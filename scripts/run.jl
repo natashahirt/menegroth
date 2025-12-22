@@ -11,4 +11,8 @@ display(visualize(skel))
 rebuild_levels!(skel)
 display(visualize(skel))
 
-println(keys(skel.levels))
+for (n, level) in skel.levels
+    println(level.faces)
+end
+
+println(skel.face_indices)

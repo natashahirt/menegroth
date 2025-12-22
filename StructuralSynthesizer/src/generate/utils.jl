@@ -156,7 +156,7 @@ function find_faces!(skel::StructureSkeleton{T}) where T
                         
                         v_neighbors = adj[curr_v]
                         idx_in = findfirst(x -> x == curr_u, v_neighbors)
-                        idx_next = mod1(idx_in + 1, length(v_neighbors))
+                        idx_next = mod1(idx_in - 1, length(v_neighbors))
                         
                         next_v = v_neighbors[idx_next]
                         curr_u, curr_v = curr_v, next_v

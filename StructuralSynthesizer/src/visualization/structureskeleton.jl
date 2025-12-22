@@ -70,7 +70,7 @@ function visualize(skel::StructureSkeleton)
         # get polygons for that group
         group_polygons = skel.faces[face_indices]
         
-        for poly in group_polygons
+        for (j, poly) in enumerate(group_polygons)
             # extract coordinates
             pts = GLMakie.Point3f[]
             for v in Meshes.vertices(poly)
@@ -83,10 +83,16 @@ function visualize(skel::StructureSkeleton)
             end
 
             # plot polygon
-            GLMakie.poly!(ax, pts,
-                          color = (face_palette[mod1(i, length(face_palette))], 0.2),
-                          transparency = true,
-                          label = string(group_name))
+            if j == 1
+                GLMakie.poly!(ax, pts,
+                            color = (face_palette[mod1(i, length(face_palette))], 0.2),
+                            transparency = true,
+                            label = string(group_name))
+            else
+                GLMakie.poly!(ax, pts,
+                            color = (face_palette[mod1(i, length(face_palette))], 0.2),
+                            transparency = true)
+            end
         end
     end
 

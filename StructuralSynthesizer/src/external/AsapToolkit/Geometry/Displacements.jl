@@ -43,7 +43,7 @@ Get the [3 × n] matrix where each column represents the local [x,y,z] displacem
 function unodal(element::Element; n::Integer = 20)
 
     # base properties
-    ulocal = element.R * [element.nodeStart.displacement; element.nodeEnd.displacement] .* release2DOF[element.release]
+    ulocal = element.R * [element.nodeStart.displacement; element.nodeEnd.displacement] .* etype2DOF[typeof(element)]
     L = element.length
 
     # extracting relevant nodal DOFs
@@ -80,16 +80,12 @@ function accumulatedisp!(
     Istrong = load.element.section.Ix
     Iweak = load.element.section.Iy
 
-    release = load.element.release
-
     # distributed load magnitudes in LCS
     wx, wy, wz = (R  * load.value) .* [1, -1, -1]
 
-    # extract relevant function
-    dfunction = DLineLoad[release]
-
-    Dy .-= dfunction.(wy, L, xvals, E, Istrong)
-    Dz .-= dfunction.(wz, L, xvals, E, Iweak)
+    # Use dispatched DLine function based on element type
+    Dy .-= DLine.(Ref(load.element), wy, L, xvals, E, Istrong)
+    Dz .-= DLine.(Ref(load.element), wz, L, xvals, E, Iweak)
 end
 
 """
@@ -106,17 +102,14 @@ function accumulatedisp!(
     E = load.element.section.E
     Istrong = load.element.section.Ix
     Iweak = load.element.section.Iy
-    release = load.element.release
     frac = load.position
 
     # distributed load magnitudes in LCS
     px, py, pz = (R  * load.value) .* [1, -1, -1]
 
-    # extract relevant function
-    dfunction = DPointLoad[release]
-
-    Dy .-= dfunction.(py, L, xvals, frac, E, Istrong)
-    Dz .-= dfunction.(pz, L, xvals, frac, E, Iweak)
+    # Use dispatched DPoint function based on element type
+    Dy .-= DPoint.(Ref(load.element), py, L, xvals, frac, E, Istrong)
+    Dz .-= DPoint.(Ref(load.element), pz, L, xvals, frac, E, Iweak)
 end
 
 """
@@ -132,7 +125,9 @@ function ulocal(element::Element, model::Model; resolution = 20)
 
     D = unodal(element; n = resolution)
 
-    for load in model.loads[element.loadIDs]
+    loadids = get_elemental_loads(model)
+
+    for load in model.loads[loadids[element.elementID]]
         accumulatedisp!(load, xinc, D[2,:], D[3,:])
     end
 
@@ -152,7 +147,9 @@ function uglobal(element::Element, model::Model; resolution = 20)
 
     D = unodal(element; n = resolution)
 
-    for load in model.loads[element.loadIDs]
+    loadids = get_elemental_loads(model)
+
+    for load in model.loads[loadids[element.elementID]]
         accumulatedisp!(load, xinc, D[2,:], D[3,:])
     end
 
@@ -173,14 +170,16 @@ end
 
 Get the local/global displacements of an element
 """
-function ElementDisplacements(element::Element, model::Model; resolution = 20)
+function ElementDisplacements(element::Asap.AbstractElement, model::Asap.Model; resolution = 20)
     L = element.length
 
     xinc = collect(range(0, L, resolution))
 
     Dx, Dy, Dz = unodal(element; n = resolution)
 
-    for load in model.loads[element.loadIDs]
+    loadids = get_elemental_loads(model)
+
+    for load in model.loads[loadids[element.elementID]]
         accumulatedisp!(load, xinc, Dy, Dz)
     end
 
@@ -193,7 +192,7 @@ function ElementDisplacements(element::Element, model::Model; resolution = 20)
     return ElementDisplacements(element, resolution, xinc, D, Dglobal, basepoints)
 end
 
-function ElementDisplacements(elements::Vector{<:Asap.FrameElement}, model::Model; resolution = 20)
+function ElementDisplacements(elements::AbstractVector{<:Asap.AbstractElement}, model::Asap.Model; resolution = 20)
 
     xstore = Vector{Float64}()
     ulocalstore = Vector{Matrix{Float64}}()
@@ -202,6 +201,8 @@ function ElementDisplacements(elements::Vector{<:Asap.FrameElement}, model::Mode
 
     resolution = Int(round(resolution / length(elements)))
 
+    loadids = get_elemental_loads(model)
+
     for element in elements
         L = element.length
 
@@ -209,7 +210,7 @@ function ElementDisplacements(elements::Vector{<:Asap.FrameElement}, model::Mode
 
         Dx, Dy, Dz = unodal(element; n = resolution)
 
-        for load in model.loads[element.loadIDs]
+        for load in model.loads[loadids[element.elementID]]
             accumulatedisp!(load, xinc, Dy, Dz)
         end
 
@@ -233,11 +234,11 @@ function ElementDisplacements(elements::Vector{<:Asap.FrameElement}, model::Mode
 end
 
 """
-    displacements(model::Model, increment::Real)
+    displacements(model::Asap.Model, increment::Real)
 
 Get the displacements of all elements in a model
 """
-function displacements(model::Model, increment::Real)
+function displacements(model::Asap.Model, increment::Real)
     results = Vector{ElementDisplacements}()
 
     ids = groupbyid(model.elements)

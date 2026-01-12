@@ -45,19 +45,27 @@ Reinforces metric units throughout.
 """
 function initialize_slabs!(struc::BuildingStructure{T}; material=:concrete) where T
     skel = struc.skeleton
+    empty!(struc.slabs)
 
     # should initialize the load map with geometry?
-    load_map = Dict(
+    # Priority order: grade > floor > roof (a face only gets one classification)
+    load_map = [
         :grade => (Constants.LL_GRADE_f, Constants.SDL_FLOOR_f),
         :floor => (Constants.LL_FLOOR_f, Constants.SDL_FLOOR_f),
         :roof  => (Constants.LL_ROOF_f,  Constants.SDL_ROOF_f)
-    )
+    ]
+    
+    processed_faces = Set{Int}()
     
     for (grp_name, loads) in load_map
         face_indices = get(skel.groups_faces, grp_name, Int[])
         ll_f, sdl_f = loads
         
         for face_idx in face_indices
+            # Skip if already processed (prevents double-counting from overlapping groups)
+            face_idx in processed_faces && continue
+            push!(processed_faces, face_idx)
+            
             polygon = skel.faces[face_idx]
             pts = Meshes.vertices(polygon)
 
@@ -110,7 +118,7 @@ Hard SI Metric Boundary: All values sent to Asap are stripped of units and force
 function to_asap!(struc::BuildingStructure{T}) where T
     skel = struc.skeleton
     
-    # 1. Nodes
+    # 1. nodes
     nodes = map(skel.vertices) do v
         coords = Meshes.coords(v)
         x = ustrip(uconvert(u"m", coords.x))
@@ -131,19 +139,48 @@ function to_asap!(struc::BuildingStructure{T}) where T
         return Asap.Node([x, y, z], dofs)
     end
 
-    # 2. Elements
-    default_section = AsapToolkit.toASAPframe("W10x22")
+    # 2. elements
+    default_section = AsapToolkit.toASAPframe("W10x22", unit=u"m")
     elements = map(skel.edge_indices) do (v1, v2)
         return Asap.Element(nodes[v1], nodes[v2], default_section, release=:fixedfixed) # placeholder section
     end
     
-    # 3. Loads
+    # 3. loads - distribute slab loads to supporting edges
     loads = Asap.AbstractLoad[]
+    for slab in struc.slabs
+        sec = slab.section
+        # Pressure (N/m²) applied to this slab
+        pressure = ustrip(uconvert(u"N/m^2", sec.dead_load + sec.live_load))
+        
+        # edges of this slab's face (now stored directly as edge indices)
+        face_edge_indices = skel.face_edge_indices[slab.face_idx]
+        
+        # total perimeter for tributary distribution
+        total_perimeter = sum(face_edge_indices) do edge_idx
+            v1, v2 = skel.edge_indices[edge_idx]
+            p1, p2 = skel.vertices[v1], skel.vertices[v2]
+            ustrip(uconvert(u"m", Meshes.measure(Meshes.Segment(p1, p2))))
+        end
+        
+        # area in m²
+        area_m2 = ustrip(uconvert(u"m^2", sec.area))
+        
+        # trib width = area / perimeter (assumes load fans out to edges)
+        tributary_width = area_m2 / total_perimeter
+        
+        # line load (N/m) = pressure (N/m²) × tributary_width (m)
+        line_load = pressure * tributary_width
+        
+        for edge_idx in face_edge_indices
+            push!(loads, Asap.LineLoad(elements[edge_idx], [0.0, 0.0, -line_load]))
+        end
+    end
 
     model = Asap.Model(nodes, elements, loads)
     println("DEBUG: Converted to Asap.Model with $(length(nodes)) nodes and $(length(elements)) elements.")
 
     Asap.process!(model)
+    Asap.solve!(model)
 
     struc.asap_model = model
 end

@@ -5,6 +5,7 @@ module Constants
     Unitful.@unit lbf "lbf" PoundForce 4.4482216152605u"N" false
     Unitful.@unit kip "kip" Kip 1000 * lbf false
     Unitful.@unit psf "psf" PoundPerSquareFoot 47.88025898u"N/m^2" false
+    Unitful.@unit ksi "ksi" KipPerSquareInch 6.894757e6u"Pa" false  # 1 ksi = 6.895 MPa
 
     # 2. Physical Constants
     const GRAVITY = 9.80665u"m/s^2" # acceleration due to gravity

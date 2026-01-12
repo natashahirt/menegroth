@@ -88,7 +88,19 @@ function add_face!(skel::BuildingSkeleton{T}, face::Meshes.Polygon; group::Symbo
     idx = findfirst(f -> f == face, skel.faces) 
     if isnothing(idx)
         push!(skel.faces, face)
-        push!(skel.face_indices, v_indices)
+        push!(skel.face_vertex_indices, v_indices)
+        
+        # compute edge indices for this face (vertex pairs → edge index)
+        n_verts = length(v_indices)
+        e_indices = Int[]
+        for i in 1:n_verts
+            v1, v2 = v_indices[i], v_indices[mod1(i + 1, n_verts)]
+            # find edge index (check both orderings)
+            edge_idx = findfirst(e -> e == (v1, v2) || e == (v2, v1), skel.edge_indices)
+            !isnothing(edge_idx) && push!(e_indices, edge_idx)
+        end
+        push!(skel.face_edge_indices, e_indices)
+        
         idx = length(skel.faces)
     end
 
@@ -196,6 +208,7 @@ function rebuild_stories!(skel::BuildingSkeleton{T}) where T
     end
     unique_z = sort(unique(rounded_z))
     z_to_idx = Dict(z => i-1 for (i,z) in enumerate(unique_z))
+    skel.stories_z = unique_z
 
     # update stories dict
     empty!(skel.stories)
@@ -224,7 +237,7 @@ function rebuild_stories!(skel::BuildingSkeleton{T}) where T
         end
     end
 
-    for (f_idx, v_indices) in enumerate(skel.face_indices)
+    for (f_idx, v_indices) in enumerate(skel.face_vertex_indices)
         z_vals = [rounded_z[i] for i in v_indices]
         if all(z -> z == z_vals[1], z_vals)
             level_idx = z_to_idx[z_vals[1]]

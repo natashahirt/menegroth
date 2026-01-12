@@ -56,7 +56,7 @@ end
 Karamba-style visualization for Asap models, using skeleton groups for supports.
 
 # Arguments
-- `deflection_scale::Float64=1.0`: Scale factor for deflected shape.
+- `deflection_scale::Union{Float64,Symbol}=:auto`: Scale factor for deflected shape, or `:auto` to auto-compute.
 - `mode::Symbol=:original`: `:original` or `:deflected`.
 - `color_by::Symbol=:none`: `:none`, `:displacement`, or `:stress`.
 - `show_nodes::Bool=true`: Whether to show nodes.
@@ -68,7 +68,7 @@ Karamba-style visualization for Asap models, using skeleton groups for supports.
 - `markersize::Float64=10.0`: Marker size for nodes/supports.
 """
 function visualize(skel::BuildingSkeleton, model::Asap.Model;
-    deflection_scale = 1.0,
+    deflection_scale = :auto, # :auto or a Float64 scale factor
     mode = :original, # :original, :deflected
     color_by = :none, # :none, :displacement, :stress
     show_nodes = true,
@@ -100,15 +100,37 @@ function visualize(skel::BuildingSkeleton, model::Asap.Model;
         end
         push!(leg_elems, GLMakie.LineElement(color = :black, linewidth = 2))
         push!(leg_labels, "Elements")
+
     elseif mode == :deflected
+        # Draw original geometry as thin dotted lines for reference
+        for element in model.elements
+            p1 = element.nodeStart.position
+            p2 = element.nodeEnd.position
+            GLMakie.lines!(ax, [p1[1], p2[1]], [p1[2], p2[2]], [p1[3], p2[3]], 
+                          color = (:black, 0.75), linewidth = 0.5, linestyle = :dash)
+        end
+        push!(leg_elems, GLMakie.LineElement(color = (:black, 0.4), linewidth = 1, linestyle = :dot))
+        push!(leg_labels, "Original Geometry")
+
         # Calculate displacements/forces with a reasonable increment
-        # Determine average length for discretization
         avg_len = model.nElements > 0 ? sum(getproperty.(model.elements, :length)) / model.nElements : 1.0
         increment = avg_len / resolution
         
         # AsapToolkit provides high-level helpers for displacements and forces
         edisps = AsapToolkit.displacements(model, increment)
-        
+        println("First element uglobal: ", edisps[1].uglobal[:, 1:3])
+
+        # Auto-scale: make max displacement ~10% of avg element length
+        if deflection_scale === :auto
+            max_disp = 0.0
+            for edisp in edisps
+                for j in 1:size(edisp.uglobal, 2)
+                    max_disp = max(max_disp, norm(edisp.uglobal[:, j]))
+                end
+            end
+            deflection_scale = max_disp > 1e-12 ? (avg_len * 0.1) / max_disp : 1.0
+        end
+
         # For stress coloring, we need internal forces
         eforces = color_by == :stress ? AsapToolkit.InternalForces(model, increment) : nothing
 
@@ -119,7 +141,7 @@ function visualize(skel::BuildingSkeleton, model::Asap.Model;
         for (i, edisp) in enumerate(edisps)
             # basepositions + (deflection * uglobal)
             # Both are [3 x n] matrices in GCS
-            pos = edisp.basepositions + deflection_scale .* edisp.uglobal
+            pos = edisp.basepositions .+ deflection_scale .* edisp.uglobal
             pts = [GLMakie.Point3f(pos[1, j], pos[2, j], pos[3, j]) for j in 1:size(pos, 2)]
             push!(all_points, pts)
             
@@ -267,6 +289,6 @@ function visualize(skel::BuildingSkeleton, model::Asap.Model;
             GLMakie.Legend(sidebar[row_idx, 1], leg_elems, leg_labels, "Asap Model")
         end
     end
-
+    display(fig)
     return fig
 end

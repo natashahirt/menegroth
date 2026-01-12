@@ -70,10 +70,10 @@ end
 """
 Internal force sampling for an element 
 """
-function InternalForces(element::Element, model::Model; resolution = 20)
+function InternalForces(element::Asap.AbstractElement, model::Asap.Model; resolution = 20)
     
     #beam information
-    release = element.release
+    dofs = etype2DOF[typeof(element)]
     L = element.length
 
     #discretization
@@ -83,7 +83,7 @@ function InternalForces(element::Element, model::Model; resolution = 20)
     uglobal = [element.nodeStart.displacement; element.nodeEnd.displacement]
     
     # end forces that are relevant to the given element/release condition
-    Flocal = (element.R * element.K * uglobal) .* release2DOF[release]
+    Flocal = (element.R * element.K * uglobal) .* dofs
 
     # shear/moment acting at the *starting* point of an element in LCS
     Pstart, Vystart, Mystart, Vzstart, Mzstart = Flocal[[1, 2, 6, 3, 5]] .* [-1, 1, 1, 1, -1]
@@ -95,8 +95,10 @@ function InternalForces(element::Element, model::Model; resolution = 20)
     Mz = Vzstart .* xinc .- Mzstart
     Vz = zero(Mz) .+ Vzstart
 
+    loadids = get_elemental_loads(model)
+
     # accumulate loads
-    for load in model.loads[element.loadIDs]
+    for load in model.loads[loadids[element.elementID]]
         accumulate_force!(load,
             xinc,
             P,
@@ -114,7 +116,7 @@ end
 
 Get internal force results for a given element from a set of loads
 """
-function InternalForces(element::Element, loads::Vector{<:Asap.ElementLoad}; resolution = 20)
+function InternalForces(element::Asap.AbstractElement, loads::AbstractVector{<:Asap.AbstractLoad}; resolution = 20)
     
     #beam information
     dofs = etype2DOF[typeof(element)]
@@ -158,6 +160,7 @@ function get_elemental_loads(model::Model)
 
     element_to_loadids = [Int64[] for _ in 1:model.nElements]
     for load in model.loads
+        hasproperty(load, :element) || continue
         push!(element_to_loadids[load.element.elementID], load.loadID)
     end
 
@@ -170,7 +173,7 @@ end
 
 Get internal force results for a group of ordered elements that form a single physical element
 """
-function InternalForces(elements::Vector{<:Asap.FrameElement}, model::Model; resolution = 20)
+function InternalForces(elements::AbstractVector{<:Asap.AbstractElement}, model::Asap.Model; resolution = 20)
     
     xstore = Vector{Float64}()
     pstore = Vector{Float64}()
@@ -239,14 +242,14 @@ end
 
 
 """
-    forces(model::Model, increment::Real)
+    forces(model::Asap.Model, increment::Real)
 
 Get the internal forces of all elements in a model.
 
 - `model::Model` structural model whose elements are analyzed
 - `increment::Real` distance between sampling points along the element
 """
-function InternalForces(model::Model, increment::Real)
+function InternalForces(model::Asap.Model, increment::Real)
 
     results = Vector{InternalForces}()
 

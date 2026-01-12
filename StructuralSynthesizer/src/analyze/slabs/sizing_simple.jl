@@ -12,7 +12,10 @@ function get_slab_hash(skel::BuildingSkeleton{T}, face_idx::Int, span_axis::Unio
     # span dimensions (orientation aware, AABB relative to span_axis)
     # perpendicular axis is 90 degrees to span_axis in xy plane
     if !isnothing(span_axis)
+        # Ensure unitless direction vector for projection math
         u_axis = [ustrip(span_axis[1]), ustrip(span_axis[2]), ustrip(span_axis[3])]
+        mag = sqrt(sum(u_axis.^2))
+        u_axis ./= mag
         perp_axis = [-u_axis[2], u_axis[1], 0.0]
         
         projections_along = [ustrip(uconvert(Constants.STANDARD_LENGTH, Meshes.coords(p).x)) * u_axis[1] + ustrip(uconvert(Constants.STANDARD_LENGTH, Meshes.coords(p).y)) * u_axis[2] for p in pts]
@@ -75,24 +78,24 @@ function initialize_slabs!(struc::BuildingStructure{T}; material=:concrete) wher
             lx, ly = maximum(xs)-minimum(xs), maximum(ys)-minimum(ys)
             l_short = min(lx, ly)
             
-            # span axis logic
+            # span axis logic (direction vector)
             span_axis = lx <= ly ? Meshes.Vec{3, T}(T(1.0), T(0.0), T(0.0)) : Meshes.Vec{3, T}(T(0.0), T(1.0), T(0.0))
             
             # sizing (L_short / 28) - thickness_val is in m
             thickness_val = max(0.125, l_short / 28.0)
-            thickness = T <: Unitful.Quantity ? T(thickness_val * Constants.STANDARD_LENGTH) : T(thickness_val)
+            thickness = T <: Unitful.Quantity ? thickness_val * u"m" : T(thickness_val)
 
             # Calculate Self-Weight and ADD to SDL (push to metric)
-            sw = thickness_val * Constants.STANDARD_LENGTH * Constants.ρ_CONCRETE * Constants.GRAVITY
+            sw = thickness_val * u"m" * Constants.ρ_CONCRETE * Constants.GRAVITY
             sw_f = uconvert(Constants.STANDARD_PRESSURE, sw * Constants.DL_FACTOR)
             total_dl_f = sdl_f + sw_f
 
             # Generate Structural Hash
             h = get_slab_hash(skel, face_idx, span_axis, total_dl_f, ll_f)
 
-            # create or get the SlabSection
+            # create or get the SlabSection (types inferred from arguments)
             if !haskey(struc.slab_sections, h)
-                struc.slab_sections[h] = SlabSection{T}(
+                struc.slab_sections[h] = SlabSection(
                     h,
                     thickness,
                     material,
@@ -100,87 +103,12 @@ function initialize_slabs!(struc::BuildingStructure{T}; material=:concrete) wher
                     :one_way,
                     span_axis,
                     total_dl_f,
-                    ll_f,
+                    ll_f
                 )
             end
 
-            push!(struc.slabs, Slab{T}(face_idx, struc.slab_sections[h], Int[]))
+            push!(struc.slabs, Slab(face_idx, struc.slab_sections[h]))
         end
     end
-    println("DEBUG: Initialized $(length(struc.slabs)) slabs into $(length(struc.slab_sections)) unique sections.")
-end
-
-"""
-    to_asap(struc)
-Converts a BuildingStructure into an Asap.Model.
-Hard SI Metric Boundary: All values sent to Asap are stripped of units and forced to base SI.
-"""
-function to_asap!(struc::BuildingStructure{T}) where T
-    skel = struc.skeleton
-    
-    # 1. nodes
-    nodes = map(skel.vertices) do v
-        coords = Meshes.coords(v)
-        x = ustrip(uconvert(u"m", coords.x))
-        y = ustrip(uconvert(u"m", coords.y))
-        z = ustrip(uconvert(u"m", coords.z))
-        
-        # is vertex a support?
-        is_support = false
-        for (grp, indices) in skel.groups_vertices
-            if grp == :support && findfirst(==(findfirst(==(v), skel.vertices)), indices) !== nothing
-                is_support = true
-                break
-            end
-        end
-        
-        # ground level fixed, all else moment connected
-        dofs = is_support ? [false, false, false, false, false, false] : [true, true, true, false, false, false]
-        return Asap.Node([x, y, z], dofs)
-    end
-
-    # 2. elements
-    default_section = AsapToolkit.toASAPframe("W10x22", unit=u"m")
-    elements = map(skel.edge_indices) do (v1, v2)
-        return Asap.Element(nodes[v1], nodes[v2], default_section, release=:fixedfixed) # placeholder section
-    end
-    
-    # 3. loads - distribute slab loads to supporting edges
-    loads = Asap.AbstractLoad[]
-    for slab in struc.slabs
-        sec = slab.section
-        # Pressure (N/m²) applied to this slab
-        pressure = ustrip(uconvert(u"N/m^2", sec.dead_load + sec.live_load))
-        
-        # edges of this slab's face (now stored directly as edge indices)
-        face_edge_indices = skel.face_edge_indices[slab.face_idx]
-        
-        # total perimeter for tributary distribution
-        total_perimeter = sum(face_edge_indices) do edge_idx
-            v1, v2 = skel.edge_indices[edge_idx]
-            p1, p2 = skel.vertices[v1], skel.vertices[v2]
-            ustrip(uconvert(u"m", Meshes.measure(Meshes.Segment(p1, p2))))
-        end
-        
-        # area in m²
-        area_m2 = ustrip(uconvert(u"m^2", sec.area))
-        
-        # trib width = area / perimeter (assumes load fans out to edges)
-        tributary_width = area_m2 / total_perimeter
-        
-        # line load (N/m) = pressure (N/m²) × tributary_width (m)
-        line_load = pressure * tributary_width
-        
-        for edge_idx in face_edge_indices
-            push!(loads, Asap.LineLoad(elements[edge_idx], [0.0, 0.0, -line_load]))
-        end
-    end
-
-    model = Asap.Model(nodes, elements, loads)
-    println("DEBUG: Converted to Asap.Model with $(length(nodes)) nodes and $(length(elements)) elements.")
-
-    Asap.process!(model)
-    Asap.solve!(model)
-
-    struc.asap_model = model
+    @debug "Initialized $(length(struc.slabs)) slabs into $(length(struc.slab_sections)) unique sections"
 end

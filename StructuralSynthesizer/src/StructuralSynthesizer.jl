@@ -1,6 +1,8 @@
 module StructuralSynthesizer
 
-using StructuralBase  # Internal use (Constants, AbstractMaterial)
+using Logging
+using StructuralBase
+using StructuralSizer
 
 import GLMakie
 import Meshes

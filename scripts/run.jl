@@ -13,6 +13,8 @@ using Asap
 skel = gen_medium_office(160.0u"ft", 110.0u"ft", 13.0u"ft", 4, 3, 4);
 struc = BuildingStructure(skel);
 
+# Initialize slabs and convert to analysis model
+initialize_slabs!(struc);
 to_asap!(struc);
 
 # Visualize
@@ -21,8 +23,4 @@ visualize(skel, struc.asap_model, mode=:deflected, color_by=:displacement)
 
 # Example: access materials from StructuralSizer
 println("A992 Steel Fy: ", A992_Steel.Fy)
-
-# Example: access constants from StructuralBase (re-exported through StructuralSynthesizer)
 println("Standard Live Load (Floor): ", Constants.LL_FLOOR)
-
-node_forces = filter(l -> l isa Asap.NodeForce, struc.asap_model.loads)

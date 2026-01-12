@@ -1623,7 +1623,7 @@ uuid = "9d8e7f6a-5b4c-3d2e-1f0a-9b8c7d6e5f4a"
 version = "0.1.0"
 
 [[deps.StructuralSynthesizer]]
-deps = ["Asap", "GLMakie", "Graphs", "Interpolations", "JSON", "LinearAlgebra", "Meshes", "Reexport", "SparseArrays", "Statistics", "StructuralBase", "Unitful", "XLSX"]
+deps = ["Asap", "GLMakie", "Graphs", "Interpolations", "JSON", "LinearAlgebra", "Logging", "Meshes", "Reexport", "SparseArrays", "Statistics", "StructuralBase", "StructuralSizer", "Unitful", "XLSX"]
 path = "StructuralSynthesizer"
 uuid = "fc54e8a9-dab1-4bea-a64f-f8e9b3ce8a89"
 version = "0.1.0"

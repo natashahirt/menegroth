@@ -1,3 +1,2 @@
-# types are now in src/types.jl
-include("utils_BuildingSkeleton.jl")
-include("utils_ASAP.jl")
+include("utils_building_skeleton.jl")
+include("utils_asap.jl")

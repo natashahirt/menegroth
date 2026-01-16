@@ -2,7 +2,7 @@
 
 julia_version = "1.11.6"
 manifest_format = "2.0"
-project_hash = "4b66b54fcef070460997eb26fb7c351281c2b908"
+project_hash = "d08db6a97487e146f9eb261cbdb3751f9f4872a9"
 
 [[deps.AbstractFFTs]]
 deps = ["LinearAlgebra"]
@@ -128,8 +128,15 @@ version = "1.11.0"
 [[deps.Asap]]
 deps = ["LinearAlgebra", "SparseArrays"]
 git-tree-sha1 = "c3197a35015b2afbe95af76c4de8bd24c32cf44c"
+path = "external/Asap"
 uuid = "763a8c06-ba23-41fc-b385-b3b57b52403a"
 version = "0.2.2"
+
+[[deps.AsapToolkit]]
+deps = ["Asap", "Interpolations", "JSON", "LinearAlgebra", "Reexport", "SparseArrays", "Statistics", "Unitful", "XLSX"]
+path = "external/AsapToolkit"
+uuid = "45845293-de45-4074-bf34-b603320deb79"
+version = "0.1.0"
 
 [[deps.Automa]]
 deps = ["PrecompileTools", "SIMD", "TranscodingStreams"]
@@ -1819,7 +1826,7 @@ uuid = "9d8e7f6a-5b4c-3d2e-1f0a-9b8c7d6e5f4a"
 version = "0.1.0"
 
 [[deps.StructuralSynthesizer]]
-deps = ["Asap", "GLMakie", "Graphs", "Interpolations", "JSON", "LinearAlgebra", "Logging", "Meshes", "Reexport", "SparseArrays", "Statistics", "StructuralBase", "StructuralSizer", "Unitful", "XLSX"]
+deps = ["Asap", "AsapToolkit", "GLMakie", "Graphs", "Interpolations", "JSON", "LinearAlgebra", "Logging", "Meshes", "Reexport", "SparseArrays", "Statistics", "StructuralBase", "StructuralSizer", "Unitful", "XLSX"]
 path = "StructuralSynthesizer"
 uuid = "fc54e8a9-dab1-4bea-a64f-f8e9b3ce8a89"
 version = "0.1.0"

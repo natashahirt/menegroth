@@ -1,5 +1,6 @@
 [deps]
 Asap = "763a8c06-ba23-41fc-b385-b3b57b52403a"
+AsapToolkit = "45845293-de45-4074-bf34-b603320deb79"
 Gurobi = "2e9cd046-0924-5485-92f1-d5272153d98b"
 HiGHS = "87dc4568-4c63-4d18-b0c0-bb2238e4078b"
 JuMP = "4076af6c-e467-56ae-b986-b466b2749572"
@@ -10,6 +11,8 @@ StructuralSynthesizer = "fc54e8a9-dab1-4bea-a64f-f8e9b3ce8a89"
 Unitful = "1986cc42-f94f-5a68-af5c-568840ba703d"
 
 [sources]
+Asap = {path = "external/Asap"}
+AsapToolkit = {path = "external/AsapToolkit"}
 StructuralBase = {path = "StructuralBase"}
 StructuralSizer = {path = "StructuralSizer"}
 StructuralSynthesizer = {path = "StructuralSynthesizer"}

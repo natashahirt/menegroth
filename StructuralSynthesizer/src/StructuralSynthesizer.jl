@@ -21,8 +21,7 @@ Unitful.register(StructuralBase.Constants)
 
 include("types.jl")
 include("./core/_core.jl")
-include("./external/_external.jl")
-using .AsapToolkit
+using AsapToolkit
 include("./generate/_generate.jl")
 include("./visualization/_visualization.jl")
 include("./analyze/_analyze.jl")

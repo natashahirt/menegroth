@@ -123,4 +123,20 @@ export vault_stress_symmetric, vault_stress_asymmetric
 export solve_equilibrium_rise
 export parabolic_arc_length, vault_volume_per_area
 
+# =============================================================================
+# Tributary Load Distribution
+# =============================================================================
+
+# Types
+export CellGeometry, TributaryResult, EdgeLoadResult, CellGroup
+export WeightStrategy, WEIGHT_UNIFORM, WEIGHT_SECTION_EI, WEIGHT_INV_LENGTH, WEIGHT_USER_DEFINED
+
+# Core functions
+export grassfire_tributary, compute_edge_weights, weight_ratios
+export distribute_cell_loads, distribute_cell_loads_grouped
+export discretize_tributary_loads, merge_edge_loads
+
+# Geometry helpers
+export polygon_area, polygon_centroid, is_convex, interior_angles
+
 end # module

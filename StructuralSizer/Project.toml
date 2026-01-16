@@ -15,7 +15,15 @@ StructuralBase = "7e8f2a1b-4c3d-5e6f-9a0b-1c2d3e4f5a6b"
 Unitful = "1986cc42-f94f-5a68-af5c-568840ba703d"
 
 [sources]
+Asap = {path = "../external/Asap"}
 StructuralBase = {path = "../StructuralBase"}
+
+[extras]
+Asap = "763a8c06-ba23-41fc-b385-b3b57b52403a"
+Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+
+[targets]
+test = ["Asap", "Test"]
 
 [compat]
 CSV = "0.10"

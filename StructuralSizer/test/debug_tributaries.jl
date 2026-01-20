@@ -179,25 +179,28 @@ end
 
 """Create the full debug visualization."""
 function visualize_tributary_debug()
-    # Define all test shapes
+    # Define all test shapes: (name, vertices, weights)
+    # weights = nothing means isotropic (all weights = 1.0)
     shapes = [
-        ("Square", square()),
-        ("Rectangle", rectangle()),
-        ("Long Rectangle", long_thin_rect()),
-        ("Parallelogram", parallelogram()),
-        ("Trapezoid", trapezoid()),
-        ("Trapezoid (wide top)", trapezoid_wide_top()),
-        ("Triangle (narrow)", narrow_triangle()),
-        ("Triangle (wide)", wide_triangle()),
-        ("Pentagon", pentagon()),
-        ("Hexagon", hexagon()),
-        ("Octagon", octagon()),
-        ("Irregular Quad", irregular_quad()),
-        ("Irregular Pentagon", irregular_pentagon()),
-        ("Irregular Hexagon", irregular_hexagon()),
-        ("L-Shape Hull", l_shape_convex_hull()),
-        ("Arrow", arrow_shape()),
-        ("Chevron", chevron()),
+        ("Square", square(), nothing),
+        ("Rectangle", rectangle(), nothing),
+        ("Rectangle (w=[1,2,1,2])", rectangle(), [1.0, 2.0, 1.0, 2.0]),
+        ("Long Rectangle", long_thin_rect(), nothing),
+        ("Parallelogram", parallelogram(), nothing),
+        ("Parallelogram (w=[2,1,2,1])", parallelogram(), [1.0, 1.0, 2.0, 1.0]),
+        ("Trapezoid", trapezoid(), nothing),
+        ("Trapezoid (wide top)", trapezoid_wide_top(), nothing),
+        ("Triangle (narrow)", narrow_triangle(), nothing),
+        ("Triangle (wide)", wide_triangle(), nothing),
+        ("Pentagon", pentagon(), nothing),
+        ("Hexagon", hexagon(), nothing),
+        ("Octagon", octagon(), nothing),
+        ("Irregular Quad", irregular_quad(), nothing),
+        ("Irregular Pentagon", irregular_pentagon(), nothing),
+        ("Irregular Hexagon", irregular_hexagon(), nothing),
+        ("L-Shape Hull", l_shape_convex_hull(), nothing),
+        ("Arrow", arrow_shape(), nothing),
+        ("Chevron", chevron(), nothing),
     ]
     
     n_shapes = length(shapes)
@@ -206,7 +209,7 @@ function visualize_tributary_debug()
     
     fig = Figure(size = (400 * n_cols, 380 * n_rows), fontsize=12)
     
-    for (i, (name, verts)) in enumerate(shapes)
+    for (i, (name, verts, weights)) in enumerate(shapes)
         row = div(i - 1, n_cols) + 1
         col = mod(i - 1, n_cols) + 1
         
@@ -216,16 +219,14 @@ function visualize_tributary_debug()
             ylabel = "y [m]"
         )
         
-        # Compute tributaries
-        results = get_tributary_polygons_isotropic_dcel(verts)
+        # Compute tributaries (with optional weights)
+        results = get_tributary_polygons_isotropic_dcel(verts; weights=weights)
         
         # Check convexity and if fractions sum to 1
         convex = is_convex(verts)
         total_frac = sum(r.fraction for r in results)
         
-        if !convex
-            check = "[NC] ✗"  # Non-convex, expected to fail
-        elseif abs(total_frac - 1.0) < 0.01
+        if abs(total_frac - 1.0) < 0.01
             check = "✓"
         else
             check = "✗ ($(round(total_frac, digits=2)))"
@@ -269,15 +270,13 @@ function validate_shapes()
     println("=" ^ 60)
     
     for (name, verts) in shapes
-        results = get_tributary_polygons_isotropic(verts)
+        results = get_tributary_polygons_isotropic_dcel(verts)
         convex = is_convex(verts)
         total_frac = sum(r.fraction for r in results)
         total_area = sum(r.area for r in results)
         n_edges = length(verts)
         
-        if !convex
-            status = "⚠ NON-CONVEX (expected fail)"
-        elseif abs(total_frac - 1.0) < 0.01
+        if abs(total_frac - 1.0) < 0.01
             status = "✓ PASS"
         else
             status = "✗ FAIL"
@@ -316,6 +315,30 @@ for r in oct_results_dcel
 end
 println("\nTotal fraction: $(round(sum(r.fraction for r in oct_results_dcel) * 100, digits=1))%")
 
-println("\nGenerating visualization...")
+# Debug: test weighted edges on a rectangle
+println("\n" * "=" ^ 60)
+println("Weighted Rectangle Test")
+println("=" ^ 60)
+rect = rectangle()
+println("\nIsotropic (all weights = 1.0):")
+rect_iso = get_tributary_polygons_isotropic_dcel(rect)
+for r in rect_iso
+    println("  Edge $(r.edge_idx): area=$(round(r.area, digits=4)) m² ($(round(r.fraction*100, digits=1))%)")
+end
+
+println("\nWeighted [1.0, 2.0, 1.0, 2.0] (short edges move 2x faster): (Parallelogram)")
+par = parallelogram()
+println("Parallelogram vertices: $([(Float64(Meshes.coords(v).x.val), Float64(Meshes.coords(v).y.val)) for v in par])")
+par_weighted = get_tributary_polygons_isotropic_dcel(par; weights=[1.0, 1.0, 1.0, 2.0])
+println("\nResults:")
+for r in par_weighted
+    println("  Edge $(r.edge_idx): $(length(r.vertices)) vertices, area=$(round(r.area, digits=4)) m² ($(round(r.fraction*100, digits=1))%)")
+    if !isempty(r.vertices) && length(r.vertices) <= 6
+        println("    Vertices: $([(round(v[1], digits=3), round(v[2], digits=3)) for v in r.vertices])")
+    end
+end
+println("\nExpected: edges 2,4 (short, weight=2) should have SMALLER areas")
+
+println("\nGenerating full debug visualization...")
 fig = visualize_tributary_debug()
 display(fig)

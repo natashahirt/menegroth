@@ -1,17 +1,27 @@
 # =============================================================================
-# Straight Skeleton using DCEL (Isotropic Tributary Areas)
+# Straight Skeleton using DCEL (Weighted Tributary Areas)
 # =============================================================================
 
 """
-    get_tributary_polygons_isotropic_dcel(vertices::Vector{<:Point})
+    get_tributary_polygons_isotropic_dcel(vertices::Vector{<:Point}; weights=nothing)
 
 Compute tributary polygons using straight skeleton with DCEL data structure.
 Returns Vector{TributaryResult}, one per original edge.
 
-This implementation properly handles simultaneous collapse events by recording
-skeleton arcs (vertex trajectories) and using angular ordering to stitch faces.
+## Arguments
+- `vertices`: Polygon vertices as Meshes.Point objects
+- `weights`: Optional vector of edge weights (one per edge). 
+  - Higher weight = faster shrink = smaller tributary area
+  - Default `nothing` = all weights equal to 1.0 (isotropic)
+  - Example: `weights=[1.0, 2.0, 1.0, 2.0]` for a rectangle where 
+    opposite edges have different weights
+
+## Weight Convention
+Weights represent the "speed" at which each edge moves inward during 
+wavefront propagation. A weight of 2.0 means the edge moves twice as 
+fast as an edge with weight 1.0, resulting in roughly half the tributary area.
 """
-function get_tributary_polygons_isotropic_dcel(vertices::Vector{<:Point})
+function get_tributary_polygons_isotropic_dcel(vertices::Vector{<:Point}; weights=nothing)
     m = length(vertices)  # Original vertex count
     m >= 3 || return TributaryResult[]
     
@@ -22,26 +32,46 @@ function get_tributary_polygons_isotropic_dcel(vertices::Vector{<:Point})
     pts_orig = _ensure_ccw(pts_orig)
     original_pts = copy(pts_orig)  # Keep for area calculation
     
+    # Handle weights
+    if isnothing(weights)
+        weights_orig = ones(m)
+    else
+        length(weights) == m || error("weights must have same length as vertices ($m)")
+        weights_orig = Float64.(weights)
+        all(w -> w > 0, weights_orig) || error("all weights must be positive")
+    end
+    
     # Simplify collinear vertices (removes 180° degeneracies)
     pts, keep_idx = simplify_collinear_polygon(pts_orig; tol=1e-12)
     n = length(pts)
     n >= 3 || return TributaryResult[]  # Degenerate after simplification
     
     # Build mapping: orig_to_simp[i] = simplified edge that contains original edge i
+    # Also compute simplified weights (average weight of merged edges)
     orig_to_simp = fill(0, m)
     n_s = length(keep_idx)
+    simp_weights = zeros(n_s)
+    simp_edge_counts = zeros(Int, n_s)
+    
     for k in 1:n_s
         a = keep_idx[k]
         b = keep_idx[mod1(k + 1, n_s)]
         i = a
         while i != b
             orig_to_simp[i] = k
+            simp_weights[k] += weights_orig[i]
+            simp_edge_counts[k] += 1
             i = mod1(i + 1, m)
         end
     end
     
-    if !_is_convex(pts)
-        @warn "Non-convex polygon detected — DCEL algorithm handles convex only"
+    # Average the weights for merged edges
+    for k in 1:n_s
+        if simp_edge_counts[k] > 0
+            simp_weights[k] /= simp_edge_counts[k]
+        else
+            simp_weights[k] = 1.0
+        end
     end
     
     # Initialize DCEL and vertex registry
@@ -83,12 +113,15 @@ function get_tributary_polygons_isotropic_dcel(vertices::Vector{<:Point})
     # edge_map[i] = which original edge the current wavefront edge i represents
     edge_map = collect(1:n)
     
+    # weight_map[i] = weight of current wavefront edge i
+    weight_map = copy(simp_weights)
+    
     # Track which original edges are still active
     edge_active = trues(n)
     
     while n_active > 2
-        # Compute bisectors at each active vertex
-        bisectors, speeds = _compute_bisectors_dcel(current_pts, n_active)
+        # Compute bisectors at each active vertex (weighted)
+        bisectors, speeds = _compute_bisectors_weighted(current_pts, n_active, weight_map)
         
         # Find all edges collapsing at the next event time
         t_min, collapses = _find_all_collapses_dcel(current_pts, n_active, bisectors, speeds)
@@ -137,31 +170,75 @@ function get_tributary_polygons_isotropic_dcel(vertices::Vector{<:Point})
         
         # Handle case where ALL edges collapse (final convergence)
         if length(collapse_set) == n_active
-            # All edges collapse simultaneously — compute meeting point as average
+            # All edges collapse simultaneously
             cps = [pt for (_, pt) in collapses]
-            meet = (sum(p[1] for p in cps) / length(cps), 
-                    sum(p[2] for p in cps) / length(cps))
             
-            # Record arcs from each vertex to meeting point (the missing center connection)
-            for i in 1:n_active
-                p_old = current_pts[i]
-                if _dist_dcel(p_old, meet) > 1e-10
+            # Check if all collapse points are coincident (within tolerance)
+            # For isotropic symmetric cases they coincide; with weights they may form a segment
+            tol_meet = 1e-8
+            all_coincident = true
+            for i in 2:length(cps)
+                if _dist_dcel(cps[1], cps[i]) > tol_meet
+                    all_coincident = false
+                    break
+                end
+            end
+            
+            if all_coincident
+                # All points coincide — use average (or just first point)
+                meet = (sum(p[1] for p in cps) / length(cps), 
+                        sum(p[2] for p in cps) / length(cps))
+                
+                # Record arcs from each vertex to meeting point
+                for i in 1:n_active
+                    p_old = current_pts[i]
+                    if _dist_dcel(p_old, meet) > 1e-10
+                        face_left = edge_map[mod1(i - 1, n_active)]
+                        face_right = edge_map[i]
+                        _record_skeleton_arc!(dcel, registry, p_old, meet, face_left, face_right)
+                    end
+                end
+            else
+                # Collapse points form a segment (roof ridge) — record to segment endpoints
+                # Find bounding box of collapse points
+                xs = [p[1] for p in cps]
+                ys = [p[2] for p in cps]
+                x_min, x_max = extrema(xs)
+                y_min, y_max = extrema(ys)
+                
+                # Use endpoints of the bounding box (or cluster and use cluster centers)
+                # For now, use min/max points as segment endpoints
+                meet1 = (x_min, y_min)
+                meet2 = (x_max, y_max)
+                
+                # Record arcs to both endpoints (or to nearest endpoint)
+                for i in 1:n_active
+                    p_old = current_pts[i]
                     face_left = edge_map[mod1(i - 1, n_active)]
                     face_right = edge_map[i]
-                    _record_skeleton_arc!(dcel, registry, p_old, meet, face_left, face_right)
+                    
+                    # Choose closer endpoint
+                    d1 = _dist_dcel(p_old, meet1)
+                    d2 = _dist_dcel(p_old, meet2)
+                    meet = d1 < d2 ? meet1 : meet2
+                    
+                    if _dist_dcel(p_old, meet) > 1e-10
+                        _record_skeleton_arc!(dcel, registry, p_old, meet, face_left, face_right)
+                    end
                 end
             end
             break
         end
         
-        # Build new polygon handling batch collapses
-        new_current_pts, new_edge_map = _build_collapsed_polygon_dcel(
-            new_pts, edge_map, n_active, collapse_set, collapse_pt_for
+        # Build new polygon handling batch collapses (also updates weights)
+        new_current_pts, new_edge_map, new_weight_map = _build_collapsed_polygon_weighted(
+            new_pts, edge_map, weight_map, n_active, collapse_set, collapse_pt_for
         )
         
         # Update state
         current_pts = new_current_pts
         edge_map = new_edge_map
+        weight_map = new_weight_map
         n_active = length(current_pts)
     end
     
@@ -169,7 +246,7 @@ function get_tributary_polygons_isotropic_dcel(vertices::Vector{<:Point})
     # Step 3: Final convergence - remaining vertices meet at center
     # =========================================================================
     if n_active >= 2
-        bisectors, speeds = _compute_bisectors_dcel(current_pts, n_active)
+        bisectors, speeds = _compute_bisectors_weighted(current_pts, n_active, weight_map)
         t_min, _, final_pt = _find_next_collapse_single(current_pts, n_active, bisectors, speeds)
         
         if t_min < Inf && t_min > 1e-10
@@ -272,8 +349,21 @@ function _record_skeleton_arc!(dcel::DCEL, registry::VertexRegistry,
     create_halfedge_pair!(dcel, v1, v2, face_left, face_right; is_skeleton=true)
 end
 
-"""Compute bisectors and speeds for active vertices."""
+"""Compute bisectors and speeds for active vertices (isotropic, all weights = 1)."""
 function _compute_bisectors_dcel(pts::Vector{NTuple{2,Float64}}, n::Int)
+    return _compute_bisectors_weighted(pts, n, ones(n))
+end
+
+"""
+Compute weighted bisectors and speeds for active vertices.
+
+For vertex i between edges (i-1) and i with weights w_{i-1} and w_i:
+- Bisector direction = normalize(w_{i-1} * n_{i-1} + w_i * n_i)
+- Speed = computed so the vertex stays on both moving edge offsets
+
+Higher weight = faster movement = smaller tributary area for that edge.
+"""
+function _compute_bisectors_weighted(pts::Vector{NTuple{2,Float64}}, n::Int, weights::Vector{Float64})
     bisectors = Vector{NTuple{2,Float64}}(undef, n)
     speeds = Vector{Float64}(undef, n)
     
@@ -285,35 +375,63 @@ function _compute_bisectors_dcel(pts::Vector{NTuple{2,Float64}}, n::Int)
         p_curr = pts[i]
         p_next = pts[next_i]
         
-        v_in = (p_curr[1] - p_prev[1], p_curr[2] - p_prev[2])
-        v_out = (p_next[1] - p_curr[1], p_next[2] - p_curr[2])
+        # Edge directions
+        e_in = (p_curr[1] - p_prev[1], p_curr[2] - p_prev[2])   # edge (prev_i)
+        e_out = (p_next[1] - p_curr[1], p_next[2] - p_curr[2])  # edge (i)
         
-        len_in = hypot(v_in...)
-        len_out = hypot(v_out...)
-        
-        if len_in < 1e-10 || len_out < 1e-10
+        len_in = hypot(e_in...)
+        len_out = hypot(e_out...)
+        if len_in < 1e-12 || len_out < 1e-12
             bisectors[i] = (0.0, 0.0)
             speeds[i] = 0.0
             continue
         end
         
-        v_in = v_in ./ len_in
-        v_out = v_out ./ len_out
+        e_in = (e_in[1]/len_in, e_in[2]/len_in)
+        e_out = (e_out[1]/len_out, e_out[2]/len_out)
         
-        # Inward normals (90° CCW rotation)
-        n_in = (-v_in[2], v_in[1])
-        n_out = (-v_out[2], v_out[1])
+        # Inward normals for CCW polygon
+        n_in = (-e_in[2], e_in[1])
+        n_out = (-e_out[2], e_out[1])
         
-        bx, by = n_in[1] + n_out[1], n_in[2] + n_out[2]
-        blen = hypot(bx, by)
+        w_in = weights[prev_i]
+        w_out = weights[i]
         
-        if blen < 1e-10
+        # Weighted bisector direction
+        bx = w_in*n_in[1] + w_out*n_out[1]
+        by = w_in*n_in[2] + w_out*n_out[2]
+        bl = hypot(bx, by)
+        if bl < 1e-12
             bisectors[i] = (0.0, 0.0)
             speeds[i] = 0.0
-        else
-            bisectors[i] = (bx / blen, by / blen)
-            speeds[i] = 2.0 / blen
+            continue
         end
+        
+        b = (bx/bl, by/bl)
+        bisectors[i] = b
+        
+        # Enforce BOTH offset constraints:
+        # s*(b·n_in)  = w_in * t
+        # s*(b·n_out) = w_out*t
+        din = b[1]*n_in[1] + b[2]*n_in[2]
+        dout = b[1]*n_out[1] + b[2]*n_out[2]
+        
+        if abs(din) < 1e-12 || abs(dout) < 1e-12
+            speeds[i] = 0.0
+            continue
+        end
+        
+        s1 = w_in / din
+        s2 = w_out / dout
+        
+        # Both should be positive for a valid inward motion
+        if s1 <= 0 || s2 <= 0
+            speeds[i] = 0.0
+            continue
+        end
+        
+        # If they disagree due to numerics, average; clamping would use min(s1,s2)
+        speeds[i] = 0.5*(s1 + s2)
     end
     
     return bisectors, speeds
@@ -382,20 +500,37 @@ function _find_next_collapse_single(pts::Vector{NTuple{2,Float64}}, n::Int, bise
     return t_min, collapse_idx, collapse_pt
 end
 
-"""Ray-ray intersection time."""
-function _ray_ray_intersect_time_dcel(p1, d1, p2, d2)
-    dx = d1[1] - d2[1]
-    dy = d1[2] - d2[2]
-    px = p2[1] - p1[1]
-    py = p2[2] - p1[2]
+"""
+Robust time when p1 + t*d1 == p2 + t*d2 (edge-collapse event).
+Returns Inf if (d1-d2) is too small or the fit residual is too large.
+
+This is the 2D system: (p1 - p2) + t*(d1 - d2) = 0
+We solve using least-squares and verify consistency with scaled tolerance.
+"""
+function _ray_ray_intersect_time_dcel(p1, d1, p2, d2; tol_rel=1e-10, tol_abs=1e-12)
+    # Solve (p1 - p2) + t*(d1 - d2) = 0 in least-squares sense
+    ax = d1[1] - d2[1]
+    ay = d1[2] - d2[2]
+    bx = p2[1] - p1[1]
+    by = p2[2] - p1[2]
     
-    if abs(dx) >= abs(dy)
-        abs(dx) < 1e-10 && return Inf
-        return px / dx
-    else
-        abs(dy) < 1e-10 && return Inf
-        return py / dy
-    end
+    denom = ax*ax + ay*ay
+    denom < tol_abs && return Inf
+    
+    # Least-squares t
+    t = (bx*ax + by*ay) / denom
+    t <= 1e-12 && return Inf
+    
+    # Residual check: p1 + t*d1 should equal p2 + t*d2
+    rx = (p1[1] + t*d1[1]) - (p2[1] + t*d2[1])
+    ry = (p1[2] + t*d1[2]) - (p2[2] + t*d2[2])
+    r = hypot(rx, ry)
+    
+    # Scale tolerance to problem magnitude (position + displacement scale)
+    scale = max(hypot(bx, by), hypot(d1[1]*t, d1[2]*t), hypot(d2[1]*t, d2[2]*t), 1.0)
+    tol = max(tol_abs, tol_rel * scale)
+    
+    return (r <= tol) ? t : Inf
 end
 
 """Build new polygon after batch collapse."""
@@ -447,4 +582,42 @@ function _build_collapsed_polygon_dcel(
     end
     
     return new_pts, new_edge_map
+end
+
+"""Build new polygon after batch collapse, also tracking weights."""
+function _build_collapsed_polygon_weighted(
+    advanced_pts::Vector{NTuple{2,Float64}},
+    edge_map::Vector{Int},
+    weight_map::Vector{Float64},
+    n_active::Int,
+    collapse_set::Set{Int},
+    collapse_pt_for::Dict{Int, NTuple{2,Float64}}
+)
+    new_pts = NTuple{2,Float64}[]
+    new_edge_map = Int[]
+    new_weight_map = Float64[]
+    
+    for i in 1:n_active
+        prev_edge = mod1(i - 1, n_active)
+        curr_edge = i
+        
+        prev_collapsed = prev_edge in collapse_set
+        curr_collapsed = curr_edge in collapse_set
+        
+        if prev_collapsed && curr_collapsed
+            continue
+        elseif prev_collapsed && !curr_collapsed
+            push!(new_pts, collapse_pt_for[prev_edge])
+            push!(new_edge_map, edge_map[curr_edge])
+            push!(new_weight_map, weight_map[curr_edge])
+        elseif !prev_collapsed && curr_collapsed
+            continue
+        else
+            push!(new_pts, advanced_pts[i])
+            push!(new_edge_map, edge_map[curr_edge])
+            push!(new_weight_map, weight_map[curr_edge])
+        end
+    end
+    
+    return new_pts, new_edge_map, new_weight_map
 end

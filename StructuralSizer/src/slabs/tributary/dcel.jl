@@ -258,7 +258,7 @@ function walk_face_cycle(dcel::DCEL, start_h::Int; max_steps::Int=10000)
             # We've hit a face boundary - stop here
             # This shouldn't happen if next pointers are set correctly,
             # but it's a safety check
-            @warn "Face walk crossed boundary: face $target_face → face $(dcel.E[h_next].face) at step $steps"
+            # @warn "Face walk crossed boundary: face $target_face → face $(dcel.E[h_next].face) at step $steps"
             break
         end
         

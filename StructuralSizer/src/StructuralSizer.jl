@@ -148,6 +148,7 @@ export total_area, cell_count, slab_count
 # =============================================================================
 
 export TributaryResult
+export get_tributary_polygons
 export get_tributary_polygons_isotropic
 
 # DCEL types (for advanced users)

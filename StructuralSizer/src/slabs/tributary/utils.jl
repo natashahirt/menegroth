@@ -134,23 +134,6 @@ function _find_next_collapse(pts, active, bisectors, speeds)
     return t_min, collapse_idx
 end
 
-"""Find time t where two rays intersect (returns Inf if parallel/diverging)."""
-function _ray_ray_intersect_time(p1, d1, p2, d2)
-    # p1 + t*d1 = p2 + t*d2  →  t*(d1 - d2) = p2 - p1
-    dx = d1[1] - d2[1]
-    dy = d1[2] - d2[2]
-    px = p2[1] - p1[1]
-    py = p2[2] - p1[2]
-    
-    # Use the component with larger magnitude for numerical stability
-    if abs(dx) >= abs(dy)
-        abs(dx) < GEOM_TOL && return Inf  # Parallel rays
-        return px / dx
-    else
-        abs(dy) < GEOM_TOL && return Inf
-        return py / dy
-    end
-end
 
 """Compute centroid of active polygon."""
 function _polygon_centroid(pts, active)

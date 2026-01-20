@@ -302,8 +302,3 @@ validate_shapes()
 println("\nGenerating visualization...")
 fig = visualize_tributary_debug()
 display(fig)
-
-# Optionally save
-# save("tributary_debug.png", fig, px_per_unit=2)
-
-println("\nDone! Close the figure window to exit.")

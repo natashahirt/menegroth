@@ -150,15 +150,7 @@ function plot_tributaries!(ax, verts, results; title="", colors=nothing)
                   strokecolor = c,
                   strokewidth = 1.5)
         end
-        
-        # Edge midpoint label
-        if i <= n
-            mx = (pts_centered[i][1] + pts_centered[mod1(i+1, n)][1]) / 2
-            my = (pts_centered[i][2] + pts_centered[mod1(i+1, n)][2]) / 2
-            label = "$(round(trib.fraction*100, digits=0))%"
-            text!(ax, mx, my, text=label, fontsize=10, 
-                  align=(:center, :center), color=:black, font=:bold)
-        end
+    
     end
     
     # Shape outline
@@ -170,7 +162,18 @@ function plot_tributaries!(ax, verts, results; title="", colors=nothing)
     
     # Vertex markers
     scatter!(ax, Point2f.(pts_centered), color=:black, markersize=8)
-    
+
+    for (i, trib) in enumerate(results)
+        # Edge midpoint label
+        if i <= n
+            mx = (pts_centered[i][1] + pts_centered[mod1(i+1, n)][1]) / 2
+            my = (pts_centered[i][2] + pts_centered[mod1(i+1, n)][2]) / 2
+            label = "$(round(trib.fraction*100, digits=0))%"
+            text!(ax, mx, my, text=label, fontsize=10, 
+                  align=(:center, :center), color=:black, font=:bold)
+        end
+    end
+        
     ax.title = title
 end
 
@@ -214,7 +217,7 @@ function visualize_tributary_debug()
         )
         
         # Compute tributaries
-        results = get_tributary_polygons_isotropic(verts)
+        results = get_tributary_polygons_isotropic_dcel(verts)
         
         # Check convexity and if fractions sum to 1
         convex = is_convex(verts)
@@ -299,6 +302,19 @@ end
 
 println("Running tributary area validation...")
 validate_shapes()
+
+# Debug: print octagon polygon vertices (DCEL algorithm)
+println("\n" * "=" ^ 60)
+println("Octagon Tributary Polygons — DCEL Algorithm")
+println("=" ^ 60)
+oct_results_dcel = get_tributary_polygons_isotropic_dcel(octagon())
+for r in oct_results_dcel
+    println("\nEdge $(r.edge_idx): $(length(r.vertices)) vertices, area=$(round(r.area, digits=4)) m²")
+    for (j, v) in enumerate(r.vertices)
+        println("  [$j] ($(round(v[1], digits=4)), $(round(v[2], digits=4)))")
+    end
+end
+println("\nTotal fraction: $(round(sum(r.fraction for r in oct_results_dcel) * 100, digits=1))%")
 
 println("\nGenerating visualization...")
 fig = visualize_tributary_debug()

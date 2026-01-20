@@ -149,5 +149,11 @@ export total_area, cell_count, slab_count
 
 export TributaryResult
 export get_tributary_polygons_isotropic
+export get_tributary_polygons_isotropic_dcel
+
+# DCEL types (for advanced users)
+export DCEL, DCELVertex, HalfEdge, DCELFace
+export validate_dcel, extract_face_polygon, extract_face_polygon_by_edges
+export diagnose_vertex, insert_artificial_bisectors!
 
 end # module

@@ -16,7 +16,11 @@ function get_tributary_polygons_isotropic(vertices::Vector{<:Point})
     
     # Convert to simple 2D coords (strip units, work in meters)
     pts = [_to_2d(v) for v in vertices]
+    
+    # Ensure CCW orientation (algorithm assumes interior is on LEFT)
+    pts = _ensure_ccw(pts)
     original_pts = copy(pts)
+    n = length(pts)
     
     # Warn if non-convex (algorithm only handles convex polygons correctly)
     if !_is_convex(pts)
@@ -48,10 +52,10 @@ function get_tributary_polygons_isotropic(vertices::Vector{<:Point})
         # Compute bisectors at each active vertex
         bisectors, speeds = _compute_bisectors_active(current_pts, n_active)
         
-        # Find next edge collapse
-        t_min, collapse_idx, collapse_pt = _find_next_collapse_active(current_pts, n_active, bisectors, speeds)
+        # Find ALL edges collapsing at the next event time (handles simultaneous collapses)
+        t_min, collapses = _find_all_collapses_active(current_pts, n_active, bisectors, speeds)
         
-        if t_min == Inf || t_min <= 1e-10
+        if t_min == Inf || t_min <= 1e-10 || isempty(collapses)
             break
         end
         
@@ -73,29 +77,27 @@ function get_tributary_polygons_isotropic(vertices::Vector{<:Point})
         end
         push!(edge_levels, level_edges)
         
-        # The collapsing wavefront edge is at collapse_idx
-        # Record termination for that original edge
-        dead_edge = edge_map[collapse_idx]
-        edge_dead[dead_edge] = true
-        collapse_point[dead_edge] = collapse_pt
+        # Build lookup structures for batch processing
+        collapse_set = Set(c[1] for c in collapses)
+        collapse_pt_for = Dict(c[1] => c[2] for c in collapses)
         
-        # Build new vertex list (strict ownership - no union)
-        next_idx = mod1(collapse_idx + 1, n_active)
-        new_current_pts = NTuple{2,Float64}[]
-        new_edge_map = Int[]
-        for i in 1:n_active
-            if i == collapse_idx
-                # This edge died; insert collapse point but carry forward next_idx's edge ownership
-                push!(new_current_pts, collapse_pt)
-                push!(new_edge_map, edge_map[next_idx])  # Surviving edge takes over
-            elseif i == next_idx
-                # Skip - merged into collapse point
-                continue
-            else
-                push!(new_current_pts, new_pts[i])
-                push!(new_edge_map, edge_map[i])
-            end
+        # Mark all collapsing edges as dead
+        for (idx, pt) in collapses
+            dead_edge = edge_map[idx]
+            edge_dead[dead_edge] = true
+            collapse_point[dead_edge] = pt
         end
+        
+        # Handle case where ALL edges collapse (final convergence)
+        if length(collapse_set) == n_active
+            break
+        end
+        
+        # Build new polygon handling batch collapses
+        # Strategy: find runs of consecutive collapsed edges, emit one collapse point per run
+        new_current_pts, new_edge_map = _build_collapsed_polygon(
+            new_pts, edge_map, n_active, collapse_set, collapse_pt_for
+        )
         
         # Update state
         current_pts = new_current_pts
@@ -104,7 +106,10 @@ function get_tributary_polygons_isotropic(vertices::Vector{<:Point})
     end
     
     # Final convergence: all remaining edges terminate at the same point
-    if n_active >= 2
+    # Skip if all edges already collapsed in the main loop
+    any_surviving = any(i -> !edge_dead[edge_map[i]], 1:n_active)
+    
+    if n_active >= 2 && any_surviving
         bisectors, speeds = _compute_bisectors_active(current_pts, n_active)
         t_min, _, final_pt = _find_next_collapse_active(current_pts, n_active, bisectors, speeds)
         
@@ -223,6 +228,122 @@ function _find_next_collapse_active(pts::Vector{NTuple{2,Float64}}, n::Int, bise
     end
     
     return t_min, collapse_idx, collapse_pt
+end
+
+"""
+Find ALL edges collapsing at the minimum time (handles simultaneous events).
+Returns (t_min, collapses) where collapses is Vector of (idx, collapse_point) tuples.
+"""
+function _find_all_collapses_active(pts::Vector{NTuple{2,Float64}}, n::Int, bisectors, speeds)
+    # First pass: find t_min
+    t_min = Inf
+    for i in 1:n
+        next_i = mod1(i + 1, n)
+        p1 = pts[i]
+        p2 = pts[next_i]
+        d1 = bisectors[i] .* speeds[i]
+        d2 = bisectors[next_i] .* speeds[next_i]
+        t = _ray_ray_intersect_time(p1, d1, p2, d2)
+        if t > 1e-10 && t < t_min
+            t_min = t
+        end
+    end
+    
+    t_min == Inf && return (Inf, Tuple{Int, NTuple{2,Float64}}[])
+    
+    # Second pass: collect all edges collapsing at t_min (within tolerance)
+    tol = max(1e-9, 1e-6 * t_min)
+    collapses = Tuple{Int, NTuple{2,Float64}}[]
+    
+    for i in 1:n
+        next_i = mod1(i + 1, n)
+        p1 = pts[i]
+        p2 = pts[next_i]
+        d1 = bisectors[i] .* speeds[i]
+        d2 = bisectors[next_i] .* speeds[next_i]
+        t = _ray_ray_intersect_time(p1, d1, p2, d2)
+        
+        if isfinite(t) && t > 1e-10 && abs(t - t_min) <= tol
+            pt = (p1[1] + d1[1] * t, p1[2] + d1[2] * t)
+            push!(collapses, (i, pt))
+        end
+    end
+    
+    return (t_min, collapses)
+end
+
+"""
+Build new polygon after batch collapse, handling consecutive collapse runs and wrap-around.
+Returns (new_pts, new_edge_map).
+"""
+function _build_collapsed_polygon(
+    advanced_pts::Vector{NTuple{2,Float64}},
+    edge_map::Vector{Int},
+    n_active::Int,
+    collapse_set::Set{Int},
+    collapse_pt_for::Dict{Int, NTuple{2,Float64}}
+)
+    new_pts = NTuple{2,Float64}[]
+    new_edge_map = Int[]
+    
+    # Check for wrap-around: does a collapse run span from end back to start?
+    wrap_around = (1 in collapse_set) && (n_active in collapse_set)
+    
+    # Find first non-collapsed index to start iteration (avoids split wrap-around runs)
+    start_idx = 1
+    if wrap_around
+        # Find first index NOT in collapse set
+        for i in 1:n_active
+            if !(i in collapse_set)
+                start_idx = i
+                break
+            end
+        end
+    end
+    
+    # Process vertices in order starting from start_idx
+    visited = 0
+    i = start_idx
+    
+    while visited < n_active
+        if i in collapse_set
+            # Start of a collapse run - collect all consecutive collapsed edges
+            run_pts = NTuple{2,Float64}[]
+            run_start = i
+            
+            while i in collapse_set && visited < n_active
+                push!(run_pts, collapse_pt_for[i])
+                visited += 1
+                i = mod1(i + 1, n_active)
+            end
+            
+            # Average the collapse points (should be nearly identical for adjacent collapses)
+            avg_pt = (
+                sum(p[1] for p in run_pts) / length(run_pts),
+                sum(p[2] for p in run_pts) / length(run_pts)
+            )
+            
+            # Emit the collapse point
+            push!(new_pts, avg_pt)
+            
+            # The surviving edge after this run takes ownership
+            # (i now points to the first non-collapsed edge after the run)
+            if !(i in collapse_set) && visited < n_active
+                push!(new_edge_map, edge_map[i])
+            elseif !isempty(new_edge_map)
+                # Edge case: if we've wrapped and all remaining are collapsed
+                push!(new_edge_map, new_edge_map[1])
+            end
+        else
+            # Not collapsing - emit vertex normally
+            push!(new_pts, advanced_pts[i])
+            push!(new_edge_map, edge_map[i])
+            visited += 1
+            i = mod1(i + 1, n_active)
+        end
+    end
+    
+    return new_pts, new_edge_map
 end
 
 """Reorganize edge_levels[level][edge] → sorted_by_edge[edge][level], skipping Nothing entries."""

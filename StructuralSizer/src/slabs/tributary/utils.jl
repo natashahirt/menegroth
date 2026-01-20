@@ -174,7 +174,7 @@ function _finalize_tributary(edge_idx::Int, verts::Vector{NTuple{2,Float64}},
     return TributaryResult(edge_idx, verts, abs(area), frac)
 end
 
-"""Shoelace formula for polygon area."""
+"""Shoelace formula for polygon area (signed: positive=CCW, negative=CW)."""
 function _polygon_area(pts::Vector{NTuple{2,Float64}})
     n = length(pts)
     n >= 3 || return 0.0
@@ -186,4 +186,55 @@ function _polygon_area(pts::Vector{NTuple{2,Float64}})
         area -= pts[j][1] * pts[i][2]
     end
     return area / 2
+end
+
+"""Check if polygon is CCW (counter-clockwise) oriented."""
+_is_ccw(pts::Vector{NTuple{2,Float64}}) = _polygon_area(pts) > 0
+
+"""Ensure polygon is CCW oriented. Returns reversed copy if CW."""
+function _ensure_ccw(pts::Vector{NTuple{2,Float64}})
+    if _is_ccw(pts)
+        return pts
+    else
+        return reverse(pts)
+    end
+end
+
+# =============================================================================
+# Collinear Vertex Simplification
+# =============================================================================
+
+"""Check if three consecutive points are collinear within tolerance."""
+function _is_collinear_triplet(p_prev, p, p_next; tol=1e-12)
+    cross = (p[1]-p_prev[1])*(p_next[2]-p[2]) - (p[2]-p_prev[2])*(p_next[1]-p[1])
+    return abs(cross) ≤ tol
+end
+
+"""
+Simplify polygon by dropping collinear vertices. Keeps CCW order.
+Returns (simp_pts, keep_idx) where keep_idx[i] = original index of simp vertex i.
+"""
+function simplify_collinear_polygon(pts::Vector{NTuple{2,Float64}}; tol=1e-12)
+    n = length(pts)
+    n ≤ 3 && return pts, collect(1:n)
+    
+    keep = Int[]
+    for i in 1:n
+        p_prev = pts[mod1(i-1, n)]
+        p = pts[i]
+        p_next = pts[mod1(i+1, n)]
+        if !_is_collinear_triplet(p_prev, p, p_next; tol=tol)
+            push!(keep, i)
+        end
+    end
+    
+    simp = [pts[i] for i in keep]
+    
+    # Ensure still CCW
+    if _polygon_area(simp) < 0
+        reverse!(simp)
+        reverse!(keep)
+    end
+    
+    return simp, keep
 end

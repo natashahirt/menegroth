@@ -2,3 +2,5 @@
 
 include("utils.jl")
 include("isotropic.jl")
+include("dcel.jl")
+include("isotropic_dcel.jl")

@@ -423,56 +423,24 @@ for r in par_weighted
 end
 println("\nExpected: edge 4 (weight=2) should have SMALLER area")
 
-# Debug: test irregular varying edges
+# Debug: test triangle (one short edge problem)
 println("\n" * "=" ^ 60)
-println("Irregular Varying Edges Test")
+println("Triangle Test (One Short Edge Issue)")
 println("=" ^ 60)
-irreg_var = irregular_varying_edges()
-println("\nIrregular Varying vertices: $([(Float64(Meshes.coords(v).x.val), Float64(Meshes.coords(v).y.val)) for v in irreg_var])")
-println("\nOne-Way (axis=[1.0, 0.0]) Isotropic (all weights = 1.0):")
-irreg_var_iso = get_tributary_polygons(irreg_var; axis=[1.0, 0.0])
-for r in irreg_var_iso
+tri = rect_one_short_edge()  # (0,0), (3,0), (1.5, 5)
+println("\nTriangle vertices: $([(Float64(Meshes.coords(v).x.val), Float64(Meshes.coords(v).y.val)) for v in tri])")
+println("\nOne-Way (axis=[1.0, 0.0]) Isotropic:")
+tri_results = get_tributary_polygons(tri; axis=[1.0, 0.0])
+for r in tri_results
     println("  Edge $(r.edge_idx): $(length(r.vertices)) vertices, area=$(round(r.area, digits=4)) m² ($(round(r.fraction*100, digits=1))%)")
-    if !isempty(r.vertices) && length(r.vertices) <= 10
+    if !isempty(r.vertices)
         println("    Vertices: $([(round(v[1], digits=3), round(v[2], digits=3)) for v in r.vertices])")
+    else
+        println("    (empty polygon)")
     end
 end
-total_frac_iso = sum(r.fraction for r in irreg_var_iso)
-println("\nTotal fraction: $(round(total_frac_iso * 100, digits=1))%")
-
-println("\nWeighted [1.0, 1.0, 2.0, 1.0, 2.0, 1.0, 1.0] (edges 3,5 move 2x faster):")
-irreg_var_weighted = get_tributary_polygons(irreg_var; weights=[1.0, 1.0, 2.0, 1.0, 2.0, 1.0, 1.0])
-println("\nResults:")
-for r in irreg_var_weighted
-    println("  Edge $(r.edge_idx): $(length(r.vertices)) vertices, area=$(round(r.area, digits=4)) m² ($(round(r.fraction*100, digits=1))%)")
-    if !isempty(r.vertices) && length(r.vertices) <= 10
-        println("    Vertices: $([(round(v[1], digits=3), round(v[2], digits=3)) for v in r.vertices])")
-    end
-end
-total_frac_weighted = sum(r.fraction for r in irreg_var_weighted)
-println("\nTotal fraction: $(round(total_frac_weighted * 100, digits=1))%")
-println("\nExpected: edges 3,5 (weight=2) should have SMALLER areas")
-
-# Debug: test with collinear vertices
-println("\n" * "=" ^ 60)
-println("With Collinear Vertices Test")
-println("=" ^ 60)
-collinear_shape = with_collinear()
-println("\nWith Collinear vertices (6 vertices, should simplify to 4): $([(Float64(Meshes.coords(v).x.val), Float64(Meshes.coords(v).y.val)) for v in collinear_shape])")
-println("Note: Vertices (0,0), (2,0), (4,0) are collinear on bottom edge")
-println("      Vertices (4,3), (2,3), (0,3) are collinear on top edge")
-println("      Should simplify to rectangle: (0,0), (4,0), (4,3), (0,3)")
-collinear_results = get_tributary_polygons(collinear_shape)
-println("\nResults:")
-for r in collinear_results
-    println("  Edge $(r.edge_idx): $(length(r.vertices)) vertices, area=$(round(r.area, digits=4)) m² ($(round(r.fraction*100, digits=1))%)")
-    if !isempty(r.vertices) && length(r.vertices) <= 10
-        println("    Vertices: $([(round(v[1], digits=3), round(v[2], digits=3)) for v in r.vertices])")
-    end
-end
-total_frac_collinear = sum(r.fraction for r in collinear_results)
-println("\nTotal fraction: $(round(total_frac_collinear * 100, digits=1))%")
-println("Expected: Should match a 4x3 rectangle (area=12.0 m²)")
+total_frac_tri = sum(r.fraction for r in tri_results)
+println("\nTotal fraction: $(round(total_frac_tri * 100, digits=1))%")
 
 # Debug: test chevron shape
 println("\n" * "=" ^ 60)
@@ -492,5 +460,5 @@ total_frac_chev = sum(r.fraction for r in chev_iso)
 println("\nTotal fraction: $(round(total_frac_chev * 100, digits=1))%")
 
 println("\nGenerating full debug visualization...")
-fig = visualize_tributary_debug(axis=[1.,0.])
+fig = visualize_tributary_debug()
 display(fig)

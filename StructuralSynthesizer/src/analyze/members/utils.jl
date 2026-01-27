@@ -332,14 +332,20 @@ function size_members_discrete!(
     group_ids, demands, L_totals, Lb_govs, Cb_govs, Kx_govs, Ky_govs =
         member_group_demands(struc; member_edge_group=member_edge_group, resolution=resolution)
 
-    result = StructuralSizer.optimize_member_groups_discrete(
-        demands, L_totals, Lb_govs, Cb_govs, Kx_govs, Ky_govs;
-        catalogue=catalogue,
-        material=material,
+    # Convert to SteelMemberGeometry objects for new API
+    geometries = [StructuralSizer.SteelMemberGeometry(L; Lb=Lb, Cb=Cb, Kx=Kx, Ky=Ky)
+                  for (L, Lb, Cb, Kx, Ky) in zip(L_totals, Lb_govs, Cb_govs, Kx_govs, Ky_govs)]
+    
+    # Create AISC checker with design constraints
+    checker = StructuralSizer.AISCChecker(;
         max_depth=max_depth,
+        deflection_limit=deflection_limit,
+    )
+    
+    result = StructuralSizer.optimize_discrete(
+        checker, demands, geometries, catalogue, material;
         n_max_sections=n_max_sections,
         optimizer=optimizer,
-        deflection_limit=deflection_limit,
     )
 
     # Apply results to member groups + ASAP elements + individual members

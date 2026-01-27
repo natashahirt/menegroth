@@ -16,7 +16,10 @@ end
 # Types (Metal, etc.)
 include("types.jl")
 
-# Members (materials, sections, codes, optimization)
+# Materials
+include("materials/_materials.jl")
+
+# Members (sections, codes, optimization)
 include("members/_members.jl")
 
 # Slabs (types, codes, optimization)
@@ -37,8 +40,22 @@ export AbstractDemand, MemberDemand
 export AbstractObjective, MinWeight, MinVolume, MinCost, MinCarbon
 export objective_value, total_objective
 
+# =============================================================================
+# Capacity Checker Interface
+# =============================================================================
+export AbstractCapacityChecker, AbstractCapacityCache, AbstractMemberGeometry
+export create_cache, is_feasible, precompute_capacities!, get_objective_coeff
+
+# Geometry types (material-specific)
+export SteelMemberGeometry, TimberMemberGeometry, ConcreteMemberGeometry
+
+# Checkers
+export AISCChecker, AISCCapacityCache  # Steel (implemented)
+export NDSChecker, Timber              # Timber (stub)
+export ACIChecker                      # Concrete (stub)
+
 # Optimization
-export optimize_member_groups_discrete
+export optimize_discrete
 
 # Materials - Steel
 export A992_Steel, S355_Steel, Rebar_40, Rebar_60, Rebar_75, Rebar_80
@@ -48,10 +65,24 @@ export NWC_4000, NWC_6000, NWC_GGBS, NWC_PFA
 # Section Interface (generic)
 export area, depth, width, weight_per_length
 
-# Sections
+# =============================================================================
+# Sections - Steel
+# =============================================================================
 export W, W_names, all_W, preferred_W
 export Rebar, rebar, rebar_sizes, all_rebar
 export update!, update, geometry, get_coords
+export HSSSection  # (stub)
+
+# =============================================================================
+# Sections - Timber (stubs)
+# =============================================================================
+export GlulamSection
+export STANDARD_GLULAM_WIDTHS, GLULAM_LAM_THICKNESS
+
+# =============================================================================
+# Sections - Concrete (stubs)
+# =============================================================================
+export RCBeamSection, rho
 
 # Capacity Interface (generic)
 export get_Mn, get_Vn, get_Pn, get_Tn

@@ -16,7 +16,7 @@ Design philosophy:
     live = 2.0u"kN/m^2"
 
     # Helper: create a "rebar material" with a specific yield strength (for interpolation tests)
-    _rebar_with_fy(fy) = Metal(Rebar_60.E, Rebar_60.G, fy, Rebar_60.Fu, Rebar_60.ρ, Rebar_60.ν, Rebar_60.ecc)
+    _rebar_with_fy(fy) = RebarSteel(Rebar_60.E, Rebar_60.G, fy, Rebar_60.Fu, Rebar_60.ρ, Rebar_60.ν, Rebar_60.ecc)
 
     # -------------------------------------------------------------------------
     # Smoke tests (all CIP subtypes)

@@ -325,3 +325,232 @@ function visualize_cell_tributary(struc::BuildingStructure, cell_idx::Int)
     
     return fig
 end
+
+# =============================================================================
+# Vertex Tributary Visualization (Voronoi)
+# =============================================================================
+
+"""
+    visualize_vertex_tributaries(struc::BuildingStructure; story=0, kwargs...)
+
+Visualize stored Voronoi vertex tributary polygons for columns at a given story.
+Uses pre-computed polygons from `col.tributary_polygons` (no recomputation).
+
+# Arguments
+- `story::Int=0`: Which story to visualize (0 = ground level columns)
+- `show_labels::Bool=true`: Show column index and tributary area labels
+- `show_column_positions::Bool=true`: Show column position markers
+
+# Returns
+GLMakie.Figure with colored Voronoi cells for each column.
+"""
+function visualize_vertex_tributaries(struc::BuildingStructure;
+    story::Int = 0,
+    show_labels::Bool = true,
+    show_column_positions::Bool = true
+)
+    skel = struc.skeleton
+    
+    # Get columns at this story with their stored polygons
+    story_cols = filter(c -> c.story == story, struc.columns)
+    
+    if isempty(story_cols)
+        @warn "No columns found at story $story"
+        return GLMakie.Figure()
+    end
+    
+    # Collect all polygon vertices for centering
+    all_xs = Float64[]
+    all_ys = Float64[]
+    for col in story_cols
+        for (_, polygon) in col.tributary_polygons
+            for v in polygon
+                push!(all_xs, v[1])
+                push!(all_ys, v[2])
+            end
+        end
+        # Also include column position
+        v = skel.vertices[col.vertex_idx]
+        c = Meshes.coords(v)
+        push!(all_xs, Float64(ustrip(u"m", c.x)))
+        push!(all_ys, Float64(ustrip(u"m", c.y)))
+    end
+    
+    if isempty(all_xs)
+        @warn "No tributary polygons found for story $story"
+        return GLMakie.Figure()
+    end
+    
+    cx = (minimum(all_xs) + maximum(all_xs)) / 2
+    cy = (minimum(all_ys) + maximum(all_ys)) / 2
+    
+    # Create figure
+    fig = GLMakie.Figure(size = (700, 700))
+    ax = GLMakie.Axis(fig[1, 1],
+        title = "Vertex Tributaries (Story $story)",
+        aspect = GLMakie.DataAspect(),
+        xlabel = "x [m]",
+        ylabel = "y [m]"
+    )
+    
+    colors = StructuralPlots.harmonic
+    
+    # Plot stored polygons for each column
+    for (col_idx, col) in enumerate(story_cols)
+        color = colors[mod1(col_idx, length(colors))]
+        
+        # Draw each per-cell polygon
+        for (cell_idx, polygon) in col.tributary_polygons
+            isempty(polygon) && continue
+            
+            xs = [v[1] - cx for v in polygon]
+            ys = [v[2] - cy for v in polygon]
+            push!(xs, xs[1])
+            push!(ys, ys[1])
+            
+            GLMakie.poly!(ax, GLMakie.Point2f.(xs, ys),
+                         color = (color, 0.4),
+                         strokecolor = color,
+                         strokewidth = 2)
+        end
+        
+        # Label at column position
+        if show_labels && !isnothing(col.tributary_area)
+            v = skel.vertices[col.vertex_idx]
+            c = Meshes.coords(v)
+            mx = Float64(ustrip(u"m", c.x)) - cx
+            my = Float64(ustrip(u"m", c.y)) - cy
+            label = "$(round(col.tributary_area, digits=1)) m²"
+            GLMakie.text!(ax, mx, my + 0.5, text=label, fontsize=10,
+                         align=(:center, :bottom), color=:black)
+        end
+    end
+    
+    # Plot column positions
+    if show_column_positions
+        for col in story_cols
+            v = skel.vertices[col.vertex_idx]
+            c = Meshes.coords(v)
+            x = Float64(ustrip(u"m", c.x)) - cx
+            y = Float64(ustrip(u"m", c.y)) - cy
+            GLMakie.scatter!(ax, [x], [y], color=:black, markersize=12, marker=:rect)
+        end
+    end
+    
+    return fig
+end
+
+"""
+    visualize_tributaries_combined(struc::BuildingStructure, cell_idx::Int; kwargs...)
+
+Visualize both edge tributaries (straight skeleton) and vertex tributaries (Voronoi)
+for a single cell side-by-side.
+
+# Arguments
+- `cell_idx::Int`: Which cell to visualize
+- `show_labels::Bool=true`: Show area/fraction labels
+
+# Returns
+GLMakie.Figure with two panels: [Edge Tribs | Vertex Tribs]
+"""
+function visualize_tributaries_combined(struc::BuildingStructure, cell_idx::Int;
+    show_labels::Bool = true
+)
+    cell = struc.cells[cell_idx]
+    skel = struc.skeleton
+    
+    # Compute edge tributaries if needed
+    if isnothing(cell.tributary)
+        compute_cell_tributaries!(struc)
+        cell = struc.cells[cell_idx]
+    end
+    
+    # Get cell vertices
+    verts_raw, offset = _get_cell_vertices_2d_with_offset(struc, cell)
+    verts = [(v[1] - offset[1], v[2] - offset[2]) for v in verts_raw]
+    
+    # Compute Voronoi for cell vertices (these would be column positions)
+    points = [Meshes.Point(v[1], v[2]) for v in verts_raw]
+    vertex_tribs = StructuralSizer.compute_voronoi_tributaries(points)
+    
+    # Create figure with two panels
+    fig = GLMakie.Figure(size = (1200, 550))
+    
+    colors = StructuralPlots.harmonic
+    
+    # --- Left panel: Edge Tributaries ---
+    ax1 = GLMakie.Axis(fig[1, 1],
+        title = "Edge Tributaries (Straight Skeleton)",
+        aspect = GLMakie.DataAspect(),
+        xlabel = "x [m]", ylabel = "y [m]"
+    )
+    
+    if !isnothing(cell.tributary)
+        n_verts = length(verts_raw)
+        for (j, trib) in enumerate(cell.tributary)
+            if !isempty(trib.s)
+                local_idx = trib.local_edge_idx
+                beam_start = verts_raw[local_idx]
+                beam_end = verts_raw[mod1(local_idx + 1, n_verts)]
+                
+                trib_verts = vertices(trib, beam_start, beam_end)
+                txs = [v[1] - offset[1] for v in trib_verts]
+                tys = [v[2] - offset[2] for v in trib_verts]
+                push!(txs, txs[1])
+                push!(tys, tys[1])
+                
+                c = colors[mod1(j, length(colors))]
+                GLMakie.poly!(ax1, GLMakie.Point2f.(txs, tys),
+                             color = (c, 0.3), strokecolor = c, strokewidth = 1.5)
+                
+                if show_labels
+                    label = "$(round(trib.fraction*100, digits=0))%"
+                    mx = (verts[local_idx][1] + verts[mod1(local_idx+1, length(verts))][1]) / 2
+                    my = (verts[local_idx][2] + verts[mod1(local_idx+1, length(verts))][2]) / 2
+                    GLMakie.text!(ax1, mx, my, text=label, fontsize=10,
+                                 align=(:center, :center), color=:black)
+                end
+            end
+        end
+    end
+    
+    # Cell outline
+    xs = [v[1] for v in verts]; ys = [v[2] for v in verts]
+    push!(xs, xs[1]); push!(ys, ys[1])
+    GLMakie.lines!(ax1, xs, ys, color=:black, linewidth=2)
+    GLMakie.scatter!(ax1, GLMakie.Point2f.(verts), color=:black, markersize=8)
+    
+    # --- Right panel: Vertex Tributaries ---
+    ax2 = GLMakie.Axis(fig[1, 2],
+        title = "Vertex Tributaries (Voronoi)",
+        aspect = GLMakie.DataAspect(),
+        xlabel = "x [m]", ylabel = "y [m]"
+    )
+    
+    for (i, trib) in enumerate(vertex_tribs)
+        if !isempty(trib.polygon)
+            pxs = [v[1] - offset[1] for v in trib.polygon]
+            pys = [v[2] - offset[2] for v in trib.polygon]
+            push!(pxs, pxs[1])
+            push!(pys, pys[1])
+            
+            c = colors[mod1(i, length(colors))]
+            GLMakie.poly!(ax2, GLMakie.Point2f.(pxs, pys),
+                         color = (c, 0.4), strokecolor = c, strokewidth = 2)
+            
+            if show_labels
+                mx = sum(v[1] for v in trib.polygon) / length(trib.polygon) - offset[1]
+                my = sum(v[2] for v in trib.polygon) / length(trib.polygon) - offset[2]
+                label = "V$(i)\n$(round(trib.area, digits=1)) m²"
+                GLMakie.text!(ax2, mx, my, text=label, fontsize=9,
+                             align=(:center, :center), color=:black)
+            end
+        end
+    end
+    
+    # Cell outline and vertices
+    GLMakie.lines!(ax2, xs, ys, color=:black, linewidth=2)
+    GLMakie.scatter!(ax2, GLMakie.Point2f.(verts), color=:black, markersize=10, marker=:rect)
+    
+    return fig
+end

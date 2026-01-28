@@ -1819,7 +1819,7 @@ uuid = "a1b2c3d4-5678-90ab-cdef-123456789abc"
 version = "0.1.0"
 
 [[deps.StructuralSizer]]
-deps = ["CSV", "Gurobi", "HiGHS", "JSON3", "JuMP", "Logging", "Meshes", "QuadGK", "Roots", "StructuralBase", "Unitful"]
+deps = ["CSV", "DelaunayTriangulation", "Gurobi", "HiGHS", "JSON3", "JuMP", "Logging", "Meshes", "QuadGK", "Roots", "StructuralBase", "Unitful"]
 path = "StructuralSizer"
 uuid = "9d8e7f6a-5b4c-3d2e-1f0a-9b8c7d6e5f4a"
 version = "0.1.0"

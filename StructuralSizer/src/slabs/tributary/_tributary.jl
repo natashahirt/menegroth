@@ -1,10 +1,14 @@
-# Tributary Area Computation (Straight Skeleton via DCEL and One-Way Directed)
+# Tributary Area Computation
+#
+# Edge Tributaries: Straight Skeleton (DCEL) and One-Way Directed
+# Vertex Tributaries: Voronoi Tessellation (for column sizing)
 
 include("utils.jl")
 include("dcel.jl")
 include("isotropic.jl")
 include("one_way.jl")
 include("spans.jl")
+include("voronoi.jl")
 
 # =============================================================================
 # Main Dispatch Function

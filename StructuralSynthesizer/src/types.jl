@@ -104,13 +104,14 @@ mutable struct Cell{T, A, P}
     live_load::P
     self_weight::P
     floor_type::Symbol
+    position::Symbol          # :corner, :edge, or :interior
     # Tributary results (one polygon per edge)
     tributary::Union{Vector{TributaryPolygon}, Nothing}
 end
 
 function Cell(face_idx::Int, area::A, spans::SpanInfo{T}, 
-              sdl::P, live_load::P) where {T, A, P}
-    Cell{T, A, P}(face_idx, area, spans, sdl, live_load, zero(P), :unknown, nothing)
+              sdl::P, live_load::P; position::Symbol=:interior) where {T, A, P}
+    Cell{T, A, P}(face_idx, area, spans, sdl, live_load, zero(P), :unknown, position, nothing)
 end
 
 """Total factored pressure (SDL + LL + SW)."""
@@ -126,16 +127,17 @@ mutable struct Slab{T, R<:AbstractFloorResult}
     result::R
     floor_type::Symbol        # :one_way, :two_way, :pt_banded, :flat_plate
     spans::SpanInfo{T}        # Governing spans across all child cells
+    position::Symbol          # :corner, :edge, or :interior (derived from cells)
     group_id::Union{UInt64, Nothing}
     volumes::MaterialVolumes  # material → total volume (m³)
 end
 
 function Slab(cell_indices::Vector{Int}, result::R, spans::SpanInfo; 
-              floor_type=:one_way, group_id=nothing,
+              floor_type=:one_way, position::Symbol=:interior, group_id=nothing,
               volumes::MaterialVolumes=MaterialVolumes()) where {R<:AbstractFloorResult}
     T = typeof(StructuralSizer.total_depth(result))
     spans_T = SpanInfo{T}(T(spans.primary), T(spans.secondary), spans.axis, T(spans.isotropic))
-    Slab{T, R}(cell_indices, result, floor_type, spans_T, group_id, volumes)
+    Slab{T, R}(cell_indices, result, floor_type, spans_T, position, group_id, volumes)
 end
 
 # Single-cell slab convenience
@@ -230,7 +232,9 @@ Vertical member (columns).
 - `base::MemberBase{T}`: Shared member properties
 - `vertex_idx::Int`: Skeleton vertex index (column location)
 - `c1`, `c2`: Cross-section dimensions (for punching shear, etc.)
-- `tributary_area`: From Voronoi tessellation (for initial sizing, foundation loads)
+- `tributary_area::Union{Float64, Nothing}`: Total Voronoi tributary area (m²)
+- `tributary_by_slab::Dict{Int, Float64}`: Per-cell area breakdown (cell_idx → area in m²)
+- `tributary_polygons::Dict{Int, Vector{NTuple{2,Float64}}}`: Per-cell polygon vertices for visualization
 - `story::Int`: Story index (0 = ground level)
 - `position::Symbol`: `:interior`, `:edge`, `:corner` (for punching shear coefficients)
 """
@@ -239,7 +243,9 @@ Vertical member (columns).
     vertex_idx::Int = 0
     c1::Union{T, Nothing} = nothing
     c2::Union{T, Nothing} = nothing
-    tributary_area::Union{T, Nothing} = nothing
+    tributary_area::Union{Float64, Nothing} = nothing  # Total tributary area (m²)
+    tributary_by_slab::Dict{Int, Float64} = Dict{Int, Float64}()  # cell_idx → area (m²)
+    tributary_polygons::Dict{Int, Vector{NTuple{2,Float64}}} = Dict{Int, Vector{NTuple{2,Float64}}}()  # cell_idx → polygon vertices (m)
     story::Int = 0
     position::Symbol = :interior
 end
@@ -276,14 +282,17 @@ Beam(seg_idx::Int, L::T; kwargs...) where T = Beam([seg_idx], L; kwargs...)
 
 function Column(seg_indices::Vector{Int}, L::T; Lb=L, Kx=1.0, Ky=1.0, Cb=1.0,
                 group_id=nothing, vertex_idx=0, c1=nothing, c2=nothing,
-                tributary_area=nothing, story=0, position=:interior) where T
+                tributary_area=nothing, tributary_by_slab=Dict{Int,Float64}(),
+                tributary_polygons=Dict{Int,Vector{NTuple{2,Float64}}}(),
+                story=0, position=:interior) where T
     base = MemberBase{T}(
         segment_indices=seg_indices, L=L, Lb=Lb,
         Kx=Float64(Kx), Ky=Float64(Ky), Cb=Float64(Cb),
         group_id=group_id, section=nothing, volumes=MaterialVolumes()
     )
     Column{T}(base=base, vertex_idx=vertex_idx, c1=c1, c2=c2,
-              tributary_area=tributary_area, story=story, position=position)
+              tributary_area=tributary_area, tributary_by_slab=tributary_by_slab,
+              tributary_polygons=tributary_polygons, story=story, position=position)
 end
 
 Column(seg_idx::Int, L::T; kwargs...) where T = Column([seg_idx], L; kwargs...)

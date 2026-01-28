@@ -163,13 +163,19 @@ export solve_equilibrium_rise
 export parabolic_arc_length, vault_volume_per_area
 
 # =============================================================================
-# Tributary Area (Straight Skeleton)
+# Tributary Area (Straight Skeleton) - Edge Tributaries
 # =============================================================================
 
 export TributaryPolygon
 export vertices  # for converting parametric → absolute coords
 export get_tributary_polygons
 export get_tributary_polygons_isotropic
+
+# Tributary Area (Voronoi) - Vertex Tributaries
+# =============================================================================
+
+export VertexTributary
+export compute_voronoi_tributaries
 
 # Span calculations
 export SpanInfo, governing_spans

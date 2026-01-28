@@ -1303,8 +1303,21 @@ Key values from StructurePoint Flat Plate Example for validation:
 - [x] `column-classification`: Implement classify_column_position() based on graph connectivity
 - [ ] `column-dimensions`: Add column_dimensions() helpers for each section type (deferred)
 
-### Phase 0: Geometry
-- [ ] `voronoi-tributary`: Implement Voronoi vertex tributaries (regular, clipped to boundary)
+### Phase 0: Geometry ✅ COMPLETE
+- [x] `voronoi-tributary`: Implement Voronoi vertex tributaries (regular, clipped to boundary)
+  - Located in `StructuralSizer/src/slabs/tributary/voronoi.jl`
+  - Uses DelaunayTriangulation.jl with perturbation for degenerate cases
+  - Exports: `VertexTributary`, `compute_voronoi_tributaries()`
+- [x] `column-trib-storage`: Store tributaries on Column objects
+  - `Column.tributary_area::Float64` - total Voronoi area (m²)
+  - `Column.tributary_by_slab::Dict{Int, Float64}` - per-cell breakdown (cell_idx → area)
+  - Computed in `compute_column_tributaries!(struc)` during `initialize!`
+  - Each cell's Voronoi is computed separately and accumulated on columns
+  - Visualization: `visualize_vertex_tributaries()`, `visualize_tributaries_combined()`
+- [x] `voronoi-column-storage`: Store Voronoi tributary areas on Column objects
+  - Computed automatically in `initialize_members!()` via `compute_column_tributaries!()`
+  - Stored as `col.tributary_area::Float64` (always in m²)
+  - Validated: corner ~20m², edge ~40m², interior ~80m² for 2×2 bay building
 - [ ] `initial-column-estimate`: Implement initial column size estimation from span table
 
 ### Phase 1: Slab Type Hierarchy
@@ -1339,9 +1352,11 @@ Key values from StructurePoint Flat Plate Example for validation:
 - [ ] `reanalysis-warning`: Implement warning if final column < initial estimate
 
 ### Testing
-- [ ] `test-member-types`: Write test_member_types.jl for AbstractMember hierarchy
+- [x] `test-member-types`: Write test_member_types.jl for AbstractMember hierarchy
 - [ ] `test-column-dimensions`: Write test_column_dimensions.jl
-- [ ] `test-voronoi`: Write test_voronoi.jl for Voronoi vertex tributaries
+- [x] `test-voronoi`: Write test_voronoi.jl for Voronoi vertex tributaries
+  - Tests: `StructuralSynthesizer/test/test_voronoi_tributaries.jl`
+  - Visualization test: `StructuralSynthesizer/test/test_voronoi_vis.jl`
 - [ ] `test-initial-column`: Write test_initial_column.jl for span table estimates
 - [ ] `test-strip-split`: Write test_strip_split.jl for split_tributary_at_half_depth()
 - [ ] `test-strips`: Write test_strips.jl for rectangular/irregular strip geometry

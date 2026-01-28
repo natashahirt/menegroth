@@ -3,6 +3,7 @@ module StructuralSynthesizer
 using Logging
 using StructuralBase
 using StructuralSizer
+using AsapToolkit
 
 # Extend StructuralSizer's floor-result interface functions for local wrapper types
 # (e.g. `Slab`). In Julia, adding methods requires `import`, not `using`.
@@ -19,7 +20,6 @@ import StructuralPlots  # Colors and themes for visualization
 
 include("types.jl")
 include("./core/_core.jl")
-using AsapToolkit
 include("./generate/_generate.jl")
 include("./visualization/_visualization.jl")
 include("./analyze/_analyze.jl")
@@ -43,6 +43,7 @@ export Support, Foundation, FoundationGroup, FoundationDemand
 # Functions
 export visualize
 export visualize_cell_groups, visualize_cell_tributary, visualize_cell_tributaries
+export visualize_vertex_tributaries, visualize_tributaries_combined
 export vis_embodied_carbon_summary
 export add_vertex!, add_element!, find_faces!, rebuild_stories!, to_asap!
 export initialize!

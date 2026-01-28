@@ -101,6 +101,103 @@ function initialize_members!(struc::BuildingStructure{T};
     
     n_total = length(struc.beams) + length(struc.columns) + length(struc.struts)
     @debug "Initialized members from $(length(struc.segments)) segments" beams=length(struc.beams) columns=length(struc.columns) struts=length(struc.struts)
+    
+    # Compute Voronoi tributary areas for columns
+    compute_column_tributaries!(struc)
+    
+    return struc
+end
+
+"""
+    compute_column_tributaries!(struc::BuildingStructure)
+
+Compute and store Voronoi vertex tributary areas on each Column.
+
+For each cell:
+1. Get the cell's corner vertices (column positions)
+2. Compute Voronoi clipped to the cell boundary
+3. Store per-cell area in `col.tributary_by_slab[cell_idx]`
+4. Store per-cell polygon in `col.tributary_polygons[cell_idx]` (for visualization)
+5. Sum contributions to get total `col.tributary_area`
+
+Note: Columns use their bottom vertex_idx, but floor cells have vertices at the floor 
+elevation. We match by (x,y) position to link columns to their supported floor areas.
+"""
+function compute_column_tributaries!(struc::BuildingStructure{T}) where T
+    isempty(struc.columns) && return struc
+    
+    skel = struc.skeleton
+    
+    # Build (x,y) → Column lookup (rounded to avoid FP precision issues)
+    # We use the column's vertex position (bottom of column) to get x,y
+    col_by_xy = Dict{Tuple{Float64, Float64}, Vector{Column{T}}}()
+    for col in struc.columns
+        c = Meshes.coords(skel.vertices[col.vertex_idx])
+        xy = (round(Float64(ustrip(u"m", c.x)), digits=6), 
+              round(Float64(ustrip(u"m", c.y)), digits=6))
+        push!(get!(col_by_xy, xy, Column{T}[]), col)
+        
+        # Reset tributary data
+        col.tributary_area = 0.0
+        empty!(col.tributary_by_slab)
+        empty!(col.tributary_polygons)
+    end
+    
+    # Process each cell
+    for (cell_idx, cell) in enumerate(struc.cells)
+        v_indices = skel.face_vertex_indices[cell.face_idx]
+        length(v_indices) < 3 && continue
+        
+        # Get cell elevation for matching columns
+        first_vert = skel.vertices[v_indices[1]]
+        cell_z = Float64(ustrip(u"m", Meshes.coords(first_vert).z))
+        
+        # Extract vertex positions as tuples (in meters)
+        col_positions = NTuple{2, Float64}[]
+        cell_xys = Tuple{Float64, Float64}[]
+        for vi in v_indices
+            c = Meshes.coords(skel.vertices[vi])
+            xy = (Float64(ustrip(u"m", c.x)), Float64(ustrip(u"m", c.y)))
+            push!(col_positions, xy)
+            push!(cell_xys, (round(xy[1], digits=6), round(xy[2], digits=6)))
+        end
+        
+        # Compute Voronoi within cell boundary (boundary = cell vertices)
+        tribs = StructuralSizer.compute_voronoi_tributaries(col_positions; floor_boundary=col_positions)
+        
+        # Store results on columns (matching by x,y position)
+        for (i, trib) in enumerate(tribs)
+            xy = cell_xys[i]
+            cols = get(col_by_xy, xy, nothing)
+            isnothing(cols) && continue
+            
+            # Find the column whose TOP is at or below this floor level
+            # (column that supports this floor)
+            matched_col = nothing
+            for col in cols
+                v_c = Meshes.coords(skel.vertices[col.vertex_idx])
+                col_bottom_z = Float64(ustrip(u"m", v_c.z))
+                # This column supports the floor if its top is at the floor elevation
+                # Column top = col_bottom_z + column height (L)
+                col_top_z = col_bottom_z + Float64(ustrip(u"m", col.base.L))
+                if abs(col_top_z - cell_z) < 0.1  # Within 10cm tolerance
+                    matched_col = col
+                    break
+                end
+            end
+            isnothing(matched_col) && continue
+            
+            # Store area and polygon
+            matched_col.tributary_by_slab[cell_idx] = trib.area
+            matched_col.tributary_polygons[cell_idx] = trib.polygon
+            matched_col.tributary_area += trib.area
+        end
+    end
+    
+    n_with_trib = count(c.tributary_area > 0 for c in struc.columns)
+    n_with_breakdown = count(!isempty(c.tributary_by_slab) for c in struc.columns)
+    @debug "Computed Voronoi tributary areas" total=n_with_trib per_cell=n_with_breakdown columns=length(struc.columns)
+    
     return struc
 end
 
@@ -412,6 +509,12 @@ end
 
 Discrete, simultaneous catalog-based sizing for physical members using a MIP.
 Respects `Member.group_id` by solving at the group level.
+
+!!! warning "Steel-Specific Implementation"
+    This function is currently hardcoded for steel members using `AISCChecker` and
+    `AsapToolkit.toASAPframe`. To support other materials (concrete, timber), the
+    design checker and ASAP section conversion need to be parameterized by material.
+    See `StructuralSizer` for the generic checker interface.
 
 # Arguments
 - `deflection_limit::Union{Nothing, Real}=nothing`: Optional deflection limit as a ratio.

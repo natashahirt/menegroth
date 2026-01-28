@@ -33,6 +33,40 @@ function get_cell_spans(skel::BuildingSkeleton{T}, face_idx::Int;
     )
 end
 
+"""
+    classify_cell_position(skel, face_idx) -> Symbol
+
+Classify cell position based on how many boundary edges it has.
+- 2+ boundary edges → :corner
+- 1 boundary edge → :edge
+- 0 boundary edges → :interior
+
+A boundary edge is one that belongs to only one face (building perimeter).
+"""
+function classify_cell_position(skel::BuildingSkeleton, face_idx::Int)
+    face_edges = skel.face_edge_indices[face_idx]
+    
+    # Count edges that are on the building boundary
+    # Boundary edges only belong to one face
+    boundary_count = 0
+    for edge_idx in face_edges
+        # Count how many faces contain this edge
+        faces_with_edge = count(face_edges_list -> edge_idx in face_edges_list, 
+                                skel.face_edge_indices)
+        if faces_with_edge == 1
+            boundary_count += 1
+        end
+    end
+    
+    if boundary_count >= 2
+        return :corner
+    elseif boundary_count == 1
+        return :edge
+    else
+        return :interior
+    end
+end
+
 """Initialize cells from skeleton faces (geometry + service SDL/LL)."""
 function initialize_cells!(struc::BuildingStructure{T, A, P}) where {T, A, P}
     skel = struc.skeleton
@@ -57,13 +91,17 @@ function initialize_cells!(struc::BuildingStructure{T, A, P}) where {T, A, P}
             polygon = skel.faces[face_idx]
             area = Meshes.measure(polygon)
             spans = get_cell_spans(skel, face_idx)
+            position = classify_cell_position(skel, face_idx)
             
-            cell = Cell(face_idx, area, spans, sdl, ll)
+            cell = Cell(face_idx, area, spans, sdl, ll; position=position)
             push!(struc.cells, cell)
         end
     end
     
-    @debug "Initialized $(length(struc.cells)) cells"
+    n_corner = count(c.position == :corner for c in struc.cells)
+    n_edge = count(c.position == :edge for c in struc.cells)
+    n_interior = count(c.position == :interior for c in struc.cells)
+    @debug "Initialized $(length(struc.cells)) cells" corner=n_corner edge=n_edge interior=n_interior
 end
 
 """
@@ -243,14 +281,27 @@ function _apply_slab_results!(struc, slab_specs, group_results, group_sw, group_
             cell.floor_type = spec.floor_type
         end
 
+        # Derive slab position from its cells (most exterior wins)
+        slab_position = _derive_slab_position(struc, spec.cell_indices)
+
         # Compute floor area and material volumes
         floor_area = sum(struc.cells[i].area for i in spec.cell_indices)
         volumes = _compute_slab_volumes(result, floor_area, primary_material, opts)
 
         slab = Slab(spec.cell_indices, result, spans_gov; 
-                    floor_type=spec.floor_type, group_id=gid, volumes=volumes)
+                    floor_type=spec.floor_type, position=slab_position, 
+                    group_id=gid, volumes=volumes)
         push!(struc.slabs, slab)
     end
+end
+
+"""Derive slab position from its cells (corner > edge > interior)."""
+function _derive_slab_position(struc, cell_indices)
+    positions = [struc.cells[i].position for i in cell_indices]
+    # Priority: corner > edge > interior
+    :corner in positions && return :corner
+    :edge in positions && return :edge
+    return :interior
 end
 
 """Compute material volumes for a slab from its result and floor area."""

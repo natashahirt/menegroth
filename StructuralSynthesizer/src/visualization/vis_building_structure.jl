@@ -51,7 +51,8 @@ Karamba-style visualization for a BuildingStructure.
   - `:displacement_global` - total displacement magnitude (includes rigid body motion)
   - `:displacement_local` - chord-relative deflection (member bending only, excludes rigid body motion)
   - `:stress` - combined stress approximation
-  - `:tributary` - show tributary area polygons for each cell (beams shown in black)
+  - `:tributary_edge` - show edge tributary areas (straight skeleton, for beam loads)
+  - `:tributary_vertex` - show vertex tributary areas (Voronoi, for column loads)
 - `theme::Union{Nothing,Symbol}=nothing`: Apply StructuralPlots theme (`:light`, `:dark`, or `nothing` for default)
 - `show_nodes::Bool=true`: Whether to show nodes.
 - `show_supports::Bool=true`: Whether to show supports.
@@ -124,12 +125,13 @@ function visualize(struc::BuildingStructure;
 
     elseif mode == :deflected
         if show_original_geometry
-            # Draw original geometry as thin dotted lines for reference
+            # Draw original geometry as thin faded lines for reference
             for element in model.elements
                 # get_drawing_pts returns positions in meters (raw Float64)
                 p1, p2 = get_drawing_pts(element, 0.0)
                 GLMakie.lines!(ax, [p1[1], p2[1]], [p1[2], p2[2]], [p1[3], p2[3]], 
-                            color = (:black, 0.75), linewidth = 0.5, linestyle = :dash)
+                            color = (:black, 0.4), linewidth = 0.5, linestyle = :dash,
+                            transparency = true)
             end
             push!(leg_elems, GLMakie.LineElement(color = (:black, 0.4), linewidth = 1, linestyle = :dot))
             push!(leg_labels, "Original Geometry")
@@ -215,8 +217,8 @@ function visualize(struc::BuildingStructure;
         end
 
         # Plot deflected elements
-        # Note: :tributary coloring only applies to :original mode, so treat it as :none here
-        use_coloring = color_by ∉ (:none, :tributary) && !isempty(all_colors)
+        # Note: tributary coloring only applies to :original mode, so treat it as :none here
+        use_coloring = color_by ∉ (:none, :tributary_edge, :tributary_vertex) && !isempty(all_colors)
         
         color_idx = 1
         for pts in all_points
@@ -238,8 +240,10 @@ function visualize(struc::BuildingStructure;
     end
 
     # 1b. Tributary Areas (works with both original and deflected modes)
-    if color_by == :tributary
+    if color_by == :tributary_edge
         _draw_tributary_areas!(ax, struc, leg_elems, leg_labels)
+    elseif color_by == :tributary_vertex
+        _draw_vertex_tributary_areas!(ax, struc, leg_elems, leg_labels)
     end
 
     # 2. Nodes
@@ -423,9 +427,81 @@ function _draw_tributary_areas!(ax, struc::BuildingStructure, leg_elems, leg_lab
         end
     end
     
-    # Add legend entry
+    # Add legend entry using the first harmonic color
     if !isempty(drawn_edges)
-        push!(leg_elems, GLMakie.PolyElement(color = (:coral, 0.6), strokecolor = :coral, strokewidth = 1))
-        push!(leg_labels, "Tributary Areas")
+        push!(leg_elems, GLMakie.PolyElement(color = (colors[1], 0.6), strokecolor = colors[1], strokewidth = 1))
+        push!(leg_labels, "Edge Tributary Areas")
+    end
+end
+
+"""Draw Voronoi vertex tributary areas in 3D using stored polygons on columns."""
+function _draw_vertex_tributary_areas!(ax, struc::BuildingStructure, leg_elems, leg_labels)
+    skel = struc.skeleton
+    colors = StructuralPlots.harmonic
+    
+    drawn_any = false
+    
+    # Draw stored polygons for each column
+    for col in struc.columns
+        isempty(col.tributary_polygons) && continue  # Skip columns without tributaries
+        
+        # Color by column position
+        color = if col.position == :corner
+            colors[1]
+        elseif col.position == :edge
+            colors[2]
+        else
+            colors[3]
+        end
+        
+        # Draw each per-cell polygon
+        for (cell_idx, polygon) in col.tributary_polygons
+            isempty(polygon) && continue
+            
+            # Get z-coordinate from the cell's face
+            z_coord = 0.0
+            if cell_idx <= length(struc.cells)
+                face_idx = struc.cells[cell_idx].face_idx
+                v_indices = skel.face_vertex_indices[face_idx]
+                if !isempty(v_indices)
+                    first_vert = skel.vertices[v_indices[1]]
+                    z_coord = Float64(ustrip(u"m", Meshes.coords(first_vert).z))
+                end
+            end
+            
+            # Convert to 3D points
+            pts_3d = [GLMakie.Point3f(v[1], v[2], z_coord) for v in polygon]
+            length(pts_3d) < 3 && continue
+            
+            # Create triangulated mesh
+            n_pts = length(pts_3d)
+            tri_faces = [GLMakie.TriangleFace(1, k, k+1) for k in 2:n_pts-1]
+            
+            mesh = GLMakie.GeometryBasics.Mesh(pts_3d, tri_faces)
+            GLMakie.mesh!(ax, mesh, color = (color, 0.5), transparency = true)
+            
+            # Outline
+            outline = vcat(pts_3d, [pts_3d[1]])
+            GLMakie.lines!(ax, outline, color = color, linewidth = 1.5)
+            
+            drawn_any = true
+        end
+        
+        # Draw column marker at column vertex z
+        v = skel.vertices[col.vertex_idx]
+        c = Meshes.coords(v)
+        z_col = Float64(ustrip(u"m", c.z))
+        pt = GLMakie.Point3f(ustrip(u"m", c.x), ustrip(u"m", c.y), z_col)
+        GLMakie.scatter!(ax, [pt], color = :black, markersize = 10, marker = :rect)
+    end
+    
+    # Add legend entries
+    if drawn_any
+        push!(leg_elems, GLMakie.PolyElement(color = (colors[1], 0.5), strokecolor = colors[1], strokewidth = 1))
+        push!(leg_labels, "Corner Column Trib")
+        push!(leg_elems, GLMakie.PolyElement(color = (colors[2], 0.5), strokecolor = colors[2], strokewidth = 1))
+        push!(leg_labels, "Edge Column Trib")
+        push!(leg_elems, GLMakie.PolyElement(color = (colors[3], 0.5), strokecolor = colors[3], strokewidth = 1))
+        push!(leg_labels, "Interior Column Trib")
     end
 end

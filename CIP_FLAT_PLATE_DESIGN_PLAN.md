@@ -410,83 +410,110 @@ end
 
 ## Slab Type Hierarchy (Extensibility)
 
-The workflow is designed to be extensible to all slab types and materials.
+The workflow is designed to be extensible to all slab types and materials using a **traits pattern**.
 
-### Structural Behavior Types (Material-Agnostic)
+### Type Hierarchy (Material-Based)
 
-```julia
-abstract type AbstractSlabType end
-
-# ═══════════════════════════════════════════════════════════════════════════
-# Beamless slabs (αf = 0) - slab spans directly to columns
-# ═══════════════════════════════════════════════════════════════════════════
-abstract type BeamlessSlabType <: AbstractSlabType end
-
-struct FlatPlate <: BeamlessSlabType end      # Uniform thickness ← CURRENT FOCUS
-struct FlatSlab <: BeamlessSlabType           # +drop panels
-    drop_panel::DropPanelSpec
-end
-struct OneWay <: BeamlessSlabType end         # One-way spanning
-
-@kwdef struct DropPanelSpec
-    width::Unitful.Length    # Typically l/3
-    depth::Unitful.Length    # Additional depth below slab soffit
-end
-
-# ═══════════════════════════════════════════════════════════════════════════
-# Beamed slabs (αf > 0) - beams on column lines
-# ═══════════════════════════════════════════════════════════════════════════
-abstract type BeamedSlabType <: AbstractSlabType end
-
-struct TwoWayBeamed <: BeamedSlabType end     # Solid slab with beams
-struct WaffleSlab <: BeamedSlabType           # Two-way joist (ribbed)
-    rib_spacing::Unitful.Length
-    rib_width::Unitful.Length
-    void_depth::Unitful.Length
-end
-```
-
-### Material Types
+The primary hierarchy is organized by **material** (for self-weight, E, density calculations):
 
 ```julia
-abstract type SlabMaterial end
+abstract type AbstractFloorSystem end
 
 # ═══════════════════════════════════════════════════════════════════════════
-# Concrete Materials (ACI 318)
+# Concrete floors (ACI 318)
 # ═══════════════════════════════════════════════════════════════════════════
-abstract type ConcreteMaterial <: SlabMaterial end
-struct NormalWeightConcrete <: ConcreteMaterial
-    fc::Unitful.Pressure
-end
-struct LightweightConcrete <: ConcreteMaterial
-    fc::Unitful.Pressure
-    λ::Float64  # Lightweight factor
-end
+abstract type AbstractConcreteSlab <: AbstractFloorSystem end
+
+struct OneWay <: AbstractConcreteSlab end       # One-way spanning
+struct TwoWay <: AbstractConcreteSlab end       # Two-way spanning to beams
+struct FlatPlate <: AbstractConcreteSlab end    # Beamless, uniform ← CURRENT FOCUS
+struct FlatSlab <: AbstractConcreteSlab end     # Beamless + drop panels
+struct Waffle <: AbstractConcreteSlab end       # Two-way joist (ribbed)
+struct PTBanded <: AbstractConcreteSlab end     # Post-tensioned banded
 
 # ═══════════════════════════════════════════════════════════════════════════
-# Timber Materials (NDS)
+# Timber floors (NDS)
 # ═══════════════════════════════════════════════════════════════════════════
-abstract type TimberMaterial <: SlabMaterial end
-struct CLT <: TimberMaterial                  # Cross-Laminated Timber
-    layup::Symbol                             # :3ply, :5ply, :7ply, :9ply
-    grade::Symbol                             # :E1, :V2, etc.
-    manufacturer::String                      # For panel capacities
-end
-struct NLT <: TimberMaterial                  # Nail-Laminated Timber
-    lumber_size::Symbol                       # :2x6, :2x8, :2x10, :2x12
-    species::Symbol                           # :SPF, :DF, :SYP
-end
-struct GLT <: TimberMaterial                  # Glue-Laminated Timber
-    grade::Symbol
-    width::Unitful.Length
-end
+abstract type AbstractTimberFloor <: AbstractFloorSystem end
+
+struct CLT <: AbstractTimberFloor end           # Cross-Laminated Timber
+struct DLT <: AbstractTimberFloor end           # Dowel-Laminated Timber
+struct NLT <: AbstractTimberFloor end           # Nail-Laminated Timber
+struct MassTimberJoist <: AbstractTimberFloor end
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Steel floors
+# ═══════════════════════════════════════════════════════════════════════════
+abstract type AbstractSteelFloor <: AbstractFloorSystem end
+
+struct CompositeDeck <: AbstractSteelFloor end
+struct NonCompositeDeck <: AbstractSteelFloor end
+struct JoistRoofDeck <: AbstractSteelFloor end
 ```
+
+### Spanning Behavior Traits (Cross-Cutting)
+
+**Spanning behavior** is handled via traits, allowing cross-material dispatch without multiple inheritance:
+
+```julia
+# ═══════════════════════════════════════════════════════════════════════════
+# Trait types
+# ═══════════════════════════════════════════════════════════════════════════
+abstract type SpanningBehavior end
+struct OneWaySpanning <: SpanningBehavior end   # Loads → edges ⊥ span
+struct TwoWaySpanning <: SpanningBehavior end   # Loads → all edges
+struct BeamlessSpanning <: SpanningBehavior end # Loads → columns directly
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Trait function: spanning_behavior(ft) → SpanningBehavior
+# This is INTRINSIC to the type and cannot be overridden by options
+# ═══════════════════════════════════════════════════════════════════════════
+spanning_behavior(::OneWay) = OneWaySpanning()
+spanning_behavior(::CLT) = OneWaySpanning()
+spanning_behavior(::NLT) = OneWaySpanning()
+spanning_behavior(::CompositeDeck) = OneWaySpanning()
+
+spanning_behavior(::TwoWay) = TwoWaySpanning()
+spanning_behavior(::Waffle) = TwoWaySpanning()
+spanning_behavior(::PTBanded) = TwoWaySpanning()
+
+spanning_behavior(::FlatPlate) = BeamlessSpanning()
+spanning_behavior(::FlatSlab) = BeamlessSpanning()
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Downstream dispatch on traits
+# ═══════════════════════════════════════════════════════════════════════════
+load_distribution(ft) = load_distribution(spanning_behavior(ft))
+load_distribution(::OneWaySpanning) = DISTRIBUTION_ONE_WAY
+load_distribution(::TwoWaySpanning) = DISTRIBUTION_TWO_WAY
+load_distribution(::BeamlessSpanning) = DISTRIBUTION_POINT
+
+default_tributary_axis(ft, spans) = default_tributary_axis(spanning_behavior(ft), spans)
+default_tributary_axis(::OneWaySpanning, spans) = spans.axis   # Directed
+default_tributary_axis(::TwoWaySpanning, spans) = nothing      # Isotropic
+default_tributary_axis(::BeamlessSpanning, spans) = nothing    # Isotropic
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Convenience predicates
+# ═══════════════════════════════════════════════════════════════════════════
+is_one_way(ft) = spanning_behavior(ft) isa OneWaySpanning
+is_two_way(ft) = spanning_behavior(ft) isa TwoWaySpanning
+is_beamless(ft) = spanning_behavior(ft) isa BeamlessSpanning
+requires_column_tributaries(ft) = is_beamless(ft)
+```
+
+### Why Traits?
+
+1. **Cross-cutting concerns**: CLT and OneWay both use `OneWaySpanning`, despite different materials
+2. **Extensibility**: Add new types by defining `spanning_behavior(::NewType)` 
+3. **No options override**: Spanning behavior is intrinsic, not user-configurable
+4. **Future traits**: Can add `AnalysisMethod`, `ReinforcementType`, etc. independently
 
 ### Double Dispatch: Type × Material
 
 ```julia
-# Sizing dispatches on BOTH slab type AND material
-function size_floor(slab_type::AbstractSlabType, span, material::SlabMaterial; kwargs...)
+# Sizing dispatches on BOTH floor type AND material
+function size_floor(floor_type::AbstractFloorSystem, span, material::AbstractMaterial; kwargs...)
 
 # ═══════════════════════════════════════════════════════════════════════════
 # Thickness rules - dispatch on type AND material
@@ -550,103 +577,155 @@ result = size_floor(OneWay(), 16u"ft", nlt_mat; sdl=15u"psf", ll=40u"psf")
 | Fire rating          |                        | ✅ (cover vs charring)   |
 | Column sizing        | ✅ (workflow)          | Material-specific checks |
 
-### Shared vs Type-Specific Methods
+### Shared vs Trait-Dispatched vs Type-Specific Methods
 
 ```julia
 # ═══════════════════════════════════════════════════════════════════════════
-# SHARED across ALL types (inherited from AbstractSlabType)
+# SHARED across ALL types (dispatch on AbstractFloorSystem)
 # ═══════════════════════════════════════════════════════════════════════════
-# - Voronoi vertex tributaries
 # - Edge tributaries (straight skeleton)
 # - CellGroup/SlabGroup caching
 # - Binary search thickness optimization
 # - ASAP frame integration
 # - Column sizing from reactions
-# - Reinforcement As calculation
 
 # ═══════════════════════════════════════════════════════════════════════════
-# SHARED across BeamlessSlabType (αf = 0)
+# TRAIT-DISPATCHED (dispatch on SpanningBehavior)
 # ═══════════════════════════════════════════════════════════════════════════
-moment_distribution(::BeamlessSlabType, M0, span_type) = MDDM_COEFFICIENTS[span_type]
+
+# Load distribution behavior
+load_distribution(ft) = load_distribution(spanning_behavior(ft))
+load_distribution(::OneWaySpanning) = DISTRIBUTION_ONE_WAY
+load_distribution(::TwoWaySpanning) = DISTRIBUTION_TWO_WAY
+load_distribution(::BeamlessSpanning) = DISTRIBUTION_POINT
+
+# Tributary calculation method
+default_tributary_axis(ft, spans) = default_tributary_axis(spanning_behavior(ft), spans)
+default_tributary_axis(::OneWaySpanning, spans) = spans.axis  # Directed
+default_tributary_axis(::TwoWaySpanning, spans) = nothing     # Isotropic
+default_tributary_axis(::BeamlessSpanning, spans) = nothing   # Isotropic
+
+# Voronoi vertex tributaries (column loads for beamless only)
+requires_column_tributaries(ft) = is_beamless(ft)
+
+# Moment distribution (M-DDM for beamless, ACI tables for beamed)
+moment_distribution(ft, M0, span_type) = moment_distribution(spanning_behavior(ft), M0, span_type)
+moment_distribution(::BeamlessSpanning, M0, span_type) = M0 * MDDM_COEFFICIENTS[span_type]
+moment_distribution(::TwoWaySpanning, M0, span_type, αf, l2_l1) = M0 * ACI_TABLE[span_type, αf, l2_l1]
 
 # ═══════════════════════════════════════════════════════════════════════════
-# TYPE-SPECIFIC (dispatch per type)
+# TYPE-SPECIFIC (dispatch per concrete type)
 # ═══════════════════════════════════════════════════════════════════════════
 
 # Minimum thickness (ACI 8.3.1)
 min_thickness(::FlatPlate, ln) = ln / 33
 min_thickness(::FlatSlab, ln, drop) = ln / 36   # Thinner with drops
-min_thickness(::TwoWayBeamed, ln, αf) = ...     # Table 8.3.1.2
-min_thickness(::WaffleSlab, ln) = ln / 21
+min_thickness(::TwoWay, ln, αf) = ...           # Table 8.3.1.2
+min_thickness(::Waffle, ln) = ln / 21
 
 # EFM element sections
 efm_section(::FlatPlate, width, h) = slab_beam_section(width, h)
 efm_section(::FlatSlab, width, h, drop) = slab_beam_with_drop(width, h, drop)
-efm_section(::TwoWayBeamed, beam_section) = beam_section  # Actual beam
-efm_section(::WaffleSlab, width, h, ribs) = ribbed_section(width, h, ribs)
+efm_section(::TwoWay, beam_section) = beam_section  # Actual beam
+efm_section(::Waffle, width, h, ribs) = ribbed_section(width, h, ribs)
 
-# Punching shear perimeter
+# Punching shear perimeter (beamless only)
 punching_perimeter(::FlatPlate, c, d) = 4(c + d)
 punching_perimeter(::FlatSlab, c, d, drop) = perimeter_with_drop(c, d, drop)
 
 # Self-weight
 self_weight(::FlatPlate, h, ρ) = h * ρ
 self_weight(::FlatSlab, h, drop, ρ) = ...       # Thicker at drops
-self_weight(::WaffleSlab, h, ribs, ρ) = ...     # Accounts for voids
-
-# Moment distribution coefficients
-moment_coefficients(::BeamlessSlabType) = MDDM_COEFFICIENTS  # αf = 0
-moment_coefficients(::BeamedSlabType, αf, l2_l1) = ...       # ACI Table 8.10.5
+self_weight(::Waffle, h, ribs, ρ) = ...         # Accounts for voids
 ```
 
-### Adding a New Slab Type
+### Adding a New Floor Type
 
 ```julia
-# Example: Adding Post-Tensioned Banded Slab
-struct PTBanded <: BeamlessSlabType
-    tendon_profile::TendonSpec
-    band_width::Unitful.Length
+# Example 1: Adding Mass Timber Joist (one-way spanning timber)
+struct MassTimberJoist <: AbstractTimberFloor end
+
+# Step 1: Define spanning behavior (one method!)
+spanning_behavior(::MassTimberJoist) = OneWaySpanning()
+
+# Now all trait-dispatched methods work automatically:
+#   load_distribution(MassTimberJoist()) → DISTRIBUTION_ONE_WAY ✓
+#   is_one_way(MassTimberJoist()) → true ✓
+#   requires_column_tributaries(MassTimberJoist()) → false ✓
+
+# Step 2: Implement type-specific methods
+min_thickness(::MassTimberJoist, span) = span / 20  # NDS rule
+self_weight(::MassTimberJoist, d, spacing, ρ) = ...
+
+
+# Example 2: Adding Voided Slab (two-way spanning concrete)
+struct VoidedSlab <: AbstractConcreteSlab
+    void_ratio::Float64
 end
 
-# Implement 5 required methods:
-min_thickness(::PTBanded, ln) = ln / 45  # PT allows thinner
-efm_section(::PTBanded, ...) = ...
-punching_perimeter(::PTBanded, ...) = ...
-self_weight(::PTBanded, ...) = ...
-moment_coefficients(::PTBanded) = ...  # Different for PT
+spanning_behavior(::VoidedSlab) = TwoWaySpanning()
 
-# Everything else (tributaries, grouping, ASAP, columns) works automatically!
+min_thickness(::VoidedSlab, ln) = ln / 30
+self_weight(vs::VoidedSlab, h, ρ) = h * ρ * (1 - vs.void_ratio)
 ```
 
 ### Full Architecture Diagram
 
 ```
-SlabDesignSystem
-│
-├── RCSlabSystem (current - dispatch on material for calcs)
-│   │
-│   ├── BeamlessSlabType (αf = 0)
-│   │   ├── FlatPlate    × {Concrete, CLT}        ← Current focus
-│   │   ├── FlatSlab     × {Concrete}
-│   │   └── OneWay       × {Concrete, NLT, CLT}
-│   │
-│   └── BeamedSlabType (αf > 0)
-│       ├── TwoWayBeamed × {Concrete}
-│       └── WaffleSlab   × {Concrete}
-│
-├── PTSlabSystem (future - different paradigm)
-│   │   Load balancing, stress checks, tendon layout
-│   ├── PTBanded
-│   └── PTFlatPlate
-│
-├── CompositeSlabSystem (future)
-│   │   Metal deck + concrete, shored/unshored
-│   └── MetalDeckComposite
-│
-└── PrecastSlabSystem (future - selection not design)
-    ├── HollowCore
-    ├── DoubleTee
-    └── MassTimberPanel (catalog selection)
+                        AbstractFloorSystem
+                               │
+        ┌──────────────────────┼──────────────────────┐
+        │                      │                      │
+AbstractConcreteSlab   AbstractTimberFloor    AbstractSteelFloor
+        │                      │                      │
+   ┌────┴────┐            ┌────┴────┐           ┌────┴────┐
+   │         │            │         │           │         │
+FlatPlate  TwoWay       CLT       NLT      Composite  NonComposite
+FlatSlab   Waffle       DLT    MassTimberJoist  JoistRoof
+OneWay     PTBanded
+
+═════════════════════════════════════════════════════════════════════
+
+                       SpanningBehavior (Trait)
+                              │
+           ┌──────────────────┼──────────────────┐
+           │                  │                  │
+    OneWaySpanning     TwoWaySpanning     BeamlessSpanning
+           │                  │                  │
+    spanning_behavior()  spanning_behavior()  spanning_behavior()
+    returns for:         returns for:         returns for:
+    - OneWay             - TwoWay             - FlatPlate
+    - CLT, DLT, NLT      - Waffle             - FlatSlab
+    - CompositeDeck      - PTBanded
+    - HollowCore
+    - MassTimberJoist
+```
+
+### Method Resolution Example
+
+```julia
+ft = FlatPlate()
+
+# Type hierarchy path (for material properties):
+#   ft isa FlatPlate <: AbstractConcreteSlab <: AbstractFloorSystem
+
+# Trait path (for spanning behavior):
+#   spanning_behavior(ft) → BeamlessSpanning()
+
+# Method calls:
+load_distribution(ft)
+#   → load_distribution(spanning_behavior(ft))
+#   → load_distribution(BeamlessSpanning())
+#   → DISTRIBUTION_POINT
+
+requires_column_tributaries(ft)
+#   → is_beamless(ft)
+#   → spanning_behavior(ft) isa BeamlessSpanning
+#   → true
+
+self_weight(ft, h, ρ)
+#   → dispatches directly on FlatPlate (type-specific)
+#   → h * ρ
 ```
 
 ### Implementation Priority
@@ -1334,12 +1413,18 @@ Key values from StructurePoint Flat Plate Example for validation:
 - [X] `shell-elements`: Added ShellElement to ASAP for diaphragm modeling
 - [X] `diaphragm-loads`: Support for distributed loads on shell elements
 
-### Phase 1: Slab Type Hierarchy ✅ ALREADY EXISTS
+### Phase 1: Slab Type Hierarchy ✅ COMPLETE
 
-- [X] `slab-type-hierarchy`: Floor type hierarchy already exists in `StructuralSizer/src/slabs/types.jl`
+- [X] `slab-type-hierarchy`: Floor type hierarchy exists in `StructuralSizer/src/slabs/types.jl`
   - `AbstractFloorSystem` → `AbstractConcreteSlab` → `FlatPlate`, `FlatSlab`, `OneWay`, `TwoWay`, etc.
   - Material-based organization (Concrete/Steel/Timber) instead of Beamless/Beamed
   - Dispatch works directly on `FlatPlate`, `TwoWay`, etc.
+- [X] `spanning-behavior-trait`: Implemented `SpanningBehavior` trait system
+  - `SpanningBehavior` abstract type with `OneWaySpanning`, `TwoWaySpanning`, `BeamlessSpanning` subtypes
+  - `spanning_behavior(ft)` returns intrinsic behavior (cannot be overridden by options)
+  - `is_one_way(ft)`, `is_two_way(ft)`, `is_beamless(ft)`, `requires_column_tributaries(ft)` helpers
+  - `load_distribution()` and `default_tributary_axis()` now dispatch on traits
+  - Test file: `StructuralSizer/test/slabs/test_spanning_behavior.jl` (107 tests)
 
 ### Phase 1: Replace cip_aci.jl
 

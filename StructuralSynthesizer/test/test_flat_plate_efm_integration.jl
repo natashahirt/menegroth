@@ -27,6 +27,7 @@ using Test
 using Logging
 using Unitful
 using Unitful: @u_str
+using Asap  # For custom units (psf, kip, etc.)
 import Meshes
 
 # Load packages

@@ -94,6 +94,10 @@ function initialize_cells!(struc::BuildingStructure{T, A, P}) where {T, A, P}
             position = classify_cell_position(skel, face_idx)
             
             cell = Cell(face_idx, area, spans, sdl, ll; position=position)
+            # Set floor_type for grade cells (they don't need slab design)
+            if grp_name == :grade
+                cell.floor_type = :grade
+            end
             push!(struc.cells, cell)
         end
     end
@@ -105,17 +109,42 @@ function initialize_cells!(struc::BuildingStructure{T, A, P}) where {T, A, P}
 end
 
 """
-Initialize slabs from cells using `StructuralSizer.size_floor`.
+    initialize_slabs!(struc; material, floor_type, floor_kwargs, cell_groupings, slab_group_ids)
 
-Notes:
+Initialize slabs from cells.
+
+# Cell Grouping Options
+
+`cell_groupings` controls how cells are combined into physical slabs:
+
+- `:auto` (default): Use the grouping mode from floor type options (e.g., `FlatPlateOptions.grouping`)
+- `:individual`: One slab per cell (traditional behavior)
+- `:by_floor`: Group all cells on each floor into a single continuous slab
+- `:building_wide`: Group all cells into one slab (for PT post-tensioned systems)
+- `Vector{Vector{Int}}`: Explicit cell index groupings
+
+# Examples
+
+```julia
+# Use default from FlatPlateOptions (grouping = :by_floor)
+initialize!(struc; floor_type = :flat_plate)
+
+# Override to individual slabs per cell
+initialize!(struc; floor_type = :flat_plate, cell_groupings = :individual)
+
+# Explicit groupings
+initialize!(struc; cell_groupings = [[1,2,3], [4,5,6]])
+```
+
+# Notes
 - `Cell` stores **service** `sdl`/`live_load`. Slab sizing computes service self-weight.
-- The `span` passed to `size_floor(ft, span, ...)` depends on floor type; see `_sizing_span`.
+- The `span` passed to sizing depends on floor type; see `_sizing_span`.
 """
 function initialize_slabs!(struc::BuildingStructure{T};
                            material::AbstractMaterial=NWC_4000,
                            floor_type::Symbol=:auto,
                            floor_kwargs::NamedTuple=NamedTuple(),
-                           cell_groupings::Union{Nothing, Vector{Vector{Int}}}=nothing,
+                           cell_groupings::Union{Symbol, Vector{Vector{Int}}}=:auto,
                            slab_group_ids::Union{Nothing, AbstractVector}=nothing) where T
     empty!(struc.slabs)
     
@@ -123,8 +152,12 @@ function initialize_slabs!(struc::BuildingStructure{T};
     empty!(struc.cell_groups)
     clear_tributary_cache!(struc)
     
+    # Resolve cell_groupings to actual indices
+    opts = get(floor_kwargs, :options, StructuralSizer.FloorOptions())
+    resolved_groupings = _resolve_cell_groupings(struc, cell_groupings, floor_type, opts)
+    
     # 1. Build per-slab "specs"
-    slab_specs = _build_slab_specs(struc, floor_type, cell_groupings, slab_group_ids)
+    slab_specs = _build_slab_specs(struc, floor_type, resolved_groupings, slab_group_ids)
 
     # 2. Assign fallback deterministic group IDs if needed
     _assign_deterministic_group_ids!(slab_specs)
@@ -158,6 +191,9 @@ function _build_slab_specs(struc, floor_type, cell_groupings, slab_group_ids)
     if isnothing(cell_groupings)
         # Default: 1 slab per cell
         for (cell_idx, cell) in enumerate(struc.cells)
+            # Skip grade cells (ground floor doesn't need slab design)
+            cell.floor_type == :grade && continue
+            
             spans = cell.spans
             
             # Use primary/secondary for floor type inference
@@ -172,7 +208,11 @@ function _build_slab_specs(struc, floor_type, cell_groupings, slab_group_ids)
     else
         # Explicit groupings: combine cells into physical slabs (PT, etc.)
         for cell_indices in cell_groupings
-            cells = [struc.cells[i] for i in cell_indices]
+            # Filter out grade cells from groupings
+            filtered_indices = filter(i -> struc.cells[i].floor_type != :grade, cell_indices)
+            isempty(filtered_indices) && continue  # Skip if all cells are grade
+            
+            cells = [struc.cells[i] for i in filtered_indices]
 
             # Compute governing spans across all cells in this slab
             cell_spans = [c.spans for c in cells]
@@ -185,15 +225,114 @@ function _build_slab_specs(struc, floor_type, cell_groupings, slab_group_ids)
             ft_sym = floor_type == :auto ? :pt_banded : floor_type
 
             # Group id: must be consistent across all cells participating in this physical slab
-            gid = _resolve_group_id_for_cell_set(slab_group_ids, cell_indices)
+            gid = _resolve_group_id_for_cell_set(slab_group_ids, filtered_indices)
 
-            push!(slab_specs, (; cell_indices=cell_indices,
+            push!(slab_specs, (; cell_indices=filtered_indices,
                               spans_gov=spans_gov,
                               sdl_gov=sdl_gov, live_gov=live_gov,
                               floor_type=ft_sym, group_id=gid))
         end
     end
     return slab_specs
+end
+
+"""
+    _resolve_cell_groupings(struc, groupings, floor_type, opts) -> Union{Nothing, Vector{Vector{Int}}}
+
+Resolve cell_groupings parameter to actual cell index vectors.
+
+- `:auto` → Use floor type options to determine grouping mode
+- `:individual` → `nothing` (default: 1 slab per cell)
+- `:by_floor` → Group all cells on each floor
+- `:building_wide` → All cells in one slab
+- `Vector{Vector{Int}}` → Pass through as-is
+"""
+function _resolve_cell_groupings(struc::BuildingStructure, groupings::Symbol, 
+                                  floor_type::Symbol, opts::StructuralSizer.FloorOptions)
+    mode = if groupings == :auto
+        _get_grouping_mode(floor_type, opts)
+    else
+        groupings
+    end
+    
+    @debug "Resolving cell groupings" input=groupings floor_type resolved_mode=mode
+    
+    if mode == :individual
+        return nothing  # Default behavior: 1 slab per cell
+    elseif mode == :by_floor
+        result = _group_cells_by_floor(struc)
+        @debug "Auto-grouped cells by floor" n_groups=length(result) cells_per_group=[length(g) for g in result]
+        return result
+    elseif mode == :building_wide
+        # All non-grade cells in one slab
+        all_cells = [i for (i, c) in enumerate(struc.cells) if c.floor_type != :grade]
+        @debug "Building-wide grouping" n_cells=length(all_cells)
+        return [all_cells]
+    else
+        error("Unknown cell_groupings mode: $mode. Use :auto, :individual, :by_floor, :building_wide, or explicit Vector{Vector{Int}}.")
+    end
+end
+
+# Pass-through for explicit groupings
+function _resolve_cell_groupings(struc::BuildingStructure, groupings::Vector{Vector{Int}}, 
+                                  floor_type::Symbol, opts::StructuralSizer.FloorOptions)
+    return groupings
+end
+
+"""
+    _get_grouping_mode(floor_type, opts) -> Symbol
+
+Get the default slab grouping mode from floor type options.
+Returns :individual, :by_floor, or :building_wide.
+"""
+function _get_grouping_mode(floor_type::Symbol, opts::StructuralSizer.FloorOptions)
+    # Check floor-type-specific options for grouping setting
+    if floor_type == :flat_plate || floor_type == :flat_slab
+        return opts.flat_plate.grouping
+    elseif floor_type == :pt_banded
+        # PT typically groups by floor
+        return :by_floor
+    else
+        # Default: individual slabs per cell
+        return :individual
+    end
+end
+
+"""
+    _group_cells_by_floor(struc) -> Vector{Vector{Int}}
+
+Group cells by their floor/story level for continuous slab design.
+Returns a vector of cell index vectors, one per floor.
+Skips grade cells (ground level).
+"""
+function _group_cells_by_floor(struc::BuildingStructure)
+    skel = struc.skeleton
+    
+    # Build reverse lookup: face_idx → story_idx
+    face_to_story = Dict{Int, Int}()
+    for (story_idx, story) in skel.stories
+        for face_idx in story.faces
+            face_to_story[face_idx] = story_idx
+        end
+    end
+    
+    # Group cells by story
+    story_cells = Dict{Int, Vector{Int}}()
+    
+    for (cell_idx, cell) in enumerate(struc.cells)
+        # Skip grade cells
+        cell.floor_type == :grade && continue
+        
+        story_idx = get(face_to_story, cell.face_idx, -1)
+        if story_idx >= 0
+            push!(get!(story_cells, story_idx, Int[]), cell_idx)
+        else
+            @warn "Cell not mapped to story during :by_floor grouping" cell_idx face_idx=cell.face_idx
+        end
+    end
+    
+    # Convert to vector of vectors (sorted by story for determinism)
+    return [story_cells[k] for k in sort(collect(keys(story_cells)))]
 end
 
 function _assign_deterministic_group_ids!(slab_specs)
@@ -258,7 +397,7 @@ function _process_single_slab_group(gid, specs, struc, material, floor_kwargs)
     span_for_sizing = _sizing_span(ft, spans_gov)
     kwargs = _build_floor_kwargs(ft, span_for_sizing, floor_kwargs)
 
-    result = size_floor(ft, span_for_sizing, sdl_gov, live_gov; material=material, kwargs...)
+    result = StructuralSizer._size_span_floor(ft, span_for_sizing, sdl_gov, live_gov; material=material, kwargs...)
     sw_service = StructuralSizer.self_weight(result)
 
     return result, sw_service, spans_gov
@@ -284,7 +423,7 @@ function _apply_slab_results!(struc, slab_specs, group_results, group_sw, group_
 
         # Compute floor area and material volumes
         floor_area = sum(struc.cells[i].area for i in spec.cell_indices)
-        volumes = _compute_slab_volumes(result, floor_area, primary_material, opts)
+        volumes = _compute_slab_volumes(result, floor_area, primary_material, opts, spec.floor_type)
 
         slab = Slab(spec.cell_indices, result, spans_gov; 
                     floor_type=spec.floor_type, position=slab_position, 
@@ -303,9 +442,11 @@ function _derive_slab_position(struc, cell_indices)
 end
 
 """Compute material volumes for a slab from its result and floor area."""
-function _compute_slab_volumes(result::R, floor_area, primary_mat, opts) where R<:AbstractFloorResult
+function _compute_slab_volumes(result::R, floor_area, primary_mat, opts, floor_type::Symbol) where R<:AbstractFloorResult
     # Get material mapping: symbol → actual material object
-    mat_map = StructuralSizer.result_materials(result, primary_mat, opts)
+    # Convert symbol to type for clean dispatch
+    ft = StructuralSizer.floor_system(floor_type)
+    mat_map = StructuralSizer.result_materials(result, primary_mat, opts, ft)
     
     # Compute volumes: material → total volume
     volumes = MaterialVolumes()
@@ -577,9 +718,15 @@ parametric `local_edge_idx` must match each cell's specific vertex order.
 """
 function compute_cell_tributaries!(struc::BuildingStructure; 
                                     opts::StructuralSizer.FloorOptions=StructuralSizer.FloorOptions())
+    skel = struc.skeleton
     for (cell_idx, cell) in enumerate(struc.cells)
+        # Skip grade-level cells (they don't need tributary computation)
+        if cell.floor_type == :unknown || cell.floor_type == :grade
+            continue
+        end
+        
         # Get this cell's vertices (will be CCW ordered internally by tributary computation)
-        verts = [struc.skeleton.vertices[i] for i in struc.skeleton.face_vertex_indices[cell.face_idx]]
+        verts = [skel.vertices[i] for i in skel.face_vertex_indices[cell.face_idx]]
         
         # Resolve tributary axis based on floor type and options
         ft = StructuralSizer.floor_type(cell.floor_type)
@@ -636,7 +783,7 @@ end
 # =============================================================================
 
 """
-Pick the `span` passed into `size_floor(ft, span, ...)`.
+Pick the `span` passed into `_size_span_floor(ft, span, ...)`.
 
 Uses SpanInfo to select the appropriate span for each floor system type:
 - One-way systems: primary (short) span
@@ -704,7 +851,7 @@ end
 # =============================================================================
 
 """
-Build kwargs for size_floor with type-specific defaults.
+Build kwargs for `_size_span_floor` with type-specific defaults.
 """
 function _build_floor_kwargs(ft::AbstractFloorSystem, span, user_kwargs::NamedTuple)
     defaults = _default_floor_kwargs(ft, span, user_kwargs)
@@ -733,4 +880,122 @@ function _default_floor_kwargs(::Vault, span, user_kwargs::NamedTuple)
         return (lambda=10.0,)
     end
     return NamedTuple()
+end
+
+# =============================================================================
+# Slab Summary Output
+# =============================================================================
+
+"""
+    slab_summary(struc::BuildingStructure)
+
+Print a formatted summary of all designed slabs, similar to `foundation_group_summary`.
+
+Shows:
+- Floor type and thickness
+- Span dimensions
+- Design check results (punching shear, deflection)
+- Reinforcement summary (for flat plates)
+- Concrete volume
+"""
+function slab_summary(struc::BuildingStructure)
+    isempty(struc.slabs) && return println("No slabs. Call initialize_slabs!() first.")
+    
+    println("\n=== Slab Design Summary ===")
+    println("─" ^ 70)
+    
+    total_concrete = 0.0u"m^3"
+    total_area = 0.0u"m^2"
+    
+    for (i, slab) in enumerate(struc.slabs)
+        r = slab.result
+        n_cells = length(slab.cell_indices)
+        
+        # Calculate slab area from cells
+        slab_area = sum(struc.cells[ci].area for ci in slab.cell_indices)
+        total_area += slab_area
+        
+        println("Slab $i: $(slab.floor_type) ($n_cells cells)")
+        println("  Area: $(round(u"m^2", slab_area, digits=1)) ($(round(u"ft^2", slab_area, digits=0)))")
+        
+        if r isa StructuralSizer.FlatPlatePanelResult
+            # Flat plate details
+            h_in = round(u"inch", r.h, digits=2)
+            h_mm = round(u"mm", r.h, digits=0)
+            println("  Thickness: $h_in ($h_mm)")
+            println("  Spans: $(round(u"ft", r.l1, digits=1)) × $(round(u"ft", r.l2, digits=1))")
+            println("  M₀ (static moment): $(round(u"kip*ft", r.M0, digits=1))")
+            
+            # Punching check
+            if hasproperty(r, :punching_check) && !isnothing(r.punching_check)
+                pc = r.punching_check
+                status = pc.passes ? "✓ OK" : "✗ FAIL"
+                println("  Punching shear: $status (max ratio=$(round(pc.max_ratio, digits=2)))")
+            end
+            
+            # Deflection check
+            if hasproperty(r, :deflection_check) && !isnothing(r.deflection_check)
+                dc = r.deflection_check
+                status = dc.passes ? "✓ OK" : "✗ FAIL"
+                println("  Deflection: $status (Δ=$(round(u"mm", dc.Δ_total, digits=1)), limit=$(round(u"mm", dc.Δ_limit, digits=1)))")
+            end
+            
+            # Reinforcement summary
+            if !isempty(r.column_strip_reinf)
+                cs = r.column_strip_reinf[1]  # representative
+                println("  Column strip: #$(cs.bar_size) @ $(round(u"inch", cs.spacing, digits=1))")
+            end
+            if !isempty(r.middle_strip_reinf)
+                ms = r.middle_strip_reinf[1]  # representative
+                println("  Middle strip: #$(ms.bar_size) @ $(round(u"inch", ms.spacing, digits=1))")
+            end
+            
+            # Concrete volume
+            vol = r.h * slab_area
+            total_concrete += vol
+            println("  Concrete volume: $(round(u"m^3", vol, digits=2))")
+            
+        elseif r isa StructuralSizer.VaultResult
+            # Vault details
+            println("  Thickness: $(round(u"inch", r.thickness, digits=2))")
+            println("  Rise: $(round(u"inch", r.rise, digits=1))")
+            println("  λ (rise ratio): $(round(r.lambda, digits=1))")
+            println("  Thrust: $(round(u"kN/m", StructuralSizer.total_thrust(r), digits=1))")
+            
+            vol = r.volume_per_area * slab_area
+            total_concrete += vol
+            println("  Concrete volume: $(round(u"m^3", vol, digits=2))")
+            
+        elseif r isa StructuralSizer.CIPSlabResult
+            # Standard one-way/two-way slab
+            println("  Thickness: $(round(u"inch", r.thickness, digits=2))")
+            println("  Self-weight: $(round(u"psf", r.self_weight, digits=1))")
+            
+            vol = r.volume_per_area * slab_area
+            total_concrete += vol
+            println("  Concrete volume: $(round(u"m^3", vol, digits=2))")
+            
+        elseif !isnothing(r)
+            # Generic result with total_depth accessor
+            h = StructuralSizer.total_depth(r)
+            println("  Thickness: $(round(u"inch", h, digits=2))")
+            
+            if hasproperty(r, :volume_per_area)
+                vol = r.volume_per_area * slab_area
+                total_concrete += vol
+                println("  Concrete volume: $(round(u"m^3", vol, digits=2))")
+            end
+        else
+            println("  (not sized)")
+        end
+        
+        println()
+    end
+    
+    println("─" ^ 70)
+    println("TOTALS:")
+    println("  Slabs: $(length(struc.slabs))")
+    println("  Total area: $(round(u"m^2", total_area, digits=1)) ($(round(u"ft^2", total_area, digits=0)))")
+    println("  Concrete volume: $(round(u"m^3", total_concrete, digits=2))")
+    println("  Concrete weight: $(round(u"kg", total_concrete * 2400u"kg/m^3", digits=0)) ($(round(u"lbf", total_concrete * 150u"lbf/ft^3", digits=0)))")
 end

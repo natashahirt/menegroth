@@ -6,15 +6,18 @@
 # This is the main entry point for parametric design studies.
 #
 # Example:
-#   building = BuildingStructure(skeleton)
-#   initialize!(building, ...)
+#   skel = gen_medium_office(54u"ft", 42u"ft", 13u"ft", 3, 3, 3)
+#   struc = BuildingStructure(skel)
 #   
-#   design1 = design_building(building, DesignParameters(
-#       concrete = ConcreteMaterial(fc = 4000u"psi")
+#   design1 = design_building(struc, DesignParameters(
+#       name = "Option A - 4ksi concrete",
+#       floor_options = FloorOptions(flat_plate=FlatPlateOptions(material=RC_4000_60)),
+#       foundation_options = FoundationParameters(soil=MEDIUM_SAND),
 #   ))
 #   
-#   design2 = design_building(building, DesignParameters(
-#       concrete = ConcreteMaterial(fc = 6000u"psi")
+#   design2 = design_building(struc, DesignParameters(
+#       name = "Option B - 6ksi concrete",
+#       floor_options = FloorOptions(flat_plate=FlatPlateOptions(material=RC_6000_60)),
 #   ))
 #   
 #   compare_designs(design1, design2)
@@ -25,49 +28,87 @@ using Dates
 """
     design_building(struc::BuildingStructure, params::DesignParameters) -> BuildingDesign
 
-Generate a complete design for a building structure using the given parameters.
+Run the complete design pipeline and return a BuildingDesign with all results.
 
-This is the main entry point for design. It:
-1. Ensures tributaries are computed and cached
-2. Sizes slabs based on floor type and material
-3. Sizes columns (if concrete) with punching shear checks
-4. Sizes beams based on tributary loads
-5. Computes summary metrics (volume, weight, embodied carbon)
+This is the main entry point for design. It runs the full pipeline:
+1. Initialize structure with floor type and options
+2. Estimate initial column sizes
+3. Convert to Asap analysis model
+4. Size slabs (flat plate DDM/EFM with column P-M design)
+5. Size foundations (if foundation_options provided)
+6. Populate BuildingDesign with all results
 
 # Arguments
-- `struc`: BuildingStructure with initialized cells, members, etc.
-- `params`: DesignParameters specifying material, code, and options
+- `struc`: BuildingStructure (geometry from BuildingSkeleton)
+- `params`: DesignParameters specifying materials, floor options, foundation options
 
 # Returns
-- `BuildingDesign` with all design results
+- `BuildingDesign` with complete design results
 
 # Example
 ```julia
+skel = gen_medium_office(54u"ft", 42u"ft", 13u"ft", 3, 3, 3)
+struc = BuildingStructure(skel)
+
 design = design_building(struc, DesignParameters(
-    name = "Option A - 4ksi concrete",
-    concrete = NWC_4000,  # or custom Concrete(...)
-    deflection_limit = :L_360
+    name = "3-Story Flat Plate",
+    floor_options = FloorOptions(
+        flat_plate = FlatPlateOptions(
+            material = RC_4000_60,
+            analysis_method = :mddm,
+        )
+    ),
+    foundation_options = FoundationParameters(
+        soil = MEDIUM_SAND,
+        min_depth = 0.5u"m",
+    ),
 ))
+
+visualize(design, show_slabs=true, show_foundations=true)
 ```
 """
 function design_building(struc::BuildingStructure, params::DesignParameters)
     t_start = time()
     
+    # ─────────────────────────────────────────────────────────────────────────
+    # STEP 1: Initialize structure with floor type
+    # ─────────────────────────────────────────────────────────────────────────
+    opts = something(params.floor_options, StructuralSizer.FloorOptions())
+    floor_type = _infer_floor_type(opts)
+    
+    initialize!(struc; floor_type=floor_type, floor_kwargs=(options=opts,))
+    
+    # ─────────────────────────────────────────────────────────────────────────
+    # STEP 2: Estimate initial column sizes
+    # ─────────────────────────────────────────────────────────────────────────
+    fc = _get_design_fc(params)
+    estimate_column_sizes!(struc; fc=fc)
+    
+    # ─────────────────────────────────────────────────────────────────────────
+    # STEP 3: Convert to Asap analysis model
+    # ─────────────────────────────────────────────────────────────────────────
+    to_asap!(struc)
+    
+    # ─────────────────────────────────────────────────────────────────────────
+    # STEP 4: Size slabs (includes column P-M design for flat plates)
+    # ─────────────────────────────────────────────────────────────────────────
+    StructuralSizer.size_slabs!(struc; options=opts, verbose=false, max_iterations=20)
+    
+    # ─────────────────────────────────────────────────────────────────────────
+    # STEP 5: Size foundations (if options provided)
+    # ─────────────────────────────────────────────────────────────────────────
+    if !isnothing(params.foundation_options)
+        _size_foundations!(struc, params.foundation_options)
+    end
+    
+    # ─────────────────────────────────────────────────────────────────────────
+    # STEP 6: Build BuildingDesign with captured results
+    # ─────────────────────────────────────────────────────────────────────────
     design = BuildingDesign(struc, params)
-    
-    # 1. Ensure tributaries are computed
-    _ensure_tributaries_computed!(struc, params)
-    
-    # 2. Design slabs
-    _design_slabs!(design, struc, params)
-    
-    # 3. Design columns (including punching shear)
-    _design_columns!(design, struc, params)
-    
-    # 4. Design beams
-    _design_beams!(design, struc, params)
-    
-    # 5. Compute summary
+    _populate_slab_results!(design, struc)
+    _populate_column_results!(design, struc)
+    _populate_beam_results!(design, struc)
+    _populate_foundation_results!(design, struc)
     _compute_design_summary!(design, struc, params)
     
     design.compute_time_s = time() - t_start
@@ -93,98 +134,109 @@ function design_building(struc::BuildingStructure; kwargs...)
 end
 
 # =============================================================================
-# Internal Design Functions
+# Internal Helper Functions
 # =============================================================================
 
-"""Ensure tributaries are computed for the design configuration."""
-function _ensure_tributaries_computed!(struc::BuildingStructure, params::DesignParameters)
-    # Determine spanning behavior from floor options or default
-    opts = something(params.floor_options, StructuralSizer.FloorOptions())
-    
-    # For each cell, check if tributaries are cached for this configuration
-    for (cell_idx, cell) in enumerate(struc.cells)
-        # Determine axis based on floor type and options
-        ft = StructuralSizer.floor_type(cell.floor_type)
-        behavior = StructuralSizer.spanning_behavior(ft)
-        axis = StructuralSizer.resolve_tributary_axis(ft, cell.spans, opts)
-        
-        # Skip if already cached
-        has_cell_tributaries(struc, cell_idx, behavior, axis) && continue
-        
-        # Compute and cache
-        verts = [struc.skeleton.vertices[i] for i in struc.skeleton.face_vertex_indices[cell.face_idx]]
-        tributaries = if isnothing(axis)
-            StructuralSizer.get_tributary_polygons_isotropic(verts)
-        else
-            StructuralSizer.get_tributary_polygons(verts; axis=collect(axis))
-        end
-        
-        # Compute strip geometry for two-way/beamless floors
-        strips = nothing
-        if behavior isa TwoWaySpanning || behavior isa BeamlessSpanning
-            strips = StructuralSizer.compute_panel_strips(tributaries)
-        end
-        
-        cache_edge_tributaries!(struc, behavior, axis, cell_idx, tributaries; 
-                                strip_geometry=strips)
-    end
-    
-    # Compute column (Voronoi) tributaries if needed for beamless floors
-    any_beamless = any(StructuralSizer.is_beamless(
-        StructuralSizer.floor_type(c.floor_type)) for c in struc.cells)
-    
-    if any_beamless
-        _ensure_column_tributaries_computed!(struc)
+"""Infer floor type from floor options."""
+function _infer_floor_type(opts::StructuralSizer.FloorOptions)
+    # Check which sub-options are populated to infer floor type
+    if !isnothing(opts.flat_plate)
+        return :flat_plate
+    elseif !isnothing(opts.vault)
+        return :vault
+    elseif !isnothing(opts.one_way)
+        return :one_way
+    else
+        return :flat_plate  # Default
     end
 end
 
-"""Ensure column Voronoi tributaries are computed."""
-function _ensure_column_tributaries_computed!(struc::BuildingStructure)
-    # Check if any columns are missing tributary data
-    for col in struc.columns
-        cached = get_cached_column_tributary(struc, col.story, col.vertex_idx)
-        if isnothing(cached)
-            # Need to compute - call the full computation which stores in cache
-            compute_column_tributaries!(struc)
-            return  # All columns computed at once
+"""Get concrete f'c from design parameters (for initial column estimates)."""
+function _get_design_fc(params::DesignParameters)
+    # Try floor options first (flat plate material)
+    if !isnothing(params.floor_options) && !isnothing(params.floor_options.flat_plate)
+        mat = params.floor_options.flat_plate.material
+        if !isnothing(mat)
+            return mat.concrete.fc′
         end
     end
-    # All columns have cached data - nothing to do
+    # Fall back to params.concrete
+    if !isnothing(params.concrete)
+        return params.concrete.fc′
+    end
+    # Default
+    return 4000u"psi"
 end
 
-"""Design all slabs."""
-function _design_slabs!(design::BuildingDesign, struc::BuildingStructure, params::DesignParameters)
+"""Size foundations using FoundationParameters."""
+function _size_foundations!(struc::BuildingStructure, fp::FoundationParameters)
+    initialize_supports!(struc)
+    initialize_foundations!(struc)
+    group_foundations_by_reaction!(struc; tolerance=fp.group_tolerance)
+    size_foundations_grouped!(struc;
+        soil = fp.soil,
+        concrete = fp.concrete,
+        rebar = fp.rebar,
+        pier_width = fp.pier_width,
+        min_depth = fp.min_depth,
+    )
+end
+
+# =============================================================================
+# Result Population Functions
+# =============================================================================
+
+"""Populate slab design results from struc.slabs."""
+function _populate_slab_results!(design::BuildingDesign, struc::BuildingStructure)
     for (slab_idx, slab) in enumerate(struc.slabs)
+        isnothing(slab.result) && continue
+        
         result = SlabDesignResult(
             thickness = StructuralSizer.total_depth(slab.result),
             self_weight = StructuralSizer.self_weight(slab.result)
         )
         
-        # TODO: Detailed reinforcement design based on floor type and code
-        # For now, just store the sizing result
+        # Extract M0 if available (FlatPlatePanelResult has it)
+        if hasproperty(slab.result, :M0)
+            result.M0 = slab.result.M0
+        end
+        
+        # Extract deflection check if available
+        if hasproperty(slab.result, :deflection_check)
+            dc = slab.result.deflection_check
+            # Field name varies: FlatPlatePanelResult uses 'passes', VaultResult uses 'ok'
+            result.deflection_ok = hasproperty(dc, :passes) ? dc.passes : dc.ok
+            result.deflection_ratio = dc.ratio
+        end
         
         design.slabs[slab_idx] = result
     end
 end
 
-"""Design all columns."""
-function _design_columns!(design::BuildingDesign, struc::BuildingStructure, params::DesignParameters)
+"""Populate column design results from struc.columns."""
+function _populate_column_results!(design::BuildingDesign, struc::BuildingStructure)
     for (col_idx, col) in enumerate(struc.columns)
         result = ColumnDesignResult()
         
-        # Get tributary area from cache
-        trib_area = column_tributary_area(struc, col)
+        # Capture section size
+        if !isnothing(col.c1) && !isnothing(col.c2)
+            c1_in = round(Int, ustrip(u"inch", col.c1))
+            c2_in = round(Int, ustrip(u"inch", col.c2))
+            result.section_size = "$(c1_in)×$(c2_in)"
+        end
         
-        if !isnothing(trib_area) && !isnothing(params.concrete)
-            # TODO: Punching shear check using flat plate calculations
-            # For now, just mark as OK
+        # Get tributary area from cache (if available)
+        trib_area = column_tributary_area(struc, col)
+        if !isnothing(trib_area)
+            # Create punching result placeholder
+            # (actual punching check is done during slab sizing)
             result.punching = PunchingCheckResult(
                 Vu = 0.0u"kN",
                 φVc = 0.0u"kN",
                 ratio = 0.0,
                 ok = true,
                 critical_perimeter = 0.0u"mm",
-                tributary_area = trib_area * u"m^2"
+                tributary_area = trib_area  # Already has m² units
             )
         end
         
@@ -192,8 +244,8 @@ function _design_columns!(design::BuildingDesign, struc::BuildingStructure, para
     end
 end
 
-"""Design all beams."""
-function _design_beams!(design::BuildingDesign, struc::BuildingStructure, params::DesignParameters)
+"""Populate beam design results from struc.beams."""
+function _populate_beam_results!(design::BuildingDesign, struc::BuildingStructure)
     for (beam_idx, beam) in enumerate(struc.beams)
         result = BeamDesignResult()
         
@@ -203,6 +255,40 @@ function _design_beams!(design::BuildingDesign, struc::BuildingStructure, params
         end
         
         design.beams[beam_idx] = result
+    end
+end
+
+"""Populate foundation design results from struc.foundations."""
+function _populate_foundation_results!(design::BuildingDesign, struc::BuildingStructure)
+    for (fdn_idx, fdn) in enumerate(struc.foundations)
+        isnothing(fdn.result) && continue
+        
+        # SpreadFootingResult uses L_ftg (not L) to avoid type param conflict
+        fdn_length = hasproperty(fdn.result, :L_ftg) ? fdn.result.L_ftg : 
+                     hasproperty(fdn.result, :L) ? fdn.result.L : fdn.result.B
+        
+        # Sum reactions from all supports under this foundation
+        total_reaction = 0.0u"kN"
+        for sup_idx in fdn.support_indices
+            sup = struc.supports[sup_idx]
+            # Fz is the vertical reaction (index 3)
+            total_reaction += uconvert(u"kN", sup.forces[3])
+        end
+        
+        # group_id is a UInt64 hash, convert to Int for FoundationDesignResult
+        gid = isnothing(fdn.group_id) ? 0 : Int(fdn.group_id % typemax(Int))
+        
+        result = FoundationDesignResult(
+            length = fdn_length,
+            width = fdn.result.B,
+            depth = fdn.result.D,
+            reaction = total_reaction,
+            bearing_ratio = hasproperty(fdn.result, :utilization) ? fdn.result.utilization : 0.0,
+            ok = !hasproperty(fdn.result, :utilization) || fdn.result.utilization <= 1.0,
+            group_id = gid,
+        )
+        
+        design.foundations[fdn_idx] = result
     end
 end
 
@@ -235,11 +321,28 @@ function _compute_design_summary!(design::BuildingDesign, struc::BuildingStructu
         end
     end
     
+    for (idx, fdn_result) in design.foundations
+        if fdn_result.bearing_ratio > max_ratio
+            max_ratio = fdn_result.bearing_ratio
+            critical_elem = "Foundation $idx (bearing)"
+        end
+        if !fdn_result.ok
+            all_ok = false
+        end
+    end
+    
     summary.critical_ratio = max_ratio
     summary.critical_element = critical_elem
     summary.all_checks_pass = all_ok
     
-    # TODO: Compute total volumes and embodied carbon
+    # Compute total volumes (rough estimate)
+    # TODO: More accurate EC calculation using ec_summary logic
+    total_conc_vol = 0.0u"m^3"
+    for (_, slab_result) in design.slabs
+        # Rough estimate: thickness × avg cell area
+        # This is a placeholder - should use actual slab areas
+    end
+    summary.concrete_volume = total_conc_vol
 end
 
 # =============================================================================

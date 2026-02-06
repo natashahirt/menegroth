@@ -40,23 +40,72 @@ function get_compression_factors(s::ISymmSection, mat::Metal)
     end
 
     # --- Qa: Stiffened Elements (Webs) ---
-    # Case 5: Doubly symmetric I-shapes
-    # Limit for slender web
-    qa_limit = 1.49 * sqrt(E / Fy)
+    # Case 5: Doubly symmetric I-shapes (Table B4.1a)
+    # Limit for slender web: λr = 1.49√(E/Fy)
+    λr_w = 1.49 * sqrt(E / Fy)
 
-    if λ_w <= qa_limit
+    if λ_w <= λr_w
         Qa = 1.0
     else
-        # E7.2: Qa = Aeff / Ag
-        # Simplified: Use f = Fy (conservative for classification/sizing)
-        # Exact calculation requires iteration or assumption of Fcr.
-        # For now, we assume Qa = 1.0 because rolled W-shapes with slender webs in compression are extremely rare.
-        # (Only applies to rare built-up sections or very deep thin shapes).
-        # TODO: Implement full Qa iteration.
-        Qa = 1.0
+        # AISC E7: Members with Slender Elements
+        # Qa = Ae/Ag where Ae uses reduced effective width be
+        Qa = _calc_Qa_web(s, mat, λ_w, λr_w)
     end
 
     return (Qs=Qs, Qa=Qa, Q=Qs*Qa)
+end
+
+"""
+    _calc_Qa_web(s::ISymmSection, mat::Metal, λ_w, λr_w) -> Float64
+
+Calculate Qa for slender web per AISC 360-16 Section E7.
+Uses effective width formula (E7-3) with imperfection factors from Table E7.1.
+
+# AISC E7 Formulas
+- be = b × √(Fel/Fcr) × (1 - c1×√(Fel/Fcr))  (E7-3)
+- Fel = (c2 × λr/λ)² × Fy  (E7-5)
+
+For stiffened I-shape webs (Table E7.1 Case a):
+- c1 = 0.18
+- c2 = 1.31
+
+Note: This uses Fcr = Fy (conservative). For more economy, iterate with actual Fcr.
+"""
+function _calc_Qa_web(s::ISymmSection, mat::Metal, λ_w::Real, λr_w::Real)
+    E, Fy = mat.E, mat.Fy
+    
+    # Table E7.1 Case (a): Stiffened elements (I-shape webs)
+    c1 = 0.18
+    c2 = 1.31
+    
+    # Web dimensions
+    h = s.h  # clear web height
+    tw = s.tw
+    
+    # Elastic local buckling stress (E7-5)
+    Fel = (c2 * λr_w / λ_w)^2 * Fy
+    
+    # Critical stress - use Fy (conservative, no iteration)
+    # For rolled shapes, actual Fcr is typically close to Fy anyway
+    Fcr = Fy
+    
+    # Effective width (E7-3)
+    ratio = sqrt(Fel / Fcr)
+    be = h * ratio * (1 - c1 * ratio)
+    
+    # Ensure be ≤ h and be > 0
+    be = clamp(be, 0.0*h, h)
+    
+    # Effective area
+    # Ae = Ag - (h - be) × tw
+    ΔA = (h - be) * tw
+    Ag = s.A
+    Ae = Ag - ΔA
+    
+    # Qa = Ae/Ag
+    Qa = Ae / Ag
+    
+    return max(Qa, 0.0)  # Ensure non-negative
 end
 
 """Check if section is compact in both flange and web (Flexure)."""

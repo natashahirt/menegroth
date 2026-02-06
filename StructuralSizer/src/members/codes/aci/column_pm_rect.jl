@@ -184,10 +184,10 @@ function calculate_PM_at_c(section::RCColumnSection, mat, c_in::Real)
     # Total axial force (positive = compression)
     Pn = Cc + Fs_total  # kip
     
-    # Total moment about centroid
-    Mc = Cc * (centroid_from_top - y_Cc_from_top)  # kip-in
-    Mn_in = Mc + Ms_total  # kip-in
-    Mn = Mn_in / 12.0  # kip-ft
+    # Total moment about centroid (kip-in, then converted to kip-ft)
+    Mc = Cc * (centroid_from_top - y_Cc_from_top)
+    Mn_kipin = Mc + Ms_total
+    Mn = Mn_kipin / 12.0  # → kip-ft
     
     return (Pn = Pn, Mn = abs(Mn), εt = εt, c = c_in)
 end
@@ -1005,10 +1005,10 @@ function calculate_PM_at_c_yaxis(section::RCColumnSection, mat, c_in::Real)
     # Total axial force
     Pn = Cc + Fs_total
     
-    # Total moment about y-axis centroid
+    # Total moment about y-axis centroid (kip-in, then converted to kip-ft)
     Mc = Cc * (centroid_from_right - x_Cc_from_right)
-    Mn_in = Mc + Ms_total
-    Mn = Mn_in / 12.0  # kip-ft
+    Mn_kipin = Mc + Ms_total
+    Mn = Mn_kipin / 12.0  # → kip-ft
     
     return (Pn = Pn, Mn = abs(Mn), εt = εt, c = c_in)
 end
@@ -1252,4 +1252,181 @@ function generate_PM_diagrams_biaxial(section::RCColumnSection, mat; n_intermedi
     diagram_x = generate_PM_diagram(section, mat; n_intermediate=n_intermediate)
     diagram_y = generate_PM_diagram_yaxis(section, mat; n_intermediate=n_intermediate)
     return (x = diagram_x, y = diagram_y)
+end
+
+# ==============================================================================
+# Column Reinforcement Design for Fixed Dimensions
+# ==============================================================================
+
+"""
+    design_column_reinforcement(
+        b::Length, h::Length, 
+        Pu::Real, Mu::Real, 
+        mat;
+        cover::Length = 1.5u"inch",
+        tie_type::Symbol = :tied,
+        bar_sizes = [6, 7, 8, 9, 10, 11],
+        n_bars_options = [4, 6, 8, 10, 12, 14, 16, 20],
+        min_rho::Float64 = 0.01,
+        max_rho::Float64 = 0.08
+    ) -> RCColumnSection
+
+Design reinforcement for a column with fixed dimensions to resist given demands.
+
+Uses P-M interaction analysis to find the minimum reinforcement that:
+1. Provides adequate capacity for (Pu, Mu)
+2. Satisfies ACI 318-19 ρg limits (0.01 ≤ ρg ≤ 0.08)
+
+# Arguments
+- `b`, `h`: Column dimensions (with units)
+- `Pu`: Factored axial load (kip, positive = compression)
+- `Mu`: Factored moment (kip-ft)
+- `mat`: Concrete material
+- `cover`: Clear cover (default 1.5")
+- `tie_type`: :tied or :spiral
+- `bar_sizes`: Available bar sizes to try (ascending order preferred)
+- `n_bars_options`: Number of bars to try
+- `min_rho`, `max_rho`: ACI reinforcement ratio limits
+
+# Returns
+RCColumnSection with minimum reinforcement that satisfies demands and ρg ≥ min_rho
+
+# Notes
+- Tries combinations in order of increasing steel area
+- First valid combination is returned (minimum weight)
+- Throws error if no valid combination found
+
+# Example
+```julia
+b, h = 20u"inch", 20u"inch"
+Pu, Mu = 300.0, 150.0  # kip, kip-ft
+section = design_column_reinforcement(b, h, Pu, Mu, NWC_4000)
+```
+"""
+function design_column_reinforcement(
+    b::Length, h::Length, 
+    Pu::Real, Mu::Real, 
+    mat;
+    cover::Length = 1.5u"inch",
+    tie_type::Symbol = :tied,
+    bar_sizes = [6, 7, 8, 9, 10, 11],
+    n_bars_options = [4, 6, 8, 10, 12, 14, 16, 20],
+    min_rho::Float64 = 0.01,
+    max_rho::Float64 = 0.08
+)
+    # Convert dimensions
+    b_in = ustrip(u"inch", b)
+    h_in = ustrip(u"inch", h)
+    Ag = b_in * h_in
+    
+    # Standard bar areas (ASTM A615)
+    bar_areas = Dict(
+        3 => 0.11, 4 => 0.20, 5 => 0.31, 6 => 0.44,
+        7 => 0.60, 8 => 0.79, 9 => 1.00, 10 => 1.27,
+        11 => 1.56, 14 => 2.25, 18 => 4.00
+    )
+    
+    # Minimum number of bars (ACI 10.7.3.1)
+    min_bars = tie_type == :spiral ? 6 : 4
+    
+    # Generate candidates sorted by steel area (ascending = minimum weight first)
+    candidates = Tuple{Int, Int, Float64}[]  # (bar_size, n_bars, As)
+    
+    for bar_size in bar_sizes
+        Ab = bar_areas[bar_size]
+        for n_bars in n_bars_options
+            n_bars >= min_bars || continue
+            
+            As = n_bars * Ab
+            ρ = As / Ag
+            
+            # Skip if outside ACI limits
+            (min_rho ≤ ρ ≤ max_rho) || continue
+            
+            push!(candidates, (bar_size, n_bars, As))
+        end
+    end
+    
+    # Sort by steel area (minimum first)
+    sort!(candidates, by = x -> x[3])
+    
+    # Try each candidate
+    for (bar_size, n_bars, As) in candidates
+        try
+            section = RCColumnSection(
+                b = b, h = h,
+                bar_size = bar_size,
+                n_bars = n_bars,
+                cover = cover,
+                tie_type = tie_type
+            )
+            
+            # Check P-M capacity using the diagram
+            diagram = generate_PM_diagram(section, mat; n_intermediate=10)
+            result = check_PM_capacity(diagram, Pu, Mu)
+            
+            if result.adequate
+                return section
+            end
+        catch
+            # Skip invalid bar arrangements (e.g., spacing too tight)
+            continue
+        end
+    end
+    
+    # No valid combination found - try with maximum reinforcement
+    # This indicates the column dimensions are too small for the demands
+    error("Cannot design reinforcement for $(b_in)\"×$(h_in)\" column with Pu=$(Pu) kip, Mu=$(Mu) kip-ft. " *
+          "Consider larger column dimensions.")
+end
+
+"""
+    resize_column_with_reinforcement(
+        section::RCColumnSection,
+        new_b::Length, new_c::Length,
+        Pu::Real, Mu::Real,
+        mat;
+        kwargs...
+    ) -> RCColumnSection
+
+Resize a column to new dimensions while properly re-designing reinforcement.
+
+This replaces the simple `scale_column_section` approach when column dimensions
+are increased (e.g., for punching shear requirements). Instead of keeping the
+same bars (which would reduce ρg below 0.01), this function uses P-M analysis
+to design new reinforcement appropriate for the larger section.
+
+# Arguments
+- `section`: Original RCColumnSection (used for cover and tie_type defaults)
+- `new_b`, `new_c`: New column dimensions
+- `Pu`, `Mu`: Design demands (kip, kip-ft)
+- `mat`: Concrete material
+- `kwargs`: Passed to design_column_reinforcement
+
+# Returns
+New RCColumnSection with properly designed reinforcement
+
+# Example
+```julia
+# Original 16" column from P-M design
+sec = RCColumnSection(b=16u"inch", h=16u"inch", bar_size=8, n_bars=8)
+
+# Need 20" for punching shear - properly redesign reinforcement
+new_sec = resize_column_with_reinforcement(sec, 20u"inch", 20u"inch", 300.0, 150.0, NWC_4000)
+```
+"""
+function resize_column_with_reinforcement(
+    section::RCColumnSection,
+    new_b::Length, new_c::Length,
+    Pu::Real, Mu::Real,
+    mat;
+    kwargs...
+)
+    # Use original section's cover and tie_type
+    design_column_reinforcement(
+        new_b, new_c, Pu, Mu, mat;
+        cover = section.cover,
+        tie_type = section.tie_type,
+        kwargs...
+    )
 end

@@ -15,7 +15,7 @@
 
 using Test
 using Unitful
-# Units are re-exported from StructuralSizer (via Asap)
+using Asap  # Register Asap units with Unitful's @u_str
 using StructuralSizer
 
 # =============================================================================
@@ -181,30 +181,32 @@ end
 # Integration Tests
 # =============================================================================
 
-@testset "Flat Plate Pipeline - CIPOptions Integration" begin
+@testset "Flat Plate Pipeline - FlatPlateOptions Integration" begin
     
     @testset "Default Options" begin
-        opts = CIPOptions()
+        opts = FlatPlateOptions()
         
         @test opts.φ_flexure == 0.90
         @test opts.φ_shear == 0.75
-        @test opts.φ_compression == 0.65
         @test opts.λ == 1.0
         @test opts.analysis_method == :ddm
         @test opts.deflection_limit == :L_360
+        @test opts.has_edge_beam == false
+        @test opts.has_drop_panels == false
     end
     
     @testset "Lightweight Concrete Options" begin
-        opts = CIPOptions(λ = 0.85)  # Sand-lightweight
+        opts = FlatPlateOptions(λ = 0.85)  # Sand-lightweight
         @test opts.λ == 0.85
     end
     
-    @testset "EFM Stiffness Factors" begin
-        opts = CIPOptions()
+    @testset "OneWayOptions" begin
+        opts = OneWayOptions()
+        @test opts.support == BOTH_ENDS_CONT
+        @test opts.material == RC_4000_60
         
-        @test opts.efm_k_slab ≈ 4.127 rtol=0.01
-        @test opts.efm_k_col ≈ 4.74 rtol=0.01
-        @test opts.efm_cof ≈ 0.507 rtol=0.01
+        opts2 = OneWayOptions(support=ONE_END_CONT)
+        @test opts2.support == ONE_END_CONT
     end
 end
 

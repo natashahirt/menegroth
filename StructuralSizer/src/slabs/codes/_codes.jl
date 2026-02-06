@@ -1,16 +1,15 @@
-# Sizing Logic Entry Points
+# Sizing Logic Implementations
+#
+# NOTE:
+# The legacy public span-based API `size_floor` has been removed in favor of the
+# structure/slab-based API:
+#   size_slabs! → size_slab! → _size_slab!
+#
+# We still keep an *internal* span-based helper for initialization and isolated
+# checks, but it is not exported:
+#   _size_span_floor(ft, span, sdl, live; ...) -> AbstractFloorResult
 
-"""
-Common interface for floor sizing.
-Each implementation should define:
-    size_floor(type, span, sdl, live; material=..., **kwargs) → AbstractFloorResult
-"""
-
-# =============================================================================
-# Generic Dispatch Wrappers
-# =============================================================================
-
-# Include all code implementations
+# Include all code implementations (define _size_span_floor methods)
 include("concrete/_concrete.jl")
 include("steel/_steel.jl")
 include("timber/_timber.jl")
@@ -18,11 +17,13 @@ include("vault/_vault.jl")
 include("custom/_custom.jl")
 
 """
-    size_floor(st::AbstractFloorSystem, span, sdl, live; kwargs...)
-Base dispatch for sizing floor systems using parametric Unitful types.
+    _size_span_floor(st::AbstractFloorSystem, span, sdl, live; kwargs...)
+
+Internal span-based sizing helper (returns an `AbstractFloorResult`).
+Used for initialization and standalone checks. Not exported.
 """
-function size_floor(st::AbstractFloorSystem, span, sdl, live; kwargs...)
+function _size_span_floor(st::AbstractFloorSystem, span, sdl, live; kwargs...)
     # This will catch cases where the specific type doesn't have an implementation
     # or doesn't match the signature.
-    error("size_floor not implemented for $(typeof(st)) with arguments: span=$(typeof(span)), sdl=$(typeof(sdl)), live=$(typeof(live))")
+    error("_size_span_floor not implemented for $(typeof(st)) with arguments: span=$(typeof(span)), sdl=$(typeof(sdl)), live=$(typeof(live))")
 end

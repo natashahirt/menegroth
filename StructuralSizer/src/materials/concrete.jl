@@ -104,17 +104,77 @@ const RC_6000_75 = ReinforcedConcreteMaterial(NWC_6000, Rebar_75)
 const RC_GGBS_60 = ReinforcedConcreteMaterial(NWC_GGBS, Rebar_60)
 
 # ==============================================================================
+# Earthen / Masonry Materials (for unreinforced vaults)
+# ==============================================================================
+# From BasePlotsWithLim.m reference: Density = 2000 kg/m³, MOE = 500-8000 MPa
+# Named by E [MPa] since that's the key variable for vault analysis.
+# fc' estimated as E/1000 (typical for earthen materials).
+# ECC values are approximate - earthen materials have very low embodied carbon.
+
+const Earthen_500 = Concrete(
+    0.5u"GPa",          # E = 500 MPa
+    0.5u"MPa",          # fc' (conservative estimate)
+    2000.0u"kg/m^3",    # ρ (from Matlab reference)
+    0.20,               # ν
+    0.01;               # ecc [kgCO₂e/kg] - very low for unfired earth
+    εcu = 0.002
+)
+
+const Earthen_1000 = Concrete(
+    1.0u"GPa",          # E = 1000 MPa
+    1.0u"MPa",          # fc'
+    2000.0u"kg/m^3",    # ρ
+    0.20,               # ν
+    0.01;               # ecc
+    εcu = 0.002
+)
+
+const Earthen_2000 = Concrete(
+    2.0u"GPa",          # E = 2000 MPa
+    2.0u"MPa",          # fc'
+    2000.0u"kg/m^3",    # ρ
+    0.20,               # ν
+    0.02;               # ecc - slightly higher for stabilized earth
+    εcu = 0.002
+)
+
+const Earthen_4000 = Concrete(
+    4.0u"GPa",          # E = 4000 MPa
+    4.0u"MPa",          # fc'
+    2000.0u"kg/m^3",    # ρ
+    0.20,               # ν
+    0.05;               # ecc - compressed earth blocks
+    εcu = 0.002
+)
+
+const Earthen_8000 = Concrete(
+    8.0u"GPa",          # E = 8000 MPa
+    8.0u"MPa",          # fc'
+    2000.0u"kg/m^3",    # ρ
+    0.20,               # ν
+    0.10;               # ecc - fired clay brick
+    εcu = 0.002
+)
+
+# ==============================================================================
 # Display Names
 # ==============================================================================
 
 """Get short display name for a concrete material."""
 function material_name(mat::Concrete)
+    # Standard concrete
     mat === NWC_3000 && return "NWC_3000"
     mat === NWC_4000 && return "NWC_4000"
     mat === NWC_5000 && return "NWC_5000"
     mat === NWC_6000 && return "NWC_6000"
     mat === NWC_GGBS && return "NWC_GGBS"
     mat === NWC_PFA && return "NWC_PFA"
+    # Earthen materials
+    mat === Earthen_500 && return "Earthen_500"
+    mat === Earthen_1000 && return "Earthen_1000"
+    mat === Earthen_2000 && return "Earthen_2000"
+    mat === Earthen_4000 && return "Earthen_4000"
+    mat === Earthen_8000 && return "Earthen_8000"
     # Fallback: show fc' in psi
     fc_psi = round(ustrip(psi, mat.fc′), digits=0)
     return "Concrete ($(Int(fc_psi)) psi)"

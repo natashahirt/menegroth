@@ -17,40 +17,69 @@ using Asap: ksi
 
 """
     standard_rc_columns(; 
-        sizes = 12:2:36,      # inches
+        sizes = 12:2:36,      # inches (square) or [(b,h), ...] for rectangular
         bar_sizes = [5, 6, 7, 8, 9, 10, 11],
         n_bars_range = 4:4:20,
-        cover_in = 1.5
+        cover = 1.5u"inch",
+        include_rectangular = true,
+        aspect_ratios = [1.5, 2.0]
     ) -> Vector{RCColumnSection}
 
 Generate a catalog of standard RC column sections.
 
 # Arguments
-- `sizes`: Range of square column sizes (inches)
-- `bar_sizes`: Available rebar sizes
+- `sizes`: Range of column sizes (inches). For square columns, use integers.
+- `bar_sizes`: Available rebar sizes (#5 through #18)
 - `n_bars_range`: Range of bar counts (must be ≥4 for corners)
-- `cover_in`: Clear cover (inches)
+- `cover`: Clear cover (Length with units, default 1.5")
+- `include_rectangular`: If true, also generate rectangular columns
+- `aspect_ratios`: b/h ratios for rectangular columns (h > b)
 
 # Returns
 Vector of RCColumnSection with varying sizes and reinforcement
 
 # Example
 ```julia
-catalog = standard_rc_columns()           # Default: 12"-36" with various rebar
+catalog = standard_rc_columns()           # Default: 12"-36" square
 catalog = standard_rc_columns(sizes=14:2:24, bar_sizes=[8,9,10])
+catalog = standard_rc_columns(include_rectangular=true)  # Adds 1.5:1 and 2:1 ratios
 ```
 """
 function standard_rc_columns(;
     sizes = 12:2:36,
     bar_sizes = [6, 7, 8, 9, 10, 11],
     n_bars_range = 4:4:16,
-    cover_in = 1.5
+    cover::Length = 1.5u"inch",
+    include_rectangular = true,
+    aspect_ratios = [1.5, 2.0]
 )
     catalog = RCColumnSection[]
     
+    # Generate size pairs (b, h)
+    size_pairs = Tuple{Float64, Float64}[]
+    
+    # Square columns
     for size in sizes
-        b = Float64(size) * u"inch"
-        h = b  # Square columns
+        push!(size_pairs, (Float64(size), Float64(size)))
+    end
+    
+    # Rectangular columns (h > b)
+    if include_rectangular
+        for size in sizes
+            for ratio in aspect_ratios
+                h_rect = size * ratio
+                if h_rect <= 48  # Practical limit
+                    push!(size_pairs, (Float64(size), Float64(h_rect)))
+                end
+            end
+        end
+    end
+    
+    cover_val = ustrip(u"inch", cover)
+    
+    for (b_val, h_val) in size_pairs
+        b = b_val * u"inch"
+        h = h_val * u"inch"
         
         for bar_size in bar_sizes
             # Check minimum size for this bar
@@ -58,15 +87,15 @@ function standard_rc_columns(;
             db = ustrip(u"inch", bar.diameter)
             
             # Minimum column size should fit bars with adequate spacing
-            min_cover_to_center = cover_in + db/2
-            if 2 * min_cover_to_center > size * 0.4
+            min_cover_to_center = cover_val + db/2
+            if 2 * min_cover_to_center > min(b_val, h_val) * 0.4
                 continue  # Skip if bars would be too close
             end
             
             for n_bars in n_bars_range
                 # Ensure reasonable reinforcement ratio (1-8% per ACI)
                 As_total = n_bars * ustrip(u"inch^2", bar.A)
-                Ag = size^2
+                Ag = b_val * h_val
                 ρ = As_total / Ag
                 
                 if ρ < 0.01 || ρ > 0.08
@@ -74,13 +103,13 @@ function standard_rc_columns(;
                 end
                 
                 # Cover to bar center
-                cover = (cover_in + db/2) * u"inch"
+                cover_to_center = cover + (db/2) * u"inch"
                 
                 try
                     section = RCColumnSection(
                         b = b,
                         h = h,
-                        cover = cover,
+                        cover = cover_to_center,
                         bar_size = bar_size,
                         n_bars = n_bars,
                         tie_type = :tied,
@@ -96,7 +125,7 @@ function standard_rc_columns(;
     end
     
     # Sort by size then by steel area (smaller first for minimum weight)
-    sort!(catalog, by = s -> (ustrip(u"inch", s.b), _total_As(s)))
+    sort!(catalog, by = s -> (ustrip(u"inch", s.b) * ustrip(u"inch", s.h), _total_As(s)))
     
     return catalog
 end
@@ -113,66 +142,144 @@ end
 # All presets are defined in materials/concrete.jl
 
 """
-    concrete_fc_ksi(mat::Concrete) -> Float64
+    concrete_fc(mat::Concrete) -> Pressure (ksi)
 
-Extract concrete compressive strength in ksi from Concrete material.
-Handles unit conversion from any pressure unit.
+Extract concrete compressive strength from Concrete material.
+Returns a Unitful quantity in ksi.
 """
-function concrete_fc_ksi(mat::Concrete)
-    ustrip(ksi, mat.fc′)
+function concrete_fc(mat::Concrete)
+    uconvert(ksi, mat.fc′)
 end
 
 """
-    concrete_fc_mpa(mat::Concrete) -> Float64
+    concrete_fc_mpa(mat::Concrete) -> Pressure (MPa)
 
-Extract concrete compressive strength in MPa from Concrete material.
+Extract concrete compressive strength from Concrete material.
+Returns a Unitful quantity in MPa.
 """
 function concrete_fc_mpa(mat::Concrete)
-    ustrip(u"MPa", mat.fc′)
+    uconvert(u"MPa", mat.fc′)
 end
 
 """
-    concrete_E_ksi(mat::Concrete) -> Float64
+    concrete_E(mat::Concrete) -> Pressure (ksi)
 
-Extract concrete elastic modulus in ksi from Concrete material.
+Extract concrete elastic modulus from Concrete material.
+Returns a Unitful quantity in ksi.
 """
-function concrete_E_ksi(mat::Concrete)
-    ustrip(ksi, mat.E)
+function concrete_E(mat::Concrete)
+    uconvert(ksi, mat.E)
 end
 
 """
-    concrete_wc_pcf(mat::Concrete) -> Float64
+    concrete_wc(mat::Concrete) -> Density (lbf/ft³)
 
-Extract concrete unit weight in pcf (lb/ft³) from Concrete material.
-Handles conversion from kg/m³ density.
+Extract concrete unit weight from Concrete material.
+Returns a Unitful quantity in lbf/ft³ (pcf).
 """
-function concrete_wc_pcf(mat::Concrete)
+function concrete_wc(mat::Concrete)
     # ρ is density in kg/m³, convert to weight in lbf/ft³
-    ustrip(u"lbf/ft^3", mat.ρ * 1u"gn")
+    uconvert(u"lbf/ft^3", mat.ρ * 1u"gn")
 end
 
 # ==============================================================================
-# Prebuilt Catalogs
+# Prebuilt Catalogs - Rectangular
 # ==============================================================================
 # Note: RCColumnDemand is defined in members/optimize/demands.jl
+#
+# Naming convention:
+#   - square_rc_columns: Square columns only (b = h)
+#   - rectangular_rc_columns: Includes rectangular aspect ratios (b ≠ h)
+#   - low_capacity_rc_columns: Smaller sizes for light loads
+#   - high_capacity_rc_columns: Larger sizes with heavy reinforcement
+#   - all_rc_rect_columns: Comprehensive catalog
+#
+# For the unified `rc_column_catalog(shape, catalog)` function, see options.jl
 
-"""Return a small catalog of common column sizes (12"-24")."""
-function common_rc_rect_columns()
+"""
+    square_rc_columns() -> Vector{RCColumnSection}
+
+Square columns only (12"-36"), no rectangular aspect ratios.
+Good default for typical buildings. ~200-400 sections.
+"""
+function square_rc_columns()
     standard_rc_columns(
-        sizes = 12:4:24,
-        bar_sizes = [6, 8, 9, 11],
-        n_bars_range = 4:4:12
+        sizes = 12:2:36,
+        bar_sizes = [5, 6, 7, 8, 9, 10, 11],
+        n_bars_range = [4, 6, 8, 10, 12, 14, 16, 20],
+        cover = 1.5u"inch",
+        include_rectangular = false
     )
 end
 
-"""Return a large catalog for optimization (10"-48")."""
+"""
+    rectangular_rc_columns() -> Vector{RCColumnSection}
+
+Square + rectangular columns (12"-36") with 1.5:1 and 2:1 aspect ratios.
+Use for buildings with directional moment demands. ~500-800 sections.
+"""
+function rectangular_rc_columns()
+    standard_rc_columns(
+        sizes = 12:2:36,
+        bar_sizes = [5, 6, 7, 8, 9, 10, 11],
+        n_bars_range = [4, 6, 8, 10, 12, 14, 16, 20],
+        cover = 1.5u"inch",
+        include_rectangular = true,
+        aspect_ratios = [1.5, 2.0]
+    )
+end
+
+"""
+    low_capacity_rc_columns() -> Vector{RCColumnSection}
+
+Smaller columns (12"-24") for low-rise or light load applications.
+Includes both square and rectangular. ~100-200 sections.
+"""
+function low_capacity_rc_columns()
+    standard_rc_columns(
+        sizes = 12:2:24,
+        bar_sizes = [5, 6, 7, 8, 9],
+        n_bars_range = [4, 6, 8, 10, 12],
+        cover = 1.5u"inch",
+        include_rectangular = true,
+        aspect_ratios = [1.5]
+    )
+end
+
+"""
+    high_capacity_rc_columns() -> Vector{RCColumnSection}
+
+Larger columns (18"-48") with heavy reinforcement (#8-#18).
+For high-rise or heavy load applications. Includes rectangular. ~400-600 sections.
+"""
+function high_capacity_rc_columns()
+    standard_rc_columns(
+        sizes = 18:2:48,
+        bar_sizes = [8, 9, 10, 11, 14, 18],
+        n_bars_range = [8, 10, 12, 14, 16, 18, 20, 24, 28],
+        cover = 2.0u"inch",
+        include_rectangular = true,
+        aspect_ratios = [1.5, 2.0, 2.5]
+    )
+end
+
+"""
+    all_rc_rect_columns() -> Vector{RCColumnSection}
+
+Comprehensive catalog (10"-48") with all bar sizes and rectangular options.
+Use for full optimization studies. ~1000+ sections.
+"""
 function all_rc_rect_columns()
     standard_rc_columns(
         sizes = 10:2:48,
         bar_sizes = [5, 6, 7, 8, 9, 10, 11, 14, 18],
-        n_bars_range = 4:2:24
+        n_bars_range = [4, 6, 8, 10, 12, 14, 16, 18, 20, 24],
+        cover = 1.5u"inch",
+        include_rectangular = true,
+        aspect_ratios = [1.25, 1.5, 2.0]
     )
 end
+
 
 # ==============================================================================
 # Circular Column Catalog
@@ -183,7 +290,7 @@ end
         diameters = 12:2:36,       # inches
         bar_sizes = [6, 7, 8, 9, 10, 11],
         n_bars_range = 6:2:16,
-        cover_in = 1.5
+        cover = 1.5u"inch"
     ) -> Vector{RCCircularSection}
 
 Generate a catalog of standard circular RC column sections.
@@ -192,7 +299,7 @@ Generate a catalog of standard circular RC column sections.
 - `diameters`: Range of column diameters (inches)
 - `bar_sizes`: Available rebar sizes
 - `n_bars_range`: Range of bar counts (minimum 6 for spiral columns)
-- `cover_in`: Clear cover (inches)
+- `cover`: Clear cover (Length with units, default 1.5")
 
 # Returns
 Vector of RCCircularSection with varying sizes and reinforcement
@@ -207,9 +314,10 @@ function standard_rc_circular_columns(;
     diameters = 12:2:36,
     bar_sizes = [6, 7, 8, 9, 10, 11],
     n_bars_range = 6:2:16,
-    cover_in = 1.5
+    cover::Length = 1.5u"inch"
 )
     catalog = RCCircularSection[]
+    cover_val = ustrip(u"inch", cover)
     
     for D_val in diameters
         D = Float64(D_val) * u"inch"
@@ -221,7 +329,7 @@ function standard_rc_circular_columns(;
             
             # Minimum diameter should fit bars with adequate spacing
             # For circular, need clearance around perimeter
-            min_cover_to_center = cover_in + 0.5 + db/2  # 0.5" for spiral
+            min_cover_to_center = cover_val + 0.5 + db/2  # 0.5" for spiral
             R_bars = D_val/2 - min_cover_to_center
             
             if R_bars < db
@@ -252,7 +360,7 @@ function standard_rc_circular_columns(;
                         D = D,
                         bar_size = bar_size,
                         n_bars = n_bars,
-                        cover = cover_in * u"inch",
+                        cover = cover,
                         tie_type = :spiral  # Circular columns typically use spiral
                     )
                     push!(catalog, section)
@@ -275,20 +383,62 @@ function _total_As_circular(section::RCCircularSection)
     sum(ustrip(u"inch^2", bar.As) for bar in section.bars)
 end
 
-"""Return a small catalog of common circular column sizes (12"-24")."""
-function common_rc_circular_columns()
+# ==============================================================================
+# Prebuilt Catalogs - Circular
+# ==============================================================================
+
+"""
+    standard_circular_columns() -> Vector{RCCircularSection}
+
+Standard circular columns (12"-36"). Good default. ~200-300 sections.
+"""
+function standard_circular_columns()
     standard_rc_circular_columns(
-        diameters = 12:4:24,
-        bar_sizes = [6, 8, 9, 10],
-        n_bars_range = 6:2:12
+        diameters = 12:2:36,
+        bar_sizes = [6, 7, 8, 9, 10, 11],
+        n_bars_range = [6, 8, 10, 12, 14, 16],
+        cover = 1.5u"inch"
     )
 end
 
-"""Return a large catalog of circular columns for optimization (12"-48")."""
+"""
+    low_capacity_circular_columns() -> Vector{RCCircularSection}
+
+Smaller circular columns (12"-24") for light loads. ~50-100 sections.
+"""
+function low_capacity_circular_columns()
+    standard_rc_circular_columns(
+        diameters = 12:2:24,
+        bar_sizes = [6, 7, 8, 9],
+        n_bars_range = [6, 8, 10, 12],
+        cover = 1.5u"inch"
+    )
+end
+
+"""
+    high_capacity_circular_columns() -> Vector{RCCircularSection}
+
+Larger circular columns (18"-60") with heavy reinforcement. ~400-600 sections.
+"""
+function high_capacity_circular_columns()
+    standard_rc_circular_columns(
+        diameters = 18:2:60,
+        bar_sizes = [8, 9, 10, 11, 14, 18],
+        n_bars_range = [8, 10, 12, 14, 16, 18, 20, 24, 28],
+        cover = 2.0u"inch"
+    )
+end
+
+"""
+    all_rc_circular_columns() -> Vector{RCCircularSection}
+
+Comprehensive circular catalog (12"-48"). ~500+ sections.
+"""
 function all_rc_circular_columns()
     standard_rc_circular_columns(
         diameters = 12:2:48,
-        bar_sizes = [5, 6, 7, 8, 9, 10, 11, 14],
-        n_bars_range = 6:2:20
+        bar_sizes = [5, 6, 7, 8, 9, 10, 11, 14, 18],
+        n_bars_range = [6, 8, 10, 12, 14, 16, 18, 20, 24]
     )
 end
+

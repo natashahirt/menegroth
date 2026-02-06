@@ -4,13 +4,18 @@
 #
 # visualize(design::BuildingDesign) - Display sized members with capacity ratios
 #
+# Modes:
+#   :sized     - (default) 3D solid geometry showing actual element sizes
+#   :deflected - Deformed shape with lines and shell meshes
+#
 # Coloring modes:
 #   :utilization  - capacity ratio gradient (green → yellow → red)
 #   :pass_fail    - binary green (ok) / red (not ok)
 #   :member_type  - color by beam/column/strut
 #   :section_type - categorical by section name
+#   :displacement - (deflected mode only) total displacement magnitude
 #
-# Section visualization:
+# Section visualization (sized mode only):
 #   :none   - just centerlines (fastest)
 #   :ends   - 2D section silhouettes at member endpoints
 #   :solid  - 3D extruded sections as composed primitives
@@ -83,51 +88,82 @@ end
 """
     _utilization_color(ratio::Float64, limits::Tuple{Float64, Float64})
 
-Map a utilization ratio to a color on the RdYlGn_r (red-yellow-green reversed) colormap.
+Map a utilization ratio to a color on the RdYlGn reversed (red-yellow-green) colormap.
+Low utilization → green, high utilization → red.
 """
 function _utilization_color(ratio::Float64, limits::Tuple{Float64, Float64})
     t = clamp((ratio - limits[1]) / (limits[2] - limits[1]), 0.0, 1.0)
-    # Use GLMakie's colormap interpolation
-    cmap = GLMakie.cgrad(:RdYlGn_r)
-    return GLMakie.Makie.interpolated_getindex(cmap, t)
+    # Sample reversed RdYlGn colormap: green at 0, red at 1
+    cmap = GLMakie.Makie.to_colormap(:RdYlGn)
+    # Reverse and interpolate
+    idx = 1.0 - t  # reverse: low ratio → high index (green), high ratio → low index (red)
+    n = length(cmap)
+    i = clamp(Int(floor(idx * (n - 1))) + 1, 1, n)
+    return cmap[i]
 end
 
 """
     visualize(design::BuildingDesign; kwargs...)
 
-Visualize a building design with sized members and capacity ratios.
+Visualize a complete building design with sized members, slabs, and foundations.
+
+This is the presentation-quality visualization for design output.
 
 # Arguments
+## Mode
+- `mode::Symbol=:sized`: Visualization mode:
+  - `:sized` - 3D solid geometry showing actual element sizes (default)
+  - `:deflected` - Deformed shape with lines for frames, shell meshes for slabs
+
+## Coloring
 - `color_by::Symbol=:utilization`: Coloring mode:
   - `:utilization` - capacity ratio gradient (green → yellow → red at 1.0)
   - `:pass_fail` - binary green (ok) / red (not ok)
   - `:member_type` - color by beam/column/strut
   - `:section_type` - categorical by section name
+  - `:displacement` - (deflected mode only) displacement magnitude
+- `utilization_limits::Tuple=(0.0, 1.0)`: Color range for utilization mode
+
+## Frame Elements (sized mode)
 - `show_sections::Symbol=:none`: Section visualization mode:
   - `:none` - just centerlines (fastest)
   - `:ends` - 2D section silhouettes at member endpoints
   - `:solid` - 3D extruded sections as composed primitives
-- `section_scale::Float64=1.0`: Scale factor for section geometry (1.0 = actual size)
+- `section_scale::Float64=1.0`: Scale factor for section geometry
 - `section_alpha::Float64=0.7`: Transparency for section geometry
-- `utilization_limits::Tuple=(0.0, 1.0)`: Color range for utilization mode
 - `show_labels::Bool=false`: Show section size labels on elements
+- `linewidth::Float64=2.0`: Line width for elements
+
+## Deflected Mode
+- `deflection_scale=:auto`: Scale factor for deflections, or `:auto` to auto-compute
+- `show_original_geometry::Bool=true`: Show original geometry as dashed reference
+
+## Slabs & Foundations (sized mode)
+- `show_slabs::Bool=true`: Show slabs as 3D boxes with designed thickness
+- `show_foundations::Bool=true`: Show foundations as 3D boxes
+- `slab_color=:lightblue`: Slab color
+- `slab_alpha::Float64=0.6`: Slab transparency
+- `foundation_color=:gray70`: Foundation color
+- `foundation_alpha::Float64=0.7`: Foundation transparency
+
+## Other
 - `show_nodes::Bool=true`: Show node markers
 - `show_supports::Bool=true`: Show support markers
-- `linewidth::Float64=2.0`: Line width for elements (when show_sections=:none)
 - `markersize::Float64=10.0`: Marker size for nodes/supports
 - `theme::Union{Nothing,Symbol}=nothing`: `:light`, `:dark`, or `nothing`
 
 # Example
 ```julia
-design = BuildingDesign(struc, params)
-# ... run design ...
-visualize(design)                              # Centerlines with utilization colors
-visualize(design, show_sections=:ends)         # Section silhouettes at ends
-visualize(design, show_sections=:solid)        # Full 3D sections
+design = design_building(struc, params)
+visualize(design)                              # Full design view with slabs + foundations
+visualize(design, mode=:deflected)             # Deflected shape view
+visualize(design, show_sections=:solid)        # With 3D member sections
 visualize(design, color_by=:pass_fail)         # Quick pass/fail check
+visualize(design, show_slabs=false)            # Hide slabs
 ```
 """
 function visualize(design::BuildingDesign;
+    mode::Symbol = :sized,
     color_by::Symbol = :utilization,
     show_sections::Symbol = :none,
     section_scale::Float64 = 1.0,
@@ -136,9 +172,18 @@ function visualize(design::BuildingDesign;
     show_labels::Bool = false,
     show_nodes::Bool = true,
     show_supports::Bool = true,
+    show_slabs::Bool = true,
+    show_foundations::Bool = true,
+    show_original_geometry::Bool = true,
+    deflection_scale = :auto,
+    slab_color = :lightblue,
+    slab_alpha::Float64 = 0.6,
+    foundation_color = :gray70,
+    foundation_alpha::Float64 = 0.7,
     linewidth::Float64 = 2.0,
     markersize::Float64 = 10.0,
-    theme::Union{Nothing, Symbol} = nothing
+    theme::Union{Nothing, Symbol} = nothing,
+    resolution::Int = 20
 )
     struc = design.structure
     skel = struc.skeleton
@@ -172,6 +217,9 @@ function visualize(design::BuildingDesign;
     if !design.summary.all_checks_pass
         title_str *= " [FAILS]"
     end
+    if mode == :deflected
+        title_str *= " (Deflected)"
+    end
     
     fig = GLMakie.Figure(size = (1200, 800))
     ax = GLMakie.Axis3(fig[1, 1], 
@@ -190,56 +238,182 @@ function visualize(design::BuildingDesign;
     label_positions = GLMakie.Point3f[]
     label_texts = String[]
     
-    # Draw elements with design-based coloring and optional section geometry
-    for (i, element) in enumerate(model.elements)
-        p1_raw, p2_raw = get_drawing_pts(element, 0.0)
-        p1 = GLMakie.Point3f(p1_raw...)
-        p2 = GLMakie.Point3f(p2_raw...)
-        
-        # Determine color based on mode
-        c = if color_by == :utilization
-            ratio = get(element_ratios, i, 0.0)
-            _utilization_color(ratio, utilization_limits)
-        elseif color_by == :pass_fail
-            get(element_ok, i, true) ? :green : :red
-        elseif color_by == :member_type
-            typ = get(element_type, i, :other)
-            get(type_colors, typ, :gray60)
-        elseif color_by == :section_type
-            sec_name = get(element_section, i, "")
-            get(section_colors_map, sec_name, :gray60)
-        else
-            :black
+    # Color data for deflected mode coloring
+    all_colors = Float64[]
+    crange = (0.0, 1.0)
+    
+    # =========================================================================
+    # MODE: DEFLECTED - deformed shape with lines and shell meshes
+    # =========================================================================
+    if mode == :deflected
+        # Draw original geometry as dashed reference
+        if show_original_geometry
+            for element in model.elements
+                p1, p2 = get_drawing_pts(element, 0.0)
+                GLMakie.lines!(ax, [p1[1], p2[1]], [p1[2], p2[2]], [p1[3], p2[3]], 
+                              color = (:gray60, 0.4), linewidth = 0.5, linestyle = :dash,
+                              transparency = true)
+            end
+            push!(leg_elems, GLMakie.LineElement(color = (:gray60, 0.4), linewidth = 1, linestyle = :dash))
+            push!(leg_labels, "Original Geometry")
         end
         
-        # Get section object for this element (if available)
-        sec_obj = get(element_section_obj, i, nothing)
-        has_section = !isnothing(sec_obj)
+        # Calculate displacement data
+        avg_len_unitful = model.nElements > 0 ? sum(getproperty.(model.elements, :length)) / model.nElements : 1.0u"m"
+        avg_len = ustrip(u"m", avg_len_unitful)
+        increment = avg_len_unitful / resolution
         
-        # Draw based on show_sections mode
-        if show_sections == :solid && has_section
-            # Draw 3D extruded section
-            draw_section_solid!(ax, sec_obj, p1, p2; 
-                color = c, alpha = section_alpha)
-        elseif show_sections == :ends && has_section
-            # Draw 2D section silhouettes at ends + centerline
-            draw_section_ends!(ax, sec_obj, p1, p2;
-                color = c, alpha = section_alpha, scale = section_scale)
-            # Also draw thin centerline for context
-            GLMakie.lines!(ax, [p1[1], p2[1]], [p1[2], p2[2]], [p1[3], p2[3]],
-                color = (c, 0.5), linewidth = 0.5, linestyle = :dash)
+        edisps = Asap.displacements(model, increment)
+        if isempty(edisps)
+            @warn "No displacement data available for deflected mode"
         else
-            # Default: just draw centerline
-            lw = haskey(element_ratios, i) ? linewidth : linewidth * 0.5
-            GLMakie.lines!(ax, [p1[1], p2[1]], [p1[2], p2[2]], [p1[3], p2[3]],
-                color = c, linewidth = lw)
+            # Auto-scale: make max displacement ~10% of avg element length
+            if deflection_scale === :auto
+                max_disp = 0.0
+                for edisp in edisps
+                    for j in 1:size(edisp.uglobal, 2)
+                        max_disp = max(max_disp, norm(edisp.uglobal[:, j]))
+                    end
+                end
+                deflection_scale = max_disp > 1e-12 ? (avg_len * 0.1) / max_disp : 1.0
+            end
+            
+            # Collect all displaced points for coloring
+            all_points = Vector{GLMakie.Point3f}[]
+            
+            for (i, edisp) in enumerate(edisps)
+                pos = edisp.basepositions .+ deflection_scale .* edisp.uglobal
+                pts = [GLMakie.Point3f(pos[1, j], pos[2, j], pos[3, j]) for j in 1:size(pos, 2)]
+                push!(all_points, pts)
+                
+                if color_by == :displacement
+                    dvals = [norm(edisp.uglobal[:, j]) for j in 1:size(edisp.uglobal, 2)]
+                    append!(all_colors, dvals)
+                end
+            end
+            
+            # Compute color range
+            if color_by == :displacement && !isempty(all_colors)
+                crange = (minimum(all_colors), maximum(all_colors))
+                if crange[1] ≈ crange[2]
+                    crange = (crange[1], crange[1] + 1.0)
+                end
+            end
+            
+            # Draw deflected elements
+            use_displacement_coloring = color_by == :displacement && !isempty(all_colors)
+            color_idx = 1
+            res = resolution + 1
+            
+            for (i, pts) in enumerate(all_points)
+                if use_displacement_coloring
+                    # Use per-point coloring
+                    local_colors = all_colors[color_idx:min(color_idx + res - 1, length(all_colors))]
+                    GLMakie.lines!(ax, pts, color = local_colors, colorrange = crange,
+                                  linewidth = linewidth, colormap = :turbo)
+                    color_idx += res
+                else
+                    # Use utilization coloring
+                    c = if color_by == :utilization
+                        ratio = get(element_ratios, i, 0.0)
+                        _utilization_color(ratio, utilization_limits)
+                    elseif color_by == :pass_fail
+                        get(element_ok, i, true) ? :green : :red
+                    elseif color_by == :member_type
+                        typ = get(element_type, i, :other)
+                        get(type_colors, typ, :gray60)
+                    else
+                        :black
+                    end
+                    lw = haskey(element_ratios, i) ? linewidth : linewidth * 0.5
+                    GLMakie.lines!(ax, pts, color = c, linewidth = lw)
+                end
+            end
+            
+            push!(leg_elems, GLMakie.LineElement(color = :steelblue, linewidth = 2))
+            push!(leg_labels, "Elements (Deflected)")
         end
         
-        # Collect label position (midpoint) if requested
-        if show_labels && haskey(element_section, i) && !isempty(element_section[i])
-            mid = (p1 .+ p2) ./ 2
-            push!(label_positions, mid)
-            push!(label_texts, element_section[i])
+        # For deflected mode, show slabs as thin surfaces at reference position
+        # (Future enhancement: draw shell mesh with actual nodal displacements)
+        if show_slabs && !isempty(struc.slabs)
+            draw_slabs!(ax, struc; color=slab_color, alpha=slab_alpha * 0.5)
+            push!(leg_elems, GLMakie.PolyElement(color = (slab_color, slab_alpha * 0.5), 
+                  strokecolor = :gray40, strokewidth = 1))
+            push!(leg_labels, "Slabs (Reference)")
+        end
+        
+    # =========================================================================
+    # MODE: SIZED - 3D solid geometry showing actual element sizes
+    # =========================================================================
+    else  # mode == :sized (default)
+        # Draw elements with design-based coloring and optional section geometry
+        for (i, element) in enumerate(model.elements)
+            p1_raw, p2_raw = get_drawing_pts(element, 0.0)
+            p1 = GLMakie.Point3f(p1_raw...)
+            p2 = GLMakie.Point3f(p2_raw...)
+            
+            # Determine color based on coloring mode
+            c = if color_by == :utilization
+                ratio = get(element_ratios, i, 0.0)
+                _utilization_color(ratio, utilization_limits)
+            elseif color_by == :pass_fail
+                get(element_ok, i, true) ? :green : :red
+            elseif color_by == :member_type
+                typ = get(element_type, i, :other)
+                get(type_colors, typ, :gray60)
+            elseif color_by == :section_type
+                sec_name = get(element_section, i, "")
+                get(section_colors_map, sec_name, :gray60)
+            else
+                :black
+            end
+            
+            # Get section object for this element (if available)
+            sec_obj = get(element_section_obj, i, nothing)
+            has_section = !isnothing(sec_obj)
+            
+            # Draw based on show_sections mode
+            if show_sections == :solid && has_section
+                # Draw 3D extruded section
+                draw_section_solid!(ax, sec_obj, p1, p2; 
+                    color = c, alpha = section_alpha)
+            elseif show_sections == :ends && has_section
+                # Draw 2D section silhouettes at ends + centerline
+                draw_section_ends!(ax, sec_obj, p1, p2;
+                    color = c, alpha = section_alpha, scale = section_scale)
+                # Also draw thin centerline for context
+                GLMakie.lines!(ax, [p1[1], p2[1]], [p1[2], p2[2]], [p1[3], p2[3]],
+                    color = (c, 0.5), linewidth = 0.5, linestyle = :dash)
+            else
+                # Default: just draw centerline
+                lw = haskey(element_ratios, i) ? linewidth : linewidth * 0.5
+                GLMakie.lines!(ax, [p1[1], p2[1]], [p1[2], p2[2]], [p1[3], p2[3]],
+                    color = c, linewidth = lw)
+            end
+            
+            # Collect label position (midpoint) if requested
+            if show_labels && haskey(element_section, i) && !isempty(element_section[i])
+                mid = (p1 .+ p2) ./ 2
+                push!(label_positions, mid)
+                push!(label_texts, element_section[i])
+            end
+        end
+        
+        # Draw slabs (3D boxes with designed thickness)
+        if show_slabs && !isempty(struc.slabs)
+            draw_slabs!(ax, struc; color=slab_color, alpha=slab_alpha)
+            push!(leg_elems, GLMakie.PolyElement(color = (slab_color, slab_alpha), 
+                  strokecolor = :gray40, strokewidth = 1))
+            push!(leg_labels, "Slabs")
+        end
+        
+        # Draw foundations (3D boxes with designed dimensions)
+        if show_foundations && !isempty(struc.foundations)
+            draw_foundations!(ax, struc; color=foundation_color, alpha=foundation_alpha)
+            push!(leg_elems, GLMakie.PolyElement(color = (foundation_color, foundation_alpha), 
+                  strokecolor = :gray40, strokewidth = 1))
+            push!(leg_labels, "Foundations")
         end
     end
     
@@ -266,8 +440,8 @@ function visualize(design::BuildingDesign;
         end
     end
     
-    # Draw labels
-    if show_labels && !isempty(label_positions)
+    # Draw labels (sized mode only)
+    if mode == :sized && show_labels && !isempty(label_positions)
         GLMakie.text!(ax, label_positions, text = label_texts,
             fontsize = 10, color = :black, align = (:center, :bottom))
     end
@@ -276,15 +450,20 @@ function visualize(design::BuildingDesign;
     sidebar = fig[1, 2] = GLMakie.GridLayout()
     row_idx = 1
     
-    # Colorbar for utilization mode
-    if color_by == :utilization
+    # Colorbar based on mode and coloring
+    if mode == :deflected && color_by == :displacement && !isempty(all_colors)
+        GLMakie.Colorbar(sidebar[row_idx, 1], 
+            limits = crange, 
+            colormap = :turbo,
+            label = "Displacement [m]")
+        row_idx += 1
+    elseif color_by == :utilization
         GLMakie.Colorbar(sidebar[row_idx, 1], 
             limits = utilization_limits, 
-            colormap = :RdYlGn_r,
+            colormap = GLMakie.cgrad(:RdYlGn, rev=true),
             label = "Capacity Ratio")
         row_idx += 1
     elseif color_by == :pass_fail
-        # Simple legend for pass/fail
         push!(leg_elems, GLMakie.LineElement(color = :green, linewidth = 3))
         push!(leg_labels, "OK (ratio ≤ 1.0)")
         push!(leg_elems, GLMakie.LineElement(color = :red, linewidth = 3))
@@ -300,17 +479,25 @@ function visualize(design::BuildingDesign;
     
     # Add legend
     if !isempty(leg_elems)
-        GLMakie.Legend(sidebar[row_idx, 1], leg_elems, leg_labels, "Design")
+        GLMakie.Legend(sidebar[row_idx, 1], leg_elems, leg_labels, 
+            mode == :deflected ? "Deflected" : "Design")
     end
     
     # Add summary text
     row_idx += 1
     summary = design.summary
-    summary_text = """
-    Critical: $(summary.critical_element)
-    Max ratio: $(round(summary.critical_ratio, digits=3))
-    All pass: $(summary.all_checks_pass ? "✓" : "✗")
-    """
+    summary_text = if mode == :deflected
+        """
+        Mode: Deflected Shape
+        Scale: $(round(deflection_scale, digits=1))x
+        """
+    else
+        """
+        Critical: $(summary.critical_element)
+        Max ratio: $(round(summary.critical_ratio, digits=3))
+        All pass: $(summary.all_checks_pass ? "✓" : "✗")
+        """
+    end
     GLMakie.Label(sidebar[row_idx, 1], summary_text, 
         fontsize = 12, halign = :left, valign = :top)
     

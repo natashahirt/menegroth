@@ -41,6 +41,9 @@ include("./core/_core.jl")
 # Design workflow (uses both building_types and design_types)
 include("design_workflow.jl")
 
+# Geometry utilities (frame lines, slab validation)
+include("./geometry/_geometry.jl")
+
 # Other modules
 include("./generate/_generate.jl")
 include("./visualization/_visualization.jl")
@@ -79,11 +82,12 @@ export cell_edge_tributaries, cell_strip_geometry, has_cell_tributaries
 export clear_tributary_cache!, list_cached_tributary_keys
 
 # --- Design types ---
-export DesignParameters
-export BuildingDesign, SlabDesignResult, ColumnDesignResult, BeamDesignResult
+export DesignParameters, FoundationParameters
+export BuildingDesign, SlabDesignResult, ColumnDesignResult, BeamDesignResult, FoundationDesignResult
 export PunchingCheckResult, StripReinforcementDesign, DesignSummary
 export structure, skeleton  # BuildingDesign accessors
-export slab_design, column_design, beam_design, all_ok, critical_ratio
+export slab_design, column_design, beam_design, foundation_design, all_ok, critical_ratio
+export has_analysis_model, build_analysis_model!
 
 # --- Design workflow ---
 export design_building, compare_designs
@@ -100,6 +104,7 @@ export ASCE7_STRENGTH_COMBINATIONS, GRAVITY_COMBINATIONS
 export AbstractMember, MemberBase, Beam, Column, Strut
 export all_members, segment_indices, member_length, unbraced_length
 export group_id, section, volumes, set_group_id!, set_section!, set_volumes!
+export classify_column_position, is_exterior_support  # Column position classification for DDM/EFM
 export Support, Foundation, FoundationGroup, FoundationDemand
 
 # --- Visualization ---
@@ -107,6 +112,7 @@ export visualize
 export visualize_cell_groups, visualize_cell_tributary, visualize_cell_tributaries
 export visualize_vertex_tributaries, visualize_tributaries_combined
 export vis_embodied_carbon_summary
+export draw_slab!, draw_slabs!, slab_info, slab_summary_text
 
 # --- Building operations ---
 export add_vertex!, add_element!, find_faces!, rebuild_stories!, to_asap!
@@ -119,6 +125,13 @@ export find_vertex, find_edge, find_face, validate_lookup
 
 # --- Geometry query helpers (avoid exposing Meshes to downstream) ---
 export edge_length, face_area, vertex_coords, edge_vertices, face_vertices
+export is_convex_face
+
+# --- Frame lines and slab geometry ---
+export FrameLine, perpendicular, direction_vector
+export n_spans, n_joints, is_end_span, get_span_supports
+export is_convex_polygon, decompose_to_rectangles, group_by_connectivity
+export validate_and_split_slab, build_cell_grid, CellGrid
 export initialize_cells!, initialize_slabs!
 export initialize_segments!, initialize_members!, update_bracing!
 export build_slab_groups!, build_cell_groups!, compute_cell_tributaries!
@@ -129,6 +142,9 @@ export build_member_groups!, member_group_demands, size_members_discrete!
 export size_columns!
 export rc_section_to_asap
 export estimate_column_sizes!
+
+# --- Slab summary ---
+export slab_summary
 
 # --- Foundation sizing ---
 export initialize_supports!, initialize_foundations!, size_foundations!

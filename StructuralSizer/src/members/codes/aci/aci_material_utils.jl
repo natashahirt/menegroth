@@ -131,10 +131,12 @@ fc_ksi(mat::NamedTuple) = Float64(mat.fc)  # Already in ksi
 
 """Extract rebar yield strength fy in ksi."""
 fy_ksi(mat::ReinforcedConcreteMaterial) = to_ksi(mat.rebar.Fy)
+fy_ksi(mat::RebarSteel) = to_ksi(mat.Fy)  # Direct rebar material
 fy_ksi(mat::NamedTuple) = Float64(mat.fy)  # Already in ksi
 
 """Extract rebar elastic modulus Es in ksi."""
 Es_ksi(mat::ReinforcedConcreteMaterial) = to_ksi(mat.rebar.E)
+Es_ksi(mat::RebarSteel) = to_ksi(mat.E)  # Direct rebar material
 Es_ksi(mat::NamedTuple) = haskey(mat, :Es) ? Float64(mat.Es) : 29000.0
 
 """Extract ultimate compressive strain εcu."""

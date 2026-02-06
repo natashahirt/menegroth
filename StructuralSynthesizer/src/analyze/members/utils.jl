@@ -74,12 +74,13 @@ function initialize_members!(struc::BuildingStructure{T};
             # Determine story from edge level
             story = get_edge_story(skel, edge_idx)
             
-            # Classify position based on connectivity
-            position = classify_column_position(skel, vertex_idx)
+            # Classify position based on boundary edges (robust method)
+            position, boundary_edge_dirs = classify_column_position(skel, vertex_idx)
             
             col = Column(seg_idx, seg.L; 
                         Lb=seg.Lb, Kx=default_Kx, Ky=default_Ky, Cb=seg.Cb,
-                        vertex_idx=vertex_idx, story=story, position=position)
+                        vertex_idx=vertex_idx, story=story, position=position,
+                        boundary_edge_dirs=boundary_edge_dirs)
             push!(struc.columns, col)
             
         elseif edge_idx in brace_edges
@@ -216,8 +217,24 @@ function compute_column_tributaries!(struc::BuildingStructure{T}) where T
             col_polygons[key])
     end
     
+    # Populate tributary fields directly on each Column for Sizer access
+    n_populated = 0
+    for col in struc.columns
+        key = (col.story, col.vertex_idx)
+        if haskey(col_by_cell, key)
+            col.tributary_cell_indices = Set(keys(col_by_cell[key]))
+            # Store areas as raw Float64 in m² for Sizer to use without Unitful lookups
+            col.tributary_cell_areas = Dict{Int, Float64}(
+                cell_idx => ustrip(u"m^2", area) 
+                for (cell_idx, area) in col_by_cell[key]
+            )
+            n_populated += 1
+        end
+    end
+    
+    
     n_cached = length(col_totals)
-    @debug "Computed Voronoi tributary areas" columns_with_tribs=n_cached total_columns=length(struc.columns)
+    @info "Computed Voronoi tributary areas" columns_with_tribs=n_cached total_columns=length(struc.columns) columns_populated=n_populated
     
     return struc
 end
@@ -244,33 +261,122 @@ function get_edge_story(skel::BuildingSkeleton, edge_idx::Int)
 end
 
 """
-    classify_column_position(skel, vertex_idx) -> Symbol
+    classify_column_position(skel, vertex_idx) -> (position::Symbol, boundary_edge_dirs::Vector{NTuple{2,Float64}})
 
-Classify column position based on number of connected horizontal edges at ground level.
-- 4+ connections → :interior
-- 2 connections → :corner  
-- 3 connections → :edge
+Classify column position based on whether it touches boundary edges (edges in only one face).
+
+A boundary edge is one that belongs to exactly one face (building perimeter).
+This is more robust than counting neighbors, and provides directional information
+needed for DDM/EFM analysis.
+
+# Returns
+- `position`: :interior (no boundary edges), :edge (1 boundary edge), :corner (2+ boundary edges)
+- `boundary_edge_dirs`: Unit vectors along each boundary edge (for DDM exterior support detection)
 """
 function classify_column_position(skel::BuildingSkeleton, vertex_idx::Int)
-    # Count horizontal edges connected to this vertex at ground level
-    neighbors = Graphs.neighbors(skel.graph, vertex_idx)
+    v_coords = Meshes.coords(skel.vertices[vertex_idx])
+    v_z = v_coords.z
+    v_x = ustrip(u"m", v_coords.x)
+    v_y = ustrip(u"m", v_coords.y)
     
-    # Filter to horizontal edges (same z-level)
-    v_z = Meshes.coords(skel.vertices[vertex_idx]).z
+    # Get all horizontal neighbors
+    neighbors = Graphs.neighbors(skel.graph, vertex_idx)
     horizontal_neighbors = filter(neighbors) do n_idx
         n_z = Meshes.coords(skel.vertices[n_idx]).z
-        abs(n_z - v_z) < 0.01u"m"  # Same level (within tolerance)
+        abs(n_z - v_z) < 0.01u"m"
     end
     
-    n_connections = length(horizontal_neighbors)
+    # Check each horizontal edge for boundary status
+    boundary_edge_dirs = NTuple{2, Float64}[]
     
-    if n_connections >= 4
-        return :interior
-    elseif n_connections <= 2
-        return :corner
+    for n_idx in horizontal_neighbors
+        # Find the edge index for this vertex pair
+        edge_idx = find_edge(skel, vertex_idx, n_idx)
+        isnothing(edge_idx) && continue
+        
+        # Is this edge a boundary edge? (only belongs to one face)
+        faces_with_edge = count(skel.face_edge_indices) do face_edges
+            edge_idx in face_edges
+        end
+        
+        if faces_with_edge == 1
+            # This is a boundary edge — record its direction
+            n_coords = Meshes.coords(skel.vertices[n_idx])
+            dx = ustrip(u"m", n_coords.x) - v_x
+            dy = ustrip(u"m", n_coords.y) - v_y
+            len = hypot(dx, dy)
+            if len > 1e-9
+                push!(boundary_edge_dirs, (dx/len, dy/len))
+            end
+        end
+    end
+    
+    # Classify based on boundary edge count
+    n_boundary = length(boundary_edge_dirs)
+    
+    position = if n_boundary == 0
+        :interior
+    elseif n_boundary >= 2
+        :corner
     else
-        return :edge
+        :edge
     end
+    
+    return (position, boundary_edge_dirs)
+end
+
+"""
+    is_exterior_support(col::Column, span_axis::NTuple{2, Float64}) -> Bool
+
+Determine if a column is an exterior support for spans in the given direction.
+
+For DDM/EFM analysis, a support is "exterior" if the slab does not continue 
+beyond it in the span direction. This is indicated by a boundary edge that
+is perpendicular to the span axis (the boundary edge runs along the support line).
+
+# Arguments
+- `col`: Column with `boundary_edge_dirs` populated
+- `span_axis`: Unit vector in the span direction (e.g., (1.0, 0.0) for X-direction)
+
+# Returns
+`true` if the column is an exterior support for this span direction.
+
+# Examples
+- Interior column: always returns `false`
+- Corner column: always returns `true` (exterior in all directions)
+- Edge column: returns `true` only if a boundary edge is perpendicular to span_axis
+"""
+function is_exterior_support(col::Column, span_axis::NTuple{2, Float64})::Bool
+    # Interior columns are never exterior supports
+    isempty(col.boundary_edge_dirs) && return false
+    
+    # Normalize span axis
+    ax_len = hypot(span_axis...)
+    ax_len < 1e-9 && return false
+    ax = (span_axis[1]/ax_len, span_axis[2]/ax_len)
+    
+    # Check if any boundary edge is perpendicular to span axis
+    # (A boundary edge perpendicular to the span means the slab ends at this support)
+    for dir in col.boundary_edge_dirs
+        # Perpendicularity: dot product ≈ 0
+        dot_product = abs(ax[1]*dir[1] + ax[2]*dir[2])
+        if dot_product < 0.3  # Edge is roughly perpendicular to span (within ~73°)
+            return true
+        end
+    end
+    
+    return false
+end
+
+# Convenience overload with direction symbol
+"""
+    is_exterior_support(col::Column, span_direction::Symbol) -> Bool
+
+Convenience method using `:x` or `:y` for span direction.
+"""
+function is_exterior_support(col::Column, span_direction::Symbol)::Bool
+    span_axis = span_direction == :x ? (1.0, 0.0) : (0.0, 1.0)
+    return is_exterior_support(col, span_axis)
 end
 
 """
@@ -405,7 +511,9 @@ function member_group_demands(struc::BuildingStructure; member_edge_group::Symbo
     all_group_ids = sort!(collect(keys(struc.member_groups)))  # deterministic ordering
 
     group_ids = UInt64[]
-    demands = StructuralSizer.MemberDemand{Float64}[]
+    # `StructuralSizer.MemberDemand(idx; ...)` intentionally returns `MemberDemand{Any}`
+    # to support mixed numeric types (and Unitful quantities in some callers).
+    demands = StructuralSizer.MemberDemand{Any}[]
     
     # We enforce base SI units (meters) for geometry passed to the optimizer,
     # consistent with `get_segment_length` returning meters for Float64 structures.
@@ -776,13 +884,13 @@ function _size_columns_impl!(
     geometries = [StructuralSizer.ConcreteMemberGeometry(L; Lu=Lb, k=Ky)
                   for (L, Lb, Ky) in zip(L_totals, Lb_govs, Ky_govs)]
     
-    # Convert demands: N/N*m → kip/kip*ft for concrete
-    Pu_kip = [ustrip(uconvert(Asap.kip, d.Pu_c * u"N")) for d in demands]
-    Mux_kipft = [ustrip(uconvert(Asap.kip*u"ft", d.Mux * u"N*m")) for d in demands]
-    Muy_kipft = [ustrip(uconvert(Asap.kip*u"ft", d.Muy * u"N*m")) for d in demands]
+    # Convert demands to Unitful quantities then strip for size_columns API
+    Pu = [uconvert(Asap.kip, d.Pu_c * u"N") for d in demands]
+    Mux = [uconvert(Asap.kip*u"ft", d.Mux * u"N*m") for d in demands]
+    Muy = [uconvert(Asap.kip*u"ft", d.Muy * u"N*m") for d in demands]
     
-    # Run optimization
-    result = StructuralSizer.size_columns(Pu_kip, Mux_kipft, geometries, opts; Muy=Muy_kipft)
+    # Run optimization (size_columns expects stripped values in kip, kip*ft)
+    result = StructuralSizer.size_columns(ustrip.(Pu), ustrip.(Mux), geometries, opts; Muy=ustrip.(Muy))
     
     # Apply results
     _apply_column_results!(struc, result, group_ids, opts.grade, :concrete, edge_ids_in_group)
@@ -898,6 +1006,9 @@ function estimate_column_sizes!(struc::BuildingStructure;
     
     estimated_count = 0
     
+    # Get average span for punching-based column sizing (flat plate design)
+    avg_span = _estimate_avg_span(skel)
+    
     for col in struc.columns
         # Number of stories above this column
         n_above = n_total_stories - col.story
@@ -909,7 +1020,6 @@ function estimate_column_sizes!(struc::BuildingStructure;
             
             if isnothing(At) || ustrip(u"m^2", At) <= 0
                 # Fall back to span-based estimate
-                avg_span = _estimate_avg_span(skel)
                 c = StructuralSizer.estimate_column_size_from_span(avg_span)
                 col.c1 = c
                 col.c2 = c
@@ -917,8 +1027,9 @@ function estimate_column_sizes!(struc::BuildingStructure;
                 # Get average load from adjacent cells
                 qu = _get_column_load_intensity(struc, col, qu_default)
                 
-                # Estimate column size (At already has units from accessor)
-                c = StructuralSizer.estimate_column_size(At, qu, n_above, fc)
+                # Estimate column size considering both axial load AND punching shear
+                # Pass span for punching-based minimum (c ≥ span/15 per StructurePoint)
+                c = StructuralSizer.estimate_column_size(At, qu, n_above, fc; span=avg_span)
                 
                 # Rectangular for edge/corner columns (optional)
                 if col.position == :interior

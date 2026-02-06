@@ -142,24 +142,30 @@ using Test
         end
 
         # -------------------------
-        # Rectangular HSS compression (E3 + placeholder Ae reduction)
+        # Rectangular HSS compression (E3 + E7 effective width)
         # -------------------------
         @testset "Rect HSS compression reduces area when slender" begin
-            s = HSSRectSection(0.30u"m", 0.30u"m", 0.002u"m")
+            s = HSSRectSection(0.30u"m", 0.30u"m", 0.002u"m")  # Very slender (b/t ≈ 147)
             L = 3.0u"m"
 
             lim = StructuralSizer.get_compression_limits(s, mat)
-            @test max(lim.λ_f, lim.λ_w) > lim.λr
-
-            Ae = s.A * (lim.λr / max(lim.λ_f, lim.λ_w))
+            @test max(lim.λ_f, lim.λ_w) > lim.λr  # Confirm slender
+            
+            # E7 effective area reduces capacity compared to gross area
+            # For slender sections, Pn with effective area < Pn with gross area
             r = s.ry
             Fe = π^2 * mat.E / (L / r)^2
             ratio = mat.Fy / Fe
             Fcr = ratio <= 2.25 ? (0.658^ratio) * mat.Fy : 0.877 * Fe
-            Pn_expected = Fcr * Ae
-
+            Pn_gross = Fcr * s.A  # Would get if no local buckling
+            
             Pn = get_Pn(s, mat, L; axis=:weak)
-            @test isapprox(Pn, Pn_expected; rtol=1e-10)
+            @test Pn < Pn_gross  # Effective area reduces capacity
+            @test Pn > 0u"N"     # But capacity is still positive
+            
+            # Verify E7 effective width formula is applied
+            # For this very slender section, reduction should be significant (< 80% of gross)
+            @test Pn / Pn_gross < 0.8
         end
 
         # -------------------------

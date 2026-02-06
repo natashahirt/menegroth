@@ -342,3 +342,31 @@ edge_vertices(skel::BuildingSkeleton, edge_idx::Int) = skel.edge_indices[edge_id
 Return the vertex indices for the face at `face_idx`.
 """
 face_vertices(skel::BuildingSkeleton, face_idx::Int) = skel.face_vertex_indices[face_idx]
+
+"""
+    is_convex_face(skel, face_idx) -> Bool
+
+Check if a face in the skeleton is convex.
+
+Convenience wrapper around `Asap.is_convex_polygon` for BuildingSkeleton faces.
+
+# Example
+```julia
+if is_convex_face(skel, face_idx)
+    # Use DDM/EFM directly
+else
+    # Need to split into rectangular regions
+end
+```
+"""
+function is_convex_face(skel::BuildingSkeleton, face_idx::Int)
+    v_indices = skel.face_vertex_indices[face_idx]
+    
+    # Extract 2D vertices (x, y) from skeleton
+    vertices_2d = map(v_indices) do vi
+        c = Meshes.coords(skel.vertices[vi])
+        (Float64(ustrip(c.x)), Float64(ustrip(c.y)))
+    end
+    
+    return Asap.is_convex_polygon(vertices_2d)
+end

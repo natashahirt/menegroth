@@ -52,18 +52,17 @@ Calculate slenderness ratio kLu/r per ACI 318-19.
 - Slenderness ratio (dimensionless)
 """
 function slenderness_ratio(section::RCColumnSection, geometry)
+    # Note: This function works internally in inches (ACI convention)
     # Radius of gyration: r = 0.3h for rectangular sections (ACI 6.2.5.2)
-    h_in = to_inches(section.h)
-    r_in = 0.3 * h_in
+    h = to_inches(section.h)
+    r = 0.3 * h
     
     # Unsupported length - ConcreteMemberGeometry stores Lu in meters or inches
-    Lu_in = geometry.Lu isa Unitful.Length ? 
-            to_inches(geometry.Lu) : 
-            geometry.Lu * 39.37  # meters to inches
+    Lu = geometry.Lu isa Unitful.Length ? 
+         to_inches(geometry.Lu) : 
+         geometry.Lu * 39.37  # meters → inches
     
-    k = geometry.k
-    
-    return k * Lu_in / r_in
+    return geometry.k * Lu / r
 end
 
 """
@@ -140,10 +139,10 @@ function effective_stiffness(
     Es = Es_ksi(mat)
     Ec = Ec_ksi(mat)
     
-    # Gross moment of inertia
-    b_in = to_inches(section.b)
-    h_in = to_inches(section.h)
-    Ig = b_in * h_in^3 / 12  # in⁴
+    # Gross moment of inertia (units: in⁴)
+    b = to_inches(section.b)
+    h = to_inches(section.h)
+    Ig = b * h^3 / 12
     
     if method == :accurate
         # Method (b): Accounts for reinforcement
@@ -158,20 +157,21 @@ function effective_stiffness(
     return EI_eff  # kip-in²
 end
 
-"""Calculate moment of inertia of reinforcement about section centroid."""
+"""Calculate moment of inertia of reinforcement about section centroid (returns in⁴)."""
 function _calc_Ise(section::RCColumnSection)
-    h_in = to_inches(section.h)
-    centroid = h_in / 2
+    # All computations in inches
+    h = to_inches(section.h)
+    centroid = h / 2
     
     Ise = 0.0
     for bar in section.bars
-        y_bar = to_inches(bar.y)
-        As_bar = to_sqinches(bar.As)
-        d = y_bar - centroid  # Distance from centroid
-        Ise += As_bar * d^2   # Parallel axis theorem (ignore bar's own I)
+        y = to_inches(bar.y)
+        As = to_sqinches(bar.As)
+        d = y - centroid  # Distance from centroid
+        Ise += As * d^2   # Parallel axis theorem (ignore bar's own I)
     end
     
-    return Ise  # in⁴
+    return Ise
 end
 
 # ==============================================================================
@@ -196,12 +196,11 @@ function critical_buckling_load(
 )
     EI_eff = effective_stiffness(section, mat; βdns=βdns)
     
-    # Effective length
-    Lu_in = geometry.Lu isa Unitful.Length ?
-            to_inches(geometry.Lu) :
-            geometry.Lu * 39.37  # m to in
-    k = geometry.k
-    kLu = k * Lu_in
+    # Effective length (inches)
+    Lu = geometry.Lu isa Unitful.Length ?
+         to_inches(geometry.Lu) :
+         geometry.Lu * 39.37  # m → in
+    kLu = geometry.k * Lu
     
     # Critical load
     Pc = π^2 * EI_eff / kLu^2
@@ -285,10 +284,10 @@ M_min = Pu * (0.6 + 0.03h)
 # Returns
 - Minimum moment (kip-ft)
 """
-function minimum_moment(Pu::Real, h_in::Real)
-    # M_min = Pu * (0.6 + 0.03h) [in kip-in, then convert to kip-ft]
-    M_min = Pu * (0.6 + 0.03 * h_in) / 12
-    return M_min  # kip-ft
+function minimum_moment(Pu::Real, h::Real)
+    # M_min = Pu × (0.6" + 0.03×h) per ACI 6.6.4.5.4
+    # Pu in kip, h in inches → result in kip-in, converted to kip-ft
+    return Pu * (0.6 + 0.03 * h) / 12
 end
 
 """
@@ -331,11 +330,11 @@ function magnify_moment_nonsway(
 )
     # Check if slenderness should be considered
     slender = should_consider_slenderness(section, geometry; M1=M1, M2=M2)
-    h_in = to_inches(section.h)
+    h = to_inches(section.h)  # inches for ACI formula
     
     if !slender
         # No magnification needed
-        M_min = minimum_moment(Pu, h_in)
+        M_min = minimum_moment(Pu, h)
         Mc = max(abs(M2), M_min)
         return (Mc=Mc, δns=1.0, Cm=1.0, Pc=Inf, slender=false)
     end
@@ -350,7 +349,7 @@ function magnify_moment_nonsway(
     δns = magnification_factor_nonsway(Pu, Pc; Cm=Cm)
     
     # Magnified moment
-    M_min = minimum_moment(Pu, h_in)
+    M_min = minimum_moment(Pu, h)
     Mc = max(δns * abs(M2), M_min)
     
     return (Mc=Mc, δns=δns, Cm=Cm, Pc=Pc, slender=true)
@@ -424,7 +423,7 @@ end
 # ==============================================================================
 
 """
-    StoryProperties
+    SwayStoryProperties
 
 Properties of a story for sway frame analysis per ACI 318-19 Section 6.6.4.
 
@@ -435,7 +434,7 @@ Properties of a story for sway frame analysis per ACI 318-19 Section 6.6.4.
 - `Δo`: First-order relative story drift (in)
 - `lc`: Story height from center-to-center of joints (in)
 """
-struct StoryProperties
+struct SwayStoryProperties
     ΣPu::Float64
     ΣPc::Float64
     Vus::Float64
@@ -444,7 +443,7 @@ struct StoryProperties
 end
 
 """
-    stability_index(story::StoryProperties) -> Float64
+    stability_index(story::SwayStoryProperties) -> Float64
 
 Calculate story stability index Q per ACI 318-19 (6.6.4.4.1).
 
@@ -456,7 +455,7 @@ Q = (ΣPu × Δo) / (Vus × lc)
 # Reference
 ACI 318-19 6.6.4.3: Story is sway if Q > 0.05
 """
-function stability_index(story::StoryProperties)
+function stability_index(story::SwayStoryProperties)
     if story.Vus ≈ 0 || story.lc ≈ 0
         return Inf  # Undefined without lateral load
     end
@@ -464,13 +463,13 @@ function stability_index(story::StoryProperties)
 end
 
 """
-    is_sway_frame(story::StoryProperties) -> Bool
+    is_sway_frame(story::SwayStoryProperties) -> Bool
 
 Determine if story is a sway frame per ACI 318-19 6.6.4.3.
 
 A story is sway if Q > 0.05.
 """
-function is_sway_frame(story::StoryProperties)
+function is_sway_frame(story::SwayStoryProperties)
     Q = stability_index(story)
     return Q > 0.05
 end
@@ -539,9 +538,10 @@ function effective_stiffness_sway(
     Es = Es_ksi(mat)
     Ec = Ec_ksi(mat)
     
-    b_in = to_inches(section.b)
-    h_in = to_inches(section.h)
-    Ig = b_in * h_in^3 / 12
+    # Section dimensions (inches) for Ig calculation
+    b = to_inches(section.b)
+    h = to_inches(section.h)
+    Ig = b * h^3 / 12  # in⁴
     
     if method == :accurate
         Ise = _calc_Ise(section)
@@ -580,21 +580,20 @@ function critical_buckling_load_sway(
 )
     EI_eff = effective_stiffness_sway(section, mat; βds=βds)
     
-    Lu_in = geometry.Lu isa Unitful.Length ?
-            to_inches(geometry.Lu) :
-            geometry.Lu * 39.37
-    k = geometry.k
-    kLu = k * Lu_in
+    # Effective length (inches)
+    Lu = geometry.Lu isa Unitful.Length ?
+         to_inches(geometry.Lu) :
+         geometry.Lu * 39.37
+    kLu = geometry.k * Lu
     
-    Pc = π^2 * EI_eff / kLu^2
-    return Pc
+    return π^2 * EI_eff / kLu^2  # kip
 end
 
 """
     magnify_moment_sway_complete(
         section, mat, geometry,
         Pu, M1ns, M2ns, M1s, M2s;
-        story::Union{Nothing, StoryProperties}=nothing,
+        story::Union{Nothing, SwayStoryProperties}=nothing,
         βds::Real=0.0, βdns::Real=0.6,
         transverse_load::Bool=false
     ) -> NamedTuple
@@ -640,12 +639,13 @@ function magnify_moment_sway_complete(
     Pu::Real,
     M1ns::Real, M2ns::Real,
     M1s::Real, M2s::Real;
-    story::Union{Nothing, StoryProperties} = nothing,
+    story::Union{Nothing, SwayStoryProperties} = nothing,
     βds::Real = 0.0,
     βdns::Real = 0.6,
     transverse_load::Bool = false
 )
-    h_in = to_inches(section.h)
+    # Section height (inches) for minimum moment and radius of gyration
+    h = to_inches(section.h)
     
     # =========================================================================
     # Step 1: Calculate δs (sway magnification at ends)
@@ -694,13 +694,13 @@ function magnify_moment_sway_complete(
     k_nonsway = 1.0  # For members braced against sidesway (after sway magnification)
     
     # Calculate slenderness ratio for non-sway check
-    h_in = to_inches(section.h)
-    r_in = 0.3 * h_in
-    Lu_in = geometry.Lu isa Unitful.Length ?
-            to_inches(geometry.Lu) :
-            geometry.Lu * 39.37
+    # h already defined above; r = 0.3h for rectangular sections
+    r = 0.3 * h
+    Lu = geometry.Lu isa Unitful.Length ?
+         to_inches(geometry.Lu) :
+         geometry.Lu * 39.37
     
-    λ = k_nonsway * Lu_in / r_in
+    λ = k_nonsway * Lu / r
     
     # Check if along-length magnification is needed
     M_ratio = M2 ≈ 0 ? 0.0 : M1 / M2
@@ -727,7 +727,7 @@ function magnify_moment_sway_complete(
         δns = magnification_factor_nonsway(Pu, Pc; Cm=Cm)
         
         # Final design moment (ACI 6.6.4.6.4)
-        M_min = minimum_moment(Pu, h_in)
+        M_min = minimum_moment(Pu, h)
         Mc = max(δns * max(abs(M1), abs(M2)), M_min)
         
         length_magnified = δns > 1.0
@@ -764,8 +764,9 @@ function effective_stiffness_sway(
     Es = Es_ksi(mat)
     Ec = Ec_ksi(mat)
     
-    D_in = to_inches(section.D)
-    Ig = π * D_in^4 / 64
+    # Diameter (inches) for Ig calculation
+    D = to_inches(section.D)
+    Ig = π * D^4 / 64  # in⁴
     
     if method == :accurate
         Ise = _calc_Ise(section)
@@ -790,14 +791,13 @@ function critical_buckling_load_sway(
 )
     EI_eff = effective_stiffness_sway(section, mat; βds=βds)
     
-    Lu_in = geometry.Lu isa Unitful.Length ?
-            to_inches(geometry.Lu) :
-            geometry.Lu * 39.37
-    k = geometry.k
-    kLu = k * Lu_in
+    # Effective length (inches)
+    Lu = geometry.Lu isa Unitful.Length ?
+         to_inches(geometry.Lu) :
+         geometry.Lu * 39.37
+    kLu = geometry.k * Lu
     
-    Pc = π^2 * EI_eff / kLu^2
-    return Pc
+    return π^2 * EI_eff / kLu^2  # kip
 end
 
 """
@@ -812,13 +812,14 @@ function magnify_moment_sway_complete(
     Pu::Real,
     M1ns::Real, M2ns::Real,
     M1s::Real, M2s::Real;
-    story::Union{Nothing, StoryProperties} = nothing,
+    story::Union{Nothing, SwayStoryProperties} = nothing,
     βds::Real = 0.0,
     βdns::Real = 0.6,
     transverse_load::Bool = false
 )
-    D_in = to_inches(section.D)
-    r_in = 0.25 * D_in
+    # Diameter and radius of gyration (inches)
+    D = to_inches(section.D)
+    r = 0.25 * D  # r = 0.25D for circular sections (ACI 6.2.5.2)
     
     # Step 1: Calculate δs
     Q = NaN
@@ -836,11 +837,11 @@ function magnify_moment_sway_complete(
     
     # Step 3: Check along-length slenderness
     k_nonsway = 1.0
-    Lu_in = geometry.Lu isa Unitful.Length ?
-            to_inches(geometry.Lu) :
-            geometry.Lu * 39.37
+    Lu = geometry.Lu isa Unitful.Length ?
+         to_inches(geometry.Lu) :
+         geometry.Lu * 39.37
     
-    λ = k_nonsway * Lu_in / r_in
+    λ = k_nonsway * Lu / r
     M_ratio = M2 ≈ 0 ? 0.0 : M1 / M2
     limit = min(34 - 12 * M_ratio, 40)
     
@@ -854,7 +855,7 @@ function magnify_moment_sway_complete(
         Cm = calc_Cm(M1, M2; transverse_load=transverse_load)
         δns = magnification_factor_nonsway(Pu, Pc; Cm=Cm)
         
-        M_min = minimum_moment(Pu, D_in)
+        M_min = minimum_moment(Pu, D)
         Mc = max(δns * max(abs(M1), abs(M2)), M_min)
         length_magnified = δns > 1.0
     end
@@ -882,18 +883,17 @@ Calculate slenderness ratio kLu/r for circular sections.
 Per ACI 318-19 6.2.5.2: r = 0.25D for circular sections.
 """
 function slenderness_ratio(section::RCCircularSection, geometry)
+    # Note: This function works internally in inches (ACI convention)
     # Radius of gyration: r = 0.25D for circular sections (ACI 6.2.5.2)
-    D_in = to_inches(section.D)
-    r_in = 0.25 * D_in
+    D = to_inches(section.D)
+    r = 0.25 * D
     
-    # Unsupported length - ConcreteMemberGeometry stores Lu in meters or inches
-    Lu_in = geometry.Lu isa Unitful.Length ? 
-            to_inches(geometry.Lu) : 
-            geometry.Lu * 39.37  # meters to inches
+    # Unsupported length
+    Lu = geometry.Lu isa Unitful.Length ? 
+         to_inches(geometry.Lu) : 
+         geometry.Lu * 39.37  # m → in
     
-    k = geometry.k
-    
-    return k * Lu_in / r_in
+    return geometry.k * Lu / r
 end
 
 """
@@ -936,8 +936,8 @@ function effective_stiffness(
     Ec = Ec_ksi(mat)
     
     # Gross moment of inertia for circular: Ig = πD⁴/64
-    D_in = to_inches(section.D)
-    Ig = π * D_in^4 / 64  # in⁴
+    D = to_inches(section.D)
+    Ig = π * D^4 / 64  # in⁴
     
     if method == :accurate
         Ise = _calc_Ise(section)
@@ -949,10 +949,11 @@ function effective_stiffness(
     return EI_eff  # kip-in²
 end
 
-"""Calculate moment of inertia of reinforcement for circular section."""
+"""Calculate moment of inertia of reinforcement for circular section (returns in⁴)."""
 function _calc_Ise(section::RCCircularSection)
-    D_in = to_inches(section.D)
-    centroid = D_in / 2  # Center of circle
+    # All computations in inches
+    D = to_inches(section.D)
+    centroid = D / 2  # Center of circle
     
     Ise = 0.0
     for bar in section.bars
@@ -978,14 +979,13 @@ function critical_buckling_load(
 )
     EI_eff = effective_stiffness(section, mat; βdns=βdns)
     
-    Lu_in = geometry.Lu isa Unitful.Length ?
-            to_inches(geometry.Lu) :
-            geometry.Lu * 39.37
-    k = geometry.k
-    kLu = k * Lu_in
+    # Effective length (inches)
+    Lu = geometry.Lu isa Unitful.Length ?
+         to_inches(geometry.Lu) :
+         geometry.Lu * 39.37
+    kLu = geometry.k * Lu
     
-    Pc = π^2 * EI_eff / kLu^2
-    return Pc  # kip
+    return π^2 * EI_eff / kLu^2  # kip
 end
 
 """
@@ -1006,11 +1006,11 @@ function magnify_moment_nonsway(
 )
     slender = should_consider_slenderness(section, geometry; M1=M1, M2=M2)
     
-    # Use diameter for minimum moment calculation
-    D_in = to_inches(section.D)
+    # Use diameter (inches) for minimum moment calculation
+    D = to_inches(section.D)
     
     if !slender
-        M_min = minimum_moment(Pu, D_in)
+        M_min = minimum_moment(Pu, D)
         Mc = max(abs(M2), M_min)
         return (Mc=Mc, δns=1.0, Cm=1.0, Pc=Inf, slender=false)
     end
@@ -1019,7 +1019,7 @@ function magnify_moment_nonsway(
     Cm = calc_Cm(M1, M2; transverse_load=transverse_load)
     δns = magnification_factor_nonsway(Pu, Pc; Cm=Cm)
     
-    M_min = minimum_moment(Pu, D_in)
+    M_min = minimum_moment(Pu, D)
     Mc = max(δns * abs(M2), M_min)
     
     return (Mc=Mc, δns=δns, Cm=Cm, Pc=Pc, slender=true)

@@ -12,6 +12,7 @@
 
 using GeometryBasics: Point3f, Vec3f, Cylinder, Mesh, TriangleFace
 using LinearAlgebra: norm, normalize, cross
+using Unitful: ustrip, @u_str
 
 # Import visualization interface from StructuralSizer
 using StructuralSizer: AbstractSectionGeometry, SolidRect, HollowRect, HollowRound, IShape
@@ -19,6 +20,9 @@ using StructuralSizer: section_geometry
 using StructuralSizer: section_width, section_depth, section_thickness
 using StructuralSizer: section_flange_width, section_flange_thickness, section_web_thickness
 using StructuralSizer: has_rebar, section_rebar_positions, section_rebar_radius
+
+# Helper to strip units to meters for visualization
+_to_m(x) = Float32(ustrip(u"m", x))
 
 # =============================================================================
 # Axis Rotation Helpers
@@ -156,8 +160,8 @@ section_boxes(sec, p1::Point3f, p2::Point3f) = _section_boxes(section_geometry(s
 
 # --- Solid Rectangular ---
 function _section_boxes(::SolidRect, sec, p1::Point3f, p2::Point3f)
-    w = Float32(section_width(sec))
-    h = Float32(section_depth(sec))
+    w = _to_m(section_width(sec))
+    h = _to_m(section_depth(sec))
     L = Float32(norm(p2 - p1))
     center = (p1 + p2) / 2
     return [(center, Vec3f(L, w, h))]
@@ -165,8 +169,8 @@ end
 
 # --- Hollow Rectangular (approximate as solid for simplicity) ---
 function _section_boxes(::HollowRect, sec, p1::Point3f, p2::Point3f)
-    w = Float32(section_width(sec))
-    h = Float32(section_depth(sec))
+    w = _to_m(section_width(sec))
+    h = _to_m(section_depth(sec))
     L = Float32(norm(p2 - p1))
     center = (p1 + p2) / 2
     return [(center, Vec3f(L, w, h))]
@@ -179,10 +183,10 @@ end
 
 # --- I-Shape (3 boxes: 2 flanges + web) ---
 function _section_boxes(::IShape, sec, p1::Point3f, p2::Point3f)
-    d = Float32(section_depth(sec))
-    bf = Float32(section_flange_width(sec))
-    tw = Float32(section_web_thickness(sec))
-    tf = Float32(section_flange_thickness(sec))
+    d = _to_m(section_depth(sec))
+    bf = _to_m(section_flange_width(sec))
+    tw = _to_m(section_web_thickness(sec))
+    tf = _to_m(section_flange_thickness(sec))
     
     L = Float32(norm(p2 - p1))
     center = (p1 + p2) / 2
@@ -320,7 +324,7 @@ end
 
 """Draw round section as cylinder."""
 function _draw_cylinder!(ax, sec, p1::Point3f, p2::Point3f; color, alpha)
-    r = Float32(section_width(sec) / 2)  # OD/2
+    r = _to_m(section_width(sec)) / 2  # OD/2
     cyl = Cylinder(p1, p2, r)
     GLMakie.mesh!(ax, cyl, color = (color, alpha), transparency = true)
 end

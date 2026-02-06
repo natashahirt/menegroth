@@ -8,8 +8,12 @@ Initialize all structural components of a BuildingStructure.
 # Arguments
 - `material`: Material for slab sizing and self-weight (default: NWC_4000)
 - `floor_type`: Floor type (:auto, :one_way, :two_way, :flat_plate, :pt_banded, :vault, etc.)
-- `floor_kwargs`: Extra kwargs forwarded to `StructuralSizer.size_floor` (e.g. `(lambda=10.0,)` for vaults)
-- `cell_groupings`: Optional explicit slab groupings (vector of cell index vectors)
+- `floor_kwargs`: Extra kwargs forwarded to StructuralSizer's internal span-based sizing helper (e.g. `(lambda=10.0,)` for vaults)
+- `cell_groupings`: How to group cells into slabs:
+  - `:auto` (default): Use floor type options (e.g., FlatPlateOptions.grouping)
+  - `:individual`: One slab per cell
+  - `:by_floor`: Group all cells on each floor
+  - `Vector{Vector{Int}}`: Explicit cell index groupings
 - `slab_group_ids`: Optional per-cell slab design group ids; cells/slabs with the same id are sized together (enveloped)
 - `braced_by_slabs`: If true (default), beams supporting slabs get Lb=0 (top flange braced)
 """
@@ -17,7 +21,7 @@ function initialize!(struc::BuildingStructure;
                      material::AbstractMaterial=NWC_4000,
                      floor_type::Symbol=:auto,
                      floor_kwargs::NamedTuple=NamedTuple(),
-                     cell_groupings::Union{Nothing, Vector{Vector{Int}}}=nothing,
+                     cell_groupings::Union{Symbol, Vector{Vector{Int}}}=:auto,
                      slab_group_ids::Union{Nothing, AbstractVector}=nothing,
                      braced_by_slabs::Bool=true)
     skel = struc.skeleton

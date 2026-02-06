@@ -26,10 +26,10 @@ The user's `sizing_fn` should have signature:
 # Example
 ```julia
 tapered = ShapedSlab(tapered_slab_fn)
-result = size_floor(tapered, 8.0, 2.0, 3.0; material=NWC_4000, span_y=8.0)
+result = _size_span_floor(tapered, 8.0, 2.0, 3.0; material=NWC_4000, span_y=8.0)
 ```
 """
-function size_floor(slab::ShapedSlab, span::L, sdl::F, live::F;
+function _size_span_floor(slab::ShapedSlab, span::L, sdl::F, live::F;
                     material::AbstractMaterial=NWC_4000,
                     span_y::Union{L,Nothing}=nothing) where {L, F}
     span_y_val = isnothing(span_y) ? span : span_y
@@ -47,7 +47,7 @@ Example: Tapered slab (thick at edges, thin at center).
 # Example
 ```julia
 tapered = ShapedSlab(tapered_slab_fn)
-result = size_floor(tapered, 8.0, 2.0, 3.0; material=NWC_4000, span_y=8.0)
+result = _size_span_floor(tapered, 8.0, 2.0, 3.0; material=NWC_4000, span_y=8.0)
 ```
 """
 function tapered_slab_fn(span_x::Real, span_y::Real, load::Real, material::Concrete)
@@ -68,14 +68,14 @@ function tapered_slab_fn(span_x::Real, span_y::Real, load::Real, material::Concr
         return h_center + d * (h_edge - h_center)
     end
     
-    # self_weight = volume * density * g
+    # Self-weight calculation:
+    # volume_per_area [m³/m² = m] × density [kg/m³] × g [m/s²] = Pa = N/m²
+    # Convert to kPa (= kN/m²): 1 Pa = 0.001 kPa
     g = ustrip(u"m/s^2", Asap.GRAVITY)
-    density = ustrip(u"kg/m^3", material.ρ) 
-    # Force result to kPa/kN/m^2 if input units are standard, otherwise rely on caller
-    # Here we assume standard SI input scaling: [m] * [kg/m^3] * [m/s^2] = [Pa] = [N/m^2]
-    # To get kN/m^2: / 1000
+    density = ustrip(u"kg/m^3", material.ρ)
     self_weight_Pa = volume_per_area * density * g
-    self_weight = self_weight_Pa / 1000.0
+    self_weight_kPa = self_weight_Pa * 1e-3  # Pa → kPa
+    self_weight = self_weight_kPa
     
     return ShapedSlabResult(volume_per_area, self_weight, thickness_fn, 
                             Dict(:h_edge => h_edge, :h_center => h_center))
@@ -87,7 +87,7 @@ Example: Coffered/waffle slab with ribs.
 # Example
 ```julia
 coffered = ShapedSlab(coffered_slab_fn)
-result = size_floor(coffered, 10.0, 2.0, 3.0; material=NWC_4000, span_y=10.0)
+result = _size_span_floor(coffered, 10.0, 2.0, 3.0; material=NWC_4000, span_y=10.0)
 ```
 """
 function coffered_slab_fn(span_x::Real, span_y::Real, load::Real, material::Concrete;
@@ -102,10 +102,11 @@ function coffered_slab_fn(span_x::Real, span_y::Real, load::Real, material::Conc
     
     volume_per_area = h_topping + rib_vol * 0.9  # ~10% reduction for overlap
     
+    # Self-weight: Pa → kPa conversion
     g = ustrip(u"m/s^2", Asap.GRAVITY)
     density = ustrip(u"kg/m^3", material.ρ)
     self_weight_Pa = volume_per_area * density * g
-    self_weight = self_weight_Pa / 1000.0
+    self_weight = self_weight_Pa * 1e-3  # Pa → kPa
     
     return ShapedSlabResult(volume_per_area, self_weight, nothing,
                             Dict(:h_topping => h_topping, :h_rib => h_rib,

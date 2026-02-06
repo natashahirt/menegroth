@@ -8,7 +8,7 @@
 using Test
 using Unitful
 using Unitful: @u_str
-using StructuralSizer: ksi, ksf, psf  # Units from Asap via StructuralSizer
+using Asap  # Register Asap units with Unitful's @u_str
 using StructuralSizer
 
 # =============================================================================
@@ -380,6 +380,71 @@ using StructuralSizer
                 @test ustrip(u"inch^2", As_calc) ≈ As_expected rtol=0.10
             end
         end
+    end
+    
+    @testset "Two-Way Deflection - StructurePoint Validation (Pages 48-57)" begin
+        # StructurePoint Table 9 validation for deflection calculations
+        # Reference: DE-Two-Way-Flat-Plate Section 6.1
+        
+        # Material properties
+        Ecs = 3.834e6u"psi"  # Page 50: Ec = 33 × wc^1.5 × √f'c = 3,834,000 psi
+        fr_val = 474.34u"psi"  # Page 50: fr = 7.5√f'c = 474.34 psi
+        Es = 29e6u"psi"
+        
+        # Section properties for frame strip
+        Ig_frame = 4802u"inch^4"  # Page 50: l2×h³/12 = (14×12)×7³/12
+        Ig_cs = 2401u"inch^4"    # Column strip: (7×12)×7³/12
+        
+        @test ustrip(u"inch^4", slab_moment_of_inertia(l2, h)) ≈ 4802 rtol=0.01
+        @test ustrip(u"inch^4", slab_moment_of_inertia(l2/2, h)) ≈ 2401 rtol=0.01
+        
+        # Cracking moment (Page 50): Mcr = fr × Ig / yt = 474.34 × 4802 / 3.5 / 12000
+        yt = h / 2  # 3.5 in
+        Mcr = fr_val * Ig_frame / yt
+        Mcr_kft = ustrip(u"kip*ft", uconvert(u"kip*ft", Mcr))
+        @test Mcr_kft ≈ 54.23 rtol=0.02
+        
+        # Cracked moment of inertia (Page 50): Icr = 629 in⁴ for 17 #4 bars
+        # n = Es/Ec = 7.56, kd = 1.18 in
+        As_17_4 = 17 * 0.20u"inch^2"  # 17 #4 bars = 3.40 in²
+        d_test = 5.75u"inch"
+        Icr = cracked_moment_of_inertia(As_17_4, l2, d_test, Ecs, Es)
+        @test ustrip(u"inch^4", Icr) ≈ 629 rtol=0.10
+        
+        # Effective moment of inertia (Page 52)
+        # For D+L_full, Ma_neg = 64.13 k-ft at interior support
+        Ma_neg = 64.13u"kip*ft"
+        Ma_pos = 34.35u"kip*ft"
+        Mcr_unit = 54.23u"kip*ft"
+        
+        # At negative section (cracked): Ie = 3,152 in⁴
+        Ie_neg = effective_moment_of_inertia(Mcr_unit, Ma_neg, Ig_frame, Icr)
+        @test ustrip(u"inch^4", Ie_neg) ≈ 3152 rtol=0.10
+        
+        # At positive section (uncracked since Mcr > Ma): Ie = Ig
+        Ie_pos = effective_moment_of_inertia(Mcr_unit, Ma_pos, Ig_frame, Icr)
+        @test ustrip(u"inch^4", Ie_pos) ≈ 4802 rtol=0.02
+        
+        # Averaged Ie for exterior span (Page 52):
+        # Ie,avg = 0.85×Ie⁺ + 0.15×Ie⁻ = 4,555 in⁴
+        Ie_avg_ext = 0.85 * Ie_pos + 0.15 * Ie_neg
+        @test ustrip(u"inch^4", Ie_avg_ext) ≈ 4555 rtol=0.05
+        
+        # Load distribution factors (Page 56)
+        # Exterior span: LDFc = (2×0.60 + 1.00 + 0.75)/4 = 0.738
+        LDF_c_ext = load_distribution_factor(:column, :exterior)
+        LDF_m_ext = load_distribution_factor(:middle, :exterior)
+        
+        @test LDF_c_ext ≈ 0.738 rtol=0.02
+        @test LDF_m_ext ≈ 0.262 rtol=0.02
+        @test LDF_c_ext + LDF_m_ext ≈ 1.0 rtol=0.01
+        
+        # Interior span LDFs (Page 53): LDFc = 0.675
+        LDF_c_int = load_distribution_factor(:column, :interior)
+        LDF_m_int = load_distribution_factor(:middle, :interior)
+        
+        @test LDF_c_int ≈ 0.675 rtol=0.02
+        @test LDF_m_int ≈ 0.325 rtol=0.02
     end
 end
 

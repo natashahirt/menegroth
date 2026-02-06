@@ -1,1 +1,2 @@
-include("utils.jl")
+﻿include("utils.jl")
+include("story_properties.jl")

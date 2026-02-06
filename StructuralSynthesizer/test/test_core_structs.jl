@@ -29,7 +29,7 @@ using Meshes
     # TODO: Re-enable when OneWay floor sizing is implemented
     # This test is currently broken for two reasons:
     # 1. Manually created skeleton has no edges (get_cell_spans fails)
-    # 2. OneWay floor type is not implemented yet (size_floor stub)
+    # 2. OneWay floor type is not implemented yet (stub)
     # @testset "Slab sizing by slab groups" begin
     #     ...
     # end

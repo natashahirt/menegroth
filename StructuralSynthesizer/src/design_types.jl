@@ -18,6 +18,39 @@ using Dates
 using Unitful
 
 # =============================================================================
+# Foundation Parameters
+# =============================================================================
+
+"""
+Foundation sizing parameters.
+
+# Fields
+- `soil`: Soil profile (bearing capacity, settlement params)
+- `concrete`: Concrete grade for footings
+- `rebar`: Rebar grade for footings
+- `pier_width`: Column/pier width for sizing
+- `min_depth`: Minimum footing depth (frost line, etc.)
+- `group_tolerance`: Tolerance for grouping similar foundations (default 0.15 = 15%)
+
+# Example
+```julia
+fp = FoundationParameters(
+    soil = MEDIUM_SAND,
+    concrete = NWC_4000,
+    min_depth = 0.5u"m",
+)
+```
+"""
+Base.@kwdef struct FoundationParameters
+    soil::StructuralSizer.Soil = StructuralSizer.MEDIUM_SAND
+    concrete::StructuralSizer.Concrete = StructuralSizer.NWC_4000
+    rebar::StructuralSizer.RebarSteel = StructuralSizer.Rebar_60
+    pier_width::typeof(1.0u"m") = 0.35u"m"
+    min_depth::typeof(1.0u"m") = 0.4u"m"
+    group_tolerance::Float64 = 0.15
+end
+
+# =============================================================================
 # Design Parameters
 # =============================================================================
 
@@ -107,6 +140,9 @@ Base.@kwdef mutable struct DesignParameters
     
     # ─── Floor Options ───
     floor_options::Union{StructuralSizer.FloorOptions, Nothing} = nothing
+    
+    # ─── Foundation Options ───
+    foundation_options::Union{FoundationParameters, Nothing} = nothing
     
     # ─── Design Targets ───
     deflection_limit::Symbol = :L_360        # :L_240, :L_360, :L_480
@@ -216,6 +252,28 @@ Base.@kwdef mutable struct BeamDesignResult
 end
 
 """
+Design result for a foundation.
+"""
+Base.@kwdef mutable struct FoundationDesignResult
+    # Geometry
+    length::typeof(1.0u"m") = 0.0u"m"
+    width::typeof(1.0u"m") = 0.0u"m"
+    depth::typeof(1.0u"m") = 0.0u"m"
+    
+    # Demands
+    reaction::typeof(1.0u"kN") = 0.0u"kN"
+    
+    # Checks
+    bearing_ratio::Float64 = 0.0      # actual / allowable bearing pressure
+    punching_ratio::Float64 = 0.0     # punching shear check
+    flexure_ratio::Float64 = 0.0      # flexure check
+    ok::Bool = true
+    
+    # Group assignment
+    group_id::Int = 0
+end
+
+"""
 Design summary with aggregate metrics.
 """
 Base.@kwdef mutable struct DesignSummary
@@ -274,9 +332,15 @@ mutable struct BuildingDesign{T, A, P}
     slabs::Dict{Int, SlabDesignResult}
     columns::Dict{Int, ColumnDesignResult}
     beams::Dict{Int, BeamDesignResult}
+    foundations::Dict{Int, FoundationDesignResult}
     
     # Summary
     summary::DesignSummary
+    
+    # ─── Analysis Model ───
+    # Frame+shell model for global deflection analysis (built after design)
+    # Separate from struc.asap_model to preserve the design-phase frame model
+    asap_model::Union{Asap.Model, Nothing}
     
     # Metadata
     created::DateTime
@@ -290,7 +354,9 @@ function BuildingDesign(struc::BuildingStructure{T, A, P}, params::DesignParamet
         Dict{Int, SlabDesignResult}(),
         Dict{Int, ColumnDesignResult}(),
         Dict{Int, BeamDesignResult}(),
+        Dict{Int, FoundationDesignResult}(),
         DesignSummary(),
+        nothing,  # asap_model (built via build_analysis_model!)
         now(),
         0.0
     )
@@ -315,8 +381,14 @@ column_design(d::BuildingDesign, idx::Int) = get(d.columns, idx, nothing)
 """Get beam design result by index."""
 beam_design(d::BuildingDesign, idx::Int) = get(d.beams, idx, nothing)
 
+"""Get foundation design result by index."""
+foundation_design(d::BuildingDesign, idx::Int) = get(d.foundations, idx, nothing)
+
 """Check if all design checks pass."""
 all_ok(d::BuildingDesign) = d.summary.all_checks_pass
 
 """Get the governing (critical) design ratio."""
 critical_ratio(d::BuildingDesign) = d.summary.critical_ratio
+
+"""Check if the analysis model (frame+shell) has been built."""
+has_analysis_model(d::BuildingDesign) = !isnothing(d.asap_model)

@@ -9,7 +9,7 @@ using Test
     # Generate a simple building
     skel = gen_medium_office(20.0u"m", 15.0u"m", 4.0u"m", 2, 2, 2)
     struc = BuildingStructure(skel)
-    # Use vault as it has a working size_floor implementation
+    # Use vault as it has a full sizing implementation
     # rise parameter is required for vault sizing
     initialize!(struc; floor_type=:vault, material=NWC_4000, 
                 floor_kwargs=(rise=1.0u"m", thickness=0.05u"m"))

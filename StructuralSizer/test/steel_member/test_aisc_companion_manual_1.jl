@@ -1,7 +1,8 @@
 using Test
 using Unitful
+using Unitful: ustrip, uconvert
 using StructuralSizer
-# Units are re-exported from StructuralSizer (via Asap)
+using StructuralSizer.Asap: kip  # Asap custom unit
 
 @testset "AISC companion manual 1 tests (v16.0 companion PDF)" begin
 
@@ -17,12 +18,12 @@ using StructuralSizer
 
         # Yielding (ϕ=0.9)
         ϕPn_yield = 0.9 * mat.Fy * s.A
-        @test isapprox(ϕPn_yield, 277u"kip"; rtol=0.03)
+        @test isapprox(ϕPn_yield, 277kip; rtol=0.03)
 
         # Rupture (ϕ=0.75, Ae = 4.32 in^2)
         Ae_ratio = ustrip(uconvert(Unitful.NoUnits, (4.32u"inch^2") / s.A))
         ϕPn_rupt = StructuralSizer.get_ϕPn_tension(s, mat; Ae_ratio=Ae_ratio)
-        @test isapprox(ϕPn_rupt, 211u"kip"; rtol=0.05)
+        @test isapprox(ϕPn_rupt, 211kip; rtol=0.05)
 
         # Slenderness recommendation (D1 commentary): L/r <= 300
         L = 25.0u"ft"
@@ -42,8 +43,8 @@ using StructuralSizer
         s = W("W24X62")
         mat = A992_Steel
 
-        ϕVn = get_ϕVn(s, mat; axis=:strong)  # uses the code’s Aw definition
-        @test isapprox(ϕVn, 306u"kip"; rtol=0.10)
+        ϕVn = get_ϕVn(s, mat; axis=:strong)  # uses the code's Aw definition
+        @test isapprox(ϕVn, 306kip; rtol=0.10)
     end
 
     @testset "Example E.4A excerpt - W14x82 compression table point" begin
@@ -59,7 +60,7 @@ using StructuralSizer
         KL = 9.0u"ft"
 
         ϕPn_y = get_ϕPn(s, mat, KL; axis=:weak, ϕ=0.9)
-        @test isapprox(ϕPn_y, 940u"kip"; rtol=0.15)
+        @test isapprox(ϕPn_y, 940kip; rtol=0.15)
     end
 end
 

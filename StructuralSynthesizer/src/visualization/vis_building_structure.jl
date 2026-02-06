@@ -58,14 +58,12 @@ Karamba-style visualization for a BuildingStructure.
 - `show_supports::Bool=true`: Whether to show supports.
 - `show_releases::Bool=true`: Whether to show element releases (gaps).
 - `show_dofs::Bool=false`: Whether to show degrees of freedom (arrows).
-- `show_foundations::Bool=false`: Whether to show foundation geometry.
 - `show_original_geometry::Bool=true`: Whether to show the dotted lines of the original geometry to emphasise deflection.
 - `resolution::Int=20`: Number of segments per element for curved shapes.
 - `linewidth::Float64=1.0`: Line width for elements.
 - `markersize::Float64=10.0`: Marker size for nodes/supports.
-- `foundation_color`: Color for foundations (default: :gray70).
-- `foundation_alpha::Float64=0.7`: Foundation transparency.
-- `show_rebar::Bool=false`: Whether to show rebar in foundations.
+
+Note: For sized elements (slabs, foundations, member sections), use `visualize(design::BuildingDesign)`.
 """
 function visualize(struc::BuildingStructure;
     deflection_scale = :auto,
@@ -76,14 +74,10 @@ function visualize(struc::BuildingStructure;
     show_supports = true,
     show_releases = true,
     show_dofs = false,
-    show_foundations = false,
     show_original_geometry = true,
     resolution = 20,
     linewidth = 1.0,
     markersize = 10.0,
-    foundation_color = :gray70,
-    foundation_alpha = 0.7,
-    show_rebar = false
 )
     skel = struc.skeleton
     model = struc.asap_model
@@ -266,16 +260,7 @@ function visualize(struc::BuildingStructure;
         end
     end
 
-    # 3b. Foundations
-    if show_foundations && !isempty(struc.foundations)
-        draw_foundations!(ax, struc; 
-            color=foundation_color, alpha=foundation_alpha, show_rebar=show_rebar)
-        push!(leg_elems, GLMakie.PolyElement(color = (foundation_color, foundation_alpha), 
-              strokecolor = :gray40, strokewidth = 1))
-        push!(leg_labels, "Foundations")
-    end
-
-    # 4. Degrees of Freedom
+    # 3b. Degrees of Freedom
     if show_dofs
         # Ensure model is processed to populate length, LCS, etc.
         model.processed || Asap.process!(model)

@@ -6,3 +6,6 @@ external/
 
 # Ignore plain text files
 *.txt
+
+# Ignore crash dump files
+*.stackdump

@@ -1,18 +1,14 @@
 # ==============================================================================
-# Optimization Module
+# Member-Specific Optimization
 # ==============================================================================
-# NOTE: Include order is controlled by _members.jl due to cross-dependencies
-# with sections/ and codes/. This file documents the module structure.
-#
-# Structure:
-#   core/       - Abstract types, geometry, demands, objectives
-#   solvers/    - Generic optimization algorithms (MIP, NLP)
-#   types/      - Member-type specific APIs (columns, beams)
-#   options.jl  - Configuration types for each member type
-#
-# Include order (in _members.jl):
-#   1. core/_core.jl    - AbstractCapacityChecker, geometry, demands, objectives
-#   2. (sections and codes loaded)
-#   3. solvers/_solvers.jl  - optimize_discrete()
-#   4. options.jl           - SteelColumnOptions, ConcreteColumnOptions, etc.
-#   5. types/_types.jl      - size_columns(), size_beams()
+# Depends on: sections/, codes/ (must be included after them)
+# Uses: optimize/core/ and optimize/solvers/ (loaded earlier)
+
+# Catalog builders (depend on sections)
+include("catalogs.jl")
+
+# NLP problem definitions (for continuous optimization)
+include("problems.jl")
+
+# High-level API (depends on catalogs, checkers, solvers, problems)
+include("api.jl")

@@ -59,18 +59,24 @@ end
 # ==============================================================================
 
 """Union type for P-M diagrams (rectangular or circular)."""
-const PMDiagram = Union{PMInteractionDiagram{RCColumnSection}, PMInteractionDiagram{RCCircularSection}}
+# Use broader type to handle parametric material types
+const PMDiagram = PMInteractionDiagram{<:AbstractSection}
 
 """
     ACIColumnCapacityCache <: AbstractCapacityCache
 
 Caches P-M diagrams and objective coefficients for RC columns.
 Supports both rectangular and circular sections.
+
+For rectangular sections, also caches y-axis (minor axis) diagrams
+to support proper biaxial bending checks when b ≠ h.
 """
 mutable struct ACIColumnCapacityCache <: AbstractCapacityCache
-    diagrams::Vector{PMDiagram}             # P-M diagrams per section
+    diagrams::Vector{PMDiagram}             # P-M diagrams per section (x-axis / strong axis)
+    diagrams_y::Vector{Union{PMDiagram, Nothing}}  # Y-axis diagrams for rectangular sections
     obj_coeffs::Vector{Float64}             # Objective coefficients per section
     depths::Vector{Float64}                 # Section depths in meters (h for rect, D for circular)
+    is_square::Vector{Bool}                 # True if section is approximately square (b ≈ h)
     fc_ksi::Float64                         # Concrete strength (ksi)
     fy_ksi::Float64                         # Steel yield strength (ksi)
     Es_ksi::Float64                         # Steel modulus (ksi)
@@ -79,8 +85,10 @@ end
 function ACIColumnCapacityCache(n_sections::Int)
     ACIColumnCapacityCache(
         Vector{PMDiagram}(undef, n_sections),
+        Vector{Union{PMDiagram, Nothing}}(nothing, n_sections),  # Y-axis diagrams
         zeros(n_sections),
         zeros(n_sections),
+        fill(true, n_sections),  # Default to square
         0.0,
         0.0,
         29000.0
@@ -168,6 +176,11 @@ function _precompute_diagrams!(
         # Section depth (h for rectangular, D for circular)
         cache.depths[j] = _section_depth_m(section)
         
+        # Check if section is approximately square and generate y-axis diagram if needed
+        cache.is_square[j], cache.diagrams_y[j] = _check_square_and_generate_y_diagram(
+            section, mat, checker.include_biaxial
+        )
+        
         # Objective coefficient (value per meter)
         val = objective_value(objective, section, concrete, 1.0u"m")
         if ref_unit != Unitful.NoUnits
@@ -176,6 +189,29 @@ function _precompute_diagrams!(
             cache.obj_coeffs[j] = val
         end
     end
+end
+
+# Helper to check if section is square and generate y-axis diagram if needed
+function _check_square_and_generate_y_diagram(section::RCColumnSection, mat, include_biaxial::Bool)
+    b = ustrip(u"inch", section.b)
+    h = ustrip(u"inch", section.h)
+    
+    # Consider square if dimensions within 5% of each other
+    is_square = abs(b - h) / max(b, h) < 0.05
+    
+    # Generate y-axis diagram for rectangular sections if biaxial is enabled
+    diagram_y = if !is_square && include_biaxial
+        generate_PM_diagram_yaxis(section, mat; n_intermediate=15)
+    else
+        nothing
+    end
+    
+    return is_square, diagram_y
+end
+
+# Circular sections are always "square" (axisymmetric)
+function _check_square_and_generate_y_diagram(section::RCCircularSection, mat, include_biaxial::Bool)
+    return true, nothing
 end
 
 # Helper to extract section depth in meters (works for both section types)
@@ -239,10 +275,16 @@ function _is_feasible_rc_column(
         # Create material tuple for slenderness functions
         mat = (fc = cache.fc_ksi, fy = cache.fy_ksi, Es = cache.Es_ksi, εcu = 0.003)
         
-        # Magnify moment if slender
+        # Extract end moments (M1 = smaller, M2 = larger) for proper Cm calculation
+        M1x = demand.M1x isa Unitful.Quantity ? ustrip(kip*u"ft", demand.M1x) : Float64(demand.M1x)
+        M2x = demand.M2x isa Unitful.Quantity ? ustrip(kip*u"ft", demand.M2x) : Float64(demand.M2x)
+        M1y = demand.M1y isa Unitful.Quantity ? ustrip(kip*u"ft", demand.M1y) : Float64(demand.M1y)
+        M2y = demand.M2y isa Unitful.Quantity ? ustrip(kip*u"ft", demand.M2y) : Float64(demand.M2y)
+        
+        # Magnify moment if slender (using actual end moments for Cm)
         result = magnify_moment_nonsway(
             section, mat, geometry,
-            Pu, 0.0, abs(Mux);  # M1=0 (conservative single curvature)
+            Pu, M1x, M2x;
             βdns = βdns
         )
         Mux = result.Mc
@@ -251,7 +293,7 @@ function _is_feasible_rc_column(
         if Muy > 0 && checker.include_biaxial
             result_y = magnify_moment_nonsway(
                 section, mat, geometry,
-                Pu, 0.0, abs(Muy);
+                Pu, M1y, M2y;
                 βdns = βdns
             )
             Muy = result_y.Mc
@@ -267,10 +309,19 @@ function _is_feasible_rc_column(
     
     # --- Biaxial Check (if applicable) ---
     if checker.include_biaxial && Muy > 0
-        # For square/circular columns, use same diagram for both axes
         # Bresler Load Contour: (Mux/φMnx)^α + (Muy/φMny)^α ≤ 1.0
         φMnx = check_x.φMn_at_Pu
-        φMny = φMnx  # Same for square/circular section
+        
+        # For rectangular sections (b ≠ h), use y-axis diagram for φMny
+        # For square/circular sections, use same capacity for both axes
+        φMny = if cache.is_square[j] || isnothing(cache.diagrams_y[j])
+            φMnx  # Same for square/circular section
+        else
+            # Use y-axis diagram for rectangular sections
+            check_y = check_PM_capacity(cache.diagrams_y[j], Pu, Muy)
+            check_y.adequate || return false  # Must also pass y-axis check
+            check_y.φMn_at_Pu
+        end
         
         util_biaxial = bresler_load_contour(Mux, Muy, φMnx, φMny; α=checker.α_biaxial)
         util_biaxial <= 1.0 || return false

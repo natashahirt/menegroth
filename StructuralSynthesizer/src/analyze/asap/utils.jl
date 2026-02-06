@@ -97,6 +97,11 @@ function to_asap!(struc::BuildingStructure{T, A, P};
     empty!(struc.cell_tributary_loads)
     
     for (cell_idx, cell) in enumerate(struc.cells)
+        # Skip grade cells (ground floor doesn't contribute loads to frame)
+        if cell.floor_type == :grade
+            struc.cell_tributary_loads[cell_idx] = Asap.AbstractLoad[]
+            continue
+        end
         cell_loads = _create_cell_tributary_loads!(loads, frame_elements, skel, struc, cell, cell_idx, params)
         struc.cell_tributary_loads[cell_idx] = cell_loads
     end
@@ -518,4 +523,203 @@ function create_slab_diaphragm_shells(struc::BuildingStructure, slab::Slab, node
     end
     
     return shells
+end
+
+# Helper to extract release symbol from Element type parameter
+function _get_release_symbol(el::Asap.Element{R}) where R
+    R === Asap.FixedFixed && return :fixedfixed
+    R === Asap.FixedFree && return :fixedfree
+    R === Asap.FreeFixed && return :freefixed
+    R === Asap.FreeFree && return :freefree
+    R === Asap.Joist && return :joist
+    return :fixedfixed  # fallback
+end
+
+# =============================================================================
+# Analysis Model Builder (Frame + Shell for Global Deflection)
+# =============================================================================
+
+"""
+    build_analysis_model!(design; load_combination=SERVICE, mesh_density=2, frame_groups=:auto)
+
+Build a frame+shell Asap model for global deflection analysis.
+
+This creates a **separate** model stored in `design.asap_model` that includes:
+- Frame elements (columns, and optionally beams)
+- Shell elements representing designed slabs
+- Area loads (SDL + LL) applied directly to shells
+
+The original `struc.asap_model` (frame-only) is preserved for design calculations.
+
+# Arguments
+- `design::BuildingDesign`: Design with completed slab sizing
+- `load_combination::LoadCombination`: Load factors (default: SERVICE = 1.0D + 1.0L)
+- `mesh_density::Int`: Shell mesh refinement per face (default: 2 = 2×2 triangulation)
+- `frame_groups`: Which skeleton edge groups to include as frame elements
+  - `:auto` (default): Infer from floor type
+    - `:flat_plate` → `[:columns]` (beamless)
+    - `:one_way`, `:two_way` → `[:columns, :beams]`
+  - `Vector{Symbol}`: Explicit list, e.g. `[:columns]` or `[:columns, :beams]`
+
+# Example
+```julia
+# After design_building() completes
+design = design_building(struc, params)
+
+# Build global analysis model (auto-detects flat plate → columns only)
+build_analysis_model!(design)
+
+# Or explicitly include beams for slab-on-beam systems
+build_analysis_model!(design; frame_groups=[:columns, :beams])
+
+# Visualize deflected shape including slabs
+visualize(design, mode=:deflected)
+```
+
+# Notes
+- Shells use actual slab thickness and concrete E from design results
+- Self-weight is included via shell density (ρ = concrete density)
+- SDL + LL applied as AreaLoad to shell surfaces
+- Frame TributaryLoads are NOT included (loads go through shells)
+"""
+function build_analysis_model!(design::BuildingDesign;
+                               load_combination::LoadCombination=SERVICE,
+                               mesh_density::Int=2,
+                               frame_groups::Union{Symbol, Vector{Symbol}}=:auto)
+    struc = design.structure
+    skel = struc.skeleton
+    
+    isempty(struc.slabs) && error("No slabs found. Run size_slabs!() first.")
+    isnothing(struc.asap_model) && error("No frame model found. Run to_asap!() first.")
+    
+    # ─── 1. Resolve frame_groups ───
+    resolved_groups = if frame_groups == :auto
+        # Infer from floor type
+        floor_type = isempty(struc.slabs) ? :unknown : struc.slabs[1].floor_type
+        if floor_type == :flat_plate
+            [:columns]  # Beamless slab
+        else
+            [:columns, :beams]  # Slab-on-beam systems
+        end
+    else
+        frame_groups isa Vector ? frame_groups : [frame_groups]
+    end
+    
+    # Build set of edge indices to include
+    included_edges = Set{Int}()
+    for group in resolved_groups
+        union!(included_edges, get(skel.groups_edges, group, Int[]))
+    end
+    
+    # ─── 2. Create nodes (same as struc.asap_model) ───
+    support_indices = get(skel.groups_vertices, :support, Int[])
+    nodes = [begin
+        c = Meshes.coords(skel.vertices[i])
+        is_support = i in support_indices
+        dofs = is_support ? [false, false, false, false, false, false] : [true, true, true, false, false, false]
+        Asap.Node([uconvert(u"m", c.x), uconvert(u"m", c.y), uconvert(u"m", c.z)], dofs)
+    end for i in eachindex(skel.vertices)]
+    
+    # ─── 3. Copy frame elements from selected groups ───
+    # Use existing elements from struc.asap_model (preserves sized sections)
+    src_model = struc.asap_model
+    frame_elements = Asap.FrameElement[]
+    
+    for (edge_idx, (v1, v2)) in enumerate(skel.edge_indices)
+        # Only include edges from selected groups
+        edge_idx in included_edges || continue
+        
+        # Get section from source model if available
+        src_el = src_model.elements[edge_idx]
+        section = src_el.section
+        
+        # Extract release symbol from type parameter
+        release_sym = _get_release_symbol(src_el)
+        
+        el = Asap.Element(nodes[v1], nodes[v2], section; release=release_sym)
+        push!(frame_elements, el)
+    end
+    
+    # ─── 4. Create shell elements for slabs ───
+    shell_elements = Asap.ShellElement[]
+    slab_shell_map = Dict{Int, Vector{Asap.ShellElement}}()  # slab_idx → shells
+    
+    for (slab_idx, slab) in enumerate(struc.slabs)
+        # Get slab properties
+        t = thickness(slab)
+        
+        # Get concrete properties from slab result
+        E = 30e9u"Pa"  # default
+        ρ = 2400.0u"kg/m^3"  # default concrete density
+        
+        if hasfield(typeof(slab.result), :concrete) && !isnothing(slab.result.concrete)
+            concrete = slab.result.concrete
+            hasfield(typeof(concrete), :E) && (E = concrete.E)
+            hasfield(typeof(concrete), :ρ) && (ρ = concrete.ρ)
+        end
+        
+        E_pa = uconvert(u"Pa", E)
+        ρ_kgm3 = uconvert(u"kg/m^3", ρ)
+        
+        # Create shell section with proper density (enables self-weight)
+        section = Asap.ShellSection(t, E_pa, 0.2; ρ=ρ_kgm3)
+        
+        # Create shells for each cell face
+        slab_shells = Asap.ShellElement[]
+        face_indices = [struc.cells[ci].face_idx for ci in slab.cell_indices]
+        
+        for face_idx in face_indices
+            vert_indices = skel.face_vertex_indices[face_idx]
+            corners = tuple([nodes[vi] for vi in vert_indices]...)
+            
+            face_shells = Asap.Shell(corners, section; n=mesh_density, 
+                                     id=Symbol("slab_$(slab_idx)"),
+                                     edge_support_type=:free, 
+                                     interior_support_type=:free)
+            append!(slab_shells, face_shells)
+        end
+        
+        # Note: populate_globalID! is called by model.process! after nodes get their IDs
+        slab_shell_map[slab_idx] = slab_shells
+        append!(shell_elements, slab_shells)
+    end
+    
+    # ─── 5. Create loads ───
+    loads = Asap.AbstractLoad[]
+    
+    # Self-weight of shells (concrete weight)
+    if !isempty(shell_elements)
+        push!(loads, Asap.SelfWeight(shell_elements))
+    end
+    
+    # SDL + LL on each slab as AreaLoad
+    for (slab_idx, slab) in enumerate(struc.slabs)
+        slab_shells = slab_shell_map[slab_idx]
+        isempty(slab_shells) && continue
+        
+        # Get loads from first cell (assumes uniform across slab)
+        cell = struc.cells[first(slab.cell_indices)]
+        sdl = cell.sdl
+        ll = cell.live_load
+        
+        # Factored superimposed load (SDL + LL, NOT including self-weight which is on shells)
+        factored = factored_pressure(load_combination, sdl, ll)
+        pressure_pa = uconvert(u"Pa", factored)
+        
+        # Apply as area load (downward)
+        area_load = Asap.AreaLoad(slab_shells, pressure_pa; direction=(0.0, 0.0, -1.0))
+        push!(loads, area_load)
+    end
+    
+    # ─── 6. Build and solve model ───
+    model = Asap.Model(nodes, frame_elements, shell_elements, loads)
+    
+    Asap.process!(model)
+    Asap.solve!(model)
+    
+    design.asap_model = model
+    
+    @info "Built analysis model" frame_groups=resolved_groups n_frames=length(frame_elements) n_shells=length(shell_elements) n_loads=length(loads)
+    
+    return model
 end

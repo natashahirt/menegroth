@@ -45,6 +45,7 @@ struct FlatPlate <: AbstractConcreteSlab end
 struct FlatSlab <: AbstractConcreteSlab end      # with drop panels
 struct PTBanded <: AbstractConcreteSlab end
 struct Waffle <: AbstractConcreteSlab end
+struct Grade <: AbstractConcreteSlab end         # slab on grade (ground floor)
 
 # Precast concrete
 struct HollowCore <: AbstractConcreteSlab end
@@ -66,6 +67,41 @@ struct CLT <: AbstractTimberFloor end
 struct DLT <: AbstractTimberFloor end
 struct NLT <: AbstractTimberFloor end
 struct MassTimberJoist <: AbstractTimberFloor end
+
+# =============================================================================
+# Symbol → Type conversion
+# =============================================================================
+
+"""
+    floor_system(sym::Symbol) -> AbstractFloorSystem
+
+Convert a floor type symbol to its corresponding type instance.
+
+# Examples
+```julia
+floor_system(:flat_plate)  # → FlatPlate()
+floor_system(:vault)       # → Vault()
+floor_system(:one_way)     # → OneWay()
+```
+"""
+function floor_system(sym::Symbol)::AbstractFloorSystem
+    sym == :flat_plate && return FlatPlate()
+    sym == :flat_slab && return FlatSlab()
+    sym == :one_way && return OneWay()
+    sym == :two_way && return TwoWay()
+    sym == :pt_banded && return PTBanded()
+    sym == :waffle && return Waffle()
+    sym == :hollow_core && return HollowCore()
+    sym == :vault && return Vault()
+    sym == :composite_deck && return CompositeDeck()
+    sym == :non_composite_deck && return NonCompositeDeck()
+    sym == :joist_roof_deck && return JoistRoofDeck()
+    sym == :clt && return CLT()
+    sym == :dlt && return DLT()
+    sym == :nlt && return NLT()
+    sym == :mass_timber_joist && return MassTimberJoist()
+    error("Unknown floor system symbol: $sym")
+end
 
 # --- Custom/Shaped ---
 struct ShapedSlab <: AbstractConcreteSlab
@@ -133,6 +169,40 @@ requires_column_tributaries(ft::AbstractFloorSystem) = is_beamless(ft)
 end
 
 # =============================================================================
+# Vault Analysis Methods
+# =============================================================================
+
+"""
+    VaultAnalysisMethod
+
+Abstract type for vault analysis methods. Allows dispatch between
+analytical solutions and FEA-based approaches.
+
+## Subtypes
+- `HaileAnalytical`: Haile's 3-hinge parabolic arch (closed-form)
+- `ShellFEA`: Shell finite element analysis (future)
+"""
+abstract type VaultAnalysisMethod end
+
+"""
+Haile's analytical method for unreinforced parabolic vaults.
+
+Uses 3-hinge arch theory with elastic shortening correction.
+Valid for parabolic intrados under uniform distributed load.
+
+Reference: Haile method for three-hinge parabolic arch analysis.
+"""
+struct HaileAnalytical <: VaultAnalysisMethod end
+
+"""
+Shell FEA analysis for vault stress (future implementation).
+
+Placeholder for FinEtools-based shell analysis for validation
+and non-standard geometries.
+"""
+struct ShellFEA <: VaultAnalysisMethod end
+
+# =============================================================================
 # Result Types (parametric for unit flexibility)
 # =============================================================================
 
@@ -197,18 +267,62 @@ struct TimberJoistResult{L, F} <: AbstractFloorResult
     self_weight::F
 end
 
-"""Vault result (includes thrust)."""
+"""
+    VaultResult{L, P, F}
+
+Vault sizing result with geometry, thrust, and design checks.
+
+# Geometry
+- `thickness`: Shell thickness
+- `rise`: Crown rise (final, after elastic shortening)
+- `arc_length`: Parabolic arc length (for material takeoff)
+
+# Thrust (line loads at supports, perpendicular to span)
+- `thrust_dead`: Horizontal thrust from dead load
+- `thrust_live`: Horizontal thrust from live load
+
+# Material
+- `volume_per_area`: Concrete volume per plan area [L³/L² = L]
+- `self_weight`: Self-weight pressure [F/L²]
+
+# Analysis
+- `σ_max`: Maximum compressive stress [MPa]
+- `governing_case`: Which load case governs (`:symmetric` or `:asymmetric`)
+
+# Design Checks
+- `stress_check`: Named tuple with `(σ, σ_allow, ratio, ok)`
+- `deflection_check`: Named tuple with `(δ, limit, ratio, ok)`
+- `convergence_check`: Named tuple with `(converged, iterations)`
+"""
 struct VaultResult{L, P, F} <: AbstractFloorResult
-    thickness::L        # shell thickness
-    rise::L             # crown rise
-    thrust_dead::P      # horizontal thrust (dead load component)
-    thrust_live::P      # horizontal thrust (live load component)
-    volume_per_area::L  # concrete volume (length units = m^3/m^2)
-    self_weight::F      # force/area (service)
+    # Geometry
+    thickness::L
+    rise::L
+    arc_length::L
+    
+    # Thrust (line loads at supports)
+    thrust_dead::P
+    thrust_live::P
+    
+    # Material
+    volume_per_area::L
+    self_weight::F
+    
+    # Analysis outputs
+    σ_max::Float64
+    governing_case::Symbol
+    
+    # Design checks (structured like FlatPlatePanelResult)
+    stress_check::NamedTuple{(:σ, :σ_allow, :ratio, :ok), Tuple{Float64, Float64, Float64, Bool}}
+    deflection_check::NamedTuple{(:δ, :limit, :ratio, :ok), Tuple{Float64, Float64, Float64, Bool}}
+    convergence_check::NamedTuple{(:converged, :iterations), Tuple{Bool, Int}}
 end
 
-# Total thrust accessor
+# Accessors
 total_thrust(r::VaultResult) = r.thrust_dead + r.thrust_live
+
+"""Check if vault design passes all checks."""
+is_adequate(r::VaultResult) = r.stress_check.ok && r.deflection_check.ok && r.convergence_check.converged
 
 """Custom/shaped slab result."""
 struct ShapedSlabResult{L, F} <: AbstractFloorResult
@@ -219,6 +333,83 @@ struct ShapedSlabResult{L, F} <: AbstractFloorResult
 end
 
 ShapedSlabResult(vol::L, sw::F) where {L, F} = ShapedSlabResult{L, F}(vol, sw, nothing, Dict{Symbol,Any}())
+
+# =============================================================================
+# Shear Stud Design (for Punching Shear Reinforcement)
+# =============================================================================
+
+"""
+    ShearStudDesign
+
+Per-column shear stud design per ACI 318-19 §22.6.8 / Ancon Shearfix.
+
+# Fields
+- `required`: Whether studs are needed for this column
+- `stud_diameter`: Stud diameter (typically 3/8" or 1/2")
+- `fyt`: Stud yield strength (from material)
+- `n_rails`: Number of stud rails (min 8 for interior, 4-6 for edge/corner)
+- `n_studs_per_rail`: Studs per rail (determines shear-reinforced zone extent)
+- `s0`: First stud spacing from column face (0.35d to 0.5d)
+- `s`: Subsequent spacing (≤ 0.75d, or ≤ 0.5d if high stress)
+- `Av_per_line`: Total stud area per peripheral line
+- `vs`: Steel contribution to shear stress
+- `vcs`: Concrete contribution with studs (reduced)
+- `vc_max`: Compression strut limit
+- `outer_ok`: Whether outer critical section passes
+
+# Reference
+- ACI 318-19 Section 22.6.8
+- Ancon Shearfix Design Manual to ACI 318-19
+"""
+Base.@kwdef struct ShearStudDesign{L<:Asap.Length, A<:Asap.Area, P<:Asap.Pressure}
+    required::Bool = false
+    stud_diameter::L = 0.5u"inch"
+    fyt::P = 51000.0u"psi"
+    n_rails::Int = 0
+    n_studs_per_rail::Int = 0
+    s0::L = 0.0u"inch"              # First spacing (from column face)
+    s::L = 0.0u"inch"               # Subsequent spacing
+    Av_per_line::A = 0.0u"inch^2"   # Total stud area per peripheral line
+    vs::P = 0.0u"psi"               # Steel contribution
+    vcs::P = 0.0u"psi"              # Reduced concrete contribution
+    vc_max::P = 0.0u"psi"           # Compression strut limit
+    outer_ok::Bool = true           # Outer critical section passes
+end
+
+"""Check if stud design is adequate."""
+is_adequate(s::ShearStudDesign) = !s.required || (s.n_rails > 0 && s.outer_ok)
+
+"""
+    PunchingCheckResult
+
+Per-column punching shear check result with optional stud design.
+
+# Fields
+- `ok`: Whether check passes (with or without studs)
+- `ratio`: vu / φvc (or vu / φ(vcs+vs) with studs)
+- `vu`: Factored shear stress
+- `φvc`: Design capacity (concrete only without studs)
+- `b0`: Critical perimeter at column
+- `Jc`: Polar moment of inertia
+- `Vu`: Factored shear force
+- `Mub`: Unbalanced moment
+- `studs`: Shear stud design (nothing if no studs needed/used)
+
+# Reference
+- ACI 318-19 Section 22.6
+- Ancon Shearfix Design Manual
+"""
+Base.@kwdef struct PunchingCheckResult{L<:Asap.Length, P<:Asap.Pressure, F<:Asap.Force, M<:Asap.Moment}
+    ok::Bool
+    ratio::Float64
+    vu::P
+    φvc::P
+    b0::L
+    Jc::Asap.SecondMomentOfArea
+    Vu::F
+    Mub::M
+    studs::Union{ShearStudDesign, Nothing} = nothing
+end
 
 """
 Strip reinforcement design result (flat plate/slab design).
@@ -235,13 +426,48 @@ struct StripReinforcement{L<:Asap.Length, A<:Asap.Area, M<:Asap.Moment}
 end
 
 """
+    FlatPlatePanelResult
+
 Panel design result for flat plate per ACI 318 DDM/EFM.
+
+Extends `CIPSlabResult` with strip reinforcement and design checks.
+Main result type for flat plate design - includes all fields needed
+for visualization, analysis, and documentation.
+
+# Core Fields (same interface as CIPSlabResult)
+- `thickness`: Slab thickness (same as `h` for compatibility)
+- `volume_per_area`: Concrete volume per plan area [m]
+- `self_weight`: Self-weight pressure
+
+# Geometry
+- `l1`, `l2`: Panel spans in each direction
+- `M0`: Total static moment
+
+# Reinforcement Design
+- `column_strip_width`, `column_strip_reinf`: Column strip design
+- `middle_strip_width`, `middle_strip_reinf`: Middle strip design
+
+# Design Checks
+- `punching_check`: Punching shear verification
+- `deflection_check`: Two-way deflection verification
+
+# Example
+```julia
+result = size_flat_plate!(struc, slab, col_opts)
+result.thickness          # Slab thickness
+result.deflection_ok      # Quick deflection status
+result.column_strip_reinf # Reinforcement details
+```
 """
-struct FlatPlatePanelResult{L<:Asap.Length, M<:Asap.Moment} <: AbstractFloorResult
+struct FlatPlatePanelResult{L<:Asap.Length, F<:Asap.Pressure, M<:Asap.Moment} <: AbstractFloorResult
+    # Core fields (CIPSlabResult interface)
+    thickness::L              # Slab thickness
+    volume_per_area::L        # Concrete volume per plan area [m]
+    self_weight::F            # Self-weight pressure
+    
     # Geometry
     l1::L                     # Span in direction 1
     l2::L                     # Span in direction 2
-    h::L                      # Slab thickness
     
     # Analysis
     M0::M                     # Total static moment
@@ -259,9 +485,57 @@ struct FlatPlatePanelResult{L<:Asap.Length, M<:Asap.Moment} <: AbstractFloorResu
     deflection_check::NamedTuple
 end
 
-# Interface for FlatPlatePanelResult
-self_weight(::FlatPlatePanelResult) = error("Use get_gravity_loads for FlatPlatePanelResult")
-total_depth(r::FlatPlatePanelResult) = r.h
+# Convenience constructor from old format (h-based)
+# Accepts mixed length units and normalizes to meters internally
+function FlatPlatePanelResult(
+    l1::Asap.Length, l2::Asap.Length, h::Asap.Length, M0::M,
+    cs_width::Asap.Length, cs_reinf::Vector{<:StripReinforcement},
+    ms_width::Asap.Length, ms_reinf::Vector{<:StripReinforcement},
+    punching::NamedTuple, deflection::NamedTuple;
+    γ_concrete = 150.0u"lbf/ft^3"  # Weight density (force/volume)
+) where {M<:Asap.Moment}
+    # Normalize all lengths to meters for consistent storage
+    L = typeof(1.0u"m")
+    
+    thickness_m = uconvert(u"m", h)
+    l1_m = uconvert(u"m", l1)
+    l2_m = uconvert(u"m", l2)
+    cs_width_m = uconvert(u"m", cs_width)
+    ms_width_m = uconvert(u"m", ms_width)
+    
+    # Compute self-weight: weight density × thickness = pressure
+    sw = uconvert(u"lbf/ft^2", γ_concrete * h)
+    vol_per_area = thickness_m  # m³/m² = m
+    
+    return FlatPlatePanelResult{L, typeof(sw), M}(
+        thickness_m,
+        vol_per_area,
+        sw,
+        l1_m, l2_m, M0,
+        cs_width_m, cs_reinf,
+        ms_width_m, ms_reinf,
+        punching, deflection
+    )
+end
+
+# Interface accessors
+total_depth(r::FlatPlatePanelResult) = r.thickness
+
+"""Quick check: does deflection pass?"""
+deflection_ok(r::FlatPlatePanelResult) = r.deflection_check.passes
+
+"""Quick check: does punching shear pass?"""
+punching_ok(r::FlatPlatePanelResult) = r.punching_check.passes
+
+"""Maximum punching utilization ratio across all columns."""
+max_punching_ratio(r::FlatPlatePanelResult) = r.punching_check.max_ratio
+
+"""Deflection ratio (Δ_total / Δ_limit)."""
+deflection_ratio(r::FlatPlatePanelResult) = r.deflection_check.ratio
+
+# Backward compatibility: h accessor
+Base.getproperty(r::FlatPlatePanelResult, s::Symbol) = 
+    s === :h ? getfield(r, :thickness) : getfield(r, s)
 materials(::FlatPlatePanelResult) = (:concrete,)
 
 # =============================================================================
@@ -444,6 +718,7 @@ const FLOOR_TYPE_MAP = Dict{Symbol, AbstractFloorSystem}(
     :dlt => DLT(),
     :nlt => NLT(),
     :mass_timber_joist => MassTimberJoist(),
+    :grade => Grade(),
 )
 
 const FLOOR_SYMBOL_MAP = Dict{Type, Symbol}(

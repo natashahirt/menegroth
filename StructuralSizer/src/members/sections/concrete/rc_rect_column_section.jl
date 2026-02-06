@@ -445,3 +445,101 @@ function radius_of_gyration(s::RCColumnSection; axis::Symbol = :x)
         return 0.3 * s.b
     end
 end
+
+# ==============================================================================
+# Section Scaling
+# ==============================================================================
+
+"""
+    scale_column_section(section::RCColumnSection, new_b, new_c) -> RCColumnSection
+
+Create a new RCColumnSection with updated dimensions, preserving reinforcement layout.
+
+Used when column dimensions are increased beyond the P-M design result (e.g., for 
+span minimum or punching shear requirements). The rebar configuration is preserved,
+giving a conservative design (same steel in larger column = lower ρg).
+
+# Arguments
+- `section`: Original RCColumnSection from P-M design
+- `new_b`: New section width
+- `new_c`: New section depth  
+
+# Returns
+New RCColumnSection with updated dimensions and same reinforcement
+
+# Example
+```julia
+sec = RCColumnSection(b=16u"inch", h=16u"inch", bar_size=8, n_bars=8)
+scaled = scale_column_section(sec, 20u"inch", 20u"inch")  # Same bars, bigger section
+```
+
+# Notes
+For proper column design where reinforcement must be sized for demands,
+use `resize_column_with_reinforcement` instead, which uses P-M interaction
+analysis to determine appropriate reinforcement.
+"""
+function scale_column_section(
+    section::RCColumnSection,
+    new_b::Length,
+    new_c::Length
+)
+    # If dimensions haven't changed, return original
+    b_old = ustrip(u"inch", section.b)
+    h_old = ustrip(u"inch", section.h)
+    b_new = ustrip(u"inch", new_b)
+    h_new = ustrip(u"inch", new_c)
+    
+    if abs(b_new - b_old) < 0.1 && abs(h_new - h_old) < 0.1
+        return section
+    end
+    
+    # Extract bar info from original section
+    n_bars_val = length(section.bars)
+    if n_bars_val == 0
+        error("Cannot scale section with no bars")
+    end
+    
+    # Find bar size from area (reverse lookup)
+    As_bar = section.bars[1].As
+    bar_size = _infer_bar_size_from_area(As_bar)
+    
+    # Create new section with same bar configuration
+    return RCColumnSection(
+        b = new_b,
+        h = new_c,
+        bar_size = bar_size,
+        n_bars = n_bars_val,
+        cover = section.cover,
+        tie_type = section.tie_type
+    )
+end
+
+"""Infer rebar size number from bar area by matching to ASTM A615 catalog."""
+function _infer_bar_size_from_area(As::Area)
+    As_in2 = ustrip(u"inch^2", As)
+    
+    # Standard bar areas (ASTM A615)
+    bar_areas = Dict(
+        3 => 0.11, 4 => 0.20, 5 => 0.31, 6 => 0.44,
+        7 => 0.60, 8 => 0.79, 9 => 1.00, 10 => 1.27,
+        11 => 1.56, 14 => 2.25, 18 => 4.00
+    )
+    
+    best_size = 8  # Default
+    best_diff = Inf
+    
+    for (size, area) in bar_areas
+        diff = abs(As_in2 - area)
+        if diff < best_diff
+            best_diff = diff
+            best_size = size
+        end
+    end
+    
+    # Warn if match is poor
+    if best_diff / bar_areas[best_size] > 0.05
+        @warn "Bar area $As_in2 in² doesn't closely match standard sizes, using #$best_size"
+    end
+    
+    return best_size
+end

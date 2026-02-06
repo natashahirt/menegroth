@@ -1,6 +1,6 @@
 # Structural Synthesizer — Codebase Directory
 
-> **Last updated:** 2026-02-02
+> **Last updated:** 2026-02-05 (Unitful best practices + overflow fixes)
 > 
 > Reference document for codebase capabilities, types, and workflows.
 > Update this file when implementing new features or changing APIs.
@@ -61,6 +61,38 @@
 | Constant | Value | Description |
 |----------|-------|-------------|
 | `GRAVITY` | 9.80665 m/s² | Standard gravity |
+
+### Unitful Best Practices
+
+> **Rule:** Never create variables with unit suffixes like `length_m`, `force_kN`, `stress_psi`. Let Unitful handle conversions automatically.
+
+**Correct patterns:**
+```julia
+# Store with natural units, convert when needed
+span = 6.0u"m"
+fc = 4000u"psi"
+stress = uconvert(u"MPa", fc)  # Convert for display/output
+value = ustrip(u"ksi", stress)  # Strip only at final boundary
+```
+
+**Avoid:**
+```julia
+# BAD: Manual unit bookkeeping
+span_m = 6.0
+fc_psi = 4000
+stress_ksi = fc_psi / 1000  # Magic number!
+```
+
+**Exception:** Internal calculation functions may strip units at the boundary for:
+- Optimizer interfaces (require Float64)
+- Numerical solvers (Roots.jl, etc.)
+- Performance-critical inner loops
+
+In these cases, use named constants for any unit conversion factors:
+```julia
+const _KPA_PER_MPA = 1000.0  # Instead of magic "/ 1000"
+const _PA_PER_MPA = 1e6
+```
 
 ---
 
@@ -204,21 +236,36 @@
 
 ## 🧱 Floor Systems
 
+### Slab Sizing API (Public)
+
+| Function | Description | Status |
+|----------|-------------|--------|
+| `size_slabs!(struc; options=FloorOptions())` | Size all slabs in building | ✅ |
+| `size_slab!(struc, slab_idx; options=FloorOptions())` | Size single slab (debug/testing) | ✅ |
+
+Internal dispatch: `_size_slab!(::FloorType, struc, slab, idx; ...)` routes to type-specific pipelines.
+
 ### CIP Concrete
-| Type | Spanning | Sizing Function | Status |
-|------|----------|-----------------|--------|
-| `OneWay` | One-way | `size_floor` | ⚠️ Type defined |
-| `TwoWay` | Two-way | `size_floor` | ⚠️ Type defined |
-| `FlatPlate` | Beamless | `size_floor` | 🚧 In Progress (see `CIP_FLAT_PLATE_DESIGN_PLAN.md`) |
-| `FlatSlab` | Beamless | — | ⚠️ Type defined only |
-| `PTBanded` | Two-way | — | ⚠️ Type defined only |
-| `Waffle` | Two-way | — | ⚠️ Type defined only |
-| `HollowCore` | One-way | `size_floor` | ⚠️ Stub |
-| `Vault` | Custom | `size_floor` | ✅ Full (Haile method) |
+| Type | Spanning | Status |
+|------|----------|--------|
+| `OneWay` | One-way | ⚠️ Type defined |
+| `TwoWay` | Two-way | ⚠️ Type defined |
+| `FlatPlate` | Beamless | ✅ Full (DDM + EFM) |
+| `FlatSlab` | Beamless | ⚠️ Type defined |
+| `PTBanded` | Two-way | ⚠️ Type defined |
+| `Waffle` | Two-way | ⚠️ Type defined |
+| `HollowCore` | One-way | ⚠️ Stub |
+| `Vault` | Custom | ✅ Full (Haile method) |
 
-**Flat plate functions (🚧):** `StripReinforcement`, `FlatPlatePanelResult`, `estimate_column_size`
+**Flat plate functions:** `StripReinforcement`, `FlatPlatePanelResult`, `estimate_column_size`
 
-**Vault functions:** `vault_stress_symmetric`, `vault_stress_asymmetric`, `solve_equilibrium_rise`, `parabolic_arc_length`
+**Vault analysis methods:** `VaultAnalysisMethod`, `HaileAnalytical`, `ShellFEA` (future)
+
+**Vault functions:** `vault_stress_symmetric`, `vault_stress_asymmetric`, `solve_equilibrium_rise`, `parabolic_arc_length`, `get_vault_properties`
+
+**VaultResult fields:** `thickness`, `rise`, `arc_length`, `thrust_dead`, `thrust_live`, `volume_per_area`, `self_weight`, `σ_max`, `governing_case`, `stress_check`, `deflection_check`, `convergence_check`
+
+**VaultResult accessors:** `total_thrust(r)`, `is_adequate(r)`
 
 ### Steel Floors
 | Type | Status |
@@ -241,14 +288,18 @@
 | `ShapedSlab` | ⚠️ Type defined |
 
 ### Floor Options
-| Options Struct | Floor Types |
-|----------------|-------------|
-| `CIPOptions` | One-way, two-way, flat plate, flat slab |
-| `VaultOptions` | Vault |
-| `CompositeDeckOptions` | Composite deck |
-| `TimberOptions` | CLT, DLT, NLT |
+| Options Struct | Floor Types | Key Fields |
+|----------------|-------------|------------|
+| `FloorOptions` | All | `flat_plate`, `one_way`, `vault`, `composite`, `timber`, `tributary_axis` |
+| `FlatPlateOptions` | FlatPlate, FlatSlab, Waffle, PT | `material`, `cover`, `bar_size`, `analysis_method`, `has_edge_beam`, `φ_flexure`, `φ_shear`, `λ`, `deflection_limit` |
+| `OneWayOptions` | OneWay | `material`, `cover`, `bar_size`, `support` |
+| `VaultOptions` | Vault | `rise`/`lambda`, `thickness`, `material`, `method`, `allowable_stress` |
+| `CompositeDeckOptions` | Composite deck | `deck_material`, `fill_material`, `deck_profile` |
+| `TimberOptions` | CLT, DLT, NLT | `timber_material` |
 
-**Helper functions:** `required_floor_options`, `floor_options_help`, `floor_type`, `floor_symbol`, `infer_floor_type`
+**Material presets:** `RC_4000_60` (NWC_4000 + Rebar_60), `RC_5000_60`, etc.
+
+**Helper functions:** `floor_type`, `floor_symbol`, `infer_floor_type`
 
 ---
 

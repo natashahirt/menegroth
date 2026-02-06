@@ -3,22 +3,46 @@
 # ==============================================================================
 
 """
-Approximate effective-width reduction for slender rectangular HSS walls in flexure.
+    _Se_rect_hss(s::HSSRectSection, mat::Metal; axis::Symbol)
 
-Computes an effective section modulus `Se` by scaling the elastic section modulus
-by an effective width ratio. Conservative and avoids rebuilding section geometry.
+Effective section modulus for slender rectangular HSS per AISC F7-3.
+
+For slender compression flanges (webs in minor-axis bending), uses effective width
+from E7 to compute reduced section modulus. Uses simplified scaling approach rather
+than full sectional recalculation.
+
+# AISC F7.2(c): Compression Flange Local Buckling
+For slender elements:
+- be = 1.92t√(E/Fy) × [1 - 0.38/(b/t)√(E/Fy)] ≤ b  (F7-4)
+- Se = S × (be/b)  (approximate; F7-3 uses Mn = Fy × Se)
 """
 function _Se_rect_hss(s::HSSRectSection, mat::Metal; axis::Symbol)
     E, Fy = mat.E, mat.Fy
-    bcomp = axis === :weak ? s.h : s.b
-    λ = ustrip(bcomp / s.t)
-
+    t = s.t
+    
+    # Compression element: flange for strong-axis, web for weak-axis
+    # For strong axis bending (about x), compression is in the top/bottom walls (width b)
+    # For weak axis bending (about y), compression is in the side walls (height h)
+    if axis === :weak
+        bcomp = s.H - 3*t  # Clear web height
+        S = s.Sy
+    else
+        bcomp = s.B - 3*t  # Clear flange width
+        S = s.Sx
+    end
+    
+    λ = ustrip(bcomp / t)
+    
+    # F7-4: Effective width for slender compression elements
     rt = sqrt(E / Fy)
-    be = 1.92 * s.t * rt * (1 - 0.34 * rt / λ)
+    be = 1.92 * t * rt * (1 - 0.38 / λ * rt)
     be = clamp(be, zero(be), bcomp)
-
-    S = axis === :weak ? s.Sy : s.Sx
-    return S * ustrip(be / bcomp)
+    
+    # Approximate Se by scaling S by effective width ratio
+    # This is conservative; exact solution requires rebuilding section properties
+    Se = S * (be / bcomp)
+    
+    return Se
 end
 
 function get_Mn(s::HSSRectSection, mat::Metal; Lb=zero(s.H), Cb=1.0, axis=:strong)

@@ -49,12 +49,14 @@ include("types.jl")
 
 # Constants (ECC coefficients, load factors, standard loads)
 include("Constants.jl")
-@reexport using .Constants
 
 # Materials (includes material types: Metal, Concrete, Timber)
 include("materials/_materials.jl")
 
-# Members (sections, codes, optimization)
+# Optimization infrastructure (shared abstractions + solvers)
+include("optimize/_optimize.jl")
+
+# Members (sections, codes, member-specific optimization)
 include("members/_members.jl")
 
 # Slabs (types, codes, optimization)
@@ -100,14 +102,29 @@ export NDSChecker, Timber              # Timber (stub)
 export ACIChecker                      # Concrete beam (stub)
 export ACIColumnChecker, ACIColumnCapacityCache  # Concrete column (implemented)
 
-# Optimization
+# Optimization - Discrete (MIP)
 export optimize_discrete
 export size_columns
 export to_steel_demands, to_rc_demands
 export to_steel_geometry, to_concrete_geometry, convert_geometries
 
+# Optimization - Continuous (NLP)
+export AbstractNLPProblem
+export n_variables, variable_bounds, initial_guess, evaluate
+export objective_fn, constraint_fns, constraint_bounds, n_constraints
+export variable_names, constraint_names, problem_summary
+export optimize_continuous
+export VaultNLPProblem, optimize_vault
+export RCColumnNLPProblem, RCColumnNLPResult, build_nlp_result  # RC column NLP
+export size_column_nlp, size_columns_nlp                         # RC column NLP API
+export HSSColumnNLPProblem, HSSColumnNLPResult, build_hss_nlp_result  # HSS column NLP
+export size_hss_nlp, size_hss_columns_nlp                             # HSS column NLP API
+export WColumnNLPProblem, WColumnNLPResult, build_w_nlp_result        # W section NLP
+export size_w_nlp, size_w_columns_nlp                                 # W section NLP API
+
 # Sizing options (clean API)
 export SteelColumnOptions, ConcreteColumnOptions, SteelBeamOptions
+export NLPColumnOptions, NLPHSSOptions, NLPWOptions  # Continuous optimization options
 export ColumnOptions  # Union type for dispatch
 export steel_column_catalog, rc_column_catalog
 
@@ -115,11 +132,12 @@ export steel_column_catalog, rc_column_catalog
 export material_name
 
 # Materials - Steel
-export A992_Steel, S355_Steel, Rebar_40, Rebar_60, Rebar_75, Rebar_80
+export A992_Steel, S355_Steel, Rebar_40, Rebar_60, Rebar_75, Rebar_80, Stud_51
 # Materials - Concrete
 export NWC_3000, NWC_4000, NWC_5000, NWC_6000, NWC_GGBS, NWC_PFA
 export RC_3000_60, RC_4000_60, RC_5000_60, RC_6000_60, RC_5000_75, RC_6000_75, RC_GGBS_60
-export concrete_fc_ksi, concrete_fc_mpa, concrete_E_ksi, concrete_wc_pcf
+export Earthen_500, Earthen_1000, Earthen_2000, Earthen_4000, Earthen_8000
+export concrete_fc, concrete_fc_mpa, concrete_E, concrete_wc
 
 # Section Interface (generic)
 export section_area, section_depth, section_width, weight_per_length
@@ -149,10 +167,13 @@ export STANDARD_GLULAM_WIDTHS, GLULAM_LAM_THICKNESS
 # Sections - Concrete
 # =============================================================================
 export RCBeamSection, rho
-export RCColumnSection, RebarLocation
+export RCColumnSection, RebarLocation, scale_column_section
 export RCCircularSection, circular_compression_zone
 export RCColumnDemand
-export standard_rc_columns, common_rc_rect_columns, all_rc_rect_columns
+# RC column catalog functions
+export standard_rc_columns, standard_rc_circular_columns
+export square_rc_columns, rectangular_rc_columns, low_capacity_rc_columns, high_capacity_rc_columns, all_rc_rect_columns
+export standard_circular_columns, low_capacity_circular_columns, high_capacity_circular_columns, all_rc_circular_columns
 export standard_rc_circular_columns, common_rc_circular_columns, all_rc_circular_columns
 export effective_depth, compression_steel_depth, moment_of_inertia, radius_of_gyration, n_bars
 export extreme_tension_depth, get_bar_depths, bar_depth_from_compression
@@ -169,6 +190,14 @@ export check_interaction
 export get_slenderness, is_compact
 export get_Lp_Lr, get_Fcr_LTB, get_Fcr_flexural, get_Fe, get_Cv1
 export check_PM_interaction, check_PMxMy_interaction
+# AISC Appendix 8 - Moment Amplification (B1/B2)
+export compute_Cm, compute_Pe1, compute_B1
+export compute_RM, compute_Pe_story, compute_B2
+export amplify_moments, amplify_axial
+# AISC Chapter H3 - Torsion for HSS
+export torsional_constant_rect_hss, torsional_constant_round_hss
+export get_Fcr_torsion
+export check_combined_torsion_interaction, can_neglect_torsion
 
 # ACI Material Utilities
 export beta1, Ec, Ec_ksi, fr, fc_ksi, fy_ksi, Es_ksi, εcu
@@ -188,6 +217,8 @@ export check_PM_capacity, capacity_at_axial, capacity_at_moment, utilization_rat
 export calculate_PM_at_c_yaxis, calculate_phi_PM_at_c_yaxis
 export generate_PM_diagram_yaxis, generate_PM_diagrams_biaxial
 export effective_depth_yaxis
+# Column reinforcement design for fixed dimensions
+export design_column_reinforcement, resize_column_with_reinforcement
 # Slenderness
 export slenderness_ratio, should_consider_slenderness
 export effective_stiffness, critical_buckling_load
@@ -195,7 +226,8 @@ export magnification_factor_nonsway, calc_Cm, minimum_moment
 export magnify_moment_nonsway, magnification_factor_sway, magnify_moment_sway
 export concrete_modulus
 # Sway frame magnification (complete procedure)
-export StoryProperties, stability_index, is_sway_frame
+export SwayStoryProperties, stability_index, is_sway_frame
+export B2StoryProperties  # AISC B2 moment amplification
 export magnification_factor_sway_Q
 export effective_stiffness_sway, critical_buckling_load_sway
 export magnify_moment_sway_complete
@@ -206,7 +238,7 @@ export check_biaxial_capacity, check_biaxial_simple
 export check_biaxial_rectangular, check_biaxial_auto
 
 # Options helpers
-export get_rebar_fy_ksi, get_transverse_rebar, get_transverse_bar_diameter
+export get_rebar_fy, get_transverse_rebar, get_transverse_bar_diameter
 
 # =============================================================================
 # Floor System Types
@@ -219,6 +251,7 @@ export AbstractConcreteSlab, AbstractSteelFloor, AbstractTimberFloor
 # CIP Concrete types
 export OneWay, TwoWay, FlatPlate, FlatSlab, PTBanded, Waffle
 export HollowCore, Vault
+export floor_system  # Symbol → Type converter
 
 # Steel floor types
 export CompositeDeck, NonCompositeDeck, JoistRoofDeck
@@ -237,8 +270,7 @@ export spanning_behavior, is_one_way, is_two_way, is_beamless, requires_column_t
 export SupportCondition, SIMPLE, ONE_END_CONT, BOTH_ENDS_CONT, CANTILEVER
 
 # Floor sizing options + guidance
-export FloorOptions, CIPOptions, VaultOptions, CompositeDeckOptions, TimberOptions
-export required_floor_options, floor_options_help
+export FloorOptions, FlatPlateOptions, OneWayOptions, VaultOptions, CompositeDeckOptions, TimberOptions
 export result_materials
 
 # Type mapping utilities
@@ -253,10 +285,11 @@ export CIPSlabResult, ProfileResult
 export CompositeDeckResult, JoistDeckResult
 export TimberPanelResult, TimberJoistResult
 export VaultResult, ShapedSlabResult
-export total_thrust
+export total_thrust, is_adequate
 
 # Flat plate design results
-export StripReinforcement, FlatPlatePanelResult
+export StripReinforcement, FlatPlatePanelResult, ShearStudDesign, PunchingCheckResult
+export deflection_ok, punching_ok, max_punching_ratio, deflection_ratio
 
 # Flat plate calculations (ACI 318)
 export Ec, β1, fr
@@ -276,8 +309,11 @@ export slab_beam_stiffness_Ksb, column_stiffness_Kc, torsional_member_stiffness_
 export equivalent_column_stiffness_Kec, distribution_factor_DF, carryover_factor_COF
 export fixed_end_moment_FEM
 
-# Flat plate design pipeline
-export size_flat_plate!, size_flat_plate_efm!
+# Slab sizing dispatcher (routes to appropriate sizing function by floor type)
+export size_slabs!
+export size_slab!
+
+# Flat plate design pipeline (internal; do not export)
 
 # Common interface
 export self_weight, total_depth, volume_per_area
@@ -290,19 +326,19 @@ export default_tributary_axis, resolve_tributary_axis
 # Material volumes interface
 export materials, material_volumes
 
-# =============================================================================
-# Floor Sizing Interface
-# =============================================================================
-
-export size_floor
+# (Removed) Floor span-based sizing interface (`size_floor`) — use `size_slab!`/`size_slabs!`.
 
 # =============================================================================
 # Vault Analysis (advanced)
 # =============================================================================
 
+# Analysis methods (dispatch types)
+export VaultAnalysisMethod, HaileAnalytical, ShellFEA
+
+# Core analysis functions
 export vault_stress_symmetric, vault_stress_asymmetric
 export solve_equilibrium_rise
-export parabolic_arc_length, vault_volume_per_area
+export parabolic_arc_length, vault_volume_per_area, get_vault_properties
 
 # =============================================================================
 # Tributary Area - Re-exported from Asap
@@ -379,5 +415,10 @@ export section_geometry
 export section_thickness
 export section_flange_width, section_flange_thickness, section_web_thickness
 export has_rebar, section_rebar_positions, section_rebar_radius
+
+# =============================================================================
+# Re-exports (at end to avoid world-age issues in Julia 1.12+)
+# =============================================================================
+@reexport using .Constants
 
 end # module

@@ -16,7 +16,7 @@ Select mass timber joist floor system.
 # Returns
 - `TimberJoistResult` with joist and deck parameters
 """
-function size_floor(::MassTimberJoist, span::L, sdl::F, live::F;
+function _size_span_floor(::MassTimberJoist, span::L, sdl::F, live::F;
                     material::AbstractMaterial=NWC_4000,
                     spacing::L=uconvert(unit(span), 1.2u"m"),
                     deck_type::Symbol=:plywood) where {L, F}

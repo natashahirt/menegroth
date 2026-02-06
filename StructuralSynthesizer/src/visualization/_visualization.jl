@@ -1,3 +1,6 @@
+# Ensure StructuralPlots is available for visualization files
+import StructuralPlots
+
 include("vis_building_skeleton.jl")
 include("vis_building_structure_utils/vis_slabs.jl")
 include("vis_building_structure_utils/vis_foundations.jl")

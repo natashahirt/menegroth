@@ -294,8 +294,8 @@ end
     
     # =========================================================================
     @testset "Story Stability Index Q" begin
-        # Create StoryProperties
-        story = StoryProperties(
+        # Create SwayStoryProperties
+        story = SwayStoryProperties(
             ref.story.ΣPu,
             ref.story.ΣPc,
             ref.story.Vus,
@@ -394,7 +394,7 @@ end
     # =========================================================================
     @testset "Complete Sway Magnification Procedure" begin
         # Set up story and geometry
-        story = StoryProperties(
+        story = SwayStoryProperties(
             ref.story.ΣPu,
             ref.story.ΣPc,
             ref.story.Vus,
@@ -452,18 +452,18 @@ end
     # =========================================================================
     @testset "Stability Index Edge Cases" begin
         # Very stable story (low Q)
-        story_stable = StoryProperties(100.0, 100000.0, 50.0, 0.05, 180.0)
+        story_stable = SwayStoryProperties(100.0, 100000.0, 50.0, 0.05, 180.0)
         @test is_sway_frame(story_stable) == false
         @test stability_index(story_stable) < 0.05
         
         # Marginally sway (Q just above 0.05)
-        story_marginal = StoryProperties(1000.0, 10000.0, 20.0, 0.16, 160.0)
+        story_marginal = SwayStoryProperties(1000.0, 10000.0, 20.0, 0.16, 160.0)
         Q_marginal = stability_index(story_marginal)
         # Q = 1000 × 0.16 / (20 × 160) = 0.05
         @test Q_marginal ≈ 0.05 rtol=0.01
         
         # Very unstable (high Q approaching 1.0)
-        story_unstable = StoryProperties(3000.0, 5000.0, 10.0, 0.5, 100.0)
+        story_unstable = SwayStoryProperties(3000.0, 5000.0, 10.0, 0.5, 100.0)
         Q_unstable = stability_index(story_unstable)
         δs_unstable = magnification_factor_sway_Q(Q_unstable)
         @test δs_unstable > 2.0  # High magnification

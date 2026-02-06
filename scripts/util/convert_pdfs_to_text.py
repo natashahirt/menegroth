@@ -82,6 +82,7 @@ if __name__ == "__main__":
         workspace_root / "StructuralSizer" / "src" / "slabs" / "codes" / "concrete" / "reference" / "two_way",
         workspace_root / "StructuralSizer" / "src" / "foundations" / "codes" / "reference",
         workspace_root / "StructuralSizer" / "src" / "members" / "codes" / "aisc" / "reference",
+        Path(r"C:\Users\nhirt\MIT Dropbox\Natasha Hirt\_MIT\DS Research\Synthetic_Buildings\structural_synthesizer\StructuralSizer\src\slabs\codes\concrete\reference\two_way\Ancon_Shearfix_Design_Manual_to_ACI_318-19.pdf").parent,
     ]
     
     for ref_dir in reference_dirs:

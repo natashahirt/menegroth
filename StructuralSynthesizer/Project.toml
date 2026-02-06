@@ -1,13 +1,13 @@
 name = "StructuralSynthesizer"
 uuid = "fc54e8a9-dab1-4bea-a64f-f8e9b3ce8a89"
-authors = ["Natasha K. Hirt"]
 version = "0.1.0"
+authors = ["Natasha K. Hirt"]
 
 [deps]
 Asap = "763a8c06-ba23-41fc-b385-b3b57b52403a"
 Dates = "ade2ca70-3891-5945-98fb-dc099432e06a"
-GeometryBasics = "5c1252a2-5f33-56bf-86c9-59e7332b4326"
 GLMakie = "e9467ef8-e4e7-5192-8a1a-b1aee30e663a"
+GeometryBasics = "5c1252a2-5f33-56bf-86c9-59e7332b4326"
 Graphs = "86223c79-3864-5bf0-83f7-82e725a168b6"
 Interpolations = "a98d9a8b-a2ab-59e6-89dd-64a1c18fca59"
 JSON = "682c06a0-de6a-54ab-a142-c8b1cf79cde6"
@@ -24,17 +24,9 @@ Unitful = "1986cc42-f94f-5a68-af5c-568840ba703d"
 XLSX = "fdbf4ff8-1666-58a4-91e7-1b58723a45e0"
 
 [sources]
-Asap = {path = "../external/Asap"}
-StructuralPlots = {path = "../StructuralPlots"}
-StructuralSizer = {path = "../StructuralSizer"}
-
-[extras]
-Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
-
-[targets]
-test = ["Test"]
-
-# Note: StructuralSizer and Unitful are already in [deps], so tests can use them directly
+Asap = {path = "..\\external\\Asap"}
+StructuralPlots = {path = "..\\StructuralPlots"}
+StructuralSizer = {path = "..\\StructuralSizer"}
 
 [compat]
 Dates = "1.11.0"
@@ -48,3 +40,9 @@ SparseArrays = "1.11.0"
 Statistics = "1.11.1"
 Unitful = "1.27.0"
 XLSX = "0.10.4"
+
+[extras]
+Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+
+[targets]
+test = ["Test"]

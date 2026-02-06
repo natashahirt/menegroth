@@ -2102,3 +2102,54 @@ results = solve!(model, combos)
 # Envelope
 M_max, M_min, governing_combo = envelope(results, :moment)
 ```
+
+---
+
+### Sway Frame Moment Amplification (P-Δ Effects)
+
+**Priority**: Medium - Required for unbraced frames with lateral loads
+
+Both **RC columns** (ACI 318-19 §6.6) and **steel columns** (AISC 360-16 Appendix 8) require moment amplification for P-Δ effects when the frame is unbraced (sway frame). Currently the implementation assumes braced frames (`braced=true`).
+
+#### What's Implemented
+
+| Material | Non-sway (P-δ) | Sway (P-Δ) | Status |
+|----------|----------------|------------|--------|
+| **Steel** | B1 factor implemented | B2 factor implemented | ⚠️ Not integrated into `AISCChecker` |
+| **RC** | `magnify_moment_nonsway()` | `magnify_moment_sway_complete()` | ⚠️ Not integrated into column sizing |
+
+#### Required for Full Implementation
+
+**1. Story-Level Data Collection** (needed for both materials):
+- `ΣPu`: Total factored vertical load in story
+- `ΣPc` (RC) or `Pe_story` (steel): Elastic critical buckling strength for story
+- `Vus`: Total lateral shear in story
+- `Δo`: First-order interstory drift
+- `lc`: Story height
+
+**2. RC Columns** (ACI 6.6.4.6):
+- [ ] `story-properties-extraction`: Extract story data from ASAP model after analysis
+- [ ] `sway-magnification-integration`: Call `magnify_moment_sway_complete()` in `ACIColumnChecker`
+- [ ] `braced-flag-rc-column`: Add `braced::Bool` field to RC column demand/geometry
+
+**3. Steel Columns** (AISC Appendix 8):
+- [ ] `b1-integration`: Amplify `Mnt` by B1 in `AISCChecker.is_feasible()` before interaction check
+- [ ] `b2-integration`: When `braced=false`, compute B2 and amplify `Mlt`, `Plt`
+- [ ] `story-properties-steel`: Same story data needed as for RC
+
+**4. API Considerations**:
+```julia
+# Current: braced=true by default
+geom = SteelMemberGeometry(L; Lb=L, Cb=1.0, Kx=1.0, Ky=1.0, braced=true)
+
+# For sway frames, user provides story properties:
+story = StoryProperties(ΣPu=1500kip, H=20kip, L=12ft, ΔH=0.5inch, Pmf=500kip)
+geom_sway = SteelMemberGeometry(L; braced=false, story_properties=story)
+
+# Checker then computes B2 internally and amplifies moments
+```
+
+**5. Testing**:
+- [ ] Validate against AISC Design Examples for moment frames
+- [ ] Validate against StructurePoint for RC sway frames
+- [ ] Add integration tests for story property extraction from ASAP

@@ -318,10 +318,14 @@ total_factored_pressure(c::Cell) = (c.sdl + c.self_weight) * Constants.DL_FACTOR
 const VolumeType = typeof(1.0u"m^3")
 const MaterialVolumes = Dict{AbstractMaterial, VolumeType}
 
-"""Physical slab (one or more connected cells)."""
-mutable struct Slab{T, R<:AbstractFloorResult}
+"""Physical slab (one or more connected cells).
+
+Note: `result` uses `AbstractFloorResult` (not parameterized) to allow 
+reassignment during sizing (e.g., CIPSlabResult → FlatPlatePanelResult).
+"""
+mutable struct Slab{T}
     cell_indices::Vector{Int}
-    result::R
+    result::AbstractFloorResult  # Allow any floor result type (CIP, FlatPlate, Vault, etc.)
     floor_type::Symbol        # :one_way, :two_way, :pt_banded, :flat_plate
     spans::SpanInfo{T}        # Governing spans across all child cells
     position::Symbol          # :corner, :edge, or :interior (derived from cells)
@@ -329,16 +333,16 @@ mutable struct Slab{T, R<:AbstractFloorResult}
     volumes::MaterialVolumes  # material → total volume (m³)
 end
 
-function Slab(cell_indices::Vector{Int}, result::R, spans::SpanInfo; 
+function Slab(cell_indices::Vector{Int}, result::AbstractFloorResult, spans::SpanInfo; 
               floor_type=:one_way, position::Symbol=:interior, group_id=nothing,
-              volumes::MaterialVolumes=MaterialVolumes()) where {R<:AbstractFloorResult}
+              volumes::MaterialVolumes=MaterialVolumes())
     T = typeof(StructuralSizer.total_depth(result))
     spans_T = SpanInfo{T}(T(spans.primary), T(spans.secondary), spans.axis, T(spans.isotropic))
-    Slab{T, R}(cell_indices, result, floor_type, spans_T, position, group_id, volumes)
+    Slab{T}(cell_indices, result, floor_type, spans_T, position, group_id, volumes)
 end
 
 # Single-cell slab convenience
-Slab(cell_idx::Int, result::R, spans::SpanInfo; kwargs...) where {R<:AbstractFloorResult} = 
+Slab(cell_idx::Int, result::AbstractFloorResult, spans::SpanInfo; kwargs...) = 
     Slab([cell_idx], result, spans; kwargs...)
 
 # Interface for Slab to mirror Result interface
@@ -431,6 +435,8 @@ Vertical member (columns).
 - `c1`, `c2`: Cross-section dimensions (for punching shear, etc.)
 - `story::Int`: Story index (0 = ground level)
 - `position::Symbol`: `:interior`, `:edge`, `:corner` (for punching shear coefficients)
+- `braced`: Whether column is part of a braced frame (no sway amplification needed)
+- `story_properties`: Optional story-level data for sway magnification (populated after analysis)
 
 # Tributary Access
 Tributary areas are stored in `BuildingStructure.tributaries` (TributaryCache).
@@ -438,6 +444,24 @@ Use accessor functions:
 - `column_tributary_area(struc, col)` → total area (m²)
 - `column_tributary_by_cell(struc, col)` → Dict{Int, Float64}
 - `column_tributary_polygons(struc, col)` → Dict{Int, Vector{NTuple{2,Float64}}}
+
+# Braced vs Sway Frames
+- `braced=true` (default): Column is part of a braced frame. Only P-δ (member) effects apply.
+- `braced=false`: Column is part of a sway (unbraced) frame. Both P-δ and P-Δ (story) effects apply.
+
+For sway frames:
+- Steel: AISC Chapter C requires B1/B2 moment amplification (not yet implemented)
+- RC: ACI 318-19 §6.6.4.6 requires δs magnification at ends + δns along length
+
+# Story Properties for Sway Magnification
+For sway frame analysis (ACI 318-19 §6.6.4.6), columns need access to story-level 
+properties. After structural analysis, call `compute_story_properties!(struc)` to 
+populate the `story_properties` field with:
+- `ΣPu`: Sum of factored axial loads on all columns in story
+- `ΣPc`: Sum of critical buckling loads for all columns
+- `Vus`: Factored story shear
+- `Δo`: First-order story drift
+- `lc`: Story height (center-to-center of joints)
 """
 @kwdef mutable struct Column{T} <: AbstractMember{T}
     base::MemberBase{T}
@@ -446,6 +470,16 @@ Use accessor functions:
     c2::Union{T, Nothing} = nothing
     story::Int = 0
     position::Symbol = :interior
+    # Unit vectors pointing along boundary edges (edges that belong to only one face).
+    # Empty for interior columns; 1 direction for edge columns; 2+ for corners.
+    # Used for DDM/EFM to determine if column is an exterior support for a given span direction.
+    boundary_edge_dirs::Vector{NTuple{2, Float64}} = NTuple{2, Float64}[]
+    braced::Bool = true  # Default: braced frame (no sway amplification)
+    story_properties::Union{Nothing, @NamedTuple{ΣPu::Float64, ΣPc::Float64, Vus::Float64, Δo::Float64, lc::Float64}} = nothing
+    # Cell indices in this column's tributary area (populated by compute_vertex_tributaries!)
+    tributary_cell_indices::Set{Int} = Set{Int}()
+    # Cell tributary areas in m² (populated by compute_vertex_tributaries!)
+    tributary_cell_areas::Dict{Int, Float64} = Dict{Int, Float64}()
 end
 
 """
@@ -480,14 +514,16 @@ Beam(seg_idx::Int, L::T; kwargs...) where T = Beam([seg_idx], L; kwargs...)
 
 function Column(seg_indices::Vector{Int}, L::T; Lb=L, Kx=1.0, Ky=1.0, Cb=1.0,
                 group_id=nothing, vertex_idx=0, c1=nothing, c2=nothing,
-                story=0, position=:interior) where T
+                story=0, position=:interior, boundary_edge_dirs=NTuple{2, Float64}[],
+                braced=true, story_properties=nothing) where T
     base = MemberBase{T}(
         segment_indices=seg_indices, L=L, Lb=Lb,
         Kx=Float64(Kx), Ky=Float64(Ky), Cb=Float64(Cb),
         group_id=group_id, section=nothing, volumes=MaterialVolumes()
     )
     Column{T}(base=base, vertex_idx=vertex_idx, c1=c1, c2=c2,
-              story=story, position=position)
+              story=story, position=position, boundary_edge_dirs=boundary_edge_dirs,
+              braced=braced, story_properties=story_properties)
 end
 
 Column(seg_idx::Int, L::T; kwargs...) where T = Column([seg_idx], L; kwargs...)
@@ -677,7 +713,7 @@ mutable struct BuildingStructure{T, A, P} <: AbstractBuildingStructure
     # ─── Floor Systems ───
     cells::Vector{Cell{T, A, P}}
     cell_groups::Dict{UInt64, CellGroup}
-    slabs::Vector{Slab{T, <:AbstractFloorResult}}
+    slabs::Vector{Slab{T}}
     slab_groups::Dict{UInt64, SlabGroup}
     
     # ─── Framing Members ───
@@ -711,7 +747,7 @@ function BuildingStructure(skel::BuildingSkeleton{T}) where T
     BuildingStructure{T, A, P}(
         skel,
         Cell{T, A, P}[], Dict{UInt64, CellGroup}(),
-        Slab{T, AbstractFloorResult}[], Dict{UInt64, SlabGroup}(),
+        Slab{T}[], Dict{UInt64, SlabGroup}(),
         Segment{T}[], Beam{T}[], Column{T}[], Strut{T}[], Dict{UInt64, MemberGroup}(),
         Support{T, F, M}[], Foundation{T, AbstractFoundationResult}[], Dict{UInt64, FoundationGroup}(),
         SiteConditions(),
@@ -727,7 +763,7 @@ function BuildingStructure{T, A, P}(skel::BuildingSkeleton{T}) where {T, A, P}
     BuildingStructure{T, A, P}(
         skel,
         Cell{T, A, P}[], Dict{UInt64, CellGroup}(),
-        Slab{T, AbstractFloorResult}[], Dict{UInt64, SlabGroup}(),
+        Slab{T}[], Dict{UInt64, SlabGroup}(),
         Segment{T}[], Beam{T}[], Column{T}[], Strut{T}[], Dict{UInt64, MemberGroup}(),
         Support{T, F, M}[], Foundation{T, AbstractFoundationResult}[], Dict{UInt64, FoundationGroup}(),
         SiteConditions(),

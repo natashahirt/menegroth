@@ -14,7 +14,7 @@ Select composite deck system for given span and load.
 - `material`: Primary material (concrete fill)
 - `deck_mat`: Steel material for deck
 """
-function size_floor(::CompositeDeck, span::L, sdl::F, live::F;
+function _size_span_floor(::CompositeDeck, span::L, sdl::F, live::F;
                     material::Concrete=NWC_4000,
                     deck_mat::Metal=A992_Steel) where {L, F}
     error("CompositeDeck sizing not yet implemented")

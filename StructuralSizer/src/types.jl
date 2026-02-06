@@ -44,3 +44,15 @@ abstract type AbstractBuildingSkeleton <: AbstractStructuralSynthesizer end
 abstract type AbstractBuildingStructure <: AbstractStructuralSynthesizer end
 
 export AbstractStructuralSynthesizer, AbstractBuildingSkeleton, AbstractBuildingStructure
+
+# =============================================================================
+# Member Types (for optimization interface)
+# =============================================================================
+
+"""Base type for load demand specifications."""
+abstract type AbstractDemand end
+
+"""Base type for member geometry specifications."""
+abstract type AbstractMemberGeometry end
+
+export AbstractDemand, AbstractMemberGeometry

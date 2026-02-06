@@ -6,6 +6,7 @@
 module Constants
 
 using Unitful
+using Asap: Torque, Force, Length, Pressure, Area
 
 # =============================================================================
 # Embodied Carbon Coefficients (kgCO2e/kg)
@@ -61,5 +62,33 @@ const STANDARD_FORCE = u"kN"
 const STANDARD_PRESSURE = u"kN/m^2"
 
 export STANDARD_LENGTH, STANDARD_AREA, STANDARD_FORCE, STANDARD_PRESSURE
+
+# =============================================================================
+# Unit Conversion Pass-Through for Real Types
+# =============================================================================
+# Asap already provides pass-through methods for Real types (to_kip, to_newtons, etc.)
+# These are imported above via the @reexport in StructuralSizer.jl main module.
+# No need to redefine them here - just ensure they're accessible.
+
+# =============================================================================
+# Vector Helpers
+# =============================================================================
+
+"""
+    zeros_like(v::Vector) -> Vector
+
+Create zero vector matching the units of the input vector.
+If input has Unitful quantities, output has same units.
+If input is plain numbers, output is plain zeros.
+"""
+function zeros_like(v::Vector)
+    if !isempty(v) && v[1] isa Unitful.Quantity
+        return zeros(length(v)) .* unit(v[1])
+    else
+        return zeros(length(v))
+    end
+end
+
+export zeros_like
 
 end # module

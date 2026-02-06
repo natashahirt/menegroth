@@ -17,7 +17,7 @@
 
 using Test
 using Unitful
-# Units are re-exported from StructuralSizer (via Asap)
+using Asap  # For units like psf, and ASAP functions
 using StructuralSizer
 
 @testset "EFM Pipeline - StructurePoint Validation" begin
@@ -160,8 +160,8 @@ using StructuralSizer
         end
         @test ustrip(u"lbf*inch", joint_Kec[2]) ≈ ustrip(u"lbf*inch", Kec_expected) rtol=0.01
         
-        # Extract moments
-        span_moments = StructuralSizer.extract_span_moments(model, span_elements, spans)
+        # Extract moments (pass qu for midspan calculation)
+        span_moments = StructuralSizer.extract_span_moments(model, span_elements, spans; qu=qu)
         @test length(span_moments) == 3
         
         # Check first span (exterior to first interior)
@@ -751,6 +751,65 @@ using StructuralSizer
         println("Panel: Δ = $(round(ustrip(u"inch", Δ_panel), digits=4)) in (SP: 0.113)")
         
         @test ustrip(u"inch", Δ_panel) ≈ 0.113 rtol=0.02
+    end
+    
+    # =========================================================================
+    # Test 19: Hardy Cross Moment Distribution Solver
+    # =========================================================================
+    @testset "Hardy Cross Moment Distribution" begin
+        # Build spans and joint_Kec for moment distribution
+        # Use same geometry as ASAP test
+        
+        # Create span properties
+        Is = StructuralSizer.slab_moment_of_inertia(l2, h)
+        Ksb = StructuralSizer.slab_beam_stiffness_Ksb(Ecs, Is, l1, c1, c2; k_factor=4.127)
+        
+        spans = [
+            StructuralSizer.EFMSpanProperties(
+                i, i, i+1,
+                l1, l2, ln,
+                h, c1, c2, c1, c2,
+                Is, Ksb,
+                0.08429, 0.507, 4.127
+            )
+            for i in 1:3
+        ]
+        
+        joint_positions = [:interior, :interior, :interior, :interior]
+        joint_Kec = StructuralSizer._compute_joint_Kec(spans, joint_positions, H, Ecs, Ecc)
+        
+        # Solve using Hardy Cross (with verbose for debugging)
+        span_moments = StructuralSizer.solve_moment_distribution(
+            spans, joint_Kec, joint_positions, qu;
+            COF=0.507, max_iterations=20, tolerance=0.001, verbose=true
+        )
+        
+        # Extract first span results
+        M_neg_ext = span_moments[1].M_neg_left
+        M_neg_int = span_moments[1].M_neg_right
+        M_pos = span_moments[1].M_pos
+        
+        println("\n=== Hardy Cross Moment Distribution Results ===")
+        println("Span 1 (Exterior):")
+        println("  M_neg_left  = $(round(ustrip(u"kip*ft", M_neg_ext), digits=2)) kip-ft (SP: 46.65)")
+        println("  M_neg_right = $(round(ustrip(u"kip*ft", M_neg_int), digits=2)) kip-ft (SP: 83.91)")
+        println("  M_pos       = $(round(ustrip(u"kip*ft", M_pos), digits=2)) kip-ft (SP: 44.94)")
+        
+        # These should match StructurePoint Table 5 exactly
+        @test ustrip(u"kip*ft", M_neg_ext) ≈ 46.65 rtol=0.02
+        @test ustrip(u"kip*ft", M_neg_int) ≈ 83.91 rtol=0.02
+        @test ustrip(u"kip*ft", M_pos) ≈ 44.94 rtol=0.02
+        
+        # Check interior span (symmetric)
+        M_neg_int_span2 = span_moments[2].M_neg_left
+        M_pos_span2 = span_moments[2].M_pos
+        
+        println("\nSpan 2 (Interior):")
+        println("  M_neg = $(round(ustrip(u"kip*ft", M_neg_int_span2), digits=2)) kip-ft (SP: 76.21)")
+        println("  M_pos = $(round(ustrip(u"kip*ft", M_pos_span2), digits=2)) kip-ft (SP: 33.23)")
+        
+        @test ustrip(u"kip*ft", M_neg_int_span2) ≈ 76.21 rtol=0.02
+        @test ustrip(u"kip*ft", M_pos_span2) ≈ 33.23 rtol=0.02
     end
 end
 

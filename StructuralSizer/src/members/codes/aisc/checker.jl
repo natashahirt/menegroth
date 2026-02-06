@@ -232,6 +232,10 @@ end
 
 Check if an I-section satisfies AISC 360 requirements for the given demand.
 Uses cached capacities where available.
+
+Includes B1 moment amplification (P-δ effects) per AISC Appendix 8 when
+compression exists. For sway frames (geometry.braced=false), B2 should be
+applied externally to Mlt before creating the demand (not yet integrated).
 """
 function is_feasible(
     checker::AISCChecker,
@@ -247,10 +251,21 @@ function is_feasible(
     Pu_t = demand.Pu_t isa Unitful.Quantity ? ustrip(uconvert(u"N", demand.Pu_t)) : Float64(demand.Pu_t)
     Mux = demand.Mux isa Unitful.Quantity ? ustrip(uconvert(u"N*m", demand.Mux)) : Float64(demand.Mux)
     Muy = demand.Muy isa Unitful.Quantity ? ustrip(uconvert(u"N*m", demand.Muy)) : Float64(demand.Muy)
+    M1x = demand.M1x isa Unitful.Quantity ? ustrip(uconvert(u"N*m", demand.M1x)) : Float64(demand.M1x)
+    M2x = demand.M2x isa Unitful.Quantity ? ustrip(uconvert(u"N*m", demand.M2x)) : Float64(demand.M2x)
+    M1y = demand.M1y isa Unitful.Quantity ? ustrip(uconvert(u"N*m", demand.M1y)) : Float64(demand.M1y)
+    M2y = demand.M2y isa Unitful.Quantity ? ustrip(uconvert(u"N*m", demand.M2y)) : Float64(demand.M2y)
     Vus = demand.Vu_strong isa Unitful.Quantity ? ustrip(uconvert(u"N", demand.Vu_strong)) : Float64(demand.Vu_strong)
     Vuw = demand.Vu_weak isa Unitful.Quantity ? ustrip(uconvert(u"N", demand.Vu_weak)) : Float64(demand.Vu_weak)
     δ_max = demand.δ_max isa Unitful.Quantity ? ustrip(uconvert(u"m", demand.δ_max)) : Float64(demand.δ_max)
     I_ref = demand.I_ref isa Unitful.Quantity ? ustrip(uconvert(u"m^4", demand.I_ref)) : Float64(demand.I_ref)
+    
+    # --- Sway Frame Warning ---
+    # B2 (P-Δ) amplification is not yet implemented for sway frames
+    if !geometry.braced
+        @warn "Sway frame (braced=false) specified but B2 amplification not implemented. " *
+              "Only B1 (P-δ) effects are applied. Results may be unconservative for sway frames." maxlog=1
+    end
     
     # --- Depth Check ---
     cache.depths[j] <= checker.max_depth || return false
@@ -270,11 +285,55 @@ function is_feasible(
     ϕPn_z = _get_ϕPn_cached!(cache, :torsional, j, Lc_y, section, material)
     ϕPnc = min(ϕPn_x, ϕPn_y, ϕPn_z)
     
-    # --- Interaction Check: Compression ---
-    ur_c = check_PMxMy_interaction(Pu_c, Mux, Muy, ϕPnc, ϕMnx, cache.ϕMn_weak[j])
+    # --- B1 Moment Amplification (P-δ effects, AISC Appendix 8) ---
+    # Only applies when compression exists (beam-columns)
+    Mux_amp = Mux
+    Muy_amp = Muy
+    
+    if Pu_c > 0.0
+        # Get section properties for Pe1 calculation (SI units: Pa, m⁴)
+        E = ustrip(uconvert(u"Pa", material.E))  # Pa = N/m²
+        Ix = cache.Ix[j]  # Already in m⁴
+        
+        # For weak-axis I, we need Iy - fetch it
+        Iy = if hasproperty(section, :Iy)
+            ustrip(uconvert(u"m^4", getproperty(section, :Iy)))
+        else
+            Ix  # Fallback for symmetric sections (e.g., round HSS)
+        end
+        
+        # Effective lengths for P-δ (no lateral translation, K typically 1.0)
+        Lc1_x = geometry.Kx * geometry.L  # m
+        Lc1_y = geometry.Ky * geometry.L  # m
+        
+        # Euler buckling loads (N)
+        Pe1_x = π^2 * E * Ix / Lc1_x^2
+        Pe1_y = π^2 * E * Iy / Lc1_y^2
+        
+        # Cm factors (AISC A-8-4)
+        Cm_x = compute_Cm(M1x, M2x; transverse_loading=demand.transverse_load)
+        Cm_y = compute_Cm(M1y, M2y; transverse_loading=demand.transverse_load)
+        
+        # B1 factors (AISC A-8-3), α=1.0 for LRFD
+        B1_x = compute_B1(Pu_c, Pe1_x, Cm_x; α=1.0)
+        B1_y = compute_B1(Pu_c, Pe1_y, Cm_y; α=1.0)
+        
+        # Check for instability (B1 = Inf means member buckles)
+        if isinf(B1_x) || isinf(B1_y)
+            return false
+        end
+        
+        # Amplify moments (for braced frames, Mnt = total moment, Mlt = 0)
+        # Mr = B1*Mnt + B2*Mlt, but B2*Mlt handled externally for now
+        Mux_amp = B1_x * Mux
+        Muy_amp = B1_y * Muy
+    end
+    
+    # --- Interaction Check: Compression (with amplified moments) ---
+    ur_c = check_PMxMy_interaction(Pu_c, Mux_amp, Muy_amp, ϕPnc, ϕMnx, cache.ϕMn_weak[j])
     ur_c <= 1.0 || return false
     
-    # --- Interaction Check: Tension ---
+    # --- Interaction Check: Tension (no amplification needed for tension) ---
     ur_t = check_PMxMy_interaction(Pu_t, Mux, Muy, cache.ϕPn_tension[j], ϕMnx, cache.ϕMn_weak[j])
     ur_t <= 1.0 || return false
     

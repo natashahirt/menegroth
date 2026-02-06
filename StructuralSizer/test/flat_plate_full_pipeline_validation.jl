@@ -171,11 +171,24 @@ M0_range = extrema([M0_ddm_full, M0_ddm_simp, M0_efm_asap, M0_efm_md])
 M0_spread = (M0_range[2] - M0_range[1]) / M0_range[1] * 100
 
 println(@sprintf "    • M₀ values range: %.2f – %.2f k-ft (%.1f%% spread)" M0_range[1] M0_range[2] M0_spread)
-println("    • DDM Full vs Simplified: Same M₀ (coefficients affect distribution, not total)")
+ddm_simp_diff = abs(M0_ddm_full - M0_ddm_simp) / M0_ddm_full * 100
+if ddm_simp_diff > 1.0
+    println(@sprintf "    • DDM Simplified M₀ lower by %.1f%% (columns grew → shorter clear span)" ddm_simp_diff)
+else
+    println("    • DDM Full vs Simplified: Same M₀ (coefficients affect distribution, not total)")
+end
 ddm_efm_diff = abs(M0_ddm_full - M0_efm_asap) / M0_ddm_full * 100
-println(@sprintf "    • DDM vs EFM: %.1f%% difference" ddm_efm_diff)
+println(@sprintf "    • DDM (Full) vs EFM: %.1f%% M₀ difference" ddm_efm_diff)
 efm_internal_diff = abs(M0_efm_asap - M0_efm_md) / M0_efm_asap * 100
-println(@sprintf "    • EFM ASAP vs MomentDist: %.1f%% difference" efm_internal_diff)
+println(@sprintf "    • EFM ASAP vs MomentDist: %.1f%% M₀ difference" efm_internal_diff)
+
+# Punching comparison
+punch_ddm = results["DDM (Full)"].punching_max
+punch_efm = results["EFM (ASAP)"].punching_max
+punch_diff = (punch_ddm - punch_efm) / punch_ddm * 100
+if abs(punch_diff) > 5.0
+    println(@sprintf "    • EFM punching ratio %.0f%% lower than DDM (different moment distribution)" punch_diff)
+end
 println()
 
 # Store DDM (Full) result for later detailed breakdown

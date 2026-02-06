@@ -143,17 +143,47 @@ variable_names(::RCColumnNLPProblem) = ["b (in)", "h (in)", "ρg"]
 
 function objective_fn(p::RCColumnNLPProblem, x::Vector{Float64})
     b, h, ρ = x
+    Ag = b * h  # Gross area (sq in)
     
-    # Base objective: cross-sectional area (proportional to volume)
-    area = b * h
+    # Objective depends on what we're minimizing
+    obj = p.opts.objective
+    
+    if obj isa MinVolume
+        # Just concrete area
+        value = Ag
+    elseif obj isa MinWeight
+        # Total weight: concrete + steel
+        # γ_concrete ≈ 150 pcf, γ_steel ≈ 490 pcf
+        # Weight ∝ Ag × [(1-ρ) × 150 + ρ × 490] = Ag × [150 + ρ × 340]
+        γ_concrete = 150.0  # pcf
+        γ_steel = 490.0     # pcf
+        value = Ag * ((1 - ρ) * γ_concrete + ρ * γ_steel)
+    elseif obj isa MinCost
+        # Total cost: concrete + rebar
+        # Typical costs: concrete ~$4/ft³ (in place), rebar ~$1/lb ≈ $490/ft³
+        # Cost ∝ Ag × [(1-ρ) × cost_c + ρ × cost_s]
+        cost_concrete = 4.0    # $/ft³ of concrete volume
+        cost_steel = 490.0     # $/ft³ of steel volume (≈ $1/lb)
+        value = Ag * ((1 - ρ) * cost_concrete + ρ * cost_steel)
+    elseif obj isa MinCarbon
+        # Embodied carbon: concrete + steel
+        # ECC concrete ≈ 400 kgCO2/m³ ≈ 11 kgCO2/ft³
+        # ECC steel ≈ 1.8 kgCO2/kg ≈ 1800 kgCO2/ton ≈ 45 kgCO2/ft³
+        ecc_concrete = 11.0   # kgCO2/ft³
+        ecc_steel = 45.0      # kgCO2/ft³
+        value = Ag * ((1 - ρ) * ecc_concrete + ρ * ecc_steel)
+    else
+        # Default: minimize concrete area
+        value = Ag
+    end
     
     # Optional: penalize non-square sections
     if p.opts.prefer_square > 0
         aspect = max(b/h, h/b)
-        area *= (1 + p.opts.prefer_square * (aspect - 1))
+        value *= (1 + p.opts.prefer_square * (aspect - 1))
     end
     
-    return area
+    return value
 end
 
 # ==============================================================================

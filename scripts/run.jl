@@ -35,6 +35,7 @@ design = design_building(struc, DesignParameters(
             analysis_method = :mddm,     # Modified Direct Design Method (or :ddm, :efm)
             cover = 0.75u"inch",
             bar_size = 5,
+            shear_studs=:always
         ),
         tributary_axis = nothing,       # Isotropic tributary for flat plates
     ),

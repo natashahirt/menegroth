@@ -113,7 +113,8 @@ This is the presentation-quality visualization for design output.
 ## Mode
 - `mode::Symbol=:sized`: Visualization mode:
   - `:sized` - 3D solid geometry showing actual element sizes (default)
-  - `:deflected` - Deformed shape with lines for frames, shell meshes for slabs
+  - `:deflected` - Deformed shape with lines for frames, triangulated mesh for slabs
+                   (requires `build_analysis_model!(design)` to have been called)
 
 ## Coloring
 - `color_by::Symbol=:utilization`: Coloring mode:
@@ -187,7 +188,12 @@ function visualize(design::BuildingDesign;
 )
     struc = design.structure
     skel = struc.skeleton
-    model = struc.asap_model
+    # For deflected mode, prefer design.asap_model (has shells) if available
+    model = if mode == :deflected && !isnothing(design.asap_model)
+        design.asap_model
+    else
+        struc.asap_model
+    end
     
     # Apply theme if specified
     if theme == :light
@@ -248,11 +254,21 @@ function visualize(design::BuildingDesign;
     if mode == :deflected
         # Draw original geometry as dashed reference
         if show_original_geometry
+            # Frame elements
             for element in model.elements
                 p1, p2 = get_drawing_pts(element, 0.0)
                 GLMakie.lines!(ax, [p1[1], p2[1]], [p1[2], p2[2]], [p1[3], p2[3]], 
                               color = (:gray60, 0.4), linewidth = 0.5, linestyle = :dash,
                               transparency = true)
+            end
+            # Shell elements (original mesh outlines)
+            if Asap.has_shell_elements(model)
+                for shell in model.shell_elements
+                    pts = [GLMakie.Point3f(ustrip.(u"m", node.position)...) for node in shell.nodes]
+                    GLMakie.lines!(ax, [pts..., pts[1]],
+                                   color = (:gray60, 0.3), linewidth = 0.3, linestyle = :dash,
+                                   transparency = true)
+                end
             end
             push!(leg_elems, GLMakie.LineElement(color = (:gray60, 0.4), linewidth = 1, linestyle = :dash))
             push!(leg_labels, "Original Geometry")
@@ -303,15 +319,15 @@ function visualize(design::BuildingDesign;
             # Draw deflected elements
             use_displacement_coloring = color_by == :displacement && !isempty(all_colors)
             color_idx = 1
-            res = resolution + 1
             
             for (i, pts) in enumerate(all_points)
+                n_pts = length(pts)
                 if use_displacement_coloring
-                    # Use per-point coloring
-                    local_colors = all_colors[color_idx:min(color_idx + res - 1, length(all_colors))]
+                    # Use per-point coloring - slice exactly n_pts colors
+                    local_colors = all_colors[color_idx:min(color_idx + n_pts - 1, length(all_colors))]
                     GLMakie.lines!(ax, pts, color = local_colors, colorrange = crange,
                                   linewidth = linewidth, colormap = :turbo)
-                    color_idx += res
+                    color_idx += n_pts
                 else
                     # Use utilization coloring
                     c = if color_by == :utilization
@@ -334,9 +350,88 @@ function visualize(design::BuildingDesign;
             push!(leg_labels, "Elements (Deflected)")
         end
         
-        # For deflected mode, show slabs as thin surfaces at reference position
-        # (Future enhancement: draw shell mesh with actual nodal displacements)
-        if show_slabs && !isempty(struc.slabs)
+        # Draw deflected shell mesh if available
+        if show_slabs && Asap.has_shell_elements(model)
+            shell_disp_colors = Float64[]  # For displacement coloring
+            
+            # Compute deflection scale from shells if not set by frame elements
+            if deflection_scale === :auto || deflection_scale == 1.0
+                max_shell_disp = 0.0
+                for shell in model.shell_elements
+                    for node in shell.nodes
+                        disp = Asap.to_displacement_vec(node.displacement)
+                        max_shell_disp = max(max_shell_disp, norm(disp[1:3]))
+                    end
+                end
+                if max_shell_disp > 1e-12
+                    # Scale so max deflection is ~10% of typical span
+                    avg_len = model.nElements > 0 ? avg_len : 5.0  # fallback to 5m
+                    deflection_scale = (avg_len * 0.1) / max_shell_disp
+                end
+            end
+            
+            # Collect all shell triangles
+            shell_verts = GLMakie.Point3f[]
+            shell_faces = GLMakie.TriangleFace{Int}[]
+            
+            for shell in model.shell_elements
+                base_idx = length(shell_verts)
+                
+                # Add displaced vertices for this triangle
+                for node in shell.nodes
+                    pos = [ustrip(u"m", node.position[j]) for j in 1:3]
+                    disp = Asap.to_displacement_vec(node.displacement)
+                    deformed = pos .+ deflection_scale .* disp[1:3]
+                    push!(shell_verts, GLMakie.Point3f(deformed...))
+                    
+                    if color_by == :displacement
+                        push!(shell_disp_colors, norm(disp[1:3]))
+                    end
+                end
+                
+                # Add triangle face (1-indexed)
+                push!(shell_faces, GLMakie.TriangleFace(base_idx + 1, base_idx + 2, base_idx + 3))
+            end
+            
+            if !isempty(shell_verts) && !isempty(shell_faces)
+                if color_by == :displacement && !isempty(shell_disp_colors)
+                    # Compute combined color range (frames + shells)
+                    shell_crange = (minimum(shell_disp_colors), maximum(shell_disp_colors))
+                    combined_crange = if !isempty(all_colors)
+                        (min(crange[1], shell_crange[1]), max(crange[2], shell_crange[2]))
+                    else
+                        shell_crange
+                    end
+                    if combined_crange[1] ≈ combined_crange[2]
+                        combined_crange = (combined_crange[1], combined_crange[1] + 1.0)
+                    end
+                    crange = combined_crange  # Update for colorbar
+                    
+                    GLMakie.mesh!(ax, shell_verts, shell_faces,
+                                  color = shell_disp_colors,
+                                  colorrange = combined_crange,
+                                  colormap = :turbo,
+                                  transparency = true)
+                else
+                    GLMakie.mesh!(ax, shell_verts, shell_faces,
+                                  color = (slab_color, slab_alpha),
+                                  transparency = true)
+                end
+                
+                # Draw mesh edges for visibility
+                for face in shell_faces
+                    p1, p2, p3 = shell_verts[face[1]], shell_verts[face[2]], shell_verts[face[3]]
+                    GLMakie.lines!(ax, [p1, p2, p3, p1],
+                                   color = (:gray40, 0.3), linewidth = 0.5,
+                                   transparency = true)
+                end
+                
+                push!(leg_elems, GLMakie.PolyElement(color = (slab_color, slab_alpha), 
+                      strokecolor = :gray40, strokewidth = 1))
+                push!(leg_labels, "Slabs (Deflected Mesh)")
+            end
+        elseif show_slabs && !isempty(struc.slabs)
+            # Fallback: no shell model available, show reference slabs
             draw_slabs!(ax, struc; color=slab_color, alpha=slab_alpha * 0.5)
             push!(leg_elems, GLMakie.PolyElement(color = (slab_color, slab_alpha * 0.5), 
                   strokecolor = :gray40, strokewidth = 1))

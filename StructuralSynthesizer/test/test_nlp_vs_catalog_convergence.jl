@@ -449,6 +449,49 @@ using Unitful
             @test nlp_area <= best_discrete_area * 1.5
             @test best_discrete_area > 0
         end
+        
+        @testset "MinVolume vs MinWeight objective" begin
+            # Compare how different objectives affect the solution
+            Pu_kip = 250.0
+            Mu_kipft = 100.0
+            geometry = ConcreteMemberGeometry(12.0; k=1.0, braced=true)
+            
+            # MinVolume: minimizes concrete area only
+            opts_vol = NLPColumnOptions(
+                grade = NWC_4000,
+                rebar_grade = Rebar_60,
+                min_dim = 12.0u"inch",
+                max_dim = 24.0u"inch",
+                objective = MinVolume(),
+                verbose = false
+            )
+            result_vol = size_column_nlp(Pu_kip, Mu_kipft, geometry, opts_vol)
+            
+            # MinWeight: minimizes concrete + steel weight
+            opts_wt = NLPColumnOptions(
+                grade = NWC_4000,
+                rebar_grade = Rebar_60,
+                min_dim = 12.0u"inch",
+                max_dim = 24.0u"inch",
+                objective = MinWeight(),
+                verbose = false
+            )
+            result_wt = size_column_nlp(Pu_kip, Mu_kipft, geometry, opts_wt)
+            
+            println("\nRC Column: MinVolume vs MinWeight Objective")
+            println("  MinVolume: $(round(result_vol.b_final, digits=1))×$(round(result_vol.h_final, digits=1))\", " *
+                    "ρ=$(round(result_vol.ρ_opt, digits=3)), A=$(round(result_vol.area, digits=1)) in²")
+            println("  MinWeight: $(round(result_wt.b_final, digits=1))×$(round(result_wt.h_final, digits=1))\", " *
+                    "ρ=$(round(result_wt.ρ_opt, digits=3)), A=$(round(result_wt.area, digits=1)) in²")
+            
+            # MinWeight should use higher ρ (steel is lighter than concrete per unit strength)
+            # This allows smaller sections
+            @test result_wt.ρ_opt >= result_vol.ρ_opt - 0.005  # MinWeight should use at least as much steel
+            
+            # Both should be valid ACI solutions
+            @test result_vol.b_final >= 12.0
+            @test result_wt.b_final >= 12.0
+        end
     end
 
     # ==========================================================================

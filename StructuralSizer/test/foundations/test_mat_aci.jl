@@ -60,12 +60,12 @@ println("\nDesigning mat footing...")
 result = design_mat_footing(demands, positions, soil; opts)
 
 B_ft = ustrip(u"ft", result.B)
-L_ft = ustrip(u"ft", result.L_ftg)
+L_mat_ft = ustrip(u"ft", result.L_ftg)
 h_in = ustrip(u"inch", result.D)
 d_in = ustrip(u"inch", result.d)
 
 println("\n=== Design Results ===")
-println("  Mat size = $(round(B_ft, digits=1)) ft × $(round(L_ft, digits=1)) ft")
+println("  Mat size = $(round(B_ft, digits=1)) ft × $(round(L_mat_ft, digits=1)) ft")
 println("  h = $(round(h_in, digits=1)) in.")
 println("  d = $(round(d_in, digits=1)) in.")
 println("  n_columns = $(result.n_columns)")
@@ -83,7 +83,7 @@ println("\n=== Sanity Checks ===")
 
 # Mat should be at least as large as the grid
 @test B_ft ≥ 75.0   # 75 ft grid + overhang
-@test L_ft ≥ 75.0
+@test L_mat_ft ≥ 75.0
 println("  Mat ≥ grid footprint ✓")
 
 # Thickness: punching governs, expect 24-48"
@@ -100,7 +100,7 @@ println("  utilization = $(round(result.utilization, digits=3)) < 1.0 ✓")
 println("  All reinforcement layers > 0 ✓")
 
 # Concrete volume sanity: B × L × h (rough check)
-V_expected_m3 = B_ft * L_ft * (h_in / 12.0) * 0.0283168  # ft³ → m³
+V_expected_m3 = B_ft * L_mat_ft * (h_in / 12.0) * 0.0283168  # ft³ → m³
 V_actual = ustrip(u"m^3", result.concrete_volume)
 @test abs(V_actual - V_expected_m3) / V_expected_m3 < 0.01
 println("  Concrete volume consistent ✓")

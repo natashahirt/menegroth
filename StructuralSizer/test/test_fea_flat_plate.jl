@@ -10,8 +10,8 @@
 # Run: julia --project=. StructuralSizer/test/test_fea_flat_plate.jl
 # =============================================================================
 
-using Pkg
-Pkg.activate(".")
+# Standalone: julia --project=. StructuralSizer/test/test_fea_flat_plate.jl
+# (Pkg.activate removed — when included from runtests.jl, environment is already set up)
 
 using Test
 using Printf

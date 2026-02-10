@@ -166,7 +166,8 @@ using StructuralSizer
         # ASAP column-stub solution
         model, span_elements = StructuralSizer.build_efm_asap_model(
             spans, joint_positions, qu;
-            column_height=H, Ecs=Ecs, Ecc=Ecc
+            column_height=H, Ecs=Ecs, Ecc=Ecc,
+            ν_concrete=0.20, ρ_concrete=2380.0u"kg/m^3"
         )
         StructuralSizer.solve_efm_frame!(model)
         asap_moments = StructuralSizer.extract_span_moments(model, span_elements, spans; qu=qu)

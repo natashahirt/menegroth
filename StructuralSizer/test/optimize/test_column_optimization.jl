@@ -36,7 +36,7 @@ const MOI = JuMP.MOI
         opts = SteelColumnOptions(
             section_type = :hss,
             catalog = :all,
-            max_depth = 0.5,
+            max_depth = 0.5u"m",
         )
         
         result = size_columns(Pu, Mux, geometries, opts)
@@ -85,9 +85,9 @@ const MOI = JuMP.MOI
         
         opts = ConcreteColumnOptions(
             grade = NWC_5000,
-            rebar_fy_ksi = 75.0,
+            rebar_grade = Rebar_75,
             include_slenderness = false,
-            max_depth = 0.6,
+            max_depth = 0.6u"m",
         )
         
         result = size_columns(Pu, Mux, geometries, opts)
@@ -101,8 +101,8 @@ const MOI = JuMP.MOI
         conc_geom = to_concrete_geometry(steel_geom)
         
         @test conc_geom isa ConcreteMemberGeometry
-        @test conc_geom.L == 5.0
-        @test conc_geom.Lu == 2.5  # Maps from Lb
+        @test conc_geom.L == 5.0u"m"
+        @test conc_geom.Lu == 2.5u"m"  # Maps from Lb
         @test conc_geom.k == 0.8   # Maps from Ky
         
         # Concrete to steel
@@ -110,8 +110,8 @@ const MOI = JuMP.MOI
         steel_geom2 = to_steel_geometry(conc_geom2)
         
         @test steel_geom2 isa SteelMemberGeometry
-        @test steel_geom2.L == 4.0
-        @test steel_geom2.Lb == 4.0  # Maps from Lu
+        @test steel_geom2.L == 4.0u"m"
+        @test steel_geom2.Lb == 4.0u"m"  # Maps from Lu
         @test steel_geom2.Kx == 1.2  # Maps from k
         @test steel_geom2.Ky == 1.2
         

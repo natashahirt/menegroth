@@ -44,3 +44,35 @@ function _moment_analysis_setup(struc, slab, columns, h, γ_concrete)
         M0 = M0,
     )
 end
+
+# =============================================================================
+# Shared Column Shear Computation
+# =============================================================================
+
+"""
+    _compute_column_shear(struc, col, qu, l2, ln)
+
+Compute column shear using tributary area (if `struc` has `_tributary_caches`),
+otherwise fall back to a simply-supported approximation `qu × l2 × ln / 2`.
+
+Used by both DDM and EFM analysis methods.
+"""
+function _compute_column_shear(struc, col, qu, l2, ln)
+    Atrib = nothing
+    vidx = col_vertex_idx(col)
+    if !isnothing(struc) && hasproperty(struc, :_tributary_caches) && vidx > 0
+        caches = struc._tributary_caches
+        story = col_story(col)
+        if haskey(caches.vertex, story) && haskey(caches.vertex[story], vidx)
+            Atrib = caches.vertex[story][vidx].total_area
+        end
+    end
+
+    if !isnothing(Atrib) && ustrip(u"m^2", Atrib) > 0
+        return uconvert(kip, qu * Atrib)
+    else
+        # Fallback: simply-supported approximation
+        # Conservative for interior columns, unconservative for edge columns
+        return uconvert(kip, qu * l2 * ln / 2)
+    end
+end

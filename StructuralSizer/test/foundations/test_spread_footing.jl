@@ -72,10 +72,10 @@
         result = design_spread_footing(demand, medium_sand, NWC_4000, Rebar_60)
         
         # Interface functions work
-        @test concrete_volume(result) == result.concrete_volume
-        @test steel_volume(result) == result.steel_volume
-        @test footprint_area(result) == result.B * result.L_ftg
-        @test utilization(result) == result.utilization
+        @test StructuralSizer.concrete_volume(result) == result.concrete_volume
+        @test StructuralSizer.steel_volume(result) == result.steel_volume
+        @test StructuralSizer.footprint_area(result) == result.B * result.L_ftg
+        @test StructuralSizer.utilization(result) == result.utilization
         
         # Square footing (B == L)
         @test result.B == result.L_ftg

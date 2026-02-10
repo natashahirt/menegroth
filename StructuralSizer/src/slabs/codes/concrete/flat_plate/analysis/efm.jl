@@ -1210,40 +1210,13 @@ function _compute_efm_column_demands(struc, columns, span_moments, qu, l2, ln)
         
         column_moments[i] = M
         unbalanced_moments[i] = Mub
-        column_shears[i] = _compute_efm_column_shear(struc, col, qu, l2, ln)
+        column_shears[i] = _compute_column_shear(struc, col, qu, l2, ln)
     end
     
     return column_moments, column_shears, unbalanced_moments
 end
 
-"""
-Compute shear at column using tributary area if available.
-(Same logic as DDM - shared helper would be ideal)
-"""
-function _compute_efm_column_shear(struc, col, qu, l2, ln)
-    # Try to get tributary area from struc
-    Atrib = nothing
-    vidx = col_vertex_idx(col)
-    if !isnothing(struc) && hasproperty(struc, :tributaries) && vidx > 0
-        try
-            story = col_story(col)
-            if haskey(struc._tributary_caches.vertex, story) && 
-               haskey(struc._tributary_caches.vertex[story], vidx)
-                Atrib = struc._tributary_caches.vertex[story][vidx].total_area
-            end
-        catch e
-            @warn "EFM: tributary area lookup failed; falling back to simple shear" exception=(e, catch_backtrace())
-        end
-    end
-    
-    if !isnothing(Atrib) && ustrip(u"m^2", Atrib) > 0
-        # Use tributary area: Vu = qu × Atrib
-        return uconvert(kip, qu * Atrib)
-    else
-        # Fallback: simply-supported approximation
-        return uconvert(kip, qu * l2 * ln / 2)
-    end
-end
+# _compute_column_shear is defined in common.jl (shared between DDM and EFM)
 
 # =============================================================================
 # EFM Applicability Check - ACI 318-19 Section 8.11

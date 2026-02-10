@@ -110,7 +110,7 @@ end
                     # Get beam endpoints in meters (using CCW order like vis_tributaries)
                     pts_2d = [(ustrip(u"m", Meshes.coords(skel.vertices[vi]).x),
                                ustrip(u"m", Meshes.coords(skel.vertices[vi]).y)) for vi in v_indices]
-                    pts_2d = StructuralSizer._ensure_ccw(pts_2d)
+                    pts_2d = Asap._ensure_ccw(pts_2d)
                     
                     local_idx = trib.local_edge_idx
                     beam_start = pts_2d[local_idx]
@@ -126,8 +126,8 @@ end
         end
     end
     
-    # Test update_slab_loads!
-    println("\n--- Testing load update ---")
+    # Test sync_asap! (replaces removed update_slab_loads!)
+    println("\n--- Testing load sync ---")
     if length(struc.slabs) > 0
         # Get initial pressure for first cell
         first_cell_idx = struc.slabs[1].cell_indices[1]
@@ -138,8 +138,8 @@ end
         old_ll = first_cell.live_load
         first_cell.live_load = 2 * old_ll
         
-        # Update loads
-        update_slab_loads!(struc, 1)
+        # Sync loads via sync_asap!
+        StructuralSynthesizer.sync_asap!(struc)
         
         # Check that loads were updated
         new_pressure = ustrip(u"Pa", StructuralSynthesizer.total_factored_pressure(first_cell))

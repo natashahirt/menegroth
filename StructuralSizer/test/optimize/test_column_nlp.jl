@@ -45,13 +45,13 @@ using Asap: kip, ksi
         @test length(lb) == 3
         @test length(ub) == 3
         @test lb[3] == 0.01  # ACI min ρ
-        @test ub[3] == 0.08  # ACI max ρ
+        @test ub[3] == 0.06  # Practical max ρ (ACI allows 0.08)
         
         x0 = initial_guess(problem)
         @test length(x0) == 3
         @test x0[1] > 0  # b > 0
         @test x0[2] > 0  # h > 0
-        @test 0.01 <= x0[3] <= 0.08  # valid ρ
+        @test 0.01 <= x0[3] <= 0.06  # valid ρ
         
         # Test constraint interface
         @test n_constraints(problem) == 1  # Only P-M (no biaxial since Muy=0)
@@ -67,10 +67,10 @@ using Asap: kip, ksi
         
         problem = RCColumnNLPProblem(demand, geometry, opts)
         
-        # Test objective at a point
+        # Test objective at a point — MinVolume uses Ag*(1 + 2ρ) to penalize high ρ
         x = [18.0, 18.0, 0.02]  # 18" square, 2% steel
         obj = objective_fn(problem, x)
-        @test obj ≈ 18.0 * 18.0  # Area = 324 sq in
+        @test obj ≈ 18.0 * 18.0 * (1 + 2 * 0.02)  # Ag*(1+2ρ) = 336.96
         
         # Test constraint at same point
         g = constraint_fns(problem, x)

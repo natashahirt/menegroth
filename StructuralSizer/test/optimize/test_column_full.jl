@@ -84,7 +84,7 @@ const MOI = JuMP.MOI
     
     # =========================================================================
     @testset "Steel Columns - Max Depth" begin
-        opts = SteelColumnOptions(max_depth = 0.35)  # 350mm max
+        opts = SteelColumnOptions(max_depth = 0.35u"m")  # 350mm max
         result = size_columns(Pu_N, Mux_Nm, steel_geometries, opts)
         
         @test result.status == MOI.OPTIMAL || result.status == MOI.TIME_LIMIT
@@ -131,7 +131,7 @@ const MOI = JuMP.MOI
         Mux_small = [40.0, 50.0, 60.0, 30.0]
         Muy_small = [20.0, 25.0, 30.0, 15.0]
         
-        opts = ConcreteColumnOptions(max_depth = 0.6)  # 600mm limit (24")
+        opts = ConcreteColumnOptions(max_depth = 0.6u"m")  # 600mm limit (24")
         result = size_columns(Pu_small, Mux_small, conc_geometries, opts; Muy=Muy_small)
         
         @test result.status == MOI.OPTIMAL || result.status == MOI.TIME_LIMIT
@@ -241,8 +241,8 @@ const MOI = JuMP.MOI
     
     # =========================================================================
     @testset "Options Display" begin
-        opts_steel = SteelColumnOptions(section_type = :hss, max_depth = 0.4)
-        opts_conc = ConcreteColumnOptions(max_depth = 0.5, n_max_sections = 3)
+        opts_steel = SteelColumnOptions(section_type = :hss, max_depth = 0.4u"m")
+        opts_conc = ConcreteColumnOptions(max_depth = 0.5u"m", n_max_sections = 3)
         opts_beam = SteelBeamOptions(deflection_limit = 1/480)
         
         # Check display includes key info
@@ -257,7 +257,7 @@ const MOI = JuMP.MOI
         @test occursin("3", str_conc)
         
         str_beam = string(opts_beam)
-        @test occursin("Beam", str_beam)
+        @test occursin("Member", str_beam) || occursin("Beam", str_beam)
         @test occursin("480", str_beam)
     end
     
@@ -268,7 +268,7 @@ const MOI = JuMP.MOI
         @test s.material === A992_Steel
         @test s.section_type === :w
         @test s.catalog === :preferred
-        @test s.max_depth == Inf
+        @test isinf(ustrip(u"m", s.max_depth))
         @test s.n_max_sections == 0
         
         # Concrete defaults
@@ -283,7 +283,7 @@ const MOI = JuMP.MOI
         # Beam defaults
         b = SteelBeamOptions()
         @test b.material === A992_Steel
-        @test b.deflection_limit == 1/360
+        @test b.deflection_limit === nothing
     end
     
     # =========================================================================
@@ -347,7 +347,7 @@ const MOI = JuMP.MOI
     @testset "Circular Concrete Columns - Max Depth" begin
         opts = ConcreteColumnOptions(
             section_shape = :circular,
-            max_depth = 0.5  # 500mm max (≈20")
+            max_depth = 0.5u"m"  # 500mm max (≈20")
         )
         
         # Smaller demands to fit within 20" diameter

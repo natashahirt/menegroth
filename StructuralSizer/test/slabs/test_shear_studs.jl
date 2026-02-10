@@ -91,14 +91,14 @@ end
         fc, β, αs, b0, d, Av, s, fyt
     )
     
-    # Check reduced concrete contribution (0.25√f'c factor)
+    # Check reduced concrete contribution (US: 3.0λs√f'c per ACI 318-19 §22.6.6.1)
     sqrt_fc = sqrt(4000)
     λs = StructuralSizer.size_effect_factor_λs(d)
-    expected_vcs_max = 0.25 * λs * sqrt_fc  # Should be ≤ this
+    expected_vcs_max = 3.0 * λs * sqrt_fc  # Should be ≤ this
     @test ustrip(u"psi", result.vcs) ≤ expected_vcs_max + 0.1
     
-    # Check compression strut limit (0.66√f'c for s ≤ 0.5d)
-    expected_vc_max = 0.66 * sqrt_fc
+    # Check compression strut limit (US: 8√f'c for s ≤ 0.5d, ACI §22.6.6.2)
+    expected_vc_max = 8.0 * sqrt_fc
     @test ustrip(u"psi", result.vc_max) ≈ expected_vc_max atol=0.5
     
     # Check vs > 0
@@ -117,24 +117,24 @@ end
     
     vc_out = StructuralSizer.punching_capacity_outer(fc, d)
     
-    # vc,out = 0.17 × λs × √f'c
+    # vc,out = 4 × λs × √f'c  (US customary, ACI §22.6.5.2(a))
     λs = StructuralSizer.size_effect_factor_λs(d)
-    expected = 0.17 * λs * sqrt(4000)
+    expected = 4.0 * λs * sqrt(4000)
     @test ustrip(u"psi", vc_out) ≈ expected atol=0.5
     
-    # Outer capacity < capacity at column (reduced)
-    vc_col = 0.33 * λs * sqrt(4000)  # Without studs
-    @test ustrip(u"psi", vc_out) < vc_col
+    # Outer capacity (unreinforced) < max stud-reinforced capacity at column
+    vc_max_col = 8.0 * sqrt(4000)  # Max with studs (tight spacing)
+    @test ustrip(u"psi", vc_out) < vc_max_col
 end
 
 # =============================================================================
 # Test: Shear Stud Design Function
 # =============================================================================
 @testset "Shear Stud Design" begin
-    # Note on capacity limits:
-    # vc_max with studs = 0.66√f'c ≈ 41.7 psi for f'c = 4000
-    # φ × vc_max = 0.75 × 41.7 ≈ 31 psi
-    # So maximum achievable vu with studs is ~31 psi
+    # Note on capacity limits (US customary, psi):
+    # vc_max with studs = 8√f'c ≈ 506 psi for f'c = 4000
+    # φ × vc_max = 0.75 × 506 ≈ 380 psi
+    # So maximum achievable vu with studs is ~380 psi
     
     # Design scenario: Interior column just failing punching
     vu = 25.0u"psi"     # Realistic stress, below max capacity
@@ -179,7 +179,7 @@ end
     @test studs_corner.n_rails == 4
     
     # Test: Demand exceeds max capacity → n_rails = 0
-    vu_extreme = 50.0u"psi"  # Above φ × vc_max
+    vu_extreme = 400.0u"psi"  # Above φ × vc_max ≈ 380 psi
     studs_impossible = StructuralSizer.design_shear_studs(
         vu_extreme, fc, β, αs, b0, d, :interior, fyt, stud_diam
     )
@@ -196,10 +196,10 @@ end
     d = 8.0u"inch"
     λs = StructuralSizer.size_effect_factor_λs(d)
     
-    # φvc without studs ≈ 0.75 × 0.33√4000 × λs ≈ 15.6 psi
-    # φvc with studs (max) ≈ 0.75 × 0.66√4000 ≈ 31.3 psi
-    # So studs can help if 15.6 < vu < 31.3
-    vu = 20.0u"psi"  # Needs studs, achievable with studs
+    # φvc without studs ≈ 0.75 × 4√4000 × λs ≈ 190 psi  (US customary)
+    # φvc with studs (max) ≈ 0.75 × 8√4000 ≈ 380 psi
+    # So studs can help if 190 < vu < 380
+    vu = 250.0u"psi"  # Needs studs, achievable with studs
     β = 1.0
     αs = 40
     b0 = 80.0u"inch"
@@ -252,22 +252,22 @@ end
     d = 8.0u"inch"
     fyt = 51000.0u"psi"
     
-    # With tight spacing (s ≤ 0.5d) → vc,max = 0.66√f'c
+    # With tight spacing (s ≤ 0.5d) → vc,max = 8√f'c  (US customary, ACI §22.6.6.2)
     Av = 1.5u"inch^2"
     s_tight = 3.0u"inch"
     
     result_tight = StructuralSizer.punching_capacity_with_studs(
         fc, β, αs, b0, d, Av, s_tight, fyt
     )
-    @test ustrip(u"psi", result_tight.vc_max) ≈ 0.66 * sqrt(4000) atol=0.5
+    @test ustrip(u"psi", result_tight.vc_max) ≈ 8.0 * sqrt(4000) atol=0.5
     
-    # With wider spacing (s > 0.5d) → vc,max = 0.50√f'c
+    # With wider spacing (s > 0.5d) → vc,max = 6√f'c  (US customary)
     s_wide = 6.0u"inch"  # > 0.5 × 8 = 4"
     
     result_wide = StructuralSizer.punching_capacity_with_studs(
         fc, β, αs, b0, d, Av, s_wide, fyt
     )
-    @test ustrip(u"psi", result_wide.vc_max) ≈ 0.50 * sqrt(4000) atol=0.5
+    @test ustrip(u"psi", result_wide.vc_max) ≈ 6.0 * sqrt(4000) atol=0.5
 end
 
 println("\n✅ All shear stud tests completed!")

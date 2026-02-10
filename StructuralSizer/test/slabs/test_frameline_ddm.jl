@@ -172,7 +172,7 @@ end
         )
         
         # Run DDM with TestFrameLine
-        result = run_moment_analysis(DDM(), fl, struc, qu, qD, qL; verbose=false)
+        result = StructuralSizer.run_moment_analysis(DDM(), fl, struc, qu, qD, qL; verbose=false)
         
         # Check total static moment (first span)
         # M0 = qu × l2 × ln² / 8
@@ -219,7 +219,7 @@ end
         struc = (tributaries = (vertex = Dict{Int, Dict{Int, Any}}(),), skeleton = (vertices = [],))
         
         # Run MDDM (simplified)
-        result = run_moment_analysis(DDM(:simplified), fl, struc, qu, qD, qL)
+        result = StructuralSizer.run_moment_analysis(DDM(:simplified), fl, struc, qu, qD, qL)
         
         # MDDM uses 0.65/0.35 for all spans
         M0_kipft = ustrip(u"kip*ft", result.M0)
@@ -262,7 +262,7 @@ end
         qu = 1.2 * qD + 1.6 * qL
         
         struc = (tributaries = (vertex = Dict{Int, Dict{Int, Any}}(),), skeleton = (vertices = [],))
-        result = run_moment_analysis(DDM(), fl, struc, qu, qD, qL)
+        result = StructuralSizer.run_moment_analysis(DDM(), fl, struc, qu, qD, qL)
         
         # Should complete without error
         @test !isnothing(result)
@@ -297,7 +297,7 @@ end
         qu = 1.2 * qD + 1.6 * qL
         
         struc = (tributaries = (vertex = Dict{Int, Dict{Int, Any}}(),), skeleton = (vertices = [],))
-        result = run_moment_analysis(DDM(), fl, struc, qu, qD, qL)
+        result = StructuralSizer.run_moment_analysis(DDM(), fl, struc, qu, qD, qL)
         
         @test length(result.column_moments) == 2
     end

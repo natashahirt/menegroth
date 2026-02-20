@@ -359,7 +359,7 @@ cross-section of the governing vault panel (right).
 # Example
 ```julia
 design = design_building(struc, DesignParameters(
-    floor_options = FloorOptions(vault = VaultOptions(lambda=8.0)),
+    floor = VaultOptions(lambda=8.0),
 ))
 fig = visualize_vault(design)
 ```

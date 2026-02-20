@@ -9,3 +9,6 @@ include("types.jl")
 include("steel.jl")
 include("concrete.jl")
 include("timber.jl")
+
+# Fire protection types (SurfaceCoating, SFRM, IntumescentCoating, etc.)
+include("fire_protection.jl")

@@ -2,30 +2,30 @@
 # ACI 318 Beam Flexural Design
 # ==============================================================================
 #
-# Beam-specific flexural design per ACI 318-19 Chapter 9.
+# Beam-specific flexural design per ACI 318-11 Chapter 10.
 # Uses shared Whitney stress block from codes/aci/whitney.jl.
 #
 # Reference: DE-Simply-Supported-Reinforced-Concrete-Beam-Analysis-and-Design-
-#            ACI-318-14-spBeam-v1000 (StructurePoint)
+#            ACI-318-11-spBeam-v1000 (StructurePoint)
 #
 # Key ACI sections:
-#   9.3.1.1  - Minimum beam depth (deflection waiver)
-#   9.6.1.2  - Minimum flexural reinforcement (beams)
-#   22.2     - Whitney stress block
-#   21.2.2   - Strength reduction factors
+#   Table 9.5(a) - Minimum beam depth (deflection waiver)
+#   §10.5.1     - Minimum flexural reinforcement (beams)
+#   §10.2.7     - Whitney stress block
+#   §9.3.2      - Strength reduction factors
 # ==============================================================================
 
 using Unitful
 using Asap: kip, ksi, psf, ksf, pcf
 
 # ==============================================================================
-# Minimum Beam Depth (ACI Table 9.3.1.1)
+# Minimum Beam Depth (ACI 318-11 Table 9.5(a))
 # ==============================================================================
 
 """
     beam_min_depth(L, support::Symbol) -> Length
 
-Minimum beam depth to waive deflection calculations per ACI 318-19 Table 9.3.1.1.
+Minimum beam depth to waive deflection calculations per ACI 318-11 Table 9.5(a).
 
 # Arguments
 - `L`: Span length (center-to-center)
@@ -36,7 +36,7 @@ Minimum beam depth to waive deflection calculations per ACI 318-19 Table 9.3.1.1
   - `:cantilever` → L/8
 
 # Reference
-- ACI 318-14 Table 9.3.1.1
+- ACI 318-11 Table 9.5(a)
 - StructurePoint Example §1: h_min = 300/16 = 18.75 in
 """
 function beam_min_depth(L::Length, support::Symbol=:simply_supported)
@@ -83,19 +83,19 @@ function beam_effective_depth(h::Length;
 end
 
 # ==============================================================================
-# Minimum Flexural Reinforcement (ACI 9.6.1.2) — BEAM specific
+# Minimum Flexural Reinforcement (ACI 318-11 §10.5.1) — BEAM specific
 # ==============================================================================
 
 """
     beam_min_reinforcement(bw, d, fc, fy) -> Area
 
-Minimum flexural reinforcement for beams per ACI 318-19 §9.6.1.2.
+Minimum flexural reinforcement for beams per ACI 318-11 §10.5.1.
 
     As,min = max(As_a, As_b)
 
 where:
-- As_a = 3√f'c × bw × d / fy   (Eq. 9.6.1.2a)
-- As_b = 200 × bw × d / fy      (Eq. 9.6.1.2b)
+- As_a = 3√f'c × bw × d / fy   (Eq. (10-3))
+- As_b = 200 × bw × d / fy      (200 bw d / fy)
 
 **Note**: This is DIFFERENT from slab minimum reinforcement (ACI 8.6.1.1),
 which uses shrinkage/temperature ratios (0.0018–0.0020) applied to b×h.
@@ -108,7 +108,7 @@ Beam minimums are higher and use effective depth d, not total depth h.
 - `fy`: Steel yield strength
 
 # Reference
-- ACI 318-14 §9.6.1.2
+- ACI 318-11 §10.5.1
 - StructurePoint Example: As_min = max(0.695, 0.702) = 0.702 in²
 """
 function beam_min_reinforcement(bw::Length, d::Length, fc::Pressure, fy::Pressure)
@@ -117,10 +117,10 @@ function beam_min_reinforcement(bw::Length, d::Length, fc::Pressure, fy::Pressur
     bw_in  = ustrip(u"inch", bw)
     d_in   = ustrip(u"inch", d)
 
-    # Eq. 9.6.1.2(a): 3√f'c × bw × d / fy
+    # Eq. (10-3): 3√f'c × bw × d / fy
     As_a = 3 * sqrt(fc_psi) * bw_in * d_in / fy_psi
 
-    # Eq. 9.6.1.2(b): 200 × bw × d / fy
+    # (200 bw d / fy)
     As_b = 200 * bw_in * d_in / fy_psi
 
     return max(As_a, As_b) * u"inch^2"
@@ -136,7 +136,7 @@ end
 Whitney stress block depth a = As × fy / (0.85 × f'c × b).
 
 # Reference
-- ACI 318-14 §22.2.2.4.1
+- ACI 318-11 §10.2.7
 - StructurePoint Example: a = 2.872 × 60000 / (0.85 × 4350 × 12) = 3.88 in
 """
 function stress_block_depth(As::Area, fc::Pressure, fy::Pressure, b::Length)
@@ -149,7 +149,7 @@ end
 Neutral axis depth c = a / β₁.
 
 # Reference
-- ACI 318-14 Table 22.2.2.4.3
+- ACI 318-11 §10.2.7.3
 - StructurePoint Example: c = 3.88 / 0.83 = 4.67 in
 """
 function neutral_axis_depth(a::Length, fc::Pressure)
@@ -160,7 +160,7 @@ end
 """
     tensile_strain(d, c) -> Float64
 
-Net tensile strain in extreme tension steel per ACI 318-19 §21.2.2.
+Net tensile strain in extreme tension steel per ACI 318-11 §9.3.2.
 
     εt = 0.003 × (dt - c) / c
 
@@ -173,7 +173,7 @@ where dt = d for a single layer of tension steel.
 # Returns
 - εt (dimensionless strain)
 
-# Classification (ACI 318-19 Table 21.2.2)
+# Classification (ACI 318-11 §9.3.2)
 - εt ≥ 0.005: Tension-controlled (φ = 0.90)
 - 0.002 ≤ εt < 0.005: Transition zone (φ interpolated)
 - εt < 0.002: Compression-controlled (φ = 0.65)
@@ -191,14 +191,14 @@ end
     is_tension_controlled(εt) -> Bool
 
 Check whether section is tension-controlled (εt ≥ 0.005).
-ACI 318-19 Table 21.2.2.
+ACI 318-11 §9.3.2.
 """
 is_tension_controlled(εt::Real) = εt ≥ 0.005
 
 """
     flexure_phi(εt) -> Float64
 
-Strength reduction factor φ for flexure per ACI 318-19 Table 21.2.2.
+Strength reduction factor φ for flexure per ACI 318-11 §9.3.2.
 
 - εt ≥ 0.005: φ = 0.90 (tension-controlled)
 - εt ≤ 0.002: φ = 0.65 (compression-controlled, tied)
@@ -215,13 +215,13 @@ function flexure_phi(εt::Real)
 end
 
 # ==============================================================================
-# Maximum Bar Spacing (ACI Table 24.3.2)
+# Maximum Bar Spacing (ACI 318-11 §10.6.4)
 # ==============================================================================
 
 """
     beam_max_bar_spacing(fy; cc=1.875u"inch") -> Length
 
-Maximum center-to-center spacing of longitudinal tension bars per ACI 318-19 Table 24.3.2
+Maximum center-to-center spacing of longitudinal tension bars per ACI 318-11 §10.6.4
 (crack control for beams and one-way slabs):
 
     s_max = min(15(ACI_CRACK_CONTROL_FS_PSI/fs) - 2.5cc,  12(ACI_CRACK_CONTROL_FS_PSI/fs))
@@ -231,7 +231,7 @@ where fs = (2/3)fy, cc = clear cover to tension steel face.
 Default `cc = 1.5 + 0.375 = 1.875 in` (1.5" cover + #3 stirrup).
 
 # Reference
-- ACI 318-14 Table 24.3.2
+- ACI 318-11 §10.6.4
 - StructurePoint Example: s_max = min(10.31, 12) = 10.31 in
 """
 function beam_max_bar_spacing(fy::Pressure; cc = 1.875u"inch")
@@ -253,7 +253,7 @@ end
 Select longitudinal bar size and count for a rectangular beam.
 
 Iterates through practical beam bar sizes (#6–#11) and selects the smallest bar
-that fits within the beam width with proper clear spacing per ACI 25.2.1:
+that fits within the beam width with proper clear spacing per ACI 318-11 §7.6.1:
 
     s_clear_min = max(1 in, d_bar, 4/3 × d_agg)
 
@@ -269,8 +269,8 @@ that fits within the beam width with proper clear spacing per ACI 25.2.1:
 Named tuple: `(bar_size, n_bars, spacing, As_provided, s_clear)`
 
 # Reference
-- ACI 318-14 §25.2.1 (minimum spacing)
-- ACI 318-14 Table 24.3.2 (maximum spacing)
+- ACI 318-11 §7.6.1 (minimum spacing)
+- ACI 318-11 §10.6.4 (maximum spacing)
 - StructurePoint Example: 3-#9, spacing = 3.38 in, As = 3.00 in²
 """
 function select_beam_bars(As_required::Area, b::Length;
@@ -295,7 +295,7 @@ function select_beam_bars(As_required::Area, b::Length;
         n_bars = ceil(Int, As_in / Ab_in)
         n_bars = max(n_bars, 2)
 
-        # Minimum clear spacing (ACI 25.2.1)
+        # Minimum clear spacing (ACI 318-11 §7.6.1)
         s_clear_min = max(1.0, db_in, 4 / 3 * ustrip(u"inch", d_agg))
 
         # Width needed
@@ -307,7 +307,7 @@ function select_beam_bars(As_required::Area, b::Length;
             s_ctc = (n_bars > 1) ? (b_inner_in - db_in) / (n_bars - 1) : b_inner_in
             s_clear = s_ctc - db_in
 
-            # Check max bar spacing (ACI Table 24.3.2)
+            # Check max bar spacing (ACI 318-11 §10.6.4)
             if s_ctc > s_max_in
                 # Need more bars to satisfy crack control
                 n_bars_max = floor(Int, (b_inner_in - db_in) / s_max_in) + 1
@@ -364,7 +364,7 @@ At the tension-controlled limit (εt = 0.005):
 Named tuple: `(c_max, a_max, Cc, As_max, Mn_max, β1)`
 
 # Reference
-- ACI 318-14 Table 21.2.2 (εt = 0.005 tension-controlled limit)
+- ACI 318-11 §9.3.2 (εt = 0.005 tension-controlled limit)
 - StructurePoint Doubly Reinforced Example §2.1:
   c = 9.75 in, a = 7.80 in, Cc = 464.10 kips, As = 7.74 in², Mn = 854.72 kip-ft
 """
@@ -444,7 +444,7 @@ end
 
 Doubly reinforced beam design when the singly reinforced section is insufficient.
 
-# Procedure (ACI 318-14 §22.2)
+# Procedure (ACI 318-11 §10.2.7)
 1. Compute max singly reinforced capacity (tension-controlled limit)
 2. Excess moment: ΔMn = Mn_required - Mn_singly_max
 3. Compression couple: Cs = ΔMn / (d - d')
@@ -522,7 +522,7 @@ function design_beam_flexure_doubly(Mu::Moment, b::Length, d::Length, d_prime::L
     comp = compression_steel_stress(sr.c_max, d_prime, fc, fy, Es)
     fs_prime_psi = ustrip(u"psi", comp.fs_prime)
 
-    # Step 6: Compression steel area (subtract displaced concrete per ACI 22.2)
+    # Step 6: Compression steel area (subtract displaced concrete per ACI 318-11 §10.2.7)
     As_prime = Cs_lb / (fs_prime_psi - 0.85 * fc_psi)
 
     # Step 7: Total tension steel (equilibrium)
@@ -617,6 +617,9 @@ function design_beam_flexure(Mu::Moment, b::Length, d::Length, fc::Pressure, fy:
     if Mu ≤ φ_Mn_singly
         # --- Singly reinforced ---
         As_req = required_reinforcement(Mu, b, d, fc, fy)
+        if isinf(As_req)
+            error("Beam section inadequate: moment demand exceeds capacity. Increase d or f'c.")
+        end
         As_min = beam_min_reinforcement(b, d, fc, fy)
         As_design = max(As_req, As_min)
 

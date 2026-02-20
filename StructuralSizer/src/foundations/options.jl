@@ -3,7 +3,7 @@
 # =============================================================================
 #
 # User-facing knobs for spread, strip, and mat footing design.
-# Mirrors the pattern established by FloorOptions / FlatPlateOptions.
+# Mirrors the pattern established by AbstractFloorOptions / FlatPlateOptions.
 # =============================================================================
 
 # =============================================================================
@@ -15,12 +15,63 @@ abstract type AbstractMatMethod end
 """Rigid mat: uniform/linear pressure, strip statics. No k_s required."""
 struct RigidMat <: AbstractMatMethod end
 
-"""Hetenyi beam-on-elastic-foundation closed-form. Requires soil.ks."""
-struct Hetenyi <: AbstractMatMethod end
+"""
+    ShuklaAFM
 
-"""FEA plate on Winkler springs (Asap.Spring). Requires soil.ks."""
+Analytical Flexible Method using Kelvin-Bessel function superposition.
+
+Computes continuous moment, shear, and deflection fields from concentrated
+column loads on a plate resting on an elastic (Winkler) foundation.
+
+Subgrade modulus k_s is determined by one of:
+  1. `soil.ks` provided directly (preferred), or
+  2. Shukla (1984) chart lookup from unconfined compressive strength `q_u`,
+     scaled to mat dimensions per ACI 336.2R-88 §3.3.2 Eq. 3-8.
+
+# Fields
+- `grain`: Soil grain type for Shukla k_v1 chart — `:fine` or `:coarse`.
+  Only used when `q_u` is provided (chart lookup path).
+- `q_u`: Unconfined compressive strength for k_v1 chart lookup.
+  If `nothing`, `soil.ks` must be provided.
+- `ks_exponent`: Exponent n in ACI 336.2R Eq. 3-8: k_s = k_v1·(1ft/B)^n.
+  Range 0.5–0.7; default 0.6. Only used in chart lookup path.
+
+# References
+- Shukla, S.N. (1984). "A Simplified Method for Design of Mats on Elastic
+  Foundations." ACI Journal, 81(5), 469–475.
+- ACI 336.2R-88 §3.3.2 Eq. 3-8 (Sowers 1977 size scaling).
+- ACI 336.2R-88 §6.1.2 Step 4.
+"""
+Base.@kwdef struct ShuklaAFM <: AbstractMatMethod
+    grain::Symbol = :fine
+    q_u::Union{Pressure, Nothing} = nothing
+    ks_exponent::Float64 = 0.6
+end
+
+"""
+    WinklerFEA
+
+FEA plate on Winkler springs using Asap shell elements and grounded springs.
+
+Discretizes the mat into triangular shell elements with vertical soil springs
+at each node. Spring constants computed per ACI 336.2R-88 §6.7:
+  K_node = tributary_area × k_s
+
+Edge springs are doubled per ACI 336.2R §6.9 to approximate coupling effects.
+Requires `soil.ks` to be provided.
+
+# Fields
+- `target_edge`: Target element edge length.  `nothing` (default) → adaptive
+  sizing `clamp(min_span / 20, 0.15, 0.75) m`, giving ~20 elements per bay
+  (same heuristic as the slab FEA).
+- `double_edge_springs`: Apply ACI 336.2R §6.9 edge spring doubling (default true).
+
+# References
+- ACI 336.2R-88 §6.4 (FEM), §6.7 (Winkler springs), §6.9 (edge springs).
+"""
 Base.@kwdef struct WinklerFEA <: AbstractMatMethod
-    mesh_density::Int = 8
+    target_edge::Union{Nothing, Unitful.Length} = nothing
+    double_edge_springs::Bool = true
 end
 
 # =============================================================================
@@ -30,10 +81,10 @@ end
 """
     SpreadFootingOptions
 
-Design parameters for ACI 318-14 spread (isolated) footing design.
+Design parameters for ACI 318-11 spread (isolated) footing design.
 
 All lengths stored as Unitful quantities — stripped to imperial at the
-calculation boundary inside `design_spread_footing`.
+calculation boundary inside `design_footing(::SpreadFooting, ...)`.
 """
 Base.@kwdef struct SpreadFootingOptions
     # Materials & Detailing
@@ -42,17 +93,17 @@ Base.@kwdef struct SpreadFootingOptions
     bar_size::Int            = 8                 # Rebar designation (e.g. 8 → #8)
 
     # Column / pier interface
-    pier_shape::Symbol       = :rect             # :rect or :circular
+    pier_shape::Symbol       = :rectangular       # :rectangular or :circular
     pier_c1::Length           = 18.0u"inch"      # Column dimension parallel to L (or diameter)
     pier_c2::Length           = 18.0u"inch"      # Column dimension parallel to B (ignored for :circular)
-    footing_shape::Symbol    = :rect             # :rect (square when B==L)
+    footing_shape::Symbol    = :rectangular      # :rectangular (square when B==L)
 
     # Geometry bounds
     min_depth::Length         = 12.0u"inch"      # ACI 13.3.1.2: ≥ 6" above bottom rebar
     depth_increment::Length   = 1.0u"inch"       # Round-up increment for h
     size_increment::Length    = 3.0u"inch"        # Round B,L to nearest 3"
 
-    # Strength reduction factors — ACI 318-14 Table 21.2.1
+    # Strength reduction factors — ACI 318-11 §9.3.2
     ϕ_flexure::Float64       = 0.90
     ϕ_shear::Float64         = 0.75
     ϕ_bearing::Float64       = 0.65              # ACI Table 21.2.1 (bearing)
@@ -80,7 +131,7 @@ end
 """
     StripFootingOptions
 
-Design parameters for ACI 318-14 strip / combined footing design.
+Design parameters for ACI 318-11 strip / combined footing design.
 """
 Base.@kwdef struct StripFootingOptions
     # Materials & Detailing
@@ -89,9 +140,7 @@ Base.@kwdef struct StripFootingOptions
     bar_size_long::Int       = 7                 # Longitudinal bars
     bar_size_trans::Int      = 5                 # Transverse bars
 
-    # Column / pier dimensions (applied at each column)
-    pier_c1::Length           = 18.0u"inch"      # Column dimension along strip axis
-    pier_c2::Length           = 18.0u"inch"      # Column dimension transverse to strip
+    # Column dimensions now live on FoundationDemand (c1, c2, shape) — per column.
 
     # Geometry
     min_depth::Length         = 12.0u"inch"
@@ -107,6 +156,14 @@ Base.@kwdef struct StripFootingOptions
     ϕ_shear::Float64         = 0.75
     ϕ_bearing::Float64       = 0.65
     λ::Union{Float64, Nothing} = nothing
+
+    # Column concrete strength (may differ from footing concrete); nothing → same as footing
+    fc_col::Union{Pressure, Nothing} = nothing
+
+    # Checks to perform
+    check_development::Bool  = true              # ACI 25.4.2 development length
+    check_bearing::Bool      = true              # ACI 22.8 bearing at column-footing joint
+    check_dowels::Bool       = true              # Design dowel reinforcement if bearing insufficient
 
     # Auto-merge thresholds (spread → strip)
     merge_gap_factor::Float64    = 2.5           # Merge when gap < factor × D_max
@@ -159,9 +216,9 @@ end
 Top-level container for all foundation design parameters.
 
 # Fields
-- `code`: Design code — `:aci` (ACI 318-14 / 336.2R) or `:is` (IS 456).
+- `code`: Design code — `:aci` (ACI 318-11 / 336.2R) or `:is` (IS 456).
   Only `:aci` is wired into the auto-dispatch pipeline; IS footings can still
-  be called directly via the standalone `design_spread_footing` overload.
+  be called directly via the standalone `design_footing(::SpreadFooting, ...)` overload.
 - `strategy`: Auto-selection mode — `:auto`, `:all_spread`, `:all_strip`, `:mat`.
 - `mat_coverage_threshold`: Switch to mat when coverage ratio exceeds this (default 0.50).
 """

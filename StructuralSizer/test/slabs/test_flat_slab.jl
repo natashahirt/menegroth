@@ -110,25 +110,25 @@ const has_drop_panels_fn = SS.has_drop_panels
 
         # ── Flat Plate (without drop panels) ──
         # Exterior: ln/30 = 340/30 = 11.33 in
-        h_fp_ext = min_thickness_flat_plate(ln; discontinuous_edge=true)
+        h_fp_ext = min_thickness(FlatPlate(), ln; discontinuous_edge=true)
         @test ustrip(u"inch", h_fp_ext) ≈ 11.33 rtol=0.01
 
         # Interior: ln/33 = 340/33 = 10.30 in
-        h_fp_int = min_thickness_flat_plate(ln; discontinuous_edge=false)
+        h_fp_int = min_thickness(FlatPlate(), ln; discontinuous_edge=false)
         @test ustrip(u"inch", h_fp_int) ≈ 10.30 rtol=0.01
 
         # ── Flat Slab (with drop panels) ──
         # Exterior: ln/33 = 340/33 = 10.30 in
-        h_fs_ext = min_thickness_flat_slab(ln; discontinuous_edge=true)
+        h_fs_ext = min_thickness(FlatSlab(), ln; discontinuous_edge=true)
         @test ustrip(u"inch", h_fs_ext) ≈ 10.30 rtol=0.01
 
         # Interior: ln/36 = 340/36 = 9.44 in
-        h_fs_int = min_thickness_flat_slab(ln; discontinuous_edge=false)
+        h_fs_int = min_thickness(FlatSlab(), ln; discontinuous_edge=false)
         @test ustrip(u"inch", h_fs_int) ≈ 9.44 rtol=0.01
 
         # Absolute minimums
-        @test min_thickness_flat_plate(30u"inch") >= 5.0u"inch"
-        @test min_thickness_flat_slab(30u"inch")  >= 4.0u"inch"
+        @test min_thickness(FlatPlate(), 30u"inch") >= 5.0u"inch"
+        @test min_thickness(FlatSlab(), 30u"inch")  >= 4.0u"inch"
     end
 
     # =========================================================================
@@ -231,10 +231,10 @@ const has_drop_panels_fn = SS.has_drop_panels
 
         # Validation only: NP column stiffness matches StructurePoint reference
         # (in production, ASAP handles non-prismatic sections directly)
-        Kc_bot = column_stiffness_Kc_flat_slab(Ecc, Ic, H, h, dp; position=:bottom)
+        Kc_bot = column_stiffness_Kc(Ecc, Ic, H, h, dp; position=:bottom)
         @test ustrip(u"lbf*inch", Kc_bot) ≈ 2_134_472_479 rtol=0.03
 
-        Kc_top = column_stiffness_Kc_flat_slab(Ecc, Ic, H, h, dp; position=:top)
+        Kc_top = column_stiffness_Kc(Ecc, Ic, H, h, dp; position=:top)
         @test ustrip(u"lbf*inch", Kc_top) ≈ 1_958_272_137 rtol=0.03
 
         # ΣKc = Kc_bot + Kc_top
@@ -268,8 +268,8 @@ const has_drop_panels_fn = SS.has_drop_panels
 
         dp = DropPanelGeometry(h_drop, a_drop, a_drop)
 
-        Kc_bot = column_stiffness_Kc_flat_slab(Ecc, Ic, H, h, dp; position=:bottom)
-        Kc_top = column_stiffness_Kc_flat_slab(Ecc, Ic, H, h, dp; position=:top)
+        Kc_bot = column_stiffness_Kc(Ecc, Ic, H, h, dp; position=:bottom)
+        Kc_top = column_stiffness_Kc(Ecc, Ic, H, h, dp; position=:top)
         ΣKc    = Kc_bot + Kc_top
 
         C  = torsional_constant_C(h_total, c2)
@@ -300,31 +300,31 @@ const has_drop_panels_fn = SS.has_drop_panels
     end
 
     # =========================================================================
-    @testset "11. FlatSlabOptions & FloorOptions" begin
+    @testset "11. FlatSlabOptions" begin
 
         # Default FlatSlabOptions (composition: base::FlatPlateOptions)
         opts = FlatSlabOptions()
         @test isnothing(opts.h_drop)
         @test isnothing(opts.a_drop_ratio)
         # Property forwarding through base
-        @test opts.analysis_method == :ddm
+        @test opts.method == DDM()
         @test opts.φ_flexure == 0.90
         @test opts.φ_shear == 0.75
         @test opts.base isa FlatPlateOptions
 
         # Custom drop panel depth with base options
-        opts2 = FlatSlabOptions(h_drop=4.25u"inch", base=FlatPlateOptions(analysis_method=:efm))
+        opts2 = FlatSlabOptions(h_drop=4.25u"inch", base=FlatPlateOptions(method=EFM()))
         @test opts2.h_drop == 4.25u"inch"
-        @test opts2.analysis_method == :efm
+        @test opts2.method == EFM()
 
-        # FloorOptions integration
-        fopts = FloorOptions(flat_slab=FlatSlabOptions(h_drop=4.25u"inch"))
-        @test fopts.flat_slab.h_drop == 4.25u"inch"
+        # FlatSlabOptions with custom drop depth
+        fopts = FlatSlabOptions(h_drop=4.25u"inch")
+        @test fopts.h_drop == 4.25u"inch"
 
         # as_flat_plate_options converter returns the base directly
         fp_opts = as_flat_plate_options(opts2)
         @test fp_opts isa FlatPlateOptions
-        @test fp_opts.analysis_method == :efm
+        @test fp_opts.method == EFM()
         @test fp_opts.φ_flexure == 0.90
         @test fp_opts === opts2.base  # same object (not a copy)
 
@@ -385,7 +385,7 @@ const has_drop_panels_fn = SS.has_drop_panels
         # where b_drop = 2 × a_drop = 10 ft
         #
         # Reference: FEM = 677.53 ft-kips (approximately)
-        FEM = fixed_end_moment_FEM_flat_slab(qu_slab, qu_drop, l2, l1, dp)
+        FEM = fixed_end_moment_FEM(qu_slab, qu_drop, l2, l1, dp)
         FEM_kipft = ustrip(u"kip*ft", FEM)
 
         # Validate individual terms
@@ -439,8 +439,8 @@ const has_drop_panels_fn = SS.has_drop_panels
         )
 
         # Verify the PCA k-factors are used correctly
-        Kc_b = column_stiffness_Kc_flat_slab(Ecc, Ic, H, h, dp; position=:bottom)
-        Kc_t = column_stiffness_Kc_flat_slab(Ecc, Ic, H, h, dp; position=:top)
+        Kc_b = column_stiffness_Kc(Ecc, Ic, H, h, dp; position=:bottom)
+        Kc_t = column_stiffness_Kc(Ecc, Ic, H, h, dp; position=:top)
 
         # Bottom should be stiffer (larger ta, column end stiffer)
         @test ustrip(u"lbf*inch", Kc_b) > ustrip(u"lbf*inch", Kc_t)
@@ -466,8 +466,8 @@ const has_drop_panels_fn = SS.has_drop_panels
         Ksb = slab_beam_stiffness_Ksb(Ecs, Is, l1, c1, c2; k_factor=PCA_K_SLAB_NP)
 
         # Column stiffness (non-prismatic)
-        Kc_bot = column_stiffness_Kc_flat_slab(Ecc, Ic, H, h, dp; position=:bottom)
-        Kc_top = column_stiffness_Kc_flat_slab(Ecc, Ic, H, h, dp; position=:top)
+        Kc_bot = column_stiffness_Kc(Ecc, Ic, H, h, dp; position=:bottom)
+        Kc_top = column_stiffness_Kc(Ecc, Ic, H, h, dp; position=:top)
         ΣKc    = Kc_bot + Kc_top
 
         # Torsional stiffness (using total depth)
@@ -513,23 +513,23 @@ const has_drop_panels_fn = SS.has_drop_panels
 
         # Very short span: absolute minimum governs
         # Flat plate: min 5"
-        @test min_thickness_flat_plate(100u"inch") >= 5.0u"inch"
+        @test min_thickness(FlatPlate(), 100u"inch") >= 5.0u"inch"
         # Flat slab: min 4"
-        @test min_thickness_flat_slab(100u"inch") >= 4.0u"inch"
+        @test min_thickness(FlatSlab(), 100u"inch") >= 4.0u"inch"
 
         # Very long span: formula governs
         ln_long = 40u"ft"
         # Flat slab exterior: 480/33 = 14.55 in
-        @test ustrip(u"inch", min_thickness_flat_slab(ln_long; discontinuous_edge=true)) ≈ 14.55 rtol=0.01
+        @test ustrip(u"inch", min_thickness(FlatSlab(), ln_long; discontinuous_edge=true)) ≈ 14.55 rtol=0.01
         # Flat slab interior: 480/36 = 13.33 in
-        @test ustrip(u"inch", min_thickness_flat_slab(ln_long; discontinuous_edge=false)) ≈ 13.33 rtol=0.01
+        @test ustrip(u"inch", min_thickness(FlatSlab(), ln_long; discontinuous_edge=false)) ≈ 13.33 rtol=0.01
 
         # Flat slab is always thinner than flat plate for same span
         for ln_test in [200u"inch", 340u"inch", 480u"inch"]
-            @test min_thickness_flat_slab(ln_test; discontinuous_edge=true) <
-                  min_thickness_flat_plate(ln_test; discontinuous_edge=true)
-            @test min_thickness_flat_slab(ln_test; discontinuous_edge=false) <
-                  min_thickness_flat_plate(ln_test; discontinuous_edge=false)
+            @test min_thickness(FlatSlab(), ln_test; discontinuous_edge=true) <
+                  min_thickness(FlatPlate(), ln_test; discontinuous_edge=true)
+            @test min_thickness(FlatSlab(), ln_test; discontinuous_edge=false) <
+                  min_thickness(FlatPlate(), ln_test; discontinuous_edge=false)
         end
     end
 

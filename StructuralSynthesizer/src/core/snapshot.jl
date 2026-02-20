@@ -56,6 +56,11 @@ function restore!(struc::BuildingStructure)
         cell.live_load = snap.cell_live_loads[i]
     end
     
+    # Clear slab design details (stale after restore)
+    for slab in struc.slabs
+        hasproperty(slab, :design_details) && (slab.design_details = nothing)
+    end
+    
     return struc
 end
 

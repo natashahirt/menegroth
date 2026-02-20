@@ -7,9 +7,9 @@
 # 4. Flexure (bending moment)
 
 """
-    design_spread_footing(demand, soil, concrete, rebar; kwargs...)
+    design_footing(::SpreadFooting, demand, soil, concrete, rebar; kwargs...)
 
-Design a square spread footing for the given demand.
+Design a square spread footing for the given demand (IS 456).
 
 # Arguments
 - `demand::FoundationDemand`: Factored loads from structural analysis
@@ -29,7 +29,7 @@ Design a square spread footing for the given demand.
 # Returns
 - `SpreadFootingResult` with dimensions, reinforcement, and volumes
 """
-function design_spread_footing(
+function design_footing(::SpreadFooting,
     demand::FoundationDemand,
     soil::Soil,
     concrete::Concrete,

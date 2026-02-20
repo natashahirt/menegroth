@@ -1,5 +1,5 @@
 # ==============================================================================
-# ACI 318-19 Beam Torsion Design (§22.7)
+# ACI 318-11 Beam Torsion Design (§11.5)
 # ==============================================================================
 #
 # Design philosophy (thin-walled tube / space truss analogy):
@@ -9,13 +9,13 @@
 #   - Longitudinal bars resist the diagonal tension component
 #
 # Key ACI sections:
-#   22.7.4   - Threshold torsion (can be neglected)
-#   22.7.5   - Cracking torsion (compatibility cap)
-#   22.7.7.1 - Cross-section adequacy (shear-torsion interaction)
-#   22.7.6.1 - Transverse reinforcement for torsion
-#   22.7.6.1.2 - Longitudinal reinforcement for torsion
-#   9.5.4.1  - Combined shear + torsion transverse reinforcement
-#   9.6.4    - Minimum torsion reinforcement
+#   11.5.1   - Threshold torsion (can be neglected)
+#   11.5.2   - Cracking torsion (compatibility cap)
+#   11.5.3.1 - Cross-section adequacy (shear-torsion interaction)
+#   11.5.3   - Transverse reinforcement for torsion
+#   11.5.3.7 - Longitudinal reinforcement for torsion
+#   11.5.3.8 - Combined shear + torsion transverse reinforcement
+#   11.5.5   - Minimum torsion reinforcement
 #
 # Torsion modes:
 #   :compatibility — Torque can be capped at φ·Tcr with redistribution
@@ -52,7 +52,7 @@ Named tuple with:
 - `Ao`: Gross area enclosed by shear flow path (= 0.85 Aoh) [in²]
 
 # Reference
-- ACI 318-19 §22.7.4, §22.7.6.1
+- ACI 318-11 §11.5.1, §11.5.3
 - ACI 445.1R-12 Example 1: b=12", h=20", c_ℓ=1.5" → Aoh=153 in², ph=50.4 in
 """
 function torsion_section_properties(b::Length, h::Length, cover_to_stirrup_ctr::Length)
@@ -77,7 +77,7 @@ end
 
 Compute torsion-related section properties for a T-beam.
 
-Per ACI 318-19 §22.7.4.1(a), the overhanging flange width used in computing
+Per ACI 318-11 §11.5.1.1(a), the overhanging flange width used in computing
 Acp and pcp shall not exceed the projection of the beam above or below the slab.
 
 # Arguments
@@ -89,7 +89,7 @@ Acp and pcp shall not exceed the projection of the beam above or below the slab.
 
 # Notes
 - Aoh, ph are based on the web rectangle only (closed stirrups in web)
-- Acp, pcp include the limited flange overhang per ACI 318-19 §22.7.4.1
+- Acp, pcp include the limited flange overhang per ACI 318-11 §11.5.1.1
 """
 function torsion_section_properties_tbeam(
     bw::Length, h::Length, bf::Length, hf::Length,
@@ -103,7 +103,7 @@ function torsion_section_properties_tbeam(
 
     # Beam projection below slab (or above, whichever is greater)
     hw = h_in - hf_in  # web height below flange
-    max_overhang = hw   # ACI 318-19 §22.7.4.1(a)
+    max_overhang = hw   # ACI 318-11 §11.5.1.1(a)
 
     # Effective flange overhang on each side for torsion
     raw_overhang = (bf_in - bw_in) / 2
@@ -127,13 +127,13 @@ function torsion_section_properties_tbeam(
 end
 
 # ==============================================================================
-# Threshold Torsion (§22.7.4)
+# Threshold Torsion (§11.5.1)
 # ==============================================================================
 
 """
     threshold_torsion(Acp, pcp, fc; λ=1.0, φ=0.75) -> Float64
 
-Threshold torsion below which torsion effects can be neglected (ACI 318-19 §22.7.4).
+Threshold torsion below which torsion effects can be neglected (ACI 318-11 §11.5.1).
 
     Tth = φ · λ · √f'c · Acp² / pcp
 
@@ -149,13 +149,13 @@ function threshold_torsion(Acp::Real, pcp::Real, fc_psi::Real; λ::Real=1.0, φ:
 end
 
 # ==============================================================================
-# Cracking Torsion (§22.7.5.1)
+# Cracking Torsion (§11.5.2.4)
 # ==============================================================================
 
 """
     cracking_torsion(Acp, pcp, fc_psi; λ=1.0) -> Float64
 
-Cracking torsion per ACI 318-19 §22.7.5.1:
+Cracking torsion per ACI 318-11 §11.5.2.4:
 
     Tcr = 4 · λ · √f'c · Acp² / pcp
 
@@ -168,14 +168,14 @@ function cracking_torsion(Acp::Real, pcp::Real, fc_psi::Real; λ::Real=1.0)
 end
 
 # ==============================================================================
-# Cross-Section Adequacy Check (§22.7.7.1)
+# Cross-Section Adequacy Check (§11.5.3.1)
 # ==============================================================================
 
 """
     torsion_section_adequate(Vu_kip, Tu_kipin, bw_in, d_in, Aoh, ph, fc_psi;
                              λ=1.0, φ=0.75) -> Bool
 
-Check cross-section adequacy per ACI 318-19 §22.7.7.1.
+Check cross-section adequacy per ACI 318-11 §11.5.3.1.
 
 For solid sections:
     √[(Vu/(bw·d))² + (Tu·ph/(1.7·Aoh²))²] ≤ φ·(Vc/(bw·d) + 8·√f'c)
@@ -235,13 +235,13 @@ function torsion_adequacy_ratio(
 end
 
 # ==============================================================================
-# Required Torsion Reinforcement (§22.7.6.1)
+# Required Torsion Reinforcement (§11.5.3)
 # ==============================================================================
 
 """
     torsion_transverse_reinforcement(Tu_kipin, Ao, fyt_psi; θ=45.0, φ=0.75) -> Float64
 
-Required transverse reinforcement for torsion (At/s) per ACI 318-19 §22.7.6.1.1:
+Required transverse reinforcement for torsion (At/s) per ACI 318-11 §11.5.3.6:
 
     At/s = Tu / (φ · 2 · fyt · Ao · cot(θ))
 
@@ -270,7 +270,7 @@ end
 """
     torsion_longitudinal_reinforcement(At_s, ph, fyt_psi, fy_psi; θ=45.0) -> Float64
 
-Required longitudinal reinforcement for torsion (Al) per ACI 318-19 §22.7.6.1.2:
+Required longitudinal reinforcement for torsion (Al) per ACI 318-11 §11.5.3.7:
 
     Al = (At/s) · ph · (fyt/fy) · cot²(θ)
 
@@ -288,13 +288,13 @@ function torsion_longitudinal_reinforcement(
 end
 
 # ==============================================================================
-# Minimum Torsion Reinforcement (§9.6.4)
+# Minimum Torsion Reinforcement (§11.5.5)
 # ==============================================================================
 
 """
     min_torsion_transverse(bw_in, fc_psi, fyt_psi) -> Float64
 
-Minimum transverse reinforcement for torsion per ACI 318-19 §9.6.4.2:
+Minimum transverse reinforcement for torsion per ACI 318-11 §11.5.5.2:
 
     (At/s)_min = max(0.75·√f'c · bw / (2·fyt), 0.175·bw / fyt)
 
@@ -307,7 +307,7 @@ Returns At/s_min in in²/in.
 - ACI 445.1R-12 Example 1: At/s_min = 0.125 mm²/mm = 0.005 in²/in
 """
 function min_torsion_transverse(bw_in::Real, fc_psi::Real, fyt_psi::Real)
-    # ACI 318-19 Eq. 9.6.4.2: Av+2At ≥ max(0.75√f'c·bw/fyt, 50bw/fyt)
+    # ACI 318-11 §11.5.5.2: Av+2At ≥ max(0.75√f'c·bw/fyt, 50bw/fyt)
     # For torsion alone (Av=0): 2At ≥ max(...)
     # So At/s ≥ max(0.75√f'c·bw/(2·fyt), 50bw/(2·fyt))
     # In ACI psi units: 50 psi → 0.175 ksi → 0.175·bw/fyt... no, keep in psi:
@@ -320,7 +320,7 @@ end
 """
     min_torsion_longitudinal(Acp, At_s, ph, fc_psi, fy_psi, fyt_psi; θ=45.0) -> Float64
 
-Minimum longitudinal reinforcement for torsion per ACI 318-19 §9.6.4.3:
+Minimum longitudinal reinforcement for torsion per ACI 318-11 §11.5.5.3:
 
     Al,min = (5·√f'c · Acp / (12·fy)) − (At/s) · ph · (fyt/fy)
 
@@ -338,13 +338,13 @@ function min_torsion_longitudinal(
 end
 
 # ==============================================================================
-# Maximum Stirrup Spacing for Torsion (§9.7.6.3.3)
+# Maximum Stirrup Spacing for Torsion (§11.5.6.1)
 # ==============================================================================
 
 """
     max_torsion_stirrup_spacing(ph) -> Float64
 
-Maximum stirrup spacing for torsion per ACI 318-19 §9.7.6.3.3:
+Maximum stirrup spacing for torsion per ACI 318-11 §11.5.6.1:
 
     s_max = min(ph/8, 12 in.)
 
@@ -365,7 +365,7 @@ end
                         λ=1.0, θ=45.0, φ=0.75,
                         torsion_mode=:compatibility) -> NamedTuple
 
-Complete torsion design for an RC beam per ACI 318-19 §22.7.
+Complete torsion design for an RC beam per ACI 318-11 §11.5.
 
 # Arguments
 - `Tu`: Factored torsion demand
@@ -384,7 +384,7 @@ Complete torsion design for an RC beam per ACI 318-19 §22.7.
 - `hf`: Flange thickness (nothing → rectangular beam)
 - `λ`: Lightweight concrete factor (1.0 for NWC)
 - `θ`: Compression diagonal angle in degrees (45° for non-prestressed)
-- `φ`: Strength reduction factor (0.75 per ACI 318-19 §21.2.1)
+- `φ`: Strength reduction factor (0.75 per ACI 318-11 §9.3.2.3)
 - `torsion_mode`: `:compatibility` or `:equilibrium`
 
 # Returns
@@ -399,7 +399,7 @@ Named tuple with comprehensive design results.
   slab supported by a single beam where the slab's load path requires torsion).
 
 # Reference
-- ACI 318-19 §22.7
+- ACI 318-11 §11.5
 - ACI 445.1R-12, Chapter 9 (Design Examples)
 """
 function design_beam_torsion(

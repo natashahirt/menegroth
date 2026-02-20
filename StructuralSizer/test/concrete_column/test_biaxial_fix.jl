@@ -30,7 +30,7 @@ mat = (fc = 4.0, fy = 60.0, Es = 29000.0, εcu = 0.003)
 
 println("\n1. Testing P-M diagram generation for rectangular section...")
 diagram_x = generate_PM_diagram(rect_section, mat; n_intermediate=15)
-diagram_y = generate_PM_diagram_yaxis(rect_section, mat; n_intermediate=15)
+diagram_y = generate_PM_diagram(rect_section, mat, WeakAxis(); n_intermediate=15)
 
 # Get capacities at same axial load
 Pu = 300.0  # kip

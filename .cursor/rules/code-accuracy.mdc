@@ -1,0 +1,13 @@
+---
+description: Safety-critical code accuracy requirements
+alwaysApply: true
+---
+
+# Code Accuracy — Safety Critical
+
+This codebase is used for **structural engineering**. Incorrect code can lead to unsafe designs. Treat every calculation as safety-critical.
+
+- **Stay extremely close to the source material** (code standards, reference equations, textbook derivations). Do not improvise formulas or invent approximations.
+- **If there is any ambiguity** — in a spec, equation, sign convention, unit, load combination, boundary condition, or code clause — **stop and ask the user before generating code.** Do not guess.
+- When implementing a code provision (ACI 318, AISC 360, etc.), cite the exact clause number in a comment.
+- Double-check unit consistency (kip vs lb, in vs ft, psi vs ksi, etc.) at every interface boundary.

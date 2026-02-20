@@ -2,22 +2,34 @@
 # Supports and Foundations
 # =============================================================================
 
-"""Per-support analysis data (one support node location)."""
-mutable struct Support{T, F, M}
+"""
+Per-support analysis data (one support node location).
+
+Column dimensions (`c1`, `c2`, `shape`) are carried here so that
+`support_demands` can propagate them directly onto `FoundationDemand`.
+"""
+mutable struct Support{T, F, M, L}
     vertex_idx::Int             # Index into skeleton.vertices
     node_idx::Int               # Index into asap_model.nodes  
     forces::NTuple{3, F}        # (Fx, Fy, Fz) reaction forces
     moments::NTuple{3, M}       # (Mx, My, Mz) reaction moments
     foundation_type::Symbol     # :spread, :combined, :pile, etc.
+    c1::L                       # Column dim 1 (or diameter for :circular)
+    c2::L                       # Column dim 2 (= c1 for circular)
+    shape::Symbol               # :rectangular or :circular
 end
 
 function Support(vertex_idx::Int, node_idx::Int; 
                  forces=(0.0u"kN", 0.0u"kN", 0.0u"kN"),
                  moments=(0.0u"kN*m", 0.0u"kN*m", 0.0u"kN*m"),
-                 foundation_type=:spread)
+                 foundation_type=:spread,
+                 c1=18.0u"inch", c2=18.0u"inch", shape=:rectangular)
     F = typeof(forces[1])
     M = typeof(moments[1])
-    Support{typeof(1.0u"m"), F, M}(vertex_idx, node_idx, forces, moments, foundation_type)
+    L = typeof(c1)
+    Support{typeof(1.0u"m"), F, M, L}(
+        vertex_idx, node_idx, forces, moments, foundation_type,
+        c1, c2, shape)
 end
 
 # Convenience: access reactions as combined tuple

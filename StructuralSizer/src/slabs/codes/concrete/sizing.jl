@@ -4,7 +4,7 @@
 #
 # Internal span-based slab sizing helper (for initialization / quick checks).
 #
-# Reference: ACI 318-14/19 Chapter 8, StructurePoint Design Examples
+# Reference: ACI 318-11 Chapter 13, StructurePoint Design Examples
 #
 # =============================================================================
 
@@ -23,16 +23,16 @@ Size a cast-in-place flat plate slab per ACI 318.
 
 # Keyword Arguments
 - `material::Concrete`: Concrete material (default: NWC_4000)
-- `options::FloorOptions`: Sizing options including `cip.analysis_method`
+- `options::AbstractFloorOptions`: Sizing options (e.g., `FlatPlateOptions(method=EFM())`)
 - `l2::Length`: Panel width perpendicular to span (default: same as span)
 - `c1::Length`: Column dimension in span direction (default: estimated from span)
 - `c2::Length`: Column dimension perpendicular to span (default: same as c1)
 - `position::Symbol`: Panel position `:interior`, `:edge`, `:corner` (default: :interior)
 
-# Analysis Methods (via `options.flat_plate.analysis_method`)
-- `:mddm` - Modified Direct Design Method (simplified coefficients, fastest)
-- `:ddm` - Direct Design Method (full ACI tables)
-- `:efm` - Equivalent Frame Method (most accurate)
+# Analysis Methods (via `options.method` on `FlatPlateOptions`)
+- `DDM(:simplified)` - Modified Direct Design Method (simplified coefficients, fastest)
+- `DDM()` - Direct Design Method (full ACI tables)
+- `EFM()` - Equivalent Frame Method (most accurate)
 
 # Returns
 - `CIPSlabResult` with thickness, volume, and self-weight
@@ -49,23 +49,23 @@ result = _size_span_floor(FlatPlate(), span, sdl, live)
 # → CIPSlabResult(7 inches, ...)
 
 # With options
-opts = FloorOptions(flat_plate=FlatPlateOptions(analysis_method=:efm))
+opts = FlatPlateOptions(method=EFM())
 result = _size_span_floor(FlatPlate(), span, sdl, live; options=opts)
 ```
 
 # Reference
-- ACI 318-14 Chapter 8 (Two-Way Slabs)
-- ACI 318-14 Table 8.3.1.1 (Minimum Thickness)
+- ACI 318-11 Chapter 13 (Two-Way Slabs)
+- ACI 318-11 Table 9.5(c) (Minimum Thickness)
 """
 function _size_span_floor(::FlatPlate, span::L, sdl::F, live::F;
                     material::Concrete = NWC_4000,
-                    options::FloorOptions = FloorOptions(),
+                    options::AbstractFloorOptions = FlatPlateOptions(),
                     l2::Union{Nothing, Length} = nothing,
                     c1::Union{Nothing, Length} = nothing,
                     c2::Union{Nothing, Length} = nothing,
                     position::Symbol = :interior) where {L<:Length, F<:Pressure}
     
-    opts = options.flat_plate
+    opts = options isa FlatSlabOptions ? options.base : options
     
     # Default panel width to span (square panel)
     l2_val = isnothing(l2) ? span : l2
@@ -83,7 +83,7 @@ function _size_span_floor(::FlatPlate, span::L, sdl::F, live::F;
     # =========================================================================
     # Phase 1: Minimum Thickness (ACI 8.3.1.1)
     # =========================================================================
-    h_min = min_thickness_flat_plate(ln; discontinuous_edge=discontinuous)
+    h_min = min_thickness(FlatPlate(), ln; discontinuous_edge=discontinuous)
     
     # Round up to nearest 0.5 inch (practical)
     h = ceil(ustrip(u"inch", h_min) * 2) / 2 * u"inch"
@@ -95,8 +95,9 @@ function _size_span_floor(::FlatPlate, span::L, sdl::F, live::F;
     # Self-weight (mass density × thickness × gravity → pressure)
     sw = slab_self_weight(h, material.ρ)
     
-    # Factored load (ACI strength: 1.2D + 1.6L)
-    qu = factored_pressure(default_combo, sw + sdl, live)
+    # Governing factored load (ASCE 7 §2.3.1: max of 1.2D+1.6L, 1.4D)
+    qu = max(factored_pressure(default_combo, sw + sdl, live),
+             factored_pressure(strength_1_4D, sw + sdl, live))
     
     # Static moment M0
     M0 = total_static_moment(qu, l2_val, ln)
@@ -113,16 +114,13 @@ function _size_span_floor(::FlatPlate, span::L, sdl::F, live::F;
         _βt = edge_beam_βt(h, c1_val, c2_val, l2_val)
     end
     
-    moments = if opts.analysis_method == :mddm
+    # Dispatch on typed method: MDDM uses simplified coefficients,
+    # everything else uses full ACI DDM coefficients for initial thickness sizing.
+    # (EFM/FEA refine moments later in the full pipeline.)
+    moments = if opts.method isa DDM && opts.method.variant == :simplified
         distribute_moments_mddm(M0, span_type)
-    elseif opts.analysis_method == :ddm
-        distribute_moments_aci(M0, span_type, l2_l1; edge_beam=opts.has_edge_beam, βt=_βt)
-    elseif opts.analysis_method in (:efm, :efm_hc, :efm_asap, :fea)
-        # EFM/FEA need full panel analysis for actual moment distribution.
-        # For thickness sizing, fall back to DDM coefficients.
-        distribute_moments_aci(M0, span_type, l2_l1; edge_beam=opts.has_edge_beam, βt=_βt)
     else
-        error("Unknown analysis method: $(opts.analysis_method)")
+        distribute_moments_aci(M0, span_type, l2_l1; edge_beam=opts.has_edge_beam, βt=_βt)
     end
     
     # =========================================================================
@@ -158,7 +156,8 @@ function _size_span_floor(::FlatPlate, span::L, sdl::F, live::F;
                 
                 # Recalculate load with new self-weight
                 sw = slab_self_weight(h, material.ρ)
-                qu = factored_pressure(default_combo, sw + sdl, live)
+                qu = max(factored_pressure(default_combo, sw + sdl, live),
+                         factored_pressure(strength_1_4D, sw + sdl, live))
                 Vu = punching_demand(qu, At, c1_val, c2_val, d)
                 
                 check = check_punching_shear(Vu, Vc)
@@ -195,22 +194,22 @@ Drop panels allow for thinner slabs and better punching shear capacity.
 """
 function _size_span_floor(::FlatSlab, span::L, sdl::F, live::F;
                     material::Concrete = NWC_4000,
-                    options::FloorOptions = FloorOptions(),
+                    options::AbstractFloorOptions = FlatSlabOptions(),
                     l2::Union{Nothing, Length} = nothing,
                     c1::Union{Nothing, Length} = nothing,
                     c2::Union{Nothing, Length} = nothing,
                     position::Symbol = :interior) where {L<:Length, F<:Pressure}
     
-    # Flat slab minimum thickness per ACI 318-14 Table 8.3.1.1 (with drop panels)
+    # Flat slab minimum thickness per ACI 318-11 Table 9.5(c) (with drop panels)
     # h_min = ln/33 (exterior) or ln/36 (interior)
-    fp = options.flat_slab
+    fp = options isa FlatSlabOptions ? options : FlatSlabOptions()
     
     # Estimate clear span from center-to-center span
     c = isnothing(c1) ? estimate_column_size_from_span(span; ratio=15.0) : c1
     ln = span - c
     
     discontinuous = (position in (:exterior, :edge, :corner))
-    h_min = min_thickness_flat_slab(ln; discontinuous_edge=discontinuous)
+    h_min = min_thickness(FlatSlab(), ln; discontinuous_edge=discontinuous)
     
     # Round up to nearest 0.5 inch
     h = max(ceil(ustrip(u"inch", h_min) * 2) / 2, 4.0) * u"inch"
@@ -233,27 +232,17 @@ and allow for thinner slabs than flat plates.
 """
 function _size_span_floor(::TwoWay, span::L, sdl::F, live::F;
                     material::Concrete = NWC_4000,
-                    options::FloorOptions = FloorOptions(),
+                    options::AbstractFloorOptions = FlatPlateOptions(),
                     l2::Union{Nothing, Length} = nothing,
                     position::Symbol = :interior) where {L<:Length, F<:Pressure}
     
     l2_val = isnothing(l2) ? span : l2
     
     # Two-way with beams: ACI Table 8.3.1.2
-    # h_min depends on αfm (beam stiffness ratio)
-    # For typical cases with substantial beams: h = ln/36 or greater
-    
-    # Simplified: use shorter span for two-way
     ln = min(span, l2_val)
-    
-    # ACI 8.3.1.2 for two-way slabs with beams between supports on all sides
-    # When αfm ≥ 2.0: h_min = ln(0.8 + fy/200000) / 36
-    fy = options.flat_plate.material.rebar.Fy
-    
-    # ACI formula: h = ln × (0.8 + fy/200000) / 36
-    # fy / 200000psi is dimensionless
-    h_min = ln * (0.8 + fy / (200000u"psi")) / 36
-    h_min = max(h_min, 3.5u"inch")  # Absolute minimum for two-way with beams
+    fp = options isa FlatSlabOptions ? options.base : options
+    fy = fp.material.rebar.Fy
+    h_min = min_thickness(TwoWay(), ln; fy)
     
     # Round up to nearest 0.5"
     h = ceil(ustrip(u"inch", h_min) * 2) / 2 * u"inch"
@@ -276,27 +265,10 @@ Uses `options.one_way.support` to determine thickness divisor.
 """
 function _size_span_floor(::OneWay, span::L, sdl::F, live::F;
                     material::Concrete = NWC_4000,
-                    options::FloorOptions = FloorOptions()) where {L<:Length, F<:Pressure}
+                    options::AbstractFloorOptions = OneWayOptions()) where {L<:Length, F<:Pressure}
     
-    opts = options.one_way
-    
-    # ACI Table 7.3.1.1 - Minimum thickness for one-way slabs
-    fy = opts.material.rebar.Fy
-    fy_factor = 0.4 + fy / (100000u"psi")
-    
-    divisor = if opts.support == SIMPLE
-        20
-    elseif opts.support == ONE_END_CONT
-        24
-    elseif opts.support == BOTH_ENDS_CONT
-        28
-    elseif opts.support == CANTILEVER
-        10
-    else
-        24
-    end
-    h_min = span * fy_factor / divisor
-    h_min = max(h_min, 4.0u"inch")
+    opts = options isa OneWayOptions ? options : OneWayOptions()
+    h_min = min_thickness(OneWay(), span; fy=opts.material.rebar.Fy, support=opts.support)
     
     h_in = ceil(ustrip(u"inch", h_min) * 2) / 2
     h = h_in * u"inch"
@@ -318,7 +290,7 @@ with reduced weight compared to solid slabs.
 """
 function _size_span_floor(::Waffle, span::L, sdl::F, live::F;
                     material::Concrete = NWC_4000,
-                    options::FloorOptions = FloorOptions(),
+                    options::AbstractFloorOptions = FlatPlateOptions(),
                     l2::Union{Nothing, Length} = nothing,
                     position::Symbol = :interior) where {L<:Length, F<:Pressure}
     
@@ -328,9 +300,7 @@ function _size_span_floor(::Waffle, span::L, sdl::F, live::F;
     
     l2_val = isnothing(l2) ? span : l2
     ln = max(span, l2_val)  # Longer span governs
-    
-    # Waffle depth: span/20 to span/24 (use span/22 as default)
-    h_min = max(ln / 22, 8.0u"inch")  # Minimum practical waffle depth
+    h_min = min_thickness(Waffle(), ln)
     
     # Round up to practical waffle form depths (8", 10", 12", 14", 16", 20")
     standard_depths = [8.0, 10.0, 12.0, 14.0, 16.0, 20.0, 24.0]  # inches
@@ -360,21 +330,18 @@ through post-tensioning.
 """
 function _size_span_floor(::PTBanded, span::L, sdl::F, live::F;
                     material::Concrete = NWC_4000,
-                    options::FloorOptions = FloorOptions(),
+                    options::AbstractFloorOptions = FlatSlabOptions(),
                     l2::Union{Nothing, Length} = nothing,
                     position::Symbol = :interior) where {L<:Length, F<:Pressure}
     
     # PT slabs can be thinner than RC: span/45 to span/50
-    # With drop panels: even thinner
-    
     l2_val = isnothing(l2) ? span : l2
-    ln = max(span, l2_val)  # Longer span governs
+    ln = max(span, l2_val)
     
     # PT thickness rules (PTI guidelines)
-    # If flat_slab options have non-default drop config, use thinner PT rule
-    has_drops = !isnothing(options.flat_slab.h_drop) || !isnothing(options.flat_slab.a_drop_ratio)
-    divisor = has_drops ? 50.0 : 45.0
-    h_min = max(ln / divisor, 5.0u"inch")  # PT minimum is typically 5"
+    fs = options isa FlatSlabOptions ? options : FlatSlabOptions()
+    has_drops = !isnothing(fs.h_drop) || !isnothing(fs.a_drop_ratio)
+    h_min = min_thickness(PTBanded(), ln; has_drops)
     
     # Round up to nearest 0.5"
     h = ceil(ustrip(u"inch", h_min) * 2) / 2 * u"inch"

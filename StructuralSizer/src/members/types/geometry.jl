@@ -121,3 +121,16 @@ end
 function ConcreteMemberGeometry(L::Real; Lu::Real=L, k=1.0, braced=true)
     ConcreteMemberGeometry(Float64(L) * u"m"; Lu=Float64(Lu) * u"m", k=k, braced=braced)
 end
+
+# =============================================================================
+# Bending Axis Tags (for PM diagram dispatch)
+# =============================================================================
+
+"""Bending axis discriminator for PM interaction dispatch."""
+abstract type BendingAxis end
+
+"""Strong-axis bending (about x-axis, default)."""
+struct StrongAxis <: BendingAxis end
+
+"""Weak-axis bending (about y-axis)."""
+struct WeakAxis <: BendingAxis end

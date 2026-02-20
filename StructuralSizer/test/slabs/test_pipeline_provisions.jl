@@ -263,12 +263,12 @@ const SS = StructuralSizer
         live = 40.0psf
 
         # Without edge beam
-        opts_no_beam = FloorOptions(flat_plate=FlatPlateOptions(has_edge_beam=false))
+        opts_no_beam = FlatPlateOptions(has_edge_beam=false)
         result_no = SS._size_span_floor(FlatPlate(), span, sdl, live;
                                          options=opts_no_beam, position=:edge)
 
         # With edge beam
-        opts_beam = FloorOptions(flat_plate=FlatPlateOptions(has_edge_beam=true))
+        opts_beam = FlatPlateOptions(has_edge_beam=true)
         result_beam = SS._size_span_floor(FlatPlate(), span, sdl, live;
                                            options=opts_beam, position=:edge)
 
@@ -298,7 +298,7 @@ const SS = StructuralSizer
         span = 18.0u"ft"
         sdl = 20.0psf
         live = 40.0psf
-        opts_f = FloorOptions(flat_plate=FlatPlateOptions(edge_beam_βt=1.5))
+        opts_f = FlatPlateOptions(edge_beam_βt=1.5)
         result = SS._size_span_floor(FlatPlate(), span, sdl, live;
                                       options=opts_f, position=:edge)
         @test ustrip(u"m", result.thickness) > 0.0

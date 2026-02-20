@@ -50,8 +50,11 @@ function size!(
     beam_opts   = something(params.beams,   StructuralSizer.SteelBeamOptions())
     column_opts = something(params.columns, StructuralSizer.SteelColumnOptions())
 
-    prev_column_demands = nothing
+    n_cols_sz = length(struc.columns)
+    prev_demands = Vector{Float64}(undef, n_cols_sz)
+    curr_demands = Vector{Float64}(undef, n_cols_sz)
     converged = false
+    first_iter = true
 
     # =========================================================================
     # Iterative beam/column sizing
@@ -65,7 +68,7 @@ function size!(
         # --- Re-analyze with updated beam self-weight ---
         # Topology unchanged; only sections/loads differ → lightweight reprocess
         if struc.asap_model.processed
-            Asap._reprocess_stiffness_and_loads!(struc.asap_model)
+            Asap.update!(struc.asap_model)
         else
             Asap.process!(struc.asap_model)
         end
@@ -76,17 +79,17 @@ function size!(
 
         # --- Re-analyze with updated column sections ---
         if struc.asap_model.processed
-            Asap._reprocess_stiffness_and_loads!(struc.asap_model)
+            Asap.update!(struc.asap_model)
         else
             Asap.process!(struc.asap_model)
         end
         Asap.solve!(struc.asap_model)
 
         # --- Check convergence ---
-        current_demands = _extract_column_demands(struc)
+        _extract_column_demands!(curr_demands, struc)
 
-        if !isnothing(prev_column_demands)
-            change = _max_demand_change(prev_column_demands, current_demands)
+        if !first_iter
+            change = _max_demand_change(prev_demands, curr_demands)
             verbose && @info "  Max demand change: $(round(change * 100, digits=1))%"
 
             if change < convergence_tol
@@ -96,7 +99,8 @@ function size!(
             end
         end
 
-        prev_column_demands = current_demands
+        copyto!(prev_demands, curr_demands)
+        first_iter = false
     end
 
     !converged && verbose && @warn "Did not converge within $max_iterations iterations"
@@ -126,7 +130,7 @@ end
 # ==============================================================================
 # Internal Helpers
 # ==============================================================================
-# _extract_column_demands and _max_demand_change are defined in design_workflow.jl
+# _extract_column_demands! and _max_demand_change are defined in design_workflow.jl
 
 """Update BuildingDesign results after sizing."""
 function _update_design_results!(design::BuildingDesign)

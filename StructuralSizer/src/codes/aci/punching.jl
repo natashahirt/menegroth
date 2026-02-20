@@ -1,23 +1,23 @@
 # =============================================================================
-# Shared ACI 318 Punching & Shear Utilities (Unitful)
+# Shared ACI 318-11 Punching & Shear Utilities (Unitful)
 # =============================================================================
 #
 # Element-agnostic ACI punching/shear math used by BOTH slabs and foundations.
 # Included via codes/aci/_aci_shared.jl BEFORE slabs/ and foundations/.
 #
 # Contents:
-#   §22.6       Punching (two-way) shear geometry, capacity, demand
-#   §8.4.2      Moment transfer fractions (γf, γv)
-#   R8.4.4.2    Combined punching stress with unbalanced moment (Jc)
-#   §8.4.2.3.3  Effective slab width for moment transfer
-#   §22.5       One-way (beam) shear capacity/demand
+#   §11.11      Punching (two-way) shear geometry, capacity, demand
+#   §13.5.3     Moment transfer fractions (γf, γv)
+#   R11.11.7.2  Combined punching stress with unbalanced moment (Jc)
+#   §13.5.3.2   Effective slab width for moment transfer
+#   §11.2       One-way (beam) shear capacity/demand
 #   —           High-level punching_check for biaxial moment transfer
 #
 # All functions are fully Unitful.
 # =============================================================================
 
 # ─────────────────────────────────────────────────────────────────────────────
-# §22.6.4 — Critical Section Geometry
+# §11.11.1.2 — Critical Section Geometry
 # ─────────────────────────────────────────────────────────────────────────────
 
 """
@@ -31,7 +31,7 @@ Returns `(b1, b2, b0, cAB)`.
 - `b0`: Total perimeter
 - `cAB`: Centroid distance from face (b1/2 for symmetric)
 
-Reference: ACI 318-14 §22.6.4
+Reference: ACI 318-11 §11.11.1.2
 """
 function punching_geometry_interior(c1::Length, c2::Length, d::Length;
                                      shape::Symbol = :rectangular)
@@ -54,7 +54,7 @@ end
 
 Returns `(b1, b2, b0, cAB)`.
 
-Reference: ACI 318-14 §22.6.4, StructurePoint §5.2(a)
+Reference: ACI 318-11 §11.11.1.2, StructurePoint §5.2(a)
 """
 function punching_geometry_edge(c1::Length, c2::Length, d::Length)
     b1 = c1 + d / 2
@@ -71,7 +71,7 @@ end
 
 Returns `(b1, b2, b0, cAB_x, cAB_y)`.
 
-Reference: ACI 318-14 §22.6.4
+Reference: ACI 318-11 §11.11.1.2
 """
 function punching_geometry_corner(c1::Length, c2::Length, d::Length)
     b1 = c1 + d / 2
@@ -100,7 +100,7 @@ end
 
 Critical perimeter b₀ for an interior column.
 
-Reference: ACI 318-14 §22.6.4
+Reference: ACI 318-11 §11.11.1.2
 """
 function punching_perimeter(c1::Length, c2::Length, d::Length;
                              shape::Symbol = :rectangular)
@@ -109,13 +109,13 @@ function punching_perimeter(c1::Length, c2::Length, d::Length;
 end
 
 # ─────────────────────────────────────────────────────────────────────────────
-# §22.6.5.2 — Column Factors
+# §11.11.2.1 — Column Factors
 # ─────────────────────────────────────────────────────────────────────────────
 
 """
     punching_αs(position) → Int
 
-ACI Table 22.6.5.2 location factor: 40 interior, 30 edge, 20 corner.
+ACI 318-11 §11.11.2.1(b) location factor: 40 interior, 30 edge, 20 corner.
 """
 function punching_αs(position::Symbol)
     position == :interior ? 40 :
@@ -134,17 +134,19 @@ function punching_β(c1::Length, c2::Length; shape::Symbol = :rectangular)
 end
 
 # ─────────────────────────────────────────────────────────────────────────────
-# §8.4.2.3 — Moment Transfer Fractions
+# §13.5.3 / §11.11.7 — Moment Transfer Fractions
 # ─────────────────────────────────────────────────────────────────────────────
 
 """
     gamma_f(b1, b2) → Float64
 
-Fraction of unbalanced moment transferred by flexure (ACI 8.4.2.3.2).
+Fraction of unbalanced moment transferred by flexure.
 
     γf = 1 / (1 + (2/3)√(b1/b2))
 
 `b1` = critical section dimension in the span direction of the moment.
+
+Reference: ACI 318-11 Eq. (13-1)
 """
 function gamma_f(b1::Length, b2::Length)
     return 1.0 / (1.0 + (2.0 / 3.0) * sqrt(b1 / b2))
@@ -155,7 +157,7 @@ end
 
 Fraction of unbalanced moment transferred by eccentric shear: γv = 1 − γf.
 
-Reference: ACI 318-14 Eq. 8.4.4.2.2
+Reference: ACI 318-11 Eq. (11-37)
 """
 function gamma_v(b1::Length, b2::Length)
     return 1.0 - gamma_f(b1, b2)
@@ -164,17 +166,19 @@ end
 """
     effective_slab_width(c2, h; position=:interior)
 
-Effective slab width for moment transfer by flexure (ACI §8.4.2.3.3).
+Effective slab width for moment transfer by flexure.
 
 - Interior: bb = c2 + 3h (1.5h each side)
 - Edge/corner: bb = c2 + 1.5h (slab side only)
+
+Reference: ACI 318-11 §13.5.3.2
 """
 function effective_slab_width(c2::Length, h::Length; position::Symbol = :interior)
     position == :interior ? c2 + 3h : c2 + 1.5h
 end
 
 # ─────────────────────────────────────────────────────────────────────────────
-# R8.4.4.2.3 — Polar Moment Jc of Critical Section
+# R11.11.7.2 — Polar Moment Jc of Critical Section
 # ─────────────────────────────────────────────────────────────────────────────
 
 """
@@ -182,9 +186,9 @@ end
 
 Jc for interior column (4-sided, symmetric critical section).
 
-    Jc = 2[b1 d³/12 + d b1³/12] + 2 b2 d (b1/2)²
+    Jc = d b1³/6 + b1 d³/6 + d b2 (b1/2)² × 2
 
-Reference: ACI 318-14 R8.4.4.2.3, StructurePoint p.44
+Reference: ACI 318-11 R11.11.7.2, StructurePoint p.44
 """
 function polar_moment_Jc_interior(b1::Length, b2::Length, d::Length)
     cAB = b1 / 2
@@ -198,7 +202,12 @@ Jc for edge column (3-sided, asymmetric critical section).
 
     Jc = 2[b1 d³/12 + d b1³/12 + b1 d (b1/2−cAB)²] + b2 d cAB²
 
-Reference: ACI 318-14 R8.4.4.2.3, StructurePoint p.42–43
+Two b1 sides (perpendicular to slab edge) get full in-plane + out-of-plane +
+parallel-axis contributions.  The closing b2 side (parallel to the moment
+transfer axis) contributes only its parallel-axis term (b2·d·cAB²); its
+out-of-plane bending (b2·d³/12) is conventionally omitted per PCA practice.
+
+Reference: ACI 318-11 R11.11.7.2, PCA Notes on ACI 318, StructurePoint p.42–43
 """
 function polar_moment_Jc_edge(b1::Length, b2::Length, d::Length, cAB::Length)
     return 2 * (b1 * d^3 / 12 + d * b1^3 / 12 +
@@ -207,24 +216,24 @@ function polar_moment_Jc_edge(b1::Length, b2::Length, d::Length, cAB::Length)
 end
 
 # ─────────────────────────────────────────────────────────────────────────────
-# §22.6.5.2 — Punching Shear Capacity
+# §11.11.2.1 — Punching Shear Capacity
 # ─────────────────────────────────────────────────────────────────────────────
 
 """
     punching_capacity_stress(fc, β, αs, b0, d; λ=1.0) → Pressure
 
-Nominal punching shear stress vc per ACI 22.6.5.2:
+Nominal punching shear stress vc per ACI 318-11 §11.11.2.1:
 
-    vc = min(4λ√f'c,  (2+4/β)λ√f'c,  (αs d/b0+2)λ√f'c)
+    vc = min( (2+4/β)λ√f'c,  (αs d/b0+2)λ√f'c,  4λ√f'c )
 
-Returns vc as a Pressure (psi).
+Eq. (11-31), (11-32), (11-33) respectively. Returns vc as a Pressure (psi).
 """
 function punching_capacity_stress(fc::Pressure, β::Float64, αs::Int,
                                    b0::Length, d::Length; λ::Float64 = 1.0)
     sqrt_fc = sqrt(ustrip(u"psi", fc))
-    vc_a = 4 * λ * sqrt_fc                         # Eq (a)
-    vc_b = (2 + 4 / β) * λ * sqrt_fc               # Eq (b)
-    vc_c = (αs * d / b0 + 2) * λ * sqrt_fc         # Eq (c)
+    vc_a = (2 + 4 / β) * λ * sqrt_fc               # Eq. (11-31)
+    vc_b = (αs * d / b0 + 2) * λ * sqrt_fc         # Eq. (11-32)
+    vc_c = 4 * λ * sqrt_fc                          # Eq. (11-33)
     return min(vc_a, vc_b, vc_c) * u"psi"
 end
 
@@ -298,13 +307,15 @@ function check_combined_punching(vu::Pressure, vc::Pressure; φ::Float64 = 0.75)
 end
 
 # ─────────────────────────────────────────────────────────────────────────────
-# §22.5 — One-Way (Beam) Shear
+# §11.2 — One-Way (Beam) Shear
 # ─────────────────────────────────────────────────────────────────────────────
 
 """
     one_way_shear_capacity(fc, bw, d; λ=1.0) → Force
 
-ACI 22.5.5.1: Vc = 2λ√f'c × bw × d (calibrated for psi/inch → lbf).
+Vc = 2λ√f'c × bw × d (calibrated for psi/inch → lbf).
+
+Reference: ACI 318-11 §11.2.1.1 (Eq. 11-3)
 """
 function one_way_shear_capacity(fc::Pressure, bw::Length, d::Length;
                                  λ::Float64 = 1.0)
@@ -313,12 +324,14 @@ function one_way_shear_capacity(fc::Pressure, bw::Length, d::Length;
 end
 
 """
-    one_way_shear_demand(qu, bw, ln, c, d) → Force
+    one_way_shear_demand(qu, bw, ln, d) → Force
 
-One-way shear demand at critical section (d from support face).
+One-way shear demand at critical section (d from support face):
+    Vu = qu × bw × (ln/2 − d)
+
+Reference: ACI 318-11 §11.1.3.1
 """
-function one_way_shear_demand(qu::Pressure, bw::Length, ln::Length,
-                               c::Length, d::Length)
+function one_way_shear_demand(qu::Pressure, bw::Length, ln::Length, d::Length)
     return qu * bw * ln / 2 - qu * bw * d
 end
 
@@ -339,7 +352,7 @@ end
 """
     punching_check(Vu, Mux, Muy, d, fc, c1, c2; ...) → NamedTuple
 
-Full ACI 318-14 §22.6 + §8.4.4.2 punching shear check with eccentric shear
+Full ACI 318-11 §11.11 + §11.11.7 punching shear check with eccentric shear
 from biaxial unbalanced moments.
 
 # Arguments
@@ -424,7 +437,8 @@ function punching_check(
         v_moment = uconvert(u"psi", γv_val * Mub_adj * geom.cAB / Jc)
         vu = v_direct + v_moment
 
-    else  # :corner — conservative direct-shear only
+    else  # :corner — ACI 318-11 §11.11.7.1 applies moment transfer to all columns,
+          # but direct shear only is used here (conservative for gravity loading).
         vu = v_direct
     end
 

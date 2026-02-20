@@ -6,6 +6,7 @@
 # - Punching shear (§22.6)
 # - Two-way deflection (§24.2)
 # - One-way shear (§22.5)
+# - Flexural adequacy / tension-controlled (§21.2.2)
 #
 # These wrap the pure ACI equations from calculations.jl with logging and
 # result struct construction.
@@ -14,7 +15,7 @@
 # =============================================================================
 
 # =============================================================================
-# Punching Shear Check (ACI 318-19 §22.6)
+# Punching Shear Check (ACI 318-11 §11.11)
 # =============================================================================
 
 """
@@ -45,7 +46,8 @@ where e_centroid is the distance from column centerline to critical section cent
 Named tuple with `(ok, ratio, vu, φvc, b0, Jc)`
 """
 function check_punching_for_column(col, Vu, Mub, d, h, fc;
-                                   verbose=false, col_idx=1, λ=1.0, φ_shear=0.75)
+                                   verbose=false, col_idx=1, λ=1.0, φ_shear=0.75,
+                                   _geom_cache::Union{Nothing, Dict} = nothing)
     c1 = col.c1
     c2 = col.c2
     col_shape_val = col_shape(col)
@@ -62,29 +64,55 @@ function check_punching_for_column(col, Vu, Mub, d, h, fc;
         c2 = c_eq
     end
     
-    # Get geometry and compute eccentricity correction for Mub
-    # NOTE: Jc and γv use critical section dimensions (b1, b2), NOT column dims (c1, c2).
+    # ── Geometry (cached: depends only on c1, c2, d, position, shape) ──
+    cache_key = !isnothing(_geom_cache) ?
+        (ustrip(u"m", c1), ustrip(u"m", c2), ustrip(u"m", d), col.position, geom_shape) :
+        nothing
+
+    cached = !isnothing(cache_key) ? get(_geom_cache, cache_key, nothing) : nothing
+
+    if !isnothing(cached)
+        geom = cached.geom
+        Jc = cached.Jc
+        γv_val = cached.γv
+        cAB = cached.cAB
+        αs = cached.αs
+        β = cached.β
+    else
+        if col.position == :interior
+            geom = punching_geometry_interior(c1, c2, d; shape=geom_shape)
+            Jc = polar_moment_Jc_interior(geom.b1, geom.b2, d)
+            γv_val = gamma_v(geom.b1, geom.b2)
+            cAB = geom.cAB
+        elseif col.position == :edge
+            geom = punching_geometry_edge(c1, c2, d)
+            Jc = polar_moment_Jc_edge(geom.b1, geom.b2, d, geom.cAB)
+            γv_val = gamma_v(geom.b1, geom.b2)
+            cAB = geom.cAB
+        else  # :corner
+            geom = punching_geometry_corner(c1, c2, d)
+            cAB = max(geom.cAB_x, geom.cAB_y)
+            Jc = polar_moment_Jc_edge(geom.b1, geom.b2, d, cAB) / 2
+            γv_val = gamma_v(geom.b1, geom.b2)
+        end
+
+        c1_in = ustrip(u"inch", c1)
+        c2_in = ustrip(u"inch", c2)
+        β = col_shape_val == :circular ? 1.0 : max(c1_in, c2_in) / max(min(c1_in, c2_in), 1.0)
+        αs = punching_αs(col.position)
+
+        if !isnothing(cache_key)
+            _geom_cache[cache_key] = (geom=geom, Jc=Jc, γv=γv_val, cAB=cAB, αs=αs, β=β)
+        end
+    end
+
+    # ── Eccentricity correction (load-dependent — not cached) ──
     if col.position == :interior
-        geom = punching_geometry_interior(c1, c2, d; shape=geom_shape)
-        Jc = polar_moment_Jc_interior(geom.b1, geom.b2, d)
-        γv_val = gamma_v(geom.b1, geom.b2)
-        cAB = geom.cAB
-        Mub_adjusted = Mub  # No eccentricity correction for interior
-        
+        Mub_adjusted = Mub
     elseif col.position == :edge
-        geom = punching_geometry_edge(c1, c2, d)
-        Jc = polar_moment_Jc_edge(geom.b1, geom.b2, d, geom.cAB)
-        γv_val = gamma_v(geom.b1, geom.b2)
-        cAB = geom.cAB
-        # Eccentricity: column center to critical section centroid
         e_centroid = c1 / 2 - cAB
         Mub_adjusted = max(0.0kip*u"ft", Mub - Vu * e_centroid)
-        
     else  # :corner
-        geom = punching_geometry_corner(c1, c2, d)
-        cAB = max(geom.cAB_x, geom.cAB_y)
-        Jc = polar_moment_Jc_edge(geom.b1, geom.b2, d, cAB) / 2
-        γv_val = gamma_v(geom.b1, geom.b2)
         e_x = c1 / 2 - geom.cAB_x
         e_y = c2 / 2 - geom.cAB_y
         e_centroid = max(e_x, e_y)
@@ -93,11 +121,6 @@ function check_punching_for_column(col, Vu, Mub, d, h, fc;
     
     b0 = geom.b0
     vu = combined_punching_stress(Vu, Mub_adjusted, b0, d, γv_val, Jc, cAB)
-    
-    c1_in = ustrip(u"inch", c1)
-    c2_in = ustrip(u"inch", c2)
-    β = col_shape_val == :circular ? 1.0 : max(c1_in, c2_in) / max(min(c1_in, c2_in), 1.0)
-    αs = punching_αs(col.position)
     
     vc = punching_capacity_stress(fc, β, αs, b0, d; λ=λ)
     φvc = φ_shear * vc
@@ -119,7 +142,7 @@ function check_punching_for_column(col, Vu, Mub, d, h, fc;
 end
 
 # =============================================================================
-# Punching Shear Check at Drop Panel Edge (Flat Slab — ACI 318-19 §22.6.4.1)
+# Punching Shear Check at Drop Panel Edge (Flat Slab — ACI 318-11 §11.11.1.2)
 # =============================================================================
 
 """
@@ -128,7 +151,7 @@ end
 
 Check punching shear at d/2 from the drop panel edge for flat slab design.
 
-Per ACI 318-19 §22.6.4.1(b), when drop panels are present, punching shear
+Per ACI 318-11 §11.11.1.2, when drop panels are present, punching shear
 must also be checked at a critical section located at d/2 from the edge
 of the drop panel (where d is the slab effective depth, NOT the total depth
 at the drop).
@@ -155,7 +178,7 @@ the factored slab-only load within the critical section when `qu` is provided.
 Named tuple `(ok, ratio, vu, φvc, b0, Jc)`
 
 # Reference
-- ACI 318-19 §22.6.4.1(b)
+- ACI 318-11 §11.11.1.2
 - StructurePoint DE-Two-Way-Flat-Slab: Two critical sections checked
 """
 function check_punching_at_drop_edge(col, Vu, Mub, h_slab, d_slab, fc,
@@ -221,12 +244,12 @@ function check_punching_at_drop_edge(col, Vu, Mub, h_slab, d_slab, fc,
 end
 
 """
-    check_punching_flat_slab(col, Vu, Mub, h_slab, d_slab, h_total, d_total,
-                              fc, drop::DropPanelGeometry; kwargs...) -> NamedTuple
+    check_punching(col, Vu, Mub, h_slab, d_slab, h_total, d_total,
+                   fc, drop::DropPanelGeometry; kwargs...) -> NamedTuple
 
 Combined punching shear check for flat slab — both critical sections.
 
-Per ACI 318-19 §22.6.4.1, flat slabs with drop panels require TWO checks:
+Per ACI 318-11 §11.11.1.2, flat slabs with drop panels require TWO checks:
 1. At d/2 from column face, using total depth h_total = h_slab + h_drop
 2. At d/2 from drop panel edge, using slab depth h_slab
 
@@ -237,10 +260,10 @@ Named tuple `(ok, ratio, vu, φvc, b0, Jc, governing_section)` where
 `governing_section` is `:column` or `:drop_edge`.
 
 # Reference
-- ACI 318-19 §22.6.4.1(b)
+- ACI 318-11 §11.11.1.2
 - StructurePoint DE-Two-Way-Flat-Slab
 """
-function check_punching_flat_slab(col, Vu, Mub, h_slab, d_slab, h_total, d_total,
+function check_punching(col, Vu, Mub, h_slab, d_slab, h_total, d_total,
                                    fc, drop::DropPanelGeometry;
                                    qu = nothing,
                                    verbose=false, col_idx=1, λ=1.0, φ_shear=0.75)
@@ -266,14 +289,14 @@ function check_punching_flat_slab(col, Vu, Mub, h_slab, d_slab, h_total, d_total
 end
 
 # =============================================================================
-# Two-Way Deflection Check (ACI 318-19 §24.2)
+# Two-Way Deflection Check (ACI 318-11 §9.5.2.6)
 # =============================================================================
 
 """
     check_two_way_deflection(moment_results, h, d, fc, fy, Es, Ecs, spans, γ_concrete,
                              columns; verbose, limit_type, rotation_factor, As_provided) -> NamedTuple
 
-Two-way deflection check per ACI 318-19 §24.2.
+Two-way deflection check per ACI 318-11 §9.5.2.6.
 
 ## Deflection source — auto-selected
 
@@ -332,34 +355,53 @@ function check_two_way_deflection(
 
     # ── Section properties ──
     Ig_frame = slab_moment_of_inertia(l2, h)         # full frame strip
-    Ig_cs    = slab_moment_of_inertia(l2 / 2, h)     # column strip (half width)
-    Ig_ms    = slab_moment_of_inertia(l2 / 2, h)     # middle strip (half width)
+    Ig_half  = slab_moment_of_inertia(l2 / 2, h)     # half-width strip
+    Ig_cs    = Ig_half                                 # column strip
+    Ig_ms    = Ig_half                                 # middle strip
 
     # ── Cracking check ──
     fr_val = fr(fc)
     Mcr    = cracking_moment(fr_val, Ig_frame, h)
 
-    # ── Service moments (scale factored M_pos by load ratios) ──
+    # ── Service moments (scale factored moments by load ratios) ──
     qu_val  = ustrip(psf, moment_results.qu)          # factored load (already stored)
     qD_val  = ustrip(psf, moment_results.qD)
     qDL_val = ustrip(psf, moment_results.qD + moment_results.qL)
 
-    Ma_D  = moment_results.M_pos * (qD_val  / qu_val)  # dead-only service moment
-    Ma_DL = moment_results.M_pos * (qDL_val / qu_val)   # total service moment
+    # Midspan positive moment (service)
+    Ma_D_mid  = moment_results.M_pos * (qD_val  / qu_val)
+    Ma_DL_mid = moment_results.M_pos * (qDL_val / qu_val)
+
+    # Support negative moment (service) — envelope of exterior and interior
+    M_neg_max = max(moment_results.M_neg_ext, moment_results.M_neg_int)
+    Ma_D_sup  = M_neg_max * (qD_val  / qu_val)
+    Ma_DL_sup = M_neg_max * (qDL_val / qu_val)
 
     # ── Reinforcement for cracked I ──
     As_min = minimum_reinforcement(l2, h, fy)
-    As_est = if isnothing(As_provided)
+
+    # Midspan (positive) reinforcement estimate
+    As_mid = if isnothing(As_provided)
         As_reqd = required_reinforcement(moment_results.M_pos, l2, d, fc, fy)
         max(As_reqd, As_min)
     else
         max(As_provided, As_min)
     end
-    Icr = cracked_moment_of_inertia(As_est, l2, d, Ecs, Es)
+    Icr_mid = cracked_moment_of_inertia(As_mid, l2, d, Ecs, Es)
 
-    # ── Separate effective I for each load level ──
-    Ie_D  = effective_moment_of_inertia(Mcr, Ma_D,  Ig_frame, Icr)
-    Ie_DL = effective_moment_of_inertia(Mcr, Ma_DL, Ig_frame, Icr)
+    # Support (negative) reinforcement estimate
+    As_neg = max(required_reinforcement(M_neg_max, l2, d, fc, fy), As_min)
+    Icr_sup = cracked_moment_of_inertia(As_neg, l2, d, Ecs, Es)
+
+    # ── Effective I at each section (Branson's equation) ──
+    Ie_mid_D  = effective_moment_of_inertia(Mcr, Ma_D_mid,  Ig_frame, Icr_mid)
+    Ie_mid_DL = effective_moment_of_inertia(Mcr, Ma_DL_mid, Ig_frame, Icr_mid)
+    Ie_sup_D  = effective_moment_of_inertia(Mcr, Ma_D_sup,  Ig_frame, Icr_sup)
+    Ie_sup_DL = effective_moment_of_inertia(Mcr, Ma_DL_sup, Ig_frame, Icr_sup)
+
+    # ── ACI 435R-95 weighted average (accounts for support cracking) ──
+    Ie_D  = weighted_effective_Ie(Ie_mid_D,  Ie_sup_D,  Ie_sup_D;  position=position)
+    Ie_DL = weighted_effective_Ie(Ie_mid_DL, Ie_sup_DL, Ie_sup_DL; position=position)
 
     # ── Long-term factor: λ_Δ = ξ / (1 + 50ρ') ──
     λ_Δ = long_term_deflection_factor(ξ, ρ_prime)
@@ -438,8 +480,10 @@ function check_two_way_deflection(
     if verbose
         status = ok ? "✓ PASS" : "✗ FAIL"
         src = isnothing(fea_Δ) ? "crossing-beam" : "FEA direct"
-        @debug "Section" Ig=Ig_frame Icr=Icr Ie_D=Ie_D Ie_DL=Ie_DL
-        @debug "Service moments" Ma_D=uconvert(kip*u"ft", Ma_D) Ma_DL=uconvert(kip*u"ft", Ma_DL) Mcr=uconvert(kip*u"ft", Mcr)
+        @debug "Section (mid)" Ig=Ig_frame Icr_mid=Icr_mid Ie_mid_DL=Ie_mid_DL
+        @debug "Section (sup)" Ig=Ig_frame Icr_sup=Icr_sup Ie_sup_DL=Ie_sup_DL
+        @debug "Weighted Ie" Ie_D=Ie_D Ie_DL=Ie_DL Ie_Ig=round(ustrip(Ie_DL / Ig_frame), digits=3)
+        @debug "Service moments" Ma_mid=uconvert(kip*u"ft", Ma_DL_mid) Ma_sup=uconvert(kip*u"ft", Ma_DL_sup) Mcr=uconvert(kip*u"ft", Mcr)
         @debug "LDF" LDF_c=round(LDF_c, digits=3) LDF_m=round(LDF_m, digits=3) position=position
         @debug "Strip (D)"  Δcx=Δcx_D  Δmx=Δmx_D  panel=Δ_panel_D
         @debug "Strip (D+L)" Δcx=Δcx_DL Δmx=Δmx_DL panel=Δ_panel_DL
@@ -512,11 +556,11 @@ function weighted_effective_Ie(Ie_midspan, Ie_left, Ie_right; position::Symbol=:
 end
 
 """
-    check_two_way_deflection_flat_slab(moment_results, h_slab, d_slab, fc, fy, Es, Ecs,
-                                        spans, γ_concrete, columns, drop::DropPanelGeometry;
-                                        kwargs...) -> NamedTuple
+    check_two_way_deflection(moment_results, h_slab, d_slab, fc, fy, Es, Ecs,
+                              spans, γ_concrete, columns, drop::DropPanelGeometry;
+                              kwargs...) -> NamedTuple
 
-Two-way deflection check for flat slab with drop panels per ACI 318-19 §24.2
+Two-way deflection check for flat slab with drop panels per ACI 318-11 §9.5.2.6
 and ACI 435R-95 for non-prismatic I_e averaging.
 
 Extends the base `check_two_way_deflection` by:
@@ -533,7 +577,7 @@ Otherwise follows the same crossing-beam or FEA-direct path.
 - ACI 435R-95 Eq. 4-1a, 4-1b
 - StructurePoint DE-Two-Way-Flat-Slab (Deflection section)
 """
-function check_two_way_deflection_flat_slab(
+function check_two_way_deflection(
     moment_results, h_slab, d_slab, fc, fy, Es, Ecs, spans, γ_concrete, columns,
     drop::DropPanelGeometry;
     verbose::Bool      = false,
@@ -680,14 +724,14 @@ function check_two_way_deflection_flat_slab(
 end
 
 # =============================================================================
-# One-Way Shear Check (ACI 318-19 §22.5)
+# One-Way Shear Check (ACI 318-11 §11.2)
 # =============================================================================
 
 """
     check_one_way_shear(moment_results, d, fc; verbose=false, λ=1.0, φ_shear=0.75) -> NamedTuple
 
 Check one-way (beam) shear at the critical section (distance d from column face)
-per ACI 318-19 §22.5.
+per ACI 318-11 §11.2.
 
 # Returns
 Named tuple with `(ok, ratio, Vu, Vc, message)`
@@ -698,7 +742,7 @@ function check_one_way_shear(moment_results, d, fc; verbose=false, λ=1.0, φ_sh
     qu = moment_results.qu
     
     # Shear at critical section d from face of support (ACI 22.5.1.2)
-    Vu = one_way_shear_demand(qu, l2, ln, 0.0u"inch", d)
+    Vu = one_way_shear_demand(qu, l2, ln, d)
     Vc = one_way_shear_capacity(fc, l2, d; λ=λ)
     result = StructuralSizer.check_one_way_shear(Vu, Vc; φ=φ_shear)
     
@@ -709,5 +753,87 @@ function check_one_way_shear(moment_results, d, fc; verbose=false, λ=1.0, φ_sh
     end
     
     return (ok=result.ok, ratio=result.ratio, Vu=Vu, Vc=Vc, message=result.message)
+end
+
+# =============================================================================
+# Flexural Adequacy Check (ACI 318-11 §9.3.2)
+# =============================================================================
+
+"""
+    check_flexural_adequacy(moment_results, columns, d, fc; verbose=false) -> NamedTuple
+
+Verify that all strip locations remain tension-controlled (Rn ≤ Rn_max).
+
+Computes the resistance coefficient Rn = Mu / (φ·b·d²) for each strip and
+compares against the tension-controlled limit Rn_max = 0.319·β₁·f'c.  If any
+strip exceeds the limit the section needs more depth.
+
+Uses the same ACI 8.10.5 transverse distribution as `design_strip_reinforcement`:
+exterior negative → 100 % column strip; interior negative → 75 / 25 %;
+positive → 60 / 40 %.
+
+# Returns
+Named tuple `(ok, max_ratio, governing_strip)` where
+- `ok::Bool`:  true when all strips satisfy Rn ≤ Rn_max
+- `max_ratio`: worst-case Rn / Rn_max across all strips
+- `governing_strip`: symbol identifying the controlling location
+"""
+function check_flexural_adequacy(moment_results, columns, d, fc; verbose=false)
+    φ = 0.9
+    β = beta1(fc)
+    Rn_max = 0.319 * β * fc   # tension-controlled limit (units of pressure)
+
+    l2 = moment_results.l2
+    cs_width = l2 / 2   # column strip width
+    ms_width = l2 / 2   # middle strip width
+
+    # Derive strip design moments (mirrors design_strip_reinforcement)
+    zero_M = zero(moment_results.M0)
+    M_neg_ext_cs = zero_M
+    M_neg_int_cs = zero_M
+    M_neg_int_ms = zero_M
+
+    for (i, col) in enumerate(columns)
+        m = moment_results.column_moments[i]
+        if col.position == :interior
+            M_neg_int_cs = max(M_neg_int_cs, 0.75 * m)
+            M_neg_int_ms = max(M_neg_int_ms, 0.25 * m)
+        else
+            M_neg_ext_cs = max(M_neg_ext_cs, 1.00 * m)
+        end
+    end
+
+    M_pos_cs = 0.60 * moment_results.M_pos
+    M_pos_ms = 0.40 * moment_results.M_pos
+
+    # Collect (label, Mu, strip width) for every strip location
+    strips = [
+        (:ext_neg_cs,  M_neg_ext_cs, cs_width),
+        (:int_neg_cs,  M_neg_int_cs, cs_width),
+        (:pos_cs,      M_pos_cs,     cs_width),
+        (:int_neg_ms,  M_neg_int_ms, ms_width),
+        (:pos_ms,      M_pos_ms,     ms_width),
+    ]
+
+    max_ratio = 0.0
+    governing = :none
+
+    for (label, Mu, b) in strips
+        Rn = Mu / (φ * b * d^2)
+        ratio = ustrip(Rn / Rn_max)   # dimensionless
+        if ratio > max_ratio
+            max_ratio = ratio
+            governing = label
+        end
+    end
+
+    ok = max_ratio ≤ 1.0
+
+    if verbose
+        status = ok ? "✓ PASS" : "✗ FAIL"
+        @debug "Flexural adequacy (tension-controlled)" Rn_max=Rn_max max_ratio=round(max_ratio, digits=3) governing=governing status=status
+    end
+
+    return (ok=ok, max_ratio=max_ratio, governing_strip=governing)
 end
 

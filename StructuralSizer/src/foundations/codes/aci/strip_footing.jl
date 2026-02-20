@@ -1,5 +1,5 @@
 # =============================================================================
-# ACI 318-14 Strip / Combined Footing Design (Rigid Analysis)
+# ACI 318-11 Strip / Combined Footing Design (Rigid Analysis)
 # =============================================================================
 #
 # Supports N ≥ 2 columns along a single line.
@@ -12,9 +12,11 @@
 #   4. One-way (beam) shear at critical sections
 #   5. Longitudinal reinforcement (top + bottom)
 #   6. Transverse reinforcement under column bands
+#   7. Development length check (ACI 25.4.2)
+#   8. Column-footing bearing & dowels at each column (ACI 22.8)
 #
 # Fully Unitful throughout — uses shared punching_check() with unbalanced moments.
-# Reference: StructurePoint ACI 318-14 Combined Footing, Wight 7th Ed. Ex 15-5.
+# Reference: StructurePoint ACI 318-11 Combined Footing, Wight 7th Ed. Ex 15-5.
 # =============================================================================
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -70,13 +72,16 @@ end
 # ─────────────────────────────────────────────────────────────────────────────
 
 """
-    design_strip_footing(demands, positions, soil; opts) → StripFootingResult
+    design_footing(::StripFooting, demands, positions, soil; opts) → StripFootingResult
 
-Design a strip (combined) footing supporting N ≥ 2 columns per ACI 318-14.
+Design a strip (combined) footing supporting N ≥ 2 columns per ACI 318-11.
 
 Rigid analysis: uniform soil pressure when the footing centroid aligns with
 the resultant of column loads.  Punching check at each column includes
 unbalanced moments from `FoundationDemand.Mux`/`Muy`.
+
+Includes development length verification (ACI 25.4.2) and column-footing
+bearing check with dowel design (ACI 22.8) at each column.
 
 # Arguments
 - `demands::Vector{FoundationDemand}`: Factored & service loads per column.
@@ -89,7 +94,7 @@ unbalanced moments from `FoundationDemand.Mux`/`Muy`.
 # Returns
 `StripFootingResult` with SI output quantities.
 """
-function design_strip_footing(
+function design_footing(::StripFooting,
     demands::Vector{<:FoundationDemand},
     positions::Vector{<:Length},
     soil::Soil;
@@ -111,8 +116,7 @@ function design_strip_footing(
     ϕv     = opts.ϕ_shear
     w_incr = opts.width_increment
 
-    # Column dimension from options (used for punching & transverse design)
-    c_col  = opts.pier_c1
+    # Per-column dimensions from demands (c1, c2, shape).
 
     # =====================================================================
     # Step 1: Plan Sizing
@@ -171,21 +175,24 @@ function design_strip_footing(
             # --- Two-way (punching) at each column ---
             all_punch_ok = true
             for (j, xc) in enumerate(col_pos_local)
+                cj1 = demands[j].c1
+                cj2 = demands[j].c2
                 d_ft = ustrip(u"ft", d)
                 is_edge = (j == 1 && ustrip(u"ft", xc) < d_ft) ||
                           (j == N && ustrip(u"ft", L - xc) < d_ft)
                 pos_sym = is_edge ? :edge : :interior
 
-                Ac = (c_col + d) * (c_col + d)
+                Ac = (cj1 + d) * (cj2 + d)
                 if is_edge
-                    Ac = (c_col + d / 2) * (c_col + d)
+                    Ac = (cj1 + d / 2) * (cj2 + d)
                 end
                 Vu_p = uconvert(u"lbf", demands[j].Pu - qu * Ac)
                 Vu_p = max(Vu_p, 0.0u"lbf")
 
                 pch = punching_check(Vu_p, demands[j].Mux, demands[j].Muy,
-                                      d, fc, c_col, c_col;
-                                      position = pos_sym, λ = λ, ϕ = ϕv)
+                                      d, fc, cj1, cj2;
+                                      position = pos_sym, shape = demands[j].shape,
+                                      λ = λ, ϕ = ϕv)
                 if !pch.ok
                     all_punch_ok = false
                     break
@@ -196,12 +203,13 @@ function design_strip_footing(
             ϕVc = ϕv * one_way_shear_capacity(fc, B, d; λ = λ)
             ϕVc_kip = to_kip(ϕVc)
             d_ft = ustrip(u"ft", d)
-            c_ft = ustrip(u"ft", c_col)
+            # Per-column c1 half-widths for critical section offset
+            col_c1_ft = [ustrip(u"ft", demands[j].c1) for j in 1:N]
             diag_t = _strip_VM_diagram(L, B, qu, col_pos_local, Pu_vec)
             Vu_max_kip = 0.0
             for (i, x) in enumerate(diag_t.x_ft)
-                min_dist = minimum(abs(x - ustrip(u"ft", xc)) - c_ft / 2
-                                   for xc in col_pos_local)
+                min_dist = minimum(abs(x - ustrip(u"ft", col_pos_local[j])) - col_c1_ft[j] / 2
+                                   for j in 1:N)
                 if min_dist ≥ d_ft - 0.01
                     Vu_max_kip = max(Vu_max_kip, abs(diag_t.V_kip[i]))
                 end
@@ -255,12 +263,57 @@ function design_strip_footing(
     # =====================================================================
     # Step 5: Transverse Reinforcement (under column bands)
     # =====================================================================
-    cant_trans = (B - c_col) / 2
+    # Use max c2 across all columns for governing transverse cantilever.
+    c2_max = maximum(dem.c2 for dem in demands)
+    c1_max = maximum(dem.c1 for dem in demands)
+    cant_trans = (B - c2_max) / 2
     Mu_trans_per_ft = qu * cant_trans^2 / 2     # moment per unit length
-    band_w = c_col + d
+    band_w = c1_max + d
     Mu_band = Mu_trans_per_ft * band_w
     As_trans = max(_flexural_steel_footing(Mu_band, band_w, d, fc, fy, ϕf),
                    _min_steel_footing(band_w, h, fy))
+
+    # =====================================================================
+    # Step 6: Development Length (ACI 25.4.2)
+    # =====================================================================
+    if opts.check_development
+        ld_long = _development_length_footing(opts.bar_size_long, fc, fy, λ, db_l)
+        ld_trans = _development_length_footing(opts.bar_size_trans, fc, fy, λ, db_t)
+
+        # Longitudinal bars: available = distance from column face to nearer footing end
+        for (j, xc) in enumerate(col_pos_local)
+            avail_long = min(xc, L - xc) - demands[j].c1 / 2 - cover
+            ld_long > avail_long && @warn(
+                "Strip col #$j: longitudinal ld=$ld_long > available=$avail_long")
+        end
+
+        # Transverse bars: available = cantilever beyond smallest column (most critical)
+        c2_min = minimum(dem.c2 for dem in demands)
+        avail_trans = (B - c2_min) / 2 - cover
+        ld_trans > avail_trans && @warn(
+            "Strip transverse: ld=$ld_trans > available=$avail_trans")
+    end
+
+    # =====================================================================
+    # Step 7: Bearing & Dowels at Each Column (ACI 22.8)
+    # =====================================================================
+    if opts.check_bearing
+        fc_col_val = something(opts.fc_col, fc)
+        ϕb = opts.ϕ_bearing
+        for (j, dem) in enumerate(demands)
+            bearing = _bearing_check_footing(
+                dem.Pu, dem.c1, dem.c2, B, L, h,
+                fc, fc_col_val, fy, ϕb, dem.shape)
+            if bearing.need_dowels && opts.check_dowels
+                @info "Strip col #$j: dowels required, As_dowels = $(bearing.As_dowels)"
+            end
+            if !bearing.footing_ok
+                @warn "Strip col #$j: bearing capacity exceeded " *
+                      "(Pu=$(round(to_kip(dem.Pu), digits=0)) kip, " *
+                      "Bn=$(round(to_kip(bearing.Bn_footing), digits=0)) kip)"
+            end
+        end
+    end
 
     # =====================================================================
     # Utilization
@@ -269,16 +322,18 @@ function design_strip_footing(
 
     util_punch = 0.0
     for (j, xc) in enumerate(col_pos_local)
+        cj1, cj2 = demands[j].c1, demands[j].c2
         d_ft = ustrip(u"ft", d)
         is_edge = (j == 1 && ustrip(u"ft", xc) < d_ft) ||
                   (j == N && ustrip(u"ft", L - xc) < d_ft)
         pos_sym = is_edge ? :edge : :interior
-        Ac = is_edge ? (c_col + d / 2) * (c_col + d) :
-                       (c_col + d) * (c_col + d)
+        Ac = is_edge ? (cj1 + d / 2) * (cj2 + d) :
+                       (cj1 + d) * (cj2 + d)
         Vu_p = max(uconvert(u"lbf", demands[j].Pu - qu * Ac), 0.0u"lbf")
         pch = punching_check(Vu_p, demands[j].Mux, demands[j].Muy,
-                              d, fc, c_col, c_col;
-                              position = pos_sym, λ = λ, ϕ = ϕv)
+                              d, fc, cj1, cj2;
+                              position = pos_sym, shape = demands[j].shape,
+                              λ = λ, ϕ = ϕv)
         util_punch = max(util_punch, pch.utilization)
     end
 

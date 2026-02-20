@@ -27,11 +27,9 @@ using StructuralSizer
 # Helpers
 # =============================================================================
 
-const HLINE = "─"^74
-const DLINE = "═"^74
-
-section_header(title) = println("\n", DLINE, "\n  ", title, "\n", DLINE)
-row_header(title) = println("\n  ", title, "\n  ", HLINE)
+include(joinpath(@__DIR__, "..", "..", "StructuralSynthesizer", "test", "shared", "report_helpers.jl"))
+const _rpt = ReportHelpers.Printer(width = 74)
+row_header(title) = println("\n  ", title, "\n  ", _rpt.hline)
 
 """Print moment comparison table for DDM / EFM / FEA."""
 function print_moment_table(results::Dict{String, Any})
@@ -91,7 +89,7 @@ end
 
 @testset "FEA Flat Plate Analysis" begin
 
-section_header("Test 1: Regular 3×3 Grid — 18 ft × 14 ft Panels")
+_rpt.section("Test 1: Regular 3×3 Grid — 18 ft × 14 ft Panels")
 
 @testset "Regular grid: FEA vs DDM/EFM" begin
     # 3×3 bay grid → 18 ft × 14 ft panels, 9 ft story height
@@ -99,16 +97,13 @@ section_header("Test 1: Regular 3×3 Grid — 18 ft × 14 ft Panels")
     struc = BuildingStructure(skel)
 
     # Initialize with FEA flat plate
-    opts = FloorOptions(
-        flat_plate = FlatPlateOptions(
-            material = RC_4000_60,
-            analysis_method = :fea,
-            cover = 0.75u"inch",
-            bar_size = 5,
-        ),
-        tributary_axis = nothing
+    opts = FlatPlateOptions(
+        material = RC_4000_60,
+        method = FEA(),
+        cover = 0.75u"inch",
+        bar_size = 5,
     )
-    initialize!(struc; floor_type=:flat_plate, floor_kwargs=(options=opts,))
+    initialize!(struc; floor_type=:flat_plate, floor_opts=opts)
 
     # Override loads to match StructurePoint example
     for cell in struc.cells
@@ -176,7 +171,7 @@ end
 # Test 2: FEA-Only Geometries (Shapes Where DDM/EFM Don't Apply)
 # =============================================================================
 
-section_header("Test 2: FEA-Only — Shell Model Builder on Various Shapes")
+_rpt.section("Test 2: FEA-Only — Shell Model Builder on Various Shapes")
 
 @testset "FEA shell model builds correctly" begin
     # Test the shell model builder directly with a simple quad slab
@@ -185,15 +180,12 @@ section_header("Test 2: FEA-Only — Shell Model Builder on Various Shapes")
     skel = gen_medium_office(24.0u"ft", 20.0u"ft", 10.0u"ft", 2, 2, 1)
     struc = BuildingStructure(skel)
 
-    opts = FloorOptions(
-        flat_plate = FlatPlateOptions(
-            material = RC_4000_60,
-            analysis_method = :fea,
-            cover = 0.75u"inch",
-        ),
-        tributary_axis = nothing
+    opts = FlatPlateOptions(
+        material = RC_4000_60,
+        method = FEA(),
+        cover = 0.75u"inch",
     )
-    initialize!(struc; floor_type=:flat_plate, floor_kwargs=(options=opts,))
+    initialize!(struc; floor_type=:flat_plate, floor_opts=opts)
 
     for cell in struc.cells
         cell.sdl = uconvert(u"kN/m^2", 20.0u"psf")
@@ -242,21 +234,18 @@ end
 # Test 3: Twisting Ratio Diagnostic
 # =============================================================================
 
-section_header("Test 3: Twisting Ratio Diagnostic")
+_rpt.section("Test 3: Twisting Ratio Diagnostic")
 
 @testset "Twisting ratio for regular geometry" begin
     # On a regular rectangular grid, Mxy should be small → twisting ratio ≈ 0
     skel = gen_medium_office(36.0u"ft", 36.0u"ft", 10.0u"ft", 2, 2, 1)
     struc = BuildingStructure(skel)
 
-    opts = FloorOptions(
-        flat_plate = FlatPlateOptions(
-            material = RC_4000_60,
-            analysis_method = :fea,
-        ),
-        tributary_axis = nothing
+    opts = FlatPlateOptions(
+        material = RC_4000_60,
+        method = FEA(),
     )
-    initialize!(struc; floor_type=:flat_plate, floor_kwargs=(options=opts,))
+    initialize!(struc; floor_type=:flat_plate, floor_opts=opts)
 
     for cell in struc.cells
         cell.sdl = uconvert(u"kN/m^2", 20.0u"psf")
@@ -296,20 +285,17 @@ end
 # Test 4: Mesh Density Convergence
 # =============================================================================
 
-section_header("Test 4: Mesh Convergence")
+_rpt.section("Test 4: Mesh Convergence")
 
 @testset "Moment convergence with mesh refinement" begin
     skel = gen_medium_office(36.0u"ft", 28.0u"ft", 9.0u"ft", 2, 2, 1)
     struc = BuildingStructure(skel)
 
-    opts = FloorOptions(
-        flat_plate = FlatPlateOptions(
-            material = RC_4000_60,
-            analysis_method = :fea,
-        ),
-        tributary_axis = nothing
+    opts = FlatPlateOptions(
+        material = RC_4000_60,
+        method = FEA(),
     )
-    initialize!(struc; floor_type=:flat_plate, floor_kwargs=(options=opts,))
+    initialize!(struc; floor_type=:flat_plate, floor_opts=opts)
 
     for cell in struc.cells
         cell.sdl = uconvert(u"kN/m^2", 20.0u"psf")
@@ -359,24 +345,21 @@ end
 # Test 5: Full Pipeline (FEA → Reinforcement Design)
 # =============================================================================
 
-section_header("Test 5: Full Design Pipeline with FEA")
+_rpt.section("Test 5: Full Design Pipeline with FEA")
 
 @testset "FEA through full design pipeline" begin
     skel = gen_medium_office(54.0u"ft", 42.0u"ft", 9.0u"ft", 3, 3, 1)
     struc = BuildingStructure(skel)
 
-    opts = FloorOptions(
-        flat_plate = FlatPlateOptions(
-            material = RC_4000_60,
-            analysis_method = :fea,
-            cover = 0.75u"inch",
-            bar_size = 5,
-            shear_studs = :always,
-            min_h = 5.0u"inch",
-        ),
-        tributary_axis = nothing
+    opts = FlatPlateOptions(
+        material = RC_4000_60,
+        method = FEA(),
+        cover = 0.75u"inch",
+        bar_size = 5,
+        shear_studs = :always,
+        min_h = 5.0u"inch",
     )
-    initialize!(struc; floor_type=:flat_plate, floor_kwargs=(options=opts,))
+    initialize!(struc; floor_type=:flat_plate, floor_opts=opts)
 
     for cell in struc.cells
         cell.sdl = uconvert(u"kN/m^2", 20.0u"psf")
@@ -410,7 +393,7 @@ end
 # Test 6: Irregular Grid — Column Shift X (Trapezoidal Panels)
 # =============================================================================
 
-section_header("Test 6: Shift-X Irregular Grid — Trapezoidal Panels")
+_rpt.section("Test 6: Shift-X Irregular Grid — Trapezoidal Panels")
 
 @testset "Shift-X irregular grid" begin
     # 3×3 bays, interior columns shifted ±3 ft in x → trapezoidal cells
@@ -419,15 +402,12 @@ section_header("Test 6: Shift-X Irregular Grid — Trapezoidal Panels")
                              irregular=:shift_x, offset=3.0u"ft")
     struc = BuildingStructure(skel)
 
-    opts = FloorOptions(
-        flat_plate = FlatPlateOptions(
-            material = RC_4000_60,
-            analysis_method = :fea,
-            cover = 0.75u"inch",
-        ),
-        tributary_axis = nothing
+    opts = FlatPlateOptions(
+        material = RC_4000_60,
+        method = FEA(),
+        cover = 0.75u"inch",
     )
-    initialize!(struc; floor_type=:flat_plate, floor_kwargs=(options=opts,))
+    initialize!(struc; floor_type=:flat_plate, floor_opts=opts)
 
     for cell in struc.cells
         cell.sdl = uconvert(u"kN/m^2", 25.0u"psf")
@@ -477,7 +457,7 @@ end
 # Test 7: Irregular Grid — Zigzag (Diamond-like Panels)
 # =============================================================================
 
-section_header("Test 7: Zigzag Irregular Grid — Diamond-like Panels")
+_rpt.section("Test 7: Zigzag Irregular Grid — Diamond-like Panels")
 
 @testset "Zigzag irregular grid" begin
     # 3×3 bays with zigzag column shifts → parallelogram-like cells
@@ -485,15 +465,12 @@ section_header("Test 7: Zigzag Irregular Grid — Diamond-like Panels")
                              irregular=:zigzag, offset=2.5u"ft")
     struc = BuildingStructure(skel)
 
-    opts = FloorOptions(
-        flat_plate = FlatPlateOptions(
-            material = RC_4000_60,
-            analysis_method = :fea,
-            cover = 0.75u"inch",
-        ),
-        tributary_axis = nothing
+    opts = FlatPlateOptions(
+        material = RC_4000_60,
+        method = FEA(),
+        cover = 0.75u"inch",
     )
-    initialize!(struc; floor_type=:flat_plate, floor_kwargs=(options=opts,))
+    initialize!(struc; floor_type=:flat_plate, floor_opts=opts)
 
     for cell in struc.cells
         cell.sdl = uconvert(u"kN/m^2", 20.0u"psf")
@@ -541,7 +518,7 @@ end
 # Test 8: Extreme Aspect Ratio (2.5:1)
 # =============================================================================
 
-section_header("Test 8: Extreme Aspect Ratio — 40 ft × 16 ft Panels")
+_rpt.section("Test 8: Extreme Aspect Ratio — 40 ft × 16 ft Panels")
 
 @testset "Extreme aspect ratio panels" begin
     # 2×2 bays of 40 ft × 16 ft panels (2.5:1 ratio)
@@ -549,15 +526,12 @@ section_header("Test 8: Extreme Aspect Ratio — 40 ft × 16 ft Panels")
     skel = gen_medium_office(80.0u"ft", 32.0u"ft", 10.0u"ft", 2, 2, 1)
     struc = BuildingStructure(skel)
 
-    opts = FloorOptions(
-        flat_plate = FlatPlateOptions(
-            material = RC_4000_60,
-            analysis_method = :fea,
-            cover = 0.75u"inch",
-        ),
-        tributary_axis = nothing
+    opts = FlatPlateOptions(
+        material = RC_4000_60,
+        method = FEA(),
+        cover = 0.75u"inch",
     )
-    initialize!(struc; floor_type=:flat_plate, floor_kwargs=(options=opts,))
+    initialize!(struc; floor_type=:flat_plate, floor_opts=opts)
 
     for cell in struc.cells
         cell.sdl = uconvert(u"kN/m^2", 20.0u"psf")
@@ -605,7 +579,7 @@ end
 # Test 9: Non-Uniform Bay Spacing (Custom Skeleton)
 # =============================================================================
 
-section_header("Test 9: Non-Uniform Bays — Mixed Spans")
+_rpt.section("Test 9: Non-Uniform Bays — Mixed Spans")
 
 @testset "Non-uniform bay spacing" begin
     # Create a skeleton with non-uniform bays:
@@ -676,15 +650,12 @@ section_header("Test 9: Non-Uniform Bays — Mixed Spans")
 
     struc = BuildingStructure(skel)
 
-    opts = FloorOptions(
-        flat_plate = FlatPlateOptions(
-            material = RC_4000_60,
-            analysis_method = :fea,
-            cover = 0.75u"inch",
-        ),
-        tributary_axis = nothing
+    opts = FlatPlateOptions(
+        material = RC_4000_60,
+        method = FEA(),
+        cover = 0.75u"inch",
     )
-    initialize!(struc; floor_type=:flat_plate, floor_kwargs=(options=opts,))
+    initialize!(struc; floor_type=:flat_plate, floor_opts=opts)
 
     for cell in struc.cells
         cell.sdl = uconvert(u"kN/m^2", 20.0u"psf")
@@ -735,7 +706,7 @@ end
 # Test 10: Irregular Column Positions — X & Y Shifts on Mixed Bays
 # =============================================================================
 
-section_header("Test 10: Irregular Columns — X & Y Shifts on Varying Bays")
+_rpt.section("Test 10: Irregular Columns — X & Y Shifts on Varying Bays")
 
 @testset "Irregular columns with XY shifts" begin
     # Hand-built skeleton with deliberately messy column positions:
@@ -808,15 +779,12 @@ section_header("Test 10: Irregular Columns — X & Y Shifts on Varying Bays")
 
     struc = BuildingStructure(skel)
 
-    opts = FloorOptions(
-        flat_plate = FlatPlateOptions(
-            material = RC_4000_60,
-            analysis_method = :fea,
-            cover = 0.75u"inch",
-        ),
-        tributary_axis = nothing
+    opts = FlatPlateOptions(
+        material = RC_4000_60,
+        method = FEA(),
+        cover = 0.75u"inch",
     )
-    initialize!(struc; floor_type=:flat_plate, floor_kwargs=(options=opts,))
+    initialize!(struc; floor_type=:flat_plate, floor_opts=opts)
 
     for cell in struc.cells
         cell.sdl = uconvert(u"kN/m^2", 25.0u"psf")
@@ -869,7 +837,7 @@ end
 # Test 11: Full Pipeline — Irregular Geometry (size_slabs!)
 # =============================================================================
 
-section_header("Test 11: Full Pipeline on Irregular Geometry")
+_rpt.section("Test 11: Full Pipeline on Irregular Geometry")
 
 @testset "Full pipeline on shift-Y irregular grid" begin
     # Shift-Y creates trapezoidal panels; run the full sizing pipeline
@@ -877,18 +845,15 @@ section_header("Test 11: Full Pipeline on Irregular Geometry")
                              irregular=:shift_y, offset=2.0u"ft")
     struc = BuildingStructure(skel)
 
-    opts = FloorOptions(
-        flat_plate = FlatPlateOptions(
-            material = RC_4000_60,
-            analysis_method = :fea,
-            cover = 0.75u"inch",
-            bar_size = 5,
-            shear_studs = :always,
-            min_h = 5.0u"inch",
-        ),
-        tributary_axis = nothing
+    opts = FlatPlateOptions(
+        material = RC_4000_60,
+        method = FEA(),
+        cover = 0.75u"inch",
+        bar_size = 5,
+        shear_studs = :always,
+        min_h = 5.0u"inch",
     )
-    initialize!(struc; floor_type=:flat_plate, floor_kwargs=(options=opts,))
+    initialize!(struc; floor_type=:flat_plate, floor_opts=opts)
 
     for cell in struc.cells
         cell.sdl = uconvert(u"kN/m^2", 20.0u"psf")
@@ -926,23 +891,20 @@ end
 # Test 12: Circular Columns — Octagonal ShellPatch + Circular Stub Section
 # =============================================================================
 
-section_header("Test 12: Circular Columns — Octagonal Mesh Patch")
+_rpt.section("Test 12: Circular Columns — Octagonal Mesh Patch")
 
 @testset "FEA with circular columns" begin
     # 2×2 bay grid with circular columns
     skel = gen_medium_office(36.0u"ft", 28.0u"ft", 9.0u"ft", 2, 2, 1)
     struc = BuildingStructure(skel)
 
-    opts = FloorOptions(
-        flat_plate = FlatPlateOptions(
-            material = RC_4000_60,
-            analysis_method = :fea,
-            cover = 0.75u"inch",
-            bar_size = 5,
-        ),
-        tributary_axis = nothing
+    opts = FlatPlateOptions(
+        material = RC_4000_60,
+        method = FEA(),
+        cover = 0.75u"inch",
+        bar_size = 5,
     )
-    initialize!(struc; floor_type=:flat_plate, floor_kwargs=(options=opts,))
+    initialize!(struc; floor_type=:flat_plate, floor_opts=opts)
 
     for cell in struc.cells
         cell.sdl = uconvert(u"kN/m^2", 20.0u"psf")
@@ -1072,9 +1034,11 @@ end
     # Circular area < rectangular area (π/4 ≈ 0.785)
     @test sec_circ.A < sec_rect.A
 
-    # Circular Ix = 2 × πD⁴/64  vs  Rectangular Ix = 2 × c·c³/12
-    Ix_circ_expected = 2 * π * ustrip(u"m", D)^4 / 64
-    Ix_rect_expected = 2 * ustrip(u"m", D)^4 / 12
+    # Circular Ix = 2 × I_factor × πD⁴/64  vs  Rectangular Ix = 2 × I_factor × c·c³/12
+    # I_factor = 0.70 per ACI 318-14 §6.6.3.1.1 (default for columns)
+    I_factor = 0.70
+    Ix_circ_expected = 2 * I_factor * π * ustrip(u"m", D)^4 / 64
+    Ix_rect_expected = 2 * I_factor * ustrip(u"m", D)^4 / 12
 
     @test ustrip(u"m^4", sec_circ.Ix) ≈ Ix_circ_expected rtol=0.01
     @test ustrip(u"m^4", sec_rect.Ix) ≈ Ix_rect_expected rtol=0.01
@@ -1089,18 +1053,15 @@ end
     skel = gen_medium_office(54.0u"ft", 42.0u"ft", 9.0u"ft", 3, 3, 1)
     struc = BuildingStructure(skel)
 
-    opts = FloorOptions(
-        flat_plate = FlatPlateOptions(
-            material = RC_4000_60,
-            analysis_method = :fea,
-            cover = 0.75u"inch",
-            bar_size = 5,
-            shear_studs = :always,
-            min_h = 5.0u"inch",
-        ),
-        tributary_axis = nothing
+    opts = FlatPlateOptions(
+        material = RC_4000_60,
+        method = FEA(),
+        cover = 0.75u"inch",
+        bar_size = 5,
+        shear_studs = :always,
+        min_h = 5.0u"inch",
     )
-    initialize!(struc; floor_type=:flat_plate, floor_kwargs=(options=opts,))
+    initialize!(struc; floor_type=:flat_plate, floor_opts=opts)
 
     for cell in struc.cells
         cell.sdl = uconvert(u"kN/m^2", 20.0u"psf")
@@ -1139,6 +1100,6 @@ end
 
 end  # @testset "FEA Flat Plate Analysis"
 
-println("\n", DLINE)
+println("\n", _rpt.dline)
 println("  All FEA flat plate tests completed!")
-println(DLINE)
+println(_rpt.dline)

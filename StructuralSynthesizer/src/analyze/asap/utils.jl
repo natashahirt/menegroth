@@ -62,9 +62,11 @@ function to_asap!(struc::BuildingStructure{T, A, P};
     end
 
     # 2. Frame Elements — placeholder section (replaced during sizing)
-    frame_E = isnothing(params.steel) ? params.default_frame_E : uconvert(u"Pa", params.steel.E)
-    frame_G = isnothing(params.steel) ? params.default_frame_G : uconvert(u"Pa", params.steel.G)
-    frame_ρ = isnothing(params.steel) ? params.default_frame_ρ : uconvert(u"kg/m^3", params.steel.ρ)
+    # Use steel from materials cascade if available, else defaults
+    _mat_steel = params.materials.steel
+    frame_E = isnothing(_mat_steel) ? params.default_frame_E : uconvert(u"Pa", _mat_steel.E)
+    frame_G = isnothing(_mat_steel) ? params.default_frame_G : uconvert(u"Pa", _mat_steel.G)
+    frame_ρ = isnothing(_mat_steel) ? params.default_frame_ρ : uconvert(u"kg/m^3", _mat_steel.ρ)
     default_section = Asap.Section(
         4.18e-3u"m^2",    # A (approx W10x22 — placeholder geometry)
         frame_E, frame_G,
@@ -92,18 +94,36 @@ function to_asap!(struc::BuildingStructure{T, A, P};
     isempty(struc.cell_groups) && build_cell_groups!(struc)
     compute_cell_tributaries!(struc)  # Cache handles deduplication
     
-    # 5. Create loads using TributaryLoad (uses envelope of params.load_combinations)
+    # 5. Create loads using TributaryLoad
     loads = Asap.AbstractLoad[]
     empty!(struc.cell_tributary_loads)
+    empty!(struc.cell_dead_loads)
+    empty!(struc.cell_live_loads)
+    
+    use_patterns = params.pattern_loading != :none
     
     for (cell_idx, cell) in enumerate(struc.cells)
-        # Skip grade cells (ground floor doesn't contribute loads to frame)
         if cell.floor_type == :grade
-            struc.cell_tributary_loads[cell_idx] = Asap.AbstractLoad[]
+            struc.cell_tributary_loads[cell_idx] = Asap.TributaryLoad[]
+            struc.cell_dead_loads[cell_idx] = Asap.TributaryLoad[]
+            struc.cell_live_loads[cell_idx] = Asap.TributaryLoad[]
             continue
         end
-        cell_loads = _create_cell_tributary_loads!(loads, frame_elements, skel, struc, cell, cell_idx, params)
-        struc.cell_tributary_loads[cell_idx] = cell_loads
+        
+        if use_patterns
+            dead, live = _create_cell_tributary_loads!(
+                loads, frame_elements, skel, struc, cell, cell_idx, params;
+                split_dead_live=true)
+            struc.cell_dead_loads[cell_idx] = dead
+            struc.cell_live_loads[cell_idx] = live
+            struc.cell_tributary_loads[cell_idx] = vcat(dead, live)
+        else
+            combined = _create_cell_tributary_loads!(
+                loads, frame_elements, skel, struc, cell, cell_idx, params)
+            struc.cell_tributary_loads[cell_idx] = combined
+            struc.cell_dead_loads[cell_idx] = Asap.TributaryLoad[]
+            struc.cell_live_loads[cell_idx] = Asap.TributaryLoad[]
+        end
     end
     
     # 6. Add structural effects (e.g., vault thrust)
@@ -127,8 +147,9 @@ end
 
 """Build effective shell_props from DesignParameters and explicit overrides."""
 function _build_shell_props(params::DesignParameters, mode::Symbol, explicit_props::Union{Nothing, NamedTuple})
-    # Resolve concrete E from params.concrete (user's material choice)
-    concrete_E = isnothing(params.concrete) ? uconvert(u"Pa", NWC_4000.E) : uconvert(u"Pa", params.concrete.E)
+    # Resolve concrete E from materials cascade (user's material choice)
+    _mat_conc = resolve_concrete(params)
+    concrete_E = uconvert(u"Pa", _mat_conc.E)
     
     # Start with params values
     E_default = if mode == :rigid
@@ -194,7 +215,13 @@ function _create_shell_diaphragms(struc::BuildingStructure, nodes::Vector{Asap.N
     return shells
 end
 
-"""Create TributaryLoads for a single cell from its tributary polygons."""
+"""
+Create TributaryLoads for a single cell from its tributary polygons.
+
+When `split_dead_live=true`, returns `(dead_loads, live_loads)` with separate
+pressures for pattern loading. When `false` (default), returns combined loads
+with enveloped pressure, as a single vector.
+"""
 function _create_cell_tributary_loads!(
     loads::Vector{Asap.AbstractLoad},
     elements::Vector{<:Asap.Element},
@@ -202,22 +229,32 @@ function _create_cell_tributary_loads!(
     struc::BuildingStructure,
     cell::Cell,
     cell_idx::Int,
-    params::DesignParameters=DesignParameters()
-)::Vector{Asap.TributaryLoad}
-    cell_loads = Asap.TributaryLoad[]
+    params::DesignParameters=DesignParameters();
+    split_dead_live::Bool=false
+)
+    dead_loads = Asap.TributaryLoad[]
+    live_loads = Asap.TributaryLoad[]
     
     # Get tributaries from cache
     tribs = cell_edge_tributaries(struc, cell_idx)
-    isnothing(tribs) && return cell_loads
+    if isnothing(tribs)
+        return split_dead_live ? (dead_loads, live_loads) : dead_loads
+    end
     
     face_edges = skel.face_edge_indices[cell.face_idx]
     face_verts = skel.face_vertex_indices[cell.face_idx]
     
-    # Envelope across all load combinations in params
-    combos = params.load_combinations
-    dead = cell.sdl + cell.self_weight
-    live = cell.live_load
-    pressure = uconvert(u"Pa", envelope_pressure(combos, dead, live))
+    # Compute pressures
+    combo = governing_combo(params)
+    if split_dead_live
+        dead_pressure = uconvert(u"Pa", combo.D * (cell.sdl + cell.self_weight))
+        live_pressure = uconvert(u"Pa", combo.L * cell.live_load)
+    else
+        combos = params.load_combinations
+        dead = cell.sdl + cell.self_weight
+        live = cell.live_load
+        combined_pressure = uconvert(u"Pa", envelope_pressure(combos, dead, live))
+    end
     
     n_verts = length(face_verts)
     
@@ -236,32 +273,33 @@ function _create_cell_tributary_loads!(
         el = elements[global_edge_idx]
         
         # Check if edge direction matches face CCW order
-        # Face expects: face_verts[local_idx] → face_verts[local_idx+1]
-        # Edge stored as: skel.edge_indices[global_edge_idx] = (v1, v2)
         expected_v1 = face_verts[local_idx]
         expected_v2 = face_verts[mod1(local_idx + 1, n_verts)]
         actual_v1, actual_v2 = skel.edge_indices[global_edge_idx]
-        
-        # If edge is reversed relative to face CCW order, flip the parametric positions
         edge_reversed = (actual_v1 == expected_v2 && actual_v2 == expected_v1)
         
         if edge_reversed
-            # Flip: s → 1-s, and reverse the arrays to maintain sorted order
             positions = reverse(1.0 .- positions)
             widths_m = reverse(widths_m)
         end
         
-        # Convert widths to Unitful
         widths = [w * u"m" for w in widths_m]
         
-        # Create TributaryLoad (gravity direction)
-        tload = Asap.TributaryLoad(el, positions, widths, pressure, (0.0, 0.0, -1.0))
-        
-        push!(loads, tload)
-        push!(cell_loads, tload)
+        if split_dead_live
+            dtload = Asap.TributaryLoad(el, positions, widths, dead_pressure, (0.0, 0.0, -1.0))
+            ltload = Asap.TributaryLoad(el, copy(positions), copy(widths), live_pressure, (0.0, 0.0, -1.0))
+            push!(loads, dtload)
+            push!(loads, ltload)
+            push!(dead_loads, dtload)
+            push!(live_loads, ltload)
+        else
+            tload = Asap.TributaryLoad(el, positions, widths, combined_pressure, (0.0, 0.0, -1.0))
+            push!(loads, tload)
+            push!(dead_loads, tload)
+        end
     end
     
-    return cell_loads
+    return split_dead_live ? (dead_loads, live_loads) : dead_loads
 end
 
 """
@@ -308,11 +346,10 @@ Lightweight sync of the Asap model between pipeline stages.
 Updates cell self-weights from current slab results, recomputes tributary load
 pressures, and re-solves. Does **not** rebuild topology — only loads change.
 
-This is the standard "glue" between design stages in `build_pipeline`:
-    for stage! in build_pipeline(params)
-        stage!(struc)
-        sync_asap!(struc)
-    end
+When `params.pattern_loading != :none`, performs multi-case solve with
+checkerboard live load patterns and writes enveloped element forces back to the
+model so downstream consumers (`_column_asap_Pu`, beam sizers, etc.) see the
+governing demands.
 
 See also: [`to_asap!`](@ref), [`snapshot!`](@ref), [`restore!`](@ref)
 """
@@ -326,25 +363,228 @@ function sync_asap!(struc::BuildingStructure;
         end
     end
     
-    # 2. Recompute tributary load pressures (envelope across combinations)
+    use_patterns = params.pattern_loading != :none &&
+                   !isempty(struc.cell_dead_loads) &&
+                   any(!isempty, values(struc.cell_dead_loads))
+    
+    # 2. Update tributary load pressures
+    combo = governing_combo(params)
     combos = params.load_combinations
     for (cell_idx, cell) in enumerate(struc.cells)
         cell.floor_type == :grade && continue
+        if use_patterns
+            dead_p = uconvert(u"Pa", combo.D * (cell.sdl + cell.self_weight))
+            live_p = uconvert(u"Pa", combo.L * cell.live_load)
+            for tload in get(struc.cell_dead_loads, cell_idx, Asap.TributaryLoad[])
+                tload.pressure = dead_p
+            end
+            for tload in get(struc.cell_live_loads, cell_idx, Asap.TributaryLoad[])
+                tload.pressure = live_p
+            end
+        end
+        # Always update combined loads (used by model.loads for default solve)
         new_pressure = uconvert(u"Pa", envelope_pressure(combos, cell.sdl + cell.self_weight, cell.live_load))
         for tload in get(struc.cell_tributary_loads, cell_idx, Asap.TributaryLoad[])
             tload.pressure = new_pressure
         end
     end
     
-    # 3. Re-solve (topology unchanged, just updated loads/sections)
+    # 3. Re-process stiffness and loads (topology unchanged)
     if struc.asap_model.processed
-        Asap._reprocess_stiffness_and_loads!(struc.asap_model)
+        Asap.update!(struc.asap_model)
     else
         Asap.process!(struc.asap_model)
     end
-    Asap.solve!(struc.asap_model)
+    
+    # 4. Solve — single or multi-case
+    if use_patterns && _should_run_patterns(struc, params)
+        _solve_with_patterns!(struc, params)
+    else
+        Asap.solve!(struc.asap_model)
+    end
     
     return struc
+end
+
+"""
+Solve the Asap model with multiple pattern loading cases and write the
+enveloped element forces back to `element.forces`.
+
+The full-loading displacement vector is kept in `model.u` for downstream
+deflection checks and `node.displacement` queries.
+"""
+function _solve_with_patterns!(struc::BuildingStructure, params::DesignParameters)
+    model = struc.asap_model
+    cases = _generate_pattern_cases(struc)
+    
+    if length(cases) <= 1
+        Asap.solve!(model)
+        return
+    end
+    
+    # Full-loading solve (mutating) — sets model.u, node.displacement, element.forces
+    Asap.solve!(model)
+    
+    # Multi-case solve (non-mutating) — reuses cached K factorization
+    u_cases = Asap.solve(model, cases)
+    
+    # Envelope element forces across all pattern cases
+    n_el = length(model.frame_elements)
+    n_el == 0 && return
+    
+    for el in model.frame_elements
+        gid = el.globalID
+        best_forces = copy(el.forces)  # start from full-loading forces
+        
+        for (case_idx, (u, loads)) in enumerate(zip(u_cases, cases))
+            case_idx == 1 && continue  # case 1 is full loading (already in best_forces)
+            
+            # Compute element forces: R * (K * u_e + Q_e)
+            u_e = u[gid]
+            Q_e = _element_Q(el, loads)
+            forces_i = el.R * (el.K * u_e + Q_e)
+            
+            # Keep the value with larger absolute magnitude at each DOF
+            for k in eachindex(forces_i)
+                if abs(forces_i[k]) > abs(best_forces[k])
+                    best_forces[k] = forces_i[k]
+                end
+            end
+        end
+        
+        el.forces = best_forces
+    end
+end
+
+"""
+Compute the fixed-end force vector Q for an element from a given load set.
+Returns the accumulated `R' * q(load)` for all loads attached to this element.
+"""
+function _element_Q(el::Asap.Element, loads::Vector{<:Asap.AbstractLoad})
+    Q = zeros(length(el.globalID))
+    for load in loads
+        load isa Asap.ElementLoad || continue
+        load.element === el || continue
+        Q .+= el.R' * Asap.q(load)
+    end
+    return Q
+end
+
+"""Check whether pattern loading should actually run (`:auto` skips if L/D ≤ 0.75)."""
+function _should_run_patterns(struc::BuildingStructure, params::DesignParameters)
+    params.pattern_loading == :checkerboard && return true
+    # :auto — skip if L/D ≤ 0.75 for ALL non-grade cells (ACI 318-19 §6.4.3.3)
+    for cell in struc.cells
+        cell.floor_type == :grade && continue
+        D = ustrip(u"Pa", cell.sdl + cell.self_weight)
+        D < 1e-12 && continue
+        L = ustrip(u"Pa", cell.live_load)
+        L / D > 0.75 && return true
+    end
+    return false
+end
+
+"""
+Generate pattern loading cases from the dead/live tributary load dicts.
+
+Returns a vector of load vectors:
+1. Full loading (dead + all live)
+2. Checkerboard A (dead + live on "even" cells)
+3. Checkerboard B (dead + live on "odd" cells)
+"""
+# Module-level cache for checkerboard partition (geometry-only, computed once per model)
+const _CHECKERBOARD_CACHE = Ref{Tuple{UInt, Tuple{Vector{Int}, Vector{Int}}}}((UInt(0), (Int[], Int[])))
+
+function _generate_pattern_cases(struc::BuildingStructure)
+    dead_all = Asap.AbstractLoad[]
+    sizehint!(dead_all, sum(length(v) for (_, v) in struc.cell_dead_loads; init=0))
+    live_all = Asap.AbstractLoad[]
+    sizehint!(live_all, sum(length(v) for (_, v) in struc.cell_live_loads; init=0))
+    for (_, loads) in struc.cell_dead_loads
+        append!(dead_all, loads)
+    end
+    for (_, loads) in struc.cell_live_loads
+        append!(live_all, loads)
+    end
+    
+    # Full loading
+    case_full = Asap.AbstractLoad[dead_all; live_all]
+    
+    # Checkerboard partition — cached (geometry never changes for a given skeleton)
+    skel_id = objectid(struc.skeleton)
+    if _CHECKERBOARD_CACHE[].first == skel_id
+        set_a, set_b = _CHECKERBOARD_CACHE[].second
+    else
+        set_a, set_b = _checkerboard_partition(struc)
+        _CHECKERBOARD_CACHE[] = (skel_id, (set_a, set_b))
+    end
+    
+    live_a = Asap.AbstractLoad[]
+    live_b = Asap.AbstractLoad[]
+    for ci in set_a
+        append!(live_a, get(struc.cell_live_loads, ci, Asap.TributaryLoad[]))
+    end
+    for ci in set_b
+        append!(live_b, get(struc.cell_live_loads, ci, Asap.TributaryLoad[]))
+    end
+    
+    case_a = Asap.AbstractLoad[dead_all; live_a]
+    case_b = Asap.AbstractLoad[dead_all; live_b]
+    
+    return [case_full, case_a, case_b]
+end
+
+"""
+Partition non-grade cells into two checkerboard sets based on centroid parity.
+
+For regular rectangular grids this produces the classic checkerboard. For
+irregular layouts the partition is approximate but still provides useful
+pattern coverage.
+"""
+function _checkerboard_partition(struc::BuildingStructure)
+    skel = struc.skeleton
+    vc = skel.geometry.vertex_coords
+    
+    # Collect cell centroids (x, y) and floor elevations
+    centroids = Dict{Int, NTuple{3, Float64}}()
+    for (cell_idx, cell) in enumerate(struc.cells)
+        cell.floor_type == :grade && continue
+        vis = skel.face_vertex_indices[cell.face_idx]
+        isempty(vis) && continue
+        cx = sum(vc[v, 1] for v in vis) / length(vis)
+        cy = sum(vc[v, 2] for v in vis) / length(vis)
+        cz = sum(vc[v, 3] for v in vis) / length(vis)
+        centroids[cell_idx] = (cx, cy, cz)
+    end
+    
+    isempty(centroids) && return (Int[], Int[])
+    
+    # Find minimum grid spacings in x and y (from unique sorted centroid values)
+    xs = sort(unique(round(c[1], digits=4) for c in values(centroids)))
+    ys = sort(unique(round(c[2], digits=4) for c in values(centroids)))
+    
+    dx = length(xs) > 1 ? minimum(diff(xs)) : 1.0
+    dy = length(ys) > 1 ? minimum(diff(ys)) : 1.0
+    dx = max(dx, 1e-6)
+    dy = max(dy, 1e-6)
+    
+    # Assign parity: floor to grid indices, sum, check even/odd
+    # (floor avoids banker's rounding which maps 0.5 and 1.5 to the same parity)
+    x0 = minimum(c[1] for c in values(centroids))
+    y0 = minimum(c[2] for c in values(centroids))
+    set_a = Int[]
+    set_b = Int[]
+    for (ci, (cx, cy, _)) in centroids
+        ix = floor(Int, (cx - x0 + 0.5dx) / dx)
+        iy = floor(Int, (cy - y0 + 0.5dy) / dy)
+        if iseven(ix + iy)
+            push!(set_a, ci)
+        else
+            push!(set_b, ci)
+        end
+    end
+    
+    return (set_a, set_b)
 end
 
 # update_slab_loads! and update_all_slab_loads! removed — use sync_asap!(struc; params) instead.
@@ -369,8 +609,8 @@ function push_asap_loads!(loads::Vector{Asap.AbstractLoad}, el::Asap.Element, sp
 end
 
 function push_asap_loads!(loads::Vector{Asap.AbstractLoad}, el::Asap.Element, spec::EdgeLineLoadSpec)
-    # Convert Float64 line load (assumed SI N/m) to Unitful
-    w_unitful = [w * u"N/m" for w in collect(spec.w)]
+    # Convert Float64 line load (assumed SI N/m) to Unitful — no intermediate collect
+    w_unitful = [spec.w[1] * u"N/m", spec.w[2] * u"N/m", spec.w[3] * u"N/m"]
     push!(loads, Asap.LineLoad(el, w_unitful))
     return loads
 end
@@ -869,4 +1109,87 @@ function build_analysis_model!(design::BuildingDesign;
     @info "Built analysis model" frame_groups=resolved_groups n_frames=length(frame_elements) n_shells=length(shell_elements) n_loads=length(loads)
     
     return model
+end
+
+
+# =============================================================================
+# Fire Protection Coating → Line Loads
+# =============================================================================
+
+"""
+    add_coating_loads!(struc, params; member_edge_group=:beams, resolve=true)
+
+Add fire protection coating self-weight as `Asap.LineLoad`s on steel members.
+
+Call **after** `size_steel_members!` so that sections are assigned. The coating
+weight `w = thickness × perimeter × density` acts as additional dead load in
+the global -Z direction.
+
+For beams (3-sided exposure), uses `section.PA`; for columns (4-sided), `section.PB`.
+
+# Arguments
+- `struc`: BuildingStructure with a solved ASAP model and sized steel members
+- `params`: DesignParameters with `fire_rating` and `fire_protection`
+- `member_edge_group`: Which edge group — `:beams` or `:columns` (default `:beams`)
+- `resolve`: Re-solve the model after adding loads (default `true`)
+
+# Returns
+Number of coating loads added.
+"""
+function add_coating_loads!(struc::BuildingStructure, params::DesignParameters;
+                            member_edge_group::Symbol=:beams, resolve::Bool=true)
+    fire_rating = params.fire_rating
+    fire_rating <= 0 && return 0
+
+    fp = params.fire_protection
+    fp isa StructuralSizer.NoFireProtection && return 0
+
+    skel = struc.skeleton
+    edge_ids_in_group = Set(get(skel.groups_edges, member_edge_group, Int[]))
+    member_array = member_edge_group == :columns ? struc.columns :
+                   member_edge_group == :struts ? struc.struts : struc.beams
+
+    model = struc.asap_model
+    g = 9.80665  # m/s²
+    n_added = 0
+
+    for m in member_array
+        sec = m.base.section
+        isnothing(sec) && continue
+        !(sec isa StructuralSizer.ISymmSection) && continue
+
+        # W/D calculation: choose perimeter based on exposure
+        # Beams: 3-sided (PA), columns/struts: 4-sided (PB)
+        perimeter = member_edge_group == :beams ? sec.PA : sec.PB
+        perimeter_in = ustrip(u"inch", perimeter)
+
+        mat = sec.material
+        isnothing(mat) && continue
+        W_plf = ustrip(u"lb/ft", StructuralSizer.weight_per_length(sec, mat))
+
+        # Compute coating
+        coating = StructuralSizer.compute_surface_coating(fp, fire_rating, W_plf, perimeter_in)
+        coating.thickness_in <= 0 && continue
+
+        # Weight per unit length: thickness(in) × perimeter(in) / 144 → ft² per ft × density (pcf) → lb/ft
+        w_lbft = StructuralSizer.coating_weight_per_foot(coating, perimeter_in)
+        w_Nm = w_lbft * 4.44822 / 0.3048  # lb/ft → N/m
+
+        # Apply as downward (-Z) line load on each segment of this member
+        for seg_idx in segment_indices(m)
+            edge_idx = struc.segments[seg_idx].edge_idx
+            edge_idx in edge_ids_in_group || continue
+            el = model.elements[edge_idx]
+            push!(model.loads, Asap.LineLoad(el, [0.0u"N/m", 0.0u"N/m", -w_Nm * u"N/m"]))
+            n_added += 1
+        end
+    end
+
+    if n_added > 0 && resolve
+        Asap.process!(model)
+        Asap.solve!(model)
+    end
+
+    n_added > 0 && @info "Added fire protection coating loads" n_loads=n_added group=member_edge_group fire_rating=fire_rating
+    return n_added
 end

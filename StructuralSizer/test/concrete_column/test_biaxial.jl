@@ -205,13 +205,13 @@ end
     # =========================================================================
     @testset "Y-Axis Effective Depth" begin
         # For y-axis bending, d is from right face to leftmost bars
-        d_y = StructuralSizer.effective_depth_yaxis(section)
+        d_y = StructuralSizer.effective_depth(section, StructuralSizer.WeakAxis())
         
         # Expected: b - cover - tie - d_bar/2 ≈ 18 - 1.5 - 0.5 - 0.564 ≈ 15.44
         @test d_y ≈ ref.reinforcement.d_y rtol=0.05
         
         # d_y should be less than d_x (since b < h)
-        # effective_depth returns units, effective_depth_yaxis returns stripped Float64
+        # effective_depth returns units, effective_depth(::WeakAxis) returns stripped Float64
         d_x = ustrip(u"inch", StructuralSizer.effective_depth(section))
         @test d_y < d_x
     end
@@ -219,7 +219,7 @@ end
     # =========================================================================
     @testset "Y-Axis P-M Diagram Generation" begin
         # Generate diagram for y-axis bending
-        diagram_y = generate_PM_diagram_yaxis(section, mat; n_intermediate=15)
+        diagram_y = generate_PM_diagram(section, mat, WeakAxis(); n_intermediate=15)
         
         # Check basic structure
         @test length(diagram_y.points) > 5

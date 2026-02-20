@@ -20,11 +20,16 @@ function initialize_supports!(struc::BuildingStructure{T}) where T
     
     empty!(struc.supports)
     
+    # Build vertex → Column lookup for column dimension extraction
+    col_by_vertex = Dict{Int, Column}()
+    for col in struc.columns
+        col.vertex_idx > 0 && (col_by_vertex[col.vertex_idx] = col)
+    end
+    
     for v_idx in support_vertex_indices
         node = model.nodes[v_idx]  # Vertex index maps to node index (from to_asap!)
         
-        # Extract reactions with units (forces and moments separately)
-        # Convert to kN/kN*m to match BuildingStructure's unit convention
+        # Extract reactions with units
         rxn = node.reaction
         forces = (
             uconvert(u"kN", rxn[1]),
@@ -37,7 +42,26 @@ function initialize_supports!(struc::BuildingStructure{T}) where T
             uconvert(u"kN*m", rxn[6])
         )
         
-        support = Support(v_idx, v_idx; forces=forces, moments=moments, foundation_type=:spread)
+        # Column dimensions: pull from Column member at this vertex (if sized)
+        col_c1 = 18.0u"inch"   # sensible default
+        col_c2 = 18.0u"inch"
+        col_shape = :rectangular
+        if haskey(col_by_vertex, v_idx)
+            col = col_by_vertex[v_idx]
+            col_shape = col.shape               # :rectangular or :circular
+            if col.c1 !== nothing
+                col_c1 = uconvert(u"inch", col.c1)
+                col_c2 = col.c2 !== nothing ? uconvert(u"inch", col.c2) : col_c1
+            elseif section(col) !== nothing
+                sec = section(col)
+                col_c1 = uconvert(u"inch", StructuralSizer.section_width(sec))
+                col_c2 = uconvert(u"inch", StructuralSizer.section_depth(sec))
+            end
+        end
+        
+        support = Support(v_idx, v_idx; forces=forces, moments=moments,
+                          foundation_type=:spread,
+                          c1=col_c1, c2=col_c2, shape=col_shape)
         push!(struc.supports, support)
     end
     
@@ -87,7 +111,8 @@ function support_demands(struc::BuildingStructure; load_factor::Real=1.0)
         Ps = Pu / 1.4
         
         demand = StructuralSizer.FoundationDemand(i; 
-            Pu=Pu, Mux=Mux, Muy=Muy, Vux=Vux, Vuy=Vuy, Ps=Ps)
+            Pu=Pu, Mux=Mux, Muy=Muy, Vux=Vux, Vuy=Vuy, Ps=Ps,
+            c1=supp.c1, c2=supp.c2, shape=supp.shape)
         push!(demands, demand)
     end
     
@@ -211,19 +236,19 @@ function _size_fnd_aci!(struc, f_idx, fnd, n_supp, demands, soil, opts)
         # Mat foundation — all supports in one slab
         mat_demands = [demands[i] for i in fnd.support_indices]
         positions = _support_positions_xy(struc, fnd.support_indices)
-        result = StructuralSizer.design_mat_footing(
+        result = StructuralSizer.design_footing(StructuralSizer.MatFoundation(), 
             mat_demands, positions, soil; opts=opts.mat)
         _assign_foundation!(struc, f_idx, fnd, result, :mat, mat)
 
     elseif fnd.foundation_type == :spread && n_supp == 1
         demand = demands[fnd.support_indices[1]]
-        result = StructuralSizer.design_spread_footing(demand, soil; opts=opts.spread)
+        result = StructuralSizer.design_footing(StructuralSizer.SpreadFooting(), demand, soil; opts=opts.spread)
         _assign_foundation!(struc, f_idx, fnd, result, :spread, mat)
 
     elseif fnd.foundation_type in (:combined, :strip) || n_supp > 1
         strip_demands = [demands[i] for i in fnd.support_indices]
         positions = _support_positions_along_axis(struc, fnd.support_indices)
-        result = StructuralSizer.design_strip_footing(
+        result = StructuralSizer.design_footing(StructuralSizer.StripFooting(), 
             strip_demands, positions, soil; opts=opts.strip)
         _assign_foundation!(struc, f_idx, fnd, result, :strip, mat)
     else
@@ -239,7 +264,7 @@ function _size_fnd_is!(struc, f_idx, fnd, n_supp, demands, soil,
                        concrete, rebar, pier_width; kwargs...)
     if fnd.foundation_type == :spread && n_supp == 1
         demand = demands[fnd.support_indices[1]]
-        result = StructuralSizer.design_spread_footing(
+        result = StructuralSizer.design_footing(StructuralSizer.SpreadFooting(), 
             demand, soil, concrete, rebar; pier_width=pier_width, kwargs...)
         volumes = _compute_foundation_volumes(result, concrete, rebar)
         struc.foundations[f_idx] = Foundation(
@@ -250,7 +275,7 @@ function _size_fnd_is!(struc, f_idx, fnd, n_supp, demands, soil,
         total_Pu = sum(demands[i].Pu for i in fnd.support_indices)
         combined_demand = StructuralSizer.FoundationDemand(f_idx;
             Pu=total_Pu, Ps=total_Pu / 1.4)
-        result = StructuralSizer.design_spread_footing(
+        result = StructuralSizer.design_footing(StructuralSizer.SpreadFooting(), 
             combined_demand, soil, concrete, rebar; pier_width=pier_width, kwargs...)
         volumes = _compute_foundation_volumes(result, concrete, rebar)
         struc.foundations[f_idx] = Foundation(
@@ -556,15 +581,29 @@ function size_foundations_grouped!(
         end
 
         gov_Ps = gov_Pu / 1.4
+        # Use the largest column dimensions in the group (conservative for punching)
+        gov_c1 = 18.0u"inch"
+        gov_c2 = 18.0u"inch"
+        gov_shape = :rectangular
+        for f_idx in f_indices
+            fnd = struc.foundations[f_idx]
+            for si in fnd.support_indices
+                d = demands[si]
+                gov_c1 = max(gov_c1, d.c1)
+                gov_c2 = max(gov_c2, d.c2)
+                d.shape == :circular && (gov_shape = :circular)
+            end
+        end
         gov_demand = StructuralSizer.FoundationDemand(1;
             Pu=gov_Pu, Mux=gov_Mux, Muy=gov_Muy,
-            Vux=gov_Vux, Vuy=gov_Vuy, Ps=gov_Ps)
+            Vux=gov_Vux, Vuy=gov_Vuy, Ps=gov_Ps,
+            c1=gov_c1, c2=gov_c2, shape=gov_shape)
 
         if opts.code == :aci
-            group_results_vec[k] = StructuralSizer.design_spread_footing(
+            group_results_vec[k] = StructuralSizer.design_footing(StructuralSizer.SpreadFooting(), 
                 gov_demand, soil; opts=opts.spread)
         else
-            group_results_vec[k] = StructuralSizer.design_spread_footing(
+            group_results_vec[k] = StructuralSizer.design_footing(StructuralSizer.SpreadFooting(), 
                 gov_demand, soil, concrete, rebar;
                 pier_width=pier_width, kwargs...)
         end

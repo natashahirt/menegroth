@@ -1,12 +1,12 @@
 # =============================================================================
-# Direct Design Method (DDM) - ACI 318-19 Section 8.10
+# Direct Design Method (DDM) - ACI 318-11 §13.6
 # =============================================================================
 #
 # Moment analysis using code-prescribed coefficients.
 #
 # Reference:
-# - ACI 318-19 Section 8.10
-# - ACI 318-14 Tables 8.10.4.2, 8.10.5.1-5.7
+# - ACI 318-11 §13.6
+# - ACI 318-11 §13.6.3 (longitudinal), §13.6.4 (transverse)
 # - StructurePoint DE-Two-Way-Flat-Plate Section 3.1
 #
 # =============================================================================
@@ -243,7 +243,7 @@ DDM distributes the total static moment M₀ using code-prescribed coefficients:
 - Longitudinal distribution (ACI Table 8.10.4.2)
 - Transverse distribution is handled separately in the shared pipeline
 
-# DDM Coefficients (ACI 318-14 Table 8.10.4.2)
+# DDM Coefficients (ACI 318-11 §13.6.3)
 
 For end span with no edge beam:
 - Exterior negative: 0.26 M₀
@@ -274,7 +274,7 @@ Uses constant coefficients regardless of span type:
 `MomentAnalysisResult` with all moments and geometry data.
 
 # Reference
-- ACI 318-19 Section 8.10.3-4
+- ACI 318-11 §13.6.2–13.6.4
 - StructurePoint Table 6 (DDM Moments)
 """
 function run_moment_analysis(
@@ -292,6 +292,7 @@ function run_moment_analysis(
     cache = nothing,        # API parity (unused by DDM)
     drop_panel = nothing,   # For flat slab: adjusts M0 with equivalent uniform load
     βt::Float64 = 0.0,     # Edge beam torsional stiffness ratio (ACI 8.10.5.2)
+    col_I_factor::Float64 = 0.70,  # API parity (unused by DDM)
 )
     # Shared setup: l1, l2, ln, span_axis, c1_avg, qD, qL, qu, M0
     setup = _moment_analysis_setup(struc, slab, supporting_columns, h, γ_concrete)
@@ -329,8 +330,8 @@ function run_moment_analysis(
     has_exterior_cell = any(c -> c.position in [:corner, :edge], cells)
     has_interior_cell = any(c -> c.position == :interior, cells)
     
-    # Apply DDM moment distribution coefficients (ACI 318-19 Table 8.10.4.2)
-    # Edge beam torsional stiffness modifies end span coefficients (Table 8.10.4.2)
+    # Apply DDM moment distribution coefficients (ACI 318-11 §13.6.3)
+    # Edge beam torsional stiffness modifies end span coefficients (§13.6.3.3)
     end_coeffs = if βt > 0.0
         aci_ddm_longitudinal_with_edge_beam(βt)
     else
@@ -405,6 +406,98 @@ function run_moment_analysis(
         column_shears,   # Already in kip
         unbalanced_moments,  # Already in kip*ft
         Vu_max
+    )
+end
+
+# =============================================================================
+# Secondary (Perpendicular) Direction Analysis
+# =============================================================================
+
+"""
+    run_secondary_moment_analysis(method::DDM, struc, slab, columns, h, fc, Ecs, γ_concrete; kwargs...) -> MomentAnalysisResult
+
+Run DDM in the perpendicular direction (swapped l1↔l2).
+
+Returns a full `MomentAnalysisResult` for consistency with the primary direction.
+This is essentially free — pure arithmetic with swapped geometry.
+"""
+function run_secondary_moment_analysis(
+    method::DDM,
+    struc, slab, supporting_columns, h::Length,
+    fc::Pressure, Ecs::Pressure, γ_concrete;
+    verbose::Bool = false,
+    drop_panel = nothing,
+    βt::Float64 = 0.0,
+    kwargs...
+)
+    # Secondary setup: l1↔l2 swapped, perpendicular span axis, c2 for clear span
+    setup = _secondary_moment_analysis_setup(struc, slab, supporting_columns, h, γ_concrete)
+    (; l1, l2, ln, span_axis, c1_avg, qD, qL, qu, M0) = setup
+
+    # Drop panel correction for secondary direction (same logic, swapped extents)
+    if !isnothing(drop_panel)
+        w_drop = uconvert(psf, drop_panel.h_drop * γ_concrete * GRAVITY)
+        A_drop = drop_extent_1(drop_panel) * drop_extent_2(drop_panel)
+        A_panel = l1 * l2
+        A_drop_ft2 = uconvert(u"ft^2", A_drop)
+        qu_drop_equiv = 1.2 * w_drop * (A_drop_ft2 / A_panel)
+        qu = uconvert(psf, qu + qu_drop_equiv)
+        M0 = total_static_moment(qu, l2, ln)
+    end
+
+    # Reuse DDM coefficient logic (same code, just operating on swapped geometry)
+    cells = [struc.cells[idx] for idx in slab.cell_indices]
+    has_exterior_cell = any(c -> c.position in [:corner, :edge], cells)
+    has_interior_cell = any(c -> c.position == :interior, cells)
+
+    end_coeffs = βt > 0.0 ? aci_ddm_longitudinal_with_edge_beam(βt) : ACI_DDM_LONGITUDINAL.end_span
+
+    if method.variant == :simplified
+        M_neg_ext = end_coeffs.ext_neg * M0
+        M_neg_int = 0.65 * M0
+        M_pos = 0.35 * M0
+    else
+        if has_exterior_cell && has_interior_cell
+            M_neg_ext = end_coeffs.ext_neg * M0
+            M_pos = end_coeffs.pos * M0
+            M_neg_int = end_coeffs.int_neg * M0
+        elseif has_exterior_cell
+            M_neg_ext = end_coeffs.ext_neg * M0
+            M_pos = end_coeffs.pos * M0
+            M_neg_int = end_coeffs.int_neg * M0
+        else
+            M_neg_ext = ACI_DDM_LONGITUDINAL.interior_span.neg * M0
+            M_pos = ACI_DDM_LONGITUDINAL.interior_span.pos * M0
+            M_neg_int = ACI_DDM_LONGITUDINAL.interior_span.neg * M0
+        end
+    end
+
+    # Column demands in secondary direction (uses perpendicular span_axis)
+    column_moments, column_shears, unbalanced_moments = _compute_column_demands_ddm(
+        struc, supporting_columns, M_neg_ext, M_neg_int, M_pos, qu, l2, ln, span_axis
+    )
+
+    if verbose
+        @debug "DDM SECONDARY DIRECTION" l1=l1 l2=l2 ln=ln M0=uconvert(kip*u"ft", M0)
+    end
+
+    # Return full MomentAnalysisResult for consistency with primary direction
+    Vu_max = uconvert(kip, qu * l2 * ln / 2)
+    return MomentAnalysisResult(
+        uconvert(kip * u"ft", M0),
+        uconvert(kip * u"ft", M_neg_ext),
+        uconvert(kip * u"ft", M_neg_int),
+        uconvert(kip * u"ft", M_pos),
+        qu, qD, qL,
+        uconvert(u"ft", l1),
+        uconvert(u"ft", l2),
+        uconvert(u"ft", ln),
+        uconvert(u"ft", c1_avg),
+        column_moments,
+        column_shears,
+        unbalanced_moments,
+        Vu_max;
+        pattern_loading = false,  # DDM doesn't use pattern loading
     )
 end
 
@@ -516,7 +609,7 @@ end
 # _compute_column_shear is defined in common.jl (shared between DDM and EFM)
 
 # =============================================================================
-# DDM Applicability Check - ACI 318-19 Section 8.10.2
+# DDM Applicability Check - ACI 318-11 §13.6.1
 # =============================================================================
 
 """
@@ -537,7 +630,7 @@ end
 DDMApplicabilityError(violations::Vector{String}) = DDMApplicabilityError(violations, String[])
 
 function Base.showerror(io::IO, e::DDMApplicabilityError)
-    println(io, "DDM (Direct Design Method) is not permitted for this slab per ACI 318-19 §8.10.2:")
+    println(io, "DDM (Direct Design Method) is not permitted for this slab per ACI 318-11 §13.6.1:")
     for (i, v) in enumerate(e.violations)
         println(io, "  $i. $v")
     end
@@ -556,9 +649,9 @@ end
 """
     check_ddm_applicability(struc, slab, columns; throw_on_failure=true)
 
-Check if DDM is applicable per ACI 318-19 Section 8.10.2.
+Check if DDM is applicable per ACI 318-11 §13.6.1.
 
-# ACI 318-19 §8.10.2 Limitations (DDM shall be permitted only when):
+# ACI 318-11 §13.6.1 Limitations (DDM shall be permitted only when):
 
 1. **§8.10.2.1** - At least 3 continuous spans in each direction
 2. **§8.10.2.2** - Panels are rectangular with l₂/l₁ ≤ 2.0
@@ -639,16 +732,16 @@ function check_ddm_applicability(struc, slab, columns; throw_on_failure::Bool = 
     cell = struc.cells[first(slab.cell_indices)]
     qL = cell.live_load
     
-    # Estimate self-weight: use minimum thickness h_min ≈ ln/33 for flat plates (ACI 8.3.1.1)
+    # Estimate self-weight from ACI minimum thickness (Table 8.3.1.1)
     γ_concrete = ρ_concrete * GRAVITY
-    ln_max = max(l1, l2)  # Longer span for thickness estimate
-    h_min_estimate = ln_max / 33  # Minimum thickness per ACI Table 8.3.1.1
+    ln_max = max(l1, l2)
+    h_min_estimate = min_thickness(FlatPlate(), ln_max)
     sw_estimate = uconvert(psf, h_min_estimate * γ_concrete)
     
     qD = cell.sdl + sw_estimate  # Include self-weight estimate
     
     if !iszero(qD)
-        LD_ratio = ustrip(qL) / ustrip(qD)
+        LD_ratio = ustrip(psf, qL) / ustrip(psf, qD)
         if LD_ratio > 2.0
             push!(violations, "§8.10.2.6: Live/Dead ratio L/D = $(round(LD_ratio, digits=2)) > 2.0 (using estimated h_min for self-weight)")
         end

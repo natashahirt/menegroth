@@ -1,8 +1,8 @@
 # ==============================================================================
-# ACI 318-19 Column P-M Interaction
+# ACI 318-11 Column P-M Interaction
 # ==============================================================================
 # Strain compatibility analysis for reinforced concrete columns
-# Reference: ACI 318-19 Chapter 22 (Sectional Strength)
+# Reference: ACI 318-11 Chapter 10
 #
 # Material utilities (beta1, Ec, fr, extractors) are in aci_material_utils.jl
 
@@ -48,7 +48,7 @@ Calculate steel strain at bar location using similar triangles.
 # Returns
 - Steel strain (positive = tension, negative = compression)
 
-Per ACI 318-19 strain compatibility (22.2.1.2):
+Per ACI 318-11 strain compatibility (§10.2.2):
 - Linear strain distribution assumed
 - εcu = 0.003 at extreme compression fiber
 """
@@ -96,7 +96,7 @@ NamedTuple with:
 - `c`: Neutral axis depth used (in)
 
 # Notes
-Uses Whitney rectangular stress block per ACI 318-19 Section 22.2.2.4.
+Uses Whitney rectangular stress block per ACI 318-11 §10.2.7.
 Sign convention: compression positive for forces, tension positive for strain.
 
 Coordinate system:
@@ -223,11 +223,11 @@ end
 """
     pure_compression_capacity(section::RCColumnSection, mat) -> Float64
 
-Calculate pure axial compression capacity P0 per ACI 318-19.
+Calculate pure axial compression capacity P0 per ACI 318-11.
 
 P0 = 0.85 * f'c * (Ag - As) + fy * As
 
-Note: This is the theoretical maximum. ACI 22.4.2 requires using:
+Note: This is the theoretical maximum. ACI §10.3.6 requires using:
 - Pn,max = 0.80 * P0 for tied columns
 - Pn,max = 0.85 * P0 for spiral columns
 """
@@ -245,7 +245,7 @@ end
 """
     max_compression_capacity(section::RCColumnSection, mat) -> Float64
 
-Calculate maximum permitted compression per ACI 318-19 Section 22.4.2.
+Calculate maximum permitted compression per ACI 318-11 §10.3.6.
 
 Pn,max = α * P0, where:
 - α = 0.80 for tied columns
@@ -264,7 +264,7 @@ end
 """
     phi_factor(εt, tie_type; fy_ksi, Es_ksi) -> Float64
 
-Calculate strength reduction factor φ per ACI 318-19 Table 21.2.2.
+Calculate strength reduction factor φ per ACI 318-11 §9.3.2.
 
 # Arguments
 - `εt`: Net tensile strain in extreme tension steel
@@ -275,7 +275,7 @@ Calculate strength reduction factor φ per ACI 318-19 Table 21.2.2.
 # Returns
 - φ factor for moment/axial design
 
-# ACI 318-19 Table 21.2.2:
+# ACI 318-11 §9.3.2:
 For Grade 60 steel (εy = 0.00207):
 - εt ≤ εy: Compression controlled
   - Tied: φ = 0.65
@@ -287,7 +287,7 @@ For Grade 60 steel (εy = 0.00207):
   - φ = 0.90
 """
 function phi_factor(εt::Real, tie_type::Symbol=:tied; fy_ksi::Real, Es_ksi::Real)
-    # Yield strain (ACI 318-19 uses modular ratio)
+    # Yield strain (ACI 318-11 uses modular ratio)
     εy = fy_ksi / Es_ksi
     
     # Tension-controlled limit
@@ -406,7 +406,7 @@ const PMDiagramCircular = PMInteractionDiagram{RCCircularSection}
 """
     generate_PM_diagram(section::RCColumnSection, mat; n_intermediate::Int=20)
 
-Generate a complete P-M interaction diagram per ACI 318-19.
+Generate a complete P-M interaction diagram per ACI 318-11.
 
 # Arguments
 - `section`: RC column section
@@ -429,7 +429,7 @@ PMInteractionDiagram with:
 
 # Reference
 StructurePoint: "Interaction Diagram - Tied Reinforced Concrete Column 
-Design Strength (ACI 318-19)"
+Design Strength (ACI 318-11)"
 """
 function generate_PM_diagram(section::RCColumnSection, mat; n_intermediate::Int=20)
     # Material properties (using unified extractors)
@@ -918,7 +918,7 @@ end
 # Y-AXIS P-M INTERACTION (Biaxial Bending Support)
 # ==============================================================================
 # Reference: StructurePoint "Biaxial Bending Interaction Diagrams for Rectangular
-# Reinforced Concrete Column Design (ACI 318-19)"
+# Reinforced Concrete Column Design (ACI 318-11)"
 #
 # For rectangular columns with b ≠ h:
 # - X-axis bending: Moment about horizontal axis, depth = h, width = b
@@ -931,9 +931,9 @@ end
 # ==============================================================================
 
 """
-    calculate_PM_at_c_yaxis(section::RCColumnSection, mat, c_in::Real) -> NamedTuple
+    calculate_PM_at_c(section::RCColumnSection, mat, c_in::Real, ::WeakAxis) -> NamedTuple
 
-Calculate nominal (Pn, Mn) capacity for Y-AXIS BENDING at a given neutral axis depth c.
+Calculate nominal (Pn, Mn) capacity for WEAK-AXIS BENDING at a given neutral axis depth c.
 
 For y-axis bending (moment about vertical axis):
 - Compression face at RIGHT (x = b)
@@ -952,7 +952,7 @@ NamedTuple with Pn (kip), Mn (kip-ft), εt, c
 # Reference
 StructurePoint: "Biaxial Bending Interaction Diagrams for Rectangular RC Column Design"
 """
-function calculate_PM_at_c_yaxis(section::RCColumnSection, mat, c_in::Real)
+function calculate_PM_at_c(section::RCColumnSection, mat, c_in::Real, ::WeakAxis)
     # Extract material properties
     fc = fc_ksi(mat)
     fy = fy_ksi(mat)
@@ -1029,12 +1029,12 @@ function calculate_PM_at_c_yaxis(section::RCColumnSection, mat, c_in::Real)
 end
 
 """
-    calculate_phi_PM_at_c_yaxis(section::RCColumnSection, mat, c_in::Real) -> NamedTuple
+    calculate_phi_PM_at_c(section::RCColumnSection, mat, c_in::Real, ::WeakAxis) -> NamedTuple
 
-Calculate factored (φPn, φMn) capacity for Y-AXIS bending at a given neutral axis depth.
+Calculate factored (φPn, φMn) capacity for weak-axis bending at a given neutral axis depth.
 """
-function calculate_phi_PM_at_c_yaxis(section::RCColumnSection, mat, c_in::Real)
-    result = calculate_PM_at_c_yaxis(section, mat, c_in)
+function calculate_phi_PM_at_c(section::RCColumnSection, mat, c_in::Real, ::WeakAxis)
+    result = calculate_PM_at_c(section, mat, c_in, WeakAxis())
     φ = phi_factor(result.εt, section.tie_type; fy_ksi=fy_ksi(mat), Es_ksi=Es_ksi(mat))
     
     return (
@@ -1049,38 +1049,38 @@ function calculate_phi_PM_at_c_yaxis(section::RCColumnSection, mat, c_in::Real)
 end
 
 """
-    effective_depth_yaxis(section::RCColumnSection) -> Float64
+    effective_depth(section::RCColumnSection, ::WeakAxis) -> Float64
 
-Calculate effective depth for y-axis bending (distance from right face to leftmost bars).
+Calculate effective depth for weak-axis bending (distance from right face to leftmost bars).
 """
-function effective_depth_yaxis(section::RCColumnSection)
+function effective_depth(section::RCColumnSection, ::WeakAxis)
     b = to_inches(section.b)
     x_min = minimum(to_inches(bar.x) for bar in section.bars)
     return b - x_min  # d for y-axis bending
 end
 
 """
-    _find_pure_bending_c_yaxis(section::RCColumnSection, mat; tol=0.1) -> Float64
+    _find_pure_bending_c(section::RCColumnSection, mat, ::WeakAxis; tol=0.1) -> Float64
 
-Find c value for pure bending (Pn ≈ 0) about y-axis using bisection.
+Find c value for pure bending (Pn ≈ 0) about weak axis using bisection.
 """
-function _find_pure_bending_c_yaxis(section::RCColumnSection, mat; tol::Float64=0.1)
-    d = effective_depth_yaxis(section)
+function _find_pure_bending_c(section::RCColumnSection, mat, ::WeakAxis; tol::Float64=0.1)
+    d = effective_depth(section, WeakAxis())
     
     c_low = 0.5
     c_high = d
     
-    result_low = calculate_PM_at_c_yaxis(section, mat, c_low)
-    result_high = calculate_PM_at_c_yaxis(section, mat, c_high)
+    result_low = calculate_PM_at_c(section, mat, c_low, WeakAxis())
+    result_high = calculate_PM_at_c(section, mat, c_high, WeakAxis())
     
     if result_low.Pn > 0 && result_high.Pn > 0
         c_low = 0.1
-        result_low = calculate_PM_at_c_yaxis(section, mat, c_low)
+        result_low = calculate_PM_at_c(section, mat, c_low, WeakAxis())
     end
     
     for _ in 1:50
         c_mid = (c_low + c_high) / 2
-        result_mid = calculate_PM_at_c_yaxis(section, mat, c_mid)
+        result_mid = calculate_PM_at_c(section, mat, c_mid, WeakAxis())
         
         if abs(result_mid.Pn) < tol
             return c_mid
@@ -1095,9 +1095,9 @@ function _find_pure_bending_c_yaxis(section::RCColumnSection, mat; tol::Float64=
 end
 
 """
-    generate_PM_diagram_yaxis(section::RCColumnSection, mat; n_intermediate::Int=20)
+    generate_PM_diagram(section::RCColumnSection, mat, ::WeakAxis; n_intermediate::Int=20)
 
-Generate P-M interaction diagram for Y-AXIS bending (Mny capacity).
+Generate P-M interaction diagram for weak-axis bending (Mny capacity).
 
 This is used for biaxial bending checks where rectangular columns have different
 capacities about each axis.
@@ -1108,12 +1108,12 @@ capacities about each axis.
 - `n_intermediate`: Number of intermediate points
 
 # Returns
-PMInteractionDiagram for y-axis bending
+PMInteractionDiagram for weak-axis bending
 
 # Reference
 StructurePoint: "Biaxial Bending Interaction Diagrams for Rectangular RC Column Design"
 """
-function generate_PM_diagram_yaxis(section::RCColumnSection, mat; n_intermediate::Int=20)
+function generate_PM_diagram(section::RCColumnSection, mat, ::WeakAxis; n_intermediate::Int=20)
     # Material properties
     fc = fc_ksi(mat)
     fy = fy_ksi(mat)
@@ -1121,9 +1121,9 @@ function generate_PM_diagram_yaxis(section::RCColumnSection, mat; n_intermediate
     εcu_val = εcu(mat)
     εy = fy / Es
     
-    # For y-axis: use b as the depth, d from leftmost bars to right face
+    # For weak-axis: use b as the depth, d from leftmost bars to right face
     b = to_inches(section.b)
-    d = effective_depth_yaxis(section)
+    d = effective_depth(section, WeakAxis())
     
     points = PMDiagramPoint[]
     control_indices = Dict{Symbol, Int}()
@@ -1140,7 +1140,7 @@ function generate_PM_diagram_yaxis(section::RCColumnSection, mat; n_intermediate
     α = section.tie_type == :spiral ? 0.85 : 0.80
     Pn_max = α * P0
     c_large = 5.0 * b
-    result_large = calculate_phi_PM_at_c_yaxis(section, mat, c_large)
+    result_large = calculate_phi_PM_at_c(section, mat, c_large, WeakAxis())
     push!(points, PMDiagramPoint(
         c_large, result_large.εt, Pn_max, result_large.Mn,
         φ_comp, φ_comp * Pn_max, φ_comp * result_large.Mn, MAX_COMPRESSION
@@ -1149,7 +1149,7 @@ function generate_PM_diagram_yaxis(section::RCColumnSection, mat; n_intermediate
     
     # fs = 0 (c = d)
     c_fs0 = d
-    result_fs0 = calculate_phi_PM_at_c_yaxis(section, mat, c_fs0)
+    result_fs0 = calculate_phi_PM_at_c(section, mat, c_fs0, WeakAxis())
     push!(points, PMDiagramPoint(
         c_fs0, result_fs0.εt, result_fs0.Pn, result_fs0.Mn,
         result_fs0.φ, result_fs0.φPn, result_fs0.φMn, FS_ZERO
@@ -1159,7 +1159,7 @@ function generate_PM_diagram_yaxis(section::RCColumnSection, mat; n_intermediate
     # fs = 0.5fy
     εt_half = 0.5 * εy
     c_half = c_from_εt(εt_half, d, εcu_val)
-    result_half = calculate_phi_PM_at_c_yaxis(section, mat, c_half)
+    result_half = calculate_phi_PM_at_c(section, mat, c_half, WeakAxis())
     push!(points, PMDiagramPoint(
         c_half, result_half.εt, result_half.Pn, result_half.Mn,
         result_half.φ, result_half.φPn, result_half.φMn, FS_HALF_FY
@@ -1168,7 +1168,7 @@ function generate_PM_diagram_yaxis(section::RCColumnSection, mat; n_intermediate
     
     # Balanced (fs = fy)
     c_balanced = c_from_εt(εy, d, εcu_val)
-    result_balanced = calculate_phi_PM_at_c_yaxis(section, mat, c_balanced)
+    result_balanced = calculate_phi_PM_at_c(section, mat, c_balanced, WeakAxis())
     push!(points, PMDiagramPoint(
         c_balanced, result_balanced.εt, result_balanced.Pn, result_balanced.Mn,
         result_balanced.φ, result_balanced.φPn, result_balanced.φMn, BALANCED
@@ -1178,7 +1178,7 @@ function generate_PM_diagram_yaxis(section::RCColumnSection, mat; n_intermediate
     # Tension controlled (εt = εy + 0.003)
     εt_tension = εy + 0.003
     c_tension = c_from_εt(εt_tension, d, εcu_val)
-    result_tension = calculate_phi_PM_at_c_yaxis(section, mat, c_tension)
+    result_tension = calculate_phi_PM_at_c(section, mat, c_tension, WeakAxis())
     push!(points, PMDiagramPoint(
         c_tension, result_tension.εt, result_tension.Pn, result_tension.Mn,
         result_tension.φ, result_tension.φPn, result_tension.φMn, TENSION_CONTROLLED
@@ -1186,8 +1186,8 @@ function generate_PM_diagram_yaxis(section::RCColumnSection, mat; n_intermediate
     control_indices[:tension_controlled] = length(points)
     
     # Pure bending
-    c_pure_m = _find_pure_bending_c_yaxis(section, mat)
-    result_pure_m = calculate_phi_PM_at_c_yaxis(section, mat, c_pure_m)
+    c_pure_m = _find_pure_bending_c(section, mat, WeakAxis())
+    result_pure_m = calculate_phi_PM_at_c(section, mat, c_pure_m, WeakAxis())
     push!(points, PMDiagramPoint(
         c_pure_m, result_pure_m.εt, result_pure_m.Pn, result_pure_m.Mn,
         result_pure_m.φ, result_pure_m.φPn, result_pure_m.φMn, PURE_BENDING
@@ -1204,18 +1204,19 @@ function generate_PM_diagram_yaxis(section::RCColumnSection, mat; n_intermediate
     
     # Add intermediate points
     if n_intermediate > 0
-        points = _add_intermediate_points_yaxis(section, mat, points, n_intermediate)
+        points = _add_intermediate_points(section, mat, points, n_intermediate, WeakAxis())
     end
     
     return PMInteractionDiagram(section, mat, points, control_indices)
 end
 
-"""Add intermediate points for y-axis P-M diagram."""
-function _add_intermediate_points_yaxis(
+"""Add intermediate points for weak-axis P-M diagram."""
+function _add_intermediate_points(
     section::RCColumnSection, 
     mat, 
     control_points::Vector{PMDiagramPoint},
-    n_per_segment::Int
+    n_per_segment::Int,
+    ::WeakAxis
 )
     c_values = Float64[]
     for pt in control_points
@@ -1236,7 +1237,7 @@ function _add_intermediate_points_yaxis(
     c_sweep = range(c_max, c_min, length=n_per_segment + 2)[2:end-1]
     
     for c in c_sweep
-        result = calculate_phi_PM_at_c_yaxis(section, mat, c)
+        result = calculate_phi_PM_at_c(section, mat, c, WeakAxis())
         push!(all_points, PMDiagramPoint(
             c, result.εt, result.Pn, result.Mn,
             result.φ, result.φPn, result.φMn, INTERMEDIATE
@@ -1264,7 +1265,7 @@ StructurePoint: "Manual Design Procedure for Columns and Walls with Biaxial Bend
 """
 function generate_PM_diagrams_biaxial(section::RCColumnSection, mat; n_intermediate::Int=20)
     diagram_x = generate_PM_diagram(section, mat; n_intermediate=n_intermediate)
-    diagram_y = generate_PM_diagram_yaxis(section, mat; n_intermediate=n_intermediate)
+    diagram_y = generate_PM_diagram(section, mat, WeakAxis(); n_intermediate=n_intermediate)
     return (x = diagram_x, y = diagram_y)
 end
 
@@ -1289,7 +1290,7 @@ Design reinforcement for a column with fixed dimensions to resist given demands.
 
 Uses P-M interaction analysis to find the minimum reinforcement that:
 1. Provides adequate capacity for (Pu, Mu)
-2. Satisfies ACI 318-19 ρg limits (0.01 ≤ ρg ≤ 0.08)
+2. Satisfies ACI 318-11 ρg limits (0.01 ≤ ρg ≤ 0.08)
 
 # Arguments
 - `b`, `h`: Column dimensions (with units)

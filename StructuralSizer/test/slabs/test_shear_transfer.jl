@@ -166,7 +166,7 @@ using StructuralSizer
         println("\n=== Polar Moment Jc - Edge Column ===")
         println("Jc = $(round(Jc_in4, digits=0)) in⁴ (SP: 14,109)")
         
-        @test Jc_in4 ≈ 14109 rtol=0.02
+        @test Jc_in4 ≈ 14109 rtol=0.01
     end
     
     # =========================================================================

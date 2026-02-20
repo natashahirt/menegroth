@@ -2,17 +2,17 @@
 # ACI 318 Beam Shear Design
 # ==============================================================================
 #
-# Beam shear design per ACI 318-19 Chapter 9 / Chapter 22.
+# Beam shear design per ACI 318-11 Chapters 10–11.
 #
 # Reference: DE-Simply-Supported-Reinforced-Concrete-Beam-Analysis-and-Design-
-#            ACI-318-14-spBeam-v1000 (StructurePoint)
+#            ACI-318-11-spBeam-v1000 (StructurePoint)
 #
 # Key ACI sections:
-#   22.5.5.1   - Concrete shear capacity Vc
-#   22.5.1.2   - Maximum shear capacity Vs,max
-#   9.7.6.2.2  - Maximum stirrup spacing
-#   9.6.3.3    - Minimum shear reinforcement
-#   21.2.1     - Strength reduction factor φ = 0.75
+#   §11.2.1.1 (Eq. 11-3) - Concrete shear capacity Vc
+#   §11.4.7.9            - Maximum shear capacity Vs,max
+#   §11.4.5              - Maximum stirrup spacing
+#   §11.4.6.3            - Minimum shear reinforcement
+#   §9.3.2.3             - Strength reduction factor φ = 0.75
 # ==============================================================================
 
 using Unitful
@@ -28,12 +28,12 @@ using Asap: kip, ksi, psf, ksf, pcf
 Nominal concrete shear capacity per ACI 318.
 
 When `Nu` and `Ag` are omitted (pure flexural members), uses the
-simplified formula (ACI 318-19 §22.5.5.1):
+simplified formula (ACI 318-11 Eq. (11-3)):
 
     Vc = 2 λ √f'c bw d
 
 When `Nu > 0` and `Ag > 0` (members under axial compression), uses
-the detailed formula (ACI 318-19 §22.5.6.1 / ACI 318-11 Eq. 11-4):
+the detailed formula (ACI 318-11 §11.2.2.1, Eq. (11-4)):
 
     Vc = 2 λ (1 + Nu / (2000 Ag)) √f'c bw d
 
@@ -57,7 +57,7 @@ function Vc_beam(bw::Length, d::Length, fc::Pressure;
     bw_in  = ustrip(u"inch", bw)
     d_in   = ustrip(u"inch", d)
 
-    # Axial compression modifier (ACI 318-19 §22.5.6.1 / ACI 318-11 Eq. 11-4)
+    # Axial compression modifier (ACI 318-11 §11.2.2.1, Eq. (11-4))
     axial_factor = 1.0
     if !isnothing(Nu) && !isnothing(Ag)
         Nu_lb  = Nu isa Unitful.Quantity ? ustrip(u"lbf", Nu) : Float64(Nu)
@@ -78,7 +78,7 @@ end
 """
     Vs_max_beam(bw, d, fc) -> Force
 
-Maximum nominal shear strength from steel reinforcement per ACI 318-19 §22.5.1.2:
+Maximum nominal shear strength from steel reinforcement per ACI 318-11 §11.4.7.9:
 
     Vs,max = 8 × √f'c × bw × d
 
@@ -117,13 +117,13 @@ function Vs_required(Vu::Force, Vc::Force; φ::Real=0.75)
 end
 
 # ==============================================================================
-# Minimum Shear Reinforcement (ACI 9.6.3.3)
+# Minimum Shear Reinforcement (ACI 318-11 §11.4.6.3)
 # ==============================================================================
 
 """
     min_shear_reinforcement(bw, fc, fyt) -> typeof(1.0u"inch^2"/u"inch")
 
-Minimum Av/s per ACI 318-19 §9.6.3.3:
+Minimum Av/s per ACI 318-11 §11.4.6.3:
 
     Av/s_min = max(0.75√f'c × bw / fyt,  50 × bw / fyt)
 
@@ -147,13 +147,13 @@ function min_shear_reinforcement(bw::Length, fc::Pressure, fyt::Pressure)
 end
 
 # ==============================================================================
-# Maximum Stirrup Spacing (ACI 9.7.6.2.2)
+# Maximum Stirrup Spacing (ACI 318-11 §11.4.5)
 # ==============================================================================
 
 """
     max_stirrup_spacing(d, Vs, bw, fc) -> Length
 
-Maximum stirrup spacing per ACI 318-19 §9.7.6.2.2:
+Maximum stirrup spacing per ACI 318-11 §11.4.5:
 
 - If Vs ≤ 4√f'c × bw × d:  s_max = min(d/2, 24 in)
 - If Vs >  4√f'c × bw × d:  s_max = min(d/4, 12 in)
@@ -245,7 +245,7 @@ Complete beam shear design per ACI 318.
 - `fyt`: Stirrup yield strength
 - `λ`: Lightweight factor (1.0 normal weight)
 - `stirrup_bar`: Bar number for stirrups (default #3)
-- `Nu`: Factored axial compression (positive). Increases Vc per ACI §22.5.6.1.
+- `Nu`: Factored axial compression (positive). Increases Vc per ACI 318-11 §11.2.2.1.
 - `Ag`: Gross cross-section area (bw × h). Required when Nu is provided.
 
 # Returns
@@ -255,7 +255,7 @@ Named tuple:
 - `Vs_req`: Required steel shear contribution
 - `Vs_max`: Maximum allowable Vs (section adequacy)
 - `section_adequate`: Bool — Vs_req ≤ Vs_max
-- `Avs_min`: Minimum Av/s (ACI 9.6.3.3)
+- `Avs_min`: Minimum Av/s (ACI 318-11 §11.4.6.3)
 - `stirrups`: Stirrup design (Av, bar_size, s_required)
 - `s_max`: Maximum stirrup spacing
 - `s_design`: Governing spacing min(s_required, s_max, s_from_Avs_min)

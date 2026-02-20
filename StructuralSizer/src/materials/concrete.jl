@@ -10,9 +10,9 @@
 #   30% PFA replacement:    0.112
 #   40/50 MPa (UK avg):     0.173
 #
-# εcu = 0.003 is the standard ACI 318-19 value for normal concrete.
+# εcu = 0.003 is the standard ACI 318-11 value for normal concrete.
 
-"""ACI 318-19 §19.2.2.1: Ec = 57000√f'c psi (normal weight concrete)."""
+"""ACI 318-11 §8.5.1: Ec = 57000√f'c psi (normal weight concrete)."""
 _aci_Ec(fc′) = 57000 * sqrt(ustrip(u"psi", fc′)) * u"psi"
 
 # ==============================================================================

@@ -10,8 +10,8 @@
 # Constraints:
 #   1. Flexure utilization:  Mu / φMn ≤ 1.0  (T-beam Whitney block)
 #   2. Shear section adequacy: Vu / φVn_max ≤ 1.0  (uses bw)
-#   3. Net tensile strain:  εt ≥ 0.005  (ACI 318-19 §9.3.3.1)
-#   4. Minimum reinforcement: As ≥ As,min (ACI 318-19 §9.6.1.2, uses bw)
+#   3. Net tensile strain:  εt ≥ 0.005  (ACI 318-11 §10.3.5)
+#   4. Minimum reinforcement: As ≥ As,min (ACI 318-11 §10.5.1, uses bw)
 #   5. Geometric: bw ≤ bf (web can't exceed flange)
 #   6. Geometric: hf < h (slab thickness < total depth)
 #   7. (optional) LL deflection: Δ_LL ≤ L/360  (ACI §24.2)
@@ -47,7 +47,7 @@ sizing and tributary geometry.
 - Flexure utilization: Mu / φMn ≤ 1.0 (T-beam two-case Whitney block)
 - Shear section adequacy: Vu / φVn_max ≤ 1.0 (uses bw, not bf)
 - Net tensile strain: εt ≥ 0.005 (tension-controlled)
-- Minimum reinforcement: ρ ≥ ρ_min (ACI 318-19 §9.6.1.2, uses bw)
+- Minimum reinforcement: ρ ≥ ρ_min (ACI 318-11 §10.5.1, uses bw)
 - Geometric: bw ≤ bf, hf < h
 - (optional) LL deflection: Δ_LL ≤ L/360 (ACI §24.2, when service loads provided)
 - (optional) Total deflection: Δ_total ≤ L/240 (ACI §24.2)
@@ -70,7 +70,7 @@ struct RCTBeamNLPProblem <: AbstractNLPProblem
     # Cached cover offset for effective depth (inches)
     cover_offset_in::Float64
 
-    # ACI 318-19 §9.6.1.2 minimum reinforcement ratio
+    # ACI 318-11 §10.5.1 minimum reinforcement ratio
     ρ_min_aci::Float64
 
     # Bounds in inches
@@ -89,7 +89,7 @@ struct RCTBeamNLPProblem <: AbstractNLPProblem
     defl_support::Symbol    # :simply_supported, :cantilever, etc.
     defl_ξ::Float64         # Long-term factor (2.0 = 5+ years)
 
-    # ── Torsion constraint (ACI §22.7.7.1) ──
+    # ── Torsion constraint (ACI §11.5.3.1) ──
     Tu_kipin::Float64              # Torsion demand (kip·in). 0.0 = no torsion.
     cover_to_stirrup_ctr_in::Float64  # face → stirrup centerline (inches)
 end
@@ -122,7 +122,7 @@ function RCTBeamNLPProblem(Mu, Vu, bf, hf, opts::NLPBeamOptions;
     h_min  = max(ustrip(u"inch", opts.min_depth), hf_in + 2.0)  # h > hf + clearance
     h_max  = ustrip(u"inch", opts.max_depth)
 
-    # ACI 318-19 §9.6.1.2: ρ_min = max(3√f'c/fy, 200/fy) (uses bw)
+    # ACI 318-11 §10.5.1: ρ_min = max(3√f'c/fy, 200/fy) (uses bw)
     fc_psi = fc * 1000.0
     fy_psi = fy * 1000.0
     ρ_min_aci = max(3.0 * sqrt(fc_psi) / fy_psi, 200.0 / fy_psi)
@@ -215,7 +215,7 @@ end
 function n_constraints(p::RCTBeamNLPProblem)
     nc = 4
     p.w_dead_kiplf > 0 && (nc += 2)  # LL + total deflection
-    p.Tu_kipin > 0 && (nc += 1)       # torsion adequacy (ACI §22.7.7.1)
+    p.Tu_kipin > 0 && (nc += 1)       # torsion adequacy (ACI §11.5.3.1)
     return nc
 end
 
@@ -224,13 +224,13 @@ function constraint_names(p::RCTBeamNLPProblem)
         "flexure utilization",
         "shear adequacy",
         "net tensile strain (εt ≥ 0.005)",
-        "min reinforcement (§9.6.1.2)",
+        "min reinforcement (§10.5.1)",
     ]
     if p.w_dead_kiplf > 0
         push!(names, "deflection LL (L/360)")
         push!(names, "deflection total (L/240)")
     end
-    p.Tu_kipin > 0 && push!(names, "torsion adequacy (§22.7.7.1)")
+    p.Tu_kipin > 0 && push!(names, "torsion adequacy (§11.5.3.1)")
     return names
 end
 
@@ -384,7 +384,7 @@ function constraint_fns(p::RCTBeamNLPProblem, x::Vector{Float64})
         push!(constraints, util_defl_tot)
     end
 
-    # --- Torsion adequacy (ACI 318-19 §22.7.7.1) ---
+    # --- Torsion adequacy (ACI 318-11 §11.5.3.1) ---
     # For T-beams: Aoh/ph based on web rectangle (closed stirrups in web)
     if p.Tu_kipin > 0
         c_ctr = p.cover_to_stirrup_ctr_in

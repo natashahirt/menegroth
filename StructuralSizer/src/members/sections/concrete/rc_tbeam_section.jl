@@ -21,7 +21,7 @@ T-shaped reinforced concrete beam section (monolithic with slab).
 - `bw`: Web width
 - `h`: Total depth (bottom of web to top of flange)
 - `d`: Effective depth (centroid of tension steel)
-- `bf`: Effective flange width (per ACI 318-19 Table 6.3.2.1)
+- `bf`: Effective flange width (per ACI 318-11 §8.12.2)
 - `hf`: Flange thickness (slab thickness)
 - `cover`: Clear cover to stirrups
 - `As`: Total tension steel area
@@ -217,14 +217,14 @@ function section_modulus_bottom(s::RCTBeamSection)
 end
 
 # ==============================================================================
-# Validation (ACI 318-14 §9.6.1 / §9.7)
+# Validation (ACI 318-11 §10.5 / §7.6)
 # ==============================================================================
 
 """
     validate(s::RCTBeamSection, fc::Pressure, fy::Pressure)
 
 Run ACI 318 geometry and reinforcement ratio checks for T-beams.
-Minimum reinforcement uses bw (web width) per ACI 318-19 §9.6.1.2.
+Minimum reinforcement uses bw (web width) per ACI 318-11 §10.5.1.
 """
 function validate(s::RCTBeamSection, fc::Pressure, fy::Pressure)
     # Minimum reinforcement (ACI 9.6.1.2) — uses bw for T-beams

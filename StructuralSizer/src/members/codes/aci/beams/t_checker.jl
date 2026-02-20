@@ -1,5 +1,5 @@
 # ==============================================================================
-# ACI 318-19 T-Beam Capacity Extensions
+# ACI 318-11 T-Beam Capacity Extensions
 # ==============================================================================
 # Extends ACIBeamChecker to handle RCTBeamSection alongside RCBeamSection.
 # The existing ACIBeamChecker, ACIBeamCapacityCache, and precompute_capacities!
@@ -71,7 +71,7 @@ end
 
 """
 Maximum design shear capacity for T-beam section geometry.
-Shear is resisted by the web only (bw × d), per ACI 318-19 §22.5.5.1.
+Shear is resisted by the web only (bw × d), per ACI 318-11 §11.2.1.1.
 """
 function _compute_φVn_max(section::RCTBeamSection, fc_psi::Float64, λ::Float64)
     bw_in = ustrip(u"inch", section.bw)
@@ -156,10 +156,10 @@ function is_feasible(
         cache.φVn_max[j] ≥ Vu || return false
     end
 
-    # 4. Net tensile strain (ACI 318-19 §9.3.3.1) — εt ≥ 0.004 for beams
+    # 4. Net tensile strain (ACI 318-11 §10.3.5) — εt ≥ 0.004 for beams
     cache.εt[j] ≥ 0.004 || return false
 
-    # 5. Minimum reinforcement (ACI 318-19 §9.6.1.2) — uses bw for T-beams
+    # 5. Minimum reinforcement (ACI 318-11 §10.5.1) — uses bw for T-beams
     fc_psi = cache.fc_ksi * 1000.0
     fy_psi = cache.fy_ksi * 1000.0
     bw_in  = ustrip(u"inch", section.bw)
@@ -185,7 +185,7 @@ function is_feasible(
         defl_result.ok || return false
     end
 
-    # 7. Torsion section adequacy (§22.7.7.1) — when Tu > 0
+    # 7. Torsion section adequacy (§11.5.3.1) — when Tu > 0
     Tu_val = _get_Tu_kipin(demand)
     if Tu_val > 0.0
         d_stir = ustrip(u"inch", rebar(section.stirrup_size).diameter)

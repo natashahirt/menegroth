@@ -1,7 +1,7 @@
 # ==============================================================================
-# ACI 318-19 Slenderness Effects (Moment Magnification)
+# ACI 318-11 Slenderness Effects (Moment Magnification)
 # ==============================================================================
-# Reference: ACI 318-19 Chapter 6 (Structural Analysis)
+# Reference: ACI 318-11 Chapter 10
 # Verified against StructurePoint spColumn Design Examples:
 # - "Slender Column Design in Non-Sway Frame - Moment Magnification Method"
 # - "Slenderness Effects for Concrete Columns in Sway Frame"
@@ -18,7 +18,7 @@ using Asap: to_inches, to_sqinches, ksi
 """
     slenderness_ratio(section::RCColumnSection, geometry::ConcreteMemberGeometry) -> Float64
 
-Calculate slenderness ratio kLu/r per ACI 318-19.
+Calculate slenderness ratio kLu/r per ACI 318-11.
 
 # Arguments
 - `section`: RC column section
@@ -40,7 +40,7 @@ end
 """
     should_consider_slenderness(section, geometry; M1::Real=0.0, M2::Real=1.0) -> Bool
 
-Check if slenderness effects should be considered per ACI 318-19 6.2.5.1.
+Check if slenderness effects should be considered per ACI 318-11 §10.10.1.
 
 # Arguments
 - `section`: RC column section
@@ -51,7 +51,7 @@ Check if slenderness effects should be considered per ACI 318-19 6.2.5.1.
 # Returns
 - `true` if slenderness effects must be considered
 
-# ACI 318-19 Limits
+# ACI 318-11 Limits
 - Non-sway (braced): kLu/r ≤ 34 - 12(M1/M2), max 40
 - Sway (unbraced): kLu/r ≤ 22
 """
@@ -64,13 +64,13 @@ function should_consider_slenderness(
     λ = slenderness_ratio(section, geometry)
     
     if geometry.braced
-        # Non-sway: ACI 6.2.5.1(b)
+        # Non-sway: ACI §10.10.1(b)
         # M1/M2 is positive for single curvature, negative for double
         M_ratio = M2 ≈ 0 ? 0.0 : M1 / M2
         limit = min(34 - 12 * M_ratio, 40)
         return λ > limit
     else
-        # Sway: ACI 6.2.5.1(a)
+        # Sway: ACI §10.10.1(a)
         return λ > 22
     end
 end
@@ -83,7 +83,7 @@ end
     effective_stiffness(section, mat; βdns::Real=0.6, method::Symbol=:accurate) -> Float64
 
 Calculate effective flexural stiffness (EI)_eff for buckling analysis.
-Per ACI 318-19 (6.6.4.4.4).
+Per ACI 318-11 §10.10.6.1.
 
 # Arguments
 - `section`: RC column section
@@ -94,7 +94,7 @@ Per ACI 318-19 (6.6.4.4.4).
 # Returns
 - (EI)_eff in kip-in²
 
-# Methods (ACI 6.6.4.4.4)
+# Methods (ACI §10.10.6.1)
 - `:accurate` (b): (EI)_eff = (0.2*Ec*Ig + Es*Ise) / (1 + βdns)
 - `:simplified` (a): (EI)_eff = 0.4*Ec*Ig / (1 + βdns)
 
@@ -153,7 +153,7 @@ end
 """
     critical_buckling_load(section, mat, geometry; βdns::Real=0.6) -> Float64
 
-Calculate Euler critical buckling load Pc per ACI 318-19 (6.6.4.4.2).
+Calculate Euler critical buckling load Pc per ACI 318-11 §10.10.6.1.
 
 Pc = π² * (EI)_eff / (k*Lu)²
 
@@ -183,7 +183,7 @@ end
     magnification_factor_nonsway(Pu, Pc; Cm::Real=1.0) -> Float64
 
 Calculate moment magnification factor δns for non-sway frames.
-Per ACI 318-19 (6.6.4.5.2).
+Per ACI 318-11 §10.10.6.3.
 
 δns = Cm / (1 - Pu/(0.75*Pc)) ≥ 1.0
 
@@ -209,7 +209,7 @@ end
     calc_Cm(M1::Real, M2::Real; transverse_load::Bool=false) -> Float64
 
 Calculate equivalent uniform moment factor Cm.
-Per ACI 318-19 (6.6.4.5.3).
+Per ACI 318-11 §10.10.6.4.
 
 # Arguments
 - `M1`: Smaller factored end moment (kip-ft)
@@ -240,7 +240,7 @@ end
 """
     minimum_moment(Pu::Real, h_in::Real) -> Float64
 
-Calculate minimum design moment per ACI 318-19 (6.6.4.5.4).
+Calculate minimum design moment per ACI 318-11 §10.10.6.5.
 
 M_min = Pu * (0.6 + 0.03h)
 
@@ -252,7 +252,7 @@ M_min = Pu * (0.6 + 0.03h)
 - Minimum moment (kip-ft)
 """
 function minimum_moment(Pu::Real, h::Real)
-    # M_min = Pu × (0.6" + 0.03×h) per ACI 6.6.4.5.4
+    # M_min = Pu × (0.6" + 0.03×h) per ACI §10.10.6.5
     # Pu in kip, h in inches → result in kip-in, converted to kip-ft
     return Pu * (0.6 + 0.03 * h) / 12
 end
@@ -262,7 +262,7 @@ end
                            βdns=0.6, transverse_load=false) -> NamedTuple
 
 Calculate magnified design moment for non-sway frame column.
-Per ACI 318-19 Section 6.6.4.5.
+Per ACI 318-11 §10.10.6.
 
 # Arguments
 - `section`: RC column section
@@ -330,7 +330,7 @@ end
     magnification_factor_sway(ΣPu, ΣPc) -> Float64
 
 Calculate sway magnification factor δs for sway frames.
-Per ACI 318-19 (6.6.4.6.2).
+Per ACI 318-11 §10.10.7.3.
 
 δs = 1 / (1 - ΣPu/(0.75*ΣPc)) ≥ 1.0
 
@@ -354,7 +354,7 @@ end
     magnify_moment_sway(M1ns, M2ns, M1s, M2s, δs) -> NamedTuple
 
 Calculate magnified design moments for sway frame column.
-Per ACI 318-19 (6.6.4.6.1).
+Per ACI 318-11 §10.10.7.1.
 
 # Arguments
 - `M1ns, M2ns`: Non-sway moments at ends (kip-ft)
@@ -380,8 +380,8 @@ end
 # Complete Sway Frame Magnification (Per StructurePoint Examples)
 # ==============================================================================
 # Reference: StructurePoint "Slender Concrete Column Design in Sway Frames -
-# Moment Magnification Method (ACI 318-19)" and "Slenderness Effects for
-# Concrete Columns in Sway Frame - Moment Magnification Method (ACI 318-19)"
+# Moment Magnification Method (ACI 318-11)" and "Slenderness Effects for
+# Concrete Columns in Sway Frame - Moment Magnification Method (ACI 318-11)"
 #
 # For sway frames, the complete procedure involves:
 # 1. Story stability check (Q index)
@@ -392,7 +392,7 @@ end
 """
     SwayStoryProperties
 
-Properties of a story for sway frame analysis per ACI 318-19 Section 6.6.4.
+Properties of a story for sway frame analysis per ACI 318-11 §10.10.
 
 # Fields
 - `ΣPu`: Total factored vertical load in story (kip)
@@ -412,7 +412,7 @@ end
 """
     stability_index(story::SwayStoryProperties) -> Float64
 
-Calculate story stability index Q per ACI 318-19 (6.6.4.4.1).
+Calculate story stability index Q per ACI 318-11 §10.10.5.2.
 
 Q = (ΣPu × Δo) / (Vus × lc)
 
@@ -420,7 +420,7 @@ Q = (ΣPu × Δo) / (Vus × lc)
 - Q: Stability index (Q > 0.05 indicates sway frame)
 
 # Reference
-ACI 318-19 6.6.4.3: Story is sway if Q > 0.05
+ACI 318-11 §10.10.5.2: Story is sway if Q > 0.05
 """
 function stability_index(story::SwayStoryProperties)
     if story.Vus ≈ 0 || story.lc ≈ 0
@@ -432,7 +432,7 @@ end
 """
     is_sway_frame(story::SwayStoryProperties) -> Bool
 
-Determine if story is a sway frame per ACI 318-19 6.6.4.3.
+Determine if story is a sway frame per ACI 318-11 §10.10.5.2.
 
 A story is sway if Q > 0.05.
 """
@@ -445,7 +445,7 @@ end
     magnification_factor_sway_Q(Q::Real) -> Float64
 
 Calculate sway magnification factor δs using stability index Q method.
-Per ACI 318-19 (6.6.4.6.2a).
+Per ACI 318-11 §10.10.7.3(a).
 
 δs = 1 / (1 - Q) ≥ 1.0
 
@@ -466,7 +466,7 @@ function magnification_factor_sway_Q(Q::Real)
     δs = 1 / (1 - Q)
     
     if δs > 1.5
-        @warn "δs = $δs > 1.5; ACI 318-19 recommends second-order analysis"
+        @debug "δs = $δs > 1.5 (Q-method); second-order analysis recommended (ACI 318-11 §10.10.7.3)"
     end
     
     return max(δs, 1.0)
@@ -476,7 +476,7 @@ end
     effective_stiffness_sway(section, mat; βds::Real=0.0, method::Symbol=:accurate) -> Float64
 
 Calculate effective flexural stiffness (EI)eff for sway frames.
-Per ACI 318-19 (6.6.4.4.4).
+Per ACI 318-11 §10.10.6.1.
 
 # Arguments
 - `section`: RC column section
@@ -524,7 +524,7 @@ end
     critical_buckling_load_sway(section, mat, geometry; βds::Real=0.0) -> Float64
 
 Calculate critical buckling load Pc for sway frame columns.
-Per ACI 318-19 (6.6.4.4.2).
+Per ACI 318-11 §10.10.6.1.
 
 # Arguments
 - `section`: RC column section
@@ -562,7 +562,7 @@ end
         transverse_load::Bool=false
     ) -> NamedTuple
 
-Complete sway frame moment magnification per ACI 318-19 Sections 6.6.4.5 and 6.6.4.6.
+Complete sway frame moment magnification per ACI 318-11 §10.10.6 and §10.10.7.
 
 This implements the full procedure from StructurePoint design examples:
 1. Calculate δs (sway magnification at column ends)
@@ -594,7 +594,7 @@ NamedTuple with:
 
 # Reference
 StructurePoint: "Slender Concrete Column Design in Sway Frames - Moment 
-Magnification Method (ACI 318-19)"
+Magnification Method (ACI 318-11)"
 """
 function magnify_moment_sway_complete(
     section::RCColumnSection,
@@ -613,33 +613,45 @@ function magnify_moment_sway_complete(
     
     # =========================================================================
     # Step 1: Calculate δs (sway magnification at ends)
-    # Per ACI 318-19 (6.6.4.6.2)
+    # Per ACI 318-11 §10.10.7.3
     # =========================================================================
     Q = NaN
     
+    δs_method = :none
+
     if !isnothing(story)
-        # Method (a): Use Q index
+        # Method (a): Use Q index (ACI 318-11 §10.10.7.3(a))
         Q = stability_index(story)
-        δs = magnification_factor_sway_Q(Q)
+        δs_Q = magnification_factor_sway_Q(Q)
         
-        # Alternative: Method (b) using ΣPu/ΣPc
-        # This provides a check
-        δs_check = magnification_factor_sway(story.ΣPu, story.ΣPc)
+        # Method (b): Use ΣPu/ΣPc (ACI 318-11 §10.10.7.3(b))
+        δs_Pc = magnification_factor_sway(story.ΣPu, story.ΣPc)
+        
+        if δs_Q <= 1.5
+            # Q-method is adequate
+            δs = δs_Q
+            δs_method = :Q
+        else
+            # ACI 318-11 §10.10.7.3: when δs from Q > 1.5, use ΣPu/ΣPc method
+            # or second-order analysis.  Fall back to ΣPu/ΣPc first; if that also
+            # exceeds 1.5, flag for P-Δ iteration (caller should handle).
+            δs = δs_Pc
+            δs_method = :ΣPc
+            if δs_Pc > 1.5 && isfinite(δs_Pc)
+                @debug "δs = $(round(δs_Pc, digits=3)) > 1.5 (both Q and ΣPc methods); P-Δ analysis recommended (ACI 318-11 §10.10.4)"
+                δs_method = :needs_P_delta
+            else
+                @debug "Q-method δs=$(round(δs_Q, digits=2)) > 1.5; fell back to ΣPc method δs=$(round(δs_Pc, digits=2))"
+            end
+        end
     else
-        # Simplified: assume story data not available, use conservative δs = 1.0
-        # In practice, story properties should be provided
         δs = 1.0
-        @warn "No story properties provided; using δs = 1.0 (conservative)"
-    end
-    
-    # Check δs limit
-    if δs > 1.5 && isfinite(δs)
-        @warn "δs = $(round(δs, digits=3)) > 1.5; ACI recommends second-order analysis"
+        @debug "No story properties provided; using δs = 1.0"
     end
     
     # =========================================================================
     # Step 2: Magnify moments at column ends
-    # Per ACI 318-19 (6.6.4.6.1): M = Mns + δs × Ms
+    # Per ACI 318-11 §10.10.7.1: M = Mns + δs × Ms
     # =========================================================================
     M1 = M1ns + δs * M1s
     M2 = M2ns + δs * M2s
@@ -648,7 +660,7 @@ function magnify_moment_sway_complete(
     
     # =========================================================================
     # Step 3: Check slenderness along column length
-    # Per ACI 318-19 (6.6.4.6.4): Use non-sway procedure on magnified moments
+    # Per ACI 318-11 §10.10.7: Use non-sway procedure on magnified moments
     # =========================================================================
     # Determine if slenderness check is needed
     # Use braced frame limits with M1, M2 from step 2
@@ -672,7 +684,7 @@ function magnify_moment_sway_complete(
     
     if λ > limit
         # Need to magnify for P-δ effects along length
-        # Use non-sway procedure per ACI 6.6.4.5
+        # Use non-sway procedure per ACI §10.10.6
         
         # Create temporary geometry for non-sway check
         geometry_nonsway = (Lu = geometry.Lu, k = k_nonsway, braced = true)
@@ -686,7 +698,7 @@ function magnify_moment_sway_complete(
         # Calculate δns
         δns = magnification_factor_nonsway(Pu, Pc; Cm=Cm)
         
-        # Final design moment (ACI 6.6.4.6.4)
+        # Final design moment (ACI §10.10.7)
         M_min = minimum_moment(Pu, h)
         Mc = max(δns * max(abs(M1), abs(M2)), M_min)
         
@@ -701,7 +713,8 @@ function magnify_moment_sway_complete(
         δns = δns,
         Q = Q,
         sway_magnified = sway_magnified,
-        length_magnified = length_magnified
+        length_magnified = length_magnified,
+        δs_method = δs_method,
     )
 end
 
@@ -776,13 +789,28 @@ function magnify_moment_sway_complete(
 )
     # Diameter and radius of gyration (inches)
     D = to_inches(section.D)
-    r = 0.25 * D  # r = 0.25D for circular sections (ACI 6.2.5.2)
+    r = 0.25 * D  # r = 0.25D for circular sections (ACI §10.10.1.2)
     
-    # Step 1: Calculate δs
+    # Step 1: Calculate δs — same tiered logic as rectangular columns
     Q = NaN
+    δs_method = :none
+
     if !isnothing(story)
         Q = stability_index(story)
-        δs = magnification_factor_sway_Q(Q)
+        δs_Q = magnification_factor_sway_Q(Q)
+        δs_Pc = magnification_factor_sway(story.ΣPu, story.ΣPc)
+        
+        if δs_Q <= 1.5
+            δs = δs_Q
+            δs_method = :Q
+        else
+            δs = δs_Pc
+            δs_method = :ΣPc
+            if δs_Pc > 1.5 && isfinite(δs_Pc)
+                @debug "δs = $(round(δs_Pc, digits=3)) > 1.5 (both methods); P-Δ analysis recommended (ACI 318-11 §10.10.4)"
+                δs_method = :needs_P_delta
+            end
+        end
     else
         δs = 1.0
     end
@@ -821,7 +849,8 @@ function magnify_moment_sway_complete(
         δns = δns,
         Q = Q,
         sway_magnified = sway_magnified,
-        length_magnified = length_magnified
+        length_magnified = length_magnified,
+        δs_method = δs_method,
     )
 end
 
@@ -833,11 +862,11 @@ end
     slenderness_ratio(section::RCCircularSection, geometry) -> Float64
 
 Calculate slenderness ratio kLu/r for circular sections.
-Per ACI 318-19 6.2.5.2: r = 0.25D for circular sections.
+Per ACI 318-11 §10.10.1.2: r = 0.25D for circular sections.
 """
 function slenderness_ratio(section::RCCircularSection, geometry)
     # ACI convention: all internal calculations in inches
-    # r = 0.25D for circular sections (ACI 6.2.5.2)
+    # r = 0.25D for circular sections (ACI §10.10.1.2)
     D = to_inches(section.D)
     r = 0.25 * D
     

@@ -31,7 +31,7 @@ end
     # Initialize with floor options - use vault as it has a full sizing implementation
     println("Initializing...")
     initialize!(struc; floor_type=:vault, material=NWC_4000,
-                floor_kwargs=(rise=1.0u"m", thickness=0.05u"m"))
+                floor_opts=VaultOptions(rise=1.0u"m", thickness=0.05u"m"))
     
     @test length(struc.cells) > 0
     @test length(struc.slabs) > 0

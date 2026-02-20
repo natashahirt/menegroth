@@ -2,7 +2,7 @@
 
 julia_version = "1.12.4"
 manifest_format = "2.0"
-project_hash = "68b42992bd7d738d3da8345a61432c079e10cdf6"
+project_hash = "ce44823dab5ed211a8913b82e98d6b7772b229c0"
 
 [[deps.ASL_jll]]
 deps = ["Artifacts", "JLLWrappers", "Libdl", "Pkg"]
@@ -1814,13 +1814,13 @@ uuid = "a1b2c3d4-5678-90ab-cdef-123456789abc"
 version = "0.1.0"
 
 [[deps.StructuralSizer]]
-deps = ["Asap", "CSV", "Gurobi", "HiGHS", "Ipopt", "JSON3", "JuMP", "Logging", "Meshes", "PrecompileTools", "Printf", "ProgressMeter", "QuadGK", "Reexport", "Roots", "Unitful"]
+deps = ["Asap", "CSV", "Gurobi", "HiGHS", "Ipopt", "JSON3", "JuMP", "LinearAlgebra", "Logging", "Meshes", "PrecompileTools", "Printf", "ProgressMeter", "QuadGK", "Reexport", "Roots", "SpecialFunctions", "Unitful"]
 path = "../StructuralSizer"
 uuid = "9d8e7f6a-5b4c-3d2e-1f0a-9b8c7d6e5f4a"
 version = "0.1.0"
 
 [[deps.StructuralSynthesizer]]
-deps = ["Asap", "Dates", "GLMakie", "GeometryBasics", "Graphs", "Interpolations", "JSON", "LinearAlgebra", "Logging", "Meshes", "PrecompileTools", "Printf", "Reexport", "SparseArrays", "Statistics", "StructuralPlots", "StructuralSizer", "Unitful", "XLSX"]
+deps = ["Accessors", "Asap", "Dates", "GLMakie", "GeometryBasics", "Graphs", "Interpolations", "JSON", "JuMP", "LinearAlgebra", "Logging", "Meshes", "PrecompileTools", "Printf", "Reexport", "SparseArrays", "Statistics", "StructuralPlots", "StructuralSizer", "Unitful", "XLSX"]
 path = "."
 uuid = "fc54e8a9-dab1-4bea-a64f-f8e9b3ce8a89"
 version = "0.1.0"

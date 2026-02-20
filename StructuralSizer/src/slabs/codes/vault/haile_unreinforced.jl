@@ -384,7 +384,7 @@ result.deflection_check.ok
 """
 function _size_span_floor(::Vault, span::L, sdl::F, live::F;
                     material::Concrete=NWC_4000,
-                    options::FloorOptions=FloorOptions(),
+                    options::AbstractFloorOptions=VaultOptions(),
                     rise::Union{L,Nothing}=nothing,
                     lambda::Union{Real,Nothing}=nothing,
                     thickness::Union{L,Nothing}=nothing,
@@ -400,7 +400,7 @@ function _size_span_floor(::Vault, span::L, sdl::F, live::F;
     # =========================================================================
     # PHASE 1: RESOLVE OPTIONS (kwargs override VaultOptions defaults)
     # =========================================================================
-    vopt = options.vault
+    vopt = options isa VaultOptions ? options : VaultOptions()
     
     # Geometry: kwargs override VaultOptions (which has sensible defaults)
     rise = isnothing(rise) ? vopt.rise : rise
@@ -418,7 +418,7 @@ function _size_span_floor(::Vault, span::L, sdl::F, live::F;
     elseif isnothing(rise) && isnothing(lambda)
         throw(ArgumentError(
             "Vault requires rise or lambda. Set via VaultOptions: " *
-            "FloorOptions(vault=VaultOptions(rise=1.0u\"m\")) or VaultOptions(lambda=6.0)"))
+            "VaultOptions(rise=1.0u\"m\") or VaultOptions(lambda=6.0)"))
     end
     
     # Allowable stress: kwargs → VaultOptions → default 0.45fc'

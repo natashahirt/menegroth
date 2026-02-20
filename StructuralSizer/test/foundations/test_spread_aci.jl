@@ -38,7 +38,7 @@ opts = SpreadFootingOptions(
     material = RC_3000_60,
     pier_c1 = 18.0u"inch",
     pier_c2 = 18.0u"inch",
-    pier_shape = :rect,
+    pier_shape = :rectangular,
     bar_size = 8,
     cover = 3.0u"inch",
     min_depth = 12.0u"inch",
@@ -48,7 +48,7 @@ opts = SpreadFootingOptions(
 )
 
 println("Designing spread footing...")
-result = design_spread_footing(demand, soil; opts)
+result = design_footing(SpreadFooting(), demand, soil; opts)
 
 # Extract results in imperial for comparison
 B_in = ustrip(u"inch", result.B)

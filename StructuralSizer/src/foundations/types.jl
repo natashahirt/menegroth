@@ -281,9 +281,10 @@ utilization(r::AbstractFoundationResult) = r.utilization
 # =============================================================================
 
 """
-    FoundationDemand{F, M}
+    FoundationDemand{F, M, L}
 
-Reaction forces from structural analysis at a support node.
+Reaction forces from structural analysis at a support node, with per-column
+dimensions for punching shear, bearing, and development checks.
 
 # Fields
 - `Pu`: Factored axial load (compression positive)
@@ -292,8 +293,11 @@ Reaction forces from structural analysis at a support node.
 - `Vux`: Factored shear in x
 - `Vuy`: Factored shear in y
 - `Ps`: Service axial load (for settlement)
+- `c1`: Column dimension parallel to footing length (or diameter for circular)
+- `c2`: Column dimension perpendicular (= c1 for square/circular)
+- `shape`: `:rectangular` or `:circular`
 """
-struct FoundationDemand{F, M}
+struct FoundationDemand{F, M, L}
     group_idx::Int
     Pu::F       # Factored axial (compression +)
     Mux::M      # Moment about x
@@ -301,12 +305,17 @@ struct FoundationDemand{F, M}
     Vux::F      # Shear x
     Vuy::F      # Shear y
     Ps::F       # Service axial (for settlement)
+    c1::L       # Column dim 1 (or diameter)
+    c2::L       # Column dim 2 (= c1 for circular)
+    shape::Symbol   # :rectangular or :circular
 end
 
-function FoundationDemand(idx::Int; 
+function FoundationDemand(idx::Int;
                           Pu=0.0u"kN", Mux=0.0u"kN*m", Muy=0.0u"kN*m",
-                          Vux=0.0u"kN", Vuy=0.0u"kN", Ps=0.0u"kN")
-    FoundationDemand{typeof(Pu), typeof(Mux)}(idx, Pu, Mux, Muy, Vux, Vuy, Ps)
+                          Vux=0.0u"kN", Vuy=0.0u"kN", Ps=0.0u"kN",
+                          c1=18.0u"inch", c2=18.0u"inch", shape=:rectangular)
+    FoundationDemand{typeof(Pu), typeof(Mux), typeof(c1)}(
+        idx, Pu, Mux, Muy, Vux, Vuy, Ps, c1, c2, shape)
 end
 
 # =============================================================================

@@ -1,0 +1,15 @@
+---
+description: Testing conventions — adversarial and edge-case focus
+globs: "**/test/**/*.jl"
+alwaysApply: false
+---
+
+# Testing Conventions
+
+Write **useful** test cases. Go beyond the happy path.
+
+- **Adversarial / edge cases first**: zero-length spans, minimum slab thickness, maximum reinforcement ratio, near-capacity punching shear, single-bay frames, very slender members, extreme aspect ratios.
+- **Boundary conditions**: test at code-prescribed limits (e.g., min cover, max bar spacing, min reinforcement).
+- **Regression tests**: when a bug is fixed, add a test that reproduces the original failure.
+- **Known-answer tests**: compare against hand calculations or published worked examples with explicit tolerances.
+- Each test should have a short docstring or comment explaining *what* it is checking and *why* the case is interesting.

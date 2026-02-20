@@ -119,7 +119,7 @@ export retail_loads, storage_loads, parking_loads, hospital_loads, school_loads
 # --- Pattern loading ---
 export PatternLoadCase, FULL_LOAD, CHECKERBOARD_ODD, CHECKERBOARD_EVEN, ADJACENT_PAIRS
 export requires_pattern_loading, generate_load_patterns, apply_load_pattern
-export pattern_case_name, MomentEnvelope
+export factored_pattern_loads, pattern_case_name
 
 # --- Materials ---
 export Metal, StructuralSteel, RebarSteel, Concrete, ReinforcedConcreteMaterial
@@ -130,9 +130,19 @@ export NWC_3000, NWC_4000, NWC_5000, NWC_6000, NWC_GGBS, NWC_PFA
 export RC_3000_60, RC_4000_60, RC_5000_60, RC_6000_60, RC_5000_75, RC_6000_75, RC_GGBS_60
 export Earthen_500, Earthen_1000, Earthen_2000, Earthen_4000, Earthen_8000
 export concrete_fc, concrete_fc_mpa, concrete_E, concrete_wc
+export AggregateType, siliceous, carbonate, sand_lightweight, lightweight
+
+# --- Fire protection ---
+export FireProtection, NoFireProtection, SFRM, IntumescentCoating, CustomCoating
+export SurfaceCoating, coating_weight_per_foot
+
+# --- Fire resistance (ACI 216.1) ---
+export min_thickness_fire, min_cover_fire_slab, min_cover_fire_beam
+export min_dimension_fire_column, min_cover_fire_column
+export sfrm_thickness_x772, intumescent_thickness_n643, compute_surface_coating
 
 # --- Section interface ---
-export section_area, section_depth, section_width, weight_per_length
+export section_area, section_depth, section_width, weight_per_length, bounding_box
 export Ix, Iy, Sx, Sy
 export to_asap_section
 
@@ -225,9 +235,10 @@ export PMDiagramPoint, PMInteractionDiagram, PMDiagramRect, PMDiagramCircular
 export generate_PM_diagram, get_nominal_curve, get_factored_curve
 export get_control_points, get_control_point
 export check_PM_capacity, capacity_at_axial, capacity_at_moment, utilization_ratio
-export calculate_PM_at_c_yaxis, calculate_phi_PM_at_c_yaxis
-export generate_PM_diagram_yaxis, generate_PM_diagrams_biaxial
-export effective_depth_yaxis
+export BendingAxis, StrongAxis, WeakAxis
+export generate_PM_diagrams_biaxial
+# calculate_PM_at_c, calculate_phi_PM_at_c, generate_PM_diagram, effective_depth
+# now dispatch on WeakAxis() for y-axis bending
 
 # --- ACI 318: column design ---
 export design_column_reinforcement, resize_column_with_reinforcement
@@ -264,7 +275,7 @@ export VaultNLPProblem, optimize_vault
 export RCColumnNLPProblem, RCColumnNLPResult, build_rc_column_nlp_result
 export size_rc_column_nlp, size_rc_columns_nlp
 export RCCircularNLPProblem, RCCircularNLPResult, build_rc_circular_nlp_result
-export size_rc_circular_column_nlp, size_rc_circular_columns_nlp
+# size_rc_column_nlp / size_rc_columns_nlp now dispatch on Type{RCCircularSection}
 export RCBeamNLPProblem, RCBeamNLPResult, build_rc_beam_nlp_result
 export size_rc_beam_nlp, size_rc_beams_nlp
 export RCTBeamNLPProblem, RCTBeamNLPResult, build_rc_tbeam_nlp_result
@@ -301,7 +312,9 @@ export SupportCondition, SIMPLE, ONE_END_CONT, BOTH_ENDS_CONT, CANTILEVER
 export floor_type, floor_symbol, infer_floor_type
 
 # --- Floor options ---
-export FloorOptions, FlatPlateOptions, OneWayOptions, VaultOptions, CompositeDeckOptions, TimberOptions
+export AbstractFloorOptions
+export FlatPlateOptions, FlatSlabOptions, OneWayOptions, VaultOptions, CompositeDeckOptions, TimberOptions
+export flat_slab  # convenience constructor for FlatSlabOptions
 export result_materials
 
 # --- Floor result types ---
@@ -320,8 +333,11 @@ export DISTRIBUTION_ONE_WAY, DISTRIBUTION_TWO_WAY, DISTRIBUTION_POINT, DISTRIBUT
 export default_tributary_axis, resolve_tributary_axis
 export materials, material_volumes
 
+# --- Minimum thickness (ACI deflection-control tables, all CIP types) ---
+export min_thickness
+
 # --- Flat plate calculations (ACI 318) ---
-export min_thickness_flat_plate, min_thickness_flat_slab, clear_span
+export clear_span
 export equivalent_square_column, circular_column_Ic
 export total_static_moment, distribute_moments_mddm, distribute_moments_aci
 export edge_beam_βt, aci_ddm_longitudinal_with_edge_beam, aci_col_strip_ext_neg_fraction
@@ -334,7 +350,7 @@ export MDDM_COEFFICIENTS, ACI_DDM_LONGITUDINAL
 export estimate_column_size, estimate_column_size_from_span, face_of_support_moment
 
 # --- Flat plate analysis methods ---
-export FlatPlateAnalysisMethod, DDM, EFM, FEA
+export FlatPlateAnalysisMethod, DDM, EFM, EFM_Kc, FEA, RuleOfThumb
 export MomentAnalysisResult
 export DDMApplicabilityError, EFMApplicabilityError
 export EFMSpanProperties, EFMJointStiffness, EFMModelCache, FEAModelCache
@@ -342,10 +358,13 @@ export build_efm_asap_model, solve_efm_frame!, extract_span_moments
 export distribute_moments_to_strips
 
 # --- Flat plate design helpers ---
-export check_punching_for_column, check_punching_at_drop_edge, check_punching_flat_slab
+export check_punching_for_column, check_punching_at_drop_edge, check_punching
 export design_strip_reinforcement, design_single_strip
 export build_slab_result, build_column_results
 export method_name, round_up_thickness
+export run_secondary_moment_analysis
+export solve_column_for_punching, target_aspect_ratio
+export grow_column!, grow_column_for_axial!
 export find_supporting_columns, build_frame_line, build_frame_lines_both_directions
 export compute_column_axial_loads, update_asap_column_sections!
 export check_pattern_loading_requirement, enforce_method_applicability
@@ -354,8 +373,8 @@ export check_pattern_loading_requirement, enforce_method_applicability
 export DropPanelGeometry, total_depth_at_drop, drop_extent_1, drop_extent_2
 export check_drop_panel_aci
 
-# --- Shear stud design (ACI 318-19 §22.6.8) ---
-export size_effect_factor_λs, punching_capacity_with_studs, punching_capacity_outer
+# --- Shear stud design (ACI 318-11 §11.11.5) ---
+export punching_capacity_with_studs, punching_capacity_outer
 export minimum_stud_reinforcement, stud_area, design_shear_studs, check_punching_with_studs
 
 # --- Moment transfer / integrity reinforcement ---
@@ -388,10 +407,11 @@ export equivalent_column_stiffness_Kec, distribution_factor_DF, carryover_factor
 export fixed_end_moment_FEM
 # --- Flat Slab / Drop Panel ---
 export FlatSlabOptions, as_flat_plate_options
-export column_stiffness_Kc_flat_slab, fixed_end_moment_FEM_flat_slab
+# column_stiffness_Kc and fixed_end_moment_FEM now dispatch on drop panel arity
 export DropSectionProperties, gross_section_at_drop, weighted_slab_thickness
-export min_thickness_flat_slab, slab_self_weight_with_drop
-export weighted_effective_Ie, check_two_way_deflection_flat_slab
+export slab_self_weight_with_drop
+export weighted_effective_Ie
+# check_two_way_deflection now dispatches on drop panel arity
 export STANDARD_DROP_DEPTHS_INCH
 
 # --- Slab sizing ---
@@ -470,12 +490,10 @@ export concrete_volume, steel_volume, footprint_area, footing_length, footing_wi
 
 # Foundation options
 export SpreadFootingOptions, StripFootingOptions, MatFootingOptions, FoundationOptions
-export AbstractMatMethod, RigidMat, Hetenyi, WinklerFEA
+export AbstractMatMethod, RigidMat, ShuklaAFM, WinklerFEA
 
 # Design functions
-export design_spread_footing
-export design_strip_footing
-export design_mat_footing
+export design_footing
 export recommend_foundation_strategy
 
 # =============================================================================
@@ -537,7 +555,7 @@ using PrecompileTools
                 _Ecs = Ec(_fc, _wc)
                 _Ecs1 = Ec(_fc)
 
-                _h   = min_thickness_flat_plate(20.0u"ft")
+                _h   = min_thickness(FlatPlate(), 20.0u"ft")
                 _sw  = slab_self_weight(_h, NWC_4000.ρ)
                 _ln  = clear_span(20.0u"ft", 16.0u"inch")
                 _M0  = total_static_moment(100.0psf, 20.0u"ft", _ln)
@@ -582,7 +600,7 @@ using PrecompileTools
                 _bw = 20.0u"ft"
                 _ln = clear_span(20.0u"ft", 16.0u"inch")
 
-                _Vu = one_way_shear_demand(100.0psf, _bw, _ln, 16.0u"inch", _d)
+                _Vu = one_way_shear_demand(100.0psf, _bw, _ln, _d)
                 _Vc = one_way_shear_capacity(_fc, _bw, _d)
                 check_one_way_shear(_Vu, _Vc)
             catch; end

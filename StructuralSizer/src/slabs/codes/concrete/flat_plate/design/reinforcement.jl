@@ -2,7 +2,7 @@
 # Flat Plate Reinforcement Design
 # =============================================================================
 #
-# Strip reinforcement design per ACI 318-19 §8.10.5 (transverse distribution).
+# Strip reinforcement design per ACI 318-11 §13.6.4 (transverse distribution).
 #
 # Note: This file is included in StructuralSizer, inheriting Logging, etc.
 # =============================================================================
@@ -71,14 +71,18 @@ function design_strip_reinforcement(moment_results, columns, h, d, fc, fy, cover
         design_single_strip(:int_neg, M_neg_int_ms, ms_width, d, fc, fy, h)
     ]
 
+    # Check if any strip has inadequate section
+    all_strips = vcat(column_strip_reinf, middle_strip_reinf)
+    section_adequate = all(sr.section_adequate for sr in all_strips)
+
     if verbose
         @debug "Column strip" width=cs_width
         for sr in column_strip_reinf
-            @debug "  $(sr.location)" Mu=uconvert(kip*u"ft", sr.Mu) As_reqd=sr.As_reqd As_provided=sr.As_provided
+            @debug "  $(sr.location)" Mu=uconvert(kip*u"ft", sr.Mu) As_reqd=sr.As_reqd As_provided=sr.As_provided adequate=sr.section_adequate
         end
         @debug "Middle strip" width=ms_width
         for sr in middle_strip_reinf
-            @debug "  $(sr.location)" Mu=uconvert(kip*u"ft", sr.Mu) As_reqd=sr.As_reqd As_provided=sr.As_provided
+            @debug "  $(sr.location)" Mu=uconvert(kip*u"ft", sr.Mu) As_reqd=sr.As_reqd As_provided=sr.As_provided adequate=sr.section_adequate
         end
     end
 
@@ -86,7 +90,8 @@ function design_strip_reinforcement(moment_results, columns, h, d, fc, fy, cover
         column_strip_width = cs_width,
         column_strip_reinf = column_strip_reinf,
         middle_strip_width = ms_width,
-        middle_strip_reinf = middle_strip_reinf
+        middle_strip_reinf = middle_strip_reinf,
+        section_adequate   = section_adequate,
     )
 end
 
@@ -102,24 +107,46 @@ Design reinforcement for a single strip location.
 - `d`: Effective depth
 - `fc`, `fy`: Material strengths
 - `h`: Slab thickness (for minimum reinforcement)
+
+# Returns
+`StripReinforcement` with `section_adequate = false` if the section is too thin
+(moment demand exceeds Whitney block capacity). Caller should increase depth.
 """
 function design_single_strip(location::Symbol, Mu, b, d, fc, fy, h)
     As_reqd = required_reinforcement(Mu, b, d, fc, fy)
     As_min = minimum_reinforcement(b, h, fy)
+
+    # Check for inadequate section (whitney.jl returns Inf when term > 1)
+    if isinf(As_reqd)
+        # Return a placeholder result with section_adequate = false
+        return StripReinforcement(
+            location,
+            to_newton_meters(Mu) * u"N*m",
+            Inf * u"m^2",
+            uconvert(u"m^2", As_min),
+            Inf * u"m^2",
+            0,              # no bar size
+            0.0u"m",        # no spacing
+            0,              # no bars
+            false           # section_adequate = false
+        )
+    end
+
     As_design = max(As_reqd, As_min)
-    
     bars = select_bars(As_design, b)
     
-    # Normalize all values to coherent SI (m², m, kN·m)
+    # Normalize all values to coherent SI (m², m, N·m)
+    # Use to_newton_meters for moment (handles kip·ft → N·m conversion)
     return StripReinforcement(
         location,
-        uconvert(u"kN*m", Mu),
+        to_newton_meters(Mu) * u"N*m",
         uconvert(u"m^2", As_reqd),
         uconvert(u"m^2", As_min),
         uconvert(u"m^2", bars.As_provided),
         bars.bar_size,
         uconvert(u"m", bars.spacing),
-        bars.n_bars
+        bars.n_bars,
+        true            # section_adequate = true
     )
 end
 

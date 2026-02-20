@@ -29,7 +29,7 @@ println("Testing design architecture types...")
     @testset "DesignParameters" begin
         params = DesignParameters()
         @test params.name == "default"
-        @test isnothing(params.concrete)  # No default concrete
+        @test params.materials.concrete === nothing  # No default concrete override
         
         # Custom params with concrete from StructuralSizer
         concrete = StructuralSizer.Concrete(
@@ -41,10 +41,10 @@ println("Testing design architecture types...")
         )
         params2 = DesignParameters(
             name = "4ksi Concrete",
-            concrete = concrete
+            materials = MaterialOptions(concrete = concrete),
         )
         @test params2.name == "4ksi Concrete"
-        @test params2.concrete.fc′ == 4000.0u"psi"
+        @test params2.materials.concrete.fc′ == 4000.0u"psi"
     end
     
     @testset "BuildingDesign" begin

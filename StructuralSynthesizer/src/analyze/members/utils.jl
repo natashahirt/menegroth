@@ -270,27 +270,6 @@ function classify_column_position(skel::BuildingSkeleton, vertex_idx::Int,
     return (position, boundary_edge_dirs)
 end
 
-# Legacy overload — uses geometry cache if available, else builds on-the-fly
-function classify_column_position(skel::BuildingSkeleton, vertex_idx::Int)
-    if !isnothing(skel.geometry)
-        return classify_column_position(skel, vertex_idx,
-                                        skel.geometry.vertex_coords,
-                                        skel.geometry.edge_face_counts)
-    end
-    # Fallback for uncached skeleton (shouldn't happen in normal flow)
-    vc_tmp = Matrix{Float64}(undef, length(skel.vertices), 3)
-    for i in eachindex(skel.vertices)
-        c = Meshes.coords(skel.vertices[i])
-        vc_tmp[i, 1] = ustrip(u"m", c.x)
-        vc_tmp[i, 2] = ustrip(u"m", c.y)
-        vc_tmp[i, 3] = ustrip(u"m", c.z)
-    end
-    efc_tmp = Dict{Int,Int}()
-    for fe in skel.face_edge_indices, e in fe
-        efc_tmp[e] = get(efc_tmp, e, 0) + 1
-    end
-    return classify_column_position(skel, vertex_idx, vc_tmp, efc_tmp)
-end
 
 """
     is_exterior_support(col::Column, span_axis::NTuple{2, Float64}) -> Bool
@@ -472,7 +451,7 @@ function member_group_demands(struc::BuildingStructure; member_edge_group::Symbo
     # may hold stale groups from a previous call with a different member type.
     build_member_groups!(struc; member_type=member_type)
 
-    all_group_ids = sort!(collect(keys(struc.member_groups)))
+    all_group_ids = sort(collect(keys(struc.member_groups)))
     n_groups = length(all_group_ids)
 
     # Use lazy-cached element-to-loads map (avoids O(n_loads) rebuild per call)
@@ -747,6 +726,7 @@ function _compute_flange_params(
         mg = struc.member_groups[gid]
 
         slab_hfs = typeof(1.0u"m")[]
+        sizehint!(slab_hfs, 4)  # typical: 1-4 edges per member group
         max_face_count = 0
         trib_w_m = 0.0  # meters
 
@@ -1376,7 +1356,8 @@ function _add_gravity_loads!(struc, edge_ids_in_group, gravity_factor)
 end
 
 # Helper: apply optimization results
-function _apply_column_results!(struc, result, group_ids, material, material_type, edge_ids_in_group)
+function _apply_column_results!(struc, result, group_ids, material, material_type, edge_ids_in_group;
+                                 I_factor::Real = 0.70)
     member_array = struc.columns
     
     for (g_idx, gid) in enumerate(group_ids)
@@ -1385,8 +1366,12 @@ function _apply_column_results!(struc, result, group_ids, material, material_typ
         mg = struc.member_groups[gid]
         mg.section = chosen
         
-        # Build ASAP section
-        asap_sec = StructuralSizer.to_asap_section(chosen, material)
+        # Build ASAP section (I_factor only applies to concrete per ACI 318-14 §6.6.3.1.1)
+        asap_sec = if material_type === :concrete
+            StructuralSizer.to_asap_section(chosen, material; I_factor=I_factor)
+        else
+            StructuralSizer.to_asap_section(chosen, material)
+        end
         
         for m_idx in mg.member_indices
             m = member_array[m_idx]

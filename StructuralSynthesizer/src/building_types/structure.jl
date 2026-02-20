@@ -43,7 +43,7 @@ mutable struct BuildingStructure{T, A, P} <: AbstractBuildingStructure
     member_groups::Dict{UInt64, MemberGroup}
     
     # ─── Foundations ───
-    supports::Vector{Support{T, typeof(1.0u"kN"), typeof(1.0u"kN*m")}}
+    supports::Vector{Support{T, typeof(1.0u"kN"), typeof(1.0u"kN*m"), typeof(1.0u"inch")}}
     foundations::Vector{Foundation{T, <:AbstractFoundationResult}}
     foundation_groups::Dict{UInt64, FoundationGroup}
     
@@ -57,6 +57,8 @@ mutable struct BuildingStructure{T, A, P} <: AbstractBuildingStructure
     # ─── Analysis Backend ───
     asap_model::Asap.Model
     cell_tributary_loads::Dict{Int, Vector{Asap.TributaryLoad}}
+    cell_dead_loads::Dict{Int, Vector{Asap.TributaryLoad}}   # Pattern loading: dead-only
+    cell_live_loads::Dict{Int, Vector{Asap.TributaryLoad}}   # Pattern loading: live-only
     
     # ─── Design Snapshot (for parametric studies) ───
     _snapshot::Union{Nothing, DesignSnapshot{T, P}}
@@ -67,16 +69,19 @@ function BuildingStructure(skel::BuildingSkeleton{T}) where T
     P = typeof(1.0u"kN/m^2")
     F = typeof(1.0u"kN")
     M = typeof(1.0u"kN*m")
+    Lc = typeof(1.0u"inch")
     BuildingStructure{T, A, P}(
         skel,
         Cell{T, A, P}[], Dict{UInt64, CellGroup}(),
         Slab{T}[], Dict{UInt64, SlabGroup}(), Vector{Int}[],
         Segment{T}[], Beam{T}[], Column{T}[], Strut{T}[], Dict{UInt64, MemberGroup}(),
-        Support{T, F, M}[], Foundation{T, AbstractFoundationResult}[], Dict{UInt64, FoundationGroup}(),
+        Support{T, F, M, Lc}[], Foundation{T, AbstractFoundationResult}[], Dict{UInt64, FoundationGroup}(),
         SiteConditions(),
         TributaryCache(),
         Dict{Int, Dict{Symbol, Any}}(),
         Asap.Model(Asap.Node[], Asap.Element[], Asap.AbstractLoad[]),
+        Dict{Int, Vector{Asap.TributaryLoad}}(),
+        Dict{Int, Vector{Asap.TributaryLoad}}(),
         Dict{Int, Vector{Asap.TributaryLoad}}(),
         nothing,  # _snapshot
     )
@@ -85,16 +90,19 @@ end
 function BuildingStructure{T, A, P}(skel::BuildingSkeleton{T}) where {T, A, P}
     F = typeof(1.0u"kN")
     M = typeof(1.0u"kN*m")
+    Lc = typeof(1.0u"inch")
     BuildingStructure{T, A, P}(
         skel,
         Cell{T, A, P}[], Dict{UInt64, CellGroup}(),
         Slab{T}[], Dict{UInt64, SlabGroup}(), Vector{Int}[],
         Segment{T}[], Beam{T}[], Column{T}[], Strut{T}[], Dict{UInt64, MemberGroup}(),
-        Support{T, F, M}[], Foundation{T, AbstractFoundationResult}[], Dict{UInt64, FoundationGroup}(),
+        Support{T, F, M, Lc}[], Foundation{T, AbstractFoundationResult}[], Dict{UInt64, FoundationGroup}(),
         SiteConditions(),
         TributaryCache(),
         Dict{Int, Dict{Symbol, Any}}(),
         Asap.Model(Asap.Node[], Asap.Element[], Asap.AbstractLoad[]),
+        Dict{Int, Vector{Asap.TributaryLoad}}(),
+        Dict{Int, Vector{Asap.TributaryLoad}}(),
         Dict{Int, Vector{Asap.TributaryLoad}}(),
         nothing,  # _snapshot
     )

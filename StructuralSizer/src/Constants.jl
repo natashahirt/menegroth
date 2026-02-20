@@ -17,10 +17,10 @@ const BIG_M = 1e9
 export BIG_M
 
 # =============================================================================
-# ACI 318-19 Code Constants
+# ACI 318-11 Code Constants
 # =============================================================================
 
-# §24.3.2 — Crack control stress limit (psi)
+# §10.6.4 — Crack control stress limit (psi)
 const ACI_CRACK_CONTROL_FS_PSI = 40000
 
 export ACI_CRACK_CONTROL_FS_PSI
@@ -53,7 +53,7 @@ export PCA_K_SLAB, PCA_K_COL, PCA_M_FACTOR, PCA_COF
 # They are NOT used in production analysis.  See efm.jl for the ASAP-only
 # EFM path for flat slabs.
 #
-# Reference values from StructurePoint DE-Two-Way-Flat-Slab (ACI 318-14):
+# Reference values from StructurePoint DE-Two-Way-Flat-Slab (ACI 318-11):
 #   c/l = 20/(30×12) = 0.056, a/l ≈ 5/30 = 0.167
 # =============================================================================
 

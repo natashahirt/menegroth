@@ -2,7 +2,7 @@
 
 julia_version = "1.12.4"
 manifest_format = "2.0"
-project_hash = "4d8213b0450c840f509fc9be444f71aa5940b444"
+project_hash = "6b290581fe18d70dfc552b51f040d09f0c5c07b5"
 
 [[deps.ASL_jll]]
 deps = ["Artifacts", "JLLWrappers", "Libdl", "Pkg"]
@@ -1135,7 +1135,7 @@ uuid = "856f2bd8-1eba-4b0a-8007-ebc267875bd4"
 version = "1.11.0"
 
 [[deps.StructuralSizer]]
-deps = ["Asap", "CSV", "Gurobi", "HiGHS", "Ipopt", "JSON3", "JuMP", "Logging", "Meshes", "ProgressMeter", "QuadGK", "Reexport", "Roots", "Unitful"]
+deps = ["Asap", "CSV", "Gurobi", "HiGHS", "Ipopt", "JSON3", "JuMP", "LinearAlgebra", "Logging", "Meshes", "PrecompileTools", "Printf", "ProgressMeter", "QuadGK", "Reexport", "Roots", "SpecialFunctions", "Unitful"]
 path = "."
 uuid = "9d8e7f6a-5b4c-3d2e-1f0a-9b8c7d6e5f4a"
 version = "0.1.0"

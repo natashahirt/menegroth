@@ -1,5 +1,5 @@
 # =============================================================================
-# ACI 318-14 Spread (Isolated) Footing Design
+# ACI 318-11 Spread (Isolated) Footing Design
 # =============================================================================
 #
 # Full 7-step StructurePoint workflow:
@@ -13,7 +13,7 @@
 #
 # Fully Unitful throughout — only strips at ACI √f'c formula boundaries.
 # Uses shared punching_check() with biaxial unbalanced moment transfer.
-# Reference: StructurePoint ACI 318-14, Wight 7th Ed. Ex 15-2.
+# Reference: StructurePoint ACI 318-11, Wight 7th Ed. Ex 15-2.
 # =============================================================================
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -107,9 +107,9 @@ end
 # ─────────────────────────────────────────────────────────────────────────────
 
 """
-    design_spread_footing(demand, soil; opts) → SpreadFootingResult
+    design_footing(::SpreadFooting, demand, soil; opts) → SpreadFootingResult
 
-Design a spread (isolated) footing per ACI 318-14 with full unbalanced-moment
+Design a spread (isolated) footing per ACI 318-11 with full unbalanced-moment
 punching shear transfer (ACI §8.4.4.2).
 
 Uses the StructurePoint 7-step workflow:
@@ -137,10 +137,10 @@ Uses the StructurePoint 7-step workflow:
 d = FoundationDemand(1; Pu=912.0kip, Ps=670.0kip)
 s = Soil(5.37ksf, 18.0u"kN/m^3", 30.0, 0.0u"kPa", 25.0u"MPa")
 opts = SpreadFootingOptions(material=RC_3000_60, pier_c1=18u"inch", pier_c2=18u"inch")
-result = design_spread_footing(d, s; opts)
+result = design_footing(SpreadFooting(), d, s; opts)
 ```
 """
-function design_spread_footing(
+function design_footing(::SpreadFooting,
     demand::FoundationDemand,
     soil::Soil;
     opts::SpreadFootingOptions = SpreadFootingOptions()

@@ -1,9 +1,9 @@
 # ==============================================================================
-# ACI 318-19 Circular Column P-M Interaction
+# ACI 318-11 Circular Column P-M Interaction
 # ==============================================================================
 # Strain compatibility analysis for circular reinforced concrete columns.
 # Reference: StructurePoint "Interaction Diagram - Circular Spiral Reinforced
-#            Concrete Column (ACI 318-19)"
+#            Concrete Column (ACI 318-11)"
 #
 # Uses unified material utilities from aci_material_utils.jl
 # Uses PMInteractionDiagram{RCCircularSection} from column_pm_rect.jl
@@ -29,7 +29,7 @@ NamedTuple with:
 - `c`: Neutral axis depth used (in)
 
 # Notes
-Uses Whitney stress block with circular segment geometry per ACI 318-19.
+Uses Whitney stress block with circular segment geometry per ACI 318-11.
 Sign convention: compression positive for forces, tension positive for strain.
 
 Coordinate system:
@@ -148,7 +148,7 @@ end
 """
     pure_compression_capacity(section::RCCircularSection, mat) -> Float64
 
-Calculate pure axial compression capacity P0 per ACI 318-19.
+Calculate pure axial compression capacity P0 per ACI 318-11.
 
 P0 = 0.85 * f'c * (Ag - As) + fy * As
 """
@@ -166,7 +166,7 @@ end
 """
     max_compression_capacity(section::RCCircularSection, mat) -> Float64
 
-Calculate maximum permitted compression per ACI 318-19 Section 22.4.2.
+Calculate maximum permitted compression per ACI 318-11 §10.3.6.
 
 Pn,max = α * P0, where:
 - α = 0.80 for tied columns
@@ -229,7 +229,7 @@ const PMInteractionDiagramCircular = PMInteractionDiagram{RCCircularSection}
 """
     generate_PM_diagram(section::RCCircularSection, mat; n_intermediate::Int=20)
 
-Generate a complete P-M interaction diagram for a circular section per ACI 318-19.
+Generate a complete P-M interaction diagram for a circular section per ACI 318-11.
 
 # Arguments
 - `section`: RC circular column section

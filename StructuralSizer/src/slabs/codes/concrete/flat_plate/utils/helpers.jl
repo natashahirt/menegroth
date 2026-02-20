@@ -40,8 +40,14 @@ method_name(method::DDM) = method.variant == :simplified ? "MDDM (Simplified)" :
 """Display name for EFM analysis method."""
 method_name(method::EFM) = "EFM (ACI 8.11, $(method.solver == :asap ? "ASAP FEM" : "Hardy Cross"))"
 
+"""Display name for EFM_Kc analysis method (raw column stiffness, no torsional reduction)."""
+method_name(method::EFM_Kc) = "EFM_Kc (Kc only, $(method.solver == :asap ? "ASAP FEM" : "Hardy Cross"))"
+
 """Display name for FEA analysis method."""
 method_name(method::FEA) = "FEA (Shell + Springs, edge=$(method.target_edge))"
+
+"""Display name for RuleOfThumb analysis method."""
+method_name(::RuleOfThumb) = "ACI Min"
 
 """
     round_up_thickness(h, increment) -> Length
@@ -158,7 +164,8 @@ function compute_column_axial_loads(struc, columns, slab_cell_indices, sw_estima
             sw = iszero(cell.self_weight) ? sw_estimate : cell.self_weight
             qD = cell.sdl + sw
             qL = cell.live_load
-            q_factored = qD * 1.2 + qL * 1.6
+            # Governing of 1.2D+1.6L vs 1.4D (ASCE 7 §2.3.1)
+            q_factored = max(qD * 1.2 + qL * 1.6, qD * 1.4)
             
             load += q_factored * area
         end
@@ -174,21 +181,23 @@ end
 # =============================================================================
 
 """
-    update_asap_column_sections!(struc, columns, material::Concrete)
+    update_asap_column_sections!(struc, columns, material::Concrete; I_factor=0.70)
 
 Propagate final column geometry to Asap model after design converges.
 
 Updates Asap elements with final column sections so subsequent structural 
-analyses reflect the actual column sizes.
+analyses reflect the actual column sizes.  `I_factor` is the cracking
+reduction per ACI 318-11 §10.10.4.1 (default 0.70 for columns).
 """
-function update_asap_column_sections!(struc, columns, material::Concrete)
+function update_asap_column_sections!(struc, columns, material::Concrete;
+                                      I_factor::Real = 0.70)
     model = struc.asap_model
     
     for col in columns
         section = col.base.section
         isnothing(section) && continue
         
-        asap_sec = to_asap_section(section, material)
+        asap_sec = to_asap_section(section, material; I_factor=I_factor)
         
         for seg_idx in col.base.segment_indices
             edge_idx = struc.segments[seg_idx].edge_idx
@@ -211,7 +220,7 @@ end
 """
     check_pattern_loading_requirement(moment_results; verbose=false, threshold=0.75)
 
-Check if pattern loading may be required per ACI 318-14 §6.4.3.2.
+Check if pattern loading may be required per ACI 318-11 §13.7.6.
 
 When L/D > 0.75, pattern loading can increase peak moments by up to 15%.
 Issues a warning if the ratio exceeds the threshold.
@@ -228,9 +237,13 @@ function check_pattern_loading_requirement(moment_results; verbose::Bool=false, 
     ratio = ustrip(qL) / qD_val
     
     if ratio > threshold
-        @warn "L/D = $(round(ratio, digits=2)) > $threshold. " *
-              "Pattern loading may be required per ACI 318-14 §6.4.3.2. " *
-              "Results may underestimate peak moments by up to 15%." qL qD
+        if hasproperty(moment_results, :pattern_loading) && moment_results.pattern_loading
+            verbose && @debug "Pattern loading applied (ACI 13.7.6)" L_D=round(ratio, digits=2)
+        else
+            @warn "L/D = $(round(ratio, digits=2)) > $threshold. " *
+                  "Pattern loading required per ACI 318-11 §13.7.6 but not applied " *
+                  "(DDM assumes uniform loading)." qL qD
+        end
     elseif verbose
         @debug "Pattern loading check" L_D_ratio=round(ratio, digits=2) threshold=threshold status="OK"
     end
@@ -244,7 +257,7 @@ Enforce that DDM is valid for the given geometry. Throws if not applicable.
 function enforce_method_applicability(method::DDM, struc, slab, columns; verbose::Bool=false, ρ_concrete::Density = NWC_4000.ρ)
     if verbose
         @debug "───────────────────────────────────────────────────────────────────"
-        @debug "CHECKING DDM APPLICABILITY (ACI 318-19 §8.10.2)"
+        @debug "CHECKING DDM APPLICABILITY (ACI 318-11 §13.6.1)"
         @debug "───────────────────────────────────────────────────────────────────"
     end
     
@@ -263,7 +276,7 @@ Enforce that EFM is valid for the given geometry. Throws if not applicable.
 function enforce_method_applicability(method::EFM, struc, slab, columns; verbose::Bool=false, kwargs...)
     if verbose
         @debug "───────────────────────────────────────────────────────────────────"
-        @debug "CHECKING EFM APPLICABILITY (ACI 318-19 §8.11)"
+        @debug "CHECKING EFM APPLICABILITY (ACI 318-11 §13.7)"
         @debug "───────────────────────────────────────────────────────────────────"
     end
     
@@ -271,6 +284,25 @@ function enforce_method_applicability(method::EFM, struc, slab, columns; verbose
     
     if verbose && result.ok
         @debug "EFM applicability check: ✓ PASSED"
+    end
+end
+
+"""
+    enforce_method_applicability(method::EFM_Kc, struc, slab, columns; verbose=false)
+
+Enforce that EFM_Kc is valid. Uses same applicability checks as EFM.
+"""
+function enforce_method_applicability(method::EFM_Kc, struc, slab, columns; verbose::Bool=false, kwargs...)
+    if verbose
+        @debug "───────────────────────────────────────────────────────────────────"
+        @debug "CHECKING EFM_Kc APPLICABILITY (same as EFM, ACI 318-11 §13.7)"
+        @debug "───────────────────────────────────────────────────────────────────"
+    end
+    
+    result = check_efm_applicability(struc, slab, columns; throw_on_failure=true)
+    
+    if verbose && result.ok
+        @debug "EFM_Kc applicability check: ✓ PASSED"
     end
 end
 

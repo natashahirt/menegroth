@@ -29,8 +29,8 @@ println("Testing ACI 318-14 Strip (Combined) Footing Design...")
 # =============================================================================
 
 # Demands
-d_ext = FoundationDemand(1; Pu=480.0kip, Ps=350.0kip)
-d_int = FoundationDemand(2; Pu=720.0kip, Ps=525.0kip)
+d_ext = FoundationDemand(1; Pu=480.0kip, Ps=350.0kip, c1=18.0u"inch", c2=18.0u"inch")
+d_int = FoundationDemand(2; Pu=720.0kip, Ps=525.0kip, c1=18.0u"inch", c2=18.0u"inch")
 
 # The reference uses pre-computed net qa ≈ 4.37 ksf (after footing weight, etc.)
 # From the reference: total area = 25.33 × 8 = 202.67 ft²
@@ -57,7 +57,7 @@ opts = StripFootingOptions(
 )
 
 println("Designing strip footing...")
-result = design_strip_footing([d_ext, d_int], positions, soil; opts)
+result = design_footing(StripFooting(), [d_ext, d_int], positions, soil; opts)
 
 # Extract results
 B_in = ustrip(u"inch", result.B)

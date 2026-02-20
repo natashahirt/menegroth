@@ -28,7 +28,7 @@
 #   - Per-element precomputed data (centroid, area, LCS, bending moments)
 #     is rebuilt once after each solve.
 #
-# Reference: ACI 318-19 §8.2.1
+# Reference: ACI 318-11 §13.2.1
 # =============================================================================
 
 using Logging
@@ -40,13 +40,16 @@ using Meshes: coords
 # =============================================================================
 
 """Per-element precomputed data: extracted once after each solve."""
-struct FEAElementData
+mutable struct FEAElementData
     cx::Float64;  cy::Float64      # centroid (m)
     area::Float64                  # m²
     Mxx::Float64; Myy::Float64; Mxy::Float64  # bending moments (N·m/m)
     ex::NTuple{2,Float64}         # local x̂ projected to 2D
     ey::NTuple{2,Float64}         # local ŷ projected to 2D
 end
+
+# Column stub data for FEA cache: element + connection nodes.
+const ColStubData = NamedTuple{(:element, :base_node, :slab_node)}
 
 """
     FEAModelCache
@@ -66,16 +69,20 @@ mutable struct FEAModelCache
 
     # Asap model + column stubs (persistent across iterations)
     model::Union{Nothing, Asap.Model}
-    col_stubs::Dict{Int, Any}         # i => (element, base_node, slab_node)
-    shells::Any                       # Asap.Shell (spec)
+    col_stubs::Dict{Int, ColStubData}   # i => (element, base_node, slab_node)
+    shells::Union{Nothing, Vector{<:Asap.ShellElement}}  # shell elements from mesher
 
     # Per-element precomputed data (rebuilt after each solve)
     element_data::Vector{FEAElementData}
     cell_tri_indices::Dict{Int, Vector{Int}}   # cell_idx → indices into element_data
 
+    # Cell geometry cache (mesh-invariant — polygon, centroid, bbox)
+    cell_geometries::Dict{Int, NamedTuple}
+
     FEAModelCache() = new(
-        false, nothing, Dict{Int,Any}(), nothing,
-        FEAElementData[], Dict{Int,Vector{Int}}()
+        false, nothing, Dict{Int,ColStubData}(), nothing,
+        FEAElementData[], Dict{Int,Vector{Int}}(),
+        Dict{Int,NamedTuple}()
     )
 end
 
@@ -169,16 +176,21 @@ end
 # =============================================================================
 
 """
-    _column_stub_section(col, Ec, ν_concrete) -> Section
+    _column_stub_section(col, Ec, ν_concrete; I_factor=0.70) -> Section
 
 Build an Asap.Section for a column stub.  Properties are doubled to
 represent the combined stiffness of upper + lower column halves
 (each modeled as fixed-fixed, height Lc/2).
 
+`I_factor` reduces the gross moment of inertia for cracking per
+ACI 318-11 §10.10.4.1 (default 0.70 for columns).  Area is kept
+at gross (cracking reduces flexural stiffness, not axial area).
+
 For circular columns (col.shape == :circular), uses circular section
 properties: A = πD²/4, I = πD⁴/64, J = πD⁴/32.
 """
-function _column_stub_section(col, Ec::Pressure, ν_concrete::Float64)
+function _column_stub_section(col, Ec::Pressure, ν_concrete::Float64;
+                               I_factor::Float64 = 0.70)
     cshape = col_shape(col)
     c1 = col.c1
     c2 = col.c2
@@ -186,12 +198,12 @@ function _column_stub_section(col, Ec::Pressure, ν_concrete::Float64)
     if cshape == :circular
         D = c1   # c1 = c2 = diameter for circular
         A  = 2 * π * D^2 / 4
-        Ix = 2 * π * D^4 / 64
+        Ix = 2 * I_factor * π * D^4 / 64
         Iy = Ix
     else
         A  = 2 * c1 * c2
-        Ix = 2 * c1 * c2^3 / 12
-        Iy = 2 * c2 * c1^3 / 12
+        Ix = 2 * I_factor * c1 * c2^3 / 12
+        Iy = 2 * I_factor * c2 * c1^3 / 12
     end
 
     J = Ix + Iy
@@ -236,6 +248,7 @@ function _build_fea_slab_model(
     target_edge::Union{Nothing, Length} = nothing,
     verbose::Bool = false,
     drop_panel::Union{Nothing, DropPanelGeometry} = nothing,
+    col_I_factor::Float64 = 0.70,
 )
     skel = struc.skeleton
 
@@ -293,7 +306,7 @@ function _build_fea_slab_model(
         push!(base_nodes, base)
 
         # Column stub (doubled section → combined upper + lower stiffness)
-        sec = _column_stub_section(col, Ecs, ν_concrete)
+        sec = _column_stub_section(col, Ecs, ν_concrete; I_factor=col_I_factor)
         elem = Asap.Element(base, slab_node, sec, :col_stub)
         push!(frame_elements, elem)
 
@@ -449,7 +462,8 @@ and load, then re-process and re-solve without re-triangulating.
 """
 function _update_and_resolve!(
     cache::FEAModelCache, h, Ecs, ν_concrete, qu, columns, Lc;
-    verbose::Bool = false
+    verbose::Bool = false,
+    col_I_factor::Float64 = 0.70,
 )
     model = cache.model
     t_m = ustrip(u"m", h)
@@ -462,22 +476,21 @@ function _update_and_resolve!(
         elem.ν = ν_concrete
     end
 
-    # 2. Update load magnitude
+    # 2. Update load magnitude (geometry unchanged — no need to rebuild tributaries)
     for load in model.loads
         if load isa Asap.AreaLoad
             load.pressure = uconvert(u"Pa", qu)
-            load._tributary_loads = nothing
         end
     end
 
     # 3. Update column stub sections (column sizes may have changed)
     for (i, col) in enumerate(columns)
         haskey(cache.col_stubs, i) || continue
-        cache.col_stubs[i].element.section = _column_stub_section(col, Ecs, ν_concrete)
+        cache.col_stubs[i].element.section = _column_stub_section(col, Ecs, ν_concrete; I_factor=col_I_factor)
     end
 
-    # 4. Reprocess and solve (process! rebuilds K and S from all elements)
-    Asap.process!(model)
+    # 4. Values-only update: geometry/topology unchanged, only h/E/ν/qu changed
+    Asap.update!(model; values_only=true)
     Asap.solve!(model)
 
     if verbose
@@ -502,45 +515,52 @@ This replaces per-element calls to `bending_moments()`, `shell_centroid()`,
 and `shell_tris_in_region()` during strip integration.
 """
 function _precompute_element_data!(cache::FEAModelCache, model, struc, slab)
-    shell_vec = Asap.ShellTri3[e for e in model.shell_elements if e isa Asap.ShellTri3]
+    shell_vec = model.shell_elements
     n = length(shell_vec)
 
     # Geometry (centroid, area, LCS) is mesh-invariant; only moments change.
     first_pass = isempty(cache.element_data)
 
-    resize!(cache.element_data, n)
-    for k in 1:n
-        tri = shell_vec[k]
-        M = Asap.bending_moments(tri, model.u)
-        if first_pass
+    # Thread-local workspace for zero-alloc bending_moments!
+    ws = Asap.ShellMomentWorkspace()
+    M_buf = zeros(3)
+
+    if first_pass
+        resize!(cache.element_data, n)
+        @inbounds for k in 1:n
+            tri = shell_vec[k]
+            tri isa Asap.ShellTri3 || continue
+            Asap.bending_moments!(M_buf, tri, model.u, ws)
             tc = Asap.shell_centroid(tri)
             cache.element_data[k] = FEAElementData(
                 tc.x, tc.y, tri.area,
-                M[1], M[2], M[3],
+                M_buf[1], M_buf[2], M_buf[3],
                 (tri.LCS[1][1], tri.LCS[1][2]),
                 (tri.LCS[2][1], tri.LCS[2][2]),
             )
-        else
-            ed = cache.element_data[k]
-            cache.element_data[k] = FEAElementData(
-                ed.cx, ed.cy, ed.area,
-                M[1], M[2], M[3],
-                ed.ex, ed.ey,
-            )
         end
-    end
 
-    # Cell → triangle index mapping: mesh-invariant, only compute on first pass
-    if first_pass
+        # Cell → triangle index mapping (mesh-invariant)
         empty!(cache.cell_tri_indices)
         for ci in slab.cell_indices
-            geom = _cell_geometry_m(struc, ci)
+            geom = _cell_geometry_m(struc, ci; _cache=cache.cell_geometries)
             indices = Int[]
             for k in 1:n
                 ed = cache.element_data[k]
                 Asap._point_in_polygon((ed.cx, ed.cy), geom.poly) && push!(indices, k)
             end
             cache.cell_tri_indices[ci] = indices
+        end
+    else
+        # ── Moments-only update: geometry unchanged, just overwrite Mxx/Myy/Mxy ──
+        @inbounds for k in 1:n
+            tri = shell_vec[k]
+            tri isa Asap.ShellTri3 || continue
+            Asap.bending_moments!(M_buf, tri, model.u, ws)
+            ed = cache.element_data[k]
+            ed.Mxx = M_buf[1]
+            ed.Myy = M_buf[2]
+            ed.Mxy = M_buf[3]
         end
     end
 end
@@ -562,18 +582,21 @@ function _build_or_update_fea!(
     target_edge::Union{Nothing, Length} = nothing,
     verbose::Bool = false,
     drop_panel::Union{Nothing, DropPanelGeometry} = nothing,
+    col_I_factor::Float64 = 0.70,
 )
     if !cache.initialized
         fea = _build_fea_slab_model(
             struc, slab, columns, h, Ecs, ν_concrete, qu, Lc;
-            target_edge=target_edge, verbose=verbose, drop_panel=drop_panel
+            target_edge=target_edge, verbose=verbose, drop_panel=drop_panel,
+            col_I_factor=col_I_factor,
         )
         cache.model      = fea.model
         cache.col_stubs  = fea.col_stubs
         cache.shells     = fea.shells
         cache.initialized = true
     else
-        _update_and_resolve!(cache, h, Ecs, ν_concrete, qu, columns, Lc; verbose=verbose)
+        _update_and_resolve!(cache, h, Ecs, ν_concrete, qu, columns, Lc;
+                             verbose=verbose, col_I_factor=col_I_factor)
     end
 
     _precompute_element_data!(cache, cache.model, struc, slab)
@@ -629,15 +652,19 @@ function _extract_fea_column_forces(col_stubs, span_axis::NTuple{2, Float64}, n_
     Vu  = Vector{ForceT}(undef, n_cols)
     Mu  = Vector{MomentT}(undef, n_cols)
     Mub = Vector{MomentT}(undef, n_cols)
+    Mx  = Vector{MomentT}(undef, n_cols)
+    My  = Vector{MomentT}(undef, n_cols)
 
     for i in 1:n_cols
         f = _extract_stub_forces(col_stubs[i])
         Vu[i]  = uconvert(kip, abs(f.Fz))
         Mu[i]  = uconvert(kip * u"ft", hypot(f.Mx, f.My))
         Mub[i] = uconvert(kip * u"ft", abs(ax[1] * f.My - ax[2] * f.Mx))
+        Mx[i]  = uconvert(kip * u"ft", f.Mx)
+        My[i]  = uconvert(kip * u"ft", f.My)
     end
 
-    return (Vu=Vu, Mu=Mu, Mub=Mub)
+    return (Vu=Vu, Mu=Mu, Mub=Mub, Mx=Mx, My=My)
 end
 
 # =============================================================================
@@ -650,7 +677,12 @@ end
 Polygon vertices and centroid of a cell, both in meters (bare Float64).
 Reads directly from skeleton face data — no redundant lookups.
 """
-function _cell_geometry_m(struc, cell_idx::Int)
+function _cell_geometry_m(struc, cell_idx::Int; _cache::Union{Nothing, Dict} = nothing)
+    if !isnothing(_cache)
+        cached = get(_cache, cell_idx, nothing)
+        !isnothing(cached) && return cached
+    end
+
     skel = struc.skeleton
     cell = struc.cells[cell_idx]
     vis = skel.face_vertex_indices[cell.face_idx]
@@ -660,7 +692,9 @@ function _cell_geometry_m(struc, cell_idx::Int)
     c = coords(Meshes.centroid(face))
     centroid = (Float64(ustrip(u"m", c.x)), Float64(ustrip(u"m", c.y)))
 
-    return (poly=poly, centroid=centroid)
+    result = (poly=poly, centroid=centroid)
+    !isnothing(_cache) && (_cache[cell_idx] = result)
+    return result
 end
 
 """
@@ -755,10 +789,16 @@ function _extract_cell_strip_moments(
     span_axis::NTuple{2,Float64};
     verbose::Bool = false
 )
-    xs = [v[1] for v in cell_poly]
-    ys = [v[2] for v in cell_poly]
-    x_lo, x_hi = minimum(xs), maximum(xs)
-    y_lo, y_hi = minimum(ys), maximum(ys)
+    # Inline extrema — avoids allocating xs/ys arrays
+    x_lo, x_hi = Inf, -Inf
+    y_lo, y_hi = Inf, -Inf
+    @inbounds for v in cell_poly
+        vx, vy = v[1], v[2]
+        vx < x_lo && (x_lo = vx)
+        vx > x_hi && (x_hi = vx)
+        vy < y_lo && (y_lo = vy)
+        vy > y_hi && (y_hi = vy)
+    end
     cx, cy = cell_centroid
 
     Lx = x_hi - x_lo
@@ -771,13 +811,13 @@ function _extract_cell_strip_moments(
     tri_idx = get(cache.cell_tri_indices, ci, Int[])
 
     # Column negative moments (M⁻) at column face
-    col_Mneg = Float64[]
-    for col in cell_cols
+    col_Mneg = Vector{Float64}(undef, length(cell_cols))
+    for (col_i, col) in enumerate(cell_cols)
         px, py = _vertex_xy_m(skel, col.vertex_idx)
         off = _column_face_offset_m(col, span_axis)
         face = (px + off * span_axis[1], py + off * span_axis[2])
         Mn = max(0.0, _integrate_at(cache.element_data, tri_idx, face, span_axis, δ))
-        push!(col_Mneg, Mn)
+        col_Mneg[col_i] = Mn
 
         verbose && @debug "  Col $(col.vertex_idx) ($(col.position)): " *
                           "M⁻=$(round(Mn, digits=0)) N·m  (δ=$(round(δ*1000, digits=0))mm)"
@@ -828,7 +868,7 @@ function _extract_cell_moments(
         cell_cols = get(cell_to_cols, ci, eltype(columns)[])
         isempty(cell_cols) && continue
 
-        geom = _cell_geometry_m(struc, ci)
+        geom = _cell_geometry_m(struc, ci; _cache=cache.cell_geometries)
 
         r = _extract_cell_strip_moments(
             cache, skel, ci, geom.poly, geom.centroid, cell_cols,
@@ -892,6 +932,7 @@ function run_moment_analysis(
     efm_cache = nothing,  # API parity (unused by FEA)
     drop_panel::Union{Nothing, DropPanelGeometry} = nothing,
     βt::Float64 = 0.0,  # API parity (unused by FEA — torsion in shell model)
+    col_I_factor::Float64 = 0.70,  # ACI 318-11 §10.10.4.1
 )
     setup = _moment_analysis_setup(struc, slab, supporting_columns, h, γ_concrete)
     (; l1, l2, ln, span_axis, c1_avg, qD, qL, qu, M0) = setup
@@ -913,7 +954,8 @@ function run_moment_analysis(
     end
     _build_or_update_fea!(
         cache, struc, slab, supporting_columns, h, Ecs, ν_concrete, qu, Lc;
-        target_edge=method.target_edge, verbose=verbose, drop_panel=drop_panel
+        target_edge=method.target_edge, verbose=verbose, drop_panel=drop_panel,
+        col_I_factor=col_I_factor,
     )
     model = cache.model
 
@@ -937,11 +979,17 @@ function run_moment_analysis(
     Rz_kN  = round(total_Rz_fe / 1e3, digits=2)
     Pz_kN  = round(total_Pz / 1e3, digits=2)
     res_kN = round(fe_residual / 1e3, digits=4)
-    @info "EQUILIBRIUM (direct FE)" ΣRz_kN=Rz_kN ΣPz_kN=Pz_kN residual_kN=res_kN FE_err_pct=round(fe_equil_err, digits=4) A_from_P_m²=round(A_mesh_from_P, digits=3) A_elem_m²=round(A_elem_data, digits=3) area_Δ_pct=round(area_mismatch, digits=2)
-    if fe_equil_err > 1.0
+    @debug "EQUILIBRIUM (direct FE)" ΣRz_kN=Rz_kN ΣPz_kN=Pz_kN residual_kN=res_kN FE_err_pct=round(fe_equil_err, digits=4) A_from_P_m²=round(A_mesh_from_P, digits=3) A_elem_m²=round(A_elem_data, digits=3) area_Δ_pct=round(area_mismatch, digits=2)
+    # Soft warn at 1 %, hard error at 5 %
+    if fe_equil_err > 5.0
+        error("FEA equilibrium error $(round(fe_equil_err, digits=2))% exceeds 5 % — results unreliable. Check mesh / BCs.")
+    elseif fe_equil_err > 1.0
         @warn "FEA direct equilibrium error $(round(fe_equil_err, digits=2))%"
     end
-    if area_mismatch > 5.0
+    # Soft warn at 5 %, hard error at 10 %
+    if area_mismatch > 10.0
+        error("Mesh area mismatch $(round(area_mismatch, digits=1))% exceeds 10 % — mesh integrity compromised.")
+    elseif area_mismatch > 5.0
         @warn "Mesh area mismatch $(round(area_mismatch, digits=1))%: " *
               "AreaLoad=$(round(A_mesh_from_P, digits=3))m² vs elem_data=$(round(A_elem_data, digits=3))m²"
     end
@@ -969,6 +1017,54 @@ function run_moment_analysis(
         @debug "FEA MAX DISPLACEMENT" Δ_panel=uconvert(u"inch", fea_Δ_panel)
     end
 
+    # ─── Pattern loading amplification (ACI 318-11 §13.7.6) ───
+    # When L/D > 0.75, compute EFM-derived amplification factors for the
+    # pattern loading moment redistribution and apply them to the FEA
+    # baseline.  FEA provides accurate absolute moments; EFM captures the
+    # relative redistribution caused by alternate-span loading.
+    use_pattern = method.pattern_loading && requires_pattern_loading(qD, qL) && n_cols >= 3
+    if use_pattern
+        fc_col_pat = _get_column_fc(supporting_columns, fc)
+        wc_pcf_val = ustrip(pcf, γ_concrete)
+        Ecc_pat = Ec(fc_col_pat, wc_pcf_val)
+
+        efm_spans = _build_efm_spans(supporting_columns, l1, l2, ln, h, Ecs;
+                                     drop_panel=drop_panel)
+        joint_pos = [col.position for col in supporting_columns]
+        cshape   = col_shape(first(supporting_columns))
+        jKec     = _compute_joint_Kec(efm_spans, joint_pos, Lc, Ecs, Ecc_pat;
+                                      column_shape=cshape)
+        n_efm_spans = length(efm_spans)
+
+        # Full-load EFM baseline
+        efm_full = solve_moment_distribution(efm_spans, jKec, joint_pos, qu)
+        env_neg_ext = abs(efm_full[1].M_neg_left)
+        env_neg_int = abs(efm_full[1].M_neg_right)
+        env_pos     = abs(efm_full[1].M_pos)
+
+        # Envelope over all patterns
+        for pat in generate_load_patterns(n_efm_spans)
+            all(==(:dead_plus_live), pat) && continue
+            qu_ps = factored_pattern_loads(pat, qD, qL)
+            efm_p = solve_moment_distribution(efm_spans, jKec, joint_pos, qu_ps)
+            abs(efm_p[1].M_neg_left)  > env_neg_ext && (env_neg_ext = abs(efm_p[1].M_neg_left))
+            abs(efm_p[1].M_neg_right) > env_neg_int && (env_neg_int = abs(efm_p[1].M_neg_right))
+            abs(efm_p[1].M_pos)       > env_pos     && (env_pos     = abs(efm_p[1].M_pos))
+        end
+
+        # Amplification ratios (≥ 1.0 — pattern loading only increases design moments)
+        _safe_amp(env, base) = ustrip(base) > 1e-6 ? max(1.0, ustrip(env) / ustrip(base)) : 1.0
+        amp_ext = _safe_amp(env_neg_ext, abs(efm_full[1].M_neg_left))
+        amp_int = _safe_amp(env_neg_int, abs(efm_full[1].M_neg_right))
+        amp_pos = _safe_amp(env_pos,     abs(efm_full[1].M_pos))
+
+        M_neg_ext *= amp_ext
+        M_neg_int *= amp_int
+        M_pos     *= amp_pos
+
+        verbose && @debug "FEA PATTERN LOADING (ACI 13.7.6)" amp_ext=round(amp_ext, digits=3) amp_int=round(amp_int, digits=3) amp_pos=round(amp_pos, digits=3)
+    end
+
     M0_u = uconvert(kip * u"ft", M0)
     Vu_max = uconvert(kip, qu * l2 * ln / 2)
 
@@ -991,6 +1087,41 @@ function run_moment_analysis(
         end
     end
 
+    # ─── Secondary direction: perpendicular strip integration ───
+    # The shell model is already solved — zero additional solve cost.
+    # Extract moments in perpendicular direction and build secondary NamedTuple.
+    sec_setup = _secondary_moment_analysis_setup(struc, slab, supporting_columns, h, γ_concrete)
+    sec_span_axis = sec_setup.span_axis
+
+    sec_envelope = _extract_cell_moments(
+        cache, struc, slab, supporting_columns,
+        sec_span_axis; verbose=false
+    )
+    sec_column_moments = [uconvert(kip * u"ft", m * u"N*m") for m in sec_envelope.col_Mneg]
+    sec_neg_env = _envelope_from_columns(sec_column_moments, supporting_columns)
+
+    # Column forces in secondary direction (unbalanced about perpendicular axis)
+    sec_ax_len = hypot(sec_span_axis...)
+    sec_ax = sec_ax_len > 1e-9 ? (sec_span_axis[1]/sec_ax_len, sec_span_axis[2]/sec_ax_len) : (0.0, 1.0)
+    MomentT = typeof(1.0kip * u"ft")
+    sec_Mub = Vector{MomentT}(undef, n_cols)
+    for i in 1:n_cols
+        sec_Mub[i] = uconvert(kip * u"ft", abs(sec_ax[1] * forces.My[i] - sec_ax[2] * forces.Mx[i]))
+    end
+
+    secondary_data = (
+        M0 = uconvert(kip * u"ft", sec_setup.M0),
+        M_neg_ext = sec_neg_env.M_neg_ext,
+        M_neg_int = sec_neg_env.M_neg_int,
+        M_pos = uconvert(kip * u"ft", sec_envelope.M_pos),
+        l1 = sec_setup.l1,
+        l2 = sec_setup.l2,
+        ln = sec_setup.ln,
+        column_moments = sec_column_moments,
+        column_shears = forces.Vu,  # same shear (axial from stubs)
+        unbalanced_moments = sec_Mub,
+    )
+
     return MomentAnalysisResult(
         M0_u,
         M_neg_ext,
@@ -1002,8 +1133,35 @@ function run_moment_analysis(
         forces.Vu,
         forces.Mub,
         Vu_max;
-        secondary = nothing,
+        secondary = secondary_data,
         fea_Δ_panel = fea_Δ_panel,
+        pattern_loading = use_pattern,
+    )
+end
+
+"""
+    run_secondary_moment_analysis(::FEA, ...) -> NamedTuple
+
+For FEA, secondary moments are already computed during `run_moment_analysis`
+and stored in `moment_results.secondary`.  This method just extracts it.
+
+If `moment_results.secondary` is already populated (the normal case), returns
+it directly.  Otherwise falls back to DDM secondary as an approximation.
+"""
+function run_secondary_moment_analysis(
+    method::FEA,
+    struc, slab, supporting_columns, h::Length,
+    fc::Pressure, Ecs::Pressure, γ_concrete;
+    moment_results = nothing,
+    kwargs...
+)
+    # FEA populates secondary during run_moment_analysis — just return it
+    if !isnothing(moment_results) && !isnothing(moment_results.secondary)
+        return moment_results.secondary
+    end
+    # Fallback: DDM secondary (should not happen in normal flow)
+    return run_secondary_moment_analysis(
+        DDM(), struc, slab, supporting_columns, h, fc, Ecs, γ_concrete; kwargs...
     )
 end
 

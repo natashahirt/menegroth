@@ -33,7 +33,7 @@ const Rebar_75 = RebarSteel(200.0u"GPa", 77.2u"GPa", 517.0u"MPa", 689.0u"MPa", 7
 const Rebar_80 = RebarSteel(200.0u"GPa", 77.2u"GPa", 552.0u"MPa", 724.0u"MPa", 7850.0u"kg/m^3", 0.30, 1.72)  # Fy=80ksi, Fu=105ksi
 
 # ASTM A1044 Headed Shear Stud Steel (for punching shear reinforcement)
-# Reference: Ancon Shearfix Design Manual to ACI 318-19
+# Reference: Ancon Shearfix Design Manual (adapted to ACI 318-11)
 const Stud_51 = RebarSteel(200.0u"GPa", 77.2u"GPa", 351.6u"MPa", 448.2u"MPa", 7850.0u"kg/m^3", 0.30, 1.72)  # Fy=51ksi, Fu=65ksi
 
 # ==============================================================================

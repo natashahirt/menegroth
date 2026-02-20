@@ -74,10 +74,10 @@ export get_cached_edge_tributaries, cache_edge_tributaries!
 export get_cached_column_tributary, cache_column_tributary!
 export column_tributary_area, column_tributary_by_cell, column_tributary_polygons
 export cell_edge_tributaries, cell_strip_geometry, has_cell_tributaries
-export clear_geometry_caches!, clear_tributary_cache!, list_cached_tributary_keys
+export clear_geometry_caches!
 
 # --- Design types ---
-export DesignParameters, FoundationParameters
+export DesignParameters, MaterialOptions, FoundationParameters
 export BuildingDesign, SlabDesignResult, ColumnDesignResult, BeamDesignResult, FoundationDesignResult
 export PunchingDesignResult, StripReinforcementDesign, DesignSummary
 export DisplayUnits, imperial, metric, fmt
@@ -86,13 +86,18 @@ export slab_design, column_design, beam_design, foundation_design, all_ok, criti
 export has_analysis_model, build_analysis_model!
 
 # --- Design workflow ---
-export design_building, compare_designs, build_pipeline, sync_asap!
+export design_building, compare_designs, build_pipeline, PipelineStage, sync_asap!
+export prepare!, capture_design
 export snapshot!, restore!, has_snapshot, DesignSnapshot
+
+# --- Design parameter helpers ---
+export with, resolve_concrete, resolve_rebar, resolve_rc_material, resolve_floor_options
 
 # --- Loads (re-exported from StructuralSizer via @reexport) ---
 # GravityLoads, LoadCombination, factored_pressure, envelope_pressure, etc.
 # are all available without additional exports here.
-export governing_combo  # defined locally in design_types.jl
+export governing_combo, validate_fire_rating, has_fire_rating  # defined locally in design_types.jl
+export add_coating_loads!
 
 # --- Member type hierarchy ---
 export AbstractMember, MemberBase, Beam, Column, Strut
@@ -142,7 +147,7 @@ export build_member_groups!, member_group_demands
 export size_steel_members!
 export size_beams!, size_columns!, size_members!
 export estimate_column_sizes!
-export compute_story_properties!
+export compute_story_properties!, p_delta_iterate!
 
 # --- Slab summary ---
 export slab_summary, flat_plate_moment_comparison
@@ -152,9 +157,10 @@ export initialize_supports!, initialize_foundations!, size_foundations!
 export support_demands, foundation_summary, build_foundation_groups!
 export group_foundations_by_reaction!, size_foundations_grouped!, foundation_group_summary
 
-# --- Postprocessing (Embodied Carbon) ---
+# --- Postprocessing (Embodied Carbon + Engineering Report) ---
 export element_ec, compute_building_ec, ec_summary
 export ElementECResult, BuildingECResult
+export engineering_report
 
 # =============================================================================
 # Precompilation Workload
@@ -205,12 +211,7 @@ using PrecompileTools
                 _struc_ddm = BuildingStructure(_skel_ddm)
                 design_building(_struc_ddm, DesignParameters(
                     name = "precompile_ddm",
-                    floor_options = StructuralSizer.FloorOptions(
-                        flat_plate = StructuralSizer.FlatPlateOptions(
-                            material = StructuralSizer.RC_4000_60,
-                            analysis_method = :ddm,
-                        ),
-                    ),
+                    floor = StructuralSizer.FlatPlateOptions(method = StructuralSizer.DDM()),
                     max_iterations = 2,
                 ))
             catch; end
@@ -224,12 +225,7 @@ using PrecompileTools
                 _struc_efm = BuildingStructure(_skel_efm)
                 design_building(_struc_efm, DesignParameters(
                     name = "precompile_efm",
-                    floor_options = StructuralSizer.FloorOptions(
-                        flat_plate = StructuralSizer.FlatPlateOptions(
-                            material = StructuralSizer.RC_4000_60,
-                            analysis_method = :efm,
-                        ),
-                    ),
+                    floor = StructuralSizer.FlatPlateOptions(method = StructuralSizer.EFM()),
                     max_iterations = 2,
                 ))
             catch; end

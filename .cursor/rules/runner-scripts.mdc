@@ -1,0 +1,22 @@
+---
+description: Convention for runner scripts and shell usage
+alwaysApply: true
+---
+
+# Runner Scripts
+
+To run files in this project you typically need a runner script. Place all runner scripts in `scripts/runners/`.
+
+- Do **not** put ad-hoc run scripts in the project root.
+- Runner scripts should live at `scripts/runners/<name>.jl`.
+- Keep runner scripts small: set up the environment, then call into library code.
+
+# Shell / Terminal Usage
+
+**Avoid PowerShell commands.** Instead, write a Julia runner script and execute it with `julia`.
+
+Common PowerShell pitfalls that break commands:
+- `&&` does not chain commands in PowerShell (use `;` if you must).
+- `\"` inside quoted strings is interpreted as an escape, not a literal quote.
+
+If you absolutely must use the shell directly, use `;` to chain commands and single-quote strings where possible to avoid escaping issues. Prefer runner scripts over shell one-liners.

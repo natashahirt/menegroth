@@ -485,4 +485,104 @@ end
         δs_unstable = magnification_factor_sway_Q(1.0)
         @test isinf(δs_unstable)
     end
+
+    # =========================================================================
+    @testset "Auto-Fallback: Q > 1.5 → ΣPc Method (Rectangular)" begin
+        # Story where Q-method gives δs > 1.5 but ΣPc method is fine.
+        # Q = ΣPu×Δo / (Vus×lc) = 1000×0.72 / (10×180) = 0.40
+        # δs_Q = 1/(1-0.4) = 1.667 > 1.5  →  triggers fallback
+        # δs_Pc = 1/(1 - 1000/(0.75×50000)) = 1.027  →  acceptable
+        story_fallback = SwayStoryProperties(1000.0, 50000.0, 10.0, 0.72, 180.0)
+        
+        Q_check = stability_index(story_fallback)
+        @test Q_check ≈ 0.40 rtol=0.01
+
+        Lu_m = 186.0 / 39.37
+        geometry_sway = ConcreteMemberGeometry(Lu_m; k = 1.3, braced = false)
+
+        result = magnify_moment_sway_complete(
+            section, mat, geometry_sway,
+            ref.loading.Pu,
+            ref.loading.M1ns, ref.loading.M2ns,
+            ref.loading.M1s, ref.loading.M2s;
+            story = story_fallback,
+            βds = 0.0,
+            βdns = 0.6,
+        )
+
+        # Q-method δs = 1.667 > 1.5, so should have fallen back to ΣPc method
+        @test result.δs_method == :ΣPc
+        
+        # δs from ΣPc should be ≈ 1/(1 - 1000/(0.75×50000)) = 1.027
+        @test result.δs ≈ 1.027 rtol=0.05
+        @test result.δs < 1.5  # ΣPc method gives a much lower value
+        @test result.sway_magnified == true
+    end
+
+    # =========================================================================
+    @testset "Auto-Fallback: Both Methods > 1.5 → needs_P_delta" begin
+        # Both Q and ΣPc give δs > 1.5 — should flag for P-Δ
+        # ΣPu/(0.75 ΣPc) must be > 1/3 → δs_Pc > 1.5
+        # e.g. ΣPu = 3000, ΣPc = 6000 → 3000/4500 = 0.667 → δs = 3.0
+        story_both_high = SwayStoryProperties(
+            3000.0,    # ΣPu
+            6000.0,    # ΣPc — δs_Pc = 1/(1-3000/4500) = 3.0
+            5.0,       # Vus
+            0.60,      # Δo — Q = 3000×0.60/(5×180) = 2.0 → δs_Q = Inf
+            180.0      # lc
+        )
+
+        Lu_m = 186.0 / 39.37
+        geometry_sway = ConcreteMemberGeometry(Lu_m; k = 1.3, braced = false)
+
+        result = magnify_moment_sway_complete(
+            section, mat, geometry_sway,
+            ref.loading.Pu,
+            ref.loading.M1ns, ref.loading.M2ns,
+            ref.loading.M1s, ref.loading.M2s;
+            story = story_both_high,
+            βds = 0.0,
+            βdns = 0.6,
+        )
+
+        @test result.δs_method == :needs_P_delta
+        @test result.δs > 1.5
+    end
+
+    # =========================================================================
+    @testset "Auto-Fallback: Circular Column (Q > 1.5 → ΣPc)" begin
+        # Same fallback logic for circular columns
+        circ_section = RCCircularSection(
+            D = 20.0u"inch",
+            cover = 2.5u"inch",
+            bar_size = 8,
+            n_bars = 8,
+            tie_type = :spiral
+        )
+        circ_mat = RC_4000_60
+        
+        # Story where Q gives δs > 1.5 but ΣPc is fine
+        story_circ = SwayStoryProperties(1000.0, 50000.0, 10.0, 0.72, 180.0)
+        
+        Lu_m = 186.0 / 39.37
+        geom_circ = ConcreteMemberGeometry(Lu_m; k = 1.3, braced = false)
+        
+        result_circ = magnify_moment_sway_complete(
+            circ_section, circ_mat, geom_circ,
+            200.0,      # Pu
+            30.0, 60.0, # M1ns, M2ns
+            20.0, 40.0; # M1s, M2s
+            story = story_circ,
+            βds = 0.0,
+            βdns = 0.6,
+        )
+        
+        @test result_circ.δs_method == :ΣPc
+        @test result_circ.δs < 1.5
+        @test result_circ.sway_magnified == true
+        
+        # Verify moments magnified correctly: M2 = M2ns + δs × M2s
+        expected_M2 = 60.0 + result_circ.δs * 40.0
+        @test result_circ.M2 ≈ expected_M2 rtol=0.01
+    end
 end

@@ -23,6 +23,7 @@
 
 using Dates
 using Unitful
+using Accessors: setproperties, @set
 
 # =============================================================================
 # Display Unit Preferences
@@ -164,6 +165,99 @@ Base.@kwdef struct FoundationParameters
 end
 
 # =============================================================================
+# Material Options (cascading material specification)
+# =============================================================================
+
+"""
+    MaterialOptions(; concrete, rebar, steel, timber, slab, column, beam)
+
+Material specifications for building design.  Set building-level defaults
+that cascade to all members, or override per-member type.
+
+# Cascade Priority
+1. Per-member override (`slab`, `column`, `beam`) — highest
+2. Component materials (`concrete`, `rebar`, `steel`, `timber`)
+3. Package defaults (NWC_4000, Rebar_60, A992_Steel)
+
+# Example
+```julia
+# Set all concrete to 5 ksi
+params = DesignParameters(materials = MaterialOptions(concrete = NWC_5000))
+
+# Different concrete for slabs vs columns
+params = DesignParameters(materials = MaterialOptions(
+    slab   = RC_5000_60,   # 5 ksi slab
+    column = RC_6000_75,   # 6 ksi columns, Grade 75 rebar
+))
+
+# Quick: just set everything at once
+params = DesignParameters(materials = MaterialOptions(
+    concrete = NWC_5000,
+    rebar    = Rebar_75,
+))
+```
+"""
+Base.@kwdef struct MaterialOptions
+    # ─── Component materials (building-level defaults) ───
+    concrete::Union{StructuralSizer.Concrete, Nothing} = nothing
+    rebar::Union{StructuralSizer.RebarSteel, Nothing} = nothing
+    steel::Union{StructuralSizer.StructuralSteel, Nothing} = nothing
+    timber::Union{StructuralSizer.Timber, Nothing} = nothing
+
+    # ─── Per-member overrides (take priority over components) ───
+    slab::Union{StructuralSizer.ReinforcedConcreteMaterial, Nothing} = nothing
+    column::Union{StructuralSizer.ReinforcedConcreteMaterial, Nothing} = nothing
+    beam::Union{StructuralSizer.StructuralSteel, Nothing} = nothing
+end
+
+# --- Slab material resolution ---
+resolve_slab_concrete(m::MaterialOptions) = something(
+    isnothing(m.slab) ? nothing : m.slab.concrete,
+    m.concrete, StructuralSizer.NWC_4000)
+
+resolve_slab_rebar(m::MaterialOptions) = something(
+    isnothing(m.slab) ? nothing : m.slab.rebar,
+    m.rebar, StructuralSizer.Rebar_60)
+
+resolve_slab_rc(m::MaterialOptions) = isnothing(m.slab) ?
+    StructuralSizer.ReinforcedConcreteMaterial(resolve_slab_concrete(m), resolve_slab_rebar(m)) :
+    m.slab
+
+# --- Column material resolution ---
+resolve_column_concrete(m::MaterialOptions) = something(
+    isnothing(m.column) ? nothing : m.column.concrete,
+    m.concrete, StructuralSizer.NWC_4000)
+
+resolve_column_rebar(m::MaterialOptions) = something(
+    isnothing(m.column) ? nothing : m.column.rebar,
+    m.rebar, StructuralSizer.Rebar_60)
+
+resolve_column_rc(m::MaterialOptions) = isnothing(m.column) ?
+    StructuralSizer.ReinforcedConcreteMaterial(resolve_column_concrete(m), resolve_column_rebar(m)) :
+    m.column
+
+# --- Beam material resolution ---
+resolve_beam_steel(m::MaterialOptions) = something(m.beam, m.steel, StructuralSizer.A992_Steel)
+
+"""
+    check_material_compatibility(mat::MaterialOptions, floor::AbstractFloorOptions)
+
+Warn if material choices are incompatible with the selected floor type.
+"""
+function check_material_compatibility(mat::MaterialOptions, floor::StructuralSizer.AbstractFloorOptions)
+    fs = StructuralSizer.floor_symbol(floor)
+    if fs in (:flat_plate, :flat_slab, :one_way, :two_way, :waffle, :pt_banded)
+        if !isnothing(mat.steel) && isnothing(mat.beam)
+            @warn "StructuralSteel set in materials but floor type :$fs uses concrete. steel applies to beams only."
+        end
+    elseif fs == :vault
+        if !isnothing(mat.rebar) && isnothing(mat.slab) && isnothing(mat.column)
+            @info "RebarSteel set but vaults are unreinforced. rebar applies to columns only."
+        end
+    end
+end
+
+# =============================================================================
 # Design Parameters
 # =============================================================================
 
@@ -174,67 +268,36 @@ Different `DesignParameters` on the same `BuildingStructure` produce
 different `BuildingDesign` results, enabling parametric studies.
 
 # Materials
-Use existing types from StructuralSizer:
-- `concrete::Concrete` - with fc′, E, ρ, etc.
-- `steel::StructuralSteel` - with Fy, Fu, E, etc.
-- `rebar::RebarSteel` - for reinforcement
+Use `MaterialOptions` for cascading material specification:
+```julia
+params = DesignParameters(materials = MaterialOptions(concrete = NWC_5000))
+```
 
-# Member Sizing Options
-Optional overrides for column/beam sizing:
-- `columns`: `SteelColumnOptions` or `ConcreteColumnOptions`
-- `beams`: `SteelBeamOptions`
-
-# Loads
-- `loads::GravityLoads` - Unfactored service loads (default: `default_loads`)
-- `load_combinations::Vector{LoadCombination}` - Factored combinations for
-  envelope analysis. The Asap model uses `envelope_pressure(combos, D, L)`.
-
-# Analysis Settings
-- `diaphragm_mode::Symbol` - `:none`, `:rigid`, or `:shell`
-- `default_frame_E/G/ρ` - Placeholder frame properties
-- `column_I_factor` / `beam_I_factor` - ACI cracking factors
+# Floor System
+Pass a typed `AbstractFloorOptions` via `floor`:
+```julia
+params = DesignParameters(floor = FlatPlateOptions(method = EFM(:asap)))
+```
 
 # Example
 ```julia
-# Simple: just set materials
-params = DesignParameters(
-    steel = A992_Steel,
-    concrete = NWC_5000,
-)
-
 # Full control: materials, loads, sizing, and analysis
 params = DesignParameters(
     name = "High-Rise Office",
-    
-    # Loads
-    loads = office_loads,                                # 50 psf LL
-    load_combinations = [strength_1_2D_1_6L, service],  # envelope + serviceability
-    
-    # Materials
-    steel = A992_Steel,
-    concrete = NWC_5000,
-    
-    # Concrete columns with specific settings
-    columns = ConcreteColumnOptions(
-        grade = NWC_5000,
-        max_depth = 0.6,
-    ),
-    
-    # Steel beams with strict deflection
-    beams = SteelBeamOptions(
-        deflection_limit = 1/480,
-    ),
-    
-    # Analysis settings
+    loads = office_loads,
+    load_combinations = [strength_1_2D_1_6L, service],
+    materials = MaterialOptions(concrete = NWC_5000, rebar = Rebar_75),
+    columns = ConcreteColumnOptions(grade = NWC_5000),
+    beams = SteelBeamOptions(deflection_limit = 1/480),
+    floor = FlatPlateOptions(method = EFM(), shear_studs = :if_needed),
     diaphragm_mode = :rigid,
     optimize_for = :carbon,
 )
 
-# Parametric live load sweep
-for ll in [40, 50, 65, 80, 100]
-    design = design_building(struc, DesignParameters(
-        loads = GravityLoads(floor_LL = Float64(ll) * psf),
-    ))
+# Parametric sweep
+base = DesignParameters(floor = FlatPlateOptions(), max_iterations = 3)
+for m in [DDM(), EFM(), FEA()]
+    d = design_building(struc, with(base; floor = FlatPlateOptions(method = m)))
 end
 ```
 """
@@ -244,23 +307,38 @@ Base.@kwdef mutable struct DesignParameters
     description::String = ""
     
     # ─── Gravity Loads (unfactored service level) ───
-    # Stamped onto cells during initialize_cells!
     loads::GravityLoads = GravityLoads()
     
-    # ─── Materials ───
-    # Defaults for the building (used when section-specific material not provided)
-    concrete::Union{StructuralSizer.Concrete, Nothing} = nothing
-    steel::Union{StructuralSizer.StructuralSteel, Nothing} = nothing
-    rebar::Union{StructuralSizer.RebarSteel, Nothing} = nothing
-    timber::Union{StructuralSizer.Timber, Nothing} = nothing
+    # ─── Materials (cascading) ───
+    materials::MaterialOptions = MaterialOptions()
+    
+    # ─── Fire Rating ───
+    # Building-level fire resistance requirement in hours.
+    # Valid values: 0, 1, 1.5, 2, 3, 4  (0 = no fire design)
+    # Concrete: controls min thickness, cover, dimensions (ACI 216.1)
+    # Steel: controls coating thickness via fire_protection type
+    fire_rating::Float64 = 0.0
+    
+    # ─── Fire Protection (steel members only) ───
+    # Controls the type of fire protection coating applied to steel members.
+    # Ignored for concrete elements (fire resistance is intrinsic via cover/thickness).
+    # Override per-member via SteelMemberOptions.fire_protection.
+    fire_protection::StructuralSizer.FireProtection = StructuralSizer.SFRM()
     
     # ─── Member Sizing Options ───
-    # Override material defaults for specific member types
     columns::Union{StructuralSizer.ColumnOptions, Nothing} = nothing
     beams::Union{StructuralSizer.BeamOptions, Nothing} = nothing
     
-    # ─── Floor Options ───
-    floor_options::Union{StructuralSizer.FloorOptions, Nothing} = nothing
+    # ─── Floor Specification ───
+    # The type IS the floor system:
+    #   DesignParameters(floor = FlatPlateOptions(method = EFM(:asap)))
+    #   DesignParameters(floor = VaultOptions(lambda = 8.0))
+    floor::Union{StructuralSizer.AbstractFloorOptions, Nothing} = nothing
+    
+    # ─── Tributary Axis ───
+    # Override tributary area partitioning (default: auto from floor type).
+    # :isotropic → force straight skeleton; (x,y) tuple → directed partition.
+    tributary_axis::Union{Nothing, Symbol, NTuple{2, Float64}} = nothing
     
     # ─── Foundation Options ───
     foundation_options::Union{FoundationParameters, Nothing} = nothing
@@ -270,38 +348,133 @@ Base.@kwdef mutable struct DesignParameters
     optimize_for::Symbol = :weight           # :weight, :carbon, :cost
     
     # ─── Load Combinations (factored) ───
-    # Vector of combinations for envelope analysis.
-    # The Asap model applies max(factored_pressure(c, D, L) for c in combos).
-    # Default: standard gravity strength combination only.
     load_combinations::Vector{LoadCombination} = [default_combo]
     
+    # ─── Pattern Loading (ACI 318-19 §6.4.3) ───
+    pattern_loading::Symbol = :none
+    
     # Diaphragm modeling for lateral analysis
-    diaphragm_mode::Symbol = :none           # :none, :rigid, :shell
-    diaphragm_E::Union{typeof(1.0u"Pa"), Nothing} = nothing  # override E (default: 1e15 Pa for rigid, 30 GPa for shell)
+    diaphragm_mode::Symbol = :none
+    diaphragm_E::Union{typeof(1.0u"Pa"), Nothing} = nothing
     diaphragm_ν::Float64 = 0.2
     
     # Default frame element properties (before member sizing)
-    # Placeholder section in to_asap! before actual sizing.
-    # Defaults from A992 steel; override via params.steel material.
     default_frame_E::typeof(1.0u"Pa") = uconvert(u"Pa", A992_Steel.E)
     default_frame_G::typeof(1.0u"Pa") = uconvert(u"Pa", A992_Steel.G)
     default_frame_ρ::typeof(1.0u"kg/m^3") = uconvert(u"kg/m^3", A992_Steel.ρ)
     
     # ─── ACI Cracking Factors ───
-    # For converting RC sections to Asap.Section (effective stiffness)
-    column_I_factor::Float64 = 0.70    # ACI 318-14 §6.6.3.1.1 for columns
-    beam_I_factor::Float64 = 0.35      # ACI 318-14 §6.6.3.1.1 for beams
+    column_I_factor::Float64 = 0.70
+    beam_I_factor::Float64 = 0.35
     
     # ─── Iteration Control ───
-    max_iterations::Int = 20              # Slab/column convergence loop limit
+    max_iterations::Int = 20
     
     # ─── Display Preferences ───
-    # Controls how SI-stored values are shown in summaries and reports
     display_units::DisplayUnits = imperial
 end
 
+# =============================================================================
+# Material Resolution (convenience accessors from DesignParameters)
+# =============================================================================
+
+"""Resolve slab concrete from design parameters."""
+resolve_concrete(params::DesignParameters, override=nothing) =
+    something(override, resolve_slab_concrete(params.materials))
+
+"""Resolve slab rebar from design parameters."""
+resolve_rebar(params::DesignParameters, override=nothing) =
+    something(override, resolve_slab_rebar(params.materials))
+
+"""Resolve slab RC material from design parameters."""
+function resolve_rc_material(params::DesignParameters, override=nothing)
+    !isnothing(override) && return override
+    resolve_slab_rc(params.materials)
+end
+
+"""
+    resolve_floor_options(params::DesignParameters) -> AbstractFloorOptions
+
+Resolve the effective floor options from `params`.  Returns a typed
+`AbstractFloorOptions`.  Applies the
+material cascade from `params.materials` into the floor options.
+"""
+function resolve_floor_options(params::DesignParameters)
+    floor = something(params.floor, StructuralSizer.FlatPlateOptions())
+    check_material_compatibility(params.materials, floor)
+    return _apply_material_cascade(params.materials, floor)
+end
+
+# --- Material cascade into floor options (using Accessors @set) ---
+
+function _apply_material_cascade(mat::MaterialOptions, opts::StructuralSizer.FlatPlateOptions)
+    _has_material(mat) || return opts
+    @set opts.material = resolve_slab_rc(mat)
+end
+
+function _apply_material_cascade(mat::MaterialOptions, opts::StructuralSizer.FlatSlabOptions)
+    _has_material(mat) || return opts
+    new_base = _apply_material_cascade(mat, opts.base)
+    @set opts.base = new_base
+end
+
+function _apply_material_cascade(mat::MaterialOptions, opts::StructuralSizer.OneWayOptions)
+    _has_material(mat) || return opts
+    @set opts.material = resolve_slab_rc(mat)
+end
+
+function _apply_material_cascade(mat::MaterialOptions, opts::StructuralSizer.VaultOptions)
+    _has_material(mat) || return opts
+    @set opts.material = resolve_slab_concrete(mat)
+end
+
+# Fallback: no material fields to cascade into
+_apply_material_cascade(::MaterialOptions, opts::StructuralSizer.AbstractFloorOptions) = opts
+
+"""True if any material is set on `mat`."""
+_has_material(m::MaterialOptions) =
+    !isnothing(m.slab) || !isnothing(m.column) || !isnothing(m.concrete) || !isnothing(m.rebar)
+
+# =============================================================================
+# `with` helper (Accessors-based, replaces _with)
+# =============================================================================
+
+"""
+    with(params::DesignParameters; kwargs...) -> DesignParameters
+
+Create a modified copy of `DesignParameters`.
+
+# Example
+```julia
+base = DesignParameters(materials = MaterialOptions(concrete = NWC_5000))
+v1 = with(base; floor = FlatPlateOptions(method = EFM(:asap)))
+v2 = with(base; floor = FlatSlabOptions(), loads = GravityLoads(floor_LL = 80.0psf))
+```
+"""
+with(params::DesignParameters; kwargs...) = setproperties(params, (; kwargs...))
+
 """Primary (governing) strength combination from a DesignParameters."""
 governing_combo(p::DesignParameters) = first(p.load_combinations)
+
+# ─── Fire rating validation ───
+const VALID_FIRE_RATINGS = (0.0, 1.0, 1.5, 2.0, 3.0, 4.0)
+
+"""
+    validate_fire_rating(rating::Real) -> Float64
+
+Validate fire resistance rating. Must be one of: 0, 1, 1.5, 2, 3, 4 hours.
+Throws `ArgumentError` for invalid values.
+"""
+function validate_fire_rating(rating::Real)
+    r = Float64(rating)
+    r in VALID_FIRE_RATINGS && return r
+    throw(ArgumentError(
+        "Invalid fire_rating = $r. Must be one of $(VALID_FIRE_RATINGS) hours."
+    ))
+end
+
+"""True if the design requires fire protection (fire_rating > 0)."""
+has_fire_rating(p::DesignParameters) = p.fire_rating > 0.0
 
 # =============================================================================
 # Design Results
@@ -326,12 +499,20 @@ Design result for a slab panel.
 All values stored in coherent SI (m, kPa, kN·m).
 """
 Base.@kwdef mutable struct SlabDesignResult
+    # ── Convergence & iteration tracking ──────────────────────────────
+    converged::Bool = true
+    failure_reason::String = ""               # e.g. "non_convergence"
+    failing_check::String = ""                # last check that failed
+    iterations::Int = 0                       # design iterations used
+    pattern_loading::Bool = false             # ACI 13.7.6 pattern loading applied
+    
     # Sizing
     thickness::typeof(1.0u"m")
     self_weight::typeof(1.0u"kPa")
     
     # Analysis
     M0::Union{typeof(1.0u"kN*m"), Nothing} = nothing  # Total static moment
+    qu::Union{typeof(1.0u"kPa"), Nothing} = nothing    # Factored uniform load
     
     # Reinforcement (by location)
     column_strip::Dict{Symbol, StripReinforcementDesign} = Dict()  # :ext_neg, :pos, :int_neg
@@ -339,7 +520,35 @@ Base.@kwdef mutable struct SlabDesignResult
     
     # Checks
     deflection_ok::Bool = true
-    deflection_ratio::Float64 = 0.0  # actual / limit
+    deflection_ratio::Float64 = 0.0           # actual / limit
+    deflection_in::Float64 = 0.0              # actual deflection (inches)
+    deflection_limit_in::Float64 = 0.0        # allowable deflection (inches)
+    
+    # Punching shear summary
+    punching_max_ratio::Float64 = 0.0
+    punching_ok::Bool = true
+    punching_vu_max_psi::Float64 = 0.0        # max demand (psi)
+    
+    # Shear stud details
+    has_studs::Bool = false
+    n_stud_cols::Int = 0
+    stud_rails_max::Int = 0
+    stud_per_rail_max::Int = 0
+    
+    # Integrity & transfer (ACI 8.7.4.2 / 8.4.2.3)
+    integrity_ok::Bool = true
+    n_transfer_bars_additional::Int = 0
+    
+    # Column P-M reinforcement ratio (max ρg from slab-design column check)
+    col_rho_max::Float64 = 0.0
+    
+    # Compression rebar ratio for long-term deflection
+    ρ_prime::Float64 = 0.0
+    
+    # Drop panel geometry (flat slab only)
+    h_drop_in::Float64 = 0.0
+    a_drop1_ft::Float64 = 0.0
+    a_drop2_ft::Float64 = 0.0
 end
 
 """
@@ -361,6 +570,11 @@ Design result for a column.
 Base.@kwdef mutable struct ColumnDesignResult
     # Sizing
     section_size::String = ""         # e.g., "W14x90", "16x16"
+    
+    # Column geometry (populated from Column.c1, .c2, .shape)
+    c1::typeof(1.0u"m") = 0.0u"m"
+    c2::typeof(1.0u"m") = 0.0u"m"
+    shape::Symbol = :rectangular      # :rectangular or :circular
     
     # Demands
     Pu::typeof(1.0u"kN") = 0.0u"kN"

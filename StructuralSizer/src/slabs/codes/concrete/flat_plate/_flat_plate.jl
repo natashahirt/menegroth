@@ -37,11 +37,13 @@ include("types.jl")
 # Utility functions (pure equations, support helpers)
 include("utils/calculations.jl")
 include("utils/helpers.jl")
+include("utils/column_growth.jl")
 
 # Design functions (checks, reinforcement, results)
 include("design/checks.jl")
 include("design/reinforcement.jl")
 include("design/results.jl")
+include("design/rule_of_thumb.jl")
 
 # Analysis methods (all produce identical MomentAnalysisResult)
 include("analysis/common.jl")   # shared setup (_moment_analysis_setup)

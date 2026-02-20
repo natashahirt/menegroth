@@ -1,6 +1,6 @@
 # ACI Reinforced Concrete Column Design
 
-ACI 318-19 capacity checks for reinforced concrete columns. Covers P-M interaction diagrams, slenderness effects (moment magnification), and biaxial bending.
+ACI 318-11 capacity checks for reinforced concrete columns. Covers P-M interaction diagrams, slenderness effects (moment magnification), and biaxial bending.
 
 ---
 
@@ -10,8 +10,8 @@ ACI 318-19 capacity checks for reinforced concrete columns. Covers P-M interacti
 
 | Feature | ACI Reference | Notes |
 |---------|---------------|-------|
-| **Sway Frame Amplification (δs)** | 6.6.4.6 | Functions exist (`magnify_moment_sway_complete`) but not integrated into `ACIColumnChecker`. Set `geometry.braced=false` to flag sway frames. |
-| **Shear Design** | Chapter 22 | No column shear capacity or shear reinforcement design. |
+| **Sway Frame Amplification (δs)** | §10.10.7 | Functions exist (`magnify_moment_sway_complete`) but not integrated into `ACIColumnChecker`. Set `geometry.braced=false` to flag sway frames. |
+| **Shear Design** | Chapter 10 | No column shear capacity or shear reinforcement design. |
 | **Confinement Detailing** | 25.7.2, 25.7.3 | Tie spacing and hoop requirements not checked; section geometry only. |
 | **Lap Splice Design** | 25.5 | No splice length or location checks. |
 | **Development Length** | 25.4 | No bar anchorage or embedment checks. |
@@ -29,7 +29,7 @@ ACI 318-19 capacity checks for reinforced concrete columns. Covers P-M interacti
 | **Grade 60 rebar default** | Standard assumption | Override with `rebar_grade` (e.g., `Rebar_75`) |
 | **Es = 29,000 ksi** | Standard steel modulus | Embedded in calculations |
 | **εcu = 0.003** | ACI concrete crushing strain | Used for all calculations |
-| **Whitney stress block** | ACI 22.2.2.4 equivalent rectangular | Accurate for normal strength concrete |
+| **Whitney stress block** | ACI §10.2.7 equivalent rectangular | Accurate for normal strength concrete |
 | **α = 1.5 for biaxial** | Bresler Load Contour exponent | Override with `α_biaxial` parameter |
 
 ### Section Type Limitations
@@ -43,7 +43,7 @@ ACI 318-19 capacity checks for reinforced concrete columns. Covers P-M interacti
 
 ### Design Philosophy
 
-- **LRFD only** — Strength design with φ factors per Table 21.2.2
+- **LRFD only** — Strength design with φ factors per §9.3.2
 - **US units internally** — kip, kip-ft, inches (accepts Unitful, converts internally)
 - **Strain compatibility** — Full fiber analysis, not approximate methods
 - **Catalog-based optimization** — Sections from predefined catalogs
@@ -151,7 +151,7 @@ feasible = is_feasible(checker, cache, j, section, material, demand, geometry)
 
 ## Chapter Coverage
 
-### Chapter 22 — Sectional Strength (P-M Interaction)
+### Chapter 10 — Sectional Strength (P-M Interaction)
 
 Strain compatibility analysis with Whitney stress block.
 
@@ -183,13 +183,13 @@ balanced = get_control_point(diagram, :balanced)
 8. Pure tension
 
 **Equations:**
-- Whitney β₁: Table 22.2.2.4.3
-- φ factor: Table 21.2.2 (0.65-0.90 transition)
+- Whitney β₁: §10.2.7
+- φ factor: §9.3.2 (0.65-0.90 transition)
 - Steel stress: εs × Es, capped at ±fy
 
-### Chapter 6 — Slenderness Effects (Moment Magnification)
+### Chapter 10 — Slenderness Effects (Moment Magnification)
 
-Non-sway frame magnification per Section 6.6.4.5.
+Non-sway frame magnification per §10.10.6.
 
 ```julia
 # Check if slenderness matters
@@ -223,7 +223,7 @@ result = magnify_moment_nonsway(section, mat, geometry, Pu, M1, M2; βdns=0.6)
 # result.slender → Whether slenderness was considered
 ```
 
-**Slenderness Limits (ACI 6.2.5.1):**
+**Slenderness Limits (ACI §10.10.1):**
 - Braced: kLu/r ≤ 34 - 12(M1/M2), max 40
 - Sway: kLu/r ≤ 22
 
@@ -321,7 +321,7 @@ mat_tuple = to_material_tuple(material, fy_ksi, Es_ksi)
 
 ## Strength Reduction Factor (φ)
 
-Per ACI 318-19 Table 21.2.2:
+Per ACI 318-11 §9.3.2:
 
 ```julia
 φ = phi_factor(εt, :tied; fy_ksi=60.0)
@@ -375,23 +375,23 @@ aci/
 
 | Function | ACI Reference | Description |
 |----------|---------------|-------------|
-| `slenderness_ratio(section, geometry)` | 6.2.5 | kLu/r calculation |
-| `should_consider_slenderness(...)` | 6.2.5.1 | Check against limits |
-| `effective_stiffness(section, mat)` | 6.6.4.4.4 | (EI)eff calculation |
-| `critical_buckling_load(section, mat, geo)` | 6.6.4.4.2 | Pc = π²(EI)eff/(kLu)² |
-| `calc_Cm(M1, M2)` | 6.6.4.5.3 | Equivalent moment factor |
-| `magnification_factor_nonsway(Pu, Pc)` | 6.6.4.5.2 | δns factor |
-| `magnify_moment_nonsway(...)` | 6.6.4.5 | Complete magnification |
+| `slenderness_ratio(section, geometry)` | §10.10.1.2 | kLu/r calculation |
+| `should_consider_slenderness(...)` | §10.10.1 | Check against limits |
+| `effective_stiffness(section, mat)` | §10.10.6.1 | (EI)eff calculation |
+| `critical_buckling_load(section, mat, geo)` | §10.10.6.1 | Pc = π²(EI)eff/(kLu)² |
+| `calc_Cm(M1, M2)` | §10.10.6.4 | Equivalent moment factor |
+| `magnification_factor_nonsway(Pu, Pc)` | §10.10.6.3 | δns factor |
+| `magnify_moment_nonsway(...)` | §10.10.6 | Complete magnification |
 
 ### Sway Frame Functions
 
 | Function | ACI Reference | Description |
 |----------|---------------|-------------|
-| `SwayStoryProperties(...)` | 6.6.4 | Story data container (ΣPu, ΣPc, Vus, Δo, lc) |
-| `stability_index(story)` | 6.6.4.4.1 | Q = ΣPu·Δo / (Vus·lc) |
-| `is_sway_frame(story)` | 6.6.4.3 | Q > 0.05 → sway |
-| `magnification_factor_sway_Q(Q)` | 6.6.4.6.2a | δs = 1/(1-Q) |
-| `magnify_moment_sway_complete(...)` | 6.6.4.5-6 | Full sway magnification |
+| `SwayStoryProperties(...)` | §10.10 | Story data container (ΣPu, ΣPc, Vus, Δo, lc) |
+| `stability_index(story)` | §10.10.5.2 | Q = ΣPu·Δo / (Vus·lc) |
+| `is_sway_frame(story)` | §10.10.5.2 | Q > 0.05 → sway |
+| `magnification_factor_sway_Q(Q)` | §10.10.7.3(a) | δs = 1/(1-Q) |
+| `magnify_moment_sway_complete(...)` | §10.10.6-7 | Full sway magnification |
 
 ### Biaxial Functions
 
@@ -436,7 +436,7 @@ demand = RCColumnDemand(1;
 
 ## References
 
-- ACI 318-19: Building Code Requirements for Structural Concrete
+- ACI 318-11: Building Code Requirements for Structural Concrete
 - StructurePoint spColumn Design Examples (verification source)
 - PCA Notes on ACI 318 (biaxial methods)
 - Bresler, B. (1960) "Design Criteria for Reinforced Columns Under Axial Load and Biaxial Bending"

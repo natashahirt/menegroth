@@ -115,6 +115,12 @@ opts = ConcreteColumnOptions(
 - `βdns`: Sustained load ratio for slenderness (default: 0.6)
 - `objective`: MinVolume(), MinWeight(), MinCost(), MinCarbon() (default: MinVolume())
 - `optimizer`: `:auto`, `:highs`, `:gurobi` (default: `:auto`)
+- `shape_constraint`: `:square`, `:bounded`, `:free` (default: `:square`)
+  - `:square` — force c1 = c2 at every growth step (current behavior)
+  - `:bounded` — allow rectangular columns, capped by `max_aspect_ratio`
+  - `:free` — no aspect ratio constraint (research use only)
+- `max_aspect_ratio`: Maximum c1/c2 or c2/c1 when `shape_constraint == :bounded` (default: 2.0)
+- `size_increment`: Rounding increment for column dimensions (default: 0.5")
 
 # Material Presets
 - Concrete: NWC_3000, NWC_4000, NWC_5000, NWC_6000, NWC_GGBS, NWC_PFA
@@ -137,6 +143,20 @@ Base.@kwdef struct ConcreteColumnOptions
     βdns::Float64 = 0.6
     objective::AbstractObjective = MinVolume()
     optimizer::Symbol = :auto
+
+    # ─── Column Shape / Growth Control ───
+    # Controls how column dimensions (c1, c2) evolve during the slab-column
+    # iteration loop when columns must grow for punching shear or P-M capacity.
+    #   :square  — force c1 = c2 at every growth step (legacy default)
+    #   :bounded — allow c1 ≠ c2, capped by max_aspect_ratio
+    #   :free    — no aspect ratio constraint (research only)
+    shape_constraint::Symbol = :square
+    # Maximum c1/c2 or c2/c1 (only active when shape_constraint == :bounded).
+    # ACI punching β factor penalizes aspect ratios > ~2 heavily (Eq. 22.6.5.2(a)).
+    max_aspect_ratio::Float64 = 2.0
+    # Rounding increment for column dimensions. The direct punching solve jumps
+    # to the required size and rounds up to the nearest multiple of this value.
+    size_increment::Length = 0.5u"inch"
 end
 
 # Import ksi for use in helper functions
@@ -211,7 +231,7 @@ opts = ConcreteBeamOptions(
 - `include_flange`: If `true`, the building-level sizing dispatcher
   (`size_beams!`) auto-computes the effective T-beam flange width and slab
   thickness from adjacent slabs and routes to the T-beam sizing API.
-  The ACI 318-19 §6.3.2.1 effective flange width limits are applied
+  The ACI 318-11 §8.12.2 effective flange width limits are applied
   automatically, using beam tributary width as `sw` and `edge_face_counts`
   for interior/edge classification.  (default: `false`)
 - `catalog_size_tbeam`: T-beam catalog density when `include_flange=true`

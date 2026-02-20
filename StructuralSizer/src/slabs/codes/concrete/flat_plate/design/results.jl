@@ -7,7 +7,8 @@
 # =============================================================================
 
 """
-    build_slab_result(h, sw, moment_results, rebar_design, deflection_result, punching_results; γ_concrete) -> FlatPlatePanelResult
+    build_slab_result(h, sw, moment_results, rebar_design, deflection_result, punching_results;
+                       γ_concrete, secondary_rebar_design=nothing) -> FlatPlatePanelResult
 
 Build FlatPlatePanelResult from design outputs.
 
@@ -15,15 +16,18 @@ Build FlatPlatePanelResult from design outputs.
 - `h`: Final slab thickness
 - `sw`: Self-weight pressure
 - `moment_results`: MomentAnalysisResult with geometry and M0
-- `rebar_design`: Strip reinforcement design (column & middle strips)
+- `rebar_design`: Strip reinforcement design (column & middle strips) — primary direction
 - `deflection_result`: Result from `check_two_way_deflection`
 - `punching_results`: Dict of per-column punching check results
 - `γ_concrete`: Weight density of concrete (force/volume); defaults to NWC_4000
+- `secondary_rebar_design`: Optional secondary direction strip reinforcement
 
 # Returns
 `FlatPlatePanelResult` with all design data
 """
-function build_slab_result(h, sw, moment_results, rebar_design, deflection_result, punching_results; γ_concrete = NWC_4000.ρ * GRAVITY)
+function build_slab_result(h, sw, moment_results, rebar_design, deflection_result, punching_results;
+                           γ_concrete = NWC_4000.ρ * GRAVITY,
+                           secondary_rebar_design = nothing)
     # Aggregate punching results
     punching_check = (
         ok = all(pr.ok for pr in values(punching_results)),
@@ -42,6 +46,18 @@ function build_slab_result(h, sw, moment_results, rebar_design, deflection_resul
         ratio = Δ_check_in / Δ_limit_in
     )
     
+    # Secondary reinforcement kwargs
+    sec_kwargs = if !isnothing(secondary_rebar_design)
+        (
+            sec_cs_width = secondary_rebar_design.column_strip_width,
+            sec_cs_reinf = secondary_rebar_design.column_strip_reinf,
+            sec_ms_width = secondary_rebar_design.middle_strip_width,
+            sec_ms_reinf = secondary_rebar_design.middle_strip_reinf,
+        )
+    else
+        NamedTuple()
+    end
+    
     return FlatPlatePanelResult(
         moment_results.l1,
         moment_results.l2,
@@ -54,7 +70,8 @@ function build_slab_result(h, sw, moment_results, rebar_design, deflection_resul
         rebar_design.middle_strip_reinf,
         punching_check,
         deflection_check;
-        γ_concrete = γ_concrete
+        γ_concrete = γ_concrete,
+        sec_kwargs...
     )
 end
 
@@ -64,21 +81,22 @@ end
 Build column design results dict from design outputs.
 """
 function build_column_results(struc, columns, column_result, Pu, Mu, punching_results)
-    results = Dict{Int, Any}()
+    results = Dict{Int, NamedTuple}()
     
     for (i, col) in enumerate(columns)
         col_idx = findfirst(==(col), struc.columns)
         section = column_result.sections[i]
+        bb = bounding_box(section)
         
-        b_in = ustrip(u"inch", section.b)
-        h_in = ustrip(u"inch", section.h)
+        w_in = ustrip(u"inch", bb.width)
+        d_in = ustrip(u"inch", bb.depth)
         
         Mu_val = uconvert(u"kN*m", Mu[i])
         
         results[col_idx] = (
-            section_size = "$(b_in)×$(h_in)",
-            b = section.b,
-            h = section.h,
+            section_size = "$(w_in)×$(d_in)",
+            b = bb.width,
+            h = bb.depth,
             ρg = section.ρg,
             Pu = uconvert(u"kN", Pu[i] * kip),
             Mu = Mu_val,

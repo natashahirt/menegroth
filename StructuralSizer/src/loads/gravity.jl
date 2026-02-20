@@ -5,9 +5,9 @@
 # Configurable unfactored service loads that flow through
 # DesignParameters → initialize! → cells.
 #
-# All values stored as psf (Asap unit) internally.  Users working in metric
-# can convert at construction:
-#   GravityLoads(floor_LL = uconvert(psf, 2.4u"kPa"))
+# Each field accepts any Unitful pressure (psf, kPa, Pa, lbf/ft², …).
+# Mixed units across fields are fine:
+#   GravityLoads(floor_LL = 2.4u"kPa", floor_SDL = 15.0psf)
 #
 # Reference: ASCE 7-22 Table 4.3-1 (minimum uniformly distributed live loads)
 # =============================================================================
@@ -57,13 +57,13 @@ for ll in [40, 50, 65, 80, 100]
 end
 ```
 """
-struct GravityLoads{P}
-    floor_LL::P
-    roof_LL::P
-    grade_LL::P
-    floor_SDL::P
-    roof_SDL::P
-    wall_SDL::P
+struct GravityLoads
+    floor_LL::Pressure
+    roof_LL::Pressure
+    grade_LL::Pressure
+    floor_SDL::Pressure
+    roof_SDL::Pressure
+    wall_SDL::Pressure
 end
 
 # Keyword constructor with psf defaults (matching previous Constants.jl values)

@@ -12,7 +12,7 @@ using Test
     # Use vault as it has a full sizing implementation
     # rise parameter is required for vault sizing
     initialize!(struc; floor_type=:vault, material=NWC_4000, 
-                floor_kwargs=(rise=1.0u"m", thickness=0.05u"m"))
+                floor_opts=VaultOptions(rise=1.0u"m", thickness=0.05u"m"))
     
     @testset "Member counts" begin
         # 2x2 grid = 3x3 columns per story, 2 stories = 18 column segments

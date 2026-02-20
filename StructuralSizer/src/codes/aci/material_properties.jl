@@ -1,5 +1,5 @@
 # ==============================================================================
-# ACI 318-19 Material Property Utilities
+# ACI 318-11 Material Property Utilities
 # ==============================================================================
 #
 # Consolidated material property functions for all ACI concrete design:
@@ -27,7 +27,7 @@ using Asap: ksi, to_ksi
     beta1(mat::ReinforcedConcreteMaterial) -> Float64
     beta1(mat::NamedTuple) -> Float64
 
-Whitney stress block factor β₁ per ACI 318-19 Table 22.2.2.4.3.
+Whitney stress block factor β₁ per ACI 318-11 §10.2.7.3.
 
 - β₁ = 0.85 for f'c ≤ 4 ksi (4000 psi)
 - β₁ = 0.85 - 0.05(f'c - 4)/1 for 4 < f'c < 8 ksi
@@ -77,7 +77,7 @@ const β1 = beta1
     Ec(mat::Concrete) -> Pressure
     Ec(mat::ReinforcedConcreteMaterial) -> Pressure
 
-Concrete elastic modulus per ACI 318-19 §19.2.2.1.
+Concrete elastic modulus per ACI 318-11 §8.5.1.
 
 **Two formulas available:**
 - `Ec(fc)` — Simplified formula (19.2.2.1.b) for normal-weight concrete:
@@ -103,7 +103,7 @@ end
 """
     Ec(fc, wc_pcf) -> Pressure
 
-General Ec formula per ACI 318-19 §19.2.2.1.a:
+General Ec formula per ACI 318-11 §8.5.1:
     Ec = 33 × wc^1.5 × √f'c
 
 where `wc_pcf` is concrete unit weight in lb/ft³ (pcf) as a bare number.
@@ -138,7 +138,7 @@ Ec_ksi(mat::NamedTuple)                  = ustrip(ksi, Ec(mat.fc * ksi))
     fr(mat::Concrete) -> Pressure
     fr(mat::ReinforcedConcreteMaterial) -> Pressure
 
-Modulus of rupture per ACI 318-19 (19.2.3.1).
+Modulus of rupture per ACI 318-11 §9.5.2.3.
 For normal-weight concrete: fr = 7.5 √f'c (psi units)
 
 # Example

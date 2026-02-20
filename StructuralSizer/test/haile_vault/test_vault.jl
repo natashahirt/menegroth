@@ -32,7 +32,7 @@ mutable struct _MockStruc{P}
     cells::Vector{_MockCell{P}}
 end
 
-function _size_vault_slab(span, sdl, live; options::FloorOptions=FloorOptions())
+function _size_vault_slab(span, sdl, live; options::VaultOptions=VaultOptions())
     P = typeof(sdl)
     cell = _MockCell{P}(sdl, live, zero(P), 1)
     struc = _MockStruc{P}([cell])
@@ -103,10 +103,7 @@ const TEST_PARAMS = (
 
     @testset "Physics: volume and weight consistency" begin
         # Verify that reported volume matches reported self-weight
-        opts = FloorOptions(
-            flat_plate=FlatPlateOptions(material=ReinforcedConcreteMaterial(NWC_4000, Rebar_60)),
-            vault=VaultOptions(rise=1.0u"m", thickness=0.05u"m")
-        )
+        opts = VaultOptions(rise=1.0u"m", thickness=0.05u"m")
         result = _size_vault_slab(6.0u"m", 1.0u"kN/m^2", 0.0u"kN/m^2"; options=opts)
         
         vol = ustrip(result.volume_per_area) # m
@@ -215,7 +212,7 @@ const TEST_PARAMS = (
         # Test with rise
         result1 = _size_vault_slab(
             6.0u"m", 1.0u"kN/m^2", 1.5u"kN/m^2";
-            options=FloorOptions(vault=VaultOptions(rise=1.0u"m", thickness=0.05u"m"))
+            options=VaultOptions(rise=1.0u"m", thickness=0.05u"m")
         )
         @test result1.thickness == 0.05u"m"
         @test ustrip(result1.rise) > 0
@@ -231,7 +228,7 @@ const TEST_PARAMS = (
         # Test with lambda (should give same result)
         result2 = _size_vault_slab(
             6.0u"m", 1.0u"kN/m^2", 1.5u"kN/m^2";
-            options=FloorOptions(vault=VaultOptions(lambda=6.0, thickness=0.05u"m"))
+            options=VaultOptions(lambda=6.0, thickness=0.05u"m")
         )
         @test result2.thickness == result1.thickness
         @test total_thrust(result2) ≈ total_thrust(result1) atol=0.01u"kN/m"
@@ -240,14 +237,14 @@ const TEST_PARAMS = (
         # Test validation: both rise and lambda should error (conflicting specifications)
         @test_throws ArgumentError _size_vault_slab(
             6.0u"m", 1.0u"kN/m^2", 1.5u"kN/m^2";
-            options=FloorOptions(vault=VaultOptions(rise=1.0u"m", lambda=6.0, thickness=0.05u"m"))
+            options=VaultOptions(rise=1.0u"m", lambda=6.0, thickness=0.05u"m")
         )
         
         # NEW: With optimization support, providing only thickness now optimizes rise
         # (This was previously an error, but is now a valid 1D optimization case)
         result_opt = _size_vault_slab(
             6.0u"m", 1.0u"kN/m^2", 1.5u"kN/m^2";
-            options=FloorOptions(vault=VaultOptions(thickness=0.05u"m"))
+            options=VaultOptions(thickness=0.05u"m")
         )
         @test result_opt.thickness == 0.05u"m"
         @test ustrip(result_opt.rise) > 0  # Rise was optimized
@@ -257,11 +254,11 @@ const TEST_PARAMS = (
         # Test result with explicit stress limit
         result = _size_vault_slab(
             6.0u"m", 1.0u"kN/m^2", 1.5u"kN/m^2";
-            options=FloorOptions(vault=VaultOptions(
+            options=VaultOptions(
                 rise=1.0u"m", 
                 thickness=0.05u"m",
                 allowable_stress=15.0  # MPa - generous limit
-            ))
+            )
         )
         
         # Stress check structure
@@ -298,7 +295,7 @@ const TEST_PARAMS = (
         # NWC_4000 has fc' ≈ 27.6 MPa, so σ_allow ≈ 12.4 MPa
         result = _size_vault_slab(
             6.0u"m", 1.0u"kN/m^2", 1.5u"kN/m^2";
-            options=FloorOptions(vault=VaultOptions(rise=1.0u"m", thickness=0.05u"m"))
+            options=VaultOptions(rise=1.0u"m", thickness=0.05u"m")
         )
         
         fc_MPa = ustrip(u"MPa", NWC_4000.fc′)
@@ -310,11 +307,11 @@ const TEST_PARAMS = (
         # Test using different concrete material
         result_ggbs = _size_vault_slab(
             6.0u"m", 1.0u"kN/m^2", 1.5u"kN/m^2";
-            options=FloorOptions(vault=VaultOptions(
+            options=VaultOptions(
                 rise=1.0u"m", 
                 thickness=0.05u"m",
                 material=NWC_GGBS
-            ))
+            )
         )
         
         # GGBS has same fc' as NWC_4000, so allowable stress should be similar
@@ -336,15 +333,15 @@ const TEST_PARAMS = (
         # Without ribs
         result_no_rib = _size_vault_slab(
             6.0u"m", 1.0u"kN/m^2", 1.5u"kN/m^2";
-            options=FloorOptions(vault=VaultOptions(rise=1.0u"m", thickness=0.05u"m",
-                                                   rib_depth=0.0u"m", rib_apex_rise=0.0u"m"))
+            options=VaultOptions(rise=1.0u"m", thickness=0.05u"m",
+                                rib_depth=0.0u"m", rib_apex_rise=0.0u"m")
         )
         
         # With ribs (should have higher self-weight)
         result_with_rib = _size_vault_slab(
             6.0u"m", 1.0u"kN/m^2", 1.5u"kN/m^2";
-            options=FloorOptions(vault=VaultOptions(rise=1.0u"m", thickness=0.05u"m",
-                                                   rib_depth=0.10u"m", rib_apex_rise=0.05u"m"))
+            options=VaultOptions(rise=1.0u"m", thickness=0.05u"m",
+                                rib_depth=0.10u"m", rib_apex_rise=0.05u"m")
         )
         
         @test result_with_rib.self_weight > result_no_rib.self_weight
@@ -526,11 +523,11 @@ const TEST_PARAMS = (
         # slab sizing with rise=1.0m should equal lambda=6.0 for span=6.0m
         r1 = _size_vault_slab(
             6.0u"m", 1.0u"kN/m^2", 2.0u"kN/m^2";
-            options=FloorOptions(vault=VaultOptions(rise=1.0u"m", thickness=0.05u"m"))
+            options=VaultOptions(rise=1.0u"m", thickness=0.05u"m")
         )
         r2 = _size_vault_slab(
             6.0u"m", 1.0u"kN/m^2", 2.0u"kN/m^2";
-            options=FloorOptions(vault=VaultOptions(lambda=6.0, thickness=0.05u"m"))
+            options=VaultOptions(lambda=6.0, thickness=0.05u"m")
         )
         
         @test total_thrust(r1) ≈ total_thrust(r2)

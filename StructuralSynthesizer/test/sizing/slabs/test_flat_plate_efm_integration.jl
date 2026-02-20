@@ -39,12 +39,8 @@ using StructuralSynthesizer
 # Report helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
-const HLINE = "─"^78
-const DLINE = "═"^78
-
-section_header(title) = println("\n", DLINE, "\n  ", title, "\n", DLINE)
-sub_header(title)     = println("\n  ", HLINE, "\n  ", title, "\n  ", HLINE)
-note(msg)             = println("    → ", msg)
+include(joinpath(@__DIR__, "..", "..", "shared", "report_helpers.jl"))
+const _rpt = ReportHelpers.Printer()
 
 function table_head()
     @printf("    %-30s %12s %12s %8s %s\n",
@@ -68,7 +64,7 @@ function compare(label, computed, reference, unit; tol=0.05)
 end
 
 # Track per-step status for the final summary table
-step_status = Dict{String,String}()
+const _step_status = Dict{String,String}()
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Inputs & SP Reference
@@ -76,7 +72,7 @@ step_status = Dict{String,String}()
 
 @testset "Flat Plate & Flat Slab — Design Validation" begin
 
-section_header("FLAT PLATE & FLAT SLAB DESIGN VALIDATION")
+_rpt.section("FLAT PLATE & FLAT SLAB DESIGN VALIDATION")
 println("  Ref: DE-Two-Way-Flat-Plate (ACI 318-14), spSlab v10.00")
 println("  Flat slab (drop panel) provisions per ACI 318-19 §8.2.4")
 
@@ -103,7 +99,7 @@ Ecc     = wc^1.5 * 33 * sqrt(ustrip(u"psi", fc_col)) * u"psi"
 # ── Derived geometry ──
 ln = l1 - c_col  # clear span
 
-sub_header("INPUT SUMMARY")
+_rpt.sub("INPUT SUMMARY")
 @printf("    Panel:         l₁ = %-8s  l₂ = %s\n", l1, l2)
 @printf("    Column:        %s × %s (square)\n", c_col, c_col)
 @printf("    Story height:  H  = %s\n", H)
@@ -139,28 +135,17 @@ sp = (
     As_neg_int_cs = 2.02u"inch^2",
 )
 
-# ═════════════════════════════════════════════════════════════════════════════
-# FEA MODEL — build once, use throughout the report
-#
-# We build a full 3×3 bay BuildingStructure matching the SP geometry,
-# run the FEA shell analysis, and use its results alongside DDM/EFM
-# in every comparison table below.
-# ═════════════════════════════════════════════════════════════════════════════
-
-# Suppress @info logging from initialize! / to_asap!
+# ── FEA MODEL — build once, use throughout ──
 fea_struc = with_logger(NullLogger()) do
     _skel = gen_medium_office(54.0u"ft", 42.0u"ft", 9.0u"ft", 3, 3, 1)
     _struc = BuildingStructure(_skel)
-    _opts = FloorOptions(
-        flat_plate = FlatPlateOptions(
-            material = RC_4000_60,
-            analysis_method = :fea,
-            cover = 0.75u"inch",
-            bar_size = 5,
-        ),
-        tributary_axis = nothing
+    _opts = FlatPlateOptions(
+        material = RC_4000_60,
+        method = FEA(),
+        cover = 0.75u"inch",
+        bar_size = 5,
     )
-    initialize!(_struc; floor_type=:flat_plate, floor_kwargs=(options=_opts,))
+    initialize!(_struc; floor_type=:flat_plate, floor_opts=_opts)
     for c_fea in _struc.cells
         c_fea.sdl = uconvert(u"kN/m^2", sdl)
         c_fea.live_load = uconvert(u"kN/m^2", ll)
@@ -202,10 +187,8 @@ ln_fea_ft     = ustrip(u"ft", fea_result.ln)
 # STEP 0  Load Baseline — SP Given vs FEA Computed
 # ═════════════════════════════════════════════════════════════════════════════
 
-section_header("STEP 0 — LOAD BASELINE: SP vs FEA")
-println("  SP states qᵤ = 193 psf as a given input (load combination unspecified).")
-println("  We compute qᵤ from stated inputs: 1.2(SDL + SW) + 1.6(LL).")
-println()
+_rpt.section("STEP 0 — LOAD BASELINE: SP vs FEA")
+println("  SP qᵤ=193 psf (given). Computed: 1.2(SDL+SW)+1.6(LL).")
 
 # Compute SW using traditional 150 pcf and NWC_4000 density (2380 kg/m³ ≈ 148.6 pcf)
 γ_150 = 150.0u"pcf"
@@ -220,7 +203,7 @@ qD_mat = sdl + sw_mat
 qu_150 = 1.2 * qD_150 + 1.6 * ll
 qu_mat = 1.2 * qD_mat + 1.6 * ll
 
-println("    Two computed qᵤ values depending on concrete density:")
+println("    Computed qᵤ by density:")
 @printf("    a) wc = 150 pcf (ACI traditional):  SW = %.1f psf → qᵤ = %.0f psf\n",
         ustrip(u"psf", sw_150), ustrip(u"psf", qu_150))
 @printf("    b) wc = %.1f pcf (NWC_4000 ρ):     SW = %.1f psf → qᵤ = %.0f psf  ← FEA uses this\n",
@@ -239,25 +222,18 @@ M0_sp_kf = ustrip(u"kip*ft", sp.M0)
         @sprintf("l₁=%.0f′ l₂=%.0f′ lₙ=%.1f′", l1_fea_ft, l2_fea_ft, ln_fea_ft))
 println()
 
-note("SP qᵤ = 193 psf is ~$(@sprintf("%.0f", ustrip(u"psf", qu_150) - ustrip(u"psf", qu))) psf lower than computed (150 pcf) — likely a different SW definition or min-h assumption.")
-note("Computed (150 pcf) ≈ FEA (NWC_4000): $(@sprintf("%.0f", ustrip(u"psf", qu_150))) vs $(@sprintf("%.0f", qu_fea_psf)) psf — the ~1 psf gap is from γ = 150 vs 148.6 pcf.")
-note("FEA now uses the same span direction as DDM/EFM (slab grouper primary = short span).")
-note("All methods share the same l₁, l₂, and M₀ baseline — only moment distribution differs.")
-note("FEA qᵤ differs slightly from SP (NWC_4000 density) — see qu table above.")
+_rpt.note("SP qᵤ lower than computed — likely different SW assumption. All methods share l₁, l₂, M₀ baseline.")
 
 @test qu_fea_psf > 0
 @test M0_fea > 0
-step_status["Load Baseline"] = "✓"
+_step_status["Load Baseline"] = "✓"
 
 # ═════════════════════════════════════════════════════════════════════════════
 # STEP 1  Section Properties (SP Table 2, left columns)
 # ═════════════════════════════════════════════════════════════════════════════
 
-section_header("STEP 1 — SECTION PROPERTIES  (SP Table 2)")
-println("  Is  = l₂ · h³ / 12           Slab moment of inertia for full panel width")
-println("  Ic  = c₁ · c₂³ / 12          Column moment of inertia (square section)")
-println("  C   = Σ (1 − 0.63 x/y) x³y/3 Torsional constant (ACI 8.10.5.2)")
-println()
+_rpt.section("STEP 1 — SECTION PROPERTIES  (SP Table 2)")
+println("  Is = l₂·h³/12,  Ic = c₁·c₂³/12,  C = Σ(1−0.63x/y)x³y/3 (ACI 8.10.5.2)")
 
 Is = StructuralSizer.slab_moment_of_inertia(l2, h)
 Ic = StructuralSizer.column_moment_of_inertia(c_col, c_col)
@@ -269,24 +245,16 @@ ok2 = compare("Ic  (column I)",    Ic, sp.Ic, u"inch^4"; tol=0.01)
 ok3 = compare("C   (torsional)",   C,  sp.C,  u"inch^4"; tol=0.05)
 
 @test ok1;  @test ok2;  @test ok3
-step_status["Section Properties"] = all((ok1, ok2, ok3)) ? "✓" : "✗"
+_step_status["Section Properties"] = all((ok1, ok2, ok3)) ? "✓" : "✗"
 
-note("Is and Ic are exact formulas; C tolerance is wider because SP may")
-note("use a slightly different rectangle decomposition for the torsional strip.")
+_rpt.note("C tolerance wider — SP may use different rectangle decomposition for torsional strip.")
 
 # ═════════════════════════════════════════════════════════════════════════════
 # STEP 2  EFM Stiffnesses (SP Table 2, right columns)
 # ═════════════════════════════════════════════════════════════════════════════
 
-section_header("STEP 2 — EFM STIFFNESSES  (SP Table 2)")
-println("  Ksb = k · Ecs · Is / l₁          Slab-beam stiffness (PCA Table A7)")
-println("  Kc  = k · Ecc · Ic / lc          Column stiffness")
-println("  Kt  = 9 · Ecs · C / [l₂(1−c₂/l₂)³]  Torsional member stiffness")
-println("  Kec = 1 / (1/ΣKc + 1/ΣKt)       Equivalent column stiffness")
-println()
-println("  Interior joint:  ΣKc = 2·Kc  (above + below)")
-println("                   ΣKt = 2·Kt  (torsional arms both sides)")
-println()
+_rpt.section("STEP 2 — EFM STIFFNESSES  (SP Table 2)")
+println("  Ksb (PCA A7), Kc, Kt, Kec = 1/(1/ΣKc+1/ΣKt).  Interior: ΣKc=2Kc, ΣKt=2Kt.")
 
 Ksb = StructuralSizer.slab_beam_stiffness_Ksb(Ecs, Is, l1, c_col, c_col)
 Kc  = StructuralSizer.column_stiffness_Kc(Ecc, Ic, H, h)
@@ -300,58 +268,39 @@ ok3 = compare("Kt  (torsional)",      Kt,  sp.Kt,  u"lbf*inch"; tol=0.01)
 ok4 = compare("Kec (equiv. column)",  Kec, sp.Kec, u"lbf*inch"; tol=0.01)
 
 @test ok1;  @test ok2;  @test ok3;  @test ok4
-step_status["EFM Stiffnesses"] = all((ok1, ok2, ok3, ok4)) ? "✓" : "✗"
+_step_status["EFM Stiffnesses"] = all((ok1, ok2, ok3, ok4)) ? "✓" : "✗"
 
 αec = ustrip(u"lbf*inch", Kec) / (2 * ustrip(u"lbf*inch", Ksb))
 @printf("\n    αec = Kec / ΣKsb = %.3f\n", αec)
-note("αec < 1 → column is 'soft'; slab attracts more moment at the support.")
+_rpt.note("αec < 1 → 'soft' column; slab attracts more moment at support.")
 
 # ═════════════════════════════════════════════════════════════════════════════
 # STEP 3  Total Static Moment (ACI 8.10.3.2)
 # ═════════════════════════════════════════════════════════════════════════════
 
-section_header("STEP 3 — TOTAL STATIC MOMENT  (ACI 8.10.3.2)")
-println("  M₀ = qᵤ · l₂ · lₙ² / 8")
-@printf("     = %.0f psf × %.1f ft × (%.3f ft)² / 8\n",
-        ustrip(u"psf", qu), ustrip(u"ft", l2), ustrip(u"ft", ln))
-println()
+_rpt.section("STEP 3 — TOTAL STATIC MOMENT  (ACI 8.10.3.2)")
+println("  M₀ = qᵤ·l₂·lₙ²/8")
 
 M0 = StructuralSizer.total_static_moment(qu, l2, ln)
 
 table_head()
 ok_m0 = compare("M₀ (static moment)", M0, sp.M0, u"kip*ft"; tol=0.01)
 @test ok_m0
-step_status["Static Moment"] = ok_m0 ? "✓" : "✗"
+_step_status["Static Moment"] = ok_m0 ? "✓" : "✗"
 
-note("M₀ is the total moment distributed between negative and positive sections.")
-note("This is for ONE equivalent-frame strip with tributary width l₂ = $l2.")
-note("FEA M₀ = $(@sprintf("%.2f", M0_fea)) kip·ft (same span, slightly different qᵤ — see Step 0).")
+_rpt.note("One EFM strip (l₂=$l2). FEA M₀ = $(@sprintf("%.2f", M0_fea)) kip·ft (slightly different qᵤ).")
 
-# ═════════════════════════════════════════════════════════════════════════════
-# STEP 4  Method Comparison — DDM vs MDDM vs EFM vs FEA
-#
-# Five moment-distribution approaches compared side by side:
-#   A) DDM Hand-Calc  — ACI Table 8.10.4.2 coefficients × M₀
-#   B) DDM Computed   — our distribute_moments_aci() function
-#   C) MDDM Computed  — our distribute_moments_mddm() (Supplementary Doc)
-#   D) EFM Computed   — Hardy Cross iteration with our stiffness values
-#   E) EFM ASAP       — Structural frame analysis (direct stiffness)
-#   F) FEA Shell      — 2D shell model with per-column skeleton-edge integration
-#
-# DDM/MDDM/EFM all use SP's given qᵤ = 193 psf → M₀ = 93.82 kip·ft.
-# FEA uses the same span direction but slightly different qᵤ (NWC_4000 density).
-# ═════════════════════════════════════════════════════════════════════════════
+# ── STEP 4 — Method Comparison (DDM / MDDM / EFM / FEA) ──
 
-section_header("STEP 4 — METHOD COMPARISON: DDM vs MDDM vs EFM vs FEA")
+_rpt.section("STEP 4 — METHOD COMPARISON: DDM vs MDDM vs EFM vs FEA")
 
 l2_l1 = round(ustrip(u"ft", l2) / ustrip(u"ft", l1), digits=2)
 println("  l₂/l₁ = $l2_l1   (αf = 0, no beams, no edge beam)")
 println()
 
 # ── 4A: DDM hand-calc (ACI Table 8.10.4.2 coefficients × M₀) ──
-sub_header("4A — DDM Hand-Calc (ACI Table 8.10.4.2)")
-println("  Longitudinal coefficients × M₀  (full frame width, end span, no edge beam):")
-println()
+_rpt.sub("4A — DDM Hand-Calc (ACI Table 8.10.4.2)")
+println("  Longitudinal coefficients × M₀ (end span, no edge beam):")
 
 M_neg_ext_ddm = 0.26 * M0
 M_pos_ddm     = 0.52 * M0
@@ -379,9 +328,8 @@ cs_int_ddm = cs_frac_int * M_neg_int_ddm
         ustrip(u"kip*ft", M_neg_int_ddm), ustrip(u"kip*ft", cs_int_ddm))
 
 # ── 4B: DDM Computed — validate distribute_moments_aci() ──
-sub_header("4B — DDM Computed (distribute_moments_aci)")
-println("  Calling distribute_moments_aci(M₀, :end_span, $l2_l1) — should match 4A:")
-println()
+_rpt.sub("4B — DDM Computed (distribute_moments_aci)")
+println("  distribute_moments_aci(M₀, :end_span, $l2_l1) — should match 4A:")
 
 ddm_comp = StructuralSizer.distribute_moments_aci(M0, :end_span, Float64(l2_l1))
 
@@ -408,14 +356,11 @@ println()
 @test ustrip(u"kip*ft", ddm_comp.column_strip.pos)     ≈ ustrip(u"kip*ft", cs_pos_ddm) atol=0.01
 @test ustrip(u"kip*ft", ddm_comp.column_strip.int_neg) ≈ ustrip(u"kip*ft", cs_int_ddm) atol=0.01
 
-note("distribute_moments_aci combines longitudinal (Table 8.10.4.2) and")
-note("transverse (Table 8.10.5) in one call. Exact match confirms correctness.")
+_rpt.note("Exact match confirms distribute_moments_aci correctness.")
 
 # ── 4C: MDDM Computed — simplified coefficients ──
-sub_header("4C — MDDM Computed (distribute_moments_mddm)")
-println("  MDDM uses pre-combined coefficients from Supplementary Document Table S-1:")
-println("  These combine longitudinal + transverse distribution into single factors.")
-println()
+_rpt.sub("4C — MDDM Computed (distribute_moments_mddm)")
+println("  Pre-combined coefficients from Supplementary Document Table S-1:")
 
 mddm = StructuralSizer.distribute_moments_mddm(M0, :end_span)
 
@@ -435,15 +380,11 @@ mddm_ms_int_v = ustrip(u"kip*ft", mddm.middle_strip.int_neg)
 @printf("    %-24s %6.3f %12.2f %12.2f\n", "Int. negative",
         0.55, mddm_cs_int_v, mddm_ms_int_v)
 println()
-note("MDDM coefficients (0.27, 0.345, 0.55) differ slightly from DDM")
-note("(0.26, 0.312, 0.525) because they're derived from a different source.")
+_rpt.note("MDDM coefficients differ slightly from DDM — different source derivation.")
 
 # ── 4D: EFM Computed — Hardy Cross with our stiffness values ──
-sub_header("4D — EFM Computed (Hardy Cross Moment Distribution)")
-println("  Using stiffnesses from Step 2 to run Hardy Cross iteration:")
-println("  FEM = m × qu × l₂ × l₁²   (PCA factor m = 0.08429 for non-prismatic section)")
-println("  DF, COF from our functions  →  iterate until convergence")
-println()
+_rpt.sub("4D — EFM Computed (Hardy Cross Moment Distribution)")
+println("  Hardy Cross with Step 2 stiffnesses. FEM = m·qu·l₂·l₁² (PCA m=0.08429).")
 
 FEM = StructuralSizer.fixed_end_moment_FEM(qu, l2, l1)
 DF_ext_val = StructuralSizer.distribution_factor_DF(Ksb, Kec; is_exterior=true)
@@ -513,19 +454,14 @@ for (lbl, c_val, r_val) in zip(["Ext. negative CL","Positive CL","Int. negative 
     @printf("    %-24s %12.2f %12.2f %+7.1f%% %s\n", lbl, c_val, r_val, 100δ, flag)
 end
 println()
-note("Our Hardy Cross (using computed Ksb, Kc, Kt, Kec from Step 2) reproduces")
-note("the SP Table 5 EFM centerline moments — validating the stiffness chain.")
-note("M₀_ctc = qu·l₂·l₁²/8 = $(round(M0_ctc, digits=2)) kip·ft (c-t-c span for statics check).")
+_rpt.note("Hardy Cross reproduces SP Table 5 — stiffness chain validated.")
 
 @test abs(M_neg_ext_efm_c - ustrip(u"kip*ft", sp.M_neg_ext)) / ustrip(u"kip*ft", sp.M_neg_ext) < 0.05
 @test abs(M_neg_int_efm_c - ustrip(u"kip*ft", sp.M_neg_int)) / ustrip(u"kip*ft", sp.M_neg_int) < 0.05
 
 # ── 4E: EFM ASAP Solver — structural frame analysis ──
-sub_header("4E — EFM ASAP Solver (Structural Frame Analysis)")
-println("  Build an ASAP frame model with EFM-compliant stiffnesses:")
-println("  Slab I_eff = (k_slab/4) × I_gross,  Column I_eff derived from Kec")
-println("  Solve as linear-elastic 2D frame → extract element end moments")
-println()
+_rpt.sub("4E — EFM ASAP Solver (Structural Frame Analysis)")
+println("  Direct stiffness method with EFM stiffnesses. Linear-elastic 2D frame.")
 
 # Build EFMSpanProperties for 3 identical spans (SP example)
 l1_in = uconvert(u"inch", l1)
@@ -590,10 +526,7 @@ for (lbl, asap_v, hc_v, sp_v, fea_v) in [
     @printf("    %-24s %10.2f %10.2f %10.2f %10.2f %+7.1f%% %s\n", lbl, asap_v, hc_v, sp_v, fea_v, 100δ, flag)
 end
 println()
-note("† FEA uses different M₀ baseline (see Step 0) — compare ratios, not absolutes.")
-note("ASAP solves the frame as a direct stiffness method (no iteration).")
-note("Hardy Cross iterates to the same result — both should match SP Table 5.")
-note("Small differences due to: stub model vs infinite column, element formulation.")
+_rpt.note("† FEA uses different M₀ baseline (see Step 0). ASAP and HC should match SP Table 5.")
 
 # Also extract interior span results for completeness
 if length(asap_moments) >= 2
@@ -601,7 +534,6 @@ if length(asap_moments) >= 2
     M_pos_s2     = ustrip(u"kip*ft", asap_moments[2].M_pos)
     println()
     @printf("    Interior span (ASAP): M⁻ = %.2f  M⁺ = %.2f  kip·ft\n", M_neg_int_s2, M_pos_s2)
-    note("SP interior span: M⁻ = 76.21  M⁺ = 33.23 kip·ft")
 end
 
 @test abs(M_neg_ext_asap - ustrip(u"kip*ft", sp.M_neg_ext)) / ustrip(u"kip*ft", sp.M_neg_ext) < 0.05
@@ -609,11 +541,8 @@ end
 @test abs(M_pos_asap - ustrip(u"kip*ft", sp.M_pos)) / ustrip(u"kip*ft", sp.M_pos) < 0.05
 
 # ── 4F: Side-by-side method comparison matrix ──
-sub_header("4F — Method Comparison Matrix (Column-Strip Moments)")
-println("  All moments in kip·ft.  Column-strip = CS fraction × centerline moment.")
-println("  CS fractions (ACI 8.10.5):  ext neg 100%  /  pos 60%  /  int neg 75%")
-println("  † FEA uses slightly different qᵤ (NWC_4000 density) — see Step 0.")
-println()
+_rpt.sub("4F — Method Comparison Matrix (Column-Strip Moments)")
+println("  CS fractions (ACI 8.10.5): 100%/60%/75%.  † FEA qᵤ per NWC_4000 density.")
 
 # EFM CS moments (from SP centerline × ACI transverse fractions)
 cs_ext_efm = cs_frac_ext * ustrip(u"kip*ft", sp.M_neg_ext)
@@ -674,21 +603,12 @@ println()
         ustrip(u"psf",qu), ustrip(u"psf",qu), ustrip(u"psf",qu), qu_fea_psf)
 println()
 
-note("DDM and DDM(fn) are identical — validates distribute_moments_aci.")
-note("MDDM uses pre-combined coefficients; slightly different from DDM × ACI fractions.")
-note("EFM(HC) = Hardy Cross;  EFM(AS) = ASAP solver;  EFM(SP) = StructurePoint ref.")
-note("Both EFM solvers should closely match SP — ASAP uses direct stiffness, HC iterates.")
-note("FEA† uses per-column skeleton-edge integration of shell Mxx/Myy/Mxy — no DDM coefficients.")
-note("FEA captures two-way action: moment in one direction < M₀ (load shared with ⊥ dir).")
-note("EFM gives ~2× larger ext neg vs DDM (stiffness attracts moment to supports).")
-note("Positive moment: DDM overestimates, EFM is lower — safer for deflection but")
-note("unconservative for negative moment rebar if DDM is used instead of EFM.")
+_rpt.note("DDM(fn) validates distribute_moments_aci. EFM(HC)=Hardy Cross, EFM(AS)=ASAP.")
+_rpt.note("FEA† captures two-way action: M < M₀ per direction. EFM ~2× ext neg vs DDM.")
 
 # ── 4G: Face-of-support design moments ──
-sub_header("4G — Face-of-Support Design Moments (SP Table 7)")
-println("  Centerline → face reduction:  M_face = M_cl − V × min(c/2, 0.175·l₁)")
-println("  Positive moment (midspan) has no face reduction.")
-println()
+_rpt.sub("4G — Face-of-Support Design Moments (SP Table 7)")
+println("  M_face = M_cl − V×min(c/2, 0.175·l₁).  Positive unchanged at midspan.")
 
 # Shear at support ≈ qu × l2 × ln / 2
 V_support = qu * l2 * ln / 2
@@ -708,16 +628,11 @@ cs_int_efm_q = cs_frac_int * sp.M_neg_int
 @printf("    %-24s %10.2f %10.2f %10.2f\n", "Int. negative",
         ustrip(u"kip*ft", cs_int_efm_q), ustrip(u"kip*ft", sp.M_neg_int_cs), cs_int_fea)
 println()
-note("Face-of-support CS moments (SP Table 7) govern reinforcement design.")
-note("Positive moment is unchanged — no face reduction at midspan.")
-note("† FEA moments extracted per-column at each column face — no separate face reduction needed.")
+_rpt.note("Face-of-support governs reinforcement. † FEA extracted at column face directly.")
 
 # ── 4H: FEA Per-Column Demands (M⁻, Vu, Mub) ──
-sub_header("4H — FEA Per-Column Demands")
-println("  M⁻  = max section moment across all incident skeleton-edge directions")
-println("  Vu  = column stub axial force (vertical shear at slab-column joint)")
-println("  Mub = unbalanced moment (for punching shear transfer — ACI 8.4.4.2)")
-println()
+_rpt.sub("4H — FEA Per-Column Demands")
+println("  M⁻ = max section moment (skeleton-edge), Vu = stub axial, Mub = unbalanced (ACI 8.4.4.2)")
 
 @printf("    %-5s  %-10s  %10s  %10s  %12s\n", "Col", "Position", "M⁻ (kip·ft)", "Vu (kip)", "Mub (kip·ft)")
 @printf("    %-5s  %-10s  %10s  %10s  %12s\n", "─"^5, "─"^10, "─"^10, "─"^10, "─"^12)
@@ -729,44 +644,26 @@ for (i, col_fea_i) in enumerate(fea_columns)
 end
 println()
 
-note("M⁻ is extracted per-column: for each incident skeleton edge, a section cut")
-note("  perpendicular to that edge at the column face integrates Mn over the cell width.")
-note("  The governing (max) direction is reported — no assumption about grid axes.")
-println()
 
 # Two-way load sharing ratio: FEA ∑/M₀
 fea_sum = M_pos_fea + (M_neg_ext_fea + M_neg_int_fea) / 2
 fea_ratio = fea_sum / M0_fea * 100
 @printf("    Load sharing:  ∑(FEA moments) / M₀ = %.1f%%\n", fea_ratio)
-note("FEA ∑/M₀ < 100% because 2D shell analysis distributes load in both directions.")
-note("DDM/EFM assume 100% in each direction independently (conservative double-count).")
-println()
-note("FEA's value-add over DDM/EFM:")
-note("  1. Per-column moments from skeleton-edge integration — no empirical coefficients")
-note("  2. Accurate column shears (Vu) from stub axial forces")
-note("  3. Unbalanced moments (Mub) for punching shear design")
-note("  4. Geometry-agnostic: works for any slab shape, column layout, or mesh topology")
-note("  5. Two-way action captured naturally (less conservative than DDM/EFM)")
+_rpt.note("FEA ∑/M₀ < 100% — two-way action distributes load in both directions.")
 
 @test M0_fea > 0
 @test M_pos_fea > 0
 @test length(fea_result.column_shears) == length(fea_columns)
 @test all(ustrip.(u"kip", fea_result.column_shears) .> 0)
 
-step_status["Method Comparison"] = "✓"
+_step_status["Method Comparison"] = "✓"
 
 # ═════════════════════════════════════════════════════════════════════════════
 # STEP 5  Effective Depth
 # ═════════════════════════════════════════════════════════════════════════════
 
-section_header("STEP 5 — EFFECTIVE DEPTH")
-println("  Two-way slab: bars in both directions → use average d")
-println("  d₁ = h − cover − db/2       (top layer)")
-println("  d₂ = h − cover − 3·db/2     (bottom layer)")
-println("  d_avg = (d₁ + d₂)/2 = h − cover − db")
-println("  cover = 0.75 in  (ACI Table 20.6.1.3.1)")
-println("  db = #5 bar → 0.625 in")
-println()
+_rpt.section("STEP 5 — EFFECTIVE DEPTH")
+println("  d_avg = h − cover − db.  cover=0.75\" (ACI 20.6.1.3.1), db=#5=0.625\".")
 
 d = StructuralSizer.effective_depth(h; cover=0.75u"inch", bar_diameter=0.625u"inch")
 
@@ -784,24 +681,13 @@ d_sp = 5.75u"inch"
 @printf("    SP uses d_avg = %.2f in (with #4 bars, db=0.5\")\n", ustrip(u"inch", d_sp))
 
 @test d > 0u"inch"
-step_status["Effective Depth"] = "✓"
-note("ACI R22.6.1: d = average effective depth in two orthogonal directions.")
-note("SP uses #4 bars (db=0.5\") → d_avg = 5.75 in; our #5 bars → d_avg = $(round(ustrip(u"inch", d), digits=3)) in.")
+_step_status["Effective Depth"] = "✓"
+_rpt.note("SP uses #4 bars → d=5.75\"; our #5 bars → d=$(round(ustrip(u"inch", d), digits=3))\".")
 
-# ═════════════════════════════════════════════════════════════════════════════
-# STEP 6  Reinforcement Design (SP Table 7)
-#
-# SP designs reinforcement from EFM face-of-support CS moments.
-# We compute As from those same SP moments (Table 7 Mu values) to validate
-# our required_reinforcement function against SP's As values.
-# ═════════════════════════════════════════════════════════════════════════════
+# ── STEP 6 — Reinforcement (SP Table 7) ──
 
-section_header("STEP 6 — FLEXURAL REINFORCEMENT  (SP Table 7)")
-println("  As = ρ · b · d   where ρ from Whitney stress block")
-println("  Mu = φ · As · fy · (d − a/2),  φ = 0.9")
-println("  b_cs = l₂/2 = $(uconvert(u"inch", l2/2))  (column-strip width)")
-println("  SP uses d_avg = 5.75 in")
-println()
+_rpt.section("STEP 6 — FLEXURAL REINFORCEMENT  (SP Table 7)")
+println("  Whitney block: Mu = φ·As·fy·(d−a/2), φ=0.9.  b_cs = l₂/2 = $(uconvert(u"inch", l2/2)), d=5.75\".")
 
 b_cs = l2 / 2
 
@@ -819,7 +705,7 @@ As_neg_int_final = max(As_neg_int, As_min)
 @printf("    As,min = %.3f in²  (ACI 8.6.1.1 — 0.0018 × b × h)\n\n",
         ustrip(u"inch^2", As_min))
 
-sub_header("Column-Strip As  (b = l₂/2 = 84 in, d = 5.75 in)")
+_rpt.sub("Column-Strip As  (b = l₂/2 = 84 in, d = 5.75 in)")
 @printf("    %-30s %10s %10s %10s\n",
         "Location", "As,req", "As,min", "As,used")
 @printf("    %-30s %10s %10s %10s\n", "─"^30, "─"^10, "─"^10, "─"^10)
@@ -834,22 +720,19 @@ sub_header("Column-Strip As  (b = l₂/2 = 84 in, d = 5.75 in)")
         ustrip(u"inch^2", As_min), ustrip(u"inch^2", As_neg_int_final))
 
 println()
-sub_header("Computed As  vs SP Table 7")
+_rpt.sub("Computed As  vs SP Table 7")
 table_head()
 ok1 = compare("As⁻ ext CS", As_neg_ext_final, sp.As_neg_ext_cs, u"inch^2"; tol=0.10)
 ok2 = compare("As⁺ pos CS", As_pos_final,     sp.As_pos_cs,     u"inch^2"; tol=0.10)
 ok3 = compare("As⁻ int CS", As_neg_int_final,  sp.As_neg_int_cs, u"inch^2"; tol=0.10)
 
 @test ok1;  @test ok2;  @test ok3
-step_status["Reinforcement"] = all((ok1, ok2, ok3)) ? "✓" : "✗"
+_step_status["Reinforcement"] = all((ok1, ok2, ok3)) ? "✓" : "✗"
 
-note("Both computed and SP use the same EFM face-of-support CS moments.")
-note("Small As differences due to iterative solver precision in required_reinforcement.")
+_rpt.note("Small As differences due to iterative solver precision in required_reinforcement.")
 
 # ── FEA Reinforcement (from FEA CS moments, using SP's d for comparability) ──
-sub_header("FEA Reinforcement (CS moments from FEA, d = 5.75 in)")
-println("  Using FEA per-column moments (skeleton-edge integration) with SP's d_avg = 5.75 in.")
-println()
+_rpt.sub("FEA Reinforcement (CS moments from FEA, d = 5.75 in)")
 
 As_neg_ext_fea_v = StructuralSizer.required_reinforcement(cs_ext_fea * u"kip*ft", b_cs, d_sp, fc_slab, fy)
 As_pos_fea_v     = StructuralSizer.required_reinforcement(cs_pos_fea * u"kip*ft", b_cs, d_sp, fc_slab, fy)
@@ -874,19 +757,14 @@ for (lbl, sp_As, efm_As, fea_As) in [
     @printf("    %-24s %10.3f %10.3f %10.3f %9.2f×\n", lbl, sp_v, efm_v, fea_v_as, ratio)
 end
 println()
-note("FEA As differs from SP/EFM because M₀(FEA) ≠ M₀(SP) (slightly different qᵤ — see Step 0).")
-note("FEA captures two-way action — moment in one direction < M₀ → less steel.")
+_rpt.note("FEA M₀ differs from SP → different As. Two-way action → less steel.")
 
 # ═════════════════════════════════════════════════════════════════════════════
 # STEP 7  Punching Shear Check (ACI 22.6)
 # ═════════════════════════════════════════════════════════════════════════════
 
-section_header("STEP 7 — PUNCHING SHEAR  (ACI 22.6)")
-println("  Interior column: critical section at d/2 from column face")
-println("  b₀ = 2(c₁+d) + 2(c₂+d)")
-println("  Vc = min(4√f'c, (2+4/β)√f'c, (αs·d/b₀+2)√f'c) × b₀ × d")
-println("  Vu = qᵤ × (At − Ac)    where Ac = (c+d)²")
-println()
+_rpt.section("STEP 7 — PUNCHING SHEAR  (ACI 22.6)")
+println("  Interior column, d/2 from face.  b₀=2(c₁+d)+2(c₂+d), Vu=qᵤ(At−Ac).")
 
 b0 = StructuralSizer.punching_perimeter(c_col, c_col, d)
 Vc = StructuralSizer.punching_capacity_interior(b0, d, fc_slab;
@@ -913,11 +791,8 @@ pass_punch = ratio_punch ≤ 1.0
 @test ratio_punch < 1.0
 
 # ── FEA Punching Comparison ──
-println()
-sub_header("FEA Punching Shear Comparison")
-println("  FEA extracts Vu directly from column stub forces (more accurate for")
-println("  irregular layouts). Compare the max FEA Vu against the code formula.")
-println()
+
+_rpt.sub("FEA Punching Shear Comparison")
 
 Vu_fea_max = maximum(ustrip.(u"kip", fea_result.column_shears))
 Vu_code    = Vu_kip
@@ -930,79 +805,73 @@ ratio_fea_punch = Vu_fea_max / φVc_kip
 @printf("    %-24s %10.3f %10.3f\n", "Vu/φVc", ratio_punch, ratio_fea_punch)
 println()
 
-note("Code Vu = qᵤ(At − Ac);  FEA Vu = stub axial force (includes load distribution effects).")
-note("For regular grids, both should be similar. FEA shines on irregular geometries.")
+_rpt.note("FEA Vu from stub axial forces — more accurate for irregular layouts.")
 
-step_status["Punching Shear"] = pass_punch ? "✓" : "✗"
-note("SP example passes punching at h = 7 in with 16\" interior columns.")
+_step_status["Punching Shear"] = pass_punch ? "✓" : "✗"
 
 # ═════════════════════════════════════════════════════════════════════════════
 # STEP 8  Deflection (SP Section 6)
 # ═════════════════════════════════════════════════════════════════════════════
 
-section_header("STEP 8 — DEFLECTION CHECK  (ACI 24.2 / SP Section 6)")
-println("  Branson's equation: Ie = (Mcr/Ma)³·Ig + [1−(Mcr/Ma)³]·Icr")
-println("  Long-term factor:  λ_Δ = ξ / (1 + 50ρ')   with ξ = 2.0 (≥5 yr)")
-println()
+_rpt.section("STEP 8 — DEFLECTION CHECK  (ACI 24.2 / SP Section 6)")
+println("  Branson Ie, weighted (ACI 435R-95), λ_Δ=ξ/(1+50ρ') with ξ=2.0.")
 
 Ig = l2 * h^3 / 12
 fr_val = StructuralSizer.fr(fc_slab)
 Mcr = StructuralSizer.cracking_moment(fr_val, Ig, h)
 
-# Service positive moment (approximate: EFM pos / avg load factor)
-Ma = sp.M_pos / 1.4
-
 Es_rebar = 29000u"ksi"
 As_min_defl = StructuralSizer.minimum_reinforcement(l2, h, fy)
-Icr = StructuralSizer.cracked_moment_of_inertia(As_min_defl, l2, d, Ecs, Es_rebar)
 
-Ie = StructuralSizer.effective_moment_of_inertia(Mcr, Ma, Ig, Icr)
+# ── Midspan: service positive moment ──
+Ma_mid = sp.M_pos / 1.4
+Icr_mid = StructuralSizer.cracked_moment_of_inertia(As_min_defl, l2, d, Ecs, Es_rebar)
+Ie_mid = StructuralSizer.effective_moment_of_inertia(Mcr, Ma_mid, Ig, Icr_mid)
+
+# ── Support: service negative moment (envelope of ext/int) ──
+M_neg_max = max(sp.M_neg_ext, sp.M_neg_int)
+Ma_sup = M_neg_max / 1.4
+As_neg = max(StructuralSizer.required_reinforcement(M_neg_max, l2, d, fc_slab, fy),
+             As_min_defl)
+Icr_sup = StructuralSizer.cracked_moment_of_inertia(As_neg, l2, d, Ecs, Es_rebar)
+Ie_sup = StructuralSizer.effective_moment_of_inertia(Mcr, Ma_sup, Ig, Icr_sup)
+
+# ── ACI 435R-95 weighted average ──
+Ie = StructuralSizer.weighted_effective_Ie(Ie_mid, Ie_sup, Ie_sup; position=:exterior)
 
 λ_Δ = StructuralSizer.long_term_deflection_factor(2.0, 0.0)
 Δ_limit = StructuralSizer.deflection_limit(l1, :total)
 
-sub_header("Section Properties")
-@printf("    Ig   = %.0f in⁴   (gross, full width l₂)\n", ustrip(u"inch^4", Ig))
-@printf("    fr   = %.1f psi   (7.5√f'c)\n", ustrip(u"psi", fr_val))
-@printf("    Mcr  = %.1f kip·ft\n", ustrip(u"kip*ft", Mcr))
-@printf("    Ma   = %.1f kip·ft  (service positive ≈ EFM M⁺/1.4)\n",
-        ustrip(u"kip*ft", Ma))
+mid_cracked = Ma_mid > Mcr
+sup_cracked = Ma_sup > Mcr
 
-cracked = Ma > Mcr
 println()
-if cracked
-    note("Ma > Mcr → section IS cracked under service load")
-else
-    note("Ma ≤ Mcr → section is UNCRACKED under service load (Ie = Ig)")
-end
+@printf("    Ig = %.0f in⁴    fr = %.1f psi    Mcr = %.1f kip·ft\n",
+        ustrip(u"inch^4", Ig), ustrip(u"psi", fr_val), ustrip(u"kip*ft", Mcr))
+@printf("    Ma_mid = %.1f kip·ft (%s)    Ma_sup = %.1f kip·ft (%s)\n",
+        ustrip(u"kip*ft", Ma_mid), mid_cracked ? "cracked" : "uncracked",
+        ustrip(u"kip*ft", Ma_sup), sup_cracked ? "cracked" : "uncracked")
+@printf("    Icr_mid = %.0f    Ie_mid/Ig = %.3f    Icr_sup = %.0f    Ie_sup/Ig = %.3f\n",
+        ustrip(u"inch^4", Icr_mid), ustrip(u"inch^4", Ie_mid)/ustrip(u"inch^4", Ig),
+        ustrip(u"inch^4", Icr_sup), ustrip(u"inch^4", Ie_sup)/ustrip(u"inch^4", Ig))
+@printf("    Weighted Ie (ACI 435R-95) = %.0f in⁴    Ie/Ig = %.3f\n",
+        ustrip(u"inch^4", Ie), ustrip(u"inch^4", Ie) / ustrip(u"inch^4", Ig))
 
-sub_header("Effective Moment of Inertia")
-@printf("    Icr  = %.0f in⁴   (cracked, with As,min reinforcement)\n",
-        ustrip(u"inch^4", Icr))
-@printf("    Ie   = %.0f in⁴   (Branson's equation)\n", ustrip(u"inch^4", Ie))
-@printf("    Ie/Ig = %.3f\n", ustrip(u"inch^4", Ie) / ustrip(u"inch^4", Ig))
-
-@test ustrip(u"inch^4", Ie) >= ustrip(u"inch^4", Icr)
+@test ustrip(u"inch^4", Ie) >= ustrip(u"inch^4", Icr_mid)
 @test ustrip(u"inch^4", Ie) <= ustrip(u"inch^4", Ig)
 
-sub_header("Long-Term & Limits")
-@printf("    λ_Δ     = %.2f   (ξ=2.0, ρ'=0 → no compression steel)\n", λ_Δ)
-@printf("    Δ_limit = L/240 = %.3f in\n", ustrip(u"inch", Δ_limit))
+@printf("    λ_Δ = %.2f  (ξ=2.0, ρ'=0)    Δ_limit = L/240 = %.3f in\n", λ_Δ, ustrip(u"inch", Δ_limit))
 
 @test λ_Δ ≈ 2.0 rtol=0.01
 @test Δ_limit ≈ l1 / 240 rtol=0.01
-step_status["Deflection"] = "✓"
-note("Full two-way deflection uses crossing-beam method in the pipeline;")
-note("this step validates the individual ACI equations feeding into it.")
+_step_status["Deflection"] = "✓"
 
 # ═════════════════════════════════════════════════════════════════════════════
 # STEP 9  Column Axial Load
 # ═════════════════════════════════════════════════════════════════════════════
 
-section_header("STEP 9 — COLUMN AXIAL LOAD")
-println("  Interior column tributary area = l₁ × l₂ (full panel)")
-println("  Pu = qᵤ × At")
-println()
+_rpt.section("STEP 9 — COLUMN AXIAL LOAD")
+println("  Pu = qᵤ × At,  At = l₁ × l₂.")
 
 At = l1 * l2
 Pu = qu * At
@@ -1013,18 +882,14 @@ Pu = qu * At
         ustrip(u"psf", qu), ustrip(u"ft^2", At), ustrip(u"kip", Pu))
 
 @test ustrip(u"kip", Pu) ≈ 48.6 rtol=0.05
-step_status["Column Axial Load"] = "✓"
-note("This is the factored axial demand for P-M interaction design.")
+_step_status["Column Axial Load"] = "✓"
 
 # ═════════════════════════════════════════════════════════════════════════════
 # STEP 10  Integrity Reinforcement (ACI 8.7.4.2)
 # ═════════════════════════════════════════════════════════════════════════════
 
-section_header("STEP 10 — INTEGRITY REINFORCEMENT  (ACI 8.7.4.2)")
-println("  Continuous bottom steel to resist progressive collapse")
-println("  Pu,integrity = 2 × (qD + qL) × At")
-println("  As,integrity = Pu / (φ × fy)   with φ = 0.9")
-println()
+_rpt.section("STEP 10 — INTEGRITY REINFORCEMENT  (ACI 8.7.4.2)")
+println("  As,integ = 2(qD+qL)·At / (φ·fy),  φ=0.9.  Continuous bottom steel.")
 
 sw = StructuralSizer.slab_self_weight(h, 150.0u"pcf")
 qD = sdl + sw
@@ -1041,14 +906,10 @@ integrity = StructuralSizer.integrity_reinforcement(At, qD, qL, fy)
 
 @test ustrip(u"inch^2", integrity.As_integrity) > 0.3
 @test ustrip(u"inch^2", integrity.As_integrity) < 3.0
-step_status["Integrity Rebar"] = "✓"
-note("This bottom steel must pass through the column core continuously.")
+_step_status["Integrity Rebar"] = "✓"
 
 # ── 10B: Demo — integrity bump of bottom steel ──
-sub_header("10B — Integrity Bump Demo (large tributary area)")
-println("  When At is large enough, integrity As exceeds flexural As.")
-println("  The pipeline detects this and re-selects bars to satisfy ACI 8.7.4.2.")
-println()
+_rpt.sub("10B — Integrity Bump Demo (large tributary area)")
 
 # Large panel: 25×20 ft → At = 500 ft²  (forces integrity to govern)
 demo_At    = 25.0u"ft" * 20.0u"ft"
@@ -1109,30 +970,19 @@ if !integ_check.ok
     Δ_pct = (ustrip(u"inch^2", bumped_bars.As_provided) /
              ustrip(u"inch^2", flex_bars.As_provided) - 1) * 100
     @printf("    ΔAs            = +%.1f%%\n", Δ_pct)
-    note("Pipeline automatically bumps column-strip positive steel when integrity governs.")
     @test ustrip(u"inch^2", bumped_bars.As_provided) >= ustrip(u"inch^2", demo_integ.As_integrity)
-else
-    note("Integrity does not govern for this geometry — flexural As is sufficient.")
 end
-println()
 
 @test !integ_check.ok  # confirm this demo triggers the bump
 
-# ═════════════════════════════════════════════════════════════════════════════
-# STEP 11  Parametric Sensitivity Studies
-#
-# Vary one parameter at a time to show how key design checks respond.
-# These tables help build intuition about which parameters matter most.
-# ═════════════════════════════════════════════════════════════════════════════
+# ── STEP 11 — Parametric Sensitivity ──
 
-section_header("STEP 11 — PARAMETRIC SENSITIVITY STUDIES")
+_rpt.section("STEP 11 — PARAMETRIC SENSITIVITY STUDIES")
 
 # ── 11A: Slab Thickness Sweep ──
-sub_header("11A — Slab Thickness (h) vs Punching, Reinforcement & Deflection")
+_rpt.sub("11A — Slab Thickness (h) vs Punching, Reinforcement & Deflection")
 h_min_in = round(ustrip(u"inch", ln / 30), digits=1)
-println("  Vary h from 5.5 in to 9 in with all other inputs fixed at SP baseline.")
-println("  h_min = ln/30 = $(h_min_in) in (ACI 8.3.1.1, discontinuous)")
-println()
+println("  h: 5.5–9\", h_min=ln/30=$(h_min_in)\". SP baseline inputs.")
 
 h_trials = [5.5, 6.0, 6.5, 7.0, 7.5, 8.0, 8.5, 9.0]u"inch"
 γ_mass = 150.0u"pcf"
@@ -1164,13 +1014,26 @@ for h_t in h_trials
     # Reinforcement
     As_min_t = StructuralSizer.minimum_reinforcement(l2 / 2, h_t, fy)
 
-    # Deflection — effective moment of inertia
-    Ig_t  = l2 * h_t^3 / 12
-    Mcr_t = StructuralSizer.cracking_moment(StructuralSizer.fr(fc_slab), Ig_t, h_t)
-    Ma_t  = sp.M_pos / 1.4  # service positive moment (constant, from SP)
+    # Deflection — weighted effective Ie (ACI 435R-95)
+    Ig_t   = l2 * h_t^3 / 12
+    Mcr_t  = StructuralSizer.cracking_moment(StructuralSizer.fr(fc_slab), Ig_t, h_t)
     As_defl_t = StructuralSizer.minimum_reinforcement(l2, h_t, fy)
-    Icr_t = StructuralSizer.cracked_moment_of_inertia(As_defl_t, l2, d_t, Ecs, Es_rebar)
-    Ie_t  = StructuralSizer.effective_moment_of_inertia(Mcr_t, Ma_t, Ig_t, Icr_t)
+
+    # Midspan Ie (service positive)
+    Ma_mid_t  = sp.M_pos / 1.4
+    Icr_mid_t = StructuralSizer.cracked_moment_of_inertia(As_defl_t, l2, d_t, Ecs, Es_rebar)
+    Ie_mid_t  = StructuralSizer.effective_moment_of_inertia(Mcr_t, Ma_mid_t, Ig_t, Icr_mid_t)
+
+    # Support Ie (service negative)
+    M_neg_max_t = max(sp.M_neg_ext, sp.M_neg_int)
+    Ma_sup_t    = M_neg_max_t / 1.4
+    As_neg_t    = max(StructuralSizer.required_reinforcement(M_neg_max_t, l2, d_t, fc_slab, fy),
+                      As_defl_t)
+    Icr_sup_t   = StructuralSizer.cracked_moment_of_inertia(As_neg_t, l2, d_t, Ecs, Es_rebar)
+    Ie_sup_t    = StructuralSizer.effective_moment_of_inertia(Mcr_t, Ma_sup_t, Ig_t, Icr_sup_t)
+
+    # Weighted average
+    Ie_t  = StructuralSizer.weighted_effective_Ie(Ie_mid_t, Ie_sup_t, Ie_sup_t; position=:exterior)
     Ie_Ig = ustrip(u"inch^4", Ie_t) / ustrip(u"inch^4", Ig_t)
 
     # Total long-term deflection: Δ_LT = (1 + λΔ) × Δi
@@ -1189,15 +1052,11 @@ for h_t in h_trials
             punch_ok ? "✓" : "✗", defl_ok ? "✓" : "✗", mark)
 end
 println()
-note("◂ = SP baseline (h = 7\").  Punch = Vu/φVc ≤ 1.0.  Defl = Δ_LT < L/240.")
-note("Thicker slab → lower punching ratio, higher Ie/Ig, less deflection.")
-note("Thinner slab → higher qu but much worse punching (ratio ~ d²).")
-note("For h ≤ 6.5\": deflection governs (Δ_LT > $(round(Δ_lim_11a, digits=2)) in).")
+_rpt.note("◂ = SP baseline (h=7\").  Thicker → better punching & deflection.")
 
 # ── 11B: Column Size Sweep ──
-sub_header("11B — Column Size (c) vs Stiffness & Punching")
-println("  Vary c from 12\" to 24\" (square column). Fixed h = 7\", H = 9 ft.")
-println()
+_rpt.sub("11B — Column Size (c) vs Stiffness & Punching")
+println("  c: 12–24\" (square). h=7\", H=9 ft.")
 
 c_trials = [12.0, 14.0, 16.0, 18.0, 20.0, 24.0]u"inch"
 
@@ -1229,61 +1088,65 @@ for c_t in c_trials
             ustrip(u"lbf*inch", Kec_t) / 1e6, αec_t, ratio_t, DF_ext_t)
 end
 println()
-note("Larger columns: Kec↑ → αec↑ → stiffer joint → EFM attracts more moment")
-note("  to supports, reducing positive moment and increasing column design demand.")
-note("Larger columns: b₀↑ and Vc↑ → punching ratio drops significantly.")
-note("c = 16\" is the SP baseline. At c = 12\", punching may be critical.")
+_rpt.note("Larger c → Kec↑, αec↑, b₀↑ → better punching. c=16\" is SP baseline.")
 
 # ── 11C: Reinforcement Level vs Deflection ──
-sub_header("11C — Reinforcement Level vs Effective Stiffness & Deflection")
-println("  Vary As from 0.5×As_min to 3.0×As_min.  Fixed h=7\", d=5.75\", b=l₂.")
-println("  Shows how adding steel increases cracked stiffness Icr → less deflection.")
-println()
+_rpt.sub("11C — Reinforcement Level vs Effective Stiffness & Deflection")
+println("  As: 0.5–3.0×As_min. h=7\", d=5.75\". More steel → higher Icr → less deflection.")
 
 As_base = StructuralSizer.minimum_reinforcement(l2, h, fy)  # full-width As_min
 Ig_base = l2 * h^3 / 12
 fr_base = StructuralSizer.fr(fc_slab)
 Mcr_base = StructuralSizer.cracking_moment(fr_base, Ig_base, h)
-Ma_base  = sp.M_pos / 1.4
+Ma_mid_base = sp.M_pos / 1.4
+M_neg_max_base = max(sp.M_neg_ext, sp.M_neg_int)
+Ma_sup_base = M_neg_max_base / 1.4
 w_base   = (sdl + StructuralSizer.slab_self_weight(h, γ_mass) + ll) * l2
 d_sp_val = 5.75u"inch"
 
 As_multipliers = [0.5, 0.75, 1.0, 1.5, 2.0, 2.5, 3.0]
 
-@printf("    %7s  %8s  %10s  %7s  %8s  %8s\n",
-        "As/Amin", "As(in²)", "Icr(in⁴)", "Ie/Ig", "Δi(in)", "Δ_LT(in)")
-@printf("    %7s  %8s  %10s  %7s  %8s  %8s\n",
-        "─"^7, "─"^8, "─"^10, "─"^7, "─"^8, "─"^8)
+@printf("    %7s  %8s  %10s  %9s  %9s  %7s  %8s  %8s\n",
+        "As/Amin", "As(in²)", "Icr(in⁴)", "Ie_mid/Ig", "Ie_sup/Ig", "Ie/Ig", "Δi(in)", "Δ_LT(in)")
+@printf("    %7s  %8s  %10s  %9s  %9s  %7s  %8s  %8s\n",
+        "─"^7, "─"^8, "─"^10, "─"^9, "─"^9, "─"^7, "─"^8, "─"^8)
 
 for mult in As_multipliers
     As_t  = mult * As_base
-    Icr_t = StructuralSizer.cracked_moment_of_inertia(As_t, l2, d_sp_val, Ecs, Es_rebar)
-    Ie_t  = StructuralSizer.effective_moment_of_inertia(Mcr_base, Ma_base, Ig_base, Icr_t)
+    Icr_mid_t = StructuralSizer.cracked_moment_of_inertia(As_t, l2, d_sp_val, Ecs, Es_rebar)
+
+    # Midspan Ie
+    Ie_mid_t = StructuralSizer.effective_moment_of_inertia(Mcr_base, Ma_mid_base, Ig_base, Icr_mid_t)
+
+    # Support Ie (scale neg steel proportionally)
+    As_neg_t = max(StructuralSizer.required_reinforcement(M_neg_max_base, l2, d_sp_val, fc_slab, fy),
+                   As_t)
+    Icr_sup_t = StructuralSizer.cracked_moment_of_inertia(As_neg_t, l2, d_sp_val, Ecs, Es_rebar)
+    Ie_sup_t = StructuralSizer.effective_moment_of_inertia(Mcr_base, Ma_sup_base, Ig_base, Icr_sup_t)
+
+    # Weighted average
+    Ie_t = StructuralSizer.weighted_effective_Ie(Ie_mid_t, Ie_sup_t, Ie_sup_t; position=:exterior)
     Ie_Ig = ustrip(u"inch^4", Ie_t) / ustrip(u"inch^4", Ig_base)
 
     Δi_t = StructuralSizer.immediate_deflection(w_base, l1, Ecs, Ie_t)
     Δi_in = ustrip(u"inch", Δi_t)
     Δ_lt = 2.0 * Δi_in + Δi_in  # total ≈ (1 + λΔ) × Δi
 
-    @printf("    %7.2f  %8.2f  %10.0f  %7.3f  %8.4f  %8.4f\n",
-            mult, ustrip(u"inch^2", As_t), ustrip(u"inch^4", Icr_t),
-            Ie_Ig, Δi_in, Δ_lt)
+    Ie_mid_Ig = ustrip(u"inch^4", Ie_mid_t) / ustrip(u"inch^4", Ig_base)
+    Ie_sup_Ig = ustrip(u"inch^4", Ie_sup_t) / ustrip(u"inch^4", Ig_base)
+
+    @printf("    %7.2f  %8.2f  %10.0f  %9.3f  %9.3f  %7.3f  %8.4f  %8.4f\n",
+            mult, ustrip(u"inch^2", As_t), ustrip(u"inch^4", Icr_mid_t),
+            Ie_mid_Ig, Ie_sup_Ig, Ie_Ig, Δi_in, Δ_lt)
 end
 println()
-note("Δ_LT = (1 + λΔ) × Δi  where λΔ = 2.0 (no compression steel, ≥5 yr).")
 let Δ_lim_in = round(ustrip(u"inch", l1/240), digits=2)
-    note("Δ_limit = L/240 = $(Δ_lim_in) in.")
+    _rpt.note("Δ_LT=(1+λΔ)×Δi, λΔ=2.0. Δ_limit=L/240=$(Δ_lim_in)\". Weighted Ie includes support cracking.")
 end
-note("Even 3× As_min barely changes Ie/Ig because section is lightly cracked")
-note("(Ma/Mcr ratio matters more than As for this geometry).")
 
 # ── 11D: Column Shape — Square vs Circular ──
-sub_header("11D — Column Shape: Square vs Circular (Same Area)")
-println("  For each diameter D, the equivalent square c_eq = D×√(π/4) ≈ 0.886D.")
-println("  Punching perimeter: square b₀ = 4(c+d), circular b₀ = π(D+d).")
-println("  Column Ic:  square = c⁴/12,  circular = πD⁴/64.")
-println("  All other inputs: h = 7\", d = 5.75\", H = 9 ft, f'c = 4000 psi.")
-println()
+_rpt.sub("11D — Column Shape: Square vs Circular (Same Area)")
+println("  c_eq=D√(π/4)≈0.886D. h=7\", d=5.75\". Compare b₀ and Ic.")
 
 D_trials = [12.0, 14.0, 16.0, 18.0, 20.0, 24.0]u"inch"
 
@@ -1341,16 +1204,7 @@ for D_t in D_trials
             ratio_sq, ratio_cir)
 end
 println()
-note("c_eq = D×√(π/4): equivalent square with same cross-sectional area.")
-note("Circular b₀ = π(D+d) < square b₀ = 4(c_eq+d): circle has ~14% less perimeter.")
-note("  This is basic geometry: circles minimize perimeter for a given area.")
-note("  → Circular columns are slightly worse for punching shear (less b₀).")
-note("Circular Ic = πD⁴/64 < square Ic = c_eq⁴/12: ~4.5% lower stiffness.")
-note("  → Slightly less stiff → slightly lower Kec → marginally lower column demand.")
-note("Net effect: for the same concrete area, square columns give ~14% more")
-note("  punching perimeter but ~4.5% more stiffness. Both differences are moderate.")
-note("In practice, choosing circular vs square is driven by constructability,")
-note("  not by small structural differences.")
+_rpt.note("Circular b₀~14% less, Ic~4.5% less than equivalent square. Net effect moderate.")
 
 # Validate that circular and square are reasonably close for baseline 16" column
 let D_base = 16.0u"inch",
@@ -1371,20 +1225,12 @@ let D_base = 16.0u"inch",
     compare("Ic (circular vs eq. square)", Ic_cir_base, Ic_sq_base, u"inch^4"; tol=0.25)
 end
 
-step_status["Sensitivity Studies"] = "✓"
+_step_status["Sensitivity Studies"] = "✓"
 
-# ═════════════════════════════════════════════════════════════════════════════
-# STEP 12 — FULL SIZING COMPARISON: ALL 5 METHODS
-#
-# Larger geometry (25×20 ft panels, heavier loads) to push past minimum values
-# and produce visible differences between methods.
-# ═════════════════════════════════════════════════════════════════════════════
+# ── STEP 12 — Full Sizing (All 5 Methods) ──
 
-section_header("STEP 12 — FULL SIZING: DDM vs MDDM vs EFM-HC vs EFM-AP vs FEA")
-println("  Larger building: 75×60 ft, 3×3 bays → 25×20 ft panels")
-println("  Heavier loads: SDL=30 psf, LL=100 psf, 12\" initial columns")
-println("  Pipeline: h iteration → moment analysis → reinf → columns → checks → converge")
-println()
+_rpt.section("STEP 12 — FULL SIZING: DDM vs MDDM vs EFM-HC vs EFM-AP vs FEA")
+println("  75×60 ft, 3×3 bays, SDL=30 psf, LL=100 psf, 12\" initial columns.")
 
 # ─── Helper: build a fresh structure for a given method ───
 sz_Lx = 75.0u"ft"
@@ -1394,19 +1240,16 @@ sz_sdl = 30.0u"psf"
 sz_ll  = 100.0u"psf"
 sz_c0  = 12.0u"inch"   # initial column size (small → forces iteration)
 
-function _build_sizing_struc(method_sym::Symbol)
+function _build_sizing_struc(method_obj)
     _skel = gen_medium_office(sz_Lx, sz_Ly, sz_H, 3, 3, 1)
     _struc = BuildingStructure(_skel)
-    _opts = FloorOptions(
-        flat_plate = FlatPlateOptions(
-            material = RC_4000_60,
-            analysis_method = method_sym,
-            cover = 0.75u"inch",
-            bar_size = 5,
-        ),
-        tributary_axis = nothing
+    _opts = FlatPlateOptions(
+        material = RC_4000_60,
+        method = method_obj,
+        cover = 0.75u"inch",
+        bar_size = 5,
     )
-    initialize!(_struc; floor_type=:flat_plate, floor_kwargs=(options=_opts,))
+    initialize!(_struc; floor_type=:flat_plate, floor_opts=_opts)
     for c_i in _struc.cells
         c_i.sdl = uconvert(u"kN/m^2", sz_sdl)
         c_i.live_load = uconvert(u"kN/m^2", sz_ll)
@@ -1422,6 +1265,13 @@ end
 # ─── Run sizing for each method ───
 sizing_data = Dict{Symbol, Any}()
 methods_ordered = [:ddm, :mddm, :efm_hc, :efm_asap, :fea]
+method_objects = Dict(
+    :ddm      => DDM(),
+    :mddm     => DDM(:simplified),
+    :efm_hc   => EFM(:moment_distribution),
+    :efm_asap => EFM(:asap),
+    :fea      => FEA(),
+)
 method_labels = Dict(
     :ddm      => "DDM",
     :mddm     => "MDDM",
@@ -1431,7 +1281,7 @@ method_labels = Dict(
 )
 for method_sym in methods_ordered
     struc_m, opts_m = with_logger(NullLogger()) do
-        _build_sizing_struc(method_sym)
+        _build_sizing_struc(method_objects[method_sym])
     end
     StructuralSizer.size_slabs!(struc_m; options=opts_m, max_iterations=30)
     slab_m = struc_m.slabs[1]
@@ -1460,7 +1310,7 @@ function _total_As(res)
 end
 
 # ─── 12A: Slab Thickness & Geometry ───
-sub_header("12A — Slab Thickness & Geometry")
+_rpt.sub("12A — Slab Thickness & Geometry")
 
 # Header
 @printf("    %-18s", "")
@@ -1497,7 +1347,7 @@ println()
 println()
 
 # ─── 12B: Column-Strip Reinforcement ───
-sub_header("12B — Column-Strip Reinforcement")
+_rpt.sub("12B — Column-Strip Reinforcement")
 
 @printf("    %-18s", "Location")
 for m in methods_ordered; @printf("  %10s", method_labels[m]); end
@@ -1527,7 +1377,7 @@ end
 println()
 
 # ─── 12C: Middle-Strip Reinforcement ───
-sub_header("12C — Middle-Strip Reinforcement")
+_rpt.sub("12C — Middle-Strip Reinforcement")
 
 @printf("    %-18s", "Location")
 for m in methods_ordered; @printf("  %10s", method_labels[m]); end
@@ -1557,7 +1407,7 @@ end
 println()
 
 # ─── 12D: Design Checks ───
-sub_header("12D — Design Checks")
+_rpt.sub("12D — Design Checks")
 
 @printf("    %-22s", "")
 for m in methods_ordered; @printf("  %8s", method_labels[m]); end
@@ -1586,7 +1436,7 @@ println()
 println()
 
 # ─── 12E: Column Sizes (after pipeline convergence) ───
-sub_header("12E — Column Sizes After Convergence")
+_rpt.sub("12E — Column Sizes After Convergence")
 
 @printf("    %-22s", "Position")
 for m in methods_ordered; @printf("  %10s", method_labels[m]); end
@@ -1611,7 +1461,7 @@ end
 println()
 
 # ─── 12F: Compact Summary ───
-sub_header("12F — One-Line Summary")
+_rpt.sub("12F — One-Line Summary")
 println()
 @printf("    %-6s │ %4s │ %6s │ %6s │ %6s │ %8s │ %8s │ %s\n",
         "Method", "h\"", "M₀", "ΣAs", "Vu/φVc", "Δ/Δ_lim", "Int col", "Status")
@@ -1633,14 +1483,10 @@ for m in methods_ordered
 end
 println()
 
-note("Geometry: $(ustrip(u"ft", sz_Lx))×$(ustrip(u"ft", sz_Ly)) ft, 3×3 bays, f'c=4000 psi, fy=60 ksi.")
-note("Initial column = $(round(Int, ustrip(u"inch", sz_c0)))\" sq. SDL=$(ustrip(u"psf", sz_sdl)) psf, LL=$(ustrip(u"psf", sz_ll)) psf.")
-note("All methods use the same span direction (slab grouper primary = short span).")
-note("Differences arise ONLY from the analysis method — geometry, loads, materials identical.")
-note("ΣAs = total provided rebar area (column + middle strips, all locations).")
+_rpt.note("Same geometry/loads/materials for all methods — differences arise only from analysis method.")
 
 # ─── 12G: Per-Position Punching Demands ───
-sub_header("12G — Per-Position Punching Demands (Frame of Reference)")
+_rpt.sub("12G — Per-Position Punching Demands (Frame of Reference)")
 
 # Use the first method's result for panel geometry reference
 ref_res = sizing_data[:ddm].result
@@ -1648,9 +1494,7 @@ ref_l1 = ustrip(u"ft", ref_res.l1)
 ref_l2 = ustrip(u"ft", ref_res.l2)
 ref_qu = ustrip(u"psf", ref_res.qu)
 panel_ft2 = ref_l1 * ref_l2
-println("  Simple tributary reference:  Vu,trib = qᵤ × At   (no deduction for Ac)")
-@printf("  Panel = %.0f × %.0f = %.0f ft²,  qᵤ = %.0f psf\n", ref_l1, ref_l2, panel_ft2, ref_qu)
-println()
+@printf("  Panel = %.0f × %.0f ft², qᵤ = %.0f psf.  Vu,trib = qᵤ × At.\n", ref_l1, ref_l2, ref_qu)
 
 trib_at = Dict(:interior => panel_ft2, :edge => panel_ft2 / 2.0, :corner => panel_ft2 / 4.0)
 
@@ -1684,54 +1528,25 @@ for (pos_sym, pos_label) in [(:interior, "Interior"), (:edge, "Edge"), (:corner,
 end
 println()
 
-note("Table shows max Vu/φVc per position; Trib Vu = simple hand-calc reference.")
-note("Larger panels + heavier loads push punching ratios well above minimum values.")
+_rpt.note("Max Vu/φVc per position. Trib Vu = simple hand-calc reference.")
 
 # ─── 12H: Interpretation — What the Differences Mean ───
-sub_header("12H — Interpretation: Why Methods Differ")
-println()
-println("  1. DDM vs MDDM")
-println("     Slightly different longitudinal coefficients (e.g. DDM 0.26/0.312/0.525")
-println("     vs MDDM 0.27/0.345/0.55). Both use simple M₀ distribution — no iteration.")
-println("     Differences are small but visible in reinforcement quantities.")
-println()
-println("  2. EFM-HC vs EFM-AP")
-println("     Both use the same equivalent frame stiffnesses. HC = Hardy Cross iteration;")
-println("     AP = ASAP direct stiffness (exact). Differences arise from iteration")
-println("     convergence — typically < 2% for well-conditioned frames.")
-println()
-println("  3. FEA vs DDM/EFM")
-println("     FEA captures two-way plate action: load distributes in both directions")
-println("     simultaneously, so moment in any single direction < M₀.")
-println("     FEA's ext/int classification uses building topology (column position),")
-println("     not span-direction position as in DDM/EFM.")
-println("     Expect FEA to produce lower bending reinforcement but may show")
-println("     higher punching demands at some columns.")
+_rpt.sub("12H — Interpretation: Why Methods Differ")
+println("  DDM vs MDDM: slightly different coefficients (small rebar impact).")
+println("  EFM-HC vs EFM-AP: iteration vs direct stiffness (<2% difference).")
+println("  FEA: two-way action → lower bending, possible higher punching at some columns.")
 
 @test all(sizing_data[m].result.punching_check.ok for m in methods_ordered)
 
-step_status["Full Sizing"] = "✓"
+_step_status["Full Sizing"] = "✓"
 
-# ═════════════════════════════════════════════════════════════════════════════
-# STEP 13 — FLAT SLAB WITH DROP PANELS
-#
-# Flat slabs have thickened drop panels around columns (ACI 318-19 §8.2.4)
-# which increase punching shear capacity and allow thinner slab thickness.
-# This section compares flat plate vs flat slab design side by side.
-# ═════════════════════════════════════════════════════════════════════════════
+# ── STEP 13 — Flat Slab with Drop Panels ──
 
-section_header("STEP 13 — FLAT SLAB WITH DROP PANELS")
-println("  Flat slabs have thickened drop panels at columns (ACI 318-19 §8.2.4).")
-println("  Benefits: reduced slab thickness, improved punching shear, less rebar.")
-println("  This section provides side-by-side comparisons for engineer review.")
-println()
+_rpt.section("STEP 13 — FLAT SLAB WITH DROP PANELS (ACI §8.2.4)")
 
 # ── 13A: Minimum Thickness — Flat Plate vs Flat Slab ──
-sub_header("13A — Minimum Thickness: Flat Plate vs Flat Slab (ACI 8.3.1.1)")
-println("  Flat Plate:  h_min = ln/30 (exterior)  ln/33 (interior)")
-println("  Flat Slab:   h_min = ln/33 (exterior)  ln/36 (interior)")
-println("  → Drop panels allow ~9% thinner slab for the same clear span.")
-println()
+_rpt.sub("13A — Minimum Thickness: Flat Plate vs Flat Slab (ACI 8.3.1.1)")
+println("  FP: ln/30, ln/33.  FS: ln/33, ln/36.  Drop panels → ~9% thinner.")
 
 ln_trials = [15.0, 18.0, 20.0, 22.0, 25.0]u"ft"
 
@@ -1741,10 +1556,10 @@ ln_trials = [15.0, 18.0, 20.0, 22.0, 25.0]u"ft"
         "─"^6, "─"^7, "─"^7, "─"^7, "─"^7, "─"^8)
 
 for ln_t in ln_trials
-    fp_ext = StructuralSizer.min_thickness_flat_plate(ln_t; discontinuous_edge=true)
-    fp_int = StructuralSizer.min_thickness_flat_plate(ln_t; discontinuous_edge=false)
-    fs_ext = StructuralSizer.min_thickness_flat_slab(ln_t; discontinuous_edge=true)
-    fs_int = StructuralSizer.min_thickness_flat_slab(ln_t; discontinuous_edge=false)
+    fp_ext = StructuralSizer.min_thickness(StructuralSizer.FlatPlate(), ln_t; discontinuous_edge=true)
+    fp_int = StructuralSizer.min_thickness(StructuralSizer.FlatPlate(), ln_t; discontinuous_edge=false)
+    fs_ext = StructuralSizer.min_thickness(StructuralSizer.FlatSlab(), ln_t; discontinuous_edge=true)
+    fs_int = StructuralSizer.min_thickness(StructuralSizer.FlatSlab(), ln_t; discontinuous_edge=false)
 
     savings = (1.0 - ustrip(u"inch", fs_ext) / ustrip(u"inch", fp_ext)) * 100
 
@@ -1754,19 +1569,15 @@ for ln_t in ln_trials
             ustrip(u"inch", fs_ext), ustrip(u"inch", fs_int), savings)
 end
 println()
-note("FP = Flat Plate (ACI Table 8.3.1.1 Row 1).  FS = Flat Slab (Row 2).")
-note("Savings = (FP_ext − FS_ext) / FP_ext.  All rounded up to 0.5\" in practice.")
-note("The 9-10% thickness reduction is the primary economic driver for drop panels.")
+_rpt.note("Savings = (FP−FS)/FP. 9-10% reduction is the primary economic driver.")
 
 # Validate
-@test StructuralSizer.min_thickness_flat_slab(18.0u"ft") <
-      StructuralSizer.min_thickness_flat_plate(18.0u"ft")
+@test StructuralSizer.min_thickness(StructuralSizer.FlatSlab(), 18.0u"ft") <
+      StructuralSizer.min_thickness(StructuralSizer.FlatPlate(), 18.0u"ft")
 
 # ── 13B: Drop Panel Geometry (ACI 8.2.4) ──
-sub_header("13B — Drop Panel Geometry (ACI 8.2.4)")
-println("  ACI 8.2.4 requires:  (a) h_drop ≥ h_slab/4   (b) a_drop ≥ l/6")
-println("  Standard lumber depths (with plyform): 2.25\", 4.25\", 6.25\", 8.0\"")
-println()
+_rpt.sub("13B — Drop Panel Geometry (ACI 8.2.4)")
+println("  h_drop ≥ h/4, a_drop ≥ l/6.")
 
 h_trials_dp = [6.0, 7.0, 8.0, 9.0, 10.0, 12.0]u"inch"
 
@@ -1799,16 +1610,13 @@ println("  For SP baseline (l₁=18', l₂=14'):")
 @printf("    a_drop_2 = l₂/6 = %.2f ft = %.1f in   → full extent = %.1f in (%.1f ft)\n",
         ustrip(u"ft", a2), ustrip(u"inch", a2), ustrip(u"inch", 2*a2), ustrip(u"ft", 2*a2))
 println()
-note("Plan extent: drop panel extends l/6 from column center in each direction.")
-note("For 16\" column + 36\" drop extent = 28\" clear from column face per side — generous formwork zone.")
+_rpt.note("Drop extends l/6 from column center in each direction.")
 
 @test all(StructuralSizer.auto_size_drop_depth(h_t) >= h_t / 4 for h_t in h_trials_dp)
 
 # ── 13C: Edge Beam βt Effect on DDM Moments ──
-sub_header("13C — Edge Beam βt Effect on DDM Moments (ACI 8.10.4.2 / 8.10.5.2)")
-println("  βt = torsional stiffness ratio of the edge beam / slab.")
-println("  Higher βt → more moment attracted to exterior support, less to midspan.")
-println()
+_rpt.sub("13C — Edge Beam βt Effect on DDM Moments (ACI 8.10.4.2 / 8.10.5.2)")
+println("  βt = edge beam torsional stiffness ratio. Higher → more moment to exterior.")
 
 M0_βt = sp.M0  # use SP baseline M₀ = 93.82 kip-ft
 βt_trials = [0.0, 0.5, 1.0, 1.5, 2.0, 2.5]
@@ -1827,10 +1635,7 @@ for βt_v in βt_trials
             βt_v, coeffs.ext_neg, coeffs.pos, coeffs.int_neg, 100*cs_frac, cs_ext)
 end
 println()
-note("βt = 0: no edge beam (flat plate default) → 26% M₀ to exterior negative.")
-note("βt ≥ 2.5: full edge beam → 30% M₀ to exterior, but only 75% to column strip.")
-note("Net CS ext neg: 26.0 k·ft (βt=0) vs 21.1 k·ft (βt=2.5) — less rebar at exterior.")
-note("The reduced CS exterior negative with edge beam means less congestion at edge columns.")
+_rpt.note("βt=0→26% M₀ ext neg, βt≥2.5→30% but 75% to CS. Net: less rebar at exterior.")
 
 # Validate monotonic behavior
 @test StructuralSizer.aci_ddm_longitudinal_with_edge_beam(2.5).ext_neg >
@@ -1839,10 +1644,8 @@ note("The reduced CS exterior negative with edge beam means less congestion at e
       StructuralSizer.aci_col_strip_ext_neg_fraction(0.0)
 
 # ── 13D: Compression Steel (ρ') Effect on Deflection ──
-sub_header("13D — Compression Steel (ρ') Effect on Long-Term Deflection")
-println("  λ_Δ = ξ / (1 + 50ρ')   where ξ = 2.0 for sustained loads ≥ 5 years.")
-println("  Top bars extending past midspan act as compression steel → lower λ_Δ → less creep.")
-println()
+_rpt.sub("13D — Compression Steel (ρ') Effect on Long-Term Deflection")
+println("  λ_Δ = ξ/(1+50ρ'), ξ=2.0. Top bars as compression steel → less creep.")
 
 ρ_trials = [0.0, 0.001, 0.002, 0.005, 0.010, 0.020]
 
@@ -1861,35 +1664,28 @@ for ρ_v in ρ_trials
             ρ_v, λ_Δ_v, 100*ratio, reduction)
 end
 println()
-note("ρ' = 0.005 (typical for flat plates) → 20% reduction in long-term deflection.")
-note("ρ' = 0.010 (generous negative steel) → 33% reduction — often makes borderline Δ pass.")
-note("The pipeline estimates ρ' from 50% of column-strip negative steel extending to midspan.")
+_rpt.note("ρ'=0.005→20% reduction, ρ'=0.010→33%. Pipeline estimates from CS neg steel.")
 
 @test StructuralSizer.long_term_deflection_factor(2.0, 0.01) <
       StructuralSizer.long_term_deflection_factor(2.0, 0.0)
 
 # ── 13E: Full Pipeline — Flat Plate vs Flat Slab ──
-sub_header("13E — Full Sizing: Flat Plate vs Flat Slab (DDM)")
-println("  Same 75×60 ft building from Step 12, DDM analysis, SDL=30 psf, LL=100 psf.")
-println("  Compare flat plate (h from Table 8.3.1.1 Row 1) vs flat slab (Row 2 + drop panels).")
-println()
+_rpt.sub("13E — Full Sizing: Flat Plate vs Flat Slab (DDM)")
+println("  Same 75×60 ft building from Step 12. Flat plate vs flat slab (with drops).")
 
 # Build flat slab structure (same geometry as Step 12)
 fs_struc, fs_opts = with_logger(NullLogger()) do
     _skel = gen_medium_office(sz_Lx, sz_Ly, sz_H, 3, 3, 1)
     _struc = BuildingStructure(_skel)
-    _opts = FloorOptions(
-        flat_slab = FlatSlabOptions(
-            base = FlatPlateOptions(
-                material = RC_4000_60,
-                analysis_method = :ddm,
-                cover = 0.75u"inch",
-                bar_size = 5,
-            ),
+    _opts = FlatSlabOptions(
+        base = FlatPlateOptions(
+            material = RC_4000_60,
+            method = DDM(),
+            cover = 0.75u"inch",
+            bar_size = 5,
         ),
-        tributary_axis = nothing,
     )
-    initialize!(_struc; floor_type=:flat_slab, floor_kwargs=(options=_opts,))
+    initialize!(_struc; floor_type=:flat_slab, floor_opts=_opts)
     for c_i in _struc.cells
         c_i.sdl = uconvert(u"kN/m^2", sz_sdl)
         c_i.live_load = uconvert(u"kN/m^2", sz_ll)
@@ -1971,22 +1767,15 @@ if !isempty(fp_int_cols) && !isempty(fs_int_cols)
 end
 println()
 
-note("Flat slab thickness governed by ACI 8.3.1.1 Row 2 (ln/33, ln/36 with drops).")
-note("Drop panel increases total depth at columns → better punching without thick slab.")
-note("Lower h → less self-weight → lower M₀ → less reinforcement — a compounding benefit.")
-note("Punching is checked at BOTH column face (h_total) and drop edge (h_slab).")
+_rpt.note("Lower h → less SW → lower M₀ → less rebar. Punching checked at column face AND drop edge.")
 
 @test fs_res.punching_check.ok
 @test fs_res.deflection_check.ok
 @test h_fs <= h_fp  # flat slab should be at least as thin
 
 # ── 13F: Dual Punching Shear Check ──
-sub_header("13F — Flat Slab Dual Punching Shear Check (ACI 22.6)")
-println("  Flat slabs require TWO punching checks:")
-println("    1. At column face → d/2 from face, using total depth (h_slab + h_drop)")
-println("    2. At drop edge → d/2 from drop panel edge, using slab depth (h_slab only)")
-println("  The governing check is whichever has the higher demand/capacity ratio.")
-println()
+_rpt.sub("13F — Flat Slab Dual Punching Shear Check (ACI 22.6)")
+println("  Check 1: column face (total depth).  Check 2: drop edge (slab depth only).")
 
 if !isnothing(fs_dp)
     h_slab_fs = fs_res.thickness
@@ -2022,21 +1811,297 @@ if !isnothing(fs_dp)
         @printf("      Drop edge:    b₀ = %.1f in  (d = %.2f in, slab depth only)\n",
                 ustrip(u"inch", b0_drop), ustrip(u"inch", d_slab_fs))
         println()
-        note("Column face b₀ is small but uses full depth → higher capacity per inch of perimeter.")
-        note("Drop edge b₀ is large but uses only slab depth → lower unit capacity.")
-        note("Both must pass; the governing section depends on geometry.")
+        _rpt.note("Both checks must pass; governing section depends on geometry.")
     end
 end
 
-step_status["Flat Slab"] = "✓"
+_step_status["Flat Slab"] = "✓"
 
-# ═════════════════════════════════════════════════════════════════════════════
-# DESIGN CODE FEATURES & LIMITATIONS
-# ═════════════════════════════════════════════════════════════════════════════
+# ── STEP 14 — Pattern Loading ──
 
-section_header("DESIGN CODE FEATURES & LIMITATIONS")
+_rpt.section("STEP 14 — PATTERN LOADING  (ACI 318-19 §6.4.3)")
+println("  Checkerboard patterns for worst-case forces. Skip if L/D ≤ 0.75.")
 
-sub_header("13A — Feature Matrix")
+# ─── 14A: L/D Ratio Check ─────────────────────────────────────────────────
+_rpt.sub("14A — L/D Ratio Check (ACI §6.4.3.3)")
+println("  Pattern loading required when L/D > 0.75.")
+
+# Build structures for both scenarios
+pat_sdl_heavy = 20.0u"psf"   # lower SDL → higher L/D
+pat_ll_heavy  = 150.0u"psf"  # high LL to guarantee L/D > 0.75
+
+pat_struc_heavy = with_logger(NullLogger()) do
+    _skel = gen_medium_office(sz_Lx, sz_Ly, sz_H, 3, 3, 1)
+    _struc = BuildingStructure(_skel)
+    _opts = FlatPlateOptions(material=RC_4000_60, method=DDM(), cover=0.75u"inch", bar_size=5)
+    initialize!(_struc; floor_type=:flat_plate, floor_opts=_opts)
+    for c_i in _struc.cells
+        c_i.sdl = uconvert(u"kN/m^2", pat_sdl_heavy)
+        c_i.live_load = uconvert(u"kN/m^2", pat_ll_heavy)
+    end
+    for col_i in _struc.columns; col_i.c1 = sz_c0; col_i.c2 = sz_c0; end
+    _struc
+end
+
+# Compute L/D for the heavy-LL scenario (SDL=30, LL=100, SW depends on initial h)
+# After initialize!, cells have self_weight from the initial slab thickness estimate
+ld_ratios_heavy = Float64[]
+for cell in pat_struc_heavy.cells
+    cell.floor_type == :grade && continue
+    D = ustrip(u"Pa", cell.sdl + cell.self_weight)
+    D < 1e-12 && continue
+    L = ustrip(u"Pa", cell.live_load)
+    push!(ld_ratios_heavy, L / D)
+end
+
+ld_max_heavy = maximum(ld_ratios_heavy)
+ld_min_heavy = minimum(ld_ratios_heavy)
+ld_mean_heavy = sum(ld_ratios_heavy) / length(ld_ratios_heavy)
+
+# Light-LL scenario: SDL=100 psf, LL=30 psf → should be L/D < 0.75
+pat_struc_light = with_logger(NullLogger()) do
+    _skel = gen_medium_office(sz_Lx, sz_Ly, sz_H, 3, 3, 1)
+    _struc = BuildingStructure(_skel)
+    _opts = FlatPlateOptions(material=RC_4000_60, method=DDM(), cover=0.75u"inch", bar_size=5)
+    initialize!(_struc; floor_type=:flat_plate, floor_opts=_opts)
+    for c_i in _struc.cells
+        c_i.sdl = uconvert(u"kN/m^2", 100.0u"psf")
+        c_i.live_load = uconvert(u"kN/m^2", 30.0u"psf")
+    end
+    for col_i in _struc.columns; col_i.c1 = sz_c0; col_i.c2 = sz_c0; end
+    _struc
+end
+
+ld_ratios_light = Float64[]
+for cell in pat_struc_light.cells
+    cell.floor_type == :grade && continue
+    D = ustrip(u"Pa", cell.sdl + cell.self_weight)
+    D < 1e-12 && continue
+    L = ustrip(u"Pa", cell.live_load)
+    push!(ld_ratios_light, L / D)
+end
+
+ld_max_light = maximum(ld_ratios_light)
+
+@printf("    %-28s %10s %10s %10s %10s\n",
+        "Scenario", "SDL(psf)", "LL(psf)", "max L/D", "Pattern?")
+@printf("    %-28s %10s %10s %10s %10s\n",
+        "─"^28, "─"^10, "─"^10, "─"^10, "─"^10)
+@printf("    %-28s %10.0f %10.0f %10.2f %10s\n",
+        "Heavy LL (SDL=20, LL=150)", ustrip(u"psf", pat_sdl_heavy), ustrip(u"psf", pat_ll_heavy),
+        ld_max_heavy, ld_max_heavy > 0.75 ? "YES" : "no")
+@printf("    %-28s %10.0f %10.0f %10.2f %10s\n",
+        "Light LL (SDL=100, LL=30)", 100.0, 30.0, ld_max_light,
+        ld_max_light > 0.75 ? "YES" : "no")
+println()
+_rpt.note("Heavy: L/D≈$(round(ld_mean_heavy,digits=2))→patterns required. Light: L/D≈$(round(ld_max_light,digits=2))→skipped.")
+
+@test ld_max_heavy > 0.75
+@test ld_max_light < 0.75
+
+# ─── 14B: Checkerboard Partition ───────────────────────────────────────────
+_rpt.sub("14B — Checkerboard Cell Partition")
+println("  Centroid grid parity → sets A and B.")
+
+# Build and solve with pattern loading
+pat_params = DesignParameters(pattern_loading = :checkerboard)
+pat_struc = with_logger(NullLogger()) do
+    _skel = gen_medium_office(sz_Lx, sz_Ly, sz_H, 3, 3, 1)
+    _struc = BuildingStructure(_skel)
+    _opts = FlatPlateOptions(material=RC_4000_60, method=DDM(), cover=0.75u"inch", bar_size=5)
+    initialize!(_struc; floor_type=:flat_plate, floor_opts=_opts)
+    for c_i in _struc.cells
+        c_i.sdl = uconvert(u"kN/m^2", pat_sdl_heavy)
+        c_i.live_load = uconvert(u"kN/m^2", pat_ll_heavy)
+    end
+    for col_i in _struc.columns; col_i.c1 = sz_c0; col_i.c2 = sz_c0; end
+    to_asap!(_struc; params=pat_params)
+    _struc
+end
+
+set_a, set_b = StructuralSynthesizer._checkerboard_partition(pat_struc)
+non_grade = [i for (i, c) in enumerate(pat_struc.cells) if c.floor_type != :grade]
+
+@printf("    Non-grade cells: %d\n", length(non_grade))
+@printf("    Set A (even):    %d cells  →  %s\n", length(set_a), sort(set_a))
+@printf("    Set B (odd):     %d cells  →  %s\n", length(set_b), sort(set_b))
+println()
+
+@test !isempty(set_a)
+@test !isempty(set_b)
+@test sort(vcat(set_a, set_b)) == sort(non_grade)
+
+_rpt.note("3×3 grid → balanced split (4 vs 5 or 5 vs 4).")
+
+# ─── 14C: Force Comparison — Pattern vs No-Pattern ─────────────────────────
+_rpt.sub("14C — Element Force Comparison: Pattern vs No-Pattern")
+
+# No-pattern baseline (same loads as pattern case for fair comparison)
+base_params = DesignParameters(pattern_loading = :none)
+base_struc = with_logger(NullLogger()) do
+    _skel = gen_medium_office(sz_Lx, sz_Ly, sz_H, 3, 3, 1)
+    _struc = BuildingStructure(_skel)
+    _opts = FlatPlateOptions(material=RC_4000_60, method=DDM(), cover=0.75u"inch", bar_size=5)
+    initialize!(_struc; floor_type=:flat_plate, floor_opts=_opts)
+    for c_i in _struc.cells
+        c_i.sdl = uconvert(u"kN/m^2", pat_sdl_heavy)
+        c_i.live_load = uconvert(u"kN/m^2", pat_ll_heavy)
+    end
+    for col_i in _struc.columns; col_i.c1 = sz_c0; col_i.c2 = sz_c0; end
+    to_asap!(_struc; params=base_params)
+    sync_asap!(_struc; params=base_params)
+    _struc
+end
+
+# Pattern loading
+sync_asap!(pat_struc; params=pat_params)
+
+# Compare frame element forces
+base_els = base_struc.asap_model.frame_elements
+pat_els  = pat_struc.asap_model.frame_elements
+n_els = length(base_els)
+
+# Collect per-element max |force| for moments (DOFs 5,6,11,12) and axials (DOFs 1,7)
+# Frame element DOFs: [N1 V1y V1z M1x M1y M1z N2 V2y V2z M2x M2y M2z]
+moment_dofs = [5, 6, 11, 12]
+axial_dofs  = [1, 7]
+shear_dofs  = [2, 3, 8, 9]
+
+# Collect max across all elements
+base_max_moment = 0.0; pat_max_moment = 0.0
+base_max_axial  = 0.0; pat_max_axial  = 0.0
+base_max_shear  = 0.0; pat_max_shear  = 0.0
+
+# Per-element comparison: count how many have increased forces
+n_moment_increase = 0
+n_axial_increase  = 0
+n_shear_increase  = 0
+total_moment_increase_pct = 0.0
+
+for i in 1:n_els
+    bf = base_els[i].forces
+    pf = pat_els[i].forces
+    
+    bm = maximum(abs(bf[k]) for k in moment_dofs if k <= length(bf))
+    pm = maximum(abs(pf[k]) for k in moment_dofs if k <= length(pf))
+    base_max_moment = max(base_max_moment, bm)
+    pat_max_moment  = max(pat_max_moment, pm)
+    if pm > bm + 1e-6
+        n_moment_increase += 1
+        total_moment_increase_pct += (pm - bm) / max(bm, 1e-12) * 100
+    end
+    
+    ba = maximum(abs(bf[k]) for k in axial_dofs if k <= length(bf))
+    pa = maximum(abs(pf[k]) for k in axial_dofs if k <= length(pf))
+    base_max_axial = max(base_max_axial, ba)
+    pat_max_axial  = max(pat_max_axial, pa)
+    if pa > ba + 1e-6; n_axial_increase += 1; end
+    
+    bs = maximum(abs(bf[k]) for k in shear_dofs if k <= length(bf))
+    ps = maximum(abs(pf[k]) for k in shear_dofs if k <= length(pf))
+    base_max_shear = max(base_max_shear, bs)
+    pat_max_shear  = max(pat_max_shear, ps)
+    if ps > bs + 1e-6; n_shear_increase += 1; end
+end
+
+avg_moment_pct = n_moment_increase > 0 ? total_moment_increase_pct / n_moment_increase : 0.0
+
+@printf("    %-28s %12s %12s %8s\n",
+        "Force Type", "No Pattern", "Pattern", "Δ%")
+@printf("    %-28s %12s %12s %8s\n",
+        "─"^28, "─"^12, "─"^12, "─"^8)
+@printf("    %-28s %12.0f %12.0f %+7.1f%%\n",
+        "Max moment (N·m)",
+        base_max_moment, pat_max_moment,
+        (pat_max_moment / max(base_max_moment, 1e-12) - 1) * 100)
+@printf("    %-28s %12.0f %12.0f %+7.1f%%\n",
+        "Max axial (N)",
+        base_max_axial, pat_max_axial,
+        (pat_max_axial / max(base_max_axial, 1e-12) - 1) * 100)
+@printf("    %-28s %12.0f %12.0f %+7.1f%%\n",
+        "Max shear (N)",
+        base_max_shear, pat_max_shear,
+        (pat_max_shear / max(base_max_shear, 1e-12) - 1) * 100)
+println()
+
+@printf("    %-28s %8s\n", "Elements with ↑ moment:", "$n_moment_increase / $n_els")
+@printf("    %-28s %8s\n", "Elements with ↑ axial:",  "$n_axial_increase / $n_els")
+@printf("    %-28s %8s\n", "Elements with ↑ shear:",  "$n_shear_increase / $n_els")
+if n_moment_increase > 0
+    @printf("    %-28s %7.1f%%\n", "Avg moment increase:", avg_moment_pct)
+end
+println()
+
+_rpt.note("Pattern envelope ≥ single-solve. Typical increase: 5-15% on moments.")
+
+@test pat_max_moment >= base_max_moment - 1.0  # envelope should be ≥ base (with tolerance)
+
+# ─── 14D: Pattern Loading Modes Summary ────────────────────────────────────
+_rpt.sub("14D — Pattern Loading Modes (DesignParameters.pattern_loading)")
+println()
+@printf("    %-14s  %-60s\n", "Mode", "Behavior")
+@printf("    %-14s  %-60s\n", "─"^14, "─"^60)
+@printf("    %-14s  %-60s\n", ":none",
+        "Single solve with full D+L. No patterns. (Default)")
+@printf("    %-14s  %-60s\n", ":auto",
+        "Skip if L/D ≤ 0.75 for all cells; else run checkerboard.")
+@printf("    %-14s  %-60s\n", ":checkerboard",
+        "Always run checkerboard patterns regardless of L/D.")
+println()
+_rpt.note("Recommended: :auto for production use. :checkerboard for conservative. :none for speed.")
+
+# ─── 14E: :auto vs :checkerboard Side-by-Side ─────────────────────────────
+_rpt.sub("14E — :auto vs :checkerboard (Same Geometry)")
+println("  When L/D > 0.75, :auto triggers patterns → identical to :checkerboard.")
+
+auto_params = DesignParameters(pattern_loading = :auto)
+auto_struc = with_logger(NullLogger()) do
+    _skel = gen_medium_office(sz_Lx, sz_Ly, sz_H, 3, 3, 1)
+    _struc = BuildingStructure(_skel)
+    _opts = FlatPlateOptions(material=RC_4000_60, method=DDM(), cover=0.75u"inch", bar_size=5)
+    initialize!(_struc; floor_type=:flat_plate, floor_opts=_opts)
+    for c_i in _struc.cells
+        c_i.sdl = uconvert(u"kN/m^2", pat_sdl_heavy)
+        c_i.live_load = uconvert(u"kN/m^2", pat_ll_heavy)
+    end
+    for col_i in _struc.columns; col_i.c1 = sz_c0; col_i.c2 = sz_c0; end
+    to_asap!(_struc; params=auto_params)
+    sync_asap!(_struc; params=auto_params)
+    _struc
+end
+
+# Compare :auto vs :checkerboard max moments
+auto_max_moment = maximum(maximum(abs(el.forces[k]) for k in moment_dofs if k <= length(el.forces))
+                          for el in auto_struc.asap_model.frame_elements)
+
+@printf("    %-20s %12s %12s %12s\n",
+        "Mode", ":none", ":auto", ":checkerboard")
+@printf("    %-20s %12s %12s %12s\n",
+        "─"^20, "─"^12, "─"^12, "─"^12)
+@printf("    %-20s %12.0f %12.0f %12.0f\n",
+        "Max moment (N·m)", base_max_moment, auto_max_moment, pat_max_moment)
+@printf("    %-20s %12.0f %12.0f %12.0f\n",
+        "Max axial (N)", base_max_axial,
+        maximum(maximum(abs(el.forces[k]) for k in axial_dofs if k <= length(el.forces))
+                for el in auto_struc.asap_model.frame_elements),
+        pat_max_axial)
+println()
+
+# :auto should match :checkerboard for this case (L/D > 0.75)
+auto_vs_pat = abs(auto_max_moment - pat_max_moment) / max(pat_max_moment, 1e-12)
+@printf("    :auto vs :checkerboard difference: %.2f%%\n", auto_vs_pat * 100)
+println()
+_rpt.note("L/D>0.75 → :auto = :checkerboard. L/D≤0.75 → :auto = :none.")
+
+@test auto_vs_pat < 0.01  # should be identical (same geometry, same patterns)
+
+_step_status["Pattern Loading"] = "✓"
+
+# ── DESIGN CODE FEATURES & LIMITATIONS ──
+
+_rpt.section("DESIGN CODE FEATURES & LIMITATIONS")
+
+_rpt.sub("13A — Feature Matrix")
 println()
 println("    Feature                          DDM       EFM       FEA")
 println("    ────────────────────────────── ──────── ──────── ────────")
@@ -2058,7 +2123,7 @@ println("      (Ig/Ie cracking correction)")
 println("    One-way shear (§22.5)                ✓        ✓        ✓")
 println("    Reinforcement design                 ✓        ✓        ✓")
 println("    Integrity rebar (§8.7.4.2)           ✓        ✓        ✓")
-println("    Pattern loading (§6.4.3.2)           —        —        —")
+println("    Pattern loading (§6.4.3)             ✓        ✓        ✓")
 println("    Headed shear studs                   ✓        ✓        ✓")
 println("    Slab thickness iteration             ✓        ✓        ✓")
 println("    Column P-M co-design                 ✓        ✓        ✓")
@@ -2077,52 +2142,31 @@ println("    βt user override (edge_beam_βt)      ✓        —        —")
 println("    Compression steel ρ' for λΔ          ✓        ✓        ✓")
 println()
 
-sub_header("13B — Shared Components")
-println()
-println("    All three methods share the same downstream pipeline:")
-println("      MomentAnalysisResult → punching → deflection → shear → rebar")
-println()
-println("    Shared ACI utilities (codes/aci/):")
-println("      punching_check()          — biaxial moment transfer (§22.6 + §8.4.4.2)")
-println("      punching_geometry_*()     — interior/edge/corner critical sections")
-println("      gamma_f(), gamma_v()      — moment transfer fractions (§8.4.2.3)")
-println("      one_way_shear_capacity()  — Vc = 2λ√f'c × bw × d (§22.5)")
-println("      cracking_moment()         — Mcr for deflection (§24.2)")
-println("      effective_moment_of_inertia() — Ie for cracked sections")
-println()
+_rpt.sub("13B — Shared Components")
+println("    Shared pipeline: MomentAnalysisResult → punching → deflection → shear → rebar")
+println("    Shared ACI: punching (§22.6), γf/γv (§8.4.2.3), one-way Vc (§22.5), Mcr/Ie (§24.2)")
 
-sub_header("13C — Current Limitations & Future Work")
-println()
-println("  1. Pattern loading not yet implemented (required when L/D > 0.75).")
-println("  2. FEA uses point-spring column supports (area supports more accurate).")
-println("  3. EFM Hardy Cross solver has limited convergence for stiff frames.")
-println("  4. Twisting moments (Mxy) are diagnostic only — not used for Wood-Armer design.")
-println("  5. Perpendicular (secondary) direction moments from FEA not yet fed to rebar design.")
-println("  6. Cracked-section FEA (Ie instead of Ig) would improve deflection accuracy.")
-println()
+_rpt.sub("13C — Limitations")
+println("    1. FEA: point-spring supports  2. HC: limited stiff-frame convergence")
+println("    3. Mxy diagnostic only  4. Perp. FEA M not fed to rebar  5. No cracked-section FEA")
+println("    6. Pattern forces not yet fed back into slab sizing")
 
-# ═════════════════════════════════════════════════════════════════════════════
-# SUMMARY
-# ═════════════════════════════════════════════════════════════════════════════
+# ── SUMMARY ──
 
-section_header("SUMMARY")
-println()
+_rpt.section("SUMMARY")
 ordered_steps = [
     "Load Baseline", "Section Properties", "EFM Stiffnesses", "Static Moment",
     "Method Comparison", "Effective Depth", "Reinforcement",
     "Punching Shear", "Deflection", "Column Axial Load", "Integrity Rebar",
-    "Sensitivity Studies", "Full Sizing", "Flat Slab",
+    "Sensitivity Studies", "Full Sizing", "Flat Slab", "Pattern Loading",
 ]
-println("  Methods validated: DDM, DDM(fn), MDDM, EFM(HC), EFM(ASAP), FEA(Shell)")
-println("  Flat slab (drop panels) validated: thickness, geometry, dual punching check.")
-println("  Edge beam βt and ρ' effects demonstrated with parametric tables.")
-println("  FEA integrated throughout — shown alongside DDM/EFM in every table.")
+println("  Validated: DDM, MDDM, EFM(HC/ASAP), FEA(Shell), flat slab, pattern loading.")
 println()
 
 @printf("    %-24s  %s\n", "Step", "Status")
 @printf("    %-24s  %s\n", "─"^24, "─"^24)
 for step in ordered_steps
-    status = get(step_status, step, "?")
+    status = get(_step_status, step, "?")
     @printf("    %-24s  %s\n", step, status)
 end
 

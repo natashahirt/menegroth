@@ -1,5 +1,5 @@
 # ==============================================================================
-# ACI 318-19 Capacity Checker for RC Beams
+# ACI 318-11 Capacity Checker for RC Beams
 # ==============================================================================
 # Implements AbstractCapacityChecker for ACI 318 beam design.
 # Matches the interface used by ACIColumnChecker / AISCChecker for MIP
@@ -9,8 +9,8 @@
 #   1. Flexural capacity: φMn ≥ Mu
 #   2. Shear section adequacy: Vu ≤ φ(Vc + Vs,max)
 #   3. Depth constraint: h ≤ max_depth
-#   4. Net tensile strain: εt ≥ 0.004 (ACI 318-19 §9.3.3.1)
-#   5. Minimum reinforcement: As ≥ As,min (ACI 318-19 §9.6.1.2)
+#   4. Net tensile strain: εt ≥ 0.004 (ACI 318-11 §10.3.5)
+#   5. Minimum reinforcement: As ≥ As,min (ACI 318-11 §10.5.1)
 #
 # Shear note: This checker verifies that the cross-section is geometrically
 # large enough to resist the applied shear (i.e., Vs_required ≤ Vs_max).
@@ -26,7 +26,7 @@ using Asap: kip, ksi, to_ksi, to_kip, to_kipft
 """
     ACIBeamChecker <: AbstractCapacityChecker
 
-ACI 318-19 capacity checker for reinforced concrete beams.
+ACI 318-11 capacity checker for reinforced concrete beams.
 Implements the same interface as AISCChecker / ACIColumnChecker for use
 with `optimize_discrete`.
 
@@ -91,7 +91,7 @@ Caches precomputed capacities and objective coefficients for RC beams.
 mutable struct ACIBeamCapacityCache <: AbstractCapacityCache
     φMn::Vector{Float64}            # Flexural capacity per section (kip·ft)
     φVn_max::Vector{Float64}        # Maximum shear capacity per section (kip)
-    εt::Vector{Float64}             # Net tensile strain per section (ACI §9.3.3.1)
+    εt::Vector{Float64}             # Net tensile strain per section (ACI §10.3.5)
     obj_coeffs::Vector{Float64}     # Objective coefficients per section
     depths::Vector{Float64}         # Section depth in meters
     fc_ksi::Float64                 # Concrete strength (ksi)
@@ -173,13 +173,13 @@ function _compute_φVn_max(section::RCBeamSection, fc_psi::Float64, λ::Float64)
 end
 
 # ==============================================================================
-# εt computation (ACI 318-19 §9.3.3.1)
+# εt computation (ACI 318-11 §10.3.5)
 # ==============================================================================
 
 """
 Net tensile strain εt for a singly-reinforced RCBeamSection.
 
-ACI 318-19 §9.3.3.1 requires εt ≥ 0.004 for beams (nonprestressed
+ACI 318-11 §10.3.5 requires εt ≥ 0.004 for beams (nonprestressed
 flexural members).  Sections with εt < 0.004 are compression-controlled
 and prohibited for beams.
 """
@@ -232,7 +232,7 @@ function precompute_capacities!(
         # Maximum shear capacity
         cache.φVn_max[j] = _compute_φVn_max(section, fc_psi, checker.λ)
 
-        # Net tensile strain (ACI 318-19 §9.3.3.1)
+        # Net tensile strain (ACI 318-11 §10.3.5)
         cache.εt[j] = _compute_εt(section, fc_psi, fy_psi)
 
         # Section depth in meters
@@ -255,9 +255,9 @@ Check if an RC beam section satisfies ACI 318 requirements:
 1. Depth constraint: h ≤ max_depth
 2. Flexure: Mu ≤ φMn
 3. Shear adequacy: Vu ≤ φ(Vc + Vs,max), with axial modifier when Nu > 0
-4. Net tensile strain: εt ≥ 0.004 (ACI 318-19 §9.3.3.1)
-5. Minimum reinforcement: As ≥ As,min (ACI 318-19 §9.6.1.2)
-6. Torsion section adequacy (ACI 318-19 §22.7.7.1) — when Tu > 0
+4. Net tensile strain: εt ≥ 0.004 (ACI 318-11 §10.3.5)
+5. Minimum reinforcement: As ≥ As,min (ACI 318-11 §10.5.1)
+6. Torsion section adequacy (ACI 318-11 §11.5.3.1) — when Tu > 0
 """
 function is_feasible(
     checker::ACIBeamChecker,
@@ -297,10 +297,10 @@ function is_feasible(
         cache.φVn_max[j] ≥ Vu || return false
     end
 
-    # 4. Net tensile strain (ACI 318-19 §9.3.3.1) — εt ≥ 0.004 for beams
+    # 4. Net tensile strain (ACI 318-11 §10.3.5) — εt ≥ 0.004 for beams
     cache.εt[j] ≥ 0.004 || return false
 
-    # 5. Minimum reinforcement (ACI 318-19 §9.6.1.2)
+    # 5. Minimum reinforcement (ACI 318-11 §10.5.1)
     fc_psi = cache.fc_ksi * 1000.0
     fy_psi = cache.fy_ksi * 1000.0
     b_in   = ustrip(u"inch", section.b)
@@ -310,7 +310,7 @@ function is_feasible(
                  200.0 * b_in * d_in / fy_psi)
     As_in ≥ As_min || return false
 
-    # 6. Torsion section adequacy (§22.7.7.1) — only when Tu > 0
+    # 6. Torsion section adequacy (§11.5.3.1) — only when Tu > 0
     Tu_val = _get_Tu_kipin(demand)
     if Tu_val > 0.0
         h_in = ustrip(u"inch", section.h)

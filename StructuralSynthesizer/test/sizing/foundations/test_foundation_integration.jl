@@ -1,23 +1,5 @@
-# =============================================================================
 # Integration Test: Foundation Design — ACI 318-14 Validation Report
-# =============================================================================
-#
-# This test traces the complete foundation design workflow, printing a
-# human-readable report that compares each intermediate result against
-# StructurePoint reference values (Wight 7th Ed.) and performs cross-type
-# comparisons for spread, strip/combined, and mat foundations.
-#
-# References:
-#   [1] StructurePoint "Reinforced Concrete Spread Footing" — Wight 7th Ed. Ex 15-2
-#   [2] StructurePoint "Reinforced Concrete Combined Footing" — Wight 7th Ed. Ex 15-5
-#   [3] ACI 336.2R-88 "Suggested Analysis & Design Procedures for Combined
-#       Footings and Mats" §4.2 Rigid Mat Analysis
-#   [4] ACI 318-14 §22.6 (Punching), §8.4.4.2 (Moment Transfer)
-#
-# Package structure:
-#   StructuralSizer/src/codes/aci/punching.jl    ← Shared punching utilities
-#   StructuralSizer/src/foundations/codes/aci/    ← Spread, strip, mat designs
-# =============================================================================
+# Refs: [1] SP Spread (Wight Ex15-2) [2] SP Combined (Wight Ex15-5) [3] ACI 336.2R §4.2 [4] ACI 318-14 §22.6/§8.4.4.2
 
 using Test
 using Printf
@@ -30,12 +12,8 @@ using StructuralSizer: kip, ksf, ksi, psf, pcf, to_kip, to_kipft, to_ksi, to_inc
 # Report helpers (same style as EFM report)
 # ─────────────────────────────────────────────────────────────────────────────
 
-const HLINE = "─"^78
-const DLINE = "═"^78
-
-section_header(title) = println("\n", DLINE, "\n  ", title, "\n", DLINE)
-sub_header(title)     = println("\n  ", HLINE, "\n  ", title, "\n  ", HLINE)
-note(msg)             = println("    → ", msg)
+include(joinpath(@__DIR__, "..", "..", "shared", "report_helpers.jl"))
+const _rpt = ReportHelpers.Printer()
 
 """
 Print one comparison row. Returns `true` when |δ| ≤ tol.
@@ -49,7 +27,7 @@ function compare(label, computed, reference; tol=0.05)
 end
 
 # Track per-step status for the final summary table
-step_status = Dict{String,String}()
+const _fdn_step_status = Dict{String,String}()
 
 # ─────────────────────────────────────────────────────────────────────────────
 # BEGIN REPORT
@@ -57,26 +35,16 @@ step_status = Dict{String,String}()
 
 @testset "ACI 318-14 Foundation Design Validation" begin
 
-section_header("ACI 318-14 FOUNDATION DESIGN — Validation Report")
-println("  Ref [1]: StructurePoint Spread Footing — Wight 7th Ed. Ex 15-2")
-println("  Ref [2]: StructurePoint Combined Footing — Wight 7th Ed. Ex 15-5")
-println("  Ref [3]: ACI 336.2R-88 §4.2 — Rigid Mat Analysis")
-println("  Ref [4]: ACI 318-14 §22.6 / §8.4.4.2 — Shared Punching Utilities")
+_rpt.section("ACI 318-14 FOUNDATION DESIGN — Validation Report")
+println("  Refs: [1] SP Spread (Wight Ex15-2) [2] SP Combined (Ex15-5) [3] ACI 336.2R §4.2 [4] ACI 318-14 §22.6/§8.4.4.2")
 
-# ═════════════════════════════════════════════════════════════════════════════
-# STEP 0 — SHARED PUNCHING SHEAR UTILITIES  (ACI 318-14 §22.6 / §8.4.4.2)
-# ═════════════════════════════════════════════════════════════════════════════
+# STEP 0 — SHARED PUNCHING SHEAR UTILITIES (ACI 318-14 §22.6 / §8.4.4.2)
 
-section_header("STEP 0 — SHARED PUNCHING SHEAR UTILITIES")
-println("  Validates the element-agnostic punching/shear math shared by slabs")
-println("  and all three foundation types (codes/aci/punching.jl).")
-println()
+_rpt.section("STEP 0 — SHARED PUNCHING SHEAR UTILITIES")
+println("  Validates punching/shear math shared by slabs & all foundation types (codes/aci/punching.jl).")
 
-sub_header("0A — Critical Section Geometry (§22.6.4)")
-println("  Interior: b₀ = 2(c₁+d) + 2(c₂+d),  4-sided")
-println("  Edge:     b₀ = 2(c₁+d/2) + (c₂+d),  3-sided")
-println("  Corner:   b₀ = (c₁+d/2) + (c₂+d/2),  2-sided")
-println()
+_rpt.sub("0A — Critical Section Geometry (§22.6.4)")
+println("  b₀: Interior=4-sided, Edge=3-sided, Corner=2-sided per §22.6.4")
 
 # Test with SP baseline: c = 18", d = 28"
 c_test = 18.0u"inch"
@@ -105,13 +73,10 @@ b0_corn = ustrip(u"inch", geom_corn.b0)
 @test b0_edge ≈ 110.0 rtol=0.01      # 2(18+14) + (18+28) = 110
 @test b0_corn ≈ 64.0 rtol=0.01       # (18+14) + (18+14) = 64
 
-println()
-note("Interior b₀ = 4(c+d) = 4(46) = 184 in ✓")
-note("Edge reduces to 3 sides, corner to 2 sides → less perimeter → more critical.")
+_rpt.note("Interior b₀=184\" ✓; edge/corner reduce to 3/2 sides → more critical.")
 
-sub_header("0B — Punching Capacity vc (§22.6.5.2)")
-println("  vc = min( 4λ√f'c, (2+4/β)λ√f'c, (αs·d/b₀+2)λ√f'c )")
-println()
+_rpt.sub("0B — Punching Capacity vc (§22.6.5.2)")
+println("  vc = min(4λ√f'c, (2+4/β)λ√f'c, (αs·d/b₀+2)λ√f'c)")
 
 fc_test = 3000.0u"psi"
 β_test  = StructuralSizer.punching_β(c_test, c_test)
@@ -135,14 +100,10 @@ vc_computed_psi = ustrip(u"psi", vc_computed)
 @test vc_computed_psi ≈ min(vc_a, vc_b, vc_c) rtol=0.001
 @test vc_computed_psi ≈ vc_a rtol=0.01   # for β=1 square, Eq (a) typically governs
 
-println()
-note("For square columns (β=1): Eq (b) = 6√f'c > Eq (a) = 4√f'c → Eq (a) governs.")
-note("Eq (c) depends on d/b₀ ratio; for large d, Eq (c) can be lower.")
+_rpt.note("β=1 (square): Eq(a) governs; Eq(c) can govern for large d/b₀.")
 
-sub_header("0C — Moment Transfer Fractions (§8.4.2.3)")
-println("  γf = 1 / (1 + (2/3)√(b₁/b₂))  — fraction by flexure")
-println("  γv = 1 − γf                      — fraction by eccentric shear")
-println()
+_rpt.sub("0C — Moment Transfer Fractions (§8.4.2.3)")
+println("  γf = 1/(1+(2/3)√(b₁/b₂)), γv = 1−γf")
 
 # For interior column with c=18, d=28: b1=b2=46"
 b1_test = c_test + d_test  # 46"
@@ -159,13 +120,10 @@ b2_test = c_test + d_test  # 46"
 @test γv_val ≈ 0.400 rtol=0.001
 @test γf_val + γv_val ≈ 1.0 atol=1e-10
 
-println()
-note("γf + γv = 1.0 always (ACI Eq. 8.4.2.3.2 + 8.4.4.2.2).")
-note("For non-square columns, b₁ ≠ b₂ → γf ≠ 0.600.")
+_rpt.note("γf+γv=1.0 always; non-square columns → γf≠0.600.")
 
-sub_header("0D — Polar Moment Jc (R8.4.4.2.3)")
-println("  Interior: Jc = 2[b₁d³/12 + d·b₁³/12] + 2·b₂·d·(b₁/2)²")
-println()
+_rpt.sub("0D — Polar Moment Jc (R8.4.4.2.3)")
+println("  Jc = 2[b₁d³/12 + d·b₁³/12] + 2·b₂·d·(b₁/2)² (interior)")
 
 Jc_int = StructuralSizer.polar_moment_Jc_interior(b1_test, b2_test, d_test)
 Jc_in4 = ustrip(u"inch^4", Jc_int)
@@ -180,13 +138,10 @@ hand_Jc = 2*(46*28^3/12 + 28*46^3/12) + 2*46*28*(46/2)^2
 
 @test Jc_in4 ≈ hand_Jc rtol=0.001
 
-println()
-note("Jc combines bending inertia + torsion + parallel axis of critical section faces.")
-note("This Jc is used in vu = Vu/(b₀d) + γv·Mub·cAB/Jc for unbalanced moment transfer.")
+_rpt.note("Jc used in vu = Vu/(b₀d) + γv·Mub·cAB/Jc for unbalanced moment transfer.")
 
-sub_header("0E — One-Way Shear Capacity (§22.5.5.1)")
-println("  Vc = 2λ√f'c × bw × d")
-println()
+_rpt.sub("0E — One-Way Shear Capacity (§22.5.5.1)")
+println("  Vc = 2λ√f'c·bw·d")
 
 bw_test = 100.0u"inch"
 Vc_1way = StructuralSizer.one_way_shear_capacity(fc_test, bw_test, d_test)
@@ -200,16 +155,12 @@ hand_Vc = 2 * sqrt(3000.0) * 100 * 28 / 1000
 
 @test Vc_1way_kip ≈ hand_Vc rtol=0.01
 
-println()
-note("φVc = 0.75 × Vc = $(round(0.75 * hand_Vc, digits=1)) kip for design.")
-note("One-way shear governs at d from face of support (cantilever footings).")
+_rpt.note("φVc = 0.75×Vc = $(round(0.75 * hand_Vc, digits=1)) kip; governs at d from face of support.")
 
-step_status["Shared Punching Utils"] = "✓"
+_fdn_step_status["Shared Punching Utils"] = "✓"
 
-sub_header("0F — Full punching_check (Biaxial Moment Transfer)")
-println("  Combined check: concentric + eccentric shear from biaxial moments.")
-println("  Tests the high-level punching_check() used by all three footing types.")
-println()
+_rpt.sub("0F — Full punching_check (Biaxial Moment Transfer)")
+println("  Concentric + eccentric shear; high-level punching_check() used by all footing types.")
 
 # Concentric case (no moment) — should give vu = Vu/(b₀d)
 Vu_conc = 200.0kip
@@ -246,20 +197,14 @@ println()
 @test ustrip(u"psi", pch_ecc.vu) > vu_conc_psi   # moment adds stress
 @test pch_ecc.utilization > pch_conc.utilization
 
-println()
-note("Eccentric shear adds γv·Mub·cAB/Jc to concentric stress.")
-note("Biaxial moments (Mux ≠ 0 AND Muy ≠ 0) are superposed per R8.4.4.2.3.")
+_rpt.note("Eccentric shear adds γv·Mub·cAB/Jc; biaxial moments superposed per R8.4.4.2.3.")
 
-# ═════════════════════════════════════════════════════════════════════════════
-# STEP 1 — SPREAD FOOTING (Ref [1]: Wight 7th Ed., Ex 15-2)
-# ═════════════════════════════════════════════════════════════════════════════
+# STEP 1 — SPREAD FOOTING (Ref [1]: Wight Ex 15-2)
 
-section_header("STEP 1 — SPREAD FOOTING  (Wight Ex 15-2)")
-println("  7-step StructurePoint workflow: sizing → punching → beam shear → flexure")
-println("  → development → bearing → dowels")
-println()
+_rpt.section("STEP 1 — SPREAD FOOTING  (Wight Ex 15-2)")
+println("  7-step SP workflow: sizing → punching → beam shear → flexure → development → bearing → dowels")
 
-sub_header("1A — Input Summary")
+_rpt.sub("1A — Input Summary")
 
 sp_Pu = 912.0kip
 sp_Ps = 670.0kip
@@ -277,18 +222,17 @@ sp_cover = 3.0u"inch"
 @printf("    qa_net = %.2f ksf (after surcharge deduction)\n", ustrip(ksf, sp_qa))
 @printf("    Cover = %s (cast against soil)\n", sp_cover)
 
-sub_header("1B — Preliminary Sizing (Service Loads)")
-println("  A_req = Ps / qa = $(round(to_kip(sp_Ps) / ustrip(ksf, sp_qa), digits=1)) ft²")
-println("  B = √A_req = $(round(sqrt(to_kip(sp_Ps) / ustrip(ksf, sp_qa)), digits=2)) ft")
+_rpt.sub("1B — Preliminary Sizing (Service Loads)")
+println("  A_req = Ps/qa = $(round(to_kip(sp_Ps) / ustrip(ksf, sp_qa), digits=1)) ft², B = √A_req = $(round(sqrt(to_kip(sp_Ps) / ustrip(ksf, sp_qa)), digits=2)) ft")
 
 A_req_ft2 = to_kip(sp_Ps) / ustrip(ksf, sp_qa)
 B_calc_ft = sqrt(A_req_ft2)
 @printf("\n    A_req = %.1f ft²\n", A_req_ft2)
 @printf("    B_calc = %.2f ft → round up to nearest increment\n", B_calc_ft)
 println()
-note("Reference: B = L = 11'-2\" (134 in.) — square footing.")
+_rpt.note("Reference: B = L = 11'-2\" (134 in.) — square footing.")
 
-sub_header("1C — Design (Full ACI 318-14 Workflow)")
+_rpt.sub("1C — Design (Full ACI 318-14 Workflow)")
 
 sp_demand = FoundationDemand(1; Pu=sp_Pu, Ps=sp_Ps)
 sp_soil = Soil(sp_qa, 18.0u"kN/m^3", 30.0, 0.0u"kPa", 25.0u"MPa")
@@ -297,7 +241,7 @@ sp_opts = SpreadFootingOptions(
     material = RC_3000_60,
     pier_c1 = sp_c1,
     pier_c2 = sp_c1,
-    pier_shape = :rect,
+    pier_shape = :rectangular,
     bar_size = 8,
     cover = sp_cover,
     min_depth = 12.0u"inch",
@@ -306,7 +250,7 @@ sp_opts = SpreadFootingOptions(
     fc_col = 5000.0u"psi",
 )
 
-sp_result = design_spread_footing(sp_demand, sp_soil; opts=sp_opts)
+sp_result = design_footing(SpreadFooting(), sp_demand, sp_soil; opts=sp_opts)
 
 sp_B_in = ustrip(u"inch", sp_result.B)
 sp_L_in = ustrip(u"inch", sp_result.L_ftg)
@@ -336,7 +280,7 @@ println()
 end
 
 # Detailed checks
-sub_header("1D — Shear Checks (Two-Way + One-Way)")
+_rpt.sub("1D — Shear Checks (Two-Way + One-Way)")
 
 # Recompute punching for reporting
 sp_d = sp_result.d
@@ -359,7 +303,7 @@ sp_ϕvc_psi = ustrip(u"psi", sp_punch.ϕvc)
 @printf("      vu/φvc = %.3f  %s\n", sp_punch.utilization, sp_punch.ok ? "✓ OK" : "✗ NG")
 println()
 
-note("Ref [1]: vu = 156 psi, φvc = 164 psi — our vc uses f'c = 3000 psi.")
+_rpt.note("Ref [1]: vu = 156 psi, φvc = 164 psi — our vc uses f'c = 3000 psi.")
 
 # One-way shear
 ϕVc_1w = 0.75 * StructuralSizer.one_way_shear_capacity(sp_fc, sp_B, sp_d)
@@ -373,12 +317,12 @@ Vu_1w = sp_qu * sp_B * cant
         to_kip(Vu_1w) / to_kip(ϕVc_1w),
         to_kip(Vu_1w) ≤ to_kip(ϕVc_1w) ? "✓ OK" : "✗ NG")
 
-note("Ref [1]: Vu = 204 kip, φVc = 308 kip.")
+_rpt.note("Ref [1]: Vu = 204 kip, φVc = 308 kip.")
 
 @test sp_punch.ok
 @test to_kip(Vu_1w) ≤ to_kip(ϕVc_1w)
 
-sub_header("1E — Flexural Reinforcement")
+_rpt.sub("1E — Flexural Reinforcement")
 
 Mu_cant = sp_qu * sp_B * ((sp_B - sp_c1) / 2)^2 / 2
 Mu_cant_kipft = to_kipft(Mu_cant)
@@ -386,32 +330,28 @@ Mu_cant_kipft = to_kipft(Mu_cant)
 @printf("    Ref [1]: Mu = 954 kip·ft\n")
 @printf("    n_bars = %d #8 each way   (Ref: 11 #8)\n", sp_result.rebar_count)
 @printf("    As_provided = %.2f in²     (Ref: 8.69 in²)\n", sp_As_in2)
-println()
-note("Differences from reference arise from rounding increments (1\" vs 2\").")
-note("Our design slightly oversizes for safety — conservative per ACI 318-14.")
+_rpt.note("Differences from ref: rounding increments (1\" vs 2\"); our design is conservative.")
 
-step_status["Spread Footing"] = "✓"
+_fdn_step_status["Spread Footing"] = "✓"
 
-# ═════════════════════════════════════════════════════════════════════════════
-# STEP 2 — STRIP / COMBINED FOOTING  (Ref [2]: Wight Ex 15-5)
-# ═════════════════════════════════════════════════════════════════════════════
+# STEP 2 — STRIP / COMBINED FOOTING (Ref [2]: Wight Ex 15-5)
 
-section_header("STEP 2 — STRIP / COMBINED FOOTING  (Wight Ex 15-5)")
-println("  Rigid analysis: N=2 columns, uniform soil pressure.")
-println("  Centroid aligned with load resultant → no eccentricity.")
-println()
+_rpt.section("STEP 2 — STRIP / COMBINED FOOTING  (Wight Ex 15-5)")
+println("  Rigid analysis: N=2 columns, uniform soil pressure, centroid aligned with resultant.")
 
-sub_header("2A — Input Summary")
+_rpt.sub("2A — Input Summary")
 
 # Exterior column: 24"×16", PD=200, PL=150
 # Interior column: 24"×24", PD=300, PL=225
-str_d_ext = FoundationDemand(1; Pu=480.0kip, Ps=350.0kip)
-str_d_int = FoundationDemand(2; Pu=720.0kip, Ps=525.0kip)
+str_d_ext = FoundationDemand(1; Pu=480.0kip, Ps=350.0kip,
+                              c1=24.0u"inch", c2=16.0u"inch")
+str_d_int = FoundationDemand(2; Pu=720.0kip, Ps=525.0kip,
+                              c1=24.0u"inch", c2=24.0u"inch")
 str_Pu_total = 480.0 + 720.0   # 1200 kip
 str_Ps_total = 350.0 + 525.0   # 875 kip
 
-@printf("    Exterior column:  Pu = 480 kip, Ps = 350 kip (24\"×16\")\n")
-@printf("    Interior column:  Pu = 720 kip, Ps = 525 kip (24\"×24\")\n")
+@printf("    Exterior column:  Pu = 480 kip, Ps = 350 kip, c1×c2 = 24\"×16\"\n")
+@printf("    Interior column:  Pu = 720 kip, Ps = 525 kip, c1×c2 = 24\"×24\"\n")
 @printf("    Spacing = 20 ft\n")
 @printf("    f'c = 3000 psi,  fy = 60 ksi\n")
 @printf("    qa_net ≈ 4.32 ksf\n")
@@ -423,10 +363,8 @@ x_bar = (350.0 * 0.0 + 525.0 * 20.0) / 875.0
 @printf("    Required L ≈ 2 × %.1f = %.1f ft  (Ref: 25'-4\" = 25.33 ft)\n",
         x_bar + 1.0, 2 * (x_bar + 1.0))
 
-sub_header("2B — Design")
-println("  Soil pressure acts upward (uniform); columns apply downward point loads.")
-println("  V(x) and M(x) computed at 500 stations along the footing length.")
-println()
+_rpt.sub("2B — Design")
+println("  Uniform soil pressure upward; V(x)/M(x) at 500 stations along length.")
 
 str_positions = [0.0u"ft", 20.0u"ft"]
 str_soil = Soil(4.32ksf, 18.0u"kN/m^3", 30.0, 0.0u"kPa", 25.0u"MPa")
@@ -441,7 +379,7 @@ str_opts = StripFootingOptions(
     width_increment = 1.0u"inch",
 )
 
-str_result = design_strip_footing([str_d_ext, str_d_int], str_positions, str_soil; opts=str_opts)
+str_result = design_footing(StripFooting(), [str_d_ext, str_d_int], str_positions, str_soil; opts=str_opts)
 
 str_B_in = ustrip(u"inch", str_result.B)
 str_L_in = ustrip(u"inch", str_result.L_ftg)
@@ -451,7 +389,7 @@ str_As_top = ustrip(u"inch^2", str_result.As_long_top)
 str_As_bot = ustrip(u"inch^2", str_result.As_long_bot)
 str_As_trans = ustrip(u"inch^2", str_result.As_trans)
 
-sub_header("2C — Design Results")
+_rpt.sub("2C — Design Results")
 println()
 @printf("    %-24s %10s %10s\n", "Quantity", "Computed", "Ref [2]")
 @printf("    %-24s %10s %10s\n", "─"^24, "─"^10, "─"^10)
@@ -472,51 +410,111 @@ println()
     @test str_result.utilization < 1.0
 end
 
-note("h = $(round(str_h_in, digits=0))\" vs ref 40\" — governed by punching at exterior column.")
-note("Top steel As = $(round(str_As_top, digits=1)) in² vs ref 13.4 in² — negative moment between columns.")
-note("Width and length differences arise from rounding strategy (1\" increments).")
+_rpt.note("h=$(round(str_h_in, digits=0))\" vs ref 40\"; As_top=$(round(str_As_top, digits=1)) vs 13.4 in²; differences from 1\" rounding.")
 
-sub_header("2D — Punching at Each Column")
+_rpt.sub("2D — Punching at Each Column")
 
 # Re-derive qu for reporting
 str_qu = (480.0kip + 720.0kip) / (str_result.B * str_result.L_ftg)
 str_d_eff = str_result.d
 
 for (j, (label, demand)) in enumerate(zip(["Exterior", "Interior"], [str_d_ext, str_d_int]))
-    c_col = 24.0u"inch"
+    cj1 = demand.c1   # 24" for both; c2 differs (16" vs 24")
+    cj2 = demand.c2
     pos_sym = j == 1 ? :edge : :interior
-    Ac_p = pos_sym == :edge ? (c_col + str_d_eff / 2) * (c_col + str_d_eff) :
-                              (c_col + str_d_eff) * (c_col + str_d_eff)
+    Ac_p = pos_sym == :edge ? (cj1 + str_d_eff / 2) * (cj2 + str_d_eff) :
+                              (cj1 + str_d_eff) * (cj2 + str_d_eff)
     Vu_p = max(uconvert(u"lbf", demand.Pu - str_qu * Ac_p), 0.0u"lbf")
 
     pch = StructuralSizer.punching_check(
         Vu_p, demand.Mux, demand.Muy,
-        str_d_eff, 3000.0u"psi", c_col, c_col;
+        str_d_eff, 3000.0u"psi", cj1, cj2;
         position=pos_sym)
 
-    @printf("    %s column (%s):\n", label, string(pos_sym))
+    @printf("    %s column (%s, %s × %s):\n", label, string(pos_sym),
+            cj1, cj2)
     @printf("      Vu = %.1f kip,  vu = %.1f psi,  φvc = %.1f psi\n",
             to_kip(Vu_p), ustrip(u"psi", pch.vu), ustrip(u"psi", pch.ϕvc))
     @printf("      vu/φvc = %.3f  %s\n", pch.utilization, pch.ok ? "✓" : "✗")
     @test pch.ok
 end
 
-println()
-note("Ref [2]: Interior vu = 80.2 psi < φvc = 164 psi (OK).")
-note("Ref [2]: Exterior vu = 157 psi < φvc = 164 psi (OK at h=40\").")
+_rpt.note("Ref [2]: Interior vu=80.2psi, Exterior vu=157psi; both < φvc=164psi.")
 
-step_status["Strip/Combined Footing"] = "✓"
+_rpt.sub("2E — Development Length (ACI 25.4.2)")
+println("  Checks at each column: longitudinal bars (column face → footing edge) and transverse bars.")
 
-# ═════════════════════════════════════════════════════════════════════════════
-# STEP 3 — MAT FOUNDATION  (ACI 336.2R Rigid Analysis)
-# ═════════════════════════════════════════════════════════════════════════════
+str_db_l = StructuralSizer.bar_diameter(str_opts.bar_size_long)
+str_db_t = StructuralSizer.bar_diameter(str_opts.bar_size_trans)
+str_ld_long  = StructuralSizer._development_length_footing(str_opts.bar_size_long, 3000.0u"psi", 60.0ksi, 1.0, str_db_l)
+str_ld_trans = StructuralSizer._development_length_footing(str_opts.bar_size_trans, 3000.0u"psi", 60.0ksi, 1.0, str_db_t)
 
-section_header("STEP 3 — MAT FOUNDATION  (ACI 336.2R Rigid)")
-println("  Rigid mat analysis: 4×4 column grid, 25 ft spacing.")
-println("  Assumed rigid → uniform soil pressure (Kr > 0.5).")
-println()
+# Column positions from left edge (same as design)
+str_x_bar  = sum([350.0, 525.0] .* [0.0, 20.0]) / 875.0
+str_L_ft   = ustrip(u"ft", str_result.L_ftg)
+str_x_left = str_x_bar - str_L_ft / 2
+str_col_local = [0.0 - str_x_left, 20.0 - str_x_left] .* u"ft"
+str_demands_vec = [str_d_ext, str_d_int]
 
-sub_header("3A — Input Summary")
+@printf("    Longitudinal bars (#%d): ld = %.1f in.\n",
+        str_opts.bar_size_long, ustrip(u"inch", str_ld_long))
+for (j, xc) in enumerate(str_col_local)
+    cj1 = str_demands_vec[j].c1
+    avail = min(xc, str_result.L_ftg - xc) - cj1 / 2 - str_opts.cover
+    ok = str_ld_long ≤ avail
+    @printf("      Col #%d (%s×%s): available = %.1f in.  %s\n",
+            j, cj1, str_demands_vec[j].c2, ustrip(u"inch", avail), ok ? "✓" : "⚠ ld exceeds")
+end
+
+# Transverse: most critical = smallest c2
+c2_min = minimum(d.c2 for d in str_demands_vec)
+avail_trans = (str_result.B - c2_min) / 2 - str_opts.cover
+@printf("    Transverse bars (#%d): ld = %.1f in., available = %.1f in. (c2_min=%s)  %s\n",
+        str_opts.bar_size_trans, ustrip(u"inch", str_ld_trans),
+        ustrip(u"inch", avail_trans), c2_min,
+        str_ld_trans ≤ avail_trans ? "✓" : "⚠ ld exceeds")
+
+@testset "Strip Dev. Length" begin
+    @test ustrip(u"inch", str_ld_long) > 0
+    @test ustrip(u"inch", str_ld_trans) > 0
+end
+
+_rpt.sub("2F — Bearing & Dowels at Each Column (ACI 22.8)")
+println("  Bearing strength at column-footing interface; dowels if Pu > φBn_column.")
+
+str_fc_col = 3000.0u"psi"   # same as footing for this example
+for (j, (label, demand)) in enumerate(zip(["Exterior", "Interior"], [str_d_ext, str_d_int]))
+    cj1 = demand.c1
+    cj2 = demand.c2
+    bearing = StructuralSizer._bearing_check_footing(
+        demand.Pu, cj1, cj2,
+        str_result.B, str_result.L_ftg, str_result.D,
+        3000.0u"psi", str_fc_col, 60.0ksi, 0.65, :rectangular)
+
+    Bn_ftg_kip = to_kip(bearing.Bn_footing)
+    Bn_col_kip = to_kip(bearing.Bn_column)
+
+    @printf("    %s column (%s × %s):\n", label, cj1, cj2)
+    @printf("      φBn_footing = %.0f kip,  φBn_column = %.0f kip\n", Bn_ftg_kip, Bn_col_kip)
+    @printf("      Pu = %.0f kip  →  footing %s,  column %s\n",
+            to_kip(demand.Pu),
+            bearing.footing_ok ? "OK ✓" : "NG ✗",
+            demand.Pu ≤ bearing.Bn_column ? "OK ✓" : "needs dowels")
+    if bearing.need_dowels
+        @printf("      Dowels: As_dowels = %.2f in²\n", ustrip(u"inch^2", bearing.As_dowels))
+    end
+
+    @test bearing.footing_ok
+end
+
+_fdn_step_status["Strip/Combined Footing"] = "✓"
+
+# STEP 3 — MAT FOUNDATION (ACI 336.2R Rigid Analysis)
+
+_rpt.section("STEP 3 — MAT FOUNDATION  (ACI 336.2R Rigid)")
+println("  Rigid mat: 4×4 grid, 25 ft spacing, uniform soil pressure (Kr > 0.5).")
+
+_rpt.sub("3A — Input Summary")
 
 mat_demands = FoundationDemand[]
 mat_positions = NTuple{2, typeof(0.0u"ft")}[]
@@ -558,9 +556,9 @@ mat_opts = MatFootingOptions(
     depth_increment = 1.0u"inch",
 )
 
-sub_header("3B — Plan Sizing")
+_rpt.sub("3B — Plan Sizing")
 
-mat_result = design_mat_footing(mat_demands, mat_positions, mat_soil; opts=mat_opts)
+mat_result = design_footing(MatFoundation(), mat_demands, mat_positions, mat_soil; opts=mat_opts)
 
 mat_B_ft = ustrip(u"ft", mat_result.B)
 mat_L_ft = ustrip(u"ft", mat_result.L_ftg)
@@ -577,7 +575,7 @@ mat_qu_ksf = Pu_total_mat / mat_area_ft2
 @printf("    qu/qa = %.3f (bearing utilization, service basis)\n",
         Ps_total_mat / (ustrip(ksf, mat_soil.qa) * mat_area_ft2))
 
-sub_header("3C — Thickness from Punching Shear")
+_rpt.sub("3C — Thickness from Punching Shear")
 
 @printf("    h = %.0f in. (governs from punching at interior columns)\n", mat_h_in)
 @printf("    d = %.1f in.\n", mat_d_in)
@@ -601,9 +599,8 @@ pch_mat = StructuralSizer.punching_check(
 
 @test pch_mat.ok
 
-sub_header("3D — Flexural Reinforcement (Strip Statics)")
-println("  Kramrisch simplified: M⁻ ≈ wL²/10 (continuous), M⁺ ≈ wL²/11 (end)")
-println()
+_rpt.sub("3D — Flexural Reinforcement (Strip Statics)")
+println("  Kramrisch: M⁻≈wL²/10 (continuous), M⁺≈wL²/11 (end)")
 
 As_xb = ustrip(u"inch^2", mat_result.As_x_bot)
 As_xt = ustrip(u"inch^2", mat_result.As_x_top)
@@ -623,14 +620,10 @@ end
 @test As_xb > 0 && As_yb > 0
 @test As_xt > 0 && As_yt > 0
 
-println()
-note("Both top and bottom steel required: negative moment over columns, positive at midspan.")
-note("x- and y-direction steel may differ if grid is non-square or loads asymmetric.")
+_rpt.note("Top+bottom steel required (neg. moment over cols, pos. at midspan); x/y may differ.")
 
-sub_header("3E — Relative Stiffness Kr")
-println("  Kr = Ec·Ig / (ks·B·L³)  —  ACI 336.2R §4.2")
-println("  Kr > 0.5 → rigid assumption valid.")
-println()
+_rpt.sub("3E — Relative Stiffness Kr")
+println("  Kr = Ec·Ig/(ks·B·L³) per ACI 336.2R §4.2; Kr>0.5 → rigid valid.")
 
 Ec_psi = 57000.0 * sqrt(4000.0)
 Ig_in4 = ustrip(u"inch", mat_result.B) * ustrip(u"inch", mat_result.D)^3 / 12.0
@@ -643,15 +636,13 @@ Kr = Ec_psi * Ig_in4 / (ks_pci * ustrip(u"inch", mat_result.B) * ustrip(u"inch",
 @printf("    Kr = %.3f  %s\n", Kr, Kr > 0.5 ? "→ rigid assumption valid ✓" :
                                                "→ flexible analysis needed ⚠")
 
-println()
 if Kr > 0.5
-    note("Kr > 0.5 → rigid mat assumption is appropriate (ACI 336.2R §4.2).")
+    _rpt.note("Kr > 0.5 → rigid assumption appropriate (ACI 336.2R §4.2).")
 else
-    note("Kr < 0.5 → flexible analysis (Winkler FEA or Hetenyi) recommended.")
-    note("The WinklerFEA tier is available via MatFootingOptions(analysis_method=WinklerFEA()).")
+    _rpt.note("Kr < 0.5 → flexible analysis recommended; WinklerFEA tier available.")
 end
 
-sub_header("3F — Material Quantities")
+_rpt.sub("3F — Material Quantities")
 
 mat_V_conc = ustrip(u"m^3", mat_result.concrete_volume)
 mat_V_steel = ustrip(u"m^3", mat_result.steel_volume)
@@ -663,23 +654,306 @@ mat_V_steel = ustrip(u"m^3", mat_result.steel_volume)
 
 @test mat_result.utilization < 1.0
 
-step_status["Mat Foundation"] = "✓"
+_fdn_step_status["Mat Foundation (Rigid)"] = "✓"
 
-# ═════════════════════════════════════════════════════════════════════════════
+# STEP 3b — FLEXIBLE MAT METHODS (Analytical + FEA)
+
+_rpt.section("STEP 3b — FLEXIBLE MAT METHODS  (Analytical + FEA)")
+println("  Same 4×4 grid as Step 3; compare Rigid / Analytical / FEA.")
+println("  Analytical: Shukla + rigid envelope (ACI 336.2R §6.1.2 Steps 3–4)")
+println("  FEA:        Shell plate on Winkler springs (ACI 336.2R §6.4/§6.7)")
+
+_rpt.sub("3b-A — Moderate Loading (same as Step 3)")
+
+mat_opts_shukla = MatFootingOptions(
+    material = RC_4000_60, bar_size_x = 8, bar_size_y = 8,
+    cover = 3.0u"inch", min_depth = 24.0u"inch", depth_increment = 1.0u"inch",
+    analysis_method = ShuklaAFM(),
+)
+mat_opts_fea = MatFootingOptions(
+    material = RC_4000_60, bar_size_x = 8, bar_size_y = 8,
+    cover = 3.0u"inch", min_depth = 24.0u"inch", depth_increment = 1.0u"inch",
+    analysis_method = WinklerFEA(),
+)
+
+mat_result_shukla = design_footing(MatFoundation(), mat_demands, mat_positions, mat_soil; opts = mat_opts_shukla)
+mat_result_fea    = design_footing(MatFoundation(), mat_demands, mat_positions, mat_soil; opts = mat_opts_fea)
+
+flex_results = [("Rigid", mat_result), ("Analytical", mat_result_shukla), ("FEA", mat_result_fea)]
+
+@printf("\n    %-12s  %6s %6s %8s %8s %8s %8s %8s\n",
+        "Method", "h(in)", "d(in)", "As_xb", "As_xt", "As_yb", "As_yt", "util")
+@printf("    %-12s  %6s %6s %8s %8s %8s %8s %8s\n",
+        "─"^12, "─"^6, "─"^6, "─"^8, "─"^8, "─"^8, "─"^8, "─"^8)
+for (lbl, r) in flex_results
+    @printf("    %-12s  %6.0f %6.0f %8.1f %8.1f %8.1f %8.1f %8.3f\n", lbl,
+            ustrip(u"inch", r.D), ustrip(u"inch", r.d),
+            ustrip(u"inch^2", r.As_x_bot), ustrip(u"inch^2", r.As_x_top),
+            ustrip(u"inch^2", r.As_y_bot), ustrip(u"inch^2", r.As_y_top),
+            r.utilization)
+end
+
+@testset "Flexible Mat — Moderate Loading" begin
+    for (lbl, r) in flex_results
+        @test r.utilization < 1.0
+        @test ustrip(u"inch^2", r.As_x_bot) > 0.0
+    end
+    # Flexible should not be wildly thicker than rigid
+    h_rigid_base = ustrip(u"inch", mat_result.D)
+    @test ustrip(u"inch", mat_result_shukla.D) ≤ h_rigid_base + 6.0
+    @test ustrip(u"inch", mat_result_fea.D)    ≤ h_rigid_base + 6.0
+end
+
+_rpt.sub("3b-B — Heavy Loading (higher loads, softer soil)")
+
+heavy_demands = FoundationDemand[]
+heavy_positions = NTuple{2, typeof(0.0u"ft")}[]
+
+for (i, x) in enumerate([0.0, 30.0, 60.0, 90.0]), (j, y) in enumerate([0.0, 30.0, 60.0, 90.0])
+    idx = (i - 1) * 4 + j
+    is_corner = (i == 1 || i == 4) && (j == 1 || j == 4)
+    is_edge = !is_corner && (i == 1 || i == 4 || j == 1 || j == 4)
+
+    Pu = is_corner ? 350.0kip : is_edge ? 550.0kip : 900.0kip
+    Ps = is_corner ? 245.0kip : is_edge ? 385.0kip : 630.0kip
+
+    push!(heavy_demands, FoundationDemand(idx; Pu=Pu, Ps=Ps))
+    push!(heavy_positions, (x * u"ft", y * u"ft"))
+end
+
+heavy_soil = Soil(4.0ksf, 19.0u"kN/m^3", 35.0, 0.0u"kPa", 30.0u"MPa";
+                  ks=12000.0u"kN/m^3")
+
+Pu_heavy = sum(to_kip(d.Pu) for d in heavy_demands)
+@printf("\n    Grid: 4×4 @ 30 ft, Σ Pu = %.0f kip, ks = 12000 kN/m³\n", Pu_heavy)
+
+heavy_base = (material=RC_4000_60, bar_size_x=8, bar_size_y=8,
+              cover=3.0u"inch", min_depth=24.0u"inch", depth_increment=1.0u"inch")
+
+heavy_rigid  = design_footing(MatFoundation(), heavy_demands, heavy_positions, heavy_soil;
+    opts=MatFootingOptions(; heavy_base..., analysis_method=RigidMat()))
+heavy_shukla = design_footing(MatFoundation(), heavy_demands, heavy_positions, heavy_soil;
+    opts=MatFootingOptions(; heavy_base..., analysis_method=ShuklaAFM()))
+heavy_fea    = design_footing(MatFoundation(), heavy_demands, heavy_positions, heavy_soil;
+    opts=MatFootingOptions(; heavy_base..., analysis_method=WinklerFEA()))
+
+heavy_flex = [("Rigid", heavy_rigid), ("Analytical", heavy_shukla), ("FEA", heavy_fea)]
+
+@printf("\n    %-12s  %6s %6s %8s %8s %8s %8s %8s\n",
+        "Method", "h(in)", "d(in)", "As_xb", "As_xt", "As_yb", "As_yt", "util")
+@printf("    %-12s  %6s %6s %8s %8s %8s %8s %8s\n",
+        "─"^12, "─"^6, "─"^6, "─"^8, "─"^8, "─"^8, "─"^8, "─"^8)
+for (lbl, r) in heavy_flex
+    @printf("    %-12s  %6.0f %6.0f %8.1f %8.1f %8.1f %8.1f %8.3f\n", lbl,
+            ustrip(u"inch", r.D), ustrip(u"inch", r.d),
+            ustrip(u"inch^2", r.As_x_bot), ustrip(u"inch^2", r.As_x_top),
+            ustrip(u"inch^2", r.As_y_bot), ustrip(u"inch^2", r.As_y_top),
+            r.utilization)
+end
+
+@testset "Flexible Mat — Heavy Loading" begin
+    for (lbl, r) in heavy_flex
+        @test r.utilization < 1.0
+        @test ustrip(u"inch^2", r.As_x_bot) > 0.0
+    end
+end
+
+_rpt.note("Analytical envelopes Shukla flexible peaks with rigid strip statics (ACI 336.2R §6.1.2).")
+_rpt.note("All methods share punching shear iteration; thickness differences reflect moment demands.")
+_rpt.note("Bottom steel (As_xb, As_yb) governs for flexible methods → bottom tension at columns ✓.")
+
+_fdn_step_status["Mat Foundation (Flexible)"] = "✓"
+
+# STEP 3c — EQUILIBRIUM VERIFICATION
+
+_rpt.section("STEP 3c — EQUILIBRIUM VERIFICATION")
+println("  Verify vertical equilibrium: Σ applied loads ≈ Σ soil reactions.")
+println("  FEA: spring reaction = kz × |w| (exact within numerical precision).")
+println("  Analytical (Shukla): integral of q(x,y) over mat (infinite-plate → some load outside mat).")
+
+using Asap: Node as AsapNode, ShellSection, ShellPatch, Shell, Spring, NodeForce,
+            Model, process!, solve!, add_springs!, get_nodes, bending_moments
+
+_rpt.sub("3c-A — WinklerFEA Equilibrium (Moderate Loading)")
+
+# Build FEA manually to extract equilibrium data (same grid as Step 3)
+let
+    plan = StructuralSizer._mat_plan_sizing(mat_positions, mat_opts_fea;
+               demands = mat_demands, soil = mat_soil)
+    B_m  = ustrip(u"m", plan.B)
+    Lm_m = ustrip(u"m", plan.Lm)
+    h_in = ustrip(u"inch", mat_result_fea.D)
+    h_m  = h_in * 0.0254
+    Ec   = 57000.0 * sqrt(4000.0)  # psi
+    Ec_Pa = Ec * 6894.76  # Pa
+    ν_c  = 0.2
+    ks_Pa_m = ustrip(u"N/m^3", uconvert(u"N/m^3", mat_soil.ks))
+
+    Pu_max_kip = maximum(to_kip(d.Pu) for d in mat_demands)
+    c_est_m = ustrip(u"m", max(12.0, ceil(sqrt(Pu_max_kip / 0.5) / 3.0) * 3.0) * u"inch")
+
+    bay_xs = sort(unique(ustrip.(u"m", [p[1] for p in mat_positions])))
+    bay_ys = sort(unique(ustrip.(u"m", [p[2] for p in mat_positions])))
+    min_bay_m = Inf
+    for i in 2:length(bay_xs); min_bay_m = min(min_bay_m, bay_xs[i] - bay_xs[i-1]); end
+    for i in 2:length(bay_ys); min_bay_m = min(min_bay_m, bay_ys[i] - bay_ys[i-1]); end
+    isinf(min_bay_m) && (min_bay_m = min(B_m, Lm_m))
+
+    te_m = clamp(min_bay_m / 20.0, 0.15, 0.75)
+    refine_edge = clamp(c_est_m / 2.0, 0.04, te_m / 2.0) * u"m"
+    target_edge = te_m * u"m"
+
+    section = ShellSection(h_m * u"m", Ec_Pa * u"Pa", ν_c)
+
+    corner_nodes = (
+        AsapNode([0.0u"m", 0.0u"m", 0.0u"m"], :free),
+        AsapNode([B_m*u"m", 0.0u"m", 0.0u"m"], :free),
+        AsapNode([B_m*u"m", Lm_m*u"m", 0.0u"m"], :free),
+        AsapNode([0.0u"m", Lm_m*u"m", 0.0u"m"], :free),
+    )
+
+    positions_loc_m = [(ustrip(u"m", plan.xs_loc[j]), ustrip(u"m", plan.ys_loc[j]))
+                       for j in 1:length(mat_demands)]
+
+    interior_nodes = [AsapNode([cx * u"m", cy * u"m", 0.0u"m"], :free)
+                      for (cx, cy) in positions_loc_m]
+
+    patches = [ShellPatch(cx, cy, c_est_m, c_est_m, section; id=:col_patch)
+               for (cx, cy) in positions_loc_m]
+
+    edge_dofs = [false, false, true, true, true, true]
+
+    shells = Shell(corner_nodes, section;
+                   id=:eq_check,
+                   interior_nodes=interior_nodes,
+                   interior_patches=patches,
+                   edge_support_type=edge_dofs,
+                   interior_support_type=:free,
+                   target_edge_length=target_edge,
+                   refinement_edge_length=refine_edge)
+
+    nodes = get_nodes(shells)
+
+    # Apply column loads
+    loads = NodeForce[]
+    for (k, dem) in enumerate(mat_demands)
+        cx, cy = positions_loc_m[k]
+        best = nodes[1]; best_d2 = Inf
+        for n in nodes
+            d2 = (ustrip(u"m", n.position[1]) - cx)^2 + (ustrip(u"m", n.position[2]) - cy)^2
+            if d2 < best_d2; best = n; best_d2 = d2; end
+        end
+        Pu_N = ustrip(u"N", uconvert(u"N", dem.Pu))
+        push!(loads, NodeForce(best, [0.0, 0.0, -Pu_N] .* u"N"))
+    end
+
+    model = Model(nodes, shells, loads)
+    process!(model)
+
+    # Winkler springs
+    trib = Dict{UInt64, Float64}()
+    for elem in shells
+        A3 = elem.area / 3.0
+        for nd in elem.nodes
+            trib[objectid(nd)] = get(trib, objectid(nd), 0.0) + A3
+        end
+    end
+    springs = Spring[]
+    edge_tol = min(B_m, Lm_m) * 1e-4
+    for n in nodes
+        A_t = get(trib, objectid(n), 0.0)
+        A_t < 1e-12 && continue
+        K = A_t * ks_Pa_m
+        xn = ustrip(u"m", n.position[1])
+        yn = ustrip(u"m", n.position[2])
+        on_edge = (xn < edge_tol || xn > B_m - edge_tol ||
+                   yn < edge_tol || yn > Lm_m - edge_tol)
+        on_edge && (K *= 2.0)
+        push!(springs, Spring(n; kz = K * u"N/m"))
+    end
+    add_springs!(model, springs)
+    solve!(model)
+
+    # Equilibrium: sum of applied loads vs sum of spring reactions
+    F_applied_kN = sum(abs(ustrip(u"N", l.value[3])) for l in loads) / 1e3
+    F_reaction_kN = sum(
+        let kz = s.stiffness[3]
+            w  = ustrip(u"m", s.node.displacement[3])
+            kz * abs(w)
+        end for s in springs) / 1e3
+
+    imbalance_pct = F_applied_kN > 0 ? abs(F_applied_kN - F_reaction_kN) / F_applied_kN * 100 : 0.0
+
+    @printf("    Σ Applied loads  = %10.1f kN\n", F_applied_kN)
+    @printf("    Σ Spring reactions = %10.1f kN\n", F_reaction_kN)
+    @printf("    Imbalance        = %10.2f%%  %s\n",
+            imbalance_pct, imbalance_pct < 1.0 ? "✓ OK" : "⚠")
+
+    @test imbalance_pct < 1.0  # FEA should be exact within 1%
+
+    # Peak deflection
+    w_max_mm = maximum(abs(ustrip(u"mm", n.displacement[3])) for n in nodes)
+    @printf("    Peak deflection  = %10.2f mm\n", w_max_mm)
+end
+
+_rpt.sub("3c-B — Analytical (Shukla) Equilibrium (Moderate Loading)")
+let
+    plan = StructuralSizer._mat_plan_sizing(mat_positions,
+        MatFootingOptions(material=RC_4000_60, min_depth=mat_result_shukla.D);
+        demands = mat_demands, soil = mat_soil)
+    B = plan.B; Lm = plan.Lm
+    h = mat_result_shukla.D
+    Ec = 57000.0u"psi" * sqrt(4000.0)
+    μ = 0.2
+
+    result = StructuralSizer._shukla_analysis(h, mat_positions, mat_demands, Ec, μ, mat_soil.ks)
+    q_f = result[5]  # soil pressure function
+
+    # Trapezoidal integration of q(x,y) over mat
+    nx, ny = 50, 50
+    xs = range(plan.x_left, plan.x_left + B, length=nx)
+    ys = range(plan.y_bot, plan.y_bot + Lm, length=ny)
+    dx = B / (nx - 1); dy = Lm / (ny - 1)
+
+    q_integral = sum(
+        let w_x = (ix == 1 || ix == nx) ? 0.5 : 1.0
+            w_y = (iy == 1 || iy == ny) ? 0.5 : 1.0
+            w_x * w_y * q_f(xs[ix], ys[iy]) * dx * dy
+        end for ix in 1:nx, iy in 1:ny)
+
+    Pu_total = sum(d.Pu for d in mat_demands)
+    ratio = ustrip(Unitful.NoUnits, q_integral / Pu_total)
+    shortfall_pct = (1.0 - ratio) * 100
+
+    Pu_kN = ustrip(u"kN", uconvert(u"kN", Pu_total))
+    Qr_kN = ustrip(u"kN", uconvert(u"kN", q_integral))
+
+    @printf("    Σ Column loads     = %10.1f kN\n", Pu_kN)
+    @printf("    ∫q(x,y) dA (mat)   = %10.1f kN\n", Qr_kN)
+    @printf("    Captured ratio     = %10.1f%%\n", ratio * 100)
+    @printf("    Shortfall          = %10.1f%%  %s\n",
+            shortfall_pct,
+            shortfall_pct < 15.0 ? "✓ OK (infinite-plate)" :
+            shortfall_pct < 30.0 ? "~ acceptable" : "⚠ large shortfall")
+
+    # Shukla infinite-plate: expect ~75-100% captured by finite mat.
+    # Global equilibrium is ensured by the rigid envelope (ACI 336.2R §6.1.2).
+    @test ratio > 0.70  # at least 70% captured
+end
+
+_rpt.note("FEA: equilibrium is exact (FEM enforces Ku=F at every node).")
+_rpt.note("Analytical (Shukla): <100% expected — infinite-plate solution; rigid envelope ensures statics.")
+_rpt.note("Shortfall decreases with larger mat overhang (more soil reaction captured).")
+
+_fdn_step_status["Equilibrium Checks"] = "✓"
+
 # STEP 4 — FOUNDATION TYPE COMPARISON
-# ═════════════════════════════════════════════════════════════════════════════
 
-section_header("STEP 4 — FOUNDATION TYPE COMPARISON")
-println("  Same building, three strategies: all-spread, strip where needed, mat.")
-println("  3 × 2 column grid (25 ft x-spacing, 25 ft y-spacing), typical office loads.")
-println()
+_rpt.section("STEP 4 — FOUNDATION TYPE COMPARISON")
+println("  3×2 grid (25 ft spacing), typical office loads: spread vs strip vs mat.")
 
-sub_header("4A — Scenario: 6 Columns on 25 ft Grid")
-println("  Interior Pu = 400 kip, Ps = 280 kip")
-println("  Edge     Pu = 250 kip, Ps = 175 kip")
-println("  Corner   Pu = 150 kip, Ps = 105 kip")
-println("  Soil: qa = 4.0 ksf  (medium sand)")
-println()
+_rpt.sub("4A — Scenario: 6 Columns on 25 ft Grid")
+println("  Int Pu=400k, Edge Pu=250k, Corner Pu=150k; qa=4.0 ksf")
 
 comp_soil = Soil(4.0ksf, 18.0u"kN/m^3", 30.0, 0.0u"kPa", 25.0u"MPa";
                  ks=25000.0u"kN/m^3")
@@ -712,7 +986,7 @@ building_area = 50.0 * 25.0  # ft²
         N_comp, Pu_total_comp, Ps_total_comp)
 @printf("    Building footprint = 50 ft × 25 ft = %.0f ft²\n", building_area)
 
-sub_header("4B — Strategy 1: All Spread Footings")
+_rpt.sub("4B — Strategy 1: All Spread Footings")
 
 spread_results = SpreadFootingResult[]
 spread_opts = SpreadFootingOptions(
@@ -724,7 +998,7 @@ spread_opts = SpreadFootingOptions(
 )
 
 for d in comp_demands
-    r = design_spread_footing(d, comp_soil; opts=spread_opts)
+    r = design_footing(SpreadFooting(), d, comp_soil; opts=spread_opts)
     push!(spread_results, r)
 end
 
@@ -751,9 +1025,8 @@ end
 @printf("    Total steel     = %.5f m³\n", sp_total_steel)
 @printf("    Max utilization = %.3f\n", sp_max_util)
 
-sub_header("4C — Strategy 2: Strip Footings (Paired Columns)")
+_rpt.sub("4C — Strategy 2: Strip Footings (Paired Columns)")
 println("  Pair columns along y-axis (2 per strip at each x-coordinate).")
-println()
 
 strip_results = StripFootingResult[]
 strip_opts = StripFootingOptions(
@@ -768,7 +1041,7 @@ for xi in grid_x
     idxs = [i for i in 1:N_comp if ustrip(u"ft", comp_positions[i][1]) ≈ xi]
     ds = [comp_demands[i] for i in idxs]
     ps = [comp_positions[i][2] for i in idxs]   # y-coordinates along strip
-    r = design_strip_footing(ds, ps, comp_soil; opts=strip_opts)
+    r = design_footing(StripFooting(), ds, ps, comp_soil; opts=strip_opts)
     push!(strip_results, r)
 end
 
@@ -795,7 +1068,7 @@ end
 @printf("    Total steel     = %.5f m³\n", st_total_steel)
 @printf("    Max utilization = %.3f\n", st_max_util)
 
-sub_header("4D — Strategy 3: Mat Foundation")
+_rpt.sub("4D — Strategy 3: Mat Foundation")
 
 mat_comp_opts = MatFootingOptions(
     material = RC_4000_60,
@@ -805,7 +1078,7 @@ mat_comp_opts = MatFootingOptions(
     min_depth = 24.0u"inch",
 )
 
-mat_comp = design_mat_footing(comp_demands, comp_positions, comp_soil; opts=mat_comp_opts)
+mat_comp = design_footing(MatFoundation(), comp_demands, comp_positions, comp_soil; opts=mat_comp_opts)
 
 mt_conc  = ustrip(u"m^3", mat_comp.concrete_volume)
 mt_steel = ustrip(u"m^3", mat_comp.steel_volume)
@@ -819,7 +1092,7 @@ mt_area  = ustrip(u"ft^2", mat_comp.B * mat_comp.L_ftg)
 @printf("    Steel    = %.5f m³\n", mt_steel)
 @printf("    Utilization = %.3f\n", mat_comp.utilization)
 
-sub_header("4E — Comparison Matrix")
+_rpt.sub("4E — Comparison Matrix")
 println()
 
 @printf("    %-20s %10s %10s %10s\n", "Metric", "Spread", "Strip", "Mat")
@@ -836,30 +1109,21 @@ if sp_total_conc > 0
             st_total_conc / sp_total_conc, mt_conc / sp_total_conc)
 end
 
-println()
-note("Spread: minimum concrete per footing, but most elements to construct.")
-note("Strip: consolidates footings → fewer pours, may save formwork.")
-note("Mat: highest concrete volume but simplest excavation and forming.")
-note("Coverage > 50% typically triggers mat recommendation (auto strategy).")
-note("For this scenario, coverage = $(round(Int, 100*sp_coverage))% → " *
+_rpt.note("Spread: least concrete, most elements; Strip: fewer pours; Mat: most concrete, simplest forming. Coverage=$(round(Int, 100*sp_coverage))% → " *
      (sp_coverage > 0.5 ? "mat recommended." : sp_coverage > 0.3 ? "strip preferred." : "spread OK."))
 
 @test sp_max_util < 1.0
 @test st_max_util < 1.0
 @test mat_comp.utilization < 1.0
 
-step_status["Type Comparison"] = "✓"
+_fdn_step_status["Type Comparison"] = "✓"
 
-# ═════════════════════════════════════════════════════════════════════════════
 # STEP 5 — PARAMETRIC STUDIES
-# ═════════════════════════════════════════════════════════════════════════════
 
-section_header("STEP 5 — PARAMETRIC STUDIES")
+_rpt.section("STEP 5 — PARAMETRIC STUDIES")
 
-sub_header("5A — Spread Footing: Soil Capacity Sweep")
-println("  Fixed: Pu = 500 kip, Ps = 350 kip, c = 18\", f'c = 4000 psi")
-println("  Vary qa from 2 to 8 ksf.")
-println()
+_rpt.sub("5A — Spread Footing: Soil Capacity Sweep")
+println("  Pu=500k, Ps=350k, c=18\", f'c=4000psi; qa = 2–8 ksf")
 
 @printf("    %6s  %6s %6s %8s %8s  %s\n",
         "qa(ksf)", "B(ft)", "h(in)", "V_c(m³)", "util", "")
@@ -873,7 +1137,7 @@ sweep_opts = SpreadFootingOptions(material=RC_4000_60, pier_c1=18.0u"inch", pier
 
 for qa_val in [2.0, 3.0, 4.0, 5.0, 6.0, 8.0]
     s = Soil(qa_val * ksf, 18.0u"kN/m^3", 30.0, 0.0u"kPa", 25.0u"MPa")
-    r = design_spread_footing(sweep_demand, s; opts=sweep_opts)
+    r = design_footing(SpreadFooting(), sweep_demand, s; opts=sweep_opts)
     @printf("    %6.1f  %6.1f %6.0f %8.3f %8.3f  %s\n",
             qa_val,
             ustrip(u"ft", r.B), ustrip(u"inch", r.D),
@@ -881,14 +1145,10 @@ for qa_val in [2.0, 3.0, 4.0, 5.0, 6.0, 8.0]
             r.utilization < 1.0 ? "✓" : "✗")
     @test r.utilization < 1.0
 end
-println()
-note("Lower qa → larger B → more concrete → but h also increases (wider cantilever).")
-note("At qa = 2 ksf, footing is very large — consider strip or mat at this point.")
+_rpt.note("Lower qa → larger B & h; at qa≈2 ksf consider strip or mat.")
 
-sub_header("5B — Spread Footing: Column Load Sweep")
-println("  Fixed: qa = 4 ksf, c = 18\", f'c = 4000 psi")
-println("  Vary Pu from 200 to 1200 kip (Ps = Pu/1.43).")
-println()
+_rpt.sub("5B — Spread Footing: Column Load Sweep")
+println("  qa=4ksf, c=18\", f'c=4000psi; Pu = 200–1200 kip (Ps=Pu/1.43)")
 
 @printf("    %6s  %6s  %6s %6s %8s %8s\n",
         "Pu(kip)", "Ps", "B(ft)", "h(in)", "V_c(m³)", "util")
@@ -899,21 +1159,17 @@ sweep_soil = Soil(4.0ksf, 18.0u"kN/m^3", 30.0, 0.0u"kPa", 25.0u"MPa")
 for Pu_val in [200.0, 400.0, 600.0, 800.0, 1000.0, 1200.0]
     Ps_val = Pu_val / 1.43
     d_sweep = FoundationDemand(1; Pu=Pu_val*kip, Ps=Ps_val*kip)
-    r = design_spread_footing(d_sweep, sweep_soil; opts=sweep_opts)
+    r = design_footing(SpreadFooting(), d_sweep, sweep_soil; opts=sweep_opts)
     @printf("    %6.0f  %6.0f  %6.1f %6.0f %8.3f %8.3f\n",
             Pu_val, Ps_val,
             ustrip(u"ft", r.B), ustrip(u"inch", r.D),
             ustrip(u"m^3", r.concrete_volume), r.utilization)
     @test r.utilization < 1.0
 end
-println()
-note("Footing size scales with √(Ps/qa); thickness governed by punching (∝ √Pu).")
-note("At Pu > ~800 kip on qa = 4 ksf, footings become very large — combined/mat territory.")
+_rpt.note("Size∝√(Ps/qa), h∝√Pu (punching); Pu>~800k on qa=4ksf → combined/mat territory.")
 
-sub_header("5C — Foundation Type Transition: Coverage Ratio")
-println("  For the same building, increase loads until coverage triggers mat.")
-println("  Coverage = Σ(spread area) / building footprint.")
-println()
+_rpt.sub("5C — Foundation Type Transition: Coverage Ratio")
+println("  Scale loads; coverage = Σ(spread area)/building footprint.")
 
 @printf("    %8s %8s %10s %10s  %s\n",
         "Load×", "ΣPu(k)", "Σ_area", "coverage", "strategy")
@@ -934,98 +1190,62 @@ for scale in [0.5, 0.75, 1.0, 1.5, 2.0, 2.5]
     @printf("    %8.2f %8.0f %9.0f ft² %9.0f%%  %s\n",
             scale, total_Pu, total_area, 100 * cov, strat)
 end
-println()
-note("Coverage < 30% → spread footings fit comfortably.")
-note("30–50% → footings start overlapping → merge into strips.")
-note("> 50% → footings cover more than half the building → use a mat.")
-note("This logic is implemented in recommend_foundation_strategy().")
+_rpt.note("<30% → spread; 30–50% → strip; >50% → mat. Logic in recommend_foundation_strategy().")
 
-step_status["Parametric Studies"] = "✓"
+_fdn_step_status["Parametric Studies"] = "✓"
 
-# ═════════════════════════════════════════════════════════════════════════════
 # STEP 6 — DESIGN CODE FEATURES & LIMITATIONS
-# ═════════════════════════════════════════════════════════════════════════════
 
-section_header("STEP 6 — DESIGN CODE FEATURES & LIMITATIONS")
-println()
+_rpt.section("STEP 6 — DESIGN CODE FEATURES & LIMITATIONS")
 
-sub_header("6A — Feature Matrix")
-println()
+_rpt.sub("6A — Feature Matrix")
 @printf("    %-30s %8s %8s %8s\n", "Feature", "Spread", "Strip", "Mat")
 @printf("    %-30s %8s %8s %8s\n", "─"^30, "─"^8, "─"^8, "─"^8)
 @printf("    %-30s %8s %8s %8s\n", "ACI 318-14 punching (§22.6)", "✓", "✓", "✓")
 @printf("    %-30s %8s %8s %8s\n", "Biaxial moment transfer",     "✓", "✓", "✓")
 @printf("    %-30s %8s %8s %8s\n", "One-way shear (§22.5)",       "✓", "✓", "—")
 @printf("    %-30s %8s %8s %8s\n", "Flexural reinforcement",      "✓", "✓", "✓")
-@printf("    %-30s %8s %8s %8s\n", "Development length (§25.4)",  "✓", "—", "—")
-@printf("    %-30s %8s %8s %8s\n", "Bearing check (§22.8)",       "✓", "—", "—")
-@printf("    %-30s %8s %8s %8s\n", "Dowel design",                "✓", "—", "—")
-@printf("    %-30s %8s %8s %8s\n", "Column shape (:rect/:circ)",  "✓", "—", "—")
+@printf("    %-30s %8s %8s %8s\n", "Development length (§25.4)",  "✓", "✓", "—")
+@printf("    %-30s %8s %8s %8s\n", "Bearing check (§22.8)",       "✓", "✓", "—")
+@printf("    %-30s %8s %8s %8s\n", "Dowel design",                "✓", "✓", "—")
+@printf("    %-30s %8s %8s %8s\n", "Per-col dims + shape",         "✓", "✓", "✓")
 @printf("    %-30s %8s %8s %8s\n", "V(x)/M(x) diagrams",         "—", "✓", "—")
 @printf("    %-30s %8s %8s %8s\n", "Strip statics (Kramrisch)",   "—", "—", "✓")
 @printf("    %-30s %8s %8s %8s\n", "Relative stiffness Kr",       "—", "—", "✓")
-@printf("    %-30s %8s %8s %8s\n", "Winkler FEA (flexible)",      "—", "—", "stub")
+@printf("    %-30s %8s %8s %8s\n", "Analytical (Shukla+Rigid)",   "—", "—", "✓")
+@printf("    %-30s %8s %8s %8s\n", "Winkler FEA (flexible)",      "—", "—", "✓")
 println()
 
-sub_header("6B — Shared Components")
-println("  All three types share the same punching & shear utilities from")
-println("  StructuralSizer/src/codes/aci/punching.jl:")
-println()
-println("    punching_check()           — biaxial moment transfer (§22.6 + §8.4.4.2)")
-println("    punching_geometry_*()      — interior/edge/corner critical sections")
-println("    gamma_f(), gamma_v()       — moment transfer fractions (§8.4.2.3)")
-println("    polar_moment_Jc_*()        — J_c for eccentric shear stress")
-println("    one_way_shear_capacity()   — Vc = 2λ√f'c × bw × d (§22.5)")
-println("    punching_capacity_stress() — vc per §22.6.5.2")
-println()
-println("  This module is also shared with slabs (flat plate analysis).")
-println("  → One implementation, one test suite, zero code duplication.")
+_rpt.sub("6B — Shared Components")
+println("  codes/aci/punching.jl: punching_check, punching_geometry_*, gamma_f/v, Jc, one_way_shear, vc.")
+println("  Shared by all 3 footing types + slabs — one implementation, zero duplication.")
 
-sub_header("6C — Current Limitations & Future Work")
-println()
-println("  1. Mat analysis is rigid only (Kr > 0.5). Flexible (Winkler FEA) is stubbed.")
-println("  2. Strip footing pier_c1/c2 defaults to 18\" (configurable via StripFootingOptions).")
-println("  3. Pattern loading not yet implemented for strip/mat (see ACI §6.4.3.2).")
-println("  4. Pile foundations (DrivenPile, DrilledShaft) are type-defined but not designed.")
-println("  5. IS 456 code dispatch exists but only calls legacy spread footing overload.")
+_rpt.sub("6C — Current Limitations & Future Work")
+println("  1. No pattern loading for mats (ACI 318 §6.4.3.2)")
+println("  2. Pile types defined, not designed  3. IS 456 dispatch: legacy spread only")
 
-step_status["Features & Limits"] = "✓"
+_fdn_step_status["Features & Limits"] = "✓"
 
-# ═════════════════════════════════════════════════════════════════════════════
 # SUMMARY
-# ═════════════════════════════════════════════════════════════════════════════
 
-section_header("SUMMARY")
-println()
+_rpt.section("SUMMARY")
 
 ordered_steps = [
-    "Shared Punching Utils",
-    "Spread Footing",
-    "Strip/Combined Footing",
-    "Mat Foundation",
-    "Type Comparison",
-    "Parametric Studies",
-    "Features & Limits",
+    "Shared Punching Utils", "Spread Footing", "Strip/Combined Footing",
+    "Mat Foundation (Rigid)", "Mat Foundation (Flexible)", "Equilibrium Checks",
+    "Type Comparison", "Parametric Studies", "Features & Limits",
 ]
 
-println("  Foundation types validated: Spread (ACI 318-14), Strip/Combined (ACI 318-14),")
-println("  Mat (ACI 336.2R rigid). Shared punching utilities validated independently.")
-println()
+println("  Validated: Spread/Strip (ACI 318-14), Mat Rigid+Flexible (ACI 336.2R), equilibrium, shared utils.")
 
 @printf("    %-24s  %s\n", "Step", "Status")
 @printf("    %-24s  %s\n", "─"^24, "─"^24)
 for step in ordered_steps
-    status = get(step_status, step, "?")
+    status = get(_fdn_step_status, step, "?")
     @printf("    %-24s  %s\n", step, status)
 end
 
-println()
-println("  References:")
-println("    [1] StructurePoint Spread Footing — Wight 7th Ed. Ex 15-2")
-println("    [2] StructurePoint Combined Footing — Wight 7th Ed. Ex 15-5")
-println("    [3] ACI 336.2R-88 §4.2 — Rigid Mat Analysis")
-println("    [4] ACI 318-14 §22.6 / §8.4.4.2 — Punching & Moment Transfer")
-println("    [5] ACI SP-152 — Mat Foundation Design (flexible mat reference)")
+println("  Refs: [1] SP Spread Ex15-2 [2] SP Combined Ex15-5 [3] ACI 336.2R §4.2 [4] ACI 318-14 §22.6 [5] ACI SP-152")
 
 @test true  # sentinel
 end  # @testset

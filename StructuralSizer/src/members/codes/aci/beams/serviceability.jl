@@ -5,16 +5,16 @@
 # Wraps the shared deflection primitives (codes/aci/deflection.jl) into a
 # convenient beam-level interface.
 #
-# Methodology follows StructurePoint / standard ACI 318-14 §24.2 approach:
+# Methodology follows StructurePoint / standard ACI 318-11 §9.5.2 approach:
 #   1. Compute Ie_D  from Ma_D  (dead load service moment)
 #   2. Compute Ie_DL from Ma_DL (total D+L service moment)
 #   3. Δ_D  = 5 wD L⁴ / (384 Ec Ie_D)
 #   4. Δ_DL = 5 (wD+wL) L⁴ / (384 Ec Ie_DL)
 #   5. Δ_LL = Δ_DL − Δ_D    ← subtraction approach
 #
-# Reference: ACI 318-14 §24.2, Table 24.2.2
+# Reference: ACI 318-11 §9.5.2, Table 9.5(b)
 #            DE-Simply-Supported-Reinforced-Concrete-Beam-Analysis-and-Design-
-#            ACI-318-14-spBeam-v1000 (StructurePoint), pg. 11–14
+#            ACI-318-11-spBeam-v1000 (StructurePoint), pg. 11–14
 # ==============================================================================
 
 """
@@ -37,9 +37,9 @@ different effective stiffness at each load level.
    - `Δ_D  = f(wD, L, Ec, Ie_D)`
    - `Δ_DL = f(wD+wL, L, Ec, Ie_DL)`
    - `Δ_LL = Δ_DL − Δ_D`
-7. Long-term: `λΔ` per ACI 24.2.4.1
+7. Long-term: `λΔ` per ACI 318-11 §9.5.2.5
 8. Total: `Δ_total = λΔ × Δ_D + Δ_LL`
-9. Compare against ACI Table 24.2.2 limits
+9. Compare against ACI Table 9.5(b) limits
 
 # Arguments
 - `b`, `h`, `d`, `As`: Beam geometry and tension steel area
@@ -50,7 +50,7 @@ different effective stiffness at each load level.
 - `w_dead`, `w_live`: Unfactored service loads (force/length)
 - `support`: `:simply_supported`, `:cantilever`, etc.
 - `wc_pcf`: Concrete unit weight in pcf (default 150). When provided, uses the
-  general Ec formula `33 × wc^1.5 × √f'c` (ACI 19.2.2.1.a). Set to `nothing`
+  general Ec formula `33 × wc^1.5 × √f'c` (ACI 318-11 §8.5.1). Set to `nothing`
   to use the simplified `57000√f'c` formula.
 - `As_prime`: Compression steel area for long-term factor (default 0)
 - `ξ`: Time-dependent factor (default 2.0 → 5+ years)
@@ -87,7 +87,7 @@ function design_beam_deflection(
     # --- Cracked section ---
     Icr = cracked_moment_of_inertia(As, b, d, Ec_val, Es)
 
-    # --- Service moments (unfactored, per ACI 24.2) ---
+    # --- Service moments (unfactored, per ACI 318-11 §9.5.2) ---
     Ma_dead  = _beam_moment(w_dead, L, support)
     Ma_live  = _beam_moment(w_live, L, support)
     Ma_total = Ma_dead + Ma_live
@@ -107,7 +107,7 @@ function design_beam_deflection(
     # Live load by subtraction (standard ACI / StructurePoint approach)
     Δ_LL = Δ_DL - Δ_D
 
-    # --- Long-term deflection (ACI 24.2.4.1) ---
+    # --- Long-term deflection (ACI 318-11 §9.5.2.5) ---
     ρ_prime = ustrip(As_prime / (b * d))
     λΔ = long_term_deflection_factor(ξ, ρ_prime)
     Δ_lt_dead = λΔ * Δ_D
@@ -191,7 +191,7 @@ function _beam_deflection(w, L::Length, Ec::Pressure, Ie, support::Symbol)
 end
 
 # ==============================================================================
-# T-Beam Deflection Check (ACI 318-19 §24.2)
+# T-Beam Deflection Check (ACI 318-11 §9.5.2)
 # ==============================================================================
 
 """
@@ -200,7 +200,7 @@ end
 
 Complete immediate + long-term deflection check for an RC T-beam.
 
-Follows the same ACI §24.2 methodology as `design_beam_deflection` but uses:
+Follows the same ACI §9.5.2 methodology as `design_beam_deflection` but uses:
 - T-shaped gross section properties (Ig, ȳ from top)
 - `cracked_moment_of_inertia_tbeam` for Icr (handles NA in flange or web)
 - Cracking moment based on bottom-fiber distance (yb = h − ȳ)

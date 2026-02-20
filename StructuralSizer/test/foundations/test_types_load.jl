@@ -24,7 +24,7 @@ println("FoundationOptions OK: strategy=", fopts.strategy)
 
 # Test mat methods
 println("RigidMat: ", RigidMat())
-println("Hetenyi: ", Hetenyi())
+println("ShuklaAFM: ", ShuklaAFM())
 println("WinklerFEA: ", WinklerFEA())
 
 println("\nAll types and options loaded successfully!")

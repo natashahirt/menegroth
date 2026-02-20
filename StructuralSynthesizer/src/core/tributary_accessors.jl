@@ -234,17 +234,7 @@ function clear_geometry_caches!(struc::BuildingStructure)
     empty!(struc._analysis_caches)
 end
 
-"""Backward-compatible alias."""
-clear_tributary_cache!(struc::BuildingStructure) = clear_geometry_caches!(struc)
 
-"""
-    list_cached_tributary_keys(struc)
-
-List all cached tributary configuration keys.
-"""
-function list_cached_tributary_keys(struc::BuildingStructure)
-    return collect(keys(struc._tributary_caches.edge))
-end
 
 # =============================================================================
 # Analysis Cache Accessors

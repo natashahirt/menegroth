@@ -2,7 +2,7 @@
 # ACI 318 Deflection Calculations
 # ==============================================================================
 #
-# Element-agnostic serviceability calculations per ACI 318-19 §24.2.
+# Element-agnostic serviceability calculations per ACI 318-11 §9.5.2.
 # Works for beams, one-way slabs, and flat plate strips.
 # ==============================================================================
 
@@ -70,7 +70,7 @@ Effective moment of inertia per ACI 24.2.3.5 (Branson's equation).
 - `Icr`: Cracked moment of inertia
 
 # Reference
-- ACI 318-14 Eq. 24.2.3.5a
+- ACI 318-11 Eq. (9-10)
 """
 function effective_moment_of_inertia(Mcr, Ma, Ig, Icr)
     if ustrip(u"N*m", Ma) <= ustrip(u"N*m", Mcr)
@@ -137,7 +137,7 @@ Long-term deflection multiplier per ACI 24.2.4.1.
 - `ρ_prime`: Compression reinforcement ratio As'/(b·d)
 
 # Reference
-- ACI 318-14 Section 24.2.4.1
+- ACI 318-11 §9.5.2.5
 """
 function long_term_deflection_factor(ξ::Float64=2.0, ρ_prime::Float64=0.0)
     return ξ / (1 + 50 * ρ_prime)

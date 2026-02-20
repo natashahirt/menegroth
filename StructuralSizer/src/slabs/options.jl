@@ -1,10 +1,51 @@
-# FloorOptions: user-facing configuration for floor/slab sizing
+# Floor options: user-facing configuration for floor/slab sizing
 #
-# Motivation:
-# - Many sizing methods accept impactful keyword args (e.g. ACI support conditions),
-#   but those keywords are hard to discover through higher-level APIs that forward kwargs.
-# - A single structured `FloorOptions` object makes defaults explicit, composable, and
-#   easier to document and introspect.
+# Architecture:
+#   AbstractFloorOptions           → abstract parent for all floor option types
+#     ├── FlatPlateOptions         → flat plate / beamless two-way slab
+#     ├── FlatSlabOptions          → flat plate with drop panels
+#     ├── OneWayOptions            → one-way CIP slab
+#     ├── VaultOptions             → unreinforced parabolic vault
+#     ├── CompositeDeckOptions     → steel deck + concrete fill
+#     └── TimberOptions            → CLT / DLT / NLT panels
+#
+# Usage:
+#   DesignParameters(floor = FlatPlateOptions(method = EFM(:asap)))
+
+# =============================================================================
+# Abstract parent
+# =============================================================================
+
+"""
+    AbstractFloorOptions
+
+Abstract parent for all floor system option types.
+
+Each subtype is self-describing — the type itself identifies the floor system,
+eliminating the need for a `floor_type::Symbol` discriminator.
+
+# Subtypes
+- `FlatPlateOptions` — beamless two-way slab (ACI 318 Ch 8)
+- `FlatSlabOptions` — flat plate with drop panels
+- `OneWayOptions` — one-way CIP slab (ACI 318 Table 7.3.1.1)
+- `VaultOptions` — unreinforced parabolic vault
+- `CompositeDeckOptions` — steel deck + concrete fill
+- `TimberOptions` — CLT / DLT / NLT panels
+
+# Example
+```julia
+# Direct usage (recommended):
+params = DesignParameters(floor = FlatPlateOptions(method = EFM(:asap)))
+
+# The type carries the floor system identity:
+opts = FlatSlabOptions()
+floor_symbol(opts)  # → :flat_slab
+```
+"""
+abstract type AbstractFloorOptions end
+
+# floor_symbol(::AbstractFloorOptions) methods defined below each struct.
+# The generic floor_symbol(::AbstractFloorSystem) is in types.jl.
 
 # =============================================================================
 # Option structs
@@ -27,18 +68,20 @@ Options for one-way slab sizing per ACI 318 Table 7.3.1.1.
 
 # Example
 ```julia
-opts = FloorOptions(one_way=OneWayOptions(support=ONE_END_CONT))
+opts = OneWayOptions(support=ONE_END_CONT)
 ```
 """
-Base.@kwdef struct OneWayOptions
+Base.@kwdef struct OneWayOptions <: AbstractFloorOptions
     material::ReinforcedConcreteMaterial = RC_4000_60
     cover::Length = 19.05u"mm"
     bar_size::Int = 5
     support::SupportCondition = BOTH_ENDS_CONT
 end
 
+floor_symbol(::OneWayOptions) = :one_way
+
 """
-    FlatPlateOptions
+    FlatPlateOptions <: AbstractFloorOptions
 
 Options for flat plate / flat slab / waffle / PT slab sizing per ACI 318 Chapter 8.
 
@@ -48,13 +91,12 @@ Options for flat plate / flat slab / waffle / PT slab sizing per ACI 318 Chapter
 - `bar_size`: Typical rebar size #3-#11 (default: 5)
 
 # Analysis Method
-- `analysis_method`: Two-way slab analysis method
-  - `:ddm` - Direct Design Method (full ACI tables)
-  - `:mddm` - Modified Direct Design Method (simplified coefficients)
-  - `:efm` - Equivalent Frame Method (default solver: ASAP)
-  - `:efm_hc` - EFM with Hardy Cross moment distribution
-  - `:efm_asap` - EFM with ASAP direct stiffness solver
-  - `:fea` - Finite Element Analysis (shell + column stubs, no geometry restrictions)
+- `method`: Typed analysis method object (default: `DDM()`)
+  - `DDM()` — Direct Design Method (full ACI tables)
+  - `DDM(:simplified)` — Modified DDM (simplified 0.65/0.35 coefficients)
+  - `EFM()` — Equivalent Frame Method (default solver: ASAP)
+  - `EFM(:moment_distribution)` — EFM with Hardy Cross
+  - `FEA()` — Finite Element Analysis (shell model, no geometry restrictions)
 
 # Edge Conditions
 - `has_edge_beam`: Spandrel beam at exterior (affects DDM moment distribution)
@@ -65,7 +107,7 @@ Options for flat plate / flat slab / waffle / PT slab sizing per ACI 318 Chapter
 - `grouping`: How to group slabs for envelope sizing
   - `:individual`, `:by_floor`, `:building_wide`
 
-# Strength Reduction (ACI 318-14 Table 21.2.1)
+# Strength Reduction (ACI 318-11 §9.3.2)
 - `φ_flexure`: Flexure (default: 0.90)
 - `φ_shear`: Shear (default: 0.75)
 - `λ`: Lightweight concrete factor override (default: `nothing` → uses `material.concrete.λ`)
@@ -73,11 +115,11 @@ Options for flat plate / flat slab / waffle / PT slab sizing per ACI 318 Chapter
 # Deflection
 - `deflection_limit`: `:L_240`, `:L_360`, `:L_480`
 
-# Punching Shear Resolution (ACI 318-19 §22.6.8)
+# Punching Shear Resolution (ACI 318-11 §11.11.5)
 - `shear_studs`: Strategy for punching shear reinforcement
-  - `:never` - Only grow columns; error if maxed (default)
-  - `:if_needed` - Try columns first, use studs if columns max out
-  - `:always` - Use studs first, grow columns only if studs insufficient
+  - `:never` — Only grow columns; error if maxed (default)
+  - `:if_needed` — Try columns first, use studs if columns max out
+  - `:always` — Use studs first, grow columns only if studs insufficient
 - `max_column_size`: Maximum column size before considering studs (default: 30")
 - `stud_material`: Shear stud steel material (default: `Stud_51`)
 - `stud_diameter`: Stud diameter (default: 1/2")
@@ -86,24 +128,29 @@ Options for flat plate / flat slab / waffle / PT slab sizing per ACI 318 Chapter
 - `objective`: Objective for `size_flat_plate_optimized` grid search
   - `MinVolume()` (default), `MinWeight()`, `MinCost()`, `MinCarbon()`
 
+# Column Cracking (FEA only)
+- `col_I_factor`: Cracking reduction for FEA column stubs (default: 0.70 per ACI 318-11 §10.10.4.1).
+  Set to 1.0 to recover gross (uncracked) column stiffness.
+
 # Example
 ```julia
-opts = FloorOptions(flat_plate=FlatPlateOptions(analysis_method=:efm))
+# Recommended: use typed method objects
+params = DesignParameters(floor = FlatPlateOptions(method = EFM(:asap)))
 
 # Enable shear studs if columns can't resolve punching
-opts = FloorOptions(flat_plate=FlatPlateOptions(shear_studs=:if_needed))
+opts = FlatPlateOptions(shear_studs = :if_needed)
 
 # Minimize embodied carbon
-opts = FloorOptions(flat_plate=FlatPlateOptions(objective=MinCarbon()))
+opts = FlatPlateOptions(objective = MinCarbon())
 ```
 """
-Base.@kwdef struct FlatPlateOptions
+Base.@kwdef struct FlatPlateOptions <: AbstractFloorOptions
     material::ReinforcedConcreteMaterial = RC_4000_60
     cover::Length = 19.05u"mm"
     bar_size::Int = 5
     has_edge_beam::Bool = false
     edge_beam_βt::Union{Float64, Nothing} = nothing  # nothing → auto-compute if has_edge_beam
-    analysis_method::Symbol = :ddm
+    method::FlatPlateAnalysisMethod = DDM()
     grouping::Symbol = :by_floor
     φ_flexure::Float64 = 0.90
     φ_shear::Float64 = 0.75
@@ -118,15 +165,50 @@ Base.@kwdef struct FlatPlateOptions
     min_h::Union{Length, Nothing} = nothing
     # Optimization objective (used by size_flat_plate_optimized)
     objective::AbstractObjective = MinVolume()
+    # Column cracking factor for FEA stub stiffness (ACI 318-11 §10.10.4.1)
+    col_I_factor::Float64 = 0.70
 end
 
+floor_symbol(::FlatPlateOptions) = :flat_plate
+
+# Backward-compat: .analysis_method returns a Symbol derived from the typed method
+function Base.getproperty(opts::FlatPlateOptions, name::Symbol)
+    if name === :analysis_method
+        m = getfield(opts, :method)
+        return _method_to_symbol(m)
+    end
+    return getfield(opts, name)
+end
+
+"""Convert a typed FlatPlateAnalysisMethod to the legacy Symbol representation."""
+function _method_to_symbol(m::FlatPlateAnalysisMethod)
+    m isa DDM && m.variant == :simplified && return :mddm
+    m isa DDM && return :ddm
+    m isa EFM && m.solver == :moment_distribution && return :efm_hc
+    m isa EFM && return :efm
+    m isa FEA && return :fea
+    return :ddm
+end
+
+"""Convert a legacy analysis_method Symbol to a typed FlatPlateAnalysisMethod."""
+function _symbol_to_method(s::Symbol)::FlatPlateAnalysisMethod
+    s == :ddm      ? DDM() :
+    s == :mddm     ? DDM(:simplified) :
+    s == :efm      ? EFM() :
+    s == :efm_hc   ? EFM(:moment_distribution) :
+    s == :efm_asap ? EFM(:asap) :
+    s == :fea      ? FEA() :
+    throw(ArgumentError("Unknown analysis_method :$s. Use :ddm, :mddm, :efm, :efm_hc, :efm_asap, or :fea."))
+end
+
+
 """
-    FlatSlabOptions
+    FlatSlabOptions <: AbstractFloorOptions
 
 Options for flat slab (with drop panels) sizing per ACI 318 Chapter 8.
 
 Flat slabs are structurally identical to flat plates except they have thickened
-drop panels around columns (ACI 318-19 §8.2.4). This provides:
+drop panels around columns (ACI 318-11 §13.2.5). This provides:
 - Increased punching shear capacity at columns
 - Reduced minimum slab thickness (ln/33 and ln/36 vs ln/30 and ln/33)
 - Non-prismatic section effects handled by ASAP elastic solver
@@ -147,20 +229,26 @@ flat plates and flat slabs, with drop panel geometry injected via the
 # Example
 ```julia
 # Auto-size drop panels (ACI minimum extent, smallest standard depth)
-opts = FloorOptions(flat_slab=FlatSlabOptions())
+opts = FlatSlabOptions()
 
 # Specify drop panel depth (4× lumber = 4.25")
-opts = FloorOptions(flat_slab=FlatSlabOptions(h_drop=4.25u"inch"))
+opts = FlatSlabOptions(h_drop = 4.25u"inch")
 
 # EFM analysis with drop panels
-opts = FloorOptions(flat_slab=FlatSlabOptions(base=FlatPlateOptions(analysis_method=:efm)))
+opts = FlatSlabOptions(base = FlatPlateOptions(method = EFM()))
+```
+
+# Convenience Constructor
+Pass flat plate keyword arguments directly — they forward to `base`:
+```julia
+flat_slab(method = EFM(:asap), shear_studs = :if_needed)
 ```
 
 # Reference
-- ACI 318-19 §8.2.4, §8.3.1.1, §22.6.4.1(b)
+- ACI 318-11 §13.2.5, Table 9.5(c), §11.11.1.2
 - StructurePoint DE-Two-Way-Flat-Slab-Concrete-Floor-with-Drop-Panels
 """
-Base.@kwdef struct FlatSlabOptions
+Base.@kwdef struct FlatSlabOptions <: AbstractFloorOptions
     # ─── Drop Panel Configuration ───
     h_drop::Union{Length, Nothing} = nothing        # nothing = auto-size
     a_drop_ratio::Union{Float64, Nothing} = nothing # nothing = ACI minimum (l/6)
@@ -169,16 +257,33 @@ Base.@kwdef struct FlatSlabOptions
     base::FlatPlateOptions = FlatPlateOptions()
 end
 
+floor_symbol(::FlatSlabOptions) = :flat_slab
+
 """Convert FlatSlabOptions to FlatPlateOptions for the shared pipeline."""
 as_flat_plate_options(opts::FlatSlabOptions) = opts.base
 
-# Property forwarding: allow opts.analysis_method instead of opts.base.analysis_method
+# Property forwarding: allow opts.method instead of opts.base.method
 function Base.getproperty(opts::FlatSlabOptions, name::Symbol)
     if name in (:h_drop, :a_drop_ratio, :base)
         return getfield(opts, name)
     else
         return getproperty(getfield(opts, :base), name)
     end
+end
+
+"""
+    flat_slab(; h_drop=nothing, a_drop_ratio=nothing, kwargs...) -> FlatSlabOptions
+
+Convenience constructor: forward flat plate kwargs through `base`.
+
+# Example
+```julia
+flat_slab(method = EFM(:asap), shear_studs = :if_needed)
+```
+"""
+function flat_slab(; h_drop = nothing, a_drop_ratio = nothing, base_kw...)
+    base = FlatPlateOptions(; base_kw...)
+    FlatSlabOptions(; h_drop, a_drop_ratio, base)
 end
 
 """
@@ -231,33 +336,33 @@ Note: Provide at most ONE of: `lambda_bounds`, `rise_bounds`, `lambda`, or `rise
 # Examples
 ```julia
 # OPTIMIZATION: Use defaults (λ ∈ (10,20), t ∈ (2",4"))
-opts = FloorOptions(vault=VaultOptions())
+opts = VaultOptions()
 
 # OPTIMIZATION: Custom lambda bounds
-opts = FloorOptions(vault=VaultOptions(lambda_bounds=(8.0, 15.0)))
+opts = VaultOptions(lambda_bounds=(8.0, 15.0))
 
 # OPTIMIZATION: Absolute rise bounds instead of lambda
-opts = FloorOptions(vault=VaultOptions(rise_bounds=(0.5u"m", 1.5u"m")))
+opts = VaultOptions(rise_bounds=(0.5u"m", 1.5u"m"))
 
 # PARTIAL: Fix lambda, optimize thickness
-opts = FloorOptions(vault=VaultOptions(lambda=12.0))
+opts = VaultOptions(lambda=12.0)
 
 # PARTIAL: Fix thickness, optimize rise (uses default lambda_bounds)
-opts = FloorOptions(vault=VaultOptions(thickness=75u"mm"))
+opts = VaultOptions(thickness=75u"mm")
 
 # ANALYTICAL: Fixed geometry → constraint evaluation
-opts = FloorOptions(vault=VaultOptions(lambda=15.0, thickness=50u"mm"))
-opts = FloorOptions(vault=VaultOptions(rise=0.5u"m", thickness=50u"mm"))
+opts = VaultOptions(lambda=15.0, thickness=50u"mm")
+opts = VaultOptions(rise=0.5u"m", thickness=50u"mm")
 
 # Minimize carbon with custom material
-opts = FloorOptions(vault=VaultOptions(
+opts = VaultOptions(
     lambda_bounds = (10.0, 15.0),
     objective = MinCarbon(),
     material = NWC_GGBS
-))
+)
 ```
 """
-Base.@kwdef struct VaultOptions
+Base.@kwdef struct VaultOptions <: AbstractFloorOptions
     # ─── Rise Bounds (optimization mode) ───
     # Provide ONE of: lambda_bounds, rise_bounds, lambda, or rise
     # If none provided, defaults to lambda_bounds = (10, 20)
@@ -298,106 +403,53 @@ Base.@kwdef struct VaultOptions
     material::Concrete = NWC_4000                # concrete for density, E, fc'
 end
 
+floor_symbol(::VaultOptions) = :vault
+
 """Composite deck options (steel deck + concrete fill)."""
-Base.@kwdef struct CompositeDeckOptions
+Base.@kwdef struct CompositeDeckOptions <: AbstractFloorOptions
     deck_material::Metal = A992_Steel
     fill_material::Union{Concrete, Nothing} = nothing  # Uses primary if nothing
     deck_profile::String = "2VLI"
 end
 
+floor_symbol(::CompositeDeckOptions) = :composite_deck
+
 """Timber panel options (CLT, DLT, NLT)."""
-Base.@kwdef struct TimberOptions
+Base.@kwdef struct TimberOptions <: AbstractFloorOptions
     timber_material::Union{AbstractMaterial, Nothing} = nothing  # Uses primary if nothing
 end
 
-"""
-    FloorOptions(; floor_type, flat_plate, one_way, vault, composite, timber, tributary_axis)
-
-Unified options container for floor sizing and analysis.
-
-`floor_type` selects which floor system to design.  The corresponding
-sub-options struct carries the design parameters for that system; the
-others are ignored at runtime but kept with defaults for convenience.
-
-## Supported `floor_type` values
-- `:flat_plate` (default), `:flat_slab`, `:waffle`, `:pt_banded`
-- `:one_way`, `:two_way`
-- `:vault`
-- `:composite_deck`, `:hollow_core`
-- `:clt`, `:dlt`, `:nlt`, `:mass_timber_joist`
-
-## Examples
-
-```julia
-# Flat plate with EFM analysis (default floor_type)
-opts = FloorOptions(flat_plate=FlatPlateOptions(analysis_method=:efm))
-
-# One-way slab
-opts = FloorOptions(floor_type=:one_way, one_way=OneWayOptions(support=ONE_END_CONT))
-
-# Vault
-opts = FloorOptions(floor_type=:vault, vault=VaultOptions(lambda=8.0))
-```
-"""
-Base.@kwdef struct FloorOptions
-    floor_type::Symbol = :flat_plate
-    flat_plate::FlatPlateOptions = FlatPlateOptions()
-    flat_slab::FlatSlabOptions = FlatSlabOptions()
-    one_way::OneWayOptions = OneWayOptions()
-    vault::VaultOptions = VaultOptions()
-    composite::CompositeDeckOptions = CompositeDeckOptions()
-    timber::TimberOptions = TimberOptions()
-    tributary_axis::Union{Nothing, Symbol, NTuple{2, Float64}} = nothing
-end
+floor_symbol(::TimberOptions) = :clt  # default timber type
 
 # =============================================================================
 # Tributary Axis Resolution
 # =============================================================================
 
 """
-    resolve_tributary_axis(ft, spans, opts) -> Union{NTuple{2,Float64}, Nothing}
+    resolve_tributary_axis(ft, spans, tax) -> Union{NTuple{2,Float64}, Nothing}
 
-Resolve the tributary axis for a floor type, respecting user override in FloorOptions.
+Resolve the tributary axis for a floor type, respecting a user override.
+
+## Arguments
+- `ft`: Floor system type (e.g., `OneWay()`, `FlatPlate()`)
+- `spans`: `SpanInfo` for the cell
+- `tax`: Override value — `nothing` (use default), `:isotropic` (force 2-way),
+  or `(x, y)` tuple (force direction)
 
 ## Returns
 - `nothing`: Use isotropic straight skeleton (two-way tributary areas)
-- `(x, y)` tuple: Use directed partitioning along this axis (one-way tributary areas)
-
-## Resolution Priority
-1. `opts.tributary_axis === :isotropic` → `nothing` (force isotropic)
-2. `opts.tributary_axis isa NTuple{2,Float64}` → use that custom axis
-3. Otherwise → `default_tributary_axis(ft, spans)` (floor type default)
+- `(x, y)` tuple: Use directed partitioning along this axis
 
 ## Examples
-
 ```julia
-ft = OneWay()
-spans = SpanInfo(verts)  # e.g., axis = (1.0, 0.0)
-
-# Default: one-way uses span axis
-resolve_tributary_axis(ft, spans, FloorOptions())  # → (1.0, 0.0)
-
-# Override to isotropic
-resolve_tributary_axis(ft, spans, FloorOptions(tributary_axis=:isotropic))  # → nothing
-
-# Override to custom 45° axis
-resolve_tributary_axis(ft, spans, FloorOptions(tributary_axis=(0.707, 0.707)))  # → (0.707, 0.707)
+resolve_tributary_axis(OneWay(), spans, nothing)            # → default axis
+resolve_tributary_axis(FlatPlate(), spans, :isotropic)      # → nothing
+resolve_tributary_axis(FlatPlate(), spans, (0.707, 0.707))  # → (0.707, 0.707)
 ```
 """
-function resolve_tributary_axis(ft::AbstractFloorSystem, spans, opts::FloorOptions)
-    tax = opts.tributary_axis
-    
-    # Explicit override: force isotropic
-    if tax === :isotropic
-        return nothing
-    end
-    
-    # Explicit override: custom axis (accept any Real tuple, convert to Float64)
-    if tax isa NTuple{2, <:Real}
-        return (Float64(tax[1]), Float64(tax[2]))
-    end
-    
-    # Use floor type default
+function resolve_tributary_axis(ft::AbstractFloorSystem, spans, tax)
+    tax === :isotropic && return nothing
+    tax isa NTuple{2, <:Real} && return (Float64(tax[1]), Float64(tax[2]))
     return default_tributary_axis(ft, spans)
 end
 
@@ -406,112 +458,70 @@ end
 # =============================================================================
 
 """
-    result_materials(result, primary_mat, opts, floor_type) -> Dict{Symbol, AbstractMaterial}
+    result_materials(result, primary_mat, opts::AbstractFloorOptions) -> Dict{Symbol, AbstractMaterial}
 
-Get material dict for a floor result, mapping material symbols to actual material objects.
-Uses type-specific options for secondary materials, falling back to primary for unspecified.
-
-The `floor_type` argument is needed for `CIPSlabResult` since it's shared by both 
-one-way slabs (which use `OneWayOptions`) and flat plates (which use `FlatPlateOptions`).
+Get material dict for a floor result, mapping material symbols to actual
+material objects.  The `opts` type carries the floor system identity, so no
+separate `floor_type` argument is needed.
 
 ## Example
 ```julia
 result = CIPSlabResult(...)
-mats = result_materials(result, NWC_4000, FloorOptions(), FlatPlate())
+mats = result_materials(result, NWC_4000, FlatPlateOptions())
 # → Dict(:concrete => NWC_4000, :steel => Rebar_60)
 ```
 """
 function result_materials end
 
-# CIP slabs: dispatch on floor type to get correct options
-function result_materials(::CIPSlabResult, primary_mat, opts::FloorOptions, ::OneWay)
+# ─── RC floor results dispatch on options type ───
+
+# FlatPlateOptions covers flat_plate, two_way, waffle, pt_banded
+function result_materials(::CIPSlabResult, primary_mat, opts::FlatPlateOptions)
+    Dict{Symbol, AbstractMaterial}(:concrete => opts.material.concrete, :steel => opts.material.rebar)
+end
+
+function result_materials(::FlatPlatePanelResult, primary_mat, opts::FlatPlateOptions)
+    Dict{Symbol, AbstractMaterial}(:concrete => opts.material.concrete, :steel => opts.material.rebar)
+end
+
+# FlatSlabOptions delegates to base FlatPlateOptions
+result_materials(r::CIPSlabResult, pm, opts::FlatSlabOptions) = result_materials(r, pm, opts.base)
+result_materials(r::FlatPlatePanelResult, pm, opts::FlatSlabOptions) = result_materials(r, pm, opts.base)
+
+# OneWayOptions
+function result_materials(::CIPSlabResult, primary_mat, opts::OneWayOptions)
+    Dict{Symbol, AbstractMaterial}(:concrete => opts.material.concrete, :steel => opts.material.rebar)
+end
+
+# VaultOptions
+result_materials(::VaultResult, primary_mat, opts::VaultOptions) =
+    Dict{Symbol, AbstractMaterial}(:concrete => opts.material)
+
+# CompositeDeckOptions
+function result_materials(::CompositeDeckResult, primary_mat, opts::CompositeDeckOptions)
     Dict{Symbol, AbstractMaterial}(
-        :concrete => opts.one_way.material.concrete,
-        :steel => opts.one_way.material.rebar
+        :steel => opts.deck_material,
+        :concrete => something(opts.fill_material, primary_mat)
     )
 end
 
-function result_materials(::CIPSlabResult, primary_mat, opts::FloorOptions, ::FlatPlate)
-    Dict{Symbol, AbstractMaterial}(
-        :concrete => opts.flat_plate.material.concrete,
-        :steel => opts.flat_plate.material.rebar
-    )
-end
+result_materials(::JoistDeckResult, primary_mat, opts::CompositeDeckOptions) =
+    Dict{Symbol, AbstractMaterial}(:steel => opts.deck_material)
 
-function result_materials(::CIPSlabResult, primary_mat, opts::FloorOptions, ::FlatSlab)
-    Dict{Symbol, AbstractMaterial}(
-        :concrete => opts.flat_plate.material.concrete,
-        :steel => opts.flat_plate.material.rebar
-    )
-end
+# TimberOptions
+result_materials(::TimberPanelResult, primary_mat, opts::TimberOptions) =
+    Dict{Symbol, AbstractMaterial}(:timber => something(opts.timber_material, primary_mat))
 
-function result_materials(::CIPSlabResult, primary_mat, opts::FloorOptions, ::TwoWay)
-    Dict{Symbol, AbstractMaterial}(
-        :concrete => opts.flat_plate.material.concrete,
-        :steel => opts.flat_plate.material.rebar
-    )
-end
+result_materials(::TimberJoistResult, primary_mat, opts::TimberOptions) =
+    Dict{Symbol, AbstractMaterial}(:timber => something(opts.timber_material, primary_mat))
 
-function result_materials(::CIPSlabResult, primary_mat, opts::FloorOptions, ::Waffle)
-    Dict{Symbol, AbstractMaterial}(
-        :concrete => opts.flat_plate.material.concrete,
-        :steel => opts.flat_plate.material.rebar
-    )
-end
+# Simple fallbacks (ProfileResult, ShapedSlabResult, etc.)
+result_materials(::ProfileResult, primary_mat, ::AbstractFloorOptions) =
+    Dict{Symbol, AbstractMaterial}(:concrete => primary_mat)
 
-function result_materials(::CIPSlabResult, primary_mat, opts::FloorOptions, ::PTBanded)
-    Dict{Symbol, AbstractMaterial}(
-        :concrete => opts.flat_plate.material.concrete,
-        :steel => opts.flat_plate.material.rebar
-    )
-end
+result_materials(::ShapedSlabResult, primary_mat, ::AbstractFloorOptions) =
+    Dict{Symbol, AbstractMaterial}(:concrete => primary_mat)
 
-# Fallback for CIP without floor type (defaults to flat_plate for backwards compat)
-function result_materials(r::CIPSlabResult, primary_mat, opts::FloorOptions)
-    result_materials(r, primary_mat, opts, FlatPlate())
-end
-
-# FlatPlatePanelResult - uses flat_plate material settings (includes rebar for EC)
-function result_materials(::FlatPlatePanelResult, primary_mat, opts::FloorOptions, ::FlatPlate)
-    Dict{Symbol, AbstractMaterial}(
-        :concrete => opts.flat_plate.material.concrete,
-        :steel => opts.flat_plate.material.rebar
-    )
-end
-
-# Fallback for FlatPlatePanelResult without floor type
-function result_materials(r::FlatPlatePanelResult, primary_mat, opts::FloorOptions)
-    result_materials(r, primary_mat, opts, FlatPlate())
-end
-
-# Generic fallback: strip floor_type arg and delegate to 3-arg method
-result_materials(r::AbstractFloorResult, pm, opts::FloorOptions, ::AbstractFloorSystem) = result_materials(r, pm, opts)
-
-# FlatPlatePanelResult always uses flat_plate options regardless of floor_type arg
-result_materials(r::FlatPlatePanelResult, pm, opts::FloorOptions, ::AbstractFloorSystem) = 
-    result_materials(r, pm, opts, FlatPlate())
-
-# --- 3-arg methods (result, primary_mat, opts) ---
-
-result_materials(::ProfileResult, primary_mat, opts::FloorOptions) = Dict{Symbol, AbstractMaterial}(:concrete => primary_mat)
-
-function result_materials(::CompositeDeckResult, primary_mat, opts::FloorOptions)
-    Dict{Symbol, AbstractMaterial}(
-        :steel => opts.composite.deck_material,
-        :concrete => something(opts.composite.fill_material, primary_mat)
-    )
-end
-
-result_materials(::JoistDeckResult, primary_mat, opts::FloorOptions) = Dict{Symbol, AbstractMaterial}(:steel => opts.composite.deck_material)
-
-function result_materials(::TimberPanelResult, primary_mat, opts::FloorOptions)
-    Dict{Symbol, AbstractMaterial}(:timber => something(opts.timber.timber_material, primary_mat))
-end
-
-function result_materials(::TimberJoistResult, primary_mat, opts::FloorOptions)
-    Dict{Symbol, AbstractMaterial}(:timber => something(opts.timber.timber_material, primary_mat))
-end
-
-result_materials(::VaultResult, primary_mat, opts::FloorOptions) = Dict{Symbol, AbstractMaterial}(:concrete => opts.vault.material)
-
-result_materials(::ShapedSlabResult, primary_mat, opts::FloorOptions) = Dict{Symbol, AbstractMaterial}(:concrete => primary_mat)
+# Generic fallback for any result × any options
+result_materials(::AbstractFloorResult, primary_mat, ::AbstractFloorOptions) =
+    Dict{Symbol, AbstractMaterial}(:concrete => primary_mat)

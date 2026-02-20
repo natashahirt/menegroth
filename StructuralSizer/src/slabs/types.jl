@@ -168,6 +168,169 @@ and non-standard geometries.
 struct ShellFEA <: VaultAnalysisMethod end
 
 # =============================================================================
+# Flat Plate Analysis Methods
+# =============================================================================
+#
+# Defined here (slab-level types) so that options.jl can reference them
+# before codes/ is included.  Concrete subtypes live alongside the abstract
+# type for locality.
+#
+# Reference: ACI 318-11 §13.6 (DDM), §13.7 (EFM)
+# =============================================================================
+
+"""
+    FlatPlateAnalysisMethod
+
+Abstract type for flat plate moment analysis methods.
+
+Subtypes:
+- `DDM`: Direct Design Method (ACI 318 coefficient-based)
+- `EFM`: Equivalent Frame Method (stiffness-based frame analysis)
+- `FEA`: Finite Element Analysis (shell model)
+"""
+abstract type FlatPlateAnalysisMethod end
+
+"""
+    DDM(variant::Symbol = :full)
+
+Direct Design Method - ACI 318 coefficient-based moment distribution.
+
+# Variants
+- `:full` - Full ACI 318 Table 8.10.4.2 coefficients with l₂/l₁ interpolation
+- `:simplified` - Modified DDM (0.65/0.35 simplified coefficients)
+
+# Reference
+- ACI 318-11 §13.6
+"""
+struct DDM <: FlatPlateAnalysisMethod
+    variant::Symbol
+    
+    function DDM(variant::Symbol = :full)
+        variant in (:full, :simplified) || error("DDM variant must be :full or :simplified")
+        new(variant)
+    end
+end
+
+"""
+    EFM(solver::Symbol = :asap)
+
+Equivalent Frame Method - stiffness-based frame analysis.
+
+# Solvers
+- `:asap` - Use ASAP structural analysis package (default)
+- `:moment_distribution` - Hardy Cross moment distribution [future]
+
+# Options
+- `pattern_loading::Bool`: Enable ACI 318-11 §13.7.6 pattern loading (default: `true`).
+  Set to `false` for direct comparison with DDM which uses fixed coefficients.
+
+# Reference
+- ACI 318-11 §13.7
+"""
+struct EFM <: FlatPlateAnalysisMethod
+    solver::Symbol
+    pattern_loading::Bool
+    
+    function EFM(solver::Symbol = :asap; pattern_loading::Bool = true)
+        solver in (:asap, :moment_distribution) || error("EFM solver must be :asap or :moment_distribution")
+        new(solver, pattern_loading)
+    end
+end
+
+"""
+    EFM_Kc(solver=:asap; pattern_loading=true)
+
+Equivalent Frame Method with raw column stiffness (no torsional reduction).
+
+This variant uses the column flexural stiffness `Kc` directly instead of the
+ACI-reduced equivalent column stiffness `Kec = Kc×Kt/(Kc+Kt)`. This provides
+a comparison point between standard EFM (with torsional flexibility) and FEA
+(which models full 3D stiffness).
+
+# Solvers
+- `:asap` - Use ASAP structural analysis package (default)
+- `:moment_distribution` - Hardy Cross moment distribution
+
+# Options
+- `pattern_loading::Bool`: Enable ACI 318-11 §13.7.6 pattern loading (default: `true`).
+
+# Comparison
+| Method   | Column Stiffness              | Moment Distribution |
+|----------|-------------------------------|---------------------|
+| DDM      | N/A (fixed coefficients)      | Fixed 0.65/0.35     |
+| EFM      | Kec = Kc×Kt/(Kc+Kt)          | Stiffness-based     |
+| EFM_Kc   | Kc (no torsional reduction)   | Stiffness-based     |
+| FEA      | Full 3D stiffness             | Finite element      |
+
+# Reference
+- ACI 318-11 §13.7 (modified)
+"""
+struct EFM_Kc <: FlatPlateAnalysisMethod
+    solver::Symbol
+    pattern_loading::Bool
+    
+    function EFM_Kc(solver::Symbol = :asap; pattern_loading::Bool = true)
+        solver in (:asap, :moment_distribution) || error("EFM_Kc solver must be :asap or :moment_distribution")
+        new(solver, pattern_loading)
+    end
+end
+
+"""
+    FEA(; target_edge=nothing, pattern_loading=true)
+
+Finite Element Analysis — 2D shell model with column stubs.
+
+No geometric restrictions — works for any slab shape or column layout.
+
+# Options
+- `target_edge::Length`: Target mesh edge length (default: adaptive from span).
+- `pattern_loading::Bool`: Enable ACI 318-11 §13.7.6 pattern loading amplification (default: `true`).
+  FEA uses EFM-derived amplification factors (always ≥ 1.0, conservative).
+  Set to `false` for direct comparison with DDM which uses fixed coefficients.
+
+# Reference
+- ACI 318-11 §13.2.1
+"""
+struct FEA <: FlatPlateAnalysisMethod
+    target_edge::Union{Nothing, typeof(1.0u"m")}
+    pattern_loading::Bool
+
+    function FEA(; target_edge::Union{Nothing, Unitful.Length} = nothing, pattern_loading::Bool = true)
+        if target_edge !== nothing
+            ustrip(u"m", target_edge) > 0 || error("FEA target_edge must be > 0")
+            new(uconvert(u"m", target_edge), pattern_loading)
+        else
+            new(nothing, pattern_loading)
+        end
+    end
+end
+
+"""
+    RuleOfThumb <: FlatPlateAnalysisMethod
+
+Rule-of-thumb slab sizing: use ACI `min_thickness`, run one pass of all
+design checks, and report results even when checks fail.
+
+Wraps an underlying analysis method (default: simplified DDM) for moment
+analysis.  The slab thickness is NOT iterated — it is fixed at the ACI
+minimum, and each check result (punching, deflection, shear, flexure) is
+recorded regardless of pass/fail.
+
+# Fields
+- `analysis`: Underlying moment analysis method (default `DDM(:simplified)`)
+
+# Example
+```julia
+RuleOfThumb()                      # uses DDM(:simplified) internally
+RuleOfThumb(FEA())                 # uses FEA for moments
+```
+"""
+struct RuleOfThumb <: FlatPlateAnalysisMethod
+    analysis::FlatPlateAnalysisMethod
+end
+RuleOfThumb() = RuleOfThumb(DDM(:simplified))
+
+# =============================================================================
 # Result Types (parametric for unit flexibility)
 # =============================================================================
 
@@ -306,7 +469,7 @@ ShapedSlabResult(vol::L, sw::F) where {L, F} = ShapedSlabResult{L, F}(vol, sw, n
 """
     ShearStudDesign
 
-Per-column shear stud design per ACI 318-19 §22.6.8 / Ancon Shearfix.
+Per-column shear stud design per ACI 318-11 §11.11.5 / Ancon Shearfix.
 
 # Fields
 - `required`: Whether studs are needed for this column
@@ -323,8 +486,8 @@ Per-column shear stud design per ACI 318-19 §22.6.8 / Ancon Shearfix.
 - `outer_ok`: Whether outer critical section passes
 
 # Reference
-- ACI 318-19 Section 22.6.8
-- Ancon Shearfix Design Manual to ACI 318-19
+- ACI 318-11 §11.11.5
+- Ancon Shearfix Design Manual (adapted to ACI 318-11)
 """
 Base.@kwdef struct ShearStudDesign{L<:Asap.Length, A<:Asap.Area, P<:Asap.Pressure}
     required::Bool = false
@@ -361,7 +524,7 @@ Per-column punching shear check result with optional stud design.
 - `studs`: Shear stud design (nothing if no studs needed/used)
 
 # Reference
-- ACI 318-19 Section 22.6
+- ACI 318-11 §11.11
 - Ancon Shearfix Design Manual
 """
 Base.@kwdef struct PunchingCheckResult{L<:Asap.Length, P<:Asap.Pressure, F<:Asap.Force, M<:Asap.Moment}
@@ -378,6 +541,9 @@ end
 
 """
 Strip reinforcement design result (flat plate/slab design).
+
+When `section_adequate = false`, the section is too thin for the moment demand
+(Whitney block solution is imaginary). The iteration loop should increase h.
 """
 struct StripReinforcement{L<:Asap.Length, A<:Asap.Area, M<:Asap.Moment}
     location::Symbol          # :ext_neg, :pos, :int_neg
@@ -388,6 +554,7 @@ struct StripReinforcement{L<:Asap.Length, A<:Asap.Area, M<:Asap.Moment}
     bar_size::Int             # Bar designation (#4, #5, etc.)
     spacing::L                # Bar spacing
     n_bars::Int               # Number of bars
+    section_adequate::Bool    # false if section too thin (As_reqd = Inf)
 end
 
 """
@@ -431,22 +598,29 @@ struct FlatPlatePanelResult{L<:Asap.Length, F<:Asap.Pressure, M<:Asap.Moment} <:
     self_weight::F            # Self-weight pressure
     
     # Loads
-    qu::F                     # Factored uniform load (1.2D + 1.6L)
+    qu::F                     # Factored uniform load: max(1.2D+1.6L, 1.4D)
     
     # Geometry
     l1::L                     # Span in direction 1
     l2::L                     # Span in direction 2
     
     # Analysis
-    M0::M                     # Total static moment
+    M0::M                     # Total static moment (primary direction)
     
-    # Column strip design
+    # Primary direction reinforcement
     column_strip_width::L
     column_strip_reinf::Vector{<:StripReinforcement}
     
     # Middle strip design  
     middle_strip_width::L
     middle_strip_reinf::Vector{<:StripReinforcement}
+    
+    # Secondary (perpendicular) direction reinforcement
+    # These are populated when secondary moment analysis is performed.
+    secondary_column_strip_width::L
+    secondary_column_strip_reinf::Vector{<:StripReinforcement}
+    secondary_middle_strip_width::L
+    secondary_middle_strip_reinf::Vector{<:StripReinforcement}
     
     # Checks
     punching_check::NamedTuple
@@ -461,7 +635,11 @@ function FlatPlatePanelResult(
     cs_width::Asap.Length, cs_reinf::Vector{<:StripReinforcement},
     ms_width::Asap.Length, ms_reinf::Vector{<:StripReinforcement},
     punching::NamedTuple, deflection::NamedTuple;
-    γ_concrete = NWC_4000.ρ * GRAVITY
+    γ_concrete = NWC_4000.ρ * GRAVITY,
+    sec_cs_width::Asap.Length = 0.0u"m",
+    sec_cs_reinf::Vector{<:StripReinforcement} = StripReinforcement[],
+    sec_ms_width::Asap.Length = 0.0u"m",
+    sec_ms_reinf::Vector{<:StripReinforcement} = StripReinforcement[],
 ) where {M<:Asap.Moment}
     L = typeof(1.0u"m")
     
@@ -473,6 +651,9 @@ function FlatPlatePanelResult(
     M0_si        = uconvert(u"kN*m", M0)
     qu_si        = uconvert(u"kPa", qu)
 
+    sec_cs_w_m = uconvert(u"m", sec_cs_width)
+    sec_ms_w_m = uconvert(u"m", sec_ms_width)
+
     sw = uconvert(u"kPa", γ_concrete * h)
     vol_per_area = thickness_m
     
@@ -481,6 +662,8 @@ function FlatPlatePanelResult(
         l1_m, l2_m, M0_si,
         cs_width_m, cs_reinf,
         ms_width_m, ms_reinf,
+        sec_cs_w_m, sec_cs_reinf,
+        sec_ms_w_m, sec_ms_reinf,
         punching, deflection
     )
 end
@@ -572,10 +755,13 @@ _volume_impl(r::FlatPlatePanelResult, ::Val{:steel}) = _calc_rebar_volume_per_ar
 
 Calculate reinforcing steel volume per plan area for EC calculations.
 
-Approximates total rebar volume by:
-1. Summing As_provided from all strip reinforcement
-2. Estimating bar length based on span geometry
-3. Accounting for both directions and top/bottom layers
+Sums As_provided from all strip reinforcement in both directions:
+- Primary direction: bars run parallel to l1, with width = strip_width
+- Secondary direction: bars run parallel to l2, with width = strip_width
+
+When secondary reinforcement is available (from dual-direction moment analysis),
+uses the actual designed reinforcement.  Falls back to the conservative 2× estimate
+for legacy results that only have primary reinforcement.
 
 # Returns
 Volume per plan area [m³/m² = m], same units as concrete volume_per_area.
@@ -585,35 +771,37 @@ function _calc_rebar_volume_per_area(r::FlatPlatePanelResult)
     l2 = r.l2
     panel_area = l1 * l2
     
-    # Sum all reinforcement from column and middle strips
     total_steel_volume = 0.0u"m^3"
     
-    # Column strip reinforcement (runs parallel to l1)
+    # ─── Primary direction: bars run parallel to l1 ───
     for reinf in r.column_strip_reinf
         As = uconvert(u"m^2", reinf.As_provided)
-        # Bars span full l1 length, width is column_strip_width
-        # Multiply by strip width since As is per unit width
-        bar_length = l1
-        strip_width = r.column_strip_width
-        total_steel_volume += As * bar_length * strip_width / (1.0u"m")
+        total_steel_volume += As * l1 * r.column_strip_width / (1.0u"m")
     end
-    
-    # Middle strip reinforcement (runs parallel to l1)
     for reinf in r.middle_strip_reinf
         As = uconvert(u"m^2", reinf.As_provided)
-        bar_length = l1
-        strip_width = r.middle_strip_width
-        total_steel_volume += As * bar_length * strip_width / (1.0u"m")
+        total_steel_volume += As * l1 * r.middle_strip_width / (1.0u"m")
     end
     
-    # Assume similar reinforcement in perpendicular direction (conservative)
-    # Real design would have direction-specific reinforcement
-    total_steel_volume *= 2.0
+    # ─── Secondary direction: bars run parallel to l2 ───
+    has_secondary = !isempty(r.secondary_column_strip_reinf)
+    if has_secondary
+        for reinf in r.secondary_column_strip_reinf
+            As = uconvert(u"m^2", reinf.As_provided)
+            total_steel_volume += As * l2 * r.secondary_column_strip_width / (1.0u"m")
+        end
+        for reinf in r.secondary_middle_strip_reinf
+            As = uconvert(u"m^2", reinf.As_provided)
+            total_steel_volume += As * l2 * r.secondary_middle_strip_width / (1.0u"m")
+        end
+    else
+        # Fallback: assume similar reinforcement in perpendicular direction
+        total_steel_volume *= 2.0
+    end
     
     # Add ~10% for lap splices, hooks, and integrity reinforcement
     total_steel_volume *= 1.10
     
-    # Return volume per plan area (same units as concrete)
     return uconvert(u"m", total_steel_volume / panel_area)
 end
 

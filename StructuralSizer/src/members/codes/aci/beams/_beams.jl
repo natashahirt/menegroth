@@ -9,7 +9,7 @@ include("flexure.jl")
 include("shear.jl")
 include("serviceability.jl")
 
-# Torsion design (ACI 318-19 §22.7 — threshold, adequacy, reinforcement)
+# Torsion design (ACI 318-11 §11.5 — threshold, adequacy, reinforcement)
 include("torsion.jl")
 
 # T-beam flexural design (effective flange width, T-beam decomposition)

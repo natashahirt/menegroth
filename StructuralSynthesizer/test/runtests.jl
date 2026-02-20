@@ -13,6 +13,7 @@ using Asap  # ensures `u"kip"`, `u"ksi"`, etc resolve via Asap unit module
         include("core/test_core_structs.jl")
         include("core/test_design_architecture.jl")
         include("core/test_member_hierarchy.jl")
+        include("core/test_design_api.jl")
     end
 
     # ─── Geometry & Utilities ────────────────────────────────────────────
@@ -24,6 +25,7 @@ using Asap  # ensures `u"kip"`, `u"ksi"`, etc resolve via Asap unit module
     # ─── Analysis ────────────────────────────────────────────────────────
     @testset "Analysis" begin
         include("analyze/test_drape.jl")
+        include("analyze/test_pattern_loading.jl")
     end
 
     # ─── Visualization ───────────────────────────────────────────────────

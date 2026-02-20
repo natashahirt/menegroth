@@ -2,25 +2,25 @@
 # ACI 318 T-Beam Flexural Design
 # ==============================================================================
 #
-# T-beam specific flexural design per ACI 318-19.
+# T-beam specific flexural design per ACI 318-11.
 # Uses shared Whitney stress block from codes/aci/whitney.jl.
 #
 # Key ACI sections:
-#   6.3.2.1  - Effective flange width
-#   22.2     - Whitney stress block (T-beam decomposition)
-#   9.6.1.2  - Minimum flexural reinforcement (uses bw)
+#   8.12.2   - Effective flange width (ACI 318-11 §8.12.2)
+#   10.2.7   - Whitney stress block (T-beam decomposition)
+#   10.5.1   - Minimum flexural reinforcement (uses bw)
 # ==============================================================================
 
 using Unitful
 
 # ==============================================================================
-# Effective Flange Width (ACI 318-19 Table 6.3.2.1)
+# Effective Flange Width (ACI 318-11 §8.12.2)
 # ==============================================================================
 
 """
     effective_flange_width(; bw, hf, sw, ln, position=:interior) -> Length
 
-Effective flange width for a T-beam per ACI 318-19 Table 6.3.2.1.
+Effective flange width for a T-beam per ACI 318-11 §8.12.2.
 
 # Arguments
 - `bw`: Web width
@@ -96,8 +96,8 @@ Named tuple with:
 - `bars`: Bar selection (placed in web width bw)
 
 # Reference
-- ACI 318-19 §22.2.2 (Whitney stress block)
-- ACI 318-19 Table 6.3.2.1 (effective flange width)
+- ACI 318-11 §10.2.7 (Whitney stress block)
+- ACI 318-11 §8.12.2 (effective flange width)
 """
 function design_tbeam_flexure(Mu::Moment, bw::Length, d::Length,
                                bf::Length, hf::Length,
@@ -110,9 +110,12 @@ function design_tbeam_flexure(Mu::Moment, bw::Length, d::Length,
 
     # Try as rectangular beam with full flange width
     As_trial = required_reinforcement(Mu, bf, d, fc, fy)
+    if isinf(As_trial)
+        error("T-beam section inadequate: moment demand exceeds capacity. Increase d or f'c.")
+    end
     a_trial = stress_block_depth(As_trial, fc, fy, bf)
 
-    # Minimum reinforcement uses bw (ACI 318-19 §9.6.1.2)
+    # Minimum reinforcement uses bw (ACI 318-11 §10.5.1)
     As_min = beam_min_reinforcement(bw, d, fc, fy)
 
     if a_trial ≤ hf
@@ -341,7 +344,7 @@ end
 
 Effective flange width from adjacent-cell tributary polygons.
 
-Generalizes ACI 318-19 §6.3.2.1 to irregular cell geometries by using the
+Generalizes ACI 318-11 §8.12.2 to irregular cell geometries by using the
 **moment-weighted average perpendicular extent** of each side's tributary
 polygon as the available slab overhang, then applying ACI caps.
 

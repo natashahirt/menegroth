@@ -79,16 +79,16 @@ using StructuralSizer
         # Longer clear span governs
         
         # Interior panel: h_min = 16.67 × 12 / 33 = 6.06" (StructurePoint uses 7")
-        h_min_int = min_thickness_flat_plate(ln_NS; discontinuous_edge=false)
+        h_min_int = min_thickness(FlatPlate(), ln_NS; discontinuous_edge=false)
         @test ustrip(u"inch", h_min_int) ≈ 6.06 rtol=0.02
         
         # Exterior panel: h_min = 16.67 × 12 / 30 = 6.67"
-        h_min_ext = min_thickness_flat_plate(ln_NS; discontinuous_edge=true)
+        h_min_ext = min_thickness(FlatPlate(), ln_NS; discontinuous_edge=true)
         @test ustrip(u"inch", h_min_ext) ≈ 6.67 rtol=0.02
         
         # Absolute minimum = 5"
         short_span = 10u"ft"
-        h_min_short = min_thickness_flat_plate(short_span)
+        h_min_short = min_thickness(FlatPlate(), short_span)
         @test ustrip(u"inch", h_min_short) >= 5.0
         
         # StructurePoint uses h = 7" (satisfies both interior and exterior)

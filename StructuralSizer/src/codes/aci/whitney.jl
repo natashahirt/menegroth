@@ -24,10 +24,11 @@ where Rn = Mu / (φ·b·d²)
 - `fy`: Steel yield strength
 
 # Returns
-Required steel area As (with units)
+Required steel area As (with units). Returns `Inf * u"m^2"` if the section is
+inadequate (demand exceeds capacity) — caller should increase depth.
 
 # Reference
-- ACI 318-19 §22.2 (Whitney rectangular stress block)
+- ACI 318-11 §10.2.7 (Whitney rectangular stress block)
 - Supplementary Document Section 1.7 (Setareh & Darvas derivation)
 """
 function required_reinforcement(Mu::Moment, b::Length, d::Length, fc::Pressure, fy::Pressure)
@@ -39,16 +40,22 @@ function required_reinforcement(Mu::Moment, b::Length, d::Length, fc::Pressure, 
     # Stress block factor
     β = beta1(fc)
 
-    # Check if section is adequate (ACI limits)
-    Rn_max = 0.319 * β * fc  # Approximate limit for tension-controlled
-    if Rn > Rn_max
-        @warn "Section may not be tension-controlled, Rn=$(ustrip(u"psi", Rn)) psi > Rn_max=$(ustrip(u"psi", Rn_max)) psi"
-    end
-
     # Required steel ratio (from quadratic solution)
     term = 2 * Rn / (β * fc)  # dimensionless
     if term > 1.0
-        error("Section inadequate: required Rn exceeds capacity. Increase h or f'c.")
+        # Section inadequate: demand exceeds capacity. Return sentinel.
+        return Inf * u"m^2"
+    end
+
+    # Check if section is tension-controlled (ACI limits)
+    # Rn_max corresponds to the tension-controlled strain limit εt = 0.005
+    Rn_max = 0.319 * β * fc
+    if Rn > Rn_max
+        ratio = ustrip(Rn / Rn_max)
+        @warn "Section not tension-controlled (Rn/Rn_max=$(round(ratio, digits=2))). " *
+              "φ=0.9 is unconservative; section needs more depth or the pipeline " *
+              "should have caught this. Rn=$(round(ustrip(u"psi", Rn), digits=1)) psi, " *
+              "Rn_max=$(round(ustrip(u"psi", Rn_max), digits=1)) psi"
     end
 
     ρ = (β * fc / fy) * (1 - sqrt(1 - term))  # dimensionless

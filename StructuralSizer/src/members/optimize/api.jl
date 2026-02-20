@@ -238,7 +238,7 @@ to_rc_demands(demands::Vector{<:RCColumnDemand}; βdns=nothing) = demands
 
 Size reinforced concrete beams using discrete catalog optimization.
 Selects the lightest (or minimum-objective) RCBeamSection that satisfies
-ACI 318-19 flexure and shear requirements.
+ACI 318-11 flexure and shear requirements.
 
 # Arguments
 - `Mu`: Vector of factored moments — any moment unit (N·m, kN·m, kip·ft, etc.)
@@ -251,7 +251,7 @@ ACI 318-19 flexure and shear requirements.
   the shear checker increases Vc per ACI §22.5.6.1.
 - `Tu`: Vector of factored torsional moments (default: zeros, kip·in or Unitful).
   When > threshold torsion, the MIP checker checks cross-section adequacy
-  per ACI 318-19 §22.7.7.1.
+  per ACI 318-11 §11.5.3.1.
 - `mip_gap`: MIP optimality gap (default 1e-4)
 - `output_flag`: Solver verbosity (default 0)
 
@@ -602,7 +602,7 @@ end
 # ==============================================================================
 
 """
-    size_rc_circular_column_nlp(Pu, Mux, geometry, opts::NLPColumnOptions) -> RCCircularNLPResult
+    size_rc_column_nlp(::Type{RCCircularSection}, Pu, Mux, geometry, opts) -> RCCircularNLPResult
 
 Size a single circular RC column using continuous (NLP) optimization.
 
@@ -634,13 +634,13 @@ Mux = 200.0kip * u"ft"
 geom = ConcreteMemberGeometry(4.0; k=1.0, braced=true)
 
 opts = NLPColumnOptions(tie_type=:spiral, min_dim=10.0u"inch", max_dim=36.0u"inch")
-result = size_rc_circular_column_nlp(Pu, Mux, geom, opts)
+result = size_rc_column_nlp(RCCircularSection, Pu, Mux, geom, opts)
 println("Optimal diameter: \$(result.D_final)\"")
 ```
 
 See also: [`size_rc_column_nlp`](@ref), [`NLPColumnOptions`](@ref), [`RCCircularNLPProblem`](@ref)
 """
-function size_rc_circular_column_nlp(
+function size_rc_column_nlp(::Type{RCCircularSection},
     Pu,
     Mux,
     geometry::ConcreteMemberGeometry,
@@ -674,12 +674,12 @@ function size_rc_circular_column_nlp(
 end
 
 """
-    size_rc_circular_columns_nlp(Pu, Mux, geometries, opts::NLPColumnOptions) -> Vector{RCCircularNLPResult}
+    size_rc_columns_nlp(::Type{RCCircularSection}, Pu, Mux, geometries, opts) -> Vector{RCCircularNLPResult}
 
 Size multiple circular RC columns using continuous (NLP) optimization.
-Applies `size_rc_circular_column_nlp` to each column independently.
+Applies `size_rc_column_nlp(RCCircularSection, ...)` to each column independently.
 """
-function size_rc_circular_columns_nlp(
+function size_rc_columns_nlp(::Type{RCCircularSection},
     Pu::Vector,
     Mux::Vector,
     geometries::Vector{<:ConcreteMemberGeometry},
@@ -691,7 +691,7 @@ function size_rc_circular_columns_nlp(
 
     results = Vector{RCCircularNLPResult}(undef, n)
     for i in 1:n
-        results[i] = size_rc_circular_column_nlp(Pu[i], Mux[i], geometries[i], opts)
+        results[i] = size_rc_column_nlp(RCCircularSection, Pu[i], Mux[i], geometries[i], opts)
     end
     return results
 end
@@ -1233,7 +1233,7 @@ Size reinforced concrete T-beams using discrete catalog optimization.
 
 Generates a catalog of `RCTBeamSection`s with fixed flange dimensions
 (from slab sizing and tributary geometry) and selects the minimum-objective
-section satisfying ACI 318-19 requirements.
+section satisfying ACI 318-11 requirements.
 
 # Arguments
 - `Mu`: Vector of factored moments — any moment unit

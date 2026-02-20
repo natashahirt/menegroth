@@ -1,5 +1,5 @@
 # =============================================================================
-# Pattern Loading Analysis - ACI 318-14 §6.4.3.2
+# Pattern Loading Analysis - ACI 318-11 §13.7.6
 # =============================================================================
 #
 # Pattern loading is required for continuous systems when L/D > 0.75.
@@ -13,8 +13,7 @@
 # - Skip joist systems
 #
 # Reference:
-# - ACI 318-14 Section 6.4.3.2
-# - ACI 318-19 Section 6.4.3.2 (unchanged)
+# - ACI 318-11 §13.7.6 (pattern loading for two-way slabs)
 #
 # =============================================================================
 
@@ -37,7 +36,7 @@ end
 """
     requires_pattern_loading(qD, qL) -> Bool
 
-Check if pattern loading is required per ACI 318-14 §6.4.3.2.
+Check if pattern loading is required per ACI 318-11 §13.7.6.
 
 Pattern loading is required when the live-to-dead load ratio exceeds 0.75:
     L/D > 0.75
@@ -56,8 +55,7 @@ For typical buildings:
 `true` if pattern loading is required, `false` otherwise
 
 # Reference
-- ACI 318-14 §6.4.3.2
-- ACI 318-19 §6.4.3.2
+- ACI 318-11 §13.7.6
 """
 function requires_pattern_loading(qD, qL)
     # Extract numeric values (handle Unitful quantities)
@@ -169,28 +167,35 @@ function pattern_case_name(case::PatternLoadCase)
 end
 
 # =============================================================================
-# Moment Envelope (Stub - to be implemented with analysis integration)
+# Factored Pattern Loads  (ACI 318-11 §13.7.6 / §9.2.1)
 # =============================================================================
 
 """
-    MomentEnvelope
+    factored_pattern_loads(pattern, qD, qL) -> Vector{Pressure}
 
-Results from pattern loading envelope analysis.
+Compute per-span **factored** pressures for a given load pattern.
 
-# Fields
-- `M_neg_max`: Maximum negative moments at each support
-- `M_pos_max`: Maximum positive moments at each span midpoint
-- `M_neg_min`: Minimum negative moments (for load reversal checks)
-- `controlling_cases`: Which load case controls at each location
+Within the governing load combination (1.2D + 1.6L), live load is placed only
+on the loaded spans while dead load acts everywhere:
+- `:dead_plus_live` → max(1.2D + 1.6L, 1.4D)
+- `:dead_only`      → 1.2D
 
-# Note
-This is a stub type. Full implementation requires integration with 
-the specific analysis method (EFM, FEA) being used.
+Using 1.2D (rather than 1.4D) for unloaded spans is correct because all
+spans share the same load combination — we are only varying the placement
+of the live-load component.
+
+# Reference
+- ACI 318-11 §13.7.6 (pattern loading trigger)
+- ACI 318-11 §9.2.1 / ASCE 7 §2.3.1 (factored load combinations)
 """
-struct MomentEnvelope
-    M_neg_max::Vector{Float64}
-    M_pos_max::Vector{Float64}
-    M_neg_min::Vector{Float64}
-    controlling_cases::Dict{Symbol, Int}
+function factored_pattern_loads(pattern::Vector{Symbol}, qD, qL)
+    qu_loaded = max(1.2 * qD + 1.6 * qL, 1.4 * qD)
+    qu_dead   = 1.2 * qD  # same combo, live portion omitted
+
+    loads = similar([qD], length(pattern))
+    for (i, load_type) in enumerate(pattern)
+        loads[i] = load_type === :dead_plus_live ? qu_loaded : qu_dead
+    end
+    return loads
 end
 

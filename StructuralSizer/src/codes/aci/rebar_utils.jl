@@ -73,17 +73,24 @@ end
 # ==============================================================================
 
 """
-    select_bars(As_reqd, strip_width; max_spacing=18u"inch") -> NamedTuple
+    select_bars(As_reqd, strip_width; max_spacing=18u"inch", d_agg=0.75u"inch") -> NamedTuple
 
-Select bar size and compute spacing to provide required steel area.
+Select the smallest practical bar size (#4–#8) that satisfies:
+  1. `As_provided ≥ As_reqd`
+  2. `spacing ≤ max_spacing`
+  3. `spacing ≥ s_min` (ACI 318-11 §7.6.1 minimum clear spacing)
 
-Iterates through practical bar sizes (#4–#8) and selects the first that
-satisfies spacing requirements. Falls back to #8 at 6" spacing if needed.
+The minimum center-to-center spacing is `s_clear_min + db`, where
+`s_clear_min = max(1″, db, 4/3 × d_agg)`.
+
+Errors if no bar size in the range can satisfy all three constraints
+simultaneously — there is no silent fallback.
 
 # Arguments
 - `As_reqd`: Required steel area
 - `strip_width`: Width of section or strip
-- `max_spacing`: Maximum bar spacing (default 18")
+- `max_spacing`: Maximum bar spacing (default 18″)
+- `d_agg`: Nominal maximum aggregate size (default ¾″)
 
 # Returns
 Named tuple: `(bar_size, n_bars, spacing, As_provided)`
@@ -91,46 +98,52 @@ Named tuple: `(bar_size, n_bars, spacing, As_provided)`
 # Example
 ```julia
 bars = select_bars(2.5u"inch^2", 60u"inch")
-# → (bar_size=5, n_bars=9, spacing=6.67", As_provided=2.79 in²)
+# → (bar_size=5, n_bars=9, spacing=6.67″, As_provided=2.79 in²)
 ```
 """
-function select_bars(As_reqd::Area, strip_width::Length; max_spacing=18u"inch")
+function select_bars(As_reqd::Area, strip_width::Length;
+                     max_spacing=18u"inch", d_agg=0.75u"inch")
     for bar_size in [4, 5, 6, 7, 8]
         Ab = bar_area(bar_size)
-        n_bars = ceil(Int, ustrip(u"inch^2", As_reqd) / ustrip(u"inch^2", Ab))
-        n_bars = max(n_bars, 2)
-        spacing = strip_width / n_bars
+        db = bar_diameter(bar_size)
 
-        if spacing <= max_spacing
-            As_provided = n_bars * Ab
-            return (bar_size=bar_size, n_bars=n_bars, spacing=spacing, As_provided=As_provided)
-        end
+        # ACI 318-11 §7.6.1 — minimum clear spacing → center-to-center
+        s_min = max(1.0u"inch", db, 4//3 * d_agg) + db
+
+        # Number of bars: satisfy both demand and max-spacing constraints
+        n_demand  = ceil(Int, ustrip(u"inch^2", As_reqd) / ustrip(u"inch^2", Ab))
+        n_spacing = ceil(Int, ustrip(u"inch", strip_width) / ustrip(u"inch", max_spacing))
+        n_bars    = max(n_demand, n_spacing, 2)
+
+        spacing = strip_width / n_bars
+        spacing < s_min && continue   # can't physically fit — try next bar size
+
+        As_provided = n_bars * Ab
+        return (bar_size=bar_size, n_bars=n_bars, spacing=spacing, As_provided=As_provided)
     end
 
-    # Fallback: #8 bars at tight spacing
-    Ab = bar_area(8)
-    n_bars = ceil(Int, ustrip(u"inch", strip_width) / 6.0)
-    n_bars = max(n_bars, 2)
-    As_provided = n_bars * Ab
-    spacing = strip_width / n_bars
-
-    return (bar_size=8, n_bars=n_bars, spacing=spacing, As_provided=As_provided)
+    error("select_bars: cannot fit reinforcement in $(ustrip(u"inch", strip_width))\" " *
+          "strip for As = $(round(ustrip(u"inch^2", As_reqd); digits=3)) in²")
 end
 
 """
-    select_bars_for_size(As_reqd, strip_width, bar_size; max_spacing=18u"inch") -> NamedTuple
+    select_bars_for_size(As_reqd, strip_width, bar_size;
+                         max_spacing=18u"inch", d_agg=0.75u"inch") -> NamedTuple
 
 Select bars of a *specific* size to provide required steel area.
 
 Unlike `select_bars`, this does not iterate through bar sizes — it computes
 the number of bars of the given size needed to satisfy `As_reqd`, then
 adjusts `n_bars` upward if the resulting spacing exceeds `max_spacing`.
+Errors if the resulting spacing violates ACI 318-11 §7.6.1 minimum clear
+spacing.
 
 # Arguments
 - `As_reqd`: Required steel area
 - `strip_width`: Width of section or strip
 - `bar_size`: Bar designation (e.g. 4 for #4)
-- `max_spacing`: Maximum bar spacing (default 18")
+- `max_spacing`: Maximum bar spacing (default 18″)
+- `d_agg`: Nominal maximum aggregate size (default ¾″)
 
 # Returns
 Named tuple: `(bar_size, n_bars, spacing, As_provided)`
@@ -138,21 +151,27 @@ Named tuple: `(bar_size, n_bars, spacing, As_provided)`
 # Example
 ```julia
 select_bars_for_size(2.0u"inch^2", 60u"inch", 5)
-# → (bar_size=5, n_bars=7, spacing=8.57", As_provided=2.17 in²)
+# → (bar_size=5, n_bars=7, spacing=8.57″, As_provided=2.17 in²)
 ```
 """
 function select_bars_for_size(As_reqd::Area, strip_width::Length, bar_size::Int;
-                              max_spacing=18u"inch")
+                              max_spacing=18u"inch", d_agg=0.75u"inch")
     Ab = bar_area(bar_size)
-    n_bars = ceil(Int, ustrip(u"inch^2", As_reqd) / ustrip(u"inch^2", Ab))
-    n_bars = max(n_bars, 2)
-    spacing = strip_width / n_bars
+    db = bar_diameter(bar_size)
 
-    # Tighten if spacing exceeds limit
-    if spacing > max_spacing
-        n_bars = ceil(Int, ustrip(u"inch", strip_width) / ustrip(u"inch", max_spacing))
-        n_bars = max(n_bars, 2)
-        spacing = strip_width / n_bars
+    # ACI 318-11 §7.6.1 — minimum clear spacing → center-to-center
+    s_min = max(1.0u"inch", db, 4//3 * d_agg) + db
+
+    # Number of bars: satisfy both demand and max-spacing constraints
+    n_demand  = ceil(Int, ustrip(u"inch^2", As_reqd) / ustrip(u"inch^2", Ab))
+    n_spacing = ceil(Int, ustrip(u"inch", strip_width) / ustrip(u"inch", max_spacing))
+    n_bars    = max(n_demand, n_spacing, 2)
+    spacing   = strip_width / n_bars
+
+    if spacing < s_min
+        error("select_bars_for_size: #$bar_size bars at $(round(u"inch", spacing; digits=2)) " *
+              "violate min spacing $(round(u"inch", s_min; digits=2)) in " *
+              "$(round(u"inch", strip_width; digits=1)) strip")
     end
 
     As_provided = n_bars * Ab

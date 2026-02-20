@@ -22,12 +22,9 @@ using StructuralSizer
     # ─── Design parameters: vault floor with λ = 8 ──────────────────────
     params = DesignParameters(
         name = "vault_pipeline_test",
-        floor_options = StructuralSizer.FloorOptions(
-            floor_type = :vault,
-            vault = StructuralSizer.VaultOptions(
-                lambda = 8.0,
-                material = StructuralSizer.NWC_4000,
-            ),
+        floor = StructuralSizer.VaultOptions(
+            lambda = 8.0,
+            material = StructuralSizer.NWC_4000,
         ),
     )
 
@@ -156,10 +153,7 @@ using StructuralSizer
 
             p = DesignParameters(
                 name = "lambda_$λ",
-                floor_options = StructuralSizer.FloorOptions(
-                    floor_type = :vault,
-                    vault = StructuralSizer.VaultOptions(lambda = λ, material = StructuralSizer.NWC_4000),
-                ),
+                floor = StructuralSizer.VaultOptions(lambda = λ, material = StructuralSizer.NWC_4000),
             )
 
             d = design_building(struc_i, p)

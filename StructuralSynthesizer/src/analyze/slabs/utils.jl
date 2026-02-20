@@ -100,7 +100,7 @@ function initialize_cells!(struc::BuildingStructure{T, A, P};
 end
 
 """
-    initialize_slabs!(struc; material, floor_type, floor_kwargs, cell_groupings, slab_group_ids)
+    initialize_slabs!(struc; material, floor_type, floor_opts, tributary_axis, cell_groupings, slab_group_ids)
 
 Initialize slabs from cells.
 
@@ -134,41 +134,40 @@ initialize!(struc; cell_groupings = [[1,2,3], [4,5,6]])
 function initialize_slabs!(struc::BuildingStructure{T};
                            material::AbstractMaterial=NWC_4000,
                            floor_type::Symbol=:auto,
-                           floor_kwargs::NamedTuple=NamedTuple(),
+                           floor_opts::StructuralSizer.AbstractFloorOptions=StructuralSizer.FlatPlateOptions(),
+                           tributary_axis=nothing,
                            cell_groupings::Union{Symbol, Vector{Vector{Int}}}=:auto,
                            slab_group_ids::Union{Nothing, AbstractVector}=nothing) where T
     empty!(struc.slabs)
-    empty!(struc.slab_parallel_batches)  # clear stale coloring
+    empty!(struc.slab_parallel_batches)
     
-    # Clear stale cell groups and tributary cache (floor type may have changed)
+    # Clear stale cell groups and tributary cache
     empty!(struc.cell_groups)
     clear_geometry_caches!(struc)
     
     # Resolve cell_groupings to actual indices
-    opts = get(floor_kwargs, :options, StructuralSizer.FloorOptions())
-    resolved_groupings = _resolve_cell_groupings(struc, cell_groupings, floor_type, opts)
+    resolved_groupings = _resolve_cell_groupings(struc, cell_groupings, floor_type, floor_opts)
     
     # 1. Build per-slab "specs"
     slab_specs = _build_slab_specs(struc, floor_type, resolved_groupings, slab_group_ids)
 
-    # 2. Assign fallback deterministic group IDs if needed
+    # 2. Assign fallback deterministic group IDs
     _assign_deterministic_group_ids!(slab_specs)
 
     # 3. Group specs by ID
     groups = _group_slab_specs(slab_specs)
 
     # 4. Size once per slab group
-    group_results, group_sw, group_spans = _size_slab_groups(groups, slab_specs, struc, material, floor_kwargs)
+    group_results, group_sw, group_spans = _size_slab_groups(groups, slab_specs, struc, material, floor_opts)
 
     # 5. Fan out results to cells and create Slab objects (with volumes)
-    opts = get(floor_kwargs, :options, StructuralSizer.FloorOptions())
-    _apply_slab_results!(struc, slab_specs, group_results, group_sw, group_spans, material, opts)
+    _apply_slab_results!(struc, slab_specs, group_results, group_sw, group_spans, material, floor_opts)
 
-    # 6. Finalize grouping structure in BuildingStructure
+    # 6. Finalize grouping structure
     build_slab_groups!(struc)
 
-    # 7. Compute tributary areas with options (if provided)
-    compute_cell_tributaries!(struc; opts=opts)
+    # 7. Compute tributary areas
+    compute_cell_tributaries!(struc; floor_opts=floor_opts, tributary_axis=tributary_axis)
 
     @debug "Initialized $(length(struc.slabs)) slabs from $(length(struc.cells)) cells"
 end
@@ -240,7 +239,7 @@ Resolve cell_groupings parameter to actual cell index vectors.
 - `Vector{Vector{Int}}` → Pass through as-is
 """
 function _resolve_cell_groupings(struc::BuildingStructure, groupings::Symbol, 
-                                  floor_type::Symbol, opts::StructuralSizer.FloorOptions)
+                                  floor_type::Symbol, opts::StructuralSizer.AbstractFloorOptions)
     mode = if groupings == :auto
         _get_grouping_mode(floor_type, opts)
     else
@@ -250,13 +249,12 @@ function _resolve_cell_groupings(struc::BuildingStructure, groupings::Symbol,
     @debug "Resolving cell groupings" input=groupings floor_type resolved_mode=mode
     
     if mode == :individual
-        return nothing  # Default behavior: 1 slab per cell
+        return nothing
     elseif mode == :by_floor
         result = _group_cells_by_floor(struc)
         @debug "Auto-grouped cells by floor" n_groups=length(result) cells_per_group=[length(g) for g in result]
         return result
     elseif mode == :building_wide
-        # All non-grade cells in one slab
         all_cells = [i for (i, c) in enumerate(struc.cells) if c.floor_type != :grade]
         @debug "Building-wide grouping" n_cells=length(all_cells)
         return [all_cells]
@@ -267,7 +265,7 @@ end
 
 # Pass-through for explicit groupings
 function _resolve_cell_groupings(struc::BuildingStructure, groupings::Vector{Vector{Int}}, 
-                                  floor_type::Symbol, opts::StructuralSizer.FloorOptions)
+                                  floor_type::Symbol, ::StructuralSizer.AbstractFloorOptions)
     return groupings
 end
 
@@ -275,17 +273,14 @@ end
     _get_grouping_mode(floor_type, opts) -> Symbol
 
 Get the default slab grouping mode from floor type options.
-Returns :individual, :by_floor, or :building_wide.
 """
-function _get_grouping_mode(floor_type::Symbol, opts::StructuralSizer.FloorOptions)
-    # Check floor-type-specific options for grouping setting
-    if floor_type == :flat_plate || floor_type == :flat_slab
-        return opts.flat_plate.grouping
+function _get_grouping_mode(floor_type::Symbol, opts::StructuralSizer.AbstractFloorOptions)
+    if floor_type in (:flat_plate, :flat_slab)
+        fp = opts isa StructuralSizer.FlatSlabOptions ? opts.base : opts
+        return hasproperty(fp, :grouping) ? fp.grouping : :individual
     elseif floor_type == :pt_banded
-        # PT typically groups by floor
         return :by_floor
     else
-        # Default: individual slabs per cell
         return :individual
     end
 end
@@ -319,12 +314,12 @@ function _group_cells_by_floor(struc::BuildingStructure)
         if story_idx >= 0
             push!(get!(story_cells, story_idx, Int[]), cell_idx)
         else
-            @warn "Cell not mapped to story during :by_floor grouping" cell_idx face_idx=cell.face_idx
+            @warn "Cell not mapped to story during :by_floor grouping" cell_idx face_idx=cell.face_idx maxlog=5
         end
     end
     
     # Convert to vector of vectors (sorted by story for determinism)
-    return [story_cells[k] for k in sort(collect(keys(story_cells)))]
+    return [story_cells[k] for k in sort!(collect(keys(story_cells)))]
 end
 
 function _assign_deterministic_group_ids!(slab_specs)
@@ -345,43 +340,39 @@ function _group_slab_specs(slab_specs)
     return groups
 end
 
-function _size_slab_groups(groups, slab_specs, struc, material, floor_kwargs)
-    # Flatten to arrays for threaded iteration (Dict iteration is not thread-safe)
+function _size_slab_groups(groups, slab_specs, struc, material, floor_opts::StructuralSizer.AbstractFloorOptions)
     gids = collect(keys(groups))
     n = length(gids)
     
     results_vec  = Vector{AbstractFloorResult}(undef, n)
-    sw_vec       = Vector{Any}(undef, n)
+    sw_vec       = Vector{typeof(0.0u"kPa")}(undef, n)
     spans_vec    = Vector{SpanInfo}(undef, n)
     
-    Threads.@threads for k in 1:n
+    @inbounds Threads.@threads for k in 1:n
         gid = gids[k]
         spec_idxs = groups[gid]
         specs = slab_specs[spec_idxs]
-        result, sw_service, spans_gov = _process_single_slab_group(gid, specs, struc, material, floor_kwargs)
+        result, sw_service, spans_gov = _process_single_slab_group(gid, specs, struc, material, floor_opts)
         
         results_vec[k] = result
         sw_vec[k]      = sw_service
         spans_vec[k]   = spans_gov
     end
     
-    # Reconstruct Dicts from parallel results
     group_results = Dict{UInt64, AbstractFloorResult}(gids[k] => results_vec[k] for k in 1:n)
-    group_sw      = Dict{UInt64, Any}(gids[k] => sw_vec[k] for k in 1:n)
+    group_sw      = Dict{UInt64, typeof(0.0u"kPa")}(gids[k] => sw_vec[k] for k in 1:n)
     group_spans   = Dict{UInt64, SpanInfo}(gids[k] => spans_vec[k] for k in 1:n)
 
     return group_results, group_sw, group_spans
 end
 
-function _process_single_slab_group(gid, specs, struc, material, floor_kwargs)
-    # Enforce consistent type per group (caller-defined groups should be "similar slabs").
+function _process_single_slab_group(gid, specs, struc, material, floor_opts::StructuralSizer.AbstractFloorOptions)
     ft_syms = unique(getfield.(specs, :floor_type))
-    length(ft_syms) == 1 || throw(ArgumentError("Slab group $gid has mixed floor types: $(ft_syms). Provide a consistent `floor_type` or use separate `slab_group_ids`."))
+    length(ft_syms) == 1 || throw(ArgumentError("Slab group $gid has mixed floor types: $(ft_syms)."))
 
     ft_sym = only(ft_syms)
     ft = StructuralSizer.floor_type(ft_sym)
 
-    # Disallow physical multi-cell vault slabs (still OK to have multiple *slabs* in a vault group).
     if ft isa Vault
         for s in specs
             length(s.cell_indices) == 1 || throw(ArgumentError("Vault slabs must be a single rectangular face; got a slab with $(length(s.cell_indices)) cells in group $gid."))
@@ -390,7 +381,6 @@ function _process_single_slab_group(gid, specs, struc, material, floor_kwargs)
         end
     end
 
-    # Compute governing spans across all specs in this group
     all_spans = [s.spans_gov for s in specs]
     spans_gov = StructuralSizer.governing_spans(all_spans)
     
@@ -398,16 +388,16 @@ function _process_single_slab_group(gid, specs, struc, material, floor_kwargs)
     live_gov = maximum(getfield.(specs, :live_gov))
 
     span_for_sizing = _sizing_span(ft, spans_gov)
-    kwargs = _build_floor_kwargs(ft, span_for_sizing, floor_kwargs)
 
-    result = StructuralSizer._size_span_floor(ft, span_for_sizing, sdl_gov, live_gov; material=material, kwargs...)
+    result = StructuralSizer._size_span_floor(ft, span_for_sizing, sdl_gov, live_gov;
+                                               material=material, options=floor_opts)
     sw_service = StructuralSizer.self_weight(result)
 
     return result, sw_service, spans_gov
 end
 
 function _apply_slab_results!(struc, slab_specs, group_results, group_sw, group_spans, 
-                              primary_material, opts::StructuralSizer.FloorOptions)
+                              primary_material, opts::StructuralSizer.AbstractFloorOptions)
     for spec in slab_specs
         gid = spec.group_id
         result = group_results[gid]
@@ -426,7 +416,7 @@ function _apply_slab_results!(struc, slab_specs, group_results, group_sw, group_
 
         # Compute floor area and material volumes
         floor_area = sum(struc.cells[i].area for i in spec.cell_indices)
-        volumes = _compute_slab_volumes(result, floor_area, primary_material, opts, spec.floor_type)
+        volumes = _compute_slab_volumes(result, floor_area, primary_material, opts)
 
         slab = Slab(spec.cell_indices, result, spans_gov; 
                     floor_type=spec.floor_type, position=slab_position, 
@@ -445,11 +435,8 @@ function _derive_slab_position(struc, cell_indices)
 end
 
 """Compute material volumes for a slab from its result and floor area."""
-function _compute_slab_volumes(result::R, floor_area, primary_mat, opts, floor_type::Symbol) where R<:AbstractFloorResult
-    # Get material mapping: symbol → actual material object
-    # Convert symbol to type for clean dispatch
-    ft = StructuralSizer.floor_type(floor_type)
-    mat_map = StructuralSizer.result_materials(result, primary_mat, opts, ft)
+function _compute_slab_volumes(result::R, floor_area, primary_mat, opts::StructuralSizer.AbstractFloorOptions) where R<:AbstractFloorResult
+    mat_map = StructuralSizer.result_materials(result, primary_mat, opts)
     
     # Compute volumes: material → total volume
     volumes = MaterialVolumes()
@@ -462,46 +449,38 @@ function _compute_slab_volumes(result::R, floor_area, primary_mat, opts, floor_t
 end
 
 """
-    update_slab_volumes!(struc::BuildingStructure; options::FloorOptions=FloorOptions())
+    update_slab_volumes!(struc; options, primary_material=nothing)
 
 Recompute material volumes for all slabs based on their current results.
 
-Call this after `size_slabs!` to update the volumes with accurate material 
+Call this after `size_slabs!` to update the volumes with accurate material
 quantities (including reinforcement) for EC calculations.
 
 # Example
 ```julia
 size_slabs!(struc; options=opts)
-update_slab_volumes!(struc; options=opts)  # Now includes rebar volumes
-ec = compute_building_ec(struc)            # Accurate EC with rebar
+update_slab_volumes!(struc; options=opts)
+ec = compute_building_ec(struc)
 ```
 """
 function update_slab_volumes!(struc::BuildingStructure; 
-                              options::FloorOptions=FloorOptions(),
+                              options::StructuralSizer.AbstractFloorOptions=StructuralSizer.FlatPlateOptions(),
                               primary_material=nothing)
-    for (i, slab) in enumerate(struc.slabs)
-        # Compute floor area from cells
+    for slab in struc.slabs
+        isnothing(slab.result) && continue   # skip non-converged slabs
         floor_area = sum(struc.cells[idx].area for idx in slab.cell_indices)
-        
-        # Get primary material (default from options based on floor type)
-        mat = if isnothing(primary_material)
-            ft = slab.floor_type
-            if ft in (:flat_plate, :flat_slab, :two_way, :waffle, :pt_banded)
-                options.flat_plate.material.concrete
-            elseif ft == :one_way
-                options.one_way.material.concrete
-            else
-                options.flat_plate.material.concrete  # fallback
-            end
-        else
-            primary_material
-        end
-        
-        # Recompute volumes from current result
-        slab.volumes = _compute_slab_volumes(slab.result, floor_area, mat, options, slab.floor_type)
+        mat = isnothing(primary_material) ? _primary_material(options) : primary_material
+        slab.volumes = _compute_slab_volumes(slab.result, floor_area, mat, options)
     end
     return struc
 end
+
+"""Extract primary material from floor options for volume calculations."""
+_primary_material(opts::StructuralSizer.FlatPlateOptions) = opts.material.concrete
+_primary_material(opts::StructuralSizer.FlatSlabOptions)  = opts.base.material.concrete
+_primary_material(opts::StructuralSizer.OneWayOptions)    = opts.material.concrete
+_primary_material(opts::StructuralSizer.VaultOptions)     = opts.material
+_primary_material(::StructuralSizer.AbstractFloorOptions) = StructuralSizer.NWC_4000
 
 # =============================================================================
 # Slab grouping helpers
@@ -734,13 +713,13 @@ end
 # =============================================================================
 
 """
-    compute_cell_tributaries!(struc; opts=FloorOptions())
+    compute_cell_tributaries!(struc; floor_opts, tributary_axis=nothing)
 
 Compute parametric tributary polygons for each cell and store in TributaryCache.
 
 Uses one-way directed partitioning for one-way floor types (along span axis),
-isotropic straight skeleton for two-way systems. The `tributary_axis` option
-in `FloorOptions` can override the default behavior.
+isotropic straight skeleton for two-way systems. The `tributary_axis` argument
+can override the default behavior.
 
 Results stored in `struc._tributary_caches.edge[key][cell_idx]` where key is derived
 from (spanning_behavior, axis). Access via:
@@ -751,42 +730,35 @@ Note: Tributaries are computed per-cell (not shared via groups) because the
 parametric `local_edge_idx` must match each cell's specific vertex order.
 """
 function compute_cell_tributaries!(struc::BuildingStructure; 
-                                    opts::StructuralSizer.FloorOptions=StructuralSizer.FloorOptions())
+                                    floor_opts::StructuralSizer.AbstractFloorOptions=StructuralSizer.FlatPlateOptions(),
+                                    tributary_axis=nothing)
     skel = struc.skeleton
     for (cell_idx, cell) in enumerate(struc.cells)
-        # Skip grade-level cells (they don't need tributary computation)
         if cell.floor_type == :unknown || cell.floor_type == :grade
             continue
         end
         
-        # Get this cell's vertices (will be CCW ordered internally by tributary computation)
         verts = [skel.vertices[i] for i in skel.face_vertex_indices[cell.face_idx]]
         
-        # Resolve tributary axis based on floor type and options
         ft = StructuralSizer.floor_type(cell.floor_type)
         behavior = StructuralSizer.spanning_behavior(ft)
-        axis = StructuralSizer.resolve_tributary_axis(ft, cell.spans, opts)
+        axis = StructuralSizer.resolve_tributary_axis(ft, cell.spans, tributary_axis)
         
-        # Check if already cached for this configuration
         if has_cell_tributaries(struc, cell_idx, behavior, axis)
-            continue  # Already computed
+            continue
         end
         
         trib = if isnothing(axis)
-            # Isotropic: straight skeleton
             StructuralSizer.get_tributary_polygons_isotropic(verts)
         else
-            # Directed: partition along axis
             StructuralSizer.get_tributary_polygons(verts; axis=collect(axis))
         end
         
-        # Compute strip geometry for two-way/beamless floors
         strips = nothing
         if behavior isa TwoWaySpanning || behavior isa BeamlessSpanning
             strips = StructuralSizer.compute_panel_strips(trib)
         end
         
-        # Store in cache
         cache_edge_tributaries!(struc, behavior, axis, cell_idx, trib; strip_geometry=strips)
     end
 end
@@ -897,11 +869,11 @@ function _default_floor_kwargs(::Vault, span, user_kwargs::NamedTuple)
     has_rise = haskey(user_kwargs, :rise) && !isnothing(user_kwargs.rise)
     has_lambda = haskey(user_kwargs, :lambda) && !isnothing(user_kwargs.lambda)
 
-    # If caller passes `options=FloorOptions(...)`, respect vault rise/lambda there too.
+    # Respect vault rise/lambda from VaultOptions if passed via `options`
     has_options_lambda = false
     has_options_rise = false
-    if haskey(user_kwargs, :options) && user_kwargs.options isa StructuralSizer.FloorOptions
-        vopt = user_kwargs.options.vault
+    if haskey(user_kwargs, :options) && user_kwargs.options isa StructuralSizer.VaultOptions
+        vopt = user_kwargs.options
         has_options_lambda = !isnothing(vopt.lambda)
         has_options_rise = vopt.rise !== nothing
     end
@@ -1093,7 +1065,7 @@ function flat_plate_moment_comparison(
     end
 
     has_edge = any(col.position != :interior for col in columns)
-    h = StructuralSizer.min_thickness_flat_plate(ln_max; discontinuous_edge=has_edge)
+    h = StructuralSizer.min_thickness(StructuralSizer.FlatPlate(), ln_max; discontinuous_edge=has_edge)
 
     # Run each method (catch failures for inapplicable methods)
     methods = [

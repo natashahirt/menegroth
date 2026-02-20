@@ -42,7 +42,7 @@ end
 """
 Smooth ACI 318 φ factor for combined axial + flexure.
 
-ACI 318-19 Table 21.2.2:
+ACI 318-11 §9.3.2:
 - εt ≥ 0.005: φ = 0.90 (tension-controlled)
 - εt ≤ 0.002: φ = 0.65 (tied) or 0.75 (spiral)
 - Between: linear interpolation
@@ -65,7 +65,7 @@ end
 # ==============================================================================
 
 """
-    _smooth_rect_PnMn(b, h, ρg, c, fc, fy, Es, εcu, β1; ...) -> NamedTuple
+    _smooth_PnMn(b, h, ρg, c, fc, fy, Es, εcu, β1; ...) -> NamedTuple
 
 Compute nominal (Pn, Mn, φ, εt) for a rectangular RC column at neutral
 axis depth `c` using the Whitney stress block with smooth approximations.
@@ -75,7 +75,7 @@ Steel modeled as `n_layers` distributed uniformly from cover to d.
 
 Returns (Pn, Mn, φ, εt) — all C¹-smooth in (b, h, ρg, c).
 """
-function _smooth_rect_PnMn(b::Float64, h::Float64, ρg::Float64, c::Float64,
+function _smooth_PnMn(b::Float64, h::Float64, ρg::Float64, c::Float64,
                             fc::Float64, fy::Float64, Es::Float64,
                             εcu::Float64, β1::Float64;
                             cover::Float64=2.5, n_layers::Int=10,
@@ -169,7 +169,7 @@ end
 
 
 """
-    _smooth_find_c_rect(b, h, ρg, Pu_kip, ...) -> Float64
+    _smooth_find_c(b, h, ρg, Pu_kip, ...) -> Float64
 
 Find neutral axis depth c* such that φ(c*)·Pn(c*) ≈ Pu_kip for a
 rectangular column, using bisection.
@@ -178,14 +178,14 @@ The result c* is smooth w.r.t. (b, h, ρg) by the implicit function theorem:
 if F(c, θ) = φ·Pn - Pu and ∂F/∂c ≠ 0, then c*(θ) inherits the smoothness
 of F. Since all components use smooth approximations, F is C¹ and so is c*.
 """
-function _smooth_find_c_rect(b::Float64, h::Float64, ρg::Float64,
+function _smooth_find_c(b::Float64, h::Float64, ρg::Float64,
                               Pu_kip::Float64,
                               fc::Float64, fy::Float64, Es::Float64,
                               εcu::Float64, β1::Float64;
                               cover::Float64=2.5, n_layers::Int=10,
                               tie_type::Symbol=:tied)
     function residual(c)
-        r = _smooth_rect_PnMn(b, h, ρg, c, fc, fy, Es, εcu, β1;
+        r = _smooth_PnMn(b, h, ρg, c, fc, fy, Es, εcu, β1;
                                cover, n_layers, tie_type)
         return r.φ * r.Pn - Pu_kip
     end
@@ -210,7 +210,7 @@ end
 
 
 """
-    _smooth_rc_rect_pm_util(b, h, ρg, Pu_kip, Mu_kipft, mat; ...) -> Float64
+    _smooth_rc_pm_util(b, h, ρg, Pu_kip, Mu_kipft, mat; ...) -> Float64
 
 Smooth P-M utilization for a rectangular RC column: Mu / φMn(at Pu).
 
@@ -224,7 +224,7 @@ Returns utilization ≤ 1.0 if section is adequate, > 1.0 if not.
 - `Mu_kipft`: Factored moment (kip-ft)
 - `mat`: Named tuple (fc, fy, Es, εcu) in ksi units
 """
-function _smooth_rc_rect_pm_util(b::Float64, h::Float64, ρg::Float64,
+function _smooth_rc_pm_util(b::Float64, h::Float64, ρg::Float64,
                                   Pu_kip::Float64, Mu_kipft::Float64,
                                   mat::NamedTuple;
                                   cover::Float64=2.5, n_layers::Int=10,
@@ -232,10 +232,10 @@ function _smooth_rc_rect_pm_util(b::Float64, h::Float64, ρg::Float64,
     fc, fy, Es, εcu = mat.fc, mat.fy, mat.Es, mat.εcu
     β1 = clamp(0.85 - 0.05 * (fc * 1000.0 - 4000.0) / 1000.0, 0.65, 0.85)
 
-    c_star = _smooth_find_c_rect(b, h, ρg, Pu_kip, fc, fy, Es, εcu, β1;
+    c_star = _smooth_find_c(b, h, ρg, Pu_kip, fc, fy, Es, εcu, β1;
                                   cover, n_layers, tie_type)
 
-    r = _smooth_rect_PnMn(b, h, ρg, c_star, fc, fy, Es, εcu, β1;
+    r = _smooth_PnMn(b, h, ρg, c_star, fc, fy, Es, εcu, β1;
                            cover, n_layers, tie_type)
 
     # 10% conservatism: accounts for smooth-vs-discrete approximation errors
@@ -253,26 +253,26 @@ end
 
 
 """
-    _smooth_rc_rect_pm_capacity(b, h, ρg, Pu_kip, mat; ...) -> (φMn_kipft, εt)
+    _smooth_rc_pm_capacity(b, h, ρg, Pu_kip, mat; ...) -> (φMn_kipft, εt)
 
 Compute smooth φMn capacity (kip·ft) at given Pu for a rectangular RC column.
 Also returns net tensile strain εt for ductility checks.
 Used by constraint_fns for biaxial interaction.
 """
-function _smooth_rc_rect_pm_capacity(b::Float64, h::Float64, ρg::Float64,
+function _smooth_rc_pm_capacity(b::Float64, h::Float64, ρg::Float64,
                                       Pu_kip::Float64, mat::NamedTuple;
                                       cover::Float64=2.5, n_layers::Int=10,
                                       tie_type::Symbol=:tied)
     fc, fy, Es, εcu = mat.fc, mat.fy, mat.Es, mat.εcu
     β1 = clamp(0.85 - 0.05 * (fc * 1000.0 - 4000.0) / 1000.0, 0.65, 0.85)
 
-    c_star = _smooth_find_c_rect(b, h, ρg, Pu_kip, fc, fy, Es, εcu, β1;
+    c_star = _smooth_find_c(b, h, ρg, Pu_kip, fc, fy, Es, εcu, β1;
                                   cover, n_layers, tie_type)
 
-    r = _smooth_rect_PnMn(b, h, ρg, c_star, fc, fy, Es, εcu, β1;
+    r = _smooth_PnMn(b, h, ρg, c_star, fc, fy, Es, εcu, β1;
                            cover, n_layers, tie_type)
 
-    # 10% conservatism (consistent with _smooth_rc_rect_pm_util)
+    # 10% conservatism (consistent with _smooth_rc_pm_util)
     return (φMn_kipft = r.φ * r.Mn / 12.0 * 0.90, εt = r.εt)
 end
 
@@ -282,7 +282,7 @@ end
 # ==============================================================================
 
 """
-    _smooth_circ_PnMn(D, ρg, c, fc, fy, Es, εcu, β1; ...) -> NamedTuple
+    _smooth_PnMn(D, ρg, c, fc, fy, Es, εcu, β1; ...) -> NamedTuple
 
 Compute nominal (Pn, Mn, φ, εt) for a circular RC column at neutral
 axis depth `c` using the Whitney stress block with smooth approximations.
@@ -293,7 +293,7 @@ Uses analytical circular segment formulas for the concrete compression zone:
 
 Steel modeled as `n_bars` uniformly spaced around the perimeter.
 """
-function _smooth_circ_PnMn(D::Float64, ρg::Float64, c::Float64,
+function _smooth_PnMn(D::Float64, ρg::Float64, c::Float64,
                             fc::Float64, fy::Float64, Es::Float64,
                             εcu::Float64, β1::Float64;
                             cover::Float64=2.5, n_bars::Int=12,
@@ -358,18 +358,18 @@ end
 
 
 """
-    _smooth_find_c_circ(D, ρg, Pu_kip, ...) -> Float64
+    _smooth_find_c(D, ρg, Pu_kip, ...) -> Float64
 
 Find neutral axis depth c* such that φ(c*)·Pn(c*) ≈ Pu_kip for a
 circular column, using bisection.
 """
-function _smooth_find_c_circ(D::Float64, ρg::Float64, Pu_kip::Float64,
+function _smooth_find_c(D::Float64, ρg::Float64, Pu_kip::Float64,
                               fc::Float64, fy::Float64, Es::Float64,
                               εcu::Float64, β1::Float64;
                               cover::Float64=2.5, n_bars::Int=12,
                               tie_type::Symbol=:spiral)
     function residual(c)
-        r = _smooth_circ_PnMn(D, ρg, c, fc, fy, Es, εcu, β1;
+        r = _smooth_PnMn(D, ρg, c, fc, fy, Es, εcu, β1;
                                cover, n_bars, tie_type)
         return r.φ * r.Pn - Pu_kip
     end
@@ -392,11 +392,11 @@ end
 
 
 """
-    _smooth_rc_circ_pm_util(D, ρg, Pu_kip, Mu_kipft, mat; ...) -> Float64
+    _smooth_rc_pm_util(D, ρg, Pu_kip, Mu_kipft, mat; ...) -> Float64
 
 Smooth P-M utilization for a circular RC column: Mu / φMn(at Pu).
 """
-function _smooth_rc_circ_pm_util(D::Float64, ρg::Float64,
+function _smooth_rc_pm_util(D::Float64, ρg::Float64,
                                   Pu_kip::Float64, Mu_kipft::Float64,
                                   mat::NamedTuple;
                                   cover::Float64=2.5, n_bars::Int=12,
@@ -404,10 +404,10 @@ function _smooth_rc_circ_pm_util(D::Float64, ρg::Float64,
     fc, fy, Es, εcu = mat.fc, mat.fy, mat.Es, mat.εcu
     β1 = clamp(0.85 - 0.05 * (fc * 1000.0 - 4000.0) / 1000.0, 0.65, 0.85)
 
-    c_star = _smooth_find_c_circ(D, ρg, Pu_kip, fc, fy, Es, εcu, β1;
+    c_star = _smooth_find_c(D, ρg, Pu_kip, fc, fy, Es, εcu, β1;
                                   cover, n_bars, tie_type)
 
-    r = _smooth_circ_PnMn(D, ρg, c_star, fc, fy, Es, εcu, β1;
+    r = _smooth_PnMn(D, ρg, c_star, fc, fy, Es, εcu, β1;
                            cover, n_bars, tie_type)
 
     # 10% conservatism (matches rectangular — accounts for smooth approx errors)
@@ -422,21 +422,21 @@ end
 
 
 """
-    _smooth_rc_circ_pm_capacity(D, ρg, Pu_kip, mat; ...) -> (φMn_kipft, εt)
+    _smooth_rc_pm_capacity(D, ρg, Pu_kip, mat; ...) -> (φMn_kipft, εt)
 
 Compute smooth φMn capacity (kip·ft) at given Pu for a circular RC column.
 """
-function _smooth_rc_circ_pm_capacity(D::Float64, ρg::Float64,
+function _smooth_rc_pm_capacity(D::Float64, ρg::Float64,
                                       Pu_kip::Float64, mat::NamedTuple;
                                       cover::Float64=2.5, n_bars::Int=12,
                                       tie_type::Symbol=:spiral)
     fc, fy, Es, εcu = mat.fc, mat.fy, mat.Es, mat.εcu
     β1 = clamp(0.85 - 0.05 * (fc * 1000.0 - 4000.0) / 1000.0, 0.65, 0.85)
 
-    c_star = _smooth_find_c_circ(D, ρg, Pu_kip, fc, fy, Es, εcu, β1;
+    c_star = _smooth_find_c(D, ρg, Pu_kip, fc, fy, Es, εcu, β1;
                                   cover, n_bars, tie_type)
 
-    r = _smooth_circ_PnMn(D, ρg, c_star, fc, fy, Es, εcu, β1;
+    r = _smooth_PnMn(D, ρg, c_star, fc, fy, Es, εcu, β1;
                            cover, n_bars, tie_type)
 
     # 10% conservatism (matches rectangular)

@@ -14,20 +14,31 @@
 # =============================================================================
 
 """
-    size_slabs!(struc; options=FloorOptions(), column_opts=nothing, max_iterations=10, verbose=false) -> struc
+    size_slabs!(struc; options, column_opts=nothing, max_iterations=10, verbose=false) -> struc
 
 Size/design all slabs in `struc` using the floor type stored on each slab.
 
 - Uses the **type system** via `floor_type(slab.floor_type)` for dispatch.
-- Uses **`FloorOptions`** as the single public configuration surface.
+- Accepts any `AbstractFloorOptions` subtype for configuration.
 """
 function size_slabs!(
     struc;
-    options::FloorOptions = FloorOptions(),
+    options::AbstractFloorOptions = FlatPlateOptions(),
     column_opts = nothing,
     max_iterations::Int = 10,
     verbose::Bool = false,
+    fire_rating::Real = 0.0,
 )
+    # ─── Validate: concrete slabs require concrete columns ───
+    has_concrete_slab = any(s -> floor_type(s.floor_type) isa AbstractConcreteSlab, struc.slabs)
+    if has_concrete_slab && !isnothing(column_opts) && !(column_opts isa ConcreteColumnOptions)
+        throw(ArgumentError(
+            "Concrete slab floor systems require ConcreteColumnOptions, " *
+            "got $(typeof(column_opts)). Steel columns are not supported " *
+            "with concrete slabs."
+        ))
+    end
+
     # Pre-build column P-M cache once if flat-plate slabs exist (expensive P-M diagrams)
     _col_cache = nothing
     if any(s -> s.floor_type in (:flat_plate, :flat_slab), struc.slabs)
@@ -43,7 +54,7 @@ function size_slabs!(
             tasks = map(batch) do slab_idx
                 Threads.@spawn size_slab!(struc, slab_idx; options=options,
                     column_opts=column_opts, max_iterations=max_iterations,
-                    verbose=verbose, _col_cache=_col_cache)
+                    verbose=verbose, _col_cache=_col_cache, fire_rating=fire_rating)
             end
             fetch.(tasks)
         end
@@ -51,7 +62,7 @@ function size_slabs!(
         for slab_idx in eachindex(struc.slabs)
             size_slab!(struc, slab_idx; options=options, column_opts=column_opts,
                        max_iterations=max_iterations, verbose=verbose,
-                       _col_cache=_col_cache)
+                       _col_cache=_col_cache, fire_rating=fire_rating)
         end
     end
     return struc
@@ -80,25 +91,26 @@ function _precompute_flat_plate_col_cache(column_opts)
 end
 
 """
-    size_slab!(struc, slab_idx; options=FloorOptions(), kwargs...) -> Any
+    size_slab!(struc, slab_idx; options, kwargs...) -> Any
 
 Size/design a single slab in `struc` by index. Intended for debugging and scripting.
 """
 function size_slab!(
     struc,
     slab_idx::Int;
-    options::FloorOptions = FloorOptions(),
+    options::AbstractFloorOptions = FlatPlateOptions(),
     column_opts = nothing,
     max_iterations::Int = 10,
     verbose::Bool = false,
     _col_cache = nothing,
+    fire_rating::Real = 0.0,
 )
     slab = struc.slabs[slab_idx]
     ft = floor_type(slab.floor_type)
     return _size_slab!(ft, struc, slab, slab_idx;
                       options=options, column_opts=column_opts,
                       max_iterations=max_iterations, verbose=verbose,
-                      _col_cache=_col_cache)
+                      _col_cache=_col_cache, fire_rating=fire_rating)
 end
 
 # =============================================================================
@@ -114,48 +126,39 @@ end
 # Concrete: Flat plate (full design pipeline)
 # =============================================================================
 
-function _analysis_method_from_options(opts::FlatPlateOptions)::FlatPlateAnalysisMethod
-    if opts.analysis_method == :ddm
-        return DDM()
-    elseif opts.analysis_method == :mddm
-        return DDM(:simplified)
-    elseif opts.analysis_method == :efm
-        return EFM()              # default solver (:asap)
-    elseif opts.analysis_method == :efm_hc
-        return EFM(:moment_distribution)
-    elseif opts.analysis_method == :efm_asap
-        return EFM(:asap)
-    elseif opts.analysis_method == :fea
-        return FEA()
-    else
-        throw(ArgumentError("Unknown FlatPlateOptions.analysis_method=$(opts.analysis_method). Expected :ddm, :mddm, :efm, :efm_hc, :efm_asap, or :fea."))
-    end
-end
-
 function _size_slab!(::FlatPlate, struc, slab, slab_idx;
-                     options::FloorOptions = FloorOptions(),
+                     options::AbstractFloorOptions = FlatPlateOptions(),
                      column_opts = nothing,
                      max_iterations::Int = 10,
                      verbose::Bool = false,
-                     _col_cache = nothing)
-    # Default column options for concrete flat plates
+                     _col_cache = nothing,
+                     fire_rating::Real = 0.0)
     col_opts = isnothing(column_opts) ? ConcreteColumnOptions() : column_opts
-    method = _analysis_method_from_options(options.flat_plate)
+    fp_opts = options isa FlatSlabOptions ? options.base : options
+    method = fp_opts.method
 
     verbose && @info "Sizing flat plate slab $slab_idx" cells=length(slab.cell_indices) method=typeof(method)
 
-    # Full flat plate design pipeline (updates cell self-weight internally)
     result = size_flat_plate!(struc, slab, col_opts;
                               method=method,
-                              opts=options.flat_plate,
+                              opts=fp_opts,
                               max_iterations=max_iterations,
                               verbose=verbose,
                               _col_cache=_col_cache,
-                              slab_idx=slab_idx)
+                              slab_idx=slab_idx,
+                              fire_rating=fire_rating)
     
-    # Set slab.result to the FlatPlatePanelResult (like Vault does)
+    # Handle non-convergence gracefully
+    if hasproperty(result, :converged) && !result.converged
+        @warn "Flat plate slab $slab_idx did not converge" check=result.failing_check iters=result.iterations h=result.h_final
+        hasproperty(slab, :design_details) && (slab.design_details = result)
+        return result
+    end
+    
     slab.result = result.slab_result
-    
+    # Preserve the full design output (column P-M, integrity, transfer, ρ′)
+    # so downstream consumers don't lose the detail.
+    hasproperty(slab, :design_details) && (slab.design_details = result)
     return result
 end
 
@@ -164,18 +167,17 @@ end
 # =============================================================================
 
 function _size_slab!(::FlatSlab, struc, slab, slab_idx;
-                     options::FloorOptions = FloorOptions(),
+                     options::AbstractFloorOptions = FlatSlabOptions(),
                      column_opts = nothing,
                      max_iterations::Int = 10,
                      verbose::Bool = false,
-                     _col_cache = nothing)
-    # Default column options for concrete flat slabs (same as flat plate)
+                     _col_cache = nothing,
+                     fire_rating::Real = 0.0)
     col_opts = isnothing(column_opts) ? ConcreteColumnOptions() : column_opts
 
-    # Convert FlatSlabOptions to FlatPlateOptions for the shared pipeline
-    fs_opts = options.flat_slab
+    fs_opts = options isa FlatSlabOptions ? options : FlatSlabOptions(base = options)
     fp_opts = as_flat_plate_options(fs_opts)
-    method = _analysis_method_from_options(fp_opts)
+    method = fp_opts.method
 
     verbose && @info "Sizing flat slab (with drop panels) $slab_idx" cells=length(slab.cell_indices) method=typeof(method)
 
@@ -192,11 +194,21 @@ function _size_slab!(::FlatSlab, struc, slab, slab_idx;
                               verbose=verbose,
                               _col_cache=_col_cache,
                               slab_idx=slab_idx,
-                              drop_panel=drop_panel)
+                              drop_panel=drop_panel,
+                              fire_rating=fire_rating)
+    
+    # Handle non-convergence gracefully
+    if hasproperty(result, :converged) && !result.converged
+        @warn "Flat slab $slab_idx did not converge" check=result.failing_check iters=result.iterations h=result.h_final
+        hasproperty(slab, :design_details) && (slab.design_details = result)
+        return result
+    end
     
     # Set slab.result and drop_panel geometry (may have been adjusted by pipeline)
     slab.result = result.slab_result
     slab.drop_panel = result.drop_panel
+    # Preserve the full design output (column P-M, integrity, transfer, ρ′)
+    hasproperty(slab, :design_details) && (slab.design_details = result)
     
     return result
 end
@@ -286,7 +298,7 @@ Size a vault slab using either analytical evaluation or optimization.
 - `optimize_vault` for standalone optimization API
 """
 function _size_slab!(::Vault, struc, slab, slab_idx;
-                     options::FloorOptions = FloorOptions(),
+                     options::AbstractFloorOptions = VaultOptions(),
                      verbose::Bool = false,
                      kwargs...)
     # Validate: vault = 1 cell per slab
@@ -295,7 +307,7 @@ function _size_slab!(::Vault, struc, slab, slab_idx;
     
     cell_idx = only(slab.cell_indices)
     cell = struc.cells[cell_idx]
-    vopt = options.vault
+    vopt = options isa VaultOptions ? options : VaultOptions()
 
     # Extract geometry and loading
     span = slab.spans.primary
@@ -313,7 +325,7 @@ function _size_slab!(::Vault, struc, slab, slab_idx;
         
         result = _size_span_floor(Vault(), span, sdl, live;
             material = vopt.material,
-            options = options,
+            options = vopt,
         )
     else
         # ─── OPTIMIZATION MODE ───

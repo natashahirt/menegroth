@@ -1,6 +1,6 @@
 # Flat Plate Design
 
-Two-way flat plate slab design per ACI 318-19, with integrated column P-M design and multiple analysis methods.
+Two-way flat plate slab design per ACI 318-11, with integrated column P-M design and multiple analysis methods.
 
 ## Quick Start
 
@@ -104,8 +104,8 @@ result.column_results[col_idx].Mu        # Factored moment
 
 ## Reference
 
-- ACI 318-19 Chapter 8 (Two-Way Slabs)
-- ACI 318-19 Section 8.10 (DDM)
-- ACI 318-19 Section 8.11 (EFM)
+- ACI 318-11 Chapter 13 (Two-Way Slabs)
+- ACI 318-11 §13.6 (DDM)
+- ACI 318-11 §13.7 (EFM)
 - StructurePoint DE-Two-Way-Flat-Plate Example
 - PCA Notes on ACI 318 (stiffness factors)

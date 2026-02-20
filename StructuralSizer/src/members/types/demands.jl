@@ -103,7 +103,7 @@ converted internally to kip/kip-ft for ACI calculations.
 - `M2y`: Larger end moment about y-axis
 - `βdns`: Ratio of sustained to total factored load (for slenderness)
 
-# End Moment Convention (ACI 318-19 §6.6.4.5.3)
+# End Moment Convention (ACI 318-11 §10.10.6.4)
 - M1 = smaller end moment, M2 = larger end moment (|M2| ≥ |M1|)
 - M1/M2 > 0: Single curvature (both ends rotate same direction)
 - M1/M2 < 0: Double curvature (ends rotate opposite directions)
@@ -195,7 +195,7 @@ converted internally to kip/kip·ft for ACI calculations.
 - `Tu`: Factored torsion (positive, 0.0 = no torsion demand)
 
 When `Nu > 0`, the ACI 318 shear capacity `Vc` is increased via the
-axial compression modifier (ACI 318-19 §22.5.6.1 / 318-11 Eq. 11-4):
+axial compression modifier (ACI 318-11 §11.2.2.1, Eq. 11-4):
 `Vc = 2λ(1 + Nu/(2000 Ag)) √f'c bw d`.
 
 # Examples

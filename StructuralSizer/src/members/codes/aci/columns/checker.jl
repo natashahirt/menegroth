@@ -1,5 +1,5 @@
 # ==============================================================================
-# ACI 318-19 Capacity Checker for RC Columns
+# ACI 318-11 Capacity Checker for RC Columns
 # ==============================================================================
 # Implements AbstractCapacityChecker for ACI 318 concrete column design.
 # Matches the interface used by AISCChecker for MIP optimization.
@@ -11,7 +11,7 @@ using Asap: kip, ksi, to_ksi
 """
     ACIColumnChecker <: AbstractCapacityChecker
 
-ACI 318-19 capacity checker for reinforced concrete columns.
+ACI 318-11 capacity checker for reinforced concrete columns.
 Implements the same interface as AISCChecker for use with `optimize_discrete`.
 
 # Options
@@ -22,7 +22,7 @@ Implements the same interface as AISCChecker for use with `optimize_discrete`.
 - `Es_ksi`: Rebar elastic modulus in ksi — from user's rebar material
 - `max_depth`: Maximum section depth constraint (meters, Inf = no limit)
 
-# Strength Reduction Factors (computed per ACI Table 21.2.2)
+# Strength Reduction Factors (computed per ACI §9.3.2)
 - Tension-controlled (εt ≥ 0.005): φ = 0.90
 - Compression-controlled (εt ≤ εy): φ = 0.65 (tied), 0.75 (spiral)
 - Transition zone: linear interpolation
@@ -208,7 +208,7 @@ function _check_square_and_generate_y_diagram(section::RCColumnSection, mat, inc
     
     # Generate y-axis diagram for rectangular sections if biaxial is enabled
     diagram_y = if !is_square && include_biaxial
-        generate_PM_diagram_yaxis(section, mat; n_intermediate=15)
+        generate_PM_diagram(section, mat, WeakAxis(); n_intermediate=15)
     else
         nothing
     end

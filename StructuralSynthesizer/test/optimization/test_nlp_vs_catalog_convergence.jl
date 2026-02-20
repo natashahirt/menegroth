@@ -797,7 +797,7 @@ using Unitful
                 include_slenderness = false,
                 verbose          = false,
             )
-            nlp_result = size_rc_circular_column_nlp(Pu_kip, Mu_kipft, geometry, nlp_opts)
+            nlp_result = size_rc_column_nlp(RCCircularSection, Pu_kip, Mu_kipft, geometry, nlp_opts)
             nlp_area   = nlp_result.area   # π/4 × D²
 
             println("RC Circular Moderate (NLP vs Catalog):")
@@ -838,7 +838,7 @@ using Unitful
                 include_slenderness = false,
                 verbose          = false,
             )
-            nlp_result = size_rc_circular_column_nlp(Pu_kip, Mu_kipft, geometry, nlp_opts)
+            nlp_result = size_rc_column_nlp(RCCircularSection, Pu_kip, Mu_kipft, geometry, nlp_opts)
             nlp_area   = nlp_result.area
 
             println("RC Circular Heavy (NLP vs Catalog):")
@@ -879,7 +879,7 @@ using Unitful
                 include_slenderness = false,
                 verbose     = false,
             )
-            nlp_results = size_rc_circular_columns_nlp(Pu_kips, Mu_kipfts, geoms, nlp_opts)
+            nlp_results = size_rc_columns_nlp(RCCircularSection, Pu_kips, Mu_kipfts, geoms, nlp_opts)
             nlp_areas   = [r.area for r in nlp_results]
 
             println("RC Circular Batch (NLP vs Catalog):")

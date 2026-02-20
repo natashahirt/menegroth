@@ -81,6 +81,18 @@ RebarSteel(E, G, Fy, Fu, ρ, ν, ecc; cost=NaN) = Metal{RebarType, typeof(E), ty
 # =============================================================================
 
 """
+    AggregateType
+
+Concrete aggregate classification for fire resistance calculations (ACI 216.1-14).
+
+- `siliceous`: Quartz, granite, sandstone — least fire resistant
+- `carbonate`: Limestone, dolomite — better fire resistance
+- `sand_lightweight`: Sand-lightweight aggregate
+- `lightweight`: Fully lightweight aggregate — best fire resistance
+"""
+@enum AggregateType siliceous carbonate sand_lightweight lightweight
+
+"""
     Concrete{T_P, T_D} <: AbstractMaterial
 
 Concrete material with compressive strength.
@@ -93,7 +105,8 @@ Concrete material with compressive strength.
 - `εcu`: Ultimate compressive strain (default 0.003 per ACI 318)
 - `ecc`: Embodied carbon [kgCO₂e/kg]
 - `cost`: Unit cost [\$/kg] (NaN if not set; required for MinCost optimization)
-- `λ`: Lightweight concrete factor (1.0 for NWC, 0.75–0.85 for LWC per ACI 318-19 §19.2.4)
+- `λ`: Lightweight concrete factor (1.0 for NWC, 0.75–0.85 for LWC per ACI 318-11 §8.6.1)
+- `aggregate_type`: Aggregate classification for fire resistance (default `siliceous`)
 
 # Notes
 - `εcu = 0.003` is the standard ACI 318 value for concrete up to ~10 ksi
@@ -107,11 +120,14 @@ struct Concrete{T_P, T_D} <: AbstractMaterial
     εcu::Float64  # Ultimate compressive strain
     ecc::Float64  # Embodied carbon [kgCO₂e/kg]
     cost::Float64 # Unit cost [$/kg] (NaN = not set)
-    λ::Float64    # Lightweight concrete factor (ACI 318-19 §19.2.4)
+    λ::Float64    # Lightweight concrete factor (ACI 318-11 §8.6.1)
+    aggregate_type::AggregateType  # Aggregate type for fire resistance (ACI 216.1)
 end
 
-function Concrete(E, fc′, ρ, ν, ecc; εcu::Real=0.003, cost::Real=NaN, λ::Real=1.0)
-    Concrete{typeof(E), typeof(ρ)}(E, fc′, ρ, Float64(ν), Float64(εcu), Float64(ecc), Float64(cost), Float64(λ))
+function Concrete(E, fc′, ρ, ν, ecc; εcu::Real=0.003, cost::Real=NaN, λ::Real=1.0,
+                  aggregate_type::AggregateType=siliceous)
+    Concrete{typeof(E), typeof(ρ)}(E, fc′, ρ, Float64(ν), Float64(εcu), Float64(ecc),
+                                    Float64(cost), Float64(λ), aggregate_type)
 end
 
 # =============================================================================

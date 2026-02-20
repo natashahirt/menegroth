@@ -40,8 +40,8 @@ function make_structure(; column_size=16.0u"inch", flat_plate_opts=FlatPlateOpti
     skel = gen_medium_office(54.0u"ft", 42.0u"ft", 10.0u"ft", 3, 3, 1)
     struc = BuildingStructure(skel)
     
-    opts = FloorOptions(flat_plate = flat_plate_opts, tributary_axis = nothing)
-    initialize!(struc; floor_type = :flat_plate, floor_kwargs = (options = opts,))
+    opts = flat_plate_opts
+    initialize!(struc; floor_type = :flat_plate, floor_opts = opts)
     
     for col in struc.columns
         col.c1 = column_size
@@ -221,7 +221,7 @@ for strategy in strategies
         shear_studs = strategy,
         max_column_size = 20.0u"inch",
         stud_diameter = 0.5u"inch",
-        analysis_method = :ddm
+        method = DDM()
     )
     
     try
@@ -504,10 +504,10 @@ function make_long_span_structure()
     fp_opts = FlatPlateOptions(
         shear_studs = :if_needed,
         max_column_size = 28.0u"inch",
-        analysis_method = :ddm
+        method = DDM()
     )
-    opts = FloorOptions(flat_plate = fp_opts, tributary_axis = nothing)
-    initialize!(struc; floor_type = :flat_plate, floor_kwargs = (options = opts,))
+    opts = fp_opts
+    initialize!(struc; floor_type = :flat_plate, floor_opts = opts)
     
     # Start with 18" columns
     for col in struc.columns
@@ -624,11 +624,11 @@ function make_deflection_critical_structure()
     fp_opts = FlatPlateOptions(
         shear_studs = :if_needed,
         max_column_size = 36.0u"inch",  # Very large max
-        analysis_method = :ddm,
+        method = DDM(),
         deflection_limit = :L_480  # Stricter than typical L/360
     )
-    opts = FloorOptions(flat_plate = fp_opts, tributary_axis = nothing)
-    initialize!(struc; floor_type = :flat_plate, floor_kwargs = (options = opts,))
+    opts = fp_opts
+    initialize!(struc; floor_type = :flat_plate, floor_opts = opts)
     
     # HUGE 30" columns so punching passes easily, isolating deflection check
     for col in struc.columns
@@ -743,10 +743,10 @@ function test_punching_failure()
     fp_opts = FlatPlateOptions(
         shear_studs = :never,  # Force column growth
         max_column_size = 24.0u"inch",
-        analysis_method = :ddm
+        method = DDM()
     )
-    opts = FloorOptions(flat_plate = fp_opts, tributary_axis = nothing)
-    initialize!(struc; floor_type = :flat_plate, floor_kwargs = (options = opts,))
+    opts = fp_opts
+    initialize!(struc; floor_type = :flat_plate, floor_opts = opts)
     
     # TINY 12" columns - guaranteed punching failure
     for col in struc.columns
@@ -805,11 +805,11 @@ function test_deflection_failure()
     fp_opts = FlatPlateOptions(
         shear_studs = :never,
         max_column_size = 36.0u"inch",
-        analysis_method = :ddm,
+        method = DDM(),
         deflection_limit = :L_480  # Very strict limit
     )
-    opts = FloorOptions(flat_plate = fp_opts, tributary_axis = nothing)
-    initialize!(struc; floor_type = :flat_plate, floor_kwargs = (options = opts,))
+    opts = fp_opts
+    initialize!(struc; floor_type = :flat_plate, floor_opts = opts)
     
     # HUGE columns so punching won't govern
     for col in struc.columns
@@ -876,10 +876,10 @@ function test_one_way_shear_failure()
     fp_opts = FlatPlateOptions(
         shear_studs = :if_needed,
         max_column_size = 30.0u"inch",
-        analysis_method = :ddm
+        method = DDM()
     )
-    opts = FloorOptions(flat_plate = fp_opts, tributary_axis = nothing)
-    initialize!(struc; floor_type = :flat_plate, floor_kwargs = (options = opts,))
+    opts = fp_opts
+    initialize!(struc; floor_type = :flat_plate, floor_opts = opts)
     
     # Large columns to avoid punching dominating
     for col in struc.columns
@@ -946,11 +946,11 @@ function test_combined_failures()
     fp_opts = FlatPlateOptions(
         shear_studs = :if_needed,
         max_column_size = 30.0u"inch",
-        analysis_method = :ddm,
+        method = DDM(),
         deflection_limit = :L_480
     )
-    opts = FloorOptions(flat_plate = fp_opts, tributary_axis = nothing)
-    initialize!(struc; floor_type = :flat_plate, floor_kwargs = (options = opts,))
+    opts = fp_opts
+    initialize!(struc; floor_type = :flat_plate, floor_opts = opts)
     
     # Small columns + long spans = punching stress
     for col in struc.columns

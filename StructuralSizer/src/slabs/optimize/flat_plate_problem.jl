@@ -18,7 +18,7 @@
 #      c. Scores (concrete + rebar) by the chosen objective
 #   5. Returns the best feasible (bar_size, objective) or infeasible
 #
-# Reference: ACI 318-19 Chapters 8, 22, 24
+# Reference: ACI 318-11 Chapters 9, 10, 11, 13
 # ==============================================================================
 
 # ==============================================================================
@@ -150,7 +150,7 @@ function FlatPlateNLPProblem(
     # Bounds
     ln_max   = max(l1, l2)
     has_edge = any(p != :interior for p in col_positions)
-    h_aci    = min_thickness_flat_plate(ln_max; discontinuous_edge=has_edge)
+    h_aci    = min_thickness(FlatPlate(), ln_max; discontinuous_edge=has_edge)
     h_min_in = isnothing(opts.min_h) ? ustrip(u"inch", h_aci) : ustrip(u"inch", opts.min_h)
     h_max_in = isnothing(h_max)     ? h_min_in + 6.0          : ustrip(u"inch", h_max)
 
@@ -228,7 +228,8 @@ function evaluate(p::FlatPlateNLPProblem, x::Vector{Float64})
     sw  = slab_self_weight(h, p.γ_concrete)
     qD  = uconvert(psf, p.sdl) + sw
     qL  = uconvert(psf, p.qL)
-    qu  = factored_pressure(default_combo, qD, qL)
+    qu  = max(factored_pressure(default_combo, qD, qL),
+              factored_pressure(strength_1_4D, qD, qL))
 
     # ── DDM moments ──
     l1 = uconvert(u"ft", p.l1)
@@ -386,6 +387,10 @@ function _evaluate_rebar_for_size(p::FlatPlateNLPProblem, moment_results, h, d, 
 
     for (Mu, width, label) in strip_designs
         As_reqd  = required_reinforcement(Mu, width, d, p.fc, p.fy)
+        # Section inadequate — return Inf to signal infeasible point
+        if isinf(As_reqd)
+            return (total_As=Inf*u"inch^2", As_pos_cs=Inf*u"inch^2")
+        end
         As_min   = minimum_reinforcement(width, h, p.fy)
         As_design = max(As_reqd, As_min)
 

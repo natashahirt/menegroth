@@ -177,7 +177,7 @@ section_modulus_bottom(s::RCBeamSection) = gross_moment_of_inertia(s) / (s.h / 2
 is_doubly_reinforced(s::RCBeamSection) = s.n_bars_prime > 0
 
 # ==============================================================================
-# Validation (ACI 318-14 §9.6.1 / §9.7)
+# Validation (ACI 318-11 §10.5 / §7.6)
 # ==============================================================================
 
 """

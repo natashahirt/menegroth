@@ -1,8 +1,8 @@
 # =============================================================================
-# CIP Flat Plate Design per ACI 318-14/19
+# CIP Flat Plate Design per ACI 318-11
 # =============================================================================
 #
-# Methodology: StructurePoint Design Examples (ACI 318-14)
+# Methodology: StructurePoint Design Examples (ACI 318-11)
 # Equations: Broyles, Solnosky, Brown (2024) - Supplementary Document
 #
 # Reference: DE-Two-Way-Flat-Plate-Concrete-Floor-System-Analysis-and-Design-ACI-318-14-spSlab-v1000.pdf
@@ -12,13 +12,13 @@
 # NOT YET IMPLEMENTED (Future Work)
 # =============================================================================
 #
-# 1. Shear Reinforcement (ACI 318-19 §22.6)
+# 1. Shear Reinforcement (ACI 318-11 §11.11.5)
 #    - Stud rails / headed shear studs for punching shear enhancement
 #    - Stirrup cages around columns
 #    - vn = vc + vs calculations where shear exceeds concrete capacity
 #    Note: Currently punching shear failure requires column size or slab thickness increase
 #
-# 2. Pattern Loading (ACI 318-14 §6.4.3.2)  
+# 2. Pattern Loading (ACI 318-11 §13.7.6)  
 #    - Only required when L/D > 0.75 (live load > 3/4 dead load)
 #    - Checkerboard loading, adjacent spans loaded patterns
 #    - Envelope of maximum/minimum moments at each location
@@ -38,7 +38,7 @@
 # for ACI compatibility) and return results with explicit units.
 #
 # Example:
-#   h = min_thickness_flat_plate(16.67u"ft")  # Returns Quantity in inches
+#   h = min_thickness(FlatPlate(), 16.67u"ft")  # Returns Quantity in inches
 #   fc = 4000u"psi"
 #   Ec_val = Ec(fc, 150)  # Returns Quantity in psi (wc=150 pcf)
 #
@@ -79,34 +79,6 @@ sw = slab_self_weight(h, ρ)  # ≈ 87.5 psf
 """
 slab_self_weight(h, ρ) = uconvert(psf, h * ρ * GRAVITY)
 
-# =============================================================================
-# Phase 2: Slab Thickness (ACI 8.3.1.1)
-# =============================================================================
-
-"""
-    min_thickness_flat_plate(ln; discontinuous_edge=false)
-
-Minimum flat plate thickness per ACI 318-14 Table 8.3.1.1.
-
-# Arguments
-- `ln`: Clear span (face-to-face of columns) - longer span governs
-- `discontinuous_edge`: true if slab has discontinuous edge (exterior panel)
-
-# Returns
-- Minimum thickness h (with 5 inch absolute minimum)
-
-# Reference
-- ACI 318-14 Table 8.3.1.1, Row 1 (flat plates)
-- StructurePoint Example: ln = 16.67 ft → h_min = 6.06 in → use 7 in
-"""
-function min_thickness_flat_plate(ln::Length; discontinuous_edge::Bool=false)
-    # ACI formula: h_min = ln/30 (exterior) or ln/33 (interior)
-    divisor = discontinuous_edge ? 30 : 33
-    h_min = ln / divisor
-    
-    # Absolute minimum per ACI 8.3.1.1: 5 inches
-    return max(h_min, 5.0u"inch")
-end
 
 """
     clear_span(l, c; shape=:rectangular)
@@ -130,7 +102,7 @@ function clear_span(l::Length, c::Length; shape::Symbol=:rectangular)
 end
 
 # =============================================================================
-# Circular Column Utilities (ACI 318-19 R22.6.4.1)
+# Circular Column Utilities (ACI 318-11 R13.6.2.5)
 # =============================================================================
 
 """
@@ -144,8 +116,8 @@ Preserves cross-sectional area: π D²/4 = c_eq².
 Used for clear span, torsional constant, and EFM stiffness calculations.
 
 # Reference
-- ACI 318-19 R22.6.4.1
-- PCA Notes on ACI 318: "For circular columns, use equivalent square"
+- ACI 318-11 R13.6.2.5
+- PCA Notes on ACI 318-11: "For circular columns, use equivalent square"
 """
 function equivalent_square_column(D::Length)
     return D * sqrt(π / 4)
@@ -163,13 +135,13 @@ function circular_column_Ic(D::Length)
 end
 
 # =============================================================================
-# Phase 3: Static Moment & Moment Distribution (ACI 8.10)
+# Phase 3: Static Moment & Moment Distribution (ACI 318-11 §13.6)
 # =============================================================================
 
 """
     total_static_moment(qu, l2, ln)
 
-Total factored static moment per ACI 318-14 Eq. 8.10.3.2.
+Total factored static moment per ACI 318-11 Eq. (13-4).
 
     M₀ = (qᵤ × l₂ × lₙ²) / 8
 
@@ -179,7 +151,7 @@ Total factored static moment per ACI 318-14 Eq. 8.10.3.2.
 - `ln`: Clear span (face-to-face of columns)
 
 # Reference
-- ACI 318-14 Section 8.10.3.2
+- ACI 318-11 §13.6.2.2 (Eq. 13-4)
 - StructurePoint Example: qu=0.193 ksf, l2=14 ft, ln=16.67 ft → M₀ = 93.82 k-ft
 """
 function total_static_moment(qu::Pressure, l2::Length, ln::Length)
@@ -214,7 +186,7 @@ End span middle strip: 0.00 + 0.235 + 0.18 = 0.415
 
 # Reference
 - Supplementary Document Table S-1 (primary source)
-- ACI 318-14 Tables 8.10.4.2, 8.10.5.1-5.5 (underlying methodology)
+- ACI 318-11 §13.6.3, §13.6.4 (underlying methodology)
 """
 const MDDM_COEFFICIENTS = (
     # End span (exterior span with one exterior support)
@@ -247,14 +219,14 @@ const MDDM_COEFFICIENTS = (
 )
 
 """
-ACI DDM Longitudinal Distribution Coefficients per ACI 318-14 Table 8.10.4.2.
+ACI DDM Longitudinal Distribution Coefficients per ACI 318-11 §13.6.3.
 
 These are the code-mandated coefficients for distributing total static moment M₀
 to negative and positive moment regions along the span. These apply before
 transverse distribution to column/middle strips.
 
 # Source
-- ACI 318-14 Table 8.10.4.2 (longitudinal distribution)
+- ACI 318-11 §13.6.3.2 (interior), §13.6.3.3 (end span)
 - Supplementary Document Table S-1 (uses same values: 0.26, 0.52, 0.70)
 
 # Note
@@ -262,7 +234,7 @@ Transverse distribution to column/middle strips uses ACI Tables 8.10.5.1-5.7
 and varies with l₂/l₁ and αf. For flat plates (αf = 0), see distribute_moments_aci().
 
 # Reference
-- ACI 318-14 Table 8.10.4.2
+- ACI 318-11 §13.6.3
 - StructurePoint DE-Two-Way-Flat-Plate Table 6
 """
 const ACI_DDM_LONGITUDINAL = (
@@ -280,13 +252,13 @@ const ACI_DDM_LONGITUDINAL = (
 )
 
 """
-ACI Table 8.10.5.1 - Column strip negative moment at interior supports.
+ACI 318-11 §13.6.4.1 — Column strip negative moment at interior supports.
 For flat plates (αf = 0), always 75%.
 """
 const ACI_COL_STRIP_INT_NEG = 0.75
 
 """
-ACI Table 8.10.5.2 - Column strip negative moment at exterior supports.
+ACI 318-11 §13.6.4.2 — Column strip negative moment at exterior supports.
 Without edge beam (βt = 0), always 100%.
 """
 const ACI_COL_STRIP_EXT_NEG_NO_BEAM = 1.00
@@ -294,7 +266,7 @@ const ACI_COL_STRIP_EXT_NEG_NO_BEAM = 1.00
 """
     edge_beam_βt(h, c1, c2, l2, Ecs_slab, Ecs_beam)
 
-Compute the torsional stiffness ratio β_t for an edge beam per ACI 318-19 §8.10.5.2.
+Compute the torsional stiffness ratio β_t for an edge beam per ACI 318-11 Eq. (13-5).
 
     β_t = E_cb × C / (2 × E_cs × I_s)
 
@@ -314,8 +286,8 @@ conservative (low) β_t for a flat plate with spandrel columns.
 Dimensionless torsional stiffness ratio β_t
 
 # Reference
-- ACI 318-19 §8.10.5.2, Eq. 8.10.5.2(a)
-- ACI 318-19 R8.4.1.8 (effective beam section)
+- ACI 318-11 §13.6.4.2, Eq. (13-5)
+- ACI 318-11 §13.2.4 (effective beam section)
 """
 function edge_beam_βt(h::Length, c1::Length, c2::Length, l2::Length;
                       Ecs_slab::Pressure = 1.0u"psi",
@@ -338,7 +310,7 @@ end
 """
     aci_ddm_longitudinal_with_edge_beam(βt) -> NamedTuple
 
-ACI 318-19 Table 8.10.4.2 longitudinal distribution coefficients,
+ACI 318-11 §13.6.3.3 longitudinal distribution coefficients,
 interpolated for edge beam stiffness ratio β_t.
 
 Interpolates linearly between:
@@ -346,7 +318,7 @@ Interpolates linearly between:
 - β_t ≥ 2.5 (full edge beam): ext_neg=0.30, pos=0.50, int_neg=0.70
 
 # Reference
-- ACI 318-19 Table 8.10.4.2 (both rows for αf×l₂/l₁ = 0)
+- ACI 318-11 §13.6.3.3, Columns (3) and (4)
 """
 function aci_ddm_longitudinal_with_edge_beam(βt::Float64)
     t = clamp(βt / 2.5, 0.0, 1.0)  # interpolation parameter [0,1]
@@ -361,14 +333,14 @@ end
 """
     aci_col_strip_ext_neg_fraction(βt)
 
-ACI Table 8.10.5.2 — Column strip fraction of exterior negative moment.
+ACI 318-11 §13.6.4.2 — Column strip fraction of exterior negative moment.
 
 Interpolates linearly between:
 - β_t = 0: 100% to column strip
 - β_t ≥ 2.5: 75% to column strip
 
 # Reference
-- ACI 318-19 Table 8.10.5.2 (for l₂/l₁ = 1.0, αf = 0)
+- ACI 318-11 §13.6.4.2 (for l₂/l₁ = 1.0, αf = 0)
 """
 function aci_col_strip_ext_neg_fraction(βt::Float64)
     t = clamp(βt / 2.5, 0.0, 1.0)
@@ -376,7 +348,7 @@ function aci_col_strip_ext_neg_fraction(βt::Float64)
 end
 
 """
-ACI Table 8.10.5.5 - Column strip positive moment.
+ACI 318-11 §13.6.4.4 — Column strip positive moment.
 For flat plates (αf = 0), constant at 60% regardless of l₂/l₁.
 """
 function aci_col_strip_positive(l2_l1::Float64)
@@ -432,7 +404,7 @@ end
 """
     distribute_moments_aci(M0, span_type::Symbol, l2_l1::Float64; edge_beam::Bool=false)
 
-Distribute moments using full ACI DDM procedure (Tables 8.10.4-5).
+Distribute moments using full ACI 318-11 DDM procedure (§13.6.3–13.6.6).
 
 # Arguments
 - `M0`: Total static moment
@@ -503,7 +475,7 @@ function distribute_moments_aci(M0, span_type::Symbol, l2_l1::Float64;
 end
 
 # =============================================================================
-# Phase 4: Equivalent Frame Method (EFM) - ACI 318-14 Section 8.11
+# Phase 4: Equivalent Frame Method (EFM) - ACI 318-11 §13.7
 # =============================================================================
 #
 # Reference: StructurePoint DE-Two-Way-Flat-Plate-...-ACI-318-14-spSlab-v1000.pdf
@@ -533,7 +505,7 @@ Gross moment of inertia for slab strip per unit of span direction.
 Moment of inertia (Length⁴)
 
 # Reference
-- ACI 318-14 Section 8.11.3
+- ACI 318-11 §13.7.3
 - StructurePoint Example: l2=168 in, h=7 in → Is = 4,802 in⁴
 """
 function slab_moment_of_inertia(l2::Length, h::Length)
@@ -557,7 +529,7 @@ Gross moment of inertia for column section.
 Moment of inertia (Length⁴)
 
 # Reference
-- ACI 318-14 Section 8.11.4
+- ACI 318-11 §13.7.4
 - StructurePoint Example: c1=c2=16 in → Ic = 5,461 in⁴
 """
 function column_moment_of_inertia(c1::Length, c2::Length; shape::Symbol=:rectangular)
@@ -571,7 +543,7 @@ end
 """
     torsional_constant_C(x, y)
 
-Cross-sectional constant C for torsional member per ACI 318-14 Eq. 8.10.5.2b.
+Cross-sectional constant C for torsional member per ACI 318-11 Eq. (13-6).
 
     C = Σ(1 - 0.63×(x/y)) × (x³×y/3)
 
@@ -587,7 +559,7 @@ For flat plate without beams, the torsional member is a slab strip with:
 Torsional constant C (Length⁴)
 
 # Reference
-- ACI 318-14 Eq. 8.10.5.2b
+- ACI 318-11 Eq. (13-6)
 - StructurePoint Example: x=7 in, y=16 in → C = 1,325 in⁴
 """
 function torsional_constant_C(x::Length, y::Length)
@@ -595,7 +567,7 @@ function torsional_constant_C(x::Length, y::Length)
     x_short = min(x, y)
     y_long = max(x, y)
     
-    # ACI 8.10.5.2b: C = (1 - 0.63x/y) × x³y/3
+    # ACI 318-11 Eq. (13-6): C = (1 - 0.63x/y) × x³y/3
     # Ratio is dimensionless, so units work out to Length⁴
     return (1 - 0.63 * (x_short / y_long)) * (x_short^3 * y_long / 3)
 end
@@ -603,7 +575,7 @@ end
 """
     slab_beam_stiffness_Ksb(Ecs, Is, l1, c1, c2; k_factor=PCA_K_SLAB)
 
-Flexural stiffness of slab-beam at both ends per ACI 318-14 Section 8.11.3.
+Flexural stiffness of slab-beam at both ends per ACI 318-11 §13.7.3.
 
     Kₛᵦ = k × Eᶜₛ × Iₛ / l₁
 
@@ -623,7 +595,7 @@ The stiffness factor k accounts for the non-prismatic section:
 Slab-beam stiffness Ksb (Moment units, e.g., in-lb)
 
 # Reference
-- ACI 318-14 Section 8.11.3
+- ACI 318-11 §13.7.3
 - PCA Notes on ACI 318-11 Table A1
 - StructurePoint Example: Ecs=3,834×10³ psi, Is=4,802 in⁴, l1=18 ft=216 in
   → Ksb = 4.127 × 3,834×10³ × 4,802 / 216 = 351,766,909 in-lb
@@ -653,7 +625,7 @@ end
 """
     column_stiffness_Kc(Ecc, Ic, H, h; k_factor=PCA_K_COL)
 
-Flexural stiffness of column at slab-beam joint per ACI 318-14 Section 8.11.4.
+Flexural stiffness of column at slab-beam joint per ACI 318-11 §13.7.4.
 
     Kᶜ = k × Eᶜᶜ × Iᶜ / H
 
@@ -674,7 +646,7 @@ Default k = `PCA_K_COL` (4.74) from PCA Notes Table A7 for ta/tb = 1, H/Hc ≈ 1
 Column stiffness Kc (Moment units, e.g., in-lb)
 
 # Reference
-- ACI 318-14 Section 8.11.4
+- ACI 318-11 §13.7.4
 - PCA Notes on ACI 318-11 Table A7
 - StructurePoint Example: Ecc=4,696×10³ psi, Ic=5,461 in⁴, H=108 in
   → Kc = 4.74 × 4,696×10³ × 5,461 / 108 = 1,125,592,936 in-lb
@@ -702,7 +674,7 @@ end
 """
     torsional_member_stiffness_Kt(Ecs, C, l2, c2)
 
-Torsional stiffness of transverse slab strip per ACI 318-14 Section R8.11.5.
+Torsional stiffness of transverse slab strip per ACI 318-11 R13.7.5.
 
     Kₜ = 9 × Eᶜₛ × C / (l₂ × (1 - c₂/l₂)³)
 
@@ -719,12 +691,12 @@ it's a slab strip with width equal to the column dimension c1.
 Torsional stiffness Kt (Moment units, e.g., in-lb)
 
 # Reference
-- ACI 318-14 Section R8.11.5, Eq. R8.11.5
+- ACI 318-11 R13.7.5
 - StructurePoint Example: Ecs=3,834×10³ psi, C=1,325 in⁴, l2=168 in, c2=16 in
   → Kt = 9 × 3,834×10³ × 1,325 / (168 × (1 - 16/168)³) = 367,484,240 in-lb
 """
 function torsional_member_stiffness_Kt(Ecs::Pressure, C::TorsionalConstant, l2::Length, c2::Length)
-    # ACI R8.11.5: Kt = 9 × Ec × C / (l2 × (1 - c2/l2)³)
+    # ACI 318-11 R13.7.5: Kt = 9 × Ec × C / (l2 × (1 - c2/l2)³)
     # C has units of Length⁴ (torsional constant = x³y/3 for rectangular section)
     # Convert to consistent units to avoid Unitful overflow
     Ec = ustrip(u"psi", Ecs)
@@ -754,7 +726,7 @@ Or equivalently:
 Equivalent column stiffness Kec (Moment units)
 
 # Reference
-- ACI 318-14 Section 8.11.5
+- ACI 318-11 §13.7.5 (series combination of column + torsional stiffness)
 - StructurePoint Example: ΣKc = 2×1,125.6×10⁶, ΣKt = 2×367.5×10⁶
   → Kec = (2×1125.6 × 2×367.5) / (2×1125.6 + 2×367.5) × 10⁶ = 554,074,058 in-lb
 
@@ -863,7 +835,7 @@ end
 """
     face_of_support_moment(M_centerline, V, c, l1)
 
-Reduce centerline moment to face-of-support for design per ACI 318-14 8.11.6.1.
+Reduce centerline moment to face-of-support for design per ACI 318-11 §13.7.7.1.
 
     M_face = M_centerline - V × (c/2)
 
@@ -879,7 +851,7 @@ But not less than M at 0.175×l1 from column center.
 Design moment at face of support
 
 # Reference
-- ACI 318-14 Section 8.11.6.1
+- ACI 318-11 §13.7.7.1
 - StructurePoint Example: M_cl = 83.91 kip-ft, V = 26.39 kip, c = 16/12 ft
   → M_face = 83.91 - 26.39 × (16/12/2) = 66.32 ft-kip
   
@@ -891,7 +863,7 @@ function face_of_support_moment(M_centerline, V, c::Length, l1::Length)
     # Distance to face of support
     d_face = c / 2
     
-    # Maximum distance for moment reduction (ACI 8.11.6.1)
+    # Maximum distance for moment reduction (ACI 318-11 §13.7.7.1)
     d_max = 0.175 * l1
     
     # Use smaller of face distance or max distance
@@ -904,14 +876,14 @@ function face_of_support_moment(M_centerline, V, c::Length, l1::Length)
 end
 
 # =============================================================================
-# Phase 5: Reinforcement Design (ACI 8.6, 22.2)
+# Phase 5: Reinforcement Design (ACI 318-11 §13.3, §10.5)
 
 """
     minimum_reinforcement(b, h, fy)
 
-Minimum reinforcement per ACI 318-14 Table 8.6.1.1 for shrinkage and temperature.
+Minimum reinforcement per ACI 318-11 §13.3.1 / §7.12.2.1 for shrinkage and temperature.
 
-# Minimum Ratios (ACI Table 8.6.1.1)
+# Minimum Ratios (ACI 318-11 §7.12.2.1)
 - fy < 60 ksi:  ρ_min = 0.0020
 - 60 ≤ fy < 77 ksi: ρ_min = 0.0018
 - fy ≥ 77 ksi:  ρ_min = max(0.0014, 0.0018 × 60000/fy)
@@ -925,11 +897,11 @@ Minimum reinforcement per ACI 318-14 Table 8.6.1.1 for shrinkage and temperature
 - As_min = ρ_min × b × h
 
 # Reference
-- ACI 318-14 Table 8.6.1.1
+- ACI 318-11 §13.3.1, §7.12.2.1
 - StructurePoint Example: fy=60ksi → As_min = 0.0018 × b × h
 """
 function minimum_reinforcement(b::Length, h::Length, fy::Pressure)
-    # ACI 318-14 Table 8.6.1.1 thresholds
+    # ACI 318-11 §7.12.2.1 thresholds
     # Round to nearest psi to avoid Asap ksi ↔ Unitful psi conversion gap
     fy_psi = round(Int, ustrip(u"psi", fy))
     
@@ -971,7 +943,7 @@ For **one-way** slabs (`two_way=false`), only one bar layer:
 - `two_way`: Use average depth for two orthogonal bar layers (default `true`)
 
 # Reference
-- ACI 318-14 R22.6.1: "d shall be the average of the effective depths in the
+- ACI 318-11 R11.11.1: "d shall be the average of the effective depths in the
   two orthogonal directions"
 - StructurePoint Example: d_avg = 5.75 in (h=7", cover=0.75", #4 bars)
 """
@@ -988,15 +960,15 @@ end
 """
     max_bar_spacing(h)
 
-Maximum bar spacing per ACI 8.7.2.2.
+Maximum bar spacing per ACI 318-11 §13.3.2.
 
     s_max = min(2h, 18 in)
 
 # Reference
-- ACI 318-14 Section 8.7.2.2
+- ACI 318-11 §13.3.2
 """
 function max_bar_spacing(h::Length)
-    # ACI 8.7.2.2: s_max = min(2h, 18")
+    # ACI 318-11 §13.3.2: s_max = min(2h, 18")
     return min(2 * h, 18.0u"inch")
 end
 
@@ -1010,41 +982,23 @@ end
 
 
 # =============================================================================
-# Phase 6d+: Shear Stud Design (ACI 318-19 §22.6.8 / Ancon Shearfix)
+# Phase 6d+: Shear Stud Design (ACI 318-11 §11.11.5 / Ancon Shearfix)
 # =============================================================================
-
-"""
-    size_effect_factor_λs(d)
-
-ACI 318-19 size effect modification factor for punching shear.
-
-    λs = 2 / √(1 + d/254mm) ≤ 1.0
-
-# Reference
-- ACI 318-19 Eq. (22.5.5.1.3)
-- Ancon Shearfix Manual Eq. 7
-"""
-function size_effect_factor_λs(d::Length)
-    d_mm = ustrip(u"mm", d)
-    λs = 2.0 / sqrt(1.0 + d_mm / 254.0)
-    return min(λs, 1.0)
-end
 
 """
     punching_capacity_with_studs(fc, β, αs, b0, d, Av, s, fyt; λ=1.0)
 
-Punching shear capacity with headed shear stud reinforcement per ACI 318-19 §22.6.8.
+Punching shear capacity with headed shear stud reinforcement per ACI 318-11 §11.11.5.
 
 # Three Failure Modes Checked:
-1. Compression strut limit (vc,max)
+1. Nominal capacity limit (vc_max = 8√f'c, §11.11.3.2)
 2. Combined concrete + steel within studs (vcs + vs)
 3. Outer critical section (checked separately)
 
-# Formulas (ACI 318-19, US customary psi):
-- vc,max = 8√f'c (if s ≤ 0.5d), else 6√f'c
-- vcs = 0.75 × vc (reduced concrete contribution)
-- vs = Av × fyt / (b0 × s)
-- Combined: φ(vcs + vs) ≤ φ × vc,max
+# Formulas (ACI 318-11, US customary psi):
+- vcs = min(4λ√f'c, (2+4/β)λ√f'c, (αs d/b0+2)λ√f'c, 3λ√f'c)  §11.11.5.1
+- vs  = Av × fyt / (b0 × s)
+- vc_max = 8λ√f'c  (headed studs, §11.11.3.2)
 
 # Arguments
 - `fc`: Concrete compressive strength
@@ -1072,36 +1026,27 @@ function punching_capacity_with_studs(
     λ::Float64 = 1.0
 )
     sqrt_fc = sqrt(ustrip(u"psi", fc))
-    λs = size_effect_factor_λs(d)
     b0_in = ustrip(u"inch", b0)
     d_in = ustrip(u"inch", d)
     s_in = ustrip(u"inch", s)
     Av_in2 = ustrip(u"inch^2", Av)
     fyt_psi = ustrip(u"psi", fyt)
     
-    # Reduced concrete contribution with studs (ACI 318-19 §22.6.6.1)
-    # vcs = 0.75 × vc (concrete capacity is reduced when studs are used)
-    # US customary coefficients (psi): 0.75 × {4, (2+4/β), (αs·d/b0+2)} √f'c
-    #   → {3.0, 1.5(1+2/β) ≈ Ancon rounds to 2.0, 0.75(2+αs·d/b0) ≈ 1.0×(...)}
-    # Note: sqrt_fc is √f'c in psi, so coefficients must be US customary.
-    vcs_a = 3.0 * λs * λ * sqrt_fc
-    vcs_b = (1.5 + 3.0/β) * λs * λ * sqrt_fc
-    vcs_c = 0.75 * (2 + αs * d_in / b0_in) * λs * λ * sqrt_fc
-    vcs = min(vcs_a, vcs_b, vcs_c)
+    # ACI 318-11 §11.11.5.1: Vc with studs ≤ 3λ√f'c × b0 × d
+    # Compute vc from §11.11.2.1, then cap at 3λ√f'c
+    vc_a = (2 + 4 / β) * λ * sqrt_fc               # Eq. (11-31)
+    vc_b = (αs * d_in / b0_in + 2) * λ * sqrt_fc   # Eq. (11-32)
+    vc_c = 4 * λ * sqrt_fc                          # Eq. (11-33)
+    vcs = min(min(vc_a, vc_b, vc_c), 3.0 * λ * sqrt_fc)
     
-    # Steel contribution (Ancon Eq. 13)
-    # vs = Av × fyt / (b0 × s)
+    # Steel contribution: vs = Av × fyt / (b0 × s)
     vs = s_in > 0 ? Av_in2 * fyt_psi / (b0_in * s_in) : 0.0
     
-    # Compression strut limit (ACI 318-19 §22.6.6.2)
-    # US customary: vc,max = 8√f'c if s ≤ 0.5d, else 6√f'c
-    if s_in <= 0.5 * d_in
-        vc_max = 8.0 * sqrt_fc
-    else
-        vc_max = 6.0 * sqrt_fc
-    end
+    # Nominal capacity limit for headed studs (ACI 318-11 §11.11.3.2)
+    # Vn ≤ 8√f'c × b0 × d
+    vc_max = 8.0 * λ * sqrt_fc
     
-    # Combined capacity (but limited by compression strut)
+    # Combined capacity (but limited by nominal cap)
     vc_total = min(vcs + vs, vc_max)
     compression_ok = (vcs + vs) <= vc_max
     
@@ -1117,44 +1062,42 @@ end
 """
     punching_capacity_outer(fc, d; λ=1.0)
 
-Punching capacity at outer critical section (beyond shear studs) per ACI 318-19.
+Punching capacity at outer critical section (beyond shear studs).
 
-    vc,out = 4 × λs × λ × √f'c  (psi)
+    vc,out = 2λ√f'c  (psi)
 
-Uses the ACI 22.6.5.2(a) basic two-way shear limit at the outer perimeter.
-The outer critical section is at d/2 beyond the last stud rail, where β ≈ 1
-and b0 is large enough that (a) and (c) don't reduce below 4√f'c.
+At d/2 beyond the outermost peripheral line of studs, the concrete is
+unreinforced. ACI 318-11 §11.11.5.4 requires vu ≤ φ × 2λ√f'c at this section.
 
 # Reference
-- ACI 318-19 §22.6.5.2(a)
+- ACI 318-11 §11.11.5.4
 """
 function punching_capacity_outer(fc::Pressure, d::Length; λ::Float64 = 1.0)
-    # At the outer critical section (beyond stud zone), concrete is unreinforced
-    # For flat plates (two-way slabs), use the same limits as interior punching:
-    # vc = 4λ√f'c (conservative, ignores β and αs which improve capacity at larger perimeters)
     sqrt_fc = sqrt(ustrip(u"psi", fc))
-    λs = size_effect_factor_λs(d)
-    # Using 4√f'c for consistency with inner section analysis
-    vc_out = 4.0 * λs * λ * sqrt_fc
+    vc_out = 2.0 * λ * sqrt_fc
     return vc_out * u"psi"
 end
 
 """
     minimum_stud_reinforcement(fc, b0, fyt)
 
-Minimum shear stud reinforcement per ACI 318-19 §22.6.8.3.
+Minimum shear stud reinforcement per ACI 318-11 §11.11.5.1:
 
-    Av/s ≥ 0.17√f'c × b0/fyt
+    Av × fyt / (b0 × s) ≥ 2√f'c   →   Av/s ≥ 2√f'c × b0 / fyt
 
 # Returns
 Minimum Av/s ratio (Area/Length)
+
+# Reference
+- ACI 318-11 §11.11.5.1
 """
 function minimum_stud_reinforcement(fc::Pressure, b0::Length, fyt::Pressure)
     sqrt_fc = sqrt(ustrip(u"psi", fc))
     b0_in = ustrip(u"inch", b0)
     fyt_psi = ustrip(u"psi", fyt)
     
-    Av_s_min = 0.17 * sqrt_fc * b0_in / fyt_psi
+    # ACI 318-11 §11.11.5.1: Av*fyt/(b0*s) ≥ 2√f'c
+    Av_s_min = 2.0 * sqrt_fc * b0_in / fyt_psi
     return Av_s_min * u"inch^2/inch"
 end
 
@@ -1168,16 +1111,16 @@ function stud_area(diameter::Length)
 end
 
 """
-    design_shear_studs(vu, fc, β, αs, b0, d, position, fyt, stud_diameter; λ=1.0, φ=0.75)
+    design_shear_studs(vu, fc, β, αs, b0, d, position, fyt, stud_diameter; λ, φ, c1, c2, qu)
 
 Design headed shear stud reinforcement for a punching shear failure.
 
-# Design Steps (Ancon Shearfix Method):
-1. Compute required vs = vu/φ - vcs
+# Design Steps (ACI 318-11 §11.11.5 / Ancon Shearfix):
+1. Compute required vs = vu/φ − vcs
 2. Select number of rails based on position (8 interior, 6 edge, 4 corner)
 3. Determine Av per line from n_rails × stud_area
 4. Compute spacing s = Av × fyt / (b0 × vs)
-5. Apply detailing limits (s ≤ 0.75d or 0.5d if high stress)
+5. Apply detailing limits (s ≤ 0.75d or 0.5d if high stress, §11.11.5.2)
 6. Determine number of studs per rail for outer section adequacy
 
 # Arguments
@@ -1190,9 +1133,18 @@ Design headed shear stud reinforcement for a punching shear failure.
 - `position`: Column position (:interior, :edge, :corner)
 - `fyt`: Stud yield strength
 - `stud_diameter`: Stud diameter
+- `c1`, `c2`: Column dimensions (for outer section geometry; optional)
+- `qu`: Factored uniform pressure (for outer section Vu reduction; optional)
+
+When `c1`, `c2`, and `qu` are provided, the outer section check uses the
+exact ACI approach: Vu_outer = Vu_total − qu × A_enclosed.
+Otherwise falls back to the perimeter-ratio approximation.
 
 # Returns
 ShearStudDesign struct with complete stud layout
+
+# Reference
+- ACI 318-11 §11.11.3.2, §11.11.5
 """
 function design_shear_studs(
     vu::Pressure,
@@ -1205,20 +1157,22 @@ function design_shear_studs(
     fyt::Pressure,
     stud_diameter::Length;
     λ::Float64 = 1.0,
-    φ::Float64 = 0.75
+    φ::Float64 = 0.75,
+    c1::Union{Length, Nothing} = nothing,
+    c2::Union{Length, Nothing} = nothing,
+    qu::Union{Pressure, Nothing} = nothing
 )
     d_in = ustrip(u"inch", d)
     b0_in = ustrip(u"inch", b0)
     vu_psi = ustrip(u"psi", vu)
     sqrt_fc = sqrt(ustrip(u"psi", fc))
-    λs = size_effect_factor_λs(d)
     fyt_psi = ustrip(u"psi", fyt)
     
     # Convert fyt to psi for consistent units in ShearStudDesign struct
     fyt_unit = fyt_psi * u"psi"
     
-    # Maximum nominal shear strength with headed studs (ACI 318-19 §22.6.8.2)
-    # vn_max = 8λ√f'c at the critical section d/2 from column
+    # Maximum nominal shear strength with headed studs (ACI 318-11 §11.11.3.2)
+    # Vn ≤ 8√f'c × b0 × d
     vc_max = 8.0 * λ * sqrt_fc
     
     # Check if studs can solve the problem
@@ -1240,12 +1194,12 @@ function design_shear_studs(
         )
     end
     
-    # Reduced concrete contribution with studs (US customary, psi)
-    # vcs = 0.75 × vc per ACI 318-19 §22.6.6.1
-    vcs_a = 3.0 * λs * λ * sqrt_fc
-    vcs_b = (1.5 + 3.0/β) * λs * λ * sqrt_fc
-    vcs_c = 0.75 * (2 + αs * d_in / b0_in) * λs * λ * sqrt_fc
-    vcs = min(vcs_a, vcs_b, vcs_c)
+    # ACI 318-11 §11.11.5.1: Vc with studs ≤ 3λ√f'c × b0 × d
+    # Compute vc from §11.11.2.1, then cap at 3λ√f'c
+    vc_a = (2 + 4 / β) * λ * sqrt_fc               # Eq. (11-31)
+    vc_b = (αs * d_in / b0_in + 2) * λ * sqrt_fc   # Eq. (11-32)
+    vc_c = 4 * λ * sqrt_fc                          # Eq. (11-33)
+    vcs = min(min(vc_a, vc_b, vc_c), 3.0 * λ * sqrt_fc)
     
     # Required steel contribution
     vs_reqd = max(vu_psi / φ - vcs, 0.0)
@@ -1268,10 +1222,11 @@ function design_shear_studs(
         s_reqd = 0.75 * d_in  # Use max allowed if no steel required
     end
     
-    # Apply detailing limits (ACI 318-19 Table 22.6.8.1)
-    # Max spacing = 0.75d (or 0.5d when steel contribution vs > 2√f'c)
-    high_stress = vs_reqd > 2.0 * λ * sqrt_fc
-    s_max = high_stress ? 0.5 * d_in : min(0.75 * d_in, 500.0 / 25.4)  # 500mm limit
+    # ACI 318-11 §11.11.5.2: spacing limits based on total factored shear stress
+    # (a) s ≤ 0.75d when vu ≤ 6φ√f'c
+    # (b) s ≤ 0.5d  when vu > 6φ√f'c
+    high_stress = vu_psi > 6.0 * φ * sqrt_fc
+    s_max = high_stress ? 0.5 * d_in : 0.75 * d_in
     s = min(s_reqd, s_max)
     
     # Check minimum reinforcement
@@ -1302,12 +1257,50 @@ function design_shear_studs(
     stud_zone = s0 + (n_studs - 1) * s
     outer_perimeter_dist = stud_zone + d_in / 2
     
-    # Outer perimeter is larger → shear stress is lower
-    # b0_out ≈ b0 + 8 × outer_perimeter_dist (for interior column, 4 sides each +2×dist)
-    b0_out = b0_in + 8 * outer_perimeter_dist
+    # Outer perimeter geometry — position-aware (ACI 318-11 §11.11.5.4)
+    # Total offset from column face to outer critical section
+    total_offset_in = outer_perimeter_dist  # s0 + (n-1)*s + d/2
     
-    # Shear stress at outer section (approximate - shear reduces by ratio of perimeters)
-    vu_out_psi = vu_psi * b0_in / b0_out
+    if !isnothing(c1) && !isnothing(c2) && !isnothing(qu)
+        # ─── Exact ACI approach (R22.6.4.1) ───
+        # Compute outer perimeter and enclosed area from actual geometry
+        c1_in = ustrip(u"inch", c1)
+        c2_in_col = ustrip(u"inch", c2)
+        
+        if position == :interior
+            # 4-sided: rectangle (c1 + 2×offset) × (c2 + 2×offset)
+            b1_out = c1_in + 2 * total_offset_in
+            b2_out = c2_in_col + 2 * total_offset_in
+            b0_out = 2 * b1_out + 2 * b2_out
+            A_enclosed_in2 = b1_out * b2_out
+        elseif position == :edge
+            # 3-sided: slab edge clips one side of c1
+            b1_out = c1_in / 2 + total_offset_in
+            b2_out = c2_in_col + 2 * total_offset_in
+            b0_out = 2 * b1_out + b2_out
+            A_enclosed_in2 = b1_out * b2_out
+        else  # :corner
+            # 2-sided: two slab edges clip
+            b1_out = c1_in / 2 + total_offset_in
+            b2_out = c2_in_col / 2 + total_offset_in
+            b0_out = b1_out + b2_out
+            A_enclosed_in2 = b1_out * b2_out
+        end
+        
+        # Vu at outer section = Vu_total - qu × A_enclosed
+        Vu_total_psi_in = vu_psi * b0_in * d_in  # total shear force (psi × in × in = lb)
+        qu_psi = ustrip(u"psi", qu)               # psf → psi via Unitful
+        load_in_zone = qu_psi * A_enclosed_in2     # lb of load inside outer perimeter
+        Vu_outer_lb = max(Vu_total_psi_in - load_in_zone, 0.0)
+        vu_out_psi = Vu_outer_lb / (b0_out * d_in)
+    else
+        # ─── Fallback: perimeter-ratio approximation ───
+        # Expand all sides uniformly (conservative for edge/corner)
+        n_sides = position == :interior ? 8 :
+                  position == :edge ? 6 : 4
+        b0_out = b0_in + n_sides * total_offset_in
+        vu_out_psi = vu_psi * b0_in / b0_out
+    end
     
     # Outer section check
     outer_ok = φ * vc_out_psi >= vu_out_psi
@@ -1364,7 +1357,7 @@ function check_punching_with_studs(vu::Pressure, studs::ShearStudDesign; φ::Flo
 end
 
 # =============================================================================
-# Phase 6e: Moment Transfer Reinforcement (ACI 8.4.2.3)
+# Phase 6e: Moment Transfer Reinforcement (ACI 318-11 §13.5.3)
 # =============================================================================
 
 """
@@ -1386,7 +1379,7 @@ The fraction γf×Mu must be transferred within effective width bb.
 Required As within effective width bb
 
 # Reference
-- ACI 318-14 Section 8.4.2.3
+- ACI 318-11 §13.5.3
 - StructurePoint Table 8
 """
 function transfer_reinforcement(
@@ -1449,7 +1442,7 @@ function additional_transfer_bars(
 end
 
 # =============================================================================
-# Phase 6b: Structural Integrity Reinforcement (ACI 318-19 §8.7.4.2)
+# Phase 6b: Structural Integrity Reinforcement (ACI 318-11 §13.3.8.5)
 # =============================================================================
 #
 # Structural integrity reinforcement prevents progressive collapse by requiring
@@ -1465,7 +1458,7 @@ end
         load_factor::Float64 = 2.0
     ) -> NamedTuple
 
-Calculate required structural integrity reinforcement per ACI 318-19 §8.7.4.2.
+Calculate required structural integrity reinforcement per ACI 318-11 §13.3.8.5.
 
 The required steel area provides tensile capacity to carry the reaction force
 from the tributary area under a progressive collapse scenario.
@@ -1488,8 +1481,8 @@ Named tuple with:
 - This is in addition to flexural reinforcement requirements
 
 # Reference
-- ACI 318-19 §8.7.4.2: Two-way slab structural integrity
-- ACI 318-19 §R8.7.4.2: Commentary on progressive collapse resistance
+- ACI 318-11 §13.3.8.5: Two-way slab structural integrity
+- ACI 318-11 R13.3.8: Commentary on progressive collapse resistance
 """
 function integrity_reinforcement(
     tributary_area::Area,
@@ -1550,7 +1543,7 @@ end
 
 Load distribution factor (LDF) for column or middle strip.
 
-Per ACI 318-14 Table 8.10.5.7.1, the negative and positive moments are distributed
+Per ACI 318-11 §13.6.4, the negative and positive moments are distributed
 to column and middle strips. The LDF represents the average portion of moment
 carried by the strip.
 
@@ -1565,7 +1558,7 @@ carried by the strip.
 - PCA Notes on ACI 318-11 Section 9.5.3.4
 """
 function load_distribution_factor(strip::Symbol, position::Symbol)
-    # Column strip distribution percentages from ACI Table 8.10.5.7.1:
+    # Column strip distribution percentages from ACI 318-11 §13.6.4:
     # - Exterior negative: 100% (no edge beam)
     # - Positive: 60%
     # - Interior negative: 75%
@@ -1576,12 +1569,12 @@ function load_distribution_factor(strip::Symbol, position::Symbol)
     
     if position == :exterior
         # End span: 
-        # ACI 8.10.5: LDF⁺ = 0.60, LDF⁻_ext = 1.00, LDF⁻_int = 0.75
+        # ACI 318-11 §13.6.4: LDF⁺ = 0.60, LDF⁻_ext = 1.00, LDF⁻_int = 0.75
         # LDFc = (2×0.60 + 1.00 + 0.75) / 4 = 2.95/4 = 0.7375 ≈ 0.738
         LDF_c = (2 * 0.60 + 1.00 + 0.75) / 4
     else
         # Interior span:
-        # ACI 8.10.5: LDF⁺ = 0.60, LDF⁻ = 0.75 both sides
+        # ACI 318-11 §13.6.4: LDF⁺ = 0.60, LDF⁻ = 0.75 both sides
         # LDFc = (2×0.60 + 0.75 + 0.75) / 4 = 2.70/4 = 0.675
         LDF_c = (2 * 0.60 + 0.75 + 0.75) / 4
     end
@@ -1767,7 +1760,7 @@ Assumes ρg ≈ 2% (typical), φ = 0.65 (compression-controlled)
 Simplifies to: Ag ≈ Pu / (0.40 × f'c)  for f'c ≤ 6000 psi
 
 # Reference
-- ACI 318-14 Section 22.4.2 (nominal axial strength)
+- ACI 318-11 §10.3.6 (nominal axial strength)
 - Rule of thumb: c ≈ √(Ag)
 
 # Example
@@ -1851,44 +1844,9 @@ end
 
 
 # =============================================================================
-# Flat Slab (Drop Panel) Calculations — ACI 318-19
+# Flat Slab (Drop Panel) Calculations — ACI 318-11
 # =============================================================================
 
-"""
-    min_thickness_flat_slab(ln; discontinuous_edge=false)
-
-Minimum flat slab thickness per ACI 318-14 Table 8.3.1.1.
-
-Flat slabs with drop panels conforming to §8.2.4 have reduced minimum
-thickness compared to flat plates:
-- Exterior panel: h_min = ln / 33  (vs ln / 30 for flat plate)
-- Interior panel: h_min = ln / 36  (vs ln / 33 for flat plate)
-
-Absolute minimum: 4 inches (vs 5 inches for flat plate).
-
-# Arguments
-- `ln`: Clear span (face-to-face of columns) - longer span governs
-- `discontinuous_edge`: true if slab has discontinuous edge (exterior panel)
-
-# Returns
-Minimum slab thickness h (the slab portion, NOT including drop panel projection)
-
-# Reference
-- ACI 318-14 Table 8.3.1.1, Row 2 (with drop panels)
-- ACI 318-14 §8.3.1.1(b): minimum 4 inches
-- StructurePoint DE-Two-Way-Flat-Slab:
-    ln = 340 in. → exterior h_min = 340/33 = 10.30 in.
-                  → interior h_min = 340/36 = 9.44 in.
-                  → try 10 in. slab
-"""
-function min_thickness_flat_slab(ln::Length; discontinuous_edge::Bool=false)
-    # ACI formula: h_min = ln/33 (exterior) or ln/36 (interior)
-    divisor = discontinuous_edge ? 33 : 36
-    h_min = ln / divisor
-    
-    # Absolute minimum per ACI 8.3.1.1(b): 4 inches (flat slab)
-    return max(h_min, 4.0u"inch")
-end
 
 """
     slab_self_weight_with_drop(h_slab, drop::DropPanelGeometry, ρ) -> (w_slab, w_drop)
@@ -2021,7 +1979,7 @@ function weighted_slab_thickness(h_slab::Length, drop::DropPanelGeometry, l_stri
 end
 
 """
-    fixed_end_moment_FEM_flat_slab(qu_slab, qu_drop, l2, l1, drop::DropPanelGeometry)
+    fixed_end_moment_FEM(qu_slab, qu_drop, l2, l1, drop::DropPanelGeometry)
 
 Fixed-end moment for non-prismatic slab-beam with drop panels using
 PCA multi-term FEM coefficients.
@@ -2046,7 +2004,7 @@ Where:
     FEM = 0.0915 × 0.270 × 30 × 30² + 0.0163 × 0.064 × 10 × 30² + 0.002 × 0.064 × 10 × 30²
         = 677.53 ft-kips
 """
-function fixed_end_moment_FEM_flat_slab(
+function fixed_end_moment_FEM(
     qu_slab::Pressure,
     qu_drop::Pressure,
     l2::Length,
@@ -2073,8 +2031,8 @@ function fixed_end_moment_FEM_flat_slab(
 end
 
 """
-    column_stiffness_Kc_flat_slab(Ecc, Ic, H, h_slab, drop::DropPanelGeometry;
-                                   position=:bottom)
+    column_stiffness_Kc(Ecc, Ic, H, h_slab, drop::DropPanelGeometry;
+                         position=:bottom)
 
 Column stiffness for flat slab accounting for asymmetric joint depth.
 
@@ -2099,7 +2057,7 @@ The PCA Table A7 k-factor changes because ta/tb ≠ 1.
     Bottom: ta=9.25", tb=5.00", k=5.318 → Kc = 2,134,472,479 in-lb
     Top:    ta=5.00", tb=9.25", k=4.879 → Kc = 1,958,272,137 in-lb
 """
-function column_stiffness_Kc_flat_slab(
+function column_stiffness_Kc(
     Ecc::Pressure,
     Ic::SecondMomentOfArea,
     H::Length,

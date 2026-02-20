@@ -121,15 +121,19 @@ mutable struct Slab{T}
     group_id::Union{UInt64, Nothing}
     volumes::MaterialVolumes  # material → total volume (m³)
     drop_panel::Union{Nothing, StructuralSizer.DropPanelGeometry}  # Drop panel geometry (flat_slab only)
+    # Full design output from size_flat_plate! (column P-M results, integrity check,
+    # transfer reinforcement, ρ_prime).  Stored so downstream consumers (capture_design,
+    # study scripts) don't lose the rich detail that slab.result alone can't carry.
+    design_details::Union{Nothing, NamedTuple}  # NamedTuple from size_flat_plate!, or nothing
 end
 
 function Slab(cell_indices::Vector{Int}, result::AbstractFloorResult, spans::SpanInfo; 
               floor_type=:one_way, position::Symbol=:interior, group_id=nothing,
               volumes::MaterialVolumes=MaterialVolumes(),
-              drop_panel=nothing)
+              drop_panel=nothing, design_details=nothing)
     T = typeof(StructuralSizer.total_depth(result))
     spans_T = SpanInfo{T}(T(spans.primary), T(spans.secondary), spans.axis, T(spans.isotropic))
-    Slab{T}(cell_indices, result, floor_type, spans_T, position, group_id, volumes, drop_panel)
+    Slab{T}(cell_indices, result, floor_type, spans_T, position, group_id, volumes, drop_panel, design_details)
 end
 
 # Single-cell slab convenience

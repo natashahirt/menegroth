@@ -2,140 +2,14 @@
 # Flat Plate Analysis Types
 # =============================================================================
 #
-# Shared type definitions for DDM and EFM analysis methods.
+# Analysis method types (FlatPlateAnalysisMethod, DDM, EFM, FEA) are defined
+# in slabs/types.jl so that options.jl can reference them before codes/ loads.
 #
-# Reference: ACI 318-19 Sections 8.10 (DDM), 8.11 (EFM)
+# Reference: ACI 318-11 §13.6 (DDM), §13.7 (EFM)
 # =============================================================================
 
 using Unitful
 using Unitful: @u_str
-
-# =============================================================================
-# Analysis Method Selection
-# =============================================================================
-
-"""
-    FlatPlateAnalysisMethod
-
-Abstract type for flat plate moment analysis methods.
-
-Subtypes:
-- `DDM`: Direct Design Method (ACI 318 coefficient-based)
-- `EFM`: Equivalent Frame Method (stiffness-based frame analysis)
-"""
-abstract type FlatPlateAnalysisMethod end
-
-"""
-    DDM(variant::Symbol = :full)
-
-Direct Design Method - ACI 318 coefficient-based moment distribution.
-
-# Variants
-- `:full` - Full ACI 318 Table 8.10.4.2 coefficients with l₂/l₁ interpolation
-- `:simplified` - Modified DDM (0.65/0.35 simplified coefficients)
-
-# Example
-```julia
-size_flat_plate!(struc, slab, col_opts; method=DDM())           # Default full ACI
-size_flat_plate!(struc, slab, col_opts; method=DDM(:simplified)) # MDDM
-```
-
-# Reference
-- ACI 318-19 Section 8.10
-- StructurePoint DE-Two-Way-Flat-Plate Section 3.1 (DDM)
-"""
-struct DDM <: FlatPlateAnalysisMethod
-    variant::Symbol
-    
-    function DDM(variant::Symbol = :full)
-        variant in (:full, :simplified) || error("DDM variant must be :full or :simplified")
-        new(variant)
-    end
-end
-
-"""
-    EFM(solver::Symbol = :asap)
-
-Equivalent Frame Method - stiffness-based frame analysis.
-
-Models the slab strip as a continuous beam supported on equivalent columns,
-accounting for torsional flexibility of the slab-column connection.
-
-# Solvers
-- `:asap` - Use ASAP structural analysis package (default)
-- `:moment_distribution` - Hardy Cross moment distribution [future]
-
-# Example
-```julia
-size_flat_plate!(struc, slab, col_opts; method=EFM())       # Default ASAP solver
-```
-
-# Reference
-- ACI 318-19 Section 8.11
-- StructurePoint DE-Two-Way-Flat-Plate Section 3.2 (EFM)
-"""
-struct EFM <: FlatPlateAnalysisMethod
-    solver::Symbol
-    
-    function EFM(solver::Symbol = :asap)
-        solver in (:asap, :moment_distribution) || error("EFM solver must be :asap or :moment_distribution")
-        new(solver)
-    end
-end
-
-"""
-    FEA(; target_edge=0.25u"m")
-
-Finite Element Analysis — 2D shell model with column stubs.
-
-Builds a standalone Asap model of the slab panel:
-- Triangulated shell mesh for the slab
-- Column stub beam elements above and below each support
-- Factored area load applied as consistent nodal forces
-
-Design moments are extracted via **tributary integration**: the cell polygon
-for the analyzed panel defines the transverse extent of section cuts at
-column faces and midspan—no hardcoded `l₂` widths required. This adapts
-naturally to irregular slab shapes and column layouts.
-
-Column shears (Vu) and unbalanced moments (Mub) come from stub reactions.
-
-No geometric restrictions — works for any slab shape or column layout.
-
-# Options
-- `target_edge::Length`: Target mesh edge length (default: 0.25 m ≈ 10 in).
-  Asap's auto-mesher refines to this edge size.  Smaller values yield finer
-  meshes with more accurate results at higher cost.  The same length sets the
-  section-cut strip width `δ`, keeping mesh and integration resolution matched.
-
-# Example
-```julia
-size_flat_plate!(struc, slab, col_opts; method=FEA())
-size_flat_plate!(struc, slab, col_opts; method=FEA(target_edge=0.15u"m"))
-```
-
-# Reference
-- ACI 318-19 §8.2.1 permits any analysis satisfying equilibrium and compatibility
-"""
-struct FEA <: FlatPlateAnalysisMethod
-    target_edge::Union{Nothing, typeof(1.0u"m")}
-
-    """
-        FEA(; target_edge=nothing)
-
-    `target_edge = nothing` (default) → adaptive mesh from the smallest cell's short span:
-    `clamp(min_span/20, 0.15, 0.75) m`, ~20 elements per span direction.
-    Pass an explicit `Length` to override.
-    """
-    function FEA(; target_edge::Union{Nothing, Length} = nothing)
-        if target_edge !== nothing
-            ustrip(u"m", target_edge) > 0 || error("FEA target_edge must be > 0")
-            new(uconvert(u"m", target_edge))
-        else
-            new(nothing)
-        end
-    end
-end
 
 # =============================================================================
 # Moment Analysis Results
@@ -211,13 +85,20 @@ struct MomentAnalysisResult{M<:Moment, P<:Pressure, F<:Force}
     unbalanced_moments::Vector{M}        # Unbalanced moment at each column
     Vu_max::F
 
-    # Optional: secondary (perpendicular) direction moments (FEA only)
-    # NamedTuple with fields M_neg_ext, M_neg_int, M_pos, M0 — or nothing for DDM/EFM
+    # Optional: secondary (perpendicular) direction moments
+    # NamedTuple with fields: M0, M_neg_ext, M_neg_int, M_pos, l1, l2, ln,
+    #   column_moments, column_shears, unbalanced_moments
+    # Populated by run_secondary_moment_analysis (DDM/EFM/FEA).
     secondary::Union{Nothing, NamedTuple}
 
     # Optional: FEA max panel deflection (factored load, gross section)
     # Extracted directly from FEA nodal displacements — `nothing` for DDM/EFM.
     fea_Δ_panel::Union{Nothing, Length}
+
+    # Whether pattern loading (ACI 13.7.6) was applied to produce this result.
+    # True when L/D > 0.75 and the analysis method supports pattern loading
+    # (EFM, FEA).  DDM coefficients already account for this implicitly.
+    pattern_loading::Bool
 
     function MomentAnalysisResult(
         M0::M, M_neg_ext::M, M_neg_int::M, M_pos::M,
@@ -229,12 +110,14 @@ struct MomentAnalysisResult{M<:Moment, P<:Pressure, F<:Force}
         Vu_max::F;
         secondary::Union{Nothing, NamedTuple} = nothing,
         fea_Δ_panel::Union{Nothing, Length} = nothing,
+        pattern_loading::Bool = false,
     ) where {M<:Moment, P<:Pressure, F<:Force}
         new{M,P,F}(
             M0, M_neg_ext, M_neg_int, M_pos,
             qu, qD, qL, l1, l2, ln, c_avg,
             column_moments, column_shears, unbalanced_moments,
             Vu_max, secondary, fea_Δ_panel,
+            pattern_loading,
         )
     end
 end
@@ -274,7 +157,7 @@ function _envelope_from_columns(column_moments, columns)
 end
 
 # =============================================================================
-# Drop Panel Geometry (Flat Slab — ACI 318-19 §8.2.4)
+# Drop Panel Geometry (Flat Slab — ACI 318-11 §13.2.5)
 # =============================================================================
 
 """
@@ -282,7 +165,7 @@ end
 
 Geometry of a drop panel (thickened slab zone around a column) for flat slab design.
 
-Drop panels must satisfy ACI 318-19 §8.2.4:
+Drop panels must satisfy ACI 318-11 §13.2.5:
 - (a) Projection below slab ≥ h_slab / 4
 - (b) Extend ≥ l/6 from column center in each direction
 
@@ -295,8 +178,8 @@ Drop panels must satisfy ACI 318-19 §8.2.4:
       Full extent in direction 2 = 2 × a_drop_2.
 
 # ACI Requirements
-- `h_drop ≥ h_slab / 4`                          ACI 318-19 §8.2.4(a)
-- `a_drop_1 ≥ l1 / 6`,  `a_drop_2 ≥ l2 / 6`    ACI 318-19 §8.2.4(b)
+- `h_drop ≥ h_slab / 4`                          ACI 318-11 §13.2.5
+- `a_drop_1 ≥ l1 / 6`,  `a_drop_2 ≥ l2 / 6`    ACI 318-11 §13.2.5
 
 # Formwork
 Standard lumber sizes control practical drop depths:
@@ -308,7 +191,7 @@ Standard lumber sizes control practical drop depths:
 | 8×      | 7.25"  | 0.75"            | 8.00"  |
 
 # Reference
-- ACI 318-19 §8.2.4
+- ACI 318-11 §13.2.5
 - StructurePoint DE-Two-Way-Flat-Slab: h_drop = 4.25 in. (4× lumber), a_drop = 5 ft
 """
 struct DropPanelGeometry{L<:Length}
@@ -335,7 +218,7 @@ drop_extent_2(dp::DropPanelGeometry) = 2 * dp.a_drop_2
 """
     check_drop_panel_aci(dp, h_slab, l1, l2) -> (ok, violations)
 
-Verify drop panel geometry against ACI 318-19 §8.2.4 requirements.
+Verify drop panel geometry against ACI 318-11 §13.2.5 requirements.
 Returns `(true, [])` if compliant, or `(false, ["violation description", ...])`.
 """
 function check_drop_panel_aci(dp::DropPanelGeometry, h_slab::Length, l1::Length, l2::Length)

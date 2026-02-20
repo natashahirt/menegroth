@@ -97,7 +97,7 @@ end
 # -----------------------------------------------------------------------------
 # 
 # For RC sections, we use CONCRETE properties with ACI cracking reduction factors.
-# Per ACI 318-14 §6.6.3.1.1, effective moment of inertia for elastic analysis:
+# Per ACI 318-11 §10.10.4.1, effective moment of inertia for elastic analysis:
 #   - Columns: 0.70 Ig
 #   - Beams: 0.35 Ig  
 #   - Walls (uncracked): 0.70 Ig
@@ -116,7 +116,7 @@ end
 
 Convert RC rectangular column section to Asap.Section for FEA stiffness.
 
-Uses effective section properties per ACI 318-14 §6.6.3.1.1:
+Uses effective section properties per ACI 318-11 §10.10.4.1:
 - Area: Gross area Ag (conservative for axial stiffness)
 - Moment of inertia: `I_factor × Ig` (default 0.70 for columns)
 - Material: Concrete properties (Ec, ρc)
@@ -163,7 +163,7 @@ end
     to_asap_section(sec::RCCircularSection, mat::Concrete; I_factor=0.70)
 
 Convert RC circular column section to Asap.Section for FEA stiffness.
-Uses effective properties per ACI 318-14 §6.6.3.1.1.
+Uses effective properties per ACI 318-11 §10.10.4.1.
 """
 function to_asap_section(sec::RCCircularSection, mat::Concrete; I_factor::Real=0.70)
     D = ustrip(u"m", sec.D)
@@ -191,7 +191,7 @@ end
     to_asap_section(sec::RCBeamSection, mat::Concrete; I_factor=0.35)
 
 Convert RC beam section to Asap.Section for FEA stiffness.
-Uses effective properties per ACI 318-14 §6.6.3.1.1 (default 0.35 for beams).
+Uses effective properties per ACI 318-11 §10.10.4.1 (default 0.35 for beams).
 """
 function to_asap_section(sec::RCBeamSection, mat::Concrete; I_factor::Real=0.35)
     b = ustrip(u"m", sec.b)
@@ -223,7 +223,7 @@ end
     to_asap_section(sec::RCTBeamSection, mat::Concrete; I_factor=0.35)
 
 Convert RC T-beam section to Asap.Section for FEA stiffness.
-Uses T-shaped gross section properties with ACI 318-14 §6.6.3.1.1 reduction.
+Uses T-shaped gross section properties with ACI 318-11 §10.10.4.1 reduction.
 """
 function to_asap_section(sec::RCTBeamSection, mat::Concrete; I_factor::Real=0.35)
     bw = ustrip(u"m", sec.bw)

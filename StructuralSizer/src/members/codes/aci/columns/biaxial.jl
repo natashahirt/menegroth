@@ -1,7 +1,7 @@
 # ==============================================================================
-# ACI 318-19 Biaxial Bending for RC Columns
+# ACI 318-11 Biaxial Bending for RC Columns
 # ==============================================================================
-# Reference: ACI 318-19 and StructurePoint Design Examples:
+# Reference: ACI 318-11 and StructurePoint Design Examples:
 # - "Manual Design Procedure for Columns and Walls with Biaxial Bending"
 # - "Biaxial Bending Interaction Diagrams for Square RC Column Design"
 # - "Biaxial Bending Interaction Diagrams for Rectangular RC Column Design"
@@ -320,7 +320,7 @@ NamedTuple with:
 
 # Reference
 StructurePoint: "Biaxial Bending Interaction Diagrams for Rectangular 
-Reinforced Concrete Column Design (ACI 318-19)"
+Reinforced Concrete Column Design (ACI 318-11)"
 """
 function check_biaxial_rectangular(
     section::RCColumnSection, 

@@ -280,10 +280,7 @@ end
 # ==============================================================================
 
 bm_section_header("BEAM SIZING VALIDATION REPORT")
-println("  Generated: $(Dates.format(now(), "yyyy-mm-dd HH:MM"))")
-println("  This report validates RC and steel beam sizing against analytical")
-println("  capacities using both discrete (MIP) and continuous (NLP) optimization.")
-println()
+println("  Generated: $(Dates.format(now(), "yyyy-mm-dd HH:MM"))  |  RC & steel beam sizing: MIP + NLP vs analytical capacity")
 
 # ╔═══════════════════════════════════════════════════════════════════════════╗
 # ║  1.  INPUT SUMMARY                                                        ║
@@ -377,8 +374,7 @@ flex_ok_mod  = Mu_mod / flex_mip.φMn_kipft ≤ 1.0
 shear_ok_mod = Vu_mod / shear_mip.φVn_max_kip ≤ 1.0
 
 println()
-bm_note("Demand = factored load; MIP/NLP columns = φ-capacity of each section.")
-bm_note("εt ≥ 0.005 → tension-controlled (φ = 0.9); snapping rounds to 2\" increments.")
+bm_note("Demand = factored load; MIP/NLP = φ-capacity. εt ≥ 0.005 → φ=0.9; snap rounds to 2\" increments.")
 
 @testset "RC Beam — Moderate" begin
     @test flex_ok_mod
@@ -502,8 +498,7 @@ bm_step_status["RC f'c Study"] = a6 ≤ a4 * 1.05 ? "✓" : "✗"
 # ║  5.  STEEL W BEAM  (AISC 360-16)                                          ║
 # ╚═══════════════════════════════════════════════════════════════════════════╝
 bm_sub_header("5.0  Steel W Beam — AISC 360-16")
-bm_note("Uses size_beams with SteelBeamOptions — AISC checker with Pu=0 (pure flexure).")
-bm_note("Shear (Vu) checked analytically after section selection.")
+bm_note("AISC checker (Pu=0 pure flexure); shear checked analytically post-selection.")
 
 Mu_sw = 150.0u"kN*m"
 Vu_sw = 100.0u"kN"
@@ -531,8 +526,7 @@ println("    Mu/φMn : $(round(sw_chk.util_M, digits=3)),  Vu/φVn : $(round(sw_
 
 # ── 5.2  NLP (Continuous Optimization) ──
 println("\n  5.2  NLP (Continuous Optimization) Sizing")
-bm_note("Dedicated steel W beam NLP: AISC F2 flexure (smooth LTB) + G2 shear.")
-bm_note("MIP warm-start: NLP seeded with MIP section dimensions for better convergence.")
+bm_note("Steel W NLP: AISC F2 (flexure+LTB) + G2 (shear); MIP warm-start for convergence.")
 
 sw_nlp_base = (min_depth = 8.0u"inch", max_depth = 24.0u"inch", verbose = false)
 
@@ -573,9 +567,7 @@ summary_row("Shear util",       nothing, sw_chk.util_V, sw_nlp_raw_chk.util_V, s
 summary_row("Weight (lb/ft)",   nothing, nothing, sw_nlp_raw.weight_per_ft, sw_nlp.weight_per_ft)
 
 println()
-bm_note("Demand = factored Mu/Vu; MIP/NLP columns = φ-capacity of each section.")
-bm_note("NLP is a continuous I-shape (dedicated beam formulation); MIP selects from rolled W catalog.")
-bm_note("Dedicated beam NLP uses AISC F2 (flexure with LTB) + G2 (shear) directly.")
+bm_note("NLP = continuous I-shape (F2+G2); MIP = rolled W catalog. Demand = factored Mu/Vu.")
 
 @testset "Steel W Beam" begin
     @test sw_chk.adequate
@@ -618,8 +610,7 @@ println("    Mu/φMn : $(round(sh_chk.util_M, digits=3)),  Vu/φVn : $(round(sh_
 
 # ── 6.2  NLP (Continuous Optimization) ──
 println("\n  6.2  NLP (Continuous Optimization) Sizing")
-bm_note("Dedicated steel HSS beam NLP: AISC F7 flexure + G4 shear (no LTB for closed sections).")
-bm_note("MIP warm-start: NLP seeded with MIP section dimensions for better convergence.")
+bm_note("Steel HSS NLP: AISC F7 (flexure) + G4 (shear), no LTB; MIP warm-start for convergence.")
 
 sh_nlp_base = (min_outer = 4.0u"inch", max_outer = 12.0u"inch", verbose = false)
 
@@ -659,9 +650,7 @@ summary_row("Shear util",       nothing, sh_chk.util_V, sh_nlp_raw_chk.util_V, s
 summary_row("Weight (lb/ft)",   nothing, nothing, sh_nlp_raw.weight_per_ft, sh_nlp.weight_per_ft)
 
 println()
-bm_note("Demand = factored Mu/Vu; MIP/NLP columns = φ-capacity of each section.")
-bm_note("HSS closed section: no LTB. NLP includes F7-2/F7-3 noncompact reductions.")
-bm_note("Dedicated beam NLP uses AISC F7 (flexure) + G4 (shear) directly.")
+bm_note("HSS closed section: no LTB. NLP uses F7 (flex, incl. noncompact) + G4 (shear).")
 
 @testset "Steel HSS Beam" begin
     @test sh_chk.adequate
@@ -709,8 +698,7 @@ for (Mu_i, Vu_i) in zip(Mu_levels, Vu_scale)
 end
 
 println()
-bm_note("Section area should generally increase with demand (monotonicity).")
-bm_note("Utilization Mu/φMn should be ≤ 1.0 for all cases.")
+bm_note("Area should increase monotonically with demand; Mu/φMn ≤ 1.0 for all cases.")
 
 @testset "RC Beam Demand Scaling" begin
     # Check the extremes
@@ -838,8 +826,7 @@ flex_ok_t_mod  = Mu_t_mod / flex_t_mip.φMn_kipft ≤ 1.0
 shear_ok_t_mod = Vu_t_mod / shear_t_mip.φVn_max_kip ≤ 1.0
 
 println()
-bm_note("Stress block 'flange' = a ≤ hf (rectangular with bf); 'web' = T-beam decomposition.")
-bm_note("Web area reported (slab concrete already counted in slab sizing).")
+bm_note("'flange' = a ≤ hf (rect. with bf); 'web' = T-beam decomp. Web area only (slab counted separately).")
 
 @testset "RC T-Beam — Moderate" begin
     @test flex_ok_t_mod
@@ -941,8 +928,7 @@ bm_step_status["RC T-Beam (hvy)"] = (flex_ok_t_hvy && shear_ok_t_hvy) ? "✓" : 
 # ║  11. RC T-BEAM vs RECTANGULAR COMPARISON                                  ║
 # ╚═══════════════════════════════════════════════════════════════════════════╝
 bm_sub_header("11.0  RC T-Beam vs Rectangular Beam — Efficiency Comparison")
-bm_note("Same Mu/Vu, same materials → T-beam should use smaller or equal web.")
-bm_note("Benefit grows with larger flange width (more slab acting as compression zone).")
+bm_note("Same Mu/Vu → T-beam ≤ rect. web; wider flange → more compression zone → smaller web.")
 
 Mu_cmp_t = 250.0
 Vu_cmp_t = 45.0
@@ -982,8 +968,7 @@ println()
 @printf("    Web area savings:  bf=24\" → %+.1f%%,  bf=60\" → %+.1f%%\n", savings_narrow, savings_wide)
 
 println()
-bm_note("T-beam web area ≤ rectangular area for same demand (flange provides compression).")
-bm_note("Wider flange → stress block stays in flange → smaller/shallower web needed.")
+bm_note("T-beam web ≤ rect. area (flange provides compression); wider flange → shallower web.")
 
 t_vs_rect_ok = t_wide.area_web ≤ rect_cmp.area * 1.05
 
@@ -998,9 +983,7 @@ bm_step_status["T vs Rect"] = t_vs_rect_ok ? "✓" : "✗"
 # ║  12. TRIBUTARY FLANGE WIDTH — ADVERSARIAL CASES                           ║
 # ╚═══════════════════════════════════════════════════════════════════════════╝
 bm_sub_header("12.0  Tributary Flange Width — Adversarial Geometry Cases")
-bm_note("Tests moment-weighted effective flange width for irregular cell geometries.")
-bm_note("Uses TributaryPolygon (s, d) profiles from straight-skeleton partitioning.")
-bm_note("Moment weighting: w(s) = 4s(1−s) (parabolic, simply-supported default).")
+bm_note("Moment-weighted bf from TributaryPolygon (s,d) profiles; w(s)=4s(1−s) parabolic default.")
 
 println()
 @printf("    %-30s  %10s  %10s  %10s  %s\n",
@@ -1133,8 +1116,7 @@ bm_step_status["Trib Flange"] = trib_all_ok && pinch_conservative && bulge_benef
 # ║  13. STEEL BEAM DEFLECTION (Ix_min NLP CONSTRAINT)                        ║
 # ╚═══════════════════════════════════════════════════════════════════════════╝
 bm_sub_header("13.0  Steel Beam Deflection — Ix_min NLP Constraint")
-bm_note("Steel beam deflection limit L/360 → required minimum Ix.")
-bm_note("NLP accepts Ix_min constraint; solver finds lightest section meeting strength + stiffness.")
+bm_note("L/360 → required Ix_min; NLP finds lightest section meeting strength + stiffness.")
 
 # ── 13.1  required_Ix_for_deflection ──
 println("\n  13.1  required_Ix_for_deflection")
@@ -1158,8 +1140,7 @@ Ix_cont_val = round(ustrip(u"inch^4", Ix_cont), digits=1)
 @printf("    %-35s  %10.1f  %s\n", "Both ends continuous (wL⁴/384EI)", Ix_cont_val, "Continuous frame")
 
 println()
-bm_note("Cantilever requires $(round(Ix_cant_val / Ix_ss_val, digits=1))× the Ix of simply supported.")
-bm_note("Both-ends-continuous requires $(round(100*Ix_cont_val / Ix_ss_val, digits=0))% of simply supported.")
+bm_note("Cantilever = $(round(Ix_cant_val / Ix_ss_val, digits=1))× SS; continuous = $(round(100*Ix_cont_val / Ix_ss_val, digits=0))% of SS.")
 
 # ── 13.2  Steel W-beam NLP: strength-only vs strength+deflection ──
 println("\n  13.2  W-beam NLP: Strength-Only vs Strength + Deflection")
@@ -1204,8 +1185,7 @@ bm_step_status["Steel Defl."] = defl_w_ok ? "✓" : "✗"
 # ║  14. RC T-BEAM DEFLECTION CHECK (ACI §24.2)                               ║
 # ╚═══════════════════════════════════════════════════════════════════════════╝
 bm_sub_header("14.0  RC T-Beam Deflection Check (ACI §24.2)")
-bm_note("Full ACI §24.2 deflection check: Ig(T), Icr(T), Ie (Branson), Δ_LL, Δ_total.")
-bm_note("T-beam Ig > rectangular Ig → less deflection for same load and geometry.")
+bm_note("ACI §24.2: Ig(T), Icr(T), Ie (Branson), Δ_LL, Δ_total. T-beam Ig > rect → less deflection.")
 
 # ── 14.1  T-beam deflection — typical case ──
 println("\n  14.1  T-Beam Deflection — Typical Case")
@@ -1304,10 +1284,7 @@ bm_step_status["T-Beam Defl."] = defl_tbeam_ok ? "✓" : "✗"
 
 # ── 14.1  Auto-Integrated Deflection in NLP / MIP ──────────────────────────
 bm_sub_header("14.1  Auto-Integrated T-Beam Deflection — NLP & MIP")
-bm_note("Deflection constraints are now built into the NLP and MIP sizing loops.")
-bm_note("NLP: adds Δ_LL/L ≤ 1/360 and Δ_total/L ≤ 1/240 as smooth constraints.")
-bm_note("MIP: design_tbeam_deflection runs inside is_feasible for every candidate section.")
-println()
+bm_note("NLP: Δ_LL/L ≤ 1/360 + Δ_total/L ≤ 1/240 constraints. MIP: deflection in is_feasible filter.")
 
 # -- NLP with and without deflection --
 begin
@@ -1410,10 +1387,7 @@ bm_step_status["Defl. Auto MIP"] = r_mip_def.status == JuMP.MOI.OPTIMAL ? "✓" 
 # ║  15. RC BEAM TORSION DESIGN (ACI 318-19 §22.7)                            ║
 # ╚═══════════════════════════════════════════════════════════════════════════╝
 bm_sub_header("15.0  RC Beam Torsion Design (ACI 318-19 §22.7)")
-bm_note("Full torsion design: section properties, threshold/cracking torsion,")
-bm_note("cross-section adequacy, transverse (At/s) & longitudinal (Al) reinforcement.")
-bm_note("Compatibility mode caps Tu at φ·Tcr; equilibrium mode requires full Tu.")
-println()
+bm_note("Torsion: section props, Tth/Tcr, adequacy, At/s & Al reinf. Compat caps Tu at φ·Tcr; equil uses full Tu.")
 
 # ── 15.0.1  Rectangular beam — moderate torsion (compatibility) ──
 begin
@@ -1451,8 +1425,7 @@ begin
     @printf("    %-30s  %12.2f  %12.2f\n", "s_max (in)", tor_compat.s_max_torsion, tor_equil.s_max_torsion)
     @printf("    %-30s  %12s  %12s\n", "Was capped?", string(tor_compat.was_capped), string(tor_equil.was_capped))
     println()
-    bm_note("Compatibility mode may cap Tu at φ·Tcr → less reinforcement required.")
-    bm_note("Equilibrium mode designs for full factored Tu → conservative.")
+bm_note("Compat caps Tu at φ·Tcr (less reinf.); equilibrium designs for full Tu (conservative).")
 end
 
 # ── 15.0.2  T-beam torsion ──
@@ -1484,8 +1457,7 @@ begin
     @printf("    %-30s  %12.4f\n", "At/s required (in²/in)", ttor_result.At_s_required)
     @printf("    %-30s  %12.3f\n", "Al required (in²)", ttor_result.Al_required)
     println()
-    bm_note("T-beam Acp includes limited flange overhang per ACI §22.7.4.1(a).")
-    bm_note("Aoh/ph based on web rectangle only (closed stirrups in web).")
+bm_note("T-beam Acp includes flange overhang (§22.7.4.1a); Aoh/ph from web rectangle only.")
 end
 
 # ── 15.0.3  Below threshold — torsion can be neglected ──
@@ -1523,9 +1495,7 @@ bm_step_status["RC Torsion"] = tor_rc_ok ? "✓" : "✗"
 # ║  15.1  STEEL W-SHAPE TORSION (AISC DESIGN GUIDE 9)                        ║
 # ╚═══════════════════════════════════════════════════════════════════════════╝
 bm_sub_header("15.1  Steel W-Shape Torsion (AISC Design Guide 9)")
-bm_note("W-shape torsion: pure (St. Venant) shear + warping normal/shear stresses.")
-bm_note("Design checks: normal yielding, shear yielding, combined interaction (DG9 §4.7.1).")
-println()
+bm_note("W torsion: St. Venant + warping stresses; checks normal/shear yielding + interaction (DG9 §4.7.1).")
 
 begin
     wtor_sec = W("W10X49")
@@ -1610,9 +1580,7 @@ bm_step_status["Steel Torsion"] = tor_steel_ok ? "✓" : "✗"
 # ║  15.2  RC BEAM TORSION — MIP CHECKER INTEGRATION                          ║
 # ╚═══════════════════════════════════════════════════════════════════════════╝
 bm_sub_header("15.2  RC Beam Torsion — MIP Checker Integration")
-bm_note("is_feasible now checks torsion cross-section adequacy when Tu > Tth.")
-bm_note("Sections failing adequacy are rejected during MIP optimization.")
-println()
+bm_note("is_feasible rejects sections failing torsion adequacy (§22.7.7.1) when Tu > Tth.")
 
 begin
     # Size a beam with moderate torsion — should select a section that passes adequacy
@@ -1680,11 +1648,7 @@ bm_step_status["RC Tor. MIP"] = mip_tor_ok ? "✓" : "✗"
 # ║  15.3  TORSION NLP INTEGRATION                                             ║
 # ╚═══════════════════════════════════════════════════════════════════════════╝
 bm_sub_header("15.3  Torsion NLP Integration — All Beam Types")
-bm_note("NLP constraint: torsion adequacy ratio ≤ 1.0, conditionally added when Tu > 0.")
-bm_note("RC beams: ACI §22.7.7.1 shear-torsion interaction.")
-bm_note("Steel W: DG9 §4.7.1 combined normal+shear interaction.")
-bm_note("Steel HSS: AISC H3-6 combined interaction (closed section, no warping).")
-println()
+bm_note("Torsion NLP: RC=§22.7.7.1 interaction, W=DG9 §4.7.1, HSS=H3-6 closed. Added when Tu > 0.")
 
 # ── 15.3.1  RC Beam NLP with torsion ──
 begin
@@ -1756,8 +1720,7 @@ begin
     @printf("    %-28s  %12.1f  %12.1f\n", "Weight (plf)", hss_nlp_tor.weight_per_ft, hss_nlp_notor.weight_per_ft)
     @printf("    %-28s  %12s  %12s\n", "Status", string(hss_nlp_tor.status), string(hss_nlp_notor.status))
     println()
-    bm_note("HSS torsion uses AISC H3-6 interaction (Mr/Mc + (Vr/Vc + Tr/Tc)²).")
-    bm_note("Closed HSS sections have negligible warping — torsion is pure shear flow.")
+bm_note("HSS torsion: H3-6 interaction (Mr/Mc + (Vr/Vc + Tr/Tc)²); closed section = pure shear flow.")
 end
 
 # ── 15.3.4  RC T-Beam NLP with torsion ──
@@ -1815,65 +1778,18 @@ bm_step_status["Torsion NLP"] = nlp_tor_ok ? "✓" : "✗"
 # ║  16. DESIGN CODE FEATURES & LIMITATIONS                                   ║
 # ╚═══════════════════════════════════════════════════════════════════════════╝
 bm_sub_header("16.0  Feature Matrix")
-println()
-println("    Feature                            RC Beam  RC T-Beam  Steel W   Steel HSS")
-println("    ──────────────────────────────── ──────── ───────── ──────── ─────────")
-println("    Flexure (ACI §22.2 Whitney)            ✓         ✓        —         —")
-println("    T-beam decomposition (Cf + Cw)         —         ✓        —         —")
-println("    Flexure (AISC F2 + LTB)                —         —        ✓         —")
-println("    Flexure (AISC F7, no LTB)              —         —        —         ✓")
-println("    Shear   (ACI §22.5, Vc + Vs)           ✓       ✓(bw)     —         —")
-println("    Shear   (AISC G2)                      —         —        ✓         —")
-println("    Shear   (AISC G4)                      —         —        —         ✓")
-println("    Torsion (ACI §22.7, compat/equil)      ✓         ✓        —         —")
-println("    Torsion (AISC DG9, warping+pure)       —         —        ✓         —")
-println("    Torsion (AISC H3, closed section)      —         —        —         ✓")
-println("    Torsion MIP checker integration        ✓         ✓        —         —")
-println("    Torsion NLP integration                ✓         ✓        ✓         ✓")
-println("    Min reinforcement (§9.6.1.2)           ✓       ✓(bw)     —         —")
-println("    Net tensile strain εt ≥ 0.004          ✓         ✓        —         —")
-println("    Doubly reinforced design                ✓         ✓        —         —")
-println("    Noncompact flange/web reduction         —         —        —         ✓")
-println("    Deflection check (§24.2)                ✓         ✓        —         —")
-println("    Deflection auto-NLP (§24.2)             —         ✓        —         —")
-println("    Deflection auto-MIP (§24.2)             —         ✓        —         —")
-println("    Steel deflection (Ix_min NLP)           —         —        ✓         ✓")
-println("    MIP (discrete catalog)                 ✓         ✓        ✓         ✓")
-println("    NLP (continuous optimization)           ✓         ✓        ✓         ✓")
-println("    MIP warm-start for NLP                 —         —        ✓         ✓")
-println("    Snap to practical dims                  ✓         ✓        ✓         ✓")
-println("    Batch sizing (vectorized API)           ✓         ✓        ✓         ✓")
-println("    f'c parametric comparison               ✓         —        —         —")
-println("    Irregular flange width (tributary)      —         ✓        —         —")
-println("    Moment-weighted effective bf             —         ✓        —         —")
-println()
+println("    RC/RC-T: Whitney flex (§22.2), shear (§22.5), torsion (§22.7), deflection (§24.2), MIP+NLP, batch, snap")
+println("    Steel W: AISC F2+LTB flex, G2 shear, DG9 torsion, Ix_min defl., MIP+NLP, warm-start, batch, snap")
+println("    Steel HSS: AISC F7 flex (no LTB), G4 shear, H3-6 torsion, Ix_min defl., MIP+NLP, warm-start, batch, snap")
 
 bm_sub_header("16.1  Shared Components")
-println()
-println("    All beam types share the unified sizing API and optimization framework")
-println("    (optimize_discrete / optimize_continuous).")
-println()
-println("    NLP uses Ipopt with smooth analytical constraint functions:")
-println("      RC   → 3 variables (b, h, ρ),    4–5 constraints (flex, shear, εt, ρ_min [+ torsion])")
-println("      RC-T → 3 variables (bw, h, ρ),   4–7 constraints (T-beam flex, shear, εt, ρ_min [+ Δ_LL, Δ_total, torsion])")
-println("      W    → 4 variables (d, bf, tf, tw), 5–8 constraints (flex, shear, proportioning [+ Ix, torsion])")
-println("      HSS  → 3 variables (B, H, t),    3–5 constraints (flex, shear, proportioning [+ Ix, torsion])")
-println()
-println("    T-beam specifics:")
-println("      - Fixed parameters: bf, hf (from slab sizing / tributary polygon)")
-println("      - Objective: minimize web area bw×h (slab concrete counted separately)")
-println("      - Shear and min reinforcement use bw (web width), not bf")
-println("      - Irregular flange widths via moment_weighted_avg_depth(TributaryPolygon)")
-println()
+println("    Unified API (optimize_discrete/optimize_continuous) + Ipopt NLP with smooth constraints.")
+println("    RC: 3 vars (b,h,ρ); RC-T: 3 vars (bw,h,ρ) + fixed bf/hf; W: 4 vars (d,bf,tf,tw); HSS: 3 vars (B,H,t).")
+println("    T-beam: minimizes web area bw×h; shear/ρ_min use bw; irregular bf via moment_weighted_avg_depth.")
 
 bm_sub_header("16.2  Current Limitations & Future Work")
-println()
-println("  1. RC beam development length not checked during sizing (post-design only).")
-println("  2. Composite (steel-concrete) beams not yet supported.")
-println("  3. Precast/prestressed concrete beams not yet supported.")
-println("  4. T-beam flange transverse reinforcement (ACI §9.7.6.3) not yet checked.")
-println("  5. Torsion NLP ensures section adequacy; detailed reinforcement design is post-sizing.")
-println()
+println("    Not yet: development length in sizing, composite/precast beams, flange transverse reinf. (§9.7.6.3).")
+println("    Torsion NLP ensures adequacy only; detailed At/s & Al design is post-sizing.")
 
 # ╔═══════════════════════════════════════════════════════════════════════════╗
 # ║  17. FINAL SUMMARY                                                        ║
@@ -1890,17 +1806,7 @@ all_pass = all(v == "✓" for v in values(bm_step_status))
 println()
 println("  Overall: $(all_pass ? "✓ ALL CHECKS PASSED" : "✗ SOME CHECKS FAILED")")
 println()
-bm_note("RC beam NLP optimizes continuous b, h, ρ (ACI 318 flexure + shear).")
-bm_note("RC T-beam NLP optimizes bw, h, ρ with fixed bf/hf (T-beam Whitney block).")
-bm_note("Steel W beam NLP: dedicated AISC F2 (flexure + LTB) + G2 (shear) formulation.")
-bm_note("Steel HSS beam NLP: dedicated AISC F7 (flexure) + G4 (shear) formulation.")
-bm_note("Steel beam deflection: Ix_min constraint in NLP from required_Ix_for_deflection.")
-bm_note("RC T-beam deflection: ACI §24.2 auto-integrated into NLP (Δ_LL + Δ_total constraints) and MIP (is_feasible filter).")
-bm_note("RC torsion: ACI §22.7 — compatibility/equilibrium modes, At/s + Al design, MIP + NLP integration.")
-bm_note("Steel W torsion: AISC DG9 — pure + warping stresses, yielding + interaction, NLP constraint.")
-bm_note("Steel HSS torsion: AISC H3-6 — closed-section interaction, NLP constraint.")
-bm_note("All NLP results shown with snap=true (practical) and snap=false (theoretical).")
-bm_note("Tributary flange width: moment-weighted average of polygon (s,d) profile.")
+bm_note("NLP: RC(b,h,ρ) + RC-T(bw,h,ρ,fixed bf/hf) + W(F2+G2+LTB) + HSS(F7+G4). Defl: Ix_min(steel), §24.2(RC-T). Torsion: §22.7/DG9/H3-6. Snap+raw shown.")
 println(BM_DLINE)
 
 @test all_pass

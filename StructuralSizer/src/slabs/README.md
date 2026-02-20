@@ -62,7 +62,7 @@ The slab's floor type determines which sub-options are used.
 
 ### Flat Plate (CIP Concrete)
 
-Full ACI 318-19 design pipeline with DDM or EFM analysis.
+Full ACI 318-11 design pipeline with DDM or EFM analysis.
 
 ```julia
 opts = FloorOptions(flat_plate=FlatPlateOptions(

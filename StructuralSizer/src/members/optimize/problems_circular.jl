@@ -195,7 +195,7 @@ function constraint_fns(p::RCCircularNLPProblem, x::Vector{Float64})
     end
 
     # Smooth analytical P-M utilization (replaces piecewise-linear P-M diagram)
-    util = _smooth_rc_circ_pm_util(D, ρ, p.Pu_kip, Mux_design, p.mat;
+    util = _smooth_rc_pm_util(D, ρ, p.Pu_kip, Mux_design, p.mat;
                                     cover, n_bars, tie_type=p.opts.tie_type)
     return [util]
 end

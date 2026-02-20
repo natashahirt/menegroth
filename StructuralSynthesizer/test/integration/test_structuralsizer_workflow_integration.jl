@@ -33,20 +33,17 @@ using StructuralSizer
         struc = BuildingStructure(skel)
         
         # Initialize with flat plate options
-        opts = FloorOptions(
-            flat_plate = FlatPlateOptions(
-                material = RC_4000_60,      # 4000 psi concrete, Grade 60 rebar
-                analysis_method = :ddm,      # Direct Design Method  
-                cover = 0.75u"inch",
-                bar_size = 5,
-            ),
-            tributary_axis = nothing
+        opts = FlatPlateOptions(
+            material = RC_4000_60,      # 4000 psi concrete, Grade 60 rebar
+            method = DDM(),              # Direct Design Method  
+            cover = 0.75u"inch",
+            bar_size = 5,
         )
         
         # FlatPlateOptions has grouping = :by_floor by default
         # This automatically groups all cells on each floor into a continuous slab
         # (like StructurePoint's multi-span example)
-        initialize!(struc; floor_type = :flat_plate, floor_kwargs = (options = opts,))
+        initialize!(struc; floor_type = :flat_plate, floor_opts = opts)
         
         # ─────────────────────────────────────────────────────────────────────
         # Override cell loads to match StructurePoint example
@@ -166,17 +163,14 @@ using StructuralSizer
         struc = BuildingStructure(skel)
         
         # Initialize with EFM flat plate options
-        opts = FloorOptions(
-            flat_plate = FlatPlateOptions(
-                material = RC_4000_60,
-                analysis_method = :efm,  # Equivalent Frame Method
-                cover = 0.75u"inch",
-                bar_size = 5,
-            ),
-            tributary_axis = nothing
+        opts = FlatPlateOptions(
+            material = RC_4000_60,
+            method = EFM(),          # Equivalent Frame Method
+            cover = 0.75u"inch",
+            bar_size = 5,
         )
         
-        initialize!(struc; floor_type = :flat_plate, floor_kwargs = (options = opts,))
+        initialize!(struc; floor_type = :flat_plate, floor_opts = opts)
         
         # Same loads as DDM test
         sp_sdl = 20.0u"psf"
@@ -270,10 +264,10 @@ using StructuralSizer
         @test ustrip(u"kip*ft", M0) ≈ 93.82 rtol=0.05
         
         # Minimum thickness
-        h_min_int = StructuralSizer.min_thickness_flat_plate(ln; discontinuous_edge=false)
+        h_min_int = StructuralSizer.min_thickness(StructuralSizer.FlatPlate(), ln; discontinuous_edge=false)
         @test ustrip(u"inch", h_min_int) ≈ 6.06 rtol=0.05
         
-        h_min_ext = StructuralSizer.min_thickness_flat_plate(ln; discontinuous_edge=true)
+        h_min_ext = StructuralSizer.min_thickness(StructuralSizer.FlatPlate(), ln; discontinuous_edge=true)
         @test ustrip(u"inch", h_min_ext) ≈ 6.67 rtol=0.05
         
         # Punching capacity
@@ -405,7 +399,7 @@ using StructuralSizer
         initialize!(struc;
             floor_type = :vault,
             material = NWC_4000,
-            floor_kwargs = (rise = 1.0u"m", thickness = 0.05u"m")
+            floor_opts = VaultOptions(rise = 1.0u"m", thickness = 0.05u"m")
         )
 
         @test !isempty(struc.cells)

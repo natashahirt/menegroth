@@ -154,7 +154,7 @@ All material types carry `ecc` (embodied carbon, kgCO₂e/kg) and `cost` ($/kg, 
 |------|-------------------|-------------|--------|
 | `ISymmSection` | `W(name)`, `all_W()`, `preferred_W()` | AISC 360-16 | ✅ Full |
 
-**Key functions:** `section_area`, `section_depth`, `section_width`, `weight_per_length`
+**Key functions:** `section_area`, `section_depth`, `section_width`, `weight_per_length`, `bounding_box`
 
 ### Steel — HSS (Hollow Structural Sections)
 | Type | Catalog Functions | Design Code | Status |

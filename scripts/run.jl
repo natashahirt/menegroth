@@ -29,34 +29,63 @@ design = design_building(struc, DesignParameters(
     name = "3-Story Flat Plate Office",
     max_iterations = 100,
     
-    # Column sizing options (RC columns)
-    columns = ConcreteColumnOptions(
-        grade = NWC_4000,
-        rebar_grade = Rebar_60,
-        section_shape = :rect,
-    ),
+    # Building-level material (cascades to floor + column options)
+    concrete = NWC_4000,
+    rebar = Rebar_60,
     
-    # Floor system options
-    floor_options = FloorOptions(
-        flat_plate = FlatPlateOptions(
-            material = RC_4000_60,      # 4000 psi concrete, Grade 60 rebar
-            analysis_method = :efm,     # Modified Direct Design Method (or :ddm, :efm)
-            cover = 0.75u"inch",
-            bar_size = 5,
-            shear_studs=:always,
-            min_h = 5.0u"inch",         # Experiment: bypass ACI min, let checks drive h
-        ),
-        tributary_axis = nothing,       # Isotropic tributary for flat plates
+    # Column sizing options (RC columns)
+    columns = ConcreteColumnOptions(section_shape = :rect),
+    
+    # Floor system
+    #   Type:   FlatPlateOptions  → beamless two-way slab (ACI 318 Ch 8)
+    #           FlatSlabOptions   → flat plate + drop panels (ACI 8.2.4)
+    #           OneWayOptions     → one-way CIP slab (ACI Table 7.3.1.1)
+    #           VaultOptions      → unreinforced parabolic vault
+    #           CompositeDeckOptions → steel deck + concrete fill
+    #           TimberOptions     → CLT / DLT / NLT panels
+    #
+    #   Method (flat plate/slab only):
+    #           DDM()                    → Direct Design Method (ACI tables)
+    #           DDM(:simplified)         → Modified DDM (0.65/0.35 coefficients)
+    #           EFM()                    → Equivalent Frame Method (ASAP solver)
+    #           EFM(:moment_distribution)→ EFM with Hardy Cross
+    #           FEA()                    → Finite Element Analysis (shell model)
+    #
+    #   Shear studs: :never     → only grow columns
+    #                :if_needed → columns first, studs if maxed
+    #                :always    → studs first, grow columns only if insufficient
+    floor = FlatPlateOptions(
+        method = EFM(),
+        cover = 0.75u"inch",
+        bar_size = 5,
+        shear_studs = :always,
+        min_h = 5.0u"inch",        # Bypass ACI min; let checks drive h
+        # grouping = :by_floor,     # :individual, :by_floor, :building_wide
+        # deflection_limit = :L_360,# :L_240, :L_360, :L_480
+        # objective = MinVolume(),  # or MinWeight(), MinCost(), MinCarbon()
     ),
     
     # Foundation options
+    #   strategy: :auto  → heuristic (spread → strip → mat by coverage ratio)
+    #             :all_spread → force isolated spread footings
+    #             :all_strip  → force strip/combined footings
+    #             :mat        → force mat foundation
     foundation_options = FoundationParameters(
-        soil = medium_sand,
-        concrete = NWC_4000,
-        rebar = Rebar_60,
+        soil = medium_sand,       # Presets: loose_sand, medium_sand, dense_sand,
+                                  #          soft_clay, stiff_clay, hard_clay
         pier_width = 0.35u"m",
         min_depth = 0.4u"m",
-        group_tolerance = 0.15,         # ±15% for grouping
+        group_tolerance = 0.15,
+        options = FoundationOptions(
+            strategy = :auto,
+            mat_coverage_threshold = 0.50,
+            # spread = SpreadFootingOptions(min_depth = 12.0u"inch"),
+            # strip  = StripFootingOptions(min_depth = 12.0u"inch"),
+            # mat    = MatFootingOptions(
+            #     analysis_method = RigidMat(),   # or ShuklaAFM(), WinklerFEA()
+            #     min_depth = 24.0u"inch",
+            # ),
+        ),
     ),
 ));
 
@@ -137,13 +166,7 @@ struc_v = BuildingStructure(skel_v)
 
 design_v = design_building(struc_v, DesignParameters(
     name = "1-Story Vault Office",
-    floor_options = FloorOptions(
-        floor_type = :vault,
-        vault = VaultOptions(
-            lambda = 8.0,
-            material = NWC_4000,
-        ),
-    ),
+    floor = VaultOptions(lambda = 8.0, material = NWC_4000),
 ))
 
 println("Compute time: $(round(design_v.compute_time_s, digits=2))s")

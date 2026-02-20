@@ -86,7 +86,7 @@ function summary_row_s(label, d_s, m_s, r_s, s_s)
 end
 
 # Collect pass/fail per section
-step_status = Dict{String,String}()
+const _col_step_status = Dict{String,String}()
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Common helper: compute AISC H1-1 interaction ratio for steel columns
@@ -144,30 +144,16 @@ end
 # ==============================================================================
 
 col_section_header("COLUMN SIZING VALIDATION REPORT")
-println("  Generated: $(Dates.format(now(), "yyyy-mm-dd HH:MM"))")
-println("  This report validates RC and steel column sizing against analytical")
-println("  capacities and compares discrete (MIP) vs continuous (NLP) optimization.")
-println()
+println("  Generated: $(Dates.format(now(), "yyyy-mm-dd HH:MM"))  |  RC + Steel column MIP vs NLP validation")
 
 # ╔═══════════════════════════════════════════════════════════════════════════╗
 # ║  1.  INPUT SUMMARY                                                        ║
 # ╚═══════════════════════════════════════════════════════════════════════════╝
 col_sub_header("1.0  Input Summary")
 
-println("    Materials")
-println("      Concrete : f'c = 4 000 psi  (NWC_4000, λ = 1.0)")
-println("      Rebar    : fy  = 60 ksi     (Rebar_60)")
-println("      Steel    : Fy  = 50 ksi     (A992_Steel)")
-println()
-println("    Geometry")
-println("      Column length : 4.0 m  (13.12 ft)")
-println("      K factor      : 1.0    (braced frame)")
-println()
-println("    Demand Cases")
-println("      RC Rect : Pu = 180 kip,  Mu = 74 kip·ft")
-println("      RC Circ : Pu = 250 kip,  Mu = 90 kip·ft")
-println("      Steel W : Pu = 500 kN,   Mu = 30 kN·m")
-println("      Steel HSS: Pu = 300 kN,  Mu = 20 kN·m")
+println("    Materials: f'c=4000psi (NWC_4000), fy=60ksi (Rebar_60), Fy=50ksi (A992_Steel)")
+println("    Geometry: L=4.0m (13.12ft), K=1.0 (braced)")
+println("    Demands: RC Rect 180k/74k·ft | RC Circ 250k/90k·ft | W 500kN/30kN·m | HSS 300kN/20kN·m")
 
 # ╔═══════════════════════════════════════════════════════════════════════════╗
 # ║  2.  RC RECTANGULAR COLUMN  (ACI 318-19)                                  ║
@@ -263,10 +249,7 @@ summary_row("P-M Utilization",  nothing, mip_util, nlp_raw_util_val, nlp_util; d
 summary_row("ρg",               nothing, rc_rect_mip_sec.ρg, rc_rect_nlp_raw.ρ_opt, rc_rect_nlp.ρ_opt; d=4)
 
 println()
-col_note("Demand = factored Pu/Mu; MIP/NLP columns = φ-capacity of each section.")
-col_note("MIP selects from a discrete grid → section may be conservatively oversized.")
-col_note("NLP optimizes continuously → tighter fit to the demand, utilization closer to 1.0.")
-col_note("Snapping rounds to 2\" increments — raw solver dims may be fractional.")
+col_note("MIP=discrete catalog (may oversize); NLP=continuous (tighter fit); snap rounds to 2\" increments.")
 
 @testset "RC Rectangular Column" begin
     @test mip_ok   # MIP section passes P-M check
@@ -276,7 +259,7 @@ col_note("Snapping rounds to 2\" increments — raw solver dims may be fractiona
     @test nlp_area ≤ rc_rect_mip_area * 1.5
     @test nlp_area ≥ rc_rect_mip_area * 0.5
 end
-step_status["RC Rectangular"] = mip_ok ? "✓" : "✗"
+_col_step_status["RC Rectangular"] = mip_ok ? "✓" : "✗"
 
 # ╔═══════════════════════════════════════════════════════════════════════════╗
 # ║  3.  RC CIRCULAR COLUMN  (ACI 318-19)                                     ║
@@ -330,13 +313,13 @@ circ_nlp_base = (
 
 # Snapped
 rc_circ_nlp_opts = NLPColumnOptions(; circ_nlp_base..., snap=true)
-rc_circ_nlp = size_rc_circular_column_nlp(Pu_circ, Mu_circ, circ_geom, rc_circ_nlp_opts)
+rc_circ_nlp = size_rc_column_nlp(RCCircularSection, Pu_circ, Mu_circ, circ_geom, rc_circ_nlp_opts)
 circ_nlp_area = rc_circ_nlp.area
 circ_nlp_sec  = rc_circ_nlp.section
 
 # Unsnapped
 rc_circ_nlp_raw_opts = NLPColumnOptions(; circ_nlp_base..., snap=false)
-rc_circ_nlp_raw = size_rc_circular_column_nlp(Pu_circ, Mu_circ, circ_geom, rc_circ_nlp_raw_opts)
+rc_circ_nlp_raw = size_rc_column_nlp(RCCircularSection, Pu_circ, Mu_circ, circ_geom, rc_circ_nlp_raw_opts)
 circ_nlp_raw_area = rc_circ_nlp_raw.area
 
 println("    Unsnapped : D=$(round(rc_circ_nlp_raw.D_final, digits=2))\"  →  A = $(round(circ_nlp_raw_area, digits=1)) in²")
@@ -371,9 +354,7 @@ summary_row("P-M Utilization",  nothing, circ_util, circ_raw_util_val, circ_nlp_
 summary_row("ρg",               nothing, nothing, rc_circ_nlp_raw.ρ_opt, rc_circ_nlp.ρ_opt; d=4)
 
 println()
-col_note("Demand = factored Pu/Mu; MIP/NLP columns = φ-capacity of each section.")
-col_note("NLP uses 2 design variables (D, ρg) — simpler than rect (b, h, ρg).")
-col_note("Snapping rounds to 2\" increments — raw D may be fractional.")
+col_note("NLP uses 2 vars (D, ρg); snap rounds to 2\" increments; raw D may be fractional.")
 
 @testset "RC Circular Column" begin
     @test circ_ok       # MIP section passes P-M check
@@ -383,7 +364,7 @@ col_note("Snapping rounds to 2\" increments — raw D may be fractional.")
     @test circ_nlp_area ≤ rc_circ_area * 1.5
     @test circ_nlp_area ≥ rc_circ_area * 0.5
 end
-step_status["RC Circular"] = (circ_ok && circ_nlp_ok) ? "✓" : "✗"
+_col_step_status["RC Circular"] = (circ_ok && circ_nlp_ok) ? "✓" : "✗"
 
 # ╔═══════════════════════════════════════════════════════════════════════════╗
 # ║  4.  STEEL W-SHAPE COLUMN  (AISC 360-16)                                  ║
@@ -464,10 +445,7 @@ summary_row("H1-1 Utilization",  nothing, w_mip_chk.utilization, w_nlp_raw_chk.u
 summary_row("Weight (lb/ft)",    nothing, nothing, w_nlp_raw.weight_per_ft, w_nlp.weight_per_ft)
 
 println()
-col_note("Demand = factored Pu/Mu; MIP/NLP columns = φ-capacity of each section.")
-col_note("NLP returns a custom continuous I-shape — area is a theoretical lower bound.")
-col_note("MIP gives the lightest feasible rolled W from the AISC catalog.")
-col_note("Snapping rounds to 1/16\" increments.")
+col_note("NLP=continuous I-shape (theoretical lower bound); MIP=lightest rolled W; snap to 1/16\".")
 
 @testset "Steel W-Shape Column" begin
     @test w_mip_chk.adequate
@@ -475,7 +453,7 @@ col_note("Snapping rounds to 1/16\" increments.")
     @test w_nlp_area > 0
     @test w_nlp_area ≤ w_mip_area * 1.5 || w_nlp_area ≥ w_mip_area * 0.5
 end
-step_status["Steel W-Shape"] = w_mip_chk.adequate ? "✓" : "✗"
+_col_step_status["Steel W-Shape"] = w_mip_chk.adequate ? "✓" : "✗"
 
 # ╔═══════════════════════════════════════════════════════════════════════════╗
 # ║  5.  STEEL HSS RECT COLUMN  (AISC 360-16)                                 ║
@@ -558,9 +536,7 @@ summary_row("H1-1 Utilization", nothing, hss_mip_chk.utilization, hss_nlp_raw_ch
 summary_row("Weight (lb/ft)",   nothing, nothing, hss_nlp_raw.weight_per_ft, hss_nlp.weight_per_ft)
 
 println()
-col_note("Demand = factored Pu/Mu; MIP/NLP columns = φ-capacity of each section.")
-col_note("H1-1 interaction used in NLP constraint for accurate combined loading.")
-col_note("Snapping rounds to standard increments (1\" outer, 1/16\" thickness).")
+col_note("NLP uses H1-1 constraint; snap rounds to 1\" outer / 1/16\" thickness.")
 
 @testset "Steel HSS Column" begin
     @test hss_mip_chk.adequate
@@ -568,7 +544,7 @@ col_note("Snapping rounds to standard increments (1\" outer, 1/16\" thickness)."
     @test hss_nlp_area > 0
     @test hss_nlp_area ≤ hss_mip_area * 1.3 || hss_nlp_area ≥ hss_mip_area * 0.7
 end
-step_status["Steel HSS"] = hss_mip_chk.adequate ? "✓" : "✗"
+_col_step_status["Steel HSS"] = hss_mip_chk.adequate ? "✓" : "✗"
 
 # ╔═══════════════════════════════════════════════════════════════════════════╗
 # ║  6.  PARAMETRIC SENSITIVITY: Demand Scaling                               ║
@@ -576,8 +552,7 @@ step_status["Steel HSS"] = hss_mip_chk.adequate ? "✓" : "✗"
 
 # ── 6.1  RC Rectangular ──
 col_sub_header("6.1  Parametric Study — Demand Scaling (RC Rectangular)")
-col_note("Scales Pu from 150–1500 kip with proportional Mu (e ≈ 5\").")
-col_note("Both Pu and Mu increase → forces real section growth from 12\" up to 30\"+.")
+col_note("Pu 150–1500 kip, proportional Mu (e≈5\"); forces section growth 12\"→30\"+.")
 
 rc_scale_geom = ConcreteMemberGeometry(4.0; k=1.0, braced=true)
 # Constant eccentricity load path: Mu ≈ Pu × 5"/12 (≈ Pu/2.4 kip·ft)
@@ -621,13 +596,11 @@ for (Pu_i, Mu_i) in zip(rc_Pu_levels, rc_Mu_levels)
 end
 
 println()
-col_note("Both MIP and NLP area should increase with demand (monotonicity).")
-col_note("Constant-eccentricity load path avoids balanced-point non-monotonicity.")
+col_note("Monotonicity expected — constant-eccentricity load path avoids balanced-point issues.")
 
 # ── 6.2  RC Circular ──
 col_sub_header("6.2  Parametric Study — Demand Scaling (RC Circular)")
-col_note("Scales Pu from 150–1200 kip with proportional Mu (e ≈ 5\").")
-col_note("Both Pu and Mu increase → forces real section growth from 12\" up to 28\"+.")
+col_note("Pu 150–1200 kip, proportional Mu (e≈5\"); forces section growth 12\"→28\"+.")
 
 circ_scale_geom = ConcreteMemberGeometry(4.0; k=1.0, braced=true)
 # Constant eccentricity load path: Mu ≈ Pu × 5"/12
@@ -655,7 +628,7 @@ for (Pu_i, Mu_i) in zip(circ_Pu_levels, circ_Mu_levels)
     circ_opts_i = NLPColumnOptions(include_slenderness=false, tie_type=:spiral, bar_size=8,
                                     verbose=false, n_multistart=3,
                                     min_dim=circ_min_dim_floor * u"inch")
-    nlp_i = size_rc_circular_column_nlp(Pu_i, Mu_i, circ_scale_geom, circ_opts_i; x0=circ_x0)
+    nlp_i = size_rc_column_nlp(RCCircularSection, Pu_i, Mu_i, circ_scale_geom, circ_opts_i; x0=circ_x0)
     nlp_a = nlp_i.area
 
     # Tighten floor for next iteration
@@ -672,8 +645,7 @@ for (Pu_i, Mu_i) in zip(circ_Pu_levels, circ_Mu_levels)
 end
 
 println()
-col_note("Both MIP and NLP area should increase with demand (monotonicity).")
-col_note("Constant-eccentricity load path avoids balanced-point non-monotonicity.")
+col_note("Monotonicity expected — constant-eccentricity load path avoids balanced-point issues.")
 
 # ── 6.3  Steel W-Shape ──
 col_sub_header("6.3  Parametric Study — Demand Scaling (Steel W-Shape)")
@@ -783,64 +755,342 @@ col_note("HSS NLP has 3 design variables (B, H, t) — simpler than the 4-var W 
 end
 
 # ╔═══════════════════════════════════════════════════════════════════════════╗
-# ║  7.  DESIGN CODE FEATURES & LIMITATIONS                                   ║
+# ║  7.  RECTANGULAR COLUMN EXPANSION (Column Growth Helpers)                  ║
 # ╚═══════════════════════════════════════════════════════════════════════════╝
-col_sub_header("7.0  Feature Matrix")
-println()
-println("    Feature                          RC Rect   RC Circ   Steel W   Steel HSS")
-println("    ────────────────────────────── ──────── ──────── ──────── ─────────")
-println("    P-M interaction (ACI §22.4)          ✓        ✓        —         —")
-println("    Biaxial P-M (Bresler contour)        ✓        —        —         —")
-println("    P-M diagram (strong + weak)          ✓        ✓        —         —")
-println("    Slenderness (ACI §6.6 δns)           ✓        ✓        —         —")
-println("    H1-1 P-M interaction (AISC)          —        —        ✓         ✓")
-println("    Compression (AISC E1/E3/E7)          —        —        ✓         ✓")
-println("    Flexure (AISC F2 + LTB)              —        —        ✓         —")
-println("    Flexure (AISC F7, no LTB)            —        —        —         ✓")
-println("    Local buckling / slender elems        —        —        ✓         ✓")
-println("    Biaxial flexure (AISC H1-1)          —        —        ✓         ✓")
-println("    Min/max ρg (ACI 1%–8%)               ✓        ✓        —         —")
-println("    Spiral / tied confinement             ✓        ✓        —         —")
-println("    MIP (discrete catalog)               ✓        ✓        ✓         ✓")
-println("    NLP (continuous optimization)         ✓        ✓        ✓         ✓")
-println("    MIP warm-start for NLP               —        —        ✓         ✓")
-println("    Snap to practical dims                ✓        ✓        ✓         ✓")
+col_sub_header("7.0  Column Growth — Rectangular Expansion")
+col_note("Tests the direct b₀ solve + shape-aware growth infrastructure.")
+col_note("Reference: ACI 318 §22.6.5 (punching geometry), §22.6.5.2 (β factor)")
+
+# ── Mock column type for growth tests ──
+mutable struct ReportTestColumn
+    c1::typeof(1.0u"inch")
+    c2::typeof(1.0u"inch")
+    position::Symbol
+    shape::Symbol
+end
+ReportTestColumn(c1, c2, pos) = ReportTestColumn(c1, c2, pos, :rectangular)
+
+# Alias internal helpers
+_rut  = StructuralSizer._round_up_to
+_ssb  = StructuralSizer._solve_square_b0
+_srb  = StructuralSizer._solve_rectangular_b0
+_scfp = StructuralSizer.solve_column_for_punching
+_tar  = StructuralSizer.target_aspect_ratio
+
+# ── 7.1  b₀ Geometry Back-Solve (Square) ──
+println("\n  7.1  b₀ Back-Solve — Square Columns")
+col_note("For each position, solve c from b₀, then recompute b₀ and check round-trip error.")
 println()
 
-col_sub_header("7.1  Shared Components")
-println()
-println("    All four column types share the unified sizing API (size_columns)")
-println("    and optimization framework (optimize_discrete / optimize_continuous).")
-println()
-println("    NLP uses Ipopt with smooth analytical constraint functions:")
-println("      RC Rect → 3 variables (b, h, ρg), P-M utilization constraint")
-println("      RC Circ → 2 variables (D, ρg),    P-M utilization constraint")
-println("      Steel W → 4 variables (d, bf, tf, tw), H1-1 + proportioning")
-println("      Steel HSS → 3 variables (B, H, t),    H1-1 + proportioning")
-println()
+d_test = 6.0u"inch"
 
-col_sub_header("7.2  Current Limitations & Future Work")
-println()
-println("  1. RC biaxial P-M uses symmetric Bresler assumption (conservative for b ≠ h).")
-println("  2. RC circular NLP does not support weak-axis bending (axisymmetric).")
-println("  3. Steel column NLP does not model lateral bracing points along height.")
-println("  4. Timber column sizing (NDS) is type-defined but not yet in NLP.")
-println("  5. Composite columns (encased W in concrete) not yet supported.")
-println()
+@printf("    %-8s  %9s  %9s  %9s  %10s  %s\n",
+        "Position", "b₀_in(in)", "c_solve", "b₀_check", "Error(in)", "")
+@printf("    %-8s  %9s  %9s  %9s  %10s  %s\n",
+        "─"^8, "─"^9, "─"^9, "─"^9, "─"^10, "──")
 
-# ╔═══════════════════════════════════════════════════════════════════════════╗
-# ║  8.  FINAL SUMMARY                                                        ║
-# ╚═══════════════════════════════════════════════════════════════════════════╝
-col_section_header("COLUMN SIZING REPORT — SUMMARY")
-
-println("  Step                            Status")
-println("  ────────────────────────────── ──────")
-for (name, status) in sort(collect(step_status))
-    println("  $(rpad(name, 32)) $status")
+b0_sq_pass = true
+for (pos, b0_target) in [(:interior, 88.0u"inch"), (:edge, 54.0u"inch"), (:corner, 30.0u"inch")]
+    c = _ssb(pos, b0_target, d_test)
+    b0_check = if pos == :interior
+        4 * (c + d_test)
+    elseif pos == :edge
+        3c + 2d_test
+    else
+        2c + d_test
+    end
+    err = abs(ustrip(u"inch", b0_check) - ustrip(u"inch", b0_target))
+    ok = err < 0.01
+    b0_sq_pass &= ok
+    @printf("    %-8s  %9.1f  %9.2f  %9.2f  %10.4f  %s\n",
+            pos, ustrip(u"inch", b0_target), ustrip(u"inch", c),
+            ustrip(u"inch", b0_check), err, ok ? "✓" : "✗")
 end
 
-all_pass = all(v == "✓" for v in values(step_status))
+# ── 7.2  b₀ Geometry Back-Solve (Rectangular, r=2.0) ──
+println("\n  7.2  b₀ Back-Solve — Rectangular Columns (r = c1/c2 = 2.0)")
+col_note("Solves c1 from b₀ with aspect ratio r=2.0, then verifies b₀ round-trip.")
 println()
+
+r_test = 2.0
+@printf("    %-8s  %9s  %9s  %9s  %9s  %10s  %s\n",
+        "Position", "b₀_in(in)", "c1_solve", "c2=c1/r", "b₀_check", "Error(in)", "")
+@printf("    %-8s  %9s  %9s  %9s  %9s  %10s  %s\n",
+        "─"^8, "─"^9, "─"^9, "─"^9, "─"^9, "─"^10, "──")
+
+b0_rect_pass = true
+for (pos, b0_target) in [(:interior, 100.0u"inch"), (:edge, 80.0u"inch"), (:corner, 50.0u"inch")]
+    c1 = _srb(pos, b0_target, d_test, r_test)
+    c2 = c1 / r_test
+    b0_check = if pos == :interior
+        2*(c1 + d_test) + 2*(c2 + d_test)
+    elseif pos == :edge
+        2*(c1 + d_test/2) + (c2 + d_test)
+    else
+        (c1 + d_test/2) + (c2 + d_test/2)
+    end
+    err = abs(ustrip(u"inch", b0_check) - ustrip(u"inch", b0_target))
+    ok = err < 0.01
+    b0_rect_pass &= ok
+    @printf("    %-8s  %9.1f  %9.2f  %9.2f  %9.2f  %10.4f  %s\n",
+            pos, ustrip(u"inch", b0_target), ustrip(u"inch", c1),
+            ustrip(u"inch", c2), ustrip(u"inch", b0_check), err, ok ? "✓" : "✗")
+end
+
+# ── 7.3  Moment-Informed Aspect Ratio ──
+println("\n  7.3  Moment-Informed Aspect Ratio")
+col_note("AR = √(Mx/My) clamped to max_ar. Shows how directional moments drive column shape.")
+println()
+
+@printf("    %-18s  %-18s  %10s  %10s  %s\n",
+        "Mx(kip·ft)", "My(kip·ft)", "Target AR", "Expected", "")
+@printf("    %-18s  %-18s  %10s  %10s  %s\n",
+        "─"^18, "─"^18, "─"^10, "─"^10, "──")
+
+ar_pass = true
+ar_cases = [
+    (100.0, 100.0, 2.0, 1.0,  "Equal → square"),
+    (400.0, 100.0, 2.0, 2.0,  "Mx>>My → c1>c2"),
+    (100.0, 400.0, 2.0, 0.5,  "My>>Mx → c2>c1"),
+    (900.0,   1.0, 2.0, 2.0,  "Extreme → clamped"),
+    (  0.0,   0.0, 2.0, 1.0,  "Zero → square"),
+    (100.0,   0.0, 3.0, 3.0,  "One-sided → max"),
+]
+for (mx, my, mar, expected, label) in ar_cases
+    Mx = mx * kip * u"ft"
+    My = my * kip * u"ft"
+    r = _tar(Mx, My; max_ar=mar)
+    ok = abs(r - expected) < 0.15
+    ar_pass &= ok
+    @printf("    %-18s  %-18s  %10.2f  %10.2f  %s  %s\n",
+            "$(mx)", "$(my)", r, expected, ok ? "✓" : "✗", label)
+end
+
+# ── 7.4  Square vs Bounded vs Circular — Punching Expansion ──
+println("\n  7.4  Punching Growth — Square vs Bounded vs Circular")
+col_note("Same 40% overstress (ratio=1.4) starting from 16\" square. Bounded uses Mx=200, My=80.")
+col_note("Bounded columns should use less area than square (smarter geometry allocation).")
+println()
+
+d_grow = 6.0u"inch"
+inc_grow = 0.5u"inch"
+ratio_grow = 1.4
+
+@printf("    %-8s  %-7s  %8s  %8s  %6s  %8s  %8s  %12s\n",
+        "Position", "Mode", "c1(in)", "c2(in)", "AR", "Ag(in²)", "b₀(in)", "Ag Δ vs Sq")
+@printf("    %-8s  %-7s  %8s  %8s  %6s  %8s  %8s  %12s\n",
+        "─"^8, "─"^7, "─"^8, "─"^8, "─"^6, "─"^8, "─"^8, "─"^12)
+
+growth_pass = true
+for pos in [:interior, :edge, :corner]
+    # Compute b0 for 16" square column
+    b0_init = if pos == :interior
+        4 * (16.0u"inch" + d_grow)
+    elseif pos == :edge
+        3 * 16.0u"inch" + 2 * d_grow
+    else
+        2 * 16.0u"inch" + d_grow
+    end
+
+    # Square growth
+    col_sq = ReportTestColumn(16.0u"inch", 16.0u"inch", pos)
+    c1_sq, c2_sq = _scfp(col_sq, ratio_grow, b0_init, d_grow;
+                          shape_constraint=:square, increment=inc_grow)
+    Ag_sq = ustrip(u"inch", c1_sq) * ustrip(u"inch", c2_sq)
+    ar_sq = 1.0
+
+    # Bounded growth (moment-informed)
+    col_bd = ReportTestColumn(16.0u"inch", 16.0u"inch", pos)
+    c1_bd, c2_bd = _scfp(col_bd, ratio_grow, b0_init, d_grow;
+                          shape_constraint=:bounded, max_ar=2.0,
+                          Mx=200.0kip*u"ft", My=80.0kip*u"ft", increment=inc_grow)
+    Ag_bd = ustrip(u"inch", c1_bd) * ustrip(u"inch", c2_bd)
+    ar_bd = ustrip(u"inch", c1_bd) / max(ustrip(u"inch", c2_bd), 0.1)
+
+    # Circular growth (same starting size, treated as D=16")
+    col_ci = ReportTestColumn(16.0u"inch", 16.0u"inch", pos, :circular)
+    b0_circ = pos == :interior ? π * (16.0u"inch" + d_grow) : b0_init
+    c1_ci, c2_ci = _scfp(col_ci, ratio_grow, b0_circ, d_grow;
+                          shape_constraint=:square, increment=inc_grow)
+    Ag_ci = if pos == :interior
+        π/4 * ustrip(u"inch", c1_ci)^2
+    else
+        ustrip(u"inch", c1_ci) * ustrip(u"inch", c2_ci)
+    end
+
+    # Compute b0 for each result
+    b0_sq_result = if pos == :interior
+        4 * (c1_sq + d_grow)
+    elseif pos == :edge
+        3 * c1_sq + 2d_grow
+    else
+        2 * c1_sq + d_grow
+    end
+
+    b0_bd_result = if pos == :interior
+        2*(c1_bd + d_grow) + 2*(c2_bd + d_grow)
+    elseif pos == :edge
+        2*(c1_bd + d_grow/2) + (c2_bd + d_grow)
+    else
+        (c1_bd + d_grow/2) + (c2_bd + d_grow/2)
+    end
+
+    # Print rows
+    @printf("    %-8s  %-7s  %8.1f  %8.1f  %6.2f  %8.1f  %8.1f  %12s\n",
+            pos, "Square", ustrip(u"inch", c1_sq), ustrip(u"inch", c2_sq),
+            ar_sq, Ag_sq, ustrip(u"inch", b0_sq_result), "—")
+
+    δ_bd = (Ag_bd - Ag_sq) / Ag_sq * 100
+    @printf("    %-8s  %-7s  %8.1f  %8.1f  %6.2f  %8.1f  %8.1f  %+11.1f%%\n",
+            "", "Bounded", ustrip(u"inch", c1_bd), ustrip(u"inch", c2_bd),
+            ar_bd, Ag_bd, ustrip(u"inch", b0_bd_result), δ_bd)
+
+    δ_ci = (Ag_ci - Ag_sq) / Ag_sq * 100
+    b0_ci_str = pos == :interior ? @sprintf("%.1f", ustrip(u"inch", π*(c1_ci + d_grow))) :
+                                   @sprintf("%.1f", ustrip(u"inch", b0_sq_result))
+    @printf("    %-8s  %-7s  %8.1f  %8.1f  %6s  %8.1f  %8s  %+11.1f%%\n",
+            "", "Circular", ustrip(u"inch", c1_ci), ustrip(u"inch", c2_ci),
+            "—", Ag_ci, b0_ci_str, δ_ci)
+
+    println()
+
+    # Tests: bounded shouldn't be more than 30% larger than square
+    growth_pass &= (Ag_bd < Ag_sq * 1.3)
+    # Tests: square must remain square
+    growth_pass &= abs(ustrip(u"inch", c1_sq) - ustrip(u"inch", c2_sq)) < 0.01
+    # Tests: bounded c1 > c2 (because Mx > My)
+    growth_pass &= c1_bd ≥ c2_bd
+end
+
+# ── 7.5  Axial Growth — Shape-Aware Scaling ──
+println("  7.5  Axial Growth — Shape-Aware Scaling")
+col_note("grow_column_for_axial! maintains proportions for :bounded and forces c1=c2 for :square.")
+println()
+
+@printf("    %-8s  %-10s  %-12s  %8s  %8s  %6s  %8s  %s\n",
+        "Mode", "Initial", "Ag_req(in²)", "c1(in)", "c2(in)", "AR", "Ag(in²)", "")
+@printf("    %-8s  %-10s  %-12s  %8s  %8s  %6s  %8s  %s\n",
+        "─"^8, "─"^10, "─"^12, "─"^8, "─"^8, "─"^6, "─"^8, "──")
+
+axial_pass = true
+
+# Square: 12×12 → Ag=324 in² (c=18")
+col_a1 = ReportTestColumn(12.0u"inch", 12.0u"inch", :interior)
+grow_column_for_axial!(col_a1, 324.0u"inch^2"; shape_constraint=:square, increment=0.5u"inch")
+a1_Ag = ustrip(u"inch", col_a1.c1) * ustrip(u"inch", col_a1.c2)
+a1_ok = abs(ustrip(u"inch", col_a1.c1) - 18.0) < 0.1 && col_a1.c1 ≈ col_a1.c2
+axial_pass &= a1_ok
+@printf("    %-8s  %-10s  %12.0f  %8.1f  %8.1f  %6.2f  %8.1f  %s\n",
+        "Square", "12×12", 324.0, ustrip(u"inch", col_a1.c1), ustrip(u"inch", col_a1.c2),
+        1.0, a1_Ag, a1_ok ? "✓" : "✗")
+
+# Square: 12×12 → Ag=300 in² (c=√300≈17.32 → 17.5")
+col_a2 = ReportTestColumn(12.0u"inch", 12.0u"inch", :interior)
+grow_column_for_axial!(col_a2, 300.0u"inch^2"; shape_constraint=:square, increment=0.5u"inch")
+a2_Ag = ustrip(u"inch", col_a2.c1) * ustrip(u"inch", col_a2.c2)
+a2_ok = abs(ustrip(u"inch", col_a2.c1) - 17.5) < 0.1 && col_a2.c1 ≈ col_a2.c2
+axial_pass &= a2_ok
+@printf("    %-8s  %-10s  %12.0f  %8.1f  %8.1f  %6.2f  %8.1f  %s\n",
+        "Square", "12×12", 300.0, ustrip(u"inch", col_a2.c1), ustrip(u"inch", col_a2.c2),
+        1.0, a2_Ag, a2_ok ? "✓" : "✗")
+
+# Bounded: 20×12 → Ag=400 in² (scale proportionally)
+col_a3 = ReportTestColumn(20.0u"inch", 12.0u"inch", :interior)
+grow_column_for_axial!(col_a3, 400.0u"inch^2"; shape_constraint=:bounded, max_ar=2.0, increment=0.5u"inch")
+a3_Ag = ustrip(u"inch", col_a3.c1) * ustrip(u"inch", col_a3.c2)
+a3_ar = ustrip(u"inch", col_a3.c1) / ustrip(u"inch", col_a3.c2)
+a3_ok = a3_Ag ≥ 390.0 && a3_ar ≤ 2.1 && col_a3.c1 ≥ 20.0u"inch" && col_a3.c2 ≥ 12.0u"inch"
+axial_pass &= a3_ok
+@printf("    %-8s  %-10s  %12.0f  %8.1f  %8.1f  %6.2f  %8.1f  %s\n",
+        "Bounded", "20×12", 400.0, ustrip(u"inch", col_a3.c1), ustrip(u"inch", col_a3.c2),
+        a3_ar, a3_Ag, a3_ok ? "✓" : "✗")
+
+# Bounded: 20×12, Ag=0 → no growth
+col_a4 = ReportTestColumn(20.0u"inch", 12.0u"inch", :interior)
+grow_column_for_axial!(col_a4, 0.0u"inch^2"; shape_constraint=:bounded, increment=0.5u"inch")
+a4_ok = col_a4.c1 ≈ 20.0u"inch" && col_a4.c2 ≈ 12.0u"inch"
+axial_pass &= a4_ok
+@printf("    %-8s  %-10s  %12.0f  %8.1f  %8.1f  %6.2f  %8.1f  %s\n",
+        "Bounded", "20×12", 0.0, ustrip(u"inch", col_a4.c1), ustrip(u"inch", col_a4.c2),
+        ustrip(u"inch", col_a4.c1)/ustrip(u"inch", col_a4.c2),
+        ustrip(u"inch", col_a4.c1)*ustrip(u"inch", col_a4.c2), a4_ok ? "✓" : "✗")
+
+println()
+
+# ── 7.6  Rounding Increment Verification ──
+println("  7.6  Rounding Increment Verification")
+col_note("_round_up_to snaps to the next multiple of the increment (0.5\", 1.0\", 2.0\").")
+println()
+
+@printf("    %-12s  %-6s  %10s  %10s  %s\n",
+        "Input(in)", "Incr", "Result(in)", "Expected", "")
+@printf("    %-12s  %-6s  %10s  %10s  %s\n",
+        "─"^12, "─"^6, "─"^10, "─"^10, "──")
+
+round_pass = true
+round_cases = [
+    (10.0,  0.5, 10.0),  (10.1,  0.5, 10.5),  (10.25, 0.5, 10.5),
+    (10.5,  0.5, 10.5),  (10.51, 0.5, 11.0),  (10.0,  1.0, 10.0),
+    (10.1,  1.0, 11.0),  (10.0,  2.0, 10.0),  (11.0,  2.0, 12.0),
+]
+for (val, incr, expected) in round_cases
+    result = ustrip(u"inch", _rut(val * u"inch", incr * u"inch"))
+    ok = abs(result - expected) < 0.001
+    round_pass &= ok
+    @printf("    %-12s  %-6s  %10.1f  %10.1f  %s\n",
+            "$val", "$incr", result, expected, ok ? "✓" : "✗")
+end
+
+println()
+
+# ── 7.7  Tests ──
+@testset "Column Growth — Rectangular Expansion" begin
+    @testset "b₀ square back-solve round-trips" begin
+        @test b0_sq_pass
+    end
+    @testset "b₀ rectangular back-solve round-trips" begin
+        @test b0_rect_pass
+    end
+    @testset "moment-informed aspect ratio" begin
+        @test ar_pass
+    end
+    @testset "square vs bounded vs circular growth" begin
+        @test growth_pass
+    end
+    @testset "axial growth shape-aware scaling" begin
+        @test axial_pass
+    end
+    @testset "rounding increment" begin
+        @test round_pass
+    end
+end
+_col_step_status["Rect. Expansion"] = (b0_sq_pass && b0_rect_pass && ar_pass && growth_pass && axial_pass && round_pass) ? "✓" : "✗"
+
+# ╔═══════════════════════════════════════════════════════════════════════════╗
+# ║  8.  DESIGN CODE FEATURES & LIMITATIONS                                   ║
+# ╚═══════════════════════════════════════════════════════════════════════════╝
+col_sub_header("8.0  Feature Matrix")
+println("    RC (ACI 318-19): P-M interaction, biaxial Bresler, slenderness δns, ρg 1–8%, spiral/tied, MIP+NLP+snap")
+println("    Steel (AISC 360-16): H1-1 P-M, compression E1/E3/E7, flexure F2/F7+LTB, local buckling, biaxial, MIP+NLP+snap")
+
+col_sub_header("8.1  Shared Components")
+println("    Unified API: size_columns → MIP (optimize_discrete) / NLP (Ipopt optimize_continuous)")
+println("    NLP vars: RC Rect(b,h,ρg) RC Circ(D,ρg) W(d,bf,tf,tw) HSS(B,H,t) — all with P-M or H1-1 constraints")
+
+col_sub_header("8.2  Current Limitations & Future Work")
+println("    1. RC biaxial: symmetric Bresler  2. RC circ: no weak-axis  3. Steel NLP: no intermediate bracing")
+println("    4. Timber NDS: type-defined only  5. Composite (encased W): not yet supported")
+
+# ╔═══════════════════════════════════════════════════════════════════════════╗
+# ║  9.  FINAL SUMMARY                                                        ║
+# ╚═══════════════════════════════════════════════════════════════════════════╝
+col_section_header("COLUMN SIZING REPORT — SUMMARY")
+println("  Step                            Status")
+println("  ────────────────────────────── ──────")
+for (name, status) in sort(collect(_col_step_status))
+    println("  $(rpad(name, 32)) $status")
+end
+all_pass = all(v == "✓" for v in values(_col_step_status))
 println("  Overall: $(all_pass ? "✓ ALL CHECKS PASSED" : "✗ SOME CHECKS FAILED")")
 println(COL_DLINE)
 

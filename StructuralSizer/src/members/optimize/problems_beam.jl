@@ -9,8 +9,8 @@
 # Constraints:
 #   1. Flexure utilization:  Mu / φMn ≤ 1.0
 #   2. Shear section adequacy: Vu / φVn_max ≤ 1.0
-#   3. Net tensile strain:  εt ≥ 0.004  (ACI 318-19 §9.3.3.1)
-#   4. Minimum reinforcement: As ≥ As,min (ACI 318-19 §9.6.1.2)
+#   3. Net tensile strain:  εt ≥ 0.004  (ACI 318-11 §10.3.5)
+#   4. Minimum reinforcement: As ≥ As,min (ACI 318-11 §10.5.1)
 
 using Unitful
 using Asap: kip, ksi, to_kip, to_kipft, to_inches, to_sqinches
@@ -35,10 +35,10 @@ the minimum-area section satisfying ACI 318 requirements.
 # Constraints
 - Flexure utilization: Mu / φMn ≤ 1.0
 - Shear section adequacy: Vu / φVn_max ≤ 1.0
-- Net tensile strain: εt ≥ 0.004 (ACI 318-19 §9.3.3.1 — beams must not be
+- Net tensile strain: εt ≥ 0.004 (ACI 318-11 §10.3.5 — beams must not be
   compression-controlled; prevents over-reinforcement)
-- Minimum reinforcement: ρ ≥ ρ_min (ACI 318-19 §9.6.1.2)
-- (optional) Torsion adequacy: shear-torsion interaction ≤ 1.0 (ACI §22.7.7.1)
+- Minimum reinforcement: ρ ≥ ρ_min (ACI 318-11 §10.5.1)
+- (optional) Torsion adequacy: shear-torsion interaction ≤ 1.0 (ACI §11.5.3.1)
 """
 struct RCBeamNLPProblem <: AbstractNLPProblem
     Mu_kipft::Float64
@@ -57,7 +57,7 @@ struct RCBeamNLPProblem <: AbstractNLPProblem
     # Distance from face to stirrup centerline (inches) — for torsion Aoh
     cover_to_stirrup_ctr_in::Float64
 
-    # ACI 318-19 §9.6.1.2 minimum reinforcement ratio
+    # ACI 318-11 §10.5.1 minimum reinforcement ratio
     ρ_min_aci::Float64
 
     # Bounds in inches
@@ -91,7 +91,7 @@ function RCBeamNLPProblem(Mu, Vu, opts::NLPBeamOptions; Tu=0.0)
     h_min = ustrip(u"inch", opts.min_depth)
     h_max = ustrip(u"inch", opts.max_depth)
 
-    # ACI 318-19 §9.6.1.2: As,min = max(3√f'c/fy, 200/fy) × bw × d
+    # ACI 318-11 §10.5.1: As,min = max(3√f'c/fy, 200/fy) × bw × d
     # Since As = ρ × b × d, the minimum ρ is:
     fc_psi = fc * 1000.0
     fy_psi = fy * 1000.0
@@ -163,7 +163,7 @@ end
 
 function n_constraints(p::RCBeamNLPProblem)
     nc = 4
-    p.Tu_kipin > 0 && (nc += 1)  # torsion adequacy (ACI §22.7.7.1)
+    p.Tu_kipin > 0 && (nc += 1)  # torsion adequacy (ACI §11.5.3.1)
     return nc
 end
 
@@ -172,9 +172,9 @@ function constraint_names(p::RCBeamNLPProblem)
         "flexure utilization",
         "shear adequacy",
         "net tensile strain (εt ≥ 0.005)",
-        "min reinforcement (§9.6.1.2)",
+        "min reinforcement (§10.5.1)",
     ]
-    p.Tu_kipin > 0 && push!(names, "torsion adequacy (§22.7.7.1)")
+    p.Tu_kipin > 0 && push!(names, "torsion adequacy (§11.5.3.1)")
     return names
 end
 
@@ -215,19 +215,19 @@ function constraint_fns(p::RCBeamNLPProblem, x::Vector{Float64})
 
     util_shear = p.Vu_kip / max(φVn_max_kip, 1e-6)
 
-    # --- Net tensile strain (ACI 318-19 §9.3.3.1) ---
+    # --- Net tensile strain (ACI 318-11 §10.3.5) ---
     # Beams must have εt ≥ 0.004 (absolute min).  We target εt ≥ 0.005
     # to ensure tension-controlled behavior (φ = 0.9) and provide margin
     # for bar discretization which typically increases ρ and decreases εt.
     util_strain = 0.005 / max(εt, 1e-8)
 
-    # --- Minimum reinforcement (ACI 318-19 §9.6.1.2) ---
+    # --- Minimum reinforcement (ACI 318-11 §10.5.1) ---
     # ρ_min = max(3√f'c / fy, 200 / fy)  (precomputed in constructor)
     util_as_min = p.ρ_min_aci / max(ρ, 1e-8)
 
     constraints = [util_flexure, util_shear, util_strain, util_as_min]
 
-    # --- Torsion adequacy (ACI 318-19 §22.7.7.1) ---
+    # --- Torsion adequacy (ACI 318-11 §11.5.3.1) ---
     # Shear-torsion interaction: √[(Vu/(bw·d))² + (Tu·ph/(1.7·Aoh²))²] ≤ φ·(Vc/(bw·d) + 8·√f'c)
     # Already a smooth function (sqrt of sum of squares).
     if p.Tu_kipin > 0

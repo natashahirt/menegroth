@@ -22,8 +22,8 @@ using Asap: kip, ksi, psf
     # Create and size a flat plate structure
     skel = gen_medium_office(54.0u"ft", 42.0u"ft", 10.0u"ft", 3, 3, 1)
     struc = BuildingStructure(skel)
-    opts = FloorOptions(flat_plate = FlatPlateOptions())
-    initialize!(struc; floor_type = :flat_plate, floor_kwargs = (options = opts,))
+    opts = FlatPlateOptions()
+    initialize!(struc; floor_type = :flat_plate, floor_opts = opts)
     
     for col in struc.columns
         col.c1 = 16.0u"inch"

@@ -101,12 +101,15 @@ function load_w_catalog!()
 
         hov   = maybe_asfloat(row.ho)
         ho_db = hov === nothing ? nothing : (hov * IN_TO_M) * u"m"
+
+        kv     = maybe_asfloat(row.kdes)
+        kdes_db = kv === nothing ? nothing : (kv * IN_TO_M) * u"m"
         
         is_preferred = name in PREFERRED_W_SECTIONS
         
         W_CATALOG[name] = ISymmSection(d, bf, tw, tf; 
             name=name, J_db=J_db, Cw_db=Cw_db, rts_db=rts_db, ho_db=ho_db,
-            is_preferred=is_preferred)
+            kdes_db=kdes_db, is_preferred=is_preferred)
     end
     nothing
 end

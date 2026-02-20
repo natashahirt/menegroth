@@ -229,12 +229,12 @@ function constraint_fns(p::RCColumnNLPProblem, x::Vector{Float64})
     end
 
     # Smooth analytical P-M utilization (replaces piecewise-linear P-M diagram)
-    util_x = _smooth_rc_rect_pm_util(b, h, ρ, p.Pu_kip, Mux_design, p.mat;
+    util_x = _smooth_rc_pm_util(b, h, ρ, p.Pu_kip, Mux_design, p.mat;
                                       cover, n_layers=10, tie_type=p.opts.tie_type)
 
     if p.Muy_kipft > 1e-6
         # Biaxial: Bresler load contour
-        cap = _smooth_rc_rect_pm_capacity(b, h, ρ, p.Pu_kip, p.mat;
+        cap = _smooth_rc_pm_capacity(b, h, ρ, p.Pu_kip, p.mat;
                                            cover, n_layers=10, tie_type=p.opts.tie_type)
         φMnx = max(cap.φMn_kipft, 1e-6)
         φMny = φMnx   # Symmetric assumption (conservative for b < h)

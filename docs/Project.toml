@@ -6,5 +6,5 @@ StructuralSizer = "9d8e7f6a-5b4c-3d2e-1f0a-9b8c7d6e5f4a"
 StructuralSynthesizer = "fc54e8a9-dab1-4bea-a64f-f8e9b3ce8a89"
 
 [sources]
-StructuralSizer = {path = "..\\StructuralSizer"}
-StructuralSynthesizer = {path = "..\\StructuralSynthesizer"}
+StructuralSizer = {path = "../StructuralSizer"}
+StructuralSynthesizer = {path = "../StructuralSynthesizer"}

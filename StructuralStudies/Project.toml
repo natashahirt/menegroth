@@ -12,6 +12,6 @@ StructuralSynthesizer = "fc54e8a9-dab1-4bea-a64f-f8e9b3ce8a89"
 Unitful = "1986cc42-f94f-5a68-af5c-568840ba703d"
 
 [sources]
-StructuralPlots = {path = "..\\StructuralPlots"}
-StructuralSizer = {path = "..\\StructuralSizer"}
-StructuralSynthesizer = {path = "..\\StructuralSynthesizer"}
+StructuralPlots = {path = "../StructuralPlots"}
+StructuralSizer = {path = "../StructuralSizer"}
+StructuralSynthesizer = {path = "../StructuralSynthesizer"}

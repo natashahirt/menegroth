@@ -24,7 +24,7 @@ SpecialFunctions = "276daf66-3868-5448-9aa4-cd146d93841b"
 Unitful = "1986cc42-f94f-5a68-af5c-568840ba703d"
 
 [sources]
-Asap = {path = "..\\external\\Asap"}
+Asap = {path = "../external/Asap"}
 StructuralPlots = {path = "../StructuralPlots"}
 StructuralSynthesizer = {path = "../StructuralSynthesizer"}
 
@@ -35,7 +35,7 @@ HiGHS = "1.20.1"
 Ipopt = "1.14.0"
 JSON3 = "1"
 JuMP = "1.29.3"
-LinearAlgebra = "1.12.0"
+LinearAlgebra = "1.11.0"
 Meshes = "0.50 - 0.60"
 PrecompileTools = "1"
 ProgressMeter = "1.11.0"

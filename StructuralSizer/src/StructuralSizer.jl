@@ -139,7 +139,7 @@ export total_thrust
 
 # Common interface
 export self_weight, total_depth, volume_per_area
-export has_structural_effects, apply_effects!
+export has_structural_effects, apply_effects!, structural_effects
 export required_materials
 export load_distribution, get_gravity_loads, LoadDistributionType
 export DISTRIBUTION_ONE_WAY, DISTRIBUTION_TWO_WAY, DISTRIBUTION_POINT, DISTRIBUTION_CUSTOM

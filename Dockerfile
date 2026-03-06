@@ -24,8 +24,8 @@ RUN sed -i 's|\\\\|/|g' StructuralSynthesizer/Project.toml StructuralSizer/Proje
 ENV SS_ENABLE_VISUALIZATION=false
 ENV SS_ENABLE_HEAVY_PRECOMPILE_WORKLOAD=false
 
-# Install and precompile dependencies in a cache-friendly layer.
-RUN julia --project=StructuralSynthesizer -e 'using Pkg; Pkg.instantiate(); Pkg.precompile()'
+# Install dependencies in a cache-friendly layer.
+RUN julia --project=StructuralSynthesizer -e 'using Pkg; Pkg.instantiate()'
 
 # Copy source code after dependency installation
 COPY StructuralSynthesizer/src ./StructuralSynthesizer/src
@@ -33,6 +33,10 @@ COPY StructuralSizer/src ./StructuralSizer/src
 COPY StructuralPlots/src ./StructuralPlots/src
 COPY external/Asap/src ./external/Asap/src
 COPY scripts/api ./scripts/api
+
+# Precompile after local path package sources are present.
+# strict=false prevents headless GLMakie issues from failing the image build.
+RUN julia --project=StructuralSynthesizer -e 'using Pkg; Pkg.precompile(strict=false)'
 
 # Warm package cache so App Runner instances start faster.
 # Keep this non-fatal: if warmup fails, runtime can still start.

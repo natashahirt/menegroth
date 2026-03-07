@@ -71,11 +71,37 @@ jobs:
             '.ImageRepository.ImageIdentifier = $image | .AutoDeploymentsEnabled = false' \
             source-config.json > new-source-config.json
 
-          OPERATION_ID=$(aws apprunner update-service \
-            --service-arn "${APP_RUNNER_SERVICE_ARN}" \
-            --source-configuration file://new-source-config.json \
-            --query 'OperationId' \
-            --output text)
+          OPERATION_ID=""
+          for i in {1..30}; do
+            set +e
+            UPDATE_OUT=$(aws apprunner update-service \
+              --service-arn "${APP_RUNNER_SERVICE_ARN}" \
+              --source-configuration file://new-source-config.json \
+              --query 'OperationId' \
+              --output text 2>&1)
+            UPDATE_RC=$?
+            set -e
+
+            if [ "${UPDATE_RC}" -eq 0 ]; then
+              OPERATION_ID="${UPDATE_OUT}"
+              break
+            fi
+
+            if [[ "${UPDATE_OUT}" == *"OPERATION_IN_PROGRESS"* ]]; then
+              echo "App Runner is busy (attempt ${i}/30); retrying in 20s..."
+              sleep 20
+              continue
+            fi
+
+            echo "${UPDATE_OUT}"
+            exit "${UPDATE_RC}"
+          done
+
+          if [ -z "${OPERATION_ID}" ]; then
+            echo "Timed out waiting to start App Runner update operation"
+            exit 1
+          fi
+
           echo "Started App Runner operation: ${OPERATION_ID}"
 
           for i in {1..60}; do

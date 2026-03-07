@@ -35,9 +35,12 @@ COPY StructuralVisualization/src ./StructuralVisualization/src
 COPY external/Asap/src ./external/Asap/src
 COPY scripts/api ./scripts/api
 
-# Warm package cache so App Runner instances start faster.
-# Keep this non-fatal: if warmup fails, runtime can still start.
-RUN julia --project=StructuralSynthesizer -e 'try; using StructuralSynthesizer; catch e; @warn "Warmup failed" exception=(e, catch_backtrace()); end'
+# Warm exact server path only (no full Pkg.precompile). Full precompile was
+# hanging after InteractiveUtils (open tasks/IO in a transitive dep). This
+# warms the API code path so runtime startup is fast enough for health checks.
+RUN julia --project=StructuralSynthesizer -e '\
+  ENV["SS_ENABLE_VISUALIZATION"]="false"; ENV["SS_ENABLE_HEAVY_PRECOMPILE_WORKLOAD"]="false"; \
+  using StructuralSynthesizer; register_routes!(); using Oxygen;'
 
 # Expose port (AWS App Runner sets PORT env var)
 EXPOSE 8080

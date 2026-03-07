@@ -24,12 +24,16 @@ const HOST = get(ENV, "SIZER_HOST", "0.0.0.0")
 const STATUS_FN = Ref{Function}(() -> "warming")
 
 @get "/health" function (_)
+    # Health check only: always 200 so load balancers see "up".
     return HTTP.Response(200, ["Content-Type" => "application/json"], "{\"status\":\"ok\"}")
 end
 
 @get "/status" function (_)
+    # "warming" → still loading; then "idle" / "running" / "queued" or "error".
     s = STATUS_FN[]()
-    return HTTP.Response(200, ["Content-Type" => "application/json"], "{\"status\":\"$(s)\"}")
+    msg = s == "warming" ? "Full API not ready yet" : "ready"
+    body = "{\"status\":\"$(s)\",\"message\":\"$(msg)\"}"
+    return HTTP.Response(200, ["Content-Type" => "application/json"], body)
 end
 
 # Load full app in background so first connection is fast.

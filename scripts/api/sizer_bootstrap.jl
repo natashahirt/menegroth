@@ -57,7 +57,7 @@ const SS_PKGID = Base.PkgId(Base.UUID("fc54e8a9-dab1-4bea-a64f-f8e9b3ce8a89"), "
         println(stdout, "[bootstrap] @async: starting background load...")
         flush(stdout)
         @info "Loading StructuralSynthesizer (first request may be slow)..."
-        mod = Base.require(Main, SS_PKGID)
+        mod = Base.require(SS_PKGID)
         println(stdout, "[bootstrap] @async: require done, calling register_routes!...")
         flush(stdout)
         mod.register_routes!()

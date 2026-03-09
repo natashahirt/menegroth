@@ -30,6 +30,7 @@ println(stdout, "[bootstrap] host=$HOST port=$PORT")
 flush(stdout)
 
 const STATUS_FN = Ref{Function}(() -> "warming")
+const LOAD_ERROR = Ref{String}("")
 
 @get "/health" function (_)
     return HTTP.Response(200, ["Content-Type" => "application/json"], "{\"status\":\"ok\"}")
@@ -42,16 +43,33 @@ end
     return HTTP.Response(200, ["Content-Type" => "application/json"], body)
 end
 
+@get "/debug" function (_)
+    err = LOAD_ERROR[]
+    s = STATUS_FN[]()
+    body = "{\"status\":\"$(s)\",\"error\":$(repr(err))}"
+    return HTTP.Response(200, ["Content-Type" => "application/json"], body)
+end
+
 # Load StructuralSynthesizer in background via require (no "using" inside block).
 const SS_PKGID = Base.PkgId(Base.UUID("fc54e8a9-dab1-4bea-a64f-f8e9b3ce8a89"), "StructuralSynthesizer")
 @async begin
     try
+        println(stdout, "[bootstrap] @async: starting background load...")
+        flush(stdout)
         @info "Loading StructuralSynthesizer (first request may be slow)..."
         mod = Base.require(Main, SS_PKGID)
+        println(stdout, "[bootstrap] @async: require done, calling register_routes!...")
+        flush(stdout)
         mod.register_routes!()
         STATUS_FN[] = () -> mod.status_string(mod.SERVER_STATUS)
+        println(stdout, "[bootstrap] @async: fully loaded")
+        flush(stdout)
         @info "StructuralSynthesizer loaded; POST /design, /validate, GET /schema ready"
     catch e
+        err_msg = sprint(showerror, e, catch_backtrace())
+        LOAD_ERROR[] = err_msg
+        println(stderr, "[bootstrap] @async FAILED: ", err_msg)
+        flush(stderr)
         @error "Failed to load StructuralSynthesizer" exception=(e, catch_backtrace())
         STATUS_FN[] = () -> "error"
     end

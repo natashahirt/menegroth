@@ -60,7 +60,10 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: Update App Runner image to immutable tag
+        env:
+          APP_RUNNER_SERVICE_ARN: ${{ env.APP_RUNNER_SERVICE_ARN }}
         run: |
+          set -e
           IMAGE_IDENTIFIER="${{ steps.meta.outputs.image_uri }}:${{ steps.meta.outputs.sha_tag }}"
           aws apprunner describe-service \
             --service-arn "${APP_RUNNER_SERVICE_ARN}" \
@@ -72,7 +75,7 @@ jobs:
             source-config.json > new-source-config.json
 
           OPERATION_ID=""
-          for i in {1..30}; do
+          for i in $(seq 1 30); do
             set +e
             UPDATE_OUT=$(aws apprunner update-service \
               --service-arn "${APP_RUNNER_SERVICE_ARN}" \
@@ -87,9 +90,9 @@ jobs:
               break
             fi
 
-            if [[ "${UPDATE_OUT}" == *"OPERATION_IN_PROGRESS"* ]]; then
-              echo "App Runner is busy (attempt ${i}/30); retrying in 20s..."
-              sleep 20
+            if echo "${UPDATE_OUT}" | grep -q "OPERATION_IN_PROGRESS"; then
+              echo "App Runner busy (attempt ${i}/30); retrying in 15s..."
+              sleep 15
               continue
             fi
 
@@ -104,21 +107,28 @@ jobs:
 
           echo "Started App Runner operation: ${OPERATION_ID}"
 
-          for i in {1..60}; do
-            STATUS=$(aws apprunner describe-operation \
-              --operation-id "${OPERATION_ID}" \
-              --query 'Operation.Status' \
-              --output text)
-
-            echo "Operation status: ${STATUS}"
-            if [ "${STATUS}" = "SUCCEEDED" ]; then
-              exit 0
+          # Poll list-operations until our operation (by Id) reaches a terminal status.
+          for i in $(seq 1 72); do
+            LIST_JSON=$(aws apprunner list-operations \
+              --service-arn "${APP_RUNNER_SERVICE_ARN}" \
+              --max-results 5 \
+              --output json)
+            STATUS=$(echo "${LIST_JSON}" | jq -r --arg id "${OPERATION_ID}" \
+              '.OperationSummaryList[] | select(.Id == $id) | .Status // empty')
+            if [ -z "${STATUS}" ]; then
+              echo "Poll ${i}: operation not in list yet, waiting 5s..."
+              sleep 5
+              continue
             fi
-            if [ "${STATUS}" = "FAILED" ] || [ "${STATUS}" = "ROLLBACK_FAILED" ] || [ "${STATUS}" = "ROLLBACK_SUCCEEDED" ]; then
-              echo "App Runner operation failed with status: ${STATUS}"
-              exit 1
-            fi
-            sleep 10
+            echo "Poll ${i}: status=${STATUS}"
+            case "${STATUS}" in
+              SUCCEEDED) exit 0 ;;
+              FAILED|ROLLBACK_FAILED|ROLLBACK_SUCCEEDED)
+                echo "App Runner operation failed: ${STATUS}"
+                exit 1
+                ;;
+              *) sleep 5 ;;
+            esac
           done
 
           echo "Timed out waiting for App Runner operation to finish"
@@ -127,10 +137,12 @@ jobs:
       - name: Smoke check /health
         if: ${{ env.APP_URL != '' }}
         run: |
-          for i in {1..30}; do
+          for i in $(seq 1 24); do
             if curl --fail --silent --show-error "${APP_URL%/}/health" >/dev/null; then
+              echo "Health check passed"
               exit 0
             fi
+            echo "Attempt ${i}/24: waiting 5s..."
             sleep 5
           done
           echo "Health check failed after retries"
@@ -139,4 +151,14 @@ jobs:
       - name: Smoke check /schema
         if: ${{ env.APP_URL != '' }}
         run: |
-          curl --fail --silent --show-error "${APP_URL%/}/schema" >/dev/null
+          # Full API loads in background after bootstrap; allow up to ~2 min.
+          for i in $(seq 1 24); do
+            if curl --fail --silent --show-error "${APP_URL%/}/schema" >/dev/null; then
+              echo "Schema check passed"
+              exit 0
+            fi
+            echo "Attempt ${i}/24: waiting 5s..."
+            sleep 5
+          done
+          echo "Schema check failed after retries"
+          exit 1

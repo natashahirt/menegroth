@@ -75,7 +75,7 @@ For beam-based systems, slab analysis computes tributary widths that determine t
 | Option | Description |
 |:-------|:------------|
 | `floor_type` | `AbstractFloorSystem` subtype |
-| `floor_opts.method` | Analysis method for flat plates (DDM, EFM, FEA, RuleOfThumb) |
+| `floor_opts.method` | Analysis method for flat plates and flat slabs (DDM, EFM, FEA, RuleOfThumb) |
 | `floor_opts.deflection_limit` | L/n deflection limit |
 | `floor_opts.punching_strategy` | Punching shear strategy (increase thickness, add studs, use drop panels) |
 

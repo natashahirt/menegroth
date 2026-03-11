@@ -38,7 +38,7 @@ The platform consists of two Julia packages plus an HTTP API:
   - Materials — [Steel](sizer/materials/steel.md), [Concrete](sizer/materials/concrete.md), [FRC](sizer/materials/frc.md), [Timber](sizer/materials/timber.md), [Fire Protection](sizer/materials/fire_protection.md)
   - Loads — [Combinations](sizer/loads/combinations.md), [Gravity Loads](sizer/loads/gravity.md), [Pattern Loading](sizer/loads/pattern_loading.md)
   - Members — sections, design code checks, optimization
-  - Slabs — flat plate, waffle, hollow core, steel deck, vaults
+  - Slabs — flat plate / flat slab, waffle, hollow core, steel deck, vaults
   - Foundations — spread footings, piles
   - Optimization — solvers, objectives
 - **StructuralSynthesizer**

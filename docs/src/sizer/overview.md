@@ -67,7 +67,7 @@ StructuralSizer/src/
 
 ## Dependency on Asap
 
-StructuralSizer depends on [Asap](https://github.com/keithjlee/Asap.jl) for:
+StructuralSizer depends on [Asap](https://github.com/natashahirt/Asap.jl) (local fork at `external/Asap`) for:
 
 - **Units**: Re-exports Unitful quantities — `kip`, `ksi`, `psf`, `ksf`, `pcf`, and `GRAVITY`
 - **FEM**: `Asap.Model`, `Asap.solve!` for frame analysis in EFM and member sizing
@@ -81,7 +81,7 @@ GravityLoads(floor_LL = 2.4u"kPa", floor_SDL = 15.0psf)  # mixed units are fine
 
 ## Units & Type Aliases
 
-StructuralSizer re-exports unit quantities from [Unitful.jl](https://github.com/PainterQubits/Unitful.jl) via [Asap](https://github.com/keithjlee/Asap.jl).
+StructuralSizer re-exports unit quantities from [Unitful.jl](https://github.com/PainterQubits/Unitful.jl) via [Asap](https://github.com/natashahirt/Asap.jl).
 
 ### US Customary Units
 

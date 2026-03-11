@@ -27,8 +27,8 @@ Dependency chain: `Asap` → `StructuralSizer` → `StructuralSynthesizer`
 ## Installation
 
 ```bash
-git clone https://github.com/natashahirt/structural_synthesizer.git
-cd structural_synthesizer
+git clone https://github.com/natashahirt/menegroth.git
+cd menegroth
 ```
 
 ```julia

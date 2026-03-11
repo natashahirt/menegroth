@@ -52,7 +52,7 @@ makedocs(
             "Slabs" => [
                 "Types & Options"  => "sizer/slabs/types.md",
                 "Design Codes" => [
-                    "Flat Plate"           => "sizer/slabs/codes/concrete/flat_plate.md",
+                    "Flat Plate / Flat Slab" => "sizer/slabs/codes/concrete/flat_plate.md",
                     "Waffle"               => "sizer/slabs/codes/concrete/waffle.md",
                     "Hollow Core"          => "sizer/slabs/codes/concrete/hollow_core.md",
                     "General Concrete"     => "sizer/slabs/codes/concrete/general.md",
@@ -144,6 +144,6 @@ makedocs(
 )
 
 deploydocs(
-    repo = "github.com/natashahirt/structural_synthesizer.git",
+    repo = "github.com/natashahirt/menegroth.git",
     devbranch = "main",
 )

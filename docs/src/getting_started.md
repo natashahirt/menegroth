@@ -22,8 +22,8 @@ This guide walks through installation, running your first structural design, lau
 Clone the repository and activate the project environment:
 
 ```bash
-git clone https://github.com/natashahirt/structural_synthesizer.git
-cd structural_synthesizer
+git clone https://github.com/natashahirt/menegroth.git
+cd menegroth
 ```
 
 From the Julia REPL:

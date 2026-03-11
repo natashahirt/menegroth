@@ -9,7 +9,7 @@
 
 ## Overview
 
-The Asap integration module bridges the `BuildingStructure` with the [Asap](https://github.com/keithjlee/Asap.jl) finite element package. It creates frame models from the structure's members and supports, applies gravity loads, solves for forces and displacements, and provides utilities for re-solving after section changes and building visualization models.
+The Asap integration module bridges the `BuildingStructure` with the [Asap](https://github.com/natashahirt/Asap.jl) finite element package (local fork at `external/Asap`). It creates frame models from the structure's members and supports, applies gravity loads, solves for forces and displacements, and provides utilities for re-solving after section changes and building visualization models.
 
 **Source:** `StructuralSynthesizer/src/analyze/asap/*.jl`
 

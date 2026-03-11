@@ -46,7 +46,7 @@ regardless of the underlying system.
 size_slabs!(struc; options)          # Size all slabs in structure
 └── size_slab!(struc, idx; options)  # Size single slab (scripting/debug)
     └── _size_slab!(floor_type, ...) # Type-dispatched implementation
-        ├── FlatPlate → size_flat_plate!()
+        ├── FlatPlate / FlatSlab → size_flat_plate!()
         ├── Vault → optimize_vault() or _size_span_floor()
         └── (others) → not yet implemented
 ```
@@ -57,7 +57,7 @@ size_slabs!(struc; options)          # Size all slabs in structure
 using StructuralSizer
 
 # Size all slabs in a structure
-opts = FloorOptions(flat_plate=FlatPlateOptions(analysis_method=:ddm))
+opts = FloorOptions(flat_plate=FlatPlateOptions(method=DDM()))
 size_slabs!(struc; options=opts)
 
 # Size a single slab
@@ -71,7 +71,7 @@ result = optimize_vault(6.0u"m", 1.0u"kN/m^2", 2.0u"kN/m^2")
 
 | Type | Status | Description |
 |:-----|:-------|:------------|
-| `FlatPlate` | ✅ Full | Two-way flat plate (ACI 318 DDM/EFM) |
+| `FlatPlate` | ✅ Full | Two-way flat plate (ACI 318 DDM/EFM/FEA) |
 | `Vault` | ✅ Full | Unreinforced parabolic vault (Haile method) |
 | `FlatSlab` | ⚠️ Stub | Flat plate with drop panels |
 | `TwoWay` | ⚠️ Stub | Two-way slab with beams |
@@ -316,8 +316,10 @@ TimberOptions
 
 `FlatPlateOptions` is the most complex, exposing analysis method selection
 (`DDM`, `EFM`, `FEA`, `RuleOfThumb`), punching resolution strategy
-(`:grow_columns`, `:reinforce_first`, `:reinforce_last`), deflection method,
-convergence tolerances, and fire rating overrides.
+(`:grow_columns`, `:reinforce_first`, `:reinforce_last`), deflection limit,
+and fire rating overrides. Convergence tolerances (`max_iterations`,
+`column_tol`, `h_increment`) are keyword arguments to `size_flat_plate!`,
+not fields on the options struct.
 
 `FlatSlabOptions` composes a `FlatPlateOptions` internally, adding drop panel
 geometry controls (`h_drop`, `a_drop_ratio`).

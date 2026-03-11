@@ -1,4 +1,4 @@
-# Flat Plate Design (ACI 318)
+# Flat Plate / Flat Slab (ACI 318)
 
 > ```julia
 > using StructuralSizer
@@ -17,13 +17,17 @@ using StructuralSizer
 result = size_flat_plate!(struc, slab, ConcreteColumnOptions())
 
 # With EFM analysis (more accurate for irregular layouts)
-opts = FlatPlateOptions(analysis_method=:efm)
+opts = FlatPlateOptions(method=EFM())
 result = size_flat_plate!(struc, slab, ConcreteColumnOptions(); method=EFM(), opts=opts)
 
+# With FEA (shell mesh; for irregular layouts or shell-level accuracy)
+opts = FlatPlateOptions(method=FEA())
+result = size_flat_plate!(struc, slab, ConcreteColumnOptions(); method=FEA(), opts=opts)
+
 # Check results
-result.slab_result.thickness
-result.slab_result.punching_ok
-result.slab_result.deflection_ok
+result.thickness           # Final slab depth
+punching_ok(result)        # All columns pass punching?
+deflection_ok(result)      # Deflection within limit?
 ```
 
 ## Overview
@@ -44,15 +48,17 @@ flexural adequacy are simultaneously satisfied.
 | `DDM()` | `:ddm` | Direct Design Method | Regular grids, quick estimates |
 | `DDM(:simplified)` | `:mddm` | Modified DDM | Simplified coefficients |
 | `EFM()` | `:efm` | Equivalent Frame Method | Irregular geometry, final design |
+| `FEA()` | `:fea` | Shell Finite Element Analysis | Irregular layouts, large grids, shell-level accuracy |
 
-**DDM** uses ACI 318 Table 8.10 coefficients — fast but requires regular geometry (aspect ratio, load limits). **EFM** builds an Asap frame model and distributes moments by stiffness — handles irregular geometry with more accurate results.
+**DDM** uses ACI 318 Table 8.10 coefficients — fast but requires regular geometry (aspect ratio, load limits). **EFM** builds an Asap frame model and distributes moments by stiffness — handles irregular geometry with more accurate results. **FEA** uses a 2D shell mesh with column stubs and supports pattern loading; see [FEA — Shell Finite Element Analysis](#fea--shell-finite-element-analysis) below for options.
 
 ### Design Workflow
 
 ```
 Phase A: Moment Analysis (method-specific)
 ├── DDM: ACI coefficient tables → static moment → column/middle strip
-└── EFM: Asap frame model → moment distribution → column/middle strip
+├── EFM: Asap frame model → moment distribution → column/middle strip
+└── FEA: Shell mesh + column stubs → section cuts or Wood–Armer → strips
 
 Phase B: Slab Design (shared)
 ├── Column P-M interaction design (iterates with slab)
@@ -87,6 +93,10 @@ run_secondary_moment_analysis
 ```
 
 ### DDM (Direct Design Method)
+
+Dispatched via `run_moment_analysis(::DDM, ...)`. Low-level coefficient
+functions (`total_static_moment`, `distribute_moments_aci`,
+`distribute_moments_mddm`) are exported for standalone use.
 
 ### EFM (Equivalent Frame Method)
 
@@ -339,29 +349,41 @@ restarts.  Default maximum iterations: 10 per phase.
 
 | Function | Description | API Level |
 |:---------|:-----------|:----------|
-| `size_flat_plate!` | Full design pipeline | **Public** |
-| `ddm_analysis` | DDM moment analysis | Internal |
-| `efm_analysis` | EFM moment analysis | Internal |
-| `check_punching_shear` | ACI 22.6 punching check | Internal |
-| `check_two_way_deflection` | Crossing beam method | Internal |
-| `design_strip_reinforcement` | Flexure + minimum As | Internal |
+| `size_flat_plate!` | Full design pipeline | Internal (called by `size_slab!`) |
+| `run_moment_analysis(::DDM, ...)` | DDM moment analysis | Internal |
+| `run_moment_analysis(::EFM, ...)` | EFM moment analysis | Internal |
+| `run_moment_analysis(::FEA, ...)` | FEA moment analysis | Internal |
+| `check_punching` | ACI 22.6 punching check | Exported |
+| `design_strip_reinforcement` | Flexure + minimum As | Exported |
 
 ## Results Access
 
+`FlatPlatePanelResult` is returned per panel. Key fields:
+
 ```julia
-result = size_flat_plate!(struc, slab, col_opts)
+panel = result  # :: FlatPlatePanelResult
 
-# Slab result
-result.slab_result.thickness         # Final thickness
-result.slab_result.punching_ok       # All columns pass punching?
-result.slab_result.deflection_ok     # Deflection within limit?
-result.slab_result.one_way_shear_ok  # One-way shear OK?
-result.slab_result.reinforcement     # Strip-by-strip As
+# Geometry & loads
+panel.thickness               # Final slab depth
+panel.l1                      # Primary span
+panel.l2                      # Transverse span
+panel.M0                      # Total static moment
 
-# Column results (keyed by column index)
-result.column_results[col_idx].section   # Designed section
-result.column_results[col_idx].Pu        # Factored axial
-result.column_results[col_idx].Mu        # Factored moment
+# Reinforcement (per strip)
+panel.column_strip_reinf      # :: StripReinforcement — primary column strip
+panel.middle_strip_reinf      # :: StripReinforcement — primary middle strip
+panel.secondary_column_strip_reinf
+panel.secondary_middle_strip_reinf
+
+# Punching shear
+panel.punching_check.ok       # All columns pass?
+panel.punching_check.max_ratio
+punching_ok(panel)            # Helper accessor
+
+# Deflection
+panel.deflection_check.ok     # Within limit?
+panel.deflection_check.ratio
+deflection_ok(panel)          # Helper accessor
 ```
 
 ## Options & Configuration
@@ -376,11 +398,11 @@ FlatPlateOptions(
     material = RC_4000_60,       # Concrete + rebar bundle
     cover = 0.75u"inch",         # Clear cover (ACI Table 20.6.1.3.1)
     bar_size = 5,                # Typical bar (#3-#11)
-    analysis_method = :ddm,      # :ddm, :mddm, or :efm
+    method = DDM(),              # DDM(), EFM(), FEA(), or RuleOfThumb()
     has_edge_beam = false,       # Spandrel beam at exterior?
     φ_flexure = 0.90,            # Tension-controlled (ACI Table 21.2.1)
     φ_shear = 0.75,              # Shear and torsion
-    λ = 1.0,                     # Lightweight factor
+    λ = nothing,                  # Lightweight factor (nothing → auto from material)
     deflection_limit = :L_360,   # :L_240, :L_360, :L_480
 )
 ```
@@ -389,11 +411,19 @@ Key `FlatPlateOptions` fields:
 
 | Field | Default | Description |
 |:------|:--------|:------------|
-| `method` | `DDM(:full)` | Analysis method |
-| `punching_strategy` | `:reinforce_last` | Punching failure resolution order |
-| `deflection_method` | `:bischoff` | Ie formulation |
+| `method` | `DDM(:full)` | Analysis method (`DDM`, `EFM`, `FEA`, `RuleOfThumb`) |
+| `punching_strategy` | `:grow_columns` | Punching failure resolution order |
+| `punching_reinforcement` | `:headed_studs_generic` | Punching reinforcement type |
+| `objective` | `MinVolume()` | Optimization objective |
+| `col_I_factor` | `0.70` | Column cracked Ig factor (ACI §10.10.4.1) |
+
+Key `size_flat_plate!` keyword arguments:
+
+| Kwarg | Default | Description |
+|:------|:--------|:------------|
 | `max_iterations` | `10` | Convergence loop limit |
 | `column_tol` | `0.05` | Column size convergence tolerance |
+| `h_increment` | `0.5u"inch"` | Slab thickness growth step |
 
 Key `FEA` options:
 
@@ -410,6 +440,7 @@ Key `FEA` options:
 | `rebar_direction` | `nothing` | Reinforcement axis angle (radians); `nothing` = span direction |
 | `sign_treatment` | `:signed` | `:signed` or `:separate_faces` (prevents cross-sign cancellation at inflection points) |
 | `concrete_torsion_discount` | `false` | Subtract concrete Mxy capacity before Wood–Armer |
+| `patch_stiffness_factor` | `1.0` | Column patch stiffness multiplier |
 | `deflection_Ie_method` | `:branson` | `:branson` or `:bischoff` |
 
 !!! note "Drop Panel Strip Widening"

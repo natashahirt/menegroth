@@ -16,7 +16,11 @@ Source: `StructuralSizer/src/members/codes/aisc/hss_rect/*.jl`
 
 ## Key Types
 
-Rectangular HSS checks use the same `AISCChecker` type as W shapes — dispatching on `HSSRectSection` selects the HSS-specific capacity functions. See [AISC — W Shapes](i_symm.md) for `AISCChecker` documentation.
+```@docs
+AISCChecker
+```
+
+Rectangular HSS checks use the same `AISCChecker` type as W shapes — dispatching on `HSSRectSection` selects the HSS-specific capacity functions.
 
 ## Functions
 
@@ -129,10 +133,6 @@ get_slenderness
 `get_slenderness(s::HSSRectSection, mat)` — flexural slenderness classification per Table B4.1b:
 - Flange: `λp = 1.12√(E/Fy)`, `λr = 1.40√(E/Fy)`
 - Web: `λp = 2.42√(E/Fy)`, `λr = 3.10√(E/Fy)` (adjusted for plastic neutral axis location on HSS webs; see Commentary §F7)
-
-```@docs
-get_compression_limits
-```
 
 `get_compression_limits(s, mat)` — compression slenderness limit per Table B4.1a: `λr = 1.40√(E/Fy)` for walls of rectangular HSS.
 

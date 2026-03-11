@@ -175,20 +175,24 @@ end
 # AbstractNLPProblem Interface
 # ==============================================================================
 
+"""Flat plate optimization has 2 decision variables: `[h, c]`."""
 n_variables(::FlatPlateNLPProblem) = 2
 
+"""Return `(lb, ub)` bound vectors in inches for `[h, c]`."""
 function variable_bounds(p::FlatPlateNLPProblem)
     lb = [p.h_bounds_in[1], p.c_bounds_in[1]]
     ub = [p.h_bounds_in[2], p.c_bounds_in[2]]
     return (lb, ub)
 end
 
+"""Return midpoint initial guess `[h₀, c₀]` in inches."""
 function initial_guess(p::FlatPlateNLPProblem)
     h0 = (p.h_bounds_in[1] + p.h_bounds_in[2]) / 2
     c0 = (p.c_bounds_in[1] + p.c_bounds_in[2]) / 2
     return [h0, c0]
 end
 
+"""Return variable name strings for the flat plate optimization."""
 variable_names(::FlatPlateNLPProblem) = ["h_in", "c_in"]
 
 # ==============================================================================
@@ -197,6 +201,7 @@ variable_names(::FlatPlateNLPProblem) = ["h_in", "c_in"]
 # evaluate() returns the full composite objective (concrete + steel), so the
 # grid solver's _convert_objective should be identity.
 
+"""Identity conversion — `evaluate()` already returns the composite objective."""
 _convert_objective(::MinVolume, ::FlatPlateNLPProblem, v::Float64) = v
 _convert_objective(::MinWeight, ::FlatPlateNLPProblem, v::Float64) = v
 _convert_objective(::MinCarbon, ::FlatPlateNLPProblem, v::Float64) = v

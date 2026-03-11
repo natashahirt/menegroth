@@ -40,10 +40,14 @@ function beta1(fc::Unitful.Pressure)
     _beta1_from_fc_psi(fc_psi)
 end
 
+"""β₁ from a `Concrete` material's f'c."""
 beta1(mat::Concrete)                    = beta1(mat.fc′)
+"""β₁ from a `ReinforcedConcreteMaterial`'s concrete component."""
 beta1(mat::ReinforcedConcreteMaterial)  = beta1(mat.concrete)
-beta1(mat::NamedTuple)                  = _beta1_from_fc_ksi(mat.fc)  # Legacy: fc in ksi
+"""β₁ from a legacy NamedTuple with `fc` in ksi."""
+beta1(mat::NamedTuple)                  = _beta1_from_fc_ksi(mat.fc)
 
+"""Compute β₁ from f'c in psi (bare number)."""
 function _beta1_from_fc_psi(fc_psi::Real)
     if fc_psi ≤ 4000
         return 0.85
@@ -54,6 +58,7 @@ function _beta1_from_fc_psi(fc_psi::Real)
     end
 end
 
+"""Compute β₁ from f'c in ksi (bare number)."""
 function _beta1_from_fc_ksi(fc_ksi::Real)
     if fc_ksi ≤ 4.0
         return 0.85
@@ -116,7 +121,9 @@ function Ec(fc::Unitful.Pressure, wc_pcf::Real)
     return (33.0 * wc_pcf^1.5 * sqrt(fc_psi)) * u"psi"
 end
 
+"""Ec from a `Concrete` material (simplified formula)."""
 Ec(mat::Concrete)                    = Ec(mat.fc′)
+"""Ec from a `ReinforcedConcreteMaterial`'s concrete component."""
 Ec(mat::ReinforcedConcreteMaterial)  = Ec(mat.concrete)
 
 """
@@ -126,7 +133,9 @@ Concrete elastic modulus in ksi (stripped of units).
 Convenience for internal calculations that need dimensionless values.
 """
 Ec_ksi(mat::Concrete)                    = ustrip(ksi, Ec(mat))
+"""Ec in ksi from a `ReinforcedConcreteMaterial`."""
 Ec_ksi(mat::ReinforcedConcreteMaterial)  = Ec_ksi(mat.concrete)
+"""Ec in ksi from a legacy NamedTuple with `fc` in ksi."""
 Ec_ksi(mat::NamedTuple)                  = ustrip(ksi, Ec(mat.fc * ksi))
 
 # ==============================================================================
@@ -151,7 +160,9 @@ function fr(fc::Unitful.Pressure)
     return 7.5 * sqrt(fc_psi) * u"psi"
 end
 
+"""Modulus of rupture from a `Concrete` material's f'c."""
 fr(mat::Concrete)                    = fr(mat.fc′)
+"""Modulus of rupture from a `ReinforcedConcreteMaterial`'s concrete component."""
 fr(mat::ReinforcedConcreteMaterial)  = fr(mat.concrete)
 
 # ==============================================================================
@@ -161,22 +172,30 @@ fr(mat::ReinforcedConcreteMaterial)  = fr(mat.concrete)
 
 """Extract concrete compressive strength f'c in ksi."""
 fc_ksi(mat::Concrete)                    = to_ksi(mat.fc′)
+"""Extract f'c in ksi from a `ReinforcedConcreteMaterial`."""
 fc_ksi(mat::ReinforcedConcreteMaterial)  = fc_ksi(mat.concrete)
-fc_ksi(mat::NamedTuple)                  = Float64(mat.fc)  # Already in ksi
+"""Extract f'c in ksi from a legacy NamedTuple (already in ksi)."""
+fc_ksi(mat::NamedTuple)                  = Float64(mat.fc)
 
 """Extract rebar yield strength fy in ksi."""
 fy_ksi(mat::ReinforcedConcreteMaterial)  = to_ksi(mat.rebar.Fy)
+"""Extract fy in ksi from a `RebarSteel` material."""
 fy_ksi(mat::RebarSteel)                  = to_ksi(mat.Fy)
+"""Extract fy in ksi from a legacy NamedTuple."""
 fy_ksi(mat::NamedTuple)                  = Float64(mat.fy)
 
 """Extract rebar elastic modulus Es in ksi."""
 Es_ksi(mat::ReinforcedConcreteMaterial)  = to_ksi(mat.rebar.E)
+"""Extract Es in ksi from a `RebarSteel` material."""
 Es_ksi(mat::RebarSteel)                  = to_ksi(mat.E)
+"""Extract Es in ksi from a legacy NamedTuple."""
 Es_ksi(mat::NamedTuple)                  = haskey(mat, :Es) ? Float64(mat.Es) : error("NamedTuple material missing :Es field")
 
 """Extract ultimate compressive strain εcu."""
 εcu(mat::Concrete)                    = mat.εcu
+"""Extract εcu from a `ReinforcedConcreteMaterial`."""
 εcu(mat::ReinforcedConcreteMaterial)  = εcu(mat.concrete)
+"""Extract εcu from a legacy NamedTuple."""
 εcu(mat::NamedTuple)                  = haskey(mat, :εcu) ? Float64(mat.εcu) : error("NamedTuple material missing :εcu field")
 
 # ==============================================================================
@@ -198,4 +217,5 @@ function to_material_tuple(mat::Concrete, rebar_fy_ksi::Real, rebar_Es_ksi::Real
     (fc = fc_ksi(mat), fy = Float64(rebar_fy_ksi), Es = Float64(rebar_Es_ksi), εcu = εcu(mat))
 end
 
+"""Pass-through for NamedTuple materials (already in legacy format)."""
 to_material_tuple(mat::NamedTuple) = mat

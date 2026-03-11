@@ -19,10 +19,10 @@ flexure, development length, and bearing/dowel checks.
 
 ## Key Types
 
+See [Foundation Types & Options](../types.md) for `SpreadFooting`, `StripFooting`,
+and `MatFoundation` type documentation.
+
 ```@docs
-SpreadFooting
-StripFooting
-MatFoundation
 SpreadFootingResult
 StripFootingResult
 MatFootingResult

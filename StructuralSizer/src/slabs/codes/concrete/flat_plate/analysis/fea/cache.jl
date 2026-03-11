@@ -19,10 +19,10 @@ struct ElementMoments
     Mxy::Float64
 end
 
-# Single column stub data: element + connection nodes.
+"""Column stub half: `(element, base_node, slab_node)` for one side of a column."""
 const ColStubHalf = NamedTuple{(:element, :base_node, :slab_node)}
 
-# Per-column stub data: below (always) + above (nothing at roof).
+"""Per-column stub data: `(below, above)` where `above` is `nothing` at roof level."""
 const ColStubData = NamedTuple{(:below, :above),
                                Tuple{ColStubHalf, Union{Nothing, ColStubHalf}}}
 

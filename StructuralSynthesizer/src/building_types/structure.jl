@@ -64,6 +64,11 @@ mutable struct BuildingStructure{T, A, P} <: AbstractBuildingStructure
     _snapshots::Dict{Symbol, DesignSnapshot{T, P}}
 end
 
+"""
+    BuildingStructure(skel::BuildingSkeleton) -> BuildingStructure
+
+Construct an empty `BuildingStructure` wrapping the given skeleton with default unit types.
+"""
 function BuildingStructure(skel::BuildingSkeleton{T}) where T
     A = typeof(1.0u"m^2")
     P = typeof(1.0u"kN/m^2")
@@ -87,6 +92,7 @@ function BuildingStructure(skel::BuildingSkeleton{T}) where T
     )
 end
 
+"""Parametric constructor allowing explicit area (`A`) and pressure (`P`) types."""
 function BuildingStructure{T, A, P}(skel::BuildingSkeleton{T}) where {T, A, P}
     F = typeof(1.0u"kN")
     M = typeof(1.0u"kN*m")

@@ -59,7 +59,8 @@ section_geometry(::Type{<:ISymmSection}) = IShape()
 section_geometry(::Type{<:HSSRectSection}) = HollowRect()
 ```
 """
-section_geometry(::Type{<:AbstractSection}) = SolidRect()  # Default fallback
+section_geometry(::Type{<:AbstractSection}) = SolidRect()
+"""Dispatch on instance by forwarding to the `Type`-based method."""
 section_geometry(sec) = section_geometry(typeof(sec))
 
 # =============================================================================
@@ -92,11 +93,13 @@ section_flange_width(sec) = ustrip(u"m", section_width(sec))
 
 """Get flange thickness for I-shapes (meters)."""
 section_flange_thickness(sec::ISymmSection) = ustrip(u"m", sec.tf)
-section_flange_thickness(sec) = 0.01  # Fallback for non-I sections
+"""Fallback flange thickness (0.01 m) for non-I sections."""
+section_flange_thickness(sec) = 0.01
 
 """Get web thickness for I-shapes (meters)."""
 section_web_thickness(sec::ISymmSection) = ustrip(u"m", sec.tw)
-section_web_thickness(sec) = 0.01  # Fallback for non-I sections
+"""Fallback web thickness (0.01 m) for non-I sections."""
+section_web_thickness(sec) = 0.01
 
 # =============================================================================
 # Rebar Interface (for RC sections)
@@ -125,18 +128,22 @@ section_rebar_radius(::AbstractSection) = 0.0
 # These must come after section types are defined (in _members.jl).
 # Grouped here for easy reference of all visualization traits.
 
-# --- Steel Sections ---
+"""W-shapes visualize as doubly-symmetric I-sections."""
 section_geometry(::Type{<:ISymmSection}) = IShape()
+"""HSS rectangular sections visualize as hollow rectangles."""
 section_geometry(::Type{<:HSSRectSection}) = HollowRect()
+"""HSS round sections visualize as hollow circles."""
 section_geometry(::Type{<:HSSRoundSection}) = HollowRound()
 
-# --- Concrete Sections ---
+"""RC columns visualize as solid rectangles."""
 section_geometry(::Type{<:RCColumnSection}) = SolidRect()
+"""RC beams visualize as solid rectangles."""
 section_geometry(::Type{<:RCBeamSection}) = SolidRect()
 
-# RC Column: has rebar for visualization
+"""RC columns have rebar when their `bars` vector is non-empty."""
 has_rebar(sec::RCColumnSection) = !isempty(sec.bars)
 
+"""Rebar positions in centroid-relative (y, z) coordinates (meters) for an RC column."""
 function section_rebar_positions(sec::RCColumnSection)
     b = ustrip(u"m", section_width(sec))
     h = ustrip(u"m", section_depth(sec))
@@ -145,11 +152,12 @@ function section_rebar_positions(sec::RCColumnSection)
              ustrip(u"m", bar.y) - h/2) for bar in sec.bars]
 end
 
+"""Rebar radius (meters) for visualization, computed from the first bar's area."""
 function section_rebar_radius(sec::RCColumnSection)
     isempty(sec.bars) && return 0.0
     As = ustrip(u"m^2", sec.bars[1].As)
     return sqrt(As / π)
 end
 
-# --- Timber Sections ---
+"""Glulam sections visualize as solid rectangles."""
 section_geometry(::Type{<:GlulamSection}) = SolidRect()

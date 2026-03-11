@@ -59,12 +59,14 @@ mutable struct DisplayUnits
     units::Dict{Symbol, Any}
 end
 
+"""Construct `DisplayUnits` from a system preset (`:imperial` or `:metric`)."""
 function DisplayUnits(system::Symbol)
     system === :imperial ? DisplayUnits(_imperial_units()) :
     system === :metric   ? DisplayUnits(_metric_units()) :
     error("Unknown unit system :$system. Use :imperial or :metric.")
 end
 
+"""Build the imperial unit lookup table."""
 function _imperial_units()
     Dict{Symbol, Any}(
         :length      => u"ft",
@@ -85,6 +87,7 @@ function _imperial_units()
     )
 end
 
+"""Build the metric unit lookup table."""
 function _metric_units()
     Dict{Symbol, Any}(
         :length      => u"m",
@@ -210,33 +213,37 @@ Base.@kwdef struct MaterialOptions
     beam::Union{StructuralSizer.StructuralSteel, Nothing} = nothing
 end
 
-# --- Slab material resolution ---
+"""Resolve the effective slab concrete from the material cascade."""
 resolve_slab_concrete(m::MaterialOptions) = something(
     isnothing(m.slab) ? nothing : m.slab.concrete,
     m.concrete, StructuralSizer.NWC_4000)
 
+"""Resolve the effective slab rebar from the material cascade."""
 resolve_slab_rebar(m::MaterialOptions) = something(
     isnothing(m.slab) ? nothing : m.slab.rebar,
     m.rebar, StructuralSizer.Rebar_60)
 
+"""Resolve the effective slab RC material (concrete + rebar) from the cascade."""
 resolve_slab_rc(m::MaterialOptions) = isnothing(m.slab) ?
     StructuralSizer.ReinforcedConcreteMaterial(resolve_slab_concrete(m), resolve_slab_rebar(m)) :
     m.slab
 
-# --- Column material resolution ---
+"""Resolve the effective column concrete from the material cascade."""
 resolve_column_concrete(m::MaterialOptions) = something(
     isnothing(m.column) ? nothing : m.column.concrete,
     m.concrete, StructuralSizer.NWC_4000)
 
+"""Resolve the effective column rebar from the material cascade."""
 resolve_column_rebar(m::MaterialOptions) = something(
     isnothing(m.column) ? nothing : m.column.rebar,
     m.rebar, StructuralSizer.Rebar_60)
 
+"""Resolve the effective column RC material (concrete + rebar) from the cascade."""
 resolve_column_rc(m::MaterialOptions) = isnothing(m.column) ?
     StructuralSizer.ReinforcedConcreteMaterial(resolve_column_concrete(m), resolve_column_rebar(m)) :
     m.column
 
-# --- Beam material resolution ---
+"""Resolve the effective beam steel from the material cascade."""
 resolve_beam_steel(m::MaterialOptions) = something(m.beam, m.steel, StructuralSizer.A992_Steel)
 
 """
@@ -413,28 +420,33 @@ end
 
 # --- Material cascade into floor options (using Accessors @set) ---
 
+"""Cascade user-specified materials into `FlatPlateOptions`."""
 function _apply_material_cascade(mat::MaterialOptions, opts::StructuralSizer.FlatPlateOptions)
     _has_material(mat) || return opts
     @set opts.material = resolve_slab_rc(mat)
 end
 
+"""Cascade user-specified materials into `FlatSlabOptions` (delegates to the base options)."""
 function _apply_material_cascade(mat::MaterialOptions, opts::StructuralSizer.FlatSlabOptions)
     _has_material(mat) || return opts
     new_base = _apply_material_cascade(mat, opts.base)
     @set opts.base = new_base
 end
 
+"""Cascade user-specified materials into `OneWayOptions`."""
 function _apply_material_cascade(mat::MaterialOptions, opts::StructuralSizer.OneWayOptions)
     _has_material(mat) || return opts
     @set opts.material = resolve_slab_rc(mat)
 end
 
+"""Cascade user-specified materials into `VaultOptions`."""
 function _apply_material_cascade(mat::MaterialOptions, opts::StructuralSizer.VaultOptions)
     _has_material(mat) || return opts
     @set opts.material = resolve_slab_concrete(mat)
 end
 
 # Fallback: no material fields to cascade into
+"""Fallback: no material fields to cascade into; return options unchanged."""
 _apply_material_cascade(::MaterialOptions, opts::StructuralSizer.AbstractFloorOptions) = opts
 
 """True if any material is set on `mat`."""
@@ -704,6 +716,11 @@ mutable struct BuildingDesign{T, A, P}
     compute_time_s::Float64
 end
 
+"""
+    BuildingDesign(struc, params=DesignParameters()) -> BuildingDesign
+
+Construct an empty `BuildingDesign` with empty result dictionaries and a fresh timestamp.
+"""
 function BuildingDesign(struc::BuildingStructure{T, A, P}, params::DesignParameters=DesignParameters()) where {T, A, P}
     BuildingDesign{T, A, P}(
         struc,

@@ -105,6 +105,41 @@ p_max = envelope_pressure(gravity_combinations, 100.0psf, 50.0psf)
 eurocode_combo = LoadCombination(name=:EC0_6_10, D=1.35, L=1.5)
 ```
 
+## Current Scope & Future Roadmap
+
+### Gravity-Only Scope
+
+The loads infrastructure currently handles **gravity loads** (dead, live, superimposed dead) through three components:
+
+| File | Purpose |
+|:-----|:--------|
+| `combinations.jl` | `LoadCombination` struct, ASCE 7-22 presets, `factored_pressure` / `envelope_pressure` |
+| `gravity.jl` | `GravityLoads` struct with occupancy presets (`office_loads`, `residential_loads`, …) |
+| `pattern_loading.jl` | ACI 318 pattern load utilities (checkerboard, adjacent spans) |
+
+`LoadCombination` already carries fields for all ASCE 7 load types (D, L, Lr, S, R, **W**, **E**), but the W and E factors are currently inert — no lateral load source exists yet to multiply them against.
+
+### Expanding to Lateral Loads
+
+When the implementation moves beyond gravity, the minimal path is:
+
+1. **Define lateral load inputs** — Create a `LateralLoads` struct (or extend a broader `BuildingLoads` wrapper) and wire it into `DesignParameters` alongside `GravityLoads`.
+2. **Apply lateral forces to the Asap model** — Add a function (e.g., `_apply_lateral_loads!`) in `StructuralSynthesizer/src/analyze/asap/utils.jl` that places nodal lateral forces at each floor-diaphragm level. The existing `sync_asap!` pipeline would call this after `_create_cell_tributary_loads!`.
+3. **Use the keyword-argument `factored_pressure` at lateral call sites** — The full overload already exists (`factored_pressure(combo; D=dead, L=live, W=wind_demand)`). No changes to `combinations.jl` are needed.
+4. **Column / beam sizing picks up lateral demands automatically** — Columns are sized from Asap member forces. Once lateral loads are in the model, demands increase and columns size up through the existing `sync_asap! → size → sync_asap!` pipeline loop.
+5. **Slab unbalanced moments (wind-governed punching)** — Feed frame-sway unbalanced moments into the punching shear check via the existing `Mux` / `Muy` inputs in `codes/aci/punching.jl`.
+6. **Multi-case analysis** — Wind introduces directional load cases (+X, −X, +Y, −Y) requiring separate Asap solves per direction, per-member demand envelopes, and sign-aware combination (e.g., 0.9D + 1.0W can produce net uplift).
+
+### What Already Works
+
+- `LoadCombination` struct — has W, E fields
+- `factored_pressure` / `envelope_pressure` — full-keyword versions exist
+- `DesignParameters.load_combinations` — accepts any combo vector
+- `design_building` pipeline — stages are composable
+- Snapshot / restore — unaffected by lateral loads
+
+The hardest part will be computing the wind pressures themselves (MWFRS per ASCE 7 Chapter 27/28), not wiring them into the existing infrastructure.
+
 ## Limitations & Future Work
 
 - **Lateral load directions**: The envelope functions return a scalar maximum, which is appropriate for gravity. Wind and seismic require tracking load direction and sign.

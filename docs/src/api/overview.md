@@ -113,9 +113,10 @@ Full service mode loads everything upfront with `using StructuralSynthesizer`, r
 APIInput
 APIOutput
 APIParams
-APISummary
 APIError
 ```
+
+**`APISummary`** — A summary of the design results including pass/fail status, total material quantities (concrete volume, steel weight, rebar weight), embodied carbon, and the governing demand-to-capacity ratio with its associated element.
 
 ## Functions
 

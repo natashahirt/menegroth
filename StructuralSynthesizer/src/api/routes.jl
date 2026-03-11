@@ -18,8 +18,11 @@ function _json_resp(status_code::Int, obj)
     return HTTP.Response(status_code, ["Content-Type" => "application/json"], body)
 end
 
+"""HTTP 200 JSON response."""
 _json_ok(obj) = _json_resp(200, obj)
+"""HTTP 400 JSON response."""
 _json_bad(obj) = _json_resp(400, obj)
+"""HTTP 500 JSON response."""
 _json_err(obj) = _json_resp(500, obj)
 
 # ─── Route registration ──────────────────────────────────────────────────────

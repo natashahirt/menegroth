@@ -23,7 +23,7 @@ using Unitful: inch
 # Table 4.2 — Minimum slab/wall thickness for fire resistance
 # =============================================================================
 
-# Rows: [1 hr, 1.5 hr, 2 hr, 3 hr, 4 hr] — values in inches
+"""ACI 216.1-14 Table 4.2 — min equivalent thickness (inches) by aggregate type and fire rating."""
 const _FIRE_THICKNESS_TABLE = Dict{AggregateType, NTuple{5, Float64}}(
     siliceous        => (3.5, 4.3, 5.0, 6.2, 7.0),
     carbonate        => (3.2, 4.0, 4.6, 5.7, 6.6),
@@ -31,7 +31,7 @@ const _FIRE_THICKNESS_TABLE = Dict{AggregateType, NTuple{5, Float64}}(
     lightweight      => (2.5, 3.1, 3.6, 4.4, 5.1),
 )
 
-# Map fire rating → column index (1-based)
+"""Map fire rating (hours) → 1-based column index for fire resistance tables."""
 const _FIRE_RATING_INDEX = Dict{Float64, Int}(
     1.0 => 1, 1.5 => 2, 2.0 => 3, 3.0 => 4, 4.0 => 5
 )
@@ -71,12 +71,10 @@ end
 # Table 4.3.1.1 — Minimum cover for slab reinforcement
 # =============================================================================
 
-# Nonprestressed slabs (restrained: all ratings use ¾"; unrestrained varies)
-# Format: [1 hr, 1.5 hr, 2 hr, 3 hr, 4 hr] in inches
-# Restrained: ≤4 hr → ¾" for all aggregate types
-const _FIRE_SLAB_COVER_RESTRAINED = 0.75  # inches, all ratings ≤ 4 hr
+"""ACI 216.1-14 Table 4.3.1.1 — restrained slab cover: ¾″ for all ratings ≤ 4 hr."""
+const _FIRE_SLAB_COVER_RESTRAINED = 0.75
 
-# Unrestrained nonprestressed slab cover
+"""ACI 216.1-14 Table 4.3.1.1 — unrestrained slab cover (inches) by aggregate type."""
 const _FIRE_SLAB_COVER_UNRESTRAINED = Dict{AggregateType, NTuple{5, Float64}}(
     siliceous        => (0.75, 0.75, 1.00, 1.25, 1.625),
     carbonate        => (0.75, 0.75, 0.75, 1.25, 1.25),
@@ -120,10 +118,7 @@ end
 # Table 4.3.1.2 — Minimum cover for beam reinforcement (nonprestressed)
 # =============================================================================
 
-# Format: Dict of (restraint, width_category) => [1 hr, 1.5 hr, 2 hr, 3 hr, 4 hr]
-# Width categories: 5", 7", ≥10" (interpolation between these)
-# NP (not permitted) encoded as Inf
-
+"""ACI 216.1-14 Table 4.3.1.2 — beam cover (inches) by (restrained, width_category)."""
 const _FIRE_BEAM_COVER = Dict{Tuple{Bool, Int}, NTuple{5, Float64}}(
     # Restrained beams
     (true, 5)   => (0.75, 0.75, 0.75, 1.00, 1.25),
@@ -192,7 +187,7 @@ end
 # Table 4.5.1a — Minimum column dimension (4-sided exposure)
 # =============================================================================
 
-# [1 hr, 1.5 hr, 2 hr, 3 hr, 4 hr] in inches
+"""ACI 216.1-14 Table 4.5.1a — min column dimension (inches) by aggregate type."""
 const _FIRE_COLUMN_DIM = Dict{AggregateType, NTuple{5, Float64}}(
     siliceous        => (8.0, 9.0, 10.0, 12.0, 14.0),
     carbonate        => (8.0, 9.0, 10.0, 11.0, 12.0),

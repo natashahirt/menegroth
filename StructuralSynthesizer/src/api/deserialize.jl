@@ -338,21 +338,25 @@ const SOIL_MAP = Dict{String, StructuralSizer.Soil}(
     "medium_sand" => StructuralSizer.medium_sand,
 )
 
+"""Look up a concrete grade by name string, or error with available options."""
 function _resolve_concrete_name(name::String)
     haskey(CONCRETE_MAP, name) && return CONCRETE_MAP[name]
     error("Unknown concrete grade: \"$name\". Options: $(join(keys(CONCRETE_MAP), ", "))")
 end
 
+"""Look up a rebar grade by name string, or error with available options."""
 function _resolve_rebar_name(name::String)
     haskey(REBAR_MAP, name) && return REBAR_MAP[name]
     error("Unknown rebar grade: \"$name\". Options: $(join(keys(REBAR_MAP), ", "))")
 end
 
+"""Look up a structural steel type by name string, or error with available options."""
 function _resolve_steel_name(name::String)
     haskey(STEEL_MAP, name) && return STEEL_MAP[name]
     error("Unknown steel type: \"$name\". Options: $(join(keys(STEEL_MAP), ", "))")
 end
 
+"""Look up a soil type by name string, or error with available options."""
 function _resolve_soil_name(name::String)
     haskey(SOIL_MAP, name) && return SOIL_MAP[name]
     error("Unknown soil type: \"$name\". Options: $(join(keys(SOIL_MAP), ", "))")

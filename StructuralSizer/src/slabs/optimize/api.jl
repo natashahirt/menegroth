@@ -33,23 +33,27 @@ struct OptThickness <: VaultOptMode
     thickness_bounds::Tuple{Float64, Float64}
 end
 
-# Mode accessors
+"""Return the optimization mode symbol (`:both`, `:rise_only`, `:thickness_only`)."""
 _mode_symbol(::OptBoth) = :both
 _mode_symbol(::OptRise) = :rise_only
 _mode_symbol(::OptThickness) = :thickness_only
 
+"""Return the effective rise bounds (m) for the mode; degenerate for fixed-rise modes."""
 _rise_bounds(m::OptBoth) = m.rise_bounds
 _rise_bounds(m::OptRise) = m.rise_bounds
 _rise_bounds(m::OptThickness) = (m.fixed_rise, m.fixed_rise)
 
+"""Return the effective thickness bounds (m) for the mode; degenerate for fixed-thickness modes."""
 _thickness_bounds(m::OptBoth) = m.thickness_bounds
 _thickness_bounds(m::OptRise) = (m.fixed_thickness, m.fixed_thickness)
 _thickness_bounds(m::OptThickness) = m.thickness_bounds
 
+"""Human-readable description of the optimization mode."""
 _mode_description(::OptBoth) = "rise + thickness"
 _mode_description(::OptRise) = "rise (thickness fixed)"
 _mode_description(::OptThickness) = "thickness (rise fixed)"
 
+"""Extract (rise, thickness) from minimizer vector, filling in fixed values as needed."""
 _extract_result(::OptBoth, minimizer) = (minimizer[1], minimizer[2])
 _extract_result(m::OptRise, minimizer) = (minimizer[1], m.fixed_thickness)
 _extract_result(m::OptThickness, minimizer) = (m.fixed_rise, minimizer[1])

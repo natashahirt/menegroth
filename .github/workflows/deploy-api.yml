@@ -108,7 +108,8 @@ jobs:
           echo "Started App Runner operation: ${OPERATION_ID}"
 
           # Poll list-operations until our operation (by Id) reaches a terminal status.
-          for i in $(seq 1 72); do
+          # App Runner deployments can take 10+ min; allow up to 20 min (120 × 10s).
+          for i in $(seq 1 120); do
             LIST_JSON=$(aws apprunner list-operations \
               --service-arn "${APP_RUNNER_SERVICE_ARN}" \
               --max-results 5 \
@@ -116,8 +117,8 @@ jobs:
             STATUS=$(echo "${LIST_JSON}" | jq -r --arg id "${OPERATION_ID}" \
               '.OperationSummaryList[] | select(.Id == $id) | .Status // empty')
             if [ -z "${STATUS}" ]; then
-              echo "Poll ${i}: operation not in list yet, waiting 5s..."
-              sleep 5
+              echo "Poll ${i}: operation not in list yet, waiting 10s..."
+              sleep 10
               continue
             fi
             echo "Poll ${i}: status=${STATUS}"
@@ -127,7 +128,7 @@ jobs:
                 echo "App Runner operation failed: ${STATUS}"
                 exit 1
                 ;;
-              *) sleep 5 ;;
+              *) sleep 10 ;;
             esac
           done
 

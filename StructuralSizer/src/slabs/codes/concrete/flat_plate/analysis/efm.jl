@@ -1558,6 +1558,7 @@ struct EFMApplicabilityError <: Exception
     violations::Vector{String}
 end
 
+"""Print a human-readable error listing violated ACI 318-11 §13.7 conditions and suggest FEA as fallback."""
 function Base.showerror(io::IO, e::EFMApplicabilityError)
     println(io, "EFM (Equivalent Frame Method) is not permitted for this slab per ACI 318-11 §13.7:")
     for (i, v) in enumerate(e.violations)

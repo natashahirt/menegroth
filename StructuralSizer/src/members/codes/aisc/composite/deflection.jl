@@ -53,34 +53,56 @@ end
              b_eff, ΣQn) -> SecondMomentOfArea
 
 Lower-bound moment of inertia for partially composite beams per AISC Manual
-(Commentary on I3.2, approach used to generate Table 3-20).
+Eq. C-I3-1 (Commentary on Section I3.2).
 
-Uses the actual PNA location and compression force to build the effective
-transformed section. For full composite, this equals the fully transformed I.
+Uses the stress-block centroid (Y2 method) consistent with AISC Manual
+Tables 3-19/3-20:
 
-The lower-bound I is used for live-load deflection calculations when
-partial composite action is specified.
+    a  = Cf / (0.85 fc′ b_eff)
+    Y2 = (gap + ts) − a/2          (top of steel to concrete resultant)
+    Aₑ = Cf / Fy                   (effective area, transformed to steel)
+    YENA from bottom of steel via parallel axis theorem
+    I_LB = Is + As×(YENA − d/2)² + Aₑ×(d + Y2 − YENA)²
 
-Formula (AISC Manual Eq. C-I3-1):
-    I_LB = Is + As × (YENA - d/2)² + (ΣQn / Fy)² / (2 × Ac_eff_tr) × (d_eff)²
-
-Simplified approach: linearly interpolate between I_steel and I_transformed
-based on partial composite ratio ΣQn / Cf_max.
+For full composite (`ΣQn ≥ Cf_max`), delegates to `get_I_transformed`.
+For zero composite, returns `section.Ix`.
 """
 function get_I_LB(section::ISymmSection, material, slab::AbstractSlabOnBeam,
                   b_eff, ΣQn)
     Cf_max = _Cf_max(section, material, slab, b_eff)
-    I_steel = section.Ix
-    I_full  = get_I_transformed(section, slab, b_eff)
+    Cf = min(uconvert(u"N", ΣQn), uconvert(u"N", Cf_max))
 
-    # Partial composite ratio (0 to 1)
-    ratio = clamp(ustrip(ΣQn / Cf_max), 0.0, 1.0)
+    if ustrip(u"N", Cf) ≤ 0.0
+        return section.Ix
+    end
 
-    # AISC Manual approach: I_LB = Is + ratio^0.5 × (I_full - Is)
-    # Using sqrt because I doesn't scale linearly with stud count.
-    # The Manual tables use a more exact formula, but this approximation
-    # is standard practice and matches Table 3-20 within ~2%.
-    I_LB = I_steel + sqrt(ratio) * (I_full - I_steel)
+    if Cf >= uconvert(u"N", Cf_max)
+        return get_I_transformed(section, slab, b_eff)
+    end
+
+    Is  = section.Ix
+    As  = section.A
+    Fy  = material.Fy
+    d   = section.d
+    ts  = slab.t_slab
+    gap = _gap_above_steel(slab)
+
+    # Stress block depth: a = Cf / (0.85 fc′ b_eff)
+    a = Cf / (0.85 * slab.fc′ * b_eff)
+
+    Ae = Cf / Fy
+
+    # Y2 = distance from top of steel to concrete resultant (AISC notation)
+    Y2 = gap + ts - a / 2
+
+    # Centroids from bottom of steel section
+    ȳ_steel = d / 2
+    ȳ_conc  = d + Y2
+
+    A_total = As + Ae
+    ȳ_ENA = (As * ȳ_steel + Ae * ȳ_conc) / A_total
+
+    I_LB = Is + As * (ȳ_ENA - ȳ_steel)^2 + Ae * (ȳ_conc - ȳ_ENA)^2
 
     return I_LB
 end

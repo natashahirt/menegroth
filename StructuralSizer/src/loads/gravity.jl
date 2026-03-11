@@ -66,7 +66,7 @@ struct GravityLoads
     wall_SDL::Pressure
 end
 
-# Keyword constructor with psf defaults (matching previous Constants.jl values)
+"""Keyword constructor with psf defaults matching typical US office buildings."""
 function GravityLoads(;
     floor_LL  = 80.0psf,
     roof_LL   = 20.0psf,
@@ -78,6 +78,7 @@ function GravityLoads(;
     GravityLoads(floor_LL, roof_LL, grade_LL, floor_SDL, roof_SDL, wall_SDL)
 end
 
+"""Pretty-print a `GravityLoads` instance showing all load values."""
 function Base.show(io::IO, g::GravityLoads)
     print(io, "GravityLoads(floor_LL=$(g.floor_LL), roof_LL=$(g.roof_LL), ",
               "grade_LL=$(g.grade_LL), floor_SDL=$(g.floor_SDL), ",

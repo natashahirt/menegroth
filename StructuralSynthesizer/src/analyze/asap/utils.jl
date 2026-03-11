@@ -764,7 +764,7 @@ function create_slab_diaphragm_shells(struc::BuildingStructure, slab::Slab, node
     return shells
 end
 
-# Helper to extract release symbol from Element type parameter
+"""Extract the end-release symbol (`:fixedfixed`, etc.) from an `Asap.Element` type parameter."""
 function _get_release_symbol(el::Asap.Element{R}) where R
     R === Asap.FixedFixed && return :fixedfixed
     R === Asap.FixedFree && return :fixedfree

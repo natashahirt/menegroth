@@ -1,3 +1,13 @@
+"""
+    StructuralSizer
+
+Structural member and slab sizing library for steel, concrete, and timber.
+
+Provides design code implementations (AISC 360, ACI 318, NDS), section catalogs,
+load combinations (ASCE 7-22), discrete and continuous optimization, and fire
+resistance calculations. Used by `StructuralSynthesizer` to size members within
+parametric building models.
+"""
 module StructuralSizer
 
 using Logging
@@ -35,7 +45,11 @@ using Asap
 @reexport using Asap: to_meters, to_pascals, to_newtons, to_newton_meters, to_newtons_per_meter
 @reexport using Asap: asfloat, maybe_asfloat
 
-# Register custom units and reset C-pointer caches at package load time (not precompile time)
+"""
+Register Unitful units, reset Gurobi pointer caches, and warm up JuMP solvers.
+
+Called automatically at package load time (not precompile time).
+"""
 function __init__()
     Unitful.register(Asap)
     _reset_gurobi_env!()   # clear stale Gurobi.Env pointer from precompilation

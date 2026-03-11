@@ -556,7 +556,7 @@ function p_delta_iterate!(struc;
             stories_needing_attention=attention)
 end
 
-# ── P-Δ helper: compute story drift in metres (raw Float64) ──
+"""Compute the maximum inter-story drift (metres, raw Float64) across columns."""
 function _story_drift_m(struc, model, skel, vc, cols)
     max_d = 0.0
     for col in cols
@@ -581,7 +581,7 @@ function _story_drift_m(struc, model, skel, vc, cols)
     return max_d
 end
 
-# ── P-Δ helper: determine governing drift direction ──
+"""Determine the governing drift direction (`:x` or `:y`) from summed displacements."""
 function _governing_drift_direction(struc, model, skel, vc, cols)
     sum_dx = 0.0
     sum_dy = 0.0
@@ -606,7 +606,7 @@ function _governing_drift_direction(struc, model, skel, vc, cols)
     return sum_dx >= sum_dy ? :x : :y
 end
 
-# ── P-Δ helper: get column top node from ASAP model ──
+"""Return the ASAP `Node` at the top (highest Z) of a column, or `nothing`."""
 function _column_top_node(struc, model, skel, vc, col)
     for seg_idx in segment_indices(col)
         seg = struc.segments[seg_idx]

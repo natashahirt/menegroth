@@ -473,7 +473,13 @@ end
     b_eff = get_b_eff(fix.slab, fix.L_beam)
     
     @testset "Unshored — DL on steel, LL on composite" begin
-        ΣQn = 292.0u"kip"
+        # Use full composite for this general check (ΣQn = Cf_max).
+        # Partial composite at ΣQn=292 kip with a solid slab gives a low
+        # composite ratio (~36%), where the exact I_LB formula correctly
+        # produces a smaller I_LB. The deck-slab Example I-1 validation
+        # tests partial composite separately with realistic deck parameters.
+        Cf_max = StructuralSizer._Cf_max(fix.section, fix.material, fix.slab, b_eff)
+        ΣQn = Cf_max
         w_DL = 0.93u"kip/ft"
         w_LL = 1.00u"kip/ft"
         
@@ -486,7 +492,7 @@ end
         # LL deflection limit = 45ft × 12 / 360 = 1.5 in. = 38.1 mm
         @test isapprox(ustrip(u"mm", result.δ_LL_limit), 38.1; rtol=0.01)
         
-        # LL deflection should be less than limit (Example I-1 gets 1.30 in.)
+        # At full composite, LL deflection easily passes
         @test result.δ_LL < result.δ_LL_limit
         @test result.ok_LL == true
     end
@@ -786,5 +792,152 @@ end
         # Compare to Chapter F bare steel capacity
         ϕMn_F = get_ϕMn(fix.section, fix.material; Lb=fix.L_beam, Cb=1.0, axis=:strong)
         @test isapprox(r.ϕMn_steel, ϕMn_F; rtol=1e-10)
+    end
+end
+
+# ==============================================================================
+# 19. AISC Design Example I-1 — Numerical Validation (Deck Slab)
+# ==============================================================================
+# Validates against AISC Steel Construction Manual, 15th Ed., Example I-1
+# "Composite Beam Design"
+#
+# W21×55, A992, 45 ft span @ 10 ft o/c, unshored
+# 3 in. × 18 ga. deck (perpendicular), 4.5 in. NWC above deck, fc'=4 ksi
+# 3/4 in. headed studs, Fu=65 ksi, one per rib (weak stud)
+
+function _aisc_example_I1_deck_setup()
+    section  = W("W21X55")
+    material = A992_Steel
+
+    fc′ = 4.0u"ksi"
+    Ec  = 3644.0u"ksi"
+    Es  = 29000.0u"ksi"
+
+    slab = DeckSlabOnBeam(
+        4.5u"inch",        # t_slab — concrete above deck ribs
+        fc′, Ec,
+        145.0u"lb/ft^3",  # wc
+        Es,                # Es (for n = Es/Ec)
+        3.0u"inch",        # hr — nominal rib height
+        6.0u"inch",        # wr — average rib width
+        :perpendicular,    # deck orientation
+        10.0u"ft",         # beam_spacing_left
+        10.0u"ft",         # beam_spacing_right
+    )
+
+    anchor = HeadedStudAnchor(
+        0.75u"inch",       # d_sa
+        5.0u"inch",        # l_sa
+        65.0u"ksi",        # Fu
+        50.0u"ksi",        # Fy (nominal)
+        7850.0u"kg/m^3",  # ρ
+    )
+
+    L_beam = 45.0u"ft"
+    return (; section, material, slab, anchor, L_beam)
+end
+
+@testset "AISC Example I-1 — Deck Slab Validation" begin
+    fix = _aisc_example_I1_deck_setup()
+    b_eff = get_b_eff(fix.slab, fix.L_beam)
+
+    @testset "Effective width = 10 ft (spacing controls)" begin
+        # Per Example I-1: spacing/2 = 5 ft per side = 10 ft total
+        @test isapprox(b_eff, 10.0u"ft"; rtol=0.001)
+    end
+
+    @testset "Deck stud Rg/Rp and Qn" begin
+        Rg, Rp = StructuralSizer._Rg_Rp(fix.anchor, fix.slab)
+        @test Rg == 1.0    # perpendicular deck, 1 stud/rib
+        @test Rp == 0.6    # AISC I8.2a "weak stud" position
+
+        Qn = get_Qn(fix.anchor, fix.slab)
+        # Example I-1: Qn = 17.2 kips/stud
+        @test isapprox(ustrip(u"kip", Qn), 17.2; rtol=0.02)
+    end
+
+    @testset "Stress block depth a = 0.716 in." begin
+        # a = ΣQn / (0.85 fc' b_eff) = 292 / (0.85 × 4 × 120) = 0.716 in.
+        ΣQn = 292.0u"kip"
+        a = ΣQn / (0.85 * fix.slab.fc′ * b_eff)
+        @test isapprox(ustrip(u"inch", a), 0.716; rtol=0.01)
+    end
+
+    @testset "Composite ϕMn ≈ 767 kip-ft (LRFD, PNA location 6)" begin
+        ΣQn = 292.0u"kip"
+        result = get_ϕMn_composite(fix.section, fix.material, fix.slab, b_eff, ΣQn)
+
+        # Example I-1: ϕMn = 767 kip-ft
+        # Our section database has slightly different As (15.99 vs 16.2 in²),
+        # so we allow ~1% tolerance.
+        @test isapprox(ustrip(u"kip*ft", result.ϕMn), 767.0; rtol=0.015)
+
+        # Must exceed required Mu = 687 kip-ft
+        @test ustrip(u"kip*ft", result.ϕMn) > 687.0
+    end
+
+    @testset "I_LB ≈ 2440 in⁴" begin
+        ΣQn = 292.0u"kip"
+        I_LB = get_I_LB(fix.section, fix.material, fix.slab, b_eff, ΣQn)
+
+        # Example I-1: I_LB = 2440 in⁴ (Manual Table 3-20)
+        @test isapprox(ustrip(u"inch^4", I_LB), 2440.0; rtol=0.01)
+    end
+
+    @testset "Live load deflection δ_LL ≈ 1.30 in. < L/360" begin
+        ΣQn = 292.0u"kip"
+        w_DL = 0.93u"kip/ft"
+        w_LL = 1.00u"kip/ft"
+
+        result = check_composite_deflection(
+            fix.section, fix.material, fix.slab, b_eff, ΣQn,
+            fix.L_beam, w_DL, w_LL;
+            shored=false, δ_limit_ratio=1/360
+        )
+
+        # Example I-1: δ_LL = 1.30 in.
+        δ_LL_in = ustrip(u"inch", result.δ_LL)
+        @test isapprox(δ_LL_in, 1.30; rtol=0.02)
+
+        # δ_LL < L/360 = 1.5 in.
+        @test result.ok_LL == true
+    end
+
+    @testset "Construction deflection — W21×55 Ix adequate" begin
+        # Example I-1: I_req = 1060 in⁴ for 2.5 in. limit
+        # W21×55 Ix ≈ 1123-1140 in⁴ > 1060 → ok
+        w_const = 0.83u"kip/ft"
+
+        result = check_composite_deflection(
+            fix.section, fix.material, fix.slab, b_eff, 292.0u"kip",
+            fix.L_beam, w_const, 0.0u"kip/ft";
+            shored=false, δ_const_limit=2.5u"inch"
+        )
+        @test result.ok_const == true
+    end
+
+    @testset "Construction flexure — bare steel adequate" begin
+        # Example I-1 LRFD: Mu_const = max(1.4×0.83, 1.2×0.83+1.6×0.20)×L²/8
+        #                  = max(1.16, 1.32) × 45² / 8 = 1.32 × 2025 / 8 = 334 kip-ft
+        # AISC states W21×55 ϕMn = 473 kip-ft (with deck bracing Lb ≈ 0)
+        Mu_const = 334.0u"kip*ft"
+        Vu_const = 30.0u"kip"
+        r = check_construction(fix.section, fix.material, Mu_const, Vu_const;
+                                Lb_const=0.0u"ft", Cb_const=1.0)
+        @test r.flexure_ok == true
+    end
+
+    @testset "Required studs: 17 per half-span" begin
+        # Example I-1: n = ΣQn / Qn = 292 / 17.2 = 17 studs per side
+        Qn = get_Qn(fix.anchor, fix.slab)
+        n_half = ceil(Int, 292.0 / ustrip(u"kip", Qn))
+        @test n_half == 17
+    end
+
+    @testset "Shear check — ϕVn adequate" begin
+        # Example I-1: Vu = 61.2 kips, ϕVn = 234 kips
+        Vu = 61.2u"kip"
+        ϕVn = get_ϕVn(fix.section, fix.material; axis=:strong)
+        @test ϕVn > Vu
     end
 end

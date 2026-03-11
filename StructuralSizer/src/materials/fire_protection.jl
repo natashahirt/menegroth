@@ -51,6 +51,7 @@ where R = fire rating (hr), W = weight (lb/ft), D = heated perimeter (in).
 struct SFRM <: FireProtection
     density_pcf::Float64
 end
+"""Default SFRM with standard 15 pcf density."""
 SFRM() = SFRM(15.0)
 
 """
@@ -67,6 +68,7 @@ Much thinner than SFRM (~0.04"–0.25" vs 0.5"–3"+).
 struct IntumescentCoating <: FireProtection
     density_pcf::Float64
 end
+"""Default intumescent coating with 6 pcf density."""
 IntumescentCoating() = IntumescentCoating(6.0)
 
 """
@@ -188,4 +190,5 @@ function coating_ec(section, coating::SurfaceCoating, L::Unitful.Length;
     return ustrip(u"kg", m) * ecc
 end
 
-const ECC_SFRM = 0.85  # kgCO₂e/kg (CLF baseline for cementitious fireproofing)
+"""Embodied carbon coefficient for SFRM: 0.85 kgCO₂e/kg (CLF baseline for cementitious fireproofing)."""
+const ECC_SFRM = 0.85

@@ -88,6 +88,7 @@ min_dimension_fire_column
 ## Embodied Carbon Functions
 
 ```@docs
+exposed_perimeter
 coating_volume
 coating_mass
 coating_ec
@@ -97,6 +98,7 @@ coating_ec
 
 | Function | Returns |
 |:---------|:--------|
+| `exposed_perimeter(section; exposure)` | Heated perimeter of a section (m) — `PA` for 3-sided, `PB` for 4-sided |
 | `coating_volume(section, coating, L; exposure)` | Volume of coating (m³) |
 | `coating_mass(section, coating, L; exposure)` | Mass of coating (kg) |
 | `coating_ec(section, coating, L; exposure, ecc)` | Embodied carbon (kgCO₂e) |
@@ -153,4 +155,4 @@ Concrete fire resistance is governed by:
 - **Fire ratings**: Currently supports 1, 1.5, 2, 3, and 4 hour ratings. Non-standard ratings are interpolated.
 - **Concrete spalling**: ACI 216.1-14 spalling provisions (supplementary reinforcement for covers > 2.5") are not modeled.
 - **Composite fire resistance**: Fire resistance of composite steel-concrete members (AISC Design Guide 19 Chapter 5) is not yet implemented.
-- **Cost model**: Fire protection cost (installed $/ft²) is not tracked. Only embodied carbon is computed.
+- **Cost model**: Fire protection cost (installed \$/ft²) is not tracked. Only embodied carbon is computed.

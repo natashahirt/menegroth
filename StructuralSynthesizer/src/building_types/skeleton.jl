@@ -19,6 +19,7 @@ mutable struct SkeletonLookup
     version::Int
 end
 
+"""Create an empty `SkeletonLookup` with no cached indices."""
 SkeletonLookup() = SkeletonLookup(
     Dict{NTuple{3, Float64}, Int}(),
     Dict{Tuple{Int, Int}, Int}(),
@@ -74,6 +75,7 @@ mutable struct BuildingSkeleton{T} <: AbstractBuildingSkeleton
     # When empty, each edge is its own chain (1:1 mapping, the default).
     edge_chains::Dict{UInt64, Vector{Int}}
 
+    """Construct an empty `BuildingSkeleton` with no vertices, edges, faces, or lookup tables."""
     function BuildingSkeleton{T}() where T
         new{T}(
             Meshes.Point[], Meshes.Segment[], Meshes.Polygon[],

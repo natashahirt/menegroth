@@ -14,7 +14,9 @@ The PixelFrame module implements a novel structural system using pixel-based cro
 
 The module covers axial capacity, flexural capacity, deflection analysis (with multiple methods and cracking regimes), tendon deviation forces, embodied carbon estimation, and per-pixel material optimization.
 
-Source: `StructuralSizer/src/members/codes/pixelframe/*.jl`
+Reference: Wongsittikan (2024) thesis and the original `Pixelframe.jl` package.
+
+**Source:** `StructuralSizer/src/members/codes/pixelframe/*.jl`
 
 ## Key Types
 
@@ -72,6 +74,22 @@ PixelFrameCapacityCache
 
 Stores precomputed capacities: `Pu`, `Mu`, `Vu`, `depth_mm`, `width_mm`, `obj_coeffs`.
 
+### Section Geometry
+
+Three layup types are supported, each dispatched via `make_pixelframe_section`:
+
+| Layup | Arms | Spacing | Typical Use |
+|:------|:-----|:--------|:------------|
+| `:Y` | 3 | 120° | Beams |
+| `:X2` | 2 | 180° | Slabs, thin members, columns |
+| `:X4` | 4 | 90° | Columns, biaxial members |
+
+Sections are represented as `Asap.CompoundSection` / `SolidSection` with accurate polygon geometry. Section properties (area, centroid, moment of inertia) are computed via `Asap.jl`.
+
+### Material Model (FRC)
+
+The `FiberReinforcedConcrete` type (in `materials/frc.jl`, `materials/types.jl`) stores `fR1`, `fR3`, dosage, and `fiber_ecc`. Regression functions `fc′_dosage2fR1` and `fc′_dosage2fR3` map compressive strength and fiber dosage to residual flexural strengths.
+
 ## Functions
 
 ### Axial Capacity
@@ -80,7 +98,7 @@ Stores precomputed capacities: `Pu`, `Mu`, `Vu`, `depth_mm`, `width_mm`, `obj_co
 pf_axial_capacity
 ```
 
-`pf_axial_capacity(s::PixelFrameSection; E_s, ϕ_compression)` — axial capacity of the PixelFrame section considering the concrete compressive strength and prestress contribution.
+`pf_axial_capacity(s::PixelFrameSection; E_s, ϕ_compression)` — axial capacity per ACI 318-19 §22.4: `Po = 0.85 f'c Ag`, with 0.8 × Po reduction factor (ACI 318-19 Table 22.4.2.1) and ϕ = 0.65 for compression-controlled members.
 
 ### Flexural Capacity
 
@@ -88,7 +106,14 @@ pf_axial_capacity
 pf_flexural_capacity
 ```
 
-`pf_flexural_capacity(s::PixelFrameSection; E_s, f_py, Ω, max_iter)` — flexural capacity using strain compatibility analysis. The tendon stress increment is computed iteratively, accounting for the nonlinear stress-strain relationship of prestressing steel. FRC tensile contribution (from `fR1`, `fR3`) is included in the tension zone.
+`pf_flexural_capacity(s::PixelFrameSection; E_s, f_py, Ω, max_iter)` — flexural capacity per ACI 318-19 §22.4, using strain compatibility analysis with rectangular stress block and β₁. Polygon clipping (`Asap.sutherland_hodgman`) handles the non-rectangular compression zone. The tendon stress at ultimate (`fps`) is computed iteratively via strain compatibility, and the ϕ factor follows ACI 318-19 Table 21.2.2 (tension/compression/transition). FRC tensile contribution (from `fR1`, `fR3`) is included in the tension zone.
+
+### Shear Capacity
+
+Shear capacity follows the fib MC2010 §7.7-5 FRC shear model (in `codes/fib/frc_shear.jl`):
+- Linear `fFtuk` model using fR1 and fR3
+- Size-effect factor: `k = min(1 + √(200/d), 2)` (corrected from original thesis)
+- `V_Rd,Fmin` floor value per fib MC2010
 
 ### Deflection
 
@@ -98,19 +123,21 @@ pf_deflection
 
 `pf_deflection(s, L, w_or_M; method, E_s, f_py, support)` — deflection calculation with multiple methods:
 
-- `PFSimplified` — simplified elastic calculation using effective moment of inertia
-- `PFThirdPointLoad` — third-point loading configuration
-- `PFSinglePointLoad` — single midspan point load
+**Simplified** (`PFSimplified`, default):
+- Cracking moment `Mcr` per ACI 318-19 §24.2.3.5, plus decompression moment `Mdec` for EPT beams
+- Cracked moment of inertia `Icr` via `Asap.depth_from_area` + `OffsetSection`
+- Effective moment of inertia `Ie` using modified Branson's equation for EPT (Ng & Tan 2006): `Ie = k³ Ig + (1 − k³) Icr` where `k = (Mcr − Mdec) / (Ma − Mdec)`
+- Immediate deflection: `Δ = 5wL⁴ / (384 Ec Ie)`
+- Serviceability check against ACI 318-19 Table 24.2.2 limits
 
-The calculation identifies the governing `DeflectionRegime` and uses the appropriate stiffness for that regime.
+**Full Ng & Tan** (`PFThirdPointLoad`, `PFSinglePointLoad`):
+Full iterative model from Ng & Tan (2006) Part I with four deflection regimes:
+- `LINEAR_ELASTIC_UNCRACKED`: `Ma ≤ Mcr` — iterate on fps only
+- `LINEAR_ELASTIC_CRACKED`: `Mcr < Ma ≤ Mecl` — nested fps + Icr loops
+- `NONLINEAR_CRACKED`: `Mecl < Ma ≤ My` — same nested loops
+- Beyond `My` → returns `Inf` (failure)
 
-### Tendon Deviation
-
-```@docs
-pf_tendon_deviation_force
-```
-
-`pf_tendon_deviation_force(design, V_max; d_ps_support, f_ps, μ_s)` — computes the transverse force from tendon deviation at harping points. This is critical for PixelFrame members where the tendon profile creates uplift forces at deviation points.
+Includes cracked bond reduction factor Ωc (4-branch formula), Hognestad parabola concrete strain, and second-order eccentricity/tendon depth updates. `pf_deflection_curve` generates moment–deflection curves for research validation.
 
 ### Embodied Carbon
 
@@ -138,7 +165,30 @@ pixel_volumes
 assign_pixel_materials
 ```
 
-`assign_pixel_materials(governing, n_pixels, pixel_demands, material_pool, checker; symmetric)` — assigns materials to individual pixels based on local demands. Pixels with higher demands get higher-strength materials; pixels with lower demands can use weaker (lower-carbon) materials. The `symmetric` flag enforces material symmetry about midspan.
+`assign_pixel_materials(governing, n_pixels, pixel_demands, material_pool, checker; symmetric)` — assigns materials to individual pixels based on local demands via post-MIP carbon-sorted relaxation. The MIP guarantees global optimality for the governing section; per-pixel assignment is a fast post-step. The `symmetric` flag enforces material symmetry about midspan by pairing symmetric pixel positions with the stronger material.
+
+Additional per-pixel functions:
+- `validate_pixel_divisibility` — errors if span is not a multiple of pixel length (default 500 mm)
+- `pixel_carbon` — total embodied carbon summing per-pixel contributions
+- `build_pixel_design` — convenience combining validation + assignment
+
+### Catalog & Optimization
+
+`generate_pixelframe_catalog` performs a Cartesian sweep of `L_px × t × L_c × λ × f'c × dosage × A_s × f_pe × d_ps` to build a section catalog. `PixelFrameChecker` implements `AbstractCapacityChecker` with cached capacities for MIP optimization. Beam and column options (`PixelFrameBeamOptions`, `PixelFrameColumnOptions`) support `MinCarbon` / `MinWeight` / `MinCost` objectives and minimum bounding-box constraints (`min_depth_mm`, `min_width_mm`) for punching shear compatibility.
+
+### Tendon Deviation Axial Force
+
+```@docs
+pf_tendon_deviation_force
+```
+
+`pf_tendon_deviation_force(design, V_max; d_ps_support, f_ps, μ_s)` computes the additional clamping force needed at deviator points for friction-based shear transfer between pixels:
+- Tendon angle θ from eccentricity change over pixel length
+- Horizontal PT component: `A_ps × f_ps × cos(θ)`
+- Friction-required normal force: `V_max / μ_s` (default μ_s = 0.3)
+- Additional force: `N_friction − P_horizontal` (negative = PT alone suffices)
+
+Stored in `PixelFrameDesign.tendon_deviation`. Reference: Wongsittikan (2024), `designPixelframe.jl` lines 474–536.
 
 ## Implementation Details
 
@@ -180,6 +230,17 @@ checker = PixelFrameChecker(
 ```
 
 PixelFrame sections use SI units (mm, MPa) throughout, unlike the US-customary units in the AISC and ACI modules.
+
+## Intentional Differences from Original Pixelframe.jl
+
+| Item | Original | This Implementation | Reason |
+|:-----|:---------|:--------------------|:-------|
+| Shear `k` factor | `min(√(200/d), 2)` (typo from thesis) | `min(1 + √(200/d), 2)` | Correct per fib MC2010 §7.7-5 |
+| `V_Rd,Fmin` floor | Not implemented | Implemented | Enhancement per fib MC2010 |
+| Unit handling | Bare `Float64` in mm/N/MPa | `Unitful.jl` quantities | Catches dimension errors at compile time |
+| Geometry engine | Custom polygon math | `Asap.jl` `CompoundSection` | Reuses validated structural analysis library |
+| Quadratic solver | `PolynomialRoots.roots` | Analytical quadratic formula | No extra dependency; exact same result |
+| Per-pixel assignment | Greedy search (midspan out) | Post-MIP carbon-sorted relaxation | MIP guarantees global optimality for governing section |
 
 ## Limitations & Future Work
 

@@ -97,8 +97,9 @@ concrete_fc
 concrete_fc_mpa
 concrete_E
 concrete_wc
-material_name
 ```
+
+`material_name` is documented on the [Steel](steel.md) materials page.
 
 ## Implementation Details
 

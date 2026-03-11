@@ -41,6 +41,7 @@ struct TendonDeviationResult
     μ_s::Float64                    # friction coefficient
 end
 
+"""Pretty-print a `TendonDeviationResult` showing tendon angle and additional clamping force."""
 function Base.show(io::IO, r::TendonDeviationResult)
     θ_deg = round(rad2deg(r.θ); digits=2)
     N_add = round(u"kN", r.N_additional; digits=1)
@@ -85,6 +86,7 @@ mutable struct PixelFrameDesign
     tendon_deviation::Union{Nothing, TendonDeviationResult}  # Connection design output
 end
 
+"""Pretty-print a `PixelFrameDesign` showing pixel count, length, unique materials, and deviation force."""
 function Base.show(io::IO, d::PixelFrameDesign)
     n_unique = length(unique(d.pixel_materials))
     print(io, "PixelFrameDesign(", d.n_pixels, " pixels × ",

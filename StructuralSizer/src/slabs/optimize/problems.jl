@@ -135,6 +135,7 @@ end
 """Number of decision variables depends on mode."""
 n_variables(p::VaultNLPProblem) = p.mode == :both ? 2 : 1
 
+"""Return `(lb, ub)` variable bound vectors depending on optimization mode."""
 function variable_bounds(p::VaultNLPProblem)
     if p.mode == :both
         lb = [p.h_bounds[1], p.t_bounds[1]]
@@ -149,6 +150,7 @@ function variable_bounds(p::VaultNLPProblem)
     return (lb, ub)
 end
 
+"""Return midpoint initial guess for the vault optimization variables."""
 function initial_guess(p::VaultNLPProblem)
     h0 = (p.h_bounds[1] + p.h_bounds[2]) / 2
     t0 = (p.t_bounds[1] + p.t_bounds[2]) / 2
@@ -161,6 +163,7 @@ function initial_guess(p::VaultNLPProblem)
     end
 end
 
+"""Return variable name strings for the vault optimization (mode-dependent)."""
 function variable_names(p::VaultNLPProblem)
     if p.mode == :both
         ["rise_m", "thickness_m"]
@@ -170,6 +173,7 @@ function variable_names(p::VaultNLPProblem)
         ["thickness_m"]
     end
 end
+"""Return constraint name strings for the vault optimization problem."""
 constraint_names(::VaultNLPProblem) = ["stress", "convergence"]
 
 """

@@ -70,6 +70,12 @@ struct RCBeamNLPProblem <: AbstractNLPProblem
     Tu_kipin::Float64
 end
 
+"""
+    RCBeamNLPProblem(Mu, Vu, opts; Tu=0.0)
+
+Construct an RC beam NLP problem from factored demands and options.
+Converts Unitful inputs to bare ACI units (kip, kip-ft, inches, psi).
+"""
 function RCBeamNLPProblem(Mu, Vu, opts::NLPBeamOptions; Tu=0.0)
     fc = fc_ksi(opts.grade)
     fy = fy_ksi(opts.rebar_grade)
@@ -119,14 +125,17 @@ end
 # AbstractNLPProblem Interface: Core
 # ==============================================================================
 
+"""Number of design variables: b, h, ρ."""
 n_variables(::RCBeamNLPProblem) = 3
 
+"""Variable bounds for RC beam NLP: [b_min, h_min, 0.003] to [b_max, h_max, 0.015]."""
 function variable_bounds(p::RCBeamNLPProblem)
     lb = [p.b_min, p.h_min, 0.003]   # ACI practical ρ_min
     ub = [p.b_max, p.h_max, 0.015]   # Practical ρ_max for beams (lower to keep εt ≥ 0.004 after bar rounding)
     return (lb, ub)
 end
 
+"""Midrange initial guess for RC beam NLP: [b_mid, h_mid, 0.012]."""
 function initial_guess(p::RCBeamNLPProblem)
     # Start at midrange dimensions and low reinforcement
     b0 = (p.b_min + p.b_max) / 2
@@ -134,12 +143,14 @@ function initial_guess(p::RCBeamNLPProblem)
     return [b0, h0, 0.012]
 end
 
+"""Human-readable variable names for solver output."""
 variable_names(::RCBeamNLPProblem) = ["b (in)", "h (in)", "ρ"]
 
 # ==============================================================================
 # AbstractNLPProblem Interface: Objective
 # ==============================================================================
 
+"""Objective function: cross-sectional area with optional ρ weighting."""
 function objective_fn(p::RCBeamNLPProblem, x::Vector{Float64})
     b, h, ρ = x
     Ag = b * h
@@ -161,12 +172,14 @@ end
 # AbstractNLPProblem Interface: Constraints
 # ==============================================================================
 
+"""Number of constraints: 4 base + 1 torsion (if Tu > 0)."""
 function n_constraints(p::RCBeamNLPProblem)
     nc = 4
     p.Tu_kipin > 0 && (nc += 1)  # torsion adequacy (ACI §11.5.3.1)
     return nc
 end
 
+"""Human-readable constraint names for solver diagnostics."""
 function constraint_names(p::RCBeamNLPProblem)
     names = [
         "flexure utilization",
@@ -178,11 +191,19 @@ function constraint_names(p::RCBeamNLPProblem)
     return names
 end
 
+"""Constraint bounds: all utilizations ≤ 1.0, no lower bound."""
 function constraint_bounds(p::RCBeamNLPProblem)
     nc = n_constraints(p)
     return (fill(-Inf, nc), fill(1.0, nc))
 end
 
+"""
+    constraint_fns(p::RCBeamNLPProblem, x) -> Vector{Float64}
+
+Evaluate ACI 318 constraint utilizations for RC beam at design point `x`.
+Returns utilization ratios: flexure, shear adequacy, εt ≥ 0.005, ρ ≥ ρ_min,
+plus optional torsion adequacy per ACI 318-11 §11.5.3.1.
+"""
 function constraint_fns(p::RCBeamNLPProblem, x::Vector{Float64})
     b, h, ρ = x
 
@@ -285,6 +306,12 @@ struct RCBeamNLPResult
     iterations::Int
 end
 
+"""
+    build_rc_beam_nlp_result(p::RCBeamNLPProblem, opt_result) -> RCBeamNLPResult
+
+Convert optimization result to `RCBeamNLPResult` with practical section.
+Snaps dimensions to increment grid and constructs an `RCBeamSection`.
+"""
 function build_rc_beam_nlp_result(p::RCBeamNLPProblem, opt_result)
     b_opt, h_opt, ρ_opt = opt_result.minimizer
 
@@ -357,6 +384,7 @@ end
 # AbstractNLPProblem Interface: evaluate + build_result
 # ==============================================================================
 
+"""Dispatch `build_result` to `build_rc_beam_nlp_result` for the RC beam problem."""
 function build_result(p::RCBeamNLPProblem, opt_result)
     build_rc_beam_nlp_result(p, opt_result)
 end
@@ -432,6 +460,12 @@ struct SteelWBeamNLPProblem <: AbstractNLPProblem
     tw_max::Float64
 end
 
+"""
+    SteelWBeamNLPProblem(Mu, Vu, geometry, opts; Ix_min, Tu, L_span)
+
+Construct a steel W-beam NLP problem from factored demands and options.
+Converts Unitful inputs to bare AISC units (kip, kip-ft, inches, ksi).
+"""
 function SteelWBeamNLPProblem(
     Mu, Vu,
     geometry::SteelMemberGeometry,
@@ -493,14 +527,17 @@ end
 
 # --- Interface: Core ---
 
+"""Number of design variables: d, bf, tf, tw."""
 n_variables(::SteelWBeamNLPProblem) = 4
 
+"""Variable bounds for steel W-beam NLP."""
 function variable_bounds(p::SteelWBeamNLPProblem)
     lb = [p.d_min, p.bf_min, p.tf_min, p.tw_min]
     ub = [p.d_max, p.bf_max, p.tf_max, p.tw_max]
     return (lb, ub)
 end
 
+"""Initial guess from required plastic modulus Zx estimate."""
 function initial_guess(p::SteelWBeamNLPProblem)
     # Estimate from Mu: Zx_required ≈ Mu / (0.9 × Fy)
     # Mu in kip-ft, Fy in ksi → Zx in in³ = Mu×12 / (0.9 × Fy)
@@ -516,10 +553,12 @@ function initial_guess(p::SteelWBeamNLPProblem)
     return [d_guess, bf_guess, tf_guess, tw_guess]
 end
 
+"""Human-readable variable names for solver output."""
 variable_names(::SteelWBeamNLPProblem) = ["d (in)", "bf (in)", "tf (in)", "tw (in)"]
 
 # --- Interface: Objective ---
 
+"""Objective function: W-section cross-sectional area (AISC 360)."""
 function objective_fn(p::SteelWBeamNLPProblem, x::Vector{Float64})
     d, bf, tf, tw = x
     return _w_area_smooth(d, bf, tf, tw)
@@ -527,6 +566,7 @@ end
 
 # --- Interface: Constraints ---
 
+"""Number of constraints: 5 base + optional compactness, deflection, torsion."""
 function n_constraints(p::SteelWBeamNLPProblem)
     nc = 5  # flexure, shear, bf/d, tf/tw, web slenderness
     p.opts.require_compact && (nc += 1)  # flange compactness
@@ -535,6 +575,7 @@ function n_constraints(p::SteelWBeamNLPProblem)
     return nc
 end
 
+"""Human-readable constraint names for solver diagnostics."""
 function constraint_names(p::SteelWBeamNLPProblem)
     names = ["flexure utilization", "shear utilization", "bf/d ratio", "tf/tw ratio",
              "web slenderness (h/tw)"]
@@ -544,11 +585,20 @@ function constraint_names(p::SteelWBeamNLPProblem)
     return names
 end
 
+"""Constraint bounds: all utilizations ≤ 1.0, no lower bound."""
 function constraint_bounds(p::SteelWBeamNLPProblem)
     nc = n_constraints(p)
     return (fill(-Inf, nc), ones(nc))
 end
 
+"""
+    constraint_fns(p::SteelWBeamNLPProblem, x) -> Vector{Float64}
+
+Evaluate AISC 360 constraint utilizations for W-beam at design point `x`.
+Includes smooth F2 flexure (with LTB), G2 shear, proportioning, web
+slenderness, and optional flange compactness, deflection (Ix), and DG9
+torsion interaction.
+"""
 function constraint_fns(p::SteelWBeamNLPProblem, x::Vector{Float64})
     d, bf, tf, tw = x
     k = p.opts.smooth_k
@@ -707,6 +757,11 @@ end
 
 # --- Result builder (reuses WColumnNLPResult) ---
 
+"""
+    build_w_beam_nlp_result(p, opt_result) -> WColumnNLPResult
+
+Convert optimization result to `WColumnNLPResult` with practical ISymmSection.
+"""
 function build_w_beam_nlp_result(p::SteelWBeamNLPProblem, opt_result)
     d_opt, bf_opt, tf_opt, tw_opt = opt_result.minimizer
     
@@ -749,6 +804,7 @@ function build_w_beam_nlp_result(p::SteelWBeamNLPProblem, opt_result)
     )
 end
 
+"""Dispatch `build_result` to `build_w_beam_nlp_result` for W-beam problem."""
 function build_result(p::SteelWBeamNLPProblem, opt_result)
     build_w_beam_nlp_result(p, opt_result)
 end
@@ -804,6 +860,12 @@ struct SteelHSSBeamNLPProblem <: AbstractNLPProblem
     t_max::Float64
 end
 
+"""
+    SteelHSSBeamNLPProblem(Mu, Vu, opts; Ix_min, Tu)
+
+Construct a steel HSS beam NLP problem from factored demands and options.
+Converts Unitful inputs to bare AISC units (kip, kip-ft, inches, ksi).
+"""
 function SteelHSSBeamNLPProblem(
     Mu, Vu,
     opts::NLPHSSOptions;
@@ -846,14 +908,17 @@ end
 
 # --- Interface: Core ---
 
+"""Number of design variables: B, H, t."""
 n_variables(::SteelHSSBeamNLPProblem) = 3
 
+"""Variable bounds for HSS beam NLP."""
 function variable_bounds(p::SteelHSSBeamNLPProblem)
     lb = [p.B_min, p.B_min, p.t_min]
     ub = [p.B_max, p.B_max, p.t_max]
     return (lb, ub)
 end
 
+"""Initial guess from required plastic modulus Zx estimate."""
 function initial_guess(p::SteelHSSBeamNLPProblem)
     # Estimate Zx_required: Mu × 12 / (0.9 × Fy)
     Zx_est = p.Mu_kipft * 12.0 / (0.9 * p.Fy_ksi)
@@ -867,10 +932,12 @@ function initial_guess(p::SteelHSSBeamNLPProblem)
     return [B_guess, H_guess, t_guess]
 end
 
+"""Human-readable variable names for solver output."""
 variable_names(::SteelHSSBeamNLPProblem) = ["B (in)", "H (in)", "t (in)"]
 
 # --- Interface: Objective ---
 
+"""Objective function: HSS cross-sectional area with optional aspect penalty."""
 function objective_fn(p::SteelHSSBeamNLPProblem, x::Vector{Float64})
     B, H, t = x
     area = _hss_area_smooth(B, H, t)
@@ -886,6 +953,7 @@ end
 
 # --- Interface: Constraints ---
 
+"""Number of constraints: 3 base + optional deflection and torsion."""
 function n_constraints(p::SteelHSSBeamNLPProblem)
     nc = 3  # flexure, shear, b/t fabrication
     p.Ix_min_in4 > 0 && (nc += 1)  # deflection (Ix adequacy)
@@ -893,6 +961,7 @@ function n_constraints(p::SteelHSSBeamNLPProblem)
     return nc
 end
 
+"""Human-readable constraint names for solver diagnostics."""
 function constraint_names(p::SteelHSSBeamNLPProblem)
     names = ["flexure utilization", "shear utilization", "min b/t ratio"]
     p.Ix_min_in4 > 0 && push!(names, "deflection (Ix adequacy)")
@@ -900,11 +969,19 @@ function constraint_names(p::SteelHSSBeamNLPProblem)
     return names
 end
 
+"""Constraint bounds: all utilizations ≤ 1.0, no lower bound."""
 function constraint_bounds(p::SteelHSSBeamNLPProblem)
     nc = n_constraints(p)
     return (fill(-Inf, nc), ones(nc))
 end
 
+"""
+    constraint_fns(p::SteelHSSBeamNLPProblem, x) -> Vector{Float64}
+
+Evaluate AISC 360 constraint utilizations for HSS beam at design point `x`.
+Includes smooth F7 flexure (compact/noncompact), G4 shear (Cv2), b/t
+fabrication limit, and optional Ix deflection and H3-6 torsion interaction.
+"""
 function constraint_fns(p::SteelHSSBeamNLPProblem, x::Vector{Float64})
     B, H, t = x
     k = p.opts.smooth_k
@@ -1041,6 +1118,11 @@ end
 
 # --- Result builder (reuses HSSColumnNLPResult) ---
 
+"""
+    build_hss_beam_nlp_result(p, opt_result) -> HSSColumnNLPResult
+
+Convert optimization result to `HSSColumnNLPResult` with practical HSSRectSection.
+"""
 function build_hss_beam_nlp_result(p::SteelHSSBeamNLPProblem, opt_result)
     B_opt, H_opt, t_opt = opt_result.minimizer
     
@@ -1077,6 +1159,7 @@ function build_hss_beam_nlp_result(p::SteelHSSBeamNLPProblem, opt_result)
     )
 end
 
+"""Dispatch `build_result` to `build_hss_beam_nlp_result` for HSS beam problem."""
 function build_result(p::SteelHSSBeamNLPProblem, opt_result)
     build_hss_beam_nlp_result(p, opt_result)
 end

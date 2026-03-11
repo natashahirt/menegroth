@@ -18,6 +18,10 @@ The platform consists of two Julia packages plus an HTTP API:
 | **StructuralSynthesizer** | Building-level workflows: geometry generation, tributary analysis, design pipelines, post-processing, and the HTTP API | `gen_medium_office`, `design_building`, `DesignParameters` |
 | **StructuralSizer** | Component-level structural design: materials, loads, sections, design code checks (AISC 360, ACI 318, NDS), slab design, foundation design, and optimization | `A992_Steel`, `LoadCombination`, `FlatPlateOptions` |
 | **Asap** | Units, type aliases, and finite element analysis (FEM) | `kip`, `ksi`, `psf`, `Model`, `solve!` |
+| **StructuralPlots** | Makie themes, color palettes, figure utilities for publication-quality plots | `sp_light`, `sp_dark`, `fullwidth` |
+| **StructuralStudies** | Parametric research studies built on StructuralSizer + StructuralPlots | — |
+
+**Dependency chain:** `Asap` → `StructuralSizer` → `StructuralSynthesizer`
 
 ## How It Works
 
@@ -44,6 +48,21 @@ The platform consists of two Julia packages plus an HTTP API:
   - Post-Processing — embodied carbon, reports
 - **[HTTP API](api/overview.md)** — endpoints, schema, deployment
 - **Reference** — design codes index, type hierarchy
+
+## Test Coverage
+
+| Area | Tests | Status |
+|------|-------|--------|
+| Steel members (AISC) | AISC Design Examples validated | Full |
+| RC columns (ACI) | StructurePoint validated (rect + circular + biaxial + slenderness) | Full |
+| RC beams (ACI) | 106 tests, 3 StructurePoint examples (simply supported, cantilever, doubly reinforced) | Full |
+| Flat plates | DDM + EFM + FEA validated | In Progress |
+| Vaults | Validated against MATLAB (Haile) | Full |
+| Foundations (ACI) | StructurePoint validated (spread, strip, mat) | Full |
+| Foundations (IS 456) | Basic validation | Full |
+| PixelFrame | 222 tests (capacities + checker + MIP) | Full |
+| Tributaries | Edge + Voronoi + strip geometry | Full |
+| Optimization | Column MIP + multi-material | Full |
 
 ## Safety-Critical Software
 

@@ -5,7 +5,6 @@ using StructuralSizer
 makedocs(
     sitename = "Structural Synthesizer",
     format = Documenter.HTML(prettyurls = get(ENV, "CI", "false") == "true"),
-    warnonly = [:docs_block, :cross_references, :missing_docs],
     pages = [
         "Home" => "index.md",
         "Getting Started" => "getting_started.md",

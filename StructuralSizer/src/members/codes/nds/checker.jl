@@ -44,6 +44,11 @@ struct NDSChecker <: AbstractCapacityChecker
     incised::Bool          # Ci factor applies if true
 end
 
+"""
+    NDSChecker(; CD=1.0, wet_service=false, high_temperature=false, repetitive=false, incised=false)
+
+Keyword constructor for [`NDSChecker`](@ref) with NDS 2018 defaults.
+"""
 function NDSChecker(;
     CD = 1.0,              # Normal duration (10-year load)
     wet_service = false,
@@ -58,7 +63,11 @@ end
 # Stub Implementations
 # ==============================================================================
 
-# Placeholder: feasibility check (not implemented)
+"""
+    is_feasible(checker::NDSChecker, section, material, demand, geometry) -> Bool
+
+Check whether a timber section satisfies NDS 2018 capacity requirements. **Not yet implemented.**
+"""
 function is_feasible(
     checker::NDSChecker,
     section::GlulamSection,
@@ -69,7 +78,11 @@ function is_feasible(
     error("NDSChecker.is_feasible not yet implemented")
 end
 
-# Placeholder: precompute capacities
+"""
+    precompute_capacities!(checker::NDSChecker, cache, catalog, material, objective)
+
+Precompute adjusted design values for all sections in `catalog`. **Not yet implemented.**
+"""
 function precompute_capacities!(
     checker::NDSChecker,
     cache,

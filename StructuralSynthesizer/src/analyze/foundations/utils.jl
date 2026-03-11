@@ -165,7 +165,7 @@ function initialize_foundations!(struc::BuildingStructure{T};
     return struc
 end
 
-# Placeholder result for undesigned foundations
+"""Create a zero-valued `SpreadFootingResult` placeholder for undesigned foundations."""
 function _placeholder_foundation_result(::Type{T}) where T
     L = typeof(1.0u"m")
     V = typeof(1.0u"m^3")
@@ -229,6 +229,7 @@ end
 # ACI 318-11 dispatch
 # ─────────────────────────────────────────────────────────────────────────────
 
+"""Dispatch a single foundation through the ACI 318 sizing path (spread, strip, or mat)."""
 function _size_fnd_aci!(struc, f_idx, fnd, n_supp, demands, soil, opts)
     mat = opts.spread.material   # ReinforcedConcreteMaterial (concrete + rebar)
 
@@ -260,6 +261,7 @@ end
 # IS 456 legacy dispatch
 # ─────────────────────────────────────────────────────────────────────────────
 
+"""Dispatch a single foundation through the IS 456 legacy sizing path."""
 function _size_fnd_is!(struc, f_idx, fnd, n_supp, demands, soil,
                        concrete, rebar, pier_width; kwargs...)
     if fnd.foundation_type == :spread && n_supp == 1
@@ -338,16 +340,19 @@ function _compute_foundation_volumes(result::R, concrete, rebar) where R<:Abstra
     )
 end
 
-"""Polymorphic rebar line for foundation summary (not all result types have rebar_count)."""
+"""Print rebar schedule line for a spread footing (count × bar size each way)."""
 function _print_rebar_line(r::StructuralSizer.SpreadFootingResult, du)
     println("  Rebar: $(r.rebar_count) × $(fmt(du, :rebar_dia, r.rebar_dia, digits=0)) each way")
 end
+"""Print rebar schedule line for a strip footing (longitudinal + transverse areas)."""
 function _print_rebar_line(r::StructuralSizer.StripFootingResult, du)
     println("  Rebar: As_long=$(fmt(du, :rebar_area, r.As_long_bot)), As_trans=$(fmt(du, :rebar_area, r.As_trans))")
 end
+"""Print rebar schedule line for a mat footing (x- and y-direction areas)."""
 function _print_rebar_line(r::StructuralSizer.MatFootingResult, du)
     println("  Rebar: As_x=$(fmt(du, :rebar_area, r.As_x_bot)), As_y=$(fmt(du, :rebar_area, r.As_y_bot))")
 end
+"""Fallback rebar line for unrecognised foundation result types."""
 _print_rebar_line(r, du) = println("  Rebar: (see result object)")
 
 """
@@ -516,7 +521,7 @@ function group_foundations_by_reaction!(struc::BuildingStructure;
     return n_groups
 end
 
-# Helper: get number of supports for foundations in a group
+"""Number of supports for the first foundation in a group (for grouping compatibility)."""
 function _group_n_supports(struc, f_indices)
     isempty(f_indices) && return 0
     return length(struc.foundations[f_indices[1]].support_indices)

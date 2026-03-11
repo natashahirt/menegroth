@@ -190,6 +190,7 @@ end
 # Pretty Printing
 # =============================================================================
 
+"""Compact single-line display of a `FrameLine`."""
 function Base.show(io::IO, fl::FrameLine{T, C}) where {T, C}
     dir_str = if isapprox(fl.direction[1], 1.0, atol=1e-6) && isapprox(fl.direction[2], 0.0, atol=1e-6)
         "X"
@@ -202,6 +203,7 @@ function Base.show(io::IO, fl::FrameLine{T, C}) where {T, C}
     print(io, "FrameLine{$dir_str}($(n_joints(fl)) columns, $(n_spans(fl)) spans, l₂=$(fl.tributary_width))")
 end
 
+"""Multi-line REPL display of a `FrameLine` with span details."""
 function Base.show(io::IO, ::MIME"text/plain", fl::FrameLine{T, C}) where {T, C}
     println(io, "FrameLine:")
     println(io, "  Direction: $(fl.direction)")

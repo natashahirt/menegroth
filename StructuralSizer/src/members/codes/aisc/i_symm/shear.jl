@@ -37,9 +37,11 @@ or Chapter G7 (weak axis, flange shear).
 """
 function get_Vn(s::ISymmSection, mat::Metal; axis=:strong, kv=5.34, rolled=true)
     if axis == :strong
-        # G2.1: Shear in Web
+        # G2.1: Vn = 0.6 Fy Aw Cv1,  Aw = d × tw  (AISC 360-16 §G2.1)
+        # Note: s.Aw is the *clear* web area (h × tw); AISC G2 uses full depth.
         Cv1 = get_Cv1(s, mat; kv=kv, rolled=rolled)
-        return 0.6 * mat.Fy * s.Aw * Cv1
+        Aw  = s.d * s.tw
+        return 0.6 * mat.Fy * Aw * Cv1
     else
         # G7: Shear in Flanges (Weak Axis)
         # Vn = 0.6 * Fy * Aw_flanges * Cv2

@@ -89,14 +89,17 @@ end
 # AbstractNLPProblem Interface: Core
 # ==============================================================================
 
+"""Number of design variables: D, ρg."""
 n_variables(::RCCircularNLPProblem) = 2
 
+"""Variable bounds for circular column NLP: [D_min, 0.01] to [D_max, ρ_max]."""
 function variable_bounds(p::RCCircularNLPProblem)
     lb = [p.D_min, 0.01]   # ACI min ρ = 0.01
     ub = [p.D_max, p.opts.ρ_max]  # Practical ρ limit (default 0.06)
     return (lb, ub)
 end
 
+"""Initial guess from simplified axial capacity estimate: [D0, 0.04]."""
 function initial_guess(p::RCCircularNLPProblem)
     # Estimate from simplified axial capacity: Ag ≈ Pu / (0.40 × f'c)
     Ag_est = p.Pu_kip / (0.40 * p.mat.fc)
@@ -105,12 +108,14 @@ function initial_guess(p::RCCircularNLPProblem)
     return [D0, 0.04]  # Midrange reinforcement
 end
 
+"""Human-readable variable names for solver output."""
 variable_names(::RCCircularNLPProblem) = ["D (in)", "ρg"]
 
 # ==============================================================================
 # AbstractNLPProblem Interface: Objective
 # ==============================================================================
 
+"""Objective function: circular cross-sectional area with ρ weighting per objective type."""
 function objective_fn(p::RCCircularNLPProblem, x::Vector{Float64})
     D, ρ = x
     Ag = π * D^2 / 4
@@ -151,14 +156,23 @@ end
 # AbstractNLPProblem Interface: Constraints
 # ==============================================================================
 
+"""Single constraint: P-M interaction utilization."""
 n_constraints(::RCCircularNLPProblem) = 1
 
+"""Constraint name for solver diagnostics."""
 constraint_names(::RCCircularNLPProblem) = ["P-M utilization"]
 
+"""Constraint bounds: P-M utilization ≤ 1.0."""
 function constraint_bounds(p::RCCircularNLPProblem)
     return ([-Inf], [1.0])
 end
 
+"""
+    constraint_fns(p::RCCircularNLPProblem, x) -> Vector{Float64}
+
+Evaluate smooth P-M utilization for circular column at design point `x`.
+Includes optional ACI 318 slenderness magnification (moment magnifier δns).
+"""
 function constraint_fns(p::RCCircularNLPProblem, x::Vector{Float64})
     D, ρ = x
 
@@ -274,6 +288,7 @@ end
     build_rc_circular_nlp_result(problem, opt_result) -> RCCircularNLPResult
 
 Convert optimization result to `RCCircularNLPResult` with practical section.
+Dispatch target for `build_result`.
 """
 function build_rc_circular_nlp_result(p::RCCircularNLPProblem, opt_result)
     D_opt, ρ_opt = opt_result.minimizer

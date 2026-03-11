@@ -17,7 +17,7 @@ AISC 360-16 capacity checks for steel members. Covers compression, flexure, shea
 | **Single-Angle Members** | Chapter E, F | Special provisions for single angles not implemented. |
 | **Asymmetric I-Shapes** | — | Only doubly symmetric W/S shapes supported; no channels, WT, or singly symmetric I. |
 | **Composite Columns** | I2 | Composite beams (I3) are implemented; composite columns are not. |
-| **Formed Metal Deck (full)** | I3.2c | `DeckSlabOnBeam` type exists as a stub; Rg/Rp factors are implemented but deck-specific Ac and rib geometry are not fully wired. |
+| **Formed Metal Deck (parallel wr/hr < 1.5)** | I3.2c | `DeckSlabOnBeam` is fully implemented for perpendicular deck and parallel deck with wr/hr ≥ 1.5. Parallel deck with wr/hr < 1.5 uses conservative Rg=0.85 but may need additional rib-level checks for heavily loaded configurations. |
 | **Elastic Stress Distribution** | I3.2a(b) | When h/tw > 3.76√(E/Fy), the elastic method is required. A `NotImplementedError` is raised — only plastic stress distribution (I3.2a(a)) is implemented. |
 | **Seismic Provisions** | AISC 341 | No seismic compactness, expected strengths, or special detailing. |
 | **Fire Design** | Appendix 4 | No elevated temperature capacity reduction. |
@@ -212,6 +212,7 @@ Vn = get_Vn(section, material; axis=:strong, kv=5.34, rolled=true)
 ```
 
 **Equations:**
+- Vn = 0.6 Fy Aw Cv1 where Aw = d × tw (G2-1, full-depth web area)
 - Cv1, Cv2: G2.1, G4, G5
 - Round HSS shear buckling: G5-2a, G5-2b (with Lv)
 
@@ -314,7 +315,7 @@ const_check = check_construction(section, material, 200.0u"kip*ft", 50.0u"kip";
 ```
 
 **Key types:**
-- `SolidSlabOnBeam` / `DeckSlabOnBeam` (stub): Slab-on-beam configurations
+- `SolidSlabOnBeam` / `DeckSlabOnBeam`: Slab-on-beam configurations (solid and metal deck)
 - `HeadedStudAnchor`: Stud properties, including `n_per_row` for multi-row layouts
 - `CompositeContext`: Bundles slab + anchor + geometry for the checker pipeline
 
@@ -324,7 +325,7 @@ const_check = check_construction(section, material, 200.0u"kip*ft", 50.0u"kip";
 - Cf: I3.2d (min of concrete, steel, studs — Eqs. I3-1a/b/c)
 - Mn: Plastic stress distribution (I3.2a(a)), continuous PNA solver
 - Negative Mn: I3.2b with Asr × Fysr
-- I_transformed / I_LB: Commentary I3.2, AISC Manual approach
+- I_transformed / I_LB: Commentary I3.2, AISC Manual Eq. C-I3-1 (Y2 method)
 
 ### Appendix 8 — Second-Order Analysis (B1/B2)
 
@@ -417,7 +418,8 @@ aisc/
 │   ├── stud_strength.jl  # I8.2a — Qn, Rg/Rp, validations
 │   ├── flexure.jl        # I3.2 — Cf, PNA solver, Mn, partial composite, negative moment
 │   ├── construction.jl   # I3.1b — construction-stage bare steel check
-│   └── deflection.jl     # Commentary I3.2 — I_transformed, I_LB, deflection
+│   ├── deflection.jl     # Commentary I3.2 — I_transformed, I_LB, deflection
+│   └── rebar_from_slab.jl # Extract Asr/Fysr from slab results for negative moment
 └── reference/            # AISC 360-16 extracts
 ```
 
@@ -447,6 +449,10 @@ aisc/
 | `validate_stud_length` | I8.2 | Stud l_sa ≥ 4d_sa and cover check |
 | `check_stud_spacing` | I8.2d | Min/max longitudinal spacing |
 | `stud_mass` | — | Single stud mass (for ECC/weight objectives) |
+| `composite_stud_contribution` | — | Total stud cost contribution to objective |
+| `extract_parallel_Asr` | I3.2b | Extract parallel slab rebar for negative moment |
+| `beam_direction_from_vectors` | — | Check if rebar is parallel to beam direction |
+| `report_composite_beam` | — | Full composite beam design check report (`test/report_generators/`) |
 
 ### Interaction Functions
 

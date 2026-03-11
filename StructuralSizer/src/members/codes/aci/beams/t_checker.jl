@@ -213,6 +213,7 @@ end
 # Beam volume/weight uses bw × h (web rectangle only).
 # The flange concrete is already counted as slab material.
 
+"""Objective value: web concrete volume (bw × h) of the T-beam per unit length."""
 function objective_value(
     ::MinVolume,
     section::RCTBeamSection,
@@ -223,6 +224,7 @@ function objective_value(
     uconvert(u"m^3", Ag * length)
 end
 
+"""Objective value: self-weight (web only) of the T-beam per unit length."""
 function objective_value(
     ::MinWeight,
     section::RCTBeamSection,
@@ -233,6 +235,7 @@ function objective_value(
     uconvert(u"kN", Ag * length * material.ρ * 1u"gn")
 end
 
+"""Objective value: cost proxy (web volume) for the T-beam per unit length."""
 function objective_value(
     ::MinCost,
     section::RCTBeamSection,
@@ -243,6 +246,7 @@ function objective_value(
     uconvert(u"m^3", Ag * length)
 end
 
+"""Objective value: embodied carbon (kgCO₂e, web only) of the T-beam per unit length."""
 function objective_value(
     ::MinCarbon,
     section::RCTBeamSection,
@@ -252,5 +256,5 @@ function objective_value(
     Ag = section.bw * section.h
     volume = uconvert(u"m^3", Ag * length)
     mass_kg = ustrip(volume) * ustrip(u"kg/m^3", material.ρ)
-    mass_kg * material.ecc   # kgCO₂e
+    mass_kg * material.ecc
 end

@@ -16,9 +16,11 @@ struct TributaryCacheKey
     axis_hash::UInt64          # hash of axis vector (0 for isotropic)
 end
 
+"""Isotropic cache key (axis hash = 0) from a bare symbol."""
 TributaryCacheKey(behavior::Symbol) = TributaryCacheKey(behavior, UInt64(0))
 
 # Accept AbstractVector, Tuple, or Nothing for axis
+"""Construct a `TributaryCacheKey` from a `SpanningBehavior` and optional axis direction."""
 function TributaryCacheKey(behavior::SpanningBehavior, axis::Union{Nothing, AbstractVector, Tuple})
     bsym = if behavior isa OneWaySpanning
         :one_way
@@ -112,6 +114,7 @@ mutable struct TributaryCache
     vertex_computed::Dict{Int, DateTime}
 end
 
+"""Create an empty `TributaryCache` with no stored results."""
 TributaryCache() = TributaryCache(
     Dict{TributaryCacheKey, Dict{Int, CellTributaryResult}}(),
     Dict{Int, Dict{Int, ColumnTributaryResult}}(),

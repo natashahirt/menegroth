@@ -13,6 +13,7 @@ struct ValidationResult
     errors::Vector{String}
 end
 
+"""Create a passing `ValidationResult` with no errors."""
 ValidationResult() = ValidationResult(true, String[])
 
 """

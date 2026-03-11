@@ -137,6 +137,11 @@ end
 # Convenience constructors
 # -----------------------------------------------------------------------------
 
+"""
+    Beam(seg_indices, L; Lb, Kx, Ky, Cb, group_id, role, tributary_width) -> Beam
+
+Convenience constructor from segment indices and total length.
+"""
 function Beam(seg_indices::Vector{Int}, L::T; Lb=L, Kx=1.0, Ky=1.0, Cb=1.0, 
               group_id=nothing, role=:beam, tributary_width=nothing) where T
     base = MemberBase{T}(
@@ -147,8 +152,14 @@ function Beam(seg_indices::Vector{Int}, L::T; Lb=L, Kx=1.0, Ky=1.0, Cb=1.0,
     Beam{T}(base=base, tributary_width=tributary_width, role=role)
 end
 
+"""Single-segment beam convenience: wraps the index in a vector."""
 Beam(seg_idx::Int, L::T; kwargs...) where T = Beam([seg_idx], L; kwargs...)
 
+"""
+    Column(seg_indices, L; Lb, Kx, Ky, Cb, group_id, vertex_idx, c1, c2, story, position, ...) -> Column
+
+Convenience constructor from segment indices and total length.
+"""
 function Column(seg_indices::Vector{Int}, L::T; Lb=L, Kx=1.0, Ky=1.0, Cb=1.0,
                 group_id=nothing, vertex_idx=0, c1=nothing, c2=nothing,
                 story=0, position=:interior, boundary_edge_dirs=NTuple{2, Float64}[],
@@ -163,8 +174,14 @@ function Column(seg_indices::Vector{Int}, L::T; Lb=L, Kx=1.0, Ky=1.0, Cb=1.0,
               braced=braced, story_properties=story_properties)
 end
 
+"""Single-segment column convenience: wraps the index in a vector."""
 Column(seg_idx::Int, L::T; kwargs...) where T = Column([seg_idx], L; kwargs...)
 
+"""
+    Strut(seg_indices, L; Lb, Kx, Ky, Cb, group_id, brace_type) -> Strut
+
+Convenience constructor from segment indices and total length.
+"""
 function Strut(seg_indices::Vector{Int}, L::T; Lb=L, Kx=1.0, Ky=1.0, Cb=1.0,
                group_id=nothing, brace_type=:both) where T
     base = MemberBase{T}(
@@ -175,24 +192,44 @@ function Strut(seg_indices::Vector{Int}, L::T; Lb=L, Kx=1.0, Ky=1.0, Cb=1.0,
     Strut{T}(base=base, brace_type=brace_type)
 end
 
+"""Single-segment strut convenience: wraps the index in a vector."""
 Strut(seg_idx::Int, L::T; kwargs...) where T = Strut([seg_idx], L; kwargs...)
 
 # -----------------------------------------------------------------------------
 # Accessors (delegate to base)
 # -----------------------------------------------------------------------------
 
+"""Skeleton segment indices spanned by this member."""
 segment_indices(m::AbstractMember) = m.base.segment_indices
+
+"""Total member length."""
 member_length(m::AbstractMember) = m.base.L
+
+"""Governing unbraced length."""
 unbraced_length(m::AbstractMember) = m.base.Lb
+
+"""Optimization group hash (or `nothing`)."""
 group_id(m::AbstractMember) = m.base.group_id
+
+"""Assigned cross-section (or `nothing` before sizing)."""
 section(m::AbstractMember) = m.base.section
+
+"""Per-pixel design for PixelFrame members (or `nothing`)."""
 pixel_design(m::AbstractMember) = m.base.pixel_design
+
+"""Material → volume mapping for this member."""
 volumes(m::AbstractMember) = m.base.volumes
 
-# Setters
+"""Set the optimization group hash."""
 set_group_id!(m::AbstractMember, gid) = (m.base.group_id = gid)
+
+"""Assign a cross-section to this member."""
 set_section!(m::AbstractMember, sec) = (m.base.section = sec)
+
+"""Assign a per-pixel design to this member."""
 set_pixel_design!(m::AbstractMember, pd) = (m.base.pixel_design = pd)
+
+"""Replace the material → volume mapping."""
 set_volumes!(m::AbstractMember, vols) = (m.base.volumes = vols)
 
 """Optimization grouping for similar members (pure grouping logic + shared section for ASAP)."""
@@ -202,4 +239,5 @@ mutable struct MemberGroup
     section::Union{AbstractSection, Nothing}  # Shared section for ASAP element updates
 end
 
+"""Create an empty `MemberGroup` with the given hash key and no shared section."""
 MemberGroup(hash::UInt64) = MemberGroup(hash, Int[], nothing)

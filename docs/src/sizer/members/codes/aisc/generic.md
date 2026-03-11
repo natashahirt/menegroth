@@ -18,19 +18,11 @@ Source: `StructuralSizer/src/members/codes/aisc/generic/*.jl`
 
 ### Tension (AISC §D2)
 
-```@docs
-get_Pn_tension
-```
-
 `get_Pn_tension(s, mat; Ae_ratio=0.75)` — nominal tensile strength, minimum of:
 - **Yielding on gross section (D2-1):** `Pn = Fy × Ag`
 - **Rupture on net section (D2-2):** `Pn = Fu × Ae` where `Ae = Ag × Ae_ratio`
 
 The default `Ae_ratio = 0.75` is a conservative approximation; use the actual effective net area ratio when connection details are known.
-
-```@docs
-get_ϕPn_tension
-```
 
 `get_ϕPn_tension(s, mat; Ae_ratio=0.75)` — design tensile strength with `ϕ_t = 0.90` for yielding, `ϕ_t = 0.75` for rupture. Returns the governing (minimum) value.
 

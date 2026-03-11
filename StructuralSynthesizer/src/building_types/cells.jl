@@ -163,9 +163,13 @@ end
 Slab(cell_idx::Int, result::AbstractFloorResult, spans::SpanInfo; kwargs...) = 
     Slab([cell_idx], result, spans; kwargs...)
 
-# Interface for Slab to mirror Result interface
+"""Total slab thickness (delegates to the sizing result)."""
 thickness(s::Slab) = StructuralSizer.total_depth(s.result)
+
+"""Self-weight pressure of the slab (delegates to the sizing result)."""
 self_weight(s::Slab) = StructuralSizer.self_weight(s.result)
+
+"""Structural effects (e.g., cracking, creep) from the sizing result."""
 structural_effects(s::Slab) = StructuralSizer.structural_effects(s.result)
 
 """
@@ -188,6 +192,7 @@ mutable struct SlabGroup
     slab_indices::Vector{Int}
 end
 
+"""Create an empty `SlabGroup` with the given hash key."""
 SlabGroup(hash::UInt64) = SlabGroup(hash, Int[])
 
 """Per-edge analysis data (one per skeleton edge / ASAP element)."""
@@ -198,6 +203,11 @@ mutable struct Segment{T}
     Cb::Float64
 end
 
+"""
+    Segment(edge_idx, L; Lb=L, Cb=1.0) -> Segment
+
+Construct a `Segment` for a skeleton edge with optional unbraced length and moment gradient factor.
+"""
 function Segment(edge_idx::Int, L::T; Lb=L, Cb=1.0) where T
     Segment{T}(edge_idx, L, Lb, Float64(Cb))
 end

@@ -81,7 +81,7 @@ function build_cell_panel(
     end
 end
 
-# ── Quad path: bilinear IsoParametricPanel ──
+"""Build a `CellPanel` for a 4-vertex cell using bilinear `IsoParametricPanel`."""
 function _build_quad_panel(
     cell_poly::Vector{NTuple{2, Float64}},
     cell_cols::Vector,
@@ -116,7 +116,7 @@ function _build_quad_panel(
     return CellPanel(panel, col_ξη, span_axis, 4)
 end
 
-# ── N-gon path: WachspressPanel with auto_params ──
+"""Build a `CellPanel` for an N-gon cell using `WachspressPanel` with `auto_params`."""
 function _build_ngon_panel(
     cell_poly::Vector{NTuple{2, Float64}},
     cell_cols::Vector,
@@ -146,7 +146,7 @@ function _build_ngon_panel(
     return CellPanel(panel, col_ξη, span_axis, n)
 end
 
-# ── Shared: map column positions to parametric space ──
+"""Map column vertex positions into parametric (ξ, η) coordinates of `panel`."""
 function _map_columns_to_parametric(panel, cell_cols::Vector, skel)
     col_ξη = NTuple{2, Float64}[]
     for col in cell_cols
@@ -240,7 +240,7 @@ function generate_cut_lines(
     end
 end
 
-# ── Quad cuts: uniform ξ sweep over [0,1]² with iso_alpha blending ──
+"""Generate uniform ξ-sweep cut lines for a quad panel with `iso_alpha` blending."""
 function _generate_quad_cuts(
     panel, col_bands, span_axis, n_cuts, n_pts, iso_alpha,
 )
@@ -284,9 +284,7 @@ function _generate_quad_cuts(
     return cuts
 end
 
-# ── N-gon cuts: boundary-crossing isolines via Wachspress ──
-# Uses the waffle geometry functions (_boundary_crossings, _trace_isoline)
-# to generate iso-ξ lines through the Wachspress parametric domain.
+"""Generate iso-ξ cut lines for an N-gon panel via Wachspress boundary crossings."""
 function _generate_ngon_cuts(
     panel::WachspressPanel{N}, col_bands, n_cuts, n_pts,
 ) where {N}

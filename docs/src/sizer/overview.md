@@ -79,6 +79,67 @@ All unit quantities flow through Unitful.jl, so mixed-unit inputs are handled au
 GravityLoads(floor_LL = 2.4u"kPa", floor_SDL = 15.0psf)  # mixed units are fine
 ```
 
+## Units & Type Aliases
+
+StructuralSizer re-exports unit quantities from [Unitful.jl](https://github.com/PainterQubits/Unitful.jl) via [Asap](https://github.com/keithjlee/Asap.jl).
+
+### US Customary Units
+
+| Unit | Symbol | Definition | Usage |
+|------|--------|------------|-------|
+| `kip` | kip | 1000 lbf | Force |
+| `ksi` | ksi | 1000 psi | Pressure / stress |
+| `psf` | psf | lbf/ft² | Area load |
+| `ksf` | ksf | 1000 psf | Foundation bearing |
+| `pcf` | pcf | lb/ft³ | Density |
+
+### Type Aliases (Dimension-Based)
+
+| Alias | Dimension | Examples |
+|-------|-----------|----------|
+| `Length` | L | `m`, `ft`, `inch` |
+| `Area` | L² | `m²`, `ft²`, `inch²` |
+| `Volume` | L³ | `m³`, `ft³`, `inch³` |
+| `Pressure` | ML⁻¹T⁻² | `Pa`, `ksi`, `psf` |
+| `Force` | MLT⁻² | `N`, `kip`, `lbf` |
+| `Moment` | ML²T⁻² | `N·m`, `kip·ft` |
+| `LinearLoad` | MT⁻² | `N/m`, `kip/ft` |
+| `Density` | ML⁻³ | `kg/m³`, `pcf` |
+
+### Unit Conversion Helpers
+
+| Function | Description |
+|----------|-------------|
+| `to_ksi(x)` | Convert pressure to ksi |
+| `to_kip(x)` | Convert force to kip |
+| `to_kipft(x)` | Convert moment to kip·ft |
+| `to_inches(x)` | Convert length to inches |
+| `to_meters(x)` | Convert length to meters |
+| `to_pascals(x)` | Convert pressure to Pa |
+| `to_newtons(x)` | Convert force to N |
+
+### Unitful Best Practices
+
+```julia
+# Store with natural units, convert when needed
+span = 6.0u"m"
+fc   = 4000u"psi"
+stress = uconvert(u"MPa", fc)
+value  = ustrip(u"ksi", stress)  # Strip only at final boundary
+```
+
+!!! note "Exception"
+    Internal calculation functions may strip units at the boundary for optimizer
+    interfaces, numerical solvers, and performance-critical inner loops.
+
+### Physical & Design Constants
+
+| Constant | Value | Description |
+|----------|-------|-------------|
+| `GRAVITY` | 9.80665 m/s² | Standard gravity (from Asap) |
+| `DL_FACTOR` | 1.2 | ASCE 7 dead load factor |
+| `LL_FACTOR` | 1.6 | ASCE 7 live load factor |
+
 ## Dispatch Model
 
 Functions dispatch on section type + material type + design code. For example:
@@ -101,5 +162,5 @@ This pattern allows the same high-level API (`check_capacity`, `size_member!`) t
 ## Limitations & Future Work
 
 - **Timber**: Material type and NDS reference values are defined, but the NDS checker is minimal. Full NDS 2018 implementation is planned.
-- **Composite sections**: AISC 360 composite beam/column checks are in development.
+- **Composite beams**: AISC 360-16 Chapter I composite beam design is implemented (solid and deck slabs, full/partial composite, PNA solver, deflection, construction stage, stud detailing). Composite columns (I2) are not yet implemented.
 - **Seismic detailing**: Current code checks cover gravity/wind strength. Seismic detailing (ACI 318 Chapter 18) is not yet implemented.

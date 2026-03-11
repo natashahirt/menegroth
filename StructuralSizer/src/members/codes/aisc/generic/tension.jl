@@ -1,6 +1,14 @@
 # AISC 360 Chapter D - Design of Members for Tension
 
-"""Nominal tensile strength (D2). Considers Yielding and Rupture."""
+"""
+    get_Pn_tension(s::AbstractSection, mat::Metal; Ae_ratio=0.75) -> Force
+
+Nominal tensile strength per AISC 360-16 Section D2, considering:
+- D2-1: Tensile yielding on gross section (Pn = Fy × Ag)
+- D2-2: Tensile rupture on effective net section (Pn = Fu × Ae)
+
+`Ae_ratio` is a conservative placeholder for Ae/Ag (default 0.75).
+"""
 function get_Pn_tension(s::AbstractSection, mat::Metal; Ae_ratio=0.75)
     # D2-1: Tensile Yielding
     # Pn = Fy * Ag
@@ -19,7 +27,12 @@ function get_Pn_tension(s::AbstractSection, mat::Metal; Ae_ratio=0.75)
     return min(Pn_yield, Pn_rupture)
 end
 
-"""Design tensile strength (LRFD)."""
+"""
+    get_ϕPn_tension(s::AbstractSection, mat::Metal; Ae_ratio=0.75) -> Force
+
+Design tensile strength per AISC 360-16 (LRFD).
+ϕ_t = 0.90 for yielding (D2-1), ϕ_t = 0.75 for rupture (D2-2).
+"""
 function get_ϕPn_tension(s::AbstractSection, mat::Metal; Ae_ratio=0.75)
     # ϕ = 0.90 for yielding
     ϕ_yield = 0.90

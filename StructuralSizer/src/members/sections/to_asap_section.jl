@@ -42,6 +42,7 @@ function to_asap_section(sec::ISymmSection)
     to_asap_section(sec, mat)
 end
 
+"""Convert steel I-section with explicit `Metal` material to Asap.Section."""
 function to_asap_section(sec::ISymmSection, mat::Metal)
     Asap.Section(
         uconvert(u"m^2", sec.A),
@@ -61,6 +62,7 @@ function to_asap_section(sec::HSSRectSection)
     to_asap_section(sec, mat)
 end
 
+"""Convert HSS rectangular section with explicit `Metal` material to Asap.Section."""
 function to_asap_section(sec::HSSRectSection, mat::Metal)
     Asap.Section(
         uconvert(u"m^2", sec.A),
@@ -80,6 +82,7 @@ function to_asap_section(sec::HSSRoundSection)
     to_asap_section(sec, mat)
 end
 
+"""Convert HSS round/pipe section with explicit `Metal` material to Asap.Section."""
 function to_asap_section(sec::HSSRoundSection, mat::Metal)
     # Round sections: Ix = Iy = I, J = 2I
     Asap.Section(
@@ -309,11 +312,12 @@ function to_asap_section(sec::PixelFrameSection; I_factor::Real=0.70)
     Asap.Section(A_m2 * u"m^2", E, G, Ix_m4 * u"m^4", Iy_m4 * u"m^4", J_m4 * u"m^4", ρ)
 end
 
-# Overload with explicit material argument (for interface consistency)
+"""Overload accepting explicit `FiberReinforcedConcrete` material for interface consistency; delegates to the materialless method."""
 function to_asap_section(sec::PixelFrameSection, mat::FiberReinforcedConcrete; I_factor::Real=0.70)
     to_asap_section(sec; I_factor=I_factor)
 end
 
+"""Overload accepting any `AbstractMaterial` for interface consistency; delegates to the materialless method."""
 function to_asap_section(sec::PixelFrameSection, mat::AbstractMaterial; I_factor::Real=0.70)
     to_asap_section(sec; I_factor=I_factor)
 end

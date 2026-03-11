@@ -73,20 +73,19 @@ end
 # Restrained beam ratings:   1, 1.5, 2, 3 hr
 # =============================================================================
 
-# Breakpoint tables: (W/D, thickness_in) — from UL N643 pages 2–10
-# Unrestrained beams — 1 HR: all 0.074" for W/D < ~1.75, then 0.043"
+"""UL N643 breakpoints — unrestrained beams, 1 hr."""
 const _N643_UNRESTRAINED_1HR = [
     (0.67, 0.074), (1.75, 0.043), (8.0, 0.043)
 ]
 
-# Unrestrained — 1.5 HR
+"""UL N643 breakpoints — unrestrained beams, 1.5 hr."""
 const _N643_UNRESTRAINED_1_5HR = [
     (0.67, 0.117), (0.72, 0.110), (0.80, 0.100), (0.90, 0.091),
     (1.00, 0.081), (1.10, 0.075), (1.20, 0.069), (1.40, 0.059),
     (1.60, 0.053), (1.75, 0.043), (8.0, 0.043)
 ]
 
-# Unrestrained — 2 HR
+"""UL N643 breakpoints — unrestrained beams, 2 hr."""
 const _N643_UNRESTRAINED_2HR = [
     (0.76, 0.253), (0.80, 0.241), (0.90, 0.219), (1.00, 0.196),
     (1.10, 0.183), (1.20, 0.166), (1.40, 0.147), (1.60, 0.127),
@@ -94,14 +93,14 @@ const _N643_UNRESTRAINED_2HR = [
     (4.00, 0.052), (5.00, 0.043), (8.0, 0.043)
 ]
 
-# Restrained — 2 HR (all 0.074" for low W/D, drops to 0.043")
+"""UL N643 breakpoints — restrained beams, 2 hr."""
 const _N643_RESTRAINED_2HR = [
     (0.67, 0.102), (0.80, 0.092), (0.90, 0.086), (1.00, 0.079),
     (1.10, 0.076), (1.20, 0.068), (1.40, 0.059), (1.60, 0.053),
     (1.75, 0.043), (8.0, 0.043)
 ]
 
-# Restrained — 3 HR (from page 10: 0.139 plateau, no NR entries)
+"""UL N643 breakpoints — restrained beams, 3 hr."""
 const _N643_RESTRAINED_3HR = [
     (0.67, 0.139), (2.13, 0.139), (8.0, 0.139)
 ]
@@ -173,8 +172,14 @@ end
 
 Compute the required fire protection coating for a steel member.
 
+Dispatches on the `fp` type:
+- `NoFireProtection` → zero-thickness coating
+- `SFRM` → UL X772 equation
+- `IntumescentCoating` → UL N643 table lookup
+- `CustomCoating` → user-specified thickness and density
+
 # Arguments
-- `fp::FireProtection`: Fire protection type (SFRM, IntumescentCoating, etc.)
+- `fp::FireProtection`: Fire protection type
 - `fire_rating::Real`: Fire resistance rating in hours
 - `W_plf::Real`: Section weight in lb/ft
 - `perimeter_in::Real`: Heated perimeter in inches (PA for beams, PB for columns)
@@ -186,6 +191,7 @@ function compute_surface_coating(fp::NoFireProtection, fire_rating::Real, W_plf:
     return SurfaceCoating(0.0, 0.0, "None")
 end
 
+"""SFRM coating sized via UL X772 equation."""
 function compute_surface_coating(fp::SFRM, fire_rating::Real, W_plf::Real, perimeter_in::Real)
     fire_rating <= 0 && return SurfaceCoating(0.0, fp.density_pcf, "SFRM")
     W_D = W_plf / perimeter_in
@@ -193,6 +199,7 @@ function compute_surface_coating(fp::SFRM, fire_rating::Real, W_plf::Real, perim
     return SurfaceCoating(h, fp.density_pcf, "SFRM ($(Int(fp.density_pcf)) pcf)")
 end
 
+"""Intumescent coating sized via UL N643 table lookup."""
 function compute_surface_coating(fp::IntumescentCoating, fire_rating::Real, W_plf::Real, perimeter_in::Real)
     fire_rating <= 0 && return SurfaceCoating(0.0, fp.density_pcf, "Intumescent")
     W_D = W_plf / perimeter_in
@@ -200,6 +207,7 @@ function compute_surface_coating(fp::IntumescentCoating, fire_rating::Real, W_pl
     return SurfaceCoating(h, fp.density_pcf, "Intumescent ($(Int(fp.density_pcf)) pcf)")
 end
 
+"""Custom coating: use user-specified thickness and density directly."""
 function compute_surface_coating(fp::CustomCoating, fire_rating::Real, W_plf::Real, perimeter_in::Real)
     return SurfaceCoating(fp.thickness_in, fp.density_pcf, fp.name)
 end

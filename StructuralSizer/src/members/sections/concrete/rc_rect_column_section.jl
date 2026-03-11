@@ -28,7 +28,19 @@ struct RebarLocation{T<:Length, A<:Area}
     As::A   # Bar area
 end
 
-# Constructor with consistent units - converts to inches then Float64
+"""
+    RebarLocation(x::Length, y::Length, As::Area)
+
+Construct a `RebarLocation` with automatic unit conversion to inches (Float64).
+
+# Arguments
+- `x::Length`: Distance from left edge of section (converted to inches)
+- `y::Length`: Distance from bottom edge of section (converted to inches)
+- `As::Area`: Bar cross-sectional area (converted to in²)
+
+# Returns
+`RebarLocation{Float64}` with all values in inch-based units.
+"""
 function RebarLocation(x::Length, y::Length, As::Area)
     # Step 1: Convert to inches (ensure correct unit conversion)
     x_inch = uconvert(u"inch", x)

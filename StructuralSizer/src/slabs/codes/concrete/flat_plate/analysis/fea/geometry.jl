@@ -87,8 +87,7 @@ function _ensure_ccw_vis!(vis::Vector{Int}, skel)
     return vis
 end
 
-# Column section helper — delegates to the centralised `column_asap_section`
-# in `to_asap_section.jl` (single source of truth for Ig, J, I_factor).
+"""Build an Asap section for a column stub, delegating to `column_asap_section`."""
 _col_asap_sec(col, Ec, ν; I_factor=0.70) =
     column_asap_section(col.c1, col.c2, col_shape(col), Ec, ν; I_factor=I_factor)
 

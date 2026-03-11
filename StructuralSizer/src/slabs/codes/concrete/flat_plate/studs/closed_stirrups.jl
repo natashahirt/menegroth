@@ -21,7 +21,7 @@ using Unitful
 using Unitful: @u_str
 using Asap: Length, Pressure, Force, Moment, Area
 
-# Stirrup bar sizes commonly used for punching shear (ACI standard sizes)
+"""ACI standard bar sizes commonly used for closed stirrup punching shear reinforcement (#3, #4, #5)."""
 const STIRRUP_BAR_SIZES = [3, 4, 5]
 
 """

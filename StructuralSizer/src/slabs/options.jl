@@ -78,6 +78,7 @@ Base.@kwdef struct OneWayOptions <: AbstractFloorOptions
     support::SupportCondition = BOTH_ENDS_CONT
 end
 
+"""Return the canonical floor system symbol for `OneWayOptions`."""
 floor_symbol(::OneWayOptions) = :one_way
 
 """
@@ -204,10 +205,12 @@ struct FlatPlateOptions <: AbstractFloorOptions
     col_I_factor::Float64
 end
 
+"""Return the canonical floor system symbol for `FlatPlateOptions`."""
 floor_symbol(::FlatPlateOptions) = :flat_plate
 
 # ── Backward-compatible constructor: accept legacy `shear_studs` kwarg ──
 # Maps :never → :grow_columns, :if_needed → :reinforce_last, :always → :reinforce_first
+"""Map deprecated `shear_studs` symbols to current `punching_strategy` symbols."""
 function _shear_studs_to_strategy(s::Symbol)
     s === :never     && return :grow_columns
     s === :if_needed && return :reinforce_last
@@ -274,7 +277,7 @@ function FlatPlateOptions(;
     _build_flat_plate_options(; punching_strategy=punching_strategy, kw...)
 end
 
-# Backward-compat: .analysis_method and .shear_studs virtual properties
+"""Backward-compat property access: `.analysis_method` and `.shear_studs` virtual fields."""
 function Base.getproperty(opts::FlatPlateOptions, name::Symbol)
     if name === :analysis_method
         m = getfield(opts, :method)
@@ -392,12 +395,13 @@ Base.@kwdef struct FlatSlabOptions <: AbstractFloorOptions
     base::FlatPlateOptions = FlatPlateOptions()
 end
 
+"""Return the canonical floor system symbol for `FlatSlabOptions`."""
 floor_symbol(::FlatSlabOptions) = :flat_slab
 
 """Convert FlatSlabOptions to FlatPlateOptions for the shared pipeline."""
 as_flat_plate_options(opts::FlatSlabOptions) = opts.base
 
-# Property forwarding: allow opts.method instead of opts.base.method
+"""Property forwarding: transparently delegate non-drop-panel fields to `base`."""
 function Base.getproperty(opts::FlatSlabOptions, name::Symbol)
     if name in (:h_drop, :a_drop_ratio, :base)
         return getfield(opts, name)
@@ -539,6 +543,7 @@ Base.@kwdef struct VaultOptions <: AbstractFloorOptions
     material::Concrete = NWC_4000                # concrete for density, E, fc'
 end
 
+"""Return the canonical floor system symbol for `VaultOptions`."""
 floor_symbol(::VaultOptions) = :vault
 
 """Composite deck options (steel deck + concrete fill)."""
@@ -548,6 +553,7 @@ Base.@kwdef struct CompositeDeckOptions <: AbstractFloorOptions
     deck_profile::String = "2VLI"
 end
 
+"""Return the canonical floor system symbol for `CompositeDeckOptions`."""
 floor_symbol(::CompositeDeckOptions) = :composite_deck
 
 """Timber panel options (CLT, DLT, NLT)."""
@@ -555,6 +561,7 @@ Base.@kwdef struct TimberOptions <: AbstractFloorOptions
     timber_material::Union{AbstractMaterial, Nothing} = nothing  # Uses primary if nothing
 end
 
+"""Return the canonical floor system symbol for `TimberOptions`."""
 floor_symbol(::TimberOptions) = :clt  # default timber type
 
 # =============================================================================
@@ -611,29 +618,32 @@ function result_materials end
 
 # ─── RC floor results dispatch on options type ───
 
-# FlatPlateOptions covers flat_plate, two_way, waffle, pt_banded
+"""Return concrete + rebar materials for a CIP slab result with flat plate options."""
 function result_materials(::CIPSlabResult, primary_mat, opts::FlatPlateOptions)
     Dict{Symbol, AbstractMaterial}(:concrete => opts.material.concrete, :steel => opts.material.rebar)
 end
 
+"""Return concrete + rebar materials for a panel-level flat plate result."""
 function result_materials(::FlatPlatePanelResult, primary_mat, opts::FlatPlateOptions)
     Dict{Symbol, AbstractMaterial}(:concrete => opts.material.concrete, :steel => opts.material.rebar)
 end
 
-# FlatSlabOptions delegates to base FlatPlateOptions
+"""Delegate flat slab CIP result materials to the base `FlatPlateOptions`."""
 result_materials(r::CIPSlabResult, pm, opts::FlatSlabOptions) = result_materials(r, pm, opts.base)
+
+"""Delegate flat slab panel result materials to the base `FlatPlateOptions`."""
 result_materials(r::FlatPlatePanelResult, pm, opts::FlatSlabOptions) = result_materials(r, pm, opts.base)
 
-# OneWayOptions
+"""Return concrete + rebar materials for a one-way CIP slab result."""
 function result_materials(::CIPSlabResult, primary_mat, opts::OneWayOptions)
     Dict{Symbol, AbstractMaterial}(:concrete => opts.material.concrete, :steel => opts.material.rebar)
 end
 
-# VaultOptions
+"""Return concrete material for a vault result (unreinforced)."""
 result_materials(::VaultResult, primary_mat, opts::VaultOptions) =
     Dict{Symbol, AbstractMaterial}(:concrete => opts.material)
 
-# CompositeDeckOptions
+"""Return steel + concrete materials for a composite deck result."""
 function result_materials(::CompositeDeckResult, primary_mat, opts::CompositeDeckOptions)
     Dict{Symbol, AbstractMaterial}(
         :steel => opts.deck_material,
@@ -641,23 +651,26 @@ function result_materials(::CompositeDeckResult, primary_mat, opts::CompositeDec
     )
 end
 
+"""Return steel material for a joist deck result (no concrete fill)."""
 result_materials(::JoistDeckResult, primary_mat, opts::CompositeDeckOptions) =
     Dict{Symbol, AbstractMaterial}(:steel => opts.deck_material)
 
-# TimberOptions
+"""Return timber material for a timber panel result (CLT/DLT/NLT)."""
 result_materials(::TimberPanelResult, primary_mat, opts::TimberOptions) =
     Dict{Symbol, AbstractMaterial}(:timber => something(opts.timber_material, primary_mat))
 
+"""Return timber material for a timber joist result."""
 result_materials(::TimberJoistResult, primary_mat, opts::TimberOptions) =
     Dict{Symbol, AbstractMaterial}(:timber => something(opts.timber_material, primary_mat))
 
-# Simple fallbacks (ProfileResult, ShapedSlabResult, etc.)
+"""Return concrete material for a profile-based slab result (fallback)."""
 result_materials(::ProfileResult, primary_mat, ::AbstractFloorOptions) =
     Dict{Symbol, AbstractMaterial}(:concrete => primary_mat)
 
+"""Return concrete material for a shaped slab result (fallback)."""
 result_materials(::ShapedSlabResult, primary_mat, ::AbstractFloorOptions) =
     Dict{Symbol, AbstractMaterial}(:concrete => primary_mat)
 
-# Generic fallback for any result × any options
+"""Generic fallback: assume concrete as the primary material."""
 result_materials(::AbstractFloorResult, primary_mat, ::AbstractFloorOptions) =
     Dict{Symbol, AbstractMaterial}(:concrete => primary_mat)

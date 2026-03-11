@@ -327,6 +327,7 @@ end
 # Display
 # ==============================================================================
 
+"""Pretty-print an `RCCircularSection` showing diameter, bar count, steel area, ρg, and confinement type."""
 function Base.show(io::IO, s::RCCircularSection)
     D_val = round(ustrip(s.D), digits=2)
     As_val = round(ustrip(s.As_total), digits=2)

@@ -23,11 +23,7 @@ No public types are defined here.  The `SurfaceCoating` type and
 
 ## Functions
 
-```@docs
-sfrm_thickness_x772
-intumescent_thickness_n643
-compute_surface_coating
-```
+The fire protection functions (`sfrm_thickness_x772`, `intumescent_thickness_n643`, `compute_surface_coating`) are documented on the [Fire Protection](../materials/fire_protection.md) materials page.
 
 ## Implementation Details
 

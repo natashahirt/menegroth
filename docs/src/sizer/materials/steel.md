@@ -70,8 +70,9 @@ Metal
 
 ```@docs
 material_name
-register_material!
 ```
+
+`register_material!(name, mat)` — registers a material instance in the global name registry. Used internally by preset constructors.
 
 ## Implementation Details
 

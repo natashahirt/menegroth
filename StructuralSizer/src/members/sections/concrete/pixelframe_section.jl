@@ -75,6 +75,29 @@ struct PixelFrameSection{T<:Length, A<:Area, P<:Pressure, M<:FiberReinforcedConc
     section::CompoundSection  # polygon geometry (computed)
 end
 
+"""
+    PixelFrameSection(; L_px, t, L_c, material, A_s, f_pe, d_ps, λ=:Y, name=nothing)
+
+Keyword constructor for [`PixelFrameSection`](@ref).
+
+Promotes all length arguments to a common type, builds the polygon
+`CompoundSection` via [`make_pixelframe_section`](@ref), and returns a
+fully-initialised section.
+
+# Arguments
+- `L_px::Length`: Pixel arm length
+- `t::Length`: Wall thickness
+- `L_c::Length`: Straight region before arc
+- `material::FiberReinforcedConcrete`: FRC material (fc′, fR1, fR3, dosage)
+- `A_s::Area`: Post-tensioning tendon area
+- `f_pe::Pressure`: Initial effective prestress
+- `d_ps::Length`: Tendon eccentricity from section centroid
+- `λ::Symbol`: Layup type — `:Y`, `:X2`, or `:X4` (default `:Y`)
+- `name::Union{String, Nothing}`: Optional section designation
+
+# Returns
+`PixelFrameSection` with computed polygon geometry.
+"""
 function PixelFrameSection(;
     L_px::Length, t::Length, L_c::Length,
     material::FiberReinforcedConcrete,
@@ -146,6 +169,7 @@ end
 # Display
 # ==============================================================================
 
+"""Pretty-print a `PixelFrameSection` as `Name[λ](L×t×Lc, fc′, A)`."""
 function Base.show(io::IO, s::PixelFrameSection)
     nm = something(s.name, "PixelFrame")
     L = round(u"mm", s.L_px; digits=0)

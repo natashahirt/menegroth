@@ -29,7 +29,7 @@ behavior.
 See `CLT`, `DLT`, `NLT`,
 `MassTimberJoist`, `AbstractTimberFloor`,
 `TimberPanelResult`, and `TimberJoistResult` in
-[Slab Types & Options](../../types.md).
+[Slab Types & Options](../types.md).
 
 ## Functions
 
@@ -66,7 +66,7 @@ deck type, and total system depth.
 
 ## Options & Configuration
 
-See `TimberOptions` in [Slab Types & Options](../../types.md).
+See `TimberOptions` in [Slab Types & Options](../types.md).
 
 Common parameters:
 

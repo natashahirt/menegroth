@@ -44,7 +44,31 @@ Extrados height at position x (intrados + shell thickness).
 extrados(x, span, rise, thickness) = intrados(x, span, rise) + thickness
 
 """
-Calculate geometric properties (volumes, areas) for a vault.
+    get_vault_properties(span, rise, thickness, trib_depth, rib_depth, rib_apex_rise)
+
+Calculate geometric properties (volumes, areas) for a parabolic vault cross-section.
+
+All inputs are dimensionless (pre-stripped to consistent length units). The returned
+values share those same implied length units.
+
+# Arguments
+- `span::Real`: Clear span (chord length).
+- `rise::Real`: Rise at crown.
+- `thickness::Real`: Shell thickness.
+- `trib_depth::Real`: Tributary depth / rib spacing.
+- `rib_depth::Real`: Rib width in the span direction (0 for no ribs).
+- `rib_apex_rise::Real`: Additional rib height above extrados at apex (0 for no ribs).
+
+# Returns
+Named tuple with fields:
+- `arc_length`: Parabolic arc length of the intrados.
+- `shell_cs_area`: Shell cross-sectional area (thickness × span approximation).
+- `shell_vol`: Shell volume (shell_cs_area × trib_depth).
+- `rib_cs_area`: Rib cross-sectional area (0 if no ribs).
+- `rib_vol`: Rib volume (rib_cs_area × rib_depth).
+- `total_vol`: Total material volume (shell + ribs).
+
+Reference: Haile's method for unreinforced parabolic vault geometry.
 """
 function get_vault_properties(
     span::Real,
@@ -83,12 +107,23 @@ function get_vault_properties(
 end
 
 """
+    vault_volume_per_area(span, rise, thickness, trib_depth, rib_depth, rib_apex_rise)
+
 Calculate material volume per unit plan area for a vault.
 
 Accounts for curved shell geometry (arc length > span) and ribs.
+All inputs are dimensionless (pre-stripped to consistent length units).
+
+# Arguments
+- `span::Real`: Clear span (chord length).
+- `rise::Real`: Rise at crown.
+- `thickness::Real`: Shell thickness.
+- `trib_depth::Real`: Tributary depth / rib spacing.
+- `rib_depth::Real`: Rib width in the span direction (0 for no ribs).
+- `rib_apex_rise::Real`: Additional rib height above extrados at apex (0 for no ribs).
 
 # Returns
-Volume per plan area [m³/m²]
+- `Real`: Volume per plan area [length³/length² = length].
 """
 function vault_volume_per_area(
     span::Real,

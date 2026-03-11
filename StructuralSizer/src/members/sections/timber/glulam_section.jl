@@ -41,7 +41,21 @@ struct GlulamSection <: AbstractSection
     Sy::SectionModulus
 end
 
-# Stub constructor
+"""
+    GlulamSection(b, d; name=nothing, stress_class="24F-V4")
+
+Construct a `GlulamSection` from width `b` and depth `d`, computing gross
+rectangular section properties (A, Ix, Iy, Sx, Sy).
+
+# Arguments
+- `b`: Section width (Length).
+- `d`: Section depth (Length).
+- `name`: Optional section designation string.
+- `stress_class`: AITC stress class (default `"24F-V4"`).
+
+# Returns
+A `GlulamSection` with computed gross section properties per NDS.
+"""
 function GlulamSection(b, d; name=nothing, stress_class="24F-V4")
     A = b * d
     Ix = b * d^3 / 12
@@ -51,13 +65,25 @@ function GlulamSection(b, d; name=nothing, stress_class="24F-V4")
     GlulamSection(name, b, d, stress_class, A, Ix, Iy, Sx, Sy)
 end
 
-# Interface
+"""Return gross cross-sectional area of the glulam section."""
 section_area(s::GlulamSection) = s.A
+
+"""Return section depth (parallel to strong axis)."""
 section_depth(s::GlulamSection) = s.d
+
+"""Return section width (parallel to weak axis)."""
 section_width(s::GlulamSection) = s.b
+
+"""Return strong-axis moment of inertia."""
 Ix(s::GlulamSection) = s.Ix
+
+"""Return weak-axis moment of inertia."""
 Iy(s::GlulamSection) = s.Iy
+
+"""Return strong-axis section modulus."""
 Sx(s::GlulamSection) = s.Sx
+
+"""Return weak-axis section modulus."""
 Sy(s::GlulamSection) = s.Sy
 
 """

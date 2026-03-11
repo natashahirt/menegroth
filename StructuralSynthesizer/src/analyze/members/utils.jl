@@ -1885,7 +1885,7 @@ function _size_columns_impl!(
     return struc
 end
 
-# Helper: add gravity loads
+"""Add self-weight `GravityLoad`s to ASAP elements in the given edge group."""
 function _add_gravity_loads!(struc, edge_ids_in_group, gravity_factor)
     existing_gravity_ids = Set{UInt}()
     for load in struc.asap_model.loads

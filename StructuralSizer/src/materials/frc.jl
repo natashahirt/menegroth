@@ -86,6 +86,7 @@ end
 # Fallback display name
 # ==============================================================================
 
+"""Generate a display name for an FRC material when no explicit name is provided."""
 function _fallback_material_name(mat::FiberReinforcedConcrete)
     conc = material_name(mat.concrete)
     dosage = round(Int, mat.fiber_dosage)

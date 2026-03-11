@@ -97,14 +97,17 @@ end
 # AbstractNLPProblem Interface: Core
 # ==============================================================================
 
+"""Number of design variables: b, h, ρg."""
 n_variables(::RCColumnNLPProblem) = 3
 
+"""Variable bounds for RC column NLP: [b_min, b_min, 0.01] to [b_max, b_max, ρ_max]."""
 function variable_bounds(p::RCColumnNLPProblem)
     lb = [p.b_min, p.b_min, 0.01]   # ACI min ρ = 0.01
     ub = [p.b_max, p.b_max, p.opts.ρ_max]  # Practical ρ limit (default 0.06)
     return (lb, ub)
 end
 
+"""Initial guess from simplified axial capacity: start square at midrange ρ."""
 function initial_guess(p::RCColumnNLPProblem)
     # Estimate from simplified axial capacity: Ag ≈ Pu / (0.40 × f'c)
     Ag_est = p.Pu_kip / (0.40 * p.mat.fc)
@@ -113,12 +116,14 @@ function initial_guess(p::RCColumnNLPProblem)
     return [c0, c0, 0.04]  # Start square at midrange reinforcement
 end
 
+"""Human-readable variable names for solver output."""
 variable_names(::RCColumnNLPProblem) = ["b (in)", "h (in)", "ρg"]
 
 # ==============================================================================
 # AbstractNLPProblem Interface: Objective
 # ==============================================================================
 
+"""Objective function: gross area with ρ weighting per objective type (ACI 318)."""
 function objective_fn(p::RCColumnNLPProblem, x::Vector{Float64})
     b, h, ρ = x
     Ag = b * h  # Gross area (sq in)
@@ -176,11 +181,13 @@ end
 # AbstractNLPProblem Interface: Constraints
 # ==============================================================================
 
+"""Number of constraints: 1 (P-Mx) or 2 (+ biaxial Bresler) if Muy > 0."""
 function n_constraints(p::RCColumnNLPProblem)
     # 1 constraint for P-Mx, +1 for biaxial if Muy > 0
     return p.Muy_kipft > 1e-6 ? 2 : 1
 end
 
+"""Human-readable constraint names for solver diagnostics."""
 function constraint_names(p::RCColumnNLPProblem)
     if p.Muy_kipft > 1e-6
         return ["P-Mx utilization", "biaxial utilization"]
@@ -189,6 +196,7 @@ function constraint_names(p::RCColumnNLPProblem)
     end
 end
 
+"""Constraint bounds: all utilizations ≤ 1.0, no lower bound."""
 function constraint_bounds(p::RCColumnNLPProblem)
     nc = n_constraints(p)
     lb = fill(-Inf, nc)   # No lower bound
@@ -196,6 +204,12 @@ function constraint_bounds(p::RCColumnNLPProblem)
     return (lb, ub)
 end
 
+"""
+    constraint_fns(p::RCColumnNLPProblem, x) -> Vector{Float64}
+
+Evaluate smooth ACI 318 P-M constraint utilizations for RC column.
+Includes optional slenderness magnification and Bresler biaxial interaction.
+"""
 function constraint_fns(p::RCColumnNLPProblem, x::Vector{Float64})
     b, h, ρ = x
 
@@ -481,14 +495,17 @@ end
 # AbstractNLPProblem Interface: Core
 # ==============================================================================
 
+"""Number of design variables: B, H, t."""
 n_variables(::HSSColumnNLPProblem) = 3
 
+"""Variable bounds for HSS column NLP: [B_min, B_min, t_min] to [B_max, B_max, t_max]."""
 function variable_bounds(p::HSSColumnNLPProblem)
     lb = [p.B_min, p.B_min, p.t_min]
     ub = [p.B_max, p.B_max, p.t_max]
     return (lb, ub)
 end
 
+"""Initial guess from axial capacity estimate; starts square."""
 function initial_guess(p::HSSColumnNLPProblem)
     # Estimate based on axial capacity: A ≈ Pu / (0.5 × Fy)
     A_est = p.Pu_kip / (0.5 * p.Fy_ksi)  # sq in
@@ -502,12 +519,14 @@ function initial_guess(p::HSSColumnNLPProblem)
     return [B_guess, B_guess, t_guess]  # Start square
 end
 
+"""Human-readable variable names for solver output."""
 variable_names(::HSSColumnNLPProblem) = ["B (in)", "H (in)", "t (in)"]
 
 # ==============================================================================
 # AbstractNLPProblem Interface: Objective
 # ==============================================================================
 
+"""Objective function: HSS cross-sectional area with optional aspect penalty."""
 function objective_fn(p::HSSColumnNLPProblem, x::Vector{Float64})
     B, H, t = x
     
@@ -537,19 +556,29 @@ end
 # AbstractNLPProblem Interface: Constraints
 # ==============================================================================
 
+"""Number of constraints: AISC H1-1 interaction + b/t fabrication limit."""
 function n_constraints(p::HSSColumnNLPProblem)
     # H1-1 P-M interaction + b/t ratio constraint
     return 2
 end
 
+"""Human-readable constraint names for solver diagnostics."""
 function constraint_names(p::HSSColumnNLPProblem)
     return ["H1-1 P-M interaction", "min b/t ratio"]
 end
 
+"""Constraint bounds: all utilizations ≤ 1.0, no lower bound."""
 function constraint_bounds(p::HSSColumnNLPProblem)
     return ([-Inf, -Inf], [1.0, 1.0])
 end
 
+"""
+    constraint_fns(p::HSSColumnNLPProblem, x) -> Vector{Float64}
+
+Evaluate smooth AISC 360 constraint utilizations for HSS column at design point `x`.
+Includes E1/E7 compression (with slender-element reduction), F7 flexure
+(noncompact/slender web and flange), H1-1a/b P-M interaction, and b/t fabrication limit.
+"""
 function constraint_fns(p::HSSColumnNLPProblem, x::Vector{Float64})
     B, H, t = x
     k = p.opts.smooth_k
@@ -971,14 +1000,17 @@ end
 # AbstractNLPProblem Interface: Core
 # ==============================================================================
 
+"""Number of design variables: d, bf, tf, tw."""
 n_variables(::WColumnNLPProblem) = 4
 
+"""Variable bounds for W column NLP: depth, flange width, flange/web thickness."""
 function variable_bounds(p::WColumnNLPProblem)
     lb = [p.d_min, p.bf_min, p.tf_min, p.tw_min]
     ub = [p.d_max, p.bf_max, p.tf_max, p.tw_max]
     return (lb, ub)
 end
 
+"""Initial guess from axial capacity estimate with typical W proportions."""
 function initial_guess(p::WColumnNLPProblem)
     # Estimate based on axial capacity: A ≈ Pu / (0.5 × Fy)
     A_est = p.Pu_kip / (0.5 * p.Fy_ksi)  # sq in
@@ -998,12 +1030,14 @@ function initial_guess(p::WColumnNLPProblem)
     return [d_guess, bf_guess, tf_guess, tw_guess]
 end
 
+"""Human-readable variable names for solver output."""
 variable_names(::WColumnNLPProblem) = ["d (in)", "bf (in)", "tf (in)", "tw (in)"]
 
 # ==============================================================================
 # AbstractNLPProblem Interface: Objective
 # ==============================================================================
 
+"""Objective function: W section cross-sectional area (minimize weight)."""
 function objective_fn(p::WColumnNLPProblem, x::Vector{Float64})
     d, bf, tf, tw = x
     # Cross-sectional area (minimize weight)
@@ -1024,6 +1058,7 @@ end
 # AbstractNLPProblem Interface: Constraints
 # ==============================================================================
 
+"""Number of constraints: 4 base + optional flange compactness."""
 function n_constraints(p::WColumnNLPProblem)
     nc = 4  # H1-1 interaction, bf/d ratio, tf/tw ratio, web h/tw
     # Add flange compactness if required
@@ -1033,6 +1068,7 @@ function n_constraints(p::WColumnNLPProblem)
     return nc
 end
 
+"""Human-readable constraint names for solver diagnostics."""
 function constraint_names(p::WColumnNLPProblem)
     names = ["H1-1 P-M interaction", "bf/d ratio", "tf/tw ratio", "web slenderness"]
     if p.opts.require_compact
@@ -1041,6 +1077,7 @@ function constraint_names(p::WColumnNLPProblem)
     return names
 end
 
+"""Constraint bounds: all utilizations ≤ 1.0, no lower bound."""
 function constraint_bounds(p::WColumnNLPProblem)
     nc = n_constraints(p)
     lb = fill(-Inf, nc)
@@ -1048,6 +1085,13 @@ function constraint_bounds(p::WColumnNLPProblem)
     return (lb, ub)
 end
 
+"""
+    constraint_fns(p::WColumnNLPProblem, x) -> Vector{Float64}
+
+Evaluate smooth AISC 360 constraint utilizations for W column at design point `x`.
+Includes E1/E7 compression with LTB flexure (F2), H1-1a/b P-M interaction,
+bf/d and tf/tw proportioning, web slenderness, and optional flange compactness.
+"""
 function constraint_fns(p::WColumnNLPProblem, x::Vector{Float64})
     d, bf, tf, tw = x
     k = p.opts.smooth_k

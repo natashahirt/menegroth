@@ -16,8 +16,11 @@
 #
 # =============================================================================
 
-# ─── Load Combinations (ASCE 7 §2.3.1) ──────────────────────────────────────
-# Each combo is (α_D, α_L) such that M = α_D × M_D + α_L × M_L.
+"""
+ASCE 7 §2.3.1 factored load combinations as `(α_D, α_L)` tuples.
+
+`M = α_D × M_D + α_L × M_L` for each combination.
+"""
 const _LOAD_COMBOS = (
     (1.2, 1.6),   # 1.2D + 1.6L  (ASCE 7 §2.3.1 combo 2)
     (1.4, 0.0),   # 1.4D         (ASCE 7 §2.3.1 combo 1)

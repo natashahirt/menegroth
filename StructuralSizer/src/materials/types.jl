@@ -65,7 +65,7 @@ Parametric metal type supporting different steel categories via type tags.
 - `ρ`: Density
 - `ν`: Poisson's ratio
 - `ecc`: Embodied carbon [kgCO₂e/kg]
-- `cost`: Unit cost [\$/kg] (NaN if not set; required for MinCost optimization)
+- `cost`: Unit cost [USD/kg] (NaN if not set; required for MinCost optimization)
 """
 struct Metal{K<:MetalType, T_P, T_D} <: AbstractMaterial
     E::T_P      # Young's modulus
@@ -118,7 +118,7 @@ Concrete material with compressive strength.
 - `ν`: Poisson's ratio
 - `εcu`: Ultimate compressive strain (default 0.003 per ACI 318)
 - `ecc`: Embodied carbon [kgCO₂e/kg]
-- `cost`: Unit cost [\$/kg] (NaN if not set; required for MinCost optimization)
+- `cost`: Unit cost [USD/kg] (NaN if not set; required for MinCost optimization)
 - `λ`: Lightweight concrete factor (1.0 for NWC, 0.75–0.85 for LWC per ACI 318-11 §8.6.1)
 - `aggregate_type`: Aggregate classification for fire resistance (default `siliceous`)
 

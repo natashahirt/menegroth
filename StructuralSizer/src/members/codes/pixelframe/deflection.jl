@@ -663,6 +663,7 @@ function _pf_ng_tan_deflection(s::PixelFrameSection, props, moment::Real,
     end
 end
 
+"""Ng & Tan regime dispatcher for single midspan point loading."""
 function _pf_ng_tan_deflection(s::PixelFrameSection, props, moment::Real,
                                 method::PFSinglePointLoad)
     (; Mcr, Mecl, My) = props
@@ -992,6 +993,7 @@ end
 
 # -- Simplified (existing behavior) --
 
+"""Simplified deflection dispatch: uniform load → modified Branson Ie → Δ = coeff × w × L⁴ / (Ec × Ie)."""
 function _pf_deflection_dispatch(s::PixelFrameSection, L, w_service, ::PFSimplified;
                                   E_s, f_py, support)
     L_mm = ustrip(u"mm", L)
@@ -1018,6 +1020,7 @@ end
 
 # -- Ng & Tan (ThirdPointLoad / SinglePointLoad) --
 
+"""Ng & Tan deflection dispatch: moment input → full iterative model with regime classification."""
 function _pf_deflection_dispatch(s::PixelFrameSection, L, Ma_moment,
                                   method::Union{PFThirdPointLoad, PFSinglePointLoad};
                                   E_s, f_py, support)
@@ -1084,6 +1087,7 @@ end
 
 # -- Simplified --
 
+"""Simplified serviceability check dispatch using uniform load deflection formula."""
 function _pf_check_dispatch(s, L, w_dead, w_live, ::PFSimplified;
                              E_s, f_py, support, limit_ll, limit_total, ξ)
     result_D = pf_deflection(s, L, w_dead; method=PFSimplified(), E_s, support)
@@ -1123,6 +1127,7 @@ end
 
 # -- Ng & Tan --
 
+"""Ng & Tan serviceability check dispatch converting uniform loads to equivalent midspan moments."""
 function _pf_check_dispatch(s, L, w_dead, w_live,
                              method::Union{PFThirdPointLoad, PFSinglePointLoad};
                              E_s, f_py, support, limit_ll, limit_total, ξ)

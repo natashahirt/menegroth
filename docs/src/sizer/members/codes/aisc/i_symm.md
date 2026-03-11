@@ -11,19 +11,58 @@
 
 ## Overview
 
-This module implements AISC 360-16 capacity checks for doubly-symmetric I-shapes (W, S, M, HP sections). It covers flexure (Chapter F), compression (Chapter E), shear (Chapter G), torsion (AISC Design Guide 9), P-M interaction (Chapter H), slenderness classification (Table B4.1), and moment amplification (Appendix 8).
+This module implements AISC 360-16 capacity checks for doubly-symmetric I-shapes (W, S, M, HP sections). It covers compression (Chapter E), flexure (Chapter F), shear (Chapter G), torsion (AISC Design Guide 9), tension (Chapter D), P-M interaction (Chapter H), slenderness classification (Table B4.1), moment amplification (Appendix 8 B1/B2), and **composite beam design (Chapter I)**.
 
-The `AISCChecker` type dispatches capacity calculations based on section type. For `ISymmSection`, the functions in this module are called.
+The `AISCChecker` type dispatches capacity calculations based on section type. For `ISymmSection`, the functions in this module are called. See also:
+- [Generic Provisions](generic.md) — tension, interaction, moment amplification (all section types)
+- [HSS Rectangular](hss_rect.md) / [HSS Round](hss_round.md) — hollow sections
+- [Fire](fire.md) — fire protection sizing
 
 Source: `StructuralSizer/src/members/codes/aisc/i_symm/*.jl`
 
-## Key Types
+## Design Philosophy
 
-```@docs
-AISCChecker
+- **LRFD only** — ASD (Ω factors) not implemented
+- **US/SI units via Unitful** — functions accept any consistent unit; conversions are automatic
+- **Member-level design** — no system-level checks (diaphragm, stability bracing)
+- **Catalog-based optimization** — sections must come from predefined catalogs
+
+## Units & Input Flexibility
+
+The API accepts **any Unitful quantity** — conversions happen internally:
+
+```julia
+using StructuralSizer: kip  # Asap custom unit
+
+# All equivalent — units converted internally to SI (N, N·m)
+size_columns([500u"kN"], [100u"kN*m"], geoms, SteelColumnOptions())
+size_columns([112.4kip], [73.76kip*u"ft"], geoms, SteelColumnOptions())
+size_columns([500e3], [100.0], geoms, SteelColumnOptions())  # Raw Float64 assumed N, N·m
 ```
 
-`AISCChecker <: AbstractCapacityChecker` carries LRFD resistance factors and design preferences:
+Unit helpers: `to_newtons(x)`, `to_newton_meters(x)` for SI; `to_kip(x)`, `to_kipft(x)` for US customary. Raw `Real` values pass through as-is (assumed correct units).
+
+## Quick Start
+
+```julia
+using StructuralSizer
+using Unitful
+
+section = W("W14X22")
+material = A992_Steel
+
+ϕPn = get_ϕPn(section, material, 12u"ft"; axis=:weak)      # Compression (Ch. E)
+ϕMn = get_ϕMn(section, material; Lb=12u"ft", Cb=1.0)       # Flexure (Ch. F)
+ϕVn = get_ϕVn(section, material; axis=:strong)              # Shear (Ch. G)
+ϕPn_t = get_ϕPn_tension(section, material)                  # Tension (Ch. D)
+
+ratio = check_PMxMy_interaction(Pu, Mux, Muy, ϕPn, ϕMnx, ϕMny)
+# ratio ≤ 1.0 → OK
+```
+
+## Key Types
+
+`AISCChecker <: AbstractCapacityChecker` carries LRFD resistance factors and design preferences. See [AISC — HSS Rect](hss_rect.md) for the `@docs` entry.
 
 | Field | Default | Description |
 |:------|:--------|:------------|
@@ -39,15 +78,9 @@ AISCChecker
 
 ### Flexure (AISC §F2, §F3, §F6)
 
-```@docs
-get_ϕMn
-```
+`get_ϕMn` and `get_Mn` dispatch on `ISymmSection` for W-shape-specific flexure. See [AISC — HSS Rect](hss_rect.md) for the generic `@docs` entry.
 
 `get_ϕMn(s::ISymmSection, mat; Lb, Cb=1.0, axis=:strong, ϕ=0.9)` — returns the design flexural strength.
-
-```@docs
-get_Mn
-```
 
 `get_Mn(s::ISymmSection, mat; Lb, Cb=1.0, axis=:strong)` — returns the nominal flexural strength. For strong-axis bending, this is the minimum of:
 
@@ -75,15 +108,9 @@ get_Fcr_LTB
 
 ### Compression (AISC §E3, §E4, §E7)
 
-```@docs
-get_ϕPn
-```
+`get_ϕPn` and `get_Pn` dispatch on `ISymmSection` for W-shape-specific compression. See [AISC — HSS Rect](hss_rect.md) for the generic `@docs` entry.
 
 `get_ϕPn(s::ISymmSection, mat, L; axis=:weak, ϕ=0.90)` — design compressive strength.
-
-```@docs
-get_Pn
-```
 
 `get_Pn(s::ISymmSection, mat, L; axis=:weak)` — nominal compressive strength. Considers:
 - Flexural buckling (E3) about the governing axis
@@ -94,31 +121,17 @@ Critical stress per E3-2/E3-3:
 - `Fy/Fe ≤ 2.25`: `Fcr = 0.658^(Fy/Fe) × Fy`
 - `Fy/Fe > 2.25`: `Fcr = 0.877 × Fe`
 
-```@docs
-get_Fe_flexural
-```
-
 `get_Fe_flexural(s, mat, L; axis)` — Euler buckling stress (E3-4): `Fe = π²E / (KL/r)²`
-
-```@docs
-get_Fe_torsional
-```
 
 `get_Fe_torsional(s, mat, Lz)` — torsional/flexural-torsional buckling stress (E4-4).
 
 ### Shear (AISC §G2)
 
-```@docs
-get_ϕVn
-```
+`get_ϕVn` and `get_Vn` dispatch on `ISymmSection` for W-shape-specific shear. See [AISC — HSS Rect](hss_rect.md) for the generic `@docs` entry.
 
 `get_ϕVn(s::ISymmSection, mat; axis=:strong, ϕ=nothing)` — design shear strength. Default `ϕ = 1.0` for rolled shapes per G2.1(a).
 
-```@docs
-get_Vn
-```
-
-`get_Vn(s::ISymmSection, mat; axis=:strong)` — nominal shear strength: `Vn = 0.6 Fy Aw Cv1` (G2-1).
+`get_Vn(s::ISymmSection, mat; axis=:strong)` — nominal shear strength: `Vn = 0.6 Fy Aw Cv1` (G2-1), where `Aw = d × tw` (full-depth web area per AISC §G2.1).
 
 ```@docs
 get_Cv1
@@ -148,17 +161,11 @@ check_torsion_yielding
 
 ### Slenderness Classification (Table B4.1)
 
-```@docs
-get_slenderness
-```
+`get_slenderness` dispatches on `ISymmSection` for W-shape slenderness classification. See [AISC — HSS Rect](hss_rect.md) for the generic `@docs` entry.
 
 `get_slenderness(s::ISymmSection, mat)` — classifies flange and web as compact, noncompact, or slender for flexure per Table B4.1b. Returns slenderness ratios and limit values:
 - Flange (Case 10): `λp = 0.38√(E/Fy)`, `λr = 1.0√(E/Fy)`
 - Web (Case 15): `λp = 3.76√(E/Fy)`, `λr = 5.70√(E/Fy)`
-
-```@docs
-get_compression_factors
-```
 
 `get_compression_factors(s, mat)` — computes the Q factor (Qs × Qa) for compression per Table B4.1a / §E7.
 
@@ -198,9 +205,168 @@ checker = AISCChecker(ϕ_b=0.9, ϕ_c=0.9, ϕ_v=1.0, deflection_limit=360.0, max_
 
 Set `deflection_limit` to `nothing` to skip deflection checks. The `prefer_penalty` multiplies the objective coefficient for non-preferred sections (> 1.0 penalizes them in optimization).
 
-## Limitations & Future Work
+## Chapter I — Composite Members (Beams)
 
-- Singly-symmetric I-shapes (channels, WT) are not supported — only doubly-symmetric.
-- Web local buckling under flexure (§F4/F5 for noncompact/slender webs) is not implemented for the general case.
-- Built-up I-sections with different `ϕ_v` are not distinguished from rolled shapes.
-- No composite beam design (AISC §I).
+Composite slab-on-beam design with full and partial composite action per Chapter I.
+
+```julia
+using StructuralSizer
+
+section = W("W21X55")
+material = A992_Steel
+
+# Define slab (solid slab, 7.5 in. thick, 4 ksi concrete)
+slab = SolidSlabOnBeam(
+    7.5u"inch", 4.0u"ksi", 3644.0u"ksi", 145.0u"lb/ft^3", 29000.0u"ksi",
+    10.0u"ft", 10.0u"ft"  # beam spacing left/right
+)
+
+# Headed stud anchor (¾ in. × 5 in., Fu = 65 ksi)
+anchor = HeadedStudAnchor(0.75u"inch", 5.0u"inch", 65.0u"ksi", 50.0u"ksi", 7850.0u"kg/m^3")
+
+# Effective width (I3.1a)
+b_eff = get_b_eff(slab, 45.0u"ft")
+
+# Stud strength (I8.2a)
+Qn = get_Qn(anchor, slab)
+
+# Composite moment capacity (I3.2a, plastic stress distribution)
+ΣQn = 40 * Qn   # 40 studs per half-span
+result = get_ϕMn_composite(section, material, slab, b_eff, ΣQn)
+# result.ϕMn, result.Mn, result.y_pna, result.Cf, result.a
+
+# Partial composite: find minimum ΣQn for a target moment
+req = find_required_ΣQn(section, material, slab, b_eff, 500.0u"kip*ft", Qn)
+# req.ΣQn, req.n_studs_half, req.sufficient
+
+# Negative moment (I3.2b) with slab rebar
+Mn_neg = get_Mn_negative(section, material, 2.0u"inch^2", 60.0u"ksi")
+
+# Deflection check (shored vs unshored)
+defl = check_composite_deflection(section, material, slab, b_eff, ΣQn,
+    45.0u"ft", 0.5u"kip/ft", 0.8u"kip/ft"; shored=false)
+# defl.δ_DL, defl.δ_LL, defl.ok_LL
+
+# Construction-stage check (bare steel, I3.1b)
+const_check = check_construction(section, material, 200.0u"kip*ft", 50.0u"kip";
+    Lb_const=45.0u"ft")
+# const_check.flexure_ok, const_check.shear_ok
+```
+
+**Key types:**
+- `SolidSlabOnBeam` / `DeckSlabOnBeam`: slab-on-beam configurations (solid concrete and metal deck)
+- `HeadedStudAnchor`: stud properties, including `n_per_row` for multi-row layouts
+- `CompositeContext`: bundles slab + anchor + geometry for the checker pipeline
+
+**Equations:**
+- Effective width: I3.1a (L/8, spacing/2, edge distance)
+- Qn: I8.2a (Eq. I8-1), with Rg/Rp per User Note table
+- Cf: I3.2d (min of concrete, steel, studs — Eqs. I3-1a/b/c)
+- Mn: plastic stress distribution (I3.2a(a)), continuous PNA solver
+- Negative Mn: I3.2b with Asr × Fysr
+- I\_transformed / I\_LB: Commentary I3.2, AISC Manual Eq. C-I3-1 (Y2 method)
+
+## Limitations & Assumptions
+
+### Not Implemented
+
+| Feature | AISC Reference | Notes |
+|:--------|:---------------|:------|
+| Sway Frame Amplification (B2) | Appendix 8 | B2 functions exist but are not integrated into `AISCChecker`. Apply externally for sway frames. |
+| Connection Design | Chapter J | No bolt/weld capacity, block shear, prying action, or connection detailing. |
+| Web Crippling / Local Bearing | J10 | Concentrated load checks at supports not implemented. |
+| Built-up Sections | E6 | Modified slenderness for built-up columns not implemented. |
+| Single-Angle Members | Chapter E, F | Special provisions for single angles not implemented. |
+| Asymmetric I-Shapes | — | Only doubly-symmetric W/S shapes; no channels, WT, or singly-symmetric I. |
+| Composite Columns | I2 | Composite beams (I3) are implemented; composite columns are not. |
+| Formed Metal Deck (parallel wr/hr < 1.5) | I3.2c | `DeckSlabOnBeam` is fully implemented for perpendicular deck and parallel deck with wr/hr ≥ 1.5. Parallel deck with wr/hr < 1.5 uses conservative Rg=0.85 but may need additional rib-level checks. |
+| Elastic Stress Distribution | I3.2a(b) | Only plastic distribution implemented. Raises error when h/tw > 3.76√(E/Fy). |
+| Seismic Provisions | AISC 341 | No seismic compactness, expected strengths, or special detailing. |
+| Fire Design | Appendix 4 | No elevated temperature capacity reduction. |
+| Fatigue | Appendix 3 | No fatigue/cyclic loading checks. |
+| Web LB under Flexure (F4/F5) | F4, F5 | Noncompact/slender web flexure not implemented for the general case. |
+
+### Simplifying Assumptions
+
+| Assumption | Impact | Mitigation |
+|:-----------|:-------|:-----------|
+| Ae = 0.75·Ag for tension rupture | Conservative for most connections | Override with `Ae_ratio` parameter |
+| Cb = 1.0 default | Conservative for moment gradient | Provide actual Cb from analysis |
+| K = 1.0 default | Conservative for braced; unconservative for sway | Provide actual K from alignment charts |
+| Shear Lv = L default | Conservative for distributed loads | Provide Lv for accuracy |
+| Deflection uses linear scaling | Approximate for moment-controlled beams | Acceptable for typical cases |
+| No stiffener design | Affects shear/bearing capacity | Use rolled shapes within web limits |
+
+### Section Type Limitations
+
+| Section | Supported | Not Supported |
+|:--------|:----------|:--------------|
+| W-shapes | Compression, flexure, shear, tension | Torsion (use HSS for significant torsion) |
+| HSS Rect | All including torsion | — |
+| HSS Round | All including torsion | — |
+| Channels, WT, Angles | — | Not yet implemented |
+| Plate girders | Web slenderness only | No tension field action (G3) |
+
+## API Summary
+
+### Capacity Functions (W Shapes)
+
+| Function | Chapter | Description |
+|:---------|:--------|:------------|
+| `get_Pn`, `get_ϕPn` | E | Compression capacity |
+| `get_Mn`, `get_ϕMn` | F | Flexural capacity |
+| `get_Vn`, `get_ϕVn` | G | Shear capacity |
+| `get_ϕPn_tension` | D | Tension capacity |
+| `get_slenderness` | Table B4.1b | Flange/web classification |
+| `get_compression_factors` | E7, Table B4.1a | Q factor for slender elements |
+| `is_compact` | Table B4.1b | Compact check (flange + web) |
+| `design_w_torsion` | DG9 | Torsion design check |
+
+### Composite Functions (Chapter I)
+
+| Function | Reference | Description |
+|:---------|:----------|:------------|
+| `get_Mn_composite`, `get_ϕMn_composite` | I3.2a | Positive flexural strength |
+| `get_Mn_negative` | I3.2b | Negative flexural strength |
+| `get_Cf` | I3.2d | Horizontal shear (compression force) |
+| `get_Qn` | I8.2a | Stud nominal shear strength |
+| `get_b_eff` | I3.1a | Effective slab width |
+| `get_I_transformed`, `get_I_LB` | Commentary I3.2 | Composite / lower-bound moment of inertia |
+| `check_composite_deflection` | I3 | Shored / unshored deflection |
+| `check_construction` | I3.1b | Construction-stage bare steel check |
+| `find_required_ΣQn` | I3.2d | Partial composite solver (binary search) |
+| `validate_stud_diameter` | I8.1 | Stud d\_sa ≤ 2.5tf check |
+| `validate_stud_length` | I8.2 | Stud l\_sa ≥ 4d\_sa and cover check |
+| `check_stud_spacing` | I8.2d | Min/max longitudinal spacing |
+| `stud_mass` | — | Single stud mass (for ECC/weight objectives) |
+| `composite_stud_contribution` | — | Total stud cost contribution to objective |
+| `extract_parallel_Asr` | I3.2b | Extract parallel slab rebar for negative moment |
+| `beam_direction_from_vectors` | — | Check if rebar is parallel to beam direction |
+
+### Interaction & Amplification (All Section Types)
+
+See [Generic Provisions](generic.md) for the full API. Key functions:
+
+| Function | Reference | Description |
+|:---------|:----------|:------------|
+| `check_PM_interaction` | H1-1 | Uniaxial P-M check |
+| `check_PMxMy_interaction` | H1-2 | Biaxial P-Mx-My check |
+| `compute_B1` | A-8-3 | P-δ amplification factor |
+| `compute_B2` | A-8-6 | P-Δ amplification factor |
+| `amplify_moments` | A-8-1 | Mr = B1·Mnt + B2·Mlt |
+
+### Checker Interface
+
+| Function | Description |
+|:---------|:------------|
+| `AISCChecker(; ...)` | Create checker with options |
+| `create_cache(checker, n)` | Create capacity cache |
+| `precompute_capacities!(...)` | Precompute length-independent values |
+| `is_feasible(...)` | Check section feasibility (includes B1 amplification) |
+
+## References
+
+- AISC 360-16: Specification for Structural Steel Buildings
+- AISC Steel Construction Manual, 15th Edition
+- AISC Design Examples, Version 15.0
+- AISC Design Guide 9: Torsional Analysis of Structural Steel Members

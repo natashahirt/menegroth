@@ -67,6 +67,11 @@ struct PixelFrameChecker <: AbstractCapacityChecker
     min_width_mm::Float64
 end
 
+"""
+    PixelFrameChecker(; E_s_MPa=200_000, f_py_MPa=1860, γ_c=1.0, min_depth_mm=0, min_width_mm=0)
+
+Keyword constructor for [`PixelFrameChecker`](@ref) with typical defaults.
+"""
 function PixelFrameChecker(;
     E_s_MPa::Real = 200_000.0,
     f_py_MPa::Real = 1860.0,
@@ -100,6 +105,11 @@ mutable struct PixelFrameCapacityCache <: AbstractCapacityCache
     obj_coeffs::Vector{Float64} # Objective coefficients per section
 end
 
+"""
+    PixelFrameCapacityCache(n_sections::Int)
+
+Allocate a zero-initialized cache for `n_sections` PixelFrame catalog entries.
+"""
 function PixelFrameCapacityCache(n_sections::Int)
     PixelFrameCapacityCache(
         zeros(n_sections),
@@ -111,12 +121,20 @@ function PixelFrameCapacityCache(n_sections::Int)
     )
 end
 
+"""Create a [`PixelFrameCapacityCache`](@ref) sized for `n_sections` catalog entries."""
 create_cache(::PixelFrameChecker, n_sections::Int) = PixelFrameCapacityCache(n_sections)
 
 # ==============================================================================
 # Interface: precompute_capacities!
 # ==============================================================================
 
+"""
+    precompute_capacities!(checker, cache, catalog, material, objective)
+
+Populate `cache` with axial (ACI 318-19 §22.4), flexural (ACI 318-19 §22.4.1.2),
+shear (fib MC2010 §7.7-5), bounding-box, and objective values for every section
+in `catalog`. Runs multi-threaded.
+"""
 function precompute_capacities!(
     checker::PixelFrameChecker,
     cache::PixelFrameCapacityCache,
@@ -207,6 +225,7 @@ end
 # Interface: get_objective_coeff
 # ==============================================================================
 
+"""Return the precomputed objective coefficient for section index `j`."""
 function get_objective_coeff(
     checker::PixelFrameChecker,
     cache::PixelFrameCapacityCache,
@@ -219,6 +238,7 @@ end
 # Interface: error message
 # ==============================================================================
 
+"""Format a human-readable error message when no feasible PixelFrame section exists for `demand`."""
 function get_feasibility_error_msg(
     checker::PixelFrameChecker,
     demand::MemberDemand,

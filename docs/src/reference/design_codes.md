@@ -32,13 +32,17 @@ This page provides a comprehensive index of every design code provision implemen
 | §H1.1 | P-M interaction (Eq. H1-1a, H1-1b) | ✅ Implemented | `members/codes/aisc/generic/interaction.jl` |
 | §C2 | Required strength — amplified first-order analysis (B1, B2) | ✅ Implemented | `members/codes/aisc/generic/amplification.jl` |
 | DG9 | Torsional analysis of structural steel members | ✅ Implemented | `members/codes/aisc/hss_rect/torsion.jl`, `hss_round/torsion.jl` |
-| §I3.1a | Composite beam — effective width | ✅ Implemented | `members/codes/aisc/composite/composite_beam.jl` |
-| §I3.1b | Composite beam — construction strength | ✅ Implemented | `members/codes/aisc/composite/composite_beam.jl` |
-| §I3.2 | Composite beam — flexural strength | ✅ Implemented | `members/codes/aisc/composite/composite_beam.jl` |
-| §I3.2a-d | Composite PNA cases (concrete crush, steel yield) | ✅ Implemented | `members/codes/aisc/composite/composite_beam.jl` |
-| §I3.2d | Negative moment capacity | ✅ Implemented | `members/codes/aisc/composite/composite_beam.jl` |
-| §I8.1 | Composite beam — vertical shear | ✅ Implemented | `members/codes/aisc/composite/composite_beam.jl` |
-| §I8.2 | Headed stud anchors — shear connector strength | ✅ Implemented | `members/codes/aisc/composite/composite_beam.jl` |
+| §I3.1a | Composite beam — effective width | ✅ Implemented | `members/codes/aisc/composite/effective_width.jl` |
+| §I3.1b | Composite beam — construction strength | ✅ Implemented | `members/codes/aisc/composite/construction.jl` |
+| §I3.2a | Composite beam — positive flexural strength (plastic) | ✅ Implemented | `members/codes/aisc/composite/flexure.jl` |
+| §I3.2a(b) | Composite beam — elastic stress distribution | ⚠️ Not implemented (raises error) | `members/codes/aisc/composite/flexure.jl` |
+| §I3.2b | Composite beam — negative moment capacity | ✅ Implemented | `members/codes/aisc/composite/flexure.jl` |
+| §I3.2c | Formed metal deck — Rg/Rp factors | ✅ Implemented | `members/codes/aisc/composite/stud_strength.jl` |
+| §I3.2d | Composite beam — compression force Cf | ✅ Implemented | `members/codes/aisc/composite/flexure.jl` |
+| §I8.1 | Stud diameter limit (d_sa ≤ 2.5tf) | ✅ Implemented | `members/codes/aisc/composite/stud_strength.jl` |
+| §I8.2a | Headed stud anchors — shear connector strength | ✅ Implemented | `members/codes/aisc/composite/stud_strength.jl` |
+| §I8.2d | Stud spacing limits | ✅ Implemented | `members/codes/aisc/composite/stud_strength.jl` |
+| Commentary I3.2 | Transformed I, lower-bound I_LB (Eq. C-I3-1) | ✅ Implemented | `members/codes/aisc/composite/deflection.jl` |
 | DG19 | Fire resistance of structural steel framing | ✅ Implemented | `members/codes/aisc/fire/` |
 
 ## ACI 318-11 / ACI 318-19 — Building Code Requirements for Structural Concrete

@@ -89,6 +89,12 @@ provides a solver-free alternative:
 This is faster than MIP for simple problems (no group-linking constraints) and
 has zero solver dependencies.
 
+!!! note "Default in StructuralSynthesizer"
+    The `size_steel_members!` pipeline in StructuralSynthesizer automatically
+    selects binary search when `n_max_sections == 0` (no shared-section constraint)
+    and falls back to MIP when `n_max_sections > 0`. This makes binary search the
+    default solver for most steel sizing workflows.
+
 ### NLP Continuous Optimization
 
 `optimize_continuous(problem; ...)` solves continuous NLP problems that implement

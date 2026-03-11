@@ -86,7 +86,7 @@ intensity are stored on the material objects, not on the objective:
 | Property | Stored on | Description |
 |:---------|:----------|:------------|
 | Density ``\rho`` | Material | kg/m³ |
-| Unit cost | Material | $/kg or $/m³ |
+| Unit cost | Material | \$/kg or \$/m³ |
 | GWP | Material | kgCO₂e/kg |
 
 ## Limitations & Future Work

@@ -18,6 +18,7 @@ mutable struct DesignCache
     last_result::Union{APIOutput, Nothing}
 end
 
+"""Create an empty `DesignCache` with no stored geometry or results."""
 DesignCache() = DesignCache("", nothing, nothing, nothing)
 
 """

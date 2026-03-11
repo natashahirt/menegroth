@@ -748,7 +748,7 @@ end
 # Reference: PCA Notes on ACI 318-11, EB712, Appendix 20A, pp. 20-14 to 20-17.
 # =============================================================================
 
-# 8-tuple: (k, COF, m_unif, m_a00, m_a02, m_a04, m_a06, m_a08)
+"""8-tuple type alias for non-prismatic table entries: (k, COF, m_unif, m_a00, m_a02, m_a04, m_a06, m_a08)."""
 const _NP_ENTRY = NTuple{8, Float64}
 
 # ── Table A2: Drop thickness = 0.25h ──

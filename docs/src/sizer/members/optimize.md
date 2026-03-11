@@ -96,6 +96,12 @@ RCColumnNLPProblem
 Formulates the continuous column sizing as an NLP: minimize cross-sectional area subject to P-M interaction, ACI detailing rules, and dimension bounds.
 
 ```@docs
+RCCircularNLPProblem
+```
+
+Formulates the continuous circular column sizing as an NLP: minimize cross-sectional area subject to P-M interaction and ACI detailing rules.
+
+```@docs
 RCBeamNLPProblem
 ```
 
@@ -103,13 +109,7 @@ Formulates the continuous beam sizing: minimize weight subject to flexure, shear
 
 ### Solver Types
 
-```@docs
-optimize_discrete
-```
-
-```@docs
-optimize_binary_search
-```
+The two solver strategies (`optimize_discrete` and `optimize_binary_search`) are documented below under [Discrete Optimization](#discrete-optimization).
 
 ## Functions
 

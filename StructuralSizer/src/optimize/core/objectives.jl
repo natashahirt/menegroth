@@ -17,8 +17,8 @@ struct MinVolume <: AbstractObjective end
 """
 Minimize total cost.
 
-- `MinCost()` — uses `material.cost` [\$/kg] (errors if cost=NaN)
-- `MinCost(c::Real)` — explicit unit cost [\$/kg]
+- `MinCost()` — uses `material.cost` [USD/kg] (errors if cost=NaN)
+- `MinCost(c::Real)` — explicit unit cost [USD/kg]
 - `MinCost(f::Function)` — custom cost function `f(section, material) -> cost_per_length`
 """
 struct MinCost{T} <: AbstractObjective

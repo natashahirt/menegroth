@@ -94,6 +94,12 @@ struct RCTBeamNLPProblem <: AbstractNLPProblem
     cover_to_stirrup_ctr_in::Float64  # face → stirrup centerline (inches)
 end
 
+"""
+    RCTBeamNLPProblem(Mu, Vu, bf, hf, opts; w_dead, w_live, L_span, support, ξ, Tu)
+
+Construct an RC T-beam NLP problem from demand, flange geometry, and options.
+Converts all Unitful inputs to bare ACI units (kip, kip-ft, inches, psi).
+"""
 function RCTBeamNLPProblem(Mu, Vu, bf, hf, opts::NLPBeamOptions;
                            w_dead=nothing, w_live=nothing, L_span=nothing,
                            support::Symbol=:simply_supported, ξ::Float64=2.0,
@@ -166,8 +172,10 @@ end
 # AbstractNLPProblem Interface: Core
 # ==============================================================================
 
+"""Number of design variables: bw, h, ρ."""
 n_variables(::RCTBeamNLPProblem) = 3
 
+"""Variable bounds for T-beam NLP: [bw_min, h_min, 0.003] to [bw_max, h_max, 0.025]."""
 function variable_bounds(p::RCTBeamNLPProblem)
     lb = [p.bw_min, p.h_min, 0.003]
     # T-beams: ρ = As/(bw×d) is relative to the narrow web, so it's naturally
@@ -179,18 +187,21 @@ function variable_bounds(p::RCTBeamNLPProblem)
     return (lb, ub)
 end
 
+"""Midrange initial guess for T-beam NLP: [bw_mid, h_mid, 0.012]."""
 function initial_guess(p::RCTBeamNLPProblem)
     bw0 = (p.bw_min + p.bw_max) / 2
     h0  = (p.h_min + p.h_max) / 2
     return [bw0, h0, 0.012]
 end
 
+"""Human-readable variable names for solver output."""
 variable_names(::RCTBeamNLPProblem) = ["bw (in)", "h (in)", "ρ"]
 
 # ==============================================================================
 # AbstractNLPProblem Interface: Objective
 # ==============================================================================
 
+"""Objective function: web cross-sectional area with optional ρ weighting."""
 function objective_fn(p::RCTBeamNLPProblem, x::Vector{Float64})
     bw, h, ρ = x
     # Web area only — flange (slab) is already counted as slab material
@@ -212,6 +223,7 @@ end
 # AbstractNLPProblem Interface: Constraints
 # ==============================================================================
 
+"""Number of constraints: 4 base + 2 deflection (if service loads) + 1 torsion (if Tu > 0)."""
 function n_constraints(p::RCTBeamNLPProblem)
     nc = 4
     p.w_dead_kiplf > 0 && (nc += 2)  # LL + total deflection
@@ -219,6 +231,7 @@ function n_constraints(p::RCTBeamNLPProblem)
     return nc
 end
 
+"""Human-readable constraint names for solver diagnostics."""
 function constraint_names(p::RCTBeamNLPProblem)
     names = [
         "flexure utilization",
@@ -234,11 +247,19 @@ function constraint_names(p::RCTBeamNLPProblem)
     return names
 end
 
+"""Constraint bounds: all utilizations ≤ 1.0, no lower bound."""
 function constraint_bounds(p::RCTBeamNLPProblem)
     nc = n_constraints(p)
     return (fill(-Inf, nc), fill(1.0, nc))
 end
 
+"""
+    constraint_fns(p::RCTBeamNLPProblem, x) -> Vector{Float64}
+
+Evaluate all constraint utilizations for the T-beam NLP at design point `x`.
+Returns utilization ratios per ACI 318: flexure, shear, εt, ρ_min,
+plus optional deflection (LL and total) and torsion adequacy.
+"""
 function constraint_fns(p::RCTBeamNLPProblem, x::Vector{Float64})
     bw, h, ρ = x
     bf = p.bf_in
@@ -484,6 +505,12 @@ struct RCTBeamNLPResult
     iterations::Int
 end
 
+"""
+    build_rc_tbeam_nlp_result(p::RCTBeamNLPProblem, opt_result) -> RCTBeamNLPResult
+
+Convert optimization result to `RCTBeamNLPResult` with practical section.
+Snaps dimensions to increment grid and constructs an `RCTBeamSection`.
+"""
 function build_rc_tbeam_nlp_result(p::RCTBeamNLPProblem, opt_result)
     bw_opt, h_opt, ρ_opt = opt_result.minimizer
 
@@ -564,6 +591,7 @@ end
 # AbstractNLPProblem Interface: build_result
 # ==============================================================================
 
+"""Dispatch `build_result` to `build_rc_tbeam_nlp_result` for the T-beam problem."""
 function build_result(p::RCTBeamNLPProblem, opt_result)
     build_rc_tbeam_nlp_result(p, opt_result)
 end

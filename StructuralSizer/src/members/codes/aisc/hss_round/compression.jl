@@ -23,6 +23,12 @@ function _Ae_round_hss(s::HSSRoundSection, mat::Metal)
     return clamp(Ae, zero(Ae), s.A)
 end
 
+"""
+    get_Pn(s::HSSRoundSection, mat::Metal, L; axis=:weak) -> Force
+
+Nominal compressive strength for round HSS per AISC 360-16 Chapters E3/E7.
+Considers Euler buckling and effective area for slender walls.
+"""
 function get_Pn(s::HSSRoundSection, mat::Metal, L; axis=:weak)
     E, Fy = mat.E, mat.Fy
     Fe = _Fe_euler(E, L, s.r)
@@ -31,6 +37,12 @@ function get_Pn(s::HSSRoundSection, mat::Metal, L; axis=:weak)
     return Fcr * Ae
 end
 
+"""
+    get_ϕPn(s::HSSRoundSection, mat::Metal, L; axis=:weak, ϕ=0.9) -> Force
+
+Design compressive strength ϕPn for round HSS per AISC 360-16 (LRFD).
+Torsional buckling maps to weak-axis for round HSS.
+"""
 function get_ϕPn(s::HSSRoundSection, mat::Metal, L; axis=:weak, ϕ=0.9)
     axis_eff = axis === :torsional ? :weak : axis
     return ϕ * get_Pn(s, mat, L; axis=axis_eff)

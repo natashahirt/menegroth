@@ -9,5 +9,5 @@ StructuralSynthesizer = "fc54e8a9-dab1-4bea-a64f-f8e9b3ce8a89"
 Documenter = "1"
 
 [sources]
-StructuralSizer = {path = "..\\StructuralSizer"}
-StructuralSynthesizer = {path = "..\\StructuralSynthesizer"}
+StructuralSizer = {path = "../StructuralSizer"}
+StructuralSynthesizer = {path = "../StructuralSynthesizer"}

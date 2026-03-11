@@ -119,6 +119,7 @@ end
 # Internal dispatch hook
 # =============================================================================
 
+"""Fallback `_size_slab!`: no-op for floor types without a sizing implementation."""
 _size_slab!(::AbstractFloorSystem, struc, slab, slab_idx; verbose::Bool=false, kwargs...) = begin
     verbose && @debug "Skipping slab (no sizing implementation)" slab_idx floor_type=slab.floor_type
     return nothing
@@ -128,6 +129,7 @@ end
 # Concrete: Flat plate (full design pipeline)
 # =============================================================================
 
+"""Dispatch `_size_slab!` for flat plate slabs: runs the full ACI 318 Ch 8 design pipeline."""
 function _size_slab!(::FlatPlate, struc, slab, slab_idx;
                      options::AbstractFloorOptions = FlatPlateOptions(),
                      column_opts = nothing,
@@ -168,6 +170,7 @@ end
 # Concrete: Flat slab (with drop panels — shared pipeline with FlatPlate)
 # =============================================================================
 
+"""Dispatch `_size_slab!` for flat slabs with drop panels: shared pipeline with `FlatPlate`."""
 function _size_slab!(::FlatSlab, struc, slab, slab_idx;
                      options::AbstractFloorOptions = FlatSlabOptions(),
                      column_opts = nothing,

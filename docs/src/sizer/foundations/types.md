@@ -17,6 +17,12 @@ and result structures with a common interface for volume and utilization queries
 
 **Source:** `StructuralSizer/src/foundations/`
 
+For docstring-level API documentation of individual types and functions, see the
+code-specific pages:
+
+- [ACI Foundation Design](codes/aci.md) — spread, strip, and mat footing design per ACI 318 / ACI 336.2R
+- [IS Foundation Design](codes/is.md) — spread footing design per IS 456
+
 The hierarchy:
 
 ```
@@ -36,98 +42,80 @@ AbstractFoundation
 
 ### Abstract Hierarchy
 
-```@docs
-AbstractFoundation
-AbstractShallowFoundation
-AbstractDeepFoundation
-```
+`AbstractFoundation` is the root type.  `AbstractShallowFoundation` and
+`AbstractDeepFoundation` are the two branches.  See the tree above for the
+full hierarchy.
 
 ### Shallow Foundation Types
 
-```@docs
-SpreadFooting
-CombinedFooting
-StripFooting
-MatFoundation
-```
+- **`SpreadFooting`** — isolated pad footing under a single column.
+- **`CombinedFooting`** — footing supporting two or more columns (design not yet implemented).
+- **`StripFooting`** — continuous strip footing along a column line.
+- **`MatFoundation`** — full-building mat (raft) foundation.
+
+See [ACI Foundation Design](codes/aci.md) for full docstrings.
 
 ### Deep Foundation Types
 
-```@docs
-DrivenPile
-DrilledShaft
-Micropile
-```
+- **`DrivenPile`**, **`DrilledShaft`**, **`Micropile`** — type stubs for future
+  deep foundation design (no design implementations yet).
 
 ### Soil Model
 
-```@docs
-Soil
-```
+The `Soil` struct stores geotechnical parameters used for bearing, subgrade
+reaction, and pile capacity calculations.  See the table below for fields.
 
 ### Soil Presets
 
-```@docs
-loose_sand
-medium_sand
-dense_sand
-soft_clay
-stiff_clay
-hard_clay
-```
+Six preset soils are provided (see table below).  Import them directly:
+`loose_sand`, `medium_sand`, `dense_sand`, `soft_clay`, `stiff_clay`, `hard_clay`.
 
 ### Demand
 
-```@docs
-FoundationDemand
-```
+`FoundationDemand` wraps the column-to-foundation interface including factored
+and service loads, moments, shears, and column geometry.
 
 ### Result Types
 
-```@docs
-AbstractFoundationResult
-SpreadFootingResult
-CombinedFootingResult
-StripFootingResult
-MatFootingResult
-PileCapResult
-```
+`AbstractFoundationResult` is the base result type.  Concrete subtypes:
+
+- **`SpreadFootingResult`**, **`StripFootingResult`**, **`MatFootingResult`** —
+  see [ACI Foundation Design](codes/aci.md).
+- **`CombinedFootingResult`**, **`PileCapResult`** — defined but not yet
+  produced by any design function.
 
 ### Mat Analysis Methods
 
-```@docs
-AbstractMatMethod
-RigidMat
-ShuklaAFM
-WinklerFEA
-```
+`AbstractMatMethod` is the base for mat analysis strategies:
+
+- **`RigidMat`** — rigid mat, uniform pressure (ACI 336.2R §4.2).
+- **`ShuklaAFM`** — Shukla approximate flexible method (ACI 336.2R §6.1.2).
+- **`WinklerFEA`** — FEA plate on Winkler springs (ACI 336.2R §6.4).
+
+See [ACI Foundation Design](codes/aci.md) for full docstrings.
 
 ## Functions
 
 ### Common Interface
 
-```@docs
-concrete_volume
-steel_volume
-footprint_area
-footing_length
-footing_width
-utilization
-```
+The following functions operate on any `AbstractFoundationResult`:
+
+- `footprint_area(result)` — plan area of the foundation.
+- `footing_length(result)` / `footing_width(result)` — plan dimensions.
+- `utilization(result)` — governing utilization ratio (max of bearing, punching, shear, flexure).
+- Concrete and rebar volumes are available from the result fields.
 
 ### Design Entry Point
 
-```@docs
-design_footing
-recommend_foundation_strategy
-```
+- **`design_footing`** — main design entry point; dispatches on foundation type.
+  See [ACI Foundation Design](codes/aci.md) and [IS Foundation Design](codes/is.md).
+- **`recommend_foundation_strategy`** — computes coverage ratio and recommends
+  `:spread`, `:strip`, or `:mat`.  See [ACI Foundation Design](codes/aci.md).
 
 ### Type Mapping
 
-```@docs
-foundation_type
-foundation_symbol
-```
+- `foundation_type(sym)` — convert a `Symbol` to its `AbstractFoundation` subtype.
+- `foundation_symbol(f)` — convert an `AbstractFoundation` instance to its `Symbol`.
 
 ## Implementation Details
 
@@ -186,15 +174,14 @@ All result types implement a common interface:
 
 ## Options & Configuration
 
-```@docs
-SpreadFootingOptions
-StripFootingOptions
-MatFootingOptions
-FoundationOptions
-```
+The option structs configure code-specific design parameters:
 
-`FoundationOptions` is the top-level container that selects code, strategy,
-and mat coverage threshold.
+- **`SpreadFootingOptions`** — cover, bar size, pier shape, strength reduction factors.
+- **`StripFootingOptions`** — similar to spread footing options, for continuous strips.
+- **`MatFootingOptions`** — analysis method selection, cover, bar size, overhang ratio, minimum thickness.
+- **`FoundationOptions`** — top-level container selecting code, strategy, and mat coverage threshold.
+
+See [ACI Foundation Design](codes/aci.md) for full docstrings and default values.
 
 Key `SpreadFootingOptions` fields:
 

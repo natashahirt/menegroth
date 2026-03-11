@@ -31,14 +31,7 @@ MetalType
 └── RebarType                 # Reinforcing steel
 ```
 
-```@docs
-AbstractMaterial
-StructuralSteel
-RebarSteel
-Concrete
-FiberReinforcedConcrete
-Timber
-```
+See [Steel](../sizer/materials/steel.md), [Concrete](../sizer/materials/concrete.md), [FRC](../sizer/materials/frc.md), and [Timber](../sizer/materials/timber.md) for full type documentation.
 
 ### Fire Protection
 
@@ -50,11 +43,7 @@ FireProtection
 └── CustomCoating             # User-defined fire protection
 ```
 
-```@docs
-FireProtection
-SFRM
-IntumescentCoating
-```
+See [Fire Protection](../sizer/materials/fire_protection.md) for full type documentation.
 
 ## Sections
 
@@ -82,18 +71,7 @@ AbstractHollowSection
     └── HSSRoundSection
 ```
 
-```@docs
-AbstractSection
-ISymmSection
-HSSRectSection
-HSSRoundSection
-RCBeamSection
-RCTBeamSection
-RCColumnSection
-RCCircularSection
-GlulamSection
-PixelFrameSection
-```
+See [Steel Sections](../sizer/members/sections/steel.md), [Concrete Sections](../sizer/members/sections/concrete.md), and [Timber Sections](../sizer/members/sections/timber.md) for full type documentation.
 
 ## Demands
 
@@ -104,12 +82,7 @@ AbstractDemand
 └── RCBeamDemand              # RC beam (Mu, Vu, Tu) with exposure
 ```
 
-```@docs
-AbstractDemand
-MemberDemand
-RCColumnDemand
-RCBeamDemand
-```
+See [Types & Demands](../sizer/members/types.md) for full type documentation.
 
 ## Member Geometry
 
@@ -120,12 +93,7 @@ AbstractMemberGeometry
 └── TimberMemberGeometry      # L, Le, moisture, temperature for timber
 ```
 
-```@docs
-AbstractMemberGeometry
-SteelMemberGeometry
-ConcreteMemberGeometry
-TimberMemberGeometry
-```
+See [Types & Demands](../sizer/members/types.md) for full type documentation.
 
 ## Floor Systems
 
@@ -153,14 +121,7 @@ AbstractFloorSystem
     └── MassTimberJoist        # Mass timber joist floor
 ```
 
-```@docs
-AbstractFloorSystem
-FlatPlate
-FlatSlab
-CompositeDeck
-Vault
-CLT
-```
+See [Slab Types & Options](../sizer/slabs/types.md) for full type documentation.
 
 ### Spanning Behavior
 
@@ -228,12 +189,7 @@ AbstractFoundationResult
 └── PileCapResult
 ```
 
-```@docs
-AbstractFoundation
-SpreadFooting
-StripFooting
-MatFoundation
-```
+See [Foundation Types](../sizer/foundations/types.md) for full type documentation.
 
 ## Optimization
 
@@ -247,13 +203,7 @@ AbstractObjective
 └── MinCarbon                 # Minimize embodied carbon (kgCO₂e)
 ```
 
-```@docs
-AbstractObjective
-MinWeight
-MinVolume
-MinCost
-MinCarbon
-```
+See [Objectives](../sizer/optimize/objectives.md) for full type documentation.
 
 ### Capacity Checkers
 
@@ -266,12 +216,22 @@ AbstractCapacityChecker
 └── NDSChecker                # NDS timber checks (stub)
 ```
 
-```@docs
-AbstractCapacityChecker
-AISCChecker
-ACIBeamChecker
-ACIColumnChecker
+See individual design code pages for full checker documentation: [AISC](../sizer/members/codes/aisc/hss_rect.md), [ACI Beams](../sizer/members/codes/aci/beams.md), [ACI Columns](../sizer/members/codes/aci/columns.md).
+
+### Composite Beam Types (AISC Chapter I)
+
 ```
+AbstractSlabOnBeam
+├── SolidSlabOnBeam           # Solid reinforced-concrete slab on steel beam
+└── DeckSlabOnBeam            # Metal-deck composite slab on steel beam
+
+AbstractSteelAnchor
+└── HeadedStudAnchor          # Steel headed stud anchor (I8)
+
+CompositeContext              # Bundles slab + anchor + span for checker pipeline
+```
+
+See [AISC W Shapes — Chapter I](../sizer/members/codes/aisc/i_symm.md#chapter-i-composite-members-beams) for full documentation.
 
 ### Capacity Caches
 
@@ -309,10 +269,7 @@ AbstractStructuralSynthesizer
     └── BuildingStructure     # Skeleton + structural data
 ```
 
-```@docs
-BuildingSkeleton
-BuildingStructure
-```
+See [Skeleton](../synthesizer/building_types/skeleton.md) and [Structure](../synthesizer/building_types/structure.md) for full type documentation.
 
 ## Dispatch Model
 

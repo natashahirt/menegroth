@@ -200,7 +200,7 @@ struct DropPanelGeometry{L<:Length}
     a_drop_2::L     # half-extent in direction 2 (from column center)
 end
 
-# Convenience constructor: convert mixed length types to Float64-based meters
+"""Convert mixed-unit lengths to Float64-based meters for internal consistency."""
 function DropPanelGeometry(h_drop::Length, a1::Length, a2::Length)
     h   = Float64(ustrip(u"m", h_drop)) * u"m"
     a1m = Float64(ustrip(u"m", a1))     * u"m"
@@ -243,7 +243,7 @@ function check_drop_panel_aci(dp::DropPanelGeometry, h_slab::Length, l1::Length,
     return (isempty(violations), violations)
 end
 
-# Standard formwork drop panel depths (actual + 3/4" plyform)
+"""Standard formwork drop panel depths in inches (actual lumber + 3/4" plyform)."""
 const STANDARD_DROP_DEPTHS_INCH = [2.25, 4.25, 6.25, 8.0]
 
 # =============================================================================
@@ -296,7 +296,7 @@ struct EFMSpanProperties{I<:SecondMomentOfArea, M<:Moment}
     Is_drop::Union{Nothing, I}
 end
 
-# Convenience constructor for flat plate (no drop panels) — backwards compatible
+"""Convenience constructor for flat plate (no drop panels): sets `drop` and `Is_drop` to `nothing`."""
 function EFMSpanProperties(
     span_idx::Int, left_joint::Int, right_joint::Int,
     l1::Length, l2::Length, ln::Length, h::Length,

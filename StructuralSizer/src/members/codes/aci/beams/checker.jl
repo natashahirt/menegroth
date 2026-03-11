@@ -110,6 +110,7 @@ function ACIBeamCapacityCache(n_sections::Int)
     )
 end
 
+"""Create an ACI beam capacity cache for `n_sections` catalog entries."""
 create_cache(::ACIBeamChecker, n_sections::Int) = ACIBeamCapacityCache(n_sections)
 
 
@@ -203,6 +204,12 @@ end
 # Interface: precompute_capacities!
 # ==============================================================================
 
+"""
+    precompute_capacities!(checker::ACIBeamChecker, cache, catalog, material, objective)
+
+Precompute flexural, shear, and strain capacities for all beam sections in the catalog.
+Thread-safe: each section index writes to distinct cache slots.
+"""
 function precompute_capacities!(
     checker::ACIBeamChecker,
     cache::ACIBeamCapacityCache,
@@ -332,7 +339,7 @@ function is_feasible(
     return true
 end
 
-# Helper to extract Tu in kip·in from demand (backward-compatible)
+"""Extract factored torsion Tu from demand as kip·in (backward-compatible)."""
 function _get_Tu_kipin(demand::RCBeamDemand)
     Tu = demand.Tu
     if Tu isa Unitful.Quantity
@@ -342,7 +349,7 @@ function _get_Tu_kipin(demand::RCBeamDemand)
     end
 end
 
-# Helper to extract Nu in kip from demand
+"""Extract factored axial force Nu from demand as kip."""
 function _get_Nu_kip(demand::RCBeamDemand)
     Nu = demand.Nu
     if Nu isa Unitful.Quantity
@@ -356,6 +363,7 @@ end
 # Interface: get_objective_coeff
 # ==============================================================================
 
+"""Get the precomputed objective coefficient for beam section `j`."""
 function get_objective_coeff(
     checker::ACIBeamChecker,
     cache::ACIBeamCapacityCache,
@@ -368,6 +376,7 @@ end
 # Interface: error message
 # ==============================================================================
 
+"""Generate descriptive error message for infeasible ACI beam groups."""
 function get_feasibility_error_msg(
     checker::ACIBeamChecker,
     demand::RCBeamDemand,
@@ -383,6 +392,7 @@ end
 # Objective Values for RCBeamSection
 # ==============================================================================
 
+"""Objective value: gross concrete volume of the RC beam per unit length."""
 function objective_value(
     ::MinVolume,
     section::RCBeamSection,
@@ -393,6 +403,7 @@ function objective_value(
     uconvert(u"m^3", Ag * length)
 end
 
+"""Objective value: self-weight of the RC beam per unit length."""
 function objective_value(
     ::MinWeight,
     section::RCBeamSection,
@@ -403,17 +414,18 @@ function objective_value(
     uconvert(u"kN", Ag * length * material.ρ * 1u"gn")
 end
 
+"""Objective value: cost proxy (volume) for the RC beam per unit length."""
 function objective_value(
     ::MinCost,
     section::RCBeamSection,
     material::Concrete,
     length::Length,
 )
-    # Simplified: use volume as proxy
     Ag = section.b * section.h
     uconvert(u"m^3", Ag * length)
 end
 
+"""Objective value: embodied carbon (kgCO₂e) of the RC beam per unit length."""
 function objective_value(
     ::MinCarbon,
     section::RCBeamSection,
@@ -423,5 +435,5 @@ function objective_value(
     Ag = section.b * section.h
     volume = uconvert(u"m^3", Ag * length)
     mass_kg = ustrip(volume) * ustrip(u"kg/m^3", material.ρ)
-    mass_kg * material.ecc   # kgCO₂e
+    mass_kg * material.ecc
 end

@@ -322,28 +322,31 @@ end
 # ==============================================================================
 
 """
-    get_Mn_negative(section::ISymmSection, material, Asr, Fysr) -> Moment
+    get_Mn_negative(section::ISymmSection, material, Asr, Fysr;
+                    d_rebar=0.0u"m") -> Moment
 
 Nominal negative flexural strength per AISC I3.2b (plastic stress distribution
 on composite section in negative bending).
 
-If Asr = 0, falls back to bare steel Mn = Mp = Fy × Zx (Chapter F).
+If `Asr ≈ 0`, falls back to bare steel `Mn = Mp = Fy × Zx` (Chapter F).
 
 For composite negative moment, the slab reinforcement is in tension:
-- T_rebar = Fysr × Asr (at centroid of slab, taken as t_slab/2 above top of steel)
-- Steel section carries compression above PNA, tension below.
+- `T_rebar = Fysr × Asr`
+- Steel section carries compression below PNA, tension above PNA.
 
-This simplified version places the rebar force at the top of the steel section
-(conservative for the moment arm). A more detailed version would account for
-actual rebar centroid depth.
+# Arguments
+- `d_rebar`: Distance from the **top of the steel section** to the rebar centroid
+  (positive upward into the slab). Default 0 places the rebar resultant at the
+  top of steel (conservative). For a more accurate calculation, set
+  `d_rebar = cover + d_b/2` where cover is from the slab top to the bar center,
+  measured downward. Then `d_rebar = t_slab - cover - d_b/2` above the steel top.
 """
-function get_Mn_negative(section::ISymmSection, material, Asr, Fysr)
+function get_Mn_negative(section::ISymmSection, material, Asr, Fysr;
+                          d_rebar=0.0u"m")
     if ustrip(u"m^2", Asr) ≈ 0.0
         return material.Fy * section.Zx
     end
-    # Steel plastic moment plus contribution of rebar tension
-    # Equilibrium: Asr Fysr + As_tension Fy = As_compression Fy
-    # → As_comp = (As Fy + Asr Fysr) / (2 Fy)
+
     As  = section.A
     Fy  = material.Fy
     d   = section.d
@@ -353,41 +356,39 @@ function get_Mn_negative(section::ISymmSection, material, Asr, Fysr)
     h_w = section.h
 
     T_rebar = Fysr * Asr
+    d_r = uconvert(u"m", d_rebar)
 
     # PNA shifts downward (toward bottom flange) because rebar adds tension at top.
-    # A_comp = area of steel below PNA = (As Fy + T_rebar) / (2 Fy)
-    # (Steel below PNA is in compression for negative bending.)
+    # Equilibrium: T_rebar + Fy × A_tens_steel = Fy × A_comp_steel
+    #   A_comp_below = (As Fy + T_rebar) / (2 Fy)
     A_comp_below = (As * Fy + T_rebar) / (2 * Fy)
 
-    # Locate PNA in steel (measuring from bottom of section)
+    # Locate PNA in steel, measuring from bottom of section
     Af = bf * tf
     if A_comp_below <= Af
-        # PNA in bottom flange
         y_from_bot = A_comp_below / bf
-        # Moment: rebar at top of steel (d from bottom) + steel forces
-        Mn = T_rebar * (d - y_from_bot) +
-             Fy * bf * y_from_bot * (y_from_bot / 2) +                   # comp flange below PNA
-             Fy * bf * (tf - y_from_bot) * ((tf - y_from_bot) / 2) +     # tens flange above PNA
-             Fy * tw * h_w * (tf - y_from_bot + h_w / 2) +               # web tension
-             Fy * bf * tf * (tf - y_from_bot + h_w + tf / 2)             # top flange tension
+        # Rebar is at (d + d_r) from bottom of steel
+        Mn = T_rebar * (d + d_r - y_from_bot) +
+             Fy * bf * y_from_bot * (y_from_bot / 2) +
+             Fy * bf * (tf - y_from_bot) * ((tf - y_from_bot) / 2) +
+             Fy * tw * h_w * (tf - y_from_bot + h_w / 2) +
+             Fy * bf * tf * (tf - y_from_bot + h_w + tf / 2)
     elseif A_comp_below <= Af + tw * h_w
-        # PNA in web
         A_in_web = A_comp_below - Af
-        y_in_web = A_in_web / tw  # from bottom of web (= top of bottom flange)
+        y_in_web = A_in_web / tw
         y_from_bot = tf + y_in_web
 
-        Mn = T_rebar * (d - y_from_bot) +
-             Fy * bf * tf * (y_from_bot - tf / 2) +           # bottom flange comp
-             Fy * tw * y_in_web * (y_in_web / 2) +             # web comp
-             Fy * tw * (h_w - y_in_web) * ((h_w - y_in_web) / 2) +  # web tens
-             Fy * bf * tf * (h_w - y_in_web + tf / 2)          # top flange tens
+        Mn = T_rebar * (d + d_r - y_from_bot) +
+             Fy * bf * tf * (y_from_bot - tf / 2) +
+             Fy * tw * y_in_web * (y_in_web / 2) +
+             Fy * tw * (h_w - y_in_web) * ((h_w - y_in_web) / 2) +
+             Fy * bf * tf * (h_w - y_in_web + tf / 2)
     else
-        # PNA in top flange (unusual — large rebar area)
         A_in_tf = A_comp_below - Af - tw * h_w
         y_in_tf = A_in_tf / bf
         y_from_bot = tf + h_w + y_in_tf
 
-        Mn = T_rebar * (d - y_from_bot) +
+        Mn = T_rebar * (d + d_r - y_from_bot) +
              Fy * bf * tf * (y_from_bot - tf / 2) +
              Fy * tw * h_w * (y_from_bot - tf - h_w / 2) +
              Fy * bf * y_in_tf * (y_in_tf / 2) +

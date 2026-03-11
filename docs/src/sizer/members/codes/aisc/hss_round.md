@@ -22,15 +22,9 @@ Round HSS checks use the same `AISCChecker` type as other steel sections — dis
 
 ### Flexure (AISC §F8)
 
-```@docs
-get_ϕMn
-```
+`get_ϕMn` and `get_Mn` dispatch on `HSSRoundSection` for round-specific flexure. See [AISC — HSS Rect](hss_rect.md) for the generic `@docs` entry.
 
 `get_ϕMn(s::HSSRoundSection, mat; Lb, Cb=1.0, axis=:strong, ϕ=0.9)` — design flexural strength.
-
-```@docs
-get_Mn
-```
 
 `get_Mn(s::HSSRoundSection, mat; Lb, Cb=1.0, axis=:strong)` — nominal flexural strength. Limit states:
 
@@ -44,15 +38,9 @@ Round HSS are not susceptible to LTB (closed circular cross-section).
 
 ### Compression (AISC §E3, §E7)
 
-```@docs
-get_ϕPn
-```
+`get_ϕPn` and `get_Pn` dispatch on `HSSRoundSection` for round-specific compression. See [AISC — HSS Rect](hss_rect.md) for the generic `@docs` entry.
 
 `get_ϕPn(s::HSSRoundSection, mat, L; axis=:weak, ϕ=0.9)` — design compressive strength.
-
-```@docs
-get_Pn
-```
 
 `get_Pn(s::HSSRoundSection, mat, L; axis=:weak)` — nominal compressive strength. Uses:
 - Flexural buckling (E3) — the axis argument is irrelevant since `rx = ry = r`
@@ -64,15 +52,9 @@ When `D/t > 0.11 E/Fy`, the effective area is reduced:
 
 ### Shear (AISC §G5/G6)
 
-```@docs
-get_ϕVn
-```
+`get_ϕVn` and `get_Vn` dispatch on `HSSRoundSection` for round-specific shear. See [AISC — HSS Rect](hss_rect.md) for the generic `@docs` entry.
 
 `get_ϕVn(s::HSSRoundSection, mat; Lv=nothing, axis=:strong, ϕ=nothing)` — design shear strength.
-
-```@docs
-get_Vn
-```
 
 `get_Vn(s::HSSRoundSection, mat; Lv=nothing, axis=:strong)` — nominal shear strength. The shear critical stress `Fcr` is the larger of (G5-2a) and (G5-2b):
 
@@ -82,15 +64,9 @@ get_Vn
 
 ### Torsion (AISC §H3)
 
-```@docs
-get_ϕTn
-```
+`get_ϕTn` and `get_Tn` dispatch on `HSSRoundSection` for round-specific torsion. See [AISC — HSS Rect](hss_rect.md) for the generic `@docs` entry.
 
 `get_ϕTn(s::HSSRoundSection, mat; L=nothing, ϕ=0.90)` — design torsional strength.
-
-```@docs
-get_Tn
-```
 
 `get_Tn(s::HSSRoundSection, mat; L=nothing)` — nominal torsional strength per H3-1: `Tn = Fcr × C` where `C = J / rm` for round sections.
 
@@ -100,9 +76,7 @@ torsional_constant_round_hss
 
 `torsional_constant_round_hss(D, t)` — torsional constant for round HSS (= 2I for thin-walled circular tubes).
 
-```@docs
-get_Fcr_torsion
-```
+`get_Fcr_torsion` dispatches on `HSSRoundSection` for the round-specific torsion critical stress. See [AISC — HSS Rect](hss_rect.md) for the generic `@docs` entry.
 
 `get_Fcr_torsion(s::HSSRoundSection, mat; L=nothing)` — torsional critical stress per H3-2a/H3-2b:
 
@@ -111,20 +85,14 @@ get_Fcr_torsion
 
 ### Slenderness (Table B4.1)
 
-```@docs
-get_slenderness
-```
+`get_slenderness` dispatches on `HSSRoundSection` for round-specific slenderness classification. See [AISC — HSS Rect](hss_rect.md) for the generic `@docs` entry.
 
 `get_slenderness(s::HSSRoundSection, mat)` — classifies the D/t ratio for flexure per Table B4.1b:
 - Compact: `D/t ≤ 0.07 E/Fy`
 - Noncompact: `0.07 E/Fy < D/t ≤ 0.31 E/Fy`
 - Slender: `D/t > 0.31 E/Fy`
 
-```@docs
-get_compression_limits
-```
-
-`get_compression_limits(s, mat)` — compression slenderness limit per Table B4.1a: `D/t ≤ 0.11 E/Fy`.
+Compression slenderness limit per Table B4.1a: `D/t ≤ 0.11 E/Fy`.
 
 ## Implementation Details
 

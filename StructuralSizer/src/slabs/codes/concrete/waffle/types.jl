@@ -67,6 +67,17 @@ struct WaffleRibGrid
     solid_head::Float64   # parametric distance from corners
 end
 
+"""
+    WaffleRibGrid(panel, nξ, nη; solid_head=0.0)
+
+Construct a `WaffleRibGrid` with validation on grid counts and solid head extent.
+
+# Arguments
+- `panel::IsoParametricPanel`: underlying panel geometry.
+- `nξ::Int`: number of rib modules in the ξ direction (≥ 1).
+- `nη::Int`: number of rib modules in the η direction (≥ 1).
+- `solid_head::Float64`: parametric distance from corners defining the solid region, in [0, 0.5).
+"""
 function WaffleRibGrid(panel::IsoParametricPanel, nξ::Int, nη::Int;
                        solid_head::Float64 = 0.0)
     @assert nξ ≥ 1 "nξ must be ≥ 1"

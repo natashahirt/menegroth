@@ -17,63 +17,22 @@ Source: `StructuralSizer/src/materials/fire_protection.jl` (types), `StructuralS
 
 ## Key Types
 
-```@docs
-FireProtection
-```
+All fire protection types (`FireProtection`, `NoFireProtection`, `SFRM`, `IntumescentCoating`, `CustomCoating`, `SurfaceCoating`) are documented on the [Fire Protection](../../../materials/fire_protection.md) materials page.
 
-`FireProtection` is the abstract base type for fire protection strategies.
-
-```@docs
-NoFireProtection
-```
-
-`NoFireProtection <: FireProtection` — no coating applied.
-
-```@docs
-SFRM
-```
-
-`SFRM <: FireProtection` — spray-applied fire-resistive material:
-
-| Field | Default | Description |
-|:------|:--------|:------------|
-| `density_pcf` | 15.0 | Density in lb/ft³ |
-
-```@docs
-IntumescentCoating
-```
-
-`IntumescentCoating <: FireProtection` — intumescent (reactive) coating:
-
-| Field | Default | Description |
-|:------|:--------|:------------|
-| `density_pcf` | 6.0 | Density in lb/ft³ |
-
-```@docs
-CustomCoating
-```
-
-`CustomCoating <: FireProtection` — user-defined coating with explicit thickness:
-
-| Field | Description |
-|:------|:------------|
-| `thickness_in` | Coating thickness in inches |
-| `density_pcf` | Density in lb/ft³ |
-| `name` | Coating name |
-
-```@docs
-SurfaceCoating
-```
-
-`SurfaceCoating` is the output type from `compute_surface_coating`, carrying the resolved thickness, density, and name.
+| Type | Description |
+|:-----|:------------|
+| `FireProtection` | Abstract base type for fire protection strategies |
+| `NoFireProtection` | No coating applied |
+| `SFRM` | Spray-applied fire-resistive material (default density 15.0 pcf) |
+| `IntumescentCoating` | Intumescent (reactive) coating (default density 6.0 pcf) |
+| `CustomCoating` | User-defined coating with explicit thickness, density, and name |
+| `SurfaceCoating` | Output type from `compute_surface_coating` carrying resolved thickness, density, and name |
 
 ## Functions
 
 ### Coating Thickness Calculations
 
-```@docs
-sfrm_thickness_x772
-```
+The coating calculation functions (`sfrm_thickness_x772`, `intumescent_thickness_n643`, `compute_surface_coating`) are documented on the [Fire Protection](../../../materials/fire_protection.md) materials page.
 
 `sfrm_thickness_x772(fire_rating, W_D)` — SFRM thickness per UL X772 assembly:
 
@@ -81,17 +40,9 @@ sfrm_thickness_x772
 
 where `R` is the fire rating in hours and `W/D` is in lb/ft per inch. The result is clamped to a minimum of 0.25 inches per UL listing requirements.
 
-```@docs
-intumescent_thickness_n643
-```
-
 `intumescent_thickness_n643(fire_rating, W_D; restrained=false)` — intumescent coating thickness per UL N643 assembly (Carboline Thermo-Sorb E). Uses piecewise-linear interpolation of the published W/D vs. thickness table for each fire rating. The `restrained` flag selects between restrained and unrestrained assembly tables.
 
 ### Dispatch Function
-
-```@docs
-compute_surface_coating
-```
 
 `compute_surface_coating(fp, fire_rating, W_plf, perimeter_in)` — computes the required coating for a given fire protection type. Dispatches on `fp`:
 
@@ -109,9 +60,7 @@ Arguments:
 
 ### Exposed Perimeter
 
-```@docs
-exposed_perimeter
-```
+`exposed_perimeter` is documented on the [Fire Protection](../../../materials/fire_protection.md) materials page.
 
 `exposed_perimeter(s::ISymmSection; exposure=:three_sided)` — returns the heated perimeter:
 - `:three_sided` → `PA` (beams with top flange protected by slab)

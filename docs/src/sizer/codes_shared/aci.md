@@ -69,13 +69,13 @@ check_one_way_shear
 cracking_moment
 cracked_moment_of_inertia
 cracked_moment_of_inertia_tbeam
-effective_moment_of_inertia
-effective_moment_of_inertia_bischoff
 immediate_deflection
 long_term_deflection_factor
 deflection_limit
 required_Ix_for_deflection
 ```
+
+`effective_moment_of_inertia` and `effective_moment_of_inertia_bischoff` are documented on the [ACI Beams](../members/codes/aci/beams.md) page.
 
 ### Rebar Utilities (ACI 318-11 §7.6)
 
@@ -99,13 +99,7 @@ pca_np_fem_coefficients
 
 ### Fire Protection (ACI/TMS 216.1-14)
 
-```@docs
-min_thickness_fire
-min_cover_fire_slab
-min_cover_fire_beam
-min_dimension_fire_column
-min_cover_fire_column
-```
+The concrete fire resistance functions (`min_thickness_fire`, `min_cover_fire_slab`, `min_cover_fire_beam`, `min_dimension_fire_column`, `min_cover_fire_column`) are documented on the [Fire Protection](../materials/fire_protection.md) materials page.
 
 ## Implementation Details
 

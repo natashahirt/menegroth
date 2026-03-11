@@ -57,15 +57,14 @@ end
 # Standard Combinations (ASCE 7-22 §2.3.1)
 # =============================================================================
 
-# Combination 1: 1.4D
+"""ASCE 7-22 §2.3.1 Combination 1: 1.4D."""
 const strength_1_4D = LoadCombination(
     name = :strength_1_4D,
     D = 1.4,
     L = 0.0
 )
 
-# Combination 2: 1.2D + 1.6L + 0.5(Lr or S or R)
-# Note: User should set Lr, S, or R as appropriate
+"""ASCE 7-22 §2.3.1 Combination 2: 1.2D + 1.6L + 0.5(Lr or S or R)."""
 const strength_1_2D_1_6L = LoadCombination(
     name = :strength_1_2D_1_6L,
     D = 1.2,
@@ -75,7 +74,7 @@ const strength_1_2D_1_6L = LoadCombination(
     R = 0.5
 )
 
-# Combination 3: 1.2D + 1.6(Lr or S or R) + (L or 0.5W)
+"""ASCE 7-22 §2.3.1 Combination 3: 1.2D + 1.6(Lr or S or R) + (L or 0.5W)."""
 const strength_1_2D_1_6Lr = LoadCombination(
     name = :strength_1_2D_1_6Lr,
     D = 1.2,
@@ -86,7 +85,7 @@ const strength_1_2D_1_6Lr = LoadCombination(
     W = 0.5
 )
 
-# Combination 4: 1.2D + 1.0W + L + 0.5(Lr or S or R)
+"""ASCE 7-22 §2.3.1 Combination 4: 1.2D + 1.0W + L + 0.5(Lr or S or R)."""
 const strength_1_2D_1_0W = LoadCombination(
     name = :strength_1_2D_1_0W,
     D = 1.2,
@@ -97,7 +96,7 @@ const strength_1_2D_1_0W = LoadCombination(
     W = 1.0
 )
 
-# Combination 5: 1.2D + 1.0E + L + 0.2S
+"""ASCE 7-22 §2.3.1 Combination 5: 1.2D + 1.0E + L + 0.2S."""
 const strength_1_2D_1_0E = LoadCombination(
     name = :strength_1_2D_1_0E,
     D = 1.2,
@@ -106,35 +105,35 @@ const strength_1_2D_1_0E = LoadCombination(
     E = 1.0
 )
 
-# Combination 6: 0.9D + 1.0W
+"""ASCE 7-22 §2.3.1 Combination 6: 0.9D + 1.0W."""
 const strength_0_9D_1_0W = LoadCombination(
     name = :strength_0_9D_1_0W,
     D = 0.9,
     W = 1.0
 )
 
-# Combination 7: 0.9D + 1.0E
+"""ASCE 7-22 §2.3.1 Combination 7: 0.9D + 1.0E."""
 const strength_0_9D_1_0E = LoadCombination(
     name = :strength_0_9D_1_0E,
     D = 0.9,
     E = 1.0
 )
 
-# Allowable Stress Design (ASD)
+"""Allowable Stress Design: 1.0D + 1.0L."""
 const ASD = LoadCombination(
     name = :asd,
     D = 1.0,
     L = 1.0
 )
 
-# Serviceability (unfactored for deflection checks)
+"""Serviceability combination: 1.0D + 1.0L (unfactored, for deflection checks)."""
 const service = LoadCombination(
     name = :service,
     D = 1.0,
     L = 1.0
 )
 
-# Alias for the most common strength combination
+"""Alias for the most common strength combination (1.2D + 1.6L)."""
 const default_combo = strength_1_2D_1_6L
 
 # =============================================================================
@@ -218,7 +217,7 @@ function envelope_pressure(combos::AbstractVector{LoadCombination};
     return maximum(factored_pressure(c; D=D, L=L, Lr=Lr, S=S, R=R, W=W, E=E) for c in combos)
 end
 
-# Single-combo convenience: treat a single combo as a length-1 vector
+"""Single-combo convenience: treat a single `LoadCombination` as a length-1 vector."""
 envelope_pressure(combo::LoadCombination, dead::P, live::P) where P =
     factored_pressure(combo, dead, live)
 

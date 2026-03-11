@@ -26,9 +26,7 @@ The top-level input object sent to `POST /design` and `POST /validate`.
 | `params` | `APIParams` | yes | Design parameters |
 | `geometry_hash` | `String` | no | Precomputed geometry hash for caching |
 
-```@docs
-APIInput
-```
+See [`APIInput`](@ref) in [API Overview](overview.md).
 
 ### APIEdgeGroups
 
@@ -38,9 +36,7 @@ APIInput
 | `columns` | `Vector{Vector{Int}}` | Column edges |
 | `braces` | `Vector{Vector{Int}}` | Brace edges (optional) |
 
-```@docs
-APIEdgeGroups
-```
+`APIEdgeGroups` groups the structural edge connectivity into beams, columns, and braces, each defined as a vector of vertex-index pairs.
 
 ### APIFaceGroups
 
@@ -70,9 +66,7 @@ A dictionary mapping face group names to face vertex lists:
 | `size_foundations` | `Bool` | `true` | Whether to size foundations |
 | `foundation_soil` | `String` | `"medium_sand"` | Soil type name |
 
-```@docs
-APIParams
-```
+See [`APIParams`](@ref) in [API Overview](overview.md).
 
 ### APILoads
 
@@ -85,9 +79,7 @@ APIParams
 | `roof_SDL_psf` | `Float64` | psf | Roof superimposed dead load |
 | `wall_SDL_psf` | `Float64` | psf | Perimeter wall dead load |
 
-```@docs
-APILoads
-```
+`APILoads` specifies gravity loading intensities (in psf) for floors, roofs, grade levels, and perimeter walls, covering both live loads and superimposed dead loads.
 
 ### APIFloorOptions
 
@@ -97,9 +89,7 @@ APILoads
 | `deflection_limit` | `Float64` | `240.0` | L/n deflection limit |
 | `punching_strategy` | `String` | `"auto"` | `"auto"`, `"thicken"`, `"studs"`, `"drop_panel"` |
 
-```@docs
-APIFloorOptions
-```
+`APIFloorOptions` controls floor-specific design settings including the analysis method (DDM, EFM, FEA, or rule-of-thumb), deflection limits, and the punching shear mitigation strategy.
 
 ### APIMaterials
 
@@ -109,9 +99,7 @@ APIFloorOptions
 | `rebar` | `String` | `"gr60"` | Rebar grade |
 | `steel` | `String` | `"A992"` | Structural steel grade |
 
-```@docs
-APIMaterials
-```
+`APIMaterials` selects the material grades for concrete, rebar, and structural steel used throughout the design.
 
 ## Output Types
 
@@ -131,9 +119,7 @@ The top-level response from `POST /design`.
 | `geometry_hash` | `String` | Geometry hash for caching |
 | `visualization` | `APIVisualization` | Visualization data (optional) |
 
-```@docs
-APIOutput
-```
+See [`APIOutput`](@ref) in [API Overview](overview.md).
 
 ### APISummary
 
@@ -147,9 +133,7 @@ APIOutput
 | `critical_ratio` | `Float64` | Governing D/C ratio |
 | `critical_element` | `String` | Element with highest D/C |
 
-```@docs
-APISummary
-```
+`APISummary` aggregates the high-level design results: overall pass/fail status, total material quantities (concrete volume, steel weight, rebar weight), embodied carbon, and the governing demand-to-capacity ratio with its associated critical element.
 
 ### APISlabResult
 
@@ -166,9 +150,7 @@ APISummary
 | `punching_ok` | `Bool` | Punching shear adequate |
 | `punching_max_ratio` | `Float64` | Maximum punching D/C |
 
-```@docs
-APISlabResult
-```
+`APISlabResult` reports per-slab design outcomes including thickness, convergence status, deflection and punching shear checks, and iteration count.
 
 ### APIColumnResult
 
@@ -183,9 +165,7 @@ APISlabResult
 | `interaction_ratio` | `Float64` | P-M interaction ratio |
 | `ok` | `Bool` | Passes all checks |
 
-```@docs
-APIColumnResult
-```
+`APIColumnResult` reports per-column design outcomes including section designation, dimensions, shape, axial ratio, P-M interaction ratio, and pass/fail status.
 
 ### APIBeamResult
 
@@ -197,9 +177,7 @@ APIColumnResult
 | `shear_ratio` | `Float64` | Vu / ϕVn |
 | `ok` | `Bool` | Passes all checks |
 
-```@docs
-APIBeamResult
-```
+`APIBeamResult` reports per-beam design outcomes including section designation, flexure and shear demand-to-capacity ratios, and pass/fail status.
 
 ### APIFoundationResult
 
@@ -212,9 +190,7 @@ APIBeamResult
 | `bearing_ratio` | `Float64` | Bearing pressure / capacity |
 | `ok` | `Bool` | Passes all checks |
 
-```@docs
-APIFoundationResult
-```
+`APIFoundationResult` reports per-foundation design outcomes including footing dimensions, bearing pressure ratio, and pass/fail status.
 
 ### APIVisualization
 
@@ -227,13 +203,13 @@ APIFoundationResult
 | `suggested_scale_factor` | `Float64` | Suggested displacement magnification |
 | `max_displacement_ft` | `Float64` | Maximum displacement in the model |
 
-```@docs
-APIVisualization
-APIVisualizationNode
-APIVisualizationFrameElement
-APISizedSlab
-APIDeflectedSlabMesh
-```
+The visualization schema contains several related types:
+
+- **`APIVisualization`** — Top-level container holding nodes, frame elements, sized slabs, deflected slab meshes, and global displacement metadata (suggested scale factor, maximum displacement).
+- **`APIVisualizationNode`** — A single node with its 3D position and displacement vector.
+- **`APIVisualizationFrameElement`** — A frame element (beam, column, or brace) with start/end node indices, section geometry, and member type.
+- **`APISizedSlab`** — A slab boundary polygon with its designed thickness.
+- **`APIDeflectedSlabMesh`** — A triangulated surface mesh representing the deflected slab shape for 3D rendering.
 
 ### APIError
 
@@ -244,9 +220,7 @@ APIDeflectedSlabMesh
 | `message` | `String` | Human-readable message |
 | `traceback` | `String` | Stack trace (debug mode only) |
 
-```@docs
-APIError
-```
+See [`APIError`](@ref) in [API Overview](overview.md).
 
 ## Limitations & Future Work
 

@@ -24,6 +24,7 @@ mutable struct ServerStatus
     lock::ReentrantLock
 end
 
+"""Create an idle `ServerStatus` with no queued input."""
 ServerStatus() = ServerStatus(SERVER_IDLE, nothing, ReentrantLock())
 
 """Get the current server state as a string."""

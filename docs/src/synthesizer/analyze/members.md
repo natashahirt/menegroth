@@ -52,7 +52,7 @@ update_bracing!
 
 ### Steel Member Sizing
 
-`size_steel_members!(struc; catalog, member_edge_group, resolution)` sizes steel beams and columns via the AISC 360-16 mixed-integer programming approach:
+`size_steel_members!(struc; catalog, member_edge_group, resolution)` sizes steel beams and columns via the AISC 360-16 optimization framework:
 
 1. Extracts demands (Mu, Vu, Pu, Tu) from the Asap model for each member group
 2. Filters the section catalog (W shapes, HSS, pipe) to candidate sections
@@ -64,6 +64,16 @@ update_bracing!
    - Combined: AISC 360-16 §H1 (P-M interaction)
    - Torsion: AISC DG9
 4. Selects the optimal section per the objective function (MinWeight, MinCarbon, etc.)
+
+**Automatic solver selection:** The solver is chosen based on `n_max_sections`:
+- `n_max_sections == 0` (default) — uses `optimize_binary_search`, which sorts the catalog by weight and binary-searches for the lightest feasible section per group. This is fast and has no solver dependencies.
+- `n_max_sections > 0` — uses `optimize_discrete` (MIP via JuMP/HiGHS or Gurobi), which can enforce shared-section constraints across groups.
+
+Both solvers produce identical per-group results when there are no shared-section constraints.
+
+### Collinear Member Grouping
+
+When `DesignParameters.collinear_grouping = true`, `size_beams!` and `size_columns!` automatically call `group_collinear_members!` before sizing. This detects chains of members that share a node and have parallel direction vectors, and assigns them a common `group_id`. The optimizer then assigns a single section to the entire chain, producing uniform member sizes along continuous lines — a common constructability requirement.
 
 ### RC Column Sizing
 
@@ -120,3 +130,4 @@ The trigger threshold δs > 1.5 follows ACI 318-11 §6.6.4.6.2, which limits the
 - Steel member sizing uses discrete catalog optimization; custom section proportioning is not supported.
 - Composite beam design (AISC 360 Chapter I) is available in StructuralSizer but not yet integrated into the synthesizer pipeline.
 - Column biaxial bending uses simplified Bresler reciprocal method; fiber analysis is planned.
+- Collinear grouping currently uses a geometric tolerance (`tol`) on the cross product of direction vectors; near-parallel members at small angles may not be grouped.

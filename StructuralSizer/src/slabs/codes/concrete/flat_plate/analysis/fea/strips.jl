@@ -190,6 +190,7 @@ Returns `nothing` if `drop_panel` is `nothing`.
 function _drop_panel_half_widths_m(dp::DropPanelGeometry)
     return (ustrip(u"m", dp.a_drop_1), ustrip(u"m", dp.a_drop_2))
 end
+"""Return `nothing` when no drop panel is present."""
 _drop_panel_half_widths_m(::Nothing) = nothing
 
 """

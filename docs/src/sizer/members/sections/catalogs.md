@@ -33,11 +33,7 @@ Source: `StructuralSizer/src/members/sections/steel/catalogs/aisc_w.jl`, `aisc_h
 
 #### W Shapes
 
-```@docs
-all_W
-```
-
-Returns all W shapes from the AISC database as a `Vector{ISymmSection}`.
+`all_W()` — Returns a vector of all available `ISymmSection` W-shapes from the AISC catalog.
 
 ```@docs
 preferred_W
@@ -45,39 +41,19 @@ preferred_W
 
 Returns only the AISC preferred (bolded) W shapes — the subset recommended for economy and availability.
 
-```@docs
-W_names
-```
-
-Returns section names (e.g. `"W14X22"`) as a `Vector{String}`.
+`W_names()` — Returns a vector of all W-shape designation strings (e.g. `"W14X22"`) as a `Vector{String}`.
 
 #### Rectangular HSS
 
-```@docs
-all_HSS
-```
+`all_HSS()` — Returns all available `HSSRectSection` sections from the AISC catalog.
 
-Returns all rectangular/square HSS shapes as a `Vector{HSSRectSection}`.
-
-```@docs
-HSS_names
-```
-
-Returns HSS section names as a `Vector{String}`.
+`HSS_names()` — Returns HSS rectangular section designation strings as a `Vector{String}`.
 
 #### Round HSS
 
-```@docs
-all_HSSRound
-```
+`all_HSSRound()` — Returns all available `HSSRoundSection` sections from the AISC catalog.
 
-Returns all round HSS shapes as a `Vector{HSSRoundSection}`.
-
-```@docs
-HSSRound_names
-```
-
-Returns round HSS section names as a `Vector{String}`.
+`HSSRound_names()` — Returns round HSS designation strings as a `Vector{String}`.
 
 #### Pipe
 

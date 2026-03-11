@@ -59,12 +59,23 @@ end
 # Constructors
 # =============================================================================
 
-# Quad: standard isoparametric assignment
+"""
+    WachspressPanel(corners::NTuple{4, NTuple{2, Float64}})
+
+Construct a quad `WachspressPanel{4}` with the standard isoparametric parametric
+assignment: `(0,0)→(1,0)→(1,1)→(0,1)`.
+"""
 function WachspressPanel(corners::NTuple{4, NTuple{2, Float64}})
     WachspressPanel{4}(corners, ((0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)))
 end
 
-# Vector of tuples: quad shorthand (CCW-ensured)
+"""
+    WachspressPanel(pts::AbstractVector)
+
+Construct a quad `WachspressPanel{4}` from a vector of four 2D points, auto-ensuring
+CCW ordering. Only 4-vertex inputs are supported; for N ≠ 4 supply explicit parametric
+coordinates via `WachspressPanel(verts, params)`.
+"""
 function WachspressPanel(pts::AbstractVector)
     n = length(pts)
     if n == 4
@@ -75,7 +86,16 @@ function WachspressPanel(pts::AbstractVector)
     end
 end
 
-# Vector + vector
+"""
+    WachspressPanel(verts::AbstractVector, params::AbstractVector)
+
+Construct a `WachspressPanel{N}` from vertex positions and explicit parametric
+coordinates. Both vectors must have the same length N.
+
+# Arguments
+- `verts`:  Physical (x, y) positions of the polygon vertices.
+- `params`: Parametric (ξ, η) assigned to each vertex.
+"""
 function WachspressPanel(verts::AbstractVector, params::AbstractVector)
     n = length(verts)
     @assert length(params) == n "Need same count of vertices ($n) and params ($(length(params)))"
@@ -84,7 +104,17 @@ function WachspressPanel(verts::AbstractVector, params::AbstractVector)
     WachspressPanel{n}(v, p)
 end
 
-# Grid constructor
+"""
+    WachspressGrid(panel, nξ, nη; solid_head=0.0)
+
+Construct a `WachspressGrid{N}` with validation on grid counts and solid head extent.
+
+# Arguments
+- `panel::WachspressPanel{N}`: underlying Wachspress panel geometry.
+- `nξ::Int`: number of rib modules in the ξ direction (≥ 1).
+- `nη::Int`: number of rib modules in the η direction (≥ 1).
+- `solid_head::Float64`: parametric distance from corners defining the solid region, in [0, 0.5).
+"""
 function WachspressGrid(panel::WachspressPanel{N}, nξ::Int, nη::Int;
                         solid_head::Float64 = 0.0) where {N}
     @assert nξ ≥ 1 && nη ≥ 1
@@ -92,6 +122,7 @@ function WachspressGrid(panel::WachspressPanel{N}, nξ::Int, nη::Int;
     WachspressGrid{N}(panel, nξ, nη, solid_head)
 end
 
+"""Ensure four 2D points are in CCW order for Wachspress quad construction."""
 function _ensure_ccw_wach(pts::AbstractVector)
     length(pts) == 4 || error("Expected 4 points, got $(length(pts))")
     sa = 0.0
@@ -124,6 +155,7 @@ function is_convex_polygon(verts::NTuple{N}) where {N}
     true
 end
 
+"""Vector overload: convert to NTuple and delegate to `is_convex_polygon(::NTuple)`."""
 function is_convex_polygon(verts::AbstractVector)
     n = length(verts)
     tup = ntuple(i -> (Float64(verts[i][1]), Float64(verts[i][2])), n)
@@ -238,7 +270,7 @@ function mean_value_weights(verts::NTuple{N}, x::Real, y::Real) where {N}
     ntuple(i -> w[i] / wsum, N)
 end
 
-# Vector overload for convenience
+"""Vector overload: convert to NTuple and delegate to `mean_value_weights(::NTuple, ...)`."""
 function mean_value_weights(verts::AbstractVector, x::Real, y::Real)
     tup = ntuple(i -> (Float64(verts[i][1]), Float64(verts[i][2])), length(verts))
     mean_value_weights(tup, x, y)
@@ -474,6 +506,11 @@ function _wach_jacobian(verts::NTuple{N}, params::NTuple{N},
     (dξdx, dξdy, dηdx, dηdy)
 end
 
+"""
+    jacobian(panel::WachspressPanel{N}, x, y) -> Matrix{Float64}
+
+Jacobian matrix ∂(ξ,η)/∂(x,y) at physical point (x, y), returned as a 2×2 `Matrix`.
+"""
 function jacobian(panel::WachspressPanel{N}, x::Real, y::Real) where {N}
     J = _wach_jacobian(panel.vertices, panel.params, x, y)
     [J[1] J[2]; J[3] J[4]]
@@ -491,6 +528,7 @@ function jacobian_det_parametric(panel::WachspressPanel{4}, ξ::Real, η::Real)
     dx_dξ * dy_dη - dx_dη * dy_dξ
 end
 
+"""General N-gon: forward Jacobian det via inversion of the parametric-space Jacobian."""
 function jacobian_det_parametric(panel::WachspressPanel{N}, ξ::Real, η::Real) where {N}
     xy = physical_coords(panel, ξ, η)
     J_inv = _wach_jacobian(panel.vertices, panel.params, xy[1], xy[2])
@@ -520,6 +558,12 @@ function min_jacobian_det(panel::WachspressPanel{4}; n::Int = 5)
     jmin
 end
 
+"""
+    min_jacobian_det(panel::WachspressPanel{N}; n=10) where N
+
+General N-gon: minimum forward Jacobian det sampled on an n×n physical-space
+grid, skipping points outside the polygon.
+"""
 function min_jacobian_det(panel::WachspressPanel{N}; n::Int = 10) where {N}
     # Sample a grid of physical points inside the polygon, compute inverse Jacobian
     v = panel.vertices
@@ -593,8 +637,12 @@ function _param_bounds(panel::WachspressPanel{N}) where {N}
     (ξmin=minimum(ξs), ξmax=maximum(ξs), ηmin=minimum(ηs), ηmax=maximum(ηs))
 end
 
-# --- Quad: direct parametric sweep (exact bilinear) ---
+"""
+    rib_lines_ξ(grid::WachspressGrid{4}; n_pts=20)
 
+Polylines for constant-ξ ribs on a quad Wachspress grid via direct bilinear evaluation.
+Returns `nξ + 1` polylines, each with `n_pts` points.
+"""
 function rib_lines_ξ(grid::WachspressGrid{4}; n_pts::Int = 20)
     panel = grid.panel
     lines = Vector{Vector{NTuple{2, Float64}}}(undef, grid.nξ + 1)
@@ -606,6 +654,12 @@ function rib_lines_ξ(grid::WachspressGrid{4}; n_pts::Int = 20)
     lines
 end
 
+"""
+    rib_lines_η(grid::WachspressGrid{4}; n_pts=20)
+
+Polylines for constant-η ribs on a quad Wachspress grid via direct bilinear evaluation.
+Returns `nη + 1` polylines, each with `n_pts` points.
+"""
 function rib_lines_η(grid::WachspressGrid{4}; n_pts::Int = 20)
     panel = grid.panel
     lines = Vector{Vector{NTuple{2, Float64}}}(undef, grid.nη + 1)
@@ -728,6 +782,12 @@ function _trace_isoline(panel::WachspressPanel{N},
     pts
 end
 
+"""
+    rib_lines_ξ(grid::WachspressGrid{N}; n_pts=20) where N
+
+Polylines for constant-ξ ribs on a general N-gon Wachspress grid.
+Uses boundary-tracing isolines with Newton refinement.
+"""
 function rib_lines_ξ(grid::WachspressGrid{N}; n_pts::Int = 20) where {N}
     panel = grid.panel
     ξ_vals = [panel.params[i][1] for i in 1:N]
@@ -747,6 +807,12 @@ function rib_lines_ξ(grid::WachspressGrid{N}; n_pts::Int = 20) where {N}
     lines
 end
 
+"""
+    rib_lines_η(grid::WachspressGrid{N}; n_pts=20) where N
+
+Polylines for constant-η ribs on a general N-gon Wachspress grid.
+Uses boundary-tracing isolines with Newton refinement.
+"""
 function rib_lines_η(grid::WachspressGrid{N}; n_pts::Int = 20) where {N}
     panel = grid.panel
     η_vals = [panel.params[i][2] for i in 1:N]
@@ -766,6 +832,12 @@ function rib_lines_η(grid::WachspressGrid{N}; n_pts::Int = 20) where {N}
     lines
 end
 
+"""
+    modules(grid::WachspressGrid{4}) -> Vector{RibModule}
+
+Enumerate all rib modules on a quad Wachspress grid. Identical logic to
+`modules(::WaffleRibGrid)` but uses the `WachspressPanel{4}` forward map.
+"""
 function modules(grid::WachspressGrid{4})
     panel = grid.panel
     nξ, nη = grid.nξ, grid.nη
@@ -791,6 +863,12 @@ function modules(grid::WachspressGrid{4})
     result
 end
 
+"""
+    modules(grid::WachspressGrid{N}) -> Vector{RibModule}  where N
+
+Enumerate rib modules on a general N-gon Wachspress grid. Modules whose
+parametric centroid falls outside the convex hull of vertex params are skipped.
+"""
 function modules(grid::WachspressGrid{N}) where {N}
     panel = grid.panel
     nξ, nη = grid.nξ, grid.nη
@@ -824,6 +902,12 @@ function modules(grid::WachspressGrid{N}) where {N}
     result
 end
 
+"""
+    grid_summary(grid::WachspressGrid) -> NamedTuple
+
+Quick summary of Wachspress grid geometry for debugging, analogous to
+`grid_summary(::WaffleRibGrid)`.
+"""
 function grid_summary(grid::WachspressGrid)
     mods = modules(grid)
     isempty(mods) && return (n_modules=0, n_solid=0, n_void=0,

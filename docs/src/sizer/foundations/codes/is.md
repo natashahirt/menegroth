@@ -19,9 +19,10 @@ checks for bearing and punching.
 
 ## Key Types
 
+See [Foundation Types & Options](../types.md) for `SpreadFooting` and
+`SpreadFootingResult` type documentation.
+
 ```@docs
-SpreadFooting
-SpreadFootingResult
 Soil
 ```
 
@@ -29,10 +30,12 @@ Soil
 
 ### Design
 
-```@docs
-design_footing
-check_spread_footing
-```
+`design_footing(::SpreadFooting, ...)` is the main entry point for IS spread
+footing design.  See [ACI Foundation Design](aci.md) for the shared
+`design_footing` docstring.
+
+`check_spread_footing` re-evaluates bearing and punching checks on an existing
+result (see [Post-Design Check](#post-design-check) below for details).
 
 ## Implementation Details
 

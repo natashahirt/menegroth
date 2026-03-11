@@ -904,4 +904,5 @@ function compare_designs(designs::Vector{BuildingDesign})
     return results
 end
 
+"""Two-design convenience: wraps into a vector and delegates."""
 compare_designs(d1::BuildingDesign, d2::BuildingDesign) = compare_designs([d1, d2])

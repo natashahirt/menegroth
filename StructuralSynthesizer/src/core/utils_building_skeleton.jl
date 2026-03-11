@@ -57,6 +57,7 @@ function add_vertex!(skel::BuildingSkeleton{T}, pt::Meshes.Point;
 end
 
 # Convenience method for vector coordinates
+"""Convenience: add a vertex from a plain coordinate vector (converted to `Meshes.Point`)."""
 function add_vertex!(skel::BuildingSkeleton{T}, coords::AbstractVector{<:Real}; kwargs...) where T
     pt = Meshes.Point(Tuple(coords))
     return add_vertex!(skel, pt; kwargs...)
@@ -180,6 +181,12 @@ function add_face!(skel::BuildingSkeleton{T}, face::Meshes.Polygon;
     return idx
 end
 
+"""
+    find_faces!(skel::BuildingSkeleton)
+
+Detect planar faces (slab panels) at each story by traversing directed half-edges
+in the planar graph. Found faces are added with group `:slabs`.
+"""
 function find_faces!(skel::BuildingSkeleton{T}) where T
     for (level_idx, story) in skel.stories
         v_indices = story.vertices
@@ -235,7 +242,7 @@ function find_faces!(skel::BuildingSkeleton{T}) where T
     end
 end
 
-# utility for finding faces (clockwise vs anticlockwise)
+"""Compute the signed area of a polygon defined by skeleton vertex `indices` (positive = CCW)."""
 function calculate_signed_area(skel, indices)
     area = 0.0
     n = length(indices)
@@ -247,6 +254,11 @@ function calculate_signed_area(skel, indices)
     return area / 2.0
 end
 
+"""
+    rebuild_stories!(skel::BuildingSkeleton)
+
+Recompute story assignments for all vertices, edges, and faces from their Z-coordinates.
+"""
 function rebuild_stories!(skel::BuildingSkeleton{T}) where T
     # get unique z coordinates and assign to corresponding stories
     rounded_z = map(skel.vertices) do v

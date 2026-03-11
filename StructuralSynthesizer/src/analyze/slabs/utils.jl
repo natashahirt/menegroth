@@ -177,6 +177,7 @@ end
 # Initialization Helpers
 # =============================================================================
 
+"""Build per-slab specification tuples from cells and grouping options."""
 function _build_slab_specs(struc, floor_type, cell_groupings, slab_group_ids)
     slab_specs = NamedTuple[]
 
@@ -264,7 +265,7 @@ function _resolve_cell_groupings(struc::BuildingStructure, groupings::Symbol,
     end
 end
 
-# Pass-through for explicit groupings
+"""Pass-through: explicit cell index groupings require no resolution."""
 function _resolve_cell_groupings(struc::BuildingStructure, groupings::Vector{Vector{Int}}, 
                                   floor_type::Symbol, ::StructuralSizer.AbstractFloorOptions)
     return groupings
@@ -323,6 +324,7 @@ function _group_cells_by_floor(struc::BuildingStructure)
     return [story_cells[k] for k in sort!(collect(keys(story_cells)))]
 end
 
+"""Assign hash-based group IDs to any slab specs that have `group_id === nothing`."""
 function _assign_deterministic_group_ids!(slab_specs)
     for (i, spec) in enumerate(slab_specs)
         if spec.group_id === nothing
@@ -333,6 +335,7 @@ function _assign_deterministic_group_ids!(slab_specs)
     end
 end
 
+"""Group slab spec indices by their `group_id` hash."""
 function _group_slab_specs(slab_specs)
     groups = Dict{UInt64, Vector{Int}}()
     for (i, spec) in enumerate(slab_specs)
@@ -341,6 +344,7 @@ function _group_slab_specs(slab_specs)
     return groups
 end
 
+"""Size all slab groups in parallel and return result/self-weight/span dictionaries."""
 function _size_slab_groups(groups, slab_specs, struc, material, floor_opts::StructuralSizer.AbstractFloorOptions)
     gids = collect(keys(groups))
     n = length(gids)
@@ -367,6 +371,7 @@ function _size_slab_groups(groups, slab_specs, struc, material, floor_opts::Stru
     return group_results, group_sw, group_spans
 end
 
+"""Size a single slab group: resolve governing demands, call the backend, return `(result, self_weight, spans)`."""
 function _process_single_slab_group(gid, specs, struc, material, floor_opts::StructuralSizer.AbstractFloorOptions)
     ft_syms = unique(getfield.(specs, :floor_type))
     length(ft_syms) == 1 || throw(ArgumentError("Slab group $gid has mixed floor types: $(ft_syms)."))
@@ -397,6 +402,7 @@ function _process_single_slab_group(gid, specs, struc, material, floor_opts::Str
     return result, sw_service, spans_gov
 end
 
+"""Write group results back into `struc.slabs` and update cell self-weights."""
 function _apply_slab_results!(struc, slab_specs, group_results, group_sw, group_spans, 
                               primary_material, opts::StructuralSizer.AbstractFloorOptions)
     for spec in slab_specs
@@ -764,6 +770,7 @@ function compute_cell_tributaries!(struc::BuildingStructure;
     end
 end
 
+"""Resolve a user-provided slab group ID at `idx`, returning `nothing` or `UInt64`."""
 function _resolve_slab_group_id(slab_group_ids, idx::Int; tag::Symbol)
     isnothing(slab_group_ids) && return nothing
     length(slab_group_ids) >= idx || throw(ArgumentError("slab_group_ids too short: need at least $idx entries for $tag indexing"))
@@ -772,6 +779,7 @@ function _resolve_slab_group_id(slab_group_ids, idx::Int; tag::Symbol)
     return UInt64(v)
 end
 
+"""Resolve the common group ID for a set of cells (errors if they disagree)."""
 function _resolve_group_id_for_cell_set(slab_group_ids, cell_indices::Vector{Int})
     isnothing(slab_group_ids) && return nothing
     gids = UInt64[]
@@ -823,7 +831,7 @@ function StructuralSizer.apply_effects!(::Vault, struc::BuildingStructure, slab:
     end
 end
 
-# --- Vault geometry guard ---
+"""Assert that `face_idx` is a 4-vertex orthogonal rectangle (required for vaults)."""
 function _assert_rectangular_slab_face(struc::BuildingStructure, face_idx::Int; tol=1e-8)
     skel = struc.skeleton
     vc = skel.geometry.vertex_coords
@@ -861,7 +869,7 @@ function _build_floor_kwargs(ft::AbstractFloorSystem, span, user_kwargs::NamedTu
     return merge(defaults, user_kwargs)
 end
 
-# Default: no extra kwargs needed
+"""Fallback: no additional kwargs for generic floor systems."""
 _default_floor_kwargs(::AbstractFloorSystem, span, user_kwargs::NamedTuple) = NamedTuple()
 
 # Vault: default lambda = 10 (span/rise = 10) unless user provides rise or lambda

@@ -53,7 +53,7 @@ function is_exterior_support(col, span_axis::NTuple{2, Float64})::Bool
     end
 end
 
-# Convenience overload with direction symbol
+"""Convenience overload: convert a direction symbol (`:x` or `:y`) to a unit vector."""
 is_exterior_support(col, span_direction::Symbol)::Bool = 
     is_exterior_support(col, span_direction == :x ? (1.0, 0.0) : (0.0, 1.0))
 
@@ -626,9 +626,10 @@ struct DDMApplicabilityError <: Exception
     alternatives::Vector{String}
 end
 
-# Constructor with just violations (alternatives computed later)
+"""Construct a `DDMApplicabilityError` with an empty alternatives list."""
 DDMApplicabilityError(violations::Vector{String}) = DDMApplicabilityError(violations, String[])
 
+"""Print a human-readable error listing violated ACI 318-11 §13.6.1 conditions and suggested alternatives."""
 function Base.showerror(io::IO, e::DDMApplicabilityError)
     println(io, "DDM (Direct Design Method) is not permitted for this slab per ACI 318-11 §13.6.1:")
     for (i, v) in enumerate(e.violations)

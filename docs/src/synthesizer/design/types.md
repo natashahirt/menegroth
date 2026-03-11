@@ -55,6 +55,7 @@ compare_designs
 | `floor` | `AbstractFloorOptions` | Floor system options (method, deflection limit, punching strategy) |
 | `tributary_axis` | `Symbol` | Principal axis for one-way spanning |
 | `foundation_options` | `FoundationParameters` | Soil, concrete, rebar, depth, grouping tolerance |
+| `collinear_grouping` | `Bool` | When `true`, detect collinear members sharing a node with aligned direction and assign a shared group\_id before sizing (default `false`) |
 | `deflection_limit` | `Float64` | L/n deflection limit |
 | `optimize_for` | `AbstractObjective` | Optimization objective (MinWeight, MinVolume, MinCost, MinCarbon) |
 | `load_combinations` | `Vector{LoadCombination}` | Load combinations per ASCE 7 §2.3.1 |

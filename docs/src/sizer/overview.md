@@ -160,19 +160,19 @@ This pattern allows the same high-level APIs (`size_members`, `size_slabs!`, cap
 ## Key Types
 
 ```@docs
-AbstractMaterial
-AbstractSection
-AbstractDesignCode
-AbstractObjective
-MinWeight
-MinVolume
-MinCost
-MinCarbon
-AbstractDemand
-MemberDemand
-AbstractMemberGeometry
-AbstractCapacityChecker
-AbstractCapacityCache
+StructuralSizer.AbstractMaterial
+StructuralSizer.AbstractSection
+StructuralSizer.AbstractDesignCode
+StructuralSizer.AbstractObjective
+StructuralSizer.MinWeight
+StructuralSizer.MinVolume
+StructuralSizer.MinCost
+StructuralSizer.MinCarbon
+StructuralSizer.AbstractDemand
+StructuralSizer.MemberDemand
+StructuralSizer.AbstractMemberGeometry
+StructuralSizer.AbstractCapacityChecker
+StructuralSizer.AbstractCapacityCache
 ```
 
 - `LoadCombination` — named load combination with factors for dead, live, snow, wind, and seismic loads per ASCE 7-22. Predefined constants include `strength_1_2D_1_6L`, `strength_1_4D`, etc.

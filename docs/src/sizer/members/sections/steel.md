@@ -16,14 +16,14 @@ Sections are defined in `StructuralSizer/src/members/sections/steel/`.
 ## Key Types
 
 ```@docs
-AbstractHollowSection
-AbstractRectHollowSection
-AbstractRoundHollowSection
-AbstractSectionGeometry
-SolidRect
-HollowRect
-HollowRound
-IShape
+StructuralSizer.AbstractHollowSection
+StructuralSizer.AbstractRectHollowSection
+StructuralSizer.AbstractRoundHollowSection
+StructuralSizer.AbstractSectionGeometry
+StructuralSizer.SolidRect
+StructuralSizer.HollowRect
+StructuralSizer.HollowRound
+StructuralSizer.IShape
 ```
 
 ### W Shapes (Doubly-Symmetric I-Sections)

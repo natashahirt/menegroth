@@ -48,23 +48,23 @@ AbstractFoundation
 full hierarchy.
 
 ```@docs
-AbstractFoundation
-AbstractShallowFoundation
-AbstractDeepFoundation
-Soil
-FoundationDemand
-AbstractFoundationResult
-AbstractMatMethod
-FoundationOptions
+StructuralSizer.AbstractFoundation
+StructuralSizer.AbstractShallowFoundation
+StructuralSizer.AbstractDeepFoundation
+StructuralSizer.Soil
+StructuralSizer.FoundationDemand
+StructuralSizer.AbstractFoundationResult
+StructuralSizer.AbstractMatMethod
+StructuralSizer.FoundationOptions
 ```
 
 ### Shallow Foundation Types
 
 ```@docs
-SpreadFooting
-CombinedFooting
-StripFooting
-MatFoundation
+StructuralSizer.SpreadFooting
+StructuralSizer.CombinedFooting
+StructuralSizer.StripFooting
+StructuralSizer.MatFoundation
 ```
 
 - **`SpreadFooting`** — isolated pad footing under a single column.
@@ -80,9 +80,9 @@ See [ACI Foundation Design](codes/aci.md) for full docstrings.
   deep foundation design (no design implementations yet).
 
 ```@docs
-DrivenPile
-DrilledShaft
-Micropile
+StructuralSizer.DrivenPile
+StructuralSizer.DrilledShaft
+StructuralSizer.Micropile
 ```
 
 ### Soil Model
@@ -110,11 +110,11 @@ and service loads, moments, shears, and column geometry.
   produced by any design function.
 
 ```@docs
-SpreadFootingResult
-CombinedFootingResult
-StripFootingResult
-MatFootingResult
-PileCapResult
+StructuralSizer.SpreadFootingResult
+StructuralSizer.CombinedFootingResult
+StructuralSizer.StripFootingResult
+StructuralSizer.MatFootingResult
+StructuralSizer.PileCapResult
 ```
 
 ### Mat Analysis Methods

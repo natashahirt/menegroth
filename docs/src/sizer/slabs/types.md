@@ -2,9 +2,9 @@
 
 > ```julia
 > using StructuralSizer
-> result = _size_span_floor(FlatPlate(), 8.0u"m", 1.0u"kPa", 2.4u"kPa")
-> total_depth(result)      # slab thickness
-> material_volumes(result) # Dict(:concrete => ..., :steel => ...)
+> ft = FlatPlate()
+> spanning_behavior(ft)                # BeamlessSpanning()
+> min_thickness(ft, 8.0u"m")           # ACI minimum slab thickness
 > ```
 
 ## Overview
@@ -56,12 +56,9 @@ size_slabs!(struc; options)          # Size all slabs in structure
 ```julia
 using StructuralSizer
 
-# Size all slabs in a structure
+# Configure a flat-plate design option set
 opts = FlatPlateOptions(method=DDM())
-size_slabs!(struc; options=opts)
-
-# Size a single slab
-size_slab!(struc, 1; options=opts, verbose=true)
+floor_symbol(FlatPlate())   # :flat_plate
 
 # Standalone vault optimization
 result = optimize_vault(6.0u"m", 1.0u"kN/m^2", 2.0u"kN/m^2")
@@ -146,11 +143,30 @@ BeamlessSpanning
 - `HollowCore` — precast prestressed hollow core plank.
 - `Grade` — slab-on-grade (no structural sizing).
 
+```@docs
+OneWay
+TwoWay
+FlatPlate
+FlatSlab
+PTBanded
+Waffle
+HollowCore
+Vault
+Grade
+ShapedSlab
+```
+
 ### Steel Floor Types
 
 - `CompositeDeck` — composite steel deck with concrete topping.
 - `NonCompositeDeck` — steel deck without composite action.
 - `JoistRoofDeck` — open-web steel joist roof system with metal deck.
+
+```@docs
+CompositeDeck
+NonCompositeDeck
+JoistRoofDeck
+```
 
 ### Timber Floor Types
 
@@ -158,6 +174,13 @@ BeamlessSpanning
 - `DLT` — dowel-laminated timber panel.
 - `NLT` — nail-laminated timber panel.
 - `MassTimberJoist` — traditional timber joist with subfloor panel.
+
+```@docs
+CLT
+DLT
+NLT
+MassTimberJoist
+```
 
 ### Special Types
 
@@ -167,7 +190,7 @@ BeamlessSpanning
 ### Support & Spanning Enums
 
 - `SupportCondition` — enum for one-way slab support conditions: `SIMPLE`, `ONE_END_CONT`, `BOTH_ENDS_CONT`, `CANTILEVER`.
-- `LoadDistributionType` — enum for load distribution method: `DISTRIBUTION_ONE_WAY`, `DISTRIBUTION_TWO_WAY`, `DISTRIBUTION_BEAMLESS`, `DISTRIBUTION_CUSTOM`.
+- `LoadDistributionType` — enum for load distribution method: `DISTRIBUTION_ONE_WAY`, `DISTRIBUTION_TWO_WAY`, `DISTRIBUTION_POINT`, `DISTRIBUTION_CUSTOM`.
 
 ### Analysis Method Types
 
@@ -193,6 +216,19 @@ ShellFEA
 - `VaultResult` — result for vault/shell floor systems.
 - `ShapedSlabResult` — result for user-defined shaped slabs.
 - `FlatPlatePanelResult` — detailed per-panel result for flat plate design (moments, reinforcement, punching).
+
+```@docs
+AbstractFloorResult
+CIPSlabResult
+ProfileResult
+CompositeDeckResult
+JoistDeckResult
+TimberPanelResult
+TimberJoistResult
+VaultResult
+ShapedSlabResult
+FlatPlatePanelResult
+```
 
 ### Punching & Reinforcement Results
 
@@ -315,8 +351,7 @@ TimberOptions
 (`DDM`, `EFM`, `FEA`, `RuleOfThumb`), punching resolution strategy
 (`:grow_columns`, `:reinforce_first`, `:reinforce_last`), deflection limit,
 and fire rating overrides. Convergence tolerances (`max_iterations`,
-`column_tol`, `h_increment`) are keyword arguments to `size_flat_plate!`,
-not fields on the options struct.
+`column_tol`, `h_increment`) are pipeline keyword arguments (internal `size_flat_plate!` path), not fields on the options struct.
 
 `FlatSlabOptions` composes a `FlatPlateOptions` internally, adding drop panel
 geometry controls (`h_drop`, `a_drop_ratio`).

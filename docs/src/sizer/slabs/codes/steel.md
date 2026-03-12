@@ -2,9 +2,10 @@
 
 > ```julia
 > using StructuralSizer
-> result = _size_span_floor(CompositeDeck(), 3.0u"m", 0.5u"kPa", 3.6u"kPa")
-> total_depth(result)    # deck + fill
-> self_weight(result)    # kN/m²
+> ft = CompositeDeck()
+> floor_symbol(ft)            # :composite_deck
+> spanning_behavior(ft)       # OneWaySpanning()
+> load_distribution(ft)       # DISTRIBUTION_ONE_WAY
 > ```
 
 ## Overview
@@ -31,7 +32,7 @@ See `CompositeDeck`, `NonCompositeDeck`,
 
 ## Functions
 
-`_size_span_floor(slab_type, ...)` — internal dispatch for simplified steel floor sizing by deck type (currently stubs).
+No steel-deck-specific public sizing function is exported yet. Steel floor systems are reached via the structure-level APIs (`size_slab!` / `size_slabs!`) and currently remain stub implementations.
 
 ## Implementation Details
 
@@ -81,3 +82,7 @@ Key parameters for composite deck design:
   interaction with deck.
 - Joist roof deck: SJI load table lookup and joist girder selection.
 - Diaphragm action for lateral load resistance is not modeled.
+
+## References
+
+- `StructuralSizer/src/slabs/codes/steel/`

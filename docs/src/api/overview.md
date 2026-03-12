@@ -27,14 +27,14 @@ curl http://localhost:8080/health
 
 ### GET /status
 
-Server state: `idle`, `running`, `queued`, or `warming`.
+Server state endpoint. In bootstrap mode it reports `"warming"` until full routes are loaded; after load it reports full-service states (`"idle"`, `"running"`, `"queued"`).
 
 ```bash
 curl http://localhost:8080/status
 ```
 
 ```json
-{"status": "idle", "queue_depth": 0}
+{"status":"warming","message":"Full API not ready yet"}
 ```
 
 ### GET /schema
@@ -86,6 +86,15 @@ curl -X POST http://localhost:8080/design \
   "columns": [...],
   "beams": [...],
   "foundations": [...]
+}
+```
+
+When the server is busy, `POST /design` returns:
+
+```json
+{
+  "status": "queued",
+  "message": "Request queued; will run after current job completes."
 }
 ```
 
@@ -159,3 +168,8 @@ This significantly speeds up parameter studies where only loads, materials, or f
 - The API processes one design at a time; true concurrent execution is not supported.
 - WebSocket streaming of design progress is planned but not yet implemented.
 - Authentication is not implemented; the API is intended for internal/VPC use.
+
+## References
+
+- `StructuralSynthesizer/src/api/routes.jl`
+- `scripts/api/sizer_bootstrap.jl`

@@ -2,10 +2,10 @@
 
 > ```julia
 > using StructuralSizer
-> result = _size_span_floor(HollowCore(), 10.0u"m", 0.5u"kPa", 2.4u"kPa";
->                     fire_rating=2)
-> total_depth(result)   # plank depth
-> self_weight(result)   # kN/m²
+> ft = HollowCore()
+> spanning_behavior(ft)       # OneWaySpanning()
+> load_distribution(ft)       # DISTRIBUTION_ONE_WAY
+> floor_symbol(ft)            # :hollow_core
 > ```
 
 ## Overview
@@ -25,12 +25,12 @@ See also `ProfileResult` in [Slab Types & Options](../../types.md).
 
 ## Functions
 
-`_size_span_floor(::HollowCore, ...)` — entry point for hollow core slab sizing (currently a stub).
+No hollow-core-specific public sizing function is exported yet. Hollow-core slabs are reached via the structure-level APIs (`size_slab!` / `size_slabs!`) and currently remain stub implementations.
 
 ## Implementation Details
 
-The `_size_span_floor(::HollowCore, ...)` entry point is currently a **stub**
-that raises a "not yet implemented" error.  The planned implementation will:
+The internal hollow-core sizing path is currently a **stub** that raises a
+"not yet implemented" error. The planned implementation will:
 
 1. Look up manufacturer span tables (PCI Hollow Core Slab Manual)
 2. Select the lightest profile satisfying span, load, and fire rating
@@ -50,7 +50,7 @@ The sizing function accepts:
 | `span` | `Length` | Clear span |
 | `sdl` | `Pressure` | Superimposed dead load |
 | `live` | `Pressure` | Live load |
-| `material` | `ConcreteMaterial` | Concrete properties |
+| `material` | `Concrete` | Concrete properties |
 | `fire_rating` | `Int` | Required fire rating (hours) |
 
 ## Limitations & Future Work
@@ -60,3 +60,7 @@ The sizing function accepts:
   and connection detailing.
 - Diaphragm action and lateral load transfer through keyway grouting are not
   modeled.
+
+## References
+
+- `StructuralSizer/src/slabs/codes/concrete/hollow_core.jl`

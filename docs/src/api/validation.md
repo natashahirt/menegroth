@@ -26,15 +26,15 @@ validate_input
 
 | Check | Description | Error Message |
 |:------|:------------|:-------------|
-| Units | `input.units` is a recognized unit string (`"feet"`, `"inches"`, `"meters"`, `"mm"`) | Parse error from `parse_unit` |
+| Units | `input.units` is a recognized unit string (`"feet"/"ft"`, `"inches"/"in"`, `"meters"/"m"`, `"millimeters"/"mm"`, `"centimeters"/"cm"`) | Parse error from `parse_unit` |
 | Vertices | At least 4 vertices required; each has exactly 3 coordinates | `"Need at least 4 vertices (got N)"` |
-| Edges | At least one edge; each has 2 valid, non-degenerate vertex indices | `"Edge N: vertex index out of range"` |
-| Supports | At least one support; each index references a valid vertex | `"Support N: vertex index out of range"` |
+| Edges | At least one edge; each has 2 valid, non-degenerate **1-based** vertex indices | `"Edge N: vertex index ... out of range [1, Nverts]"` |
+| Supports | At least one support; each index references a valid **1-based** vertex | `"Support N: vertex index ... out of range [1, Nverts]"` |
 | Stories Z | If provided, at least 2 elevations required | `"If provided, need at least 2 story elevations"` |
 | Faces | If provided, each face has ≥ 3 vertices with 3 coordinates each | `"Face category[j] has N vertices (need ≥ 3)"` |
 | Fire rating | `fire_rating` is one of 0, 1, 1.5, 2, 3, 4 | `"Invalid fire_rating. Must be one of: 0, 1, 1.5, 2, 3, 4"` |
 | Optimization target | `optimize_for` is `"weight"`, `"carbon"`, or `"cost"` | `"Invalid optimize_for. Must be: weight, carbon, or cost"` |
-| Material names | `params.materials.concrete`, `.rebar`, `.steel` are recognized presets | `"Unknown concrete/rebar/steel: ..."` |
+| Material names | `params.materials.concrete`, `.rebar`, `.steel` must match resolver maps (`NWC_3000/4000/5000/6000`, `Rebar_40/60/75/80`, `A992`) | `"Unknown concrete/rebar/steel ... Options: ..."` |
 
 ### Validation Response
 
@@ -56,3 +56,7 @@ Validation rules are hardcoded to match the supported API schema. Adding new flo
 - Geometric validity (e.g., non-intersecting edges, planar faces) is not checked during validation; it is handled during skeleton construction.
 - Custom material definitions are not validated; they pass validation but may fail during `json_to_params`.
 - Schema versioning would allow different validation rules for different API versions.
+
+## References
+
+- `StructuralSynthesizer/src/api/validation.jl`

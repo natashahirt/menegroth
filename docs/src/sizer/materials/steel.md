@@ -77,7 +77,7 @@ material_name
 ## Implementation Details
 
 - **Parametric type**: `Metal{K, T_P, T_D}` is parametric over the pressure unit type `T_P` and density unit type `T_D`. This allows presets to be defined in any consistent unit system (GPa/kg·m⁻³ or ksi/pcf) while Unitful handles conversions.
-- **Type tags**: `StructuralSteelType` and `RebarType` are empty structs used solely for dispatch. Functions like `check_flexure` and `check_shear` dispatch differently based on whether the material is structural steel or rebar.
+- **Type tags**: `StructuralSteelType` and `RebarType` are empty structs used solely for dispatch. Capacity functions such as `get_ϕMn`, `get_ϕVn`, and `get_ϕPn` dispatch differently based on whether the material is structural steel or rebar.
 - **Name registry**: `register_material!` stores a `UInt → String` mapping keyed by `objectid`. The `material_name` function looks up this registry and falls back to type-specific formatting (e.g., `"Steel (Fy=50 ksi)"`) for unregistered instances.
 - **Embodied carbon**: ECC values are from the ICE Database v4.1 (Oct 2025). Steel sections use 1.61 kgCO₂e/kg; rebar uses 1.72 kgCO₂e/kg, reflecting the higher energy intensity of bar production.
 - **Cost field**: The `cost` field defaults to `NaN` and is only required when using `MinCost` optimization objectives.

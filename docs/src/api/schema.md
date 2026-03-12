@@ -17,10 +17,10 @@ The top-level input object sent to `POST /design` and `POST /validate`.
 
 | Field | Type | Required | Description |
 |:------|:-----|:---------|:------------|
-| `units` | `String` | yes | Coordinate units: `"feet"`, `"inches"`, `"meters"`, or `"mm"` |
+| `units` | `String` | yes | Coordinate units: `"feet"/"ft"`, `"inches"/"in"`, `"meters"/"m"`, `"millimeters"/"mm"`, or `"centimeters"/"cm"` |
 | `vertices` | `Vector{Vector{Float64}}` | yes | 3D vertex coordinates `[[x,y,z], ...]` |
 | `edges` | `APIEdgeGroups` | yes | Edge connectivity by group |
-| `supports` | `Vector{Int}` | yes | Vertex indices with support conditions |
+| `supports` | `Vector{Int}` | yes | 1-based vertex indices with support conditions |
 | `stories_z` | `Vector{Float64}` | no | Story elevation Z coordinates (inferred from vertices if omitted) |
 | `faces` | `APIFaceGroups` | no | Face definitions by group (auto-detected if omitted) |
 | `params` | `APIParams` | yes | Design parameters |
@@ -32,7 +32,7 @@ See [`APIInput`](@ref) in [API Overview](overview.md).
 
 | Field | Type | Description |
 |:------|:-----|:------------|
-| `beams` | `Vector{Vector{Int}}` | Beam edges as `[[v1, v2], ...]` (0-indexed vertex pairs) |
+| `beams` | `Vector{Vector{Int}}` | Beam edges as `[[v1, v2], ...]` (1-based vertex pairs) |
 | `columns` | `Vector{Vector{Int}}` | Column edges |
 | `braces` | `Vector{Vector{Int}}` | Brace edges (optional) |
 
@@ -40,13 +40,12 @@ See [`APIInput`](@ref) in [API Overview](overview.md).
 
 ### APIFaceGroups
 
-A dictionary mapping face group names to face vertex lists:
+A dictionary mapping face group names to face-coordinate polylines:
 
 ```json
 {
-  "floor": [[[0,1,2,3], [4,5,6,7]]],
-  "roof": [[[8,9,10,11]]],
-  "grade": [[[12,13,14,15]]]
+  "floor": [[[0.0,0.0,10.0], [30.0,0.0,10.0], [30.0,20.0,10.0], [0.0,20.0,10.0]]],
+  "roof": [[[0.0,0.0,20.0], [30.0,0.0,20.0], [30.0,20.0,20.0], [0.0,20.0,20.0]]]
 }
 ```
 
@@ -56,28 +55,28 @@ A dictionary mapping face group names to face vertex lists:
 |:------|:-----|:--------|:------------|
 | `unit_system` | `String` | `"imperial"` | `"imperial"` or `"metric"` |
 | `loads` | `APILoads` | — | Gravity loading |
-| `floor_type` | `String` | `"flat_plate"` | Floor system type |
+| `floor_type` | `String` | `"flat_plate"` | Floor system type: `"flat_plate"`, `"flat_slab"`, `"one_way"`, or `"vault"` |
 | `floor_options` | `APIFloorOptions` | — | Floor-specific options |
 | `materials` | `APIMaterials` | — | Material selections |
-| `column_type` | `String` | `"rc_rect"` | `"rc_rect"`, `"rc_circular"`, or `"steel_w"` |
+| `column_type` | `String` | `"rc_rect"` | `"rc_rect"`, `"rc_circular"`, `"steel_w"`, `"steel_hss"`, or `"steel_pipe"` |
 | `beam_type` | `String` | `"steel_w"` | `"steel_w"`, `"steel_hss"`, `"rc_rect"`, or `"rc_tbeam"` |
 | `fire_rating` | `Float64` | `0.0` | Fire resistance in hours |
 | `optimize_for` | `String` | `"weight"` | `"weight"`, `"carbon"`, or `"cost"` |
 | `size_foundations` | `Bool` | `false` | Whether to size foundations |
-| `foundation_soil` | `String` | `"medium_sand"` | Soil type name |
+| `foundation_soil` | `String` | `"medium_sand"` | Soil type name (currently only `"medium_sand"` is mapped) |
 
 See [`APIParams`](@ref) in [API Overview](overview.md).
 
 ### APILoads
 
-| Field | Type | Unit | Description |
-|:------|:-----|:-----|:------------|
-| `floor_LL_psf` | `Float64` | psf | Floor live load |
-| `roof_LL_psf` | `Float64` | psf | Roof live load |
-| `grade_LL_psf` | `Float64` | psf | Grade live load |
-| `floor_SDL_psf` | `Float64` | psf | Floor superimposed dead load |
-| `roof_SDL_psf` | `Float64` | psf | Roof superimposed dead load |
-| `wall_SDL_psf` | `Float64` | psf | Perimeter wall dead load |
+| Field | Type | Default | Unit | Description |
+|:------|:-----|:--------|:-----|:------------|
+| `floor_LL_psf` | `Float64` | `80.0` | psf | Floor live load |
+| `roof_LL_psf` | `Float64` | `20.0` | psf | Roof live load |
+| `grade_LL_psf` | `Float64` | `100.0` | psf | Grade live load |
+| `floor_SDL_psf` | `Float64` | `15.0` | psf | Floor superimposed dead load |
+| `roof_SDL_psf` | `Float64` | `15.0` | psf | Roof superimposed dead load |
+| `wall_SDL_psf` | `Float64` | `10.0` | psf | Perimeter wall dead load |
 
 `APILoads` specifies gravity loading intensities (in psf) for floors, roofs, grade levels, and perimeter walls, covering both live loads and superimposed dead loads.
 
@@ -85,7 +84,7 @@ See [`APIParams`](@ref) in [API Overview](overview.md).
 
 | Field | Type | Default | Description |
 |:------|:-----|:--------|:------------|
-| `method` | `String` | `"DDM"` | Analysis method: `"DDM"`, `"EFM"`, `"FEA"`, `"rule_of_thumb"` |
+| `method` | `String` | `"DDM"` | Analysis method: `"DDM"`, `"DDM_SIMPLIFIED"`, `"EFM"`, `"EFM_HARDY_CROSS"`, or `"FEA"` |
 | `deflection_limit` | `String` | `"L_360"` | Deflection limit: `"L_240"`, `"L_360"`, `"L_480"` |
 | `punching_strategy` | `String` | `"grow_columns"` | `"grow_columns"`, `"reinforce_first"`, `"reinforce_last"` |
 
@@ -117,7 +116,7 @@ The top-level response from `POST /design`.
 | `beams` | `Vector{APIBeamResult}` | Per-beam results |
 | `foundations` | `Vector{APIFoundationResult}` | Per-foundation results |
 | `geometry_hash` | `String` | Geometry hash for caching |
-| `visualization` | `APIVisualization` | Visualization data (optional) |
+| `visualization` | `Union{APIVisualization, Nothing}` | Visualization data (optional; `nothing` when unavailable) |
 
 See [`APIOutput`](@ref) in [API Overview](overview.md).
 
@@ -227,3 +226,7 @@ See [`APIError`](@ref) in [API Overview](overview.md).
 - All dimensions in the output are imperial (ft, in, lb); metric output is planned.
 - Visualization data is optional and controlled by the `SS_ENABLE_VISUALIZATION` environment variable.
 - The schema is versioned implicitly; explicit API versioning (`/v1/design`) is planned.
+
+## References
+
+- `StructuralSynthesizer/src/api/schema.jl`

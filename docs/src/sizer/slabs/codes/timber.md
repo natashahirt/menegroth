@@ -2,10 +2,10 @@
 
 > ```julia
 > using StructuralSizer
-> result = _size_span_floor(CLT(), 5.0u"m", 0.5u"kPa", 2.4u"kPa";
->                     fire_rating=1)
-> total_depth(result)   # panel depth
-> self_weight(result)   # kN/m²
+> ft = CLT()
+> floor_symbol(ft)            # :clt
+> spanning_behavior(ft)       # OneWaySpanning()
+> load_distribution(ft)       # DISTRIBUTION_ONE_WAY
 > ```
 
 ## Overview
@@ -33,7 +33,7 @@ See `CLT`, `DLT`, `NLT`,
 
 ## Functions
 
-`_size_span_floor(slab_type, ...)` — internal dispatch for simplified timber floor sizing by panel/joist type (currently stubs).
+No timber-floor-specific public sizing function is exported yet. Timber floor systems are reached via the structure-level APIs (`size_slab!` / `size_slabs!`) and currently remain stub implementations.
 
 ## Implementation Details
 
@@ -91,3 +91,7 @@ NDS/CSA O86 charring rate for the specified fire rating.
 - Fire design currently uses simplified charring rates; a full effective
   cross-section method is planned.
 - Acoustic performance (STC/IIC ratings) is not evaluated.
+
+## References
+
+- `StructuralSizer/src/slabs/codes/timber/`

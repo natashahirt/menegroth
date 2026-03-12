@@ -33,7 +33,7 @@ AbstractDesignCode
 └── NDS
 ```
 
-Design functions dispatch on `(section_type, material_type, code)` triples, so the same `check_capacity` call routes to the correct implementation for an AISC W-shape vs. an ACI RC column.
+Design functions dispatch on `(section_type, material_type, code)` triples, so the same exported capacity function family (`get_ϕMn`, `get_ϕVn`, `get_ϕPn`, `check_biaxial_capacity`, etc.) routes to the correct steel, concrete, timber, or FRC implementation.
 
 ## Module Organization
 
@@ -145,14 +145,14 @@ Dead/live load factors are accessed via `LoadCombination` presets (e.g., `streng
 Functions dispatch on section type + material type + design code. For example:
 
 ```julia
-# AISC 360 capacity check for a W-shape
-check_flexure(section::ISymmSection, mat::StructuralSteel, ::AISC_360)
+# AISC steel flexural capacity
+get_ϕMn(section, A992_Steel; Lb=20.0u"ft", Cb=1.0, axis=:strong)
 
-# ACI 318 capacity check for an RC column
-check_pm_interaction(section::RCColumnSection, mat::ReinforcedConcreteMaterial, ::ACI_318)
+# AISC steel axial capacity
+get_ϕPn(section, A992_Steel, 20.0u"ft"; axis=:strong)
 ```
 
-This pattern allows the same high-level API (`check_capacity`, `size_member!`) to work across steel, concrete, timber, and FRC sections without conditional branching.
+This pattern allows the same high-level APIs (`size_members`, `size_slabs!`, capacity/check helpers) to work across steel, concrete, timber, and FRC sections without conditional branching.
 
 ## Key Types
 

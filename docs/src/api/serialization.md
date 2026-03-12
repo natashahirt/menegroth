@@ -28,7 +28,7 @@ compute_geometry_hash
 
 `json_to_skeleton(input::APIInput) → BuildingSkeleton` performs:
 
-1. **Unit conversion** — vertex coordinates from input units (imperial ft or metric m) to internal units
+1. **Unit conversion** — vertex coordinates from accepted API units (`feet/ft`, `inches/in`, `meters/m`, `millimeters/mm`, `centimeters/cm`) into internal meters
 2. **Vertex creation** — `Meshes.Point` objects from coordinate arrays
 3. **Edge creation** — skeleton edges from `APIEdgeGroups`, classified into `:beams`, `:columns`, `:braces`
 4. **Support marking** — vertices listed in `input.supports` are marked as restrained
@@ -43,10 +43,13 @@ compute_geometry_hash
 |:-----------|:------------|:-------------|
 | `floor_type` | `"flat_plate"` | `FlatPlateOptions(...)` |
 | `floor_type` | `"flat_slab"` | `FlatSlabOptions(...)` |
+| `floor_type` | `"one_way"` | `OneWayOptions(...)` |
 | `floor_type` | `"vault"` | `VaultOptions(...)` |
 | `column_type` | `"rc_rect"` | `ConcreteColumnOptions(section_shape=:rect)` |
 | `column_type` | `"rc_circular"` | `ConcreteColumnOptions(section_shape=:circular)` |
 | `column_type` | `"steel_w"` | `SteelColumnOptions(...)` |
+| `column_type` | `"steel_hss"` | `SteelColumnOptions(section_type=:hss)` |
+| `column_type` | `"steel_pipe"` | `SteelColumnOptions(section_type=:pipe)` |
 | `beam_type` | `"steel_w"` | `SteelBeamOptions(section_type=:w)` |
 | `beam_type` | `"steel_hss"` | `SteelBeamOptions(section_type=:hss)` |
 | `beam_type` | `"rc_rect"` | `ConcreteBeamOptions(include_flange=false)` |
@@ -57,9 +60,13 @@ compute_geometry_hash
 | `materials.rebar` | `"Rebar_60"` | `Rebar_60` |
 | `optimize_for` | `"weight"` | `:weight` |
 | `optimize_for` | `"carbon"` | `:carbon` |
+| `optimize_for` | `"cost"` | `:cost` |
 | `floor_options.method` | `"DDM"` | `DDM()` |
+| `floor_options.method` | `"DDM_SIMPLIFIED"` | `DDM(:simplified)` |
 | `floor_options.method` | `"EFM"` | `EFM()` |
+| `floor_options.method` | `"EFM_HARDY_CROSS"` | `EFM(solver=:hardy_cross)` |
 | `floor_options.method` | `"FEA"` | `FEA()` |
+| `foundation_soil` | `"medium_sand"` | `FoundationParameters(soil=medium_sand)` when `size_foundations=true` |
 
 ### design_to_json
 
@@ -77,10 +84,11 @@ compute_geometry_hash
 
 `compute_geometry_hash(input::APIInput) → String` computes a SHA-256 hash of the geometry-defining fields:
 - `vertices`
-- `edges` (beams, columns, braces)
+- `edges` (beams and columns)
 - `supports`
 - `stories_z`
 - `faces` (if provided)
+- `units`
 
 The hash is used to detect when two requests share the same geometry, enabling skeleton reuse and skipping the `json_to_skeleton` and `find_faces!` steps.
 
@@ -89,3 +97,9 @@ The hash is used to detect when two requests share the same geometry, enabling s
 - Unit conversion assumes all input is in consistent units; mixing units within a single input is not supported.
 - Custom material definitions beyond the preset names require extending the `json_to_params` mapping.
 - Serialization of visualization data is the most expensive part; it can be disabled via `SS_ENABLE_VISUALIZATION=false`.
+
+## References
+
+- `StructuralSynthesizer/src/api/deserialize.jl`
+- `StructuralSynthesizer/src/api/serialize.jl`
+- `StructuralSynthesizer/src/api/cache.jl`

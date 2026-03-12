@@ -273,26 +273,24 @@ See [Skeleton](../synthesizer/building_types/skeleton.md) and [Structure](../syn
 
 ## Dispatch Model
 
-The key design pattern is multiple dispatch on `(section_type, material_type)` pairs. This allows the same function name to be used across different code provisions:
+The key design pattern is multiple dispatch on `(section_type, material_type)` pairs. This allows the same function name family to be used across different code provisions:
 
 ```julia
-# AISC 360 — steel W-shape flexure
-get_ϕMn(s::ISymmSection, m::StructuralSteel, g::SteelMemberGeometry)
+# AISC steel flexure
+get_ϕMn(w_section, A992_Steel; Lb=20.0u"ft", Cb=1.0, axis=:strong)
 
-# AISC 360 — steel HSS flexure
-get_ϕMn(s::HSSRectSection, m::StructuralSteel, g::SteelMemberGeometry)
+# AISC steel axial
+get_ϕPn(hss_section, A992_Steel, 20.0u"ft"; axis=:strong)
 
-# ACI 318 — RC beam flexure
-get_ϕMn(s::RCBeamSection, m::Concrete, g::ConcreteMemberGeometry)
-
-# ACI 318 — RC T-beam flexure
-get_ϕMn(s::RCTBeamSection, m::Concrete, g::ConcreteMemberGeometry)
+# ACI concrete beam design helpers
+design_beam_flexure(Mu, bw, d, fc, fy)
+design_tbeam_flexure(Mu, bw, bf, hf, d, fc, fy)
 ```
 
 The optimization framework uses this dispatch to provide a unified interface:
 
 1. `AbstractCapacityChecker` wraps the dispatch logic
-2. The optimizer calls `check_capacity(checker, section, demand)` for each candidate section
+2. The optimizer calls checker APIs such as `is_feasible`, `get_objective_coeff`, and cache helpers (`create_cache`, `precompute_capacities!`) for each candidate section
 3. The checker dispatches to the appropriate code provision based on the section and material types
 4. Results are compared via the `AbstractObjective` to select the optimal section
 

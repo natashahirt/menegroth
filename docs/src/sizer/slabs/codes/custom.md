@@ -2,10 +2,10 @@
 
 > ```julia
 > using StructuralSizer
-> slab = ShapedSlab(tapered_slab_fn)
-> result = _size_span_floor(slab, 8.0u"m", 0.5u"kPa", 2.4u"kPa"; span_y=6.0u"m")
-> result.volume_per_area   # concrete volume per plan area
-> result.custom            # Dict of user-defined metadata
+> sizing_fn = (span_x, span_y, load, material) -> ShapedSlabResult(0.20u"m", 5.0u"kPa")
+> slab = ShapedSlab(sizing_fn)
+> spanning_behavior(slab)        # TwoWaySpanning()
+> required_materials(slab)       # ()
 > ```
 
 ## Overview
@@ -15,8 +15,9 @@ that fall outside the standard type hierarchy.  The user supplies a `sizing_fn`
 that takes span, load, and material inputs and returns a `ShapedSlabResult` with
 volume, self-weight, and optional thickness function.
 
-Two example sizing functions are provided: `tapered_slab_fn` (thick edges,
-thin center) and `coffered_slab_fn` (ribs with voids).
+Two internal example sizing functions are provided in source for reference:
+`tapered_slab_fn` (thick edges, thin center) and `coffered_slab_fn`
+(ribs with voids).
 
 **Source:** `StructuralSizer/src/slabs/codes/custom/shaped.jl`
 
@@ -27,18 +28,18 @@ See `ShapedSlab` and `ShapedSlabResult` in
 
 ## Functions
 
-- `tapered_slab_fn(span_x, span_y, load, material)` — example sizing function for a slab that is thicker at edges and thinner at center. Returns a `ShapedSlabResult`.
-- `coffered_slab_fn(span_x, span_y, load, material)` — example sizing function for a coffered slab with orthogonal ribs and voids. Returns a `ShapedSlabResult`.
+- `ShapedSlab(sizing_fn)` — exported type constructor for custom slab behavior.
+- `ShapedSlabResult(vol, sw)` — exported result constructor for custom slab output.
 
 ## Implementation Details
 
 ### ShapedSlab Dispatch
 
-The `ShapedSlab` struct carries a `sizing_fn::Function` field.  When
-`_size_span_floor(slab::ShapedSlab, ...)` is called, it delegates to:
+The `ShapedSlab` struct carries a `sizing_fn::Function` field. The internal
+sizing dispatch delegates to:
 
 ```julia
-slab.sizing_fn(span_x, span_y, load, material) → ShapedSlabResult
+slab.sizing_fn(span_x, span_y, load, material) -> ShapedSlabResult
 ```
 
 The `ShapedSlabResult` stores:
@@ -70,7 +71,7 @@ embedded in the user's `sizing_fn`.  The function receives:
 | `span_x` | `Length` | Span in the x-direction |
 | `span_y` | `Length` | Span in the y-direction |
 | `load` | `Pressure` | Total factored load |
-| `material` | `ConcreteMaterial` | Material properties |
+| `material` | `AbstractMaterial` | Material properties passed through to `sizing_fn` |
 
 ## Limitations & Future Work
 

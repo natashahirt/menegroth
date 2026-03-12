@@ -3,9 +3,8 @@
 > ```julia
 > using StructuralSizer
 > opts = FlatPlateOptions(method=DDM(:full))
-> result = size_flat_plate!(struc, slab, column_opts; method=opts.method, opts=opts)
-> punching_ok(result.slab_result)    # true / false
-> deflection_ratio(result.slab_result)
+> method_name(opts.method)                     # "DDM"
+> min_thickness(FlatPlate(), 20.0u"ft")        # ACI minimum thickness
 > ```
 
 ## Quick Start
@@ -13,21 +12,16 @@
 ```julia
 using StructuralSizer
 
-# Design a flat plate slab (uses DDM by default)
-result = size_flat_plate!(struc, slab, ConcreteColumnOptions())
+# Method presets for structure-level sizing
+opts_ddm = FlatPlateOptions(method=DDM())
+opts_efm = FlatPlateOptions(method=EFM())
+opts_fea = FlatPlateOptions(method=FEA())
 
-# With EFM analysis (more accurate for irregular layouts)
-opts = FlatPlateOptions(method=EFM())
-result = size_flat_plate!(struc, slab, ConcreteColumnOptions(); method=EFM(), opts=opts)
+# Minimum-thickness check at a target span
+h_min = min_thickness(FlatPlate(), 20.0u"ft")
 
-# With FEA (shell mesh; for irregular layouts or shell-level accuracy)
-opts = FlatPlateOptions(method=FEA())
-result = size_flat_plate!(struc, slab, ConcreteColumnOptions(); method=FEA(), opts=opts)
-
-# Check results
-result.thickness           # Final slab depth
-punching_ok(result)        # All columns pass punching?
-deflection_ok(result)      # Deflection within limit?
+# Full slab design is reached through size_slab!/size_slabs! once a structure is initialized.
+# Example: size_slab!(struc, slab_idx; options=opts_ddm, column_opts=ConcreteColumnOptions())
 ```
 
 ## Overview

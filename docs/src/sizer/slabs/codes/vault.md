@@ -2,11 +2,12 @@
 
 > ```julia
 > using StructuralSizer
-> opts = VaultOptions(lambda_bounds=(0.05, 0.15), thickness_bounds=(0.05u"m", 0.20u"m"))
-> result = _size_span_floor(Vault(), 8.0u"m", 0.5u"kPa", 2.0u"kPa"; options=opts)
-> result.rise            # final arch rise (after elastic shortening)
-> result.thrust_dead     # horizontal thrust per unit width
-> is_adequate(result)    # stress + deflection + convergence
+> result = optimize_vault(8.0u"m", 0.5u"kN/m^2", 2.0u"kN/m^2";
+>                         lambda_bounds=(8.0, 15.0),
+>                         thickness_bounds=(50u"mm", 200u"mm"))
+> result.rise
+> result.thickness
+> result.status
 > ```
 
 ## Quick Start
@@ -20,10 +21,13 @@ result.rise       # Optimal rise
 result.thickness  # Optimal thickness
 result.status     # :optimal, :feasible, :infeasible
 
-# Evaluate fixed geometry
-opts = VaultOptions(lambda=12.0, thickness=75u"mm")
-result = _size_span_floor(Vault(), 6.0u"m", 1.0u"kN/m^2", 2.0u"kN/m^2"; options=opts)
-is_adequate(result)  # All checks pass?
+# Optimize thickness for a fixed lambda
+result = optimize_vault(6.0u"m", 1.0u"kN/m^2", 2.0u"kN/m^2";
+                        lambda=12.0, thickness_bounds=(50u"mm", 150u"mm"))
+
+# Optimize rise for a fixed thickness
+result = optimize_vault(6.0u"m", 1.0u"kN/m^2", 2.0u"kN/m^2";
+                        thickness=75u"mm", lambda_bounds=(10.0, 20.0))
 ```
 
 ## Overview
@@ -59,7 +63,7 @@ vault_volume_per_area
 | Function | Description | API Level |
 |:---------|:-----------|:----------|
 | `optimize_vault` | Find optimal geometry | **Public** |
-| `_size_span_floor(::Vault)` | Evaluate fixed geometry | Internal |
+| `_size_span_floor(::Vault)` | Evaluate fixed geometry | Internal (called from `size_slab!`) |
 | `vault_stress_symmetric` | Stress/thrust under full UDL | Internal |
 | `vault_stress_asymmetric` | Stress/thrust under half-span live | Internal |
 | `solve_equilibrium_rise` | Elastic shortening iteration | Internal |
@@ -105,7 +109,8 @@ optimize_vault(span, sdl, live; thickness=75u"mm")  # Fixed t, optimize rise
 
 ### Analytical API (Fixed Geometry)
 
-For evaluating a specific geometry with both rise and thickness fixed:
+For evaluating a specific geometry with both rise and thickness fixed, the
+internal vault sizing path is used from the structure-level API.
 
 ```julia
 opts = VaultOptions(
@@ -113,21 +118,22 @@ opts = VaultOptions(
     thickness = 75u"mm",
 )
 
-result = _size_span_floor(Vault(), span, sdl, live; options=opts)
+# Internal path triggered by structure-level sizing:
+# size_slab!(struc, slab_idx; options=opts)
+# (returns a VaultResult in slab.result)
 
 # VaultResult fields
-result.thickness         # Shell thickness
-result.rise              # Final rise (after elastic shortening)
-result.initial_rise      # Design rise (before shortening)
-result.thrust_dead       # Horizontal thrust (dead) [kN/m]
-result.thrust_live       # Horizontal thrust (live) [kN/m]
-result.σ_max             # Governing stress [MPa]
-result.governing_case    # :symmetric or :asymmetric
+# result.thickness      # Shell thickness
+# result.rise           # Final rise (after elastic shortening)
+# result.thrust_dead    # Horizontal thrust (dead) [kN/m]
+# result.thrust_live    # Horizontal thrust (live) [kN/m]
+# result.σ_max          # Governing stress [MPa]
+# result.governing_case # :symmetric or :asymmetric
 
 # Design checks
-result.stress_check.ok       # Stress ≤ allowable?
-result.deflection_check.ok   # Rise reduction acceptable?
-is_adequate(result)          # All checks pass?
+# result.stress_check.ok       # Stress ≤ allowable?
+# result.deflection_check.ok   # Rise reduction acceptable?
+# is_adequate(result)          # All checks pass?
 ```
 
 ## Implementation Details
@@ -261,7 +267,7 @@ Rise specification (four mutually exclusive forms):
 
 | Parameter | Description |
 |:----------|:------------|
-| `lambda_bounds` | Rise-to-span ratio bounds, e.g., `(0.05, 0.15)` |
+| `lambda_bounds` | Span-to-rise ratio bounds (`λ = span/rise`), e.g., `(10.0, 20.0)` |
 | `rise_bounds` | Explicit rise bounds in length units |
 | `lambda` | Fixed rise-to-span ratio |
 | `rise` | Fixed rise value |
@@ -270,7 +276,7 @@ Additional options:
 
 | Parameter | Default | Description |
 |:----------|:--------|:------------|
-| `thickness_bounds` | `(0.03m, 0.30m)` | Shell thickness bounds |
+| `thickness_bounds` | `(2.0u"inch", 4.0u"inch")` | Shell thickness bounds |
 | `thickness` | `nothing` | Fixed thickness (skips optimization) |
 | `allowable_stress` | ``0.45 f'_c`` | Maximum compressive stress |
 | `deflection_limit` | ``L/240`` | Maximum allowable rise deflection |

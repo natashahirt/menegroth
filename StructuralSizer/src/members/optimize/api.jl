@@ -72,7 +72,7 @@ function size_columns(
     Pu::Vector,
     Mux::Vector,
     geometries::Vector,
-    opts::SteelColumnOptions;
+    opts::SteelMemberOptions;
     Muy::Vector = zeros_like(Mux),
     Vu_strong::Vector = zeros_like(Mux),
     δ_max_vec::Union{Nothing, Vector} = nothing,
@@ -106,9 +106,8 @@ function size_columns(
     demands = [MemberDemand(i; Pu_c=Pu_N[i], Mux=Mux_Nm[i], Muy=Muy_Nm[i],
                                Vu_strong=Vus_N[i], δ_max=δ_m[i], I_ref=Ir_m4[i]) for i in 1:n]
     
-    # Create checker (pass deflection_limit from options)
     checker = AISCChecker(; max_depth = opts.max_depth,
-                            deflection_limit = opts.deflection_limit)
+                            deflection_limit = _deflection_limit(opts))
     
     # Optimize — multi-material if materials vector is provided
     if !isnothing(opts.materials)
@@ -446,7 +445,7 @@ end
 # ==============================================================================
 
 """
-    size_beams(Mu, Vu, geometries, opts::SteelMemberOptions; δ_max_vec, I_ref_vec, ...)
+    size_beams(Mu, Vu, geometries, opts::SteelBeamOptions; δ_max_vec, I_ref_vec, ...)
 
 Size steel beams using discrete catalog optimization.
 
@@ -471,7 +470,7 @@ Without `δ_max_vec`/`I_ref_vec`, the deflection check is skipped even if
 - `Mu`: Vector of factored moments — any moment unit (N·m, kN·m, kip·ft, etc.)
 - `Vu`: Vector of factored shears — any force unit
 - `geometries`: Member geometries (span via `SteelMemberGeometry`)
-- `opts`: `SteelBeamOptions` (alias for `SteelMemberOptions`)
+- `opts`: `SteelBeamOptions`
 
 # Keyword Arguments
 - `δ_max_vec`: Max deflection from analysis for each beam (length unit, e.g. m or inch).
@@ -506,7 +505,7 @@ function size_beams(
     Mu::Vector,
     Vu::Vector,
     geometries::Vector,
-    opts::SteelMemberOptions;
+    opts::SteelBeamOptions;
     δ_max_vec::Union{Nothing, Vector} = nothing,
     I_ref_vec::Union{Nothing, Vector} = nothing,
     mip_gap::Real = 1e-4,
@@ -741,7 +740,7 @@ based on the options type:
 | `PixelFrameColumnOptions`  | arg1=Pu, arg2=Mux    | `size_columns`   |
 | `PixelFrameBeamOptions`    | arg1=Mu, arg2=Vu     | `size_beams`     |
 
-For `SteelMemberOptions` (where `SteelColumnOptions === SteelBeamOptions`),
+For steel options (`SteelColumnOptions` / `SteelBeamOptions`),
 call `size_columns` or `size_beams` directly since the type system cannot
 distinguish the two cases.
 

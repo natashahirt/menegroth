@@ -283,7 +283,7 @@ const MOI = JuMP.MOI
         # Beam defaults
         b = SteelBeamOptions()
         @test b.material === A992_Steel
-        @test b.deflection_limit === nothing
+        @test b.deflection_limit ≈ 1/360
     end
     
     # =========================================================================

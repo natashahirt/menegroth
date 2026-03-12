@@ -5,4 +5,4 @@
 
 include("interface.jl")   # AbstractCapacityChecker, AbstractCapacityCache
 include("objectives.jl")  # AbstractObjective, MinVolume, MinWeight, etc.
-include("options.jl")     # SteelMemberOptions (+ aliases), ConcreteColumnOptions, ConcreteBeamOptions, NLP options
+include("options.jl")     # SteelColumnOptions, SteelBeamOptions, ConcreteColumnOptions, ConcreteBeamOptions, NLP options

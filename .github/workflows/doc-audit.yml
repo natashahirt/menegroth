@@ -4,12 +4,6 @@ on:
   schedule:
     - cron: '0 5 * * *'  # 00:00 EST / 05:00 UTC daily
   workflow_dispatch:       # allow manual trigger from GitHub UI
-  push:
-    branches: [main]
-    paths:
-      - 'StructuralSizer/src/**'
-      - 'StructuralSynthesizer/src/**'
-      - 'docs/**'
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
@@ -80,6 +74,7 @@ jobs:
             COUNT=$(echo "$CHANGED" | wc -l)
             echo "Changes detected in $COUNT files:"
             echo "$CHANGED"
+            echo "$CHANGED" > doc_audit_changed_files.txt
             echo "has_changes=true" >> "$GITHUB_OUTPUT"
           fi
 
@@ -93,7 +88,20 @@ jobs:
         env:
           CURSOR_API_KEY: ${{ secrets.CURSOR_API_KEY }}
         run: |
-          PROMPT=$(cat scripts/prompts/doc-audit.md)
+          # Build full prompt: base instructions + list of changed files for prioritization
+          cat scripts/prompts/doc-audit.md > full_prompt.txt
+          echo "" >> full_prompt.txt
+          echo "---" >> full_prompt.txt
+          echo "" >> full_prompt.txt
+          echo "## Changed files (prioritize these)" >> full_prompt.txt
+          echo "" >> full_prompt.txt
+          echo "Focus the audit on the following paths that changed in the last 24 hours. Prioritize these files and their direct doc/source references; for other files, do a lighter pass or skip unless you find obvious issues." >> full_prompt.txt
+          echo "" >> full_prompt.txt
+          echo '```' >> full_prompt.txt
+          cat doc_audit_changed_files.txt >> full_prompt.txt
+          echo '```' >> full_prompt.txt
+          PROMPT=$(cat full_prompt.txt)
+
           REPO_URL="https://github.com/${{ github.repository }}"
           BRANCH="cursor/doc-audit-$(date +%Y-%m-%d)"
 

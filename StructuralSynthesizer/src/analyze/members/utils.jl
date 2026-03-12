@@ -1084,7 +1084,7 @@ Size beams, dispatching on material (steel vs concrete) and method (:discrete / 
 # Dispatch Table
 | Options type         | method     | Implementation                           |
 |:---------------------|:-----------|:-----------------------------------------|
-| SteelMemberOptions   | :discrete  | `size_steel_members!`                    |
+| SteelBeamOptions     | :discrete  | `size_steel_members!`                    |
 | ConcreteBeamOptions  | :discrete  | MIP via `size_beams` or `size_tbeams`    |
 | ConcreteBeamOptions  | :nlp       | NLP via `size_rc_beams_nlp` / `_tbeams`  |
 
@@ -1141,7 +1141,7 @@ end
 # --- Steel beams (discrete) ---
 function _size_beams_impl!(
     struc::BuildingStructure,
-    opts::StructuralSizer.SteelMemberOptions,
+    opts::StructuralSizer.SteelBeamOptions,
     ::Val{:discrete};
     resolution::Int,
     reanalyze::Bool,

@@ -7,6 +7,15 @@ Audit all Markdown files under `docs/src/` against the Julia source code in
 The docs should be accurate enough that a user can copy-paste a Quick Start
 example and have it run without modification.
 
+## Scope (when "Changed files" is provided)
+
+If a **Changed files** list appears at the end of this prompt, **prioritize**
+those paths and any doc pages or source files that reference them. For those,
+apply the full audit (API accuracy, structural consistency, stale limitations,
+etc.). For all other files, do a lighter pass: only fix obvious errors or skip
+unless you find clear discrepancies. This keeps the audit focused on what
+actually changed.
+
 ---
 
 ## 1. API Accuracy (highest priority)
@@ -132,6 +141,11 @@ Once all changes are committed, send a summary to the Slack channel
 - Number of files changed
 - Brief description of each fix (grouped by category: API accuracy, stale
   limitations, math formatting, etc.)
+- **Recommendations for API cleanup** — a short, actionable list of improvements
+  you noticed but did not implement (docs-only). Examples: naming inconsistencies,
+  missing or redundant exports, schema/validation clarity, deprecated patterns,
+  or doc/source mismatches that would require code changes. Keep each item
+  one line so the team can triage.
 - Any loose ends or ambiguities you encountered but could not resolve — flag
   these clearly so they can be addressed manually.
 

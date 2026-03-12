@@ -344,7 +344,7 @@ export SteelHSSBeamNLPProblem, build_hss_beam_nlp_result
 export size_steel_hss_beam_nlp, size_steel_hss_beams_nlp
 
 # --- Sizing options ---
-export SteelMemberOptions, SteelColumnOptions, SteelBeamOptions
+export SteelColumnOptions, SteelBeamOptions, SteelMemberOptions
 export ConcreteColumnOptions, ConcreteBeamOptions
 export NLPColumnOptions, NLPHSSOptions, NLPWOptions, NLPBeamOptions
 export ColumnOptions, BeamOptions, MemberOptions

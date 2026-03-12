@@ -1,9 +1,6 @@
 # Use official Julia image
 FROM julia:1.12.4
 
-# PackageCompiler needs a C compiler + linker to build the sysimage.
-RUN apt-get update && apt-get install -y --no-install-recommends gcc libc6-dev && rm -rf /var/lib/apt/lists/*
-
 # Set working directory
 WORKDIR /app
 
@@ -41,12 +38,14 @@ COPY scripts/api ./scripts/api
 # Precompile Oxygen + HTTP so the bootstrap binds quickly.
 RUN julia --project=StructuralSynthesizer -e 'using Oxygen; using HTTP'
 
-# Build custom sysimage so cold start is "load sysimage" instead of many .ji files.
-# PackageCompiler is added only at build time (not in Project.toml).
-RUN julia --project=StructuralSynthesizer -e 'using Pkg; Pkg.add("PackageCompiler")'
-
-# Sysimage build (timeout 45 min; typically 15–30 min).
-RUN timeout 2700 julia --project=StructuralSynthesizer scripts/api/build_sysimage.jl /app/sys.so
+# Precompile StructuralSynthesizer + register routes so runtime startup is fast.
+# This layer is cached until source or Project.toml files change.
+# Timeout after 30 min: if it hangs (e.g. InteractiveUtils), the build fails.
+RUN timeout 1800 julia --project=StructuralSynthesizer -e '\
+  using StructuralSynthesizer; \
+  Base.invokelatest(register_routes!); \
+  @info "Build-time warmup complete"' \
+  || { echo "ERROR: build-time warmup timed out or failed"; exit 1; }
 
 # Expose port (AWS App Runner sets PORT env var)
 EXPOSE 8080
@@ -57,4 +56,4 @@ ENV SIZER_HOST=0.0.0.0
 # Optional: set GRB_LICENSE_CONTENTS at runtime to write gurobi.lic; then start the API
 RUN chmod +x /app/scripts/api/docker_entry.sh
 ENTRYPOINT ["/app/scripts/api/docker_entry.sh"]
-CMD ["julia", "-J", "/app/sys.so", "--project=StructuralSynthesizer", "scripts/api/sizer_bootstrap.jl"]
+CMD ["julia", "--project=StructuralSynthesizer", "scripts/api/sizer_bootstrap.jl"]

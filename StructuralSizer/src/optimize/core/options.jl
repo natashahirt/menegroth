@@ -13,63 +13,103 @@
 # ACI design rules differ significantly (P-M interaction vs flexure/shear).
 
 # ==============================================================================
-# Steel Member Options (columns + beams)
+# Steel Column Options
 # ==============================================================================
 
 """
-    SteelMemberOptions
+    SteelColumnOptions
 
-Configuration for steel member sizing (columns **and** beams).
+Configuration for steel column sizing (AISC 360 P-M interaction).
 
-The same AISC checker + MIP optimizer serves both, so one struct covers both
-use-cases.  The type aliases `SteelColumnOptions` and `SteelBeamOptions` are
-provided for readability; they are the *same* type.
+Columns are governed by axial + flexural interaction — there is no member-level
+deflection limit (story drift is checked at the system level, not here).
 
 # Example
 ```julia
-# Columns — W shapes, A992
 opts = SteelColumnOptions()
-
-# HSS columns with depth limit
 opts = SteelColumnOptions(section_type = :hss, max_depth = 0.4)
-
-# Floor beams with L/360 deflection check
-opts = SteelBeamOptions(deflection_limit = 1/360)
-
-# Roof beams — relaxed deflection
-opts = SteelBeamOptions(deflection_limit = 1/240)
 ```
 
 # Fields
 - `material`: Steel grade (default: A992_Steel)
+- `materials`: Vector of grades for multi-material MIP (default: nothing)
 - `section_type`: `:w`, `:hss`, `:pipe`, `:w_and_hss` (default: `:w`)
 - `catalog`: `:common`, `:preferred`, `:all` (default: `:preferred`)
 - `custom_catalog`: Custom section vector (overrides catalog)
-- `max_depth`: Maximum depth in meters (default: Inf)
-- `deflection_limit`: L/δ ratio for serviceability, e.g. `1/360`.
-  `nothing` = no deflection check (default: `nothing`)
+- `max_depth`: Maximum depth (default: Inf)
 - `n_max_sections`: Limit unique sections, 0 = no limit (default: 0)
 - `objective`: MinVolume(), MinWeight(), MinCost(), MinCarbon() (default: MinVolume())
 - `optimizer`: `:auto`, `:highs`, `:gurobi` (default: `:auto`)
 """
-Base.@kwdef struct SteelMemberOptions
+Base.@kwdef struct SteelColumnOptions
     material::StructuralSteel = A992_Steel
-    materials::Union{Nothing, Vector{<:StructuralSteel}} = nothing  # multi-material MIP
-    section_type::Symbol = :w           # :w, :hss, :pipe, :w_and_hss
-    catalog::Symbol = :preferred        # :common, :preferred, :all
+    materials::Union{Nothing, Vector{<:StructuralSteel}} = nothing
+    section_type::Symbol = :w
+    catalog::Symbol = :preferred
     custom_catalog::Union{Nothing, Vector} = nothing
     max_depth::Length = Inf * u"m"
-    deflection_limit::Union{Nothing, Float64} = nothing  # L/δ (beams)
-    n_max_sections::Int = 0             # 0 = no limit
+    n_max_sections::Int = 0
     objective::AbstractObjective = MinVolume()
-    optimizer::Symbol = :auto           # :auto, :highs, :gurobi
+    optimizer::Symbol = :auto
 end
 
-"""Alias — steel columns and beams share the same AISC checker."""
-const SteelColumnOptions = SteelMemberOptions
+# ==============================================================================
+# Steel Beam Options
+# ==============================================================================
 
-"""Alias — steel columns and beams share the same AISC checker."""
-const SteelBeamOptions = SteelMemberOptions
+"""
+    SteelBeamOptions
+
+Configuration for steel beam sizing (AISC 360 flexure + shear + deflection).
+
+Beams default to L/360 live-load deflection check. The deflection constraint
+is only enforced when `δ_max`/`I_ref` are provided in the demand (from Asap
+FEM or via `size_beams` kwargs). Set `deflection_limit = nothing` to opt out.
+
+# Example
+```julia
+# Floor beams — L/360 is the default
+opts = SteelBeamOptions()
+
+# Roof beams — relaxed deflection
+opts = SteelBeamOptions(deflection_limit = 1/240)
+
+# Strength only (opt out of deflection)
+opts = SteelBeamOptions(deflection_limit = nothing)
+```
+
+# Fields
+- `material`: Steel grade (default: A992_Steel)
+- `materials`: Vector of grades for multi-material MIP (default: nothing)
+- `section_type`: `:w`, `:hss`, `:pipe`, `:w_and_hss` (default: `:w`)
+- `catalog`: `:common`, `:preferred`, `:all` (default: `:preferred`)
+- `custom_catalog`: Custom section vector (overrides catalog)
+- `max_depth`: Maximum depth (default: Inf)
+- `deflection_limit`: L/δ ratio for serviceability (default: `1/360`).
+  Set `nothing` to disable. Only enforced when `δ_max`/`I_ref` are present.
+- `n_max_sections`: Limit unique sections, 0 = no limit (default: 0)
+- `objective`: MinVolume(), MinWeight(), MinCost(), MinCarbon() (default: MinVolume())
+- `optimizer`: `:auto`, `:highs`, `:gurobi` (default: `:auto`)
+"""
+Base.@kwdef struct SteelBeamOptions
+    material::StructuralSteel = A992_Steel
+    materials::Union{Nothing, Vector{<:StructuralSteel}} = nothing
+    section_type::Symbol = :w
+    catalog::Symbol = :preferred
+    custom_catalog::Union{Nothing, Vector} = nothing
+    max_depth::Length = Inf * u"m"
+    deflection_limit::Union{Nothing, Float64} = 1/360
+    n_max_sections::Int = 0
+    objective::AbstractObjective = MinVolume()
+    optimizer::Symbol = :auto
+end
+
+"""Union of steel column and beam options for shared dispatch paths."""
+const SteelMemberOptions = Union{SteelColumnOptions, SteelBeamOptions}
+
+"""Get deflection_limit: beams have it, columns return nothing."""
+_deflection_limit(opts::SteelBeamOptions) = opts.deflection_limit
+_deflection_limit(opts::SteelColumnOptions) = nothing
 
 # ==============================================================================
 # Concrete Column Options
@@ -685,26 +725,37 @@ end
 # ==============================================================================
 
 """Column sizing options (steel, concrete, or PixelFrame)."""
-const ColumnOptions = Union{SteelMemberOptions, ConcreteColumnOptions, PixelFrameColumnOptions}
+const ColumnOptions = Union{SteelColumnOptions, ConcreteColumnOptions, PixelFrameColumnOptions}
 
 """Beam sizing options (steel, concrete, or PixelFrame)."""
-const BeamOptions = Union{SteelMemberOptions, ConcreteBeamOptions, PixelFrameBeamOptions}
+const BeamOptions = Union{SteelBeamOptions, ConcreteBeamOptions, PixelFrameBeamOptions}
 
 """Any member sizing options."""
-const MemberOptions = Union{SteelMemberOptions, ConcreteColumnOptions, ConcreteBeamOptions,
-                            PixelFrameBeamOptions, PixelFrameColumnOptions}
+const MemberOptions = Union{SteelColumnOptions, SteelBeamOptions, ConcreteColumnOptions,
+                            ConcreteBeamOptions, PixelFrameBeamOptions, PixelFrameColumnOptions}
 
 # ==============================================================================
 # Display
 # ==============================================================================
 
-"""Compact display for `SteelMemberOptions`."""
-function Base.show(io::IO, opts::SteelMemberOptions)
+"""Compact display for `SteelColumnOptions`."""
+function Base.show(io::IO, opts::SteelColumnOptions)
     mat_str = material_name(opts.material)
     sec_type = uppercase(string(opts.section_type))
-    print(io, "SteelMemberOptions(", mat_str, " ", sec_type)
+    print(io, "SteelColumnOptions(", mat_str, " ", sec_type)
     isfinite(opts.max_depth) && print(io, ", max_depth=", opts.max_depth)
-    !isnothing(opts.deflection_limit) && print(io, ", L/", Int(round(1/opts.deflection_limit)))
+    opts.n_max_sections > 0 && print(io, ", n_max=", opts.n_max_sections)
+    print(io, ")")
+end
+
+"""Compact display for `SteelBeamOptions`."""
+function Base.show(io::IO, opts::SteelBeamOptions)
+    mat_str = material_name(opts.material)
+    sec_type = uppercase(string(opts.section_type))
+    print(io, "SteelBeamOptions(", mat_str, " ", sec_type)
+    isfinite(opts.max_depth) && print(io, ", max_depth=", opts.max_depth)
+    dl = _deflection_limit(opts)
+    !isnothing(dl) && print(io, ", L/", Int(round(1/dl)))
     opts.n_max_sections > 0 && print(io, ", n_max=", opts.n_max_sections)
     print(io, ")")
 end

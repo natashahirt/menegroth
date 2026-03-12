@@ -329,7 +329,7 @@ Base.@kwdef mutable struct DesignParameters
     # ─── Fire Protection (steel members only) ───
     # Controls the type of fire protection coating applied to steel members.
     # Ignored for concrete elements (fire resistance is intrinsic via cover/thickness).
-    # Override per-member via SteelMemberOptions.fire_protection.
+    # Override per-member via SteelBeamOptions/SteelColumnOptions fire_protection.
     fire_protection::StructuralSizer.FireProtection = StructuralSizer.SFRM()
     
     # ─── Member Sizing Options ───

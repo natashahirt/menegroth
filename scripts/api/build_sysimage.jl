@@ -28,7 +28,7 @@ PackageCompiler.create_sysimage(
     sysimage_path=out_path,
     precompile_execution_file=precompile_file,
     project=project_dir,
-    cpu_target="generic;sandybridge,-xsaveopt,clone_all;haswell,-rdrnd,base(1)",
+    cpu_target="generic",
 )
 
 @info "Sysimage built successfully" path=out_path

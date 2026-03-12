@@ -988,13 +988,13 @@ ccmp_rc_circ_area = ustrip(u"mm^2", section_area(ccmp_rc_circ_sec))
 
 # Steel W
 ccmp_sw = size_columns([ccmp_Pu], [ccmp_Mu],
-    [SteelMemberGeometry(ccmp_L; Kx=1.0, Ky=1.0)], SteelMemberOptions(section_type=:w))
+    [SteelMemberGeometry(ccmp_L; Kx=1.0, Ky=1.0)], SteelColumnOptions(section_type=:w))
 ccmp_sw_sec = ccmp_sw.sections[1]
 ccmp_sw_area = ustrip(u"mm^2", section_area(ccmp_sw_sec))
 
 # Steel HSS
 ccmp_sh = size_columns([ccmp_Pu], [ccmp_Mu],
-    [SteelMemberGeometry(ccmp_L; Kx=1.0, Ky=1.0)], SteelMemberOptions(section_type=:hss))
+    [SteelMemberGeometry(ccmp_L; Kx=1.0, Ky=1.0)], SteelColumnOptions(section_type=:hss))
 ccmp_sh_sec = ccmp_sh.sections[1]
 ccmp_sh_area = ustrip(u"mm^2", section_area(ccmp_sh_sec))
 

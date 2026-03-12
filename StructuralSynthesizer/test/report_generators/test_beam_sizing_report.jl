@@ -2473,6 +2473,7 @@ hd_Mu = 200.0u"kN*m"
 hd_Vu = 50.0u"kN"
 hd_L  = 10.0  # m
 hd_L_ft = uconvert(u"ft", hd_L * u"m")
+hd_L_in = uconvert(u"inch", hd_L * u"m")
 hd_w_DL = 1.0u"kip/ft"
 hd_w_LL = 0.8u"kip/ft"
 hd_Es   = 29000.0u"ksi"
@@ -2503,7 +2504,7 @@ hd_coeff = 5 * hd_L_ft^4 / (384 * hd_Es)
 hd_sw_δ_DL = uconvert(u"inch", hd_coeff * hd_w_DL / hd_sw_sec.Ix)
 hd_sw_δ_LL = uconvert(u"inch", hd_coeff * hd_w_LL / hd_sw_sec.Ix)
 hd_sw_δ_tot = hd_sw_δ_DL + hd_sw_δ_LL
-hd_sw_δ_LL_ratio = hd_L_ft / hd_sw_δ_LL
+hd_sw_δ_LL_ratio = hd_L_in / hd_sw_δ_LL
 
 # ── 17.3c  Composite W — lightest from preferred catalog (strength search) ──
 hd_comp_slab = SolidSlabOnBeam(
@@ -2544,7 +2545,7 @@ hd_comp_defl = check_composite_deflection(
 hd_comp_δ_DL  = uconvert(u"inch", hd_comp_defl.δ_DL)
 hd_comp_δ_LL  = uconvert(u"inch", hd_comp_defl.δ_LL)
 hd_comp_δ_tot = uconvert(u"inch", hd_comp_defl.δ_total)
-hd_comp_δ_LL_ratio = hd_L_ft / hd_comp_δ_LL
+hd_comp_δ_LL_ratio = uconvert(u"inch", hd_L_ft) / hd_comp_δ_LL
 
 # ── Extract display values ──
 hd_Mu_kNm = ustrip(u"kN*m", hd_Mu)
@@ -2600,7 +2601,7 @@ hd_saving = (hd_sw_wt_plf - hd_comp_wt_plf) / hd_sw_wt_plf * 100
 hd_str_δ_LL = uconvert(u"inch", hd_coeff * hd_w_LL / hd_sw_str_sec.Ix)
 hd_str_δ_DL = uconvert(u"inch", hd_coeff * hd_w_DL / hd_sw_str_sec.Ix)
 hd_str_δ_tot = hd_str_δ_DL + hd_str_δ_LL
-hd_str_δ_LL_ratio = hd_L_ft / hd_str_δ_LL
+hd_str_δ_LL_ratio = hd_L_in / hd_str_δ_LL
 hd_str_Ix_in4 = ustrip(u"inch^4", hd_sw_str_sec.Ix)
 
 @printf("    %-22s  %16.1f  %16.1f  %16.1f\n", "Ix or I_LB (in⁴)",

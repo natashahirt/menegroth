@@ -39,25 +39,27 @@ compute_geometry_hash
 
 `json_to_params(params::APIParams) → DesignParameters` maps JSON string identifiers to Julia types:
 
-| JSON String | Julia Type |
-|:------------|:-----------|
-| `"flat_plate"` | `FlatPlate` |
-| `"flat_slab"` | `FlatSlab` |
-| `"one_way"` | `OneWay` |
-| `"composite_deck"` | `CompositeDeck` |
-| `"vault"` | `Vault` |
-| `"clt"` | `CLT` |
-| `"rc"` | RC material options |
-| `"steel"` | Steel material options |
-| `"fc4000"` | `Concrete(fc = 4000psi)` |
-| `"fc5000"` | `Concrete(fc = 5000psi)` |
-| `"A992"` | `A992_Steel()` |
-| `"gr60"` | `GR60_Rebar()` |
-| `"weight"` | `MinWeight()` |
-| `"carbon"` | `MinCarbon()` |
-| `"ddm"` | `DDM()` |
-| `"efm"` | `EFM()` |
-| `"fea"` | `FEA()` |
+| JSON Field | JSON String | Julia Result |
+|:-----------|:------------|:-------------|
+| `floor_type` | `"flat_plate"` | `FlatPlateOptions(...)` |
+| `floor_type` | `"flat_slab"` | `FlatSlabOptions(...)` |
+| `floor_type` | `"vault"` | `VaultOptions(...)` |
+| `column_type` | `"rc_rect"` | `ConcreteColumnOptions(section_shape=:rect)` |
+| `column_type` | `"rc_circular"` | `ConcreteColumnOptions(section_shape=:circular)` |
+| `column_type` | `"steel_w"` | `SteelColumnOptions(...)` |
+| `beam_type` | `"steel_w"` | `SteelBeamOptions(section_type=:w)` |
+| `beam_type` | `"steel_hss"` | `SteelBeamOptions(section_type=:hss)` |
+| `beam_type` | `"rc_rect"` | `ConcreteBeamOptions(include_flange=false)` |
+| `beam_type` | `"rc_tbeam"` | `ConcreteBeamOptions(include_flange=true)` |
+| `materials.concrete` | `"NWC_4000"` | `NWC_4000` |
+| `materials.concrete` | `"NWC_5000"` | `NWC_5000` |
+| `materials.steel` | `"A992"` | `A992_Steel` |
+| `materials.rebar` | `"Rebar_60"` | `Rebar_60` |
+| `optimize_for` | `"weight"` | `:weight` |
+| `optimize_for` | `"carbon"` | `:carbon` |
+| `floor_options.method` | `"DDM"` | `DDM()` |
+| `floor_options.method` | `"EFM"` | `EFM()` |
+| `floor_options.method` | `"FEA"` | `FEA()` |
 
 ### design_to_json
 

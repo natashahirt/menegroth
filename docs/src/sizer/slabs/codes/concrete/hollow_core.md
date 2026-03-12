@@ -2,7 +2,7 @@
 
 > ```julia
 > using StructuralSizer
-> result = size_floor(HollowCore(), 10.0u"m", 0.5u"kPa", 2.4u"kPa";
+> result = _size_span_floor(HollowCore(), 10.0u"m", 0.5u"kPa", 2.4u"kPa";
 >                     fire_rating=2)
 > total_depth(result)   # plank depth
 > self_weight(result)   # kN/m²

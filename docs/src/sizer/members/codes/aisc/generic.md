@@ -34,10 +34,15 @@ check_PM_interaction
 
 `check_PM_interaction(Pu, Mu, ϕPn, ϕMn)` — uniaxial P-M interaction check per H1-1:
 
-- When `Pr/ϕPn ≥ 0.2`: `ur = Pr/ϕPn + (8/9)(Mr/ϕMn) ≤ 1.0` (H1-1a)
-- When `Pr/ϕPn < 0.2`: `ur = Pr/(2ϕPn) + Mr/ϕMn ≤ 1.0` (H1-1b)
+```math
+\text{H1-1a:}\quad \frac{P_r}{\phi P_n} + \frac{8}{9}\frac{M_r}{\phi M_n} \leq 1.0 \qquad \left(\frac{P_r}{\phi P_n} \geq 0.2\right)
+```
 
-Returns the utilization ratio `ur`. A convenience overload accepts section, material, and length arguments and internally computes `ϕPn` and `ϕMn`.
+```math
+\text{H1-1b:}\quad \frac{P_r}{2\,\phi P_n} + \frac{M_r}{\phi M_n} \leq 1.0 \qquad \left(\frac{P_r}{\phi P_n} < 0.2\right)
+```
+
+Returns the utilization ratio. A convenience overload accepts section, material, and length arguments and internally computes ``\phi P_n`` and ``\phi M_n``.
 
 ```@docs
 check_PMxMy_interaction
@@ -68,9 +73,11 @@ compute_Pe1
 
 `compute_Pe1(E, I, Lc1)` — elastic critical buckling load for the member in the plane of bending (A-8-5):
 
-`Pe1 = π²EI / Lc1²`
+```math
+P_{e1} = \frac{\pi^2 E I}{L_{c1}^2}
+```
 
-where `Lc1 = K₁L` is the effective length in the plane of bending.
+where ``L_{c1} = K_1 L`` is the effective length in the plane of bending.
 
 ```@docs
 compute_B1
@@ -78,7 +85,9 @@ compute_B1
 
 `compute_B1(Pr, Pe1, Cm; α=1.0)` — nonsway amplification factor (A-8-3):
 
-`B1 = Cm / (1 - α Pr/Pe1) ≥ 1.0`
+```math
+B_1 = \frac{C_m}{1 - \alpha\,P_r / P_{e1}} \geq 1.0
+```
 
 A convenience overload accepts `(Pr, E, I, L, M1, M2; K=1.0, α=1.0, transverse_loading=false)` and internally computes `Cm` and `Pe1`.
 
@@ -108,7 +117,9 @@ compute_B2
 
 `compute_B2(Pstory, Pe_story; α=1.0)` — sway amplification factor (A-8-6):
 
-`B2 = 1 / (1 - α Pstory/Pe_story) ≥ 1.0`
+```math
+B_2 = \frac{1}{1 - \alpha\,P_{\text{story}} / P_{e,\text{story}}} \geq 1.0
+```
 
 A convenience overload accepts `(Pstory, H, L, ΔH; Pmf=0.0, α=1.0)` and internally computes `RM` and `Pe_story`.
 
@@ -118,9 +129,11 @@ amplify_moments
 
 `amplify_moments(Mnt, Mlt, B1, B2)` — required flexural strength (A-8-1):
 
-`Mr = B1 × Mnt + B2 × Mlt`
+```math
+M_r = B_1 M_{nt} + B_2 M_{lt}
+```
 
-where `Mnt` is the nonsway moment and `Mlt` is the sway (lateral translation) moment.
+where ``M_{nt}`` is the nonsway moment and ``M_{lt}`` is the sway (lateral translation) moment.
 
 ```@docs
 amplify_axial
@@ -128,7 +141,9 @@ amplify_axial
 
 `amplify_axial(Pnt, Plt, B2)` — required axial strength (A-8-2):
 
-`Pr = Pnt + B2 × Plt`
+```math
+P_r = P_{nt} + B_2 P_{lt}
+```
 
 ## Implementation Details
 

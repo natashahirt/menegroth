@@ -37,12 +37,12 @@ capture_design
 
 ```julia
 struct PipelineStage
-    fn::Function     # closure: (struc, params) -> nothing
+    fn::Function     # closure: (struc) -> nothing (params are captured)
     needs_sync::Bool # if true, sync_asap! is called after this stage
 end
 ```
 
-The pipeline runner iterates through stages, calling `stage.fn(struc, params)` and optionally re-solving the FEM model with `sync_asap!` when `needs_sync == true`.
+The pipeline runner iterates through stages, calling `stage.fn(struc)` (params are closed over when the stage is built) and optionally re-solving the FEM model with `sync_asap!` when `needs_sync == true`.
 
 ### Stages by Floor Type
 

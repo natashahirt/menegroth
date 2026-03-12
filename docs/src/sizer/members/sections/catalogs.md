@@ -185,7 +185,7 @@ RC catalogs accept keyword arguments to control the sweep ranges.
 For optimization over multiple concrete grades or steel grades, use `expand_catalog_with_materials`:
 
 ```julia
-expanded, sec_idx, mat_idx = expand_catalog_with_materials(catalog, [NWC_4000(), NWC_5000()])
+expanded, sec_idx, mat_idx = expand_catalog_with_materials(catalog, [NWC_4000, NWC_5000])
 ```
 
 This creates a Cartesian product of sections × materials for the MIP optimizer.

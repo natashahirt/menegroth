@@ -2,7 +2,7 @@
 
 > ```julia
 > struc = BuildingStructure(skeleton)
-> initialize!(struc; loads = office_loads, floor_type = FlatPlate)
+> initialize!(struc; loads = office_loads, floor_type = :flat_plate)
 > col = struc.columns[1]
 > col.base.section       # current section assignment
 > member_length(col)     # total member length

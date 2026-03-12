@@ -137,8 +137,8 @@ value  = ustrip(u"ksi", stress)  # Strip only at final boundary
 | Constant | Value | Description |
 |----------|-------|-------------|
 | `GRAVITY` | 9.80665 m/s² | Standard gravity (from Asap) |
-| `DL_FACTOR` | 1.2 | ASCE 7 dead load factor |
-| `LL_FACTOR` | 1.6 | ASCE 7 live load factor |
+
+Dead/live load factors are accessed via `LoadCombination` presets (e.g., `strength_1_2D_1_6L.D`, `strength_1_2D_1_6L.L`).
 
 ## Dispatch Model
 

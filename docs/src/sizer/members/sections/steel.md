@@ -2,9 +2,9 @@
 
 > ```julia
 > using StructuralSizer
-> w = get_w_section("W14X22")
+> w = W("W14X22")
 > println("A = $(section_area(w)), Ix = $(Ix(w))")
-> asap = to_asap_section(w, A992())
+> asap = to_asap_section(w, A992_Steel)
 > ```
 
 ## Overview
@@ -16,6 +16,10 @@ Sections are defined in `StructuralSizer/src/members/sections/steel/`.
 ## Key Types
 
 ### W Shapes (Doubly-Symmetric I-Sections)
+
+```@docs
+ISymmSection
+```
 
 **`ISymmSection <: AbstractSection`** is a mutable struct representing doubly-symmetric I-shapes (W, S, M, HP series). Input geometry fields:
 
@@ -46,6 +50,10 @@ Additional fields:
 
 ### Rectangular HSS
 
+```@docs
+HSSRectSection
+```
+
 **`HSSRectSection <: AbstractRectHollowSection`** represents rectangular or square HSS shapes. Input geometry:
 
 | Field | Description |
@@ -59,6 +67,10 @@ Derived geometry uses the AISC convention for clear dimensions (`h = H - 3t`, `b
 Section properties: `A`, `Ix`, `Iy`, `Sx`, `Sy`, `Zx`, `Zy`, `J`, `rx`, `ry`
 
 ### Round HSS
+
+```@docs
+HSSRoundSection
+```
 
 **`HSSRoundSection <: AbstractRoundHollowSection`** represents round HSS (pipe) shapes. All section properties are symmetric about every axis:
 

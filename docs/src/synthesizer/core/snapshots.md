@@ -58,7 +58,6 @@ Snapshots are stored in the structure's `_snapshots` dictionary, keyed by `Symbo
 | Key | Used By | Purpose |
 |:----|:--------|:--------|
 | `:prepare` | `prepare!` / `design_building` | Restore after design pipeline |
-| `:default` | General use | User-specified save points |
 
 ### Deep Copy Semantics
 

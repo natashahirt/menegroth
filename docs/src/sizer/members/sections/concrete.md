@@ -17,6 +17,10 @@ Reinforcement is modeled through `RebarLocation` objects that carry bar position
 
 ### RC Beam Section
 
+```@docs
+RCBeamSection
+```
+
 **`RCBeamSection{T<:Length, A<:Area}`** represents a singly or doubly reinforced rectangular concrete beam:
 
 | Field | Description |
@@ -31,6 +35,10 @@ Reinforcement is modeled through `RebarLocation` objects that carry bar position
 | `stirrup_size` | Transverse reinforcement bar designation |
 
 ### RC T-Beam Section
+
+```@docs
+RCTBeamSection
+```
 
 **`RCTBeamSection{T<:Length, A<:Area}`** extends the rectangular beam model with a T-shaped cross-section for slab-beam systems:
 
@@ -49,6 +57,10 @@ Reinforcement is modeled through `RebarLocation` objects that carry bar position
 
 ### RC Column Section (Rectangular)
 
+```@docs
+RCColumnSection
+```
+
 **`RCColumnSection{T<:Length, A<:Area}`** represents a rectangular RC column with arbitrary bar layout:
 
 | Field | Description |
@@ -63,6 +75,10 @@ Reinforcement is modeled through `RebarLocation` objects that carry bar position
 
 ### RC Circular Section
 
+```@docs
+RCCircularSection
+```
+
 **`RCCircularSection{T<:Length, A<:Area}`** represents a circular RC column:
 
 | Field | Description |
@@ -76,6 +92,10 @@ Reinforcement is modeled through `RebarLocation` objects that carry bar position
 | `tie_type` | `:spiral` or `:tied` |
 
 ### PixelFrame Section
+
+```@docs
+PixelFrameSection
+```
 
 **`PixelFrameSection`** is a novel cross-section type that uses pixel-based material assignment for fiber-reinforced concrete members:
 

@@ -7,7 +7,7 @@
 
 ## Overview
 
-The Grasshopper client is a Rhino Grasshopper component (`SizerRun.cs`) that connects the parametric modeling environment to the Structural Synthesizer API. Designers define building geometry in Grasshopper using standard Rhino primitives (points, lines, surfaces) and the component sends the geometry and parameters to the Julia API for structural design.
+The Grasshopper client is a Rhino Grasshopper component (`SizerRun.cs`) that connects the parametric modeling environment to the menegroth API. Designers define building geometry in Grasshopper using standard Rhino primitives (points, lines, surfaces) and the component sends the geometry and parameters to the Julia API for structural design.
 
 **Source:** `grasshopper/StructuralSizer.GH/Components/SizerRun.cs`
 

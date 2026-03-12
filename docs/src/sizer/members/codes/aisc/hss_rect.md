@@ -2,8 +2,8 @@
 
 > ```julia
 > using StructuralSizer
-> hss = get_hss_section("HSS8X4X1/4")
-> mat = A500GrC()
+> hss = HSS("HSS8X4X1/4")
+> mat = A992_Steel  # Fy = 50 ksi (same as A500 Gr. C for rect HSS)
 > ϕMn = get_ϕMn(hss, mat; Lb=10u"ft")
 > ϕPn = get_ϕPn(hss, mat, 10u"ft")
 > ```
@@ -38,8 +38,8 @@ get_Mn
 
 `get_Mn(s::HSSRectSection, mat; Lb, Cb=1.0, axis=:strong)` — nominal flexural strength. Limit states:
 
-1. **Yielding (F7-1):** `Mp = Fy × Zx`
-2. **Flange local buckling (F7-2, F7-3):** for noncompact flanges, linear interpolation between Mp and `Fy × Se`; for slender flanges, `Se` from effective width (F7-3, F7-4)
+1. **Yielding (F7-1):** ``M_p = F_y \times Z_x``
+2. **Flange local buckling (F7-2, F7-3):** for noncompact flanges, linear interpolation between ``M_p`` and ``F_y S_e``; for slender flanges, ``S_e`` from effective width (F7-3, F7-4)
 3. **Web local buckling (F7-5, F7-6):** analogous treatment for web slenderness
 
 HSS sections are not susceptible to LTB (closed cross-section).
@@ -74,11 +74,17 @@ get_ϕVn
 get_Vn
 ```
 
-`get_Vn(s::HSSRectSection, mat; axis=:strong)` — nominal shear strength per G4-1: `Vn = 0.6 Fy Aw Cv2` where `Aw = 2 h t` for strong-axis shear. The Cv2 coefficient follows G2.2 with `kv = 5.0`:
+`get_Vn(s::HSSRectSection, mat; axis=:strong)` — nominal shear strength per G4-1:
 
-- `h/t ≤ 1.10√(kv E/Fy)`: `Cv2 = 1.0`
-- `1.10√(kv E/Fy) < h/t ≤ 1.37√(kv E/Fy)`: `Cv2 = 1.10√(kv E/Fy) / (h/t)`
-- `h/t > 1.37√(kv E/Fy)`: `Cv2 = 1.51 kv E / ((h/t)² Fy)`
+```math
+V_n = 0.6\,F_y\,A_w\,C_{v2}
+```
+
+where ``A_w = 2ht`` for strong-axis shear. The ``C_{v2}`` coefficient follows G2.2 with ``k_v = 5.0``:
+
+```math
+C_{v2} = \begin{cases} 1.0 & h/t \leq 1.10\sqrt{k_v E / F_y} \\ \dfrac{1.10\sqrt{k_v E / F_y}}{h/t} & 1.10\sqrt{k_v E / F_y} < h/t \leq 1.37\sqrt{k_v E / F_y} \\ \dfrac{1.51\,k_v\,E}{(h/t)^2\,F_y} & h/t > 1.37\sqrt{k_v E / F_y} \end{cases}
+```
 
 ### Torsion (AISC §H3)
 
@@ -116,7 +122,9 @@ check_combined_torsion_interaction
 
 `check_combined_torsion_interaction(Pr, Mr, Vr, Tr, Pc, Mc, Vc, Tc)` — combined loading interaction per H3-6:
 
-`(Pr/Pc + Mr/Mc)² + (Vr/Vc + Tr/Tc)² ≤ 1.0`
+```math
+\left(\frac{P_r}{P_c} + \frac{M_r}{M_c}\right)^2 + \left(\frac{V_r}{V_c} + \frac{T_r}{T_c}\right)^2 \leq 1.0
+```
 
 ```@docs
 can_neglect_torsion
@@ -142,9 +150,11 @@ get_slenderness
 
 For slender elements under compression or flexure, the effective width approach (E7-3, E7-5) reduces the element width to account for local buckling:
 
-`be = b (1 - c₁√(Fel/f)) √(Fel/f)`
+```math
+b_e = b\left(1 - c_1\sqrt{\frac{F_{el}}{f}}\right)\sqrt{\frac{F_{el}}{f}}
+```
 
-where `Fel = c₂ kE / (b/t)²` with `c₁ = 0.18`, `c₂ = 1.31` from Table E7.1 for HSS walls. For flexure, effective section modulus `Se` is computed from the reduced cross-section.
+where ``F_{el} = c_2\,k\,E / (b/t)^2`` with ``c_1 = 0.18``, ``c_2 = 1.31`` from Table E7.1 for HSS walls. For flexure, effective section modulus `Se` is computed from the reduced cross-section.
 
 ### Shear Area Convention
 

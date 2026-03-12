@@ -1,10 +1,10 @@
 # Slab Analysis
 
 > ```julia
-> initialize_cells!(struc; loads = office_loads, floor_type = FlatPlate)
-> initialize_slabs!(struc)
+> initialize_cells!(struc; loads = office_loads)
+> initialize_slabs!(struc; floor_type = :flat_plate)
 > compute_cell_tributaries!(struc)
-> size_slabs!(struc, params)
+> size_slabs!(struc; options = floor_opts)
 > ```
 
 ## Overview

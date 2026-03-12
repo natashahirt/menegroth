@@ -4,7 +4,7 @@
 > to_asap!(struc; params = design_params)
 > struc.asap_model  # Asap.Model — solved frame model
 > sync_asap!(struc; params = design_params)  # re-solve after section changes
-> build_analysis_model!(design; load_combination = :service)
+> build_analysis_model!(design; load_combination = service)
 > ```
 
 ## Overview
@@ -54,7 +54,7 @@ This is more efficient than `to_asap!` for iterative design because the topology
 
 ### Pattern Loading
 
-When `params.pattern_loading == true`, the analysis applies pattern loading per ACI 318-11 §13.7.6:
+When `params.pattern_loading` is not `:none`, the analysis applies pattern loading per ACI 318-11 §13.7.6:
 - Factored dead load on all spans
 - Factored live load on alternate spans to maximize positive and negative moments
 - The pattern loading threshold is L/D > 0.5 per ACI 318-11 §13.7.6.2
@@ -85,7 +85,7 @@ When `params.pattern_loading == true`, the analysis applies pattern loading per 
 | `diaphragm_mode` | Diaphragm modeling approach | `:none` |
 | `diaphragm_E` | Diaphragm elastic modulus | Concrete E |
 | `diaphragm_ν` | Diaphragm Poisson's ratio | 0.2 |
-| `pattern_loading` | Enable pattern loading | `false` |
+| `pattern_loading` | Pattern loading mode (`:none`, `:checkerboard`, `:auto`) | `:none` |
 
 ## Limitations & Future Work
 

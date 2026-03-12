@@ -2,8 +2,8 @@
 
 > ```julia
 > using StructuralSizer
-> w = get_w_section("W14X22")
-> mat = A992()
+> w = W("W14X22")
+> mat = A992_Steel
 > ϕMn = get_ϕMn(w, mat; Lb=12u"ft", Cb=1.0)
 > ϕPn = get_ϕPn(w, mat, 12u"ft")
 > println("ϕMn = $ϕMn, ϕPn = $ϕPn")
@@ -84,19 +84,23 @@ ratio = check_PMxMy_interaction(Pu, Mux, Muy, ϕPn, ϕMnx, ϕMny)
 
 `get_Mn(s::ISymmSection, mat; Lb, Cb=1.0, axis=:strong)` — returns the nominal flexural strength. For strong-axis bending, this is the minimum of:
 
-1. **Yielding (F2-1):** `Mp = Fy × Zx`
-2. **Lateral-torsional buckling (F2-2, F2-3, F2-4):** depends on `Lb` relative to `Lp` and `Lr`
+1. **Yielding (F2-1):** ``M_p = F_y \times Z_x``
+2. **Lateral-torsional buckling (F2-2, F2-3, F2-4):** depends on ``L_b`` relative to ``L_p`` and ``L_r``
 3. **Flange local buckling (F3-1, F3-2):** for noncompact or slender flanges
 
-For weak-axis bending (§F6): `Mp = min(Fy × Zy, 1.6 × Fy × Sy)` with FLB reductions for noncompact/slender flanges.
+For weak-axis bending (§F6): ``M_p = \min(F_y Z_y,\; 1.6\,F_y S_y)`` with FLB reductions for noncompact/slender flanges.
 
 ```@docs
 get_Lp_Lr
 ```
 
 `get_Lp_Lr(s, mat)` — limiting unbraced lengths for LTB:
-- `Lp = 1.76 ry √(E/Fy)` (F2-5)
-- `Lr` from Eq. F2-6 using `rts`, `J`, `Sx`, `ho`
+
+```math
+L_p = 1.76\,r_y\sqrt{\frac{E}{F_y}} \qquad \text{(F2-5)}
+```
+
+``L_r`` from Eq. F2-6 using ``r_{ts}``, ``J``, ``S_x``, ``h_o``.
 
 ```@docs
 get_Fcr_LTB
@@ -104,7 +108,9 @@ get_Fcr_LTB
 
 `get_Fcr_LTB(s, mat, Lb; Cb)` — elastic LTB critical stress (F2-4):
 
-`Fcr = Cb π²E / (Lb/rts)² × √(1 + 0.078 (J c)/(Sx ho) (Lb/rts)²)`
+```math
+F_{cr} = \frac{C_b \pi^2 E}{\left(\dfrac{L_b}{r_{ts}}\right)^2} \sqrt{1 + 0.078 \frac{Jc}{S_x h_o} \left(\frac{L_b}{r_{ts}}\right)^2}
+```
 
 ### Compression (AISC §E3, §E4, §E7)
 
@@ -118,10 +124,16 @@ get_Fcr_LTB
 - Local buckling reductions via Q factor (E7) for slender elements
 
 Critical stress per E3-2/E3-3:
-- `Fy/Fe ≤ 2.25`: `Fcr = 0.658^(Fy/Fe) × Fy`
-- `Fy/Fe > 2.25`: `Fcr = 0.877 × Fe`
 
-`get_Fe_flexural(s, mat, L; axis)` — Euler buckling stress (E3-4): `Fe = π²E / (KL/r)²`
+```math
+F_{cr} = \begin{cases} 0.658^{F_y/F_e} \, F_y & F_y/F_e \leq 2.25 \\ 0.877\,F_e & F_y/F_e > 2.25 \end{cases}
+```
+
+`get_Fe_flexural(s, mat, L; axis)` — Euler buckling stress (E3-4):
+
+```math
+F_e = \frac{\pi^2 E}{\left(\dfrac{KL}{r}\right)^2}
+```
 
 `get_Fe_torsional(s, mat, Lz)` — torsional/flexural-torsional buckling stress (E4-4).
 
@@ -131,7 +143,13 @@ Critical stress per E3-2/E3-3:
 
 `get_ϕVn(s::ISymmSection, mat; axis=:strong, ϕ=nothing)` — design shear strength. Default `ϕ = 1.0` for rolled shapes per G2.1(a).
 
-`get_Vn(s::ISymmSection, mat; axis=:strong)` — nominal shear strength: `Vn = 0.6 Fy Aw Cv1` (G2-1), where `Aw = d × tw` (full-depth web area per AISC §G2.1).
+`get_Vn(s::ISymmSection, mat; axis=:strong)` — nominal shear strength (G2-1):
+
+```math
+V_n = 0.6\,F_y\,A_w\,C_{v1}
+```
+
+where ``A_w = d \times t_w`` (full-depth web area per AISC §G2.1).
 
 ```@docs
 get_Cv1
@@ -266,7 +284,7 @@ const_check = check_construction(section, material, 200.0u"kip*ft", 50.0u"kip";
 - Negative Mn: I3.2b with Asr × Fysr
 - I\_transformed / I\_LB: Commentary I3.2, AISC Manual Eq. C-I3-1 (Y2 method)
 
-## Limitations & Assumptions
+## Limitations & Future Work
 
 ### Not Implemented
 
@@ -301,7 +319,7 @@ const_check = check_construction(section, material, 200.0u"kip*ft", 50.0u"kip";
 
 | Section | Supported | Not Supported |
 |:--------|:----------|:--------------|
-| W-shapes | Compression, flexure, shear, tension | Torsion (use HSS for significant torsion) |
+| W-shapes | Compression, flexure, shear, tension, torsion (DG9) | HSS preferred when torsion dominates |
 | HSS Rect | All including torsion | — |
 | HSS Round | All including torsion | — |
 | Channels, WT, Angles | — | Not yet implemented |

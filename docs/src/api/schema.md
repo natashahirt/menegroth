@@ -17,11 +17,11 @@ The top-level input object sent to `POST /design` and `POST /validate`.
 
 | Field | Type | Required | Description |
 |:------|:-----|:---------|:------------|
-| `units` | `String` | yes | Unit system: `"imperial"` or `"metric"` |
+| `units` | `String` | yes | Coordinate units: `"feet"`, `"inches"`, `"meters"`, or `"mm"` |
 | `vertices` | `Vector{Vector{Float64}}` | yes | 3D vertex coordinates `[[x,y,z], ...]` |
 | `edges` | `APIEdgeGroups` | yes | Edge connectivity by group |
 | `supports` | `Vector{Int}` | yes | Vertex indices with support conditions |
-| `stories_z` | `Vector{Float64}` | yes | Story elevation Z coordinates |
+| `stories_z` | `Vector{Float64}` | no | Story elevation Z coordinates (inferred from vertices if omitted) |
 | `faces` | `APIFaceGroups` | no | Face definitions by group (auto-detected if omitted) |
 | `params` | `APIParams` | yes | Design parameters |
 | `geometry_hash` | `String` | no | Precomputed geometry hash for caching |
@@ -59,11 +59,11 @@ A dictionary mapping face group names to face vertex lists:
 | `floor_type` | `String` | `"flat_plate"` | Floor system type |
 | `floor_options` | `APIFloorOptions` | — | Floor-specific options |
 | `materials` | `APIMaterials` | — | Material selections |
-| `column_type` | `String` | `"rc"` | `"rc"` or `"steel"` |
-| `beam_type` | `String` | `"rc"` | `"rc"` or `"steel"` |
+| `column_type` | `String` | `"rc_rect"` | `"rc_rect"`, `"rc_circular"`, or `"steel_w"` |
+| `beam_type` | `String` | `"steel_w"` | `"steel_w"`, `"steel_hss"`, `"rc_rect"`, or `"rc_tbeam"` |
 | `fire_rating` | `Float64` | `0.0` | Fire resistance in hours |
-| `optimize_for` | `String` | `"weight"` | `"weight"`, `"volume"`, `"cost"`, `"carbon"` |
-| `size_foundations` | `Bool` | `true` | Whether to size foundations |
+| `optimize_for` | `String` | `"weight"` | `"weight"`, `"carbon"`, or `"cost"` |
+| `size_foundations` | `Bool` | `false` | Whether to size foundations |
 | `foundation_soil` | `String` | `"medium_sand"` | Soil type name |
 
 See [`APIParams`](@ref) in [API Overview](overview.md).
@@ -85,9 +85,9 @@ See [`APIParams`](@ref) in [API Overview](overview.md).
 
 | Field | Type | Default | Description |
 |:------|:-----|:--------|:------------|
-| `method` | `String` | `"ddm"` | Analysis method: `"ddm"`, `"efm"`, `"fea"`, `"rule_of_thumb"` |
-| `deflection_limit` | `Float64` | `240.0` | L/n deflection limit |
-| `punching_strategy` | `String` | `"auto"` | `"auto"`, `"thicken"`, `"studs"`, `"drop_panel"` |
+| `method` | `String` | `"DDM"` | Analysis method: `"DDM"`, `"EFM"`, `"FEA"`, `"rule_of_thumb"` |
+| `deflection_limit` | `String` | `"L_360"` | Deflection limit: `"L_240"`, `"L_360"`, `"L_480"` |
+| `punching_strategy` | `String` | `"grow_columns"` | `"grow_columns"`, `"reinforce_first"`, `"reinforce_last"` |
 
 `APIFloorOptions` controls floor-specific design settings including the analysis method (DDM, EFM, FEA, or rule-of-thumb), deflection limits, and the punching shear mitigation strategy.
 
@@ -95,8 +95,8 @@ See [`APIParams`](@ref) in [API Overview](overview.md).
 
 | Field | Type | Default | Description |
 |:------|:-----|:--------|:------------|
-| `concrete` | `String` | `"fc4000"` | Concrete name (e.g., `"fc4000"`, `"fc5000"`) |
-| `rebar` | `String` | `"gr60"` | Rebar grade |
+| `concrete` | `String` | `"NWC_4000"` | Concrete name (e.g., `"NWC_4000"`, `"NWC_5000"`) |
+| `rebar` | `String` | `"Rebar_60"` | Rebar grade (e.g., `"Rebar_60"`, `"Rebar_75"`) |
 | `steel` | `String` | `"A992"` | Structural steel grade |
 
 `APIMaterials` selects the material grades for concrete, rebar, and structural steel used throughout the design.

@@ -3,7 +3,7 @@ using StructuralSynthesizer
 using StructuralSizer
 
 makedocs(
-    sitename = "Structural Synthesizer",
+    sitename = "menegroth",
     format = Documenter.HTML(prettyurls = get(ENV, "CI", "false") == "true"),
     pages = [
         "Home" => "index.md",

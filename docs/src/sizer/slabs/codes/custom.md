@@ -3,7 +3,7 @@
 > ```julia
 > using StructuralSizer
 > slab = ShapedSlab(tapered_slab_fn)
-> result = size_floor(slab, 8.0u"m", 0.5u"kPa", 2.4u"kPa"; span_y=6.0u"m")
+> result = _size_span_floor(slab, 8.0u"m", 0.5u"kPa", 2.4u"kPa"; span_y=6.0u"m")
 > result.volume_per_area   # concrete volume per plan area
 > result.custom            # Dict of user-defined metadata
 > ```

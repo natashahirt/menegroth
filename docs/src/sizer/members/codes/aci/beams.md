@@ -32,7 +32,7 @@ ACIBeamChecker
 | `max_depth` | Maximum beam depth constraint |
 | `w_dead_kplf` | Dead load for deflection check (kip/ft) |
 | `w_live_kplf` | Live load for deflection check (kip/ft) |
-| `defl_support` | Support condition for deflection (`:simple`, `:one_end`, `:both_ends`, `:cantilever`) |
+| `defl_support` | Support condition for deflection (`:simply_supported`, `:one_end_continuous`, `:both_ends_continuous`, `:cantilever`) |
 | `defl_ξ` | Time-dependent factor for sustained load deflection |
 
 ```@docs
@@ -58,7 +58,9 @@ stress_block_depth
 
 `stress_block_depth(As, fc, fy, b)` — Whitney stress block depth per §22.2.2.4:
 
-`a = As × fy / (0.85 × fc′ × b)`
+```math
+a = \frac{A_s \, f_y}{0.85 \, f'_c \, b}
+```
 
 ```@docs
 neutral_axis_depth
@@ -66,9 +68,11 @@ neutral_axis_depth
 
 `neutral_axis_depth(a, fc)` — neutral axis depth from stress block:
 
-`c = a / β₁`
+```math
+c = \frac{a}{\beta_1}
+```
 
-where `β₁` is determined from `fc′` per §22.2.2.4.3.
+where ``\beta_1`` is determined from ``f'_c`` per §22.2.2.4.3.
 
 ```@docs
 design_beam_flexure
@@ -76,9 +80,9 @@ design_beam_flexure
 
 `design_beam_flexure(Mu, b, d, fc, fy, Es; ...)` — complete flexural design. Returns required `As` (and `As_prime` if doubly reinforced). The algorithm:
 
-1. Compute required `Rn = Mu / (φ b d²)`
-2. Solve for reinforcement ratio `ρ`
-3. Check strain to ensure tension-controlled behavior (`εt ≥ 0.005`)
+1. Compute required ``R_n = M_u / (\phi \, b \, d^2)``
+2. Solve for reinforcement ratio ``\rho = \frac{0.85 f'_c}{f_y}\left(1 - \sqrt{1 - \frac{2 R_n}{0.85 f'_c}}\right)``
+3. Check strain to ensure tension-controlled behavior (``\varepsilon_t \geq 0.005``)
 4. If singly reinforced is insufficient, add compression steel
 
 ```@docs
@@ -106,9 +110,11 @@ Vc_beam
 
 `Vc_beam(bw, d, fc; λ=1.0, Nu=nothing, Ag=nothing)` — concrete shear capacity per Eq. 11-3 (ACI 318-14) / §22.5.5:
 
-`Vc = 2 λ √fc′ bw d`
+```math
+V_c = 2 \lambda \sqrt{f'_c} \, b_w \, d
+```
 
-When axial compression `Nu` is present, the modified formula applies.
+When axial compression ``N_u`` is present, the modified formula applies.
 
 ```@docs
 Vs_required
@@ -116,25 +122,31 @@ Vs_required
 
 `Vs_required(Vu, Vc; φ=0.75)` — required steel shear contribution:
 
-`Vs = Vu/φ - Vc`
+```math
+V_s = \frac{V_u}{\phi} - V_c
+```
 
 ```@docs
 Vs_max_beam
 ```
 
-`Vs_max_beam(bw, d, fc)` — maximum permitted `Vs` per §11.4.7.9:
+`Vs_max_beam(bw, d, fc)` — maximum permitted ``V_s`` per §11.4.7.9:
 
-`Vs_max = 8 √fc′ bw d`
+```math
+V_{s,\max} = 8 \sqrt{f'_c} \, b_w \, d
+```
 
 ```@docs
 design_stirrups
 ```
 
-`design_stirrups(Vs, d, fyt; bar_size=3)` — determines stirrup spacing for the required `Vs`:
+`design_stirrups(Vs, d, fyt; bar_size=3)` — determines stirrup spacing for the required ``V_s``:
 
-`s = Av × fyt × d / Vs`
+```math
+s = \frac{A_v \, f_{yt} \, d}{V_s}
+```
 
-Subject to ACI maximum spacing limits (d/2 or d/4 when `Vs > 4√fc′ bw d`).
+Subject to ACI maximum spacing limits (``d/2`` or ``d/4`` when ``V_s > 4\sqrt{f'_c}\, b_w\, d``).
 
 ```@docs
 design_beam_shear
@@ -150,9 +162,11 @@ threshold_torsion
 
 `threshold_torsion(Acp, pcp, fc_psi; λ=1.0, φ=0.75)` — torsion below which effects can be neglected (§11.5.1):
 
-`Tu_threshold = φ λ √fc′ (Acp²/pcp)`
+```math
+T_{u,\text{threshold}} = \phi \lambda \sqrt{f'_c} \frac{A_{cp}^2}{p_{cp}}
+```
 
-where `Acp` = area enclosed by outside perimeter, `pcp` = outside perimeter.
+where ``A_{cp}`` = area enclosed by outside perimeter, ``p_{cp}`` = outside perimeter.
 
 ```@docs
 cracking_torsion
@@ -160,7 +174,9 @@ cracking_torsion
 
 `cracking_torsion(Acp, pcp, fc_psi; λ=1.0)` — cracking torsion (§11.5.2.4):
 
-`Tcr = 4 λ √fc′ (Acp²/pcp)`
+```math
+T_{cr} = 4 \lambda \sqrt{f'_c} \frac{A_{cp}^2}{p_{cp}}
+```
 
 ```@docs
 torsion_transverse_reinforcement
@@ -168,7 +184,9 @@ torsion_transverse_reinforcement
 
 `torsion_transverse_reinforcement(Tu, Ao, fyt; θ=45°, φ=0.75)` — required transverse reinforcement for torsion (§11.5.3.6):
 
-`At/s = Tu / (2 φ Ao fyt cot θ)`
+```math
+\frac{A_t}{s} = \frac{T_u}{2 \phi \, A_o \, f_{yt} \cot\theta}
+```
 
 ```@docs
 torsion_longitudinal_reinforcement
@@ -176,7 +194,9 @@ torsion_longitudinal_reinforcement
 
 `torsion_longitudinal_reinforcement(At_s, ph, fyt, fy; θ=45°)` — required longitudinal reinforcement for torsion (§11.5.3.7):
 
-`Al = At/s × ph × (fyt/fy) × cot²θ`
+```math
+A_l = \frac{A_t}{s} \cdot p_h \cdot \frac{f_{yt}}{f_y} \cdot \cot^2\theta
+```
 
 ```@docs
 design_beam_torsion
@@ -198,7 +218,9 @@ effective_moment_of_inertia
 
 `effective_moment_of_inertia(Mcr, Ma, Ig, Icr)` — effective moment of inertia per Branson's equation (ACI 318-14 §24.2.3.5):
 
-`Ie = (Mcr/Ma)³ Ig + (1 - (Mcr/Ma)³) Icr ≤ Ig`
+```math
+I_e = \left(\frac{M_{cr}}{M_a}\right)^3 I_g + \left[1 - \left(\frac{M_{cr}}{M_a}\right)^3\right] I_{cr} \leq I_g
+```
 
 ```@docs
 effective_moment_of_inertia_bischoff
@@ -206,7 +228,9 @@ effective_moment_of_inertia_bischoff
 
 `effective_moment_of_inertia_bischoff(Mcr, Ma, Ig, Icr)` — Bischoff (2005) formulation, adopted in ACI 318-19 §24.2.3.5:
 
-`Ie = Icr / (1 - (1 - Icr/Ig)(Mcr/Ma)²) ≤ Ig`
+```math
+I_e = \frac{I_{cr}}{1 - \left(1 - \frac{I_{cr}}{I_g}\right)\left(\frac{M_{cr}}{M_a}\right)^2} \leq I_g
+```
 
 The Bischoff equation provides better accuracy for lightly reinforced sections and FRP-reinforced members.
 
@@ -233,7 +257,13 @@ Two methods are available for `Ie`:
 - **Branson** (default): traditional cubic interpolation, conservative for heavily reinforced sections
 - **Bischoff**: more accurate for lightly reinforced sections, adopted in ACI 318-19
 
-Long-term deflection multiplier: `λ_Δ = ξ / (1 + 50ρ′)` where `ξ` is the time-dependent factor (1.0 at 3 months, 2.0 at 5+ years).
+Long-term deflection multiplier:
+
+```math
+\lambda_\Delta = \frac{\xi}{1 + 50\rho'}
+```
+
+where ``\xi`` is the time-dependent factor (1.0 at 3 months, 2.0 at 5+ years).
 
 ## Options & Configuration
 
@@ -248,7 +278,7 @@ checker = ACIBeamChecker(
     max_depth = 36.0,
     w_dead_kplf = 1.0,
     w_live_kplf = 0.8,
-    defl_support = :simple,
+    defl_support = :simply_supported,
     defl_ξ = 2.0
 )
 ```

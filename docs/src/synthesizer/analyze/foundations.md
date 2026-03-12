@@ -5,7 +5,7 @@
 > initialize_foundations!(struc)
 > group_foundations_by_reaction!(struc; tolerance = 0.1)
 > size_foundations_grouped!(struc;
->     soil = medium_sand, concrete = fc4000, rebar = gr60)
+>     soil = medium_sand, concrete = NWC_4000, rebar = Rebar_60)
 > ```
 
 ## Overview
@@ -75,8 +75,8 @@ Foundation sizing is controlled by `FoundationParameters` in `DesignParameters`:
 | Parameter | Description | Default |
 |:----------|:------------|:--------|
 | `soil` | Soil bearing capacity and type | Required |
-| `concrete` | Foundation concrete material | `fc4000` |
-| `rebar` | Foundation reinforcement | `gr60` |
+| `concrete` | Foundation concrete material | `NWC_4000` |
+| `rebar` | Foundation reinforcement | `Rebar_60` |
 | `pier_width` | Minimum pedestal width | 12 in |
 | `min_depth` | Minimum footing depth | 12 in |
 | `group_tolerance` | Demand similarity threshold | 0.10 |

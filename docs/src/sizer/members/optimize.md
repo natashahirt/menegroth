@@ -2,7 +2,7 @@
 
 > ```julia
 > using StructuralSizer
-> opts = SteelColumnOptions(material=A992(), catalog=preferred_W(), K=1.0)
+> opts = SteelColumnOptions(material=A992_Steel)
 > results = size_columns(Pu, Mux, geometries, opts)
 > println("Selected: $(results.sections[1].name)")
 > ```
@@ -31,9 +31,8 @@ SteelColumnOptions
 
 | Field | Description |
 |:------|:------------|
-| `material` | Steel material (e.g. `A992()`) |
-| `catalog` | Section catalog (e.g. `preferred_W()`) |
-| `K` | Effective length factor |
+| `material` | Steel material (e.g. `A992_Steel`) |
+| `catalog` | Catalog symbol: `:common`, `:preferred`, `:all` |
 | `Cb` | Moment gradient factor |
 | `deflection_limit` | L/Δ limit (or `nothing`) |
 | `max_depth` | Maximum section depth |
@@ -53,8 +52,8 @@ ConcreteColumnOptions
 
 | Field | Description |
 |:------|:------------|
-| `grade` | Concrete grade (e.g. `NWC_4000()`) |
-| `section_shape` | `:square`, `:rectangular`, or `:circular` |
+| `grade` | Concrete grade (e.g. `NWC_4000`) |
+| `section_shape` | `:rect`, `:square`, `:rectangular`, or `:circular` |
 | `rebar_grade` | Rebar material |
 | `sizing_strategy` | `:catalog` or `:nlp` |
 | Other fields | Slenderness, biaxial, catalog parameters |
@@ -228,9 +227,8 @@ In the MIP formulation, all members in a group share the same section (one set o
 
 ```julia
 opts = SteelColumnOptions(
-    material = A992(),
-    catalog = preferred_W(),
-    K = 1.0,
+    material = A992_Steel,
+    catalog = :preferred,
     Cb = 1.0,
     deflection_limit = nothing,
     max_depth = Inf,
@@ -242,9 +240,9 @@ opts = SteelColumnOptions(
 
 ```julia
 opts = ConcreteColumnOptions(
-    grade = NWC_4000(),
-    rebar_grade = A615_60(),
-    section_shape = :square,
+    grade = NWC_4000,
+    rebar_grade = Rebar_60,
+    section_shape = :rect,
     sizing_strategy = :catalog
 )
 ```

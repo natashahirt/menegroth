@@ -3,10 +3,10 @@
 > ```julia
 > params = DesignParameters(
 >     loads = GravityLoads(floor_LL = 50psf, roof_LL = 20psf),
->     materials = MaterialOptions(concrete = fc4000, steel = A992),
+>     materials = MaterialOptions(concrete = NWC_4000, steel = A992_Steel),
 >     floor = FlatPlateOptions(method = DDM()),
 > )
-> modified = with(params; fire_rating = 2.0u"hr")
+> modified = with(params; fire_rating = 2.0)
 > ```
 
 ## Overview
@@ -48,18 +48,18 @@ compare_designs
 | `description` | `String` | Optional description |
 | `loads` | `GravityLoads` | Floor, roof, and grade loading |
 | `materials` | `MaterialOptions` | Material selections for concrete, rebar, steel, timber |
-| `fire_rating` | `TimeQuantity` | Required fire resistance (drives ACI 216.1 checks) |
+| `fire_rating` | `Float64` | Required fire resistance in hours (drives ACI 216.1 checks) |
 | `fire_protection` | `FireProtection` | Fire protection type for steel members (SFRM, intumescent) |
 | `columns` | options | Column type and configuration |
 | `beams` | options | Beam type and configuration |
 | `floor` | `AbstractFloorOptions` | Floor system options (method, deflection limit, punching strategy) |
-| `tributary_axis` | `Symbol` | Principal axis for one-way spanning |
+| `tributary_axis` | `Union{Nothing, Symbol, NTuple{2,Float64}}` | Override tributary partitioning (default: `nothing` = auto) |
 | `foundation_options` | `FoundationParameters` | Soil, concrete, rebar, depth, grouping tolerance |
 | `collinear_grouping` | `Bool` | When `true`, detect collinear members sharing a node with aligned direction and assign a shared group\_id before sizing (default `false`) |
-| `deflection_limit` | `Float64` | L/n deflection limit |
-| `optimize_for` | `AbstractObjective` | Optimization objective (MinWeight, MinVolume, MinCost, MinCarbon) |
+| `deflection_limit` | `Symbol` | Deflection limit (`:L_240`, `:L_360`, `:L_480`) |
+| `optimize_for` | `Symbol` | Optimization objective: `:weight`, `:carbon`, `:cost` |
 | `load_combinations` | `Vector{LoadCombination}` | Load combinations per ASCE 7 §2.3.1 |
-| `pattern_loading` | `Bool` | Enable pattern loading per ACI 318-11 §13.7.6 |
+| `pattern_loading` | `Symbol` | Pattern loading mode (`:none`, `:checkerboard`, `:auto`) |
 | `diaphragm_mode` | `Symbol` | Diaphragm stiffness model |
 | `diaphragm_E`, `diaphragm_ν` | `Float64` | Diaphragm elastic properties |
 | `default_frame_E`, `default_frame_G`, `default_frame_ρ` | quantities | Default frame material properties |
@@ -86,7 +86,7 @@ Groups material selections:
 | `rebar` | Foundation rebar |
 | `pier_width` | Minimum pier width |
 | `min_depth` | Minimum footing depth |
-| `group_tolerance` | Demand similarity for grouping (default 0.1) |
+| `group_tolerance` | Demand similarity for grouping (default 0.15) |
 
 ### BuildingDesign
 
@@ -96,10 +96,10 @@ Groups material selections:
 |:------|:------------|
 | `structure` | The `BuildingStructure` (snapshot of designed state) |
 | `params` | `DesignParameters` used |
-| `slabs` | `Vector{SlabDesignResult}` |
-| `columns` | `Vector{ColumnDesignResult}` |
-| `beams` | `Vector{BeamDesignResult}` |
-| `foundations` | `Vector{FoundationDesignResult}` |
+| `slabs` | `Dict{Int, SlabDesignResult}` |
+| `columns` | `Dict{Int, ColumnDesignResult}` |
+| `beams` | `Dict{Int, BeamDesignResult}` |
+| `foundations` | `Dict{Int, FoundationDesignResult}` |
 | `summary` | `DesignSummary` |
 | `asap_model` | Solved Asap model |
 | `created` | Timestamp |
@@ -125,7 +125,7 @@ The `with(params; kwargs...)` function creates a modified copy of `DesignParamet
 
 ```julia
 base = DesignParameters(loads = office_loads)
-study = [with(base; fire_rating = r) for r in [1.0u"hr", 1.5u"hr", 2.0u"hr"]]
+study = [with(base; fire_rating = r) for r in [1.0, 1.5, 2.0]]
 ```
 
 ## Options & Configuration

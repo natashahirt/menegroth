@@ -17,16 +17,12 @@ to have `E`, `G`, `ρ` properties.
 # Examples
 ```julia
 # Steel W-section
-w = get_w_section("W10X22")
-w.material = A992()
-asap_sec = to_asap_section(w)
-
-# With explicit material
-asap_sec = to_asap_section(w, A992())
+w = W("W10X22")
+asap_sec = to_asap_section(w, A992_Steel)
 
 # RC column (uses gross section properties)
 rc = RCColumnSection(b=16u"inch", h=16u"inch", bar_size=9, n_bars=8)
-asap_sec = to_asap_section(rc, NWC_4000())
+asap_sec = to_asap_section(rc, NWC_4000)
 ```
 """
 function to_asap_section end

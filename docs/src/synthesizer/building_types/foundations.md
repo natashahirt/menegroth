@@ -4,7 +4,7 @@
 > initialize_supports!(struc)
 > initialize_foundations!(struc)
 > group_foundations_by_reaction!(struc; tolerance = 0.1)
-> size_foundations_grouped!(struc; soil = medium_sand, concrete = fc4000)
+> size_foundations_grouped!(struc; soil = medium_sand, concrete = NWC_4000)
 > struc.foundations[1].result  # SpreadFootingResult
 > ```
 

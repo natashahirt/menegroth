@@ -22,25 +22,19 @@ validate_input
 
 ### Validation Checks
 
-`validate_input(input::APIInput)` performs the following checks and returns `(ok::Bool, errors::Vector{String})`:
+`validate_input(input::APIInput)` performs the following checks and returns a `ValidationResult` with `.ok::Bool` and `.errors::Vector{String}`:
 
 | Check | Description | Error Message |
 |:------|:------------|:-------------|
-| Units | `input.units` is `"imperial"` or `"metric"` | `"Invalid unit system: ..."` |
-| Vertices non-empty | At least one vertex is defined | `"No vertices provided"` |
-| Vertex dimensions | Each vertex has exactly 3 coordinates | `"Vertex N has M coordinates, expected 3"` |
-| Edge vertex refs | All edge vertex indices reference valid vertices | `"Edge [v1, v2] references invalid vertex"` |
-| Edge non-degenerate | No self-loops (v1 ≠ v2) | `"Edge [v, v] is degenerate"` |
-| Supports exist | Support vertex indices reference valid vertices | `"Support index N is out of range"` |
-| Supports non-empty | At least one support is defined | `"No supports provided"` |
-| Stories Z valid | `stories_z` is non-empty and sorted | `"stories_z must be sorted ascending"` |
-| Floor type valid | `params.floor_type` is a recognized type | `"Unknown floor type: ..."` |
-| Column type valid | `params.column_type` is `"rc"` or `"steel"` | `"Unknown column type: ..."` |
-| Beam type valid | `params.beam_type` is `"rc"` or `"steel"` | `"Unknown beam type: ..."` |
-| Material names | `params.materials.*` are recognized presets | `"Unknown concrete: ..."` |
-| Loads positive | All load values are non-negative | `"floor_LL_psf must be non-negative"` |
-| Fire rating range | `fire_rating` is between 0 and 4 hours | `"fire_rating must be 0–4 hours"` |
-| Optimization target | `optimize_for` is recognized | `"Unknown optimization target: ..."` |
+| Units | `input.units` is a recognized unit string (`"feet"`, `"inches"`, `"meters"`, `"mm"`) | Parse error from `parse_unit` |
+| Vertices | At least 4 vertices required; each has exactly 3 coordinates | `"Need at least 4 vertices (got N)"` |
+| Edges | At least one edge; each has 2 valid, non-degenerate vertex indices | `"Edge N: vertex index out of range"` |
+| Supports | At least one support; each index references a valid vertex | `"Support N: vertex index out of range"` |
+| Stories Z | If provided, at least 2 elevations required | `"If provided, need at least 2 story elevations"` |
+| Faces | If provided, each face has ≥ 3 vertices with 3 coordinates each | `"Face category[j] has N vertices (need ≥ 3)"` |
+| Fire rating | `fire_rating` is one of 0, 1, 1.5, 2, 3, 4 | `"Invalid fire_rating. Must be one of: 0, 1, 1.5, 2, 3, 4"` |
+| Optimization target | `optimize_for` is `"weight"`, `"carbon"`, or `"cost"` | `"Invalid optimize_for. Must be: weight, carbon, or cost"` |
+| Material names | `params.materials.concrete`, `.rebar`, `.steel` are recognized presets | `"Unknown concrete/rebar/steel: ..."` |
 
 ### Validation Response
 

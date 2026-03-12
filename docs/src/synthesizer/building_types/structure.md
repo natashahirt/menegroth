@@ -16,7 +16,9 @@
 
 ## Key Types
 
-`BuildingStructure` — wraps a `BuildingSkeleton` with all structural data needed for analysis and design: cells, slabs, segments, beams, columns, struts, supports, foundations, tributary caches, and the Asap FEM model.
+```@docs
+BuildingStructure
+```
 
 ## Functions
 

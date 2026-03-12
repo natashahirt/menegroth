@@ -177,8 +177,8 @@ Fire protection tables provide:
   columns (§4.5.3)
 - Minimum column dimension (Table 4.5.1a)
 
-Aggregate types: `:siliceous` (conservative), `:carbonate`, `:sand_lightweight`,
-`:lightweight`.
+Aggregate types: `siliceous` (conservative), `carbonate`, `sand_lightweight`,
+`lightweight` (enum values, not symbols).
 
 ## Limitations & Future Work
 

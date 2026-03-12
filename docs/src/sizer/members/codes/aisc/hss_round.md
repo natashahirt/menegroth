@@ -2,8 +2,8 @@
 
 > ```julia
 > using StructuralSizer
-> hss = get_hss_round_section("HSS6.000X0.250")
-> mat = A500GrC()
+> hss = HSSRound("HSS6.000X0.250")
+> mat = A992_Steel  # Fy = 50 ksi (same as A500 Gr. C for HSS)
 > ϕMn = get_ϕMn(hss, mat; Lb=8u"ft")
 > ϕVn = get_ϕVn(hss, mat)
 > ```
@@ -28,11 +28,18 @@ Round HSS checks use the same `AISCChecker` type as other steel sections — dis
 
 `get_Mn(s::HSSRoundSection, mat; Lb, Cb=1.0, axis=:strong)` — nominal flexural strength. Limit states:
 
-1. **Yielding (F8-1):** `Mp = Fy × Z`
-2. **Local buckling (F8-2):** for noncompact sections (`0.07 E/Fy < D/t ≤ 0.31 E/Fy`):
-   `Mn = (0.021 E/(D/t) + Fy) × S`
-3. **Local buckling (F8-3):** for slender sections (`D/t > 0.31 E/Fy`):
-   `Mn = 0.33 E / (D/t) × S`
+1. **Yielding (F8-1):** ``M_p = F_y \times Z``
+2. **Local buckling (F8-2):** for noncompact sections (``0.07\,E/F_y < D/t \leq 0.31\,E/F_y``):
+
+```math
+M_n = \left(\frac{0.021\,E}{D/t} + F_y\right) S
+```
+
+3. **Local buckling (F8-3):** for slender sections (``D/t > 0.31\,E/F_y``):
+
+```math
+M_n = \frac{0.33\,E}{D/t}\,S
+```
 
 Round HSS are not susceptible to LTB (closed circular cross-section).
 
@@ -48,7 +55,9 @@ Round HSS are not susceptible to LTB (closed circular cross-section).
 
 When `D/t > 0.11 E/Fy`, the effective area is reduced:
 
-`Ae = Ag (2/3 + 0.038 (E/Fy)/(D/t))`
+```math
+A_e = A_g\left(\frac{2}{3} + 0.038\,\frac{E/F_y}{D/t}\right)
+```
 
 ### Shear (AISC §G5/G6)
 
@@ -58,9 +67,13 @@ When `D/t > 0.11 E/Fy`, the effective area is reduced:
 
 `get_Vn(s::HSSRoundSection, mat; Lv=nothing, axis=:strong)` — nominal shear strength. The shear critical stress `Fcr` is the larger of (G5-2a) and (G5-2b):
 
-- `Fcr_a = 1.60 E / (√(Lv/D) × (D/t)^(5/4))`
-- `Fcr_b = 0.78 E / (D/t)^(3/2)`
-- `Vn = Fcr × Ag / 2` (G5-1), capped at `0.6 Fy × Ag / 2`
+```math
+F_{cr} = \max\!\left(\frac{1.60\,E}{\sqrt{L_v/D}\,(D/t)^{5/4}},\;\; \frac{0.78\,E}{(D/t)^{3/2}}\right)
+```
+
+```math
+V_n = \frac{F_{cr}\,A_g}{2} \leq \frac{0.6\,F_y\,A_g}{2} \qquad\text{(G5-1)}
+```
 
 ### Torsion (AISC §H3)
 

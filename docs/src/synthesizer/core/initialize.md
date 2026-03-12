@@ -3,7 +3,7 @@
 > ```julia
 > struc = BuildingStructure(skeleton)
 > initialize!(struc;
->     loads = office_loads, floor_type = FlatPlate,
+>     loads = office_loads, floor_type = :flat_plate,
 >     floor_opts = FlatPlateOptions(method = DDM()),
 > )
 > estimate_column_sizes!(struc; fc = 4000psi)
@@ -61,10 +61,11 @@ initialize_members!
 
 | Parameter | Description | Default |
 |:----------|:------------|:--------|
-| `loads` | `GravityLoads` — dead and live loads | Required |
-| `floor_type` | `AbstractFloorSystem` subtype | Required |
-| `floor_opts` | `AbstractFloorOptions` | Type-specific defaults |
-| `tributary_axis` | Principal spanning direction for one-way systems | `:x` |
+| `loads` | `GravityLoads` — dead and live loads | `GravityLoads()` |
+| `material` | `AbstractMaterial` for slab sizing and self-weight | `NWC_4000` |
+| `floor_type` | `Symbol` (`:auto`, `:flat_plate`, `:vault`, etc.) | `:auto` |
+| `floor_opts` | `AbstractFloorOptions` | `FlatPlateOptions()` |
+| `tributary_axis` | Principal spanning direction for one-way systems | `nothing` (auto) |
 | `cell_groupings` | Manual cell → slab mapping | Auto-detected |
 | `slab_group_ids` | Manual slab group assignments | Auto-grouped |
 | `braced_by_slabs` | Whether slabs brace beams laterally | `true` |

@@ -2,14 +2,14 @@
 
 > ```bash
 > # Build and run locally
-> docker build -t structural-synthesizer .
-> docker run -p 8080:8080 structural-synthesizer
+> docker build -t menegroth .
+> docker run -p 8080:8080 menegroth
 > curl http://localhost:8080/health
 > ```
 
 ## Overview
 
-The Structural Synthesizer API is deployed as a Docker container on AWS App Runner. The CI/CD pipeline automates building, pushing to ECR, updating the App Runner service, and running smoke tests.
+The menegroth API is deployed as a Docker container on AWS App Runner. The CI/CD pipeline automates building, pushing to ECR, updating the App Runner service, and running smoke tests.
 
 ## Docker
 

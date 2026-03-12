@@ -1,4 +1,4 @@
-# Structural Synthesizer
+# menegroth
 
 End-to-end building generation and structural design platform in Julia. Produces fully sized structural systems — beams, columns, slabs, and foundations — from a parametric building skeleton, with embodied carbon accounting and fire protection sizing.
 

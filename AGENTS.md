@@ -4,7 +4,7 @@
 
 ### Overview
 
-Structural Synthesizer (repo: **menegroth**) is a Julia codebase for automated structural engineering design. The dependency chain is `Asap` (FEM + units) → `StructuralSizer` (sizing library) → `StructuralSynthesizer` (building workflow + REST API).
+**menegroth** is a Julia codebase for automated structural engineering design. The dependency chain is `Asap` (FEM + units) → `StructuralSizer` (sizing library) → `StructuralSynthesizer` (building workflow + REST API).
 
 ### Julia version
 

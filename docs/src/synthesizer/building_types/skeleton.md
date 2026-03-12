@@ -19,9 +19,8 @@ A skeleton represents a building as a half-edge mesh:
 
 ## Key Types
 
-- `BuildingSkeleton` — core geometry container for a building's structural layout: vertices, edges, faces, spatial indices, and precomputed geometric properties.
-
 ```@docs
+BuildingSkeleton
 SkeletonLookup
 GeometryCache
 ```

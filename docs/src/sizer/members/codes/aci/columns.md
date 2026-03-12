@@ -3,7 +3,7 @@
 > ```julia
 > using StructuralSizer
 > col = RCColumnSection(b=16u"inch", h=16u"inch", bar_size=9, n_bars=8, cover=1.5u"inch")
-> mat = NWC_4000()
+> mat = RC_4000_60
 > diagram = generate_PM_diagram(col, mat)
 > ur = utilization_ratio(diagram, 200u"kip", 100u"kip*ft")
 > ```
@@ -47,8 +47,8 @@ using Unitful
 # Define section (18"×18" with 8-#8 bars)
 section = RCColumnSection(
     b = 18u"inch", h = 18u"inch",
-    bars = standard_bar_layout(8, 8, 18u"inch", 18u"inch", 2.5u"inch"),
-    tie_type = :tied
+    bar_size = 8, n_bars = 8,
+    cover = 2.5u"inch", tie_type = :tied
 )
 
 # Material
@@ -187,9 +187,11 @@ bresler_reciprocal_load
 
 `bresler_reciprocal_load(Pnx, Pny, P0)` — Bresler reciprocal load method:
 
-`1/Pn = 1/Pnx + 1/Pny - 1/P0`
+```math
+\frac{1}{P_n} = \frac{1}{P_{nx}} + \frac{1}{P_{ny}} - \frac{1}{P_0}
+```
 
-where `Pnx` = nominal axial capacity at eccentricity `ex` only, `Pny` at `ey` only, `P0` = pure axial capacity. Valid when `Pn/P0 ≥ 0.1`.
+where ``P_{nx}`` = nominal axial capacity at eccentricity ``e_x`` only, ``P_{ny}`` at ``e_y`` only, ``P_0`` = pure axial capacity. Valid when ``P_n / P_0 \geq 0.1``.
 
 ```@docs
 pca_load_contour
@@ -197,9 +199,11 @@ pca_load_contour
 
 `pca_load_contour(Mux, Muy, φMnox, φMnoy, Pu, φPn, φP0; β=0.65)` — PCA load contour method:
 
-`(Mux/φMnox)^α + (Muy/φMnoy)^α ≤ 1.0`
+```math
+\left(\frac{M_{ux}}{\phi M_{nox}}\right)^\alpha + \left(\frac{M_{uy}}{\phi M_{noy}}\right)^\alpha \leq 1.0
+```
 
-where `α ≈ 1.5` for typical columns (the `β` parameter maps to `α` via `log 0.5 / log β`).
+where ``\alpha \approx 1.5`` for typical columns (``\beta`` maps to ``\alpha`` via ``\alpha = \log 0.5 / \log \beta``).
 
 ```@docs
 check_biaxial_capacity
@@ -221,9 +225,11 @@ magnification_factor_nonsway
 
 `magnification_factor_nonsway(Pu, Pc; Cm=1.0)` — moment magnification factor for nonsway frames (§10.10.6.3 / §6.6.4.5):
 
-`δns = Cm / (1 - Pu/(0.75 Pc)) ≥ 1.0`
+```math
+\delta_{ns} = \frac{C_m}{1 - \dfrac{P_u}{0.75\,P_c}} \geq 1.0
+```
 
-where `Pc = π²EI/(kLu)²` is the Euler buckling load using the effective stiffness `EI`.
+where ``P_c = \pi^2 EI / (k L_u)^2`` is the Euler buckling load using the effective stiffness ``EI``.
 
 ```@docs
 magnify_moment_nonsway
@@ -231,9 +237,11 @@ magnify_moment_nonsway
 
 `magnify_moment_nonsway(section, mat, geometry, Pu, M1, M2; βdns, transverse_load)` — complete nonsway moment magnification. Computes `EI` per §6.6.4.4.4:
 
-`EI = (0.2 Ec Ig + Es Ise) / (1 + βdns)` or `EI = 0.4 Ec Ig / (1 + βdns)`
+```math
+EI = \frac{0.2\,E_c\,I_g + E_s\,I_{se}}{1 + \beta_{dns}} \quad \text{or} \quad EI = \frac{0.4\,E_c\,I_g}{1 + \beta_{dns}}
+```
 
-Then computes `Pc`, `Cm`, and `δns`.
+Then computes ``P_c``, ``C_m``, and ``\delta_{ns}``.
 
 ### Sway Properties
 
@@ -257,33 +265,41 @@ stability_index
 
 `stability_index(story)` — stability index Q per §10.10.5.2 / §6.6.4.4.1:
 
-`Q = ΣPu × Δo / (Vus × lc)`
+```math
+Q = \frac{\sum P_u \cdot \Delta_o}{V_{us} \cdot l_c}
+```
 
-If `Q ≤ 0.05`, the story is classified as nonsway.
+If ``Q \leq 0.05``, the story is classified as nonsway.
 
 ## Implementation Details
 
 ### Strain Compatibility
 
-The P-M diagram is generated using a full strain compatibility analysis at each neutral axis depth `c`. The concrete compressive force uses the Whitney stress block (`a = β₁ c`), and each bar's stress is determined from its strain (assuming elastic-perfectly-plastic steel behavior):
+The P-M diagram is generated using a full strain compatibility analysis at each neutral axis depth ``c``. The concrete compressive force uses the Whitney stress block (``a = \beta_1 c``), and each bar's stress is determined from its strain (assuming elastic-perfectly-plastic steel behavior):
 
-`εsi = εcu × (c - di) / c`
+```math
+\varepsilon_{si} = \varepsilon_{cu} \cdot \frac{c - d_i}{c}
+```
 
-where `εcu = 0.003`, `di` is the distance from the extreme compression fiber to bar `i`. Forces are summed and moments taken about the plastic centroid.
+where ``\varepsilon_{cu} = 0.003``, ``d_i`` is the distance from the extreme compression fiber to bar ``i``. Forces are summed and moments taken about the plastic centroid.
 
 ### Strength Reduction Factor φ
 
-The φ factor varies linearly between the compression-controlled value (0.65 for tied, 0.75 for spiral) and the tension-controlled value (0.90) based on the extreme tension steel strain:
+The ``\phi`` factor varies linearly between the compression-controlled value and the tension-controlled value based on the extreme tension steel strain ``\varepsilon_t``:
 
-- `εt ≤ εy`: φ = 0.65 (tied) or 0.75 (spiral) — compression controlled
-- `εy < εt < 0.005`: linear interpolation — transition zone
-- `εt ≥ 0.005`: φ = 0.90 — tension controlled
+- ``\varepsilon_t \leq \varepsilon_y``: ``\phi = 0.65`` (tied) or ``0.75`` (spiral) — compression controlled
+- ``\varepsilon_y < \varepsilon_t < 0.005``: linear interpolation — transition zone
+- ``\varepsilon_t \geq 0.005``: ``\phi = 0.90`` — tension controlled
 
 ### Maximum Compression Cap
 
 ACI limits the maximum axial load to prevent pure compression failure:
-- Tied columns: `ϕPn_max = ϕ × 0.80 × (0.85 fc′(Ag - Ast) + fy Ast)`
-- Spiral columns: `ϕPn_max = ϕ × 0.85 × (0.85 fc′(Ag - Ast) + fy Ast)`
+
+```math
+\phi P_{n,\max} = \phi \cdot \alpha \left[0.85\,f'_c\,(A_g - A_{st}) + f_y\,A_{st}\right]
+```
+
+where ``\alpha = 0.80`` for tied columns and ``0.85`` for spiral columns.
 
 ### Biaxial Method Selection
 
@@ -444,7 +460,7 @@ Es = Es_ksi(mat)          # Es in ksi
 mat_tuple = to_material_tuple(material, fy_ksi, Es_ksi)
 ```
 
-## Limitations & Assumptions
+## Limitations & Future Work
 
 ### Not Implemented
 

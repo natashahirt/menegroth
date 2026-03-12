@@ -57,7 +57,8 @@ params = DesignParameters(
     loads = office_loads,                    # 50 psf LL, 15 psf SDL
     materials = MaterialOptions(
         steel = A992_Steel,
-        concrete = RC_4000_60,
+        concrete = NWC_4000,
+        rebar = Rebar_60,
     ),
     fire_rating = 2.0,                      # 2-hour fire resistance
     fire_protection = SFRM(),               # spray-applied fireproofing
@@ -68,8 +69,9 @@ params = DesignParameters(
 result = design_building(struc, params)
 
 # 5. Inspect results
-println("Total weight: ", result.total_weight)
-println("Embodied carbon: ", result.total_ec, " kgCO₂e")
+println("Steel weight: ", result.summary.steel_weight)
+println("Embodied carbon: ", result.summary.embodied_carbon, " kgCO₂e")
+println("All checks pass: ", result.summary.all_checks_pass)
 ```
 
 `design_building` runs the full multi-stage pipeline:

@@ -7,7 +7,7 @@
 
 ## Overview
 
-The Structural Synthesizer HTTP API exposes the full design pipeline as a JSON REST service. It accepts building geometry and design parameters as JSON, runs the design workflow, and returns sized elements, material quantities, embodied carbon, and visualization data.
+The menegroth HTTP API exposes the full design pipeline as a JSON REST service. It accepts building geometry and design parameters as JSON, runs the design workflow, and returns sized elements, material quantities, embodied carbon, and visualization data.
 
 The API uses [Oxygen.jl](https://github.com/ndortega/Oxygen.jl) for HTTP routing and supports both a **bootstrap mode** (fast cold start, lazy loading) and a **full service mode** (everything loaded upfront).
 
@@ -56,7 +56,7 @@ curl -X POST http://localhost:8080/validate \
 ```
 
 ```json
-{"valid": true, "errors": []}
+{"status": "ok", "message": "Input is valid."}
 ```
 
 ### POST /design

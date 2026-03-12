@@ -14,6 +14,10 @@ Source: `StructuralSizer/src/members/sections/timber/glulam_section.jl`
 
 ## Key Types
 
+```@docs
+GlulamSection
+```
+
 **`GlulamSection <: AbstractSection`** represents a glulam beam or column section:
 
 | Field | Description |

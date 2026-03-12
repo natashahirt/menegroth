@@ -1,14 +1,15 @@
 # Size Dispatch
 
 > ```julia
+> # struc must be prepared first: prepare!(struc, params)
 > design = BuildingDesign(struc, params)
-> size!(design; max_iterations = 10, convergence_tol = 0.01)
+> size!(design; max_iterations = 3, convergence_tol = 0.05)
 > design.summary.all_checks_pass
 > ```
 
 ## Overview
 
-`size!` is the top-level sizing dispatcher that runs the pipeline stages built by `build_pipeline`. It iterates through stages, calling each sizing function and optionally re-solving the FEM model, until all stages complete or the maximum iteration count is reached.
+`size!` is the top-level sizing dispatcher that iteratively sizes beams and columns until demand convergence, then optionally sizes foundations. It calls `size_beams!`, `size_columns!`, `sync_asap!`, and `size_foundations!` directly — it does **not** use `build_pipeline`.
 
 ## Functions
 
@@ -22,11 +23,13 @@ size!
 
 `size!(design::BuildingDesign)` performs:
 
-1. Retrieves the pipeline via `build_pipeline(design.params)`
-2. For each `PipelineStage`:
-   - Calls `stage.fn(design.structure, design.params)`
-   - If `stage.needs_sync`, calls `sync_asap!(design.structure; params = design.params)` to update the FEM model
-3. After all stages, calls `_update_design_results!(design)` to refresh result summaries
+1. Extracts beam and column options from `design.params`
+2. For each iteration (up to `max_iterations`):
+   - Calls `size_beams!(struc, beam_opts)` to size all beams
+   - Calls `size_columns!(struc, col_opts)` to size all columns
+   - Calls `sync_asap!(struc)` to re-solve the FEM model with updated sections
+   - Compares demand envelopes between iterations; stops if change < `convergence_tol`
+3. After convergence, optionally calls `size_foundations!(struc, ...)` if `size_foundations == true`
 
 ### Floor Type Dispatch
 
@@ -46,16 +49,16 @@ For iterative stages (beam–column sizing), convergence is checked by comparing
 - No section changes occur between iterations, OR
 - `max_iterations` is reached
 
-The `convergence_tol` parameter controls the minimum section size change that counts as a modification.
+The `convergence_tol` parameter controls the maximum relative demand change between iterations that qualifies as convergence.
 
 ## Options & Configuration
 
 | Parameter | Description | Default |
 |:----------|:------------|:--------|
-| `max_iterations` | Maximum sizing iterations | 10 |
-| `convergence_tol` | Minimum change threshold | 0.01 |
+| `max_iterations` | Maximum beam/column sizing iterations | `3` |
+| `convergence_tol` | Max demand change for convergence (fraction) | `0.05` |
 | `size_foundations` | Whether to include foundation sizing | `true` |
-| `verbose` | Print iteration progress | `false` |
+| `verbose` | Print iteration progress | `true` |
 
 ## Limitations & Future Work
 

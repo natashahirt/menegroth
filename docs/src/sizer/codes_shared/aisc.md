@@ -62,9 +62,9 @@ Fire protection type is set at the member level via `FireProtection`:
 
 | Type | Description | Reference |
 |:-----|:------------|:----------|
-| `:sfrm` | Spray-applied fire-resistive material | UL X772 |
-| `:intumescent` | Intumescent paint | UL N643 |
-| `:none` | No fire protection | — |
+| `SFRM()` | Spray-applied fire-resistive material | UL X772 |
+| `IntumescentCoating()` | Intumescent paint | UL N643 |
+| `NoFireProtection()` | No fire protection | — |
 
 The fire rating (hours: 0, 1, 2, 3, 4) and assembly restraint condition
 (restrained/unrestrained) are specified per AISC Design Guide 19.

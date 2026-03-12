@@ -3,7 +3,7 @@
 > ```julia
 > using StructuralSizer
 > result = optimize_vault(8.0u"m", 0.5u"kPa", 2.0u"kPa";
->             lambda_bounds=(0.05, 0.15), thickness_bounds=(0.05u"m", 0.20u"m"))
+>             lambda_bounds=(10, 20), thickness_bounds=(0.05u"m", 0.20u"m"))
 > result.rise       # optimized arch rise
 > result.thickness   # optimized shell thickness
 > ```
@@ -128,9 +128,9 @@ supports:
 
 | Parameter | Default | Description |
 |:----------|:--------|:------------|
-| `lambda_bounds` | `(0.05, 0.20)` | Rise-to-span ratio bounds |
+| `lambda_bounds` | `(10, 20)` | Span-to-rise ratio bounds (λ = span/rise) |
 | `thickness_bounds` | `(0.03m, 0.30m)` | Shell thickness bounds |
-| `allowable_stress` | ``0.25 f'_c`` | Stress constraint |
+| `allowable_stress` | ``0.45 f'_c`` | Maximum compressive stress |
 | `deflection_limit` | ``L/360`` | Elastic shortening convergence |
 
 ### optimize_vault API

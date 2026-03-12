@@ -2,7 +2,7 @@
 
 > ```julia
 > struc = BuildingStructure(skeleton)
-> initialize!(struc; loads = office_loads, floor_type = FlatPlate)
+> initialize!(struc; loads = office_loads, floor_type = :flat_plate)
 > struc.cells[1].area        # tributary area of first cell
 > struc.slabs[1].floor_type  # FlatPlate, Vault, CompositeDeck, etc.
 > struc.slabs[1].result      # AbstractFloorResult after sizing
@@ -92,7 +92,7 @@ A `Segment{T}` represents a single span of a member between supports:
 
 Cell initialization is controlled by the arguments to `initialize!`:
 - `loads` — `GravityLoads` specifying floor/roof/grade dead and live loads
-- `floor_type` — `AbstractFloorSystem` subtype for all floors
+- `floor_type` — `Symbol` (`:auto`, `:flat_plate`, `:vault`, etc.)
 - `floor_opts` — `AbstractFloorOptions` subtype with method-specific settings
 - `tributary_axis` — principal axis for one-way spanning behavior
 - `cell_groupings` — optional manual cell grouping overrides

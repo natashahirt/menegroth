@@ -2,7 +2,7 @@
 
 > ```julia
 > using StructuralSizer
-> result = size_floor(FlatPlate(), 8.0u"m", 1.0u"kPa", 2.4u"kPa")
+> result = _size_span_floor(FlatPlate(), 8.0u"m", 1.0u"kPa", 2.4u"kPa")
 > total_depth(result)      # slab thickness
 > material_volumes(result) # Dict(:concrete => ..., :steel => ...)
 > ```
@@ -57,7 +57,7 @@ size_slabs!(struc; options)          # Size all slabs in structure
 using StructuralSizer
 
 # Size all slabs in a structure
-opts = FloorOptions(flat_plate=FlatPlateOptions(method=DDM()))
+opts = FlatPlateOptions(method=DDM())
 size_slabs!(struc; options=opts)
 
 # Size a single slab
@@ -79,22 +79,19 @@ result = optimize_vault(6.0u"m", 1.0u"kN/m^2", 2.0u"kN/m^2")
 | `Waffle` | ⚠️ Stub | Two-way joist system |
 | `PTBanded` | ⚠️ Stub | Post-tensioned banded |
 
-### Configuration via FloorOptions
+### Configuration via AbstractFloorOptions
 
-All options flow through `FloorOptions`:
+Each floor system has its own options type inheriting from `AbstractFloorOptions`:
 
 ```julia
-FloorOptions(
-    flat_plate = FlatPlateOptions(...),  # Flat plate / flat slab / waffle / PT
-    one_way = OneWayOptions(...),        # One-way slab settings
-    vault = VaultOptions(...),           # Vault-specific settings
-    composite = CompositeDeckOptions(...),
-    timber = TimberOptions(...),
-    tributary_axis = nothing,            # Override tributary computation
-)
+FlatPlateOptions(method=DDM(), ...)      # Flat plate / flat slab / waffle / PT
+OneWayOptions(material=RC_4000_60, ...)  # One-way slab settings
+VaultOptions(lambda_bounds=(10, 20), ...)# Vault-specific settings
+CompositeDeckOptions(...)                # Composite steel deck
+TimberOptions(...)                       # Timber panel floors
 ```
 
-The slab's floor type determines which sub-options are used.
+Pass the appropriate options type to `size_slabs!` or `size_slab!` — the slab's floor type determines dispatch.
 
 ### Adding New Floor Types
 
@@ -108,7 +105,7 @@ The slab's floor type determines which sub-options are used.
 ```
 slabs/
 ├── types.jl            # Floor type definitions, result structs
-├── options.jl          # FloorOptions, FlatPlateOptions, OneWayOptions, VaultOptions
+├── options.jl          # AbstractFloorOptions, FlatPlateOptions, OneWayOptions, VaultOptions
 ├── sizing.jl           # Main API: size_slabs!, size_slab!, _size_slab!
 ├── utils/              # ACI strip geometry, tributary helpers
 ├── optimize/           # Vault NLP optimization

@@ -3,7 +3,7 @@
 > ```julia
 > using StructuralSizer
 > opts = VaultOptions(lambda_bounds=(0.05, 0.15), thickness_bounds=(0.05u"m", 0.20u"m"))
-> result = size_floor(Vault(), 8.0u"m", 0.5u"kPa", 2.0u"kPa"; options=opts)
+> result = _size_span_floor(Vault(), 8.0u"m", 0.5u"kPa", 2.0u"kPa"; options=opts)
 > result.rise            # final arch rise (after elastic shortening)
 > result.thrust_dead     # horizontal thrust per unit width
 > is_adequate(result)    # stress + deflection + convergence
@@ -21,7 +21,7 @@ result.thickness  # Optimal thickness
 result.status     # :optimal, :feasible, :infeasible
 
 # Evaluate fixed geometry
-opts = FloorOptions(vault=VaultOptions(lambda=12.0, thickness=75u"mm"))
+opts = VaultOptions(lambda=12.0, thickness=75u"mm")
 result = _size_span_floor(Vault(), 6.0u"m", 1.0u"kN/m^2", 2.0u"kN/m^2"; options=opts)
 is_adequate(result)  # All checks pass?
 ```
@@ -108,11 +108,10 @@ optimize_vault(span, sdl, live; thickness=75u"mm")  # Fixed t, optimize rise
 For evaluating a specific geometry with both rise and thickness fixed:
 
 ```julia
-opts = FloorOptions(vault=VaultOptions(
+opts = VaultOptions(
     lambda = 12.0,         # or rise = 0.5u"m"
     thickness = 75u"mm",
-    material = NWC_4000,
-))
+)
 
 result = _size_span_floor(Vault(), span, sdl, live; options=opts)
 
@@ -139,8 +138,18 @@ The vault is modeled as a three-hinge parabolic arch under uniform distributed
 load.  For a span ``L``, rise ``f``, and thickness ``t``:
 
 **Symmetric loading** (dead + live on full span):
-- Horizontal thrust: ``H = \frac{w L^2}{8 f}``
-- Maximum compressive stress at crown: ``\sigma = H / (t \cdot b)``
+
+Horizontal thrust:
+
+```math
+H = \frac{w \, L^2}{8 f}
+```
+
+Maximum compressive stress at crown:
+
+```math
+\sigma = \frac{H}{t \cdot b}
+```
 
 where ``w`` is the total load per unit area and ``b`` is the tributary depth.
 
@@ -157,7 +166,12 @@ The `solve_equilibrium_rise` function iterates to find the equilibrium rise
 considering axial shortening of the arch:
 
 1. Compute thrust and arc length for current rise
-2. Calculate axial shortening: ``\Delta L = \frac{H \cdot S}{E \cdot A}``
+2. Calculate axial shortening:
+
+```math
+\Delta L = \frac{H \cdot S}{E \cdot A}
+```
+
    where ``S`` is arc length and ``A = t \cdot b``
 3. Reduce rise to account for shortening
 4. Repeat until convergence (within `deflection_limit`)
@@ -258,8 +272,8 @@ Additional options:
 |:----------|:--------|:------------|
 | `thickness_bounds` | `(0.03m, 0.30m)` | Shell thickness bounds |
 | `thickness` | `nothing` | Fixed thickness (skips optimization) |
-| `allowable_stress` | ``0.25 f'_c`` | Maximum compressive stress |
-| `deflection_limit` | ``L/360`` | Deflection limit |
+| `allowable_stress` | ``0.45 f'_c`` | Maximum compressive stress |
+| `deflection_limit` | ``L/240`` | Maximum allowable rise deflection |
 | `check_asymmetric` | `true` | Include half-span live load case |
 | `rib_depth` | `0.0` | Depth of stiffening ribs |
 | `rib_apex_rise` | `0.0` | Rise of rib at apex |
@@ -275,7 +289,7 @@ Additional options:
   tie beams, buttresses, or the surrounding frame).
 - Thermal effects and creep are not considered in the analysis.
 
-## Reference
+## References
 
 MATLAB implementation by Nebyu Haile (saved in `reference/`):
 - `VaultStress.m` — Symmetric analysis

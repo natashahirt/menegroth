@@ -4,8 +4,8 @@
 > using StructuralSizer
 > opts = FlatPlateOptions(method=DDM(:full))
 > result = size_flat_plate!(struc, slab, column_opts; method=opts.method, opts=opts)
-> punching_ok(result)    # true / false
-> deflection_ratio(result)
+> punching_ok(result.slab_result)    # true / false
+> deflection_ratio(result.slab_result)
 > ```
 
 ## Quick Start
@@ -463,7 +463,7 @@ Key `FEA` options:
 - The `RuleOfThumb` method uses ACI min thickness without iteration—design checks
   are reported but may fail.
 
-## Reference
+## References
 
 - ACI 318-11 Chapter 13 (Two-Way Slabs)
 - ACI 318-11 §13.6 (DDM), §13.7 (EFM)

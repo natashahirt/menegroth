@@ -1,4 +1,4 @@
-# Structural Synthesizer
+# menegroth
 
 > ```julia
 > using StructuralSynthesizer
@@ -9,7 +9,7 @@
 
 ## Overview
 
-**Structural Synthesizer** is an end-to-end building generation and structural design platform. It produces fully sized structural systems — beams, columns, slabs, and foundations — from a parametric building skeleton, complete with embodied carbon accounting and fire protection sizing.
+**menegroth** is an end-to-end building generation and structural design platform. It produces fully sized structural systems — beams, columns, slabs, and foundations — from a parametric building skeleton, complete with embodied carbon accounting and fire protection sizing.
 
 The platform consists of two Julia packages plus an HTTP API:
 

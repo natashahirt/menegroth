@@ -2,7 +2,7 @@
 
 > ```julia
 > using StructuralSizer
-> result = size_floor(CompositeDeck(), 3.0u"m", 0.5u"kPa", 3.6u"kPa")
+> result = _size_span_floor(CompositeDeck(), 3.0u"m", 0.5u"kPa", 3.6u"kPa")
 > total_depth(result)    # deck + fill
 > self_weight(result)    # kN/m²
 > ```

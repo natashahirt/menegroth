@@ -48,6 +48,12 @@ full hierarchy.
 
 ### Shallow Foundation Types
 
+```@docs
+SpreadFooting
+StripFooting
+MatFoundation
+```
+
 - **`SpreadFooting`** — isolated pad footing under a single column.
 - **`CombinedFooting`** — footing supporting two or more columns (design not yet implemented).
 - **`StripFooting`** — continuous strip footing along a column line.

@@ -16,32 +16,20 @@ The menegroth API is deployed as a Docker container on AWS App Runner. The CI/CD
 The `Dockerfile` uses the official `julia:1.12.4` base image:
 
 1. Copies the project files (manifests, source code, scripts)
-2. Instantiates the Julia project and precompiles dependencies
-3. Runs `scripts/api/sizer_bootstrap.jl` as the entry point
+2. Instantiates the Julia project and builds a **custom sysimage** (PackageCompiler) containing StructuralSynthesizer and API route registration
+3. Runs `scripts/api/sizer_bootstrap.jl` with that sysimage (`julia -J /app/sys.so ...`) as the entry point
 
-The bootstrap entry point provides fast cold starts: the HTTP server is available immediately for health checks, while StructuralSynthesizer loads in the background.
+The bootstrap entry point binds the HTTP server quickly; StructuralSynthesizer is loaded from the custom sysimage in the background.
 
-### Relying on the Docker image (build-time precompile)
+### Custom sysimage (build-time)
 
-The Dockerfile runs a **build-time warmup** before the image is published:
+The Dockerfile builds a **custom sysimage** with [PackageCompiler.jl](https://julialang.github.io/PackageCompiler.jl/stable/):
 
-```dockerfile
-RUN timeout 1800 julia --project=StructuralSynthesizer -e '\
-  using StructuralSynthesizer; \
-  Base.invokelatest(register_routes!); \
-  @info "Build-time warmup complete"' \
-  || { echo "ERROR: build-time warmup timed out or failed"; exit 1; }
-```
+- **Scripts:** `scripts/api/build_sysimage.jl` (runner) and `scripts/api/sysimage_precompile.jl` (execution file that runs `using StructuralSynthesizer; register_routes!()`).
+- **Build step:** PackageCompiler is added at image build time; `create_sysimage` is run with that precompile script; the result is written to `/app/sys.so`.
+- **Runtime:** The container starts with `julia -J /app/sys.so --project=StructuralSynthesizer scripts/api/sizer_bootstrap.jl`, so startup is “load one sysimage” plus the bootstrap script, rather than loading many `.ji` files (or re-precompiling).
 
-That step loads `StructuralSynthesizer` and registers routes so Julia precompiles the package and its dependency tree (JuMP, Gurobi, HiGHS, Meshes, etc.) **during `docker build`**. The compiled artifacts are stored in the image under `JULIA_DEPOT_PATH=/app/.julia`.
-
-**At runtime** (e.g. on App Runner), when the container starts it reuses that depot: `using StructuralSynthesizer` loads from the precompiled cache instead of compiling from source. So in theory cold start is only “load from disk” (often under a minute). In practice you may still see longer cold starts because:
-
-- **First-time load of native libs** — Gurobi, HiGHS, Ipopt, etc. are loaded and initialized when the package is first used; that can add tens of seconds.
-- **Cache or environment differences** — If the runtime environment differs from build (e.g. different glibc, CPU features, or depot path), Julia may re-precompile some modules, which can take several minutes (as in the “549 seconds” / “197 dependencies successfully precompiled” logs).
-- **Scale-to-zero** — When the service has been idle, App Runner may have stopped the container; the next request starts a new instance and pays full cold start.
-
-So “relying on the Docker image” means: the image is built with a full warmup so that **typical** cold start is much shorter than a clean machine. If the runtime matches the build environment well, startup is often on the order of 1–2 minutes; if not, the first request can still trigger a long precompile. The Grasshopper client waits up to 1 hour for “API ready” and offers a **Cancel** option so the user can stop waiting if needed.
+Cold start is typically on the order of tens of seconds to about a minute (loading the sysimage and native libs). The Grasshopper client waits up to 1 hour for “API ready” and offers a **Cancel** option. Building the image takes longer (sysimage build can be 15–30 minutes) but that happens in CI, not at request time.
 
 ### Storing the environment so startup isn’t necessary
 
@@ -53,16 +41,12 @@ The environment (packages + precompiled code) is already stored in the image und
 2. **Match build and run environment**  
    Build the image for the same architecture and OS as the cloud (e.g. `linux/amd64`). In GitHub Actions, the default runner is amd64; App Runner is typically amd64. If they match, Julia is less likely to invalidate the precompiled cache at runtime. Ensure `JULIA_DEPOT_PATH` is the same at build and run (`/app/.julia` in the Dockerfile).
 
-3. **Custom sysimage (PackageCompiler)**  
-   You can “store” the environment as a single native image (a `.so` sysimage) that Julia loads at startup instead of loading many `.ji` files. That makes startup faster and more predictable (often tens of seconds instead of minutes).  
-   - Add a build step that uses [PackageCompiler.jl](https://julialang.github.io/PackageCompiler.jl/stable/) to create a custom sysimage that includes `StructuralSynthesizer` and the code paths used by the API (e.g. `register_routes!`, design pipeline).  
-   - Save the sysimage in the image (e.g. `/app/sys.so`) and run with `julia -J /app/sys.so --project=StructuralSynthesizer scripts/api/sizer_bootstrap.jl`.  
-   This requires a one-time setup (script or extra Docker stage) and longer image build times, but cold start in the cloud becomes much shorter and more consistent. The “environment” is then literally one file (the sysimage) plus the project.
+3. **Custom sysimage (PackageCompiler)** — **Implemented.** The image is built with a custom sysimage at `/app/sys.so` and the process starts with `julia -J /app/sys.so ...`. See **Custom sysimage (build-time)** above. To build the sysimage locally (e.g. to run with faster startup without Docker): add PackageCompiler (`using Pkg; Pkg.add("PackageCompiler")` in the StructuralSynthesizer project), then run `julia --project=StructuralSynthesizer scripts/api/build_sysimage.jl [path]` (default output: `sys.so` in the current directory). Start the API with `julia -J sys.so --project=StructuralSynthesizer scripts/api/sizer_bootstrap.jl`.
 
 4. **Persistent volume (other services only)**  
    If you move off App Runner to something that supports volumes (e.g. ECS with EFS, or an EC2 instance with an EBS volume), you could put `JULIA_DEPOT_PATH` on that volume. The first run would populate it; later runs (or new containers mounting the same volume) would reuse it. App Runner does not support this.
 
-**Summary:** The image already stores the environment; cold start is “load that environment into a new container.” To avoid waiting on that, keep one instance warm (min capacity 1) and/or add a custom sysimage so loading is faster.
+**Summary:** The image stores the environment in a custom sysimage and in `/app/.julia`. Cold start is “load the sysimage + bootstrap.” To avoid cold start entirely, keep one instance warm (min capacity 1).
 
 ## AWS App Runner
 
@@ -87,6 +71,14 @@ The GitHub Actions workflow triggers on pushes to `main` and `workflow_dispatch`
 | App Runner Update | Update the App Runner service with the new image |
 | Smoke Test (health) | Poll `GET /health` until `200 OK` (up to 24 attempts, 10s interval) |
 | Smoke Test (schema) | Verify `GET /schema` returns valid response |
+
+### Timeouts and credentials
+
+The Docker image build includes a **custom sysimage** step that can take **15–30 minutes**. The full workflow (build → push → App Runner update → smoke test) may approach or exceed **1 hour**.
+
+- **AWS credentials:** The workflow uses OIDC to assume an IAM role. Default temporary credentials last **1 hour**. The workflow requests **2 hours** (`role-duration-seconds: 7200`) so they don’t expire during a long build. The **IAM role** used for OIDC must allow this: in AWS IAM → your role → **Maximum session duration** set to at least **2 hours** (7200 seconds). If you leave it at 1 hour, the job can fail with expired credentials when pushing to ECR or updating App Runner.
+- **Job timeout:** The deploy job has a **120-minute** limit (`timeout-minutes: 120`). If the build or deploy hangs, the job is cancelled instead of running for hours.
+- **Sysimage step:** Inside the Dockerfile, the sysimage build has a **45-minute** timeout (`timeout 2700`). If PackageCompiler takes longer on the runner, that step fails; you can increase `2700` in the Dockerfile if needed.
 
 ### Required Secrets
 

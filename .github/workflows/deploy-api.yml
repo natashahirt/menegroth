@@ -25,6 +25,8 @@ jobs:
   deploy:
     name: Build, Push, Deploy
     runs-on: ubuntu-latest
+    # Build (including sysimage) can take 45–60+ min; keep under credential/session limits.
+    timeout-minutes: 120
 
     steps:
       - name: Checkout
@@ -32,11 +34,14 @@ jobs:
         with:
           submodules: recursive
 
+      # Request 2-hour session so credentials don't expire during long Docker build + push + deploy.
+      # IAM role must allow it: set MaxSessionDuration to 7200 (or higher) on the OIDC role.
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
           aws-region: ${{ env.AWS_REGION }}
+          role-duration-seconds: 7200
 
       - name: Login to Amazon ECR
         id: login-ecr

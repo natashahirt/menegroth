@@ -15,6 +15,7 @@ Cells and slabs model the floor system at the building level. A **Cell** represe
 ## Key Types
 
 ```@docs
+Story
 SiteConditions
 Cell
 CellGroup

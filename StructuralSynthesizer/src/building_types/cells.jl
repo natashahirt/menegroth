@@ -108,7 +108,26 @@ total_factored_pressure(c::Cell) =
     factored_pressure(default_combo, c.sdl + c.self_weight, c.live_load)
 
 # Volume type alias
+"""
+    VolumeType
+
+Type alias for a Unitful volume quantity (defaults to cubic meters).
+
+Used throughout StructuralSynthesizer result structs to store material quantities
+in coherent SI units at the boundary between sizing and post-processing.
+"""
 const VolumeType = typeof(1.0u"m^3")
+
+"""
+    MaterialVolumes
+
+Type alias for the mapping `AbstractMaterial => VolumeType` used for embodied
+carbon and reporting.
+
+Conventions:
+- Keys are `StructuralSizer.AbstractMaterial` instances (e.g. `NWC_4000`, `A992_Steel`).
+- Values are total volumes in cubic meters (Unitful quantities).
+"""
 const MaterialVolumes = Dict{AbstractMaterial, VolumeType}
 
 """

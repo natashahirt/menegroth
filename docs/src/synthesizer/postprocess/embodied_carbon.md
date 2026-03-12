@@ -16,6 +16,8 @@ The embodied carbon (EC) module computes the total greenhouse gas emissions (kgC
 ## Key Types
 
 ```@docs
+MaterialVolumes
+VolumeType
 ElementECResult
 BuildingECResult
 ```

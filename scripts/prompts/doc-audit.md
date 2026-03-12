@@ -137,7 +137,7 @@ pages for inline equations that should be math blocks.
 ## 9. When Done
 
 Once all changes are committed, send a summary to the Slack channel
-`@menegroth-nightly-documentation` including:
+`#menegroth-nightly-documentation` (channel ID `C0AL4NPK1SA`) using the connected Slack integration (do not use webhooks) including:
 - Number of files changed
 - Brief description of each fix (grouped by category: API accuracy, stale
   limitations, math formatting, etc.)

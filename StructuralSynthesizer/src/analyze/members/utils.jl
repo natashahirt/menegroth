@@ -1123,14 +1123,14 @@ function size_beams!(
 )
     effective_opts = if !isnothing(opts)
         opts
-    elseif !isnothing(struc.design_parameters) && !isnothing(struc.design_parameters.beams)
+    elseif hasproperty(struc, :design_parameters) && !isnothing(struc.design_parameters) && !isnothing(struc.design_parameters.beams)
         struc.design_parameters.beams
     else
         StructuralSizer.SteelBeamOptions()
     end
 
     # Apply collinear grouping if enabled in design parameters
-    if !isnothing(struc.design_parameters) && struc.design_parameters.collinear_grouping
+    if hasproperty(struc, :design_parameters) && !isnothing(struc.design_parameters) && struc.design_parameters.collinear_grouping
         group_collinear_members!(struc; member_type=:beams)
     end
 
@@ -1673,14 +1673,14 @@ function size_columns!(
     # Determine options: explicit > design_parameters > default
     effective_opts = if !isnothing(opts)
         opts
-    elseif !isnothing(struc.design_parameters) && !isnothing(struc.design_parameters.columns)
+    elseif hasproperty(struc, :design_parameters) && !isnothing(struc.design_parameters) && !isnothing(struc.design_parameters.columns)
         struc.design_parameters.columns
     else
         StructuralSizer.SteelColumnOptions()
     end
     
     # Apply collinear grouping if enabled in design parameters
-    if !isnothing(struc.design_parameters) && struc.design_parameters.collinear_grouping
+    if hasproperty(struc, :design_parameters) && !isnothing(struc.design_parameters) && struc.design_parameters.collinear_grouping
         group_collinear_members!(struc; member_type=:columns)
     end
     

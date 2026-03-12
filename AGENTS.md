@@ -48,13 +48,10 @@ SS_ENABLE_VISUALIZATION=false julia --project=StructuralSynthesizer scripts/api/
 
 Bootstrap mode: `/health` and `/status` respond immediately; `/design`, `/validate`, `/schema` become available after background loading (~60s). See `docs/src/getting_started.md` for full API docs.
 
-### Known test issues on Linux / Julia 1.12
+### Known test issues on Linux / headless
 
-- **2 AISC beam test failures** (Examples 2.4 and 2.6 in `test_aisc_beam_examples.jl`) — numeric tolerance, pre-existing.
-- **Gurobi-dependent tests error** without a license (~39 in StructuralSizer, fewer in Synthesizer). These fall back to HiGHS in production code.
-- **`test_slab_coloring.jl`** errors with `Package Random not found` — Julia 1.12 moved `Random` out of the default stdlib; the test file needs `Random` added to test deps.
-- **`test_voronoi_vis.jl`** errors on headless environments (requires GLMakie display).
-- **`test_vault_pipeline.jl`** errors due to same `Random` stdlib issue.
+- **`test_voronoi_vis.jl`** (1 error) — requires GLMakie display server; expected to fail in headless environments. All other tests pass cleanly.
+- **Gurobi-dependent tests** error without a license (~39 in StructuralSizer). Ensure `GRB_LICENSE_FILE` is set. Without Gurobi, HiGHS is the fallback in production code.
 
 ### Runner scripts
 

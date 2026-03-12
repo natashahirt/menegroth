@@ -10,7 +10,7 @@ namespace StructuralSizer.GH
     /// </summary>
     public class StructuralSizerInfo : GH_AssemblyInfo
     {
-        public override string Name => "StructuralSizer";
+        public override string Name => "Menegroth";
         public override string Description =>
             "Structural sizing via a Julia REST API — beams, columns, slabs, foundations.";
         public override Guid Id => new Guid("A1B2C3D4-0000-1111-2222-333344445555");

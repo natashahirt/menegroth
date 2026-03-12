@@ -16,7 +16,7 @@ namespace StructuralSizer.GH.Components
             : base("Sizer Element Details",
                    "SizerDetails",
                    "Detailed breakdown by element type",
-                   "StructuralSizer", "Statistics")
+                   "Menegroth", "Statistics")
         { }
 
         public override Guid ComponentGuid =>

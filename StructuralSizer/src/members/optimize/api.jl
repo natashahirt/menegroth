@@ -74,6 +74,9 @@ function size_columns(
     geometries::Vector,
     opts::SteelColumnOptions;
     Muy::Vector = zeros_like(Mux),
+    Vu_strong::Vector = zeros_like(Mux),
+    δ_max_vec::Union{Nothing, Vector} = nothing,
+    I_ref_vec::Union{Nothing, Vector} = nothing,
     mip_gap::Real = 1e-4,
     output_flag::Integer = 0,
 )
@@ -93,12 +96,19 @@ function size_columns(
     Pu_N = [to_newtons(p) for p in Pu]
     Mux_Nm = [to_newton_meters(m) for m in Mux]
     Muy_Nm = [to_newton_meters(m) for m in Muy]
+    Vus_N  = [to_newtons(v) for v in Vu_strong]
+
+    # Convert deflection vectors to SI if provided
+    δ_m  = isnothing(δ_max_vec) ? zeros(n) : [to_meters(d) for d in δ_max_vec]
+    Ir_m4 = isnothing(I_ref_vec) ? ones(n) : [to_meters_fourth(r) for r in I_ref_vec]
     
     # Build demands (SI units)
-    demands = [MemberDemand(i; Pu_c=Pu_N[i], Mux=Mux_Nm[i], Muy=Muy_Nm[i]) for i in 1:n]
+    demands = [MemberDemand(i; Pu_c=Pu_N[i], Mux=Mux_Nm[i], Muy=Muy_Nm[i],
+                               Vu_strong=Vus_N[i], δ_max=δ_m[i], I_ref=Ir_m4[i]) for i in 1:n]
     
-    # Create checker
-    checker = AISCChecker(; max_depth = opts.max_depth)
+    # Create checker (pass deflection_limit from options)
+    checker = AISCChecker(; max_depth = opts.max_depth,
+                            deflection_limit = opts.deflection_limit)
     
     # Optimize — multi-material if materials vector is provided
     if !isnothing(opts.materials)
@@ -436,7 +446,7 @@ end
 # ==============================================================================
 
 """
-    size_beams(Mu, Vu, geometries, opts::SteelMemberOptions; ...)
+    size_beams(Mu, Vu, geometries, opts::SteelMemberOptions; δ_max_vec, I_ref_vec, ...)
 
 Size steel beams using discrete catalog optimization.
 
@@ -444,16 +454,28 @@ Uses the AISC 360 checker with zero axial load (pure flexure). The same
 checker handles both beams and columns, so this is a thin wrapper around
 `size_columns` with `Pu = 0`.
 
-Shear (`Vu`) is not used in the MIP selection — check it after sizing
-with `get_ϕVn` or the beam utilization function.
+# Deflection constraint
+
+When `opts.deflection_limit` is set (e.g. `1/360`), the optimizer enforces
+`δ_scaled / L ≤ deflection_limit` where `δ_scaled = δ_max × I_ref / Ix`.
+
+Pass `δ_max_vec` and `I_ref_vec` from an Asap FEM analysis (or equivalent).
+`δ_max` is the max local deflection from analysis, and `I_ref` is the Ix of
+the section used in that analysis. The checker then scales deflection linearly
+with `1/Ix` for each candidate section.
+
+Without `δ_max_vec`/`I_ref_vec`, the deflection check is skipped even if
+`deflection_limit` is set (consistent with the checker requiring δ_max > 0).
 
 # Arguments
 - `Mu`: Vector of factored moments — any moment unit (N·m, kN·m, kip·ft, etc.)
-- `Vu`: Vector of factored shears — any force unit (reserved; not used in MIP)
+- `Vu`: Vector of factored shears — any force unit
 - `geometries`: Member geometries (span via `SteelMemberGeometry`)
 - `opts`: `SteelBeamOptions` (alias for `SteelMemberOptions`)
 
 # Keyword Arguments
+- `δ_max_vec`: Max deflection from analysis for each beam (length unit, e.g. m or inch).
+- `I_ref_vec`: Reference Ix used in the analysis for each beam (length⁴ unit).
 - `mip_gap`: MIP optimality gap (default 1e-4)
 - `output_flag`: Solver verbosity (default 0)
 
@@ -469,7 +491,15 @@ Named tuple with:
 Mu = [150.0, 200.0] .* u"kN*m"
 Vu = [100.0, 120.0] .* u"kN"
 geoms = [SteelMemberGeometry(8.0; Kx=1.0, Ky=1.0) for _ in 1:2]
+
+# Strength only
 result = size_beams(Mu, Vu, geoms, SteelBeamOptions(section_type=:w))
+
+# With L/360 deflection constraint (δ_max and I_ref from Asap analysis)
+opts = SteelBeamOptions(section_type=:w, deflection_limit=1/360)
+result = size_beams(Mu, Vu, geoms, opts;
+                    δ_max_vec=[0.025, 0.030],   # meters
+                    I_ref_vec=[1.5e-4, 2.0e-4])  # m⁴
 ```
 """
 function size_beams(
@@ -477,13 +507,15 @@ function size_beams(
     Vu::Vector,
     geometries::Vector,
     opts::SteelMemberOptions;
+    δ_max_vec::Union{Nothing, Vector} = nothing,
+    I_ref_vec::Union{Nothing, Vector} = nothing,
     mip_gap::Real = 1e-4,
     output_flag::Integer = 0,
 )
-    # Pu = 0 for pure beams; Mu maps to Mux for the AISC interaction checker.
-    # Use Vu's units (force) to build a zero Pu vector with compatible dimensions.
     Pu_zero = [zero(Vu[1]) for _ in Mu]
     return size_columns(Pu_zero, Mu, geometries, opts;
+                        Vu_strong=Vu,
+                        δ_max_vec=δ_max_vec, I_ref_vec=I_ref_vec,
                         mip_gap=mip_gap, output_flag=output_flag)
 end
 

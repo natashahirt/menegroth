@@ -17,7 +17,7 @@ namespace StructuralSizer.GH.Components
             : base("Sizer Results",
                    "SizerRes",
                    "Parse structural sizing results from the API response",
-                   "StructuralSizer", "Results")
+                   "Menegroth", "Results")
         { }
 
         public override Guid ComponentGuid =>

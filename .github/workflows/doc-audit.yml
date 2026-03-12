@@ -19,6 +19,57 @@ jobs:
         with:
           fetch-depth: 0  # full history for git log
 
+      - name: Check for already-running doc audit (GitHub)
+        id: concurrent
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Avoid launching a second agent if another run of this workflow is already in progress
+          RUNS=$(curl -s -H "Authorization: bearer $GH_TOKEN" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/workflows/doc-audit.yml/runs?status=in_progress&per_page=10")
+          COUNT=$(echo "$RUNS" | jq '.total_count')
+          if [ "$COUNT" -gt 1 ]; then
+            echo "Another doc-audit run already in progress — skipping agent launch."
+            echo "should_launch=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "should_launch=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Check for already-running Cursor doc-audit agent
+        id: cursor_agent
+        env:
+          CURSOR_API_KEY: ${{ secrets.CURSOR_API_KEY }}
+          REPO_URL: https://github.com/${{ github.repository }}
+        run: |
+          # Cannot use secrets in 'if' — handle missing key in script instead
+          if [ -z "$CURSOR_API_KEY" ]; then
+            echo "No CURSOR_API_KEY — skipping Cursor check, allowing launch."
+            echo "cursor_agent_running=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # List agents: GET https://api.cursor.com/v0/agents (Basic Auth with API key)
+          # Skip launch if any agent is RUNNING for this repo
+          set +e
+          RESP=$(curl -s -w "\n%{http_code}" -u "$CURSOR_API_KEY:" \
+            "https://api.cursor.com/v0/agents?limit=50")
+          HTTP_BODY=$(echo "$RESP" | head -n -1)
+          HTTP_CODE=$(echo "$RESP" | tail -n 1)
+          set -e
+          if [ "$HTTP_CODE" != "200" ]; then
+            echo "Cursor API returned $HTTP_CODE — allowing launch (no double-check)."
+            echo "cursor_agent_running=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # Count RUNNING agents for this repo
+          RUNNING=$(echo "$HTTP_BODY" | jq --arg repo "$REPO_URL" \
+            '[.agents[]? | select(.status == "RUNNING" and (.source.repository // "") == $repo)] | length')
+          if [ "${RUNNING:-0}" -gt 0 ]; then
+            echo "A Cursor doc-audit agent is already RUNNING for this repo — skipping launch."
+            echo "cursor_agent_running=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "cursor_agent_running=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Check for documentation-relevant changes
         id: check
         run: |
@@ -37,7 +88,7 @@ jobs:
           fi
 
       - name: Launch Cursor Cloud Agent
-        if: steps.check.outputs.has_changes == 'true'
+        if: steps.check.outputs.has_changes == 'true' && steps.concurrent.outputs.should_launch == 'true' && steps.cursor_agent.outputs.cursor_agent_running != 'true'
         env:
           CURSOR_API_KEY: ${{ secrets.CURSOR_API_KEY }}
         run: |

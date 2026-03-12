@@ -82,7 +82,9 @@ function _warmup_jump_solvers()
             JuMP.@objective(m, Min, x)
             JuMP.optimize!(m)
         catch e
-            @debug "JuMP/Gurobi warmup skipped" exception = e
+            # No license or other Gurobi failure — use HiGHS for :auto from now on
+            @info "Gurobi unavailable (e.g. no license); :auto will use HiGHS" exception = e
+            _HAS_GUROBI[] = false
         end
     end
     nothing
@@ -108,7 +110,16 @@ function _choose_mip_optimizer(optimizer::Symbol)
         _HAS_GUROBI[] || throw(ArgumentError("optimizer=:gurobi requested, but Gurobi.jl is not available in this environment."))
         return (() -> Gurobi.Optimizer(_get_gurobi_env())), :gurobi
     elseif optimizer === :auto
-        return _HAS_GUROBI[] ? (() -> Gurobi.Optimizer(_get_gurobi_env()), :gurobi) : (() -> HiGHS.Optimizer(), :highs)
+        if _HAS_GUROBI[]
+            try
+                _get_gurobi_env()
+                return (() -> Gurobi.Optimizer(_get_gurobi_env())), :gurobi
+            catch e
+                @info "Gurobi not usable (e.g. no license); falling back to HiGHS" exception = e
+                _HAS_GUROBI[] = false
+            end
+        end
+        return (() -> HiGHS.Optimizer(), :highs)
     else
         throw(ArgumentError("Unknown optimizer=$optimizer. Use :auto, :gurobi, or :highs."))
     end

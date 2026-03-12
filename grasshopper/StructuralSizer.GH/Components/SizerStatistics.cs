@@ -14,7 +14,7 @@ namespace StructuralSizer.GH.Components
             : base("Sizer Statistics",
                    "SizerStats",
                    "Extract quantitative statistics from design results",
-                   "StructuralSizer", "Statistics")
+                   "Menegroth", "Statistics")
         { }
 
         public override Guid ComponentGuid =>

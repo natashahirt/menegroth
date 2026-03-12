@@ -35,7 +35,7 @@ namespace StructuralSizer.GH.Components
             : base("Sizer Geometry",
                    "SizerGeo",
                    "Extract building geometry for structural sizing",
-                   "StructuralSizer", "Input")
+                   "Menegroth", "Input")
         { }
 
         public override Guid ComponentGuid =>

@@ -146,7 +146,7 @@ namespace StructuralSizer.GH.Components
             : base("Sizer Design Params",
                    "SizerParams",
                    "Configure design parameters for structural sizing",
-                   "StructuralSizer", "Input")
+                   "Menegroth", "Input")
         { }
 
         public override Guid ComponentGuid =>

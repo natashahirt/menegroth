@@ -59,7 +59,7 @@ The Grasshopper client is a Rhino Grasshopper component (`SizerRun.cs`) that con
 |:------|:-----|:------------|
 | Geometry | `GH_SizerGeometry` | Building geometry from `SizerGeometryInput` |
 | Params | `GH_SizerParams` | Design parameters from `SizerDesignParams` |
-| Server URL | `String` | API endpoint (default: `http://localhost:8080`) |
+| Server URL | `String` | API endpoint (default: `http://localhost:8080`). For AWS deployment, ask the project owner for the server URL. |
 | Run | `Boolean` | Trigger design execution |
 
 **Outputs:**
@@ -110,7 +110,7 @@ The `SizerGeometryInput` component converts Rhino geometry to API-compatible for
 
 | Setting | Description | Default |
 |:--------|:------------|:--------|
-| Server URL | API endpoint | `http://localhost:8080` |
+| Server URL | API endpoint | `http://localhost:8080` (for AWS, ask the project owner for the server URL) |
 | Timeout | HTTP request timeout | 300 seconds |
 | Poll interval | Queue status polling interval | 2 seconds |
 
@@ -120,3 +120,7 @@ The `SizerGeometryInput` component converts Rhino geometry to API-compatible for
 - Visualization mesh import back to Rhino is supported but large models may be slow.
 - Real-time design-as-you-model (automatic re-run on geometry change) is planned but not yet implemented.
 - The client does not support authentication; it assumes a local or VPC-accessible server.
+
+## Using the AWS-deployed API
+
+For the AWS-deployed API, ask the project owner for the server URL and set it in the **Server URL** input (or as the default in `SizerRun.cs`). The component default is `http://localhost:8080` for local development.

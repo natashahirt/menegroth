@@ -5,6 +5,7 @@ external/*
 
 # Ignore secrets
 secrets/
+.env
 
 # Ignore reference documents (e.g., PDFs) anywhere in the repo
 # **/reference/

@@ -1,0 +1,63 @@
+name: Nightly Doc Audit
+
+on:
+  schedule:
+    - cron: '0 5 * * *'  # 00:00 EST / 05:00 UTC daily
+  workflow_dispatch:       # allow manual trigger from GitHub UI
+  push:
+    branches: [main]
+    paths:
+      - 'StructuralSizer/src/**'
+      - 'StructuralSynthesizer/src/**'
+      - 'docs/**'
+
+jobs:
+  check-and-launch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # full history for git log
+
+      - name: Check for documentation-relevant changes
+        id: check
+        run: |
+          CHANGED=$(git log --since="24 hours ago" --name-only --pretty=format: origin/main | \
+            grep -E '^(StructuralSizer/src/|StructuralSynthesizer/src/|docs/)' | \
+            sort -u)
+
+          if [ -z "$CHANGED" ]; then
+            echo "No doc-relevant changes in last 24h — skipping."
+            echo "has_changes=false" >> "$GITHUB_OUTPUT"
+          else
+            COUNT=$(echo "$CHANGED" | wc -l)
+            echo "Changes detected in $COUNT files:"
+            echo "$CHANGED"
+            echo "has_changes=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Launch Cursor Cloud Agent
+        if: steps.check.outputs.has_changes == 'true'
+        env:
+          CURSOR_API_KEY: ${{ secrets.CURSOR_API_KEY }}
+        run: |
+          PROMPT=$(cat scripts/prompts/doc-audit.md)
+          REPO_URL="https://github.com/${{ github.repository }}"
+          BRANCH="cursor/doc-audit-$(date +%Y-%m-%d)"
+
+          RESPONSE=$(curl -s -X POST https://api.cursor.com/v0/agents \
+            -u "$CURSOR_API_KEY:" \
+            -H "Content-Type: application/json" \
+            -d "$(jq -n \
+              --arg prompt "$PROMPT" \
+              --arg repo "$REPO_URL" \
+              --arg branch "$BRANCH" \
+              '{
+                prompt: { text: $prompt },
+                model: "gpt-5.2",
+                source: { repository: $repo, ref: "main" },
+                target: { autoCreatePr: true, branchName: $branch }
+              }')")
+
+          echo "Agent launched:"
+          echo "$RESPONSE" | jq .

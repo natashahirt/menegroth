@@ -27,22 +27,31 @@ Source: `StructuralSizer/src/optimize/*.jl`, `StructuralSizer/src/members/optimi
 SteelColumnOptions
 ```
 
-`SteelColumnOptions` (alias for `SteelMemberOptions`) configures steel column optimization:
+`SteelColumnOptions` configures steel column optimization:
 
 | Field | Description |
 |:------|:------------|
 | `material` | Steel material (e.g. `A992_Steel`) |
-| `catalog` | Catalog symbol: `:common`, `:preferred`, `:all` |
-| `Cb` | Moment gradient factor |
-| `deflection_limit` | L/Δ limit (or `nothing`) |
-| `max_depth` | Maximum section depth |
-| `prefer_penalty` | Penalty for non-preferred sections |
+| `materials` | Optional vector of steel grades for multi-material MIP (`nothing` for single material) |
+| `section_type` | Section family symbol: `:w`, `:hss`, `:pipe`, `:w_and_hss` |
+| `catalog` | Catalog selector: `:common`, `:preferred`, `:all` |
+| `custom_catalog` | Optional custom section vector (overrides `catalog`) |
+| `max_depth` | Maximum section depth (Length) |
+| `n_max_sections` | Max unique sections across groups (0 = no limit) |
+| `objective` | `MinWeight()`, `MinVolume()`, `MinCost()`, `MinCarbon()` |
+| `solver` | MIP optimizer selector: `:auto`, `:highs`, `:gurobi` |
 
 ```@docs
 SteelBeamOptions
 ```
 
-Alias for `SteelMemberOptions`, same configuration as columns.
+`SteelBeamOptions` configures steel beam sizing. It shares the same catalog/material fields as `SteelColumnOptions`, and adds deflection and composite-beam settings:
+
+| Field | Description |
+|:------|:------------|
+| `deflection_limit` | Live-load deflection limit ratio (default `1/360`; set to `nothing` to disable) |
+| `total_deflection_limit` | Total-load deflection limit ratio (default `1/240`; set to `nothing` to disable) |
+| `composite` | Enable composite beam sizing (AISC 360-16 Ch. I) |
 
 ```@docs
 ConcreteColumnOptions
@@ -53,7 +62,7 @@ ConcreteColumnOptions
 | Field | Description |
 |:------|:------------|
 | `material` | Concrete grade (e.g. `NWC_4000`) |
-| `section_shape` | `:rect`, `:square`, `:rectangular`, or `:circular` |
+| `section_shape` | `:rect` or `:circular` |
 | `rebar_material` | Rebar material |
 | `sizing_strategy` | `:discrete` or `:nlp` |
 | Other fields | Slenderness, biaxial, catalog parameters |
@@ -154,7 +163,7 @@ optimize_discrete
 - Exactly one section selected: `Σ x[j] = 1`
 - Feasibility: `x[j] = 0` for all sections that fail any member's capacity check
 
-Options: `solver` (HiGHS or Gurobi), `mip_gap`, `time_limit_sec`, `n_max_sections`.
+Options: `optimizer` (`:auto`, `:highs`, `:gurobi`), `mip_gap`, `time_limit_sec`, `output_flag`, `cache`, `n_max_sections`.
 
 A multi-material overload accepts `(checker, demands, geometries, catalog, materials)` and uses `expand_catalog_with_materials` to create the Cartesian product.
 
@@ -226,13 +235,15 @@ In the MIP formulation, all members in a group share the same section (one set o
 ### Steel
 
 ```julia
+using Unitful
 opts = SteelColumnOptions(
     material = A992_Steel,
+    section_type = :w,
     catalog = :preferred,
-    Cb = 1.0,
-    deflection_limit = nothing,
-    max_depth = Inf,
-    prefer_penalty = 1.0
+    max_depth = Inf * u"mm",
+    n_max_sections = 0,
+    objective = MinWeight(),
+    solver = :auto,
 )
 ```
 
@@ -249,7 +260,7 @@ opts = ConcreteColumnOptions(
 
 ### Solver Selection
 
-For discrete MIP: HiGHS (open-source, default) or Gurobi (commercial, faster for large problems). Set via the `solver` keyword.
+For discrete MIP: HiGHS (open-source) or Gurobi (commercial, faster for large problems). Set via the `optimizer` keyword on `optimize_discrete` or via the options field `opts.solver` (which is forwarded as `optimizer=...` internally).
 
 For NLP: Ipopt (default) via the `solver` keyword in `NLPColumnOptions`.
 

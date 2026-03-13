@@ -66,6 +66,15 @@ function register_routes!()
         return _json_ok(Dict("status" => status_string(SERVER_STATUS)))
     end
 
+    # ─── GET /env-check ───────────────────────────────────────────────────
+    # Reports whether expected env vars are set (presence only; no values).
+    # Use to verify Secrets Manager / App Runner config without exposing secrets.
+    @get "/env-check" function (_::HTTP.Request)
+        keys_to_check = ["GRB_WLSACCESSID", "GRB_WLSSECRET", "GRB_LICENSEID"]
+        present = Dict(k => haskey(ENV, k) for k in keys_to_check)
+        return _json_ok(present)
+    end
+
     # ─── GET /schema ──────────────────────────────────────────────────────
     @get "/schema" function (_::HTTP.Request)
         schema_doc = Dict(
@@ -75,6 +84,7 @@ function register_routes!()
                 "POST /validate" => "Validate input without running design",
                 "GET /health" => "Server health check",
                 "GET /status" => "Server state: idle, running, queued",
+                "GET /env-check" => "Whether Gurobi env vars are set (presence only, no values)",
                 "GET /result" => "Last completed design result (after POST /design and status idle)",
                 "GET /schema" => "This documentation",
             ),

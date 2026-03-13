@@ -182,6 +182,24 @@ namespace Menegroth.GH.Components
             ScheduleExpire(doc);
         }
 
+        /// <summary>
+        /// Appends the current wait line (including final elapsed time) to the log, then clears it.
+        /// Keeps lines like "Waiting for API ready... (107 s)" in the log after the wait finishes.
+        /// </summary>
+        private void CommitWaitStatus(GH_Document doc)
+        {
+            lock (_logLock)
+            {
+                if (!string.IsNullOrEmpty(_waitStatusLine))
+                {
+                    if (_statusLog.Length > 0) _statusLog.AppendLine();
+                    _statusLog.Append(_waitStatusLine);
+                    _waitStatusLine = null;
+                }
+            }
+            ScheduleExpire(doc);
+        }
+
         private void ClearWaitStatus()
         {
             lock (_logLock) { _waitStatusLine = null; }
@@ -336,7 +354,7 @@ namespace Menegroth.GH.Components
                     string readyBody = await PollUntilReady(url, PollTimeoutSeconds,
                         elapsed => UpdateWaitStatus(doc, "Waiting for API ready...", elapsed),
                         () => _cancelRequested);
-                    ClearWaitStatus();
+                    CommitWaitStatus(doc);
 
                     if (readyBody.Contains("Cancelled by user"))
                     {
@@ -398,7 +416,7 @@ namespace Menegroth.GH.Components
                         designCts.Cancel();
                         try { await timerTask; }
                         catch (OperationCanceledException) { }
-                        ClearWaitStatus();
+                        CommitWaitStatus(doc);
                     }
 
                     // Check if server returned 202 Accepted (async pattern)
@@ -414,7 +432,7 @@ namespace Menegroth.GH.Components
                         string idleBody = await PollUntilReady(url, PollTimeoutSeconds,
                             elapsed => UpdateWaitStatus(doc, "Waiting for design to complete...", elapsed),
                             () => _cancelRequested);
-                        ClearWaitStatus();
+                        CommitWaitStatus(doc);
 
                         if (idleBody.Contains("Cancelled by user"))
                         {

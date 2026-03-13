@@ -18,12 +18,39 @@ import LinearAlgebra: norm, normalize
 using Unitful
 
 function __init__()
-    # Ensure Asap units (ksi, kip, etc.) are registered in Unitful.basefactors.
-    # This redundancy fixes issues where units are lost in certain loading contexts
-    # (e.g. AWS bootstrap via Base.require).
-    if isdefined(Asap, :_localunits)
+    _ensure_asap_units!()
+end
+
+# Expected Asap custom-unit symbols. Used by the runtime sanity check.
+const _ASAP_UNIT_SYMS = (:Kip, :KipPerSquareInch, :PoundPerSquareFoot,
+                          :KipPerSquareFoot, :PoundPerCubicFoot)
+
+"""
+    _ensure_asap_units!()
+
+Force-register Asap custom units (kip, ksi, psf, …) into `Unitful.basefactors`.
+
+Two strategies are tried:
+
+1. `Unitful.register(Asap)` — the canonical Unitful mechanism (reads the hidden
+   per-module basefactors dict that `@unit` populated at compile time).
+2. `merge!(basefactors, Asap._localunits)` — snapshot captured at precompile time.
+
+After both, a sanity check confirms every expected symbol is present and logs
+an error for any that are missing.
+"""
+function _ensure_asap_units!()
+    Unitful.register(Asap)
+
+    if isdefined(Asap, :_localunits) && !isempty(Asap._localunits)
         merge!(Unitful.basefactors, Asap._localunits)
-        Unitful.register(Asap)
+    end
+
+    for sym in _ASAP_UNIT_SYMS
+        haskey(Unitful.basefactors, sym) && continue
+        @error "StructuralSynthesizer.__init__: Unitful.basefactors is missing :$sym — " *
+               "unit conversions will fail. _localunits has $(length(get(Main, :_localunits, Dict()))) entries; " *
+               "Asap._localunits has $(isdefined(Asap, :_localunits) ? length(Asap._localunits) : "N/A") entries"
     end
 end
 

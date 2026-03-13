@@ -265,6 +265,16 @@ function check_material_compatibility(mat::MaterialOptions, floor::StructuralSiz
 end
 
 # =============================================================================
+# Default Frame Properties (precomputed SI to avoid runtime ksi→Pa conversion)
+# =============================================================================
+# A992 Steel: E = 29000 ksi, G = 11200 ksi, ρ = 490 pcf.
+# Converted at compile time so DesignParameters defaults never trigger
+# Unitful basefactor lookups that may fail on cold-start deployments.
+const _DEFAULT_FRAME_E = uconvert(u"Pa",      A992_Steel.E)
+const _DEFAULT_FRAME_G = uconvert(u"Pa",      A992_Steel.G)
+const _DEFAULT_FRAME_ρ = uconvert(u"kg/m^3",  A992_Steel.ρ)
+
+# =============================================================================
 # Design Parameters
 # =============================================================================
 
@@ -371,10 +381,12 @@ Base.@kwdef mutable struct DesignParameters
     diaphragm_E::Union{typeof(1.0u"Pa"), Nothing} = nothing
     diaphragm_ν::Float64 = 0.2
     
-    # Default frame element properties (before member sizing)
-    default_frame_E::typeof(1.0u"Pa") = uconvert(u"Pa", A992_Steel.E)
-    default_frame_G::typeof(1.0u"Pa") = uconvert(u"Pa", A992_Steel.G)
-    default_frame_ρ::typeof(1.0u"kg/m^3") = uconvert(u"kg/m^3", A992_Steel.ρ)
+    # Default frame element properties (before member sizing).
+    # Use precomputed SI constants to avoid runtime Unitful conversion of ksi → Pa,
+    # which can fail if Asap custom-unit basefactors are not yet registered.
+    default_frame_E::typeof(1.0u"Pa") = _DEFAULT_FRAME_E
+    default_frame_G::typeof(1.0u"Pa") = _DEFAULT_FRAME_G
+    default_frame_ρ::typeof(1.0u"kg/m^3") = _DEFAULT_FRAME_ρ
     
     # ─── ACI Cracking Factors ───
     column_I_factor::Float64 = 0.70

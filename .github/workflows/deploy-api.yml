@@ -5,6 +5,12 @@ on:
     branches:
       - aws-api
   workflow_dispatch:
+    inputs:
+      no_docker_cache:
+        description: 'Build with no Docker cache (slower; use if deploys fail from stale precompile cache)'
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   id-token: write
@@ -55,12 +61,13 @@ jobs:
           echo "sha_tag=${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
           echo "image_uri=${{ steps.login-ecr.outputs.registry }}/${ECR_REPOSITORY}" >> "$GITHUB_OUTPUT"
 
-      - name: Build and push Docker image (cached)
+      - name: Build and push Docker image
         uses: docker/build-push-action@v7
         with:
           context: .
           push: true
           tags: ${{ steps.meta.outputs.image_uri }}:${{ steps.meta.outputs.sha_tag }}
+          no-cache: ${{ github.event_name == 'workflow_dispatch' && inputs.no_docker_cache == true }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 

@@ -70,7 +70,7 @@ result = optimize_vault(6.0u"m", 1.0u"kN/m^2", 2.0u"kN/m^2")
 |:-----|:-------|:------------|
 | `FlatPlate` | ✅ Full | Two-way flat plate (ACI 318 DDM/EFM/FEA) |
 | `Vault` | ✅ Full | Unreinforced parabolic vault (Haile method) |
-| `FlatSlab` | ⚠️ Stub | Flat plate with drop panels |
+| `FlatSlab` | ✅ Full | Flat plate with drop panels (shared ACI 318 pipeline) |
 | `TwoWay` | ⚠️ Stub | Two-way slab with beams |
 | `OneWay` | ⚠️ Stub | One-way slab |
 | `Waffle` | ⚠️ Stub | Two-way joist system |

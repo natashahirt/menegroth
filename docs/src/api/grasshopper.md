@@ -25,9 +25,10 @@ The Grasshopper client is a Rhino Grasshopper component (`SizerRun.cs`) that con
 
 3. **Run design** via the `SizerRun` component:
    - Pre-flight health check: `GET /health`
-   - Submit design: `POST /design` with JSON body
-   - Handle queuing: if server returns `"queued"`, poll `GET /status` until `"idle"`, then retry
-   - Parse response: extract results, visualization data
+   - Submit design: `POST /design` with JSON body (returns immediately with `"accepted"` or `"queued"`)
+   - Poll `GET /status` until the server returns `"idle"`
+   - Fetch the last completed result from `GET /result`
+   - Parse result: extract element results, summary, and visualization data
 
 4. **Inspect results** via downstream components:
    - `SizerResults` — parsed design results
@@ -73,8 +74,8 @@ The Grasshopper client is a Rhino Grasshopper component (`SizerRun.cs`) that con
 ### HTTP Communication
 
 - **Health check:** `GET /health` — verifies the server is reachable before submitting
-- **Design request:** `POST /design` — async HTTP with 300-second timeout
-- **Queue handling:** if response status is `"queued"`, the component polls `GET /status` at 2-second intervals until the server returns `"idle"`, then resubmits
+- **Design request:** `POST /design` — starts an asynchronous design job (returns quickly; the design runs server-side in the background)
+- **Result polling:** poll `GET /status` at 2-second intervals until the server returns `"idle"`, then fetch results via `GET /result`
 
 ### Caching
 

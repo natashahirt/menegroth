@@ -63,7 +63,7 @@ A dictionary mapping face group names to face-coordinate polylines:
 | `fire_rating` | `Float64` | `0.0` | Fire resistance in hours |
 | `optimize_for` | `String` | `"weight"` | `"weight"`, `"carbon"`, or `"cost"` |
 | `size_foundations` | `Bool` | `false` | Whether to size foundations |
-| `foundation_soil` | `String` | `"medium_sand"` | Soil type name (currently only `"medium_sand"` is mapped) |
+| `foundation_soil` | `String` | `"medium_sand"` | Soil type name (used when `size_foundations=true`): `"loose_sand"`, `"medium_sand"`, `"dense_sand"`, `"soft_clay"`, `"stiff_clay"`, `"hard_clay"` |
 
 See [`APIParams`](@ref) in [API Overview](overview.md).
 
@@ -139,6 +139,7 @@ See [`APIOutput`](@ref) in [API Overview](overview.md).
 | Field | Type | Description |
 |:------|:-----|:------------|
 | `id` | `Int` | Slab index |
+| `ok` | `Bool` | Slab passes all slab checks (`converged && deflection_ok && punching_ok`) |
 | `thickness_in` | `Float64` | Slab thickness in inches |
 | `converged` | `Bool` | Design converged |
 | `failure_reason` | `String` | Failure description (empty if ok) |

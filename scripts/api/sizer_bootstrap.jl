@@ -58,6 +58,23 @@ const SS_PKGID = Base.PkgId(Base.UUID("fc54e8a9-dab1-4bea-a64f-f8e9b3ce8a89"), "
         flush(stdout)
         @info "Loading StructuralSynthesizer (first request may be slow)..."
         mod = Base.require(SS_PKGID)
+
+        # Belt-and-suspenders: ensure Asap units are in Unitful.basefactors.
+        # The __init__ chain should have done this, but log the state for debugging.
+        using Unitful
+        n_bf = length(Unitful.basefactors)
+        has_ksi = haskey(Unitful.basefactors, :KipPerSquareInch)
+        println(stdout, "[bootstrap] basefactors: $n_bf entries, has :KipPerSquareInch = $has_ksi")
+        flush(stdout)
+        if !has_ksi
+            println(stdout, "[bootstrap] __init__ did NOT register Asap units — calling _ensure_asap_units! explicitly")
+            flush(stdout)
+            Base.invokelatest(mod._ensure_asap_units!)
+            has_ksi2 = haskey(Unitful.basefactors, :KipPerSquareInch)
+            println(stdout, "[bootstrap] after explicit fix: has :KipPerSquareInch = $has_ksi2")
+            flush(stdout)
+        end
+
         println(stdout, "[bootstrap] @async: require done, calling register_routes!...")
         flush(stdout)
         Base.invokelatest(mod.register_routes!)

@@ -33,7 +33,7 @@ namespace Menegroth.GH.Components
         { }
 
         public override Guid ComponentGuid =>
-            new Guid("8C252AFB-41B9-4F5C-BB0C-905CD6353BA2");
+            new Guid("E7D94B2A-6C31-4D89-AF1E-2B8A3C5D7E9F");
 
         protected override void RegisterInputParams(GH_InputParamManager pManager)
         {

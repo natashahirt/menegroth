@@ -160,7 +160,7 @@ fp = FoundationParameters(
 Base.@kwdef struct FoundationParameters
     soil::StructuralSizer.Soil = StructuralSizer.medium_sand
     options::StructuralSizer.FoundationOptions = StructuralSizer.FoundationOptions()
-    concrete::StructuralSizer.Concrete = StructuralSizer.NWC_4000
+    concrete::StructuralSizer.Concrete = StructuralSizer.NWC_3000  # Default 3 ksi for footings
     rebar::StructuralSizer.RebarSteel = StructuralSizer.Rebar_60
     pier_width::typeof(1.0u"m") = 0.35u"m"
     min_depth::typeof(1.0u"m") = 0.4u"m"
@@ -228,10 +228,10 @@ resolve_slab_rc(m::MaterialOptions) = isnothing(m.slab) ?
     StructuralSizer.ReinforcedConcreteMaterial(resolve_slab_concrete(m), resolve_slab_rebar(m)) :
     m.slab
 
-"""Resolve the effective column concrete from the material cascade."""
+"""Resolve the effective column concrete from the material cascade (default 6 ksi)."""
 resolve_column_concrete(m::MaterialOptions) = something(
     isnothing(m.column) ? nothing : m.column.concrete,
-    m.concrete, StructuralSizer.NWC_4000)
+    m.concrete, StructuralSizer.NWC_6000)
 
 """Resolve the effective column rebar from the material cascade."""
 resolve_column_rebar(m::MaterialOptions) = something(

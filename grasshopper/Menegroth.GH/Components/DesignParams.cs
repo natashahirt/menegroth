@@ -434,7 +434,7 @@ namespace Menegroth.GH.Components
                                 out double parsed))
                 fireRatingVal = parsed;
 
-            var p = new DesignParams
+            var p = new DesignParamsData
             {
                 FloorLL         = floorLL,
                 RoofLL          = roofLL,
@@ -458,7 +458,7 @@ namespace Menegroth.GH.Components
                 UnitSystem      = _unitSystem,
             };
 
-            DA.SetData(0, new GH_DesignParams(p));
+            DA.SetData(0, new GH_DesignParamsData(p));
         }
 
         // ─── Helper types ────────────────────────────────────────────────

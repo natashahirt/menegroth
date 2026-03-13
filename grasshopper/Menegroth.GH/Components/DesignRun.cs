@@ -193,7 +193,7 @@ namespace Menegroth.GH.Components
         {
             // 1. Read inputs
             GH_BuildingGeometry geoGoo = null;
-            GH_DesignParams paramsGoo = null;
+            GH_DesignParamsData paramsGoo = null;
             string urlInput = _serverUrl;
             bool run = false;
 
@@ -625,7 +625,7 @@ namespace Menegroth.GH.Components
         private static readonly HashSet<string> ValidUnitSystems =
             new HashSet<string> { "imperial", "metric" };
 
-        private static List<string> ValidateLocally(BuildingGeometry geo, DesignParams prms)
+        private static List<string> ValidateLocally(BuildingGeometry geo, DesignParamsData prms)
         {
             var errors = new List<string>();
 

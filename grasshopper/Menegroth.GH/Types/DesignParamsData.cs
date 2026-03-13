@@ -6,7 +6,7 @@ namespace Menegroth.GH.Types
     /// <summary>
     /// Container for design parameters matching the Julia API schema.
     /// </summary>
-    public class DesignParams
+    public class DesignParamsData
     {
         // Loads (psf)
         public double FloorLL { get; set; } = 80;

@@ -1,15 +1,15 @@
 # Grasshopper Client
 
 > ```csharp
-> // In Grasshopper (Rhino), the SizerRun component sends
+> // In Grasshopper (Rhino), the Design Run component sends
 > // building geometry to the Julia API and returns results.
 > ```
 
 ## Overview
 
-The Grasshopper client is a Rhino Grasshopper component (`SizerRun.cs`) that connects the parametric modeling environment to the menegroth API. Designers define building geometry in Grasshopper using standard Rhino primitives (points, lines, surfaces) and the component sends the geometry and parameters to the Julia API for structural design.
+The Grasshopper client is a Rhino Grasshopper component (`DesignRun.cs`) that connects the parametric modeling environment to the menegroth API. Designers define building geometry in Grasshopper using standard Rhino primitives (points, lines, surfaces) and the component sends the geometry and parameters to the Julia API for structural design.
 
-**Source:** `grasshopper/StructuralSizer.GH/Components/SizerRun.cs`
+**Source:** `grasshopper/Menegroth.GH/Components/DesignRun.cs`
 
 ## Workflow
 
@@ -19,11 +19,11 @@ The Grasshopper client is a Rhino Grasshopper component (`SizerRun.cs`) that con
    - Floor faces from `Surface` or `Brep` objects
    - Support vertices from point indices
 
-2. **Configure parameters** via the `SizerDesignParams` component:
+2. **Configure parameters** via the **Design Params** component:
    - Floor type, materials, loads, fire rating
    - Optimization objective
 
-3. **Run design** via the `SizerRun` component:
+3. **Run design** via the **Design Run** component:
    - Pre-flight health check: `GET /health`
    - Submit design: `POST /design` with JSON body (returns immediately with `"accepted"` or `"queued"`)
    - Poll `GET /status` until the server returns `"idle"`
@@ -31,35 +31,35 @@ The Grasshopper client is a Rhino Grasshopper component (`SizerRun.cs`) that con
    - Parse result: extract element results, summary, and visualization data
 
 4. **Inspect results** via downstream components:
-   - `SizerResults` — parsed design results
-   - `SizerSummary` — material quantities and pass/fail
-   - `SizerStatistics` — compute time, convergence info
-   - `SizerElementDetails` — per-element D/C ratios
-   - `SizerVisualization` — 3D visualization meshes
+   - **Design Results** — parsed design results
+   - Summary — material quantities and pass/fail
+   - Statistics — compute time, convergence info
+   - Element details — per-element D/C ratios
+   - **Visualization** — 3D visualization meshes
 
 ## Grasshopper Components
 
 | Component | Description |
 |:----------|:------------|
-| `SizerGeometryInput` | Collect points, lines, surfaces into `GH_SizerGeometry` |
-| `SizerDesignParams` | Configure design parameters as `GH_SizerParams` |
-| `SizerRun` | Execute design via API — main component |
-| `SizerResults` | Parse and expose design results |
-| `SizerSummary` | Material quantities, EC, pass/fail |
-| `SizerStatistics` | Timing, iterations, convergence |
-| `SizerElementDetails` | Per-element detailed results |
-| `SizerVisualization` | 3D mesh output for Rhino viewport |
+| **Geometry Input** | Collect points, lines, surfaces into `GH_BuildingGeometry` |
+| **Design Params** | Configure design parameters as `GH_DesignParams` |
+| **Design Run** | Execute design via API — main component |
+| **Design Results** | Parse and expose design results |
+| Summary | Material quantities, EC, pass/fail |
+| Statistics | Timing, iterations, convergence |
+| Element details | Per-element detailed results |
+| **Visualization** | 3D mesh output for Rhino viewport |
 
 ## Implementation Details
 
-### SizerRun Component
+### Design Run Component
 
 **Inputs:**
 
 | Input | Type | Description |
 |:------|:-----|:------------|
-| Geometry | `GH_SizerGeometry` | Building geometry from `SizerGeometryInput` |
-| Params | `GH_SizerParams` | Design parameters from `SizerDesignParams` |
+| Geometry | `GH_BuildingGeometry` | Building geometry from **Geometry Input** |
+| Params | `GH_DesignParams` | Design parameters from **Design Params** |
 | Server URL | `String` | API endpoint (default: `http://localhost:8080`). For AWS deployment, ask the project owner for the server URL. |
 | Run | `Boolean` | Trigger design execution |
 
@@ -98,7 +98,7 @@ The component displays real-time status in the Grasshopper canvas:
 
 ### Building Geometry from Grasshopper
 
-The `SizerGeometryInput` component converts Rhino geometry to API-compatible format:
+The **Geometry Input** component converts Rhino geometry to API-compatible format:
 
 | Rhino Primitive | API Field | Conversion |
 |:----------------|:----------|:-----------|
@@ -124,4 +124,4 @@ The `SizerGeometryInput` component converts Rhino geometry to API-compatible for
 
 ## Using the AWS-deployed API
 
-For the AWS-deployed API, ask the project owner for the server URL and set it in the **Server URL** input (or as the default in `SizerRun.cs`). The component default is `http://localhost:8080` for local development.
+For the AWS-deployed API, ask the project owner for the server URL and set it in the **Server URL** input (or as the default in `DesignRun.cs`). The component default is `http://localhost:8080` for local development.

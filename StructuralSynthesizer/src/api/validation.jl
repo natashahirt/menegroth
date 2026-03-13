@@ -149,6 +149,9 @@ function validate_input(input::APIInput)
     if !haskey(CONCRETE_MAP, p.materials.concrete)
         push!(errors, "Unknown concrete \"$(p.materials.concrete)\". Options: $(join(keys(CONCRETE_MAP), ", ")).")
     end
+    if !haskey(CONCRETE_MAP, p.materials.column_concrete)
+        push!(errors, "Unknown column_concrete \"$(p.materials.column_concrete)\". Options: $(join(keys(CONCRETE_MAP), ", ")).")
+    end
     if !haskey(REBAR_MAP, p.materials.rebar)
         push!(errors, "Unknown rebar \"$(p.materials.rebar)\". Options: $(join(keys(REBAR_MAP), ", ")).")
     end
@@ -156,10 +159,15 @@ function validate_input(input::APIInput)
         push!(errors, "Unknown steel \"$(p.materials.steel)\". Options: $(join(keys(STEEL_MAP), ", ")).")
     end
 
-    # ─── Foundation soil (required when size_foundations is true) ──────
-    if p.size_foundations && !haskey(SOIL_MAP, p.foundation_soil)
-        push!(errors, "Unknown foundation_soil \"$(p.foundation_soil)\". " *
-              "Options: $(join(keys(SOIL_MAP), ", ")).")
+    # ─── Foundation (when size_foundations is true) ────────────────────
+    if p.size_foundations
+        if !haskey(SOIL_MAP, p.foundation_soil)
+            push!(errors, "Unknown foundation_soil \"$(p.foundation_soil)\". " *
+                  "Options: $(join(keys(SOIL_MAP), ", ")).")
+        end
+        if !haskey(CONCRETE_MAP, p.foundation_concrete)
+            push!(errors, "Unknown foundation_concrete \"$(p.foundation_concrete)\". Options: $(join(keys(CONCRETE_MAP), ", ")).")
+        end
     end
 
     # ─── Unit system ──────────────────────────────────────────────────

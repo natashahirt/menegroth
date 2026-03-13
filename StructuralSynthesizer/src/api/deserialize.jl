@@ -307,7 +307,10 @@ function json_to_params(api_params::APIParams)
     )
 
     conc, reb, stl = _resolve_materials(api_params)
-    materials = MaterialOptions(concrete=conc, rebar=reb, steel=stl)
+    column_conc = _resolve_concrete_name(api_params.materials.column_concrete)
+    # Set column override so resolve_column_concrete(materials) returns column_conc (default 6 ksi)
+    column_rc = StructuralSizer.ReinforcedConcreteMaterial(column_conc, reb)
+    materials = MaterialOptions(concrete=conc, rebar=reb, steel=stl, column=column_rc)
 
     floor = _resolve_floor_options(api_params)
 
@@ -316,7 +319,8 @@ function json_to_params(api_params::APIParams)
 
     foundation_options = if api_params.size_foundations
         soil = _resolve_soil_name(api_params.foundation_soil)
-        FoundationParameters(soil=soil)
+        fdn_conc = _resolve_concrete_name(api_params.foundation_concrete)
+        FoundationParameters(soil=soil, concrete=fdn_conc)
     else
         nothing
     end
@@ -451,15 +455,16 @@ function _resolve_materials(api_params::APIParams)
     )
 end
 
-"""Resolve column type string to ColumnOptions."""
+"""Resolve column type string to ColumnOptions. Uses column_concrete (default 6 ksi)."""
 function _resolve_column_options(api_params::APIParams)
     ct = lowercase(strip(api_params.column_type))
-    concrete, rebar, steel = _resolve_materials(api_params)
+    _, rebar, steel = _resolve_materials(api_params)
+    column_conc = _resolve_concrete_name(api_params.materials.column_concrete)
 
     if startswith(ct, "rc_")
         shape = ct == "rc_circular" ? :circular : :rect
         return StructuralSizer.ConcreteColumnOptions(
-            material = concrete,
+            material = column_conc,
             rebar_material = rebar,
             section_shape = shape
         )
@@ -480,7 +485,7 @@ function _resolve_column_options(api_params::APIParams)
     else
         # Default to RC rectangular
         return StructuralSizer.ConcreteColumnOptions(
-            material = concrete,
+            material = column_conc,
             rebar_material = rebar,
             section_shape = :rect
         )

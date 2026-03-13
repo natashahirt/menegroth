@@ -17,6 +17,16 @@ import Asap
 import LinearAlgebra: norm, normalize
 using Unitful
 
+function __init__()
+    # Ensure Asap units (ksi, kip, etc.) are registered in Unitful.basefactors.
+    # This redundancy fixes issues where units are lost in certain loading contexts
+    # (e.g. AWS bootstrap via Base.require).
+    if isdefined(Asap, :_localunits)
+        merge!(Unitful.basefactors, Asap._localunits)
+        Unitful.register(Asap)
+    end
+end
+
 # =============================================================================
 # File includes (order matters!)
 # =============================================================================

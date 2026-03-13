@@ -76,7 +76,8 @@ function api_input_schema()
                     "punching_strategy" => "grow_columns | reinforce_last | reinforce_first. Default: grow_columns.",
                 ),
                 "materials" => Dict(
-                    "concrete" => "Concrete name (e.g. NWC_4000). Default: NWC_4000.",
+                    "concrete" => "Slab/floor concrete (e.g. NWC_4000). Default: NWC_4000.",
+                    "column_concrete" => "Column concrete (e.g. NWC_6000). Default: NWC_6000.",
                     "rebar" => "Rebar name (e.g. Rebar_60). Default: Rebar_60.",
                     "steel" => "Steel name (e.g. A992). Default: A992.",
                 ),
@@ -86,6 +87,7 @@ function api_input_schema()
                 "optimize_for" => "weight | carbon | cost. Default: weight.",
                 "size_foundations" => "Boolean. Default: false.",
                 "foundation_soil" => "Soil name (e.g. medium_sand). Required when size_foundations is true. Default: medium_sand.",
+                "foundation_concrete" => "Foundation concrete (e.g. NWC_3000). Default: NWC_3000.",
             ),
         ),
         "geometry_hash" => Dict(
@@ -131,7 +133,8 @@ end
 
 """Raw material selections from JSON."""
 Base.@kwdef mutable struct APIMaterials
-    concrete::String = "NWC_4000"
+    concrete::String = "NWC_4000"           # Slab/floor concrete (default 4 ksi)
+    column_concrete::String = "NWC_6000"   # Column concrete (default 6 ksi)
     rebar::String = "Rebar_60"
     steel::String = "A992"
 end
@@ -149,6 +152,7 @@ Base.@kwdef mutable struct APIParams
     optimize_for::String = "weight"
     size_foundations::Bool = false
     foundation_soil::String = "medium_sand"
+    foundation_concrete::String = "NWC_3000"  # Foundation concrete (default 3 ksi)
 end
 
 """

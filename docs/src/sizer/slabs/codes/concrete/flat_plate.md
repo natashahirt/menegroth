@@ -238,7 +238,7 @@ at inflection points).
 - `:efm_amp` — One FEA solve + many cheap EFM solves for amplification factors.
 - `:fea_resolve` — Full re-solve for each load pattern (more accurate, slower).
 
-### Punching Shear (ACI §22.6)
+### Punching Shear (ACI 318-11 §11.11)
 
 Critical section geometry is computed at ``d/2`` from the column face:
 
@@ -277,13 +277,15 @@ order:
 
 ### Deflection (ACI §24.2)
 
-Effective moment of inertia uses the **Bischoff (2005)** formulation by default:
+The flat-plate pipeline uses **Branson's** effective moment of inertia by default (`effective_moment_of_inertia`, ACI Eq. 9-10). For FEA-based analysis, you can opt into the **Bischoff (2005)** reciprocal formulation by setting `FEA(deflection_Ie_method = :bischoff)`.
+
+Bischoff's formulation is:
 
 ```math
 I_e = \frac{I_{cr}}{1 - \left(\frac{M_{cr}}{M_a}\right)^2 \left(1 - \frac{I_{cr}}{I_g}\right)}
 ```
 
-The **Branson** formulation (ACI Eq. 9-10) is also available:
+Branson's formulation (ACI Eq. 9-10) is:
 
 ```math
 I_e = \left(\frac{M_{cr}}{M_a}\right)^3 I_g + \left[1 - \left(\frac{M_{cr}}{M_a}\right)^3\right] I_{cr}
@@ -347,7 +349,7 @@ restarts.  Default maximum iterations: 10 per phase.
 | `run_moment_analysis(::DDM, ...)` | DDM moment analysis | Internal |
 | `run_moment_analysis(::EFM, ...)` | EFM moment analysis | Internal |
 | `run_moment_analysis(::FEA, ...)` | FEA moment analysis | Internal |
-| `check_punching` | ACI 22.6 punching check | Exported |
+| `check_punching` | ACI 318 punching check (shared slab/foundation utilities) | Exported |
 | `design_strip_reinforcement` | Flexure + minimum As | Exported |
 
 ## Results Access

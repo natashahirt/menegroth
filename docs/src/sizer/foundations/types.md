@@ -2,9 +2,11 @@
 
 > ```julia
 > using StructuralSizer
+> using Unitful
 > soil = medium_sand
-> demand = FoundationDemand(1; Pu=500u"kip", Mux=100u"kip*ft", c1=24u"inch", c2=24u"inch")
-> result = design_footing(SpreadFooting(), demand, soil)
+> demand = FoundationDemand(1; Pu=500.0kip, Ps=400.0kip, Mux=100.0kip * u"ft")
+> opts   = SpreadFootingOptions(pier_c1=24u"inch", pier_c2=24u"inch", pier_shape=:rectangular)
+> result = design_footing(SpreadFooting(), demand, soil; opts=opts)
 > footprint_area(result)  # ft²
 > utilization(result)     # bearing utilization ratio
 > ```
@@ -71,6 +73,16 @@ See [ACI Foundation Design](codes/aci.md) for full docstrings.
 The `Soil` struct stores geotechnical parameters used for bearing, subgrade
 reaction, and pile capacity calculations.  See the table below for fields.
 
+```@docs
+Soil
+loose_sand
+medium_sand
+dense_sand
+soft_clay
+stiff_clay
+hard_clay
+```
+
 ### Soil Presets
 
 Six preset soils are provided (see table below).  Import them directly:
@@ -80,6 +92,10 @@ Six preset soils are provided (see table below).  Import them directly:
 
 `FoundationDemand` wraps the column-to-foundation interface including factored
 and service loads, moments, shears, and column geometry.
+
+```@docs
+FoundationDemand
+```
 
 ### Result Types
 
@@ -144,12 +160,12 @@ Six preset soils are provided from Bowles (1996) Table 9-1 and ACI 336.2R:
 
 | Preset | ``q_a`` | ``\phi`` | ``k_s`` |
 |:-------|:--------|:---------|:--------|
-| `loose_sand` | 1.5 ksf | 28° | 30 pci |
-| `medium_sand` | 3.0 ksf | 33° | 100 pci |
-| `dense_sand` | 5.0 ksf | 38° | 250 pci |
-| `soft_clay` | 1.0 ksf | 0° | 30 pci |
-| `stiff_clay` | 3.0 ksf | 0° | 150 pci |
-| `hard_clay` | 6.0 ksf | 0° | 300 pci |
+| `loose_sand` | 75 kPa | 28° | 5 000 kN/m³ |
+| `medium_sand` | 150 kPa | 32° | 25 000 kN/m³ |
+| `dense_sand` | 300 kPa | 38° | 100 000 kN/m³ |
+| `soft_clay` | 50 kPa | 0° | 12 000 kN/m³ |
+| `stiff_clay` | 150 kPa | 0° | 50 000 kN/m³ |
+| `hard_clay` | 300 kPa | 0° | 150 000 kN/m³ |
 
 ### Foundation Demand
 
@@ -157,7 +173,7 @@ Six preset soils are provided from Bowles (1996) Table 9-1 and ACI 336.2R:
 
 - Factored loads: ``P_u, M_{ux}, M_{uy}, V_{ux}, V_{uy}``
 - Service load: ``P_s`` (for bearing check)
-- Column dimensions: ``c_1, c_2`` and shape (`:square`, `:round`)
+- Column dimensions: ``c_1, c_2`` and shape (`:rectangular`, `:circular`)
 
 ### Foundation Strategy Recommendation
 
@@ -184,20 +200,34 @@ The option structs configure code-specific design parameters:
 
 - **`SpreadFootingOptions`** — cover, bar size, pier shape, strength reduction factors.
 - **`StripFootingOptions`** — similar to spread footing options, for continuous strips.
-- **`MatFootingOptions`** — analysis method selection, cover, bar size, overhang ratio, minimum thickness.
+- **`MatFootingOptions`** — analysis method selection, cover, bar sizes, minimum thickness, and optional edge overhang.
 - **`FoundationOptions`** — top-level container selecting code, strategy, and mat coverage threshold.
 
 See [ACI Foundation Design](codes/aci.md) for full docstrings and default values.
+
+```@docs
+SpreadFootingOptions
+StripFootingOptions
+MatFootingOptions
+FoundationOptions
+```
 
 Key `SpreadFootingOptions` fields:
 
 | Field | Default | Description |
 |:------|:--------|:------------|
-| `cover` | 3 in. | Concrete cover to rebar |
-| `bar_size` | 5 | Rebar bar designation |
-| `pier_shape` | `:square` | Column/pier shape |
-| `ϕ_flexure` | 0.90 | Flexure strength reduction factor |
-| `ϕ_shear` | 0.75 | Shear strength reduction factor |
+| `material` | `RC_4000_60` | Concrete + rebar material bundle |
+| `cover` | 3 in. | Clear cover to reinforcement (cast against soil) |
+| `bar_size` | 8 | Rebar bar size (#8, etc.) |
+| `pier_shape` | `:rectangular` | Pier/column shape (`:rectangular` or `:circular`) |
+| `pier_c1` | 18 in. | Pier dimension parallel to footing length (or diameter) |
+| `pier_c2` | 18 in. | Pier dimension parallel to footing width (ignored for `:circular`) |
+| `min_depth` | 12 in. | Minimum footing thickness before iteration |
+| `size_increment` | 3 in. | Round plan dimensions up to this increment |
+| `ϕ_flexure` | 0.90 | Flexure strength reduction factor (ACI 318-11 §9.3.2) |
+| `ϕ_shear` | 0.75 | Shear strength reduction factor (ACI 318-11 §9.3.2) |
+| `ϕ_bearing` | 0.65 | Bearing strength reduction factor |
+| `objective` | `MinVolume()` | Optimization objective for sizing (volume/quantity) |
 
 `MatFootingOptions` selects the analysis method:
 

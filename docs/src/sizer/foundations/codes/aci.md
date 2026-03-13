@@ -2,8 +2,10 @@
 
 > ```julia
 > using StructuralSizer
-> demand = FoundationDemand(1; Pu=400u"kip", Mux=80u"kip*ft", c1=20u"inch", c2=20u"inch")
-> result = design_footing(SpreadFooting(), demand, medium_sand)
+> using Unitful
+> demand = FoundationDemand(1; Pu=400.0kip, Ps=300.0kip, Mux=80.0kip * u"ft")
+> opts   = SpreadFootingOptions(pier_c1=20u"inch", pier_c2=20u"inch", pier_shape=:rectangular)
+> result = design_footing(SpreadFooting(), demand, medium_sand; opts=opts)
 > result.B               # footing width
 > result.utilization     # governing check ratio
 > ```
@@ -26,9 +28,6 @@ and `MatFoundation` type documentation.
 SpreadFootingResult
 StripFootingResult
 MatFootingResult
-SpreadFootingOptions
-StripFootingOptions
-MatFootingOptions
 RigidMat
 ShuklaAFM
 WinklerFEA
@@ -50,7 +49,7 @@ and column positions along the strip.
 ### Mat Foundation
 
 The `design_footing(::MatFoundation, ...)` function dispatches to one of three
-analysis methods based on `MatFootingOptions.method`:
+analysis methods based on `MatFootingOptions.analysis_method`:
 
 ```@docs
 recommend_foundation_strategy
@@ -94,7 +93,7 @@ The strip footing design treats the footing as a rigid beam:
 
 ### Mat Foundation Design
 
-Three analysis methods are available, selected via `MatFootingOptions.method`:
+Three analysis methods are available, selected via `MatFootingOptions.analysis_method`:
 
 #### RigidMat (ACI 336.2R §4.2)
 
@@ -138,21 +137,26 @@ Finite element plate model on Winkler springs:
 
 | Field | Default | Description |
 |:------|:--------|:------------|
+| `material` | `RC_4000_60` | Concrete + rebar material bundle |
 | `cover` | 3 in. | Clear cover to reinforcement |
-| `bar_size` | 5 | Rebar bar size (#4, #5, etc.) |
-| `pier_shape` | `:square` | Column shape (`:square`, `:round`) |
-| `ϕ_flexure` | 0.90 | ACI §9.3.2 strength reduction |
-| `ϕ_shear` | 0.75 | ACI §9.3.2 strength reduction |
+| `bar_size` | 8 | Rebar bar size (#8, etc.) |
+| `pier_shape` | `:rectangular` | Pier/column shape (`:rectangular` or `:circular`) |
+| `pier_c1` | 18 in. | Pier dimension parallel to footing length (or diameter) |
+| `pier_c2` | 18 in. | Pier dimension parallel to footing width (ignored for `:circular`) |
+| `ϕ_flexure` | 0.90 | ACI 318-11 §9.3.2 strength reduction |
+| `ϕ_shear` | 0.75 | ACI 318-11 §9.3.2 strength reduction |
+| `ϕ_bearing` | 0.65 | Bearing strength reduction factor |
 
 ### MatFootingOptions
 
 | Field | Default | Description |
 |:------|:--------|:------------|
-| `method` | `RigidMat()` | Analysis method |
+| `analysis_method` | `RigidMat()` | Analysis method selector (`RigidMat`, `ShuklaAFM`, `WinklerFEA`) |
 | `cover` | 3 in. | Clear cover |
-| `bar_size` | 6 | Rebar bar size |
-| `overhang_ratio` | 0.15 | Min overhang as fraction of span |
-| `h_min` | 24 in. | Minimum mat thickness |
+| `bar_size_x` | 8 | Rebar bar size in x |
+| `bar_size_y` | 8 | Rebar bar size in y |
+| `min_depth` | 24 in. | Minimum mat thickness |
+| `edge_overhang` | `nothing` | Edge overhang (auto if `nothing`) |
 
 ## Limitations & Future Work
 

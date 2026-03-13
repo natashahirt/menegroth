@@ -118,13 +118,17 @@ curl http://localhost:8080/health
 # Server status
 curl http://localhost:8080/status
 
-# Input/output schema
+# Input schema
 curl http://localhost:8080/schema
 
-# Run a design
+# Submit a design (async)
 curl -X POST http://localhost:8080/design \
   -H "Content-Type: application/json" \
   -d @input.json
+
+# Poll until idle, then fetch the last result
+curl http://localhost:8080/status
+curl http://localhost:8080/result
 ```
 
 ## Building the Docs
@@ -143,7 +147,7 @@ The optimization framework checks for a Gurobi license at startup. If Gurobi is 
 
 ### Display Units
 
-`DesignParameters` accepts a `display_units` field (use `imperial` or `metric`) that controls how results are formatted in reports and API responses.
+`DesignParameters` accepts a `display_units` field (use `imperial` or `metric`) that controls how results are formatted in reports and local outputs. The current HTTP API JSON output is hardcoded to imperial units (ft, in, lb) even when `display_units = metric`.
 
 ## Limitations & Future Work
 

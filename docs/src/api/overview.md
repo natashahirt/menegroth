@@ -27,7 +27,10 @@ curl http://localhost:8080/health
 
 ### GET /status
 
-Server state endpoint. Once the full API is loaded it returns one of: `"idle"`, `"running"`, `"queued"`.
+Server state endpoint.
+
+- In **full service mode** (`scripts/api/sizer_service.jl`), it returns one of: `"idle"`, `"running"`, `"queued"`.
+- In **bootstrap mode** (`scripts/api/sizer_bootstrap.jl`), it returns `"warming"` until the full API has been loaded in the background, then returns `"idle"`, `"running"`, or `"queued"`.
 
 ```bash
 curl http://localhost:8080/status
@@ -39,7 +42,7 @@ curl http://localhost:8080/status
 
 ### GET /schema
 
-Returns documentation of the input/output JSON schema.
+Returns documentation of the API input payload schema and a short endpoint summary.
 
 ```bash
 curl http://localhost:8080/schema
@@ -61,7 +64,13 @@ curl -X POST http://localhost:8080/validate \
 
 ### POST /design
 
-Run the full design pipeline. Returns an `APIOutput` with sized elements, summary, and visualization data.
+Run the full design pipeline.
+
+Because AWS App Runner enforces a 120-second per-request timeout, the API uses an **async submit-then-poll** flow:
+
+1. Submit the job with `POST /design` (returns immediately).
+2. Poll `GET /status` until it returns `"idle"`.
+3. Fetch the last completed result with `GET /result`.
 
 ```bash
 curl -X POST http://localhost:8080/design \
@@ -71,27 +80,12 @@ curl -X POST http://localhost:8080/design \
 
 ```json
 {
-  "status": "ok",
-  "compute_time_s": 2.34,
-  "summary": {
-    "all_pass": true,
-    "concrete_volume_ft3": 1234.5,
-    "steel_weight_lb": 56789.0,
-    "rebar_weight_lb": 12345.0,
-    "embodied_carbon_kgCO2e": 98765.0,
-    "critical_ratio": 0.87,
-    "critical_element": "Column 12"
-  },
-  "slabs": [...],
-  "columns": [...],
-  "beams": [...],
-  "foundations": [...],
-  "geometry_hash": "…",
-  "visualization": {...}
+  "status": "accepted",
+  "message": "Design started. Poll GET /status until idle, then GET /result for the result."
 }
 ```
 
-When the server is busy, `POST /design` returns:
+When the server is busy, `POST /design` enqueues the request and returns:
 
 ```json
 {
@@ -99,6 +93,10 @@ When the server is busy, `POST /design` returns:
   "message": "Request queued; will run after current job completes."
 }
 ```
+
+### GET /result
+
+Fetch the last completed design result after a `POST /design` submission. Clients should poll `GET /status` until `"idle"` before calling this endpoint.
 
 ## Starting the Server
 
@@ -142,22 +140,14 @@ register_routes!
 
 ## Implementation Details
 
-### Environment Variables
-
-| Variable | Description | Default |
-|:---------|:------------|:--------|
-| `PORT` / `SIZER_PORT` | HTTP listen port | `8080` |
-| `SIZER_HOST` | Bind address | `0.0.0.0` |
-| `SS_ENABLE_VISUALIZATION` | Toggle heavy visualization dependencies (e.g., GLMakie) in interactive tooling; does not currently control JSON `visualization` output | `false` |
-| `SS_ENABLE_HEAVY_PRECOMPILE_WORKLOAD` | Run precompilation workload on startup | `false` (API scripts set this) |
-
 ### Request Queuing
 
 If the server is already processing a design request, it keeps a **single-slot queue** (the most recent queued request wins):
 
-1. `POST /design` → `try_start!(server_status)`
-2. If busy → `enqueue!(server_status, input)` and return `{"status": "queued"}`
-3. The client should poll `GET /status` until `"idle"`, then retry `POST /design`
+1. `POST /design` attempts to start work via `try_start!(SERVER_STATUS)`
+2. If busy → `enqueue!(SERVER_STATUS, input)` and return `{"status": "queued", ...}`
+3. If accepted → the server runs the design in a background task and returns HTTP 202
+4. Clients poll `GET /status` until `"idle"`, then fetch the last result with `GET /result`
 
 ### Geometry Caching
 
@@ -168,6 +158,17 @@ Repeated requests with the same building geometry (but different design paramete
 3. Only `json_to_params` and `design_building` are re-run
 
 This significantly speeds up parameter studies where only loads, materials, or floor options change.
+
+## Options & Configuration
+
+### Environment Variables
+
+| Variable | Description | Default |
+|:---------|:------------|:--------|
+| `PORT` / `SIZER_PORT` | HTTP listen port | `8080` |
+| `SIZER_HOST` | Bind address | `0.0.0.0` |
+| `SS_ENABLE_VISUALIZATION` | Toggle heavy visualization dependencies (e.g., GLMakie) in interactive tooling; does not currently control JSON `visualization` output | `false` |
+| `SS_ENABLE_HEAVY_PRECOMPILE_WORKLOAD` | Run precompilation workload on startup | `false` (API scripts set this) |
 
 ## Limitations & Future Work
 

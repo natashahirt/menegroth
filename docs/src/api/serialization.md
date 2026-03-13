@@ -32,7 +32,7 @@ compute_geometry_hash
 2. **Vertex creation** — `Meshes.Point` objects from coordinate arrays
 3. **Edge creation** — skeleton edges from `APIEdgeGroups`, classified into `:beams`, `:columns`, `:braces`
 4. **Support marking** — vertices listed in `input.supports` are marked as restrained
-5. **Story setup** — `stories_z` defines story elevations
+5. **Story setup** — if `input.stories_z` is provided (non-empty), those elevations are used; otherwise story elevations are inferred from vertex Z via `rebuild_stories!`
 6. **Face detection** — if `input.faces` is provided, faces are created directly; otherwise `find_faces!` detects them automatically from the edge mesh
 
 ### json_to_params
@@ -88,7 +88,7 @@ Notes:
 
 `compute_geometry_hash(input::APIInput) → String` computes a SHA-256 hash of the geometry-defining fields:
 - `vertices`
-- `edges` (beams and columns)
+- `edges` (beams, columns, braces)
 - `supports`
 - `stories_z`
 - `faces` (if provided)

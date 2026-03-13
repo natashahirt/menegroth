@@ -5,7 +5,7 @@
 > result = optimize_discrete(checker, demands, geometries, catalog, material;
 >             objective=MinWeight())
 > result.sections    # optimal section per group
-> result.objective   # total objective value
+> result.objective_value   # total objective value
 > ```
 
 ## Overview
@@ -45,6 +45,13 @@ evaluation and objective computation.
 ### NLP Solver
 
 - `optimize_continuous(problem; ...)` — solve a continuous NLP problem implementing the `AbstractNLPProblem` interface.
+
+```@docs
+optimize_discrete
+optimize_binary_search
+optimize_continuous
+expand_catalog_with_materials
+```
 
 ## Implementation Details
 
@@ -105,8 +112,7 @@ the `AbstractNLPProblem` interface:
   dimension, `n_refine` levels of zoom around the best point.
 - `:ipopt` — Gradient-based via JuMP/Ipopt.  Gradients computed by central
   finite differences (`_numeric_gradient`, step ``\varepsilon = 10^{-6}``).
-- `:multistart_ipopt` — Multiple random starting points to escape local minima.
-- `:nlopt`, `:nonconvex` — Placeholders for future solvers.
+- `:nlopt`, `:nonconvex` — Present in the API but not yet implemented (they currently throw an error).
 
 The objective is mapped through `_convert_objective` which converts raw volume
 to the selected objective type (weight, cost, carbon) using material densities
@@ -118,29 +124,33 @@ and emission factors.
 
 | Parameter | Default | Description |
 |:----------|:--------|:------------|
-| `objective` | `MinWeight()` | Optimization objective |
-| `n_max_sections` | `nothing` | Limit on candidate sections per group |
-| `solver` | `:auto` | `:auto`, `:highs`, or `:gurobi` |
+| `objective` | `MinVolume()` | Optimization objective |
+| `n_max_sections` | `0` | Limit unique sections across groups (0 = no limit) |
+| `optimizer` | `:auto` | `:auto`, `:highs`, or `:gurobi` |
 | `mip_gap` | `1e-4` | Relative optimality gap |
+| `time_limit_sec` | `30.0` | Solver time limit (seconds) |
+| `output_flag` | `0` | Solver verbosity (0 = silent) |
+| `cache` | `nothing` | Reuse a precomputed capacity cache |
 
 ### Binary Search Options
 
 | Parameter | Default | Description |
 |:----------|:--------|:------------|
-| `objective` | `MinWeight()` | Sorting criterion |
+| `objective` | `MinVolume()` | Sorting criterion |
 | `cache` | `nothing` | Pre-computed capacity cache |
 
 ### NLP Options
 
 | Parameter | Default | Description |
 |:----------|:--------|:------------|
-| `solver` | `:grid` | `:grid`, `:ipopt`, `:multistart_ipopt` |
+| `objective` | `MinVolume()` | Optimization objective |
+| `solver` | `:grid` | `:grid`, `:ipopt`, `:nlopt`, `:nonconvex` |
 | `n_grid` | `20` | Grid points per dimension |
 | `n_refine` | `2` | Grid refinement iterations |
-| `maxiter` | `500` | Ipopt iteration limit |
+| `maxiter` | `1000` | Ipopt iteration limit |
 | `tol` | `1e-6` | Ipopt convergence tolerance |
 | `x0` | `nothing` | Initial guess (Ipopt) |
-| `n_multistart` | `10` | Number of starts (multistart) |
+| `n_multistart` | `1` | Number of starts for Ipopt (set > 1 to enable multi-start) |
 
 ## Limitations & Future Work
 

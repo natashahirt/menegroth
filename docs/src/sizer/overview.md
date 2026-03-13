@@ -23,14 +23,17 @@ AbstractMaterial
 └── Timber{T_P, T_D}
 
 AbstractSection
-├── SteelSection  (ISymmSection, HSSRectSection, HSSRoundSection, ...)
-└── ConcreteSection  (RCColumnSection, RCBeamSection, ...)
+├── ISymmSection, HSSRectSection, HSSRoundSection, PipeSection
+├── RCBeamSection, RCTBeamSection, RCColumnSection, RCCircularSection
+├── GlulamSection
+└── PixelFrameSection
 
-AbstractDesignCode
-├── AISC_360
-├── ACI_318
-├── fib_MC2010
-└── NDS
+AbstractCapacityChecker
+├── AISCChecker
+├── ACIBeamChecker
+├── ACIColumnChecker
+├── PixelFrameChecker
+└── NDSChecker
 ```
 
 Design functions dispatch on `(section_type, material_type, code)` triples, so the same exported capacity function family (`get_ϕMn`, `get_ϕVn`, `get_ϕPn`, `check_biaxial_capacity`, etc.) routes to the correct steel, concrete, timber, or FRC implementation.
@@ -157,7 +160,7 @@ This pattern allows the same high-level APIs (`size_members`, `size_slabs!`, cap
 ## Key Types
 
 - `LoadCombination` — named load combination with factors for dead, live, snow, wind, and seismic loads per ASCE 7-22. Predefined constants include `strength_1_2D_1_6L`, `strength_1_4D`, etc.
-- `GravityLoads` — gravity load specification for a floor or roof, carrying `floor_DL`, `floor_LL`, `floor_SDL`, `roof_DL`, `roof_LL`, and `roof_SDL` as `Pressure` values.
+- `GravityLoads` — unfactored gravity load intensities (service-level), with fields `floor_LL`, `roof_LL`, `grade_LL`, `floor_SDL`, `roof_SDL`, and `wall_SDL` (all `Pressure`).
 
 ## Limitations & Future Work
 

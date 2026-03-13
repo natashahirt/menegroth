@@ -13,7 +13,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("StructuralSizer")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Debug")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+e4587a88781fc14c0244d352056817204f3bd334")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+ff988ad8f97141cd760726ea32c73b2fce50d3cc")]
 [assembly: System.Reflection.AssemblyProductAttribute("StructuralSizer")]
 [assembly: System.Reflection.AssemblyTitleAttribute("StructuralSizer")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]

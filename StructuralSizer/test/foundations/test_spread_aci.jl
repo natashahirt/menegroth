@@ -27,8 +27,9 @@ println("Testing ACI 318-14 Spread Footing Design...")
 #   One-way shear: Vu = 204 kip, ϕVc = 308 kip (OK)
 # =============================================================================
 
-# Set up demand
-demand = FoundationDemand(1; Pu=912.0kip, Ps=670.0kip)
+# Set up demand (column geometry on demand — single source of truth)
+demand = FoundationDemand(1; Pu=912.0kip, Ps=670.0kip,
+    c1=18.0u"inch", c2=18.0u"inch", shape=:rectangular)
 
 # Set up soil (net allowable = 5370 psf = 5.37 ksf)
 soil = Soil(5.37ksf, 18.0u"kN/m^3", 30.0, 0.0u"kPa", 25.0u"MPa")
@@ -36,9 +37,6 @@ soil = Soil(5.37ksf, 18.0u"kN/m^3", 30.0, 0.0u"kPa", 25.0u"MPa")
 # Set up options matching the reference problem
 opts = SpreadFootingOptions(
     material = RC_3000_60,
-    pier_c1 = 18.0u"inch",
-    pier_c2 = 18.0u"inch",
-    pier_shape = :rectangular,
     bar_size = 8,
     cover = 3.0u"inch",
     min_depth = 12.0u"inch",

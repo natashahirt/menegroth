@@ -127,21 +127,23 @@ Uses the StructurePoint 7-step workflow:
 7. Dowel design (if bearing insufficient)
 
 # Arguments
-- `demand::FoundationDemand`: Must include `Pu` (factored) and `Ps` (service).
-  `Mux`/`Muy` used for eccentric punching shear.
+- `demand::FoundationDemand`: Must include `Pu` (factored), `Ps` (service), and column
+  geometry `c1`, `c2`, `shape` (used for punching, shear, bearing). `Mux`/`Muy` used for
+  eccentric punching shear.
 - `soil::Soil`: `qa` = net allowable bearing pressure.
 
 # Keyword Arguments
-- `opts::SpreadFootingOptions`
+- `opts::SpreadFootingOptions`: Material, cover, depth/size increments, and checks.
+  Column dimensions are taken from `demand`, not from `opts`.
 
 # Returns
 `SpreadFootingResult` with SI output quantities.
 
 # Example
 ```julia
-d = FoundationDemand(1; Pu=912.0kip, Ps=670.0kip)
+d = FoundationDemand(1; Pu=912.0kip, Ps=670.0kip, c1=18u"inch", c2=18u"inch", shape=:rectangular)
 s = Soil(5.37ksf, 18.0u"kN/m^3", 30.0, 0.0u"kPa", 25.0u"MPa")
-opts = SpreadFootingOptions(material=RC_3000_60, pier_c1=18u"inch", pier_c2=18u"inch")
+opts = SpreadFootingOptions(material=RC_3000_60)
 result = design_footing(SpreadFooting(), d, s; opts)
 ```
 """
@@ -150,13 +152,15 @@ function design_footing(::SpreadFooting,
     soil::Soil;
     opts::SpreadFootingOptions = SpreadFootingOptions()
 )
+    # Column geometry: single source of truth is FoundationDemand (ACI 318-11)
+    c1     = demand.c1
+    c2     = demand.c2
+    col_shape = demand.shape
     # Material / option extraction
     fc     = opts.material.concrete.fc′
     fy     = opts.material.rebar.Fy
     λ      = something(opts.λ, opts.material.concrete.λ)
     fc_col = something(opts.fc_col, fc)
-    c1     = opts.pier_c1
-    c2     = opts.pier_c2
     cover  = opts.cover
     db     = bar_diameter(opts.bar_size)
     Ab     = bar_area(opts.bar_size)
@@ -198,11 +202,11 @@ function design_footing(::SpreadFooting,
         d < 4.0u"inch" && (h += h_incr; continue)
 
         # Two-way (punching) shear with biaxial moments
-        Ac = opts.pier_shape == :circular ?
+        Ac = col_shape == :circular ?
              π * (c1 + d)^2 / 4 : (c1 + d) * (c2 + d)
         Vu_p = qu * (B * Lf - Ac)
         punch = punching_check(Vu_p, demand.Mux, demand.Muy, d, fc, c1, c2;
-                               position = :interior, shape = opts.pier_shape,
+                               position = :interior, shape = col_shape,
                                λ = λ, ϕ = ϕv)
 
         # One-way shear in both directions
@@ -260,7 +264,7 @@ function design_footing(::SpreadFooting,
     # =====================================================================
     if opts.check_bearing
         bearing = _bearing_check_footing(Pu, c1, c2, B, Lf, h,
-                                          fc, fc_col, fy, ϕb, opts.pier_shape)
+                                          fc, fc_col, fy, ϕb, col_shape)
         bearing.need_dowels && opts.check_dowels &&
             @info "Dowels required: As_dowels = $(bearing.As_dowels)"
     end

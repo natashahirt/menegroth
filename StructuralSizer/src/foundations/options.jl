@@ -93,10 +93,10 @@ Base.@kwdef struct SpreadFootingOptions
     cover::Length            = 3.0u"inch"       # ACI 7.7.1: ≥ 3" cast against soil
     bar_size::Int            = 8                 # Rebar designation (e.g. 8 → #8)
 
-    # Column / pier interface
-    pier_shape::Symbol       = :rectangular       # :rectangular or :circular
-    pier_c1::Length           = 18.0u"inch"      # Column dimension parallel to L (or diameter)
-    pier_c2::Length           = 18.0u"inch"      # Column dimension parallel to B (ignored for :circular)
+    # Column / pier interface (legacy: for spread footings use FoundationDemand.c1, c2, shape)
+    pier_shape::Symbol       = :rectangular       # Ignored by ACI spread; use demand.shape
+    pier_c1::Length           = 18.0u"inch"      # Ignored by ACI spread; use demand.c1
+    pier_c2::Length           = 18.0u"inch"      # Ignored by ACI spread; use demand.c2
     footing_shape::Symbol    = :rectangular      # :rectangular (square when B==L)
 
     # Geometry bounds

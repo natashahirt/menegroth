@@ -234,14 +234,12 @@ _rpt.note("Reference: B = L = 11'-2\" (134 in.) — square footing.")
 
 _rpt.sub("1C — Design (Full ACI 318-14 Workflow)")
 
-sp_demand = FoundationDemand(1; Pu=sp_Pu, Ps=sp_Ps)
+sp_demand = FoundationDemand(1; Pu=sp_Pu, Ps=sp_Ps,
+    c1=sp_c1, c2=sp_c1, shape=:rectangular)
 sp_soil = Soil(sp_qa, 18.0u"kN/m^3", 30.0, 0.0u"kPa", 25.0u"MPa")
 
 sp_opts = SpreadFootingOptions(
     material = RC_3000_60,
-    pier_c1 = sp_c1,
-    pier_c2 = sp_c1,
-    pier_shape = :rectangular,
     bar_size = 8,
     cover = sp_cover,
     min_depth = 12.0u"inch",
@@ -972,7 +970,8 @@ for (i, x) in enumerate(grid_x), (j, y) in enumerate(grid_y)
     Pu = is_corner ? 150.0kip : is_edge ? 250.0kip : 400.0kip
     Ps = is_corner ? 105.0kip : is_edge ? 175.0kip : 280.0kip
 
-    push!(comp_demands, FoundationDemand(idx; Pu=Pu, Ps=Ps))
+    push!(comp_demands, FoundationDemand(idx; Pu=Pu, Ps=Ps,
+        c1=18.0u"inch", c2=18.0u"inch", shape=:rectangular))
     push!(comp_positions, (x * u"ft", y * u"ft"))
 end
 
@@ -991,8 +990,6 @@ _rpt.sub("4B — Strategy 1: All Spread Footings")
 spread_results = SpreadFootingResult[]
 spread_opts = SpreadFootingOptions(
     material = RC_4000_60,
-    pier_c1 = 18.0u"inch",
-    pier_c2 = 18.0u"inch",
     bar_size = 7,
     cover = 3.0u"inch",
 )
@@ -1132,8 +1129,9 @@ println("  Pu=500k, Ps=350k, c=18\", f'c=4000psi; qa = 2–8 ksf")
 
 sweep_Pu = 500.0kip
 sweep_Ps = 350.0kip
-sweep_demand = FoundationDemand(1; Pu=sweep_Pu, Ps=sweep_Ps)
-sweep_opts = SpreadFootingOptions(material=RC_4000_60, pier_c1=18.0u"inch", pier_c2=18.0u"inch")
+sweep_demand = FoundationDemand(1; Pu=sweep_Pu, Ps=sweep_Ps,
+    c1=18.0u"inch", c2=18.0u"inch", shape=:rectangular)
+sweep_opts = SpreadFootingOptions(material=RC_4000_60)
 
 for qa_val in [2.0, 3.0, 4.0, 5.0, 6.0, 8.0]
     s = Soil(qa_val * ksf, 18.0u"kN/m^3", 30.0, 0.0u"kPa", 25.0u"MPa")
@@ -1158,7 +1156,8 @@ println("  qa=4ksf, c=18\", f'c=4000psi; Pu = 200–1200 kip (Ps=Pu/1.43)")
 sweep_soil = Soil(4.0ksf, 18.0u"kN/m^3", 30.0, 0.0u"kPa", 25.0u"MPa")
 for Pu_val in [200.0, 400.0, 600.0, 800.0, 1000.0, 1200.0]
     Ps_val = Pu_val / 1.43
-    d_sweep = FoundationDemand(1; Pu=Pu_val*kip, Ps=Ps_val*kip)
+    d_sweep = FoundationDemand(1; Pu=Pu_val*kip, Ps=Ps_val*kip,
+        c1=18.0u"inch", c2=18.0u"inch", shape=:rectangular)
     r = design_footing(SpreadFooting(), d_sweep, sweep_soil; opts=sweep_opts)
     @printf("    %6.0f  %6.0f  %6.1f %6.0f %8.3f %8.3f\n",
             Pu_val, Ps_val,

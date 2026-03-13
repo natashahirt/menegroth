@@ -1,4 +1,5 @@
 name = "menegroth"
+version = "0.1.0"
 
 [deps]
 Asap = "763a8c06-ba23-41fc-b385-b3b57b52403a"

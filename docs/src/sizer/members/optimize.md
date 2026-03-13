@@ -149,9 +149,7 @@ size_members
 
 ### Discrete Optimization
 
-```@docs
-optimize_discrete
-```
+See [Optimization Solvers](../optimize/solvers.md) for full solver docstrings.
 
 `optimize_discrete(checker, demands, geometries, catalog, material; ...)` — formulates and solves a MIP:
 
@@ -166,10 +164,6 @@ optimize_discrete
 Options: `optimizer` (`:auto`, `:highs`, `:gurobi`), `mip_gap`, `time_limit_sec`, `output_flag`, `cache`, `n_max_sections`.
 
 A multi-material overload accepts `(checker, demands, geometries, catalog, materials)` and uses `expand_catalog_with_materials` to create the Cartesian product.
-
-```@docs
-optimize_binary_search
-```
 
 `optimize_binary_search(checker, demands, geometries, catalog, material; objective, cache)` — sorts the catalog by objective (lightest first), then binary searches for the lightest section that is feasible for all members. No external solver needed.
 
@@ -188,10 +182,6 @@ size_rc_beam_nlp
 `size_rc_beam_nlp(Mu, Vu, opts; Tu=0)` — continuous RC beam sizing using NLP.
 
 ### Catalog Utilities
-
-```@docs
-expand_catalog_with_materials
-```
 
 `expand_catalog_with_materials(catalog, materials)` — creates the Cartesian product of sections × materials for multi-material optimization. Returns `(expanded_catalog, section_indices, material_indices)` for reconstructing the solution.
 

@@ -2,9 +2,12 @@
 
 > ```julia
 > using StructuralSizer
+> using Unitful
+> concrete = NWC_4000
+> rebar = Rebar_60
 > demand = FoundationDemand(1; Pu=200u"kN", c1=300u"mm", c2=300u"mm")
-> result = design_footing(SpreadFooting(), demand, stiff_clay,
->             concrete, rebar; pier_width=300u"mm")
+> result = design_footing(SpreadFooting(), demand, stiff_clay, concrete, rebar;
+>             pier_width=300u"mm")
 > footprint_area(result)
 > ```
 
@@ -21,10 +24,7 @@ checks for bearing and punching.
 
 See [Foundation Types & Options](../types.md) for `SpreadFooting` and
 `SpreadFootingResult` type documentation.
-
-```@docs
-Soil
-```
+Soil presets and the `Soil` type are documented on [Foundation Types & Options](../types.md).
 
 ## Functions
 
@@ -44,7 +44,7 @@ result (see [Post-Design Check](#post-design-check) below for details).
 The `design_footing(::SpreadFooting, demand, soil, concrete, rebar; ...)` workflow:
 
 1. **Bearing sizing**: ``B = \sqrt{P_s / (q_a \cdot \text{SF})}`` where SF is the
-   safety factor (default 1.0 for allowable stress input)
+   safety factor (in the current implementation: ``B = \sqrt{P_u \cdot \text{SF} / q_a}``)
 2. **Punching shear**: Nominal shear stress capacity ``\tau_c \approx 0.25\sqrt{f'_c}``
    at the critical section ``d/2`` from the column face
 3. **One-way (beam) shear**: ``\tau_{\text{beam}} \approx 0.17\sqrt{f'_c}`` at ``d``

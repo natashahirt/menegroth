@@ -28,9 +28,6 @@ and `MatFoundation` type documentation.
 SpreadFootingResult
 StripFootingResult
 MatFootingResult
-SpreadFootingOptions
-StripFootingOptions
-MatFootingOptions
 RigidMat
 ShuklaAFM
 WinklerFEA

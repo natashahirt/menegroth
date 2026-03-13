@@ -630,8 +630,7 @@ comp_result = get_ϕMn_composite(sw_sec, A992_Steel, comp_slab, comp_b_eff, comp
 comp_ϕMn = comp_result.ϕMn
 
 # Partial composite via solver
-comp_Mn_target = Mu_sw / 0.9
-comp_partial = find_required_ΣQn(sw_sec, A992_Steel, comp_slab, comp_b_eff, comp_Mn_target, comp_Qn; ϕ=0.9)
+comp_partial = find_required_ΣQn(sw_sec, A992_Steel, comp_slab, comp_b_eff, Mu_sw, comp_Qn; ϕ=0.9)
 comp_ϕMn_partial = get_ϕMn_composite(sw_sec, A992_Steel, comp_slab, comp_b_eff, comp_partial.ΣQn).ϕMn
 
 # Bare steel capacity

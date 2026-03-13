@@ -395,8 +395,13 @@ function _process_single_slab_group(gid, specs, struc, material, floor_opts::Str
 
     span_for_sizing = _sizing_span(ft, spans_gov)
 
+    extra_kwargs = if ft isa Vault && !(floor_opts isa StructuralSizer.VaultOptions)
+        (lambda=10.0,)
+    else
+        NamedTuple()
+    end
     result = StructuralSizer._size_span_floor(ft, span_for_sizing, sdl_gov, live_gov;
-                                               material=material, options=floor_opts)
+                                               material=material, options=floor_opts, extra_kwargs...)
     sw_service = StructuralSizer.self_weight(result)
 
     return result, sw_service, spans_gov

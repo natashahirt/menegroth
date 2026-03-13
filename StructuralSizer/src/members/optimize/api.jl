@@ -74,7 +74,7 @@ function size_columns(
     geometries::Vector,
     opts::SteelMemberOptions;
     Muy::Vector = zeros_like(Mux),
-    Vu_strong::Vector = zeros_like(Mux),
+    Vu_strong::Vector = zeros_like(Pu),
     δ_max_vec::Union{Nothing, Vector} = nothing,
     δ_max_total_vec::Union{Nothing, Vector} = nothing,
     I_ref_vec::Union{Nothing, Vector} = nothing,

@@ -364,9 +364,9 @@ end
     Qn = get_Qn(fix.anchor, fix.slab)
     
     @testset "Target Mu = 687 kip-ft (Example I-1 LRFD)" begin
-        Mn_required = 687.0kip*u"ft" / 0.9  # back out from ϕMn
+        Mu = 687.0kip*u"ft"
         result = find_required_ΣQn(fix.section, fix.material, fix.slab,
-                                    b_eff, Mn_required, Qn; ϕ=0.9)
+                                    b_eff, Mu, Qn; ϕ=0.9)
         @test result.sufficient == true
         # Example I-1 uses ΣQn = 292 kips at PNA location 6
         # Our solver should find a value in the same ballpark

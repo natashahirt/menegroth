@@ -84,8 +84,8 @@ const MOI = JuMP.MOI
         geometries = [ConcreteMemberGeometry(3.0)]
         
         opts = ConcreteColumnOptions(
-            grade = NWC_5000,
-            rebar_grade = Rebar_75,
+            material = NWC_5000,
+            rebar_material = Rebar_75,
             include_slenderness = false,
             max_depth = 0.6u"m",
         )

@@ -1,190 +1,244 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Windows.Forms;
 using Grasshopper.Kernel;
-using Newtonsoft.Json.Linq;
+using StructuralSizer.GH.Types;
 
 namespace StructuralSizer.GH.Components
 {
     /// <summary>
-    /// Parses the JSON response from the Julia sizing API into typed GH outputs.
-    /// Utilisation ratios are 0–1 numbers suitable for gradient colour-mapping.
-    /// Failed elements produce per-element failure messages.
+    /// Unified results component. Accepts a <see cref="SizerResult"/> object from SizerRun
+    /// and outputs summary statistics plus per-element data.
+    ///
+    /// Right-click menu selects the element type for per-element outputs:
+    ///   Slabs | Columns | Beams | Foundations
+    ///
+    /// Also supports a filter: All | Passing | Failing
     /// </summary>
     public class SizerResults : GH_Component
     {
+        private string _elementType = "columns";
+        private string _filter = "all";
+
         public SizerResults()
             : base("Sizer Results",
                    "SizerRes",
-                   "Parse structural sizing results from the API response",
+                   "Design results: summary statistics and per-element data",
                    "Menegroth", "Results")
         { }
 
         public override Guid ComponentGuid =>
-            new Guid("A1B2C3D4-AAAA-BBBB-CCCC-DDDDEEEE0002");
+            new Guid("33F12765-4E2E-43AD-86F0-697FECEF4BCD");
 
-        // ─── Parameters ──────────────────────────────────────────────────
+        // ─── Parameters ─────────────────────────────────────────────────
 
         protected override void RegisterInputParams(GH_InputParamManager pManager)
         {
-            pManager.AddTextParameter("JSON", "J",
-                "Raw JSON response from SizerRun", GH_ParamAccess.item);
+            pManager.AddGenericParameter("Result", "Result",
+                "SizerResult from the SizerRun component", GH_ParamAccess.item);
         }
 
         protected override void RegisterOutputParams(GH_OutputParamManager pManager)
         {
-            pManager.AddNumberParameter("Slab Thicknesses", "St",
-                "Slab thickness in inches", GH_ParamAccess.list);
-            pManager.AddTextParameter("Column Sections", "Cs",
-                "Column section labels", GH_ParamAccess.list);
-            pManager.AddNumberParameter("Column Utilizations", "Cu",
-                "Column interaction ratios (0–1)", GH_ParamAccess.list);
-            pManager.AddTextParameter("Beam Sections", "Bs",
-                "Beam section labels", GH_ParamAccess.list);
-            pManager.AddNumberParameter("Beam Utilizations", "Bu",
-                "Beam max utilisation ratios (0–1)", GH_ParamAccess.list);
-            pManager.AddBooleanParameter("All Pass", "OK",
+            // Summary outputs (always available)
+            pManager.AddBooleanParameter("All Pass", "AP",
                 "True if all elements pass design checks", GH_ParamAccess.item);
             pManager.AddNumberParameter("Critical Ratio", "CR",
-                "Highest utilisation ratio in the building", GH_ParamAccess.item);
+                "Highest utilization ratio in the building", GH_ParamAccess.item);
             pManager.AddTextParameter("Critical Element", "CE",
-                "Element with the highest utilisation ratio", GH_ParamAccess.item);
-            pManager.AddTextParameter("Summary", "Sum",
-                "Text summary of the design", GH_ParamAccess.item);
-            pManager.AddTextParameter("Failure Messages", "Fail",
-                "Per-element failure messages (empty for passing elements)",
-                GH_ParamAccess.list);
+                "Element with the highest utilization ratio", GH_ParamAccess.item);
+            pManager.AddNumberParameter("Concrete Volume", "CV",
+                "Concrete volume (ft\u00b3)", GH_ParamAccess.item);
+            pManager.AddNumberParameter("Steel Weight", "SW",
+                "Steel weight (lb)", GH_ParamAccess.item);
+            pManager.AddNumberParameter("Rebar Weight", "RW",
+                "Rebar weight (lb)", GH_ParamAccess.item);
+            pManager.AddNumberParameter("Embodied Carbon", "EC",
+                "Embodied carbon (kg CO\u2082e)", GH_ParamAccess.item);
+            pManager.AddNumberParameter("Compute Time", "CT",
+                "Compute time (seconds)", GH_ParamAccess.item);
+
+            // Per-element outputs (filtered by menu selection)
+            pManager.AddIntegerParameter("IDs", "ID",
+                "Element IDs", GH_ParamAccess.list);
+            pManager.AddTextParameter("Sections", "S",
+                "Section labels", GH_ParamAccess.list);
+            pManager.AddNumberParameter("Utilization", "U",
+                "Max utilization ratios (0\u20131)", GH_ParamAccess.list);
+            pManager.AddBooleanParameter("Pass", "P",
+                "Pass/fail per element", GH_ParamAccess.list);
+            pManager.AddTextParameter("Failures", "F",
+                "Failure messages (empty for passing elements)", GH_ParamAccess.list);
         }
 
-        // ─── Solve ───────────────────────────────────────────────────────
+        // ─── Right-click menu ───────────────────────────────────────────
+
+        protected override void AppendAdditionalComponentMenuItems(ToolStripDropDown menu)
+        {
+            base.AppendAdditionalComponentMenuItems(menu);
+            Menu_AppendSeparator(menu);
+
+            var typeMenu = Menu_AppendItem(menu, "Element Type");
+            foreach (var (label, value) in new[]
+            {
+                ("Slabs", "slabs"), ("Columns", "columns"),
+                ("Beams", "beams"), ("Foundations", "foundations")
+            })
+            {
+                var item = new ToolStripMenuItem(label) { Checked = _elementType == value, Tag = value };
+                item.Click += (s, _) => { _elementType = (string)((ToolStripMenuItem)s).Tag; UpdateMessage(); ExpireSolution(true); };
+                typeMenu.DropDownItems.Add(item);
+            }
+
+            Menu_AppendSeparator(menu);
+
+            var filterMenu = Menu_AppendItem(menu, "Filter");
+            foreach (var (label, value) in new[]
+            {
+                ("All", "all"), ("Passing", "passing"), ("Failing", "failing")
+            })
+            {
+                var item = new ToolStripMenuItem(label) { Checked = _filter == value, Tag = value };
+                item.Click += (s, _) => { _filter = (string)((ToolStripMenuItem)s).Tag; UpdateMessage(); ExpireSolution(true); };
+                filterMenu.DropDownItems.Add(item);
+            }
+        }
+
+        // ─── Persistence ────────────────────────────────────────────────
+
+        public override bool Write(GH_IO.Serialization.GH_IWriter writer)
+        {
+            writer.SetString("ElementType", _elementType);
+            writer.SetString("Filter", _filter);
+            return base.Write(writer);
+        }
+
+        public override bool Read(GH_IO.Serialization.GH_IReader reader)
+        {
+            if (reader.ItemExists("ElementType")) _elementType = reader.GetString("ElementType");
+            if (reader.ItemExists("Filter")) _filter = reader.GetString("Filter");
+            UpdateMessage();
+            return base.Read(reader);
+        }
+
+        public override void AddedToDocument(GH_Document document)
+        {
+            base.AddedToDocument(document);
+            UpdateMessage();
+        }
+
+        private void UpdateMessage()
+        {
+            string typeLabel = _elementType.Substring(0, 1).ToUpper() + _elementType.Substring(1);
+            Message = _filter == "all" ? typeLabel : $"{typeLabel} ({_filter})";
+        }
+
+        // ─── Solve ──────────────────────────────────────────────────────
 
         protected override void SolveInstance(IGH_DataAccess DA)
         {
-            string json = "";
-            if (!DA.GetData(0, ref json) || string.IsNullOrWhiteSpace(json)) return;
+            GH_SizerResult goo = null;
+            if (!DA.GetData(0, ref goo) || goo?.Value == null) return;
 
-            JObject root;
-            try
+            var r = goo.Value;
+
+            if (r.IsError)
             {
-                root = JObject.Parse(json);
-            }
-            catch (Exception ex)
-            {
-                AddRuntimeMessage(GH_RuntimeMessageLevel.Error,
-                    $"Failed to parse JSON: {ex.Message}");
+                AddRuntimeMessage(GH_RuntimeMessageLevel.Error, r.ErrorMessage);
                 return;
             }
 
-            string status = root["status"]?.ToString() ?? "unknown";
-            if (status == "error")
-            {
-                string msg = root["message"]?.ToString() ?? "Unknown error";
-                AddRuntimeMessage(GH_RuntimeMessageLevel.Error, msg);
-                return;
-            }
+            // Summary outputs
+            DA.SetData(0, r.AllPass);
+            DA.SetData(1, r.CriticalRatio);
+            DA.SetData(2, r.CriticalElement);
+            DA.SetData(3, r.ConcreteVolumeFt3);
+            DA.SetData(4, r.SteelWeightLb);
+            DA.SetData(5, r.RebarWeightLb);
+            DA.SetData(6, r.EmbodiedCarbonKgCO2e);
+            DA.SetData(7, r.ComputeTime);
 
-            // ─── Slabs ──────────────────────────────────────────────────
-            var slabThicknesses = new List<double>();
+            // Per-element outputs
+            var ids = new List<int>();
+            var sections = new List<string>();
+            var ratios = new List<double>();
+            var pass = new List<bool>();
             var failures = new List<string>();
-            var slabs = root["slabs"] as JArray ?? new JArray();
-            foreach (var s in slabs)
+
+            switch (_elementType)
             {
-                slabThicknesses.Add(s["thickness_in"]?.ToObject<double>() ?? 0);
-                bool converged = s["converged"]?.ToObject<bool>() ?? true;
-                if (!converged)
-                {
-                    string reason = s["failure_reason"]?.ToString() ?? "unknown";
-                    string check = s["failing_check"]?.ToString() ?? "";
-                    int id = s["id"]?.ToObject<int>() ?? 0;
-                    failures.Add($"Slab {id}: {reason}" +
-                        (string.IsNullOrEmpty(check) ? "" : $" ({check})"));
-                }
-                else
-                {
-                    failures.Add("");
-                }
+                case "slabs":
+                    foreach (var s in r.Slabs)
+                    {
+                        if (!MatchesFilter(s.Ok)) continue;
+                        ids.Add(s.Id);
+                        sections.Add(s.Label);
+                        ratios.Add(s.MaxRatio);
+                        pass.Add(s.Ok);
+                        failures.Add(s.Ok ? "" : FormatSlabFailure(s));
+                    }
+                    break;
+
+                case "columns":
+                    foreach (var c in r.Columns)
+                    {
+                        if (!MatchesFilter(c.Ok)) continue;
+                        ids.Add(c.Id);
+                        sections.Add(c.Section);
+                        ratios.Add(c.MaxRatio);
+                        pass.Add(c.Ok);
+                        failures.Add(c.Ok ? "" : $"Column {c.Id}: interaction={c.InteractionRatio:F2}");
+                    }
+                    break;
+
+                case "beams":
+                    foreach (var b in r.Beams)
+                    {
+                        if (!MatchesFilter(b.Ok)) continue;
+                        ids.Add(b.Id);
+                        sections.Add(b.Section);
+                        ratios.Add(b.MaxRatio);
+                        pass.Add(b.Ok);
+                        failures.Add(b.Ok ? "" : $"Beam {b.Id}: flex={b.FlexureRatio:F2}, shear={b.ShearRatio:F2}");
+                    }
+                    break;
+
+                case "foundations":
+                    foreach (var f in r.Foundations)
+                    {
+                        if (!MatchesFilter(f.Ok)) continue;
+                        ids.Add(f.Id);
+                        sections.Add(f.Label);
+                        ratios.Add(f.BearingRatio);
+                        pass.Add(f.Ok);
+                        failures.Add(f.Ok ? "" : $"Foundation {f.Id}: bearing={f.BearingRatio:F2}");
+                    }
+                    break;
             }
 
-            // ─── Columns ────────────────────────────────────────────────
-            var colSections = new List<string>();
-            var colUtils = new List<double>();
-            var columns = root["columns"] as JArray ?? new JArray();
-            foreach (var c in columns)
-            {
-                colSections.Add(c["section"]?.ToString() ?? "");
-                colUtils.Add(c["interaction_ratio"]?.ToObject<double>() ?? 0);
-                bool ok = c["ok"]?.ToObject<bool>() ?? true;
-                if (!ok)
-                {
-                    int id = c["id"]?.ToObject<int>() ?? 0;
-                    double ratio = c["interaction_ratio"]?.ToObject<double>() ?? 0;
-                    failures.Add($"Column {id}: interaction ratio {ratio:F2}");
-                }
-                else
-                {
-                    failures.Add("");
-                }
-            }
+            DA.SetDataList(8, ids);
+            DA.SetDataList(9, sections);
+            DA.SetDataList(10, ratios);
+            DA.SetDataList(11, pass);
+            DA.SetDataList(12, failures);
 
-            // ─── Beams ──────────────────────────────────────────────────
-            var beamSections = new List<string>();
-            var beamUtils = new List<double>();
-            var beams = root["beams"] as JArray ?? new JArray();
-            foreach (var b in beams)
-            {
-                beamSections.Add(b["section"]?.ToString() ?? "");
-                double flex = b["flexure_ratio"]?.ToObject<double>() ?? 0;
-                double shear = b["shear_ratio"]?.ToObject<double>() ?? 0;
-                beamUtils.Add(Math.Max(flex, shear));
-                bool ok = b["ok"]?.ToObject<bool>() ?? true;
-                if (!ok)
-                {
-                    int id = b["id"]?.ToObject<int>() ?? 0;
-                    failures.Add($"Beam {id}: flex={flex:F2}, shear={shear:F2}");
-                }
-                else
-                {
-                    failures.Add("");
-                }
-            }
-
-            // ─── Summary ────────────────────────────────────────────────
-            var summary = root["summary"];
-            bool allPass = summary?["all_pass"]?.ToObject<bool>() ?? false;
-            double critRatio = summary?["critical_ratio"]?.ToObject<double>() ?? 0;
-            string critElement = summary?["critical_element"]?.ToString() ?? "";
-
-            double concreteVol = summary?["concrete_volume_ft3"]?.ToObject<double>() ?? 0;
-            double steelWt = summary?["steel_weight_lb"]?.ToObject<double>() ?? 0;
-            double rebarWt = summary?["rebar_weight_lb"]?.ToObject<double>() ?? 0;
-            double ec = summary?["embodied_carbon_kgCO2e"]?.ToObject<double>() ?? 0;
-            double computeTime = root["compute_time_s"]?.ToObject<double>() ?? 0;
-
-            string summaryText =
-                $"All Pass: {allPass}\n" +
-                $"Critical: {critElement} ({critRatio:F2})\n" +
-                $"Concrete: {concreteVol:F1} ft³\n" +
-                $"Steel: {steelWt:F0} lb\n" +
-                $"Rebar: {rebarWt:F0} lb\n" +
-                $"Embodied Carbon: {ec:F0} kgCO₂e\n" +
-                $"Compute Time: {computeTime:F2} s";
-
-            // ─── Warnings for failed elements ────────────────────────────
-            var failedMsgs = failures.Where(f => !string.IsNullOrEmpty(f)).ToList();
-            foreach (var fm in failedMsgs)
+            // Warnings for failing elements
+            foreach (var fm in failures.Where(f => !string.IsNullOrEmpty(f)))
                 AddRuntimeMessage(GH_RuntimeMessageLevel.Warning, fm);
+        }
 
-            // ─── Set outputs ─────────────────────────────────────────────
-            DA.SetDataList(0, slabThicknesses);
-            DA.SetDataList(1, colSections);
-            DA.SetDataList(2, colUtils);
-            DA.SetDataList(3, beamSections);
-            DA.SetDataList(4, beamUtils);
-            DA.SetData(5, allPass);
-            DA.SetData(6, critRatio);
-            DA.SetData(7, critElement);
-            DA.SetData(8, summaryText);
-            DA.SetDataList(9, failures);
+        private bool MatchesFilter(bool ok) =>
+            _filter == "all" || (_filter == "passing" && ok) || (_filter == "failing" && !ok);
+
+        private static string FormatSlabFailure(SlabResult s)
+        {
+            string msg = $"Slab {s.Id}";
+            if (!s.Converged)
+                msg += $": {s.FailureReason}" + (string.IsNullOrEmpty(s.FailingCheck) ? "" : $" ({s.FailingCheck})");
+            else
+                msg += $": defl={s.DeflectionRatio:F2}, punch={s.PunchingMaxRatio:F2}";
+            return msg;
         }
     }
 }

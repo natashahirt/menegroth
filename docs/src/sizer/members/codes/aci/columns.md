@@ -483,7 +483,7 @@ mat_tuple = to_material_tuple(material, fy_ksi, Es_ksi)
 |:-----------|:-------|:-----------|
 | βdns = 0.6 default | Conservative sustained load ratio | Override with actual βdns from load analysis |
 | k = 1.0 default | Conservative for braced frames | Provide actual k from alignment charts |
-| Grade 60 rebar default | Standard assumption | Override with `rebar_grade` (e.g., `Rebar_75`) |
+| Grade 60 rebar default | Standard assumption | Override with `rebar_material` (e.g., `Rebar_75`) |
 | Es = 29,000 ksi | Standard steel modulus | Embedded in calculations |
 | εcu = 0.003 | ACI concrete crushing strain | Used for all calculations |
 | Whitney stress block | ACI §10.2.7 equivalent rectangular | Accurate for normal strength concrete |

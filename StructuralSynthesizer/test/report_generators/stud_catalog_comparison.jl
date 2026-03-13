@@ -149,7 +149,7 @@ function _make_stud_params(;
             roof_SDL  = sdl_psf * psf,
         ),
         materials = MaterialOptions(concrete = SR.NWC_4000, rebar = SR.Rebar_60),
-        columns   = SR.ConcreteColumnOptions(grade = SR.NWC_6000, catalog = :high_capacity),
+        columns   = SR.ConcreteColumnOptions(material = SR.NWC_6000, catalog = :high_capacity),
         floor     = fp,
         max_iterations = max_iterations,
         foundation_options = FoundationParameters(

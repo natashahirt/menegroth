@@ -13,20 +13,20 @@ using Asap: kip, ksi
     @testset "NLPColumnOptions construction" begin
         # Default options
         opts = NLPColumnOptions()
-        @test opts.grade == NWC_4000
+        @test opts.material == NWC_4000
         @test opts.solver == :ipopt
         @test opts.min_dim == 8.0u"inch"
         @test opts.max_dim == 48.0u"inch"
         
         # Custom options
         opts2 = NLPColumnOptions(
-            grade = NWC_5000,
+            material = NWC_5000,
             min_dim = 14.0u"inch",
             max_dim = 30.0u"inch",
             prefer_square = 0.1,
             verbose = false
         )
-        @test opts2.grade == NWC_5000
+        @test opts2.material == NWC_5000
         @test opts2.prefer_square == 0.1
     end
     
@@ -63,7 +63,7 @@ using Asap: kip, ksi
     @testset "Objective and constraint evaluation" begin
         demand = RCColumnDemand(1; Pu=300.0, Mux=100.0, βdns=0.6)
         geometry = ConcreteMemberGeometry(3.5; k=1.0, braced=true)
-        opts = NLPColumnOptions(verbose=false)
+        opts = NLPColumnOptions(verbose=false, objective=MinVolume())
         
         problem = RCColumnNLPProblem(demand, geometry, opts)
         
@@ -128,7 +128,7 @@ using Asap: kip, ksi
         demand = RCColumnDemand(1; Pu=500.0, Mux=200.0, βdns=0.6)
         geometry = ConcreteMemberGeometry(4.0; k=1.0, braced=true)
         opts = NLPColumnOptions(
-            grade = NWC_4000,
+            material = NWC_4000,
             solver = :ipopt,
             min_dim = 14.0u"inch",
             max_dim = 36.0u"inch",
@@ -146,7 +146,7 @@ using Asap: kip, ksi
         @test 14.0 <= result.h_final <= 36.0
         
         # Verify the final section passes capacity check
-        mat = (fc = fc_ksi(opts.grade), fy = 60.0, Es = 29000.0, εcu = 0.003)
+        mat = (fc = fc_ksi(opts.material), fy = 60.0, Es = 29000.0, εcu = 0.003)
         diagram = generate_PM_diagram(result.section, mat)
         check = check_PM_capacity(diagram, 500.0, 200.0)
         @test check.adequate || check.utilization < 1.1  # Allow small tolerance

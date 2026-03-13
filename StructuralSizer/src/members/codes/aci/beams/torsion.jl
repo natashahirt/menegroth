@@ -144,6 +144,8 @@ All inputs in psi / inch units. Returns kip·in.
   (b=12", h=20", f'c=2900 psi, λ=1.0)
 """
 function threshold_torsion(Acp::Real, pcp::Real, fc_psi::Real; λ::Real=1.0, φ::Real=0.75)
+    pcp > 0 || throw(ArgumentError("pcp must be positive (got $pcp)"))
+    fc_psi > 0 || throw(ArgumentError("fc_psi must be positive (got $fc_psi)"))
     Tth_lbin = φ * λ * sqrt(fc_psi) * Acp^2 / pcp
     return Tth_lbin / 1000.0  # kip·in
 end
@@ -163,6 +165,8 @@ Used to compute the compatibility torsion cap: φ·Tcr.
 All inputs in psi / inch units. Returns kip·in.
 """
 function cracking_torsion(Acp::Real, pcp::Real, fc_psi::Real; λ::Real=1.0)
+    pcp > 0 || throw(ArgumentError("pcp must be positive (got $pcp)"))
+    fc_psi > 0 || throw(ArgumentError("fc_psi must be positive (got $fc_psi)"))
     Tcr_lbin = 4.0 * λ * sqrt(fc_psi) * Acp^2 / pcp
     return Tcr_lbin / 1000.0  # kip·in
 end
@@ -190,14 +194,15 @@ function torsion_section_adequate(
     bw_in::Real, d_in::Real, Aoh::Real, ph::Real, fc_psi::Real;
     λ::Real=1.0, φ::Real=0.75,
 )
-    # Convert to lbs/in
+    bw_in > 0 || throw(ArgumentError("bw_in must be positive (got $bw_in)"))
+    d_in > 0 || throw(ArgumentError("d_in must be positive (got $d_in)"))
+    Aoh > 0 || throw(ArgumentError("Aoh must be positive (got $Aoh)"))
+    fc_psi > 0 || throw(ArgumentError("fc_psi must be positive (got $fc_psi)"))
+
     Vu_lb  = Vu_kip * 1000.0
     Tu_lbin = Tu_kipin * 1000.0
 
-    # Shear stress from flexural shear
     τv = Vu_lb / (bw_in * d_in)
-
-    # Torsional stress
     τt = Tu_lbin * ph / (1.7 * Aoh^2)
 
     # Combined stress (interaction)
@@ -221,6 +226,11 @@ function torsion_adequacy_ratio(
     bw_in::Real, d_in::Real, Aoh::Real, ph::Real, fc_psi::Real;
     λ::Real=1.0, φ::Real=0.75,
 )
+    bw_in > 0 || throw(ArgumentError("bw_in must be positive (got $bw_in)"))
+    d_in > 0 || throw(ArgumentError("d_in must be positive (got $d_in)"))
+    Aoh > 0 || throw(ArgumentError("Aoh must be positive (got $Aoh)"))
+    fc_psi > 0 || throw(ArgumentError("fc_psi must be positive (got $fc_psi)"))
+
     Vu_lb   = Vu_kip * 1000.0
     Tu_lbin = Tu_kipin * 1000.0
 
@@ -261,6 +271,9 @@ function torsion_transverse_reinforcement(
     Tu_kipin::Real, Ao::Real, fyt_psi::Real;
     θ::Real=45.0, φ::Real=0.75,
 )
+    Ao > 0 || throw(ArgumentError("Ao must be positive (got $Ao)"))
+    fyt_psi > 0 || throw(ArgumentError("fyt_psi must be positive (got $fyt_psi)"))
+    θ > 0 || throw(ArgumentError("θ must be positive (got $θ)"))
     Tu_lbin = Tu_kipin * 1000.0
     cot_θ = 1.0 / tand(θ)
     At_s = Tu_lbin / (φ * 2 * fyt_psi * Ao * cot_θ)
@@ -307,6 +320,8 @@ Returns At/s_min in in²/in.
 - ACI 445.1R-12 Example 1: At/s_min = 0.125 mm²/mm = 0.005 in²/in
 """
 function min_torsion_transverse(bw_in::Real, fc_psi::Real, fyt_psi::Real)
+    fyt_psi > 0 || throw(ArgumentError("fyt_psi must be positive (got $fyt_psi)"))
+    fc_psi > 0 || throw(ArgumentError("fc_psi must be positive (got $fc_psi)"))
     # ACI 318-11 §11.5.5.2: Av+2At ≥ max(0.75√f'c·bw/fyt, 50bw/fyt)
     # For torsion alone (Av=0): 2At ≥ max(...)
     # So At/s ≥ max(0.75√f'c·bw/(2·fyt), 50bw/(2·fyt))
@@ -333,6 +348,8 @@ function min_torsion_longitudinal(
     fc_psi::Real, fy_psi::Real, fyt_psi::Real;
     θ::Real=45.0,
 )
+    fy_psi > 0 || throw(ArgumentError("fy_psi must be positive (got $fy_psi)"))
+    fc_psi > 0 || throw(ArgumentError("fc_psi must be positive (got $fc_psi)"))
     Al_min = 5 * sqrt(fc_psi) * Acp / (12 * fy_psi) - At_s * ph * (fyt_psi / fy_psi)
     return max(Al_min, 0.0)
 end

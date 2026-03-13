@@ -61,20 +61,28 @@ Simple piecewise linear interpolation with linear extrapolation at boundaries.
 """
 function _linear_interp(xs::Vector{Float64}, ys::Vector{Float64}, x::Float64)
     n = length(xs)
+    n >= 2 || throw(ArgumentError("Interpolation requires at least 2 data points (got $n)"))
+    length(ys) == n || throw(ArgumentError("xs and ys must have equal length"))
     # Extrapolate below
     if x <= xs[1]
-        slope = (ys[2] - ys[1]) / (xs[2] - xs[1])
+        dx = xs[2] - xs[1]
+        dx != 0 || return ys[1]
+        slope = (ys[2] - ys[1]) / dx
         return ys[1] + slope * (x - xs[1])
     end
     # Extrapolate above
     if x >= xs[n]
-        slope = (ys[n] - ys[n-1]) / (xs[n] - xs[n-1])
+        dx = xs[n] - xs[n-1]
+        dx != 0 || return ys[n]
+        slope = (ys[n] - ys[n-1]) / dx
         return ys[n] + slope * (x - xs[n])
     end
     # Interpolate
     for i in 1:(n-1)
         if xs[i] <= x <= xs[i+1]
-            t = (x - xs[i]) / (xs[i+1] - xs[i])
+            dx = xs[i+1] - xs[i]
+            dx != 0 || return ys[i]
+            t = (x - xs[i]) / dx
             return ys[i] + t * (ys[i+1] - ys[i])
         end
     end
@@ -183,10 +191,11 @@ function _shukla_analysis(
     L = (D / ks)^(0.25)
 
     # Equivalent column radii (map rectangular to circular for singularity capping)
-    # Expressed as r_col / L (dimensionless). Using default column size.
-    default_col = 18.0u"inch"
-    r_col_over_L = ustrip(Unitful.NoUnits, sqrt(default_col^2 / π) / L)
-    equiv_radii = fill(r_col_over_L, length(demands))
+    # Expressed as r_col / L (dimensionless). Use actual column dimensions per demand.
+    equiv_radii = map(demands) do d
+        col_dim = max(d.c1, d.c2)
+        ustrip(Unitful.NoUnits, sqrt(col_dim^2 / π) / L)
+    end
 
     P = [d.Pu for d in demands]
     pos = positions
@@ -317,6 +326,7 @@ function _design_mat_shukla(
     Ps_total = sum(d.Ps for d in demands)
 
     # Bearing utilization (service loads, rigid assumption for initial check)
+    ustrip(soil.qa) > 0 || error("Allowable soil bearing pressure (qa) must be positive")
     util_bearing = to_kip(Ps_total) / to_kip(soil.qa * B * Lm)
     util_bearing > 1.0 && @warn "Mat bearing exceeds allowable: util=$(round(util_bearing, digits=3))"
 
@@ -361,46 +371,26 @@ function _design_mat_shukla(
             h, positions, demands, Ec_c, μ, ks)
 
         # ── Bearing check at critical locations ──
+        # q_f is from factored loads (Pu); scale to service level for
+        # comparison with soil.qa.  Pressure is linear in P, so
+        # q_service = q_factored × (ΣPs / ΣPu).
+        Pu_total = sum(d.Pu for d in demands)
+        Ps_total = sum(d.Ps for d in demands)
+        service_scale = Pu_total > 0.0u"kN" ? Ps_total / Pu_total : 1.0
         bearing_ok = true
         check_locs = vcat([(p[1], p[2]) for p in positions], [mat_center], mat_corners)
         for loc in check_locs
-            q_val = q_f(loc[1], loc[2])
-            # Service-level check: compare to allowable bearing
+            q_val = q_f(loc[1], loc[2]) * service_scale
             if uconvert(u"lbf/ft^2", q_val) > soil.qa
                 bearing_ok = false
                 break
             end
         end
 
-        # ── Punching shear check at each column (per-column dimensions) ──
+        # ── Punching shear check (reuse shared util with corner detection) ──
         qu_punch = sum(d.Pu for d in demands) / (B * Lm)
-        punch_ok = true
-        for j in 1:N
-            c1j, c2j = demands[j].c1, demands[j].c2
-            is_edge = (
-                plan.xs_loc[j] < plan.overhang + 0.5u"ft" ||
-                plan.xs_loc[j] > (B - plan.overhang - 0.5u"ft") ||
-                plan.ys_loc[j] < plan.overhang + 0.5u"ft" ||
-                plan.ys_loc[j] > (Lm - plan.overhang - 0.5u"ft")
-            )
-            pos_sym = is_edge ? :edge : :interior
-            Ac = if demands[j].shape == :circular
-                π * (c1j + d_eff)^2 / 4
-            else
-                is_edge ? (c1j + d_eff / 2) * (c2j + d_eff) :
-                          (c1j + d_eff) * (c2j + d_eff)
-            end
-            Vu_p = max(uconvert(u"lbf", demands[j].Pu - qu_punch * Ac), 0.0u"lbf")
-
-            pch = punching_check(Vu_p, demands[j].Mux, demands[j].Muy,
-                                  d_eff, fc, c1j, c2j;
-                                  position = pos_sym, shape = demands[j].shape,
-                                  λ = λ, ϕ = ϕv)
-            if !pch.ok
-                punch_ok = false
-                break
-            end
-        end
+        util_p = _mat_punching_util(demands, plan, qu_punch, d_eff, fc, λ, ϕv)
+        punch_ok = util_p ≤ 1.0
 
         (bearing_ok && punch_ok) && break
         h += h_incr
@@ -414,6 +404,7 @@ function _design_mat_shukla(
     # over the finite mat domain should capture most (~90%+) of the total load.
     # A large shortfall indicates the mat overhang is too small for this method.
     Pu_total = sum(d.Pu for d in demands)
+    ustrip(u"kN", Pu_total) > 0 || error("Total factored load Pu_total is zero or negative — check demands")
     eq_nx, eq_ny = 40, 40
     eq_xs = range(plan.x_left, plan.x_left + B, length=eq_nx)
     eq_ys = range(plan.y_bot, plan.y_bot + Lm, length=eq_ny)

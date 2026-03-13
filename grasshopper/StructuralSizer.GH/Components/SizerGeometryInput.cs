@@ -39,7 +39,7 @@ namespace StructuralSizer.GH.Components
         { }
 
         public override Guid ComponentGuid =>
-            new Guid("A1B2C3D4-1111-2222-3333-444455556666");
+            new Guid("06337717-7C60-47C6-97A5-0F2D8F9BC155");
 
         // ─── Parameters ──────────────────────────────────────────────────
         protected override void RegisterInputParams(GH_InputParamManager pManager)

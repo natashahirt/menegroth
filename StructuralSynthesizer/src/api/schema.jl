@@ -10,6 +10,92 @@
 using JSON3
 using StructTypes
 
+# ─── Full input schema for GET /schema ─────────────────────────────────────
+# Describes the complete APIInput shape so clients have a single source of truth.
+
+"""
+    api_input_schema() -> Dict
+
+Return a documentation schema for the full API input payload (APIInput + APIParams).
+Used by GET /schema to align documentation with the actual wire format.
+"""
+function api_input_schema()
+    return Dict(
+        "units" => Dict(
+            "type" => "string",
+            "required" => true,
+            "description" => "Coordinate units for vertices and story elevations.",
+            "accepted" => "feet, ft, inches, in, meters, m, millimeters, mm, centimeters, cm",
+        ),
+        "vertices" => Dict(
+            "type" => "array of [x, y, z]",
+            "required" => true,
+            "description" => "Array of vertex coordinates; at least 4 required.",
+        ),
+        "edges" => Dict(
+            "type" => "object",
+            "description" => "Beam, column, and brace connectivity.",
+            "fields" => Dict(
+                "beams" => "Array of [v1, v2] vertex index pairs (1-based).",
+                "columns" => "Array of [v1, v2] vertex index pairs (1-based).",
+                "braces" => "Array of [v1, v2] vertex index pairs (1-based).",
+            ),
+        ),
+        "supports" => Dict(
+            "type" => "array of integers",
+            "required" => true,
+            "description" => "Vertex indices (1-based) that are fixed supports.",
+        ),
+        "stories_z" => Dict(
+            "type" => "array of numbers",
+            "required" => false,
+            "description" => "Story elevations in coordinate units. If omitted, inferred from vertex Z.",
+        ),
+        "faces" => Dict(
+            "type" => "object",
+            "required" => false,
+            "description" => "Optional. Keys: floor, roof, grade. Values: arrays of polylines [[x,y,z], ...].",
+        ),
+        "params" => Dict(
+            "type" => "object",
+            "description" => "Design parameters; all fields optional with defaults below.",
+            "fields" => Dict(
+                "unit_system" => "Display units: \"imperial\" or \"metric\". Default: \"imperial\".",
+                "loads" => Dict(
+                    "floor_LL_psf" => "Floor live load (psf). Default: 80.",
+                    "roof_LL_psf" => "Roof live load (psf). Default: 20.",
+                    "grade_LL_psf" => "Grade live load (psf). Default: 100.",
+                    "floor_SDL_psf" => "Floor superimposed dead (psf). Default: 15.",
+                    "roof_SDL_psf" => "Roof superimposed dead (psf). Default: 15.",
+                    "wall_SDL_psf" => "Wall superimposed dead (psf). Default: 10.",
+                ),
+                "floor_type" => "flat_plate | flat_slab | one_way | vault. Default: flat_plate.",
+                "floor_options" => Dict(
+                    "method" => "DDM | DDM_SIMPLIFIED | EFM | EFM_HARDY_CROSS | FEA. Default: DDM.",
+                    "deflection_limit" => "L_240 | L_360 | L_480. Default: L_360.",
+                    "punching_strategy" => "grow_columns | reinforce_last | reinforce_first. Default: grow_columns.",
+                ),
+                "materials" => Dict(
+                    "concrete" => "Concrete name (e.g. NWC_4000). Default: NWC_4000.",
+                    "rebar" => "Rebar name (e.g. Rebar_60). Default: Rebar_60.",
+                    "steel" => "Steel name (e.g. A992). Default: A992.",
+                ),
+                "column_type" => "rc_rect | rc_circular | steel_w | steel_hss | steel_pipe. Default: rc_rect.",
+                "beam_type" => "steel_w | steel_hss | rc_rect | rc_tbeam. Default: steel_w.",
+                "fire_rating" => "Fire rating (hours): 0, 1, 1.5, 2, 3, or 4. Default: 0.",
+                "optimize_for" => "weight | carbon | cost. Default: weight.",
+                "size_foundations" => "Boolean. Default: false.",
+                "foundation_soil" => "Soil name (e.g. medium_sand). Required when size_foundations is true. Default: medium_sand.",
+            ),
+        ),
+        "geometry_hash" => Dict(
+            "type" => "string",
+            "required" => false,
+            "description" => "Ignored; server recomputes hash. Reserved for forward compatibility.",
+        ),
+    )
+end
+
 # ─── Input Schema ────────────────────────────────────────────────────────────
 # Input structs are `mutable` so that StructTypes.Mutable() can construct them
 # via the no-arg constructor and then set only the fields present in JSON.
@@ -65,7 +151,12 @@ Base.@kwdef mutable struct APIParams
     foundation_soil::String = "medium_sand"
 end
 
-"""Top-level input payload from JSON."""
+"""
+Top-level input payload from JSON.
+
+`geometry_hash` is accepted for forward-compatibility but ignored — the server
+always recomputes the hash via `compute_geometry_hash(input)`.
+"""
 Base.@kwdef mutable struct APIInput
     units::String = ""
     vertices::Vector{Vector{Float64}} = Vector{Float64}[]
@@ -93,6 +184,7 @@ StructTypes.StructType(::Type{APIInput}) = StructTypes.Mutable()
 """Slab result for JSON output."""
 Base.@kwdef struct APISlabResult
     id::Int = 0
+    ok::Bool = true
     thickness_in::Float64 = 0.0
     converged::Bool = true
     failure_reason::String = ""

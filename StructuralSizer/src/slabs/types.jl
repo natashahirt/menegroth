@@ -918,6 +918,62 @@ end
 """Check if column capital design is adequate."""
 is_adequate(s::ColumnCapitalDesign) = !s.required || s.ok
 
+# =============================================================================
+# Material Takeoff Helpers for Punching Reinforcement
+# =============================================================================
+
+"""
+    stud_steel_volume(studs::ShearStudDesign) -> Volume
+
+Total steel volume of all shear studs at one column location.
+Each stud is a cylinder: π/4 × d² × h_stud, where h_stud = 5 × d (typical headed stud).
+Total = n_rails × n_studs_per_rail × single_stud_volume.
+"""
+function stud_steel_volume(studs::ShearStudDesign)
+    !studs.required && return 0.0u"inch^3"
+    d = studs.stud_diameter
+    h_stud = 5 * d  # typical headed stud height ≈ 5× shank diameter
+    single_vol = π / 4 * d^2 * h_stud
+    return studs.n_rails * studs.n_studs_per_rail * single_vol
+end
+
+"""
+    shear_cap_concrete_volume(cap::ShearCapDesign, c1, c2) -> Volume
+
+Additional concrete volume from a shear cap (thickened head) at one column.
+The cap extends `extent` from each column face, with projection `h_cap` below the slab.
+Volume = (c1 + 2·extent) × (c2 + 2·extent) × h_cap.
+"""
+function shear_cap_concrete_volume(cap::ShearCapDesign, c1, c2)
+    !cap.required && return 0.0u"inch^3"
+    L1 = c1 + 2 * cap.extent
+    L2 = c2 + 2 * cap.extent
+    return L1 * L2 * cap.h_cap
+end
+
+"""
+    capital_concrete_volume(cap::ColumnCapitalDesign) -> Volume
+
+Additional concrete volume from a column capital at one column.
+Modeled as a rectangular prism: c1_eff × c2_eff × h_cap.
+"""
+function capital_concrete_volume(cap::ColumnCapitalDesign)
+    !cap.required && return 0.0u"inch^3"
+    return cap.c1_eff * cap.c2_eff * cap.h_cap
+end
+
+"""
+    drop_panel_concrete_volume(h_drop, a1, a2, h_slab) -> Volume
+
+Additional concrete volume from a drop panel (beyond the flat slab thickness).
+Volume = a1 × a2 × (h_drop − h_slab).
+"""
+function drop_panel_concrete_volume(h_drop, a1, a2, h_slab)
+    Δh = h_drop - h_slab
+    Δh <= zero(Δh) && return zero(a1 * a2 * h_slab)
+    return a1 * a2 * Δh
+end
+
 """
     PunchingCheckResult
 
@@ -1171,9 +1227,12 @@ _volume_impl(r::FlatPlatePanelResult, ::Val{:steel}) = _calc_rebar_volume_per_ar
 
 Calculate reinforcing steel volume per plan area for EC calculations.
 
-Sums As_provided from all strip reinforcement in both directions:
-- Primary direction: bars run parallel to l1, with width = strip_width
-- Secondary direction: bars run parallel to l2, with width = strip_width
+Sums As_provided from all strip reinforcement in both directions.
+As_provided = n_bars × Ab is the total bar cross-section for the full strip width,
+so volume = As_provided × bar_run_length (no further width multiplier).
+
+- Primary direction: bars run parallel to l1
+- Secondary direction: bars run parallel to l2
 
 When secondary reinforcement is available (from dual-direction moment analysis),
 uses the actual designed reinforcement.  Falls back to the conservative 2× estimate
@@ -1192,11 +1251,11 @@ function _calc_rebar_volume_per_area(r::FlatPlatePanelResult)
     # ─── Primary direction: bars run parallel to l1 ───
     for reinf in r.column_strip_reinf
         As = uconvert(u"m^2", reinf.As_provided)
-        total_steel_volume += As * l1 * r.column_strip_width / (1.0u"m")
+        total_steel_volume += As * l1
     end
     for reinf in r.middle_strip_reinf
         As = uconvert(u"m^2", reinf.As_provided)
-        total_steel_volume += As * l1 * r.middle_strip_width / (1.0u"m")
+        total_steel_volume += As * l1
     end
     
     # ─── Secondary direction: bars run parallel to l2 ───
@@ -1204,11 +1263,11 @@ function _calc_rebar_volume_per_area(r::FlatPlatePanelResult)
     if has_secondary
         for reinf in r.secondary_column_strip_reinf
             As = uconvert(u"m^2", reinf.As_provided)
-            total_steel_volume += As * l2 * r.secondary_column_strip_width / (1.0u"m")
+            total_steel_volume += As * l2
         end
         for reinf in r.secondary_middle_strip_reinf
             As = uconvert(u"m^2", reinf.As_provided)
-            total_steel_volume += As * l2 * r.secondary_middle_strip_width / (1.0u"m")
+            total_steel_volume += As * l2
         end
     else
         # Fallback: assume similar reinforcement in perpendicular direction

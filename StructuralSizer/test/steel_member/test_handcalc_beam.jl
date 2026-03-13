@@ -86,7 +86,7 @@ end
         
         # 4. Apply loads (LRFD factored: 1.2D + 1.6L = 2.8 klf)
         w_factored_klf = 2.8
-        w_factored_si = uconvert(u"N/m", w_factored_klf * u"kip/ft")
+        w_factored_si = uconvert(u"N/m", w_factored_klf * kip/u"ft")
         
         push!(model.loads, Asap.LineLoad(model.elements[1], [0.0u"N/m", 0.0u"N/m", -w_factored_si]))
         
@@ -95,14 +95,14 @@ end
         
         # Expected moment: Mu = wL²/8 = 140 k-ft
         Mu_expected_kft = 140.0
-        Mu_expected_Nm = ustrip(u"N*m", Mu_expected_kft * u"kip*ft")
+        Mu_expected_Nm = ustrip(u"N*m", Mu_expected_kft * kip*u"ft")
         
         # 5. Size
         size_steel_members!(
             struc;
             member_edge_group=:beams,
             material=A992_Steel,
-            optimizer=:auto,
+            solver=:auto,
             resolution=20,
             reanalyze=true
         )

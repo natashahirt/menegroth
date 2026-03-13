@@ -160,9 +160,8 @@ function report_composite_beam(
     _row2("V′_steel    = Fy As",         ustrip(u"kip", V_steel), "kips")
     _row2("Cf_max = min(V′c, V′s)",      ustrip(u"kip", Cf_max), "kips")
 
-    # Partial composite solver: find minimum ΣQn for Mu
-    Mn_target = Mu / 0.9  # back out from ϕMn requirement
-    partial = find_required_ΣQn(section, material, slab, b_eff, Mn_target, Qn; ϕ=0.9)
+    # Partial composite solver: find minimum stud count for ϕMn ≥ Mu
+    partial = find_required_ΣQn(section, material, slab, b_eff, Mu, Qn; ϕ=0.9)
     ΣQn = partial.ΣQn
     n_studs_half = partial.n_studs_half
     n_studs_total = 2 * n_studs_half

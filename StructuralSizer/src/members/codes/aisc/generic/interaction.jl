@@ -7,6 +7,7 @@ Uniaxial P-M interaction check per AISC 360-16 Eq. H1-1a/H1-1b.
 Returns the utilization ratio (≤ 1.0 means adequate).
 """
 function check_PM_interaction(Pu, Mu, ϕPn, ϕMn; Pr=Pu, Mr=Mu)
+    (iszero(ϕPn) || iszero(ϕMn)) && return Inf
     if Pr / ϕPn >= 0.2
         return Pr / ϕPn + 8/9 * (Mr / ϕMn)
     else
@@ -36,6 +37,7 @@ Biaxial P-Mx-My interaction check per AISC 360-16 Eq. H1-1a/H1-1b.
 Returns the utilization ratio (≤ 1.0 means adequate).
 """
 function check_PMxMy_interaction(Pu, Mux, Muy, ϕPn, ϕMnx, ϕMny; Pr=Pu, Mrx=Mux, Mry=Muy)
+    (iszero(ϕPn) || iszero(ϕMnx) || iszero(ϕMny)) && return Inf
     if Pr / ϕPn >= 0.2
         return Pr / ϕPn + 8/9 * (Mrx / ϕMnx + Mry / ϕMny)
     else

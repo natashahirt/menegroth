@@ -117,7 +117,7 @@ const MOI = JuMP.MOI
     
     # =========================================================================
     @testset "Concrete Columns - High Strength" begin
-        opts = ConcreteColumnOptions(grade = NWC_6000)
+        opts = ConcreteColumnOptions(material = NWC_6000)
         result = size_columns(Pu_kip, Mux_kipft, conc_geometries, opts; Muy=Muy_kipft)
         
         @test result.status == MOI.OPTIMAL || result.status == MOI.TIME_LIMIT
@@ -273,8 +273,8 @@ const MOI = JuMP.MOI
         
         # Concrete defaults
         c = ConcreteColumnOptions()
-        @test c.grade === NWC_4000
-        @test c.rebar_grade === Rebar_60
+        @test c.material === NWC_4000
+        @test c.rebar_material === Rebar_60
         @test c.catalog === :standard
         @test c.include_slenderness == true
         @test c.include_biaxial == true
@@ -312,7 +312,7 @@ const MOI = JuMP.MOI
     @testset "Circular Concrete Columns - High Strength" begin
         opts = ConcreteColumnOptions(
             section_shape = :circular,
-            grade = NWC_6000
+            material = NWC_6000
         )
         
         Pu_circ = [500.0, 600.0, 700.0, 400.0]

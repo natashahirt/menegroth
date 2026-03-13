@@ -178,16 +178,16 @@ end
         # M0 = qu × l2 × ln² / 8
         # qu ≈ 193 psf, l2 = 14 ft, ln ≈ 16.67 ft
         # M0 ≈ 0.193 × 14 × 16.67² / 8 ≈ 93.8 kip-ft
-        M0_kipft = ustrip(u"kip*ft", result.M0)
+        M0_kipft = ustrip(kip*u"ft", result.M0)
         @test M0_kipft ≈ 93.8 rtol=0.05
         
         # End span moments (ACI Table 8.10.4.2)
         # Exterior negative: 0.26 × M0 ≈ 24.4 kip-ft
         # Interior negative: 0.70 × M0 ≈ 65.7 kip-ft
         # Positive: 0.52 × M0 ≈ 48.8 kip-ft
-        @test ustrip(u"kip*ft", result.M_neg_ext) ≈ 24.4 rtol=0.05
-        @test ustrip(u"kip*ft", result.M_neg_int) ≈ 65.7 rtol=0.05
-        @test ustrip(u"kip*ft", result.M_pos) ≈ 48.8 rtol=0.05
+        @test ustrip(kip*u"ft", result.M_neg_ext) ≈ 24.4 rtol=0.05
+        @test ustrip(kip*u"ft", result.M_neg_int) ≈ 65.7 rtol=0.05
+        @test ustrip(kip*u"ft", result.M_pos) ≈ 48.8 rtol=0.05
         
         # Should have 4 column moments
         @test length(result.column_moments) == 4
@@ -222,9 +222,9 @@ end
         result = StructuralSizer.run_moment_analysis(DDM(:simplified), fl, struc, qu, qD, qL)
         
         # MDDM uses 0.65/0.35 for all spans
-        M0_kipft = ustrip(u"kip*ft", result.M0)
-        @test ustrip(u"kip*ft", result.M_neg_ext) ≈ 0.65 * M0_kipft rtol=0.01
-        @test ustrip(u"kip*ft", result.M_pos) ≈ 0.35 * M0_kipft rtol=0.01
+        M0_kipft = ustrip(kip*u"ft", result.M0)
+        @test ustrip(kip*u"ft", result.M_neg_ext) ≈ 0.65 * M0_kipft rtol=0.01
+        @test ustrip(kip*u"ft", result.M_pos) ≈ 0.35 * M0_kipft rtol=0.01
     end
     
     @testset "FrameLine with Varying Span Lengths" begin

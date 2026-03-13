@@ -373,7 +373,7 @@ end
             struc;
             member_edge_group=:columns,
             material=A992_Steel,
-            optimizer=:auto,
+            solver=:auto,
             resolution=100,
             reanalyze=true
         )
@@ -452,7 +452,7 @@ end
             struc;
             member_edge_group=:columns,
             material=A992_Steel,
-            optimizer=:auto,
+            solver=:auto,
             resolution=100,
             reanalyze=true
         )

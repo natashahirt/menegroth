@@ -21,7 +21,7 @@ import JuMP
     # ==================================================================
     @testset "required_Ix_for_deflection — basic" begin
         # 25 ft span, 0.8 kip/ft live load, E = 29000 ksi, L/360
-        w_LL = 0.8u"kip/ft"
+        w_LL = 0.8kip/u"ft"
         L    = 25.0u"ft"
         E    = 29000.0ksi
 
@@ -36,7 +36,7 @@ import JuMP
     end
 
     @testset "required_Ix_for_deflection — support conditions" begin
-        w = 1.0u"kip/ft"; L = 20.0u"ft"; E = 29000.0ksi
+        w = 1.0kip/u"ft"; L = 20.0u"ft"; E = 29000.0ksi
         Ix_ss   = required_Ix_for_deflection(w, L, E; support=:simply_supported)
         Ix_cant = required_Ix_for_deflection(w, L, E; support=:cantilever)
         Ix_both = required_Ix_for_deflection(w, L, E; support=:both_ends_continuous)
@@ -47,7 +47,7 @@ import JuMP
     end
 
     @testset "required_Ix_for_deflection — limit_ratio" begin
-        w = 0.5u"kip/ft"; L = 30.0u"ft"; E = 29000.0ksi
+        w = 0.5kip/u"ft"; L = 30.0u"ft"; E = 29000.0ksi
         Ix_360 = required_Ix_for_deflection(w, L, E; limit_ratio=1/360)
         Ix_240 = required_Ix_for_deflection(w, L, E; limit_ratio=1/240)
         # Tighter limit → larger required Ix
@@ -58,11 +58,11 @@ import JuMP
     # 2. Steel W-beam NLP with Ix_min
     # ==================================================================
     @testset "Steel W-beam NLP with deflection constraint" begin
-        Mu = 200.0u"kip*ft"
+        Mu = 200.0kip*u"ft"
         Vu = 40.0kip
         geom = SteelMemberGeometry(25.0u"ft"; Lb=25.0u"ft", Cb=1.0)
         opts = NLPWOptions(
-            min_depth = 12.0u"inch", max_depth = 30.0u"inch",
+            min_depth = 12.0u"inch", max_depth = 36.0u"inch",
         )
 
         # Without deflection constraint
@@ -142,8 +142,8 @@ import JuMP
         As = 4.0u"inch^2"
         fc′ = 4.0ksi; fy = 60.0ksi; Es = 29000.0ksi
         L  = 25.0u"ft"
-        w_dead = 1.2u"kip/ft"
-        w_live = 0.8u"kip/ft"
+        w_dead = 1.2kip/u"ft"
+        w_live = 0.8kip/u"ft"
 
         result = design_tbeam_deflection(
             bw, bf, hf, h, d, As,
@@ -184,8 +184,8 @@ import JuMP
         As = 5.0u"inch^2"
         fc′ = 4.0ksi; fy = 60.0ksi; Es = 29000.0ksi
         L  = 24.0u"ft"
-        w_dead = 1.0u"kip/ft"
-        w_live = 0.6u"kip/ft"
+        w_dead = 1.0kip/u"ft"
+        w_live = 0.6kip/u"ft"
 
         result = design_tbeam_deflection(
             bw, bf, hf, h, d, As,
@@ -202,7 +202,7 @@ import JuMP
         As = 4.0u"inch^2"
         fc′ = 4.0ksi; fy = 60.0ksi; Es = 29000.0ksi
         L  = 25.0u"ft"
-        w_dead = 1.2u"kip/ft"; w_live = 0.8u"kip/ft"
+        w_dead = 1.2kip/u"ft"; w_live = 0.8kip/u"ft"
 
         t_result = design_tbeam_deflection(
             bw, bf, hf, h, d, As,
@@ -227,7 +227,7 @@ import JuMP
         As = 3.0u"inch^2"
         fc′ = 4.0ksi; fy = 60.0ksi; Es = 29000.0ksi
         L  = 20.0u"ft"
-        w_dead = 0.8u"kip/ft"; w_live = 0.5u"kip/ft"
+        w_dead = 0.8kip/u"ft"; w_live = 0.5kip/u"ft"
 
         # No compression steel → λΔ = 2.0 / (1+0) = 2.0
         r1 = design_tbeam_deflection(bw, bf, hf, h, d, As,
@@ -248,7 +248,7 @@ import JuMP
         As = 4.0u"inch^2"
         fc′ = 4.0ksi; fy = 60.0ksi; Es = 29000.0ksi
         L = 25.0u"ft"
-        w_dead = 1.0u"kip/ft"; w_live = 0.6u"kip/ft"
+        w_dead = 1.0kip/u"ft"; w_live = 0.6kip/u"ft"
 
         t_res = design_tbeam_deflection(b, b, hf, h, d, As,
             fc′, fy, Es, L, w_dead, w_live)
@@ -264,13 +264,13 @@ import JuMP
     # 5. RC T-Beam NLP with auto-integrated deflection constraint
     # ==================================================================
     @testset "T-beam NLP with deflection constraint" begin
-        Mu = 250.0u"kip*ft"
+        Mu = 250.0kip*u"ft"
         Vu = 50.0kip
         bf = 48.0u"inch"
         hf = 6.0u"inch"
         L  = 25.0u"ft"
-        w_dead = 1.2u"kip/ft"
-        w_live = 0.8u"kip/ft"
+        w_dead = 1.2kip/u"ft"
+        w_live = 0.8kip/u"ft"
         opts = NLPBeamOptions(min_depth=16.0u"inch", max_depth=30.0u"inch")
 
         # ── Without deflection constraint ──
@@ -300,13 +300,13 @@ import JuMP
 
     @testset "T-beam NLP deflection — severe demand forces deeper beam" begin
         # Heavy live load on long span → deflection governs, not strength
-        Mu = 150.0u"kip*ft"  # moderate moment
+        Mu = 150.0kip*u"ft"  # moderate moment
         Vu = 30.0kip
         bf = 60.0u"inch"
         hf = 5.0u"inch"
         L  = 30.0u"ft"
-        w_dead = 0.8u"kip/ft"
-        w_live = 1.5u"kip/ft"   # heavy live load
+        w_dead = 0.8kip/u"ft"
+        w_live = 1.5kip/u"ft"   # heavy live load
         opts = NLPBeamOptions(min_depth=14.0u"inch", max_depth=36.0u"inch")
 
         r_str = size_rc_tbeam_nlp(Mu, Vu, bf, hf, opts)
@@ -325,14 +325,14 @@ import JuMP
     # ==================================================================
     @testset "T-beam MIP with deflection constraint" begin
         n = 2
-        Mu = [200.0, 300.0] .* u"kip*ft"
+        Mu = [200.0, 300.0] .* kip*u"ft"
         Vu = [40.0, 60.0] .* kip
         L_span = 25.0u"ft"
         geoms = [ConcreteMemberGeometry(L_span) for _ in 1:n]
         opts  = ConcreteBeamOptions()
         bf = 48.0u"inch"; hf = 6.0u"inch"
-        w_dead = 1.0u"kip/ft"
-        w_live = 0.8u"kip/ft"
+        w_dead = 1.0kip/u"ft"
+        w_live = 0.8kip/u"ft"
 
         # Without deflection
         r_no = size_tbeams(Mu, Vu, geoms, opts;

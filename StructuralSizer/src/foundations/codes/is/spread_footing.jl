@@ -49,26 +49,31 @@ function design_footing(::SpreadFooting,
     
     # Convert to consistent units (SI)
     Pu = uconvert(u"kN", demand.Pu)
+    Ps = uconvert(u"kN", demand.Ps)
     qa_kPa = uconvert(u"kPa", qa)
     fc_MPa = uconvert(u"MPa", fc′)
     fy_MPa = uconvert(u"MPa", fy)
     pier_m = uconvert(u"m", pier_width)
     rebar_m = uconvert(u"m", rebar_dia)
     cover_m = uconvert(u"m", cover)
+
+    ustrip(u"kPa", qa_kPa) > 0 || error("Allowable soil bearing pressure (qa) must be positive")
+    ustrip(u"MPa", fc_MPa) > 0 || error("Concrete strength (f'c) must be positive")
+    ustrip(u"MPa", fy_MPa) > 0 || error("Rebar yield strength (Fy) must be positive")
     
     # ==========================================================================
-    # 1. Bearing Capacity → Footing Size
+    # 1. Bearing Capacity → Footing Size  (IS 456 §34.1)
     # ==========================================================================
-    # Required area: A_req = P_service / q_allowable
-    # For factored load with SF: A_req = P_u * SF / q_a
-    A_req = Pu * SF / qa_kPa
-    A_req = uconvert(u"m^2", A_req)  # Ensure proper unit simplification
+    # Size using factored load with safety factor: A_req = Pu · SF / qa
+    # This ensures q_actual = Pu / A ≤ qa / SF (IS 456 §34.4).
+    A_req = uconvert(u"m^2", Pu * SF / qa_kPa)
     B = sqrt(A_req)  # Square footing
     B = max(B, pier_m + 0.3u"m")  # Minimum projection
     
-    # Factored bearing pressure
+    # Factored bearing pressure (for shear/flexure design)
     q_u = Pu / B^2
-    utilization = ustrip(q_u / qa_kPa)
+    # Bearing utilization: actual factored pressure / (qa, adjusted for SF)
+    utilization = ustrip(Pu / (qa_kPa * B^2))
     
     # ==========================================================================
     # 2. Punching Shear → Minimum Depth
@@ -79,23 +84,16 @@ function design_footing(::SpreadFooting,
     # or v_c = 0.25 * √fc′ (conservative, per IS 456)
     
     τ_c = 0.25 * sqrt(ustrip(fc_MPa)) * u"MPa"  # Punching shear stress capacity
-    
-    # Solve for d iteratively (punching shear governs for typical cases)
-    # V_u / (b_0 * d) ≤ ϕ * v_c  where b_0 = 4*(pier + d)
-    # This leads to a quadratic in d
-    
-    # Simplified: use quadratic formula approach
-    # P_u - q_u*(pier+d)² ≤ ϕ*τ_c * 4*(pier+d)*d
-    # Let x = pier + d, then d = x - pier
-    # P_u - q_u*x² ≤ ϕ*τ_c * 4*x*(x - pier)
-    
-    # Iterative solution (simpler to understand)
-    d_ps = 0.2u"m"  # Initial guess
+    ustrip(u"MPa", τ_c) > 0 || error("Punching shear capacity τ_c is zero — check f'c")
+
+    d_ps = 0.2u"m"
     for _ in 1:20
-        b_0 = 4 * (pier_m + d_ps)  # Critical perimeter
+        b_0 = 4 * (pier_m + d_ps)
         V_punch = Pu - q_u * (pier_m + d_ps)^2
         V_punch = max(V_punch, 0.0u"kN")
-        d_req = V_punch / (ϕ_shear * τ_c * b_0)
+        denom = ϕ_shear * τ_c * b_0
+        ustrip(u"kN/m", denom) > 0 || break  # perimeter is always positive; exit if somehow zero
+        d_req = V_punch / denom
         d_req = uconvert(u"m", d_req)
         
         if abs(d_req - d_ps) < 0.001u"m"
@@ -112,6 +110,7 @@ function design_footing(::SpreadFooting,
     # V_beam = q_u * B * ((B - pier)/2 - d)
     
     τ_beam = 0.17 * sqrt(ustrip(fc_MPa)) * u"MPa"  # One-way shear capacity (ACI)
+    ustrip(u"MPa", τ_beam) > 0 || error("One-way shear capacity τ_beam is zero — check f'c")
     
     cantilever = (B - pier_m) / 2
     V_beam = q_u * B * max(cantilever - d_ps, 0.0u"m")

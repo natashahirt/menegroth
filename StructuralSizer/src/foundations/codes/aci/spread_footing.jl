@@ -28,6 +28,10 @@ Iterates on lever arm jd until convergence. Returns total As for width `b`.
 function _flexural_steel_footing(Mu::Torque, b::Length, d::Length,
                                   fc::Pressure, fy::Pressure, ϕf::Float64)
     to_kipft(Mu) ≤ 0.0 && return 0.0u"inch^2"
+    ustrip(fy) > 0 || throw(ArgumentError("fy must be positive"))
+    ustrip(fc) > 0 || throw(ArgumentError("fc must be positive"))
+    ustrip(b) > 0 || throw(ArgumentError("b must be positive"))
+    ustrip(d) > 0 || throw(ArgumentError("d must be positive"))
 
     jd = 0.95 * d
     As = Mu / (ϕf * fy * jd)
@@ -217,7 +221,8 @@ function design_footing(::SpreadFooting,
 
         punch.ok && ow_ok && break
         h += h_incr
-        iter == 60 && @warn "Spread footing depth did not converge at h=$h"
+        iter == 60 && error("Spread footing depth did not converge after 60 iterations (h=$h). " *
+                            "Check bearing pressure, column dimensions, or increase max depth.")
     end
     d = h - cover - db
 

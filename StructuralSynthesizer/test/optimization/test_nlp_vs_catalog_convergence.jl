@@ -353,8 +353,8 @@ using Unitful
             
             # NLP solution
             nlp_opts = NLPColumnOptions(
-                grade = NWC_4000,
-                rebar_grade = Rebar_60,
+                material = NWC_4000,
+                rebar_material = Rebar_60,
                 min_dim = 12.0u"inch",
                 max_dim = 24.0u"inch",
                 verbose = false
@@ -409,8 +409,8 @@ using Unitful
             
             # NLP solution
             nlp_opts = NLPColumnOptions(
-                grade = NWC_5000,
-                rebar_grade = Rebar_60,
+                material = NWC_5000,
+                rebar_material = Rebar_60,
                 min_dim = 14.0u"inch",
                 max_dim = 30.0u"inch",
                 verbose = false
@@ -454,8 +454,8 @@ using Unitful
             
             # MinVolume: minimizes concrete area only
             opts_vol = NLPColumnOptions(
-                grade = NWC_4000,
-                rebar_grade = Rebar_60,
+                material = NWC_4000,
+                rebar_material = Rebar_60,
                 min_dim = 12.0u"inch",
                 max_dim = 24.0u"inch",
                 objective = MinVolume(),
@@ -465,8 +465,8 @@ using Unitful
             
             # MinWeight: minimizes concrete + steel weight
             opts_wt = NLPColumnOptions(
-                grade = NWC_4000,
-                rebar_grade = Rebar_60,
+                material = NWC_4000,
+                rebar_material = Rebar_60,
                 min_dim = 12.0u"inch",
                 max_dim = 24.0u"inch",
                 objective = MinWeight(),
@@ -502,8 +502,8 @@ using Unitful
             
             # MinVolume: minimizes concrete area only
             opts_vol = NLPColumnOptions(
-                grade = NWC_4000,
-                rebar_grade = Rebar_60,
+                material = NWC_4000,
+                rebar_material = Rebar_60,
                 min_dim = 12.0u"inch",
                 max_dim = 24.0u"inch",
                 objective = MinVolume(),
@@ -513,8 +513,8 @@ using Unitful
             
             # MinWeight: minimizes concrete + steel weight
             opts_wt = NLPColumnOptions(
-                grade = NWC_4000,
-                rebar_grade = Rebar_60,
+                material = NWC_4000,
+                rebar_material = Rebar_60,
                 min_dim = 12.0u"inch",
                 max_dim = 24.0u"inch",
                 objective = MinWeight(),
@@ -524,8 +524,8 @@ using Unitful
             
             # MinCarbon: minimizes embodied carbon (concrete + steel)
             opts_ec = NLPColumnOptions(
-                grade = NWC_4000,
-                rebar_grade = Rebar_60,
+                material = NWC_4000,
+                rebar_material = Rebar_60,
                 min_dim = 12.0u"inch",
                 max_dim = 24.0u"inch",
                 objective = MinCarbon(),
@@ -538,8 +538,8 @@ using Unitful
             has_cost = !isnan(NWC_4000.cost)
             result_cost = if has_cost
                 opts_cost = NLPColumnOptions(
-                    grade = NWC_4000,
-                    rebar_grade = Rebar_60,
+                    material = NWC_4000,
+                    rebar_material = Rebar_60,
                     min_dim = 12.0u"inch",
                     max_dim = 24.0u"inch",
                     objective = MinCost(),
@@ -602,8 +602,8 @@ using Unitful
 
             # --- Catalog (discrete MIP) ---
             catalog_opts = ConcreteColumnOptions(
-                grade = NWC_4000,
-                rebar_grade = Rebar_60,
+                material = NWC_4000,
+                rebar_material = Rebar_60,
                 include_slenderness = false,  # match NLP default
             )
             cat_result = size_columns(
@@ -615,8 +615,8 @@ using Unitful
 
             # --- NLP (continuous) ---
             nlp_opts = NLPColumnOptions(
-                grade = NWC_4000,
-                rebar_grade = Rebar_60,
+                material = NWC_4000,
+                rebar_material = Rebar_60,
                 min_dim = 12.0u"inch",
                 max_dim = 30.0u"inch",
                 include_slenderness = false,
@@ -645,8 +645,8 @@ using Unitful
 
             # --- Catalog ---
             catalog_opts = ConcreteColumnOptions(
-                grade = NWC_5000,
-                rebar_grade = Rebar_60,
+                material = NWC_5000,
+                rebar_material = Rebar_60,
                 include_slenderness = false,
             )
             cat_result = size_columns(
@@ -658,8 +658,8 @@ using Unitful
 
             # --- NLP ---
             nlp_opts = NLPColumnOptions(
-                grade = NWC_5000,
-                rebar_grade = Rebar_60,
+                material = NWC_5000,
+                rebar_material = Rebar_60,
                 min_dim = 14.0u"inch",
                 max_dim = 30.0u"inch",
                 include_slenderness = false,
@@ -686,8 +686,8 @@ using Unitful
 
             # --- Catalog (vectorised) ---
             catalog_opts = ConcreteColumnOptions(
-                grade = NWC_4000,
-                rebar_grade = Rebar_60,
+                material = NWC_4000,
+                rebar_material = Rebar_60,
                 include_slenderness = false,
             )
             cat_result = size_columns(Pu_kips, Mu_kipfts, geoms, catalog_opts)
@@ -695,8 +695,8 @@ using Unitful
 
             # --- NLP (vectorised) ---
             nlp_opts = NLPColumnOptions(
-                grade = NWC_4000,
-                rebar_grade = Rebar_60,
+                material = NWC_4000,
+                rebar_material = Rebar_60,
                 min_dim = 12.0u"inch",
                 max_dim = 30.0u"inch",
                 include_slenderness = false,
@@ -729,8 +729,8 @@ using Unitful
 
             # --- Catalog ---
             catalog_opts = ConcreteColumnOptions(
-                grade = NWC_6000,
-                rebar_grade = Rebar_75,
+                material = NWC_6000,
+                rebar_material = Rebar_75,
                 include_slenderness = false,
             )
             cat_result = size_columns(
@@ -742,8 +742,8 @@ using Unitful
 
             # --- NLP ---
             nlp_opts = NLPColumnOptions(
-                grade = NWC_6000,
-                rebar_grade = Rebar_75,
+                material = NWC_6000,
+                rebar_material = Rebar_75,
                 min_dim = 12.0u"inch",
                 max_dim = 30.0u"inch",
                 include_slenderness = false,
@@ -776,8 +776,8 @@ using Unitful
 
             # --- Catalog (discrete MIP) ---
             cat_opts = ConcreteColumnOptions(
-                grade            = NWC_4000,
-                rebar_grade      = Rebar_60,
+                material            = NWC_4000,
+                rebar_material      = Rebar_60,
                 section_shape    = :circular,
                 include_slenderness = false,
                 objective        = MinVolume(),
@@ -788,8 +788,8 @@ using Unitful
 
             # --- NLP (continuous) ---
             nlp_opts = NLPColumnOptions(
-                grade            = NWC_4000,
-                rebar_grade      = Rebar_60,
+                material            = NWC_4000,
+                rebar_material      = Rebar_60,
                 tie_type         = :spiral,
                 min_dim          = 12.0u"inch",
                 max_dim          = 36.0u"inch",
@@ -817,8 +817,8 @@ using Unitful
 
             # --- Catalog ---
             cat_opts = ConcreteColumnOptions(
-                grade            = NWC_4000,
-                rebar_grade      = Rebar_60,
+                material            = NWC_4000,
+                rebar_material      = Rebar_60,
                 section_shape    = :circular,
                 include_slenderness = false,
                 objective        = MinVolume(),
@@ -829,8 +829,8 @@ using Unitful
 
             # --- NLP ---
             nlp_opts = NLPColumnOptions(
-                grade            = NWC_4000,
-                rebar_grade      = Rebar_60,
+                material            = NWC_4000,
+                rebar_material      = Rebar_60,
                 tie_type         = :spiral,
                 min_dim          = 12.0u"inch",
                 max_dim          = 36.0u"inch",
@@ -860,8 +860,8 @@ using Unitful
 
             # --- Catalog ---
             cat_opts = ConcreteColumnOptions(
-                grade         = NWC_4000,
-                rebar_grade   = Rebar_60,
+                material         = NWC_4000,
+                rebar_material   = Rebar_60,
                 section_shape = :circular,
                 include_slenderness = false,
             )
@@ -870,8 +870,8 @@ using Unitful
 
             # --- NLP (batch) ---
             nlp_opts = NLPColumnOptions(
-                grade       = NWC_4000,
-                rebar_grade = Rebar_60,
+                material       = NWC_4000,
+                rebar_material = Rebar_60,
                 tie_type    = :spiral,
                 min_dim     = 12.0u"inch",
                 max_dim     = 36.0u"inch",
@@ -946,7 +946,7 @@ using Unitful
             cat_result = size_beams(
                 [Mu_kipft], [Vu_kip],
                 [ConcreteMemberGeometry(L_m)],
-                ConcreteBeamOptions(grade=NWC_4000, rebar_grade=Rebar_60),
+                ConcreteBeamOptions(material=NWC_4000, rebar_material=Rebar_60),
             )
             cat_sec  = cat_result.sections[1]
             cat_area = ustrip(u"inch^2", section_area(cat_sec))
@@ -991,7 +991,7 @@ using Unitful
             cat_result = size_beams(
                 [Mu_kipft], [Vu_kip],
                 [ConcreteMemberGeometry(L_m)],
-                ConcreteBeamOptions(grade=NWC_4000, rebar_grade=Rebar_60),
+                ConcreteBeamOptions(material=NWC_4000, rebar_material=Rebar_60),
             )
             cat_sec  = cat_result.sections[1]
             cat_area = ustrip(u"inch^2", section_area(cat_sec))
@@ -1036,7 +1036,7 @@ using Unitful
 
             cat_result = size_beams(
                 Mu_kipfts, Vu_kips, geoms,
-                ConcreteBeamOptions(grade=NWC_4000, rebar_grade=Rebar_60),
+                ConcreteBeamOptions(material=NWC_4000, rebar_material=Rebar_60),
             )
             cat_areas = [ustrip(u"inch^2", section_area(s)) for s in cat_result.sections]
 
@@ -1061,7 +1061,7 @@ using Unitful
             r4 = size_beams(
                 [Mu_kipft], [Vu_kip],
                 [ConcreteMemberGeometry(7.0)],
-                ConcreteBeamOptions(grade=NWC_4000),
+                ConcreteBeamOptions(material=NWC_4000),
             )
             area_4k = ustrip(u"inch^2", section_area(r4.sections[1]))
 
@@ -1069,7 +1069,7 @@ using Unitful
             r6 = size_beams(
                 [Mu_kipft], [Vu_kip],
                 [ConcreteMemberGeometry(7.0)],
-                ConcreteBeamOptions(grade=NWC_6000),
+                ConcreteBeamOptions(material=NWC_6000),
             )
             area_6k = ustrip(u"inch^2", section_area(r6.sections[1]))
 

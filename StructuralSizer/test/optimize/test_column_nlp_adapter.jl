@@ -22,7 +22,7 @@ using Asap: kip, ksi
         # bounding_box(section) and section.ρg.  Verify the NLP adapter
         # returns the same fields.
         opts = ConcreteColumnOptions(
-            grade           = NWC_4000,
+            material        = NWC_4000,
             sizing_strategy = :nlp,
         )
         result = StructuralSizer.size_columns(Pu, Mux, geoms, opts)
@@ -49,12 +49,12 @@ using Asap: kip, ksi
         # Both strategies should produce valid columns for the same demands.
         # Dimensions may differ, but both must be structurally adequate.
         opts_mip = ConcreteColumnOptions(
-            grade           = NWC_4000,
-            sizing_strategy = :catalog,
+            material        = NWC_4000,
+            sizing_strategy = :discrete,
             catalog         = :high_capacity,
         )
         opts_nlp = ConcreteColumnOptions(
-            grade           = NWC_4000,
+            material        = NWC_4000,
             sizing_strategy = :nlp,
         )
 
@@ -79,7 +79,7 @@ using Asap: kip, ksi
     @testset "NLP respects max_depth" begin
         # max_depth should limit the NLP solution dimensions
         opts = ConcreteColumnOptions(
-            grade           = NWC_4000,
+            material        = NWC_4000,
             sizing_strategy = :nlp,
             max_depth       = 24.0u"inch",
         )
@@ -93,11 +93,11 @@ using Asap: kip, ksi
         end
     end
 
-    @testset "sizing_strategy = :catalog still works (regression)" begin
+    @testset "sizing_strategy = :discrete still works (regression)" begin
         # Ensure the default MIP path is unaffected
         opts = ConcreteColumnOptions(
-            grade           = NWC_4000,
-            sizing_strategy = :catalog,
+            material        = NWC_4000,
+            sizing_strategy = :discrete,
         )
         result = StructuralSizer.size_columns(Pu, Mux, geoms, opts)
 
@@ -116,7 +116,7 @@ using Asap: kip, ksi
         geom_high = [ConcreteMemberGeometry(4.0; k=1.0, braced=true)]
 
         opts = ConcreteColumnOptions(
-            grade           = NWC_6000,
+            material        = NWC_6000,
             sizing_strategy = :nlp,
             nlp_ρ_max       = 0.06,
         )

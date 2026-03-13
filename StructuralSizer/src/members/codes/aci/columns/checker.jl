@@ -226,7 +226,7 @@ function _check_square_and_generate_y_diagram(section::RCColumnSection, mat, inc
     b = ustrip(u"inch", section.b)
     h = ustrip(u"inch", section.h)
     
-    # Consider square if dimensions within 5% of each other
+    (b > 0 && h > 0) || throw(ArgumentError("Column dimensions b=$b and h=$h must both be positive"))
     is_square = abs(b - h) / max(b, h) < 0.05
     
     # Generate y-axis diagram for rectangular sections if biaxial is enabled
@@ -425,7 +425,7 @@ function objective_value(
     return uconvert(u"m^3", Ag * length)
 end
 
-"""Minimum-weight objective for a rectangular RC column (kN)."""
+"""Minimum-weight objective for a rectangular RC column (kg)."""
 function objective_value(
     ::MinWeight,
     section::RCColumnSection,
@@ -433,7 +433,7 @@ function objective_value(
     length::Length
 )
     Ag = section.b * section.h
-    return uconvert(u"kN", Ag * length * material.ρ * 1u"gn")
+    return uconvert(u"kg", Ag * length * material.ρ)
 end
 
 """Minimum-cost objective for a rectangular RC column (m³ volume proxy)."""
@@ -457,14 +457,14 @@ function objective_value(
     return uconvert(u"m^3", section.Ag * length)
 end
 
-"""Minimum-weight objective for a circular RC column (kN)."""
+"""Minimum-weight objective for a circular RC column (kg)."""
 function objective_value(
     ::MinWeight,
     section::RCCircularSection,
     material::Concrete,
     length::Length
 )
-    return uconvert(u"kN", section.Ag * length * material.ρ * 1u"gn")
+    return uconvert(u"kg", section.Ag * length * material.ρ)
 end
 
 """Minimum-cost objective for a circular RC column (m³ volume proxy)."""

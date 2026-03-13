@@ -120,7 +120,7 @@ and emission factors.
 |:----------|:--------|:------------|
 | `objective` | `MinWeight()` | Optimization objective |
 | `n_max_sections` | `nothing` | Limit on candidate sections per group |
-| `optimizer` | `:auto` | `:auto`, `:highs`, or `:gurobi` |
+| `solver` | `:auto` | `:auto`, `:highs`, or `:gurobi` |
 | `mip_gap` | `1e-4` | Relative optimality gap |
 
 ### Binary Search Options

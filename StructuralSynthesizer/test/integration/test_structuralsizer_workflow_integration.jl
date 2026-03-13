@@ -330,7 +330,7 @@ using StructuralSizer
             struc;
             member_edge_group = :beams,
             material = A992_Steel,
-            optimizer = :auto,
+            solver = :auto,
             resolution = 200,
             reanalyze = true
         )
@@ -380,7 +380,7 @@ using StructuralSizer
             struc;
             member_edge_group = :columns,
             material = A992_Steel,
-            optimizer = :auto,
+            solver = :auto,
             resolution = 100,
             reanalyze = true
         )

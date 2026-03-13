@@ -58,16 +58,17 @@ For typical buildings:
 - ACI 318-11 §13.7.6
 """
 function requires_pattern_loading(qD, qL)
-    # Extract numeric values (handle Unitful quantities)
-    qD_val = qD isa Real ? qD : ustrip(qD)
-    qL_val = qL isa Real ? qL : ustrip(qL)
-    
-    # Avoid division by zero
-    if qD_val < 1e-10
-        return true  # Conservative: if D ≈ 0, pattern loading required
+    # Compute the dimensionless ratio directly — Unitful cancels units automatically.
+    # For bare Reals (pre-stripped), this also works.
+    ratio = if qD isa Real && qL isa Real
+        abs(qD) < 1e-10 && return true
+        qL / qD
+    else
+        qD_Pa = ustrip(u"Pa", qD)
+        abs(qD_Pa) < 1e-10 && return true
+        ustrip(u"Pa", qL) / qD_Pa
     end
-    
-    return qL_val / qD_val > 0.75
+    return ratio > 0.75
 end
 
 """

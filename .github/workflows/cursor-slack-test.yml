@@ -1,5 +1,5 @@
 # Manual run: launch a Cursor Cloud Agent that posts a test message to Slack.
-# The agent must have SLACK_WEBHOOK_URL in its environment (Cursor Dashboard).
+# Uses the connected Slack integration (no webhook required).
 name: Cursor Slack test
 
 on:
@@ -17,12 +17,10 @@ jobs:
             echo "::error::CURSOR_API_KEY secret is not set."
             exit 1
           fi
-          PROMPT='Your only task: send one short message to Slack.
+          PROMPT='Your only task: send one short message to Slack using the connected Slack integration.
 
-          1. The webhook URL is in the environment variable SLACK_WEBHOOK_URL in this environment.
-          2. Use curl to POST a JSON payload to that URL with a "text" field. Example:
-             curl -s -X POST -H "Content-Type: application/json" -d '\''{"text":"Test from Cursor agent (GitHub Actions)"}'\'' "$SLACK_WEBHOOK_URL"
-          3. Run the curl command. Confirm in your response that you did it, or report if SLACK_WEBHOOK_URL is not set.'
+          - Send a DM to Tasha (Slack user ID U0AKVLWEJ7J) with the exact text: "Test from Cursor cloud agent (GitHub Actions)".
+          - Confirm in your response that you sent it and include the Slack message link.'
           REPO_URL="https://github.com/${{ github.repository }}"
           BRANCH="cursor/slack-test"
           RESPONSE=$(curl -s -X POST https://api.cursor.com/v0/agents \

@@ -554,7 +554,7 @@ function _run_final_design(method, struc, slab, columns, moment_results, seconda
     end
 
     # ─── Update Asap Model ───
-    update_asap_column_sections!(struc, columns, column_opts.grade)
+    update_asap_column_sections!(struc, columns, column_opts.material)
 
     if verbose
         @debug "═══════════════════════════════════════════════════════════════════"
@@ -845,13 +845,13 @@ function size_flat_plate!(
         _col_checker = ACIColumnChecker(;
             include_slenderness = column_opts.include_slenderness,
             include_biaxial = column_opts.include_biaxial,
-            fy_ksi = ustrip(ksi, column_opts.rebar_grade.Fy),
-            Es_ksi = ustrip(ksi, column_opts.rebar_grade.E),
+            fy_ksi = ustrip(ksi, column_opts.rebar_material.Fy),
+            Es_ksi = ustrip(ksi, column_opts.rebar_material.E),
             max_depth = column_opts.max_depth,
         )
         
         _col_cache = create_cache(_col_checker, length(_col_cat))
-        precompute_capacities!(_col_checker, _col_cache, _col_cat, column_opts.grade, column_opts.objective)
+        precompute_capacities!(_col_checker, _col_cache, _col_cat, column_opts.material, column_opts.objective)
     end
     
     # =========================================================================
@@ -938,6 +938,13 @@ function size_flat_plate!(
         
         for iter_a in 1:max_iterations
             total_iters += 1
+
+            # Guard against runaway thickness (h > ln/10 is impractical)
+            h_max = ln_max / 10
+            if h > h_max
+                @warn "Slab thickness h=$h exceeds practical limit (ln/10 = $h_max). Aborting."
+                break
+            end
             
             if verbose
                 @debug "═══════════════════════════════════════════════════════════════════"
@@ -1080,7 +1087,8 @@ function size_flat_plate!(
                 _As_neg = max(_As_neg, minimum_reinforcement(_l2_defl / 2, h, fy))
                 0.5 * ustrip(u"inch^2", _As_neg) /
                     (ustrip(u"inch", _l2_defl / 2) * ustrip(u"inch", d))
-            catch
+            catch e
+                @debug "ρ' estimation failed, using 0.0" exception=(e, catch_backtrace())
                 0.0
             end
             
@@ -1105,7 +1113,8 @@ function size_flat_plate!(
                     )
                 end
                 deflection_result.ok
-            catch
+            catch e
+                @debug "Deflection check (primary) failed" exception=(e, catch_backtrace())
                 false
             end
             
@@ -1144,7 +1153,8 @@ function size_flat_plate!(
                         deflection_Ie_method=_Ie_method,
                     )
                     _sec_defl.ok
-                catch
+                catch e
+                    @debug "Deflection check (secondary) failed" exception=(e, catch_backtrace())
                     false
                 end
                 if !_sec_defl_ok
@@ -1319,12 +1329,15 @@ function size_flat_plate!(
                     )
                 end
             elseif Threads.nthreads() > 1
+                # Per-thread caches to avoid Dict race condition
+                nt = Threads.nthreads()
+                thread_caches = [Dict{Any,Any}() for _ in 1:nt]
                 Threads.@threads for i in 1:n_cols_ps
                     punching_local[i] = check_punching_for_column(
                         columns[i], moment_results.column_shears[i],
                         moment_results.unbalanced_moments[i], d, h, fc;
                         verbose=false, col_idx=i, λ=λ, φ_shear=φ_shear,
-                        _geom_cache=_punch_geom_cache
+                        _geom_cache=thread_caches[Threads.threadid()]
                     )
                 end
             else

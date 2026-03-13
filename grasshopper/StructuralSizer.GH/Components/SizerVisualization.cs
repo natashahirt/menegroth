@@ -1,43 +1,71 @@
 using System;
 using System.Collections.Generic;
+using System.Drawing;
 using System.Linq;
-using System.Windows.Forms;
 using Grasshopper.Kernel;
+using Grasshopper.Kernel.Parameters;
 using Grasshopper.Kernel.Types;
 using Newtonsoft.Json.Linq;
 using Rhino.Geometry;
+using StructuralSizer.GH.Types;
 
 namespace StructuralSizer.GH.Components
 {
     /// <summary>
-    /// Visualizes structural design geometry with deflections.
-    /// Supports two modes: "sized" (designed sections) and "deflected" (analysis model with displacements).
+    /// Visualizes structural design geometry with optional deflection and coloring.
+    /// Uses input-level dropdown parameters for Mode and Color By selection.
     /// </summary>
     public class SizerVisualization : GH_Component
     {
-        // Menu state
-        private string _mode = "deflected";
-        private string _displacementMode = "global";
-        
+        private const int MODE_SIZED = 0;
+        private const int MODE_DEFLECTED_GLOBAL = 1;
+        private const int MODE_DEFLECTED_LOCAL = 2;
+
+        private const int COLOR_NONE = 0;
+        private const int COLOR_UTILIZATION = 1;
+        private const int COLOR_DEFLECTION = 2;
+
         public SizerVisualization()
             : base("Sizer Visualization",
                    "SizerViz",
-                   "Visualize structural design with geometry and deflections",
+                   "Visualize structural design with geometry, deflections, and color mapping",
                    "Menegroth", "Visualization")
         { }
 
         public override Guid ComponentGuid =>
-            new Guid("A1B2C3D4-AAAA-BBBB-CCCC-DDDDEEEE0003");
+            new Guid("8C252AFB-41B9-4F5C-BB0C-905CD6353BA2");
 
         protected override void RegisterInputParams(GH_InputParamManager pManager)
         {
-            pManager.AddTextParameter("JSON", "J",
-                "Raw JSON response from SizerRun", GH_ParamAccess.item);
-            // Mode and Displacement Mode are now menu-only (no text inputs)
-            pManager.AddNumberParameter("Scale Factor", "S",
-                "Deflection scale factor (only for deflected mode, 0 = auto)", GH_ParamAccess.item, 0.0);
+            pManager.AddGenericParameter("Result", "R",
+                "SizerResult from the SizerRun component", GH_ParamAccess.item);
+
+            var modeParam = new Param_Integer();
+            modeParam.AddNamedValue("Sized", MODE_SIZED);
+            modeParam.AddNamedValue("Deflected (Global)", MODE_DEFLECTED_GLOBAL);
+            modeParam.AddNamedValue("Deflected (Local)", MODE_DEFLECTED_LOCAL);
+            pManager.AddParameter(modeParam, "Mode", "M",
+                "Visualization mode: Sized shows as-designed geometry, " +
+                "Deflected Global/Local shows displaced shapes",
+                GH_ParamAccess.item);
+            pManager[1].Optional = true;
+
+            pManager.AddNumberParameter("Scale", "S",
+                "Deflection scale multiplier (0 = no deflection, 1 = auto-suggested, >1 = exaggerated)",
+                GH_ParamAccess.item, 1.0);
+
             pManager.AddBooleanParameter("Show Original", "O",
-                "Show original geometry as reference (only for deflected mode)", GH_ParamAccess.item, true);
+                "Show undeflected geometry as reference", GH_ParamAccess.item, true);
+
+            var colorParam = new Param_Integer();
+            colorParam.AddNamedValue("None", COLOR_NONE);
+            colorParam.AddNamedValue("Utilization", COLOR_UTILIZATION);
+            colorParam.AddNamedValue("Deflection", COLOR_DEFLECTION);
+            pManager.AddParameter(colorParam, "Color By", "C",
+                "Color mapping: None, Utilization (green→red by demand/capacity), " +
+                "Deflection (blue→red by displacement magnitude)",
+                GH_ParamAccess.item);
+            pManager[4].Optional = true;
         }
 
         protected override void RegisterOutputParams(GH_OutputParamManager pManager)
@@ -47,49 +75,34 @@ namespace StructuralSizer.GH.Components
             pManager.AddGenericParameter("Frame Geometry", "FG",
                 "Frame element 3D section geometry (Brep)", GH_ParamAccess.list);
             pManager.AddGenericParameter("Slab Geometry", "SG",
-                "Slab geometry (Brep boxes for 'sized', Mesh for 'deflected')", GH_ParamAccess.list);
+                "Slab geometry (Brep for Sized, Mesh for Deflected)", GH_ParamAccess.list);
             pManager.AddCurveParameter("Original Curves", "OC",
-                "Original frame curves (only if Show Original=true)", GH_ParamAccess.list);
+                "Original frame curves (only if Show Original = true and Mode is Deflected)",
+                GH_ParamAccess.list);
             pManager.AddGenericParameter("Original Slabs", "OS",
-                "Original slab geometry (only if Show Original=true)", GH_ParamAccess.list);
+                "Original slab geometry (only if Show Original = true and Mode is Deflected)",
+                GH_ParamAccess.list);
+            pManager.AddColourParameter("Frame Colors", "FClr",
+                "Colors for frame elements (parallel to FC/FG). Wire to Custom Preview.",
+                GH_ParamAccess.list);
+            pManager.AddColourParameter("Slab Colors", "SClr",
+                "Colors for slabs (parallel to SG). Wire to Custom Preview.",
+                GH_ParamAccess.list);
         }
 
         protected override void SolveInstance(IGH_DataAccess DA)
         {
-            string json = "";
-            if (!DA.GetData(0, ref json) || string.IsNullOrWhiteSpace(json)) return;
+            GH_SizerResult goo = null;
+            if (!DA.GetData(0, ref goo) || goo?.Value == null) return;
 
-            // Use menu values instead of reading from inputs
-            string mode = _mode;
-            string dispMode = _displacementMode;
-
-            double scaleFactor = 0.0;
-            DA.GetData(1, ref scaleFactor);
-
-            bool showOriginal = true;
-            DA.GetData(2, ref showOriginal);
-
-            JObject root;
-            try
+            var result = goo.Value;
+            if (result.IsError)
             {
-                root = JObject.Parse(json);
-            }
-            catch (Exception ex)
-            {
-                AddRuntimeMessage(GH_RuntimeMessageLevel.Error,
-                    $"Failed to parse JSON: {ex.Message}");
+                AddRuntimeMessage(GH_RuntimeMessageLevel.Error, result.ErrorMessage);
                 return;
             }
 
-            string status = root["status"]?.ToString() ?? "unknown";
-            if (status == "error")
-            {
-                string msg = root["message"]?.ToString() ?? "Unknown error";
-                AddRuntimeMessage(GH_RuntimeMessageLevel.Error, msg);
-                return;
-            }
-
-            var viz = root["visualization"];
+            var viz = result.Visualization;
             if (viz == null)
             {
                 AddRuntimeMessage(GH_RuntimeMessageLevel.Warning,
@@ -97,306 +110,144 @@ namespace StructuralSizer.GH.Components
                 return;
             }
 
-            // Extract nodes for displacement mapping
+            // Read inputs with defaults
+            int modeInt = MODE_DEFLECTED_GLOBAL;
+            DA.GetData(1, ref modeInt);
+
+            double scaleMult = 1.0;
+            DA.GetData(2, ref scaleMult);
+
+            bool showOriginal = true;
+            DA.GetData(3, ref showOriginal);
+
+            int colorByInt = COLOR_UTILIZATION;
+            DA.GetData(4, ref colorByInt);
+
+            bool isDeflected = modeInt != MODE_SIZED;
+            bool isLocal = modeInt == MODE_DEFLECTED_LOCAL;
+
+            // Extract nodes
             var nodes = new Dictionary<int, (Point3d pos, Vector3d disp)>();
             var nodesArray = viz["nodes"] as JArray ?? new JArray();
             foreach (var n in nodesArray)
             {
                 int nodeId = n["node_id"]?.ToObject<int>() ?? 0;
-                var posArray = n["position_ft"]?.ToObject<double[]>() ?? new double[3];
-                var dispArray = n["displacement_ft"]?.ToObject<double[]>() ?? new double[3];
+                var posArr = n["position_ft"]?.ToObject<double[]>() ?? new double[3];
+                var dispArr = n["displacement_ft"]?.ToObject<double[]>() ?? new double[3];
                 nodes[nodeId] = (
-                    new Point3d(posArray[0], posArray[1], posArray[2]),
-                    new Vector3d(dispArray[0], dispArray[1], dispArray[2])
+                    new Point3d(posArr[0], posArr[1], posArr[2]),
+                    new Vector3d(dispArr[0], dispArr[1], dispArr[2])
                 );
             }
 
-            // Extract frame elements with cubic interpolation
+            double finalScale = scaleMult * result.SuggestedScaleFactor;
+            double maxDisp = result.MaxDisplacementFt;
+
+            // Frame elements
             var frameCurves = new List<Curve>();
             var frameGeometry = new List<IGH_GeometricGoo>();
+            var frameColors = new List<Color>();
             var originalCurves = new List<Curve>();
-            var frameElementsArray = viz["frame_elements"] as JArray ?? new JArray();
-            
-            double finalScale = scaleFactor > 0 ? scaleFactor : (viz["suggested_scale_factor"]?.ToObject<double>() ?? 1.0);
+            var frameElements = viz["frame_elements"] as JArray ?? new JArray();
 
-            foreach (var elem in frameElementsArray)
+            foreach (var elem in frameElements)
             {
-                var originalPoints = elem["original_points"]?.ToObject<double[][]>() ?? new double[0][];
-                var displacementVectors = elem["displacement_vectors"]?.ToObject<double[][]>() ?? new double[0][];
-                
-                if (originalPoints.Length == 0 || displacementVectors.Length == 0)
+                var origPts = elem["original_points"]?.ToObject<double[][]>() ?? new double[0][];
+                var dispVecs = elem["displacement_vectors"]?.ToObject<double[][]>() ?? new double[0][];
+
+                Curve elementCurve;
+                List<Point3d> origCurvePoints = null;
+
+                if (origPts.Length == 0 || dispVecs.Length == 0)
                 {
-                    // Fallback to node-to-node if no interpolation data
-                    int nodeStart = elem["node_start"]?.ToObject<int>() ?? 0;
-                    int nodeEnd = elem["node_end"]?.ToObject<int>() ?? 0;
-                    if (nodes.ContainsKey(nodeStart) && nodes.ContainsKey(nodeEnd))
+                    int ns = elem["node_start"]?.ToObject<int>() ?? 0;
+                    int ne = elem["node_end"]?.ToObject<int>() ?? 0;
+                    if (!nodes.ContainsKey(ns) || !nodes.ContainsKey(ne)) continue;
+
+                    var p1 = nodes[ns].pos;
+                    var p2 = nodes[ne].pos;
+
+                    if (showOriginal && isDeflected && finalScale > 0)
+                        originalCurves.Add(new Line(p1, p2).ToNurbsCurve());
+
+                    if (isDeflected && finalScale > 0)
                     {
-                        var p1 = nodes[nodeStart].pos;
-                        var p2 = nodes[nodeEnd].pos;
-                        
-                        // Store original positions
-                        if (showOriginal && mode == "deflected")
-                        {
-                            originalCurves.Add(new Line(p1, p2).ToNurbsCurve());
-                        }
-                        
-                        // Apply deflections if in deflected mode
-                        if (mode == "deflected")
-                        {
-                            p1 += nodes[nodeStart].disp * finalScale;
-                            p2 += nodes[nodeEnd].disp * finalScale;
-                        }
-                        
-                        var lineCurve = new Line(p1, p2).ToNurbsCurve();
-                        frameCurves.Add(lineCurve);
-                        
-                        // Create 3D section geometry if section_polygon is available
-                        var sectionPolygon = elem["section_polygon"]?.ToObject<double[][]>() ?? new double[0][];
-                        
-                        // If section_polygon is empty, create default based on section dimensions
-                        if (sectionPolygon.Length < 3)
-                        {
-                            double depth = elem["section_depth_ft"]?.ToObject<double>() ?? 0.0;
-                            double width = elem["section_width_ft"]?.ToObject<double>() ?? 0.0;
-                            
-                            if (depth > 0 && width > 0)
-                            {
-                                // Create default rectangular section polygon
-                                sectionPolygon = new double[][]
-                                {
-                                    new double[] { -width / 2, -depth / 2 },
-                                    new double[] { width / 2, -depth / 2 },
-                                    new double[] { width / 2, depth / 2 },
-                                    new double[] { -width / 2, depth / 2 }
-                                };
-                            }
-                        }
-                        
-                        if (sectionPolygon.Length >= 3)
-                        {
-                            var brep = CreateSectionGeometry(lineCurve, sectionPolygon);
-                            if (brep != null)
-                            {
-                                frameGeometry.Add(new GH_Brep(brep));
-                            }
-                        }
+                        p1 += nodes[ns].disp * finalScale;
+                        p2 += nodes[ne].disp * finalScale;
                     }
-                    continue;
+
+                    elementCurve = new Line(p1, p2).ToNurbsCurve();
                 }
-
-                // Build cubic-interpolated curve
-                var curvePoints = new List<Point3d>();
-                var originalCurvePoints = new List<Point3d>();
-
-                for (int i = 0; i < originalPoints.Length; i++)
+                else
                 {
-                    var origPt = new Point3d(originalPoints[i][0], originalPoints[i][1], originalPoints[i][2]);
-                    originalCurvePoints.Add(origPt);
+                    var pts = new List<Point3d>();
+                    origCurvePoints = new List<Point3d>();
 
-                    if (mode == "deflected")
+                    for (int i = 0; i < origPts.Length; i++)
                     {
-                        var dispVec = new Vector3d(
-                            displacementVectors[i][0],
-                            displacementVectors[i][1],
-                            displacementVectors[i][2]);
+                        var op = new Point3d(origPts[i][0], origPts[i][1], origPts[i][2]);
+                        origCurvePoints.Add(op);
 
-                        if (dispMode == "local")
+                        if (isDeflected && finalScale > 0)
                         {
-                            // Local mode: compute chord-relative displacement
-                            // This shows the element's own deflection without rigid body motion
-                            var uStart = new Vector3d(
-                                displacementVectors[0][0],
-                                displacementVectors[0][1],
-                                displacementVectors[0][2]);
-                            var uEnd = new Vector3d(
-                                displacementVectors[displacementVectors.Length - 1][0],
-                                displacementVectors[displacementVectors.Length - 1][1],
-                                displacementVectors[displacementVectors.Length - 1][2]);
-                            
-                            double t = originalPoints.Length > 1 ? (double)i / (originalPoints.Length - 1) : 0.0;
-                            var uChord = uStart + t * (uEnd - uStart);
-                            var uLocal = dispVec - uChord;
-                            
-                            curvePoints.Add(origPt + uLocal * finalScale);
+                            double dvx = i < dispVecs.Length ? dispVecs[i][0] : 0;
+                            double dvy = i < dispVecs.Length ? dispVecs[i][1] : 0;
+                            double dvz = i < dispVecs.Length ? dispVecs[i][2] : 0;
+                            var dv = new Vector3d(dvx, dvy, dvz);
+
+                            if (isLocal && dispVecs.Length >= 2)
+                            {
+                                var uStart = new Vector3d(dispVecs[0][0], dispVecs[0][1], dispVecs[0][2]);
+                                int last = dispVecs.Length - 1;
+                                var uEnd = new Vector3d(dispVecs[last][0], dispVecs[last][1], dispVecs[last][2]);
+                                double t = origPts.Length > 1 ? (double)i / (origPts.Length - 1) : 0.0;
+                                dv -= uStart + t * (uEnd - uStart);
+                            }
+
+                            pts.Add(op + dv * finalScale);
                         }
                         else
                         {
-                            // Global mode: full displacement
-                            curvePoints.Add(origPt + dispVec * finalScale);
+                            pts.Add(op);
                         }
                     }
-                    else
-                    {
-                        curvePoints.Add(origPt);
-                    }
+
+                    elementCurve = pts.Count > 1 ? new PolylineCurve(pts) : null;
+
+                    if (showOriginal && isDeflected && finalScale > 0 && origCurvePoints.Count > 1)
+                        originalCurves.Add(new PolylineCurve(origCurvePoints));
                 }
 
-                if (curvePoints.Count > 1)
-                {
-                    var elementCurve = new PolylineCurve(curvePoints);
-                    frameCurves.Add(elementCurve);
-                    
-                    // Create 3D section geometry if section_polygon is available
-                    var sectionPolygon = elem["section_polygon"]?.ToObject<double[][]>() ?? new double[0][];
-                    
-                    // If section_polygon is empty, create default based on section dimensions
-                    if (sectionPolygon.Length < 3)
-                    {
-                        double depth = elem["section_depth_ft"]?.ToObject<double>() ?? 0.0;
-                        double width = elem["section_width_ft"]?.ToObject<double>() ?? 0.0;
-                        
-                        if (depth > 0 && width > 0)
-                        {
-                            // Create default rectangular section polygon
-                            sectionPolygon = new double[][]
-                            {
-                                new double[] { -width / 2, -depth / 2 },
-                                new double[] { width / 2, -depth / 2 },
-                                new double[] { width / 2, depth / 2 },
-                                new double[] { -width / 2, depth / 2 }
-                            };
-                        }
-                        else
-                        {
-                            // If no dimensions, skip geometry creation
-                            sectionPolygon = new double[0][];
-                        }
-                    }
-                    
-                    if (sectionPolygon.Length >= 3)
-                    {
-                        var brep = CreateSectionGeometry(elementCurve, sectionPolygon);
-                        if (brep != null)
-                        {
-                            frameGeometry.Add(new GH_Brep(brep));
-                        }
-                    }
-                }
+                if (elementCurve == null) continue;
+                frameCurves.Add(elementCurve);
 
-                if (showOriginal && mode == "deflected" && originalCurvePoints.Count > 1)
+                var brep = SweepSection(elementCurve, elem);
+                if (brep != null)
+                    frameGeometry.Add(new GH_Brep(brep));
+
+                if (colorByInt == COLOR_UTILIZATION)
                 {
-                    originalCurves.Add(new PolylineCurve(originalCurvePoints));
+                    double ratio = elem["utilization_ratio"]?.ToObject<double>() ?? 0;
+                    bool ok = elem["ok"]?.ToObject<bool>() ?? true;
+                    frameColors.Add(UtilizationColor(ratio, ok));
+                }
+                else if (colorByInt == COLOR_DEFLECTION)
+                {
+                    double disp = ComputeElementDisplacement(elem, nodes, dispVecs);
+                    frameColors.Add(DeflectionColor(disp, maxDisp));
                 }
             }
 
-            // Extract slabs
+            // Slab geometry + colors
             var slabGeometry = new List<IGH_GeometricGoo>();
+            var slabColors = new List<Color>();
             var originalSlabs = new List<IGH_GeometricGoo>();
 
-            if (mode == "sized")
-            {
-                var sizedSlabs = viz["sized_slabs"] as JArray ?? new JArray();
-                foreach (var slab in sizedSlabs)
-                {
-                    var boundary = slab["boundary_vertices"]?.ToObject<double[][]>() ?? new double[0][];
-                    double thickness = slab["thickness_ft"]?.ToObject<double>() ?? 0.0;
-                    double zTop = slab["z_top_ft"]?.ToObject<double>() ?? 0.0;
-
-                    if (boundary.Length < 3) continue;
-
-                    var boundaryPts = boundary.Select(v => new Point3d(v[0], v[1], zTop)).ToList();
-                    boundaryPts.Add(boundaryPts[0]);
-
-                    var bottomPts = boundaryPts.Select(p => new Point3d(p.X, p.Y, p.Z - thickness)).ToList();
-                    
-                    var brep = Brep.CreateFromLoft(
-                        new[] { new PolylineCurve(boundaryPts), new PolylineCurve(bottomPts) },
-                        Point3d.Unset, Point3d.Unset, LoftType.Normal, false)[0];
-                    
-                    if (brep != null)
-                    {
-                        slabGeometry.Add(new GH_Brep(brep));
-                    }
-                }
-            }
-            else // deflected mode
-            {
-                var deflectedMeshes = viz["deflected_slab_meshes"] as JArray ?? new JArray();
-
-                foreach (var mesh in deflectedMeshes)
-                {
-                    var vertices = mesh["vertices"]?.ToObject<double[][]>() ?? new double[0][];
-                    var vertexDisplacements = mesh["vertex_displacements"]?.ToObject<double[][]>() ?? new double[0][];
-                    var faces = mesh["faces"]?.ToObject<int[][]>() ?? new int[0][];
-
-                    if (vertices.Length == 0) continue;
-
-                    var rhinoMesh = new Mesh();
-                    var originalMesh = new Mesh();
-
-                    // Ensure vertex_displacements array matches vertices array
-                    if (vertexDisplacements.Length != vertices.Length)
-                    {
-                        // If mismatch, create zero displacements for missing vertices
-                        var fixedDisplacements = new double[vertices.Length][];
-                        for (int i = 0; i < vertices.Length; i++)
-                        {
-                            if (i < vertexDisplacements.Length)
-                            {
-                                fixedDisplacements[i] = vertexDisplacements[i];
-                            }
-                            else
-                            {
-                                fixedDisplacements[i] = new double[] { 0.0, 0.0, 0.0 };
-                            }
-                        }
-                        vertexDisplacements = fixedDisplacements;
-                    }
-
-                    // Add vertices with deflections applied
-                    for (int i = 0; i < vertices.Length; i++)
-                    {
-                        var origPt = new Point3d(vertices[i][0], vertices[i][1], vertices[i][2]);
-                        originalMesh.Vertices.Add(origPt);
-
-                        var dispVec = new Vector3d(
-                            vertexDisplacements[i][0],
-                            vertexDisplacements[i][1],
-                            vertexDisplacements[i][2]);
-
-                        // Apply displacement scaled by finalScale
-                        var deflectedPt = origPt + dispVec * finalScale;
-                        rhinoMesh.Vertices.Add(deflectedPt);
-                    }
-
-                    // Add faces (triangles from FEA mesh)
-                    foreach (var face in faces)
-                    {
-                        if (face.Length >= 3)
-                        {
-                            // Convert from 1-based to 0-based indices
-                            int i0 = face[0] - 1;
-                            int i1 = face[1] - 1;
-                            int i2 = face[2] - 1;
-                            
-                            // Validate indices
-                            if (i0 >= 0 && i0 < rhinoMesh.Vertices.Count &&
-                                i1 >= 0 && i1 < rhinoMesh.Vertices.Count &&
-                                i2 >= 0 && i2 < rhinoMesh.Vertices.Count)
-                            {
-                                rhinoMesh.Faces.AddFace(i0, i1, i2);
-                                originalMesh.Faces.AddFace(i0, i1, i2);
-                            }
-                        }
-                    }
-
-                    // Rebuild mesh normals for proper rendering
-                    if (rhinoMesh.Vertices.Count > 0 && rhinoMesh.Faces.Count > 0)
-                    {
-                        rhinoMesh.Normals.ComputeNormals();
-                        rhinoMesh.Compact(); // Remove unused vertices
-                        
-                        if (showOriginal && originalMesh.Vertices.Count > 0 && originalMesh.Faces.Count > 0)
-                        {
-                            originalMesh.Normals.ComputeNormals();
-                            originalMesh.Compact();
-                            originalSlabs.Add(new GH_Mesh(originalMesh));
-                        }
-                        
-                        slabGeometry.Add(new GH_Mesh(rhinoMesh));
-                    }
-                }
-            }
+            if (!isDeflected || finalScale <= 0)
+                BuildSizedSlabs(viz, slabGeometry, slabColors, colorByInt, maxDisp);
+            else
+                BuildDeflectedSlabs(viz, finalScale, showOriginal, slabGeometry, originalSlabs,
+                    slabColors, colorByInt, maxDisp);
 
             // Set outputs
             DA.SetDataList(0, frameCurves);
@@ -404,177 +255,307 @@ namespace StructuralSizer.GH.Components
             DA.SetDataList(2, slabGeometry);
             DA.SetDataList(3, originalCurves);
             DA.SetDataList(4, originalSlabs);
-        }
-        
-        // ─── Right-click menu ────────────────────────────────────────────────
-        
-        protected override void AppendAdditionalComponentMenuItems(ToolStripDropDown menu)
-        {
-            base.AppendAdditionalComponentMenuItems(menu);
-            Menu_AppendSeparator(menu);
-            
-            // Visualization Mode menu
-            var modeMenu = Menu_AppendItem(menu, "Visualization Mode");
-            var sizedItem = new ToolStripMenuItem("Sized")
-            {
-                Checked = _mode == "sized",
-                Tag = "sized"
-            };
-            sizedItem.Click += (s, e) =>
-            {
-                _mode = (string)((ToolStripMenuItem)s).Tag;
-                UpdateMessage();
-                ExpireSolution(true);
-            };
-            modeMenu.DropDownItems.Add(sizedItem);
-            
-            var deflectedItem = new ToolStripMenuItem("Deflected")
-            {
-                Checked = _mode == "deflected",
-                Tag = "deflected"
-            };
-            deflectedItem.Click += (s, e) =>
-            {
-                _mode = (string)((ToolStripMenuItem)s).Tag;
-                UpdateMessage();
-                ExpireSolution(true);
-            };
-            modeMenu.DropDownItems.Add(deflectedItem);
-            
-            Menu_AppendSeparator(menu);
-            
-            // Displacement Mode menu (only relevant for deflected mode)
-            var dispMenu = Menu_AppendItem(menu, "Displacement Mode");
-            var globalItem = new ToolStripMenuItem("Global")
-            {
-                Checked = _displacementMode == "global",
-                Tag = "global"
-            };
-            globalItem.Click += (s, e) =>
-            {
-                _displacementMode = (string)((ToolStripMenuItem)s).Tag;
-                UpdateMessage();
-                ExpireSolution(true);
-            };
-            dispMenu.DropDownItems.Add(globalItem);
-            
-            var localItem = new ToolStripMenuItem("Local")
-            {
-                Checked = _displacementMode == "local",
-                Tag = "local"
-            };
-            localItem.Click += (s, e) =>
-            {
-                _displacementMode = (string)((ToolStripMenuItem)s).Tag;
-                UpdateMessage();
-                ExpireSolution(true);
-            };
-            dispMenu.DropDownItems.Add(localItem);
-        }
-        
-        // ─── Persistence ──────────────────────────────────────────────────────
-        
-        public override bool Write(GH_IO.Serialization.GH_IWriter writer)
-        {
-            writer.SetString("Mode", _mode);
-            writer.SetString("DisplacementMode", _displacementMode);
-            return base.Write(writer);
+            DA.SetDataList(5, frameColors);
+            DA.SetDataList(6, slabColors);
+
+            // Update message bar
+            string modeName = modeInt == MODE_SIZED ? "Sized"
+                : modeInt == MODE_DEFLECTED_LOCAL ? "Deflected (Local)" : "Deflected (Global)";
+            string colorName = colorByInt == COLOR_UTILIZATION ? "Utilization"
+                : colorByInt == COLOR_DEFLECTION ? "Deflection" : "";
+            Message = colorName.Length > 0 ? $"{modeName} | {colorName}" : modeName;
         }
 
-        public override bool Read(GH_IO.Serialization.GH_IReader reader)
+        // ─── Displacement magnitude for a frame element ──────────────────
+
+        private static double ComputeElementDisplacement(JToken elem,
+            Dictionary<int, (Point3d pos, Vector3d disp)> nodes,
+            double[][] dispVecs)
         {
-            if (reader.ItemExists("Mode"))
-                _mode = reader.GetString("Mode");
-            if (reader.ItemExists("DisplacementMode"))
-                _displacementMode = reader.GetString("DisplacementMode");
-            UpdateMessage();
-            return base.Read(reader);
+            if (dispVecs != null && dispVecs.Length > 0)
+            {
+                double maxMag = 0;
+                foreach (var dv in dispVecs)
+                {
+                    if (dv.Length >= 3)
+                    {
+                        double mag = Math.Sqrt(dv[0] * dv[0] + dv[1] * dv[1] + dv[2] * dv[2]);
+                        if (mag > maxMag) maxMag = mag;
+                    }
+                }
+                return maxMag;
+            }
+
+            int ns = elem["node_start"]?.ToObject<int>() ?? 0;
+            int ne = elem["node_end"]?.ToObject<int>() ?? 0;
+            double d1 = nodes.ContainsKey(ns) ? nodes[ns].disp.Length : 0;
+            double d2 = nodes.ContainsKey(ne) ? nodes[ne].disp.Length : 0;
+            return Math.Max(d1, d2);
         }
-        
-        public override void AddedToDocument(GH_Document document)
+
+        // ─── Section sweep ──────────────────────────────────────────────
+
+        private static Brep SweepSection(Curve elementCurve, JToken elem)
         {
-            base.AddedToDocument(document);
-            UpdateMessage();
-        }
-        
-        private void UpdateMessage()
-        {
-            Message = $"Mode: {_mode}, Disp: {_displacementMode}";
-        }
-        
-        /// <summary>
-        /// Create 3D Brep geometry from section polygon and element curve.
-        /// Section polygon is in local y-z coordinates (centroid at origin).
-        /// </summary>
-        private Brep CreateSectionGeometry(Curve elementCurve, double[][] sectionPolygon)
-        {
-            if (sectionPolygon.Length < 3) return null;
-            
+            var poly = elem["section_polygon"]?.ToObject<double[][]>() ?? new double[0][];
+
+            if (poly.Length < 3)
+            {
+                double depth = elem["section_depth_ft"]?.ToObject<double>() ?? 0;
+                double width = elem["section_width_ft"]?.ToObject<double>() ?? 0;
+                if (depth <= 0 || width <= 0) return null;
+                poly = new[]
+                {
+                    new[] { -width / 2, -depth / 2 },
+                    new[] {  width / 2, -depth / 2 },
+                    new[] {  width / 2,  depth / 2 },
+                    new[] { -width / 2,  depth / 2 },
+                };
+            }
+
             try
             {
-                // Get start point and tangent at start
                 elementCurve.Domain = new Interval(0.0, 1.0);
-                var startPt = elementCurve.PointAtStart;
-                var startTangent = elementCurve.TangentAtStart;
-                startTangent.Unitize();
-                
-                // Compute local coordinate system
-                // x = element direction (along length)
-                // y = width direction (from section polygon)
-                // z = depth direction (from section polygon)
-                
-                // Choose an "up" vector that isn't parallel to element direction
-                Vector3d up = Math.Abs(startTangent.Z) < 0.9 
-                    ? new Vector3d(0, 0, 1) 
+                var tangent = elementCurve.TangentAtStart;
+                tangent.Unitize();
+
+                Vector3d up = Math.Abs(tangent.Z) < 0.9
+                    ? new Vector3d(0, 0, 1)
                     : new Vector3d(1, 0, 0);
-                
-                // Local Y = up × elementDir (perpendicular to element, roughly horizontal)
-                var localY = Vector3d.CrossProduct(up, startTangent);
-                localY.Unitize();
-                
-                // Local Z = elementDir × localY (perpendicular to both)
-                var localZ = Vector3d.CrossProduct(startTangent, localY);
-                localZ.Unitize();
-                
-                // Create section polygon in 3D space at start point
-                var sectionPts = new List<Point3d>();
-                foreach (var pt2d in sectionPolygon)
-                {
-                    // pt2d is [y, z] in local coordinates
-                    double y = pt2d[0];  // width direction
-                    double z = pt2d[1];  // depth direction
-                    
-                    // Transform to global coordinates
-                    var pt3d = startPt + localY * y + localZ * z;
-                    sectionPts.Add(pt3d);
-                }
-                
-                // Close the polygon if needed
-                if (sectionPts.Count > 0 && sectionPts[0].DistanceTo(sectionPts[sectionPts.Count - 1]) > 1e-6)
-                {
-                    sectionPts.Add(sectionPts[0]);
-                }
-                
-                // Create closed section curve (use Curve so we can assign NurbsCurve when closing)
-                Curve sectionCurve = new PolylineCurve(sectionPts);
-                if (!sectionCurve.IsClosed)
-                {
-                    sectionCurve = sectionCurve.ToNurbsCurve();
-                }
-                
-                // Sweep section along element curve
+                var localY = Vector3d.CrossProduct(up, tangent); localY.Unitize();
+                var localZ = Vector3d.CrossProduct(tangent, localY); localZ.Unitize();
+
+                var pts = new List<Point3d>();
+                var origin = elementCurve.PointAtStart;
+                foreach (var v in poly)
+                    pts.Add(origin + localY * v[0] + localZ * v[1]);
+                if (pts.Count > 0 && pts[0].DistanceTo(pts[pts.Count - 1]) > 1e-6)
+                    pts.Add(pts[0]);
+
+                var sectionCurve = new PolylineCurve(pts);
                 var sweep = Brep.CreateFromSweep(elementCurve, sectionCurve, true, 0.01);
-                if (sweep != null && sweep.Length > 0)
-                {
-                    return sweep[0];
-                }
+                return sweep?.Length > 0 ? sweep[0] : null;
             }
             catch
             {
-                // Silently fail - return null if geometry creation fails
+                return null;
             }
-            
-            return null;
+        }
+
+        // ─── Utilization color mapping ────────────────────────────────
+
+        /// <summary>
+        /// Green → yellow → red gradient by utilization ratio (0 → 1).
+        /// Elements above 1.0 or failing are magenta.
+        /// </summary>
+        private static Color UtilizationColor(double ratio, bool ok)
+        {
+            if (!ok || ratio > 1.0)
+                return Color.FromArgb(200, 0, 120);
+
+            ratio = Math.Max(0.0, Math.Min(ratio, 1.0));
+
+            int r, g, b;
+            if (ratio <= 0.5)
+            {
+                double t = ratio / 0.5;
+                r = (int)(0 + t * 220);
+                g = (int)(180 + t * 20);
+                b = 0;
+            }
+            else
+            {
+                double t = (ratio - 0.5) / 0.5;
+                r = 220;
+                g = (int)(200 - t * 160);
+                b = 0;
+            }
+
+            return Color.FromArgb(r, g, b);
+        }
+
+        // ─── Deflection color mapping ─────────────────────────────────
+
+        /// <summary>
+        /// Blue → cyan → yellow → red gradient by displacement magnitude.
+        /// Normalized against the building's max displacement.
+        /// </summary>
+        private static Color DeflectionColor(double displacement, double maxDisplacement)
+        {
+            if (maxDisplacement < 1e-12)
+                return Color.FromArgb(40, 80, 200);
+
+            double t = Math.Max(0.0, Math.Min(displacement / maxDisplacement, 1.0));
+
+            int r, g, b;
+            if (t <= 0.33)
+            {
+                double s = t / 0.33;
+                r = (int)(40 * (1 - s));
+                g = (int)(80 + s * 175);
+                b = (int)(200 * (1 - s) + s * 200);
+            }
+            else if (t <= 0.66)
+            {
+                double s = (t - 0.33) / 0.33;
+                r = (int)(s * 240);
+                g = (int)(255 - s * 55);
+                b = (int)(200 * (1 - s));
+            }
+            else
+            {
+                double s = (t - 0.66) / 0.34;
+                r = (int)(240 - s * 20);
+                g = (int)(200 * (1 - s) + s * 30);
+                b = 0;
+            }
+
+            return Color.FromArgb(
+                Math.Max(0, Math.Min(255, r)),
+                Math.Max(0, Math.Min(255, g)),
+                Math.Max(0, Math.Min(255, b)));
+        }
+
+        // ─── Slab helpers ───────────────────────────────────────────────
+
+        private static void BuildSizedSlabs(JToken viz, List<IGH_GeometricGoo> output,
+            List<Color> colors, int colorBy, double maxDisp)
+        {
+            var slabs = viz["sized_slabs"] as JArray ?? new JArray();
+            foreach (var slab in slabs)
+            {
+                var boundary = slab["boundary_vertices"]?.ToObject<double[][]>() ?? new double[0][];
+                double thickness = slab["thickness_ft"]?.ToObject<double>() ?? 0;
+                double zTop = slab["z_top_ft"]?.ToObject<double>() ?? 0;
+                if (boundary.Length < 3) continue;
+
+                var topPts = boundary.Select(v => new Point3d(v[0], v[1], zTop)).ToList();
+                topPts.Add(topPts[0]);
+                var bottomPts = topPts.Select(p => new Point3d(p.X, p.Y, p.Z - thickness)).ToList();
+
+                var loft = Brep.CreateFromLoft(
+                    new[] { new PolylineCurve(topPts), new PolylineCurve(bottomPts) },
+                    Point3d.Unset, Point3d.Unset, LoftType.Normal, false);
+
+                if (loft?.Length > 0)
+                {
+                    try
+                    {
+                        var capped = loft[0].CapPlanarHoles(
+                            Rhino.RhinoDoc.ActiveDoc?.ModelAbsoluteTolerance ?? 0.001);
+                        output.Add(new GH_Brep(capped ?? loft[0]));
+                    }
+                    catch
+                    {
+                        output.Add(new GH_Brep(loft[0]));
+                    }
+
+                    AppendSlabColor(colors, slab, colorBy, maxDisp);
+                }
+            }
+        }
+
+        private static void BuildDeflectedSlabs(JToken viz, double scale, bool showOriginal,
+            List<IGH_GeometricGoo> output, List<IGH_GeometricGoo> origOutput,
+            List<Color> colors, int colorBy, double maxDisp)
+        {
+            var meshes = viz["deflected_slab_meshes"] as JArray ?? new JArray();
+            foreach (var m in meshes)
+            {
+                var verts = m["vertices"]?.ToObject<double[][]>() ?? new double[0][];
+                var disps = m["vertex_displacements"]?.ToObject<double[][]>() ?? new double[0][];
+                var faces = m["faces"]?.ToObject<int[][]>() ?? new int[0][];
+                if (verts.Length == 0) continue;
+
+                var rhinoMesh = new Mesh();
+                var origMesh = showOriginal ? new Mesh() : null;
+
+                for (int i = 0; i < verts.Length; i++)
+                {
+                    var op = new Point3d(verts[i][0], verts[i][1], verts[i][2]);
+                    origMesh?.Vertices.Add(op);
+
+                    double dx = i < disps.Length ? disps[i][0] : 0;
+                    double dy = i < disps.Length ? disps[i][1] : 0;
+                    double dz = i < disps.Length ? disps[i][2] : 0;
+                    rhinoMesh.Vertices.Add(op + new Vector3d(dx, dy, dz) * scale);
+                }
+
+                foreach (var face in faces)
+                {
+                    if (face.Length < 3) continue;
+                    int i0 = face[0] - 1, i1 = face[1] - 1, i2 = face[2] - 1;
+                    if (i0 < 0 || i1 < 0 || i2 < 0 ||
+                        i0 >= rhinoMesh.Vertices.Count ||
+                        i1 >= rhinoMesh.Vertices.Count ||
+                        i2 >= rhinoMesh.Vertices.Count) continue;
+                    rhinoMesh.Faces.AddFace(i0, i1, i2);
+                    origMesh?.Faces.AddFace(i0, i1, i2);
+                }
+
+                // Per-vertex coloring for deflection mode on meshes
+                if (colorBy == COLOR_DEFLECTION && disps.Length > 0)
+                {
+                    for (int i = 0; i < rhinoMesh.Vertices.Count; i++)
+                    {
+                        double mag = 0;
+                        if (i < disps.Length && disps[i].Length >= 3)
+                            mag = Math.Sqrt(disps[i][0] * disps[i][0] +
+                                            disps[i][1] * disps[i][1] +
+                                            disps[i][2] * disps[i][2]);
+                        rhinoMesh.VertexColors.Add(DeflectionColor(mag, maxDisp));
+                    }
+                }
+
+                if (rhinoMesh.Vertices.Count > 0 && rhinoMesh.Faces.Count > 0)
+                {
+                    rhinoMesh.Normals.ComputeNormals();
+                    rhinoMesh.Compact();
+                    output.Add(new GH_Mesh(rhinoMesh));
+
+                    if (origMesh?.Vertices.Count > 0 && origMesh.Faces.Count > 0)
+                    {
+                        origMesh.Normals.ComputeNormals();
+                        origMesh.Compact();
+                        origOutput.Add(new GH_Mesh(origMesh));
+                    }
+
+                    AppendSlabColor(colors, m, colorBy, maxDisp);
+                }
+            }
+        }
+
+        /// <summary>
+        /// Append one color per slab/mesh element to the parallel color list.
+        /// For deflection mode on meshes, per-vertex coloring is handled above;
+        /// this still outputs one representative color for the Custom Preview pipeline.
+        /// </summary>
+        private static void AppendSlabColor(List<Color> colors, JToken element,
+            int colorBy, double maxDisp)
+        {
+            if (colorBy == COLOR_UTILIZATION)
+            {
+                double ratio = element["utilization_ratio"]?.ToObject<double>() ?? 0;
+                bool ok = element["ok"]?.ToObject<bool>() ?? true;
+                colors.Add(UtilizationColor(ratio, ok));
+            }
+            else if (colorBy == COLOR_DEFLECTION)
+            {
+                var disps = element["vertex_displacements"]?.ToObject<double[][]>();
+                double maxVertDisp = 0;
+                if (disps != null)
+                {
+                    foreach (var d in disps)
+                    {
+                        if (d.Length >= 3)
+                        {
+                            double mag = Math.Sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+                            if (mag > maxVertDisp) maxVertDisp = mag;
+                        }
+                    }
+                }
+                colors.Add(DeflectionColor(maxVertDisp, maxDisp));
+            }
         }
     }
 }

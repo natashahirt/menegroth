@@ -87,7 +87,9 @@ println("Total EC: \$(ec.total_ec) kgCO₂e")
 println("Intensity: \$(ec.ec_per_floor_area) kgCO₂e/m²")
 ```
 """
-function compute_building_ec(struc::BuildingStructure)
+compute_building_ec(struc::BuildingStructure) = compute_building_ec(struc, nothing)
+
+function compute_building_ec(struc::BuildingStructure, params::Union{DesignParameters, Nothing})
     # Compute per-element EC
     slab_results = [compute_element_ec(s, :slab, i) for (i, s) in enumerate(struc.slabs)]
     
@@ -106,7 +108,7 @@ function compute_building_ec(struc::BuildingStructure)
     fdn_results = [compute_element_ec(f, :foundation, i) for (i, f) in enumerate(struc.foundations) if !isempty(f.volumes)]
     
     # Fireproofing EC (steel members with ISymmSection + SurfaceCoating)
-    fp_ec = _compute_fireproofing_ec(struc)
+    fp_ec = _compute_fireproofing_ec(struc, params)
     
     # Sum by system
     slab_ec = sum(r.ec for r in slab_results; init=0.0)
@@ -134,8 +136,7 @@ Iterates over beams, columns, and struts. For each member with an `ISymmSection`
 computes the coating volume from the section's exposed perimeter (PA for beams,
 PB for columns) and the design parameters' fire protection specification.
 """
-function _compute_fireproofing_ec(struc::BuildingStructure)
-    params = struc.design_parameters
+function _compute_fireproofing_ec(struc::BuildingStructure, params::Union{DesignParameters, Nothing}=nothing)
     isnothing(params) && return 0.0
     
     fp = params.fire_protection
@@ -194,11 +195,11 @@ Print a summary of embodied carbon for a building structure.
 Display units controlled by `du` (default: `imperial`).
 """
 function ec_summary(design::BuildingDesign)
-    ec_summary(design.structure; du=design.params.display_units)
+    ec_summary(design.structure; du=design.params.display_units, params=design.params)
 end
 
-function ec_summary(struc::BuildingStructure; du::DisplayUnits=imperial)
-    ec = compute_building_ec(struc)
+function ec_summary(struc::BuildingStructure; du::DisplayUnits=imperial, params::Union{DesignParameters,Nothing}=nothing)
+    ec = compute_building_ec(struc, params)
     
     println("\n=== Embodied Carbon Summary ===")
     println("─" ^ 50)

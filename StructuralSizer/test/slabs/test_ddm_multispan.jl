@@ -19,11 +19,11 @@ println("   ✓ DDM coefficients correct")
 
 # Test 2: Total static moment calculation
 println("\n2. Testing M0 calculation...")
-qu = 0.193u"ksf"
+qu = 0.193ksf
 l2 = 14u"ft"
 ln = 16.67u"ft"
 M0 = total_static_moment(qu, l2, ln)
-M0_kipft = ustrip(u"kip*ft", M0)
+M0_kipft = ustrip(kip*u"ft", M0)
 println("   M0 = $(round(M0_kipft, digits=2)) kip-ft (expected ≈93.82)")
 @assert abs(M0_kipft - 93.82) < 2.0
 println("   ✓ M0 calculation correct")
@@ -89,7 +89,7 @@ println("\n8. Testing DDM coefficient selection logic...")
 # End span (has exterior support): 0.26/0.52/0.70 coefficients
 # Interior span: 0.65/0.35 coefficients
 
-M0_test = 100u"kip*ft"
+M0_test = 100kip*u"ft"
 
 # End span moments
 M_ext_neg_end = 0.26 * M0_test  # 26 kip-ft at exterior
@@ -100,8 +100,8 @@ M_pos_end = 0.52 * M0_test      # 52 kip-ft positive
 M_neg_int = 0.65 * M0_test      # 65 kip-ft both supports
 M_pos_int = 0.35 * M0_test      # 35 kip-ft positive
 
-println("   End span: ext_neg=$(ustrip(u"kip*ft", M_ext_neg_end)), pos=$(ustrip(u"kip*ft", M_pos_end)), int_neg=$(ustrip(u"kip*ft", M_int_neg_end))")
-println("   Int span: neg=$(ustrip(u"kip*ft", M_neg_int)), pos=$(ustrip(u"kip*ft", M_pos_int))")
+println("   End span: ext_neg=$(ustrip(kip*u"ft", M_ext_neg_end)), pos=$(ustrip(kip*u"ft", M_pos_end)), int_neg=$(ustrip(kip*u"ft", M_int_neg_end))")
+println("   Int span: neg=$(ustrip(kip*u"ft", M_neg_int)), pos=$(ustrip(kip*u"ft", M_pos_int))")
 
 # For a 3-column frame (2 spans):
 # Span 1 (end span): col1-col2, left is exterior
@@ -132,7 +132,7 @@ println("\n9. Testing per-span M0 with different span lengths...")
 # M0_span2 = qu × l2 × ln2² / 8 (should be larger due to longer span)
 # M0_span3 = qu × l2 × ln3² / 8
 
-qu_test = 0.193u"ksf"
+qu_test = 0.193ksf
 l2_test = 14u"ft"
 
 ln1 = 16.67u"ft"
@@ -143,9 +143,9 @@ M0_span1 = total_static_moment(qu_test, l2_test, ln1)
 M0_span2 = total_static_moment(qu_test, l2_test, ln2)
 M0_span3 = total_static_moment(qu_test, l2_test, ln3)
 
-println("   Span 1 (ln=16.67ft): M0 = $(round(ustrip(u"kip*ft", M0_span1), digits=1)) kip-ft")
-println("   Span 2 (ln=18.67ft): M0 = $(round(ustrip(u"kip*ft", M0_span2), digits=1)) kip-ft")
-println("   Span 3 (ln=16.67ft): M0 = $(round(ustrip(u"kip*ft", M0_span3), digits=1)) kip-ft")
+println("   Span 1 (ln=16.67ft): M0 = $(round(ustrip(kip*u"ft", M0_span1), digits=1)) kip-ft")
+println("   Span 2 (ln=18.67ft): M0 = $(round(ustrip(kip*u"ft", M0_span2), digits=1)) kip-ft")
+println("   Span 3 (ln=16.67ft): M0 = $(round(ustrip(kip*u"ft", M0_span3), digits=1)) kip-ft")
 
 # Verify middle span has larger M0 (proportional to ln²)
 @assert M0_span2 > M0_span1
@@ -170,19 +170,19 @@ println("\n10. Testing unbalanced moment calculation...")
 # At first interior: M_left = 0.70 × M0_end, M_right = 0.65 × M0_int
 # If M0_end ≈ M0_int: Unbalanced ≈ |0.70 - 0.65| × M0 = 0.05 × M0
 
-M0_equal = 100u"kip*ft"
+M0_equal = 100kip*u"ft"
 M_left_sym = 0.70 * M0_equal  # From end span (interior side)
 M_right_sym = 0.70 * M0_equal  # From other end span (interior side)
 Mub_symmetric = abs(M_left_sym - M_right_sym)
-println("   Symmetric case: Mub = $(ustrip(u"kip*ft", Mub_symmetric)) kip-ft (expected 0)")
-@assert ustrip(u"kip*ft", Mub_symmetric) ≈ 0.0
+println("   Symmetric case: Mub = $(ustrip(kip*u"ft", Mub_symmetric)) kip-ft (expected 0)")
+@assert ustrip(kip*u"ft", Mub_symmetric) ≈ 0.0
 
 # Asymmetric: end span meets interior span
 M_left_asym = 0.70 * M0_equal  # From end span
 M_right_asym = 0.65 * M0_equal # From interior span
 Mub_asymmetric = abs(M_left_asym - M_right_asym)
-println("   Asymmetric case: Mub = $(ustrip(u"kip*ft", Mub_asymmetric)) kip-ft (expected 5)")
-@assert abs(ustrip(u"kip*ft", Mub_asymmetric) - 5.0) < 0.1
+println("   Asymmetric case: Mub = $(ustrip(kip*u"ft", Mub_asymmetric)) kip-ft (expected 5)")
+@assert abs(ustrip(kip*u"ft", Mub_asymmetric) - 5.0) < 0.1
 
 println("   ✓ Unbalanced moment calculation correct")
 

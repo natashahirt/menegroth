@@ -243,7 +243,7 @@ Minimum Ix (in⁴) to satisfy `Δ ≤ L × limit_ratio`.
 
 # Example
 ```julia
-Ix_req = required_Ix_for_deflection(0.8u"kip/ft", 25.0u"ft", 29000.0u"ksi")
+Ix_req = required_Ix_for_deflection(0.8kip/u"ft", 25.0u"ft", 29000.0ksi)
 # → ~500 in⁴ for L/360
 ```
 """

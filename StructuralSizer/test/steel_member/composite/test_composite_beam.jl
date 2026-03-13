@@ -14,13 +14,13 @@ function _example_I1_setup()
     
     # Solid slab: t_slab = 7.5 in. (mimics total 3 in. deck + 4.5 in. concrete
     # from the original example, treated as a solid slab for our implementation)
-    fc′ = 4.0u"ksi"
+    fc′ = 4.0ksi
     wc  = 145.0u"lb/ft^3"
     Ec  = wc^1.5 * sqrt(uconvert(u"psi", fc′)) * 1.0u"psi^(-0.5)*lb^(-0.5)*ft^(1.5)"
     # Ec ≈ 3,644 ksi for NWC 4 ksi (AISC formula)
     # Use standard value:
-    Ec = 3644.0u"ksi"
-    Es = 29000.0u"ksi"
+    Ec = 3644.0ksi
+    Es = 29000.0ksi
     
     slab = SolidSlabOnBeam(
         7.5u"inch",       # t_slab
@@ -38,8 +38,8 @@ function _example_I1_setup()
     anchor = HeadedStudAnchor(
         0.75u"inch",      # d_sa
         5.0u"inch",       # l_sa
-        65.0u"ksi",       # Fu
-        50.0u"ksi",       # Fy (nominal)
+        65.0ksi,       # Fu
+        50.0ksi,       # Fy (nominal)
         7850.0u"kg/m^3",  # ρ
     )
     
@@ -53,19 +53,19 @@ end
 @testset "Composite Types" begin
     @testset "SolidSlabOnBeam construction" begin
         slab = SolidSlabOnBeam(
-            8.0u"inch", 4.0u"ksi", 3644.0u"ksi", 145.0u"lb/ft^3",
-            29000.0u"ksi", 10.0u"ft", 10.0u"ft"
+            8.0u"inch", 4.0ksi, 3644.0ksi, 145.0u"lb/ft^3",
+            29000.0ksi, 10.0u"ft", 10.0u"ft"
         )
         @test isapprox(slab.t_slab, uconvert(u"m", 8.0u"inch"); rtol=0.001)
-        @test slab.fc′ == 4.0u"ksi"
+        @test slab.fc′ == 4.0ksi
         # n = Es/Ec
         @test isapprox(slab.n, 29000.0 / 3644.0; rtol=0.001)
     end
     
     @testset "SolidSlabOnBeam with edge distances" begin
         slab = SolidSlabOnBeam(
-            8.0u"inch", 4.0u"ksi", 3644.0u"ksi", 145.0u"lb/ft^3",
-            29000.0u"ksi", 10.0u"ft", 10.0u"ft";
+            8.0u"inch", 4.0ksi, 3644.0ksi, 145.0u"lb/ft^3",
+            29000.0ksi, 10.0u"ft", 10.0u"ft";
             edge_dist_left=3.0u"ft", edge_dist_right=nothing
         )
         @test isapprox(slab.edge_dist_left, uconvert(u"m", 3.0u"ft"); rtol=0.001)
@@ -73,7 +73,7 @@ end
     end
     
     @testset "HeadedStudAnchor construction" begin
-        a = HeadedStudAnchor(0.75u"inch", 5.0u"inch", 65.0u"ksi", 50.0u"ksi",
+        a = HeadedStudAnchor(0.75u"inch", 5.0u"inch", 65.0ksi, 50.0ksi,
                              7850.0u"kg/m^3")
         @test isapprox(a.d_sa, uconvert(u"m", 0.75u"inch"); rtol=0.001)
         @test a.n_per_row == 1
@@ -81,19 +81,19 @@ end
     end
     
     @testset "HeadedStudAnchor with multi-row" begin
-        a = HeadedStudAnchor(0.75u"inch", 5.0u"inch", 65.0u"ksi", 50.0u"ksi",
+        a = HeadedStudAnchor(0.75u"inch", 5.0u"inch", 65.0ksi, 50.0ksi,
                              7850.0u"kg/m^3"; n_per_row=2)
         @test a.n_per_row == 2
     end
     
     @testset "HeadedStudAnchor invalid n_per_row" begin
         @test_throws ArgumentError HeadedStudAnchor(
-            0.75u"inch", 5.0u"inch", 65.0u"ksi", 50.0u"ksi",
+            0.75u"inch", 5.0u"inch", 65.0ksi, 50.0ksi,
             7850.0u"kg/m^3"; n_per_row=0)
     end
     
     @testset "Stud mass (cylindrical shank)" begin
-        a = HeadedStudAnchor(0.75u"inch", 5.0u"inch", 65.0u"ksi", 50.0u"ksi",
+        a = HeadedStudAnchor(0.75u"inch", 5.0u"inch", 65.0ksi, 50.0ksi,
                              7850.0u"kg/m^3")
         m = stud_mass(a)
         # A = π/4 × (0.75 in)² ≈ 0.4418 in² = 2.85e-4 m²
@@ -115,7 +115,7 @@ end
         fix = _example_I1_setup()
         ctx = CompositeContext(fix.slab, fix.anchor, fix.L_beam;
                                shored=true, Lb_const=10.0u"ft",
-                               Asr=1.0u"inch^2", Fysr=60.0u"ksi",
+                               Asr=1.0u"inch^2", Fysr=60.0ksi,
                                neg_moment=true)
         @test ctx.shored == true
         @test isapprox(ctx.Lb_const, uconvert(u"m", 10.0u"ft"); rtol=0.001)
@@ -139,8 +139,8 @@ end
     
     @testset "Interior beam — span controls" begin
         slab = SolidSlabOnBeam(
-            8.0u"inch", 4.0u"ksi", 3644.0u"ksi", 145.0u"lb/ft^3",
-            29000.0u"ksi", 20.0u"ft", 20.0u"ft"
+            8.0u"inch", 4.0ksi, 3644.0ksi, 145.0u"lb/ft^3",
+            29000.0ksi, 20.0u"ft", 20.0u"ft"
         )
         b_eff = get_b_eff(slab, 30.0u"ft")
         # L/8 = 30/8 = 3.75 ft per side → 7.5 ft total ← controls
@@ -150,8 +150,8 @@ end
     
     @testset "Edge beam — edge distance controls one side" begin
         slab = SolidSlabOnBeam(
-            8.0u"inch", 4.0u"ksi", 3644.0u"ksi", 145.0u"lb/ft^3",
-            29000.0u"ksi", 10.0u"ft", 10.0u"ft";
+            8.0u"inch", 4.0ksi, 3644.0ksi, 145.0u"lb/ft^3",
+            29000.0ksi, 10.0u"ft", 10.0u"ft";
             edge_dist_left=2.0u"ft", edge_dist_right=nothing
         )
         b_eff = get_b_eff(slab, 45.0u"ft")
@@ -182,18 +182,18 @@ end
         # Asa = π/4 × 0.75² = 0.4418 in²
         # Qn_conc = 0.5 × 0.4418 × √(4 × 3644) = 0.5 × 0.4418 × 120.73 = 26.67 kips
         # Qn_steel = 1.0 × 0.75 × 0.4418 × 65 = 21.54 kips ← controls
-        Qn_kips = ustrip(u"kip", Qn)
+        Qn_kips = ustrip(kip, Qn)
         @test isapprox(Qn_kips, 21.54; rtol=0.03)
     end
     
     @testset "Qn for deck slab (perpendicular, 1 stud/rib)" begin
         slab_deck = DeckSlabOnBeam(
-            uconvert(u"m", 4.5u"inch"), 4.0u"ksi", 3644.0u"ksi", 145.0u"lb/ft^3",
+            uconvert(u"m", 4.5u"inch"), 4.0ksi, 3644.0ksi, 145.0u"lb/ft^3",
             29000.0 / 3644.0,
             uconvert(u"m", 3.0u"inch"), uconvert(u"m", 6.0u"inch"), :perpendicular,
             uconvert(u"m", 10.0u"ft"), uconvert(u"m", 10.0u"ft"), nothing, nothing
         )
-        anchor = HeadedStudAnchor(0.75u"inch", 5.0u"inch", 65.0u"ksi", 50.0u"ksi",
+        anchor = HeadedStudAnchor(0.75u"inch", 5.0u"inch", 65.0ksi, 50.0ksi,
                                   7850.0u"kg/m^3"; n_per_row=1)
         Rg, Rp = StructuralSizer._Rg_Rp(anchor, slab_deck)
         @test Rg == 1.0
@@ -214,7 +214,7 @@ end
     end
     
     @testset "Diameter check — fails" begin
-        big_stud = HeadedStudAnchor(1.5u"inch", 6.0u"inch", 65.0u"ksi", 50.0u"ksi",
+        big_stud = HeadedStudAnchor(1.5u"inch", 6.0u"inch", 65.0ksi, 50.0ksi,
                                     7850.0u"kg/m^3")
         tf = 0.4u"inch"  # 2.5 × 0.4 = 1.0 < 1.5
         @test_throws ArgumentError validate_stud_diameter(big_stud, tf)
@@ -227,10 +227,10 @@ end
     end
     
     @testset "Length check — fails (too short)" begin
-        short_stud = HeadedStudAnchor(0.75u"inch", 2.0u"inch", 65.0u"ksi", 50.0u"ksi",
+        short_stud = HeadedStudAnchor(0.75u"inch", 2.0u"inch", 65.0ksi, 50.0ksi,
                                       7850.0u"kg/m^3")
-        slab = SolidSlabOnBeam(8.0u"inch", 4.0u"ksi", 3644.0u"ksi", 145.0u"lb/ft^3",
-                               29000.0u"ksi", 10.0u"ft", 10.0u"ft")
+        slab = SolidSlabOnBeam(8.0u"inch", 4.0ksi, 3644.0ksi, 145.0u"lb/ft^3",
+                               29000.0ksi, 10.0u"ft", 10.0u"ft")
         # l_sa = 2 in. < 4 × 0.75 = 3.0 in.
         @test_throws ArgumentError validate_stud_length(short_stud, slab)
     end
@@ -245,21 +245,21 @@ end
     b_eff = get_b_eff(fix.slab, fix.L_beam)  # 10.0 ft = 120 in.
     
     @testset "Full composite (ΣQn large)" begin
-        ΣQn = 10000.0u"kip"  # artificially large
+        ΣQn = 10000.0kip  # artificially large
         Cf = get_Cf(fix.section, fix.material, fix.slab, b_eff, ΣQn)
         
         # Cf = min(0.85×4×120×7.5, 50×As, 10000) 
         # V'_conc = 0.85 × 4 × 120 × 7.5 = 3060 kips (using b_eff=120 in, t=7.5 in)
         # V'_steel = 50 × 16.2 = 810 kips ← controls (W21×55, A≈16.2 in²)
-        Cf_kips = ustrip(u"kip", Cf)
+        Cf_kips = ustrip(kip, Cf)
         @test isapprox(Cf_kips, 810.0; rtol=0.05)
     end
     
     @testset "Partial composite (studs limit)" begin
-        ΣQn = 292.0u"kip"  # from Example I-1
+        ΣQn = 292.0kip  # from Example I-1
         Cf = get_Cf(fix.section, fix.material, fix.slab, b_eff, ΣQn)
         # ΣQn = 292 < min(3060, 810) → Cf = 292
-        @test isapprox(ustrip(u"kip", Cf), 292.0; rtol=0.001)
+        @test isapprox(ustrip(kip, Cf), 292.0; rtol=0.001)
     end
 end
 
@@ -285,7 +285,7 @@ end
     
     @testset "Full composite (PNA in slab)" begin
         As_Fy = fix.material.Fy * fix.section.A
-        ΣQn = uconvert(u"kip", As_Fy)  # Full composite: limited by steel yielding
+        ΣQn = uconvert(kip, As_Fy)  # Full composite: limited by steel yielding
         result = get_Mn_composite(fix.section, fix.material, fix.slab, b_eff, ΣQn)
         
         # a = As×Fy / (0.85 fc' b_eff)
@@ -298,12 +298,12 @@ end
         
         # For full composite W21×55, ϕMn should be around 800-900 kip-ft
         ϕMn = 0.9 * result.Mn
-        ϕMn_kipft = ustrip(u"kip*ft", ϕMn)
+        ϕMn_kipft = ustrip(kip*u"ft", ϕMn)
         @test ϕMn_kipft > 700  # must exceed Mu = 687 kip-ft
     end
     
     @testset "Partial composite ΣQn=292 kips (Example I-1 level)" begin
-        ΣQn = 292.0u"kip"
+        ΣQn = 292.0kip
         result = get_Mn_composite(fix.section, fix.material, fix.slab, b_eff, ΣQn)
         
         # a = 292 / (0.85 × 4 × 120) = 0.716 in. (matches Example I-1!)
@@ -319,7 +319,7 @@ end
         # ϕMn should be around 767 kip-ft (from Example I-1)
         # Note: Example I-1 uses a deck slab (different Ac geometry), so 
         # our solid slab result will differ somewhat. We verify a reasonable range.
-        ϕMn_kipft = ustrip(u"kip*ft", 0.9 * result.Mn)
+        ϕMn_kipft = ustrip(kip*u"ft", 0.9 * result.Mn)
         @test ϕMn_kipft > 687.0   # must exceed required Mu
         @test ϕMn_kipft < 1000.0  # reasonable upper bound
     end
@@ -336,7 +336,7 @@ end
     end
     
     @testset "PNA equilibrium check (force balance)" begin
-        ΣQn = 400.0u"kip"
+        ΣQn = 400.0kip
         result = get_Mn_composite(fix.section, fix.material, fix.slab, b_eff, ΣQn)
         Cf = get_Cf(fix.section, fix.material, fix.slab, b_eff, ΣQn)
         
@@ -349,7 +349,7 @@ end
         
         # Equilibrium: C_slab + C_steel = T_steel
         # C_slab = Cf, T_steel = Fy × A_below, C_steel = Fy × A_above
-        residual = ustrip(u"kip", Cf + Fy * A_above - Fy * A_below)
+        residual = ustrip(kip, Cf + Fy * A_above - Fy * A_below)
         @test abs(residual) < 0.01  # kips
     end
 end
@@ -364,19 +364,19 @@ end
     Qn = get_Qn(fix.anchor, fix.slab)
     
     @testset "Target Mu = 687 kip-ft (Example I-1 LRFD)" begin
-        Mn_required = 687.0u"kip*ft" / 0.9  # back out from ϕMn
+        Mu = 687.0kip*u"ft"
         result = find_required_ΣQn(fix.section, fix.material, fix.slab,
-                                    b_eff, Mn_required, Qn; ϕ=0.9)
+                                    b_eff, Mu, Qn; ϕ=0.9)
         @test result.sufficient == true
         # Example I-1 uses ΣQn = 292 kips at PNA location 6
         # Our solver should find a value in the same ballpark
-        ΣQn_kips = ustrip(u"kip", result.ΣQn)
+        ΣQn_kips = ustrip(kip, result.ΣQn)
         @test ΣQn_kips > 200  # must be above the 25% minimum
         @test ΣQn_kips < 900  # must be below full composite
     end
     
     @testset "Infeasible — even full composite insufficient" begin
-        Mn_huge = 5000.0u"kip*ft"
+        Mn_huge = 5000.0kip*u"ft"
         result = find_required_ΣQn(fix.section, fix.material, fix.slab,
                                     b_eff, Mn_huge, Qn; ϕ=0.9)
         @test result.sufficient == false
@@ -398,20 +398,20 @@ end
     
     @testset "With rebar — Mn exceeds bare steel" begin
         Asr = 2.0u"inch^2"
-        Fysr = 60.0u"ksi"
+        Fysr = 60.0ksi
         Mn = get_Mn_negative(fix.section, fix.material, Asr, Fysr)
         Mp = fix.material.Fy * fix.section.Zx
         # Rebar contribution should increase Mn
-        @test ustrip(u"kip*ft", Mn) > ustrip(u"kip*ft", Mp)
+        @test ustrip(kip*u"ft", Mn) > ustrip(kip*u"ft", Mp)
     end
     
     @testset "Negative Mn equilibrium check" begin
         Asr = 1.5u"inch^2"
-        Fysr = 60.0u"ksi"
+        Fysr = 60.0ksi
         Mn = get_Mn_negative(fix.section, fix.material, Asr, Fysr)
         # Should be positive and finite
-        @test ustrip(u"kip*ft", Mn) > 0
-        @test isfinite(ustrip(u"kip*ft", Mn))
+        @test ustrip(kip*u"ft", Mn) > 0
+        @test isfinite(ustrip(kip*u"ft", Mn))
     end
 end
 
@@ -439,7 +439,7 @@ end
     end
     
     @testset "I_LB at zero composite = I_steel" begin
-        I_LB = get_I_LB(fix.section, fix.material, fix.slab, b_eff, 0.0u"kip")
+        I_LB = get_I_LB(fix.section, fix.material, fix.slab, b_eff, 0.0kip)
         @test isapprox(I_LB, fix.section.Ix; rtol=0.001)
     end
     
@@ -456,7 +456,7 @@ end
     @testset "I_LB partial composite (Example I-1 level)" begin
         # Example I-1: W21×55, PNA location 6, I_LB = 2440 in.⁴
         # Our setup is slightly different (solid slab vs deck) so we just check range
-        ΣQn = 292.0u"kip"
+        ΣQn = 292.0kip
         I_LB = get_I_LB(fix.section, fix.material, fix.slab, b_eff, ΣQn)
         I_LB_in4 = ustrip(u"inch^4", I_LB)
         @test I_LB_in4 > ustrip(u"inch^4", fix.section.Ix)  # > 1140
@@ -480,8 +480,8 @@ end
         # tests partial composite separately with realistic deck parameters.
         Cf_max = StructuralSizer._Cf_max(fix.section, fix.material, fix.slab, b_eff)
         ΣQn = Cf_max
-        w_DL = 0.93u"kip/ft"
-        w_LL = 1.00u"kip/ft"
+        w_DL = 0.93kip/u"ft"
+        w_LL = 1.00kip/u"ft"
         
         result = check_composite_deflection(
             fix.section, fix.material, fix.slab, b_eff, ΣQn,
@@ -498,9 +498,9 @@ end
     end
     
     @testset "Shored — all loads on composite" begin
-        ΣQn = 292.0u"kip"
-        w_DL = 0.93u"kip/ft"
-        w_LL = 1.00u"kip/ft"
+        ΣQn = 292.0kip
+        w_DL = 0.93kip/u"ft"
+        w_LL = 1.00kip/u"ft"
         
         result = check_composite_deflection(
             fix.section, fix.material, fix.slab, b_eff, ΣQn,
@@ -518,9 +518,9 @@ end
     end
     
     @testset "Construction deflection limit check" begin
-        ΣQn = 292.0u"kip"
-        w_DL = 0.83u"kip/ft"  # construction DL
-        w_LL = 0.0u"kip/ft"
+        ΣQn = 292.0kip
+        w_DL = 0.83kip/u"ft"  # construction DL
+        w_LL = 0.0kip/u"ft"
         
         result = check_composite_deflection(
             fix.section, fix.material, fix.slab, b_eff, ΣQn,
@@ -543,8 +543,8 @@ end
     
     @testset "W21×55 construction flexure passes" begin
         # Example I-1: Mu_const = 331 kip-ft (LRFD), ϕMn_steel = 473 kip-ft → ok
-        Mu_const = 331.0u"kip*ft"
-        Vu_const = 30.0u"kip"
+        Mu_const = 331.0kip*u"ft"
+        Vu_const = 30.0kip
         
         result = check_construction(fix.section, fix.material, Mu_const, Vu_const;
                                      Lb_const=fix.L_beam, Cb_const=1.0)
@@ -569,7 +569,7 @@ end
     b_eff = get_b_eff(fix.slab, fix.L_beam)
     
     @testset "a = ΣQn / (0.85 fc' b_eff) — Example I-1 value" begin
-        ΣQn = 292.0u"kip"
+        ΣQn = 292.0kip
         a = ΣQn / (0.85 * fix.slab.fc′ * b_eff)
         a_in = ustrip(u"inch", a)
         # Example I-1: a = 292 / (0.85 × 4 × 120) = 0.716 in.
@@ -577,7 +577,7 @@ end
     end
     
     @testset "a < t_slab for partial composite" begin
-        ΣQn = 292.0u"kip"
+        ΣQn = 292.0kip
         result = get_Mn_composite(fix.section, fix.material, fix.slab, b_eff, ΣQn)
         @test ustrip(u"inch", result.a) < ustrip(u"inch", fix.slab.t_slab)
     end
@@ -611,7 +611,7 @@ end
     end
     
     @testset "ϕMn_composite returns correct fields" begin
-        ΣQn = 292.0u"kip"
+        ΣQn = 292.0kip
         result = get_ϕMn_composite(fix.section, fix.material, fix.slab, b_eff, ΣQn)
         @test haskey(result, :ϕMn)
         @test haskey(result, :Mn)
@@ -643,10 +643,10 @@ end
         # so the construction-stage ϕMn is not overly penalized by LTB.
         ctx_braced = CompositeContext(fix.slab, fix.anchor, fix.L_beam;
                                       shored=false, Lb_const=10.0u"ft")
-        Mu_moderate = 300.0u"kip*ft"
+        Mu_moderate = 300.0kip*u"ft"
         demand = MemberDemand(1;
             Mux   = ustrip(u"N*m", uconvert(u"N*m", Mu_moderate)),
-            Vu_strong = ustrip(u"N", uconvert(u"N", 50.0u"kip")),
+            Vu_strong = ustrip(u"N", uconvert(u"N", 50.0kip)),
         )
         geom = SteelMemberGeometry(fix.L_beam; Lb=fix.L_beam)
 
@@ -656,10 +656,10 @@ end
     end
 
     @testset "Infeasible under extreme moment" begin
-        Mu_extreme = 1500.0u"kip*ft"
+        Mu_extreme = 1500.0kip*u"ft"
         demand = MemberDemand(1;
             Mux = ustrip(u"N*m", uconvert(u"N*m", Mu_extreme)),
-            Vu_strong = ustrip(u"N", uconvert(u"N", 50.0u"kip")),
+            Vu_strong = ustrip(u"N", uconvert(u"N", 50.0kip)),
         )
         geom = SteelMemberGeometry(fix.L_beam; Lb=fix.L_beam)
 
@@ -682,8 +682,8 @@ end
     @testset "Shored context works" begin
         ctx_shored = CompositeContext(fix.slab, fix.anchor, fix.L_beam; shored=true)
         demand = MemberDemand(1;
-            Mux = ustrip(u"N*m", uconvert(u"N*m", 300.0u"kip*ft")),
-            Vu_strong = ustrip(u"N", uconvert(u"N", 50.0u"kip")),
+            Mux = ustrip(u"N*m", uconvert(u"N*m", 300.0kip*u"ft")),
+            Vu_strong = ustrip(u"N", uconvert(u"N", 50.0kip)),
         )
         geom = SteelMemberGeometry(fix.L_beam; Lb=fix.L_beam)
 
@@ -768,8 +768,8 @@ end
     end
 
     @testset "Custom Lb_const affects construction check" begin
-        Mu_const = 400.0u"kip*ft"
-        Vu_const = 50.0u"kip"
+        Mu_const = 400.0kip*u"ft"
+        Vu_const = 50.0kip
 
         # Full span unbraced (conservative)
         r_full = check_construction(fix.section, fix.material, Mu_const, Vu_const;
@@ -784,8 +784,8 @@ end
     end
 
     @testset "Construction check uses bare steel (not composite)" begin
-        Mu_const = 200.0u"kip*ft"
-        Vu_const = 30.0u"kip"
+        Mu_const = 200.0kip*u"ft"
+        Vu_const = 30.0kip
         r = check_construction(fix.section, fix.material, Mu_const, Vu_const;
                                 Lb_const=fix.L_beam)
 
@@ -809,9 +809,9 @@ function _aisc_example_I1_deck_setup()
     section  = W("W21X55")
     material = A992_Steel
 
-    fc′ = 4.0u"ksi"
-    Ec  = 3644.0u"ksi"
-    Es  = 29000.0u"ksi"
+    fc′ = 4.0ksi
+    Ec  = 3644.0ksi
+    Es  = 29000.0ksi
 
     slab = DeckSlabOnBeam(
         4.5u"inch",        # t_slab — concrete above deck ribs
@@ -828,8 +828,8 @@ function _aisc_example_I1_deck_setup()
     anchor = HeadedStudAnchor(
         0.75u"inch",       # d_sa
         5.0u"inch",        # l_sa
-        65.0u"ksi",        # Fu
-        50.0u"ksi",        # Fy (nominal)
+        65.0ksi,        # Fu
+        50.0ksi,        # Fy (nominal)
         7850.0u"kg/m^3",  # ρ
     )
 
@@ -853,31 +853,31 @@ end
 
         Qn = get_Qn(fix.anchor, fix.slab)
         # Example I-1: Qn = 17.2 kips/stud
-        @test isapprox(ustrip(u"kip", Qn), 17.2; rtol=0.02)
+        @test isapprox(ustrip(kip, Qn), 17.2; rtol=0.02)
     end
 
     @testset "Stress block depth a = 0.716 in." begin
         # a = ΣQn / (0.85 fc' b_eff) = 292 / (0.85 × 4 × 120) = 0.716 in.
-        ΣQn = 292.0u"kip"
+        ΣQn = 292.0kip
         a = ΣQn / (0.85 * fix.slab.fc′ * b_eff)
         @test isapprox(ustrip(u"inch", a), 0.716; rtol=0.01)
     end
 
     @testset "Composite ϕMn ≈ 767 kip-ft (LRFD, PNA location 6)" begin
-        ΣQn = 292.0u"kip"
+        ΣQn = 292.0kip
         result = get_ϕMn_composite(fix.section, fix.material, fix.slab, b_eff, ΣQn)
 
         # Example I-1: ϕMn = 767 kip-ft
         # Our section database has slightly different As (15.99 vs 16.2 in²),
         # so we allow ~1% tolerance.
-        @test isapprox(ustrip(u"kip*ft", result.ϕMn), 767.0; rtol=0.015)
+        @test isapprox(ustrip(kip*u"ft", result.ϕMn), 767.0; rtol=0.015)
 
         # Must exceed required Mu = 687 kip-ft
-        @test ustrip(u"kip*ft", result.ϕMn) > 687.0
+        @test ustrip(kip*u"ft", result.ϕMn) > 687.0
     end
 
     @testset "I_LB ≈ 2440 in⁴" begin
-        ΣQn = 292.0u"kip"
+        ΣQn = 292.0kip
         I_LB = get_I_LB(fix.section, fix.material, fix.slab, b_eff, ΣQn)
 
         # Example I-1: I_LB = 2440 in⁴ (Manual Table 3-20)
@@ -885,9 +885,9 @@ end
     end
 
     @testset "Live load deflection δ_LL ≈ 1.30 in. < L/360" begin
-        ΣQn = 292.0u"kip"
-        w_DL = 0.93u"kip/ft"
-        w_LL = 1.00u"kip/ft"
+        ΣQn = 292.0kip
+        w_DL = 0.93kip/u"ft"
+        w_LL = 1.00kip/u"ft"
 
         result = check_composite_deflection(
             fix.section, fix.material, fix.slab, b_eff, ΣQn,
@@ -906,11 +906,11 @@ end
     @testset "Construction deflection — W21×55 Ix adequate" begin
         # Example I-1: I_req = 1060 in⁴ for 2.5 in. limit
         # W21×55 Ix ≈ 1123-1140 in⁴ > 1060 → ok
-        w_const = 0.83u"kip/ft"
+        w_const = 0.83kip/u"ft"
 
         result = check_composite_deflection(
-            fix.section, fix.material, fix.slab, b_eff, 292.0u"kip",
-            fix.L_beam, w_const, 0.0u"kip/ft";
+            fix.section, fix.material, fix.slab, b_eff, 292.0kip,
+            fix.L_beam, w_const, 0.0kip/u"ft";
             shored=false, δ_const_limit=2.5u"inch"
         )
         @test result.ok_const == true
@@ -920,8 +920,8 @@ end
         # Example I-1 LRFD: Mu_const = max(1.4×0.83, 1.2×0.83+1.6×0.20)×L²/8
         #                  = max(1.16, 1.32) × 45² / 8 = 1.32 × 2025 / 8 = 334 kip-ft
         # AISC states W21×55 ϕMn = 473 kip-ft (with deck bracing Lb ≈ 0)
-        Mu_const = 334.0u"kip*ft"
-        Vu_const = 30.0u"kip"
+        Mu_const = 334.0kip*u"ft"
+        Vu_const = 30.0kip
         r = check_construction(fix.section, fix.material, Mu_const, Vu_const;
                                 Lb_const=0.0u"ft", Cb_const=1.0)
         @test r.flexure_ok == true
@@ -930,13 +930,13 @@ end
     @testset "Required studs: 17 per half-span" begin
         # Example I-1: n = ΣQn / Qn = 292 / 17.2 = 17 studs per side
         Qn = get_Qn(fix.anchor, fix.slab)
-        n_half = ceil(Int, 292.0 / ustrip(u"kip", Qn))
+        n_half = ceil(Int, 292.0 / ustrip(kip, Qn))
         @test n_half == 17
     end
 
     @testset "Shear check — ϕVn adequate" begin
         # Example I-1: Vu = 61.2 kips, ϕVn = 234 kips
-        Vu = 61.2u"kip"
+        Vu = 61.2kip
         ϕVn = get_ϕVn(fix.section, fix.material; axis=:strong)
         @test ϕVn > Vu
     end

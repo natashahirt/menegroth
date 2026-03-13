@@ -6,11 +6,11 @@
 
 """ASTM A992 structural steel (Fy = 50 ksi, Fu = 65 ksi, ECC = 1.61 kgCO₂e/kg)."""
 const A992_Steel = StructuralSteel(
-    200.0u"GPa",        # E  (29000 ksi ≈ 200 GPa)
-    77.2u"GPa",         # G  (11500 ksi ≈ 77.2 GPa)
-    345.0u"MPa",        # Fy (50 ksi ≈ 345 MPa)
-    450.0u"MPa",        # Fu (65 ksi ≈ 450 MPa)
-    7850.0u"kg/m^3",    # ρ  (490 lb/ft³ ≈ 7850 kg/m³)
+    29000.0ksi,      # E
+    11200.0ksi,      # G
+    50.0ksi,         # Fy
+    65.0ksi,         # Fu
+    490.0u"lb/ft^3",    # ρ
     0.29,               # ν
     1.61                # ecc [kgCO₂e/kg]
 )
@@ -27,19 +27,19 @@ const S355_Steel = StructuralSteel(
 )
 
 """ASTM A615 Grade 40 rebar (Fy = 40 ksi, Fu = 60 ksi, ECC = 1.72 kgCO₂e/kg)."""
-const Rebar_40 = RebarSteel(200.0u"GPa", 77.2u"GPa", 276.0u"MPa", 414.0u"MPa", 7850.0u"kg/m^3", 0.30, 1.72)
+const Rebar_40 = RebarSteel(29000.0ksi, 11200.0ksi, 40.0ksi, 60.0ksi, 490.0u"lb/ft^3", 0.30, 1.72)
 
 """ASTM A615 Grade 60 rebar (Fy = 60 ksi, Fu = 90 ksi, ECC = 1.72 kgCO₂e/kg)."""
-const Rebar_60 = RebarSteel(200.0u"GPa", 77.2u"GPa", 414.0u"MPa", 620.0u"MPa", 7850.0u"kg/m^3", 0.30, 1.72)
+const Rebar_60 = RebarSteel(29000.0ksi, 11200.0ksi, 60.0ksi, 90.0ksi, 490.0u"lb/ft^3", 0.30, 1.72)
 
 """ASTM A615 Grade 75 rebar (Fy = 75 ksi, Fu = 100 ksi, ECC = 1.72 kgCO₂e/kg)."""
-const Rebar_75 = RebarSteel(200.0u"GPa", 77.2u"GPa", 517.0u"MPa", 689.0u"MPa", 7850.0u"kg/m^3", 0.30, 1.72)
+const Rebar_75 = RebarSteel(29000.0ksi, 11200.0ksi, 75.0ksi, 100.0ksi, 490.0u"lb/ft^3", 0.30, 1.72)
 
 """ASTM A615 Grade 80 rebar (Fy = 80 ksi, Fu = 105 ksi, ECC = 1.72 kgCO₂e/kg)."""
-const Rebar_80 = RebarSteel(200.0u"GPa", 77.2u"GPa", 552.0u"MPa", 724.0u"MPa", 7850.0u"kg/m^3", 0.30, 1.72)
+const Rebar_80 = RebarSteel(29000.0ksi, 11200.0ksi, 80.0ksi, 105.0ksi, 490.0u"lb/ft^3", 0.30, 1.72)
 
 """ASTM A1044 headed shear stud steel (Fy = 51 ksi, Fu = 65 ksi, ECC = 1.72 kgCO₂e/kg)."""
-const Stud_51 = RebarSteel(200.0u"GPa", 77.2u"GPa", 351.6u"MPa", 448.2u"MPa", 7850.0u"kg/m^3", 0.30, 1.72)
+const Stud_51 = RebarSteel(29000.0ksi, 11200.0ksi, 51.0ksi, 65.0ksi, 490.0u"lb/ft^3", 0.30, 1.72)
 
 # ==============================================================================
 # Registry

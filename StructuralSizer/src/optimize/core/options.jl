@@ -38,8 +38,8 @@ opts = SteelColumnOptions(section_type = :hss, max_depth = 0.4)
 - `custom_catalog`: Custom section vector (overrides catalog)
 - `max_depth`: Maximum depth (default: Inf)
 - `n_max_sections`: Limit unique sections, 0 = no limit (default: 0)
-- `objective`: MinVolume(), MinWeight(), MinCost(), MinCarbon() (default: MinVolume())
-- `optimizer`: `:auto`, `:highs`, `:gurobi` (default: `:auto`)
+- `objective`: MinWeight(), MinVolume(), MinCost(), MinCarbon() (default: MinWeight())
+- `solver`: `:auto`, `:highs`, `:gurobi` (default: `:auto`)
 """
 Base.@kwdef struct SteelColumnOptions
     material::StructuralSteel = A992_Steel
@@ -47,10 +47,11 @@ Base.@kwdef struct SteelColumnOptions
     section_type::Symbol = :w
     catalog::Symbol = :preferred
     custom_catalog::Union{Nothing, Vector} = nothing
-    max_depth::Length = Inf * u"m"
+    max_depth::Length = Inf * u"mm"
     n_max_sections::Int = 0
-    objective::AbstractObjective = MinVolume()
-    optimizer::Symbol = :auto
+    sizing_strategy::Symbol = :discrete
+    objective::AbstractObjective = MinWeight()
+    solver::Symbol = :auto
 end
 
 # ==============================================================================
@@ -62,20 +63,17 @@ end
 
 Configuration for steel beam sizing (AISC 360 flexure + shear + deflection).
 
-Beams default to L/360 live-load deflection check. The deflection constraint
-is only enforced when `δ_max`/`I_ref` are provided in the demand (from Asap
-FEM or via `size_beams` kwargs). Set `deflection_limit = nothing` to opt out.
+Beams default to L/360 LL and L/240 total (DL+LL) deflection checks. The deflection
+constraints are only enforced when `δ_max_LL`/`δ_max_total`/`I_ref` are provided
+in the demand (from Asap FEM or via `size_beams` kwargs). Set the relevant limit
+to `nothing` to opt out.
 
 # Example
 ```julia
-# Floor beams — L/360 is the default
-opts = SteelBeamOptions()
-
-# Roof beams — relaxed deflection
-opts = SteelBeamOptions(deflection_limit = 1/240)
-
-# Strength only (opt out of deflection)
-opts = SteelBeamOptions(deflection_limit = nothing)
+opts = SteelBeamOptions()                                # L/360 LL, L/240 total
+opts = SteelBeamOptions(deflection_limit = nothing,      # strength only
+                        total_deflection_limit = nothing)
+opts = SteelBeamOptions(composite = true)                # composite beam sizing
 ```
 
 # Fields
@@ -84,12 +82,14 @@ opts = SteelBeamOptions(deflection_limit = nothing)
 - `section_type`: `:w`, `:hss`, `:pipe`, `:w_and_hss` (default: `:w`)
 - `catalog`: `:common`, `:preferred`, `:all` (default: `:preferred`)
 - `custom_catalog`: Custom section vector (overrides catalog)
-- `max_depth`: Maximum depth (default: Inf)
-- `deflection_limit`: L/δ ratio for serviceability (default: `1/360`).
-  Set `nothing` to disable. Only enforced when `δ_max`/`I_ref` are present.
+- `max_depth`: Maximum depth (default: Inf mm)
+- `deflection_limit`: LL L/δ ratio (default: `1/360`). `nothing` to disable.
+- `total_deflection_limit`: DL+LL L/δ ratio (default: `1/240`). `nothing` to disable.
+- `composite`: Enable composite beam sizing via AISC 360-16 Ch. I (default: false)
+- `sizing_strategy`: `:discrete` (MIP catalog) or `:nlp` (continuous) (default: `:discrete`)
 - `n_max_sections`: Limit unique sections, 0 = no limit (default: 0)
-- `objective`: MinVolume(), MinWeight(), MinCost(), MinCarbon() (default: MinVolume())
-- `optimizer`: `:auto`, `:highs`, `:gurobi` (default: `:auto`)
+- `objective`: MinWeight(), MinVolume(), MinCost(), MinCarbon() (default: MinWeight())
+- `solver`: `:auto`, `:highs`, `:gurobi` (default: `:auto`)
 """
 Base.@kwdef struct SteelBeamOptions
     material::StructuralSteel = A992_Steel
@@ -97,19 +97,26 @@ Base.@kwdef struct SteelBeamOptions
     section_type::Symbol = :w
     catalog::Symbol = :preferred
     custom_catalog::Union{Nothing, Vector} = nothing
-    max_depth::Length = Inf * u"m"
+    max_depth::Length = Inf * u"mm"
     deflection_limit::Union{Nothing, Float64} = 1/360
+    total_deflection_limit::Union{Nothing, Float64} = 1/240
+    composite::Bool = false
     n_max_sections::Int = 0
-    objective::AbstractObjective = MinVolume()
-    optimizer::Symbol = :auto
+    sizing_strategy::Symbol = :discrete
+    objective::AbstractObjective = MinWeight()
+    solver::Symbol = :auto
 end
 
 """Union of steel column and beam options for shared dispatch paths."""
 const SteelMemberOptions = Union{SteelColumnOptions, SteelBeamOptions}
 
-"""Get deflection_limit: beams have it, columns return nothing."""
+"""Get LL deflection_limit: beams have it, columns return nothing."""
 _deflection_limit(opts::SteelBeamOptions) = opts.deflection_limit
 _deflection_limit(opts::SteelColumnOptions) = nothing
+
+"""Get total deflection_limit: beams have it, columns return nothing."""
+_total_deflection_limit(opts::SteelBeamOptions) = opts.total_deflection_limit
+_total_deflection_limit(opts::SteelColumnOptions) = nothing
 
 # ==============================================================================
 # Concrete Column Options
@@ -125,58 +132,54 @@ ACI units (kip, kip·ft) happen automatically via `Asap.to_kip`/`Asap.to_kipft`.
 Bare `Real` values are treated as already in kip / kip·ft.
 
 # Sizing Strategy
-- `:catalog` (default) — MIP discrete selection from an RC column catalog.
-  Uses `optimizer` to pick the lightest feasible section from the catalog.
+- `:discrete` (default) — MIP discrete selection from an RC column catalog.
+  Uses `solver` to pick the lightest feasible section from the catalog.
 - `:nlp` — Continuous NLP optimization (Ipopt) for column dimensions (b, h)
-  and reinforcement ratio (ρg).  Produces the minimum-volume section that
+  and reinforcement ratio (ρg).  Produces the minimum-weight section that
   satisfies ACI 318 P-M interaction, then snaps to practical increments.
 
 Both strategies share the same material, slenderness, and shape-control
 fields.  Catalog-specific fields (`catalog`, `custom_catalog`, `n_max_sections`,
-`optimizer`) are ignored when `sizing_strategy == :nlp`.  NLP-specific fields
-(`nlp_*`) are ignored when `sizing_strategy == :catalog`.
+`solver`) are ignored when `sizing_strategy == :nlp`.  NLP-specific fields
+(`nlp_*`) are ignored when `sizing_strategy == :discrete`.
 
 # Example
 ```julia
-# Default: MIP catalog selection
 opts = ConcreteColumnOptions()
-
-# NLP continuous optimization
 opts = ConcreteColumnOptions(sizing_strategy = :nlp)
-
 opts = ConcreteColumnOptions(section_shape = :circular)
 
 opts = ConcreteColumnOptions(
-    grade = NWC_6000,
+    material = NWC_6000,
     sizing_strategy = :nlp,
     nlp_prefer_square = 0.1,
 )
 
 opts = ConcreteColumnOptions(
-    grade = NWC_5000,
-    rebar_grade = Rebar_75,
+    material = NWC_5000,
+    rebar_material = Rebar_75,
     cover = 50.8u"mm",
     transverse_bar_size = :no4,
 )
 ```
 
 # Fields
-- `grade`: Concrete material (default: NWC_4000)
+- `material`: Concrete material (default: NWC_4000)
 - `section_shape`: `:rect` or `:circular` (default: `:rect`)
-- `rebar_grade`: RebarSteel material for longitudinal bars (default: Rebar_60)
-- `transverse_rebar_grade`: RebarSteel for ties/spirals (default: same as rebar_grade)
+- `rebar_material`: RebarSteel for longitudinal bars (default: Rebar_60)
+- `transverse_rebar_material`: RebarSteel for ties/spirals (default: same as rebar_material)
 - `cover`: Clear cover to transverse reinforcement (default: 1.5" or 38mm)
 - `transverse_bar_size`: Tie/spiral bar size, :no3, :no4, :no5 (default: :no4)
-- `sizing_strategy`: `:catalog` (MIP) or `:nlp` (continuous Ipopt) (default: `:catalog`)
+- `sizing_strategy`: `:discrete` (MIP) or `:nlp` (continuous Ipopt) (default: `:discrete`)
 - `catalog`: `:standard`, `:low_capacity`, `:high_capacity`, `:all` (default: `:standard`)
 - `custom_catalog`: Custom section vector (overrides catalog)
-- `max_depth`: Maximum depth/diameter in meters (default: Inf)
+- `max_depth`: Maximum depth/diameter (default: Inf mm)
 - `n_max_sections`: Limit unique sections, 0 = no limit (default: 0)
 - `include_slenderness`: Consider slenderness effects (default: true)
 - `include_biaxial`: Consider biaxial bending (default: true)
 - `βdns`: Sustained load ratio for slenderness (default: 0.6)
-- `objective`: MinVolume(), MinWeight(), MinCost(), MinCarbon() (default: MinVolume())
-- `optimizer`: `:auto`, `:highs`, `:gurobi` (default: `:auto`)
+- `objective`: MinWeight(), MinVolume(), MinCost(), MinCarbon() (default: MinWeight())
+- `solver`: `:auto`, `:highs`, `:gurobi` (default: `:auto`)
 - `shape_constraint`: `:square`, `:bounded`, `:free` (default: `:square`)
   - `:square` — force c1 = c2 at every growth step (current behavior)
   - `:bounded` — allow rectangular columns, capped by `max_aspect_ratio`
@@ -184,7 +187,7 @@ opts = ConcreteColumnOptions(
 - `max_aspect_ratio`: Maximum c1/c2 or c2/c1 when `shape_constraint == :bounded` (default: 2.0)
 - `size_increment`: Rounding increment for column dimensions (default: 0.5")
 
-## NLP-Specific Fields (ignored when `sizing_strategy == :catalog`)
+## NLP-Specific Fields (ignored when `sizing_strategy == :discrete`)
 - `nlp_dim_increment`: Round NLP solution to this increment (default: 2")
 - `nlp_aspect_limit`: Maximum aspect ratio max(b,h)/min(b,h) (default: 3.0)
 - `nlp_prefer_square`: Penalty for non-square sections, 0 = none (default: 0.0)
@@ -200,30 +203,28 @@ opts = ConcreteColumnOptions(
 
 """
 Base.@kwdef struct ConcreteColumnOptions
-    grade::Concrete = NWC_4000
-    grades::Union{Nothing, Vector{<:Concrete}} = nothing  # multi-material MIP
+    material::Concrete = NWC_4000
+    materials::Union{Nothing, Vector{<:Concrete}} = nothing  # multi-material MIP
     section_shape::Symbol = :rect       # :rect or :circular
-    rebar_grade::RebarSteel = Rebar_60
-    transverse_rebar_grade::Union{Nothing, RebarSteel} = nothing  # defaults to rebar_grade
+    rebar_material::RebarSteel = Rebar_60
+    transverse_rebar_material::Union{Nothing, RebarSteel} = nothing  # defaults to rebar_material
     cover::Length = 38.1u"mm"                    # Clear cover to ties (≈1.5")
     transverse_bar_size::Symbol = :no4         # :no3, :no4, :no5
 
     # ─── Sizing Strategy ───
-    # :catalog — MIP discrete selection from RC column catalog (default)
-    # :nlp     — Continuous NLP optimization (Ipopt) for b, h, ρg
-    sizing_strategy::Symbol = :catalog
+    sizing_strategy::Symbol = :discrete
 
     catalog::Symbol = :standard         # :standard, :low_capacity, :high_capacity, :all
     custom_catalog::Union{Nothing, Vector} = nothing
-    max_depth::Length = Inf * u"m"       # depth for rect, diameter for circular
+    max_depth::Length = Inf * u"mm"      # depth for rect, diameter for circular
     n_max_sections::Int = 0             # 0 = no limit
     include_slenderness::Bool = true
     include_biaxial::Bool = true
     βdns::Float64 = 0.6
-    objective::AbstractObjective = MinVolume()
-    optimizer::Symbol = :auto
+    objective::AbstractObjective = MinWeight()
+    solver::Symbol = :auto
 
-    # ─── NLP-Specific Settings (ignored when sizing_strategy == :catalog) ───
+    # ─── NLP-Specific Settings (ignored when sizing_strategy == :discrete) ───
     nlp_dim_increment::Length = 2.0u"inch"
     nlp_aspect_limit::Float64 = 3.0
     nlp_prefer_square::Float64 = 0.0
@@ -234,17 +235,8 @@ Base.@kwdef struct ConcreteColumnOptions
     nlp_n_multistart::Int = 1
 
     # ─── Column Shape / Growth Control ───
-    # Controls how column dimensions (c1, c2) evolve during the slab-column
-    # iteration loop when columns must grow for punching shear or P-M capacity.
-    #   :square  — force c1 = c2 at every growth step (legacy default)
-    #   :bounded — allow c1 ≠ c2, capped by max_aspect_ratio
-    #   :free    — no aspect ratio constraint (research only)
     shape_constraint::Symbol = :square
-    # Maximum c1/c2 or c2/c1 (only active when shape_constraint == :bounded).
-    # ACI punching β factor penalizes aspect ratios > ~2 heavily (Eq. 22.6.5.2(a)).
     max_aspect_ratio::Float64 = 2.0
-    # Rounding increment for column dimensions. The direct punching solve jumps
-    # to the required size and rounds up to the nearest multiple of this value.
     size_increment::Length = 0.5u"inch"
 end
 
@@ -256,16 +248,16 @@ using Asap: ksi
 Return longitudinal rebar yield strength in ksi.
 """
 function get_rebar_fy(opts::ConcreteColumnOptions)
-    uconvert(ksi, opts.rebar_grade.Fy)
+    uconvert(ksi, opts.rebar_material.Fy)
 end
 
 """
     get_transverse_rebar(opts::ConcreteColumnOptions) -> RebarSteel
 
-Return the transverse rebar grade, defaulting to the longitudinal rebar grade.
+Return the transverse rebar material, defaulting to the longitudinal rebar material.
 """
 function get_transverse_rebar(opts::ConcreteColumnOptions)
-    isnothing(opts.transverse_rebar_grade) ? opts.rebar_grade : opts.transverse_rebar_grade
+    isnothing(opts.transverse_rebar_material) ? opts.rebar_material : opts.transverse_rebar_material
 end
 
 """Transverse bar diameters in inches, keyed by ASTM bar size symbol."""
@@ -281,7 +273,9 @@ const TRANSVERSE_BAR_DIAMETERS = Dict(
 Return transverse bar diameter [inches] for the selected bar size.
 """
 function get_transverse_bar_diameter(opts::ConcreteColumnOptions)
-    get(TRANSVERSE_BAR_DIAMETERS, opts.transverse_bar_size, 0.5)
+    haskey(TRANSVERSE_BAR_DIAMETERS, opts.transverse_bar_size) ||
+        throw(ArgumentError("Unknown transverse bar size: $(opts.transverse_bar_size). Use :no3, :no4, or :no5."))
+    TRANSVERSE_BAR_DIAMETERS[opts.transverse_bar_size]
 end
 
 # ==============================================================================
@@ -308,23 +302,23 @@ size_beams([60.0u"kN*m"], [40.0u"kN"], geoms, opts)
 size_beams([120.0], [25.0], geoms, opts)
 
 opts = ConcreteBeamOptions(
-    grade = NWC_5000,
-    rebar_grade = Rebar_75,
+    material = NWC_5000,
+    rebar_material = Rebar_75,
     deflection_limit = 1/480,
 )
 
 opts = ConcreteBeamOptions(
     cover = 50.8u"mm",
     transverse_bar_size = :no4,
-    max_depth = 0.6,
+    max_depth = 600.0u"mm",
 )
 ```
 
 # Fields
 ## Materials
-- `grade`: Concrete material (default: NWC_4000)
-- `rebar_grade`: RebarSteel for longitudinal bars (default: Rebar_60)
-- `transverse_rebar_grade`: RebarSteel for stirrups (default: same as rebar_grade)
+- `material`: Concrete material (default: NWC_4000)
+- `rebar_material`: RebarSteel for longitudinal bars (default: Rebar_60)
+- `transverse_rebar_material`: RebarSteel for stirrups (default: same as rebar_material)
 - `cover`: Clear cover to stirrups (default: 1.5" or 38mm)
 - `transverse_bar_size`: Stirrup bar size :no3, :no4, :no5 (default: :no3)
 
@@ -333,8 +327,8 @@ opts = ConcreteBeamOptions(
 - `custom_catalog`: Custom section vector (overrides catalog)
 
 ## Dimension Constraints
-- `max_depth`: Maximum overall depth in meters (default: Inf)
-- `max_width`: Maximum width in meters (default: Inf)
+- `max_depth`: Maximum overall depth (default: Inf mm)
+- `max_width`: Maximum width (default: Inf mm)
 
 ## Design Settings
 - `deflection_limit`: L/δ ratio, e.g. `1/360`.
@@ -350,35 +344,31 @@ opts = ConcreteBeamOptions(
 
 ## Optimization
 - `n_max_sections`: Limit unique sections, 0 = no limit (default: 0)
-- `objective`: MinVolume(), MinWeight(), MinCost(), MinCarbon() (default: MinVolume())
-- `optimizer`: `:auto`, `:highs`, `:gurobi` (default: `:auto`)
+- `objective`: MinWeight(), MinVolume(), MinCost(), MinCarbon() (default: MinWeight())
+- `solver`: `:auto`, `:highs`, `:gurobi` (default: `:auto`)
 """
 Base.@kwdef struct ConcreteBeamOptions
-    # Materials
-    grade::Concrete = NWC_4000
-    grades::Union{Nothing, Vector{<:Concrete}} = nothing  # multi-material MIP
-    rebar_grade::RebarSteel = Rebar_60
-    transverse_rebar_grade::Union{Nothing, RebarSteel} = nothing
+    material::Concrete = NWC_4000
+    materials::Union{Nothing, Vector{<:Concrete}} = nothing  # multi-material MIP
+    rebar_material::RebarSteel = Rebar_60
+    transverse_rebar_material::Union{Nothing, RebarSteel} = nothing
     cover::Length = 38.1u"mm"            # ≈ 1.5" to stirrups
     transverse_bar_size::Symbol = :no3   # Stirrup bar size
 
-    # Catalog (discrete)
     catalog::Symbol = :standard
     custom_catalog::Union{Nothing, Vector} = nothing
 
-    # Dimension constraints
-    max_depth::Length = Inf * u"m"
-    max_width::Length = Inf * u"m"
+    max_depth::Length = Inf * u"mm"
+    max_width::Length = Inf * u"mm"
 
-    # Design settings
     deflection_limit::Union{Nothing, Float64} = 1/360
     include_flange::Bool = false
     catalog_size_tbeam::Symbol = :standard
 
-    # Optimization
+    sizing_strategy::Symbol = :discrete
     n_max_sections::Int = 0
-    objective::AbstractObjective = MinVolume()
-    optimizer::Symbol = :auto
+    objective::AbstractObjective = MinWeight()
+    solver::Symbol = :auto
 end
 
 """
@@ -387,16 +377,16 @@ end
 Return longitudinal rebar yield strength in ksi.
 """
 function get_rebar_fy(opts::ConcreteBeamOptions)
-    uconvert(ksi, opts.rebar_grade.Fy)
+    uconvert(ksi, opts.rebar_material.Fy)
 end
 
 """
     get_transverse_rebar(opts::ConcreteBeamOptions) -> RebarSteel
 
-Return the transverse rebar grade, defaulting to the longitudinal rebar grade.
+Return the transverse rebar material, defaulting to the longitudinal rebar material.
 """
 function get_transverse_rebar(opts::ConcreteBeamOptions)
-    isnothing(opts.transverse_rebar_grade) ? opts.rebar_grade : opts.transverse_rebar_grade
+    isnothing(opts.transverse_rebar_material) ? opts.rebar_material : opts.transverse_rebar_material
 end
 
 """
@@ -405,7 +395,9 @@ end
 Return transverse bar diameter [inches] for the selected bar size.
 """
 function get_transverse_bar_diameter(opts::ConcreteBeamOptions)
-    get(TRANSVERSE_BAR_DIAMETERS, opts.transverse_bar_size, 0.5)
+    haskey(TRANSVERSE_BAR_DIAMETERS, opts.transverse_bar_size) ||
+        throw(ArgumentError("Unknown transverse bar size: $(opts.transverse_bar_size). Use :no3, :no4, or :no5."))
+    TRANSVERSE_BAR_DIAMETERS[opts.transverse_bar_size]
 end
 
 # ==============================================================================
@@ -479,7 +471,7 @@ opts = PixelFrameBeamOptions(deflection_limit = 1/360)
 ## Optimization
 - `n_max_sections`: Limit unique sections, 0 = no limit (default: 0)
 - `objective`: MinVolume(), MinWeight(), MinCost(), MinCarbon() (default: MinCarbon())
-- `optimizer`: `:auto`, `:highs`, `:gurobi` (default: `:auto`)
+- `solver`: `:auto`, `:highs`, `:gurobi` (default: `:auto`)
 """
 Base.@kwdef struct PixelFrameBeamOptions
     # Catalog generation — Unitful vectors
@@ -513,8 +505,8 @@ Base.@kwdef struct PixelFrameBeamOptions
 
     # Optimization
     n_max_sections::Int = 0
-    objective::AbstractObjective = MinCarbon()
-    optimizer::Symbol = :auto
+    objective::AbstractObjective = MinWeight()
+    solver::Symbol = :auto
 end
 
 # ── Boundary helpers: strip Unitful to bare mm / MPa / mm² / kg/m³ ──
@@ -643,7 +635,7 @@ opts = PixelFrameColumnOptions(
 ## Optimization
 - `n_max_sections`: Limit unique sections, 0 = no limit (default: 0)
 - `objective`: MinVolume(), MinWeight(), MinCost(), MinCarbon() (default: MinCarbon())
-- `optimizer`: `:auto`, `:highs`, `:gurobi` (default: `:auto`)
+- `solver`: `:auto`, `:highs`, `:gurobi` (default: `:auto`)
 """
 Base.@kwdef struct PixelFrameColumnOptions
     # Catalog generation — Unitful vectors
@@ -673,8 +665,8 @@ Base.@kwdef struct PixelFrameColumnOptions
 
     # Optimization
     n_max_sections::Int = 0
-    objective::AbstractObjective = MinCarbon()
-    optimizer::Symbol = :auto
+    objective::AbstractObjective = MinWeight()
+    solver::Symbol = :auto
 end
 
 """Extract bare catalog-generation vectors from PixelFrameColumnOptions."""
@@ -742,7 +734,8 @@ const MemberOptions = Union{SteelColumnOptions, SteelBeamOptions, ConcreteColumn
 function Base.show(io::IO, opts::SteelColumnOptions)
     mat_str = material_name(opts.material)
     sec_type = uppercase(string(opts.section_type))
-    print(io, "SteelColumnOptions(", mat_str, " ", sec_type)
+    strat_str = opts.sizing_strategy == :nlp ? " NLP" : ""
+    print(io, "SteelColumnOptions(", mat_str, " ", sec_type, strat_str)
     isfinite(opts.max_depth) && print(io, ", max_depth=", opts.max_depth)
     opts.n_max_sections > 0 && print(io, ", n_max=", opts.n_max_sections)
     print(io, ")")
@@ -752,17 +745,21 @@ end
 function Base.show(io::IO, opts::SteelBeamOptions)
     mat_str = material_name(opts.material)
     sec_type = uppercase(string(opts.section_type))
-    print(io, "SteelBeamOptions(", mat_str, " ", sec_type)
+    strat_str = opts.sizing_strategy == :nlp ? " NLP" : ""
+    print(io, "SteelBeamOptions(", mat_str, " ", sec_type, strat_str)
     isfinite(opts.max_depth) && print(io, ", max_depth=", opts.max_depth)
     dl = _deflection_limit(opts)
     !isnothing(dl) && print(io, ", L/", Int(round(1/dl)))
+    tdl = _total_deflection_limit(opts)
+    !isnothing(tdl) && print(io, ", L_total/", Int(round(1/tdl)))
+    opts.composite && print(io, ", composite")
     opts.n_max_sections > 0 && print(io, ", n_max=", opts.n_max_sections)
     print(io, ")")
 end
 
 """Compact display for `ConcreteColumnOptions`."""
 function Base.show(io::IO, opts::ConcreteColumnOptions)
-    mat_str = material_name(opts.grade)
+    mat_str = material_name(opts.material)
     shape_str = opts.section_shape == :circular ? "CIRCULAR" : "RECT"
     strat_str = opts.sizing_strategy == :nlp ? " NLP" : ""
     print(io, "ConcreteColumnOptions(", mat_str, " ", shape_str, strat_str)
@@ -775,13 +772,15 @@ end
 
 """Compact display for `ConcreteBeamOptions`."""
 function Base.show(io::IO, opts::ConcreteBeamOptions)
-    mat_str = material_name(opts.grade)
-    print(io, "ConcreteBeamOptions(", mat_str)
+    mat_str = material_name(opts.material)
+    strat_str = opts.sizing_strategy == :nlp ? " NLP" : ""
+    print(io, "ConcreteBeamOptions(", mat_str, strat_str)
     isfinite(opts.max_depth) && print(io, ", max_depth=", opts.max_depth)
     isfinite(opts.max_width) && print(io, ", max_width=", opts.max_width)
     if !isnothing(opts.deflection_limit)
         print(io, ", L/", Int(round(1/opts.deflection_limit)))
     end
+    opts.include_flange && print(io, ", T-beam")
     opts.n_max_sections > 0 && print(io, ", n_max=", opts.n_max_sections)
     print(io, ")")
 end
@@ -804,7 +803,7 @@ to find the minimum-volume section that satisfies ACI 318 requirements.
 opts = NLPColumnOptions()
 
 opts = NLPColumnOptions(
-    grade = NWC_5000,
+    material = NWC_5000,
     min_dim = 14.0u"inch",
     max_dim = 36.0u"inch",
     prefer_square = 0.1,
@@ -818,8 +817,8 @@ opts = NLPColumnOptions(
 
 # Fields
 ## Materials
-- `grade`: Concrete material (default: NWC_4000)
-- `rebar_grade`: RebarSteel for longitudinal bars (default: Rebar_60)
+- `material`: Concrete material (default: NWC_4000)
+- `rebar_material`: RebarSteel for longitudinal bars (default: Rebar_60)
 - `cover`: Clear cover to ties (default: 1.5" or 38mm)
 - `tie_type`: :tied or :spiral (default: :tied)
 
@@ -844,8 +843,8 @@ opts = NLPColumnOptions(
 """
 Base.@kwdef struct NLPColumnOptions
     # Materials
-    grade::Concrete = NWC_4000
-    rebar_grade::RebarSteel = Rebar_60
+    material::Concrete = NWC_4000
+    rebar_material::RebarSteel = Rebar_60
     cover::Length = 38.1u"mm"           # ≈ 1.5"
     tie_type::Symbol = :tied
     
@@ -864,7 +863,7 @@ Base.@kwdef struct NLPColumnOptions
     
     # Solver settings
     solver::Symbol = :ipopt
-    objective::AbstractObjective = MinVolume()
+    objective::AbstractObjective = MinWeight()
     maxiter::Int = 200
     tol::Float64 = 1e-4
     verbose::Bool = false
@@ -876,7 +875,7 @@ end
 
 """Compact display for `NLPColumnOptions`."""
 function Base.show(io::IO, opts::NLPColumnOptions)
-    mat_str = material_name(opts.grade)
+    mat_str = material_name(opts.material)
     min_in = round(Int, ustrip(u"inch", opts.min_dim))
     max_in = round(Int, ustrip(u"inch", opts.max_dim))
     print(io, "NLPColumnOptions(", mat_str)
@@ -1097,8 +1096,8 @@ minimum-area section satisfying ACI 318 flexure and shear requirements.
 
 # Fields
 ## Materials
-- `grade`: Concrete material (default: NWC_4000)
-- `rebar_grade`: RebarSteel for longitudinal bars (default: Rebar_60)
+- `material`: Concrete material (default: NWC_4000)
+- `rebar_material`: RebarSteel for longitudinal bars (default: Rebar_60)
 - `cover`: Clear cover to stirrups (default: 1.5")
 - `stirrup_size`: Stirrup bar size (default: 3)
 - `bar_size`: Longitudinal bar size (default: 8)
@@ -1122,8 +1121,8 @@ minimum-area section satisfying ACI 318 flexure and shear requirements.
 """
 Base.@kwdef struct NLPBeamOptions
     # Materials
-    grade::Concrete = NWC_4000
-    rebar_grade::RebarSteel = Rebar_60
+    material::Concrete = NWC_4000
+    rebar_material::RebarSteel = Rebar_60
     cover::Length = 38.1u"mm"           # ≈ 1.5"
     stirrup_size::Int = 3
     bar_size::Int = 8
@@ -1137,7 +1136,7 @@ Base.@kwdef struct NLPBeamOptions
 
     # Solver settings
     solver::Symbol = :ipopt
-    objective::AbstractObjective = MinVolume()
+    objective::AbstractObjective = MinWeight()
     maxiter::Int = 200
     tol::Float64 = 1e-4
     verbose::Bool = false
@@ -1148,7 +1147,7 @@ end
 
 """Compact display for `NLPBeamOptions`."""
 function Base.show(io::IO, opts::NLPBeamOptions)
-    mat_str = material_name(opts.grade)
+    mat_str = material_name(opts.material)
     bmin = round(Int, ustrip(u"inch", opts.min_width))
     bmax = round(Int, ustrip(u"inch", opts.max_width))
     hmin = round(Int, ustrip(u"inch", opts.min_depth))

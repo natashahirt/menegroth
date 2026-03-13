@@ -7,6 +7,7 @@
 #   - concrete_column/test_catalog_gen.jl     (smoke test, println-based)
 #   - concrete_column/test_biaxial_fix.jl     (debug script, println-based)
 #   - slabs/test_ddm_multispan.jl             (assert-based, not @testset)
+#   - concrete_column/run_biaxial_slenderness_tests.jl (runner script, println-based)
 
 using Test
 using Unitful
@@ -40,6 +41,8 @@ using Asap  # custom units (kip, ksi, ksf, psf, etc.)
         # Moment amplification (B1/B2)
         include("steel_member/test_b1_b2_amplification.jl")
         include("steel_member/test_b1_checker_integration.jl")
+        # Composite beams
+        include("steel_member/composite/test_composite_beam.jl")
     end
 
     # ─── Concrete Beams ──────────────────────────────────────────────────
@@ -96,8 +99,17 @@ using Asap  # custom units (kip, ksi, ksf, psf, etc.)
         # Punching / shear
         include("slabs/test_shear_transfer.jl")
         include("slabs/test_shear_studs.jl")
+        include("slabs/test_punching_reinforcement.jl")
         # Torsion discount (ACI concrete torsion capacity for Wood–Armer)
         include("slabs/test_torsion_discount.jl")
+        # Column growth
+        include("slabs/test_column_growth.jl")
+        # Pattern loading
+        include("slabs/test_pattern_loading_sizing.jl")
+        # Stud catalogs
+        include("slabs/test_stud_catalog.jl")
+        # Waffle geometry
+        include("slabs/test_waffle_geometry.jl")
         # Optimizer
         include("slabs/test_flat_plate_optimizer.jl")
         # FEA flat plate
@@ -118,8 +130,10 @@ using Asap  # custom units (kip, ksi, ksf, psf, etc.)
         include("optimize/test_column_optimization.jl")
         include("optimize/test_column_full.jl")
         include("optimize/test_column_nlp.jl")
+        include("optimize/test_column_nlp_adapter.jl")
         include("optimize/test_hss_column_nlp.jl")
         include("optimize/test_w_column_nlp.jl")
+        include("optimize/test_multi_material_mip.jl")
     end
 
     # ─── PixelFrame ──────────────────────────────────────────────────────
@@ -131,6 +145,16 @@ using Asap  # custom units (kip, ksi, ksf, psf, etc.)
     # ─── VCmaster Reference ──────────────────────────────────────────────
     @testset "VCmaster Reference" begin
         include("test_vcmaster_reference.jl")
+    end
+
+    # ─── Fire Provisions ──────────────────────────────────────────────────
+    @testset "Fire Provisions" begin
+        include("test_fire_provisions.jl")
+    end
+
+    # ─── Element Rebar ────────────────────────────────────────────────────
+    @testset "Element Rebar" begin
+        include("test_element_rebar.jl")
     end
 
 end

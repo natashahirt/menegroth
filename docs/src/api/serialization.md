@@ -45,15 +45,15 @@ compute_geometry_hash
 | `floor_type` | `"flat_slab"` | `FlatSlabOptions(...)` |
 | `floor_type` | `"one_way"` | `OneWayOptions(...)` |
 | `floor_type` | `"vault"` | `VaultOptions(...)` |
-| `column_type` | `"rc_rect"` | `ConcreteColumnOptions(grade=concrete, rebar_grade=rebar, section_shape=:rect)` |
-| `column_type` | `"rc_circular"` | `ConcreteColumnOptions(grade=concrete, rebar_grade=rebar, section_shape=:circular)` |
+| `column_type` | `"rc_rect"` | `ConcreteColumnOptions(material=concrete, rebar_material=rebar, section_shape=:rect)` |
+| `column_type` | `"rc_circular"` | `ConcreteColumnOptions(material=concrete, rebar_material=rebar, section_shape=:circular)` |
 | `column_type` | `"steel_w"` | `SteelColumnOptions(material=steel, section_type=:w)` |
 | `column_type` | `"steel_hss"` | `SteelColumnOptions(material=steel, section_type=:hss)` |
 | `column_type` | `"steel_pipe"` | `SteelColumnOptions(material=steel, section_type=:pipe)` |
 | `beam_type` | `"steel_w"` | `SteelBeamOptions(material=steel, section_type=:w)` |
 | `beam_type` | `"steel_hss"` | `SteelBeamOptions(material=steel, section_type=:hss)` |
-| `beam_type` | `"rc_rect"` | `ConcreteBeamOptions(grade=concrete, rebar_grade=rebar, include_flange=false)` |
-| `beam_type` | `"rc_tbeam"` | `ConcreteBeamOptions(grade=concrete, rebar_grade=rebar, include_flange=true)` |
+| `beam_type` | `"rc_rect"` | `ConcreteBeamOptions(material=concrete, rebar_material=rebar, include_flange=false)` |
+| `beam_type` | `"rc_tbeam"` | `ConcreteBeamOptions(material=concrete, rebar_material=rebar, include_flange=true)` |
 | `materials.concrete` | `"NWC_4000"` | `NWC_4000` |
 | `materials.concrete` | `"NWC_5000"` | `NWC_5000` |
 | `materials.steel` | `"A992"` | `A992_Steel` |

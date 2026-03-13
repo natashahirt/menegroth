@@ -36,8 +36,8 @@ using StructuralSizer
     ln = l1 - c1       # Clear span
     
     # Loads
-    DL = 87.5u"psf" + 20.0u"psf"  # Self-weight + superimposed
-    LL = 40.0u"psf"
+    DL = 87.5psf + 20.0psf  # Self-weight + superimposed
+    LL = 40.0psf
     qu = 1.2 * DL + 1.6 * LL  # Factored load = 193 psf
     
     # Compute span properties using PCA table lookup
@@ -75,29 +75,29 @@ using StructuralSizer
         
         println("\n=== 5-Span Hardy Cross Results ===")
         for (i, m) in enumerate(hc_moments)
-            println("Span $i: M_left=$(round(ustrip(u"kip*ft", m.M_neg_left), digits=2)), " *
-                    "M_pos=$(round(ustrip(u"kip*ft", m.M_pos), digits=2)), " *
-                    "M_neg_right=$(round(ustrip(u"kip*ft", m.M_neg_right), digits=2))")
+            println("Span $i: M_left=$(round(ustrip(kip*u"ft", m.M_neg_left), digits=2)), " *
+                    "M_pos=$(round(ustrip(kip*u"ft", m.M_pos), digits=2)), " *
+                    "M_neg_right=$(round(ustrip(kip*u"ft", m.M_neg_right), digits=2))")
         end
         
         # Test symmetry: spans 1 and 5 should be mirror images
-        @test ustrip(u"kip*ft", hc_moments[1].M_neg_left) ≈ ustrip(u"kip*ft", hc_moments[5].M_neg_right) rtol=0.01
-        @test ustrip(u"kip*ft", hc_moments[1].M_neg_right) ≈ ustrip(u"kip*ft", hc_moments[5].M_neg_left) rtol=0.01
-        @test ustrip(u"kip*ft", hc_moments[1].M_pos) ≈ ustrip(u"kip*ft", hc_moments[5].M_pos) rtol=0.01
+        @test ustrip(kip*u"ft", hc_moments[1].M_neg_left) ≈ ustrip(kip*u"ft", hc_moments[5].M_neg_right) rtol=0.01
+        @test ustrip(kip*u"ft", hc_moments[1].M_neg_right) ≈ ustrip(kip*u"ft", hc_moments[5].M_neg_left) rtol=0.01
+        @test ustrip(kip*u"ft", hc_moments[1].M_pos) ≈ ustrip(kip*u"ft", hc_moments[5].M_pos) rtol=0.01
         
         # Test symmetry: spans 2 and 4 should be mirror images
-        @test ustrip(u"kip*ft", hc_moments[2].M_neg_left) ≈ ustrip(u"kip*ft", hc_moments[4].M_neg_right) rtol=0.01
-        @test ustrip(u"kip*ft", hc_moments[2].M_neg_right) ≈ ustrip(u"kip*ft", hc_moments[4].M_neg_left) rtol=0.01
-        @test ustrip(u"kip*ft", hc_moments[2].M_pos) ≈ ustrip(u"kip*ft", hc_moments[4].M_pos) rtol=0.01
+        @test ustrip(kip*u"ft", hc_moments[2].M_neg_left) ≈ ustrip(kip*u"ft", hc_moments[4].M_neg_right) rtol=0.01
+        @test ustrip(kip*u"ft", hc_moments[2].M_neg_right) ≈ ustrip(kip*u"ft", hc_moments[4].M_neg_left) rtol=0.01
+        @test ustrip(kip*u"ft", hc_moments[2].M_pos) ≈ ustrip(kip*u"ft", hc_moments[4].M_pos) rtol=0.01
         
         # Center span (3) should be symmetric
-        @test ustrip(u"kip*ft", hc_moments[3].M_neg_left) ≈ ustrip(u"kip*ft", hc_moments[3].M_neg_right) rtol=0.01
+        @test ustrip(kip*u"ft", hc_moments[3].M_neg_left) ≈ ustrip(kip*u"ft", hc_moments[3].M_neg_right) rtol=0.01
         
         # Exterior moments should be less than first interior (typical for flat plates)
-        @test ustrip(u"kip*ft", hc_moments[1].M_neg_left) < ustrip(u"kip*ft", hc_moments[1].M_neg_right)
+        @test ustrip(kip*u"ft", hc_moments[1].M_neg_left) < ustrip(kip*u"ft", hc_moments[1].M_neg_right)
         
         # Positive moments: exterior spans should have larger positive moment than interior
-        @test ustrip(u"kip*ft", hc_moments[1].M_pos) > ustrip(u"kip*ft", hc_moments[3].M_pos)
+        @test ustrip(kip*u"ft", hc_moments[1].M_pos) > ustrip(kip*u"ft", hc_moments[3].M_pos)
     end
     
     @testset "6-Span Frame - Even Number" begin
@@ -125,18 +125,18 @@ using StructuralSizer
         
         println("\n=== 6-Span Hardy Cross Results ===")
         for (i, m) in enumerate(hc_moments)
-            println("Span $i: M_left=$(round(ustrip(u"kip*ft", m.M_neg_left), digits=2)), " *
-                    "M_pos=$(round(ustrip(u"kip*ft", m.M_pos), digits=2)), " *
-                    "M_neg_right=$(round(ustrip(u"kip*ft", m.M_neg_right), digits=2))")
+            println("Span $i: M_left=$(round(ustrip(kip*u"ft", m.M_neg_left), digits=2)), " *
+                    "M_pos=$(round(ustrip(kip*u"ft", m.M_pos), digits=2)), " *
+                    "M_neg_right=$(round(ustrip(kip*u"ft", m.M_neg_right), digits=2))")
         end
         
         # Test symmetry for 6-span (symmetric about centerline between spans 3 and 4)
-        @test ustrip(u"kip*ft", hc_moments[1].M_neg_left) ≈ ustrip(u"kip*ft", hc_moments[6].M_neg_right) rtol=0.01
-        @test ustrip(u"kip*ft", hc_moments[2].M_neg_left) ≈ ustrip(u"kip*ft", hc_moments[5].M_neg_right) rtol=0.01
-        @test ustrip(u"kip*ft", hc_moments[3].M_neg_left) ≈ ustrip(u"kip*ft", hc_moments[4].M_neg_right) rtol=0.01
+        @test ustrip(kip*u"ft", hc_moments[1].M_neg_left) ≈ ustrip(kip*u"ft", hc_moments[6].M_neg_right) rtol=0.01
+        @test ustrip(kip*u"ft", hc_moments[2].M_neg_left) ≈ ustrip(kip*u"ft", hc_moments[5].M_neg_right) rtol=0.01
+        @test ustrip(kip*u"ft", hc_moments[3].M_neg_left) ≈ ustrip(kip*u"ft", hc_moments[4].M_neg_right) rtol=0.01
         
         # Interior spans (3 and 4) should have similar positive moments
-        @test ustrip(u"kip*ft", hc_moments[3].M_pos) ≈ ustrip(u"kip*ft", hc_moments[4].M_pos) rtol=0.01
+        @test ustrip(kip*u"ft", hc_moments[3].M_pos) ≈ ustrip(kip*u"ft", hc_moments[4].M_pos) rtol=0.01
     end
     
     @testset "Hardy Cross vs ASAP Cross-Validation (5 spans)" begin
@@ -190,12 +190,12 @@ using StructuralSizer
         for i in 1:n_spans
             hc = hc_moments[i]
             asap = asap_moments[i]
-            println("  $i  |  $(round(ustrip(u"kip*ft", hc.M_neg_left), digits=1))   |   " *
-                    "$(round(ustrip(u"kip*ft", asap.M_neg_left), digits=1))     |  " *
-                    "$(round(ustrip(u"kip*ft", hc.M_pos), digits=1))   |   " *
-                    "$(round(ustrip(u"kip*ft", asap.M_pos), digits=1))    |   " *
-                    "$(round(ustrip(u"kip*ft", hc.M_neg_right), digits=1))    |    " *
-                    "$(round(ustrip(u"kip*ft", asap.M_neg_right), digits=1))")
+            println("  $i  |  $(round(ustrip(kip*u"ft", hc.M_neg_left), digits=1))   |   " *
+                    "$(round(ustrip(kip*u"ft", asap.M_neg_left), digits=1))     |  " *
+                    "$(round(ustrip(kip*u"ft", hc.M_pos), digits=1))   |   " *
+                    "$(round(ustrip(kip*u"ft", asap.M_pos), digits=1))    |   " *
+                    "$(round(ustrip(kip*u"ft", hc.M_neg_right), digits=1))    |    " *
+                    "$(round(ustrip(kip*u"ft", asap.M_neg_right), digits=1))")
         end
         
         # Compare Hardy Cross vs ASAP — with matching Kc stiffness they should agree within ~5%
@@ -204,11 +204,11 @@ using StructuralSizer
             asap = asap_moments[i]
             
             # Negative moments at supports
-            @test ustrip(u"kip*ft", hc.M_neg_left) ≈ ustrip(u"kip*ft", asap.M_neg_left) rtol=0.05
-            @test ustrip(u"kip*ft", hc.M_neg_right) ≈ ustrip(u"kip*ft", asap.M_neg_right) rtol=0.05
+            @test ustrip(kip*u"ft", hc.M_neg_left) ≈ ustrip(kip*u"ft", asap.M_neg_left) rtol=0.05
+            @test ustrip(kip*u"ft", hc.M_neg_right) ≈ ustrip(kip*u"ft", asap.M_neg_right) rtol=0.05
             
             # Positive moments (slightly larger tolerance — midspan interpolation)
-            @test ustrip(u"kip*ft", hc.M_pos) ≈ ustrip(u"kip*ft", asap.M_pos) rtol=0.10
+            @test ustrip(kip*u"ft", hc.M_pos) ≈ ustrip(kip*u"ft", asap.M_pos) rtol=0.10
         end
     end
     
@@ -269,12 +269,12 @@ using StructuralSizer
         for i in 1:n_spans
             hc = hc_moments[i]
             asap = asap_moments[i]
-            println("  $i  |  $(round(ustrip(u"kip*ft", hc.M_neg_left), digits=1))   |   " *
-                    "$(round(ustrip(u"kip*ft", asap.M_neg_left), digits=1))     |  " *
-                    "$(round(ustrip(u"kip*ft", hc.M_pos), digits=1))   |   " *
-                    "$(round(ustrip(u"kip*ft", asap.M_pos), digits=1))    |   " *
-                    "$(round(ustrip(u"kip*ft", hc.M_neg_right), digits=1))    |    " *
-                    "$(round(ustrip(u"kip*ft", asap.M_neg_right), digits=1))")
+            println("  $i  |  $(round(ustrip(kip*u"ft", hc.M_neg_left), digits=1))   |   " *
+                    "$(round(ustrip(kip*u"ft", asap.M_neg_left), digits=1))     |  " *
+                    "$(round(ustrip(kip*u"ft", hc.M_pos), digits=1))   |   " *
+                    "$(round(ustrip(kip*u"ft", asap.M_pos), digits=1))    |   " *
+                    "$(round(ustrip(kip*u"ft", hc.M_neg_right), digits=1))    |    " *
+                    "$(round(ustrip(kip*u"ft", asap.M_neg_right), digits=1))")
         end
         
         # With Kec reduction, ASAP and Hardy Cross should agree within ~10%
@@ -282,9 +282,9 @@ using StructuralSizer
             hc = hc_moments[i]
             asap = asap_moments[i]
             
-            @test ustrip(u"kip*ft", hc.M_neg_left) ≈ ustrip(u"kip*ft", asap.M_neg_left) rtol=0.10
-            @test ustrip(u"kip*ft", hc.M_neg_right) ≈ ustrip(u"kip*ft", asap.M_neg_right) rtol=0.10
-            @test ustrip(u"kip*ft", hc.M_pos) ≈ ustrip(u"kip*ft", asap.M_pos) rtol=0.15
+            @test ustrip(kip*u"ft", hc.M_neg_left) ≈ ustrip(kip*u"ft", asap.M_neg_left) rtol=0.10
+            @test ustrip(kip*u"ft", hc.M_neg_right) ≈ ustrip(kip*u"ft", asap.M_neg_right) rtol=0.10
+            @test ustrip(kip*u"ft", hc.M_pos) ≈ ustrip(kip*u"ft", asap.M_pos) rtol=0.15
         end
     end
 
@@ -313,16 +313,16 @@ using StructuralSizer
         
         println("\n=== Single Span Results ===")
         m = hc_moments[1]
-        println("M_left = $(round(ustrip(u"kip*ft", m.M_neg_left), digits=2)) kip-ft")
-        println("M_pos  = $(round(ustrip(u"kip*ft", m.M_pos), digits=2)) kip-ft")
-        println("M_right = $(round(ustrip(u"kip*ft", m.M_neg_right), digits=2)) kip-ft")
+        println("M_left = $(round(ustrip(kip*u"ft", m.M_neg_left), digits=2)) kip-ft")
+        println("M_pos  = $(round(ustrip(kip*u"ft", m.M_pos), digits=2)) kip-ft")
+        println("M_right = $(round(ustrip(kip*u"ft", m.M_neg_right), digits=2)) kip-ft")
         
         # Single span should be symmetric
-        @test ustrip(u"kip*ft", m.M_neg_left) ≈ ustrip(u"kip*ft", m.M_neg_right) rtol=0.01
+        @test ustrip(kip*u"ft", m.M_neg_left) ≈ ustrip(kip*u"ft", m.M_neg_right) rtol=0.01
         
         # Moments should be reasonable (not zero, not infinite)
-        @test 0 < ustrip(u"kip*ft", m.M_neg_left) < 100
-        @test 0 < ustrip(u"kip*ft", m.M_pos) < 100
+        @test 0 < ustrip(kip*u"ft", m.M_neg_left) < 100
+        @test 0 < ustrip(kip*u"ft", m.M_pos) < 100
     end
     
     @testset "Convergence for 10 Spans" begin
@@ -351,16 +351,16 @@ using StructuralSizer
         )
         
         println("\n=== 10-Span Results (checking convergence) ===")
-        println("Exterior span 1: M_left=$(round(ustrip(u"kip*ft", hc_moments[1].M_neg_left), digits=2))")
-        println("Center span 5: M_left=$(round(ustrip(u"kip*ft", hc_moments[5].M_neg_left), digits=2))")
-        println("Center span 6: M_left=$(round(ustrip(u"kip*ft", hc_moments[6].M_neg_left), digits=2))")
+        println("Exterior span 1: M_left=$(round(ustrip(kip*u"ft", hc_moments[1].M_neg_left), digits=2))")
+        println("Center span 5: M_left=$(round(ustrip(kip*u"ft", hc_moments[5].M_neg_left), digits=2))")
+        println("Center span 6: M_left=$(round(ustrip(kip*u"ft", hc_moments[6].M_neg_left), digits=2))")
         
         # Verify symmetry (1 mirrors 10, 5 mirrors 6 at center)
-        @test ustrip(u"kip*ft", hc_moments[1].M_neg_left) ≈ ustrip(u"kip*ft", hc_moments[10].M_neg_right) rtol=0.01
-        @test ustrip(u"kip*ft", hc_moments[5].M_neg_left) ≈ ustrip(u"kip*ft", hc_moments[6].M_neg_right) rtol=0.01
+        @test ustrip(kip*u"ft", hc_moments[1].M_neg_left) ≈ ustrip(kip*u"ft", hc_moments[10].M_neg_right) rtol=0.01
+        @test ustrip(kip*u"ft", hc_moments[5].M_neg_left) ≈ ustrip(kip*u"ft", hc_moments[6].M_neg_right) rtol=0.01
         
         # Interior spans should have stabilized moments
-        @test ustrip(u"kip*ft", hc_moments[5].M_neg_left) ≈ ustrip(u"kip*ft", hc_moments[5].M_neg_right) rtol=0.02
+        @test ustrip(kip*u"ft", hc_moments[5].M_neg_left) ≈ ustrip(kip*u"ft", hc_moments[5].M_neg_right) rtol=0.02
     end
 end
 

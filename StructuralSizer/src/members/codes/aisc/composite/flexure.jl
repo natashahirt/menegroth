@@ -271,37 +271,45 @@ end
 
 """
     find_required_ΣQn(section::ISymmSection, material, slab::AbstractSlabOnBeam,
-                      b_eff, Mn_required, Qn; ϕ=0.9) -> (ΣQn, n_studs_half)
+                      b_eff, Mu_required, Qn; ϕ=0.9) -> (ΣQn, n_studs_half, sufficient)
 
-Binary search for the minimum ΣQn (total stud strength between zero and max moment)
-that provides ϕMn ≥ Mn_required.
+Find the minimum number of studs per half-span such that `ϕMn ≥ Mu_required`.
 
-Returns `ΣQn` and `n_studs_half` (studs per half-span, rounded up).
-If full composite is required, returns the maximum ΣQn.
+Uses a binary search on continuous ΣQn to locate the capacity threshold, then
+rounds up to the next integer stud count (`n = ceil(ΣQn / Qn)`).  This matches
+the AISC partial-composite design procedure where you determine the required
+ΣQn and then provide enough studs to achieve it.
+
+`Mu_required` is the *factored* moment demand (e.g. `Mu`).  The function applies
+`ϕ` internally: it searches for the smallest ΣQn where `ϕ × Mn(ΣQn) ≥ Mu`.
+
+AISC I3.2d(5) minimum `ΣQn ≥ 0.25 Cf_max` is enforced.
 
 # Arguments
+- `Mu_required`: Required flexural strength (factored moment).
 - `Qn`: Nominal shear strength of a single stud (from `get_Qn`).
+- `ϕ`: Resistance factor (default 0.9, AISC I3.2a).
 """
 function find_required_ΣQn(section::ISymmSection, material, slab::AbstractSlabOnBeam,
-                           b_eff, Mn_required, Qn; ϕ=0.9)
+                           b_eff, Mu_required, Qn; ϕ=0.9)
     Cf_max = _Cf_max(section, material, slab, b_eff)
 
     # Check if even full composite is insufficient
     result_full = get_Mn_composite(section, material, slab, b_eff, Cf_max)
-    if ϕ * result_full.Mn < Mn_required
+    if ϕ * result_full.Mn < Mu_required
         return (; ΣQn=Cf_max, n_studs_half=ceil(Int, ustrip(u"N", Cf_max) / ustrip(u"N", Qn)),
                  sufficient=false)
     end
 
+    # Binary search for the continuous ΣQn threshold
     # AISC I3.2d(5): minimum ΣQn ≥ 0.25 × Cf_max
     ΣQn_lo = 0.25 * Cf_max
     ΣQn_hi = Cf_max
 
-    # Binary search
     for _ in 1:50
         ΣQn_mid = (ΣQn_lo + ΣQn_hi) / 2
         result_mid = get_Mn_composite(section, material, slab, b_eff, ΣQn_mid)
-        if ϕ * result_mid.Mn >= Mn_required
+        if ϕ * result_mid.Mn >= Mu_required
             ΣQn_hi = ΣQn_mid
         else
             ΣQn_lo = ΣQn_mid
@@ -311,8 +319,9 @@ function find_required_ΣQn(section::ISymmSection, material, slab::AbstractSlabO
         end
     end
 
-    ΣQn = ΣQn_hi  # conservative: use upper bound
-    n_studs_half = ceil(Int, ustrip(u"N", ΣQn) / ustrip(u"N", Qn))
+    # Round up to integer stud count
+    n_studs_half = ceil(Int, ustrip(u"N", ΣQn_hi) / ustrip(u"N", Qn))
+    ΣQn = n_studs_half * Qn
 
     return (; ΣQn=ΣQn, n_studs_half=n_studs_half, sufficient=true)
 end

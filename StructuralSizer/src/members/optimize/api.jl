@@ -74,8 +74,9 @@ function size_columns(
     geometries::Vector,
     opts::SteelMemberOptions;
     Muy::Vector = zeros_like(Mux),
-    Vu_strong::Vector = zeros_like(Mux),
+    Vu_strong::Vector = zeros_like(Pu),
     δ_max_vec::Union{Nothing, Vector} = nothing,
+    δ_max_total_vec::Union{Nothing, Vector} = nothing,
     I_ref_vec::Union{Nothing, Vector} = nothing,
     mip_gap::Real = 1e-4,
     output_flag::Integer = 0,
@@ -84,30 +85,29 @@ function size_columns(
     n == length(Mux) || throw(ArgumentError("Pu and Mux must have same length"))
     n == length(geometries) || throw(ArgumentError("demands and geometries must have same length"))
     
-    # Convert geometries if needed
     steel_geoms = [to_steel_geometry(g) for g in geometries]
     
-    # Build catalog
     cat = isnothing(opts.custom_catalog) ? 
         steel_column_catalog(opts.section_type, opts.catalog) : 
         opts.custom_catalog
     
-    # Convert forces/moments to SI (N, N·m) - handles any Unitful input
     Pu_N = [to_newtons(p) for p in Pu]
     Mux_Nm = [to_newton_meters(m) for m in Mux]
     Muy_Nm = [to_newton_meters(m) for m in Muy]
     Vus_N  = [to_newtons(v) for v in Vu_strong]
 
-    # Convert deflection vectors to SI if provided
-    δ_m  = isnothing(δ_max_vec) ? zeros(n) : [to_meters(d) for d in δ_max_vec]
-    Ir_m4 = isnothing(I_ref_vec) ? ones(n) : [to_meters_fourth(r) for r in I_ref_vec]
+    δ_m    = isnothing(δ_max_vec)       ? zeros(n) : [to_meters(d) for d in δ_max_vec]
+    δ_tot  = isnothing(δ_max_total_vec) ? zeros(n) : [to_meters(d) for d in δ_max_total_vec]
+    Ir_m4  = isnothing(I_ref_vec)       ? ones(n)  : [to_meters_fourth(r) for r in I_ref_vec]
     
-    # Build demands (SI units)
     demands = [MemberDemand(i; Pu_c=Pu_N[i], Mux=Mux_Nm[i], Muy=Muy_Nm[i],
-                               Vu_strong=Vus_N[i], δ_max=δ_m[i], I_ref=Ir_m4[i]) for i in 1:n]
+                               Vu_strong=Vus_N[i],
+                               δ_max_LL=δ_m[i], δ_max_total=δ_tot[i],
+                               I_ref=Ir_m4[i]) for i in 1:n]
     
     checker = AISCChecker(; max_depth = opts.max_depth,
-                            deflection_limit = _deflection_limit(opts))
+                            deflection_limit = _deflection_limit(opts),
+                            total_deflection_limit = _total_deflection_limit(opts))
     
     # Optimize — multi-material if materials vector is provided
     if !isnothing(opts.materials)
@@ -115,7 +115,7 @@ function size_columns(
             checker, demands, steel_geoms, cat, opts.materials;
             objective = opts.objective,
             n_max_sections = opts.n_max_sections,
-            optimizer = opts.optimizer,
+            optimizer = opts.solver,
             mip_gap = mip_gap,
             output_flag = output_flag,
         )
@@ -124,7 +124,7 @@ function size_columns(
             checker, demands, steel_geoms, cat, opts.material;
             objective = opts.objective,
             n_max_sections = opts.n_max_sections,
-            optimizer = opts.optimizer,
+            optimizer = opts.solver,
             mip_gap = mip_gap,
             output_flag = output_flag,
         )
@@ -175,27 +175,27 @@ function size_columns(
     checker = ACIColumnChecker(;
         include_slenderness = opts.include_slenderness,
         include_biaxial = opts.include_biaxial,
-        fy_ksi = ustrip(ksi, opts.rebar_grade.Fy),
-        Es_ksi = ustrip(ksi, opts.rebar_grade.E),
+        fy_ksi = ustrip(ksi, opts.rebar_material.Fy),
+        Es_ksi = ustrip(ksi, opts.rebar_material.E),
         max_depth = opts.max_depth,
     )
     
     # Optimize — multi-material if grades vector is provided
-    if !isnothing(opts.grades)
+    if !isnothing(opts.materials)
         return optimize_discrete(
-            checker, demands, conc_geoms, cat, opts.grades;
+            checker, demands, conc_geoms, cat, opts.materials;
             objective = opts.objective,
             n_max_sections = opts.n_max_sections,
-            optimizer = opts.optimizer,
+            optimizer = opts.solver,
             mip_gap = mip_gap,
             output_flag = output_flag,
         )
     else
         return optimize_discrete(
-            checker, demands, conc_geoms, cat, opts.grade;
+            checker, demands, conc_geoms, cat, opts.material;
             objective = opts.objective,
             n_max_sections = opts.n_max_sections,
-            optimizer = opts.optimizer,
+            optimizer = opts.solver,
             mip_gap = mip_gap,
             output_flag = output_flag,
             cache = cache,
@@ -222,8 +222,8 @@ function _size_columns_nlp(
     max_dim = isfinite(opts.max_depth) ? opts.max_depth : 48.0u"inch"
 
     nlp_opts = NLPColumnOptions(
-        grade               = opts.grade,
-        rebar_grade         = opts.rebar_grade,
+        material            = opts.material,
+        rebar_material      = opts.rebar_material,
         cover               = opts.cover,
         tie_type            = :tied,
         min_dim             = 8.0u"inch",
@@ -248,7 +248,12 @@ function _size_columns_nlp(
     # Wrap into MIP-compatible result shape so the slab pipeline can read
     # column_result.sections[i] without knowing which strategy was used.
     sections = [r.section for r in nlp_results]
-    obj_val  = sum(r.area for r in nlp_results)
+    # Match MIP path: objective_value = total volume (m³) or weight (kg) per opts.objective
+    concrete = opts.material isa ReinforcedConcreteMaterial ? opts.material.concrete : opts.material
+    obj_val  = ustrip(sum(
+        objective_value(opts.objective, r.section, concrete, conc_geoms[i].L)
+        for (i, r) in enumerate(nlp_results)
+    ))
 
     return (;
         section_indices = collect(1:length(sections)),
@@ -411,29 +416,29 @@ function size_beams(
 
     # Create checker
     checker = ACIBeamChecker(;
-        fy_ksi  = ustrip(ksi, opts.rebar_grade.Fy),
+        fy_ksi  = ustrip(ksi, opts.rebar_material.Fy),
         fyt_ksi = ustrip(ksi, get_transverse_rebar(opts).Fy),
-        Es_ksi  = ustrip(ksi, opts.rebar_grade.E),
-        λ       = opts.grade.λ,       # Lightweight factor from Concrete type
+        Es_ksi  = ustrip(ksi, opts.rebar_material.E),
+        λ       = opts.material.λ,       # Lightweight factor from Concrete type
         max_depth = opts.max_depth,
     )
 
     # Optimize — multi-material if grades vector is provided
-    if !isnothing(opts.grades)
+    if !isnothing(opts.materials)
         return optimize_discrete(
-            checker, demands, conc_geoms, cat, opts.grades;
+            checker, demands, conc_geoms, cat, opts.materials;
             objective      = opts.objective,
             n_max_sections = opts.n_max_sections,
-            optimizer      = opts.optimizer,
+            optimizer      = opts.solver,
             mip_gap        = mip_gap,
             output_flag    = output_flag,
         )
     else
         return optimize_discrete(
-            checker, demands, conc_geoms, cat, opts.grade;
+            checker, demands, conc_geoms, cat, opts.material;
             objective      = opts.objective,
             n_max_sections = opts.n_max_sections,
-            optimizer      = opts.optimizer,
+            optimizer      = opts.solver,
             mip_gap        = mip_gap,
             output_flag    = output_flag,
         )
@@ -445,7 +450,7 @@ end
 # ==============================================================================
 
 """
-    size_beams(Mu, Vu, geometries, opts::SteelBeamOptions; δ_max_vec, I_ref_vec, ...)
+    size_beams(Mu, Vu, geometries, opts::SteelBeamOptions; δ_max_vec, δ_max_total_vec, I_ref_vec, ...)
 
 Size steel beams using discrete catalog optimization.
 
@@ -453,18 +458,18 @@ Uses the AISC 360 checker with zero axial load (pure flexure). The same
 checker handles both beams and columns, so this is a thin wrapper around
 `size_columns` with `Pu = 0`.
 
-# Deflection constraint
+# Deflection constraints
 
 When `opts.deflection_limit` is set (e.g. `1/360`), the optimizer enforces
-`δ_scaled / L ≤ deflection_limit` where `δ_scaled = δ_max × I_ref / Ix`.
+`δ_scaled / L ≤ deflection_limit` where `δ_scaled = δ_max_LL × I_ref / Ix`.
+Similarly for `opts.total_deflection_limit` (e.g. `1/240`) using `δ_max_total`.
 
-Pass `δ_max_vec` and `I_ref_vec` from an Asap FEM analysis (or equivalent).
-`δ_max` is the max local deflection from analysis, and `I_ref` is the Ix of
-the section used in that analysis. The checker then scales deflection linearly
-with `1/Ix` for each candidate section.
+Pass `δ_max_vec` (LL) and/or `δ_max_total_vec` (DL+LL), plus `I_ref_vec`,
+from an Asap FEM analysis (or equivalent). The checker scales deflection
+linearly with `1/Ix` for each candidate section.
 
-Without `δ_max_vec`/`I_ref_vec`, the deflection check is skipped even if
-`deflection_limit` is set (consistent with the checker requiring δ_max > 0).
+Without the deflection vectors, the checks are skipped (consistent with
+the checker requiring δ_max_LL > 0 / δ_max_total > 0).
 
 # Arguments
 - `Mu`: Vector of factored moments — any moment unit (N·m, kN·m, kip·ft, etc.)
@@ -473,7 +478,8 @@ Without `δ_max_vec`/`I_ref_vec`, the deflection check is skipped even if
 - `opts`: `SteelBeamOptions`
 
 # Keyword Arguments
-- `δ_max_vec`: Max deflection from analysis for each beam (length unit, e.g. m or inch).
+- `δ_max_vec`: Max LL deflection from analysis for each beam (length unit, e.g. m or inch).
+- `δ_max_total_vec`: Max DL+LL service deflection for each beam (length unit).
 - `I_ref_vec`: Reference Ix used in the analysis for each beam (length⁴ unit).
 - `mip_gap`: MIP optimality gap (default 1e-4)
 - `output_flag`: Solver verbosity (default 0)
@@ -494,7 +500,7 @@ geoms = [SteelMemberGeometry(8.0; Kx=1.0, Ky=1.0) for _ in 1:2]
 # Strength only
 result = size_beams(Mu, Vu, geoms, SteelBeamOptions(section_type=:w))
 
-# With L/360 deflection constraint (δ_max and I_ref from Asap analysis)
+# With L/360 deflection constraint (δ_max_LL and I_ref from Asap analysis)
 opts = SteelBeamOptions(section_type=:w, deflection_limit=1/360)
 result = size_beams(Mu, Vu, geoms, opts;
                     δ_max_vec=[0.025, 0.030],   # meters
@@ -507,6 +513,7 @@ function size_beams(
     geometries::Vector,
     opts::SteelBeamOptions;
     δ_max_vec::Union{Nothing, Vector} = nothing,
+    δ_max_total_vec::Union{Nothing, Vector} = nothing,
     I_ref_vec::Union{Nothing, Vector} = nothing,
     mip_gap::Real = 1e-4,
     output_flag::Integer = 0,
@@ -514,7 +521,9 @@ function size_beams(
     Pu_zero = [zero(Vu[1]) for _ in Mu]
     return size_columns(Pu_zero, Mu, geometries, opts;
                         Vu_strong=Vu,
-                        δ_max_vec=δ_max_vec, I_ref_vec=I_ref_vec,
+                        δ_max_vec=δ_max_vec,
+                        δ_max_total_vec=δ_max_total_vec,
+                        I_ref_vec=I_ref_vec,
                         mip_gap=mip_gap, output_flag=output_flag)
 end
 
@@ -613,7 +622,7 @@ function size_beams(
         checker, demands, conc_geoms, cat, mat;
         objective      = opts.objective,
         n_max_sections = opts.n_max_sections,
-        optimizer      = opts.optimizer,
+        optimizer      = opts.solver,
         mip_gap        = mip_gap,
         output_flag    = output_flag,
     )
@@ -715,7 +724,7 @@ function size_columns(
         checker, demands, conc_geoms, cat, mat;
         objective      = opts.objective,
         n_max_sections = opts.n_max_sections,
-        optimizer      = opts.optimizer,
+        optimizer      = opts.solver,
         mip_gap        = mip_gap,
         output_flag    = output_flag,
     )
@@ -841,7 +850,7 @@ println("Optimal: \$(result.b_final)\" × \$(result.h_final)\"")
 
 # Custom options
 opts = NLPColumnOptions(
-    grade = NWC_5000,
+    material = NWC_5000,
     min_dim = 14.0u"inch",
     max_dim = 30.0u"inch",
     prefer_square = 0.1,
@@ -1437,7 +1446,7 @@ result = size_steel_w_beam_nlp(150.0u"kN*m", 100.0u"kN",
     NLPWOptions(min_depth=8.0u"inch", max_depth=24.0u"inch"))
 
 # With deflection constraint
-Ix_req = required_Ix_for_deflection(0.8u"kip/ft", 25.0u"ft", 29000.0u"ksi")
+Ix_req = required_Ix_for_deflection(0.8kip/u"ft", 25.0u"ft", 29000.0ksi)
 result = size_steel_w_beam_nlp(Mu, Vu, geom, opts; Ix_min=Ix_req)
 ```
 """
@@ -1447,11 +1456,12 @@ function size_steel_w_beam_nlp(
     geometry::SteelMemberGeometry,
     opts::NLPWOptions;
     Ix_min = nothing,
+    Ix_min_total = nothing,
     Tu = 0.0,
     L_span = nothing,
     x0::Union{Nothing,Vector{Float64}} = nothing,
 )
-    problem = SteelWBeamNLPProblem(Mu, Vu, geometry, opts; Ix_min=Ix_min, Tu=Tu, L_span=L_span)
+    problem = SteelWBeamNLPProblem(Mu, Vu, geometry, opts; Ix_min=Ix_min, Ix_min_total=Ix_min_total, Tu=Tu, L_span=L_span)
     
     opt_result = optimize_continuous(
         problem;
@@ -1530,10 +1540,11 @@ function size_steel_hss_beam_nlp(
     Vu,
     opts::NLPHSSOptions;
     Ix_min = nothing,
+    Ix_min_total = nothing,
     Tu = 0.0,
     x0::Union{Nothing,Vector{Float64}} = nothing,
 )
-    problem = SteelHSSBeamNLPProblem(Mu, Vu, opts; Ix_min=Ix_min, Tu=Tu)
+    problem = SteelHSSBeamNLPProblem(Mu, Vu, opts; Ix_min=Ix_min, Ix_min_total=Ix_min_total, Tu=Tu)
     
     opt_result = optimize_continuous(
         problem;
@@ -1686,10 +1697,10 @@ function size_tbeams(
 
     # Create checker (with optional deflection)
     checker = ACIBeamChecker(;
-        fy_ksi  = ustrip(ksi, opts.rebar_grade.Fy),
+        fy_ksi  = ustrip(ksi, opts.rebar_material.Fy),
         fyt_ksi = ustrip(ksi, get_transverse_rebar(opts).Fy),
-        Es_ksi  = ustrip(ksi, opts.rebar_grade.E),
-        λ       = opts.grade.λ,
+        Es_ksi  = ustrip(ksi, opts.rebar_material.E),
+        λ       = opts.material.λ,
         max_depth = opts.max_depth,
         w_dead_kplf = wd_kplf,
         w_live_kplf = wl_kplf,
@@ -1698,10 +1709,10 @@ function size_tbeams(
     )
 
     return optimize_discrete(
-        checker, demands, conc_geoms, cat, opts.grade;
+        checker, demands, conc_geoms, cat, opts.material;
         objective      = opts.objective,
         n_max_sections = opts.n_max_sections,
-        optimizer      = opts.optimizer,
+        optimizer      = opts.solver,
         mip_gap        = mip_gap,
         output_flag    = output_flag,
     )

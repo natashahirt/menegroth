@@ -107,7 +107,7 @@ function _choose_mip_optimizer(optimizer::Symbol)
     if optimizer === :highs
         return (() -> HiGHS.Optimizer()), :highs
     elseif optimizer === :gurobi
-        _HAS_GUROBI[] || throw(ArgumentError("optimizer=:gurobi requested, but Gurobi.jl is not available in this environment."))
+        _HAS_GUROBI[] || throw(ArgumentError("solver=:gurobi requested, but Gurobi.jl is not available in this environment."))
         return (() -> Gurobi.Optimizer(_get_gurobi_env())), :gurobi
     elseif optimizer === :auto
         if _HAS_GUROBI[]
@@ -119,7 +119,7 @@ function _choose_mip_optimizer(optimizer::Symbol)
                 _HAS_GUROBI[] = false
             end
         end
-        return (() -> HiGHS.Optimizer(), :highs)
+        return (() -> HiGHS.Optimizer()), :highs
     else
         throw(ArgumentError("Unknown optimizer=$optimizer. Use :auto, :gurobi, or :highs."))
     end
@@ -282,8 +282,14 @@ function optimize_discrete(
     JuMP.optimize!(m)
     
     status = JuMP.termination_status(m)
-    status == JuMP.MOI.OPTIMAL || status == JuMP.MOI.TIME_LIMIT ||
+    if status == JuMP.MOI.TIME_LIMIT
+        ps = JuMP.primal_status(m)
+        ps == JuMP.MOI.FEASIBLE_POINT ||
+            error("MIP timed out with no feasible solution (primal_status=$ps)")
+        @warn "MIP hit TIME_LIMIT but has a feasible solution — result may be suboptimal"
+    elseif status != JuMP.MOI.OPTIMAL
         @warn "MIP did not reach OPTIMAL" status
+    end
     
     # Extract solution
     section_indices = Vector{Int}(undef, n_groups)
@@ -464,8 +470,13 @@ function optimize_discrete(
     JuMP.optimize!(m)
 
     status = JuMP.termination_status(m)
-    status == JuMP.MOI.OPTIMAL || status == JuMP.MOI.TIME_LIMIT ||
+    if status == JuMP.MOI.TIME_LIMIT
+        ps = JuMP.primal_status(m)
+        ps == JuMP.MOI.FEASIBLE_POINT ||
+            error("Multi-material MIP timed out with no feasible solution (primal_status=$ps)")
+    elseif status != JuMP.MOI.OPTIMAL
         @warn "Multi-material MIP did not reach OPTIMAL" status
+    end
 
     # Extract solution
     section_indices = Vector{Int}(undef, n_groups)

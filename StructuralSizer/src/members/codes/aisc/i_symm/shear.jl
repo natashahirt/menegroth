@@ -18,8 +18,16 @@ function get_Cv1(s::ISymmSection, mat::Metal; kv=5.34, rolled=true)
         limit = 2.24 * sqrt(E / Fy)
         Cv1 = λ_w <= limit ? 1.0 : 1.10 * sqrt(kv * E / Fy) / λ_w
     else
-        limit = 1.10 * sqrt(kv * E / Fy)
-        Cv1 = λ_w <= limit ? 1.0 : 1.10 * sqrt(kv * E / Fy) / λ_w
+        # Built-up sections: three-branch Cv1 per AISC G2.1(b)
+        limit_inelastic = 1.10 * sqrt(kv * E / Fy)
+        limit_elastic   = 1.37 * sqrt(kv * E / Fy)
+        if λ_w <= limit_inelastic
+            Cv1 = 1.0
+        elseif λ_w <= limit_elastic
+            Cv1 = 1.10 * sqrt(kv * E / Fy) / λ_w
+        else
+            Cv1 = 1.51 * kv * E / (Fy * λ_w^2)  # Elastic web buckling
+        end
     end
     return Cv1
 end

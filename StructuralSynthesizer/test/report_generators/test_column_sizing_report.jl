@@ -176,8 +176,8 @@ rc_geom = ConcreteMemberGeometry(4.0; k=1.0, braced=true)
 println("\n  2.1  MIP (Discrete Catalog) Sizing")
 
 rc_rect_cat_opts = ConcreteColumnOptions(
-    grade            = NWC_4000,
-    rebar_grade      = Rebar_60,
+    material         = NWC_4000,
+    rebar_material   = Rebar_60,
     section_shape    = :rect,
     include_slenderness = false,   # match NLP for fair comparison
     objective        = MinVolume(),
@@ -201,8 +201,8 @@ println("    φMn at Pu       : $(round(mip_check.φMn_at_Pu, digits=1)) kip·ft
 println("\n  2.2  NLP (Continuous Optimization) Sizing")
 
 rc_rect_nlp_base = (
-    grade         = NWC_4000,
-    rebar_grade   = Rebar_60,
+    material      = NWC_4000,
+    rebar_material = Rebar_60,
     max_dim       = 30.0u"inch",
     min_dim       = 8.0u"inch",
     include_slenderness = false,
@@ -281,8 +281,8 @@ circ_geom = ConcreteMemberGeometry(4.0; k=1.0, braced=true)
 println("\n  3.1  MIP (Discrete Catalog) Sizing")
 
 rc_circ_opts = ConcreteColumnOptions(
-    grade            = NWC_4000,
-    rebar_grade      = Rebar_60,
+    material         = NWC_4000,
+    rebar_material   = Rebar_60,
     section_shape    = :circular,
     include_slenderness = false,
     objective        = MinVolume(),
@@ -306,8 +306,8 @@ println("    φMn at Pu       : $(round(circ_check.φMn_at_Pu, digits=1)) kip·f
 println("\n  3.2  NLP (Continuous Optimization) Sizing")
 
 circ_nlp_base = (
-    grade         = NWC_4000,
-    rebar_grade   = Rebar_60,
+    material      = NWC_4000,
+    rebar_material = Rebar_60,
     tie_type      = :spiral,
     max_dim       = 36.0u"inch",
     min_dim       = 10.0u"inch",
@@ -971,7 +971,7 @@ ccmp_L  = 4.0  # m
 # RC Rectangular
 ccmp_rc_rect = size_columns([ccmp_Pu], [ccmp_Mu],
     [ConcreteMemberGeometry(ccmp_L; k=1.0, braced=true)],
-    ConcreteColumnOptions(grade=NWC_4000, section_shape=:rect, include_slenderness=false))
+    ConcreteColumnOptions(material=NWC_4000, section_shape=:rect, include_slenderness=false))
 ccmp_rc_rect_sec = ccmp_rc_rect.sections[1]
 ccmp_rc_rect_area = ustrip(u"mm^2", section_area(ccmp_rc_rect_sec))
 ccmp_rc_rect_chk = rc_column_utilization(ccmp_rc_rect_sec, NWC_4000, Rebar_60,
@@ -982,7 +982,7 @@ ccmp_rc_rect_Mu_kNm = ccmp_rc_rect_chk.φMn_at_Pu * ustrip(u"kN*m", 1.0kip * u"f
 # RC Circular
 ccmp_rc_circ = size_columns([ccmp_Pu], [ccmp_Mu],
     [ConcreteMemberGeometry(ccmp_L; k=1.0, braced=true)],
-    ConcreteColumnOptions(grade=NWC_4000, section_shape=:circular, include_slenderness=false))
+    ConcreteColumnOptions(material=NWC_4000, section_shape=:circular, include_slenderness=false))
 ccmp_rc_circ_sec = ccmp_rc_circ.sections[1]
 ccmp_rc_circ_area = ustrip(u"mm^2", section_area(ccmp_rc_circ_sec))
 

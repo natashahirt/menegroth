@@ -31,7 +31,7 @@ All demand types subtype `AbstractDemand` and all geometry types subtype `Abstra
 | `M1y`, `M2y` | Smaller / larger end moments, weak axis (for B1 amplification) |
 | `Vu_strong`, `Vu_weak` | Strong-axis and weak-axis shear |
 | `Tu` | Factored torsion (set to 0 when torsion is not present) |
-| `δ_max`, `I_ref` | Max local deflection and reference moment of inertia from analysis (for deflection scaling) |
+| `δ_max_LL`, `δ_max_total`, `I_ref` | Max live-load deflection, max total deflection, and reference moment of inertia from analysis (for deflection scaling) |
 | `transverse_load` | Whether transverse loading exists between supports (affects Cm) |
 
 **`RCColumnDemand{T}`**

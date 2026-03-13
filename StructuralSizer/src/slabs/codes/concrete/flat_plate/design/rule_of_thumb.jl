@@ -129,14 +129,14 @@ function check_flat_plate_at_thickness!(
         _col_checker = ACIColumnChecker(;
             include_slenderness = column_opts.include_slenderness,
             include_biaxial     = column_opts.include_biaxial,
-            fy_ksi = ustrip(ksi, column_opts.rebar_grade.Fy),
-            Es_ksi = ustrip(ksi, column_opts.rebar_grade.E),
+            fy_ksi = ustrip(ksi, column_opts.rebar_material.Fy),
+            Es_ksi = ustrip(ksi, column_opts.rebar_material.E),
             max_depth = column_opts.max_depth,
         )
 
         _col_cache = create_cache(_col_checker, length(_col_cat))
         precompute_capacities!(_col_checker, _col_cache, _col_cat,
-                               column_opts.grade, column_opts.objective)
+                               column_opts.material, column_opts.objective)
     end
 
     local_to_global = let
@@ -448,7 +448,7 @@ function check_flat_plate_at_thickness!(
     for cell_idx in slab.cell_indices
         struc.cells[cell_idx].self_weight = sw_final
     end
-    update_asap_column_sections!(struc, columns, column_opts.grade)
+    update_asap_column_sections!(struc, columns, column_opts.material)
 
     punching_results = Dict{Int, NamedTuple}(
         local_to_global[i] => punching_local[i] for i in 1:n_cols

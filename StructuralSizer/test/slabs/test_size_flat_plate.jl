@@ -41,9 +41,9 @@ function create_mock_structure()
             id = 1,
             face_idx = 1,
             area = 18u"ft" * 14u"ft",
-            sdl = 20u"psf",     # Superimposed dead load
-            live_load = 50u"psf",
-            self_weight = 0u"psf",  # Will be computed
+            sdl = 20psf,     # Superimposed dead load
+            live_load = 50psf,
+            self_weight = 0psf,  # Will be computed
             spans = (primary = 18u"ft", secondary = 14u"ft"),
         )
     ]
@@ -83,9 +83,9 @@ mutable struct MutableCell
     id::Int
     face_idx::Int
     area::typeof(1.0u"ft^2")
-    sdl::typeof(1.0u"psf")
-    live_load::typeof(1.0u"psf")
-    self_weight::typeof(1.0u"psf")
+    sdl::typeof(1.0psf)
+    live_load::typeof(1.0psf)
+    self_weight::typeof(1.0psf)
     spans::NamedTuple{(:primary, :secondary), Tuple{typeof(1.0u"ft"), typeof(1.0u"ft")}}
 end
 
@@ -222,29 +222,29 @@ end
         # For end span, no edge beam:
         # Exterior neg: 0.26, Pos: 0.52, Interior neg: 0.70
         
-        M0 = 100u"kip*ft"  # Example total static moment
+        M0 = 100kip*u"ft"  # Example total static moment
         
         # These would be computed by _run_moment_analysis
         M_neg_ext = 0.26 * M0
         M_neg_int = 0.70 * M0
         M_pos = 0.52 * M0
         
-        @test ustrip(u"kip*ft", M_neg_ext) ≈ 26 rtol=0.01
-        @test ustrip(u"kip*ft", M_neg_int) ≈ 70 rtol=0.01
-        @test ustrip(u"kip*ft", M_pos) ≈ 52 rtol=0.01
+        @test ustrip(kip*u"ft", M_neg_ext) ≈ 26 rtol=0.01
+        @test ustrip(kip*u"ft", M_neg_int) ≈ 70 rtol=0.01
+        @test ustrip(kip*u"ft", M_pos) ≈ 52 rtol=0.01
     end
     
     @testset "MDDM Coefficients" begin
         # MDDM uses simplified coefficients
         # Negative: 0.65, Positive: 0.35
         
-        M0 = 100u"kip*ft"
+        M0 = 100kip*u"ft"
         
         M_neg = 0.65 * M0
         M_pos = 0.35 * M0
         
-        @test ustrip(u"kip*ft", M_neg) ≈ 65 rtol=0.01
-        @test ustrip(u"kip*ft", M_pos) ≈ 35 rtol=0.01
+        @test ustrip(kip*u"ft", M_neg) ≈ 65 rtol=0.01
+        @test ustrip(kip*u"ft", M_pos) ≈ 35 rtol=0.01
         @test M_neg + M_pos ≈ M0 rtol=0.01  # MDDM sums to M0
     end
 end
@@ -255,7 +255,7 @@ end
         # Test that StripReinforcement can be constructed
         sr = StripReinforcement(
             :int_neg,           # location
-            50u"kip*ft",        # Mu
+            50kip*u"ft",        # Mu
             2.0u"inch^2",       # As_reqd
             1.06u"inch^2",      # As_min
             2.36u"inch^2",      # As_provided
@@ -275,15 +275,15 @@ end
         # Test FlatPlatePanelResult structure
         # This tests that the result type has the expected fields
         
-        sr = StripReinforcement(:pos, 30u"kip*ft", 1.2u"inch^2", 1.06u"inch^2", 
+        sr = StripReinforcement(:pos, 30kip*u"ft", 1.2u"inch^2", 1.06u"inch^2", 
                                 1.24u"inch^2", 4, 8u"inch", 10, true)
         
         result = FlatPlatePanelResult(
             18u"ft",            # l1
             14u"ft",            # l2
             7u"inch",           # h
-            94u"kip*ft",        # M0
-            193.0u"psf",        # qu
+            94kip*u"ft",        # M0
+            193.0psf,        # qu
             7u"ft",             # column_strip_width
             [sr, sr, sr],       # column_strip_reinf
             7u"ft",             # middle_strip_width
@@ -327,8 +327,8 @@ end
         # Interior circular column
         col = MutableColumn(1, :interior, 1, 16u"inch", 16u"inch", MutableBase(9u"ft"), :circular)
 
-        Vu = 48u"kip"
-        Mub = 5u"kip*ft"
+        Vu = 48kip
+        Mub = 5kip*u"ft"
 
         result = StructuralSizer.check_punching_for_column(col, Vu, Mub, d, h, fc; verbose=true)
 
@@ -353,8 +353,8 @@ end
         # Edge circular column → converted to equivalent square
         col = MutableColumn(1, :edge, 1, 16u"inch", 16u"inch", MutableBase(9u"ft"), :circular)
 
-        Vu = 22u"kip"
-        Mub = 30u"kip*ft"
+        Vu = 22kip
+        Mub = 30kip*u"ft"
 
         result = StructuralSizer.check_punching_for_column(col, Vu, Mub, d, h, fc; verbose=true)
 
@@ -375,8 +375,8 @@ end
         # Corner circular column → converted to equivalent square
         col = MutableColumn(1, :corner, 1, 16u"inch", 16u"inch", MutableBase(9u"ft"), :circular)
 
-        Vu = 12u"kip"
-        Mub = 15u"kip*ft"
+        Vu = 12kip
+        Mub = 15kip*u"ft"
 
         result = StructuralSizer.check_punching_for_column(col, Vu, Mub, d, h, fc; verbose=true)
 
@@ -392,8 +392,8 @@ end
         fc = 4000u"psi"
         h = 7u"inch"
         d = 5.75u"inch"
-        Vu = 48u"kip"
-        Mub = 5u"kip*ft"
+        Vu = 48kip
+        Mub = 5kip*u"ft"
 
         col_rect = MutableColumn(1, :interior, 1, 16u"inch", 16u"inch", MutableBase(9u"ft"), :rectangular)
         col_circ = MutableColumn(1, :interior, 1, 16u"inch", 16u"inch", MutableBase(9u"ft"), :circular)

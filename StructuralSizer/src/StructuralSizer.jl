@@ -46,12 +46,12 @@ using Asap
 @reexport using Asap: asfloat, maybe_asfloat
 
 """
-Register Unitful units, reset Gurobi pointer caches, and warm up JuMP solvers.
+Reset Gurobi pointer caches and warm up JuMP solvers.
 
 Called automatically at package load time (not precompile time).
+Custom units (ksi, kip, etc.) are exported from Asap and used as bare symbols.
 """
 function __init__()
-    Unitful.register(Asap)
     _reset_gurobi_env!()   # clear stale Gurobi.Env pointer from precompilation
 
     # Skip heavy solver init when we're inside a precompilation worker subprocess
@@ -62,7 +62,7 @@ function __init__()
     # Eagerly initialize Gurobi so the license handshake (~5 s) happens during
     # `using StructuralSizer` rather than surprising users mid-pipeline.
     if _HAS_GUROBI[]
-        try _get_gurobi_env() catch; end
+        try _get_gurobi_env() catch e; @debug "Gurobi init failed" exception=(e, catch_backtrace()); end
     end
     # Warm up the JuMP → solver bridge with a trivial MIP so that the first real
     # optimize_discrete() call doesn't pay ~2-3 s of JIT compilation.
@@ -382,7 +382,7 @@ export deflection_ok, punching_ok, max_punching_ratio, deflection_ratio
 
 # --- Floor common interface ---
 export self_weight, total_depth, volume_per_area
-export has_structural_effects, apply_effects!, required_materials
+export structural_effects, has_structural_effects, apply_effects!, required_materials
 export load_distribution, get_gravity_loads, LoadDistributionType
 export DISTRIBUTION_ONE_WAY, DISTRIBUTION_TWO_WAY, DISTRIBUTION_POINT, DISTRIBUTION_CUSTOM
 export default_tributary_axis, resolve_tributary_axis
@@ -433,6 +433,7 @@ export punching_capacity_with_studs, punching_capacity_outer
 export minimum_stud_reinforcement, stud_area, design_shear_studs, check_punching_with_studs
 export design_shear_cap, check_punching_with_shear_cap
 export design_column_capital, check_punching_with_capital
+export stud_steel_volume, shear_cap_concrete_volume, capital_concrete_volume, drop_panel_concrete_volume
 export design_closed_stirrups, check_punching_with_stirrups
 
 # --- Moment transfer / integrity reinforcement ---

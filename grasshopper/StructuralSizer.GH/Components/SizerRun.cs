@@ -1,5 +1,6 @@
 using System;
-using System.Diagnostics;
+using System.Collections.Generic;
+using System.Linq;
 using System.Net.Http;
 using System.Text;
 using System.Threading;
@@ -12,51 +13,55 @@ using StructuralSizer.GH.Types;
 namespace StructuralSizer.GH.Components
 {
     /// <summary>
-    /// Sends geometry + params to the Julia sizing API and returns the raw
-    /// JSON response.
+    /// Sends geometry + params to the Julia sizing API and returns a parsed
+    /// <see cref="SizerResult"/> object plus the raw JSON and a streaming log.
     ///
     /// Key UX features:
-    ///   • Pre-flight /health check with clear "server not running" message
-    ///   • Async background request — Grasshopper UI stays responsive
-    ///   • Message bar shows current state: Ready, Computing…, ✓ 2.3 s, ✗ Error
-    ///   • Smart caching: unchanged inputs return instantly
-    ///   • Server-side geometry cache: param-only changes skip skeleton rebuild
+    ///   - Pre-flight /health check with clear "server not running" message
+    ///   - Async background request — Grasshopper UI stays responsive
+    ///   - Message bar: Ready → Computing… → ✓ 2.3 s All Pass / ⚠ 3 failures
+    ///   - Smart caching: unchanged inputs return instantly
+    ///   - Server-side geometry cache: param-only changes skip skeleton rebuild
+    ///   - Async submit-then-poll pattern for App Runner 120 s request timeout
     /// </summary>
     public class SizerRun : GH_Component
     {
+        private const string DefaultServerUrl = "http://localhost:8080";
+        private const int PollTimeoutSeconds = 3600;
+        private const int HealthCheckTimeoutSeconds = 3;
+        private const int ScheduleSolutionIntervalMs = 100;
+
         private static readonly HttpClient _client = new HttpClient
         {
             Timeout = TimeSpan.FromHours(1)
         };
 
-        // ─── Cached results ──────────────────────────────────────────────
+        // ─── Persisted state ────────────────────────────────────────────
+        private string _serverUrl = DefaultServerUrl;
+
+        // ─── Cached results ─────────────────────────────────────────────
         private string _lastGeoHash = "";
         private string _lastParamsHash = "";
-        private string _lastResult = "";
-        private string _lastStatus = "";
-        private double _lastComputeTime = 0;
+        private SizerResult _lastParsed;
+        private double _lastComputeTime;
 
-        // ─── Async state machine ─────────────────────────────────────────
+        // ─── Async state machine ────────────────────────────────────────
         private enum RunState { Idle, HealthCheck, Sending, Polling, Done, Error }
-        private volatile int _stateInt = 0; // int-backed for volatile safety
+        private volatile int _stateInt;
         private RunState _state
         {
             get => (RunState)_stateInt;
             set => _stateInt = (int)value;
         }
-        private string _pendingResult = "";
-        private string _pendingStatus = "";
-        private double _pendingTime = 0;
+        private SizerResult _pendingParsed;
         private string _pendingError = "";
         private string _pendingGeoHash = "";
         private string _pendingParamsHash = "";
 
-        // ─── Status log for streaming to Panel ─────────────────────────────
+        // ─── Status log ─────────────────────────────────────────────────
         private readonly object _logLock = new object();
         private readonly StringBuilder _statusLog = new StringBuilder();
-        /// <summary>Current waiting line with timer (e.g. "Waiting for API ready... (12 s)"). Updated every second during poll.</summary>
         private string _waitStatusLine;
-        /// <summary>Set by Cancel menu; when true the async task stops waiting and reports "Cancelled by user".</summary>
         private volatile bool _cancelRequested;
 
         public SizerRun()
@@ -67,9 +72,9 @@ namespace StructuralSizer.GH.Components
         { }
 
         public override Guid ComponentGuid =>
-            new Guid("A1B2C3D4-AAAA-BBBB-CCCC-DDDDEEEE0001");
+            new Guid("54C14B09-90A6-4F8C-BE47-6B5CAECC109F");
 
-        // ─── Parameters ──────────────────────────────────────────────────
+        // ─── Parameters ─────────────────────────────────────────────────
 
         protected override void RegisterInputParams(GH_InputParamManager pManager)
         {
@@ -81,10 +86,9 @@ namespace StructuralSizer.GH.Components
                 "SizerParams from the DesignParams component",
                 GH_ParamAccess.item);
 
-            // Default Server URL: for AWS deployment, ask the user for the AWS server URL and set it here.
             pManager.AddTextParameter("Server URL", "URL",
-                "Julia API server URL",
-                GH_ParamAccess.item, "http://localhost:8080");
+                "Julia API server URL (persisted in right-click menu)",
+                GH_ParamAccess.item, DefaultServerUrl);
 
             pManager.AddBooleanParameter("Run", "Run",
                 "Toggle to send the request (connect a Button)",
@@ -93,15 +97,16 @@ namespace StructuralSizer.GH.Components
 
         protected override void RegisterOutputParams(GH_OutputParamManager pManager)
         {
+            pManager.AddGenericParameter("Result", "Result",
+                "Parsed SizerResult object for downstream components",
+                GH_ParamAccess.item);
             pManager.AddTextParameter("JSON", "JSON",
                 "Raw JSON response from the server", GH_ParamAccess.item);
-            pManager.AddTextParameter("Status", "Status",
-                "Response status (ok, error, cached)", GH_ParamAccess.item);
             pManager.AddTextParameter("Log", "Log",
                 "Status log (wire to Panel to see progress)", GH_ParamAccess.item);
         }
 
-        // ─── Right-click menu ────────────────────────────────────────────────
+        // ─── Right-click menu ───────────────────────────────────────────
 
         protected override void AppendAdditionalComponentMenuItems(ToolStripDropDown menu)
         {
@@ -126,15 +131,30 @@ namespace StructuralSizer.GH.Components
         {
             _lastGeoHash = "";
             _lastParamsHash = "";
-            _lastResult = "";
-            _lastStatus = "";
+            _lastParsed = null;
             _lastComputeTime = 0;
             lock (_logLock) { _statusLog.Clear(); _waitStatusLine = null; }
             Message = "Cache cleared";
             ExpireSolution(true);
         }
 
-        /// <summary>Append a line to the status log and schedule a canvas refresh so the Panel updates.</summary>
+        // ─── Persistence ────────────────────────────────────────────────
+
+        public override bool Write(GH_IO.Serialization.GH_IWriter writer)
+        {
+            writer.SetString("ServerUrl", _serverUrl);
+            return base.Write(writer);
+        }
+
+        public override bool Read(GH_IO.Serialization.GH_IReader reader)
+        {
+            if (reader.ItemExists("ServerUrl"))
+                _serverUrl = reader.GetString("ServerUrl");
+            return base.Read(reader);
+        }
+
+        // ─── Logging helpers ────────────────────────────────────────────
+
         private void AppendLog(GH_Document doc, string line)
         {
             lock (_logLock)
@@ -156,10 +176,9 @@ namespace StructuralSizer.GH.Components
             }
         }
 
-        /// <summary>Set the live wait line (e.g. "Waiting... (12 s)") and refresh the Panel.</summary>
         private void UpdateWaitStatus(GH_Document doc, string message, int elapsedSec)
         {
-            lock (_logLock) { _waitStatusLine = message + " (" + elapsedSec + " s)"; }
+            lock (_logLock) { _waitStatusLine = $"{message} ({elapsedSec} s)"; }
             ScheduleExpire(doc);
         }
 
@@ -168,44 +187,35 @@ namespace StructuralSizer.GH.Components
             lock (_logLock) { _waitStatusLine = null; }
         }
 
-        // ─── Solve ───────────────────────────────────────────────────────
+        // ─── Solve ──────────────────────────────────────────────────────
 
         protected override void SolveInstance(IGH_DataAccess DA)
         {
-            // ── 1. Read inputs ──
-            GH_SizerGeometry? geoGoo = null;
-            GH_SizerParams? paramsGoo = null;
-            string url = "http://localhost:8080";
+            // 1. Read inputs
+            GH_SizerGeometry geoGoo = null;
+            GH_SizerParams paramsGoo = null;
+            string urlInput = _serverUrl;
             bool run = false;
 
             if (!DA.GetData(0, ref geoGoo) || geoGoo?.Value == null) return;
             if (!DA.GetData(1, ref paramsGoo) || paramsGoo?.Value == null) return;
-            DA.GetData(2, ref url);
+            DA.GetData(2, ref urlInput);
             DA.GetData(3, ref run);
 
-            if (string.IsNullOrWhiteSpace(url))
-                url = "http://localhost:8080";
+            string url = string.IsNullOrWhiteSpace(urlInput) ? _serverUrl : urlInput;
+            _serverUrl = url;
 
-            // ── 2. If async work just finished, harvest the result ──
+            // 2. Async work just finished
             if (_state == RunState.Done)
             {
                 _lastGeoHash = _pendingGeoHash;
                 _lastParamsHash = _pendingParamsHash;
-                _lastResult = _pendingResult;
-                _lastStatus = _pendingStatus;
-                _lastComputeTime = _pendingTime;
+                _lastParsed = _pendingParsed;
+                _lastComputeTime = _lastParsed?.ComputeTime ?? 0;
                 _state = RunState.Idle;
 
-                DA.SetData(0, _lastResult);
-                DA.SetData(1, _lastStatus);
-                DA.SetData(2, GetLogSnapshot());
-
-                if (_lastStatus == "error")
-                    AddRuntimeMessage(GH_RuntimeMessageLevel.Error, ExtractErrorMessage(_lastResult));
-
-                Message = _lastStatus == "error"
-                    ? $"\u2717 Error"
-                    : $"\u2713 {_lastComputeTime:F1} s";
+                EmitResult(DA, _lastParsed);
+                Message = FormatDoneMessage(_lastParsed);
                 return;
             }
 
@@ -215,40 +225,36 @@ namespace StructuralSizer.GH.Components
                 Message = "\u2717 Server error";
                 _state = RunState.Idle;
 
-                DA.SetData(0, _lastResult);
-                DA.SetData(1, "error");
-                DA.SetData(2, GetLogSnapshot());
+                EmitResult(DA, _lastParsed);
                 return;
             }
 
-            // ── 3. If currently computing, show progress ──
+            // 3. Currently computing
             if (_state != RunState.Idle)
             {
                 Message = _state == RunState.HealthCheck ? "Checking server..."
                         : _state == RunState.Sending     ? "Computing..."
-                        : _state == RunState.Polling      ? "Queued..."
+                        : _state == RunState.Polling      ? "Waiting..."
                         : "Working...";
-
                 AddRuntimeMessage(GH_RuntimeMessageLevel.Remark, Message);
-
                 DA.SetData(2, GetLogSnapshot());
-                if (!string.IsNullOrEmpty(_lastResult))
+                if (_lastParsed != null)
                 {
-                    DA.SetData(0, _lastResult);
-                    DA.SetData(1, _lastStatus);
+                    DA.SetData(0, new GH_SizerResult(_lastParsed));
+                    DA.SetData(1, _lastParsed.RawJson);
                 }
                 return;
             }
 
-            // ── 4. Run = false → show cached or "ready" ──
+            // 4. Run = false → cached or ready
             if (!run)
             {
                 DA.SetData(2, GetLogSnapshot());
-                if (!string.IsNullOrEmpty(_lastResult))
+                if (_lastParsed != null)
                 {
-                    DA.SetData(0, _lastResult);
-                    DA.SetData(1, _lastStatus);
-                    Message = $"\u2713 {_lastComputeTime:F1} s (cached)";
+                    DA.SetData(0, new GH_SizerResult(_lastParsed));
+                    DA.SetData(1, _lastParsed.RawJson);
+                    Message = FormatDoneMessage(_lastParsed) + " (cached)";
                 }
                 else
                 {
@@ -259,34 +265,46 @@ namespace StructuralSizer.GH.Components
                 return;
             }
 
-            // ── 5. Check for unchanged inputs ──
+            // 5. Check for unchanged inputs
             var geo = geoGoo.Value;
             var prms = paramsGoo.Value;
             string geoHash = geo.ComputeHash();
             string paramsHash = prms.ComputeHash();
 
-            if (geoHash == _lastGeoHash && paramsHash == _lastParamsHash
-                && !string.IsNullOrEmpty(_lastResult))
+            if (geoHash == _lastGeoHash && paramsHash == _lastParamsHash && _lastParsed != null)
             {
-                DA.SetData(0, _lastResult);
-                DA.SetData(1, "cached");
+                DA.SetData(0, new GH_SizerResult(_lastParsed));
+                DA.SetData(1, _lastParsed.RawJson);
                 DA.SetData(2, GetLogSnapshot());
-                Message = $"\u2713 {_lastComputeTime:F1} s (cached)";
+                Message = FormatDoneMessage(_lastParsed) + " (cached)";
                 AddRuntimeMessage(GH_RuntimeMessageLevel.Remark,
                     "No changes detected \u2014 returning cached result.");
                 return;
             }
 
-            // ── 6. Build payload ──
+            // 6. Client-side validation (instant feedback, no network needed)
+            var validationErrors = ValidateLocally(geo, prms);
+            if (validationErrors.Count > 0)
+            {
+                foreach (var err in validationErrors)
+                    AddRuntimeMessage(GH_RuntimeMessageLevel.Error, err);
+                lock (_logLock) { _statusLog.Clear(); }
+                AppendLog(OnPingDocument(), $"\u2717 Validation failed ({validationErrors.Count} error{(validationErrors.Count > 1 ? "s" : "")}):");
+                foreach (var err in validationErrors)
+                    AppendLog(OnPingDocument(), "  \u2022 " + err);
+                DA.SetData(2, GetLogSnapshot());
+                Message = $"\u2717 {validationErrors.Count} validation error{(validationErrors.Count > 1 ? "s" : "")}";
+                return;
+            }
+
+            // 7. Build payload
             var payload = geo.ToJson();
             payload["params"] = prms.ToJson();
-
             if (geoHash == _lastGeoHash && paramsHash != _lastParamsHash)
                 payload["geometry_hash"] = geoHash;
-
             string jsonBody = payload.ToString();
 
-            // ── 7. Launch async: health check → wait for API → POST /design → poll if queued ──
+            // 8. Launch async
             _state = RunState.HealthCheck;
             _pendingGeoHash = geoHash;
             _pendingParamsHash = paramsHash;
@@ -303,7 +321,7 @@ namespace StructuralSizer.GH.Components
                 {
                     if (!await CheckHealth(url))
                     {
-                        AppendLog(doc, "✗ Health check failed.");
+                        AppendLog(doc, "\u2717 Health check failed.");
                         _pendingError = $"Julia server not running at {url}.\n" +
                             "Start it with:\n  julia --project=StructuralSynthesizer scripts/api/sizer_service.jl";
                         _state = RunState.Error;
@@ -315,12 +333,14 @@ namespace StructuralSizer.GH.Components
                     _state = RunState.Polling;
                     ScheduleExpire(doc);
                     UpdateWaitStatus(doc, "Waiting for API ready...", 0);
-                    // No practical timeout (1 h cap); user can Cancel from the component menu if needed
-                    string readyBody = await PollUntilReady(url, 3600, elapsed => UpdateWaitStatus(doc, "Waiting for API ready...", elapsed), () => _cancelRequested);
+                    string readyBody = await PollUntilReady(url, PollTimeoutSeconds,
+                        elapsed => UpdateWaitStatus(doc, "Waiting for API ready...", elapsed),
+                        () => _cancelRequested);
                     ClearWaitStatus();
+
                     if (readyBody.Contains("Cancelled by user"))
                     {
-                        AppendLog(doc, "✗ Cancelled by user.");
+                        AppendLog(doc, "\u2717 Cancelled by user.");
                         _pendingError = "Cancelled by user.";
                         _state = RunState.Error;
                         ScheduleExpire(doc);
@@ -328,18 +348,27 @@ namespace StructuralSizer.GH.Components
                     }
                     if (readyBody.Contains("Timeout waiting for server"))
                     {
-                        AppendLog(doc, "✗ Timeout waiting for API (1 h).");
-                        _pendingError = "Server did not become ready within 1 hour. Check server logs or try Cancel and run again.";
+                        AppendLog(doc, "\u2717 Timeout waiting for API (1 h).");
+                        _pendingError = "Server did not become ready within 1 hour.";
                         _state = RunState.Error;
                         ScheduleExpire(doc);
                         return;
                     }
-                    AppendLog(doc, "API ready. Sending design request...");
+                    if (readyBody.Contains("\"status\":\"error\""))
+                    {
+                        AppendLog(doc, "\u2717 Server failed during startup. Check server logs.");
+                        _pendingError = "Server reported an error during startup.";
+                        _state = RunState.Error;
+                        ScheduleExpire(doc);
+                        return;
+                    }
 
+                    AppendLog(doc, "API ready. Sending design request...");
                     _state = RunState.Sending;
                     ScheduleExpire(doc);
                     UpdateWaitStatus(doc, "Waiting for design...", 0);
 
+                    // Timer task shows elapsed seconds while waiting
                     var designCts = new CancellationTokenSource();
                     var designStart = DateTime.UtcNow;
                     var timerTask = Task.Run(async () =>
@@ -347,14 +376,8 @@ namespace StructuralSizer.GH.Components
                         int lastTick = 0;
                         while (!designCts.Token.IsCancellationRequested)
                         {
-                            try
-                            {
-                                await Task.Delay(1000, designCts.Token);
-                            }
-                            catch (OperationCanceledException)
-                            {
-                                break;
-                            }
+                            try { await Task.Delay(1000, designCts.Token); }
+                            catch (OperationCanceledException) { break; }
                             int elapsed = (int)(DateTime.UtcNow - designStart).TotalSeconds;
                             if (elapsed != lastTick)
                             {
@@ -378,70 +401,70 @@ namespace StructuralSizer.GH.Components
                         ClearWaitStatus();
                     }
 
-                    string status = "ok";
-                    double computeTime = 0;
+                    // Check if server returned 202 Accepted (async pattern)
+                    var jobj = JObject.Parse(responseJson);
+                    string status = jobj["status"]?.ToString() ?? "unknown";
 
-                    try
+                    if (status == "queued" || status == "accepted")
                     {
-                        var jobj = JObject.Parse(responseJson);
-                        status = jobj["status"]?.ToString() ?? "unknown";
-                        computeTime = jobj["compute_time_s"]?.ToObject<double>() ?? 0;
+                        AppendLog(doc, "Design accepted. Waiting for server to finish...");
+                        _state = RunState.Polling;
+                        ScheduleExpire(doc);
+                        UpdateWaitStatus(doc, "Waiting for design to complete...", 0);
+                        string idleBody = await PollUntilReady(url, PollTimeoutSeconds,
+                            elapsed => UpdateWaitStatus(doc, "Waiting for design to complete...", elapsed),
+                            () => _cancelRequested);
+                        ClearWaitStatus();
 
-                        if (status == "queued" || status == "accepted")
+                        if (idleBody.Contains("Cancelled by user"))
                         {
-                            AppendLog(doc, "Design started. Waiting for server to become idle...");
-                            _state = RunState.Polling;
+                            AppendLog(doc, "\u2717 Cancelled by user.");
+                            _pendingError = "Cancelled by user.";
+                            _state = RunState.Error;
                             ScheduleExpire(doc);
-                            UpdateWaitStatus(doc, "Waiting for server idle...", 0);
-                            string idleBody = await PollUntilReady(url, 3600, elapsed => UpdateWaitStatus(doc, "Waiting for server idle...", elapsed), () => _cancelRequested);
-                            ClearWaitStatus();
-                            if (idleBody.Contains("Cancelled by user"))
-                            {
-                                AppendLog(doc, "✗ Cancelled by user.");
-                                _pendingError = "Cancelled by user.";
-                                _state = RunState.Error;
-                                ScheduleExpire(doc);
-                                return;
-                            }
-                            AppendLog(doc, "Fetching design result...");
-                            responseJson = await GetResult(url);
-                            var result = JObject.Parse(responseJson);
-                            status = result["status"]?.ToString() ?? "unknown";
-                            computeTime = result["compute_time_s"]?.ToObject<double>() ?? 0;
+                            return;
                         }
-                    }
-                    catch { /* parse errors are surfaced via status */ }
+                        if (idleBody.Contains("Timeout waiting for server"))
+                        {
+                            AppendLog(doc, "\u2717 Timeout waiting for design (1 h).");
+                            _pendingError = "Design did not complete within 1 hour.";
+                            _state = RunState.Error;
+                            ScheduleExpire(doc);
+                            return;
+                        }
 
-                    _pendingResult = responseJson;
-                    _pendingStatus = status;
-                    _pendingTime = computeTime;
-                    if (status == "ok")
-                        AppendLog(doc, $"✓ Done in {computeTime:F1} s.");
+                        AppendLog(doc, "Server idle. Fetching design result...");
+                        responseJson = await GetResultWithRetry(url);
+                    }
+
+                    // Parse the final response into a typed result
+                    _pendingParsed = SizerResult.FromJson(responseJson);
+
+                    if (_pendingParsed.IsError)
+                        AppendLog(doc, $"\u2717 Server returned error: {_pendingParsed.ErrorMessage}");
                     else
-                        AppendLog(doc, $"Response status: {status}");
+                        AppendLog(doc, $"\u2713 Done in {_pendingParsed.ComputeTime:F1} s.");
+
                     _state = RunState.Done;
                 }
                 catch (TaskCanceledException)
                 {
-                    AppendLog(doc, "✗ Request timed out.");
+                    AppendLog(doc, "\u2717 Request timed out.");
                     _pendingError = $"Request timed out after {_client.Timeout.TotalSeconds:F0}s. " +
-                        "The server may still be computing — check its terminal.";
+                        "The server may still be computing.";
                     _state = RunState.Error;
                 }
                 catch (HttpRequestException ex)
                 {
-                    AppendLog(doc, "✗ Connection failed: " + ex.Message);
+                    AppendLog(doc, "\u2717 Connection failed: " + ex.Message);
                     _pendingError = $"Connection failed: {ex.Message}\n" +
-                        $"Is the Julia server running at {url}?\n" +
-                        "Start it with:\n  julia --project=StructuralSynthesizer scripts/api/sizer_service.jl";
+                        $"Is the Julia server running at {url}?";
                     _state = RunState.Error;
                 }
                 catch (Exception ex)
                 {
-                    AppendLog(doc, "✗ Error: " + ex.Message);
-                    _pendingError = $"Unexpected error: {ex.Message}";
-                    if (ex.Message.Contains("504"))
-                        _pendingError += "\nApp Runner limits each request to 120 seconds. If the design takes longer, the request will time out. Consider simplifying the model or using a different host (e.g. ECS) for long-running designs.";
+                    AppendLog(doc, "\u2717 Error: " + ex.Message);
+                    _pendingError = $"Error: {ex.Message}";
                     _state = RunState.Error;
                 }
 
@@ -449,84 +472,103 @@ namespace StructuralSizer.GH.Components
             });
 
             DA.SetData(2, GetLogSnapshot());
-            if (!string.IsNullOrEmpty(_lastResult))
+            if (_lastParsed != null)
             {
-                DA.SetData(0, _lastResult);
-                DA.SetData(1, _lastStatus);
+                DA.SetData(0, new GH_SizerResult(_lastParsed));
+                DA.SetData(1, _lastParsed.RawJson);
             }
         }
 
-        // ─── Thread-safe solution expiry ─────────────────────────────────
+        // ─── Output helper ──────────────────────────────────────────────
 
-        private void ScheduleExpire(GH_Document? doc)
+        private void EmitResult(IGH_DataAccess DA, SizerResult result)
         {
-            if (doc == null) return;
-            doc.ScheduleSolution(100, d =>
+            DA.SetData(2, GetLogSnapshot());
+            if (result != null)
             {
-                ExpireSolution(false);
-            });
+                DA.SetData(0, new GH_SizerResult(result));
+                DA.SetData(1, result.RawJson);
+                if (result.IsError)
+                    AddRuntimeMessage(GH_RuntimeMessageLevel.Error, result.ErrorMessage);
+            }
         }
 
-        // ─── HTTP helpers ────────────────────────────────────────────────
+        private static string FormatDoneMessage(SizerResult r)
+        {
+            if (r == null) return "Ready";
+            if (r.IsError) return "\u2717 Error";
+            int failures = r.FailureCount;
+            return failures == 0
+                ? $"\u2713 {r.ComputeTime:F1} s \u2014 All Pass"
+                : $"\u26A0 {r.ComputeTime:F1} s \u2014 {failures} failure{(failures > 1 ? "s" : "")}";
+        }
 
-        /// <summary>
-        /// Quick health check — returns true if the server responds to GET /health
-        /// within 3 seconds.
-        /// </summary>
+        // ─── Thread-safe solution expiry ────────────────────────────────
+
+        private void ScheduleExpire(GH_Document doc)
+        {
+            if (doc == null) return;
+            doc.ScheduleSolution(ScheduleSolutionIntervalMs, _ => ExpireSolution(false));
+        }
+
+        // ─── HTTP helpers ───────────────────────────────────────────────
+
         private static async Task<bool> CheckHealth(string baseUrl)
         {
             try
             {
-                using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(3));
-                var resp = await _client.GetAsync(
-                    $"{baseUrl.TrimEnd('/')}/health", cts.Token);
+                using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(HealthCheckTimeoutSeconds));
+                var resp = await _client.GetAsync($"{baseUrl.TrimEnd('/')}/health", cts.Token);
                 return resp.IsSuccessStatusCode;
             }
-            catch
-            {
-                return false;
-            }
+            catch { return false; }
         }
 
-        /// <summary>
-        /// POST /design. Throws if response is not success (e.g. 404 during warming, 400 validation).
-        /// May return 202 Accepted (status "accepted") — client should then poll GET /status and GET /result.
-        /// </summary>
         private static async Task<string> PostDesign(string baseUrl, string jsonBody)
         {
             var content = new StringContent(jsonBody, Encoding.UTF8, "application/json");
             var response = await _client.PostAsync($"{baseUrl.TrimEnd('/')}/design", content);
             var body = await response.Content.ReadAsStringAsync();
             if (!response.IsSuccessStatusCode)
-            {
                 throw new InvalidOperationException(
                     $"Server returned {(int)response.StatusCode} {response.ReasonPhrase}. {body}");
-            }
             if (string.IsNullOrWhiteSpace(body))
                 throw new InvalidOperationException("Server returned empty response.");
             return body;
         }
 
-        /// <summary>
-        /// GET /result. Returns the last completed design result. Throws if 503 (still running) or 404 (no result).
-        /// </summary>
-        private static async Task<string> GetResult(string baseUrl)
+        private static async Task<string> GetResultWithRetry(string baseUrl)
         {
-            var response = await _client.GetAsync($"{baseUrl.TrimEnd('/')}/result");
-            var body = await response.Content.ReadAsStringAsync();
-            if (!response.IsSuccessStatusCode)
+            const int maxRetries = 10;
+            const int retryDelayMs = 1000;
+
+            for (int attempt = 1; attempt <= maxRetries; attempt++)
             {
+                var response = await _client.GetAsync($"{baseUrl.TrimEnd('/')}/result");
+                var body = await response.Content.ReadAsStringAsync();
+
+                if (response.IsSuccessStatusCode)
+                {
+                    if (string.IsNullOrWhiteSpace(body))
+                        throw new InvalidOperationException("Server returned empty result from GET /result.");
+                    return body;
+                }
+
+                if ((int)response.StatusCode == 503 && attempt < maxRetries)
+                {
+                    await Task.Delay(retryDelayMs);
+                    continue;
+                }
+
                 throw new InvalidOperationException(
-                    $"Server returned {(int)response.StatusCode} {response.ReasonPhrase}. {body}");
+                    $"GET /result failed: {(int)response.StatusCode} {response.ReasonPhrase}. {body}");
             }
-            if (string.IsNullOrWhiteSpace(body))
-                throw new InvalidOperationException("Server returned empty result.");
-            return body;
+
+            throw new InvalidOperationException("GET /result failed after retries.");
         }
 
-        /// <param name="onTick">Optional: called each second with elapsed seconds (1, 2, 3, ...) so the UI can show a timer.</param>
-        /// <param name="cancelRequested">Optional: when true, stop waiting and return a "Cancelled by user" body.</param>
-        private static async Task<string> PollUntilReady(string baseUrl, int timeoutSeconds, Action<int> onTick = null, Func<bool> cancelRequested = null)
+        private static async Task<string> PollUntilReady(string baseUrl, int timeoutSeconds,
+            Action<int> onTick = null, Func<bool> cancelRequested = null)
         {
             var start = DateTime.UtcNow;
             var deadline = start.AddSeconds(timeoutSeconds);
@@ -550,25 +592,98 @@ namespace StructuralSizer.GH.Components
                     string st = jobj["status"]?.ToString() ?? "";
                     if (st == "idle")
                         return body;
+                    if (st == "error")
+                        return "{\"status\":\"error\",\"message\":\"Server reported an error during startup. Check server logs.\"}";
                 }
-                catch { /* retry */ }
+                catch { /* retry on transient network errors */ }
             }
             return "{\"status\":\"error\",\"message\":\"Timeout waiting for server\"}";
         }
 
-        // ─── Helpers ─────────────────────────────────────────────────────
+        // ─── Client-side validation ──────────────────────────────────────
+        // Mirrors StructuralSynthesizer/src/api/validation.jl so that obvious
+        // errors are caught instantly without a network round-trip.
 
-        private static string ExtractErrorMessage(string json)
+        private static readonly HashSet<string> ValidFloorTypes =
+            new HashSet<string> { "flat_plate", "flat_slab", "one_way", "vault" };
+        private static readonly HashSet<string> ValidColumnTypes =
+            new HashSet<string> { "rc_rect", "rc_circular", "steel_w", "steel_hss", "steel_pipe" };
+        private static readonly HashSet<string> ValidBeamTypes =
+            new HashSet<string> { "steel_w", "steel_hss", "rc_rect", "rc_tbeam" };
+        private static readonly HashSet<string> ValidConcretes =
+            new HashSet<string> { "NWC_3000", "NWC_4000", "NWC_5000", "NWC_6000" };
+        private static readonly HashSet<string> ValidRebars =
+            new HashSet<string> { "Rebar_40", "Rebar_60", "Rebar_75", "Rebar_80" };
+        private static readonly HashSet<string> ValidSteels =
+            new HashSet<string> { "A992" };
+        private static readonly HashSet<string> ValidSoils =
+            new HashSet<string> { "loose_sand", "medium_sand", "dense_sand", "soft_clay", "stiff_clay", "hard_clay" };
+        private static readonly HashSet<double> ValidFireRatings =
+            new HashSet<double> { 0, 1, 1.5, 2, 3, 4 };
+        private static readonly HashSet<string> ValidOptimize =
+            new HashSet<string> { "weight", "carbon", "cost" };
+        private static readonly HashSet<string> ValidUnitSystems =
+            new HashSet<string> { "imperial", "metric" };
+
+        private static List<string> ValidateLocally(SizerGeometry geo, SizerParams prms)
         {
-            try
+            var errors = new List<string>();
+
+            // Vertices
+            int nVerts = geo.Vertices.Count;
+            if (nVerts < 4)
+                errors.Add($"Need at least 4 vertices (got {nVerts}).");
+            for (int i = 0; i < nVerts; i++)
+                if (geo.Vertices[i].Length != 3)
+                    errors.Add($"Vertex {i + 1} has {geo.Vertices[i].Length} coordinates (expected 3).");
+
+            // Edges
+            var allEdges = geo.BeamEdges.Concat(geo.ColumnEdges).Concat(geo.StrutEdges).ToList();
+            if (allEdges.Count == 0)
+                errors.Add("No edges provided (need at least beams, columns, or braces).");
+            for (int i = 0; i < allEdges.Count; i++)
             {
-                var jobj = JObject.Parse(json);
-                return jobj["message"]?.ToString() ?? "Unknown server error";
+                var e = allEdges[i];
+                if (e.Length != 2) { errors.Add($"Edge {i + 1} has {e.Length} indices (expected 2)."); continue; }
+                if (e[0] < 1 || e[0] > nVerts) errors.Add($"Edge {i + 1}: vertex index {e[0]} out of range [1, {nVerts}].");
+                if (e[1] < 1 || e[1] > nVerts) errors.Add($"Edge {i + 1}: vertex index {e[1]} out of range [1, {nVerts}].");
+                if (e[0] == e[1]) errors.Add($"Edge {i + 1}: degenerate edge (both indices = {e[0]}).");
             }
-            catch
+
+            // Supports
+            if (geo.Supports.Count == 0)
+                errors.Add("No support vertices specified.");
+            for (int i = 0; i < geo.Supports.Count; i++)
             {
-                return "Server returned an error.";
+                int si = geo.Supports[i];
+                if (si < 1 || si > nVerts) errors.Add($"Support {i + 1}: vertex index {si} out of range [1, {nVerts}].");
             }
+
+            // Parameters
+            if (!ValidFloorTypes.Contains(prms.FloorType))
+                errors.Add($"Invalid floor type \"{prms.FloorType}\". Options: {string.Join(", ", ValidFloorTypes)}");
+            if (!ValidColumnTypes.Contains(prms.ColumnType))
+                errors.Add($"Invalid column type \"{prms.ColumnType}\". Options: {string.Join(", ", ValidColumnTypes)}");
+            if (!ValidBeamTypes.Contains(prms.BeamType))
+                errors.Add($"Invalid beam type \"{prms.BeamType}\". Options: {string.Join(", ", ValidBeamTypes)}");
+            if (!ValidConcretes.Contains(prms.Concrete))
+                errors.Add($"Unknown concrete \"{prms.Concrete}\". Options: {string.Join(", ", ValidConcretes)}");
+            if (!ValidRebars.Contains(prms.Rebar))
+                errors.Add($"Unknown rebar \"{prms.Rebar}\". Options: {string.Join(", ", ValidRebars)}");
+            if (!ValidSteels.Contains(prms.Steel))
+                errors.Add($"Unknown steel \"{prms.Steel}\". Options: {string.Join(", ", ValidSteels)}");
+            if (!ValidFireRatings.Contains(prms.FireRating))
+                errors.Add($"Invalid fire rating {prms.FireRating}. Options: 0, 1, 1.5, 2, 3, 4");
+            if (!ValidOptimize.Contains(prms.OptimizeFor))
+                errors.Add($"Invalid optimize_for \"{prms.OptimizeFor}\". Options: weight, carbon, cost");
+            if (!ValidUnitSystems.Contains(prms.UnitSystem?.ToLowerInvariant() ?? ""))
+                errors.Add($"Invalid unit system \"{prms.UnitSystem}\". Options: imperial, metric");
+
+            // Foundation soil (only if foundations requested)
+            if (prms.SizeFoundations && !ValidSoils.Contains(prms.FoundationSoil))
+                errors.Add($"Unknown foundation soil \"{prms.FoundationSoil}\". Options: {string.Join(", ", ValidSoils)}");
+
+            return errors;
         }
     }
 }

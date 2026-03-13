@@ -37,6 +37,7 @@ using Asap  # ensures `u"kip"`, `u"ksi"`, etc resolve via Asap unit module
     @testset "Report Generators" begin
         include("report_generators/test_beam_sizing_report.jl")
         include("report_generators/test_column_sizing_report.jl")
+        include("report_generators/test_composite_beam_report.jl")
         include("report_generators/test_flat_plate_efm_integration.jl")
         include("report_generators/test_flat_plate_methods_comparison.jl")
         include("report_generators/test_foundation_integration.jl")

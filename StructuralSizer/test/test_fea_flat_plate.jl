@@ -107,8 +107,8 @@ _rpt.section("Test 1: Regular 3×3 Grid — 18 ft × 14 ft Panels")
 
     # Override loads to match StructurePoint example
     for cell in struc.cells
-        cell.sdl = uconvert(u"kN/m^2", 20.0u"psf")
-        cell.live_load = uconvert(u"kN/m^2", 40.0u"psf")
+        cell.sdl = uconvert(u"kN/m^2", 20.0psf)
+        cell.live_load = uconvert(u"kN/m^2", 40.0psf)
     end
 
     # Column sizes: 16" × 16"
@@ -188,8 +188,8 @@ _rpt.section("Test 2: FEA-Only — Shell Model Builder on Various Shapes")
     initialize!(struc; floor_type=:flat_plate, floor_opts=opts)
 
     for cell in struc.cells
-        cell.sdl = uconvert(u"kN/m^2", 20.0u"psf")
-        cell.live_load = uconvert(u"kN/m^2", 50.0u"psf")
+        cell.sdl = uconvert(u"kN/m^2", 20.0psf)
+        cell.live_load = uconvert(u"kN/m^2", 50.0psf)
     end
     for col in struc.columns
         col.c1 = 12.0u"inch"
@@ -248,8 +248,8 @@ _rpt.section("Test 3: Twisting Ratio Diagnostic")
     initialize!(struc; floor_type=:flat_plate, floor_opts=opts)
 
     for cell in struc.cells
-        cell.sdl = uconvert(u"kN/m^2", 20.0u"psf")
-        cell.live_load = uconvert(u"kN/m^2", 50.0u"psf")
+        cell.sdl = uconvert(u"kN/m^2", 20.0psf)
+        cell.live_load = uconvert(u"kN/m^2", 50.0psf)
     end
     for col in struc.columns
         col.c1 = 16.0u"inch"
@@ -298,8 +298,8 @@ _rpt.section("Test 4: Mesh Convergence")
     initialize!(struc; floor_type=:flat_plate, floor_opts=opts)
 
     for cell in struc.cells
-        cell.sdl = uconvert(u"kN/m^2", 20.0u"psf")
-        cell.live_load = uconvert(u"kN/m^2", 50.0u"psf")
+        cell.sdl = uconvert(u"kN/m^2", 20.0psf)
+        cell.live_load = uconvert(u"kN/m^2", 50.0psf)
     end
     for col in struc.columns
         col.c1 = 14.0u"inch"
@@ -362,8 +362,8 @@ _rpt.section("Test 5: Full Design Pipeline with FEA")
     initialize!(struc; floor_type=:flat_plate, floor_opts=opts)
 
     for cell in struc.cells
-        cell.sdl = uconvert(u"kN/m^2", 20.0u"psf")
-        cell.live_load = uconvert(u"kN/m^2", 40.0u"psf")
+        cell.sdl = uconvert(u"kN/m^2", 20.0psf)
+        cell.live_load = uconvert(u"kN/m^2", 40.0psf)
     end
     for col in struc.columns
         col.c1 = 16.0u"inch"
@@ -410,8 +410,8 @@ _rpt.section("Test 6: Shift-X Irregular Grid — Trapezoidal Panels")
     initialize!(struc; floor_type=:flat_plate, floor_opts=opts)
 
     for cell in struc.cells
-        cell.sdl = uconvert(u"kN/m^2", 25.0u"psf")
-        cell.live_load = uconvert(u"kN/m^2", 50.0u"psf")
+        cell.sdl = uconvert(u"kN/m^2", 25.0psf)
+        cell.live_load = uconvert(u"kN/m^2", 50.0psf)
     end
     for col in struc.columns
         col.c1 = 14.0u"inch"
@@ -473,8 +473,8 @@ _rpt.section("Test 7: Zigzag Irregular Grid — Diamond-like Panels")
     initialize!(struc; floor_type=:flat_plate, floor_opts=opts)
 
     for cell in struc.cells
-        cell.sdl = uconvert(u"kN/m^2", 20.0u"psf")
-        cell.live_load = uconvert(u"kN/m^2", 50.0u"psf")
+        cell.sdl = uconvert(u"kN/m^2", 20.0psf)
+        cell.live_load = uconvert(u"kN/m^2", 50.0psf)
     end
     for col in struc.columns
         col.c1 = 14.0u"inch"
@@ -534,8 +534,8 @@ _rpt.section("Test 8: Extreme Aspect Ratio — 40 ft × 16 ft Panels")
     initialize!(struc; floor_type=:flat_plate, floor_opts=opts)
 
     for cell in struc.cells
-        cell.sdl = uconvert(u"kN/m^2", 20.0u"psf")
-        cell.live_load = uconvert(u"kN/m^2", 60.0u"psf")
+        cell.sdl = uconvert(u"kN/m^2", 20.0psf)
+        cell.live_load = uconvert(u"kN/m^2", 60.0psf)
     end
     for col in struc.columns
         col.c1 = 16.0u"inch"
@@ -658,8 +658,8 @@ _rpt.section("Test 9: Non-Uniform Bays — Mixed Spans")
     initialize!(struc; floor_type=:flat_plate, floor_opts=opts)
 
     for cell in struc.cells
-        cell.sdl = uconvert(u"kN/m^2", 20.0u"psf")
-        cell.live_load = uconvert(u"kN/m^2", 50.0u"psf")
+        cell.sdl = uconvert(u"kN/m^2", 20.0psf)
+        cell.live_load = uconvert(u"kN/m^2", 50.0psf)
     end
     for col in struc.columns
         col.c1 = 14.0u"inch"
@@ -787,8 +787,8 @@ _rpt.section("Test 10: Irregular Columns — X & Y Shifts on Varying Bays")
     initialize!(struc; floor_type=:flat_plate, floor_opts=opts)
 
     for cell in struc.cells
-        cell.sdl = uconvert(u"kN/m^2", 25.0u"psf")
-        cell.live_load = uconvert(u"kN/m^2", 50.0u"psf")
+        cell.sdl = uconvert(u"kN/m^2", 25.0psf)
+        cell.live_load = uconvert(u"kN/m^2", 50.0psf)
     end
     for col in struc.columns
         col.c1 = 14.0u"inch"
@@ -856,8 +856,8 @@ _rpt.section("Test 11: Full Pipeline on Irregular Geometry")
     initialize!(struc; floor_type=:flat_plate, floor_opts=opts)
 
     for cell in struc.cells
-        cell.sdl = uconvert(u"kN/m^2", 20.0u"psf")
-        cell.live_load = uconvert(u"kN/m^2", 50.0u"psf")
+        cell.sdl = uconvert(u"kN/m^2", 20.0psf)
+        cell.live_load = uconvert(u"kN/m^2", 50.0psf)
     end
     for col in struc.columns
         col.c1 = 16.0u"inch"
@@ -876,7 +876,7 @@ _rpt.section("Test 11: Full Pipeline on Irregular Geometry")
         if r isa StructuralSizer.FlatPlatePanelResult
             h_in = round(ustrip(u"inch", r.h), digits=1)
             M0_kf = round(ustrip(kip * u"ft", r.M0), digits=1)
-            qu_psf = round(ustrip(u"psf", r.qu), digits=0)
+            qu_psf = round(ustrip(psf, r.qu), digits=0)
             punch = r.punching_check.ok ? "✓" : "✗"
             defl  = r.deflection_check.ok ? "✓" : "✗"
             @printf("    Slab %d: h=%.1f\"  M₀=%.1f kip·ft  qu=%.0f psf  Punch %s  Defl %s\n",
@@ -907,8 +907,8 @@ _rpt.section("Test 12: Circular Columns — Octagonal Mesh Patch")
     initialize!(struc; floor_type=:flat_plate, floor_opts=opts)
 
     for cell in struc.cells
-        cell.sdl = uconvert(u"kN/m^2", 20.0u"psf")
-        cell.live_load = uconvert(u"kN/m^2", 50.0u"psf")
+        cell.sdl = uconvert(u"kN/m^2", 20.0psf)
+        cell.live_load = uconvert(u"kN/m^2", 50.0psf)
     end
 
     # Set ALL columns to circular with D = 16"
@@ -1016,7 +1016,7 @@ end
 @testset "FEA circular column — section properties (column_asap_section)" begin
     # Verify circular vs rectangular column section properties
     D = 16.0u"inch"
-    Ec = 4000.0u"ksi"
+    Ec = 4000.0ksi
 
     sec_circ = StructuralSizer.column_asap_section(D, D, :circular, Ec, 0.20)
     sec_rect = StructuralSizer.column_asap_section(D, D, :rectangular, Ec, 0.20)
@@ -1061,8 +1061,8 @@ end
     initialize!(struc; floor_type=:flat_plate, floor_opts=opts)
 
     for cell in struc.cells
-        cell.sdl = uconvert(u"kN/m^2", 20.0u"psf")
-        cell.live_load = uconvert(u"kN/m^2", 40.0u"psf")
+        cell.sdl = uconvert(u"kN/m^2", 20.0psf)
+        cell.live_load = uconvert(u"kN/m^2", 40.0psf)
     end
 
     # Circular columns: D = 18"

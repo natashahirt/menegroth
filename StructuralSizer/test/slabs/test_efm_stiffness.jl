@@ -38,8 +38,8 @@ using StructuralSizer
     fc_slab = 4000u"psi"   # Slab concrete strength
     fc_col = 6000u"psi"    # Column concrete strength
     
-    SDL = 20u"psf"         # Superimposed dead load
-    LL = 40u"psf"          # Live load
+    SDL = 20psf         # Superimposed dead load
+    LL = 40psf          # Live load
     
     # ==========================================================================
     # StructurePoint reference values (from document Section 3.2.2)
@@ -152,13 +152,13 @@ using StructuralSizer
     
     @testset "Fixed-End Moment" begin
         # Self-weight of 7" slab: 7/12 × 150 = 87.5 psf
-        sw = 7/12 * 150u"psf"
+        sw = 7/12 * 150psf
         qu = 1.2 * (sw + SDL) + 1.6 * LL
-        qu_ksf = uconvert(u"ksf", qu)
+        qu_ksf = uconvert(ksf, qu)
         
         sf_fem = pca_slab_beam_factors(c1, l1, c2, l2)
         FEM = fixed_end_moment_FEM(qu_ksf, l2, l1; m_factor=sf_fem.m)
-        FEM_kipft = ustrip(u"kip*ft", FEM)
+        FEM_kipft = ustrip(kip*u"ft", FEM)
         
         # StructurePoint: FEM = 73.79 ft-kip
         @test isapprox(FEM_kipft, 73.79, rtol=0.02)
@@ -171,13 +171,13 @@ end
     # V at right of span 1-2 = 26.39 kips
     # c = 16 in = 16/12 ft
     
-    M_cl = 83.91u"kip*ft"
-    V = 26.39u"kip"
+    M_cl = 83.91kip*u"ft"
+    V = 26.39kip
     c = 16u"inch"
     l1 = 18u"ft"
     
     M_face = face_of_support_moment(M_cl, V, c, l1)
-    M_face_kipft = ustrip(u"kip*ft", M_face)
+    M_face_kipft = ustrip(kip*u"ft", M_face)
     
     # Expected: M_face = 83.91 - 26.39 × (16/12/2) ≈ 66.32 ft-kip
     # StructurePoint reports 66.99 ft-kip (slightly different due to rounding)

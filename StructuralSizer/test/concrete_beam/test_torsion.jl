@@ -179,14 +179,14 @@ using Asap
 
     @testset "Full design_beam_torsion — ACI Example 1 (equilibrium)" begin
         result = design_beam_torsion(
-            266.0u"kip*inch",   # Tu
-            0.0u"kip",          # Vu (pure torsion)
+            266.0kip*u"inch",   # Tu
+            0.0kip,          # Vu (pure torsion)
             12.0u"inch",        # bw
             20.0u"inch",        # h
             17.56u"inch",       # d (approximate)
-            2.9u"ksi",          # f'c
-            60.0u"ksi",         # fy
-            60.0u"ksi";         # fyt
+            2.9ksi,          # f'c
+            60.0ksi,         # fy
+            60.0ksi;         # fyt
             cover = 1.2u"inch", # Clear cover (1.575 - 0.375/2 stirrup half ≈ 1.2")
             stirrup_size = 4,   # Slightly larger to get closer to 40mm c_ℓ
             torsion_mode = :equilibrium,
@@ -211,14 +211,14 @@ using Asap
     @testset "Full design_beam_torsion — Compatibility Capping" begin
         # Same beam but with very high torsion → should be capped
         result = design_beam_torsion(
-            500.0u"kip*inch",   # Tu > φ·Tcr → will be capped
-            10.0u"kip",         # Some shear
+            500.0kip*u"inch",   # Tu > φ·Tcr → will be capped
+            10.0kip,         # Some shear
             12.0u"inch",
             20.0u"inch",
             17.56u"inch",
-            2.9u"ksi",
-            60.0u"ksi",
-            60.0u"ksi";
+            2.9ksi,
+            60.0ksi,
+            60.0ksi;
             torsion_mode = :compatibility,
         )
 
@@ -230,14 +230,14 @@ using Asap
 
     @testset "Below-Threshold Torsion — Skip Design" begin
         result = design_beam_torsion(
-            5.0u"kip*inch",    # Very small Tu (below threshold)
-            20.0u"kip",
+            5.0kip*u"inch",    # Very small Tu (below threshold)
+            20.0kip,
             12.0u"inch",
             20.0u"inch",
             17.56u"inch",
-            4.0u"ksi",
-            60.0u"ksi",
-            60.0u"ksi",
+            4.0ksi,
+            60.0ksi,
+            60.0ksi,
         )
 
         @test result.torsion_required == false
@@ -247,14 +247,14 @@ using Asap
 
     @testset "T-beam Torsion Design" begin
         result = design_beam_torsion(
-            150.0u"kip*inch",
-            15.0u"kip",
+            150.0kip*u"inch",
+            15.0kip,
             12.0u"inch",
             24.0u"inch",
             21.0u"inch",
-            4.0u"ksi",
-            60.0u"ksi",
-            60.0u"ksi";
+            4.0ksi,
+            60.0ksi,
+            60.0ksi;
             bf = 48.0u"inch",
             hf = 5.0u"inch",
             torsion_mode = :equilibrium,
@@ -275,14 +275,14 @@ using Asap
         # Push torsion demand just past the adequacy limit
         # Very thin web with high torsion → should fail adequacy
         result = design_beam_torsion(
-            800.0u"kip*inch",   # Very high torsion
-            80.0u"kip",         # Combined with high shear
+            800.0kip*u"inch",   # Very high torsion
+            80.0kip,         # Combined with high shear
             8.0u"inch",         # Narrow web
             16.0u"inch",        # Shallow beam
             13.5u"inch",
-            3.0u"ksi",          # Lower concrete strength
-            60.0u"ksi",
-            60.0u"ksi";
+            3.0ksi,          # Lower concrete strength
+            60.0ksi,
+            60.0ksi;
             torsion_mode = :equilibrium,
         )
 
@@ -307,14 +307,14 @@ using Asap
 
     @testset "ADVERSARIAL: Very High Concrete Strength (f'c = 12 ksi)" begin
         result = design_beam_torsion(
-            200.0u"kip*inch",
-            10.0u"kip",
+            200.0kip*u"inch",
+            10.0kip,
             14.0u"inch",
             24.0u"inch",
             21.0u"inch",
-            12.0u"ksi",         # High-strength concrete
-            60.0u"ksi",
-            60.0u"ksi";
+            12.0ksi,         # High-strength concrete
+            60.0ksi,
+            60.0ksi;
             torsion_mode = :equilibrium,
         )
 
@@ -323,19 +323,19 @@ using Asap
     end
 
     @testset "ADVERSARIAL: Equilibrium vs Compatibility — Different Results" begin
-        Tu_high = 400.0u"kip*inch"
+        Tu_high = 400.0kip*u"inch"
 
         result_eq = design_beam_torsion(
-            Tu_high, 20.0u"kip",
+            Tu_high, 20.0kip,
             14.0u"inch", 24.0u"inch", 21.0u"inch",
-            4.0u"ksi", 60.0u"ksi", 60.0u"ksi";
+            4.0ksi, 60.0ksi, 60.0ksi;
             torsion_mode = :equilibrium,
         )
 
         result_comp = design_beam_torsion(
-            Tu_high, 20.0u"kip",
+            Tu_high, 20.0kip,
             14.0u"inch", 24.0u"inch", 21.0u"inch",
-            4.0u"ksi", 60.0u"ksi", 60.0u"ksi";
+            4.0ksi, 60.0ksi, 60.0ksi;
             torsion_mode = :compatibility,
         )
 
@@ -350,14 +350,14 @@ using Asap
     @testset "ADVERSARIAL: Combined Heavy Shear + Torsion" begin
         # Interaction of heavy shear and torsion should challenge adequacy
         result = design_beam_torsion(
-            350.0u"kip*inch",
-            60.0u"kip",         # Heavy shear
+            350.0kip*u"inch",
+            60.0kip,         # Heavy shear
             12.0u"inch",
             24.0u"inch",
             21.0u"inch",
-            4.0u"ksi",
-            60.0u"ksi",
-            60.0u"ksi";
+            4.0ksi,
+            60.0ksi,
+            60.0ksi;
             torsion_mode = :equilibrium,
         )
 
@@ -365,10 +365,10 @@ using Asap
         # The interaction should increase the utilization ratio
         # compared to pure torsion
         result_no_shear = design_beam_torsion(
-            350.0u"kip*inch",
-            0.0u"kip",
+            350.0kip*u"inch",
+            0.0kip,
             12.0u"inch", 24.0u"inch", 21.0u"inch",
-            4.0u"ksi", 60.0u"ksi", 60.0u"ksi";
+            4.0ksi, 60.0ksi, 60.0ksi;
             torsion_mode = :equilibrium,
         )
         @test result.adequacy_ratio ≥ result_no_shear.adequacy_ratio
@@ -377,14 +377,14 @@ using Asap
     @testset "ADVERSARIAL: Minimum Reinforcement Governs" begin
         # Very low torsion → required At/s < minimum → minimum should govern
         result = design_beam_torsion(
-            40.0u"kip*inch",    # Just above threshold
-            5.0u"kip",
+            40.0kip*u"inch",    # Just above threshold
+            5.0kip,
             12.0u"inch",
             20.0u"inch",
             17.0u"inch",
-            4.0u"ksi",
-            60.0u"ksi",
-            60.0u"ksi";
+            4.0ksi,
+            60.0ksi,
+            60.0ksi;
             torsion_mode = :equilibrium,
         )
 
@@ -399,9 +399,9 @@ using Asap
         # ACI allows 30° ≤ θ ≤ 60° for non-prestressed members
         # θ < 45° → less transverse, more longitudinal
         # θ > 45° → more transverse, less longitudinal
-        Tu = 200.0u"kip*inch"
-        common_args = (Tu, 10.0u"kip", 14.0u"inch", 24.0u"inch", 21.0u"inch",
-                       4.0u"ksi", 60.0u"ksi", 60.0u"ksi")
+        Tu = 200.0kip*u"inch"
+        common_args = (Tu, 10.0kip, 14.0u"inch", 24.0u"inch", 21.0u"inch",
+                       4.0ksi, 60.0ksi, 60.0ksi)
 
         r45 = design_beam_torsion(common_args...; θ=45.0, torsion_mode=:equilibrium)
         r30 = design_beam_torsion(common_args...; θ=30.0, torsion_mode=:equilibrium)

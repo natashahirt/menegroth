@@ -117,6 +117,7 @@ end
                                 L, w_DL, w_LL;
                                 shored::Bool=false,
                                 δ_limit_ratio=1/360,
+                                δ_total_limit_ratio=1/240,
                                 δ_const_limit=nothing) -> NamedTuple
 
 Check deflections for a composite beam under uniform load.
@@ -130,11 +131,13 @@ Check deflections for a composite beam under uniform load.
 - `w_DL`: Distributed dead load (weight per length)
 - `w_LL`: Distributed live load (weight per length)
 - `δ_limit_ratio`: Maximum LL deflection ratio (default L/360)
+- `δ_total_limit_ratio`: Maximum DL+LL deflection ratio (default L/240). `nothing` to skip.
 - `δ_const_limit`: Optional absolute limit for construction deflection (e.g., 2.5 in.)
 
 # Returns
 - `δ_DL`, `δ_LL`, `δ_total`: Computed deflections
 - `ok_LL`: Live load deflection check passes
+- `ok_total`: Total (DL+LL) deflection check passes
 - `ok_const`: Construction deflection check passes (only if `δ_const_limit` is set)
 """
 function check_composite_deflection(section::ISymmSection, material,
@@ -142,20 +145,18 @@ function check_composite_deflection(section::ISymmSection, material,
                                      L, w_DL, w_LL;
                                      shored::Bool=false,
                                      δ_limit_ratio=1/360,
+                                     δ_total_limit_ratio=1/240,
                                      δ_const_limit=nothing)
     Es = material.E
     I_steel = section.Ix
     I_LB = get_I_LB(section, material, slab, b_eff, ΣQn)
 
-    # 5wL⁴ / (384 E I)
     coeff = 5 * L^4 / (384 * Es)
 
     if shored
-        # All loads on composite section
         δ_DL = coeff * w_DL / I_LB
         δ_LL = coeff * w_LL / I_LB
     else
-        # DL on steel alone, LL on composite
         δ_DL = coeff * w_DL / I_steel
         δ_LL = coeff * w_LL / I_LB
     end
@@ -165,9 +166,20 @@ function check_composite_deflection(section::ISymmSection, material,
 
     ok_LL = δ_LL <= δ_LL_limit
 
+    # Total deflection check (DL+LL)
+    ok_total = true
+    δ_total_limit = if !isnothing(δ_total_limit_ratio)
+        L * δ_total_limit_ratio
+    else
+        nothing
+    end
+    if !isnothing(δ_total_limit)
+        ok_total = δ_total <= δ_total_limit
+    end
+
     # Construction deflection (unshored only)
     ok_const = true
-    δ_const = δ_DL  # construction DL ≈ total DL for unshored
+    δ_const = δ_DL
     if !shored && δ_const_limit !== nothing
         ok_const = δ_const <= δ_const_limit
     end
@@ -176,5 +188,6 @@ function check_composite_deflection(section::ISymmSection, material,
               δ_LL=uconvert(u"mm", δ_LL),
               δ_total=uconvert(u"mm", δ_total),
               δ_LL_limit=uconvert(u"mm", δ_LL_limit),
-              ok_LL, ok_const, I_LB)
+              δ_total_limit=isnothing(δ_total_limit) ? nothing : uconvert(u"mm", δ_total_limit),
+              ok_LL, ok_total, ok_const, I_LB)
 end

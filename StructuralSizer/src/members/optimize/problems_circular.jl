@@ -35,7 +35,7 @@ variables, finding the minimum-area section that satisfies ACI 318.
 ```julia
 demand = RCColumnDemand(1; Pu=500.0, Mux=200.0)  # kip, kip-ft
 geometry = ConcreteMemberGeometry(4.0u"m"; k=1.0)
-opts = NLPColumnOptions(grade=NWC_5000, tie_type=:spiral)
+opts = NLPColumnOptions(material=NWC_5000, tie_type=:spiral)
 
 problem = RCCircularNLPProblem(demand, geometry, opts)
 result = optimize_continuous(problem; solver=:ipopt)
@@ -70,7 +70,7 @@ function RCCircularNLPProblem(
     geometry::ConcreteMemberGeometry,
     opts::NLPColumnOptions
 )
-    mat = to_material_tuple(opts.grade, fy_ksi(opts.rebar_grade), Es_ksi(opts.rebar_grade))
+    mat = to_material_tuple(opts.material, fy_ksi(opts.rebar_material), Es_ksi(opts.rebar_material))
 
     Pu_kip = to_kip(demand.Pu)
     Mux_kipft = to_kipft(demand.Mux)
@@ -127,22 +127,22 @@ function objective_fn(p::RCCircularNLPProblem, x::Vector{Float64})
         # See RCColumnNLPProblem for rationale — prevents ρ from pegging at max.
         value = Ag * (1 + 2.0 * ρ)
     elseif obj isa MinWeight
-        γ_concrete = ustrip(pcf, p.opts.grade.ρ)
-        γ_steel = ustrip(pcf, p.opts.rebar_grade.ρ)
+        γ_concrete = ustrip(pcf, p.opts.material.ρ)
+        γ_steel = ustrip(pcf, p.opts.rebar_material.ρ)
         value = Ag * ((1 - ρ) * γ_concrete + ρ * γ_steel)
     elseif obj isa MinCost
-        isnan(p.opts.grade.cost) && error("MinCost requires material.cost to be set (concrete grade has cost=NaN)")
-        isnan(p.opts.rebar_grade.cost) && error("MinCost requires material.cost to be set (rebar grade has cost=NaN)")
-        ρ_c_kgft3 = ustrip(u"kg/ft^3", p.opts.grade.ρ)
-        ρ_s_kgft3 = ustrip(u"kg/ft^3", p.opts.rebar_grade.ρ)
-        cost_c_vol = p.opts.grade.cost * ρ_c_kgft3
-        cost_s_vol = p.opts.rebar_grade.cost * ρ_s_kgft3
+        isnan(p.opts.material.cost) && error("MinCost requires material.cost to be set (concrete has cost=NaN)")
+        isnan(p.opts.rebar_material.cost) && error("MinCost requires material.cost to be set (rebar has cost=NaN)")
+        ρ_c_kgft3 = ustrip(u"kg/ft^3", p.opts.material.ρ)
+        ρ_s_kgft3 = ustrip(u"kg/ft^3", p.opts.rebar_material.ρ)
+        cost_c_vol = p.opts.material.cost * ρ_c_kgft3
+        cost_s_vol = p.opts.rebar_material.cost * ρ_s_kgft3
         value = Ag * ((1 - ρ) * cost_c_vol + ρ * cost_s_vol)
     elseif obj isa MinCarbon
-        ρ_c_kgft3 = ustrip(u"kg/ft^3", p.opts.grade.ρ)
-        ρ_s_kgft3 = ustrip(u"kg/ft^3", p.opts.rebar_grade.ρ)
-        ecc_concrete = p.opts.grade.ecc * ρ_c_kgft3
-        ecc_steel = p.opts.rebar_grade.ecc * ρ_s_kgft3
+        ρ_c_kgft3 = ustrip(u"kg/ft^3", p.opts.material.ρ)
+        ρ_s_kgft3 = ustrip(u"kg/ft^3", p.opts.rebar_material.ρ)
+        ecc_concrete = p.opts.material.ecc * ρ_c_kgft3
+        ecc_steel = p.opts.rebar_material.ecc * ρ_s_kgft3
         value = Ag * ((1 - ρ) * ecc_concrete + ρ * ecc_steel)
     else
         # Default: gross area with ρ penalty (same as MinVolume)

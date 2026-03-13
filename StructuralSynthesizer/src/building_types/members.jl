@@ -56,7 +56,7 @@ Vertical member (columns).
 - `vertex_idx::Int`: Skeleton vertex index (column location)
 - `c1`, `c2`: Cross-section dimensions (for punching shear, etc.)
 - `shape::Symbol`: `:rectangular` or `:circular` (for circular, c1 = c2 = D)
-- `concrete`: Per-column concrete grade (`nothing` → use `ConcreteColumnOptions.grade`)
+- `concrete`: Per-column concrete material (`nothing` → use `ConcreteColumnOptions.material`)
 - `story::Int`: Story index (0 = ground level)
 - `position::Symbol`: `:interior`, `:edge`, `:corner` (for punching shear coefficients)
 - `braced`: Whether column is part of a braced frame (no sway amplification needed)
@@ -99,7 +99,7 @@ populate the `story_properties` field with:
     # c1 is measured along the rotated local-x axis, c2 along local-y.
     # Default 0.0 → axis-aligned (c1 ∥ X, c2 ∥ Y).
     θ::Float64 = 0.0
-    # Per-column concrete grade (nothing → use ConcreteColumnOptions.grade).
+    # Per-column concrete material (nothing → use ConcreteColumnOptions.material).
     # Set when columns on different stories use different f'c.
     concrete::Union{Nothing, StructuralSizer.Concrete} = nothing
     story::Int = 0

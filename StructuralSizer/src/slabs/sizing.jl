@@ -82,13 +82,13 @@ function _precompute_flat_plate_col_cache(column_opts)
     checker = ACIColumnChecker(;
         include_slenderness = col_opts.include_slenderness,
         include_biaxial = col_opts.include_biaxial,
-        fy_ksi = ustrip(ksi, col_opts.rebar_grade.Fy),
-        Es_ksi = ustrip(ksi, col_opts.rebar_grade.E),
+        fy_ksi = ustrip(ksi, col_opts.rebar_material.Fy),
+        Es_ksi = ustrip(ksi, col_opts.rebar_material.E),
         max_depth = col_opts.max_depth,
     )
 
     cache = create_cache(checker, length(cat))
-    precompute_capacities!(checker, cache, cat, col_opts.grade, col_opts.objective)
+    precompute_capacities!(checker, cache, cat, col_opts.material, col_opts.objective)
     return cache
 end
 

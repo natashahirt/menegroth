@@ -13,13 +13,14 @@ AISC 360-16 capacity checker for steel members.
 - `ϕ_c`: Resistance factor for compression (default 0.9)
 - `ϕ_v`: Resistance factor for shear (default 1.0 for rolled shapes)
 - `ϕ_t`: Resistance factor for tension (default 0.9)
-- `deflection_limit`: Optional L/δ limit (e.g., 1/360)
+- `deflection_limit`: Optional L/δ LL-only limit (e.g., 1/360)
+- `total_deflection_limit`: Optional L/δ DL+LL limit (e.g., 1/240)
 - `max_depth`: Maximum section depth constraint
 - `prefer_penalty`: Penalty factor for non-preferred sections (default 1.0 = no penalty)
 
 # Usage
 ```julia
-checker = AISCChecker(; deflection_limit=1/360, prefer_penalty=1.05)
+checker = AISCChecker(; deflection_limit=1/360, total_deflection_limit=1/240)
 feasible = is_feasible(checker, W("W14x22"), A992_Steel, demand, geometry)
 ```
 """
@@ -29,6 +30,7 @@ struct AISCChecker <: AbstractCapacityChecker
     ϕ_v::Float64
     ϕ_t::Float64
     deflection_limit::Union{Nothing, Float64}
+    total_deflection_limit::Union{Nothing, Float64}
     max_depth::Float64  # meters, Inf for no limit
     prefer_penalty::Float64
 end
@@ -39,11 +41,12 @@ function AISCChecker(;
     ϕ_v = 1.0,
     ϕ_t = 0.9,
     deflection_limit = nothing,
+    total_deflection_limit = nothing,
     max_depth = Inf,
     prefer_penalty = 1.0
 )
     max_d = to_meters(max_depth)
-    AISCChecker(ϕ_b, ϕ_c, ϕ_v, ϕ_t, deflection_limit, max_d, prefer_penalty)
+    AISCChecker(ϕ_b, ϕ_c, ϕ_v, ϕ_t, deflection_limit, total_deflection_limit, max_d, prefer_penalty)
 end
 
 # ==============================================================================
@@ -239,6 +242,12 @@ function is_feasible(
     demand::MemberDemand,
     geometry::SteelMemberGeometry
 )::Bool
+    # --- Composite branch: delegate to composite overload ---
+    if !isnothing(demand.composite) && section isa ISymmSection
+        return is_feasible(checker, cache, j, section, material, demand, geometry,
+                           demand.composite)
+    end
+
     # Extract demand values (SI: N, N·m)
     Pu_c = to_newtons(demand.Pu_c)
     Pu_t = to_newtons(demand.Pu_t)
@@ -250,15 +259,13 @@ function is_feasible(
     M2y = to_newton_meters(demand.M2y)
     Vus = to_newtons(demand.Vu_strong)
     Vuw = to_newtons(demand.Vu_weak)
-    δ_max = to_meters(demand.δ_max)
+    δ_max_LL = to_meters(demand.δ_max_LL)
+    δ_max_total = to_meters(demand.δ_max_total)
     I_ref = to_meters_fourth(demand.I_ref)
 
-    # Strip geometry to Float64 meters for internal computation
     L_m = to_meters(geometry.L)
     Lb_m = to_meters(geometry.Lb)
     
-    # --- Sway Frame Warning ---
-    # B2 (P-Δ) amplification is not yet implemented for sway frames
     if !geometry.braced
         @warn "Sway frame (braced=false) specified but B2 amplification not implemented. " *
               "Only B1 (P-δ) effects are applied. Results may be unconservative for sway frames." maxlog=1
@@ -283,41 +290,33 @@ function is_feasible(
     ϕPnc = min(ϕPn_x, ϕPn_y, ϕPn_z)
     
     # --- B1 Moment Amplification (P-δ effects, AISC Appendix 8) ---
-    # Only applies when compression exists (beam-columns)
     Mux_amp = Mux
     Muy_amp = Muy
     
     if Pu_c > 0.0
-        # Get section properties for Pe1 calculation (SI units: Pa, m⁴)
         E = to_pascals(material.E)
-        Ix = cache.Ix[j]  # Already in m⁴
-        
-        # For weak-axis I, we need Iy
+        Ix = cache.Ix[j]
         Iy = to_meters_fourth(StructuralSizer.Iy(section))
         
-        # Effective lengths for P-δ (no lateral translation, K typically 1.0)
         Lc1_x = geometry.Kx * L_m
         Lc1_y = geometry.Ky * L_m
         
-        # Euler buckling loads (N)
+        (Lc1_x > 0 && Lc1_y > 0) || return false  # zero unbraced length → skip P-δ
+        
         Pe1_x = π^2 * E * Ix / Lc1_x^2
         Pe1_y = π^2 * E * Iy / Lc1_y^2
         
-        # Cm factors (AISC A-8-4)
         Cm_x = compute_Cm(M1x, M2x; transverse_loading=demand.transverse_load)
         Cm_y = compute_Cm(M1y, M2y; transverse_loading=demand.transverse_load)
         
-        # B1 factors (AISC A-8-3), α=1.0 for LRFD
+        # AISC A-8-3, α=1.0 for LRFD
         B1_x = compute_B1(Pu_c, Pe1_x, Cm_x; α=1.0)
         B1_y = compute_B1(Pu_c, Pe1_y, Cm_y; α=1.0)
         
-        # Check for instability (B1 = Inf means member buckles)
         if isinf(B1_x) || isinf(B1_y)
             return false
         end
         
-        # Amplify moments (for braced frames, Mnt = total moment, Mlt = 0)
-        # Mr = B1*Mnt + B2*Mlt, but B2*Mlt handled externally for now
         Mux_amp = B1_x * Mux
         Muy_amp = B1_y * Muy
     end
@@ -326,15 +325,22 @@ function is_feasible(
     ur_c = check_PMxMy_interaction(Pu_c, Mux_amp, Muy_amp, ϕPnc, ϕMnx, cache.ϕMn_weak[j])
     ur_c <= 1.0 || return false
     
-    # --- Interaction Check: Tension (no amplification needed for tension) ---
+    # --- Interaction Check: Tension ---
     ur_t = check_PMxMy_interaction(Pu_t, Mux, Muy, cache.ϕPn_tension[j], ϕMnx, cache.ϕMn_weak[j])
     ur_t <= 1.0 || return false
     
-    # --- Deflection Check (Optional) ---
-    if !isnothing(checker.deflection_limit) && I_ref > 0 && δ_max > 0
-        δ_scaled = δ_max * I_ref / cache.Ix[j]
+    # --- LL Deflection Check (e.g. L/360) ---
+    if !isnothing(checker.deflection_limit) && I_ref > 0 && δ_max_LL > 0
+        δ_scaled = δ_max_LL * I_ref / cache.Ix[j]
         δ_ratio = δ_scaled / L_m
         δ_ratio <= checker.deflection_limit || return false
+    end
+    
+    # --- Total Deflection Check (e.g. L/240) ---
+    if !isnothing(checker.total_deflection_limit) && I_ref > 0 && δ_max_total > 0
+        δ_scaled = δ_max_total * I_ref / cache.Ix[j]
+        δ_ratio = δ_scaled / L_m
+        δ_ratio <= checker.total_deflection_limit || return false
     end
     
     return true
@@ -434,8 +440,9 @@ function is_feasible(
         result = get_ϕMn_composite(section, material, ctx.slab, b_eff, ΣQn_full;
                                     ϕ=checker.ϕ_b)
         ϕMn_comp = ustrip(u"N*m", result.ϕMn)
-    catch
-        return false  # web compactness or other check failed
+    catch e
+        @debug "Composite flexure check failed — section infeasible" exception=(e, catch_backtrace())
+        return false
     end
 
     # Use the greater of composite and bare-steel capacity
@@ -446,19 +453,26 @@ function is_feasible(
     # Pure flexure check (beams typically have Pu ≈ 0)
     ϕMnx >= Mux || return false
 
-    # --- Deflection Check (Commentary I3.2) ---
-    if !isnothing(checker.deflection_limit)
-        I_LB_m4 = ustrip(u"m^4", get_I_LB(section, material, ctx.slab, b_eff, ΣQn_full))
-        I_steel_m4 = cache.Ix[j]
-        δ_max = to_meters(demand.δ_max)
-        I_ref = to_meters_fourth(demand.I_ref)
+    # --- Deflection Checks (Commentary I3.2) ---
+    I_LB_m4 = ustrip(u"m^4", get_I_LB(section, material, ctx.slab, b_eff, ΣQn_full))
+    I_steel_m4 = cache.Ix[j]
+    δ_max_LL = to_meters(demand.δ_max_LL)
+    δ_max_total = to_meters(demand.δ_max_total)
+    I_ref = to_meters_fourth(demand.I_ref)
 
-        if I_ref > 0 && δ_max > 0
-            I_eff = ctx.shored ? I_LB_m4 : I_LB_m4  # LL uses I_LB in both cases
-            δ_scaled = δ_max * I_ref / I_eff
-            δ_ratio = δ_scaled / L_m
-            δ_ratio <= checker.deflection_limit || return false
-        end
+    # LL deflection check (e.g. L/360) — uses I_LB for composite
+    if !isnothing(checker.deflection_limit) && I_ref > 0 && δ_max_LL > 0
+        δ_scaled = δ_max_LL * I_ref / I_LB_m4
+        δ_ratio = δ_scaled / L_m
+        δ_ratio <= checker.deflection_limit || return false
+    end
+
+    # Total deflection check (e.g. L/240) — DL uses I_steel (unshored) or I_LB (shored)
+    if !isnothing(checker.total_deflection_limit) && I_ref > 0 && δ_max_total > 0
+        I_total_eff = ctx.shored ? I_LB_m4 : I_steel_m4
+        δ_scaled = δ_max_total * I_ref / I_total_eff
+        δ_ratio = δ_scaled / L_m
+        δ_ratio <= checker.total_deflection_limit || return false
     end
 
     return true
@@ -486,6 +500,7 @@ function composite_stud_contribution(
 )
     b_eff = get_b_eff(ctx.slab, ctx.L_beam)
     Qn = get_Qn(ctx.anchor, ctx.slab)
+    ustrip(u"N", Qn) > 0 || error("Stud shear strength Qn is zero — check anchor/slab inputs")
     Cf_max = _Cf_max(section, material, ctx.slab, b_eff)
 
     n_studs_half = ceil(Int, ustrip(u"N", Cf_max) / ustrip(u"N", Qn))

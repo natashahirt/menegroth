@@ -30,9 +30,9 @@ mutable struct MockCell
     id::Int
     face_idx::Int
     area::typeof(1.0u"ft^2")
-    sdl::typeof(1.0u"psf")
-    live_load::typeof(1.0u"psf")
-    self_weight::typeof(1.0u"psf")
+    sdl::typeof(1.0psf)
+    live_load::typeof(1.0psf)
+    self_weight::typeof(1.0psf)
     spans::NamedTuple{(:primary, :secondary), Tuple{typeof(1.0u"ft"), typeof(1.0u"ft")}}
     position::Symbol
 end
@@ -83,21 +83,21 @@ function create_structurepoint_mock()
         MockCell(
             1, 1,
             span_ft * trib_ft * u"ft^2",
-            20.0u"psf", 50.0u"psf", 0.0u"psf",
+            20.0psf, 50.0psf, 0.0psf,
             (primary = span_ft * u"ft", secondary = trib_ft * u"ft"),
             :edge       # end span
         ),
         MockCell(
             2, 2,
             span_ft * trib_ft * u"ft^2",
-            20.0u"psf", 50.0u"psf", 0.0u"psf",
+            20.0psf, 50.0psf, 0.0psf,
             (primary = span_ft * u"ft", secondary = trib_ft * u"ft"),
             :interior   # interior span
         ),
         MockCell(
             3, 3,
             span_ft * trib_ft * u"ft^2",
-            20.0u"psf", 50.0u"psf", 0.0u"psf",
+            20.0psf, 50.0psf, 0.0psf,
             (primary = span_ft * u"ft", secondary = trib_ft * u"ft"),
             :edge       # end span
         ),
@@ -205,7 +205,7 @@ end
     @printf("│  Span l₂ (E-W):        %8.2f ft                                  │\n", ustrip(u"ft", ddm_result.l2))
     @printf("│  Clear span ln:        %8.2f ft                                  │\n", ustrip(u"ft", ddm_result.ln))
     @printf("│  Slab thickness h:     %8.2f in                                  │\n", ustrip(u"inch", h_ddm))
-    @printf("│  Factored load qu:     %8.2f psf                                 │\n", ustrip(u"psf", ddm_result.qu))
+    @printf("│  Factored load qu:     %8.2f psf                                 │\n", ustrip(psf, ddm_result.qu))
     println("└─────────────────────────────────────────────────────────────────────┘")
 
     println("\n┌─────────────────────────────────────────────────────────────────────┐")
@@ -214,31 +214,31 @@ end
     println("│     Parameter    │     DDM      │     MDDM     │     EFM      │Unit │")
     println("├──────────────────┼──────────────┼──────────────┼──────────────┼─────┤")
 
-    M0_ddm  = ustrip(u"kip*ft", ddm_result.M0)
-    M0_mddm = ustrip(u"kip*ft", mddm_result.M0)
-    M0_efm  = ustrip(u"kip*ft", efm_result.M0)
+    M0_ddm  = ustrip(kip*u"ft", ddm_result.M0)
+    M0_mddm = ustrip(kip*u"ft", mddm_result.M0)
+    M0_efm  = ustrip(kip*u"ft", efm_result.M0)
     @printf("│  M₀ (static)     │ %10.2f   │ %10.2f   │ %10.2f   │k-ft │\n", M0_ddm, M0_mddm, M0_efm)
 
-    M_ext_ddm  = ustrip(u"kip*ft", ddm_result.M_neg_ext)
-    M_ext_mddm = ustrip(u"kip*ft", mddm_result.M_neg_ext)
-    M_ext_efm  = ustrip(u"kip*ft", efm_result.M_neg_ext)
+    M_ext_ddm  = ustrip(kip*u"ft", ddm_result.M_neg_ext)
+    M_ext_mddm = ustrip(kip*u"ft", mddm_result.M_neg_ext)
+    M_ext_efm  = ustrip(kip*u"ft", efm_result.M_neg_ext)
     @printf("│  M⁻ (exterior)   │ %10.2f   │ %10.2f   │ %10.2f   │k-ft │\n", M_ext_ddm, M_ext_mddm, M_ext_efm)
 
-    M_pos_ddm  = ustrip(u"kip*ft", ddm_result.M_pos)
-    M_pos_mddm = ustrip(u"kip*ft", mddm_result.M_pos)
-    M_pos_efm  = ustrip(u"kip*ft", efm_result.M_pos)
+    M_pos_ddm  = ustrip(kip*u"ft", ddm_result.M_pos)
+    M_pos_mddm = ustrip(kip*u"ft", mddm_result.M_pos)
+    M_pos_efm  = ustrip(kip*u"ft", efm_result.M_pos)
     @printf("│  M⁺ (positive)   │ %10.2f   │ %10.2f   │ %10.2f   │k-ft │\n", M_pos_ddm, M_pos_mddm, M_pos_efm)
 
-    M_int_ddm  = ustrip(u"kip*ft", ddm_result.M_neg_int)
-    M_int_mddm = ustrip(u"kip*ft", mddm_result.M_neg_int)
-    M_int_efm  = ustrip(u"kip*ft", efm_result.M_neg_int)
+    M_int_ddm  = ustrip(kip*u"ft", ddm_result.M_neg_int)
+    M_int_mddm = ustrip(kip*u"ft", mddm_result.M_neg_int)
+    M_int_efm  = ustrip(kip*u"ft", efm_result.M_neg_int)
     @printf("│  M⁻ (interior)   │ %10.2f   │ %10.2f   │ %10.2f   │k-ft │\n", M_int_ddm, M_int_mddm, M_int_efm)
 
     println("├──────────────────┼──────────────┼──────────────┼──────────────┼─────┤")
 
-    Vu_ddm  = ustrip(u"kip", ddm_result.Vu_max)
-    Vu_mddm = ustrip(u"kip", mddm_result.Vu_max)
-    Vu_efm  = ustrip(u"kip", efm_result.Vu_max)
+    Vu_ddm  = ustrip(kip, ddm_result.Vu_max)
+    Vu_mddm = ustrip(kip, mddm_result.Vu_max)
+    Vu_efm  = ustrip(kip, efm_result.Vu_max)
     @printf("│  Vu,max (shear)  │ %10.2f   │ %10.2f   │ %10.2f   │kip  │\n", Vu_ddm, Vu_mddm, Vu_efm)
 
     println("└──────────────────┴──────────────┴──────────────┴──────────────┴─────┘")
@@ -283,7 +283,7 @@ end
     sp_M0 = 93.82   # kip-ft (SP uses LL=40 psf; we use 50 psf → higher M0)
     sp_qu = 193.0    # psf
 
-    our_qu = ustrip(u"psf", ddm_result.qu)
+    our_qu = ustrip(psf, ddm_result.qu)
     qu_diff = 100 * (our_qu - sp_qu) / sp_qu
     qu_ok = abs(qu_diff) < 10 ? "✓" : "✗"
     @printf("│  qu (factored)   │ %10.1f   │ %10.1f   │ %+10.1f   │  %s  │\n", sp_qu, our_qu, qu_diff, qu_ok)
@@ -300,9 +300,9 @@ end
     # ==========================================================================
 
     @testset "Basic Sanity Checks" begin
-        @test ddm_result.M0  > 0u"kip*ft"
-        @test mddm_result.M0 > 0u"kip*ft"
-        @test efm_result.M0  > 0u"kip*ft"
+        @test ddm_result.M0  > 0kip*u"ft"
+        @test mddm_result.M0 > 0kip*u"ft"
+        @test efm_result.M0  > 0kip*u"ft"
 
         # M0 should be same across methods (same loads/geometry)
         @test ddm_result.M0 ≈ mddm_result.M0 rtol=0.01
@@ -314,14 +314,14 @@ end
         @test c_int_ddm ≈ 70.0 rtol=0.05
 
         # MDDM should produce reasonable moments
-        @test mddm_result.M_neg_int > 0u"kip*ft"
-        @test mddm_result.M_pos     > 0u"kip*ft"
+        @test mddm_result.M_neg_int > 0kip*u"ft"
+        @test mddm_result.M_pos     > 0kip*u"ft"
     end
 
     @testset "Method Differences" begin
-        @test efm_result.M_neg_ext > 0u"kip*ft"
-        @test efm_result.M_pos     > 0u"kip*ft"
-        @test efm_result.M_neg_int > 0u"kip*ft"
+        @test efm_result.M_neg_ext > 0kip*u"ft"
+        @test efm_result.M_pos     > 0kip*u"ft"
+        @test efm_result.M_neg_int > 0kip*u"ft"
 
         # With Kec torsional reduction, EFM and DDM should agree reasonably.
         # Exterior negative has the most sensitivity (DDM uses 26% fixed coeff,

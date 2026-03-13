@@ -52,10 +52,10 @@ ConcreteColumnOptions
 
 | Field | Description |
 |:------|:------------|
-| `grade` | Concrete grade (e.g. `NWC_4000`) |
+| `material` | Concrete grade (e.g. `NWC_4000`) |
 | `section_shape` | `:rect`, `:square`, `:rectangular`, or `:circular` |
-| `rebar_grade` | Rebar material |
-| `sizing_strategy` | `:catalog` or `:nlp` |
+| `rebar_material` | Rebar material |
+| `sizing_strategy` | `:discrete` or `:nlp` |
 | Other fields | Slenderness, biaxial, catalog parameters |
 
 ```@docs
@@ -66,8 +66,8 @@ ConcreteBeamOptions
 
 | Field | Description |
 |:------|:------------|
-| `grade` | Concrete grade |
-| `rebar_grade` | Rebar material |
+| `material` | Concrete grade |
+| `rebar_material` | Rebar material |
 | `catalog` | Beam section catalog |
 | `deflection_limit` | L/Δ limit |
 | Other fields | Design parameters for flexure, shear, torsion |
@@ -80,8 +80,8 @@ NLPColumnOptions
 
 | Field | Description |
 |:------|:------------|
-| `grade` | Concrete grade |
-| `rebar_grade` | Rebar material |
+| `material` | Concrete grade |
+| `rebar_material` | Rebar material |
 | `min_dim`, `max_dim` | Dimension bounds |
 | `ρ_max` | Maximum reinforcement ratio |
 | `solver` | NLP solver (e.g. Ipopt) |
@@ -154,7 +154,7 @@ optimize_discrete
 - Exactly one section selected: `Σ x[j] = 1`
 - Feasibility: `x[j] = 0` for all sections that fail any member's capacity check
 
-Options: `optimizer` (HiGHS or Gurobi), `mip_gap`, `time_limit_sec`, `n_max_sections`.
+Options: `solver` (HiGHS or Gurobi), `mip_gap`, `time_limit_sec`, `n_max_sections`.
 
 A multi-material overload accepts `(checker, demands, geometries, catalog, materials)` and uses `expand_catalog_with_materials` to create the Cartesian product.
 
@@ -240,16 +240,16 @@ opts = SteelColumnOptions(
 
 ```julia
 opts = ConcreteColumnOptions(
-    grade = NWC_4000,
-    rebar_grade = Rebar_60,
+    material = NWC_4000,
+    rebar_material = Rebar_60,
     section_shape = :rect,
-    sizing_strategy = :catalog
+    sizing_strategy = :discrete
 )
 ```
 
 ### Solver Selection
 
-For discrete MIP: HiGHS (open-source, default) or Gurobi (commercial, faster for large problems). Set via the `optimizer` keyword.
+For discrete MIP: HiGHS (open-source, default) or Gurobi (commercial, faster for large problems). Set via the `solver` keyword.
 
 For NLP: Ipopt (default) via the `solver` keyword in `NLPColumnOptions`.
 

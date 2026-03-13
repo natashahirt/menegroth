@@ -33,6 +33,7 @@ function status_string(ss::ServerStatus)
         ss.state == SERVER_IDLE    && return "idle"
         ss.state == SERVER_RUNNING && return "running"
         ss.state == SERVER_QUEUED  && return "queued"
+        return "unknown"
     end
 end
 

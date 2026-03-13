@@ -47,7 +47,7 @@ using Asap
     ρ = 150u"lb/ft^3"
     
     # Load
-    qu = 193u"psf"
+    qu = 193psf
     
     # =========================================================================
     # Compute EFM-Equivalent Section Properties from Geometry
@@ -258,7 +258,7 @@ using Asap
         M_neg_ext = abs(span_elements[1].forces[6]) / 1355.82
         M_neg_int = abs(span_elements[1].forces[12]) / 1355.82
         
-        w_kft = ustrip(u"kip/ft", qu * l2)
+        w_kft = ustrip(kip/u"ft", qu * l2)
         l1_ft = ustrip(u"ft", l1)
         M0 = w_kft * l1_ft^2 / 8
         M_pos = M0 - (M_neg_ext + M_neg_int) / 2

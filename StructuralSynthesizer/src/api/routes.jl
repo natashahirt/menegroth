@@ -25,6 +25,32 @@ _json_bad(obj) = _json_resp(400, obj)
 """HTTP 500 JSON response."""
 _json_err(obj) = _json_resp(500, obj)
 
+"""Parse a JSON request body into `APIInput`, returning `(input, nothing)` on
+success or `(nothing, HTTP.Response)` with a 400 error on parse failure."""
+function _parse_json_body(req::HTTP.Request)
+    try
+        input = JSON3.read(String(req.body), APIInput)
+        return (input, nothing)
+    catch e
+        resp = _json_bad(Dict(
+            "status" => "error",
+            "error" => "ParseError",
+            "message" => "Invalid JSON: $(sprint(showerror, e))",
+        ))
+        return (nothing, resp)
+    end
+end
+
+"""Build a standard 400 validation-error response from a `ValidationResult`."""
+function _validation_error_response(vr::ValidationResult)
+    return _json_bad(Dict(
+        "status" => "error",
+        "error" => "ValidationError",
+        "message" => "Validation failed: $(length(vr.errors)) error(s)",
+        "errors" => vr.errors,
+    ))
+end
+
 # ─── Route registration ──────────────────────────────────────────────────────
 
 """Register all API routes with the Oxygen router."""
@@ -43,21 +69,7 @@ function register_routes!()
     # ─── GET /schema ──────────────────────────────────────────────────────
     @get "/schema" function (_::HTTP.Request)
         schema_doc = Dict(
-            "input" => Dict(
-                "units" => "Required. Coordinate units: feet, inches, meters, mm",
-                "vertices" => "Array of [x,y,z] arrays",
-                "edges" => Dict("beams" => "[[v1,v2],...]", "columns" => "[[v1,v2],...]"),
-                "supports" => "Array of vertex indices (1-based)",
-                "stories_z" => "Array of story elevations in coordinate units",
-                "faces" => "Optional. {\"floor\": [[[x,y,z],...]], \"roof\": [...], \"grade\": [...]}",
-                "params" => Dict(
-                    "unit_system" => "imperial or metric (output display)",
-                    "loads" => "floor_LL_psf, roof_LL_psf, floor_SDL_psf, ...",
-                    "floor_type" => "flat_plate, flat_slab, one_way, vault",
-                    "materials" => "concrete, rebar, steel names",
-                    "fire_rating" => "0, 1, 1.5, 2, 3, or 4 hours",
-                ),
-            ),
+            "input" => api_input_schema(),
             "endpoints" => Dict(
                 "POST /design" => "Start design (returns 202 immediately; poll GET /status then GET /result)",
                 "POST /validate" => "Validate input without running design",
@@ -72,51 +84,21 @@ function register_routes!()
 
     # ─── POST /validate ───────────────────────────────────────────────────
     @post "/validate" function (req::HTTP.Request)
-        local input
-        try
-            input = JSON3.read(String(req.body), APIInput)
-        catch e
-            return _json_bad(Dict(
-                "status" => "error",
-                "error" => "ParseError",
-                "message" => "Invalid JSON: $(sprint(showerror, e))",
-            ))
-        end
+        (input, err) = _parse_json_body(req)
+        !isnothing(err) && return err
 
         result = validate_input(input)
-        if result.ok
-            return _json_ok(Dict("status" => "ok", "message" => "Input is valid."))
-        else
-            return _json_bad(Dict(
-                "status" => "error",
-                "error" => "ValidationError",
-                "errors" => result.errors,
-            ))
-        end
+        result.ok && return _json_ok(Dict("status" => "ok", "message" => "Input is valid."))
+        return _validation_error_response(result)
     end
 
     # ─── POST /design ─────────────────────────────────────────────────────
     @post "/design" function (req::HTTP.Request)
-        local input
-        try
-            input = JSON3.read(String(req.body), APIInput)
-        catch e
-            return _json_bad(Dict(
-                "status" => "error",
-                "error" => "ParseError",
-                "message" => "Invalid JSON: $(sprint(showerror, e))",
-            ))
-        end
+        (input, err) = _parse_json_body(req)
+        !isnothing(err) && return err
 
-        # Validate
         vr = validate_input(input)
-        if !vr.ok
-            return _json_bad(Dict(
-                "status" => "error",
-                "error" => "ValidationError",
-                "errors" => vr.errors,
-            ))
-        end
+        !vr.ok && return _validation_error_response(vr)
 
         # Queue if server is busy
         if !try_start!(SERVER_STATUS)
@@ -163,28 +145,38 @@ end
 # ─── Design execution ─────────────────────────────────────────────────────────
 
 """
-    _run_design_loop(input::APIInput) -> HTTP.Response
+    _run_design_loop(input::APIInput) -> Nothing
 
-Execute the design pipeline. After completion, checks for queued requests
-and processes them before returning to idle.
+Execute the design pipeline asynchronously. After completion, checks for
+queued requests and processes them before returning to idle. Results are
+stored in `DESIGN_CACHE.last_result` for retrieval via `GET /result`.
 """
 function _run_design_loop(input::APIInput)
-    local last_response
     current_input = input
 
-    while true
-        last_response = _execute_design(current_input)
+    try
+        while true
+            _execute_design(current_input)
 
-        # Check for queued request
-        next_input = finish!(SERVER_STATUS)
-        if isnothing(next_input)
-            break  # No queued request → idle
-        else
-            current_input = next_input
+            next_input = finish!(SERVER_STATUS)
+            if isnothing(next_input)
+                break
+            else
+                current_input = next_input
+            end
         end
+    catch e
+        @error "Design loop crashed — resetting server status" exception=(e, catch_backtrace())
+        DESIGN_CACHE.last_result = APIError(
+            status = "error",
+            error = string(typeof(e)),
+            message = sprint(showerror, e),
+            traceback = sprint(Base.show_backtrace, catch_backtrace()),
+        )
+        finish!(SERVER_STATUS)
     end
 
-    return last_response
+    return nothing
 end
 
 """
@@ -228,11 +220,14 @@ function _execute_design(input::APIInput)
                     "Ensure vertices have different Z coordinates."
                 end
                 
-                return _json_bad(Dict(
+                validation_err = Dict(
                     "status" => "error",
                     "error" => "ValidationError",
+                    "message" => error_msg,
                     "errors" => [error_msg],
-                ))
+                )
+                DESIGN_CACHE.last_result = validation_err
+                return _json_bad(validation_err)
             end
             
             struc = BuildingStructure(skel)

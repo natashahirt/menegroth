@@ -148,14 +148,26 @@ end
         
         @test new_pressure > initial_pressure
         
-        # Check that TributaryLoad pressures were updated
-        if haskey(struc.cell_tributary_loads, first_cell_idx)
-            for tload in struc.cell_tributary_loads[first_cell_idx]
+        # Check that split dead/live TributaryLoad pressures were updated
+        combo = StructuralSynthesizer.governing_combo(StructuralSynthesizer.DesignParameters())
+        expected_dead = ustrip(u"Pa", combo.D * (first_cell.sdl + first_cell.self_weight))
+        expected_live = ustrip(u"Pa", combo.L * first_cell.live_load)
+
+        if haskey(struc.cell_dead_loads, first_cell_idx)
+            for tload in struc.cell_dead_loads[first_cell_idx]
                 tload_p = ustrip(u"Pa", tload.pressure)
-                @test abs(tload_p - new_pressure) < 1.0  # Within 1 Pa
+                @test abs(tload_p - expected_dead) < 1.0
             end
-            println("TributaryLoad pressures updated correctly!")
         end
+        if haskey(struc.cell_live_loads, first_cell_idx)
+            for tload in struc.cell_live_loads[first_cell_idx]
+                tload_p = ustrip(u"Pa", tload.pressure)
+                @test abs(tload_p - expected_live) < 1.0
+            end
+        end
+
+        @test abs((expected_dead + expected_live) - new_pressure) < 1.0
+        println("Dead/live TributaryLoad pressures updated correctly!")
         
         # Restore
         first_cell.live_load = old_ll

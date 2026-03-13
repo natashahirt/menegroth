@@ -338,7 +338,7 @@ println("\n  2.1  MIP (Discrete Catalog) Sizing")
 rc_beam_mod = size_beams(
     [Mu_mod], [Vu_mod],
     [ConcreteMemberGeometry(L_mod)],
-    ConcreteBeamOptions(grade=NWC_4000, rebar_grade=Rebar_60),
+    ConcreteBeamOptions(material=NWC_4000, rebar_material=Rebar_60),
 )
 mod_sec  = rc_beam_mod.sections[1]
 mod_area = ustrip(u"inch^2", section_area(mod_sec))
@@ -351,7 +351,7 @@ println("\n  2.2  NLP (Continuous Optimization)")
 
 rc_bm_nlp_base = (min_depth=12.0u"inch", max_depth=30.0u"inch",
                    min_width=10.0u"inch", max_width=24.0u"inch",
-                   grade=NWC_4000, rebar_grade=Rebar_60, verbose=false)
+                   material=NWC_4000, rebar_material=Rebar_60, verbose=false)
 
 rc_bm_nlp_snap = size_rc_beam_nlp(Mu_mod * 1.0u"kip*ft", Vu_mod * 1.0u"kip",
                                    NLPBeamOptions(; rc_bm_nlp_base..., snap=true))
@@ -419,7 +419,7 @@ println("\n  3.1  MIP (Discrete Catalog) Sizing")
 rc_beam_hvy = size_beams(
     [Mu_hvy], [Vu_hvy],
     [ConcreteMemberGeometry(L_hvy)],
-    ConcreteBeamOptions(grade=NWC_4000, rebar_grade=Rebar_60),
+    ConcreteBeamOptions(material=NWC_4000, rebar_material=Rebar_60),
 )
 hvy_sec  = rc_beam_hvy.sections[1]
 hvy_area = ustrip(u"inch^2", section_area(hvy_sec))
@@ -432,7 +432,7 @@ println("\n  3.2  NLP (Continuous Optimization)")
 
 hvy_nlp_base = (min_depth=14.0u"inch", max_depth=36.0u"inch",
                 min_width=12.0u"inch", max_width=24.0u"inch",
-                grade=NWC_4000, rebar_grade=Rebar_60, verbose=false)
+                material=NWC_4000, rebar_material=Rebar_60, verbose=false)
 
 hvy_nlp_snap = size_rc_beam_nlp(Mu_hvy * 1.0u"kip*ft", Vu_hvy * 1.0u"kip",
                                 NLPBeamOptions(; hvy_nlp_base..., snap=true))
@@ -489,9 +489,9 @@ Vu_cmp = 40.0
 L_cmp  = 7.0
 
 r4 = size_beams([Mu_cmp], [Vu_cmp], [ConcreteMemberGeometry(L_cmp)],
-                ConcreteBeamOptions(grade=NWC_4000))
+                ConcreteBeamOptions(material=NWC_4000))
 r6 = size_beams([Mu_cmp], [Vu_cmp], [ConcreteMemberGeometry(L_cmp)],
-                ConcreteBeamOptions(grade=NWC_6000))
+                ConcreteBeamOptions(material=NWC_6000))
 
 a4 = ustrip(u"inch^2", section_area(r4.sections[1]))
 a6 = ustrip(u"inch^2", section_area(r6.sections[1]))
@@ -630,8 +630,7 @@ comp_result = get_ϕMn_composite(sw_sec, A992_Steel, comp_slab, comp_b_eff, comp
 comp_ϕMn = comp_result.ϕMn
 
 # Partial composite via solver
-comp_Mn_target = Mu_sw / 0.9
-comp_partial = find_required_ΣQn(sw_sec, A992_Steel, comp_slab, comp_b_eff, comp_Mn_target, comp_Qn; ϕ=0.9)
+comp_partial = find_required_ΣQn(sw_sec, A992_Steel, comp_slab, comp_b_eff, Mu_sw, comp_Qn; ϕ=0.9)
 comp_ϕMn_partial = get_ϕMn_composite(sw_sec, A992_Steel, comp_slab, comp_b_eff, comp_partial.ΣQn).ϕMn
 
 # Bare steel capacity
@@ -773,7 +772,7 @@ monotonic = true
 
 for (Mu_i, Vu_i) in zip(Mu_levels, Vu_scale)
     r = size_beams([Mu_i], [Vu_i], [ConcreteMemberGeometry(6.0)],
-                   ConcreteBeamOptions(grade=NWC_4000, rebar_grade=Rebar_60))
+                   ConcreteBeamOptions(material=NWC_4000, rebar_material=Rebar_60))
     sec = r.sections[1]
     a   = ustrip(u"inch^2", section_area(sec))
 
@@ -797,9 +796,9 @@ bm_note("Area should increase monotonically with demand; Mu/φMn ≤ 1.0 for all
 @testset "RC Beam Demand Scaling" begin
     # Check the extremes
     r_lo = size_beams([80.0], [15.0], [ConcreteMemberGeometry(6.0)],
-                      ConcreteBeamOptions(grade=NWC_4000))
+                      ConcreteBeamOptions(material=NWC_4000))
     r_hi = size_beams([350.0], [60.0], [ConcreteMemberGeometry(6.0)],
-                      ConcreteBeamOptions(grade=NWC_4000))
+                      ConcreteBeamOptions(material=NWC_4000))
     a_lo = ustrip(u"inch^2", section_area(r_lo.sections[1]))
     a_hi = ustrip(u"inch^2", section_area(r_hi.sections[1]))
     @test a_hi ≥ a_lo   # Monotonicity
@@ -818,7 +817,7 @@ geom_batch = [ConcreteMemberGeometry(6.0) for _ in 1:3]
 
 batch_result = size_beams(
     Mu_batch, Vu_batch, geom_batch,
-    ConcreteBeamOptions(grade=NWC_4000, rebar_grade=Rebar_60),
+    ConcreteBeamOptions(material=NWC_4000, rebar_material=Rebar_60),
 )
 
 @printf("    %-6s  %-10s  %-8s  %-18s  %-10s\n",
@@ -861,7 +860,7 @@ println("\n  9.1  MIP (Discrete Catalog) Sizing")
 rc_tbeam_mod = size_tbeams(
     [Mu_t_mod], [Vu_t_mod],
     [ConcreteMemberGeometry(L_t_mod)],
-    ConcreteBeamOptions(grade=NWC_4000, rebar_grade=Rebar_60);
+    ConcreteBeamOptions(material=NWC_4000, rebar_material=Rebar_60);
     flange_width=bf_t_mod, flange_thickness=hf_t_mod,
 )
 t_mod_sec  = rc_tbeam_mod.sections[1]
@@ -878,7 +877,7 @@ println("\n  9.2  NLP (Continuous Optimization)")
 
 t_nlp_base = (min_depth=14.0u"inch", max_depth=30.0u"inch",
               min_width=10.0u"inch", max_width=20.0u"inch",
-              grade=NWC_4000, rebar_grade=Rebar_60, verbose=false)
+              material=NWC_4000, rebar_material=Rebar_60, verbose=false)
 
 t_nlp_snap = size_rc_tbeam_nlp(Mu_t_mod * 1.0u"kip*ft", Vu_t_mod * 1.0u"kip",
                                 bf_t_mod, hf_t_mod,
@@ -951,7 +950,7 @@ println("\n  10.1  MIP (Discrete Catalog) Sizing")
 rc_tbeam_hvy = size_tbeams(
     [Mu_t_hvy], [Vu_t_hvy],
     [ConcreteMemberGeometry(L_t_hvy)],
-    ConcreteBeamOptions(grade=NWC_4000, rebar_grade=Rebar_60);
+    ConcreteBeamOptions(material=NWC_4000, rebar_material=Rebar_60);
     flange_width=bf_t_hvy, flange_thickness=hf_t_hvy,
 )
 t_hvy_sec  = rc_tbeam_hvy.sections[1]
@@ -968,7 +967,7 @@ println("\n  10.2  NLP (Continuous Optimization)")
 
 t_hvy_nlp_base = (min_depth=16.0u"inch", max_depth=36.0u"inch",
                    min_width=10.0u"inch", max_width=24.0u"inch",
-                   grade=NWC_4000, rebar_grade=Rebar_60, verbose=false)
+                   material=NWC_4000, rebar_material=Rebar_60, verbose=false)
 
 t_hvy_nlp_snap = size_rc_tbeam_nlp(Mu_t_hvy * 1.0u"kip*ft", Vu_t_hvy * 1.0u"kip",
                                      bf_t_hvy, hf_t_hvy,
@@ -1030,7 +1029,7 @@ Vu_cmp_t = 45.0
 cmp_opts_nlp = NLPBeamOptions(
     min_width=10.0u"inch", max_width=24.0u"inch",
     min_depth=14.0u"inch", max_depth=36.0u"inch",
-    grade=NWC_4000, rebar_grade=Rebar_60, verbose=false, snap=true,
+    material=NWC_4000, rebar_material=Rebar_60, verbose=false, snap=true,
 )
 
 # Rectangular beam NLP
@@ -1685,7 +1684,7 @@ begin
     mip_tor_result = size_beams(
         [mip_tor_Mu], [mip_tor_Vu],
         [ConcreteMemberGeometry(7.0)],
-        ConcreteBeamOptions(grade=NWC_4000, rebar_grade=Rebar_60);
+        ConcreteBeamOptions(material=NWC_4000, rebar_material=Rebar_60);
         Tu=[mip_tor_Tu],
     )
     mip_tor_sec = mip_tor_result.sections[1]
@@ -1709,7 +1708,7 @@ begin
     mip_notor_result = size_beams(
         [mip_tor_Mu], [mip_tor_Vu],
         [ConcreteMemberGeometry(7.0)],
-        ConcreteBeamOptions(grade=NWC_4000, rebar_grade=Rebar_60),
+        ConcreteBeamOptions(material=NWC_4000, rebar_material=Rebar_60),
     )
     mip_notor_sec = mip_notor_result.sections[1]
     mip_notor_area = ustrip(u"inch^2", section_area(mip_notor_sec))
@@ -2302,7 +2301,7 @@ cmp_L  = 6.0  # m
 # ── 17.1  Size each type (all using Unitful — RC accepts Unitful via to_kipft/to_kip) ──
 # RC Rectangular
 cmp_rc = size_beams([cmp_Mu], [cmp_Vu],
-    [ConcreteMemberGeometry(cmp_L)], ConcreteBeamOptions(grade=NWC_4000))
+    [ConcreteMemberGeometry(cmp_L)], ConcreteBeamOptions(material=NWC_4000))
 cmp_rc_sec = cmp_rc.sections[1]
 cmp_rc_area_mm2 = ustrip(u"mm^2", section_area(cmp_rc_sec))
 cmp_rc_flex = rc_beam_flexure(cmp_rc_sec, 4000.0, 60000.0)

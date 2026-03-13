@@ -170,11 +170,11 @@ using Asap
     end
 
     @testset "Design Check — Unitful Wrapper" begin
-        Fy = 50.0u"ksi"
+        Fy = 50.0ksi
         result = check_torsion_yielding(
-            12.4u"ksi", 28.0u"ksi", 2.4u"ksi", 10.0u"ksi", 0.6u"ksi", Fy)
+            12.4ksi, 28.0ksi, 2.4ksi, 10.0ksi, 0.6ksi, Fy)
 
-        @test ustrip(u"ksi", result.f_un) ≈ 40.4  atol=0.1
+        @test ustrip(ksi, result.f_un) ≈ 40.4  atol=0.1
         @test result.normal_ok == true
     end
 
@@ -185,9 +185,9 @@ using Asap
     @testset "Full design_w_torsion — DG9 Example 5.1" begin
         sec = W("W10X49")
         L   = 15.0u"ft"
-        Tu  = 90.0u"kip*inch"
-        Vu  = 7.5u"kip"
-        Mu  = 675.0u"kip*inch"
+        Tu  = 90.0kip*u"inch"
+        Vu  = 7.5kip
+        Mu  = 675.0kip*u"inch"
 
         result = design_w_torsion(sec, mat, Tu, Vu, Mu, L;
                                   load_type=:concentrated_midspan)
@@ -214,7 +214,7 @@ using Asap
     @testset "ADVERSARIAL: Very Short Span (L/a < 1)" begin
         sec = W("W10X49")
         result = design_w_torsion(sec, mat,
-            30.0u"kip*inch", 5.0u"kip", 50.0u"kip*inch", 3.0u"ft")
+            30.0kip*u"inch", 5.0kip, 50.0kip*u"inch", 3.0u"ft")
 
         @test !isnan(result.f_un_midspan_ksi)
         @test result.θ_max_rad ≥ 0
@@ -223,7 +223,7 @@ using Asap
     @testset "ADVERSARIAL: Very Long Span (L/a >> 1)" begin
         sec = W("W10X49")
         result = design_w_torsion(sec, mat,
-            90.0u"kip*inch", 7.5u"kip", 675.0u"kip*inch", 50.0u"ft")
+            90.0kip*u"inch", 7.5kip, 675.0kip*u"inch", 50.0u"ft")
 
         @test !isnan(result.σ_w_midspan_ksi)
         @test result.θ_max_rad > 0
@@ -232,7 +232,7 @@ using Asap
     @testset "ADVERSARIAL: Very Large Torque — Section Fails" begin
         sec = W("W10X49")
         result = design_w_torsion(sec, mat,
-            500.0u"kip*inch", 7.5u"kip", 675.0u"kip*inch", 15.0u"ft")
+            500.0kip*u"inch", 7.5kip, 675.0kip*u"inch", 15.0u"ft")
 
         @test result.ok == false
     end
@@ -240,7 +240,7 @@ using Asap
     @testset "ADVERSARIAL: Light W-shape Under Torsion" begin
         sec = W("W6X9")
         result = design_w_torsion(sec, mat,
-            20.0u"kip*inch", 3.0u"kip", 100.0u"kip*inch", 10.0u"ft")
+            20.0kip*u"inch", 3.0kip, 100.0kip*u"inch", 10.0u"ft")
 
         @test result.f_un_midspan_ksi > 20.0
         @test result.θ_max_rad > 0.01
@@ -249,7 +249,7 @@ using Asap
     @testset "ADVERSARIAL: Heavy W-shape — Torsion Barely Matters" begin
         sec = W("W24X370")
         result = design_w_torsion(sec, mat,
-            100.0u"kip*inch", 50.0u"kip", 5000.0u"kip*inch", 20.0u"ft")
+            100.0kip*u"inch", 50.0kip, 5000.0kip*u"inch", 20.0u"ft")
 
         σ_w_abs = abs(result.σ_w_midspan_ksi)
         @test σ_w_abs < abs(result.σ_b_ksi)  # Torsion stress < bending stress
@@ -259,7 +259,7 @@ using Asap
     @testset "ADVERSARIAL: Zero Torque" begin
         sec = W("W10X49")
         result = design_w_torsion(sec, mat,
-            0.0u"kip*inch", 7.5u"kip", 675.0u"kip*inch", 15.0u"ft")
+            0.0kip*u"inch", 7.5kip, 675.0kip*u"inch", 15.0u"ft")
 
         @test result.σ_w_midspan_ksi ≈ 0.0  atol=1e-10
         @test result.τ_t_support_ksi ≈ 0.0   atol=1e-10
@@ -271,7 +271,7 @@ using Asap
         # W36x150 — very deep section, warping dominates
         sec = W("W36X150")
         result = design_w_torsion(sec, mat,
-            200.0u"kip*inch", 30.0u"kip", 3000.0u"kip*inch", 30.0u"ft")
+            200.0kip*u"inch", 30.0kip, 3000.0kip*u"inch", 30.0u"ft")
 
         @test !isnan(result.f_un_midspan_ksi)
         @test !isnan(result.f_uv_support_ksi)

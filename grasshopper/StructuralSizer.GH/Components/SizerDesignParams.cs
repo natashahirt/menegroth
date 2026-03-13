@@ -45,6 +45,8 @@ namespace StructuralSizer.GH.Components
         private string _beamType = "steel_w";
         private string _optimizeFor = "weight";
         private string _fireRating = "0";
+        private bool _sizeFoundations = false;
+        private string _foundationSoil = "medium_sand";
         private string _unitSystem = "imperial";
 
         // ─── Choice tables ───────────────────────────────────────────────
@@ -135,6 +137,16 @@ namespace StructuralSizer.GH.Components
             new("4 hour",   "4"),
         };
 
+        private static readonly Choice[] SoilTypes =
+        {
+            new("Loose Sand  (qa=75 kPa)",   "loose_sand"),
+            new("Medium Sand (qa=150 kPa)",  "medium_sand"),
+            new("Dense Sand  (qa=300 kPa)",  "dense_sand"),
+            new("Soft Clay   (qa=50 kPa)",   "soft_clay"),
+            new("Stiff Clay  (qa=150 kPa)",  "stiff_clay"),
+            new("Hard Clay   (qa=300 kPa)",  "hard_clay"),
+        };
+
         private static readonly Choice[] UnitSystems =
         {
             new("Imperial", "imperial"),
@@ -150,7 +162,7 @@ namespace StructuralSizer.GH.Components
         { }
 
         public override Guid ComponentGuid =>
-            new Guid("A1B2C3D4-5555-6666-7777-888899990000");
+            new Guid("75125D15-612B-495B-9544-AC4C08EBB8CE");
 
         // ─── Wired inputs (numeric only) ─────────────────────────────────
         protected override void RegisterInputParams(GH_InputParamManager pManager)
@@ -166,6 +178,12 @@ namespace StructuralSizer.GH.Components
 
             pManager.AddNumberParameter("Roof SDL (psf)", "Roof SDL",
                 "Roof superimposed dead load in psf", GH_ParamAccess.item, 15.0);
+
+            pManager.AddNumberParameter("Grade LL (psf)", "Grade LL",
+                "Grade-level live load in psf", GH_ParamAccess.item, 100.0);
+
+            pManager.AddNumberParameter("Wall SDL (psf)", "Wall SDL",
+                "Wall superimposed dead load in psf", GH_ParamAccess.item, 10.0);
         }
 
         protected override void RegisterOutputParams(GH_OutputParamManager pManager)
@@ -256,6 +274,25 @@ namespace StructuralSizer.GH.Components
             AddSubChoices(designMenu, "Optimize For", Objectives,  _optimizeFor);
             AddSubChoices(designMenu, "Fire Rating",  FireRatings, _fireRating);
 
+            // ── Foundations ▸ ──
+            var fdnMenu = Menu_AppendItem(menu, "Foundations");
+
+            var fdnToggle = new ToolStripMenuItem("Size Foundations")
+            {
+                Checked = _sizeFoundations,
+                CheckOnClick = true
+            };
+            fdnToggle.CheckedChanged += (s, _) =>
+            {
+                _sizeFoundations = ((ToolStripMenuItem)s).Checked;
+                UpdateMessage();
+                ExpireSolution(true);
+            };
+            fdnMenu.DropDownItems.Add(fdnToggle);
+
+            fdnMenu.DropDownItems.Add(new ToolStripSeparator());
+            AddSubChoices(fdnMenu, "Soil Type", SoilTypes, _foundationSoil);
+
             Menu_AppendSeparator(menu);
 
             // ── Output ▸ ──
@@ -305,6 +342,7 @@ namespace StructuralSizer.GH.Components
                 case "Beam Type":         _beamType   = tag.Value; break;
                 case "Optimize For":      _optimizeFor = tag.Value; break;
                 case "Fire Rating":       _fireRating  = tag.Value; break;
+                case "Soil Type":         _foundationSoil = tag.Value; break;
                 case "Units":             _unitSystem  = tag.Value; break;
             }
 
@@ -326,6 +364,8 @@ namespace StructuralSizer.GH.Components
             writer.SetString("BeamType",    _beamType);
             writer.SetString("OptimizeFor", _optimizeFor);
             writer.SetString("FireRating",  _fireRating);
+            writer.SetBoolean("SizeFoundations", _sizeFoundations);
+            writer.SetString("FoundationSoil", _foundationSoil);
             writer.SetString("UnitSystem",  _unitSystem);
             return base.Write(writer);
         }
@@ -343,6 +383,8 @@ namespace StructuralSizer.GH.Components
             if (reader.ItemExists("BeamType"))     _beamType    = reader.GetString("BeamType");
             if (reader.ItemExists("OptimizeFor"))  _optimizeFor = reader.GetString("OptimizeFor");
             if (reader.ItemExists("FireRating"))   _fireRating  = reader.GetString("FireRating");
+            if (reader.ItemExists("SizeFoundations")) _sizeFoundations = reader.GetBoolean("SizeFoundations");
+            if (reader.ItemExists("FoundationSoil"))  _foundationSoil  = reader.GetString("FoundationSoil");
             if (reader.ItemExists("UnitSystem"))   _unitSystem  = reader.GetString("UnitSystem");
             UpdateMessage();
             return base.Read(reader);
@@ -357,10 +399,15 @@ namespace StructuralSizer.GH.Components
 
         private void UpdateMessage()
         {
-            Message = string.Join(" | ",
+            var parts = new List<string>
+            {
                 LabelFor(FloorTypes, _floorType),
                 LabelFor(ColumnTypes, _columnType),
-                LabelFor(BeamTypes, _beamType));
+                LabelFor(BeamTypes, _beamType),
+            };
+            if (_sizeFoundations)
+                parts.Add("Fdn: " + LabelFor(SoilTypes, _foundationSoil));
+            Message = string.Join(" | ", parts);
         }
 
         private static string LabelFor(Choice[] choices, string value)
@@ -372,11 +419,14 @@ namespace StructuralSizer.GH.Components
         protected override void SolveInstance(IGH_DataAccess DA)
         {
             double floorLL = 80, roofLL = 20, floorSDL = 15, roofSDL = 15;
+            double gradeLL = 100, wallSDL = 10;
 
             DA.GetData(0, ref floorLL);
             DA.GetData(1, ref roofLL);
             DA.GetData(2, ref floorSDL);
             DA.GetData(3, ref roofSDL);
+            DA.GetData(4, ref gradeLL);
+            DA.GetData(5, ref wallSDL);
 
             double fireRatingVal = 0;
             if (double.TryParse(_fireRating, System.Globalization.NumberStyles.Any,
@@ -390,6 +440,8 @@ namespace StructuralSizer.GH.Components
                 RoofLL          = roofLL,
                 FloorSDL        = floorSDL,
                 RoofSDL         = roofSDL,
+                GradeLL         = gradeLL,
+                WallSDL         = wallSDL,
                 FireRating      = fireRatingVal,
                 FloorType       = _floorType,
                 AnalysisMethod  = _method,
@@ -401,6 +453,8 @@ namespace StructuralSizer.GH.Components
                 ColumnType      = _columnType,
                 BeamType        = _beamType,
                 OptimizeFor     = _optimizeFor,
+                SizeFoundations = _sizeFoundations,
+                FoundationSoil  = _foundationSoil,
                 UnitSystem      = _unitSystem,
             };
 

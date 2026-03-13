@@ -152,7 +152,7 @@ p_u = factored_pressure(strength_1_2D_1_6L, 5.0u"kN/m^2", 3.0u"kN/m^2")
 # → 1.2 * 5.0 + 1.6 * 3.0 = 10.8 kN/m²
 ```
 """
-function factored_pressure(combo::LoadCombination, dead::P1, live::P2) where {P1, P2}
+function factored_pressure(combo::LoadCombination, dead, live)
     return combo.D * dead + combo.L * live
 end
 
@@ -169,8 +169,8 @@ p_u = factored_pressure(strength_1_2D_1_0W;
 ```
 """
 function factored_pressure(combo::LoadCombination; 
-    D::T=0.0, L::T=0.0, Lr::T=0.0, S::T=0.0, R::T=0.0, W::T=0.0, E::T=0.0
-) where T
+    D=0.0, L=0.0, Lr=0.0, S=0.0, R=0.0, W=0.0, E=0.0
+)
     return (combo.D * D + combo.L * L + combo.Lr * Lr + 
             combo.S * S + combo.R * R + combo.W * W + combo.E * E)
 end
@@ -180,7 +180,7 @@ end
 
 Alias for `factored_pressure` - works for any load type (force, moment, etc.).
 """
-const factored_load = factored_pressure
+factored_load(args...; kwargs...) = factored_pressure(args...; kwargs...)
 
 # =============================================================================
 # Envelope Functions

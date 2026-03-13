@@ -296,7 +296,7 @@ Qn = get_Qn(anchor, slab)
 result = get_ϕMn_composite(section, material, slab, b_eff, ΣQn)
 # result.ϕMn, result.Mn, result.y_pna, result.Cf, result.a
 
-# Partial composite: find minimum ΣQn for a target moment
+# Partial composite: find minimum ΣQn for a factored moment demand
 req = find_required_ΣQn(section, material, slab, b_eff, 500.0u"kip*ft", Qn)
 # req.ΣQn, req.n_studs_half, req.sufficient
 

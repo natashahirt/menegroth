@@ -215,11 +215,10 @@ function torsional_constant(s::RCCircularSection)
     return J_val * unit(s.D)^4
 end
 
-"""Effective depth to extreme tension steel."""
+"""Effective depth to extreme tension steel (from compression face at top)."""
 function effective_depth(s::RCCircularSection)
-    # Find maximum y-coordinate (furthest from compression face at top)
-    max_y = maximum(b.y for b in s.bars)
-    return max_y
+    # Depth from compression face (top) to extreme tension bar (lowest y)
+    return s.D - minimum(b.y for b in s.bars)
 end
 
 """Depth to compression steel (minimum y from top face)."""
@@ -275,9 +274,8 @@ function circular_compression_zone(D::Real, a::Real)
     # A_comp = R² × (θ - sin(θ)cos(θ)) where θ is in radians
     A_comp = R^2 * (θ - sin(θ) * cos(θ))
     
-    # Distance from extreme compression fiber to centroid
+    # Distance from SECTION CENTER to compression zone centroid (moment arm)
     # StructurePoint formula: ȳ = D³ sin³(θ) / (12 × A_comp)
-    # This gives the distance from TOP (compression face) to centroid directly
     if A_comp > 1e-10
         y_bar = D^3 * sin(θ)^3 / (12 * A_comp)
     else

@@ -77,10 +77,10 @@ Construct an RC beam NLP problem from factored demands and options.
 Converts Unitful inputs to bare ACI units (kip, kip-ft, inches, psi).
 """
 function RCBeamNLPProblem(Mu, Vu, opts::NLPBeamOptions; Tu=0.0)
-    fc = fc_ksi(opts.grade)
-    fy = fy_ksi(opts.rebar_grade)
-    Es = Es_ksi(opts.rebar_grade)
-    λ_val = opts.grade.λ
+    fc = fc_ksi(opts.material)
+    fy = fy_ksi(opts.rebar_material)
+    Es = Es_ksi(opts.rebar_material)
+    λ_val = opts.material.λ
 
     Mu_kipft = to_kipft(Mu)
     Vu_kip   = to_kip(Vu)
@@ -160,8 +160,8 @@ function objective_fn(p::RCBeamNLPProblem, x::Vector{Float64})
         # Gross area with ρ penalty — prevents pegging at ρ_max.
         return Ag * (1 + 2.0 * ρ)
     elseif obj isa MinWeight
-        γ_c = ustrip(u"lb/ft^3", p.opts.grade.ρ)
-        γ_s = ustrip(u"lb/ft^3", p.opts.rebar_grade.ρ)
+        γ_c = ustrip(u"lb/ft^3", p.opts.material.ρ)
+        γ_s = ustrip(u"lb/ft^3", p.opts.rebar_material.ρ)
         return Ag * ((1 - ρ) * γ_c + ρ * γ_s)
     else
         return Ag * (1 + 2.0 * ρ)
@@ -428,25 +428,22 @@ This is a beam-specific problem — no axial compression.
 struct SteelWBeamNLPProblem <: AbstractNLPProblem
     opts::NLPWOptions
     
-    # Material properties (ksi)
     E_ksi::Float64
     G_ksi::Float64
     Fy_ksi::Float64
     
-    # Demand values (kip, kip-ft)
     Mu_kipft::Float64
     Vu_kip::Float64
     
-    # Unbraced length and moment gradient factor
     Lb_in::Float64
     Cb::Float64
     
-    # Deflection: minimum required Ix (in⁴). 0.0 = no deflection check.
+    # Deflection: minimum required Ix for LL (in⁴). 0.0 = no check.
     Ix_min_in4::Float64
+    # Deflection: minimum required Ix for DL+LL total (in⁴). 0.0 = no check.
+    Ix_min_total_in4::Float64
     
-    # Torsion demand (kip·in). 0.0 = no torsion constraint.
     Tu_kipin::Float64
-    # Span length for torsion derivatives (inches). Only used when Tu > 0.
     L_in::Float64
     
     # Bounds in inches
@@ -471,6 +468,7 @@ function SteelWBeamNLPProblem(
     geometry::SteelMemberGeometry,
     opts::NLPWOptions;
     Ix_min = nothing,
+    Ix_min_total = nothing,
     Tu = 0.0,
     L_span = nothing,
 )
@@ -490,6 +488,14 @@ function SteelWBeamNLPProblem(
         ustrip(u"inch^4", Ix_min)
     else
         Float64(Ix_min)
+    end
+    
+    Ix_min_total_in4 = if isnothing(Ix_min_total)
+        0.0
+    elseif Ix_min_total isa Unitful.Quantity
+        ustrip(u"inch^4", Ix_min_total)
+    else
+        Float64(Ix_min_total)
     end
     
     # Torsion demand
@@ -519,7 +525,7 @@ function SteelWBeamNLPProblem(
         opts, E_ksi, G_ksi, Fy_ksi,
         Mu_kipft, Vu_kip,
         Lb_in, Cb,
-        Ix_min_in4,
+        Ix_min_in4, Ix_min_total_in4,
         Tu_kipin_val, L_in_val,
         d_min, d_max, bf_min, bf_max, tf_min, tf_max, tw_min, tw_max
     )
@@ -566,12 +572,13 @@ end
 
 # --- Interface: Constraints ---
 
-"""Number of constraints: 5 base + optional compactness, deflection, torsion."""
+"""Number of constraints: 5 base + optional compactness, LL deflection, total deflection, torsion."""
 function n_constraints(p::SteelWBeamNLPProblem)
     nc = 5  # flexure, shear, bf/d, tf/tw, web slenderness
-    p.opts.require_compact && (nc += 1)  # flange compactness
-    p.Ix_min_in4 > 0 && (nc += 1)        # deflection (Ix adequacy)
-    p.Tu_kipin > 0 && (nc += 1)           # torsion interaction (DG9 §4.7.1)
+    p.opts.require_compact && (nc += 1)
+    p.Ix_min_in4 > 0 && (nc += 1)
+    p.Ix_min_total_in4 > 0 && (nc += 1)
+    p.Tu_kipin > 0 && (nc += 1)
     return nc
 end
 
@@ -580,7 +587,8 @@ function constraint_names(p::SteelWBeamNLPProblem)
     names = ["flexure utilization", "shear utilization", "bf/d ratio", "tf/tw ratio",
              "web slenderness (h/tw)"]
     p.opts.require_compact && push!(names, "flange compactness")
-    p.Ix_min_in4 > 0 && push!(names, "deflection (Ix adequacy)")
+    p.Ix_min_in4 > 0 && push!(names, "LL deflection (Ix adequacy)")
+    p.Ix_min_total_in4 > 0 && push!(names, "total deflection (Ix adequacy)")
     p.Tu_kipin > 0 && push!(names, "torsion interaction (DG9 §4.7.1)")
     return names
 end
@@ -697,8 +705,13 @@ function constraint_fns(p::SteelWBeamNLPProblem, x::Vector{Float64})
     end
     
     if p.Ix_min_in4 > 0
-        Ix, _ = _w_inertia_smooth(d, bf, tf, tw)
-        push!(constraints, p.Ix_min_in4 / _smooth_max(Ix, 0.1; k=k))
+        Ix_check, _ = _w_inertia_smooth(d, bf, tf, tw)
+        push!(constraints, p.Ix_min_in4 / _smooth_max(Ix_check, 0.1; k=k))
+    end
+    
+    if p.Ix_min_total_in4 > 0
+        Ix_check2, _ = _w_inertia_smooth(d, bf, tf, tw)
+        push!(constraints, p.Ix_min_total_in4 / _smooth_max(Ix_check2, 0.1; k=k))
     end
     
     # ── DG9 Torsion interaction (§4.7.1) ──
@@ -847,10 +860,11 @@ struct SteelHSSBeamNLPProblem <: AbstractNLPProblem
     Mu_kipft::Float64
     Vu_kip::Float64
     
-    # Deflection: minimum required Ix (in⁴). 0.0 = no deflection check.
+    # Deflection: minimum required Ix for LL (in⁴). 0.0 = no check.
     Ix_min_in4::Float64
+    # Deflection: minimum required Ix for DL+LL total (in⁴). 0.0 = no check.
+    Ix_min_total_in4::Float64
     
-    # Torsion demand (kip·in). 0.0 = no torsion constraint.
     Tu_kipin::Float64
     
     # Bounds in inches
@@ -870,6 +884,7 @@ function SteelHSSBeamNLPProblem(
     Mu, Vu,
     opts::NLPHSSOptions;
     Ix_min = nothing,
+    Ix_min_total = nothing,
     Tu = 0.0,
 )
     E_ksi = to_ksi(opts.material.E)
@@ -884,6 +899,14 @@ function SteelHSSBeamNLPProblem(
         ustrip(u"inch^4", Ix_min)
     else
         Float64(Ix_min)
+    end
+    
+    Ix_min_total_in4 = if isnothing(Ix_min_total)
+        0.0
+    elseif Ix_min_total isa Unitful.Quantity
+        ustrip(u"inch^4", Ix_min_total)
+    else
+        Float64(Ix_min_total)
     end
     
     # Torsion demand
@@ -901,7 +924,7 @@ function SteelHSSBeamNLPProblem(
     SteelHSSBeamNLPProblem(
         opts, E_ksi, Fy_ksi,
         Mu_kipft, Vu_kip,
-        Ix_min_in4, Tu_kipin_val,
+        Ix_min_in4, Ix_min_total_in4, Tu_kipin_val,
         B_min, B_max, t_min, t_max
     )
 end
@@ -953,18 +976,20 @@ end
 
 # --- Interface: Constraints ---
 
-"""Number of constraints: 3 base + optional deflection and torsion."""
+"""Number of constraints: 3 base + optional LL deflection, total deflection, torsion."""
 function n_constraints(p::SteelHSSBeamNLPProblem)
     nc = 3  # flexure, shear, b/t fabrication
-    p.Ix_min_in4 > 0 && (nc += 1)  # deflection (Ix adequacy)
-    p.Tu_kipin > 0 && (nc += 1)     # torsion interaction (AISC H3-6)
+    p.Ix_min_in4 > 0 && (nc += 1)
+    p.Ix_min_total_in4 > 0 && (nc += 1)
+    p.Tu_kipin > 0 && (nc += 1)
     return nc
 end
 
 """Human-readable constraint names for solver diagnostics."""
 function constraint_names(p::SteelHSSBeamNLPProblem)
     names = ["flexure utilization", "shear utilization", "min b/t ratio"]
-    p.Ix_min_in4 > 0 && push!(names, "deflection (Ix adequacy)")
+    p.Ix_min_in4 > 0 && push!(names, "LL deflection (Ix adequacy)")
+    p.Ix_min_total_in4 > 0 && push!(names, "total deflection (Ix adequacy)")
     p.Tu_kipin > 0 && push!(names, "torsion interaction (AISC H3-6)")
     return names
 end
@@ -1067,8 +1092,13 @@ function constraint_fns(p::SteelHSSBeamNLPProblem, x::Vector{Float64})
     constraints = [util_flex, util_shear, util_bt]
     
     if p.Ix_min_in4 > 0
-        Ix, _ = _hss_inertia_smooth(B, H, t)
-        push!(constraints, p.Ix_min_in4 / _smooth_max(Ix, 0.1; k=k))
+        Ix_check, _ = _hss_inertia_smooth(B, H, t)
+        push!(constraints, p.Ix_min_in4 / _smooth_max(Ix_check, 0.1; k=k))
+    end
+    
+    if p.Ix_min_total_in4 > 0
+        Ix_check2, _ = _hss_inertia_smooth(B, H, t)
+        push!(constraints, p.Ix_min_total_in4 / _smooth_max(Ix_check2, 0.1; k=k))
     end
     
     # ── AISC H3-6: HSS Torsion interaction ──

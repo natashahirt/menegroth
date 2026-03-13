@@ -198,7 +198,7 @@ Factor ≈ 0.5 for equal columns above and below (typical interior floor).
 
 Handles unequal columns (different dimensions, lengths, or shapes) and
 per-column concrete grades (via `col.concrete`). When a column has no
-per-column grade, falls back to `column_opts.grade`.
+per-column material, falls back to `column_opts.material`.
 
 # Arguments
 - `struc`: BuildingStructure with all columns
@@ -210,8 +210,8 @@ function column_moment_distribution_factors(struc, columns, column_opts)
     factors = ones(Float64, n)
 
     # Default column Ec from column_opts (used when col.concrete is nothing)
-    fc_default = column_opts.grade.fc′
-    wc_default = ustrip(pcf, column_opts.grade.ρ)
+    fc_default = column_opts.material.fc′
+    wc_default = ustrip(pcf, column_opts.material.ρ)
     Ec_default = ustrip(ksi, Ec(fc_default, wc_default))  # ksi
 
     for (i, col_below) in enumerate(columns)

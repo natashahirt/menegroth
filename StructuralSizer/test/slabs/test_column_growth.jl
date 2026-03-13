@@ -546,8 +546,8 @@ end
 
     # Create minimal mock for testing setup functions
     mutable struct _TestCell
-        sdl::typeof(1.0u"psf")
-        live_load::typeof(1.0u"psf")
+        sdl::typeof(1.0psf)
+        live_load::typeof(1.0psf)
     end
 
     mock_slab = (
@@ -561,10 +561,10 @@ end
     ]
 
     mock_struc = (
-        cells = [_TestCell(20.0u"psf", 50.0u"psf")],
+        cells = [_TestCell(20.0psf, 50.0psf)],
     )
 
-    γ = 150.0u"pcf"  # NWC
+    γ = 150.0pcf  # NWC
     h = 8.0u"inch"
 
     primary = _mas(mock_struc, mock_slab, mock_columns, h, γ)

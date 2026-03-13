@@ -48,7 +48,7 @@ using StructuralSizer
         # ACI 19.2.2.1: Ec = 57000√f'c (psi)
         # For f'c = 4000 psi: Ec = 57000 × 63.25 = 3,605,000 psi = 3605 ksi
         Ec_calc = Ec(fc)
-        @test ustrip(u"ksi", Ec_calc) ≈ 3605 rtol=0.01
+        @test ustrip(ksi, Ec_calc) ≈ 3605 rtol=0.01
         
         # ACI 22.2.2.4.3: β₁ varies with f'c
         # f'c ≤ 4000 psi: β₁ = 0.85
@@ -99,30 +99,30 @@ using StructuralSizer
     @testset "Factored Loads (StructurePoint Example)" begin
         # Self-weight: 150 pcf × 7"/12 = 87.5 psf
         γ_conc = 150u"lbf/ft^3"
-        sw = γ_conc * h |> u"psf"
-        @test ustrip(u"psf", sw) ≈ 87.5 rtol=0.01
+        sw = γ_conc * h |> psf
+        @test ustrip(psf, sw) ≈ 87.5 rtol=0.01
         
-        sdl = 20u"psf"
-        ll = 40u"psf"  # StructurePoint uses 40 psf (residential)
+        sdl = 20psf
+        ll = 40psf  # StructurePoint uses 40 psf (residential)
         
         # Dead load: D = sw + SDL = 87.5 + 20 = 107.5 psf
         D = sw + sdl
-        @test ustrip(u"psf", D) ≈ 107.5 rtol=0.01
+        @test ustrip(psf, D) ≈ 107.5 rtol=0.01
         
         # Factored load: qu = 1.2D + 1.6L = 1.2(107.5) + 1.6(40) = 193.0 psf
         qu = 1.2 * D + 1.6 * ll
-        @test ustrip(u"psf", qu) ≈ 193.0 rtol=0.01
+        @test ustrip(psf, qu) ≈ 193.0 rtol=0.01
     end
     
     @testset "Static Moment M₀ (ACI 8.10.3.2)" begin
         # M₀ = qu × l₂ × ln² / 8
         # From StructurePoint: qu = 0.193 ksf
-        qu = 0.193u"ksf"
+        qu = 0.193ksf
         ln_NS = 16.67u"ft"  # Clear span in long direction
         
         # M0 = 0.193 × 14 × 16.67² / 8 = 93.82 kip-ft
         M0 = total_static_moment(qu, l2, ln_NS)
-        @test ustrip(u"kip*ft", M0) ≈ 93.82 rtol=0.02
+        @test ustrip(kip*u"ft", M0) ≈ 93.82 rtol=0.02
     end
     
     @testset "ACI DDM Longitudinal Distribution (Table 8.10.4.2)" begin
@@ -138,25 +138,25 @@ using StructuralSizer
     end
     
     @testset "Design Moments - DDM (StructurePoint Table 1)" begin
-        M0 = 93.82u"kip*ft"
+        M0 = 93.82kip*u"ft"
         
         # End span moment distribution (Table 1 from StructurePoint)
         # Exterior Negative: 0.26 × M₀ = 24.39 k-ft
-        @test 0.26 * ustrip(u"kip*ft", M0) ≈ 24.39 rtol=0.02
+        @test 0.26 * ustrip(kip*u"ft", M0) ≈ 24.39 rtol=0.02
         
         # Positive: 0.52 × M₀ = 48.79 k-ft
-        @test 0.52 * ustrip(u"kip*ft", M0) ≈ 48.79 rtol=0.02
+        @test 0.52 * ustrip(kip*u"ft", M0) ≈ 48.79 rtol=0.02
         
         # Interior Negative: 0.70 × M₀ = 65.67 k-ft
-        @test 0.70 * ustrip(u"kip*ft", M0) ≈ 65.67 rtol=0.02
+        @test 0.70 * ustrip(kip*u"ft", M0) ≈ 65.67 rtol=0.02
         
         # Interior span
         # Positive: 0.35 × M₀ = 32.84 k-ft
-        @test 0.35 * ustrip(u"kip*ft", M0) ≈ 32.84 rtol=0.02
+        @test 0.35 * ustrip(kip*u"ft", M0) ≈ 32.84 rtol=0.02
     end
     
     @testset "Moment Distribution - Full ACI DDM (StructurePoint Table 2)" begin
-        M0 = 93.82u"kip*ft"
+        M0 = 93.82kip*u"ft"
         l2_l1 = ustrip(u"ft", l2) / ustrip(u"ft", l1)  # 14/18 = 0.778
         
         # Full ACI DDM for end span
@@ -169,24 +169,24 @@ using StructuralSizer
         
         # Column strip distribution (Table 2):
         # Exterior Negative: 100% to column strip (no edge beam)
-        @test ustrip(u"kip*ft", moments_aci.column_strip.ext_neg) ≈ 24.39 rtol=0.05
-        @test ustrip(u"kip*ft", moments_aci.middle_strip.ext_neg) ≈ 0.0 atol=0.5
+        @test ustrip(kip*u"ft", moments_aci.column_strip.ext_neg) ≈ 24.39 rtol=0.05
+        @test ustrip(kip*u"ft", moments_aci.middle_strip.ext_neg) ≈ 0.0 atol=0.5
         
         # Positive: 60% to column strip, 40% to middle strip
-        @test ustrip(u"kip*ft", moments_aci.column_strip.pos) ≈ 29.27 rtol=0.05
-        @test ustrip(u"kip*ft", moments_aci.middle_strip.pos) ≈ 19.52 rtol=0.05
+        @test ustrip(kip*u"ft", moments_aci.column_strip.pos) ≈ 29.27 rtol=0.05
+        @test ustrip(kip*u"ft", moments_aci.middle_strip.pos) ≈ 19.52 rtol=0.05
         
         # Interior Negative: 75% to column strip, 25% to middle strip
-        @test ustrip(u"kip*ft", moments_aci.column_strip.int_neg) ≈ 49.25 rtol=0.05
-        @test ustrip(u"kip*ft", moments_aci.middle_strip.int_neg) ≈ 16.42 rtol=0.05
+        @test ustrip(kip*u"ft", moments_aci.column_strip.int_neg) ≈ 49.25 rtol=0.05
+        @test ustrip(kip*u"ft", moments_aci.middle_strip.int_neg) ≈ 16.42 rtol=0.05
         
         # Interior span
         M0_int = M0  # Same M0 for comparison
         moments_int = distribute_moments_aci(M0_int, :interior_span, l2_l1)
         
         # Positive: 0.35 × M0, then 60% to column strip
-        @test ustrip(u"kip*ft", moments_int.column_strip.pos) ≈ 19.70 rtol=0.05
-        @test ustrip(u"kip*ft", moments_int.middle_strip.pos) ≈ 13.14 rtol=0.05
+        @test ustrip(kip*u"ft", moments_int.column_strip.pos) ≈ 19.70 rtol=0.05
+        @test ustrip(kip*u"ft", moments_int.middle_strip.pos) ≈ 13.14 rtol=0.05
     end
     
     @testset "M-DDM Coefficients (Supplementary Doc Table S-1)" begin
@@ -255,7 +255,7 @@ using StructuralSizer
         
         # Design for exterior negative moment in column strip
         # Mu = 24.39 k-ft, b = 84 in, d = 5.75 in
-        Mu = 24.39u"kip*ft"
+        Mu = 24.39kip*u"ft"
         d_avg = 5.75u"inch"
         
         As_reqd = required_reinforcement(Mu, b_cs, d_avg, fc, fy)
@@ -277,17 +277,17 @@ using StructuralSizer
         # Punching shear capacity (ACI 22.6.5.2)
         # Vc = 4λ√f'c × b₀ × d = 4(1)(63.25)(87)(5.75) / 1000 = 126.55 kips
         Vc = punching_capacity_interior(b0, d_avg, fc; c1=c1, c2=c2)
-        @test ustrip(u"kip", Vc) ≈ 126.55 rtol=0.05
+        @test ustrip(kip, Vc) ≈ 126.55 rtol=0.05
         
         # Punching shear demand from StructurePoint
         # At = 18 × 14 = 252 ft² (tributary area)
         # Adjusted tributary = 252 - (21.75/12)² = 248.71 ft²
-        qu = 0.193u"ksf"
+        qu = 0.193ksf
         At = 18u"ft" * 14u"ft"
         Vu = punching_demand(qu, At, c1, c2, d_avg)
         
         # StructurePoint: Vu = 48.00 kips
-        @test ustrip(u"kip", Vu) ≈ 48.0 rtol=0.02
+        @test ustrip(kip, Vu) ≈ 48.0 rtol=0.02
         
         # Check: φVc = 0.75 × 126.55 = 94.92 kip > Vu = 48.00 kip → OK
         check = check_punching_shear(Vu, Vc)
@@ -309,7 +309,7 @@ using StructuralSizer
         # Mcr = 474.3 × 343 / 3.5 = 46,492 lb-in = 3.87 kip-ft per foot
         fr_val = fr(fc)
         Mcr = cracking_moment(fr_val, Ig, h)
-        @test ustrip(u"kip*ft", Mcr) ≈ 3.87 rtol=0.05
+        @test ustrip(kip*u"ft", Mcr) ≈ 3.87 rtol=0.05
         
         # Deflection limits (ACI Table 24.2.2)
         l = 18u"ft"  # Use longer span
@@ -334,7 +334,7 @@ using StructuralSizer
         
         # For the 18×14 ft bay = 252 ft² tributary
         At = 252u"ft^2"
-        qu = 193u"psf"
+        qu = 193psf
         n_stories = 1  # Single story for basic check
         fc_col = 6000u"psi"  # Columns use higher f'c
         
@@ -375,7 +375,7 @@ using StructuralSizer
         
         for (location, Mu_kft, As_expected) in test_cases
             if Mu_kft > 0
-                Mu = Mu_kft * u"kip*ft"
+                Mu = Mu_kft * kip*u"ft"
                 As_calc = required_reinforcement(Mu, b, d, fc, fy)
                 @test ustrip(u"inch^2", As_calc) ≈ As_expected rtol=0.10
             end
@@ -401,7 +401,7 @@ using StructuralSizer
         # Cracking moment (Page 50): Mcr = fr × Ig / yt = 474.34 × 4802 / 3.5 / 12000
         yt = h / 2  # 3.5 in
         Mcr = fr_val * Ig_frame / yt
-        Mcr_kft = ustrip(u"kip*ft", uconvert(u"kip*ft", Mcr))
+        Mcr_kft = ustrip(kip*u"ft", uconvert(kip*u"ft", Mcr))
         @test Mcr_kft ≈ 54.23 rtol=0.02
         
         # Cracked moment of inertia (Page 50): Icr = 629 in⁴ for 17 #4 bars
@@ -413,9 +413,9 @@ using StructuralSizer
         
         # Effective moment of inertia (Page 52)
         # For D+L_full, Ma_neg = 64.13 k-ft at interior support
-        Ma_neg = 64.13u"kip*ft"
-        Ma_pos = 34.35u"kip*ft"
-        Mcr_unit = 54.23u"kip*ft"
+        Ma_neg = 64.13kip*u"ft"
+        Ma_pos = 34.35kip*u"ft"
+        Mcr_unit = 54.23kip*u"ft"
         
         # At negative section (cracked): Ie = 3,152 in⁴
         Ie_neg = effective_moment_of_inertia(Mcr_unit, Ma_neg, Ig_frame, Icr)
@@ -536,7 +536,7 @@ println("All flat plate design tests passed!")
 
     @testset "Punching Demand — Circular Interior" begin
         d = 5.75u"inch"
-        qu = 0.193u"ksf"
+        qu = 0.193ksf
         At = 18u"ft" * 14u"ft"
 
         # Rectangular deduction: (c+d)²
@@ -551,13 +551,13 @@ println("All flat plate design tests passed!")
         # Verify the demand formula: Vu = qu × (At - Ac)
         Ac_circ = π * (D + d)^2 / 4
         Vu_manual = qu * (At - Ac_circ)
-        @test ustrip(u"kip", Vu_circ) ≈ ustrip(u"kip", Vu_manual) rtol=0.001
+        @test ustrip(kip, Vu_circ) ≈ ustrip(kip, Vu_manual) rtol=0.001
     end
 
     @testset "Punching Check — Circular vs Rectangular" begin
         d = 5.75u"inch"
         fc = 4000u"psi"
-        qu = 0.193u"ksf"
+        qu = 0.193ksf
         At = 18u"ft" * 14u"ft"
 
         # Rectangular 16" square

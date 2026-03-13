@@ -43,7 +43,7 @@ const has_drop_panels_fn = SS.has_drop_panels
     fc_col  = 6000u"psi"
     fy      = 60000u"psi"
     wc      = 150.0       # pcf (mass density as number for Ec formula)
-    γ       = 150u"pcf"   # unit weight
+    γ       = 150pcf   # unit weight
 
     # ─── Geometry ───
     l1      = 30u"ft"     # span direction 1
@@ -60,10 +60,10 @@ const has_drop_panels_fn = SS.has_drop_panels
     h_total = h + h_drop        # = 14.25 in
 
     # ─── Loads ───
-    sdl     = 20u"psf"
-    ll      = 60u"psf"
-    sw_slab = 125.0u"psf"      # 150 × 10/12
-    sw_drop = 53.13u"psf"      # 150 × 4.25/12 (additional)
+    sdl     = 20psf
+    ll      = 60psf
+    sw_slab = 125.0psf      # 150 × 10/12
+    sw_drop = 53.13psf      # 150 × 4.25/12 (additional)
 
     # ─── Reference stiffness values ───
     Ecs_ref = 4287e3  # psi (slab concrete modulus)
@@ -136,16 +136,16 @@ const has_drop_panels_fn = SS.has_drop_panels
 
         # Slab-only self-weight: 150 pcf × 10 in / 12 = 125.0 psf
         sw = slab_self_weight(h, γ)
-        @test ustrip(u"psf", sw) ≈ 125.0 rtol=0.01
+        @test ustrip(psf, sw) ≈ 125.0 rtol=0.01
 
         # Self-weight with drop panels
         dp = DropPanelGeometry(h_drop, a_drop, a_drop)
         w_slab, w_drop = slab_self_weight_with_drop(h, dp, γ)
 
         # w_slab = 125.0 psf
-        @test ustrip(u"psf", w_slab) ≈ 125.0 rtol=0.01
+        @test ustrip(psf, w_slab) ≈ 125.0 rtol=0.01
         # w_drop = 150 × 4.25/12 = 53.125 psf
-        @test ustrip(u"psf", w_drop) ≈ 53.13 rtol=0.01
+        @test ustrip(psf, w_drop) ≈ 53.13 rtol=0.01
     end
 
     # =========================================================================
@@ -388,9 +388,9 @@ const has_drop_panels_fn = SS.has_drop_panels
 
         # Total factored load components
         # qu_slab = 1.2 × (125 + 20) + 1.6 × 60 = 270 psf
-        qu_slab = 270u"psf"
+        qu_slab = 270psf
         # qu_drop (additional from drop projection) = 1.2 × 53.13 = 63.75 psf
-        qu_drop = 63.75u"psf"
+        qu_drop = 63.75psf
 
         # StructurePoint FEM computation (now uses PCA Tables A2–A5 lookup):
         # FEM = m_uniform × w_slab × l2 × l1² + m_near × w_drop × b_drop × l1²
@@ -399,7 +399,7 @@ const has_drop_panels_fn = SS.has_drop_panels
         #
         # Reference: FEM = 677.53 ft-kips (approximately)
         FEM = fixed_end_moment_FEM(qu_slab, qu_drop, l2, l1, c1, c2, h, dp)
-        FEM_kipft = ustrip(u"kip*ft", FEM)
+        FEM_kipft = ustrip(kip*u"ft", FEM)
 
         # SP reference ≈ 677.5 ft-kips
         @test FEM_kipft ≈ 677.5 rtol=0.05

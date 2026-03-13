@@ -97,7 +97,7 @@ function _compute_story_props(struc, cols, story::Int; concrete::StructuralSizer
     
     # --- Sum of factored axial loads (ΣPu) ---
     # Get from ASAP results if available, otherwise estimate from tributary
-    ΣPu = 0.0u"kip"
+    ΣPu = 0.0kip
     for col in cols
         # Try to get from analysis results first
         Pu = _get_column_axial_from_analysis(struc, col)
@@ -128,9 +128,9 @@ function _compute_story_props(struc, cols, story::Int; concrete::StructuralSizer
     # Strip to Float64 in (kip, inch) — matches the Column.story_properties field type
     # and SwayStoryProperties conventions
     return (
-        ΣPu = ustrip(u"kip",  ΣPu),
-        ΣPc = ustrip(u"kip",  ΣPc),
-        Vus = ustrip(u"kip",  Vus),
+        ΣPu = ustrip(kip,  ΣPu),
+        ΣPc = ustrip(kip,  ΣPc),
+        Vus = ustrip(kip,  Vus),
         Δo  = ustrip(u"inch", Δo),
         lc  = ustrip(u"inch", lc),
     )
@@ -172,7 +172,7 @@ function _get_column_axial_from_analysis(struc, col)
         end
     end
 
-    Pu_max > 0 ? uconvert(u"kip", Pu_max * u"N") : nothing
+    Pu_max > 0 ? uconvert(kip, Pu_max * u"N") : nothing
 end
 
 """Estimate column axial load from tributary area and loads. Returns Force (kip)."""
@@ -180,7 +180,7 @@ function _estimate_column_axial(struc, col)
     # Get tributary area
     trib = column_tributary_by_cell(struc, col)
     
-    Pu = 0.0u"kip"
+    Pu = 0.0kip
     for (cell_idx, area_m2) in trib
         cell = struc.cells[cell_idx]
         area = area_m2 * u"m^2"
@@ -191,7 +191,7 @@ function _estimate_column_axial(struc, col)
         qu = max(factored_pressure(default_combo, qD, qL),
                  factored_pressure(strength_1_4D, qD, qL))
         
-        Pu += uconvert(u"kip", qu * area)
+        Pu += uconvert(kip, qu * area)
     end
     
     return Pu
@@ -203,7 +203,7 @@ function _estimate_Pc_sum(struc, cols; concrete::StructuralSizer.Concrete = NWC_
     # Pc = π²(0.4EcIg)/(kLu)²
     
     Ec_val = StructuralSizer.Ec(concrete)
-    ΣPc = 0.0u"kip"
+    ΣPc = 0.0kip
     
     for col in cols
         # Get column dimensions (fall back to defaults if not set)
@@ -228,7 +228,7 @@ function _estimate_Pc_sum(struc, cols; concrete::StructuralSizer.Concrete = NWC_
         # Critical buckling load
         if ustrip(k * Lu) > 0
             Pc = π^2 * EI_eff / (k * Lu)^2
-            ΣPc += uconvert(u"kip", Pc)
+            ΣPc += uconvert(kip, Pc)
         end
     end
     
@@ -278,7 +278,7 @@ function _estimate_story_shear(struc, cols, story::Int)
         return 0.05 * ΣPu
     end
 
-    return uconvert(u"kip", Vus * u"N")
+    return uconvert(kip, Vus * u"N")
 end
 
 """

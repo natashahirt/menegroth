@@ -48,6 +48,9 @@ function compute_geometry_hash(input::APIInput)
     for edge in input.edges.columns
         SHA.update!(ctx, reinterpret(UInt8, Int64.(edge)))
     end
+    for edge in input.edges.braces
+        SHA.update!(ctx, reinterpret(UInt8, Int64.(edge)))
+    end
 
     # Supports
     SHA.update!(ctx, reinterpret(UInt8, Int64.(input.supports)))

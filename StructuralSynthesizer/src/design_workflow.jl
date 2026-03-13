@@ -137,7 +137,7 @@ size_slabs!(struc, params)          # just slabs
 snapshot!(struc, :post_slab)        # save intermediate state
 
 # Try different column options on the same slab result
-for col_opts in [ConcreteColumnOptions(), ConcreteColumnOptions(grade = NWC_6000)]
+for col_opts in [ConcreteColumnOptions(), ConcreteColumnOptions(material = NWC_6000)]
     restore!(struc, :post_slab)
     size_columns!(struc, col_opts)
 end
@@ -690,6 +690,18 @@ function _populate_column_results!(design::BuildingDesign, struc::BuildingStruct
         end
         result.shape = hasproperty(col, :shape) ? col.shape : :rectangular
         
+        # ─── Material takeoff fields ───
+        col_L = member_length(col)
+        result.height = col_L isa Unitful.Quantity ? uconvert(u"m", col_L) : col_L * u"m"
+        if !isnothing(col.c1) && !isnothing(col.c2)
+            result.Ag = uconvert(u"m^2", col.c1 * col.c2)
+        end
+        col_sec = section(col)
+        if !isnothing(col_sec) && hasproperty(col_sec, :As_total)
+            result.As_total = uconvert(u"m^2", col_sec.As_total)
+            result.rho_g = hasproperty(col_sec, :ρg) ? col_sec.ρg : 0.0
+        end
+        
         # ─── Demands from Asap model ───
         # Extract peak axial force and moments from solved element forces.
         # el.forces layout (12-DOF 3D frame):
@@ -794,13 +806,75 @@ function _populate_column_results!(design::BuildingDesign, struc::BuildingStruct
     end
 end
 
-"""Populate beam design results from struc.beams."""
+"""Populate beam design results from struc.beams with forces from the Asap model."""
 function _populate_beam_results!(design::BuildingDesign, struc::BuildingStructure)
+    has_model = !isnothing(struc.asap_model) && !isempty(struc.asap_model.elements)
+    el_loads_map = has_model ? Asap.get_elemental_loads(struc.asap_model) : nothing
+
     for (beam_idx, beam) in enumerate(struc.beams)
         result = BeamDesignResult()
-        if !isnothing(beam.base.section)
-            result.section_size = string(beam.base.section)
+        sec = section(beam)
+        if !isnothing(sec)
+            result.section_size = string(sec)
         end
+
+        # Member length for material takeoff
+        L_total = member_length(beam)
+        result.member_length = L_total isa Unitful.Quantity ? uconvert(u"m", L_total) : L_total * u"m"
+
+        # Extract peak Mu, Vu from Asap internal forces
+        if has_model
+            Mu_Nm = 0.0; Vu_N = 0.0
+            for seg_idx in segment_indices(beam)
+                seg = struc.segments[seg_idx]
+                eidx = seg.edge_idx
+                (eidx < 1 || eidx > length(struc.asap_model.elements)) && continue
+                el = struc.asap_model.elements[eidx]
+                eid = el.elementID
+                loads = (eid >= 1 && eid <= length(el_loads_map)) ? el_loads_map[eid] : Asap.AbstractLoad[]
+                if !isempty(loads)
+                    fd = Asap.ElementForceAndDisplacement(el, loads; resolution=20)
+                    Mu_Nm = max(Mu_Nm, maximum(abs, fd.forces.My))
+                    Vu_N  = max(Vu_N,  maximum(abs, fd.forces.Vz))
+                elseif !isempty(el.forces)
+                    f = el.forces; n = length(f)
+                    if n >= 5;  Mu_Nm = max(Mu_Nm, abs(f[5])); end
+                    if n >= 11; Mu_Nm = max(Mu_Nm, abs(f[11])); end
+                    if n >= 3;  Vu_N  = max(Vu_N,  abs(f[3])); end
+                    if n >= 9;  Vu_N  = max(Vu_N,  abs(f[9])); end
+                end
+            end
+            result.Mu = Mu_Nm * u"N*m" |> u"kN*m"
+            result.Vu = Vu_N  * u"N"   |> u"kN"
+        end
+
+        # Approximate capacity ratios and weight for steel sections
+        vols = volumes(beam)
+        mat = isempty(vols) ? nothing : first(keys(vols))
+        if !isnothing(sec) && hasproperty(sec, :A) && !isnothing(mat) && mat isa StructuralSizer.Metal
+            wpl = StructuralSizer.weight_per_length(sec, mat)
+            result.weight = uconvert(u"kg", wpl * result.member_length)
+
+            # Flexure capacity: φMn ≈ 0.9 × Fy × Zx (plastic moment, AISC F2-1)
+            if hasproperty(sec, :Zx)
+                Fy = mat.Fy
+                φMn = 0.9 * Fy * sec.Zx
+                φMn_kNm = ustrip(u"kN*m", φMn)
+                Mu_kNm = ustrip(u"kN*m", result.Mu)
+                result.flexure_ratio = φMn_kNm > 0 ? Mu_kNm / φMn_kNm : 0.0
+            end
+
+            # Shear capacity: φVn ≈ 1.0 × 0.6 × Fy × Aw (AISC G2, rolled I-shapes)
+            if hasproperty(sec, :d) && hasproperty(sec, :tw)
+                Aw = sec.d * sec.tw
+                φVn = 1.0 * 0.6 * mat.Fy * Aw
+                φVn_kN = ustrip(u"kN", φVn)
+                Vu_kN = ustrip(u"kN", result.Vu)
+                result.shear_ratio = φVn_kN > 0 ? Vu_kN / φVn_kN : 0.0
+            end
+        end
+
+        result.ok = result.flexure_ratio ≤ 1.0 && result.shear_ratio ≤ 1.0
         design.beams[beam_idx] = result
     end
 end
@@ -825,6 +899,8 @@ function _populate_foundation_results!(design::BuildingDesign, struc::BuildingSt
             reaction = total_reaction,
             bearing_ratio = StructuralSizer.utilization(fdn.result),
             ok = StructuralSizer.utilization(fdn.result) <= 1.0,
+            concrete_volume = uconvert(u"m^3", StructuralSizer.concrete_volume(fdn.result)),
+            steel_volume = uconvert(u"m^3", StructuralSizer.steel_volume(fdn.result)),
             group_id = gid,
         )
         
@@ -832,14 +908,15 @@ function _populate_foundation_results!(design::BuildingDesign, struc::BuildingSt
     end
 end
 
-"""Compute summary metrics."""
+"""Compute summary metrics: critical element search + material quantity aggregation."""
 function _compute_design_summary!(design::BuildingDesign, struc::BuildingStructure, params::DesignParameters)
     summary = design.summary
-    
+
+    # ── Critical element search ──────────────────────────────────────────
     max_ratio = 0.0
     critical_elem = ""
     all_ok = true
-    
+
     for (idx, slab_result) in design.slabs
         if slab_result.deflection_ratio > max_ratio
             max_ratio = slab_result.deflection_ratio
@@ -849,8 +926,13 @@ function _compute_design_summary!(design::BuildingDesign, struc::BuildingStructu
             all_ok = false
         end
     end
-    
+
     for (idx, col_result) in design.columns
+        r = col_result.interaction_ratio
+        if r > max_ratio
+            max_ratio = r
+            critical_elem = "Column $idx (interaction)"
+        end
         if !isnothing(col_result.punching) && col_result.punching.ratio > max_ratio
             max_ratio = col_result.punching.ratio
             critical_elem = "Column $idx (punching)"
@@ -859,7 +941,18 @@ function _compute_design_summary!(design::BuildingDesign, struc::BuildingStructu
             all_ok = false
         end
     end
-    
+
+    for (idx, beam_result) in design.beams
+        r = max(beam_result.flexure_ratio, beam_result.shear_ratio)
+        if r > max_ratio
+            max_ratio = r
+            critical_elem = "Beam $idx (flexure/shear)"
+        end
+        if !beam_result.ok
+            all_ok = false
+        end
+    end
+
     for (idx, fdn_result) in design.foundations
         if fdn_result.bearing_ratio > max_ratio
             max_ratio = fdn_result.bearing_ratio
@@ -869,13 +962,112 @@ function _compute_design_summary!(design::BuildingDesign, struc::BuildingStructu
             all_ok = false
         end
     end
-    
+
     summary.critical_ratio = max_ratio
     summary.critical_element = critical_elem
     summary.all_checks_pass = all_ok
-    
+
+    # ── Material quantity aggregation ────────────────────────────────────
     total_conc_vol = 0.0u"m^3"
+    total_steel_wt = 0.0u"kg"
+    total_rebar_wt = 0.0u"kg"
+    total_timber_vol = 0.0u"m^3"
+
+    ρ_conc = 2400.0u"kg/m^3"   # typical normal-weight concrete
+    ρ_rebar = 7850.0u"kg/m^3"  # steel density
+
+    # ── Slabs: aggregate from struc.slabs[].volumes (MaterialVolumes dict) ──
+    for slab in struc.slabs
+        for (mat, vol) in slab.volumes
+            v = uconvert(u"m^3", vol)
+            if mat isa StructuralSizer.Concrete
+                total_conc_vol += v
+            elseif mat isa StructuralSizer.RebarSteel
+                total_rebar_wt += uconvert(u"kg", v * mat.ρ)
+            elseif mat isa StructuralSizer.StructuralSteel
+                total_steel_wt += uconvert(u"kg", v * mat.ρ)
+            elseif mat isa StructuralSizer.Timber
+                total_timber_vol += v
+            end
+        end
+        # Punching reinforcement: studs, shear caps, capitals from slab result
+        r = slab.result
+        if r isa StructuralSizer.FlatPlatePanelResult && hasproperty(r, :punching_check)
+            pc = r.punching_check
+            if hasproperty(pc, :details)
+                for (col_idx, detail) in pc.details
+                    # Stud steel volume
+                    if hasproperty(detail, :studs) && !isnothing(detail.studs)
+                        sv = StructuralSizer.stud_steel_volume(detail.studs)
+                        total_rebar_wt += uconvert(u"kg", sv * ρ_rebar)
+                    end
+                    # Shear cap concrete (needs column dims from struc.columns)
+                    if hasproperty(detail, :shear_cap) && !isnothing(detail.shear_cap)
+                        sc = detail.shear_cap
+                        if col_idx >= 1 && col_idx <= length(struc.columns)
+                            col = struc.columns[col_idx]
+                            if !isnothing(col.c1) && !isnothing(col.c2)
+                                cv = StructuralSizer.shear_cap_concrete_volume(sc, col.c1, col.c2)
+                                total_conc_vol += uconvert(u"m^3", cv)
+                            end
+                        end
+                    end
+                    # Column capital concrete
+                    if hasproperty(detail, :capital) && !isnothing(detail.capital)
+                        cv = StructuralSizer.capital_concrete_volume(detail.capital)
+                        total_conc_vol += uconvert(u"m^3", cv)
+                    end
+                end
+            end
+        end
+        # Drop panel concrete (additional thickness beyond the slab)
+        if !isnothing(slab.drop_panel)
+            dp = slab.drop_panel
+            h_slab = r isa StructuralSizer.FlatPlatePanelResult ? r.thickness : 0.0u"m"
+            if h_slab > 0.0u"m"
+                a1_full = 2 * dp.a_drop_1  # full extent
+                a2_full = 2 * dp.a_drop_2
+                dv = StructuralSizer.drop_panel_concrete_volume(dp.h_drop, a1_full, a2_full, h_slab)
+                total_conc_vol += uconvert(u"m^3", dv)
+            end
+        end
+    end
+
+    # ── Columns: concrete + rebar from geometry ──
+    for (_, col_result) in design.columns
+        Ag = col_result.Ag
+        As = col_result.As_total
+        h = col_result.height
+        if Ag > 0.0u"m^2" && h > 0.0u"m"
+            total_conc_vol += (Ag - As) * h
+            total_rebar_wt += uconvert(u"kg", As * h * ρ_rebar)
+        end
+    end
+
+    # ── Beams: steel weight from beam results ──
+    for (_, beam_result) in design.beams
+        total_steel_wt += beam_result.weight
+    end
+
+    # ── Foundations: from Sizer-level volumes ──
+    for (_, fdn_result) in design.foundations
+        total_conc_vol += fdn_result.concrete_volume
+        total_rebar_wt += uconvert(u"kg", fdn_result.steel_volume * ρ_rebar)
+    end
+
     summary.concrete_volume = total_conc_vol
+    summary.steel_weight = total_steel_wt
+    summary.rebar_weight = total_rebar_wt
+    summary.timber_volume = total_timber_vol
+
+    # ── Embodied carbon ──
+    try
+        ec = compute_building_ec(struc, params)
+        summary.embodied_carbon = ec.total_ec
+    catch e
+        @warn "Embodied carbon computation failed — defaulting to 0.0" exception=(e, catch_backtrace())
+        summary.embodied_carbon = 0.0
+    end
 end
 
 # =============================================================================

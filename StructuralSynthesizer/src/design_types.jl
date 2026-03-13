@@ -294,7 +294,7 @@ params = DesignParameters(
     loads = office_loads,
     load_combinations = [strength_1_2D_1_6L, service],
     materials = MaterialOptions(concrete = NWC_5000, rebar = Rebar_75),
-    columns = ConcreteColumnOptions(grade = NWC_5000),
+    columns = ConcreteColumnOptions(material = NWC_5000),
     beams = SteelBeamOptions(deflection_limit = 1/480),
     floor = FlatPlateOptions(method = EFM(), shear_studs = :if_needed),
     diaphragm_mode = :rigid,
@@ -474,6 +474,19 @@ with(params::DesignParameters; kwargs...) = setproperties(params, (; kwargs...))
 """Primary (governing) strength combination from a DesignParameters."""
 governing_combo(p::DesignParameters) = first(p.load_combinations)
 
+"""
+    resolve_objective(sym::Symbol) -> AbstractObjective
+
+Map a DesignParameters `optimize_for` symbol to its StructuralSizer objective type.
+"""
+function resolve_objective(sym::Symbol)
+    sym === :weight && return StructuralSizer.MinWeight()
+    sym === :carbon && return StructuralSizer.MinCarbon()
+    sym === :cost   && return StructuralSizer.MinCost(1.0)
+    sym === :volume && return StructuralSizer.MinVolume()
+    return StructuralSizer.MinWeight()
+end
+
 # ─── Fire rating validation ───
 const VALID_FIRE_RATINGS = (0.0, 1.0, 1.5, 2.0, 3.0, 4.0)
 
@@ -594,6 +607,12 @@ Base.@kwdef mutable struct ColumnDesignResult
     c2::typeof(1.0u"m") = 0.0u"m"
     shape::Symbol = :rectangular      # :rectangular or :circular
     
+    # Member dimensions for material takeoff
+    height::typeof(1.0u"m") = 0.0u"m"        # full column height
+    Ag::typeof(1.0u"m^2") = 0.0u"m^2"        # gross section area
+    As_total::typeof(1.0u"m^2") = 0.0u"m^2"  # total rebar area
+    rho_g::Float64 = 0.0                       # reinforcement ratio
+    
     # Demands
     Pu::typeof(1.0u"kN") = 0.0u"kN"
     Mu_x::typeof(1.0u"kN*m") = 0.0u"kN*m"
@@ -618,6 +637,9 @@ Base.@kwdef mutable struct BeamDesignResult
     flexure_ratio::Float64 = 0.0
     shear_ratio::Float64 = 0.0
     ok::Bool = true
+    # Material takeoff
+    member_length::typeof(1.0u"m") = 0.0u"m"
+    weight::typeof(1.0u"kg") = 0.0u"kg"
 end
 
 """
@@ -637,6 +659,10 @@ Base.@kwdef mutable struct FoundationDesignResult
     punching_ratio::Float64 = 0.0     # punching shear check
     flexure_ratio::Float64 = 0.0      # flexure check
     ok::Bool = true
+    
+    # Material quantities (propagated from Sizer-level result)
+    concrete_volume::typeof(1.0u"m^3") = 0.0u"m^3"
+    steel_volume::typeof(1.0u"m^3") = 0.0u"m^3"
     
     # Group assignment
     group_id::Int = 0

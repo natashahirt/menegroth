@@ -104,10 +104,10 @@ function RCTBeamNLPProblem(Mu, Vu, bf, hf, opts::NLPBeamOptions;
                            w_dead=nothing, w_live=nothing, L_span=nothing,
                            support::Symbol=:simply_supported, ξ::Float64=2.0,
                            Tu=0.0)
-    fc = fc_ksi(opts.grade)
-    fy = fy_ksi(opts.rebar_grade)
-    Es = Es_ksi(opts.rebar_grade)
-    λ_val = opts.grade.λ
+    fc = fc_ksi(opts.material)
+    fy = fy_ksi(opts.rebar_material)
+    Es = Es_ksi(opts.rebar_material)
+    λ_val = opts.material.λ
 
     Mu_kipft = to_kipft(Mu)
     Vu_kip   = to_kip(Vu)
@@ -211,8 +211,8 @@ function objective_fn(p::RCTBeamNLPProblem, x::Vector{Float64})
     if obj isa MinVolume
         return Ag_web * (1 + 2.0 * ρ)
     elseif obj isa MinWeight
-        γ_c = ustrip(u"lb/ft^3", p.opts.grade.ρ)
-        γ_s = ustrip(u"lb/ft^3", p.opts.rebar_grade.ρ)
+        γ_c = ustrip(u"lb/ft^3", p.opts.material.ρ)
+        γ_s = ustrip(u"lb/ft^3", p.opts.rebar_material.ρ)
         return Ag_web * ((1 - ρ) * γ_c + ρ * γ_s)
     else
         return Ag_web * (1 + 2.0 * ρ)

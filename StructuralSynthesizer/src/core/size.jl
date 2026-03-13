@@ -29,7 +29,7 @@ Uses `design.params` for all sizing options:
 # Example
 ```julia
 design = BuildingDesign(struc, DesignParameters(
-    columns = ConcreteColumnOptions(grade = NWC_5000),
+    columns = ConcreteColumnOptions(material = NWC_5000),
     beams = SteelBeamOptions(deflection_limit = 1/360),
 ))
 

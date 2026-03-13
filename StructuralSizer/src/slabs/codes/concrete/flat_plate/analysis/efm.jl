@@ -88,6 +88,7 @@ function _update_efm_sections_and_loads!(
 
     h  = spans[1].h
     l2 = spans[1].l2
+    ustrip(l2) > 0 || throw(ArgumentError("Transverse span l2 must be positive (got $l2)"))
 
     G_slab  = Ecs / (2 * (1 + ν_concrete))
     Is_gross = l2 * h^3 / 12
@@ -114,6 +115,9 @@ function _update_efm_sections_and_loads!(
         # ACI 318-11 §13.7.3.3 rigid-zone I
         ratio_left  = ustrip(sp.c2_left)  / ustrip(uconvert(unit(sp.c2_left), l2))
         ratio_right = ustrip(sp.c2_right) / ustrip(uconvert(unit(sp.c2_right), l2))
+        # Cap ratio below 1.0 to avoid singularity; column wider than span is non-physical
+        ratio_left  = min(ratio_left, 0.99)
+        ratio_right = min(ratio_right, 0.99)
         Is_rigid_left  = Is_gross / (1 - ratio_left)^2
         Is_rigid_right = Is_gross / (1 - ratio_right)^2
 
@@ -864,6 +868,8 @@ function build_efm_asap_model(
         c2_right = sp.c2_right
         ratio_left  = ustrip(c2_left) / ustrip(uconvert(unit(c2_left), l2))
         ratio_right = ustrip(c2_right) / ustrip(uconvert(unit(c2_right), l2))
+        ratio_left  = min(ratio_left, 0.99)
+        ratio_right = min(ratio_right, 0.99)
         Is_rigid_left  = Is_gross / (1 - ratio_left)^2
         Is_rigid_right = Is_gross / (1 - ratio_right)^2
 

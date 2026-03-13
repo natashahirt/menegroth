@@ -127,7 +127,7 @@ const MOI = JuMP.MOI
         ]
 
         opts = ConcreteColumnOptions(
-            grades = [NWC_4000, NWC_6000],
+            materials = [NWC_4000, NWC_6000],
             include_biaxial = false,
         )
         result = size_columns(Pu, Mux, geometries, opts)
@@ -153,12 +153,12 @@ const MOI = JuMP.MOI
         geometries = [ConcreteMemberGeometry(3.66)]
 
         # Low-strength only
-        opts_low = ConcreteColumnOptions(grade = NWC_4000, include_biaxial = false)
+        opts_low = ConcreteColumnOptions(material = NWC_4000, include_biaxial = false)
         result_low = size_columns(Pu, Mux, geometries, opts_low)
 
         # Multi-grade (low + high)
         opts_multi = ConcreteColumnOptions(
-            grades = [NWC_4000, NWC_6000],
+            materials = [NWC_4000, NWC_6000],
             include_biaxial = false,
         )
         result_multi = size_columns(Pu, Mux, geometries, opts_multi)
@@ -182,7 +182,7 @@ const MOI = JuMP.MOI
         ]
 
         opts = ConcreteBeamOptions(
-            grades = [NWC_4000, NWC_6000],
+            materials = [NWC_4000, NWC_6000],
         )
         result = size_beams(Mu, Vu, geometries, opts)
 

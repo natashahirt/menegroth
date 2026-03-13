@@ -699,7 +699,62 @@ function build_member_groups!(struc::BuildingStructure; member_type::Symbol=:bea
 end
 
 """
-    member_group_demands(struc; member_edge_group=:beams, resolution=200)
+    _service_load_deflections(struc, params) -> (δ_LL, δ_total)
+
+Perform a service-load multi-RHS solve using the already-factorized stiffness
+matrix. Returns two `Dict{Int, Float64}` (elementID → max deflection in meters):
+  - `δ_LL`:    live-load-only deflection (for L/360 check)
+  - `δ_total`: dead + live deflection (for L/240 check)
+
+Load factors from `governing_combo(params)` are divided out to yield unfactored
+(service) displacements. Only cell tributary loads (cell_dead_loads / cell_live_loads)
+are included; secondary effects (vault thrust, self-weight) are omitted from the
+split — this is a conservative simplification since vault thrust adds to total
+deflection, making the factored-solve δ from `model.u` more conservative.
+"""
+function _service_load_deflections(
+    struc::BuildingStructure,
+    params::DesignParameters;
+    resolution::Int = 20,
+)
+    model = struc.asap_model
+    combo = governing_combo(params)
+    factor_D = combo.D
+    factor_L = combo.L
+
+    dead_loads = Asap.AbstractLoad[]
+    live_loads = Asap.AbstractLoad[]
+    for loads in values(struc.cell_dead_loads)
+        append!(dead_loads, loads)
+    end
+    for loads in values(struc.cell_live_loads)
+        append!(live_loads, loads)
+    end
+
+    if isempty(dead_loads) && isempty(live_loads)
+        empty_d = Dict{Int, Float64}()
+        return (empty_d, copy(empty_d))
+    end
+
+    cases = Vector{Asap.AbstractLoad}[dead_loads, live_loads]
+    u_vecs = Asap.solve(model, cases)
+    u_D = u_vecs[1]
+    u_L = u_vecs[2]
+
+    # Unfactor to service-level displacements
+    if factor_D != 0; u_D ./= factor_D; end
+    if factor_L != 0; u_L ./= factor_L; end
+
+    u_total = u_D .+ u_L
+
+    δ_LL    = Asap.element_max_deflections(model, u_L; resolution=resolution)
+    δ_total = Asap.element_max_deflections(model, u_total; resolution=resolution)
+
+    return (δ_LL, δ_total)
+end
+
+"""
+    member_group_demands(struc; member_edge_group=:beams, resolution=200, params=DesignParameters())
 
 Compute governing demands and geometry for each `MemberGroup` by enveloping ASAP internal
 forces across all segments of all members in the group.
@@ -710,13 +765,19 @@ Conventions:
 - shear demand uses `Vy`/`Vz` (mapped to weak/strong)
 - deflection uses max local Z displacement from `ElementDisplacements.ulocal`
 
+When `params` is provided and cell dead/live loads are available, a service-load
+multi-RHS solve separates LL-only and total (DL+LL) deflections. Otherwise
+the factored-solve deflection is used for both (conservative).
+
 For multi-segment members (shattered edges), the `δ_max` in the returned demand
 is pre-scaled so that `δ_max / L_total == δ_original / L_defl`, where `L_defl`
 is the longest individual sub-segment (the actual deflection span between supports).
 
 Returns `(group_ids, demands, L_totals, Lb_govs, Cb_govs, Kx_govs, Ky_govs)`.
 """
-function member_group_demands(struc::BuildingStructure; member_edge_group::Symbol=:beams, resolution::Int=200)
+function member_group_demands(struc::BuildingStructure;
+    member_edge_group::Symbol=:beams, resolution::Int=200,
+    params::DesignParameters=DesignParameters())
     isempty(struc.asap_model.elements) && throw(ArgumentError("ASAP model is empty. Call `to_asap!(struc)` before sizing."))
 
     skel = struc.skeleton
@@ -820,9 +881,46 @@ function member_group_demands(struc::BuildingStructure; member_edge_group::Symbo
         par_Ldefl[g] = L_defl
     end
 
+    # ── Service-load deflection split (LL-only vs DL+LL) ──
+    # Solve for unfactored dead and live displacements separately,
+    # then extract per-element max deflections.
+    has_split = !isempty(struc.cell_dead_loads) || !isempty(struc.cell_live_loads)
+    local δ_LL_map::Dict{Int, Float64}
+    local δ_total_map::Dict{Int, Float64}
+    if has_split
+        δ_LL_map, δ_total_map = _service_load_deflections(struc, params)
+    else
+        δ_LL_map = Dict{Int, Float64}()
+        δ_total_map = Dict{Int, Float64}()
+    end
+
+    # Aggregate service deflections per group (max over all segments)
+    par_δ_LL    = Vector{Float64}(undef, n_groups)
+    par_δ_total = Vector{Float64}(undef, n_groups)
+    Threads.@threads for g in 1:n_groups
+        par_has[g] || (par_δ_LL[g] = 0.0; par_δ_total[g] = 0.0; continue)
+        gid = all_group_ids[g]
+        mg = struc.member_groups[gid]
+        δ_ll = 0.0; δ_tot = 0.0
+        for m_idx in mg.member_indices
+            m = member_array[m_idx]
+            for seg_idx in segment_indices(m)
+                seg = struc.segments[seg_idx]
+                edge_idx = seg.edge_idx
+                edge_idx in beam_edge_ids || continue
+                el = struc.asap_model.elements[edge_idx]
+                eid = el.elementID
+                δ_ll  = max(δ_ll,  get(δ_LL_map, eid, 0.0))
+                δ_tot = max(δ_tot, get(δ_total_map, eid, 0.0))
+            end
+        end
+        par_δ_LL[g] = δ_ll
+        par_δ_total[g] = δ_tot
+    end
+
     # Sequential filter & renumber indices
     group_ids = UInt64[]
-    demands   = StructuralSizer.MemberDemand{Float64}[]
+    demands   = StructuralSizer.MemberDemand{Float64, Nothing}[]
     L_totals  = Float64[]
     Lb_govs   = Float64[]
     Cb_govs   = Float64[]
@@ -835,18 +933,19 @@ function member_group_demands(struc::BuildingStructure; member_edge_group::Symbo
         push!(group_ids, all_group_ids[g])
         g_idx = length(group_ids)
 
-        # For multi-segment members the deflection span (longest sub-segment)
-        # differs from L_total. The AISC checker divides δ by L, so pre-scale
-        # δ_max so that δ_adjusted / L_total == δ_original / L_defl.
         L_t = par_L[g]
         L_d = par_Ldefl[g]
-        δ_adj = (L_d > 0 && L_d < L_t) ? par_δ[g] * L_t / L_d : par_δ[g]
+        scale = (L_d > 0 && L_d < L_t) ? L_t / L_d : 1.0
+
+        δ_ll_adj    = has_split ? par_δ_LL[g] * scale    : par_δ[g] * scale
+        δ_total_adj = has_split ? par_δ_total[g] * scale  : 0.0
 
         d = StructuralSizer.MemberDemand(g_idx;
             Pu_c=par_Pu_c[g], Pu_t=par_Pu_t[g],
             Mux=par_Mux[g], Muy=par_Muy[g],
             Vu_strong=par_Vus[g], Vu_weak=par_Vuw[g],
-            δ_max=δ_adj, I_ref=par_Ir[g])
+            δ_max_LL=δ_ll_adj, δ_max_total=δ_total_adj,
+            I_ref=par_Ir[g])
 
         push!(demands, d)
         push!(L_totals, par_L[g])
@@ -886,7 +985,7 @@ function size_steel_members!(
     member_edge_group::Symbol=:beams,
     max_depth=Inf * u"m",
     n_max_sections::Integer=0,
-    optimizer::Symbol=:auto,
+    solver::Symbol=:auto,
     resolution::Int=200,
     reanalyze::Bool=true,
     gravity_factor::Quantity=GRAVITY,  # standard gravity (9.80665 m/s²)
@@ -919,7 +1018,7 @@ function size_steel_members!(
         result = StructuralSizer.optimize_discrete(
             checker, demands, geometries, catalog, material;
             n_max_sections=n_max_sections,
-            optimizer=optimizer,
+            optimizer=solver,
         )
         solver_name = "MIP"
     else
@@ -1107,38 +1206,50 @@ When `ConcreteBeamOptions.include_flange = true`, the dispatcher automatically:
 size_beams!(struc, SteelBeamOptions(deflection_limit = 1/360))
 
 # RC rectangular beams (discrete catalog MIP)
-size_beams!(struc, ConcreteBeamOptions(grade = NWC_5000))
+size_beams!(struc, ConcreteBeamOptions(material = NWC_5000))
 
 # RC T-beams — auto-detects flange from slab data
-size_beams!(struc, ConcreteBeamOptions(grade = NWC_5000, include_flange = true))
+size_beams!(struc, ConcreteBeamOptions(material = NWC_5000, include_flange = true))
 ```
 """
 function size_beams!(
     struc::BuildingStructure,
     opts::Union{StructuralSizer.BeamOptions, Nothing} = nothing;
-    method::Symbol = :discrete,
+    method::Union{Symbol, Nothing} = nothing,
     resolution::Int = 200,
     reanalyze::Bool = true,
     gravity_factor::Quantity = GRAVITY,
 )
+    dp = (hasproperty(struc, :design_parameters) && !isnothing(struc.design_parameters)) ?
+         struc.design_parameters : nothing
+
     effective_opts = if !isnothing(opts)
         opts
-    elseif hasproperty(struc, :design_parameters) && !isnothing(struc.design_parameters) && !isnothing(struc.design_parameters.beams)
-        struc.design_parameters.beams
+    elseif !isnothing(dp) && !isnothing(dp.beams)
+        dp.beams
     else
-        StructuralSizer.SteelBeamOptions()
+        obj = !isnothing(dp) ? resolve_objective(dp.optimize_for) : StructuralSizer.MinWeight()
+        StructuralSizer.SteelBeamOptions(objective=obj)
     end
 
-    # Apply collinear grouping if enabled in design parameters
+    # Resolve strategy: explicit `method` kwarg wins, else read from opts field
+    strategy = if !isnothing(method)
+        method
+    elseif hasproperty(effective_opts, :sizing_strategy)
+        effective_opts.sizing_strategy
+    else
+        :discrete
+    end
+
     if hasproperty(struc, :design_parameters) && !isnothing(struc.design_parameters) && struc.design_parameters.collinear_grouping
         group_collinear_members!(struc; member_type=:beams)
     end
 
-    _size_beams_impl!(struc, effective_opts, Val(method);
+    _size_beams_impl!(struc, effective_opts, Val(strategy);
                       resolution, reanalyze, gravity_factor)
 end
 
-# --- Steel beams (discrete) ---
+# --- Steel beams (discrete) — calls public StructuralSizer.size_beams ---
 function _size_beams_impl!(
     struc::BuildingStructure,
     opts::StructuralSizer.SteelBeamOptions,
@@ -1147,22 +1258,42 @@ function _size_beams_impl!(
     reanalyze::Bool,
     gravity_factor::Quantity,
 )
-    catalog = isnothing(opts.custom_catalog) ?
-        StructuralSizer.steel_column_catalog(opts.section_type, opts.catalog) :
-        opts.custom_catalog
+    skel = struc.skeleton
+    edge_ids_in_group = Set(get(skel.groups_edges, :beams, Int[]))
+    _add_gravity_loads!(struc, edge_ids_in_group, gravity_factor)
 
-    size_steel_members!(struc;
-        catalog       = catalog,
-        material        = opts.material,
-        member_edge_group = :beams,
-        max_depth       = opts.max_depth,
-        n_max_sections  = opts.n_max_sections,
-        optimizer       = opts.optimizer,
-        resolution      = resolution,
-        reanalyze       = reanalyze,
-        gravity_factor  = gravity_factor,
-        deflection_limit = opts.deflection_limit,
+    group_ids, demands, L_totals, Lb_govs, Cb_govs, Kx_govs, Ky_govs =
+        member_group_demands(struc; member_edge_group=:beams, resolution=resolution)
+
+    isempty(group_ids) && return struc
+
+    geometries = [StructuralSizer.SteelMemberGeometry(L; Lb=Lb, Cb=Cb, Kx=Kx, Ky=Ky)
+                  for (L, Lb, Cb, Kx, Ky) in zip(L_totals, Lb_govs, Cb_govs, Kx_govs, Ky_govs)]
+
+    Mu_vec = [d.Mux for d in demands]
+    Vu_vec = [d.Vu_strong for d in demands]
+    δ_LL_vec   = [d.δ_max_LL for d in demands]
+    δ_total_vec = [d.δ_max_total for d in demands]
+    I_ref_v  = [d.I_ref for d in demands]
+
+    result = StructuralSizer.size_beams(
+        Mu_vec, Vu_vec, geometries, opts;
+        δ_max_vec = any(>(0), δ_LL_vec)   ? δ_LL_vec   : nothing,
+        δ_max_total_vec = any(>(0), δ_total_vec) ? δ_total_vec : nothing,
+        I_ref_vec = any(>(0), I_ref_v)    ? I_ref_v    : nothing,
     )
+
+    member_array = struc.beams
+    mat = opts.material
+    _apply_beam_results!(struc, result, group_ids, member_array, edge_ids_in_group, mat)
+
+    if reanalyze
+        Asap.process!(struc.asap_model)
+        Asap.solve!(struc.asap_model)
+    end
+
+    @info "Sized $(length(group_ids)) steel beam groups via size_beams API"
+    return struc
 end
 
 # --- Shared helper: apply MIP/NLP beam results to the BuildingStructure ---
@@ -1266,14 +1397,14 @@ function _size_beams_impl!(
             )
 
             _apply_beam_results!(struc, result, group_ids, member_array,
-                                 edge_ids_in_group, opts.grade)
+                                 edge_ids_in_group, opts.material)
 
             if reanalyze
                 Asap.process!(struc.asap_model)
                 Asap.solve!(struc.asap_model)
             end
 
-            fc_psi = round(Int, ustrip(u"psi", opts.grade.fc′))
+            fc_psi = round(Int, ustrip(u"psi", opts.material.fc′))
             bf_in  = round(ustrip(u"inch", bf_env); digits=1)
             hf_in  = round(ustrip(u"inch", hf_env); digits=1)
             @info "Sized $(length(group_ids)) RC T-beam groups via MIP" fc_psi bf_in hf_in
@@ -1286,14 +1417,14 @@ function _size_beams_impl!(
     result = StructuralSizer.size_beams(Mu, Vu, geoms, opts; Nu=Nu)
 
     _apply_beam_results!(struc, result, group_ids, member_array,
-                         edge_ids_in_group, opts.grade)
+                         edge_ids_in_group, opts.material)
 
     if reanalyze
         Asap.process!(struc.asap_model)
         Asap.solve!(struc.asap_model)
     end
 
-    fc_psi = round(Int, ustrip(u"psi", opts.grade.fc′))
+    fc_psi = round(Int, ustrip(u"psi", opts.material.fc′))
     @info "Sized $(length(group_ids)) RC beam groups via MIP" fc_psi=fc_psi
 
     return struc
@@ -1328,8 +1459,8 @@ function _size_beams_impl!(
     # Map ConcreteBeamOptions → NLPBeamOptions (shared material fields)
     stirrup_int = parse(Int, replace(string(opts.transverse_bar_size), "no" => ""))
     nlp_opts = StructuralSizer.NLPBeamOptions(
-        grade      = opts.grade,
-        rebar_grade = opts.rebar_grade,
+        material       = opts.material,
+        rebar_material = opts.rebar_material,
         cover      = opts.cover,
         stirrup_size = stirrup_int,
         max_depth  = opts.max_depth,
@@ -1349,7 +1480,7 @@ function _size_beams_impl!(
         tbeam_idx = findall(!isnothing, bf_vec)
         rect_idx  = findall(isnothing, bf_vec)
 
-        mat = opts.grade
+        mat = opts.material
         n_feasible = 0
 
         if !isempty(tbeam_idx)
@@ -1434,7 +1565,7 @@ function _size_beams_impl!(
     # ── Rectangular NLP path (default) ──
     results = StructuralSizer.size_rc_beams_nlp(Mu, Vu, nlp_opts)
 
-    mat = opts.grade
+    mat = opts.material
     n_feasible = 0
     for (g_idx, gid) in enumerate(group_ids)
         r = results[g_idx]
@@ -1604,7 +1735,7 @@ provided explicitly.
 ```julia
 size_members!(struc;
     beam_opts   = SteelBeamOptions(deflection_limit = 1/360),
-    column_opts = ConcreteColumnOptions(grade = NWC_5000),
+    column_opts = ConcreteColumnOptions(material = NWC_5000),
 )
 ```
 """
@@ -1654,7 +1785,7 @@ otherwise defaults to `SteelColumnOptions()`.
 ```julia
 # Use design parameters (recommended)
 struc.design_parameters = DesignParameters(
-    columns = ConcreteColumnOptions(grade = NWC_5000),
+    columns = ConcreteColumnOptions(material = NWC_5000),
 )
 size_columns!(struc)
 
@@ -1670,17 +1801,19 @@ function size_columns!(
     reanalyze::Bool = true,
     gravity_factor::Quantity = GRAVITY,
 )
-    # Determine options: explicit > design_parameters > default
+    dp = (hasproperty(struc, :design_parameters) && !isnothing(struc.design_parameters)) ?
+         struc.design_parameters : nothing
+
     effective_opts = if !isnothing(opts)
         opts
-    elseif hasproperty(struc, :design_parameters) && !isnothing(struc.design_parameters) && !isnothing(struc.design_parameters.columns)
-        struc.design_parameters.columns
+    elseif !isnothing(dp) && !isnothing(dp.columns)
+        dp.columns
     else
-        StructuralSizer.SteelColumnOptions()
+        obj = !isnothing(dp) ? resolve_objective(dp.optimize_for) : StructuralSizer.MinWeight()
+        StructuralSizer.SteelColumnOptions(objective=obj)
     end
-    
-    # Apply collinear grouping if enabled in design parameters
-    if hasproperty(struc, :design_parameters) && !isnothing(struc.design_parameters) && struc.design_parameters.collinear_grouping
+
+    if !isnothing(dp) && dp.collinear_grouping
         group_collinear_members!(struc; member_type=:columns)
     end
     
@@ -1762,14 +1895,14 @@ function _size_columns_impl!(
     result = StructuralSizer.size_columns(ustrip.(Pu), ustrip.(Mux), geometries, opts; Muy=ustrip.(Muy))
     
     # Apply results
-    _apply_column_results!(struc, result, group_ids, opts.grade, :concrete, edge_ids_in_group)
+    _apply_column_results!(struc, result, group_ids, opts.material, :concrete, edge_ids_in_group)
     
     if reanalyze
         Asap.process!(struc.asap_model)
         Asap.solve!(struc.asap_model)
     end
     
-    @info "Sized $(length(group_ids)) column groups" material="concrete" grade=StructuralSizer.material_name(opts.grade)
+    @info "Sized $(length(group_ids)) column groups" material=StructuralSizer.material_name(opts.material)
     return struc
 end
 
@@ -1955,7 +2088,7 @@ end
 # =============================================================================
 
 """
-    estimate_column_sizes!(struc; fc=4000u"psi", qu_default=200u"psf", method=:tributary)
+    estimate_column_sizes!(struc; fc=4000u"psi", qu_default=200psf, method=:tributary)
 
 Estimate initial column sizes and store in Column.c1, Column.c2.
 
@@ -1991,7 +2124,7 @@ end
 """
 function estimate_column_sizes!(struc::BuildingStructure;
                                  fc::Unitful.Pressure = 4000u"psi",
-                                 qu_default::Unitful.Pressure = 200u"psf",
+                                 qu_default::Unitful.Pressure = 200psf,
                                  method::Symbol = :tributary)
     skel = struc.skeleton
     n_total_stories = length(skel.stories_z) - 1  # stories_z includes ground (0)

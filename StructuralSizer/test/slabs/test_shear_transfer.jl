@@ -29,7 +29,7 @@ using StructuralSizer
         Vc = StructuralSizer.one_way_shear_capacity(fc, bw, d)
         
         # Unfactored capacity
-        Vc_kips = ustrip(u"kip", Vc)
+        Vc_kips = ustrip(kip, Vc)
         
         # SP reports φVc = 91.64 kips, so Vc = 91.64/0.75 = 122.2 kips
         expected_Vc = 91.64 / 0.75
@@ -199,8 +199,8 @@ using StructuralSizer
         # vu = 21.70×1000/(59.5×5.75) + 0.383×(37.81×12×1000)×5.99/14109
         #    = 63.43 + 73.77 = 137.20 psi
         
-        Vu = 21.70u"kip"
-        Mub = 37.81u"kip*ft"
+        Vu = 21.70kip
+        Mub = 37.81kip*u"ft"
         b0 = 59.50u"inch"
         γv = 0.383
         Jc = 14109u"inch^4"
@@ -214,8 +214,8 @@ using StructuralSizer
         v_moment = γv * ustrip(u"lbf*inch", Mub) * ustrip(u"inch", cAB) / ustrip(u"inch^4", Jc)
         
         println("\n=== Combined Punching Stress - Edge Column ===")
-        println("Vu = $(ustrip(u"kip", Vu)) kips")
-        println("Mub = $(ustrip(u"kip*ft", Mub)) kip-ft")
+        println("Vu = $(ustrip(kip, Vu)) kips")
+        println("Mub = $(ustrip(kip*u"ft", Mub)) kip-ft")
         println("v_direct = $(round(v_direct, digits=2)) psi (SP: 63.43)")
         println("v_moment = $(round(v_moment, digits=2)) psi (SP: 73.77)")
         println("vu = $(round(vu_psi, digits=2)) psi (SP: 137.20)")
@@ -233,8 +233,8 @@ using StructuralSizer
         # vu = 50.08×1000/(87×5.75) + 0.40×(7.70×12×1000)×10.88/40431
         #    = 100.10 + 10.02 = 110.12 psi
         
-        Vu = 50.08u"kip"
-        Mub = 7.70u"kip*ft"
+        Vu = 50.08kip
+        Mub = 7.70kip*u"ft"
         b0 = 87.0u"inch"
         γv = 0.40
         Jc = 40431u"inch^4"
@@ -244,8 +244,8 @@ using StructuralSizer
         vu_psi = ustrip(u"psi", vu)
         
         println("\n=== Combined Punching Stress - Interior Column ===")
-        println("Vu = $(ustrip(u"kip", Vu)) kips")
-        println("Mub = $(ustrip(u"kip*ft", Mub)) kip-ft")
+        println("Vu = $(ustrip(kip, Vu)) kips")
+        println("Mub = $(ustrip(kip*u"ft", Mub)) kip-ft")
         println("vu = $(round(vu_psi, digits=2)) psi (SP: 110.12)")
         
         @test vu_psi ≈ 110.12 rtol=0.03
@@ -345,7 +345,7 @@ using StructuralSizer
         #   bb = 37 in
         #   As,req = 1.17 in²
         
-        Mu = 46.65u"kip*ft"
+        Mu = 46.65kip*u"ft"
         γf = 0.62  # SP uses 0.62
         bb = 37u"inch"
         
@@ -354,9 +354,9 @@ using StructuralSizer
         
         println("\n=== Moment Transfer Reinforcement ===")
         println("Exterior column:")
-        println("  Mu = $(ustrip(u"kip*ft", Mu)) kip-ft")
+        println("  Mu = $(ustrip(kip*u"ft", Mu)) kip-ft")
         println("  γf = $(γf)")
-        println("  γf×Mu = $(round(γf * ustrip(u"kip*ft", Mu), digits=2)) kip-ft (SP: 28.78)")
+        println("  γf×Mu = $(round(γf * ustrip(kip*u"ft", Mu), digits=2)) kip-ft (SP: 28.78)")
         println("  bb = $(ustrip(u"inch", bb)) in")
         println("  As,req = $(round(As_in2, digits=2)) in² (SP: 1.17)")
         
@@ -493,8 +493,8 @@ println("\n✓ Shear and moment transfer tests complete!")
         Jc = StructuralSizer.polar_moment_Jc_interior(geom.b1, geom.b2, d)
         γv = StructuralSizer.gamma_v(geom.b1, geom.b2)
 
-        Vu = 50u"kip"
-        Mub = 8u"kip*ft"
+        Vu = 50kip
+        Mub = 8kip*u"ft"
 
         vu = StructuralSizer.combined_punching_stress(Vu, Mub, geom.b0, d, γv, Jc, geom.cAB)
 
@@ -529,9 +529,9 @@ println("\n✓ Shear and moment transfer tests complete!")
     # High-Level Punching Check — Circular Column
     # =========================================================================
     @testset "Punching Check API — Circular" begin
-        Vu = 45u"kip"
-        Mux = 5u"kip*ft"
-        Muy = 0u"kip*ft"
+        Vu = 45kip
+        Mux = 5kip*u"ft"
+        Muy = 0kip*u"ft"
 
         # Interior circular column
         result = StructuralSizer.punching_check(

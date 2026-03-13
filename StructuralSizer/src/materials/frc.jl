@@ -71,8 +71,14 @@ end
 """Linear interpolation between bracketing dosage levels for non-standard dosages."""
 function _interpolate_fRx(fc′_MPa::Real, dosage::Real, fn::Function)::Float64
     standard = [20.0, 25.0, 30.0, 35.0, 40.0]
-    dosage < 20.0 && return fn(fc′_MPa, 20) * dosage / 20.0  # scale linearly from zero
-    dosage > 40.0 && return fn(fc′_MPa, 40) * dosage / 40.0  # extrapolate linearly
+    if dosage < 20.0
+        @warn "FRC dosage $(dosage) kg/m³ below calibrated range [20, 40]; scaling linearly from zero" maxlog=1
+        return fn(fc′_MPa, 20) * dosage / 20.0
+    end
+    if dosage > 40.0
+        @warn "FRC dosage $(dosage) kg/m³ above calibrated range [20, 40]; extrapolating linearly" maxlog=1
+        return fn(fc′_MPa, 40) * dosage / 40.0
+    end
     idx = findfirst(d -> d ≥ dosage, standard)
     idx === nothing && return fn(fc′_MPa, 40)
     d_hi = standard[idx]

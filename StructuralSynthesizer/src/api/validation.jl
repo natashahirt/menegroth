@@ -28,7 +28,7 @@ function validate_input(input::APIInput)
     # ─── Units required ───────────────────────────────────────────────────
     if isempty(strip(input.units))
         push!(errors, "Missing required field \"units\". " *
-              "Specify coordinate units: \"feet\", \"inches\", \"meters\", or \"mm\".")
+              "Accepted: feet/ft, inches/in, meters/m, millimeters/mm, centimeters/cm.")
     else
         try
             parse_unit(input.units)
@@ -104,6 +104,42 @@ function validate_input(input::APIInput)
 
     # ─── Params ──────────────────────────────────────────────────────────
     p = input.params
+
+    valid_floor_types = ("flat_plate", "flat_slab", "one_way", "vault")
+    if !(p.floor_type in valid_floor_types)
+        push!(errors, "Invalid floor_type \"$(p.floor_type)\". Must be one of: $(join(valid_floor_types, ", ")).")
+    end
+
+    # ─── Floor options (method, deflection_limit, punching_strategy) ─────
+    valid_analysis_methods = ("DDM", "DDM_SIMPLIFIED", "EFM", "EFM_HARDY_CROSS", "FEA")
+    method_key = uppercase(strip(p.floor_options.method))
+    if !(method_key in valid_analysis_methods)
+        push!(errors, "Invalid floor_options.method \"$(p.floor_options.method)\". " *
+              "Must be one of: $(join(valid_analysis_methods, ", ")).")
+    end
+    valid_deflection_limits = ("L_240", "L_360", "L_480")
+    defl_key = uppercase(strip(p.floor_options.deflection_limit))
+    if !(defl_key in valid_deflection_limits)
+        push!(errors, "Invalid floor_options.deflection_limit \"$(p.floor_options.deflection_limit)\". " *
+              "Must be one of: $(join(valid_deflection_limits, ", ")).")
+    end
+    valid_punching_strategies = ("grow_columns", "reinforce_last", "reinforce_first")
+    punch_key = lowercase(strip(p.floor_options.punching_strategy))
+    if !(punch_key in valid_punching_strategies)
+        push!(errors, "Invalid floor_options.punching_strategy \"$(p.floor_options.punching_strategy)\". " *
+              "Must be one of: $(join(valid_punching_strategies, ", ")).")
+    end
+
+    valid_column_types = ("rc_rect", "rc_circular", "steel_w", "steel_hss", "steel_pipe")
+    if !(p.column_type in valid_column_types)
+        push!(errors, "Invalid column_type \"$(p.column_type)\". Must be one of: $(join(valid_column_types, ", ")).")
+    end
+
+    valid_beam_types = ("steel_w", "steel_hss", "rc_rect", "rc_tbeam")
+    if !(p.beam_type in valid_beam_types)
+        push!(errors, "Invalid beam_type \"$(p.beam_type)\". Must be one of: $(join(valid_beam_types, ", ")).")
+    end
+
     if p.fire_rating ∉ (0.0, 1.0, 1.5, 2.0, 3.0, 4.0)
         push!(errors, "Invalid fire_rating $(p.fire_rating). Must be one of: 0, 1, 1.5, 2, 3, 4.")
     end
@@ -118,6 +154,17 @@ function validate_input(input::APIInput)
     end
     if !haskey(STEEL_MAP, p.materials.steel)
         push!(errors, "Unknown steel \"$(p.materials.steel)\". Options: $(join(keys(STEEL_MAP), ", ")).")
+    end
+
+    # ─── Foundation soil (required when size_foundations is true) ──────
+    if p.size_foundations && !haskey(SOIL_MAP, p.foundation_soil)
+        push!(errors, "Unknown foundation_soil \"$(p.foundation_soil)\". " *
+              "Options: $(join(keys(SOIL_MAP), ", ")).")
+    end
+
+    # ─── Unit system ──────────────────────────────────────────────────
+    if !(lowercase(strip(p.unit_system)) in ("imperial", "metric"))
+        push!(errors, "Invalid unit_system \"$(p.unit_system)\". Must be \"imperial\" or \"metric\".")
     end
 
     return ValidationResult(isempty(errors), errors)

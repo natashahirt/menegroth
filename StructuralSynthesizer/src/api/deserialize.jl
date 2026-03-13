@@ -124,6 +124,62 @@ end
 # JSON → BuildingSkeleton
 # =============================================================================
 
+"""Throw ArgumentError if any edge vertex index is out of [1, n_verts]."""
+function _validate_edge_bounds(edge_pairs::Vector{Vector{Int}}, n_verts::Int, label::String)
+    for (i, pair) in enumerate(edge_pairs)
+        length(pair) >= 2 || throw(ArgumentError("$label edge $i has $(length(pair)) indices (expected 2)."))
+        v1, v2 = pair[1], pair[2]
+        (v1 >= 1 && v1 <= n_verts) || throw(ArgumentError("$label edge $i: vertex index $v1 out of range [1, $n_verts]."))
+        (v2 >= 1 && v2 <= n_verts) || throw(ArgumentError("$label edge $i: vertex index $v2 out of range [1, $n_verts]."))
+    end
+end
+
+"""Add vertices from input.vertices to the skeleton (coordinates converted via _to_m)."""
+function _add_vertices!(skel::BuildingSkeleton, input::APIInput, _to_m)
+    for coords in input.vertices
+        pt = Meshes.Point(_to_m(coords[1]), _to_m(coords[2]), _to_m(coords[3]))
+        add_vertex!(skel, pt)
+    end
+end
+
+"""Add beam, column, and brace edges with bounds checks and shatter."""
+function _add_edges!(skel::BuildingSkeleton, input::APIInput)
+    n_verts = length(skel.vertices)
+    _validate_edge_bounds(input.edges.beams, n_verts, "Beam")
+    _validate_edge_bounds(input.edges.columns, n_verts, "Column")
+    _validate_edge_bounds(input.edges.braces, n_verts, "Brace")
+    _shatter_edges!(skel, input.edges.beams, :beams)
+    _shatter_edges!(skel, input.edges.columns, :columns)
+    _shatter_edges!(skel, input.edges.braces, :braces)
+end
+
+"""Add support vertices; throws if any support index is out of [1, n_vertices]."""
+function _add_supports!(skel::BuildingSkeleton, input::APIInput)
+    n_verts = length(skel.vertices)
+    for vi in input.supports
+        (vi >= 1 && vi <= n_verts) || throw(ArgumentError("Support vertex index $vi out of range [1, $n_verts]."))
+        add_vertex!(skel, skel.vertices[vi]; group=:support)
+    end
+end
+
+"""Rebuild stories then add explicit faces or find/auto-categorize faces."""
+function _add_faces!(skel::BuildingSkeleton, input::APIInput, coord_unit, _to_m)
+    if isempty(skel.vertices)
+        error("Cannot rebuild stories: no vertices found in skeleton")
+    end
+    rebuild_stories!(skel)
+    if isempty(skel.stories_z)
+        error("rebuild_stories! failed to populate stories_z from $(length(skel.vertices)) vertices")
+    end
+    has_explicit = !isempty(input.faces) && any(!isempty(polys) for polys in values(input.faces))
+    if has_explicit
+        _add_explicit_faces!(skel, input.faces, coord_unit, _to_m)
+    else
+        find_faces!(skel)
+        _auto_categorize_faces!(skel)
+    end
+end
+
 """
     json_to_skeleton(input::APIInput) -> BuildingSkeleton
 
@@ -141,68 +197,27 @@ sub-segments. The original user-line is recorded in `skel.edge_chains` so that
 ## Stories Z
 If `input.stories_z` is empty, story elevations are inferred from the unique Z
 coordinates of all vertices via `rebuild_stories!`.
+
+## Bounds checks
+Vertex indices in edges and supports are validated; out-of-range indices throw
+`ArgumentError` even when `validate_input` has not been called.
 """
 function json_to_skeleton(input::APIInput)
     coord_unit = parse_unit(input.units)
-
-    # Convert to meters (BuildingStructure expects m-based skeleton so that
-    # face_area returns m² matching the hardcoded A type parameter)
     _to_m(val) = uconvert(u"m", val * coord_unit)
 
     T = typeof(1.0u"m")
     skel = BuildingSkeleton{T}()
     enable_lookup!(skel)
 
-    # ─── Stories Z (optional — rebuild_stories! infers from vertices) ─────
     if !isempty(input.stories_z)
         skel.stories_z = [_to_m(z) for z in input.stories_z]
     end
 
-    # ─── Vertices ─────────────────────────────────────────────────────────
-    for coords in input.vertices
-        pt = Meshes.Point(
-            _to_m(coords[1]),
-            _to_m(coords[2]),
-            _to_m(coords[3]),
-        )
-        add_vertex!(skel, pt)
-    end
-
-    # ─── Edges: beams (with auto-shatter) ─────────────────────────────────
-    _shatter_edges!(skel, input.edges.beams, :beams)
-
-    # ─── Edges: columns (with auto-shatter) ──────────────────────────────
-    _shatter_edges!(skel, input.edges.columns, :columns)
-
-    # ─── Edges: braces / struts (with auto-shatter) ──────────────────────
-    _shatter_edges!(skel, input.edges.braces, :braces)
-
-    # ─── Supports ─────────────────────────────────────────────────────────
-    for vi in input.supports
-        add_vertex!(skel, skel.vertices[vi]; group=:support)
-    end
-
-    # ─── Rebuild stories from vertex Z coordinates ────────────────────────
-    if isempty(skel.vertices)
-        error("Cannot rebuild stories: no vertices found in skeleton")
-    end
-    rebuild_stories!(skel)
-    
-    # Ensure stories_z was populated
-    if isempty(skel.stories_z)
-        error("rebuild_stories! failed to populate stories_z from $(length(skel.vertices)) vertices")
-    end
-
-    # ─── Faces ────────────────────────────────────────────────────────────
-    has_explicit_faces = !isempty(input.faces) &&
-        any(!isempty(polys) for polys in values(input.faces))
-
-    if has_explicit_faces
-        _add_explicit_faces!(skel, input.faces, coord_unit, _to_m)
-    else
-        find_faces!(skel)
-        _auto_categorize_faces!(skel)
-    end
+    _add_vertices!(skel, input, _to_m)
+    _add_edges!(skel, input)
+    _add_supports!(skel, input)
+    _add_faces!(skel, input, coord_unit, _to_m)
 
     n_chains = length(skel.edge_chains)
     n_shattered = sum(length(v) for v in values(skel.edge_chains); init=0)
@@ -253,15 +268,25 @@ function _auto_categorize_faces!(skel::BuildingSkeleton{T}) where T
     end
 end
 
-"""Find the story level index for a given Z elevation."""
+"""Find the story level index for a given Z elevation. Returns a 0-indexed level,
+or the nearest story if no exact match is found (with a warning)."""
 function _find_level_idx(skel::BuildingSkeleton{T}, z_val) where T
     z_stripped = ustrip(z_val)
+    best_idx = 0
+    best_dist = Inf
     for (i, sz) in enumerate(skel.stories_z)
-        if abs(ustrip(sz) - z_stripped) < 1e-4
-            return i - 1  # 0-indexed
+        dist = abs(ustrip(sz) - z_stripped)
+        if dist < 1e-4
+            return i - 1  # 0-indexed, exact match
+        end
+        if dist < best_dist
+            best_dist = dist
+            best_idx = i - 1
         end
     end
-    return -1
+    @warn "Face at z=$z_val does not match any story elevation exactly; " *
+          "snapping to nearest story (level $best_idx, distance=$(round(best_dist; digits=4)))"
+    return best_idx
 end
 
 # ─── Design Parameters ────────────────────────────────────────────────────────
@@ -281,11 +306,8 @@ function json_to_params(api_params::APIParams)
         wall_SDL  = api_params.loads.wall_SDL_psf * psf,
     )
 
-    materials = MaterialOptions(
-        concrete = _resolve_concrete_name(api_params.materials.concrete),
-        rebar    = _resolve_rebar_name(api_params.materials.rebar),
-        steel    = _resolve_steel_name(api_params.materials.steel),
-    )
+    conc, reb, stl = _resolve_materials(api_params)
+    materials = MaterialOptions(concrete=conc, rebar=reb, steel=stl)
 
     floor = _resolve_floor_options(api_params)
 
@@ -335,32 +357,24 @@ const STEEL_MAP = Dict{String, StructuralSizer.StructuralSteel}(
 )
 
 const SOIL_MAP = Dict{String, StructuralSizer.Soil}(
+    "loose_sand"  => StructuralSizer.loose_sand,
     "medium_sand" => StructuralSizer.medium_sand,
+    "dense_sand"  => StructuralSizer.dense_sand,
+    "soft_clay"   => StructuralSizer.soft_clay,
+    "stiff_clay"  => StructuralSizer.stiff_clay,
+    "hard_clay"   => StructuralSizer.hard_clay,
 )
 
-"""Look up a concrete grade by name string, or error with available options."""
-function _resolve_concrete_name(name::String)
-    haskey(CONCRETE_MAP, name) && return CONCRETE_MAP[name]
-    error("Unknown concrete grade: \"$name\". Options: $(join(keys(CONCRETE_MAP), ", "))")
+"""Generic named-value resolver: look up `name` in `map`, or error listing options."""
+function _resolve_from_map(name::String, map::Dict, label::String)
+    haskey(map, name) && return map[name]
+    error("Unknown $label: \"$name\". Options: $(join(keys(map), ", "))")
 end
 
-"""Look up a rebar grade by name string, or error with available options."""
-function _resolve_rebar_name(name::String)
-    haskey(REBAR_MAP, name) && return REBAR_MAP[name]
-    error("Unknown rebar grade: \"$name\". Options: $(join(keys(REBAR_MAP), ", "))")
-end
-
-"""Look up a structural steel type by name string, or error with available options."""
-function _resolve_steel_name(name::String)
-    haskey(STEEL_MAP, name) && return STEEL_MAP[name]
-    error("Unknown steel type: \"$name\". Options: $(join(keys(STEEL_MAP), ", "))")
-end
-
-"""Look up a soil type by name string, or error with available options."""
-function _resolve_soil_name(name::String)
-    haskey(SOIL_MAP, name) && return SOIL_MAP[name]
-    error("Unknown soil type: \"$name\". Options: $(join(keys(SOIL_MAP), ", "))")
-end
+_resolve_concrete_name(name::String) = _resolve_from_map(name, CONCRETE_MAP, "concrete grade")
+_resolve_rebar_name(name::String)    = _resolve_from_map(name, REBAR_MAP,    "rebar grade")
+_resolve_steel_name(name::String)    = _resolve_from_map(name, STEEL_MAP,    "steel type")
+_resolve_soil_name(name::String)     = _resolve_from_map(name, SOIL_MAP,     "soil type")
 
 """Resolve floor options from API params."""
 function _resolve_floor_options(api_params::APIParams)
@@ -386,47 +400,67 @@ function _resolve_floor_options(api_params::APIParams)
     end
 end
 
+const _ANALYSIS_METHOD_MAP = Dict{String, Function}(
+    "DDM"             => () -> StructuralSizer.DDM(),
+    "DDM_SIMPLIFIED"  => () -> StructuralSizer.DDM(:simplified),
+    "EFM"             => () -> StructuralSizer.EFM(),
+    "EFM_HARDY_CROSS" => () -> StructuralSizer.EFM(solver=:hardy_cross),
+    "FEA"             => () -> StructuralSizer.FEA(),
+)
+
 """Resolve analysis method string to Julia type."""
 function _resolve_analysis_method(method_str::String)
     s = uppercase(strip(method_str))
-    s == "DDM"               && return StructuralSizer.DDM()
-    s == "DDM_SIMPLIFIED"    && return StructuralSizer.DDM(:simplified)
-    s == "EFM"               && return StructuralSizer.EFM()
-    s == "EFM_HARDY_CROSS"   && return StructuralSizer.EFM(solver=:hardy_cross)
-    s == "FEA"               && return StructuralSizer.FEA()
-    return StructuralSizer.DDM()  # default
+    haskey(_ANALYSIS_METHOD_MAP, s) && return _ANALYSIS_METHOD_MAP[s]()
+    @warn "Unknown analysis_method '$method_str' — defaulting to DDM"
+    return StructuralSizer.DDM()
 end
+
+const _DEFLECTION_LIMIT_MAP = Dict{String, Symbol}(
+    "L_240" => :L_240, "L_360" => :L_360, "L_480" => :L_480,
+)
 
 """Resolve deflection limit string to Symbol."""
 function _resolve_deflection_limit(s::String)
-    s = uppercase(strip(s))
-    s == "L_240" && return :L_240
-    s == "L_360" && return :L_360
-    s == "L_480" && return :L_480
-    return :L_360  # default
+    key = uppercase(strip(s))
+    haskey(_DEFLECTION_LIMIT_MAP, key) && return _DEFLECTION_LIMIT_MAP[key]
+    @warn "Unknown deflection_limit '$s' — defaulting to L_360"
+    return :L_360
 end
+
+const _PUNCHING_STRATEGY_MAP = Dict{String, Symbol}(
+    "grow_columns" => :grow_columns,
+    "reinforce_last" => :reinforce_last,
+    "reinforce_first" => :reinforce_first,
+)
 
 """Resolve punching strategy string to Symbol."""
 function _resolve_punching_strategy(s::String)
-    s = lowercase(strip(s))
-    s == "grow_columns"    && return :grow_columns
-    s == "reinforce_last"  && return :reinforce_last
-    s == "reinforce_first" && return :reinforce_first
-    return :grow_columns  # default
+    key = lowercase(strip(s))
+    haskey(_PUNCHING_STRATEGY_MAP, key) && return _PUNCHING_STRATEGY_MAP[key]
+    @warn "Unknown punching_strategy '$s' — defaulting to grow_columns"
+    return :grow_columns
+end
+
+"""Resolve all three material names from API params. Returns `(concrete, rebar, steel)`."""
+function _resolve_materials(api_params::APIParams)
+    return (
+        _resolve_concrete_name(api_params.materials.concrete),
+        _resolve_rebar_name(api_params.materials.rebar),
+        _resolve_steel_name(api_params.materials.steel),
+    )
 end
 
 """Resolve column type string to ColumnOptions."""
 function _resolve_column_options(api_params::APIParams)
     ct = lowercase(strip(api_params.column_type))
-    concrete = _resolve_concrete_name(api_params.materials.concrete)
-    rebar = _resolve_rebar_name(api_params.materials.rebar)
-    steel = _resolve_steel_name(api_params.materials.steel)
+    concrete, rebar, steel = _resolve_materials(api_params)
 
     if startswith(ct, "rc_")
         shape = ct == "rc_circular" ? :circular : :rect
         return StructuralSizer.ConcreteColumnOptions(
-            grade = concrete,
-            rebar_grade = rebar,
+            material = concrete,
+            rebar_material = rebar,
             section_shape = shape
         )
     elseif startswith(ct, "steel_")
@@ -446,8 +480,8 @@ function _resolve_column_options(api_params::APIParams)
     else
         # Default to RC rectangular
         return StructuralSizer.ConcreteColumnOptions(
-            grade = concrete,
-            rebar_grade = rebar,
+            material = concrete,
+            rebar_material = rebar,
             section_shape = :rect
         )
     end
@@ -456,9 +490,7 @@ end
 """Resolve beam type string to BeamOptions."""
 function _resolve_beam_options(api_params::APIParams)
     bt = lowercase(strip(api_params.beam_type))
-    concrete = _resolve_concrete_name(api_params.materials.concrete)
-    rebar = _resolve_rebar_name(api_params.materials.rebar)
-    steel = _resolve_steel_name(api_params.materials.steel)
+    concrete, rebar, steel = _resolve_materials(api_params)
 
     if startswith(bt, "steel_")
         section_type = if bt == "steel_w"
@@ -474,14 +506,14 @@ function _resolve_beam_options(api_params::APIParams)
         )
     elseif bt == "rc_rect"
         return StructuralSizer.ConcreteBeamOptions(
-            grade = concrete,
-            rebar_grade = rebar,
+            material = concrete,
+            rebar_material = rebar,
             include_flange = false
         )
     elseif bt == "rc_tbeam"
         return StructuralSizer.ConcreteBeamOptions(
-            grade = concrete,
-            rebar_grade = rebar,
+            material = concrete,
+            rebar_material = rebar,
             include_flange = true
         )
     else

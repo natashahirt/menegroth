@@ -46,7 +46,7 @@ end
         @test 1.05 < f < 1.25
         
         # Capacity calculations
-        Fy = 50.0u"ksi"
+        Fy = 50.0ksi
         Mp = Fy * section.Zx
         My = Fy * section.Sx
         ϕMp = 0.9 * Mp
@@ -155,7 +155,7 @@ end
         model.nodes[id2].dof = [true, true, false, true, true, true]
 
         # 4. Loads (pre-factored) - LineLoad expects Unitful quantities
-        w_u_si = uconvert(u"N/m", w_u * u"kip/ft")
+        w_u_si = uconvert(u"N/m", w_u * kip/u"ft")
         push!(model.loads, Asap.LineLoad(model.elements[e1], [0.0u"N/m", 0.0u"N/m", -w_u_si]))
         
         Asap.process!(model)
@@ -166,7 +166,7 @@ end
             struc;
             member_edge_group=:beams,
             material=A992_Steel,
-            optimizer=:auto,
+            solver=:auto,
             resolution=20,
             reanalyze=true
         )
@@ -176,7 +176,7 @@ end
         selected = mg.section
         
         ϕMn = get_ϕMn(selected, A992_Steel; Lb=24.0u"ft", Cb=1.14, axis=:strong)
-        ϕMn_kft = ustrip(u"kip*ft", ϕMn)
+        ϕMn_kft = ustrip(kip*u"ft", ϕMn)
         
         # Must satisfy demand
         @test ϕMn_kft >= 354.24
@@ -266,8 +266,8 @@ end
         model.nodes[idD].dof = [true, false, false, true, true, true]    # Roller
 
         # 4. Loads (Unitful quantities required)
-        w_u_si = uconvert(u"N/m", w_u * u"kip/ft")
-        P_u_si = uconvert(u"N", P_u * u"kip")
+        w_u_si = uconvert(u"N/m", w_u * kip/u"ft")
+        P_u_si = uconvert(u"N", P_u * kip)
         
         # Distributed load on all elements
         push!(model.loads, Asap.LineLoad(model.elements[e_AB], [0.0u"N/m", 0.0u"N/m", -w_u_si]))
@@ -286,7 +286,7 @@ end
             struc;
             member_edge_group=:beams,
             material=A992_Steel,
-            optimizer=:auto,
+            solver=:auto,
             resolution=20,
             reanalyze=true
         )
@@ -304,7 +304,7 @@ end
         # Use the most critical span (AB with Lb=12ft) for capacity check
         # The example would determine Cb for each span; use conservative Cb=1.0
         ϕMn = get_ϕMn(selected, A992_Steel; Lb=12.0u"ft", Cb=1.0, axis=:strong)
-        ϕMn_kft = ustrip(u"kip*ft", ϕMn)
+        ϕMn_kft = ustrip(kip*u"ft", ϕMn)
         
         # Must satisfy controlling demand (≈ 550.6 k-ft)
         @test ϕMn_kft >= 550.0
@@ -357,8 +357,8 @@ end
         model.nodes[id2].dof = [true, true, false, true, true, true]
 
         # 4. Loads (pre-factored, Unitful)
-        w_u_si = uconvert(u"N/m", 4.52 * u"kip/ft")
-        P_u_si = uconvert(u"N", 16.0 * u"kip")
+        w_u_si = uconvert(u"N/m", 4.52 * kip/u"ft")
+        P_u_si = uconvert(u"N", 16.0 * kip)
         
         push!(model.loads, Asap.LineLoad(model.elements[e1], [0.0u"N/m", 0.0u"N/m", -w_u_si]))
         push!(model.loads, Asap.PointLoad(model.elements[e1], 0.5, [0.0u"N", 0.0u"N", -P_u_si]))
@@ -371,7 +371,7 @@ end
             struc;
             member_edge_group=:beams,
             material=A992_Steel,
-            optimizer=:auto,
+            solver=:auto,
             resolution=20,
             reanalyze=true
         )
@@ -381,7 +381,7 @@ end
         selected = mg.section
         
         ϕMn = get_ϕMn(selected, A992_Steel; Lb=12.0u"ft", Cb=1.37, axis=:strong)
-        ϕMn_kft = ustrip(u"kip*ft", ϕMn)
+        ϕMn_kft = ustrip(kip*u"ft", ϕMn)
         
         # Must satisfy demand
         @test ϕMn_kft >= 421.44

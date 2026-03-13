@@ -22,9 +22,10 @@ function get_slenderness(s::HSSRectSection, mat::Metal)
     λp_f = 1.12 * sqrt(E / Fy)
     λr_f = 1.40 * sqrt(E / Fy)
 
-    # Webs of rectangular HSS and box sections: λp = 2.42√(E/Fy), λr = 3.10√(E/Fy)
+    # Webs of rectangular HSS and box sections (Table B4.1b Case 19):
+    # λp = 2.42√(E/Fy), λr = 5.70√(E/Fy)
     λp_w = 2.42 * sqrt(E / Fy)
-    λr_w = 3.10 * sqrt(E / Fy)
+    λr_w = 5.70 * sqrt(E / Fy)
 
     class_f = λ_f > λr_f ? :slender : (λ_f > λp_f ? :noncompact : :compact)
     class_w = λ_w > λr_w ? :slender : (λ_w > λp_w ? :noncompact : :compact)

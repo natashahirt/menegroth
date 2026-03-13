@@ -80,6 +80,7 @@ function _mat_plan_sizing(
         #     Mat area = (gx + 2·oh) × (gy + 2·oh) where gx, gy = grid extent.
         #     Solve quadratic: 4·oh² + 2(gx+gy)·oh + (gx·gy − A_req) ≥ 0.
         Ps_total = sum(d.Ps for d in demands)
+        ustrip(soil.qa) > 0 || error("Allowable soil bearing pressure (qa) must be positive")
         A_req = Ps_total / soil.qa    # required area (Length²)
         gx = x_max - x_min
         gy = y_max - y_min
@@ -160,13 +161,25 @@ function _mat_punching_util(demands, plan, qu, d_eff, fc, λ, ϕv)
             ys_loc[j] > (Lm - overhang - 0.5u"ft")
         )
         pos_sym = is_edge ? :edge : :interior
+        # Corner detection: within tolerance of two edges simultaneously
+        n_close_edges = (
+            (xs_loc[j] < overhang + 0.5u"ft") +
+            (xs_loc[j] > (B - overhang - 0.5u"ft")) +
+            (ys_loc[j] < overhang + 0.5u"ft") +
+            (ys_loc[j] > (Lm - overhang - 0.5u"ft"))
+        )
+        is_corner = n_close_edges >= 2
         Ac = if demands[j].shape == :circular
-            is_edge ? π * (c1j + d_eff)^2 / 4 :    # approximate 3-sided
-                      π * (c1j + d_eff)^2 / 4
+            A_full = π * (c1j + d_eff)^2 / 4
+            is_corner ? A_full / 2 :       # 2-sided critical perimeter
+            is_edge   ? A_full * 3 / 4 :   # 3-sided critical perimeter
+                        A_full              # interior — full perimeter
         else
-            is_edge ? (c1j + d_eff / 2) * (c2j + d_eff) :
-                      (c1j + d_eff) * (c2j + d_eff)
+            is_corner ? (c1j + d_eff / 2) * (c2j + d_eff / 2) :
+            is_edge   ? (c1j + d_eff / 2) * (c2j + d_eff) :
+                        (c1j + d_eff) * (c2j + d_eff)
         end
+        pos_sym = is_corner ? :corner : pos_sym
         Vu_p = max(uconvert(u"lbf", demands[j].Pu - qu * Ac), 0.0u"lbf")
         pch = punching_check(Vu_p, demands[j].Mux, demands[j].Muy,
                               d_eff, fc, c1j, c2j;
@@ -343,6 +356,8 @@ function _design_mat_rigid(
     util_bearing > 1.0 && @warn "Mat bearing exceeds allowable: util=$(round(util_bearing, digits=3))"
 
     # ── Step 2: Thickness from Punching Shear (per-column dimensions) ──
+    # Uses _mat_punching_util (with corner detection) so thickness iteration
+    # and final utilization are computed by the same code path.
     h = opts.min_depth
     h_incr = opts.depth_increment
 
@@ -350,35 +365,8 @@ function _design_mat_rigid(
         d_eff = h - cover - max(db_x, db_y)
         d_eff < 6.0u"inch" && (h += h_incr; continue)
 
-        all_ok = true
-        for j in 1:N
-            c1j, c2j = demands[j].c1, demands[j].c2
-            is_edge = (
-                plan.xs_loc[j] < plan.overhang + 0.5u"ft" ||
-                plan.xs_loc[j] > (B - plan.overhang - 0.5u"ft") ||
-                plan.ys_loc[j] < plan.overhang + 0.5u"ft" ||
-                plan.ys_loc[j] > (Lm - plan.overhang - 0.5u"ft")
-            )
-            pos_sym = is_edge ? :edge : :interior
-            Ac = if demands[j].shape == :circular
-                π * (c1j + d_eff)^2 / 4
-            else
-                is_edge ? (c1j + d_eff / 2) * (c2j + d_eff) :
-                          (c1j + d_eff) * (c2j + d_eff)
-            end
-            Vu_p = max(uconvert(u"lbf", demands[j].Pu - qu * Ac), 0.0u"lbf")
-
-            pch = punching_check(Vu_p, demands[j].Mux, demands[j].Muy,
-                                  d_eff, fc, c1j, c2j;
-                                  position = pos_sym, shape = demands[j].shape,
-                                  λ = λ, ϕ = ϕv)
-            if !pch.ok
-                all_ok = false
-                break
-            end
-        end
-
-        all_ok && break
+        util_p = _mat_punching_util(demands, plan, qu, d_eff, fc, λ, ϕv)
+        util_p ≤ 1.0 && break
         h += h_incr
         iter == 60 && @warn "Mat footing thickness did not converge at h=$h"
     end

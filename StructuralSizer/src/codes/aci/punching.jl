@@ -60,6 +60,7 @@ function punching_geometry_edge(c1::Length, c2::Length, d::Length)
     b1 = c1 + d / 2
     b2 = c2 + d
     b0 = 2b1 + b2
+    ustrip(b0) > 0 || throw(ArgumentError("Edge critical perimeter is zero (c1=$c1, c2=$c2, d=$d)"))
     cAB = b1^2 / (2b1 + b2)
     return (b1 = b1, b2 = b2, b0 = b0, cAB = cAB)
 end
@@ -78,6 +79,7 @@ function punching_geometry_corner(c1::Length, c2::Length, d::Length)
     b2 = c2 + d / 2
     b0 = b1 + b2
     denom = 2 * (b1 + b2)
+    ustrip(denom) > 0 || throw(ArgumentError("Corner critical perimeter is zero (c1=$c1, c2=$c2, d=$d)"))
     return (b1 = b1, b2 = b2, b0 = b0,
             cAB_x = b1^2 / denom, cAB_y = b2^2 / denom)
 end

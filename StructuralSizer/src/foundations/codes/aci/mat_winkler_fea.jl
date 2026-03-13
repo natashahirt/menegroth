@@ -431,35 +431,10 @@ function _design_mat_winkler_fea(
         gov_My_total_pos = gov_my_pos * B_m
         gov_My_total_neg = gov_my_neg * B_m
 
-        # ── Punching shear check (per-column dimensions) ──
+        # ── Punching shear check (reuse shared util with corner detection) ──
         qu_punch = sum(d.Pu for d in demands) / (B * Lm)
-        punch_ok = true
-        for j in 1:N_col
-            c1j, c2j = demands[j].c1, demands[j].c2
-            is_edge = (
-                plan.xs_loc[j] < plan.overhang + 0.5u"ft" ||
-                plan.xs_loc[j] > (B - plan.overhang - 0.5u"ft") ||
-                plan.ys_loc[j] < plan.overhang + 0.5u"ft" ||
-                plan.ys_loc[j] > (Lm - plan.overhang - 0.5u"ft")
-            )
-            pos_sym = is_edge ? :edge : :interior
-            Ac = if demands[j].shape == :circular
-                π * (c1j + d_eff)^2 / 4
-            else
-                is_edge ? (c1j + d_eff / 2) * (c2j + d_eff) :
-                          (c1j + d_eff) * (c2j + d_eff)
-            end
-            Vu_p = max(uconvert(u"lbf", demands[j].Pu - qu_punch * Ac), 0.0u"lbf")
-
-            pch = punching_check(Vu_p, demands[j].Mux, demands[j].Muy,
-                                  d_eff, fc, c1j, c2j;
-                                  position = pos_sym, shape = demands[j].shape,
-                                  λ = λ_c, ϕ = ϕv)
-            if !pch.ok
-                punch_ok = false
-                break
-            end
-        end
+        util_p = _mat_punching_util(demands, plan, qu_punch, d_eff, fc, λ_c, ϕv)
+        punch_ok = util_p ≤ 1.0
 
         punch_ok && break
         h += h_incr

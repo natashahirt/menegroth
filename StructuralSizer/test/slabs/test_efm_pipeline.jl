@@ -43,7 +43,7 @@ using StructuralSizer
     Ecc = wc^1.5 * 33 * sqrt(ustrip(u"psi", fc_col)) * u"psi"   # SP: 4,696,000 psi
     
     # Load
-    qu = 193u"psf"  # Total factored load (193 psf from SP example)
+    qu = 193psf  # Total factored load (193 psf from SP example)
     
     # =========================================================================
     # Test 1: Section Properties
@@ -102,8 +102,8 @@ using StructuralSizer
         # FEM = m_factor × qu × l2 × l1²
         sf_fem = StructuralSizer.pca_slab_beam_factors(c1, l1, c2, l2)
         FEM = StructuralSizer.fixed_end_moment_FEM(qu, l2, l1; m_factor=sf_fem.m)
-        FEM_expected = 73.79u"kip*ft"  # SP: 73.79 ft-kips
-        @test ustrip(u"kip*ft", FEM) ≈ ustrip(u"kip*ft", FEM_expected) rtol=0.05
+        FEM_expected = 73.79kip*u"ft"  # SP: 73.79 ft-kips
+        @test ustrip(kip*u"ft", FEM) ≈ ustrip(kip*u"ft", FEM_expected) rtol=0.05
     end
     
     # =========================================================================
@@ -189,23 +189,23 @@ using StructuralSizer
             spans, joint_Kc, joint_positions, qu;
             COF=sf_pipe.COF, max_iterations=20, tolerance=0.001)
         
-        hc_ext  = ustrip(u"kip*ft", hc_kc_moments[1].M_neg_left)
-        hc_int  = ustrip(u"kip*ft", hc_kc_moments[1].M_neg_right)
-        hc_pos  = ustrip(u"kip*ft", hc_kc_moments[1].M_pos)
+        hc_ext  = ustrip(kip*u"ft", hc_kc_moments[1].M_neg_left)
+        hc_int  = ustrip(kip*u"ft", hc_kc_moments[1].M_neg_right)
+        hc_pos  = ustrip(kip*u"ft", hc_kc_moments[1].M_pos)
         
         println("\n=== ASAP vs Hardy Cross (Kc only) ===")
         println("Span 1 (Exterior):")
-        println("  M_neg_left  ASAP=$(round(ustrip(u"kip*ft", M_neg_ext), digits=2))  HC=$(round(hc_ext, digits=2))")
-        println("  M_neg_right ASAP=$(round(ustrip(u"kip*ft", M_neg_int), digits=2))  HC=$(round(hc_int, digits=2))")
-        println("  M_pos       ASAP=$(round(ustrip(u"kip*ft", M_pos), digits=2))  HC=$(round(hc_pos, digits=2))")
+        println("  M_neg_left  ASAP=$(round(ustrip(kip*u"ft", M_neg_ext), digits=2))  HC=$(round(hc_ext, digits=2))")
+        println("  M_neg_right ASAP=$(round(ustrip(kip*u"ft", M_neg_int), digits=2))  HC=$(round(hc_int, digits=2))")
+        println("  M_pos       ASAP=$(round(ustrip(kip*u"ft", M_pos), digits=2))  HC=$(round(hc_pos, digits=2))")
         
         # ASAP and Hardy Cross Kc-only should agree within 5%.
         # Small differences arise from: COF (0.507 vs exact), non-prismatic
         # slab modelling in ASAP, and column I_factor (0.70) applied in ASAP
         # but not in the Hardy Cross Kc path.
-        @test ustrip(u"kip*ft", M_neg_ext) ≈ hc_ext rtol=0.10
-        @test ustrip(u"kip*ft", M_neg_int) ≈ hc_int rtol=0.10
-        @test ustrip(u"kip*ft", M_pos) ≈ hc_pos rtol=0.10
+        @test ustrip(kip*u"ft", M_neg_ext) ≈ hc_ext rtol=0.10
+        @test ustrip(kip*u"ft", M_neg_int) ≈ hc_int rtol=0.10
+        @test ustrip(kip*u"ft", M_pos) ≈ hc_pos rtol=0.10
     end
     
     # =========================================================================
@@ -215,10 +215,10 @@ using StructuralSizer
         # Create sample span moments (using SP values)
         span_moments = [(
             span_idx = 1,
-            M_neg_left = 46.65u"kip*ft",
-            M_neg_right = 83.91u"kip*ft",
-            M_pos = 44.94u"kip*ft",
-            M0 = 93.82u"kip*ft"
+            M_neg_left = 46.65kip*u"ft",
+            M_neg_right = 83.91kip*u"ft",
+            M_pos = 44.94kip*u"ft",
+            M0 = 93.82kip*u"ft"
         )]
         
         joint_positions = [:corner, :interior]
@@ -226,26 +226,26 @@ using StructuralSizer
         strip_moments = StructuralSizer.distribute_moments_to_strips(span_moments, joint_positions)
         
         # At exterior (corner): 100% to column strip
-        @test strip_moments[1].M_neg_left_cs ≈ 46.65u"kip*ft" rtol=0.01
-        @test strip_moments[1].M_neg_left_ms ≈ 0.0u"kip*ft" atol=0.1u"kip*ft"
+        @test strip_moments[1].M_neg_left_cs ≈ 46.65kip*u"ft" rtol=0.01
+        @test strip_moments[1].M_neg_left_ms ≈ 0.0kip*u"ft" atol=0.1kip*u"ft"
         
         # At interior: 75% to column strip, 25% to middle strip
-        @test ustrip(u"kip*ft", strip_moments[1].M_neg_right_cs) ≈ 0.75 * 83.91 rtol=0.01
-        @test ustrip(u"kip*ft", strip_moments[1].M_neg_right_ms) ≈ 0.25 * 83.91 rtol=0.01
+        @test ustrip(kip*u"ft", strip_moments[1].M_neg_right_cs) ≈ 0.75 * 83.91 rtol=0.01
+        @test ustrip(kip*u"ft", strip_moments[1].M_neg_right_ms) ≈ 0.25 * 83.91 rtol=0.01
         
         # Positive: 60% to column strip, 40% to middle strip
-        @test ustrip(u"kip*ft", strip_moments[1].M_pos_cs) ≈ 0.60 * 44.94 rtol=0.01
-        @test ustrip(u"kip*ft", strip_moments[1].M_pos_ms) ≈ 0.40 * 44.94 rtol=0.01
+        @test ustrip(kip*u"ft", strip_moments[1].M_pos_cs) ≈ 0.60 * 44.94 rtol=0.01
+        @test ustrip(kip*u"ft", strip_moments[1].M_pos_ms) ≈ 0.40 * 44.94 rtol=0.01
         
         println("\n=== Strip Distribution (ACI 318) ===")
         println("Column Strip:")
-        println("  M_neg_ext = $(round(ustrip(u"kip*ft", strip_moments[1].M_neg_left_cs), digits=2)) kip-ft")
-        println("  M_neg_int = $(round(ustrip(u"kip*ft", strip_moments[1].M_neg_right_cs), digits=2)) kip-ft")
-        println("  M_pos     = $(round(ustrip(u"kip*ft", strip_moments[1].M_pos_cs), digits=2)) kip-ft")
+        println("  M_neg_ext = $(round(ustrip(kip*u"ft", strip_moments[1].M_neg_left_cs), digits=2)) kip-ft")
+        println("  M_neg_int = $(round(ustrip(kip*u"ft", strip_moments[1].M_neg_right_cs), digits=2)) kip-ft")
+        println("  M_pos     = $(round(ustrip(kip*u"ft", strip_moments[1].M_pos_cs), digits=2)) kip-ft")
         println("Middle Strip:")
-        println("  M_neg_ext = $(round(ustrip(u"kip*ft", strip_moments[1].M_neg_left_ms), digits=2)) kip-ft")
-        println("  M_neg_int = $(round(ustrip(u"kip*ft", strip_moments[1].M_neg_right_ms), digits=2)) kip-ft")
-        println("  M_pos     = $(round(ustrip(u"kip*ft", strip_moments[1].M_pos_ms), digits=2)) kip-ft")
+        println("  M_neg_ext = $(round(ustrip(kip*u"ft", strip_moments[1].M_neg_left_ms), digits=2)) kip-ft")
+        println("  M_neg_int = $(round(ustrip(kip*u"ft", strip_moments[1].M_neg_right_ms), digits=2)) kip-ft")
+        println("  M_pos     = $(round(ustrip(kip*u"ft", strip_moments[1].M_pos_ms), digits=2)) kip-ft")
     end
     
     # =========================================================================
@@ -292,7 +292,7 @@ using StructuralSizer
         
         println("\nReinforcement calculations:")
         for (location, Mu_kft, As_expected) in test_cases
-            Mu = Mu_kft * u"kip*ft"
+            Mu = Mu_kft * kip*u"ft"
             As_req = StructuralSizer.required_reinforcement(Mu, b, d, fc, fy)
             As_req_val = ustrip(u"inch^2", As_req)
             
@@ -320,19 +320,19 @@ using StructuralSizer
         # M_centerline (int neg) = 83.91 kip-ft
         # V (right of span 1-2) = 26.39 kips (from equilibrium)
         
-        M_cl = 83.91u"kip*ft"
-        V = 26.39u"kip"
+        M_cl = 83.91kip*u"ft"
+        V = 26.39kip
         c = 16u"inch"
         
         M_face = StructuralSizer.face_of_support_moment(M_cl, V, c, l1)
-        M_face_kft = ustrip(u"kip*ft", M_face)
+        M_face_kft = ustrip(kip*u"ft", M_face)
         
         # SP Table 6 reports 66.99 kip-ft for this location
         # Our calculation: 83.91 - 26.39 × (16/12/2) = 83.91 - 17.59 = 66.32 kip-ft
         # Small difference due to SP's more detailed shear calculation
         println("\n=== Face-of-Support Moment ===")
-        println("M_centerline = $(ustrip(u"kip*ft", M_cl)) kip-ft")
-        println("V = $(ustrip(u"kip", V)) kips")
+        println("M_centerline = $(ustrip(kip*u"ft", M_cl)) kip-ft")
+        println("V = $(ustrip(kip, V)) kips")
         println("M_face = $(round(M_face_kft, digits=2)) kip-ft (SP: 66.99)")
         
         @test M_face_kft ≈ 66.32 rtol=0.03
@@ -360,12 +360,12 @@ using StructuralSizer
         println("Max bar spacing s_max = $(ustrip(u"inch", s_max)) in (2h or 18 in)")
         
         # Column strip interior negative (critical section)
-        Mu_cs_int_neg = 50.24u"kip*ft"
+        Mu_cs_int_neg = 50.24kip*u"ft"
         As_req = StructuralSizer.required_reinforcement(Mu_cs_int_neg, b_cs, d, fc, fy)
         As_gov = max(As_req, As_min)
         
         println("\nColumn Strip Int Neg:")
-        println("  Mu = $(ustrip(u"kip*ft", Mu_cs_int_neg)) kip-ft")
+        println("  Mu = $(ustrip(kip*u"ft", Mu_cs_int_neg)) kip-ft")
         println("  As,req = $(round(ustrip(u"inch^2", As_req), digits=2)) in²")
         println("  As,gov = $(round(ustrip(u"inch^2", As_gov), digits=2)) in²")
         
@@ -373,12 +373,12 @@ using StructuralSizer
         @test ustrip(u"inch^2", As_gov) ≈ 2.02 rtol=0.10
         
         # Middle strip positive (minimum often governs)
-        Mu_ms_pos = 13.29u"kip*ft"
+        Mu_ms_pos = 13.29kip*u"ft"
         As_req_ms = StructuralSizer.required_reinforcement(Mu_ms_pos, b_ms, d, fc, fy)
         As_gov_ms = max(As_req_ms, As_min)
         
         println("\nMiddle Strip Positive:")
-        println("  Mu = $(ustrip(u"kip*ft", Mu_ms_pos)) kip-ft")
+        println("  Mu = $(ustrip(kip*u"ft", Mu_ms_pos)) kip-ft")
         println("  As,req = $(round(ustrip(u"inch^2", As_req_ms), digits=2)) in²")
         println("  As,gov = $(round(ustrip(u"inch^2", As_gov_ms), digits=2)) in² (min governs)")
         
@@ -409,7 +409,7 @@ using StructuralSizer
         # Cracking moment: Mcr = fr × Ig / yt where yt = h/2
         # Mcr = 474.34 × 4802 / 3.5 / 12 / 1000 = 54.23 ft-kip
         Mcr = StructuralSizer.cracking_moment(fr_calc, Ig, h)
-        Mcr_kipft = ustrip(u"kip*ft", Mcr)
+        Mcr_kipft = ustrip(kip*u"ft", Mcr)
         @test Mcr_kipft ≈ 54.23 rtol=0.02
         println("Mcr = $(round(Mcr_kipft, digits=2)) kip-ft (SP: 54.23)")
         
@@ -441,7 +441,7 @@ using StructuralSizer
         As = 17 * 0.20u"inch^2"  # 17 #4 bars
         b_frame = l2  # Frame strip width = 168 in
         d = 5.75u"inch"
-        Es_rebar = 29000u"ksi"  # SP: Es = 29,000,000 psi (Grade 60 rebar)
+        Es_rebar = 29000ksi  # SP: Es = 29,000,000 psi (Grade 60 rebar)
         
         Icr = StructuralSizer.cracked_moment_of_inertia(As, b_frame, d, Ecs, Es_rebar)
         Icr_in4 = ustrip(u"inch^4", Icr)
@@ -466,8 +466,8 @@ using StructuralSizer
         # Mcr = 54.23 ft-kip
         # Since Ma > Mcr, section is cracked
         
-        Mcr = 54.23u"kip*ft"
-        Ma = 64.13u"kip*ft"
+        Mcr = 54.23kip*u"ft"
+        Ma = 64.13kip*u"ft"
         Ig = 4802u"inch^4"
         Icr = 629u"inch^4"
         
@@ -481,15 +481,15 @@ using StructuralSizer
         Ie_manual = 629 + (4802 - 629) * (54.23/64.13)^3
         
         println("\n=== Effective Moment of Inertia (Cracked) ===")
-        println("Ma = $(ustrip(u"kip*ft", Ma)) kip-ft (service moment)")
-        println("Mcr = $(ustrip(u"kip*ft", Mcr)) kip-ft")
+        println("Ma = $(ustrip(kip*u"ft", Ma)) kip-ft (service moment)")
+        println("Mcr = $(ustrip(kip*u"ft", Mcr)) kip-ft")
         println("Ma > Mcr: Section is cracked")
         println("Ie = $(round(Ie_in4, digits=0)) in⁴")
         
         @test Ie_in4 ≈ Ie_manual rtol=0.01
         
         # When section is uncracked (Ma ≤ Mcr), Ie = Ig
-        Ma_uncracked = 40.0u"kip*ft"
+        Ma_uncracked = 40.0kip*u"ft"
         Ie_uncracked = StructuralSizer.effective_moment_of_inertia(Mcr, Ma_uncracked, Ig, Icr)
         @test ustrip(u"inch^4", Ie_uncracked) == ustrip(u"inch^4", Ig)
         
@@ -699,7 +699,7 @@ using StructuralSizer
         # θc,L = M_net / Kec = 25.99×12000 / 554.07×10⁶ = 0.000563 rad
         # SP reports 0.0006 rad (rounded to 4 decimal places)
         
-        M_net = 25.99u"kip*ft"
+        M_net = 25.99kip*u"ft"
         Kec = 554.07e6u"lbf*inch"  # = 554.07×10⁶ in-lb
         
         θ = StructuralSizer.support_rotation(M_net, Kec)
@@ -724,7 +724,7 @@ using StructuralSizer
         @test Δ_θ_in ≈ 0.0152 rtol=0.1
         
         println("\n=== Support Rotation & Deflection Contribution ===")
-        println("M_net = $(ustrip(u"kip*ft", M_net)) kip-ft")
+        println("M_net = $(ustrip(kip*u"ft", M_net)) kip-ft")
         println("Kec = $(ustrip(u"lbf*inch", Kec) / 1e6)×10⁶ in-lb")
         println("θ = $(round(θ, digits=6)) rad (SP: 0.0006)")
         println("Δθ = $(round(Δ_θ_in, digits=4)) in (SP: 0.0152)")
@@ -808,25 +808,25 @@ using StructuralSizer
         
         println("\n=== Hardy Cross Moment Distribution Results ===")
         println("Span 1 (Exterior):")
-        println("  M_neg_left  = $(round(ustrip(u"kip*ft", M_neg_ext), digits=2)) kip-ft (SP: 46.65)")
-        println("  M_neg_right = $(round(ustrip(u"kip*ft", M_neg_int), digits=2)) kip-ft (SP: 83.91)")
-        println("  M_pos       = $(round(ustrip(u"kip*ft", M_pos), digits=2)) kip-ft (SP: 44.94)")
+        println("  M_neg_left  = $(round(ustrip(kip*u"ft", M_neg_ext), digits=2)) kip-ft (SP: 46.65)")
+        println("  M_neg_right = $(round(ustrip(kip*u"ft", M_neg_int), digits=2)) kip-ft (SP: 83.91)")
+        println("  M_pos       = $(round(ustrip(kip*u"ft", M_pos), digits=2)) kip-ft (SP: 44.94)")
         
         # These should match StructurePoint Table 5 exactly
-        @test ustrip(u"kip*ft", M_neg_ext) ≈ 46.65 rtol=0.02
-        @test ustrip(u"kip*ft", M_neg_int) ≈ 83.91 rtol=0.02
-        @test ustrip(u"kip*ft", M_pos) ≈ 44.94 rtol=0.02
+        @test ustrip(kip*u"ft", M_neg_ext) ≈ 46.65 rtol=0.02
+        @test ustrip(kip*u"ft", M_neg_int) ≈ 83.91 rtol=0.02
+        @test ustrip(kip*u"ft", M_pos) ≈ 44.94 rtol=0.02
         
         # Check interior span (symmetric)
         M_neg_int_span2 = span_moments[2].M_neg_left
         M_pos_span2 = span_moments[2].M_pos
         
         println("\nSpan 2 (Interior):")
-        println("  M_neg = $(round(ustrip(u"kip*ft", M_neg_int_span2), digits=2)) kip-ft (SP: 76.21)")
-        println("  M_pos = $(round(ustrip(u"kip*ft", M_pos_span2), digits=2)) kip-ft (SP: 33.23)")
+        println("  M_neg = $(round(ustrip(kip*u"ft", M_neg_int_span2), digits=2)) kip-ft (SP: 76.21)")
+        println("  M_pos = $(round(ustrip(kip*u"ft", M_pos_span2), digits=2)) kip-ft (SP: 33.23)")
         
-        @test ustrip(u"kip*ft", M_neg_int_span2) ≈ 76.21 rtol=0.02
-        @test ustrip(u"kip*ft", M_pos_span2) ≈ 33.23 rtol=0.02
+        @test ustrip(kip*u"ft", M_neg_int_span2) ≈ 76.21 rtol=0.02
+        @test ustrip(kip*u"ft", M_pos_span2) ≈ 33.23 rtol=0.02
     end
 
     # =========================================================================

@@ -71,7 +71,7 @@ using Test
         catalog = [hss, pipe]
 
         dem = MemberDemand(1; Pu_c=100e3u"N", Pu_t=0.0u"N", Mux=10e3u"N*m", Muy=0.0u"N*m",
-                           Vu_strong=0.0u"N", Vu_weak=0.0u"N", δ_max=0.0u"m", I_ref=1.0u"m^4")
+                           Vu_strong=0.0u"N", Vu_weak=0.0u"N", δ_max_LL=0.0u"m", I_ref=1.0u"m^4")
         geo = SteelMemberGeometry(3.0; Lb=3.0, Kx=1.0, Ky=1.0, Cb=1.0)
 
         cache = create_cache(chk, length(catalog))

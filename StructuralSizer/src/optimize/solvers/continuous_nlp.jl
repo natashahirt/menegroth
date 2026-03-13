@@ -104,6 +104,10 @@ import Ipopt
     _numeric_gradient(f, x; ε=1e-6) -> Vector
 
 Compute numerical gradient using central differences.
+
+!!! warning
+    Mutates `x` in-place during computation (restores original values before returning).
+    Not safe for concurrent reads of `x` or closures that capture `x` by reference.
 """
 function _numeric_gradient(f, x::Vector{Float64}; ε::Float64=1e-6)
     n = length(x)
@@ -237,6 +241,8 @@ function _optimize_ipopt(problem::AbstractNLPProblem, objective::AbstractObjecti
         :optimal
     elseif term_status == JuMP.MOI.ALMOST_LOCALLY_SOLVED || term_status == JuMP.MOI.ALMOST_OPTIMAL
         :feasible   # KKT satisfied to relaxed tolerance (common with piecewise-linear P-M constraints)
+    elseif term_status == JuMP.MOI.ITERATION_LIMIT || term_status == JuMP.MOI.SLOW_PROGRESS
+        :converged  # Solver stalled or hit iteration cap; solution is typically near-feasible
     elseif term_status == JuMP.MOI.LOCALLY_INFEASIBLE || term_status == JuMP.MOI.INFEASIBLE
         :infeasible
     else

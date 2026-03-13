@@ -135,6 +135,7 @@ function _compute_φMn(section::RCBeamSection, fc_psi::Float64, fy_psi::Float64)
     As_in = ustrip(u"inch^2", section.As)
 
     As_in > 0 || return 0.0
+    (b_in > 0 && fc_psi > 0) || throw(ArgumentError("b ($b_in in) and f'c ($fc_psi psi) must be positive"))
 
     a_in = As_in * fy_psi / (0.85 * fc_psi * b_in)
     β1   = _beta1_from_fc_psi(fc_psi)
@@ -191,6 +192,7 @@ function _compute_εt(section::RCBeamSection, fc_psi::Float64, fy_psi::Float64)
     As_in = ustrip(u"inch^2", section.As)
 
     As_in > 0 || return Inf  # No steel → infinite strain (always OK)
+    (b_in > 0 && fc_psi > 0) || throw(ArgumentError("b ($b_in in) and f'c ($fc_psi psi) must be positive"))
 
     a_in = As_in * fy_psi / (0.85 * fc_psi * b_in)
     β1   = _beta1_from_fc_psi(fc_psi)

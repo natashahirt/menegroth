@@ -98,22 +98,22 @@ end
     
     @testset "Pattern Loading Trigger (L/D > 0.75)" begin
         # Office: L/D = 50/100 = 0.50 → NOT required
-        @test SR.requires_pattern_loading(100u"psf", 50u"psf") == false
+        @test SR.requires_pattern_loading(100psf, 50psf) == false
         
         # Residential: L/D = 40/100 = 0.40 → NOT required
-        @test SR.requires_pattern_loading(100u"psf", 40u"psf") == false
+        @test SR.requires_pattern_loading(100psf, 40psf) == false
         
         # Assembly: L/D = 100/100 = 1.00 → REQUIRED
-        @test SR.requires_pattern_loading(100u"psf", 100u"psf") == true
+        @test SR.requires_pattern_loading(100psf, 100psf) == true
         
         # Storage: L/D = 125/100 = 1.25 → REQUIRED
-        @test SR.requires_pattern_loading(100u"psf", 125u"psf") == true
+        @test SR.requires_pattern_loading(100psf, 125psf) == true
         
         # Edge case: L/D = 0.75 exactly → NOT required (> not ≥)
-        @test SR.requires_pattern_loading(100u"psf", 75u"psf") == false
+        @test SR.requires_pattern_loading(100psf, 75psf) == false
         
         # Edge case: L/D = 0.76 → REQUIRED
-        @test SR.requires_pattern_loading(100u"psf", 76u"psf") == true
+        @test SR.requires_pattern_loading(100psf, 76psf) == true
         
         println("✓ Pattern loading trigger logic correct")
     end
@@ -139,20 +139,20 @@ end
     end
     
     @testset "Factored Pattern Loads (ACI 318-11 §9.2.1)" begin
-        qD = 100u"psf"
-        qL = 100u"psf"
+        qD = 100psf
+        qL = 100psf
         
         pattern = [:dead_plus_live, :dead_only, :dead_plus_live]
         loads = SR.factored_pattern_loads(pattern, qD, qL)
         
         # Loaded spans: max(1.2D + 1.6L, 1.4D) = max(280, 140) = 280 psf
         qu_loaded = max(1.2 * qD + 1.6 * qL, 1.4 * qD)
-        @test ustrip(u"psf", loads[1]) ≈ ustrip(u"psf", qu_loaded) rtol=0.01
-        @test ustrip(u"psf", loads[3]) ≈ ustrip(u"psf", qu_loaded) rtol=0.01
+        @test ustrip(psf, loads[1]) ≈ ustrip(psf, qu_loaded) rtol=0.01
+        @test ustrip(psf, loads[3]) ≈ ustrip(psf, qu_loaded) rtol=0.01
         
         # Unloaded spans: 1.2D = 120 psf
         qu_dead = 1.2 * qD
-        @test ustrip(u"psf", loads[2]) ≈ ustrip(u"psf", qu_dead) rtol=0.01
+        @test ustrip(psf, loads[2]) ≈ ustrip(psf, qu_dead) rtol=0.01
         
         println("✓ Factored pattern loads correct")
     end
@@ -164,8 +164,8 @@ end
     
     # High live load to trigger pattern loading (L/D > 0.75)
     # Assembly occupancy: D ≈ 87.5 psf (7" slab), L = 100 psf → L/D ≈ 1.14
-    qD = 87.5u"psf"
-    qL = 100u"psf"
+    qD = 87.5psf
+    qL = 100psf
     qu_full = max(1.2 * qD + 1.6 * qL, 1.4 * qD)
     
     @test SR.requires_pattern_loading(qD, qL) == true
@@ -177,9 +177,9 @@ end
     M_pos_base = abs(baseline[1].M_pos)
     
     println("\n=== EFM Baseline (Full Load) ===")
-    println("M_neg_ext = $(round(ustrip(u"kip*ft", M_neg_ext_base), digits=2)) kip-ft")
-    println("M_neg_int = $(round(ustrip(u"kip*ft", M_neg_int_base), digits=2)) kip-ft")
-    println("M_pos     = $(round(ustrip(u"kip*ft", M_pos_base), digits=2)) kip-ft")
+    println("M_neg_ext = $(round(ustrip(kip*u"ft", M_neg_ext_base), digits=2)) kip-ft")
+    println("M_neg_int = $(round(ustrip(kip*u"ft", M_neg_int_base), digits=2)) kip-ft")
+    println("M_pos     = $(round(ustrip(kip*u"ft", M_pos_base), digits=2)) kip-ft")
     
     # ─── Pattern loading envelope ───
     n_spans = length(spans)
@@ -207,9 +207,9 @@ end
     end
     
     println("\n=== EFM Pattern Envelope ===")
-    println("M_neg_ext = $(round(ustrip(u"kip*ft", env_neg_ext), digits=2)) kip-ft")
-    println("M_neg_int = $(round(ustrip(u"kip*ft", env_neg_int), digits=2)) kip-ft")
-    println("M_pos     = $(round(ustrip(u"kip*ft", env_pos), digits=2)) kip-ft")
+    println("M_neg_ext = $(round(ustrip(kip*u"ft", env_neg_ext), digits=2)) kip-ft")
+    println("M_neg_int = $(round(ustrip(kip*u"ft", env_neg_int), digits=2)) kip-ft")
+    println("M_pos     = $(round(ustrip(kip*u"ft", env_pos), digits=2)) kip-ft")
     
     # ─── Amplification factors ───
     amp_neg_ext = ustrip(env_neg_ext) / ustrip(M_neg_ext_base)
@@ -244,14 +244,14 @@ end
     
     @testset "No Anomalous Values" begin
         # Moments should be positive (we took abs)
-        @test ustrip(u"kip*ft", env_neg_ext) > 0
-        @test ustrip(u"kip*ft", env_neg_int) > 0
-        @test ustrip(u"kip*ft", env_pos) > 0
+        @test ustrip(kip*u"ft", env_neg_ext) > 0
+        @test ustrip(kip*u"ft", env_neg_int) > 0
+        @test ustrip(kip*u"ft", env_pos) > 0
         
         # Moments should be reasonable (< 500 kip-ft for this geometry)
-        @test ustrip(u"kip*ft", env_neg_ext) < 500
-        @test ustrip(u"kip*ft", env_neg_int) < 500
-        @test ustrip(u"kip*ft", env_pos) < 500
+        @test ustrip(kip*u"ft", env_neg_ext) < 500
+        @test ustrip(kip*u"ft", env_neg_int) < 500
+        @test ustrip(kip*u"ft", env_pos) < 500
     end
 end
 
@@ -260,15 +260,15 @@ end
     (; spans, joint_positions, joint_Kec) = setup
     
     # Moderate live load (L/D < 0.75 → pattern NOT required)
-    qD_low = 100u"psf"
-    qL_low = 50u"psf"
+    qD_low = 100psf
+    qL_low = 50psf
     qu_low = max(1.2 * qD_low + 1.6 * qL_low, 1.4 * qD_low)
     
     @test SR.requires_pattern_loading(qD_low, qL_low) == false
     
     # High live load (L/D > 0.75 → pattern REQUIRED)
-    qD_high = 87.5u"psf"
-    qL_high = 100u"psf"
+    qD_high = 87.5psf
+    qL_high = 100psf
     qu_high = max(1.2 * qD_high + 1.6 * qL_high, 1.4 * qD_high)
     
     @test SR.requires_pattern_loading(qD_high, qL_high) == true
@@ -282,8 +282,8 @@ end
     @test abs(result_high[1].M_pos) > abs(result_low[1].M_pos)
     
     println("\n=== Low vs High Live Load ===")
-    println("Low LL (no pattern):  M_neg_int = $(round(ustrip(u"kip*ft", result_low[1].M_neg_right), digits=2)) kip-ft")
-    println("High LL (pattern):    M_neg_int = $(round(ustrip(u"kip*ft", result_high[1].M_neg_right), digits=2)) kip-ft")
+    println("Low LL (no pattern):  M_neg_int = $(round(ustrip(kip*u"ft", result_low[1].M_neg_right), digits=2)) kip-ft")
+    println("High LL (pattern):    M_neg_int = $(round(ustrip(kip*u"ft", result_high[1].M_neg_right), digits=2)) kip-ft")
 end
 
 @testset "Pattern Loading Edge Cases" begin
@@ -292,8 +292,8 @@ end
     
     @testset "Very High L/D Ratio (Storage)" begin
         # Storage: L/D = 250/100 = 2.5
-        qD = 100u"psf"
-        qL = 250u"psf"
+        qD = 100psf
+        qL = 250psf
         qu_full = max(1.2 * qD + 1.6 * qL, 1.4 * qD)
         
         @test SR.requires_pattern_loading(qD, qL) == true
@@ -355,15 +355,15 @@ end
         joint_pos_2 = [:interior, :interior, :interior]
         joint_Kec_2 = SR._compute_joint_Kec(spans_2, joint_pos_2, H, Ecs, Ecc)
         
-        qD = 87.5u"psf"
-        qL = 100u"psf"
+        qD = 87.5psf
+        qL = 100psf
         qu = max(1.2 * qD + 1.6 * qL, 1.4 * qD)
         
         # Should work without error
         baseline = SR.solve_moment_distribution(spans_2, joint_Kec_2, joint_pos_2, qu)
         
         @test length(baseline) == 2
-        @test abs(baseline[1].M_neg_right) > 0u"kip*ft"
+        @test abs(baseline[1].M_neg_right) > 0kip*u"ft"
         
         # Pattern envelope
         env_neg = abs(baseline[1].M_neg_right)
@@ -388,8 +388,8 @@ end
         setup = create_pattern_loading_spans()
         (; spans, joint_positions, joint_Kec) = setup
         
-        qD = 87.5u"psf"
-        qL = 100u"psf"
+        qD = 87.5psf
+        qL = 100psf
         
         for pattern in SR.generate_load_patterns(3)
             qu_ps = SR.factored_pattern_loads(pattern, qD, qL)
@@ -399,16 +399,16 @@ end
             # (negative moments are negative, positive are positive)
             for sm in result
                 # Negative moments at supports should be negative (hogging)
-                @test sm.M_neg_left ≤ 0u"kip*ft" || sm.M_neg_left ≥ 0u"kip*ft"  # Just check it's not NaN
-                @test sm.M_neg_right ≤ 0u"kip*ft" || sm.M_neg_right ≥ 0u"kip*ft"
+                @test sm.M_neg_left ≤ 0kip*u"ft" || sm.M_neg_left ≥ 0kip*u"ft"  # Just check it's not NaN
+                @test sm.M_neg_right ≤ 0kip*u"ft" || sm.M_neg_right ≥ 0kip*u"ft"
                 
                 # Positive moment at midspan should be positive (sagging)
-                @test sm.M_pos ≥ 0u"kip*ft"
+                @test sm.M_pos ≥ 0kip*u"ft"
                 
                 # No NaN or Inf
-                @test isfinite(ustrip(u"kip*ft", sm.M_neg_left))
-                @test isfinite(ustrip(u"kip*ft", sm.M_neg_right))
-                @test isfinite(ustrip(u"kip*ft", sm.M_pos))
+                @test isfinite(ustrip(kip*u"ft", sm.M_neg_left))
+                @test isfinite(ustrip(kip*u"ft", sm.M_neg_right))
+                @test isfinite(ustrip(kip*u"ft", sm.M_pos))
             end
         end
         
@@ -421,8 +421,8 @@ end
     setup = create_pattern_loading_spans()
     (; spans, joint_positions, joint_Kec) = setup
     
-    qD = 87.5u"psf"
-    qL = 100u"psf"
+    qD = 87.5psf
+    qL = 100psf
     qu_full = max(1.2 * qD + 1.6 * qL, 1.4 * qD)
     qu_dead = 1.2 * qD
     
@@ -440,13 +440,13 @@ end
     even = SR.solve_moment_distribution(spans, joint_Kec, joint_positions, qu_even)
     
     println("\n=== Checkerboard Pattern Comparison ===")
-    println("Full load:  Span 1 M_pos = $(round(ustrip(u"kip*ft", full[1].M_pos), digits=2)) kip-ft")
-    println("Odd loaded: Span 1 M_pos = $(round(ustrip(u"kip*ft", odd[1].M_pos), digits=2)) kip-ft")
-    println("Even loaded: Span 1 M_pos = $(round(ustrip(u"kip*ft", even[1].M_pos), digits=2)) kip-ft")
+    println("Full load:  Span 1 M_pos = $(round(ustrip(kip*u"ft", full[1].M_pos), digits=2)) kip-ft")
+    println("Odd loaded: Span 1 M_pos = $(round(ustrip(kip*u"ft", odd[1].M_pos), digits=2)) kip-ft")
+    println("Even loaded: Span 1 M_pos = $(round(ustrip(kip*u"ft", even[1].M_pos), digits=2)) kip-ft")
     
-    println("\nFull load:  Span 2 M_pos = $(round(ustrip(u"kip*ft", full[2].M_pos), digits=2)) kip-ft")
-    println("Odd loaded: Span 2 M_pos = $(round(ustrip(u"kip*ft", odd[2].M_pos), digits=2)) kip-ft")
-    println("Even loaded: Span 2 M_pos = $(round(ustrip(u"kip*ft", even[2].M_pos), digits=2)) kip-ft")
+    println("\nFull load:  Span 2 M_pos = $(round(ustrip(kip*u"ft", full[2].M_pos), digits=2)) kip-ft")
+    println("Odd loaded: Span 2 M_pos = $(round(ustrip(kip*u"ft", odd[2].M_pos), digits=2)) kip-ft")
+    println("Even loaded: Span 2 M_pos = $(round(ustrip(kip*u"ft", even[2].M_pos), digits=2)) kip-ft")
     
     @testset "Checkerboard Redistribution" begin
         # Odd pattern: Span 1 loaded → its positive moment should increase

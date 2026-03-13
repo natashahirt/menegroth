@@ -244,7 +244,11 @@ function _create_cell_tributary_loads!(
     
     face_edges = skel.face_edge_indices[cell.face_idx]
     face_verts = skel.face_vertex_indices[cell.face_idx]
-    
+    if isempty(face_edges)
+        @warn "Cell face has no edges (face_idx=$(cell.face_idx)); skipping tributary loads"
+        return split_dead_live ? (dead_loads, live_loads) : dead_loads
+    end
+
     # Compute pressures
     combo = governing_combo(params)
     if split_dead_live

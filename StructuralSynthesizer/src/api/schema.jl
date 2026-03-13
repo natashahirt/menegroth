@@ -319,6 +319,7 @@ end
 Base.@kwdef struct APIOutput
     status::String = "ok"
     compute_time_s::Float64 = 0.0
+    length_unit::String = "ft"  # "ft" or "m" — units for all length fields (position_ft, displacement_ft, etc.)
     summary::APISummary = APISummary()
     slabs::Vector{APISlabResult} = APISlabResult[]
     columns::Vector{APIColumnResult} = APIColumnResult[]

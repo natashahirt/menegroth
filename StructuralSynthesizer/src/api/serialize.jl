@@ -1,9 +1,8 @@
 # =============================================================================
 # API Serialize — BuildingDesign → JSON output structs
 #
-# NOTE: The `is_imperial` parameter is threaded through all serializers but
-# currently all output is hardcoded to imperial units (ft, in, lb, ksi).
-# The parameter is retained as a hook for future metric output support.
+# All length/volume/mass values are converted to the display system specified
+# in design.params.display_units (from params.unit_system: "imperial" or "metric").
 # =============================================================================
 
 """Round a number to the given decimal digits (default 3). Used for consistent API output."""
@@ -11,6 +10,22 @@ _round_val(x; digits=3) = round(x; digits=digits)
 
 """Return sorted indices of a dict (e.g. design.slabs, design.columns)."""
 _sorted_indices(d::AbstractDict) = sort(collect(keys(d)))
+
+"""Convert a length value to display units as Float64. Accepts Number (assumed m) or Quantity."""
+function _to_display_length(du::DisplayUnits, value)
+    len_unit = du.units[:length]
+    if value isa Number
+        return ustrip(len_unit, value * u"m")
+    end
+    return ustrip(len_unit, uconvert(len_unit, value))
+end
+
+"""Length unit string for API consumers (e.g. Grasshopper): \"ft\" or \"m\"."""
+_length_unit_string(du::DisplayUnits) = du.units[:length] == u"ft" ? "ft" : "m"
+
+"""Convert a Quantity to display unit for a given category (:length, :thickness, :volume, :mass, etc.)."""
+_to_display(du::DisplayUnits, category::Symbol, value) =
+    ustrip(du.units[category], uconvert(du.units[category], value))
 
 """
     design_to_json(design::BuildingDesign; geometry_hash::String="") -> APIOutput
@@ -20,18 +35,18 @@ Units are converted to the display system specified in `design.params.display_un
 """
 function design_to_json(design::BuildingDesign; geometry_hash::String="")
     du = design.params.display_units
-    is_imperial = haskey(du.units, :length) && du.units[:length] == u"ft"
 
-    slabs = _serialize_slabs(design, is_imperial)
-    columns = _serialize_columns(design, is_imperial)
-    beams = _serialize_beams(design, is_imperial)
-    foundations = _serialize_foundations(design, is_imperial)
-    summary = _serialize_summary(design, is_imperial)
-    visualization = _serialize_visualization(design, is_imperial)
+    slabs = _serialize_slabs(design, du)
+    columns = _serialize_columns(design, du)
+    beams = _serialize_beams(design, du)
+    foundations = _serialize_foundations(design, du)
+    summary = _serialize_summary(design, du)
+    visualization = _serialize_visualization(design, du)
 
     return APIOutput(
         status = "ok",
         compute_time_s = _round_val(design.compute_time_s; digits=3),
+        length_unit = _length_unit_string(du),
         summary = summary,
         slabs = slabs,
         columns = columns,
@@ -45,16 +60,16 @@ end
 # ─── Slabs ────────────────────────────────────────────────────────────────────
 
 """Serialize slab design results into `APISlabResult` records."""
-function _serialize_slabs(design::BuildingDesign, is_imperial::Bool)
+function _serialize_slabs(design::BuildingDesign, du::DisplayUnits)
     results = APISlabResult[]
     for idx in _sorted_indices(design.slabs)
         sr = design.slabs[idx]
-        t_in = ustrip(u"inch", sr.thickness)
+        t_display = _to_display(du, :thickness, sr.thickness)
         slab_ok = sr.converged && sr.deflection_ok && sr.punching_ok
         push!(results, APISlabResult(
             id = idx,
             ok = slab_ok,
-            thickness_in = _round_val(t_in; digits=2),
+            thickness_in = _round_val(t_display; digits=2),
             converged = sr.converged,
             failure_reason = sr.failure_reason,
             failing_check = sr.failing_check,
@@ -71,17 +86,17 @@ end
 # ─── Columns ──────────────────────────────────────────────────────────────────
 
 """Serialize column design results into `APIColumnResult` records."""
-function _serialize_columns(design::BuildingDesign, is_imperial::Bool)
+function _serialize_columns(design::BuildingDesign, du::DisplayUnits)
     results = APIColumnResult[]
     for idx in _sorted_indices(design.columns)
         cr = design.columns[idx]
-        c1_in = ustrip(u"inch", cr.c1)
-        c2_in = ustrip(u"inch", cr.c2)
+        c1_display = _to_display(du, :thickness, cr.c1)
+        c2_display = _to_display(du, :thickness, cr.c2)
         push!(results, APIColumnResult(
             id = idx,
             section = cr.section_size,
-            c1_in = _round_val(c1_in; digits=1),
-            c2_in = _round_val(c2_in; digits=1),
+            c1_in = _round_val(c1_display; digits=1),
+            c2_in = _round_val(c2_display; digits=1),
             shape = string(cr.shape),
             axial_ratio = _round_val(cr.axial_ratio),
             interaction_ratio = _round_val(cr.interaction_ratio),
@@ -94,7 +109,7 @@ end
 # ─── Beams ────────────────────────────────────────────────────────────────────
 
 """Serialize beam design results into `APIBeamResult` records."""
-function _serialize_beams(design::BuildingDesign, is_imperial::Bool)
+function _serialize_beams(design::BuildingDesign, du::DisplayUnits)
     results = APIBeamResult[]
     for idx in _sorted_indices(design.beams)
         br = design.beams[idx]
@@ -112,15 +127,15 @@ end
 # ─── Foundations ──────────────────────────────────────────────────────────────
 
 """Serialize foundation design results into `APIFoundationResult` records."""
-function _serialize_foundations(design::BuildingDesign, is_imperial::Bool)
+function _serialize_foundations(design::BuildingDesign, du::DisplayUnits)
     results = APIFoundationResult[]
     for idx in _sorted_indices(design.foundations)
         fr = design.foundations[idx]
         push!(results, APIFoundationResult(
             id = idx,
-            length_ft = _round_val(ustrip(u"ft", fr.length); digits=2),
-            width_ft = _round_val(ustrip(u"ft", fr.width); digits=2),
-            depth_ft = _round_val(ustrip(u"ft", fr.depth); digits=2),
+            length_ft = _round_val(_to_display_length(du, fr.length); digits=2),
+            width_ft = _round_val(_to_display_length(du, fr.width); digits=2),
+            depth_ft = _round_val(_to_display_length(du, fr.depth); digits=2),
             bearing_ratio = _round_val(fr.bearing_ratio),
             ok = fr.ok,
         ))
@@ -131,16 +146,16 @@ end
 # ─── Summary ─────────────────────────────────────────────────────────────────
 
 """Serialize the design summary (material quantities, critical ratio) into `APISummary`."""
-function _serialize_summary(design::BuildingDesign, is_imperial::Bool)
+function _serialize_summary(design::BuildingDesign, du::DisplayUnits)
     s = design.summary
-    # steel_weight and rebar_weight are mass (kg); convert to lb
-    steel_lb = ustrip(u"lb", s.steel_weight)
-    rebar_lb = ustrip(u"lb", s.rebar_weight)
+    vol_display = _to_display(du, :volume, s.concrete_volume)
+    steel_display = _to_display(du, :mass, s.steel_weight)
+    rebar_display = _to_display(du, :mass, s.rebar_weight)
     return APISummary(
         all_pass = s.all_checks_pass,
-        concrete_volume_ft3 = _round_val(ustrip(u"ft^3", s.concrete_volume); digits=1),
-        steel_weight_lb = _round_val(steel_lb; digits=0),
-        rebar_weight_lb = _round_val(rebar_lb; digits=0),
+        concrete_volume_ft3 = _round_val(vol_display; digits=1),
+        steel_weight_lb = _round_val(steel_display; digits=0),
+        rebar_weight_lb = _round_val(rebar_display; digits=0),
         embodied_carbon_kgCO2e = _round_val(s.embodied_carbon; digits=0),
         critical_ratio = _round_val(s.critical_ratio),
         critical_element = s.critical_element,
@@ -150,16 +165,16 @@ end
 # ─── Visualization ────────────────────────────────────────────────────────────
 
 """
-    _serialize_visualization(design::BuildingDesign, is_imperial::Bool) -> Union{APIVisualization, Nothing}
+    _serialize_visualization(design::BuildingDesign, du::DisplayUnits) -> Union{APIVisualization, Nothing}
 
 Extract visualization geometry from the analysis model (post-shatter, post-design).
 Returns nothing if analysis model is not available.
 """
-function _serialize_visualization(design::BuildingDesign, is_imperial::Bool)
+function _serialize_visualization(design::BuildingDesign, du::DisplayUnits)
     struc = design.structure
     model = isnothing(design.asap_model) ? struc.asap_model : design.asap_model
     isnothing(model) && return nothing
-    
+
     # Ensure model is solved (needed for displacements)
     if !model.processed
         Asap.process!(model)
@@ -167,22 +182,22 @@ function _serialize_visualization(design::BuildingDesign, is_imperial::Bool)
     if isempty(model.u)
         Asap.solve!(model)
     end
-    
+
     # Extract nodes with displacements
-    nodes = _serialize_visualization_nodes(model, is_imperial)
-    
+    nodes = _serialize_visualization_nodes(model, du)
+
     # Extract frame elements
-    frame_elements = _serialize_visualization_frame_elements(design, model, is_imperial)
-    
+    frame_elements = _serialize_visualization_frame_elements(design, model, du)
+
     # Extract sized slabs (from struc.slabs - cell boundaries)
-    sized_slabs = _serialize_sized_slabs(design, struc, is_imperial)
-    
+    sized_slabs = _serialize_sized_slabs(design, struc, du)
+
     # Extract deflected slab meshes (from model.shell_elements)
-    deflected_meshes = _serialize_deflected_slab_meshes(design, model, is_imperial)
-    
+    deflected_meshes = _serialize_deflected_slab_meshes(design, model, du)
+
     # Compute suggested scale factor
     max_disp = isempty(nodes) ? 0.0 : maximum(norm(n.displacement_ft) for n in nodes)
-    avg_length = _compute_avg_element_length(model, is_imperial)
+    avg_length = _compute_avg_element_length(model, du)
     suggested_scale = max_disp > 1e-12 ? (avg_length * 0.1) / max_disp : 1.0
     
     return APIVisualization(
@@ -196,12 +211,13 @@ function _serialize_visualization(design::BuildingDesign, is_imperial::Bool)
 end
 
 """Serialize model nodes with positions and displacements for visualization."""
-function _serialize_visualization_nodes(model, is_imperial::Bool)
+function _serialize_visualization_nodes(model, du::DisplayUnits)
     nodes = APIVisualizationNode[]
     for (i, node) in enumerate(model.nodes)
-        pos = ustrip.(u"ft", node.position)
-        # node.displacement is Vector{Quantity} - use first 3 (translations in m)
-        disp = ustrip.(u"ft", node.displacement[1:3])
+        pos = [_to_display_length(du, p) for p in node.position]
+        # node.displacement: first 3 components are translations; to_displacement_vec returns Float64 in m
+        disp_m = Asap.to_displacement_vec(node.displacement)[1:3]
+        disp = _to_display_length.(du, disp_m)
         push!(nodes, APIVisualizationNode(
             node_id = i,
             position_ft = [_round_val(p; digits=6) for p in pos],
@@ -212,7 +228,7 @@ function _serialize_visualization_nodes(model, is_imperial::Bool)
 end
 
 """Serialize frame elements with section geometry, utilization, and interpolated deflected shapes."""
-function _serialize_visualization_frame_elements(design::BuildingDesign, model, is_imperial::Bool)
+function _serialize_visualization_frame_elements(design::BuildingDesign, model, du::DisplayUnits)
     struc = design.structure
     skel = struc.skeleton
     
@@ -300,9 +316,9 @@ function _serialize_visualization_frame_elements(design::BuildingDesign, model, 
         
         # Extract section geometry
         sec_obj = get(element_section_obj, elem_idx, nothing)
-        section_type, depth_ft, width_ft, flange_width_ft, web_thickness_ft, flange_thickness_ft = 
-            _extract_section_geometry(sec_obj, is_imperial)
-        
+        section_type, depth_ft, width_ft, flange_width_ft, web_thickness_ft, flange_thickness_ft =
+            _extract_section_geometry(sec_obj, du)
+
         # Extract section polygon (2D outline in local y-z coordinates)
         section_poly = Vector{Float64}[]
         if !isnothing(sec_obj)
@@ -310,32 +326,32 @@ function _serialize_visualization_frame_elements(design::BuildingDesign, model, 
                 # section_polygon returns Vector{NTuple{2, Float64}} in meters
                 poly_local = section_polygon(sec_obj)
                 for (y, z) in poly_local
-                    # Convert from meters to feet
-                    y_ft = ustrip(u"ft", y * u"m")
-                    z_ft = ustrip(u"ft", z * u"m")
-                    push!(section_poly, [_round_val(y_ft; digits=6), _round_val(z_ft; digits=6)])
+                    y_disp = _to_display_length(du, y)
+                    z_disp = _to_display_length(du, z)
+                    push!(section_poly, [_round_val(y_disp; digits=6), _round_val(z_disp; digits=6)])
                 end
             catch e
                 # If section_polygon fails (e.g., unsupported section type), leave empty
                 @debug "Failed to extract section polygon for element $elem_idx" exception=e
             end
         end
-        
+
         # Extract interpolated deflected curve points (cubic interpolation)
         original_points = Vector{Float64}[]
         displacement_vectors = Vector{Float64}[]
-        
+
         if haskey(edisp_map, elem_idx)
             edisp = edisp_map[elem_idx]
             n_pts = size(edisp.uglobal, 2)
             # basepositions and uglobal are Matrix{Float64} in meters (no Unitful)
-            m_to_ft = 1.0 / 0.3048
-            
+
             for j in 1:n_pts
-                orig_pos = edisp.basepositions[:, j] .* m_to_ft
+                orig_pos_m = edisp.basepositions[:, j]
+                orig_pos = _to_display_length.(du, orig_pos_m)
                 push!(original_points, [_round_val(p; digits=6) for p in orig_pos])
-                
-                disp_vec = edisp.uglobal[:, j] .* m_to_ft
+
+                disp_m = edisp.uglobal[:, j]
+                disp_vec = _to_display_length.(du, disp_m)
                 push!(displacement_vectors, [_round_val(d; digits=6) for d in disp_vec])
             end
         end
@@ -363,72 +379,73 @@ function _serialize_visualization_frame_elements(design::BuildingDesign, model, 
     return elements
 end
 
-"""Extract section type string and key dimensions (ft) from a section object."""
-function _extract_section_geometry(sec_obj, is_imperial::Bool)
+"""Extract section type string and key dimensions in display length units from a section object."""
+function _extract_section_geometry(sec_obj, du::DisplayUnits)
     isnothing(sec_obj) && return ("", 0.0, 0.0, 0.0, 0.0, 0.0)
-    
+
     geom = StructuralSizer.section_geometry(sec_obj)
-    
+
     if geom isa StructuralSizer.IShape
-        d_ft = ustrip(u"ft", StructuralSizer.section_depth(sec_obj))
-        bf_ft = ustrip(u"ft", StructuralSizer.section_flange_width(sec_obj))
-        tw_ft = ustrip(u"ft", StructuralSizer.section_web_thickness(sec_obj))
-        tf_ft = ustrip(u"ft", StructuralSizer.section_flange_thickness(sec_obj))
+        d_ft = _to_display_length(du, StructuralSizer.section_depth(sec_obj))
+        bf_ft = _to_display_length(du, StructuralSizer.section_flange_width(sec_obj))
+        tw_ft = _to_display_length(du, StructuralSizer.section_web_thickness(sec_obj))
+        tf_ft = _to_display_length(du, StructuralSizer.section_flange_thickness(sec_obj))
         return ("W-shape", _round_val(d_ft; digits=4), _round_val(bf_ft; digits=4),
                 _round_val(bf_ft; digits=4), _round_val(tw_ft; digits=4), _round_val(tf_ft; digits=4))
     elseif geom isa StructuralSizer.SolidRect
-        d_ft = ustrip(u"ft", StructuralSizer.section_depth(sec_obj))
-        w_ft = ustrip(u"ft", StructuralSizer.section_width(sec_obj))
+        d_ft = _to_display_length(du, StructuralSizer.section_depth(sec_obj))
+        w_ft = _to_display_length(du, StructuralSizer.section_width(sec_obj))
         return ("rectangular", _round_val(d_ft; digits=4), _round_val(w_ft; digits=4), 0.0, 0.0, 0.0)
     elseif geom isa StructuralSizer.HollowRect
-        d_ft = ustrip(u"ft", StructuralSizer.section_depth(sec_obj))
-        w_ft = ustrip(u"ft", StructuralSizer.section_width(sec_obj))
+        d_ft = _to_display_length(du, StructuralSizer.section_depth(sec_obj))
+        w_ft = _to_display_length(du, StructuralSizer.section_width(sec_obj))
         return ("HSS_rect", _round_val(d_ft; digits=4), _round_val(w_ft; digits=4), 0.0, 0.0, 0.0)
     elseif geom isa StructuralSizer.HollowRound
-        d_ft = ustrip(u"ft", StructuralSizer.section_width(sec_obj))  # diameter
+        d_ft = _to_display_length(du, StructuralSizer.section_width(sec_obj))  # diameter
         return ("HSS_round", _round_val(d_ft; digits=4), _round_val(d_ft; digits=4), 0.0, 0.0, 0.0)
     else
-        d_ft = ustrip(u"ft", StructuralSizer.section_depth(sec_obj))
-        w_ft = ustrip(u"ft", StructuralSizer.section_width(sec_obj))
+        d_ft = _to_display_length(du, StructuralSizer.section_depth(sec_obj))
+        w_ft = _to_display_length(du, StructuralSizer.section_width(sec_obj))
         return ("other", _round_val(d_ft; digits=4), _round_val(w_ft; digits=4), 0.0, 0.0, 0.0)
     end
 end
 
 """Serialize sized slab boundary polygons and utilization for 3D visualization."""
-function _serialize_sized_slabs(design::BuildingDesign, struc::BuildingStructure, is_imperial::Bool)
+function _serialize_sized_slabs(design::BuildingDesign, struc::BuildingStructure, du::DisplayUnits)
     sized_slabs = APISizedSlab[]
     skel = struc.skeleton
-    
+
     for (slab_idx, slab) in enumerate(struc.slabs)
         isnothing(slab.result) && continue
         slab_result = get(design.slabs, slab_idx, nothing)
         isnothing(slab_result) && continue
-        
+
         # Collect boundary vertices from all cells
         all_verts_2d = Set{NTuple{2, Float64}}()
         z_coord = 0.0
-        
+
         for cell_idx in slab.cell_indices
             cell = struc.cells[cell_idx]
             v_indices = skel.face_vertex_indices[cell.face_idx]
-            
+
             for vi in v_indices
                 pt = skel.vertices[vi]
                 c = Meshes.coords(pt)
-                x, y = ustrip(u"ft", c.x), ustrip(u"ft", c.y)
-                z_coord = ustrip(u"ft", c.z)
+                x = _to_display_length(du, c.x)
+                y = _to_display_length(du, c.y)
+                z_coord = _to_display_length(du, c.z)
                 push!(all_verts_2d, (x, y))
             end
         end
-        
+
         # Convert to boundary polygon (convex hull for multi-cell slabs)
         verts_2d = collect(all_verts_2d)
         hull_pts = _convex_hull_2d(verts_2d)
-        
+
         # Convert to 3D vertices at z_top
         boundary_vertices = [[p[1], p[2], z_coord] for p in hull_pts]
-        
-        thickness_ft = ustrip(u"ft", slab_result.thickness)
+
+        thickness_ft = _to_display_length(du, slab_result.thickness)
         z_top_ft = z_coord
         ratio = slab_result.deflection_ratio
         ok = slab_result.deflection_ok
@@ -447,18 +464,18 @@ function _serialize_sized_slabs(design::BuildingDesign, struc::BuildingStructure
 end
 
 """Serialize shell-element meshes with vertex displacements for deflected slab visualization."""
-function _serialize_deflected_slab_meshes(design::BuildingDesign, model, is_imperial::Bool)
+function _serialize_deflected_slab_meshes(design::BuildingDesign, model, du::DisplayUnits)
     deflected_meshes = APIDeflectedSlabMesh[]
-    
+
     !Asap.has_shell_elements(model) && return deflected_meshes
-    
+
     # Group shells by slab ID
     slab_shells = Dict{Symbol, Vector{Asap.ShellElement}}()
     for shell in model.shell_elements
         shells = get!(slab_shells, shell.id, Asap.ShellElement[])
         push!(shells, shell)
     end
-    
+
     # Extract mesh data per slab
     for (slab_id_sym, shells) in slab_shells
         # Extract slab index from symbol (e.g., :slab_1 -> 1)
@@ -467,17 +484,17 @@ function _serialize_deflected_slab_meshes(design::BuildingDesign, model, is_impe
         catch
             continue
         end
-        
+
         slab_result = get(design.slabs, slab_idx, nothing)
         isnothing(slab_result) && continue
-        
+
         # Collect all vertices and faces from shell elements
         # Each ShellTri3 is a triangle with 3 nodes
         vertices = Vector{Float64}[]
         vertex_displacements = Vector{Float64}[]
         faces = Vector{Int}[]
         vertex_map = Dict{Asap.Node, Int}()
-        
+
         for shell in shells
             # ShellTri3 has 3 nodes - extract triangle connectivity
             shell_nodes = shell.nodes  # Tuple of 3 nodes
@@ -486,13 +503,14 @@ function _serialize_deflected_slab_meshes(design::BuildingDesign, model, is_impe
                 tri_indices = Int[]
                 for node in shell_nodes
                     if !haskey(vertex_map, node)
-                        pos = ustrip.(u"ft", node.position)
+                        pos = [_to_display_length(du, p) for p in node.position]
                         push!(vertices, [_round_val(p; digits=6) for p in pos])
-                        
-                        # Extract displacement vector from node
-                        disp_vec = ustrip.(u"ft", Asap.to_displacement_vec(node.displacement)[1:3])
+
+                        # to_displacement_vec returns Float64 in m; do not ustrip to ft (DimensionError)
+                        disp_m = Asap.to_displacement_vec(node.displacement)[1:3]
+                        disp_vec = _to_display_length.(du, disp_m)
                         push!(vertex_displacements, [_round_val(d; digits=6) for d in disp_vec])
-                        
+
                         vertex_map[node] = length(vertices)
                     end
                     push!(tri_indices, vertex_map[node])
@@ -501,8 +519,8 @@ function _serialize_deflected_slab_meshes(design::BuildingDesign, model, is_impe
                 push!(faces, tri_indices)
             end
         end
-        
-        thickness_ft = ustrip(u"ft", slab_result.thickness)
+
+        thickness_ft = _to_display_length(du, slab_result.thickness)
         ratio = slab_result.deflection_ratio
         ok = slab_result.deflection_ok
         
@@ -520,10 +538,10 @@ function _serialize_deflected_slab_meshes(design::BuildingDesign, model, is_impe
     return deflected_meshes
 end
 
-"""Compute average frame element length in feet for displacement scale calibration."""
-function _compute_avg_element_length(model, is_imperial::Bool)
+"""Compute average frame element length in display units for displacement scale calibration."""
+function _compute_avg_element_length(model, du::DisplayUnits)
     isempty(model.elements) && return 1.0
-    total_length = sum(ustrip(u"ft", elem.length) for elem in model.elements)
+    total_length = sum(_to_display_length(du, elem.length) for elem in model.elements)
     return total_length / length(model.elements)
 end
 

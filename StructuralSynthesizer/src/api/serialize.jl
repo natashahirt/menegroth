@@ -254,7 +254,7 @@ function _serialize_visualization_nodes(model, du::DisplayUnits)
         pos = _position_to_display_lengths(du, node.position; node_id=i)
         # Displacement: first 3 components are translations (Float64 in m from to_displacement_vec)
         disp_m = Asap.to_displacement_vec(node.displacement)[1:3]
-        disp = _to_display_length.(du, disp_m)
+        disp = _to_display_length.(Ref(du), disp_m)
         push!(nodes, APIVisualizationNode(
             node_id = i,
             position_ft = [_round_val(p; digits=6) for p in pos],
@@ -384,11 +384,11 @@ function _serialize_visualization_frame_elements(design::BuildingDesign, model, 
 
             for j in 1:n_pts
                 orig_pos_m = edisp.basepositions[:, j]
-                orig_pos = _to_display_length.(du, orig_pos_m)
+                orig_pos = _to_display_length.(Ref(du), orig_pos_m)
                 push!(original_points, [_round_val(p; digits=6) for p in orig_pos])
 
                 disp_m = edisp.uglobal[:, j]
-                disp_vec = _to_display_length.(du, disp_m)
+                disp_vec = _to_display_length.(Ref(du), disp_m)
                 push!(displacement_vectors, [_round_val(d; digits=6) for d in disp_vec])
             end
         end
@@ -545,7 +545,7 @@ function _serialize_deflected_slab_meshes(design::BuildingDesign, model, du::Dis
 
                         # to_displacement_vec returns Float64 in m; do not ustrip to ft (DimensionError)
                         disp_m = Asap.to_displacement_vec(node.displacement)[1:3]
-                        disp_vec = _to_display_length.(du, disp_m)
+                        disp_vec = _to_display_length.(Ref(du), disp_m)
                         push!(vertex_displacements, [_round_val(d; digits=6) for d in disp_vec])
 
                         vertex_map[node] = length(vertices)

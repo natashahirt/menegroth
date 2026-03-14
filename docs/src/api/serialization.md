@@ -3,8 +3,8 @@
 > ```julia
 > skeleton = json_to_skeleton(api_input)
 > params   = json_to_params(api_input.params)
-> output   = design_to_json(design; geometry_hash = hash)
 > hash     = compute_geometry_hash(api_input)
+> output   = design_to_json(design; geometry_hash = hash)
 > ```
 
 ## Overview
@@ -42,11 +42,11 @@ compute_geometry_hash
 | JSON Field | JSON String | Julia Result |
 |:-----------|:------------|:-------------|
 | `floor_type` | `"flat_plate"` | `FlatPlateOptions(...)` |
-| `floor_type` | `"flat_slab"` | `FlatSlabOptions(...)` |
+| `floor_type` | `"flat_slab"` | `FlatSlabOptions(base=FlatPlateOptions(...))` |
 | `floor_type` | `"one_way"` | `OneWayOptions(...)` |
 | `floor_type` | `"vault"` | `VaultOptions(...)` |
-| `column_type` | `"rc_rect"` | `ConcreteColumnOptions(material=concrete, rebar_material=rebar, section_shape=:rect)` |
-| `column_type` | `"rc_circular"` | `ConcreteColumnOptions(material=concrete, rebar_material=rebar, section_shape=:circular)` |
+| `column_type` | `"rc_rect"` | `ConcreteColumnOptions(material=column_concrete, rebar_material=rebar, section_shape=:rect)` |
+| `column_type` | `"rc_circular"` | `ConcreteColumnOptions(material=column_concrete, rebar_material=rebar, section_shape=:circular)` |
 | `column_type` | `"steel_w"` | `SteelColumnOptions(material=steel, section_type=:w)` |
 | `column_type` | `"steel_hss"` | `SteelColumnOptions(material=steel, section_type=:hss)` |
 | `column_type` | `"steel_pipe"` | `SteelColumnOptions(material=steel, section_type=:pipe)` |
@@ -56,6 +56,7 @@ compute_geometry_hash
 | `beam_type` | `"rc_tbeam"` | `ConcreteBeamOptions(material=concrete, rebar_material=rebar, include_flange=true)` |
 | `materials.concrete` | `"NWC_4000"` | `NWC_4000` |
 | `materials.concrete` | `"NWC_5000"` | `NWC_5000` |
+| `materials.column_concrete` | `"NWC_6000"` | `NWC_6000` |
 | `materials.steel` | `"A992"` | `A992_Steel` |
 | `materials.rebar` | `"Rebar_60"` | `Rebar_60` |
 | `optimize_for` | `"weight"` | `:weight` |
@@ -66,18 +67,19 @@ compute_geometry_hash
 | `floor_options.method` | `"EFM"` | `EFM()` |
 | `floor_options.method` | `"EFM_HARDY_CROSS"` | `EFM(solver=:hardy_cross)` |
 | `floor_options.method` | `"FEA"` | `FEA()` |
-| `foundation_soil` | `"medium_sand"` | `FoundationParameters(soil=medium_sand)` when `size_foundations=true` |
+| `foundation_soil` | `"medium_sand"` | `FoundationParameters(soil=medium_sand, concrete=...)` when `size_foundations=true` |
+| `foundation_concrete` | `"NWC_3000"` | `FoundationParameters(concrete=NWC_3000, ...)` when `size_foundations=true` |
 
 Notes:
 - Unknown `floor_type` strings fall back to `FlatPlateOptions(...)` with the resolved analysis settings.
-- `unit_system` controls `DesignParameters.display_units` (`DisplayUnits(:imperial)` or `DisplayUnits(:metric)`), but the current JSON output is still imperial.
+- `unit_system` controls `DesignParameters.display_units` and therefore the units used in serialized output. Length-valued arrays are emitted in either feet or meters (see `APIOutput.length_unit`), while thickness-style fields (e.g. `thickness_in`, `c1_in`) follow the display thickness unit (inches for imperial, millimeters for metric).
 
 ### design_to_json
 
 `design_to_json(design::BuildingDesign; geometry_hash) → APIOutput` converts the design to JSON-safe output:
 
 1. **Summary** — extracts material quantities, embodied carbon, pass/fail status
-2. **Slabs** — converts each `SlabDesignResult` to `APISlabResult` with imperial dimensions
+2. **Slabs** — converts each `SlabDesignResult` to `APISlabResult` using the design's display units
 3. **Columns** — converts each `ColumnDesignResult` to `APIColumnResult`
 4. **Beams** — converts each `BeamDesignResult` to `APIBeamResult`
 5. **Foundations** — converts each `FoundationDesignResult` to `APIFoundationResult`
@@ -94,7 +96,7 @@ Notes:
 - `faces` (if provided)
 - `units`
 
-The hash is used to detect when two requests share the same geometry, enabling skeleton reuse and skipping the `json_to_skeleton` and `find_faces!` steps.
+The hash intentionally excludes `params`, so parameter-only changes produce the same hash. It is used to detect when two requests share the same geometry, enabling skeleton reuse and skipping the `json_to_skeleton` and `find_faces!` steps.
 
 ## Limitations & Future Work
 

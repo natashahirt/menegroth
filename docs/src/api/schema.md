@@ -9,7 +9,9 @@
 
 The API schema defines the JSON input and output structures for the HTTP API. Input types are mutable structs (for JSON deserialization via StructTypes.jl), and output types are immutable structs (for serialization).
 
-## Input Types
+## Key Types
+
+### Input Types
 
 ### APIInput
 
@@ -64,6 +66,7 @@ A dictionary mapping face group names to face-coordinate polylines:
 | `optimize_for` | `String` | `"weight"` | `"weight"`, `"carbon"`, or `"cost"` |
 | `size_foundations` | `Bool` | `false` | Whether to size foundations |
 | `foundation_soil` | `String` | `"medium_sand"` | Soil type name (used when `size_foundations=true`): `"loose_sand"`, `"medium_sand"`, `"dense_sand"`, `"soft_clay"`, `"stiff_clay"`, `"hard_clay"` |
+| `foundation_concrete` | `String` | `"NWC_3000"` | Foundation concrete grade (used when `size_foundations=true`) |
 
 See [`APIParams`](@ref) in [API Overview](overview.md).
 
@@ -95,12 +98,13 @@ See [`APIParams`](@ref) in [API Overview](overview.md).
 | Field | Type | Default | Description |
 |:------|:-----|:--------|:------------|
 | `concrete` | `String` | `"NWC_4000"` | Concrete name (e.g., `"NWC_4000"`, `"NWC_5000"`) |
+| `column_concrete` | `String` | `"NWC_6000"` | Column concrete name (used for RC column sizing) |
 | `rebar` | `String` | `"Rebar_60"` | Rebar grade (e.g., `"Rebar_60"`, `"Rebar_75"`) |
 | `steel` | `String` | `"A992"` | Structural steel grade |
 
-`APIMaterials` selects the material grades for concrete, rebar, and structural steel used throughout the design.
+`APIMaterials` selects the material grades used throughout the design. Note that RC columns default to a higher-strength concrete (`column_concrete`, default `"NWC_6000"`) unless overridden.
 
-## Output Types
+### Output Types
 
 ### APIOutput
 
@@ -110,6 +114,7 @@ The top-level response from `POST /design`.
 |:------|:-----|:------------|
 | `status` | `String` | `"ok"` or `"error"` |
 | `compute_time_s` | `Float64` | Wall-clock design time in seconds |
+| `length_unit` | `String` | Length unit for all length-valued output arrays: `"ft"` (imperial) or `"m"` (metric) |
 | `summary` | `APISummary` | Design summary |
 | `slabs` | `Vector{APISlabResult}` | Per-slab results |
 | `columns` | `Vector{APIColumnResult}` | Per-column results |
@@ -200,6 +205,7 @@ See [`APIOutput`](@ref) in [API Overview](overview.md).
 | `frame_elements` | `Vector{APIVisualizationFrameElement}` | Frame element data with section geometry |
 | `sized_slabs` | `Vector{APISizedSlab}` | Slab boundary and thickness |
 | `deflected_slab_meshes` | `Vector{APIDeflectedSlabMesh}` | Deflected slab surface meshes |
+| `foundations` | `Vector{APIVisualizationFoundation}` | Foundation blocks for 3D visualization |
 | `suggested_scale_factor` | `Float64` | Suggested displacement magnification |
 | `max_displacement_ft` | `Float64` | Maximum displacement in the model |
 
@@ -224,8 +230,8 @@ See [`APIError`](@ref) in [API Overview](overview.md).
 
 ## Limitations & Future Work
 
-- All dimensions in the output are imperial (ft, in, lb); metric output is planned.
-- The current server implementation always builds an analysis model and returns `visualization` data; making this optional (for performance) would require an API option.
+- Output units follow `params.unit_system`. Length-valued arrays are always expressed in `APIOutput.length_unit` (`"ft"` or `"m"`), even when individual field names include `_ft` suffixes for legacy reasons.
+- The server currently builds an analysis model during `POST /design` (to support visualization output). Making visualization optional (for performance) would require adding an API option and a corresponding server-side branch.
 - The schema is versioned implicitly; explicit API versioning (`/v1/design`) is planned.
 
 ## References

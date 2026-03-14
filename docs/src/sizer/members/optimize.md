@@ -38,6 +38,7 @@ SteelColumnOptions
 | `custom_catalog` | Optional custom section vector (overrides `catalog`) |
 | `max_depth` | Maximum section depth (Length) |
 | `n_max_sections` | Max unique sections across groups (0 = no limit) |
+| `sizing_strategy` | Sizing strategy selector (currently `:discrete` for steel options) |
 | `objective` | `MinWeight()`, `MinVolume()`, `MinCost()`, `MinCarbon()` |
 | `solver` | MIP optimizer selector: `:auto`, `:highs`, `:gurobi` |
 

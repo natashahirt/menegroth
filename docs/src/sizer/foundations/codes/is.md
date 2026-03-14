@@ -43,12 +43,14 @@ result (see [Post-Design Check](#post-design-check) below for details).
 
 The `design_footing(::SpreadFooting, demand, soil, concrete, rebar; ...)` workflow:
 
-1. **Bearing sizing**: ``B = \sqrt{P_s / (q_a \cdot \text{SF})}`` where SF is the
-   safety factor (in the current implementation: ``B = \sqrt{P_u \cdot \text{SF} / q_a}``)
-2. **Punching shear**: Nominal shear stress capacity ``\tau_c \approx 0.25\sqrt{f'_c}``
-   at the critical section ``d/2`` from the column face
-3. **One-way (beam) shear**: ``\tau_{\text{beam}} \approx 0.17\sqrt{f'_c}`` at ``d``
-   from the column face
+1. **Bearing sizing** (IS 456 §34.1 / §34.4): size from factored load with a safety factor:
+
+```math
+A_{\mathrm{req}} = \frac{P_u \, \mathrm{SF}}{q_a}, \qquad B = \sqrt{A_{\mathrm{req}}}
+```
+
+2. **Punching shear**: nominal shear stress capacity \(\tau_c \approx 0.25\sqrt{f'_c}\) at the critical section \(d/2\) from the column face.
+3. **One-way (beam) shear**: \(\tau_{\text{beam}} \approx 0.17\sqrt{f'_c}\) at a section located \(d\) from the column face.
 4. **Flexure**: Cantilever moment at column face; standard reinforcement calculation
 5. **Minimum steel**: Per IS 456 provisions
 
@@ -72,11 +74,11 @@ The IS footing design accepts keyword arguments rather than an options struct:
 
 | Parameter | Default | Description |
 |:----------|:--------|:------------|
-| `pier_width` | required | Column/pier width |
-| `rebar_dia` | 12 mm | Rebar diameter |
+| `pier_width` | 0.3 m | Column/pier width |
+| `rebar_dia` | 16 mm | Rebar diameter |
 | `cover` | 75 mm | Clear cover |
-| `SF` | 1.0 | Bearing safety factor |
-| `ϕ_flexure` | 0.87 | Flexure strength reduction |
+| `SF` | 1.5 | Bearing safety factor |
+| `ϕ_flexure` | 0.9 | Flexure strength reduction |
 | `ϕ_shear` | 0.75 | Shear strength reduction |
 | `min_depth` | 300 mm | Minimum footing depth |
 

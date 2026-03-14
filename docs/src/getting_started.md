@@ -147,7 +147,7 @@ The optimization framework checks for a Gurobi license at startup. If Gurobi is 
 
 ### Display Units
 
-`DesignParameters` accepts a `display_units` field (use `imperial` or `metric`) that controls how results are formatted in reports and local outputs. The current HTTP API JSON output is hardcoded to imperial units (ft, in, lb) even when `display_units = metric`.
+`DesignParameters` accepts a `display_units` field (use `imperial` or `metric`) that controls how values are formatted in reports and local outputs. The HTTP API derives its output units from the request (`APIParams.unit_system`), which is mapped to `DesignParameters.display_units` during `json_to_params`.
 
 ## Limitations & Future Work
 

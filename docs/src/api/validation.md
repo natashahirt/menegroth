@@ -38,15 +38,17 @@ validate_input
 | Fire rating | `fire_rating` is one of 0, 1, 1.5, 2, 3, 4 | `"Invalid fire_rating r. Must be one of: 0, 1, 1.5, 2, 3, 4."` |
 | Optimization target | `optimize_for` is `"weight"`, `"carbon"`, or `"cost"` | `"Invalid optimize_for \"...\". Must be: weight, carbon, or cost."` |
 | Material names | `params.materials.concrete`, `.rebar`, `.steel` are present in the resolver maps (`NWC_3000/4000/5000/6000`, `Rebar_40/60/75/80`, `A992`) | `"Unknown concrete \"...\". Options: ..."` / `"Unknown rebar \"...\". Options: ..."` / `"Unknown steel \"...\". Options: ..."` |
+| Column concrete | `params.materials.column_concrete` is present in the concrete resolver map (`NWC_3000/4000/5000/6000`) | `"Unknown column_concrete \"...\". Options: ..."` |
 | Foundation soil | If `params.size_foundations=true`, `params.foundation_soil` is present in the resolver map (`loose_sand`, `medium_sand`, `dense_sand`, `soft_clay`, `stiff_clay`, `hard_clay`) | `"Unknown foundation_soil \"...\". Options: ..."` |
+| Foundation concrete | If `params.size_foundations=true`, `params.foundation_concrete` is present in the concrete resolver map (`NWC_3000/4000/5000/6000`) | `"Unknown foundation_concrete \"...\". Options: ..."` |
 | Unit system | `params.unit_system` is `"imperial"` or `"metric"` (case-insensitive) | `"Invalid unit_system \"...\". Must be \"imperial\" or \"metric\"."` |
 
 ### Validation Response
 
 The validation result is used in two places:
 
-1. **`POST /validate`** — returns the validation result directly as JSON
-2. **`POST /design`** — validates first; if invalid, returns a 400 JSON response with `{"status":"error","error":"ValidationError","errors":[...]}` without running the pipeline
+1. **`POST /validate`** — returns `{"status":"ok","message":"Input is valid."}` on success, or a 400 validation error payload on failure.
+2. **`POST /design`** — validates first; if invalid, returns a 400 JSON response with `{"status":"error","error":"ValidationError","message":"...","errors":[...]}` without running the pipeline.
 
 ### Early Return
 

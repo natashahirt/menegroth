@@ -4,11 +4,14 @@
 > using StructuralSizer
 > using Unitful
 > soil = medium_sand
-> demand = FoundationDemand(1; Pu=500.0kip, Ps=400.0kip, Mux=100.0kip * u"ft")
-> opts   = SpreadFootingOptions(pier_c1=24u"inch", pier_c2=24u"inch", pier_shape=:rectangular)
+> demand = FoundationDemand(1;
+>     Pu=500.0kip, Ps=400.0kip, Mux=100.0kip * u"ft",
+>     c1=24u"inch", c2=24u"inch", shape=:rectangular,
+> )
+> opts   = SpreadFootingOptions(material=RC_4000_60)
 > result = design_footing(SpreadFooting(), demand, soil; opts=opts)
-> footprint_area(result)  # ft²
-> utilization(result)     # bearing utilization ratio
+> uconvert(u"ft^2", footprint_area(result))
+> utilization(result)
 > ```
 
 ## Overview
@@ -124,7 +127,7 @@ The following functions operate on any `AbstractFoundationResult`:
 
 - `footprint_area(result)` — plan area of the foundation.
 - `footing_length(result)` / `footing_width(result)` — plan dimensions.
-- `utilization(result)` — governing utilization ratio (max of bearing, punching, shear, flexure).
+- `utilization(result)` — governing utilization ratio reported by the design routine (for ACI spread footings this is currently the max of punching utilization and service bearing utilization).
 - Concrete and rebar volumes are available from the result fields.
 
 ### Design Entry Point
@@ -219,9 +222,9 @@ Key `SpreadFootingOptions` fields:
 | `material` | `RC_4000_60` | Concrete + rebar material bundle |
 | `cover` | 3 in. | Clear cover to reinforcement (cast against soil) |
 | `bar_size` | 8 | Rebar bar size (#8, etc.) |
-| `pier_shape` | `:rectangular` | Pier/column shape (`:rectangular` or `:circular`) |
-| `pier_c1` | 18 in. | Pier dimension parallel to footing length (or diameter) |
-| `pier_c2` | 18 in. | Pier dimension parallel to footing width (ignored for `:circular`) |
+| `pier_shape` | `:rectangular` | Legacy field (ignored for ACI spread footings); use `FoundationDemand.shape` |
+| `pier_c1` | 18 in. | Legacy field (ignored for ACI spread footings); use `FoundationDemand.c1` |
+| `pier_c2` | 18 in. | Legacy field (ignored for ACI spread footings); use `FoundationDemand.c2` |
 | `min_depth` | 12 in. | Minimum footing thickness before iteration |
 | `size_increment` | 3 in. | Round plan dimensions up to this increment |
 | `ϕ_flexure` | 0.90 | Flexure strength reduction factor (ACI 318-11 §9.3.2) |

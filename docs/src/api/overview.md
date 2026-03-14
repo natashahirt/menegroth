@@ -11,7 +11,23 @@ The menegroth HTTP API exposes the full design pipeline as a JSON REST service. 
 
 The API uses [Oxygen.jl](https://github.com/ndortega/Oxygen.jl) for HTTP routing and supports both a **bootstrap mode** (fast cold start, lazy loading) and a **full service mode** (everything loaded upfront).
 
-## Endpoints
+## Key Types
+
+```@docs
+APIInput
+APIOutput
+APIParams
+APIError
+StructuralSynthesizer.APISummary
+```
+
+## Functions
+
+```@docs
+register_routes!
+```
+
+### Endpoints
 
 ### GET /health
 
@@ -39,6 +55,18 @@ curl http://localhost:8080/status
 ```json
 {"status":"idle"}
 ```
+
+### GET /env-check
+
+Returns whether expected Gurobi Web License Service environment variables are set (presence only; values are never returned). This is useful for debugging AWS/App Runner secret injection.
+
+```bash
+curl http://localhost:8080/env-check
+```
+
+### GET /debug (bootstrap only)
+
+Bootstrap mode exposes a lightweight debug endpoint that reports the bootstrap loader status and any background-load error message.
 
 ### GET /schema
 
@@ -106,7 +134,7 @@ Fetch the last completed design result after a `POST /design` submission. Client
 julia --project=StructuralSynthesizer scripts/api/sizer_bootstrap.jl
 ```
 
-Bootstrap mode starts a lightweight HTTP server immediately with `/health`, `/status`, and `/debug` endpoints. It then loads `StructuralSynthesizer` in a background task. Once loaded, it registers the full route set (`/design`, `/validate`, `/schema`). This provides fast cold starts for container deployments while the heavy package precompilation happens in the background.
+Bootstrap mode starts a lightweight HTTP server immediately with `/health`, `/status`, and `/debug` endpoints. It then loads `StructuralSynthesizer` in a background task. Once loaded, it registers the full route set (`/design`, `/validate`, `/schema`, `/result`, `/env-check`). This provides fast cold starts for container deployments while the heavy package precompilation happens in the background.
 
 In bootstrap mode (before the full API is loaded), `GET /status` returns:
 
@@ -121,23 +149,6 @@ julia --project=StructuralSynthesizer scripts/api/sizer_service.jl
 ```
 
 Full service mode loads everything upfront with `using StructuralSynthesizer`, registers all routes, and starts serving. This is simpler but has a longer startup time.
-
-## Key Types
-
-```@docs
-APIInput
-APIOutput
-APIParams
-APIError
-StructuralSynthesizer.APISummary
-```
-
-## Functions
-
-```@docs
-register_routes!
-```
-
 ## Implementation Details
 
 ### Request Queuing
@@ -168,7 +179,7 @@ This significantly speeds up parameter studies where only loads, materials, or f
 | `PORT` / `SIZER_PORT` | HTTP listen port | `8080` |
 | `SIZER_HOST` | Bind address | `0.0.0.0` |
 | `SS_ENABLE_VISUALIZATION` | Toggle heavy visualization dependencies (e.g., GLMakie) in interactive tooling; does not currently control JSON `visualization` output | `false` |
-| `SS_ENABLE_HEAVY_PRECOMPILE_WORKLOAD` | Run precompilation workload on startup | `false` (API scripts set this) |
+| `SS_ENABLE_HEAVY_PRECOMPILE_WORKLOAD` | Run the heavy precompile workload when `StructuralSynthesizer` loads | `false` for the API scripts (they set this unless already provided) |
 
 ## Limitations & Future Work
 

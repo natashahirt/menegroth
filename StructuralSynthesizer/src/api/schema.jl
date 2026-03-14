@@ -299,8 +299,20 @@ Base.@kwdef struct APIDeflectedSlabMesh
     slab_id::Int = 0
     vertices::Vector{Vector{Float64}} = []  # [[x,y,z], ...] original positions in feet
     vertex_displacements::Vector{Vector{Float64}} = []  # [[dx,dy,dz], ...] displacements at each vertex in feet
+    vertex_displacements_local::Vector{Vector{Float64}} = []  # [[dx,dy,dz], ...] local-bending displacements in feet
     faces::Vector{Vector{Int}} = []         # [[i1,i2,i3], ...] triangle indices (1-based)
     thickness_ft::Float64 = 0.0
+    utilization_ratio::Float64 = 0.0
+    ok::Bool = true
+end
+
+"""Foundation geometry for visualization (axis-aligned block centered at support group centroid)."""
+Base.@kwdef struct APIVisualizationFoundation
+    foundation_id::Int = 0
+    center_ft::Vector{Float64} = [0.0, 0.0, 0.0]  # [x,y,z_top] in display length units
+    length_ft::Float64 = 0.0
+    width_ft::Float64 = 0.0
+    depth_ft::Float64 = 0.0
     utilization_ratio::Float64 = 0.0
     ok::Bool = true
 end
@@ -311,6 +323,7 @@ Base.@kwdef struct APIVisualization
     frame_elements::Vector{APIVisualizationFrameElement} = []
     sized_slabs::Vector{APISizedSlab} = []
     deflected_slab_meshes::Vector{APIDeflectedSlabMesh} = []
+    foundations::Vector{APIVisualizationFoundation} = []
     suggested_scale_factor::Float64 = 1.0
     max_displacement_ft::Float64 = 0.0
 end
@@ -340,4 +353,5 @@ StructTypes.StructType(::Type{APIVisualizationNode}) = StructTypes.Struct()
 StructTypes.StructType(::Type{APIVisualizationFrameElement}) = StructTypes.Struct()
 StructTypes.StructType(::Type{APISizedSlab}) = StructTypes.Struct()
 StructTypes.StructType(::Type{APIDeflectedSlabMesh}) = StructTypes.Struct()
+StructTypes.StructType(::Type{APIVisualizationFoundation}) = StructTypes.Struct()
 StructTypes.StructType(::Type{APIVisualization}) = StructTypes.Struct()

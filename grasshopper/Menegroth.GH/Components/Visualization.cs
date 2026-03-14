@@ -20,6 +20,7 @@ namespace Menegroth.GH.Components
         private const int MODE_SIZED = 0;
         private const int MODE_DEFLECTED_GLOBAL = 1;
         private const int MODE_DEFLECTED_LOCAL = 2;
+        private const int MODE_ORIGINAL = 3;
 
         private const int COLOR_NONE = 0;
         private const int COLOR_UTILIZATION = 1;
@@ -44,6 +45,7 @@ namespace Menegroth.GH.Components
             modeParam.AddNamedValue("Sized", MODE_SIZED);
             modeParam.AddNamedValue("Deflected (Global)", MODE_DEFLECTED_GLOBAL);
             modeParam.AddNamedValue("Deflected (Local)", MODE_DEFLECTED_LOCAL);
+            modeParam.AddNamedValue("Original", MODE_ORIGINAL);
             pManager.AddParameter(modeParam, "Mode", "M",
                 "Visualization mode: Sized shows as-designed geometry, " +
                 "Deflected Global/Local shows displaced shapes",
@@ -75,7 +77,7 @@ namespace Menegroth.GH.Components
             pManager.AddGenericParameter("Frame Geometry", "FG",
                 "Frame element 3D section geometry (Brep)", GH_ParamAccess.list);
             pManager.AddGenericParameter("Slab Geometry", "SG",
-                "Slab geometry (Brep for Sized, Mesh for Deflected)", GH_ParamAccess.list);
+                "Slab + foundation geometry (Brep for Sized, Mesh for Deflected)", GH_ParamAccess.list);
             pManager.AddCurveParameter("Original Curves", "OC",
                 "Original frame curves (only if Show Original = true and Mode is Deflected)",
                 GH_ParamAccess.list);
@@ -88,6 +90,18 @@ namespace Menegroth.GH.Components
             pManager.AddColourParameter("Slab Colors", "SClr",
                 "Colors for slabs (parallel to SG). Wire to Custom Preview.",
                 GH_ParamAccess.list);
+            pManager.AddCurveParameter("Column Curves", "CC",
+                "Column curves (subset of FC) for dedicated line preview", GH_ParamAccess.list);
+            pManager.AddCurveParameter("Beam Curves", "BC",
+                "Beam curves (subset of FC) for dedicated line preview", GH_ParamAccess.list);
+            pManager.AddColourParameter("Column Colors", "CClr",
+                "Colors parallel to CC", GH_ParamAccess.list);
+            pManager.AddColourParameter("Beam Colors", "BClr",
+                "Colors parallel to BC", GH_ParamAccess.list);
+            pManager.AddGenericParameter("Column Geometry", "CG",
+                "Column section geometry as Breps", GH_ParamAccess.list);
+            pManager.AddGenericParameter("Beam Geometry", "BG",
+                "Beam section geometry as Breps", GH_ParamAccess.list);
         }
 
         protected override void SolveInstance(IGH_DataAccess DA)
@@ -123,8 +137,9 @@ namespace Menegroth.GH.Components
             int colorByInt = COLOR_UTILIZATION;
             DA.GetData(4, ref colorByInt);
 
-            bool isDeflected = modeInt != MODE_SIZED;
+            bool isDeflected = modeInt == MODE_DEFLECTED_GLOBAL || modeInt == MODE_DEFLECTED_LOCAL;
             bool isLocal = modeInt == MODE_DEFLECTED_LOCAL;
+            bool isOriginalMode = modeInt == MODE_ORIGINAL;
 
             // Extract nodes
             var nodes = new Dictionary<int, (Point3d pos, Vector3d disp)>();
@@ -147,6 +162,12 @@ namespace Menegroth.GH.Components
             var frameCurves = new List<Curve>();
             var frameGeometry = new List<IGH_GeometricGoo>();
             var frameColors = new List<Color>();
+            var columnCurves = new List<Curve>();
+            var beamCurves = new List<Curve>();
+            var columnColors = new List<Color>();
+            var beamColors = new List<Color>();
+            var columnGeometry = new List<IGH_GeometricGoo>();
+            var beamGeometry = new List<IGH_GeometricGoo>();
             var originalCurves = new List<Curve>();
             var frameElements = viz["frame_elements"] as JArray ?? new JArray();
 
@@ -220,21 +241,46 @@ namespace Menegroth.GH.Components
 
                 if (elementCurve == null) continue;
                 frameCurves.Add(elementCurve);
+                string elemType = elem["element_type"]?.ToString() ?? "";
 
                 var brep = SweepSection(elementCurve, elem);
                 if (brep != null)
+                {
                     frameGeometry.Add(new GH_Brep(brep));
+                    if (elemType == "column")
+                        columnGeometry.Add(new GH_Brep(brep));
+                    else if (elemType == "beam")
+                        beamGeometry.Add(new GH_Brep(brep));
+                }
 
+                Color elementColor = Color.Empty;
+                bool hasColor = false;
                 if (colorByInt == COLOR_UTILIZATION)
                 {
                     double ratio = elem["utilization_ratio"]?.ToObject<double>() ?? 0;
                     bool ok = elem["ok"]?.ToObject<bool>() ?? true;
-                    frameColors.Add(UtilizationColor(ratio, ok));
+                    elementColor = UtilizationColor(ratio, ok);
+                    hasColor = true;
                 }
                 else if (colorByInt == COLOR_DEFLECTION)
                 {
                     double disp = ComputeElementDisplacement(elem, nodes, dispVecs);
-                    frameColors.Add(DeflectionColor(disp, maxDisp));
+                    elementColor = DeflectionColor(disp, maxDisp);
+                    hasColor = true;
+                }
+
+                if (hasColor)
+                    frameColors.Add(elementColor);
+
+                if (elemType == "column")
+                {
+                    columnCurves.Add(elementCurve);
+                    if (hasColor) columnColors.Add(elementColor);
+                }
+                else if (elemType == "beam")
+                {
+                    beamCurves.Add(elementCurve);
+                    if (hasColor) beamColors.Add(elementColor);
                 }
             }
 
@@ -243,11 +289,16 @@ namespace Menegroth.GH.Components
             var slabColors = new List<Color>();
             var originalSlabs = new List<IGH_GeometricGoo>();
 
-            if (!isDeflected || finalScale <= 0)
+            if (isOriginalMode)
+                BuildOriginalSlabs(viz, slabGeometry, slabColors, colorByInt, maxDisp);
+            else if (!isDeflected || finalScale <= 0)
                 BuildSizedSlabs(viz, slabGeometry, slabColors, colorByInt, maxDisp);
             else
                 BuildDeflectedSlabs(viz, finalScale, showOriginal, slabGeometry, originalSlabs,
-                    slabColors, colorByInt, maxDisp);
+                    slabColors, colorByInt, maxDisp, isLocal);
+
+            if (!isDeflected)
+                BuildFoundations(viz, slabGeometry, slabColors, colorByInt);
 
             // Set outputs
             DA.SetDataList(0, frameCurves);
@@ -257,10 +308,18 @@ namespace Menegroth.GH.Components
             DA.SetDataList(4, originalSlabs);
             DA.SetDataList(5, frameColors);
             DA.SetDataList(6, slabColors);
+            DA.SetDataList(7, columnCurves);
+            DA.SetDataList(8, beamCurves);
+            DA.SetDataList(9, columnColors);
+            DA.SetDataList(10, beamColors);
+            DA.SetDataList(11, columnGeometry);
+            DA.SetDataList(12, beamGeometry);
 
             // Update message bar
             string modeName = modeInt == MODE_SIZED ? "Sized"
-                : modeInt == MODE_DEFLECTED_LOCAL ? "Deflected (Local)" : "Deflected (Global)";
+                : modeInt == MODE_DEFLECTED_LOCAL ? "Deflected (Local)"
+                : modeInt == MODE_ORIGINAL ? "Original"
+                : "Deflected (Global)";
             string colorName = colorByInt == COLOR_UTILIZATION ? "Utilization"
                 : colorByInt == COLOR_DEFLECTION ? "Deflection" : "";
             Message = colorName.Length > 0 ? $"{modeName} | {colorName}" : modeName;
@@ -298,11 +357,11 @@ namespace Menegroth.GH.Components
         private static Brep SweepSection(Curve elementCurve, JToken elem)
         {
             var poly = elem["section_polygon"]?.ToObject<double[][]>() ?? new double[0][];
+            double depth = elem["section_depth_ft"]?.ToObject<double>() ?? 0;
+            double width = elem["section_width_ft"]?.ToObject<double>() ?? 0;
 
             if (poly.Length < 3)
             {
-                double depth = elem["section_depth_ft"]?.ToObject<double>() ?? 0;
-                double width = elem["section_width_ft"]?.ToObject<double>() ?? 0;
                 if (depth <= 0 || width <= 0) return null;
                 poly = new[]
                 {
@@ -334,12 +393,19 @@ namespace Menegroth.GH.Components
 
                 var sectionCurve = new PolylineCurve(pts);
                 var sweep = Brep.CreateFromSweep(elementCurve, sectionCurve, true, 0.01);
-                return sweep?.Length > 0 ? sweep[0] : null;
+                if (sweep?.Length > 0) return sweep[0];
             }
             catch
             {
-                return null;
+                // Fall through to robust pipe fallback.
             }
+
+            // Robust fallback for unsupported/degenerate section sweeps.
+            // Equivalent radius from rectangular area keeps approximate visual mass.
+            double area = Math.Max(width, 0.01) * Math.Max(depth, 0.01);
+            double radius = Math.Sqrt(area / Math.PI);
+            var pipe = Brep.CreatePipe(elementCurve, radius, false, PipeCapMode.Flat, true, 0.01, 0.01);
+            return pipe != null && pipe.Length > 0 ? pipe[0] : null;
         }
 
         // ─── Utilization color mapping ────────────────────────────────
@@ -457,13 +523,15 @@ namespace Menegroth.GH.Components
 
         private static void BuildDeflectedSlabs(JToken viz, double scale, bool showOriginal,
             List<IGH_GeometricGoo> output, List<IGH_GeometricGoo> origOutput,
-            List<Color> colors, int colorBy, double maxDisp)
+            List<Color> colors, int colorBy, double maxDisp, bool isLocal)
         {
             var meshes = viz["deflected_slab_meshes"] as JArray ?? new JArray();
             foreach (var m in meshes)
             {
                 var verts = m["vertices"]?.ToObject<double[][]>() ?? new double[0][];
-                var disps = m["vertex_displacements"]?.ToObject<double[][]>() ?? new double[0][];
+                var dispsGlobal = m["vertex_displacements"]?.ToObject<double[][]>() ?? new double[0][];
+                var dispsLocal = m["vertex_displacements_local"]?.ToObject<double[][]>() ?? new double[0][];
+                var disps = isLocal && dispsLocal.Length > 0 ? dispsLocal : dispsGlobal;
                 var faces = m["faces"]?.ToObject<int[][]>() ?? new int[0][];
                 if (verts.Length == 0) continue;
 
@@ -520,7 +588,103 @@ namespace Menegroth.GH.Components
                         origOutput.Add(new GH_Mesh(origMesh));
                     }
 
+                    string dispField = isLocal && dispsLocal.Length > 0
+                        ? "vertex_displacements_local"
+                        : "vertex_displacements";
+                    AppendSlabColor(colors, m, colorBy, maxDisp, dispField);
+                }
+            }
+        }
+
+        /// <summary>
+        /// Build undeformed slab meshes from the deflected slab payload.
+        /// This is used by "Original" mode so users can color original geometry
+        /// by utilization/deflection without drawing displaced geometry.
+        /// </summary>
+        private static void BuildOriginalSlabs(JToken viz, List<IGH_GeometricGoo> output,
+            List<Color> colors, int colorBy, double maxDisp)
+        {
+            var meshes = viz["deflected_slab_meshes"] as JArray ?? new JArray();
+            if (meshes.Count == 0)
+            {
+                BuildSizedSlabs(viz, output, colors, colorBy, maxDisp);
+                return;
+            }
+
+            foreach (var m in meshes)
+            {
+                var verts = m["vertices"]?.ToObject<double[][]>() ?? new double[0][];
+                var faces = m["faces"]?.ToObject<int[][]>() ?? new int[0][];
+                if (verts.Length == 0) continue;
+
+                var rhinoMesh = new Mesh();
+                for (int i = 0; i < verts.Length; i++)
+                {
+                    var op = new Point3d(verts[i][0], verts[i][1], verts[i][2]);
+                    rhinoMesh.Vertices.Add(op);
+                }
+
+                foreach (var face in faces)
+                {
+                    if (face.Length < 3) continue;
+                    int i0 = face[0] - 1, i1 = face[1] - 1, i2 = face[2] - 1;
+                    if (i0 < 0 || i1 < 0 || i2 < 0 ||
+                        i0 >= rhinoMesh.Vertices.Count ||
+                        i1 >= rhinoMesh.Vertices.Count ||
+                        i2 >= rhinoMesh.Vertices.Count) continue;
+                    rhinoMesh.Faces.AddFace(i0, i1, i2);
+                }
+
+                if (rhinoMesh.Vertices.Count > 0 && rhinoMesh.Faces.Count > 0)
+                {
+                    rhinoMesh.Normals.ComputeNormals();
+                    rhinoMesh.Compact();
+                    output.Add(new GH_Mesh(rhinoMesh));
                     AppendSlabColor(colors, m, colorBy, maxDisp);
+                }
+            }
+        }
+
+        private static void BuildFoundations(JToken viz, List<IGH_GeometricGoo> output,
+            List<Color> colors, int colorBy)
+        {
+            var foundations = viz["foundations"] as JArray ?? new JArray();
+            foreach (var f in foundations)
+            {
+                var c = f["center_ft"]?.ToObject<double[]>() ?? new double[3];
+                if (c.Length < 3) continue;
+                double length = f["length_ft"]?.ToObject<double>() ?? 0;
+                double width = f["width_ft"]?.ToObject<double>() ?? 0;
+                double depth = f["depth_ft"]?.ToObject<double>() ?? 0;
+                if (length <= 0 || width <= 0 || depth <= 0) continue;
+
+                double x0 = c[0] - length / 2.0;
+                double x1 = c[0] + length / 2.0;
+                double y0 = c[1] - width / 2.0;
+                double y1 = c[1] + width / 2.0;
+                double zTop = c[2];
+                double zBot = zTop - depth;
+
+                var corners = new[]
+                {
+                    new Point3d(x0, y0, zBot), new Point3d(x1, y0, zBot),
+                    new Point3d(x1, y1, zBot), new Point3d(x0, y1, zBot),
+                    new Point3d(x0, y0, zTop), new Point3d(x1, y0, zTop),
+                    new Point3d(x1, y1, zTop), new Point3d(x0, y1, zTop),
+                };
+                var brep = new BoundingBox(corners).ToBrep();
+                if (brep == null) continue;
+
+                output.Add(new GH_Brep(brep));
+                if (colorBy == COLOR_UTILIZATION)
+                {
+                    double ratio = f["utilization_ratio"]?.ToObject<double>() ?? 0;
+                    bool ok = f["ok"]?.ToObject<bool>() ?? true;
+                    colors.Add(UtilizationColor(ratio, ok));
+                }
+                else if (colorBy == COLOR_DEFLECTION)
+                {
+                    colors.Add(DeflectionColor(0.0, 1.0));
                 }
             }
         }
@@ -531,7 +695,7 @@ namespace Menegroth.GH.Components
         /// this still outputs one representative color for the Custom Preview pipeline.
         /// </summary>
         private static void AppendSlabColor(List<Color> colors, JToken element,
-            int colorBy, double maxDisp)
+            int colorBy, double maxDisp, string displacementField = "vertex_displacements")
         {
             if (colorBy == COLOR_UTILIZATION)
             {
@@ -541,7 +705,7 @@ namespace Menegroth.GH.Components
             }
             else if (colorBy == COLOR_DEFLECTION)
             {
-                var disps = element["vertex_displacements"]?.ToObject<double[][]>();
+                var disps = element[displacementField]?.ToObject<double[][]>();
                 double maxVertDisp = 0;
                 if (disps != null)
                 {

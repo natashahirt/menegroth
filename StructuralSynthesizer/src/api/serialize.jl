@@ -229,6 +229,9 @@ function _serialize_visualization(design::BuildingDesign, du::DisplayUnits)
     # Extract deflected slab meshes (from model.shell_elements)
     deflected_meshes = _serialize_deflected_slab_meshes(design, model, du)
 
+    # Extract foundations for sized/original visualization modes
+    foundations = _serialize_visualization_foundations(design, struc, du)
+
     # Compute suggested scale factor
     max_disp = isempty(nodes) ? 0.0 : maximum(norm(n.displacement_ft) for n in nodes)
     avg_length = _compute_avg_element_length(model, du)
@@ -239,6 +242,7 @@ function _serialize_visualization(design::BuildingDesign, du::DisplayUnits)
         frame_elements = frame_elements,
         sized_slabs = sized_slabs,
         deflected_slab_meshes = deflected_meshes,
+        foundations = foundations,
         suggested_scale_factor = _round_val(suggested_scale),
         max_displacement_ft = _round_val(max_disp; digits=6),
     )
@@ -484,8 +488,8 @@ function _serialize_sized_slabs(design::BuildingDesign, struc::BuildingStructure
 
         thickness_ft = _to_display_length(du, slab_result.thickness)
         z_top_ft = z_coord
-        ratio = slab_result.deflection_ratio
-        ok = slab_result.deflection_ok
+        ratio = max(slab_result.deflection_ratio, slab_result.punching_max_ratio)
+        ok = slab_result.deflection_ok && slab_result.punching_ok
         
         push!(sized_slabs, APISizedSlab(
             slab_id = slab_idx,
@@ -500,11 +504,15 @@ function _serialize_sized_slabs(design::BuildingDesign, struc::BuildingStructure
     return sized_slabs
 end
 
-"""Serialize shell-element meshes with vertex displacements for deflected slab visualization."""
+"""Serialize shell-element meshes with global/local vertex displacements for deflected slab visualization."""
 function _serialize_deflected_slab_meshes(design::BuildingDesign, model, du::DisplayUnits)
     deflected_meshes = APIDeflectedSlabMesh[]
 
     !Asap.has_shell_elements(model) && return deflected_meshes
+
+    draped = compute_draped_displacements(design)
+    total_disp = draped.total
+    local_disp = draped.local_bending
 
     # Group shells by slab ID
     slab_shells = Dict{Symbol, Vector{Asap.ShellElement}}()
@@ -528,7 +536,8 @@ function _serialize_deflected_slab_meshes(design::BuildingDesign, model, du::Dis
         # Collect all vertices and faces from shell elements
         # Each ShellTri3 is a triangle with 3 nodes
         vertices = Vector{Float64}[]
-        vertex_displacements = Vector{Float64}[]
+        vertex_displacements = Vector{Float64}[]  # global
+        vertex_displacements_local = Vector{Float64}[]
         faces = Vector{Int}[]
         vertex_map = Dict{Asap.Node, Int}()
 
@@ -543,10 +552,15 @@ function _serialize_deflected_slab_meshes(design::BuildingDesign, model, du::Dis
                         pos = _position_to_display_lengths(du, node.position)
                         push!(vertices, [_round_val(p; digits=6) for p in pos])
 
-                        # to_displacement_vec returns Float64 in m; do not ustrip to ft (DimensionError)
-                        disp_m = Asap.to_displacement_vec(node.displacement)[1:3]
-                        disp_vec = _to_display_length.(Ref(du), disp_m)
-                        push!(vertex_displacements, [_round_val(d; digits=6) for d in disp_vec])
+                        nid = objectid(node)
+                        disp_global_m = get(total_disp, nid, Asap.to_displacement_vec(node.displacement)[1:3])
+                        disp_local_m = get(local_disp, nid, disp_global_m)
+
+                        disp_global_vec = _to_display_length.(Ref(du), disp_global_m)
+                        disp_local_vec = _to_display_length.(Ref(du), disp_local_m)
+
+                        push!(vertex_displacements, [_round_val(d; digits=6) for d in disp_global_vec])
+                        push!(vertex_displacements_local, [_round_val(d; digits=6) for d in disp_local_vec])
 
                         vertex_map[node] = length(vertices)
                     end
@@ -558,13 +572,14 @@ function _serialize_deflected_slab_meshes(design::BuildingDesign, model, du::Dis
         end
 
         thickness_ft = _to_display_length(du, slab_result.thickness)
-        ratio = slab_result.deflection_ratio
-        ok = slab_result.deflection_ok
+        ratio = max(slab_result.deflection_ratio, slab_result.punching_max_ratio)
+        ok = slab_result.deflection_ok && slab_result.punching_ok
         
         push!(deflected_meshes, APIDeflectedSlabMesh(
             slab_id = slab_idx,
             vertices = vertices,
             vertex_displacements = vertex_displacements,
+            vertex_displacements_local = vertex_displacements_local,
             faces = faces,  # Triangle connectivity (1-based indices)
             thickness_ft = _round_val(thickness_ft; digits=4),
             utilization_ratio = _round_val(ratio),
@@ -573,6 +588,48 @@ function _serialize_deflected_slab_meshes(design::BuildingDesign, model, du::Dis
     end
     
     return deflected_meshes
+end
+
+"""Serialize foundation blocks for visualization in sized/original modes."""
+function _serialize_visualization_foundations(design::BuildingDesign, struc::BuildingStructure, du::DisplayUnits)
+    skel = struc.skeleton
+    out = APIVisualizationFoundation[]
+
+    for (fdn_idx, fdn) in enumerate(struc.foundations)
+        fdn_result = get(design.foundations, fdn_idx, nothing)
+        isnothing(fdn_result) && continue
+        isempty(fdn.support_indices) && continue
+
+        xs = Float64[]
+        ys = Float64[]
+        zs = Float64[]
+        for sup_idx in fdn.support_indices
+            sup_idx > length(struc.supports) && continue
+            v_idx = struc.supports[sup_idx].vertex_idx
+            v_idx > length(skel.vertices) && continue
+            c = Meshes.coords(skel.vertices[v_idx])
+            push!(xs, _to_display_length(du, c.x))
+            push!(ys, _to_display_length(du, c.y))
+            push!(zs, _to_display_length(du, c.z))
+        end
+        isempty(xs) && continue
+
+        cx = sum(xs) / length(xs)
+        cy = sum(ys) / length(ys)
+        z_top = minimum(zs)
+
+        push!(out, APIVisualizationFoundation(
+            foundation_id = fdn_idx,
+            center_ft = [_round_val(cx; digits=6), _round_val(cy; digits=6), _round_val(z_top; digits=6)],
+            length_ft = _round_val(_to_display_length(du, fdn_result.length); digits=4),
+            width_ft = _round_val(_to_display_length(du, fdn_result.width); digits=4),
+            depth_ft = _round_val(_to_display_length(du, fdn_result.depth); digits=4),
+            utilization_ratio = _round_val(fdn_result.bearing_ratio),
+            ok = fdn_result.ok,
+        ))
+    end
+
+    return out
 end
 
 """Compute average frame element length in display units for displacement scale calibration."""

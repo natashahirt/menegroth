@@ -60,7 +60,7 @@
     },
     "fire_rating": 0,
     "optimize_for": "weight",
-    "size_foundations": false,
+    "size_foundations": true,
     "foundation_soil": "medium_sand"
   }
 }

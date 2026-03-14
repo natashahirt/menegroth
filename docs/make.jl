@@ -17,10 +17,7 @@ end
 
 makedocs(
     sitename = "menegroth",
-    format = Documenter.HTML(
-        prettyurls = get(ENV, "CI", "false") == "true",
-        assets = [joinpath("assets", "logo-overrides.css")],
-    ),
+    format = Documenter.HTML(prettyurls = get(ENV, "CI", "false") == "true"),
     pages = [
         "Home" => "index.md",
         "Getting Started" => "getting_started.md",

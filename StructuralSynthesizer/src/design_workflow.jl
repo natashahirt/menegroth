@@ -263,6 +263,23 @@ function capture_design(struc::BuildingStructure, params::DesignParameters; t_st
     _populate_beam_results!(design, struc)
     _populate_foundation_results!(design, struc)
     _compute_design_summary!(design, struc, params)
+
+    # Capture structural offsets before restore! wipes them.
+    # Maps vertex_idx → (dx_m, dy_m) for edge/corner columns.
+    skel = struc.skeleton
+    for col in struc.columns
+        off = col.structural_offset
+        (off[1] == 0.0 && off[2] == 0.0) && continue
+        for seg_idx in segment_indices(col)
+            seg_idx > length(struc.segments) && continue
+            edge_idx = struc.segments[seg_idx].edge_idx
+            (edge_idx < 1 || edge_idx > length(skel.edge_indices)) && continue
+            v1, v2 = skel.edge_indices[edge_idx]
+            design.structural_offsets[v1] = off
+            design.structural_offsets[v2] = off
+        end
+    end
+
     if !isnothing(t_start)
         design.compute_time_s = time() - t_start
     end
@@ -306,6 +323,12 @@ function design_building(struc::BuildingStructure, params::DesignParameters)
     end
     
     design = capture_design(struc, params; t_start=t_start)
+
+    # Build the visualization analysis model while struc still has sized
+    # dimensions and structural offsets (restore! will wipe them).
+    if isnothing(design.asap_model)
+        build_analysis_model!(design)
+    end
     
     # ─── Restore ───
     restore!(struc; geometry_is_centerline=params.geometry_is_centerline)

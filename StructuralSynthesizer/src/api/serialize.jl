@@ -897,20 +897,8 @@ function _serialize_visualization_foundations(design::BuildingDesign, struc::Bui
     skel = struc.skeleton
     out = APIVisualizationFoundation[]
 
-    # Build vertex → column offset lookup so foundations shift with their columns
-    col_offset_by_vertex = Dict{Int, NTuple{2, Float64}}()
-    for col in struc.columns
-        off = col.structural_offset
-        (off[1] == 0.0 && off[2] == 0.0) && continue
-        for seg_idx in segment_indices(col)
-            seg_idx > length(struc.segments) && continue
-            edge_idx = struc.segments[seg_idx].edge_idx
-            (edge_idx < 1 || edge_idx > length(skel.edge_indices)) && continue
-            v1, v2 = skel.edge_indices[edge_idx]
-            col_offset_by_vertex[v1] = off
-            col_offset_by_vertex[v2] = off
-        end
-    end
+    # Use offsets captured at design time (survives restore!)
+    col_offset_by_vertex = design.structural_offsets
 
     for (fdn_idx, fdn) in enumerate(struc.foundations)
         fdn_result = get(design.foundations, fdn_idx, nothing)
@@ -988,7 +976,7 @@ function _serialize_drop_panel_patches(slab_idx::Int, slab, struc::BuildingStruc
         v_idx = col.vertex_idx
         (v_idx < 1 || v_idx > length(struc.skeleton.vertices)) && continue
         c = Meshes.coords(struc.skeleton.vertices[v_idx])
-        off = col.structural_offset
+        off = get(design.structural_offsets, v_idx, (0.0, 0.0))
         cx = _to_display_length(du, c.x + off[1] * u"m")
         cy = _to_display_length(du, c.y + off[2] * u"m")
         cz = _to_display_length(du, c.z)

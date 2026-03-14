@@ -307,11 +307,16 @@ namespace Menegroth.GH.Components
             int analyticalSlab = _analyticalSlab;
             int analyticalFrame = _analyticalFrame;
 
-            // Slab/Frame menus override base color when a valid analytical option is selected
-            int effectiveColorBySlab = IsValidAnalyticalSlab(analyticalSlab) ? analyticalSlab : colorByInt;
+            // Slab/Frame menus override base color when a valid analytical option is selected.
+            // Material from base menu overrides submenu so Color by Material always applies.
+            int effectiveColorBySlab = (colorByInt == COLOR_MATERIAL)
+                ? COLOR_MATERIAL
+                : (IsValidAnalyticalSlab(analyticalSlab) ? analyticalSlab : colorByInt);
             if (effectiveColorBySlab == COLOR_NONE) effectiveColorBySlab = COLOR_UTILIZATION;
 
-            int effectiveColorByFrame = IsValidAnalyticalFrame(analyticalFrame) ? analyticalFrame : colorByInt;
+            int effectiveColorByFrame = (colorByInt == COLOR_MATERIAL)
+                ? COLOR_MATERIAL
+                : (IsValidAnalyticalFrame(analyticalFrame) ? analyticalFrame : colorByInt);
             if (effectiveColorByFrame == COLOR_NONE) effectiveColorByFrame = COLOR_UTILIZATION;
 
             bool isDeflected = modeInt == MODE_DEFLECTED_GLOBAL || modeInt == MODE_DEFLECTED_LOCAL;
@@ -567,23 +572,28 @@ namespace Menegroth.GH.Components
                 }
                 else
                 {
-                    elementColor = elemType == "column" ? VisualizationColorMapper.ColumnTypeColor
-                        : elemType == "beam" ? VisualizationColorMapper.BeamTypeColor
-                        : VisualizationColorMapper.OtherTypeColor;
-                    var materialColor = VisualizationColorMapper.ParseHexColor(elem["material_color_hex"]?.ToString());
-                    if (materialColor.HasValue)
-                        elementColor = materialColor.Value;
+                    // Fallback: use utilization when Color By is unexpected (avoids rigid material-only coloring).
+                    double ratio = elem["utilization_ratio"]?.ToObject<double>() ?? 0;
+                    bool ok = elem["ok"]?.ToObject<bool>() ?? true;
+                    elementColor = VisualizationColorMapper.UtilizationColor(ratio, ok, null);
                 }
 
                 var brep = SweepSection(elementCurve, elem);
                 if (brep != null)
                 {
-                    frameGeometry.Add(new GH_Brep(brep));
-                    frameGeometryColors.Add(elementColor);
-                    if (elemType == "column")
-                        columnGeometry.Add(new GH_Brep(brep));
-                    else if (elemType == "beam")
-                        beamGeometry.Add(new GH_Brep(brep));
+                    // Sized mode: always show geometry. Other modes: show geometry when scale = 0;
+                    // when scale > 0, show analytical objects (curves only).
+                    bool showFrameGeometry = (modeInt == MODE_SIZED) || (finalScale <= 0);
+
+                    if (showFrameGeometry)
+                    {
+                        frameGeometry.Add(new GH_Brep(brep));
+                        frameGeometryColors.Add(elementColor);
+                        if (elemType == "column")
+                            columnGeometry.Add(new GH_Brep(brep));
+                        else if (elemType == "beam")
+                            beamGeometry.Add(new GH_Brep(brep));
+                    }
                 }
 
                 // Always parallel to frameCurves
@@ -1394,6 +1404,17 @@ namespace Menegroth.GH.Components
                     for (int i = 0; i < rhinoMesh.Vertices.Count; i++)
                         rhinoMesh.VertexColors.Add(utilColor);
                 }
+                else if (colorBy == COLOR_MATERIAL)
+                {
+                    bool isVault = m["is_vault"]?.ToObject<bool>() ?? false;
+                    var materialColor = isVault
+                        ? VisualizationColorMapper.EarthenMaterialColor
+                        : VisualizationColorMapper.ResolveMaterialColor(
+                            m["material_color_hex"]?.ToString(),
+                            VisualizationColorMapper.ConcreteMaterialColor);
+                    for (int i = 0; i < rhinoMesh.Vertices.Count; i++)
+                        rhinoMesh.VertexColors.Add(materialColor);
+                }
                 else if (isAnalyticalSlab && faceAnalytical != null)
                 {
                     ApplyPerFaceVertexColors(rhinoMesh, faces, faceAnalytical, analyticalMax, analyticalDiverging);
@@ -1628,8 +1649,35 @@ namespace Menegroth.GH.Components
                     rhinoMesh.Faces.AddFace(i0, i1, i2);
                 }
 
-                if (isAnalyticalSlab && faceAnalytical != null)
+                if (colorBy == COLOR_UTILIZATION)
+                {
+                    double ratio = m["utilization_ratio"]?.ToObject<double>() ?? 0;
+                    bool ok = m["ok"]?.ToObject<bool>() ?? true;
+                    var utilColor = VisualizationColorMapper.UtilizationColor(ratio, ok, null);
+                    for (int i = 0; i < rhinoMesh.Vertices.Count; i++)
+                        rhinoMesh.VertexColors.Add(utilColor);
+                }
+                else if (colorBy == COLOR_DEFLECTION)
+                {
+                    var defColor = VisualizationColorMapper.DeflectionColor(0.0, maxDisp, null);
+                    for (int i = 0; i < rhinoMesh.Vertices.Count; i++)
+                        rhinoMesh.VertexColors.Add(defColor);
+                }
+                else if (colorBy == COLOR_MATERIAL)
+                {
+                    bool isVault = m["is_vault"]?.ToObject<bool>() ?? false;
+                    var materialColor = isVault
+                        ? VisualizationColorMapper.EarthenMaterialColor
+                        : VisualizationColorMapper.ResolveMaterialColor(
+                            m["material_color_hex"]?.ToString(),
+                            VisualizationColorMapper.ConcreteMaterialColor);
+                    for (int i = 0; i < rhinoMesh.Vertices.Count; i++)
+                        rhinoMesh.VertexColors.Add(materialColor);
+                }
+                else if (isAnalyticalSlab && faceAnalytical != null)
+                {
                     ApplyPerFaceVertexColors(rhinoMesh, faces, faceAnalytical, analyticalMax, analyticalDiverging);
+                }
 
                 if (rhinoMesh.Vertices.Count > 0 && rhinoMesh.Faces.Count > 0)
                 {

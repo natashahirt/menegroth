@@ -780,6 +780,10 @@ mutable struct BuildingDesign{T, A, P}
     # Skeleton edge index for each frame element in asap_model (when built via build_analysis_model!).
     # Enables correct element→design mapping for visualization; empty when using struc.asap_model.
     asap_model_frame_edge_indices::Vector{Int}
+
+    # Structural offsets captured at design time (vertex_idx → (dx, dy) in meters).
+    # Survives restore! so serialization can position foundations at offset centerlines.
+    structural_offsets::Dict{Int, NTuple{2, Float64}}
     
     # Metadata
     created::DateTime
@@ -802,6 +806,7 @@ function BuildingDesign(struc::BuildingStructure{T, A, P}, params::DesignParamet
         DesignSummary(),
         nothing,  # asap_model (built via build_analysis_model!)
         Int[],    # asap_model_frame_edge_indices (populated by build_analysis_model!)
+        Dict{Int, NTuple{2, Float64}}(),  # structural_offsets (captured by capture_design)
         now(),
         0.0
     )

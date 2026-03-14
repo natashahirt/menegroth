@@ -561,7 +561,7 @@ export recommend_foundation_strategy
 
 # Geometry traits
 export AbstractSectionGeometry
-export SolidRect, HollowRect, HollowRound, IShape
+export SolidRect, SolidRound, HollowRect, HollowRound, IShape, TShape
 
 # Trait assignment and getters
 export section_geometry

@@ -17,16 +17,16 @@ namespace Menegroth.GH.Components
     /// no external ValueList components needed.
     ///
     /// Menu structure:
-    ///   Beams ▸ Type ▸ RC Catalog ▸ ...
+    ///   Beams ▸ Type ▸ Beam Catalog ▸ ...
     ///   Columns ▸ Type ▸ ...
     ///   Slabs ▸ Floor System ▸ Flat Plate ▸ Analysis Method ▸ ...
     ///                        ▸ Flat Slab ▸ Punching Strategy ▸ ...
     ///                        ▸ One-Way, Vault
-    ///                        ▸ Deflection Limit ▸ ...
-    ///   Foundations ▸ Size Foundations ▸ Soil Type ▸ ...
+    ///         ▸ Deflection Limit ▸ ...
+    ///   Foundations ▸ Size Foundations ▸ Soil Type ▸ Foundation Type ▸ ...
     ///   Default Materials ▸ Concrete ▸ Rebar ▸ Steel ▸ ...
     ///   Design Options ▸ Optimize For ▸ Fire Rating ▸ ...
-    ///   Units ▸ ...
+    ///   Load Units ▸ Imperial (psf, ft, in) | Metric (kN/m², m) ▸ ...
     ///
     /// Override hierarchy when multiple params conflict: geometry-scoped overrides general;
     /// Slab Params / Foundation Params (specific inputs) override generic Params; earlier in a list overrides later.
@@ -50,6 +50,7 @@ namespace Menegroth.GH.Components
         private string _fireRating = "0";
         private bool _sizeFoundations = true;
         private string _foundationSoil = "medium_sand";
+        private string _foundationType = "auto";
         private string _unitSystem = "imperial";
 
         // ─── Choice tables ───────────────────────────────────────────────
@@ -91,6 +92,11 @@ namespace Menegroth.GH.Components
             new("NWC 4000 psi", "NWC_4000"),
             new("NWC 5000 psi", "NWC_5000"),
             new("NWC 6000 psi", "NWC_6000"),
+            new("Earthen 500 MPa (unfired earth)",   "Earthen_500"),
+            new("Earthen 1000 MPa",                  "Earthen_1000"),
+            new("Earthen 2000 MPa (stabilized)",     "Earthen_2000"),
+            new("Earthen 4000 MPa (compressed earth blocks)", "Earthen_4000"),
+            new("Earthen 8000 MPa (fired clay brick)",        "Earthen_8000"),
         };
 
         private static readonly Choice[] Rebars =
@@ -189,10 +195,18 @@ namespace Menegroth.GH.Components
             new("Hard Clay   (qa=300 kPa)",  "hard_clay"),
         };
 
+        private static readonly Choice[] FoundationTypes =
+        {
+            new("Auto",   "auto"),
+            new("Spread", "spread"),
+            new("Strip",  "strip"),
+            new("Mat",    "mat"),
+        };
+
         private static readonly Choice[] UnitSystems =
         {
-            new("Imperial", "imperial"),
-            new("Metric",   "metric"),
+            new("Imperial (psf, ft, in)", "imperial"),
+            new("Metric (kN/m², m)",      "metric"),
         };
 
         // ─── Constructor ─────────────────────────────────────────────────
@@ -253,6 +267,7 @@ namespace Menegroth.GH.Components
             // ── Beams ▸ ──
             var beamMenu = Menu_AppendItem(menu, "Beams");
             AddSubChoices(beamMenu, "Beam Type", BeamTypes, _beamType);
+            AddSubChoices(beamMenu, "Beam Catalog", BeamCatalogs, _beamCatalog);
 
             // ── Columns ▸ Column Type (top-level) ▸ Column Catalog (second, updates by type) ──
             var colMenu = Menu_AppendItem(menu, "Columns");
@@ -317,10 +332,10 @@ namespace Menegroth.GH.Components
                 }
             }
 
-            Menu_AppendSeparator(floorMenu.DropDown);
+            Menu_AppendSeparator(slabParamsMenu.DropDown);
 
-            // Deflection Limit (shared across all floor types)
-            AddSubChoices(floorMenu, "Deflection Limit", DeflLimits, _deflLimit);
+            // Deflection limit (shared across all slab/floor types) at slab menu level.
+            AddSubChoices(slabParamsMenu, "Deflection Limit", DeflLimits, _deflLimit);
 
             // ── Foundations ▸ ──
             var fdnMenu = Menu_AppendItem(menu, "Foundations");
@@ -340,6 +355,7 @@ namespace Menegroth.GH.Components
 
             fdnMenu.DropDownItems.Add(new ToolStripSeparator());
             AddSubChoices(fdnMenu, "Soil Type", SoilTypes, _foundationSoil);
+            AddSubChoices(fdnMenu, "Foundation Type", FoundationTypes, _foundationType);
 
             Menu_AppendSeparator(menu);
 
@@ -356,8 +372,8 @@ namespace Menegroth.GH.Components
 
             Menu_AppendSeparator(menu);
 
-            // ── Units (displayed under component, same pattern as Geometry Input) ──
-            var unitsMenu = Menu_AppendItem(menu, "Units");
+            // ── Load Units (display units for loads and geometry) ──
+            var unitsMenu = Menu_AppendItem(menu, "Load Units");
             foreach (var choice in UnitSystems)
             {
                 var item = new ToolStripMenuItem(choice.Label)
@@ -462,10 +478,12 @@ namespace Menegroth.GH.Components
                     _columnCatalog = tag.Value;
                     break;
                 case "Beam Type":         _beamType    = tag.Value; break;
-                case "RC Catalog":         _beamCatalog = tag.Value; break;
+                case "RC Catalog":         _beamCatalog = tag.Value; break; // Backward-compatible legacy field name.
+                case "Beam Catalog":       _beamCatalog = tag.Value; break;
                 case "Optimize For":      _optimizeFor = tag.Value; break;
                 case "Fire Rating":       _fireRating  = tag.Value; break;
                 case "Soil Type":         _foundationSoil = tag.Value; break;
+                case "Foundation Type":   _foundationType = tag.Value; break;
             }
 
             UpdateMessage();
@@ -490,6 +508,7 @@ namespace Menegroth.GH.Components
             writer.SetString("FireRating",  _fireRating);
             writer.SetBoolean("SizeFoundations", _sizeFoundations);
             writer.SetString("FoundationSoil", _foundationSoil);
+            writer.SetString("FoundationType", _foundationType);
             writer.SetString("UnitSystem",  _unitSystem);
             return base.Write(writer);
         }
@@ -511,6 +530,7 @@ namespace Menegroth.GH.Components
             if (reader.ItemExists("FireRating"))   _fireRating  = reader.GetString("FireRating");
             if (reader.ItemExists("SizeFoundations")) _sizeFoundations = reader.GetBoolean("SizeFoundations");
             if (reader.ItemExists("FoundationSoil"))  _foundationSoil  = reader.GetString("FoundationSoil");
+            if (reader.ItemExists("FoundationType"))  _foundationType  = reader.GetString("FoundationType");
             if (reader.ItemExists("UnitSystem"))   _unitSystem  = reader.GetString("UnitSystem");
             UpdateMessage();
             return base.Read(reader);
@@ -532,7 +552,7 @@ namespace Menegroth.GH.Components
                 LabelFor(BeamTypes, _beamType),
             };
             if (_sizeFoundations)
-                parts.Add("Fdn: " + LabelFor(SoilTypes, _foundationSoil));
+                parts.Add("Fdn: " + LabelFor(SoilTypes, _foundationSoil) + ", " + LabelFor(FoundationTypes, _foundationType));
             parts.Add(LabelFor(UnitSystems, _unitSystem));
             Message = string.Join(" | ", parts);
         }
@@ -633,6 +653,7 @@ namespace Menegroth.GH.Components
                 OptimizeFor     = _optimizeFor,
                 SizeFoundations = _sizeFoundations,
                 FoundationSoil  = _foundationSoil,
+                FoundationStrategy = _foundationType,
                 UnitSystem      = _unitSystem,
             };
 
@@ -675,7 +696,10 @@ namespace Menegroth.GH.Components
 
             sb.Append("Columns: ").Append(LabelForColumnTypeSummary(p))
               .Append(" (").Append(p.ColumnType).Append(ColumnTypeUsesCatalog(p.ColumnType) ? " / " + (p.ColumnCatalog ?? (p.ColumnType?.StartsWith("steel_") == true ? "preferred" : "standard")) : "").AppendLine(")");
-            sb.Append("Beams: ").Append(LabelFor(BeamTypes, p.BeamType)).Append(" (").Append(p.BeamType).AppendLine(")");
+            sb.Append("Beams: ").Append(LabelFor(BeamTypes, p.BeamType))
+              .Append(" (").Append(p.BeamType).Append(")");
+            sb.Append(" | Catalog: ").Append(LabelFor(BeamCatalogs, p.BeamCatalog))
+              .Append(" (").Append(p.BeamCatalog).AppendLine(")");
             sb.Append("Materials: ").Append(LabelFor(Concretes, p.Concrete)).Append(" (").Append(p.Concrete).Append(")");
             sb.Append(", ").Append(LabelFor(Rebars, p.Rebar)).Append(" (").Append(p.Rebar).Append(")");
             sb.Append(", ").Append(LabelFor(Steels, p.Steel)).Append(" (").Append(p.Steel).AppendLine(")");
@@ -702,7 +726,7 @@ namespace Menegroth.GH.Components
             else
                 sb.AppendLine("Foundations: Not sizing");
 
-            sb.Append("Units: ").Append(LabelFor(UnitSystems, p.UnitSystem))
+            sb.Append("Load Units: ").Append(LabelFor(UnitSystems, p.UnitSystem))
               .Append(" (").Append(p.UnitSystem).AppendLine(")");
 
             if (p.ScopedVaultOverrides != null && p.ScopedVaultOverrides.Count > 0)

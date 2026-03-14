@@ -253,6 +253,16 @@ function _serialize_visualization(design::BuildingDesign, du::DisplayUnits)
     is_beamless_system = !isempty(struc.slabs) &&
                          all(slab -> slab.floor_type in (:flat_plate, :flat_slab), struc.slabs)
 
+    # Global analytical maxima (max |value|) for diverging color normalization
+    max_fa = isempty(frame_elements) ? 0.0 : maximum(abs(e.max_axial_force) for e in frame_elements)
+    max_fm = isempty(frame_elements) ? 0.0 : maximum(abs(e.max_moment) for e in frame_elements)
+    max_fv = isempty(frame_elements) ? 0.0 : maximum(abs(e.max_shear) for e in frame_elements)
+    max_sb = isempty(deflected_meshes) ? 0.0 : maximum((isempty(m.face_bending_moment) ? 0.0 : maximum(abs, m.face_bending_moment) for m in deflected_meshes))
+    max_sm = isempty(deflected_meshes) ? 0.0 : maximum((isempty(m.face_membrane_force) ? 0.0 : maximum(abs, m.face_membrane_force) for m in deflected_meshes))
+    max_ss = isempty(deflected_meshes) ? 0.0 : maximum((isempty(m.face_shear_force) ? 0.0 : maximum(m.face_shear_force) for m in deflected_meshes))
+    max_sv = isempty(deflected_meshes) ? 0.0 : maximum((isempty(m.face_von_mises) ? 0.0 : maximum(m.face_von_mises) for m in deflected_meshes))
+    max_sp = isempty(deflected_meshes) ? 0.0 : maximum((isempty(m.face_surface_stress) ? 0.0 : maximum(abs, m.face_surface_stress) for m in deflected_meshes))
+
     return APIVisualization(
         nodes = nodes,
         frame_elements = frame_elements,
@@ -262,6 +272,14 @@ function _serialize_visualization(design::BuildingDesign, du::DisplayUnits)
         is_beamless_system = is_beamless_system,
         suggested_scale_factor = _round_val(suggested_scale),
         max_displacement = _round_val(max_disp; digits=6),
+        max_frame_axial = _round_val(max_fa; digits=2),
+        max_frame_moment = _round_val(max_fm; digits=2),
+        max_frame_shear = _round_val(max_fv; digits=2),
+        max_slab_bending = _round_val(max_sb; digits=4),
+        max_slab_membrane = _round_val(max_sm; digits=4),
+        max_slab_shear = _round_val(max_ss; digits=4),
+        max_slab_von_mises = _round_val(max_sv; digits=2),
+        max_slab_surface_stress = _round_val(max_sp; digits=2),
     )
 end
 
@@ -441,6 +459,9 @@ function _serialize_visualization_frame_elements(design::BuildingDesign, model, 
             end
         end
         
+        # Analytical: max absolute internal forces along element
+        max_P, max_M, max_V = _compute_frame_analytical(elem, model)
+
         push!(elements, APIVisualizationFrameElement(
             element_id = edisp_key,
             node_start = node_start_id,
@@ -460,10 +481,39 @@ function _serialize_visualization_frame_elements(design::BuildingDesign, model, 
             section_polygon_inner = section_poly_inner,
             original_points = original_points,
             displacement_vectors = displacement_vectors,
+            max_axial_force = _round_val(max_P; digits=2),
+            max_moment = _round_val(max_M; digits=2),
+            max_shear = _round_val(max_V; digits=2),
         ))
     end
     
     return elements
+end
+
+"""Compute signed extremum of P, M, V along a frame element (value with largest |·|, sign preserved).
+Falls back to end-forces when ElementInternalForces is unavailable."""
+function _compute_frame_analytical(elem, model)
+    try
+        eif = Asap.ElementInternalForces(elem, model; resolution=10)
+        ext_P = _vec_signed_extremum(eif.P)
+        ext_My = _vec_signed_extremum(eif.My)
+        ext_Mz = _vec_signed_extremum(eif.Mz)
+        ext_Vy = _vec_signed_extremum(eif.Vy)
+        ext_Vz = _vec_signed_extremum(eif.Vz)
+        ext_M = _signed_extremum(ext_My, ext_Mz)
+        ext_V = _signed_extremum(ext_Vy, ext_Vz)
+        return (ext_P, ext_M, ext_V)
+    catch
+        P = Asap.axial_force(elem)
+        return (P, 0.0, 0.0)
+    end
+end
+
+"""Return the element of `v` with the largest absolute value, preserving sign."""
+function _vec_signed_extremum(v::AbstractVector)
+    isempty(v) && return 0.0
+    idx = argmax(abs.(v))
+    return v[idx]
 end
 
 """Return a normalized hex color string from a material, or empty string if unavailable."""
@@ -511,19 +561,19 @@ function _extract_section_geometry(sec_obj, du::DisplayUnits)
         d_ft = _to_display_length(du, StructuralSizer.section_depth(sec_obj))
         w_ft = _to_display_length(du, StructuralSizer.section_width(sec_obj))
         return ("rectangular", _round_val(d_ft; digits=4), _round_val(w_ft; digits=4), 0.0, 0.0, 0.0)
+    elseif geom isa StructuralSizer.SolidRound
+        d_ft = _to_display_length(du, StructuralSizer.section_width(sec_obj))
+        return ("circular", _round_val(d_ft; digits=4), _round_val(d_ft; digits=4), 0.0, 0.0, 0.0)
     elseif geom isa StructuralSizer.HollowRect
         d_ft = _to_display_length(du, StructuralSizer.section_depth(sec_obj))
         w_ft = _to_display_length(du, StructuralSizer.section_width(sec_obj))
         return ("HSS_rect", _round_val(d_ft; digits=4), _round_val(w_ft; digits=4), 0.0, 0.0, 0.0)
     elseif geom isa StructuralSizer.HollowRound
-        d_ft = _to_display_length(du, StructuralSizer.section_width(sec_obj))  # diameter
-        return ("HSS_round", _round_val(d_ft; digits=4), _round_val(d_ft; digits=4), 0.0, 0.0, 0.0)
-    elseif sec_obj isa StructuralSizer.RCCircularSection
         d_ft = _to_display_length(du, StructuralSizer.section_width(sec_obj))
-        return ("circular", _round_val(d_ft; digits=4), _round_val(d_ft; digits=4), 0.0, 0.0, 0.0)
-    elseif sec_obj isa StructuralSizer.RCTBeamSection
+        return ("HSS_round", _round_val(d_ft; digits=4), _round_val(d_ft; digits=4), 0.0, 0.0, 0.0)
+    elseif geom isa StructuralSizer.TShape
         d_ft = _to_display_length(du, StructuralSizer.section_depth(sec_obj))
-        w_ft = _to_display_length(du, sec_obj.bf)
+        w_ft = _to_display_length(du, StructuralSizer.flange_width(sec_obj))
         return ("T-beam", _round_val(d_ft; digits=4), _round_val(w_ft; digits=4), 0.0, 0.0, 0.0)
     elseif sec_obj isa StructuralSizer.PixelFrameSection
         d_ft = _to_display_length(du, StructuralSizer.section_depth(sec_obj))
@@ -700,6 +750,8 @@ function _serialize_deflected_slab_meshes(design::BuildingDesign, struc::Buildin
     total_disp = draped.total
     local_disp = draped.local_bending
 
+    sif_ws = Asap.ShellForcesWorkspace()
+
     # Group shells by slab ID
     slab_shells = Dict{Symbol, Vector{Asap.ShellElement}}()
     for shell in model.shell_elements
@@ -729,11 +781,16 @@ function _serialize_deflected_slab_meshes(design::BuildingDesign, struc::Buildin
         faces = Vector{Int}[]
         vertex_map = Dict{Asap.Node, Int}()
 
+        # Per-face analytical values (one entry per triangle, parallel to `faces`)
+        face_bending = Float64[]
+        face_membrane = Float64[]
+        face_shear = Float64[]
+        face_vm = Float64[]
+        face_surf = Float64[]
+
         for shell in shells
-            # ShellTri3 has 3 nodes - extract triangle connectivity
-            shell_nodes = shell.nodes  # Tuple of 3 nodes
+            shell_nodes = shell.nodes
             if length(shell_nodes) == 3
-                # Map nodes to vertex indices
                 tri_indices = Int[]
                 for node in shell_nodes
                     if !haskey(vertex_map, node)
@@ -754,8 +811,11 @@ function _serialize_deflected_slab_meshes(design::BuildingDesign, struc::Buildin
                     end
                     push!(tri_indices, vertex_map[node])
                 end
-                # Add triangle face (1-based indices for JSON)
                 push!(faces, tri_indices)
+
+                # Compute shell internal forces for this triangle
+                _append_shell_analytical!(face_bending, face_membrane, face_shear,
+                                          face_vm, face_surf, shell, model.u, sif_ws)
             end
         end
 
@@ -770,16 +830,66 @@ function _serialize_deflected_slab_meshes(design::BuildingDesign, struc::Buildin
             vertices = vertices,
             vertex_displacements = vertex_displacements,
             vertex_displacements_local = vertex_displacements_local,
-            faces = faces,  # Triangle connectivity (1-based indices)
+            faces = faces,
             thickness = _round_val(thickness_ft; digits=4),
             drop_panels = drop_panels,
             utilization_ratio = _round_val(ratio),
             ok = ok,
             is_vault = is_vault,
+            face_bending_moment = [_round_val(v; digits=4) for v in face_bending],
+            face_membrane_force = [_round_val(v; digits=4) for v in face_membrane],
+            face_shear_force = [_round_val(v; digits=4) for v in face_shear],
+            face_von_mises = [_round_val(v; digits=2) for v in face_vm],
+            face_surface_stress = [_round_val(v; digits=2) for v in face_surf],
         ))
     end
     
     return deflected_meshes
+end
+
+"""Compute per-face analytical scalars from ShellInternalForces and append to arrays.
+Signed quantities preserve physical meaning (+ tension/sagging, − compression/hogging)."""
+function _append_shell_analytical!(face_bending, face_membrane, face_shear,
+                                    face_vm, face_surf, shell, u_global, sif_ws)
+    sif = Asap.ShellInternalForces(shell, u_global, sif_ws)
+    t = shell.thickness  # [m]
+
+    # Signed dominant principal bending moment (+ sagging, − hogging)
+    pm = Asap.principal_moments(sif)
+    push!(face_bending, _signed_extremum(pm.M1, pm.M2))
+
+    # Signed dominant principal membrane force (+ tension, − compression)
+    pf = Asap.principal_forces(sif)
+    push!(face_membrane, _signed_extremum(pf.N1, pf.N2))
+
+    # Transverse shear resultant: √(Qxz² + Qyz²) — always ≥ 0
+    push!(face_shear, sqrt(sif.Qxz^2 + sif.Qyz^2))
+
+    # Von Mises at top (+t/2) and bottom (-t/2) surfaces — always ≥ 0
+    vm_top = Asap.von_mises_stress(sif, t / 2, t)
+    vm_bot = Asap.von_mises_stress(sif, -t / 2, t)
+    push!(face_vm, max(vm_top, vm_bot))
+
+    # Signed dominant principal stress at top/bottom (+ tension, − compression)
+    surf = Asap.max_surface_stresses(sif, t)
+    σ_top = _signed_principal_stress(surf.top.σxx, surf.top.σyy, surf.top.τxy)
+    σ_bot = _signed_principal_stress(surf.bottom.σxx, surf.bottom.σyy, surf.bottom.τxy)
+    push!(face_surf, _signed_extremum(σ_top, σ_bot))
+
+    return nothing
+end
+
+"""Return the value with the largest absolute magnitude, preserving sign."""
+_signed_extremum(a, b) = abs(a) >= abs(b) ? a : b
+
+"""Signed dominant principal stress from a 2D stress state (σxx, σyy, τxy).
+Returns the principal stress (σ1 or σ2) with the largest absolute value, keeping sign."""
+function _signed_principal_stress(σxx, σyy, τxy)
+    avg = (σxx + σyy) / 2
+    R = sqrt(((σxx - σyy) / 2)^2 + τxy^2)
+    σ1 = avg + R
+    σ2 = avg - R
+    return _signed_extremum(σ1, σ2)
 end
 
 """Serialize foundation blocks for visualization in sized/original modes."""

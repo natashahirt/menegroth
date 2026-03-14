@@ -30,6 +30,16 @@ namespace Menegroth.GH.Components
         private const int COLOR_UTILIZATION = 1;
         private const int COLOR_DEFLECTION = 2;
         private const int COLOR_MATERIAL = 3;
+        // Analytical sub-modes: slabs
+        private const int COLOR_SLAB_BENDING = 10;
+        private const int COLOR_SLAB_MEMBRANE = 11;
+        private const int COLOR_SLAB_SHEAR = 12;
+        private const int COLOR_SLAB_VON_MISES = 13;
+        private const int COLOR_SLAB_SURFACE_STRESS = 14;
+        // Analytical sub-modes: frames
+        private const int COLOR_FRAME_AXIAL = 20;
+        private const int COLOR_FRAME_MOMENT = 21;
+        private const int COLOR_FRAME_SHEAR = 22;
         private bool _useInternalPreview = true;
         private bool _showOriginal = true;
         private bool _showSlabs = true;
@@ -129,9 +139,6 @@ namespace Menegroth.GH.Components
             }) { Checked = _showFoundations });
             menu.Items.Add(showMenu);
 
-            Menu_AppendSeparator(menu);
-            var gradientNote = Menu_AppendItem(menu, "Gradient colors: Expand component (+) for Utilization / Deflection", null, false, false);
-            gradientNote.ToolTipText = "Use the + button on the component to show optional Utilization Gradient and Deflection Gradient inputs.";
         }
 
         public override bool Write(GH_IO.Serialization.GH_IWriter writer)
@@ -197,21 +204,19 @@ namespace Menegroth.GH.Components
             colorParam.AddNamedValue("Utilization", COLOR_UTILIZATION);
             colorParam.AddNamedValue("Deflection", COLOR_DEFLECTION);
             colorParam.AddNamedValue("Material", COLOR_MATERIAL);
+            colorParam.AddNamedValue("Slab: Bending Moment", COLOR_SLAB_BENDING);
+            colorParam.AddNamedValue("Slab: Membrane Force", COLOR_SLAB_MEMBRANE);
+            colorParam.AddNamedValue("Slab: Shear Force", COLOR_SLAB_SHEAR);
+            colorParam.AddNamedValue("Slab: Von Mises", COLOR_SLAB_VON_MISES);
+            colorParam.AddNamedValue("Slab: Surface Stress", COLOR_SLAB_SURFACE_STRESS);
+            colorParam.AddNamedValue("Frame: Axial Force", COLOR_FRAME_AXIAL);
+            colorParam.AddNamedValue("Frame: Moment", COLOR_FRAME_MOMENT);
+            colorParam.AddNamedValue("Frame: Shear", COLOR_FRAME_SHEAR);
             pManager.AddParameter(colorParam, "Color By", "ColorBy",
-                "Color mapping: None, Utilization (green→red by demand/capacity), Deflection (blue→red by displacement magnitude), " +
-                "Material (use serialized material color with neutral gray fallback).",
+                "Color mapping: None, Utilization, Deflection, Material, or Analytical modes " +
+                "(Slab: Bending/Membrane/Shear/VonMises/Surface; Frame: Axial/Moment/Shear).",
                 GH_ParamAccess.item);
             pManager[3].Optional = true;
-
-            pManager.AddColourParameter("Utilization Gradient", "UtilizationGradient",
-                "Optional utilization gradient colors (low→high). Leave empty for defaults.",
-                GH_ParamAccess.list);
-            pManager[4].Optional = true;
-
-            pManager.AddColourParameter("Deflection Gradient", "DeflectionGradient",
-                "Optional deflection gradient colors (low→high). Leave empty for defaults.",
-                GH_ParamAccess.list);
-            pManager[5].Optional = true;
         }
 
         protected override void RegisterOutputParams(GH_OutputParamManager pManager)
@@ -263,11 +268,6 @@ namespace Menegroth.GH.Components
 
             int colorByInt = COLOR_UTILIZATION;
             DA.GetData(3, ref colorByInt);
-
-            var utilizationGradient = new List<Color>();
-            DA.GetDataList(4, utilizationGradient);
-            var deflectionGradient = new List<Color>();
-            DA.GetDataList(5, deflectionGradient);
 
             bool isDeflected = modeInt == MODE_DEFLECTED_GLOBAL || modeInt == MODE_DEFLECTED_LOCAL;
             bool isLocal = modeInt == MODE_DEFLECTED_LOCAL;
@@ -327,6 +327,18 @@ namespace Menegroth.GH.Components
 
             double finalScale = scaleMult * result.SuggestedScaleFactor;
             double maxDisp = result.MaxDisplacementFt;
+
+            // Analytical global maxima for color normalization
+            double maxFrameAxial = viz["max_frame_axial"]?.ToObject<double>() ?? 0;
+            double maxFrameMoment = viz["max_frame_moment"]?.ToObject<double>() ?? 0;
+            double maxFrameShear = viz["max_frame_shear"]?.ToObject<double>() ?? 0;
+            double maxSlabBending = viz["max_slab_bending"]?.ToObject<double>() ?? 0;
+            double maxSlabMembrane = viz["max_slab_membrane"]?.ToObject<double>() ?? 0;
+            double maxSlabShear = viz["max_slab_shear"]?.ToObject<double>() ?? 0;
+            double maxSlabVonMises = viz["max_slab_von_mises"]?.ToObject<double>() ?? 0;
+            double maxSlabSurfaceStress = viz["max_slab_surface_stress"]?.ToObject<double>() ?? 0;
+            bool isAnalyticalSlab = colorByInt >= COLOR_SLAB_BENDING && colorByInt <= COLOR_SLAB_SURFACE_STRESS;
+            bool isAnalyticalFrame = colorByInt >= COLOR_FRAME_AXIAL && colorByInt <= COLOR_FRAME_SHEAR;
 
             // Warn early when deflected mesh payload is likely to exhaust viewport memory.
             var slabMeshes = viz["deflected_slab_meshes"] as JArray ?? new JArray();
@@ -497,21 +509,45 @@ namespace Menegroth.GH.Components
                 {
                     double ratio = elem["utilization_ratio"]?.ToObject<double>() ?? 0;
                     bool ok = elem["ok"]?.ToObject<bool>() ?? true;
-                    elementColor = VisualizationColorMapper.UtilizationColor(ratio, ok, utilizationGradient);
+                    elementColor = VisualizationColorMapper.UtilizationColor(ratio, ok, null);
                 }
                 else if (colorByInt == COLOR_DEFLECTION)
                 {
                     double disp = ComputeElementDisplacement(elem, nodes, dispVecs);
-                    elementColor = VisualizationColorMapper.DeflectionColor(disp, maxDisp, deflectionGradient);
+                    elementColor = VisualizationColorMapper.DeflectionColor(disp, maxDisp, null);
                 }
                 else if (colorByInt == COLOR_MATERIAL)
                 {
                     elementColor = VisualizationColorMapper.ResolveMaterialColor(elem["material_color_hex"]?.ToString(), VisualizationColorMapper.DefaultMaterialColor);
                 }
+                else if (isAnalyticalFrame)
+                {
+                    double val = 0;
+                    double maxVal = 0;
+                    if (colorByInt == COLOR_FRAME_AXIAL)
+                    {
+                        val = elem["max_axial_force"]?.ToObject<double>() ?? 0;
+                        maxVal = maxFrameAxial;
+                    }
+                    else if (colorByInt == COLOR_FRAME_MOMENT)
+                    {
+                        val = elem["max_moment"]?.ToObject<double>() ?? 0;
+                        maxVal = maxFrameMoment;
+                    }
+                    else if (colorByInt == COLOR_FRAME_SHEAR)
+                    {
+                        val = elem["max_shear"]?.ToObject<double>() ?? 0;
+                        maxVal = maxFrameShear;
+                    }
+                    elementColor = VisualizationColorMapper.AnalyticalColor(val, maxVal, isDiverging: true);
+                }
+                else if (isAnalyticalSlab)
+                {
+                    // Slab analytical mode: frames get a neutral gray
+                    elementColor = VisualizationColorMapper.DefaultMaterialColor;
+                }
                 else
                 {
-                    // Keep line colors visible when Color By = None.
-                    // Member-type defaults make CC/BC previews immediately readable.
                     elementColor = elemType == "column" ? VisualizationColorMapper.ColumnTypeColor
                         : elemType == "beam" ? VisualizationColorMapper.BeamTypeColor
                         : VisualizationColorMapper.OtherTypeColor;
@@ -540,7 +576,7 @@ namespace Menegroth.GH.Components
                     {
                         AppendDeflectionSegmentedCurves(
                             elementCurve, dispVecs, nodes, ns, ne, isLocal, maxDisp,
-                            columnCurves, columnColors, deflectionGradient);
+                            columnCurves, columnColors);
                     }
                     else
                     {
@@ -554,7 +590,7 @@ namespace Menegroth.GH.Components
                     {
                         AppendDeflectionSegmentedCurves(
                             elementCurve, dispVecs, nodes, ns, ne, isLocal, maxDisp,
-                            beamCurves, beamColors, deflectionGradient);
+                            beamCurves, beamColors);
                     }
                     else
                     {
@@ -573,16 +609,19 @@ namespace Menegroth.GH.Components
             if (_showSlabs)
             {
                 if (isOriginalMode)
-                    BuildOriginalSlabs(viz, slabGeometry, slabColors, colorByInt, maxDisp, utilizationGradient, deflectionGradient);
+                    BuildOriginalSlabs(viz, slabGeometry, slabColors, colorByInt, maxDisp,
+                        maxSlabBending, maxSlabMembrane, maxSlabShear, maxSlabVonMises, maxSlabSurfaceStress);
                 else if (!isDeflected || finalScale <= 0)
-                    BuildSizedSlabs(viz, slabGeometry, slabColors, colorByInt, maxDisp, utilizationGradient, deflectionGradient);
+                    BuildSizedSlabs(viz, slabGeometry, slabColors, colorByInt, maxDisp,
+                        maxSlabBending, maxSlabMembrane, maxSlabShear, maxSlabVonMises, maxSlabSurfaceStress);
                 else
                     BuildDeflectedSlabs(viz, finalScale, showOriginal, slabGeometry, originalSlabs,
-                        slabColors, colorByInt, maxDisp, isLocal, utilizationGradient, deflectionGradient);
+                        slabColors, colorByInt, maxDisp, isLocal,
+                        maxSlabBending, maxSlabMembrane, maxSlabShear, maxSlabVonMises, maxSlabSurfaceStress);
             }
 
             if (showFoundationsEffective)
-                BuildFoundations(viz, foundationGeometry, slabColors, colorByInt, utilizationGradient, deflectionGradient);
+                BuildFoundations(viz, foundationGeometry, slabColors, colorByInt);
 
             var visibleSlabGeometry = new List<IGH_GeometricGoo>();
             if (_showSlabs)
@@ -623,9 +662,21 @@ namespace Menegroth.GH.Components
                 : modeInt == MODE_DEFLECTED_LOCAL ? "Deflected (Local)"
                 : modeInt == MODE_ORIGINAL ? "Original"
                 : "Deflected (Global)";
-            string colorName = colorByInt == COLOR_UTILIZATION ? "Utilization"
-                : colorByInt == COLOR_DEFLECTION ? "Deflection"
-                : colorByInt == COLOR_MATERIAL ? "Material" : "";
+            string colorName = colorByInt switch
+            {
+                COLOR_UTILIZATION => "Utilization",
+                COLOR_DEFLECTION => "Deflection",
+                COLOR_MATERIAL => "Material",
+                COLOR_SLAB_BENDING => "Slab Bending",
+                COLOR_SLAB_MEMBRANE => "Slab Membrane",
+                COLOR_SLAB_SHEAR => "Slab Shear",
+                COLOR_SLAB_VON_MISES => "Slab Von Mises",
+                COLOR_SLAB_SURFACE_STRESS => "Slab Surface σ",
+                COLOR_FRAME_AXIAL => "Frame Axial",
+                COLOR_FRAME_MOMENT => "Frame Moment",
+                COLOR_FRAME_SHEAR => "Frame Shear",
+                _ => "",
+            };
             Message = colorName.Length > 0 ? $"{modeName} | {colorName}" : modeName;
         }
 
@@ -777,6 +828,8 @@ namespace Menegroth.GH.Components
 
         /// <summary>
         /// Build a closed PolylineCurve from polygon vertices [y, z] in the frame's local coordinates.
+        /// The frame from PerpendicularFrameAt has ZAxis = tangent, so the section should be built
+        /// in the XY plane (perpendicular to the curve). v[0] maps to XAxis (width), v[1] maps to YAxis (depth).
         /// </summary>
         private static PolylineCurve BuildSectionCurve(double[][] poly, Plane frame, double tol)
         {
@@ -784,7 +837,8 @@ namespace Menegroth.GH.Components
             foreach (var v in poly)
             {
                 if (v == null || v.Length < 2) continue;
-                pts.Add(frame.Origin + frame.YAxis * v[0] + frame.ZAxis * v[1]);
+                // Section polygon is in the XY plane of the frame (perpendicular to ZAxis/tangent)
+                pts.Add(frame.Origin + frame.XAxis * v[0] + frame.YAxis * v[1]);
             }
             if (pts.Count < 3) return null;
             if (pts[0].DistanceTo(pts[pts.Count - 1]) > tol)
@@ -811,8 +865,7 @@ namespace Menegroth.GH.Components
             bool isLocal,
             double maxDisp,
             List<Curve> targetCurves,
-            List<Color> targetColors,
-            IList<Color> deflectionGradient)
+            List<Color> targetColors)
         {
             if (sourceCurve == null)
                 return;
@@ -824,7 +877,7 @@ namespace Menegroth.GH.Components
             if (segments <= 1)
             {
                 targetCurves.Add(sourceCurve);
-                targetColors.Add(VisualizationColorMapper.DeflectionColor(mags.Length > 0 ? mags[0] : 0.0, maxDisp, deflectionGradient));
+                targetColors.Add(VisualizationColorMapper.DeflectionColor(mags.Length > 0 ? mags[0] : 0.0, maxDisp, null));
                 return;
             }
 
@@ -841,7 +894,7 @@ namespace Menegroth.GH.Components
                 var p1 = sourceCurve.PointAt(t1);
 
                 targetCurves.Add(new Line(p0, p1).ToNurbsCurve());
-                targetColors.Add(VisualizationColorMapper.DeflectionColor(InterpolateMagnitude(mags, tmn), maxDisp, deflectionGradient));
+                targetColors.Add(VisualizationColorMapper.DeflectionColor(InterpolateMagnitude(mags, tmn), maxDisp, null));
             }
         }
 
@@ -997,7 +1050,9 @@ namespace Menegroth.GH.Components
         // ─── Slab helpers ───────────────────────────────────────────────
 
         private static void BuildSizedSlabs(JToken viz, List<IGH_GeometricGoo> output,
-            List<Color> colors, int colorBy, double maxDisp, IList<Color> utilGradient, IList<Color> deflectionGradient)
+            List<Color> colors, int colorBy, double maxDisp,
+            double maxSlabBending = 0, double maxSlabMembrane = 0, double maxSlabShear = 0,
+            double maxSlabVonMises = 0, double maxSlabSurfaceStress = 0)
         {
             var slabs = viz["sized_slabs"] as JArray ?? new JArray();
             var deflectedMeshes = viz["deflected_slab_meshes"] as JArray ?? new JArray();
@@ -1016,20 +1071,25 @@ namespace Menegroth.GH.Components
                 double thickness = slab["thickness"]?.ToObject<double>() ?? 0;
                 double zTop = slab["z_top"]?.ToObject<double>() ?? 0;
                 
+                // For analytical coloring in sized mode, use the deflected mesh data (has face values)
+                meshBySlabId.TryGetValue(slabId, out var analyticalMesh);
+                var analyticalSource = analyticalMesh ?? slab;
+
                 // Check for vault-specific curved mesh (new API field)
                 bool isVault = slab["is_vault"]?.ToObject<bool>() ?? false;
                 if (isVault && TryBuildVaultBrep(slab, thickness, output))
                 {
-                    AppendSlabColor(colors, slab, colorBy, maxDisp, "vertex_displacements", utilGradient, deflectionGradient);
+                    AppendSlabColor(colors, analyticalSource, colorBy, maxDisp, "vertex_displacements",
+                        maxSlabBending, maxSlabMembrane, maxSlabShear, maxSlabVonMises, maxSlabSurfaceStress);
                     continue;
                 }
                 
                 // Fallback: try deflected mesh (for curved slabs from analysis model)
-                if (slabId > 0 &&
-                    meshBySlabId.TryGetValue(slabId, out var meshToken) &&
-                    TryBuildCurvedSizedSlabFromMesh(meshToken, output))
+                if (analyticalMesh != null &&
+                    TryBuildCurvedSizedSlabFromMesh(analyticalMesh, output))
                 {
-                    AppendSlabColor(colors, slab, colorBy, maxDisp, "vertex_displacements", utilGradient, deflectionGradient);
+                    AppendSlabColor(colors, analyticalSource, colorBy, maxDisp, "vertex_displacements",
+                        maxSlabBending, maxSlabMembrane, maxSlabShear, maxSlabVonMises, maxSlabSurfaceStress);
                     continue;
                 }
 
@@ -1058,7 +1118,8 @@ namespace Menegroth.GH.Components
                         output.Add(new GH_Brep(loft[0]));
                     }
 
-                    AppendSlabColor(colors, slab, colorBy, maxDisp, "vertex_displacements", utilGradient, deflectionGradient);
+                    AppendSlabColor(colors, analyticalSource, colorBy, maxDisp, "vertex_displacements",
+                        maxSlabBending, maxSlabMembrane, maxSlabShear, maxSlabVonMises, maxSlabSurfaceStress);
                 }
 
                 AppendDropPanelSizedGeometry(slab, zTop, thickness, output);
@@ -1228,8 +1289,11 @@ namespace Menegroth.GH.Components
 
         private static void BuildDeflectedSlabs(JToken viz, double scale, bool showOriginal,
             List<IGH_GeometricGoo> output, List<IGH_GeometricGoo> origOutput,
-            List<Color> colors, int colorBy, double maxDisp, bool isLocal, IList<Color> utilGradient, IList<Color> deflectionGradient)
+            List<Color> colors, int colorBy, double maxDisp, bool isLocal,
+            double maxSlabBending = 0, double maxSlabMembrane = 0, double maxSlabShear = 0,
+            double maxSlabVonMises = 0, double maxSlabSurfaceStress = 0)
         {
+            bool isAnalyticalSlab = colorBy >= COLOR_SLAB_BENDING && colorBy <= COLOR_SLAB_SURFACE_STRESS;
             var meshes = viz["deflected_slab_meshes"] as JArray ?? new JArray();
             foreach (var m in meshes)
             {
@@ -1239,6 +1303,15 @@ namespace Menegroth.GH.Components
                 var disps = isLocal && dispsLocal.Length > 0 ? dispsLocal : dispsGlobal;
                 var faces = m["faces"]?.ToObject<int[][]>() ?? new int[0][];
                 if (verts.Length == 0) continue;
+
+                // Load per-face analytical arrays when needed
+                double[] faceAnalytical = null;
+                double analyticalMax = 0;
+                bool analyticalDiverging = false;
+                if (isAnalyticalSlab)
+                    ResolveSlabAnalyticalData(m, colorBy, maxSlabBending, maxSlabMembrane,
+                        maxSlabShear, maxSlabVonMises, maxSlabSurfaceStress,
+                        out faceAnalytical, out analyticalMax, out analyticalDiverging);
 
                 var rhinoMesh = new Mesh();
                 var origMesh = showOriginal ? new Mesh() : null;
@@ -1266,9 +1339,6 @@ namespace Menegroth.GH.Components
                     origMesh?.Faces.AddFace(i0, i1, i2);
                 }
 
-                // Per-vertex coloring for mesh preview:
-                // - Deflection mode: color by per-vertex displacement magnitude
-                // - Utilization mode: apply a uniform utilization color per mesh vertex
                 if (colorBy == COLOR_DEFLECTION && disps.Length > 0)
                 {
                     for (int i = 0; i < rhinoMesh.Vertices.Count; i++)
@@ -1278,16 +1348,20 @@ namespace Menegroth.GH.Components
                             mag = Math.Sqrt(disps[i][0] * disps[i][0] +
                                             disps[i][1] * disps[i][1] +
                                             disps[i][2] * disps[i][2]);
-                        rhinoMesh.VertexColors.Add(VisualizationColorMapper.DeflectionColor(mag, maxDisp, deflectionGradient));
+                        rhinoMesh.VertexColors.Add(VisualizationColorMapper.DeflectionColor(mag, maxDisp, null));
                     }
                 }
                 else if (colorBy == COLOR_UTILIZATION)
                 {
                     double ratio = m["utilization_ratio"]?.ToObject<double>() ?? 0;
                     bool ok = m["ok"]?.ToObject<bool>() ?? true;
-                    var utilColor = VisualizationColorMapper.UtilizationColor(ratio, ok, utilGradient);
+                    var utilColor = VisualizationColorMapper.UtilizationColor(ratio, ok, null);
                     for (int i = 0; i < rhinoMesh.Vertices.Count; i++)
                         rhinoMesh.VertexColors.Add(utilColor);
+                }
+                else if (isAnalyticalSlab && faceAnalytical != null)
+                {
+                    ApplyPerFaceVertexColors(rhinoMesh, faces, faceAnalytical, analyticalMax, analyticalDiverging);
                 }
 
                 if (rhinoMesh.Vertices.Count > 0 && rhinoMesh.Faces.Count > 0)
@@ -1307,9 +1381,80 @@ namespace Menegroth.GH.Components
                     string dispField = isLocal && dispsLocal.Length > 0
                         ? "vertex_displacements_local"
                         : "vertex_displacements";
-                    AppendSlabColor(colors, m, colorBy, maxDisp, dispField, utilGradient, deflectionGradient);
+                    AppendSlabColor(colors, m, colorBy, maxDisp, dispField,
+                        maxSlabBending, maxSlabMembrane, maxSlabShear, maxSlabVonMises, maxSlabSurfaceStress);
                 }
             }
+        }
+
+        /// <summary>
+        /// Resolve the correct per-face analytical array, global max, and whether the
+        /// quantity uses a diverging color scheme (signed) vs sequential (always ≥ 0).
+        /// </summary>
+        private static void ResolveSlabAnalyticalData(JToken m, int colorBy,
+            double maxBending, double maxMembrane, double maxShear, double maxVM, double maxSurf,
+            out double[] faceValues, out double maxValue, out bool isDiverging)
+        {
+            string field;
+            switch (colorBy)
+            {
+                case COLOR_SLAB_BENDING:
+                    field = "face_bending_moment"; maxValue = maxBending; isDiverging = true; break;
+                case COLOR_SLAB_MEMBRANE:
+                    field = "face_membrane_force"; maxValue = maxMembrane; isDiverging = true; break;
+                case COLOR_SLAB_SHEAR:
+                    field = "face_shear_force"; maxValue = maxShear; isDiverging = false; break;
+                case COLOR_SLAB_VON_MISES:
+                    field = "face_von_mises"; maxValue = maxVM; isDiverging = false; break;
+                case COLOR_SLAB_SURFACE_STRESS:
+                    field = "face_surface_stress"; maxValue = maxSurf; isDiverging = true; break;
+                default:
+                    faceValues = null; maxValue = 0; isDiverging = false; return;
+            }
+            faceValues = m[field]?.ToObject<double[]>() ?? null;
+        }
+
+        /// <summary>
+        /// Apply per-face analytical colors to a mesh via vertex colors.
+        /// For signed (diverging) quantities, each vertex receives the value from the
+        /// adjacent face with the largest absolute magnitude, preserving sign.
+        /// For unsigned (sequential) quantities, each vertex gets the max adjacent face value.
+        /// </summary>
+        private static void ApplyPerFaceVertexColors(Mesh mesh, int[][] faces,
+            double[] faceValues, double maxValue, bool isDiverging)
+        {
+            int nVerts = mesh.Vertices.Count;
+            var vertVal = new double[nVerts];
+            var vertAbs = new double[nVerts]; // tracks |value| for signed extremum selection
+
+            for (int fi = 0; fi < faces.Length && fi < faceValues.Length; fi++)
+            {
+                double val = faceValues[fi];
+                double absVal = Math.Abs(val);
+                var face = faces[fi];
+                if (face == null || face.Length < 3) continue;
+                for (int k = 0; k < 3; k++)
+                {
+                    int vi = face[k] - 1;
+                    if (vi < 0 || vi >= nVerts) continue;
+                    if (isDiverging)
+                    {
+                        if (absVal > vertAbs[vi])
+                        {
+                            vertVal[vi] = val;
+                            vertAbs[vi] = absVal;
+                        }
+                    }
+                    else
+                    {
+                        if (val > vertVal[vi])
+                            vertVal[vi] = val;
+                    }
+                }
+            }
+
+            for (int i = 0; i < nVerts; i++)
+                mesh.VertexColors.Add(VisualizationColorMapper.AnalyticalColor(vertVal[i], maxValue, isDiverging));
         }
 
         private static void AppendDropPanelSizedGeometry(JToken slab, double zTop, double slabThickness,
@@ -1403,12 +1548,16 @@ namespace Menegroth.GH.Components
         /// by utilization/deflection without drawing displaced geometry.
         /// </summary>
         private static void BuildOriginalSlabs(JToken viz, List<IGH_GeometricGoo> output,
-            List<Color> colors, int colorBy, double maxDisp, IList<Color> utilGradient, IList<Color> deflectionGradient)
+            List<Color> colors, int colorBy, double maxDisp,
+            double maxSlabBending = 0, double maxSlabMembrane = 0, double maxSlabShear = 0,
+            double maxSlabVonMises = 0, double maxSlabSurfaceStress = 0)
         {
+            bool isAnalyticalSlab = colorBy >= COLOR_SLAB_BENDING && colorBy <= COLOR_SLAB_SURFACE_STRESS;
             var meshes = viz["deflected_slab_meshes"] as JArray ?? new JArray();
             if (meshes.Count == 0)
             {
-                BuildSizedSlabs(viz, output, colors, colorBy, maxDisp, utilGradient, deflectionGradient);
+                BuildSizedSlabs(viz, output, colors, colorBy, maxDisp,
+                    maxSlabBending, maxSlabMembrane, maxSlabShear, maxSlabVonMises, maxSlabSurfaceStress);
                 return;
             }
 
@@ -1417,6 +1566,14 @@ namespace Menegroth.GH.Components
                 var verts = m["vertices"]?.ToObject<double[][]>() ?? new double[0][];
                 var faces = m["faces"]?.ToObject<int[][]>() ?? new int[0][];
                 if (verts.Length == 0) continue;
+
+                double[] faceAnalytical = null;
+                double analyticalMax = 0;
+                bool analyticalDiverging = false;
+                if (isAnalyticalSlab)
+                    ResolveSlabAnalyticalData(m, colorBy, maxSlabBending, maxSlabMembrane,
+                        maxSlabShear, maxSlabVonMises, maxSlabSurfaceStress,
+                        out faceAnalytical, out analyticalMax, out analyticalDiverging);
 
                 var rhinoMesh = new Mesh();
                 for (int i = 0; i < verts.Length; i++)
@@ -1436,18 +1593,22 @@ namespace Menegroth.GH.Components
                     rhinoMesh.Faces.AddFace(i0, i1, i2);
                 }
 
+                if (isAnalyticalSlab && faceAnalytical != null)
+                    ApplyPerFaceVertexColors(rhinoMesh, faces, faceAnalytical, analyticalMax, analyticalDiverging);
+
                 if (rhinoMesh.Vertices.Count > 0 && rhinoMesh.Faces.Count > 0)
                 {
                     rhinoMesh.Normals.ComputeNormals();
                     rhinoMesh.Compact();
                     output.Add(new GH_Mesh(rhinoMesh));
-                    AppendSlabColor(colors, m, colorBy, maxDisp, "vertex_displacements", utilGradient, deflectionGradient);
+                    AppendSlabColor(colors, m, colorBy, maxDisp, "vertex_displacements",
+                        maxSlabBending, maxSlabMembrane, maxSlabShear, maxSlabVonMises, maxSlabSurfaceStress);
                 }
             }
         }
 
         private static void BuildFoundations(JToken viz, List<IGH_GeometricGoo> output,
-            List<Color> colors, int colorBy, IList<Color> utilGradient, IList<Color> deflectionGradient)
+            List<Color> colors, int colorBy)
         {
             var foundations = viz["foundations"] as JArray ?? new JArray();
             foreach (var f in foundations)
@@ -1481,11 +1642,11 @@ namespace Menegroth.GH.Components
                 {
                     double ratio = f["utilization_ratio"]?.ToObject<double>() ?? 0;
                     bool ok = f["ok"]?.ToObject<bool>() ?? true;
-                    colors.Add(VisualizationColorMapper.UtilizationColor(ratio, ok, utilGradient));
+                    colors.Add(VisualizationColorMapper.UtilizationColor(ratio, ok, null));
                 }
                 else if (colorBy == COLOR_DEFLECTION)
                 {
-                    colors.Add(VisualizationColorMapper.DeflectionColor(0.0, 1.0, deflectionGradient));
+                    colors.Add(VisualizationColorMapper.DeflectionColor(0.0, 1.0, null));
                 }
                 else if (colorBy == COLOR_MATERIAL)
                 {
@@ -1506,15 +1667,17 @@ namespace Menegroth.GH.Components
         /// </summary>
         private static void AppendSlabColor(List<Color> colors, JToken element,
             int colorBy, double maxDisp, string displacementField = "vertex_displacements",
-            IList<Color> utilGradient = null, IList<Color> deflectionGradient = null)
+            double maxSlabBending = 0, double maxSlabMembrane = 0, double maxSlabShear = 0,
+            double maxSlabVonMises = 0, double maxSlabSurfaceStress = 0)
         {
             bool isVault = element["is_vault"]?.ToObject<bool>() ?? false;
-            
+            bool isAnalyticalSlab = colorBy >= COLOR_SLAB_BENDING && colorBy <= COLOR_SLAB_SURFACE_STRESS;
+
             if (colorBy == COLOR_UTILIZATION)
             {
                 double ratio = element["utilization_ratio"]?.ToObject<double>() ?? 0;
                 bool ok = element["ok"]?.ToObject<bool>() ?? true;
-                colors.Add(VisualizationColorMapper.UtilizationColor(ratio, ok, utilGradient));
+                colors.Add(VisualizationColorMapper.UtilizationColor(ratio, ok, null));
             }
             else if (colorBy == COLOR_DEFLECTION)
             {
@@ -1531,27 +1694,45 @@ namespace Menegroth.GH.Components
                         }
                     }
                 }
-                colors.Add(VisualizationColorMapper.DeflectionColor(maxVertDisp, maxDisp, deflectionGradient));
+                colors.Add(VisualizationColorMapper.DeflectionColor(maxVertDisp, maxDisp, null));
             }
             else if (colorBy == COLOR_MATERIAL)
             {
-                // Vaults use earthen material; flat slabs use concrete or serialized color
                 if (isVault)
-                {
                     colors.Add(VisualizationColorMapper.EarthenMaterialColor);
-                }
                 else
-                {
                     colors.Add(VisualizationColorMapper.ResolveMaterialColor(
-                        element["material_color_hex"]?.ToString(), 
+                        element["material_color_hex"]?.ToString(),
                         VisualizationColorMapper.ConcreteMaterialColor));
+            }
+            else if (isAnalyticalSlab)
+            {
+                ResolveSlabAnalyticalData(element, colorBy, maxSlabBending, maxSlabMembrane,
+                    maxSlabShear, maxSlabVonMises, maxSlabSurfaceStress,
+                    out var faceValues, out var maxVal, out var diverging);
+                double repValue = 0;
+                if (faceValues != null && faceValues.Length > 0)
+                {
+                    if (diverging)
+                    {
+                        double repAbs = 0;
+                        foreach (var v in faceValues)
+                        {
+                            if (Math.Abs(v) > repAbs) { repAbs = Math.Abs(v); repValue = v; }
+                        }
+                    }
+                    else
+                    {
+                        foreach (var v in faceValues)
+                            if (v > repValue) repValue = v;
+                    }
                 }
+                colors.Add(VisualizationColorMapper.AnalyticalColor(repValue, maxVal, diverging));
             }
             else
             {
-                // Default/None mode: still differentiate vaults from flat slabs
-                colors.Add(isVault 
-                    ? VisualizationColorMapper.EarthenMaterialColor 
+                colors.Add(isVault
+                    ? VisualizationColorMapper.EarthenMaterialColor
                     : VisualizationColorMapper.DefaultMaterialColor);
             }
         }

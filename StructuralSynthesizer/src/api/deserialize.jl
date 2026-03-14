@@ -445,6 +445,11 @@ const CONCRETE_MAP = Dict{String, StructuralSizer.Concrete}(
     "NWC_4000" => StructuralSizer.NWC_4000,
     "NWC_5000" => StructuralSizer.NWC_5000,
     "NWC_6000" => StructuralSizer.NWC_6000,
+    "Earthen_500" => StructuralSizer.Earthen_500,
+    "Earthen_1000" => StructuralSizer.Earthen_1000,
+    "Earthen_2000" => StructuralSizer.Earthen_2000,
+    "Earthen_4000" => StructuralSizer.Earthen_4000,
+    "Earthen_8000" => StructuralSizer.Earthen_8000,
 )
 
 const REBAR_MAP = Dict{String, StructuralSizer.RebarSteel}(

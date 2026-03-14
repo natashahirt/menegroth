@@ -78,7 +78,7 @@ function api_input_schema()
                 ),
                 "scoped_overrides" => "Optional list of scoped floor overrides. Each override provides face polygons and floor-specific options applied only to matching cells.",
                 "materials" => Dict(
-                    "concrete" => "Slab/floor concrete (e.g. NWC_4000). Default: NWC_4000.",
+                    "concrete" => "Slab/floor concrete (e.g. NWC_4000, Earthen_500, Earthen_2000). Default: NWC_4000.",
                     "column_concrete" => "Column concrete (e.g. NWC_6000). Default: NWC_6000.",
                     "rebar" => "Rebar name (e.g. Rebar_60). Default: Rebar_60.",
                     "steel" => "Steel name (e.g. A992). Default: A992.",
@@ -391,6 +391,10 @@ Base.@kwdef struct APIVisualizationFrameElement
     # Interpolated deflected curve (cubic interpolation from FEA)
     original_points::Vector{Vector{Float64}} = []   # [[x,y,z], ...] original positions in feet
     displacement_vectors::Vector{Vector{Float64}} = []  # [[dx,dy,dz], ...] displacements at each point in feet
+    # Analytical: signed extremum along element length (value with largest |·|, sign preserved)
+    max_axial_force::Float64 = 0.0   # signed P extremum [N] (+ tension, − compression)
+    max_moment::Float64 = 0.0        # signed M extremum [N·m] (largest |My| or |Mz|)
+    max_shear::Float64 = 0.0         # signed V extremum [N] (largest |Vy| or |Vz|)
 end
 
 """Slab geometry for sized mode (3D boxes from cell boundaries)."""
@@ -428,6 +432,13 @@ Base.@kwdef struct APIDeflectedSlabMesh
     utilization_ratio::Float64 = 0.0
     ok::Bool = true
     is_vault::Bool = false  # For material coloring (earthen vs concrete)
+    # Analytical: per-face scalar values for force/stress visualization (one per face, face order matches `faces`)
+    # Signed quantities use diverging color (red + → white → blue −); von Mises/shear are always ≥ 0.
+    face_bending_moment::Vector{Float64} = []   # signed dominant principal moment [N·m/m] (+ sagging, − hogging)
+    face_membrane_force::Vector{Float64} = []   # signed dominant principal membrane force [N/m] (+ tension, − compression)
+    face_shear_force::Vector{Float64} = []      # √(Qxz² + Qyz²) transverse shear resultant [N/m] (always ≥ 0)
+    face_von_mises::Vector{Float64} = []        # max von Mises stress at top/bottom surface [Pa] (always ≥ 0)
+    face_surface_stress::Vector{Float64} = []   # signed dominant principal stress at top/bottom [Pa] (+ tension, − compression)
 end
 
 """Foundation geometry for visualization (axis-aligned block centered at support group centroid)."""
@@ -451,6 +462,15 @@ Base.@kwdef struct APIVisualization
     is_beamless_system::Bool = false
     suggested_scale_factor::Float64 = 1.0
     max_displacement::Float64 = 0.0
+    # Global maxima for analytical color normalization (max |value| for diverging scale symmetry)
+    max_frame_axial::Float64 = 0.0      # max |P| across all frame elements [N]
+    max_frame_moment::Float64 = 0.0     # max |M| across all frame elements [N·m]
+    max_frame_shear::Float64 = 0.0      # max |V| across all frame elements [N]
+    max_slab_bending::Float64 = 0.0     # max |principal moment| across all slab faces [N·m/m]
+    max_slab_membrane::Float64 = 0.0    # max |principal membrane force| across all faces [N/m]
+    max_slab_shear::Float64 = 0.0       # max transverse shear across all faces [N/m] (≥ 0)
+    max_slab_von_mises::Float64 = 0.0   # max von Mises stress across all faces [Pa] (≥ 0)
+    max_slab_surface_stress::Float64 = 0.0 # max |principal stress| across all faces [Pa]
 end
 
 """Top-level output payload."""

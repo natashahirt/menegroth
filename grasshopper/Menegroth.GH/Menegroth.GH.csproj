@@ -23,6 +23,11 @@
     <Reference Include="System.Windows.Forms" />
   </ItemGroup>
 
+  <!-- Ribbon icon (assembly/tab icon only; component icons are separate) -->
+  <ItemGroup>
+    <EmbeddedResource Include="..\..\assets\menegroth_logo_48w.png" LogicalName="Menegroth.GH.Resources.menegroth_icon.png" />
+  </ItemGroup>
+
   <!-- Auto-copy .gha to Grasshopper Libraries folder after build -->
   <Target Name="CopyToGH" AfterTargets="Build">
     <Copy SourceFiles="$(TargetPath)"

@@ -237,10 +237,11 @@ namespace Menegroth.GH.Components
             string section = _section == "beam" ? "Beam" : "Col";
             string type = GetTypeLabel();
             
-            // Update both Name and Message
-            Name = $"{type} {section} {solver}";
-            NickName = $"{type[0]}{section[0]}{solver[0]}"; // e.g., "SWB" for Steel W Beam
-            Message = $"{type} {section} {solver}";
+            // NickName is what shows on the component itself
+            // Message shows below the component
+            string displayName = $"{type} {section} {solver}";
+            NickName = displayName;
+            Message = displayName;
         }
 
         public override bool Write(GH_IO.Serialization.GH_IWriter writer)

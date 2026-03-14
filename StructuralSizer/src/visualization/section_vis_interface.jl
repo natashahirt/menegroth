@@ -12,9 +12,14 @@
 #
 # Available geometry traits:
 #   - SolidRect:    Solid rectangular (RC columns/beams, glulam)
+#   - SolidRound:   Solid circular (RC circular columns)
 #   - HollowRect:   Hollow rectangular (HSS rect)
 #   - HollowRound:  Hollow circular (HSS round, pipe)
 #   - IShape:       Doubly-symmetric I-section (W-shapes)
+#   - TShape:       T-beam (RC T-beams with effective flange)
+#
+# PixelFrameSection uses a direct section_polygon override (compound geometry
+# from radial sweep that doesn't fit a simple trait).
 #
 # =============================================================================
 
@@ -30,6 +35,9 @@ abstract type AbstractSectionGeometry end
 """Solid rectangular section (RC columns, RC beams, glulam, etc.)."""
 struct SolidRect <: AbstractSectionGeometry end
 
+"""Solid circular section (RC circular columns)."""
+struct SolidRound <: AbstractSectionGeometry end
+
 """Hollow rectangular section (HSS rect, box sections)."""
 struct HollowRect <: AbstractSectionGeometry end
 
@@ -38,6 +46,9 @@ struct HollowRound <: AbstractSectionGeometry end
 
 """Doubly-symmetric I-section (W-shapes, wide-flange beams)."""
 struct IShape <: AbstractSectionGeometry end
+
+"""T-beam section (RC T-beams with effective flange)."""
+struct TShape <: AbstractSectionGeometry end
 
 # =============================================================================
 # Trait Assignment Interface
@@ -128,26 +139,31 @@ section_rebar_radius(::AbstractSection) = 0.0
 # These must come after section types are defined (in _members.jl).
 # Grouped here for easy reference of all visualization traits.
 
-"""W-shapes visualize as doubly-symmetric I-sections."""
+# Steel
 section_geometry(::Type{<:ISymmSection}) = IShape()
-"""HSS rectangular sections visualize as hollow rectangles."""
 section_geometry(::Type{<:HSSRectSection}) = HollowRect()
-"""HSS round sections visualize as hollow circles."""
 section_geometry(::Type{<:HSSRoundSection}) = HollowRound()
 
-"""RC columns visualize as solid rectangles."""
+# Concrete — rectangular
 section_geometry(::Type{<:RCColumnSection}) = SolidRect()
-"""RC beams visualize as solid rectangles."""
 section_geometry(::Type{<:RCBeamSection}) = SolidRect()
 
-"""RC columns have rebar when their `bars` vector is non-empty."""
+# Concrete — circular
+section_geometry(::Type{<:RCCircularSection}) = SolidRound()
+
+# Concrete — T-beam
+section_geometry(::Type{<:RCTBeamSection}) = TShape()
+
+# Timber
+section_geometry(::Type{<:GlulamSection}) = SolidRect()
+
+# RC column rebar visualization
 has_rebar(sec::RCColumnSection) = !isempty(sec.bars)
 
 """Rebar positions in centroid-relative (y, z) coordinates (meters) for an RC column."""
 function section_rebar_positions(sec::RCColumnSection)
     b = ustrip(u"m", section_width(sec))
     h = ustrip(u"m", section_depth(sec))
-    # Bars stored with x,y from bottom-left corner → centroid-relative
     return [(ustrip(u"m", bar.x) - b/2, 
              ustrip(u"m", bar.y) - h/2) for bar in sec.bars]
 end
@@ -159,9 +175,6 @@ function section_rebar_radius(sec::RCColumnSection)
     return sqrt(As / π)
 end
 
-"""Glulam sections visualize as solid rectangles."""
-section_geometry(::Type{<:GlulamSection}) = SolidRect()
-
 # =============================================================================
 # Section Polygon Interface
 # =============================================================================
@@ -170,8 +183,10 @@ section_geometry(::Type{<:GlulamSection}) = SolidRect()
 # Returns Vector{NTuple{2, Float64}} in meters, centroid at origin, y = width, z = depth.
 # Used by API serialization and visualization (e.g. Grasshopper section sweep).
 #
-# PixelFrameSection stores polygon geometry in sec.section (CompoundSection);
-# other types derive from dimensions (b, h, D, etc.).
+# All trait-based implementations go through:
+#   section_polygon(sec) → _section_polygon(section_geometry(sec), sec)
+#
+# PixelFrameSection uses a direct override (compound radial-sweep geometry).
 # =============================================================================
 
 """
@@ -197,6 +212,13 @@ function _section_polygon(::SolidRect, sec)
     return NTuple{2, Float64}[
         (-w/2, -d/2), (w/2, -d/2), (w/2, d/2), (-w/2, d/2)
     ]
+end
+
+# --- Solid Round (RCCircularSection) ---
+function _section_polygon(::SolidRound, sec; n_segments::Int=24)
+    r = ustrip(u"m", section_width(sec)) / 2
+    θ = range(0, 2π, length=n_segments + 1)[1:end-1]
+    return NTuple{2, Float64}[(r * cos(t), r * sin(t)) for t in θ]
 end
 
 # --- Hollow Rectangular (HSS rect) ---
@@ -252,27 +274,23 @@ function _section_polygon(::IShape, sec)
     ]
 end
 
-# --- RCCircularSection: circle (override; default SolidRect would give square) ---
-function section_polygon(sec::RCCircularSection)
-    r = section_width(sec) / 2
-    θ = range(0, 2π, length=25)[1:end-1]
-    return NTuple{2, Float64}[(r * cos(t), r * sin(t)) for t in θ]
-end
+# --- T-Shape (RC T-beams) ---
+# Centroid is at the composite centroid of flange + web, not at mid-height.
+function _section_polygon(::TShape, sec)
+    bw_m = ustrip(u"m", section_width(sec))       # web width
+    bf_m = ustrip(u"m", flange_width(sec))         # flange width
+    h_m  = ustrip(u"m", section_depth(sec))        # total depth
+    hf_m = ustrip(u"m", flange_thickness(sec))     # flange thickness
 
-# --- RCTBeamSection: T-beam outline ---
-function section_polygon(sec::RCTBeamSection)
-    bw = sec.bw
-    bf = sec.bf
-    h = sec.h
-    hf = sec.hf
-    Af = bf * hf
-    Aw = bw * (h - hf)
-    ybar_from_top = (Af * (hf / 2) + Aw * (hf + (h - hf) / 2)) / (Af + Aw)
-    z_top = ustrip(u"m", h - ybar_from_top)
-    z_bot = -ustrip(u"m", ybar_from_top)
-    z_flange_bot = ustrip(u"m", h - hf - ybar_from_top)
-    bw_m = ustrip(u"m", bw)
-    bf_m = ustrip(u"m", bf)
+    # Composite centroid measured from top fiber
+    Af = bf_m * hf_m
+    Aw = bw_m * (h_m - hf_m)
+    ybar_from_top = (Af * (hf_m / 2) + Aw * (hf_m + (h_m - hf_m) / 2)) / (Af + Aw)
+
+    z_top = h_m - ybar_from_top
+    z_bot = -ybar_from_top
+    z_flange_bot = h_m - hf_m - ybar_from_top
+
     return NTuple{2, Float64}[
         (-bw_m/2, z_bot), (bw_m/2, z_bot), (bw_m/2, z_flange_bot),
         (bf_m/2, z_flange_bot), (bf_m/2, z_top), (-bf_m/2, z_top),
@@ -280,7 +298,7 @@ function section_polygon(sec::RCTBeamSection)
     ]
 end
 
-# --- PixelFrameSection: extract from stored CompoundSection (like PixelFrame) ---
+# --- PixelFrameSection: compound geometry from radial sweep (no trait) ---
 function section_polygon(sec::PixelFrameSection)
     return _pixelframe_envelope_polygon(sec.section)
 end

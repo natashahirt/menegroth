@@ -136,6 +136,86 @@ namespace Menegroth.GH.Helpers
             return parsed ?? fallback;
         }
 
+        /// <summary>
+        /// Diverging color for signed analytical quantities.
+        /// Negative (compression/hogging) → blue, zero → white, positive (tension/sagging) → red.
+        /// <paramref name="absMax"/> is the max |value| across the building (symmetric normalization).
+        /// </summary>
+        public static Color DivergingColor(double value, double absMax)
+        {
+            if (absMax < 1e-12)
+                return Color.FromArgb(235, 235, 235);
+
+            // Map to [-1, +1]
+            double t = Math.Max(-1.0, Math.Min(value / absMax, 1.0));
+
+            int r, g, b;
+            if (t >= 0)
+            {
+                // White → red (positive / tension / sagging)
+                r = 255;
+                g = (int)(255 * (1.0 - t));
+                b = (int)(255 * (1.0 - t));
+            }
+            else
+            {
+                // White → blue (negative / compression / hogging)
+                double s = -t;
+                r = (int)(255 * (1.0 - s));
+                g = (int)(255 * (1.0 - s));
+                b = 255;
+            }
+
+            return Color.FromArgb(
+                Math.Max(0, Math.Min(255, r)),
+                Math.Max(0, Math.Min(255, g)),
+                Math.Max(0, Math.Min(255, b)));
+        }
+
+        /// <summary>
+        /// Sequential color for always-positive analytical quantities (von Mises, shear magnitude).
+        /// 0 → light gray/white, max → deep orange/red.
+        /// </summary>
+        public static Color SequentialColor(double value, double maxValue)
+        {
+            if (maxValue < 1e-12)
+                return Color.FromArgb(235, 235, 235);
+
+            double t = Math.Max(0.0, Math.Min(value / maxValue, 1.0));
+
+            // White → yellow → orange → red
+            int r, g, b;
+            if (t <= 0.5)
+            {
+                double s = t / 0.5;
+                r = (int)(240 + s * 15);
+                g = (int)(240 - s * 50);
+                b = (int)(240 - s * 200);
+            }
+            else
+            {
+                double s = (t - 0.5) / 0.5;
+                r = 255;
+                g = (int)(190 - s * 160);
+                b = (int)(40 - s * 40);
+            }
+
+            return Color.FromArgb(
+                Math.Max(0, Math.Min(255, r)),
+                Math.Max(0, Math.Min(255, g)),
+                Math.Max(0, Math.Min(255, b)));
+        }
+
+        /// <summary>
+        /// Dispatch to the correct analytical ramp based on whether the quantity is signed or absolute.
+        /// Signed: bending moment, membrane force, surface stress, frame axial/moment/shear.
+        /// Absolute: von Mises, transverse shear magnitude.
+        /// </summary>
+        public static Color AnalyticalColor(double value, double absMax, bool isDiverging)
+        {
+            return isDiverging ? DivergingColor(value, absMax) : SequentialColor(value, absMax);
+        }
+
         public static Color InterpolateGradient(IList<Color> gradient, double t)
         {
             if (gradient == null || gradient.Count == 0)

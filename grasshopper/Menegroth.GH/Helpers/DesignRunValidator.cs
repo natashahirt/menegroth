@@ -26,7 +26,7 @@ namespace Menegroth.GH.Helpers
         private static readonly HashSet<string> ValidBeamCatalogs =
             new HashSet<string> { "standard", "small", "large", "xlarge", "all", "custom" };
         private static readonly HashSet<string> ValidConcretes =
-            new HashSet<string> { "NWC_3000", "NWC_4000", "NWC_5000", "NWC_6000" };
+            new HashSet<string> { "NWC_3000", "NWC_4000", "NWC_5000", "NWC_6000", "Earthen_500", "Earthen_1000", "Earthen_2000", "Earthen_4000", "Earthen_8000" };
         private static readonly HashSet<string> ValidRebars =
             new HashSet<string> { "Rebar_40", "Rebar_60", "Rebar_75", "Rebar_80" };
         private static readonly HashSet<string> ValidSteels =

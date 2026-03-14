@@ -365,11 +365,6 @@ function _reconcile_columns!(struc::BuildingStructure, params::DesignParameters)
         
         # Extract max axial from Asap model
         Pu_N = _column_asap_Pu(struc, col)
-        Pu_N ≤ 0 && continue
-        
-        # Required area: ϕ Pn = 0.65 × 0.80 × f'c × Ag  (ACI 318 pure compression)
-        Ag_required_m2 = Pu_N / (0.65 * 0.80 * fc_Pa)
-        Ag_required = Ag_required_m2 * u"m^2"
         
         # Use shape-aware growth if column_opts are available in params
         _col_opts = _get_column_opts(params)
@@ -377,28 +372,73 @@ function _reconcile_columns!(struc::BuildingStructure, params::DesignParameters)
         _max_ar   = !isnothing(_col_opts) ? _col_opts.max_aspect_ratio : 2.0
         _c_inc    = !isnothing(_col_opts) ? _col_opts.size_increment : 0.5u"inch"
         
-        c_required = sqrt(Ag_required_m2) * u"m"
-        if c_required > col.c1 || c_required > col.c2
-            grow_column_for_axial!(col, Ag_required;
-                                    shape_constraint=_shape_con, max_ar=_max_ar,
-                                    increment=_c_inc)
-            grew += 1
+        # Check if column needs to grow for axial capacity
+        needs_growth = false
+        if Pu_N > 0
+            # Required area: ϕ Pn = 0.65 × 0.80 × f'c × Ag  (ACI 318 pure compression)
+            Ag_required_m2 = Pu_N / (0.65 * 0.80 * fc_Pa)
+            Ag_required = Ag_required_m2 * u"m^2"
+            c_required = sqrt(Ag_required_m2) * u"m"
+            if c_required > col.c1 || c_required > col.c2
+                grow_column_for_axial!(col, Ag_required;
+                                        shape_constraint=_shape_con, max_ar=_max_ar,
+                                        increment=_c_inc)
+                grew += 1
+                needs_growth = true
+            end
+        end
 
-            # Push updated gross-property section to Asap model elements
-            b_m = ustrip(u"m", col.c1)
-            h_m = ustrip(u"m", col.c2)
-            A   = b_m * h_m
-            Ig_x = b_m * h_m^3 / 12
-            Ig_y = h_m * b_m^3 / 12
-            a_dim = max(b_m, h_m); b_dim = min(b_m, h_m)
-            β = 1/3 - 0.21 * (b_dim / a_dim) * (1 - (b_dim / a_dim)^4 / 12)
-
-            asap_sec = Asap.Section(
-                A * u"m^2", E_Pa * u"Pa", G_Pa * u"Pa",
-                I_factor * Ig_x * u"m^4", I_factor * Ig_y * u"m^4",
-                I_factor * β * a_dim * b_dim^3 * u"m^4",
-                ρ_kg * u"kg/m^3",
+        # Always create an RC section for visualization (and update Asap section if grew)
+        b_m = ustrip(u"m", col.c1)
+        h_m = ustrip(u"m", col.c2)
+        
+        # Create RC section with minimum reinforcement for visualization serialization.
+        # Branch on shape: rectangular → RCColumnSection, circular → RCCircularSection.
+        # This ensures section_polygon is populated correctly in the API output.
+        col_shape = hasproperty(col, :shape) ? col.shape : :rectangular
+        if col_shape == :circular
+            # For circular: c1 = c2 = D (diameter). RCCircularSection needs min 6 bars.
+            rc_section = StructuralSizer.RCCircularSection(
+                D = col.c1,
+                bar_size = 8,
+                n_bars = 6,  # Minimum for spiral per ACI
             )
+        else
+            rc_section = StructuralSizer.RCColumnSection(
+                b = col.c1,
+                h = col.c2,
+                bar_size = 8,
+                n_bars = 4,  # Minimum bars per ACI 10.7.3.1
+            )
+        end
+        set_section!(col, rc_section)
+        
+        # Update Asap model elements if column grew
+        if needs_growth
+            if col_shape == :circular
+                D_m = b_m  # c1 = c2 = D for circular
+                A = π * D_m^2 / 4
+                I = π * D_m^4 / 64  # Same for both axes
+                J = π * D_m^4 / 32  # Torsional constant, solid circular
+                asap_sec = Asap.Section(
+                    A * u"m^2", E_Pa * u"Pa", G_Pa * u"Pa",
+                    I_factor * I * u"m^4", I_factor * I * u"m^4",
+                    I_factor * J * u"m^4",
+                    ρ_kg * u"kg/m^3",
+                )
+            else
+                A   = b_m * h_m
+                Ig_x = b_m * h_m^3 / 12
+                Ig_y = h_m * b_m^3 / 12
+                a_dim = max(b_m, h_m); b_dim = min(b_m, h_m)
+                β = 1/3 - 0.21 * (b_dim / a_dim) * (1 - (b_dim / a_dim)^4 / 12)
+                asap_sec = Asap.Section(
+                    A * u"m^2", E_Pa * u"Pa", G_Pa * u"Pa",
+                    I_factor * Ig_x * u"m^4", I_factor * Ig_y * u"m^4",
+                    I_factor * β * a_dim * b_dim^3 * u"m^4",
+                    ρ_kg * u"kg/m^3",
+                )
+            end
 
             for seg_idx in segment_indices(col)
                 edge_idx = struc.segments[seg_idx].edge_idx
@@ -423,6 +463,26 @@ function _reconcile_columns!(struc::BuildingStructure, params::DesignParameters)
     end
 
     return (struc = struc, n_reconciled = grew, synced = synced)
+end
+
+"""
+    _ensure_beam_sections_for_visualization!(struc, params)
+
+Assign nominal RC beam sections to beams that have no section (e.g. when beam sizing
+was skipped for flat plate/flat slab). Ensures section_polygon is populated in API output.
+"""
+function _ensure_beam_sections_for_visualization!(struc::BuildingStructure, params::DesignParameters)
+    for beam in struc.beams
+        !isnothing(section(beam)) && continue
+        # Nominal rectangular section for visualization (12×18 in typical for spandrel)
+        sec = StructuralSizer.RCBeamSection(
+            b = 12.0u"inch",
+            h = 18.0u"inch",
+            bar_size = 8,
+            n_bars = 4,
+        )
+        set_section!(beam, sec)
+    end
 end
 
 """Extract max axial force (N) for a column from the Asap model."""
@@ -457,6 +517,7 @@ function _size_beams_columns!(struc::BuildingStructure, params::DesignParameters
         if all(ft -> ft in (:flat_plate, :flat_slab, :grade, :roof), floor_types)
             @warn "Skipping beam sizing for slab-only floor system in beam+column stage" floor_types=collect(floor_types)
             _reconcile_columns!(struc, params)
+            _ensure_beam_sections_for_visualization!(struc, params)
             return struc
         end
     end

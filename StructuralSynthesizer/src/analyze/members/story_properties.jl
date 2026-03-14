@@ -177,13 +177,12 @@ end
 
 """Estimate column axial load from tributary area and loads. Returns Force (kip)."""
 function _estimate_column_axial(struc, col)
-    # Get tributary area
+    # Get tributary area (column_tributary_by_cell returns Dict{Int, AreaQuantity})
     trib = column_tributary_by_cell(struc, col)
     
     Pu = 0.0kip
-    for (cell_idx, area_m2) in trib
+    for (cell_idx, area) in trib
         cell = struc.cells[cell_idx]
-        area = area_m2 * u"m^2"
         
         # Governing factored load (ASCE 7 §2.3.1: max of 1.2D+1.6L, 1.4D)
         qD = cell.sdl + cell.self_weight

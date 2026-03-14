@@ -996,12 +996,31 @@ function build_analysis_model!(design::BuildingDesign;
         refinement_targets=refinement_targets,
     )
 
-    # ─── 3. Create nodes (same as struc.asap_model) ───
+    # ─── 3. Create nodes with structural offsets (same as to_asap!) ───
+    # Build vertex → offset lookup from columns (shifts edge/corner columns inward)
+    col_offset_by_vertex = Dict{Int, NTuple{2, Float64}}()
+    for col in struc.columns
+        off = col.structural_offset
+        (off[1] == 0.0 && off[2] == 0.0) && continue
+        for seg_idx in segment_indices(col)
+            seg_idx > length(struc.segments) && continue
+            edge_idx = struc.segments[seg_idx].edge_idx
+            (edge_idx < 1 || edge_idx > length(skel.edge_indices)) && continue
+            v1, v2 = skel.edge_indices[edge_idx]
+            col_offset_by_vertex[v1] = off
+            col_offset_by_vertex[v2] = off
+        end
+    end
+    
     support_set = Set(get(skel.groups_vertices, :support, Int[]))
     vc = skel.geometry.vertex_coords
     nodes = [begin
+        off = get(col_offset_by_vertex, i, nothing)
+        x = (vc[i, 1] + (isnothing(off) ? 0.0 : off[1])) * u"m"
+        y = (vc[i, 2] + (isnothing(off) ? 0.0 : off[2])) * u"m"
+        z = vc[i, 3] * u"m"
         dofs = i in support_set ? [false, false, false, false, false, false] : [true, true, true, false, false, false]
-        Asap.Node([vc[i,1]*u"m", vc[i,2]*u"m", vc[i,3]*u"m"], dofs)
+        Asap.Node([x, y, z], dofs)
     end for i in eachindex(skel.vertices)]
     
     # ─── 4. Copy frame elements from selected groups ───

@@ -17,6 +17,7 @@ namespace Menegroth.GH
         public override string AuthorName => "Natasha K. Hirt";
         public override string AuthorContact => "";
         public override string Version => "0.1.0";
-        public override Bitmap? Icon => null;
+
+        public override Bitmap? Icon => IconResources.RibbonIcon;
     }
 }

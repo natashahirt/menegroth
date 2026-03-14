@@ -179,12 +179,12 @@ Two variants are supported:
 
 An equivalent frame is constructed along one direction with:
 
-- **Slab-beam stiffness** ``K_{sb}`` from PCA Table A1 (non-prismatic for drop
+- **Slab-beam stiffness** \(K_{sb}\) from PCA Table A1 (non-prismatic for drop
   panels, using `pca_slab_beam_factors_np`)
-- **Column stiffness** ``K_c`` from PCA Table A7 (optionally cracked, ``0.70\,I_g``
+- **Column stiffness** \(K_c\) from PCA Table A7 (optionally cracked, \(0.70\,I_g\)
   per ACI §10.10.4.1)
-- **Torsional member stiffness** ``K_t = \frac{9\,E_c\,C}{l_2\,(1 - c_2/l_2)^3}``
-- **Equivalent column stiffness** ``K_{ec} = \frac{K_c \cdot K_t}{K_c + K_t}``
+- **Torsional member stiffness** \(K_t = \frac{9\,E_c\,C}{l_2\,(1 - c_2/l_2)^3}\)
+- **Equivalent column stiffness** \(K_{ec} = \frac{K_c \cdot K_t}{K_c + K_t}\)
 
 Two solvers are available:
 - `:asap` — Builds an Asap `FrameModel` with rigid-zone-enhanced elements
@@ -252,8 +252,7 @@ Nominal shear stress capacity (ACI §11.11.2.1):
 v_c = \min\left( 4\lambda\sqrt{f'_c},\; \left(2 + \frac{4}{\beta}\right)\lambda\sqrt{f'_c},\; \left(\frac{\alpha_s d}{b_0} + 2\right)\lambda\sqrt{f'_c} \right)
 ```
 
-where ``\beta = c_{\text{long}} / c_{\text{short}}``, ``\alpha_s = 40`` (interior),
-30 (edge), 20 (corner).
+where \(\beta = c_{\text{long}} / c_{\text{short}}\), and \(\alpha_s = 40\) (interior), 30 (edge), 20 (corner).
 
 Combined shear stress from direct shear and unbalanced moment transfer
 (ACI R11.11.7.2):
@@ -262,8 +261,8 @@ Combined shear stress from direct shear and unbalanced moment transfer
 v_u = \frac{V_u}{b_0 d} + \frac{\gamma_v M_{ub} \, c_{AB}}{J_c}
 ```
 
-Moment transfer fraction ``\gamma_v = 1 - \gamma_f`` where
-``\gamma_f = 1 / (1 + \frac{2}{3}\sqrt{b_1/b_2})`` (ACI Eq. 13-1).
+Moment transfer fraction \(\gamma_v = 1 - \gamma_f\), where
+\(\gamma_f = 1 / (1 + \frac{2}{3}\sqrt{b_1/b_2})\) (ACI Eq. 13-1).
 
 When punching fails, four remediation strategies are attempted in configurable
 order:
@@ -291,8 +290,7 @@ Branson's formulation (ACI Eq. 9-10) is:
 I_e = \left(\frac{M_{cr}}{M_a}\right)^3 I_g + \left[1 - \left(\frac{M_{cr}}{M_a}\right)^3\right] I_{cr}
 ```
 
-Long-term deflection multiplier: ``\lambda_\Delta = \xi / (1 + 50\rho')`` with
-``\xi = 2.0`` for loads sustained ≥ 5 years.
+Long-term deflection multiplier: \(\lambda_\Delta = \xi / (1 + 50\rho')\), with \(\xi = 2.0\) for loads sustained ≥ 5 years.
 
 For flat slabs with drop panels, ``I_e`` is computed at midspan (slab-only
 section) and at supports (composite drop + slab section), then weighted per
@@ -339,7 +337,7 @@ restarts.  Default maximum iterations: 10 per phase.
 - Thickness from ACI Table 8.3.1.1: ``l_n/33`` (flat plate interior),
   ``l_n/30`` (exterior), ``l_n/36`` / ``l_n/33`` (flat slab)
 - Fire rating override from ACI 216.1-14 if specified
-- Column size from ``\text{span}/15`` or tributary area
+- Column size from \(\text{span}/15\) or tributary area
 
 ## Key Functions
 

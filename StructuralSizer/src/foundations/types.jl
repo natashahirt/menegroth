@@ -161,7 +161,7 @@ Design result for a spread (isolated) footing.
 - `rebar_dia`: Rebar diameter
 - `concrete_volume`: Total concrete volume
 - `steel_volume`: Total rebar volume
-- `utilization`: Bearing pressure ratio (demand/capacity)
+- `utilization`: Utilization ratio reported by the design routine (for ACI spread footings this is currently the max of punching utilization and service bearing utilization)
 """
 struct SpreadFootingResult{L, V, F} <: AbstractFoundationResult
     B::L                # Width (m)

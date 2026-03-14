@@ -3,11 +3,14 @@
 > ```julia
 > using StructuralSizer
 > using Unitful
-> demand = FoundationDemand(1; Pu=400.0kip, Ps=300.0kip, Mux=80.0kip * u"ft")
-> opts   = SpreadFootingOptions(pier_c1=20u"inch", pier_c2=20u"inch", pier_shape=:rectangular)
+> demand = FoundationDemand(1;
+>     Pu=400.0kip, Ps=300.0kip, Mux=80.0kip * u"ft",
+>     c1=20u"inch", c2=20u"inch", shape=:rectangular,
+> )
+> opts   = SpreadFootingOptions(material=RC_4000_60)
 > result = design_footing(SpreadFooting(), demand, medium_sand; opts=opts)
-> result.B               # footing width
-> result.utilization     # governing check ratio
+> uconvert(u"ft", result.B)
+> result.utilization
 > ```
 
 ## Overview
@@ -61,20 +64,19 @@ recommend_foundation_strategy
 
 The `design_footing(::SpreadFooting, ...)` workflow:
 
-1. **Bearing sizing**: ``B = \sqrt{P_s / q_a}`` (square), adjusted for eccentricity
-   from ``M_{ux}, M_{uy}``
-2. **Punching shear** (ACI §8.4.4.2): Critical section at ``d/2`` from column face;
-   capacity per ACI §11.11.2.1 (three-equation minimum)
-3. **One-way shear** (ACI §22.5): Critical section at ``d`` from column face;
-   ``V_c = 2\lambda\sqrt{f'_c}\,b_w\,d``
-4. **Flexure**: Cantilever moment at column face; Whitney stress block for
-   required steel area, with iterative ``jd`` convergence
-5. **Development length** (ACI §25.4.2): Check bar embedment within available
-   footing projection
-6. **Bearing check** (ACI §22.8): Column-to-footing bearing stress with area
-   ratio enhancement; dowel bars if needed
+1. **Bearing sizing** (square footing, service load):
 
-Minimum steel per ACI §7.6.1.1: ``A_{s,\min} = 0.0018\,b\,h``.
+```math
+B = \sqrt{\frac{P_s}{q_a}}
+```
+
+2. **Punching shear** (ACI §8.4.4.2): punching check uses `punching_check(...)` with full biaxial unbalanced-moment transfer (`Mux`, `Muy`) and the critical section at \(d/2\).
+3. **One-way shear** (ACI §22.5): checks one-way shear in both directions at a section located \(d\) from the column face.
+4. **Flexure**: designs cantilever reinforcement at the column face using an iterative lever arm \(jd\) calculation and enforces ACI minimum temperature/shrinkage reinforcement (ACI §7.6.1.1).
+5. **Development length** (ACI §25.4.2): checks simplified tension development length against the available footing projection.
+6. **Bearing check** (ACI §22.8): evaluates column-to-footing bearing with the ACI area-ratio enhancement and reports dowel demand when bearing in the column concrete controls.
+
+Minimum steel per ACI §7.6.1.1 is computed from the bar grade, using \(\rho_{\min}=0.0018\) for Grade 60 and reducing for higher grades (capped at 0.0014).
 
 ### Strip Footing Design (ACI 318-11)
 
@@ -104,7 +106,7 @@ method: continuous beam on elastic supports with tributary widths.
 
 Shukla's (1984) closed-form solution for a plate on elastic foundation:
 
-1. Compute relative stiffness: ``\lambda_c = \left(\frac{k_s}{4 E_c I}\right)^{1/4}``
+1. Compute relative stiffness: \(\lambda_c = \left(\frac{k_s}{4 E_c I}\right)^{1/4}\)
 2. Evaluate Kelvin–Bessel functions ``Z_3, Z_4`` for moment and shear at
    each column location
 3. Superpose contributions from all columns
@@ -117,8 +119,8 @@ mat width.
 
 Finite element plate model on Winkler springs:
 
-1. Generate plate mesh (quad shell elements)
-2. Assign Winkler springs at nodes: ``k_{\text{node}} = k_s \times A_{\text{trib}}``
+1. Generate plate mesh (triangular shell elements)
+2. Assign Winkler springs at nodes: \(k_{\text{node}} = k_s \, A_{\text{trib}}\)
 3. Double edge spring stiffness per ACI 336.2R §6.9
 4. Apply concentrated column loads at nearest nodes
 5. Solve for displacements, moments, and shears
@@ -140,9 +142,9 @@ Finite element plate model on Winkler springs:
 | `material` | `RC_4000_60` | Concrete + rebar material bundle |
 | `cover` | 3 in. | Clear cover to reinforcement |
 | `bar_size` | 8 | Rebar bar size (#8, etc.) |
-| `pier_shape` | `:rectangular` | Pier/column shape (`:rectangular` or `:circular`) |
-| `pier_c1` | 18 in. | Pier dimension parallel to footing length (or diameter) |
-| `pier_c2` | 18 in. | Pier dimension parallel to footing width (ignored for `:circular`) |
+| `pier_shape` | `:rectangular` | Legacy field (ignored for ACI spread footings); use `FoundationDemand.shape` |
+| `pier_c1` | 18 in. | Legacy field (ignored for ACI spread footings); use `FoundationDemand.c1` |
+| `pier_c2` | 18 in. | Legacy field (ignored for ACI spread footings); use `FoundationDemand.c2` |
 | `ϕ_flexure` | 0.90 | ACI 318-11 §9.3.2 strength reduction |
 | `ϕ_shear` | 0.75 | ACI 318-11 §9.3.2 strength reduction |
 | `ϕ_bearing` | 0.65 | Bearing strength reduction factor |
@@ -160,8 +162,7 @@ Finite element plate model on Winkler springs:
 
 ## Limitations & Future Work
 
-- Eccentricity from biaxial moments uses the kern limit approximation; full
-  soil pressure redistribution for large eccentricities is not implemented.
+- Spread footing preliminary sizing assumes uniform soil pressure (no pressure redistribution for eccentricity). Biaxial moments (`Mux`, `Muy`) are currently used in the punching shear transfer check, not to modify bearing pressure distribution.
 - WinklerFEA uses uniform ``k_s``; depth-dependent or nonlinear subgrade
   reaction models are not supported.
 - Pile cap design (deep foundations) is not implemented.

@@ -40,16 +40,23 @@ namespace Menegroth.GH.Components
         private const int COLOR_FRAME_AXIAL = 20;
         private const int COLOR_FRAME_MOMENT = 21;
         private const int COLOR_FRAME_SHEAR = 22;
+
+        private static bool IsValidAnalyticalSlab(int value) =>
+            value >= COLOR_SLAB_BENDING && value <= COLOR_SLAB_SURFACE_STRESS;
+
+        private static bool IsValidAnalyticalFrame(int value) =>
+            value >= COLOR_FRAME_AXIAL && value <= COLOR_FRAME_SHEAR;
+
         private bool _useInternalPreview = true;
         private bool _showOriginal = true;
         private bool _showSlabs = true;
         private bool _showBeams = true;
         private bool _showColumns = true;
         private bool _showFoundations = true;
-        private const int CLAMP_NONE = 0;
-        private const int CLAMP_SUPPORTS = 1;
-        private const int CLAMP_GLOBAL_GROUND = 2;
-        private int _clampMode = CLAMP_NONE;
+        private int _mode = MODE_DEFLECTED_GLOBAL;
+        private int _colorBy = COLOR_UTILIZATION;
+        private int _analyticalSlab = COLOR_NONE;
+        private int _analyticalFrame = COLOR_NONE;
         private bool _beamVisibilityInitialized = false;
         private readonly List<Curve> _previewColumnCurves = new List<Curve>();
         private readonly List<Color> _previewColumnColors = new List<Color>();
@@ -78,6 +85,12 @@ namespace Menegroth.GH.Components
         {
             base.AppendAdditionalComponentMenuItems(menu);
             Menu_AppendSeparator(menu);
+            var modeMenu = new ToolStripMenuItem("Mode");
+            modeMenu.DropDownItems.Add(CreateModeMenuItem("Sized", MODE_SIZED));
+            modeMenu.DropDownItems.Add(CreateModeMenuItem("Deflected (Global)", MODE_DEFLECTED_GLOBAL));
+            modeMenu.DropDownItems.Add(CreateModeMenuItem("Deflected (Local)", MODE_DEFLECTED_LOCAL));
+            modeMenu.DropDownItems.Add(CreateModeMenuItem("Original", MODE_ORIGINAL));
+            menu.Items.Add(modeMenu);
             Menu_AppendItem(menu, "Use Internal Preview", (s, e) =>
             {
                 _useInternalPreview = !_useInternalPreview;
@@ -90,27 +103,6 @@ namespace Menegroth.GH.Components
                 ExpirePreview(true);
                 ExpireSolution(true);
             }, true, _showOriginal);
-            var clampMenu = new ToolStripMenuItem("Clamp");
-            clampMenu.DropDownItems.Add(new ToolStripMenuItem("None", null, (s, e) =>
-            {
-                _clampMode = CLAMP_NONE;
-                ExpirePreview(true);
-                ExpireSolution(true);
-            }) { Checked = _clampMode == CLAMP_NONE });
-            clampMenu.DropDownItems.Add(new ToolStripMenuItem("Supports", null, (s, e) =>
-            {
-                _clampMode = CLAMP_SUPPORTS;
-                ExpirePreview(true);
-                ExpireSolution(true);
-            }) { Checked = _clampMode == CLAMP_SUPPORTS });
-            clampMenu.DropDownItems.Add(new ToolStripMenuItem("Global ground", null, (s, e) =>
-            {
-                _clampMode = CLAMP_GLOBAL_GROUND;
-                ExpirePreview(true);
-                ExpireSolution(true);
-            }) { Checked = _clampMode == CLAMP_GLOBAL_GROUND });
-            menu.Items.Add(clampMenu);
-
             var showMenu = new ToolStripMenuItem("Show");
             showMenu.DropDownItems.Add(new ToolStripMenuItem("Slabs", null, (s, e) =>
             {
@@ -139,6 +131,75 @@ namespace Menegroth.GH.Components
             }) { Checked = _showFoundations });
             menu.Items.Add(showMenu);
 
+            var colorMenu = new ToolStripMenuItem("Color By");
+            colorMenu.DropDownItems.Add(CreateColorMenuItem("None", COLOR_NONE));
+            colorMenu.DropDownItems.Add(CreateColorMenuItem("Material", COLOR_MATERIAL));
+            colorMenu.DropDownItems.Add(CreateColorMenuItem("Deflection", COLOR_DEFLECTION));
+            colorMenu.DropDownItems.Add(CreateColorMenuItem("Utilization", COLOR_UTILIZATION));
+            colorMenu.DropDownItems.Add(new ToolStripSeparator());
+            var slabMenu = new ToolStripMenuItem("Slab");
+            slabMenu.DropDownItems.Add(CreateAnalyticalSlabMenuItem("None", COLOR_NONE));
+            slabMenu.DropDownItems.Add(CreateAnalyticalSlabMenuItem("Bending Moment", COLOR_SLAB_BENDING));
+            slabMenu.DropDownItems.Add(CreateAnalyticalSlabMenuItem("Membrane Force", COLOR_SLAB_MEMBRANE));
+            slabMenu.DropDownItems.Add(CreateAnalyticalSlabMenuItem("Shear Force", COLOR_SLAB_SHEAR));
+            slabMenu.DropDownItems.Add(CreateAnalyticalSlabMenuItem("Von Mises", COLOR_SLAB_VON_MISES));
+            slabMenu.DropDownItems.Add(CreateAnalyticalSlabMenuItem("Surface Stress", COLOR_SLAB_SURFACE_STRESS));
+            colorMenu.DropDownItems.Add(slabMenu);
+            var frameMenu = new ToolStripMenuItem("Frame");
+            frameMenu.DropDownItems.Add(CreateAnalyticalFrameMenuItem("None", COLOR_NONE));
+            frameMenu.DropDownItems.Add(CreateAnalyticalFrameMenuItem("Axial Force", COLOR_FRAME_AXIAL));
+            frameMenu.DropDownItems.Add(CreateAnalyticalFrameMenuItem("Moment", COLOR_FRAME_MOMENT));
+            frameMenu.DropDownItems.Add(CreateAnalyticalFrameMenuItem("Shear", COLOR_FRAME_SHEAR));
+            colorMenu.DropDownItems.Add(frameMenu);
+            menu.Items.Add(colorMenu);
+        }
+
+        private ToolStripMenuItem CreateModeMenuItem(string label, int value)
+        {
+            var item = new ToolStripMenuItem(label, null, (s, e) =>
+            {
+                _mode = value;
+                ExpirePreview(true);
+                ExpireSolution(true);
+            });
+            item.Checked = _mode == value;
+            return item;
+        }
+
+        private ToolStripMenuItem CreateColorMenuItem(string label, int value)
+        {
+            var item = new ToolStripMenuItem(label, null, (s, e) =>
+            {
+                _colorBy = value;
+                ExpirePreview(true);
+                ExpireSolution(true);
+            });
+            item.Checked = _colorBy == value;
+            return item;
+        }
+
+        private ToolStripMenuItem CreateAnalyticalSlabMenuItem(string label, int value)
+        {
+            var item = new ToolStripMenuItem(label, null, (s, e) =>
+            {
+                _analyticalSlab = value;
+                ExpirePreview(true);
+                ExpireSolution(true);
+            });
+            item.Checked = _analyticalSlab == value;
+            return item;
+        }
+
+        private ToolStripMenuItem CreateAnalyticalFrameMenuItem(string label, int value)
+        {
+            var item = new ToolStripMenuItem(label, null, (s, e) =>
+            {
+                _analyticalFrame = value;
+                ExpirePreview(true);
+                ExpireSolution(true);
+            });
+            item.Checked = _analyticalFrame == value;
+            return item;
         }
 
         public override bool Write(GH_IO.Serialization.GH_IWriter writer)
@@ -149,8 +210,11 @@ namespace Menegroth.GH.Components
             writer.SetBoolean("ShowBeams", _showBeams);
             writer.SetBoolean("ShowColumns", _showColumns);
             writer.SetBoolean("ShowFoundations", _showFoundations);
-            writer.SetInt32("ClampMode", _clampMode);
             writer.SetBoolean("BeamVisibilityInitialized", _beamVisibilityInitialized);
+            writer.SetInt32("Mode", _mode);
+            writer.SetInt32("ColorBy", _colorBy);
+            writer.SetInt32("AnalyticalSlab", _analyticalSlab);
+            writer.SetInt32("AnalyticalFrame", _analyticalFrame);
             return base.Write(writer);
         }
 
@@ -168,14 +232,18 @@ namespace Menegroth.GH.Components
                 _showColumns = reader.GetBoolean("ShowColumns");
             if (reader.ItemExists("ShowFoundations"))
                 _showFoundations = reader.GetBoolean("ShowFoundations");
-            if (reader.ItemExists("ClampMode"))
-                _clampMode = reader.GetInt32("ClampMode");
-            else if (reader.ItemExists("ClampSupports"))
-                _clampMode = reader.GetBoolean("ClampSupports") ? CLAMP_SUPPORTS : CLAMP_NONE;
             if (reader.ItemExists("BeamVisibilityInitialized"))
                 _beamVisibilityInitialized = reader.GetBoolean("BeamVisibilityInitialized");
             else if (reader.ItemExists("ShowBeams"))
                 _beamVisibilityInitialized = true;
+            if (reader.ItemExists("Mode"))
+                _mode = reader.GetInt32("Mode");
+            if (reader.ItemExists("ColorBy"))
+                _colorBy = reader.GetInt32("ColorBy");
+            if (reader.ItemExists("AnalyticalSlab"))
+                _analyticalSlab = reader.GetInt32("AnalyticalSlab");
+            if (reader.ItemExists("AnalyticalFrame"))
+                _analyticalFrame = reader.GetInt32("AnalyticalFrame");
             return base.Read(reader);
         }
 
@@ -184,39 +252,9 @@ namespace Menegroth.GH.Components
             pManager.AddGenericParameter("Result", "Result",
                 "DesignResult from the DesignRun component", GH_ParamAccess.item);
 
-            var modeParam = new Param_Integer();
-            modeParam.AddNamedValue("Sized", MODE_SIZED);
-            modeParam.AddNamedValue("Deflected (Global)", MODE_DEFLECTED_GLOBAL);
-            modeParam.AddNamedValue("Deflected (Local)", MODE_DEFLECTED_LOCAL);
-            modeParam.AddNamedValue("Original", MODE_ORIGINAL);
-            pManager.AddParameter(modeParam, "Mode", "Mode",
-                "Visualization mode: Sized shows as-designed geometry, " +
-                "Deflected Global/Local shows displaced shapes",
-                GH_ParamAccess.item);
-            pManager[1].Optional = true;
-
             pManager.AddNumberParameter("Scale", "Scale",
                 "Deflection scale multiplier (0 = no deflection, 1 = auto-suggested, >1 = exaggerated)",
                 GH_ParamAccess.item, 1.0);
-
-            var colorParam = new Param_Integer();
-            colorParam.AddNamedValue("None", COLOR_NONE);
-            colorParam.AddNamedValue("Utilization", COLOR_UTILIZATION);
-            colorParam.AddNamedValue("Deflection", COLOR_DEFLECTION);
-            colorParam.AddNamedValue("Material", COLOR_MATERIAL);
-            colorParam.AddNamedValue("Slab: Bending Moment", COLOR_SLAB_BENDING);
-            colorParam.AddNamedValue("Slab: Membrane Force", COLOR_SLAB_MEMBRANE);
-            colorParam.AddNamedValue("Slab: Shear Force", COLOR_SLAB_SHEAR);
-            colorParam.AddNamedValue("Slab: Von Mises", COLOR_SLAB_VON_MISES);
-            colorParam.AddNamedValue("Slab: Surface Stress", COLOR_SLAB_SURFACE_STRESS);
-            colorParam.AddNamedValue("Frame: Axial Force", COLOR_FRAME_AXIAL);
-            colorParam.AddNamedValue("Frame: Moment", COLOR_FRAME_MOMENT);
-            colorParam.AddNamedValue("Frame: Shear", COLOR_FRAME_SHEAR);
-            pManager.AddParameter(colorParam, "Color By", "ColorBy",
-                "Color mapping: None, Utilization, Deflection, Material, or Analytical modes " +
-                "(Slab: Bending/Membrane/Shear/VonMises/Surface; Frame: Axial/Moment/Shear).",
-                GH_ParamAccess.item);
-            pManager[3].Optional = true;
         }
 
         protected override void RegisterOutputParams(GH_OutputParamManager pManager)
@@ -258,16 +296,23 @@ namespace Menegroth.GH.Components
             }
 
             // Read inputs with defaults
-            int modeInt = MODE_DEFLECTED_GLOBAL;
-            DA.GetData(1, ref modeInt);
+            int modeInt = _mode;
 
             double scaleMult = 1.0;
-            DA.GetData(2, ref scaleMult);
+            DA.GetData(1, ref scaleMult);
 
             bool showOriginal = _showOriginal;
 
-            int colorByInt = COLOR_UTILIZATION;
-            DA.GetData(3, ref colorByInt);
+            int colorByInt = _colorBy;
+            int analyticalSlab = _analyticalSlab;
+            int analyticalFrame = _analyticalFrame;
+
+            // Slab/Frame menus override base color when a valid analytical option is selected
+            int effectiveColorBySlab = IsValidAnalyticalSlab(analyticalSlab) ? analyticalSlab : colorByInt;
+            if (effectiveColorBySlab == COLOR_NONE) effectiveColorBySlab = COLOR_UTILIZATION;
+
+            int effectiveColorByFrame = IsValidAnalyticalFrame(analyticalFrame) ? analyticalFrame : colorByInt;
+            if (effectiveColorByFrame == COLOR_NONE) effectiveColorByFrame = COLOR_UTILIZATION;
 
             bool isDeflected = modeInt == MODE_DEFLECTED_GLOBAL || modeInt == MODE_DEFLECTED_LOCAL;
             bool isLocal = modeInt == MODE_DEFLECTED_LOCAL;
@@ -288,21 +333,6 @@ namespace Menegroth.GH.Components
             var nodes = new Dictionary<int, (Point3d pos, Vector3d disp, Point3d defPos)>();
             var nodesArray = viz["nodes"] as JArray ?? new JArray();
 
-            // Pass 1: compute global ground Z (min of all support positions) when needed
-            double zGround = double.MaxValue;
-            if (_clampMode == CLAMP_GLOBAL_GROUND)
-            {
-                foreach (var n in nodesArray)
-                {
-                    bool isSupport = n["is_support"]?.ToObject<bool>() ?? false;
-                    if (!isSupport) continue;
-                    var posArr = n["position"]?.ToObject<double[]>() ?? new double[3];
-                    if (posArr.Length >= 3 && posArr[2] < zGround)
-                        zGround = posArr[2];
-                }
-                if (double.IsInfinity(zGround)) zGround = 0.0;
-            }
-
             foreach (var n in nodesArray)
             {
                 int nodeId = n["node_id"]?.ToObject<int>() ?? 0;
@@ -315,12 +345,6 @@ namespace Menegroth.GH.Components
                     ? new Point3d(defPosArr[0], defPosArr[1], defPosArr[2])
                     : pos + new Vector3d(dispArr[0], dispArr[1], dispArr[2]);
 
-                if (isSupport && _clampMode != CLAMP_NONE)
-                {
-                    double zMin = _clampMode == CLAMP_SUPPORTS ? pos.Z : zGround;
-                    if (defPos.Z < zMin)
-                        defPos = new Point3d(defPos.X, defPos.Y, zMin);
-                }
                 var disp = defPos - pos;
                 nodes[nodeId] = (pos, disp, defPos);
             }
@@ -337,8 +361,8 @@ namespace Menegroth.GH.Components
             double maxSlabShear = viz["max_slab_shear"]?.ToObject<double>() ?? 0;
             double maxSlabVonMises = viz["max_slab_von_mises"]?.ToObject<double>() ?? 0;
             double maxSlabSurfaceStress = viz["max_slab_surface_stress"]?.ToObject<double>() ?? 0;
-            bool isAnalyticalSlab = colorByInt >= COLOR_SLAB_BENDING && colorByInt <= COLOR_SLAB_SURFACE_STRESS;
-            bool isAnalyticalFrame = colorByInt >= COLOR_FRAME_AXIAL && colorByInt <= COLOR_FRAME_SHEAR;
+            bool isAnalyticalSlab = effectiveColorBySlab >= COLOR_SLAB_BENDING && effectiveColorBySlab <= COLOR_SLAB_SURFACE_STRESS;
+            bool isAnalyticalFrame = effectiveColorByFrame >= COLOR_FRAME_AXIAL && effectiveColorByFrame <= COLOR_FRAME_SHEAR;
 
             // Warn early when deflected mesh payload is likely to exhaust viewport memory.
             var slabMeshes = viz["deflected_slab_meshes"] as JArray ?? new JArray();
@@ -505,18 +529,18 @@ namespace Menegroth.GH.Components
                 frameCurves.Add(elementCurve);
 
                 Color elementColor;
-                if (colorByInt == COLOR_UTILIZATION)
+                if (effectiveColorByFrame == COLOR_UTILIZATION)
                 {
                     double ratio = elem["utilization_ratio"]?.ToObject<double>() ?? 0;
                     bool ok = elem["ok"]?.ToObject<bool>() ?? true;
                     elementColor = VisualizationColorMapper.UtilizationColor(ratio, ok, null);
                 }
-                else if (colorByInt == COLOR_DEFLECTION)
+                else if (effectiveColorByFrame == COLOR_DEFLECTION)
                 {
                     double disp = ComputeElementDisplacement(elem, nodes, dispVecs);
                     elementColor = VisualizationColorMapper.DeflectionColor(disp, maxDisp, null);
                 }
-                else if (colorByInt == COLOR_MATERIAL)
+                else if (effectiveColorByFrame == COLOR_MATERIAL)
                 {
                     elementColor = VisualizationColorMapper.ResolveMaterialColor(elem["material_color_hex"]?.ToString(), VisualizationColorMapper.DefaultMaterialColor);
                 }
@@ -524,27 +548,22 @@ namespace Menegroth.GH.Components
                 {
                     double val = 0;
                     double maxVal = 0;
-                    if (colorByInt == COLOR_FRAME_AXIAL)
+                    if (effectiveColorByFrame == COLOR_FRAME_AXIAL)
                     {
                         val = elem["max_axial_force"]?.ToObject<double>() ?? 0;
                         maxVal = maxFrameAxial;
                     }
-                    else if (colorByInt == COLOR_FRAME_MOMENT)
+                    else if (effectiveColorByFrame == COLOR_FRAME_MOMENT)
                     {
                         val = elem["max_moment"]?.ToObject<double>() ?? 0;
                         maxVal = maxFrameMoment;
                     }
-                    else if (colorByInt == COLOR_FRAME_SHEAR)
+                    else if (effectiveColorByFrame == COLOR_FRAME_SHEAR)
                     {
                         val = elem["max_shear"]?.ToObject<double>() ?? 0;
                         maxVal = maxFrameShear;
                     }
                     elementColor = VisualizationColorMapper.AnalyticalColor(val, maxVal, isDiverging: true);
-                }
-                else if (isAnalyticalSlab)
-                {
-                    // Slab analytical mode: frames get a neutral gray
-                    elementColor = VisualizationColorMapper.DefaultMaterialColor;
                 }
                 else
                 {
@@ -572,7 +591,7 @@ namespace Menegroth.GH.Components
 
                 if (elemType == "column")
                 {
-                    if (colorByInt == COLOR_DEFLECTION)
+                    if (effectiveColorByFrame == COLOR_DEFLECTION)
                     {
                         AppendDeflectionSegmentedCurves(
                             elementCurve, dispVecs, nodes, ns, ne, isLocal, maxDisp,
@@ -586,7 +605,7 @@ namespace Menegroth.GH.Components
                 }
                 else if (elemType == "beam")
                 {
-                    if (colorByInt == COLOR_DEFLECTION)
+                    if (effectiveColorByFrame == COLOR_DEFLECTION)
                     {
                         AppendDeflectionSegmentedCurves(
                             elementCurve, dispVecs, nodes, ns, ne, isLocal, maxDisp,
@@ -609,19 +628,19 @@ namespace Menegroth.GH.Components
             if (_showSlabs)
             {
                 if (isOriginalMode)
-                    BuildOriginalSlabs(viz, slabGeometry, slabColors, colorByInt, maxDisp,
+                    BuildOriginalSlabs(viz, slabGeometry, slabColors, effectiveColorBySlab, maxDisp,
                         maxSlabBending, maxSlabMembrane, maxSlabShear, maxSlabVonMises, maxSlabSurfaceStress);
                 else if (!isDeflected || finalScale <= 0)
-                    BuildSizedSlabs(viz, slabGeometry, slabColors, colorByInt, maxDisp,
+                    BuildSizedSlabs(viz, slabGeometry, slabColors, effectiveColorBySlab, maxDisp,
                         maxSlabBending, maxSlabMembrane, maxSlabShear, maxSlabVonMises, maxSlabSurfaceStress);
                 else
                     BuildDeflectedSlabs(viz, finalScale, showOriginal, slabGeometry, originalSlabs,
-                        slabColors, colorByInt, maxDisp, isLocal,
+                        slabColors, effectiveColorBySlab, maxDisp, isLocal,
                         maxSlabBending, maxSlabMembrane, maxSlabShear, maxSlabVonMises, maxSlabSurfaceStress);
             }
 
             if (showFoundationsEffective)
-                BuildFoundations(viz, foundationGeometry, slabColors, colorByInt);
+                BuildFoundations(viz, foundationGeometry, slabColors, effectiveColorBySlab);
 
             var visibleSlabGeometry = new List<IGH_GeometricGoo>();
             if (_showSlabs)
@@ -662,21 +681,37 @@ namespace Menegroth.GH.Components
                 : modeInt == MODE_DEFLECTED_LOCAL ? "Deflected (Local)"
                 : modeInt == MODE_ORIGINAL ? "Original"
                 : "Deflected (Global)";
-            string colorName = colorByInt switch
+            string colorName;
+            if (isAnalyticalSlab || isAnalyticalFrame)
             {
-                COLOR_UTILIZATION => "Utilization",
-                COLOR_DEFLECTION => "Deflection",
-                COLOR_MATERIAL => "Material",
-                COLOR_SLAB_BENDING => "Slab Bending",
-                COLOR_SLAB_MEMBRANE => "Slab Membrane",
-                COLOR_SLAB_SHEAR => "Slab Shear",
-                COLOR_SLAB_VON_MISES => "Slab Von Mises",
-                COLOR_SLAB_SURFACE_STRESS => "Slab Surface σ",
-                COLOR_FRAME_AXIAL => "Frame Axial",
-                COLOR_FRAME_MOMENT => "Frame Moment",
-                COLOR_FRAME_SHEAR => "Frame Shear",
-                _ => "",
-            };
+                string slabName = effectiveColorBySlab switch
+                {
+                    COLOR_SLAB_BENDING => "Slab Bending",
+                    COLOR_SLAB_MEMBRANE => "Slab Membrane",
+                    COLOR_SLAB_SHEAR => "Slab Shear",
+                    COLOR_SLAB_VON_MISES => "Slab Von Mises",
+                    COLOR_SLAB_SURFACE_STRESS => "Slab Surface σ",
+                    _ => "Slab Utilization",
+                };
+                string frameName = effectiveColorByFrame switch
+                {
+                    COLOR_FRAME_AXIAL => "Frame Axial",
+                    COLOR_FRAME_MOMENT => "Frame Moment",
+                    COLOR_FRAME_SHEAR => "Frame Shear",
+                    _ => "Frame Utilization",
+                };
+                colorName = $"{slabName} | {frameName}";
+            }
+            else
+            {
+                colorName = colorByInt switch
+                {
+                    COLOR_UTILIZATION => "Utilization",
+                    COLOR_DEFLECTION => "Deflection",
+                    COLOR_MATERIAL => "Material",
+                    _ => "",
+                };
+            }
             Message = colorName.Length > 0 ? $"{modeName} | {colorName}" : modeName;
         }
 

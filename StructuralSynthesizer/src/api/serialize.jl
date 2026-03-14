@@ -321,12 +321,12 @@ function _serialize_visualization_frame_elements(design::BuildingDesign, model, 
     element_section_obj = Dict{Int, StructuralSizer.AbstractSection}()
     element_material_color = Dict{Int, String}()
     
-    # Map columns
+    # Map columns — read section from captured design result (survives restore!)
     for (col_idx, result) in design.columns
         col_idx > length(struc.columns) && continue
         col = struc.columns[col_idx]
         ratio = max(result.axial_ratio, result.interaction_ratio)
-        sec_obj = section(col)
+        sec_obj = result.section_obj
         mat_obj = !isnothing(col.concrete) ? col.concrete :
                   (!isnothing(sec_obj) && hasproperty(sec_obj, :material) ? getproperty(sec_obj, :material) : nothing)
         mat_color = _material_color_hex(mat_obj)
@@ -342,12 +342,12 @@ function _serialize_visualization_frame_elements(design::BuildingDesign, model, 
         end
     end
     
-    # Map beams
+    # Map beams — read section from captured design result (survives restore!)
     for (beam_idx, result) in design.beams
         beam_idx > length(struc.beams) && continue
         beam = struc.beams[beam_idx]
         ratio = max(result.flexure_ratio, result.shear_ratio)
-        sec_obj = section(beam)
+        sec_obj = result.section_obj
         mat_obj = !isnothing(sec_obj) && hasproperty(sec_obj, :material) ? getproperty(sec_obj, :material) : nothing
         mat_color = _material_color_hex(mat_obj)
         for seg_idx in segment_indices(beam)

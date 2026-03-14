@@ -660,6 +660,9 @@ Base.@kwdef mutable struct ColumnDesignResult
     
     # Punching (if supporting flat slab)
     punching::Union{PunchingDesignResult, Nothing} = nothing
+
+    # Captured section object for visualization (survives restore!)
+    section_obj::Union{StructuralSizer.AbstractSection, Nothing} = nothing
 end
 
 """
@@ -675,6 +678,9 @@ Base.@kwdef mutable struct BeamDesignResult
     # Material takeoff
     member_length::typeof(1.0u"m") = 0.0u"m"
     weight::typeof(1.0u"kg") = 0.0u"kg"
+
+    # Captured section object for visualization (survives restore!)
+    section_obj::Union{StructuralSizer.AbstractSection, Nothing} = nothing
 end
 
 """

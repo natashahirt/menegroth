@@ -141,6 +141,7 @@ function _update_design_results!(design::BuildingDesign)
         if !isnothing(col.base.section)
             result = get(design.columns, col_idx, ColumnDesignResult())
             result.section_size = string(col.base.section)
+            result.section_obj = col.base.section
             design.columns[col_idx] = result
         end
     end
@@ -150,6 +151,7 @@ function _update_design_results!(design::BuildingDesign)
         if !isnothing(beam.base.section)
             result = get(design.beams, beam_idx, BeamDesignResult())
             result.section_size = string(beam.base.section)
+            result.section_obj = beam.base.section
             design.beams[beam_idx] = result
         end
     end

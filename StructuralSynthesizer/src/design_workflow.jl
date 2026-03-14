@@ -886,6 +886,7 @@ function _populate_column_results!(design::BuildingDesign, struc::BuildingStruct
             result.Ag = uconvert(u"m^2", col.c1 * col.c2)
         end
         col_sec = section(col)
+        result.section_obj = col_sec
         if !isnothing(col_sec) && hasproperty(col_sec, :As_total)
             result.As_total = uconvert(u"m^2", col_sec.As_total)
             result.rho_g = hasproperty(col_sec, :ρg) ? col_sec.ρg : 0.0
@@ -1003,6 +1004,7 @@ function _populate_beam_results!(design::BuildingDesign, struc::BuildingStructur
     for (beam_idx, beam) in enumerate(struc.beams)
         result = BeamDesignResult()
         sec = section(beam)
+        result.section_obj = sec
         if !isnothing(sec)
             result.section_size = string(sec)
         end

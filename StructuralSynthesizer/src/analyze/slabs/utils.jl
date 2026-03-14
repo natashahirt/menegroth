@@ -138,7 +138,8 @@ function initialize_slabs!(struc::BuildingStructure{T};
                            floor_opts::StructuralSizer.AbstractFloorOptions=StructuralSizer.FlatPlateOptions(),
                            tributary_axis=nothing,
                            cell_groupings::Union{Symbol, Vector{Vector{Int}}}=:auto,
-                           slab_group_ids::Union{Nothing, AbstractVector}=nothing) where T
+                           slab_group_ids::Union{Nothing, AbstractVector}=nothing,
+                           scoped_floor_overrides::Vector{ScopedFloorOverride}=ScopedFloorOverride[]) where T
     empty!(struc.slabs)
     empty!(struc.slab_parallel_batches)
     
@@ -148,9 +149,18 @@ function initialize_slabs!(struc::BuildingStructure{T};
     
     # Resolve cell_groupings to actual indices
     resolved_groupings = _resolve_cell_groupings(struc, cell_groupings, floor_type, floor_opts)
+    effective_group_ids = slab_group_ids
+    cell_floor_types = nothing
+    cell_floor_opts = nothing
+
+    if !isempty(scoped_floor_overrides)
+        resolved_groupings, effective_group_ids, cell_floor_types, cell_floor_opts =
+            _resolve_scoped_floor_overrides(struc, scoped_floor_overrides)
+    end
     
     # 1. Build per-slab "specs"
-    slab_specs = _build_slab_specs(struc, floor_type, resolved_groupings, slab_group_ids)
+    slab_specs = _build_slab_specs(struc, floor_type, resolved_groupings, effective_group_ids;
+                                   cell_floor_types=cell_floor_types, cell_floor_opts=cell_floor_opts)
 
     # 2. Assign fallback deterministic group IDs
     _assign_deterministic_group_ids!(slab_specs)
@@ -177,8 +187,163 @@ end
 # Initialization Helpers
 # =============================================================================
 
+"""
+Resolve scoped floor overrides into explicit cell groupings and per-cell floor option overrides.
+
+Current behavior:
+- Each scoped override forms one physical slab group (all matched cells).
+- Unmatched non-grade cells default to one-cell groups.
+- Last override wins for overlapping cells.
+"""
+function _resolve_scoped_floor_overrides(struc::BuildingStructure, scoped_overrides::Vector{ScopedFloorOverride})
+    n_cells = length(struc.cells)
+    owner = fill(0, n_cells)
+    cell_floor_types = Vector{Union{Nothing, Symbol}}(undef, n_cells)
+    fill!(cell_floor_types, nothing)
+    cell_floor_opts = Vector{Any}(undef, n_cells)
+    fill!(cell_floor_opts, nothing)
+
+    for (ov_idx, ov) in enumerate(scoped_overrides)
+        matched = _match_override_cells(struc, ov)
+        isempty(matched) && throw(ArgumentError("Scoped override $ov_idx did not match any slab cells."))
+
+        ov_opts = _scoped_override_floor_opts(ov)
+        for c_idx in matched
+            owner[c_idx] = ov_idx
+            cell_floor_types[c_idx] = ov.floor_type
+            cell_floor_opts[c_idx] = ov_opts
+        end
+    end
+
+    override_groups = Dict{Int, Vector{Int}}()
+    for c_idx in eachindex(owner)
+        struc.cells[c_idx].floor_type == :grade && continue
+        oid = owner[c_idx]
+        oid > 0 || continue
+        push!(get!(override_groups, oid, Int[]), c_idx)
+    end
+
+    resolved_groupings = Vector{Vector{Int}}()
+    slab_group_ids = Vector{Union{Nothing, UInt64}}(undef, n_cells)
+    fill!(slab_group_ids, nothing)
+
+    for oid in sort(collect(keys(override_groups)))
+        cells = sort(unique(override_groups[oid]))
+        isempty(cells) && continue
+        gid = UInt64(hash((:scoped_floor_override, oid)))
+        for c_idx in cells
+            slab_group_ids[c_idx] = gid
+        end
+        push!(resolved_groupings, cells)
+    end
+
+    for c_idx in 1:n_cells
+        struc.cells[c_idx].floor_type == :grade && continue
+        owner[c_idx] > 0 && continue
+        push!(resolved_groupings, [c_idx])
+    end
+
+    return resolved_groupings, slab_group_ids, cell_floor_types, cell_floor_opts
+end
+
+"""Build typed floor options for a scoped override."""
+function _scoped_override_floor_opts(ov::ScopedFloorOverride)
+    if ov.floor_type == :vault
+        return isnothing(ov.vault_lambda) ?
+            StructuralSizer.VaultOptions(lambda=10.0) :
+            StructuralSizer.VaultOptions(lambda=ov.vault_lambda)
+    end
+    return nothing
+end
+
+"""Match scoped override selector polygons to slab cells via face centroid-in-polygon tests."""
+function _match_override_cells(struc::BuildingStructure, ov::ScopedFloorOverride)
+    skel = struc.skeleton
+    vc = skel.geometry.vertex_coords
+
+    face_to_story = Dict{Int, Int}()
+    for (story_idx, story) in skel.stories
+        for face_idx in story.faces
+            face_to_story[face_idx] = story_idx
+        end
+    end
+
+    matched = Set{Int}()
+    for poly in ov.faces
+        length(poly) >= 3 || continue
+        z = poly[1][3]
+        story_idx = _nearest_story_idx(skel, z)
+        poly_xy = [(p[1], p[2]) for p in poly]
+
+        for (cell_idx, cell) in enumerate(struc.cells)
+            cell.floor_type == :grade && continue
+            get(face_to_story, cell.face_idx, typemin(Int)) == story_idx || continue
+
+            vis = skel.face_vertex_indices[cell.face_idx]
+            cx = sum(vc[vi, 1] for vi in vis) / length(vis)
+            cy = sum(vc[vi, 2] for vi in vis) / length(vis)
+            _point_in_polygon_cells_2d(cx, cy, poly_xy) && push!(matched, cell_idx)
+        end
+    end
+
+    return sort(collect(matched))
+end
+
+"""Find nearest story index to the provided Z coordinate (meters)."""
+function _nearest_story_idx(skel::BuildingSkeleton, z::Float64)
+    best_story = 0
+    best_dist = Inf
+    for (i, sz) in enumerate(skel.stories_z)
+        d = abs(ustrip(sz) - z)
+        if d < best_dist
+            best_dist = d
+            best_story = i - 1
+        end
+    end
+    return best_story
+end
+
+"""2D point-in-polygon test with boundary-inclusive tolerance."""
+function _point_in_polygon_cells_2d(x::Float64, y::Float64, poly::Vector{Tuple{Float64, Float64}})
+    n = length(poly)
+    n < 3 && return false
+
+    inside = false
+    j = n
+    for i in 1:n
+        xi, yi = poly[i]
+        xj, yj = poly[j]
+
+        if _point_on_segment_cells_2d(x, y, xi, yi, xj, yj)
+            return true
+        end
+
+        intersects = ((yi > y) != (yj > y)) &&
+                     (x < (xj - xi) * (y - yi) / (yj - yi + 1e-16) + xi)
+        inside = intersects ? !inside : inside
+        j = i
+    end
+    return inside
+end
+
+"""Boundary check helper for point-in-polygon."""
+function _point_on_segment_cells_2d(px, py, x1, y1, x2, y2; tol=1e-8)
+    dx = x2 - x1
+    dy = y2 - y1
+    seg_len_sq = dx^2 + dy^2
+    seg_len_sq <= tol^2 && return hypot(px - x1, py - y1) <= tol
+
+    t = ((px - x1) * dx + (py - y1) * dy) / seg_len_sq
+    (t < -tol || t > 1 + tol) && return false
+
+    qx = x1 + clamp(t, 0.0, 1.0) * dx
+    qy = y1 + clamp(t, 0.0, 1.0) * dy
+    return hypot(px - qx, py - qy) <= tol
+end
+
 """Build per-slab specification tuples from cells and grouping options."""
-function _build_slab_specs(struc, floor_type, cell_groupings, slab_group_ids)
+function _build_slab_specs(struc, floor_type, cell_groupings, slab_group_ids;
+                           cell_floor_types=nothing, cell_floor_opts=nothing)
     slab_specs = NamedTuple[]
 
     if isnothing(cell_groupings)
@@ -190,13 +355,19 @@ function _build_slab_specs(struc, floor_type, cell_groupings, slab_group_ids)
             spans = cell.spans
             
             # Use primary/secondary for floor type inference
-            ft_sym = floor_type == :auto ? infer_floor_type(spans.primary, spans.secondary) : floor_type
+            ft_override = isnothing(cell_floor_types) ? nothing : cell_floor_types[cell_idx]
+            ft_sym = isnothing(ft_override) ?
+                (floor_type == :auto ? infer_floor_type(spans.primary, spans.secondary) : floor_type) :
+                ft_override
+            opts_override = isnothing(cell_floor_opts) ? nothing : cell_floor_opts[cell_idx]
             gid = _resolve_slab_group_id(slab_group_ids, cell_idx; tag=:cell)
 
             push!(slab_specs, (; cell_indices=[cell_idx],
                               spans_gov=spans,
                               sdl_gov=cell.sdl, live_gov=cell.live_load,
-                              floor_type=ft_sym, group_id=gid))
+                              floor_type=ft_sym,
+                              floor_opts_override=opts_override,
+                              group_id=gid))
         end
     else
         # Explicit groupings: combine cells into physical slabs (PT, etc.)
@@ -215,7 +386,25 @@ function _build_slab_specs(struc, floor_type, cell_groupings, slab_group_ids)
             live_gov = maximum(c.live_load for c in cells)
 
             # For grouped slabs, default to :pt_banded unless specified
-            ft_sym = floor_type == :auto ? :pt_banded : floor_type
+            ft_overrides = if isnothing(cell_floor_types)
+                Symbol[]
+            else
+                unique(Symbol[x for x in (cell_floor_types[i] for i in filtered_indices) if !isnothing(x)])
+            end
+            length(ft_overrides) <= 1 ||
+                throw(ArgumentError("Scoped overrides assign mixed floor types within one slab group: $ft_overrides"))
+            ft_sym = isempty(ft_overrides) ?
+                (floor_type == :auto ? :pt_banded : floor_type) :
+                only(ft_overrides)
+
+            opts_overrides = if isnothing(cell_floor_opts)
+                Any[]
+            else
+                unique([x for x in (cell_floor_opts[i] for i in filtered_indices) if !isnothing(x)])
+            end
+            length(opts_overrides) <= 1 ||
+                throw(ArgumentError("Scoped overrides assign mixed floor options within one slab group."))
+            opts_override = isempty(opts_overrides) ? nothing : only(opts_overrides)
 
             # Group id: must be consistent across all cells participating in this physical slab
             gid = _resolve_group_id_for_cell_set(slab_group_ids, filtered_indices)
@@ -223,7 +412,9 @@ function _build_slab_specs(struc, floor_type, cell_groupings, slab_group_ids)
             push!(slab_specs, (; cell_indices=filtered_indices,
                               spans_gov=spans_gov,
                               sdl_gov=sdl_gov, live_gov=live_gov,
-                              floor_type=ft_sym, group_id=gid))
+                              floor_type=ft_sym,
+                              floor_opts_override=opts_override,
+                              group_id=gid))
         end
     end
     return slab_specs
@@ -395,13 +586,17 @@ function _process_single_slab_group(gid, specs, struc, material, floor_opts::Str
 
     span_for_sizing = _sizing_span(ft, spans_gov)
 
-    extra_kwargs = if ft isa Vault && !(floor_opts isa StructuralSizer.VaultOptions)
+    scoped_opts = unique([s.floor_opts_override for s in specs if hasproperty(s, :floor_opts_override) && !isnothing(s.floor_opts_override)])
+    length(scoped_opts) <= 1 || throw(ArgumentError("Slab group $gid has conflicting floor options overrides."))
+    effective_floor_opts = isempty(scoped_opts) ? floor_opts : only(scoped_opts)
+
+    extra_kwargs = if ft isa Vault && !(effective_floor_opts isa StructuralSizer.VaultOptions)
         (lambda=10.0,)
     else
         NamedTuple()
     end
     result = StructuralSizer._size_span_floor(ft, span_for_sizing, sdl_gov, live_gov;
-                                               material=material, options=floor_opts, extra_kwargs...)
+                                               material=material, options=effective_floor_opts, extra_kwargs...)
     sw_service = StructuralSizer.self_weight(result)
 
     return result, sw_service, spans_gov

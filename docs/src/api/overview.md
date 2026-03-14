@@ -29,15 +29,17 @@ curl http://localhost:8080/health
 
 Server state endpoint.
 
-- In **full service mode** (`scripts/api/sizer_service.jl`), it returns one of: `"idle"`, `"running"`, `"queued"`.
-- In **bootstrap mode** (`scripts/api/sizer_bootstrap.jl`), it returns `"warming"` until the full API has been loaded in the background, then returns `"idle"`, `"running"`, or `"queued"`.
+- Response shape is consistent across service modes: `{"state":"...","message":"..."?}`.
+- In **full service mode** (`scripts/api/sizer_service.jl`), `state` is one of: `"idle"`, `"running"`, `"queued"`.
+- In **bootstrap mode** (`scripts/api/sizer_bootstrap.jl`), `state` is `"warming"` until the full API has been loaded in the background, then returns `"idle"`, `"running"`, or `"queued"`.
+- `message` is optional and is included when additional context is useful (for example, bootstrap warm-up).
 
 ```bash
 curl http://localhost:8080/status
 ```
 
 ```json
-{"status":"idle"}
+{"state":"idle"}
 ```
 
 ### GET /schema
@@ -111,7 +113,7 @@ Bootstrap mode starts a lightweight HTTP server immediately with `/health`, `/st
 In bootstrap mode (before the full API is loaded), `GET /status` returns:
 
 ```json
-{"status":"warming","message":"Full API not ready yet"}
+{"state":"warming","message":"Full API not ready yet"}
 ```
 
 ### Full Service Mode (Development)

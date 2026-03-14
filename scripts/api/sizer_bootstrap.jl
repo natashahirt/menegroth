@@ -23,6 +23,7 @@ using Oxygen
 println(stdout, "[bootstrap] loading HTTP...")
 flush(stdout)
 using HTTP
+using JSON3
 using Unitful
 
 const PORT = parse(Int, get(ENV, "PORT", get(ENV, "SIZER_PORT", "8080")))
@@ -39,9 +40,14 @@ end
 
 @get "/status" function (_)
     s = STATUS_FN[]()
-    msg = s == "warming" ? "Full API not ready yet" : "ready"
-    body = "{\"status\":\"$(s)\",\"message\":\"$(msg)\"}"
-    return HTTP.Response(200, ["Content-Type" => "application/json"], body)
+    payload = if s == "warming"
+        Dict("state" => s, "message" => "Full API not ready yet")
+    elseif s == "error"
+        Dict("state" => s, "message" => "Failed to load full API")
+    else
+        Dict("state" => s)
+    end
+    return HTTP.Response(200, ["Content-Type" => "application/json"], JSON3.write(payload))
 end
 
 @get "/debug" function (_)

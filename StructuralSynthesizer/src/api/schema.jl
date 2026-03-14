@@ -74,7 +74,9 @@ function api_input_schema()
                     "method" => "DDM | DDM_SIMPLIFIED | EFM | EFM_HARDY_CROSS | FEA. Default: DDM.",
                     "deflection_limit" => "L_240 | L_360 | L_480. Default: L_360.",
                     "punching_strategy" => "grow_columns | reinforce_last | reinforce_first. Default: grow_columns.",
+                    "vault_lambda" => "Optional vault span/rise ratio (dimensionless, > 0). Used when floor_type is vault.",
                 ),
+                "scoped_overrides" => "Optional list of scoped floor overrides. Each override provides face polygons and floor-specific options applied only to matching cells.",
                 "materials" => Dict(
                     "concrete" => "Slab/floor concrete (e.g. NWC_4000). Default: NWC_4000.",
                     "column_concrete" => "Column concrete (e.g. NWC_6000). Default: NWC_6000.",
@@ -129,6 +131,19 @@ Base.@kwdef mutable struct APIFloorOptions
     method::String = "DDM"
     deflection_limit::String = "L_360"
     punching_strategy::String = "grow_columns"
+    vault_lambda::Union{Float64, Nothing} = nothing
+end
+
+"""Raw scoped floor options from JSON (subset used for face-scoped overrides)."""
+Base.@kwdef mutable struct APIScopedFloorOptions
+    vault_lambda::Union{Float64, Nothing} = nothing
+end
+
+"""Face-scoped override block from JSON."""
+Base.@kwdef mutable struct APIScopedOverride
+    floor_type::String = "vault"
+    floor_options::APIScopedFloorOptions = APIScopedFloorOptions()
+    faces::Vector{Vector{Vector{Float64}}} = Vector{Vector{Float64}}[]
 end
 
 """Raw material selections from JSON."""
@@ -152,7 +167,9 @@ Base.@kwdef mutable struct APIParams
     optimize_for::String = "weight"
     size_foundations::Bool = false
     foundation_soil::String = "medium_sand"
-    foundation_concrete::String = "NWC_3000"  # Foundation concrete (default 3 ksi)
+    foundation_concrete::String = "NWC_3000"
+    scoped_overrides::Vector{APIScopedOverride} = APIScopedOverride[]
+    geometry_is_centerline::Bool = false
 end
 
 """
@@ -178,6 +195,8 @@ end
 StructTypes.StructType(::Type{APIEdgeGroups}) = StructTypes.Mutable()
 StructTypes.StructType(::Type{APILoads}) = StructTypes.Mutable()
 StructTypes.StructType(::Type{APIFloorOptions}) = StructTypes.Mutable()
+StructTypes.StructType(::Type{APIScopedFloorOptions}) = StructTypes.Mutable()
+StructTypes.StructType(::Type{APIScopedOverride}) = StructTypes.Mutable()
 StructTypes.StructType(::Type{APIMaterials}) = StructTypes.Mutable()
 StructTypes.StructType(::Type{APIParams}) = StructTypes.Mutable()
 StructTypes.StructType(::Type{APIInput}) = StructTypes.Mutable()
@@ -189,7 +208,7 @@ StructTypes.StructType(::Type{APIInput}) = StructTypes.Mutable()
 Base.@kwdef struct APISlabResult
     id::Int = 0
     ok::Bool = true
-    thickness_in::Float64 = 0.0
+    thickness::Float64 = 0.0
     converged::Bool = true
     failure_reason::String = ""
     failing_check::String = ""
@@ -204,8 +223,8 @@ end
 Base.@kwdef struct APIColumnResult
     id::Int = 0
     section::String = ""
-    c1_in::Float64 = 0.0
-    c2_in::Float64 = 0.0
+    c1::Float64 = 0.0
+    c2::Float64 = 0.0
     shape::String = "rectangular"
     axial_ratio::Float64 = 0.0
     interaction_ratio::Float64 = 0.0
@@ -224,9 +243,9 @@ end
 """Foundation result for JSON output."""
 Base.@kwdef struct APIFoundationResult
     id::Int = 0
-    length_ft::Float64 = 0.0
-    width_ft::Float64 = 0.0
-    depth_ft::Float64 = 0.0
+    length::Float64 = 0.0
+    width::Float64 = 0.0
+    depth::Float64 = 0.0
     bearing_ratio::Float64 = 0.0
     ok::Bool = true
 end
@@ -234,9 +253,9 @@ end
 """Design summary for JSON output."""
 Base.@kwdef struct APISummary
     all_pass::Bool = true
-    concrete_volume_ft3::Float64 = 0.0
-    steel_weight_lb::Float64 = 0.0
-    rebar_weight_lb::Float64 = 0.0
+    concrete_volume::Float64 = 0.0
+    steel_weight::Float64 = 0.0
+    rebar_weight::Float64 = 0.0
     embodied_carbon_kgCO2e::Float64 = 0.0
     critical_ratio::Float64 = 0.0
     critical_element::String = ""
@@ -255,9 +274,9 @@ end
 """Node position and displacement from analysis model."""
 Base.@kwdef struct APIVisualizationNode
     node_id::Int = 0              # 1-based node index in analysis model
-    position_ft::Vector{Float64} = [0.0, 0.0, 0.0]  # Original position [x, y, z] in feet
-    displacement_ft::Vector{Float64} = [0.0, 0.0, 0.0]  # [dx, dy, dz] in feet
-    deflected_position_ft::Vector{Float64} = [0.0, 0.0, 0.0]  # position + displacement in feet
+    position::Vector{Float64} = [0.0, 0.0, 0.0]  # Original position [x, y, z] in display length units
+    displacement::Vector{Float64} = [0.0, 0.0, 0.0]  # [dx, dy, dz] in display length units
+    deflected_position::Vector{Float64} = [0.0, 0.0, 0.0]  # position + displacement in display length units
 end
 
 """Frame element with connectivity and design data."""
@@ -265,18 +284,19 @@ Base.@kwdef struct APIVisualizationFrameElement
     element_id::Int = 0           # Element index in analysis model
     node_start::Int = 0            # 1-based start node index
     node_end::Int = 0              # 1-based end node index
-    element_type::String = ""     # "beam", "column", "brace"
+    element_type::String = ""     # "beam", "column", "strut", or "other"
     utilization_ratio::Float64 = 0.0
     ok::Bool = true
     section_name::String = ""      # e.g., "W14x90", "16x16"
+    material_color_hex::String = "" # Optional material display color (e.g. "#6E6E6E")
     # Section geometry for rendering
     section_type::String = ""      # "W-shape", "rectangular", "HSS_rect", "HSS_round", etc.
-    section_depth_ft::Float64 = 0.0
-    section_width_ft::Float64 = 0.0
+    section_depth::Float64 = 0.0
+    section_width::Float64 = 0.0
     # Additional dimensions for W-shapes
-    flange_width_ft::Float64 = 0.0
-    web_thickness_ft::Float64 = 0.0
-    flange_thickness_ft::Float64 = 0.0
+    flange_width::Float64 = 0.0
+    web_thickness::Float64 = 0.0
+    flange_thickness::Float64 = 0.0
     # 2D section polygon in local y-z coordinates (centroid at origin)
     # Each vertex is [y, z] in feet, where y = width direction, z = depth direction
     section_polygon::Vector{Vector{Float64}} = []  # [[y1, z1], [y2, z2], ...]
@@ -286,11 +306,20 @@ Base.@kwdef struct APIVisualizationFrameElement
 end
 
 """Slab geometry for sized mode (3D boxes from cell boundaries)."""
+Base.@kwdef struct APIDropPanelPatch
+    center::Vector{Float64} = [0.0, 0.0, 0.0]  # [x,y,z_top] in display length units
+    length::Float64 = 0.0  # full extent in local-x/global-x direction
+    width::Float64 = 0.0   # full extent in local-y/global-y direction
+    extra_depth::Float64 = 0.0  # projection below slab soffit
+end
+
+"""Slab geometry for sized mode (3D boxes from cell boundaries)."""
 Base.@kwdef struct APISizedSlab
     slab_id::Int = 0
     boundary_vertices::Vector{Vector{Float64}} = []  # [[x,y,z], ...] cell boundary vertices in feet
-    thickness_ft::Float64 = 0.0
-    z_top_ft::Float64 = 0.0  # Top surface elevation
+    thickness::Float64 = 0.0
+    z_top::Float64 = 0.0  # Top surface elevation
+    drop_panels::Vector{APIDropPanelPatch} = []
     utilization_ratio::Float64 = 0.0
     ok::Bool = true
 end
@@ -302,7 +331,8 @@ Base.@kwdef struct APIDeflectedSlabMesh
     vertex_displacements::Vector{Vector{Float64}} = []  # [[dx,dy,dz], ...] displacements at each vertex in feet
     vertex_displacements_local::Vector{Vector{Float64}} = []  # [[dx,dy,dz], ...] local-bending displacements in feet
     faces::Vector{Vector{Int}} = []         # [[i1,i2,i3], ...] triangle indices (1-based)
-    thickness_ft::Float64 = 0.0
+    thickness::Float64 = 0.0
+    drop_panels::Vector{APIDropPanelPatch} = []
     utilization_ratio::Float64 = 0.0
     ok::Bool = true
 end
@@ -310,10 +340,10 @@ end
 """Foundation geometry for visualization (axis-aligned block centered at support group centroid)."""
 Base.@kwdef struct APIVisualizationFoundation
     foundation_id::Int = 0
-    center_ft::Vector{Float64} = [0.0, 0.0, 0.0]  # [x,y,z_top] in display length units
-    length_ft::Float64 = 0.0
-    width_ft::Float64 = 0.0
-    depth_ft::Float64 = 0.0
+    center::Vector{Float64} = [0.0, 0.0, 0.0]  # [x,y,z_top] in display length units
+    length::Float64 = 0.0
+    width::Float64 = 0.0
+    depth::Float64 = 0.0
     utilization_ratio::Float64 = 0.0
     ok::Bool = true
 end
@@ -325,15 +355,19 @@ Base.@kwdef struct APIVisualization
     sized_slabs::Vector{APISizedSlab} = []
     deflected_slab_meshes::Vector{APIDeflectedSlabMesh} = []
     foundations::Vector{APIVisualizationFoundation} = []
+    is_beamless_system::Bool = false
     suggested_scale_factor::Float64 = 1.0
-    max_displacement_ft::Float64 = 0.0
+    max_displacement::Float64 = 0.0
 end
 
 """Top-level output payload."""
 Base.@kwdef struct APIOutput
     status::String = "ok"
     compute_time_s::Float64 = 0.0
-    length_unit::String = "ft"  # "ft" or "m" — units for all length fields (position_ft, displacement_ft, etc.)
+    length_unit::String = "ft"
+    thickness_unit::String = "in"
+    volume_unit::String = "ft3"
+    mass_unit::String = "lb"
     summary::APISummary = APISummary()
     slabs::Vector{APISlabResult} = APISlabResult[]
     columns::Vector{APIColumnResult} = APIColumnResult[]
@@ -352,6 +386,7 @@ StructTypes.StructType(::Type{APIOutput}) = StructTypes.Struct()
 StructTypes.StructType(::Type{APIError}) = StructTypes.Struct()
 StructTypes.StructType(::Type{APIVisualizationNode}) = StructTypes.Struct()
 StructTypes.StructType(::Type{APIVisualizationFrameElement}) = StructTypes.Struct()
+StructTypes.StructType(::Type{APIDropPanelPatch}) = StructTypes.Struct()
 StructTypes.StructType(::Type{APISizedSlab}) = StructTypes.Struct()
 StructTypes.StructType(::Type{APIDeflectedSlabMesh}) = StructTypes.Struct()
 StructTypes.StructType(::Type{APIVisualizationFoundation}) = StructTypes.Struct()

@@ -252,7 +252,7 @@ function _extract_wood_armer_strip_moments(
 
         # ── Column-face M⁻ (hogging, from Mn_top) ──
         for (_, col) in enumerate(cell_cols)
-            px, py = _vertex_xy_m(skel, col.vertex_idx)
+            px, py = _column_xy_m(skel, col)
             off = _column_face_offset_m(col, cut_ax)
             face_s = ax * (px + off * ax) + ay * (py + off * ay)
 

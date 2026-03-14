@@ -150,8 +150,7 @@ end
 function _map_columns_to_parametric(panel, cell_cols::Vector, skel)
     col_ξη = NTuple{2, Float64}[]
     for col in cell_cols
-        vi = col.vertex_idx
-        px, py = _vertex_xy_m(skel, vi)
+        px, py = _column_xy_m(skel, col)
         try
             ξη = parametric_coords(panel, px, py)
             push!(col_ξη, ξη)

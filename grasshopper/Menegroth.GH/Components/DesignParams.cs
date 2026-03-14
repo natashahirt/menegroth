@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Windows.Forms;
 using Grasshopper.Kernel;
+using Grasshopper.Kernel.Types;
 using Menegroth.GH.Types;
 
 namespace Menegroth.GH.Components
@@ -158,7 +159,7 @@ namespace Menegroth.GH.Components
             : base("Design Params",
                    "DesignParams",
                    "Configure design parameters for structural sizing",
-                   "Menegroth", "Input")
+                   "Menegroth", "Core")
         { }
 
         public override Guid ComponentGuid =>
@@ -184,6 +185,11 @@ namespace Menegroth.GH.Components
 
             pManager.AddNumberParameter("Wall SDL (psf)", "Wall SDL",
                 "Wall superimposed dead load in psf", GH_ParamAccess.item, 10.0);
+
+            pManager.AddGenericParameter("Params", "Params",
+                "Optional list of per-system parameter overrides (e.g., VaultParams).",
+                GH_ParamAccess.list);
+            pManager[6].Optional = true;
         }
 
         protected override void RegisterOutputParams(GH_OutputParamManager pManager)
@@ -427,6 +433,8 @@ namespace Menegroth.GH.Components
             DA.GetData(3, ref roofSDL);
             DA.GetData(4, ref gradeLL);
             DA.GetData(5, ref wallSDL);
+            var overrideParams = new List<IGH_Goo>();
+            DA.GetDataList(6, overrideParams);
 
             double fireRatingVal = 0;
             if (double.TryParse(_fireRating, System.Globalization.NumberStyles.Any,
@@ -458,7 +466,57 @@ namespace Menegroth.GH.Components
                 UnitSystem      = _unitSystem,
             };
 
+            ApplyOverrides(p, overrideParams);
+
             DA.SetData(0, new GH_DesignParamsData(p));
+        }
+
+        private void ApplyOverrides(DesignParamsData target, List<IGH_Goo> overrideParams)
+        {
+            if (target == null || overrideParams == null || overrideParams.Count == 0)
+                return;
+
+            foreach (var goo in overrideParams)
+            {
+                if (!TryGetVaultParams(goo, out var vault))
+                    continue;
+
+                if (vault.Lambda.HasValue && vault.Lambda.Value <= 0.0)
+                {
+                    AddRuntimeMessage(GH_RuntimeMessageLevel.Warning,
+                        "Ignoring VaultParams override with invalid lambda <= 0.");
+                    continue;
+                }
+
+                if (vault.HasScopedFaces)
+                {
+                    target.ScopedVaultOverrides.Add(vault.Clone());
+                }
+                else
+                {
+                    vault.ApplyTo(target);
+                }
+            }
+        }
+
+        private static bool TryGetVaultParams(IGH_Goo goo, out VaultParamsData vault)
+        {
+            vault = null;
+            if (goo == null) return false;
+
+            if (goo is GH_VaultParamsData ghVault && ghVault.Value != null)
+            {
+                vault = ghVault.Value;
+                return true;
+            }
+
+            if (goo is GH_ObjectWrapper wrapper && wrapper.Value is VaultParamsData wrappedVault)
+            {
+                vault = wrappedVault;
+                return true;
+            }
+
+            return false;
         }
 
         // ─── Helper types ────────────────────────────────────────────────

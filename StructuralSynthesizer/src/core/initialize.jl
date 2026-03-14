@@ -25,6 +25,7 @@ function initialize!(struc::BuildingStructure;
                      material::AbstractMaterial=NWC_4000,
                      floor_type::Symbol=:auto,
                      floor_opts::StructuralSizer.AbstractFloorOptions=StructuralSizer.FlatPlateOptions(),
+                     scoped_floor_overrides::Vector{ScopedFloorOverride}=ScopedFloorOverride[],
                      tributary_axis=nothing,
                      cell_groupings::Union{Symbol, Vector{Vector{Int}}}=:auto,
                      slab_group_ids::Union{Nothing, AbstractVector}=nothing,
@@ -38,7 +39,8 @@ function initialize!(struc::BuildingStructure;
     initialize_cells!(struc; loads=loads)
     initialize_slabs!(struc; material=material, floor_type=floor_type,
                       floor_opts=floor_opts, cell_groupings=cell_groupings,
-                      slab_group_ids=slab_group_ids)
+                      slab_group_ids=slab_group_ids,
+                      scoped_floor_overrides=scoped_floor_overrides)
     
     # Framing: segments → members
     initialize_segments!(struc)

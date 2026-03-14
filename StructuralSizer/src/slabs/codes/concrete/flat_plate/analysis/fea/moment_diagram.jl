@@ -252,7 +252,7 @@ function _fallback_cell!(
     δ = _section_cut_bandwidth(cache, cell_cols)
 
     for (_, col) in enumerate(cell_cols)
-        px, py = _vertex_xy_m(skel, col.vertex_idx)
+        px, py = _column_xy_m(skel, col)
         off = _column_face_offset_m(col, span_axis)
         face = (px + off * span_axis[1], py + off * span_axis[2])
 
@@ -378,7 +378,7 @@ function _extract_peak_nodal_strip_moments(
         # ── Column-face M⁻: peak Mₙ × strip width ──
         for (_, col) in enumerate(cell_cols)
             # Find nodes near column face (within 2 × column dimension)
-            px_col, py_col = _vertex_xy_m(skel, col.vertex_idx)
+            px_col, py_col = _column_xy_m(skel, col)
             off = _column_face_offset_m(col, span_axis)
             face_s = ax * (px_col + off * ax) + ay * (py_col + off * ay)
 

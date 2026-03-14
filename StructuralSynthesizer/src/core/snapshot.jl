@@ -43,7 +43,7 @@ function snapshot!(struc::BuildingStructure{T, A, P}, key::Symbol = :prepare) wh
 end
 
 """
-    restore!(struc::BuildingStructure, key::Symbol = :prepare)
+    restore!(struc::BuildingStructure, key::Symbol = :prepare; geometry_is_centerline=false)
 
 Revert mutable fields to the state captured by `snapshot!(struc, key)`.
 
@@ -51,9 +51,13 @@ Restores column dimensions/sections, beam sections, cell loads, and slab
 results/design details so the structure is ready for another design run
 without re-initialization.
 
+`geometry_is_centerline` is forwarded to `update_structural_offsets!` so
+restored column dimensions produce the correct structural centerline offsets.
+
 See also: [`snapshot!`](@ref), [`sync_asap!`](@ref)
 """
-function restore!(struc::BuildingStructure, key::Symbol = :prepare)
+function restore!(struc::BuildingStructure, key::Symbol = :prepare;
+                   geometry_is_centerline::Bool = false)
     snap = get(struc._snapshots, key, nothing)
     isnothing(snap) && error("No snapshot for key :$key — call snapshot!(struc, :$key) first")
 
@@ -83,6 +87,9 @@ function restore!(struc::BuildingStructure, key::Symbol = :prepare)
         slab.drop_panel = ss.drop_panel
         hasproperty(slab, :design_details) && (slab.design_details = ss.design_details)
     end
+
+    # Recompute structural offsets for restored column dimensions
+    !isnothing(struc.skeleton.geometry) && update_structural_offsets!(struc; input_is_centerline=geometry_is_centerline)
 
     return struc
 end

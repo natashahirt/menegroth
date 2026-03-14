@@ -129,6 +129,31 @@ function validate_input(input::APIInput)
         push!(errors, "Invalid floor_options.punching_strategy \"$(p.floor_options.punching_strategy)\". " *
               "Must be one of: $(join(valid_punching_strategies, ", ")).")
     end
+    if !isnothing(p.floor_options.vault_lambda) && p.floor_options.vault_lambda <= 0
+        push!(errors, "Invalid floor_options.vault_lambda $(p.floor_options.vault_lambda). Must be > 0.")
+    end
+
+    for (i, ov) in enumerate(p.scoped_overrides)
+        if !(ov.floor_type in valid_floor_types)
+            push!(errors, "Invalid scoped_overrides[$i].floor_type \"$(ov.floor_type)\". Must be one of: $(join(valid_floor_types, ", ")).")
+        end
+        if !isnothing(ov.floor_options.vault_lambda) && ov.floor_options.vault_lambda <= 0
+            push!(errors, "Invalid scoped_overrides[$i].floor_options.vault_lambda $(ov.floor_options.vault_lambda). Must be > 0.")
+        end
+        if isempty(ov.faces)
+            push!(errors, "scoped_overrides[$i] must include at least one face polygon.")
+        end
+        for (j, poly) in enumerate(ov.faces)
+            if length(poly) < 3
+                push!(errors, "scoped_overrides[$i].faces[$j] has $(length(poly)) vertices (need ≥ 3).")
+            end
+            for (k, coord) in enumerate(poly)
+                if length(coord) != 3
+                    push!(errors, "scoped_overrides[$i].faces[$j] vertex $k has $(length(coord)) coords (expected 3).")
+                end
+            end
+        end
+    end
 
     valid_column_types = ("rc_rect", "rc_circular", "steel_w", "steel_hss", "steel_pipe")
     if !(p.column_type in valid_column_types)

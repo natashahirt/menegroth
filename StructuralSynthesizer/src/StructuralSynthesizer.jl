@@ -142,6 +142,7 @@ export AbstractMember, MemberBase, Beam, Column, Strut
 export all_members, segment_indices, member_length, unbraced_length
 export group_id, section, volumes, set_group_id!, set_section!, set_volumes!
 export classify_column_position, is_exterior_support  # Column position classification for DDM/EFM
+export update_structural_offsets!, structural_center_xy_m  # Architectural → structural centerline
 export Support, Foundation, FoundationGroup, FoundationDemand
 
 # --- Building operations ---

@@ -12,10 +12,10 @@ for i in 1:MAX_SECONDS
         resp = HTTP.get("$(BASE)/status"; readtimeout=10)
         if resp.status == 200
             status_obj = JSON3.read(String(resp.body))
-            status_str = haskey(status_obj, :status) ? String(status_obj.status) : "unknown"
-            println("  [$i] status=$status_str")
-            if status_str != "warming"
-                println("Ready: status=$status_str")
+            state_str = haskey(status_obj, :state) ? String(status_obj.state) : "unknown"
+            println("  [$i] state=$state_str")
+            if state_str != "warming"
+                println("Ready: state=$state_str")
                 exit(0)
             end
         else

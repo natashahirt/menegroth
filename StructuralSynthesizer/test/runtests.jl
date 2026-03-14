@@ -15,6 +15,7 @@ using Asap  # ensures `u"kip"`, `u"ksi"`, etc resolve via Asap unit module
         include("core/test_member_hierarchy.jl")
         include("core/test_design_api.jl")
         include("core/test_api_units_faces.jl")
+        include("core/test_api_scoped_overrides_payload.jl")
     end
 
     # ─── Geometry & Utilities ────────────────────────────────────────────
@@ -27,11 +28,18 @@ using Asap  # ensures `u"kip"`, `u"ksi"`, etc resolve via Asap unit module
     @testset "Analysis" begin
         include("analyze/test_drape.jl")
         include("analyze/test_pattern_loading.jl")
+        include("analyze/test_structural_offset.jl")
     end
 
     # ─── Visualization ───────────────────────────────────────────────────
+    # Requires StructuralVisualization (and GLMakie); skip when not in project or headless.
     @testset "Visualization" begin
-        include("visualization/test_voronoi_vis.jl")
+        try
+            using StructuralVisualization
+            include("visualization/test_voronoi_vis.jl")
+        catch
+            @test_skip "StructuralVisualization not available (optional dep; expected in headless/CI)"
+        end
     end
 
     # ─── Report Generators (hybrid: report + @test assertions) ───────────

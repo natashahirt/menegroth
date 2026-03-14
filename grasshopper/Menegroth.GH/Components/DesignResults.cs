@@ -25,7 +25,7 @@ namespace Menegroth.GH.Components
             : base("Design Results",
                    "DesignRes",
                    "Design results: summary statistics and per-element data",
-                   "Menegroth", "Results")
+                   "Menegroth", "Core")
         { }
 
         public override Guid ComponentGuid =>
@@ -42,33 +42,33 @@ namespace Menegroth.GH.Components
         protected override void RegisterOutputParams(GH_OutputParamManager pManager)
         {
             // Summary outputs (always available)
-            pManager.AddBooleanParameter("All Pass", "AP",
+            pManager.AddBooleanParameter("All Pass", "AllPass",
                 "True if all elements pass design checks", GH_ParamAccess.item);
-            pManager.AddNumberParameter("Critical Ratio", "CR",
+            pManager.AddNumberParameter("Critical Ratio", "CriticalRatio",
                 "Highest utilization ratio in the building", GH_ParamAccess.item);
-            pManager.AddTextParameter("Critical Element", "CE",
+            pManager.AddTextParameter("Critical Element", "CriticalElement",
                 "Element with the highest utilization ratio", GH_ParamAccess.item);
-            pManager.AddNumberParameter("Concrete Volume", "CV",
+            pManager.AddNumberParameter("Concrete Volume", "ConcreteVolume",
                 "Concrete volume (ft\u00b3)", GH_ParamAccess.item);
-            pManager.AddNumberParameter("Steel Weight", "SW",
+            pManager.AddNumberParameter("Steel Weight", "SteelWeight",
                 "Steel weight (lb)", GH_ParamAccess.item);
-            pManager.AddNumberParameter("Rebar Weight", "RW",
+            pManager.AddNumberParameter("Rebar Weight", "RebarWeight",
                 "Rebar weight (lb)", GH_ParamAccess.item);
-            pManager.AddNumberParameter("Embodied Carbon", "EC",
+            pManager.AddNumberParameter("Embodied Carbon", "EmbodiedCarbon",
                 "Embodied carbon (kg CO\u2082e)", GH_ParamAccess.item);
-            pManager.AddNumberParameter("Compute Time", "CT",
+            pManager.AddNumberParameter("Compute Time", "ComputeTime",
                 "Compute time (seconds)", GH_ParamAccess.item);
 
             // Per-element outputs (filtered by menu selection)
-            pManager.AddIntegerParameter("IDs", "ID",
+            pManager.AddIntegerParameter("IDs", "IDs",
                 "Element IDs", GH_ParamAccess.list);
-            pManager.AddTextParameter("Sections", "S",
+            pManager.AddTextParameter("Sections", "Sections",
                 "Section labels", GH_ParamAccess.list);
-            pManager.AddNumberParameter("Utilization", "U",
+            pManager.AddNumberParameter("Utilization", "Utilization",
                 "Max utilization ratios (0\u20131)", GH_ParamAccess.list);
-            pManager.AddBooleanParameter("Pass", "P",
+            pManager.AddBooleanParameter("Pass", "Pass",
                 "Pass/fail per element", GH_ParamAccess.list);
-            pManager.AddTextParameter("Failures", "F",
+            pManager.AddTextParameter("Failures", "Failures",
                 "Failure messages (empty for passing elements)", GH_ParamAccess.list);
         }
 

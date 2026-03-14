@@ -12,7 +12,8 @@ const A992_Steel = StructuralSteel(
     65.0ksi,         # Fu
     490.0u"lb/ft^3",    # ρ
     0.29,               # ν
-    1.61                # ecc [kgCO₂e/kg]
+    1.61;               # ecc [kgCO₂e/kg]
+    color = "#6E6E6E"
 )
 
 """EN S355 structural steel (Fy = 355 MPa, Fu = 510 MPa, ECC = 1.61 kgCO₂e/kg)."""
@@ -23,23 +24,24 @@ const S355_Steel = StructuralSteel(
     510.0u"MPa",        # Fu
     7850.0u"kg/m^3",    # ρ
     0.30,               # ν
-    1.61                # ecc [kgCO₂e/kg]
+    1.61;               # ecc [kgCO₂e/kg]
+    color = "#6E6E6E"
 )
 
 """ASTM A615 Grade 40 rebar (Fy = 40 ksi, Fu = 60 ksi, ECC = 1.72 kgCO₂e/kg)."""
-const Rebar_40 = RebarSteel(29000.0ksi, 11200.0ksi, 40.0ksi, 60.0ksi, 490.0u"lb/ft^3", 0.30, 1.72)
+const Rebar_40 = RebarSteel(29000.0ksi, 11200.0ksi, 40.0ksi, 60.0ksi, 490.0u"lb/ft^3", 0.30, 1.72; color = "#5A5A5A")
 
 """ASTM A615 Grade 60 rebar (Fy = 60 ksi, Fu = 90 ksi, ECC = 1.72 kgCO₂e/kg)."""
-const Rebar_60 = RebarSteel(29000.0ksi, 11200.0ksi, 60.0ksi, 90.0ksi, 490.0u"lb/ft^3", 0.30, 1.72)
+const Rebar_60 = RebarSteel(29000.0ksi, 11200.0ksi, 60.0ksi, 90.0ksi, 490.0u"lb/ft^3", 0.30, 1.72; color = "#5A5A5A")
 
 """ASTM A615 Grade 75 rebar (Fy = 75 ksi, Fu = 100 ksi, ECC = 1.72 kgCO₂e/kg)."""
-const Rebar_75 = RebarSteel(29000.0ksi, 11200.0ksi, 75.0ksi, 100.0ksi, 490.0u"lb/ft^3", 0.30, 1.72)
+const Rebar_75 = RebarSteel(29000.0ksi, 11200.0ksi, 75.0ksi, 100.0ksi, 490.0u"lb/ft^3", 0.30, 1.72; color = "#5A5A5A")
 
 """ASTM A615 Grade 80 rebar (Fy = 80 ksi, Fu = 105 ksi, ECC = 1.72 kgCO₂e/kg)."""
-const Rebar_80 = RebarSteel(29000.0ksi, 11200.0ksi, 80.0ksi, 105.0ksi, 490.0u"lb/ft^3", 0.30, 1.72)
+const Rebar_80 = RebarSteel(29000.0ksi, 11200.0ksi, 80.0ksi, 105.0ksi, 490.0u"lb/ft^3", 0.30, 1.72; color = "#5A5A5A")
 
 """ASTM A1044 headed shear stud steel (Fy = 51 ksi, Fu = 65 ksi, ECC = 1.72 kgCO₂e/kg)."""
-const Stud_51 = RebarSteel(29000.0ksi, 11200.0ksi, 51.0ksi, 65.0ksi, 490.0u"lb/ft^3", 0.30, 1.72)
+const Stud_51 = RebarSteel(29000.0ksi, 11200.0ksi, 51.0ksi, 65.0ksi, 490.0u"lb/ft^3", 0.30, 1.72; color = "#5A5A5A")
 
 # ==============================================================================
 # Registry

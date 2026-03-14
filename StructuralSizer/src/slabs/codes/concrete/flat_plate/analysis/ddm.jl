@@ -76,15 +76,18 @@ end
 """
     _get_column_xy(struc, col) -> NTuple{2, Float64}
 
-Get XY position of column in meters from skeleton vertex.
+Get XY position of column's **structural centerline** in meters.
 
-Uses `col.vertex_idx` to look up position in `struc.skeleton.vertices`.
+Applies `structural_offset` (edge/corner columns shifted inward) when available.
+Falls back to the raw vertex position for lightweight stubs without the offset field.
 """
 function _get_column_xy(struc, col)::NTuple{2, Float64}
     vidx = col_vertex_idx(col)
     if vidx > 0
         vc = struc.skeleton.geometry.vertex_coords
-        return (vc[vidx, 1], vc[vidx, 2])
+        xy = (vc[vidx, 1], vc[vidx, 2])
+        off = hasproperty(col, :structural_offset) ? col.structural_offset : (0.0, 0.0)
+        return (xy[1] + off[1], xy[2] + off[2])
     else
         error("Column missing vertex_idx - cannot determine position for ordering")
     end

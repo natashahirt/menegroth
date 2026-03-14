@@ -68,7 +68,7 @@ namespace Menegroth.GH.Components
             : base("Design Run",
                    "DesignRun",
                    "Send geometry and parameters to the Julia sizing server",
-                   "Menegroth", "Analysis")
+                   "Menegroth", "Core")
         { }
 
         public override Guid ComponentGuid =>
@@ -86,7 +86,7 @@ namespace Menegroth.GH.Components
                 "DesignParams from the DesignParams component",
                 GH_ParamAccess.item);
 
-            pManager.AddTextParameter("Server URL", "URL",
+            pManager.AddTextParameter("Server URL", "ServerUrl",
                 "Julia API server URL (persisted in right-click menu)",
                 GH_ParamAccess.item, DefaultServerUrl);
 
@@ -104,6 +104,10 @@ namespace Menegroth.GH.Components
                 "Raw JSON response from the server", GH_ParamAccess.item);
             pManager.AddTextParameter("Log", "Log",
                 "Status log (wire to Panel to see progress)", GH_ParamAccess.item);
+            pManager.AddIntegerParameter("Failure Count", "FailureCount",
+                "Number of failing elements in the latest result", GH_ParamAccess.item);
+            pManager.AddTextParameter("Failure Messages", "FailureMessages",
+                "Per-element failure messages from the latest result", GH_ParamAccess.list);
         }
 
         // ─── Right-click menu ───────────────────────────────────────────
@@ -256,6 +260,7 @@ namespace Menegroth.GH.Components
                         : "Working...";
                 AddRuntimeMessage(GH_RuntimeMessageLevel.Remark, Message);
                 DA.SetData(2, GetLogSnapshot());
+                SetFailureOutputs(DA, _lastParsed);
                 if (_lastParsed != null)
                 {
                     DA.SetData(0, new GH_DesignResult(_lastParsed));
@@ -268,6 +273,7 @@ namespace Menegroth.GH.Components
             if (!run)
             {
                 DA.SetData(2, GetLogSnapshot());
+                SetFailureOutputs(DA, _lastParsed);
                 if (_lastParsed != null)
                 {
                     DA.SetData(0, new GH_DesignResult(_lastParsed));
@@ -294,6 +300,7 @@ namespace Menegroth.GH.Components
                 DA.SetData(0, new GH_DesignResult(_lastParsed));
                 DA.SetData(1, _lastParsed.RawJson);
                 DA.SetData(2, GetLogSnapshot());
+                SetFailureOutputs(DA, _lastParsed);
                 Message = FormatDoneMessage(_lastParsed) + " (cached)";
                 AddRuntimeMessage(GH_RuntimeMessageLevel.Remark,
                     "No changes detected \u2014 returning cached result.");
@@ -311,13 +318,16 @@ namespace Menegroth.GH.Components
                 foreach (var err in validationErrors)
                     AppendLog(OnPingDocument(), "  \u2022 " + err);
                 DA.SetData(2, GetLogSnapshot());
+                SetFailureOutputs(DA, null);
                 Message = $"\u2717 {validationErrors.Count} validation error{(validationErrors.Count > 1 ? "s" : "")}";
                 return;
             }
 
             // 7. Build payload
             var payload = geo.ToJson();
-            payload["params"] = prms.ToJson();
+            var paramsJson = prms.ToJson();
+            paramsJson["geometry_is_centerline"] = geo.GeometryIsCenterline;
+            payload["params"] = paramsJson;
             if (geoHash == _lastGeoHash && paramsHash != _lastParamsHash)
                 payload["geometry_hash"] = geoHash;
             string jsonBody = payload.ToString();
@@ -335,6 +345,29 @@ namespace Menegroth.GH.Components
 
             Task.Run(async () =>
             {
+                var logPollCts = new CancellationTokenSource();
+                var logPollTask = Task.Run(async () =>
+                {
+                    int since = 0;
+                    while (!logPollCts.Token.IsCancellationRequested)
+                    {
+                        try
+                        {
+                            var (nextSince, lines) = await GetServerLogs(url, since);
+                            since = nextSince;
+                            foreach (var line in lines)
+                                AppendLog(doc, $"[server] {line}");
+                        }
+                        catch
+                        {
+                            // Keep polling; transient log endpoint failures should not fail design runs.
+                        }
+
+                        try { await Task.Delay(1000, logPollCts.Token); }
+                        catch (OperationCanceledException) { break; }
+                    }
+                }, logPollCts.Token);
+
                 try
                 {
                     if (!await CheckHealth(url))
@@ -372,7 +405,7 @@ namespace Menegroth.GH.Components
                         ScheduleExpire(doc);
                         return;
                     }
-                    if (readyBody.Contains("\"status\":\"error\""))
+                    if (readyBody.Contains("\"state\":\"error\"") || readyBody.Contains("\"status\":\"error\""))
                     {
                         AppendLog(doc, "\u2717 Server failed during startup. Check server logs.");
                         _pendingError = "Server reported an error during startup.";
@@ -485,11 +518,18 @@ namespace Menegroth.GH.Components
                     _pendingError = $"Error: {ex.Message}";
                     _state = RunState.Error;
                 }
+                finally
+                {
+                    logPollCts.Cancel();
+                    try { await logPollTask; }
+                    catch (OperationCanceledException) { }
+                }
 
                 ScheduleExpire(doc);
             });
 
             DA.SetData(2, GetLogSnapshot());
+            SetFailureOutputs(DA, _lastParsed);
             if (_lastParsed != null)
             {
                 DA.SetData(0, new GH_DesignResult(_lastParsed));
@@ -502,6 +542,7 @@ namespace Menegroth.GH.Components
         private void EmitResult(IGH_DataAccess DA, DesignResult result)
         {
             DA.SetData(2, GetLogSnapshot());
+            SetFailureOutputs(DA, result);
             if (result != null)
             {
                 DA.SetData(0, new GH_DesignResult(result));
@@ -509,6 +550,42 @@ namespace Menegroth.GH.Components
                 if (result.IsError)
                     AddRuntimeMessage(GH_RuntimeMessageLevel.Error, result.ErrorMessage);
             }
+        }
+
+        private static void SetFailureOutputs(IGH_DataAccess DA, DesignResult result)
+        {
+            if (result == null || result.IsError)
+            {
+                DA.SetData(3, 0);
+                DA.SetDataList(4, new List<string>());
+                return;
+            }
+
+            var failures = CollectFailureMessages(result);
+            DA.SetData(3, failures.Count);
+            DA.SetDataList(4, failures);
+        }
+
+        private static List<string> CollectFailureMessages(DesignResult result)
+        {
+            var failures = new List<string>();
+
+            foreach (var s in result.Slabs)
+            {
+                if (s.Ok) continue;
+                failures.Add(string.IsNullOrWhiteSpace(s.FailureReason)
+                    ? $"Slab {s.Id}: deflection={s.DeflectionRatio:F2}, punching={s.PunchingMaxRatio:F2}"
+                    : $"Slab {s.Id}: {s.FailureReason}");
+            }
+
+            foreach (var c in result.Columns)
+                if (!c.Ok) failures.Add($"Column {c.Id}: interaction={c.InteractionRatio:F2}, axial={c.AxialRatio:F2}");
+            foreach (var b in result.Beams)
+                if (!b.Ok) failures.Add($"Beam {b.Id}: flexure={b.FlexureRatio:F2}, shear={b.ShearRatio:F2}");
+            foreach (var f in result.Foundations)
+                if (!f.Ok) failures.Add($"Foundation {f.Id}: bearing={f.BearingRatio:F2}");
+
+            return failures;
         }
 
         private static string FormatDoneMessage(DesignResult r)
@@ -607,15 +684,41 @@ namespace Menegroth.GH.Components
                     var resp = await _client.GetAsync($"{baseUrl.TrimEnd('/')}/status");
                     var body = await resp.Content.ReadAsStringAsync();
                     var jobj = JObject.Parse(body);
-                    string st = jobj["status"]?.ToString() ?? "";
+                    string st = jobj["state"]?.ToString() ?? "";
                     if (st == "idle")
                         return body;
                     if (st == "error")
-                        return "{\"status\":\"error\",\"message\":\"Server reported an error during startup. Check server logs.\"}";
+                        return "{\"state\":\"error\",\"message\":\"Server reported an error during startup. Check server logs.\"}";
                 }
                 catch { /* retry on transient network errors */ }
             }
-            return "{\"status\":\"error\",\"message\":\"Timeout waiting for server\"}";
+            return "{\"state\":\"error\",\"message\":\"Timeout waiting for server\"}";
+        }
+
+        private static async Task<(int nextSince, List<string> lines)> GetServerLogs(string baseUrl, int since)
+        {
+            var response = await _client.GetAsync($"{baseUrl.TrimEnd('/')}/logs?since={since}");
+            if (!response.IsSuccessStatusCode)
+                return (since, new List<string>());
+
+            var body = await response.Content.ReadAsStringAsync();
+            if (string.IsNullOrWhiteSpace(body))
+                return (since, new List<string>());
+
+            var obj = JObject.Parse(body);
+            int next = obj["next_since"]?.ToObject<int>() ?? since;
+            var lines = new List<string>();
+            if (obj["lines"] is JArray arr)
+            {
+                foreach (var token in arr)
+                {
+                    var line = token?.ToString();
+                    if (!string.IsNullOrWhiteSpace(line))
+                        lines.Add(line);
+                }
+            }
+
+            return (next, lines);
         }
 
         // ─── Client-side validation ──────────────────────────────────────
@@ -696,6 +799,8 @@ namespace Menegroth.GH.Components
                 errors.Add($"Invalid optimize_for \"{prms.OptimizeFor}\". Options: weight, carbon, cost");
             if (!ValidUnitSystems.Contains(prms.UnitSystem?.ToLowerInvariant() ?? ""))
                 errors.Add($"Invalid unit system \"{prms.UnitSystem}\". Options: imperial, metric");
+            if (prms.VaultLambda.HasValue && prms.VaultLambda.Value <= 0)
+                errors.Add($"Invalid vault_lambda {prms.VaultLambda.Value}. Must be > 0.");
 
             // Foundation soil (only if foundations requested)
             if (prms.SizeFoundations && !ValidSoils.Contains(prms.FoundationSoil))

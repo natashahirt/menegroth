@@ -2,6 +2,7 @@
 
 using StructuralSynthesizer
 using StructuralSizer
+using StructuralVisualization
 using Unitful
 using GLMakie
 

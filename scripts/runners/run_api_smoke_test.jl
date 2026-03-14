@@ -35,7 +35,7 @@ function run_design_e2e()
     idle = false
     for i in 1:180
         status_obj = JSON3.read(get("/status"))
-        if haskey(status_obj, :status) && status_obj.status == "idle"
+        if haskey(status_obj, :state) && status_obj.state == "idle"
             println("  GET /status ... idle after $(i)s")
             idle = true
             break

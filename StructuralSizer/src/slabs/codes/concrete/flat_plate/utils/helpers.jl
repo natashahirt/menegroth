@@ -249,10 +249,12 @@ Build a FrameLine from columns and tributary width for EFM analysis.
 - `direction`: Frame direction (:x or :y)
 """
 function build_frame_line(struc, columns, l2, direction::Symbol=:x)
-    vc = struc.skeleton.geometry.vertex_coords
-    # Position accessor: reads from cached coordinate matrix
+    skel = struc.skeleton
+    vc = skel.geometry.vertex_coords
+    # Position accessor: structural centerline (applies inward offset for edge/corner)
     function get_position(col)
-        (vc[col.vertex_idx, 1], vc[col.vertex_idx, 2])
+        off = hasproperty(col, :structural_offset) ? col.structural_offset : (0.0, 0.0)
+        (vc[col.vertex_idx, 1] + off[1], vc[col.vertex_idx, 2] + off[2])
     end
     
     # Width accessor: returns column width in frame direction

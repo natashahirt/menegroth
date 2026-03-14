@@ -70,19 +70,19 @@ compute_geometry_hash
 
 Notes:
 - Unknown `floor_type` strings fall back to `FlatPlateOptions(...)` with the resolved analysis settings.
-- `unit_system` controls `DesignParameters.display_units` (`DisplayUnits(:imperial)` or `DisplayUnits(:metric)`), but the current JSON output is still imperial.
+- `unit_system` controls `DesignParameters.display_units` (`DisplayUnits(:imperial)` or `DisplayUnits(:metric)`), and output numeric fields use those display units.
 
 ### design_to_json
 
 `design_to_json(design::BuildingDesign; geometry_hash) → APIOutput` converts the design to JSON-safe output:
 
 1. **Summary** — extracts material quantities, embodied carbon, pass/fail status
-2. **Slabs** — converts each `SlabDesignResult` to `APISlabResult` with imperial dimensions
+2. **Slabs** — converts each `SlabDesignResult` to `APISlabResult` in display units
 3. **Columns** — converts each `ColumnDesignResult` to `APIColumnResult`
 4. **Beams** — converts each `BeamDesignResult` to `APIBeamResult`
 5. **Foundations** — converts each `FoundationDesignResult` to `APIFoundationResult`
 6. **Visualization** — if enabled, generates `APIVisualization` with node positions, frame elements, slab meshes, and deflected shapes
-7. **Metadata** — `compute_time_s`, `geometry_hash`, status
+7. **Metadata** — `compute_time_s`, `geometry_hash`, status plus explicit unit labels (`length_unit`, `thickness_unit`, `volume_unit`, `mass_unit`)
 
 ### compute_geometry_hash
 

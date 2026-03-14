@@ -59,6 +59,8 @@ Vertical member (columns).
 - `concrete`: Per-column concrete material (`nothing` → use `ConcreteColumnOptions.material`)
 - `story::Int`: Story index (0 = ground level)
 - `position::Symbol`: `:interior`, `:edge`, `:corner` (for punching shear coefficients)
+- `boundary_inward_normals`: Unit vectors pointing from each boundary edge toward the slab interior
+- `structural_offset::NTuple{2,Float64}`: Offset (m) from architectural vertex to structural centerline
 - `braced`: Whether column is part of a braced frame (no sway amplification needed)
 - `story_properties`: Optional story-level data for sway magnification (populated after analysis)
 
@@ -108,6 +110,15 @@ populate the `story_properties` field with:
     # Empty for interior columns; 1 direction for edge columns; 2+ for corners.
     # Used for DDM/EFM to determine if column is an exterior support for a given span direction.
     boundary_edge_dirs::Vector{NTuple{2, Float64}} = NTuple{2, Float64}[]
+    # Inward unit normals corresponding to each boundary_edge_dir (populated by
+    # update_structural_offsets!).  Each normal points from the slab edge toward
+    # the slab interior, derived from the adjacent face's CCW winding.
+    boundary_inward_normals::Vector{NTuple{2, Float64}} = NTuple{2, Float64}[]
+    # Structural offset (meters) from the architectural vertex to the column
+    # centerline.  For interior columns this is (0,0).  For edge/corner columns
+    # the offset shifts inward by half the column dimension normal to each
+    # boundary edge.  Recomputed whenever column dimensions change.
+    structural_offset::NTuple{2, Float64} = (0.0, 0.0)
     braced::Bool = true  # Default: braced frame (no sway amplification)
     story_properties::Union{Nothing, @NamedTuple{ΣPu::Float64, ΣPc::Float64, Vus::Float64, Δo::Float64, lc::Float64}} = nothing
     # Cell indices in this column's tributary area (populated by compute_vertex_tributaries!)

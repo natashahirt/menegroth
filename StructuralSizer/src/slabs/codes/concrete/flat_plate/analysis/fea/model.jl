@@ -90,7 +90,7 @@ function _build_fea_slab_model(
         end
 
         slab_node = node_map[vi]
-        xy = _vertex_xy_m(skel, vi)
+        xy = _column_xy_m(skel, col)
 
         # ── Below column (always present) ──
         Lc_below = col.base.L
@@ -140,7 +140,6 @@ function _build_fea_slab_model(
                 # Rotated rectangle: build vertices manually
                 cosθ = cos(θ); sinθ = sin(θ)
                 hx = c1_m / 2; hy = c2_m / 2
-                # Local corners → global via rotation R = [cosθ -sinθ; sinθ cosθ]
                 corners_local = ((-hx, -hy), (hx, -hy), (hx, hy), (-hx, hy))
                 verts = Tuple{Float64, Float64}[
                     (xy[1] + cosθ*lx - sinθ*ly, xy[2] + sinθ*lx + cosθ*ly)
@@ -180,7 +179,7 @@ function _build_fea_slab_model(
         for (i, col) in enumerate(columns)
             vi = col.vertex_idx
             haskey(node_map, vi) || continue
-            xy = _vertex_xy_m(skel, vi)
+            xy = _column_xy_m(skel, col)
             
             push!(patches, Asap.ShellPatch(
                 xy[1], xy[2], w_drop, h_drop_m,

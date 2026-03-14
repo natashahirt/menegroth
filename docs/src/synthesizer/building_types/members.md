@@ -81,6 +81,8 @@ All members share the abstract base `AbstractMember{T}`. The concrete types wrap
 | `story` | Story index |
 | `position` | `:interior`, `:edge`, or `:corner` (from `classify_column_position`) |
 | `boundary_edge_dirs` | Edge directions at boundary for punching shear |
+| `boundary_inward_normals` | Unit vectors pointing from boundary edges toward slab interior (for structural offset computation) |
+| `structural_offset` | `(dx, dy)` offset in meters from architectural vertex to structural centerline |
 | `braced` | Whether column is braced against sway |
 | `story_properties` | Sway magnification data (ΣPu, ΣPc, Vus, Δo) per ACI 318-11 §10.10.7 |
 | `tributary_cell_indices` | Cell indices contributing load |

@@ -441,6 +441,194 @@ function is_exterior_support(col::Column, span_direction::Symbol)::Bool
     return is_exterior_support(col, span_axis)
 end
 
+# =============================================================================
+# Structural Column Offset — Architectural → Centerline
+# =============================================================================
+#
+# When columns are placed at architectural reference points (column face flush
+# with slab edge), the structural centerline is inboard by half the column
+# dimension normal to each boundary edge.  These functions compute that offset
+# using the adjacent face's CCW winding to determine the inward direction —
+# robust to concave floor plates and arbitrary edge orientations.
+# =============================================================================
+
+"""
+    _column_half_dim_m(col, d::NTuple{2,Float64}) -> Float64
+
+Distance (meters) from column center to column face in direction `d` (unit vector).
+
+For circular columns: D/2 in any direction.
+For rectangular columns: projects `d` into the column's local frame (rotated by θ)
+and returns the distance to the bounding-box face along that direction.
+
+Equivalent to StructuralSizer's `_column_face_offset_m` but self-contained so
+StructuralSynthesizer doesn't depend on a private function.
+"""
+function _column_half_dim_m(col::Column, d::NTuple{2,Float64})
+    (col.c1 === nothing || col.c2 === nothing) && return 0.0
+
+    c1_m = Float64(ustrip(u"m", col.c1))
+    c2_m = Float64(ustrip(u"m", col.c2))
+
+    if col.shape == :circular
+        return c1_m / 2  # D/2 in any direction
+    end
+
+    # Rotate d from global frame into the column's local frame.
+    θ = col.θ
+    cosθ = cos(θ); sinθ = sin(θ)
+    dl_x =  cosθ * d[1] + sinθ * d[2]
+    dl_y = -sinθ * d[1] + cosθ * d[2]
+
+    # Axis-aligned bounding-box intersection: t = min distance such that
+    # the ray from center along d_local hits the box edge.
+    tx = abs(dl_x) > 1e-9 ? c1_m / (2 * abs(dl_x)) : Inf
+    ty = abs(dl_y) > 1e-9 ? c2_m / (2 * abs(dl_y)) : Inf
+    return min(tx, ty)
+end
+
+"""
+    _compute_inward_normal(skel, vertex_idx, neighbor_idx, edge_idx) -> NTuple{2,Float64}
+
+Compute the unit normal pointing **inward** (toward the slab interior) for a
+boundary edge connecting `vertex_idx` and `neighbor_idx`.
+
+Uses the CCW winding of the adjacent face: for a CCW-wound polygon, the
+left-hand normal of each directed edge points into the polygon interior.
+We find the face that contains this boundary edge, determine the edge's
+direction as it appears in the face's vertex list, and return its 90° CCW
+rotation (left-hand normal).
+
+Robust to concave polygons — does not rely on centroid position.
+"""
+function _compute_inward_normal(skel::BuildingSkeleton, vertex_idx::Int,
+                                neighbor_idx::Int, edge_idx::Int)
+    # Find the single face that owns this boundary edge
+    face_idx = 0
+    for (fi, face_edges) in enumerate(skel.face_edge_indices)
+        if edge_idx in face_edges
+            face_idx = fi
+            break
+        end
+    end
+    face_idx == 0 && error("Boundary edge $edge_idx not found in any face")
+
+    # Walk the face's CCW vertex list to find edge direction as seen by the face
+    vis = skel.face_vertex_indices[face_idx]
+    vc = skel.geometry.vertex_coords
+    n_v = length(vis)
+    for i in 1:n_v
+        v_a = vis[i]
+        v_b = vis[mod1(i + 1, n_v)]
+        if (v_a == vertex_idx && v_b == neighbor_idx) ||
+           (v_a == neighbor_idx && v_b == vertex_idx)
+            # Directed edge as it appears in CCW face: v_a → v_b
+            dx = vc[v_b, 1] - vc[v_a, 1]
+            dy = vc[v_b, 2] - vc[v_a, 2]
+            len = hypot(dx, dy)
+            len < 1e-12 && error("Zero-length edge in face $face_idx")
+            # Left-hand normal of CCW edge = inward: rotate (dx,dy) by +90°
+            return (-dy / len, dx / len)
+        end
+    end
+    error("Edge ($vertex_idx, $neighbor_idx) not found in face $face_idx vertex list")
+end
+
+"""
+    update_structural_offsets!(struc; input_is_centerline=false)
+
+Compute `structural_offset` and `boundary_inward_normals` for every column.
+
+When `input_is_centerline=true`, all offsets are set to `(0,0)` — the input
+vertex coordinates are already structural centerlines and no adjustment is needed.
+
+When `input_is_centerline=false` (architectural input), edge and corner columns
+are offset inward by half the column dimension normal to each boundary edge.
+Interior columns always have zero offset.
+
+Call this:
+1. After `classify_column_position` (initial setup)
+2. After any column resize (design iteration) to update offsets for new dimensions
+
+The function is idempotent — safe to call repeatedly.
+"""
+function update_structural_offsets!(struc::BuildingStructure;
+                                    input_is_centerline::Bool = false)
+    skel = struc.skeleton
+    vc = skel.geometry.vertex_coords
+    efc = skel.geometry.edge_face_counts
+
+    for col in struc.columns
+        if input_is_centerline || col.position == :interior
+            col.structural_offset = (0.0, 0.0)
+            empty!(col.boundary_inward_normals)
+            continue
+        end
+
+        # Recompute inward normals + offset from current column dimensions.
+        # Multiple boundary edges may share the same inward normal (e.g., a
+        # mid-edge column has two boundary edges both pointing the same way).
+        # We deduplicate normals so the offset is applied once per unique
+        # inward direction.
+        all_normals = NTuple{2, Float64}[]
+        v_idx = col.vertex_idx
+        v_z = vc[v_idx, 3]
+
+        neighbors = Graphs.neighbors(skel.graph, v_idx)
+        for n_idx in neighbors
+            abs(vc[n_idx, 3] - v_z) > 0.01 && continue  # horizontal only
+            edge_idx = find_edge(skel, v_idx, n_idx)
+            isnothing(edge_idx) && continue
+            get(efc, edge_idx, 0) == 1 || continue  # boundary edges only
+
+            n_inward = _compute_inward_normal(skel, v_idx, n_idx, edge_idx)
+            push!(all_normals, n_inward)
+        end
+
+        # Deduplicate: keep only unique inward normal directions (cosine > 0.95)
+        unique_normals = NTuple{2, Float64}[]
+        for n in all_normals
+            is_dup = false
+            for u in unique_normals
+                dot_val = n[1]*u[1] + n[2]*u[2]
+                if dot_val > 0.95
+                    is_dup = true
+                    break
+                end
+            end
+            is_dup || push!(unique_normals, n)
+        end
+
+        ox, oy = 0.0, 0.0
+        for n_inward in unique_normals
+            half_dim = _column_half_dim_m(col, n_inward)
+            ox += n_inward[1] * half_dim
+            oy += n_inward[2] * half_dim
+        end
+
+        col.boundary_inward_normals = unique_normals
+        col.structural_offset = (ox, oy)
+    end
+
+    return struc
+end
+
+"""
+    structural_center_xy_m(skel, col::Column) -> NTuple{2,Float64}
+
+XY position (meters) of a column's **structural centerline**, accounting for
+the inward offset from the architectural vertex.
+
+For interior columns or when `input_is_centerline=true`, this returns the
+same value as `_vertex_xy_m(skel, col.vertex_idx)`.
+"""
+function structural_center_xy_m(skel, col::Column)
+    vc = skel.geometry.vertex_coords
+    vi = col.vertex_idx
+    return (vc[vi, 1] + col.structural_offset[1],
+            vc[vi, 2] + col.structural_offset[2])
+end
+
 """
     group_collinear_members!(struc::BuildingStructure; 
                              member_type::Symbol=:beams, tol::Real=1e-3)
@@ -2088,18 +2276,23 @@ end
 # =============================================================================
 
 """
-    estimate_column_sizes!(struc; fc=4000u"psi", qu_default=200psf, method=:tributary)
+    estimate_column_sizes!(struc; fc=4000u"psi", qu_default=200psf, method=:tributary,
+                           input_is_centerline=false)
 
 Estimate initial column sizes and store in Column.c1, Column.c2.
 
 This provides preliminary column dimensions needed for slab clear span calculation
 (ln = l - c) before full column design. The estimate is intentionally conservative.
 
+After sizing, calls `update_structural_offsets!` to compute the inward offset
+from architectural vertices to structural centerlines for edge/corner columns.
+
 # Arguments
 - `struc`: BuildingStructure with columns and tributary areas computed
 - `fc`: Concrete compressive strength (default 4000 psi)
 - `qu_default`: Default factored floor load if not available from cells (default 200 psf)
 - `method`: :tributary (from Voronoi area) or :span (from span rule of thumb)
+- `input_is_centerline`: forwarded to `update_structural_offsets!`; when `true`, all offsets are zero
 
 # Requires
 - Columns initialized with `initialize_members!()`
@@ -2125,7 +2318,8 @@ end
 function estimate_column_sizes!(struc::BuildingStructure;
                                  fc::Unitful.Pressure = 4000u"psi",
                                  qu_default::Unitful.Pressure = 200psf,
-                                 method::Symbol = :tributary)
+                                 method::Symbol = :tributary,
+                                 input_is_centerline::Bool = false)
     skel = struc.skeleton
     n_total_stories = length(skel.stories_z) - 1  # stories_z includes ground (0)
     
@@ -2183,6 +2377,10 @@ function estimate_column_sizes!(struc::BuildingStructure;
     end
     
     @info "Estimated initial column sizes" method=method columns=estimated_count fc=fc
+
+    # Compute structural offsets now that column dimensions are available.
+    update_structural_offsets!(struc; input_is_centerline=input_is_centerline)
+
     return struc
 end
 

@@ -279,6 +279,19 @@ const _DEFAULT_FRAME_ρ = uconvert(u"kg/m^3",  A992_Steel.ρ)
 # =============================================================================
 
 """
+Face-scoped floor override from API/client input.
+
+- `floor_type`: Target floor system (currently supports `:vault` in scoped mode).
+- `vault_lambda`: Optional vault span/rise ratio override.
+- `faces`: Selector polygons in meters, each as `[(x,y,z), ...]`.
+"""
+Base.@kwdef struct ScopedFloorOverride
+    floor_type::Symbol = :vault
+    vault_lambda::Union{Float64, Nothing} = nothing
+    faces::Vector{Vector{NTuple{3, Float64}}} = Vector{NTuple{3, Float64}}[]
+end
+
+"""
 Parameters that define a design configuration.
 
 Different `DesignParameters` on the same `BuildingStructure` produce
@@ -359,6 +372,11 @@ Base.@kwdef mutable struct DesignParameters
     
     # ─── Foundation Options ───
     foundation_options::Union{FoundationParameters, Nothing} = nothing
+
+    # ─── Face-scoped Floor Overrides ───
+    # Optional geometry-scoped floor overrides (e.g., vault-only regions).
+    # Coordinates are stored in meters as plain Float64 triplets.
+    scoped_floor_overrides::Vector{ScopedFloorOverride} = ScopedFloorOverride[]
     
     # ─── Member Grouping ───
     # When true, detect collinear beams (sharing a node with aligned direction)
@@ -394,6 +412,13 @@ Base.@kwdef mutable struct DesignParameters
     
     # ─── Iteration Control ───
     max_iterations::Int = 20
+    
+    # ─── Geometry Interpretation ───
+    # When false (default), input vertex coordinates are architectural reference
+    # points (panel corners / facade line).  Edge and corner columns are offset
+    # inward by half the column dimension to their structural centerlines.
+    # When true, vertices are already structural centerlines — no offset is applied.
+    geometry_is_centerline::Bool = false
     
     # ─── Display Preferences ───
     display_units::DisplayUnits = imperial

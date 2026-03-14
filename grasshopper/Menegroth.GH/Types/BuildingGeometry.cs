@@ -19,6 +19,14 @@ namespace Menegroth.GH.Types
         public List<int> Supports { get; set; } = new List<int>();
         public List<double> StoriesZ { get; set; } = new List<double>();
 
+        /// <summary>
+        /// When false (default), input vertices are architectural reference points
+        /// (panel corners / facade line). Edge and corner columns are automatically
+        /// offset inward to their structural centerlines.
+        /// When true, vertices are already structural centerlines — no offset is applied.
+        /// </summary>
+        public bool GeometryIsCenterline { get; set; } = false;
+
         // Faces grouped by category (floor, roof, grade)
         public Dictionary<string, List<List<double[]>>> Faces { get; set; }
             = new Dictionary<string, List<List<double[]>>>();

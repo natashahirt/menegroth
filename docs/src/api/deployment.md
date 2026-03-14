@@ -99,9 +99,9 @@ The Docker image build includes a **custom sysimage** step that can take **15–
 | Cold start | Fast — serves `/health` immediately | Slow — blocks until loaded |
 | Use case | Production (App Runner health checks) | Development |
 
-Bootstrap mode is preferred for production because App Runner requires a health check response within a timeout. The bootstrap server responds to `/health` immediately and returns `{"status":"warming","message":"Full API not ready yet"}` for `/status` until the full package is loaded.
+Bootstrap mode is preferred for production because App Runner requires a health check response within a timeout. The bootstrap server responds to `/health` immediately and returns `{"state":"warming","message":"Full API not ready yet"}` for `/status` until the full package is loaded.
 
-Once the full API is loaded, the bootstrap `/status` endpoint returns `{"status":"idle"|"running"|"queued","message":"ready"}`.
+Once the full API is loaded, the bootstrap `/status` endpoint returns `{"state":"idle"|"running"|"queued"}` (with optional `message` when extra context is needed).
 
 ## Environment Variables
 

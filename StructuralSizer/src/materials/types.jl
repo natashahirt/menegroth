@@ -66,6 +66,7 @@ Parametric metal type supporting different steel categories via type tags.
 - `ν`: Poisson's ratio
 - `ecc`: Embodied carbon [kgCO₂e/kg]
 - `cost`: Unit cost [USD/kg] (NaN if not set; required for MinCost optimization)
+- `color`: Optional display color as hex string (e.g. "#6E6E6E")
 """
 struct Metal{K<:MetalType, T_P, T_D} <: AbstractMaterial
     E::T_P      # Young's modulus
@@ -76,6 +77,7 @@ struct Metal{K<:MetalType, T_P, T_D} <: AbstractMaterial
     ν::Float64  # Poisson's ratio
     ecc::Float64  # Embodied carbon [kgCO₂e/kg]
     cost::Float64 # Unit cost [$/kg] (NaN = not set)
+    color::Union{Nothing, String} # Optional display color hex (or nothing)
 end
 
 """Alias for `Metal{StructuralSteelType}` — rolled/welded structural steel."""
@@ -85,10 +87,12 @@ const StructuralSteel{T_P, T_D} = Metal{StructuralSteelType, T_P, T_D}
 const RebarSteel{T_P, T_D} = Metal{RebarType, T_P, T_D}
 
 """Construct a `StructuralSteel` from elastic constants, strengths, density, and ECC."""
-StructuralSteel(E, G, Fy, Fu, ρ, ν, ecc; cost=NaN) = Metal{StructuralSteelType, typeof(E), typeof(ρ)}(E, G, Fy, Fu, ρ, Float64(ν), Float64(ecc), Float64(cost))
+StructuralSteel(E, G, Fy, Fu, ρ, ν, ecc; cost=NaN, color=nothing) = Metal{StructuralSteelType, typeof(E), typeof(ρ)}(
+    E, G, Fy, Fu, ρ, Float64(ν), Float64(ecc), Float64(cost), isnothing(color) ? nothing : String(color))
 
 """Construct a `RebarSteel` from elastic constants, strengths, density, and ECC."""
-RebarSteel(E, G, Fy, Fu, ρ, ν, ecc; cost=NaN) = Metal{RebarType, typeof(E), typeof(ρ)}(E, G, Fy, Fu, ρ, Float64(ν), Float64(ecc), Float64(cost))
+RebarSteel(E, G, Fy, Fu, ρ, ν, ecc; cost=NaN, color=nothing) = Metal{RebarType, typeof(E), typeof(ρ)}(
+    E, G, Fy, Fu, ρ, Float64(ν), Float64(ecc), Float64(cost), isnothing(color) ? nothing : String(color))
 
 # =============================================================================
 # Concrete
@@ -121,6 +125,7 @@ Concrete material with compressive strength.
 - `cost`: Unit cost [USD/kg] (NaN if not set; required for MinCost optimization)
 - `λ`: Lightweight concrete factor (1.0 for NWC, 0.75–0.85 for LWC per ACI 318-11 §8.6.1)
 - `aggregate_type`: Aggregate classification for fire resistance (default `siliceous`)
+- `color`: Optional display color as hex string (e.g. "#C8C8C8")
 
 # Notes
 - `εcu = 0.003` is the standard ACI 318 value for concrete up to ~10 ksi
@@ -136,18 +141,20 @@ struct Concrete{T_P, T_D} <: AbstractMaterial
     cost::Float64 # Unit cost [$/kg] (NaN = not set)
     λ::Float64    # Lightweight concrete factor (ACI 318-11 §8.6.1)
     aggregate_type::AggregateType  # Aggregate type for fire resistance (ACI 216.1)
+    color::Union{Nothing, String}  # Optional display color hex (or nothing)
 end
 
 """
-    Concrete(E, fc′, ρ, ν, ecc; εcu=0.003, cost=NaN, λ=1.0, aggregate_type=siliceous)
+    Concrete(E, fc′, ρ, ν, ecc; εcu=0.003, cost=NaN, λ=1.0, aggregate_type=siliceous, color=nothing)
 
 Construct a `Concrete` material from elastic modulus, strength, density, Poisson's
 ratio, and embodied carbon coefficient.
 """
 function Concrete(E, fc′, ρ, ν, ecc; εcu::Real=0.003, cost::Real=NaN, λ::Real=1.0,
-                  aggregate_type::AggregateType=siliceous)
+                  aggregate_type::AggregateType=siliceous, color=nothing)
     Concrete{typeof(E), typeof(ρ)}(E, fc′, ρ, Float64(ν), Float64(εcu), Float64(ecc),
-                                    Float64(cost), Float64(λ), aggregate_type)
+                                    Float64(cost), Float64(λ), aggregate_type,
+                                    isnothing(color) ? nothing : String(color))
 end
 
 # =============================================================================
@@ -278,6 +285,7 @@ Timber material with NDS reference design values.
 - `Fc_perp`: Reference compression perpendicular to grain
 - `ρ`: Density
 - `ecc`: Embodied carbon [kgCO₂e/kg]
+- `color`: Optional display color as hex string (e.g. "#8A6B4F")
 
 Note: Reference values are multiplied by adjustment factors (CD, CM, etc.) 
 per NDS to get adjusted design values.
@@ -295,13 +303,15 @@ struct Timber{T_P<:Pressure, T_D<:Density} <: AbstractMaterial
     ρ::T_D               # Density
     ecc::Float64         # Embodied carbon [kgCO₂e/kg]
     cost::Float64        # Unit cost [$/kg] (NaN = not set)
+    color::Union{Nothing, String} # Optional display color hex (or nothing)
 end
 
 """
-    Timber(species, grade, E, Emin, Fb, Ft, Fv, Fc, Fc_perp, ρ, ecc; cost=NaN)
+    Timber(species, grade, E, Emin, Fb, Ft, Fv, Fc, Fc_perp, ρ, ecc; cost=NaN, color=nothing)
 
 Construct a `Timber` material from NDS reference design values and species/grade identifiers.
 """
-function Timber(species::Symbol, grade::Symbol, E, Emin, Fb, Ft, Fv, Fc, Fc_perp, ρ, ecc; cost::Real=NaN)
-    Timber{typeof(E), typeof(ρ)}(species, grade, E, Emin, Fb, Ft, Fv, Fc, Fc_perp, ρ, Float64(ecc), Float64(cost))
+function Timber(species::Symbol, grade::Symbol, E, Emin, Fb, Ft, Fv, Fc, Fc_perp, ρ, ecc; cost::Real=NaN, color=nothing)
+    Timber{typeof(E), typeof(ρ)}(species, grade, E, Emin, Fb, Ft, Fv, Fc, Fc_perp, ρ, Float64(ecc), Float64(cost),
+                                 isnothing(color) ? nothing : String(color))
 end

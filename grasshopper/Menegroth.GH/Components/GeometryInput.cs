@@ -22,6 +22,7 @@ namespace Menegroth.GH.Components
     {
         // ─── Embedded dropdown state ─────────────────────────────────────
         private string _units = "feet";
+        private bool _geometryIsCenterline = false;
 
         private static readonly (string Label, string Value)[] UnitChoices =
         {
@@ -35,7 +36,7 @@ namespace Menegroth.GH.Components
             : base("Geometry Input",
                    "GeoInput",
                    "Extract building geometry for structural sizing",
-                   "Menegroth", "Input")
+                   "Menegroth", "Core")
         { }
 
         public override Guid ComponentGuid =>
@@ -59,7 +60,7 @@ namespace Menegroth.GH.Components
                 GH_ParamAccess.list);
             pManager[2].Optional = true;
 
-            pManager.AddGeometryParameter("Faces", "F",
+            pManager.AddGeometryParameter("Faces", "Frame",
                 "Planar surfaces or closed curves (floor/roof/grade faces)",
                 GH_ParamAccess.list);
             pManager[3].Optional = true;
@@ -75,7 +76,7 @@ namespace Menegroth.GH.Components
                 GH_ParamAccess.item);
         }
 
-        // ─── Right-click menu for Units ──────────────────────────────────
+        // ─── Right-click menu for Units + Geometry Mode ──────────────────
         protected override void AppendAdditionalComponentMenuItems(ToolStripDropDown menu)
         {
             base.AppendAdditionalComponentMenuItems(menu);
@@ -92,17 +93,34 @@ namespace Menegroth.GH.Components
                 item.Click += (s, e) =>
                 {
                     _units = (string)((ToolStripMenuItem)s).Tag;
-                    Message = LabelForValue(_units);
+                    Message = BuildMessage();
                     ExpireSolution(true);
                 };
                 unitsMenu.DropDownItems.Add(item);
             }
+
+            Menu_AppendSeparator(menu);
+            var centerlineItem = new ToolStripMenuItem("Input is Centerline")
+            {
+                Checked = _geometryIsCenterline,
+                ToolTipText = "When checked, vertices are structural centerlines.\n" +
+                    "When unchecked (default), vertices are architectural reference points\n" +
+                    "and edge/corner columns are automatically offset inward."
+            };
+            centerlineItem.Click += (s, e) =>
+            {
+                _geometryIsCenterline = !_geometryIsCenterline;
+                Message = BuildMessage();
+                ExpireSolution(true);
+            };
+            menu.Items.Add(centerlineItem);
         }
 
         // ─── Persistence (save/load dropdown state) ──────────────────────
         public override bool Write(GH_IO.Serialization.GH_IWriter writer)
         {
             writer.SetString("Units", _units);
+            writer.SetBoolean("GeometryIsCenterline", _geometryIsCenterline);
             return base.Write(writer);
         }
 
@@ -110,7 +128,9 @@ namespace Menegroth.GH.Components
         {
             if (reader.ItemExists("Units"))
                 _units = reader.GetString("Units");
-            Message = LabelForValue(_units);
+            if (reader.ItemExists("GeometryIsCenterline"))
+                _geometryIsCenterline = reader.GetBoolean("GeometryIsCenterline");
+            Message = BuildMessage();
             return base.Read(reader);
         }
 
@@ -118,14 +138,22 @@ namespace Menegroth.GH.Components
         public override void AddedToDocument(GH_Document document)
         {
             base.AddedToDocument(document);
-            Message = LabelForValue(_units);
+            Message = BuildMessage();
         }
 
-        private static string LabelForValue(string value)
+        private static string UnitLabelForValue(string value)
         {
             foreach (var (label, val) in UnitChoices)
                 if (val == value) return label;
             return value;
+        }
+
+        private string BuildMessage()
+        {
+            var msg = UnitLabelForValue(_units);
+            if (_geometryIsCenterline)
+                msg += " | CL";
+            return msg;
         }
 
         // ─── Solve ───────────────────────────────────────────────────────
@@ -148,7 +176,11 @@ namespace Menegroth.GH.Components
                 return;
             }
 
-            var geo = new BuildingGeometry { Units = _units };
+            var geo = new BuildingGeometry
+            {
+                Units = _units,
+                GeometryIsCenterline = _geometryIsCenterline
+            };
 
             // ─── Vertex extraction with deduplication ────────────────────
             const double TOL = 1e-6;

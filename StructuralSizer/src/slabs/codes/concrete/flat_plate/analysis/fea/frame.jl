@@ -33,7 +33,7 @@ function _extract_cell_strip_moments(
     # Column negative moments (M⁻) at column face
     col_Mneg = Vector{Float64}(undef, length(cell_cols))
     for (col_i, col) in enumerate(cell_cols)
-        px, py = _vertex_xy_m(skel, col.vertex_idx)
+        px, py = _column_xy_m(skel, col)
         off = _column_face_offset_m(col, span_axis)
         face = (px + off * span_axis[1], py + off * span_axis[2])
         Mn = max(0.0, _integrate_at(cache.element_data, tri_idx, face, span_axis, δ;

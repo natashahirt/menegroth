@@ -9,6 +9,62 @@ using HTTP
 
 const DESIGN_CACHE = DesignCache()
 const SERVER_STATUS = ServerStatus()
+const DESIGN_LOG_LINES = String[]
+const DESIGN_LOG_LOCK = ReentrantLock()
+const DESIGN_LOG_BASE_INDEX = Ref(0)
+const DESIGN_LOG_MAX_LINES = 2000
+
+function _reset_design_logs!()
+    lock(DESIGN_LOG_LOCK) do
+        empty!(DESIGN_LOG_LINES)
+        DESIGN_LOG_BASE_INDEX[] = 0
+    end
+    return nothing
+end
+
+function _append_design_log!(line::AbstractString)
+    clean = isempty(line) ? "" : strip(String(line))
+    lock(DESIGN_LOG_LOCK) do
+        push!(DESIGN_LOG_LINES, clean)
+        while length(DESIGN_LOG_LINES) > DESIGN_LOG_MAX_LINES
+            popfirst!(DESIGN_LOG_LINES)
+            DESIGN_LOG_BASE_INDEX[] += 1
+        end
+    end
+    return nothing
+end
+
+function _read_design_logs_since(since::Int)
+    lock(DESIGN_LOG_LOCK) do
+        base = DESIGN_LOG_BASE_INDEX[]
+        total = base + length(DESIGN_LOG_LINES)
+        clamped = max(0, min(since, total))
+        start_abs = max(clamped, base)
+        start_local = start_abs - base + 1
+        lines = start_local <= length(DESIGN_LOG_LINES) ?
+            DESIGN_LOG_LINES[start_local:end] :
+            String[]
+        return (base=base, next_since=total, lines=copy(lines))
+    end
+end
+
+function _query_int(req::HTTP.Request, key::String, default::Int=0)
+    target = String(req.target)
+    qidx = findfirst('?', target)
+    qidx === nothing && return default
+    query = target[qidx + 1:end]
+    for pair in split(query, '&')
+        kv = split(pair, '='; limit=2)
+        length(kv) == 2 || continue
+        kv[1] == key || continue
+        try
+            return parse(Int, kv[2])
+        catch
+            return default
+        end
+    end
+    return default
+end
 
 # ─── JSON helpers ─────────────────────────────────────────────────────────────
 
@@ -63,7 +119,7 @@ function register_routes!()
 
     # ─── GET /status ──────────────────────────────────────────────────────
     @get "/status" function (_::HTTP.Request)
-        return _json_ok(Dict("status" => status_string(SERVER_STATUS)))
+        return _json_ok(Dict("state" => status_string(SERVER_STATUS)))
     end
 
     # ─── GET /env-check ───────────────────────────────────────────────────
@@ -83,8 +139,9 @@ function register_routes!()
                 "POST /design" => "Start design (returns 202 immediately; poll GET /status then GET /result)",
                 "POST /validate" => "Validate input without running design",
                 "GET /health" => "Server health check",
-                "GET /status" => "Server state: idle, running, queued",
+                "GET /status" => "Server status payload: {state, message?}; states: idle, running, queued",
                 "GET /env-check" => "Whether Gurobi env vars are set (presence only, no values)",
+                "GET /logs?since=N" => "Streaming design logs; returns lines after cursor N",
                 "GET /result" => "Last completed design result (after POST /design and status idle)",
                 "GET /schema" => "This documentation",
             ),
@@ -113,6 +170,7 @@ function register_routes!()
         # Queue if server is busy
         if !try_start!(SERVER_STATUS)
             enqueue!(SERVER_STATUS, input)
+            _append_design_log!("Request queued while another design is running.")
             return _json_ok(Dict(
                 "status" => "queued",
                 "message" => "Request queued; will run after current job completes.",
@@ -122,10 +180,24 @@ function register_routes!()
         # Run design in background so we can return before App Runner's 120s request limit.
         # Client polls GET /status until idle then GET /result for the result.
         DESIGN_CACHE.last_result = nothing
+        _reset_design_logs!()
+        _append_design_log!("Design request accepted.")
         @async _run_design_loop(input)
         return _json_resp(202, Dict(
             "status" => "accepted",
             "message" => "Design started. Poll GET /status until idle, then GET /result for the result.",
+        ))
+    end
+
+    # ─── GET /logs ───────────────────────────────────────────────────────
+    @get "/logs" function (req::HTTP.Request)
+        since = _query_int(req, "since", 0)
+        payload = _read_design_logs_since(since)
+        return _json_ok(Dict(
+            "status" => status_string(SERVER_STATUS),
+            "base" => payload.base,
+            "next_since" => payload.next_since,
+            "lines" => payload.lines,
         ))
     end
 
@@ -166,17 +238,22 @@ function _run_design_loop(input::APIInput)
 
     try
         while true
+            _append_design_log!("Starting design execution.")
             _execute_design(current_input)
+            _append_design_log!("Design execution finished.")
 
             next_input = finish!(SERVER_STATUS)
             if isnothing(next_input)
+                _append_design_log!("Server is idle.")
                 break
             else
+                _append_design_log!("Dequeued next request.")
                 current_input = next_input
             end
         end
     catch e
         @error "Design loop crashed — resetting server status" exception=(e, catch_backtrace())
+        _append_design_log!("Design loop crashed: $(sprint(showerror, e))")
         DESIGN_CACHE.last_result = APIError(
             status = "error",
             error = string(typeof(e)),
@@ -197,14 +274,16 @@ Run a single design iteration. Uses the geometry cache when possible.
 function _execute_design(input::APIInput)
     try
         geo_hash = compute_geometry_hash(input)
-        params = json_to_params(input.params)
+        params = json_to_params(input.params, input.units)
 
         # Check cache — skip skeleton rebuild if geometry unchanged
         if is_geometry_cached(DESIGN_CACHE, geo_hash)
             @info "Geometry cache hit — reusing skeleton/structure"
+            _append_design_log!("Geometry cache hit: reusing structure.")
             struc = DESIGN_CACHE.structure
         else
             @info "Building new skeleton from JSON input"
+            _append_design_log!("Building new skeleton from input.")
             skel = json_to_skeleton(input)
             
             # Validate that we have at least 2 stories (after rebuild_stories!)
@@ -237,6 +316,7 @@ function _execute_design(input::APIInput)
                     "errors" => [error_msg],
                 )
                 DESIGN_CACHE.last_result = validation_err
+                _append_design_log!("Validation error: $error_msg")
                 return _json_bad(validation_err)
             end
             
@@ -247,19 +327,23 @@ function _execute_design(input::APIInput)
         end
 
         design = design_building(struc, params)
+        _append_design_log!("Design sizing completed.")
         
         # Build analysis model for visualization (if not already built)
         if isnothing(design.asap_model)
+            _append_design_log!("Building analysis model for visualization.")
             build_analysis_model!(design)
         end
         
         output = design_to_json(design; geometry_hash=geo_hash)
         DESIGN_CACHE.last_result = output
+        _append_design_log!("Design result serialized.")
 
         return _json_ok(output)
 
     catch e
         @error "Design failed" exception=(e, catch_backtrace())
+        _append_design_log!("Design failed: $(sprint(showerror, e))")
         err = APIError(
             status = "error",
             error = string(typeof(e)),

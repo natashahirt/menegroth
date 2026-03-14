@@ -148,10 +148,12 @@ function prepare!(struc::BuildingStructure, params::DesignParameters)
     floor_type = _infer_floor_type(floor_opts)
     
     initialize!(struc; loads=params.loads, floor_type=floor_type,
-                floor_opts=floor_opts, tributary_axis=params.tributary_axis)
+                floor_opts=floor_opts,
+                scoped_floor_overrides=params.scoped_floor_overrides,
+                tributary_axis=params.tributary_axis)
     
     fc = _get_design_fc(params)
-    estimate_column_sizes!(struc; fc=fc)
+    estimate_column_sizes!(struc; fc=fc, input_is_centerline=params.geometry_is_centerline)
     
     to_asap!(struc; params=params)
     
@@ -223,7 +225,7 @@ function design_building(struc::BuildingStructure, params::DesignParameters)
     design = capture_design(struc, params; t_start=t_start)
     
     # ─── Restore ───
-    restore!(struc)
+    restore!(struc; geometry_is_centerline=params.geometry_is_centerline)
     sync_asap!(struc; params=params)
     
     return design
@@ -324,6 +326,9 @@ function _reconcile_columns!(struc::BuildingStructure, params::DesignParameters)
     end
     
     grew > 0 && @info "Column reconciliation: $grew columns grew from Asap model forces"
+
+    # Recompute structural offsets after column dimensions changed
+    grew > 0 && update_structural_offsets!(struc; input_is_centerline=params.geometry_is_centerline)
 
     # Self-sync: if any columns grew, do a lightweight K+S update and re-solve
     # so the outer pipeline can skip the redundant full sync_asap!

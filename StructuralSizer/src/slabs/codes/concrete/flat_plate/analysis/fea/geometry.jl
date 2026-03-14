@@ -98,11 +98,27 @@ _col_asap_sec(col, Ec, ν; I_factor=0.70) =
 """
     _vertex_xy_m(skel, vi) -> NTuple{2,Float64}
 
-XY position of a skeleton vertex in meters.
+XY position of a skeleton vertex in meters (architectural / raw position).
 """
 function _vertex_xy_m(skel, vi::Int)
     vc = skel.geometry.vertex_coords
     return (vc[vi, 1], vc[vi, 2])
+end
+
+"""
+    _column_xy_m(skel, col) -> NTuple{2,Float64}
+
+XY position (meters) of a column's **structural centerline**.
+
+Applies `col.structural_offset` (populated by `update_structural_offsets!`)
+to shift edge/corner columns inward from their architectural vertex.
+Falls back to the raw vertex position if the column has no offset field
+(e.g., lightweight NamedTuple stubs in standalone tests).
+"""
+function _column_xy_m(skel, col)
+    xy = _vertex_xy_m(skel, col.vertex_idx)
+    off = hasproperty(col, :structural_offset) ? col.structural_offset : (0.0, 0.0)
+    return (xy[1] + off[1], xy[2] + off[2])
 end
 
 # =============================================================================

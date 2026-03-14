@@ -24,7 +24,7 @@ const HOST = get(ENV, "SIZER_HOST", "0.0.0.0")
 register_routes!()
 
 @info "Starting Structural Sizer API on http://$HOST:$PORT"
-@info "Endpoints: POST /design, POST /validate, GET /health, GET /status, GET /schema"
+@info "Endpoints: POST /design, POST /validate, GET /health, GET /status, GET /schema, GET /env-check, GET /result, GET /logs"
 
 # Oxygen.serve blocks until interrupted (Ctrl-C)
 using Oxygen

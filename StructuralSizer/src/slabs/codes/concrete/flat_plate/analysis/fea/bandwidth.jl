@@ -165,7 +165,7 @@ function _check_bandwidth_convergence(
         δ = _section_cut_bandwidth(cache, cell_cols)
 
         col = first(cell_cols)
-        px, py = _vertex_xy_m(skel, col.vertex_idx)
+        px, py = _column_xy_m(skel, col)
         off = _column_face_offset_m(col, span_axis)
         face = (px + off * span_axis[1], py + off * span_axis[2])
 

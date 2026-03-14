@@ -25,32 +25,32 @@ _aci_Ec(fc′) = 57000 * sqrt(ustrip(u"psi", fc′)) * u"psi"
 
 """Normal-weight concrete, f'c = 3000 psi, OPC (ECC = 0.130 kgCO₂e/kg)."""
 const NWC_3000 = let fc = 3000u"psi"
-    Concrete(_aci_Ec(fc), fc, 2380.0u"kg/m^3", 0.20, 0.130)
+    Concrete(_aci_Ec(fc), fc, 2380.0u"kg/m^3", 0.20, 0.130; color = "#C8C8C8")
 end
 
 """Normal-weight concrete, f'c = 4000 psi, OPC (ECC = 0.138 kgCO₂e/kg)."""
 const NWC_4000 = let fc = 4000u"psi"
-    Concrete(_aci_Ec(fc), fc, 2380.0u"kg/m^3", 0.20, 0.138)
+    Concrete(_aci_Ec(fc), fc, 2380.0u"kg/m^3", 0.20, 0.138; color = "#C8C8C8")
 end
 
 """Normal-weight concrete, f'c = 5000 psi, OPC (ECC = 0.155 kgCO₂e/kg)."""
 const NWC_5000 = let fc = 5000u"psi"
-    Concrete(_aci_Ec(fc), fc, 2385.0u"kg/m^3", 0.20, 0.155)
+    Concrete(_aci_Ec(fc), fc, 2385.0u"kg/m^3", 0.20, 0.155; color = "#C8C8C8")
 end
 
 """Normal-weight concrete, f'c = 6000 psi, OPC (ECC = 0.173 kgCO₂e/kg)."""
 const NWC_6000 = let fc = 6000u"psi"
-    Concrete(_aci_Ec(fc), fc, 2385.0u"kg/m^3", 0.20, 0.173)
+    Concrete(_aci_Ec(fc), fc, 2385.0u"kg/m^3", 0.20, 0.173; color = "#C8C8C8")
 end
 
 """Normal-weight concrete, f'c = 4000 psi, 50% GGBS replacement (ECC = 0.099 kgCO₂e/kg)."""
 const NWC_GGBS = let fc = 4000u"psi"
-    Concrete(_aci_Ec(fc), fc, 2380.0u"kg/m^3", 0.20, 0.099)
+    Concrete(_aci_Ec(fc), fc, 2380.0u"kg/m^3", 0.20, 0.099; color = "#C8C8C8")
 end
 
 """Normal-weight concrete, f'c = 4000 psi, 30% PFA replacement (ECC = 0.112 kgCO₂e/kg)."""
 const NWC_PFA = let fc = 4000u"psi"
-    Concrete(_aci_Ec(fc), fc, 2380.0u"kg/m^3", 0.20, 0.112)
+    Concrete(_aci_Ec(fc), fc, 2380.0u"kg/m^3", 0.20, 0.112; color = "#C8C8C8")
 end
 
 # ==============================================================================
@@ -95,7 +95,8 @@ const Earthen_500 = Concrete(
     2000.0u"kg/m^3",    # ρ (from Matlab reference)
     0.20,               # ν
     0.01;               # ecc [kgCO₂e/kg] - very low for unfired earth
-    εcu = 0.002
+    εcu = 0.002,
+    color = "#B8926A"
 )
 
 """Earthen material, E = 1000 MPa."""
@@ -105,7 +106,8 @@ const Earthen_1000 = Concrete(
     2000.0u"kg/m^3",    # ρ
     0.20,               # ν
     0.01;               # ecc
-    εcu = 0.002
+    εcu = 0.002,
+    color = "#B8926A"
 )
 
 """Earthen material, E = 2000 MPa (stabilized earth)."""
@@ -115,7 +117,8 @@ const Earthen_2000 = Concrete(
     2000.0u"kg/m^3",    # ρ
     0.20,               # ν
     0.02;               # ecc - slightly higher for stabilized earth
-    εcu = 0.002
+    εcu = 0.002,
+    color = "#A97C50"
 )
 
 """Earthen material, E = 4000 MPa (compressed earth blocks)."""
@@ -125,7 +128,8 @@ const Earthen_4000 = Concrete(
     2000.0u"kg/m^3",    # ρ
     0.20,               # ν
     0.05;               # ecc - compressed earth blocks
-    εcu = 0.002
+    εcu = 0.002,
+    color = "#9A6B43"
 )
 
 """Earthen material, E = 8000 MPa (fired clay brick)."""
@@ -135,7 +139,8 @@ const Earthen_8000 = Concrete(
     2000.0u"kg/m^3",    # ρ
     0.20,               # ν
     0.10;               # ecc - fired clay brick
-    εcu = 0.002
+    εcu = 0.002,
+    color = "#8A5B34"
 )
 
 # ==============================================================================

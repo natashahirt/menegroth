@@ -40,12 +40,14 @@ build_member_groups!
 group_collinear_members!
 ```
 
-### Classification
+### Classification & Structural Offsets
 
 ```@docs
 classify_column_position
 is_exterior_support
 update_bracing!
+update_structural_offsets!
+structural_center_xy_m
 ```
 
 ## Implementation Details
@@ -117,6 +119,21 @@ The trigger threshold δs > 1.5 follows ACI 318-11 §6.6.4.6.2, which limits the
 
 `member_group_demands(struc, group)` extracts the governing demand envelope from the Asap model for a member group, considering all load combinations. Returns the critical (Mu, Vu, Pu, Tu) that governs the design.
 
+### Structural Column Offsets
+
+When `DesignParameters.geometry_is_centerline = false` (the default), edge and corner columns are offset inward from their architectural vertex positions to their structural centerlines. This is handled by `update_structural_offsets!`, which:
+
+1. Identifies boundary edges adjacent to each non-interior column
+2. Computes the inward-pointing normal for each boundary edge using the CCW face-winding invariant of the `BuildingSkeleton`
+3. Deduplicates parallel normals (dot product > 0.95) so straight building edges contribute a single offset direction
+4. Shifts the column inward by half the column dimension along each unique normal
+
+The offset is stored as `col.structural_offset :: NTuple{2, Float64}` in meters. It is applied in `to_asap!` when building the frame analysis model — both endpoints of each column edge shift by the same amount, and beams framing into the column vertex shift with it.
+
+The offset is recomputed automatically when column dimensions change (after `estimate_column_sizes!`, `_reconcile_columns!`, and `restore!`). The `structural_center_xy_m(skel, col)` accessor returns the offset position.
+
+See also: [Structural Column Offsets](../../api/schema.md#structural-column-offsets) in the API Schema docs.
+
 ## Options & Configuration
 
 | Parameter | Description |
@@ -124,6 +141,7 @@ The trigger threshold δs > 1.5 follows ACI 318-11 §6.6.4.6.2, which limits the
 | `catalog` | Section catalog for steel optimization (e.g., W shapes up to W36) |
 | `member_edge_group` | Which edge group to size (`:beams` or `:columns`) |
 | `resolution` | Optimization resolution — number of candidate sections to evaluate |
+| `geometry_is_centerline` | When `false` (default), edge/corner columns are offset inward from architectural vertices. When `true`, all offsets are zero. |
 
 ## Limitations & Future Work
 
@@ -131,3 +149,4 @@ The trigger threshold δs > 1.5 follows ACI 318-11 §6.6.4.6.2, which limits the
 - Composite beam design (AISC 360 Chapter I) is available in StructuralSizer but not yet integrated into the synthesizer pipeline.
 - Column biaxial bending uses simplified Bresler reciprocal method; fiber analysis is planned.
 - Collinear grouping currently uses a geometric tolerance (`tol`) on the cross product of direction vectors; near-parallel members at small angles may not be grouped.
+- When `geometry_is_centerline = true`, the slab boundary stops at the column centerline rather than extending outward to the building face. Outward slab extension for centerline input is a planned enhancement.

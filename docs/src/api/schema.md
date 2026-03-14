@@ -64,6 +64,7 @@ A dictionary mapping face group names to face-coordinate polylines:
 | `optimize_for` | `String` | `"weight"` | `"weight"`, `"carbon"`, or `"cost"` |
 | `size_foundations` | `Bool` | `false` | Whether to size foundations |
 | `foundation_soil` | `String` | `"medium_sand"` | Soil type name (used when `size_foundations=true`): `"loose_sand"`, `"medium_sand"`, `"dense_sand"`, `"soft_clay"`, `"stiff_clay"`, `"hard_clay"` |
+| `geometry_is_centerline` | `Bool` | `false` | How to interpret input vertex coordinates — see [Structural Column Offsets](#structural-column-offsets) |
 
 See [`APIParams`](@ref) in [API Overview](overview.md).
 
@@ -110,6 +111,10 @@ The top-level response from `POST /design`.
 |:------|:-----|:------------|
 | `status` | `String` | `"ok"` or `"error"` |
 | `compute_time_s` | `Float64` | Wall-clock design time in seconds |
+| `length_unit` | `String` | Length unit label for length-category outputs (`"ft"` or `"m"`) |
+| `thickness_unit` | `String` | Thickness unit label for thickness-category outputs (`"in"` or `"mm"`) |
+| `volume_unit` | `String` | Volume unit label for volume-category outputs (`"ft3"` or `"m3"`) |
+| `mass_unit` | `String` | Mass unit label for mass-category outputs (`"lb"` or `"kg"`) |
 | `summary` | `APISummary` | Design summary |
 | `slabs` | `Vector{APISlabResult}` | Per-slab results |
 | `columns` | `Vector{APIColumnResult}` | Per-column results |
@@ -120,14 +125,43 @@ The top-level response from `POST /design`.
 
 See [`APIOutput`](@ref) in [API Overview](overview.md).
 
+### Unit-Neutral Key Mapping
+
+Output field names are unit-neutral. Unit interpretation comes from top-level unit labels (`length_unit`, `thickness_unit`, `volume_unit`, `mass_unit`).
+
+| Legacy key | Current key |
+|:-------------|:------------|
+| `thickness_in` | `thickness` |
+| `c1_in` | `c1` |
+| `c2_in` | `c2` |
+| `length_ft` | `length` |
+| `width_ft` | `width` |
+| `depth_ft` | `depth` |
+| `concrete_volume_ft3` | `concrete_volume` |
+| `steel_weight_lb` | `steel_weight` |
+| `rebar_weight_lb` | `rebar_weight` |
+| `position_ft` | `position` |
+| `displacement_ft` | `displacement` |
+| `deflected_position_ft` | `deflected_position` |
+| `section_depth_ft` | `section_depth` |
+| `section_width_ft` | `section_width` |
+| `flange_width_ft` | `flange_width` |
+| `web_thickness_ft` | `web_thickness` |
+| `flange_thickness_ft` | `flange_thickness` |
+| `center_ft` | `center` |
+| `extra_depth_ft` | `extra_depth` |
+| `thickness_ft` | `thickness` |
+| `z_top_ft` | `z_top` |
+| `max_displacement_ft` | `max_displacement` |
+
 ### APISummary
 
 | Field | Type | Description |
 |:------|:-----|:------------|
 | `all_pass` | `Bool` | All elements pass code checks |
-| `concrete_volume_ft3` | `Float64` | Total concrete volume |
-| `steel_weight_lb` | `Float64` | Total structural steel weight |
-| `rebar_weight_lb` | `Float64` | Total rebar weight |
+| `concrete_volume` | `Float64` | Total concrete volume (see `volume_unit`) |
+| `steel_weight` | `Float64` | Total structural steel weight (see `mass_unit`) |
+| `rebar_weight` | `Float64` | Total rebar weight (see `mass_unit`) |
 | `embodied_carbon_kgCO2e` | `Float64` | Total embodied carbon |
 | `critical_ratio` | `Float64` | Governing D/C ratio |
 | `critical_element` | `String` | Element with highest D/C |
@@ -140,7 +174,7 @@ See [`APIOutput`](@ref) in [API Overview](overview.md).
 |:------|:-----|:------------|
 | `id` | `Int` | Slab index |
 | `ok` | `Bool` | Slab passes all slab checks (`converged && deflection_ok && punching_ok`) |
-| `thickness_in` | `Float64` | Slab thickness in inches |
+| `thickness` | `Float64` | Slab thickness (see `thickness_unit`) |
 | `converged` | `Bool` | Design converged |
 | `failure_reason` | `String` | Failure description (empty if ok) |
 | `failing_check` | `String` | Which check failed |
@@ -158,8 +192,8 @@ See [`APIOutput`](@ref) in [API Overview](overview.md).
 |:------|:-----|:------------|
 | `id` | `Int` | Column index |
 | `section` | `String` | Section designation |
-| `c1_in` | `Float64` | Depth dimension |
-| `c2_in` | `Float64` | Width dimension |
+| `c1` | `Float64` | Depth dimension (see `thickness_unit`) |
+| `c2` | `Float64` | Width dimension (see `thickness_unit`) |
 | `shape` | `String` | `"rectangular"` or `"circular"` |
 | `axial_ratio` | `Float64` | Pu / ϕPn |
 | `interaction_ratio` | `Float64` | P-M interaction ratio |
@@ -184,9 +218,9 @@ See [`APIOutput`](@ref) in [API Overview](overview.md).
 | Field | Type | Description |
 |:------|:-----|:------------|
 | `id` | `Int` | Foundation index |
-| `length_ft` | `Float64` | Footing length |
-| `width_ft` | `Float64` | Footing width |
-| `depth_ft` | `Float64` | Footing depth |
+| `length` | `Float64` | Footing length (see `length_unit`) |
+| `width` | `Float64` | Footing width (see `length_unit`) |
+| `depth` | `Float64` | Footing depth (see `length_unit`) |
 | `bearing_ratio` | `Float64` | Bearing pressure / capacity |
 | `ok` | `Bool` | Passes all checks |
 
@@ -196,20 +230,86 @@ See [`APIOutput`](@ref) in [API Overview](overview.md).
 
 | Field | Type | Description |
 |:------|:-----|:------------|
-| `nodes` | `Vector{APIVisualizationNode}` | Node positions and displacements |
-| `frame_elements` | `Vector{APIVisualizationFrameElement}` | Frame element data with section geometry |
-| `sized_slabs` | `Vector{APISizedSlab}` | Slab boundary and thickness |
-| `deflected_slab_meshes` | `Vector{APIDeflectedSlabMesh}` | Deflected slab surface meshes |
+| `nodes` | `Vector{APIVisualizationNode}` | Node positions, displacements, and deflected positions |
+| `frame_elements` | `Vector{APIVisualizationFrameElement}` | Frame element data with section geometry and optional material color |
+| `sized_slabs` | `Vector{APISizedSlab}` | Slab boundary/thickness plus drop-panel patches |
+| `deflected_slab_meshes` | `Vector{APIDeflectedSlabMesh}` | Deflected slab surface meshes with local/global displacements and drop-panel patches |
+| `foundations` | `Vector{APIVisualizationFoundation}` | Foundation blocks for visualization |
+| `is_beamless_system` | `Bool` | True when model uses slab-only framing (`flat_plate` / `flat_slab`) |
 | `suggested_scale_factor` | `Float64` | Suggested displacement magnification |
-| `max_displacement_ft` | `Float64` | Maximum displacement in the model |
+| `max_displacement` | `Float64` | Maximum displacement in the model (see `length_unit`) |
 
 The visualization schema contains several related types:
 
-- **`APIVisualization`** — Top-level container holding nodes, frame elements, sized slabs, deflected slab meshes, and global displacement metadata (suggested scale factor, maximum displacement).
-- **`APIVisualizationNode`** — A single node with its 3D position and displacement vector.
-- **`APIVisualizationFrameElement`** — A frame element (beam, column, or brace) with start/end node indices, section geometry, and member type.
-- **`APISizedSlab`** — A slab boundary polygon with its designed thickness.
-- **`APIDeflectedSlabMesh`** — A triangulated surface mesh representing the deflected slab shape for 3D rendering.
+- **`APIVisualization`** — Top-level container for all visualization payloads.
+- **`APIVisualizationNode`** — A single node with `position`, `displacement`, and `deflected_position`.
+- **`APIVisualizationFrameElement`** — A frame element with start/end node indices, section geometry, member type, and optional `material_color_hex`.
+- **`APISizedSlab`** — A slab boundary polygon with thickness (`thickness`, `z_top`) and `drop_panels`.
+- **`APIDropPanelPatch`** — A rectangular drop-panel patch (`center`, `length`, `width`, `extra_depth`) used in both sized and deflected slab views.
+- **`APIDeflectedSlabMesh`** — A triangulated deflected slab mesh with `vertex_displacements`, `vertex_displacements_local`, and `drop_panels`.
+- **`APIVisualizationFoundation`** — Foundation block geometry (`center`, `length`, `width`, `depth`) with utilization metadata.
+
+Example snippet (abbreviated) showing beamless-state and one drop-panel patch:
+
+```json
+{
+  "visualization": {
+    "is_beamless_system": true,
+    "sized_slabs": [
+      {
+        "slab_id": 1,
+        "thickness": 1.0,
+        "z_top": 12.0,
+        "drop_panels": [
+          {
+            "center": [30.0, 20.0, 12.0],
+            "length": 8.0,
+            "width": 8.0,
+            "extra_depth": 0.5
+          }
+        ]
+      }
+    ],
+    "deflected_slab_meshes": [
+      {
+        "slab_id": 1,
+        "drop_panels": [
+          {
+            "center": [30.0, 20.0, 12.0],
+            "length": 8.0,
+            "width": 8.0,
+            "extra_depth": 0.5
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+#### APIVisualizationNode
+
+| Field | Type | Description |
+|:------|:-----|:------------|
+| `node_id` | `Int` | 1-based node index in analysis model |
+| `position` | `Vector{Float64}` | Original node position `[x,y,z]` |
+| `displacement` | `Vector{Float64}` | Nodal displacement vector `[dx,dy,dz]` |
+| `deflected_position` | `Vector{Float64}` | Deflected node position `[x,y,z]` |
+
+#### APIVisualizationFrameElement
+
+| Field | Type | Description |
+|:------|:-----|:------------|
+| `element_id` | `Int` | Analysis element index |
+| `node_start` | `Int` | 1-based start node index |
+| `node_end` | `Int` | 1-based end node index |
+| `element_type` | `String` | `"beam"`, `"column"`, `"strut"`, or `"other"` |
+| `section_name` | `String` | Section designation |
+| `material_color_hex` | `String` | Optional material display color (e.g. `#6E6E6E`) |
+| `section_type` | `String` | Section shape family |
+| `section_depth` | `Float64` | Section depth |
+| `section_width` | `Float64` | Section width |
+| `section_polygon` | `Vector{Vector{Float64}}` | Section polygon in local `[y,z]` coordinates |
 
 ### APIError
 
@@ -222,11 +322,80 @@ The visualization schema contains several related types:
 
 See [`APIError`](@ref) in [API Overview](overview.md).
 
+## Structural Column Offsets
+
+When `geometry_is_centerline` is `false` (the default), the server treats input
+vertex coordinates as **architectural reference points** — panel corners and
+facade lines.  Edge and corner columns are automatically offset inward to their
+structural centerlines before analysis.
+
+### How it works
+
+1. **Column classification**: Each column is classified as `:interior`, `:edge`,
+   or `:corner` based on how many boundary edges meet at its vertex
+   (`edge_face_counts` in the skeleton).
+
+2. **Inward normal computation**: For each boundary edge adjacent to a
+   non-interior column, the face-winding approach determines the inward-pointing
+   normal. The skeleton stores face vertices in CCW order; the left-hand normal
+   of the directed edge (as it appears in the owning face's winding) reliably
+   points toward the slab interior, even for concave polygons.
+
+3. **Deduplication**: Parallel boundary edges (dot product > 0.95) produce
+   duplicate normals. These are collapsed so each unique inward direction
+   contributes only one offset component.
+
+4. **Offset magnitude**: Along each unique inward normal, the offset equals half
+   the column dimension in that direction (`_column_half_dim_m`), accounting for
+   column shape (rectangular vs circular) and rotation angle `θ`.
+
+5. **Application**: The resulting `structural_offset` (dx, dy) in meters is
+   stored on each `Column` and applied in `to_asap!` when building Asap model
+   nodes.  Beams that frame into the column naturally follow because they share
+   the same skeleton vertex (and therefore the same shifted Asap node).
+
+### When `geometry_is_centerline = true`
+
+All offsets are `(0, 0)` — the input vertex positions are used directly as
+structural centerlines.
+
+### Iteration
+
+Offsets depend on column dimensions, which change during design iteration.
+`update_structural_offsets!` is called:
+- After `estimate_column_sizes!` (initial sizing)
+- After `_reconcile_columns!` (if columns grow during reconciliation)
+- After `restore!` (snapshot recovery)
+
+The function is idempotent and safe to call repeatedly.
+
+### Slab boundary behaviour
+
+The slab boundary always matches the input (architectural) geometry.  When
+offsets are active, edge/corner column support nodes sit slightly inboard of the
+slab edge, producing a small cantilever overhang in the slab FEA mesh.  This is
+structurally correct — the slab extends to the building face while the column
+supports it from inboard.
+
+!!! note "Future work: centerline input slab extension"
+    When `geometry_is_centerline = true`, the slab boundary stops at the column
+    centerline rather than extending outward to the building face.  This means the
+    small outboard slab strip is not modelled.  Extending the slab boundary outward
+    by half the column dimension for centerline input is a planned enhancement.
+
+### Grasshopper
+
+The **Geometry Input** component exposes a right-click toggle **"Input is
+Centerline"**.  When checked, `geometry_is_centerline = true` is sent in the API
+payload.  The default (unchecked) is architectural input.  The component message
+bar shows "CL" when centerline mode is active.
+
 ## Limitations & Future Work
 
-- All dimensions in the output are imperial (ft, in, lb); metric output is planned.
+- Output fields are unit-neutral; clients must use `length_unit`, `thickness_unit`, `volume_unit`, and `mass_unit` to interpret numeric values.
 - The current server implementation always builds an analysis model and returns `visualization` data; making this optional (for performance) would require an API option.
 - The schema is versioned implicitly; explicit API versioning (`/v1/design`) is planned.
+- Slab boundary extension for centerline input mode is not yet implemented (see note above).
 
 ## References
 

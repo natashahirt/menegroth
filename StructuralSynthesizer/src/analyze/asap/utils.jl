@@ -47,15 +47,32 @@ function to_asap!(struc::BuildingStructure{T, A, P};
     
     skel = struc.skeleton
     
-    # 1. Nodes — from cached coordinate matrix
+    # 1. Nodes — from cached coordinate matrix, with structural offsets for columns.
+    # Both endpoints of each column edge share the same XY offset so the column
+    # line shifts as a rigid body and beams that frame into the column follow.
+    col_offset_by_vertex = Dict{Int, NTuple{2, Float64}}()
+    for col in struc.columns
+        off = col.structural_offset
+        (off[1] == 0.0 && off[2] == 0.0) && continue
+        for seg_idx in segment_indices(col)
+            seg_idx > length(struc.segments) && continue
+            edge_idx = struc.segments[seg_idx].edge_idx
+            (edge_idx < 1 || edge_idx > length(skel.edge_indices)) && continue
+            v1, v2 = skel.edge_indices[edge_idx]
+            col_offset_by_vertex[v1] = off
+            col_offset_by_vertex[v2] = off
+        end
+    end
+
     support_set = Set(get(skel.groups_vertices, :support, Int[]))
     vc = skel.geometry.vertex_coords
     n_verts = length(skel.vertices)
     
     nodes = Vector{Asap.Node}(undef, n_verts)
     @inbounds for v_idx in 1:n_verts
-        x = vc[v_idx, 1] * u"m"
-        y = vc[v_idx, 2] * u"m"
+        off = get(col_offset_by_vertex, v_idx, nothing)
+        x = (vc[v_idx, 1] + (isnothing(off) ? 0.0 : off[1])) * u"m"
+        y = (vc[v_idx, 2] + (isnothing(off) ? 0.0 : off[2])) * u"m"
         z = vc[v_idx, 3] * u"m"
         dofs = v_idx in support_set ? [false, false, false, false, false, false] : [true, true, true, false, false, false]
         nodes[v_idx] = Asap.Node([x, y, z], dofs)

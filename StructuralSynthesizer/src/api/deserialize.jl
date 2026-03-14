@@ -172,11 +172,11 @@ function _add_faces!(skel::BuildingSkeleton, input::APIInput, coord_unit, _to_m)
         error("rebuild_stories! failed to populate stories_z from $(length(skel.vertices)) vertices")
     end
     has_explicit = !isempty(input.faces) && any(!isempty(polys) for polys in values(input.faces))
+    find_faces!(skel)
+    _auto_categorize_faces!(skel)
+    rebuild_geometry_cache!(skel)
     if has_explicit
-        _add_explicit_faces!(skel, input.faces, coord_unit, _to_m)
-    else
-        find_faces!(skel)
-        _auto_categorize_faces!(skel)
+        _apply_explicit_face_groups!(skel, input.faces, _to_m)
     end
 end
 
@@ -226,28 +226,43 @@ function json_to_skeleton(input::APIInput)
     return skel
 end
 
-"""Add explicit face polylines from the JSON `faces` dict (coordinates converted to meters)."""
-function _add_explicit_faces!(skel::BuildingSkeleton{T}, face_groups::APIFaceGroups,
-                               coord_unit, _to_m) where T
+"""Map explicit face polygons onto detected skeleton faces and assign requested groups."""
+function _apply_explicit_face_groups!(skel::BuildingSkeleton{T}, face_groups::APIFaceGroups, _to_m) where T
+    for (category, _) in face_groups
+        skel.groups_faces[Symbol(category)] = Int[]
+    end
+
+    vc = skel.geometry.vertex_coords
+    face_to_story = Dict{Int, Int}()
+    for (story_idx, story) in skel.stories
+        for face_idx in story.faces
+            face_to_story[face_idx] = story_idx
+        end
+    end
+
     for (category, polylines) in face_groups
         group = Symbol(category)
         for (poly_idx, poly_coords) in enumerate(polylines)
-            pts = [Meshes.Point(_to_m(c[1]), _to_m(c[2]), _to_m(c[3]))
-                   for c in poly_coords]
-            polygon = Meshes.Ngon(pts...)
+            length(poly_coords) >= 3 || continue
 
-            # Determine level_idx from the Z coordinate of the first vertex
-            z_val = Meshes.coords(pts[1]).z
+            poly_xy = [(_to_m(c[1]) |> ustrip, _to_m(c[2]) |> ustrip) for c in poly_coords]
+            z_val = _to_m(poly_coords[1][3])
             level_idx = _find_level_idx(skel, z_val)
 
-            face_idx = add_face!(skel, polygon; group=group, level_idx=level_idx)
-
-            # Explicit faces must map to existing skeleton edges; otherwise tributary loading is undefined.
-            if isempty(skel.face_edge_indices[face_idx])
-                throw(ArgumentError(
-                    "Explicit face \"$category\"[$poly_idx] could not be mapped to skeleton edges. " *
-                    "Ensure face boundary vertices align with existing edge vertices (same coordinates/units)."))
+            matched = Int[]
+            for (face_idx, vis) in enumerate(skel.face_vertex_indices)
+                get(face_to_story, face_idx, typemin(Int)) == level_idx || continue
+                cx = sum(vc[vi, 1] for vi in vis) / length(vis)
+                cy = sum(vc[vi, 2] for vi in vis) / length(vis)
+                _point_in_polygon_2d(cx, cy, poly_xy) && push!(matched, face_idx)
             end
+
+            if isempty(matched)
+                throw(ArgumentError(
+                    "Explicit face \"$category\"[$poly_idx] did not match any detected skeleton faces. " *
+                    "Ensure selector geometry overlaps slab cells on the target story."))
+            end
+            append!(skel.groups_faces[group], matched)
         end
     end
 end
@@ -296,6 +311,40 @@ function _find_level_idx(skel::BuildingSkeleton{T}, z_val) where T
     return best_idx
 end
 
+"""2D point-in-polygon test with boundary-inclusive tolerance."""
+function _point_in_polygon_2d(x::Float64, y::Float64, poly::Vector{Tuple{Float64, Float64}})
+    n = length(poly)
+    n < 3 && return false
+
+    inside = false
+    j = n
+    for i in 1:n
+        xi, yi = poly[i]
+        xj, yj = poly[j]
+        if _point_on_segment_2d(x, y, xi, yi, xj, yj)
+            return true
+        end
+        intersects = ((yi > y) != (yj > y)) &&
+                     (x < (xj - xi) * (y - yi) / (yj - yi + 1e-16) + xi)
+        inside = intersects ? !inside : inside
+        j = i
+    end
+    return inside
+end
+
+"""Boundary check helper for 2D point-in-polygon."""
+function _point_on_segment_2d(px, py, x1, y1, x2, y2; tol=1e-8)
+    dx = x2 - x1
+    dy = y2 - y1
+    seg_len_sq = dx^2 + dy^2
+    seg_len_sq <= tol^2 && return hypot(px - x1, py - y1) <= tol
+    t = ((px - x1) * dx + (py - y1) * dy) / seg_len_sq
+    (t < -tol || t > 1 + tol) && return false
+    qx = x1 + clamp(t, 0.0, 1.0) * dx
+    qy = y1 + clamp(t, 0.0, 1.0) * dy
+    return hypot(px - qx, py - qy) <= tol
+end
+
 # ─── Design Parameters ────────────────────────────────────────────────────────
 
 """
@@ -303,7 +352,7 @@ end
 
 Convert API parameter block to a `DesignParameters` instance.
 """
-function json_to_params(api_params::APIParams)
+function json_to_params(api_params::APIParams, coord_unit_str::String="meters")
     loads = GravityLoads(
         floor_LL  = api_params.loads.floor_LL_psf * psf,
         roof_LL   = api_params.loads.roof_LL_psf * psf,
@@ -333,6 +382,7 @@ function json_to_params(api_params::APIParams)
     end
 
     display_units_sys = lowercase(api_params.unit_system) == "metric" ? :metric : :imperial
+    scoped_overrides = _resolve_scoped_floor_overrides(api_params, coord_unit_str)
 
     return DesignParameters(
         loads = loads,
@@ -343,8 +393,42 @@ function json_to_params(api_params::APIParams)
         fire_rating = validate_fire_rating(api_params.fire_rating),
         optimize_for = Symbol(api_params.optimize_for),
         foundation_options = foundation_options,
+        scoped_floor_overrides = scoped_overrides,
+        geometry_is_centerline = api_params.geometry_is_centerline,
         display_units = DisplayUnits(display_units_sys),
     )
+end
+
+"""Resolve face-scoped floor overrides from API params (coordinates converted to meters)."""
+function _resolve_scoped_floor_overrides(api_params::APIParams, coord_unit_str::String)
+    isempty(api_params.scoped_overrides) && return ScopedFloorOverride[]
+
+    coord_unit = parse_unit(coord_unit_str)
+    _to_m(x) = ustrip(uconvert(u"m", x * coord_unit))
+    out = ScopedFloorOverride[]
+
+    for ov in api_params.scoped_overrides
+        ft = Symbol(ov.floor_type)
+        λ = ov.floor_options.vault_lambda
+
+        faces_m = Vector{NTuple{3, Float64}}[]
+        for poly in ov.faces
+            pts = NTuple{3, Float64}[]
+            for c in poly
+                length(c) < 3 && continue
+                push!(pts, (_to_m(c[1]), _to_m(c[2]), _to_m(c[3])))
+            end
+            length(pts) >= 3 && push!(faces_m, pts)
+        end
+
+        push!(out, ScopedFloorOverride(
+            floor_type = ft,
+            vault_lambda = λ,
+            faces = faces_m,
+        ))
+    end
+
+    return out
 end
 
 # ─── Name → object resolution helpers ────────────────────────────────────────
@@ -404,7 +488,11 @@ function _resolve_floor_options(api_params::APIParams)
     elseif ft == :one_way
         return StructuralSizer.OneWayOptions()
     elseif ft == :vault
-        return StructuralSizer.VaultOptions()
+        # Vault sizing requires either rise or lambda. Use client-provided
+        # lambda when available, otherwise default to lambda=10.
+        λ = api_params.floor_options.vault_lambda
+        return isnothing(λ) ? StructuralSizer.VaultOptions(lambda=10.0) :
+                              StructuralSizer.VaultOptions(lambda=λ)
     else
         return StructuralSizer.FlatPlateOptions(
             method=method, deflection_limit=defl, punching_strategy=punch)

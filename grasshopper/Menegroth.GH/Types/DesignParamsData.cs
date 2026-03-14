@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using Newtonsoft.Json.Linq;
 
 namespace Menegroth.GH.Types
@@ -21,6 +22,7 @@ namespace Menegroth.GH.Types
         public string AnalysisMethod { get; set; } = "DDM";
         public string DeflectionLimit { get; set; } = "L_360";
         public string PunchingStrategy { get; set; } = "grow_columns";
+        public double? VaultLambda { get; set; } = null;
 
         // Materials
         public string Concrete { get; set; } = "NWC_4000";
@@ -37,13 +39,14 @@ namespace Menegroth.GH.Types
         public bool SizeFoundations { get; set; } = false;
         public string FoundationSoil { get; set; } = "medium_sand";
         public string UnitSystem { get; set; } = "imperial";
+        public List<VaultParamsData> ScopedVaultOverrides { get; set; } = new List<VaultParamsData>();
 
         /// <summary>
         /// Serialise to a JObject matching the API params schema.
         /// </summary>
         public JObject ToJson()
         {
-            return new JObject
+            var obj = new JObject
             {
                 ["unit_system"] = UnitSystem,
                 ["loads"] = new JObject
@@ -75,6 +78,33 @@ namespace Menegroth.GH.Types
                 ["size_foundations"] = SizeFoundations,
                 ["foundation_soil"] = FoundationSoil
             };
+
+            if (VaultLambda.HasValue)
+                ((JObject)obj["floor_options"])["vault_lambda"] = VaultLambda.Value;
+
+            if (ScopedVaultOverrides != null && ScopedVaultOverrides.Count > 0)
+            {
+                var scoped = new JArray();
+                foreach (var ov in ScopedVaultOverrides)
+                {
+                    if (ov == null || !ov.HasScopedFaces) continue;
+                    var floorOpts = new JObject();
+                    if (ov.Lambda.HasValue)
+                        floorOpts["vault_lambda"] = ov.Lambda.Value;
+
+                    scoped.Add(new JObject
+                    {
+                        ["floor_type"] = "vault",
+                        ["floor_options"] = floorOpts,
+                        ["faces"] = JToken.FromObject(ov.Faces)
+                    });
+                }
+
+                if (scoped.Count > 0)
+                    obj["scoped_overrides"] = scoped;
+            }
+
+            return obj;
         }
 
         /// <summary>

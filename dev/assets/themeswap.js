@@ -1,5 +1,22 @@
 // Custom themeswap: default to documenter-light regardless of OS preference.
 // User can still manually select a different theme via Settings.
+// Also inverts logo (white) in dark themes.
+var DARK_THEMES = [
+  "documenter-dark",
+  "catppuccin-frappe",
+  "catppuccin-macchiato",
+  "catppuccin-mocha",
+];
+var _activeTheme = null;
+
+function set_logo_for_theme(activeTheme) {
+  var imgs = document.querySelectorAll(".docs-logo img");
+  var isDark = activeTheme && DARK_THEMES.indexOf(activeTheme) >= 0;
+  for (var j = 0; j < imgs.length; j++) {
+    imgs[j].style.filter = isDark ? "invert(1)" : "";
+  }
+}
+
 function set_theme_from_local_storage() {
   var theme = null;
   if (window.localStorage != null) {
@@ -39,5 +56,10 @@ function set_theme_from_local_storage() {
     if (themename === null) continue;
     ss.disabled = !(themename == activeTheme);
   }
+  _activeTheme = activeTheme;
+  set_logo_for_theme(activeTheme);
 }
 set_theme_from_local_storage();
+document.addEventListener("DOMContentLoaded", function () {
+  set_logo_for_theme(_activeTheme);
+});

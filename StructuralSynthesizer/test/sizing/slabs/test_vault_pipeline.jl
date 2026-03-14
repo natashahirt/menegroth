@@ -147,7 +147,7 @@ using StructuralSizer
         build_analysis_model!(design)
         
         # Get visualization data
-        output = StructuralSynthesizer.serialize_output(design)
+        output = design_to_json(design)
         @test haskey(output, :visualization) || output.status == "ok"
         
         viz = output.visualization

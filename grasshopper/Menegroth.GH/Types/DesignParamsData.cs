@@ -40,8 +40,11 @@ namespace Menegroth.GH.Types
         public string BeamCatalog { get; set; } = "large";
         /// <summary>RC beams only: discrete (MIP) or nlp (continuous).</summary>
         public string BeamSizingStrategy { get; set; } = "discrete";
-        /// <summary>Bounds for custom catalog (required when BeamCatalog is custom).</summary>
-        public BeamCatalogBoundsData BeamCatalogBounds { get; set; } = null;
+        // NLP bounds for various element types
+        public SteelWBoundsData SteelWBounds { get; set; } = null;
+        public SteelHSSBoundsData SteelHSSBounds { get; set; } = null;
+        public RCRectBoundsData RCRectBounds { get; set; } = null;
+        public RCCircularBoundsData RCCircularBounds { get; set; } = null;
 
         /// <summary>PixelFrame fc preset when ColumnType or BeamType is pixelframe: standard, low, high, extended, custom.</summary>
         public string PixelFrameFcPreset { get; set; } = "standard";
@@ -99,14 +102,42 @@ namespace Menegroth.GH.Types
                 ["beam_type"] = BeamType,
                 ["beam_catalog"] = BeamCatalog,
                 ["beam_sizing_strategy"] = BeamSizingStrategy ?? "discrete",
-                ["beam_catalog_bounds"] = BeamCatalogBounds != null
+                ["steel_w_bounds"] = SteelWBounds != null
                     ? (JToken)new JObject
                     {
-                        ["min_width_in"] = BeamCatalogBounds.MinWidthIn,
-                        ["max_width_in"] = BeamCatalogBounds.MaxWidthIn,
-                        ["min_depth_in"] = BeamCatalogBounds.MinDepthIn,
-                        ["max_depth_in"] = BeamCatalogBounds.MaxDepthIn,
-                        ["resolution_in"] = BeamCatalogBounds.ResolutionIn
+                        ["min_depth_in"] = SteelWBounds.MinDepthIn,
+                        ["max_depth_in"] = SteelWBounds.MaxDepthIn,
+                        ["min_flange_width_in"] = SteelWBounds.MinFlangeWidthIn,
+                        ["max_flange_width_in"] = SteelWBounds.MaxFlangeWidthIn,
+                        ["min_flange_thickness_in"] = SteelWBounds.MinFlangeThicknessIn,
+                        ["max_flange_thickness_in"] = SteelWBounds.MaxFlangeThicknessIn,
+                        ["min_web_thickness_in"] = SteelWBounds.MinWebThicknessIn,
+                        ["max_web_thickness_in"] = SteelWBounds.MaxWebThicknessIn
+                    }
+                    : null,
+                ["steel_hss_bounds"] = SteelHSSBounds != null
+                    ? (JToken)new JObject
+                    {
+                        ["min_outer_in"] = SteelHSSBounds.MinOuterIn,
+                        ["max_outer_in"] = SteelHSSBounds.MaxOuterIn,
+                        ["min_thickness_in"] = SteelHSSBounds.MinThicknessIn,
+                        ["max_thickness_in"] = SteelHSSBounds.MaxThicknessIn
+                    }
+                    : null,
+                ["rc_rect_bounds"] = RCRectBounds != null
+                    ? (JToken)new JObject
+                    {
+                        ["min_width_in"] = RCRectBounds.MinWidthIn,
+                        ["max_width_in"] = RCRectBounds.MaxWidthIn,
+                        ["min_depth_in"] = RCRectBounds.MinDepthIn,
+                        ["max_depth_in"] = RCRectBounds.MaxDepthIn
+                    }
+                    : null,
+                ["rc_circular_bounds"] = RCCircularBounds != null
+                    ? (JToken)new JObject
+                    {
+                        ["min_diameter_in"] = RCCircularBounds.MinDiameterIn,
+                        ["max_diameter_in"] = RCCircularBounds.MaxDiameterIn
                     }
                     : null,
                 ["pixelframe_options"] = (ColumnType == "pixelframe" || BeamType == "pixelframe")

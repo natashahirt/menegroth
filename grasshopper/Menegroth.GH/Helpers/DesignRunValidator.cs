@@ -152,10 +152,6 @@ namespace Menegroth.GH.Helpers
             }
             if (!ValidBeamTypes.Contains(prms.BeamType))
                 errors.Add($"Invalid beam type \"{prms.BeamType}\". Options: {string.Join(", ", ValidBeamTypes)}");
-            if (!ValidBeamCatalogs.Contains(prms.BeamCatalog ?? "large"))
-                errors.Add($"Invalid beam_catalog \"{prms.BeamCatalog}\". Options: {string.Join(", ", ValidBeamCatalogs)}");
-            if (prms.BeamCatalog == "custom" && prms.BeamCatalogBounds == null)
-                errors.Add("beam_catalog_bounds is required when beam_catalog is \"custom\". Use Solver Params with Catalog = Custom.");
             if (!ValidConcretes.Contains(prms.Concrete))
                 errors.Add($"Unknown concrete \"{prms.Concrete}\". Options: {string.Join(", ", ValidConcretes)}");
             if (!ValidRebars.Contains(prms.Rebar))

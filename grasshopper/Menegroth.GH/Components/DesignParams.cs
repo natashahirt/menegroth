@@ -228,7 +228,7 @@ namespace Menegroth.GH.Components
                 "Wall superimposed dead load in psf", GH_ParamAccess.item, 10.0);
 
             pManager.AddGenericParameter("Params", "Params",
-                "Optional overrides (VaultParams, SolverParams, FoundationParams). Click + to add Slab Params / Foundation Params.",
+                "Optional overrides (VaultParams, ElementParams, FoundationParams). Click + to add Slab Params / Foundation Params.",
                 GH_ParamAccess.list);
             pManager[6].Optional = true;
         }
@@ -253,7 +253,6 @@ namespace Menegroth.GH.Components
             // ── Beams ▸ ──
             var beamMenu = Menu_AppendItem(menu, "Beams");
             AddSubChoices(beamMenu, "Beam Type", BeamTypes, _beamType);
-            AddSubChoices(beamMenu, "RC Catalog", BeamCatalogs, _beamCatalog);
 
             // ── Columns ▸ Column Type (top-level) ▸ Column Catalog (second, updates by type) ──
             var colMenu = Menu_AppendItem(menu, "Columns");
@@ -676,10 +675,7 @@ namespace Menegroth.GH.Components
 
             sb.Append("Columns: ").Append(LabelForColumnTypeSummary(p))
               .Append(" (").Append(p.ColumnType).Append(ColumnTypeUsesCatalog(p.ColumnType) ? " / " + (p.ColumnCatalog ?? (p.ColumnType?.StartsWith("steel_") == true ? "preferred" : "standard")) : "").AppendLine(")");
-            sb.Append("Beams: ").Append(LabelFor(BeamTypes, p.BeamType)).Append(" (").Append(p.BeamType).Append(")");
-            if (p.BeamType == "rc_rect" || p.BeamType == "rc_tbeam")
-                sb.Append(" | catalog: ").Append(LabelFor(BeamCatalogs, p.BeamCatalog)).Append(" (").Append(p.BeamCatalog).Append(")");
-            sb.AppendLine();
+            sb.Append("Beams: ").Append(LabelFor(BeamTypes, p.BeamType)).Append(" (").Append(p.BeamType).AppendLine(")");
             sb.Append("Materials: ").Append(LabelFor(Concretes, p.Concrete)).Append(" (").Append(p.Concrete).Append(")");
             sb.Append(", ").Append(LabelFor(Rebars, p.Rebar)).Append(" (").Append(p.Rebar).Append(")");
             sb.Append(", ").Append(LabelFor(Steels, p.Steel)).Append(" (").Append(p.Steel).AppendLine(")");
@@ -747,7 +743,7 @@ namespace Menegroth.GH.Components
             return allOverrides;
         }
 
-        /// <summary>Apply all overrides (VaultParams, SolverParams, FoundationParams). Order reflects hierarchy: later in list wins.</summary>
+        /// <summary>Apply all overrides (VaultParams, ElementParams, FoundationParams). Order reflects hierarchy: later in list wins.</summary>
         private void ApplyOverrides(DesignParamsData target, List<IGH_Goo> allOverrides)
         {
             if (target == null || allOverrides == null || allOverrides.Count == 0)
@@ -755,9 +751,9 @@ namespace Menegroth.GH.Components
 
             foreach (var goo in allOverrides)
             {
-                if (TryGetSolverParams(goo, out var solver))
+                if (TryGetElementParams(goo, out var elem))
                 {
-                    solver.ApplyTo(target);
+                    elem.ApplyTo(target);
                     continue;
                 }
                 if (TryGetVaultParams(goo, out var vault))
@@ -782,20 +778,20 @@ namespace Menegroth.GH.Components
             }
         }
 
-        private static bool TryGetSolverParams(IGH_Goo goo, out SolverParamsData solver)
+        private static bool TryGetElementParams(IGH_Goo goo, out ElementParamsData elem)
         {
-            solver = null;
+            elem = null;
             if (goo == null) return false;
 
-            if (goo is SolverParamsDataGoo ghSolver && ghSolver.Value != null)
+            if (goo is ElementParamsDataGoo ghElem && ghElem.Value != null)
             {
-                solver = ghSolver.Value;
+                elem = ghElem.Value;
                 return true;
             }
 
-            if (goo is Grasshopper.Kernel.Types.GH_ObjectWrapper wrapper && wrapper.Value is SolverParamsData wrappedSolver)
+            if (goo is Grasshopper.Kernel.Types.GH_ObjectWrapper wrapper && wrapper.Value is ElementParamsData wrappedElem)
             {
-                solver = wrappedSolver;
+                elem = wrappedElem;
                 return true;
             }
 

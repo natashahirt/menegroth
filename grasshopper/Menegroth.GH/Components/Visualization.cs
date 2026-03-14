@@ -1143,14 +1143,13 @@ namespace Menegroth.GH.Components
             {
                 foreach (var edge in boundary)
                 {
-                    var pts = edge.ToPolyline().ToList();
-                    if (pts.Count < 2) continue;
-                    
+                    if (edge == null || edge.Count < 2) continue;
+
                     // Create vertical strip connecting intrados edge to extrados
-                    for (int i = 0; i < pts.Count - 1; i++)
+                    for (int i = 0; i < edge.Count - 1; i++)
                     {
-                        var p1 = pts[i];
-                        var p2 = pts[i + 1];
+                        var p1 = edge[i];
+                        var p2 = edge[i + 1];
                         var p3 = new Point3d(p2.X, p2.Y, p2.Z + thickness);
                         var p4 = new Point3d(p1.X, p1.Y, p1.Z + thickness);
                         

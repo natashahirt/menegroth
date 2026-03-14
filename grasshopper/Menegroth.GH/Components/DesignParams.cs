@@ -112,6 +112,7 @@ namespace Menegroth.GH.Components
             new("RC Circular",   "rc_circular"),
             new("Steel HSS",     "steel_hss"),
             new("Steel W-shape", "steel_w"),
+            new("PixelFrame",   "pixelframe"),
             new("Steel Pipe",    "steel_pipe"),
         };
 
@@ -149,6 +150,7 @@ namespace Menegroth.GH.Components
             new("Steel HSS",     "steel_hss"),
             new("RC Rectangular", "rc_rect"),
             new("RC T-beam",     "rc_tbeam"),
+            new("PixelFrame",    "pixelframe"),
         };
 
         private static readonly Choice[] BeamCatalogs =
@@ -226,7 +228,7 @@ namespace Menegroth.GH.Components
                 "Wall superimposed dead load in psf", GH_ParamAccess.item, 10.0);
 
             pManager.AddGenericParameter("Params", "Params",
-                "Optional overrides (VaultParams, future FoundationParams). Click + to add Slab Params / Foundation Params.",
+                "Optional overrides (VaultParams, SolverParams, FoundationParams). Click + to add Slab Params / Foundation Params.",
                 GH_ParamAccess.list);
             pManager[6].Optional = true;
         }
@@ -389,7 +391,8 @@ namespace Menegroth.GH.Components
             if (_columnType == "steel_hss") return $"Steel HSS ({LabelFor(SteelColumnCatalogs, _columnCatalog)})";
             if (_columnType == "steel_w") return $"Steel W-shape ({LabelFor(SteelColumnCatalogs, _columnCatalog)})";
             if (_columnType == "steel_pipe") return "Steel Pipe";
-            return _columnType;
+            if (_columnType == "pixelframe") return "PixelFrame";
+            return _columnType ?? "";
         }
 
         private static string LabelForColumnTypeSummary(DesignParamsData p)
@@ -401,10 +404,11 @@ namespace Menegroth.GH.Components
             if (ct == "steel_pipe") return "Steel Pipe";
             if (ct == "steel_hss") return $"Steel HSS ({LabelFor(SteelColumnCatalogs, cat)})";
             if (ct == "steel_w") return $"Steel W-shape ({LabelFor(SteelColumnCatalogs, cat)})";
+            if (ct == "pixelframe") return $"PixelFrame (fc: {p.PixelFrameFcPreset ?? "standard"})";
             return ct;
         }
 
-        /// <summary>True when column type has a catalog submenu (RC Rect, RC Circular, Steel HSS, Steel W).</summary>
+        /// <summary>True when column type has a catalog submenu (RC Rect, RC Circular, Steel HSS, Steel W). PixelFrame uses pixelframe_options instead.</summary>
         private static bool ColumnTypeUsesCatalog(string? columnType)
         {
             return columnType == "rc_rect" || columnType == "rc_circular"
@@ -692,8 +696,13 @@ namespace Menegroth.GH.Components
             sb.Append(" | Fire rating: ").Append(fireLabel).Append(" (").Append(p.FireRating.ToString("F1")).Append(" hr)").AppendLine();
 
             if (p.SizeFoundations)
+            {
                 sb.Append("Foundations: Size (").Append(LabelFor(SoilTypes, p.FoundationSoil))
-                  .Append(" / ").Append(p.FoundationSoil).AppendLine(")");
+                  .Append(" / ").Append(p.FoundationSoil).Append(")");
+                sb.Append(", ").Append(p.FoundationConcrete ?? "NWC_3000");
+                sb.Append(", strategy=").Append(p.FoundationStrategy ?? "auto");
+                sb.Append(", mat_thresh=").Append(p.MatCoverageThreshold.ToString("F2")).AppendLine();
+            }
             else
                 sb.AppendLine("Foundations: Not sizing");
 
@@ -738,7 +747,7 @@ namespace Menegroth.GH.Components
             return allOverrides;
         }
 
-        /// <summary>Apply all overrides (VaultParams, future FoundationParams). Order reflects hierarchy: later in list wins.</summary>
+        /// <summary>Apply all overrides (VaultParams, SolverParams, FoundationParams). Order reflects hierarchy: later in list wins.</summary>
         private void ApplyOverrides(DesignParamsData target, List<IGH_Goo> allOverrides)
         {
             if (target == null || allOverrides == null || allOverrides.Count == 0)
@@ -765,7 +774,11 @@ namespace Menegroth.GH.Components
                         vault.ApplyTo(target);
                     continue;
                 }
-                // Future: if (TryGetFoundationParams(goo, out var fdn)) { ... }
+                if (TryGetFoundationParams(goo, out var fdn))
+                {
+                    fdn.ApplyTo(target);
+                    continue;
+                }
             }
         }
 
@@ -809,6 +822,26 @@ namespace Menegroth.GH.Components
             return false;
         }
 
+        private static bool TryGetFoundationParams(IGH_Goo goo, out FoundationParamsData fdn)
+        {
+            fdn = null;
+            if (goo == null) return false;
+
+            if (goo is FoundationParamsDataGoo ghFdn && ghFdn.Value != null)
+            {
+                fdn = ghFdn.Value;
+                return true;
+            }
+
+            if (goo is Grasshopper.Kernel.Types.GH_ObjectWrapper wrapper && wrapper.Value is FoundationParamsData wrappedFdn)
+            {
+                fdn = wrappedFdn;
+                return true;
+            }
+
+            return false;
+        }
+
         // ─── IGH_VariableParameterComponent: + button adds Slab Params, then Foundation Params ───
         public bool CanInsertParameter(GH_ParameterSide side, int index)
         {
@@ -839,7 +872,7 @@ namespace Menegroth.GH.Components
             {
                 param.Name = "Foundation Params";
                 param.NickName = "Foundation";
-                param.Description = "Optional foundation overrides. Reserved for future use.";
+                param.Description = "Optional foundation overrides (FoundationParams).";
             }
             param.Access = GH_ParamAccess.list;
             param.Optional = true;

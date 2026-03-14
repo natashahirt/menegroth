@@ -771,6 +771,9 @@ mutable struct BuildingDesign{T, A, P}
     # Frame+shell model for global deflection analysis (built after design)
     # Separate from struc.asap_model to preserve the design-phase frame model
     asap_model::Union{Asap.Model, Nothing}
+    # Skeleton edge index for each frame element in asap_model (when built via build_analysis_model!).
+    # Enables correct element→design mapping for visualization; empty when using struc.asap_model.
+    asap_model_frame_edge_indices::Vector{Int}
     
     # Metadata
     created::DateTime
@@ -792,6 +795,7 @@ function BuildingDesign(struc::BuildingStructure{T, A, P}, params::DesignParamet
         Dict{Int, FoundationDesignResult}(),
         DesignSummary(),
         nothing,  # asap_model (built via build_analysis_model!)
+        Int[],    # asap_model_frame_edge_indices (populated by build_analysis_model!)
         now(),
         0.0
     )

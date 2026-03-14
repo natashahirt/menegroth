@@ -176,7 +176,7 @@ function validate_input(input::APIInput)
         end
     end
 
-    valid_column_types = ("rc_rect", "rc_circular", "steel_w", "steel_hss", "steel_pipe")
+    valid_column_types = ("rc_rect", "rc_circular", "steel_w", "steel_hss", "steel_pipe", "pixelframe")
     if !(p.column_type in valid_column_types)
         push!(errors, "Invalid column_type \"$(p.column_type)\". Must be one of: $(join(valid_column_types, ", ")).")
     end
@@ -193,7 +193,7 @@ function validate_input(input::APIInput)
         push!(errors, "Invalid column_catalog for RC circular \"$(p.column_catalog)\". Must be one of: $(join(valid_rc_circular_catalogs, ", ")).")
     end
 
-    valid_beam_types = ("steel_w", "steel_hss", "rc_rect", "rc_tbeam")
+    valid_beam_types = ("steel_w", "steel_hss", "rc_rect", "rc_tbeam", "pixelframe")
     if !(p.beam_type in valid_beam_types)
         push!(errors, "Invalid beam_type \"$(p.beam_type)\". Must be one of: $(join(valid_beam_types, ", ")).")
     end
@@ -202,6 +202,25 @@ function validate_input(input::APIInput)
     if !(p.beam_catalog in valid_beam_catalogs)
         push!(errors, "Invalid beam_catalog \"$(p.beam_catalog)\". Must be one of: $(join(valid_beam_catalogs, ", ")).")
     end
+    valid_pixelframe_fc_presets = ("standard", "low", "high", "extended", "custom")
+    if p.column_type == "pixelframe" || p.beam_type == "pixelframe"
+        pf = p.pixelframe_options
+        if pf !== nothing
+            preset = lowercase(strip(pf.fc_preset))
+            if !(preset in valid_pixelframe_fc_presets)
+                push!(errors, "Invalid pixelframe_options.fc_preset \"$(pf.fc_preset)\". Must be one of: $(join(valid_pixelframe_fc_presets, ", ")).")
+            elseif preset == "custom"
+                if pf.fc_min_ksi === nothing || pf.fc_max_ksi === nothing || pf.fc_resolution_ksi === nothing
+                    push!(errors, "pixelframe_options: fc_min_ksi, fc_max_ksi, and fc_resolution_ksi are required when fc_preset is \"custom\".")
+                elseif pf.fc_min_ksi >= pf.fc_max_ksi
+                    push!(errors, "pixelframe_options: fc_min_ksi must be < fc_max_ksi.")
+                elseif pf.fc_resolution_ksi <= 0
+                    push!(errors, "pixelframe_options: fc_resolution_ksi must be > 0.")
+                end
+            end
+        end
+    end
+
     if p.beam_catalog == "custom"
         if p.beam_catalog_bounds === nothing
             push!(errors, "beam_catalog_bounds is required when beam_catalog is \"custom\".")
@@ -217,6 +236,13 @@ function validate_input(input::APIInput)
                 push!(errors, "beam_catalog_bounds: resolution_in must be > 0.")
             end
         end
+    end
+
+    if !(lowercase(strip(p.column_sizing_strategy)) in ("discrete", "nlp"))
+        push!(errors, "Invalid column_sizing_strategy \"$(p.column_sizing_strategy)\". Must be discrete or nlp.")
+    end
+    if !(lowercase(strip(p.beam_sizing_strategy)) in ("discrete", "nlp"))
+        push!(errors, "Invalid beam_sizing_strategy \"$(p.beam_sizing_strategy)\". Must be discrete or nlp.")
     end
 
     if p.fire_rating ∉ (0.0, 1.0, 1.5, 2.0, 3.0, 4.0)

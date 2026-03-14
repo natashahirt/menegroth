@@ -140,7 +140,50 @@ using StructuralSizer
     end
 
     # =====================================================================
-    # 7. Sensitivity: λ variation
+    # 7. Curved vault mesh serialization
+    # =====================================================================
+    @testset "Vault mesh serialization" begin
+        # Run full design with analysis model
+        build_analysis_model!(design)
+        
+        # Get visualization data
+        output = StructuralSynthesizer.serialize_output(design)
+        @test haskey(output, :visualization) || output.status == "ok"
+        
+        viz = output.visualization
+        @test !isnothing(viz)
+        
+        # Check sized_slabs for vault-specific fields
+        sized_slabs = viz.sized_slabs
+        @test !isempty(sized_slabs)
+        
+        # Find vault slabs
+        vault_sized = filter(s -> s.is_vault, sized_slabs)
+        @test !isempty(vault_sized)
+        
+        for vslab in vault_sized
+            @test vslab.is_vault
+            @test !isempty(vslab.vault_mesh_vertices)
+            @test !isempty(vslab.vault_mesh_faces)
+            
+            # Verify mesh is curved (Z varies)
+            zs = [v[3] for v in vslab.vault_mesh_vertices]
+            @test maximum(zs) > minimum(zs) + 0.1  # Rise > 0.1 ft
+            
+            # Verify face indices are valid
+            n_verts = length(vslab.vault_mesh_vertices)
+            for face in vslab.vault_mesh_faces
+                @test length(face) == 3
+                @test all(i -> 1 <= i <= n_verts, face)
+            end
+            
+            println("  Vault mesh: $(n_verts) vertices, $(length(vslab.vault_mesh_faces)) faces")
+            println("  Z range: $(round(minimum(zs), digits=2)) - $(round(maximum(zs), digits=2)) ft")
+        end
+    end
+
+    # =====================================================================
+    # 8. Sensitivity: λ variation
     # =====================================================================
     @testset "Lambda sensitivity" begin
         # Shallower vault (higher λ) → higher thrust: H = wL²/(8h), h = L/λ → H ∝ λ

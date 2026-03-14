@@ -14,6 +14,16 @@ namespace Menegroth.GH.Helpers
         public static readonly Color BeamTypeColor = Color.Coral;
         public static readonly Color OtherTypeColor = Color.DimGray;
         public static readonly Color DefaultMaterialColor = Color.FromArgb(200, 200, 200);
+        
+        /// <summary>
+        /// Earthen/masonry material color for vaults (warm terracotta/adobe tone).
+        /// </summary>
+        public static readonly Color EarthenMaterialColor = Color.FromArgb(194, 154, 108);
+        
+        /// <summary>
+        /// Concrete material color (neutral gray).
+        /// </summary>
+        public static readonly Color ConcreteMaterialColor = Color.FromArgb(180, 180, 180);
 
         /// <summary>
         /// Green → yellow → red gradient by utilization ratio (0 → 1).

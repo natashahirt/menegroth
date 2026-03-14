@@ -1013,6 +1013,18 @@ namespace Menegroth.GH.Components
             foreach (var slab in slabs)
             {
                 int slabId = slab["slab_id"]?.ToObject<int>() ?? -1;
+                double thickness = slab["thickness"]?.ToObject<double>() ?? 0;
+                double zTop = slab["z_top"]?.ToObject<double>() ?? 0;
+                
+                // Check for vault-specific curved mesh (new API field)
+                bool isVault = slab["is_vault"]?.ToObject<bool>() ?? false;
+                if (isVault && TryBuildVaultBrep(slab, thickness, output))
+                {
+                    AppendSlabColor(colors, slab, colorBy, maxDisp, "vertex_displacements", utilGradient, deflectionGradient);
+                    continue;
+                }
+                
+                // Fallback: try deflected mesh (for curved slabs from analysis model)
                 if (slabId > 0 &&
                     meshBySlabId.TryGetValue(slabId, out var meshToken) &&
                     TryBuildCurvedSizedSlabFromMesh(meshToken, output))
@@ -1021,9 +1033,8 @@ namespace Menegroth.GH.Components
                     continue;
                 }
 
+                // Standard flat slab: loft boundary to create box
                 var boundary = slab["boundary_vertices"]?.ToObject<double[][]>() ?? new double[0][];
-                double thickness = slab["thickness"]?.ToObject<double>() ?? 0;
-                double zTop = slab["z_top"]?.ToObject<double>() ?? 0;
                 if (boundary.Length < 3) continue;
 
                 var topPts = boundary.Select(v => new Point3d(v[0], v[1], zTop)).ToList();
@@ -1052,6 +1063,112 @@ namespace Menegroth.GH.Components
 
                 AppendDropPanelSizedGeometry(slab, zTop, thickness, output);
             }
+        }
+
+        /// <summary>
+        /// Build parabolic vault geometry from vault_mesh_vertices and vault_mesh_faces.
+        /// Creates a Brep with intrados and extrados surfaces plus end caps.
+        /// </summary>
+        private static bool TryBuildVaultBrep(JToken slab, double thickness, List<IGH_GeometricGoo> output)
+        {
+            var verts = slab["vault_mesh_vertices"]?.ToObject<double[][]>() ?? new double[0][];
+            var faces = slab["vault_mesh_faces"]?.ToObject<int[][]>() ?? new int[0][];
+            
+            if (verts.Length == 0 || faces.Length == 0)
+                return false;
+            
+            // Build intrados mesh
+            var intradosMesh = new Mesh();
+            for (int i = 0; i < verts.Length; i++)
+            {
+                if (verts[i].Length < 3) continue;
+                intradosMesh.Vertices.Add(new Point3d(verts[i][0], verts[i][1], verts[i][2]));
+            }
+            
+            foreach (var face in faces)
+            {
+                if (face == null || face.Length < 3) continue;
+                int i0 = face[0] - 1;  // Convert from 1-based to 0-based
+                int i1 = face[1] - 1;
+                int i2 = face[2] - 1;
+                if (i0 < 0 || i1 < 0 || i2 < 0 ||
+                    i0 >= intradosMesh.Vertices.Count ||
+                    i1 >= intradosMesh.Vertices.Count ||
+                    i2 >= intradosMesh.Vertices.Count)
+                    continue;
+                intradosMesh.Faces.AddFace(i0, i1, i2);
+            }
+            
+            if (intradosMesh.Vertices.Count == 0 || intradosMesh.Faces.Count == 0)
+                return false;
+            
+            intradosMesh.Normals.ComputeNormals();
+            intradosMesh.Compact();
+            
+            // Build extrados mesh (offset by thickness in Z direction)
+            var extradosMesh = new Mesh();
+            for (int i = 0; i < verts.Length; i++)
+            {
+                if (verts[i].Length < 3) continue;
+                extradosMesh.Vertices.Add(new Point3d(verts[i][0], verts[i][1], verts[i][2] + thickness));
+            }
+            
+            // Reverse face winding for extrados (normals point up)
+            foreach (var face in faces)
+            {
+                if (face == null || face.Length < 3) continue;
+                int i0 = face[0] - 1;
+                int i1 = face[1] - 1;
+                int i2 = face[2] - 1;
+                if (i0 < 0 || i1 < 0 || i2 < 0 ||
+                    i0 >= extradosMesh.Vertices.Count ||
+                    i1 >= extradosMesh.Vertices.Count ||
+                    i2 >= extradosMesh.Vertices.Count)
+                    continue;
+                extradosMesh.Faces.AddFace(i0, i2, i1);  // Reversed winding
+            }
+            
+            extradosMesh.Normals.ComputeNormals();
+            extradosMesh.Compact();
+            
+            // Combine into single mesh with both surfaces
+            var combinedMesh = new Mesh();
+            combinedMesh.Append(intradosMesh);
+            combinedMesh.Append(extradosMesh);
+            
+            // Add end caps (vertical surfaces at vault abutments)
+            // Extract boundary edges from intrados and connect to extrados
+            var boundary = intradosMesh.GetNakedEdges();
+            if (boundary != null && boundary.Length > 0)
+            {
+                foreach (var edge in boundary)
+                {
+                    var pts = edge.ToPolyline().ToList();
+                    if (pts.Count < 2) continue;
+                    
+                    // Create vertical strip connecting intrados edge to extrados
+                    for (int i = 0; i < pts.Count - 1; i++)
+                    {
+                        var p1 = pts[i];
+                        var p2 = pts[i + 1];
+                        var p3 = new Point3d(p2.X, p2.Y, p2.Z + thickness);
+                        var p4 = new Point3d(p1.X, p1.Y, p1.Z + thickness);
+                        
+                        int baseIdx = combinedMesh.Vertices.Count;
+                        combinedMesh.Vertices.Add(p1);
+                        combinedMesh.Vertices.Add(p2);
+                        combinedMesh.Vertices.Add(p3);
+                        combinedMesh.Vertices.Add(p4);
+                        combinedMesh.Faces.AddFace(baseIdx, baseIdx + 1, baseIdx + 2, baseIdx + 3);
+                    }
+                }
+            }
+            
+            combinedMesh.Normals.ComputeNormals();
+            combinedMesh.Compact();
+            
+            output.Add(new GH_Mesh(combinedMesh));
+            return true;
         }
 
         /// <summary>
@@ -1386,11 +1503,14 @@ namespace Menegroth.GH.Components
         /// Append one color per slab/mesh element to the parallel color list.
         /// For deflection mode on meshes, per-vertex coloring is handled above;
         /// this still outputs one representative color for the Custom Preview pipeline.
+        /// Vaults use earthen material color; flat slabs use concrete color.
         /// </summary>
         private static void AppendSlabColor(List<Color> colors, JToken element,
             int colorBy, double maxDisp, string displacementField = "vertex_displacements",
             IList<Color> utilGradient = null, IList<Color> deflectionGradient = null)
         {
+            bool isVault = element["is_vault"]?.ToObject<bool>() ?? false;
+            
             if (colorBy == COLOR_UTILIZATION)
             {
                 double ratio = element["utilization_ratio"]?.ToObject<double>() ?? 0;
@@ -1416,11 +1536,24 @@ namespace Menegroth.GH.Components
             }
             else if (colorBy == COLOR_MATERIAL)
             {
-                colors.Add(VisualizationColorMapper.ResolveMaterialColor(element["material_color_hex"]?.ToString(), VisualizationColorMapper.DefaultMaterialColor));
+                // Vaults use earthen material; flat slabs use concrete or serialized color
+                if (isVault)
+                {
+                    colors.Add(VisualizationColorMapper.EarthenMaterialColor);
+                }
+                else
+                {
+                    colors.Add(VisualizationColorMapper.ResolveMaterialColor(
+                        element["material_color_hex"]?.ToString(), 
+                        VisualizationColorMapper.ConcreteMaterialColor));
+                }
             }
             else
             {
-                colors.Add(VisualizationColorMapper.DefaultMaterialColor);
+                // Default/None mode: still differentiate vaults from flat slabs
+                colors.Add(isVault 
+                    ? VisualizationColorMapper.EarthenMaterialColor 
+                    : VisualizationColorMapper.DefaultMaterialColor);
             }
         }
     }

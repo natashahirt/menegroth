@@ -86,6 +86,11 @@ function size_columns(
     n == length(geometries) || throw(ArgumentError("demands and geometries must have same length"))
     
     steel_geoms = [to_steel_geometry(g) for g in geometries]
+
+    # ─── Steel NLP path (W and HSS only) ───
+    if opts.sizing_strategy == :nlp && opts.section_type in (:w, :hss)
+        return _size_steel_columns_nlp(Pu, Mux, steel_geoms, opts; Muy=Muy)
+    end
     
     cat = isnothing(opts.custom_catalog) ? 
         steel_column_catalog(opts.section_type, opts.catalog) : 
@@ -254,6 +259,42 @@ function _size_columns_nlp(
         objective_value(opts.objective, r.section, concrete, conc_geoms[i].L)
         for (i, r) in enumerate(nlp_results)
     ))
+
+    return (;
+        section_indices = collect(1:length(sections)),
+        sections        = sections,
+        status          = :nlp_complete,
+        objective_value = obj_val,
+    )
+end
+
+"""
+    _size_steel_columns_nlp(Pu, Mux, geometries, opts; Muy) -> NamedTuple
+
+Steel column NLP adapter. Maps SteelColumnOptions to NLPWOptions or NLPHSSOptions,
+calls size_w_columns_nlp or size_hss_columns_nlp, and returns MIP-compatible result shape.
+"""
+function _size_steel_columns_nlp(
+    Pu::Vector, Mux::Vector, geometries::Vector{<:SteelMemberGeometry},
+    opts::SteelMemberOptions;
+    Muy::Vector = zeros_like(Mux),
+)
+    max_d = isfinite(ustrip(u"mm", opts.max_depth)) ? opts.max_depth : 36.0u"inch"
+    Muy_vec = length(Muy) >= length(Pu) ? Muy : [i <= length(Muy) ? Muy[i] : 0.0 for i in 1:length(Pu)]
+
+    if opts.section_type === :w
+        nlp_opts = NLPWOptions(material=opts.material, max_depth=max_d, objective=opts.objective)
+        nlp_results = size_w_columns_nlp(Pu, Mux, geometries, nlp_opts; Muy=Muy_vec)
+    elseif opts.section_type === :hss
+        nlp_opts = NLPHSSOptions(material=opts.material, max_outer=max_d, objective=opts.objective)
+        nlp_results = size_hss_columns_nlp(Pu, Mux, geometries, nlp_opts; Muy=Muy_vec)
+    else
+        throw(ArgumentError("Steel NLP only supports section_type :w or :hss (got :$(opts.section_type))"))
+    end
+
+    sections = [r.section for r in nlp_results]
+    L_ft = [uconvert(u"ft", g.L) for g in geometries]
+    obj_val = ustrip(sum(r.weight_per_ft * u"lb/ft" * L_ft[i] for (i, r) in enumerate(nlp_results)))
 
     return (;
         section_indices = collect(1:length(sections)),

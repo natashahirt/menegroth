@@ -548,6 +548,15 @@ function _resolve_punching_strategy(s::String)
     return :grow_columns
 end
 
+"""Resolve sizing strategy string to Symbol."""
+function _resolve_sizing_strategy(s::String)
+    key = lowercase(strip(s))
+    key == "nlp" && return :nlp
+    key == "discrete" && return :discrete
+    @warn "Unknown sizing_strategy '$s' — defaulting to discrete"
+    return :discrete
+end
+
 """Resolve all three material names from API params. Returns `(concrete, rebar, steel)`."""
 function _resolve_materials(api_params::APIParams)
     return (
@@ -557,20 +566,55 @@ function _resolve_materials(api_params::APIParams)
     )
 end
 
+"""Build fc_values [MPa] from PixelFrame options. 1 ksi ≈ 6.895 MPa."""
+function _resolve_pixelframe_fc_values(api_params::APIParams)
+    ksi_to_MPa = 6.894757  # 1 ksi = 6.894757 MPa
+    opts = api_params.pixelframe_options
+    preset = opts !== nothing ? lowercase(strip(opts.fc_preset)) : "standard"
+
+    if preset == "custom" && opts !== nothing &&
+       opts.fc_min_ksi !== nothing && opts.fc_max_ksi !== nothing && opts.fc_resolution_ksi !== nothing
+        min_ksi = opts.fc_min_ksi
+        max_ksi = opts.fc_max_ksi
+        res_ksi = max(opts.fc_resolution_ksi, 0.5)
+        vals_ksi = collect(min_ksi:res_ksi:max_ksi)
+        return Float64.(vals_ksi .* ksi_to_MPa)
+    end
+
+    # Presets: fc values in MPa (catalog uses MPa)
+    if preset == "low"
+        return [21.0, 28.0, 35.0]  # ≈ 3–5 ksi
+    elseif preset == "high"
+        return [42.0, 50.0, 57.0, 69.0]  # ≈ 6–10 ksi
+    elseif preset == "extended"
+        return collect(Float64, 28:7:97)  # 4–14 ksi, step 1 ksi
+    else
+        # standard: 4–8 ksi
+        return [28.0, 35.0, 42.0, 50.0, 57.0]
+    end
+end
+
 """Resolve column type string to ColumnOptions. Uses column_concrete (default 6 ksi)."""
 function _resolve_column_options(api_params::APIParams)
     ct = lowercase(strip(api_params.column_type))
     _, rebar, steel = _resolve_materials(api_params)
     column_conc = _resolve_concrete_name(api_params.materials.column_concrete)
 
-    if startswith(ct, "rc_")
+    if ct == "pixelframe"
+        fc_vals = _resolve_pixelframe_fc_values(api_params)
+        return StructuralSizer.PixelFrameColumnOptions(
+            fc_values = fc_vals .* u"MPa",
+        )
+    elseif startswith(ct, "rc_")
         shape = ct == "rc_circular" ? :circular : :rect
         catalog_sym = Symbol(lowercase(strip(api_params.column_catalog)))
+        strat = _resolve_sizing_strategy(api_params.column_sizing_strategy)
         return StructuralSizer.ConcreteColumnOptions(
             material = column_conc,
             rebar_material = rebar,
             section_shape = shape,
             catalog = catalog_sym,
+            sizing_strategy = strat,
         )
     elseif startswith(ct, "steel_")
         section_type = if ct == "steel_w"
@@ -583,10 +627,12 @@ function _resolve_column_options(api_params::APIParams)
             :w  # default
         end
         catalog_sym = Symbol(lowercase(strip(api_params.column_catalog)))
+        strat = _resolve_sizing_strategy(api_params.column_sizing_strategy)
         return StructuralSizer.SteelColumnOptions(
             material = steel,
             section_type = section_type,
             catalog = catalog_sym,
+            sizing_strategy = strat,
         )
     else
         # Default to RC rectangular
@@ -761,25 +807,36 @@ function _resolve_beam_options(api_params::APIParams)
         else
             :w  # default
         end
+        strat = _resolve_sizing_strategy(api_params.beam_sizing_strategy)
         return StructuralSizer.SteelBeamOptions(
             material = steel,
-            section_type = section_type
+            section_type = section_type,
+            sizing_strategy = strat,
         )
     elseif bt == "rc_rect"
+        strat = _resolve_sizing_strategy(api_params.beam_sizing_strategy)
         return StructuralSizer.ConcreteBeamOptions(
             material = concrete,
             rebar_material = rebar,
             include_flange = false,
             catalog = catalog === :custom ? :standard : catalog,
             custom_catalog = custom_cat,
+            sizing_strategy = strat,
         )
     elseif bt == "rc_tbeam"
+        strat = _resolve_sizing_strategy(api_params.beam_sizing_strategy)
         return StructuralSizer.ConcreteBeamOptions(
             material = concrete,
             rebar_material = rebar,
             include_flange = true,
             catalog = catalog === :custom ? :standard : catalog,
             custom_catalog = custom_cat,
+            sizing_strategy = strat,
+        )
+    elseif bt == "pixelframe"
+        fc_vals = _resolve_pixelframe_fc_values(api_params)
+        return StructuralSizer.PixelFrameBeamOptions(
+            fc_values = fc_vals .* u"MPa",
         )
     else
         # Default to steel W-shape

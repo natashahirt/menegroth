@@ -380,15 +380,30 @@ function _serialize_visualization_frame_elements(design::BuildingDesign, model, 
     end
 
     # Serialize elements
+    # Resolve element index → skeleton edge index mapping:
+    # - design.asap_model: use stored frame_edge_indices (subset of edges)
+    # - struc.asap_model: 1:1 with skeleton edges, elem_idx = edge_idx
+    # - fallback: node-based lookup
+    use_stored_mapping = !isnothing(design.asap_model) && design.asap_model === model &&
+                         length(design.asap_model_frame_edge_indices) == length(model.elements)
+    use_elem_idx_1to1 = model === struc.asap_model &&
+                       length(model.elements) == length(skel.edge_indices)
+
     elements = APIVisualizationFrameElement[]
     for (elem_idx, elem) in enumerate(model.elements)
         node_start_id = elem.nodeStart.nodeID
         node_end_id = elem.nodeEnd.nodeID
 
-        edge_key = node_start_id <= node_end_id ?
-            (node_start_id, node_end_id) :
-            (node_end_id, node_start_id)
-        src_edge_idx = get(edge_by_nodes, edge_key, 0)
+        src_edge_idx = if use_stored_mapping
+            design.asap_model_frame_edge_indices[elem_idx]
+        elseif use_elem_idx_1to1
+            elem_idx
+        else
+            edge_key = node_start_id <= node_end_id ?
+                (node_start_id, node_end_id) :
+                (node_end_id, node_start_id)
+            get(edge_by_nodes, edge_key, 0)
+        end
 
         ratio = src_edge_idx > 0 ? get(element_ratios, src_edge_idx, 0.0) : 0.0
         ok = src_edge_idx > 0 ? get(element_ok, src_edge_idx, true) : true
@@ -601,6 +616,17 @@ function _serialize_sized_slabs(design::BuildingDesign, struc::BuildingStructure
         ratio = max(slab_result.deflection_ratio, slab_result.punching_max_ratio)
         ok = slab_result.deflection_ok && slab_result.punching_ok
         
+        # Check for vault slab and serialize curved mesh
+        is_vault = slab.result isa StructuralSizer.VaultResult
+        vault_mesh_vertices = Vector{Float64}[]
+        vault_mesh_faces = Vector{Int}[]
+        
+        if is_vault
+            vault_mesh = _serialize_vault_mesh(slab, struc, du)
+            vault_mesh_vertices = vault_mesh.vertices
+            vault_mesh_faces = vault_mesh.faces
+        end
+        
         push!(sized_slabs, APISizedSlab(
             slab_id = slab_idx,
             boundary_vertices = [[_round_val(v; digits=6) for v in vert] for vert in boundary_vertices],
@@ -609,10 +635,59 @@ function _serialize_sized_slabs(design::BuildingDesign, struc::BuildingStructure
             drop_panels = drop_panels,
             utilization_ratio = _round_val(ratio),
             ok = ok,
+            is_vault = is_vault,
+            vault_mesh_vertices = vault_mesh_vertices,
+            vault_mesh_faces = vault_mesh_faces,
         ))
     end
     
     return sized_slabs
+end
+
+"""
+Build parabolic vault mesh for visualization/serialization.
+
+Uses Asap.get_vault_mesh_data() for Delaunay mesh projected onto parabolic surface.
+Returns (vertices=..., faces=...) with vertices in display length units.
+"""
+function _serialize_vault_mesh(slab, struc::BuildingStructure, du::DisplayUnits;
+                                target_edge_length::Float64=0.15)
+    result = slab.result
+    skel = struc.skeleton
+    
+    # Build corner nodes from face vertices
+    cell_idx = slab.cell_indices[1]
+    cell = struc.cells[cell_idx]
+    v_indices = skel.face_vertex_indices[cell.face_idx]
+    
+    # Create temporary Asap nodes for get_vault_mesh_data
+    corner_nodes = [let c = Meshes.coords(skel.vertices[vi])
+        Asap.Node([c.x, c.y, c.z], :free)
+    end for vi in v_indices]
+    
+    # Get vault mesh data from Asap (Delaunay projected onto parabola)
+    span_axis = slab.spans.axis
+    rise = result.rise
+    
+    mesh_data = Asap.get_vault_mesh_data(corner_nodes, span_axis, rise;
+                                          target_edge_length=target_edge_length * u"m")
+    
+    # Convert vertices to display units
+    vertices = Vector{Float64}[]
+    for (x, y, z) in mesh_data.vertices
+        x_disp = _to_display_length(du, x * u"m")
+        y_disp = _to_display_length(du, y * u"m")
+        z_disp = _to_display_length(du, z * u"m")
+        
+        push!(vertices, [_round_val(x_disp; digits=6), 
+                         _round_val(y_disp; digits=6), 
+                         _round_val(z_disp; digits=6)])
+    end
+    
+    # Convert faces to vectors (JSON serialization)
+    faces = [[f[1], f[2], f[3]] for f in mesh_data.faces]
+    
+    return (vertices=vertices, faces=faces)
 end
 
 """Serialize shell-element meshes with global/local vertex displacements for deflected slab visualization."""
@@ -688,6 +763,7 @@ function _serialize_deflected_slab_meshes(design::BuildingDesign, struc::Buildin
         drop_panels = _serialize_drop_panel_patches(slab_idx, slab, struc, design, du)
         ratio = max(slab_result.deflection_ratio, slab_result.punching_max_ratio)
         ok = slab_result.deflection_ok && slab_result.punching_ok
+        is_vault = slab.result isa StructuralSizer.VaultResult
         
         push!(deflected_meshes, APIDeflectedSlabMesh(
             slab_id = slab_idx,
@@ -699,6 +775,7 @@ function _serialize_deflected_slab_meshes(design::BuildingDesign, struc::Buildin
             drop_panels = drop_panels,
             utilization_ratio = _round_val(ratio),
             ok = ok,
+            is_vault = is_vault,
         ))
     end
     

@@ -83,11 +83,14 @@ function api_input_schema()
                     "rebar" => "Rebar name (e.g. Rebar_60). Default: Rebar_60.",
                     "steel" => "Steel name (e.g. A992). Default: A992.",
                 ),
-                "column_type" => "rc_rect | rc_circular | steel_w | steel_hss | steel_pipe. Default: rc_rect.",
-                "column_catalog" => "Column catalog. Steel (steel_w/steel_hss): compact_only | preferred | all. RC rectangular (rc_rect): standard | square | rectangular | low_capacity | high_capacity | all. RC circular (rc_circular): standard | low_capacity | high_capacity | all. Default: preferred (steel) / standard (RC).",
-                "beam_type" => "steel_w | steel_hss | rc_rect | rc_tbeam. Default: steel_w.",
-                "beam_catalog" => "RC beam catalog when beam_type is rc_rect or rc_tbeam: standard | small | large | xlarge | all | custom. Default: large. Use xlarge for vaults with high thrust. Use custom with beam_catalog_bounds for bounds-based catalog.",
+                "column_type" => "rc_rect | rc_circular | steel_w | steel_hss | steel_pipe | pixelframe. Default: rc_rect.",
+                "column_catalog" => "Column catalog. Steel (steel_w/steel_hss): compact_only | preferred | all. RC rectangular (rc_rect): standard | square | rectangular | low_capacity | high_capacity | all. RC circular (rc_circular): standard | low_capacity | high_capacity | all. Ignored for pixelframe. Default: preferred (steel) / standard (RC).",
+                "column_sizing_strategy" => "discrete (MIP catalog) or nlp (continuous Ipopt). Default: discrete. Applies to RC and steel columns.",
+                "beam_type" => "steel_w | steel_hss | rc_rect | rc_tbeam | pixelframe. Default: steel_w.",
+                "beam_catalog" => "RC beam catalog when beam_type is rc_rect or rc_tbeam: standard | small | large | xlarge | all | custom. Default: large. Use xlarge for vaults with high thrust. Use custom with beam_catalog_bounds for bounds-based catalog. Ignored for pixelframe.",
+                "beam_sizing_strategy" => "discrete (MIP catalog) or nlp (continuous Ipopt). Default: discrete. Applies to RC and steel beams.",
                 "beam_catalog_bounds" => "Required when beam_catalog is custom. Object: min_width_in, max_width_in, min_depth_in, max_depth_in, resolution_in (all in inches).",
+                "pixelframe_options" => "When column_type or beam_type is pixelframe. Object: fc_preset (standard | low | high | extended | custom) or fc_min_ksi, fc_max_ksi, fc_resolution_ksi when custom. Default: standard.",
                 "fire_rating" => "Fire rating (hours): 0, 1, 1.5, 2, 3, or 4. Default: 0.",
                 "optimize_for" => "weight | carbon | cost. Default: weight.",
                 "size_foundations" => "Boolean. Default: false.",
@@ -195,6 +198,14 @@ Base.@kwdef mutable struct APIBeamCatalogBounds
     resolution_in::Float64 = 2.0
 end
 
+"""PixelFrame concrete strength options. Use fc_preset or (fc_min_ksi, fc_max_ksi, fc_resolution_ksi) when custom."""
+Base.@kwdef mutable struct APIPixelFrameOptions
+    fc_preset::String = "standard"  # standard | low | high | extended | custom
+    fc_min_ksi::Union{Float64, Nothing} = nothing
+    fc_max_ksi::Union{Float64, Nothing} = nothing
+    fc_resolution_ksi::Union{Float64, Nothing} = nothing
+end
+
 """Optional mat footing params from JSON. All lengths in inches."""
 Base.@kwdef mutable struct APIMatParams
     cover_in::Union{Float64, Nothing} = nothing
@@ -224,9 +235,12 @@ Base.@kwdef mutable struct APIParams
     materials::APIMaterials = APIMaterials()
     column_type::String = "rc_rect"
     column_catalog::String = "preferred"   # Steel: compact_only | preferred | all. RC rect: standard | square | rectangular | low_capacity | high_capacity | all. RC circular: standard | low_capacity | high_capacity | all.
+    column_sizing_strategy::String = "discrete"  # RC columns only: discrete | nlp
     beam_type::String = "steel_w"
     beam_catalog::String = "large"   # RC beam catalog: standard | small | large | xlarge | all | custom. Ignored for steel.
+    beam_sizing_strategy::String = "discrete"  # RC beams only: discrete | nlp
     beam_catalog_bounds::Union{APIBeamCatalogBounds, Nothing} = nothing  # Required when beam_catalog is "custom".
+    pixelframe_options::Union{APIPixelFrameOptions, Nothing} = nothing  # When column_type or beam_type is pixelframe.
     fire_rating::Float64 = 0.0
     optimize_for::String = "weight"
     size_foundations::Bool = false
@@ -268,6 +282,7 @@ StructTypes.StructType(::Type{APIStripParams}) = StructTypes.Mutable()
 StructTypes.StructType(::Type{APIMatParams}) = StructTypes.Mutable()
 StructTypes.StructType(::Type{APIFoundationOptions}) = StructTypes.Mutable()
 StructTypes.StructType(::Type{APIBeamCatalogBounds}) = StructTypes.Mutable()
+StructTypes.StructType(::Type{APIPixelFrameOptions}) = StructTypes.Mutable()
 StructTypes.StructType(::Type{APIParams}) = StructTypes.Mutable()
 StructTypes.StructType(::Type{APIInput}) = StructTypes.Mutable()
 
@@ -395,6 +410,10 @@ Base.@kwdef struct APISizedSlab
     drop_panels::Vector{APIDropPanelPatch} = []
     utilization_ratio::Float64 = 0.0
     ok::Bool = true
+    # Vault-specific curved mesh (intrados surface only, extrados = intrados + thickness)
+    is_vault::Bool = false
+    vault_mesh_vertices::Vector{Vector{Float64}} = []  # [[x,y,z], ...] intrados surface
+    vault_mesh_faces::Vector{Vector{Int}} = []         # [[i,j,k], ...] triangle indices (1-based)
 end
 
 """Slab mesh for deflected mode (analysis model triangulation)."""
@@ -408,6 +427,7 @@ Base.@kwdef struct APIDeflectedSlabMesh
     drop_panels::Vector{APIDropPanelPatch} = []
     utilization_ratio::Float64 = 0.0
     ok::Bool = true
+    is_vault::Bool = false  # For material coloring (earthen vs concrete)
 end
 
 """Foundation geometry for visualization (axis-aligned block centered at support group centroid)."""

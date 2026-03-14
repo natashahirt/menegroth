@@ -33,17 +33,33 @@ namespace Menegroth.GH.Types
         public string ColumnType { get; set; } = "rc_rect";
         /// <summary>Column catalog: for steel_w/steel_hss use compact_only, preferred, all; for rc_rect use standard, square, rectangular, low_capacity, high_capacity, all; for rc_circular use standard, low_capacity, high_capacity, all. Default: preferred.</summary>
         public string ColumnCatalog { get; set; } = "preferred";
+        /// <summary>RC columns only: discrete (MIP) or nlp (continuous).</summary>
+        public string ColumnSizingStrategy { get; set; } = "discrete";
         public string BeamType { get; set; } = "steel_w";
         /// <summary>RC beam catalog when BeamType is rc_rect or rc_tbeam: standard, small, large, xlarge, all, custom. Default: large.</summary>
         public string BeamCatalog { get; set; } = "large";
+        /// <summary>RC beams only: discrete (MIP) or nlp (continuous).</summary>
+        public string BeamSizingStrategy { get; set; } = "discrete";
         /// <summary>Bounds for custom catalog (required when BeamCatalog is custom).</summary>
         public BeamCatalogBoundsData BeamCatalogBounds { get; set; } = null;
+
+        /// <summary>PixelFrame fc preset when ColumnType or BeamType is pixelframe: standard, low, high, extended, custom.</summary>
+        public string PixelFrameFcPreset { get; set; } = "standard";
+        /// <summary>PixelFrame fc min (ksi). Required when PixelFrameFcPreset is custom.</summary>
+        public double? PixelFrameFcMinKsi { get; set; } = null;
+        /// <summary>PixelFrame fc max (ksi). Required when PixelFrameFcPreset is custom.</summary>
+        public double? PixelFrameFcMaxKsi { get; set; } = null;
+        /// <summary>PixelFrame fc resolution (ksi). Required when PixelFrameFcPreset is custom.</summary>
+        public double? PixelFrameFcResolutionKsi { get; set; } = null;
 
         // Design targets
         public double FireRating { get; set; } = 0;
         public string OptimizeFor { get; set; } = "weight";
         public bool SizeFoundations { get; set; } = true;
         public string FoundationSoil { get; set; } = "medium_sand";
+        public string FoundationConcrete { get; set; } = "NWC_3000";
+        public string FoundationStrategy { get; set; } = "auto";
+        public double MatCoverageThreshold { get; set; } = 0.5;
         public string UnitSystem { get; set; } = "imperial";
         public List<VaultParamsData> ScopedVaultOverrides { get; set; } = new List<VaultParamsData>();
 
@@ -79,8 +95,10 @@ namespace Menegroth.GH.Types
                 },
                 ["column_type"] = ColumnType,
                 ["column_catalog"] = ColumnCatalog,
+                ["column_sizing_strategy"] = ColumnSizingStrategy ?? "discrete",
                 ["beam_type"] = BeamType,
                 ["beam_catalog"] = BeamCatalog,
+                ["beam_sizing_strategy"] = BeamSizingStrategy ?? "discrete",
                 ["beam_catalog_bounds"] = BeamCatalogBounds != null
                     ? (JToken)new JObject
                     {
@@ -91,10 +109,25 @@ namespace Menegroth.GH.Types
                         ["resolution_in"] = BeamCatalogBounds.ResolutionIn
                     }
                     : null,
+                ["pixelframe_options"] = (ColumnType == "pixelframe" || BeamType == "pixelframe")
+                    ? (JToken)new JObject
+                    {
+                        ["fc_preset"] = PixelFrameFcPreset ?? "standard",
+                        ["fc_min_ksi"] = PixelFrameFcMinKsi,
+                        ["fc_max_ksi"] = PixelFrameFcMaxKsi,
+                        ["fc_resolution_ksi"] = PixelFrameFcResolutionKsi
+                    }
+                    : null,
                 ["fire_rating"] = FireRating,
                 ["optimize_for"] = OptimizeFor,
                 ["size_foundations"] = SizeFoundations,
-                ["foundation_soil"] = FoundationSoil
+                ["foundation_soil"] = FoundationSoil,
+                ["foundation_concrete"] = FoundationConcrete,
+                ["foundation_options"] = new JObject
+                {
+                    ["strategy"] = FoundationStrategy,
+                    ["mat_coverage_threshold"] = MatCoverageThreshold
+                }
             };
 
             if (VaultLambda.HasValue)

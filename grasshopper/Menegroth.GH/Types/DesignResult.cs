@@ -88,15 +88,9 @@ namespace Menegroth.GH.Types
                 r.AllPass = summary["all_pass"]?.ToObject<bool>() ?? false;
                 r.CriticalRatio = summary["critical_ratio"]?.ToObject<double>() ?? 0;
                 r.CriticalElement = summary["critical_element"]?.ToString() ?? "";
-                r.ConcreteVolumeFt3 =
-                    summary["concrete_volume"]?.ToObject<double>() ??
-                    summary["concrete_volume_ft3"]?.ToObject<double>() ?? 0;
-                r.SteelWeightLb =
-                    summary["steel_weight"]?.ToObject<double>() ??
-                    summary["steel_weight_lb"]?.ToObject<double>() ?? 0;
-                r.RebarWeightLb =
-                    summary["rebar_weight"]?.ToObject<double>() ??
-                    summary["rebar_weight_lb"]?.ToObject<double>() ?? 0;
+                r.ConcreteVolumeFt3 = summary["concrete_volume"]?.ToObject<double>() ?? 0;
+                r.SteelWeightLb = summary["steel_weight"]?.ToObject<double>() ?? 0;
+                r.RebarWeightLb = summary["rebar_weight"]?.ToObject<double>() ?? 0;
                 r.EmbodiedCarbonKgCO2e = summary["embodied_carbon_kgCO2e"]?.ToObject<double>() ?? 0;
             }
 
@@ -112,7 +106,7 @@ namespace Menegroth.GH.Types
                     r.Slabs.Add(new SlabResult
                     {
                         Id = s["id"]?.ToObject<int>() ?? 0,
-                        ThicknessIn = s["thickness"]?.ToObject<double>() ?? s["thickness_in"]?.ToObject<double>() ?? 0,
+                        ThicknessIn = s["thickness"]?.ToObject<double>() ?? 0,
                         Ok = converged && deflOk && punchOk,
                         Converged = converged,
                         FailureReason = s["failure_reason"]?.ToString() ?? "",
@@ -166,9 +160,9 @@ namespace Menegroth.GH.Types
                     r.Foundations.Add(new FoundationResult
                     {
                         Id = f["id"]?.ToObject<int>() ?? 0,
-                        LengthFt = f["length"]?.ToObject<double>() ?? f["length_ft"]?.ToObject<double>() ?? 0,
-                        WidthFt = f["width"]?.ToObject<double>() ?? f["width_ft"]?.ToObject<double>() ?? 0,
-                        DepthFt = f["depth"]?.ToObject<double>() ?? f["depth_ft"]?.ToObject<double>() ?? 0,
+                        LengthFt = f["length"]?.ToObject<double>() ?? 0,
+                        WidthFt = f["width"]?.ToObject<double>() ?? 0,
+                        DepthFt = f["depth"]?.ToObject<double>() ?? 0,
                         BearingRatio = f["bearing_ratio"]?.ToObject<double>() ?? 0,
                         Ok = f["ok"]?.ToObject<bool>() ?? true,
                     });
@@ -180,9 +174,7 @@ namespace Menegroth.GH.Types
             if (r.Visualization != null)
             {
                 r.SuggestedScaleFactor = r.Visualization["suggested_scale_factor"]?.ToObject<double>() ?? 1.0;
-                r.MaxDisplacementFt =
-                    r.Visualization["max_displacement"]?.ToObject<double>() ??
-                    r.Visualization["max_displacement_ft"]?.ToObject<double>() ?? 0;
+                r.MaxDisplacementFt = r.Visualization["max_displacement"]?.ToObject<double>() ?? 0;
             }
 
             return r;

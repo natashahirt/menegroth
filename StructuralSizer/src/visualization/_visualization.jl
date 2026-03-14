@@ -8,3 +8,4 @@
 # =============================================================================
 
 include("section_vis_interface.jl")
+include("pixelframe_polygon.jl")

@@ -61,6 +61,7 @@ A dictionary mapping face group names to face-coordinate polylines:
 | `floor_options` | `APIFloorOptions` | `APIFloorOptions()` | Floor-specific options |
 | `materials` | `APIMaterials` | `APIMaterials()` | Material selections |
 | `column_type` | `String` | `"rc_rect"` | `"rc_rect"`, `"rc_circular"`, `"steel_w"`, `"steel_hss"`, or `"steel_pipe"` |
+| `column_catalog` | `String` | `"preferred"` | **Steel** (steel_w/steel_hss): `"compact_only"`, `"preferred"`, `"all"`. **RC rectangular** (rc_rect): `"standard"`, `"square"`, `"rectangular"`, `"low_capacity"`, `"high_capacity"`, `"all"`. **RC circular** (rc_circular): `"standard"`, `"low_capacity"`, `"high_capacity"`, `"all"`. Ignored for steel_pipe. |
 | `beam_type` | `String` | `"steel_w"` | `"steel_w"`, `"steel_hss"`, `"rc_rect"`, or `"rc_tbeam"` |
 | `beam_catalog` | `String` | `"large"` | RC beam catalog when `beam_type` is RC: `"standard"`, `"small"`, `"large"`, or `"all"`. Ignored for steel. |
 | `fire_rating` | `Float64` | `0.0` | Fire resistance in hours |
@@ -316,6 +317,7 @@ Example snippet (abbreviated) showing beamless-state and one drop-panel patch:
 | `section_depth` | `Float64` | Section depth |
 | `section_width` | `Float64` | Section width |
 | `section_polygon` | `Vector{Vector{Float64}}` | Section polygon in local `[y,z]` coordinates |
+| `section_polygon_inner` | `Vector{Vector{Float64}}` | Inner boundary for hollow sections (HSS rect/round); empty for solid sections |
 
 ### APIError
 

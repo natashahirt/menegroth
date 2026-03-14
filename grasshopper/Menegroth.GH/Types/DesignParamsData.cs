@@ -31,9 +31,13 @@ namespace Menegroth.GH.Types
 
         // Member types
         public string ColumnType { get; set; } = "rc_rect";
+        /// <summary>Column catalog: for steel_w/steel_hss use compact_only, preferred, all; for rc_rect use standard, square, rectangular, low_capacity, high_capacity, all; for rc_circular use standard, low_capacity, high_capacity, all. Default: preferred.</summary>
+        public string ColumnCatalog { get; set; } = "preferred";
         public string BeamType { get; set; } = "steel_w";
-        /// <summary>RC beam catalog when BeamType is rc_rect or rc_tbeam: standard, small, large, all. Default: large.</summary>
+        /// <summary>RC beam catalog when BeamType is rc_rect or rc_tbeam: standard, small, large, xlarge, all, custom. Default: large.</summary>
         public string BeamCatalog { get; set; } = "large";
+        /// <summary>Bounds for custom catalog (required when BeamCatalog is custom).</summary>
+        public BeamCatalogBoundsData BeamCatalogBounds { get; set; } = null;
 
         // Design targets
         public double FireRating { get; set; } = 0;
@@ -74,8 +78,19 @@ namespace Menegroth.GH.Types
                     ["steel"] = Steel
                 },
                 ["column_type"] = ColumnType,
+                ["column_catalog"] = ColumnCatalog,
                 ["beam_type"] = BeamType,
                 ["beam_catalog"] = BeamCatalog,
+                ["beam_catalog_bounds"] = BeamCatalogBounds != null
+                    ? (JToken)new JObject
+                    {
+                        ["min_width_in"] = BeamCatalogBounds.MinWidthIn,
+                        ["max_width_in"] = BeamCatalogBounds.MaxWidthIn,
+                        ["min_depth_in"] = BeamCatalogBounds.MinDepthIn,
+                        ["max_depth_in"] = BeamCatalogBounds.MaxDepthIn,
+                        ["resolution_in"] = BeamCatalogBounds.ResolutionIn
+                    }
+                    : null,
                 ["fire_rating"] = FireRating,
                 ["optimize_for"] = OptimizeFor,
                 ["size_foundations"] = SizeFoundations,

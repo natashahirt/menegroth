@@ -237,7 +237,12 @@ function optimize_discrete(
     # Check for infeasible groups (sequential — only on error path)
     for i in 1:n_groups
         if !isnothing(errors[i])
-            throw(ArgumentError("No feasible sections for group $i: $(errors[i])"))
+            diag = diagnose_infeasibility(checker, cache, catalog, material, demands[i], geometries[i])
+            msg = "No feasible sections for group $i: $(errors[i])"
+            if !isnothing(diag)
+                msg *= ". Diagnostic: $diag"
+            end
+            throw(ArgumentError(msg))
         end
     end
     

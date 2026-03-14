@@ -371,9 +371,6 @@ function _serialize_visualization_frame_elements(design::BuildingDesign, model, 
         edisp_map[elem_idx] = edisp
     end
     
-    # Import section_polygon from visualization utilities
-    # section_polygon returns Vector{NTuple{2, Float64}} in meters (local y-z coordinates)
-    
     # Map analysis-model elements back to skeleton edge indices by node connectivity.
     # This is robust when analysis models include a subset/reordering of skeleton edges.
     edge_by_nodes = Dict{Tuple{Int, Int}, Int}()
@@ -406,6 +403,7 @@ function _serialize_visualization_frame_elements(design::BuildingDesign, model, 
 
         # Extract section polygon (2D outline in local y-z coordinates)
         section_poly = _serialize_section_polygon(sec_obj, du, elem_idx)
+        section_poly_inner = _serialize_section_polygon_inner(sec_obj, du, elem_idx)
 
         # Extract interpolated deflected curve points (cubic interpolation)
         original_points = Vector{Float64}[]
@@ -444,6 +442,7 @@ function _serialize_visualization_frame_elements(design::BuildingDesign, model, 
             web_thickness = web_thickness_ft,
             flange_thickness = flange_thickness_ft,
             section_polygon = section_poly,
+            section_polygon_inner = section_poly_inner,
             original_points = original_points,
             displacement_vectors = displacement_vectors,
         ))
@@ -522,23 +521,12 @@ function _extract_section_geometry(sec_obj, du::DisplayUnits)
     end
 end
 
-"""Serialize section polygon to display units with robust fallbacks for special section types."""
+"""Serialize section polygon to display units. Uses StructuralSizer.section_polygon for all section types."""
 function _serialize_section_polygon(sec_obj, du::DisplayUnits, elem_idx::Int)
     isnothing(sec_obj) && return Vector{Float64}[]
 
     try
-        local poly_local
-        if sec_obj isa StructuralSizer.PixelFrameSection
-            poly_local = _pixelframe_envelope_polygon(sec_obj)
-        elseif sec_obj isa StructuralSizer.RCCircularSection
-            poly_local = _circle_polygon(StructuralSizer.section_width(sec_obj) / 2; n_segments=24)
-        elseif sec_obj isa StructuralSizer.RCTBeamSection
-            poly_local = _tbeam_polygon(sec_obj)
-        else
-            # section_polygon returns Vector{NTuple{2, Float64}} in meters
-            poly_local = section_polygon(sec_obj)
-        end
-
+        poly_local = StructuralSizer.section_polygon(sec_obj)
         section_poly = Vector{Float64}[]
         for (y, z) in poly_local
             y_disp = _to_display_length(du, y)
@@ -552,129 +540,24 @@ function _serialize_section_polygon(sec_obj, du::DisplayUnits, elem_idx::Int)
     end
 end
 
-"""Reconstruct a single-loop PixelFrame boundary with concavities via radial intersections."""
-function _pixelframe_envelope_polygon(sec::StructuralSizer.PixelFrameSection)
-    cs = sec.section
-    cx, cy = cs.centroid
-    rings = Vector{Vector{NTuple{2, Float64}}}()
-    for solid in cs.solids
-        ring = NTuple{2, Float64}[]
-        n = size(solid.points, 2)
-        for j in 1:n
-            # PixelFrame geometry is stored in mm in CompoundSection.
-            y_m = (solid.points[1, j] - cx) * 1e-3
-            z_m = (solid.points[2, j] - cy) * 1e-3
-            push!(ring, (y_m, z_m))
+"""Serialize inner section polygon for hollow sections (HSS rect/round). Empty for solid sections."""
+function _serialize_section_polygon_inner(sec_obj, du::DisplayUnits, elem_idx::Int)
+    isnothing(sec_obj) && return Vector{Float64}[]
+
+    try
+        poly_local = StructuralSizer.section_polygon_inner(sec_obj)
+        isempty(poly_local) && return Vector{Float64}[]
+        section_poly = Vector{Float64}[]
+        for (y, z) in poly_local
+            y_disp = _to_display_length(du, y)
+            z_disp = _to_display_length(du, z)
+            push!(section_poly, [_round_val(y_disp; digits=6), _round_val(z_disp; digits=6)])
         end
-        length(ring) >= 3 && push!(rings, ring)
+        return section_poly
+    catch e
+        @debug "Failed to extract inner section polygon for element $elem_idx" exception=e
+        return Vector{Float64}[]
     end
-    isempty(rings) && return NTuple{2, Float64}[]
-
-    # Radial sweep from section centroid gives a single loop that preserves
-    # PixelFrame concavities (unlike a convex hull).
-    n_angles = 180
-    boundary = NTuple{2, Float64}[]
-    for k in 0:(n_angles - 1)
-        θ = 2π * k / n_angles
-        d = (cos(θ), sin(θ))
-        tmax = 0.0
-        for ring in rings
-            n = length(ring)
-            for i in 1:n
-                p = ring[i]
-                q = ring[i == n ? 1 : i + 1]
-                t = _ray_segment_intersection_distance(d, p, q)
-                if t > tmax
-                    tmax = t
-                end
-            end
-        end
-        if tmax > 0
-            push!(boundary, (tmax * d[1], tmax * d[2]))
-        end
-    end
-
-    boundary = _dedupe_close_points(boundary; tol=1e-6)
-    if length(boundary) < 3
-        # Fallback guard: should be rare, but keep output robust.
-        all_pts = NTuple{2, Float64}[]
-        for ring in rings
-            append!(all_pts, ring)
-        end
-        return _convex_hull_2d(all_pts)
-    end
-    return boundary
-end
-
-"""Distance `t` for ray `t*d` intersecting segment `p→q`; returns 0.0 when no hit."""
-function _ray_segment_intersection_distance(d::NTuple{2, Float64},
-                                            p::NTuple{2, Float64},
-                                            q::NTuple{2, Float64})
-    vx = q[1] - p[1]
-    vy = q[2] - p[2]
-    den = _cross2(d[1], d[2], vx, vy)
-    abs(den) < 1e-12 && return 0.0
-
-    # Solve t*d = p + u*(q-p)
-    t = _cross2(p[1], p[2], vx, vy) / den
-    u = _cross2(p[1], p[2], d[1], d[2]) / den
-    (t >= 0 && u >= 0 && u <= 1) ? t : 0.0
-end
-
-_cross2(ax::Float64, ay::Float64, bx::Float64, by::Float64) = ax * by - ay * bx
-
-function _dedupe_close_points(points::Vector{NTuple{2, Float64}}; tol::Float64=1e-6)
-    isempty(points) && return points
-    out = NTuple{2, Float64}[points[1]]
-    for i in 2:length(points)
-        p = points[i]
-        q = out[end]
-        if hypot(p[1] - q[1], p[2] - q[2]) > tol
-            push!(out, p)
-        end
-    end
-    if length(out) >= 2
-        firstp = out[1]
-        lastp = out[end]
-        if hypot(firstp[1] - lastp[1], firstp[2] - lastp[2]) <= tol
-            pop!(out)
-        end
-    end
-    return out
-end
-
-"""Circular polygon in local y-z coordinates."""
-function _circle_polygon(radius; n_segments::Int=24)
-    r = radius
-    θ = range(0, 2π, length=n_segments + 1)[1:end-1]
-    return NTuple{2, Float64}[(r * cos(t), r * sin(t)) for t in θ]
-end
-
-"""T-beam polygon centered at centroid in local y-z coordinates."""
-function _tbeam_polygon(sec::StructuralSizer.RCTBeamSection)
-    bw = sec.bw
-    bf = sec.bf
-    h = sec.h
-    hf = sec.hf
-
-    Af = bf * hf
-    Aw = bw * (h - hf)
-    ybar_from_top = (Af * (hf / 2) + Aw * (hf + (h - hf) / 2)) / (Af + Aw)
-
-    z_top = h - ybar_from_top
-    z_bot = -ybar_from_top
-    z_flange_bot = h - hf - ybar_from_top
-
-    return NTuple{2, Float64}[
-        (-bw / 2, z_bot),
-        (bw / 2, z_bot),
-        (bw / 2, z_flange_bot),
-        (bf / 2, z_flange_bot),
-        (bf / 2, z_top),
-        (-bf / 2, z_top),
-        (-bf / 2, z_flange_bot),
-        (-bw / 2, z_flange_bot),
-    ]
 end
 
 """Serialize sized slab boundary polygons and utilization for 3D visualization."""

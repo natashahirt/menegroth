@@ -348,8 +348,8 @@ export SteelColumnOptions, SteelBeamOptions, SteelMemberOptions
 export ConcreteColumnOptions, ConcreteBeamOptions
 export NLPColumnOptions, NLPHSSOptions, NLPWOptions, NLPBeamOptions
 export ColumnOptions, BeamOptions, MemberOptions
-export steel_column_catalog, rc_column_catalog, rc_beam_catalog
-export standard_rc_beams, small_rc_beams, large_rc_beams, all_rc_beams
+export steel_column_catalog, rc_column_catalog, rc_beam_catalog, rc_beam_catalog_from_bounds
+export standard_rc_beams, small_rc_beams, large_rc_beams, xlarge_rc_beams, all_rc_beams
 
 # --- Floor system types ---
 export AbstractFloorSystem, AbstractConcreteSlab, AbstractSteelFloor, AbstractTimberFloor
@@ -565,6 +565,7 @@ export SolidRect, HollowRect, HollowRound, IShape
 
 # Trait assignment and getters
 export section_geometry
+export section_polygon, section_polygon_inner
 export section_thickness
 export section_flange_width, section_flange_thickness, section_web_thickness
 export has_rebar, section_rebar_positions, section_rebar_radius

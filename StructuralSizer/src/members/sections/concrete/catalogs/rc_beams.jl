@@ -142,6 +142,22 @@ function large_rc_beams(; cover::Length = 1.5u"inch", stirrup_size::Int = 3)
 end
 
 """
+    xlarge_rc_beams(; kwargs...) -> Vector{RCBeamSection}
+
+Extended catalog for vaults and very heavy loads (18–36" widths, 24–60" depths).
+Includes larger sections than `large_rc_beams` to handle high thrust and moment demands.
+"""
+function xlarge_rc_beams(; cover::Length = 1.5u"inch", stirrup_size::Int = 3)
+    standard_rc_beams(;
+        widths = [18, 20, 24, 30, 36],
+        depths = [24, 28, 30, 36, 42, 48, 54, 60],
+        bar_sizes = [8, 9, 10, 11],
+        n_bars_range = 4:10,
+        cover, stirrup_size,
+    )
+end
+
+"""
     all_rc_beams(; kwargs...) -> Vector{RCBeamSection}
 
 Comprehensive beam catalog (10–30" widths, 10–48" depths, #4–#11 bars).

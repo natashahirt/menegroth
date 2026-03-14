@@ -1,7 +1,6 @@
 using System;
 using System.Collections.Generic;
 using System.Drawing;
-using System.Globalization;
 using System.Linq;
 using System.Windows.Forms;
 using Grasshopper.Kernel;
@@ -10,6 +9,8 @@ using Grasshopper.Kernel.Parameters;
 using Grasshopper.Kernel.Types;
 using Newtonsoft.Json.Linq;
 using Rhino.Geometry;
+using Menegroth.GH.Config;
+using Menegroth.GH.Helpers;
 using Menegroth.GH.Types;
 
 namespace Menegroth.GH.Components
@@ -29,13 +30,6 @@ namespace Menegroth.GH.Components
         private const int COLOR_UTILIZATION = 1;
         private const int COLOR_DEFLECTION = 2;
         private const int COLOR_MATERIAL = 3;
-        private static readonly Color COLUMN_TYPE_COLOR = Color.SteelBlue;
-        private static readonly Color BEAM_TYPE_COLOR = Color.Coral;
-        private static readonly Color OTHER_TYPE_COLOR = Color.DimGray;
-        private static readonly Color DEFAULT_MATERIAL_COLOR = Color.FromArgb(200, 200, 200);
-        private const int DEFLECTION_SEGMENTS_MIN = 3;
-        private const int DEFLECTION_SEGMENTS_MAX = 6;
-        private const int SLAB_VERTEX_WARNING_THRESHOLD = 200000;
         private bool _useInternalPreview = true;
         private bool _showOriginal = true;
         private bool _showSlabs = true;
@@ -240,7 +234,7 @@ namespace Menegroth.GH.Components
 
         protected override void SolveInstance(IGH_DataAccess DA)
         {
-            GH_DesignResult goo = null;
+            DesignResultGoo goo = null;
             if (!DA.GetData(0, ref goo) || goo?.Value == null) return;
 
             var result = goo.Value;
@@ -302,7 +296,7 @@ namespace Menegroth.GH.Components
                 {
                     bool isSupport = n["is_support"]?.ToObject<bool>() ?? false;
                     if (!isSupport) continue;
-                    var posArr = n["position"]?.ToObject<double[]>() ?? n["position_ft"]?.ToObject<double[]>() ?? new double[3];
+                    var posArr = n["position"]?.ToObject<double[]>() ?? new double[3];
                     if (posArr.Length >= 3 && posArr[2] < zGround)
                         zGround = posArr[2];
                 }
@@ -313,9 +307,9 @@ namespace Menegroth.GH.Components
             {
                 int nodeId = n["node_id"]?.ToObject<int>() ?? 0;
                 bool isSupport = n["is_support"]?.ToObject<bool>() ?? false;
-                var posArr = n["position"]?.ToObject<double[]>() ?? n["position_ft"]?.ToObject<double[]>() ?? new double[3];
-                var dispArr = n["displacement"]?.ToObject<double[]>() ?? n["displacement_ft"]?.ToObject<double[]>() ?? new double[3];
-                var defPosArr = n["deflected_position"]?.ToObject<double[]>() ?? n["deflected_position_ft"]?.ToObject<double[]>();
+                var posArr = n["position"]?.ToObject<double[]>() ?? new double[3];
+                var dispArr = n["displacement"]?.ToObject<double[]>() ?? new double[3];
+                var defPosArr = n["deflected_position"]?.ToObject<double[]>();
                 var pos = new Point3d(posArr[0], posArr[1], posArr[2]);
                 var defPos = defPosArr != null && defPosArr.Length >= 3
                     ? new Point3d(defPosArr[0], defPosArr[1], defPosArr[2])
@@ -342,7 +336,7 @@ namespace Menegroth.GH.Components
                 var vv = sm["vertices"]?.ToObject<double[][]>() ?? Array.Empty<double[]>();
                 totalSlabVerts += vv.Length;
             }
-            if (totalSlabVerts > SLAB_VERTEX_WARNING_THRESHOLD)
+            if (totalSlabVerts > MenegrothConfig.SlabVertexWarningThreshold)
             {
                 AddRuntimeMessage(GH_RuntimeMessageLevel.Warning,
                     $"Large slab mesh payload ({totalSlabVerts:N0} vertices). Consider hiding slabs/foundations or reducing analysis mesh density.");
@@ -503,25 +497,25 @@ namespace Menegroth.GH.Components
                 {
                     double ratio = elem["utilization_ratio"]?.ToObject<double>() ?? 0;
                     bool ok = elem["ok"]?.ToObject<bool>() ?? true;
-                    elementColor = UtilizationColor(ratio, ok, utilizationGradient);
+                    elementColor = VisualizationColorMapper.UtilizationColor(ratio, ok, utilizationGradient);
                 }
                 else if (colorByInt == COLOR_DEFLECTION)
                 {
                     double disp = ComputeElementDisplacement(elem, nodes, dispVecs);
-                    elementColor = DeflectionColor(disp, maxDisp, deflectionGradient);
+                    elementColor = VisualizationColorMapper.DeflectionColor(disp, maxDisp, deflectionGradient);
                 }
                 else if (colorByInt == COLOR_MATERIAL)
                 {
-                    elementColor = ResolveMaterialColor(elem["material_color_hex"]?.ToString(), DEFAULT_MATERIAL_COLOR);
+                    elementColor = VisualizationColorMapper.ResolveMaterialColor(elem["material_color_hex"]?.ToString(), VisualizationColorMapper.DefaultMaterialColor);
                 }
                 else
                 {
                     // Keep line colors visible when Color By = None.
                     // Member-type defaults make CC/BC previews immediately readable.
-                    elementColor = elemType == "column" ? COLUMN_TYPE_COLOR
-                        : elemType == "beam" ? BEAM_TYPE_COLOR
-                        : OTHER_TYPE_COLOR;
-                    var materialColor = ParseHexColor(elem["material_color_hex"]?.ToString());
+                    elementColor = elemType == "column" ? VisualizationColorMapper.ColumnTypeColor
+                        : elemType == "beam" ? VisualizationColorMapper.BeamTypeColor
+                        : VisualizationColorMapper.OtherTypeColor;
+                    var materialColor = VisualizationColorMapper.ParseHexColor(elem["material_color_hex"]?.ToString());
                     if (materialColor.HasValue)
                         elementColor = materialColor.Value;
                 }
@@ -700,8 +694,9 @@ namespace Menegroth.GH.Components
         private static Brep SweepSection(Curve elementCurve, JToken elem)
         {
             var poly = elem["section_polygon"]?.ToObject<double[][]>() ?? new double[0][];
-            double depth = elem["section_depth"]?.ToObject<double>() ?? elem["section_depth_ft"]?.ToObject<double>() ?? 0;
-            double width = elem["section_width"]?.ToObject<double>() ?? elem["section_width_ft"]?.ToObject<double>() ?? 0;
+            var polyInner = elem["section_polygon_inner"]?.ToObject<double[][]>() ?? new double[0][];
+            double depth = elem["section_depth"]?.ToObject<double>() ?? 0;
+            double width = elem["section_width"]?.ToObject<double>() ?? 0;
 
             if (poly.Length < 3)
             {
@@ -738,22 +733,32 @@ namespace Menegroth.GH.Components
                     frame = new Plane(elementCurve.PointAtStart, localY, localZ);
                 }
 
-                // Build closed section in frame (poly vertices are [y, z] in local coords).
-                var pts = new List<Point3d>();
-                foreach (var v in poly)
-                {
-                    if (v == null || v.Length < 2) continue;
-                    pts.Add(frame.Origin + frame.YAxis * v[0] + frame.ZAxis * v[1]);
-                }
-                if (pts.Count < 3) return PipeFallback(elementCurve, width, depth, tol);
-                if (pts[0].DistanceTo(pts[pts.Count - 1]) > tol)
-                    pts.Add(pts[0]);
-
-                var sectionCurve = new PolylineCurve(pts);
+                // Build outer section curve.
+                var sectionCurve = BuildSectionCurve(poly, frame, tol);
                 if (sectionCurve == null || !sectionCurve.IsValid)
                     return PipeFallback(elementCurve, width, depth, tol);
 
-                // Sweep with capping; use document tolerance.
+                // Hollow section: sweep outer and inner, then boolean difference.
+                if (polyInner.Length >= 3)
+                {
+                    var innerCurve = BuildSectionCurve(polyInner, frame, tol);
+                    if (innerCurve != null && innerCurve.IsValid)
+                    {
+                        var outerSweep = Brep.CreateFromSweep(elementCurve, sectionCurve, true, tol);
+                        var innerSweep = Brep.CreateFromSweep(elementCurve, innerCurve, true, tol);
+                        if (outerSweep != null && outerSweep.Length > 0 && innerSweep != null && innerSweep.Length > 0)
+                        {
+                            var diff = Brep.CreateBooleanDifference(outerSweep[0], innerSweep[0], tol);
+                            if (diff != null && diff.Length > 0)
+                            {
+                                var capped = diff[0].CapPlanarHoles(tol);
+                                return capped ?? diff[0];
+                            }
+                        }
+                    }
+                }
+
+                // Solid section: sweep outer and cap.
                 var sweep = Brep.CreateFromSweep(elementCurve, sectionCurve, true, tol);
                 if (sweep != null && sweep.Length > 0)
                 {
@@ -770,6 +775,23 @@ namespace Menegroth.GH.Components
             return PipeFallback(elementCurve, width, depth, tol);
         }
 
+        /// <summary>
+        /// Build a closed PolylineCurve from polygon vertices [y, z] in the frame's local coordinates.
+        /// </summary>
+        private static PolylineCurve BuildSectionCurve(double[][] poly, Plane frame, double tol)
+        {
+            var pts = new List<Point3d>();
+            foreach (var v in poly)
+            {
+                if (v == null || v.Length < 2) continue;
+                pts.Add(frame.Origin + frame.YAxis * v[0] + frame.ZAxis * v[1]);
+            }
+            if (pts.Count < 3) return null;
+            if (pts[0].DistanceTo(pts[pts.Count - 1]) > tol)
+                pts.Add(pts[0]);
+            return new PolylineCurve(pts);
+        }
+
         private static Brep PipeFallback(Curve path, double width, double depth, double tol)
         {
             if (path == null || !path.IsValid) return null;
@@ -778,84 +800,6 @@ namespace Menegroth.GH.Components
             double radius = Math.Max(Math.Sqrt(area / Math.PI), 0.01);
             var pipe = Brep.CreatePipe(path, radius, false, PipeCapMode.Flat, true, tol, tol);
             return pipe != null && pipe.Length > 0 ? pipe[0] : null;
-        }
-
-        // ─── Utilization color mapping ────────────────────────────────
-
-        /// <summary>
-        /// Green → yellow → red gradient by utilization ratio (0 → 1).
-        /// Elements above 1.0 or failing are magenta.
-        /// </summary>
-        private static Color UtilizationColor(double ratio, bool ok, IList<Color> gradient = null)
-        {
-            if (!ok || ratio > 1.0)
-                return Color.FromArgb(200, 0, 120);
-
-            ratio = Math.Max(0.0, Math.Min(ratio, 1.0));
-            if (gradient != null && gradient.Count >= 2)
-                return InterpolateGradient(gradient, ratio);
-
-            int r, g, b;
-            if (ratio <= 0.5)
-            {
-                double t = ratio / 0.5;
-                r = (int)(0 + t * 220);
-                g = (int)(180 + t * 20);
-                b = 0;
-            }
-            else
-            {
-                double t = (ratio - 0.5) / 0.5;
-                r = 220;
-                g = (int)(200 - t * 160);
-                b = 0;
-            }
-
-            return Color.FromArgb(r, g, b);
-        }
-
-        // ─── Deflection color mapping ─────────────────────────────────
-
-        /// <summary>
-        /// Blue → cyan → yellow → red gradient by displacement magnitude.
-        /// Normalized against the building's max displacement.
-        /// </summary>
-        private static Color DeflectionColor(double displacement, double maxDisplacement, IList<Color> gradient = null)
-        {
-            if (maxDisplacement < 1e-12)
-                return Color.FromArgb(40, 80, 200);
-
-            double t = Math.Max(0.0, Math.Min(displacement / maxDisplacement, 1.0));
-            if (gradient != null && gradient.Count >= 2)
-                return InterpolateGradient(gradient, t);
-
-            int r, g, b;
-            if (t <= 0.33)
-            {
-                double s = t / 0.33;
-                r = (int)(40 * (1 - s));
-                g = (int)(80 + s * 175);
-                b = (int)(200 * (1 - s) + s * 200);
-            }
-            else if (t <= 0.66)
-            {
-                double s = (t - 0.33) / 0.33;
-                r = (int)(s * 240);
-                g = (int)(255 - s * 55);
-                b = (int)(200 * (1 - s));
-            }
-            else
-            {
-                double s = (t - 0.66) / 0.34;
-                r = (int)(240 - s * 20);
-                g = (int)(200 * (1 - s) + s * 30);
-                b = 0;
-            }
-
-            return Color.FromArgb(
-                Math.Max(0, Math.Min(255, r)),
-                Math.Max(0, Math.Min(255, g)),
-                Math.Max(0, Math.Min(255, b)));
         }
 
         private static void AppendDeflectionSegmentedCurves(
@@ -874,13 +818,13 @@ namespace Menegroth.GH.Components
                 return;
 
             var mags = ComputeDisplacementMagnitudes(dispVecs, nodes, nodeStart, nodeEnd, isLocal);
-            int baseSegments = mags.Length > 1 ? mags.Length - 1 : DEFLECTION_SEGMENTS_MIN;
-            int segments = Math.Max(DEFLECTION_SEGMENTS_MIN, Math.Min(DEFLECTION_SEGMENTS_MAX, baseSegments));
+            int baseSegments = mags.Length > 1 ? mags.Length - 1 : MenegrothConfig.DeflectionSegmentsMin;
+            int segments = Math.Max(MenegrothConfig.DeflectionSegmentsMin, Math.Min(MenegrothConfig.DeflectionSegmentsMax, baseSegments));
 
             if (segments <= 1)
             {
                 targetCurves.Add(sourceCurve);
-                targetColors.Add(DeflectionColor(mags.Length > 0 ? mags[0] : 0.0, maxDisp, deflectionGradient));
+                targetColors.Add(VisualizationColorMapper.DeflectionColor(mags.Length > 0 ? mags[0] : 0.0, maxDisp, deflectionGradient));
                 return;
             }
 
@@ -897,7 +841,7 @@ namespace Menegroth.GH.Components
                 var p1 = sourceCurve.PointAt(t1);
 
                 targetCurves.Add(new Line(p0, p1).ToNurbsCurve());
-                targetColors.Add(DeflectionColor(InterpolateMagnitude(mags, tmn), maxDisp, deflectionGradient));
+                targetColors.Add(VisualizationColorMapper.DeflectionColor(InterpolateMagnitude(mags, tmn), maxDisp, deflectionGradient));
             }
         }
 
@@ -977,63 +921,6 @@ namespace Menegroth.GH.Components
         private static string NormalizeElementType(string rawType)
         {
             return (rawType ?? "").Trim().ToLowerInvariant();
-        }
-
-        private static Color? ParseHexColor(string hex)
-        {
-            if (string.IsNullOrWhiteSpace(hex))
-                return null;
-
-            string s = hex.Trim();
-            if (s.StartsWith("#", StringComparison.Ordinal))
-                s = s.Substring(1);
-
-            if (s.Length == 6)
-            {
-                if (!int.TryParse(s.Substring(0, 2), NumberStyles.HexNumber, CultureInfo.InvariantCulture, out int r) ||
-                    !int.TryParse(s.Substring(2, 2), NumberStyles.HexNumber, CultureInfo.InvariantCulture, out int g) ||
-                    !int.TryParse(s.Substring(4, 2), NumberStyles.HexNumber, CultureInfo.InvariantCulture, out int b))
-                    return null;
-                return Color.FromArgb(r, g, b);
-            }
-
-            if (s.Length == 8)
-            {
-                if (!int.TryParse(s.Substring(0, 2), NumberStyles.HexNumber, CultureInfo.InvariantCulture, out int r) ||
-                    !int.TryParse(s.Substring(2, 2), NumberStyles.HexNumber, CultureInfo.InvariantCulture, out int g) ||
-                    !int.TryParse(s.Substring(4, 2), NumberStyles.HexNumber, CultureInfo.InvariantCulture, out int b) ||
-                    !int.TryParse(s.Substring(6, 2), NumberStyles.HexNumber, CultureInfo.InvariantCulture, out int a))
-                    return null;
-                return Color.FromArgb(a, r, g, b);
-            }
-
-            return null;
-        }
-
-        private static Color ResolveMaterialColor(string hex, Color fallback)
-        {
-            var parsed = ParseHexColor(hex);
-            return parsed ?? fallback;
-        }
-
-        private static Color InterpolateGradient(IList<Color> gradient, double t)
-        {
-            if (gradient == null || gradient.Count == 0)
-                return Color.White;
-            if (gradient.Count == 1)
-                return gradient[0];
-
-            t = Math.Max(0.0, Math.Min(1.0, t));
-            double pos = t * (gradient.Count - 1);
-            int i0 = (int)Math.Floor(pos);
-            int i1 = Math.Min(i0 + 1, gradient.Count - 1);
-            double a = pos - i0;
-            var c0 = gradient[i0];
-            var c1 = gradient[i1];
-            return Color.FromArgb(
-                (int)(c0.R * (1.0 - a) + c1.R * a),
-                (int)(c0.G * (1.0 - a) + c1.G * a),
-                (int)(c0.B * (1.0 - a) + c1.B * a));
         }
 
         private void UpdateInternalPreviewCache(
@@ -1135,8 +1022,8 @@ namespace Menegroth.GH.Components
                 }
 
                 var boundary = slab["boundary_vertices"]?.ToObject<double[][]>() ?? new double[0][];
-                double thickness = slab["thickness"]?.ToObject<double>() ?? slab["thickness_ft"]?.ToObject<double>() ?? 0;
-                double zTop = slab["z_top"]?.ToObject<double>() ?? slab["z_top_ft"]?.ToObject<double>() ?? 0;
+                double thickness = slab["thickness"]?.ToObject<double>() ?? 0;
+                double zTop = slab["z_top"]?.ToObject<double>() ?? 0;
                 if (boundary.Length < 3) continue;
 
                 var topPts = boundary.Select(v => new Point3d(v[0], v[1], zTop)).ToList();
@@ -1275,14 +1162,14 @@ namespace Menegroth.GH.Components
                             mag = Math.Sqrt(disps[i][0] * disps[i][0] +
                                             disps[i][1] * disps[i][1] +
                                             disps[i][2] * disps[i][2]);
-                        rhinoMesh.VertexColors.Add(DeflectionColor(mag, maxDisp, deflectionGradient));
+                        rhinoMesh.VertexColors.Add(VisualizationColorMapper.DeflectionColor(mag, maxDisp, deflectionGradient));
                     }
                 }
                 else if (colorBy == COLOR_UTILIZATION)
                 {
                     double ratio = m["utilization_ratio"]?.ToObject<double>() ?? 0;
                     bool ok = m["ok"]?.ToObject<bool>() ?? true;
-                    var utilColor = UtilizationColor(ratio, ok, utilGradient);
+                    var utilColor = VisualizationColorMapper.UtilizationColor(ratio, ok, utilGradient);
                     for (int i = 0; i < rhinoMesh.Vertices.Count; i++)
                         rhinoMesh.VertexColors.Add(utilColor);
                 }
@@ -1315,11 +1202,11 @@ namespace Menegroth.GH.Components
             var dropPanels = slab["drop_panels"] as JArray ?? new JArray();
             foreach (var dp in dropPanels)
             {
-                var c = dp["center"]?.ToObject<double[]>() ?? dp["center_ft"]?.ToObject<double[]>() ?? new double[0];
+                var c = dp["center"]?.ToObject<double[]>() ?? new double[0];
                 if (c.Length < 2) continue;
-                double length = dp["length"]?.ToObject<double>() ?? dp["length_ft"]?.ToObject<double>() ?? 0.0;
-                double width = dp["width"]?.ToObject<double>() ?? dp["width_ft"]?.ToObject<double>() ?? 0.0;
-                double extra = dp["extra_depth"]?.ToObject<double>() ?? dp["extra_depth_ft"]?.ToObject<double>() ?? 0.0;
+                double length = dp["length"]?.ToObject<double>() ?? 0.0;
+                double width = dp["width"]?.ToObject<double>() ?? 0.0;
+                double extra = dp["extra_depth"]?.ToObject<double>() ?? 0.0;
                 if (length <= 0 || width <= 0 || extra <= 0) continue;
 
                 double x0 = c[0] - length / 2.0;
@@ -1347,14 +1234,14 @@ namespace Menegroth.GH.Components
             if (dropPanels.Count == 0 || verts == null || verts.Length == 0)
                 return;
 
-            double slabThickness = meshToken["thickness"]?.ToObject<double>() ?? meshToken["thickness_ft"]?.ToObject<double>() ?? 0.0;
+            double slabThickness = meshToken["thickness"]?.ToObject<double>() ?? 0.0;
             foreach (var dp in dropPanels)
             {
-                var c = dp["center"]?.ToObject<double[]>() ?? dp["center_ft"]?.ToObject<double[]>() ?? new double[0];
+                var c = dp["center"]?.ToObject<double[]>() ?? new double[0];
                 if (c.Length < 2) continue;
-                double length = dp["length"]?.ToObject<double>() ?? dp["length_ft"]?.ToObject<double>() ?? 0.0;
-                double width = dp["width"]?.ToObject<double>() ?? dp["width_ft"]?.ToObject<double>() ?? 0.0;
-                double extra = dp["extra_depth"]?.ToObject<double>() ?? dp["extra_depth_ft"]?.ToObject<double>() ?? 0.0;
+                double length = dp["length"]?.ToObject<double>() ?? 0.0;
+                double width = dp["width"]?.ToObject<double>() ?? 0.0;
+                double extra = dp["extra_depth"]?.ToObject<double>() ?? 0.0;
                 if (length <= 0 || width <= 0 || extra <= 0) continue;
 
                 int nearest = 0;
@@ -1449,11 +1336,11 @@ namespace Menegroth.GH.Components
             var foundations = viz["foundations"] as JArray ?? new JArray();
             foreach (var f in foundations)
             {
-                var c = f["center"]?.ToObject<double[]>() ?? f["center_ft"]?.ToObject<double[]>() ?? new double[3];
+                var c = f["center"]?.ToObject<double[]>() ?? new double[3];
                 if (c.Length < 3) continue;
-                double length = f["length"]?.ToObject<double>() ?? f["length_ft"]?.ToObject<double>() ?? 0;
-                double width = f["width"]?.ToObject<double>() ?? f["width_ft"]?.ToObject<double>() ?? 0;
-                double depth = f["depth"]?.ToObject<double>() ?? f["depth_ft"]?.ToObject<double>() ?? 0;
+                double length = f["length"]?.ToObject<double>() ?? 0;
+                double width = f["width"]?.ToObject<double>() ?? 0;
+                double depth = f["depth"]?.ToObject<double>() ?? 0;
                 if (length <= 0 || width <= 0 || depth <= 0) continue;
 
                 double x0 = c[0] - length / 2.0;
@@ -1478,19 +1365,19 @@ namespace Menegroth.GH.Components
                 {
                     double ratio = f["utilization_ratio"]?.ToObject<double>() ?? 0;
                     bool ok = f["ok"]?.ToObject<bool>() ?? true;
-                    colors.Add(UtilizationColor(ratio, ok, utilGradient));
+                    colors.Add(VisualizationColorMapper.UtilizationColor(ratio, ok, utilGradient));
                 }
                 else if (colorBy == COLOR_DEFLECTION)
                 {
-                    colors.Add(DeflectionColor(0.0, 1.0, deflectionGradient));
+                    colors.Add(VisualizationColorMapper.DeflectionColor(0.0, 1.0, deflectionGradient));
                 }
                 else if (colorBy == COLOR_MATERIAL)
                 {
-                    colors.Add(ResolveMaterialColor(f["material_color_hex"]?.ToString(), DEFAULT_MATERIAL_COLOR));
+                    colors.Add(VisualizationColorMapper.ResolveMaterialColor(f["material_color_hex"]?.ToString(), VisualizationColorMapper.DefaultMaterialColor));
                 }
                 else
                 {
-                    colors.Add(DEFAULT_MATERIAL_COLOR);
+                    colors.Add(VisualizationColorMapper.DefaultMaterialColor);
                 }
             }
         }
@@ -1508,7 +1395,7 @@ namespace Menegroth.GH.Components
             {
                 double ratio = element["utilization_ratio"]?.ToObject<double>() ?? 0;
                 bool ok = element["ok"]?.ToObject<bool>() ?? true;
-                colors.Add(UtilizationColor(ratio, ok, utilGradient));
+                colors.Add(VisualizationColorMapper.UtilizationColor(ratio, ok, utilGradient));
             }
             else if (colorBy == COLOR_DEFLECTION)
             {
@@ -1525,15 +1412,15 @@ namespace Menegroth.GH.Components
                         }
                     }
                 }
-                colors.Add(DeflectionColor(maxVertDisp, maxDisp, deflectionGradient));
+                colors.Add(VisualizationColorMapper.DeflectionColor(maxVertDisp, maxDisp, deflectionGradient));
             }
             else if (colorBy == COLOR_MATERIAL)
             {
-                colors.Add(ResolveMaterialColor(element["material_color_hex"]?.ToString(), DEFAULT_MATERIAL_COLOR));
+                colors.Add(VisualizationColorMapper.ResolveMaterialColor(element["material_color_hex"]?.ToString(), VisualizationColorMapper.DefaultMaterialColor));
             }
             else
             {
-                colors.Add(DEFAULT_MATERIAL_COLOR);
+                colors.Add(VisualizationColorMapper.DefaultMaterialColor);
             }
         }
     }

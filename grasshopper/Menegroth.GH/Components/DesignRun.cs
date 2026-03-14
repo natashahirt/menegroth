@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.Linq;
 using System.Net.Http;
 using System.Text;
 using System.Threading;
@@ -8,6 +7,8 @@ using System.Threading.Tasks;
 using System.Windows.Forms;
 using Grasshopper.Kernel;
 using Newtonsoft.Json.Linq;
+using Menegroth.GH.Config;
+using Menegroth.GH.Helpers;
 using Menegroth.GH.Types;
 
 namespace Menegroth.GH.Components
@@ -26,18 +27,8 @@ namespace Menegroth.GH.Components
     /// </summary>
     public class DesignRun : GH_Component
     {
-        private const string DefaultServerUrl = "http://localhost:8080";
-        private const int PollTimeoutSeconds = 3600;
-        private const int HealthCheckTimeoutSeconds = 3;
-        private const int ScheduleSolutionIntervalMs = 100;
-
-        private static readonly HttpClient _client = new HttpClient
-        {
-            Timeout = TimeSpan.FromHours(1)
-        };
-
         // ─── Persisted state ────────────────────────────────────────────
-        private string _serverUrl = DefaultServerUrl;
+        private string _serverUrl = MenegrothConfig.DefaultServerUrl;
 
         // ─── Cached results ─────────────────────────────────────────────
         private string _lastGeoHash = "";
@@ -88,7 +79,7 @@ namespace Menegroth.GH.Components
 
             pManager.AddTextParameter("Server URL", "ServerUrl",
                 "Julia API server URL (persisted in right-click menu)",
-                GH_ParamAccess.item, DefaultServerUrl);
+                GH_ParamAccess.item, MenegrothConfig.DefaultServerUrl);
 
             pManager.AddBooleanParameter("Run", "Run",
                 "Toggle to send the request (connect a Button)",
@@ -214,8 +205,8 @@ namespace Menegroth.GH.Components
         protected override void SolveInstance(IGH_DataAccess DA)
         {
             // 1. Read inputs
-            GH_BuildingGeometry geoGoo = null;
-            GH_DesignParamsData paramsGoo = null;
+            BuildingGeometryGoo geoGoo = null;
+            DesignParamsDataGoo paramsGoo = null;
             string urlInput = _serverUrl;
             bool run = false;
 
@@ -263,7 +254,7 @@ namespace Menegroth.GH.Components
                 SetFailureOutputs(DA, _lastParsed);
                 if (_lastParsed != null)
                 {
-                    DA.SetData(0, new GH_DesignResult(_lastParsed));
+                    DA.SetData(0, new DesignResultGoo(_lastParsed));
                     DA.SetData(1, _lastParsed.RawJson);
                 }
                 return;
@@ -276,7 +267,7 @@ namespace Menegroth.GH.Components
                 SetFailureOutputs(DA, _lastParsed);
                 if (_lastParsed != null)
                 {
-                    DA.SetData(0, new GH_DesignResult(_lastParsed));
+                    DA.SetData(0, new DesignResultGoo(_lastParsed));
                     DA.SetData(1, _lastParsed.RawJson);
                     Message = FormatDoneMessage(_lastParsed) + " (cached)";
                 }
@@ -297,7 +288,7 @@ namespace Menegroth.GH.Components
 
             if (geoHash == _lastGeoHash && paramsHash == _lastParamsHash && _lastParsed != null)
             {
-                DA.SetData(0, new GH_DesignResult(_lastParsed));
+                DA.SetData(0, new DesignResultGoo(_lastParsed));
                 DA.SetData(1, _lastParsed.RawJson);
                 DA.SetData(2, GetLogSnapshot());
                 SetFailureOutputs(DA, _lastParsed);
@@ -308,7 +299,7 @@ namespace Menegroth.GH.Components
             }
 
             // 6. Client-side validation (instant feedback, no network needed)
-            var validationErrors = ValidateLocally(geo, prms);
+            var validationErrors = DesignRunValidator.Validate(geo, prms);
             if (validationErrors.Count > 0)
             {
                 foreach (var err in validationErrors)
@@ -354,7 +345,7 @@ namespace Menegroth.GH.Components
                     {
                         try
                         {
-                            var (nextSince, lines) = await GetServerLogs(url, since);
+                            var (nextSince, lines) = await DesignRunHttpClient.GetServerLogsAsync(url, since, logPollCts.Token);
                             since = nextSince;
                             foreach (var line in lines)
                                 AppendLog(doc, $"[server] {line}");
@@ -371,7 +362,7 @@ namespace Menegroth.GH.Components
 
                 try
                 {
-                    if (!await CheckHealth(url))
+                    if (!await DesignRunHttpClient.CheckHealthAsync(url, logPollCts.Token))
                     {
                         AppendLog(doc, "\u2717 Health check failed.");
                         _pendingError = $"Julia server not running at {url}.\n" +
@@ -385,9 +376,9 @@ namespace Menegroth.GH.Components
                     _state = RunState.Polling;
                     ScheduleExpire(doc);
                     UpdateWaitStatus(doc, "Waiting for API ready...", 0);
-                    string readyBody = await PollUntilReady(url, PollTimeoutSeconds,
+                    string readyBody = await DesignRunHttpClient.PollUntilReadyAsync(url, MenegrothConfig.PollTimeoutSeconds,
                         elapsed => UpdateWaitStatus(doc, "Waiting for API ready...", elapsed),
-                        () => _cancelRequested);
+                        () => _cancelRequested, logPollCts.Token);
                     CommitWaitStatus(doc);
 
                     if (readyBody.Contains("Cancelled by user"))
@@ -443,7 +434,7 @@ namespace Menegroth.GH.Components
                     string responseJson;
                     try
                     {
-                        responseJson = await PostDesign(url, jsonBody);
+                        responseJson = await DesignRunHttpClient.PostDesignAsync(url, jsonBody, designCts.Token);
                     }
                     finally
                     {
@@ -463,9 +454,9 @@ namespace Menegroth.GH.Components
                         _state = RunState.Polling;
                         ScheduleExpire(doc);
                         UpdateWaitStatus(doc, "Waiting for design to complete...", 0);
-                        string idleBody = await PollUntilReady(url, PollTimeoutSeconds,
+                        string idleBody = await DesignRunHttpClient.PollUntilReadyAsync(url, MenegrothConfig.PollTimeoutSeconds,
                             elapsed => UpdateWaitStatus(doc, "Waiting for design to complete...", elapsed),
-                            () => _cancelRequested);
+                            () => _cancelRequested, logPollCts.Token);
                         CommitWaitStatus(doc);
 
                         if (idleBody.Contains("Cancelled by user"))
@@ -486,7 +477,7 @@ namespace Menegroth.GH.Components
                         }
 
                         AppendLog(doc, "Server idle. Fetching design result...");
-                        responseJson = await GetResultWithRetry(url);
+                        responseJson = await DesignRunHttpClient.GetResultWithRetryAsync(url, logPollCts.Token);
                     }
 
                     // Parse the final response into a typed result
@@ -499,11 +490,16 @@ namespace Menegroth.GH.Components
 
                     _state = RunState.Done;
                 }
-                catch (TaskCanceledException)
+                catch (OperationCanceledException)
                 {
-                    AppendLog(doc, "\u2717 Request timed out.");
-                    _pendingError = $"Request timed out after {_client.Timeout.TotalSeconds:F0}s. " +
-                        "The server may still be computing.";
+                    AppendLog(doc, "\u2717 Cancelled by user.");
+                    _pendingError = "Cancelled by user.";
+                    _state = RunState.Error;
+                }
+                catch (DesignRunHttpException ex)
+                {
+                    AppendLog(doc, "\u2717 " + ex.Message);
+                    _pendingError = ex.Message;
                     _state = RunState.Error;
                 }
                 catch (HttpRequestException ex)
@@ -533,7 +529,7 @@ namespace Menegroth.GH.Components
             SetFailureOutputs(DA, _lastParsed);
             if (_lastParsed != null)
             {
-                DA.SetData(0, new GH_DesignResult(_lastParsed));
+                DA.SetData(0, new DesignResultGoo(_lastParsed));
                 DA.SetData(1, _lastParsed.RawJson);
             }
         }
@@ -546,7 +542,7 @@ namespace Menegroth.GH.Components
             SetFailureOutputs(DA, result);
             if (result != null)
             {
-                DA.SetData(0, new GH_DesignResult(result));
+                DA.SetData(0, new DesignResultGoo(result));
                 DA.SetData(1, result.RawJson);
                 if (result.IsError)
                     AddRuntimeMessage(GH_RuntimeMessageLevel.Error, result.ErrorMessage);
@@ -604,267 +600,7 @@ namespace Menegroth.GH.Components
         private void ScheduleExpire(GH_Document doc)
         {
             if (doc == null) return;
-            doc.ScheduleSolution(ScheduleSolutionIntervalMs, _ => ExpireSolution(false));
-        }
-
-        // ─── HTTP helpers ───────────────────────────────────────────────
-
-        private static async Task<bool> CheckHealth(string baseUrl)
-        {
-            try
-            {
-                using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(HealthCheckTimeoutSeconds));
-                var resp = await _client.GetAsync($"{baseUrl.TrimEnd('/')}/health", cts.Token);
-                return resp.IsSuccessStatusCode;
-            }
-            catch { return false; }
-        }
-
-        private static async Task<string> PostDesign(string baseUrl, string jsonBody)
-        {
-            var content = new StringContent(jsonBody, Encoding.UTF8, "application/json");
-            var response = await _client.PostAsync($"{baseUrl.TrimEnd('/')}/design", content);
-            var body = await response.Content.ReadAsStringAsync();
-            if (!response.IsSuccessStatusCode)
-                throw new InvalidOperationException(
-                    $"Server returned {(int)response.StatusCode} {response.ReasonPhrase}. {body}");
-            if (string.IsNullOrWhiteSpace(body))
-                throw new InvalidOperationException("Server returned empty response.");
-            return body;
-        }
-
-        private static async Task<string> GetResultWithRetry(string baseUrl)
-        {
-            const int maxRetries = 10;
-            const int retryDelayMs = 1000;
-
-            for (int attempt = 1; attempt <= maxRetries; attempt++)
-            {
-                var response = await _client.GetAsync($"{baseUrl.TrimEnd('/')}/result");
-                var body = await response.Content.ReadAsStringAsync();
-
-                if (response.IsSuccessStatusCode)
-                {
-                    if (string.IsNullOrWhiteSpace(body))
-                        throw new InvalidOperationException("Server returned empty result from GET /result.");
-                    return body;
-                }
-
-                if ((int)response.StatusCode == 503 && attempt < maxRetries)
-                {
-                    await Task.Delay(retryDelayMs);
-                    continue;
-                }
-
-                throw new InvalidOperationException(
-                    $"GET /result failed: {(int)response.StatusCode} {response.ReasonPhrase}. {body}");
-            }
-
-            throw new InvalidOperationException("GET /result failed after retries.");
-        }
-
-        private static async Task<string> PollUntilReady(string baseUrl, int timeoutSeconds,
-            Action<int> onTick = null, Func<bool> cancelRequested = null)
-        {
-            var start = DateTime.UtcNow;
-            var deadline = start.AddSeconds(timeoutSeconds);
-            int lastTick = 0;
-            while (DateTime.UtcNow < deadline)
-            {
-                await Task.Delay(1000);
-                if (cancelRequested?.Invoke() == true)
-                    return "{\"status\":\"error\",\"message\":\"Cancelled by user\"}";
-                int elapsed = (int)(DateTime.UtcNow - start).TotalSeconds;
-                if (elapsed != lastTick)
-                {
-                    lastTick = elapsed;
-                    onTick?.Invoke(elapsed);
-                }
-                try
-                {
-                    var resp = await _client.GetAsync($"{baseUrl.TrimEnd('/')}/status");
-                    var body = await resp.Content.ReadAsStringAsync();
-                    var jobj = JObject.Parse(body);
-                    string st = jobj["state"]?.ToString() ?? "";
-                    if (st == "idle")
-                        return body;
-                    if (st == "error")
-                        return "{\"state\":\"error\",\"message\":\"Server reported an error during startup. Check server logs.\"}";
-                }
-                catch { /* retry on transient network errors */ }
-            }
-            return "{\"state\":\"error\",\"message\":\"Timeout waiting for server\"}";
-        }
-
-        private static async Task<(int nextSince, List<string> lines)> GetServerLogs(string baseUrl, int since)
-        {
-            var response = await _client.GetAsync($"{baseUrl.TrimEnd('/')}/logs?since={since}");
-            if (!response.IsSuccessStatusCode)
-                return (since, new List<string>());
-
-            var body = await response.Content.ReadAsStringAsync();
-            if (string.IsNullOrWhiteSpace(body))
-                return (since, new List<string>());
-
-            var obj = JObject.Parse(body);
-            int next = obj["next_since"]?.ToObject<int>() ?? since;
-            var lines = new List<string>();
-            if (obj["lines"] is JArray arr)
-            {
-                foreach (var token in arr)
-                {
-                    var line = token?.ToString();
-                    if (!string.IsNullOrWhiteSpace(line))
-                        lines.Add(line);
-                }
-            }
-
-            return (next, lines);
-        }
-
-        // ─── Client-side validation ──────────────────────────────────────
-        // Mirrors StructuralSynthesizer/src/api/validation.jl so that obvious
-        // errors are caught instantly without a network round-trip.
-
-        private static readonly HashSet<string> ValidFloorTypes =
-            new HashSet<string> { "flat_plate", "flat_slab", "one_way", "vault" };
-        private static readonly HashSet<string> ValidColumnTypes =
-            new HashSet<string> { "rc_rect", "rc_circular", "steel_w", "steel_hss", "steel_pipe" };
-        private static readonly HashSet<string> ValidBeamTypes =
-            new HashSet<string> { "steel_w", "steel_hss", "rc_rect", "rc_tbeam" };
-        private static readonly HashSet<string> ValidBeamCatalogs =
-            new HashSet<string> { "standard", "small", "large", "all" };
-        private static readonly HashSet<string> ValidConcretes =
-            new HashSet<string> { "NWC_3000", "NWC_4000", "NWC_5000", "NWC_6000" };
-        private static readonly HashSet<string> ValidRebars =
-            new HashSet<string> { "Rebar_40", "Rebar_60", "Rebar_75", "Rebar_80" };
-        private static readonly HashSet<string> ValidSteels =
-            new HashSet<string> { "A992" };
-        private static readonly HashSet<string> ValidSoils =
-            new HashSet<string> { "loose_sand", "medium_sand", "dense_sand", "soft_clay", "stiff_clay", "hard_clay" };
-        private static readonly HashSet<double> ValidFireRatings =
-            new HashSet<double> { 0, 1, 1.5, 2, 3, 4 };
-        private static readonly HashSet<string> ValidOptimize =
-            new HashSet<string> { "weight", "carbon", "cost" };
-        private static readonly HashSet<string> ValidUnitSystems =
-            new HashSet<string> { "imperial", "metric" };
-
-        private static List<string> ValidateLocally(BuildingGeometry geo, DesignParamsData prms)
-        {
-            var errors = new List<string>();
-
-            // Vertices
-            int nVerts = geo.Vertices.Count;
-            if (nVerts < 4)
-                errors.Add($"Need at least 4 vertices (got {nVerts}).");
-            for (int i = 0; i < nVerts; i++)
-                if (geo.Vertices[i].Length != 3)
-                    errors.Add($"Vertex {i + 1} has {geo.Vertices[i].Length} coordinates (expected 3).");
-
-            // Geometry: at least 2 distinct story elevations (from Z coordinates or stories_z)
-            if (nVerts >= 4)
-            {
-                var zValues = geo.StoriesZ != null && geo.StoriesZ.Count > 0
-                    ? geo.StoriesZ
-                    : geo.Vertices.Select(v => v.Length >= 3 ? v[2] : 0.0).Distinct().ToList();
-                if (geo.StoriesZ != null && geo.StoriesZ.Count > 0 && geo.StoriesZ.Count < 2)
-                    errors.Add("If stories_z is provided, need at least 2 story elevations (got " + geo.StoriesZ.Count + ").");
-                else if (zValues.Count < 2)
-                    errors.Add("Need at least 2 distinct Z coordinates to infer stories (got " + zValues.Count + "). " +
-                        "Ensure vertices span multiple floor levels.");
-            }
-
-            // Faces: each polyline must have at least 3 vertices
-            if (geo.Faces != null)
-            {
-                foreach (var kv in geo.Faces)
-                {
-                    for (int j = 0; j < kv.Value.Count; j++)
-                    {
-                        if (kv.Value[j].Count < 3)
-                            errors.Add($"Face \"{kv.Key}\"[{j + 1}] has {kv.Value[j].Count} vertices (need ≥ 3).");
-                        else
-                        {
-                            for (int k = 0; k < kv.Value[j].Count; k++)
-                            {
-                                if (kv.Value[j][k].Length != 3)
-                                    errors.Add($"Face \"{kv.Key}\"[{j + 1}] vertex {k + 1} has {kv.Value[j][k].Length} coords (expected 3).");
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Scoped overrides: if HasScopedFaces, must have at least one face with ≥3 vertices
-            if (prms.ScopedVaultOverrides != null)
-            {
-                for (int i = 0; i < prms.ScopedVaultOverrides.Count; i++)
-                {
-                    var ov = prms.ScopedVaultOverrides[i];
-                    if (ov != null && ov.HasScopedFaces && (ov.Faces == null || ov.Faces.Count == 0))
-                        errors.Add($"Scoped override {i + 1} must include at least one face polygon.");
-                    else if (ov != null && ov.Faces != null)
-                    {
-                        for (int j = 0; j < ov.Faces.Count; j++)
-                        {
-                            if (ov.Faces[j].Count < 3)
-                                errors.Add($"Scoped override {i + 1} face {j + 1} has {ov.Faces[j].Count} vertices (need ≥ 3).");
-                        }
-                    }
-                }
-            }
-
-            // Edges
-            var allEdges = geo.BeamEdges.Concat(geo.ColumnEdges).Concat(geo.StrutEdges).ToList();
-            if (allEdges.Count == 0)
-                errors.Add("No edges provided (need at least beams, columns, or braces).");
-            for (int i = 0; i < allEdges.Count; i++)
-            {
-                var e = allEdges[i];
-                if (e.Length != 2) { errors.Add($"Edge {i + 1} has {e.Length} indices (expected 2)."); continue; }
-                if (e[0] < 1 || e[0] > nVerts) errors.Add($"Edge {i + 1}: vertex index {e[0]} out of range [1, {nVerts}].");
-                if (e[1] < 1 || e[1] > nVerts) errors.Add($"Edge {i + 1}: vertex index {e[1]} out of range [1, {nVerts}].");
-                if (e[0] == e[1]) errors.Add($"Edge {i + 1}: degenerate edge (both indices = {e[0]}).");
-            }
-
-            // Supports
-            if (geo.Supports.Count == 0)
-                errors.Add("No support vertices specified.");
-            for (int i = 0; i < geo.Supports.Count; i++)
-            {
-                int si = geo.Supports[i];
-                if (si < 1 || si > nVerts) errors.Add($"Support {i + 1}: vertex index {si} out of range [1, {nVerts}].");
-            }
-
-            // Parameters
-            if (!ValidFloorTypes.Contains(prms.FloorType))
-                errors.Add($"Invalid floor type \"{prms.FloorType}\". Options: {string.Join(", ", ValidFloorTypes)}");
-            if (!ValidColumnTypes.Contains(prms.ColumnType))
-                errors.Add($"Invalid column type \"{prms.ColumnType}\". Options: {string.Join(", ", ValidColumnTypes)}");
-            if (!ValidBeamTypes.Contains(prms.BeamType))
-                errors.Add($"Invalid beam type \"{prms.BeamType}\". Options: {string.Join(", ", ValidBeamTypes)}");
-            if (!ValidBeamCatalogs.Contains(prms.BeamCatalog ?? "large"))
-                errors.Add($"Invalid beam_catalog \"{prms.BeamCatalog}\". Options: {string.Join(", ", ValidBeamCatalogs)}");
-            if (!ValidConcretes.Contains(prms.Concrete))
-                errors.Add($"Unknown concrete \"{prms.Concrete}\". Options: {string.Join(", ", ValidConcretes)}");
-            if (!ValidRebars.Contains(prms.Rebar))
-                errors.Add($"Unknown rebar \"{prms.Rebar}\". Options: {string.Join(", ", ValidRebars)}");
-            if (!ValidSteels.Contains(prms.Steel))
-                errors.Add($"Unknown steel \"{prms.Steel}\". Options: {string.Join(", ", ValidSteels)}");
-            if (!ValidFireRatings.Contains(prms.FireRating))
-                errors.Add($"Invalid fire rating {prms.FireRating}. Options: 0, 1, 1.5, 2, 3, 4");
-            if (!ValidOptimize.Contains(prms.OptimizeFor))
-                errors.Add($"Invalid optimize_for \"{prms.OptimizeFor}\". Options: weight, carbon, cost");
-            if (!ValidUnitSystems.Contains(prms.UnitSystem?.ToLowerInvariant() ?? ""))
-                errors.Add($"Invalid unit system \"{prms.UnitSystem}\". Options: imperial, metric");
-            if (prms.VaultLambda.HasValue && prms.VaultLambda.Value <= 0)
-                errors.Add($"Invalid vault_lambda {prms.VaultLambda.Value}. Must be > 0.");
-
-            // Foundation soil (only if foundations requested)
-            if (prms.SizeFoundations && !ValidSoils.Contains(prms.FoundationSoil))
-                errors.Add($"Unknown foundation soil \"{prms.FoundationSoil}\". Options: {string.Join(", ", ValidSoils)}");
-
-            return errors;
+            doc.ScheduleSolution(MenegrothConfig.ScheduleSolutionIntervalMs, _ => ExpireSolution(false));
         }
     }
 }

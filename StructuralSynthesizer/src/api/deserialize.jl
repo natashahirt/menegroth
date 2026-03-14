@@ -565,10 +565,12 @@ function _resolve_column_options(api_params::APIParams)
 
     if startswith(ct, "rc_")
         shape = ct == "rc_circular" ? :circular : :rect
+        catalog_sym = Symbol(lowercase(strip(api_params.column_catalog)))
         return StructuralSizer.ConcreteColumnOptions(
             material = column_conc,
             rebar_material = rebar,
-            section_shape = shape
+            section_shape = shape,
+            catalog = catalog_sym,
         )
     elseif startswith(ct, "steel_")
         section_type = if ct == "steel_w"
@@ -580,9 +582,11 @@ function _resolve_column_options(api_params::APIParams)
         else
             :w  # default
         end
+        catalog_sym = Symbol(lowercase(strip(api_params.column_catalog)))
         return StructuralSizer.SteelColumnOptions(
             material = steel,
-            section_type = section_type
+            section_type = section_type,
+            catalog = catalog_sym,
         )
     else
         # Default to RC rectangular
@@ -730,6 +734,25 @@ function _resolve_beam_options(api_params::APIParams)
     bt = lowercase(strip(api_params.beam_type))
     concrete, rebar, steel = _resolve_materials(api_params)
 
+    # Vaults produce high thrust; default to xlarge catalog for RC beams.
+    catalog = Symbol(api_params.beam_catalog)
+    if Symbol(api_params.floor_type) == :vault && startswith(bt, "rc_") && catalog === :large
+        catalog = :xlarge
+    end
+
+    # Build custom catalog from bounds when beam_catalog is "custom".
+    custom_cat = nothing
+    if catalog === :custom && api_params.beam_catalog_bounds !== nothing
+        b = api_params.beam_catalog_bounds
+        custom_cat = StructuralSizer.rc_beam_catalog_from_bounds(;
+            min_width_in = b.min_width_in,
+            max_width_in = b.max_width_in,
+            min_depth_in = b.min_depth_in,
+            max_depth_in = b.max_depth_in,
+            resolution_in = b.resolution_in,
+        )
+    end
+
     if startswith(bt, "steel_")
         section_type = if bt == "steel_w"
             :w
@@ -747,14 +770,16 @@ function _resolve_beam_options(api_params::APIParams)
             material = concrete,
             rebar_material = rebar,
             include_flange = false,
-            catalog = Symbol(api_params.beam_catalog),
+            catalog = catalog === :custom ? :standard : catalog,
+            custom_catalog = custom_cat,
         )
     elseif bt == "rc_tbeam"
         return StructuralSizer.ConcreteBeamOptions(
             material = concrete,
             rebar_material = rebar,
             include_flange = true,
-            catalog = Symbol(api_params.beam_catalog),
+            catalog = catalog === :custom ? :standard : catalog,
+            custom_catalog = custom_cat,
         )
     else
         # Default to steel W-shape

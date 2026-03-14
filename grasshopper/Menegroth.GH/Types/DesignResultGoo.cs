@@ -6,17 +6,17 @@ namespace Menegroth.GH.Types
     /// Grasshopper Goo wrapper for <see cref="DesignResult"/>.
     /// Enables typed wiring between DesignRun and downstream result/visualization components.
     /// </summary>
-    public class GH_DesignResult : GH_Goo<DesignResult>
+    public class DesignResultGoo : GH_Goo<DesignResult>
     {
-        public GH_DesignResult() { Value = new DesignResult(); }
-        public GH_DesignResult(DesignResult r) { Value = r; }
-        public GH_DesignResult(GH_DesignResult other) { Value = other.Value; }
+        public DesignResultGoo() { Value = new DesignResult(); }
+        public DesignResultGoo(DesignResult r) { Value = r; }
+        public DesignResultGoo(DesignResultGoo other) { Value = other.Value; }
 
         public override bool IsValid => Value != null && Value.Status != "unknown";
         public override string TypeName => "DesignResult";
         public override string TypeDescription => "Parsed structural design result";
 
-        public override IGH_Goo Duplicate() => new GH_DesignResult(this);
+        public override IGH_Goo Duplicate() => new DesignResultGoo(this);
 
         public override string ToString()
         {

@@ -17,7 +17,6 @@ namespace Menegroth.GH.Types
         public List<int[]> ColumnEdges { get; set; } = new List<int[]>();
         public List<int[]> StrutEdges { get; set; } = new List<int[]>();
         public List<int> Supports { get; set; } = new List<int>();
-        public List<double> StoriesZ { get; set; } = new List<double>();
 
         /// <summary>
         /// When false (default), input vertices are architectural reference points
@@ -48,10 +47,6 @@ namespace Menegroth.GH.Types
                 },
                 ["supports"] = JToken.FromObject(Supports),
             };
-
-            // stories_z is optional — only include if provided
-            if (StoriesZ.Count > 0)
-                obj["stories_z"] = JToken.FromObject(StoriesZ);
 
             if (Faces.Count > 0)
                 obj["faces"] = JToken.FromObject(Faces);

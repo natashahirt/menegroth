@@ -386,8 +386,88 @@ function get_feasibility_error_msg(
 )
     Mu = to_kipft(demand.Mu)
     Vu = to_kip(demand.Vu)
-    "No feasible RC beam section: Mu=$(round(Mu, digits=1)) kip·ft, " *
-    "Vu=$(round(Vu, digits=1)) kip, L=$(geometry.L)"
+    Nu = _get_Nu_kip(demand)
+    Tu = _get_Tu_kipin(demand)
+    base = "No feasible RC beam section: Mu=$(round(Mu, digits=1)) kip·ft, " *
+           "Vu=$(round(Vu, digits=1)) kip, L=$(geometry.L)"
+    if Nu > 0 || Tu > 0
+        base *= " (Nu=$(round(Nu, digits=1)) kip, Tu=$(round(Tu, digits=1)) kip·in)"
+    end
+    base
+end
+
+"""
+    diagnose_infeasibility(checker, cache, catalog, material, demand, geometry) -> String
+
+Run feasibility checks on the highest-capacity section and return which check failed.
+Useful for debugging when no section passes.
+"""
+function diagnose_infeasibility(
+    checker::ACIBeamChecker,
+    cache::ACIBeamCapacityCache,
+    catalog::AbstractVector,
+    material::Concrete,
+    demand::RCBeamDemand,
+    geometry::ConcreteMemberGeometry,
+)::String
+    n = length(catalog)
+    n == 0 && return "Catalog is empty"
+    best_j = argmax(cache.φMn)
+    sec = catalog[best_j]
+    Mu = to_kipft(demand.Mu)
+    Vu = to_kip(demand.Vu)
+    Nu_kip = _get_Nu_kip(demand)
+    Tu_val = _get_Tu_kipin(demand)
+
+    if cache.depths[best_j] > checker.max_depth
+        return "Depth: h=$(cache.depths[best_j])m > max_depth=$(checker.max_depth)m"
+    end
+    if cache.φMn[best_j] < Mu
+        return "Flexure: φMn=$(round(cache.φMn[best_j], digits=1)) < Mu=$(round(Mu, digits=1)) kip·ft"
+    end
+    if Nu_kip > 0
+        fc_psi = cache.fc_ksi * 1000.0
+        b_in = ustrip(u"inch", sec.b)
+        d_in = ustrip(u"inch", sec.d)
+        h_in = ustrip(u"inch", sec.h)
+        Ag_in2 = b_in * h_in
+        axial_factor = 1 + (Nu_kip * 1000) / (2000 * Ag_in2)
+        sqrt_fc = sqrt(fc_psi)
+        Vc_lb = 2 * checker.λ * axial_factor * sqrt_fc * b_in * d_in
+        Vs_max_lb = 8 * sqrt_fc * b_in * d_in
+        φVn_kip = 0.75 * (Vc_lb + Vs_max_lb) / 1000.0
+        if φVn_kip < Vu
+            return "Shear (Nu>0): φVn=$(round(φVn_kip, digits=1)) < Vu=$(round(Vu, digits=1)) kip"
+        end
+    else
+        if cache.φVn_max[best_j] < Vu
+            return "Shear: φVn_max=$(round(cache.φVn_max[best_j], digits=1)) < Vu=$(round(Vu, digits=1)) kip"
+        end
+    end
+    if cache.εt[best_j] < 0.004
+        return "εt: $(round(cache.εt[best_j], digits=4)) < 0.004 (ACI §10.3.5)"
+    end
+    fc_psi = cache.fc_ksi * 1000.0
+    fy_psi = cache.fy_ksi * 1000.0
+    b_in = ustrip(u"inch", sec.b)
+    d_in = ustrip(u"inch", sec.d)
+    As_in = ustrip(u"inch^2", sec.As)
+    As_min = max(3.0 * sqrt(fc_psi) * b_in * d_in / fy_psi, 200.0 * b_in * d_in / fy_psi)
+    if As_in < As_min
+        return "As_min: As=$(round(As_in, digits=2)) < As_min=$(round(As_min, digits=2)) in²"
+    end
+    if Tu_val > 0.0
+        h_in = ustrip(u"inch", sec.h)
+        d_stir = ustrip(u"inch", rebar(sec.stirrup_size).diameter)
+        cov_in = ustrip(u"inch", sec.cover)
+        c_ctr = cov_in + d_stir / 2
+        props = torsion_section_properties(sec.b, sec.h, c_ctr * u"inch")
+        Tth = threshold_torsion(props.Acp, props.pcp, fc_psi; λ=checker.λ)
+        if Tu_val > Tth && !torsion_section_adequate(Vu, Tu_val, b_in, d_in, props.Aoh, props.ph, fc_psi; λ=checker.λ)
+            return "Torsion: section inadequate for Tu=$(round(Tu_val, digits=1)) kip·in"
+        end
+    end
+    return "All checks passed for best section — possible threading/cache inconsistency"
 end
 
 # ==============================================================================

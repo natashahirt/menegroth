@@ -11,7 +11,7 @@ Build a steel column catalog based on section type.
 
 # Arguments
 - `section_type`: `:w`, `:hss`, `:pipe`, `:w_and_hss`
-- `catalog`: `:common`, `:all`, `:preferred`
+- `catalog`: `:compact_only`, `:preferred`, `:all` (legacy `:common` → `:all`)
 
 # Examples
 ```julia
@@ -20,18 +20,16 @@ steel_column_catalog(:w_and_hss, :preferred)  # Preferred W + all HSS
 ```
 """
 function steel_column_catalog(section_type::Symbol, catalog::Symbol)
+    # Normalize legacy :common to :all; :compact_only and :preferred both use preferred W set
+    use_preferred_w = (catalog === :preferred || catalog === :compact_only)
     if section_type === :w
-        if catalog === :preferred
-            return preferred_W()
-        else  # :common or :all
-            return all_W()
-        end
+        return use_preferred_w ? preferred_W() : all_W()
     elseif section_type === :hss
-        return all_HSS()
+        return all_HSS()  # No compact/preferred filter for HSS yet
     elseif section_type === :pipe
         return all_HSSRound()
     elseif section_type === :w_and_hss
-        w_sections = catalog === :preferred ? preferred_W() : all_W()
+        w_sections = use_preferred_w ? preferred_W() : all_W()
         hss_sections = all_HSS()
         return vcat(w_sections, hss_sections)
     else
@@ -115,19 +113,66 @@ end
 # ==============================================================================
 
 """
+    rc_beam_catalog_from_bounds(; min_width_in, max_width_in, min_depth_in, max_depth_in,
+                                 resolution_in, bar_sizes, n_bars_range, kwargs...) -> Vector{RCBeamSection}
+
+Build an RC beam catalog from bounds and resolution (for MIP custom catalog).
+
+# Arguments
+- `min_width_in`, `max_width_in`: Width range in inches
+- `min_depth_in`, `max_depth_in`: Depth range in inches
+- `resolution_in`: Step size in inches for both width and depth (default: 2.0)
+- `bar_sizes`: Bar sizes (default: [6, 7, 8, 9, 10, 11])
+- `n_bars_range`: Bar count range (default: 2:8)
+- `kwargs`: Passed to `standard_rc_beams` (cover, stirrup_size, etc.)
+
+# Example
+```julia
+cat = rc_beam_catalog_from_bounds(;
+    min_width_in = 12, max_width_in = 36,
+    min_depth_in = 18, max_depth_in = 48,
+    resolution_in = 2.0)
+```
+"""
+function rc_beam_catalog_from_bounds(;
+    min_width_in::Real,
+    max_width_in::Real,
+    min_depth_in::Real,
+    max_depth_in::Real,
+    resolution_in::Real = 2.0,
+    bar_sizes = [6, 7, 8, 9, 10, 11],
+    n_bars_range = 2:8,
+    kwargs...,
+)
+    res = Float64(resolution_in)
+    widths = collect(Float64(min_width_in):res:Float64(max_width_in))
+    depths = collect(Float64(min_depth_in):res:Float64(max_depth_in))
+    isempty(widths) && throw(ArgumentError("Empty width range: min=$min_width_in max=$max_width_in res=$resolution_in"))
+    isempty(depths) && throw(ArgumentError("Empty depth range: min=$min_depth_in max=$max_depth_in res=$resolution_in"))
+    return standard_rc_beams(;
+        widths = widths,
+        depths = depths,
+        bar_sizes = bar_sizes,
+        n_bars_range = n_bars_range,
+        kwargs...,
+    )
+end
+
+"""
     rc_beam_catalog(catalog) -> Vector{RCBeamSection}
 
 Build an RC beam catalog.
 
 # Arguments
-- `catalog`: `:standard`, `:small`, `:large`, `:all`
+- `catalog`: `:standard`, `:small`, `:large`, `:xlarge`, `:all`
 
 # Examples
 ```julia
 rc_beam_catalog(:standard)   # Default catalog (~400-600 sections)
 rc_beam_catalog(:small)      # Light-load (smaller sections)
 rc_beam_catalog(:large)      # Heavy-load (larger sections)
-rc_beam_catalog(:all)        # Comprehensive (widest range)
+rc_beam_catalog(:xlarge)     # Vault/heavy thrust (largest sections)
+rc_beam_catalog(:all)       # Comprehensive (widest range)
 ```
 """
 function rc_beam_catalog(catalog::Symbol)
@@ -137,11 +182,13 @@ function rc_beam_catalog(catalog::Symbol)
         return small_rc_beams()
     elseif catalog === :large
         return large_rc_beams()
+    elseif catalog === :xlarge
+        return xlarge_rc_beams()
     elseif catalog === :all
         return all_rc_beams()
     else
         throw(ArgumentError(
             "Unknown catalog=$catalog for RC beams. " *
-            "Use :standard, :small, :large, or :all"))
+            "Use :standard, :small, :large, :xlarge, or :all"))
     end
 end

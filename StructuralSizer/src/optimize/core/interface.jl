@@ -94,6 +94,16 @@ function get_feasibility_error_msg(::AbstractCapacityChecker, demand, geometry)
     "No feasible section found for demand=$demand"
 end
 
+"""
+    diagnose_infeasibility(checker, cache, catalog, material, demand, geometry) -> Union{String, Nothing}
+
+Optional: return a diagnostic string when no section is feasible. Returns `nothing` if
+the checker does not support diagnostics.
+"""
+function diagnose_infeasibility(::AbstractCapacityChecker, cache, catalog, material, demand, geometry)
+    nothing
+end
+
 # ==============================================================================
 # NLP Problem Interface (for Continuous Optimization)
 # ==============================================================================

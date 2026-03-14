@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Windows.Forms;
 using Grasshopper.Kernel;
+using Grasshopper.Kernel.Parameters;
 using Grasshopper.Kernel.Types;
 using Menegroth.GH.Types;
 
@@ -16,23 +17,22 @@ namespace Menegroth.GH.Components
     /// no external ValueList components needed.
     ///
     /// Menu structure:
-    ///   Slab Params ▸ Floor System ▸ Flat Plate ▸ Analysis Method ▸ ...
-    ///                                    ▸ Punching Strategy ▸ ...
-    ///               ▸ Flat Slab ▸ ...
-    ///               ▸ One-Way, Vault
-    ///               ▸ Deflection Limit ▸ ...
+    ///   Beams ▸ Type ▸ RC Catalog ▸ ...
     ///   Columns ▸ Type ▸ ...
-    ///   Beams ▸ Type ▸ ...
-    ///   Materials ▸ Concrete ▸ ...
-    ///   Design ▸ Optimize For ▸ ...
-    ///          ▸ Fire Rating ▸ ...
-    ///   Foundation Params ▸ Size Foundations ▸ Soil Type ▸ ...
+    ///   Slabs ▸ Floor System ▸ Flat Plate ▸ Analysis Method ▸ ...
+    ///                        ▸ Flat Slab ▸ Punching Strategy ▸ ...
+    ///                        ▸ One-Way, Vault
+    ///                        ▸ Deflection Limit ▸ ...
+    ///   Foundations ▸ Size Foundations ▸ Soil Type ▸ ...
+    ///   Default Materials ▸ Concrete ▸ Rebar ▸ Steel ▸ ...
+    ///   Design Options ▸ Optimize For ▸ Fire Rating ▸ ...
     ///   Units ▸ ...
     ///
     /// Override hierarchy when multiple params conflict: geometry-scoped overrides general;
     /// Slab Params / Foundation Params (specific inputs) override generic Params; earlier in a list overrides later.
+    /// Use the + button to add optional "Slab Params" and "Foundation Params" inputs.
     /// </summary>
-    public class DesignParams : GH_Component
+    public class DesignParams : GH_Component, IGH_VariableParameterComponent
     {
         // ─── Persisted dropdown state ────────────────────────────────────
         private string _floorType = "flat_plate";
@@ -43,6 +43,7 @@ namespace Menegroth.GH.Components
         private string _rebar = "Rebar_60";
         private string _steel = "A992";
         private string _columnType = "rc_rect";
+        private string _columnCatalog = "standard";
         private string _beamType = "steel_w";
         private string _beamCatalog = "large";
         private string _optimizeFor = "weight";
@@ -109,9 +110,37 @@ namespace Menegroth.GH.Components
         {
             new("RC Rectangular", "rc_rect"),
             new("RC Circular",   "rc_circular"),
-            new("Steel W-shape",  "steel_w"),
             new("Steel HSS",     "steel_hss"),
+            new("Steel W-shape", "steel_w"),
             new("Steel Pipe",    "steel_pipe"),
+        };
+
+        /// <summary>Steel column catalog: compact only, preferred, or all. Used when Column Type is steel_hss or steel_w.</summary>
+        private static readonly Choice[] SteelColumnCatalogs =
+        {
+            new("Compact only", "compact_only"),
+            new("Preferred",    "preferred"),
+            new("All",          "all"),
+        };
+
+        /// <summary>RC rectangular column catalog. Used when Column Type is rc_rect.</summary>
+        private static readonly Choice[] RCRectColumnCatalogs =
+        {
+            new("Standard (square)",   "standard"),
+            new("Square only",         "square"),
+            new("Rectangular",         "rectangular"),
+            new("Low capacity",         "low_capacity"),
+            new("High capacity",       "high_capacity"),
+            new("All",                 "all"),
+        };
+
+        /// <summary>RC circular column catalog. Used when Column Type is rc_circular.</summary>
+        private static readonly Choice[] RCCircularColumnCatalogs =
+        {
+            new("Standard",     "standard"),
+            new("Low capacity", "low_capacity"),
+            new("High capacity", "high_capacity"),
+            new("All",         "all"),
         };
 
         private static readonly Choice[] BeamTypes =
@@ -126,7 +155,8 @@ namespace Menegroth.GH.Components
         {
             new("Standard (light–moderate loads)", "standard"),
             new("Small (light loads)",             "small"),
-            new("Large (heavy loads, vaults)",     "large"),
+            new("Large (heavy loads)",             "large"),
+            new("XLarge (vaults, heavy thrust)",   "xlarge"),
             new("All (comprehensive)",             "all"),
         };
 
@@ -174,11 +204,6 @@ namespace Menegroth.GH.Components
         public override Guid ComponentGuid =>
             new Guid("75125D15-612B-495B-9544-AC4C08EBB8CE");
 
-        public override void CreateAttributes()
-        {
-            m_attributes = new DesignParamsAttributes(this);
-        }
-
         // ─── Wired inputs (numeric only) ─────────────────────────────────
         protected override void RegisterInputParams(GH_InputParamManager pManager)
         {
@@ -201,19 +226,9 @@ namespace Menegroth.GH.Components
                 "Wall superimposed dead load in psf", GH_ParamAccess.item, 10.0);
 
             pManager.AddGenericParameter("Params", "Params",
-                "Optional overrides (VaultParams, future FoundationParams). Expand (+) for Slab Params / Foundation Params.",
+                "Optional overrides (VaultParams, future FoundationParams). Click + to add Slab Params / Foundation Params.",
                 GH_ParamAccess.list);
             pManager[6].Optional = true;
-
-            pManager.AddGenericParameter("Slab Params", "Slab",
-                "Optional slab/floor overrides (e.g. VaultParams). Shown when component is expanded.",
-                GH_ParamAccess.list);
-            pManager[7].Optional = true;
-
-            pManager.AddGenericParameter("Foundation Params", "Foundation",
-                "Optional foundation overrides. Reserved for future use. Shown when component is expanded.",
-                GH_ParamAccess.list);
-            pManager[8].Optional = true;
         }
 
         protected override void RegisterOutputParams(GH_OutputParamManager pManager)
@@ -233,8 +248,24 @@ namespace Menegroth.GH.Components
             base.AppendAdditionalComponentMenuItems(menu);
             Menu_AppendSeparator(menu);
 
-            // ── Slab Params ▸ Floor System ▸ ──
-            var slabParamsMenu = Menu_AppendItem(menu, "Slab Params");
+            // ── Beams ▸ ──
+            var beamMenu = Menu_AppendItem(menu, "Beams");
+            AddSubChoices(beamMenu, "Beam Type", BeamTypes, _beamType);
+            AddSubChoices(beamMenu, "RC Catalog", BeamCatalogs, _beamCatalog);
+
+            // ── Columns ▸ Column Type (top-level) ▸ Column Catalog (second, updates by type) ──
+            var colMenu = Menu_AppendItem(menu, "Columns");
+            AddSubChoices(colMenu, "Column Type", ColumnTypes, _columnType);
+
+            // Column Catalog: choices depend on selected column type
+            if (ColumnTypeUsesCatalog(_columnType))
+            {
+                var catalogChoices = GetCatalogChoicesForColumnType(_columnType);
+                AddSubChoices(colMenu, "Column Catalog", catalogChoices, _columnCatalog);
+            }
+
+            // ── Slabs ▸ Floor System ▸ ──
+            var slabParamsMenu = Menu_AppendItem(menu, "Slabs");
             var floorMenu = Menu_AppendItem(slabParamsMenu.DropDown, "Floor System");
 
             // Floor types as direct children
@@ -290,28 +321,8 @@ namespace Menegroth.GH.Components
             // Deflection Limit (shared across all floor types)
             AddSubChoices(floorMenu, "Deflection Limit", DeflLimits, _deflLimit);
 
-            // ── Columns ▸ ──
-            var colMenu = Menu_AppendItem(menu, "Columns");
-            AddSubChoices(colMenu, "Column Type", ColumnTypes, _columnType);
-
-            // ── Beams ▸ ──
-            var beamMenu = Menu_AppendItem(menu, "Beams");
-            AddSubChoices(beamMenu, "Beam Type", BeamTypes, _beamType);
-            AddSubChoices(beamMenu, "RC Catalog", BeamCatalogs, _beamCatalog);
-
-            // ── Materials ▸ ──
-            var matMenu = Menu_AppendItem(menu, "Materials");
-            AddSubChoices(matMenu, "Concrete", Concretes, _concrete);
-            AddSubChoices(matMenu, "Rebar",    Rebars,    _rebar);
-            AddSubChoices(matMenu, "Steel",    Steels,    _steel);
-
-            // ── Design ▸ ──
-            var designMenu = Menu_AppendItem(menu, "Design");
-            AddSubChoices(designMenu, "Optimize For", Objectives,  _optimizeFor);
-            AddSubChoices(designMenu, "Fire Rating",  FireRatings, _fireRating);
-
-            // ── Foundation Params ▸ ──
-            var fdnMenu = Menu_AppendItem(menu, "Foundation Params");
+            // ── Foundations ▸ ──
+            var fdnMenu = Menu_AppendItem(menu, "Foundations");
 
             var fdnToggle = new ToolStripMenuItem("Size Foundations")
             {
@@ -328,6 +339,19 @@ namespace Menegroth.GH.Components
 
             fdnMenu.DropDownItems.Add(new ToolStripSeparator());
             AddSubChoices(fdnMenu, "Soil Type", SoilTypes, _foundationSoil);
+
+            Menu_AppendSeparator(menu);
+
+            // ── Default Materials ▸ ──
+            var matMenu = Menu_AppendItem(menu, "Default Materials");
+            AddSubChoices(matMenu, "Concrete", Concretes, _concrete);
+            AddSubChoices(matMenu, "Rebar",    Rebars,    _rebar);
+            AddSubChoices(matMenu, "Steel",    Steels,    _steel);
+
+            // ── Design Options ▸ ──
+            var designMenu = Menu_AppendItem(menu, "Design Options");
+            AddSubChoices(designMenu, "Optimize For", Objectives,  _optimizeFor);
+            AddSubChoices(designMenu, "Fire Rating",  FireRatings, _fireRating);
 
             Menu_AppendSeparator(menu);
 
@@ -348,6 +372,43 @@ namespace Menegroth.GH.Components
                 };
                 unitsMenu.DropDownItems.Add(item);
             }
+        }
+
+        private static Choice[] GetCatalogChoicesForColumnType(string columnType)
+        {
+            if (columnType == "rc_rect") return RCRectColumnCatalogs;
+            if (columnType == "rc_circular") return RCCircularColumnCatalogs;
+            if (columnType == "steel_hss" || columnType == "steel_w") return SteelColumnCatalogs;
+            return new Choice[0];
+        }
+
+        private string LabelForColumnType()
+        {
+            if (_columnType == "rc_rect") return $"RC Rectangular ({LabelFor(RCRectColumnCatalogs, _columnCatalog)})";
+            if (_columnType == "rc_circular") return $"RC Circular ({LabelFor(RCCircularColumnCatalogs, _columnCatalog)})";
+            if (_columnType == "steel_hss") return $"Steel HSS ({LabelFor(SteelColumnCatalogs, _columnCatalog)})";
+            if (_columnType == "steel_w") return $"Steel W-shape ({LabelFor(SteelColumnCatalogs, _columnCatalog)})";
+            if (_columnType == "steel_pipe") return "Steel Pipe";
+            return _columnType;
+        }
+
+        private static string LabelForColumnTypeSummary(DesignParamsData p)
+        {
+            var ct = p.ColumnType ?? "rc_rect";
+            var cat = p.ColumnCatalog ?? (ct == "steel_w" || ct == "steel_hss" ? "preferred" : "standard");
+            if (ct == "rc_rect") return $"RC Rectangular ({LabelFor(RCRectColumnCatalogs, cat)})";
+            if (ct == "rc_circular") return $"RC Circular ({LabelFor(RCCircularColumnCatalogs, cat)})";
+            if (ct == "steel_pipe") return "Steel Pipe";
+            if (ct == "steel_hss") return $"Steel HSS ({LabelFor(SteelColumnCatalogs, cat)})";
+            if (ct == "steel_w") return $"Steel W-shape ({LabelFor(SteelColumnCatalogs, cat)})";
+            return ct;
+        }
+
+        /// <summary>True when column type has a catalog submenu (RC Rect, RC Circular, Steel HSS, Steel W).</summary>
+        private static bool ColumnTypeUsesCatalog(string? columnType)
+        {
+            return columnType == "rc_rect" || columnType == "rc_circular"
+                || columnType == "steel_hss" || columnType == "steel_w";
         }
 
         /// <summary>
@@ -388,7 +449,15 @@ namespace Menegroth.GH.Components
                 case "Concrete":          _concrete    = tag.Value; break;
                 case "Rebar":             _rebar       = tag.Value; break;
                 case "Steel":             _steel        = tag.Value; break;
-                case "Column Type":       _columnType  = tag.Value; break;
+                case "Column Type":
+                    _columnType = tag.Value;
+                    // Set default catalog when switching type
+                    if (ColumnTypeUsesCatalog(tag.Value))
+                        _columnCatalog = tag.Value.StartsWith("steel_") ? "preferred" : "standard";
+                    break;
+                case "Column Catalog":
+                    _columnCatalog = tag.Value;
+                    break;
                 case "Beam Type":         _beamType    = tag.Value; break;
                 case "RC Catalog":         _beamCatalog = tag.Value; break;
                 case "Optimize For":      _optimizeFor = tag.Value; break;
@@ -410,7 +479,8 @@ namespace Menegroth.GH.Components
             writer.SetString("Concrete",    _concrete);
             writer.SetString("Rebar",       _rebar);
             writer.SetString("Steel",       _steel);
-            writer.SetString("ColumnType",  _columnType);
+            writer.SetString("ColumnType",    _columnType);
+            writer.SetString("ColumnCatalog", _columnCatalog);
             writer.SetString("BeamType",    _beamType);
             writer.SetString("BeamCatalog", _beamCatalog);
             writer.SetString("OptimizeFor", _optimizeFor);
@@ -430,7 +500,8 @@ namespace Menegroth.GH.Components
             if (reader.ItemExists("Concrete"))     _concrete    = reader.GetString("Concrete");
             if (reader.ItemExists("Rebar"))        _rebar       = reader.GetString("Rebar");
             if (reader.ItemExists("Steel"))        _steel       = reader.GetString("Steel");
-            if (reader.ItemExists("ColumnType"))   _columnType  = reader.GetString("ColumnType");
+            if (reader.ItemExists("ColumnType"))     _columnType    = reader.GetString("ColumnType");
+            if (reader.ItemExists("ColumnCatalog"))  _columnCatalog = reader.GetString("ColumnCatalog");
             if (reader.ItemExists("BeamType"))     _beamType    = reader.GetString("BeamType");
             if (reader.ItemExists("BeamCatalog"))  _beamCatalog = reader.GetString("BeamCatalog");
             if (reader.ItemExists("OptimizeFor"))  _optimizeFor = reader.GetString("OptimizeFor");
@@ -454,7 +525,7 @@ namespace Menegroth.GH.Components
             var parts = new List<string>
             {
                 LabelFor(FloorTypes, _floorType),
-                LabelFor(ColumnTypes, _columnType),
+                LabelForColumnType(),
                 LabelFor(BeamTypes, _beamType),
             };
             if (_sizeFoundations)
@@ -466,6 +537,47 @@ namespace Menegroth.GH.Components
         private static string LabelFor(Choice[] choices, string value)
         {
             return choices.FirstOrDefault(c => c.Value == value)?.Label ?? value;
+        }
+
+        /// <summary>
+        /// Validates design parameter combinations. Returns error messages for invalid
+        /// combinations; empty list if valid.
+        ///
+        /// Invalid combinations:
+        /// - Flat plate/slab + steel columns: beamless systems require RC columns for
+        ///   punching shear design (ACI 318); steel columns are not supported.
+        /// - Vault + steel beams/columns: vault thrust requires RC framing; steel is not supported.
+        /// </summary>
+        private static List<string> ValidateDesignParams(DesignParamsData p)
+        {
+            var errors = new List<string>();
+            var floor = (p.FloorType ?? "").ToLowerInvariant();
+            var colType = (p.ColumnType ?? "").ToLowerInvariant();
+
+            var floorLabel = LabelFor(FloorTypes, p.FloorType);
+            var colLabel = LabelFor(ColumnTypes, p.ColumnType);
+            var beamLabel = LabelFor(BeamTypes, p.BeamType);
+            var steelColumns = new[] { "steel_w", "steel_hss", "steel_pipe" };
+            var steelBeams = new[] { "steel_w", "steel_hss" };
+
+            // Flat plate and flat slab require RC columns (punching shear design assumes RC)
+            var beamlessFloors = new[] { "flat_plate", "flat_slab" };
+            if (beamlessFloors.Contains(floor) && steelColumns.Contains(colType))
+            {
+                errors.Add($"{floorLabel} requires reinforced concrete columns. " +
+                    $"{colLabel} is not supported for beamless slab systems (punching shear design assumes RC).");
+            }
+
+            // Vault requires RC beams and RC columns (thrust resistance)
+            if (floor == "vault")
+            {
+                if (steelColumns.Contains(colType))
+                    errors.Add($"{floorLabel} requires reinforced concrete columns. {colLabel} is not supported.");
+                if (steelBeams.Contains((p.BeamType ?? "").ToLowerInvariant()))
+                    errors.Add($"{floorLabel} requires reinforced concrete beams. {beamLabel} is not supported.");
+            }
+
+            return errors;
         }
 
         // ─── Solve ───────────────────────────────────────────────────────
@@ -483,9 +595,11 @@ namespace Menegroth.GH.Components
             var paramsList = new List<IGH_Goo>();
             DA.GetDataList(6, paramsList);
             var slabParams = new List<IGH_Goo>();
-            DA.GetDataList(7, slabParams);
             var foundationParams = new List<IGH_Goo>();
-            DA.GetDataList(8, foundationParams);
+            if (Params.Input.Count >= 8)
+                DA.GetDataList(7, slabParams);
+            if (Params.Input.Count >= 9)
+                DA.GetDataList(8, foundationParams);
 
             double fireRatingVal = 0;
             if (double.TryParse(_fireRating, System.Globalization.NumberStyles.Any,
@@ -510,6 +624,7 @@ namespace Menegroth.GH.Components
                 Rebar           = _rebar,
                 Steel           = _steel,
                 ColumnType      = _columnType,
+                ColumnCatalog   = _columnCatalog,
                 BeamType        = _beamType,
                 BeamCatalog     = _beamCatalog,
                 OptimizeFor     = _optimizeFor,
@@ -522,7 +637,15 @@ namespace Menegroth.GH.Components
             var allOverrides = BuildOverrideList(paramsList, slabParams, foundationParams);
             ApplyOverrides(p, allOverrides);
 
-            DA.SetData(0, new GH_DesignParamsData(p));
+            var validationErrors = ValidateDesignParams(p);
+            if (validationErrors.Count > 0)
+            {
+                foreach (var err in validationErrors)
+                    AddRuntimeMessage(GH_RuntimeMessageLevel.Error, err);
+                return;
+            }
+
+            DA.SetData(0, new DesignParamsDataGoo(p));
             DA.SetData(1, BuildSummary(p));
         }
 
@@ -547,8 +670,8 @@ namespace Menegroth.GH.Components
             if (p.FloorType == "vault" && p.VaultLambda.HasValue)
                 sb.Append("  Vault λ: ").AppendLine(p.VaultLambda.Value.ToString("F2"));
 
-            sb.Append("Columns: ").Append(LabelFor(ColumnTypes, p.ColumnType))
-              .Append(" (").Append(p.ColumnType).AppendLine(")");
+            sb.Append("Columns: ").Append(LabelForColumnTypeSummary(p))
+              .Append(" (").Append(p.ColumnType).Append(ColumnTypeUsesCatalog(p.ColumnType) ? " / " + (p.ColumnCatalog ?? (p.ColumnType?.StartsWith("steel_") == true ? "preferred" : "standard")) : "").AppendLine(")");
             sb.Append("Beams: ").Append(LabelFor(BeamTypes, p.BeamType)).Append(" (").Append(p.BeamType).Append(")");
             if (p.BeamType == "rc_rect" || p.BeamType == "rc_tbeam")
                 sb.Append(" | catalog: ").Append(LabelFor(BeamCatalogs, p.BeamCatalog)).Append(" (").Append(p.BeamCatalog).Append(")");
@@ -623,6 +746,11 @@ namespace Menegroth.GH.Components
 
             foreach (var goo in allOverrides)
             {
+                if (TryGetSolverParams(goo, out var solver))
+                {
+                    solver.ApplyTo(target);
+                    continue;
+                }
                 if (TryGetVaultParams(goo, out var vault))
                 {
                     if (vault.Lambda.HasValue && vault.Lambda.Value <= 0.0)
@@ -641,24 +769,97 @@ namespace Menegroth.GH.Components
             }
         }
 
+        private static bool TryGetSolverParams(IGH_Goo goo, out SolverParamsData solver)
+        {
+            solver = null;
+            if (goo == null) return false;
+
+            if (goo is SolverParamsDataGoo ghSolver && ghSolver.Value != null)
+            {
+                solver = ghSolver.Value;
+                return true;
+            }
+
+            if (goo is Grasshopper.Kernel.Types.GH_ObjectWrapper wrapper && wrapper.Value is SolverParamsData wrappedSolver)
+            {
+                solver = wrappedSolver;
+                return true;
+            }
+
+            return false;
+        }
+
         private static bool TryGetVaultParams(IGH_Goo goo, out VaultParamsData vault)
         {
             vault = null;
             if (goo == null) return false;
 
-            if (goo is GH_VaultParamsData ghVault && ghVault.Value != null)
+            if (goo is VaultParamsDataGoo ghVault && ghVault.Value != null)
             {
                 vault = ghVault.Value;
                 return true;
             }
 
-            if (goo is GH_ObjectWrapper wrapper && wrapper.Value is VaultParamsData wrappedVault)
+            if (goo is Grasshopper.Kernel.Types.GH_ObjectWrapper wrapper && wrapper.Value is VaultParamsData wrappedVault)
             {
                 vault = wrappedVault;
                 return true;
             }
 
             return false;
+        }
+
+        // ─── IGH_VariableParameterComponent: + button adds Slab Params, then Foundation Params ───
+        public bool CanInsertParameter(GH_ParameterSide side, int index)
+        {
+            if (side != GH_ParameterSide.Input) return false;
+            int n = Params.Input.Count;
+            return (n == 7 && index == 7) || (n == 8 && index == 8);
+        }
+
+        public bool CanRemoveParameter(GH_ParameterSide side, int index)
+        {
+            if (side != GH_ParameterSide.Input) return false;
+            int n = Params.Input.Count;
+            return (n == 8 && index == 7) || (n == 9 && index == 8);
+        }
+
+        public IGH_Param? CreateParameter(GH_ParameterSide side, int index)
+        {
+            if (side != GH_ParameterSide.Input) return null;
+            if (index != 7 && index != 8) return null;
+            var param = new Param_GenericObject();
+            if (index == 7)
+            {
+                param.Name = "Slab Params";
+                param.NickName = "Slab";
+                param.Description = "Optional slab/floor overrides (e.g. VaultParams).";
+            }
+            else
+            {
+                param.Name = "Foundation Params";
+                param.NickName = "Foundation";
+                param.Description = "Optional foundation overrides. Reserved for future use.";
+            }
+            param.Access = GH_ParamAccess.list;
+            param.Optional = true;
+            return param;
+        }
+
+        public bool DestroyParameter(GH_ParameterSide side, int index) => true;
+
+        public void VariableParameterMaintenance()
+        {
+            if (Params.Input.Count > 7)
+            {
+                Params.Input[7].Name = "Slab Params";
+                Params.Input[7].NickName = "Slab";
+            }
+            if (Params.Input.Count > 8)
+            {
+                Params.Input[8].Name = "Foundation Params";
+                Params.Input[8].NickName = "Foundation";
+            }
         }
 
         // ─── Helper types ────────────────────────────────────────────────
@@ -673,6 +874,8 @@ namespace Menegroth.GH.Components
         {
             public string Field { get; set; } = "";
             public string Value { get; set; } = "";
+            /// <summary>When set with Field "Column Type", also sets column catalog (rc_rect, rc_circular, steel_hss, steel_w).</summary>
+            public string? ColumnCatalog { get; set; }
         }
     }
 }

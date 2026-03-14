@@ -138,7 +138,7 @@ namespace Menegroth.GH.Components
 
         protected override void SolveInstance(IGH_DataAccess DA)
         {
-            GH_DesignResult goo = null;
+            DesignResultGoo goo = null;
             if (!DA.GetData(0, ref goo) || goo?.Value == null) return;
 
             var r = goo.Value;

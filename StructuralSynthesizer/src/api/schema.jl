@@ -84,8 +84,10 @@ function api_input_schema()
                     "steel" => "Steel name (e.g. A992). Default: A992.",
                 ),
                 "column_type" => "rc_rect | rc_circular | steel_w | steel_hss | steel_pipe. Default: rc_rect.",
+                "column_catalog" => "Column catalog. Steel (steel_w/steel_hss): compact_only | preferred | all. RC rectangular (rc_rect): standard | square | rectangular | low_capacity | high_capacity | all. RC circular (rc_circular): standard | low_capacity | high_capacity | all. Default: preferred (steel) / standard (RC).",
                 "beam_type" => "steel_w | steel_hss | rc_rect | rc_tbeam. Default: steel_w.",
-                "beam_catalog" => "RC beam catalog when beam_type is rc_rect or rc_tbeam: standard | small | large | all. Default: large.",
+                "beam_catalog" => "RC beam catalog when beam_type is rc_rect or rc_tbeam: standard | small | large | xlarge | all | custom. Default: large. Use xlarge for vaults with high thrust. Use custom with beam_catalog_bounds for bounds-based catalog.",
+                "beam_catalog_bounds" => "Required when beam_catalog is custom. Object: min_width_in, max_width_in, min_depth_in, max_depth_in, resolution_in (all in inches).",
                 "fire_rating" => "Fire rating (hours): 0, 1, 1.5, 2, 3, or 4. Default: 0.",
                 "optimize_for" => "weight | carbon | cost. Default: weight.",
                 "size_foundations" => "Boolean. Default: false.",
@@ -184,6 +186,15 @@ Base.@kwdef mutable struct APIStripParams
     eccentricity_limit::Union{Float64, Nothing} = nothing
 end
 
+"""Optional beam catalog bounds from JSON (used when beam_catalog is "custom"). All lengths in inches."""
+Base.@kwdef mutable struct APIBeamCatalogBounds
+    min_width_in::Float64 = 12.0
+    max_width_in::Float64 = 36.0
+    min_depth_in::Float64 = 18.0
+    max_depth_in::Float64 = 48.0
+    resolution_in::Float64 = 2.0
+end
+
 """Optional mat footing params from JSON. All lengths in inches."""
 Base.@kwdef mutable struct APIMatParams
     cover_in::Union{Float64, Nothing} = nothing
@@ -212,8 +223,10 @@ Base.@kwdef mutable struct APIParams
     floor_options::APIFloorOptions = APIFloorOptions()
     materials::APIMaterials = APIMaterials()
     column_type::String = "rc_rect"
+    column_catalog::String = "preferred"   # Steel: compact_only | preferred | all. RC rect: standard | square | rectangular | low_capacity | high_capacity | all. RC circular: standard | low_capacity | high_capacity | all.
     beam_type::String = "steel_w"
-    beam_catalog::String = "large"   # RC beam catalog: standard | small | large | all. Ignored for steel.
+    beam_catalog::String = "large"   # RC beam catalog: standard | small | large | xlarge | all | custom. Ignored for steel.
+    beam_catalog_bounds::Union{APIBeamCatalogBounds, Nothing} = nothing  # Required when beam_catalog is "custom".
     fire_rating::Float64 = 0.0
     optimize_for::String = "weight"
     size_foundations::Bool = false
@@ -254,6 +267,7 @@ StructTypes.StructType(::Type{APISpreadParams}) = StructTypes.Mutable()
 StructTypes.StructType(::Type{APIStripParams}) = StructTypes.Mutable()
 StructTypes.StructType(::Type{APIMatParams}) = StructTypes.Mutable()
 StructTypes.StructType(::Type{APIFoundationOptions}) = StructTypes.Mutable()
+StructTypes.StructType(::Type{APIBeamCatalogBounds}) = StructTypes.Mutable()
 StructTypes.StructType(::Type{APIParams}) = StructTypes.Mutable()
 StructTypes.StructType(::Type{APIInput}) = StructTypes.Mutable()
 
@@ -357,6 +371,8 @@ Base.@kwdef struct APIVisualizationFrameElement
     # 2D section polygon in local y-z coordinates (centroid at origin)
     # Each vertex is [y, z] in feet, where y = width direction, z = depth direction
     section_polygon::Vector{Vector{Float64}} = []  # [[y1, z1], [y2, z2], ...]
+    # Inner boundary for hollow sections (HSS rect/round); empty for solid sections
+    section_polygon_inner::Vector{Vector{Float64}} = []  # [[y1, z1], [y2, z2], ...]
     # Interpolated deflected curve (cubic interpolation from FEA)
     original_points::Vector{Vector{Float64}} = []   # [[x,y,z], ...] original positions in feet
     displacement_vectors::Vector{Vector{Float64}} = []  # [[dx,dy,dz], ...] displacements at each point in feet

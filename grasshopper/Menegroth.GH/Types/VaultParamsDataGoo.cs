@@ -5,17 +5,17 @@ namespace Menegroth.GH.Types
     /// <summary>
     /// Grasshopper Goo wrapper for <see cref="VaultParamsData"/>.
     /// </summary>
-    public class GH_VaultParamsData : GH_Goo<VaultParamsData>
+    public class VaultParamsDataGoo : GH_Goo<VaultParamsData>
     {
-        public GH_VaultParamsData() { Value = new VaultParamsData(); }
-        public GH_VaultParamsData(VaultParamsData p) { Value = p; }
-        public GH_VaultParamsData(GH_VaultParamsData other) { Value = other.Value; }
+        public VaultParamsDataGoo() { Value = new VaultParamsData(); }
+        public VaultParamsDataGoo(VaultParamsData p) { Value = p; }
+        public VaultParamsDataGoo(VaultParamsDataGoo other) { Value = other.Value; }
 
         public override bool IsValid => Value != null;
         public override string TypeName => "VaultParamsData";
         public override string TypeDescription => "Vault-specific parameter overrides";
 
-        public override IGH_Goo Duplicate() => new GH_VaultParamsData(this);
+        public override IGH_Goo Duplicate() => new VaultParamsDataGoo(this);
 
         public override string ToString()
         {

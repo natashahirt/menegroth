@@ -217,12 +217,16 @@ end
 Top-level container for all foundation design parameters.
 
 # Fields
+- `code`: Design code — `:aci` (default) or `:is` (IS 456 legacy).
 - `strategy`: Auto-selection mode — `:auto`, `:all_spread`, `:all_strip`, `:mat`.
 - `mat_coverage_threshold`: Switch to mat when coverage ratio exceeds this (default 0.50).
 - `spread_params`, `strip_params`, `mat_params`: Option blocks for each foundation type;
   each can be overridden by API or param components.
 """
 Base.@kwdef struct FoundationOptions
+    # Design code dispatch (:aci default, :is legacy)
+    code::Symbol = :aci
+
     # Sub-option blocks
     spread_params::SpreadParams   = SpreadParams()
     strip_params::StripParams     = StripParams()

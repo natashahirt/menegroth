@@ -4,6 +4,7 @@ using System.Linq;
 using System.Windows.Forms;
 using Grasshopper.Kernel;
 using Rhino.Geometry;
+using Menegroth.GH.Helpers;
 using Menegroth.GH.Types;
 
 namespace Menegroth.GH.Components
@@ -242,7 +243,7 @@ namespace Menegroth.GH.Components
                 foreach (var geom in faceInputs)
                 {
                     if (geom == null) continue;
-                    var coords = GetBoundaryPolylineCoords(geom);
+                    var coords = GeometryExtraction.GetBoundaryPolylineCoords(geom);
                     if (coords == null || coords.Count < 3) continue;
 
                     // Snap face boundary points to the same rounded vertex map used by edges.
@@ -271,7 +272,7 @@ namespace Menegroth.GH.Components
                 }
             }
 
-            DA.SetData(0, new GH_BuildingGeometry(geo));
+            DA.SetData(0, new BuildingGeometryGoo(geo));
             DA.SetData(1, BuildGeometrySummary(geo));
         }
 
@@ -318,12 +319,7 @@ namespace Menegroth.GH.Components
                 sb.Append(" Z [").Append(minZ.ToString("F2")).Append(", ").Append(maxZ.ToString("F2")).AppendLine("]");
             }
 
-            if (geo.StoriesZ != null && geo.StoriesZ.Count > 0)
-            {
-                sb.Append("Story elevations: ");
-                sb.AppendLine(string.Join(", ", geo.StoriesZ.Select(z => z.ToString("F2"))));
-            }
-            else if (nV > 0 && geo.Vertices != null)
+            if (nV > 0 && geo.Vertices != null)
             {
                 var zVals = geo.Vertices
                     .Where(v => v != null && v.Length >= 3)
@@ -421,75 +417,6 @@ namespace Menegroth.GH.Components
                 return 0;
             double dx = a[0] - b[0], dy = a[1] - b[1], dz = a[2] - b[2];
             return Math.Sqrt(dx * dx + dy * dy + dz * dz);
-        }
-
-        /// <summary>
-        /// Get boundary as a closed polyline in [x,y,z] coords. Supports closed curves
-        /// (polyline or NURBS) and planar surfaces / single-face Breps.
-        /// </summary>
-        private static List<double[]> GetBoundaryPolylineCoords(GeometryBase geom)
-        {
-            if (geom is Curve crv)
-                return CurveToPolylineCoords(crv);
-            if (geom is Brep brep && brep.Faces.Count == 1)
-                return BrepFaceToPolylineCoords(brep.Faces[0]);
-            if (geom is Surface srf)
-            {
-                var brepFromSrf = Brep.CreateFromSurface(srf);
-                if (brepFromSrf?.Faces.Count == 1)
-                    return BrepFaceToPolylineCoords(brepFromSrf.Faces[0]);
-            }
-            return null;
-        }
-
-        private static List<double[]> CurveToPolylineCoords(Curve crv)
-        {
-            if (crv == null || !crv.IsClosed) return null;
-            if (crv.TryGetPolyline(out Polyline pl))
-            {
-                var coords = new List<double[]>();
-                for (int i = 0; i < pl.Count - 1; i++)
-                    coords.Add(new[] { pl[i].X, pl[i].Y, pl[i].Z });
-                return coords;
-            }
-            const double tol = 1e-6;
-            const double angleTol = 0.1;
-            var plCurve = crv.ToPolyline(tol, angleTol, 0.001, 1000.0);
-            if (plCurve == null || !plCurve.TryGetPolyline(out Polyline plApprox) || plApprox.Count < 4)
-                return null;
-            var list = new List<double[]>();
-            for (int i = 0; i < plApprox.Count - 1; i++)
-                list.Add(new[] { plApprox[i].X, plApprox[i].Y, plApprox[i].Z });
-            return list;
-        }
-
-        private static List<double[]> BrepFaceToPolylineCoords(BrepFace face)
-        {
-            var loop = face.OuterLoop;
-            if (loop == null) return null;
-            var coords = new List<double[]>();
-            foreach (var trim in loop.Trims)
-            {
-                var edge = trim.Edge;
-                if (edge?.EdgeCurve == null) return null;
-                var edgeCrv = edge.EdgeCurve;
-                if (edgeCrv.TryGetPolyline(out Polyline pl))
-                {
-                    int n = pl.Count - 1;
-                    for (int i = 0; i < n; i++)
-                        coords.Add(new[] { pl[i].X, pl[i].Y, pl[i].Z });
-                }
-                else
-                {
-                    const double tol = 1e-6;
-                    const double angleTol = 0.1;
-                    var plCurve = edgeCrv.ToPolyline(tol, angleTol, 0.001, 1000.0);
-                    if (plCurve == null || !plCurve.TryGetPolyline(out Polyline plApprox)) return null;
-                    for (int i = 0; i < plApprox.Count - 1; i++)
-                        coords.Add(new[] { plApprox[i].X, plApprox[i].Y, plApprox[i].Z });
-                }
-            }
-            return coords.Count >= 3 ? coords : null;
         }
 
         // ─── Auto-shatter helper ─────────────────────────────────────────

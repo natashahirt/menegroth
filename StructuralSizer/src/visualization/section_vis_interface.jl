@@ -161,3 +161,126 @@ end
 
 """Glulam sections visualize as solid rectangles."""
 section_geometry(::Type{<:GlulamSection}) = SolidRect()
+
+# =============================================================================
+# Section Polygon Interface
+# =============================================================================
+#
+# Each section type exposes its 2D outline polygon via section_polygon(sec).
+# Returns Vector{NTuple{2, Float64}} in meters, centroid at origin, y = width, z = depth.
+# Used by API serialization and visualization (e.g. Grasshopper section sweep).
+#
+# PixelFrameSection stores polygon geometry in sec.section (CompoundSection);
+# other types derive from dimensions (b, h, D, etc.).
+# =============================================================================
+
+"""
+    section_polygon(sec) -> Vector{NTuple{2, Float64}}
+
+Return the 2D outline polygon of a section in local y-z coordinates (meters).
+Origin at section centroid; y = width direction, z = depth direction.
+"""
+section_polygon(sec) = _section_polygon(section_geometry(sec), sec)
+
+"""
+    section_polygon_inner(sec) -> Vector{NTuple{2, Float64}}
+
+Return the inner boundary polygon for hollow sections (meters). Returns empty for solid sections.
+Used for HSS rect/round to show hollow geometry; cap will close the ends correctly.
+"""
+section_polygon_inner(sec) = NTuple{2, Float64}[]
+
+# --- Solid Rectangular (RCColumnSection, RCBeamSection, GlulamSection) ---
+function _section_polygon(::SolidRect, sec)
+    w = ustrip(u"m", section_width(sec))
+    d = ustrip(u"m", section_depth(sec))
+    return NTuple{2, Float64}[
+        (-w/2, -d/2), (w/2, -d/2), (w/2, d/2), (-w/2, d/2)
+    ]
+end
+
+# --- Hollow Rectangular (HSS rect) ---
+function _section_polygon(::HollowRect, sec)
+    w = ustrip(u"m", section_width(sec))
+    d = ustrip(u"m", section_depth(sec))
+    return NTuple{2, Float64}[
+        (-w/2, -d/2), (w/2, -d/2), (w/2, d/2), (-w/2, d/2)
+    ]
+end
+
+"""Inner boundary for hollow rectangular HSS (meters). Returns empty for solid sections."""
+function section_polygon_inner(sec::HSSRectSection)
+    w = ustrip(u"m", section_width(sec))
+    d = ustrip(u"m", section_depth(sec))
+    t = section_thickness(sec)
+    wi = max(0.0, w - 2t)
+    di = max(0.0, d - 2t)
+    (wi < 1e-6 || di < 1e-6) && return NTuple{2, Float64}[]
+    return NTuple{2, Float64}[
+        (-wi/2, -di/2), (wi/2, -di/2), (wi/2, di/2), (-wi/2, di/2)
+    ]
+end
+
+# --- Hollow Round (HSS round, pipe) ---
+function _section_polygon(::HollowRound, sec; n_segments::Int=24)
+    r = ustrip(u"m", section_width(sec) / 2)
+    θ = range(0, 2π, length=n_segments + 1)[1:end-1]
+    return NTuple{2, Float64}[(r * cos(t), r * sin(t)) for t in θ]
+end
+
+"""Inner boundary for hollow round HSS (meters). Returns empty for solid sections."""
+function section_polygon_inner(sec::HSSRoundSection; n_segments::Int=24)
+    r_outer = ustrip(u"m", section_width(sec) / 2)
+    t = section_thickness(sec)
+    r_inner = max(0.0, r_outer - t)
+    r_inner < 1e-6 && return NTuple{2, Float64}[]
+    θ = range(0, 2π, length=n_segments + 1)[1:end-1]
+    return NTuple{2, Float64}[(r_inner * cos(t), r_inner * sin(t)) for t in θ]
+end
+
+# --- I-Shape (W-shapes) ---
+function _section_polygon(::IShape, sec)
+    d_m = ustrip(u"m", section_depth(sec))
+    bf_m = section_flange_width(sec)
+    tw_m = section_web_thickness(sec)
+    tf_m = section_flange_thickness(sec)
+    return NTuple{2, Float64}[
+        (-bf_m/2, -d_m/2), (-bf_m/2, -d_m/2 + tf_m), (-tw_m/2, -d_m/2 + tf_m),
+        (-tw_m/2, d_m/2 - tf_m), (-bf_m/2, d_m/2 - tf_m), (-bf_m/2, d_m/2),
+        (bf_m/2, d_m/2), (bf_m/2, d_m/2 - tf_m), (tw_m/2, d_m/2 - tf_m),
+        (tw_m/2, -d_m/2 + tf_m), (bf_m/2, -d_m/2 + tf_m), (bf_m/2, -d_m/2),
+    ]
+end
+
+# --- RCCircularSection: circle (override; default SolidRect would give square) ---
+function section_polygon(sec::RCCircularSection)
+    r = section_width(sec) / 2
+    θ = range(0, 2π, length=25)[1:end-1]
+    return NTuple{2, Float64}[(r * cos(t), r * sin(t)) for t in θ]
+end
+
+# --- RCTBeamSection: T-beam outline ---
+function section_polygon(sec::RCTBeamSection)
+    bw = sec.bw
+    bf = sec.bf
+    h = sec.h
+    hf = sec.hf
+    Af = bf * hf
+    Aw = bw * (h - hf)
+    ybar_from_top = (Af * (hf / 2) + Aw * (hf + (h - hf) / 2)) / (Af + Aw)
+    z_top = ustrip(u"m", h - ybar_from_top)
+    z_bot = -ustrip(u"m", ybar_from_top)
+    z_flange_bot = ustrip(u"m", h - hf - ybar_from_top)
+    bw_m = ustrip(u"m", bw)
+    bf_m = ustrip(u"m", bf)
+    return NTuple{2, Float64}[
+        (-bw_m/2, z_bot), (bw_m/2, z_bot), (bw_m/2, z_flange_bot),
+        (bf_m/2, z_flange_bot), (bf_m/2, z_top), (-bf_m/2, z_top),
+        (-bf_m/2, z_flange_bot), (-bw_m/2, z_flange_bot),
+    ]
+end
+
+# --- PixelFrameSection: extract from stored CompoundSection (like PixelFrame) ---
+function section_polygon(sec::PixelFrameSection)
+    return _pixelframe_envelope_polygon(sec.section)
+end

@@ -45,10 +45,10 @@ compute_geometry_hash
 | `floor_type` | `"flat_slab"` | `FlatSlabOptions(base=FlatPlateOptions(...))` |
 | `floor_type` | `"one_way"` | `OneWayOptions(...)` |
 | `floor_type` | `"vault"` | `VaultOptions(...)` |
-| `column_type` | `"rc_rect"` | `ConcreteColumnOptions(material=column_concrete, rebar_material=rebar, section_shape=:rect)` |
-| `column_type` | `"rc_circular"` | `ConcreteColumnOptions(material=column_concrete, rebar_material=rebar, section_shape=:circular)` |
-| `column_type` | `"steel_w"` | `SteelColumnOptions(material=steel, section_type=:w)` |
-| `column_type` | `"steel_hss"` | `SteelColumnOptions(material=steel, section_type=:hss)` |
+| `column_type` | `"rc_rect"` | `ConcreteColumnOptions(material=..., rebar_material=..., section_shape=:rect, catalog=column_catalog)` |
+| `column_type` | `"rc_circular"` | `ConcreteColumnOptions(material=..., rebar_material=..., section_shape=:circular, catalog=column_catalog)` |
+| `column_type` | `"steel_w"` | `SteelColumnOptions(material=steel, section_type=:w, catalog=column_catalog)` |
+| `column_type` | `"steel_hss"` | `SteelColumnOptions(material=steel, section_type=:hss, catalog=column_catalog)` |
 | `column_type` | `"steel_pipe"` | `SteelColumnOptions(material=steel, section_type=:pipe)` |
 | `beam_type` | `"steel_w"` | `SteelBeamOptions(material=steel, section_type=:w)` |
 | `beam_type` | `"steel_hss"` | `SteelBeamOptions(material=steel, section_type=:hss)` |

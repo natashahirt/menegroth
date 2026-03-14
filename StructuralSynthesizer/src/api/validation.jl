@@ -110,6 +110,27 @@ function validate_input(input::APIInput)
         push!(errors, "Invalid floor_type \"$(p.floor_type)\". Must be one of: $(join(valid_floor_types, ", ")).")
     end
 
+    # ─── Floor + column/beam type compatibility ─────────────────────────────
+    # Flat plate/slab require RC columns (punching shear design assumes RC; steel not supported)
+    beamless_floor = p.floor_type in ("flat_plate", "flat_slab")
+    steel_column = p.column_type in ("steel_w", "steel_hss", "steel_pipe")
+    steel_beam = p.beam_type in ("steel_w", "steel_hss")
+    if beamless_floor && steel_column
+        push!(errors, "floor_type \"$(p.floor_type)\" requires reinforced concrete columns. " *
+              "column_type \"$(p.column_type)\" is not supported for beamless slab systems.")
+    end
+    # Vault requires RC beams and RC columns (thrust resistance)
+    if p.floor_type == "vault"
+        if steel_column
+            push!(errors, "floor_type \"vault\" requires reinforced concrete columns. " *
+                  "column_type \"$(p.column_type)\" is not supported.")
+        end
+        if steel_beam
+            push!(errors, "floor_type \"vault\" requires reinforced concrete beams. " *
+                  "beam_type \"$(p.beam_type)\" is not supported.")
+        end
+    end
+
     # ─── Floor options (method, deflection_limit, punching_strategy) ─────
     valid_analysis_methods = ("DDM", "DDM_SIMPLIFIED", "EFM", "EFM_HARDY_CROSS", "FEA")
     method_key = uppercase(strip(p.floor_options.method))
@@ -159,15 +180,43 @@ function validate_input(input::APIInput)
     if !(p.column_type in valid_column_types)
         push!(errors, "Invalid column_type \"$(p.column_type)\". Must be one of: $(join(valid_column_types, ", ")).")
     end
+    valid_steel_column_catalogs = ("compact_only", "preferred", "all")
+    if p.column_type in ("steel_w", "steel_hss") && !(p.column_catalog in valid_steel_column_catalogs)
+        push!(errors, "Invalid column_catalog for steel \"$(p.column_catalog)\". Must be one of: $(join(valid_steel_column_catalogs, ", ")).")
+    end
+    valid_rc_rect_catalogs = ("standard", "square", "rectangular", "low_capacity", "high_capacity", "all")
+    if p.column_type == "rc_rect" && !(p.column_catalog in valid_rc_rect_catalogs)
+        push!(errors, "Invalid column_catalog for RC rectangular \"$(p.column_catalog)\". Must be one of: $(join(valid_rc_rect_catalogs, ", ")).")
+    end
+    valid_rc_circular_catalogs = ("standard", "low_capacity", "high_capacity", "all")
+    if p.column_type == "rc_circular" && !(p.column_catalog in valid_rc_circular_catalogs)
+        push!(errors, "Invalid column_catalog for RC circular \"$(p.column_catalog)\". Must be one of: $(join(valid_rc_circular_catalogs, ", ")).")
+    end
 
     valid_beam_types = ("steel_w", "steel_hss", "rc_rect", "rc_tbeam")
     if !(p.beam_type in valid_beam_types)
         push!(errors, "Invalid beam_type \"$(p.beam_type)\". Must be one of: $(join(valid_beam_types, ", ")).")
     end
 
-    valid_beam_catalogs = ("standard", "small", "large", "all")
+    valid_beam_catalogs = ("standard", "small", "large", "xlarge", "all", "custom")
     if !(p.beam_catalog in valid_beam_catalogs)
         push!(errors, "Invalid beam_catalog \"$(p.beam_catalog)\". Must be one of: $(join(valid_beam_catalogs, ", ")).")
+    end
+    if p.beam_catalog == "custom"
+        if p.beam_catalog_bounds === nothing
+            push!(errors, "beam_catalog_bounds is required when beam_catalog is \"custom\".")
+        else
+            b = p.beam_catalog_bounds
+            if b.min_width_in >= b.max_width_in
+                push!(errors, "beam_catalog_bounds: min_width_in must be < max_width_in.")
+            end
+            if b.min_depth_in >= b.max_depth_in
+                push!(errors, "beam_catalog_bounds: min_depth_in must be < max_depth_in.")
+            end
+            if b.resolution_in <= 0
+                push!(errors, "beam_catalog_bounds: resolution_in must be > 0.")
+            end
+        end
     end
 
     if p.fire_rating ∉ (0.0, 1.0, 1.5, 2.0, 3.0, 4.0)

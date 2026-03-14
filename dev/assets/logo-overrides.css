@@ -1,0 +1,7 @@
+/* Invert logo in dark themes so it appears white on dark sidebar background */
+html.theme--documenter-dark .docs-logo img,
+html.theme--catppuccin-frappe .docs-logo img,
+html.theme--catppuccin-macchiato .docs-logo img,
+html.theme--catppuccin-mocha .docs-logo img {
+  filter: invert(1);
+}

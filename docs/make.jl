@@ -3,12 +3,16 @@ using StructuralSynthesizer
 using StructuralSizer
 
 # Copy logo from project assets; Documenter expects docs/src/assets/logo.svg
+# Use abspath so the source path resolves correctly whether make.jl is run
+# directly (julia docs/make.jl) or via include() from scripts/runners/build_docs.jl.
 assets_dir = joinpath(@__DIR__, "src", "assets")
 mkpath(assets_dir)
-src_logo = joinpath(@__DIR__, "..", "assets", "menegroth_logo.svg")
+src_logo = abspath(joinpath(@__DIR__, "..", "assets", "menegroth_logo.svg"))
 dst_logo = joinpath(assets_dir, "logo.svg")
 if isfile(src_logo)
     cp(src_logo, dst_logo; force = true)
+else
+    @warn "Logo not copied: source not found" src_logo
 end
 
 makedocs(

@@ -904,7 +904,7 @@ function _get_interior_column_nodes(struc::BuildingStructure, slab::Slab,
     interior_vert_indices = setdiff(all_cell_verts, boundary_set)
     
     # Return actual Node objects for interior columns
-    return [nodes[vi] for vi in interior_vert_indices]
+    return Asap.Node[nodes[vi] for vi in interior_vert_indices]
 end
 
 # =============================================================================
@@ -1309,7 +1309,7 @@ function _get_slab_column_nodes(struc::BuildingStructure, slab::Slab, nodes::Vec
     end
 
     target_verts = intersect(slab_vert_set, column_vert_set)
-    return [nodes[vi] for vi in target_verts if 1 <= vi <= length(nodes)]
+    return Asap.Node[nodes[vi] for vi in target_verts if 1 <= vi <= length(nodes)]
 end
 
 

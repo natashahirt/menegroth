@@ -15,6 +15,15 @@ Sections are defined in `StructuralSizer/src/members/sections/steel/`.
 
 ## Key Types
 
+### Abstract Hierarchy
+
+```@docs
+AbstractSection
+AbstractHollowSection
+AbstractRectHollowSection
+AbstractRoundHollowSection
+```
+
 ### W Shapes (Doubly-Symmetric I-Sections)
 
 ```@docs

@@ -21,6 +21,7 @@ All presets compute elastic modulus per ACI 318-11 §8.5.1. The `AggregateType` 
 ## Key Types
 
 ```@docs
+AbstractMaterial
 Concrete
 ReinforcedConcreteMaterial
 AggregateType

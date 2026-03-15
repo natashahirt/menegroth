@@ -4,8 +4,13 @@
 # Section types and catalogs for structural steel members.
 
 # Abstract types for hollow sections (needed before section files)
+"""Base type for hollow structural sections (rectangular HSS, round HSS, pipe)."""
 abstract type AbstractHollowSection <: AbstractSection end
+
+"""Base type for rectangular or square hollow sections (HSSRectSection)."""
 abstract type AbstractRectHollowSection <: AbstractHollowSection end
+
+"""Base type for round hollow sections and pipe (HSSRoundSection)."""
 abstract type AbstractRoundHollowSection <: AbstractHollowSection end
 
 # I-shaped sections (W, S, M, HP shapes)

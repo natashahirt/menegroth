@@ -329,10 +329,16 @@ function _execute_design(input::APIInput)
         design = design_building(struc, params)
         _append_design_log!("Design sizing completed.")
         
-        # Build analysis model for visualization (if not already built)
+        # Build analysis model for visualization (if not already built).
+        # This is a fallback — normally built inside design_building before restore.
         if isnothing(design.asap_model)
-            _append_design_log!("Building analysis model for visualization.")
-            build_analysis_model!(design)
+            _append_design_log!("Building analysis model for visualization (fallback).")
+            try
+                build_analysis_model!(design)
+            catch e
+                @warn "Fallback build_analysis_model! failed — proceeding without shell mesh" exception=(e, catch_backtrace())
+                _append_design_log!("Analysis model build failed: $(sprint(showerror, e)). Proceeding with frame-only visualization.")
+            end
         end
         
         output = design_to_json(design; geometry_hash=geo_hash)

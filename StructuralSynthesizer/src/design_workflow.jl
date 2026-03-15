@@ -309,7 +309,9 @@ compare_designs(d1, d2)
 function design_building(struc::BuildingStructure, params::DesignParameters)
     t_start = time()
     
+    t0 = time()
     prepare!(struc, params)
+    t_prepare = time() - t0
 
     # Pre-sizing validation: fail fast if DDM/EFM/FEA applicability checks fail
     ok, val_errors = run_pre_sizing_validation(struc, params)
@@ -317,22 +319,38 @@ function design_building(struc::BuildingStructure, params::DesignParameters)
         throw(PreSizingValidationError(val_errors))
     end
     
+    t0 = time()
     for stage in build_pipeline(params)
         stage.fn(struc)
         stage.needs_sync && sync_asap!(struc; params=params)
     end
+    t_pipeline = time() - t0
     
+    t0 = time()
     design = capture_design(struc, params; t_start=t_start)
+    t_capture = time() - t0
 
     # Build the visualization analysis model while struc still has sized
     # dimensions and structural offsets (restore! will wipe them).
+    t0 = time()
     if isnothing(design.asap_model)
-        build_analysis_model!(design)
+        try
+            build_analysis_model!(design)
+        catch e
+            @warn "build_analysis_model! failed — visualization will use frame-only model" exception=(e, catch_backtrace())
+        end
     end
+    t_analysis = time() - t0
     
-    # ─── Restore ───
+    # Restore pristine member dimensions so struc can be reused.
+    # Skip sync_asap! — prepare! rebuilds the Asap model from scratch on the
+    # next design_building call, and the API route never reads struc.asap_model
+    # after this point (serialization uses design.asap_model).
+    t0 = time()
     restore!(struc; geometry_is_centerline=params.geometry_is_centerline)
-    sync_asap!(struc; params=params)
+    t_restore = time() - t0
+
+    @info "design_building timing" prepare=round(t_prepare; digits=2) pipeline=round(t_pipeline; digits=2) capture=round(t_capture; digits=2) analysis_model=round(t_analysis; digits=2) restore=round(t_restore; digits=2) total=round(time() - t_start; digits=2)
     
     return design
 end

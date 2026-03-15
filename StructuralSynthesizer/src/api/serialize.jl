@@ -211,6 +211,7 @@ Extract visualization geometry from the analysis model (post-shatter, post-desig
 Returns nothing if analysis model is not available.
 """
 function _serialize_visualization(design::BuildingDesign, du::DisplayUnits)
+    t_vis_start = time()
     struc = design.structure
     model = isnothing(design.asap_model) ? struc.asap_model : design.asap_model
     isnothing(model) && return nothing
@@ -231,19 +232,33 @@ function _serialize_visualization(design::BuildingDesign, du::DisplayUnits)
         1 <= sup.node_idx <= length(model.nodes) || continue
         push!(support_node_ids, sup.node_idx)
     end
+    t0 = time()
     nodes = _serialize_visualization_nodes(model, du, support_node_ids)
+    t_nodes = time() - t0
 
-    # Extract frame elements
+    t0 = time()
     frame_elements = _serialize_visualization_frame_elements(design, model, du)
+    t_frames = time() - t0
 
-    # Extract sized slabs (from struc.slabs - cell boundaries)
-    sized_slabs = _serialize_sized_slabs(design, struc, du)
+    # Pre-compute drop panels once (used by both sized slabs and deflected meshes)
+    drop_panel_cache = Dict{Int, Vector{APIDropPanelPatch}}()
+    for (slab_idx, slab) in enumerate(struc.slabs)
+        drop_panel_cache[slab_idx] = _serialize_drop_panel_patches(slab_idx, slab, struc, design, du)
+    end
 
-    # Extract deflected slab meshes (from model.shell_elements)
-    deflected_meshes = _serialize_deflected_slab_meshes(design, struc, model, du)
+    t0 = time()
+    sized_slabs = _serialize_sized_slabs(design, struc, du, drop_panel_cache)
+    t_sized = time() - t0
 
-    # Extract foundations for sized/original visualization modes
+    t0 = time()
+    deflected_meshes = _serialize_deflected_slab_meshes(design, struc, model, du, drop_panel_cache)
+    t_deflected = time() - t0
+
+    t0 = time()
     foundations = _serialize_visualization_foundations(design, struc, du)
+    t_found = time() - t0
+
+    @info "serialize_visualization timing" nodes=round(t_nodes; digits=2) frames=round(t_frames; digits=2) sized_slabs=round(t_sized; digits=2) deflected_meshes=round(t_deflected; digits=2) foundations=round(t_found; digits=2) total=round(time() - t_vis_start; digits=2)
 
     # Compute suggested scale factor
     max_disp = isempty(nodes) ? 0.0 : maximum(norm(n.displacement) for n in nodes)
@@ -292,6 +307,7 @@ reflect the structural centerlines, so no additional shifting is needed here.
 """
 function _serialize_visualization_nodes(model, du::DisplayUnits, support_node_ids::Set{Int}=Set{Int}())
     nodes = APIVisualizationNode[]
+    sizehint!(nodes, length(model.nodes))
     for (i, node) in enumerate(model.nodes)
         pos = _position_to_display_lengths(du, node.position; node_id=i)
         disp_m = Asap.to_displacement_vec(node.displacement)[1:3]
@@ -407,7 +423,9 @@ function _serialize_visualization_frame_elements(design::BuildingDesign, model, 
     use_elem_idx_1to1 = model === struc.asap_model &&
                        length(model.elements) == length(skel.edge_indices)
 
+    n_elems = length(model.elements)
     elements = APIVisualizationFrameElement[]
+    sizehint!(elements, n_elems)
     for (elem_idx, elem) in enumerate(model.elements)
         node_start_id = elem.nodeStart.nodeID
         node_end_id = elem.nodeEnd.nodeID
@@ -626,8 +644,10 @@ function _serialize_section_polygon_inner(sec_obj, du::DisplayUnits, elem_idx::I
 end
 
 """Serialize sized slab boundary polygons and utilization for 3D visualization."""
-function _serialize_sized_slabs(design::BuildingDesign, struc::BuildingStructure, du::DisplayUnits)
+function _serialize_sized_slabs(design::BuildingDesign, struc::BuildingStructure, du::DisplayUnits,
+                                drop_panel_cache::Dict{Int, Vector{APIDropPanelPatch}})
     sized_slabs = APISizedSlab[]
+    sizehint!(sized_slabs, length(struc.slabs))
     skel = struc.skeleton
 
     for (slab_idx, slab) in enumerate(struc.slabs)
@@ -662,7 +682,7 @@ function _serialize_sized_slabs(design::BuildingDesign, struc::BuildingStructure
 
         thickness_ft = _to_display_length(du, slab_result.thickness)
         z_top_ft = z_coord
-        drop_panels = _serialize_drop_panel_patches(slab_idx, slab, struc, design, du)
+        drop_panels = get(drop_panel_cache, slab_idx, APIDropPanelPatch[])
         ratio = max(slab_result.deflection_ratio, slab_result.punching_max_ratio)
         ok = slab_result.deflection_ok && slab_result.punching_ok
         
@@ -672,9 +692,13 @@ function _serialize_sized_slabs(design::BuildingDesign, struc::BuildingStructure
         vault_mesh_faces = Vector{Int}[]
         
         if is_vault
-            vault_mesh = _serialize_vault_mesh(slab, struc, du)
-            vault_mesh_vertices = vault_mesh.vertices
-            vault_mesh_faces = vault_mesh.faces
+            try
+                vault_mesh = _serialize_vault_mesh(slab, struc, du)
+                vault_mesh_vertices = vault_mesh.vertices
+                vault_mesh_faces = vault_mesh.faces
+            catch e
+                @warn "Vault mesh serialization failed for slab $slab_idx — omitting curved mesh" exception=(e, catch_backtrace())
+            end
         end
         
         push!(sized_slabs, APISizedSlab(
@@ -741,7 +765,8 @@ function _serialize_vault_mesh(slab, struc::BuildingStructure, du::DisplayUnits;
 end
 
 """Serialize shell-element meshes with global/local vertex displacements for deflected slab visualization."""
-function _serialize_deflected_slab_meshes(design::BuildingDesign, struc::BuildingStructure, model, du::DisplayUnits)
+function _serialize_deflected_slab_meshes(design::BuildingDesign, struc::BuildingStructure, model, du::DisplayUnits,
+                                          drop_panel_cache::Dict{Int, Vector{APIDropPanelPatch}})
     deflected_meshes = APIDeflectedSlabMesh[]
 
     !Asap.has_shell_elements(model) && return deflected_meshes
@@ -775,11 +800,19 @@ function _serialize_deflected_slab_meshes(design::BuildingDesign, struc::Buildin
 
         # Collect all vertices and faces from shell elements
         # Each ShellTri3 is a triangle with 3 nodes
+        n_shells = length(shells)
+        n_verts_est = div(n_shells * 3, 2)  # ~shared vertices in triangle mesh
+
         vertices = Vector{Float64}[]
-        vertex_displacements = Vector{Float64}[]  # global
+        vertex_displacements = Vector{Float64}[]
         vertex_displacements_local = Vector{Float64}[]
         faces = Vector{Int}[]
+        sizehint!(vertices, n_verts_est)
+        sizehint!(vertex_displacements, n_verts_est)
+        sizehint!(vertex_displacements_local, n_verts_est)
+        sizehint!(faces, n_shells)
         vertex_map = Dict{Asap.Node, Int}()
+        sizehint!(vertex_map, n_verts_est)
 
         # Per-face analytical values (one entry per triangle, parallel to `faces`)
         face_bending = Float64[]
@@ -787,6 +820,11 @@ function _serialize_deflected_slab_meshes(design::BuildingDesign, struc::Buildin
         face_shear = Float64[]
         face_vm = Float64[]
         face_surf = Float64[]
+        sizehint!(face_bending, n_shells)
+        sizehint!(face_membrane, n_shells)
+        sizehint!(face_shear, n_shells)
+        sizehint!(face_vm, n_shells)
+        sizehint!(face_surf, n_shells)
 
         for shell in shells
             shell_nodes = shell.nodes
@@ -820,7 +858,7 @@ function _serialize_deflected_slab_meshes(design::BuildingDesign, struc::Buildin
         end
 
         thickness_ft = _to_display_length(du, slab_result.thickness)
-        drop_panels = _serialize_drop_panel_patches(slab_idx, slab, struc, design, du)
+        drop_panels = get(drop_panel_cache, slab_idx, APIDropPanelPatch[])
         ratio = max(slab_result.deflection_ratio, slab_result.punching_max_ratio)
         ok = slab_result.deflection_ok && slab_result.punching_ok
         is_vault = slab.result isa StructuralSizer.VaultResult

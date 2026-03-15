@@ -16,6 +16,7 @@ This is a specialized material for research into novel structural systems — mo
 ## Key Types
 
 ```@docs
+AbstractMaterial
 FiberReinforcedConcrete
 ```
 

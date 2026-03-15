@@ -45,6 +45,10 @@ Related functions documented on their canonical pages:
 
 All members share the abstract base `AbstractMember{T}`. The concrete types wrap a `MemberBase{T}` with additional fields.
 
+```@docs
+AbstractMember
+```
+
 ### MemberBase
 
 `MemberBase{T}` stores:

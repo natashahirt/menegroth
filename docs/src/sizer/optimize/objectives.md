@@ -24,16 +24,20 @@ solver to compute per-section coefficients and total objective values.
 
 ## Key Types
 
-- `AbstractObjective` — abstract base type for all optimization objectives.
-- `MinWeight` — minimize total structural weight (default objective).
-- `MinVolume` — minimize total material volume.
-- `MinCost` — minimize estimated material cost.
-- `MinCarbon` — minimize embodied carbon (kgCO₂e).
+```@docs
+AbstractObjective
+MinWeight
+MinVolume
+MinCost
+MinCarbon
+```
 
 ## Functions
 
-- `objective_value(obj, section, material, length)` — compute the contribution of a single member to the total objective.
-- `total_objective(obj, sections, materials, lengths)` — sum `objective_value` across all members.
+```@docs
+objective_value
+total_objective
+```
 
 ## Implementation Details
 

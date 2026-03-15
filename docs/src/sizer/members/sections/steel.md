@@ -15,6 +15,13 @@ Sections are defined in `StructuralSizer/src/members/sections/steel/`.
 
 ## Key Types
 
+```@docs
+AbstractSection
+AbstractHollowSection
+AbstractRectHollowSection
+AbstractRoundHollowSection
+```
+
 ### W Shapes (Doubly-Symmetric I-Sections)
 
 ```@docs
@@ -87,6 +94,10 @@ Section properties: `A`, `I` (= Ix = Iy), `S` (= Sx = Sy), `Z` (= Zx = Zy), `J` 
 ### Pipe Section
 
 **`PipeSection`** is a type alias for `HSSRoundSection`. The AISC database distinguishes Pipe shapes by name, but they use the same geometric model.
+
+```@docs
+PipeSection
+```
 
 ### Rebar
 

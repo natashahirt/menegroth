@@ -51,6 +51,14 @@ AbstractFoundation
 `AbstractDeepFoundation` are the two branches.  See the tree above for the
 full hierarchy.
 
+```@docs
+AbstractFoundation
+AbstractShallowFoundation
+AbstractDeepFoundation
+AbstractFoundationResult
+AbstractMatMethod
+```
+
 ### Shallow Foundation Types
 
 ```@docs

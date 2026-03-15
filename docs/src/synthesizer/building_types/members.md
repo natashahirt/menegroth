@@ -11,7 +11,7 @@
 
 ## Overview
 
-Beams, columns, and struts are the linear structural members of a `BuildingStructure`. They all share a common `MemberBase` that stores segment indices, length, buckling parameters, section assignment, and material volumes. Each member type adds domain-specific fields.
+Beams, columns, and struts are the linear structural members of a `BuildingStructure`. They all share a common `MemberBase{T}` (composition) that stores segment indices, member length, buckling parameters, section assignment, and material volumes. Each concrete member type wraps a `MemberBase{T}` and adds domain-specific fields.
 
 ## Key Types
 
@@ -56,9 +56,9 @@ All members share the abstract base `AbstractMember{T}`. The concrete types wrap
 | `Lb` | `T` | Unbraced length for buckling |
 | `Kx`, `Ky` | `Float64` | Effective length factors |
 | `Cb` | `Float64` | Moment gradient coefficient (AISC §F1) |
-| `group_id` | `Int` | Index into `member_groups` |
+| `group_id` | `Union{UInt64, Nothing}` | Optimization grouping key (resolved by `build_member_groups!`) |
 | `section` | `Union{AbstractSection, Nothing}` | Current section assignment |
-| `pixel_design` | optional | PixelFrame design result |
+| `pixel_design` | `Union{Nothing, StructuralSizer.PixelFrameDesign}` | PixelFrame per-pixel design (when applicable) |
 | `volumes` | `MaterialVolumes` | Material quantities for EC |
 
 ### Beam
@@ -77,17 +77,17 @@ All members share the abstract base `AbstractMember{T}`. The concrete types wrap
 | `c1`, `c2` | Cross-section dimensions (depth, width) |
 | `shape` | `:rectangular` or `:circular` |
 | `θ` | Rotation angle of section |
-| `concrete` | `Concrete` material |
+| `concrete` | Optional per-column concrete material override |
 | `story` | Story index |
 | `position` | `:interior`, `:edge`, or `:corner` (from `classify_column_position`) |
 | `boundary_edge_dirs` | Edge directions at boundary for punching shear |
 | `boundary_inward_normals` | Unit vectors pointing from boundary edges toward slab interior (for structural offset computation) |
 | `structural_offset` | `(dx, dy)` offset in meters from architectural vertex to structural centerline |
 | `braced` | Whether column is braced against sway |
-| `story_properties` | Sway magnification data (ΣPu, ΣPc, Vus, Δo) per ACI 318-11 §10.10.7 |
+| `story_properties` | Optional story-level data (ΣPu, ΣPc, Vus, Δo, lc) used by sway / P-Δ utilities |
 | `tributary_cell_indices` | Cell indices contributing load |
 | `tributary_cell_areas` | Tributary areas per cell |
-| `column_above` | Index of column at story above (for load accumulation) |
+| `column_above` | Reference to the column on the story above at the same plan location (or `nothing`) |
 
 ### Strut
 
@@ -107,7 +107,8 @@ All members share the abstract base `AbstractMember{T}`. The concrete types wrap
 Member behavior is controlled by `DesignParameters`:
 - `columns` — column material type (`:rc`, `:steel`), shape, bracing
 - `beams` — beam material type, section catalog
-- `fire_rating` — fire resistance requirement affecting minimum dimensions
+- `fire_rating` — building-level fire resistance requirement (hours)
+- `fire_protection` — steel fire protection type (e.g., SFRM) used when `fire_rating > 0`
 
 ## Limitations & Future Work
 

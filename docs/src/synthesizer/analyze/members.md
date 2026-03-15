@@ -9,7 +9,7 @@
 
 ## Overview
 
-Member analysis extracts demands from the Asap FEM model and sizes beams and columns using StructuralSizer's optimization framework. For steel members, this uses AISC 360 mixed-integer programming. For RC members, this uses ACI 318 interaction diagrams. The module also computes story-level properties for P-Δ second-order analysis.
+Member analysis extracts demands from the Asap FEM model and sizes beams and columns using StructuralSizer’s catalog-based sizing APIs. Steel members are checked per AISC 360 via `AISCChecker` (with optional deflection constraints). RC members are sized using ACI 318 checks via StructuralSizer’s concrete checkers (catalog-based MIP and/or continuous NLP, depending on options). The module also computes story-level properties used by the P-Δ second-order iteration utilities.
 
 **Source:** `StructuralSynthesizer/src/analyze/members/*.jl`
 
@@ -54,24 +54,20 @@ structural_center_xy_m
 
 ### Steel Member Sizing
 
-`size_steel_members!(struc; catalog, member_edge_group, resolution)` sizes steel beams and columns via the AISC 360-16 optimization framework:
+`size_steel_members!` is a steel-only sizing helper that sizes one edge group (`:beams`, `:columns`, or `:struts`) from a steel section catalog:
 
-1. Extracts demands (Mu, Vu, Pu, Tu) from the Asap model for each member group
-2. Filters the section catalog (W shapes, HSS, pipe) to candidate sections
-3. Runs the `AISCChecker` to verify each candidate against:
-   - Flexure: AISC 360-16 §F2–F8
-   - Shear: AISC 360-16 §G2–G6
-   - Compression: AISC 360-16 §E3
-   - Tension: AISC 360-16 §D2
-   - Combined: AISC 360-16 §H1 (P-M interaction)
-   - Torsion: AISC DG9
-4. Selects the optimal section per the objective function (MinWeight, MinCarbon, etc.)
+1. Extracts group demands from the Asap model (axial, flexure, shear, and optionally deflection envelopes when available)
+2. Builds `SteelMemberGeometry` for each group (L, Lb, K, Cb)
+3. Checks feasibility with `StructuralSizer.AISCChecker` (shear, flexure, compression/tension, and P–M interaction; with optional LL / total deflection limits when provided)
+4. Selects the minimum-objective feasible section (e.g., `MinWeight`, `MinCarbon`)
 
-**Automatic solver selection:** The solver is chosen based on `n_max_sections`:
+**Automatic solver selection (`size_steel_members!`):** The solver is chosen based on `n_max_sections`:
 - `n_max_sections == 0` (default) — uses `optimize_binary_search`, which sorts the catalog by weight and binary-searches for the lightest feasible section per group. This is fast and has no solver dependencies.
 - `n_max_sections > 0` — uses `optimize_discrete` (MIP via JuMP/HiGHS or Gurobi), which can enforce shared-section constraints across groups.
 
 Both solvers produce identical per-group results when there are no shared-section constraints.
+
+For the primary dispatchers `size_beams!` and `size_columns!`, steel sizing routes through StructuralSizer’s `size_beams` / `size_columns` APIs (discrete catalog MIP, with optional `n_max_sections` constraints controlled by the options).
 
 ### Collinear Member Grouping
 
@@ -94,26 +90,26 @@ RC beams use ACI 318-11:
 
 ### compute_story_properties!
 
-`compute_story_properties!(struc)` computes sway magnification parameters per ACI 318-11 §10.10.7 for each story:
+`compute_story_properties!(struc)` computes and assigns story-level properties to each column (stored on `col.story_properties`) for sway / P-Δ workflows:
 
 | Property | Description | Reference |
 |:---------|:------------|:----------|
-| ΣPu | Total factored axial load in story | §10.10.7 |
-| ΣPc | Total critical buckling load in story | §10.10.7, §19.2.2.1 |
-| Vus | Factored story shear | §6.6.4.4.4 |
-| Δo | First-order story drift | Analysis |
-| δs | Sway magnification factor = 1 / (1 - ΣPu / 0.75ΣPc) | §10.10.7 |
+| ΣPu | Sum of factored axial loads on all columns in the story | Analysis / moment magnification inputs |
+| ΣPc | Sum of estimated critical buckling loads (initially based on simplified stiffness until final sections are known) | Moment magnification inputs |
+| Vus | Factored story shear (from analysis when available; otherwise an estimate) | Moment magnification inputs |
+| Δo | First-order inter-story drift extracted from the solved model (fallback used if unsolved) | Analysis |
+| lc | Story height proxy (average column length in story) | Analysis |
 
 ### P-Δ Iteration
 
-`p_delta_iterate!(struc)` implements iterative P-Δ second-order analysis:
+`p_delta_iterate!(struc)` performs an elastic P-Δ second-order iteration on the existing Asap model:
 
-1. Compute story properties (ΣPu, ΣPc, Vus, Δo)
-2. If δs > 1.5 for any story, perform geometric stiffness iteration
-3. Update member forces with amplified moments
-4. Re-check column adequacy with amplified demands
+1. Extracts current story drifts and column axial forces from the solved model
+2. Applies equivalent lateral P-Δ forces at each story level using \(F_{P\Delta} = \Sigma P_u \, \Delta / l_c\)
+3. Re-solves and repeats until drifts converge (or `max_iter` is reached)
+4. Flags stories whose second-order drift amplification exceeds the implementation’s 1.4 ratio check
 
-The trigger threshold δs > 1.5 follows ACI 318-11 §6.6.4.6.2, which limits the moment magnifier method and requires more rigorous analysis when exceeded.
+This utility is intended to provide a practical second-order amplification loop for frame analysis; it does not replace a full nonlinear second-order analysis when required by the governing code provisions.
 
 ### Member Group Demands
 

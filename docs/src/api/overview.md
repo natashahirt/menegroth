@@ -45,17 +45,22 @@ curl http://localhost:8080/health
 
 Server state endpoint.
 
-- Response shape is consistent across service modes: `{"state":"...","message":"..."?}`.
-- In **full service mode** (`scripts/api/sizer_service.jl`), `state` is one of: `"idle"`, `"running"`, `"queued"`.
-- In **bootstrap mode** (`scripts/api/sizer_bootstrap.jl`), `state` is `"warming"` until the full API has been loaded in the background, then returns `"idle"`, `"running"`, or `"queued"`.
-- `message` is optional and is included when additional context is useful (for example, bootstrap warm-up).
+The response shape is stable in both **bootstrap mode** and **full service mode**:
+
+- `status`: `"ok"`
+- `mode`: `"bootstrap"` or `"full"`
+- `ready`: `true` when the full API is loaded and design endpoints are available
+- `state`: `"warming"`, `"error"`, `"idle"`, `"running"`, or `"queued"`
+- `has_result`: whether a completed design result is available via `GET /result` (full mode only)
+- `message`: optional human-readable message (or `null`)
+- `error`: optional load error details (or `null`, bootstrap only)
 
 ```bash
 curl http://localhost:8080/status
 ```
 
 ```json
-{"state":"idle"}
+{"status":"ok","mode":"full","ready":true,"state":"idle","has_result":false,"message":null,"error":null}
 ```
 
 ### GET /env-check
@@ -127,6 +132,21 @@ When the server is busy, `POST /design` enqueues the request and returns:
 ### GET /result
 
 Fetch the last completed design result after a `POST /design` submission. Clients should poll `GET /status` until `"idle"` before calling this endpoint.
+
+### GET /logs
+
+Streaming design logs for long-running jobs. Pass a cursor `since` (integer) and the server returns the new lines since that cursor, plus the next cursor to use.
+
+```bash
+curl "http://localhost:8080/logs?since=0"
+```
+
+Response fields:
+
+- `status`: `"idle"`, `"running"`, or `"queued"` (mirrors server state)
+- `base`: the absolute index of the first line retained in the server ring buffer
+- `next_since`: the cursor to use on the next request
+- `lines`: an array of log lines
 
 ## Starting the Server
 

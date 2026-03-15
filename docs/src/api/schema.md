@@ -60,18 +60,116 @@ A dictionary mapping face group names to face-coordinate polylines:
 | `floor_type` | `String` | `"flat_plate"` | Floor system type: `"flat_plate"`, `"flat_slab"`, `"one_way"`, or `"vault"` |
 | `floor_options` | `APIFloorOptions` | `APIFloorOptions()` | Floor-specific options |
 | `materials` | `APIMaterials` | `APIMaterials()` | Material selections |
-| `column_type` | `String` | `"rc_rect"` | `"rc_rect"`, `"rc_circular"`, `"steel_w"`, `"steel_hss"`, or `"steel_pipe"` |
-| `column_catalog` | `String` | `"preferred"` | **Steel** (steel_w/steel_hss): `"compact_only"`, `"preferred"`, `"all"`. **RC rectangular** (rc_rect): `"standard"`, `"square"`, `"rectangular"`, `"low_capacity"`, `"high_capacity"`, `"all"`. **RC circular** (rc_circular): `"standard"`, `"low_capacity"`, `"high_capacity"`, `"all"`. Ignored for steel_pipe. |
-| `beam_type` | `String` | `"steel_w"` | `"steel_w"`, `"steel_hss"`, `"rc_rect"`, or `"rc_tbeam"` |
-| `beam_catalog` | `String` | `"large"` | RC beam catalog when `beam_type` is RC: `"standard"`, `"small"`, `"large"`, or `"all"`. Ignored for steel. |
+| `column_type` | `String` | `"rc_rect"` | `"rc_rect"`, `"rc_circular"`, `"steel_w"`, `"steel_hss"`, `"steel_pipe"`, or `"pixelframe"` |
+| `column_catalog` | `Union{String, Nothing}` | `nothing` | Optional. If omitted or `null`, the server chooses a safe default based on `column_type` (**steel** → `"preferred"`, **RC** → `"standard"`). If provided: **Steel** (steel_w/steel_hss/steel_pipe): `"compact_only"`, `"preferred"`, `"all"`. **RC rectangular** (rc_rect): `"standard"`, `"square"`, `"rectangular"`, `"low_capacity"`, `"high_capacity"`, `"all"`. **RC circular** (rc_circular): `"standard"`, `"low_capacity"`, `"high_capacity"`, `"all"`. Ignored for pixelframe. |
+| `column_sizing_strategy` | `String` | `"discrete"` | `"discrete"` (catalog/MIP) or `"nlp"` (continuous Ipopt). Applies to columns. |
+| `beam_type` | `String` | `"steel_w"` | `"steel_w"`, `"steel_hss"`, `"rc_rect"`, `"rc_tbeam"`, or `"pixelframe"` |
+| `beam_catalog` | `String` | `"large"` | RC beam catalog (when `beam_type` is RC): `"standard"`, `"small"`, `"large"`, `"xlarge"`, `"all"`, or `"custom"`. Ignored for steel and pixelframe. |
+| `beam_sizing_strategy` | `String` | `"discrete"` | `"discrete"` (catalog/MIP) or `"nlp"` (continuous Ipopt). Applies to beams. |
+| `beam_catalog_bounds` | `Union{APIBeamCatalogBounds, Nothing}` | `nothing` | Required when `beam_catalog == "custom"`; bounds and resolution (inches) for generating a custom RC beam catalog. |
+| `pixelframe_options` | `Union{APIPixelFrameOptions, Nothing}` | `nothing` | Required when `column_type == "pixelframe"` or `beam_type == "pixelframe"`; selects PixelFrame concrete strength catalog. |
 | `fire_rating` | `Float64` | `0.0` | Fire resistance in hours |
 | `optimize_for` | `String` | `"weight"` | `"weight"`, `"carbon"`, or `"cost"` |
 | `size_foundations` | `Bool` | `false` | Whether to size foundations |
 | `foundation_soil` | `String` | `"medium_sand"` | Soil type name (used when `size_foundations=true`): `"loose_sand"`, `"medium_sand"`, `"dense_sand"`, `"soft_clay"`, `"stiff_clay"`, `"hard_clay"` |
-| `geometry_is_centerline` | `Bool` | `false` | How to interpret input vertex coordinates — see [Structural Column Offsets](#structural-column-offsets) |
 | `foundation_concrete` | `String` | `"NWC_3000"` | Foundation concrete grade (used when `size_foundations=true`) |
+| `foundation_options` | `Union{APIFoundationOptions, Nothing}` | `nothing` | Optional strategy + per-type overrides (spread/strip/mat). Applied when `size_foundations=true`. |
+| `scoped_overrides` | `Vector{APIScopedOverride}` | `[]` | Optional face-scoped floor overrides (e.g., vault-only regions). |
+| `geometry_is_centerline` | `Bool` | `false` | How to interpret input vertex coordinates — see [Structural Column Offsets](#structural-column-offsets) |
 
 See [`APIParams`](@ref) in [API Overview](overview.md).
+
+### APIBeamCatalogBounds
+
+Bounds for generating a custom RC beam catalog when `APIParams.beam_catalog == "custom"` (all lengths in inches):
+
+| Field | Type | Default | Description |
+|:------|:-----|:--------|:------------|
+| `min_width_in` | `Float64` | `12.0` | Minimum beam width |
+| `max_width_in` | `Float64` | `36.0` | Maximum beam width |
+| `min_depth_in` | `Float64` | `18.0` | Minimum beam depth |
+| `max_depth_in` | `Float64` | `48.0` | Maximum beam depth |
+| `resolution_in` | `Float64` | `2.0` | Grid resolution (applied to both width and depth) |
+
+### APIPixelFrameOptions
+
+PixelFrame catalog selection (strengths are resolved into an internal `fc_values` vector in MPa):
+
+| Field | Type | Default | Description |
+|:------|:-----|:--------|:------------|
+| `fc_preset` | `String` | `"standard"` | `"standard"`, `"low"`, `"high"`, `"extended"`, or `"custom"` |
+| `fc_min_ksi` | `Union{Float64, Nothing}` | `nothing` | Required when `fc_preset == "custom"` |
+| `fc_max_ksi` | `Union{Float64, Nothing}` | `nothing` | Required when `fc_preset == "custom"` |
+| `fc_resolution_ksi` | `Union{Float64, Nothing}` | `nothing` | Required when `fc_preset == "custom"` |
+
+### APIFoundationOptions
+
+Optional foundation strategy + per-type overrides (applied when `APIParams.size_foundations == true`):
+
+| Field | Type | Default | Description |
+|:------|:-----|:--------|:------------|
+| `strategy` | `String` | `"auto"` | `"auto"`, `"all_spread"`, `"all_strip"`, or `"mat"` |
+| `mat_coverage_threshold` | `Float64` | `0.5` | Mat selection threshold \(R \in [0, 1]\) used by `"auto"` |
+| `spread_params` | `Union{APISpreadParams, Nothing}` | `nothing` | Optional spread-footing overrides |
+| `strip_params` | `Union{APIStripParams, Nothing}` | `nothing` | Optional strip-footing overrides |
+| `mat_params` | `Union{APIMatParams, Nothing}` | `nothing` | Optional mat-footing overrides |
+
+#### APISpreadParams
+
+All lengths are in inches:
+
+| Field | Type | Default |
+|:------|:-----|:--------|
+| `cover_in` | `Union{Float64, Nothing}` | `nothing` |
+| `min_depth_in` | `Union{Float64, Nothing}` | `nothing` |
+| `bar_size` | `Union{Int, Nothing}` | `nothing` |
+| `depth_increment_in` | `Union{Float64, Nothing}` | `nothing` |
+| `size_increment_in` | `Union{Float64, Nothing}` | `nothing` |
+
+#### APIStripParams
+
+All lengths are in inches:
+
+| Field | Type | Default |
+|:------|:-----|:--------|
+| `cover_in` | `Union{Float64, Nothing}` | `nothing` |
+| `min_depth_in` | `Union{Float64, Nothing}` | `nothing` |
+| `bar_size_long` | `Union{Int, Nothing}` | `nothing` |
+| `bar_size_trans` | `Union{Int, Nothing}` | `nothing` |
+| `width_increment_in` | `Union{Float64, Nothing}` | `nothing` |
+| `max_depth_ratio` | `Union{Float64, Nothing}` | `nothing` |
+| `merge_gap_factor` | `Union{Float64, Nothing}` | `nothing` |
+| `eccentricity_limit` | `Union{Float64, Nothing}` | `nothing` |
+
+#### APIMatParams
+
+All lengths are in inches:
+
+| Field | Type | Default | Description |
+|:------|:-----|:--------|:------------|
+| `cover_in` | `Union{Float64, Nothing}` | `nothing` | Clear cover |
+| `min_depth_in` | `Union{Float64, Nothing}` | `nothing` | Minimum mat thickness |
+| `bar_size_x` | `Union{Int, Nothing}` | `nothing` | Bar size in x |
+| `bar_size_y` | `Union{Int, Nothing}` | `nothing` | Bar size in y |
+| `depth_increment_in` | `Union{Float64, Nothing}` | `nothing` | Thickness increment |
+| `edge_overhang_in` | `Union{Float64, Nothing}` | `nothing` | Edge overhang |
+| `analysis_method` | `Union{String, Nothing}` | `nothing` | `"rigid"`, `"shukla"`, or `"winkler"` |
+
+### APIScopedOverride
+
+Face-scoped floor override blocks (used for region-specific floor types like vaults):
+
+| Field | Type | Default | Description |
+|:------|:-----|:--------|:------------|
+| `floor_type` | `String` | `"vault"` | `"flat_plate"`, `"flat_slab"`, `"one_way"`, or `"vault"` |
+| `floor_options` | `APIScopedFloorOptions` | `APIScopedFloorOptions()` | Scoped floor options (currently supports `vault_lambda` only) |
+| `faces` | `Vector{Vector{Vector{Float64}}}` | `[]` | Face polygons (each polygon is an array of `[x,y,z]` points, in coordinate units) |
+
+#### APIScopedFloorOptions
+
+| Field | Type | Default |
+|:------|:-----|:--------|
+| `vault_lambda` | `Union{Float64, Nothing}` | `nothing` |
 
 ### APILoads
 
@@ -244,6 +342,14 @@ Output field names are unit-neutral. Unit interpretation comes from top-level un
 | `is_beamless_system` | `Bool` | True when model uses slab-only framing (`flat_plate` / `flat_slab`) |
 | `suggested_scale_factor` | `Float64` | Suggested displacement magnification |
 | `max_displacement` | `Float64` | Maximum displacement in the model (see `length_unit`) |
+| `max_frame_axial` | `Float64` | Maximum \(|P|\) across all frame elements |
+| `max_frame_moment` | `Float64` | Maximum \(|M|\) across all frame elements |
+| `max_frame_shear` | `Float64` | Maximum \(|V|\) across all frame elements |
+| `max_slab_bending` | `Float64` | Maximum \(|M|\) across all slab faces |
+| `max_slab_membrane` | `Float64` | Maximum \(|N|\) across all slab faces |
+| `max_slab_shear` | `Float64` | Maximum transverse shear across all slab faces |
+| `max_slab_von_mises` | `Float64` | Maximum von Mises stress across all slab faces |
+| `max_slab_surface_stress` | `Float64` | Maximum \(|\sigma|\) across all slab faces |
 
 The visualization schema contains several related types:
 
@@ -311,13 +417,23 @@ Example snippet (abbreviated) showing beamless-state and one drop-panel patch:
 | `node_start` | `Int` | 1-based start node index |
 | `node_end` | `Int` | 1-based end node index |
 | `element_type` | `String` | `"beam"`, `"column"`, `"strut"`, or `"other"` |
+| `utilization_ratio` | `Float64` | Governing utilization ratio (D/C) for the element |
+| `ok` | `Bool` | Element pass/fail flag |
 | `section_name` | `String` | Section designation |
 | `material_color_hex` | `String` | Optional material display color (e.g. `#6E6E6E`) |
 | `section_type` | `String` | Section shape family |
 | `section_depth` | `Float64` | Section depth |
 | `section_width` | `Float64` | Section width |
+| `flange_width` | `Float64` | W-shape flange width (0 for non-W shapes) |
+| `web_thickness` | `Float64` | W-shape web thickness (0 for non-W shapes) |
+| `flange_thickness` | `Float64` | W-shape flange thickness (0 for non-W shapes) |
 | `section_polygon` | `Vector{Vector{Float64}}` | Section polygon in local `[y,z]` coordinates |
 | `section_polygon_inner` | `Vector{Vector{Float64}}` | Inner boundary for hollow sections (HSS rect/round); empty for solid sections |
+| `original_points` | `Vector{Vector{Float64}}` | Interpolated points along the element centerline `[x,y,z]` |
+| `displacement_vectors` | `Vector{Vector{Float64}}` | Displacements at each interpolated point `[dx,dy,dz]` |
+| `max_axial_force` | `Float64` | Signed axial extremum (+ tension, − compression) |
+| `max_moment` | `Float64` | Signed moment extremum (largest \(|M|\), sign preserved) |
+| `max_shear` | `Float64` | Signed shear extremum (largest \(|V|\), sign preserved) |
 
 ### APIError
 

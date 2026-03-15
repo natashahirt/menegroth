@@ -1,5 +1,9 @@
 # Steel Sections
 
+```@meta
+CurrentModule = StructuralSizer
+```
+
 > ```julia
 > using StructuralSizer
 > w = W("W14X22")
@@ -15,8 +19,11 @@ Sections are defined in `StructuralSizer/src/members/sections/steel/`.
 
 ## Key Types
 
+<<<<<<< HEAD
 ### Abstract Hierarchy
 
+=======
+>>>>>>> 35910fe7cce9e6c72fe66334ba79eb0a5af2272c
 ```@docs
 AbstractSection
 AbstractHollowSection
@@ -96,6 +103,10 @@ Section properties: `A`, `I` (= Ix = Iy), `S` (= Sx = Sy), `Z` (= Zx = Zy), `J` 
 ### Pipe Section
 
 **`PipeSection`** is a type alias for `HSSRoundSection`. The AISC database distinguishes Pipe shapes by name, but they use the same geometric model.
+
+```@docs
+PipeSection
+```
 
 ### Rebar
 

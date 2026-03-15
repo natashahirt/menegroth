@@ -40,12 +40,40 @@ end
 
 @get "/status" function (_)
     s = STATUS_FN[]()
+    # Keep response shape stable with the full API /status payload.
+    # - warming: full API not ready yet
+    # - error: background load failed
+    # - otherwise: s is the StructuralSynthesizer server state (idle/running/queued)
     payload = if s == "warming"
-        Dict("state" => s, "message" => "Full API not ready yet")
+        Dict(
+            "status" => "ok",
+            "mode" => "bootstrap",
+            "ready" => false,
+            "state" => s,
+            "has_result" => false,
+            "message" => "Full API not ready yet",
+            "error" => nothing,
+        )
     elseif s == "error"
-        Dict("state" => s, "message" => "Failed to load full API")
+        Dict(
+            "status" => "ok",
+            "mode" => "bootstrap",
+            "ready" => false,
+            "state" => s,
+            "has_result" => false,
+            "message" => "Failed to load full API",
+            "error" => (isempty(LOAD_ERROR[]) ? nothing : LOAD_ERROR[]),
+        )
     else
-        Dict("state" => s)
+        Dict(
+            "status" => "ok",
+            "mode" => "bootstrap",
+            "ready" => true,
+            "state" => s,
+            "has_result" => false,
+            "message" => nothing,
+            "error" => nothing,
+        )
     end
     return HTTP.Response(200, ["Content-Type" => "application/json"], JSON3.write(payload))
 end

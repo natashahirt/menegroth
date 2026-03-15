@@ -181,15 +181,16 @@ function validate_input(input::APIInput)
         push!(errors, "Invalid column_type \"$(p.column_type)\". Must be one of: $(join(valid_column_types, ", ")).")
     end
     valid_steel_column_catalogs = ("compact_only", "preferred", "all")
-    if p.column_type in ("steel_w", "steel_hss") && !(p.column_catalog in valid_steel_column_catalogs)
+    if p.column_type in ("steel_w", "steel_hss", "steel_pipe") && p.column_catalog !== nothing &&
+       !(p.column_catalog in valid_steel_column_catalogs)
         push!(errors, "Invalid column_catalog for steel \"$(p.column_catalog)\". Must be one of: $(join(valid_steel_column_catalogs, ", ")).")
     end
     valid_rc_rect_catalogs = ("standard", "square", "rectangular", "low_capacity", "high_capacity", "all")
-    if p.column_type == "rc_rect" && !(p.column_catalog in valid_rc_rect_catalogs)
+    if p.column_type == "rc_rect" && p.column_catalog !== nothing && !(p.column_catalog in valid_rc_rect_catalogs)
         push!(errors, "Invalid column_catalog for RC rectangular \"$(p.column_catalog)\". Must be one of: $(join(valid_rc_rect_catalogs, ", ")).")
     end
     valid_rc_circular_catalogs = ("standard", "low_capacity", "high_capacity", "all")
-    if p.column_type == "rc_circular" && !(p.column_catalog in valid_rc_circular_catalogs)
+    if p.column_type == "rc_circular" && p.column_catalog !== nothing && !(p.column_catalog in valid_rc_circular_catalogs)
         push!(errors, "Invalid column_catalog for RC circular \"$(p.column_catalog)\". Must be one of: $(join(valid_rc_circular_catalogs, ", ")).")
     end
 

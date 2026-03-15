@@ -605,6 +605,21 @@ function _resolve_column_options(api_params::APIParams)
     _, rebar, steel = _resolve_materials(api_params)
     column_conc = _resolve_concrete_name(api_params.materials.column_concrete)
 
+    # column_catalog is optional; resolve a safe default by column_type.
+    # This prevents defaults from failing validation (e.g. rc_rect + "preferred").
+    function _effective_column_catalog_str()
+        if api_params.column_catalog !== nothing
+            return lowercase(strip(api_params.column_catalog))
+        end
+        if ct == "rc_rect" || ct == "rc_circular"
+            return "standard"
+        elseif startswith(ct, "steel_")
+            return "preferred"
+        else
+            return "standard"
+        end
+    end
+
     if ct == "pixelframe"
         fc_vals = _resolve_pixelframe_fc_values(api_params)
         return StructuralSizer.PixelFrameColumnOptions(
@@ -612,7 +627,7 @@ function _resolve_column_options(api_params::APIParams)
         )
     elseif startswith(ct, "rc_")
         shape = ct == "rc_circular" ? :circular : :rect
-        catalog_sym = Symbol(lowercase(strip(api_params.column_catalog)))
+        catalog_sym = Symbol(_effective_column_catalog_str())
         strat = _resolve_sizing_strategy(api_params.column_sizing_strategy)
         return StructuralSizer.ConcreteColumnOptions(
             material = column_conc,
@@ -631,7 +646,7 @@ function _resolve_column_options(api_params::APIParams)
         else
             :w  # default
         end
-        catalog_sym = Symbol(lowercase(strip(api_params.column_catalog)))
+        catalog_sym = Symbol(_effective_column_catalog_str())
         strat = _resolve_sizing_strategy(api_params.column_sizing_strategy)
         return StructuralSizer.SteelColumnOptions(
             material = steel,

@@ -25,6 +25,7 @@ Clone the repository and activate the project environment:
 ```bash
 git clone https://github.com/natashahirt/menegroth.git
 cd menegroth
+git submodule update --init --recursive
 ```
 
 From the Julia REPL:
@@ -36,6 +37,16 @@ Pkg.instantiate()
 ```
 
 This resolves all dependencies for both `StructuralSizer` and `StructuralSynthesizer` (which is declared as a sub-package in the workspace).
+
+### Linux note: Asap path dependencies
+
+This repository uses local path dependencies to `external/Asap`. On Linux, some `Project.toml` files may contain Windows-style backslashes (for example `..\\external\\Asap`), which Julia treats as a different path and can cause `Pkg.instantiate()` to fail with a path resolution error.
+
+If that happens, replace backslashes with forward slashes in the `Project.toml` files that reference Asap, then re-run `Pkg.instantiate()`:
+
+```bash
+sed -i 's#\\#/#g' Project.toml StructuralSizer/Project.toml StructuralSynthesizer/Project.toml StructuralVisualization/Project.toml
+```
 
 ## First Design
 
@@ -81,7 +92,7 @@ println("All checks pass: ", result.summary.all_checks_pass)
 1. `initialize!` — create cells, members, and slabs from the skeleton
 2. `estimate_column_sizes!` — assign initial column sections from the catalog
 3. `to_asap!` — build the finite element model (Asap)
-4. `size!` — run AISC/ACI code checks, optimize sections via MIP
+4. `size!` — run AISC/ACI code checks and select sections from catalogs (binary search by default; MIP when enabled by options)
 5. Post-process — compute embodied carbon, fire protection, reports
 
 ## Running the HTTP API
@@ -153,4 +164,4 @@ The optimization framework checks for a Gurobi license at startup. If Gurobi is 
 
 - **Lateral loads**: Wind and seismic load factors are defined in `LoadCombination` but the building generators currently produce gravity-only skeletons. Full lateral analysis requires user-supplied loads or a future wind/seismic module.
 - **Timber design**: The `Timber` material type is defined but the NDS checker is minimal. Full NDS 2018 implementation is planned.
-- **Multi-material optimization**: The current pipeline sizes each member independently. Cross-member optimization (e.g., grouping columns by size for constructability) is in development.
+- **Cross-member constraints**: The synthesizer groups members for constructability (for example, collinear member grouping), but building-wide constraints (for example “use at most N unique column sections across the entire building”) are not yet exposed at the pipeline level.

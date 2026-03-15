@@ -10,6 +10,10 @@
 
 This page provides a comprehensive index of every design code provision implemented in the codebase. Each entry lists the code, section number, provision description, implementation status, and source file location.
 
+```@docs
+AbstractDesignCode
+```
+
 ## AISC 360-16 — Specification for Structural Steel Buildings
 
 | Section | Provision | Status | Source File |

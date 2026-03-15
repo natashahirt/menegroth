@@ -2,27 +2,16 @@
 
 > ```julia
 > using StructuralSizer
-> opts = FlatPlateOptions(method=DDM(:full))
-> method_name(opts.method)                     # "DDM"
-> min_thickness(FlatPlate(), 20.0u"ft")        # ACI minimum thickness
+> using Unitful
+>
+> # Method presets
+> opts_ddm = FlatPlateOptions(method = DDM())  # full DDM (default)
+> opts_efm = FlatPlateOptions(method = EFM())
+> opts_fea = FlatPlateOptions(method = FEA())
+>
+> method_name(opts_ddm.method)                 # "DDM"
+> h_min = min_thickness(FlatPlate(), 20.0u"ft")  # ACI minimum thickness
 > ```
-
-## Quick Start
-
-```julia
-using StructuralSizer
-
-# Method presets for structure-level sizing
-opts_ddm = FlatPlateOptions(method=DDM())
-opts_efm = FlatPlateOptions(method=EFM())
-opts_fea = FlatPlateOptions(method=FEA())
-
-# Minimum-thickness check at a target span
-h_min = min_thickness(FlatPlate(), 20.0u"ft")
-
-# Full slab design is reached through size_slab!/size_slabs! once a structure is initialized.
-# Example: size_slab!(struc, slab_idx; options=opts_ddm, column_opts=ConcreteColumnOptions())
-```
 
 ## Overview
 

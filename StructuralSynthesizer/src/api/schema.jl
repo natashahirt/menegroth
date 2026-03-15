@@ -84,7 +84,7 @@ function api_input_schema()
                     "steel" => "Steel name (e.g. A992). Default: A992.",
                 ),
                 "column_type" => "rc_rect | rc_circular | steel_w | steel_hss | steel_pipe | pixelframe. Default: rc_rect.",
-                "column_catalog" => "Column catalog. Steel (steel_w/steel_hss): compact_only | preferred | all. RC rectangular (rc_rect): standard | square | rectangular | low_capacity | high_capacity | all. RC circular (rc_circular): standard | low_capacity | high_capacity | all. Ignored for pixelframe. Default: preferred (steel) / standard (RC).",
+                "column_catalog" => "Optional column catalog (string or null). Steel (steel_w/steel_hss/steel_pipe): compact_only | preferred | all. RC rectangular (rc_rect): standard | square | rectangular | low_capacity | high_capacity | all. RC circular (rc_circular): standard | low_capacity | high_capacity | all. Ignored for pixelframe. If omitted or null: defaults to preferred (steel) or standard (RC).",
                 "column_sizing_strategy" => "discrete (MIP catalog) or nlp (continuous Ipopt). Default: discrete. Applies to RC and steel columns.",
                 "beam_type" => "steel_w | steel_hss | rc_rect | rc_tbeam | pixelframe. Default: steel_w.",
                 "beam_catalog" => "RC beam catalog when beam_type is rc_rect or rc_tbeam: standard | small | large | xlarge | all | custom. Default: large. Use xlarge for vaults with high thrust. Use custom with beam_catalog_bounds for bounds-based catalog. Ignored for pixelframe.",
@@ -234,7 +234,12 @@ Base.@kwdef mutable struct APIParams
     floor_options::APIFloorOptions = APIFloorOptions()
     materials::APIMaterials = APIMaterials()
     column_type::String = "rc_rect"
-    column_catalog::String = "preferred"   # Steel: compact_only | preferred | all. RC rect: standard | square | rectangular | low_capacity | high_capacity | all. RC circular: standard | low_capacity | high_capacity | all.
+    # Optional: when omitted or null, defaults depend on `column_type`:
+    # - Steel (steel_w/steel_hss/steel_pipe): "preferred"
+    # - RC rectangular (rc_rect): "standard"
+    # - RC circular (rc_circular): "standard"
+    # Ignored for pixelframe.
+    column_catalog::Union{String, Nothing} = nothing
     column_sizing_strategy::String = "discrete"  # RC columns only: discrete | nlp
     beam_type::String = "steel_w"
     beam_catalog::String = "large"   # RC beam catalog: standard | small | large | xlarge | all | custom. Ignored for steel.

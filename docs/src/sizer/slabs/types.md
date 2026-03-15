@@ -121,6 +121,10 @@ slabs/
 ### Abstract Hierarchy
 
 ```@docs
+AbstractFloorSystem
+AbstractConcreteSlab
+AbstractSteelFloor
+AbstractTimberFloor
 SpanningBehavior
 OneWaySpanning
 TwoWaySpanning
@@ -191,6 +195,11 @@ MassTimberJoist
 
 - `SupportCondition` — enum for one-way slab support conditions: `SIMPLE`, `ONE_END_CONT`, `BOTH_ENDS_CONT`, `CANTILEVER`.
 - `LoadDistributionType` — enum for load distribution method: `DISTRIBUTION_ONE_WAY`, `DISTRIBUTION_TWO_WAY`, `DISTRIBUTION_POINT`, `DISTRIBUTION_CUSTOM`.
+
+```@docs
+SupportCondition
+LoadDistributionType
+```
 
 ### Analysis Method Types
 
@@ -339,6 +348,7 @@ between `Symbol` keys (used in JSON/serialization) and dispatch-tag instances.
 ## Options & Configuration
 
 ```@docs
+AbstractFloorOptions
 FlatPlateOptions
 FlatSlabOptions
 OneWayOptions

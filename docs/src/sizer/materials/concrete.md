@@ -58,6 +58,15 @@ AggregateType
 | `NWC_5000` | 5000 psi | ACI §8.5.1 | 2385 kg/m³ | 0.155 | Higher strength |
 | `NWC_6000` | 6000 psi | ACI §8.5.1 | 2385 kg/m³ | 0.173 | High strength |
 
+```@docs
+NWC_3000
+NWC_4000
+NWC_5000
+NWC_6000
+NWC_GGBS
+NWC_PFA
+```
+
 ### Low-Carbon Alternatives
 
 | Preset | fc′ | ecc | Notes |
@@ -77,6 +86,16 @@ AggregateType
 | `RC_6000_75` | NWC_6000 | Rebar_75 | High-strength RC |
 | `RC_GGBS_60` | NWC_GGBS | Rebar_60 | Low-carbon RC |
 
+```@docs
+RC_3000_60
+RC_4000_60
+RC_5000_60
+RC_6000_60
+RC_5000_75
+RC_6000_75
+RC_GGBS_60
+```
+
 ## Earthen Material Presets
 
 For unreinforced vault and masonry analysis. Properties derived from BasePlotsWithLim.m reference data.
@@ -88,6 +107,14 @@ For unreinforced vault and masonry analysis. Properties derived from BasePlotsWi
 | `Earthen_2000` | 2 GPa | 2.0 MPa | 2000 kg/m³ | 0.02 | Stabilized earth |
 | `Earthen_4000` | 4 GPa | 4.0 MPa | 2000 kg/m³ | 0.05 | Compressed earth blocks |
 | `Earthen_8000` | 8 GPa | 8.0 MPa | 2000 kg/m³ | 0.10 | Fired clay brick |
+
+```@docs
+Earthen_500
+Earthen_1000
+Earthen_2000
+Earthen_4000
+Earthen_8000
+```
 
 Earthen materials use `εcu = 0.002` (lower than the ACI 318 default of 0.003).
 

@@ -1,5 +1,9 @@
 # Timber Materials
 
+```@meta
+CurrentModule = StructuralSizer
+```
+
 > ```julia
 > using StructuralSizer
 > # Define a custom timber material (no presets yet)
@@ -18,6 +22,7 @@ The `Timber` material type stores NDS reference design values for sawn lumber an
 ## Key Types
 
 ```@docs
+AbstractMaterial
 Timber
 ```
 

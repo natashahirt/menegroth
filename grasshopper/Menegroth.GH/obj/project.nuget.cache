@@ -1,8 +1,8 @@
 {
   "version": 2,
-  "dgSpecHash": "1If95LwyUGs=",
+  "dgSpecHash": "dImkJ+PWXn4=",
   "success": true,
-  "projectFilePath": "C:\\Users\\nhirt\\MIT Dropbox\\Natasha Hirt\\_MIT\\DS Research\\Synthetic_Buildings\\menegroth\\grasshopper\\Menegroth.GH\\Menegroth.GH.csproj",
+  "projectFilePath": "c:\\Users\\nhirt\\MIT Dropbox\\Natasha Hirt\\_MIT\\DS Research\\Synthetic_Buildings\\menegroth\\grasshopper\\Menegroth.GH\\Menegroth.GH.csproj",
   "expectedPackageFiles": [
     "C:\\Users\\nhirt\\.nuget\\packages\\grasshopper\\8.1.23325.13001\\grasshopper.8.1.23325.13001.nupkg.sha512",
     "C:\\Users\\nhirt\\.nuget\\packages\\microsoft.netframework.referenceassemblies\\1.0.3\\microsoft.netframework.referenceassemblies.1.0.3.nupkg.sha512",

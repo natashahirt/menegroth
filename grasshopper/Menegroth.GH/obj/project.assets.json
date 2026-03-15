@@ -1092,11 +1092,11 @@
   "project": {
     "version": "1.0.0",
     "restore": {
-      "projectUniqueName": "C:\\Users\\nhirt\\MIT Dropbox\\Natasha Hirt\\_MIT\\DS Research\\Synthetic_Buildings\\menegroth\\grasshopper\\Menegroth.GH\\Menegroth.GH.csproj",
+      "projectUniqueName": "c:\\Users\\nhirt\\MIT Dropbox\\Natasha Hirt\\_MIT\\DS Research\\Synthetic_Buildings\\menegroth\\grasshopper\\Menegroth.GH\\Menegroth.GH.csproj",
       "projectName": "Menegroth",
-      "projectPath": "C:\\Users\\nhirt\\MIT Dropbox\\Natasha Hirt\\_MIT\\DS Research\\Synthetic_Buildings\\menegroth\\grasshopper\\Menegroth.GH\\Menegroth.GH.csproj",
+      "projectPath": "c:\\Users\\nhirt\\MIT Dropbox\\Natasha Hirt\\_MIT\\DS Research\\Synthetic_Buildings\\menegroth\\grasshopper\\Menegroth.GH\\Menegroth.GH.csproj",
       "packagesPath": "C:\\Users\\nhirt\\.nuget\\packages\\",
-      "outputPath": "C:\\Users\\nhirt\\MIT Dropbox\\Natasha Hirt\\_MIT\\DS Research\\Synthetic_Buildings\\menegroth\\grasshopper\\Menegroth.GH\\obj\\",
+      "outputPath": "c:\\Users\\nhirt\\MIT Dropbox\\Natasha Hirt\\_MIT\\DS Research\\Synthetic_Buildings\\menegroth\\grasshopper\\Menegroth.GH\\obj\\",
       "projectStyle": "PackageReference",
       "configFilePaths": [
         "C:\\Users\\nhirt\\AppData\\Roaming\\NuGet\\NuGet.Config"

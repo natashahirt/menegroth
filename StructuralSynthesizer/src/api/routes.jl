@@ -119,7 +119,17 @@ function register_routes!()
 
     # ─── GET /status ──────────────────────────────────────────────────────
     @get "/status" function (_::HTTP.Request)
-        return _json_ok(Dict("state" => status_string(SERVER_STATUS)))
+        state = status_string(SERVER_STATUS)
+        payload = Dict(
+            "status" => "ok",
+            "mode" => "full",
+            "ready" => true,
+            "state" => state,
+            "has_result" => !isnothing(DESIGN_CACHE.last_result),
+            "message" => nothing,
+            "error" => nothing,
+        )
+        return _json_ok(payload)
     end
 
     # ─── GET /env-check ───────────────────────────────────────────────────
@@ -139,7 +149,7 @@ function register_routes!()
                 "POST /design" => "Start design (returns 202 immediately; poll GET /status then GET /result)",
                 "POST /validate" => "Validate input without running design",
                 "GET /health" => "Server health check",
-                "GET /status" => "Server status payload: {state, message?}; states: idle, running, queued",
+                "GET /status" => "Server status payload: {status, mode, ready, state, has_result, message, error}; state: idle, running, queued (or warming/error during bootstrap)",
                 "GET /env-check" => "Whether Gurobi env vars are set (presence only, no values)",
                 "GET /logs?since=N" => "Streaming design logs; returns lines after cursor N",
                 "GET /result" => "Last completed design result (after POST /design and status idle)",

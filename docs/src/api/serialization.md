@@ -49,7 +49,7 @@ compute_geometry_hash
 | `column_type` | `"rc_circular"` | `ConcreteColumnOptions(material=..., rebar_material=..., section_shape=:circular, catalog=column_catalog)` |
 | `column_type` | `"steel_w"` | `SteelColumnOptions(material=steel, section_type=:w, catalog=column_catalog)` |
 | `column_type` | `"steel_hss"` | `SteelColumnOptions(material=steel, section_type=:hss, catalog=column_catalog)` |
-| `column_type` | `"steel_pipe"` | `SteelColumnOptions(material=steel, section_type=:pipe)` |
+| `column_type` | `"steel_pipe"` | `SteelColumnOptions(material=steel, section_type=:pipe, catalog=column_catalog)` |
 | `column_type` | `"pixelframe"` | `PixelFrameColumnOptions(fc_values=...)` |
 | `beam_type` | `"steel_w"` | `SteelBeamOptions(material=steel, section_type=:w)` |
 | `beam_type` | `"steel_hss"` | `SteelBeamOptions(material=steel, section_type=:hss)` |
@@ -81,6 +81,7 @@ compute_geometry_hash
 
 Notes:
 - Unknown `floor_type` strings fall back to `FlatPlateOptions(...)` with the resolved analysis settings.
+- `column_catalog` is optional in JSON. When omitted or `null`, the server selects a default catalog based on `column_type` (steel → `"preferred"`, RC → `"standard"`).
 - `unit_system` controls `DesignParameters.display_units` and therefore the units used in serialized output. Length-valued arrays use `APIOutput.length_unit` (`"ft"` or `"m"`); thickness and similar dimensions use the display thickness unit (inches for imperial, millimeters for metric). See also `thickness_unit`, `volume_unit`, and `mass_unit` in the schema.
 
 ### design_to_json

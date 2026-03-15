@@ -45,15 +45,22 @@ curl http://localhost:8080/health
 
 Server state endpoint.
 
-- In **full service mode** (`scripts/api/sizer_service.jl`), the response is always `{"state":"idle"|"running"|"queued"}` (no `message` field).
-- In **bootstrap mode** (`scripts/api/sizer_bootstrap.jl`), the lightweight bootstrap server may return `{"state":"warming","message":"..."}` before the full API has been loaded; once loaded, it delegates to the full `/status` route and returns only `{"state":"..."}`.
+The response shape is stable in both **bootstrap mode** and **full service mode**:
+
+- `status`: `"ok"`
+- `mode`: `"bootstrap"` or `"full"`
+- `ready`: `true` when the full API is loaded and design endpoints are available
+- `state`: `"warming"`, `"error"`, `"idle"`, `"running"`, or `"queued"`
+- `has_result`: whether a completed design result is available via `GET /result` (full mode only)
+- `message`: optional human-readable message (or `null`)
+- `error`: optional load error details (or `null`, bootstrap only)
 
 ```bash
 curl http://localhost:8080/status
 ```
 
 ```json
-{"state":"idle"}
+{"status":"ok","mode":"full","ready":true,"state":"idle","has_result":false,"message":null,"error":null}
 ```
 
 ### GET /env-check

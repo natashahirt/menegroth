@@ -61,7 +61,7 @@ A dictionary mapping face group names to face-coordinate polylines:
 | `floor_options` | `APIFloorOptions` | `APIFloorOptions()` | Floor-specific options |
 | `materials` | `APIMaterials` | `APIMaterials()` | Material selections |
 | `column_type` | `String` | `"rc_rect"` | `"rc_rect"`, `"rc_circular"`, `"steel_w"`, `"steel_hss"`, `"steel_pipe"`, or `"pixelframe"` |
-| `column_catalog` | `String` | `"preferred"` | **Steel** (steel_w/steel_hss): `"compact_only"`, `"preferred"`, `"all"`. **RC rectangular** (rc_rect): `"standard"`, `"square"`, `"rectangular"`, `"low_capacity"`, `"high_capacity"`, `"all"`. **RC circular** (rc_circular): `"standard"`, `"low_capacity"`, `"high_capacity"`, `"all"`. Ignored for steel_pipe and pixelframe. |
+| `column_catalog` | `Union{String, Nothing}` | `nothing` | Optional. If omitted or `null`, the server chooses a safe default based on `column_type` (**steel** → `"preferred"`, **RC** → `"standard"`). If provided: **Steel** (steel_w/steel_hss/steel_pipe): `"compact_only"`, `"preferred"`, `"all"`. **RC rectangular** (rc_rect): `"standard"`, `"square"`, `"rectangular"`, `"low_capacity"`, `"high_capacity"`, `"all"`. **RC circular** (rc_circular): `"standard"`, `"low_capacity"`, `"high_capacity"`, `"all"`. Ignored for pixelframe. |
 | `column_sizing_strategy` | `String` | `"discrete"` | `"discrete"` (catalog/MIP) or `"nlp"` (continuous Ipopt). Applies to columns. |
 | `beam_type` | `String` | `"steel_w"` | `"steel_w"`, `"steel_hss"`, `"rc_rect"`, `"rc_tbeam"`, or `"pixelframe"` |
 | `beam_catalog` | `String` | `"large"` | RC beam catalog (when `beam_type` is RC): `"standard"`, `"small"`, `"large"`, `"xlarge"`, `"all"`, or `"custom"`. Ignored for steel and pixelframe. |

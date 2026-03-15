@@ -145,9 +145,17 @@ Finite element plate model on Winkler springs:
 | `pier_shape` | `:rectangular` | Legacy field (ignored for ACI spread footings); use `FoundationDemand.shape` |
 | `pier_c1` | 18 in. | Legacy field (ignored for ACI spread footings); use `FoundationDemand.c1` |
 | `pier_c2` | 18 in. | Legacy field (ignored for ACI spread footings); use `FoundationDemand.c2` |
+| `min_depth` | 12 in. | Minimum footing thickness before iteration |
+| `depth_increment` | 1 in. | Round-up increment for footing thickness during iteration |
+| `size_increment` | 3 in. | Round plan dimensions up to this increment |
 | `ϕ_flexure` | 0.90 | ACI 318-11 §9.3.2 strength reduction |
 | `ϕ_shear` | 0.75 | ACI 318-11 §9.3.2 strength reduction |
 | `ϕ_bearing` | 0.65 | Bearing strength reduction factor |
+| `λ` | `nothing` | Lightweight factor (`nothing` → pull from `material.concrete.λ`) |
+| `fc_col` | `nothing` | Column concrete strength override (`nothing` → same as footing concrete) |
+| `check_bearing` | `true` | Perform ACI 22.8 bearing check at column–footing interface |
+| `check_dowels` | `true` | Design dowels when bearing in the column concrete controls |
+| `check_development` | `true` | Verify simplified tension development length (ACI 25.4.2) |
 
 ### MatParams
 

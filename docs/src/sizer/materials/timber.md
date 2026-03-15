@@ -22,7 +22,6 @@ The `Timber` material type stores NDS reference design values for sawn lumber an
 ## Key Types
 
 ```@docs
-AbstractMaterial
 Timber
 ```
 

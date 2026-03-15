@@ -23,7 +23,6 @@ All presets are `const` instances registered in a global name registry for displ
 ## Key Types
 
 ```@docs
-AbstractMaterial
 Metal
 StructuralSteel
 RebarSteel

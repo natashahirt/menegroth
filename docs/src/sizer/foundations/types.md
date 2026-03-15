@@ -128,13 +128,7 @@ FoundationDemand
 - **`CombinedFootingResult`**, **`PileCapResult`** — defined but not yet
   produced by any design function.
 
-```@docs
-SpreadFootingResult
-CombinedFootingResult
-StripFootingResult
-MatFootingResult
-PileCapResult
-```
+See [ACI Foundation Design](codes/aci.md) for `SpreadFootingResult`, `StripFootingResult`, and `MatFootingResult` docstrings.
 
 ### Mat Analysis Methods
 

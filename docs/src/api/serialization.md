@@ -2,7 +2,7 @@
 
 > ```julia
 > skeleton = json_to_skeleton(api_input)
-> params   = json_to_params(api_input.params)
+> params   = json_to_params(api_input.params, api_input.units)
 > hash     = compute_geometry_hash(api_input)
 > output   = design_to_json(design; geometry_hash = hash)
 > ```
@@ -37,7 +37,7 @@ compute_geometry_hash
 
 ### json_to_params
 
-`json_to_params(params::APIParams) → DesignParameters` maps JSON string identifiers to Julia types:
+`json_to_params(api_params::APIParams, coord_unit_str::String="meters") → DesignParameters` maps JSON string identifiers to Julia types. In the API server, it is called as `json_to_params(input.params, input.units)` so any face-scoped override polygons are converted using the same coordinate units as `APIInput.vertices`.
 
 | JSON Field | JSON String | Julia Result |
 |:-----------|:------------|:-------------|
@@ -50,10 +50,12 @@ compute_geometry_hash
 | `column_type` | `"steel_w"` | `SteelColumnOptions(material=steel, section_type=:w, catalog=column_catalog)` |
 | `column_type` | `"steel_hss"` | `SteelColumnOptions(material=steel, section_type=:hss, catalog=column_catalog)` |
 | `column_type` | `"steel_pipe"` | `SteelColumnOptions(material=steel, section_type=:pipe)` |
+| `column_type` | `"pixelframe"` | `PixelFrameColumnOptions(fc_values=...)` |
 | `beam_type` | `"steel_w"` | `SteelBeamOptions(material=steel, section_type=:w)` |
 | `beam_type` | `"steel_hss"` | `SteelBeamOptions(material=steel, section_type=:hss)` |
 | `beam_type` | `"rc_rect"` | `ConcreteBeamOptions(material=concrete, rebar_material=rebar, include_flange=false)` |
 | `beam_type` | `"rc_tbeam"` | `ConcreteBeamOptions(material=concrete, rebar_material=rebar, include_flange=true)` |
+| `beam_type` | `"pixelframe"` | `PixelFrameBeamOptions(fc_values=...)` |
 | `materials.concrete` | `"NWC_4000"` | `NWC_4000` |
 | `materials.concrete` | `"NWC_5000"` | `NWC_5000` |
 | `materials.column_concrete` | `"NWC_6000"` | `NWC_6000` |
@@ -67,8 +69,15 @@ compute_geometry_hash
 | `floor_options.method` | `"EFM"` | `EFM()` |
 | `floor_options.method` | `"EFM_HARDY_CROSS"` | `EFM(solver=:hardy_cross)` |
 | `floor_options.method` | `"FEA"` | `FEA()` |
-| `foundation_soil` | `"medium_sand"` | `FoundationParameters(soil=medium_sand, concrete=...)` when `size_foundations=true` |
+| `column_sizing_strategy` | `"discrete"` / `"nlp"` | Sets `ConcreteColumnOptions(...; sizing_strategy=...)` and `SteelColumnOptions(...; sizing_strategy=...)` |
+| `beam_sizing_strategy` | `"discrete"` / `"nlp"` | Sets `ConcreteBeamOptions(...; sizing_strategy=...)` and `SteelBeamOptions(...; sizing_strategy=...)` |
+| `beam_catalog` | `"custom"` + `beam_catalog_bounds` | Builds `custom_catalog = rc_beam_catalog_from_bounds(...)` (RC beams only) |
+| `pixelframe_options.fc_preset` | `"standard"`, `"low"`, `"high"`, `"extended"` | Selects preset `fc_values` (MPa) for PixelFrame catalogs |
+| `pixelframe_options.fc_preset` | `"custom"` | Requires `fc_min_ksi`, `fc_max_ksi`, `fc_resolution_ksi` and builds `fc_values` (MPa) |
+| `foundation_soil` | `"medium_sand"` | `FoundationParameters(soil=medium_sand, ...)` when `size_foundations=true` |
 | `foundation_concrete` | `"NWC_3000"` | `FoundationParameters(concrete=NWC_3000, ...)` when `size_foundations=true` |
+| `foundation_options.*` | — | Builds `FoundationOptions(strategy=..., mat_coverage_threshold=..., spread_params=..., strip_params=..., mat_params=...)` |
+| `scoped_overrides` | — | Builds `DesignParameters.scoped_floor_overrides` (face-scoped floor overrides; coordinates converted to meters) |
 
 Notes:
 - Unknown `floor_type` strings fall back to `FlatPlateOptions(...)` with the resolved analysis settings.

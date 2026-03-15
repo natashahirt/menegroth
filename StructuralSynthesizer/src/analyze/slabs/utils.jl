@@ -673,10 +673,10 @@ ec = compute_building_ec(struc)
 function update_slab_volumes!(struc::BuildingStructure; 
                               options::StructuralSizer.AbstractFloorOptions=StructuralSizer.FlatPlateOptions(),
                               primary_material=nothing)
+    mat = isnothing(primary_material) ? _primary_material(options) : primary_material
     for slab in struc.slabs
         isnothing(slab.result) && continue   # skip non-converged slabs
         floor_area = sum(struc.cells[idx].area for idx in slab.cell_indices)
-        mat = isnothing(primary_material) ? _primary_material(options) : primary_material
         slab.volumes = _compute_slab_volumes(slab.result, floor_area, mat, options)
     end
     return struc

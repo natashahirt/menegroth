@@ -1,4 +1,25 @@
 """
+    _create_offset_nodes(skel, col_offset_by_vertex, support_set) -> Vector{Asap.Node}
+
+Create Asap nodes from skeleton vertices, applying structural offsets for edge/corner columns.
+Shared by `to_asap!` and `build_analysis_model!`.
+"""
+function _create_offset_nodes(skel::BuildingSkeleton, col_offset_by_vertex, support_set::Set{Int})
+    vc = skel.geometry.vertex_coords
+    n_verts = length(skel.vertices)
+    nodes = Vector{Asap.Node}(undef, n_verts)
+    @inbounds for v_idx in 1:n_verts
+        off = get(col_offset_by_vertex, v_idx, nothing)
+        x = (vc[v_idx, 1] + (isnothing(off) ? 0.0 : off[1])) * u"m"
+        y = (vc[v_idx, 2] + (isnothing(off) ? 0.0 : off[2])) * u"m"
+        z = vc[v_idx, 3] * u"m"
+        dofs = v_idx in support_set ? [false, false, false, false, false, false] : [true, true, true, false, false, false]
+        nodes[v_idx] = Asap.Node([x, y, z], dofs)
+    end
+    return nodes
+end
+
+"""
     to_asap!(struc; params=DesignParameters(), diaphragms=nothing, shell_props=nothing)
 
 Converts a BuildingStructure into an Asap.Model.
@@ -65,18 +86,7 @@ function to_asap!(struc::BuildingStructure{T, A, P};
     end
 
     support_set = Set(get(skel.groups_vertices, :support, Int[]))
-    vc = skel.geometry.vertex_coords
-    n_verts = length(skel.vertices)
-    
-    nodes = Vector{Asap.Node}(undef, n_verts)
-    @inbounds for v_idx in 1:n_verts
-        off = get(col_offset_by_vertex, v_idx, nothing)
-        x = (vc[v_idx, 1] + (isnothing(off) ? 0.0 : off[1])) * u"m"
-        y = (vc[v_idx, 2] + (isnothing(off) ? 0.0 : off[2])) * u"m"
-        z = vc[v_idx, 3] * u"m"
-        dofs = v_idx in support_set ? [false, false, false, false, false, false] : [true, true, true, false, false, false]
-        nodes[v_idx] = Asap.Node([x, y, z], dofs)
-    end
+    nodes = _create_offset_nodes(skel, col_offset_by_vertex, support_set)
 
     # 2. Frame Elements — placeholder section (replaced during sizing)
     # Use steel from materials cascade if available, else defaults
@@ -118,6 +128,7 @@ function to_asap!(struc::BuildingStructure{T, A, P};
     empty!(struc.cell_live_loads)
     
     use_patterns = params.pattern_loading != :none
+    combo = governing_combo(params)
     
     for (cell_idx, cell) in enumerate(struc.cells)
         if cell.floor_type == :grade
@@ -130,14 +141,14 @@ function to_asap!(struc::BuildingStructure{T, A, P};
         if use_patterns
             dead, live = _create_cell_tributary_loads!(
                 loads, frame_elements, skel, struc, cell, cell_idx, params;
-                split_dead_live=true)
+                split_dead_live=true, combo=combo)
             struc.cell_dead_loads[cell_idx] = dead
             struc.cell_live_loads[cell_idx] = live
             struc.cell_tributary_loads[cell_idx] = vcat(dead, live)
         else
             combined = _create_cell_tributary_loads!(
                 loads, frame_elements, skel, struc, cell, cell_idx, params;
-                split_dead_live=false)
+                split_dead_live=false, combo=combo)
             struc.cell_dead_loads[cell_idx] = Asap.TributaryLoad[]
             struc.cell_live_loads[cell_idx] = Asap.TributaryLoad[]
             struc.cell_tributary_loads[cell_idx] = combined
@@ -248,7 +259,8 @@ function _create_cell_tributary_loads!(
     cell::Cell,
     cell_idx::Int,
     params::DesignParameters=DesignParameters();
-    split_dead_live::Bool=false
+    split_dead_live::Bool=false,
+    combo::LoadCombination=governing_combo(params)
 )
     dead_loads = Asap.TributaryLoad[]
     live_loads = Asap.TributaryLoad[]
@@ -267,7 +279,6 @@ function _create_cell_tributary_loads!(
     end
 
     # Compute pressures
-    combo = governing_combo(params)
     if split_dead_live
         dead_pressure = uconvert(u"Pa", combo.D * (cell.sdl + cell.self_weight))
         live_pressure = uconvert(u"Pa", combo.L * cell.live_load)
@@ -996,32 +1007,10 @@ function build_analysis_model!(design::BuildingDesign;
         refinement_targets=refinement_targets,
     )
 
-    # ─── 3. Create nodes with structural offsets (same as to_asap!) ───
-    # Build vertex → offset lookup from columns (shifts edge/corner columns inward)
-    col_offset_by_vertex = Dict{Int, NTuple{2, Float64}}()
-    for col in struc.columns
-        off = col.structural_offset
-        (off[1] == 0.0 && off[2] == 0.0) && continue
-        for seg_idx in segment_indices(col)
-            seg_idx > length(struc.segments) && continue
-            edge_idx = struc.segments[seg_idx].edge_idx
-            (edge_idx < 1 || edge_idx > length(skel.edge_indices)) && continue
-            v1, v2 = skel.edge_indices[edge_idx]
-            col_offset_by_vertex[v1] = off
-            col_offset_by_vertex[v2] = off
-        end
-    end
-    
+    # ─── 3. Create nodes with structural offsets ───
+    # Reuse offsets already captured in design (populated by capture_design before restore!)
     support_set = Set(get(skel.groups_vertices, :support, Int[]))
-    vc = skel.geometry.vertex_coords
-    nodes = [begin
-        off = get(col_offset_by_vertex, i, nothing)
-        x = (vc[i, 1] + (isnothing(off) ? 0.0 : off[1])) * u"m"
-        y = (vc[i, 2] + (isnothing(off) ? 0.0 : off[2])) * u"m"
-        z = vc[i, 3] * u"m"
-        dofs = i in support_set ? [false, false, false, false, false, false] : [true, true, true, false, false, false]
-        Asap.Node([x, y, z], dofs)
-    end for i in eachindex(skel.vertices)]
+    nodes = _create_offset_nodes(skel, design.structural_offsets, support_set)
     
     # ─── 4. Copy frame elements from selected groups ───
     # Use existing elements from struc.asap_model (preserves sized sections)

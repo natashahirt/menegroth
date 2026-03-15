@@ -53,6 +53,7 @@ namespace Menegroth.GH.Components
         private bool _showBeams = true;
         private bool _showColumns = true;
         private bool _showFoundations = true;
+        private bool _showVolumes = true;
         private int _mode = MODE_DEFLECTED_GLOBAL;
         private int _colorBy = COLOR_UTILIZATION;
         private int _analyticalSlab = COLOR_NONE;
@@ -65,6 +66,7 @@ namespace Menegroth.GH.Components
         private readonly List<Curve> _previewOriginalCurves = new List<Curve>();
         private readonly List<Mesh> _previewShadedMeshes = new List<Mesh>();
         private readonly List<Color> _previewShadedColors = new List<Color>();
+        private readonly List<bool> _previewShadedUseVertexColors = new List<bool>();
 
         public Visualization()
             : base("Visualization",
@@ -91,6 +93,20 @@ namespace Menegroth.GH.Components
             modeMenu.DropDownItems.Add(CreateModeMenuItem("Deflected (Local)", MODE_DEFLECTED_LOCAL));
             modeMenu.DropDownItems.Add(CreateModeMenuItem("Original", MODE_ORIGINAL));
             menu.Items.Add(modeMenu);
+            var sizedAnalyticalMenu = new ToolStripMenuItem("Sized / Analytical");
+            sizedAnalyticalMenu.DropDownItems.Add(new ToolStripMenuItem("Volumes", null, (s, e) =>
+            {
+                _showVolumes = true;
+                ExpirePreview(true);
+                ExpireSolution(true);
+            }) { Checked = _showVolumes });
+            sizedAnalyticalMenu.DropDownItems.Add(new ToolStripMenuItem("Mesh", null, (s, e) =>
+            {
+                _showVolumes = false;
+                ExpirePreview(true);
+                ExpireSolution(true);
+            }) { Checked = !_showVolumes });
+            menu.Items.Add(sizedAnalyticalMenu);
             Menu_AppendItem(menu, "Use Internal Preview", (s, e) =>
             {
                 _useInternalPreview = !_useInternalPreview;
@@ -134,8 +150,10 @@ namespace Menegroth.GH.Components
             var colorMenu = new ToolStripMenuItem("Color By");
             colorMenu.DropDownItems.Add(CreateColorMenuItem("None", COLOR_NONE));
             colorMenu.DropDownItems.Add(CreateColorMenuItem("Material", COLOR_MATERIAL));
-            colorMenu.DropDownItems.Add(CreateColorMenuItem("Deflection", COLOR_DEFLECTION));
-            colorMenu.DropDownItems.Add(CreateColorMenuItem("Utilization", COLOR_UTILIZATION));
+            var wholeBuildingMenu = new ToolStripMenuItem("Whole Building");
+            wholeBuildingMenu.DropDownItems.Add(CreateColorMenuItem("Deflection", COLOR_DEFLECTION));
+            wholeBuildingMenu.DropDownItems.Add(CreateColorMenuItem("Utilization", COLOR_UTILIZATION));
+            colorMenu.DropDownItems.Add(wholeBuildingMenu);
             colorMenu.DropDownItems.Add(new ToolStripSeparator());
             var slabMenu = new ToolStripMenuItem("Slab");
             slabMenu.DropDownItems.Add(CreateAnalyticalSlabMenuItem("None", COLOR_NONE));
@@ -210,6 +228,7 @@ namespace Menegroth.GH.Components
             writer.SetBoolean("ShowBeams", _showBeams);
             writer.SetBoolean("ShowColumns", _showColumns);
             writer.SetBoolean("ShowFoundations", _showFoundations);
+            writer.SetBoolean("ShowVolumes", _showVolumes);
             writer.SetBoolean("BeamVisibilityInitialized", _beamVisibilityInitialized);
             writer.SetInt32("Mode", _mode);
             writer.SetInt32("ColorBy", _colorBy);
@@ -232,6 +251,10 @@ namespace Menegroth.GH.Components
                 _showColumns = reader.GetBoolean("ShowColumns");
             if (reader.ItemExists("ShowFoundations"))
                 _showFoundations = reader.GetBoolean("ShowFoundations");
+            if (reader.ItemExists("ShowVolumes"))
+                _showVolumes = reader.GetBoolean("ShowVolumes");
+            else
+                _showVolumes = true;
             if (reader.ItemExists("BeamVisibilityInitialized"))
                 _beamVisibilityInitialized = reader.GetBoolean("BeamVisibilityInitialized");
             else if (reader.ItemExists("ShowBeams"))
@@ -583,7 +606,8 @@ namespace Menegroth.GH.Components
                 {
                     // Sized mode: always show geometry. Other modes: show geometry when scale = 0;
                     // when scale > 0, show analytical objects (curves only).
-                    bool showFrameGeometry = (modeInt == MODE_SIZED) || (finalScale <= 0);
+                    // Volumes vs Mesh: when _showVolumes is false, show centerlines only (no breps).
+                    bool showFrameGeometry = _showVolumes && ((modeInt == MODE_SIZED) || (finalScale <= 0));
 
                     if (showFrameGeometry)
                     {
@@ -642,7 +666,8 @@ namespace Menegroth.GH.Components
                         maxSlabBending, maxSlabMembrane, maxSlabShear, maxSlabVonMises, maxSlabSurfaceStress);
                 else if (!isDeflected || finalScale <= 0)
                     BuildSizedSlabs(viz, slabGeometry, slabColors, effectiveColorBySlab, maxDisp,
-                        maxSlabBending, maxSlabMembrane, maxSlabShear, maxSlabVonMises, maxSlabSurfaceStress);
+                        maxSlabBending, maxSlabMembrane, maxSlabShear, maxSlabVonMises, maxSlabSurfaceStress,
+                        showVolumes: _showVolumes);
                 else
                     BuildDeflectedSlabs(viz, finalScale, showOriginal, slabGeometry, originalSlabs,
                         slabColors, effectiveColorBySlab, maxDisp, isLocal,
@@ -751,7 +776,9 @@ namespace Menegroth.GH.Components
             {
                 var m = _previewShadedMeshes[i];
                 if (m == null) continue;
-                var material = new Rhino.Display.DisplayMaterial(_previewShadedColors[i]);
+                var useVertexColors = i < _previewShadedUseVertexColors.Count && _previewShadedUseVertexColors[i];
+                var material = new Rhino.Display.DisplayMaterial(
+                    useVertexColors ? Color.White : _previewShadedColors[i]);
                 args.Display.DrawMeshShaded(m, material);
             }
         }
@@ -1035,6 +1062,7 @@ namespace Menegroth.GH.Components
             _previewOriginalCurves.Clear();
             _previewShadedMeshes.Clear();
             _previewShadedColors.Clear();
+            _previewShadedUseVertexColors.Clear();
 
             for (int i = 0; i < Math.Min(columnCurves.Count, columnColors.Count); i++)
             {
@@ -1066,16 +1094,37 @@ namespace Menegroth.GH.Components
             int n = Math.Min(geometry.Count, colors.Count);
             for (int i = 0; i < n; i++)
             {
-                if (!(geometry[i] is GH_Brep ghBrep) || ghBrep.Value == null)
-                    continue;
-                var meshes = Mesh.CreateFromBrep(ghBrep.Value, MeshingParameters.FastRenderMesh);
-                if (meshes == null || meshes.Length == 0)
-                    continue;
-                foreach (var m in meshes)
+                var color = colors[i];
+                if (geometry[i] is GH_Brep ghBrep && ghBrep.Value != null)
                 {
-                    if (m == null) continue;
-                    _previewShadedMeshes.Add(m.DuplicateMesh());
-                    _previewShadedColors.Add(colors[i]);
+                    var meshes = Mesh.CreateFromBrep(ghBrep.Value, MeshingParameters.FastRenderMesh);
+                    if (meshes != null && meshes.Length > 0)
+                    {
+                        foreach (var m in meshes)
+                        {
+                            if (m == null) continue;
+                            _previewShadedMeshes.Add(m.DuplicateMesh());
+                            _previewShadedColors.Add(color);
+                            _previewShadedUseVertexColors.Add(false);
+                        }
+                    }
+                }
+                else if (geometry[i] is GH_Mesh ghMesh && ghMesh.Value != null)
+                {
+                    var mesh = ghMesh.Value;
+                    if (mesh.Vertices.Count > 0 && mesh.Faces.Count > 0)
+                    {
+                        var dup = mesh.DuplicateMesh();
+                        bool hasVertexColors = mesh.VertexColors.Count == mesh.Vertices.Count && mesh.VertexColors.Count > 0;
+                        if (!hasVertexColors)
+                        {
+                            for (int v = 0; v < dup.Vertices.Count; v++)
+                                dup.VertexColors.Add(color);
+                        }
+                        _previewShadedMeshes.Add(dup);
+                        _previewShadedColors.Add(color);
+                        _previewShadedUseVertexColors.Add(hasVertexColors);
+                    }
                 }
             }
         }
@@ -1097,7 +1146,7 @@ namespace Menegroth.GH.Components
         private static void BuildSizedSlabs(JToken viz, List<IGH_GeometricGoo> output,
             List<Color> colors, int colorBy, double maxDisp,
             double maxSlabBending = 0, double maxSlabMembrane = 0, double maxSlabShear = 0,
-            double maxSlabVonMises = 0, double maxSlabSurfaceStress = 0)
+            double maxSlabVonMises = 0, double maxSlabSurfaceStress = 0, bool showVolumes = true)
         {
             var slabs = viz["sized_slabs"] as JArray ?? new JArray();
             var deflectedMeshes = viz["deflected_slab_meshes"] as JArray ?? new JArray();
@@ -1138,7 +1187,7 @@ namespace Menegroth.GH.Components
                     continue;
                 }
 
-                // Standard flat slab: loft boundary to create box
+                // Standard flat slab: loft boundary to create box (volumes) or planar mesh (analytical)
                 var boundary = slab["boundary_vertices"]?.ToObject<double[][]>() ?? new double[0][];
                 if (boundary.Length < 3) continue;
 
@@ -1146,28 +1195,50 @@ namespace Menegroth.GH.Components
                 topPts.Add(topPts[0]);
                 var bottomPts = topPts.Select(p => new Point3d(p.X, p.Y, p.Z - thickness)).ToList();
 
-                var loft = Brep.CreateFromLoft(
-                    new[] { new PolylineCurve(topPts), new PolylineCurve(bottomPts) },
-                    Point3d.Unset, Point3d.Unset, LoftType.Normal, false);
-
-                if (loft?.Length > 0)
+                if (showVolumes)
                 {
-                    try
+                    var loft = Brep.CreateFromLoft(
+                        new[] { new PolylineCurve(topPts), new PolylineCurve(bottomPts) },
+                        Point3d.Unset, Point3d.Unset, LoftType.Normal, false);
+
+                    if (loft?.Length > 0)
                     {
-                        var capped = loft[0].CapPlanarHoles(
-                            Rhino.RhinoDoc.ActiveDoc?.ModelAbsoluteTolerance ?? 0.001);
-                        output.Add(new GH_Brep(capped ?? loft[0]));
-                    }
-                    catch
-                    {
-                        output.Add(new GH_Brep(loft[0]));
+                        try
+                        {
+                            var capped = loft[0].CapPlanarHoles(
+                                Rhino.RhinoDoc.ActiveDoc?.ModelAbsoluteTolerance ?? 0.001);
+                            output.Add(new GH_Brep(capped ?? loft[0]));
+                        }
+                        catch
+                        {
+                            output.Add(new GH_Brep(loft[0]));
+                        }
+
+                        AppendSlabColor(colors, analyticalSource, colorBy, maxDisp, "vertex_displacements",
+                            maxSlabBending, maxSlabMembrane, maxSlabShear, maxSlabVonMises, maxSlabSurfaceStress);
                     }
 
-                    AppendSlabColor(colors, analyticalSource, colorBy, maxDisp, "vertex_displacements",
-                        maxSlabBending, maxSlabMembrane, maxSlabShear, maxSlabVonMises, maxSlabSurfaceStress);
+                    AppendDropPanelSizedGeometry(slab, zTop, thickness, output, colors, analyticalSource,
+                        colorBy, maxDisp, maxSlabBending, maxSlabMembrane, maxSlabShear,
+                        maxSlabVonMises, maxSlabSurfaceStress);
                 }
-
-                AppendDropPanelSizedGeometry(slab, zTop, thickness, output);
+                else
+                {
+                    var mesh = new Mesh();
+                    foreach (var p in topPts)
+                        mesh.Vertices.Add(p);
+                    int n = topPts.Count - 1;
+                    if (n >= 3)
+                    {
+                        for (int i = 1; i < n - 1; i++)
+                            mesh.Faces.AddFace(0, i, i + 1);
+                        mesh.Normals.ComputeNormals();
+                        mesh.Compact();
+                        output.Add(new GH_Mesh(mesh));
+                        AppendSlabColor(colors, analyticalSource, colorBy, maxDisp, "vertex_displacements",
+                            maxSlabBending, maxSlabMembrane, maxSlabShear, maxSlabVonMises, maxSlabSurfaceStress);
+                    }
+                }
             }
         }
 
@@ -1514,7 +1585,9 @@ namespace Menegroth.GH.Components
         }
 
         private static void AppendDropPanelSizedGeometry(JToken slab, double zTop, double slabThickness,
-            List<IGH_GeometricGoo> output)
+            List<IGH_GeometricGoo> output, List<Color> colors, JToken analyticalSource, int colorBy,
+            double maxDisp, double maxSlabBending, double maxSlabMembrane, double maxSlabShear,
+            double maxSlabVonMises, double maxSlabSurfaceStress)
         {
             var dropPanels = slab["drop_panels"] as JArray ?? new JArray();
             foreach (var dp in dropPanels)
@@ -1540,7 +1613,11 @@ namespace Menegroth.GH.Components
                     new Point3d(x1, y1, zTopDrop), new Point3d(x0, y1, zTopDrop),
                 }).ToBrep();
                 if (brep != null)
+                {
                     output.Add(new GH_Brep(brep));
+                    AppendSlabColor(colors, analyticalSource, colorBy, maxDisp, "vertex_displacements",
+                        maxSlabBending, maxSlabMembrane, maxSlabShear, maxSlabVonMises, maxSlabSurfaceStress);
+                }
             }
         }
 

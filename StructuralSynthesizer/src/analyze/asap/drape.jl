@@ -172,7 +172,8 @@ produce spurious upward local deflections at midspan with coarse meshes.
 """
 function compute_draped_displacements(design::BuildingDesign)
     empty_result = (total = Dict{UInt64, Vector{Float64}}(),
-                    local_bending = Dict{UInt64, Vector{Float64}}())
+                    local_bending = Dict{UInt64, Vector{Float64}}(),
+                    slab_shells = Dict{Symbol, Vector{Asap.ShellElement}}())
 
     shell_model = design.asap_model
 
@@ -259,5 +260,5 @@ function compute_draped_displacements(design::BuildingDesign)
         end
     end
 
-    return (total = total_dict, local_bending = local_dict)
+    return (total = total_dict, local_bending = local_dict, slab_shells = slab_shells)
 end

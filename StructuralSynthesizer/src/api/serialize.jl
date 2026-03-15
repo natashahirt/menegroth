@@ -268,15 +268,32 @@ function _serialize_visualization(design::BuildingDesign, du::DisplayUnits)
     is_beamless_system = !isempty(struc.slabs) &&
                          all(slab -> slab.floor_type in (:flat_plate, :flat_slab), struc.slabs)
 
-    # Global analytical maxima (max |value|) for diverging color normalization
-    max_fa = isempty(frame_elements) ? 0.0 : maximum(abs(e.max_axial_force) for e in frame_elements)
-    max_fm = isempty(frame_elements) ? 0.0 : maximum(abs(e.max_moment) for e in frame_elements)
-    max_fv = isempty(frame_elements) ? 0.0 : maximum(abs(e.max_shear) for e in frame_elements)
-    max_sb = isempty(deflected_meshes) ? 0.0 : maximum((isempty(m.face_bending_moment) ? 0.0 : maximum(abs, m.face_bending_moment) for m in deflected_meshes))
-    max_sm = isempty(deflected_meshes) ? 0.0 : maximum((isempty(m.face_membrane_force) ? 0.0 : maximum(abs, m.face_membrane_force) for m in deflected_meshes))
-    max_ss = isempty(deflected_meshes) ? 0.0 : maximum((isempty(m.face_shear_force) ? 0.0 : maximum(m.face_shear_force) for m in deflected_meshes))
-    max_sv = isempty(deflected_meshes) ? 0.0 : maximum((isempty(m.face_von_mises) ? 0.0 : maximum(m.face_von_mises) for m in deflected_meshes))
-    max_sp = isempty(deflected_meshes) ? 0.0 : maximum((isempty(m.face_surface_stress) ? 0.0 : maximum(abs, m.face_surface_stress) for m in deflected_meshes))
+    # Global analytical maxima — single pass over frame elements and deflected meshes
+    max_fa = 0.0; max_fm = 0.0; max_fv = 0.0
+    for e in frame_elements
+        a = abs(e.max_axial_force); a > max_fa && (max_fa = a)
+        m = abs(e.max_moment);      m > max_fm && (max_fm = m)
+        v = abs(e.max_shear);       v > max_fv && (max_fv = v)
+    end
+
+    max_sb = 0.0; max_sm = 0.0; max_ss = 0.0; max_sv = 0.0; max_sp = 0.0
+    for dm in deflected_meshes
+        if !isempty(dm.face_bending_moment)
+            v = maximum(abs, dm.face_bending_moment); v > max_sb && (max_sb = v)
+        end
+        if !isempty(dm.face_membrane_force)
+            v = maximum(abs, dm.face_membrane_force); v > max_sm && (max_sm = v)
+        end
+        if !isempty(dm.face_shear_force)
+            v = maximum(dm.face_shear_force); v > max_ss && (max_ss = v)
+        end
+        if !isempty(dm.face_von_mises)
+            v = maximum(dm.face_von_mises); v > max_sv && (max_sv = v)
+        end
+        if !isempty(dm.face_surface_stress)
+            v = maximum(abs, dm.face_surface_stress); v > max_sp && (max_sp = v)
+        end
+    end
 
     return APIVisualization(
         nodes = nodes,
@@ -328,6 +345,9 @@ end
 function _serialize_visualization_frame_elements(design::BuildingDesign, model, du::DisplayUnits)
     struc = design.structure
     skel = struc.skeleton
+
+    # Precompute meters→display-length scale factor (avoids per-value Unitful dispatch)
+    _m_to_disp = ustrip(du.units[:length], 1.0u"m")
     
     # Build element → design result mapping
     element_ratios = Dict{Int, Float64}()
@@ -336,8 +356,12 @@ function _serialize_visualization_frame_elements(design::BuildingDesign, model, 
     element_type = Dict{Int, Symbol}()
     element_section_obj = Dict{Int, StructuralSizer.AbstractSection}()
     element_material_color = Dict{Int, String}()
+
+    # Material color cache: same material object → same hex string
+    _mat_color_cache = Dict{UInt64, String}()
+    _cached_mat_color(mat) = isnothing(mat) ? "" :
+        get!(_mat_color_cache, objectid(mat)) do; _material_color_hex(mat); end
     
-    # Map columns — read section from captured design result (survives restore!)
     for (col_idx, result) in design.columns
         col_idx > length(struc.columns) && continue
         col = struc.columns[col_idx]
@@ -345,7 +369,7 @@ function _serialize_visualization_frame_elements(design::BuildingDesign, model, 
         sec_obj = result.section_obj
         mat_obj = !isnothing(col.concrete) ? col.concrete :
                   (!isnothing(sec_obj) && hasproperty(sec_obj, :material) ? getproperty(sec_obj, :material) : nothing)
-        mat_color = _material_color_hex(mat_obj)
+        mat_color = _cached_mat_color(mat_obj)
         for seg_idx in segment_indices(col)
             seg_idx > length(struc.segments) && continue
             edge_idx = struc.segments[seg_idx].edge_idx
@@ -358,14 +382,13 @@ function _serialize_visualization_frame_elements(design::BuildingDesign, model, 
         end
     end
     
-    # Map beams — read section from captured design result (survives restore!)
     for (beam_idx, result) in design.beams
         beam_idx > length(struc.beams) && continue
         beam = struc.beams[beam_idx]
         ratio = max(result.flexure_ratio, result.shear_ratio)
         sec_obj = result.section_obj
         mat_obj = !isnothing(sec_obj) && hasproperty(sec_obj, :material) ? getproperty(sec_obj, :material) : nothing
-        mat_color = _material_color_hex(mat_obj)
+        mat_color = _cached_mat_color(mat_obj)
         for seg_idx in segment_indices(beam)
             seg_idx > length(struc.segments) && continue
             edge_idx = struc.segments[seg_idx].edge_idx
@@ -378,11 +401,10 @@ function _serialize_visualization_frame_elements(design::BuildingDesign, model, 
         end
     end
     
-    # Map struts
     for (strut_idx, strut) in enumerate(struc.struts)
         sec_obj = section(strut)
         mat_obj = !isnothing(sec_obj) && hasproperty(sec_obj, :material) ? getproperty(sec_obj, :material) : nothing
-        mat_color = _material_color_hex(mat_obj)
+        mat_color = _cached_mat_color(mat_obj)
         for seg_idx in segment_indices(strut)
             seg_idx > length(struc.segments) && continue
             edge_idx = struc.segments[seg_idx].edge_idx
@@ -413,6 +435,9 @@ function _serialize_visualization_frame_elements(design::BuildingDesign, model, 
         edge_by_nodes[key] = edge_idx
     end
 
+    # Precomputed symbol→string for element types (avoids allocation per element)
+    _type_str = Dict{Symbol, String}(:column => "column", :beam => "beam", :strut => "strut", :other => "other")
+
     # Serialize elements
     # Resolve element index → skeleton edge index mapping:
     # - design.asap_model: use stored frame_edge_indices (subset of edges)
@@ -426,6 +451,12 @@ function _serialize_visualization_frame_elements(design::BuildingDesign, model, 
     n_elems = length(model.elements)
     elements = APIVisualizationFrameElement[]
     sizehint!(elements, n_elems)
+
+    # Per-section caches: avoid recomputing geometry/polygon for elements sharing a section
+    _sec_geom_cache = Dict{UInt64, Tuple{String, Float64, Float64, Float64, Float64, Float64}}()
+    _sec_poly_cache = Dict{UInt64, Vector{Vector{Float64}}}()
+    _sec_poly_inner_cache = Dict{UInt64, Vector{Vector{Float64}}}()
+
     for (elem_idx, elem) in enumerate(model.elements)
         node_start_id = elem.nodeStart.nodeID
         node_end_id = elem.nodeEnd.nodeID
@@ -447,33 +478,39 @@ function _serialize_visualization_frame_elements(design::BuildingDesign, model, 
         elem_type = src_edge_idx > 0 ? get(element_type, src_edge_idx, :other) : :other
         mat_color_hex = src_edge_idx > 0 ? get(element_material_color, src_edge_idx, "") : ""
         
-        # Extract section geometry
+        # Extract section geometry (cached by section identity)
         sec_obj = src_edge_idx > 0 ? get(element_section_obj, src_edge_idx, nothing) : nothing
+        sec_key = isnothing(sec_obj) ? UInt64(0) : objectid(sec_obj)
         section_type, depth_ft, width_ft, flange_width_ft, web_thickness_ft, flange_thickness_ft =
-            _extract_section_geometry(sec_obj, du)
+            get!(_sec_geom_cache, sec_key) do
+                _extract_section_geometry(sec_obj, du)
+            end
 
-        # Extract section polygon (2D outline in local y-z coordinates)
-        section_poly = _serialize_section_polygon(sec_obj, du, elem_idx)
-        section_poly_inner = _serialize_section_polygon_inner(sec_obj, du, elem_idx)
+        # Extract section polygon (cached by section identity)
+        section_poly = get!(_sec_poly_cache, sec_key) do
+            _serialize_section_polygon(sec_obj, du, elem_idx)
+        end
+        section_poly_inner = get!(_sec_poly_inner_cache, sec_key) do
+            _serialize_section_polygon_inner(sec_obj, du, elem_idx)
+        end
 
-        # Extract interpolated deflected curve points (cubic interpolation)
-        original_points = Vector{Float64}[]
-        displacement_vectors = Vector{Float64}[]
-
+        # Extract interpolated deflected curve points (cubic interpolation).
+        # basepositions and uglobal are Matrix{Float64} in SI meters — avoid
+        # per-element Unitful dispatch by using the precomputed scale factor.
         edisp_key = elem.elementID
-        if haskey(edisp_map, edisp_key)
+        edisp_found = haskey(edisp_map, edisp_key)
+        n_pts = edisp_found ? size(edisp_map[edisp_key].uglobal, 2) : 0
+
+        original_points = Vector{Vector{Float64}}(undef, n_pts)
+        displacement_vectors = Vector{Vector{Float64}}(undef, n_pts)
+
+        if edisp_found
             edisp = edisp_map[edisp_key]
-            n_pts = size(edisp.uglobal, 2)
-            # basepositions and uglobal are Matrix{Float64} in meters (no Unitful)
-
+            bp = edisp.basepositions  # 3×n_pts Float64
+            ug = edisp.uglobal        # 3×n_pts Float64
             for j in 1:n_pts
-                orig_pos_m = edisp.basepositions[:, j]
-                orig_pos = _to_display_length.(Ref(du), orig_pos_m)
-                push!(original_points, [_round_val(p; digits=6) for p in orig_pos])
-
-                disp_m = edisp.uglobal[:, j]
-                disp_vec = _to_display_length.(Ref(du), disp_m)
-                push!(displacement_vectors, [_round_val(d; digits=6) for d in disp_vec])
+                original_points[j] = [_round_val(_m_to_disp * bp[k, j]; digits=6) for k in 1:3]
+                displacement_vectors[j] = [_round_val(_m_to_disp * ug[k, j]; digits=6) for k in 1:3]
             end
         end
         
@@ -484,7 +521,7 @@ function _serialize_visualization_frame_elements(design::BuildingDesign, model, 
             element_id = edisp_key,
             node_start = node_start_id,
             node_end = node_end_id,
-            element_type = string(elem_type),
+            element_type = get(_type_str, elem_type, string(elem_type)),
             utilization_ratio = _round_val(ratio),
             ok = ok,
             section_name = sec_name,
@@ -530,8 +567,16 @@ end
 """Return the element of `v` with the largest absolute value, preserving sign."""
 function _vec_signed_extremum(v::AbstractVector)
     isempty(v) && return 0.0
-    idx = argmax(abs.(v))
-    return v[idx]
+    best_val = v[1]
+    best_abs = abs(best_val)
+    @inbounds for i in 2:length(v)
+        a = abs(v[i])
+        if a > best_abs
+            best_abs = a
+            best_val = v[i]
+        end
+    end
+    return best_val
 end
 
 """Return a normalized hex color string from a material, or empty string if unavailable."""
@@ -746,16 +791,14 @@ function _serialize_vault_mesh(slab, struc::BuildingStructure, du::DisplayUnits;
     mesh_data = Asap.get_vault_mesh_data(corner_nodes, span_axis, rise;
                                           target_edge_length=target_edge_length * u"m")
     
-    # Convert vertices to display units
+    # Convert vertices to display units (scalar multiply — avoids Unitful per vertex)
+    _m_to_disp = ustrip(du.units[:length], 1.0u"m")
     vertices = Vector{Float64}[]
+    sizehint!(vertices, length(mesh_data.vertices))
     for (x, y, z) in mesh_data.vertices
-        x_disp = _to_display_length(du, x * u"m")
-        y_disp = _to_display_length(du, y * u"m")
-        z_disp = _to_display_length(du, z * u"m")
-        
-        push!(vertices, [_round_val(x_disp; digits=6), 
-                         _round_val(y_disp; digits=6), 
-                         _round_val(z_disp; digits=6)])
+        push!(vertices, [_round_val(x * _m_to_disp; digits=6),
+                         _round_val(y * _m_to_disp; digits=6),
+                         _round_val(z * _m_to_disp; digits=6)])
     end
     
     # Convert faces to vectors (JSON serialization)
@@ -771,20 +814,17 @@ function _serialize_deflected_slab_meshes(design::BuildingDesign, struc::Buildin
 
     !Asap.has_shell_elements(model) && return deflected_meshes
 
+    # Precompute meters→display-length scale factor (avoids per-value Unitful dispatch in inner loop)
+    _m_to_disp = ustrip(du.units[:length], 1.0u"m")
+
     draped = compute_draped_displacements(design)
     total_disp = draped.total
     local_disp = draped.local_bending
+    slab_shells = draped.slab_shells
 
     sif_ws = Asap.ShellForcesWorkspace()
 
-    # Group shells by slab ID
-    slab_shells = Dict{Symbol, Vector{Asap.ShellElement}}()
-    for shell in model.shell_elements
-        shells = get!(slab_shells, shell.id, Asap.ShellElement[])
-        push!(shells, shell)
-    end
-
-    # Extract mesh data per slab
+    # Extract mesh data per slab (grouping already done by compute_draped_displacements)
     for (slab_id_sym, shells) in slab_shells
         # Extract slab index from symbol (e.g., :slab_1 -> 1)
         slab_idx = try
@@ -832,18 +872,16 @@ function _serialize_deflected_slab_meshes(design::BuildingDesign, struc::Buildin
                 tri_indices = Int[]
                 for node in shell_nodes
                     if !haskey(vertex_map, node)
-                        pos = _position_to_display_lengths(du, node.position)
-                        push!(vertices, [_round_val(p; digits=6) for p in pos])
+                        # Convert Unitful position via scalar multiply (avoids Quantity intermediaries)
+                        npos = node.position
+                        push!(vertices, [_round_val(ustrip(u"m", npos[k]) * _m_to_disp; digits=6) for k in 1:3])
 
                         nid = objectid(node)
                         disp_global_m = get(total_disp, nid, Asap.to_displacement_vec(node.displacement)[1:3])
                         disp_local_m = get(local_disp, nid, disp_global_m)
 
-                        disp_global_vec = _to_display_length.(Ref(du), disp_global_m)
-                        disp_local_vec = _to_display_length.(Ref(du), disp_local_m)
-
-                        push!(vertex_displacements, [_round_val(d; digits=6) for d in disp_global_vec])
-                        push!(vertex_displacements_local, [_round_val(d; digits=6) for d in disp_local_vec])
+                        push!(vertex_displacements, [_round_val(d * _m_to_disp; digits=6) for d in disp_global_m])
+                        push!(vertex_displacements_local, [_round_val(d * _m_to_disp; digits=6) for d in disp_local_m])
 
                         vertex_map[node] = length(vertices)
                     end

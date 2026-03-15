@@ -389,29 +389,24 @@ compression capacity: ϕPn = 0.65 × 0.80 × f′c × Ag  (ACI 318-11 §10.3.6.2
 Returns the mutated structure and the number of columns that grew.
 """
 function _reconcile_columns!(struc::BuildingStructure, params::DesignParameters)
-    fc = _get_design_fc(params)
-    fc_Pa = ustrip(u"Pa", uconvert(u"Pa", fc))
-    grew = 0
-
-    # Material constants for Asap section rebuild
     conc = resolve_concrete(params)
+    fc_Pa = ustrip(u"Pa", conc.fc′)
     E_Pa = ustrip(u"Pa", conc.E)
     ν_c = conc.ν
     G_Pa = E_Pa / (2.0 * (1.0 + ν_c))
     ρ_kg = ustrip(u"kg/m^3", conc.ρ)
     I_factor = 0.70  # ACI 318-11 §10.10.4.1
+    grew = 0
+
+    _col_opts = _get_column_opts(params)
+    _shape_con = !isnothing(_col_opts) ? _col_opts.shape_constraint : :square
+    _max_ar   = !isnothing(_col_opts) ? _col_opts.max_aspect_ratio : 2.0
+    _c_inc    = !isnothing(_col_opts) ? _col_opts.size_increment : 0.5u"inch"
 
     for col in struc.columns
         isnothing(col.c1) && continue
         
-        # Extract max axial from Asap model
         Pu_N = _column_asap_Pu(struc, col)
-        
-        # Use shape-aware growth if column_opts are available in params
-        _col_opts = _get_column_opts(params)
-        _shape_con = !isnothing(_col_opts) ? _col_opts.shape_constraint : :square
-        _max_ar   = !isnothing(_col_opts) ? _col_opts.max_aspect_ratio : 2.0
-        _c_inc    = !isnothing(_col_opts) ? _col_opts.size_increment : 0.5u"inch"
         
         # Check if column needs to grow for axial capacity
         needs_growth = false

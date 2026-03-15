@@ -26,9 +26,12 @@ function engineering_report(design::BuildingDesign; io::IO=stdout)
     params = design.params
     du = params.display_units
 
-    _report_header(io, design)
-    _report_slabs(io, design)
-    _report_columns(io, design)
+    conc = resolve_concrete(params)
+    reb  = resolve_rebar(params)
+
+    _report_header(io, design; conc=conc, reb=reb)
+    _report_slabs(io, design; conc=conc, reb=reb)
+    _report_columns(io, design; conc=conc, reb=reb)
     _report_foundations(io, design)
     _report_takeoff(io, design)
     _report_status(io, design)
@@ -39,7 +42,9 @@ end
 # ─────────────────────────────────────────────────────────────────────────────
 
 """Print the report header: timestamp, materials, unfactored loads, and building geometry."""
-function _report_header(io::IO, design::BuildingDesign)
+function _report_header(io::IO, design::BuildingDesign;
+                        conc=resolve_concrete(design.params),
+                        reb=resolve_rebar(design.params))
     params = design.params
     struc = design.structure
     du = params.display_units
@@ -49,10 +54,6 @@ function _report_header(io::IO, design::BuildingDesign)
     println(io, "  Generated: $(Dates.format(design.created, "yyyy-mm-dd HH:MM"))")
     println(io, "  Compute time: $(round(design.compute_time_s; digits=2))s")
     println(io)
-
-    # Materials
-    conc = resolve_concrete(params)
-    reb  = resolve_rebar(params)
     fc_psi = round(ustrip(u"psi", conc.fc′); digits=0)
     fy_ksi = round(ustrip(ksi, reb.Fy); digits=0)
     γc_pcf = round(ustrip(pcf, conc.ρ); digits=1)
@@ -94,7 +95,9 @@ end
 # ─────────────────────────────────────────────────────────────────────────────
 
 """Print slab panel tables (geometry, loading, reinforcement, punching, deflection)."""
-function _report_slabs(io::IO, design::BuildingDesign)
+function _report_slabs(io::IO, design::BuildingDesign;
+                       conc=resolve_concrete(design.params),
+                       reb=resolve_rebar(design.params))
     struc = design.structure
     params = design.params
     du = params.display_units
@@ -102,7 +105,6 @@ function _report_slabs(io::IO, design::BuildingDesign)
 
     isempty(struc.slabs) && return
 
-    conc = resolve_concrete(params)
     γc_pcf = ustrip(pcf, conc.ρ)
 
     println(io, section_break("SLAB PANELS"))
@@ -112,19 +114,19 @@ function _report_slabs(io::IO, design::BuildingDesign)
         r = slab.result
         r isa StructuralSizer.FlatPlatePanelResult || continue
 
-        _report_flat_plate_panel(io, design, s_idx, slab, r)
+        _report_flat_plate_panel(io, design, s_idx, slab, r; conc=conc, reb=reb)
     end
 end
 
 """Print a single flat-plate panel: spans, loading breakdown, M₀, reinforcement, punching, and deflection."""
 function _report_flat_plate_panel(io::IO, design::BuildingDesign,
-                                   s_idx::Int, slab, r)
+                                   s_idx::Int, slab, r;
+                                   conc=resolve_concrete(design.params),
+                                   reb=resolve_rebar(design.params))
     struc = design.structure
     params = design.params
     du = params.display_units
     loads = params.loads
-    conc = resolve_concrete(params)
-    reb  = resolve_rebar(params)
 
     γc_pcf = ustrip(pcf, conc.ρ)
     fc_psi = round(ustrip(u"psi", conc.fc′); digits=0)
@@ -284,15 +286,14 @@ end
 # ─────────────────────────────────────────────────────────────────────────────
 
 """Print the column schedule (section, loads, axial/P-M/punching ratios)."""
-function _report_columns(io::IO, design::BuildingDesign)
+function _report_columns(io::IO, design::BuildingDesign;
+                         conc=resolve_concrete(design.params),
+                         reb=resolve_rebar(design.params))
     struc = design.structure
     params = design.params
     du = params.display_units
 
     isempty(design.columns) && return
-
-    conc = resolve_concrete(params)
-    reb  = resolve_rebar(params)
     fc_psi = round(ustrip(u"psi", conc.fc′); digits=0)
     fy_ksi = round(ustrip(ksi, reb.Fy); digits=0)
 

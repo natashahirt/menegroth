@@ -2367,7 +2367,6 @@ function estimate_column_sizes!(struc::BuildingStructure;
                 end
             end
         else  # method == :span
-            avg_span = _estimate_avg_span(skel)
             c = StructuralSizer.estimate_column_size_from_span(avg_span)
             col.c1 = c
             col.c2 = c

@@ -1,5 +1,9 @@
 # Timber Materials
 
+```@meta
+CurrentModule = StructuralSizer
+```
+
 > ```julia
 > using StructuralSizer
 > # Define a custom timber material (no presets yet)

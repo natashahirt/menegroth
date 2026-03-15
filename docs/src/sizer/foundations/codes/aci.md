@@ -1,5 +1,9 @@
 # ACI Foundation Design
 
+```@meta
+CurrentModule = StructuralSizer
+```
+
 > ```julia
 > using StructuralSizer
 > using Unitful

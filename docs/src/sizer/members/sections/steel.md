@@ -1,5 +1,9 @@
 # Steel Sections
 
+```@meta
+CurrentModule = StructuralSizer
+```
+
 > ```julia
 > using StructuralSizer
 > w = W("W14X22")

@@ -1,5 +1,9 @@
 # Fiber Reinforced Concrete
 
+```@meta
+CurrentModule = StructuralSizer
+```
+
 > ```julia
 > using StructuralSizer
 > frc  = FiberReinforcedConcrete(NWC_6000, 30.0, 4.5, 3.8)

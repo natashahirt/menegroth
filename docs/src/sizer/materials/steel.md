@@ -1,5 +1,9 @@
 # Steel Materials
 
+```@meta
+CurrentModule = StructuralSizer
+```
+
 > ```julia
 > using StructuralSizer
 > steel = A992_Steel          # ASTM A992: Fy = 50 ksi, Fu = 65 ksi

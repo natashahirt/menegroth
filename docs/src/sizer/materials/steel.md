@@ -23,7 +23,10 @@ All presets are `const` instances registered in a global name registry for displ
 ## Key Types
 
 ```@docs
+AbstractMaterial
 Metal
+StructuralSteel
+RebarSteel
 ```
 
 ### Type Aliases
@@ -53,6 +56,11 @@ Metal
 | `A992_Steel` | ASTM A992 (USA) | 345 MPa (50 ksi) | 450 MPa (65 ksi) | 200 GPa | 1.61 |
 | `S355_Steel` | EN 10025 S355 (EU) | 355 MPa | 510 MPa | 210 GPa | 1.61 |
 
+```@docs
+A992_Steel
+S355_Steel
+```
+
 ## Rebar Presets
 
 | Preset | Standard | Fy | Fu | ecc |
@@ -62,6 +70,13 @@ Metal
 | `Rebar_75` | ASTM A615 Gr. 75 | 517 MPa (75 ksi) | 689 MPa (100 ksi) | 1.72 |
 | `Rebar_80` | ASTM A615 Gr. 80 | 552 MPa (80 ksi) | 724 MPa (105 ksi) | 1.72 |
 
+```@docs
+Rebar_40
+Rebar_60
+Rebar_75
+Rebar_80
+```
+
 ## Stud Preset
 
 | Preset | Standard | Fy | Fu | ecc |
@@ -69,6 +84,10 @@ Metal
 | `Stud_51` | ASTM A1044 | 351.6 MPa (51 ksi) | 448.2 MPa (65 ksi) | 1.72 |
 
 `Stud_51` is used for headed shear stud reinforcement in punching shear checks (ACI 318 §22.6) and composite deck connections.
+
+```@docs
+Stud_51
+```
 
 ## Functions
 

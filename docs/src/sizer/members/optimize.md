@@ -2,9 +2,14 @@
 
 > ```julia
 > using StructuralSizer
-> opts = SteelColumnOptions(material=A992_Steel)
-> results = size_columns(Pu, Mux, geometries, opts)
-> println("Selected: $(results.sections[1].name)")
+> using Unitful
+>
+> Pu = [500.0, 800.0] .* u"kN"
+> Mux = [100.0, 150.0] .* u"kN*m"
+> geoms = [SteelMemberGeometry(4.0u"m") for _ in 1:2]
+>
+> result = size_columns(Pu, Mux, geoms, SteelColumnOptions())
+> result.sections
 > ```
 
 ## Overview
@@ -38,7 +43,7 @@ SteelColumnOptions
 | `custom_catalog` | Optional custom section vector (overrides `catalog`) |
 | `max_depth` | Maximum section depth (Length) |
 | `n_max_sections` | Max unique sections across groups (0 = no limit) |
-| `sizing_strategy` | Sizing strategy selector (currently `:discrete` for steel options) |
+| `sizing_strategy` | `:discrete` (MIP) or `:nlp` (continuous; supported for `section_type in (:w, :hss)` only) |
 | `objective` | `MinWeight()`, `MinVolume()`, `MinCost()`, `MinCarbon()` |
 | `solver` | MIP optimizer selector: `:auto`, `:highs`, `:gurobi` |
 
@@ -154,19 +159,21 @@ See [Optimization Solvers](../optimize/solvers.md) for full solver docstrings.
 
 `optimize_discrete(checker, demands, geometries, catalog, material; ...)` — formulates and solves a MIP:
 
-**Decision variables:** binary `x[j]` = 1 if section `j` is selected (shared across all members in the group).
+**Decision variables:** binary `x[i,j]` = 1 if group `i` uses section `j`.
 
-**Objective:** minimize `Σ c[j] x[j]` where `c[j]` is the objective coefficient (weight, cost, or carbon).
+**Objective:** minimize `Σ_i Σ_j (c[j] × L[i]) x[i,j]` where `c[j]` is the objective coefficient (weight/cost/carbon per unit length) and `L[i]` is the member/group length extracted from `geometries[i].L`.
 
 **Constraints:**
-- Exactly one section selected: `Σ x[j] = 1`
-- Feasibility: `x[j] = 0` for all sections that fail any member's capacity check
+- Exactly one section per group: `Σ_j x[i,j] = 1`
+- Feasibility is enforced by restricting each group’s decision set to its prefiltered feasible indices (sections that fail `is_feasible(...)` for that group are excluded).
+
+**Optional global constraint:** when `n_max_sections > 0`, `optimize_discrete` adds auxiliary binaries that limit the total number of unique sections used across all groups in the call.
 
 Options: `optimizer` (`:auto`, `:highs`, `:gurobi`), `mip_gap`, `time_limit_sec`, `output_flag`, `cache`, `n_max_sections`.
 
 A multi-material overload accepts `(checker, demands, geometries, catalog, materials)` and uses `expand_catalog_with_materials` to create the Cartesian product.
 
-`optimize_binary_search(checker, demands, geometries, catalog, material; objective, cache)` — sorts the catalog by objective (lightest first), then binary searches for the lightest section that is feasible for all members. No external solver needed.
+`optimize_binary_search(checker, demands, geometries, catalog, material; objective, cache)` — sorts the catalog by objective (lightest first), then performs a per-group binary search for the lightest feasible section. No external solver needed.
 
 ### NLP Sizing
 
@@ -190,17 +197,17 @@ size_rc_beam_nlp
 
 ### MIP Formulation
 
-The discrete optimization uses a mixed-integer program (MIP) where binary variables select one section from the catalog. The key insight is that capacity checks are **precomputed** for all (section, demand) pairs before the MIP is formulated. This converts the nonlinear capacity check into a set of linear feasibility constraints:
+The discrete optimization uses a mixed-integer program (MIP) where binary variables select one section per group from the catalog. Capacity checks are precomputed/cached by the checker (`precompute_capacities!`), and feasibility is evaluated per group to build the candidate set for the MIP:
 
 1. `precompute_capacities!(checker, cache, catalog, material, objective)` fills the cache
-2. For each member `i` and section `j`: if `is_feasible(checker, cache, j, ..., demand_i, geometry_i) == false`, add constraint `x[j] = 0`
-3. The MIP is then purely linear: select the minimum-cost feasible section
+2. For each group `i`, build the feasible index set `{j | is_feasible(...) == true}`
+3. The MIP selects the minimum-cost feasible section per group, optionally limiting the number of unique sections via `n_max_sections`
 
 This approach avoids nonlinear capacity constraints in the MIP, making it solvable by standard MIP solvers (HiGHS, Gurobi).
 
 ### Binary Search Strategy
 
-Binary search sorts the catalog by objective value (e.g. weight per length), then finds the lightest section that passes all capacity checks for all members in the group. This is `O(n log m)` where `n` = number of members and `m` = catalog size. It is faster than MIP for small problems but cannot handle section grouping constraints or multi-objective tradeoffs.
+Binary search sorts the catalog by objective value (e.g. weight per length), then finds the lightest feasible section per group. It is faster than MIP for independent groups but cannot enforce `n_max_sections` (unique-section limits) or solve coupled multi-group selection problems.
 
 ### NLP Formulation
 

@@ -2,10 +2,15 @@
 
 > ```julia
 > using StructuralSizer
-> demand = MemberDemand(1, 200u"kip", 0u"kip", 150u"kip*ft", 0u"kip*ft",
->     -100u"kip*ft", 150u"kip*ft", 0u"kip*ft", 0u"kip*ft",
->     30u"kip", 0u"kip", 0u"kip*ft", 0.5u"inch", 100u"inch^4", true)
-> geom = SteelMemberGeometry(12u"ft", 12u"ft", 1.0, 1.0, 1.0, true)
+> using Unitful
+> demand = MemberDemand(1;
+>     Pu_c = 200u"kip",
+>     Mux  = 150u"kip*ft",
+>     M1x  = -100u"kip*ft",
+>     M2x  = 150u"kip*ft",
+>     Vu_strong = 30u"kip",
+> )
+> geom = SteelMemberGeometry(12u"ft"; Lb=12u"ft", Cb=1.0, Kx=1.0, Ky=1.0, braced=true)
 > ```
 
 ## Overview
@@ -17,6 +22,13 @@ All demand types subtype `AbstractDemand` and all geometry types subtype `Abstra
 ## Key Types
 
 ### Demand Types
+
+```@docs
+AbstractDemand
+MemberDemand
+RCColumnDemand
+RCBeamDemand
+```
 
 **`MemberDemand{T}`**
 
@@ -58,6 +70,13 @@ All demand types subtype `AbstractDemand` and all geometry types subtype `Abstra
 
 ### Geometry Types
 
+```@docs
+AbstractMemberGeometry
+SteelMemberGeometry
+ConcreteMemberGeometry
+TimberMemberGeometry
+```
+
 **`SteelMemberGeometry{T<:Unitful.Length}`**
 
 `SteelMemberGeometry{T<:Unitful.Length}` carries the geometric parameters needed for AISC 360 capacity checks:
@@ -93,6 +112,11 @@ All demand types subtype `AbstractDemand` and all geometry types subtype `Abstra
 | `support` | Boundary condition: `:pinned`, `:fixed`, or `:cantilever` |
 
 ### Checker Interfaces
+
+```@docs
+AbstractCapacityChecker
+AbstractCapacityCache
+```
 
 **`AbstractCapacityChecker`**
 

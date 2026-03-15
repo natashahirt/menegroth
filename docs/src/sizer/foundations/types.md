@@ -55,10 +55,19 @@ AbstractFoundation
 `AbstractDeepFoundation` are the two branches.  See the tree above for the
 full hierarchy.
 
+```@docs
+AbstractFoundation
+AbstractShallowFoundation
+AbstractDeepFoundation
+AbstractFoundationResult
+AbstractMatMethod
+```
+
 ### Shallow Foundation Types
 
 ```@docs
 SpreadFooting
+CombinedFooting
 StripFooting
 MatFoundation
 ```
@@ -74,6 +83,12 @@ See [ACI Foundation Design](codes/aci.md) for full docstrings.
 
 - **`DrivenPile`**, **`DrilledShaft`**, **`Micropile`** — type stubs for future
   deep foundation design (no design implementations yet).
+
+```@docs
+DrivenPile
+DrilledShaft
+Micropile
+```
 
 ### Soil Model
 
@@ -112,6 +127,14 @@ FoundationDemand
   see [ACI Foundation Design](codes/aci.md).
 - **`CombinedFootingResult`**, **`PileCapResult`** — defined but not yet
   produced by any design function.
+
+```@docs
+SpreadFootingResult
+CombinedFootingResult
+StripFootingResult
+MatFootingResult
+PileCapResult
+```
 
 ### Mat Analysis Methods
 
@@ -199,7 +222,7 @@ All result types implement a common interface:
 - `concrete_volume`: Total concrete volume
 - `steel_volume`: Total rebar volume
 - `footprint_area`: Plan area of the foundation
-- `utilization`: Governing utilization ratio (max of bearing, punching, shear, flexure)
+- `utilization`: Governing utilization ratio reported by the design routine (currently the max of service bearing utilization and punching utilization for ACI shallow foundations)
 
 ## Options & Configuration
 
@@ -230,10 +253,16 @@ Key `SpreadParams` fields:
 | `pier_c1` | 18 in. | Legacy field (ignored for ACI spread footings); use `FoundationDemand.c1` |
 | `pier_c2` | 18 in. | Legacy field (ignored for ACI spread footings); use `FoundationDemand.c2` |
 | `min_depth` | 12 in. | Minimum footing thickness before iteration |
+| `depth_increment` | 1 in. | Round-up increment for footing thickness during iteration |
 | `size_increment` | 3 in. | Round plan dimensions up to this increment |
 | `ϕ_flexure` | 0.90 | Flexure strength reduction factor (ACI 318-11 §9.3.2) |
 | `ϕ_shear` | 0.75 | Shear strength reduction factor (ACI 318-11 §9.3.2) |
 | `ϕ_bearing` | 0.65 | Bearing strength reduction factor |
+| `λ` | `nothing` | Lightweight factor (`nothing` → pull from `material.concrete.λ`) |
+| `fc_col` | `nothing` | Column concrete strength override (`nothing` → same as footing concrete) |
+| `check_bearing` | `true` | Perform ACI 22.8 bearing check at column–footing interface |
+| `check_dowels` | `true` | Design dowels when bearing in the column concrete controls |
+| `check_development` | `true` | Verify simplified tension development length (ACI 25.4.2) |
 | `objective` | `MinVolume()` | Optimization objective for sizing (volume/quantity) |
 
 `MatParams` selects the analysis method:

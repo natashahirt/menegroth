@@ -1,5 +1,9 @@
 # Foundation Types
 
+```@meta
+CurrentModule = StructuralSizer
+```
+
 > ```julia
 > using StructuralSizer
 > using Unitful

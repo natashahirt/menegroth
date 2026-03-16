@@ -310,15 +310,15 @@ function _serialize_visualization(design::BuildingDesign, du::DisplayUnits)
         foundations = foundations,
         is_beamless_system = is_beamless_system,
         suggested_scale_factor = _round_val(suggested_scale),
-        max_displacement = _round_val(max_disp; digits=2),
-        max_frame_axial = _round_val(max_fa; digits=2),
-        max_frame_moment = _round_val(max_fm; digits=2),
-        max_frame_shear = _round_val(max_fv; digits=2),
-        max_slab_bending = _round_val(max_sb; digits=2),
-        max_slab_membrane = _round_val(max_sm; digits=2),
-        max_slab_shear = _round_val(max_ss; digits=2),
-        max_slab_von_mises = _round_val(max_sv; digits=2),
-        max_slab_surface_stress = _round_val(max_sp; digits=2),
+        max_displacement = _round_val(max_disp; digits=6),
+        max_frame_axial = _round_val(max_fa; digits=4),
+        max_frame_moment = _round_val(max_fm; digits=4),
+        max_frame_shear = _round_val(max_fv; digits=4),
+        max_slab_bending = _round_val(max_sb; digits=4),
+        max_slab_membrane = _round_val(max_sm; digits=4),
+        max_slab_shear = _round_val(max_ss; digits=4),
+        max_slab_von_mises = _round_val(max_sv; digits=4),
+        max_slab_surface_stress = _round_val(max_sp; digits=4),
     )
 end
 
@@ -339,9 +339,9 @@ function _serialize_visualization_nodes(model, du::DisplayUnits, support_node_id
         def_pos = pos .+ disp
         push!(nodes, APIVisualizationNode(
             node_id = i,
-            position = [_round_val(p; digits=2) for p in pos],
-            displacement = [_round_val(d; digits=2) for d in disp],
-            deflected_position = [_round_val(p; digits=2) for p in def_pos],
+            position = [_round_val(p; digits=6) for p in pos],
+            displacement = [_round_val(d; digits=9) for d in disp],
+            deflected_position = [_round_val(p; digits=9) for p in def_pos],
             is_support = in(i, support_node_ids),
         ))
     end
@@ -516,8 +516,8 @@ function _serialize_visualization_frame_elements(design::BuildingDesign, model, 
             bp = edisp.basepositions  # 3×n_pts Float64
             ug = edisp.uglobal        # 3×n_pts Float64
             for j in 1:n_pts
-                original_points[j] = [_round_val(_m_to_disp * bp[k, j]; digits=2) for k in 1:3]
-                displacement_vectors[j] = [_round_val(_m_to_disp * ug[k, j]; digits=2) for k in 1:3]
+                original_points[j] = [_round_val(_m_to_disp * bp[k, j]; digits=6) for k in 1:3]
+                displacement_vectors[j] = [_round_val(_m_to_disp * ug[k, j]; digits=6) for k in 1:3]
             end
         end
         
@@ -543,9 +543,9 @@ function _serialize_visualization_frame_elements(design::BuildingDesign, model, 
             section_polygon_inner = section_poly_inner,
             original_points = original_points,
             displacement_vectors = displacement_vectors,
-            max_axial_force = _round_val(max_P; digits=2),
-            max_moment = _round_val(max_M; digits=2),
-            max_shear = _round_val(max_V; digits=2),
+            max_axial_force = _round_val(max_P; digits=4),
+            max_moment = _round_val(max_M; digits=4),
+            max_shear = _round_val(max_V; digits=4),
         ))
     end
     
@@ -666,7 +666,7 @@ function _serialize_section_polygon(sec_obj, du::DisplayUnits, elem_idx::Int)
         for (y, z) in poly_local
             y_disp = _to_display_length(du, y)
             z_disp = _to_display_length(du, z)
-            push!(section_poly, [_round_val(y_disp; digits=2), _round_val(z_disp; digits=2)])
+            push!(section_poly, [_round_val(y_disp; digits=6), _round_val(z_disp; digits=6)])
         end
         return section_poly
     catch e
@@ -686,7 +686,7 @@ function _serialize_section_polygon_inner(sec_obj, du::DisplayUnits, elem_idx::I
         for (y, z) in poly_local
             y_disp = _to_display_length(du, y)
             z_disp = _to_display_length(du, z)
-            push!(section_poly, [_round_val(y_disp; digits=2), _round_val(z_disp; digits=2)])
+            push!(section_poly, [_round_val(y_disp; digits=6), _round_val(z_disp; digits=6)])
         end
         return section_poly
     catch e
@@ -755,7 +755,7 @@ function _serialize_sized_slabs(design::BuildingDesign, struc::BuildingStructure
         
         push!(sized_slabs, APISizedSlab(
             slab_id = slab_idx,
-            boundary_vertices = [[_round_val(v; digits=2) for v in vert] for vert in boundary_vertices],
+            boundary_vertices = [[_round_val(v; digits=6) for v in vert] for vert in boundary_vertices],
             thickness = _round_val(thickness_ft; digits=4),
             z_top = _round_val(z_top_ft; digits=6),
             drop_panels = drop_panels,
@@ -803,9 +803,9 @@ function _serialize_vault_mesh(slab, struc::BuildingStructure, du::DisplayUnits;
     vertices = Vector{Float64}[]
     sizehint!(vertices, length(mesh_data.vertices))
     for (x, y, z) in mesh_data.vertices
-        push!(vertices, [_round_val(x * _m_to_disp; digits=2),
-                         _round_val(y * _m_to_disp; digits=2),
-                         _round_val(z * _m_to_disp; digits=2)])
+        push!(vertices, [_round_val(x * _m_to_disp; digits=6),
+                         _round_val(y * _m_to_disp; digits=6),
+                         _round_val(z * _m_to_disp; digits=6)])
     end
     
     # Convert faces to vectors (JSON serialization)
@@ -881,14 +881,14 @@ function _serialize_deflected_slab_meshes(design::BuildingDesign, struc::Buildin
                     if !haskey(vertex_map, node)
                         # Convert Unitful position via scalar multiply (avoids Quantity intermediaries)
                         npos = node.position
-                        push!(vertices, [_round_val(ustrip(u"m", npos[k]) * _m_to_disp; digits=2) for k in 1:3])
+                        push!(vertices, [_round_val(ustrip(u"m", npos[k]) * _m_to_disp; digits=6) for k in 1:3])
 
                         nid = objectid(node)
                         disp_global_m = get(total_disp, nid, Asap.to_displacement_vec(node.displacement)[1:3])
                         disp_local_m = get(local_disp, nid, disp_global_m)
 
-                        push!(vertex_displacements, [_round_val(d * _m_to_disp; digits=2) for d in disp_global_m])
-                        push!(vertex_displacements_local, [_round_val(d * _m_to_disp; digits=2) for d in disp_local_m])
+                        push!(vertex_displacements, [_round_val(d * _m_to_disp; digits=6) for d in disp_global_m])
+                        push!(vertex_displacements_local, [_round_val(d * _m_to_disp; digits=6) for d in disp_local_m])
 
                         vertex_map[node] = length(vertices)
                     end
@@ -919,11 +919,11 @@ function _serialize_deflected_slab_meshes(design::BuildingDesign, struc::Buildin
             utilization_ratio = _round_val(ratio),
             ok = ok,
             is_vault = is_vault,
-            face_bending_moment = [_round_val(v; digits=2) for v in face_bending],
-            face_membrane_force = [_round_val(v; digits=2) for v in face_membrane],
-            face_shear_force = [_round_val(v; digits=2) for v in face_shear],
-            face_von_mises = [_round_val(v; digits=2) for v in face_vm],
-            face_surface_stress = [_round_val(v; digits=2) for v in face_surf],
+            face_bending_moment = [_round_val(v; digits=4) for v in face_bending],
+            face_membrane_force = [_round_val(v; digits=4) for v in face_membrane],
+            face_shear_force = [_round_val(v; digits=4) for v in face_shear],
+            face_von_mises = [_round_val(v; digits=4) for v in face_vm],
+            face_surface_stress = [_round_val(v; digits=4) for v in face_surf],
         ))
     end
     
@@ -1009,7 +1009,7 @@ function _serialize_visualization_foundations(design::BuildingDesign, struc::Bui
 
         push!(out, APIVisualizationFoundation(
             foundation_id = fdn_idx,
-            center = [_round_val(cx; digits=2), _round_val(cy; digits=2), _round_val(z_top; digits=2)],
+            center = [_round_val(cx; digits=6), _round_val(cy; digits=6), _round_val(z_top; digits=6)],
             length = _round_val(_to_display_length(du, fdn_result.length); digits=4),
             width = _round_val(_to_display_length(du, fdn_result.width); digits=4),
             depth = _round_val(_to_display_length(du, fdn_result.depth); digits=4),
@@ -1065,7 +1065,7 @@ function _serialize_drop_panel_patches(slab_idx::Int, slab, struc::BuildingStruc
         cz = _to_display_length(du, c.z)
 
         push!(patches, APIDropPanelPatch(
-            center = [_round_val(cx; digits=2), _round_val(cy; digits=2), _round_val(cz; digits=2)],
+            center = [_round_val(cx; digits=6), _round_val(cy; digits=6), _round_val(cz; digits=6)],
             length = _round_val(a1_full_ft; digits=4),
             width = _round_val(a2_full_ft; digits=4),
             extra_depth = _round_val(h_drop_ft; digits=4),

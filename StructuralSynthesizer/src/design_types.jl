@@ -420,6 +420,15 @@ Base.@kwdef mutable struct DesignParameters
     
     # ─── Display Preferences ───
     display_units::DisplayUnits = imperial
+
+    # ─── Visualization ───
+    # Target edge length for the visualization shell mesh (meters, plain Float64).
+    # nothing → inherit from FEA target_edge or use adaptive default.
+    visualization_target_edge_m::Union{Float64, Nothing} = nothing
+    # When true, skip shell mesh build and visualization serialization entirely.
+    skip_visualization::Bool = false
+    # "minimal" → frame + slab boundaries only; "full" → deflected meshes, analytical.
+    visualization_detail::String = "full"
 end
 
 # =============================================================================
@@ -636,7 +645,8 @@ Design result for a column.
 Base.@kwdef mutable struct ColumnDesignResult
     # Sizing
     section_size::String = ""         # e.g., "W14x90", "16x16"
-    
+    section_obj::Union{StructuralSizer.AbstractSection, Nothing} = nothing
+
     # Column geometry (populated from Column.c1, .c2, .shape)
     c1::typeof(1.0u"m") = 0.0u"m"
     c2::typeof(1.0u"m") = 0.0u"m"
@@ -667,6 +677,7 @@ Design result for a beam.
 """
 Base.@kwdef mutable struct BeamDesignResult
     section_size::String = ""
+    section_obj::Union{StructuralSizer.AbstractSection, Nothing} = nothing
     Mu::typeof(1.0u"kN*m") = 0.0u"kN*m"
     Vu::typeof(1.0u"kN") = 0.0u"kN"
     flexure_ratio::Float64 = 0.0
@@ -739,12 +750,12 @@ building = BuildingStructure(skeleton)
 
 design1 = BuildingDesign(building, DesignParameters(
     name = "Concrete 4ksi",
-    concrete = NWC_4000
+    materials = MaterialOptions(concrete = NWC_4000),
 ))
 
 design2 = BuildingDesign(building, DesignParameters(
-    name = "Concrete 6ksi", 
-    concrete = NWC_6000
+    name = "Concrete 6ksi",
+    materials = MaterialOptions(concrete = NWC_6000),
 ))
 
 visualize(design1)  # Self-contained: accesses geometry via design.structure
@@ -775,6 +786,14 @@ mutable struct BuildingDesign{T, A, P}
     # Enables correct element→design mapping for visualization; empty when using struc.asap_model.
     asap_model_frame_edge_indices::Vector{Int}
     
+    # Structural offsets captured at design time (vertex_idx → (dx_m, dy_m)).
+    # Persists edge/corner column offsets so serialization can reconstruct
+    # centerline positions after restore! wipes them from the structure.
+    structural_offsets::Dict{Int, NTuple{2, Float64}}
+    
+    # Wall-clock time for each design phase (prepare, pipeline, capture, etc.)
+    phase_timings::Dict{String, Float64}
+    
     # Metadata
     created::DateTime
     compute_time_s::Float64
@@ -796,6 +815,8 @@ function BuildingDesign(struc::BuildingStructure{T, A, P}, params::DesignParamet
         DesignSummary(),
         nothing,  # asap_model (built via build_analysis_model!)
         Int[],    # asap_model_frame_edge_indices (populated by build_analysis_model!)
+        Dict{Int, NTuple{2, Float64}}(),  # structural_offsets (captured by capture_design)
+        Dict{String, Float64}(),          # phase_timings (populated by design_building)
         now(),
         0.0
     )

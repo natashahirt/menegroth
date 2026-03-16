@@ -580,7 +580,7 @@ function _size_beams_columns!(struc::BuildingStructure, params::DesignParameters
             Asap.process!(struc.asap_model)
         end
         Asap.solve!(struc.asap_model)
-        _run_p_delta_if_needed!(struc, column_opts; verbose=hasproperty(params, :verbose) ? params.verbose : false)
+        _run_p_delta_if_needed!(struc, column_opts; verbose=false)
         if has_fire_rating(params)
             n_col = add_coating_loads!(struc, params; member_edge_group=:columns, resolve=false)
             if n_col > 0
@@ -593,7 +593,7 @@ function _size_beams_columns!(struc::BuildingStructure, params::DesignParameters
 
     tol = 0.05
     max_iter = params.max_iterations
-    verbose = hasproperty(params, :verbose) ? params.verbose : false
+    verbose = false
 
     n_cols_bc = length(struc.columns)
     prev_demands = Vector{Float64}(undef, n_cols_bc)

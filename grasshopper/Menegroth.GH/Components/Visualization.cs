@@ -322,7 +322,7 @@ namespace Menegroth.GH.Components
             pManager.AddGenericParameter("Column Geometry", "ColumnGeometry",
                 "Column section geometry as Breps", GH_ParamAccess.list);
             pManager.AddGenericParameter("Slab Geometry", "SlabGeometry",
-                "Slab geometry only (Brep for Sized, Mesh for Deflected)", GH_ParamAccess.list);
+                "Slab geometry only (Mesh for Sized flat, Brep for vaults/drop panels, Mesh for Deflected)", GH_ParamAccess.list);
             pManager.AddGenericParameter("Foundation Geometry", "FoundationGeometry",
                 "Foundation geometry only (Brep)", GH_ParamAccess.list);
         }
@@ -946,10 +946,13 @@ namespace Menegroth.GH.Components
 
         private static Brep SweepSection(Curve elementCurve, JToken elem)
         {
-            var poly = elem["section_polygon"]?.ToObject<double[][]>() ?? new double[0][];
-            var polyInner = elem["section_polygon_inner"]?.ToObject<double[][]>() ?? new double[0][];
+            var poly = ParseSectionPolygon(elem["section_polygon"]);
+            var polyInner = ParseSectionPolygon(elem["section_polygon_inner"]);
             double depth = elem["section_depth"]?.ToObject<double>() ?? 0;
             double width = elem["section_width"]?.ToObject<double>() ?? 0;
+            double flangeWidth = elem["flange_width"]?.ToObject<double>() ?? 0;
+            double webThickness = elem["web_thickness"]?.ToObject<double>() ?? 0;
+            double flangeThickness = elem["flange_thickness"]?.ToObject<double>() ?? 0;
             double orientAngle = elem["orientation_angle"]?.ToObject<double>() ?? 0;
             string sectionType = elem["section_type"]?.ToString() ?? "";
 
@@ -958,13 +961,8 @@ namespace Menegroth.GH.Components
             if (poly.Length < 3)
             {
                 if (depth <= 0 || width <= 0) return null;
-                poly = new[]
-                {
-                    new[] { -width / 2, -depth / 2 },
-                    new[] {  width / 2, -depth / 2 },
-                    new[] {  width / 2,  depth / 2 },
-                    new[] { -width / 2,  depth / 2 },
-                };
+                poly = BuildPolygonFromSectionType(sectionType, depth, width,
+                    flangeWidth, webThickness, flangeThickness);
             }
 
             double tol = Rhino.RhinoDoc.ActiveDoc?.ModelAbsoluteTolerance ?? 0.001;
@@ -1063,6 +1061,81 @@ namespace Menegroth.GH.Components
             }
 
             return PipeFallback(elementCurve, width, depth, tol);
+        }
+
+        /// <summary>
+        /// Parse section polygon from JSON. Handles ToObject failure and JArray of JArray formats.
+        /// Returns empty array on parse failure.
+        /// </summary>
+        private static double[][] ParseSectionPolygon(JToken token)
+        {
+            if (token == null) return new double[0][];
+            try
+            {
+                var arr = token as JArray;
+                if (arr == null || arr.Count < 3) return new double[0][];
+                var result = new List<double[]>();
+                foreach (var item in arr)
+                {
+                    if (item is JArray inner && inner.Count >= 2)
+                    {
+                        try
+                        {
+                            result.Add(new[] { inner[0].Value<double>(), inner[1].Value<double>() });
+                        }
+                        catch { /* skip invalid vertex */ }
+                    }
+                    else
+                    {
+                        var row = item?.ToObject<double[]>();
+                        if (row != null && row.Length >= 2) result.Add(row);
+                    }
+                }
+                return result.Count >= 3 ? result.ToArray() : new double[0][];
+            }
+            catch
+            {
+                try
+                {
+                    var fallback = token.ToObject<double[][]>();
+                    return fallback ?? new double[0][];
+                }
+                catch
+                {
+                    return new double[0][];
+                }
+            }
+        }
+
+        /// <summary>
+        /// Build section polygon from section_type and dimensions when section_polygon is empty.
+        /// Vertices in [y, z] local coords: y = width, z = depth; centroid at origin.
+        /// </summary>
+        private static double[][] BuildPolygonFromSectionType(string sectionType,
+            double depth, double width, double flangeWidth, double webThickness, double flangeThickness)
+        {
+            if (sectionType == "W-shape" && (flangeWidth > 0 || width > 0) && depth > 0)
+            {
+                double bf = flangeWidth > 0 ? flangeWidth : width;
+                double tw = webThickness > 0 ? webThickness : Math.Max(bf * 0.01, 0.005);
+                double tf = flangeThickness > 0 ? flangeThickness : Math.Max(depth * 0.05, 0.005);
+                double d2 = depth / 2;
+                return new[]
+                {
+                    new[] { -bf / 2, -d2 }, new[] { -bf / 2, -d2 + tf }, new[] { -tw / 2, -d2 + tf },
+                    new[] { -tw / 2, d2 - tf }, new[] { -bf / 2, d2 - tf }, new[] { -bf / 2, d2 },
+                    new[] { bf / 2, d2 }, new[] { bf / 2, d2 - tf }, new[] { tw / 2, d2 - tf },
+                    new[] { tw / 2, -d2 + tf }, new[] { bf / 2, -d2 + tf }, new[] { bf / 2, -d2 },
+                };
+            }
+            // Rectangular fallback for rectangular, HSS_rect, T-beam, other, or unknown
+            return new[]
+            {
+                new[] { -width / 2, -depth / 2 },
+                new[] { width / 2, -depth / 2 },
+                new[] { width / 2, depth / 2 },
+                new[] { -width / 2, depth / 2 },
+            };
         }
 
         /// <summary>
@@ -1375,7 +1448,7 @@ namespace Menegroth.GH.Components
                     continue;
                 }
 
-                // Standard flat slab: loft boundary to create box (volumes) or planar mesh (analytical)
+                // Standard flat slab: two offset meshes (top + bottom) to show thickness; no lofting for speed
                 var boundary = slab["boundary_vertices"]?.ToObject<double[][]>() ?? new double[0][];
                 if (boundary.Length < 3) continue;
 
@@ -1385,23 +1458,16 @@ namespace Menegroth.GH.Components
 
                 if (showVolumes)
                 {
-                    var loft = Brep.CreateFromLoft(
-                        new[] { new PolylineCurve(topPts), new PolylineCurve(bottomPts) },
-                        Point3d.Unset, Point3d.Unset, LoftType.Normal, false);
-
-                    if (loft?.Length > 0)
+                    var topMesh = CreatePlanarPolygonMesh(topPts);
+                    var bottomMesh = CreatePlanarPolygonMesh(bottomPts);
+                    if (topMesh != null)
                     {
-                        try
-                        {
-                            var capped = loft[0].CapPlanarHoles(
-                                Rhino.RhinoDoc.ActiveDoc?.ModelAbsoluteTolerance ?? 0.001);
-                            output.Add(new GH_Brep(capped ?? loft[0]));
-                        }
-                        catch
-                        {
-                            output.Add(new GH_Brep(loft[0]));
-                        }
-
+                        output.Add(new GH_Mesh(topMesh));
+                        AppendSlabColor(colors, analyticalSource, colorBy, maxDisp, "vertex_displacements", maxima);
+                    }
+                    if (bottomMesh != null)
+                    {
+                        output.Add(new GH_Mesh(bottomMesh));
                         AppendSlabColor(colors, analyticalSource, colorBy, maxDisp, "vertex_displacements", maxima);
                     }
 
@@ -1427,6 +1493,24 @@ namespace Menegroth.GH.Components
                     // Omit solid drop panels in analytical mode; slab mesh suffices for coloring
                 }
             }
+        }
+
+        /// <summary>
+        /// Creates a planar mesh from a closed polygon (last point equals first).
+        /// Uses fan triangulation from vertex 0. Returns null if fewer than 3 distinct vertices.
+        /// </summary>
+        private static Mesh CreatePlanarPolygonMesh(List<Point3d> closedPts)
+        {
+            int n = closedPts.Count - 1; // exclude duplicate closing point
+            if (n < 3) return null;
+            var mesh = new Mesh();
+            for (int i = 0; i < n; i++)
+                mesh.Vertices.Add(closedPts[i]);
+            for (int i = 1; i < n - 1; i++)
+                mesh.Faces.AddFace(0, i, i + 1);
+            mesh.Normals.ComputeNormals();
+            mesh.Compact();
+            return mesh;
         }
 
         /// <summary>

@@ -669,6 +669,13 @@ function size_flat_plate!(
     drop_panel::Union{Nothing, DropPanelGeometry} = nothing,
     fire_rating::Real = 0.0,
 )
+    # ─── PixelFrame: rejected same as steel (validation + design_workflow should catch first) ───
+    if column_opts isa PixelFrameColumnOptions
+        throw(ArgumentError(
+            "Flat plate/slab requires reinforced concrete columns. " *
+            "PixelFrame columns are not supported for beamless slab systems."))
+    end
+
     # ─── RuleOfThumb dispatch: single-pass at ACI min thickness ───
     if method isa RuleOfThumb
         return check_flat_plate_at_thickness!(struc, slab, column_opts;

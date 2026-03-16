@@ -517,15 +517,29 @@ end
 # 3. Beams
 # ─────────────────────────────────────────────────────────────────────────────
 
-"""Print the beam schedule (section, demands, flexure/shear ratios). Adapts header to beam type."""
+"""Return true if the structure uses a beamless floor system (flat plate / flat slab).
+Matches the logic used for visualization (`is_beamless_system` in serialize)."""
+function _is_beamless_system(struc)
+    isempty(struc.slabs) && return false
+    return all(slab -> slab.floor_type in (:flat_plate, :flat_slab), struc.slabs)
+end
+
+"""Print the beam schedule (section, demands, flexure/shear ratios). Adapts header to beam type.
+For beamless systems (flat plate, flat slab), prints the section heading with 'Not applicable.'."""
 function _report_beams(io::IO, design::BuildingDesign; du::DisplayUnits=design.params.display_units)
     params = design.params
-
-    isempty(design.beams) && return
+    struc = design.structure
 
     beam_label = _beam_type_label(params)
-    println(io, section_break("BEAM SCHEDULE" * (isempty(beam_label) ? "" : " ($beam_label)")))
+    section_title = "BEAM SCHEDULE" * (isempty(beam_label) ? "" : " ($beam_label)")
+    println(io, section_break(section_title))
     println(io)
+
+    if _is_beamless_system(struc) || isempty(design.beams)
+        println(io, "  Not applicable.")
+        println(io)
+        return
+    end
 
     mom_u = _ul(du, :moment)
     force_u = _ul(du, :force)

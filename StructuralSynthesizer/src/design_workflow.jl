@@ -167,6 +167,11 @@ function build_pipeline(params::DesignParameters)
     
     # Extract column options for flat plate/slab sizing (needed for design_details)
     column_opts = _get_column_opts(params)
+    if floor_type in (:flat_plate, :flat_slab) && column_opts isa StructuralSizer.PixelFrameColumnOptions
+        throw(ArgumentError(
+            "Flat plate/slab requires reinforced concrete columns. " *
+            "PixelFrame columns are not supported for beamless slab systems."))
+    end
     
     # ─── Stage 1: Slab sizing (always) ─── needs sync to push slab self-weight
     push!(stages, PipelineStage(struc -> begin
@@ -231,7 +236,17 @@ function prepare!(struc::BuildingStructure, params::DesignParameters)
     
     fc = _get_design_fc(params)
     estimate_column_sizes!(struc; fc=fc, input_is_centerline=params.geometry_is_centerline)
-    
+
+    # Set column shape for flat plate/slab when RC circular (punching, stiffness, output)
+    if floor_type in (:flat_plate, :flat_slab)
+        col_opts = params.columns
+        if col_opts isa ConcreteColumnOptions && col_opts.section_shape == :circular
+            for col in struc.columns
+                col.shape = :circular
+            end
+        end
+    end
+
     to_asap!(struc; params=params)
     
     snapshot!(struc)
@@ -376,10 +391,12 @@ end
 # Pipeline Stage Implementations
 # =============================================================================
 
-"""Extract ConcreteColumnOptions from DesignParameters, or `nothing` if steel/missing."""
+"""Extract column options from DesignParameters for flat plate/slab sizing.
+Returns ConcreteColumnOptions or PixelFrameColumnOptions; `nothing` for steel (not supported).
+Caller must reject PixelFrame for flat plate/slab before use."""
 function _get_column_opts(params::DesignParameters)
     opts = params.columns
-    opts isa ConcreteColumnOptions ? opts : nothing
+    (opts isa ConcreteColumnOptions || opts isa StructuralSizer.PixelFrameColumnOptions) ? opts : nothing
 end
 
 """
@@ -396,6 +413,7 @@ compression capacity: ϕPn = 0.65 × 0.80 × f′c × Ag  (ACI 318-11 §10.3.6.2
 Returns the mutated structure and the number of columns that grew.
 """
 function _reconcile_columns!(struc::BuildingStructure, params::DesignParameters)
+    _col_opts = _get_column_opts(params)
     conc = resolve_concrete(params)
     fc_Pa = ustrip(u"Pa", conc.fc′)
     E_Pa = ustrip(u"Pa", conc.E)
@@ -405,7 +423,6 @@ function _reconcile_columns!(struc::BuildingStructure, params::DesignParameters)
     I_factor = 0.70  # ACI 318-11 §10.10.4.1
     grew = 0
 
-    _col_opts = _get_column_opts(params)
     _shape_con = !isnothing(_col_opts) ? _col_opts.shape_constraint : :square
     _max_ar   = !isnothing(_col_opts) ? _col_opts.max_aspect_ratio : 2.0
     _c_inc    = !isnothing(_col_opts) ? _col_opts.size_increment : 0.5u"inch"

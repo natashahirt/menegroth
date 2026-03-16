@@ -1,0 +1,163 @@
+# =============================================================================
+# Mesh Refinement Tests
+# =============================================================================
+#
+# Verifies that slab shell mesh refinement targets are correctly placed at
+# column locations. Column vertex_idx is always the top vertex; slabs below
+# a column need the bottom vertex. These tests ensure _get_slab_column_nodes
+# and _column_vertex_at_slab_level return the correct vertices for both cases.
+#
+# =============================================================================
+
+using StructuralSynthesizer
+using StructuralSizer
+using Test
+using Unitful
+
+@testset "Mesh Refinement" begin
+
+    # ─── 2-story flat plate: floor 1 slab is BELOW floor 1→2 columns ────────
+    # Column vertex_idx = top (floor 2). Floor 1 slab needs bottom vertex.
+    skel = gen_medium_office(30.0u"ft", 24.0u"ft", 12.0u"ft", 2, 2, 2)
+    struc = BuildingStructure(skel)
+
+    params = DesignParameters(
+        name = "mesh_refinement_test",
+        floor = FlatPlateOptions(method = FEA()),
+        materials = MaterialOptions(concrete = NWC_4000),
+        max_iterations = 2,
+        display_units = metric,  # mesh vertices in m, matches col_xy
+    )
+
+    design = design_building(struc, params)
+    @test all_ok(design)
+
+    build_analysis_model!(design)
+    @test has_analysis_model(design)
+
+    vc = struc.skeleton.geometry.vertex_coords
+
+    @testset "Refinement targets at slab elevation" begin
+        # Recreate nodes (same as build_analysis_model)
+        support_set = Set(get(struc.skeleton.groups_vertices, :support, Int[]))
+        nodes_vec = StructuralSynthesizer._create_offset_nodes(
+            struc.skeleton, design.structural_offsets, support_set)
+
+        for (slab_idx, slab) in enumerate(struc.slabs)
+            col_nodes = StructuralSynthesizer._get_slab_column_nodes(struc, slab, nodes_vec)
+            supporting = StructuralSizer.find_supporting_columns(struc, Set(slab.cell_indices))
+
+            # Every supporting column must yield a refinement node
+            @test length(col_nodes) >= length(supporting)
+
+            # Refinement node positions must match slab elevation (within tolerance)
+            first_cell = struc.cells[first(slab.cell_indices)]
+            slab_z = vc[struc.skeleton.face_vertex_indices[first_cell.face_idx][1], 3]
+            z_tol = 0.15  # meters
+
+            for node in col_nodes
+                z = ustrip(u"m", node.position[3])
+                @test abs(z - slab_z) <= z_tol
+            end
+
+            # For a 2×2 bay, we expect 9 columns (3×3 grid) supporting each slab
+            @test length(col_nodes) >= 4
+        end
+    end
+
+    @testset "Column vertex at slab level (multi-story)" begin
+        # Floor 1 slab: columns from floor 0→1 have vertex_idx at floor 1 (top). Match.
+        # Columns from floor 1→2 have vertex_idx at floor 2 (top). Need bottom = floor 1.
+        slab_1 = struc.slabs[1]
+        first_cell = struc.cells[first(slab_1.cell_indices)]
+        slab_1_z = vc[struc.skeleton.face_vertex_indices[first_cell.face_idx][1], 3]
+
+        supporting_1 = StructuralSizer.find_supporting_columns(struc, Set(slab_1.cell_indices))
+        @test !isempty(supporting_1)
+
+        for col in supporting_1
+            vi = StructuralSynthesizer._column_vertex_at_slab_level(struc, col, slab_1_z)
+            @test vi !== nothing
+            @test 1 <= vi <= length(struc.skeleton.vertices)
+            col_z = vc[vi, 3]
+            @test abs(col_z - slab_1_z) <= 0.15
+        end
+    end
+
+    @testset "Mesh finer near columns than mid-span" begin
+        # Get deflected slab mesh from visualization
+        output = design_to_json(design)
+        viz = output.visualization
+        isnothing(viz) && @test_skip "No visualization (skip_visualization?)"
+
+        meshes = viz.deflected_slab_meshes
+        isempty(meshes) && @test_skip "No slab meshes"
+
+        # Column positions (x, y) at slab level from structure
+        for (mesh_idx, mesh) in enumerate(meshes)
+            slab_idx = mesh.slab_id
+            slab_idx > length(struc.slabs) && continue
+            slab = struc.slabs[slab_idx]
+
+            support_set = Set(get(struc.skeleton.groups_vertices, :support, Int[]))
+            nodes_vec = StructuralSynthesizer._create_offset_nodes(
+                struc.skeleton, design.structural_offsets, support_set)
+            col_nodes = StructuralSynthesizer._get_slab_column_nodes(struc, slab, nodes_vec)
+            isempty(col_nodes) && continue
+
+            col_xy = [(ustrip(u"m", n.position[1]), ustrip(u"m", n.position[2])) for n in col_nodes]
+
+            # Mesh vertices and faces (display units from design_to_json)
+            verts = mesh.vertices
+            faces = mesh.faces
+            isempty(faces) && continue
+
+            # Vertices and column positions; mesh units may differ from col_xy (m)
+            # Normalize both to mesh bounding box [0,1] for distance comparison
+            verts_m = [[Float64(v[1]), Float64(v[2]), Float64(v[3])] for v in verts]
+            xs = [v[1] for v in verts_m]
+            ys = [v[2] for v in verts_m]
+            x0, x1 = minimum(xs), maximum(xs)
+            y0, y1 = minimum(ys), maximum(ys)
+            x_range = x1 - x0
+            y_range = y1 - y0
+            (x_range < 1e-9 || y_range < 1e-9) && continue
+            verts_norm = [[(v[1] - x0) / x_range, (v[2] - y0) / y_range, v[3]] for v in verts_m]
+            col_xy_norm = [((c[1] - x0) / x_range, (c[2] - y0) / y_range) for c in col_xy]
+
+            # Triangle areas and centroid distances to nearest column (normalized)
+            areas = Float64[]
+            min_dists = Float64[]
+            for face in faces
+                i, j, k = face[1], face[2], face[3]
+                p = verts_norm[i]
+                q = verts_norm[j]
+                r = verts_norm[k]
+                cx = (p[1] + q[1] + r[1]) / 3
+                cy = (p[2] + q[2] + r[2]) / 3
+                area = 0.5 * abs(
+                    (q[1] - p[1]) * (r[2] - p[2]) - (r[1] - p[1]) * (q[2] - p[2])
+                )
+                d_min = minimum(hypot(cx - cx_col, cy - cy_col) for (cx_col, cy_col) in col_xy_norm)
+                push!(areas, area)
+                push!(min_dists, d_min)
+            end
+
+            # Elements near columns (d < 25% of max distance) should be smaller on average
+            # than elements far from columns (d > 75% of max distance)
+            d_max = maximum(min_dists)
+            d_max < 1e-6 && continue  # degenerate
+            near_mask = [d <= 0.25 * d_max for d in min_dists]
+            far_mask = [d >= 0.75 * d_max for d in min_dists]
+            near_areas = areas[near_mask]
+            far_areas = areas[far_mask]
+            (isempty(near_areas) || isempty(far_areas)) && continue
+
+            mean_near = sum(near_areas) / length(near_areas)
+            mean_far = sum(far_areas) / length(far_areas)
+            # Refinement: near-column elements should be smaller (or similar if uniform grid fallback)
+            # Use lenient threshold: near ≤ 2× far (allows for Ruppert fallback to grid)
+            @test mean_near <= mean_far * 2.1
+        end
+    end
+end

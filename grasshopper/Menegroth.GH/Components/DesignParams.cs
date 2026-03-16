@@ -590,9 +590,10 @@ namespace Menegroth.GH.Components
             var steelColumns = new[] { "steel_w", "steel_hss", "steel_pipe" };
             var steelBeams = new[] { "steel_w", "steel_hss" };
 
-            // Flat plate and flat slab require RC columns (punching shear design assumes RC)
+            // Flat plate/slab accept RC (rectangular, circular) only; steel and PixelFrame not supported
             var beamlessFloors = new[] { "flat_plate", "flat_slab" };
-            if (beamlessFloors.Contains(floor) && steelColumns.Contains(colType))
+            var unsupportedBeamlessColumns = new[] { "steel_w", "steel_hss", "steel_pipe", "pixelframe" };
+            if (beamlessFloors.Contains(floor) && unsupportedBeamlessColumns.Contains(colType))
             {
                 errors.Add($"{floorLabel} requires reinforced concrete columns. " +
                     $"{colLabel} is not supported for beamless slab systems (punching shear design assumes RC).");

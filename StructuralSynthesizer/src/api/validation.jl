@@ -111,11 +111,12 @@ function validate_input(input::APIInput)
     end
 
     # ─── Floor + column/beam type compatibility ─────────────────────────────
-    # Flat plate/slab require RC columns (punching shear design assumes RC; steel not supported)
+    # Flat plate/slab accept RC (rectangular, circular) only. Steel and PixelFrame not supported.
     beamless_floor = p.floor_type in ("flat_plate", "flat_slab")
     steel_column = p.column_type in ("steel_w", "steel_hss", "steel_pipe")
+    pixelframe_column = p.column_type == "pixelframe"
     steel_beam = p.beam_type in ("steel_w", "steel_hss")
-    if beamless_floor && steel_column
+    if beamless_floor && (steel_column || pixelframe_column)
         push!(errors, "floor_type \"$(p.floor_type)\" requires reinforced concrete columns. " *
               "column_type \"$(p.column_type)\" is not supported for beamless slab systems.")
     end

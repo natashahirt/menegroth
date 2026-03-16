@@ -29,14 +29,27 @@ function size_slabs!(
     verbose::Bool = false,
     fire_rating::Real = 0.0,
 )
-    # ─── Validate: concrete slabs require concrete columns ───
+    # ─── Validate: flat plate/slab require RC columns; one_way/vault accept RC or PixelFrame ───
+    has_flat_plate_slab = any(s -> s.floor_type in (:flat_plate, :flat_slab), struc.slabs)
+    if has_flat_plate_slab && !isnothing(column_opts)
+        if column_opts isa PixelFrameColumnOptions
+            throw(ArgumentError(
+                "Flat plate/slab requires reinforced concrete columns. " *
+                "PixelFrame columns are not supported for beamless slab systems."))
+        end
+        if !(column_opts isa ConcreteColumnOptions)
+            throw(ArgumentError(
+                "Flat plate/slab requires reinforced concrete columns. " *
+                "Steel columns are not supported for beamless slab systems."))
+        end
+    end
     has_concrete_slab = any(s -> floor_type(s.floor_type) isa AbstractConcreteSlab, struc.slabs)
-    if has_concrete_slab && !isnothing(column_opts) && !(column_opts isa ConcreteColumnOptions)
-        throw(ArgumentError(
-            "Concrete slab floor systems require ConcreteColumnOptions, " *
-            "got $(typeof(column_opts)). Steel columns are not supported " *
-            "with concrete slabs."
-        ))
+    if has_concrete_slab && !isnothing(column_opts) && !has_flat_plate_slab
+        if !(column_opts isa ConcreteColumnOptions) && !(column_opts isa PixelFrameColumnOptions)
+            throw(ArgumentError(
+                "Concrete slab floor systems require ConcreteColumnOptions or PixelFrameColumnOptions, " *
+                "got $(typeof(column_opts)). Steel columns are not supported with concrete slabs."))
+        end
     end
 
     # Pre-build column P-M cache once if flat-plate slabs exist (expensive P-M diagrams)

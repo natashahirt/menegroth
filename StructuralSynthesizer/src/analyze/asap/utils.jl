@@ -1260,39 +1260,73 @@ function _resolve_slab_refinement_edge_length(
 end
 
 """
-Return columns whose vertex lies on this slab footprint.
+Return columns that support this slab (tributary area overlaps slab cells).
+Uses `find_supporting_columns` so columns are correctly identified for slabs
+both above and below each column segment (vertex_idx is always the top).
 """
 function _get_slab_columns(struc::BuildingStructure, slab::Slab)
-    skel = struc.skeleton
-    slab_vert_set = Set{Int}()
-    for cell_idx in slab.cell_indices
-        cell = struc.cells[cell_idx]
-        for vi in skel.face_vertex_indices[cell.face_idx]
-            push!(slab_vert_set, vi)
-        end
-    end
-    return [c for c in struc.columns if c.vertex_idx in slab_vert_set]
+    return StructuralSizer.find_supporting_columns(struc, Set(slab.cell_indices))
 end
 
 """
 Return all column nodes that lie on the slab footprint (interior or boundary).
 Used as refinement targets to improve shell quality near slab-column interfaces.
+
+Uses the vertex at slab elevation for each supporting column, not just `vertex_idx`
+(which is always the column top). This ensures refinement targets are correct for
+slabs both above and below each column segment.
 """
 function _get_slab_column_nodes(struc::BuildingStructure, slab::Slab, nodes::Vector{Asap.Node})
     skel = struc.skeleton
-    column_vert_set = Set{Int}(c.vertex_idx for c in struc.columns if c.vertex_idx > 0)
-    isempty(column_vert_set) && return Asap.Node[]
+    vc = skel.geometry.vertex_coords
+    slab_cell_set = Set(slab.cell_indices)
 
-    slab_vert_set = Set{Int}()
-    for cell_idx in slab.cell_indices
-        cell = struc.cells[cell_idx]
-        for vi in skel.face_vertex_indices[cell.face_idx]
-            push!(slab_vert_set, vi)
-        end
+    # Slab elevation from any cell vertex (all vertices of a cell face share the same Z)
+    first_cell = struc.cells[first(slab.cell_indices)]
+    first_vi = skel.face_vertex_indices[first_cell.face_idx][1]
+    slab_z = vc[first_vi, 3]
+    z_tol = 0.1  # meters
+
+    supporting = StructuralSizer.find_supporting_columns(struc, slab_cell_set)
+    isempty(supporting) && return Asap.Node[]
+
+    target_verts = Int[]
+    for col in supporting
+        vi_slab = _column_vertex_at_slab_level(struc, col, slab_z; z_tol)
+        vi_slab === nothing && continue
+        (1 <= vi_slab <= length(nodes)) || continue
+        push!(target_verts, vi_slab)
     end
 
-    target_verts = intersect(slab_vert_set, column_vert_set)
-    return Asap.Node[nodes[vi] for vi in target_verts if 1 <= vi <= length(nodes)]
+    return Asap.Node[nodes[vi] for vi in unique(target_verts)]
+end
+
+"""
+    _column_vertex_at_slab_level(struc, col, slab_z; z_tol=0.1) -> Union{Int, Nothing}
+
+Return the skeleton vertex index where the column connects to the slab at elevation `slab_z`.
+Checks both ends of each column segment; `vertex_idx` is always the top, so we must
+explicitly find the vertex at slab level for slabs below the column.
+"""
+function _column_vertex_at_slab_level(struc::BuildingStructure, col, slab_z::Float64; z_tol::Float64=0.1)
+    skel = struc.skeleton
+    vc = skel.geometry.vertex_coords
+
+    for seg_idx in segment_indices(col)
+        seg_idx > length(struc.segments) && continue
+        edge_idx = struc.segments[seg_idx].edge_idx
+        (edge_idx < 1 || edge_idx > length(skel.edge_indices)) && continue
+        v1, v2 = skel.edge_indices[edge_idx]
+        z1 = vc[v1, 3]
+        z2 = vc[v2, 3]
+        if abs(z1 - slab_z) <= z_tol
+            return v1
+        end
+        if abs(z2 - slab_z) <= z_tol
+            return v2
+        end
+    end
+    return nothing
 end
 
 

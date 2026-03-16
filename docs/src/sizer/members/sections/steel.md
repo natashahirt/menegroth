@@ -19,11 +19,7 @@ Sections are defined in `StructuralSizer/src/members/sections/steel/`.
 
 ## Key Types
 
-<<<<<<< HEAD
 ### Abstract Hierarchy
-
-=======
->>>>>>> 35910fe7cce9e6c72fe66334ba79eb0a5af2272c
 ```@docs
 AbstractSection
 AbstractHollowSection
@@ -37,7 +33,9 @@ AbstractRoundHollowSection
 ISymmSection
 ```
 
-**`ISymmSection <: AbstractSection`** is a mutable struct representing doubly-symmetric I-shapes (W, S, M, HP series). Input geometry fields:
+**`ISymmSection <: AbstractSection`** is a mutable struct representing doubly-symmetric I-shapes. In practice, StructuralSizer’s built-in AISC catalog loader provides W-shapes, but the geometry model is generic.
+
+Input geometry fields:
 
 | Field | Description |
 |:------|:------------|

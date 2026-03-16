@@ -374,7 +374,7 @@ analysis toggles.
 
 - `HollowCore`, `CompositeDeck`, `NonCompositeDeck`, `JoistRoofDeck`, `CLT`,
   `DLT`, `NLT`, and `MassTimberJoist` sizing functions are **stubs** that raise
-  errors.  Catalog-based selection is planned.
+  no-op results (they are skipped by `size_slabs!` / `size_slab!`). Catalog-based selection is planned.
 - `PTBanded` uses heuristic thickness from PTI DC20.9; full tendon design is not
   yet implemented.
 - `Grade` (slab-on-grade) has no structural sizing—thickness is user-specified.

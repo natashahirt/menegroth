@@ -17,10 +17,10 @@
 The member optimization module provides methods for selecting the lightest (or cheapest, or lowest-carbon) structural section that satisfies all design code requirements. Three optimization strategies are available:
 
 1. **Discrete MIP** — mixed-integer programming using JuMP + HiGHS/Gurobi, selecting from a catalog of discrete sections
-2. **Binary search** — iterative lightest-feasible search per member group, no solver dependency
-3. **NLP** — nonlinear programming for continuous sizing (RC sections with continuous dimensions)
+2. **NLP** — nonlinear programming for continuous sizing (where supported) of member dimensions
+3. **Binary search (utility)** — iterative lightest-feasible search over a catalog with no solver dependency (available via `optimize_binary_search`, but not automatically selected by `size_columns` / `size_beams`)
 
-A unified API (`size_columns`, `size_beams`, `size_members`) dispatches to the appropriate strategy based on the options type.
+A unified API (`size_columns`, `size_beams`, `size_members`) dispatches based on the options type (and, where applicable, `opts.sizing_strategy`).
 
 Source: `StructuralSizer/src/optimize/*.jl`, `StructuralSizer/src/members/optimize/*.jl`
 
@@ -46,6 +46,7 @@ SteelColumnOptions
 | `sizing_strategy` | `:discrete` (MIP) or `:nlp` (continuous; supported for `section_type in (:w, :hss)` only) |
 | `objective` | `MinWeight()`, `MinVolume()`, `MinCost()`, `MinCarbon()` |
 | `solver` | MIP optimizer selector: `:auto`, `:highs`, `:gurobi` |
+| `time_limit_sec` | MIP solver time limit (seconds) for discrete sizing |
 
 ```@docs
 SteelBeamOptions
@@ -58,6 +59,7 @@ SteelBeamOptions
 | `deflection_limit` | Live-load deflection limit ratio (default `1/360`; set to `nothing` to disable) |
 | `total_deflection_limit` | Total-load deflection limit ratio (default `1/240`; set to `nothing` to disable) |
 | `composite` | Enable composite beam sizing (AISC 360-16 Ch. I) |
+| `time_limit_sec` | MIP solver time limit (seconds) for discrete sizing |
 
 ```@docs
 ConcreteColumnOptions
@@ -85,7 +87,7 @@ ConcreteBeamOptions
 | `rebar_material` | Rebar material |
 | `catalog` | Beam section catalog |
 | `deflection_limit` | L/Δ limit |
-| Other fields | Design parameters for flexure, shear, torsion |
+| Other fields | Design settings (e.g. T-beam routing via `include_flange`), catalog constraints, and solver limits |
 
 ```@docs
 NLPColumnOptions
@@ -100,6 +102,17 @@ NLPColumnOptions
 | `min_dim`, `max_dim` | Dimension bounds |
 | `ρ_max` | Maximum reinforcement ratio |
 | `solver` | NLP solver (e.g. Ipopt) |
+
+```@docs
+PixelFrameBeamOptions
+PixelFrameColumnOptions
+```
+
+```@docs
+NLPBeamOptions
+NLPWOptions
+NLPHSSOptions
+```
 
 ### NLP Problem Types
 
@@ -133,9 +146,9 @@ The two solver strategies (`optimize_discrete` and `optimize_binary_search`) are
 size_columns
 ```
 
-`size_columns(Pu, Mux, geometries, opts; Muy=0)` — size columns for the given demands. Dispatches on `opts`:
-- `SteelColumnOptions` → AISC checker + MIP or binary search
-- `ConcreteColumnOptions` → ACI checker + MIP, binary search, or NLP
+`size_columns(Pu, Mux, geometries, opts; Muy=...)` — size columns for the given demands. `Muy` defaults to a zero vector with the same units as `Mux`. Dispatches on `opts`:
+- `SteelColumnOptions` → AISC checker + MIP, or NLP when `opts.sizing_strategy == :nlp` and `opts.section_type ∈ (:w, :hss)`
+- `ConcreteColumnOptions` → ACI checker + MIP, or NLP when `opts.sizing_strategy == :nlp`
 - `PixelFrameColumnOptions` → PixelFrame checker + MIP
 
 ```@docs
@@ -143,15 +156,15 @@ size_beams
 ```
 
 `size_beams(Mu, Vu, geometries, opts; Nu=0, Tu=0)` — size beams for the given demands. Dispatches on `opts`:
-- `SteelBeamOptions` → AISC checker + MIP or binary search
-- `ConcreteBeamOptions` → ACI checker + MIP or binary search
+- `SteelBeamOptions` → AISC checker + MIP (and optional deflection constraints when analysis deflections are provided)
+- `ConcreteBeamOptions` → ACI checker + MIP
 - `PixelFrameBeamOptions` → PixelFrame checker + MIP
 
 ```@docs
 size_members
 ```
 
-`size_members(demands, geometries, opts)` — generic dispatch to `size_columns` or `size_beams` based on options type.
+`size_members(arg1, arg2, geometries, opts; ...)` — generic dispatch to `size_columns` or `size_beams` based on options type (concrete and PixelFrame options only).
 
 ### Discrete Optimization
 
@@ -181,7 +194,7 @@ A multi-material overload accepts `(checker, demands, geometries, catalog, mater
 size_rc_column_nlp
 ```
 
-`size_rc_column_nlp(Pu, Mux, geometry, opts; Muy=0)` — continuous RC column sizing using NLP. Optimizes column dimensions (b, h) and reinforcement (bar_size, n_bars) to minimize area.
+`size_rc_column_nlp(Pu, Mux, geometry, opts; Muy=0)` — continuous RC column sizing using NLP. Optimizes column dimensions and reinforcement ratio to minimize the chosen objective.
 
 ```@docs
 size_rc_beam_nlp
@@ -213,13 +226,16 @@ Binary search sorts the catalog by objective value (e.g. weight per length), the
 
 The NLP approach treats column dimensions as continuous variables and solves:
 
-```
-minimize   b × h           (cross-sectional area)
-subject to ϕPn ≥ Pu        (axial capacity)
-           ϕMnx ≥ Mux      (moment capacity, x-axis)
-           ϕMny ≥ Muy      (moment capacity, y-axis)
-           ρ_min ≤ ρ ≤ ρ_max  (reinforcement ratio limits)
-           b_min ≤ b ≤ b_max  (dimension bounds)
+```math
+\begin{aligned}
+\min_{b, h, \rho} \quad & b\,h \\
+\text{s.t.}\quad & \phi P_n(b,h,\rho) \ge P_u \\
+& \phi M_{nx}(b,h,\rho) \ge M_{ux} \\
+& \phi M_{ny}(b,h,\rho) \ge M_{uy} \\
+& \rho_{\min} \le \rho \le \rho_{\max} \\
+& b_{\min} \le b \le b_{\max} \\
+& h_{\min} \le h \le h_{\max}
+\end{aligned}
 ```
 
 After solving, the continuous solution is rounded to the nearest standard dimension and bar size.

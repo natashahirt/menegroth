@@ -724,17 +724,21 @@ function _get_design_fc(params::DesignParameters)
     return fc.fc′
 end
 
-"""Size foundations using FoundationParameters."""
+"""Size foundations using FoundationParameters.
+
+Uses the strategy-aware `size_foundations!` pipeline so that
+`fp.options.strategy` (:mat, :all_spread, :all_strip, :auto, :auto_strip_spread) is respected.
+"""
 function _size_foundations!(struc::BuildingStructure, fp::FoundationParameters)
     initialize_supports!(struc)
     if isempty(struc.supports)
         @warn "Skipping foundation sizing: no supports found. Ensure support vertices are at grade."
         return
     end
-    initialize_foundations!(struc)
-    group_foundations_by_reaction!(struc; tolerance=fp.group_tolerance)
-    size_foundations_grouped!(struc;
+    size_foundations!(struc;
         soil = fp.soil,
+        opts = fp.options,
+        group_tolerance = fp.group_tolerance,
         concrete = fp.concrete,
         rebar = fp.rebar,
         pier_width = fp.pier_width,

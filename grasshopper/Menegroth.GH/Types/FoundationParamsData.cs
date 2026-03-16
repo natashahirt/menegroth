@@ -17,7 +17,7 @@ namespace Menegroth.GH.Types
         public string? Concrete { get; set; } = null;
 
         /// <summary>
-        /// Strategy: auto, all_spread, all_strip, mat.
+        /// Strategy: auto, auto_strip_spread, all_spread, all_strip, mat.
         /// </summary>
         public string? Strategy { get; set; } = null;
 

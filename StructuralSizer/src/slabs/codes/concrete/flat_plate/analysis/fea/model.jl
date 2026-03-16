@@ -20,6 +20,99 @@
 # =============================================================================
 
 """
+    build_slab_shell_patches(struc, columns, section;
+        drop_panel=nothing, patch_stiffness_factor=1.0,
+        vertex_set=nothing) -> Vector{Asap.ShellPatch}
+
+Build ShellPatch objects for columns (and optionally drop panels) to enforce mesh
+conformity at column perimeters and drop panel boundaries.
+
+Used by both the FEA design pipeline and the visualization analysis model so that
+mesh vertices respect patch boundaries and refinement happens around them.
+
+# Arguments
+- `struc`: BuildingStructure (for skeleton geometry)
+- `columns`: Columns supporting the slab
+- `section`: Base slab ShellSection (thickness, E, ν)
+
+# Keyword Arguments
+- `drop_panel`: DropPanelGeometry for flat slabs; `nothing` for flat plate
+- `patch_stiffness_factor`: Multiplier for patch E (default 1.0)
+- `vertex_set`: Optional `Set{Int}` of slab vertex indices; columns with
+  `vertex_idx ∉ vertex_set` are skipped. Pass `nothing` to include all columns.
+
+# Returns
+`Vector{Asap.ShellPatch}` — column patches (and drop panel patches when present).
+"""
+function build_slab_shell_patches(
+    struc, columns, section::Asap.ShellSection;
+    drop_panel::Union{Nothing, DropPanelGeometry} = nothing,
+    patch_stiffness_factor::Float64 = 1.0,
+    vertex_set::Union{Nothing, Set{Int}} = nothing,
+)
+    skel = struc.skeleton
+    h_m = section.thickness
+    E_Pa = section.E
+    ν_val = section.ν
+
+    patch_section = Asap.ShellSection(
+        h_m * u"m", (E_Pa * patch_stiffness_factor) * u"Pa", ν_val; name=:col_patch
+    )
+    patches = Asap.ShellPatch[]
+
+    for col in columns
+        vi = col.vertex_idx
+        isnothing(vertex_set) || vi in vertex_set || continue
+        xy = _column_xy_m(skel, col)
+        cshape = col_shape(col)
+        if cshape == :circular
+            D_m = ustrip(u"m", col.c1)
+            eq_side = D_m * sqrt(π / 4)
+            push!(patches, Asap.ShellPatch(xy[1], xy[2], eq_side, eq_side,
+                                           patch_section; id=:col_patch))
+        else
+            c1_m = ustrip(u"m", col.c1)
+            c2_m = ustrip(u"m", col.c2)
+            θ = col_orientation(col)
+            if abs(θ) < 1e-12
+                push!(patches, Asap.ShellPatch(xy[1], xy[2], c1_m, c2_m,
+                                               patch_section; id=:col_patch))
+            else
+                cosθ = cos(θ); sinθ = sin(θ)
+                hx = c1_m / 2; hy = c2_m / 2
+                corners_local = ((-hx, -hy), (hx, -hy), (hx, hy), (-hx, hy))
+                verts = Tuple{Float64, Float64}[
+                    (xy[1] + cosθ*lx - sinθ*ly, xy[2] + sinθ*lx + cosθ*ly)
+                    for (lx, ly) in corners_local
+                ]
+                push!(patches, Asap.ShellPatch(verts, (xy[1], xy[2]),
+                                               patch_section, :col_patch))
+            end
+        end
+    end
+
+    if !isnothing(drop_panel)
+        h_total = total_depth_at_drop(h_m * u"m", drop_panel)
+        drop_section = Asap.ShellSection(
+            uconvert(u"m", h_total), E_Pa * u"Pa", ν_val; name=:drop_panel_patch
+        )
+        a1_m = ustrip(u"m", drop_panel.a_drop_1)
+        a2_m = ustrip(u"m", drop_panel.a_drop_2)
+        w_drop = 2 * a1_m
+        h_drop_m = 2 * a2_m
+        for col in columns
+            vi = col.vertex_idx
+            isnothing(vertex_set) || vi in vertex_set || continue
+            xy = _column_xy_m(skel, col)
+            push!(patches, Asap.ShellPatch(xy[1], xy[2], w_drop, h_drop_m,
+                                           drop_section; id=:drop_panel))
+        end
+    end
+
+    return patches
+end
+
+"""
     build_slab_shell_mesh(struc, slab, columns, section;
         target_edge=nothing, drop_panel=nothing,
         patch_stiffness_factor=1.0, id=:slab,
@@ -62,65 +155,12 @@ function build_slab_shell_mesh(
         end
     end
 
-    # ─── 3. ShellPatches at columns ───
-    # ShellSection stores thickness (m), E (Pa), ν as raw Float64.
-    h_m = section.thickness
-    E_Pa = section.E
-    ν_val = section.ν
-    patch_section = Asap.ShellSection(
-        h_m * u"m", (E_Pa * patch_stiffness_factor) * u"Pa", ν_val; name=:col_patch
-    )
-    patches = Asap.ShellPatch[]
-
-    for col in columns
-        vi = col.vertex_idx
-        haskey(node_map, vi) || continue
-        xy = _column_xy_m(skel, col)
-        cshape = col_shape(col)
-        if cshape == :circular
-            D_m = ustrip(u"m", col.c1)
-            eq_side = D_m * sqrt(π / 4)
-            push!(patches, Asap.ShellPatch(xy[1], xy[2], eq_side, eq_side,
-                                           patch_section; id=:col_patch))
-        else
-            c1_m = ustrip(u"m", col.c1)
-            c2_m = ustrip(u"m", col.c2)
-            θ = col_orientation(col)
-            if abs(θ) < 1e-12
-                push!(patches, Asap.ShellPatch(xy[1], xy[2], c1_m, c2_m,
-                                               patch_section; id=:col_patch))
-            else
-                cosθ = cos(θ); sinθ = sin(θ)
-                hx = c1_m / 2; hy = c2_m / 2
-                corners_local = ((-hx, -hy), (hx, -hy), (hx, hy), (-hx, hy))
-                verts = Tuple{Float64, Float64}[
-                    (xy[1] + cosθ*lx - sinθ*ly, xy[2] + sinθ*lx + cosθ*ly)
-                    for (lx, ly) in corners_local
-                ]
-                push!(patches, Asap.ShellPatch(verts, (xy[1], xy[2]),
-                                               patch_section, :col_patch))
-            end
-        end
-    end
-
-    # ─── 3b. Drop panel ShellPatches ───
-    if !isnothing(drop_panel)
-        h_total = total_depth_at_drop(h_m * u"m", drop_panel)
-        drop_section = Asap.ShellSection(
-            uconvert(u"m", h_total), E_Pa * u"Pa", ν_val; name=:drop_panel_patch
-        )
-        a1_m = ustrip(u"m", drop_panel.a_drop_1)
-        a2_m = ustrip(u"m", drop_panel.a_drop_2)
-        w_drop = 2 * a1_m
-        h_drop_m = 2 * a2_m
-        for col in columns
-            vi = col.vertex_idx
-            haskey(node_map, vi) || continue
-            xy = _column_xy_m(skel, col)
-            push!(patches, Asap.ShellPatch(xy[1], xy[2], w_drop, h_drop_m,
-                                           drop_section; id=:drop_panel))
-        end
-    end
+    # ─── 3. ShellPatches at columns (and drop panels when present) ───
+    vertex_set = Set(keys(node_map))
+    patches = build_slab_shell_patches(struc, columns, section;
+        drop_panel=drop_panel,
+        patch_stiffness_factor=patch_stiffness_factor,
+        vertex_set=vertex_set)
 
     # ─── 4. Interior nodes + conforming nodes along interior cell edges ───
     boundary_set = Set(boundary_vis)

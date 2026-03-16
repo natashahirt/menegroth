@@ -527,6 +527,15 @@ function _serialize_visualization_frame_elements(design::BuildingDesign, model, 
         # Analytical: max absolute internal forces along element
         max_P, max_M, max_V = _compute_frame_analytical(elem, model)
 
+        # Sized mode mesh: build from section polygon when solid (no inner); hollow falls back to client sweep
+        mesh_verts = Vector{Vector{Float64}}()
+        mesh_fcs = Vector{Vector{Int}}()
+        if isempty(section_poly_inner) && length(section_poly) >= 3
+            p1 = _position_to_display_lengths(du, elem.nodeStart.position; node_id=node_start_id)
+            p2 = _position_to_display_lengths(du, elem.nodeEnd.position; node_id=node_end_id)
+            mesh_verts, mesh_fcs = _build_frame_element_mesh(section_poly, p1, p2, orient_angle)
+        end
+
         push!(elements, APIVisualizationFrameElement(
             element_id = edisp_key,
             node_start = node_start_id,
@@ -550,6 +559,8 @@ function _serialize_visualization_frame_elements(design::BuildingDesign, model, 
             max_axial_force = _round_val(max_P; digits=4),
             max_moment = _round_val(max_M; digits=4),
             max_shear = _round_val(max_V; digits=4),
+            mesh_vertices = mesh_verts,
+            mesh_faces = mesh_fcs,
         ))
     end
     
@@ -677,6 +688,79 @@ function _serialize_section_polygon(sec_obj, du::DisplayUnits, elem_idx::Int)
         @debug "Failed to extract section polygon for element $elem_idx" exception=e
         return Vector{Float64}[]
     end
+end
+
+"""Build extruded prism mesh from section polygon and path. Returns (vertices, faces) or empty on failure.
+Solid sections only (no inner polygon). Vertices and faces use 1-based indexing."""
+function _build_frame_element_mesh(
+    section_poly::Vector{Vector{Float64}},
+    p1::Vector{Float64},
+    p2::Vector{Float64},
+    orient_angle::Float64,
+)
+    (length(section_poly) < 3 || length(p1) < 3 || length(p2) < 3) && return (Vector{Vector{Float64}}(), Vector{Vector{Int}}())
+
+    axis = [p2[i] - p1[i] for i in 1:3]
+    len = sqrt(sum(axis .^ 2))
+    len < 1e-10 && return (Vector{Vector{Float64}}(), Vector{Vector{Int}}())
+    axis = axis ./ len
+
+    # Local frame: X = axis, Y and Z perpendicular. Apply orientation_angle about X.
+    up = abs(axis[3]) < 0.9 ? [0.0, 0.0, 1.0] : [1.0, 0.0, 0.0]
+    y_local = [up[2] * axis[3] - up[3] * axis[2],
+               up[3] * axis[1] - up[1] * axis[3],
+               up[1] * axis[2] - up[2] * axis[1]]
+    n2 = sqrt(sum(y_local .^ 2))
+    n2 < 1e-10 && return (Vector{Vector{Float64}}(), Vector{Vector{Int}}())
+    y_local = y_local ./ n2
+
+    z_local = [axis[2] * y_local[3] - axis[3] * y_local[2],
+               axis[3] * y_local[1] - axis[1] * y_local[3],
+               axis[1] * y_local[2] - axis[2] * y_local[1]]
+    n3 = sqrt(sum(z_local .^ 2))
+    n3 < 1e-10 && return (Vector{Vector{Float64}}(), Vector{Vector{Int}}())
+    z_local = z_local ./ n3
+
+    # Apply orientation: rotate Y and Z about axis
+    if abs(orient_angle) > 1e-9
+        c, s = cos(orient_angle), sin(orient_angle)
+        y_new = [c * y_local[i] - s * z_local[i] for i in 1:3]
+        z_new = [s * y_local[i] + c * z_local[i] for i in 1:3]
+        y_local, z_local = y_new, z_new
+    end
+
+    # Transform [y,z] local to global: p + y*y_local + z*z_local
+    to_global(pos, y, z) = [pos[i] + y * y_local[i] + z * z_local[i] for i in 1:3]
+
+    n = length(section_poly)
+    vertices = Vector{Float64}[]
+    for (i, v) in enumerate(section_poly)
+        y, z = length(v) >= 2 ? (v[1], v[2]) : (0.0, 0.0)
+        push!(vertices, to_global(p1, y, z))
+    end
+    for (i, v) in enumerate(section_poly)
+        y, z = length(v) >= 2 ? (v[1], v[2]) : (0.0, 0.0)
+        push!(vertices, to_global(p2, y, z))
+    end
+
+    faces = Vector{Int}[]
+    # Start cap: fan from vertex 1
+    for i in 2:(n - 1)
+        push!(faces, [1, i, i + 1])
+    end
+    # End cap: fan from vertex n+1, reversed winding
+    for i in 2:(n - 1)
+        push!(faces, [n + 1, n + i + 1, n + i])
+    end
+    # Lateral quads
+    for i in 1:n
+        i1 = i
+        i2 = i == n ? 1 : i + 1
+        push!(faces, [i1, i2, n + i2])
+        push!(faces, [i1, n + i2, n + i1])
+    end
+
+    return (vertices, faces)
 end
 
 """Serialize inner section polygon for hollow sections (HSS rect/round). Empty for solid sections."""

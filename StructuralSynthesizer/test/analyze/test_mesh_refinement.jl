@@ -11,6 +11,7 @@
 
 using StructuralSynthesizer
 using StructuralSizer
+using Asap
 using Test
 using Unitful
 
@@ -159,5 +160,75 @@ using Unitful
             # Use lenient threshold: near ≤ 2× far (allows for Ruppert fallback to grid)
             @test mean_near <= mean_far * 2.1
         end
+    end
+
+    @testset "Patch interior refinement matches target resolution" begin
+        # Inside column/drop panel patches, mesh resolution should be uniform and
+        # match the target refinement_edge_length (same as at patch edges).
+        # Patch elements have id=:col_patch or :drop_panel; check all shells.
+        model = design.asap_model
+        isnothing(model) && @test_skip "No analysis model"
+        !Asap.has_shell_elements(model) && @test_skip "No shell elements"
+
+        # Build (patch_verts, A_target) for all slabs
+        patch_specs = Tuple{Vector{Tuple{Float64,Float64}}, Float64}[]
+        for (slab_idx, slab) in enumerate(struc.slabs)
+            slab_columns = StructuralSynthesizer._get_slab_columns(struc, slab)
+            isempty(slab_columns) && continue
+            t = StructuralSynthesizer.thickness(slab)
+            E = uconvert(u"Pa", StructuralSizer.NWC_4000.E)
+            ν = StructuralSizer.NWC_4000.ν
+            section = Asap.ShellSection(t, E, ν)
+            patches = StructuralSizer.build_slab_shell_patches(
+                struc, slab_columns, section;
+                drop_panel=slab.drop_panel,
+                patch_stiffness_factor=1.0,
+                vertex_set=nothing)
+            isempty(patches) && continue
+            target_edge = StructuralSynthesizer._resolve_slab_target_edge_length(
+                struc, slab, nothing)
+            refine_edge = StructuralSynthesizer._resolve_slab_refinement_edge_length(
+                struc, slab, target_edge, nothing)
+            isnothing(refine_edge) && continue
+            h_m = Float64(ustrip(u"m", refine_edge))
+            A_target = 0.433 * h_m^2
+            for p in patches
+                push!(patch_specs, (p.vertices, A_target))
+            end
+        end
+        isempty(patch_specs) && @test_skip "No patches"
+
+        patch_area_targets = Tuple{Float64, Float64}[]  # (area, A_target)
+        for shell in model.shell_elements
+            length(shell.nodes) != 3 && continue
+            n1, n2, n3 = shell.nodes
+            p = (ustrip(u"m", n1.position[1]), ustrip(u"m", n1.position[2]))
+            q = (ustrip(u"m", n2.position[1]), ustrip(u"m", n2.position[2]))
+            r = (ustrip(u"m", n3.position[1]), ustrip(u"m", n3.position[2]))
+            cx = (p[1] + q[1] + r[1]) / 3
+            cy = (p[2] + q[2] + r[2]) / 3
+            area = 0.5 * abs(
+                (q[1] - p[1]) * (r[2] - p[2]) - (r[1] - p[1]) * (q[2] - p[2])
+            )
+            for (pv, A_t) in patch_specs
+                if StructuralSynthesizer._point_inside_polygon((cx, cy), pv)
+                    push!(patch_area_targets, (area, A_t))
+                    break
+                end
+            end
+        end
+
+        isempty(patch_area_targets) && @test_skip "No patch interior faces (mesh may not conform)"
+
+        # Patch interior triangles should be ~target resolution (within 0.3× to 4×)
+        patch_areas = [x[1] for x in patch_area_targets]
+        for (a, A_t) in patch_area_targets
+            @test 0.3 * A_t <= a <= 4.0 * A_t
+        end
+        # Resolution should be uniform: std/mean < 1.0
+        mean_a = sum(patch_areas) / length(patch_areas)
+        var_a = sum((a - mean_a)^2 for a in patch_areas) / length(patch_areas)
+        std_a = sqrt(var_a)
+        @test std_a / mean_a < 1.0
     end
 end

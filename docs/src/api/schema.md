@@ -111,11 +111,13 @@ Optional foundation strategy + per-type overrides (applied when `APIParams.size_
 
 | Field | Type | Default | Description |
 |:------|:-----|:--------|:------------|
-| `strategy` | `String` | `"auto"` | `"auto"`, `"all_spread"`, `"all_strip"`, or `"mat"` |
-| `mat_coverage_threshold` | `Float64` | `0.5` | Mat selection threshold \(R \in [0, 1]\) used by `"auto"` |
+| `strategy` | `String` | `"auto"` | `"auto"`, `"auto_strip_spread"`, `"all_spread"`, `"all_strip"`, or `"mat"` |
+| `mat_coverage_threshold` | `Float64` | `0.5` | Mat selection threshold \(R \in [0, 1]\) used by `"auto"` and `"auto_strip_spread"` |
 | `spread_params` | `Union{APISpreadParams, Nothing}` | `nothing` | Optional spread-footing overrides |
 | `strip_params` | `Union{APIStripParams, Nothing}` | `nothing` | Optional strip-footing overrides |
 | `mat_params` | `Union{APIMatParams, Nothing}` | `nothing` | Optional mat-footing overrides |
+
+Strategy values: `"auto"` — coverage-based (spread / strip / mat); `"auto_strip_spread"` — same logic but never picks mat (high coverage → strip); `"all_spread"`, `"all_strip"`, `"mat"` — explicit override.
 
 #### APISpreadParams
 

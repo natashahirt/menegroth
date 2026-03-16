@@ -739,16 +739,17 @@ end
 
 Determine foundation strategy: `:spread`, `:strip`, or `:mat`.
 
-If `opts.strategy == :auto`, sizes tentative spread footings and checks
-the coverage ratio (Σ footing area / building footprint). Otherwise
-returns the explicit strategy.
+# Strategy values
+- `:auto` — Coverage-based: spread (<30%), strip (30–50%), mat (>threshold).
+- `:auto_strip_spread` — Same as auto but never picks mat; high coverage → strip.
+- `:all_spread`, `:all_strip`, `:mat` — Explicit override.
 """
 function _resolve_strategy(struc, demands, soil, opts)
     strat = opts.strategy
     strat == :all_spread && return :spread
     strat == :all_strip  && return :strip
     strat == :mat        && return :mat
-    strat != :auto && return strat
+    strat != :auto && strat != :auto_strip_spread && return strat
 
     # Auto: estimate required spread footing area per support
     qa = soil.qa
@@ -770,13 +771,19 @@ function _resolve_strategy(struc, demands, soil, opts)
 
     coverage = ustrip(u"m^2", total_req) / footprint_m2
 
-    if coverage > opts.mat_params_coverage_threshold
-        return :mat
+    result = if coverage > opts.mat_coverage_threshold
+        :mat
     elseif coverage > 0.30
-        return :strip
+        :strip
     else
-        return :spread
+        :spread
     end
+
+    # auto_strip_spread: never pick mat; high coverage → strip
+    if strat == :auto_strip_spread && result == :mat
+        return :strip
+    end
+    return result
 end
 
 """

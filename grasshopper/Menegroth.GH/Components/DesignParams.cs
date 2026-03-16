@@ -195,13 +195,14 @@ namespace Menegroth.GH.Components
             new("Hard Clay   (qa=300 kPa)",  "hard_clay"),
         };
 
-        /// <summary>Foundation strategy values must match API: auto, all_spread, all_strip, mat.</summary>
+        /// <summary>Foundation strategy values must match API: auto, auto_strip_spread, all_spread, all_strip, mat.</summary>
         private static readonly Choice[] FoundationTypes =
         {
-            new("Auto",   "auto"),
-            new("Spread", "all_spread"),
-            new("Strip",  "all_strip"),
-            new("Mat",    "mat"),
+            new("Auto (all)",           "auto"),
+            new("Auto (strip + spread)", "auto_strip_spread"),
+            new("Spread",               "all_spread"),
+            new("Strip",                "all_strip"),
+            new("Mat",                  "mat"),
         };
 
         private static readonly Choice[] UnitSystems =

@@ -112,6 +112,19 @@ namespace Menegroth.GH.Helpers
                 errors.Add($"Invalid floor type \"{prms.FloorType}\". Options: {string.Join(", ", V.FloorTypes)}");
             if (!V.ColumnTypes.Contains(prms.ColumnType))
                 errors.Add($"Invalid column type \"{prms.ColumnType}\". Options: {string.Join(", ", V.ColumnTypes)}");
+
+            // Floor + column compatibility (mirrors DesignParams.ValidateDesignParams and API validation.jl)
+            // Flat plate/slab accept RC (rectangular, circular) only; steel and PixelFrame not supported (punching shear assumes RC).
+            var beamlessFloors = new[] { "flat_plate", "flat_slab" };
+            var unsupportedBeamlessColumns = new[] { "steel_w", "steel_hss", "steel_pipe", "pixelframe" };
+            var floor = (prms.FloorType ?? "").ToLowerInvariant();
+            var colType = (prms.ColumnType ?? "").ToLowerInvariant();
+            if (beamlessFloors.Contains(floor) && unsupportedBeamlessColumns.Contains(colType))
+            {
+                errors.Add($"floor_type \"{floor}\" requires reinforced concrete columns. " +
+                    $"column_type \"{colType}\" is not supported for beamless slab systems.");
+            }
+
             switch (prms.ColumnType)
             {
                 case "steel_w":

@@ -1093,26 +1093,42 @@ function build_analysis_model!(design::BuildingDesign;
                                           refinement_targets=effective_refinement_targets)
         elseif length(boundary_vert_indices) >= 3
             # Flat slabs: Delaunay mesh of entire slab outer boundary
+            # ShellPatches at columns (and drop panels) ensure mesh vertices conform
+            # to patch boundaries and refinement happens around them.
             n_cells = length(slab.cell_indices)
             scale_factor = ceil(Int, sqrt(n_cells))
             effective_n = mesh_density * scale_factor
             
             interior_nodes = _get_interior_column_nodes(struc, slab, boundary_vert_indices, nodes)
             column_refinement_nodes = _get_slab_column_nodes(struc, slab, nodes)
+            slab_columns = _get_slab_columns(struc, slab)
+            interior_patches = StructuralSizer.build_slab_shell_patches(
+                struc, slab_columns, section;
+                drop_panel=slab.drop_panel,
+                patch_stiffness_factor=1.0,
+                vertex_set=nothing)
             effective_target_edge_length = _resolve_slab_target_edge_length(
                 struc, slab, mesh_controls.target_edge_length)
             effective_refinement_edge_length = _resolve_slab_refinement_edge_length(
                 struc, slab, effective_target_edge_length, mesh_controls.refinement_edge_length)
-            effective_refinement_targets = isnothing(refinement_targets) ?
+            # Refinement targets: column centers + patch interior/edge points so refinement
+            # reaches target level throughout patches for smooth deflection visualization.
+            base_refinement = isnothing(refinement_targets) ?
                 column_refinement_nodes : mesh_controls.refinement_targets
+            slab_z = Float64(ustrip(u"m", nodes[boundary_vert_indices[1]].position[3]))
+            patch_refinement = effective_refinement_edge_length !== nothing && !isempty(interior_patches) ?
+                _patch_refinement_nodes(interior_patches, ustrip(u"m", effective_refinement_edge_length), slab_z) :
+                Asap.Node[]
+            effective_refinement_targets = vcat(base_refinement, patch_refinement)
             
-            @debug "Slab $slab_idx mesh" n_cells=n_cells scale_factor=scale_factor effective_n=effective_n n_corners=length(boundary_vert_indices) n_interior_nodes=length(interior_nodes) n_refinement_nodes=length(column_refinement_nodes)
+            @debug "Slab $slab_idx mesh" n_cells=n_cells scale_factor=scale_factor effective_n=effective_n n_corners=length(boundary_vert_indices) n_interior_nodes=length(interior_nodes) n_refinement_nodes=length(effective_refinement_targets) n_patches=length(interior_patches)
             
             corners = tuple([nodes[vi] for vi in boundary_vert_indices]...)
             
             slab_shells = Asap.Shell(corners, section; n=effective_n,
                                      id=Symbol("slab_$(slab_idx)"),
                                      interior_nodes=interior_nodes,
+                                     interior_patches=interior_patches,
                                      edge_support_type=:free,
                                      target_edge_length=effective_target_edge_length,
                                      refinement_edge_length=effective_refinement_edge_length,
@@ -1123,12 +1139,24 @@ function build_analysis_model!(design::BuildingDesign;
             slab_shells = Asap.ShellElement[]
             face_indices = [struc.cells[ci].face_idx for ci in slab.cell_indices]
             column_refinement_nodes = _get_slab_column_nodes(struc, slab, nodes)
+            slab_columns = _get_slab_columns(struc, slab)
+            interior_patches = StructuralSizer.build_slab_shell_patches(
+                struc, slab_columns, section;
+                drop_panel=slab.drop_panel,
+                patch_stiffness_factor=1.0,
+                vertex_set=nothing)
             effective_target_edge_length = _resolve_slab_target_edge_length(
                 struc, slab, mesh_controls.target_edge_length)
             effective_refinement_edge_length = _resolve_slab_refinement_edge_length(
                 struc, slab, effective_target_edge_length, mesh_controls.refinement_edge_length)
-            effective_refinement_targets = isnothing(refinement_targets) ?
+            base_refinement = isnothing(refinement_targets) ?
                 column_refinement_nodes : mesh_controls.refinement_targets
+            first_vi = skel.face_vertex_indices[struc.cells[first(slab.cell_indices)].face_idx][1]
+            slab_z = Float64(ustrip(u"m", nodes[first_vi].position[3]))
+            patch_refinement = effective_refinement_edge_length !== nothing && !isempty(interior_patches) ?
+                _patch_refinement_nodes(interior_patches, ustrip(u"m", effective_refinement_edge_length), slab_z) :
+                Asap.Node[]
+            effective_refinement_targets = vcat(base_refinement, patch_refinement)
             
             for face_idx in face_indices
                 vert_indices = skel.face_vertex_indices[face_idx]
@@ -1138,6 +1166,7 @@ function build_analysis_model!(design::BuildingDesign;
                                          id=Symbol("slab_$(slab_idx)"),
                                          edge_support_type=:free,
                                          interior_support_type=:free,
+                                         interior_patches=interior_patches,
                                          target_edge_length=effective_target_edge_length,
                                          refinement_edge_length=effective_refinement_edge_length,
                                          refinement_radius=mesh_controls.refinement_radius,
@@ -1266,6 +1295,109 @@ both above and below each column segment (vertex_idx is always the top).
 """
 function _get_slab_columns(struc::BuildingStructure, slab::Slab)
     return StructuralSizer.find_supporting_columns(struc, Set(slab.cell_indices))
+end
+
+"""
+    _point_inside_polygon(pt, polygon) -> Bool
+
+Ray-casting test for point-in-polygon. Used for patch interior refinement.
+"""
+function _point_inside_polygon(pt::Tuple{Float64, Float64}, polygon::Vector{Tuple{Float64, Float64}})
+    x, y = pt
+    n = length(polygon)
+    inside = false
+    j = n
+    for i in 1:n
+        xi, yi = polygon[i]
+        xj, yj = polygon[j]
+        if ((yi > y) != (yj > y)) && (x < (xj - xi) * (y - yi) / (yj - yi) + xi)
+            inside = !inside
+        end
+        j = i
+    end
+    return inside
+end
+
+"""
+    _patch_refinement_nodes(patches, refinement_edge_length_m, slab_z) -> Vector{Asap.Node}
+
+Generate refinement target nodes inside and along patch boundaries so that mesh
+refinement reaches the target level (refinement_edge_length) throughout the patch.
+This yields smooth deflection visualization at column and drop panel regions.
+
+Adds:
+- Patch centroid (column center)
+- Points along each patch edge at ~refinement_edge_length spacing
+- Interior grid at refinement_edge_length spacing (for large patches)
+"""
+function _patch_refinement_nodes(
+    patches::Vector{Asap.ShellPatch},
+    refinement_edge_length_m::Float64,
+    slab_z::Float64,
+)
+    isempty(patches) && return Asap.Node[]
+    h = refinement_edge_length_m
+    tol = 1e-9
+    round_key(x) = round(Int64, x / tol)
+    seen = Set{Tuple{Int64, Int64}}()
+    nodes = Asap.Node[]
+
+    for patch in patches
+        verts = patch.vertices
+        center = patch.center
+
+        # Centroid
+        kc = (round_key(center[1]), round_key(center[2]))
+        if kc ∉ seen
+            push!(seen, kc)
+            push!(nodes, Asap.Node([center[1] * u"m", center[2] * u"m", slab_z * u"m"], :free))
+        end
+
+        # Points along each edge at spacing ~ h
+        nv = length(verts)
+        for i in 1:nv
+            va = verts[i]
+            vb = verts[mod1(i + 1, nv)]
+            dx = vb[1] - va[1]
+            dy = vb[2] - va[2]
+            L = hypot(dx, dy)
+            n_seg = max(1, round(Int, L / h))
+            for k in 1:(n_seg - 1)
+                t = k / n_seg
+                x = va[1] + t * dx
+                y = va[2] + t * dy
+                kp = (round_key(x), round_key(y))
+                kp in seen && continue
+                push!(seen, kp)
+                push!(nodes, Asap.Node([x * u"m", y * u"m", slab_z * u"m"], :free))
+            end
+        end
+
+        # Interior grid at spacing h (for smooth deflection inside patch)
+        xmin = minimum(v[1] for v in verts)
+        xmax = maximum(v[1] for v in verts)
+        ymin = minimum(v[2] for v in verts)
+        ymax = maximum(v[2] for v in verts)
+        nx_raw = max(1, round(Int, (xmax - xmin) / h))
+        ny_raw = max(1, round(Int, (ymax - ymin) / h))
+        # Cap to avoid excessive nodes for very large patches
+        max_per_dim = 15
+        nx = min(nx_raw, max_per_dim)
+        ny = min(ny_raw, max_per_dim)
+        for i in 0:nx
+            x = i == nx ? xmax : xmin + i * (xmax - xmin) / nx
+            for j in 0:ny
+                y = j == ny ? ymax : ymin + j * (ymax - ymin) / ny
+                pt = (x, y)
+                _point_inside_polygon(pt, verts) || continue
+                kp = (round_key(x), round_key(y))
+                kp in seen && continue
+                push!(seen, kp)
+                push!(nodes, Asap.Node([x * u"m", y * u"m", slab_z * u"m"], :free))
+            end
+        end
+    end
+    return nodes
 end
 
 """

@@ -218,7 +218,7 @@ Top-level container for all foundation design parameters.
 
 # Fields
 - `code`: Design code — `:aci` (default) or `:is` (IS 456 legacy).
-- `strategy`: Auto-selection mode — `:auto`, `:all_spread`, `:all_strip`, `:mat`.
+- `strategy`: Auto-selection mode — `:auto`, `:auto_strip_spread`, `:all_spread`, `:all_strip`, `:mat`.
 - `mat_coverage_threshold`: Switch to mat when coverage ratio exceeds this (default 0.50).
 - `spread_params`, `strip_params`, `mat_params`: Option blocks for each foundation type;
   each can be overridden by API or param components.
@@ -233,7 +233,7 @@ Base.@kwdef struct FoundationOptions
     mat_params::MatParams         = MatParams()
 
     # Auto-selection strategy
-    strategy::Symbol = :auto        # :auto, :all_spread, :all_strip, :mat
+    strategy::Symbol = :auto        # :auto, :auto_strip_spread, :all_spread, :all_strip, :mat
 
     # Mat heuristic thresholds (used when strategy = :auto)
     mat_coverage_threshold::Float64 = 0.50  # Switch to mat if coverage > 50%

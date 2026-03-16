@@ -421,7 +421,7 @@ export run_secondary_moment_analysis
 export solve_column_for_punching, target_aspect_ratio
 export grow_column!, grow_column_for_axial!
 export find_supporting_columns, build_frame_line, build_frame_lines_both_directions
-export build_slab_shell_mesh  # Shared slab shell meshing for FEA and visualization
+export build_slab_shell_mesh, build_slab_shell_patches  # Shared slab shell meshing for FEA and visualization
 export compute_column_axial_loads, update_asap_column_sections!
 export check_pattern_loading_requirement, enforce_method_applicability
 

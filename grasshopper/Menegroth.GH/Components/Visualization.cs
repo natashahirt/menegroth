@@ -318,13 +318,13 @@ namespace Menegroth.GH.Components
             pManager.AddGenericParameter("Slab Surfaces", "SlabSurfaces",
                 "Slab top-surface proxies for preview/debug (Brep/Mesh)", GH_ParamAccess.list);
             pManager.AddGenericParameter("Beam Geometry", "BeamGeometry",
-                "Beam section geometry as Breps", GH_ParamAccess.list);
+                "Beam section geometry as Meshes (faster rendering)", GH_ParamAccess.list);
             pManager.AddGenericParameter("Column Geometry", "ColumnGeometry",
-                "Column section geometry as Breps", GH_ParamAccess.list);
+                "Column section geometry as Meshes (faster rendering)", GH_ParamAccess.list);
             pManager.AddGenericParameter("Slab Geometry", "SlabGeometry",
-                "Slab geometry only (Mesh for Sized flat, Brep for vaults/drop panels, Mesh for Deflected)", GH_ParamAccess.list);
+                "Slab geometry only (Mesh for all modes)", GH_ParamAccess.list);
             pManager.AddGenericParameter("Foundation Geometry", "FoundationGeometry",
-                "Foundation geometry only (Brep)", GH_ParamAccess.list);
+                "Foundation geometry only (Mesh)", GH_ParamAccess.list);
         }
 
         protected override void SolveInstance(IGH_DataAccess DA)
@@ -533,7 +533,7 @@ namespace Menegroth.GH.Components
                     $"Large slab mesh payload ({totalSlabVerts:N0} vertices). Consider hiding slabs/foundations or reducing analysis mesh density.");
             }
 
-            // Frame elements
+            // ─── Frame elements: curves (always) + sized volumes (when MODE_SIZED) ───
             var frameCurves = new List<Curve>();
             var frameGeometry = new List<IGH_GeometricGoo>();
             var frameGeometryColors = new List<Color>();
@@ -731,20 +731,18 @@ namespace Menegroth.GH.Components
                     elementColor = VisualizationColorMapper.UtilizationColor(ratio, ok, null);
                 }
 
-                var brep = SweepSection(elementCurve, elem);
-                if (brep != null)
+                if (modeInt == MODE_SIZED)
                 {
-                    // Geometry depends only on Mode: Sized = volumes (colored by Color By), Analytical = centerlines only.
-                    bool showFrameGeometry = (modeInt == MODE_SIZED);
-
-                    if (showFrameGeometry)
+                    var frameMesh = TryGetFrameMeshForElement(elem, elementCurve);
+                    if (frameMesh != null)
                     {
-                        frameGeometry.Add(new GH_Brep(brep));
+                        var ghMesh = new GH_Mesh(frameMesh);
+                        frameGeometry.Add(ghMesh);
                         frameGeometryColors.Add(elementColor);
                         if (elemType == "column")
-                            columnGeometry.Add(new GH_Brep(brep));
+                            columnGeometry.Add(ghMesh);
                         else if (elemType == "beam")
-                            beamGeometry.Add(new GH_Brep(brep));
+                            beamGeometry.Add(ghMesh);
                     }
                 }
 
@@ -781,10 +779,11 @@ namespace Menegroth.GH.Components
                 }
             }
 
-            // Slab geometry + colors
+            // ─── Slabs + foundations: sized volumes or deflected meshes ───
             var slabGeometry = new List<IGH_GeometricGoo>();
-            var foundationGeometry = new List<IGH_GeometricGoo>();
             var slabColors = new List<Color>();
+            var foundationGeometry = new List<IGH_GeometricGoo>();
+            var foundationColors = new List<Color>();
             var originalSlabs = new List<IGH_GeometricGoo>();
 
             if (_showSlabs)
@@ -801,7 +800,7 @@ namespace Menegroth.GH.Components
             }
 
             if (showFoundationsEffective)
-                BuildFoundations(viz, foundationGeometry, slabColors, effectiveColorBySlab);
+                BuildFoundations(viz, foundationGeometry, foundationColors, effectiveColorBySlab);
 
             var visibleSlabGeometry = new List<IGH_GeometricGoo>();
             if (_showSlabs)
@@ -835,7 +834,8 @@ namespace Menegroth.GH.Components
                 beamCurves, beamColors,
                 originalCurves,
                 frameGeometry, frameGeometryColors,
-                visibleSlabGeometry, slabColors);
+                slabGeometry, slabColors,
+                foundationGeometry, foundationColors);
 
             // Update message bar
             string deflectionName = deflectionInt == DEFLECTION_LOCAL ? "Local"
@@ -1186,6 +1186,82 @@ namespace Menegroth.GH.Components
             return pipe != null && pipe.Length > 0 ? pipe[0] : null;
         }
 
+        /// <summary>
+        /// Get sized frame mesh for an element. Prefers API mesh_vertices/mesh_faces when present;
+        /// otherwise sweeps section along path and tessellates to mesh (hollow sections).
+        /// </summary>
+        private static Mesh TryGetFrameMeshForElement(JToken elem, Curve elementCurve)
+        {
+            var meshVerts = elem["mesh_vertices"] as JArray;
+            var meshFaces = elem["mesh_faces"] as JArray;
+            if (meshVerts != null && meshFaces != null && meshVerts.Count >= 3 && meshFaces.Count > 0)
+            {
+                var m = BuildMeshFromVerticesFaces(meshVerts, meshFaces);
+                if (m != null) return m;
+            }
+            var brep = SweepSection(elementCurve, elem);
+            return brep != null ? BrepToMesh(brep) : null;
+        }
+
+        /// <summary>
+        /// Build a Rhino Mesh from API vertices and faces (same pattern as deflected_slab_meshes).
+        /// Vertices: [[x,y,z], ...], faces: [[i1,i2,i3], ...] (1-based indices).
+        /// </summary>
+        private static Mesh BuildMeshFromVerticesFaces(JArray meshVerts, JArray meshFaces)
+        {
+            if (meshVerts == null || meshFaces == null || meshVerts.Count == 0 || meshFaces.Count == 0)
+                return null;
+            var m = new Mesh();
+            foreach (JToken v in meshVerts)
+            {
+                var arr = v as JArray;
+                if (arr == null || arr.Count < 3) continue;
+                m.Vertices.Add(new Point3d(arr[0].Value<double>(), arr[1].Value<double>(), arr[2].Value<double>()));
+            }
+            foreach (JToken f in meshFaces)
+            {
+                var arr = f as JArray;
+                if (arr == null || arr.Count < 3) continue;
+                int i0 = arr[0].Value<int>() - 1;
+                int i1 = arr[1].Value<int>() - 1;
+                int i2 = arr[2].Value<int>() - 1;
+                if (i0 >= 0 && i1 >= 0 && i2 >= 0 && i0 < m.Vertices.Count && i1 < m.Vertices.Count && i2 < m.Vertices.Count)
+                    m.Faces.AddFace(i0, i1, i2);
+            }
+            if (m.Vertices.Count == 0 || m.Faces.Count == 0) return null;
+            m.Normals.ComputeNormals();
+            m.Compact();
+            return m;
+        }
+
+        /// <summary>
+        /// Create a mesh from an axis-aligned box. Used for foundations and drop panels.
+        /// </summary>
+        private static Mesh CreateBoxMesh(BoundingBox bbox)
+        {
+            return Mesh.CreateFromBox(new Box(bbox), 1, 1, 1);
+        }
+
+        /// <summary>
+        /// Convert a Brep to a single Mesh (fallback for hollow frame sections).
+        /// Uses MeshingParameters.FastRenderMesh for display-optimized tessellation.
+        /// </summary>
+        private static Mesh BrepToMesh(Brep brep)
+        {
+            if (brep == null || !brep.IsValid) return null;
+            var meshes = Mesh.CreateFromBrep(brep, MeshingParameters.FastRenderMesh);
+            if (meshes == null || meshes.Length == 0) return null;
+            var combined = new Mesh();
+            foreach (var m in meshes)
+            {
+                if (m != null && m.Vertices.Count > 0)
+                    combined.Append(m);
+            }
+            if (combined.Vertices.Count == 0) return null;
+            combined.Compact();
+            return combined;
+        }
+
         private static void AppendDeflectionSegmentedCurves(
             Curve sourceCurve,
             double[][] dispVecs,
@@ -1311,7 +1387,8 @@ namespace Menegroth.GH.Components
             List<Curve> beamCurves, List<Color> beamColors,
             List<Curve> originalCurves,
             List<IGH_GeometricGoo> frameGeometry, List<Color> frameGeometryColors,
-            List<IGH_GeometricGoo> slabGeometry, List<Color> slabColors)
+            List<IGH_GeometricGoo> slabGeometry, List<Color> slabColors,
+            List<IGH_GeometricGoo> foundationGeometry, List<Color> foundationColors)
         {
             _previewColumnCurves.Clear();
             _previewColumnColors.Clear();
@@ -1345,11 +1422,15 @@ namespace Menegroth.GH.Components
                 _previewOriginalCurves.Add(c);
             }
 
-            CacheShadedBreps(frameGeometry, frameGeometryColors);
-            CacheShadedBreps(slabGeometry, slabColors);
+            CacheShadedGeometry(frameGeometry, frameGeometryColors);
+            CacheShadedGeometry(slabGeometry, slabColors);
+            CacheShadedGeometry(foundationGeometry, foundationColors);
         }
 
-        private void CacheShadedBreps(List<IGH_GeometricGoo> geometry, List<Color> colors)
+        /// <summary>
+        /// Cache geometry for internal shaded preview. Handles both GH_Mesh (direct) and GH_Brep (tessellated).
+        /// </summary>
+        private void CacheShadedGeometry(List<IGH_GeometricGoo> geometry, List<Color> colors)
         {
             if (geometry == null || colors == null) return;
             int n = Math.Min(geometry.Count, colors.Count);
@@ -1407,6 +1488,17 @@ namespace Menegroth.GH.Components
 
         // ─── Slab helpers ───────────────────────────────────────────────
 
+        /// <summary>
+        /// Add a slab mesh to output and append its color. Keeps geometry and color lists in sync.
+        /// </summary>
+        private static void AddSlabMeshAndColor(List<IGH_GeometricGoo> output, List<Color> colors,
+            Mesh mesh, JToken analyticalSource, int colorBy, double maxDisp, SlabAnalyticalMaxima maxima)
+        {
+            if (mesh == null) return;
+            output.Add(new GH_Mesh(mesh));
+            AppendSlabColor(colors, analyticalSource, colorBy, maxDisp, "vertex_displacements", maxima);
+        }
+
         private static void BuildSizedSlabs(JToken viz, List<IGH_GeometricGoo> output,
             List<Color> colors, int colorBy, double maxDisp,
             SlabAnalyticalMaxima maxima, bool showVolumes = true)
@@ -1427,28 +1519,24 @@ namespace Menegroth.GH.Components
                 int slabId = slab["slab_id"]?.ToObject<int>() ?? -1;
                 double thickness = slab["thickness"]?.ToObject<double>() ?? 0;
                 double zTop = slab["z_top"]?.ToObject<double>() ?? 0;
-                
-                // For analytical coloring in sized mode, use the deflected mesh data (has face values)
                 meshBySlabId.TryGetValue(slabId, out var analyticalMesh);
                 var analyticalSource = analyticalMesh ?? slab;
 
-                // Check for vault-specific curved mesh (new API field)
-                bool isVault = slab["is_vault"]?.ToObject<bool>() ?? false;
-                if (isVault && TryBuildVaultBrep(slab, thickness, output))
-                {
-                    AppendSlabColor(colors, analyticalSource, colorBy, maxDisp, "vertex_displacements", maxima);
-                    continue;
-                }
-                
-                // Fallback: try deflected mesh (for curved slabs from analysis model)
-                if (analyticalMesh != null &&
-                    TryBuildCurvedSizedSlabFromMesh(analyticalMesh, output))
+                // 1. Vault: mesh from vault_mesh_vertices/faces
+                if (slab["is_vault"]?.ToObject<bool>() == true && TryBuildVaultMesh(slab, thickness, output))
                 {
                     AppendSlabColor(colors, analyticalSource, colorBy, maxDisp, "vertex_displacements", maxima);
                     continue;
                 }
 
-                // Standard flat slab: two offset meshes (top + bottom) to show thickness; no lofting for speed
+                // 2. Curved: mesh from deflected_slab_meshes (undeformed vertices)
+                if (analyticalMesh != null && TryBuildCurvedSizedSlabFromMesh(analyticalMesh, output))
+                {
+                    AppendSlabColor(colors, analyticalSource, colorBy, maxDisp, "vertex_displacements", maxima);
+                    continue;
+                }
+
+                // 3. Flat slab: boundary_vertices → top/bottom planar meshes
                 var boundary = slab["boundary_vertices"]?.ToObject<double[][]>() ?? new double[0][];
                 if (boundary.Length < 3) continue;
 
@@ -1458,19 +1546,10 @@ namespace Menegroth.GH.Components
 
                 if (showVolumes)
                 {
-                    var topMesh = CreatePlanarPolygonMesh(topPts);
-                    var bottomMesh = CreatePlanarPolygonMesh(bottomPts);
-                    if (topMesh != null)
-                    {
-                        output.Add(new GH_Mesh(topMesh));
-                        AppendSlabColor(colors, analyticalSource, colorBy, maxDisp, "vertex_displacements", maxima);
-                    }
-                    if (bottomMesh != null)
-                    {
-                        output.Add(new GH_Mesh(bottomMesh));
-                        AppendSlabColor(colors, analyticalSource, colorBy, maxDisp, "vertex_displacements", maxima);
-                    }
-
+                    AddSlabMeshAndColor(output, colors, CreatePlanarPolygonMesh(topPts),
+                        analyticalSource, colorBy, maxDisp, maxima);
+                    AddSlabMeshAndColor(output, colors, CreatePlanarPolygonMesh(bottomPts),
+                        analyticalSource, colorBy, maxDisp, maxima);
                     AppendDropPanelSizedGeometry(slab, zTop, thickness, output, colors, analyticalSource,
                         colorBy, maxDisp, maxima);
                 }
@@ -1486,11 +1565,8 @@ namespace Menegroth.GH.Components
                             mesh.Faces.AddFace(0, i, i + 1);
                         mesh.Normals.ComputeNormals();
                         mesh.Compact();
-                        output.Add(new GH_Mesh(mesh));
-                        AppendSlabColor(colors, analyticalSource, colorBy, maxDisp, "vertex_displacements", maxima);
+                        AddSlabMeshAndColor(output, colors, mesh, analyticalSource, colorBy, maxDisp, maxima);
                     }
-
-                    // Omit solid drop panels in analytical mode; slab mesh suffices for coloring
                 }
             }
         }
@@ -1514,10 +1590,10 @@ namespace Menegroth.GH.Components
         }
 
         /// <summary>
-        /// Build parabolic vault geometry from vault_mesh_vertices and vault_mesh_faces.
-        /// Creates a Brep with intrados and extrados surfaces plus end caps.
+        /// Build parabolic vault mesh from vault_mesh_vertices and vault_mesh_faces.
+        /// Intrados + extrados + end caps as a single mesh.
         /// </summary>
-        private static bool TryBuildVaultBrep(JToken slab, double thickness, List<IGH_GeometricGoo> output)
+        private static bool TryBuildVaultMesh(JToken slab, double thickness, List<IGH_GeometricGoo> output)
         {
             var verts = slab["vault_mesh_vertices"]?.ToObject<double[][]>() ?? new double[0][];
             var faces = slab["vault_mesh_faces"]?.ToObject<int[][]>() ?? new int[0][];
@@ -1864,20 +1940,7 @@ namespace Menegroth.GH.Components
             combined.Normals.ComputeNormals();
             combined.Compact();
 
-            // Convert closed mesh to solid Brep
-            try
-            {
-                var brep = Brep.CreateFromMesh(combined, false);
-                if (brep != null && brep.IsValid)
-                {
-                    var capped = brep.CapPlanarHoles(
-                        Rhino.RhinoDoc.ActiveDoc?.ModelAbsoluteTolerance ?? 0.001);
-                    output.Add(new GH_Brep(capped ?? brep));
-                    return true;
-                }
-            }
-            catch { /* fall through to mesh */ }
-
+            // Output mesh directly for faster rendering (skip Brep conversion)
             output.Add(new GH_Mesh(combined));
             return true;
         }
@@ -1972,16 +2035,17 @@ namespace Menegroth.GH.Components
                 double y1 = c[1] + width / 2.0;
                 double zTopDrop = zTop - slabThickness;
                 double zBotDrop = zTopDrop - extra;
-                var brep = new BoundingBox(new[]
+                var bbox = new BoundingBox(new[]
                 {
                     new Point3d(x0, y0, zBotDrop), new Point3d(x1, y0, zBotDrop),
                     new Point3d(x1, y1, zBotDrop), new Point3d(x0, y1, zBotDrop),
                     new Point3d(x0, y0, zTopDrop), new Point3d(x1, y0, zTopDrop),
                     new Point3d(x1, y1, zTopDrop), new Point3d(x0, y1, zTopDrop),
-                }).ToBrep();
-                if (brep != null)
+                });
+                var dropMesh = CreateBoxMesh(bbox);
+                if (dropMesh != null)
                 {
-                    output.Add(new GH_Brep(brep));
+                    output.Add(new GH_Mesh(dropMesh));
                     AppendSlabColor(colors, analyticalSource, colorBy, maxDisp, "vertex_displacements", maxima);
                 }
             }
@@ -2104,22 +2168,8 @@ namespace Menegroth.GH.Components
                 combined.Normals.ComputeNormals();
                 combined.Compact();
 
-                try
-                {
-                    var brep = Brep.CreateFromMesh(combined, false);
-                    if (brep != null && brep.IsValid)
-                    {
-                        var capped = brep.CapPlanarHoles(
-                            Rhino.RhinoDoc.ActiveDoc?.ModelAbsoluteTolerance ?? 0.001);
-                        output.Add(new GH_Brep(capped ?? brep));
-                    }
-                    else
-                        output.Add(new GH_Mesh(combined));
-                }
-                catch
-                {
-                    output.Add(new GH_Mesh(combined));
-                }
+                // Output mesh directly for faster rendering
+                output.Add(new GH_Mesh(combined));
             }
         }
 
@@ -2211,7 +2261,7 @@ namespace Menegroth.GH.Components
         }
 
         private static void BuildFoundations(JToken viz, List<IGH_GeometricGoo> output,
-            List<Color> colors, int colorBy)
+            List<Color> foundationColors, int colorBy)
         {
             var foundations = viz["foundations"] as JArray ?? new JArray();
             foreach (var f in foundations)
@@ -2230,34 +2280,35 @@ namespace Menegroth.GH.Components
                 double zTop = c[2];
                 double zBot = zTop - depth;
 
-                var corners = new[]
+                var bbox = new BoundingBox(new[]
                 {
                     new Point3d(x0, y0, zBot), new Point3d(x1, y0, zBot),
                     new Point3d(x1, y1, zBot), new Point3d(x0, y1, zBot),
                     new Point3d(x0, y0, zTop), new Point3d(x1, y0, zTop),
                     new Point3d(x1, y1, zTop), new Point3d(x0, y1, zTop),
-                };
-                var brep = new BoundingBox(corners).ToBrep();
-                if (brep == null) continue;
-
-                output.Add(new GH_Brep(brep));
-                if (colorBy == COLOR_UTILIZATION)
+                });
+                var mesh = CreateBoxMesh(bbox);
+                if (mesh != null)
                 {
-                    double ratio = f["utilization_ratio"]?.ToObject<double>() ?? 0;
-                    bool ok = f["ok"]?.ToObject<bool>() ?? true;
-                    colors.Add(VisualizationColorMapper.UtilizationColor(ratio, ok, null));
-                }
-                else if (colorBy == COLOR_DEFLECTION)
-                {
-                    colors.Add(VisualizationColorMapper.DeflectionColor(0.0, 1.0, null));
-                }
-                else if (colorBy == COLOR_MATERIAL)
-                {
-                    colors.Add(VisualizationColorMapper.ResolveMaterialColor(f["material_color_hex"]?.ToString(), VisualizationColorMapper.ConcreteMaterialColor));
-                }
-                else
-                {
-                    colors.Add(VisualizationColorMapper.ConcreteMaterialColor);
+                    output.Add(new GH_Mesh(mesh));
+                    if (colorBy == COLOR_UTILIZATION)
+                    {
+                        double ratio = f["utilization_ratio"]?.ToObject<double>() ?? 0;
+                        bool ok = f["ok"]?.ToObject<bool>() ?? true;
+                        foundationColors.Add(VisualizationColorMapper.UtilizationColor(ratio, ok, null));
+                    }
+                    else if (colorBy == COLOR_DEFLECTION)
+                    {
+                        foundationColors.Add(VisualizationColorMapper.DeflectionColor(0.0, 1.0, null));
+                    }
+                    else if (colorBy == COLOR_MATERIAL)
+                    {
+                        foundationColors.Add(VisualizationColorMapper.ResolveMaterialColor(f["material_color_hex"]?.ToString(), VisualizationColorMapper.ConcreteMaterialColor));
+                    }
+                    else
+                    {
+                        foundationColors.Add(VisualizationColorMapper.ConcreteMaterialColor);
+                    }
                 }
             }
         }

@@ -283,9 +283,9 @@ function validate_input(input::APIInput)
         end
         if p.foundation_options !== nothing
             fo = p.foundation_options
-            strategy_ok = lowercase(strip(fo.strategy)) in ("auto", "all_spread", "all_strip", "mat")
+            strategy_ok = lowercase(strip(fo.strategy)) in ("auto", "auto_strip_spread", "all_spread", "all_strip", "mat")
             if !strategy_ok
-                push!(errors, "foundation_options.strategy must be one of: auto, all_spread, all_strip, mat (got \"$(fo.strategy)\").")
+                push!(errors, "foundation_options.strategy must be one of: auto, auto_strip_spread, all_spread, all_strip, mat (got \"$(fo.strategy)\").")
             end
             if !(0.0 <= fo.mat_coverage_threshold <= 1.0)
                 push!(errors, "foundation_options.mat_coverage_threshold must be between 0 and 1 (got $(fo.mat_coverage_threshold)).")

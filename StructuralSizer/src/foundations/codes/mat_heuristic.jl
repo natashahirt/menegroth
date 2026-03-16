@@ -48,7 +48,7 @@ function recommend_foundation_strategy(
     opts::FoundationOptions = FoundationOptions()
 )
     # If user explicitly chose a strategy, respect it
-    if opts.strategy != :auto
+    if opts.strategy != :auto && opts.strategy != :auto_strip_spread
         return opts.strategy == :all_spread ? :spread :
                opts.strategy == :all_strip  ? :strip  :
                opts.strategy == :mat        ? :mat    :
@@ -71,12 +71,18 @@ function recommend_foundation_strategy(
     coverage = total_req_ft2 / max(footprint_ft2, 1.0)
 
     # Decision logic
-    if coverage > opts.mat_coverage_threshold
-        return :mat
+    result = if coverage > opts.mat_coverage_threshold
+        :mat
     elseif coverage > 0.30
         # Moderate coverage — likely need some strips where footings overlap
-        return :strip
+        :strip
     else
-        return :spread
+        :spread
     end
+
+    # auto_strip_spread: never pick mat; high coverage → strip
+    if opts.strategy == :auto_strip_spread && result == :mat
+        return :strip
+    end
+    return result
 end

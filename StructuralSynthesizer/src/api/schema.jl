@@ -102,7 +102,7 @@ function api_input_schema()
                 "foundation_soil" => "Soil name (e.g. medium_sand). Required when size_foundations is true. Default: medium_sand.",
                 "foundation_concrete" => "Foundation concrete (e.g. NWC_3000). Default: NWC_3000.",
                 "foundation_options" => Dict(
-                    "strategy" => "auto | all_spread | all_strip | mat. Default: auto.",
+                    "strategy" => "auto | auto_strip_spread | all_spread | all_strip | mat. Default: auto.",
                     "mat_coverage_threshold" => "Switch to mat when coverage ratio exceeds this (0–1). Default: 0.5.",
                     "spread_params" => "Optional. cover_in, min_depth_in, bar_size, depth_increment_in, size_increment_in (inches).",
                     "strip_params" => "Optional. cover_in, min_depth_in, bar_size_long, bar_size_trans, width_increment_in, max_depth_ratio, merge_gap_factor, eccentricity_limit.",
@@ -402,6 +402,10 @@ Base.@kwdef struct APIVisualizationFrameElement
     max_axial_force::Float64 = 0.0   # signed P extremum [N] (+ tension, − compression)
     max_moment::Float64 = 0.0        # signed M extremum [N·m] (largest |My| or |Mz|)
     max_shear::Float64 = 0.0         # signed V extremum [N] (largest |Vy| or |Vz|)
+    # Sized mode: pre-built mesh for fast rendering (same pattern as deflected_slab_meshes).
+    # Empty for hollow sections or when section polygon is invalid; client falls back to sweep.
+    mesh_vertices::Vector{Vector{Float64}} = []  # [[x,y,z], ...] in display length units
+    mesh_faces::Vector{Vector{Int}} = []          # [[i1,i2,i3], ...] triangle indices (1-based)
 end
 
 """Slab geometry for sized mode (3D boxes from cell boundaries)."""

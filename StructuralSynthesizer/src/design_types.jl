@@ -135,7 +135,7 @@ Foundation sizing parameters.
 # Fields
 - `soil`: Soil profile (bearing capacity, settlement params)
 - `options`: Design options (`FoundationOptions` from StructuralSizer).
-  Controls strategy (`:auto`, `:all_spread`, `:all_strip`, `:mat`) and per-type
+  Controls strategy (`:auto`, `:auto_strip_spread`, `:all_spread`, `:all_strip`, `:mat`) and per-type
   knobs (`options.spread_params`, `options.strip_params`, `options.mat_params`).
 - `concrete`: Concrete grade for footings (IS path only; ACI uses `options.spread_params.material`)
 - `rebar`: Rebar grade for footings (IS path only)

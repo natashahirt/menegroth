@@ -1,8 +1,8 @@
 {
   "version": 2,
-  "dgSpecHash": "mmiltNasbxM=",
+  "dgSpecHash": "On9bJ32KDDo=",
   "success": true,
-  "projectFilePath": "C:\\Users\\nhirt\\MIT Dropbox\\Natasha Hirt\\_MIT\\DS Research\\Synthetic_Buildings\\menegroth\\grasshopper\\Menegroth.GH\\Menegroth.GH.csproj",
+  "projectFilePath": "c:\\Users\\nhirt\\MIT Dropbox\\Natasha Hirt\\_MIT\\DS Research\\Synthetic_Buildings\\menegroth\\grasshopper\\Menegroth.GH\\Menegroth.GH.csproj",
   "expectedPackageFiles": [
     "C:\\Users\\nhirt\\.nuget\\packages\\grasshopper\\8.1.23325.13001\\grasshopper.8.1.23325.13001.nupkg.sha512",
     "C:\\Users\\nhirt\\.nuget\\packages\\microsoft.netcore.platforms\\1.1.1\\microsoft.netcore.platforms.1.1.1.nupkg.sha512",

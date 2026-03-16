@@ -55,16 +55,25 @@ namespace Menegroth.GH.Types
         }
 
         /// <summary>
-        /// Compute a simple hash of the geometry for change detection.
+        /// Compute a SHA-256 hash of the geometry for change detection.
+        /// Streams JSON directly to the hasher to avoid intermediate string allocation.
         /// </summary>
         public string ComputeHash()
         {
-            var json = ToJson().ToString(Formatting.None);
-            using (var sha = System.Security.Cryptography.SHA256.Create())
+            using (var ms = new System.IO.MemoryStream())
             {
-                var bytes = System.Text.Encoding.UTF8.GetBytes(json);
-                var hash = sha.ComputeHash(bytes);
-                return BitConverter.ToString(hash).Replace("-", "").ToLowerInvariant();
+                using (var sw = new System.IO.StreamWriter(ms, System.Text.Encoding.UTF8, 4096, leaveOpen: true))
+                using (var jw = new JsonTextWriter(sw) { Formatting = Formatting.None })
+                {
+                    ToJson().WriteTo(jw);
+                }
+
+                ms.Position = 0;
+                using (var sha = System.Security.Cryptography.SHA256.Create())
+                {
+                    var hash = sha.ComputeHash(ms);
+                    return BitConverter.ToString(hash).Replace("-", "").ToLowerInvariant();
+                }
             }
         }
     }

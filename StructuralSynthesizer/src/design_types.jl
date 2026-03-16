@@ -420,19 +420,6 @@ Base.@kwdef mutable struct DesignParameters
     
     # ─── Display Preferences ───
     display_units::DisplayUnits = imperial
-
-    # ─── Visualization Mesh ───
-    # Target shell mesh edge length (m) for analysis-model visualization.
-    # Default: nothing → inherits from FEA target_edge when method is FEA, else adaptive
-    # clamp(min_span/20, 0.15, 0.75) m (matches flat-plate FEA).
-    visualization_target_edge_m::Union{Float64, Nothing} = nothing
-
-    # When true, skip build_analysis_model! and visualization serialization (faster response).
-    skip_visualization::Bool = false
-
-    # "minimal" = frame elements + slab boundaries only (no deflected meshes, no per-face analytical).
-    # "full" = full visualization with deflected slab meshes.
-    visualization_detail::String = "full"
 end
 
 # =============================================================================
@@ -673,9 +660,6 @@ Base.@kwdef mutable struct ColumnDesignResult
     
     # Punching (if supporting flat slab)
     punching::Union{PunchingDesignResult, Nothing} = nothing
-
-    # Captured section object for visualization (survives restore!)
-    section_obj::Union{StructuralSizer.AbstractSection, Nothing} = nothing
 end
 
 """
@@ -691,9 +675,6 @@ Base.@kwdef mutable struct BeamDesignResult
     # Material takeoff
     member_length::typeof(1.0u"m") = 0.0u"m"
     weight::typeof(1.0u"kg") = 0.0u"kg"
-
-    # Captured section object for visualization (survives restore!)
-    section_obj::Union{StructuralSizer.AbstractSection, Nothing} = nothing
 end
 
 """
@@ -793,16 +774,10 @@ mutable struct BuildingDesign{T, A, P}
     # Skeleton edge index for each frame element in asap_model (when built via build_analysis_model!).
     # Enables correct element→design mapping for visualization; empty when using struc.asap_model.
     asap_model_frame_edge_indices::Vector{Int}
-
-    # Structural offsets captured at design time (vertex_idx → (dx, dy) in meters).
-    # Survives restore! so serialization can position foundations at offset centerlines.
-    structural_offsets::Dict{Int, NTuple{2, Float64}}
     
     # Metadata
     created::DateTime
     compute_time_s::Float64
-    # Per-phase wall-clock times (s) for logging: prepare, pipeline, capture, analysis_model, restore, serialize_visualization
-    phase_timings::Dict{String, Float64}
 end
 
 """
@@ -821,10 +796,8 @@ function BuildingDesign(struc::BuildingStructure{T, A, P}, params::DesignParamet
         DesignSummary(),
         nothing,  # asap_model (built via build_analysis_model!)
         Int[],    # asap_model_frame_edge_indices (populated by build_analysis_model!)
-        Dict{Int, NTuple{2, Float64}}(),  # structural_offsets (captured by capture_design)
         now(),
-        0.0,
-        Dict{String, Float64}(),  # phase_timings (populated by design_building)
+        0.0
     )
 end
 

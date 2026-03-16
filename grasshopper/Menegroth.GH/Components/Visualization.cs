@@ -4,8 +4,6 @@ using System.Drawing;
 using System.Linq;
 using System.Windows.Forms;
 using Grasshopper.Kernel;
-using Grasshopper.Kernel.Attributes;
-using Grasshopper.Kernel.Parameters;
 using Grasshopper.Kernel.Types;
 using Newtonsoft.Json.Linq;
 using Rhino.Geometry;
@@ -52,6 +50,29 @@ namespace Menegroth.GH.Components
         private static bool IsValidAnalyticalColumn(int value) =>
             value >= COLOR_FRAME_AXIAL && value <= COLOR_FRAME_SHEAR;
 
+        /// <summary>
+        /// Global analytical maxima for slab color normalization, bundled to avoid
+        /// long parameter chains through slab helper methods.
+        /// </summary>
+        private readonly struct SlabAnalyticalMaxima
+        {
+            public readonly double Bending;
+            public readonly double Membrane;
+            public readonly double Shear;
+            public readonly double VonMises;
+            public readonly double SurfaceStress;
+
+            public SlabAnalyticalMaxima(double bending, double membrane, double shear,
+                double vonMises, double surfaceStress)
+            {
+                Bending = bending;
+                Membrane = membrane;
+                Shear = shear;
+                VonMises = vonMises;
+                SurfaceStress = surfaceStress;
+            }
+        }
+
         private bool _useInternalPreview = true;
         private bool _showOriginal = true;
         private bool _showSlabs = true;
@@ -73,6 +94,7 @@ namespace Menegroth.GH.Components
         private readonly List<Mesh> _previewShadedMeshes = new List<Mesh>();
         private readonly List<Color> _previewShadedColors = new List<Color>();
         private readonly List<bool> _previewShadedUseVertexColors = new List<bool>();
+        private readonly List<Rhino.Display.DisplayMaterial> _previewShadedMaterials = new List<Rhino.Display.DisplayMaterial>();
 
         public Visualization()
             : base("Visualization",
@@ -83,11 +105,6 @@ namespace Menegroth.GH.Components
 
         public override Guid ComponentGuid =>
             new Guid("E7D94B2A-6C31-4D89-AF1E-2B8A3C5D7E9F");
-
-        public override void CreateAttributes()
-        {
-            m_attributes = new VisualizationAttributes(this);
-        }
 
         protected override void AppendAdditionalComponentMenuItems(ToolStripDropDown menu)
         {
@@ -138,116 +155,60 @@ namespace Menegroth.GH.Components
             menu.Items.Add(new ToolStripSeparator());
 
             var modeMenu = new ToolStripMenuItem("Mode");
-            modeMenu.DropDownItems.Add(CreateModeMenuItem("Sized", MODE_SIZED));
-            modeMenu.DropDownItems.Add(CreateModeMenuItem("Analytical", MODE_ANALYTICAL));
+            modeMenu.DropDownItems.Add(CreateCheckedMenuItem("Sized", MODE_SIZED, v => _mode = v, () => _mode));
+            modeMenu.DropDownItems.Add(CreateCheckedMenuItem("Analytical", MODE_ANALYTICAL, v => _mode = v, () => _mode));
             menu.Items.Add(modeMenu);
 
             var deflectionMenu = new ToolStripMenuItem("Deflection");
-            deflectionMenu.DropDownItems.Add(CreateDeflectionMenuItem("None", DEFLECTION_NONE));
-            deflectionMenu.DropDownItems.Add(CreateDeflectionMenuItem("Local", DEFLECTION_LOCAL));
-            deflectionMenu.DropDownItems.Add(CreateDeflectionMenuItem("Global", DEFLECTION_GLOBAL));
+            deflectionMenu.DropDownItems.Add(CreateCheckedMenuItem("None", DEFLECTION_NONE, v => _deflection = v, () => _deflection));
+            deflectionMenu.DropDownItems.Add(CreateCheckedMenuItem("Local", DEFLECTION_LOCAL, v => _deflection = v, () => _deflection));
+            deflectionMenu.DropDownItems.Add(CreateCheckedMenuItem("Global", DEFLECTION_GLOBAL, v => _deflection = v, () => _deflection));
             menu.Items.Add(deflectionMenu);
 
             var colorMenu = new ToolStripMenuItem("Color By");
-            colorMenu.DropDownItems.Add(CreateColorMenuItem("None", COLOR_NONE));
-            colorMenu.DropDownItems.Add(CreateColorMenuItem("Material", COLOR_MATERIAL));
+            colorMenu.DropDownItems.Add(CreateCheckedMenuItem("None", COLOR_NONE, v => _colorBy = v, () => _colorBy));
+            colorMenu.DropDownItems.Add(CreateCheckedMenuItem("Material", COLOR_MATERIAL, v => _colorBy = v, () => _colorBy));
             var wholeBuildingMenu = new ToolStripMenuItem("Whole Building");
-            wholeBuildingMenu.DropDownItems.Add(CreateColorMenuItem("Deflection", COLOR_DEFLECTION));
-            wholeBuildingMenu.DropDownItems.Add(CreateColorMenuItem("Utilization", COLOR_UTILIZATION));
+            wholeBuildingMenu.DropDownItems.Add(CreateCheckedMenuItem("Deflection", COLOR_DEFLECTION, v => _colorBy = v, () => _colorBy));
+            wholeBuildingMenu.DropDownItems.Add(CreateCheckedMenuItem("Utilization", COLOR_UTILIZATION, v => _colorBy = v, () => _colorBy));
             colorMenu.DropDownItems.Add(wholeBuildingMenu);
             colorMenu.DropDownItems.Add(new ToolStripSeparator());
             var beamMenu = new ToolStripMenuItem("Beam");
-            beamMenu.DropDownItems.Add(CreateAnalyticalBeamMenuItem("None", COLOR_NONE));
-            beamMenu.DropDownItems.Add(CreateAnalyticalBeamMenuItem("Axial Force", COLOR_FRAME_AXIAL));
-            beamMenu.DropDownItems.Add(CreateAnalyticalBeamMenuItem("Moment", COLOR_FRAME_MOMENT));
-            beamMenu.DropDownItems.Add(CreateAnalyticalBeamMenuItem("Shear", COLOR_FRAME_SHEAR));
+            beamMenu.DropDownItems.Add(CreateCheckedMenuItem("None", COLOR_NONE, v => _analyticalBeam = v, () => _analyticalBeam));
+            beamMenu.DropDownItems.Add(CreateCheckedMenuItem("Axial Force", COLOR_FRAME_AXIAL, v => _analyticalBeam = v, () => _analyticalBeam));
+            beamMenu.DropDownItems.Add(CreateCheckedMenuItem("Moment", COLOR_FRAME_MOMENT, v => _analyticalBeam = v, () => _analyticalBeam));
+            beamMenu.DropDownItems.Add(CreateCheckedMenuItem("Shear", COLOR_FRAME_SHEAR, v => _analyticalBeam = v, () => _analyticalBeam));
             colorMenu.DropDownItems.Add(beamMenu);
             var columnMenu = new ToolStripMenuItem("Column");
-            columnMenu.DropDownItems.Add(CreateAnalyticalColumnMenuItem("None", COLOR_NONE));
-            columnMenu.DropDownItems.Add(CreateAnalyticalColumnMenuItem("Axial Force", COLOR_FRAME_AXIAL));
-            columnMenu.DropDownItems.Add(CreateAnalyticalColumnMenuItem("Moment", COLOR_FRAME_MOMENT));
-            columnMenu.DropDownItems.Add(CreateAnalyticalColumnMenuItem("Shear", COLOR_FRAME_SHEAR));
+            columnMenu.DropDownItems.Add(CreateCheckedMenuItem("None", COLOR_NONE, v => _analyticalColumn = v, () => _analyticalColumn));
+            columnMenu.DropDownItems.Add(CreateCheckedMenuItem("Axial Force", COLOR_FRAME_AXIAL, v => _analyticalColumn = v, () => _analyticalColumn));
+            columnMenu.DropDownItems.Add(CreateCheckedMenuItem("Moment", COLOR_FRAME_MOMENT, v => _analyticalColumn = v, () => _analyticalColumn));
+            columnMenu.DropDownItems.Add(CreateCheckedMenuItem("Shear", COLOR_FRAME_SHEAR, v => _analyticalColumn = v, () => _analyticalColumn));
             colorMenu.DropDownItems.Add(columnMenu);
             var slabMenu = new ToolStripMenuItem("Slab");
-            slabMenu.DropDownItems.Add(CreateAnalyticalSlabMenuItem("None", COLOR_NONE));
-            slabMenu.DropDownItems.Add(CreateAnalyticalSlabMenuItem("Bending Moment", COLOR_SLAB_BENDING));
-            slabMenu.DropDownItems.Add(CreateAnalyticalSlabMenuItem("Membrane Force", COLOR_SLAB_MEMBRANE));
-            slabMenu.DropDownItems.Add(CreateAnalyticalSlabMenuItem("Shear Force", COLOR_SLAB_SHEAR));
-            slabMenu.DropDownItems.Add(CreateAnalyticalSlabMenuItem("Von Mises", COLOR_SLAB_VON_MISES));
-            slabMenu.DropDownItems.Add(CreateAnalyticalSlabMenuItem("Surface Stress", COLOR_SLAB_SURFACE_STRESS));
+            slabMenu.DropDownItems.Add(CreateCheckedMenuItem("None", COLOR_NONE, v => _analyticalSlab = v, () => _analyticalSlab));
+            slabMenu.DropDownItems.Add(CreateCheckedMenuItem("Bending Moment", COLOR_SLAB_BENDING, v => _analyticalSlab = v, () => _analyticalSlab));
+            slabMenu.DropDownItems.Add(CreateCheckedMenuItem("Membrane Force", COLOR_SLAB_MEMBRANE, v => _analyticalSlab = v, () => _analyticalSlab));
+            slabMenu.DropDownItems.Add(CreateCheckedMenuItem("Shear Force", COLOR_SLAB_SHEAR, v => _analyticalSlab = v, () => _analyticalSlab));
+            slabMenu.DropDownItems.Add(CreateCheckedMenuItem("Von Mises", COLOR_SLAB_VON_MISES, v => _analyticalSlab = v, () => _analyticalSlab));
+            slabMenu.DropDownItems.Add(CreateCheckedMenuItem("Surface Stress", COLOR_SLAB_SURFACE_STRESS, v => _analyticalSlab = v, () => _analyticalSlab));
             colorMenu.DropDownItems.Add(slabMenu);
             menu.Items.Add(colorMenu);
         }
 
-        private ToolStripMenuItem CreateDeflectionMenuItem(string label, int value)
+        /// <summary>
+        /// Create a checked menu item that sets an int field and refreshes the component.
+        /// </summary>
+        private ToolStripMenuItem CreateCheckedMenuItem(string label, int value,
+            Action<int> setter, Func<int> getter)
         {
             var item = new ToolStripMenuItem(label, null, (s, e) =>
             {
-                _deflection = value;
+                setter(value);
                 ExpirePreview(true);
                 ExpireSolution(true);
             });
-            item.Checked = _deflection == value;
-            return item;
-        }
-
-        private ToolStripMenuItem CreateModeMenuItem(string label, int value)
-        {
-            var item = new ToolStripMenuItem(label, null, (s, e) =>
-            {
-                _mode = value;
-                ExpirePreview(true);
-                ExpireSolution(true);
-            });
-            item.Checked = _mode == value;
-            return item;
-        }
-
-        private ToolStripMenuItem CreateColorMenuItem(string label, int value)
-        {
-            var item = new ToolStripMenuItem(label, null, (s, e) =>
-            {
-                _colorBy = value;
-                ExpirePreview(true);
-                ExpireSolution(true);
-            });
-            item.Checked = _colorBy == value;
-            return item;
-        }
-
-        private ToolStripMenuItem CreateAnalyticalSlabMenuItem(string label, int value)
-        {
-            var item = new ToolStripMenuItem(label, null, (s, e) =>
-            {
-                _analyticalSlab = value;
-                ExpirePreview(true);
-                ExpireSolution(true);
-            });
-            item.Checked = _analyticalSlab == value;
-            return item;
-        }
-
-        private ToolStripMenuItem CreateAnalyticalBeamMenuItem(string label, int value)
-        {
-            var item = new ToolStripMenuItem(label, null, (s, e) =>
-            {
-                _analyticalBeam = value;
-                ExpirePreview(true);
-                ExpireSolution(true);
-            });
-            item.Checked = _analyticalBeam == value;
-            return item;
-        }
-
-        private ToolStripMenuItem CreateAnalyticalColumnMenuItem(string label, int value)
-        {
-            var item = new ToolStripMenuItem(label, null, (s, e) =>
-            {
-                _analyticalColumn = value;
-                ExpirePreview(true);
-                ExpireSolution(true);
-            });
-            item.Checked = _analyticalColumn == value;
+            item.Checked = getter() == value;
             return item;
         }
 
@@ -283,35 +244,43 @@ namespace Menegroth.GH.Components
                 _showColumns = reader.GetBoolean("ShowColumns");
             if (reader.ItemExists("ShowFoundations"))
                 _showFoundations = reader.GetBoolean("ShowFoundations");
+
+            // Deflection + Mode: prefer current keys, fall back to legacy encoding
             if (reader.ItemExists("Deflection"))
-            {
                 _deflection = reader.GetInt32("Deflection");
-                if (reader.ItemExists("Mode"))
-                    _mode = reader.GetInt32("Mode");
-            }
             else if (reader.ItemExists("Mode"))
             {
+                // Legacy: Mode used to encode deflection (0=Global, 1=Local, 2=None)
                 int m = reader.GetInt32("Mode");
-                if (m == 2) _deflection = DEFLECTION_NONE;
-                else if (m == 1) _deflection = DEFLECTION_LOCAL;
-                else _deflection = DEFLECTION_GLOBAL;
+                _deflection = m == 2 ? DEFLECTION_NONE : m == 1 ? DEFLECTION_LOCAL : DEFLECTION_GLOBAL;
             }
-            if (reader.ItemExists("ShowVolumes"))
+
+            if (reader.ItemExists("Mode") && reader.ItemExists("Deflection"))
+                _mode = reader.GetInt32("Mode");
+            else if (reader.ItemExists("ShowVolumes"))
                 _mode = reader.GetBoolean("ShowVolumes") ? MODE_SIZED : MODE_ANALYTICAL;
+
             if (reader.ItemExists("BeamVisibilityInitialized"))
                 _beamVisibilityInitialized = reader.GetBoolean("BeamVisibilityInitialized");
             else if (reader.ItemExists("ShowBeams"))
                 _beamVisibilityInitialized = true;
+
             if (reader.ItemExists("ColorBy"))
                 _colorBy = reader.GetInt32("ColorBy");
             if (reader.ItemExists("AnalyticalSlab"))
                 _analyticalSlab = reader.GetInt32("AnalyticalSlab");
+
+            // Analytical beam/column: prefer split keys, fall back to legacy combined key
             if (reader.ItemExists("AnalyticalBeam"))
                 _analyticalBeam = reader.GetInt32("AnalyticalBeam");
             else if (reader.ItemExists("AnalyticalFrame"))
-                _analyticalBeam = _analyticalColumn = reader.GetInt32("AnalyticalFrame");
+                _analyticalBeam = reader.GetInt32("AnalyticalFrame");
+
             if (reader.ItemExists("AnalyticalColumn"))
                 _analyticalColumn = reader.GetInt32("AnalyticalColumn");
+            else if (reader.ItemExists("AnalyticalFrame"))
+                _analyticalColumn = reader.GetInt32("AnalyticalFrame");
+
             return base.Read(reader);
         }
 
@@ -436,11 +405,12 @@ namespace Menegroth.GH.Components
             double maxFrameAxial = viz["max_frame_axial"]?.ToObject<double>() ?? 0;
             double maxFrameMoment = viz["max_frame_moment"]?.ToObject<double>() ?? 0;
             double maxFrameShear = viz["max_frame_shear"]?.ToObject<double>() ?? 0;
-            double maxSlabBending = viz["max_slab_bending"]?.ToObject<double>() ?? 0;
-            double maxSlabMembrane = viz["max_slab_membrane"]?.ToObject<double>() ?? 0;
-            double maxSlabShear = viz["max_slab_shear"]?.ToObject<double>() ?? 0;
-            double maxSlabVonMises = viz["max_slab_von_mises"]?.ToObject<double>() ?? 0;
-            double maxSlabSurfaceStress = viz["max_slab_surface_stress"]?.ToObject<double>() ?? 0;
+            var slabMaxima = new SlabAnalyticalMaxima(
+                bending: viz["max_slab_bending"]?.ToObject<double>() ?? 0,
+                membrane: viz["max_slab_membrane"]?.ToObject<double>() ?? 0,
+                shear: viz["max_slab_shear"]?.ToObject<double>() ?? 0,
+                vonMises: viz["max_slab_von_mises"]?.ToObject<double>() ?? 0,
+                surfaceStress: viz["max_slab_surface_stress"]?.ToObject<double>() ?? 0);
             bool isAnalyticalSlab = effectiveColorBySlab >= COLOR_SLAB_BENDING && effectiveColorBySlab <= COLOR_SLAB_SURFACE_STRESS;
             bool isAnalyticalBeam = effectiveColorByBeam >= COLOR_FRAME_AXIAL && effectiveColorByBeam <= COLOR_FRAME_SHEAR;
             bool isAnalyticalColumn = effectiveColorByColumn >= COLOR_FRAME_AXIAL && effectiveColorByColumn <= COLOR_FRAME_SHEAR;
@@ -716,16 +686,13 @@ namespace Menegroth.GH.Components
             if (_showSlabs)
             {
                 if (isOriginalMode)
-                    BuildOriginalSlabs(viz, slabGeometry, slabColors, effectiveColorBySlab, maxDisp,
-                        maxSlabBending, maxSlabMembrane, maxSlabShear, maxSlabVonMises, maxSlabSurfaceStress);
+                    BuildOriginalSlabs(viz, slabGeometry, slabColors, effectiveColorBySlab, maxDisp, slabMaxima);
                 else if (isDeflected && finalScale > 0)
                     BuildDeflectedSlabs(viz, finalScale, showOriginal, slabGeometry, originalSlabs,
-                        slabColors, effectiveColorBySlab, maxDisp, isLocal,
-                        maxSlabBending, maxSlabMembrane, maxSlabShear, maxSlabVonMises, maxSlabSurfaceStress,
+                        slabColors, effectiveColorBySlab, maxDisp, isLocal, slabMaxima,
                         showVolumes: modeInt == MODE_SIZED);
                 else
-                    BuildSizedSlabs(viz, slabGeometry, slabColors, effectiveColorBySlab, maxDisp,
-                        maxSlabBending, maxSlabMembrane, maxSlabShear, maxSlabVonMises, maxSlabSurfaceStress,
+                    BuildSizedSlabs(viz, slabGeometry, slabColors, effectiveColorBySlab, maxDisp, slabMaxima,
                         showVolumes: modeInt == MODE_SIZED);
             }
 
@@ -833,15 +800,12 @@ namespace Menegroth.GH.Components
             if (!_useInternalPreview || Hidden)
                 return;
 
-            int n = Math.Min(_previewShadedMeshes.Count, _previewShadedColors.Count);
+            int n = Math.Min(_previewShadedMeshes.Count, _previewShadedMaterials.Count);
             for (int i = 0; i < n; i++)
             {
                 var m = _previewShadedMeshes[i];
                 if (m == null) continue;
-                var useVertexColors = i < _previewShadedUseVertexColors.Count && _previewShadedUseVertexColors[i];
-                var material = new Rhino.Display.DisplayMaterial(
-                    useVertexColors ? Color.White : _previewShadedColors[i]);
-                args.Display.DrawMeshShaded(m, material);
+                args.Display.DrawMeshShaded(m, _previewShadedMaterials[i]);
             }
         }
 
@@ -1125,25 +1089,28 @@ namespace Menegroth.GH.Components
             _previewShadedMeshes.Clear();
             _previewShadedColors.Clear();
             _previewShadedUseVertexColors.Clear();
+            _previewShadedMaterials.Clear();
 
+            // Transfer ownership directly -- source lists are freshly built
+            // in SolveInstance and never referenced again, so duplication is unnecessary.
             for (int i = 0; i < Math.Min(columnCurves.Count, columnColors.Count); i++)
             {
                 if (columnCurves[i] == null) continue;
-                _previewColumnCurves.Add(columnCurves[i].DuplicateCurve());
+                _previewColumnCurves.Add(columnCurves[i]);
                 _previewColumnColors.Add(columnColors[i]);
             }
 
             for (int i = 0; i < Math.Min(beamCurves.Count, beamColors.Count); i++)
             {
                 if (beamCurves[i] == null) continue;
-                _previewBeamCurves.Add(beamCurves[i].DuplicateCurve());
+                _previewBeamCurves.Add(beamCurves[i]);
                 _previewBeamColors.Add(beamColors[i]);
             }
 
             foreach (var c in originalCurves)
             {
                 if (c == null) continue;
-                _previewOriginalCurves.Add(c.DuplicateCurve());
+                _previewOriginalCurves.Add(c);
             }
 
             CacheShadedBreps(frameGeometry, frameGeometryColors);
@@ -1162,12 +1129,14 @@ namespace Menegroth.GH.Components
                     var meshes = Mesh.CreateFromBrep(ghBrep.Value, MeshingParameters.FastRenderMesh);
                     if (meshes != null && meshes.Length > 0)
                     {
+                        var mat = new Rhino.Display.DisplayMaterial(color);
                         foreach (var m in meshes)
                         {
                             if (m == null) continue;
-                            _previewShadedMeshes.Add(m.DuplicateMesh());
+                            _previewShadedMeshes.Add(m);
                             _previewShadedColors.Add(color);
                             _previewShadedUseVertexColors.Add(false);
+                            _previewShadedMaterials.Add(mat);
                         }
                     }
                 }
@@ -1176,16 +1145,17 @@ namespace Menegroth.GH.Components
                     var mesh = ghMesh.Value;
                     if (mesh.Vertices.Count > 0 && mesh.Faces.Count > 0)
                     {
-                        var dup = mesh.DuplicateMesh();
                         bool hasVertexColors = mesh.VertexColors.Count == mesh.Vertices.Count && mesh.VertexColors.Count > 0;
                         if (!hasVertexColors)
                         {
-                            for (int v = 0; v < dup.Vertices.Count; v++)
-                                dup.VertexColors.Add(color);
+                            for (int v = 0; v < mesh.Vertices.Count; v++)
+                                mesh.VertexColors.Add(color);
                         }
-                        _previewShadedMeshes.Add(dup);
+                        _previewShadedMeshes.Add(mesh);
                         _previewShadedColors.Add(color);
                         _previewShadedUseVertexColors.Add(hasVertexColors);
+                        _previewShadedMaterials.Add(new Rhino.Display.DisplayMaterial(
+                            hasVertexColors ? Color.White : color));
                     }
                 }
             }
@@ -1207,8 +1177,7 @@ namespace Menegroth.GH.Components
 
         private static void BuildSizedSlabs(JToken viz, List<IGH_GeometricGoo> output,
             List<Color> colors, int colorBy, double maxDisp,
-            double maxSlabBending = 0, double maxSlabMembrane = 0, double maxSlabShear = 0,
-            double maxSlabVonMises = 0, double maxSlabSurfaceStress = 0, bool showVolumes = true)
+            SlabAnalyticalMaxima maxima, bool showVolumes = true)
         {
             var slabs = viz["sized_slabs"] as JArray ?? new JArray();
             var deflectedMeshes = viz["deflected_slab_meshes"] as JArray ?? new JArray();
@@ -1235,8 +1204,7 @@ namespace Menegroth.GH.Components
                 bool isVault = slab["is_vault"]?.ToObject<bool>() ?? false;
                 if (isVault && TryBuildVaultBrep(slab, thickness, output))
                 {
-                    AppendSlabColor(colors, analyticalSource, colorBy, maxDisp, "vertex_displacements",
-                        maxSlabBending, maxSlabMembrane, maxSlabShear, maxSlabVonMises, maxSlabSurfaceStress);
+                    AppendSlabColor(colors, analyticalSource, colorBy, maxDisp, "vertex_displacements", maxima);
                     continue;
                 }
                 
@@ -1244,8 +1212,7 @@ namespace Menegroth.GH.Components
                 if (analyticalMesh != null &&
                     TryBuildCurvedSizedSlabFromMesh(analyticalMesh, output))
                 {
-                    AppendSlabColor(colors, analyticalSource, colorBy, maxDisp, "vertex_displacements",
-                        maxSlabBending, maxSlabMembrane, maxSlabShear, maxSlabVonMises, maxSlabSurfaceStress);
+                    AppendSlabColor(colors, analyticalSource, colorBy, maxDisp, "vertex_displacements", maxima);
                     continue;
                 }
 
@@ -1276,13 +1243,11 @@ namespace Menegroth.GH.Components
                             output.Add(new GH_Brep(loft[0]));
                         }
 
-                        AppendSlabColor(colors, analyticalSource, colorBy, maxDisp, "vertex_displacements",
-                            maxSlabBending, maxSlabMembrane, maxSlabShear, maxSlabVonMises, maxSlabSurfaceStress);
+                        AppendSlabColor(colors, analyticalSource, colorBy, maxDisp, "vertex_displacements", maxima);
                     }
 
                     AppendDropPanelSizedGeometry(slab, zTop, thickness, output, colors, analyticalSource,
-                        colorBy, maxDisp, maxSlabBending, maxSlabMembrane, maxSlabShear,
-                        maxSlabVonMises, maxSlabSurfaceStress);
+                        colorBy, maxDisp, maxima);
                 }
                 else
                 {
@@ -1297,8 +1262,7 @@ namespace Menegroth.GH.Components
                         mesh.Normals.ComputeNormals();
                         mesh.Compact();
                         output.Add(new GH_Mesh(mesh));
-                        AppendSlabColor(colors, analyticalSource, colorBy, maxDisp, "vertex_displacements",
-                            maxSlabBending, maxSlabMembrane, maxSlabShear, maxSlabVonMises, maxSlabSurfaceStress);
+                        AppendSlabColor(colors, analyticalSource, colorBy, maxDisp, "vertex_displacements", maxima);
                     }
 
                     // Omit solid drop panels in analytical mode; slab mesh suffices for coloring
@@ -1470,8 +1434,7 @@ namespace Menegroth.GH.Components
         private static void BuildDeflectedSlabs(JToken viz, double scale, bool showOriginal,
             List<IGH_GeometricGoo> output, List<IGH_GeometricGoo> origOutput,
             List<Color> colors, int colorBy, double maxDisp, bool isLocal,
-            double maxSlabBending = 0, double maxSlabMembrane = 0, double maxSlabShear = 0,
-            double maxSlabVonMises = 0, double maxSlabSurfaceStress = 0, bool showVolumes = false)
+            SlabAnalyticalMaxima maxima, bool showVolumes = false)
         {
             bool isAnalyticalSlab = colorBy >= COLOR_SLAB_BENDING && colorBy <= COLOR_SLAB_SURFACE_STRESS;
             var meshes = viz["deflected_slab_meshes"] as JArray ?? new JArray();
@@ -1489,8 +1452,7 @@ namespace Menegroth.GH.Components
                 double analyticalMax = 0;
                 bool analyticalDiverging = false;
                 if (isAnalyticalSlab)
-                    ResolveSlabAnalyticalData(m, colorBy, maxSlabBending, maxSlabMembrane,
-                        maxSlabShear, maxSlabVonMises, maxSlabSurfaceStress,
+                    ResolveSlabAnalyticalData(m, colorBy, maxima,
                         out faceAnalytical, out analyticalMax, out analyticalDiverging);
 
                 var rhinoMesh = new Mesh();
@@ -1589,8 +1551,7 @@ namespace Menegroth.GH.Components
                     string dispField = isLocal && dispsLocal.Length > 0
                         ? "vertex_displacements_local"
                         : "vertex_displacements";
-                    AppendSlabColor(colors, m, colorBy, maxDisp, dispField,
-                        maxSlabBending, maxSlabMembrane, maxSlabShear, maxSlabVonMises, maxSlabSurfaceStress);
+                    AppendSlabColor(colors, m, colorBy, maxDisp, dispField, maxima);
                 }
             }
         }
@@ -1625,31 +1586,32 @@ namespace Menegroth.GH.Components
             combined.Append(topMesh);
             combined.Append(bottomMesh);
 
-            // GetNakedEdges returns Polyline[] of 3D points; map to vertex indices for top/bottom correspondence
+            // GetNakedEdges returns Polyline[] of 3D points; map to vertex indices
+            // via PointCloud spatial index (O(log V) per query instead of O(V)).
             var boundary = topMesh.GetNakedEdges();
             if (boundary != null && boundary.Length > 0)
             {
                 const double tol = 1e-6;
+                var cloud = new Rhino.Geometry.PointCloud(
+                    Enumerable.Range(0, topMesh.Vertices.Count)
+                              .Select(i => new Point3d(topMesh.Vertices[i])));
+                int nV = topMesh.Vertices.Count;
+
                 foreach (var edge in boundary)
                 {
                     if (edge == null || edge.Count < 2) continue;
-                    int nV = topMesh.Vertices.Count;
                     for (int i = 0; i < edge.Count - 1; i++)
                     {
-                        var pt1 = edge[i];
-                        var pt2 = edge[i + 1];
-                        int i0 = FindClosestVertexIndex(topMesh, pt1, tol);
-                        int i1 = FindClosestVertexIndex(topMesh, pt2, tol);
+                        int i0 = cloud.ClosestPoint(edge[i]);
+                        int i1 = cloud.ClosestPoint(edge[i + 1]);
                         if (i0 < 0 || i1 < 0 || i0 >= nV || i1 >= nV) continue;
-                        var p1 = topMesh.Vertices[i0];
-                        var p2 = topMesh.Vertices[i1];
-                        var p3 = bottomMesh.Vertices[i1];
-                        var p4 = bottomMesh.Vertices[i0];
+                        if (new Point3d(topMesh.Vertices[i0]).DistanceToSquared(edge[i]) > tol * tol) continue;
+                        if (new Point3d(topMesh.Vertices[i1]).DistanceToSquared(edge[i + 1]) > tol * tol) continue;
                         int baseIdx = combined.Vertices.Count;
-                        combined.Vertices.Add(p1);
-                        combined.Vertices.Add(p2);
-                        combined.Vertices.Add(p3);
-                        combined.Vertices.Add(p4);
+                        combined.Vertices.Add(topMesh.Vertices[i0]);
+                        combined.Vertices.Add(topMesh.Vertices[i1]);
+                        combined.Vertices.Add(bottomMesh.Vertices[i1]);
+                        combined.Vertices.Add(bottomMesh.Vertices[i0]);
                         combined.Faces.AddFace(baseIdx, baseIdx + 1, baseIdx + 2, baseIdx + 3);
                     }
                 }
@@ -1662,46 +1624,26 @@ namespace Menegroth.GH.Components
         }
 
         /// <summary>
-        /// Find the mesh vertex index closest to the given point.
-        /// Returns -1 if the closest vertex is farther than tolerance.
-        /// </summary>
-        private static int FindClosestVertexIndex(Mesh mesh, Point3d pt, double tol)
-        {
-            int best = -1;
-            double bestSq = double.PositiveInfinity;
-            for (int i = 0; i < mesh.Vertices.Count; i++)
-            {
-                double dSq = new Point3d(mesh.Vertices[i]).DistanceToSquared(pt);
-                if (dSq < bestSq)
-                {
-                    bestSq = dSq;
-                    best = i;
-                }
-            }
-            return bestSq <= tol * tol ? best : -1;
-        }
-
-        /// <summary>
         /// Resolve the correct per-face analytical array, global max, and whether the
         /// quantity uses a diverging color scheme (signed) vs sequential (always ≥ 0).
         /// </summary>
         private static void ResolveSlabAnalyticalData(JToken m, int colorBy,
-            double maxBending, double maxMembrane, double maxShear, double maxVM, double maxSurf,
+            SlabAnalyticalMaxima maxima,
             out double[] faceValues, out double maxValue, out bool isDiverging)
         {
             string field;
             switch (colorBy)
             {
                 case COLOR_SLAB_BENDING:
-                    field = "face_bending_moment"; maxValue = maxBending; isDiverging = true; break;
+                    field = "face_bending_moment"; maxValue = maxima.Bending; isDiverging = true; break;
                 case COLOR_SLAB_MEMBRANE:
-                    field = "face_membrane_force"; maxValue = maxMembrane; isDiverging = true; break;
+                    field = "face_membrane_force"; maxValue = maxima.Membrane; isDiverging = true; break;
                 case COLOR_SLAB_SHEAR:
-                    field = "face_shear_force"; maxValue = maxShear; isDiverging = false; break;
+                    field = "face_shear_force"; maxValue = maxima.Shear; isDiverging = false; break;
                 case COLOR_SLAB_VON_MISES:
-                    field = "face_von_mises"; maxValue = maxVM; isDiverging = false; break;
+                    field = "face_von_mises"; maxValue = maxima.VonMises; isDiverging = false; break;
                 case COLOR_SLAB_SURFACE_STRESS:
-                    field = "face_surface_stress"; maxValue = maxSurf; isDiverging = true; break;
+                    field = "face_surface_stress"; maxValue = maxima.SurfaceStress; isDiverging = true; break;
                 default:
                     faceValues = null; maxValue = 0; isDiverging = false; return;
             }
@@ -1753,8 +1695,7 @@ namespace Menegroth.GH.Components
 
         private static void AppendDropPanelSizedGeometry(JToken slab, double zTop, double slabThickness,
             List<IGH_GeometricGoo> output, List<Color> colors, JToken analyticalSource, int colorBy,
-            double maxDisp, double maxSlabBending, double maxSlabMembrane, double maxSlabShear,
-            double maxSlabVonMises, double maxSlabSurfaceStress)
+            double maxDisp, SlabAnalyticalMaxima maxima)
         {
             var dropPanels = slab["drop_panels"] as JArray ?? new JArray();
             foreach (var dp in dropPanels)
@@ -1782,8 +1723,7 @@ namespace Menegroth.GH.Components
                 if (brep != null)
                 {
                     output.Add(new GH_Brep(brep));
-                    AppendSlabColor(colors, analyticalSource, colorBy, maxDisp, "vertex_displacements",
-                        maxSlabBending, maxSlabMembrane, maxSlabShear, maxSlabVonMises, maxSlabSurfaceStress);
+                    AppendSlabColor(colors, analyticalSource, colorBy, maxDisp, "vertex_displacements", maxima);
                 }
             }
         }
@@ -1927,16 +1867,13 @@ namespace Menegroth.GH.Components
         /// by utilization/deflection without drawing displaced geometry.
         /// </summary>
         private static void BuildOriginalSlabs(JToken viz, List<IGH_GeometricGoo> output,
-            List<Color> colors, int colorBy, double maxDisp,
-            double maxSlabBending = 0, double maxSlabMembrane = 0, double maxSlabShear = 0,
-            double maxSlabVonMises = 0, double maxSlabSurfaceStress = 0)
+            List<Color> colors, int colorBy, double maxDisp, SlabAnalyticalMaxima maxima)
         {
             bool isAnalyticalSlab = colorBy >= COLOR_SLAB_BENDING && colorBy <= COLOR_SLAB_SURFACE_STRESS;
             var meshes = viz["deflected_slab_meshes"] as JArray ?? new JArray();
             if (meshes.Count == 0)
             {
-                BuildSizedSlabs(viz, output, colors, colorBy, maxDisp,
-                    maxSlabBending, maxSlabMembrane, maxSlabShear, maxSlabVonMises, maxSlabSurfaceStress);
+                BuildSizedSlabs(viz, output, colors, colorBy, maxDisp, maxima);
                 return;
             }
 
@@ -1950,8 +1887,7 @@ namespace Menegroth.GH.Components
                 double analyticalMax = 0;
                 bool analyticalDiverging = false;
                 if (isAnalyticalSlab)
-                    ResolveSlabAnalyticalData(m, colorBy, maxSlabBending, maxSlabMembrane,
-                        maxSlabShear, maxSlabVonMises, maxSlabSurfaceStress,
+                    ResolveSlabAnalyticalData(m, colorBy, maxima,
                         out faceAnalytical, out analyticalMax, out analyticalDiverging);
 
                 var rhinoMesh = new Mesh();
@@ -2007,8 +1943,7 @@ namespace Menegroth.GH.Components
                     rhinoMesh.Normals.ComputeNormals();
                     rhinoMesh.Compact();
                     output.Add(new GH_Mesh(rhinoMesh));
-                    AppendSlabColor(colors, m, colorBy, maxDisp, "vertex_displacements",
-                        maxSlabBending, maxSlabMembrane, maxSlabShear, maxSlabVonMises, maxSlabSurfaceStress);
+                    AppendSlabColor(colors, m, colorBy, maxDisp, "vertex_displacements", maxima);
                 }
             }
         }
@@ -2072,9 +2007,7 @@ namespace Menegroth.GH.Components
         /// Vaults use earthen material color; flat slabs use concrete color.
         /// </summary>
         private static void AppendSlabColor(List<Color> colors, JToken element,
-            int colorBy, double maxDisp, string displacementField = "vertex_displacements",
-            double maxSlabBending = 0, double maxSlabMembrane = 0, double maxSlabShear = 0,
-            double maxSlabVonMises = 0, double maxSlabSurfaceStress = 0)
+            int colorBy, double maxDisp, string displacementField, SlabAnalyticalMaxima maxima)
         {
             bool isVault = element["is_vault"]?.ToObject<bool>() ?? false;
             bool isAnalyticalSlab = colorBy >= COLOR_SLAB_BENDING && colorBy <= COLOR_SLAB_SURFACE_STRESS;
@@ -2113,8 +2046,7 @@ namespace Menegroth.GH.Components
             }
             else if (isAnalyticalSlab)
             {
-                ResolveSlabAnalyticalData(element, colorBy, maxSlabBending, maxSlabMembrane,
-                    maxSlabShear, maxSlabVonMises, maxSlabSurfaceStress,
+                ResolveSlabAnalyticalData(element, colorBy, maxima,
                     out var faceValues, out var maxVal, out var diverging);
                 double repValue = 0;
                 if (faceValues != null && faceValues.Length > 0)

@@ -309,11 +309,13 @@ namespace Menegroth.GH.Components
                 idx = 1;
             }
 
-            // Read interval inputs based on element type
+            // Read interval inputs; guard uses idx so the check is correct
+            // regardless of whether the MIP time-limit input is present.
+            int remaining = Params.Input.Count - idx;
             switch (_elementType)
             {
                 case "steel_w":
-                    if (Params.Input.Count >= 4)
+                    if (remaining >= 4)
                     {
                         var d = new Rhino.Geometry.Interval(8, 36);
                         var bf = new Rhino.Geometry.Interval(4, 18);
@@ -331,7 +333,7 @@ namespace Menegroth.GH.Components
                     break;
 
                 case "steel_hss":
-                    if (Params.Input.Count >= 2)
+                    if (remaining >= 2)
                     {
                         var od = new Rhino.Geometry.Interval(4, 20);
                         var t = new Rhino.Geometry.Interval(0.125, 0.625);
@@ -344,7 +346,7 @@ namespace Menegroth.GH.Components
 
                 case "rc_rect":
                 case "rc_tbeam":
-                    if (Params.Input.Count >= 2)
+                    if (remaining >= 2)
                     {
                         var b = new Rhino.Geometry.Interval(12, 24);
                         var h = new Rhino.Geometry.Interval(12, 48);
@@ -356,7 +358,7 @@ namespace Menegroth.GH.Components
                     break;
 
                 case "rc_circular":
-                    if (Params.Input.Count >= 1)
+                    if (remaining >= 1)
                     {
                         var d = new Rhino.Geometry.Interval(12, 48);
                         DA.GetData(idx++, ref d);
@@ -365,7 +367,7 @@ namespace Menegroth.GH.Components
                     break;
 
                 case "pixelframe":
-                    if (Params.Input.Count >= 1)
+                    if (remaining >= 1)
                     {
                         var fc = new Rhino.Geometry.Interval(4, 8);
                         DA.GetData(idx++, ref fc);

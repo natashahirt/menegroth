@@ -1,6 +1,8 @@
 using System.Collections.Generic;
 using System.Linq;
+using Menegroth.GH.Components;
 using Menegroth.GH.Types;
+using V = Menegroth.GH.Components.DesignParams.ValidValues;
 
 namespace Menegroth.GH.Helpers
 {
@@ -8,37 +10,15 @@ namespace Menegroth.GH.Helpers
     /// Client-side validation for geometry and design parameters.
     /// Mirrors StructuralSynthesizer/src/api/validation.jl so that obvious
     /// errors are caught instantly without a network round-trip.
+    ///
+    /// String-based valid-value sets are derived from the Choice arrays in
+    /// <see cref="DesignParams.ValidValues"/> so adding a new option in one
+    /// place automatically makes it valid here.
     /// </summary>
     public static class DesignRunValidator
     {
-        private static readonly HashSet<string> ValidFloorTypes =
-            new HashSet<string> { "flat_plate", "flat_slab", "one_way", "vault" };
-        private static readonly HashSet<string> ValidColumnTypes =
-            new HashSet<string> { "rc_rect", "rc_circular", "steel_w", "steel_hss", "steel_pipe" };
-        private static readonly HashSet<string> ValidSteelColumnCatalogs =
-            new HashSet<string> { "compact_only", "preferred", "all" };
-        private static readonly HashSet<string> ValidRCRectColumnCatalogs =
-            new HashSet<string> { "standard", "square", "rectangular", "low_capacity", "high_capacity", "all" };
-        private static readonly HashSet<string> ValidRCCircularColumnCatalogs =
-            new HashSet<string> { "standard", "low_capacity", "high_capacity", "all" };
-        private static readonly HashSet<string> ValidBeamTypes =
-            new HashSet<string> { "steel_w", "steel_hss", "rc_rect", "rc_tbeam" };
-        private static readonly HashSet<string> ValidBeamCatalogs =
-            new HashSet<string> { "standard", "small", "large", "xlarge", "all", "custom" };
-        private static readonly HashSet<string> ValidConcretes =
-            new HashSet<string> { "NWC_3000", "NWC_4000", "NWC_5000", "NWC_6000", "Earthen_500", "Earthen_1000", "Earthen_2000", "Earthen_4000", "Earthen_8000" };
-        private static readonly HashSet<string> ValidRebars =
-            new HashSet<string> { "Rebar_40", "Rebar_60", "Rebar_75", "Rebar_80" };
-        private static readonly HashSet<string> ValidSteels =
-            new HashSet<string> { "A992" };
-        private static readonly HashSet<string> ValidSoils =
-            new HashSet<string> { "loose_sand", "medium_sand", "dense_sand", "soft_clay", "stiff_clay", "hard_clay" };
         private static readonly HashSet<double> ValidFireRatings =
             new HashSet<double> { 0, 1, 1.5, 2, 3, 4 };
-        private static readonly HashSet<string> ValidOptimize =
-            new HashSet<string> { "weight", "carbon", "cost" };
-        private static readonly HashSet<string> ValidUnitSystems =
-            new HashSet<string> { "imperial", "metric" };
 
         /// <summary>
         /// Validate geometry and design parameters. Returns a list of error messages;
@@ -127,49 +107,57 @@ namespace Menegroth.GH.Helpers
                 if (si < 1 || si > nVerts) errors.Add($"Support {i + 1}: vertex index {si} out of range [1, {nVerts}].");
             }
 
-            // Parameters
-            if (!ValidFloorTypes.Contains(prms.FloorType))
-                errors.Add($"Invalid floor type \"{prms.FloorType}\". Options: {string.Join(", ", ValidFloorTypes)}");
-            if (!ValidColumnTypes.Contains(prms.ColumnType))
-                errors.Add($"Invalid column type \"{prms.ColumnType}\". Options: {string.Join(", ", ValidColumnTypes)}");
-            if (prms.ColumnType == "steel_w" || prms.ColumnType == "steel_hss")
+            // Parameters -- valid-value sets come from DesignParams.ValidValues (single source of truth)
+            if (!V.FloorTypes.Contains(prms.FloorType))
+                errors.Add($"Invalid floor type \"{prms.FloorType}\". Options: {string.Join(", ", V.FloorTypes)}");
+            if (!V.ColumnTypes.Contains(prms.ColumnType))
+                errors.Add($"Invalid column type \"{prms.ColumnType}\". Options: {string.Join(", ", V.ColumnTypes)}");
+            switch (prms.ColumnType)
             {
-                var steelCat = prms.ColumnCatalog ?? "preferred";
-                if (!ValidSteelColumnCatalogs.Contains(steelCat))
-                    errors.Add($"Invalid column_catalog for steel \"{prms.ColumnCatalog}\". Options: {string.Join(", ", ValidSteelColumnCatalogs)}");
+                case "steel_w":
+                case "steel_hss":
+                {
+                    var steelCat = prms.ColumnCatalog ?? "preferred";
+                    if (!V.SteelColumnCatalogs.Contains(steelCat))
+                        errors.Add($"Invalid column_catalog for steel \"{prms.ColumnCatalog}\". Options: {string.Join(", ", V.SteelColumnCatalogs)}");
+                    break;
+                }
+                case "rc_rect":
+                {
+                    var rcCat = prms.ColumnCatalog ?? "standard";
+                    if (!V.RCRectColumnCatalogs.Contains(rcCat))
+                        errors.Add($"Invalid column_catalog for RC rectangular \"{prms.ColumnCatalog}\". Options: {string.Join(", ", V.RCRectColumnCatalogs)}");
+                    break;
+                }
+                case "rc_circular":
+                {
+                    var rcCat = prms.ColumnCatalog ?? "standard";
+                    if (!V.RCCircularColumnCatalogs.Contains(rcCat))
+                        errors.Add($"Invalid column_catalog for RC circular \"{prms.ColumnCatalog}\". Options: {string.Join(", ", V.RCCircularColumnCatalogs)}");
+                    break;
+                }
+                // steel_pipe, pixelframe: no catalog validation needed
             }
-            else if (prms.ColumnType == "rc_rect")
-            {
-                var rcCat = prms.ColumnCatalog ?? "standard";
-                if (!ValidRCRectColumnCatalogs.Contains(rcCat))
-                    errors.Add($"Invalid column_catalog for RC rectangular \"{prms.ColumnCatalog}\". Options: {string.Join(", ", ValidRCRectColumnCatalogs)}");
-            }
-            else if (prms.ColumnType == "rc_circular")
-            {
-                var rcCat = prms.ColumnCatalog ?? "standard";
-                if (!ValidRCCircularColumnCatalogs.Contains(rcCat))
-                    errors.Add($"Invalid column_catalog for RC circular \"{prms.ColumnCatalog}\". Options: {string.Join(", ", ValidRCCircularColumnCatalogs)}");
-            }
-            if (!ValidBeamTypes.Contains(prms.BeamType))
-                errors.Add($"Invalid beam type \"{prms.BeamType}\". Options: {string.Join(", ", ValidBeamTypes)}");
-            if (!ValidConcretes.Contains(prms.Concrete))
-                errors.Add($"Unknown concrete \"{prms.Concrete}\". Options: {string.Join(", ", ValidConcretes)}");
-            if (!ValidRebars.Contains(prms.Rebar))
-                errors.Add($"Unknown rebar \"{prms.Rebar}\". Options: {string.Join(", ", ValidRebars)}");
-            if (!ValidSteels.Contains(prms.Steel))
-                errors.Add($"Unknown steel \"{prms.Steel}\". Options: {string.Join(", ", ValidSteels)}");
+            if (!V.BeamTypes.Contains(prms.BeamType))
+                errors.Add($"Invalid beam type \"{prms.BeamType}\". Options: {string.Join(", ", V.BeamTypes)}");
+            if (!V.Concretes.Contains(prms.Concrete))
+                errors.Add($"Unknown concrete \"{prms.Concrete}\". Options: {string.Join(", ", V.Concretes)}");
+            if (!V.Rebars.Contains(prms.Rebar))
+                errors.Add($"Unknown rebar \"{prms.Rebar}\". Options: {string.Join(", ", V.Rebars)}");
+            if (!V.Steels.Contains(prms.Steel))
+                errors.Add($"Unknown steel \"{prms.Steel}\". Options: {string.Join(", ", V.Steels)}");
             if (!ValidFireRatings.Contains(prms.FireRating))
                 errors.Add($"Invalid fire rating {prms.FireRating}. Options: 0, 1, 1.5, 2, 3, 4");
-            if (!ValidOptimize.Contains(prms.OptimizeFor))
+            if (!V.Objectives.Contains(prms.OptimizeFor))
                 errors.Add($"Invalid optimize_for \"{prms.OptimizeFor}\". Options: weight, carbon, cost");
-            if (!ValidUnitSystems.Contains(prms.UnitSystem?.ToLowerInvariant() ?? ""))
+            if (!V.UnitSystems.Contains(prms.UnitSystem?.ToLowerInvariant() ?? ""))
                 errors.Add($"Invalid unit system \"{prms.UnitSystem}\". Options: imperial, metric");
             if (prms.VaultLambda.HasValue && prms.VaultLambda.Value <= 0)
                 errors.Add($"Invalid vault_lambda {prms.VaultLambda.Value}. Must be > 0.");
 
             // Foundation soil (only if foundations requested)
-            if (prms.SizeFoundations && !ValidSoils.Contains(prms.FoundationSoil))
-                errors.Add($"Unknown foundation soil \"{prms.FoundationSoil}\". Options: {string.Join(", ", ValidSoils)}");
+            if (prms.SizeFoundations && !V.SoilTypes.Contains(prms.FoundationSoil))
+                errors.Add($"Unknown foundation soil \"{prms.FoundationSoil}\". Options: {string.Join(", ", V.SoilTypes)}");
 
             return errors;
         }

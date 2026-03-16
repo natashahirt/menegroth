@@ -775,12 +775,12 @@ namespace Menegroth.GH.Components
 
             foreach (var goo in allOverrides)
             {
-                if (TryGetElementParams(goo, out var elem))
+                if (TryUnwrapGoo<ElementParamsData>(goo, out var elem))
                 {
                     elem.ApplyTo(target);
                     continue;
                 }
-                if (TryGetVaultParams(goo, out var vault))
+                if (TryUnwrapGoo<VaultParamsData>(goo, out var vault))
                 {
                     if (vault.Lambda.HasValue && vault.Lambda.Value <= 0.0)
                     {
@@ -794,7 +794,7 @@ namespace Menegroth.GH.Components
                         vault.ApplyTo(target);
                     continue;
                 }
-                if (TryGetFoundationParams(goo, out var fdn))
+                if (TryUnwrapGoo<FoundationParamsData>(goo, out var fdn))
                 {
                     fdn.ApplyTo(target);
                     continue;
@@ -802,60 +802,24 @@ namespace Menegroth.GH.Components
             }
         }
 
-        private static bool TryGetElementParams(IGH_Goo goo, out ElementParamsData elem)
+        /// <summary>
+        /// Unwrap a value of type <typeparamref name="T"/> from a Goo wrapper.
+        /// Supports both typed Goo (GH_Goo&lt;T&gt;) and GH_ObjectWrapper.
+        /// </summary>
+        private static bool TryUnwrapGoo<T>(IGH_Goo goo, out T value) where T : class
         {
-            elem = null;
+            value = null;
             if (goo == null) return false;
 
-            if (goo is ElementParamsDataGoo ghElem && ghElem.Value != null)
+            if (goo is GH_Goo<T> typed && typed.Value != null)
             {
-                elem = ghElem.Value;
+                value = typed.Value;
                 return true;
             }
 
-            if (goo is Grasshopper.Kernel.Types.GH_ObjectWrapper wrapper && wrapper.Value is ElementParamsData wrappedElem)
+            if (goo is Grasshopper.Kernel.Types.GH_ObjectWrapper wrapper && wrapper.Value is T wrapped)
             {
-                elem = wrappedElem;
-                return true;
-            }
-
-            return false;
-        }
-
-        private static bool TryGetVaultParams(IGH_Goo goo, out VaultParamsData vault)
-        {
-            vault = null;
-            if (goo == null) return false;
-
-            if (goo is VaultParamsDataGoo ghVault && ghVault.Value != null)
-            {
-                vault = ghVault.Value;
-                return true;
-            }
-
-            if (goo is Grasshopper.Kernel.Types.GH_ObjectWrapper wrapper && wrapper.Value is VaultParamsData wrappedVault)
-            {
-                vault = wrappedVault;
-                return true;
-            }
-
-            return false;
-        }
-
-        private static bool TryGetFoundationParams(IGH_Goo goo, out FoundationParamsData fdn)
-        {
-            fdn = null;
-            if (goo == null) return false;
-
-            if (goo is FoundationParamsDataGoo ghFdn && ghFdn.Value != null)
-            {
-                fdn = ghFdn.Value;
-                return true;
-            }
-
-            if (goo is Grasshopper.Kernel.Types.GH_ObjectWrapper wrapper && wrapper.Value is FoundationParamsData wrappedFdn)
-            {
-                fdn = wrappedFdn;
+                value = wrapped;
                 return true;
             }
 
@@ -923,12 +887,34 @@ namespace Menegroth.GH.Components
             public Choice(string label, string value) { Label = label; Value = value; }
         }
 
+        /// <summary>
+        /// Valid value sets derived from the Choice arrays -- single source of truth
+        /// for both the UI menus and the validator.
+        /// </summary>
+        internal static class ValidValues
+        {
+            public static readonly HashSet<string> FloorTypes = ToSet(DesignParams.FloorTypes);
+            public static readonly HashSet<string> ColumnTypes = ToSet(DesignParams.ColumnTypes);
+            public static readonly HashSet<string> BeamTypes = ToSet(DesignParams.BeamTypes);
+            public static readonly HashSet<string> SteelColumnCatalogs = ToSet(DesignParams.SteelColumnCatalogs);
+            public static readonly HashSet<string> RCRectColumnCatalogs = ToSet(DesignParams.RCRectColumnCatalogs);
+            public static readonly HashSet<string> RCCircularColumnCatalogs = ToSet(DesignParams.RCCircularColumnCatalogs);
+            public static readonly HashSet<string> BeamCatalogs = ToSet(DesignParams.BeamCatalogs);
+            public static readonly HashSet<string> Concretes = ToSet(DesignParams.Concretes);
+            public static readonly HashSet<string> Rebars = ToSet(DesignParams.Rebars);
+            public static readonly HashSet<string> Steels = ToSet(DesignParams.Steels);
+            public static readonly HashSet<string> Objectives = ToSet(DesignParams.Objectives);
+            public static readonly HashSet<string> SoilTypes = ToSet(DesignParams.SoilTypes);
+            public static readonly HashSet<string> UnitSystems = ToSet(DesignParams.UnitSystems);
+
+            private static HashSet<string> ToSet(Choice[] choices) =>
+                new HashSet<string>(choices.Select(c => c.Value));
+        }
+
         private class ChoiceTag
         {
             public string Field { get; set; } = "";
             public string Value { get; set; } = "";
-            /// <summary>When set with Field "Column Type", also sets column catalog (rc_rect, rc_circular, steel_hss, steel_w).</summary>
-            public string? ColumnCatalog { get; set; }
         }
     }
 }

@@ -147,7 +147,18 @@ function _build_or_update_fea!(
         end
         # else: element_data already has moments from the qu solve
     else
-        cache.drop_panel = drop_panel  # may have changed between iterations
+        # Mesh topology depends on drop_panel (flat plate vs flat slab). If it changed,
+        # we must rebuild; the update path cannot add/remove drop panel patches.
+        if drop_panel != cache.drop_panel
+            cache.initialized = false
+            empty!(cache.element_data)
+            empty!(cache.cell_tri_indices)
+            return _build_or_update_fea!(cache, struc, slab, columns, h, Ecs, ν_concrete, qu, Lc;
+                Ecc=Ecc, target_edge=target_edge, verbose=verbose, drop_panel=drop_panel,
+                col_I_factor=col_I_factor, patch_stiffness_factor=patch_stiffness_factor,
+                qD=qD, qL=qL)
+        end
+        cache.drop_panel = drop_panel  # may have changed between iterations (same topology)
         if split_dl
             # Update section/stubs (use qu for the initial update), then D/L split
             _update_and_resolve!(cache, h, Ecs, ν_concrete, qu, columns, Lc;

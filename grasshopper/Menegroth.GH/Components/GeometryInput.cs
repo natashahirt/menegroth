@@ -189,11 +189,18 @@ namespace Menegroth.GH.Components
 
             // ─── Vertex extraction with deduplication ────────────────────
             const double TOL = 1e-6;
-            var vertexMap = new Dictionary<string, int>();
+            var vertexMap = new Dictionary<(long, long, long), int>();
+
+            static (long, long, long) QuantizePoint(Point3d pt)
+            {
+                return ((long)Math.Round(pt.X * 1e6),
+                        (long)Math.Round(pt.Y * 1e6),
+                        (long)Math.Round(pt.Z * 1e6));
+            }
 
             int GetOrAddVertex(Point3d pt)
             {
-                var key = $"{Math.Round(pt.X, 6)}_{Math.Round(pt.Y, 6)}_{Math.Round(pt.Z, 6)}";
+                var key = QuantizePoint(pt);
                 if (vertexMap.TryGetValue(key, out int idx))
                     return idx;
                 geo.Vertices.Add(new[] { pt.X, pt.Y, pt.Z });
@@ -419,47 +426,96 @@ namespace Menegroth.GH.Components
             return Math.Sqrt(dx * dx + dy * dy + dz * dz);
         }
 
-        // ─── Auto-shatter helper ─────────────────────────────────────────
+        private static (long, long, long) QuantizePoint(Point3d pt)
+        {
+            return ((long)Math.Round(pt.X * 1e6),
+                    (long)Math.Round(pt.Y * 1e6),
+                    (long)Math.Round(pt.Z * 1e6));
+        }
+
+        /// <summary>
+        /// For each line, find any intermediate vertices that lie on the segment
+        /// (within tolerance) and split the edge accordingly. Uses a spatial hash
+        /// grid so only nearby vertices are tested per line (O(L*k) instead of O(L*V)).
+        /// </summary>
         private static void ShatterAndAdd(
             List<Line> lines,
             List<int[]> edgeList,
             BuildingGeometry geo,
-            Dictionary<string, int> vertexMap,
+            Dictionary<(long, long, long), int> vertexMap,
             double tol)
         {
+            if (geo.Vertices.Count == 0 || lines.Count == 0) return;
+
+            // Build spatial hash grid: cell size based on average edge length
+            double totalLen = 0;
+            foreach (var l in lines) totalLen += l.Length;
+            double cellSize = Math.Max(tol * 10, totalLen / Math.Max(lines.Count, 1));
+
+            var grid = new Dictionary<(long, long, long), List<int>>();
+            for (int i = 0; i < geo.Vertices.Count; i++)
+            {
+                var v = geo.Vertices[i];
+                var cell = ((long)Math.Floor(v[0] / cellSize),
+                            (long)Math.Floor(v[1] / cellSize),
+                            (long)Math.Floor(v[2] / cellSize));
+                if (!grid.TryGetValue(cell, out var bucket))
+                {
+                    bucket = new List<int>();
+                    grid[cell] = bucket;
+                }
+                bucket.Add(i);
+            }
+
             foreach (var line in lines)
             {
-                var key1 = $"{Math.Round(line.From.X, 6)}_{Math.Round(line.From.Y, 6)}_{Math.Round(line.From.Z, 6)}";
-                var key2 = $"{Math.Round(line.To.X, 6)}_{Math.Round(line.To.Y, 6)}_{Math.Round(line.To.Z, 6)}";
+                var key1 = QuantizePoint(line.From);
+                var key2 = QuantizePoint(line.To);
                 int v1 = vertexMap[key1];
                 int v2 = vertexMap[key2];
 
-                var intermediates = new List<(int idx, double t)>();
-                double segLenSq = line.From.DistanceTo(line.To);
-                segLenSq *= segLenSq;
-
-                if (segLenSq < tol * tol) continue;
+                double segLen = line.From.DistanceTo(line.To);
+                if (segLen < tol) continue;
 
                 Vector3d dir = line.To - line.From;
+                double dirLenSq = dir.X * dir.X + dir.Y * dir.Y + dir.Z * dir.Z;
 
-                for (int i = 0; i < geo.Vertices.Count; i++)
+                // Determine which grid cells the line's bounding box overlaps
+                double minX = Math.Min(line.From.X, line.To.X) - tol;
+                double maxX = Math.Max(line.From.X, line.To.X) + tol;
+                double minY = Math.Min(line.From.Y, line.To.Y) - tol;
+                double maxY = Math.Max(line.From.Y, line.To.Y) + tol;
+                double minZ = Math.Min(line.From.Z, line.To.Z) - tol;
+                double maxZ = Math.Max(line.From.Z, line.To.Z) + tol;
+                long cx0 = (long)Math.Floor(minX / cellSize);
+                long cx1 = (long)Math.Floor(maxX / cellSize);
+                long cy0 = (long)Math.Floor(minY / cellSize);
+                long cy1 = (long)Math.Floor(maxY / cellSize);
+                long cz0 = (long)Math.Floor(minZ / cellSize);
+                long cz1 = (long)Math.Floor(maxZ / cellSize);
+
+                var intermediates = new List<(int idx, double t)>();
+                for (long cx = cx0; cx <= cx1; cx++)
+                for (long cy = cy0; cy <= cy1; cy++)
+                for (long cz = cz0; cz <= cz1; cz++)
                 {
-                    int vi = i + 1; // 1-based
-                    if (vi == v1 || vi == v2) continue;
+                    if (!grid.TryGetValue((cx, cy, cz), out var bucket)) continue;
+                    foreach (int i in bucket)
+                    {
+                        int vi = i + 1; // 1-based
+                        if (vi == v1 || vi == v2) continue;
 
-                    var pt = new Point3d(geo.Vertices[i][0], geo.Vertices[i][1], geo.Vertices[i][2]);
-                    Vector3d toP = pt - line.From;
+                        var vx = geo.Vertices[i];
+                        var pt = new Point3d(vx[0], vx[1], vx[2]);
+                        Vector3d toP = pt - line.From;
+                        double t = (toP.X * dir.X + toP.Y * dir.Y + toP.Z * dir.Z) / dirLenSq;
+                        if (t <= tol || t >= 1.0 - tol) continue;
 
-                    double t = (toP.X * dir.X + toP.Y * dir.Y + toP.Z * dir.Z) /
-                               (dir.X * dir.X + dir.Y * dir.Y + dir.Z * dir.Z);
+                        Point3d closest = line.From + t * dir;
+                        if (pt.DistanceTo(closest) > tol) continue;
 
-                    if (t <= tol || t >= 1.0 - tol) continue;
-
-                    Point3d closest = line.From + t * dir;
-                    double dist = pt.DistanceTo(closest);
-                    if (dist > tol) continue;
-
-                    intermediates.Add((vi, t));
+                        intermediates.Add((vi, t));
+                    }
                 }
 
                 if (intermediates.Count == 0)

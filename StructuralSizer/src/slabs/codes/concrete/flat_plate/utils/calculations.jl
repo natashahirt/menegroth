@@ -1850,6 +1850,18 @@ function slab_self_weight_with_drop(h_slab::Length, drop::DropPanelGeometry, ρ)
 end
 
 """
+    drop_panel_concrete_volume(dp::DropPanelGeometry, a1_eff, a2_eff) -> Volume
+
+Additional concrete volume from one drop panel (the projection below slab soffit).
+`a1_eff` and `a2_eff` are the *full* plan extents after trimming to the slab boundary.
+Volume = a1_eff × a2_eff × h_drop.
+"""
+function drop_panel_concrete_volume(dp::DropPanelGeometry, a1_eff, a2_eff)
+    dp.h_drop <= zero(dp.h_drop) && return zero(a1_eff * a2_eff * dp.h_drop)
+    return a1_eff * a2_eff * dp.h_drop
+end
+
+"""
     DropSectionProperties
 
 Composite section properties at the drop panel (support) location.

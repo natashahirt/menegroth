@@ -808,101 +808,100 @@ function _get_release_symbol(el::Asap.Element{R}) where R
 end
 
 """
-    _get_slab_boundary_vertices(struc, slab) -> Vector{Int}
+    _get_slab_boundary_vertices(struc, slab)
+        -> (boundary_vis::Vector{Int}, interior_edge_vis::Vector{Tuple{Int,Int}})
 
-Get the outer boundary vertex indices for a slab spanning one or more cells.
-Returns vertices in counter-clockwise order (convex hull for multi-cell slabs).
+Ordered boundary vertex indices and interior cell-edge vertex pairs for a slab.
 
-For single-cell slabs, returns the face vertices directly.
-For multi-cell slabs, computes the convex hull of all vertices.
+Single-cell slabs: boundary = face polygon, interior edges = empty.
+Multi-cell slabs: boundary edges (shared by exactly 1 cell) are chained into a
+CCW polygon; interior edges (shared by 2+ cells) are returned as vertex pairs.
+
+Correctly handles concave slab boundaries (L-shapes, T-shapes, etc.) — does NOT
+use a convex hull.  The architecture supports future multiply-connected domains
+(slab openings) via `DT.triangulate(...; boundary_nodes=...)`.
 """
 function _get_slab_boundary_vertices(struc::BuildingStructure, slab::Slab)
     skel = struc.skeleton
-    
-    # Single cell: return face vertices directly (already in correct order)
+
     if length(slab.cell_indices) == 1
         cell = struc.cells[first(slab.cell_indices)]
-        return skel.face_vertex_indices[cell.face_idx]
+        boundary = collect(skel.face_vertex_indices[cell.face_idx])
+        return (boundary, Tuple{Int,Int}[])
     end
-    
-    # Multi-cell: collect all unique vertices and compute convex hull
+
+    # Count how many slab cells reference each skeleton edge
+    edge_count = Dict{Int, Int}()
+    for ci in slab.cell_indices
+        face_idx = struc.cells[ci].face_idx
+        for ei in skel.face_edge_indices[face_idx]
+            edge_count[ei] = get(edge_count, ei, 0) + 1
+        end
+    end
+
+    boundary_edge_vis = Tuple{Int,Int}[skel.edge_indices[ei] for (ei, c) in edge_count if c == 1]
+    interior_edge_vis = Tuple{Int,Int}[skel.edge_indices[ei] for (ei, c) in edge_count if c >= 2]
+
+    isempty(boundary_edge_vis) && error("Could not find slab boundary — all edges are shared.")
+
+    # Chain boundary edges into an ordered polygon
+    adj = Dict{Int, Vector{Int}}()
+    for (a, b) in boundary_edge_vis
+        push!(get!(adj, a, Int[]), b)
+        push!(get!(adj, b, Int[]), a)
+    end
+
+    start = boundary_edge_vis[1][1]
+    boundary = [start]
+    prev = 0
+    current = start
+    for _ in 1:length(boundary_edge_vis)
+        neighbors = adj[current]
+        next = first(n for n in neighbors if n != prev)
+        next == start && break
+        push!(boundary, next)
+        prev = current
+        current = next
+    end
+
+    # Ensure CCW orientation (Delaunay triangulator requirement)
+    _ensure_ccw_vis!(boundary, skel)
+
+    return (boundary, interior_edge_vis)
+end
+
+"""
+    _ensure_ccw_vis!(vis, skel)
+
+Reverse `vis` in-place if the polygon formed by the skeleton vertices is CW.
+Uses the signed-area (shoelace) sign test.
+"""
+function _ensure_ccw_vis!(vis::Vector{Int}, skel)
+    n = length(vis)
     vc = skel.geometry.vertex_coords
-    all_vert_indices = Set{Int}()
-    
-    for cell_idx in slab.cell_indices
-        cell = struc.cells[cell_idx]
-        for vi in skel.face_vertex_indices[cell.face_idx]
-            push!(all_vert_indices, vi)
-        end
+    signed_area = 0.0
+    for i in 1:n
+        j = mod1(i + 1, n)
+        signed_area += vc[vis[i], 1] * vc[vis[j], 2] -
+                       vc[vis[j], 1] * vc[vis[i], 2]
     end
-    
-    vert_idx_list = collect(all_vert_indices)
-    pts_2d = [(vc[vi, 1], vc[vi, 2]) for vi in vert_idx_list]
-    
-    # Compute convex hull in CCW order
-    hull_pts_2d = _convex_hull_ccw(pts_2d)
-    
-    # Map hull points back to vertex indices
-    pt_to_idx = Dict(pts_2d[i] => vert_idx_list[i] for i in eachindex(pts_2d))
-    hull_vert_indices = [pt_to_idx[pt] for pt in hull_pts_2d]
-    
-    return hull_vert_indices
-end
-
-"""
-    _convex_hull_ccw(points) -> Vector{NTuple{2, Float64}}
-
-Compute convex hull in counter-clockwise order using Graham scan.
-"""
-function _convex_hull_ccw(points::Vector{<:NTuple{2}})
-    n = length(points)
-    n <= 3 && return points
-    
-    # Find bottom-left point (min y, then min x)
-    start_idx = argmin([(p[2], p[1]) for p in points])
-    start = points[start_idx]
-    
-    # Sort by polar angle from start point
-    others = [p for (i, p) in enumerate(points) if i != start_idx]
-    
-    function angle_key(p)
-        dx, dy = p[1] - start[1], p[2] - start[2]
-        return (atan(dy, dx), dx^2 + dy^2)
-    end
-    
-    sorted = sort(others, by=angle_key)
-    
-    # Graham scan
-    hull = [start]
-    for p in sorted
-        while length(hull) >= 2 && _cross_2d_asap(hull[end-1], hull[end], p) <= 0
-            pop!(hull)
-        end
-        push!(hull, p)
-    end
-    
-    return hull
-end
-
-"""Cross product of vectors (b-a) and (c-a) for convex hull computation."""
-function _cross_2d_asap(a::NTuple{2}, b::NTuple{2}, c::NTuple{2})
-    return (b[1] - a[1]) * (c[2] - a[2]) - (b[2] - a[2]) * (c[1] - a[1])
+    signed_area < 0 && reverse!(vis)
+    return vis
 end
 
 """
     _get_interior_column_nodes(struc, slab, boundary_vert_indices, nodes) -> Vector{Asap.Node}
 
-Find interior column vertices (not on slab boundary) and return their Node objects.
-These are passed directly to Asap.Shell via the `interior_nodes` parameter for proper
-node sharing between shell mesh and column elements.
+Find interior vertices (not on slab boundary) and return their Node objects.
+Includes all interior cell vertices — column locations and cell-edge intersections
+alike — so the Delaunay triangulation conforms along internal cell boundaries.
 """
-function _get_interior_column_nodes(struc::BuildingStructure, slab::Slab, 
-                                     boundary_vert_indices::Vector{Int}, 
+function _get_interior_column_nodes(struc::BuildingStructure, slab::Slab,
+                                     boundary_vert_indices::Vector{Int},
                                      nodes::Vector{Asap.Node})
     skel = struc.skeleton
     boundary_set = Set(boundary_vert_indices)
-    
-    # Collect all unique vertices from all cells in this slab
+
     all_cell_verts = Set{Int}()
     for cell_idx in slab.cell_indices
         cell = struc.cells[cell_idx]
@@ -910,11 +909,9 @@ function _get_interior_column_nodes(struc::BuildingStructure, slab::Slab,
             push!(all_cell_verts, vi)
         end
     end
-    
-    # Interior vertices = all cell vertices - boundary vertices
+
     interior_vert_indices = setdiff(all_cell_verts, boundary_set)
-    
-    # Return actual Node objects for interior columns
+
     return Asap.Node[nodes[vi] for vi in interior_vert_indices]
 end
 
@@ -1035,9 +1032,10 @@ function build_analysis_model!(design::BuildingDesign;
     end
     
     # ─── 5. Create shell elements for slabs ───
+    # Mesh entire slab boundary as one continuous shell, not per-cell.
+    # For vault slabs, use VaultShell to create curved parabolic mesh.
     shell_elements = Asap.ShellElement[]
     slab_shell_map = Dict{Int, Vector{Asap.ShellElement}}()
-    vis_node_map = Dict{Int, Asap.Node}(i => nodes[i] for i in 1:length(nodes))
     
     for (slab_idx, slab) in enumerate(struc.slabs)
         # Get slab properties
@@ -1061,38 +1059,91 @@ function build_analysis_model!(design::BuildingDesign;
         # Create shell section with proper density (enables self-weight)
         section = Asap.ShellSection(t, E_pa, ν_slab; ρ=ρ_kgm3)
         
+        # Outer boundary + interior cell edges (handles concave multi-cell slabs)
+        boundary_vert_indices, interior_edge_vis = _get_slab_boundary_vertices(struc, slab)
+        
         is_vault = slab.result isa StructuralSizer.VaultResult
         
-        slab_shells = if is_vault
-            # Vault slabs use VaultShell (curved parabolic mesh)
+        if is_vault && length(boundary_vert_indices) == 4
+            # Vault slabs: curved parabolic mesh via VaultShell
             vault_result = slab.result::StructuralSizer.VaultResult
             rise = vault_result.rise
             span_axis = slab.spans.axis
-            boundary_vert_indices = _get_slab_boundary_vertices(struc, slab)
+            
             corners = tuple([nodes[vi] for vi in boundary_vert_indices]...)
+            
             column_refinement_nodes = _get_slab_column_nodes(struc, slab, nodes)
-            effective_target = _resolve_slab_target_edge_length(struc, slab, mesh_controls.target_edge_length)
-            effective_refine = _resolve_slab_refinement_edge_length(struc, slab, effective_target, mesh_controls.refinement_edge_length)
-            Asap.VaultShell(corners, section, span_axis, rise;
-                n=mesh_density, id=Symbol("slab_$(slab_idx)"),
-                interior_nodes=column_refinement_nodes, edge_support_type=:free,
-                target_edge_length=effective_target,
-                refinement_edge_length=effective_refine,
-                refinement_radius=mesh_controls.refinement_radius,
-                refinement_targets=column_refinement_nodes)
+            effective_target_edge_length = _resolve_slab_target_edge_length(
+                struc, slab, mesh_controls.target_edge_length)
+            effective_refinement_edge_length = _resolve_slab_refinement_edge_length(
+                struc, slab, effective_target_edge_length, mesh_controls.refinement_edge_length)
+            effective_refinement_targets = isnothing(refinement_targets) ?
+                column_refinement_nodes : mesh_controls.refinement_targets
+            
+            @debug "Vault slab $slab_idx" rise=rise span_axis=span_axis n_refinement=length(column_refinement_nodes)
+            
+            slab_shells = Asap.VaultShell(corners, section, span_axis, rise;
+                                          n=mesh_density,
+                                          id=Symbol("slab_$(slab_idx)"),
+                                          interior_nodes=column_refinement_nodes,
+                                          edge_support_type=:free,
+                                          target_edge_length=effective_target_edge_length,
+                                          refinement_edge_length=effective_refinement_edge_length,
+                                          refinement_radius=mesh_controls.refinement_radius,
+                                          refinement_targets=effective_refinement_targets)
+        elseif length(boundary_vert_indices) >= 3
+            # Flat slabs: Delaunay mesh of entire slab outer boundary
+            n_cells = length(slab.cell_indices)
+            scale_factor = ceil(Int, sqrt(n_cells))
+            effective_n = mesh_density * scale_factor
+            
+            interior_nodes = _get_interior_column_nodes(struc, slab, boundary_vert_indices, nodes)
+            column_refinement_nodes = _get_slab_column_nodes(struc, slab, nodes)
+            effective_target_edge_length = _resolve_slab_target_edge_length(
+                struc, slab, mesh_controls.target_edge_length)
+            effective_refinement_edge_length = _resolve_slab_refinement_edge_length(
+                struc, slab, effective_target_edge_length, mesh_controls.refinement_edge_length)
+            effective_refinement_targets = isnothing(refinement_targets) ?
+                column_refinement_nodes : mesh_controls.refinement_targets
+            
+            @debug "Slab $slab_idx mesh" n_cells=n_cells scale_factor=scale_factor effective_n=effective_n n_corners=length(boundary_vert_indices) n_interior_nodes=length(interior_nodes) n_refinement_nodes=length(column_refinement_nodes)
+            
+            corners = tuple([nodes[vi] for vi in boundary_vert_indices]...)
+            
+            slab_shells = Asap.Shell(corners, section; n=effective_n,
+                                     id=Symbol("slab_$(slab_idx)"),
+                                     interior_nodes=interior_nodes,
+                                     edge_support_type=:free,
+                                     target_edge_length=effective_target_edge_length,
+                                     refinement_edge_length=effective_refinement_edge_length,
+                                     refinement_radius=mesh_controls.refinement_radius,
+                                     refinement_targets=effective_refinement_targets)
         else
-            # Flat slabs: delegate to the shared FEA mesh builder.
-            # Pass pre-existing offset nodes so the mesh conforms to the
-            # visualization coordinate system.
-            slab_cell_indices = Set(slab.cell_indices)
-            columns = StructuralSizer.find_supporting_columns(struc, slab_cell_indices)
-            mesh = StructuralSizer.build_slab_shell_mesh(
-                struc, slab, columns, section;
-                target_edge=mesh_controls.target_edge_length,
-                id=Symbol("slab_$(slab_idx)"),
-                edge_support_type=:free,
-                node_map=vis_node_map)
-            mesh.shells
+            # Degenerate fallback: per-cell meshing
+            slab_shells = Asap.ShellElement[]
+            face_indices = [struc.cells[ci].face_idx for ci in slab.cell_indices]
+            column_refinement_nodes = _get_slab_column_nodes(struc, slab, nodes)
+            effective_target_edge_length = _resolve_slab_target_edge_length(
+                struc, slab, mesh_controls.target_edge_length)
+            effective_refinement_edge_length = _resolve_slab_refinement_edge_length(
+                struc, slab, effective_target_edge_length, mesh_controls.refinement_edge_length)
+            effective_refinement_targets = isnothing(refinement_targets) ?
+                column_refinement_nodes : mesh_controls.refinement_targets
+            
+            for face_idx in face_indices
+                vert_indices = skel.face_vertex_indices[face_idx]
+                corners = tuple([nodes[vi] for vi in vert_indices]...)
+                
+                face_shells = Asap.Shell(corners, section; n=mesh_density,
+                                         id=Symbol("slab_$(slab_idx)"),
+                                         edge_support_type=:free,
+                                         interior_support_type=:free,
+                                         target_edge_length=effective_target_edge_length,
+                                         refinement_edge_length=effective_refinement_edge_length,
+                                         refinement_radius=mesh_controls.refinement_radius,
+                                         refinement_targets=effective_refinement_targets)
+                append!(slab_shells, face_shells)
+            end
         end
         
         slab_shell_map[slab_idx] = slab_shells

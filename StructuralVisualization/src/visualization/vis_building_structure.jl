@@ -476,11 +476,12 @@ function _draw_vertex_tributary_areas!(ax, struc::BuildingStructure, leg_elems, 
             drawn_any = true
         end
         
-        # Draw column marker at column vertex z
+        # Draw column marker at structural centerline
         v = skel.vertices[col.vertex_idx]
         c = Meshes.coords(v)
+        off = col.structural_offset
         z_col = ustrip(u"m", c.z)
-        pt = GLMakie.Point3f(ustrip(u"m", c.x), ustrip(u"m", c.y), z_col)
+        pt = GLMakie.Point3f(ustrip(u"m", c.x) + off[1], ustrip(u"m", c.y) + off[2], z_col)
         GLMakie.scatter!(ax, [pt], color = :black, markersize = 10, marker = :rect)
     end
     

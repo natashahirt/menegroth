@@ -387,6 +387,9 @@ Base.@kwdef struct APIVisualizationFrameElement
     flange_width::Float64 = 0.0
     web_thickness::Float64 = 0.0
     flange_thickness::Float64 = 0.0
+    # Cross-section rotation about the element axis (radians, CCW from global X).
+    # Non-zero for columns with θ ≠ 0; beams always 0.
+    orientation_angle::Float64 = 0.0
     # 2D section polygon in local y-z coordinates (centroid at origin)
     # Each vertex is [y, z] in feet, where y = width direction, z = depth direction
     section_polygon::Vector{Vector{Float64}} = []  # [[y1, z1], [y2, z2], ...]
@@ -418,10 +421,22 @@ Base.@kwdef struct APISizedSlab
     drop_panels::Vector{APIDropPanelPatch} = []
     utilization_ratio::Float64 = 0.0
     ok::Bool = true
+    material_color_hex::String = ""  # Display color from slab concrete material (e.g. "#B4B4B4")
     # Vault-specific curved mesh (intrados surface only, extrados = intrados + thickness)
     is_vault::Bool = false
     vault_mesh_vertices::Vector{Vector{Float64}} = []  # [[x,y,z], ...] intrados surface
     vault_mesh_faces::Vector{Vector{Int}} = []         # [[i,j,k], ...] triangle indices (1-based)
+end
+
+"""
+Drop panel sub-mesh for deflected mode.  Face indices reference into the parent
+`APIDeflectedSlabMesh.faces` array (1-based).  The C# renderer builds the drop
+panel volume by extracting these faces from the deflected slab mesh and offsetting
+downward by `thickness` (top) and `thickness + extra_depth` (bottom).
+"""
+Base.@kwdef struct APIDeflectedDropPanel
+    face_indices::Vector{Int} = []       # 1-based indices into parent faces array
+    extra_depth::Float64 = 0.0           # projection below slab soffit (display units)
 end
 
 """Slab mesh for deflected mode (analysis model triangulation)."""
@@ -433,8 +448,10 @@ Base.@kwdef struct APIDeflectedSlabMesh
     faces::Vector{Vector{Int}} = []         # [[i1,i2,i3], ...] triangle indices (1-based)
     thickness::Float64 = 0.0
     drop_panels::Vector{APIDropPanelPatch} = []
+    drop_panel_meshes::Vector{APIDeflectedDropPanel} = []
     utilization_ratio::Float64 = 0.0
     ok::Bool = true
+    material_color_hex::String = ""  # Display color from slab concrete material (e.g. "#B4B4B4")
     is_vault::Bool = false  # For material coloring (earthen vs concrete)
     # Analytical: per-face scalar values for force/stress visualization (one per face, face order matches `faces`)
     # Signed quantities use diverging color (red + → white → blue −); von Mises/shear are always ≥ 0.
@@ -454,6 +471,7 @@ Base.@kwdef struct APIVisualizationFoundation
     depth::Float64 = 0.0
     utilization_ratio::Float64 = 0.0
     ok::Bool = true
+    material_color_hex::String = ""  # Display color from foundation concrete material
 end
 
 """Complete visualization data from analysis model."""

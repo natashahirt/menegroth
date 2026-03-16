@@ -731,6 +731,7 @@ function _report_takeoff(io::IO, design::BuildingDesign; du::DisplayUnits=design
     println(io)
 
     total_slab_conc = 0.0u"m^3"
+    total_drop_conc = 0.0u"m^3"
     total_slab_area = 0.0u"m^2"
     for (s_idx, slab) in enumerate(struc.slabs)
         sr = get(design.slabs, s_idx, nothing)
@@ -744,6 +745,22 @@ function _report_takeoff(io::IO, design::BuildingDesign; du::DisplayUnits=design
         elseif hasproperty(r, :thickness)
             total_slab_conc += StructuralSizer.total_depth(r) * slab_area
         end
+        # Drop panel concrete — per column, trimmed to slab boundary
+        if !isnothing(slab.drop_panel)
+            dp = slab.drop_panel
+            slab_cells = Set(slab.cell_indices)
+            bbox = _slab_bbox_m(struc, slab)
+            for (col_idx, col) in enumerate(struc.columns)
+                isempty(intersect(col.tributary_cell_indices, slab_cells)) && continue
+                v_idx = col.vertex_idx
+                (v_idx < 1 || v_idx > length(struc.skeleton.vertices)) && continue
+                c = Meshes.coords(struc.skeleton.vertices[v_idx])
+                cx = ustrip(u"m", c.x)
+                cy = ustrip(u"m", c.y)
+                a1_eff, a2_eff = _trimmed_drop_extents_m(dp, cx, cy, bbox)
+                total_drop_conc += uconvert(u"m^3", StructuralSizer.drop_panel_concrete_volume(dp, a1_eff, a2_eff))
+            end
+        end
     end
 
     total_fdn_conc = 0.0u"m^3"
@@ -752,13 +769,17 @@ function _report_takeoff(io::IO, design::BuildingDesign; du::DisplayUnits=design
     end
 
     conc_slab = _to_report(du, :volume, total_slab_conc; digits=1)
+    conc_drop = _to_report(du, :volume, total_drop_conc; digits=1)
     conc_fdn  = _to_report(du, :volume, total_fdn_conc; digits=1)
-    conc_total = _to_report(du, :volume, total_slab_conc + total_fdn_conc; digits=1)
+    conc_total = _to_report(du, :volume, total_slab_conc + total_drop_conc + total_fdn_conc; digits=1)
     area_val   = _to_report(du, :area, total_slab_area; digits=0)
 
     Printf.@printf(io, "  %-16s %12s %14s\n", "System", "Conc.Vol($vol_u)", "Floor Area($area_u)")
     Printf.@printf(io, "  %-16s %12s %14s\n", "─"^16, "─"^12, "─"^14)
     Printf.@printf(io, "  %-16s %12.1f %14.0f\n", "Slabs", conc_slab, area_val)
+    if total_drop_conc > 0.0u"m^3"
+        Printf.@printf(io, "  %-16s %12.1f %14s\n", "Drop Panels", conc_drop, "—")
+    end
     Printf.@printf(io, "  %-16s %12.1f %14s\n", "Foundations", conc_fdn, "—")
     Printf.@printf(io, "  %-16s %12s %14s\n", "─"^16, "─"^12, "─"^14)
     Printf.@printf(io, "  %-16s %12.1f\n", "TOTAL", conc_total)

@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Net;
 using System.Net.Http;
+using System.Net.Http.Headers;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -23,13 +24,26 @@ namespace Menegroth.GH.Helpers
             Timeout = MenegrothConfig.HttpClientTimeout
         };
 
+        /// <summary>
+        /// Adds Authorization: Bearer when MENEGROTH_API_KEY is set on the server.
+        /// Uses MenegrothConfig.LastApiKey (set by DesignRun).
+        /// </summary>
+        private static void AddAuthHeader(HttpRequestMessage request)
+        {
+            var key = MenegrothConfig.LastApiKey;
+            if (!string.IsNullOrEmpty(key))
+                request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", key);
+        }
+
         public static async Task<bool> CheckHealthAsync(string baseUrl, CancellationToken cancellationToken = default)
         {
             try
             {
                 using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
                 cts.CancelAfter(TimeSpan.FromSeconds(MenegrothConfig.HealthCheckTimeoutSeconds));
-                var resp = await Client.GetAsync(NormalizeUrl(baseUrl, "health"), cts.Token);
+                using var req = new HttpRequestMessage(HttpMethod.Get, NormalizeUrl(baseUrl, "health"));
+                AddAuthHeader(req);
+                var resp = await Client.SendAsync(req, cts.Token);
                 return resp.IsSuccessStatusCode;
             }
             catch (OperationCanceledException)
@@ -45,7 +59,9 @@ namespace Menegroth.GH.Helpers
         public static async Task<string> PostDesignAsync(string baseUrl, string jsonBody, CancellationToken cancellationToken = default)
         {
             var content = new StringContent(jsonBody, Encoding.UTF8, "application/json");
-            var response = await Client.PostAsync(NormalizeUrl(baseUrl, "design"), content, cancellationToken);
+            using var req = new HttpRequestMessage(HttpMethod.Post, NormalizeUrl(baseUrl, "design")) { Content = content };
+            AddAuthHeader(req);
+            var response = await Client.SendAsync(req, cancellationToken);
             var body = await response.Content.ReadAsStringAsync();
             if (!response.IsSuccessStatusCode)
                 throw new DesignRunHttpException(
@@ -68,7 +84,9 @@ namespace Menegroth.GH.Helpers
             {
                 cancellationToken.ThrowIfCancellationRequested();
 
-                var response = await Client.GetAsync(NormalizeUrl(baseUrl, "result"), cancellationToken);
+                using var req = new HttpRequestMessage(HttpMethod.Get, NormalizeUrl(baseUrl, "result"));
+                AddAuthHeader(req);
+                var response = await Client.SendAsync(req, cancellationToken);
                 var body = await response.Content.ReadAsStringAsync();
 
                 if (response.IsSuccessStatusCode)
@@ -106,23 +124,27 @@ namespace Menegroth.GH.Helpers
             {
                 cancellationToken.ThrowIfCancellationRequested();
 
-                var resp = await Client.GetAsync(NormalizeUrl(baseUrl, "status"), cancellationToken);
-                var body = await resp.Content.ReadAsStringAsync();
-                if (string.IsNullOrWhiteSpace(body))
+                using (var req = new HttpRequestMessage(HttpMethod.Get, NormalizeUrl(baseUrl, "status")))
                 {
-                    await Task.Delay(delayMs, cancellationToken);
-                    continue;
-                }
-                try
-                {
-                    var jobj = JObject.Parse(body);
-                    bool hasResult = jobj["has_result"]?.ToObject<bool>() ?? false;
-                    if (hasResult)
-                        return;
-                }
-                catch
-                {
-                    // Invalid JSON (e.g. proxy error page) — retry
+                    AddAuthHeader(req);
+                    var resp = await Client.SendAsync(req, cancellationToken);
+                    var body = await resp.Content.ReadAsStringAsync();
+                    if (string.IsNullOrWhiteSpace(body))
+                    {
+                        await Task.Delay(delayMs, cancellationToken);
+                        continue;
+                    }
+                    try
+                    {
+                        var jobj = JObject.Parse(body);
+                        bool hasResult = jobj["has_result"]?.ToObject<bool>() ?? false;
+                        if (hasResult)
+                            return;
+                    }
+                    catch
+                    {
+                        // Invalid JSON (e.g. proxy error page) — retry
+                    }
                 }
 
                 await Task.Delay(delayMs, cancellationToken);
@@ -167,7 +189,9 @@ namespace Menegroth.GH.Helpers
 
                 try
                 {
-                    var resp = await Client.GetAsync(NormalizeUrl(baseUrl, "status"), cancellationToken);
+                    using var req = new HttpRequestMessage(HttpMethod.Get, NormalizeUrl(baseUrl, "status"));
+                    AddAuthHeader(req);
+                    var resp = await Client.SendAsync(req, cancellationToken);
                     var body = await resp.Content.ReadAsStringAsync();
                     if (!string.IsNullOrWhiteSpace(body))
                     {
@@ -194,7 +218,9 @@ namespace Menegroth.GH.Helpers
 
         public static async Task<(int nextSince, List<string> lines)> GetServerLogsAsync(string baseUrl, int since, CancellationToken cancellationToken = default)
         {
-            var response = await Client.GetAsync($"{baseUrl.TrimEnd('/')}/logs?since={since}", cancellationToken);
+            using var req = new HttpRequestMessage(HttpMethod.Get, $"{baseUrl.TrimEnd('/')}/logs?since={since}");
+            AddAuthHeader(req);
+            var response = await Client.SendAsync(req, cancellationToken);
             if (!response.IsSuccessStatusCode)
                 return (since, new List<string>());
 
@@ -225,6 +251,25 @@ namespace Menegroth.GH.Helpers
         }
 
         /// <summary>
+        /// Asks the server to rebuild the visualization mesh at a new target edge length.
+        /// Returns the raw JSON response containing only the new visualization payload.
+        /// </summary>
+        public static async Task<string> PostRebuildVisualizationAsync(
+            string baseUrl, double targetEdgeM, CancellationToken cancellationToken = default)
+        {
+            var body = $"{{\"target_edge_m\":{targetEdgeM}}}";
+            var content = new StringContent(body, Encoding.UTF8, "application/json");
+            using var req = new HttpRequestMessage(HttpMethod.Post, NormalizeUrl(baseUrl, "rebuild_visualization")) { Content = content };
+            AddAuthHeader(req);
+            var response = await Client.SendAsync(req, cancellationToken);
+            var respBody = await response.Content.ReadAsStringAsync();
+            if (!response.IsSuccessStatusCode)
+                throw new DesignRunHttpException(
+                    $"POST /rebuild_visualization returned {(int)response.StatusCode}: {respBody}");
+            return respBody;
+        }
+
+        /// <summary>
         /// Fetches the engineering report as plain text from GET /report.
         /// When unitsOverride is "imperial" or "metric", appends ?units= to override DesignParams display units.
         /// Returns the report string, or an empty string if unavailable.
@@ -240,7 +285,9 @@ namespace Menegroth.GH.Helpers
                 {
                     path = $"report?units={unitsOverride.ToLowerInvariant()}";
                 }
-                var response = await Client.GetAsync(NormalizeUrl(baseUrl, path), cancellationToken);
+                using var req = new HttpRequestMessage(HttpMethod.Get, NormalizeUrl(baseUrl, path));
+                AddAuthHeader(req);
+                var response = await Client.SendAsync(req, cancellationToken);
                 if (!response.IsSuccessStatusCode)
                     return "";
                 return await response.Content.ReadAsStringAsync();

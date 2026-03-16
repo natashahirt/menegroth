@@ -369,11 +369,12 @@ function visualize_vertex_tributaries(struc::BuildingStructure;
                 push!(all_ys, ustrip(u"m", vy))
             end
         end
-        # Also include column position
+        # Also include column structural centerline position
         v = skel.vertices[col.vertex_idx]
         c = Meshes.coords(v)
-        push!(all_xs, ustrip(u"m", c.x))
-        push!(all_ys, ustrip(u"m", c.y))
+        off = col.structural_offset
+        push!(all_xs, ustrip(u"m", c.x) + off[1])
+        push!(all_ys, ustrip(u"m", c.y) + off[2])
     end
     
     if isempty(all_xs)
@@ -415,13 +416,14 @@ function visualize_vertex_tributaries(struc::BuildingStructure;
                          strokewidth = 2)
         end
         
-        # Label at column position (area is now Unitful)
+        # Label at column structural centerline
         trib_area = column_tributary_area(struc, col)
         if show_labels && !isnothing(trib_area)
             v = skel.vertices[col.vertex_idx]
             c = Meshes.coords(v)
-            mx = ustrip(u"m", c.x) - cx
-            my = ustrip(u"m", c.y) - cy
+            off = col.structural_offset
+            mx = ustrip(u"m", c.x) + off[1] - cx
+            my = ustrip(u"m", c.y) + off[2] - cy
             area_m2 = ustrip(u"m^2", trib_area)
             label = "$(round(area_m2, digits=1)) m²"
             GLMakie.text!(ax, mx, my + 0.5, text=label, fontsize=10,
@@ -429,13 +431,14 @@ function visualize_vertex_tributaries(struc::BuildingStructure;
         end
     end
     
-    # Plot column positions
+    # Plot column positions at structural centerline
     if show_column_positions
         for col in story_cols
             v = skel.vertices[col.vertex_idx]
             c = Meshes.coords(v)
-            x = ustrip(u"m", c.x) - cx
-            y = ustrip(u"m", c.y) - cy
+            off = col.structural_offset
+            x = ustrip(u"m", c.x) + off[1] - cx
+            y = ustrip(u"m", c.y) + off[2] - cy
             GLMakie.scatter!(ax, [x], [y], color=:black, markersize=12, marker=:rect)
         end
     end

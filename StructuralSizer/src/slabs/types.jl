@@ -963,15 +963,15 @@ function capital_concrete_volume(cap::ColumnCapitalDesign)
 end
 
 """
-    drop_panel_concrete_volume(h_drop, a1, a2, h_slab) -> Volume
+    drop_panel_concrete_volume(dp::DropPanelGeometry, a1_eff, a2_eff) -> Volume
 
-Additional concrete volume from a drop panel (beyond the flat slab thickness).
-Volume = a1 × a2 × (h_drop − h_slab).
+Additional concrete volume from one drop panel (the projection below slab soffit).
+`a1_eff` and `a2_eff` are the *full* plan extents after trimming to the slab boundary.
+Volume = a1_eff × a2_eff × h_drop.
 """
-function drop_panel_concrete_volume(h_drop, a1, a2, h_slab)
-    Δh = h_drop - h_slab
-    Δh <= zero(Δh) && return zero(a1 * a2 * h_slab)
-    return a1 * a2 * Δh
+function drop_panel_concrete_volume(dp::DropPanelGeometry, a1_eff, a2_eff)
+    dp.h_drop <= zero(dp.h_drop) && return zero(a1_eff * a2_eff * dp.h_drop)
+    return a1_eff * a2_eff * dp.h_drop
 end
 
 """

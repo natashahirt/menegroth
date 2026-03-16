@@ -195,11 +195,12 @@ namespace Menegroth.GH.Components
             new("Hard Clay   (qa=300 kPa)",  "hard_clay"),
         };
 
+        /// <summary>Foundation strategy values must match API: auto, all_spread, all_strip, mat.</summary>
         private static readonly Choice[] FoundationTypes =
         {
             new("Auto",   "auto"),
-            new("Spread", "spread"),
-            new("Strip",  "strip"),
+            new("Spread", "all_spread"),
+            new("Strip",  "all_strip"),
             new("Mat",    "mat"),
         };
 
@@ -530,7 +531,13 @@ namespace Menegroth.GH.Components
             if (reader.ItemExists("FireRating"))   _fireRating  = reader.GetString("FireRating");
             if (reader.ItemExists("SizeFoundations")) _sizeFoundations = reader.GetBoolean("SizeFoundations");
             if (reader.ItemExists("FoundationSoil"))  _foundationSoil  = reader.GetString("FoundationSoil");
-            if (reader.ItemExists("FoundationType"))  _foundationType  = reader.GetString("FoundationType");
+            if (reader.ItemExists("FoundationType"))
+            {
+                _foundationType = reader.GetString("FoundationType");
+                // Normalize legacy values to API strategy names (all_spread, all_strip)
+                if (_foundationType == "spread") _foundationType = "all_spread";
+                if (_foundationType == "strip") _foundationType = "all_strip";
+            }
             if (reader.ItemExists("UnitSystem"))   _unitSystem  = reader.GetString("UnitSystem");
             UpdateMessage();
             return base.Read(reader);

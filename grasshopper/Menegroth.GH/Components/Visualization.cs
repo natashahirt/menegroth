@@ -2,6 +2,8 @@ using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
 using System.Windows.Forms;
 using Grasshopper.Kernel;
 using Grasshopper.Kernel.Types;
@@ -95,6 +97,14 @@ namespace Menegroth.GH.Components
         private readonly List<Color> _previewShadedColors = new List<Color>();
         private readonly List<bool> _previewShadedUseVertexColors = new List<bool>();
         private readonly List<Rhino.Display.DisplayMaterial> _previewShadedMaterials = new List<Rhino.Display.DisplayMaterial>();
+
+        // ─── Mesh rebuild async state ────────────────────────────────────
+        private enum RebuildState { Idle, Running, Done, Error }
+        private RebuildState _rebuildState = RebuildState.Idle;
+        private double _lastMeshEdgeM = 0;
+        private JToken _pendingVisualization = null;
+        private string _rebuildError = null;
+        private CancellationTokenSource _rebuildCts = null;
 
         public Visualization()
             : base("Visualization",
@@ -292,6 +302,11 @@ namespace Menegroth.GH.Components
             pManager.AddNumberParameter("Scale", "Scale",
                 "Deflection scale multiplier (0 = no deflection, 1 = auto-suggested, >1 = exaggerated)",
                 GH_ParamAccess.item, 1.0);
+
+            pManager.AddNumberParameter("Mesh Edge", "MeshEdge",
+                "Target mesh edge length for visualization remeshing. Uses same units as the engineering report (ft or m). " +
+                "0 = use server default. Changing triggers a server-side rebuild of the visualization mesh only.",
+                GH_ParamAccess.item, 0.0);
         }
 
         protected override void RegisterOutputParams(GH_OutputParamManager pManager)
@@ -323,6 +338,95 @@ namespace Menegroth.GH.Components
                 AddRuntimeMessage(GH_RuntimeMessageLevel.Error, result.ErrorMessage);
                 return;
             }
+
+            // ─── Mesh edge rebuild ──────────────────────────────────────
+            double meshEdgeM = 0.0;
+            DA.GetData(2, ref meshEdgeM);
+
+            if (_rebuildState == RebuildState.Done)
+            {
+                if (_pendingVisualization != null)
+                {
+                    result.Visualization = _pendingVisualization;
+                    result.SuggestedScaleFactor =
+                        _pendingVisualization["suggested_scale_factor"]?.ToObject<double>() ?? 1.0;
+                    result.MaxDisplacementFt =
+                        _pendingVisualization["max_displacement"]?.ToObject<double>() ?? 0;
+                }
+                _pendingVisualization = null;
+                _rebuildState = RebuildState.Idle;
+                Message = "Mesh rebuilt";
+            }
+            else if (_rebuildState == RebuildState.Error)
+            {
+                AddRuntimeMessage(GH_RuntimeMessageLevel.Warning,
+                    $"Visualization rebuild failed: {_rebuildError}");
+                _rebuildState = RebuildState.Idle;
+            }
+
+            string lengthUnit = !string.IsNullOrEmpty(result.DisplayLengthUnit)
+                ? result.DisplayLengthUnit
+                : result.LengthUnit ?? "ft";
+            if (Params.Input.Count > 2)
+            {
+                var meshParam = Params.Input[2];
+                var unitLabel = lengthUnit.Equals("m", StringComparison.OrdinalIgnoreCase) ? "m" : "ft";
+                if (meshParam.NickName != $"Mesh Edge ({unitLabel})")
+                {
+                    meshParam.NickName = $"Mesh Edge ({unitLabel})";
+                }
+            }
+            double targetEdgeM = lengthUnit.Equals("m", StringComparison.OrdinalIgnoreCase)
+                ? meshEdgeM
+                : meshEdgeM * 0.3048;  // ft → m
+
+            if (meshEdgeM > 0 && Math.Abs(meshEdgeM - _lastMeshEdgeM) > 1e-9
+                && _rebuildState != RebuildState.Running)
+            {
+                _lastMeshEdgeM = meshEdgeM;
+                _rebuildCts?.Cancel();
+                _rebuildCts = new CancellationTokenSource();
+                var ct = _rebuildCts.Token;
+                var url = MenegrothConfig.LastServerUrl;
+                var edgeVal = targetEdgeM;
+                var doc = OnPingDocument();
+
+                _rebuildState = RebuildState.Running;
+                Message = "Rebuilding mesh…";
+
+                Task.Run(async () =>
+                {
+                    try
+                    {
+                        var json = await DesignRunHttpClient.PostRebuildVisualizationAsync(
+                            url, edgeVal, ct);
+                        var jobj = JObject.Parse(json);
+                        _pendingVisualization = jobj["visualization"];
+                        _rebuildState = RebuildState.Done;
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        _rebuildState = RebuildState.Idle;
+                    }
+                    catch (Exception ex)
+                    {
+                        _rebuildError = ex.Message;
+                        _rebuildState = RebuildState.Error;
+                    }
+
+                    if (doc != null)
+                        doc.ScheduleSolution(MenegrothConfig.ScheduleSolutionIntervalMs,
+                            _ => ExpireSolution(false));
+                }, ct);
+            }
+
+            if (_rebuildState == RebuildState.Running)
+            {
+                AddRuntimeMessage(GH_RuntimeMessageLevel.Remark,
+                    "Rebuilding visualization mesh on server…");
+                return;
+            }
+            // ────────────────────────────────────────────────────────────
 
             var viz = result.Visualization;
             if (viz == null)
@@ -846,6 +950,10 @@ namespace Menegroth.GH.Components
             var polyInner = elem["section_polygon_inner"]?.ToObject<double[][]>() ?? new double[0][];
             double depth = elem["section_depth"]?.ToObject<double>() ?? 0;
             double width = elem["section_width"]?.ToObject<double>() ?? 0;
+            double orientAngle = elem["orientation_angle"]?.ToObject<double>() ?? 0;
+            string sectionType = elem["section_type"]?.ToString() ?? "";
+
+            bool isRound = sectionType == "circular" || sectionType == "HSS_round";
 
             if (poly.Length < 3)
             {
@@ -867,14 +975,30 @@ namespace Menegroth.GH.Components
                 elementCurve.Domain = new Interval(0.0, 1.0);
                 double t0 = elementCurve.Domain.T0;
 
-                // Use PerpendicularFrameAt for robust orientation (handles vertical elements).
                 Plane frame;
-                if (!elementCurve.PerpendicularFrameAt(t0, out frame))
+                var tangent = elementCurve.TangentAtStart;
+                if (!tangent.Unitize()) return PipeFallback(elementCurve, width, depth, tol);
+
+                bool isVertical = Math.Abs(tangent.Z) > 0.9;
+
+                if (isVertical)
                 {
-                    // Fallback: manual frame when PerpendicularFrameAt fails (e.g. zero-length curve).
-                    var tangent = elementCurve.TangentAtStart;
-                    if (!tangent.Unitize()) return PipeFallback(elementCurve, width, depth, tol);
-                    Vector3d up = Math.Abs(tangent.Z) < 0.9 ? new Vector3d(0, 0, 1) : new Vector3d(1, 0, 0);
+                    double sign = tangent.Z >= 0 ? 1.0 : -1.0;
+                    var localX = new Vector3d(1, 0, 0);
+                    var localY = new Vector3d(0, sign, 0);
+
+                    if (Math.Abs(orientAngle) > 1e-9)
+                    {
+                        double cos = Math.Cos(orientAngle);
+                        double sin = Math.Sin(orientAngle);
+                        localX = new Vector3d(cos, sin, 0);
+                        localY = new Vector3d(-sign * sin, sign * cos, 0);
+                    }
+                    frame = new Plane(elementCurve.PointAtStart, localX, localY);
+                }
+                else if (!elementCurve.PerpendicularFrameAt(t0, out frame))
+                {
+                    Vector3d up = new Vector3d(0, 0, 1);
                     var localY = Vector3d.CrossProduct(up, tangent);
                     if (!localY.Unitize()) return PipeFallback(elementCurve, width, depth, tol);
                     var localZ = Vector3d.CrossProduct(tangent, localY);
@@ -882,33 +1006,50 @@ namespace Menegroth.GH.Components
                     frame = new Plane(elementCurve.PointAtStart, localY, localZ);
                 }
 
-                // Build outer section curve.
-                var sectionCurve = BuildSectionCurve(poly, frame, tol);
-                if (sectionCurve == null || !sectionCurve.IsValid)
+                // For round sections, use a true circle instead of the polygon approximation.
+                Curve outerCurve;
+                Curve innerCurve = null;
+
+                if (isRound && width > 0)
+                {
+                    double outerRadius = width / 2.0;
+                    outerCurve = new ArcCurve(new Circle(frame, outerRadius));
+
+                    if (polyInner.Length >= 3)
+                    {
+                        double innerRadius = ComputePolygonRadius(polyInner);
+                        if (innerRadius > 0)
+                            innerCurve = new ArcCurve(new Circle(frame, innerRadius));
+                    }
+                }
+                else
+                {
+                    outerCurve = BuildSectionCurve(poly, frame, tol);
+                    if (polyInner.Length >= 3)
+                        innerCurve = BuildSectionCurve(polyInner, frame, tol);
+                }
+
+                if (outerCurve == null || !outerCurve.IsValid)
                     return PipeFallback(elementCurve, width, depth, tol);
 
                 // Hollow section: sweep outer and inner, then boolean difference.
-                if (polyInner.Length >= 3)
+                if (innerCurve != null && innerCurve.IsValid)
                 {
-                    var innerCurve = BuildSectionCurve(polyInner, frame, tol);
-                    if (innerCurve != null && innerCurve.IsValid)
+                    var outerSweep = Brep.CreateFromSweep(elementCurve, outerCurve, true, tol);
+                    var innerSweep = Brep.CreateFromSweep(elementCurve, innerCurve, true, tol);
+                    if (outerSweep != null && outerSweep.Length > 0 && innerSweep != null && innerSweep.Length > 0)
                     {
-                        var outerSweep = Brep.CreateFromSweep(elementCurve, sectionCurve, true, tol);
-                        var innerSweep = Brep.CreateFromSweep(elementCurve, innerCurve, true, tol);
-                        if (outerSweep != null && outerSweep.Length > 0 && innerSweep != null && innerSweep.Length > 0)
+                        var diff = Brep.CreateBooleanDifference(outerSweep[0], innerSweep[0], tol);
+                        if (diff != null && diff.Length > 0)
                         {
-                            var diff = Brep.CreateBooleanDifference(outerSweep[0], innerSweep[0], tol);
-                            if (diff != null && diff.Length > 0)
-                            {
-                                var capped = diff[0].CapPlanarHoles(tol);
-                                return capped ?? diff[0];
-                            }
+                            var capped = diff[0].CapPlanarHoles(tol);
+                            return capped ?? diff[0];
                         }
                     }
                 }
 
                 // Solid section: sweep outer and cap.
-                var sweep = Brep.CreateFromSweep(elementCurve, sectionCurve, true, tol);
+                var sweep = Brep.CreateFromSweep(elementCurve, outerCurve, true, tol);
                 if (sweep != null && sweep.Length > 0)
                 {
                     var brep = sweep[0];
@@ -942,6 +1083,24 @@ namespace Menegroth.GH.Components
             if (pts[0].DistanceTo(pts[pts.Count - 1]) > tol)
                 pts.Add(pts[0]);
             return new PolylineCurve(pts);
+        }
+
+        /// <summary>
+        /// Compute average distance from origin for a 2D polygon (used to derive the
+        /// inner radius of a hollow round section from its polygon approximation).
+        /// </summary>
+        private static double ComputePolygonRadius(double[][] poly)
+        {
+            if (poly == null || poly.Length == 0) return 0;
+            double sum = 0;
+            int count = 0;
+            foreach (var v in poly)
+            {
+                if (v == null || v.Length < 2) continue;
+                sum += Math.Sqrt(v[0] * v[0] + v[1] * v[1]);
+                count++;
+            }
+            return count > 0 ? sum / count : 0;
         }
 
         private static Brep PipeFallback(Curve path, double width, double depth, double tol)
@@ -1504,11 +1663,11 @@ namespace Menegroth.GH.Components
                 else if (colorBy == COLOR_MATERIAL)
                 {
                     bool isVault = m["is_vault"]?.ToObject<bool>() ?? false;
-                    var materialColor = isVault
+                    var fallback = isVault
                         ? VisualizationColorMapper.EarthenMaterialColor
-                        : VisualizationColorMapper.ResolveMaterialColor(
-                            m["material_color_hex"]?.ToString(),
-                            VisualizationColorMapper.ConcreteMaterialColor);
+                        : VisualizationColorMapper.ConcreteMaterialColor;
+                    var materialColor = VisualizationColorMapper.ResolveMaterialColor(
+                        m["material_color_hex"]?.ToString(), fallback);
                     for (int i = 0; i < rhinoMesh.Vertices.Count; i++)
                         rhinoMesh.VertexColors.Add(materialColor);
                 }
@@ -1527,18 +1686,19 @@ namespace Menegroth.GH.Components
                         double thickness = m["thickness"]?.ToObject<double>() ?? 0;
                         if (thickness > 0 && TryBuildDeflectedSlabVolume(rhinoMesh, thickness, output))
                         {
-                            AppendDropPanelDeflectedGeometry(m, verts, disps, scale, output);
+                            AppendDropPanelDeflectedGeometry(m, rhinoMesh, thickness, output);
                         }
                         else
                         {
                             output.Add(new GH_Mesh(rhinoMesh));
-                            AppendDropPanelDeflectedGeometry(m, verts, disps, scale, output);
+                            AppendDropPanelDeflectedGeometry(m, rhinoMesh, thickness, output);
                         }
                     }
                     else
                     {
                         output.Add(new GH_Mesh(rhinoMesh));
-                        AppendDropPanelDeflectedGeometry(m, verts, disps, scale, output);
+                        AppendDropPanelDeflectedGeometry(m, rhinoMesh,
+                            m["thickness"]?.ToObject<double>() ?? 0, output);
                     }
 
                     if (origMesh?.Vertices.Count > 0 && origMesh.Faces.Count > 0)
@@ -1559,6 +1719,7 @@ namespace Menegroth.GH.Components
         /// <summary>
         /// Build a solid slab volume from a deflected mesh by offsetting along normals by thickness.
         /// Top surface = deflected mesh; bottom = offset downward; sides from boundary edges.
+        /// Outputs a solid Brep (via loft-like closed mesh then Brep.CreateFromMesh).
         /// </summary>
         private static bool TryBuildDeflectedSlabVolume(Mesh topMesh, double thickness, List<IGH_GeometricGoo> output)
         {
@@ -1586,8 +1747,7 @@ namespace Menegroth.GH.Components
             combined.Append(topMesh);
             combined.Append(bottomMesh);
 
-            // GetNakedEdges returns Polyline[] of 3D points; map to vertex indices
-            // via PointCloud spatial index (O(log V) per query instead of O(V)).
+            // Stitch boundary edges between top and bottom (loft the edges together)
             var boundary = topMesh.GetNakedEdges();
             if (boundary != null && boundary.Length > 0)
             {
@@ -1619,6 +1779,21 @@ namespace Menegroth.GH.Components
 
             combined.Normals.ComputeNormals();
             combined.Compact();
+
+            // Convert closed mesh to solid Brep
+            try
+            {
+                var brep = Brep.CreateFromMesh(combined, false);
+                if (brep != null && brep.IsValid)
+                {
+                    var capped = brep.CapPlanarHoles(
+                        Rhino.RhinoDoc.ActiveDoc?.ModelAbsoluteTolerance ?? 0.001);
+                    output.Add(new GH_Brep(capped ?? brep));
+                    return true;
+                }
+            }
+            catch { /* fall through to mesh */ }
+
             output.Add(new GH_Mesh(combined));
             return true;
         }
@@ -1728,137 +1903,140 @@ namespace Menegroth.GH.Components
             }
         }
 
-        private static void AppendDropPanelDeflectedGeometry(JToken meshToken, double[][] verts, double[][] disps,
-            double scale, List<IGH_GeometricGoo> output)
+        /// <summary>
+        /// Build deflected drop panel volumes from the slab's deflected mesh.
+        /// Each drop_panel_meshes entry contains face indices into the parent mesh;
+        /// the drop panel is an offset solid below the slab soffit.
+        /// Falls back to the legacy box+interpolation path when drop_panel_meshes is absent.
+        /// </summary>
+        private static void AppendDropPanelDeflectedGeometry(JToken meshToken, Mesh deflectedSlabMesh,
+            double slabThickness, List<IGH_GeometricGoo> output)
         {
-            var dropPanels = meshToken["drop_panels"] as JArray ?? new JArray();
-            if (dropPanels.Count == 0 || verts == null || verts.Length == 0)
+            var dpMeshes = meshToken["drop_panel_meshes"] as JArray;
+            if (dpMeshes == null || dpMeshes.Count == 0 || deflectedSlabMesh == null)
                 return;
 
-            double slabThickness = meshToken["thickness"]?.ToObject<double>() ?? 0.0;
-            foreach (var dp in dropPanels)
+            var allFaces = meshToken["faces"]?.ToObject<int[][]>() ?? new int[0][];
+            int nSlabVerts = deflectedSlabMesh.Vertices.Count;
+            if (nSlabVerts == 0 || allFaces.Length == 0) return;
+
+            foreach (var dpm in dpMeshes)
             {
-                var c = dp["center"]?.ToObject<double[]>() ?? new double[0];
-                if (c.Length < 2) continue;
-                double dpLength = dp["length"]?.ToObject<double>() ?? 0.0;
-                double dpWidth = dp["width"]?.ToObject<double>() ?? 0.0;
-                double extra = dp["extra_depth"]?.ToObject<double>() ?? 0.0;
-                if (dpLength <= 0 || dpWidth <= 0 || extra <= 0) continue;
+                var faceIndices = dpm["face_indices"]?.ToObject<int[]>() ?? new int[0];
+                double extra = dpm["extra_depth"]?.ToObject<double>() ?? 0.0;
+                if (faceIndices.Length == 0 || extra <= 0) continue;
 
-                double x0 = c[0] - dpLength / 2.0;
-                double x1 = c[0] + dpLength / 2.0;
-                double y0 = c[1] - dpWidth / 2.0;
-                double y1 = c[1] + dpWidth / 2.0;
+                // Extract sub-mesh from the deflected slab mesh
+                var subMesh = new Mesh();
+                var vertRemap = new Dictionary<int, int>();
 
-                var corners = new[] {
-                    new Point3d(x0, y0, 0), new Point3d(x1, y0, 0),
-                    new Point3d(x1, y1, 0), new Point3d(x0, y1, 0),
-                };
-
-                var topPts = new Point3d[4];
-                var botPts = new Point3d[4];
-
-                for (int ci = 0; ci < 4; ci++)
+                foreach (int fi1 in faceIndices)
                 {
-                    var disp = InterpolateDisplacement(corners[ci].X, corners[ci].Y, verts, disps);
-                    double zRef = disp[2]; // undeflected Z from nearest vertex
-                    double dzScaled = disp[3] * scale;
+                    int fi = fi1 - 1; // 1-based → 0-based
+                    if (fi < 0 || fi >= allFaces.Length) continue;
+                    var tri = allFaces[fi];
+                    if (tri.Length < 3) continue;
 
-                    double zTop = zRef + dzScaled - slabThickness;
-                    double zBot = zTop - extra;
-                    double xDef = corners[ci].X + disp[0] * scale;
-                    double yDef = corners[ci].Y + disp[1] * scale;
-                    topPts[ci] = new Point3d(xDef, yDef, zTop);
-                    botPts[ci] = new Point3d(xDef, yDef, zBot);
+                    int[] localIdx = new int[3];
+                    for (int k = 0; k < 3; k++)
+                    {
+                        int vi = tri[k] - 1; // 1-based → 0-based
+                        if (!vertRemap.TryGetValue(vi, out int li))
+                        {
+                            if (vi < 0 || vi >= nSlabVerts) { li = -1; }
+                            else
+                            {
+                                li = subMesh.Vertices.Count;
+                                subMesh.Vertices.Add(deflectedSlabMesh.Vertices[vi]);
+                            }
+                            vertRemap[vi] = li;
+                        }
+                        localIdx[k] = li;
+                    }
+                    if (localIdx[0] < 0 || localIdx[1] < 0 || localIdx[2] < 0) continue;
+                    subMesh.Faces.AddFace(localIdx[0], localIdx[1], localIdx[2]);
                 }
 
-                var mesh = new Mesh();
-                for (int ci = 0; ci < 4; ci++) mesh.Vertices.Add(topPts[ci]);
-                for (int ci = 0; ci < 4; ci++) mesh.Vertices.Add(botPts[ci]);
-                // Top face
-                mesh.Faces.AddFace(0, 1, 2, 3);
-                // Bottom face (reversed winding)
-                mesh.Faces.AddFace(7, 6, 5, 4);
-                // Side faces
-                mesh.Faces.AddFace(0, 4, 5, 1);
-                mesh.Faces.AddFace(1, 5, 6, 2);
-                mesh.Faces.AddFace(2, 6, 7, 3);
-                mesh.Faces.AddFace(3, 7, 4, 0);
-                mesh.Normals.ComputeNormals();
-                mesh.Compact();
-                output.Add(new GH_Mesh(mesh));
-            }
-        }
+                if (subMesh.Vertices.Count == 0 || subMesh.Faces.Count == 0) continue;
+                subMesh.Normals.ComputeNormals();
+                subMesh.Compact();
 
-        /// <summary>
-        /// Inverse-distance-weighted interpolation of displacement at an XY query point
-        /// from the slab mesh vertices. Returns (dx, dy, zRef, dz) where zRef is the
-        /// undeflected Z of the nearest vertex and (dx, dy, dz) are displacement components.
-        /// </summary>
-        private static double[] InterpolateDisplacement(double qx, double qy, double[][] verts, double[][] disps)
-        {
-            const int K = 6;
-            const double Eps = 1e-12;
-
-            var nearest = new (int idx, double dist2)[K];
-            for (int i = 0; i < K; i++)
-                nearest[i] = (-1, double.MaxValue);
-
-            for (int i = 0; i < verts.Length; i++)
-            {
-                double dx = verts[i][0] - qx;
-                double dy = verts[i][1] - qy;
-                double d2 = dx * dx + dy * dy;
-
-                int worstSlot = 0;
-                for (int j = 1; j < K; j++)
+                // Top surface = slab soffit (offset from top mesh by -thickness along normal)
+                // Bottom surface = soffit - extra_depth
+                var topMesh = new Mesh();
+                var botMesh = new Mesh();
+                for (int i = 0; i < subMesh.Vertices.Count; i++)
                 {
-                    if (nearest[j].dist2 > nearest[worstSlot].dist2)
-                        worstSlot = j;
+                    var pt = new Point3d(subMesh.Vertices[i]);
+                    var n = new Vector3d(subMesh.Normals[i]);
+                    topMesh.Vertices.Add(pt + n * (-slabThickness));
+                    botMesh.Vertices.Add(pt + n * (-(slabThickness + extra)));
                 }
-                if (d2 < nearest[worstSlot].dist2)
-                    nearest[worstSlot] = (i, d2);
-            }
-
-            // Check for exact coincidence with a vertex
-            for (int j = 0; j < K; j++)
-            {
-                if (nearest[j].idx >= 0 && nearest[j].dist2 < Eps)
+                foreach (var face in subMesh.Faces)
                 {
-                    int idx = nearest[j].idx;
-                    double ddx = idx < disps.Length && disps[idx].Length >= 3 ? disps[idx][0] : 0;
-                    double ddy = idx < disps.Length && disps[idx].Length >= 3 ? disps[idx][1] : 0;
-                    double ddz = idx < disps.Length && disps[idx].Length >= 3 ? disps[idx][2] : 0;
-                    return new[] { ddx, ddy, verts[idx][2], ddz };
+                    if (face.IsTriangle)
+                    {
+                        topMesh.Faces.AddFace(face.A, face.B, face.C);
+                        botMesh.Faces.AddFace(face.A, face.B, face.C);
+                    }
                 }
-            }
+                topMesh.Normals.ComputeNormals();
+                botMesh.Normals.ComputeNormals();
 
-            double wSum = 0, wDx = 0, wDy = 0, wDz = 0, wZ = 0;
-            for (int j = 0; j < K; j++)
-            {
-                if (nearest[j].idx < 0) continue;
-                int idx = nearest[j].idx;
-                double w = 1.0 / Math.Sqrt(nearest[j].dist2);
-                wSum += w;
-                wZ += w * verts[idx][2];
-                if (idx < disps.Length && disps[idx].Length >= 3)
+                var combined = new Mesh();
+                combined.Append(topMesh);
+                combined.Append(botMesh);
+
+                // Stitch boundary edges between top and bottom
+                var boundary = topMesh.GetNakedEdges();
+                if (boundary != null && boundary.Length > 0)
                 {
-                    wDx += w * disps[idx][0];
-                    wDy += w * disps[idx][1];
-                    wDz += w * disps[idx][2];
+                    const double tol = 1e-6;
+                    var cloud = new Rhino.Geometry.PointCloud(
+                        Enumerable.Range(0, topMesh.Vertices.Count)
+                                  .Select(i => new Point3d(topMesh.Vertices[i])));
+                    int nV = topMesh.Vertices.Count;
+
+                    foreach (var edge in boundary)
+                    {
+                        if (edge == null || edge.Count < 2) continue;
+                        for (int i = 0; i < edge.Count - 1; i++)
+                        {
+                            int i0 = cloud.ClosestPoint(edge[i]);
+                            int i1 = cloud.ClosestPoint(edge[i + 1]);
+                            if (i0 < 0 || i1 < 0 || i0 >= nV || i1 >= nV) continue;
+                            if (new Point3d(topMesh.Vertices[i0]).DistanceToSquared(edge[i]) > tol * tol) continue;
+                            if (new Point3d(topMesh.Vertices[i1]).DistanceToSquared(edge[i + 1]) > tol * tol) continue;
+                            int baseIdx = combined.Vertices.Count;
+                            combined.Vertices.Add(topMesh.Vertices[i0]);
+                            combined.Vertices.Add(topMesh.Vertices[i1]);
+                            combined.Vertices.Add(botMesh.Vertices[i1]);
+                            combined.Vertices.Add(botMesh.Vertices[i0]);
+                            combined.Faces.AddFace(baseIdx, baseIdx + 1, baseIdx + 2, baseIdx + 3);
+                        }
+                    }
+                }
+
+                combined.Normals.ComputeNormals();
+                combined.Compact();
+
+                try
+                {
+                    var brep = Brep.CreateFromMesh(combined, false);
+                    if (brep != null && brep.IsValid)
+                    {
+                        var capped = brep.CapPlanarHoles(
+                            Rhino.RhinoDoc.ActiveDoc?.ModelAbsoluteTolerance ?? 0.001);
+                        output.Add(new GH_Brep(capped ?? brep));
+                    }
+                    else
+                        output.Add(new GH_Mesh(combined));
+                }
+                catch
+                {
+                    output.Add(new GH_Mesh(combined));
                 }
             }
-
-            if (wSum < Eps)
-            {
-                int fallback = nearest[0].idx >= 0 ? nearest[0].idx : 0;
-                double ddx = fallback < disps.Length && disps[fallback].Length >= 3 ? disps[fallback][0] : 0;
-                double ddy = fallback < disps.Length && disps[fallback].Length >= 3 ? disps[fallback][1] : 0;
-                double ddz = fallback < disps.Length && disps[fallback].Length >= 3 ? disps[fallback][2] : 0;
-                return new[] { ddx, ddy, verts[fallback][2], ddz };
-            }
-
-            return new[] { wDx / wSum, wDy / wSum, wZ / wSum, wDz / wSum };
         }
 
         /// <summary>
@@ -1925,11 +2103,11 @@ namespace Menegroth.GH.Components
                 else if (colorBy == COLOR_MATERIAL)
                 {
                     bool isVault = m["is_vault"]?.ToObject<bool>() ?? false;
-                    var materialColor = isVault
+                    var fallback = isVault
                         ? VisualizationColorMapper.EarthenMaterialColor
-                        : VisualizationColorMapper.ResolveMaterialColor(
-                            m["material_color_hex"]?.ToString(),
-                            VisualizationColorMapper.ConcreteMaterialColor);
+                        : VisualizationColorMapper.ConcreteMaterialColor;
+                    var materialColor = VisualizationColorMapper.ResolveMaterialColor(
+                        m["material_color_hex"]?.ToString(), fallback);
                     for (int i = 0; i < rhinoMesh.Vertices.Count; i++)
                         rhinoMesh.VertexColors.Add(materialColor);
                 }
@@ -1991,11 +2169,11 @@ namespace Menegroth.GH.Components
                 }
                 else if (colorBy == COLOR_MATERIAL)
                 {
-                    colors.Add(VisualizationColorMapper.ResolveMaterialColor(f["material_color_hex"]?.ToString(), VisualizationColorMapper.DefaultMaterialColor));
+                    colors.Add(VisualizationColorMapper.ResolveMaterialColor(f["material_color_hex"]?.ToString(), VisualizationColorMapper.ConcreteMaterialColor));
                 }
                 else
                 {
-                    colors.Add(VisualizationColorMapper.DefaultMaterialColor);
+                    colors.Add(VisualizationColorMapper.ConcreteMaterialColor);
                 }
             }
         }
@@ -2037,12 +2215,11 @@ namespace Menegroth.GH.Components
             }
             else if (colorBy == COLOR_MATERIAL)
             {
-                if (isVault)
-                    colors.Add(VisualizationColorMapper.EarthenMaterialColor);
-                else
-                    colors.Add(VisualizationColorMapper.ResolveMaterialColor(
-                        element["material_color_hex"]?.ToString(),
-                        VisualizationColorMapper.ConcreteMaterialColor));
+                var fallback = isVault
+                    ? VisualizationColorMapper.EarthenMaterialColor
+                    : VisualizationColorMapper.ConcreteMaterialColor;
+                colors.Add(VisualizationColorMapper.ResolveMaterialColor(
+                    element["material_color_hex"]?.ToString(), fallback));
             }
             else if (isAnalyticalSlab)
             {
@@ -2069,9 +2246,11 @@ namespace Menegroth.GH.Components
             }
             else
             {
-                colors.Add(isVault
+                var fallback = isVault
                     ? VisualizationColorMapper.EarthenMaterialColor
-                    : VisualizationColorMapper.DefaultMaterialColor);
+                    : VisualizationColorMapper.ConcreteMaterialColor;
+                colors.Add(VisualizationColorMapper.ResolveMaterialColor(
+                    element["material_color_hex"]?.ToString(), fallback));
             }
         }
     }

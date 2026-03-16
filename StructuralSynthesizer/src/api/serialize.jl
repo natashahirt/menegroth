@@ -363,6 +363,7 @@ function _serialize_visualization_frame_elements(design::BuildingDesign, model, 
     element_type = Dict{Int, Symbol}()
     element_section_obj = Dict{Int, StructuralSizer.AbstractSection}()
     element_material_color = Dict{Int, String}()
+    element_orientation = Dict{Int, Float64}()
 
     # Material color cache: same material object → same hex string
     _mat_color_cache = Dict{UInt64, String}()
@@ -384,6 +385,7 @@ function _serialize_visualization_frame_elements(design::BuildingDesign, model, 
             element_ok[edge_idx] = result.ok
             element_section[edge_idx] = result.section_size
             element_type[edge_idx] = :column
+            element_orientation[edge_idx] = col.θ
             !isnothing(sec_obj) && (element_section_obj[edge_idx] = sec_obj)
             !isempty(mat_color) && (element_material_color[edge_idx] = mat_color)
         end
@@ -484,7 +486,8 @@ function _serialize_visualization_frame_elements(design::BuildingDesign, model, 
         sec_name = src_edge_idx > 0 ? get(element_section, src_edge_idx, "") : ""
         elem_type = src_edge_idx > 0 ? get(element_type, src_edge_idx, :other) : :other
         mat_color_hex = src_edge_idx > 0 ? get(element_material_color, src_edge_idx, "") : ""
-        
+        orient_angle = src_edge_idx > 0 ? get(element_orientation, src_edge_idx, 0.0) : 0.0
+
         # Extract section geometry (cached by section identity)
         sec_obj = src_edge_idx > 0 ? get(element_section_obj, src_edge_idx, nothing) : nothing
         sec_key = isnothing(sec_obj) ? UInt64(0) : objectid(sec_obj)
@@ -539,6 +542,7 @@ function _serialize_visualization_frame_elements(design::BuildingDesign, model, 
             flange_width = flange_width_ft,
             web_thickness = web_thickness_ft,
             flange_thickness = flange_thickness_ft,
+            orientation_angle = orient_angle,
             section_polygon = section_poly,
             section_polygon_inner = section_poly_inner,
             original_points = original_points,
@@ -702,6 +706,9 @@ function _serialize_sized_slabs(design::BuildingDesign, struc::BuildingStructure
     sizehint!(sized_slabs, length(struc.slabs))
     skel = struc.skeleton
 
+    slab_concrete = resolve_slab_concrete(design.params.materials)
+    slab_mat_color = _material_color_hex(slab_concrete)
+
     for (slab_idx, slab) in enumerate(struc.slabs)
         slab_result = get(design.slabs, slab_idx, nothing)
         isnothing(slab_result) && continue
@@ -759,6 +766,7 @@ function _serialize_sized_slabs(design::BuildingDesign, struc::BuildingStructure
             drop_panels = drop_panels,
             utilization_ratio = _round_val(ratio),
             ok = ok,
+            material_color_hex = slab_mat_color,
             is_vault = is_vault,
             vault_mesh_vertices = vault_mesh_vertices,
             vault_mesh_faces = vault_mesh_faces,
@@ -821,6 +829,9 @@ function _serialize_deflected_slab_meshes(design::BuildingDesign, struc::Buildin
     # Precompute meters→display-length scale factor (avoids per-value Unitful dispatch in inner loop)
     _m_to_disp = ustrip(du.units[:length], 1.0u"m")
 
+    slab_concrete = resolve_slab_concrete(design.params.materials)
+    slab_mat_color = _material_color_hex(slab_concrete)
+
     draped = compute_draped_displacements(design)
     total_disp = draped.total
     local_disp = draped.local_bending
@@ -870,13 +881,14 @@ function _serialize_deflected_slab_meshes(design::BuildingDesign, struc::Buildin
         sizehint!(face_vm, n_shells)
         sizehint!(face_surf, n_shells)
 
+        drop_panel_face_indices = Int[]
+
         for shell in shells
             shell_nodes = shell.nodes
             if length(shell_nodes) == 3
                 tri_indices = Int[]
                 for node in shell_nodes
                     if !haskey(vertex_map, node)
-                        # Convert Unitful position via scalar multiply (avoids Quantity intermediaries)
                         npos = node.position
                         push!(vertices, [_round_val(ustrip(u"m", npos[k]) * _m_to_disp; digits=6) for k in 1:3])
 
@@ -893,7 +905,10 @@ function _serialize_deflected_slab_meshes(design::BuildingDesign, struc::Buildin
                 end
                 push!(faces, tri_indices)
 
-                # Compute shell internal forces for this triangle
+                if shell.id == :drop_panel
+                    push!(drop_panel_face_indices, length(faces))
+                end
+
                 _append_shell_analytical!(face_bending, face_membrane, face_shear,
                                           face_vm, face_surf, shell, model.u, sif_ws)
             end
@@ -904,6 +919,14 @@ function _serialize_deflected_slab_meshes(design::BuildingDesign, struc::Buildin
         ratio = max(slab_result.deflection_ratio, slab_result.punching_max_ratio)
         ok = slab_result.deflection_ok && slab_result.punching_ok
         is_vault = slab_result.is_vault
+
+        dp_geom = isnothing(slab_result) ? nothing : slab_result.drop_panel
+        dp_extra = isnothing(dp_geom) ? 0.0 : _to_display_length(du, dp_geom.h_drop)
+        dp_meshes = if !isempty(drop_panel_face_indices) && dp_extra > 0
+            [APIDeflectedDropPanel(face_indices=drop_panel_face_indices, extra_depth=_round_val(dp_extra; digits=4))]
+        else
+            APIDeflectedDropPanel[]
+        end
         
         push!(deflected_meshes, APIDeflectedSlabMesh(
             slab_id = slab_idx,
@@ -913,8 +936,10 @@ function _serialize_deflected_slab_meshes(design::BuildingDesign, struc::Buildin
             faces = faces,
             thickness = _round_val(thickness_ft; digits=4),
             drop_panels = drop_panels,
+            drop_panel_meshes = dp_meshes,
             utilization_ratio = _round_val(ratio),
             ok = ok,
+            material_color_hex = slab_mat_color,
             is_vault = is_vault,
             face_bending_moment = [_round_val(v; digits=4) for v in face_bending],
             face_membrane_force = [_round_val(v; digits=4) for v in face_membrane],
@@ -980,6 +1005,13 @@ function _serialize_visualization_foundations(design::BuildingDesign, struc::Bui
     # Use offsets captured at design time (survives restore!)
     col_offset_by_vertex = design.structural_offsets
 
+    fdn_params = design.params.foundation_options
+    fdn_mat_color = if !isnothing(fdn_params)
+        _material_color_hex(fdn_params.concrete)
+    else
+        ""
+    end
+
     for (fdn_idx, fdn) in enumerate(struc.foundations)
         fdn_result = get(design.foundations, fdn_idx, nothing)
         isnothing(fdn_result) && continue
@@ -1011,6 +1043,7 @@ function _serialize_visualization_foundations(design::BuildingDesign, struc::Bui
             width = _round_val(_to_display_length(du, fdn_result.width); digits=4),
             depth = _round_val(_to_display_length(du, fdn_result.depth); digits=4),
             utilization_ratio = _round_val(fdn_result.bearing_ratio),
+            material_color_hex = fdn_mat_color,
             ok = fdn_result.ok,
         ))
     end
@@ -1018,15 +1051,33 @@ function _serialize_visualization_foundations(design::BuildingDesign, struc::Bui
     return out
 end
 
-"""Serialize drop panel footprint patches for slab visualization."""
+"""Serialize drop panel footprint patches for slab visualization, trimmed to slab boundary."""
 function _serialize_drop_panel_patches(slab_idx::Int, slab, struc::BuildingStructure, design::BuildingDesign, du::DisplayUnits)
     slab_result = get(design.slabs, slab_idx, nothing)
     dp = isnothing(slab_result) ? nothing : slab_result.drop_panel
     isnothing(dp) && return APIDropPanelPatch[]
     h_drop_ft = _to_display_length(du, dp.h_drop)
-    a1_full_ft = _to_display_length(du, 2 * dp.a_drop_1)
-    a2_full_ft = _to_display_length(du, 2 * dp.a_drop_2)
     h_drop_ft <= 0 && return APIDropPanelPatch[]
+
+    a1_half_ft = _to_display_length(du, dp.a_drop_1)
+    a2_half_ft = _to_display_length(du, dp.a_drop_2)
+
+    # Slab bounding box in display units for edge trimming
+    skel = struc.skeleton
+    slab_xmin = slab_ymin =  Inf
+    slab_xmax = slab_ymax = -Inf
+    for ci in slab.cell_indices
+        cell = struc.cells[ci]
+        for vi in skel.face_vertex_indices[cell.face_idx]
+            pt = Meshes.coords(skel.vertices[vi])
+            x = _to_display_length(du, pt.x)
+            y = _to_display_length(du, pt.y)
+            x < slab_xmin && (slab_xmin = x)
+            x > slab_xmax && (slab_xmax = x)
+            y < slab_ymin && (slab_ymin = y)
+            y > slab_ymax && (slab_ymax = y)
+        end
+    end
 
     centers = Set{Int}()
     slab_cells = Set(slab.cell_indices)
@@ -1054,17 +1105,28 @@ function _serialize_drop_panel_patches(slab_idx::Int, slab, struc::BuildingStruc
     for col_idx in centers
         col = struc.columns[col_idx]
         v_idx = col.vertex_idx
-        (v_idx < 1 || v_idx > length(struc.skeleton.vertices)) && continue
-        c = Meshes.coords(struc.skeleton.vertices[v_idx])
+        (v_idx < 1 || v_idx > length(skel.vertices)) && continue
+        c = Meshes.coords(skel.vertices[v_idx])
         off = get(design.structural_offsets, v_idx, (0.0, 0.0))
         cx = _to_display_length(du, c.x + off[1] * u"m")
         cy = _to_display_length(du, c.y + off[2] * u"m")
         cz = _to_display_length(du, c.z)
 
+        # Clamp drop panel rectangle to slab boundary
+        x0 = max(cx - a1_half_ft, slab_xmin)
+        x1 = min(cx + a1_half_ft, slab_xmax)
+        y0 = max(cy - a2_half_ft, slab_ymin)
+        y1 = min(cy + a2_half_ft, slab_ymax)
+        eff_len = x1 - x0
+        eff_wid = y1 - y0
+        (eff_len <= 0 || eff_wid <= 0) && continue
+        new_cx = (x0 + x1) / 2.0
+        new_cy = (y0 + y1) / 2.0
+
         push!(patches, APIDropPanelPatch(
-            center = [_round_val(cx; digits=6), _round_val(cy; digits=6), _round_val(cz; digits=6)],
-            length = _round_val(a1_full_ft; digits=4),
-            width = _round_val(a2_full_ft; digits=4),
+            center = [_round_val(new_cx; digits=6), _round_val(new_cy; digits=6), _round_val(cz; digits=6)],
+            length = _round_val(eff_len; digits=4),
+            width = _round_val(eff_wid; digits=4),
             extra_depth = _round_val(h_drop_ft; digits=4),
         ))
     end

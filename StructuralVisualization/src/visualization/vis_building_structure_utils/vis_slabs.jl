@@ -186,39 +186,42 @@ function _draw_drop_panels!(ax, slab::Slab, struc, dp::StructuralSizer.DropPanel
                             show_outline=true, outline_color=:gray40, outline_width=1.0)
     skel = struc.skeleton
     
-    # Drop panel dimensions in meters
     h_drop = ustrip(u"m", dp.h_drop)
-    a1 = ustrip(u"m", dp.a_drop_1)  # half-extent in direction 1
-    a2 = ustrip(u"m", dp.a_drop_2)  # half-extent in direction 2
+    a1 = ustrip(u"m", dp.a_drop_1)
+    a2 = ustrip(u"m", dp.a_drop_2)
     
-    z_drop_top = z_slab_bot  # Drop panel top aligns with slab soffit
-    z_drop_bot = z_slab_bot - h_drop  # Projects below
+    z_drop_top = z_slab_bot
+    z_drop_bot = z_slab_bot - h_drop
+
+    # Slab bounding box for edge trimming
+    xmin = ymin =  Inf
+    xmax = ymax = -Inf
+    for ci in slab.cell_indices
+        for vi in skel.face_vertex_indices[struc.cells[ci].face_idx]
+            c = Meshes.coords(skel.vertices[vi])
+            x = ustrip(u"m", c.x); y = ustrip(u"m", c.y)
+            x < xmin && (xmin = x); x > xmax && (xmax = x)
+            y < ymin && (ymin = y); y > ymax && (ymax = y)
+        end
+    end
     
-    # Find supporting columns for this slab
     slab_cell_set = Set(slab.cell_indices)
     for col in struc.columns
-        # Check if column supports this slab
-        if isempty(col.tributary_cell_indices)
-            continue
-        end
-        if !any(ci in slab_cell_set for ci in col.tributary_cell_indices)
-            continue
-        end
+        isempty(col.tributary_cell_indices) && continue
+        !any(ci in slab_cell_set for ci in col.tributary_cell_indices) && continue
         
-        # Get column XY position from skeleton vertex
         vi = col.vertex_idx
-        pt = skel.vertices[vi]
-        c = Meshes.coords(pt)
-        cx = ustrip(u"m", c.x)
-        cy = ustrip(u"m", c.y)
+        c = Meshes.coords(skel.vertices[vi])
+        off = col.structural_offset
+        cx = ustrip(u"m", c.x) + off[1]
+        cy = ustrip(u"m", c.y) + off[2]
         
-        # Drop panel is a rectangle centered on column
-        hull_pts = [
-            (cx - a1, cy - a2),
-            (cx + a1, cy - a2),
-            (cx + a1, cy + a2),
-            (cx - a1, cy + a2),
-        ]
+        # Clamp drop panel rectangle to slab boundary
+        x0 = max(cx - a1, xmin); x1 = min(cx + a1, xmax)
+        y0 = max(cy - a2, ymin); y1 = min(cy + a2, ymax)
+        (x1 <= x0 || y1 <= y0) && continue
+        
+        hull_pts = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
         
         _draw_slab_box!(ax, hull_pts, z_drop_bot, z_drop_top;
                         color=color, alpha=alpha,

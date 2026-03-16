@@ -17,6 +17,12 @@ namespace Menegroth.GH.Types
         public string ErrorMessage { get; set; } = "";
         public string GeometryHash { get; set; } = "";
 
+        /// <summary>Length unit from design: "ft" (imperial) or "m" (metric).</summary>
+        public string LengthUnit { get; set; } = "ft";
+
+        /// <summary>Effective display unit for mesh edge and report: "ft" or "m". Set by DesignRun from report units override.</summary>
+        public string DisplayLengthUnit { get; set; }
+
         // Summary
         public bool AllPass { get; set; }
         public double CriticalRatio { get; set; }
@@ -83,6 +89,7 @@ namespace Menegroth.GH.Types
             r.Status = root["status"]?.ToString() ?? "unknown";
             r.ComputeTime = root["compute_time_s"]?.ToObject<double>() ?? 0;
             r.GeometryHash = root["geometry_hash"]?.ToString() ?? "";
+            r.LengthUnit = root["length_unit"]?.ToString()?.ToLowerInvariant() ?? "ft";
 
             var phaseTimings = root["phase_timings"] as JObject;
             if (phaseTimings != null)
@@ -190,11 +197,12 @@ namespace Menegroth.GH.Types
             }
 
             // Visualization (store raw JToken for Visualization to consume)
-            r.Visualization = root["visualization"];
-            if (r.Visualization != null)
+            var vizToken = root["visualization"];
+            if (vizToken != null && vizToken.Type != JTokenType.Null)
             {
-                r.SuggestedScaleFactor = r.Visualization["suggested_scale_factor"]?.ToObject<double>() ?? 1.0;
-                r.MaxDisplacementFt = r.Visualization["max_displacement"]?.ToObject<double>() ?? 0;
+                r.Visualization = vizToken;
+                r.SuggestedScaleFactor = vizToken["suggested_scale_factor"]?.ToObject<double>() ?? 1.0;
+                r.MaxDisplacementFt = vizToken["max_displacement"]?.ToObject<double>() ?? 0;
             }
 
             return r;

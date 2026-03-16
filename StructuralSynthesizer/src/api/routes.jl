@@ -168,6 +168,7 @@ function register_routes!()
                 "GET /env-check" => "Whether Gurobi env vars are set (presence only, no values)",
                 "GET /logs?since=N" => "Streaming design logs; returns lines after cursor N",
                 "GET /result" => "Last completed design result (after POST /design and status idle)",
+                "POST /rebuild_visualization" => "Rebuild visualization mesh only. Body: {\"target_edge_m\": <positive float>}. Requires a cached design.",
                 "GET /report" => "Engineering report for the last design (plain text; after POST /design and status idle)",
                 "GET /schema" => "This documentation",
             ),
@@ -261,6 +262,80 @@ function register_routes!()
                 "message" => "Report generation failed: $(sprint(showerror, e))",
             ))
         end
+    end
+
+    # ─── POST /rebuild_visualization ─────────────────────────────────────
+    # Rebuilds only the visualization mesh at a new target edge length (meters).
+    # Requires a completed design in cache. Body: {"target_edge_m": 0.5}
+    @post "/rebuild_visualization" function (req::HTTP.Request)
+        st = status_string(SERVER_STATUS)
+        if st != "idle"
+            return _json_resp(503, Dict(
+                "status" => "running",
+                "message" => "Server is busy. Wait until idle.",
+            ))
+        end
+        design = DESIGN_CACHE.last_design
+        if isnothing(design)
+            return _json_resp(404, Dict(
+                "status" => "error",
+                "message" => "No cached design. Run POST /design first.",
+            ))
+        end
+
+        body = try
+            JSON3.read(String(req.body))
+        catch e
+            return _json_bad(Dict("status" => "error", "message" => "Invalid JSON: $(sprint(showerror, e))"))
+        end
+
+        target_edge_val = get(body, :target_edge_m, nothing)
+        if isnothing(target_edge_val) || !(target_edge_val isa Number) || target_edge_val <= 0
+            return _json_bad(Dict(
+                "status" => "error",
+                "message" => "target_edge_m must be a positive number (meters).",
+            ))
+        end
+        target_edge = Float64(target_edge_val) * u"m"
+
+        _append_design_log!("Rebuilding visualization mesh (target_edge=$(target_edge_val) m).")
+        try
+            build_analysis_model!(design; target_edge_length=target_edge)
+        catch e
+            @warn "rebuild_visualization: build_analysis_model! failed" exception=(e, catch_backtrace())
+            _append_design_log!("Visualization rebuild failed: $(sprint(showerror, e))")
+            return _json_err(Dict(
+                "status" => "error",
+                "message" => "build_analysis_model! failed: $(sprint(showerror, e))",
+            ))
+        end
+
+        du = design.params.display_units
+        viz = _serialize_visualization(design, du)
+
+        # Patch the cached result with the new visualization
+        prev = DESIGN_CACHE.last_result
+        if !isnothing(prev) && prev isa APIOutput
+            DESIGN_CACHE.last_result = APIOutput(
+                status             = prev.status,
+                compute_time_s     = prev.compute_time_s,
+                phase_timings      = prev.phase_timings,
+                length_unit        = prev.length_unit,
+                thickness_unit     = prev.thickness_unit,
+                volume_unit        = prev.volume_unit,
+                mass_unit          = prev.mass_unit,
+                summary            = prev.summary,
+                slabs              = prev.slabs,
+                columns            = prev.columns,
+                beams              = prev.beams,
+                foundations         = prev.foundations,
+                geometry_hash      = prev.geometry_hash,
+                visualization      = viz,
+            )
+        end
+
+        _append_design_log!("Visualization rebuild complete.")
+        return _json_ok(Dict("status" => "ok", "visualization" => viz))
     end
 
     # ─── GET /result ─────────────────────────────────────────────────────

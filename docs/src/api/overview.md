@@ -133,6 +133,22 @@ When the server is busy, `POST /design` enqueues the request and returns:
 
 Fetch the last completed design result after a `POST /design` submission. Clients should poll `GET /status` until `"idle"` before calling this endpoint.
 
+### POST /rebuild\_visualization
+
+Rebuild **only** the visualization mesh at a different target edge length, without re-running the full design. Requires a completed design in cache (i.e. a successful `POST /design` has been run previously). The server re-meshes all shell elements at the requested resolution, re-solves the FEA, and returns the new visualization payload.
+
+Request body:
+
+```json
+{ "target_edge_m": 0.5 }
+```
+
+- `target_edge_m` (**required**, positive float): target mesh edge length in meters.
+
+Returns a JSON object with `"status": "ok"` and a `"visualization"` key containing the same visualization structure as the full design result. The cached `GET /result` is also updated with the new visualization.
+
+Returns **503** if the server is busy, **404** if no design has been cached yet, or **400** if `target_edge_m` is missing/invalid.
+
 ### GET /report
 
 Fetch a plain-text engineering report for the last completed design. Clients should poll `GET /status` until `"idle"` before calling this endpoint.

@@ -30,6 +30,7 @@ namespace Menegroth.GH.Components
     {
         // ─── Persisted state ────────────────────────────────────────────
         private string _serverUrl = MenegrothConfig.DefaultServerUrl;
+        private string? _apiKey;
         private bool _enableVisualization = true;
         /// <summary>Report units override: null = use DesignParams, "imperial" or "metric" = force.</summary>
         private string _reportUnitsOverride = null;
@@ -132,6 +133,37 @@ namespace Menegroth.GH.Components
 
             var cancelItem = Menu_AppendItem(menu, "Cancel", OnCancel);
             cancelItem.ToolTipText = "Cancel the current request (waiting for API or design)";
+
+            Menu_AppendSeparator(menu);
+            var apiKeyItem = Menu_AppendItem(menu, "Set API Key...", OnSetApiKey);
+            apiKeyItem.ToolTipText = "Set API key for server authentication (required when MENEGROTH_API_KEY is set on server)";
+            var clearApiKeyItem = Menu_AppendItem(menu, "Clear API Key", OnClearApiKey);
+            clearApiKeyItem.ToolTipText = "Remove stored API key";
+        }
+
+        private void OnSetApiKey(object sender, EventArgs e)
+        {
+            string result;
+            if (Rhino.UI.Dialogs.ShowEditBox(
+                "API Key",
+                "Enter the API key for the Menegroth server.\nLeave empty if the server does not require authentication.",
+                _apiKey ?? "",
+                false,
+                out result))
+            {
+                _apiKey = string.IsNullOrWhiteSpace(result) ? null : result.Trim();
+                MenegrothConfig.LastApiKey = _apiKey;
+                Message = string.IsNullOrEmpty(_apiKey) ? "" : "API key set";
+                ExpireSolution(true);
+            }
+        }
+
+        private void OnClearApiKey(object sender, EventArgs e)
+        {
+            _apiKey = null;
+            MenegrothConfig.LastApiKey = null;
+            Message = "";
+            ExpireSolution(true);
         }
 
         private void OnToggleVisualization(object sender, EventArgs e)
@@ -178,6 +210,8 @@ namespace Menegroth.GH.Components
         public override bool Write(GH_IO.Serialization.GH_IWriter writer)
         {
             writer.SetString("ServerUrl", _serverUrl);
+            if (!string.IsNullOrEmpty(_apiKey))
+                writer.SetString("ApiKey", _apiKey);
             writer.SetBoolean("EnableVisualization", _enableVisualization);
             if (!string.IsNullOrEmpty(_reportUnitsOverride))
                 writer.SetString("ReportUnitsOverride", _reportUnitsOverride);
@@ -188,6 +222,11 @@ namespace Menegroth.GH.Components
         {
             if (reader.ItemExists("ServerUrl"))
                 _serverUrl = reader.GetString("ServerUrl");
+            if (reader.ItemExists("ApiKey"))
+            {
+                _apiKey = reader.GetString("ApiKey");
+                MenegrothConfig.LastApiKey = _apiKey;
+            }
             if (reader.ItemExists("EnableVisualization"))
                 _enableVisualization = reader.GetBoolean("EnableVisualization");
             if (reader.ItemExists("ReportUnitsOverride"))
@@ -288,6 +327,8 @@ namespace Menegroth.GH.Components
 
             string url = string.IsNullOrWhiteSpace(urlInput) ? _serverUrl : urlInput;
             _serverUrl = url;
+            MenegrothConfig.LastServerUrl = url;
+            MenegrothConfig.LastApiKey = _apiKey;
 
             // 2. Async work just finished
             if (_state == RunState.Done)
@@ -323,6 +364,7 @@ namespace Menegroth.GH.Components
                         : _state == RunState.Polling      ? "Waiting..."
                         : "Working...";
                 AddRuntimeMessage(GH_RuntimeMessageLevel.Remark, Message);
+                PrepareResultDisplayUnits(_lastParsed);
                 DA.SetData(2, GetLogSnapshot());
                 SetFailureOutputs(DA, _lastParsed);
                 if (_lastParsed != null)
@@ -338,6 +380,7 @@ namespace Menegroth.GH.Components
             // 4. Run = false → cached or ready
             if (!run)
             {
+                PrepareResultDisplayUnits(_lastParsed);
                 DA.SetData(2, GetLogSnapshot());
                 SetFailureOutputs(DA, _lastParsed);
                 if (_lastParsed != null)
@@ -384,6 +427,7 @@ namespace Menegroth.GH.Components
                     });
                 }
 
+                PrepareResultDisplayUnits(_lastParsed);
                 DA.SetData(0, new DesignResultGoo(_lastParsed));
                 DA.SetData(1, _lastParsed.RawJson);
                 DA.SetData(2, GetLogSnapshot());
@@ -652,6 +696,7 @@ namespace Menegroth.GH.Components
                 ScheduleExpire(doc);
             });
 
+            PrepareResultDisplayUnits(_lastParsed);
             DA.SetData(2, GetLogSnapshot());
             SetFailureOutputs(DA, _lastParsed);
             if (_lastParsed != null)
@@ -665,8 +710,17 @@ namespace Menegroth.GH.Components
 
         // ─── Output helper ──────────────────────────────────────────────
 
+        private void PrepareResultDisplayUnits(DesignResult result)
+        {
+            if (result == null) return;
+            result.DisplayLengthUnit = _reportUnitsOverride?.Equals("imperial", StringComparison.OrdinalIgnoreCase) == true ? "ft"
+                : _reportUnitsOverride?.Equals("metric", StringComparison.OrdinalIgnoreCase) == true ? "m"
+                : result.LengthUnit ?? "ft";
+        }
+
         private void EmitResult(IGH_DataAccess DA, DesignResult result)
         {
+            PrepareResultDisplayUnits(result);
             DA.SetData(2, GetLogSnapshot());
             SetFailureOutputs(DA, result);
             if (result != null)

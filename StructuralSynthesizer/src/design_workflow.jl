@@ -1201,6 +1201,42 @@ function _populate_foundation_results!(design::BuildingDesign, struc::BuildingSt
     end
 end
 
+"""Axis-aligned bounding box of all slab cell vertices in meters: (xmin, xmax, ymin, ymax)."""
+function _slab_bbox_m(struc::BuildingStructure, slab)
+    skel = struc.skeleton
+    xmin = ymin =  Inf
+    xmax = ymax = -Inf
+    for ci in slab.cell_indices
+        cell = struc.cells[ci]
+        for vi in skel.face_vertex_indices[cell.face_idx]
+            c = Meshes.coords(skel.vertices[vi])
+            x = ustrip(u"m", c.x)
+            y = ustrip(u"m", c.y)
+            x < xmin && (xmin = x)
+            x > xmax && (xmax = x)
+            y < ymin && (ymin = y)
+            y > ymax && (ymax = y)
+        end
+    end
+    return (xmin=xmin, xmax=xmax, ymin=ymin, ymax=ymax)
+end
+
+"""
+Trimmed full plan extents (with units) of a drop panel at column center `(cx, cy)`,
+clamped to the slab bounding box.  Returns `(a1_eff, a2_eff)` in meters.
+"""
+function _trimmed_drop_extents_m(dp::StructuralSizer.DropPanelGeometry, cx::Float64, cy::Float64, bbox)
+    a1 = ustrip(u"m", dp.a_drop_1)
+    a2 = ustrip(u"m", dp.a_drop_2)
+    x0 = max(cx - a1, bbox.xmin)
+    x1 = min(cx + a1, bbox.xmax)
+    y0 = max(cy - a2, bbox.ymin)
+    y1 = min(cy + a2, bbox.ymax)
+    eff1 = max(x1 - x0, 0.0) * u"m"
+    eff2 = max(y1 - y0, 0.0) * u"m"
+    return (eff1, eff2)
+end
+
 """Compute summary metrics: critical element search + material quantity aggregation."""
 function _compute_design_summary!(design::BuildingDesign, struc::BuildingStructure, params::DesignParameters)
     summary = design.summary
@@ -1313,14 +1349,20 @@ function _compute_design_summary!(design::BuildingDesign, struc::BuildingStructu
                 end
             end
         end
-        # Drop panel concrete (additional thickness beyond the slab)
+        # Drop panel concrete — one panel per supporting column, trimmed to slab boundary
         if !isnothing(slab.drop_panel)
             dp = slab.drop_panel
-            h_slab = r isa StructuralSizer.FlatPlatePanelResult ? r.thickness : 0.0u"m"
-            if h_slab > 0.0u"m"
-                a1_full = 2 * dp.a_drop_1  # full extent
-                a2_full = 2 * dp.a_drop_2
-                dv = StructuralSizer.drop_panel_concrete_volume(dp.h_drop, a1_full, a2_full, h_slab)
+            slab_cells = Set(slab.cell_indices)
+            slab_bbox = _slab_bbox_m(struc, slab)
+            for (col_idx, col) in enumerate(struc.columns)
+                isempty(intersect(col.tributary_cell_indices, slab_cells)) && continue
+                v_idx = col.vertex_idx
+                (v_idx < 1 || v_idx > length(struc.skeleton.vertices)) && continue
+                c = Meshes.coords(struc.skeleton.vertices[v_idx])
+                cx = ustrip(u"m", c.x)
+                cy = ustrip(u"m", c.y)
+                a1_eff, a2_eff = _trimmed_drop_extents_m(dp, cx, cy, slab_bbox)
+                dv = StructuralSizer.drop_panel_concrete_volume(dp, a1_eff, a2_eff)
                 total_conc_vol += uconvert(u"m^3", dv)
             end
         end

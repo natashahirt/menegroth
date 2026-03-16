@@ -21,9 +21,9 @@ namespace Menegroth.GH.Helpers
         public static readonly Color EarthenMaterialColor = Color.FromArgb(194, 154, 108);
         
         /// <summary>
-        /// Concrete material color (neutral gray).
+        /// Concrete material color (neutral gray, matches Julia NWC default #C8C8C8).
         /// </summary>
-        public static readonly Color ConcreteMaterialColor = Color.FromArgb(180, 180, 180);
+        public static readonly Color ConcreteMaterialColor = Color.FromArgb(200, 200, 200);
 
         /// <summary>
         /// Green → yellow → red gradient by utilization ratio (0 → 1).

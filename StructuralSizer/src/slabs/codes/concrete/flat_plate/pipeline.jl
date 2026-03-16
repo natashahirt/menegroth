@@ -1329,10 +1329,12 @@ function size_flat_plate!(
                     )
                 end
             elseif Threads.nthreads() > 1
-                # Per-thread caches to avoid Dict race condition
+                # Per-thread caches to avoid Dict race condition.
+                # Use :static scheduler so threadid() stays in 1:nthreads() (Julia 1.12+ allows
+                # task migration; dynamic scheduler can yield threadid() > nthreads()).
                 nt = Threads.nthreads()
                 thread_caches = [Dict{Any,Any}() for _ in 1:nt]
-                Threads.@threads for i in 1:n_cols_ps
+                Threads.@threads :static for i in 1:n_cols_ps
                     punching_local[i] = check_punching_for_column(
                         columns[i], moment_results.column_shears[i],
                         moment_results.unbalanced_moments[i], d, h, fc;

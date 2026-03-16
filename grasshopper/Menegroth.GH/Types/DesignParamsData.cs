@@ -35,6 +35,8 @@ namespace Menegroth.GH.Types
         public string ColumnCatalog { get; set; } = "preferred";
         /// <summary>RC columns only: discrete (MIP) or nlp (continuous).</summary>
         public string ColumnSizingStrategy { get; set; } = "discrete";
+        /// <summary>MIP solver time limit (seconds) when discrete sizing. Default: 30.</summary>
+        public double? MipTimeLimitSec { get; set; } = null;
         public string BeamType { get; set; } = "steel_w";
         /// <summary>RC beam catalog when BeamType is rc_rect or rc_tbeam: standard, small, large, xlarge, all, custom. Default: large.</summary>
         public string BeamCatalog { get; set; } = "large";
@@ -99,6 +101,7 @@ namespace Menegroth.GH.Types
                 ["column_type"] = ColumnType,
                 ["column_catalog"] = ColumnCatalog,
                 ["column_sizing_strategy"] = ColumnSizingStrategy ?? "discrete",
+                ["mip_time_limit_sec"] = MipTimeLimitSec,
                 ["beam_type"] = BeamType,
                 ["beam_catalog"] = BeamCatalog,
                 ["beam_sizing_strategy"] = BeamSizingStrategy ?? "discrete",

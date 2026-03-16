@@ -2,8 +2,9 @@
 # API Routes — Oxygen HTTP endpoint definitions
 # =============================================================================
 
-using Oxygen
+using CodecZlib
 using HTTP
+using Oxygen
 
 # ─── Global state ─────────────────────────────────────────────────────────────
 
@@ -66,6 +67,21 @@ function _query_int(req::HTTP.Request, key::String, default::Int=0)
     return default
 end
 
+"""Return query param value for key, or nothing if absent/invalid."""
+function _query_string(req::HTTP.Request, key::String)::Union{String, Nothing}
+    target = String(req.target)
+    qidx = findfirst('?', target)
+    qidx === nothing && return nothing
+    query = target[qidx + 1:end]
+    for pair in split(query, '&')
+        kv = split(pair, '='; limit=2)
+        length(kv) == 2 || continue
+        strip(lowercase(kv[1])) == key || continue
+        return strip(kv[2])
+    end
+    return nothing
+end
+
 # ─── JSON helpers ─────────────────────────────────────────────────────────────
 
 """Build a JSON HTTP response with the given status code."""
@@ -80,6 +96,19 @@ _json_ok(obj) = _json_resp(200, obj)
 _json_bad(obj) = _json_resp(400, obj)
 """HTTP 500 JSON response."""
 _json_err(obj) = _json_resp(500, obj)
+
+"""Build a JSON response, gzip-compressing the body when the client accepts it."""
+function _json_resp_maybe_gzip(req::HTTP.Request, status_code::Int, obj)
+    body_str = JSON3.write(obj)
+    headers = ["Content-Type" => "application/json"]
+    enc = HTTP.header(req, "Accept-Encoding", "")
+    if occursin(r"gzip"i, enc)
+        body_bytes = transcode(GzipCompressor, Vector{UInt8}(body_str))
+        push!(headers, "Content-Encoding" => "gzip")
+        return HTTP.Response(status_code, headers, body_bytes)
+    end
+    return HTTP.Response(status_code, headers, body_str)
+end
 
 """Parse a JSON request body into `APIInput`, returning `(input, nothing)` on
 success or `(nothing, HTTP.Response)` with a 400 error on parse failure."""
@@ -153,6 +182,7 @@ function register_routes!()
                 "GET /env-check" => "Whether Gurobi env vars are set (presence only, no values)",
                 "GET /logs?since=N" => "Streaming design logs; returns lines after cursor N",
                 "GET /result" => "Last completed design result (after POST /design and status idle)",
+                "GET /report" => "Engineering report for the last design (plain text; after POST /design and status idle)",
                 "GET /schema" => "This documentation",
             ),
         )
@@ -211,10 +241,47 @@ function register_routes!()
         ))
     end
 
+    # ─── GET /report ─────────────────────────────────────────────────────
+    # Returns the engineering report for the last completed design as plain text.
+    # Query param: ?units=imperial or ?units=metric to override DesignParams display units.
+    @get "/report" function (req::HTTP.Request)
+        st = status_string(SERVER_STATUS)
+        if st != "idle"
+            return _json_resp(503, Dict(
+                "status" => "running",
+                "message" => "Design still in progress. Poll GET /status until idle.",
+            ))
+        end
+        if isnothing(DESIGN_CACHE.last_design)
+            return _json_resp(404, Dict(
+                "status" => "error",
+                "message" => "No design available. Submit a design first.",
+            ))
+        end
+        report_units = nothing
+        units_val = _query_string(req, "units")
+        if units_val in ("imperial", "metric")
+            report_units = Symbol(units_val)
+        end
+        try
+            buf = IOBuffer()
+            engineering_report(DESIGN_CACHE.last_design; io=buf, report_units=report_units)
+            report_text = String(take!(buf))
+            return HTTP.Response(200, ["Content-Type" => "text/plain; charset=utf-8"], report_text)
+        catch e
+            @error "Report generation failed" exception=(e, catch_backtrace())
+            return _json_err(Dict(
+                "status" => "error",
+                "message" => "Report generation failed: $(sprint(showerror, e))",
+            ))
+        end
+    end
+
     # ─── GET /result ─────────────────────────────────────────────────────
     # Returns the last completed design result (for async submit-then-poll flow).
     # Use after POST /design returns 202 or "queued": poll GET /status until idle, then GET /result.
-    @get "/result" function (_::HTTP.Request)
+    # Compresses response with gzip when client sends Accept-Encoding: gzip.
+    @get "/result" function (req::HTTP.Request)
         st = status_string(SERVER_STATUS)
         if st != "idle"
             return _json_resp(503, Dict(
@@ -228,7 +295,7 @@ function register_routes!()
                 "message" => "No result available. Submit a design first.",
             ))
         end
-        return _json_ok(DESIGN_CACHE.last_result)
+        return _json_resp_maybe_gzip(req, 200, DESIGN_CACHE.last_result)
     end
 
     return nothing
@@ -341,18 +408,20 @@ function _execute_design(input::APIInput)
         
         # Build analysis model for visualization (if not already built).
         # This is a fallback — normally built inside design_building before restore.
-        if isnothing(design.asap_model)
+        if !params.skip_visualization && isnothing(design.asap_model)
             _append_design_log!("Building analysis model for visualization (fallback).")
+            target_edge = isnothing(params.visualization_target_edge_m) ? nothing : params.visualization_target_edge_m * u"m"
             try
-                build_analysis_model!(design)
+                build_analysis_model!(design; target_edge_length=target_edge)
             catch e
                 @warn "Fallback build_analysis_model! failed — proceeding without shell mesh" exception=(e, catch_backtrace())
                 _append_design_log!("Analysis model build failed: $(sprint(showerror, e)). Proceeding with frame-only visualization.")
             end
         end
-        
+
         output = design_to_json(design; geometry_hash=geo_hash)
         DESIGN_CACHE.last_result = output
+        DESIGN_CACHE.last_design = design
         _append_design_log!("Design result serialized.")
 
         return _json_ok(output)

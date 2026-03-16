@@ -16,10 +16,11 @@ mutable struct DesignCache
     skeleton::Union{BuildingSkeleton, Nothing}
     structure::Union{BuildingStructure, Nothing}
     last_result::Union{APIOutput, APIError, Nothing}
+    last_design::Union{BuildingDesign, Nothing}
 end
 
 """Create an empty `DesignCache` with no stored geometry or results."""
-DesignCache() = DesignCache("", nothing, nothing, nothing)
+DesignCache() = DesignCache("", nothing, nothing, nothing, nothing)
 
 """
     compute_geometry_hash(input::APIInput) -> String

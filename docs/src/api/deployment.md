@@ -146,7 +146,11 @@ Store the value in AWS Secrets Manager and inject it as an environment variable 
 ### Performance Tuning
 
 - **`SS_ENABLE_HEAVY_PRECOMPILE_WORKLOAD`** — runs a representative design on startup to compile all code paths. Increases startup time by ~30s but eliminates first-request latency.
-- **Visualization payload size** — the current server always builds an analysis model and returns `visualization` in `POST /design`. Reducing response size/latency would require adding an API option (or server-side toggle) to skip visualization serialization.
+- **Visualization payload size** — use `visualization_detail: "minimal"` in params to skip deflected slab meshes and reduce payload size.
+
+### Gzip compression
+
+The `GET /result` endpoint compresses its response with gzip when the client sends `Accept-Encoding: gzip` (or `gzip, deflate`). The Grasshopper client uses `HttpClient` with `AutomaticDecompression`, so it automatically requests gzip and decompresses responses. No configuration is needed on AWS — compression is negotiated per request. Large design results (with visualization) can be 2–5× smaller over the wire.
 
 ## Health Check Configuration
 

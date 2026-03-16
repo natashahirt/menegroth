@@ -6,6 +6,8 @@
 export JULIA_DEPOT_PATH="${JULIA_DEPOT_PATH:-/app/.julia}"
 export JULIA_CPU_TARGET="${JULIA_CPU_TARGET:-generic}"
 export JULIA_PKG_PRECOMPILE_AUTO="${JULIA_PKG_PRECOMPILE_AUTO:-0}"
+# Use all available cores for threading (MIP feasibility, NLP, foundations, slabs, Asap).
+export JULIA_NUM_THREADS="${JULIA_NUM_THREADS:-auto}"
 
 set -e
 if [ -n "${GRB_LICENSE_CONTENTS}" ]; then

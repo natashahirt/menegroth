@@ -9,7 +9,7 @@
 # Uses PMInteractionDiagram{RCCircularSection} from column_pm_rect.jl
 # ==============================================================================
 
-using Asap: to_inches, to_sqinches
+using Asap: to_inches, to_sqinches, to_kip, to_kipft
 
 """
     calculate_PM_at_c(section::RCCircularSection, mat, c_in::Real) -> NamedTuple
@@ -500,6 +500,180 @@ function _add_intermediate_points_circular(
     push!(all_points, control_points[end])    # Pure tension
     
     return all_points
+end
+
+# ==============================================================================
+# Circular Column Reinforcement Design for Fixed Diameter
+# ==============================================================================
+
+"""
+    design_circular_column_reinforcement(
+        D::Length,
+        Pu::Real, Mu::Real,
+        mat;
+        cover::Length = 1.5u"inch",
+        tie_type::Symbol = :spiral,
+        bar_sizes = [6, 7, 8, 9, 10, 11],
+        n_bars_options = [6, 8, 10, 12, 14, 16, 20],
+        min_rho::Float64 = 0.01,
+        max_rho::Float64 = 0.08
+    ) -> RCCircularSection
+
+Design reinforcement for a circular column with fixed diameter to resist given demands.
+
+Uses P-M interaction analysis to find the minimum reinforcement that:
+1. Provides adequate capacity for (Pu, Mu)
+2. Satisfies ACI 318-11 ρg limits (0.01 ≤ ρg ≤ 0.08)
+
+# Arguments
+- `D`: Column diameter (with units)
+- `Pu`: Factored axial load (kip, positive = compression)
+- `Mu`: Factored moment (kip-ft)
+- `mat`: Concrete material (Concrete or ReinforcedConcreteMaterial)
+- `cover`: Clear cover (default 1.5")
+- `tie_type`: :spiral (default) or :tied
+- `bar_sizes`: Available bar sizes to try (ascending order preferred)
+- `n_bars_options`: Number of bars to try (min 6 for spiral, 4 for tied)
+- `min_rho`, `max_rho`: ACI reinforcement ratio limits
+
+# Returns
+RCCircularSection with minimum reinforcement that satisfies demands and ρg ≥ min_rho
+
+# Notes
+- Tries combinations in order of increasing steel area
+- First valid combination is returned (minimum weight)
+- Throws error if no valid combination found
+
+# Example
+```julia
+D = 20u"inch"
+Pu, Mu = 300.0, 150.0  # kip, kip-ft
+section = design_circular_column_reinforcement(D, Pu, Mu, NWC_4000)
+```
+"""
+function design_circular_column_reinforcement(
+    D::Length,
+    Pu::Real, Mu::Real,
+    mat;
+    cover::Length = 1.5u"inch",
+    tie_type::Symbol = :spiral,
+    bar_sizes = [6, 7, 8, 9, 10, 11],
+    n_bars_options = [6, 8, 10, 12, 14, 16, 20],
+    min_rho::Float64 = 0.01,
+    max_rho::Float64 = 0.08
+)
+    D_in = ustrip(u"inch", uconvert(u"inch", D))
+    Ag = π * D_in^2 / 4
+
+    # Standard bar areas (ASTM A615)
+    bar_areas = Dict(
+        3 => 0.11, 4 => 0.20, 5 => 0.31, 6 => 0.44,
+        7 => 0.60, 8 => 0.79, 9 => 1.00, 10 => 1.27,
+        11 => 1.56, 14 => 2.25, 18 => 4.00
+    )
+
+    # Minimum number of bars (ACI 10.7.3.1)
+    min_bars = tie_type == :spiral ? 6 : 4
+
+    # Generate candidates sorted by steel area (ascending = minimum weight first)
+    candidates = Tuple{Int, Int, Float64}[]  # (bar_size, n_bars, As)
+
+    for bar_size in bar_sizes
+        Ab = get(bar_areas, bar_size, 0.0)
+        Ab > 0 || continue
+        for n_bars in n_bars_options
+            n_bars >= min_bars || continue
+
+            As = n_bars * Ab
+            ρ = As / Ag
+
+            # Skip if outside ACI limits
+            (min_rho ≤ ρ ≤ max_rho) || continue
+
+            push!(candidates, (bar_size, n_bars, As))
+        end
+    end
+
+    # Sort by steel area (minimum first)
+    sort!(candidates, by = x -> x[3])
+
+    # Convert demands to ACI units
+    Pu_kip = ustrip(to_kip(Pu))
+    Mu_kipft = ustrip(to_kipft(Mu))
+
+    # Try each candidate
+    for (bar_size, n_bars, As) in candidates
+        try
+            section = RCCircularSection(
+                D = D,
+                bar_size = bar_size,
+                n_bars = n_bars,
+                cover = cover,
+                tie_type = tie_type
+            )
+
+            # Check P-M capacity using the diagram
+            diagram = generate_PM_diagram(section, mat; n_intermediate = 10)
+            result = check_PM_capacity(diagram, Pu_kip, Mu_kipft)
+
+            if result.adequate
+                return section
+            end
+        catch e
+            @debug "Skipping bar arrangement" n_bars bar_size exception = (e, catch_backtrace())
+            continue
+        end
+    end
+
+    # No valid combination found
+    error("Cannot design reinforcement for D=$(round(D_in, digits=1))\" circular column " *
+          "with Pu=$(Pu_kip) kip, Mu=$(Mu_kipft) kip-ft. Consider larger diameter.")
+end
+
+# ==============================================================================
+# Resize Circular Column with Reinforcement Redesign
+# ==============================================================================
+
+"""
+    resize_column_with_reinforcement(
+        section::RCCircularSection,
+        new_b::Length, new_c::Length,
+        Pu::Real, Mu::Real,
+        mat;
+        kwargs...
+    ) -> RCCircularSection
+
+Resize a circular column to a new diameter while properly re-designing reinforcement.
+
+For circular columns, `new_b` and `new_c` from the slab pipeline both represent the
+diameter (they are kept equal for axisymmetric sections). Uses the larger value
+as the new diameter and redesigns reinforcement via P-M interaction.
+
+# Arguments
+- `section`: Original RCCircularSection (used for cover and tie_type defaults)
+- `new_b`, `new_c`: New column dimensions (both = diameter for circular)
+- `Pu`, `Mu`: Design demands (kip, kip-ft)
+- `mat`: Concrete material
+- `kwargs`: Passed to design_circular_column_reinforcement
+
+# Returns
+New RCCircularSection with properly designed reinforcement
+"""
+function resize_column_with_reinforcement(
+    section::RCCircularSection,
+    new_b::Length, new_c::Length,
+    Pu::Real, Mu::Real,
+    mat;
+    kwargs...
+)
+    # For circular columns, new_b and new_c both represent the diameter
+    new_D = max(uconvert(u"inch", new_b), uconvert(u"inch", new_c))
+    design_circular_column_reinforcement(
+        new_D, Pu, Mu, mat;
+        cover = section.cover,
+        tie_type = section.tie_type,
+        kwargs...
+    )
 end
 
 # ==============================================================================

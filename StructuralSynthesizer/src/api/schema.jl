@@ -74,8 +74,12 @@ function api_input_schema()
                     "method" => "DDM | DDM_SIMPLIFIED | EFM | EFM_HARDY_CROSS | FEA. Default: DDM.",
                     "deflection_limit" => "L_240 | L_360 | L_480. Default: L_360.",
                     "punching_strategy" => "grow_columns | reinforce_last | reinforce_first. Default: grow_columns.",
+                    "target_edge_m" => "Optional. FEA mesh target edge length (m). Default: adaptive clamp(min_span/20, 0.15, 0.75). Used when method is FEA.",
                     "vault_lambda" => "Optional vault span/rise ratio (dimensionless, > 0). Used when floor_type is vault.",
                 ),
+                "visualization_target_edge_m" => "Optional. Visualization shell mesh target edge (m). Default: inherits from FEA target_edge when method is FEA, else adaptive. Coarser = faster viz.",
+                "skip_visualization" => "When true, skip shell mesh build and visualization serialization (faster response, frame-only). Default: false.",
+                "visualization_detail" => "minimal | full. minimal = frame elements + slab boundaries only (no deflected meshes, no per-face analytical). full = full visualization. Default: full.",
                 "scoped_overrides" => "Optional list of scoped floor overrides. Each override provides face polygons and floor-specific options applied only to matching cells.",
                 "materials" => Dict(
                     "concrete" => "Slab/floor concrete (e.g. NWC_4000, Earthen_500, Earthen_2000). Default: NWC_4000.",
@@ -86,6 +90,7 @@ function api_input_schema()
                 "column_type" => "rc_rect | rc_circular | steel_w | steel_hss | steel_pipe | pixelframe. Default: rc_rect.",
                 "column_catalog" => "Optional column catalog (string or null). Steel (steel_w/steel_hss/steel_pipe): compact_only | preferred | all. RC rectangular (rc_rect): standard | square | rectangular | low_capacity | high_capacity | all. RC circular (rc_circular): standard | low_capacity | high_capacity | all. Ignored for pixelframe. If omitted or null: defaults to preferred (steel) or standard (RC).",
                 "column_sizing_strategy" => "discrete (MIP catalog) or nlp (continuous Ipopt). Default: discrete. Applies to RC and steel columns.",
+                "mip_time_limit_sec" => "MIP solver time limit (seconds) when discrete sizing. Default: 30.",
                 "beam_type" => "steel_w | steel_hss | rc_rect | rc_tbeam | pixelframe. Default: steel_w.",
                 "beam_catalog" => "RC beam catalog when beam_type is rc_rect or rc_tbeam: standard | small | large | xlarge | all | custom. Default: large. Use xlarge for vaults with high thrust. Use custom with beam_catalog_bounds for bounds-based catalog. Ignored for pixelframe.",
                 "beam_sizing_strategy" => "discrete (MIP catalog) or nlp (continuous Ipopt). Default: discrete. Applies to RC and steel beams.",
@@ -144,6 +149,7 @@ Base.@kwdef mutable struct APIFloorOptions
     method::String = "DDM"
     deflection_limit::String = "L_360"
     punching_strategy::String = "grow_columns"
+    target_edge_m::Union{Float64, Nothing} = nothing  # FEA mesh target edge (m). Default: adaptive.
     vault_lambda::Union{Float64, Nothing} = nothing
 end
 
@@ -241,6 +247,7 @@ Base.@kwdef mutable struct APIParams
     # Ignored for pixelframe.
     column_catalog::Union{String, Nothing} = nothing
     column_sizing_strategy::String = "discrete"  # RC columns only: discrete | nlp
+    mip_time_limit_sec::Union{Float64, Nothing} = nothing  # MIP time limit (s). Default: 30.
     beam_type::String = "steel_w"
     beam_catalog::String = "large"   # RC beam catalog: standard | small | large | xlarge | all | custom. Ignored for steel.
     beam_sizing_strategy::String = "discrete"  # RC beams only: discrete | nlp
@@ -254,6 +261,9 @@ Base.@kwdef mutable struct APIParams
     foundation_options::Union{APIFoundationOptions, Nothing} = nothing
     scoped_overrides::Vector{APIScopedOverride} = APIScopedOverride[]
     geometry_is_centerline::Bool = false
+    visualization_target_edge_m::Union{Float64, Nothing} = nothing  # Viz shell mesh target edge (m). Default: FEA or adaptive.
+    skip_visualization::Bool = false  # Skip shell mesh + viz serialization for faster response.
+    visualization_detail::String = "full"  # "minimal" | "full". minimal = no deflected slab meshes.
 end
 
 """
@@ -482,6 +492,7 @@ end
 Base.@kwdef struct APIOutput
     status::String = "ok"
     compute_time_s::Float64 = 0.0
+    phase_timings::Dict{String, Float64} = Dict{String, Float64}()
     length_unit::String = "ft"
     thickness_unit::String = "in"
     volume_unit::String = "ft3"

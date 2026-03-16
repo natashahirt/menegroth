@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Net;
 using System.Net.Http;
 using System.Text;
 using System.Threading;
@@ -12,10 +13,12 @@ namespace Menegroth.GH.Helpers
     /// <summary>
     /// HTTP client for the Menegroth Julia sizing API.
     /// Handles health checks, design submission, result retrieval, and status polling.
+    /// Supports gzip/deflate decompression when the server sends compressed responses.
     /// </summary>
     public static class DesignRunHttpClient
     {
-        private static readonly HttpClient Client = new HttpClient
+        private static readonly HttpClient Client = new HttpClient(
+            new HttpClientHandler { AutomaticDecompression = DecompressionMethods.GZip | DecompressionMethods.Deflate })
         {
             Timeout = MenegrothConfig.HttpClientTimeout
         };
@@ -52,9 +55,13 @@ namespace Menegroth.GH.Helpers
             return body;
         }
 
+        /// <summary>
+        /// Fetches the design result with retries. Retries on 503 (design still running) and 404
+        /// (result not yet cached — race between idle state and last_result visibility).
+        /// </summary>
         public static async Task<string> GetResultWithRetryAsync(string baseUrl, CancellationToken cancellationToken = default)
         {
-            const int maxRetries = 10;
+            const int maxRetries = 15;
             const int retryDelayMs = 1000;
 
             for (int attempt = 1; attempt <= maxRetries; attempt++)
@@ -71,7 +78,9 @@ namespace Menegroth.GH.Helpers
                     return body;
                 }
 
-                if ((int)response.StatusCode == 503 && attempt < maxRetries)
+                // 503: design still in progress — retry
+                // 404: idle but result not yet cached (race) — retry to allow cache write to complete
+                if (((int)response.StatusCode == 503 || (int)response.StatusCode == 404) && attempt < maxRetries)
                 {
                     await Task.Delay(retryDelayMs, cancellationToken);
                     continue;
@@ -82,6 +91,31 @@ namespace Menegroth.GH.Helpers
             }
 
             throw new DesignRunHttpException("GET /result failed after retries.");
+        }
+
+        /// <summary>
+        /// After seeing idle, polls /status until has_result is true (handles race where
+        /// state becomes idle before last_result is cached). Max wait ~5 s.
+        /// </summary>
+        public static async Task WaitForResultReadyAsync(string baseUrl, CancellationToken cancellationToken = default)
+        {
+            const int maxAttempts = 10;
+            const int delayMs = 500;
+
+            for (int i = 0; i < maxAttempts; i++)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+
+                var resp = await Client.GetAsync(NormalizeUrl(baseUrl, "status"), cancellationToken);
+                var body = await resp.Content.ReadAsStringAsync();
+                var jobj = JObject.Parse(body);
+                bool hasResult = jobj["has_result"]?.ToObject<bool>() ?? false;
+
+                if (hasResult)
+                    return;
+
+                await Task.Delay(delayMs, cancellationToken);
+            }
         }
 
         /// <summary>
@@ -168,6 +202,33 @@ namespace Menegroth.GH.Helpers
             }
 
             return (next, lines);
+        }
+
+        /// <summary>
+        /// Fetches the engineering report as plain text from GET /report.
+        /// When unitsOverride is "imperial" or "metric", appends ?units= to override DesignParams display units.
+        /// Returns the report string, or an empty string if unavailable.
+        /// </summary>
+        public static async Task<string> GetReportAsync(string baseUrl, CancellationToken cancellationToken = default, string unitsOverride = null)
+        {
+            try
+            {
+                var path = "report";
+                if (!string.IsNullOrWhiteSpace(unitsOverride) &&
+                    (unitsOverride.Equals("imperial", StringComparison.OrdinalIgnoreCase) ||
+                     unitsOverride.Equals("metric", StringComparison.OrdinalIgnoreCase)))
+                {
+                    path = $"report?units={unitsOverride.ToLowerInvariant()}";
+                }
+                var response = await Client.GetAsync(NormalizeUrl(baseUrl, path), cancellationToken);
+                if (!response.IsSuccessStatusCode)
+                    return "";
+                return await response.Content.ReadAsStringAsync();
+            }
+            catch
+            {
+                return "";
+            }
         }
 
         private static string NormalizeUrl(string baseUrl, string path)

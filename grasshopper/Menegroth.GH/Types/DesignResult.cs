@@ -12,6 +12,8 @@ namespace Menegroth.GH.Types
         public string RawJson { get; set; } = "";
         public string Status { get; set; } = "unknown";
         public double ComputeTime { get; set; }
+        /// <summary>Per-phase wall-clock times (s): prepare, pipeline, capture, analysis_model, restore, serialize_visualization.</summary>
+        public Dictionary<string, double> PhaseTimings { get; set; } = new Dictionary<string, double>();
         public string ErrorMessage { get; set; } = "";
         public string GeometryHash { get; set; } = "";
 
@@ -74,6 +76,17 @@ namespace Menegroth.GH.Types
             r.Status = root["status"]?.ToString() ?? "unknown";
             r.ComputeTime = root["compute_time_s"]?.ToObject<double>() ?? 0;
             r.GeometryHash = root["geometry_hash"]?.ToString() ?? "";
+
+            var phaseTimings = root["phase_timings"] as JObject;
+            if (phaseTimings != null)
+            {
+                foreach (var prop in phaseTimings.Properties())
+                {
+                    var val = prop.Value?.ToObject<double>();
+                    if (val.HasValue)
+                        r.PhaseTimings[prop.Name] = val.Value;
+                }
+            }
 
             if (r.Status == "error")
             {

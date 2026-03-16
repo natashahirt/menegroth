@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Net.Http;
 using System.Text;
 using System.Threading;
@@ -29,11 +30,15 @@ namespace Menegroth.GH.Components
     {
         // ─── Persisted state ────────────────────────────────────────────
         private string _serverUrl = MenegrothConfig.DefaultServerUrl;
+        private bool _enableVisualization = true;
+        /// <summary>Report units override: null = use DesignParams, "imperial" or "metric" = force.</summary>
+        private string _reportUnitsOverride = null;
 
         // ─── Cached results ─────────────────────────────────────────────
         private string _lastGeoHash = "";
         private string _lastParamsHash = "";
         private DesignResult _lastParsed;
+        private string _lastReport = "";
         private double _lastComputeTime;
 
         // ─── Async state machine ────────────────────────────────────────
@@ -45,6 +50,8 @@ namespace Menegroth.GH.Components
             set => _stateInt = (int)value;
         }
         private DesignResult _pendingParsed;
+        private string _pendingReport = "";
+        private string _lastReportUnitsOverride = null;  // units used when _lastReport was fetched
         private string _pendingError = "";
         private string _pendingGeoHash = "";
         private string _pendingParamsHash = "";
@@ -99,6 +106,8 @@ namespace Menegroth.GH.Components
                 "Number of failing elements in the latest result", GH_ParamAccess.item);
             pManager.AddTextParameter("Failure Messages", "FailureMessages",
                 "Per-element failure messages from the latest result", GH_ParamAccess.list);
+            pManager.AddTextParameter("Report", "Report",
+                "Engineering report for design review (wire to Panel)", GH_ParamAccess.item);
         }
 
         // ─── Right-click menu ───────────────────────────────────────────
@@ -111,8 +120,37 @@ namespace Menegroth.GH.Components
             var resetItem = Menu_AppendItem(menu, "Reset Cache", OnResetCache);
             resetItem.ToolTipText = "Clear cached results and force a fresh analysis run";
 
+            var vizItem = Menu_AppendItem(menu, "Enable Visualization", OnToggleVisualization, true, _enableVisualization);
+            vizItem.ToolTipText = "When off, skip shell mesh build and visualization (faster response, no deflected slabs)";
+
+            var reportUnitsMenu = new ToolStripMenuItem("Report Units");
+            reportUnitsMenu.ToolTipText = "Override units for the engineering report; default uses DesignParams";
+            var useParamsItem = Menu_AppendItem(reportUnitsMenu.DropDown, "Use DesignParams", (s, e) => OnReportUnits(null), true, _reportUnitsOverride == null);
+            var imperialItem = Menu_AppendItem(reportUnitsMenu.DropDown, "Imperial", (s, e) => OnReportUnits("imperial"), true, _reportUnitsOverride == "imperial");
+            var metricItem = Menu_AppendItem(reportUnitsMenu.DropDown, "Metric", (s, e) => OnReportUnits("metric"), true, _reportUnitsOverride == "metric");
+            menu.Items.Add(reportUnitsMenu);
+
             var cancelItem = Menu_AppendItem(menu, "Cancel", OnCancel);
             cancelItem.ToolTipText = "Cancel the current request (waiting for API or design)";
+        }
+
+        private void OnToggleVisualization(object sender, EventArgs e)
+        {
+            var item = sender as ToolStripMenuItem;
+            if (item != null)
+            {
+                _enableVisualization = !_enableVisualization;
+                item.Checked = _enableVisualization;
+                Message = _enableVisualization ? "" : "Viz off";
+                ExpireSolution(true);
+            }
+        }
+
+        private void OnReportUnits(string overrideValue)
+        {
+            _reportUnitsOverride = overrideValue;
+            Message = string.IsNullOrEmpty(overrideValue) ? "" : $"Report: {overrideValue}";
+            ExpireSolution(true);
         }
 
         private void OnCancel(object sender, EventArgs e)
@@ -127,6 +165,8 @@ namespace Menegroth.GH.Components
             _lastGeoHash = "";
             _lastParamsHash = "";
             _lastParsed = null;
+            _lastReport = "";
+            _lastReportUnitsOverride = null;
             _lastComputeTime = 0;
             lock (_logLock) { _statusLog.Clear(); _waitStatusLine = null; }
             Message = "Cache cleared";
@@ -138,6 +178,9 @@ namespace Menegroth.GH.Components
         public override bool Write(GH_IO.Serialization.GH_IWriter writer)
         {
             writer.SetString("ServerUrl", _serverUrl);
+            writer.SetBoolean("EnableVisualization", _enableVisualization);
+            if (!string.IsNullOrEmpty(_reportUnitsOverride))
+                writer.SetString("ReportUnitsOverride", _reportUnitsOverride);
             return base.Write(writer);
         }
 
@@ -145,6 +188,10 @@ namespace Menegroth.GH.Components
         {
             if (reader.ItemExists("ServerUrl"))
                 _serverUrl = reader.GetString("ServerUrl");
+            if (reader.ItemExists("EnableVisualization"))
+                _enableVisualization = reader.GetBoolean("EnableVisualization");
+            if (reader.ItemExists("ReportUnitsOverride"))
+                _reportUnitsOverride = reader.GetString("ReportUnitsOverride");
             return base.Read(reader);
         }
 
@@ -200,6 +247,30 @@ namespace Menegroth.GH.Components
             lock (_logLock) { _waitStatusLine = null; }
         }
 
+        /// <summary>
+        /// Appends a stage completion line with elapsed time, e.g. "✓ Health check (0.3 s)".
+        /// </summary>
+        private void AppendStageDone(GH_Document doc, string stageName, Stopwatch sw)
+        {
+            sw.Stop();
+            AppendLog(doc, $"\u2713 {stageName} ({sw.Elapsed.TotalSeconds:F1} s)");
+        }
+
+        /// <summary>
+        /// Appends server phase timings to the log (prepare, pipeline, capture, etc.).
+        /// </summary>
+        private void AppendPhaseTimings(GH_Document doc, DesignResult result)
+        {
+            if (result?.PhaseTimings == null || result.PhaseTimings.Count == 0)
+                return;
+            var order = new[] { "prepare", "pipeline", "capture", "analysis_model", "restore", "serialize_visualization" };
+            foreach (var phase in order)
+            {
+                if (result.PhaseTimings.TryGetValue(phase, out var sec))
+                    AppendLog(doc, $"  {phase}: {sec:F1} s");
+            }
+        }
+
         // ─── Solve ──────────────────────────────────────────────────────
 
         protected override void SolveInstance(IGH_DataAccess DA)
@@ -224,6 +295,8 @@ namespace Menegroth.GH.Components
                 _lastGeoHash = _pendingGeoHash;
                 _lastParamsHash = _pendingParamsHash;
                 _lastParsed = _pendingParsed;
+                _lastReport = _pendingReport;
+                _lastReportUnitsOverride = _reportUnitsOverride;
                 _lastComputeTime = _lastParsed?.ComputeTime ?? 0;
                 _state = RunState.Idle;
 
@@ -257,6 +330,8 @@ namespace Menegroth.GH.Components
                     DA.SetData(0, new DesignResultGoo(_lastParsed));
                     DA.SetData(1, _lastParsed.RawJson);
                 }
+                if (!string.IsNullOrEmpty(_lastReport))
+                    DA.SetData(5, _lastReport);
                 return;
             }
 
@@ -277,6 +352,8 @@ namespace Menegroth.GH.Components
                     AddRuntimeMessage(GH_RuntimeMessageLevel.Remark,
                         "Connect a Button to Run and click it to send the request.");
                 }
+                if (!string.IsNullOrEmpty(_lastReport))
+                    DA.SetData(5, _lastReport);
                 return;
             }
 
@@ -284,14 +361,35 @@ namespace Menegroth.GH.Components
             var geo = geoGoo.Value;
             var prms = paramsGoo.Value;
             string geoHash = geo.ComputeHash();
-            string paramsHash = prms.ComputeHash();
+            string paramsHash = prms.ComputeHash() + (_enableVisualization ? "" : "|noviz");
 
             if (geoHash == _lastGeoHash && paramsHash == _lastParamsHash && _lastParsed != null)
             {
+                // If report units changed, re-fetch report in background
+                if (_reportUnitsOverride != _lastReportUnitsOverride)
+                {
+                    var urlForReport = string.IsNullOrWhiteSpace(urlInput) ? _serverUrl : urlInput;
+                    var unitsToFetch = _reportUnitsOverride;
+                    var docForReport = OnPingDocument();
+                    Task.Run(async () =>
+                    {
+                        try
+                        {
+                            var report = await DesignRunHttpClient.GetReportAsync(urlForReport, default, unitsToFetch);
+                            _lastReport = report;
+                            _lastReportUnitsOverride = unitsToFetch;
+                            ScheduleExpire(docForReport);
+                        }
+                        catch { /* Non-critical */ }
+                    });
+                }
+
                 DA.SetData(0, new DesignResultGoo(_lastParsed));
                 DA.SetData(1, _lastParsed.RawJson);
                 DA.SetData(2, GetLogSnapshot());
                 SetFailureOutputs(DA, _lastParsed);
+                if (!string.IsNullOrEmpty(_lastReport))
+                    DA.SetData(5, _lastReport);
                 Message = FormatDoneMessage(_lastParsed) + " (cached)";
                 AddRuntimeMessage(GH_RuntimeMessageLevel.Remark,
                     "No changes detected \u2014 returning cached result.");
@@ -319,6 +417,7 @@ namespace Menegroth.GH.Components
             var payload = geo.ToJson();
             var paramsJson = prms.ToJson();
             paramsJson["geometry_is_centerline"] = geo.GeometryIsCenterline;
+            paramsJson["skip_visualization"] = !_enableVisualization;
             payload["params"] = paramsJson;
             if (geoHash == _lastGeoHash && paramsHash != _lastParamsHash)
                 payload["geometry_hash"] = geoHash;
@@ -335,8 +434,10 @@ namespace Menegroth.GH.Components
             var doc = OnPingDocument();
             AppendLog(doc, "Checking server...");
 
+            var reportUnits = _reportUnitsOverride;
             Task.Run(async () =>
             {
+                var runSw = Stopwatch.StartNew();
                 var logPollCts = new CancellationTokenSource();
                 var logPollTask = Task.Run(async () =>
                 {
@@ -362,6 +463,7 @@ namespace Menegroth.GH.Components
 
                 try
                 {
+                    var healthSw = Stopwatch.StartNew();
                     if (!await DesignRunHttpClient.CheckHealthAsync(url, logPollCts.Token))
                     {
                         AppendLog(doc, "\u2717 Health check failed.");
@@ -371,7 +473,8 @@ namespace Menegroth.GH.Components
                         ScheduleExpire(doc);
                         return;
                     }
-                    AppendLog(doc, "Server reachable. Waiting for API ready (cold start may take up to ~10 min)...");
+                    AppendStageDone(doc, "Health check", healthSw);
+                    AppendLog(doc, "Waiting for API ready (cold start may take up to ~10 min)...");
 
                     _state = RunState.Polling;
                     ScheduleExpire(doc);
@@ -409,6 +512,7 @@ namespace Menegroth.GH.Components
                     AppendLog(doc, "API ready. Sending design request...");
                     _state = RunState.Sending;
                     ScheduleExpire(doc);
+                    var sendSw = Stopwatch.StartNew();
                     UpdateWaitStatus(doc, "Waiting for design...", 0);
 
                     // Timer task shows elapsed seconds while waiting
@@ -442,6 +546,7 @@ namespace Menegroth.GH.Components
                         try { await timerTask; }
                         catch (OperationCanceledException) { }
                         CommitWaitStatus(doc);
+                        AppendStageDone(doc, "Design request sent", sendSw);
                     }
 
                     // Check if server returned 202 Accepted (async pattern)
@@ -476,8 +581,14 @@ namespace Menegroth.GH.Components
                             return;
                         }
 
-                        AppendLog(doc, "Server idle. Fetching design result...");
+                        AppendLog(doc, "Server idle. Waiting for result cache...");
+                        var cacheSw = Stopwatch.StartNew();
+                        await DesignRunHttpClient.WaitForResultReadyAsync(url, logPollCts.Token);
+                        AppendStageDone(doc, "Result cache ready", cacheSw);
+                        AppendLog(doc, "Fetching design result...");
+                        var fetchSw = Stopwatch.StartNew();
                         responseJson = await DesignRunHttpClient.GetResultWithRetryAsync(url, logPollCts.Token);
+                        AppendStageDone(doc, "Result fetched", fetchSw);
                     }
 
                     // Parse the final response into a typed result
@@ -486,7 +597,25 @@ namespace Menegroth.GH.Components
                     if (_pendingParsed.IsError)
                         AppendLog(doc, $"\u2717 Server returned error: {_pendingParsed.ErrorMessage}");
                     else
-                        AppendLog(doc, $"\u2713 Done in {_pendingParsed.ComputeTime:F1} s.");
+                    {
+                        AppendLog(doc, $"\u2713 Server compute: {_pendingParsed.ComputeTime:F1} s.");
+                        runSw.Stop();
+                        AppendLog(doc, $"\u2713 Total client time: {runSw.Elapsed.TotalSeconds:F1} s.");
+                        AppendPhaseTimings(doc, _pendingParsed);
+                    }
+
+                    // Fetch engineering report (non-blocking; empty string on failure)
+                    _pendingReport = "";
+                    if (!_pendingParsed.IsError)
+                    {
+                        try
+                        {
+                            _pendingReport = await DesignRunHttpClient.GetReportAsync(url, logPollCts.Token, reportUnits);
+                            if (!string.IsNullOrEmpty(_pendingReport))
+                                AppendLog(doc, "\u2713 Engineering report fetched.");
+                        }
+                        catch { /* Report is non-critical; proceed without it. */ }
+                    }
 
                     _state = RunState.Done;
                 }
@@ -532,6 +661,8 @@ namespace Menegroth.GH.Components
                 DA.SetData(0, new DesignResultGoo(_lastParsed));
                 DA.SetData(1, _lastParsed.RawJson);
             }
+            if (!string.IsNullOrEmpty(_lastReport))
+                DA.SetData(5, _lastReport);
         }
 
         // ─── Output helper ──────────────────────────────────────────────
@@ -547,6 +678,8 @@ namespace Menegroth.GH.Components
                 if (result.IsError)
                     AddRuntimeMessage(GH_RuntimeMessageLevel.Error, result.ErrorMessage);
             }
+            if (!string.IsNullOrEmpty(_lastReport))
+                DA.SetData(5, _lastReport);
         }
 
         private static void SetFailureOutputs(IGH_DataAccess DA, DesignResult result)

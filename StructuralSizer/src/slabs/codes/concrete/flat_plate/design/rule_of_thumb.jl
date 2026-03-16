@@ -235,8 +235,9 @@ function check_flat_plate_at_thickness!(
 
     for (i, col) in enumerate(columns)
         section = column_result.sections[i]
-        c1_pm = section.b
-        c2_pm = section.h
+        bb = bounding_box(section)
+        c1_pm = bb.width
+        c2_pm = bb.depth
         col.c1 = max(c_span_min, c1_pm, col.c1)
         col.c2 = max(c_span_min, c2_pm, col.c2)
         if col.c1 ≈ c1_pm && col.c2 ≈ c2_pm

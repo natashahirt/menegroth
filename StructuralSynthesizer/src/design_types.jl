@@ -420,6 +420,19 @@ Base.@kwdef mutable struct DesignParameters
     
     # ─── Display Preferences ───
     display_units::DisplayUnits = imperial
+
+    # ─── Visualization Mesh ───
+    # Target shell mesh edge length (m) for analysis-model visualization.
+    # Default: nothing → inherits from FEA target_edge when method is FEA, else adaptive
+    # clamp(min_span/20, 0.15, 0.75) m (matches flat-plate FEA).
+    visualization_target_edge_m::Union{Float64, Nothing} = nothing
+
+    # When true, skip build_analysis_model! and visualization serialization (faster response).
+    skip_visualization::Bool = false
+
+    # "minimal" = frame elements + slab boundaries only (no deflected meshes, no per-face analytical).
+    # "full" = full visualization with deflected slab meshes.
+    visualization_detail::String = "full"
 end
 
 # =============================================================================
@@ -788,6 +801,8 @@ mutable struct BuildingDesign{T, A, P}
     # Metadata
     created::DateTime
     compute_time_s::Float64
+    # Per-phase wall-clock times (s) for logging: prepare, pipeline, capture, analysis_model, restore, serialize_visualization
+    phase_timings::Dict{String, Float64}
 end
 
 """
@@ -808,7 +823,8 @@ function BuildingDesign(struc::BuildingStructure{T, A, P}, params::DesignParamet
         Int[],    # asap_model_frame_edge_indices (populated by build_analysis_model!)
         Dict{Int, NTuple{2, Float64}}(),  # structural_offsets (captured by capture_design)
         now(),
-        0.0
+        0.0,
+        Dict{String, Float64}(),  # phase_timings (populated by design_building)
     )
 end
 

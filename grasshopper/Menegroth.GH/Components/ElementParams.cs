@@ -17,6 +17,7 @@ namespace Menegroth.GH.Components
         private string _solverType = "nlp";
         private string _section = "beam";
         private string _elementType = "steel_w";
+        private double _mipTimeLimitSec = 30.0;
 
         private static readonly (string L, string V)[] SolverChoices =
         {
@@ -150,13 +151,30 @@ namespace Menegroth.GH.Components
             Params.RegisterInputParam(p, Params.Input.Count);
         }
 
+        private void AddMipTimeLimitInput()
+        {
+            var p = new Param_Number
+            {
+                Name = "MIP Time Limit (s)",
+                NickName = "t",
+                Description = "MIP solver time limit in seconds (default: 30)",
+                Access = GH_ParamAccess.item
+            };
+            p.SetPersistentData(_mipTimeLimitSec);
+            Params.RegisterInputParam(p, 0);
+        }
+
         private void UpdateInputsForCurrentType()
         {
-            string expectedFirstParam = GetExpectedFirstParamName(_elementType);
+            bool needMipInput = _solverType == "mip";
+            string expectedFirstParam = GetExpectedFirstParamName(_elementType, _solverType);
             if (Params.Input.Count > 0 && Params.Input[0].Name == expectedFirstParam)
                 return; // Already correct
 
             ClearAllInputs();
+
+            if (needMipInput)
+                AddMipTimeLimitInput();
 
             switch (_elementType)
             {
@@ -200,8 +218,9 @@ namespace Menegroth.GH.Components
             Params.OnParametersChanged();
         }
 
-        private static string GetExpectedFirstParamName(string elementType)
+        private static string GetExpectedFirstParamName(string elementType, string solverType)
         {
+            if (solverType == "mip") return "MIP Time Limit (s)";
             return elementType switch
             {
                 "steel_w" => "Depth (in)",
@@ -249,6 +268,7 @@ namespace Menegroth.GH.Components
             writer.SetString("SolverType", _solverType);
             writer.SetString("Section", _section);
             writer.SetString("ElementType", _elementType);
+            writer.SetDouble("MipTimeLimitSec", _mipTimeLimitSec);
             return base.Write(writer);
         }
 
@@ -257,6 +277,7 @@ namespace Menegroth.GH.Components
             if (reader.ItemExists("SolverType")) _solverType = reader.GetString("SolverType");
             if (reader.ItemExists("Section")) _section = reader.GetString("Section");
             if (reader.ItemExists("ElementType")) _elementType = reader.GetString("ElementType");
+            if (reader.ItemExists("MipTimeLimitSec")) _mipTimeLimitSec = reader.GetDouble("MipTimeLimitSec");
             return base.Read(reader);
         }
 
@@ -276,8 +297,19 @@ namespace Menegroth.GH.Components
                 ElementType = _elementType
             };
 
-            // Read interval inputs based on element type
             int idx = 0;
+            if (_solverType == "mip")
+            {
+                double t = _mipTimeLimitSec;
+                if (Params.Input.Count > 0 && DA.GetData(0, ref t))
+                {
+                    _mipTimeLimitSec = Math.Max(0.1, t);
+                    data.MipTimeLimitSec = _mipTimeLimitSec;
+                }
+                idx = 1;
+            }
+
+            // Read interval inputs based on element type
             switch (_elementType)
             {
                 case "steel_w":

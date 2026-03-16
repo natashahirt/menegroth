@@ -333,9 +333,10 @@ function design_building(struc::BuildingStructure, params::DesignParameters)
     # Build the visualization analysis model while struc still has sized
     # dimensions and structural offsets (restore! will wipe them).
     t0 = time()
-    if isnothing(design.asap_model)
+    if !params.skip_visualization && isnothing(design.asap_model)
+        target_edge = isnothing(params.visualization_target_edge_m) ? nothing : params.visualization_target_edge_m * u"m"
         try
-            build_analysis_model!(design)
+            build_analysis_model!(design; target_edge_length=target_edge)
         catch e
             @warn "build_analysis_model! failed — visualization will use frame-only model" exception=(e, catch_backtrace())
         end
@@ -349,6 +350,12 @@ function design_building(struc::BuildingStructure, params::DesignParameters)
     t0 = time()
     restore!(struc; geometry_is_centerline=params.geometry_is_centerline)
     t_restore = time() - t0
+
+    design.phase_timings["prepare"] = round(t_prepare; digits=3)
+    design.phase_timings["pipeline"] = round(t_pipeline; digits=3)
+    design.phase_timings["capture"] = round(t_capture; digits=3)
+    design.phase_timings["analysis_model"] = round(t_analysis; digits=3)
+    design.phase_timings["restore"] = round(t_restore; digits=3)
 
     @info "design_building timing" prepare=round(t_prepare; digits=2) pipeline=round(t_pipeline; digits=2) capture=round(t_capture; digits=2) analysis_model=round(t_analysis; digits=2) restore=round(t_restore; digits=2) total=round(time() - t_start; digits=2)
     

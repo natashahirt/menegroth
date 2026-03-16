@@ -202,6 +202,10 @@ function _size_slab!(::FlatSlab, struc, slab, slab_idx;
                               drop_panel=drop_panel,
                               fire_rating=fire_rating)
     
+    # Always persist drop panel geometry (pipeline adjusts it for ACI compliance
+    # even when the overall design doesn't converge)
+    slab.drop_panel = result.drop_panel
+
     # Handle non-convergence gracefully
     if hasproperty(result, :converged) && !result.converged
         @warn "Flat slab $slab_idx did not converge" check=result.failing_check iters=result.iterations h=result.h_final
@@ -209,9 +213,7 @@ function _size_slab!(::FlatSlab, struc, slab, slab_idx;
         return result
     end
     
-    # Set slab.result and drop_panel geometry (may have been adjusted by pipeline)
     slab.result = result.slab_result
-    slab.drop_panel = result.drop_panel
     # Preserve the full design output (column P-M, integrity, transfer, ρ′)
     hasproperty(slab, :design_details) && (slab.design_details = result)
     

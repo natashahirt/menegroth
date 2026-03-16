@@ -4,36 +4,68 @@
 # Dense, numbers-focused report for structural design review.
 # One function call: engineering_report(design) prints all tables.
 #
+# Units: Defaults to design.params.display_units (from DesignParams). Override
+# with report_units=:imperial or report_units=:metric. Uses Unitful for conversions.
+#
 # Tables:
 #   1. Design header (name, materials, loads)
-#   2. Slab panel schedule (geometry, loading, M₀)
-#   3. Slab reinforcement schedule (per strip, per panel)
-#   4. Punching shear schedule (per column, per panel)
-#   5. Slab deflection checks
-#   6. Column schedule
-#   7. Foundation schedule
-#   8. Material takeoff + embodied carbon
+#   2. Slab panel schedule — adapts to floor type
+#   3. Beam schedule
+#   4. Column schedule
+#   5. Foundation schedule
+#   6. Material takeoff + embodied carbon
 # =============================================================================
 
+"""Convert a Unitful value to display units and return Float64. Uses du.units[cat]."""
+_to_report(du::DisplayUnits, cat::Symbol, val; digits=2) =
+    round(ustrip(du.units[cat], uconvert(du.units[cat], val)); digits=digits)
+
+"""Convert force-per-length (e.g. thrust kN/m) to display units."""
+function _to_report_thrust(du::DisplayUnits, val; digits=2)
+    target = du.units[:length] == u"ft" ? (kip / u"ft") : (u"kN/m")
+    round(ustrip(target, uconvert(target, val)); digits=digits)
+end
+
+"""Unit label string for report column headers (e.g. \"psf\", \"kPa\")."""
+const _IMPERIAL_LABELS = Dict(
+    :length => "ft", :thickness => "in", :area => "ft²", :volume => "ft³",
+    :force => "kip", :moment => "kip·ft", :pressure => "psf", :stress => "ksi",
+    :mass => "lb", :deflection => "in", :spacing => "in", :rebar_area => "in²",
+    :thrust => "kip/ft",
+)
+const _METRIC_LABELS = Dict(
+    :length => "m", :thickness => "mm", :area => "m²", :volume => "m³",
+    :force => "kN", :moment => "kN·m", :pressure => "kPa", :stress => "MPa",
+    :mass => "kg", :deflection => "mm", :spacing => "mm", :rebar_area => "mm²",
+    :thrust => "kN/m",
+)
+_ul(du::DisplayUnits, cat::Symbol) =
+    du.units[:length] == u"ft" ? get(_IMPERIAL_LABELS, cat, "") : get(_METRIC_LABELS, cat, "")
+
 """
-    engineering_report(design::BuildingDesign; io::IO=stdout)
+    engineering_report(design::BuildingDesign; io::IO=stdout, report_units=nothing)
 
 Print a dense engineering report summarizing the design.
 All relevant inputs and outputs are stated; no hidden assumptions.
+Adapts automatically to the slab, beam, and column types in the design.
+
+# Arguments
+- `report_units`: When `nothing` (default), uses `design.params.display_units` (from DesignParams).
+  Override with `:imperial` or `:metric` to force a specific unit system.
 """
-function engineering_report(design::BuildingDesign; io::IO=stdout)
-    struc = design.structure
+function engineering_report(design::BuildingDesign; io::IO=stdout, report_units=nothing)
     params = design.params
-    du = params.display_units
+    du = report_units === nothing ? params.display_units : DisplayUnits(report_units)
 
     conc = resolve_concrete(params)
     reb  = resolve_rebar(params)
 
-    _report_header(io, design; conc=conc, reb=reb)
-    _report_slabs(io, design; conc=conc, reb=reb)
-    _report_columns(io, design; conc=conc, reb=reb)
-    _report_foundations(io, design)
-    _report_takeoff(io, design)
+    _report_header(io, design; conc=conc, reb=reb, du=du)
+    _report_slabs(io, design; conc=conc, reb=reb, du=du)
+    _report_beams(io, design; du=du)
+    _report_columns(io, design; conc=conc, reb=reb, du=du)
+    _report_foundations(io, design; du=du)
+    _report_takeoff(io, design; du=du)
     _report_status(io, design)
 end
 
@@ -44,209 +76,403 @@ end
 """Print the report header: timestamp, materials, unfactored loads, and building geometry."""
 function _report_header(io::IO, design::BuildingDesign;
                         conc=resolve_concrete(design.params),
-                        reb=resolve_rebar(design.params))
+                        reb=resolve_rebar(design.params),
+                        du::DisplayUnits=design.params.display_units)
     params = design.params
     struc = design.structure
-    du = params.display_units
     loads = params.loads
 
     println(io, section_break("ENGINEERING REPORT: $(params.name)"))
     println(io, "  Generated: $(Dates.format(design.created, "yyyy-mm-dd HH:MM"))")
     println(io, "  Compute time: $(round(design.compute_time_s; digits=2))s")
     println(io)
-    fc_psi = round(ustrip(u"psi", conc.fc′); digits=0)
-    fy_ksi = round(ustrip(ksi, reb.Fy); digits=0)
-    γc_pcf = round(ustrip(pcf, conc.ρ); digits=1)
+
+    # Materials — use stress + density in display units
+    fc_val = _to_report(du, :stress, conc.fc′; digits=0)
+    fy_val = _to_report(du, :stress, reb.Fy; digits=0)
+    Ec_val = _to_report(du, :stress, StructuralSizer.Ec(conc); digits=0)
+    Es_val = _to_report(du, :stress, reb.E; digits=0)
+    γc_val = du.units[:length] == u"ft" ?
+        round(ustrip(pcf, uconvert(pcf, conc.ρ)); digits=1) :
+        round(ustrip(u"kg/m^3", uconvert(u"kg/m^3", conc.ρ)); digits=1)
+    γc_unit = du.units[:length] == u"ft" ? "pcf" : "kg/m³"
+    stress_unit = _ul(du, :stress)
 
     println(io, "  MATERIALS")
-    Printf.@printf(io, "    Concrete: f'c = %.0f psi, γc = %.1f pcf, Ec = %.0f ksi\n",
-                   fc_psi, γc_pcf, round(ustrip(ksi, StructuralSizer.Ec(conc)); digits=0))
-    Printf.@printf(io, "    Rebar:    fy  = %.0f ksi, Es = %.0f ksi\n",
-                   fy_ksi, round(ustrip(ksi, reb.E); digits=0))
+    Printf.@printf(io, "    Concrete: f'c = %.0f %s, γc = %.1f %s, Ec = %.0f %s\n",
+                   fc_val, stress_unit, γc_val, γc_unit, Ec_val, stress_unit)
+    Printf.@printf(io, "    Rebar:    fy  = %.0f %s, Es = %.0f %s\n",
+                   fy_val, stress_unit, Es_val, stress_unit)
+
+    steel_mat = _resolve_steel_material(params)
+    if !isnothing(steel_mat)
+        Fy_val = _to_report(du, :stress, steel_mat.Fy; digits=0)
+        E_val  = _to_report(du, :stress, steel_mat.E; digits=0)
+        Printf.@printf(io, "    Steel:    Fy  = %.0f %s, Es = %.0f %s\n", Fy_val, stress_unit, E_val, stress_unit)
+    end
     println(io)
 
     # Loads
+    press_unit = _ul(du, :pressure)
     println(io, "  UNFACTORED LOADS")
-    Printf.@printf(io, "    Live load (floor):   %6.1f psf\n", ustrip(psf, loads.floor_LL))
-    Printf.@printf(io, "    Live load (roof):    %6.1f psf\n", ustrip(psf, loads.roof_LL))
-    Printf.@printf(io, "    Superimposed dead:   %6.1f psf\n", ustrip(psf, loads.floor_SDL))
+    Printf.@printf(io, "    Live load (floor):   %6.1f %s\n", _to_report(du, :pressure, loads.floor_LL; digits=1), press_unit)
+    Printf.@printf(io, "    Live load (roof):    %6.1f %s\n", _to_report(du, :pressure, loads.roof_LL; digits=1), press_unit)
+    Printf.@printf(io, "    Superimposed dead:   %6.1f %s\n", _to_report(du, :pressure, loads.floor_SDL; digits=1), press_unit)
     println(io)
 
     # Building geometry
     n_stories = length(struc.skeleton.stories)
     n_slabs = length(struc.slabs)
     n_cols  = length(struc.columns)
+    n_beams = length(struc.beams)
     n_fdns  = length(struc.foundations)
 
     println(io, "  BUILDING")
-    Printf.@printf(io, "    Stories: %d,  Slabs: %d,  Columns: %d,  Foundations: %d\n",
-                   n_stories, n_slabs, n_cols, n_fdns)
+    Printf.@printf(io, "    Stories: %d,  Slabs: %d,  Columns: %d,  Beams: %d,  Foundations: %d\n",
+                   n_stories, n_slabs, n_cols, n_beams, n_fdns)
 
     # Floor system
     floor = params.floor
     if !isnothing(floor)
         println(io, "    Floor system: $(typeof(floor).name.name)")
     end
+
+    # Member types
+    col_type = _column_type_label(params)
+    beam_type = _beam_type_label(params)
+    if !isempty(col_type) || !isempty(beam_type)
+        parts = String[]
+        !isempty(col_type) && push!(parts, "Columns: $col_type")
+        !isempty(beam_type) && push!(parts, "Beams: $beam_type")
+        println(io, "    ", join(parts, ",  "))
+    end
     println(io)
+end
+
+"""Return the steel material from beam or column options, or nothing."""
+function _resolve_steel_material(params::DesignParameters)
+    beams = params.beams
+    if beams isa SteelBeamOptions
+        return beams.material
+    end
+    cols = params.columns
+    if cols isa SteelColumnOptions
+        return cols.material
+    end
+    return nothing
+end
+
+"""Human-readable column type label from design parameters."""
+function _column_type_label(params::DesignParameters)
+    opts = params.columns
+    isnothing(opts) && return ""
+    opts isa ConcreteColumnOptions && return opts.section_shape == :circular ? "RC Circular" : "RC Rectangular"
+    opts isa SteelColumnOptions && return opts.section_type == :hss ? "Steel HSS" : "Steel W-shape"
+    return string(typeof(opts).name.name)
+end
+
+"""Human-readable beam type label from design parameters."""
+function _beam_type_label(params::DesignParameters)
+    opts = params.beams
+    isnothing(opts) && return ""
+    opts isa SteelBeamOptions && return opts.section_type == :hss ? "Steel HSS" : "Steel W-shape"
+    opts isa ConcreteBeamOptions && return opts.include_flange ? "RC T-beam" : "RC Rectangular"
+    opts isa PixelFrameBeamOptions && return "PixelFrame"
+    return string(typeof(opts).name.name)
 end
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 2. Slabs
 # ─────────────────────────────────────────────────────────────────────────────
 
-"""Print slab panel tables (geometry, loading, reinforcement, punching, deflection)."""
+"""Print slab panel tables, dispatching on floor result type."""
 function _report_slabs(io::IO, design::BuildingDesign;
                        conc=resolve_concrete(design.params),
-                       reb=resolve_rebar(design.params))
+                       reb=resolve_rebar(design.params),
+                       du::DisplayUnits=design.params.display_units)
     struc = design.structure
-    params = design.params
-    du = params.display_units
-    loads = params.loads
 
     isempty(struc.slabs) && return
-
-    γc_pcf = ustrip(pcf, conc.ρ)
 
     println(io, section_break("SLAB PANELS"))
     println(io)
 
     for (s_idx, slab) in enumerate(struc.slabs)
         r = slab.result
-        r isa StructuralSizer.FlatPlatePanelResult || continue
-
-        _report_flat_plate_panel(io, design, s_idx, slab, r; conc=conc, reb=reb)
+        isnothing(r) && continue
+        _report_slab_panel(io, design, s_idx, slab, r; conc=conc, reb=reb, du=du)
     end
 end
+
+# Multiple dispatch routes the right report section for each floor type.
+_report_slab_panel(io::IO, design::BuildingDesign, s_idx::Int, slab, r::StructuralSizer.FlatPlatePanelResult; kw...) =
+    _report_flat_plate_panel(io, design, s_idx, slab, r; kw...)
+_report_slab_panel(io::IO, design::BuildingDesign, s_idx::Int, slab, r::StructuralSizer.VaultResult; kw...) =
+    _report_vault_panel(io, design, s_idx, slab, r; kw...)
+_report_slab_panel(io::IO, design::BuildingDesign, s_idx::Int, slab, r; kw...) =
+    _report_generic_slab(io, design, s_idx, slab, r; kw...)
 
 """Print a single flat-plate panel: spans, loading breakdown, M₀, reinforcement, punching, and deflection."""
 function _report_flat_plate_panel(io::IO, design::BuildingDesign,
                                    s_idx::Int, slab, r;
                                    conc=resolve_concrete(design.params),
-                                   reb=resolve_rebar(design.params))
+                                   reb=resolve_rebar(design.params),
+                                   du::DisplayUnits=design.params.display_units)
     struc = design.structure
-    params = design.params
-    du = params.display_units
-    loads = params.loads
+    loads = design.params.loads
 
-    γc_pcf = ustrip(pcf, conc.ρ)
-    fc_psi = round(ustrip(u"psi", conc.fc′); digits=0)
+    h = _to_report(du, :thickness, r.thickness; digits=1)
+    l1 = _to_report(du, :length, r.l1; digits=1)
+    l2 = _to_report(du, :length, r.l2; digits=1)
+    ratio = l2 > 0 ? round(l2 / l1; digits=2) : 0.0
 
-    h_in   = round(ustrip(u"inch", r.thickness); digits=1)
-    l1_ft  = round(ustrip(u"ft", r.l1); digits=1)
-    l2_ft  = round(ustrip(u"ft", r.l2); digits=1)
-    ratio  = l2_ft > 0 ? round(l2_ft / l1_ft; digits=2) : 0.0
+    # Effective depth (assume #5 bars, typical cover)
+    is_imp = du.units[:length] == u"ft"
+    cover_disp = is_imp ? 0.75 : 19.0
+    bar_radius_disp = is_imp ? 0.3125 : 8.0
+    d = round(h - cover_disp - bar_radius_disp; digits=2)
 
-    # Effective depth (assume #5 bars, 0.75" cover as typical)
-    bar_dia = 0.625  # #5
-    d_in = round(h_in - 0.75 - bar_dia / 2; digits=2)
+    # Loading breakdown (self-weight = γ × h)
+    γc = is_imp ? ustrip(pcf, conc.ρ) : ustrip(u"kg/m^3", conc.ρ)
+    g = 9.80665
+    w_sw = is_imp ? (h / 12.0 * γc) : (h / 1000.0 * γc * g / 1000.0)  # psf or kPa
+    w_sw = round(w_sw; digits=1)
+    w_sdl = _to_report(du, :pressure, loads.floor_SDL; digits=1)
+    w_ll  = _to_report(du, :pressure, loads.floor_LL; digits=1)
+    qu    = _to_report(du, :pressure, r.qu; digits=1)
+    M0    = _to_report(du, :moment, r.M0; digits=1)
 
-    # Loading breakdown
-    w_sw_psf  = round(h_in / 12.0 * γc_pcf; digits=1)
-    w_sdl_psf = round(ustrip(psf, loads.floor_SDL); digits=1)
-    w_ll_psf  = round(ustrip(psf, loads.floor_LL); digits=1)
-    qu_psf    = round(ustrip(psf, r.qu); digits=1)
-    M0_kipft  = round(ustrip(kip * u"ft", r.M0); digits=1)
+    slab_area = sum(struc.cells[ci].area for ci in slab.cell_indices)
+    area_val = _to_report(du, :area, slab_area; digits=0)
+    len_u = _ul(du, :length)
+    thick_u = _ul(du, :thickness)
+    area_u = _ul(du, :area)
+    press_u = _ul(du, :pressure)
+    mom_u = _ul(du, :moment)
 
-    # Slab area
+    println(io, "  ┌─ Panel S-$(s_idx) ─────────────────────────────────────────────────")
+    Printf.@printf(io, "  │  Spans: l₁ = %.1f %s, l₂ = %.1f %s  (l₂/l₁ = %.2f)\n", l1, len_u, l2, len_u, ratio)
+    Printf.@printf(io, "  │  h = %.1f %s, d = %.2f %s\n", h, thick_u, d, thick_u)
+    Printf.@printf(io, "  │  Area: %.0f %s\n", area_val, area_u)
+    println(io, "  │")
+
+    Printf.@printf(io, "  │  %-22s %8s\n", "Load Component", press_u)
+    Printf.@printf(io, "  │  %-22s %8s\n", "──────────────────────", "────────")
+    Printf.@printf(io, "  │  %-22s %8.1f\n", "Self-weight", w_sw)
+    Printf.@printf(io, "  │  %-22s %8.1f\n", "Superimposed dead", w_sdl)
+    Printf.@printf(io, "  │  %-22s %8.1f\n", "Live load", w_ll)
+    Printf.@printf(io, "  │  %-22s %8s\n", "──────────────────────", "────────")
+    Printf.@printf(io, "  │  %-22s %8.1f   (1.2D + 1.6L factored)\n", "qu (factored)", qu)
+    println(io, "  │")
+    Printf.@printf(io, "  │  M₀ (total static moment) = %.1f %s\n", M0, mom_u)
+    println(io, "  │")
+
+    _report_slab_reinforcement(io, r, h, d; du=du)
+    _report_slab_punching(io, struc, r, h, d; conc=conc, du=du)
+    _report_slab_deflection(io, r, l1; du=du)
+
+    if !isnothing(slab.drop_panel)
+        dp = slab.drop_panel
+        h_drop = _to_report(du, :thickness, dp.h_drop; digits=1)
+        a1 = _to_report(du, :length, 2 * dp.a_drop_1; digits=1)
+        a2 = _to_report(du, :length, 2 * dp.a_drop_2; digits=1)
+        println(io, "  │  DROP PANEL")
+        Printf.@printf(io, "  │  Extra depth: %.1f %s,  Plan: %.1f × %.1f %s\n",
+                       h_drop, thick_u, a1, a2, len_u)
+        println(io, "  │")
+    end
+
+    println(io, "  └──────────────────────────────────────────────────────────────")
+    println(io)
+end
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 2b. Vault panels
+# ─────────────────────────────────────────────────────────────────────────────
+
+"""Print a vault panel: geometry, thrust, stress/deflection/convergence checks."""
+function _report_vault_panel(io::IO, design::BuildingDesign,
+                              s_idx::Int, slab, r::StructuralSizer.VaultResult;
+                              conc=resolve_concrete(design.params),
+                              reb=resolve_rebar(design.params),
+                              du::DisplayUnits=design.params.display_units)
+    struc = design.structure
+
+    h = _to_report(du, :thickness, r.thickness; digits=1)
+    rise = _to_report(du, :length, r.rise; digits=2)
+    arc = _to_report(du, :length, r.arc_length; digits=1)
+    span = 0.0
+    try; span = _to_report(du, :length, slab.spans.span; digits=1); catch; end
+    λ = rise > 0 ? round(span / rise; digits=1) : 0.0
+
+    slab_area = sum(struc.cells[ci].area for ci in slab.cell_indices)
+    area_val = _to_report(du, :area, slab_area; digits=0)
+    len_u = _ul(du, :length)
+    thick_u = _ul(du, :thickness)
+    area_u = _ul(du, :area)
+    thrust_u = _ul(du, :thrust)
+    stress_u = _ul(du, :stress)
+    defl_u = _ul(du, :deflection)
+
+    println(io, "  ┌─ Vault V-$(s_idx) ─────────────────────────────────────────────────")
+    Printf.@printf(io, "  │  Span: %.1f %s,  Rise: %.2f %s  (λ = span/rise = %.1f)\n", span, len_u, rise, len_u, λ)
+    Printf.@printf(io, "  │  Shell thickness: %.1f %s,  Arc length: %.1f %s\n", h, thick_u, arc, len_u)
+    Printf.@printf(io, "  │  Plan area: %.0f %s\n", area_val, area_u)
+    println(io, "  │")
+
+    H_dead = _to_report_thrust(du, r.thrust_dead; digits=2)
+    H_live = _to_report_thrust(du, r.thrust_live; digits=2)
+    H_total = _to_report_thrust(du, StructuralSizer.total_thrust(r); digits=2)
+    println(io, "  │  THRUST (horizontal, per unit width)")
+    Printf.@printf(io, "  │    Dead: %.2f %s,  Live: %.2f %s,  Total: %.2f %s\n",
+                   H_dead, thrust_u, H_live, thrust_u, H_total, thrust_u)
+    println(io, "  │")
+
+    sc = r.stress_check
+    σ_val = du.units[:stress] == ksi ? round(sc.σ * 145.038; digits=1) : round(sc.σ; digits=2)
+    σ_allow_val = du.units[:stress] == ksi ? round(sc.σ_allow * 145.038; digits=1) : round(sc.σ_allow; digits=2)
+    stress_label = du.units[:stress] == ksi ? "psi" : "MPa"
+    println(io, "  │  STRESS CHECK")
+    Printf.@printf(io, "  │    σ_max = %.2f %s,  σ_allow = %.2f %s,  Ratio = %.2f  %s\n",
+                   σ_val, stress_label, σ_allow_val, stress_label, sc.ratio, pass_fail(sc.ok))
+    Printf.@printf(io, "  │    Governing case: %s\n", string(r.governing_case))
+    println(io, "  │")
+
+    dc = r.deflection_check
+    δ_val = _to_report(du, :deflection, dc.δ * u"m"; digits=3)
+    lim_val = _to_report(du, :deflection, dc.limit * u"m"; digits=3)
+    println(io, "  │  DEFLECTION CHECK")
+    Printf.@printf(io, "  │    δ = %.3f %s,  Limit = %.3f %s,  Ratio = %.2f  %s\n",
+                   δ_val, defl_u, lim_val, defl_u, dc.ratio, pass_fail(dc.ok))
+    println(io, "  │")
+
+    cc = r.convergence_check
+    println(io, "  │  CONVERGENCE")
+    Printf.@printf(io, "  │    Converged: %s,  Iterations: %d\n",
+                   pass_fail(cc.converged), cc.iterations)
+    println(io, "  │")
+
+    println(io, "  └──────────────────────────────────────────────────────────────")
+    println(io)
+end
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 2c. Generic / one-way slabs
+# ─────────────────────────────────────────────────────────────────────────────
+
+"""Print a generic slab panel (one-way or other CIP): thickness, self-weight, basic checks."""
+function _report_generic_slab(io::IO, design::BuildingDesign,
+                               s_idx::Int, slab, r;
+                               conc=resolve_concrete(design.params),
+                               reb=resolve_rebar(design.params),
+                               du::DisplayUnits=design.params.display_units)
+    struc = design.structure
     slab_area = sum(struc.cells[ci].area for ci in slab.cell_indices)
 
-    # ── Panel geometry & loading table ──
-    println(io, "  ┌─ Panel S-$(s_idx) ─────────────────────────────────────────────────")
-    Printf.@printf(io, "  │  Spans: l₁ = %.1f ft, l₂ = %.1f ft  (l₂/l₁ = %.2f)\n", l1_ft, l2_ft, ratio)
-    Printf.@printf(io, "  │  h = %.1f in, d = %.2f in  (cover = 0.75 in, #5 bars)\n", h_in, d_in)
-    Printf.@printf(io, "  │  Area: %.0f ft²\n", ustrip(u"ft^2", slab_area))
+    floor_type = string(slab.floor_type)
+    h = hasproperty(r, :thickness) ? _to_report(du, :thickness, r.thickness; digits=1) : 0.0
+    area_val = _to_report(du, :area, slab_area; digits=0)
+    thick_u = _ul(du, :thickness)
+    area_u = _ul(du, :area)
+    press_u = _ul(du, :pressure)
+
+    println(io, "  ┌─ Slab S-$(s_idx) ($(floor_type)) ──────────────────────────────────")
+    Printf.@printf(io, "  │  Thickness: %.1f %s\n", h, thick_u)
+    Printf.@printf(io, "  │  Plan area: %.0f %s\n", area_val, area_u)
+
+    if hasproperty(r, :self_weight)
+        sw = _to_report(du, :pressure, r.self_weight; digits=1)
+        Printf.@printf(io, "  │  Self-weight: %.1f %s\n", sw, press_u)
+    end
     println(io, "  │")
 
-    Printf.@printf(io, "  │  %-22s %8s\n", "Load Component", "psf")
-    Printf.@printf(io, "  │  %-22s %8s\n", "──────────────────────", "────────")
-    Printf.@printf(io, "  │  %-22s %8.1f   (h × γc = %.1f\" × %.1f pcf / 12)\n",
-                   "Self-weight", w_sw_psf, h_in, γc_pcf)
-    Printf.@printf(io, "  │  %-22s %8.1f\n", "Superimposed dead", w_sdl_psf)
-    Printf.@printf(io, "  │  %-22s %8.1f\n", "Live load", w_ll_psf)
-    Printf.@printf(io, "  │  %-22s %8s\n", "──────────────────────", "────────")
-    Printf.@printf(io, "  │  %-22s %8.1f   (1.2D + 1.6L factored)\n", "qu (factored)", qu_psf)
-    println(io, "  │")
-    Printf.@printf(io, "  │  M₀ (total static moment) = %.1f kip·ft\n", M0_kipft)
-    println(io, "  │")
-
-    # ── Reinforcement schedule ──
-    _report_slab_reinforcement(io, r, h_in, d_in)
-
-    # ── Punching shear ──
-    _report_slab_punching(io, struc, r, h_in, d_in, fc_psi)
-
-    # ── Deflection ──
-    _report_slab_deflection(io, r, l1_ft)
+    # Check SlabDesignResult for summary ratios
+    slab_dr = get(design.slabs, s_idx, nothing)
+    if !isnothing(slab_dr)
+        if slab_dr.deflection_ratio > 0
+            Printf.@printf(io, "  │  Deflection ratio: %.2f  %s\n",
+                           slab_dr.deflection_ratio, pass_fail(slab_dr.deflection_ok))
+        end
+        if slab_dr.punching_max_ratio > 0
+            Printf.@printf(io, "  │  Punching ratio:   %.2f  %s\n",
+                           slab_dr.punching_max_ratio, pass_fail(slab_dr.punching_ok))
+        end
+        println(io, "  │")
+    end
 
     println(io, "  └──────────────────────────────────────────────────────────────")
     println(io)
 end
 
 """Print the reinforcement schedule table for column and middle strips."""
-function _report_slab_reinforcement(io::IO, r, h_in, d_in)
-    println(io, "  │  REINFORCEMENT  (h = $(h_in) in, d = $(d_in) in)")
+function _report_slab_reinforcement(io::IO, r, h, d; du::DisplayUnits=imperial)
+    thick_u = _ul(du, :thickness)
+    mom_u = _ul(du, :moment)
+    area_u = _ul(du, :rebar_area)
+    spac_u = _ul(du, :spacing)
+    println(io, "  │  REINFORCEMENT  (h = $(h) $thick_u, d = $(d) $thick_u)")
     Printf.@printf(io, "  │  %-13s %-8s %8s %11s %11s %4s %5s %3s %12s %5s\n",
-        "Strip", "Location", "Mu(k·ft)", "As_req(in²)", "As_min(in²)",
-        "Bar", "s(in)", "n", "As_prov(in²)", "Ratio")
+        "Strip", "Location", "Mu($mom_u)", "As_req($area_u)", "As_min($area_u)",
+        "Bar", "s($spac_u)", "n", "As_prov($area_u)", "Ratio")
     Printf.@printf(io, "  │  %-13s %-8s %8s %11s %11s %4s %5s %3s %12s %5s\n",
         "─"^13, "─"^8, "─"^8, "─"^11, "─"^11, "─"^4, "─"^5, "─"^3, "─"^12, "─"^5)
 
-    # Column strip
     for sr in r.column_strip_reinf
-        _print_reinf_row(io, "Col. strip", sr)
+        _print_reinf_row(io, "Col. strip", sr; du=du)
     end
-    # Middle strip
     for sr in r.middle_strip_reinf
-        _print_reinf_row(io, "Mid. strip", sr)
+        _print_reinf_row(io, "Mid. strip", sr; du=du)
     end
     println(io, "  │")
 end
 
 """Print one row of the reinforcement schedule (Mu, As_req, bar size, spacing, As_provided)."""
-function _print_reinf_row(io::IO, strip_name::String, sr)
+function _print_reinf_row(io::IO, strip_name::String, sr; du::DisplayUnits=imperial)
     loc = string(sr.location)
-    Mu_kipft = round(ustrip(kip * u"ft", sr.Mu); digits=1)
-    As_req   = round(ustrip(u"inch^2", sr.As_reqd); digits=3)
-    As_min   = round(ustrip(u"inch^2", sr.As_min); digits=3)
-    As_prov  = round(ustrip(u"inch^2", sr.As_provided); digits=3)
-    bar_str  = "#$(sr.bar_size)"
-    s_in     = round(ustrip(u"inch", sr.spacing); digits=1)
-    n_bars   = sr.n_bars
-    ratio    = As_prov > 0 ? round(As_req / As_prov; digits=2) : 0.0
+    Mu_val = _to_report(du, :moment, sr.Mu; digits=1)
+    As_req = _to_report(du, :rebar_area, sr.As_reqd; digits=3)
+    As_min = _to_report(du, :rebar_area, sr.As_min; digits=3)
+    As_prov = _to_report(du, :rebar_area, sr.As_provided; digits=3)
+    bar_str = "#$(sr.bar_size)"
+    s_val = _to_report(du, :spacing, sr.spacing; digits=1)
+    n_bars = sr.n_bars
+    ratio = As_prov > 0 ? round(As_req / As_prov; digits=2) : 0.0
 
     Printf.@printf(io, "  │  %-13s %-8s %8.1f %11.3f %11.3f %4s %5.1f %3d %12.3f %5.2f\n",
-        strip_name, loc, Mu_kipft, As_req, As_min, bar_str, s_in, n_bars, As_prov, ratio)
+        strip_name, loc, Mu_val, As_req, As_min, bar_str, s_val, n_bars, As_prov, ratio)
 end
 
 """Print the punching shear schedule per column (b₀, vu, φvc, stud requirement)."""
-function _report_slab_punching(io::IO, struc, r, h_in, d_in, fc_psi)
+function _report_slab_punching(io::IO, struc, r, h, d; conc, du::DisplayUnits=imperial)
     pc = r.punching_check
     isempty(pc.details) && return
 
-    println(io, "  │  PUNCHING SHEAR  (h = $(h_in) in, d = $(d_in) in, f'c = $(round(Int, fc_psi)) psi)")
+    is_imp = du.units[:stress] == ksi
+    fc_val = is_imp ? round(Int, ustrip(u"psi", conc.fc′)) : round(_to_report(du, :stress, conc.fc′); digits=1)
+    stress_u = is_imp ? "psi" : "MPa"
+    thick_u = _ul(du, :thickness)
+
+    println(io, "  │  PUNCHING SHEAR  (h = $(h) $thick_u, d = $(d) $thick_u, f'c = $fc_val $stress_u)")
     Printf.@printf(io, "  │  %-6s %10s %10s %10s %10s %10s %6s %6s\n",
-        "Col", "Position", "b₀(in)", "vu(psi)", "φvc(psi)", "Ratio", "Studs", "OK?")
+        "Col", "Position", "b₀($thick_u)", "vu($stress_u)", "φvc($stress_u)", "Ratio", "Studs", "OK?")
     Printf.@printf(io, "  │  %-6s %10s %10s %10s %10s %10s %6s %6s\n",
         "─"^6, "─"^10, "─"^10, "─"^10, "─"^10, "─"^10, "─"^6, "─"^6)
 
     for (col_idx, pr) in sort(collect(pc.details); by=first)
-        b0_in = round(ustrip(u"inch", pr.b0); digits=1)
-        vu_psi = round(ustrip(u"psi", pr.vu); digits=1)
-        φvc_psi = round(ustrip(u"psi", pr.φvc); digits=1)
+        b0_val = _to_report(du, :thickness, pr.b0; digits=1)
+        vu_val = du.units[:stress] == ksi ? round(ustrip(u"psi", pr.vu); digits=1) : round(ustrip(u"MPa", pr.vu); digits=1)
+        φvc_val = du.units[:stress] == ksi ? round(ustrip(u"psi", pr.φvc); digits=1) : round(ustrip(u"MPa", pr.φvc); digits=1)
         ratio = round(pr.ratio; digits=2)
         has_studs = hasproperty(pr, :studs) && !isnothing(pr.studs) && pr.studs.required
         stud_str = has_studs ? "Yes" : "No"
 
-        # Get column position from structure
         pos_str = "—"
         if col_idx ≤ length(struc.columns)
-            try
-                pos_str = string(struc.columns[col_idx].position)
-            catch; end
+            try; pos_str = string(struc.columns[col_idx].position); catch; end
         end
 
         Printf.@printf(io, "  │  C-%-3d %10s %10.1f %10.1f %10.1f %10.2f %6s %6s\n",
-            col_idx, pos_str, b0_in, vu_psi, φvc_psi, ratio, stud_str, pass_fail(pr.ok))
+            col_idx, pos_str, b0_val, vu_val, φvc_val, ratio, stud_str, pass_fail(pr.ok))
     end
 
     Printf.@printf(io, "  │  Overall: max ratio = %.2f  %s\n", pc.max_ratio, pass_fail(pc.ok))
@@ -254,27 +480,29 @@ function _report_slab_punching(io::IO, struc, r, h_in, d_in, fc_psi)
 end
 
 """Print the slab deflection check table (Δ, limit, L/Δ, long-term total)."""
-function _report_slab_deflection(io::IO, r, l1_ft)
+function _report_slab_deflection(io::IO, r, l1; du::DisplayUnits=imperial)
     dc = r.deflection_check
     hasproperty(dc, :Δ_check) || return
 
-    Δ_in   = round(ustrip(u"inch", dc.Δ_check); digits=3)
-    Δ_lim  = round(ustrip(u"inch", dc.Δ_limit); digits=3)
-    L_in   = l1_ft * 12.0
-    L_over_Δ = Δ_in > 0 ? round(Int, L_in / Δ_in) : 99999
+    Δ_val = _to_report(du, :deflection, dc.Δ_check; digits=3)
+    Δ_lim = _to_report(du, :deflection, dc.Δ_limit; digits=3)
+    defl_u = _ul(du, :deflection)
+    # L in same length unit as l1 for L/Δ ratio
+    L_disp = l1 * (du.units[:length] == u"ft" ? 12.0 : 1000.0)  # ft→in or m→mm
+    L_over_Δ = Δ_val > 0 ? round(Int, L_disp / Δ_val) : 99999
 
     println(io, "  │  DEFLECTION")
     Printf.@printf(io, "  │  %-20s %8s %8s %8s %12s %4s\n",
-        "Check", "Δ(in)", "Limit", "L/Δ", "Criterion", "OK?")
+        "Check", "Δ($defl_u)", "Limit", "L/Δ", "Criterion", "OK?")
     Printf.@printf(io, "  │  %-20s %8s %8s %8s %12s %4s\n",
         "─"^20, "─"^8, "─"^8, "─"^8, "─"^12, "─"^4)
     Printf.@printf(io, "  │  %-20s %8.3f %8.3f %8d %12s %4s\n",
-        "Deflection check", Δ_in, Δ_lim, L_over_Δ, "L/360", pass_fail(dc.ok))
+        "Deflection check", Δ_val, Δ_lim, L_over_Δ, "L/360", pass_fail(dc.ok))
 
     if hasproperty(dc, :Δ_total) && !isnothing(dc.Δ_total)
-        Δ_tot  = round(ustrip(u"inch", dc.Δ_total); digits=3)
-        Δ_tlim = round(L_in / 240.0; digits=3)
-        L_Δ_t  = Δ_tot > 0 ? round(Int, L_in / Δ_tot) : 99999
+        Δ_tot = _to_report(du, :deflection, dc.Δ_total; digits=3)
+        Δ_tlim = round(L_disp / 240.0; digits=3)
+        L_Δ_t = Δ_tot > 0 ? round(Int, L_disp / Δ_tot) : 99999
         Printf.@printf(io, "  │  %-20s %8.3f %8.3f %8d %12s %4s\n",
             "Long-term total", Δ_tot, Δ_tlim, L_Δ_t, "L/240", pass_fail(Δ_tot ≤ Δ_tlim))
     end
@@ -282,64 +510,116 @@ function _report_slab_deflection(io::IO, r, l1_ft)
 end
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 3. Columns
+# 3. Beams
 # ─────────────────────────────────────────────────────────────────────────────
 
-"""Print the column schedule (section, loads, axial/P-M/punching ratios)."""
-function _report_columns(io::IO, design::BuildingDesign;
-                         conc=resolve_concrete(design.params),
-                         reb=resolve_rebar(design.params))
-    struc = design.structure
+"""Print the beam schedule (section, demands, flexure/shear ratios). Adapts header to beam type."""
+function _report_beams(io::IO, design::BuildingDesign; du::DisplayUnits=design.params.display_units)
     params = design.params
-    du = params.display_units
 
-    isempty(design.columns) && return
-    fc_psi = round(ustrip(u"psi", conc.fc′); digits=0)
-    fy_ksi = round(ustrip(ksi, reb.Fy); digits=0)
+    isempty(design.beams) && return
 
-    # Shape constraint summary (from column options if available)
-    col_opts = _get_column_opts(params)
-    shape_con = !isnothing(col_opts) ? col_opts.shape_constraint : :square
-    max_ar    = !isnothing(col_opts) ? col_opts.max_aspect_ratio : 2.0
-    inc_in    = !isnothing(col_opts) ? round(ustrip(u"inch", col_opts.size_increment); digits=1) : 0.5
-
-    println(io, section_break("COLUMN SCHEDULE"))
-    Printf.@printf(io, "  f'c = %.0f psi, fy = %.0f ksi\n", fc_psi, fy_ksi)
-    Printf.@printf(io, "  Shape: %s, Max AR: %.1f, Increment: %.1f in\n", shape_con, max_ar, inc_in)
+    beam_label = _beam_type_label(params)
+    println(io, section_break("BEAM SCHEDULE" * (isempty(beam_label) ? "" : " ($beam_label)")))
     println(io)
 
-    # Detect whether any column is rectangular (c1 ≠ c2)
-    has_rect = any(cr -> begin
-        c1_in = ustrip(u"inch", cr.c1)
-        c2_in = ustrip(u"inch", cr.c2)
-        c1_in > 0.1 && c2_in > 0.1 && abs(c1_in - c2_in) > 0.1
+    mom_u = _ul(du, :moment)
+    force_u = _ul(du, :force)
+    len_u = _ul(du, :length)
+
+    Printf.@printf(io, "  %-5s %-12s %9s %9s %9s %8s %8s %4s\n",
+        "Beam", "Section", "Mu($mom_u)", "Vu($force_u)", "L($len_u)", "FlxRat", "ShrRat", "OK?")
+    Printf.@printf(io, "  %-5s %-12s %9s %9s %9s %8s %8s %4s\n",
+        "─"^5, "─"^12, "─"^9, "─"^9, "─"^9, "─"^8, "─"^8, "─"^4)
+
+    for (beam_idx, br) in sort(collect(design.beams); by=first)
+        Mu_val = _to_report(du, :moment, br.Mu; digits=1)
+        Vu_val = _to_report(du, :force, br.Vu; digits=1)
+        L_val  = _to_report(du, :length, br.member_length; digits=1)
+
+        Printf.@printf(io, "  B-%-2d %-12s %9.1f %9.1f %9.1f %8s %8s %4s\n",
+            beam_idx, br.section_size,
+            Mu_val, Vu_val, L_val,
+            fv(br.flexure_ratio; d=3), fv(br.shear_ratio; d=3), pass_fail(br.ok))
+    end
+    println(io)
+end
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 4. Columns
+# ─────────────────────────────────────────────────────────────────────────────
+
+"""Print the column schedule (section, loads, axial/P-M/punching ratios). Adapts to steel vs RC."""
+function _report_columns(io::IO, design::BuildingDesign;
+                         conc=resolve_concrete(design.params),
+                         reb=resolve_rebar(design.params),
+                         du::DisplayUnits=design.params.display_units)
+    struc = design.structure
+    params = design.params
+
+    isempty(design.columns) && return
+
+    force_u = _ul(du, :force)
+    mom_u = _ul(du, :moment)
+    thick_u = _ul(du, :thickness)
+
+    is_steel_col = params.columns isa SteelColumnOptions
+    col_label = _column_type_label(params)
+    println(io, section_break("COLUMN SCHEDULE" * (isempty(col_label) ? "" : " ($col_label)")))
+
+    if is_steel_col
+        steel = params.columns.material
+        Fy_val = _to_report(du, :stress, steel.Fy; digits=0)
+        Printf.@printf(io, "  Fy = %.0f %s\n", Fy_val, _ul(du, :stress))
+    else
+        fc_val = _to_report(du, :stress, conc.fc′; digits=0)
+        fy_val = _to_report(du, :stress, reb.Fy; digits=0)
+        Printf.@printf(io, "  f'c = %.0f %s, fy = %.0f %s\n", fc_val, _ul(du, :stress), fy_val, _ul(du, :stress))
+
+        col_opts = _get_column_opts(params)
+        if !isnothing(col_opts)
+            shape_con = col_opts.shape_constraint
+            max_ar    = col_opts.max_aspect_ratio
+            inc_val   = _to_report(du, :thickness, col_opts.size_increment; digits=1)
+            Printf.@printf(io, "  Shape: %s, Max AR: %.1f, Increment: %.1f %s\n", shape_con, max_ar, inc_val, thick_u)
+        end
+    end
+    println(io)
+
+    # Detect whether any column is rectangular (c1 ≠ c2) — RC columns only
+    has_rect = !is_steel_col && any(cr -> begin
+        c1_val = ustrip(du.units[:thickness], cr.c1)
+        c2_val = ustrip(du.units[:thickness], cr.c2)
+        denom = max(c1_val, c2_val, 1e-6)
+        c1_val > 0.1 && c2_val > 0.1 && abs(c1_val - c2_val) / denom > 0.01
     end, values(design.columns))
 
-    # Header — wider table when rectangular columns present
+    defl_u = _ul(du, :deflection)
+
+    # Header — adapts to column type
     if has_rect
         Printf.@printf(io, "  %-5s %5s %-8s %7s %7s %5s %9s %9s %9s %8s %8s %8s %4s\n",
-            "Col", "Story", "Position", "c1(in)", "c2(in)", "AR",
-            "Pu(kip)", "Mu(k·ft)", "e(in)", "Axl.Rat", "P-M Rat", "Pun.Rat", "OK?")
+            "Col", "Story", "Position", "c1($thick_u)", "c2($thick_u)", "AR",
+            "Pu($force_u)", "Mu($mom_u)", "e($defl_u)", "Axl.Rat", "P-M Rat", "Pun.Rat", "OK?")
         Printf.@printf(io, "  %-5s %5s %-8s %7s %7s %5s %9s %9s %9s %8s %8s %8s %4s\n",
             "─"^5, "─"^5, "─"^8, "─"^7, "─"^7, "─"^5,
             "─"^9, "─"^9, "─"^9, "─"^8, "─"^8, "─"^8, "─"^4)
     else
-        Printf.@printf(io, "  %-5s %5s %-8s %-10s %9s %9s %9s %8s %8s %8s %4s\n",
+        Printf.@printf(io, "  %-5s %5s %-8s %-12s %9s %9s %9s %8s %8s %8s %4s\n",
             "Col", "Story", "Position", "Section",
-            "Pu(kip)", "Mu(k·ft)", "e(in)", "Axl.Rat", "P-M Rat", "Pun.Rat", "OK?")
-        Printf.@printf(io, "  %-5s %5s %-8s %-10s %9s %9s %9s %8s %8s %8s %4s\n",
-            "─"^5, "─"^5, "─"^8, "─"^10,
+            "Pu($force_u)", "Mu($mom_u)", "e($defl_u)", "Axl.Rat", "P-M Rat", "Pun.Rat", "OK?")
+        Printf.@printf(io, "  %-5s %5s %-8s %-12s %9s %9s %9s %8s %8s %8s %4s\n",
+            "─"^5, "─"^5, "─"^8, "─"^12,
             "─"^9, "─"^9, "─"^9, "─"^8, "─"^8, "─"^8, "─"^4)
     end
 
     for (col_idx, cr) in sort(collect(design.columns); by=first)
-        Pu_kip  = round(ustrip(kip, cr.Pu); digits=1)
-        Mu_kipft = round(ustrip(kip * u"ft", cr.Mu_x); digits=1)
+        Pu_val  = _to_report(du, :force, cr.Pu; digits=1)
+        Mu_val  = _to_report(du, :moment, cr.Mu_x; digits=1)
 
-        # Eccentricity e = M/P (inches)
-        e_in = abs(Pu_kip) > 0.01 ? round(abs(Mu_kipft * 12.0 / Pu_kip); digits=1) : 0.0
+        Pu_strip = ustrip(du.units[:force], cr.Pu)
+        e_val = abs(Pu_strip) > 1e-6 ? _to_report(du, :deflection, abs(cr.Mu_x / cr.Pu); digits=1) : 0.0
 
-        # Story and position from structure
         story = 0
         pos_str = "—"
         try
@@ -354,17 +634,17 @@ function _report_columns(io::IO, design::BuildingDesign;
         end
 
         if has_rect
-            c1_in = round(ustrip(u"inch", cr.c1); digits=1)
-            c2_in = round(ustrip(u"inch", cr.c2); digits=1)
-            ar = c2_in > 0.1 ? round(c1_in / c2_in; digits=2) : 1.0
+            c1_val = _to_report(du, :thickness, cr.c1; digits=1)
+            c2_val = _to_report(du, :thickness, cr.c2; digits=1)
+            ar = c2_val > 0.1 ? round(c1_val / c2_val; digits=2) : 1.0
             Printf.@printf(io, "  C-%-2d %5d %-8s %7.1f %7.1f %5.2f %9.1f %9.1f %9.1f %8s %8s %8s %4s\n",
-                col_idx, story, pos_str, c1_in, c2_in, ar,
-                Pu_kip, Mu_kipft, e_in,
+                col_idx, story, pos_str, c1_val, c2_val, ar,
+                Pu_val, Mu_val, e_val,
                 fv(cr.axial_ratio; d=3), fv(cr.interaction_ratio; d=3), punch_str, pass_fail(cr.ok))
         else
-            Printf.@printf(io, "  C-%-2d %5d %-8s %-10s %9.1f %9.1f %9.1f %8s %8s %8s %4s\n",
+            Printf.@printf(io, "  C-%-2d %5d %-8s %-12s %9.1f %9.1f %9.1f %8s %8s %8s %4s\n",
                 col_idx, story, pos_str, cr.section_size,
-                Pu_kip, Mu_kipft, e_in,
+                Pu_val, Mu_val, e_val,
                 fv(cr.axial_ratio; d=3), fv(cr.interaction_ratio; d=3), punch_str, pass_fail(cr.ok))
         end
     end
@@ -372,23 +652,27 @@ function _report_columns(io::IO, design::BuildingDesign;
 end
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 4. Foundations
+# 5. Foundations
 # ─────────────────────────────────────────────────────────────────────────────
 
 """Print the foundation schedule (reactions, dimensions, bearing/punching/flexure ratios)."""
-function _report_foundations(io::IO, design::BuildingDesign)
+function _report_foundations(io::IO, design::BuildingDesign; du::DisplayUnits=design.params.display_units)
     struc = design.structure
     params = design.params
-    du = params.display_units
 
     isempty(design.foundations) && return
+
+    force_u = _ul(du, :force)
+    len_u = _ul(du, :length)
+    thick_u = _ul(du, :thickness)
+    press_u = _ul(du, :pressure)
 
     # Try to get soil bearing capacity from params
     qa_str = "—"
     if !isnothing(params.foundation_options)
         soil = params.foundation_options.soil
-        qa_ksf = round(ustrip(ksf, soil.qa); digits=1)
-        qa_str = "$(qa_ksf) ksf"
+        qa_val = _to_report(du, :pressure, soil.qa; digits=1)
+        qa_str = "$(qa_val) $press_u"
     end
 
     println(io, section_break("FOUNDATION SCHEDULE"))
@@ -402,24 +686,24 @@ function _report_foundations(io::IO, design::BuildingDesign)
 
     # Header
     Printf.@printf(io, "  %-5s %5s %10s %7s %7s %6s %10s %8s %8s %8s %4s\n",
-        "Fdn", "Group", "Rxn(kip)", "B(ft)", "L(ft)", "D(in)",
-        "q_act(ksf)", "BearRat", "PunRat", "FlxRat", "OK?")
+        "Fdn", "Group", "Rxn($force_u)", "B($len_u)", "L($len_u)", "D($thick_u)",
+        "q_act($press_u)", "BearRat", "PunRat", "FlxRat", "OK?")
     Printf.@printf(io, "  %-5s %5s %10s %7s %7s %6s %10s %8s %8s %8s %4s\n",
         "─"^5, "─"^5, "─"^10, "─"^7, "─"^7, "─"^6, "─"^10, "─"^8, "─"^8, "─"^8, "─"^4)
 
     for (fdn_idx, fr) in sorted_fdns
-        Rxn_kip = round(ustrip(kip, fr.reaction); digits=1)
-        B_ft    = round(ustrip(u"ft", fr.width); digits=1)
-        L_ft    = round(ustrip(u"ft", fr.length); digits=1)
-        D_in    = round(ustrip(u"inch", fr.depth); digits=1)
+        Rxn_val = _to_report(du, :force, fr.reaction; digits=1)
+        B_val   = _to_report(du, :length, fr.width; digits=1)
+        L_val   = _to_report(du, :length, fr.length; digits=1)
+        D_val   = _to_report(du, :thickness, fr.depth; digits=1)
 
         # Actual bearing pressure = Reaction / (B × L)
-        A_ft2 = B_ft * L_ft
-        q_act = A_ft2 > 0 ? round(Rxn_kip / A_ft2; digits=2) : 0.0
+        area = fr.width * fr.length
+        q_act_val = ustrip(area) > 1e-12 ? _to_report(du, :pressure, fr.reaction / area; digits=2) : 0.0
         g_label = get(gid_map, fr.group_id, 0)
 
         Printf.@printf(io, "  F-%-2d %5d %10.1f %7.1f %7.1f %6.1f %10.2f %8s %8s %8s %4s\n",
-            fdn_idx, g_label, Rxn_kip, B_ft, L_ft, D_in, q_act,
+            fdn_idx, g_label, Rxn_val, B_val, L_val, D_val, q_act_val,
             fv(fr.bearing_ratio; d=2), fv(fr.punching_ratio; d=2),
             fv(fr.flexure_ratio; d=2), pass_fail(fr.ok))
     end
@@ -427,14 +711,16 @@ function _report_foundations(io::IO, design::BuildingDesign)
 end
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 5. Material Takeoff
+# 6. Material Takeoff
 # ─────────────────────────────────────────────────────────────────────────────
 
 """Print the material takeoff (concrete volumes, floor area, embodied carbon)."""
-function _report_takeoff(io::IO, design::BuildingDesign)
+function _report_takeoff(io::IO, design::BuildingDesign; du::DisplayUnits=design.params.display_units)
     struc = design.structure
     params = design.params
-    du = params.display_units
+
+    vol_u = _ul(du, :volume)
+    area_u = _ul(du, :area)
 
     println(io, section_break("MATERIAL TAKEOFF"))
     println(io)
@@ -462,20 +748,20 @@ function _report_takeoff(io::IO, design::BuildingDesign)
         end
     end
 
-    conc_slab_yd3 = round(ustrip(u"yd^3", total_slab_conc); digits=1)
-    conc_fdn_yd3  = round(ustrip(u"yd^3", total_fdn_conc); digits=1)
-    conc_total    = conc_slab_yd3 + conc_fdn_yd3
-    area_ft2      = round(ustrip(u"ft^2", total_slab_area); digits=0)
+    conc_slab = _to_report(du, :volume, total_slab_conc; digits=1)
+    conc_fdn  = _to_report(du, :volume, total_fdn_conc; digits=1)
+    conc_total = _to_report(du, :volume, total_slab_conc + total_fdn_conc; digits=1)
+    area_val   = _to_report(du, :area, total_slab_area; digits=0)
 
-    Printf.@printf(io, "  %-16s %12s %14s\n", "System", "Conc.Vol(yd³)", "Floor Area(ft²)")
+    Printf.@printf(io, "  %-16s %12s %14s\n", "System", "Conc.Vol($vol_u)", "Floor Area($area_u)")
     Printf.@printf(io, "  %-16s %12s %14s\n", "─"^16, "─"^12, "─"^14)
-    Printf.@printf(io, "  %-16s %12.1f %14.0f\n", "Slabs", conc_slab_yd3, area_ft2)
-    Printf.@printf(io, "  %-16s %12.1f %14s\n", "Foundations", conc_fdn_yd3, "—")
+    Printf.@printf(io, "  %-16s %12.1f %14.0f\n", "Slabs", conc_slab, area_val)
+    Printf.@printf(io, "  %-16s %12.1f %14s\n", "Foundations", conc_fdn, "—")
     Printf.@printf(io, "  %-16s %12s %14s\n", "─"^16, "─"^12, "─"^14)
     Printf.@printf(io, "  %-16s %12.1f\n", "TOTAL", conc_total)
     println(io)
 
-    # Embodied carbon (if available)
+    # Embodied carbon (if available) — kept in kgCO₂e (standard unit)
     try
         ec = compute_building_ec(struc)
         Printf.@printf(io, "  Embodied Carbon:  %.0f kgCO₂e\n", ec.total_ec)
@@ -485,7 +771,7 @@ function _report_takeoff(io::IO, design::BuildingDesign)
 end
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 6. Overall Status
+# 7. Overall Status
 # ─────────────────────────────────────────────────────────────────────────────
 
 """Print the overall pass/fail status and critical element."""

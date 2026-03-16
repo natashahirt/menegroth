@@ -403,6 +403,9 @@ function json_to_params(api_params::APIParams, coord_unit_str::String="meters")
         scoped_floor_overrides = scoped_overrides,
         geometry_is_centerline = api_params.geometry_is_centerline,
         display_units = DisplayUnits(display_units_sys),
+        visualization_target_edge_m = api_params.visualization_target_edge_m,
+        skip_visualization = api_params.skip_visualization,
+        visualization_detail = api_params.visualization_detail,
     )
 end
 
@@ -486,7 +489,7 @@ _resolve_soil_name(name::String)     = _resolve_from_map(name, SOIL_MAP,     "so
 """Resolve floor options from API params."""
 function _resolve_floor_options(api_params::APIParams)
     ft = Symbol(api_params.floor_type)
-    method = _resolve_analysis_method(api_params.floor_options.method)
+    method = _resolve_analysis_method(api_params.floor_options)
     defl   = _resolve_deflection_limit(api_params.floor_options.deflection_limit)
     punch  = _resolve_punching_strategy(api_params.floor_options.punching_strategy)
 
@@ -516,14 +519,17 @@ const _ANALYSIS_METHOD_MAP = Dict{String, Function}(
     "DDM_SIMPLIFIED"  => () -> StructuralSizer.DDM(:simplified),
     "EFM"             => () -> StructuralSizer.EFM(),
     "EFM_HARDY_CROSS" => () -> StructuralSizer.EFM(solver=:hardy_cross),
-    "FEA"             => () -> StructuralSizer.FEA(),
 )
 
-"""Resolve analysis method string to Julia type."""
-function _resolve_analysis_method(method_str::String)
-    s = uppercase(strip(method_str))
+"""Resolve analysis method from floor options. FEA uses target_edge_m when provided (FEA default: adaptive)."""
+function _resolve_analysis_method(floor_opts::APIFloorOptions)
+    s = uppercase(strip(floor_opts.method))
+    if s == "FEA"
+        te = isnothing(floor_opts.target_edge_m) ? nothing : floor_opts.target_edge_m * u"m"
+        return StructuralSizer.FEA(target_edge=te)
+    end
     haskey(_ANALYSIS_METHOD_MAP, s) && return _ANALYSIS_METHOD_MAP[s]()
-    @warn "Unknown analysis_method '$method_str' — defaulting to DDM"
+    @warn "Unknown analysis_method '$(floor_opts.method)' — defaulting to DDM"
     return StructuralSizer.DDM()
 end
 
@@ -635,6 +641,7 @@ function _resolve_column_options(api_params::APIParams)
             section_shape = shape,
             catalog = catalog_sym,
             sizing_strategy = strat,
+            time_limit_sec = something(api_params.mip_time_limit_sec, 30.0),
         )
     elseif startswith(ct, "steel_")
         section_type = if ct == "steel_w"
@@ -653,6 +660,7 @@ function _resolve_column_options(api_params::APIParams)
             section_type = section_type,
             catalog = catalog_sym,
             sizing_strategy = strat,
+            time_limit_sec = something(api_params.mip_time_limit_sec, 30.0),
         )
     else
         # Default to RC rectangular
@@ -800,11 +808,7 @@ function _resolve_beam_options(api_params::APIParams)
     bt = lowercase(strip(api_params.beam_type))
     concrete, rebar, steel = _resolve_materials(api_params)
 
-    # Vaults produce high thrust; default to xlarge catalog for RC beams.
     catalog = Symbol(api_params.beam_catalog)
-    if Symbol(api_params.floor_type) == :vault && startswith(bt, "rc_") && catalog === :large
-        catalog = :xlarge
-    end
 
     # Build custom catalog from bounds when beam_catalog is "custom".
     custom_cat = nothing
@@ -819,6 +823,7 @@ function _resolve_beam_options(api_params::APIParams)
         )
     end
 
+    tlim = something(api_params.mip_time_limit_sec, 30.0)
     if startswith(bt, "steel_")
         section_type = if bt == "steel_w"
             :w
@@ -832,6 +837,7 @@ function _resolve_beam_options(api_params::APIParams)
             material = steel,
             section_type = section_type,
             sizing_strategy = strat,
+            time_limit_sec = tlim,
         )
     elseif bt == "rc_rect"
         strat = _resolve_sizing_strategy(api_params.beam_sizing_strategy)
@@ -842,6 +848,7 @@ function _resolve_beam_options(api_params::APIParams)
             catalog = catalog === :custom ? :standard : catalog,
             custom_catalog = custom_cat,
             sizing_strategy = strat,
+            time_limit_sec = tlim,
         )
     elseif bt == "rc_tbeam"
         strat = _resolve_sizing_strategy(api_params.beam_sizing_strategy)
@@ -852,6 +859,7 @@ function _resolve_beam_options(api_params::APIParams)
             catalog = catalog === :custom ? :standard : catalog,
             custom_catalog = custom_cat,
             sizing_strategy = strat,
+            time_limit_sec = tlim,
         )
     elseif bt == "pixelframe"
         fc_vals = _resolve_pixelframe_fc_values(api_params)

@@ -1300,6 +1300,8 @@ namespace Menegroth.GH.Components
                         AppendSlabColor(colors, analyticalSource, colorBy, maxDisp, "vertex_displacements",
                             maxSlabBending, maxSlabMembrane, maxSlabShear, maxSlabVonMises, maxSlabSurfaceStress);
                     }
+
+                    // Omit solid drop panels in analytical mode; slab mesh suffices for coloring
                 }
             }
         }
@@ -1798,46 +1800,125 @@ namespace Menegroth.GH.Components
             {
                 var c = dp["center"]?.ToObject<double[]>() ?? new double[0];
                 if (c.Length < 2) continue;
-                double length = dp["length"]?.ToObject<double>() ?? 0.0;
-                double width = dp["width"]?.ToObject<double>() ?? 0.0;
+                double dpLength = dp["length"]?.ToObject<double>() ?? 0.0;
+                double dpWidth = dp["width"]?.ToObject<double>() ?? 0.0;
                 double extra = dp["extra_depth"]?.ToObject<double>() ?? 0.0;
-                if (length <= 0 || width <= 0 || extra <= 0) continue;
+                if (dpLength <= 0 || dpWidth <= 0 || extra <= 0) continue;
 
-                int nearest = 0;
-                double best = double.MaxValue;
-                for (int i = 0; i < verts.Length; i++)
+                double x0 = c[0] - dpLength / 2.0;
+                double x1 = c[0] + dpLength / 2.0;
+                double y0 = c[1] - dpWidth / 2.0;
+                double y1 = c[1] + dpWidth / 2.0;
+
+                var corners = new[] {
+                    new Point3d(x0, y0, 0), new Point3d(x1, y0, 0),
+                    new Point3d(x1, y1, 0), new Point3d(x0, y1, 0),
+                };
+
+                var topPts = new Point3d[4];
+                var botPts = new Point3d[4];
+
+                for (int ci = 0; ci < 4; ci++)
                 {
-                    double dx = verts[i][0] - c[0];
-                    double dy = verts[i][1] - c[1];
-                    double d2 = dx * dx + dy * dy;
-                    if (d2 < best)
-                    {
-                        best = d2;
-                        nearest = i;
-                    }
+                    var disp = InterpolateDisplacement(corners[ci].X, corners[ci].Y, verts, disps);
+                    double zRef = disp[2]; // undeflected Z from nearest vertex
+                    double dzScaled = disp[3] * scale;
+
+                    double zTop = zRef + dzScaled - slabThickness;
+                    double zBot = zTop - extra;
+                    double xDef = corners[ci].X + disp[0] * scale;
+                    double yDef = corners[ci].Y + disp[1] * scale;
+                    topPts[ci] = new Point3d(xDef, yDef, zTop);
+                    botPts[ci] = new Point3d(xDef, yDef, zBot);
                 }
 
-                double zTopDef = verts[nearest][2];
-                if (nearest < disps.Length && disps[nearest].Length >= 3)
-                    zTopDef += disps[nearest][2] * scale;
-
-                double x0 = c[0] - length / 2.0;
-                double x1 = c[0] + length / 2.0;
-                double y0 = c[1] - width / 2.0;
-                double y1 = c[1] + width / 2.0;
-                double zTopDrop = zTopDef - slabThickness;
-                double zBotDrop = zTopDrop - extra;
-
-                var brep = new BoundingBox(new[]
-                {
-                    new Point3d(x0, y0, zBotDrop), new Point3d(x1, y0, zBotDrop),
-                    new Point3d(x1, y1, zBotDrop), new Point3d(x0, y1, zBotDrop),
-                    new Point3d(x0, y0, zTopDrop), new Point3d(x1, y0, zTopDrop),
-                    new Point3d(x1, y1, zTopDrop), new Point3d(x0, y1, zTopDrop),
-                }).ToBrep();
-                if (brep != null)
-                    output.Add(new GH_Brep(brep));
+                var mesh = new Mesh();
+                for (int ci = 0; ci < 4; ci++) mesh.Vertices.Add(topPts[ci]);
+                for (int ci = 0; ci < 4; ci++) mesh.Vertices.Add(botPts[ci]);
+                // Top face
+                mesh.Faces.AddFace(0, 1, 2, 3);
+                // Bottom face (reversed winding)
+                mesh.Faces.AddFace(7, 6, 5, 4);
+                // Side faces
+                mesh.Faces.AddFace(0, 4, 5, 1);
+                mesh.Faces.AddFace(1, 5, 6, 2);
+                mesh.Faces.AddFace(2, 6, 7, 3);
+                mesh.Faces.AddFace(3, 7, 4, 0);
+                mesh.Normals.ComputeNormals();
+                mesh.Compact();
+                output.Add(new GH_Mesh(mesh));
             }
+        }
+
+        /// <summary>
+        /// Inverse-distance-weighted interpolation of displacement at an XY query point
+        /// from the slab mesh vertices. Returns (dx, dy, zRef, dz) where zRef is the
+        /// undeflected Z of the nearest vertex and (dx, dy, dz) are displacement components.
+        /// </summary>
+        private static double[] InterpolateDisplacement(double qx, double qy, double[][] verts, double[][] disps)
+        {
+            const int K = 6;
+            const double Eps = 1e-12;
+
+            var nearest = new (int idx, double dist2)[K];
+            for (int i = 0; i < K; i++)
+                nearest[i] = (-1, double.MaxValue);
+
+            for (int i = 0; i < verts.Length; i++)
+            {
+                double dx = verts[i][0] - qx;
+                double dy = verts[i][1] - qy;
+                double d2 = dx * dx + dy * dy;
+
+                int worstSlot = 0;
+                for (int j = 1; j < K; j++)
+                {
+                    if (nearest[j].dist2 > nearest[worstSlot].dist2)
+                        worstSlot = j;
+                }
+                if (d2 < nearest[worstSlot].dist2)
+                    nearest[worstSlot] = (i, d2);
+            }
+
+            // Check for exact coincidence with a vertex
+            for (int j = 0; j < K; j++)
+            {
+                if (nearest[j].idx >= 0 && nearest[j].dist2 < Eps)
+                {
+                    int idx = nearest[j].idx;
+                    double ddx = idx < disps.Length && disps[idx].Length >= 3 ? disps[idx][0] : 0;
+                    double ddy = idx < disps.Length && disps[idx].Length >= 3 ? disps[idx][1] : 0;
+                    double ddz = idx < disps.Length && disps[idx].Length >= 3 ? disps[idx][2] : 0;
+                    return new[] { ddx, ddy, verts[idx][2], ddz };
+                }
+            }
+
+            double wSum = 0, wDx = 0, wDy = 0, wDz = 0, wZ = 0;
+            for (int j = 0; j < K; j++)
+            {
+                if (nearest[j].idx < 0) continue;
+                int idx = nearest[j].idx;
+                double w = 1.0 / Math.Sqrt(nearest[j].dist2);
+                wSum += w;
+                wZ += w * verts[idx][2];
+                if (idx < disps.Length && disps[idx].Length >= 3)
+                {
+                    wDx += w * disps[idx][0];
+                    wDy += w * disps[idx][1];
+                    wDz += w * disps[idx][2];
+                }
+            }
+
+            if (wSum < Eps)
+            {
+                int fallback = nearest[0].idx >= 0 ? nearest[0].idx : 0;
+                double ddx = fallback < disps.Length && disps[fallback].Length >= 3 ? disps[fallback][0] : 0;
+                double ddy = fallback < disps.Length && disps[fallback].Length >= 3 ? disps[fallback][1] : 0;
+                double ddz = fallback < disps.Length && disps[fallback].Length >= 3 ? disps[fallback][2] : 0;
+                return new[] { ddx, ddy, verts[fallback][2], ddz };
+            }
+
+            return new[] { wDx / wSum, wDy / wSum, wZ / wSum, wDz / wSum };
         }
 
         /// <summary>

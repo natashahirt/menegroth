@@ -153,6 +153,18 @@ function validate_input(input::APIInput)
     if !isnothing(p.floor_options.vault_lambda) && p.floor_options.vault_lambda <= 0
         push!(errors, "Invalid floor_options.vault_lambda $(p.floor_options.vault_lambda). Must be > 0.")
     end
+    if !isnothing(p.floor_options.target_edge_m) && p.floor_options.target_edge_m <= 0
+        push!(errors, "Invalid floor_options.target_edge_m $(p.floor_options.target_edge_m). Must be > 0.")
+    end
+    if !isnothing(p.visualization_target_edge_m) && p.visualization_target_edge_m <= 0
+        push!(errors, "Invalid visualization_target_edge_m $(p.visualization_target_edge_m). Must be > 0.")
+    end
+    if !(p.visualization_detail in ("minimal", "full"))
+        push!(errors, "Invalid visualization_detail \"$(p.visualization_detail)\". Must be \"minimal\" or \"full\".")
+    end
+    if !isnothing(p.mip_time_limit_sec) && p.mip_time_limit_sec <= 0
+        push!(errors, "Invalid mip_time_limit_sec $(p.mip_time_limit_sec). Must be > 0.")
+    end
 
     for (i, ov) in enumerate(p.scoped_overrides)
         if !(ov.floor_type in valid_floor_types)

@@ -2,7 +2,7 @@
 
 julia_version = "1.12.4"
 manifest_format = "2.0"
-project_hash = "603fd77657e9a940da2b6b786f52206affebbfb4"
+project_hash = "c18cd786e701c2d95bb0443f2670e93784c7012b"
 
 [[deps.ASL_jll]]
 deps = ["Artifacts", "JLLWrappers", "Libdl", "Pkg"]
@@ -1309,7 +1309,7 @@ uuid = "9d8e7f6a-5b4c-3d2e-1f0a-9b8c7d6e5f4a"
 version = "0.1.0"
 
 [[deps.StructuralSynthesizer]]
-deps = ["Accessors", "Asap", "Dates", "GeometryBasics", "Graphs", "HTTP", "Interpolations", "JSON", "JSON3", "JuMP", "LinearAlgebra", "Logging", "Meshes", "Oxygen", "PrecompileTools", "Printf", "Reexport", "SHA", "SparseArrays", "Statistics", "StructTypes", "StructuralSizer", "Unitful", "XLSX"]
+deps = ["Accessors", "Asap", "CodecZlib", "Dates", "GeometryBasics", "Graphs", "HTTP", "Interpolations", "JSON", "JSON3", "JuMP", "LinearAlgebra", "Logging", "Meshes", "Oxygen", "PrecompileTools", "Printf", "Random", "Reexport", "SHA", "SparseArrays", "Statistics", "StructTypes", "StructuralSizer", "Unitful", "XLSX"]
 path = "."
 uuid = "fc54e8a9-dab1-4bea-a64f-f8e9b3ce8a89"
 version = "0.1.0"

@@ -123,6 +123,7 @@ function size_columns(
             optimizer = opts.solver,
             mip_gap = mip_gap,
             output_flag = output_flag,
+            time_limit_sec = opts.time_limit_sec,
         )
     else
         return optimize_discrete(
@@ -132,6 +133,7 @@ function size_columns(
             optimizer = opts.solver,
             mip_gap = mip_gap,
             output_flag = output_flag,
+            time_limit_sec = opts.time_limit_sec,
         )
     end
 end
@@ -194,6 +196,7 @@ function size_columns(
             optimizer = opts.solver,
             mip_gap = mip_gap,
             output_flag = output_flag,
+            time_limit_sec = opts.time_limit_sec,
         )
     else
         return optimize_discrete(
@@ -203,6 +206,7 @@ function size_columns(
             optimizer = opts.solver,
             mip_gap = mip_gap,
             output_flag = output_flag,
+            time_limit_sec = opts.time_limit_sec,
             cache = cache,
         )
     end
@@ -473,6 +477,7 @@ function size_beams(
             optimizer      = opts.solver,
             mip_gap        = mip_gap,
             output_flag    = output_flag,
+            time_limit_sec = opts.time_limit_sec,
         )
     else
         return optimize_discrete(
@@ -482,6 +487,7 @@ function size_beams(
             optimizer      = opts.solver,
             mip_gap        = mip_gap,
             output_flag    = output_flag,
+            time_limit_sec = opts.time_limit_sec,
         )
     end
 end
@@ -666,6 +672,7 @@ function size_beams(
         optimizer      = opts.solver,
         mip_gap        = mip_gap,
         output_flag    = output_flag,
+        time_limit_sec = opts.time_limit_sec,
     )
 
     return (; mip_result..., n_pixels=n_pixels_vec)
@@ -768,6 +775,7 @@ function size_columns(
         optimizer      = opts.solver,
         mip_gap        = mip_gap,
         output_flag    = output_flag,
+        time_limit_sec = opts.time_limit_sec,
     )
 
     return (; mip_result..., n_pixels=n_pixels_vec)
@@ -1756,6 +1764,7 @@ function size_tbeams(
         optimizer      = opts.solver,
         mip_gap        = mip_gap,
         output_flag    = output_flag,
+        time_limit_sec = opts.time_limit_sec,
     )
 end
 

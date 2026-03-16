@@ -52,6 +52,7 @@ Base.@kwdef struct SteelColumnOptions
     sizing_strategy::Symbol = :discrete
     objective::AbstractObjective = MinWeight()
     solver::Symbol = :auto
+    time_limit_sec::Real = 30.0  # MIP solver time limit (discrete only)
 end
 
 # ==============================================================================
@@ -105,6 +106,7 @@ Base.@kwdef struct SteelBeamOptions
     sizing_strategy::Symbol = :discrete
     objective::AbstractObjective = MinWeight()
     solver::Symbol = :auto
+    time_limit_sec::Real = 30.0  # MIP solver time limit (discrete only)
 end
 
 """Union of steel column and beam options for shared dispatch paths."""
@@ -223,6 +225,7 @@ Base.@kwdef struct ConcreteColumnOptions
     βdns::Float64 = 0.6
     objective::AbstractObjective = MinWeight()
     solver::Symbol = :auto
+    time_limit_sec::Real = 30.0  # MIP solver time limit (discrete only)
 
     # ─── NLP-Specific Settings (ignored when sizing_strategy == :discrete) ───
     nlp_dim_increment::Length = 2.0u"inch"
@@ -369,6 +372,7 @@ Base.@kwdef struct ConcreteBeamOptions
     n_max_sections::Int = 0
     objective::AbstractObjective = MinWeight()
     solver::Symbol = :auto
+    time_limit_sec::Real = 30.0  # MIP solver time limit (discrete only)
 end
 
 """
@@ -507,6 +511,7 @@ Base.@kwdef struct PixelFrameBeamOptions
     n_max_sections::Int = 0
     objective::AbstractObjective = MinWeight()
     solver::Symbol = :auto
+    time_limit_sec::Real = 30.0  # MIP solver time limit
 end
 
 # ── Boundary helpers: strip Unitful to bare mm / MPa / mm² / kg/m³ ──
@@ -664,6 +669,7 @@ Base.@kwdef struct PixelFrameColumnOptions
     pixel_length::Union{Real, Length} = 500.0u"mm"
 
     # Optimization
+    time_limit_sec::Real = 30.0  # MIP solver time limit
     n_max_sections::Int = 0
     objective::AbstractObjective = MinWeight()
     solver::Symbol = :auto

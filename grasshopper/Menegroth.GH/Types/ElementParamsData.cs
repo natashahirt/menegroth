@@ -8,6 +8,8 @@ namespace Menegroth.GH.Types
     {
         /// <summary>Solver type: mip or nlp.</summary>
         public string SolverType { get; set; } = "nlp";
+        /// <summary>MIP solver time limit (seconds) when SolverType is mip. Default: 30.</summary>
+        public double? MipTimeLimitSec { get; set; } = null;
 
         /// <summary>Section type: beam or column.</summary>
         public string Section { get; set; } = "beam";
@@ -50,6 +52,8 @@ namespace Menegroth.GH.Types
                 target.ColumnType = ElementType;
                 target.ColumnSizingStrategy = SolverType;
             }
+            if (SolverType == "mip" && MipTimeLimitSec.HasValue)
+                target.MipTimeLimitSec = MipTimeLimitSec;
 
             // Apply bounds based on element type
             switch (ElementType)

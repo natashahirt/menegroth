@@ -56,9 +56,11 @@ EXPOSE 8080
 
 ENV JULIA_PROJECT=StructuralSynthesizer
 ENV SIZER_HOST=0.0.0.0
+# Single-threaded to avoid segfaults in Asap FEM (global_K!, process_elements!) under threading.
+ENV JULIA_NUM_THREADS=1
 
 # Optional: set GRB_LICENSE_CONTENTS at runtime to write gurobi.lic; then start the API
 RUN chmod +x /app/scripts/api/docker_entry.sh
 ENTRYPOINT ["/app/scripts/api/docker_entry.sh"]
-# -t auto uses JULIA_NUM_THREADS (set by docker_entry.sh, default: auto = all cores)
-CMD ["julia", "-t", "auto", "--project=StructuralSynthesizer", "scripts/api/sizer_bootstrap.jl"]
+# -t 1 matches JULIA_NUM_THREADS; single-threaded avoids Asap segfaults.
+CMD ["julia", "-t", "1", "--project=StructuralSynthesizer", "scripts/api/sizer_bootstrap.jl"]

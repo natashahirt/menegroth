@@ -24,7 +24,7 @@ SpecialFunctions = "276daf66-3868-5448-9aa4-cd146d93841b"
 Unitful = "1986cc42-f94f-5a68-af5c-568840ba703d"
 
 [sources]
-Asap = {path = "..\\external\\Asap"}
+Asap = {path = "../external/Asap"}
 StructuralPlots = {path = "../StructuralPlots"}
 StructuralSynthesizer = {path = "../StructuralSynthesizer"}
 

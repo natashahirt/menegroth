@@ -787,6 +787,71 @@ function _resolve_strategy(struc, demands, soil, opts)
 end
 
 """
+    _strip_groupings_from_orthogonal_grid(struc) → Vector{Vector{Int}}
+
+Use DDM-style column-line detection to group supports into strips.
+Uses governing spans from cells (primary/secondary axis) and clusters supports
+by projection onto the perpendicular axis within 10% of primary span (ACI §8.10.2.4).
+Returns empty if no cells or geometry, or if the structure is not orthogonal.
+
+Strips run along the primary (short) span direction — each column line = one strip.
+"""
+function _strip_groupings_from_orthogonal_grid(struc::BuildingStructure)
+    isempty(struc.supports) && return Vector{Int}[]
+    isempty(struc.cells) && return Vector{Int}[]
+    isnothing(struc.skeleton.geometry) && return Vector{Int}[]
+
+    skel = struc.skeleton
+    vc = skel.geometry.vertex_coords
+
+    # Governing spans from cells (same source as DDM)
+    cell_spans = [c.spans for c in struc.cells]
+    spans_gov = StructuralSizer.governing_spans(cell_spans)
+    span_axis = spans_gov.axis
+    l1 = spans_gov.primary
+
+    ax_len = hypot(span_axis...)
+    ax_len < 1e-9 && return Vector{Int}[]
+    span_axis = (span_axis[1] / ax_len, span_axis[2] / ax_len)
+    perp_axis = (-span_axis[2], span_axis[1])  # 90° CCW
+
+    l1_m = ustrip(u"m", l1)
+    cluster_tol = 0.10 * l1_m  # ACI §8.10.2.4: columns within 10% of span = same column line
+
+    # Project each support onto the perpendicular axis (DDM column-line logic)
+    perp_projs = [let vi = struc.supports[i].vertex_idx
+        vc[vi, 1] * perp_axis[1] + vc[vi, 2] * perp_axis[2]
+    end for i in 1:length(struc.supports)]
+
+    # Span-axis projections (for ordering within each strip)
+    span_projs = [let vi = struc.supports[i].vertex_idx
+        vc[vi, 1] * span_axis[1] + vc[vi, 2] * span_axis[2]
+    end for i in 1:length(struc.supports)]
+
+    # Cluster supports by perpendicular projection (same column line)
+    assigned = falses(length(struc.supports))
+    groups = Vector{Int}[]
+    sorted_order = sortperm(perp_projs)
+
+    for idx in sorted_order
+        assigned[idx] && continue
+        group = [idx]
+        assigned[idx] = true
+        for jdx in sorted_order
+            assigned[jdx] && continue
+            if abs(perp_projs[jdx] - perp_projs[idx]) <= cluster_tol
+                push!(group, jdx)
+                assigned[jdx] = true
+            end
+        end
+        sort!(group; by=i -> span_projs[i])  # Order along strip for design
+        push!(groups, group)
+    end
+
+    return groups
+end
+
+"""
     _auto_merge_to_strips!(struc, demands, soil, opts) → struc
 
 Inspect spread footings for adjacency and merge overlapping pairs into
@@ -882,7 +947,10 @@ Strategy-aware foundation sizing pipeline:
 1. Compute demands from support reactions
 2. Determine strategy (`:spread`, `:strip`, `:mat`) from coverage or user override
 3. For `:mat` → one mat foundation covering all supports
-4. For `:strip` → auto-merge adjacent spreads into strips, keep rest as spreads
+4. For `:strip`:
+   - Infer orthogonal grid from support positions (primary/secondary axes, spacing)
+   - If orthogonal: strips along axis with shorter spacing (one strip per row/column)
+   - If not orthogonal: fall back to spread footings + merge foundations too close
 5. For `:spread` → group by reaction similarity, size one per group
 6. Size all foundations via ACI or IS dispatch
 """
@@ -901,7 +969,7 @@ function size_foundations!(
 )
     demands = isnothing(demands) ? support_demands(struc) : demands
     strategy = _resolve_strategy(struc, demands, soil, opts)
-    verbose && @info "Foundation strategy: $strategy"
+    verbose && @info "Foundation strategy: $strategy" opts_strategy=opts.strategy
 
     if strategy == :mat
         # Single mat foundation covering all supports
@@ -913,10 +981,30 @@ function size_foundations!(
                                concrete=concrete, rebar=rebar, pier_width=pier_width, kwargs...)
 
     elseif strategy == :strip
-        # Start with one spread per support, then merge adjacent into strips
         initialize_foundations!(struc)
-        _auto_merge_to_strips!(struc, demands, soil, opts)
-        # Size individually (mix of spread + strip → grouping doesn't apply)
+        strip_groups = _strip_groupings_from_orthogonal_grid(struc)
+        if !isempty(strip_groups)
+            # Orthogonal grid detected: create strip foundations along shorter-spacing axis
+            placeholder = _placeholder_foundation_result(typeof(struc).parameters[1])
+            in_strip = Set{Int}()
+            new_foundations = Foundation[]
+            for g in strip_groups
+                length(g) > 1 || continue
+                union!(in_strip, g)
+                push!(new_foundations, Foundation(g, placeholder; foundation_type=:strip))
+            end
+            for fnd in struc.foundations
+                length(fnd.support_indices) == 1 || continue
+                fnd.support_indices[1] in in_strip && continue
+                push!(new_foundations, fnd)
+            end
+            empty!(struc.foundations)
+            append!(struc.foundations, new_foundations)
+            verbose && @info "Strip groupings from orthogonal grid: $(count(g -> length(g) > 1, strip_groups)) strips"
+        else
+            # Non-orthogonal or irregular: merge foundations that are too close
+            _auto_merge_to_strips!(struc, demands, soil, opts)
+        end
         _size_foundation!(struc; soil=soil, opts=opts, demands=demands,
                                concrete=concrete, rebar=rebar, pier_width=pier_width, kwargs...)
 

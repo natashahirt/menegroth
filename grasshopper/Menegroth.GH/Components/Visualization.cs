@@ -345,17 +345,18 @@ namespace Menegroth.GH.Components
 
             if (_rebuildState == RebuildState.Done)
             {
-                if (_pendingVisualization != null)
+                // MeshEdge = 0 means "no change" to structural visualization: keep original, do not apply rebuild.
+                if (meshEdgeM > 0 && _pendingVisualization != null)
                 {
                     result.Visualization = _pendingVisualization;
                     result.SuggestedScaleFactor =
                         _pendingVisualization["suggested_scale_factor"]?.ToObject<double>() ?? 1.0;
                     result.MaxDisplacementFt =
                         _pendingVisualization["max_displacement"]?.ToObject<double>() ?? 0;
+                    Message = "Mesh rebuilt";
                 }
                 _pendingVisualization = null;
                 _rebuildState = RebuildState.Idle;
-                Message = "Mesh rebuilt";
             }
             else if (_rebuildState == RebuildState.Error)
             {
@@ -1846,18 +1847,18 @@ namespace Menegroth.GH.Components
                         double thickness = m["thickness"]?.ToObject<double>() ?? 0;
                         if (thickness > 0 && TryBuildDeflectedSlabVolume(rhinoMesh, thickness, output))
                         {
-                            AppendDropPanelDeflectedGeometry(m, rhinoMesh, thickness, output);
+                            AppendDropPanelDeflectedGeometry(viz, m, rhinoMesh, thickness, output);
                         }
                         else
                         {
                             output.Add(new GH_Mesh(rhinoMesh));
-                            AppendDropPanelDeflectedGeometry(m, rhinoMesh, thickness, output);
+                            AppendDropPanelDeflectedGeometry(viz, m, rhinoMesh, thickness, output);
                         }
                     }
                     else
                     {
                         output.Add(new GH_Mesh(rhinoMesh));
-                        AppendDropPanelDeflectedGeometry(m, rhinoMesh,
+                        AppendDropPanelDeflectedGeometry(viz, m, rhinoMesh,
                             m["thickness"]?.ToObject<double>() ?? 0, output);
                     }
 
@@ -2055,14 +2056,72 @@ namespace Menegroth.GH.Components
         /// Build deflected drop panel volumes from the slab's deflected mesh.
         /// Each drop_panel_meshes entry contains face indices into the parent mesh;
         /// the drop panel is an offset solid below the slab soffit.
-        /// Falls back to the legacy box+interpolation path when drop_panel_meshes is absent.
+        /// Falls back to box geometry from drop_panels when drop_panel_meshes is absent.
         /// </summary>
-        private static void AppendDropPanelDeflectedGeometry(JToken meshToken, Mesh deflectedSlabMesh,
+        private static void AppendDropPanelDeflectedGeometry(JToken viz, JToken meshToken, Mesh deflectedSlabMesh,
             double slabThickness, List<IGH_GeometricGoo> output)
         {
             var dpMeshes = meshToken["drop_panel_meshes"] as JArray;
-            if (dpMeshes == null || dpMeshes.Count == 0 || deflectedSlabMesh == null)
+            if (dpMeshes != null && dpMeshes.Count > 0 && deflectedSlabMesh != null)
+            {
+                AppendDropPanelDeflectedFromMeshes(meshToken, deflectedSlabMesh, slabThickness, output);
                 return;
+            }
+
+            // Fallback: use drop_panels from mesh token or sized_slabs when mesh-based data is absent
+            var dropPanels = meshToken["drop_panels"] as JArray;
+            double zTop = 0.0;
+            JToken sizedSlab = null;
+            var sizedSlabs = viz["sized_slabs"] as JArray;
+            var slabId = meshToken["slab_id"]?.ToObject<int>() ?? -1;
+            if (sizedSlabs != null && slabId >= 0)
+            {
+                foreach (var s in sizedSlabs)
+                {
+                    if (s["slab_id"]?.ToObject<int>() == slabId) { sizedSlab = s; break; }
+                }
+            }
+            if (dropPanels == null || dropPanels.Count == 0)
+            {
+                dropPanels = sizedSlab?["drop_panels"] as JArray;
+            }
+            if (dropPanels == null || dropPanels.Count == 0) return;
+
+            zTop = sizedSlab?["z_top"]?.ToObject<double>() ?? 0.0;
+            if (zTop <= 0) return;
+
+            foreach (var dp in dropPanels)
+            {
+                var c = dp["center"]?.ToObject<double[]>() ?? new double[0];
+                if (c.Length < 2) continue;
+                double length = dp["length"]?.ToObject<double>() ?? 0.0;
+                double width = dp["width"]?.ToObject<double>() ?? 0.0;
+                double extra = dp["extra_depth"]?.ToObject<double>() ?? 0.0;
+                if (length <= 0 || width <= 0 || extra <= 0) continue;
+
+                double x0 = c[0] - length / 2.0;
+                double x1 = c[0] + length / 2.0;
+                double y0 = c[1] - width / 2.0;
+                double y1 = c[1] + width / 2.0;
+                double zTopDrop = zTop - slabThickness;
+                double zBotDrop = zTopDrop - extra;
+                var bbox = new BoundingBox(new[]
+                {
+                    new Point3d(x0, y0, zBotDrop), new Point3d(x1, y0, zBotDrop),
+                    new Point3d(x1, y1, zBotDrop), new Point3d(x0, y1, zBotDrop),
+                    new Point3d(x0, y0, zTopDrop), new Point3d(x1, y0, zTopDrop),
+                    new Point3d(x1, y1, zTopDrop), new Point3d(x0, y1, zTopDrop),
+                });
+                var dropMesh = CreateBoxMesh(bbox);
+                if (dropMesh != null) output.Add(new GH_Mesh(dropMesh));
+            }
+        }
+
+        private static void AppendDropPanelDeflectedFromMeshes(JToken meshToken, Mesh deflectedSlabMesh,
+            double slabThickness, List<IGH_GeometricGoo> output)
+        {
+            var dpMeshes = meshToken["drop_panel_meshes"] as JArray;
+            if (dpMeshes == null || dpMeshes.Count == 0 || deflectedSlabMesh == null) return;
 
             var allFaces = meshToken["faces"]?.ToObject<int[][]>() ?? new int[0][];
             int nSlabVerts = deflectedSlabMesh.Vertices.Count;
@@ -2273,10 +2332,11 @@ namespace Menegroth.GH.Components
                 double depth = f["depth"]?.ToObject<double>() ?? 0;
                 if (length <= 0 || width <= 0 || depth <= 0) continue;
 
-                double x0 = c[0] - length / 2.0;
-                double x1 = c[0] + length / 2.0;
-                double y0 = c[1] - width / 2.0;
-                double y1 = c[1] + width / 2.0;
+                // API convention: width = B (x-direction), length = L_ftg (y-direction)
+                double x0 = c[0] - width / 2.0;
+                double x1 = c[0] + width / 2.0;
+                double y0 = c[1] - length / 2.0;
+                double y1 = c[1] + length / 2.0;
                 double zTop = c[2];
                 double zBot = zTop - depth;
 

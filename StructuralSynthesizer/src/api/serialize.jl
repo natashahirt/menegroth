@@ -903,7 +903,18 @@ function _serialize_vault_mesh(slab, slab_result::SlabDesignResult, struc::Build
     return (vertices=vertices, faces=faces)
 end
 
-"""Serialize shell-element meshes with global/local vertex displacements for deflected slab visualization."""
+"""Build node → skeleton vertex index mapping. Model nodes are created from skeleton vertices in order."""
+function _node_to_vertex_map(model)
+    node_to_vi = Dict{Asap.Node, Int}()
+    for (vi, n) in enumerate(model.nodes)
+        node_to_vi[n] = vi
+    end
+    return node_to_vi
+end
+
+"""Serialize shell-element meshes with global/local vertex displacements for deflected slab visualization.
+For boundary vertices at column supports with structural offset, uses the architectural (column-corner)
+position instead of the centroid so deflected meshes align with zero-deflection/sized geometry."""
 function _serialize_deflected_slab_meshes(design::BuildingDesign, struc::BuildingStructure, model, du::DisplayUnits,
                                           drop_panel_cache::Dict{Int, Vector{APIDropPanelPatch}})
     deflected_meshes = APIDeflectedSlabMesh[]
@@ -922,6 +933,8 @@ function _serialize_deflected_slab_meshes(design::BuildingDesign, struc::Buildin
     slab_shells = draped.slab_shells
 
     sif_ws = Asap.ShellForcesWorkspace()
+    node_to_vi = _node_to_vertex_map(model)
+    offsets = design.structural_offsets
 
     # Extract mesh data per slab (grouping already done by compute_draped_displacements)
     for (slab_id_sym, shells) in slab_shells
@@ -974,7 +987,20 @@ function _serialize_deflected_slab_meshes(design::BuildingDesign, struc::Buildin
                 for node in shell_nodes
                     if !haskey(vertex_map, node)
                         npos = node.position
-                        push!(vertices, [_round_val(ustrip(u"m", npos[k]) * _m_to_disp; digits=6) for k in 1:3])
+                        vi = get(node_to_vi, node, 0)
+                        off = (vi > 0 ? get(offsets, vi, (0.0, 0.0)) : (0.0, 0.0))
+                        # For vertices with structural offset (edge/corner columns), use architectural
+                        # (column-corner) position so deflected mesh edges align with sized geometry.
+                        if off[1] != 0.0 || off[2] != 0.0
+                            corner_x = ustrip(u"m", npos[1]) - off[1]
+                            corner_y = ustrip(u"m", npos[2]) - off[2]
+                            corner_z = ustrip(u"m", npos[3])
+                            push!(vertices, [_round_val(corner_x * _m_to_disp; digits=6),
+                                             _round_val(corner_y * _m_to_disp; digits=6),
+                                             _round_val(corner_z * _m_to_disp; digits=6)])
+                        else
+                            push!(vertices, [_round_val(ustrip(u"m", npos[k]) * _m_to_disp; digits=6) for k in 1:3])
+                        end
 
                         nid = objectid(node)
                         disp_global_m = get(total_disp, nid, Asap.to_displacement_vec(node.displacement)[1:3])

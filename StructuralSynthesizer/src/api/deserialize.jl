@@ -776,7 +776,10 @@ function _resolve_foundation_options(api_params::APIParams, fdn_conc::Structural
 
     if api_params.foundation_options !== nothing
         fo = api_params.foundation_options
-        strategy = Symbol(lowercase(strip(fo.strategy)))
+        raw = strip(fo.strategy)
+        strategy = isempty(raw) ? def_opts.strategy : Symbol(lowercase(raw))
+        # Explicit mat override — must not fall through to coverage-based logic
+        strategy === :mat && @info "Foundation strategy: mat (explicit override)"
         mat_coverage_threshold = fo.mat_coverage_threshold
         if fo.spread_params !== nothing
             spread_params = _api_to_spread_params(fo.spread_params, rc)

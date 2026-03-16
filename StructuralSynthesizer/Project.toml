@@ -31,8 +31,8 @@ Unitful = "1986cc42-f94f-5a68-af5c-568840ba703d"
 XLSX = "fdbf4ff8-1666-58a4-91e7-1b58723a45e0"
 
 [sources]
-Asap = {path = "../external/Asap"}
-StructuralSizer = {path = "../StructuralSizer"}
+Asap = {path = "..\\external\\Asap"}
+StructuralSizer = {path = "..\\StructuralSizer"}
 
 [compat]
 Accessors = "0.1.43"

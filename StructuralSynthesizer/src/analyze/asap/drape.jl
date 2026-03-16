@@ -192,10 +192,60 @@ function compute_draped_displacements(design::BuildingDesign)
     end
 
     # ── Group shell elements by slab ID ──
+    # Base slab shells use id=:slab_N. _apply_patches! overwrites some to :col_patch or
+    # :drop_panel; those must be merged into their parent slab for visualization.
     slab_shells = Dict{Symbol, Vector{Asap.ShellElement}}()
+    patch_shells = Asap.ShellElement[]  # col_patch and drop_panel elements
     for shell in shell_model.shell_elements
-        shells = get!(slab_shells, shell.id, Asap.ShellElement[])
-        push!(shells, shell)
+        if shell.id in (:col_patch, :drop_panel)
+            push!(patch_shells, shell)
+        else
+            shells = get!(slab_shells, shell.id, Asap.ShellElement[])
+            push!(shells, shell)
+        end
+    end
+
+    # ── Merge patch shells into parent slab groups ──
+    # Assign each col_patch/drop_panel shell to the slab whose boundary contains its centroid.
+    struc = design.structure
+    offsets = design.structural_offsets
+    for shell in patch_shells
+        n1, n2, n3 = shell.nodes
+        cx = (ustrip(u"m", n1.position[1]) + ustrip(u"m", n2.position[1]) + ustrip(u"m", n3.position[1])) / 3
+        cy = (ustrip(u"m", n1.position[2]) + ustrip(u"m", n2.position[2]) + ustrip(u"m", n3.position[2])) / 3
+        centroid = (cx, cy)
+        assigned = false
+        for (slab_idx, slab) in enumerate(struc.slabs)
+            boundary_vis, _ = _get_slab_boundary_vertices(struc, slab)
+            vc = struc.skeleton.geometry.vertex_coords
+            boundary_pts = Tuple{Float64, Float64}[
+                (vc[vi, 1] + get(offsets, vi, (0.0, 0.0))[1],
+                 vc[vi, 2] + get(offsets, vi, (0.0, 0.0))[2])
+                for vi in boundary_vis
+            ]
+            if _point_inside_polygon(centroid, boundary_pts)
+                slab_id = Symbol("slab_$(slab_idx)")
+                shells = get!(slab_shells, slab_id, Asap.ShellElement[])
+                push!(shells, shell)
+                assigned = true
+                break
+            end
+        end
+        # If no slab contains the centroid (e.g. degenerate), attach to first slab with matching elevation
+        if !assigned && !isempty(struc.slabs)
+            slab_z = ustrip(u"m", n1.position[3])
+            for (slab_idx, slab) in enumerate(struc.slabs)
+                first_cell = struc.cells[first(slab.cell_indices)]
+                first_vi = struc.skeleton.face_vertex_indices[first_cell.face_idx][1]
+                cell_z = struc.skeleton.geometry.vertex_coords[first_vi, 3]
+                if abs(slab_z - cell_z) < 0.15
+                    slab_id = Symbol("slab_$(slab_idx)")
+                    shells = get!(slab_shells, slab_id, Asap.ShellElement[])
+                    push!(shells, shell)
+                    break
+                end
+            end
+        end
     end
 
     # ── Process each slab ──

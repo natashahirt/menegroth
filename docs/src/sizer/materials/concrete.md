@@ -40,6 +40,7 @@ AggregateType
 | `cost` | `Float64` | Unit cost [\$/kg] (`NaN` if not set) |
 | `λ` | `Float64` | Lightweight factor (1.0 NWC, 0.75–0.85 LWC per ACI 318-11 §8.6.1) |
 | `aggregate_type` | `AggregateType` | Aggregate classification for fire resistance |
+| `color` | `Union{Nothing, String}` | Optional display color hex string (e.g., `"#C8C8C8"`) |
 
 ### ReinforcedConcreteMaterial Fields
 

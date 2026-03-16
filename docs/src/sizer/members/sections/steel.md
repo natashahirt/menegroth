@@ -27,6 +27,23 @@ AbstractRectHollowSection
 AbstractRoundHollowSection
 ```
 
+### Catalog Constructors
+
+The standard AISC catalogs are exposed via convenience constructors:
+
+```@docs
+W
+HSS
+PIPE
+HSSRound
+IShape
+TShape
+SolidRect
+HollowRect
+SolidRound
+HollowRound
+```
+
 ### W Shapes (Doubly-Symmetric I-Sections)
 
 ```@docs
@@ -118,6 +135,11 @@ PipeSection
 | `weight` | Linear weight (lb/ft) |
 | `A` | Cross-sectional area |
 
+```@docs
+Rebar
+RebarLocation
+```
+
 ## Functions
 
 ### Common Section Interface
@@ -135,6 +157,16 @@ PipeSection
 - `Iy(s)` — weak-axis moment of inertia.
 - `Sx(s)` — strong-axis elastic section modulus.
 - `Sy(s)` — weak-axis elastic section modulus.
+
+```@docs
+BendingAxis
+StrongAxis
+WeakAxis
+Ix
+Iy
+Sx
+Sy
+```
 
 For `HSSRoundSection`, `Ix` and `Iy` both return `s.I`; `Sx` and `Sy` both return `s.S`.
 

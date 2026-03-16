@@ -29,6 +29,11 @@ Source: `StructuralSizer/src/optimize/*.jl`, `StructuralSizer/src/members/optimi
 ### Options Types
 
 ```@docs
+MemberOptions
+BeamOptions
+ColumnOptions
+SteelMemberOptions
+AbstractSectionGeometry
 SteelColumnOptions
 ```
 
@@ -117,6 +122,7 @@ NLPHSSOptions
 ### NLP Problem Types
 
 ```@docs
+AbstractNLPProblem
 RCColumnNLPProblem
 ```
 
@@ -133,6 +139,25 @@ RCBeamNLPProblem
 ```
 
 Formulates the continuous beam sizing: minimize weight subject to flexure, shear, and deflection constraints.
+
+```@docs
+RCTBeamNLPProblem
+WColumnNLPProblem
+HSSColumnNLPProblem
+SteelWBeamNLPProblem
+SteelHSSBeamNLPProblem
+```
+
+### NLP Result Types
+
+```@docs
+RCColumnNLPResult
+RCCircularNLPResult
+RCBeamNLPResult
+RCTBeamNLPResult
+WColumnNLPResult
+HSSColumnNLPResult
+```
 
 ### Solver Types
 

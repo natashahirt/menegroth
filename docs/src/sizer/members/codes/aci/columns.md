@@ -100,6 +100,10 @@ Type alias: `PMInteractionDiagram{RCCircularSection}` — for circular columns.
 ControlPointType
 ```
 
+```@docs
+PMDiagramPoint
+```
+
 `@enum ControlPointType` identifies key points on the interaction diagram:
 
 | Value | Description |

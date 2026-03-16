@@ -21,6 +21,7 @@ A skeleton represents a building as a half-edge mesh:
 ## Key Types
 
 ```@docs
+AbstractBuildingSkeleton
 BuildingSkeleton
 SkeletonLookup
 GeometryCache

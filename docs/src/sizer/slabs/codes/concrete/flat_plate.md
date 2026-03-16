@@ -60,6 +60,17 @@ Phase B: Slab Design (shared)
 MomentAnalysisResult
 EFMSpanProperties
 EFMJointStiffness
+DDMApplicabilityError
+EFMApplicabilityError
+EFMModelCache
+FEAModelCache
+SpanInfo
+PanelStripGeometry
+ColumnStripPolygon
+MiddleStripPolygon
+DropPanelGeometry
+DropSectionProperties
+StripReinforcementDesign
 ```
 
 See also `FlatPlatePanelResult`, `PunchingCheckResult`,

@@ -279,6 +279,15 @@ const_check = check_construction(section, material, 200.0u"kip*ft", 50.0u"kip";
 - `HeadedStudAnchor`: stud properties, including `n_per_row` for multi-row layouts
 - `CompositeContext`: bundles slab + anchor + geometry for the checker pipeline
 
+```@docs
+AbstractSlabOnBeam
+SolidSlabOnBeam
+DeckSlabOnBeam
+AbstractSteelAnchor
+HeadedStudAnchor
+CompositeContext
+```
+
 **Equations:**
 - Effective width: I3.1a (L/8, spacing/2, edge distance)
 - Qn: I8.2a (Eq. I8-1), with Rg/Rp per User Note table

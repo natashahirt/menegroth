@@ -419,8 +419,6 @@ namespace Menegroth.GH.Components
             paramsJson["geometry_is_centerline"] = geo.GeometryIsCenterline;
             paramsJson["skip_visualization"] = !_enableVisualization;
             payload["params"] = paramsJson;
-            if (geoHash == _lastGeoHash && paramsHash != _lastParamsHash)
-                payload["geometry_hash"] = geoHash;
             string jsonBody = payload.ToString();
 
             // 8. Launch async

@@ -110,11 +110,6 @@ function api_input_schema()
                 ),
             ),
         ),
-        "geometry_hash" => Dict(
-            "type" => "string",
-            "required" => false,
-            "description" => "Ignored; server recomputes hash. Reserved for forward compatibility.",
-        ),
     )
 end
 
@@ -266,12 +261,7 @@ Base.@kwdef mutable struct APIParams
     visualization_detail::String = "full"  # "minimal" | "full". minimal = no deflected slab meshes.
 end
 
-"""
-Top-level input payload from JSON.
-
-`geometry_hash` is accepted for forward-compatibility but ignored — the server
-always recomputes the hash via `compute_geometry_hash(input)`.
-"""
+"""Top-level input payload from JSON."""
 Base.@kwdef mutable struct APIInput
     units::String = ""
     vertices::Vector{Vector{Float64}} = Vector{Float64}[]
@@ -280,7 +270,6 @@ Base.@kwdef mutable struct APIInput
     stories_z::Vector{Float64} = Float64[]
     faces::APIFaceGroups = APIFaceGroups()
     params::APIParams = APIParams()
-    geometry_hash::String = ""
 end
 
 # ─── JSON3 StructType registrations ──────────────────────────────────────────

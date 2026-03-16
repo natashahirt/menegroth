@@ -82,7 +82,7 @@ The Grasshopper client is a Rhino Grasshopper component (`DesignRun.cs`) that co
 Two levels of caching reduce unnecessary API calls:
 
 1. **Client-side cache** — hashes geometry + params; if unchanged from last run, returns cached response without API call
-2. **Server-side geometry cache** — the server computes a deterministic geometry hash from the request geometry and reuses the last cached skeleton/structure when the hash matches (skipping skeleton reconstruction and only re-running the design pipeline). The `APIInput.geometry_hash` field exists but is not currently used by the server.
+2. **Server-side geometry cache** — the server computes a deterministic geometry hash from the request geometry and reuses the last cached skeleton/structure when the hash matches (skipping skeleton reconstruction and only re-running the design pipeline).
 
 ### Status Messages
 

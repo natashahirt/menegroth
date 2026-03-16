@@ -703,7 +703,6 @@ function _serialize_sized_slabs(design::BuildingDesign, struc::BuildingStructure
     skel = struc.skeleton
 
     for (slab_idx, slab) in enumerate(struc.slabs)
-        isnothing(slab.result) && continue
         slab_result = get(design.slabs, slab_idx, nothing)
         isnothing(slab_result) && continue
 
@@ -738,14 +737,13 @@ function _serialize_sized_slabs(design::BuildingDesign, struc::BuildingStructure
         ratio = max(slab_result.deflection_ratio, slab_result.punching_max_ratio)
         ok = slab_result.deflection_ok && slab_result.punching_ok
         
-        # Check for vault slab and serialize curved mesh
-        is_vault = slab.result isa StructuralSizer.VaultResult
+        is_vault = slab_result.is_vault
         vault_mesh_vertices = Vector{Float64}[]
         vault_mesh_faces = Vector{Int}[]
         
         if is_vault
             try
-                vault_mesh = _serialize_vault_mesh(slab, struc, du)
+                vault_mesh = _serialize_vault_mesh(slab, slab_result, struc, du)
                 vault_mesh_vertices = vault_mesh.vertices
                 vault_mesh_faces = vault_mesh.faces
             catch e
@@ -776,9 +774,8 @@ Build parabolic vault mesh for visualization/serialization.
 Uses Asap.get_vault_mesh_data() for Delaunay mesh projected onto parabolic surface.
 Returns (vertices=..., faces=...) with vertices in display length units.
 """
-function _serialize_vault_mesh(slab, struc::BuildingStructure, du::DisplayUnits;
+function _serialize_vault_mesh(slab, slab_result::SlabDesignResult, struc::BuildingStructure, du::DisplayUnits;
                                 target_edge_length::Float64=0.15)
-    result = slab.result
     skel = struc.skeleton
     
     # Build corner nodes from face vertices
@@ -793,7 +790,7 @@ function _serialize_vault_mesh(slab, struc::BuildingStructure, du::DisplayUnits;
     
     # Get vault mesh data from Asap (Delaunay projected onto parabola)
     span_axis = slab.spans.axis
-    rise = result.rise
+    rise = slab_result.vault_rise
     
     mesh_data = Asap.get_vault_mesh_data(corner_nodes, span_axis, rise;
                                           target_edge_length=target_edge_length * u"m")
@@ -906,7 +903,7 @@ function _serialize_deflected_slab_meshes(design::BuildingDesign, struc::Buildin
         drop_panels = get(drop_panel_cache, slab_idx, APIDropPanelPatch[])
         ratio = max(slab_result.deflection_ratio, slab_result.punching_max_ratio)
         ok = slab_result.deflection_ok && slab_result.punching_ok
-        is_vault = slab.result isa StructuralSizer.VaultResult
+        is_vault = slab_result.is_vault
         
         push!(deflected_meshes, APIDeflectedSlabMesh(
             slab_id = slab_idx,
@@ -1023,9 +1020,9 @@ end
 
 """Serialize drop panel footprint patches for slab visualization."""
 function _serialize_drop_panel_patches(slab_idx::Int, slab, struc::BuildingStructure, design::BuildingDesign, du::DisplayUnits)
-    isnothing(slab.drop_panel) && return APIDropPanelPatch[]
-
-    dp = slab.drop_panel
+    slab_result = get(design.slabs, slab_idx, nothing)
+    dp = isnothing(slab_result) ? nothing : slab_result.drop_panel
+    isnothing(dp) && return APIDropPanelPatch[]
     h_drop_ft = _to_display_length(du, dp.h_drop)
     a1_full_ft = _to_display_length(du, 2 * dp.a_drop_1)
     a2_full_ft = _to_display_length(du, 2 * dp.a_drop_2)

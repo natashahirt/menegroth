@@ -871,6 +871,17 @@ function _populate_slab_results!(design::BuildingDesign, struc::BuildingStructur
                 result.a_drop2_ft = ustrip(u"ft",   dp.a_drop_2)
             end
         end
+
+        # Capture mutable slab fields that restore! will wipe.
+        # The serializer and engineering report run after restore!, so they must
+        # read these from the SlabDesignResult rather than from slab.* on the
+        # live structure.
+        result.drop_panel = slab.drop_panel
+        result.is_vault = r isa StructuralSizer.VaultResult
+        if result.is_vault
+            result.vault_rise = uconvert(u"m", r.rise)
+        end
+        result.sizer_result = r
         
         design.slabs[slab_idx] = result
     end
@@ -913,23 +924,37 @@ function _populate_column_results!(design::BuildingDesign, struc::BuildingStruct
         result = ColumnDesignResult()
         
         # ─── Section size & geometry ───
+        col_sec = section(col)
+        result.section_obj = col_sec
+        result.shape = hasproperty(col, :shape) ? col.shape : :rectangular
+
         if !isnothing(col.c1) && !isnothing(col.c2)
-            c1_in = round(Int, ustrip(u"inch", col.c1))
-            c2_in = round(Int, ustrip(u"inch", col.c2))
-            result.section_size = "$(c1_in)×$(c2_in)"
             result.c1 = uconvert(u"m", col.c1)
             result.c2 = uconvert(u"m", col.c2)
         end
-        result.shape = hasproperty(col, :shape) ? col.shape : :rectangular
+
+        # Section name: use the section object's name for steel/PixelFrame, else c1×c2
+        if !isnothing(col_sec) && hasproperty(col_sec, :name) && !isnothing(col_sec.name)
+            result.section_size = col_sec.name
+        elseif result.shape == :circular && !isnothing(col.c1)
+            D_in = round(ustrip(u"inch", col.c1); digits=1)
+            result.section_size = "⌀$(D_in)\""
+        elseif !isnothing(col.c1) && !isnothing(col.c2)
+            c1_in = round(Int, ustrip(u"inch", col.c1))
+            c2_in = round(Int, ustrip(u"inch", col.c2))
+            result.section_size = "$(c1_in)×$(c2_in)"
+        end
         
         # ─── Material takeoff fields ───
         col_L = member_length(col)
         result.height = col_L isa Unitful.Quantity ? uconvert(u"m", col_L) : col_L * u"m"
         if !isnothing(col.c1) && !isnothing(col.c2)
-            result.Ag = uconvert(u"m^2", col.c1 * col.c2)
+            if result.shape == :circular
+                result.Ag = uconvert(u"m^2", π / 4 * col.c1^2)
+            else
+                result.Ag = uconvert(u"m^2", col.c1 * col.c2)
+            end
         end
-        col_sec = section(col)
-        result.section_obj = col_sec
         if !isnothing(col_sec) && hasproperty(col_sec, :As_total)
             result.As_total = uconvert(u"m^2", col_sec.As_total)
             result.rho_g = hasproperty(col_sec, :ρg) ? col_sec.ρg : 0.0
@@ -970,26 +995,60 @@ function _populate_column_results!(design::BuildingDesign, struc::BuildingStruct
         end
         
         # ─── Approximate capacity ratios ───
-        # ACI 318-11 §10.3.6.2 — maximum axial capacity for tied columns:
-        #   φPn(max) = 0.80 × φ × [0.85 × f'c × (Ag − Ast) + fy × Ast]
-        # We use ρg = 1% (code minimum) for a lower-bound estimate.
-        if !isnothing(col.c1) && !isnothing(col.c2)
-            Ag = ustrip(u"m^2", col.c1 * col.c2)
+        is_steel = col_sec isa StructuralSizer.ISymmSection ||
+                   col_sec isa StructuralSizer.HSSRectSection ||
+                   col_sec isa StructuralSizer.HSSRoundSection
+
+        Pu_N_val = ustrip(u"N", result.Pu)
+        Mu_Nm_val = ustrip(u"N*m", result.Mu_x)
+
+        if is_steel && hasproperty(col_sec, :A) && hasproperty(col_sec, :material) &&
+           !isnothing(col_sec.material)
+            # AISC 360-16 §E1 — φPn = 0.9 × Fcr × Ag  (using Fy as upper bound)
+            Fy_Pa = ustrip(u"Pa", col_sec.material.Fy)
+            A_m2 = ustrip(u"m^2", col_sec.A)
+            φPn = 0.9 * Fy_Pa * A_m2  # N (conservative: ignores buckling reduction)
+            result.axial_ratio = φPn > 0 ? Pu_N_val / φPn : 0.0
+
+            # AISC 360-16 §F2-1 — φMn = 0.9 × Fy × Zx
+            if hasproperty(col_sec, :Zx)
+                Zx_m3 = ustrip(u"m^3", col_sec.Zx)
+                φMn = 0.9 * Fy_Pa * Zx_m3  # N·m
+            else
+                φMn = 0.0
+            end
+
+            # AISC H1-1a/b P-M interaction
+            Pr_Pc = φPn > 0 ? Pu_N_val / φPn : 0.0
+            Mr_Mc = φMn > 0 ? Mu_Nm_val / φMn : 0.0
+            if Pr_Pc >= 0.2
+                result.interaction_ratio = Pr_Pc + (8.0 / 9.0) * Mr_Mc  # H1-1a
+            else
+                result.interaction_ratio = Pr_Pc / 2.0 + Mr_Mc          # H1-1b
+            end
+
+        elseif !is_steel && !isnothing(col.c1) && !isnothing(col.c2)
+            # ACI 318-19 §22.4.2 — RC columns (rectangular or circular)
+            Ag = result.shape == :circular ?
+                 ustrip(u"m^2", π / 4 * col.c1^2) :
+                 ustrip(u"m^2", col.c1 * col.c2)
             ρg = 0.01  # ACI 318 minimum
             Ast = ρg * Ag
             φ = 0.65  # tied column
             φPn0 = 0.80 * φ * (0.85 * fc′_Pa * (Ag - Ast) + fy_Pa * Ast)  # N
-            
-            Pu_N_val = ustrip(u"N", result.Pu)
+
             result.axial_ratio = φPn0 > 0 ? Pu_N_val / φPn0 : 0.0
-            
-            # Simple interaction: max(Pu/φPn0, Mu/φMn_est)
+
             # φMn ≈ 0.9 × fy × Ast × (d − a/2) — rough for rebar at mid-depth
-            d_m = ustrip(u"m", max(col.c1, col.c2))
-            a_est = fy_Pa * Ast / (0.85 * fc′_Pa * ustrip(u"m", min(col.c1, col.c2)))
-            φMn_est = 0.90 * fy_Pa * Ast * (d_m * 0.4 - a_est / 2)  # N·m (very conservative)
-            
-            Mu_Nm_val = ustrip(u"N*m", result.Mu_x)
+            d_m = result.shape == :circular ?
+                  ustrip(u"m", col.c1) :
+                  ustrip(u"m", max(col.c1, col.c2))
+            b_m = result.shape == :circular ?
+                  ustrip(u"m", col.c1) :
+                  ustrip(u"m", min(col.c1, col.c2))
+            a_est = b_m > 0 ? fy_Pa * Ast / (0.85 * fc′_Pa * b_m) : 0.0
+            φMn_est = 0.90 * fy_Pa * Ast * (d_m * 0.4 - a_est / 2)  # N·m
+
             if φMn_est > 0
                 result.interaction_ratio = max(result.axial_ratio, Mu_Nm_val / φMn_est)
             else

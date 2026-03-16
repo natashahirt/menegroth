@@ -198,7 +198,9 @@ function _report_slabs(io::IO, design::BuildingDesign;
     println(io)
 
     for (s_idx, slab) in enumerate(struc.slabs)
-        r = slab.result
+        sr = get(design.slabs, s_idx, nothing)
+        isnothing(sr) && continue
+        r = sr.sizer_result
         isnothing(r) && continue
         _report_slab_panel(io, design, s_idx, slab, r; conc=conc, reb=reb, du=du)
     end
@@ -232,11 +234,10 @@ function _report_flat_plate_panel(io::IO, design::BuildingDesign,
     bar_radius_disp = is_imp ? 0.3125 : 8.0
     d = round(h - cover_disp - bar_radius_disp; digits=2)
 
-    # Loading breakdown (self-weight = γ × h)
-    γc = is_imp ? ustrip(pcf, conc.ρ) : ustrip(u"kg/m^3", conc.ρ)
-    g = 9.80665
-    w_sw = is_imp ? (h / 12.0 * γc) : (h / 1000.0 * γc * g / 1000.0)  # psf or kPa
-    w_sw = round(w_sw; digits=1)
+    # Self-weight from sizer result (includes drop panel contribution for flat slabs)
+    w_sw = hasproperty(r, :self_weight) ?
+           _to_report(du, :pressure, r.self_weight; digits=1) :
+           _to_report(du, :pressure, conc.ρ * 9.80665u"m/s^2" * r.thickness; digits=1)
     w_sdl = _to_report(du, :pressure, loads.floor_SDL; digits=1)
     w_ll  = _to_report(du, :pressure, loads.floor_LL; digits=1)
     qu    = _to_report(du, :pressure, r.qu; digits=1)
@@ -271,8 +272,9 @@ function _report_flat_plate_panel(io::IO, design::BuildingDesign,
     _report_slab_punching(io, struc, r, h, d; conc=conc, du=du)
     _report_slab_deflection(io, r, l1; du=du)
 
-    if !isnothing(slab.drop_panel)
-        dp = slab.drop_panel
+    sr = get(design.slabs, s_idx, nothing)
+    dp = isnothing(sr) ? nothing : sr.drop_panel
+    if !isnothing(dp)
         h_drop = _to_report(du, :thickness, dp.h_drop; digits=1)
         a1 = _to_report(du, :length, 2 * dp.a_drop_1; digits=1)
         a2 = _to_report(du, :length, 2 * dp.a_drop_2; digits=1)
@@ -301,8 +303,8 @@ function _report_vault_panel(io::IO, design::BuildingDesign,
     h = _to_report(du, :thickness, r.thickness; digits=1)
     rise = _to_report(du, :length, r.rise; digits=2)
     arc = _to_report(du, :length, r.arc_length; digits=1)
-    span = 0.0
-    try; span = _to_report(du, :length, slab.spans.span; digits=1); catch; end
+    span = hasproperty(slab, :spans) && !isnothing(slab.spans) ?
+           _to_report(du, :length, slab.spans.isotropic * u"m"; digits=1) : 0.0
     λ = rise > 0 ? round(span / rise; digits=1) : 0.0
 
     slab_area = sum(struc.cells[ci].area for ci in slab.cell_indices)
@@ -329,9 +331,10 @@ function _report_vault_panel(io::IO, design::BuildingDesign,
     println(io, "  │")
 
     sc = r.stress_check
-    σ_val = du.units[:stress] == ksi ? round(sc.σ * 145.038; digits=1) : round(sc.σ; digits=2)
-    σ_allow_val = du.units[:stress] == ksi ? round(sc.σ_allow * 145.038; digits=1) : round(sc.σ_allow; digits=2)
-    stress_label = du.units[:stress] == ksi ? "psi" : "MPa"
+    # stress_check stores σ and σ_allow in MPa (raw Float64)
+    σ_val = _to_report(du, :stress, sc.σ * u"MPa"; digits=2)
+    σ_allow_val = _to_report(du, :stress, sc.σ_allow * u"MPa"; digits=2)
+    stress_label = _ul(du, :stress)
     println(io, "  │  STRESS CHECK")
     Printf.@printf(io, "  │    σ_max = %.2f %s,  σ_allow = %.2f %s,  Ratio = %.2f  %s\n",
                    σ_val, stress_label, σ_allow_val, stress_label, sc.ratio, pass_fail(sc.ok))
@@ -467,8 +470,9 @@ function _report_slab_punching(io::IO, struc, r, h, d; conc, du::DisplayUnits=im
         stud_str = has_studs ? "Yes" : "No"
 
         pos_str = "—"
-        if col_idx ≤ length(struc.columns)
-            try; pos_str = string(struc.columns[col_idx].position); catch; end
+        if col_idx >= 1 && col_idx <= length(struc.columns)
+            c = struc.columns[col_idx]
+            hasproperty(c, :position) && (pos_str = string(c.position))
         end
 
         Printf.@printf(io, "  │  C-%-3d %10s %10.1f %10.1f %10.1f %10.2f %6s %6s\n",
@@ -622,11 +626,11 @@ function _report_columns(io::IO, design::BuildingDesign;
 
         story = 0
         pos_str = "—"
-        try
+        if col_idx >= 1 && col_idx <= length(struc.columns)
             col = struc.columns[col_idx]
-            story = col.story
-            pos_str = string(col.position)
-        catch; end
+            story = hasproperty(col, :story) ? col.story : 0
+            pos_str = hasproperty(col, :position) ? string(col.position) : "—"
+        end
 
         punch_str = "—"
         if !isnothing(cr.punching)
@@ -636,7 +640,8 @@ function _report_columns(io::IO, design::BuildingDesign;
         if has_rect
             c1_val = _to_report(du, :thickness, cr.c1; digits=1)
             c2_val = _to_report(du, :thickness, cr.c2; digits=1)
-            ar = c2_val > 0.1 ? round(c1_val / c2_val; digits=2) : 1.0
+            mn, mx = minmax(c1_val, c2_val)
+            ar = mn > 0.1 ? round(mx / mn; digits=2) : 1.0
             Printf.@printf(io, "  C-%-2d %5d %-8s %7.1f %7.1f %5.2f %9.1f %9.1f %9.1f %8s %8s %8s %4s\n",
                 col_idx, story, pos_str, c1_val, c2_val, ar,
                 Pu_val, Mu_val, e_val,
@@ -728,7 +733,9 @@ function _report_takeoff(io::IO, design::BuildingDesign; du::DisplayUnits=design
     total_slab_conc = 0.0u"m^3"
     total_slab_area = 0.0u"m^2"
     for (s_idx, slab) in enumerate(struc.slabs)
-        r = slab.result
+        sr = get(design.slabs, s_idx, nothing)
+        isnothing(sr) && continue
+        r = sr.sizer_result
         isnothing(r) && continue
         slab_area = sum(struc.cells[ci].area for ci in slab.cell_indices)
         total_slab_area += slab_area
@@ -740,12 +747,8 @@ function _report_takeoff(io::IO, design::BuildingDesign; du::DisplayUnits=design
     end
 
     total_fdn_conc = 0.0u"m^3"
-    for fdn in struc.foundations
-        r = fdn.result
-        isnothing(r) && continue
-        if hasproperty(r, :concrete_volume)
-            total_fdn_conc += r.concrete_volume
-        end
+    for (_, fr) in design.foundations
+        total_fdn_conc += fr.concrete_volume
     end
 
     conc_slab = _to_report(du, :volume, total_slab_conc; digits=1)
@@ -761,12 +764,15 @@ function _report_takeoff(io::IO, design::BuildingDesign; du::DisplayUnits=design
     Printf.@printf(io, "  %-16s %12.1f\n", "TOTAL", conc_total)
     println(io)
 
-    # Embodied carbon (if available) — kept in kgCO₂e (standard unit)
-    try
-        ec = compute_building_ec(struc)
-        Printf.@printf(io, "  Embodied Carbon:  %.0f kgCO₂e\n", ec.total_ec)
-        Printf.@printf(io, "  EC Intensity:     %.1f kgCO₂e/m²\n", ec.ec_per_floor_area)
-    catch; end
+    # Embodied carbon — read from design.summary (computed before restore!)
+    ec_total = design.summary.embodied_carbon
+    if ec_total > 0
+        Printf.@printf(io, "  Embodied Carbon:  %.0f kgCO₂e\n", ec_total)
+        area_m2 = ustrip(u"m^2", total_slab_area)
+        if area_m2 > 0
+            Printf.@printf(io, "  EC Intensity:     %.1f kgCO₂e/m²\n", ec_total / area_m2)
+        end
+    end
     println(io)
 end
 

@@ -26,7 +26,6 @@ The top-level input object sent to `POST /design` and `POST /validate`.
 | `stories_z` | `Vector{Float64}` | no | Story elevation Z coordinates (inferred from vertices if empty / omitted) |
 | `faces` | `APIFaceGroups` | no | Face definitions by group (auto-detected if empty / omitted) |
 | `params` | `APIParams` | yes | Design parameters |
-| `geometry_hash` | `String` | no | Present in the schema, but currently ignored by the server (it recomputes the hash from geometry) |
 
 See [`APIInput`](@ref) in [API Overview](overview.md).
 

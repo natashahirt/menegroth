@@ -624,6 +624,17 @@ Base.@kwdef mutable struct SlabDesignResult
     h_drop_in::Float64 = 0.0
     a_drop1_ft::Float64 = 0.0
     a_drop2_ft::Float64 = 0.0
+
+    # Captured from slab.drop_panel before restore! (survives snapshot round-trip)
+    drop_panel::Union{Nothing, StructuralSizer.DropPanelGeometry} = nothing
+
+    # Floor result type flags (survive restore! — slab.result gets reverted to initial estimate)
+    is_vault::Bool = false
+    vault_rise::Union{Nothing, typeof(1.0u"m")} = nothing
+
+    # Full StructuralSizer result captured before restore! wipes slab.result.
+    # Used by engineering_report and any downstream that needs the rich sizing detail.
+    sizer_result::Union{Nothing, StructuralSizer.AbstractFloorResult} = nothing
 end
 
 """

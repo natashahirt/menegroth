@@ -2,7 +2,6 @@
 # API Routes — Oxygen HTTP endpoint definitions
 # =============================================================================
 
-using CodecZlib
 using HTTP
 using Oxygen
 
@@ -96,19 +95,6 @@ _json_ok(obj) = _json_resp(200, obj)
 _json_bad(obj) = _json_resp(400, obj)
 """HTTP 500 JSON response."""
 _json_err(obj) = _json_resp(500, obj)
-
-"""Build a JSON response, gzip-compressing the body when the client accepts it."""
-function _json_resp_maybe_gzip(req::HTTP.Request, status_code::Int, obj)
-    body_str = JSON3.write(obj)
-    headers = ["Content-Type" => "application/json"]
-    enc = HTTP.header(req, "Accept-Encoding", "")
-    if occursin(r"gzip"i, enc)
-        body_bytes = transcode(GzipCompressor, Vector{UInt8}(body_str))
-        push!(headers, "Content-Encoding" => "gzip")
-        return HTTP.Response(status_code, headers, body_bytes)
-    end
-    return HTTP.Response(status_code, headers, body_str)
-end
 
 """Parse a JSON request body into `APIInput`, returning `(input, nothing)` on
 success or `(nothing, HTTP.Response)` with a 400 error on parse failure."""

@@ -47,6 +47,10 @@ that accounts for axial shortening of the arch.
 See also `Vault`, `HaileAnalytical`, `ShellFEA`,
 `VaultResult`, and `VaultOptions` in [Slab Types & Options](../types.md).
 
+```@docs
+VaultAnalysisMethod
+```
+
 ## Functions
 
 ```@docs

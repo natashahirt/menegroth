@@ -18,6 +18,7 @@
 ## Key Types
 
 ```@docs
+AbstractBuildingStructure
 BuildingStructure
 ```
 

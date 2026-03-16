@@ -33,7 +33,7 @@ compute_geometry_hash
 3. **Edge creation** — skeleton edges from `APIEdgeGroups`, classified into `:beams`, `:columns`, `:braces`
 4. **Support marking** — vertices listed in `input.supports` are marked as restrained
 5. **Story setup** — if `input.stories_z` is provided (non-empty), those elevations are used; otherwise story elevations are inferred from vertex Z via `rebuild_stories!`
-6. **Face detection** — if `input.faces` is provided, faces are created directly; otherwise `find_faces!` detects them automatically from the edge mesh
+6. **Face detection + grouping** — faces are always detected from the edge mesh; if `input.faces` is provided, its polygons are used as selectors to assign detected faces to groups (`"floor"`, `"roof"`, `"grade"`), otherwise the server auto-categorizes faces by story level
 
 ### json_to_params
 
@@ -43,7 +43,7 @@ compute_geometry_hash
 |:-----------|:------------|:-------------|
 | `floor_type` | `"flat_plate"` | `FlatPlateOptions(...)` |
 | `floor_type` | `"flat_slab"` | `FlatSlabOptions(base=FlatPlateOptions(...))` |
-| `floor_type` | `"one_way"` | `OneWayOptions(...)` |
+| `floor_type` | `"one_way"` | `OneWayOptions()` (currently ignores `floor_options.*`) |
 | `floor_type` | `"vault"` | `VaultOptions(...)` |
 | `column_type` | `"rc_rect"` | `ConcreteColumnOptions(material=..., rebar_material=..., section_shape=:rect, catalog=column_catalog)` |
 | `column_type` | `"rc_circular"` | `ConcreteColumnOptions(material=..., rebar_material=..., section_shape=:circular, catalog=column_catalog)` |
@@ -68,16 +68,20 @@ compute_geometry_hash
 | `floor_options.method` | `"DDM_SIMPLIFIED"` | `DDM(:simplified)` |
 | `floor_options.method` | `"EFM"` | `EFM()` |
 | `floor_options.method` | `"EFM_HARDY_CROSS"` | `EFM(solver=:hardy_cross)` |
-| `floor_options.method` | `"FEA"` | `FEA()` |
+| `floor_options.method` | `"FEA"` | `FEA(target_edge = params.floor_options.target_edge_m * u"m" or nothing)` |
 | `column_sizing_strategy` | `"discrete"` / `"nlp"` | Sets `ConcreteColumnOptions(...; sizing_strategy=...)` and `SteelColumnOptions(...; sizing_strategy=...)` |
 | `beam_sizing_strategy` | `"discrete"` / `"nlp"` | Sets `ConcreteBeamOptions(...; sizing_strategy=...)` and `SteelBeamOptions(...; sizing_strategy=...)` |
+| `mip_time_limit_sec` | — | Sets `time_limit_sec` on discrete column/beam options (defaults to 30s when omitted/`null`) |
 | `beam_catalog` | `"custom"` + `beam_catalog_bounds` | Builds `custom_catalog = rc_beam_catalog_from_bounds(...)` (RC beams only) |
 | `pixelframe_options.fc_preset` | `"standard"`, `"low"`, `"high"`, `"extended"` | Selects preset `fc_values` (MPa) for PixelFrame catalogs |
-| `pixelframe_options.fc_preset` | `"custom"` | Requires `fc_min_ksi`, `fc_max_ksi`, `fc_resolution_ksi` and builds `fc_values` (MPa) |
+| `pixelframe_options.fc_preset` | `"custom"` | Uses `fc_min_ksi`, `fc_max_ksi`, `fc_resolution_ksi` to build `fc_values` (MPa). If `pixelframe_options` is omitted entirely, the server uses the `"standard"` preset. |
 | `foundation_soil` | `"medium_sand"` | `FoundationParameters(soil=medium_sand, ...)` when `size_foundations=true` |
 | `foundation_concrete` | `"NWC_3000"` | `FoundationParameters(concrete=NWC_3000, ...)` when `size_foundations=true` |
 | `foundation_options.*` | — | Builds `FoundationOptions(strategy=..., mat_coverage_threshold=..., spread_params=..., strip_params=..., mat_params=...)` |
 | `scoped_overrides` | — | Builds `DesignParameters.scoped_floor_overrides` (face-scoped floor overrides; coordinates converted to meters) |
+| `visualization_target_edge_m` | — | Sets `DesignParameters.visualization_target_edge_m` (shell mesh target edge length in meters) |
+| `skip_visualization` | — | When `true`, sets `DesignParameters.skip_visualization` so `design_to_json` returns `visualization = null` |
+| `visualization_detail` | `"minimal"` / `"full"` | Controls serialization detail; `"minimal"` omits deflected slab meshes |
 
 Notes:
 - Unknown `floor_type` strings fall back to `FlatPlateOptions(...)` with the resolved analysis settings.
@@ -112,7 +116,7 @@ The hash intentionally excludes `params`, so parameter-only changes produce the 
 
 - Unit conversion assumes all input is in consistent units; mixing units within a single input is not supported.
 - Custom material definitions beyond the preset names require extending the `json_to_params` mapping.
-- Serialization of visualization data is the most expensive part; making it optional would require an API option (the current server always returns `visualization`).
+- Serialization of visualization data is the most expensive part; clients can set `skip_visualization=true` (and/or `visualization_detail="minimal"`) to reduce CPU and payload size.
 
 ## References
 

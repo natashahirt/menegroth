@@ -146,7 +146,7 @@ Store the value in AWS Secrets Manager and inject it as an environment variable 
 ### Performance Tuning
 
 - **`SS_ENABLE_HEAVY_PRECOMPILE_WORKLOAD`** — runs a representative design on startup to compile all code paths. Increases startup time by ~30s but eliminates first-request latency.
-- **Visualization payload size** — use `visualization_detail: "minimal"` in params to skip deflected slab meshes and reduce payload size.
+- **Visualization payload size** — use `visualization_detail: "minimal"` in params to skip deflected slab meshes and reduce payload size, or set `skip_visualization: true` to omit visualization entirely (`visualization = null`).
 
 ### Response format
 

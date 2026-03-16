@@ -26,6 +26,10 @@ Reference: Wongsittikan (2024) thesis and the original `Pixelframe.jl` package.
 PixelFrameDesign
 ```
 
+```@docs
+TendonDeviationResult
+```
+
 `PixelFrameDesign` is a mutable struct representing a fully designed PixelFrame member:
 
 | Field | Description |
@@ -51,6 +55,15 @@ DeflectionRegime
 | `LINEAR_ELASTIC_UNCRACKED` | Linear elastic, no cracking |
 | `LINEAR_ELASTIC_CRACKED` | Linear elastic after cracking |
 | `NONLINEAR_CRACKED` | Nonlinear behavior post-cracking |
+
+### Deflection Methods
+
+```@docs
+PFDeflectionMethod
+PFSimplified
+PFThirdPointLoad
+PFSinglePointLoad
+```
 
 ### Checker & Cache
 

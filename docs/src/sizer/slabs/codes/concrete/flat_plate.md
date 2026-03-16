@@ -9,17 +9,16 @@
 > opts_efm = FlatPlateOptions(method = EFM())
 > opts_fea = FlatPlateOptions(method = FEA())
 >
-> method_name(opts_ddm.method)                 # "DDM"
+> method_name(opts_ddm.method)                 # "DDM (ACI 8.10)"
 > h_min = min_thickness(FlatPlate(), 20.0u"ft")  # ACI minimum thickness
 > ```
 
 ## Overview
 
 The flat plate module implements the full ACI 318 two-way slab design pipeline
-for flat plates and flat slabs (with drop panels).  Three moment-analysis methods
-are supported—Direct Design Method (DDM), Equivalent Frame Method (EFM), and
-shell Finite Element Analysis (FEA)—each feeding into a unified reinforcement,
-punching shear, and deflection workflow.
+for flat plates and flat slabs (with drop panels). Moment analysis is performed
+using a typed analysis method (`DDM`, `EFM`, or `FEA`), and the resulting moment
+envelopes feed into a shared reinforcement, punching shear, and deflection workflow.
 
 The design is iterative: slab thickness grows until deflection, punching, and
 flexural adequacy are simultaneously satisfied.
@@ -32,6 +31,7 @@ flexural adequacy are simultaneously satisfied.
 | `DDM(:simplified)` | `:mddm` | Modified DDM | Simplified coefficients |
 | `EFM()` | `:efm` | Equivalent Frame Method | Irregular geometry, final design |
 | `FEA()` | `:fea` | Shell Finite Element Analysis | Irregular layouts, large grids, shell-level accuracy |
+| `RuleOfThumb()` | — | Single-pass at ACI minimum thickness | Fast screening (checks may fail; no iteration) |
 
 **DDM** uses ACI 318 Table 8.10 coefficients — fast but requires regular geometry (aspect ratio, load limits). **EFM** builds an Asap frame model and distributes moments by stiffness — handles irregular geometry with more accurate results. **FEA** uses a 2D shell mesh with column stubs and supports pattern loading; see [FEA — Shell Finite Element Analysis](#fea--shell-finite-element-analysis) below for options.
 
@@ -60,6 +60,17 @@ Phase B: Slab Design (shared)
 MomentAnalysisResult
 EFMSpanProperties
 EFMJointStiffness
+DDMApplicabilityError
+EFMApplicabilityError
+EFMModelCache
+FEAModelCache
+SpanInfo
+PanelStripGeometry
+ColumnStripPolygon
+MiddleStripPolygon
+DropPanelGeometry
+DropSectionProperties
+StripReinforcementDesign
 ```
 
 See also `FlatPlatePanelResult`, `PunchingCheckResult`,
@@ -132,7 +143,7 @@ grow_column!
 
 ### Analysis Methods
 
-#### DDM — Direct Design Method (ACI 318-11 §13.6)
+#### DDM — Direct Design Method (ACI 318)
 
 The total factored static moment for each span is:
 
@@ -164,7 +175,7 @@ Two variants are supported:
 - `:simplified` — Modified DDM with 0.65/0.35 fixed split (conservative for
   preliminary design).
 
-#### EFM — Equivalent Frame Method (ACI 318-11 §13.7)
+#### EFM — Equivalent Frame Method (ACI 318)
 
 An equivalent frame is constructed along one direction with:
 
@@ -227,7 +238,7 @@ at inflection points).
 - `:efm_amp` — One FEA solve + many cheap EFM solves for amplification factors.
 - `:fea_resolve` — Full re-solve for each load pattern (more accurate, slower).
 
-### Punching Shear (ACI 318-11 §11.11)
+### Punching Shear (ACI 318)
 
 Critical section geometry is computed at ``d/2`` from the column face:
 
@@ -394,9 +405,15 @@ Key `FlatPlateOptions` fields:
 
 | Field | Default | Description |
 |:------|:--------|:------------|
-| `method` | `DDM(:full)` | Analysis method (`DDM`, `EFM`, `FEA`, `RuleOfThumb`) |
+| `method` | `DDM()` | Analysis method (`DDM`, `EFM`, `FEA`, `RuleOfThumb`) |
+| `has_edge_beam` | `false` | Whether an exterior spandrel beam is present (affects DDM/EFM edge distribution) |
+| `edge_beam_βt` | `nothing` | Explicit edge-beam torsional stiffness override (when not `nothing`) |
 | `punching_strategy` | `:grow_columns` | Punching failure resolution order |
 | `punching_reinforcement` | `:headed_studs_generic` | Punching reinforcement type |
+| `max_column_size` | `30.0u"inch"` | Maximum column size before bumping thickness (or using reinforcement, depending on strategy) |
+| `stud_material` | `Stud_51` | Shear stud / stirrup steel material |
+| `stud_diameter` | `0.5u"inch"` | Headed stud diameter (stud-based reinforcement only) |
+| `stirrup_bar_size` | `4` | Stirrup bar size (closed stirrups only) |
 | `objective` | `MinVolume()` | Optimization objective |
 | `col_I_factor` | `0.70` | Column cracked Ig factor (ACI §10.10.4.1) |
 
@@ -448,7 +465,6 @@ Key `FEA` options:
 
 ## References
 
-- ACI 318-11 Chapter 13 (Two-Way Slabs)
-- ACI 318-11 §13.6 (DDM), §13.7 (EFM)
+- ACI 318 (Two-Way Slabs)
 - StructurePoint DE-Two-Way-Flat-Plate Example
 - PCA Notes on ACI 318 (stiffness factors)

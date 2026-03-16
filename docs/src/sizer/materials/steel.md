@@ -47,6 +47,7 @@ RebarSteel
 | `ν` | `Float64` | Poisson's ratio |
 | `ecc` | `Float64` | Embodied carbon coefficient [kgCO₂e/kg] |
 | `cost` | `Float64` | Unit cost [\$/kg] (`NaN` if not set) |
+| `color` | `Union{Nothing, String}` | Optional display color hex string (e.g., `"#6E6E6E"`) |
 
 ## Structural Steel Presets
 
@@ -82,7 +83,7 @@ Rebar_80
 |:-------|:---------|:---|:---|:----|
 | `Stud_51` | ASTM A1044 | 351.6 MPa (51 ksi) | 448.2 MPa (65 ksi) | 1.72 |
 
-`Stud_51` is used for headed shear stud reinforcement in punching shear checks (ACI 318 §22.6) and composite deck connections.
+`Stud_51` is used for headed shear stud reinforcement in punching shear checks and composite deck connections.
 
 ```@docs
 Stud_51
@@ -94,7 +95,7 @@ Stud_51
 material_name
 ```
 
-`register_material!(name, mat)` — registers a material instance in the global name registry. Used internally by preset constructors.
+`register_material!(mat, name)` — registers a material instance in the global name registry. Used internally by preset constructors.
 
 ## Implementation Details
 

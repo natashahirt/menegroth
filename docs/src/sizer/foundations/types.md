@@ -130,6 +130,11 @@ FoundationDemand
 
 See [ACI Foundation Design](codes/aci.md) for `SpreadFootingResult`, `StripFootingResult`, and `MatFootingResult` docstrings.
 
+```@docs
+CombinedFootingResult
+PileCapResult
+```
+
 ### Mat Analysis Methods
 
 `AbstractMatMethod` is the base for mat analysis strategies:

@@ -41,6 +41,7 @@ Timber
 | `ρ` | Density | Mass density |
 | `ecc` | `Float64` | Embodied carbon [kgCO₂e/kg] |
 | `cost` | `Float64` | Unit cost [\$/kg] (`NaN` if not set) |
+| `color` | `Union{Nothing, String}` | Optional display color hex string (e.g., `"#8A6B4F"`) |
 
 ## Implementation Details
 
@@ -60,7 +61,7 @@ const Southern_Pine_No2 = Timber(:southern_pine, :no2, ...)
 
 ## Limitations & Future Work
 
-- **No presets**: The timber.jl file is a stub. Species/grade presets from NDS Supplement tables need to be added.
+- **No presets**: `StructuralSizer/src/materials/timber.jl` currently defines the `Timber` type but does not include species/grade presets from the NDS Supplement tables.
 - **NDS checker**: The design code checker for timber members is minimal. Full NDS 2018 implementation is planned, covering:
   - Bending (NDS §3.3): `Fb' = Fb × CD × CM × Ct × CL × CF × Cfu × Ci × Cr`
   - Compression (NDS §3.6–3.7): Column stability factor CP

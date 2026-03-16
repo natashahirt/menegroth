@@ -3,7 +3,7 @@
 > ```julia
 > using StructuralSizer
 > fp      = SFRM(15.0)     # 15 pcf spray-applied fireproofing
-> coating = compute_surface_coating(fp, 2.0, 57.0, 48.0)  # 2-hr, W=57 plf, D=48 in
+> coating = compute_surface_coating(fp, 2.0, 57.0, 48.0)  # 2-hr, W=57 plf, heated perimeter D=48 in
 > coating.thickness_in      # SFRM thickness per UL X772
 > ```
 

@@ -280,7 +280,6 @@ function register_routes!()
     # ─── GET /result ─────────────────────────────────────────────────────
     # Returns the last completed design result (for async submit-then-poll flow).
     # Use after POST /design returns 202 or "queued": poll GET /status until idle, then GET /result.
-    # Compresses response with gzip when client sends Accept-Encoding: gzip.
     @get "/result" function (req::HTTP.Request)
         st = status_string(SERVER_STATUS)
         if st != "idle"
@@ -295,7 +294,8 @@ function register_routes!()
                 "message" => "No result available. Submit a design first.",
             ))
         end
-        return _json_resp_maybe_gzip(req, 200, DESIGN_CACHE.last_result)
+        # Plain JSON (no gzip) — avoids client parse errors with AutomaticDecompression.
+        return _json_resp(200, DESIGN_CACHE.last_result)
     end
 
     return nothing

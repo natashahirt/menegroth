@@ -108,11 +108,22 @@ namespace Menegroth.GH.Helpers
 
                 var resp = await Client.GetAsync(NormalizeUrl(baseUrl, "status"), cancellationToken);
                 var body = await resp.Content.ReadAsStringAsync();
-                var jobj = JObject.Parse(body);
-                bool hasResult = jobj["has_result"]?.ToObject<bool>() ?? false;
-
-                if (hasResult)
-                    return;
+                if (string.IsNullOrWhiteSpace(body))
+                {
+                    await Task.Delay(delayMs, cancellationToken);
+                    continue;
+                }
+                try
+                {
+                    var jobj = JObject.Parse(body);
+                    bool hasResult = jobj["has_result"]?.ToObject<bool>() ?? false;
+                    if (hasResult)
+                        return;
+                }
+                catch
+                {
+                    // Invalid JSON (e.g. proxy error page) — retry
+                }
 
                 await Task.Delay(delayMs, cancellationToken);
             }
@@ -158,12 +169,15 @@ namespace Menegroth.GH.Helpers
                 {
                     var resp = await Client.GetAsync(NormalizeUrl(baseUrl, "status"), cancellationToken);
                     var body = await resp.Content.ReadAsStringAsync();
-                    var jobj = JObject.Parse(body);
-                    string st = jobj["state"]?.ToString() ?? "";
-                    if (st == "idle")
-                        return body;
-                    if (st == "error")
-                        return "{\"state\":\"error\",\"message\":\"Server reported an error during startup. Check server logs.\"}";
+                    if (!string.IsNullOrWhiteSpace(body))
+                    {
+                        var jobj = JObject.Parse(body);
+                        string st = jobj["state"]?.ToString() ?? "";
+                        if (st == "idle")
+                            return body;
+                        if (st == "error")
+                            return "{\"state\":\"error\",\"message\":\"Server reported an error during startup. Check server logs.\"}";
+                    }
                 }
                 catch (OperationCanceledException)
                 {
@@ -171,7 +185,7 @@ namespace Menegroth.GH.Helpers
                 }
                 catch
                 {
-                    /* retry on transient network errors */
+                    /* retry on transient network errors or invalid JSON */
                 }
             }
 
@@ -188,20 +202,26 @@ namespace Menegroth.GH.Helpers
             if (string.IsNullOrWhiteSpace(body))
                 return (since, new List<string>());
 
-            var obj = JObject.Parse(body);
-            int next = obj["next_since"]?.ToObject<int>() ?? since;
-            var lines = new List<string>();
-            if (obj["lines"] is JArray arr)
+            try
             {
-                foreach (var token in arr)
+                var obj = JObject.Parse(body);
+                int next = obj["next_since"]?.ToObject<int>() ?? since;
+                var lines = new List<string>();
+                if (obj["lines"] is JArray arr)
                 {
-                    var line = token?.ToString();
-                    if (!string.IsNullOrWhiteSpace(line))
-                        lines.Add(line);
+                    foreach (var token in arr)
+                    {
+                        var line = token?.ToString();
+                        if (!string.IsNullOrWhiteSpace(line))
+                            lines.Add(line);
+                    }
                 }
+                return (next, lines);
             }
-
-            return (next, lines);
+            catch
+            {
+                return (since, new List<string>());
+            }
         }
 
         /// <summary>

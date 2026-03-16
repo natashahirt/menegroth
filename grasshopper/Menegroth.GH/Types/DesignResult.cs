@@ -59,7 +59,14 @@ namespace Menegroth.GH.Types
         /// </summary>
         public static DesignResult FromJson(string json)
         {
-            var r = new DesignResult { RawJson = json };
+            var r = new DesignResult { RawJson = json ?? "" };
+
+            if (string.IsNullOrWhiteSpace(json))
+            {
+                r.Status = "error";
+                r.ErrorMessage = "Server returned empty response. The design may have crashed or timed out.";
+                return r;
+            }
 
             JObject root;
             try
@@ -69,7 +76,7 @@ namespace Menegroth.GH.Types
             catch
             {
                 r.Status = "error";
-                r.ErrorMessage = "Failed to parse server response as JSON.";
+                r.ErrorMessage = "Failed to parse server response as JSON. Response may be truncated or corrupted.";
                 return r;
             }
 

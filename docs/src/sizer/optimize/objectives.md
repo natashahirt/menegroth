@@ -48,10 +48,10 @@ a single member to the total objective:
 
 | Objective | Formula |
 |:----------|:--------|
-| `MinWeight` | ``\rho \cdot A \cdot L`` |
-| `MinVolume` | ``A \cdot L`` |
-| `MinCost` | ``\text{unit\_cost} \cdot \rho \cdot A \cdot L`` |
-| `MinCarbon` | ``\text{GWP} \cdot \rho \cdot A \cdot L`` |
+| `MinWeight` | \( \rho \cdot A \cdot L \) |
+| `MinVolume` | \( A \cdot L \) |
+| `MinCost` | \( \text{unit\_cost} \cdot \rho \cdot A \cdot L \) |
+| `MinCarbon` | \( \text{GWP} \cdot \rho \cdot A \cdot L \) |
 
 where ``\rho`` is the material density, ``A`` is the section area, ``L`` is the
 member length, and GWP is the Global Warming Potential (kgCO₂e per kg).

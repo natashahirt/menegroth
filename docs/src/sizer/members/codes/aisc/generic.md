@@ -14,6 +14,14 @@ This module contains AISC 360-16 provisions that apply to **all section types**:
 
 Source: `StructuralSizer/src/members/codes/aisc/generic/*.jl`
 
+## Key Types
+
+```@docs
+AISCCapacityCache
+ASD
+B2StoryProperties
+```
+
 ## Functions
 
 ### Tension (AISC §D2)

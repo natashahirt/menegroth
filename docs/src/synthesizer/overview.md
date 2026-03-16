@@ -57,6 +57,11 @@ The typical design workflow follows four steps:
 - `DesignParameters` — design configuration
 - `BuildingDesign` — results container
 
+```@docs
+AbstractStructuralSynthesizer
+PreSizingValidationError
+```
+
 ## Key Functions
 
 - `gen_medium_office` — parametric building generator

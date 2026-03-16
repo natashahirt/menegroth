@@ -19,16 +19,29 @@ Sections are defined in `StructuralSizer/src/members/sections/steel/`.
 
 ## Key Types
 
-<<<<<<< HEAD
 ### Abstract Hierarchy
-
-=======
->>>>>>> 35910fe7cce9e6c72fe66334ba79eb0a5af2272c
 ```@docs
 AbstractSection
 AbstractHollowSection
 AbstractRectHollowSection
 AbstractRoundHollowSection
+```
+
+### Catalog Constructors
+
+The standard AISC catalogs are exposed via convenience constructors:
+
+```@docs
+W
+HSS
+PIPE
+HSSRound
+IShape
+TShape
+SolidRect
+HollowRect
+SolidRound
+HollowRound
 ```
 
 ### W Shapes (Doubly-Symmetric I-Sections)
@@ -37,7 +50,9 @@ AbstractRoundHollowSection
 ISymmSection
 ```
 
-**`ISymmSection <: AbstractSection`** is a mutable struct representing doubly-symmetric I-shapes (W, S, M, HP series). Input geometry fields:
+**`ISymmSection <: AbstractSection`** is a mutable struct representing doubly-symmetric I-shapes. In practice, StructuralSizer’s built-in AISC catalog loader provides W-shapes, but the geometry model is generic.
+
+Input geometry fields:
 
 | Field | Description |
 |:------|:------------|
@@ -120,6 +135,11 @@ PipeSection
 | `weight` | Linear weight (lb/ft) |
 | `A` | Cross-sectional area |
 
+```@docs
+Rebar
+RebarLocation
+```
+
 ## Functions
 
 ### Common Section Interface
@@ -137,6 +157,16 @@ PipeSection
 - `Iy(s)` — weak-axis moment of inertia.
 - `Sx(s)` — strong-axis elastic section modulus.
 - `Sy(s)` — weak-axis elastic section modulus.
+
+```@docs
+BendingAxis
+StrongAxis
+WeakAxis
+Ix
+Iy
+Sx
+Sy
+```
 
 For `HSSRoundSection`, `Ix` and `Iy` both return `s.I`; `Sx` and `Sy` both return `s.S`.
 

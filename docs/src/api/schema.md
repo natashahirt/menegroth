@@ -24,7 +24,7 @@ The top-level input object sent to `POST /design` and `POST /validate`.
 | `edges` | `APIEdgeGroups` | yes | Edge connectivity by group |
 | `supports` | `Vector{Int}` | yes | 1-based vertex indices with support conditions |
 | `stories_z` | `Vector{Float64}` | no | Story elevation Z coordinates (inferred from vertices if empty / omitted) |
-| `faces` | `APIFaceGroups` | no | Face definitions by group (auto-detected if empty / omitted) |
+| `faces` | `APIFaceGroups` | no | Optional face-group selectors. The server always detects faces from the edge mesh; when `faces` is provided, its polygons are used to *assign* detected faces to groups like `"floor"`, `"roof"`, and `"grade"`. |
 | `params` | `APIParams` | yes | Design parameters |
 | `geometry_hash` | `String` | no | Present in the schema, but currently ignored by the server (it recomputes the hash from geometry) |
 
@@ -61,21 +61,25 @@ A dictionary mapping face group names to face-coordinate polylines:
 | `floor_options` | `APIFloorOptions` | `APIFloorOptions()` | Floor-specific options |
 | `materials` | `APIMaterials` | `APIMaterials()` | Material selections |
 | `column_type` | `String` | `"rc_rect"` | `"rc_rect"`, `"rc_circular"`, `"steel_w"`, `"steel_hss"`, `"steel_pipe"`, or `"pixelframe"` |
-| `column_catalog` | `Union{String, Nothing}` | `nothing` | Optional. If omitted or `null`, the server chooses a safe default based on `column_type` (**steel** → `"preferred"`, **RC** → `"standard"`). If provided: **Steel** (steel_w/steel_hss/steel_pipe): `"compact_only"`, `"preferred"`, `"all"`. **RC rectangular** (rc_rect): `"standard"`, `"square"`, `"rectangular"`, `"low_capacity"`, `"high_capacity"`, `"all"`. **RC circular** (rc_circular): `"standard"`, `"low_capacity"`, `"high_capacity"`, `"all"`. Ignored for pixelframe. |
+| `column_catalog` | `Union{String, Nothing}` | `nothing` | Optional. If omitted or `null`, the server chooses a safe default based on `column_type` (**steel** → `"preferred"`, **RC** → `"standard"`). If provided (lowercase strings): **Steel** (steel_w/steel_hss/steel_pipe): `"compact_only"`, `"preferred"`, `"all"`. **RC rectangular** (rc_rect): `"standard"`, `"square"`, `"rectangular"`, `"low_capacity"`, `"high_capacity"`, `"all"`. **RC circular** (rc_circular): `"standard"`, `"low_capacity"`, `"high_capacity"`, `"all"`. Ignored for pixelframe. |
 | `column_sizing_strategy` | `String` | `"discrete"` | `"discrete"` (catalog/MIP) or `"nlp"` (continuous Ipopt). Applies to columns. |
+| `mip_time_limit_sec` | `Union{Float64, Nothing}` | `nothing` | Optional MIP time limit in seconds for discrete sizing. If omitted/`null`, the server uses 30 seconds. |
 | `beam_type` | `String` | `"steel_w"` | `"steel_w"`, `"steel_hss"`, `"rc_rect"`, `"rc_tbeam"`, or `"pixelframe"` |
 | `beam_catalog` | `String` | `"large"` | RC beam catalog (when `beam_type` is RC): `"standard"`, `"small"`, `"large"`, `"xlarge"`, `"all"`, or `"custom"`. Ignored for steel and pixelframe. |
 | `beam_sizing_strategy` | `String` | `"discrete"` | `"discrete"` (catalog/MIP) or `"nlp"` (continuous Ipopt). Applies to beams. |
 | `beam_catalog_bounds` | `Union{APIBeamCatalogBounds, Nothing}` | `nothing` | Required when `beam_catalog == "custom"`; bounds and resolution (inches) for generating a custom RC beam catalog. |
-| `pixelframe_options` | `Union{APIPixelFrameOptions, Nothing}` | `nothing` | Required when `column_type == "pixelframe"` or `beam_type == "pixelframe"`; selects PixelFrame concrete strength catalog. |
-| `fire_rating` | `Float64` | `0.0` | Fire resistance in hours |
-| `optimize_for` | `String` | `"weight"` | `"weight"`, `"carbon"`, or `"cost"` |
+| `pixelframe_options` | `Union{APIPixelFrameOptions, Nothing}` | `nothing` | Optional PixelFrame concrete strength settings. If omitted/`null`, the server uses the `"standard"` preset. |
+| `fire_rating` | `Float64` | `0.0` | Fire resistance in hours. Accepted values are `0`, `1`, `1.5`, `2`, `3`, or `4`. |
+| `optimize_for` | `String` | `"weight"` | Optimization target (lowercase): `"weight"`, `"carbon"`, or `"cost"` |
 | `size_foundations` | `Bool` | `false` | Whether to size foundations |
 | `foundation_soil` | `String` | `"medium_sand"` | Soil type name (used when `size_foundations=true`): `"loose_sand"`, `"medium_sand"`, `"dense_sand"`, `"soft_clay"`, `"stiff_clay"`, `"hard_clay"` |
 | `foundation_concrete` | `String` | `"NWC_3000"` | Foundation concrete grade (used when `size_foundations=true`) |
 | `foundation_options` | `Union{APIFoundationOptions, Nothing}` | `nothing` | Optional strategy + per-type overrides (spread/strip/mat). Applied when `size_foundations=true`. |
 | `scoped_overrides` | `Vector{APIScopedOverride}` | `[]` | Optional face-scoped floor overrides (e.g., vault-only regions). |
 | `geometry_is_centerline` | `Bool` | `false` | How to interpret input vertex coordinates — see [Structural Column Offsets](#structural-column-offsets) |
+| `visualization_target_edge_m` | `Union{Float64, Nothing}` | `nothing` | Optional visualization shell-mesh target edge length in meters (coarser = faster). |
+| `skip_visualization` | `Bool` | `false` | When `true`, skips shell-mesh build and returns `visualization = null` (faster responses; frame-only behavior). |
+| `visualization_detail` | `String` | `"full"` | Visualization payload detail level: `"minimal"` (no deflected slab meshes) or `"full"`. |
 
 See [`APIParams`](@ref) in [API Overview](overview.md).
 
@@ -191,8 +195,10 @@ Face-scoped floor override blocks (used for region-specific floor types like vau
 | `method` | `String` | `"DDM"` | Analysis method: `"DDM"`, `"DDM_SIMPLIFIED"`, `"EFM"`, `"EFM_HARDY_CROSS"`, or `"FEA"` |
 | `deflection_limit` | `String` | `"L_360"` | Deflection limit: `"L_240"`, `"L_360"`, `"L_480"` |
 | `punching_strategy` | `String` | `"grow_columns"` | `"grow_columns"`, `"reinforce_first"`, `"reinforce_last"` |
+| `target_edge_m` | `Union{Float64, Nothing}` | `nothing` | Optional FEA mesh target edge length in meters (used when `method == "FEA"`). If omitted, the solver chooses an adaptive mesh size. |
+| `vault_lambda` | `Union{Float64, Nothing}` | `nothing` | Optional vault \(\lambda = \frac{\text{span}}{\text{rise}}\) (dimensionless, > 0). Used when `floor_type == "vault"`. |
 
-`APIFloorOptions` controls floor-specific design settings including the analysis method (DDM, EFM, FEA, or rule-of-thumb), deflection limits, and the punching shear mitigation strategy.
+`APIFloorOptions` controls floor-specific design settings including the analysis method (DDM, EFM, or FEA), deflection limits, and the punching shear mitigation strategy.
 
 ### APIMaterials
 
@@ -215,6 +221,7 @@ The top-level response from `POST /design`.
 |:------|:-----|:------------|
 | `status` | `String` | `"ok"` or `"error"` |
 | `compute_time_s` | `Float64` | Wall-clock design time in seconds |
+| `phase_timings` | `Dict{String, Float64}` | Timing breakdown by phase (seconds). Includes `"serialize_visualization"` when visualization is enabled. |
 | `length_unit` | `String` | Length unit label for length-category outputs (`"ft"` or `"m"`) |
 | `thickness_unit` | `String` | Thickness unit label for thickness-category outputs (`"in"` or `"mm"`) |
 | `volume_unit` | `String` | Volume unit label for volume-category outputs (`"ft3"` or `"m3"`) |
@@ -225,7 +232,7 @@ The top-level response from `POST /design`.
 | `beams` | `Vector{APIBeamResult}` | Per-beam results |
 | `foundations` | `Vector{APIFoundationResult}` | Per-foundation results |
 | `geometry_hash` | `String` | Geometry hash for caching |
-| `visualization` | `Union{APIVisualization, Nothing}` | Visualization data (optional; `nothing` when unavailable) |
+| `visualization` | `Union{APIVisualization, Nothing}` | Visualization data (optional; `null` when `skip_visualization=true` or when an analysis model is unavailable) |
 
 See [`APIOutput`](@ref) in [API Overview](overview.md).
 
@@ -427,7 +434,7 @@ Example snippet (abbreviated) showing beamless-state and one drop-panel patch:
 | `flange_width` | `Float64` | W-shape flange width (0 for non-W shapes) |
 | `web_thickness` | `Float64` | W-shape web thickness (0 for non-W shapes) |
 | `flange_thickness` | `Float64` | W-shape flange thickness (0 for non-W shapes) |
-| `section_polygon` | `Vector{Vector{Float64}}` | Section polygon in local `[y,z]` coordinates |
+| `section_polygon` | `Vector{Vector{Float64}}` | Section polygon in local `[y,z]` coordinates (in `length_unit`) |
 | `section_polygon_inner` | `Vector{Vector{Float64}}` | Inner boundary for hollow sections (HSS rect/round); empty for solid sections |
 | `original_points` | `Vector{Vector{Float64}}` | Interpolated points along the element centerline `[x,y,z]` |
 | `displacement_vectors` | `Vector{Vector{Float64}}` | Displacements at each interpolated point `[dx,dy,dz]` |

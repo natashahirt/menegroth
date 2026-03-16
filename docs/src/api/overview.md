@@ -2,7 +2,7 @@
 
 > ```julia
 > # Start the API server
-> # julia --project=StructuralSynthesizer scripts/api/sizer_bootstrap.jl
+> julia --project=StructuralSynthesizer scripts/api/sizer_bootstrap.jl
 > ```
 
 ## Overview
@@ -132,6 +132,14 @@ When the server is busy, `POST /design` enqueues the request and returns:
 ### GET /result
 
 Fetch the last completed design result after a `POST /design` submission. Clients should poll `GET /status` until `"idle"` before calling this endpoint.
+
+### GET /report
+
+Fetch a plain-text engineering report for the last completed design. Clients should poll `GET /status` until `"idle"` before calling this endpoint.
+
+Optional query parameter:
+
+- `units`: `"imperial"` or `"metric"` — overrides the report display units (default: uses the last design’s `params.unit_system`)
 
 ### GET /logs
 

@@ -10,6 +10,36 @@
 
 The codebase uses Julia's multiple dispatch to organize structural engineering calculations. Abstract types define interfaces, and concrete types provide implementations. Design code functions like `get_ϕMn`, `get_ϕVn`, and `check_interaction` dispatch on the combination of section type, material type, and member geometry to select the appropriate code provision.
 
+## Units & Quantities
+
+`StructuralSizer` re-exports a small set of commonly used Unitful / Asap quantity aliases so downstream code and examples can use stable names for unit-tagged values (e.g. lengths, forces, pressures, moments).
+
+```@docs
+StructuralSizer.Acceleration
+StructuralSizer.Area
+StructuralSizer.AreaLoadQuantity
+StructuralSizer.AreaQuantity
+StructuralSizer.Density
+StructuralSizer.Force
+StructuralSizer.ForcePerLength
+StructuralSizer.ForceQuantity
+StructuralSizer.Length
+StructuralSizer.LengthQuantity
+StructuralSizer.LinearLoad
+StructuralSizer.Moment
+StructuralSizer.MomentOfInertia
+StructuralSizer.MomentQuantity
+StructuralSizer.Pressure
+StructuralSizer.PressureQuantity
+StructuralSizer.SecondMomentOfArea
+StructuralSizer.SectionModulus
+StructuralSizer.Torque
+StructuralSizer.TorsionalConstant
+StructuralSizer.Volume
+StructuralSizer.VolumeQuantity
+StructuralSizer.WarpingConstant
+```
+
 ## Materials
 
 ```

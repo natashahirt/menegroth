@@ -766,8 +766,7 @@ function _resolve_strategy(struc, demands, soil, opts)
     isempty(verts) && return :spread
     xs = [ustrip(u"m", Meshes.coords(v).x) for v in verts]
     ys = [ustrip(u"m", Meshes.coords(v).y) for v in verts]
-    footprint = (maximum(xs) - minimum(xs)) * (maximum(ys) - minimum(ys))
-    footprint_m2 = ustrip(u"m^2", footprint)
+    footprint_m2 = (maximum(xs) - minimum(xs)) * (maximum(ys) - minimum(ys))
     footprint_m2 < 1.0 && return :spread
 
     coverage = ustrip(u"m^2", total_req) / footprint_m2

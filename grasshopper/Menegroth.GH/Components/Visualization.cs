@@ -785,14 +785,13 @@ namespace Menegroth.GH.Components
             var slabColors = new List<Color>();
             var foundationGeometry = new List<IGH_GeometricGoo>();
             var foundationColors = new List<Color>();
-            var originalSlabs = new List<IGH_GeometricGoo>();
-
             if (_showSlabs)
             {
                 if (isOriginalMode)
-                    BuildOriginalSlabs(viz, slabGeometry, slabColors, effectiveColorBySlab, maxDisp, slabMaxima);
+                    BuildOriginalSlabs(viz, slabGeometry, slabColors, effectiveColorBySlab, maxDisp, slabMaxima,
+                        showVolumes: modeInt == MODE_SIZED);
                 else if (isDeflected && finalScale > 0)
-                    BuildDeflectedSlabs(viz, finalScale, showOriginal, slabGeometry, originalSlabs,
+                    BuildDeflectedSlabs(viz, finalScale, slabGeometry,
                         slabColors, effectiveColorBySlab, maxDisp, isLocal, slabMaxima,
                         showVolumes: modeInt == MODE_SIZED);
                 else
@@ -818,7 +817,6 @@ namespace Menegroth.GH.Components
             if (showOriginal && isOriginalMode)
             {
                 originalCurves.AddRange(frameCurves);
-                originalSlabs.AddRange(visibleSlabGeometry);
             }
 
             // Set outputs in explicit downstream-friendly order.
@@ -910,7 +908,10 @@ namespace Menegroth.GH.Components
             {
                 var m = _previewShadedMeshes[i];
                 if (m == null) continue;
-                args.Display.DrawMeshShaded(m, _previewShadedMaterials[i]);
+                if (i < _previewShadedUseVertexColors.Count && _previewShadedUseVertexColors[i])
+                    args.Display.DrawMeshFalseColors(m);
+                else
+                    args.Display.DrawMeshShaded(m, _previewShadedMaterials[i]);
             }
         }
 
@@ -1550,40 +1551,67 @@ namespace Menegroth.GH.Components
 
                 if (showVolumes)
                 {
-                    AddSlabMeshAndColor(output, colors, CreatePlanarPolygonMesh(topPts),
-                        analyticalSource, colorBy, maxDisp, maxima);
-                    AddSlabMeshAndColor(output, colors, CreatePlanarPolygonMesh(bottomPts),
-                        analyticalSource, colorBy, maxDisp, maxima);
+                    var topMesh = CreatePlanarPolygonMesh(topPts);
+                    var bottomMesh = CreatePlanarPolygonMesh(bottomPts);
+                    if (topMesh != null && bottomMesh != null && thickness > 0)
+                    {
+                        var combined = new Mesh();
+                        combined.Append(topMesh);
+                        combined.Append(bottomMesh);
+
+                        int nBoundary = topPts.Count - 1;
+                        for (int i = 0; i < nBoundary; i++)
+                        {
+                            int j = (i + 1) % nBoundary;
+                            int baseIdx = combined.Vertices.Count;
+                            combined.Vertices.Add(topPts[i]);
+                            combined.Vertices.Add(topPts[j]);
+                            combined.Vertices.Add(bottomPts[j]);
+                            combined.Vertices.Add(bottomPts[i]);
+                            combined.Faces.AddFace(baseIdx, baseIdx + 1, baseIdx + 2, baseIdx + 3);
+                        }
+                        combined.Normals.ComputeNormals();
+                        combined.Compact();
+                        AddSlabMeshAndColor(output, colors, combined,
+                            analyticalSource, colorBy, maxDisp, maxima);
+                    }
+                    else
+                    {
+                        AddSlabMeshAndColor(output, colors, topMesh,
+                            analyticalSource, colorBy, maxDisp, maxima);
+                    }
                     AppendDropPanelSizedGeometry(slab, zTop, thickness, output, colors, analyticalSource,
                         colorBy, maxDisp, maxima);
                 }
                 else
                 {
-                    var mesh = new Mesh();
-                    foreach (var p in topPts)
-                        mesh.Vertices.Add(p);
-                    int n = topPts.Count - 1;
-                    if (n >= 3)
-                    {
-                        for (int i = 1; i < n - 1; i++)
-                            mesh.Faces.AddFace(0, i, i + 1);
-                        mesh.Normals.ComputeNormals();
-                        mesh.Compact();
-                        AddSlabMeshAndColor(output, colors, mesh, analyticalSource, colorBy, maxDisp, maxima);
-                    }
+                    AddSlabMeshAndColor(output, colors, CreatePlanarPolygonMesh(topPts),
+                        analyticalSource, colorBy, maxDisp, maxima);
                 }
             }
         }
 
         /// <summary>
         /// Creates a planar mesh from a closed polygon (last point equals first).
-        /// Uses fan triangulation from vertex 0. Returns null if fewer than 3 distinct vertices.
+        /// Uses Rhino's Mesh.CreateFromClosedPolyline for correct concave triangulation,
+        /// falling back to fan triangulation only when Rhino's method fails.
         /// </summary>
         private static Mesh CreatePlanarPolygonMesh(List<Point3d> closedPts)
         {
             int n = closedPts.Count - 1; // exclude duplicate closing point
             if (n < 3) return null;
-            var mesh = new Mesh();
+
+            var polyline = new Polyline(closedPts);
+            var mesh = Mesh.CreateFromClosedPolyline(polyline);
+            if (mesh != null && mesh.Faces.Count > 0)
+            {
+                mesh.Normals.ComputeNormals();
+                mesh.Compact();
+                return mesh;
+            }
+
+            // Fan triangulation fallback (only correct for convex polygons)
+            mesh = new Mesh();
             for (int i = 0; i < n; i++)
                 mesh.Vertices.Add(closedPts[i]);
             for (int i = 1; i < n - 1; i++)
@@ -1595,28 +1623,27 @@ namespace Menegroth.GH.Components
 
         /// <summary>
         /// Build parabolic vault mesh from vault_mesh_vertices and vault_mesh_faces.
-        /// Intrados + extrados + end caps as a single mesh.
+        /// Intrados + extrados (offset along surface normals) + side caps as a single mesh.
         /// </summary>
         private static bool TryBuildVaultMesh(JToken slab, double thickness, List<IGH_GeometricGoo> output)
         {
             var verts = slab["vault_mesh_vertices"]?.ToObject<double[][]>() ?? new double[0][];
             var faces = slab["vault_mesh_faces"]?.ToObject<int[][]>() ?? new int[0][];
-            
+
             if (verts.Length == 0 || faces.Length == 0)
                 return false;
-            
-            // Build intrados mesh
+
             var intradosMesh = new Mesh();
             for (int i = 0; i < verts.Length; i++)
             {
                 if (verts[i].Length < 3) continue;
                 intradosMesh.Vertices.Add(new Point3d(verts[i][0], verts[i][1], verts[i][2]));
             }
-            
+
             foreach (var face in faces)
             {
                 if (face == null || face.Length < 3) continue;
-                int i0 = face[0] - 1;  // Convert from 1-based to 0-based
+                int i0 = face[0] - 1;
                 int i1 = face[1] - 1;
                 int i2 = face[2] - 1;
                 if (i0 < 0 || i1 < 0 || i2 < 0 ||
@@ -1626,82 +1653,73 @@ namespace Menegroth.GH.Components
                     continue;
                 intradosMesh.Faces.AddFace(i0, i1, i2);
             }
-            
+
             if (intradosMesh.Vertices.Count == 0 || intradosMesh.Faces.Count == 0)
                 return false;
-            
+
             intradosMesh.Normals.ComputeNormals();
             intradosMesh.Compact();
-            
-            // Build extrados mesh (offset by thickness in Z direction)
+
+            // Build extrados by offsetting each vertex along its surface normal
             var extradosMesh = new Mesh();
-            for (int i = 0; i < verts.Length; i++)
+            for (int i = 0; i < intradosMesh.Vertices.Count; i++)
             {
-                if (verts[i].Length < 3) continue;
-                extradosMesh.Vertices.Add(new Point3d(verts[i][0], verts[i][1], verts[i][2] + thickness));
+                var pt = new Point3d(intradosMesh.Vertices[i]);
+                var n = new Vector3d(intradosMesh.Normals[i]);
+                extradosMesh.Vertices.Add(pt + n * thickness);
             }
-            
-            // Reverse face winding for extrados (normals point up)
-            foreach (var face in faces)
+
+            foreach (var face in intradosMesh.Faces)
             {
-                if (face == null || face.Length < 3) continue;
-                int i0 = face[0] - 1;
-                int i1 = face[1] - 1;
-                int i2 = face[2] - 1;
-                if (i0 < 0 || i1 < 0 || i2 < 0 ||
-                    i0 >= extradosMesh.Vertices.Count ||
-                    i1 >= extradosMesh.Vertices.Count ||
-                    i2 >= extradosMesh.Vertices.Count)
-                    continue;
-                extradosMesh.Faces.AddFace(i0, i2, i1);  // Reversed winding
+                if (face.IsTriangle)
+                    extradosMesh.Faces.AddFace(face.A, face.C, face.B);
+                else
+                    extradosMesh.Faces.AddFace(face.A, face.D, face.C, face.B);
             }
-            
             extradosMesh.Normals.ComputeNormals();
             extradosMesh.Compact();
-            
-            // Combine into single mesh with both surfaces
+
             var combinedMesh = new Mesh();
             combinedMesh.Append(intradosMesh);
             combinedMesh.Append(extradosMesh);
-            
-            // Add end caps (vertical surfaces at vault abutments)
-            // Extract boundary edges from intrados and connect to extrados
+
+            // Stitch boundary edges between intrados and extrados
             var boundary = intradosMesh.GetNakedEdges();
             if (boundary != null && boundary.Length > 0)
             {
+                const double tol = 1e-6;
+                var cloud = new Rhino.Geometry.PointCloud(
+                    Enumerable.Range(0, intradosMesh.Vertices.Count)
+                              .Select(i => new Point3d(intradosMesh.Vertices[i])));
+                int nV = intradosMesh.Vertices.Count;
+
                 foreach (var edge in boundary)
                 {
                     if (edge == null || edge.Count < 2) continue;
-
-                    // Create vertical strip connecting intrados edge to extrados
                     for (int i = 0; i < edge.Count - 1; i++)
                     {
-                        var p1 = edge[i];
-                        var p2 = edge[i + 1];
-                        var p3 = new Point3d(p2.X, p2.Y, p2.Z + thickness);
-                        var p4 = new Point3d(p1.X, p1.Y, p1.Z + thickness);
-                        
+                        int i0 = cloud.ClosestPoint(edge[i]);
+                        int i1 = cloud.ClosestPoint(edge[i + 1]);
+                        if (i0 < 0 || i1 < 0 || i0 >= nV || i1 >= nV) continue;
+                        if (new Point3d(intradosMesh.Vertices[i0]).DistanceToSquared(edge[i]) > tol * tol) continue;
+                        if (new Point3d(intradosMesh.Vertices[i1]).DistanceToSquared(edge[i + 1]) > tol * tol) continue;
                         int baseIdx = combinedMesh.Vertices.Count;
-                        combinedMesh.Vertices.Add(p1);
-                        combinedMesh.Vertices.Add(p2);
-                        combinedMesh.Vertices.Add(p3);
-                        combinedMesh.Vertices.Add(p4);
+                        combinedMesh.Vertices.Add(intradosMesh.Vertices[i0]);
+                        combinedMesh.Vertices.Add(intradosMesh.Vertices[i1]);
+                        combinedMesh.Vertices.Add(extradosMesh.Vertices[i1]);
+                        combinedMesh.Vertices.Add(extradosMesh.Vertices[i0]);
                         combinedMesh.Faces.AddFace(baseIdx, baseIdx + 1, baseIdx + 2, baseIdx + 3);
                     }
                 }
             }
-            
+
             combinedMesh.Normals.ComputeNormals();
             combinedMesh.Compact();
-            
+
             output.Add(new GH_Mesh(combinedMesh));
             return true;
         }
 
-        /// <summary>
-        /// Build sized slab geometry from undeformed shell mesh when the mesh is curved.
-        /// This preserves vault geometry in Sized mode instead of flattening to z_top.
-        /// </summary>
         /// <summary>
         /// Build sized slab geometry from the analytical mesh (deflected_slab_meshes undeformed vertices).
         /// Uses the triangulated mesh topology for correct concave shapes. When showVolumes is true,
@@ -1806,8 +1824,8 @@ namespace Menegroth.GH.Components
             return true;
         }
 
-        private static void BuildDeflectedSlabs(JToken viz, double scale, bool showOriginal,
-            List<IGH_GeometricGoo> output, List<IGH_GeometricGoo> origOutput,
+        private static void BuildDeflectedSlabs(JToken viz, double scale,
+            List<IGH_GeometricGoo> output,
             List<Color> colors, int colorBy, double maxDisp, bool isLocal,
             SlabAnalyticalMaxima maxima, bool showVolumes = false)
         {
@@ -1822,7 +1840,6 @@ namespace Menegroth.GH.Components
                 var faces = m["faces"]?.ToObject<int[][]>() ?? new int[0][];
                 if (verts.Length == 0) continue;
 
-                // Load per-face analytical arrays when needed
                 double[] faceAnalytical = null;
                 double analyticalMax = 0;
                 bool analyticalDiverging = false;
@@ -1831,12 +1848,10 @@ namespace Menegroth.GH.Components
                         out faceAnalytical, out analyticalMax, out analyticalDiverging);
 
                 var rhinoMesh = new Mesh();
-                var origMesh = showOriginal ? new Mesh() : null;
 
                 for (int i = 0; i < verts.Length; i++)
                 {
                     var op = new Point3d(verts[i][0], verts[i][1], verts[i][2]);
-                    origMesh?.Vertices.Add(op);
 
                     double dx = i < disps.Length ? disps[i][0] : 0;
                     double dy = i < disps.Length ? disps[i][1] : 0;
@@ -1853,7 +1868,6 @@ namespace Menegroth.GH.Components
                         i1 >= rhinoMesh.Vertices.Count ||
                         i2 >= rhinoMesh.Vertices.Count) continue;
                     rhinoMesh.Faces.AddFace(i0, i1, i2);
-                    origMesh?.Faces.AddFace(i0, i1, i2);
                 }
 
                 if (colorBy == COLOR_DEFLECTION && disps.Length > 0)
@@ -1927,12 +1941,6 @@ namespace Menegroth.GH.Components
                             output, colors, colorBy, maxDisp, maxima);
                     }
 
-                    if (origMesh?.Vertices.Count > 0 && origMesh.Faces.Count > 0)
-                    {
-                        origMesh.Normals.ComputeNormals();
-                        origMesh.Compact();
-                        origOutput.Add(new GH_Mesh(origMesh));
-                    }
                 }
             }
         }
@@ -2149,12 +2157,12 @@ namespace Menegroth.GH.Components
             }
             if (dropPanels == null || dropPanels.Count == 0) return;
 
-            zTop = sizedSlab?["z_top"]?.ToObject<double>() ?? 0.0;
-            if (zTop <= 0) return;
+            if (sizedSlab == null) return;
+            zTop = sizedSlab["z_top"]?.ToObject<double>() ?? 0.0;
 
-            // Read displacements so fallback boxes can follow slab deflection
+            // Read original vertex positions so we can compute scaled Z-deflection
+            // by comparing the deflected mesh (which has scale baked in) to the original.
             var verts = meshToken["vertices"]?.ToObject<double[][]>() ?? new double[0][];
-            var disps = meshToken["vertex_displacements"]?.ToObject<double[][]>() ?? new double[0][];
 
             foreach (var dp in dropPanels)
             {
@@ -2165,17 +2173,19 @@ namespace Menegroth.GH.Components
                 double extra = dp["extra_depth"]?.ToObject<double>() ?? 0.0;
                 if (length <= 0 || width <= 0 || extra <= 0) continue;
 
-                // Find the deflected mesh vertex closest to the drop panel center (XY)
-                // and use its displacement to shift the box.
+                // Find the nearest original vertex (XY) and compute the Z delta
+                // between the deflected mesh vertex and the original vertex.
+                // The deflected mesh already has scale baked in, so this gives correct offset.
                 double dzDeflect = 0.0;
                 if (deflectedSlabMesh != null && deflectedSlabMesh.Vertices.Count > 0 &&
-                    verts.Length > 0 && disps.Length > 0)
+                    verts.Length > 0)
                 {
                     double bestDistSq = double.MaxValue;
                     int bestIdx = -1;
-                    for (int i = 0; i < verts.Length && i < disps.Length; i++)
+                    int nSearch = Math.Min(verts.Length, deflectedSlabMesh.Vertices.Count);
+                    for (int i = 0; i < nSearch; i++)
                     {
-                        if (verts[i].Length < 2 || disps[i].Length < 3) continue;
+                        if (verts[i].Length < 3) continue;
                         double dx = verts[i][0] - c[0];
                         double dy = verts[i][1] - c[1];
                         double distSq = dx * dx + dy * dy;
@@ -2186,7 +2196,7 @@ namespace Menegroth.GH.Components
                         }
                     }
                     if (bestIdx >= 0)
-                        dzDeflect = disps[bestIdx][2];
+                        dzDeflect = deflectedSlabMesh.Vertices[bestIdx].Z - verts[bestIdx][2];
                 }
 
                 double x0 = c[0] - length / 2.0;
@@ -2329,18 +2339,29 @@ namespace Menegroth.GH.Components
 
         /// <summary>
         /// Build undeformed slab meshes from the deflected slab payload.
-        /// This is used by "Original" mode so users can color original geometry
+        /// Used by "Original" mode (Deflection=None) so users can color original geometry
         /// by utilization/deflection without drawing displaced geometry.
+        /// When showVolumes is true, produces solid slab volumes with drop panels.
         /// </summary>
         private static void BuildOriginalSlabs(JToken viz, List<IGH_GeometricGoo> output,
-            List<Color> colors, int colorBy, double maxDisp, SlabAnalyticalMaxima maxima)
+            List<Color> colors, int colorBy, double maxDisp, SlabAnalyticalMaxima maxima,
+            bool showVolumes = false)
         {
             bool isAnalyticalSlab = colorBy >= COLOR_SLAB_BENDING && colorBy <= COLOR_SLAB_SURFACE_STRESS;
             var meshes = viz["deflected_slab_meshes"] as JArray ?? new JArray();
             if (meshes.Count == 0)
             {
-                BuildSizedSlabs(viz, output, colors, colorBy, maxDisp, maxima);
+                BuildSizedSlabs(viz, output, colors, colorBy, maxDisp, maxima, showVolumes);
                 return;
+            }
+
+            var sizedSlabs = viz["sized_slabs"] as JArray ?? new JArray();
+            var sizedBySlabId = new Dictionary<int, JToken>();
+            foreach (var s in sizedSlabs)
+            {
+                int id = s["slab_id"]?.ToObject<int>() ?? -1;
+                if (id > 0 && !sizedBySlabId.ContainsKey(id))
+                    sizedBySlabId[id] = s;
             }
 
             foreach (var m in meshes)
@@ -2349,6 +2370,23 @@ namespace Menegroth.GH.Components
                 var faces = m["faces"]?.ToObject<int[][]>() ?? new int[0][];
                 if (verts.Length == 0) continue;
 
+                int slabId = m["slab_id"]?.ToObject<int>() ?? -1;
+                sizedBySlabId.TryGetValue(slabId, out var sizedSlab);
+                double thickness = m["thickness"]?.ToObject<double>()
+                    ?? sizedSlab?["thickness"]?.ToObject<double>() ?? 0;
+                double zTop = sizedSlab?["z_top"]?.ToObject<double>() ?? 0;
+
+                // Volume path: reuse TryBuildSizedSlabFromMesh for correct solid geometry
+                if (showVolumes && TryBuildSizedSlabFromMesh(m, thickness, true, output))
+                {
+                    AppendSlabColor(colors, m, colorBy, maxDisp, "vertex_displacements", maxima);
+                    if (sizedSlab != null)
+                        AppendDropPanelSizedGeometry(sizedSlab, zTop, thickness, output, colors,
+                            m, colorBy, maxDisp, maxima);
+                    continue;
+                }
+
+                // Surface-only path: build mesh with vertex colors
                 double[] faceAnalytical = null;
                 double analyticalMax = 0;
                 bool analyticalDiverging = false;
@@ -2358,10 +2396,7 @@ namespace Menegroth.GH.Components
 
                 var rhinoMesh = new Mesh();
                 for (int i = 0; i < verts.Length; i++)
-                {
-                    var op = new Point3d(verts[i][0], verts[i][1], verts[i][2]);
-                    rhinoMesh.Vertices.Add(op);
-                }
+                    rhinoMesh.Vertices.Add(new Point3d(verts[i][0], verts[i][1], verts[i][2]));
 
                 foreach (var face in faces)
                 {

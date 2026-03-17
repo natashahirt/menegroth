@@ -786,20 +786,27 @@ function _populate_slab_results!(design::BuildingDesign, struc::BuildingStructur
     end
     
     for (slab_idx, slab) in enumerate(struc.slabs)
-        # Non-converged slabs have result=nothing but still carry design_details
+        # Fallback: slab.result is nothing (shouldn't happen for properly initialized slabs,
+        # but handle gracefully to avoid dropping the slab from visualization entirely).
         if isnothing(slab.result)
             dd = hasproperty(slab, :design_details) ? slab.design_details : nothing
-            if !isnothing(dd) && hasproperty(dd, :converged) && !dd.converged
-                design.slabs[slab_idx] = SlabDesignResult(
-                    thickness   = 0.0u"m",
-                    self_weight = 0.0u"kPa",
-                    converged       = false,
-                    failure_reason  = hasproperty(dd, :failure_reason) ? dd.failure_reason : "unknown",
-                    failing_check   = hasproperty(dd, :failing_check)  ? dd.failing_check  : "",
-                    iterations      = hasproperty(dd, :iterations)     ? dd.iterations      : 0,
-                    pattern_loading = hasproperty(dd, :pattern_loading) ? dd.pattern_loading : false,
-                )
+            did_converge = isnothing(dd) || !hasproperty(dd, :converged) || dd.converged
+            # Use initial slab thickness if available via spans (h ≈ ln/33 minimum)
+            fallback_h = try
+                h_init = slab.spans.primary / 33
+                uconvert(u"m", h_init)
+            catch
+                0.2u"m"  # 200mm default
             end
+            design.slabs[slab_idx] = SlabDesignResult(
+                thickness   = fallback_h,
+                self_weight = 0.0u"kPa",
+                converged       = did_converge,
+                failure_reason  = !did_converge && !isnothing(dd) && hasproperty(dd, :failure_reason) ? string(dd.failure_reason) : "",
+                failing_check   = !did_converge && !isnothing(dd) && hasproperty(dd, :failing_check)  ? string(dd.failing_check)  : "",
+                iterations      = !isnothing(dd) && hasproperty(dd, :iterations)     ? dd.iterations      : 0,
+                pattern_loading = !isnothing(dd) && hasproperty(dd, :pattern_loading) ? dd.pattern_loading : false,
+            )
             continue
         end
         r = slab.result   # FlatPlatePanelResult (or other AbstractFloorResult)

@@ -476,6 +476,7 @@ Base.@kwdef struct APIVisualizationFoundation
     utilization_ratio::Float64 = 0.0
     ok::Bool = true
     material_color_hex::String = ""  # Display color from foundation concrete material
+    along_x::Bool = false  # true when strip long axis runs along X (swap length/width mapping)
 end
 
 """Complete visualization data from analysis model."""

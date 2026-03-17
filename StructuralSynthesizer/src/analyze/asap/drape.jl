@@ -196,14 +196,19 @@ function compute_draped_displacements(design::BuildingDesign)
     # :drop_panel; those must be merged into their parent slab for visualization.
     slab_shells = Dict{Symbol, Vector{Asap.ShellElement}}()
     patch_shells = Asap.ShellElement[]  # col_patch and drop_panel elements
+    n_drop_panel = 0
+    n_col_patch = 0
     for shell in shell_model.shell_elements
         if shell.id in (:col_patch, :drop_panel)
             push!(patch_shells, shell)
+            shell.id == :drop_panel && (n_drop_panel += 1)
+            shell.id == :col_patch  && (n_col_patch += 1)
         else
             shells = get!(slab_shells, shell.id, Asap.ShellElement[])
             push!(shells, shell)
         end
     end
+    @debug "Drape shell grouping" n_total=length(shell_model.shell_elements) n_patch=length(patch_shells) n_drop_panel n_col_patch slab_keys=collect(keys(slab_shells))
 
     # ── Merge patch shells into parent slab groups ──
     # Assign each col_patch/drop_panel shell to the slab whose boundary contains its centroid.

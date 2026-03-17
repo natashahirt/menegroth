@@ -1037,6 +1037,7 @@ function _serialize_deflected_slab_meshes(design::BuildingDesign, struc::Buildin
         else
             APIDeflectedDropPanel[]
         end
+        @debug "Deflected slab $slab_idx drop panel" n_dp_faces=length(drop_panel_face_indices) dp_extra has_dp_geom=!isnothing(dp_geom) n_dp_meshes=length(dp_meshes)
         
         push!(deflected_meshes, APIDeflectedSlabMesh(
             slab_id = slab_idx,
@@ -1136,15 +1137,28 @@ function _serialize_visualization_foundations(design::BuildingDesign, struc::Bui
             v_idx > length(skel.vertices) && continue
             c = Meshes.coords(skel.vertices[v_idx])
             off = get(col_offset_by_vertex, v_idx, nothing)
-            push!(xs, _to_display_length(du, c.x + (isnothing(off) ? 0.0u"m" : off[1] * u"m")))
-            push!(ys, _to_display_length(du, c.y + (isnothing(off) ? 0.0u"m" : off[2] * u"m")))
+            x_disp = _to_display_length(du, c.x + (isnothing(off) ? 0.0u"m" : off[1] * u"m"))
+            y_disp = _to_display_length(du, c.y + (isnothing(off) ? 0.0u"m" : off[2] * u"m"))
+            push!(xs, x_disp)
+            push!(ys, y_disp)
             push!(zs, _to_display_length(du, c.z))
+            @debug "Foundation $fdn_idx support" sup_idx v_idx x_disp y_disp off
         end
         isempty(xs) && continue
 
         cx = sum(xs) / length(xs)
         cy = sum(ys) / length(ys)
         z_top = minimum(zs)
+
+        # Strip footings: determine orientation from support spread
+        strip_along_x = false
+        if fdn.foundation_type == :strip && length(xs) >= 2
+            Δx = maximum(xs) - minimum(xs)
+            Δy = maximum(ys) - minimum(ys)
+            strip_along_x = Δx >= Δy
+        end
+
+        @debug "Foundation $fdn_idx center" type=fdn.foundation_type support_count=length(fdn.support_indices) cx cy z_top strip_along_x xs ys
 
         push!(out, APIVisualizationFoundation(
             foundation_id = fdn_idx,
@@ -1155,6 +1169,7 @@ function _serialize_visualization_foundations(design::BuildingDesign, struc::Bui
             utilization_ratio = _round_val(fdn_result.bearing_ratio),
             material_color_hex = fdn_mat_color,
             ok = fdn_result.ok,
+            along_x = strip_along_x,
         ))
     end
 

@@ -1530,10 +1530,13 @@ namespace Menegroth.GH.Components
                     continue;
                 }
 
-                // 2. Curved: mesh from deflected_slab_meshes (undeformed vertices)
-                if (analyticalMesh != null && TryBuildCurvedSizedSlabFromMesh(analyticalMesh, output))
+                // 2. Curved/mesh-based: use deflected_slab_meshes undeformed vertices
+                //    with thickness volume so the slab appears solid.
+                if (analyticalMesh != null && TryBuildSizedSlabFromMesh(analyticalMesh, thickness, showVolumes, output))
                 {
                     AppendSlabColor(colors, analyticalSource, colorBy, maxDisp, "vertex_displacements", maxima);
+                    AppendDropPanelSizedGeometry(slab, zTop, thickness, output, colors, analyticalSource,
+                        colorBy, maxDisp, maxima);
                     continue;
                 }
 
@@ -1699,33 +1702,24 @@ namespace Menegroth.GH.Components
         /// Build sized slab geometry from undeformed shell mesh when the mesh is curved.
         /// This preserves vault geometry in Sized mode instead of flattening to z_top.
         /// </summary>
-        private static bool TryBuildCurvedSizedSlabFromMesh(JToken meshToken, List<IGH_GeometricGoo> output)
+        /// <summary>
+        /// Build sized slab geometry from the analytical mesh (deflected_slab_meshes undeformed vertices).
+        /// Uses the triangulated mesh topology for correct concave shapes. When showVolumes is true,
+        /// offsets downward by thickness to create a solid volume; otherwise outputs the top surface only.
+        /// </summary>
+        private static bool TryBuildSizedSlabFromMesh(JToken meshToken, double thickness,
+            bool showVolumes, List<IGH_GeometricGoo> output)
         {
             var verts = meshToken["vertices"]?.ToObject<double[][]>() ?? new double[0][];
             var faces = meshToken["faces"]?.ToObject<int[][]>() ?? new int[0][];
             if (verts.Length == 0 || faces.Length == 0)
                 return false;
 
-            // Only use this path for genuinely curved slabs.
-            double minZ = double.PositiveInfinity;
-            double maxZ = double.NegativeInfinity;
+            var topMesh = new Mesh();
             for (int i = 0; i < verts.Length; i++)
             {
                 if (verts[i].Length < 3) continue;
-                double z = verts[i][2];
-                if (z < minZ) minZ = z;
-                if (z > maxZ) maxZ = z;
-            }
-            if (double.IsNaN(minZ) || double.IsInfinity(minZ) ||
-                double.IsNaN(maxZ) || double.IsInfinity(maxZ) ||
-                (maxZ - minZ) <= 1e-5)
-                return false;
-
-            var rhinoMesh = new Mesh();
-            for (int i = 0; i < verts.Length; i++)
-            {
-                if (verts[i].Length < 3) continue;
-                rhinoMesh.Vertices.Add(new Point3d(verts[i][0], verts[i][1], verts[i][2]));
+                topMesh.Vertices.Add(new Point3d(verts[i][0], verts[i][1], verts[i][2]));
             }
 
             foreach (var face in faces)
@@ -1735,19 +1729,80 @@ namespace Menegroth.GH.Components
                 int i1 = face[1] - 1;
                 int i2 = face[2] - 1;
                 if (i0 < 0 || i1 < 0 || i2 < 0 ||
-                    i0 >= rhinoMesh.Vertices.Count ||
-                    i1 >= rhinoMesh.Vertices.Count ||
-                    i2 >= rhinoMesh.Vertices.Count)
+                    i0 >= topMesh.Vertices.Count ||
+                    i1 >= topMesh.Vertices.Count ||
+                    i2 >= topMesh.Vertices.Count)
                     continue;
-                rhinoMesh.Faces.AddFace(i0, i1, i2);
+                topMesh.Faces.AddFace(i0, i1, i2);
             }
 
-            if (rhinoMesh.Vertices.Count == 0 || rhinoMesh.Faces.Count == 0)
+            if (topMesh.Vertices.Count == 0 || topMesh.Faces.Count == 0)
                 return false;
 
-            rhinoMesh.Normals.ComputeNormals();
-            rhinoMesh.Compact();
-            output.Add(new GH_Mesh(rhinoMesh));
+            topMesh.Normals.ComputeNormals();
+            topMesh.Compact();
+
+            if (!showVolumes || thickness <= 0)
+            {
+                output.Add(new GH_Mesh(topMesh));
+                return true;
+            }
+
+            // Build solid volume: top + bottom + stitched boundary
+            var bottomMesh = new Mesh();
+            for (int i = 0; i < topMesh.Vertices.Count; i++)
+            {
+                var pt = new Point3d(topMesh.Vertices[i]);
+                var n = new Vector3d(topMesh.Normals[i]);
+                bottomMesh.Vertices.Add(pt + n * (-thickness));
+            }
+            foreach (var face in topMesh.Faces)
+            {
+                if (face.IsTriangle)
+                    bottomMesh.Faces.AddFace(face.A, face.B, face.C);
+                else
+                    bottomMesh.Faces.AddFace(face.A, face.B, face.C, face.D);
+            }
+            bottomMesh.Normals.ComputeNormals();
+            bottomMesh.Compact();
+
+            var combined = new Mesh();
+            combined.Append(topMesh);
+            combined.Append(bottomMesh);
+
+            // Stitch boundary edges between top and bottom
+            var boundary = topMesh.GetNakedEdges();
+            if (boundary != null && boundary.Length > 0)
+            {
+                const double tol = 1e-6;
+                var cloud = new Rhino.Geometry.PointCloud(
+                    Enumerable.Range(0, topMesh.Vertices.Count)
+                              .Select(i => new Point3d(topMesh.Vertices[i])));
+                int nV = topMesh.Vertices.Count;
+
+                foreach (var edge in boundary)
+                {
+                    if (edge == null || edge.Count < 2) continue;
+                    for (int i = 0; i < edge.Count - 1; i++)
+                    {
+                        int i0 = cloud.ClosestPoint(edge[i]);
+                        int i1 = cloud.ClosestPoint(edge[i + 1]);
+                        if (i0 < 0 || i1 < 0 || i0 >= nV || i1 >= nV) continue;
+                        if (new Point3d(topMesh.Vertices[i0]).DistanceToSquared(edge[i]) > tol * tol) continue;
+                        if (new Point3d(topMesh.Vertices[i1]).DistanceToSquared(edge[i + 1]) > tol * tol) continue;
+                        int baseIdx = combined.Vertices.Count;
+                        combined.Vertices.Add(topMesh.Vertices[i0]);
+                        combined.Vertices.Add(topMesh.Vertices[i1]);
+                        combined.Vertices.Add(bottomMesh.Vertices[i1]);
+                        combined.Vertices.Add(bottomMesh.Vertices[i0]);
+                        combined.Faces.AddFace(baseIdx, baseIdx + 1, baseIdx + 2, baseIdx + 3);
+                    }
+                }
+            }
+
+            combined.Normals.ComputeNormals();
+            combined.Compact();
+            output.Add(new GH_Mesh(combined));
             return true;
         }
 
@@ -2090,6 +2145,10 @@ namespace Menegroth.GH.Components
             zTop = sizedSlab?["z_top"]?.ToObject<double>() ?? 0.0;
             if (zTop <= 0) return;
 
+            // Read displacements so fallback boxes can follow slab deflection
+            var verts = meshToken["vertices"]?.ToObject<double[][]>() ?? new double[0][];
+            var disps = meshToken["vertex_displacements"]?.ToObject<double[][]>() ?? new double[0][];
+
             foreach (var dp in dropPanels)
             {
                 var c = dp["center"]?.ToObject<double[]>() ?? new double[0];
@@ -2099,11 +2158,35 @@ namespace Menegroth.GH.Components
                 double extra = dp["extra_depth"]?.ToObject<double>() ?? 0.0;
                 if (length <= 0 || width <= 0 || extra <= 0) continue;
 
+                // Find the deflected mesh vertex closest to the drop panel center (XY)
+                // and use its displacement to shift the box.
+                double dzDeflect = 0.0;
+                if (deflectedSlabMesh != null && deflectedSlabMesh.Vertices.Count > 0 &&
+                    verts.Length > 0 && disps.Length > 0)
+                {
+                    double bestDistSq = double.MaxValue;
+                    int bestIdx = -1;
+                    for (int i = 0; i < verts.Length && i < disps.Length; i++)
+                    {
+                        if (verts[i].Length < 2 || disps[i].Length < 3) continue;
+                        double dx = verts[i][0] - c[0];
+                        double dy = verts[i][1] - c[1];
+                        double distSq = dx * dx + dy * dy;
+                        if (distSq < bestDistSq)
+                        {
+                            bestDistSq = distSq;
+                            bestIdx = i;
+                        }
+                    }
+                    if (bestIdx >= 0)
+                        dzDeflect = disps[bestIdx][2];
+                }
+
                 double x0 = c[0] - length / 2.0;
                 double x1 = c[0] + length / 2.0;
                 double y0 = c[1] - width / 2.0;
                 double y1 = c[1] + width / 2.0;
-                double zTopDrop = zTop - slabThickness;
+                double zTopDrop = zTop - slabThickness + dzDeflect;
                 double zBotDrop = zTopDrop - extra;
                 var bbox = new BoundingBox(new[]
                 {
@@ -2332,11 +2415,14 @@ namespace Menegroth.GH.Components
                 double depth = f["depth"]?.ToObject<double>() ?? 0;
                 if (length <= 0 || width <= 0 || depth <= 0) continue;
 
-                // API convention: width = B (x-direction), length = L_ftg (y-direction)
-                double x0 = c[0] - width / 2.0;
-                double x1 = c[0] + width / 2.0;
-                double y0 = c[1] - length / 2.0;
-                double y1 = c[1] + length / 2.0;
+                // Strip footings: when along_x is true, long axis (length) runs in X
+                bool alongX = f["along_x"]?.ToObject<bool>() ?? false;
+                double halfX = alongX ? length / 2.0 : width / 2.0;
+                double halfY = alongX ? width / 2.0 : length / 2.0;
+                double x0 = c[0] - halfX;
+                double x1 = c[0] + halfX;
+                double y0 = c[1] - halfY;
+                double y1 = c[1] + halfY;
                 double zTop = c[2];
                 double zBot = zTop - depth;
 

@@ -849,6 +849,13 @@ function _strip_groupings_from_orthogonal_grid(struc::BuildingStructure)
         push!(groups, group)
     end
 
+    @debug "Strip groupings" span_axis perp_axis cluster_tol n_groups=length(groups) groups
+    for (gi, g) in enumerate(groups)
+        perps = [perp_projs[i] for i in g]
+        spans = [span_projs[i] for i in g]
+        @debug "  Strip group $gi" support_indices=g perp_projs=perps span_projs=spans
+    end
+
     return groups
 end
 

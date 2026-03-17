@@ -1,6 +1,7 @@
 # BuildingSkeleton
 
 > ```julia
+> using StructuralSynthesizer
 > using Unitful
 > skeleton = gen_medium_office(30.0u"ft", 30.0u"ft", 13.0u"ft", 3, 3, 5)
 > length(skeleton.vertices)   # number of grid points

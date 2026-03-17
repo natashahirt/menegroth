@@ -178,30 +178,25 @@ namespace Menegroth.GH.Components
             var colorMenu = new ToolStripMenuItem("Color By");
             colorMenu.DropDownItems.Add(CreateCheckedMenuItem("None", COLOR_NONE, v => _colorBy = v, () => _colorBy));
             colorMenu.DropDownItems.Add(CreateCheckedMenuItem("Material", COLOR_MATERIAL, v => _colorBy = v, () => _colorBy));
-            var wholeBuildingMenu = new ToolStripMenuItem("Whole Building");
-            wholeBuildingMenu.DropDownItems.Add(CreateCheckedMenuItem("Deflection", COLOR_DEFLECTION, v => _colorBy = v, () => _colorBy));
-            wholeBuildingMenu.DropDownItems.Add(CreateCheckedMenuItem("Utilization", COLOR_UTILIZATION, v => _colorBy = v, () => _colorBy));
-            colorMenu.DropDownItems.Add(wholeBuildingMenu);
+            colorMenu.DropDownItems.Add(CreateCheckedMenuItem("Utilization", COLOR_UTILIZATION, v => _colorBy = v, () => _colorBy));
+            colorMenu.DropDownItems.Add(CreateCheckedMenuItem("Deflection", COLOR_DEFLECTION, v => _colorBy = v, () => _colorBy));
             colorMenu.DropDownItems.Add(new ToolStripSeparator());
             var beamMenu = new ToolStripMenuItem("Beam");
-            beamMenu.DropDownItems.Add(CreateCheckedMenuItem("None", COLOR_NONE, v => _analyticalBeam = v, () => _analyticalBeam));
-            beamMenu.DropDownItems.Add(CreateCheckedMenuItem("Axial Force", COLOR_FRAME_AXIAL, v => _analyticalBeam = v, () => _analyticalBeam));
-            beamMenu.DropDownItems.Add(CreateCheckedMenuItem("Moment", COLOR_FRAME_MOMENT, v => _analyticalBeam = v, () => _analyticalBeam));
-            beamMenu.DropDownItems.Add(CreateCheckedMenuItem("Shear", COLOR_FRAME_SHEAR, v => _analyticalBeam = v, () => _analyticalBeam));
+            beamMenu.DropDownItems.Add(CreateAnalyticalMenuItem("Axial Force", COLOR_FRAME_AXIAL, v => _analyticalBeam = v, () => _analyticalBeam));
+            beamMenu.DropDownItems.Add(CreateAnalyticalMenuItem("Moment", COLOR_FRAME_MOMENT, v => _analyticalBeam = v, () => _analyticalBeam));
+            beamMenu.DropDownItems.Add(CreateAnalyticalMenuItem("Shear", COLOR_FRAME_SHEAR, v => _analyticalBeam = v, () => _analyticalBeam));
             colorMenu.DropDownItems.Add(beamMenu);
             var columnMenu = new ToolStripMenuItem("Column");
-            columnMenu.DropDownItems.Add(CreateCheckedMenuItem("None", COLOR_NONE, v => _analyticalColumn = v, () => _analyticalColumn));
-            columnMenu.DropDownItems.Add(CreateCheckedMenuItem("Axial Force", COLOR_FRAME_AXIAL, v => _analyticalColumn = v, () => _analyticalColumn));
-            columnMenu.DropDownItems.Add(CreateCheckedMenuItem("Moment", COLOR_FRAME_MOMENT, v => _analyticalColumn = v, () => _analyticalColumn));
-            columnMenu.DropDownItems.Add(CreateCheckedMenuItem("Shear", COLOR_FRAME_SHEAR, v => _analyticalColumn = v, () => _analyticalColumn));
+            columnMenu.DropDownItems.Add(CreateAnalyticalMenuItem("Axial Force", COLOR_FRAME_AXIAL, v => _analyticalColumn = v, () => _analyticalColumn));
+            columnMenu.DropDownItems.Add(CreateAnalyticalMenuItem("Moment", COLOR_FRAME_MOMENT, v => _analyticalColumn = v, () => _analyticalColumn));
+            columnMenu.DropDownItems.Add(CreateAnalyticalMenuItem("Shear", COLOR_FRAME_SHEAR, v => _analyticalColumn = v, () => _analyticalColumn));
             colorMenu.DropDownItems.Add(columnMenu);
             var slabMenu = new ToolStripMenuItem("Slab");
-            slabMenu.DropDownItems.Add(CreateCheckedMenuItem("None", COLOR_NONE, v => _analyticalSlab = v, () => _analyticalSlab));
-            slabMenu.DropDownItems.Add(CreateCheckedMenuItem("Bending Moment", COLOR_SLAB_BENDING, v => _analyticalSlab = v, () => _analyticalSlab));
-            slabMenu.DropDownItems.Add(CreateCheckedMenuItem("Membrane Force", COLOR_SLAB_MEMBRANE, v => _analyticalSlab = v, () => _analyticalSlab));
-            slabMenu.DropDownItems.Add(CreateCheckedMenuItem("Shear Force", COLOR_SLAB_SHEAR, v => _analyticalSlab = v, () => _analyticalSlab));
-            slabMenu.DropDownItems.Add(CreateCheckedMenuItem("Von Mises", COLOR_SLAB_VON_MISES, v => _analyticalSlab = v, () => _analyticalSlab));
-            slabMenu.DropDownItems.Add(CreateCheckedMenuItem("Surface Stress", COLOR_SLAB_SURFACE_STRESS, v => _analyticalSlab = v, () => _analyticalSlab));
+            slabMenu.DropDownItems.Add(CreateAnalyticalMenuItem("Bending Moment", COLOR_SLAB_BENDING, v => _analyticalSlab = v, () => _analyticalSlab));
+            slabMenu.DropDownItems.Add(CreateAnalyticalMenuItem("Membrane Force", COLOR_SLAB_MEMBRANE, v => _analyticalSlab = v, () => _analyticalSlab));
+            slabMenu.DropDownItems.Add(CreateAnalyticalMenuItem("Shear Force", COLOR_SLAB_SHEAR, v => _analyticalSlab = v, () => _analyticalSlab));
+            slabMenu.DropDownItems.Add(CreateAnalyticalMenuItem("Von Mises", COLOR_SLAB_VON_MISES, v => _analyticalSlab = v, () => _analyticalSlab));
+            slabMenu.DropDownItems.Add(CreateAnalyticalMenuItem("Surface Stress", COLOR_SLAB_SURFACE_STRESS, v => _analyticalSlab = v, () => _analyticalSlab));
             colorMenu.DropDownItems.Add(slabMenu);
             menu.Items.Add(colorMenu);
         }
@@ -215,6 +210,24 @@ namespace Menegroth.GH.Components
             var item = new ToolStripMenuItem(label, null, (s, e) =>
             {
                 setter(value);
+                ExpirePreview(true);
+                ExpireSolution(true);
+            });
+            item.Checked = getter() == value;
+            return item;
+        }
+
+        /// <summary>
+        /// Create a menu item for element-specific color (Beam/Column/Slab). Clicking the selected
+        /// option again clears the selection (COLOR_NONE) so the global Color By is used.
+        /// </summary>
+        private ToolStripMenuItem CreateAnalyticalMenuItem(string label, int value,
+            Action<int> setter, Func<int> getter)
+        {
+            var item = new ToolStripMenuItem(label, null, (s, e) =>
+            {
+                int current = getter();
+                setter(current == value ? COLOR_NONE : value);
                 ExpirePreview(true);
                 ExpireSolution(true);
             });
@@ -451,21 +464,14 @@ namespace Menegroth.GH.Components
             int analyticalBeam = _analyticalBeam;
             int analyticalColumn = _analyticalColumn;
 
-            // Slab/Beam/Column menus override base color when a valid analytical option is selected.
-            // Material from base menu overrides submenu so Color by Material always applies.
-            int effectiveColorBySlab = (colorByInt == COLOR_MATERIAL)
-                ? COLOR_MATERIAL
-                : (IsValidAnalyticalSlab(analyticalSlab) ? analyticalSlab : colorByInt);
+            // Element-specific choice (Beam/Column/Slab) overrides global Color By (Material, Utilization, Deflection) for that element.
+            int effectiveColorBySlab = IsValidAnalyticalSlab(analyticalSlab) ? analyticalSlab : colorByInt;
             if (effectiveColorBySlab == COLOR_NONE) effectiveColorBySlab = COLOR_UTILIZATION;
 
-            int effectiveColorByBeam = (colorByInt == COLOR_MATERIAL)
-                ? COLOR_MATERIAL
-                : (IsValidAnalyticalBeam(analyticalBeam) ? analyticalBeam : colorByInt);
+            int effectiveColorByBeam = IsValidAnalyticalBeam(analyticalBeam) ? analyticalBeam : colorByInt;
             if (effectiveColorByBeam == COLOR_NONE) effectiveColorByBeam = COLOR_UTILIZATION;
 
-            int effectiveColorByColumn = (colorByInt == COLOR_MATERIAL)
-                ? COLOR_MATERIAL
-                : (IsValidAnalyticalColumn(analyticalColumn) ? analyticalColumn : colorByInt);
+            int effectiveColorByColumn = IsValidAnalyticalColumn(analyticalColumn) ? analyticalColumn : colorByInt;
             if (effectiveColorByColumn == COLOR_NONE) effectiveColorByColumn = COLOR_UTILIZATION;
 
             bool isDeflected = deflectionInt == DEFLECTION_GLOBAL || deflectionInt == DEFLECTION_LOCAL;
@@ -871,6 +877,9 @@ namespace Menegroth.GH.Components
                     COLOR_SLAB_SHEAR => "Slab Shear",
                     COLOR_SLAB_VON_MISES => "Slab Von Mises",
                     COLOR_SLAB_SURFACE_STRESS => "Slab Surface σ",
+                    COLOR_DEFLECTION => "Slab Deflection",
+                    COLOR_MATERIAL => "Slab Material",
+                    COLOR_UTILIZATION => "Slab Utilization",
                     _ => "Slab Utilization",
                 };
                 string beamName = effectiveColorByBeam switch
@@ -878,6 +887,9 @@ namespace Menegroth.GH.Components
                     COLOR_FRAME_AXIAL => "Beam Axial",
                     COLOR_FRAME_MOMENT => "Beam Moment",
                     COLOR_FRAME_SHEAR => "Beam Shear",
+                    COLOR_DEFLECTION => "Beam Deflection",
+                    COLOR_MATERIAL => "Beam Material",
+                    COLOR_UTILIZATION => "Beam Utilization",
                     _ => "Beam Utilization",
                 };
                 string columnName = effectiveColorByColumn switch
@@ -885,6 +897,9 @@ namespace Menegroth.GH.Components
                     COLOR_FRAME_AXIAL => "Column Axial",
                     COLOR_FRAME_MOMENT => "Column Moment",
                     COLOR_FRAME_SHEAR => "Column Shear",
+                    COLOR_DEFLECTION => "Column Deflection",
+                    COLOR_MATERIAL => "Column Material",
+                    COLOR_UTILIZATION => "Column Utilization",
                     _ => "Column Utilization",
                 };
                 colorName = $"{slabName} | {beamName} | {columnName}";
@@ -1597,7 +1612,8 @@ namespace Menegroth.GH.Components
 
                 // 2. Curved/mesh-based: use deflected_slab_meshes undeformed vertices
                 //    with thickness volume so the slab appears solid.
-                if (analyticalMesh != null && TryBuildSizedSlabFromMesh(analyticalMesh, thickness, showVolumes, output))
+                bool isVault = slab["is_vault"]?.ToObject<bool>() == true;
+                if (analyticalMesh != null && TryBuildSizedSlabFromMesh(analyticalMesh, thickness, showVolumes, output, offsetAlongNormal: isVault))
                 {
                     AppendSlabColor(colors, analyticalSource, colorBy, maxDisp, "vertex_displacements", maxima);
                     AppendDropPanelSizedGeometry(slab, zTop, thickness, output, colors, analyticalSource,
@@ -1790,7 +1806,7 @@ namespace Menegroth.GH.Components
         /// offsets downward by thickness to create a solid volume; otherwise outputs the top surface only.
         /// </summary>
         private static bool TryBuildSizedSlabFromMesh(JToken meshToken, double thickness,
-            bool showVolumes, List<IGH_GeometricGoo> output)
+            bool showVolumes, List<IGH_GeometricGoo> output, bool offsetAlongNormal = false)
         {
             var verts = meshToken["vertices"]?.ToObject<double[][]>() ?? new double[0][];
             var faces = meshToken["faces"]?.ToObject<int[][]>() ?? new int[0][];
@@ -1835,8 +1851,15 @@ namespace Menegroth.GH.Components
             for (int i = 0; i < topMesh.Vertices.Count; i++)
             {
                 var pt = new Point3d(topMesh.Vertices[i]);
-                var n = new Vector3d(topMesh.Normals[i]);
-                bottomMesh.Vertices.Add(pt + n * (-thickness));
+                if (offsetAlongNormal)
+                {
+                    var n = new Vector3d(topMesh.Normals[i]);
+                    bottomMesh.Vertices.Add(pt + n * (-thickness));
+                }
+                else
+                {
+                    bottomMesh.Vertices.Add(pt + new Vector3d(0, 0, -thickness));
+                }
             }
             foreach (var face in topMesh.Faces)
             {
@@ -1909,7 +1932,15 @@ namespace Menegroth.GH.Components
                 var verts = m["vertices"]?.ToObject<double[][]>() ?? new double[0][];
                 var dispsGlobal = m["vertex_displacements"]?.ToObject<double[][]>() ?? new double[0][];
                 var dispsLocal = m["vertex_displacements_local"]?.ToObject<double[][]>() ?? new double[0][];
-                var disps = isLocal && dispsLocal.Length > 0 ? dispsLocal : dispsGlobal;
+                bool localValid = dispsLocal.Length == verts.Length;
+                bool globalValid = dispsGlobal.Length == verts.Length;
+                var disps = isLocal && localValid
+                    ? dispsLocal
+                    : globalValid
+                        ? dispsGlobal
+                        : localValid
+                            ? dispsLocal
+                            : Array.Empty<double[]>();
                 var faces = m["faces"]?.ToObject<int[][]>() ?? new int[0][];
                 if (verts.Length == 0) continue;
 
@@ -1984,14 +2015,15 @@ namespace Menegroth.GH.Components
                     rhinoMesh.Normals.ComputeNormals();
                     rhinoMesh.Compact();
 
-                    string dispField = isLocal && dispsLocal.Length > 0
+                    string dispField = ReferenceEquals(disps, dispsLocal)
                         ? "vertex_displacements_local"
                         : "vertex_displacements";
 
                     if (showVolumes)
                     {
                         double thickness = m["thickness"]?.ToObject<double>() ?? 0;
-                        if (thickness > 0 && TryBuildDeflectedSlabVolume(rhinoMesh, thickness, output))
+                        bool isVault = m["is_vault"]?.ToObject<bool>() == true;
+                        if (thickness > 0 && TryBuildDeflectedSlabVolume(rhinoMesh, thickness, output, offsetAlongNormal: isVault))
                         {
                             AppendSlabColor(colors, m, colorBy, maxDisp, dispField, maxima);
                         }
@@ -2026,7 +2058,7 @@ namespace Menegroth.GH.Components
                         {
                             AppendDropPanelDeflectedGeometry(viz, m, rhinoMesh,
                                 m["thickness"]?.ToObject<double>() ?? 0,
-                                output, colors, colorBy, maxDisp, maxima);
+                                output, colors, colorBy, maxDisp, dispField, maxima);
                             if (slabId > 0)
                                 slabsWithDropPanelsRendered.Add(slabId);
                         }
@@ -2040,7 +2072,7 @@ namespace Menegroth.GH.Components
         /// Top surface = deflected mesh; bottom = offset downward; sides from boundary edges.
         /// Outputs a solid Brep (via loft-like closed mesh then Brep.CreateFromMesh).
         /// </summary>
-        private static bool TryBuildDeflectedSlabVolume(Mesh topMesh, double thickness, List<IGH_GeometricGoo> output)
+        private static bool TryBuildDeflectedSlabVolume(Mesh topMesh, double thickness, List<IGH_GeometricGoo> output, bool offsetAlongNormal = false)
         {
             if (topMesh.Vertices.Count == 0 || topMesh.Faces.Count == 0 || thickness <= 0)
                 return false;
@@ -2049,8 +2081,15 @@ namespace Menegroth.GH.Components
             for (int i = 0; i < topMesh.Vertices.Count; i++)
             {
                 var pt = new Point3d(topMesh.Vertices[i]);
-                var n = new Vector3d(topMesh.Normals[i]);
-                bottomMesh.Vertices.Add(pt + n * (-thickness));
+                if (offsetAlongNormal)
+                {
+                    var n = new Vector3d(topMesh.Normals[i]);
+                    bottomMesh.Vertices.Add(pt + n * (-thickness));
+                }
+                else
+                {
+                    bottomMesh.Vertices.Add(pt + new Vector3d(0, 0, -thickness));
+                }
             }
             foreach (var face in topMesh.Faces)
             {
@@ -2218,19 +2257,19 @@ namespace Menegroth.GH.Components
         /// </summary>
         private static void AppendDropPanelDeflectedGeometry(JToken viz, JToken meshToken, Mesh deflectedSlabMesh,
             double slabThickness, List<IGH_GeometricGoo> output,
-            List<Color> colors, int colorBy, double maxDisp, SlabAnalyticalMaxima maxima)
+            List<Color> colors, int colorBy, double maxDisp, string displacementField, SlabAnalyticalMaxima maxima)
         {
             var dpMeshes = meshToken["drop_panel_meshes"] as JArray;
             if (dpMeshes != null && dpMeshes.Count > 0 && deflectedSlabMesh != null)
             {
                 AppendDropPanelDeflectedFromMeshes(meshToken, deflectedSlabMesh, slabThickness,
-                    output, colors, colorBy, maxDisp, maxima);
+                    output, colors, colorBy, maxDisp, displacementField, maxima);
             }
         }
 
         private static void AppendDropPanelDeflectedFromMeshes(JToken meshToken, Mesh deflectedSlabMesh,
             double slabThickness, List<IGH_GeometricGoo> output,
-            List<Color> colors, int colorBy, double maxDisp, SlabAnalyticalMaxima maxima)
+            List<Color> colors, int colorBy, double maxDisp, string displacementField, SlabAnalyticalMaxima maxima)
         {
             var dpMeshes = meshToken["drop_panel_meshes"] as JArray;
             if (dpMeshes == null || dpMeshes.Count == 0 || deflectedSlabMesh == null) return;
@@ -2285,12 +2324,21 @@ namespace Menegroth.GH.Components
                 // The top face is omitted — it's redundant with the slab soffit.
                 var soffitVerts = new List<Point3d>();
                 var botVerts = new List<Point3d>();
+                bool isVault = meshToken["is_vault"]?.ToObject<bool>() == true;
                 for (int i = 0; i < subMesh.Vertices.Count; i++)
                 {
                     var pt = new Point3d(subMesh.Vertices[i]);
-                    var n = new Vector3d(subMesh.Normals[i]);
-                    soffitVerts.Add(pt + n * (-slabThickness));
-                    botVerts.Add(pt + n * (-(slabThickness + extra)));
+                    if (isVault)
+                    {
+                        var n = new Vector3d(subMesh.Normals[i]);
+                        soffitVerts.Add(pt + n * (-slabThickness));
+                        botVerts.Add(pt + n * (-(slabThickness + extra)));
+                    }
+                    else
+                    {
+                        soffitVerts.Add(pt + new Vector3d(0, 0, -slabThickness));
+                        botVerts.Add(pt + new Vector3d(0, 0, -(slabThickness + extra)));
+                    }
                 }
 
                 var botMesh = new Mesh();
@@ -2346,7 +2394,7 @@ namespace Menegroth.GH.Components
                 combined.Compact();
 
                 output.Add(new GH_Mesh(combined));
-                AppendSlabColor(colors, meshToken, colorBy, maxDisp, "vertex_displacements", maxima);
+                AppendSlabColor(colors, meshToken, colorBy, maxDisp, displacementField, maxima);
             }
         }
 
@@ -2390,7 +2438,8 @@ namespace Menegroth.GH.Components
                 double zTop = sizedSlab?["z_top"]?.ToObject<double>() ?? 0;
 
                 // Volume path: reuse TryBuildSizedSlabFromMesh for correct solid geometry
-                if (showVolumes && TryBuildSizedSlabFromMesh(m, thickness, true, output))
+                bool isVault = m["is_vault"]?.ToObject<bool>() == true;
+                if (showVolumes && TryBuildSizedSlabFromMesh(m, thickness, true, output, offsetAlongNormal: isVault))
                 {
                     AppendSlabColor(colors, m, colorBy, maxDisp, "vertex_displacements", maxima);
                     if (sizedSlab != null)
@@ -2432,13 +2481,19 @@ namespace Menegroth.GH.Components
                 }
                 else if (colorBy == COLOR_DEFLECTION)
                 {
-                    var defColor = VisualizationColorMapper.DeflectionColor(0.0, maxDisp, null);
+                    var disps = m["vertex_displacements"]?.ToObject<double[][]>() ?? Array.Empty<double[]>();
                     for (int i = 0; i < rhinoMesh.Vertices.Count; i++)
-                        rhinoMesh.VertexColors.Add(defColor);
+                    {
+                        double mag = 0;
+                        if (i < disps.Length && disps[i].Length >= 3)
+                            mag = Math.Sqrt(disps[i][0] * disps[i][0] +
+                                            disps[i][1] * disps[i][1] +
+                                            disps[i][2] * disps[i][2]);
+                        rhinoMesh.VertexColors.Add(VisualizationColorMapper.DeflectionColor(mag, maxDisp, null));
+                    }
                 }
                 else if (colorBy == COLOR_MATERIAL)
                 {
-                    bool isVault = m["is_vault"]?.ToObject<bool>() ?? false;
                     var fallback = isVault
                         ? VisualizationColorMapper.EarthenMaterialColor
                         : VisualizationColorMapper.ConcreteMaterialColor;

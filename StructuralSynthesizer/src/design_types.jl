@@ -285,6 +285,11 @@ Face-scoped floor override from API/client input.
 """
 Base.@kwdef struct ScopedFloorOverride
     floor_type::Symbol = :vault
+    method::String = "DDM"
+    deflection_limit::String = "L_360"
+    punching_strategy::String = "grow_columns"
+    target_edge_m::Union{Float64, Nothing} = nothing
+    concrete::Union{Concrete, Nothing} = nothing
     vault_lambda::Union{Float64, Nothing} = nothing
     faces::Vector{Vector{NTuple{3, Float64}}} = Vector{NTuple{3, Float64}}[]
 end

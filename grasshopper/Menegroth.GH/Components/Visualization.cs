@@ -2161,6 +2161,16 @@ namespace Menegroth.GH.Components
                 floorSupports = localColumnTops
                     .Where(p => Math.Abs(p.topPos.Z - zRef) <= 0.75)
                     .ToList();
+            if (floorSupports.Count == 0 && localColumnTops.Count > 0)
+            {
+                // Some slab tokens (e.g., drop-panel sub-meshes) can have a zRef offset
+                // from the floor top. In that case, choose the nearest support elevation
+                // band instead of falling back to global displacement.
+                double minDz = localColumnTops.Min(p => Math.Abs(p.topPos.Z - zRef));
+                floorSupports = localColumnTops
+                    .Where(p => Math.Abs(p.topPos.Z - zRef) <= minDz + 0.15)
+                    .ToList();
+            }
             if (floorSupports.Count == 0)
                 return dispsGlobal;
 
@@ -2479,9 +2489,8 @@ namespace Menegroth.GH.Components
                 subMesh.Normals.ComputeNormals();
                 subMesh.Compact();
 
-                // Build soffit vertices (top of drop panel region) for stitching side walls,
+                // Build soffit vertices (top of drop panel region) for top cap + side walls,
                 // and bottom vertices for the visible bottom face.
-                // The top face is omitted — it's redundant with the slab soffit.
                 var soffitVerts = new List<Point3d>();
                 var botVerts = new List<Point3d>();
                 bool isVault = meshToken["is_vault"]?.ToObject<bool>() == true;
@@ -2513,7 +2522,7 @@ namespace Menegroth.GH.Components
                 var combined = new Mesh();
                 combined.Append(botMesh);
 
-                // Stitch side walls from soffit edge to bottom edge
+                // Keep the drop-panel top cap (do not remove it from rendered geometry).
                 var soffitMesh = new Mesh();
                 foreach (var sv in soffitVerts) soffitMesh.Vertices.Add(sv);
                 foreach (var face in subMesh.Faces)
@@ -2522,6 +2531,9 @@ namespace Menegroth.GH.Components
                         soffitMesh.Faces.AddFace(face.A, face.B, face.C);
                 }
                 soffitMesh.Normals.ComputeNormals();
+                combined.Append(soffitMesh);
+
+                // Stitch side walls from soffit edge to bottom edge
 
                 var boundary = soffitMesh.GetNakedEdges();
                 if (boundary != null && boundary.Length > 0)

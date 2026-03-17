@@ -67,11 +67,11 @@ namespace Menegroth.GH.Helpers
             }
 
             // Scoped overrides: if HasScopedFaces, must have at least one face with ≥3 vertices
-            if (prms.ScopedVaultOverrides != null)
+            if (prms.ScopedSlabOverrides != null)
             {
-                for (int i = 0; i < prms.ScopedVaultOverrides.Count; i++)
+                for (int i = 0; i < prms.ScopedSlabOverrides.Count; i++)
                 {
-                    var ov = prms.ScopedVaultOverrides[i];
+                    var ov = prms.ScopedSlabOverrides[i];
                     if (ov != null && ov.HasScopedFaces && (ov.Faces == null || ov.Faces.Count == 0))
                         errors.Add($"Scoped override {i + 1} must include at least one face polygon.");
                     else if (ov != null && ov.Faces != null)
@@ -81,6 +81,23 @@ namespace Menegroth.GH.Helpers
                             if (ov.Faces[j].Count < 3)
                                 errors.Add($"Scoped override {i + 1} face {j + 1} has {ov.Faces[j].Count} vertices (need ≥ 3).");
                         }
+                    }
+                    if (ov != null)
+                    {
+                        if (!V.FloorTypes.Contains((ov.FloorType ?? "").ToLowerInvariant()))
+                            errors.Add($"Scoped override {i + 1}: invalid floor type \"{ov.FloorType}\".");
+                        if (!V.Methods.Contains((ov.AnalysisMethod ?? "").ToUpperInvariant()))
+                            errors.Add($"Scoped override {i + 1}: invalid analysis method \"{ov.AnalysisMethod}\".");
+                        if (!V.DeflectionLimits.Contains((ov.DeflectionLimit ?? "").ToUpperInvariant()))
+                            errors.Add($"Scoped override {i + 1}: invalid deflection limit \"{ov.DeflectionLimit}\".");
+                        if (!V.PunchStrategies.Contains((ov.PunchingStrategy ?? "").ToLowerInvariant()))
+                            errors.Add($"Scoped override {i + 1}: invalid punching strategy \"{ov.PunchingStrategy}\".");
+                        if (!V.Concretes.Contains(ov.Concrete ?? ""))
+                            errors.Add($"Scoped override {i + 1}: invalid concrete \"{ov.Concrete}\".");
+                        if (ov.VaultLambda.HasValue && ov.VaultLambda.Value <= 0)
+                            errors.Add($"Scoped override {i + 1}: vault lambda must be > 0.");
+                        if (ov.TargetEdgeM.HasValue && ov.TargetEdgeM.Value <= 0)
+                            errors.Add($"Scoped override {i + 1}: FEA target edge must be > 0.");
                     }
                 }
             }

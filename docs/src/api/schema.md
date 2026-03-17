@@ -174,6 +174,11 @@ Face-scoped floor override blocks (used for region-specific floor types like vau
 
 | Field | Type | Default |
 |:------|:-----|:--------|
+| `method` | `String` | `"DDM"` |
+| `deflection_limit` | `String` | `"L_360"` |
+| `punching_strategy` | `String` | `"grow_columns"` |
+| `target_edge_m` | `Union{Float64, Nothing}` | `nothing` |
+| `concrete` | `Union{String, Nothing}` | `nothing` |
 | `vault_lambda` | `Union{Float64, Nothing}` | `nothing` |
 
 ### APILoads
@@ -181,8 +186,8 @@ Face-scoped floor override blocks (used for region-specific floor types like vau
 | Field | Type | Default | Unit | Description |
 |:------|:-----|:--------|:-----|:------------|
 | `floor_LL_psf` | `Float64` | `80.0` | psf | Floor live load |
-| `roof_LL_psf` | `Float64` | `20.0` | psf | Roof live load |
-| `grade_LL_psf` | `Float64` | `100.0` | psf | Grade live load |
+| `roof_LL_psf` | `Union{Float64, Nothing}` | `nothing` | psf | Roof live load (defaults to `floor_LL_psf` when omitted) |
+| `grade_LL_psf` | `Union{Float64, Nothing}` | `nothing` | psf | Grade live load (defaults to `floor_LL_psf` when omitted) |
 | `floor_SDL_psf` | `Float64` | `15.0` | psf | Floor superimposed dead load |
 | `roof_SDL_psf` | `Float64` | `15.0` | psf | Roof superimposed dead load |
 | `wall_SDL_psf` | `Float64` | `10.0` | psf | Perimeter wall dead load |

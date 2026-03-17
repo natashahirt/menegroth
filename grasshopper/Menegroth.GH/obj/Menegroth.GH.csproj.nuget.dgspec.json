@@ -126,6 +126,11 @@
           },
           "runtimeIdentifierGraphPath": "C:\\Program Files\\dotnet\\sdk\\8.0.419\\RuntimeIdentifierGraph.json"
         }
+      },
+      "runtimes": {
+        "osx-arm64": {
+          "#import": []
+        }
       }
     }
   }

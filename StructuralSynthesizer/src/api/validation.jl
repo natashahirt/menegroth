@@ -160,13 +160,37 @@ function validate_input(input::APIInput)
     if !isnothing(p.visualization_target_edge_m) && p.visualization_target_edge_m <= 0
         push!(errors, "Invalid visualization_target_edge_m $(p.visualization_target_edge_m). Must be > 0.")
     end
+    if !isnothing(p.max_iterations) && p.max_iterations < 1
+        push!(errors, "Invalid max_iterations $(p.max_iterations). Must be >= 1.")
+    end
 
     for (i, ov) in enumerate(p.scoped_overrides)
         if !(ov.floor_type in valid_floor_types)
             push!(errors, "Invalid scoped_overrides[$i].floor_type \"$(ov.floor_type)\". Must be one of: $(join(valid_floor_types, ", ")).")
         end
+        method_key = uppercase(strip(ov.floor_options.method))
+        if !(method_key in valid_analysis_methods)
+            push!(errors, "Invalid scoped_overrides[$i].floor_options.method \"$(ov.floor_options.method)\". " *
+                  "Must be one of: $(join(valid_analysis_methods, ", ")).")
+        end
+        defl_key = uppercase(strip(ov.floor_options.deflection_limit))
+        if !(defl_key in valid_deflection_limits)
+            push!(errors, "Invalid scoped_overrides[$i].floor_options.deflection_limit \"$(ov.floor_options.deflection_limit)\". " *
+                  "Must be one of: $(join(valid_deflection_limits, ", ")).")
+        end
+        punch_key = lowercase(strip(ov.floor_options.punching_strategy))
+        if !(punch_key in valid_punching_strategies)
+            push!(errors, "Invalid scoped_overrides[$i].floor_options.punching_strategy \"$(ov.floor_options.punching_strategy)\". " *
+                  "Must be one of: $(join(valid_punching_strategies, ", ")).")
+        end
         if !isnothing(ov.floor_options.vault_lambda) && ov.floor_options.vault_lambda <= 0
             push!(errors, "Invalid scoped_overrides[$i].floor_options.vault_lambda $(ov.floor_options.vault_lambda). Must be > 0.")
+        end
+        if !isnothing(ov.floor_options.target_edge_m) && ov.floor_options.target_edge_m <= 0
+            push!(errors, "Invalid scoped_overrides[$i].floor_options.target_edge_m $(ov.floor_options.target_edge_m). Must be > 0.")
+        end
+        if !isnothing(ov.floor_options.concrete) && !haskey(CONCRETE_MAP, ov.floor_options.concrete)
+            push!(errors, "Unknown scoped_overrides[$i].floor_options.concrete \"$(ov.floor_options.concrete)\". Options: $(join(keys(CONCRETE_MAP), ", ")).")
         end
         if isempty(ov.faces)
             push!(errors, "scoped_overrides[$i] must include at least one face polygon.")

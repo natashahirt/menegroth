@@ -63,13 +63,14 @@ function api_input_schema()
                 "unit_system" => "Display units: \"imperial\" or \"metric\". Default: \"imperial\".",
                 "loads" => Dict(
                     "floor_LL_psf" => "Floor live load (psf). Default: 80.",
-                    "roof_LL_psf" => "Roof live load (psf). Default: 20.",
-                    "grade_LL_psf" => "Grade live load (psf). Default: 100.",
+                    "roof_LL_psf" => "Roof live load (psf). Default: floor_LL_psf when omitted.",
+                    "grade_LL_psf" => "Grade live load (psf). Default: floor_LL_psf when omitted.",
                     "floor_SDL_psf" => "Floor superimposed dead (psf). Default: 15.",
                     "roof_SDL_psf" => "Roof superimposed dead (psf). Default: 15.",
                     "wall_SDL_psf" => "Wall superimposed dead (psf). Default: 10.",
                 ),
                 "floor_type" => "flat_plate | flat_slab | one_way | vault. Default: flat_plate.",
+                "max_iterations" => "Optional. Maximum beam/column sizing iterations (integer >= 1). Default: 20.",
                 "floor_options" => Dict(
                     "method" => "DDM | DDM_SIMPLIFIED | EFM | EFM_HARDY_CROSS | FEA. Default: DDM.",
                     "deflection_limit" => "L_240 | L_360 | L_480. Default: L_360.",
@@ -132,8 +133,8 @@ const APIFaceGroups = Dict{String, Vector{Vector{Vector{Float64}}}}
 """Raw load parameters from JSON."""
 Base.@kwdef mutable struct APILoads
     floor_LL_psf::Float64 = 80.0
-    roof_LL_psf::Float64 = 20.0
-    grade_LL_psf::Float64 = 100.0
+    roof_LL_psf::Union{Float64, Nothing} = nothing
+    grade_LL_psf::Union{Float64, Nothing} = nothing
     floor_SDL_psf::Float64 = 15.0
     roof_SDL_psf::Float64 = 15.0
     wall_SDL_psf::Float64 = 10.0
@@ -150,6 +151,11 @@ end
 
 """Raw scoped floor options from JSON (subset used for face-scoped overrides)."""
 Base.@kwdef mutable struct APIScopedFloorOptions
+    method::String = "DDM"
+    deflection_limit::String = "L_360"
+    punching_strategy::String = "grow_columns"
+    target_edge_m::Union{Float64, Nothing} = nothing
+    concrete::Union{String, Nothing} = nothing
     vault_lambda::Union{Float64, Nothing} = nothing
 end
 
@@ -250,6 +256,7 @@ Base.@kwdef mutable struct APIParams
     pixelframe_options::Union{APIPixelFrameOptions, Nothing} = nothing  # When column_type or beam_type is pixelframe.
     fire_rating::Float64 = 0.0
     optimize_for::String = "weight"
+    max_iterations::Union{Int, Nothing} = nothing
     size_foundations::Bool = false
     foundation_soil::String = "medium_sand"
     foundation_concrete::String = "NWC_3000"

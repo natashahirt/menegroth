@@ -11,8 +11,8 @@ namespace Menegroth.GH.Types
     {
         // Loads (psf)
         public double FloorLL { get; set; } = 80;
-        public double RoofLL { get; set; } = 20;
-        public double GradeLL { get; set; } = 100;
+        public double RoofLL { get; set; } = 80;
+        public double GradeLL { get; set; } = 80;
         public double FloorSDL { get; set; } = 15;
         public double RoofSDL { get; set; } = 15;
         public double WallSDL { get; set; } = 10;
@@ -23,6 +23,8 @@ namespace Menegroth.GH.Types
         public string DeflectionLimit { get; set; } = "L_360";
         public string PunchingStrategy { get; set; } = "grow_columns";
         public double? VaultLambda { get; set; } = null;
+        public int? MaxIterations { get; set; } = null;
+        public double? FeaTargetEdgeM { get; set; } = null;
 
         // Materials
         public string Concrete { get; set; } = "NWC_4000";
@@ -66,7 +68,7 @@ namespace Menegroth.GH.Types
         public string FoundationStrategy { get; set; } = "auto";
         public double MatCoverageThreshold { get; set; } = 0.5;
         public string UnitSystem { get; set; } = "imperial";
-        public List<VaultParamsData> ScopedVaultOverrides { get; set; } = new List<VaultParamsData>();
+        public List<SlabParamsData> ScopedSlabOverrides { get; set; } = new List<SlabParamsData>();
 
         /// <summary>
         /// Serialise to a JObject matching the API params schema.
@@ -166,20 +168,30 @@ namespace Menegroth.GH.Types
 
             if (VaultLambda.HasValue)
                 ((JObject)obj["floor_options"])["vault_lambda"] = VaultLambda.Value;
+            if (FeaTargetEdgeM.HasValue)
+                ((JObject)obj["floor_options"])["target_edge_m"] = FeaTargetEdgeM.Value;
+            if (MaxIterations.HasValue)
+                obj["max_iterations"] = MaxIterations.Value;
 
-            if (ScopedVaultOverrides != null && ScopedVaultOverrides.Count > 0)
+            if (ScopedSlabOverrides != null && ScopedSlabOverrides.Count > 0)
             {
                 var scoped = new JArray();
-                foreach (var ov in ScopedVaultOverrides)
+                foreach (var ov in ScopedSlabOverrides)
                 {
                     if (ov == null || !ov.HasScopedFaces) continue;
                     var floorOpts = new JObject();
-                    if (ov.Lambda.HasValue)
-                        floorOpts["vault_lambda"] = ov.Lambda.Value;
+                    floorOpts["method"] = ov.AnalysisMethod ?? "DDM";
+                    floorOpts["deflection_limit"] = ov.DeflectionLimit ?? "L_360";
+                    floorOpts["punching_strategy"] = ov.PunchingStrategy ?? "grow_columns";
+                    floorOpts["concrete"] = ov.Concrete ?? "NWC_4000";
+                    if (ov.VaultLambda.HasValue)
+                        floorOpts["vault_lambda"] = ov.VaultLambda.Value;
+                    if (ov.TargetEdgeM.HasValue)
+                        floorOpts["target_edge_m"] = ov.TargetEdgeM.Value;
 
                     scoped.Add(new JObject
                     {
-                        ["floor_type"] = "vault",
+                        ["floor_type"] = ov.FloorType ?? "vault",
                         ["floor_options"] = floorOpts,
                         ["faces"] = JToken.FromObject(ov.Faces)
                     });

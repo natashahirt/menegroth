@@ -152,15 +152,18 @@ function initialize_slabs!(struc::BuildingStructure{T};
     effective_group_ids = slab_group_ids
     cell_floor_types = nothing
     cell_floor_opts = nothing
+    cell_floor_mats = nothing
 
     if !isempty(scoped_floor_overrides)
-        resolved_groupings, effective_group_ids, cell_floor_types, cell_floor_opts =
+        resolved_groupings, effective_group_ids, cell_floor_types, cell_floor_opts, cell_floor_mats =
             _resolve_scoped_floor_overrides(struc, scoped_floor_overrides)
     end
     
     # 1. Build per-slab "specs"
     slab_specs = _build_slab_specs(struc, floor_type, resolved_groupings, effective_group_ids;
-                                   cell_floor_types=cell_floor_types, cell_floor_opts=cell_floor_opts)
+                                   cell_floor_types=cell_floor_types,
+                                   cell_floor_opts=cell_floor_opts,
+                                   cell_floor_mats=cell_floor_mats)
 
     # 2. Assign fallback deterministic group IDs
     _assign_deterministic_group_ids!(slab_specs)
@@ -169,10 +172,10 @@ function initialize_slabs!(struc::BuildingStructure{T};
     groups = _group_slab_specs(slab_specs)
 
     # 4. Size once per slab group
-    group_results, group_sw, group_spans = _size_slab_groups(groups, slab_specs, struc, material, floor_opts)
+    group_results, group_sw, group_spans, group_material = _size_slab_groups(groups, slab_specs, struc, material, floor_opts)
 
     # 5. Fan out results to cells and create Slab objects (with volumes)
-    _apply_slab_results!(struc, slab_specs, group_results, group_sw, group_spans, material, floor_opts)
+    _apply_slab_results!(struc, slab_specs, group_results, group_sw, group_spans, group_material, material, floor_opts)
 
     # 6. Finalize grouping structure
     build_slab_groups!(struc)
@@ -202,6 +205,8 @@ function _resolve_scoped_floor_overrides(struc::BuildingStructure, scoped_overri
     fill!(cell_floor_types, nothing)
     cell_floor_opts = Vector{Any}(undef, n_cells)
     fill!(cell_floor_opts, nothing)
+    cell_floor_mats = Vector{Union{Nothing, Concrete}}(undef, n_cells)
+    fill!(cell_floor_mats, nothing)
 
     for (ov_idx, ov) in enumerate(scoped_overrides)
         matched = _match_override_cells(struc, ov)
@@ -212,6 +217,7 @@ function _resolve_scoped_floor_overrides(struc::BuildingStructure, scoped_overri
             owner[c_idx] = ov_idx
             cell_floor_types[c_idx] = ov.floor_type
             cell_floor_opts[c_idx] = ov_opts
+            cell_floor_mats[c_idx] = ov.concrete
         end
     end
 
@@ -243,17 +249,77 @@ function _resolve_scoped_floor_overrides(struc::BuildingStructure, scoped_overri
         push!(resolved_groupings, [c_idx])
     end
 
-    return resolved_groupings, slab_group_ids, cell_floor_types, cell_floor_opts
+    return resolved_groupings, slab_group_ids, cell_floor_types, cell_floor_opts, cell_floor_mats
 end
 
 """Build typed floor options for a scoped override."""
 function _scoped_override_floor_opts(ov::ScopedFloorOverride)
+    method = _resolve_analysis_method(ov.method, ov.target_edge_m)
+    defl = _resolve_scoped_deflection_limit(ov.deflection_limit)
+    punch = _resolve_scoped_punching_strategy(ov.punching_strategy)
+
     if ov.floor_type == :vault
         return isnothing(ov.vault_lambda) ?
             StructuralSizer.VaultOptions(lambda=10.0) :
             StructuralSizer.VaultOptions(lambda=ov.vault_lambda)
+    elseif ov.floor_type == :flat_plate
+        return StructuralSizer.FlatPlateOptions(
+            method=method, deflection_limit=defl, punching_strategy=punch)
+    elseif ov.floor_type == :flat_slab
+        return StructuralSizer.FlatSlabOptions(
+            base=StructuralSizer.FlatPlateOptions(
+                method=method, deflection_limit=defl, punching_strategy=punch))
+    elseif ov.floor_type == :one_way
+        return StructuralSizer.OneWayOptions()
     end
     return nothing
+end
+
+"""Resolve analysis method for scoped overrides."""
+function _resolve_analysis_method(method::String, target_edge_m::Union{Nothing, Float64}=nothing)
+    s = uppercase(strip(method))
+    if s == "FEA"
+        te = isnothing(target_edge_m) ? nothing : target_edge_m * u"m"
+        return StructuralSizer.FEA(target_edge=te)
+    elseif s == "DDM"
+        return StructuralSizer.DDM()
+    elseif s == "DDM_SIMPLIFIED"
+        return StructuralSizer.DDM(:simplified)
+    elseif s == "EFM"
+        return StructuralSizer.EFM()
+    elseif s == "EFM_HARDY_CROSS"
+        return StructuralSizer.EFM(solver=:hardy_cross)
+    end
+    @warn "Unknown scoped override analysis_method '$method' — defaulting to DDM"
+    return StructuralSizer.DDM()
+end
+
+"""Resolve deflection limit for scoped overrides."""
+function _resolve_scoped_deflection_limit(s::String)
+    key = uppercase(strip(s))
+    if key == "L_240"
+        return :L_240
+    elseif key == "L_360"
+        return :L_360
+    elseif key == "L_480"
+        return :L_480
+    end
+    @warn "Unknown scoped override deflection_limit '$s' — defaulting to L_360"
+    return :L_360
+end
+
+"""Resolve punching strategy for scoped overrides."""
+function _resolve_scoped_punching_strategy(s::String)
+    key = lowercase(strip(s))
+    if key == "grow_columns"
+        return :grow_columns
+    elseif key == "reinforce_last"
+        return :reinforce_last
+    elseif key == "reinforce_first"
+        return :reinforce_first
+    end
+    @warn "Unknown scoped override punching_strategy '$s' — defaulting to grow_columns"
+    return :grow_columns
 end
 
 """Match scoped override selector polygons to slab cells via face centroid-in-polygon tests."""
@@ -343,7 +409,7 @@ end
 
 """Build per-slab specification tuples from cells and grouping options."""
 function _build_slab_specs(struc, floor_type, cell_groupings, slab_group_ids;
-                           cell_floor_types=nothing, cell_floor_opts=nothing)
+                           cell_floor_types=nothing, cell_floor_opts=nothing, cell_floor_mats=nothing)
     slab_specs = NamedTuple[]
 
     if isnothing(cell_groupings)
@@ -360,6 +426,7 @@ function _build_slab_specs(struc, floor_type, cell_groupings, slab_group_ids;
                 (floor_type == :auto ? infer_floor_type(spans.primary, spans.secondary) : floor_type) :
                 ft_override
             opts_override = isnothing(cell_floor_opts) ? nothing : cell_floor_opts[cell_idx]
+            mat_override = isnothing(cell_floor_mats) ? nothing : cell_floor_mats[cell_idx]
             gid = _resolve_slab_group_id(slab_group_ids, cell_idx; tag=:cell)
 
             push!(slab_specs, (; cell_indices=[cell_idx],
@@ -367,6 +434,7 @@ function _build_slab_specs(struc, floor_type, cell_groupings, slab_group_ids;
                               sdl_gov=cell.sdl, live_gov=cell.live_load,
                               floor_type=ft_sym,
                               floor_opts_override=opts_override,
+                              material_override=mat_override,
                               group_id=gid))
         end
     else
@@ -406,6 +474,15 @@ function _build_slab_specs(struc, floor_type, cell_groupings, slab_group_ids;
                 throw(ArgumentError("Scoped overrides assign mixed floor options within one slab group."))
             opts_override = isempty(opts_overrides) ? nothing : only(opts_overrides)
 
+            mat_overrides = if isnothing(cell_floor_mats)
+                Concrete[]
+            else
+                unique([x for x in (cell_floor_mats[i] for i in filtered_indices) if !isnothing(x)])
+            end
+            length(mat_overrides) <= 1 ||
+                throw(ArgumentError("Scoped overrides assign mixed floor materials within one slab group."))
+            mat_override = isempty(mat_overrides) ? nothing : only(mat_overrides)
+
             # Group id: must be consistent across all cells participating in this physical slab
             gid = _resolve_group_id_for_cell_set(slab_group_ids, filtered_indices)
 
@@ -414,6 +491,7 @@ function _build_slab_specs(struc, floor_type, cell_groupings, slab_group_ids;
                               sdl_gov=sdl_gov, live_gov=live_gov,
                               floor_type=ft_sym,
                               floor_opts_override=opts_override,
+                              material_override=mat_override,
                               group_id=gid))
         end
     end
@@ -543,23 +621,26 @@ function _size_slab_groups(groups, slab_specs, struc, material, floor_opts::Stru
     results_vec  = Vector{AbstractFloorResult}(undef, n)
     sw_vec       = Vector{typeof(0.0u"kPa")}(undef, n)
     spans_vec    = Vector{SpanInfo}(undef, n)
+    mats_vec     = Vector{Concrete}(undef, n)
     
     @inbounds Threads.@threads for k in 1:n
         gid = gids[k]
         spec_idxs = groups[gid]
         specs = slab_specs[spec_idxs]
-        result, sw_service, spans_gov = _process_single_slab_group(gid, specs, struc, material, floor_opts)
+        result, sw_service, spans_gov, mat_eff = _process_single_slab_group(gid, specs, struc, material, floor_opts)
         
         results_vec[k] = result
         sw_vec[k]      = sw_service
         spans_vec[k]   = spans_gov
+        mats_vec[k]    = mat_eff
     end
     
     group_results = Dict{UInt64, AbstractFloorResult}(gids[k] => results_vec[k] for k in 1:n)
     group_sw      = Dict{UInt64, typeof(0.0u"kPa")}(gids[k] => sw_vec[k] for k in 1:n)
     group_spans   = Dict{UInt64, SpanInfo}(gids[k] => spans_vec[k] for k in 1:n)
+    group_mats    = Dict{UInt64, Concrete}(gids[k] => mats_vec[k] for k in 1:n)
 
-    return group_results, group_sw, group_spans
+    return group_results, group_sw, group_spans, group_mats
 end
 
 """Size a single slab group: resolve governing demands, call the backend, return `(result, self_weight, spans)`."""
@@ -590,26 +671,100 @@ function _process_single_slab_group(gid, specs, struc, material, floor_opts::Str
     length(scoped_opts) <= 1 || throw(ArgumentError("Slab group $gid has conflicting floor options overrides."))
     effective_floor_opts = isempty(scoped_opts) ? floor_opts : only(scoped_opts)
 
+    scoped_mats = unique([s.material_override for s in specs if hasproperty(s, :material_override) && !isnothing(s.material_override)])
+    length(scoped_mats) <= 1 || throw(ArgumentError("Slab group $gid has conflicting material overrides."))
+    effective_material = isempty(scoped_mats) ? material : only(scoped_mats)
+
+    effective_floor_opts = _with_concrete_material(effective_floor_opts, effective_material)
+
     extra_kwargs = if ft isa Vault && !(effective_floor_opts isa StructuralSizer.VaultOptions)
         (lambda=10.0,)
     else
         NamedTuple()
     end
     result = StructuralSizer._size_span_floor(ft, span_for_sizing, sdl_gov, live_gov;
-                                               material=material, options=effective_floor_opts, extra_kwargs...)
+                                               material=effective_material, options=effective_floor_opts, extra_kwargs...)
     sw_service = StructuralSizer.self_weight(result)
 
-    return result, sw_service, spans_gov
+    return result, sw_service, spans_gov, effective_material
 end
 
+"""Replace concrete grade in floor options while preserving rebar/detail settings."""
+function _with_concrete_material(opts::StructuralSizer.FlatPlateOptions, concrete::Concrete)
+    rc = ReinforcedConcreteMaterial(concrete, opts.material.rebar, opts.material.transverse)
+    return StructuralSizer.FlatPlateOptions(
+        material=rc,
+        cover=opts.cover,
+        bar_size=opts.bar_size,
+        has_edge_beam=opts.has_edge_beam,
+        edge_beam_βt=opts.edge_beam_βt,
+        method=opts.method,
+        grouping=opts.grouping,
+        φ_flexure=opts.φ_flexure,
+        φ_shear=opts.φ_shear,
+        λ=opts.λ,
+        deflection_limit=opts.deflection_limit,
+        punching_strategy=opts.punching_strategy,
+        punching_reinforcement=opts.punching_reinforcement,
+        max_column_size=opts.max_column_size,
+        stud_material=opts.stud_material,
+        stud_diameter=opts.stud_diameter,
+        stirrup_bar_size=opts.stirrup_bar_size,
+        min_h=opts.min_h,
+        objective=opts.objective,
+        col_I_factor=opts.col_I_factor)
+end
+
+function _with_concrete_material(opts::StructuralSizer.FlatSlabOptions, concrete::Concrete)
+    return StructuralSizer.FlatSlabOptions(
+        h_drop=opts.h_drop,
+        a_drop_ratio=opts.a_drop_ratio,
+        base=_with_concrete_material(opts.base, concrete))
+end
+
+function _with_concrete_material(opts::StructuralSizer.OneWayOptions, concrete::Concrete)
+    rc = ReinforcedConcreteMaterial(concrete, opts.material.rebar, opts.material.transverse)
+    return StructuralSizer.OneWayOptions(
+        material=rc,
+        cover=opts.cover,
+        bar_size=opts.bar_size,
+        support=opts.support)
+end
+
+function _with_concrete_material(opts::StructuralSizer.VaultOptions, concrete::Concrete)
+    return StructuralSizer.VaultOptions(
+        lambda_bounds=opts.lambda_bounds,
+        rise_bounds=opts.rise_bounds,
+        thickness_bounds=opts.thickness_bounds,
+        rise=opts.rise,
+        lambda=opts.lambda,
+        thickness=opts.thickness,
+        trib_depth=opts.trib_depth,
+        rib_depth=opts.rib_depth,
+        rib_apex_rise=opts.rib_apex_rise,
+        finishing_load=opts.finishing_load,
+        allowable_stress=opts.allowable_stress,
+        deflection_limit=opts.deflection_limit,
+        check_asymmetric=opts.check_asymmetric,
+        objective=opts.objective,
+        solver=opts.solver,
+        n_grid=opts.n_grid,
+        n_refine=opts.n_refine,
+        method=opts.method,
+        material=concrete)
+end
+
+_with_concrete_material(opts::StructuralSizer.AbstractFloorOptions, ::Concrete) = opts
+
 """Write group results back into `struc.slabs` and update cell self-weights."""
-function _apply_slab_results!(struc, slab_specs, group_results, group_sw, group_spans, 
+function _apply_slab_results!(struc, slab_specs, group_results, group_sw, group_spans, group_material,
                               primary_material, opts::StructuralSizer.AbstractFloorOptions)
     for spec in slab_specs
         gid = spec.group_id
         result = group_results[gid]
         sw_service = group_sw[gid]
         spans_gov = group_spans[gid]
+        material_eff = get(group_material, gid, primary_material)
 
         # Propagate structural data to cells
         for c_idx in spec.cell_indices
@@ -623,7 +778,7 @@ function _apply_slab_results!(struc, slab_specs, group_results, group_sw, group_
 
         # Compute floor area and material volumes
         floor_area = sum(struc.cells[i].area for i in spec.cell_indices)
-        volumes = _compute_slab_volumes(result, floor_area, primary_material, opts)
+        volumes = _compute_slab_volumes(result, floor_area, material_eff, opts)
 
         slab = Slab(spec.cell_indices, result, spans_gov; 
                     floor_type=spec.floor_type, position=slab_position, 

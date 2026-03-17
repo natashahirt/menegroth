@@ -353,10 +353,14 @@ end
 Convert API parameter block to a `DesignParameters` instance.
 """
 function json_to_params(api_params::APIParams, coord_unit_str::String="meters")
+    floor_ll_psf = api_params.loads.floor_LL_psf
+    roof_ll_psf = something(api_params.loads.roof_LL_psf, floor_ll_psf)
+    grade_ll_psf = something(api_params.loads.grade_LL_psf, floor_ll_psf)
+
     loads = GravityLoads(
-        floor_LL  = api_params.loads.floor_LL_psf * psf,
-        roof_LL   = api_params.loads.roof_LL_psf * psf,
-        grade_LL  = api_params.loads.grade_LL_psf * psf,
+        floor_LL  = floor_ll_psf * psf,
+        roof_LL   = roof_ll_psf * psf,
+        grade_LL  = grade_ll_psf * psf,
         floor_SDL = api_params.loads.floor_SDL_psf * psf,
         roof_SDL  = api_params.loads.roof_SDL_psf * psf,
         wall_SDL  = api_params.loads.wall_SDL_psf * psf,
@@ -399,6 +403,7 @@ function json_to_params(api_params::APIParams, coord_unit_str::String="meters")
         beams = beams,
         fire_rating = validate_fire_rating(api_params.fire_rating),
         optimize_for = Symbol(api_params.optimize_for),
+        max_iterations = something(api_params.max_iterations, 20),
         foundation_options = foundation_options,
         scoped_floor_overrides = scoped_overrides,
         geometry_is_centerline = api_params.geometry_is_centerline,
@@ -419,6 +424,11 @@ function _resolve_scoped_floor_overrides(api_params::APIParams, coord_unit_str::
 
     for ov in api_params.scoped_overrides
         ft = Symbol(ov.floor_type)
+        method = ov.floor_options.method
+        defl = ov.floor_options.deflection_limit
+        punch = ov.floor_options.punching_strategy
+        target_edge_m = ov.floor_options.target_edge_m
+        concrete = isnothing(ov.floor_options.concrete) ? nothing : _resolve_concrete_name(ov.floor_options.concrete)
         λ = ov.floor_options.vault_lambda
 
         faces_m = Vector{NTuple{3, Float64}}[]
@@ -433,6 +443,11 @@ function _resolve_scoped_floor_overrides(api_params::APIParams, coord_unit_str::
 
         push!(out, ScopedFloorOverride(
             floor_type = ft,
+            method = method,
+            deflection_limit = defl,
+            punching_strategy = punch,
+            target_edge_m = target_edge_m,
+            concrete = concrete,
             vault_lambda = λ,
             faces = faces_m,
         ))

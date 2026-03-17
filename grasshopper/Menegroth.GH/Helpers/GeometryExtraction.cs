@@ -6,7 +6,7 @@ namespace Menegroth.GH.Helpers
     /// <summary>
     /// Shared geometry extraction helpers for converting Rhino geometry to
     /// boundary polylines in [x,y,z] coordinate arrays.
-    /// Used by GeometryInput and VaultParams.
+    /// Used by GeometryInput and SlabParams.
     /// </summary>
     public static class GeometryExtraction
     {

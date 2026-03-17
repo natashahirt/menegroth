@@ -229,7 +229,7 @@ namespace Menegroth.GH.Components
                 "Floor live load in psf", GH_ParamAccess.item, 80.0);
 
             pManager.AddNumberParameter("Roof LL (psf)", "Roof LL",
-                "Roof live load in psf", GH_ParamAccess.item, 20.0);
+                "Roof live load in psf (default: same as Floor LL)", GH_ParamAccess.item, 80.0);
 
             pManager.AddNumberParameter("Floor SDL (psf)", "Floor SDL",
                 "Floor superimposed dead load in psf", GH_ParamAccess.item, 15.0);
@@ -238,13 +238,13 @@ namespace Menegroth.GH.Components
                 "Roof superimposed dead load in psf", GH_ParamAccess.item, 15.0);
 
             pManager.AddNumberParameter("Grade LL (psf)", "Grade LL",
-                "Grade-level live load in psf", GH_ParamAccess.item, 100.0);
+                "Grade-level live load in psf (default: same as Floor LL)", GH_ParamAccess.item, 80.0);
 
             pManager.AddNumberParameter("Wall SDL (psf)", "Wall SDL",
                 "Wall superimposed dead load in psf", GH_ParamAccess.item, 10.0);
 
             pManager.AddGenericParameter("Params", "Params",
-                "Optional overrides (VaultParams, ElementParams, FoundationParams). Click + to add Slab Params / Foundation Params.",
+                "Optional overrides (SlabParams, ElementParams, FoundationParams). Click + to add Slab Params / Foundation Params.",
                 GH_ParamAccess.list);
             pManager[6].Optional = true;
         }
@@ -615,8 +615,8 @@ namespace Menegroth.GH.Components
         // ─── Solve ───────────────────────────────────────────────────────
         protected override void SolveInstance(IGH_DataAccess DA)
         {
-            double floorLL = 80, roofLL = 20, floorSDL = 15, roofSDL = 15;
-            double gradeLL = 100, wallSDL = 10;
+            double floorLL = 80, roofLL = 80, floorSDL = 15, roofSDL = 15;
+            double gradeLL = 80, wallSDL = 10;
 
             DA.GetData(0, ref floorLL);
             DA.GetData(1, ref roofLL);
@@ -738,17 +738,19 @@ namespace Menegroth.GH.Components
             sb.Append("Load Units: ").Append(LabelFor(UnitSystems, p.UnitSystem))
               .Append(" (").Append(p.UnitSystem).AppendLine(")");
 
-            if (p.ScopedVaultOverrides != null && p.ScopedVaultOverrides.Count > 0)
+            if (p.ScopedSlabOverrides != null && p.ScopedSlabOverrides.Count > 0)
             {
-                sb.Append("Scoped vault overrides: ").Append(p.ScopedVaultOverrides.Count).AppendLine(" group(s)");
-                for (int i = 0; i < p.ScopedVaultOverrides.Count; i++)
+                sb.Append("Scoped slab overrides: ").Append(p.ScopedSlabOverrides.Count).AppendLine(" group(s)");
+                for (int i = 0; i < p.ScopedSlabOverrides.Count; i++)
                 {
-                    var ov = p.ScopedVaultOverrides[i];
+                    var ov = p.ScopedSlabOverrides[i];
                     if (ov == null) continue;
                     int nFaces = ov.Faces?.Count ?? 0;
-                    var part = $"  [{i + 1}] {nFaces} face(s)";
-                    if (ov.Lambda.HasValue)
-                        part += $", λ={ov.Lambda.Value:F2}";
+                    var part = $"  [{i + 1}] {nFaces} face(s), type={ov.FloorType}";
+                    if (ov.VaultLambda.HasValue)
+                        part += $", λ={ov.VaultLambda.Value:F2}";
+                    if (!string.IsNullOrWhiteSpace(ov.Concrete))
+                        part += $", concrete={ov.Concrete}";
                     sb.AppendLine(part);
                 }
             }
@@ -776,7 +778,7 @@ namespace Menegroth.GH.Components
             return allOverrides;
         }
 
-        /// <summary>Apply all overrides (VaultParams, ElementParams, FoundationParams). Order reflects hierarchy: later in list wins.</summary>
+        /// <summary>Apply all overrides (SlabParams, ElementParams, FoundationParams). Order reflects hierarchy: later in list wins.</summary>
         private void ApplyOverrides(DesignParamsData target, List<IGH_Goo> allOverrides)
         {
             if (target == null || allOverrides == null || allOverrides.Count == 0)
@@ -789,18 +791,18 @@ namespace Menegroth.GH.Components
                     elem.ApplyTo(target);
                     continue;
                 }
-                if (TryUnwrapGoo<VaultParamsData>(goo, out var vault))
+                if (TryUnwrapGoo<SlabParamsData>(goo, out var slab))
                 {
-                    if (vault.Lambda.HasValue && vault.Lambda.Value <= 0.0)
+                    if (slab.VaultLambda.HasValue && slab.VaultLambda.Value <= 0.0)
                     {
                         AddRuntimeMessage(GH_RuntimeMessageLevel.Warning,
-                            "Ignoring VaultParams override with invalid lambda <= 0.");
+                            "Ignoring SlabParams override with invalid vault lambda <= 0.");
                         continue;
                     }
-                    if (vault.HasScopedFaces)
-                        target.ScopedVaultOverrides.Add(vault.Clone());
+                    if (slab.HasScopedFaces)
+                        target.ScopedSlabOverrides.Add(slab.Clone());
                     else
-                        vault.ApplyTo(target);
+                        slab.ApplyTo(target);
                     continue;
                 }
                 if (TryUnwrapGoo<FoundationParamsData>(goo, out var fdn))
@@ -859,7 +861,7 @@ namespace Menegroth.GH.Components
             {
                 param.Name = "Slab Params";
                 param.NickName = "Slab";
-                param.Description = "Optional slab/floor overrides (e.g. VaultParams).";
+                param.Description = "Optional slab/floor overrides (SlabParams).";
             }
             else
             {
@@ -903,6 +905,9 @@ namespace Menegroth.GH.Components
         internal static class ValidValues
         {
             public static readonly HashSet<string> FloorTypes = ToSet(DesignParams.FloorTypes);
+            public static readonly HashSet<string> Methods = ToSet(DesignParams.Methods);
+            public static readonly HashSet<string> DeflectionLimits = ToSet(DesignParams.DeflLimits);
+            public static readonly HashSet<string> PunchStrategies = ToSet(DesignParams.PunchStrategies);
             public static readonly HashSet<string> ColumnTypes = ToSet(DesignParams.ColumnTypes);
             public static readonly HashSet<string> BeamTypes = ToSet(DesignParams.BeamTypes);
             public static readonly HashSet<string> SteelColumnCatalogs = ToSet(DesignParams.SteelColumnCatalogs);

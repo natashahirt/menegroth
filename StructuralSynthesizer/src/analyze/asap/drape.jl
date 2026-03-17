@@ -153,6 +153,187 @@ function _idw_interpolate(qx::Float64, qy::Float64,
     return result
 end
 
+"""
+    _solve_3x3(A, b) -> Union{Vector{Float64}, Nothing}
+
+Solve a 3x3 linear system using an explicit adjugate/determinant formula.
+Returns `nothing` if the matrix is singular or ill-conditioned.
+"""
+function _solve_3x3(A::Matrix{Float64}, b::Vector{Float64})
+    a11, a12, a13 = A[1, 1], A[1, 2], A[1, 3]
+    a21, a22, a23 = A[2, 1], A[2, 2], A[2, 3]
+    a31, a32, a33 = A[3, 1], A[3, 2], A[3, 3]
+
+    detA =
+        a11 * (a22 * a33 - a23 * a32) -
+        a12 * (a21 * a33 - a23 * a31) +
+        a13 * (a21 * a32 - a22 * a31)
+
+    abs(detA) < 1e-12 && return nothing
+
+    c11 =  (a22 * a33 - a23 * a32)
+    c12 = -(a21 * a33 - a23 * a31)
+    c13 =  (a21 * a32 - a22 * a31)
+    c21 = -(a12 * a33 - a13 * a32)
+    c22 =  (a11 * a33 - a13 * a31)
+    c23 = -(a11 * a32 - a12 * a31)
+    c31 =  (a12 * a23 - a13 * a22)
+    c32 = -(a11 * a23 - a13 * a21)
+    c33 =  (a11 * a22 - a12 * a21)
+
+    invA = Matrix{Float64}(undef, 3, 3)
+    invA[1, 1] = c11 / detA; invA[1, 2] = c21 / detA; invA[1, 3] = c31 / detA
+    invA[2, 1] = c12 / detA; invA[2, 2] = c22 / detA; invA[2, 3] = c32 / detA
+    invA[3, 1] = c13 / detA; invA[3, 2] = c23 / detA; invA[3, 3] = c33 / detA
+
+    return invA * b
+end
+
+"""
+    _weighted_affine_interpolate(qx, qy, sx, sy, vals; power=2.0)
+
+Primary fallback when bay interpolation is unavailable:
+fit an affine field `f(x,y)=a+b*x+c*y` using weighted least squares over supports.
+This yields a smoother support field than pure IDW while preserving exact values
+at support points.
+"""
+function _weighted_affine_interpolate(
+    qx::Float64, qy::Float64,
+    sx::Vector{Float64}, sy::Vector{Float64},
+    vals::Vector{Vector{Float64}};
+    power::Float64=2.0
+)
+    n = length(sx)
+    n < 3 && return nothing
+
+    # Enforce exact values at support points.
+    for i in 1:n
+        d = sqrt((qx - sx[i])^2 + (qy - sy[i])^2)
+        d < 1e-10 && return copy(vals[i])
+    end
+
+    w = Vector{Float64}(undef, n)
+    for i in 1:n
+        d = sqrt((qx - sx[i])^2 + (qy - sy[i])^2)
+        w[i] = 1.0 / (d^power + 1e-12)
+    end
+
+    s0 = 0.0; sxw = 0.0; syw = 0.0; sxx = 0.0; sxy = 0.0; syy = 0.0
+    for i in 1:n
+        wi = w[i]; xi = sx[i]; yi = sy[i]
+        s0  += wi
+        sxw += wi * xi
+        syw += wi * yi
+        sxx += wi * xi * xi
+        sxy += wi * xi * yi
+        syy += wi * yi * yi
+    end
+
+    A = [s0 sxw syw;
+         sxw sxx sxy;
+         syw sxy syy]
+
+    result = [0.0, 0.0, 0.0]
+    for c in 1:3
+        t0 = 0.0; tx = 0.0; ty = 0.0
+        for i in 1:n
+            wi = w[i]; xi = sx[i]; yi = sy[i]; vi = vals[i][c]
+            t0 += wi * vi
+            tx += wi * xi * vi
+            ty += wi * yi * vi
+        end
+        rhs = [t0, tx, ty]
+        coeff = _solve_3x3(A, rhs)
+        coeff === nothing && return nothing
+        result[c] = coeff[1] + coeff[2] * qx + coeff[3] * qy
+    end
+
+    return result
+end
+
+# ─── Geometric support fallback ───────────────────────────────────────────────
+
+"""
+    _adaptive_slab_z_tol(struc, slab_z) -> Float64
+
+Choose a robust elevation-matching tolerance from nearby story spacing.
+Keeps tolerance tight for dense floors while still handling minor numeric drift.
+"""
+function _adaptive_slab_z_tol(struc::BuildingStructure, slab_z::Float64)
+    stories = sort(unique([ustrip(u"m", z) for z in struc.skeleton.stories_z]))
+    if length(stories) < 2
+        return 0.15
+    end
+
+    # Nearest non-zero story spacing around this slab elevation.
+    deltas = sort(abs.(stories .- slab_z))
+    nearest_nonzero = findfirst(d -> d > 1e-9, deltas)
+    spacing = nearest_nonzero === nothing ? 0.6 : deltas[nearest_nonzero]
+
+    # Use a quarter of spacing, bounded to practical limits.
+    return clamp(0.25 * spacing, 0.02, 0.15)
+end
+
+"""
+    _geometric_support_nodes_for_slab(design, shell_model, slab_id) -> Vector{Asap.Node}
+
+When a slab has no shell nodes that are identity-equal to frame endpoints, build a
+support set geometrically from columns supporting that slab at slab elevation.
+"""
+function _geometric_support_nodes_for_slab(
+    design::BuildingDesign,
+    shell_model,
+    slab_id::Symbol,
+)
+    slab_idx = tryparse(Int, String(slab_id)[6:end])
+    slab_idx === nothing && return (
+        supports = Asap.Node[],
+        support_vertices = Int[],
+        z_tol = 0.15,
+        n_supporting_columns = 0,
+    )
+
+    struc = design.structure
+    (slab_idx < 1 || slab_idx > length(struc.slabs)) && return (
+        supports = Asap.Node[],
+        support_vertices = Int[],
+        z_tol = 0.15,
+        n_supporting_columns = 0,
+    )
+    slab = struc.slabs[slab_idx]
+
+    # Slab elevation from any face vertex (all vertices on the cell face share z).
+    skel = struc.skeleton
+    first_cell = struc.cells[first(slab.cell_indices)]
+    first_vi = skel.face_vertex_indices[first_cell.face_idx][1]
+    slab_z = skel.geometry.vertex_coords[first_vi, 3]
+    z_tol = _adaptive_slab_z_tol(struc, slab_z)
+
+    supports = Asap.Node[]
+    seen = Set{UInt64}()
+    support_vertices = Int[]
+    supporting_cols = StructuralSizer.find_supporting_columns(struc, Set(slab.cell_indices))
+    for col in supporting_cols
+        vi = _column_vertex_at_slab_level(struc, col, slab_z; z_tol=z_tol)
+        vi === nothing && continue
+        (vi < 1 || vi > length(shell_model.nodes)) && continue
+        n = shell_model.nodes[vi]
+        nid = objectid(n)
+        if nid ∉ seen
+            push!(supports, n)
+            push!(seen, nid)
+            push!(support_vertices, vi)
+        end
+    end
+
+    return (
+        supports = supports,
+        support_vertices = support_vertices,
+        z_tol = z_tol,
+        n_supporting_columns = length(supporting_cols),
+    )
+end
+
 # ─── Main entry point ─────────────────────────────────────────────────────────
 
 """
@@ -256,7 +437,8 @@ function compute_draped_displacements(design::BuildingDesign)
     # ── Process each slab ──
     for (slab_id, shells) in slab_shells
 
-        # Collect unique support nodes for this slab
+        # Collect unique support nodes for this slab.
+        # Primary path: shell nodes that are identity-equal to frame endpoints.
         support_nodes = Asap.Node[]
         seen = Set{UInt64}()
         for shell in shells, node in shell.nodes
@@ -267,7 +449,35 @@ function compute_draped_displacements(design::BuildingDesign)
             end
         end
 
+        used_geometric_fallback = false
+        fallback_support_vertices = Int[]
+        fallback_z_tol = 0.15
+        fallback_column_count = 0
         if isempty(support_nodes)
+            # Fallback: geometric support recovery from supporting columns at slab elevation.
+            fallback = _geometric_support_nodes_for_slab(design, shell_model, slab_id)
+            support_nodes = fallback.supports
+            fallback_support_vertices = fallback.support_vertices
+            fallback_z_tol = fallback.z_tol
+            fallback_column_count = fallback.n_supporting_columns
+            used_geometric_fallback = !isempty(support_nodes)
+        end
+
+        if isempty(support_nodes)
+            @warn "Drape supports missing for slab; local_bending will fall back to total displacement." slab_id z_tol=fallback_z_tol supporting_columns=fallback_column_count
+            for shell in shells, node in shell.nodes
+                d = Asap.to_displacement_vec(node.displacement)[1:3]
+                total_dict[objectid(node)] = d
+                local_dict[objectid(node)] = d
+            end
+            continue
+        end
+        if used_geometric_fallback
+            @warn "Drape slab recovered supports via geometric fallback (column-based)." slab_id support_count=length(support_nodes) supporting_columns=fallback_column_count z_tol=fallback_z_tol support_vertices=fallback_support_vertices
+        end
+
+        if length(support_nodes) < 3
+            @warn "Drape slab has insufficient supports for smooth local interpolation; using total displacement for local_bending." slab_id support_count=length(support_nodes)
             for shell in shells, node in shell.nodes
                 d = Asap.to_displacement_vec(node.displacement)[1:3]
                 total_dict[objectid(node)] = d
@@ -291,6 +501,10 @@ function compute_draped_displacements(design::BuildingDesign)
         end
 
         # Drape each shell node
+        bay_count = 0
+        affine_count = 0
+        idw_count = 0
+        local_count = 0
         for shell in shells, node in shell.nodes
             nid = objectid(node)
             haskey(total_dict, nid) && continue
@@ -303,15 +517,29 @@ function compute_draped_displacements(design::BuildingDesign)
             else
                 nx = ustrip(u"m", node.position[1])
                 ny = ustrip(u"m", node.position[2])
+                local_count += 1
 
-                # Bilinear within enclosing bay; IDW fallback for boundary nodes
+                # Primary: bilinear within enclosing bay.
                 coupled_field = _bay_interpolate(nx, ny, bays)
                 if coupled_field === nothing
-                    coupled_field = _idw_interpolate(nx, ny, sup_x, sup_y, sup_disp)
+                    # Secondary: smooth weighted affine interpolation over supports.
+                    coupled_field = _weighted_affine_interpolate(nx, ny, sup_x, sup_y, sup_disp)
+                    if coupled_field === nothing
+                        # Last resort: IDW.
+                        coupled_field = _idw_interpolate(nx, ny, sup_x, sup_y, sup_disp)
+                        idw_count += 1
+                    else
+                        affine_count += 1
+                    end
+                else
+                    bay_count += 1
                 end
 
                 local_dict[nid] = δ_coupled .- coupled_field
             end
+        end
+        if idw_count > 0
+            @warn "Drape slab used IDW fallback for some shell nodes (outside bay/affine interpolation)." slab_id bay_nodes=bay_count affine_nodes=affine_count idw_nodes=idw_count local_nodes=local_count support_count=length(support_nodes)
         end
     end
 

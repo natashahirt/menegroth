@@ -1,0 +1,1 @@
+Grasshopper component to interact with the Julia code, works over AWS. Ask me for the API url and key.

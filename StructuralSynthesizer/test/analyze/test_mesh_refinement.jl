@@ -15,6 +15,66 @@ using Asap
 using Test
 using Unitful
 
+_safe_percentile(v::Vector{Float64}, p::Float64) = begin
+    isempty(v) && return 0.0
+    s = sort(v)
+    idx = clamp(ceil(Int, p * length(s)), 1, length(s))
+    return s[idx]
+end
+
+function _edge_gradient_stats(verts::Vector{Vector{Float64}}, faces::Vector{Vector{Int}}, values::Vector{Float64})
+    grads = Float64[]
+    seen = Set{Tuple{Int, Int}}()
+    for f in faces
+        length(f) < 3 && continue
+        tri = (f[1], f[2], f[3])
+        edges = ((tri[1], tri[2]), (tri[2], tri[3]), (tri[3], tri[1]))
+        for (a_raw, b_raw) in edges
+            a = min(a_raw, b_raw)
+            b = max(a_raw, b_raw)
+            key = (a, b)
+            key in seen && continue
+            push!(seen, key)
+            va = verts[a]
+            vb = verts[b]
+            dx = vb[1] - va[1]
+            dy = vb[2] - va[2]
+            dz = vb[3] - va[3]
+            L = sqrt(dx * dx + dy * dy + dz * dz)
+            L < 1e-9 && continue
+            push!(grads, abs(values[a] - values[b]) / L)
+        end
+    end
+    return (
+        p95 = _safe_percentile(grads, 0.95),
+        max = isempty(grads) ? 0.0 : maximum(grads),
+        n = length(grads),
+    )
+end
+
+function _vertex_spike_stats(verts::Vector{Vector{Float64}}, faces::Vector{Vector{Int}}, values::Vector{Float64})
+    neigh = [Int[] for _ in eachindex(verts)]
+    for f in faces
+        length(f) < 3 && continue
+        i, j, k = f[1], f[2], f[3]
+        push!(neigh[i], j); push!(neigh[i], k)
+        push!(neigh[j], i); push!(neigh[j], k)
+        push!(neigh[k], i); push!(neigh[k], j)
+    end
+    residuals = Float64[]
+    for i in eachindex(verts)
+        ns = unique(neigh[i])
+        isempty(ns) && continue
+        mu = sum(values[j] for j in ns) / length(ns)
+        push!(residuals, abs(values[i] - mu))
+    end
+    return (
+        p95 = _safe_percentile(residuals, 0.95),
+        max = isempty(residuals) ? 0.0 : maximum(residuals),
+        n = length(residuals),
+    )
+end
+
 @testset "Mesh Refinement" begin
 
     # ─── 2-story flat plate: floor 1 slab is BELOW floor 1→2 columns ────────
@@ -230,5 +290,47 @@ using Unitful
         var_a = sum((a - mean_a)^2 for a in patch_areas) / length(patch_areas)
         std_a = sqrt(var_a)
         @test std_a / mean_a < 1.0
+    end
+
+    @testset "Local deflection shape quality (no tenting spikes)" begin
+        output = design_to_json(design)
+        viz = output.visualization
+        isnothing(viz) && @test_skip "No visualization (skip_visualization?)"
+        meshes = viz.deflected_slab_meshes
+        isempty(meshes) && @test_skip "No slab meshes"
+
+        checked = 0
+        for (mesh_idx, mesh) in enumerate(meshes)
+            verts = [[Float64(v[1]), Float64(v[2]), Float64(v[3])] for v in mesh.vertices]
+            faces = [Int[f[1], f[2], f[3]] for f in mesh.faces if length(f) >= 3]
+            local_disp = [[Float64(d[1]), Float64(d[2]), Float64(d[3])] for d in mesh.vertex_displacements_local]
+            global_disp = [[Float64(d[1]), Float64(d[2]), Float64(d[3])] for d in mesh.vertex_displacements]
+
+            n = length(verts)
+            (n == 0 || isempty(faces)) && continue
+            (length(local_disp) != n || length(global_disp) != n) && continue
+
+            local_z = [d[3] for d in local_disp]
+            global_z = [d[3] for d in global_disp]
+
+            g_local = _edge_gradient_stats(verts, faces, local_z)
+            g_global = _edge_gradient_stats(verts, faces, global_z)
+            s_local = _vertex_spike_stats(verts, faces, local_z)
+            s_global = _vertex_spike_stats(verts, faces, global_z)
+
+            # Guardrail 1: local p95 edge gradient should not explode relative to global.
+            # This catches tent-like sharp local spikes while allowing legitimate local variation.
+            @test g_local.p95 <= max(6.0 * g_global.p95, 1e-5)
+
+            # Guardrail 2: local per-vertex spike residual should stay bounded vs global.
+            @test s_local.p95 <= max(6.0 * s_global.p95, 1e-5)
+
+            # Guardrail 3: absolute outliers should remain bounded for this synthetic benchmark.
+            @test g_local.max <= 0.30  # display-length units per unit edge length
+            @test s_local.max <= 0.30  # display-length units
+
+            checked += 1
+        end
+        @test checked > 0
     end
 end

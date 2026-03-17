@@ -582,29 +582,7 @@ namespace Menegroth.GH.Components
                         originalCurves.Add(new Line(p1, p2).ToNurbsCurve());
 
                     if (isDeflected && finalScale > 0)
-                    {
-                        if (isLocal && elemType == "column")
-                        {
-                            // Local mode: keep column bases at original floor coordinates and move tops.
-                            bool startIsBottom = nodes[ns].pos.Z <= nodes[ne].pos.Z;
-                            if (startIsBottom)
-                            {
-                                p1 = nodes[ns].pos;
-                                p2 = nodes[ne].pos + (nodes[ne].defPos - nodes[ne].pos) * finalScale;
-                            }
-                            else
-                            {
-                                p2 = nodes[ne].pos;
-                                p1 = nodes[ns].pos + (nodes[ns].defPos - nodes[ns].pos) * finalScale;
-                            }
-                        }
-                        else
-                        {
-                            // Global mode (and local non-columns): follow displaced node coordinates.
-                            p1 = p1 + (nodes[ns].defPos - nodes[ns].pos) * finalScale;
-                            p2 = p2 + (nodes[ne].defPos - nodes[ne].pos) * finalScale;
-                        }
-                    }
+                        ResolveEffectiveFrameEndpoints(nodes, ns, ne, isLocal, isColumn, finalScale, out p1, out p2);
 
                     elementCurve = new Line(p1, p2).ToNurbsCurve();
                 }
@@ -625,17 +603,25 @@ namespace Menegroth.GH.Components
                             double dvz = i < dispVecs.Length ? dispVecs[i][2] : 0;
                             var dv = new Vector3d(dvx, dvy, dvz);
 
-                            if (isLocal && dispVecs.Length >= 2 && elemType != "column")
+                            if (isLocal && dispVecs.Length >= 2)
                             {
-                                var uStart = hasStartNode
-                                    ? nodes[ns].disp
-                                    : new Vector3d(dispVecs[0][0], dispVecs[0][1], dispVecs[0][2]);
-                                int last = dispVecs.Length - 1;
-                                var uEnd = hasEndNode
-                                    ? nodes[ne].disp
-                                    : new Vector3d(dispVecs[last][0], dispVecs[last][1], dispVecs[last][2]);
-                                double t = origPts.Length > 1 ? (double)i / (origPts.Length - 1) : 0.0;
-                                dv -= uStart + t * (uEnd - uStart);
+                                if (elemType == "column")
+                                {
+                                    // Column local frame uses the base floor as reference.
+                                    dv -= GetColumnBaseDisplacement(nodes, ns, ne);
+                                }
+                                else
+                                {
+                                    var uStart = hasStartNode
+                                        ? nodes[ns].disp
+                                        : new Vector3d(dispVecs[0][0], dispVecs[0][1], dispVecs[0][2]);
+                                    int last = dispVecs.Length - 1;
+                                    var uEnd = hasEndNode
+                                        ? nodes[ne].disp
+                                        : new Vector3d(dispVecs[last][0], dispVecs[last][1], dispVecs[last][2]);
+                                    double t = origPts.Length > 1 ? (double)i / (origPts.Length - 1) : 0.0;
+                                    dv -= uStart + t * (uEnd - uStart);
+                                }
                             }
 
                             pts.Add(op + dv * finalScale);
@@ -648,27 +634,8 @@ namespace Menegroth.GH.Components
 
                     if (isDeflected && finalScale > 0 && pts.Count > 1 && hasStartNode && hasEndNode)
                     {
-                        Point3d targetStart;
-                        Point3d targetEnd;
-                        if (isLocal && elemType == "column")
-                        {
-                            bool startIsBottom = nodes[ns].pos.Z <= nodes[ne].pos.Z;
-                            if (startIsBottom)
-                            {
-                                targetStart = nodes[ns].pos;
-                                targetEnd = nodes[ne].pos + (nodes[ne].defPos - nodes[ne].pos) * finalScale;
-                            }
-                            else
-                            {
-                                targetEnd = nodes[ne].pos;
-                                targetStart = nodes[ns].pos + (nodes[ns].defPos - nodes[ns].pos) * finalScale;
-                            }
-                        }
-                        else
-                        {
-                            targetStart = nodes[ns].pos + (nodes[ns].defPos - nodes[ns].pos) * finalScale;
-                            targetEnd = nodes[ne].pos + (nodes[ne].defPos - nodes[ne].pos) * finalScale;
-                        }
+                        ResolveEffectiveFrameEndpoints(nodes, ns, ne, isLocal, isColumn, finalScale,
+                            out Point3d targetStart, out Point3d targetEnd);
 
                         // Apply linear endpoint correction so beams stay connected to column tops.
                         var corrStart = targetStart - pts[0];
@@ -747,18 +714,8 @@ namespace Menegroth.GH.Components
                         {
                             var origS = nodes[ns].pos;
                             var origE = nodes[ne].pos;
-                            Point3d defS, defE;
-                            if (isLocal && isColumn)
-                            {
-                                bool startIsBottom = origS.Z <= origE.Z;
-                                defS = startIsBottom ? origS : origS + (nodes[ns].defPos - origS) * finalScale;
-                                defE = startIsBottom ? origE + (nodes[ne].defPos - origE) * finalScale : origE;
-                            }
-                            else
-                            {
-                                defS = origS + (nodes[ns].defPos - origS) * finalScale;
-                                defE = origE + (nodes[ne].defPos - origE) * finalScale;
-                            }
+                            ResolveEffectiveFrameEndpoints(nodes, ns, ne, isLocal, isColumn, finalScale,
+                                out Point3d defS, out Point3d defE);
                             frameMesh = TransformFrameMeshForDeflection(frameMesh, origS, origE, defS, defE);
                         }
                         var ghMesh = new GH_Mesh(frameMesh);
@@ -818,7 +775,7 @@ namespace Menegroth.GH.Components
                 // even at scale=0 so per-face/per-vertex analytical coloring remains visible.
                 else if (isDeflected && (finalScale > 0 || modeInt == MODE_ANALYTICAL))
                     BuildDeflectedSlabs(viz, finalScale, slabGeometry,
-                        slabColors, effectiveColorBySlab, maxDisp, isLocal, slabMaxima,
+                        slabColors, effectiveColorBySlab, maxDisp, isLocal, slabMaxima, nodes,
                         showVolumes: modeInt == MODE_SIZED);
                 else
                     BuildSizedSlabs(viz, slabGeometry, slabColors, effectiveColorBySlab, maxDisp, slabMaxima,
@@ -1458,6 +1415,71 @@ namespace Menegroth.GH.Components
             return mags[i0] * (1.0 - a) + mags[i1] * a;
         }
 
+        /// <summary>
+        /// Compute local deflected endpoints for a column so each member is referenced to
+        /// the original floor it rises from: base stays at original position, top moves by
+        /// relative displacement (u_top - u_base).
+        /// </summary>
+        private static void ResolveLocalColumnEndpoints(
+            Dictionary<int, (Point3d pos, Vector3d disp, Point3d defPos)> nodes,
+            int nodeStart,
+            int nodeEnd,
+            double scale,
+            out Point3d startPoint,
+            out Point3d endPoint)
+        {
+            var s = nodes[nodeStart];
+            var e = nodes[nodeEnd];
+            bool startIsBottom = s.pos.Z <= e.pos.Z;
+
+            if (startIsBottom)
+            {
+                startPoint = s.pos;
+                endPoint = e.pos + (e.disp - s.disp) * scale;
+            }
+            else
+            {
+                startPoint = s.pos + (s.disp - e.disp) * scale;
+                endPoint = e.pos;
+            }
+        }
+
+        /// <summary>
+        /// Resolve effective deformed endpoints for a frame element.
+        /// - Global (or non-column local): absolute displaced endpoints.
+        /// - Local column: base anchored at original floor, top moves by relative column compression.
+        /// </summary>
+        private static void ResolveEffectiveFrameEndpoints(
+            Dictionary<int, (Point3d pos, Vector3d disp, Point3d defPos)> nodes,
+            int nodeStart,
+            int nodeEnd,
+            bool isLocal,
+            bool isColumn,
+            double scale,
+            out Point3d startPoint,
+            out Point3d endPoint)
+        {
+            if (isLocal && isColumn)
+            {
+                ResolveLocalColumnEndpoints(nodes, nodeStart, nodeEnd, scale, out startPoint, out endPoint);
+                return;
+            }
+
+            var s = nodes[nodeStart];
+            var e = nodes[nodeEnd];
+            startPoint = s.pos + s.disp * scale;
+            endPoint = e.pos + e.disp * scale;
+        }
+
+        private static Vector3d GetColumnBaseDisplacement(
+            Dictionary<int, (Point3d pos, Vector3d disp, Point3d defPos)> nodes,
+            int nodeStart,
+            int nodeEnd)
+        {
+            bool startIsBottom = nodes[nodeStart].pos.Z <= nodes[nodeEnd].pos.Z;
+            return startIsBottom ? nodes[nodeStart].disp : nodes[nodeEnd].disp;
+        }
+
         private static string NormalizeElementType(string rawType)
         {
             return (rawType ?? "").Trim().ToLowerInvariant();
@@ -1914,10 +1936,13 @@ namespace Menegroth.GH.Components
         private static void BuildDeflectedSlabs(JToken viz, double scale,
             List<IGH_GeometricGoo> output,
             List<Color> colors, int colorBy, double maxDisp, bool isLocal,
-            SlabAnalyticalMaxima maxima, bool showVolumes = false)
+            SlabAnalyticalMaxima maxima,
+            Dictionary<int, (Point3d pos, Vector3d disp, Point3d defPos)> nodes,
+            bool showVolumes = false)
         {
             bool isAnalyticalSlab = colorBy >= COLOR_SLAB_BENDING && colorBy <= COLOR_SLAB_SURFACE_STRESS;
             var meshes = viz["deflected_slab_meshes"] as JArray ?? new JArray();
+            var localColumnTops = BuildLocalColumnTopDisplacements(viz, nodes);
             var slabsWithMeshDropPanels = new HashSet<int>();
             foreach (var meshToken in meshes)
             {
@@ -1934,15 +1959,12 @@ namespace Menegroth.GH.Components
                 var dispsLocal = m["vertex_displacements_local"]?.ToObject<double[][]>() ?? new double[0][];
                 bool localValid = dispsLocal.Length == verts.Length;
                 bool globalValid = dispsGlobal.Length == verts.Length;
-                var disps = isLocal && localValid
-                    ? dispsLocal
-                    : globalValid
-                        ? dispsGlobal
-                        : localValid
-                            ? dispsLocal
-                            : Array.Empty<double[]>();
                 var faces = m["faces"]?.ToObject<int[][]>() ?? new int[0][];
                 if (verts.Length == 0) continue;
+                var shapeDisps = SelectSlabShapeDisplacements(dispsGlobal, dispsLocal, isLocal, globalValid, localValid);
+                var colorDisps = SelectSlabColorDisplacements(dispsGlobal, dispsLocal, isLocal, globalValid, localValid);
+                if (isLocal && globalValid)
+                    shapeDisps = ComposeLocalSlabShapeDisplacements(verts, dispsGlobal, localColumnTops);
 
                 double[] faceAnalytical = null;
                 double analyticalMax = 0;
@@ -1957,9 +1979,9 @@ namespace Menegroth.GH.Components
                 {
                     var op = new Point3d(verts[i][0], verts[i][1], verts[i][2]);
 
-                    double dx = i < disps.Length ? disps[i][0] : 0;
-                    double dy = i < disps.Length ? disps[i][1] : 0;
-                    double dz = i < disps.Length ? disps[i][2] : 0;
+                    double dx = i < shapeDisps.Length ? shapeDisps[i][0] : 0;
+                    double dy = i < shapeDisps.Length ? shapeDisps[i][1] : 0;
+                    double dz = i < shapeDisps.Length ? shapeDisps[i][2] : 0;
                     rhinoMesh.Vertices.Add(op + new Vector3d(dx, dy, dz) * scale);
                 }
 
@@ -1974,15 +1996,15 @@ namespace Menegroth.GH.Components
                     rhinoMesh.Faces.AddFace(i0, i1, i2);
                 }
 
-                if (colorBy == COLOR_DEFLECTION && disps.Length > 0)
+                if (colorBy == COLOR_DEFLECTION && colorDisps.Length > 0)
                 {
                     for (int i = 0; i < rhinoMesh.Vertices.Count; i++)
                     {
                         double mag = 0;
-                        if (i < disps.Length && disps[i].Length >= 3)
-                            mag = Math.Sqrt(disps[i][0] * disps[i][0] +
-                                            disps[i][1] * disps[i][1] +
-                                            disps[i][2] * disps[i][2]);
+                        if (i < colorDisps.Length && colorDisps[i].Length >= 3)
+                            mag = Math.Sqrt(colorDisps[i][0] * colorDisps[i][0] +
+                                            colorDisps[i][1] * colorDisps[i][1] +
+                                            colorDisps[i][2] * colorDisps[i][2]);
                         rhinoMesh.VertexColors.Add(VisualizationColorMapper.DeflectionColor(mag, maxDisp, null));
                     }
                 }
@@ -1994,17 +2016,6 @@ namespace Menegroth.GH.Components
                     for (int i = 0; i < rhinoMesh.Vertices.Count; i++)
                         rhinoMesh.VertexColors.Add(utilColor);
                 }
-                else if (colorBy == COLOR_MATERIAL)
-                {
-                    bool isVault = m["is_vault"]?.ToObject<bool>() ?? false;
-                    var fallback = isVault
-                        ? VisualizationColorMapper.EarthenMaterialColor
-                        : VisualizationColorMapper.ConcreteMaterialColor;
-                    var materialColor = VisualizationColorMapper.ResolveMaterialColor(
-                        m["material_color_hex"]?.ToString(), fallback);
-                    for (int i = 0; i < rhinoMesh.Vertices.Count; i++)
-                        rhinoMesh.VertexColors.Add(materialColor);
-                }
                 else if (isAnalyticalSlab && faceAnalytical != null)
                 {
                     ApplyPerFaceVertexColors(rhinoMesh, faces, faceAnalytical, analyticalMax, analyticalDiverging);
@@ -2015,7 +2026,7 @@ namespace Menegroth.GH.Components
                     rhinoMesh.Normals.ComputeNormals();
                     rhinoMesh.Compact();
 
-                    string dispField = ReferenceEquals(disps, dispsLocal)
+                    string dispField = ReferenceEquals(colorDisps, dispsLocal)
                         ? "vertex_displacements_local"
                         : "vertex_displacements";
 
@@ -2065,6 +2076,155 @@ namespace Menegroth.GH.Components
                     }
                 }
             }
+        }
+
+        /// <summary>
+        /// Geometry displacement source for slab mesh vertices.
+        /// In local mode, geometry follows the same base shape path as global mode.
+        /// Local placement offsets are applied later via ComposeLocalSlabShapeDisplacements.
+        /// </summary>
+        private static double[][] SelectSlabShapeDisplacements(
+            double[][] dispsGlobal, double[][] dispsLocal,
+            bool isLocalMode, bool globalValid, bool localValid)
+        {
+            if (!isLocalMode)
+            {
+                if (globalValid) return dispsGlobal;
+                if (localValid) return dispsLocal;
+                return Array.Empty<double[]>();
+            }
+
+            if (globalValid) return dispsGlobal;
+            if (localValid) return dispsLocal;
+            return Array.Empty<double[]>();
+        }
+
+        /// <summary>
+        /// Build per-floor top displacement samples for columns.
+        /// For each column we keep:
+        /// - global top displacement (u_top)
+        /// - local top displacement relative to column base (u_top - u_base)
+        /// </summary>
+        private static List<(Point3d topPos, Vector3d globalDisp, Vector3d localDisp)> BuildLocalColumnTopDisplacements(
+            JToken viz,
+            Dictionary<int, (Point3d pos, Vector3d disp, Point3d defPos)> nodes)
+        {
+            var outPts = new List<(Point3d, Vector3d, Vector3d)>();
+            var frameElements = viz["frame_elements"] as JArray ?? new JArray();
+            var seenTop = new HashSet<int>();
+
+            foreach (var elem in frameElements)
+            {
+                string elemType = NormalizeElementType(elem["element_type"]?.ToString() ?? "");
+                if (elemType != "column") continue;
+
+                int ns = elem["node_start"]?.ToObject<int>() ?? 0;
+                int ne = elem["node_end"]?.ToObject<int>() ?? 0;
+                if (!nodes.ContainsKey(ns) || !nodes.ContainsKey(ne)) continue;
+
+                bool startIsBottom = nodes[ns].pos.Z <= nodes[ne].pos.Z;
+                int baseId = startIsBottom ? ns : ne;
+                int topId = startIsBottom ? ne : ns;
+                if (seenTop.Contains(topId)) continue;
+
+                var globalTop = nodes[topId].disp;
+                var localTop = globalTop - nodes[baseId].disp;
+                outPts.Add((nodes[topId].pos, globalTop, localTop));
+                seenTop.Add(topId);
+            }
+
+            return outPts;
+        }
+
+        /// <summary>
+        /// In local mode, keep the global slab shape (same shape logic as global mode),
+        /// then translate it to the local column-top frame:
+        /// shape_local = shape_global + interpolated(localTop - globalTop).
+        /// </summary>
+        private static double[][] ComposeLocalSlabShapeDisplacements(
+            double[][] verts,
+            double[][] dispsGlobal,
+            List<(Point3d topPos, Vector3d globalDisp, Vector3d localDisp)> localColumnTops)
+        {
+            int n = verts?.Length ?? 0;
+            if (n == 0) return Array.Empty<double[]>();
+            if (dispsGlobal == null || dispsGlobal.Length != n) return dispsGlobal ?? Array.Empty<double[]>();
+
+            double zRef = 0.0;
+            for (int i = 0; i < n; i++) zRef += verts[i][2];
+            zRef /= n;
+
+            var floorSupports = localColumnTops
+                .Where(p => Math.Abs(p.topPos.Z - zRef) <= 0.25)
+                .ToList();
+            if (floorSupports.Count == 0)
+                floorSupports = localColumnTops
+                    .Where(p => Math.Abs(p.topPos.Z - zRef) <= 0.75)
+                    .ToList();
+            if (floorSupports.Count == 0)
+                return dispsGlobal;
+
+            var composed = new double[n][];
+            for (int i = 0; i < n; i++)
+            {
+                double x = verts[i][0];
+                double y = verts[i][1];
+                var supportDelta = InterpolateSupportDeltaIdw2D(x, y, floorSupports);
+                var dglob = dispsGlobal[i];
+                composed[i] = new[]
+                {
+                    dglob[0] + supportDelta.X,
+                    dglob[1] + supportDelta.Y,
+                    dglob[2] + supportDelta.Z,
+                };
+            }
+            return composed;
+        }
+
+        private static Vector3d InterpolateSupportDeltaIdw2D(
+            double qx, double qy,
+            List<(Point3d topPos, Vector3d globalDisp, Vector3d localDisp)> samples,
+            double power = 2.0)
+        {
+            if (samples == null || samples.Count == 0) return Vector3d.Zero;
+            if (samples.Count == 1) return samples[0].localDisp - samples[0].globalDisp;
+
+            for (int i = 0; i < samples.Count; i++)
+            {
+                var p = samples[i].topPos;
+                double dx = qx - p.X;
+                double dy = qy - p.Y;
+                if (Math.Sqrt(dx * dx + dy * dy) < 1e-8)
+                    return samples[i].localDisp - samples[i].globalDisp;
+            }
+
+            var acc = Vector3d.Zero;
+            double wSum = 0.0;
+            for (int i = 0; i < samples.Count; i++)
+            {
+                var p = samples[i].topPos;
+                double dx = qx - p.X;
+                double dy = qy - p.Y;
+                double d = Math.Sqrt(dx * dx + dy * dy);
+                double w = 1.0 / Math.Pow(Math.Max(d, 1e-8), power);
+                acc += (samples[i].localDisp - samples[i].globalDisp) * w;
+                wSum += w;
+            }
+            return wSum > 0 ? acc / wSum : Vector3d.Zero;
+        }
+
+        /// <summary>
+        /// Color displacement source for slab deflection maps.
+        /// Local mode colors by local field when available.
+        /// </summary>
+        private static double[][] SelectSlabColorDisplacements(
+            double[][] dispsGlobal, double[][] dispsLocal,
+            bool isLocalMode, bool globalValid, bool localValid)
+        {
+            if (isLocalMode && localValid) return dispsLocal;
+            if (globalValid) return dispsGlobal;
+            if (localValid) return dispsLocal;
+            return Array.Empty<double[]>();
         }
 
         /// <summary>
@@ -2491,16 +2651,6 @@ namespace Menegroth.GH.Components
                                             disps[i][2] * disps[i][2]);
                         rhinoMesh.VertexColors.Add(VisualizationColorMapper.DeflectionColor(mag, maxDisp, null));
                     }
-                }
-                else if (colorBy == COLOR_MATERIAL)
-                {
-                    var fallback = isVault
-                        ? VisualizationColorMapper.EarthenMaterialColor
-                        : VisualizationColorMapper.ConcreteMaterialColor;
-                    var materialColor = VisualizationColorMapper.ResolveMaterialColor(
-                        m["material_color_hex"]?.ToString(), fallback);
-                    for (int i = 0; i < rhinoMesh.Vertices.Count; i++)
-                        rhinoMesh.VertexColors.Add(materialColor);
                 }
                 else if (isAnalyticalSlab && faceAnalytical != null)
                 {

@@ -12,6 +12,7 @@
 using StructuralSynthesizer
 using StructuralSizer
 using Asap
+using Meshes: Point, Segment
 using Test
 using Unitful
 
@@ -73,6 +74,61 @@ function _vertex_spike_stats(verts::Vector{Vector{Float64}}, faces::Vector{Vecto
         max = isempty(residuals) ? 0.0 : maximum(residuals),
         n = length(residuals),
     )
+end
+
+function _gen_pentagon_office(floor_height::Unitful.Length)
+    h = uconvert(u"m", floor_height)
+    skel = BuildingSkeleton{typeof(h)}()
+    push!(skel.stories_z, 0.0u"m")
+    push!(skel.stories_z, h)
+
+    plan = [
+        (0.0u"m", 0.0u"m"),
+        (9.0u"m", 0.0u"m"),
+        (12.0u"m", 5.0u"m"),
+        (6.0u"m", 9.0u"m"),
+        (0.0u"m", 6.0u"m"),
+    ]
+
+    function pt(i::Int, k::Int)
+        x, y = plan[i]
+        return Point(x, y, skel.stories_z[k + 1])
+    end
+
+    n = length(plan)
+    for k in 0:1
+        for i in 1:n
+            j = (i == n ? 1 : i + 1)
+            add_element!(skel, Segment(pt(i, k), pt(j, k)), group=:beams, level_idx=k)
+        end
+        if k > 0
+            for i in 1:n
+                add_element!(skel, Segment(pt(i, k - 1), pt(i, k)), group=:columns, level_idx=k)
+            end
+        end
+    end
+
+    for i in 1:n
+        add_vertex!(skel, pt(i, 0), group=:support)
+        add_vertex!(skel, pt(i, 1), group=:roof)
+    end
+
+    find_faces!(skel)
+    for (level_idx, story) in skel.stories
+        target_grp = if level_idx == 0
+            :grade
+        elseif level_idx == 1
+            :roof
+        else
+            :floor
+        end
+        if !haskey(skel.groups_faces, target_grp)
+            skel.groups_faces[target_grp] = Int[]
+        end
+        append!(skel.groups_faces[target_grp], story.faces)
+    end
+
+    return skel
 end
 
 @testset "Mesh Refinement" begin
@@ -332,5 +388,65 @@ end
             checked += 1
         end
         @test checked > 0
+    end
+
+    @testset "Drape non-quad cell integration (design_to_json path)" begin
+        skel_ngon = _gen_pentagon_office(12.0u"ft")
+        struc_ngon = BuildingStructure(skel_ngon)
+        params_ngon = DesignParameters(
+            name = "mesh_refinement_nonquad_drape",
+            floor = FlatPlateOptions(method = FEA()),
+            materials = MaterialOptions(concrete = NWC_4000),
+            max_iterations = 2,
+            display_units = metric,
+        )
+        design_ngon = design_building(struc_ngon, params_ngon)
+        @test all_ok(design_ngon)
+
+        build_analysis_model!(design_ngon)
+        @test has_analysis_model(design_ngon)
+
+        # Ensure at least one slab cell is truly non-quad.
+        nonquad_cells = 0
+        for slab in struc_ngon.slabs
+            for ci in slab.cell_indices
+                vis = struc_ngon.skeleton.face_vertex_indices[struc_ngon.cells[ci].face_idx]
+                length(vis) != 4 && (nonquad_cells += 1)
+            end
+        end
+        @test nonquad_cells > 0
+
+        # Full API serialization path should produce deflected slab meshes.
+        output_ngon = design_to_json(design_ngon)
+        viz_ngon = output_ngon.visualization
+        isnothing(viz_ngon) && @test_skip "No visualization (skip_visualization?)"
+        meshes_ngon = viz_ngon.deflected_slab_meshes
+        @test !isempty(meshes_ngon)
+
+        # Drape cell-map construction should include polygon cells for non-quad slabs.
+        # Build support arrays directly from slab-cell vertices to isolate the non-quad
+        # map-construction path from frame-node identity/offset nuances.
+        found_poly_cells = false
+        vc_ngon = struc_ngon.skeleton.geometry.vertex_coords
+        for (slab_idx, slab) in enumerate(struc_ngon.slabs)
+            vert_set = Set{Int}()
+            has_nonquad = false
+            for ci in slab.cell_indices
+                vis = struc_ngon.skeleton.face_vertex_indices[struc_ngon.cells[ci].face_idx]
+                length(vis) != 4 && (has_nonquad = true)
+                foreach(v -> push!(vert_set, v), vis)
+            end
+            has_nonquad || continue
+
+            sup_x = Float64[vc_ngon[vi, 1] for vi in vert_set]
+            sup_y = Float64[vc_ngon[vi, 2] for vi in vert_set]
+            sup_disp = [Float64[0.0, 0.0, 0.0] for _ in eachindex(sup_x)]
+            maps = StructuralSynthesizer._build_bays(design_ngon, slab_idx, sup_x, sup_y, sup_disp)
+            if !isempty(maps.poly_cells)
+                found_poly_cells = true
+                break
+            end
+        end
+        @test found_poly_cells
     end
 end

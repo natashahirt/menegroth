@@ -3,7 +3,7 @@ using LinearAlgebra: norm
 
 # ─── Load project ─────────────────────────────────────────────────────────────
 using StructuralSynthesizer
-using StructuralSynthesizer: _idw_interpolate
+using StructuralSynthesizer: _idw_interpolate, _PolyCell, _poly_cell_interpolate
 
 # =============================================================================
 # Unit tests for IDW interpolation
@@ -69,6 +69,47 @@ using StructuralSynthesizer: _idw_interpolate
     @testset "Empty data → zero vector" begin
         v = _idw_interpolate(1.0, 1.0, Float64[], Float64[], Vector{Float64}[])
         @test v ≈ [0.0, 0.0, 0.0]
+    end
+end
+
+# =============================================================================
+# Unit tests for polygon-cell interpolation (non-quad drape support)
+# =============================================================================
+@testset "Polygon Cell Interpolation" begin
+    @testset "Exact at polygon vertices" begin
+        verts = [(0.0, 0.0), (2.0, 0.0), (3.0, 1.0), (1.5, 2.0), (0.0, 1.0)]
+        vals = [[0.0, 0.0, -0.01],
+                [0.0, 0.0, -0.02],
+                [0.0, 0.0, -0.03],
+                [0.0, 0.0, -0.04],
+                [0.0, 0.0, -0.05]]
+        cell = _PolyCell(verts, vals)
+        for i in eachindex(verts)
+            x, y = verts[i]
+            v = _poly_cell_interpolate(x, y, cell)
+            @test v !== nothing
+            @test v ≈ vals[i]
+        end
+    end
+
+    @testset "Constant field reproduces constant interior value" begin
+        verts = [(0.0, 0.0), (2.0, 0.0), (3.0, 1.0), (1.5, 2.0), (0.0, 1.0)]
+        vals = [[1.0, -2.0, -0.02] for _ in eachindex(verts)]
+        cell = _PolyCell(verts, vals)
+        v = _poly_cell_interpolate(1.2, 0.8, cell)
+        @test v !== nothing
+        @test v ≈ [1.0, -2.0, -0.02]
+    end
+
+    @testset "Outside polygon returns nothing" begin
+        verts = [(0.0, 0.0), (2.0, 0.0), (3.0, 1.0), (1.5, 2.0), (0.0, 1.0)]
+        vals = [[0.0, 0.0, -0.01],
+                [0.0, 0.0, -0.02],
+                [0.0, 0.0, -0.03],
+                [0.0, 0.0, -0.04],
+                [0.0, 0.0, -0.05]]
+        cell = _PolyCell(verts, vals)
+        @test _poly_cell_interpolate(10.0, 10.0, cell) === nothing
     end
 end
 

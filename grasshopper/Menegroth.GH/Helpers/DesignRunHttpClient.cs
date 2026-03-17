@@ -37,23 +37,40 @@ namespace Menegroth.GH.Helpers
 
         public static async Task<bool> CheckHealthAsync(string baseUrl, CancellationToken cancellationToken = default)
         {
-            try
+            const int maxRetries = 5;
+            const int retryDelayMs = 500;
+
+            for (int attempt = 0; attempt <= maxRetries; attempt++)
             {
-                using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-                cts.CancelAfter(TimeSpan.FromSeconds(MenegrothConfig.HealthCheckTimeoutSeconds));
-                using var req = new HttpRequestMessage(HttpMethod.Get, NormalizeUrl(baseUrl, "health"));
-                AddAuthHeader(req);
-                var resp = await Client.SendAsync(req, cts.Token);
-                return resp.IsSuccessStatusCode;
+                cancellationToken.ThrowIfCancellationRequested();
+                try
+                {
+                    using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                    cts.CancelAfter(TimeSpan.FromSeconds(MenegrothConfig.HealthCheckTimeoutSeconds));
+                    using var req = new HttpRequestMessage(HttpMethod.Get, NormalizeUrl(baseUrl, "health"));
+                    AddAuthHeader(req);
+                    var resp = await Client.SendAsync(req, cts.Token);
+                    if (resp.IsSuccessStatusCode)
+                        return true;
+                }
+                catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+                {
+                    // Local per-attempt timeout: retry up to maxRetries.
+                }
+                catch (OperationCanceledException)
+                {
+                    throw;
+                }
+                catch
+                {
+                    // Transient network errors: retry up to maxRetries.
+                }
+
+                if (attempt < maxRetries)
+                    await Task.Delay(retryDelayMs, cancellationToken);
             }
-            catch (OperationCanceledException)
-            {
-                throw;
-            }
-            catch
-            {
-                return false;
-            }
+
+            return false;
         }
 
         public static async Task<string> PostDesignAsync(string baseUrl, string jsonBody, CancellationToken cancellationToken = default)
@@ -202,6 +219,10 @@ namespace Menegroth.GH.Helpers
                         if (st == "error")
                             return "{\"state\":\"error\",\"message\":\"Server reported an error during startup. Check server logs.\"}";
                     }
+                }
+                catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+                {
+                    // Request-level timeout (or similar) without explicit cancel: retry until overall deadline.
                 }
                 catch (OperationCanceledException)
                 {

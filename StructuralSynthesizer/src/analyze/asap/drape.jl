@@ -45,10 +45,23 @@ struct _Bay
 end
 
 """
-    _build_bays(design, slab_idx, sup_x, sup_y, sup_disp) -> Vector{_Bay}
+A convex/concave slab cell polygon with support displacement values at vertices.
+
+Used when a slab cell is not a quadrilateral, so local support field can still
+be interpolated directly from cell geometry before falling back to affine/IDW.
+"""
+struct _PolyCell
+    vertices::Vector{Tuple{Float64, Float64}}
+    disps::Vector{Vector{Float64}}
+end
+
+"""
+    _build_bays(design, slab_idx, sup_x, sup_y, sup_disp)
+        -> NamedTuple{(:quad_bays, :poly_cells)}
 
 Build rectangular bay structures for a slab from its cells.
-Each bay is one cell/panel with 4 corner columns whose displacements are known.
+Each quadrilateral bay uses bilinear interpolation. Non-quad cells use polygon
+interpolation if all cell vertices resolve to support displacements.
 """
 function _build_bays(design::BuildingDesign, slab_idx::Int,
                      sup_x::Vector{Float64}, sup_y::Vector{Float64},
@@ -56,7 +69,7 @@ function _build_bays(design::BuildingDesign, slab_idx::Int,
     struc = design.structure
     skel = struc.skeleton
 
-    slab_idx > length(struc.slabs) && return _Bay[]
+    slab_idx > length(struc.slabs) && return (quad_bays = _Bay[], poly_cells = _PolyCell[])
     slab = struc.slabs[slab_idx]
 
     # Position → displacement lookup (rounded keys for floating-point tolerance)
@@ -67,17 +80,35 @@ function _build_bays(design::BuildingDesign, slab_idx::Int,
         pos_disp[(round_c(sup_x[i]), round_c(sup_y[i]))] = sup_disp[i]
     end
 
-    bays = _Bay[]
+    quad_bays = _Bay[]
+    poly_cells = _PolyCell[]
     for cell_idx in slab.cell_indices
         cell = struc.cells[cell_idx]
         cell.floor_type == :grade && continue
         vis = skel.face_vertex_indices[cell.face_idx]
-        length(vis) == 4 || continue
+        length(vis) < 3 && continue
 
         # Corner XY coordinates (meters) from cached matrix
         vc = skel.geometry.vertex_coords
         cxs = [vc[vi, 1] for vi in vis]
         cys = [vc[vi, 2] for vi in vis]
+        pts = Tuple{Float64, Float64}[(cxs[i], cys[i]) for i in eachindex(cxs)]
+
+        if length(vis) != 4
+            cell_disp = Vector{Float64}[]
+            ok = true
+            for (px, py) in pts
+                d = get(pos_disp, (round_c(px), round_c(py)), nothing)
+                if d === nothing
+                    ok = false
+                    break
+                end
+                push!(cell_disp, d)
+            end
+            ok || continue
+            push!(poly_cells, _PolyCell(pts, cell_disp))
+            continue
+        end
 
         xmin, xmax = extrema(cxs)
         ymin, ymax = extrema(cys)
@@ -91,9 +122,9 @@ function _build_bays(design::BuildingDesign, slab_idx::Int,
         # All 4 corners must be resolvable
         (d00 === nothing || d10 === nothing || d01 === nothing || d11 === nothing) && continue
 
-        push!(bays, _Bay(xmin, xmax, ymin, ymax, d00, d10, d01, d11))
+        push!(quad_bays, _Bay(xmin, xmax, ymin, ymax, d00, d10, d01, d11))
     end
-    return bays
+    return (quad_bays = quad_bays, poly_cells = poly_cells)
 end
 
 """
@@ -117,6 +148,101 @@ function _bay_interpolate(px::Float64, py::Float64, bays::Vector{_Bay})
                       (1-s)*t     * bay.d01 +
                       s*t         * bay.d11
         end
+    end
+    return nothing
+end
+
+"""
+    _poly_cell_interpolate(px, py, cell) -> Union{Vector{Float64}, Nothing}
+
+Interpolate support displacement inside an N-gon cell using mean value
+coordinates. Returns `nothing` if the point is outside the polygon or if
+weights are numerically unstable.
+"""
+function _poly_cell_interpolate(px::Float64, py::Float64, cell::_PolyCell)
+    verts = cell.vertices
+    vals = cell.disps
+    n = length(verts)
+    n < 3 && return nothing
+
+    # Exact at vertices.
+    for i in 1:n
+        vx, vy = verts[i]
+        hypot(px - vx, py - vy) < 1e-10 && return copy(vals[i])
+    end
+
+    # Exact on edges via linear interpolation.
+    for i in 1:n
+        j = (i == n ? 1 : i + 1)
+        x1, y1 = verts[i]
+        x2, y2 = verts[j]
+        ex = x2 - x1
+        ey = y2 - y1
+        len2 = ex^2 + ey^2
+        len2 < 1e-16 && continue
+
+        t = clamp(((px - x1) * ex + (py - y1) * ey) / len2, 0.0, 1.0)
+        qx = x1 + t * ex
+        qy = y1 + t * ey
+        if hypot(px - qx, py - qy) < 1e-9
+            return @. (1.0 - t) * vals[i] + t * vals[j]
+        end
+    end
+
+    _point_inside_polygon((px, py), verts) || return nothing
+
+    di = Vector{Float64}(undef, n)
+    tan_half = Vector{Float64}(undef, n)
+    for i in 1:n
+        j = (i == n ? 1 : i + 1)
+        rix = verts[i][1] - px
+        riy = verts[i][2] - py
+        rjx = verts[j][1] - px
+        rjy = verts[j][2] - py
+        di[i] = hypot(rix, riy)
+        di[i] < 1e-12 && return copy(vals[i])
+        θ = atan(abs(rix * rjy - riy * rjx), rix * rjx + riy * rjy)
+        tan_half[i] = tan(0.5 * θ)
+        isfinite(tan_half[i]) || return nothing
+    end
+
+    w = Vector{Float64}(undef, n)
+    wsum = 0.0
+    for i in 1:n
+        prev = (i == 1 ? n : i - 1)
+        wi = (tan_half[prev] + tan_half[i]) / di[i]
+        isfinite(wi) || return nothing
+        w[i] = wi
+        wsum += wi
+    end
+    abs(wsum) < 1e-12 && return nothing
+
+    out = [0.0, 0.0, 0.0]
+    for i in 1:n
+        out .+= (w[i] / wsum) .* vals[i]
+    end
+    return out
+end
+
+"""
+    _cell_field_interpolate(px, py, quad_bays, poly_cells)
+        -> Union{Vector{Float64}, Nothing}
+
+Resolve support field for a slab point using:
+1) enclosing quadrilateral bay bilinear interpolation, then
+2) enclosing N-gon polygon interpolation.
+"""
+function _cell_field_interpolate(
+    px::Float64,
+    py::Float64,
+    quad_bays::Vector{_Bay},
+    poly_cells::Vector{_PolyCell},
+)
+    bay_val = _bay_interpolate(px, py, quad_bays)
+    bay_val !== nothing && return bay_val
+    for cell in poly_cells
+        v = _poly_cell_interpolate(px, py, cell)
+        v !== nothing && return v
     end
     return nothing
 end
@@ -301,6 +427,12 @@ function _geometric_support_nodes_for_slab(
         n_supporting_columns = 0,
     )
     slab = struc.slabs[slab_idx]
+    isempty(slab.cell_indices) && return (
+        supports = Asap.Node[],
+        support_vertices = Int[],
+        z_tol = 0.15,
+        n_supporting_columns = 0,
+    )
 
     # Slab elevation from any face vertex (all vertices on the cell face share z).
     skel = struc.skeleton
@@ -492,16 +624,17 @@ function compute_draped_displacements(design::BuildingDesign)
         sup_disp = Vector{Float64}[Asap.to_displacement_vec(sn.displacement)[1:3]
                                     for sn in support_nodes]
 
-        # Build bay lookup from slab cells
+        # Build cell interpolation lookup from slab cells.
         slab_idx = tryparse(Int, String(slab_id)[6:end])
-        bays = if slab_idx !== nothing
+        cell_maps = if slab_idx !== nothing
             _build_bays(design, slab_idx, sup_x, sup_y, sup_disp)
         else
-            _Bay[]
+            (quad_bays = _Bay[], poly_cells = _PolyCell[])
         end
 
         # Drape each shell node
         bay_count = 0
+        poly_count = 0
         affine_count = 0
         idw_count = 0
         local_count = 0
@@ -519,8 +652,9 @@ function compute_draped_displacements(design::BuildingDesign)
                 ny = ustrip(u"m", node.position[2])
                 local_count += 1
 
-                # Primary: bilinear within enclosing bay.
-                coupled_field = _bay_interpolate(nx, ny, bays)
+                # Primary: cell-based interpolation in enclosing quad/N-gon cell.
+                coupled_field = _cell_field_interpolate(
+                    nx, ny, cell_maps.quad_bays, cell_maps.poly_cells)
                 if coupled_field === nothing
                     # Secondary: smooth weighted affine interpolation over supports.
                     coupled_field = _weighted_affine_interpolate(nx, ny, sup_x, sup_y, sup_disp)
@@ -532,14 +666,18 @@ function compute_draped_displacements(design::BuildingDesign)
                         affine_count += 1
                     end
                 else
-                    bay_count += 1
+                    if _bay_interpolate(nx, ny, cell_maps.quad_bays) !== nothing
+                        bay_count += 1
+                    else
+                        poly_count += 1
+                    end
                 end
 
                 local_dict[nid] = δ_coupled .- coupled_field
             end
         end
         if idw_count > 0
-            @warn "Drape slab used IDW fallback for some shell nodes (outside bay/affine interpolation)." slab_id bay_nodes=bay_count affine_nodes=affine_count idw_nodes=idw_count local_nodes=local_count support_count=length(support_nodes)
+            @warn "Drape slab used IDW fallback for some shell nodes (outside cell/affine interpolation)." slab_id quad_nodes=bay_count ngon_nodes=poly_count affine_nodes=affine_count idw_nodes=idw_count local_nodes=local_count support_count=length(support_nodes)
         end
     end
 

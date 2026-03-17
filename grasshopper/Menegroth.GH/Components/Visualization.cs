@@ -737,6 +737,24 @@ namespace Menegroth.GH.Components
                     var frameMesh = TryGetFrameMeshForElement(elem, elementCurve);
                     if (frameMesh != null)
                     {
+                        if (isDeflected && finalScale > 0 && hasStartNode && hasEndNode)
+                        {
+                            var origS = nodes[ns].pos;
+                            var origE = nodes[ne].pos;
+                            Point3d defS, defE;
+                            if (isLocal && isColumn)
+                            {
+                                bool startIsBottom = origS.Z <= origE.Z;
+                                defS = startIsBottom ? origS : origS + (nodes[ns].defPos - origS) * finalScale;
+                                defE = startIsBottom ? origE + (nodes[ne].defPos - origE) * finalScale : origE;
+                            }
+                            else
+                            {
+                                defS = origS + (nodes[ns].defPos - origS) * finalScale;
+                                defE = origE + (nodes[ne].defPos - origE) * finalScale;
+                            }
+                            frameMesh = TransformFrameMeshForDeflection(frameMesh, origS, origE, defS, defE);
+                        }
                         var ghMesh = new GH_Mesh(frameMesh);
                         frameGeometry.Add(ghMesh);
                         frameGeometryColors.Add(elementColor);
@@ -1203,6 +1221,50 @@ namespace Menegroth.GH.Components
             }
             var brep = SweepSection(elementCurve, elem);
             return brep != null ? BrepToMesh(brep) : null;
+        }
+
+        /// <summary>
+        /// Deform a frame element mesh so its axis follows deflection.
+        /// Projects each vertex onto the original axis, computes a parameter t ∈ [0,1],
+        /// then moves it to the corresponding point on the deflected axis (preserving
+        /// the cross-section offset). Works for both columns and beams.
+        /// </summary>
+        private static Mesh TransformFrameMeshForDeflection(
+            Mesh mesh,
+            Point3d origStart,
+            Point3d origEnd,
+            Point3d deflectedStart,
+            Point3d deflectedEnd)
+        {
+            if (mesh == null || mesh.Vertices.Count == 0)
+                return mesh;
+
+            Vector3d axisOrig = origEnd - origStart;
+            double axisLen = axisOrig.Length;
+            if (axisLen < 1e-10)
+                return mesh;
+
+            var result = new Mesh();
+            for (int i = 0; i < mesh.Vertices.Count; i++)
+            {
+                var v = new Point3d(mesh.Vertices[i]);
+                double t = Vector3d.Multiply(v - origStart, axisOrig) / (axisLen * axisLen);
+                t = Math.Max(0, Math.Min(1, t));
+                Point3d onAxisOrig = origStart + t * axisOrig;
+                Vector3d offset = v - onAxisOrig;
+                Point3d onAxisNew = deflectedStart + (deflectedEnd - deflectedStart) * t;
+                result.Vertices.Add(onAxisNew + offset);
+            }
+            foreach (var f in mesh.Faces)
+            {
+                if (f.IsQuad)
+                    result.Faces.AddFace(f.A, f.B, f.C, f.D);
+                else
+                    result.Faces.AddFace(f.A, f.B, f.C);
+            }
+            result.Normals.ComputeNormals();
+            result.Compact();
+            return result;
         }
 
         /// <summary>

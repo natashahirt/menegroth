@@ -808,7 +808,9 @@ namespace Menegroth.GH.Components
                 if (isOriginalMode)
                     BuildOriginalSlabs(viz, slabGeometry, slabColors, effectiveColorBySlab, maxDisp, slabMaxima,
                         showVolumes: modeInt == MODE_SIZED);
-                else if (isDeflected && finalScale > 0)
+                // In Analytical mode, keep slab rendering on the deflected-mesh path
+                // even at scale=0 so per-face/per-vertex analytical coloring remains visible.
+                else if (isDeflected && (finalScale > 0 || modeInt == MODE_ANALYTICAL))
                     BuildDeflectedSlabs(viz, finalScale, slabGeometry,
                         slabColors, effectiveColorBySlab, maxDisp, isLocal, slabMaxima,
                         showVolumes: modeInt == MODE_SIZED);

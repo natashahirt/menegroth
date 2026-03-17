@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Windows.Forms;
 using Grasshopper.Kernel;
+using Menegroth.GH.Helpers;
 using Menegroth.GH.Types;
 using Rhino.Geometry;
 

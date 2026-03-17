@@ -18,7 +18,6 @@ APIInput
 APIOutput
 APIParams
 APIError
-StructuralSynthesizer.APISummary
 ```
 
 ## Functions
@@ -27,7 +26,7 @@ StructuralSynthesizer.APISummary
 register_routes!
 ```
 
-### Endpoints
+## Endpoints
 
 ### GET /health
 
@@ -45,19 +44,27 @@ curl http://localhost:8080/health
 
 Server state endpoint.
 
-The response shape is stable in both **bootstrap mode** and **full service mode**:
+The response shape is stable. In the production **bootstrap script** (`scripts/api/sizer_bootstrap.jl`), the server initially serves a lightweight `/status` implementation (`mode = "bootstrap"`) while `StructuralSynthesizer` loads in the background. Once the load completes, the full route set is registered (replacing `/status`), and the response switches to the full service payload (`mode = "full"`).
 
 - `status`: `"ok"`
-- `mode`: `"bootstrap"` or `"full"`
-- `ready`: `true` when the full API is loaded and design endpoints are available
-- `state`: `"warming"`, `"error"`, `"idle"`, `"running"`, or `"queued"`
-- `has_result`: whether a completed design result is available via `GET /result` (full mode only)
+- `mode`: `"bootstrap"` during background load, then `"full"` once routes are registered
+- `ready`: `true` only once the full route set is registered and design endpoints are available
+- `state`: `"warming"` / `"error"` during bootstrap load; `"idle"` / `"running"` / `"queued"` in full mode
+- `has_result`: whether a completed design result is available via `GET /result` (full mode only; always `false` during bootstrap load)
 - `message`: optional human-readable message (or `null`)
 - `error`: optional load error details (or `null`, bootstrap only)
 
 ```bash
 curl http://localhost:8080/status
 ```
+
+Bootstrap load (before full routes are registered):
+
+```json
+{"status":"ok","mode":"bootstrap","ready":false,"state":"warming","has_result":false,"message":"Full API not ready yet","error":null}
+```
+
+Full service mode (or bootstrap after load completes):
 
 ```json
 {"status":"ok","mode":"full","ready":true,"state":"idle","has_result":false,"message":null,"error":null}
@@ -69,6 +76,12 @@ Returns whether expected Gurobi Web License Service environment variables are se
 
 ```bash
 curl http://localhost:8080/env-check
+```
+
+Example response:
+
+```json
+{"GRB_WLSACCESSID":true,"GRB_WLSSECRET":true,"GRB_LICENSEID":true}
 ```
 
 ### GET /debug (bootstrap only)
@@ -185,7 +198,7 @@ Bootstrap mode starts a lightweight HTTP server immediately with `/health`, `/st
 In bootstrap mode (before the full API is loaded), `GET /status` returns:
 
 ```json
-{"state":"warming","message":"Full API not ready yet"}
+{"status":"ok","mode":"bootstrap","ready":false,"state":"warming","has_result":false,"message":"Full API not ready yet","error":null}
 ```
 
 ### Full Service Mode (Development)
@@ -224,7 +237,7 @@ This significantly speeds up parameter studies where only loads, materials, or f
 |:---------|:------------|:--------|
 | `PORT` / `SIZER_PORT` | HTTP listen port | `8080` |
 | `SIZER_HOST` | Bind address | `0.0.0.0` |
-| `SS_ENABLE_VISUALIZATION` | Toggle heavy visualization dependencies (e.g., GLMakie) in interactive tooling; does not currently control JSON `visualization` output | `false` |
+| `SS_ENABLE_VISUALIZATION` | Toggle heavy interactive visualization dependencies (e.g., GLMakie) in tooling; JSON `visualization` output is controlled by request params like `skip_visualization` / `visualization_detail` | `false` |
 | `SS_ENABLE_HEAVY_PRECOMPILE_WORKLOAD` | Run the heavy precompile workload when `StructuralSynthesizer` loads | `false` for the API scripts (they set this unless already provided) |
 
 ## Limitations & Future Work

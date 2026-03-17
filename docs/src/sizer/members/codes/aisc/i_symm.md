@@ -54,7 +54,7 @@ material = A992_Steel
 ϕPn = get_ϕPn(section, material, 12u"ft"; axis=:weak)      # Compression (Ch. E)
 ϕMn = get_ϕMn(section, material; Lb=12u"ft", Cb=1.0)       # Flexure (Ch. F)
 ϕVn = get_ϕVn(section, material; axis=:strong)              # Shear (Ch. G)
-ϕPn_t = get_ϕPn_tension(section, material)                  # Tension (Ch. D)
+ϕPn_t = StructuralSizer.get_ϕPn_tension(section, material)  # Tension (Ch. D)
 
 ratio = check_PMxMy_interaction(Pu, Mux, Muy, ϕPn, ϕMnx, ϕMny)
 # ratio ≤ 1.0 → OK

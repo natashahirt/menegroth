@@ -115,8 +115,8 @@ The default ECC for SFRM is `ECC_SFRM = 0.85` kgCO₂e/kg (CLF baseline for ceme
 
 The SFRM thickness equation from UL Design X772:
 
-```
-h = R / (1.05 × (W/D) + 0.61)
+```math
+h = \frac{R}{1.05\,(W/D) + 0.61}
 ```
 
 where:

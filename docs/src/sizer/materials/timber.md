@@ -7,9 +7,12 @@ CurrentModule = StructuralSizer
 > ```julia
 > using StructuralSizer
 > # Define a custom timber material (no presets yet)
-> timber = Timber(:douglas_fir, :no1, 12.4e9u"Pa", 6.9e9u"Pa",
->     7.6e6u"Pa", 5.2e6u"Pa", 1.0e6u"Pa", 7.6e6u"Pa", 4.3e6u"Pa",
->     500.0u"kg/m^3", 0.31)
+> timber = Timber(:douglas_fir, :no1,
+>     12.4e9u"Pa", 6.9e9u"Pa",   # E, Emin
+>     7.6e6u"Pa", 5.2e6u"Pa",    # Fb, Ft
+>     1.0e6u"Pa", 7.6e6u"Pa",    # Fv, Fc
+>     4.3e6u"Pa",                # Fc_perp
+>     500.0u"kg/m^3", 0.31)       # ρ, ecc
 > ```
 
 ## Overview

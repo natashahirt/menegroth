@@ -1893,6 +1893,15 @@ namespace Menegroth.GH.Components
         {
             bool isAnalyticalSlab = colorBy >= COLOR_SLAB_BENDING && colorBy <= COLOR_SLAB_SURFACE_STRESS;
             var meshes = viz["deflected_slab_meshes"] as JArray ?? new JArray();
+            var slabsWithMeshDropPanels = new HashSet<int>();
+            foreach (var meshToken in meshes)
+            {
+                int sid = meshToken?["slab_id"]?.ToObject<int>() ?? -1;
+                var tokenDpMeshes = meshToken?["drop_panel_meshes"] as JArray;
+                if (sid > 0 && tokenDpMeshes != null && tokenDpMeshes.Count > 0)
+                    slabsWithMeshDropPanels.Add(sid);
+            }
+            var slabsWithDropPanelsRendered = new HashSet<int>();
             foreach (var m in meshes)
             {
                 var verts = m["vertices"]?.ToObject<double[][]>() ?? new double[0][];
@@ -1983,26 +1992,43 @@ namespace Menegroth.GH.Components
                         if (thickness > 0 && TryBuildDeflectedSlabVolume(rhinoMesh, thickness, output))
                         {
                             AppendSlabColor(colors, m, colorBy, maxDisp, dispField, maxima);
-                            AppendDropPanelDeflectedGeometry(viz, m, rhinoMesh, thickness,
-                                output, colors, colorBy, maxDisp, maxima);
                         }
                         else
                         {
                             output.Add(new GH_Mesh(rhinoMesh));
                             AppendSlabColor(colors, m, colorBy, maxDisp, dispField, maxima);
-                            AppendDropPanelDeflectedGeometry(viz, m, rhinoMesh, thickness,
-                                output, colors, colorBy, maxDisp, maxima);
                         }
                     }
                     else
                     {
                         output.Add(new GH_Mesh(rhinoMesh));
                         AppendSlabColor(colors, m, colorBy, maxDisp, dispField, maxima);
-                        AppendDropPanelDeflectedGeometry(viz, m, rhinoMesh,
-                            m["thickness"]?.ToObject<double>() ?? 0,
-                            output, colors, colorBy, maxDisp, maxima);
                     }
 
+                    // Drop panel solids are only shown in Sized mode. In Analytical mode, keep slab
+                    // output to the shell mesh only (no boxed/solid drop panel geometry).
+                    if (showVolumes)
+                    {
+                        // Drop panels are slab-level geometry. Some payloads include multiple mesh
+                        // tokens per slab; render once per slab and prefer mesh-based
+                        // drop_panel_meshes over fallback sized-slab boxes to avoid duplicates.
+                        int slabId = m["slab_id"]?.ToObject<int>() ?? -1;
+                        bool tokenHasMeshDropPanels = (m["drop_panel_meshes"] as JArray)?.Count > 0;
+                        bool dropPanelsAlreadyRendered = slabId > 0 && slabsWithDropPanelsRendered.Contains(slabId);
+                        bool skipFallbackForThisToken =
+                            slabId > 0 &&
+                            slabsWithMeshDropPanels.Contains(slabId) &&
+                            !tokenHasMeshDropPanels;
+
+                        if (!dropPanelsAlreadyRendered && !skipFallbackForThisToken)
+                        {
+                            AppendDropPanelDeflectedGeometry(viz, m, rhinoMesh,
+                                m["thickness"]?.ToObject<double>() ?? 0,
+                                output, colors, colorBy, maxDisp, maxima);
+                            if (slabId > 0)
+                                slabsWithDropPanelsRendered.Add(slabId);
+                        }
+                    }
                 }
             }
         }
@@ -2186,7 +2212,7 @@ namespace Menegroth.GH.Components
         /// Build deflected drop panel volumes from the slab's deflected mesh.
         /// Each drop_panel_meshes entry contains face indices into the parent mesh;
         /// the drop panel is an offset solid below the slab soffit.
-        /// Falls back to box geometry from drop_panels when drop_panel_meshes is absent.
+        /// No fallback box geometry is generated when drop_panel_meshes is absent.
         /// </summary>
         private static void AppendDropPanelDeflectedGeometry(JToken viz, JToken meshToken, Mesh deflectedSlabMesh,
             double slabThickness, List<IGH_GeometricGoo> output,
@@ -2197,89 +2223,6 @@ namespace Menegroth.GH.Components
             {
                 AppendDropPanelDeflectedFromMeshes(meshToken, deflectedSlabMesh, slabThickness,
                     output, colors, colorBy, maxDisp, maxima);
-                return;
-            }
-
-            // Fallback: use drop_panels from mesh token or sized_slabs when mesh-based data is absent
-            var dropPanels = meshToken["drop_panels"] as JArray;
-            double zTop = 0.0;
-            JToken sizedSlab = null;
-            var sizedSlabs = viz["sized_slabs"] as JArray;
-            var slabId = meshToken["slab_id"]?.ToObject<int>() ?? -1;
-            if (sizedSlabs != null && slabId >= 0)
-            {
-                foreach (var s in sizedSlabs)
-                {
-                    if (s["slab_id"]?.ToObject<int>() == slabId) { sizedSlab = s; break; }
-                }
-            }
-            if (dropPanels == null || dropPanels.Count == 0)
-            {
-                dropPanels = sizedSlab?["drop_panels"] as JArray;
-            }
-            if (dropPanels == null || dropPanels.Count == 0) return;
-
-            if (sizedSlab == null) return;
-            zTop = sizedSlab["z_top"]?.ToObject<double>() ?? 0.0;
-
-            // Read original vertex positions so we can compute scaled Z-deflection
-            // by comparing the deflected mesh (which has scale baked in) to the original.
-            var verts = meshToken["vertices"]?.ToObject<double[][]>() ?? new double[0][];
-
-            foreach (var dp in dropPanels)
-            {
-                var c = dp["center"]?.ToObject<double[]>() ?? new double[0];
-                if (c.Length < 2) continue;
-                double length = dp["length"]?.ToObject<double>() ?? 0.0;
-                double width = dp["width"]?.ToObject<double>() ?? 0.0;
-                double extra = dp["extra_depth"]?.ToObject<double>() ?? 0.0;
-                if (length <= 0 || width <= 0 || extra <= 0) continue;
-
-                // Find the nearest original vertex (XY) and compute the Z delta
-                // between the deflected mesh vertex and the original vertex.
-                // The deflected mesh already has scale baked in, so this gives correct offset.
-                double dzDeflect = 0.0;
-                if (deflectedSlabMesh != null && deflectedSlabMesh.Vertices.Count > 0 &&
-                    verts.Length > 0)
-                {
-                    double bestDistSq = double.MaxValue;
-                    int bestIdx = -1;
-                    int nSearch = Math.Min(verts.Length, deflectedSlabMesh.Vertices.Count);
-                    for (int i = 0; i < nSearch; i++)
-                    {
-                        if (verts[i].Length < 3) continue;
-                        double dx = verts[i][0] - c[0];
-                        double dy = verts[i][1] - c[1];
-                        double distSq = dx * dx + dy * dy;
-                        if (distSq < bestDistSq)
-                        {
-                            bestDistSq = distSq;
-                            bestIdx = i;
-                        }
-                    }
-                    if (bestIdx >= 0)
-                        dzDeflect = deflectedSlabMesh.Vertices[bestIdx].Z - verts[bestIdx][2];
-                }
-
-                double x0 = c[0] - length / 2.0;
-                double x1 = c[0] + length / 2.0;
-                double y0 = c[1] - width / 2.0;
-                double y1 = c[1] + width / 2.0;
-                double zTopDrop = zTop - slabThickness + dzDeflect;
-                double zBotDrop = zTopDrop - extra;
-                var bbox = new BoundingBox(new[]
-                {
-                    new Point3d(x0, y0, zBotDrop), new Point3d(x1, y0, zBotDrop),
-                    new Point3d(x1, y1, zBotDrop), new Point3d(x0, y1, zBotDrop),
-                    new Point3d(x0, y0, zTopDrop), new Point3d(x1, y0, zTopDrop),
-                    new Point3d(x1, y1, zTopDrop), new Point3d(x0, y1, zTopDrop),
-                });
-                var dropMesh = CreateBoxMesh(bbox);
-                if (dropMesh != null)
-                {
-                    output.Add(new GH_Mesh(dropMesh));
-                    AppendSlabColor(colors, meshToken, colorBy, maxDisp, "vertex_displacements", maxima);
-                }
             }
         }
 
@@ -2335,41 +2278,47 @@ namespace Menegroth.GH.Components
                 subMesh.Normals.ComputeNormals();
                 subMesh.Compact();
 
-                // Top surface = slab soffit (offset from top mesh by -thickness along normal)
-                // Bottom surface = soffit - extra_depth
-                var topMesh = new Mesh();
-                var botMesh = new Mesh();
+                // Build soffit vertices (top of drop panel region) for stitching side walls,
+                // and bottom vertices for the visible bottom face.
+                // The top face is omitted — it's redundant with the slab soffit.
+                var soffitVerts = new List<Point3d>();
+                var botVerts = new List<Point3d>();
                 for (int i = 0; i < subMesh.Vertices.Count; i++)
                 {
                     var pt = new Point3d(subMesh.Vertices[i]);
                     var n = new Vector3d(subMesh.Normals[i]);
-                    topMesh.Vertices.Add(pt + n * (-slabThickness));
-                    botMesh.Vertices.Add(pt + n * (-(slabThickness + extra)));
+                    soffitVerts.Add(pt + n * (-slabThickness));
+                    botVerts.Add(pt + n * (-(slabThickness + extra)));
                 }
+
+                var botMesh = new Mesh();
+                foreach (var bv in botVerts) botMesh.Vertices.Add(bv);
                 foreach (var face in subMesh.Faces)
                 {
                     if (face.IsTriangle)
-                    {
-                        topMesh.Faces.AddFace(face.A, face.B, face.C);
                         botMesh.Faces.AddFace(face.A, face.B, face.C);
-                    }
                 }
-                topMesh.Normals.ComputeNormals();
                 botMesh.Normals.ComputeNormals();
 
                 var combined = new Mesh();
-                combined.Append(topMesh);
                 combined.Append(botMesh);
 
-                // Stitch boundary edges between top and bottom
-                var boundary = topMesh.GetNakedEdges();
+                // Stitch side walls from soffit edge to bottom edge
+                var soffitMesh = new Mesh();
+                foreach (var sv in soffitVerts) soffitMesh.Vertices.Add(sv);
+                foreach (var face in subMesh.Faces)
+                {
+                    if (face.IsTriangle)
+                        soffitMesh.Faces.AddFace(face.A, face.B, face.C);
+                }
+                soffitMesh.Normals.ComputeNormals();
+
+                var boundary = soffitMesh.GetNakedEdges();
                 if (boundary != null && boundary.Length > 0)
                 {
                     const double tol = 1e-6;
-                    var cloud = new Rhino.Geometry.PointCloud(
-                        Enumerable.Range(0, topMesh.Vertices.Count)
-                                  .Select(i => new Point3d(topMesh.Vertices[i])));
-                    int nV = topMesh.Vertices.Count;
+                    var cloud = new Rhino.Geometry.PointCloud(soffitVerts);
+                    int nV = soffitVerts.Count;
 
                     foreach (var edge in boundary)
                     {
@@ -2379,13 +2328,13 @@ namespace Menegroth.GH.Components
                             int i0 = cloud.ClosestPoint(edge[i]);
                             int i1 = cloud.ClosestPoint(edge[i + 1]);
                             if (i0 < 0 || i1 < 0 || i0 >= nV || i1 >= nV) continue;
-                            if (new Point3d(topMesh.Vertices[i0]).DistanceToSquared(edge[i]) > tol * tol) continue;
-                            if (new Point3d(topMesh.Vertices[i1]).DistanceToSquared(edge[i + 1]) > tol * tol) continue;
+                            if (soffitVerts[i0].DistanceToSquared(edge[i]) > tol * tol) continue;
+                            if (soffitVerts[i1].DistanceToSquared(edge[i + 1]) > tol * tol) continue;
                             int baseIdx = combined.Vertices.Count;
-                            combined.Vertices.Add(topMesh.Vertices[i0]);
-                            combined.Vertices.Add(topMesh.Vertices[i1]);
-                            combined.Vertices.Add(botMesh.Vertices[i1]);
-                            combined.Vertices.Add(botMesh.Vertices[i0]);
+                            combined.Vertices.Add(soffitVerts[i0]);
+                            combined.Vertices.Add(soffitVerts[i1]);
+                            combined.Vertices.Add(botVerts[i1]);
+                            combined.Vertices.Add(botVerts[i0]);
                             combined.Faces.AddFace(baseIdx, baseIdx + 1, baseIdx + 2, baseIdx + 3);
                         }
                     }

@@ -1897,24 +1897,34 @@ namespace Menegroth.GH.Components
                     rhinoMesh.Normals.ComputeNormals();
                     rhinoMesh.Compact();
 
+                    string dispField = isLocal && dispsLocal.Length > 0
+                        ? "vertex_displacements_local"
+                        : "vertex_displacements";
+
                     if (showVolumes)
                     {
                         double thickness = m["thickness"]?.ToObject<double>() ?? 0;
                         if (thickness > 0 && TryBuildDeflectedSlabVolume(rhinoMesh, thickness, output))
                         {
-                            AppendDropPanelDeflectedGeometry(viz, m, rhinoMesh, thickness, output);
+                            AppendSlabColor(colors, m, colorBy, maxDisp, dispField, maxima);
+                            AppendDropPanelDeflectedGeometry(viz, m, rhinoMesh, thickness,
+                                output, colors, colorBy, maxDisp, maxima);
                         }
                         else
                         {
                             output.Add(new GH_Mesh(rhinoMesh));
-                            AppendDropPanelDeflectedGeometry(viz, m, rhinoMesh, thickness, output);
+                            AppendSlabColor(colors, m, colorBy, maxDisp, dispField, maxima);
+                            AppendDropPanelDeflectedGeometry(viz, m, rhinoMesh, thickness,
+                                output, colors, colorBy, maxDisp, maxima);
                         }
                     }
                     else
                     {
                         output.Add(new GH_Mesh(rhinoMesh));
+                        AppendSlabColor(colors, m, colorBy, maxDisp, dispField, maxima);
                         AppendDropPanelDeflectedGeometry(viz, m, rhinoMesh,
-                            m["thickness"]?.ToObject<double>() ?? 0, output);
+                            m["thickness"]?.ToObject<double>() ?? 0,
+                            output, colors, colorBy, maxDisp, maxima);
                     }
 
                     if (origMesh?.Vertices.Count > 0 && origMesh.Faces.Count > 0)
@@ -1923,11 +1933,6 @@ namespace Menegroth.GH.Components
                         origMesh.Compact();
                         origOutput.Add(new GH_Mesh(origMesh));
                     }
-
-                    string dispField = isLocal && dispsLocal.Length > 0
-                        ? "vertex_displacements_local"
-                        : "vertex_displacements";
-                    AppendSlabColor(colors, m, colorBy, maxDisp, dispField, maxima);
                 }
             }
         }
@@ -2114,12 +2119,14 @@ namespace Menegroth.GH.Components
         /// Falls back to box geometry from drop_panels when drop_panel_meshes is absent.
         /// </summary>
         private static void AppendDropPanelDeflectedGeometry(JToken viz, JToken meshToken, Mesh deflectedSlabMesh,
-            double slabThickness, List<IGH_GeometricGoo> output)
+            double slabThickness, List<IGH_GeometricGoo> output,
+            List<Color> colors, int colorBy, double maxDisp, SlabAnalyticalMaxima maxima)
         {
             var dpMeshes = meshToken["drop_panel_meshes"] as JArray;
             if (dpMeshes != null && dpMeshes.Count > 0 && deflectedSlabMesh != null)
             {
-                AppendDropPanelDeflectedFromMeshes(meshToken, deflectedSlabMesh, slabThickness, output);
+                AppendDropPanelDeflectedFromMeshes(meshToken, deflectedSlabMesh, slabThickness,
+                    output, colors, colorBy, maxDisp, maxima);
                 return;
             }
 
@@ -2196,12 +2203,17 @@ namespace Menegroth.GH.Components
                     new Point3d(x1, y1, zTopDrop), new Point3d(x0, y1, zTopDrop),
                 });
                 var dropMesh = CreateBoxMesh(bbox);
-                if (dropMesh != null) output.Add(new GH_Mesh(dropMesh));
+                if (dropMesh != null)
+                {
+                    output.Add(new GH_Mesh(dropMesh));
+                    AppendSlabColor(colors, meshToken, colorBy, maxDisp, "vertex_displacements", maxima);
+                }
             }
         }
 
         private static void AppendDropPanelDeflectedFromMeshes(JToken meshToken, Mesh deflectedSlabMesh,
-            double slabThickness, List<IGH_GeometricGoo> output)
+            double slabThickness, List<IGH_GeometricGoo> output,
+            List<Color> colors, int colorBy, double maxDisp, SlabAnalyticalMaxima maxima)
         {
             var dpMeshes = meshToken["drop_panel_meshes"] as JArray;
             if (dpMeshes == null || dpMeshes.Count == 0 || deflectedSlabMesh == null) return;
@@ -2310,8 +2322,8 @@ namespace Menegroth.GH.Components
                 combined.Normals.ComputeNormals();
                 combined.Compact();
 
-                // Output mesh directly for faster rendering
                 output.Add(new GH_Mesh(combined));
+                AppendSlabColor(colors, meshToken, colorBy, maxDisp, "vertex_displacements", maxima);
             }
         }
 

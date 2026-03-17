@@ -314,8 +314,8 @@ function _support_positions_along_axis(struc, supp_indices::Vector{Int})
     end
 
     # Use X or Y depending on which has larger range
-    xs = [p[1] for p in pts]
-    ys = [p[2] for p in pts]
+    xs = [ustrip(u"m", Meshes.coords(p).x) for p in pts]
+    ys = [ustrip(u"m", Meshes.coords(p).y) for p in pts]
     Δx = maximum(xs) - minimum(xs)
     Δy = maximum(ys) - minimum(ys)
 
@@ -328,7 +328,8 @@ end
 function _support_positions_xy(struc, supp_indices::Vector{Int})
     skel = struc.skeleton
     return [let v = skel.vertices[struc.supports[i].vertex_idx]
-        (v[1], v[2])
+        c = Meshes.coords(v)
+        (ustrip(u"m", c.x), ustrip(u"m", c.y))
     end for i in supp_indices]
 end
 
@@ -763,8 +764,8 @@ function _resolve_strategy(struc, demands, soil, opts)
     skel = struc.skeleton
     verts = skel.vertices
     isempty(verts) && return :spread
-    xs = [v[1] for v in verts]
-    ys = [v[2] for v in verts]
+    xs = [ustrip(u"m", Meshes.coords(v).x) for v in verts]
+    ys = [ustrip(u"m", Meshes.coords(v).y) for v in verts]
     footprint = (maximum(xs) - minimum(xs)) * (maximum(ys) - minimum(ys))
     footprint_m2 = ustrip(u"m^2", footprint)
     footprint_m2 < 1.0 && return :spread
@@ -876,7 +877,8 @@ function _auto_merge_to_strips!(struc, demands, soil, opts)
         B = sqrt(ustrip(u"m^2", d.Ps / qa))
         D = max(B * 0.15, 0.3)   # rough depth ≈ 15% of B, min 0.3 m
         v = skel.vertices[struc.supports[si].vertex_idx]
-        push!(spreads, (idx=fi, x=ustrip(u"m", v[1]), y=ustrip(u"m", v[2]), B=B, D=D))
+        c = Meshes.coords(v)
+        push!(spreads, (idx=fi, x=ustrip(u"m", c.x), y=ustrip(u"m", c.y), B=B, D=D))
     end
 
     merge_factor = opts.strip_params.merge_gap_factor

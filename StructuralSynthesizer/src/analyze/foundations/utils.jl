@@ -321,7 +321,7 @@ function _support_positions_along_axis(struc, supp_indices::Vector{Int})
 
     coords = Δx >= Δy ? xs : ys
     origin = minimum(coords)
-    return [c - origin for c in coords]
+    return [(c - origin) * u"m" for c in coords]
 end
 
 """Extract support positions as (x, y) tuples (for mat footing layout)."""
@@ -329,7 +329,7 @@ function _support_positions_xy(struc, supp_indices::Vector{Int})
     skel = struc.skeleton
     return [let v = skel.vertices[struc.supports[i].vertex_idx]
         c = Meshes.coords(v)
-        (ustrip(u"m", c.x), ustrip(u"m", c.y))
+        (c.x, c.y)  # Length quantities for design_footing(MatFoundation, ...)
     end for i in supp_indices]
 end
 

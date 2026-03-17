@@ -222,7 +222,7 @@ The top-level response from `POST /design`.
 |:------|:-----|:------------|
 | `status` | `String` | `"ok"` or `"error"` |
 | `compute_time_s` | `Float64` | Wall-clock design time in seconds |
-| `phase_timings` | `Dict{String, Float64}` | Timing breakdown by phase (seconds). Includes `"serialize_visualization"` when visualization is enabled. |
+| `phase_timings` | `Dict{String, Float64}` | Timing breakdown by phase (seconds). Always includes `"serialize_visualization"` (near-zero when `skip_visualization=true`). |
 | `length_unit` | `String` | Length unit label for length-category outputs (`"ft"` or `"m"`) |
 | `thickness_unit` | `String` | Thickness unit label for thickness-category outputs (`"in"` or `"mm"`) |
 | `volume_unit` | `String` | Volume unit label for volume-category outputs (`"ft3"` or `"m3"`) |
@@ -363,11 +363,12 @@ The visualization schema contains several related types:
 
 - **`APIVisualization`** — Top-level container for all visualization payloads.
 - **`APIVisualizationNode`** — A single node with `position`, `displacement`, `deflected_position`, and support metadata (`is_support`).
-- **`APIVisualizationFrameElement`** — A frame element with start/end node indices, section geometry, member type, and optional `material_color_hex`.
-- **`APISizedSlab`** — A slab boundary polygon with thickness (`thickness`, `z_top`) and `drop_panels`.
+- **`APIVisualizationFrameElement`** — A frame element with start/end node indices, section geometry, member type, optional `material_color_hex`, and (when available) a pre-built solid mesh (`mesh_vertices`, `mesh_faces`).
+- **`APISizedSlab`** — A slab boundary polygon (`boundary_vertices`) with thickness (`thickness`, `z_top`), utilization, optional `drop_panels`, and (for vaults) a curved intrados mesh (`vault_mesh_vertices`, `vault_mesh_faces`).
 - **`APIDropPanelPatch`** — A rectangular drop-panel patch (`center`, `length`, `width`, `extra_depth`) used in both sized and deflected slab views.
-- **`APIDeflectedSlabMesh`** — A triangulated deflected slab mesh with `vertex_displacements`, `vertex_displacements_local`, and `drop_panels`.
-- **`APIVisualizationFoundation`** — Foundation block geometry (`center`, `length`, `width`, `depth`) with utilization metadata.
+- **`APIDeflectedSlabMesh`** — A triangulated deflected slab mesh with global and local displacements, optional drop-panel submesh indices, and optional per-face analytical scalars for visualization.
+- **`APIDeflectedDropPanel`** — Drop-panel sub-mesh indices into the parent `APIDeflectedSlabMesh.faces` array (used to reconstruct drop-panel volumes in clients).
+- **`APIVisualizationFoundation`** — Foundation block geometry (`center`, `length`, `width`, `depth`) with utilization metadata and strip-footing orientation (`along_x`).
 
 Example snippet (abbreviated) showing beamless-state and one drop-panel patch:
 
@@ -435,13 +436,84 @@ Example snippet (abbreviated) showing beamless-state and one drop-panel patch:
 | `flange_width` | `Float64` | W-shape flange width (0 for non-W shapes) |
 | `web_thickness` | `Float64` | W-shape web thickness (0 for non-W shapes) |
 | `flange_thickness` | `Float64` | W-shape flange thickness (0 for non-W shapes) |
+| `orientation_angle` | `Float64` | Cross-section rotation about the element axis (radians, CCW from global X). Non-zero for rotated columns; beams are typically 0. |
 | `section_polygon` | `Vector{Vector{Float64}}` | Section polygon in local `[y,z]` coordinates (in `length_unit`) |
 | `section_polygon_inner` | `Vector{Vector{Float64}}` | Inner boundary for hollow sections (HSS rect/round); empty for solid sections |
 | `original_points` | `Vector{Vector{Float64}}` | Interpolated points along the element centerline `[x,y,z]` |
 | `displacement_vectors` | `Vector{Vector{Float64}}` | Displacements at each interpolated point `[dx,dy,dz]` |
-| `max_axial_force` | `Float64` | Signed axial extremum (+ tension, − compression) |
-| `max_moment` | `Float64` | Signed moment extremum (largest \(|M|\), sign preserved) |
-| `max_shear` | `Float64` | Signed shear extremum (largest \(|V|\), sign preserved) |
+| `max_axial_force` | `Float64` | Signed axial extremum (+ tension, − compression), in **newtons (N)** |
+| `max_moment` | `Float64` | Signed moment extremum (largest \(|M|\), sign preserved), in **newton-meters (N·m)** |
+| `max_shear` | `Float64` | Signed shear extremum (largest \(|V|\), sign preserved), in **newtons (N)** |
+| `mesh_vertices` | `Vector{Vector{Float64}}` | Optional pre-built solid mesh vertices `[[x,y,z], ...]` in display length units (empty when unavailable) |
+| `mesh_faces` | `Vector{Vector{Int}}` | Optional pre-built solid mesh triangle faces `[[i1,i2,i3], ...]` (1-based; empty when unavailable) |
+
+#### APISizedSlab
+
+| Field | Type | Description |
+|:------|:-----|:------------|
+| `slab_id` | `Int` | 1-based slab index |
+| `boundary_vertices` | `Vector{Vector{Float64}}` | Boundary polygon vertices `[[x,y,z], ...]` in display length units |
+| `thickness` | `Float64` | Slab thickness (display thickness units) |
+| `z_top` | `Float64` | Slab top-surface elevation (display length units) |
+| `drop_panels` | `Vector{APIDropPanelPatch}` | Drop-panel footprint patches (may be empty) |
+| `utilization_ratio` | `Float64` | Governing utilization (e.g. max(deflection_ratio, punching_ratio)) |
+| `ok` | `Bool` | Slab pass/fail flag |
+| `material_color_hex` | `String` | Optional material display color (empty string when unavailable) |
+| `is_vault` | `Bool` | True for vault floor systems |
+| `vault_mesh_vertices` | `Vector{Vector{Float64}}` | Optional vault intrados mesh vertices `[[x,y,z], ...]` in display length units |
+| `vault_mesh_faces` | `Vector{Vector{Int}}` | Optional vault intrados mesh faces `[[i1,i2,i3], ...]` (1-based) |
+
+#### APIDropPanelPatch
+
+| Field | Type | Description |
+|:------|:-----|:------------|
+| `center` | `Vector{Float64}` | Patch center `[x,y,z_top]` in display length units |
+| `length` | `Float64` | Full patch extent in the global-x/local-x direction (display length units) |
+| `width` | `Float64` | Full patch extent in the global-y/local-y direction (display length units) |
+| `extra_depth` | `Float64` | Projection below slab soffit (display thickness units) |
+
+#### APIDeflectedDropPanel
+
+| Field | Type | Description |
+|:------|:-----|:------------|
+| `face_indices` | `Vector{Int}` | 1-based indices into parent `APIDeflectedSlabMesh.faces` |
+| `extra_depth` | `Float64` | Projection below slab soffit (display thickness units) |
+
+#### APIDeflectedSlabMesh
+
+| Field | Type | Description |
+|:------|:-----|:------------|
+| `slab_id` | `Int` | 1-based slab index |
+| `vertices` | `Vector{Vector{Float64}}` | Original mesh vertices `[[x,y,z], ...]` in display length units |
+| `vertex_displacements` | `Vector{Vector{Float64}}` | Global displacements `[[dx,dy,dz], ...]` in display length units |
+| `vertex_displacements_local` | `Vector{Vector{Float64}}` | Local-bending displacements `[[dx,dy,dz], ...]` in display length units |
+| `faces` | `Vector{Vector{Int}}` | Triangle connectivity `[[i1,i2,i3], ...]` (1-based) |
+| `thickness` | `Float64` | Slab thickness (display thickness units) |
+| `drop_panels` | `Vector{APIDropPanelPatch}` | Drop-panel footprint patches (may be empty) |
+| `drop_panel_meshes` | `Vector{APIDeflectedDropPanel}` | Optional drop-panel sub-mesh indices (may be empty) |
+| `utilization_ratio` | `Float64` | Governing utilization ratio for the slab mesh |
+| `ok` | `Bool` | Slab pass/fail flag |
+| `material_color_hex` | `String` | Optional material display color (empty string when unavailable) |
+| `is_vault` | `Bool` | True for vault floor systems |
+| `face_bending_moment` | `Vector{Float64}` | Signed dominant principal bending moment per face \([N·m/m]\); length matches `faces` |
+| `face_membrane_force` | `Vector{Float64}` | Signed dominant principal membrane force per face \([N/m]\); length matches `faces` |
+| `face_shear_force` | `Vector{Float64}` | Transverse shear resultant per face \([N/m]\); always ≥ 0; length matches `faces` |
+| `face_von_mises` | `Vector{Float64}` | Von Mises surface stress per face \([Pa]\); always ≥ 0; length matches `faces` |
+| `face_surface_stress` | `Vector{Float64}` | Signed dominant principal surface stress per face \([Pa]\); length matches `faces` |
+
+#### APIVisualizationFoundation
+
+| Field | Type | Description |
+|:------|:-----|:------------|
+| `foundation_id` | `Int` | 1-based foundation index |
+| `center` | `Vector{Float64}` | Block center `[x,y,z_top]` in display length units |
+| `length` | `Float64` | Foundation length (display length units) |
+| `width` | `Float64` | Foundation width (display length units) |
+| `depth` | `Float64` | Foundation depth (display length units) |
+| `utilization_ratio` | `Float64` | Bearing utilization ratio |
+| `ok` | `Bool` | Foundation pass/fail flag |
+| `material_color_hex` | `String` | Optional material display color (empty string when unavailable) |
+| `along_x` | `Bool` | True when a strip footing’s long axis runs along global X (client may swap length/width mapping) |
 
 ### APIError
 
@@ -525,7 +597,8 @@ bar shows "CL" when centerline mode is active.
 ## Limitations & Future Work
 
 - Output fields are unit-neutral; clients must use `length_unit`, `thickness_unit`, `volume_unit`, and `mass_unit` to interpret numeric values.
-- The current server implementation always builds an analysis model and returns `visualization` data; making this optional (for performance) would require an API option.
+- Visualization can be disabled per request via `skip_visualization=true`, and the payload can be reduced via `visualization_detail="minimal"`.
+- Visualization analytical scalars use fixed SI units (e.g. frame forces in N and N·m; shell face quantities in N/m and Pa), independent of `unit_system`.
 - The schema is versioned implicitly; explicit API versioning (`/v1/design`) is planned.
 - Slab boundary extension for centerline input mode is not yet implemented (see note above).
 

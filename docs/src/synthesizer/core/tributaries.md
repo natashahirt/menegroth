@@ -1,6 +1,14 @@
 # Tributary Area Accessors
 
 > ```julia
+> using StructuralSynthesizer
+> using Unitful
+>
+> skel = gen_medium_office(30.0u"ft", 30.0u"ft", 13.0u"ft", 3, 3, 2)
+> struc = BuildingStructure(skel)
+> initialize!(struc; floor_type=:flat_plate)
+> compute_cell_tributaries!(struc)
+>
 > col = struc.columns[1]
 > A_trib = column_tributary_area(struc, col)
 > by_cell = column_tributary_by_cell(struc, col)

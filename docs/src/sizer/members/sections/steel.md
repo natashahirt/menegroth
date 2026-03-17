@@ -36,12 +36,21 @@ W
 HSS
 PIPE
 HSSRound
+```
+
+### Section Geometry Traits (for visualization / rendering)
+
+Section *geometry traits* are separate from section constructors. They are returned by
+`section_geometry(section)` and are used by downstream visualization and meshing code.
+
+```@docs
+AbstractSectionGeometry
+SolidRect
+SolidRound
+HollowRect
+HollowRound
 IShape
 TShape
-SolidRect
-HollowRect
-SolidRound
-HollowRound
 ```
 
 ### W Shapes (Doubly-Symmetric I-Sections)

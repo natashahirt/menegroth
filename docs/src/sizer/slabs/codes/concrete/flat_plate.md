@@ -408,12 +408,14 @@ Key `FlatPlateOptions` fields:
 | `method` | `DDM()` | Analysis method (`DDM`, `EFM`, `FEA`, `RuleOfThumb`) |
 | `has_edge_beam` | `false` | Whether an exterior spandrel beam is present (affects DDM/EFM edge distribution) |
 | `edge_beam_βt` | `nothing` | Explicit edge-beam torsional stiffness override (when not `nothing`) |
+| `grouping` | `:by_floor` | How to group slabs for envelope sizing: `:individual`, `:by_floor`, `:building_wide` |
 | `punching_strategy` | `:grow_columns` | Punching failure resolution order |
 | `punching_reinforcement` | `:headed_studs_generic` | Punching reinforcement type |
 | `max_column_size` | `30.0u"inch"` | Maximum column size before bumping thickness (or using reinforcement, depending on strategy) |
 | `stud_material` | `Stud_51` | Shear stud / stirrup steel material |
 | `stud_diameter` | `0.5u"inch"` | Headed stud diameter (stud-based reinforcement only) |
 | `stirrup_bar_size` | `4` | Stirrup bar size (closed stirrups only) |
+| `min_h` | `nothing` | Minimum slab thickness override (`nothing` → use ACI Table 8.3.1.1 minimums) |
 | `objective` | `MinVolume()` | Optimization objective |
 | `col_I_factor` | `0.70` | Column cracked Ig factor (ACI §10.10.4.1) |
 
@@ -458,7 +460,7 @@ Key `FEA` options:
   `:efm_amp`.
 - **FEA** does not yet support post-tensioned slabs or staged construction.
 - Punching at re-entrant corners and openings near columns is not checked.
-- Shear stud catalogs are hard-coded (`:generic`, `:incon_iss`, `:ancon_shearfix`);
+- Punching reinforcement catalogs are hard-coded (`:headed_studs_generic`, `:headed_studs_incon`, `:headed_studs_ancon`);
   user-defined catalogs are planned.
 - The `RuleOfThumb` method uses ACI min thickness without iteration—design checks
   are reported but may fail.

@@ -26,13 +26,13 @@ B2StoryProperties
 
 ### Tension (AISC §D2)
 
-`get_Pn_tension(s, mat; Ae_ratio=0.75)` — nominal tensile strength, minimum of:
+`StructuralSizer.get_Pn_tension(s, mat; Ae_ratio=0.75)` — nominal tensile strength, minimum of:
 - **Yielding on gross section (D2-1):** ``P_n = F_y\,A_g``
 - **Rupture on net section (D2-2):** ``P_n = F_u\,A_e`` where ``A_e = A_g\,A_{e,\text{ratio}}``
 
 The default `Ae_ratio = 0.75` is a conservative approximation; use the actual effective net area ratio when connection details are known.
 
-`get_ϕPn_tension(s, mat; Ae_ratio=0.75)` — design tensile strength with ``\phi_t = 0.90`` for yielding and ``\phi_t = 0.75`` for rupture. Returns the governing (minimum) value.
+`StructuralSizer.get_ϕPn_tension(s, mat; Ae_ratio=0.75)` — design tensile strength with ``\phi_t = 0.90`` for yielding and ``\phi_t = 0.75`` for rupture. Returns the governing (minimum) value.
 
 ### P-M Interaction (AISC §H1)
 

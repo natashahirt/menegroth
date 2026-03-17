@@ -33,7 +33,6 @@ MemberOptions
 BeamOptions
 ColumnOptions
 SteelMemberOptions
-AbstractSectionGeometry
 SteelColumnOptions
 ```
 

@@ -359,8 +359,8 @@ TimberOptions
 
 `FlatPlateOptions` is the most complex, exposing analysis method selection
 (`DDM`, `EFM`, `FEA`, `RuleOfThumb`), punching resolution strategy
-(`:grow_columns`, `:reinforce_first`, `:reinforce_last`), deflection limit,
-and fire rating overrides. Convergence tolerances (`max_iterations`,
+(`:grow_columns`, `:reinforce_first`, `:reinforce_last`), and deflection limit.
+Convergence tolerances (`max_iterations`,
 `column_tol`, `h_increment`) are pipeline keyword arguments (internal `size_flat_plate!` path), not fields on the options struct.
 
 `FlatSlabOptions` composes a `FlatPlateOptions` internally, adding drop panel
@@ -374,7 +374,7 @@ analysis toggles.
 
 - `HollowCore`, `CompositeDeck`, `NonCompositeDeck`, `JoistRoofDeck`, `CLT`,
   `DLT`, `NLT`, and `MassTimberJoist` sizing functions are **stubs** that raise
-  no-op results (they are skipped by `size_slabs!` / `size_slab!`). Catalog-based selection is planned.
+  no result (they are skipped by `size_slabs!` / `size_slab!` via the `_size_slab!` fallback). Catalog-based selection is planned.
 - `PTBanded` uses heuristic thickness from PTI DC20.9; full tendon design is not
   yet implemented.
 - `Grade` (slab-on-grade) has no structural sizing—thickness is user-specified.

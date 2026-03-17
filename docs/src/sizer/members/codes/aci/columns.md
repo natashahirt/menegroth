@@ -509,7 +509,6 @@ mat_tuple = to_material_tuple(material, fy_ksi, Es_ksi)
 | Function | Description |
 |:---------|:------------|
 | `generate_PM_diagram(section, mat)` | Generate full P-M interaction diagram |
-| `generate_PM_diagram_yaxis(section, mat)` | Y-axis diagram for rectangular biaxial |
 | `generate_PM_diagrams_biaxial(section, mat)` | Both x and y diagrams |
 | `check_PM_capacity(diagram, Pu, Mu)` | Check demand against diagram |
 | `capacity_at_axial(diagram, Pu)` | φMn at given Pu |

@@ -53,7 +53,7 @@ namespace Menegroth.GH.Components
             : base("Analysis Params",
                    "AnalysisParams",
                    "Analysis-focused design parameters for Design Run (iterations + mesh controls)",
-                   "Menegroth", "Params")
+                   "Menegroth", "Inputs")
         { }
 
         public override Guid ComponentGuid =>

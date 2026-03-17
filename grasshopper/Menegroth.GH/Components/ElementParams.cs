@@ -53,7 +53,7 @@ namespace Menegroth.GH.Components
             : base("Element Params",
                    "ElemParams",
                    "Configure element sizing parameters (beam/column, MIP/NLP bounds)",
-                   "Menegroth", "Params")
+                   "Menegroth", "Component Params")
         { }
 
         public override Guid ComponentGuid =>

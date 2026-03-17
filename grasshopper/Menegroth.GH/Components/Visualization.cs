@@ -2068,7 +2068,6 @@ namespace Menegroth.GH.Components
                         if (!dropPanelsAlreadyRendered && !skipFallbackForThisToken)
                         {
                             AppendDropPanelDeflectedGeometry(viz, m, rhinoMesh,
-                                m["thickness"]?.ToObject<double>() ?? 0,
                                 output, colors, colorBy, maxDisp, dispField, maxima);
                             if (slabId > 0)
                                 slabsWithDropPanelsRendered.Add(slabId);
@@ -2420,25 +2419,28 @@ namespace Menegroth.GH.Components
         }
 
         /// <summary>
-        /// Build deflected drop panel volumes from the slab's deflected mesh.
-        /// Each drop_panel_meshes entry contains face indices into the parent mesh;
-        /// the drop panel is an offset solid below the slab soffit.
+        /// Build deflected drop panel volumes by copying a slab patch downward.
+        /// Each drop_panel_meshes entry contains face indices into the parent slab mesh.
+        /// The slab mesh itself is left unchanged; to avoid coplanar z-fighting and color seams,
+        /// we do not re-add a top cap at slab elevation.
+        /// The drop panel add-on geometry is:
+        /// bottom cap = patch shifted down by extra_depth + stitched side walls.
         /// No fallback box geometry is generated when drop_panel_meshes is absent.
         /// </summary>
         private static void AppendDropPanelDeflectedGeometry(JToken viz, JToken meshToken, Mesh deflectedSlabMesh,
-            double slabThickness, List<IGH_GeometricGoo> output,
+            List<IGH_GeometricGoo> output,
             List<Color> colors, int colorBy, double maxDisp, string displacementField, SlabAnalyticalMaxima maxima)
         {
             var dpMeshes = meshToken["drop_panel_meshes"] as JArray;
             if (dpMeshes != null && dpMeshes.Count > 0 && deflectedSlabMesh != null)
             {
-                AppendDropPanelDeflectedFromMeshes(meshToken, deflectedSlabMesh, slabThickness,
+                AppendDropPanelDeflectedFromMeshes(meshToken, deflectedSlabMesh,
                     output, colors, colorBy, maxDisp, displacementField, maxima);
             }
         }
 
         private static void AppendDropPanelDeflectedFromMeshes(JToken meshToken, Mesh deflectedSlabMesh,
-            double slabThickness, List<IGH_GeometricGoo> output,
+            List<IGH_GeometricGoo> output,
             List<Color> colors, int colorBy, double maxDisp, string displacementField, SlabAnalyticalMaxima maxima)
         {
             var dpMeshes = meshToken["drop_panel_meshes"] as JArray;
@@ -2489,24 +2491,23 @@ namespace Menegroth.GH.Components
                 subMesh.Normals.ComputeNormals();
                 subMesh.Compact();
 
-                // Build soffit vertices (top of drop panel region) for top cap + side walls,
-                // and bottom vertices for the visible bottom face.
-                var soffitVerts = new List<Point3d>();
+                // Keep the slab patch where it is and copy it downward by extra depth.
+                // This avoids treating drop panels as a slab-thickness offset operation.
+                var topPatchVerts = new List<Point3d>();
                 var botVerts = new List<Point3d>();
                 bool isVault = meshToken["is_vault"]?.ToObject<bool>() == true;
                 for (int i = 0; i < subMesh.Vertices.Count; i++)
                 {
                     var pt = new Point3d(subMesh.Vertices[i]);
+                    topPatchVerts.Add(pt);
                     if (isVault)
                     {
                         var n = new Vector3d(subMesh.Normals[i]);
-                        soffitVerts.Add(pt + n * (-slabThickness));
-                        botVerts.Add(pt + n * (-(slabThickness + extra)));
+                        botVerts.Add(pt + n * (-extra));
                     }
                     else
                     {
-                        soffitVerts.Add(pt + new Vector3d(0, 0, -slabThickness));
-                        botVerts.Add(pt + new Vector3d(0, 0, -(slabThickness + extra)));
+                        botVerts.Add(pt + new Vector3d(0, 0, -extra));
                     }
                 }
 
@@ -2522,25 +2523,14 @@ namespace Menegroth.GH.Components
                 var combined = new Mesh();
                 combined.Append(botMesh);
 
-                // Keep the drop-panel top cap (do not remove it from rendered geometry).
-                var soffitMesh = new Mesh();
-                foreach (var sv in soffitVerts) soffitMesh.Vertices.Add(sv);
-                foreach (var face in subMesh.Faces)
-                {
-                    if (face.IsTriangle)
-                        soffitMesh.Faces.AddFace(face.A, face.B, face.C);
-                }
-                soffitMesh.Normals.ComputeNormals();
-                combined.Append(soffitMesh);
-
-                // Stitch side walls from soffit edge to bottom edge
-
-                var boundary = soffitMesh.GetNakedEdges();
+                // Stitch side walls from original patch edge to copied-bottom edge.
+                // Do not append a top cap here; the slab mesh already carries that surface.
+                var boundary = subMesh.GetNakedEdges();
                 if (boundary != null && boundary.Length > 0)
                 {
                     const double tol = 1e-6;
-                    var cloud = new Rhino.Geometry.PointCloud(soffitVerts);
-                    int nV = soffitVerts.Count;
+                    var cloud = new Rhino.Geometry.PointCloud(topPatchVerts);
+                    int nV = topPatchVerts.Count;
 
                     foreach (var edge in boundary)
                     {
@@ -2550,11 +2540,11 @@ namespace Menegroth.GH.Components
                             int i0 = cloud.ClosestPoint(edge[i]);
                             int i1 = cloud.ClosestPoint(edge[i + 1]);
                             if (i0 < 0 || i1 < 0 || i0 >= nV || i1 >= nV) continue;
-                            if (soffitVerts[i0].DistanceToSquared(edge[i]) > tol * tol) continue;
-                            if (soffitVerts[i1].DistanceToSquared(edge[i + 1]) > tol * tol) continue;
+                            if (topPatchVerts[i0].DistanceToSquared(edge[i]) > tol * tol) continue;
+                            if (topPatchVerts[i1].DistanceToSquared(edge[i + 1]) > tol * tol) continue;
                             int baseIdx = combined.Vertices.Count;
-                            combined.Vertices.Add(soffitVerts[i0]);
-                            combined.Vertices.Add(soffitVerts[i1]);
+                            combined.Vertices.Add(topPatchVerts[i0]);
+                            combined.Vertices.Add(topPatchVerts[i1]);
                             combined.Vertices.Add(botVerts[i1]);
                             combined.Vertices.Add(botVerts[i0]);
                             combined.Faces.AddFace(baseIdx, baseIdx + 1, baseIdx + 2, baseIdx + 3);

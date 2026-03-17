@@ -45,7 +45,7 @@ namespace Menegroth.GH.Components
             : base("Foundation Params",
                    "FoundationParams",
                    "Foundation design overrides: soil, concrete, strategy",
-                   "Menegroth", "Params")
+                   "Menegroth", "Component Params")
         { }
 
         public override Guid ComponentGuid =>

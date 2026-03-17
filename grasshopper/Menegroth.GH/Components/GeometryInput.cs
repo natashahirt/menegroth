@@ -68,11 +68,6 @@ namespace Menegroth.GH.Components
 
             pManager.AddPointParameter("Supports", "Supports",
                 "Support point locations", GH_ParamAccess.list);
-
-            pManager.AddGenericParameter("Slab Params", "Slab",
-                "Optional slab face category assignments from Slab Params component",
-                GH_ParamAccess.list);
-            pManager[5].Optional = true;
         }
 
         protected override void RegisterOutputParams(GH_OutputParamManager pManager)
@@ -281,46 +276,6 @@ namespace Menegroth.GH.Components
                 }
             }
 
-            // ─── Optional slab category overrides from Slab Params ────────
-            var slabParamsInputs = new List<Grasshopper.Kernel.Types.IGH_Goo>();
-            if (DA.GetDataList(5, slabParamsInputs) && slabParamsInputs.Count > 0)
-            {
-                foreach (var goo in slabParamsInputs)
-                {
-                    if (!TryUnwrapGoo<SlabParamsData>(goo, out var slabData) || slabData == null)
-                        continue;
-
-                    var category = NormalizeFaceCategory(slabData.Category);
-                    var polys = slabData.Faces;
-                    if (polys == null || polys.Count == 0)
-                        continue;
-
-                    foreach (var poly in polys)
-                    {
-                        if (poly == null || poly.Count < 3) continue;
-
-                        var snapped = new List<double[]>();
-                        foreach (var c in poly)
-                        {
-                            if (c == null || c.Length < 3) continue;
-                            int vi = GetOrAddVertex(new Point3d(c[0], c[1], c[2]));
-                            var v = geo.Vertices[vi - 1];
-                            var hasPrev = snapped.Count > 0;
-                            var prev = hasPrev ? snapped[snapped.Count - 1] : null;
-                            if (snapped.Count == 0 ||
-                                Math.Abs(prev[0] - v[0]) > TOL ||
-                                Math.Abs(prev[1] - v[1]) > TOL ||
-                                Math.Abs(prev[2] - v[2]) > TOL)
-                            {
-                                snapped.Add(new[] { v[0], v[1], v[2] });
-                            }
-                        }
-                        if (snapped.Count < 3) continue;
-                        AddFacePolygon(geo, category, snapped);
-                    }
-                }
-            }
-
             DA.SetData(0, new BuildingGeometryGoo(geo));
             DA.SetData(1, BuildGeometrySummary(geo));
         }
@@ -475,32 +430,6 @@ namespace Menegroth.GH.Components
             if (!geo.Faces.ContainsKey(category))
                 geo.Faces[category] = new List<List<double[]>>();
             geo.Faces[category].Add(polygon);
-        }
-
-        private static string NormalizeFaceCategory(string category)
-        {
-            var c = (category ?? "floor").Trim().ToLowerInvariant();
-            return (c == "roof" || c == "grade") ? c : "floor";
-        }
-
-        private static bool TryUnwrapGoo<T>(Grasshopper.Kernel.Types.IGH_Goo goo, out T value) where T : class
-        {
-            value = null;
-            if (goo == null) return false;
-
-            if (goo is Grasshopper.Kernel.Types.GH_Goo<T> typed && typed.Value != null)
-            {
-                value = typed.Value;
-                return true;
-            }
-
-            if (goo is Grasshopper.Kernel.Types.GH_ObjectWrapper wrapper && wrapper.Value is T wrapped)
-            {
-                value = wrapped;
-                return true;
-            }
-
-            return false;
         }
 
         private static (long, long, long) QuantizePoint(Point3d pt)

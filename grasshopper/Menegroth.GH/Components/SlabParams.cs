@@ -10,7 +10,7 @@ using Rhino.Geometry;
 namespace Menegroth.GH.Components
 {
     /// <summary>
-    /// Builds face-scoped slab overrides for Geometry Input and Design Params.
+    /// Builds face-scoped slab overrides for Design Params.
     /// Replaces Vault Params by supporting floor type + floor options + face geometry.
     /// </summary>
     public class SlabParams : GH_Component
@@ -77,7 +77,7 @@ namespace Menegroth.GH.Components
             : base("Slab Params",
                    "SlabParams",
                    "Face-scoped slab overrides (type/options/category) for Geometry Input + Design Params",
-                   "Menegroth", "Params")
+                   "Menegroth", "Component Params")
         { }
 
         public override Guid ComponentGuid =>
@@ -105,7 +105,7 @@ namespace Menegroth.GH.Components
         protected override void RegisterOutputParams(GH_OutputParamManager pManager)
         {
             pManager.AddGenericParameter("Param", "Param",
-                "Slab override object for Geometry Input 'Slab Params' and Design Params 'Slab Params'",
+                "Slab override object for Design Params input 'Params' / 'Slab Params'",
                 GH_ParamAccess.item);
         }
 

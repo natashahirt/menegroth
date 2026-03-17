@@ -965,6 +965,11 @@ function _serialize_deflected_slab_meshes(design::BuildingDesign, struc::Buildin
         sizehint!(faces, n_shells)
         vertex_map = Dict{Asap.Node, Int}()
         sizehint!(vertex_map, n_verts_est)
+        # Weld nodes by exported position so patch shells (e.g. col_patch/drop_panel)
+        # share vertices with adjacent slab shells when they are geometrically coincident.
+        # Key tolerance follows export precision (1e-6 display-length units).
+        vertex_key_map = Dict{NTuple{3, Int}, Int}()
+        sizehint!(vertex_key_map, n_verts_est)
 
         # Per-face analytical values (one entry per triangle, parallel to `faces`)
         face_bending = Float64[]
@@ -989,27 +994,45 @@ function _serialize_deflected_slab_meshes(design::BuildingDesign, struc::Buildin
                         npos = node.position
                         vi = get(node_to_vi, node, 0)
                         off = (vi > 0 ? get(offsets, vi, (0.0, 0.0)) : (0.0, 0.0))
+                        px = 0.0
+                        py = 0.0
+                        pz = 0.0
                         # For vertices with structural offset (edge/corner columns), use architectural
                         # (column-corner) position so deflected mesh edges align with sized geometry.
                         if off[1] != 0.0 || off[2] != 0.0
                             corner_x = ustrip(u"m", npos[1]) - off[1]
                             corner_y = ustrip(u"m", npos[2]) - off[2]
                             corner_z = ustrip(u"m", npos[3])
-                            push!(vertices, [_round_val(corner_x * _m_to_disp; digits=6),
-                                             _round_val(corner_y * _m_to_disp; digits=6),
-                                             _round_val(corner_z * _m_to_disp; digits=6)])
+                            px = _round_val(corner_x * _m_to_disp; digits=6)
+                            py = _round_val(corner_y * _m_to_disp; digits=6)
+                            pz = _round_val(corner_z * _m_to_disp; digits=6)
                         else
-                            push!(vertices, [_round_val(ustrip(u"m", npos[k]) * _m_to_disp; digits=6) for k in 1:3])
+                            px = _round_val(ustrip(u"m", npos[1]) * _m_to_disp; digits=6)
+                            py = _round_val(ustrip(u"m", npos[2]) * _m_to_disp; digits=6)
+                            pz = _round_val(ustrip(u"m", npos[3]) * _m_to_disp; digits=6)
                         end
 
-                        nid = objectid(node)
-                        disp_global_m = get(total_disp, nid, Asap.to_displacement_vec(node.displacement)[1:3])
-                        disp_local_m = get(local_disp, nid, disp_global_m)
+                        key = (
+                            round(Int, px * 1_000_000),
+                            round(Int, py * 1_000_000),
+                            round(Int, pz * 1_000_000),
+                        )
+                        if haskey(vertex_key_map, key)
+                            vertex_map[node] = vertex_key_map[key]
+                        else
+                            push!(vertices, [px, py, pz])
 
-                        push!(vertex_displacements, [_round_val(d * _m_to_disp; digits=6) for d in disp_global_m])
-                        push!(vertex_displacements_local, [_round_val(d * _m_to_disp; digits=6) for d in disp_local_m])
+                            nid = objectid(node)
+                            disp_global_m = get(total_disp, nid, Asap.to_displacement_vec(node.displacement)[1:3])
+                            disp_local_m = get(local_disp, nid, disp_global_m)
 
-                        vertex_map[node] = length(vertices)
+                            push!(vertex_displacements, [_round_val(d * _m_to_disp; digits=6) for d in disp_global_m])
+                            push!(vertex_displacements_local, [_round_val(d * _m_to_disp; digits=6) for d in disp_local_m])
+
+                            vidx = length(vertices)
+                            vertex_map[node] = vidx
+                            vertex_key_map[key] = vidx
+                        end
                     end
                     push!(tri_indices, vertex_map[node])
                 end

@@ -57,7 +57,7 @@ This is more efficient than `to_asap!` for iterative design because the topology
 When `params.pattern_loading` is not `:none`, the analysis applies pattern loading per ACI 318-11 §13.7.6:
 - Factored dead load on all spans
 - Factored live load on alternate spans to maximize positive and negative moments
-- The pattern loading threshold is L/D > 0.5 per ACI 318-11 §13.7.6.2
+- In `:auto` mode, pattern loading runs only when any non-grade cell satisfies \(L/D > 0.75\) (ACI 318-11 §13.7.6.2). Use `:checkerboard` to force pattern loading regardless of \(L/D\).
 
 ### build_analysis_model!
 
@@ -70,7 +70,7 @@ When `params.pattern_loading` is not `:none`, the analysis applies pattern loadi
 
 ### Draping
 
-`compute_draped_displacements(design)` interpolates total and local bending displacements across slab surfaces for deflected shape visualization. It separates global column shortening from local slab bending to show realistic deflected shapes.
+`StructuralSynthesizer.compute_draped_displacements(design)` (internal, unexported) interpolates total and local bending displacements across slab surfaces for deflected shape visualization. It separates global column shortening from local slab bending to show realistic deflected shapes.
 
 ### Diaphragm Modeling
 
@@ -83,7 +83,7 @@ When `params.pattern_loading` is not `:none`, the analysis applies pattern loadi
 | `column_I_factor` | Stiffness reduction for columns (ACI 318-11 §10.10.4.1) | 0.70 |
 | `beam_I_factor` | Stiffness reduction for beams | 0.35 |
 | `diaphragm_mode` | Diaphragm modeling approach | `:none` |
-| `diaphragm_E` | Diaphragm elastic modulus | Concrete E |
+| `diaphragm_E` | Diaphragm elastic modulus override (used when diaphragm shells are created) | `nothing` |
 | `diaphragm_ν` | Diaphragm Poisson's ratio | 0.2 |
 | `pattern_loading` | Pattern loading mode (`:none`, `:checkerboard`, `:auto`) | `:none` |
 

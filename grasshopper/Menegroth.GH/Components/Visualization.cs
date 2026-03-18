@@ -1834,7 +1834,6 @@ namespace Menegroth.GH.Components
             var faces = meshToken["faces"]?.ToObject<int[][]>() ?? new int[0][];
             if (verts.Length == 0 || faces.Length == 0)
                 return false;
-
             var topMesh = new Mesh();
             for (int i = 0; i < verts.Length; i++)
             {
@@ -1943,15 +1942,6 @@ namespace Menegroth.GH.Components
             bool isAnalyticalSlab = colorBy >= COLOR_SLAB_BENDING && colorBy <= COLOR_SLAB_SURFACE_STRESS;
             var meshes = viz["deflected_slab_meshes"] as JArray ?? new JArray();
             var localColumnTops = BuildLocalColumnTopDisplacements(viz, nodes);
-            var slabsWithMeshDropPanels = new HashSet<int>();
-            foreach (var meshToken in meshes)
-            {
-                int sid = meshToken?["slab_id"]?.ToObject<int>() ?? -1;
-                var tokenDpMeshes = meshToken?["drop_panel_meshes"] as JArray;
-                if (sid > 0 && tokenDpMeshes != null && tokenDpMeshes.Count > 0)
-                    slabsWithMeshDropPanels.Add(sid);
-            }
-            var slabsWithDropPanelsRendered = new HashSet<int>();
             foreach (var m in meshes)
             {
                 var verts = m["vertices"]?.ToObject<double[][]>() ?? new double[0][];
@@ -2050,29 +2040,8 @@ namespace Menegroth.GH.Components
                         AppendSlabColor(colors, m, colorBy, maxDisp, dispField, maxima);
                     }
 
-                    // Drop panel solids are only shown in Sized mode. In Analytical mode, keep slab
-                    // output to the shell mesh only (no boxed/solid drop panel geometry).
-                    if (showVolumes)
-                    {
-                        // Drop panels are slab-level geometry. Some payloads include multiple mesh
-                        // tokens per slab; render once per slab and prefer mesh-based
-                        // drop_panel_meshes over fallback sized-slab boxes to avoid duplicates.
-                        int slabId = m["slab_id"]?.ToObject<int>() ?? -1;
-                        bool tokenHasMeshDropPanels = (m["drop_panel_meshes"] as JArray)?.Count > 0;
-                        bool dropPanelsAlreadyRendered = slabId > 0 && slabsWithDropPanelsRendered.Contains(slabId);
-                        bool skipFallbackForThisToken =
-                            slabId > 0 &&
-                            slabsWithMeshDropPanels.Contains(slabId) &&
-                            !tokenHasMeshDropPanels;
-
-                        if (!dropPanelsAlreadyRendered && !skipFallbackForThisToken)
-                        {
-                            AppendDropPanelDeflectedGeometry(viz, m, rhinoMesh,
-                                output, colors, colorBy, maxDisp, dispField, maxima);
-                            if (slabId > 0)
-                                slabsWithDropPanelsRendered.Add(slabId);
-                        }
-                    }
+                    // Intentionally ignore drop-panel mesh add-ons in deflected/original rendering.
+                    // Drop panels are rendered only from sized, undeformed data.
                 }
             }
         }
@@ -2409,23 +2378,19 @@ namespace Menegroth.GH.Components
                     new Point3d(x0, y0, zTopDrop), new Point3d(x1, y0, zTopDrop),
                     new Point3d(x1, y1, zTopDrop), new Point3d(x0, y1, zTopDrop),
                 });
-                var dropMesh = CreateBoxMesh(bbox);
-                if (dropMesh != null)
+                var dropBrep = new Box(bbox).ToBrep();
+                if (dropBrep != null)
                 {
-                    output.Add(new GH_Mesh(dropMesh));
+                    output.Add(new GH_Brep(dropBrep));
                     AppendSlabColor(colors, analyticalSource, colorBy, maxDisp, "vertex_displacements", maxima);
                 }
             }
         }
 
         /// <summary>
-        /// Build deflected drop panel volumes by copying a slab patch downward.
-        /// Each drop_panel_meshes entry contains face indices into the parent slab mesh.
-        /// The slab mesh itself is left unchanged; to avoid coplanar z-fighting and color seams,
-        /// we do not re-add a top cap at slab elevation.
-        /// The drop panel add-on geometry is:
-        /// bottom cap = patch shifted down by extra_depth + stitched side walls.
-        /// No fallback box geometry is generated when drop_panel_meshes is absent.
+        /// Legacy deflected drop-panel geometry path.
+        /// Not used in current rendering flow: drop panels are rendered only from sized,
+        /// undeformed drop_panels as standalone boxes.
         /// </summary>
         private static void AppendDropPanelDeflectedGeometry(JToken viz, JToken meshToken, Mesh deflectedSlabMesh,
             List<IGH_GeometricGoo> output,
@@ -2604,9 +2569,6 @@ namespace Menegroth.GH.Components
                 if (showVolumes && TryBuildSizedSlabFromMesh(m, thickness, true, output, offsetAlongNormal: isVault))
                 {
                     AppendSlabColor(colors, m, colorBy, maxDisp, "vertex_displacements", maxima);
-                    if (sizedSlab != null)
-                        AppendDropPanelSizedGeometry(sizedSlab, zTop, thickness, output, colors,
-                            m, colorBy, maxDisp, maxima);
                     continue;
                 }
 

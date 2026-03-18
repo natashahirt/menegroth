@@ -949,6 +949,7 @@ function _serialize_deflected_slab_meshes(design::BuildingDesign, struc::Buildin
         isnothing(slab_result) && continue
         slab_idx > length(struc.slabs) && continue
         slab = struc.slabs[slab_idx]
+        boundary_segments = _slab_boundary_segments_with_offsets(struc, slab, offsets, _m_to_disp)
 
         # Collect all vertices and faces from shell elements
         # Each ShellTri3 is a triangle with 3 nodes
@@ -994,23 +995,10 @@ function _serialize_deflected_slab_meshes(design::BuildingDesign, struc::Buildin
                         npos = node.position
                         vi = get(node_to_vi, node, 0)
                         off = (vi > 0 ? get(offsets, vi, (0.0, 0.0)) : (0.0, 0.0))
-                        px = 0.0
-                        py = 0.0
-                        pz = 0.0
-                        # For vertices with structural offset (edge/corner columns), use architectural
-                        # (column-corner) position so deflected mesh edges align with sized geometry.
-                        if off[1] != 0.0 || off[2] != 0.0
-                            corner_x = ustrip(u"m", npos[1]) - off[1]
-                            corner_y = ustrip(u"m", npos[2]) - off[2]
-                            corner_z = ustrip(u"m", npos[3])
-                            px = _round_val(corner_x * _m_to_disp; digits=6)
-                            py = _round_val(corner_y * _m_to_disp; digits=6)
-                            pz = _round_val(corner_z * _m_to_disp; digits=6)
-                        else
-                            px = _round_val(ustrip(u"m", npos[1]) * _m_to_disp; digits=6)
-                            py = _round_val(ustrip(u"m", npos[2]) * _m_to_disp; digits=6)
-                            pz = _round_val(ustrip(u"m", npos[3]) * _m_to_disp; digits=6)
-                        end
+                        # Export support-boundary shell vertices at architectural slab coordinates.
+                        px = _round_val((ustrip(u"m", npos[1]) - off[1]) * _m_to_disp; digits=6)
+                        py = _round_val((ustrip(u"m", npos[2]) - off[2]) * _m_to_disp; digits=6)
+                        pz = _round_val(ustrip(u"m", npos[3]) * _m_to_disp; digits=6)
 
                         key = (
                             round(Int, px * 1_000_000),
@@ -1046,6 +1034,7 @@ function _serialize_deflected_slab_meshes(design::BuildingDesign, struc::Buildin
                                           face_vm, face_surf, shell, model.u, sif_ws)
             end
         end
+        _align_mesh_boundary_to_architectural_edges!(vertices, faces, boundary_segments)
 
         thickness_ft = _to_display_length(du, slab_result.thickness)
         drop_panels = get(drop_panel_cache, slab_idx, APIDropPanelPatch[])
@@ -1083,7 +1072,288 @@ function _serialize_deflected_slab_meshes(design::BuildingDesign, struc::Buildin
         ))
     end
     
-    return deflected_meshes
+    return _merge_deflected_slab_meshes_by_slab_id(deflected_meshes)
+end
+
+"""Project 2D point to segment and return `(qx, qy, t, d2)`."""
+function _project_to_segment_2d(px::Float64, py::Float64,
+                                x0::Float64, y0::Float64,
+                                x1::Float64, y1::Float64)
+    dx = x1 - x0
+    dy = y1 - y0
+    denom = dx * dx + dy * dy
+    if denom <= 1e-18
+        qx = x0
+        qy = y0
+        return (qx, qy, 0.0, (px - qx)^2 + (py - qy)^2)
+    end
+    t = clamp(((px - x0) * dx + (py - y0) * dy) / denom, 0.0, 1.0)
+    qx = x0 + t * dx
+    qy = y0 + t * dy
+    return (qx, qy, t, (px - qx)^2 + (py - qy)^2)
+end
+
+"""Collect mesh naked-boundary vertex indices from triangle faces."""
+function _mesh_naked_boundary_vertices(faces::Vector{Vector{Int}})
+    edge_count = Dict{Tuple{Int, Int}, Int}()
+    for tri in faces
+        length(tri) == 3 || continue
+        i1, i2, i3 = tri
+        for (a, b) in ((i1, i2), (i2, i3), (i3, i1))
+            key = a <= b ? (a, b) : (b, a)
+            edge_count[key] = get(edge_count, key, 0) + 1
+        end
+    end
+    vids = Set{Int}()
+    for ((a, b), c) in edge_count
+        c == 1 || continue
+        push!(vids, a)
+        push!(vids, b)
+    end
+    return collect(vids)
+end
+
+"""Boundary segments with architectural baseline and structural-offset vectors."""
+function _slab_boundary_segments_with_offsets(
+    struc::BuildingStructure,
+    slab,
+    offsets::Dict{Int, NTuple{2, Float64}},
+    m_to_disp::Float64
+)
+    boundary_vis = Int[]
+    try
+        boundary_vis, _ = _get_slab_boundary_vertices(struc, slab)
+    catch
+        return NamedTuple[]
+    end
+    isempty(boundary_vis) && return NamedTuple[]
+
+    vc = struc.skeleton.geometry.vertex_coords
+    segs = NamedTuple[]
+    n = length(boundary_vis)
+    for i in 1:n
+        vi0 = boundary_vis[i]
+        vi1 = boundary_vis[mod1(i + 1, n)]
+        off0 = get(offsets, vi0, (0.0, 0.0))
+        off1 = get(offsets, vi1, (0.0, 0.0))
+
+        ax0 = vc[vi0, 1] * m_to_disp
+        ay0 = vc[vi0, 2] * m_to_disp
+        ax1 = vc[vi1, 1] * m_to_disp
+        ay1 = vc[vi1, 2] * m_to_disp
+        ox0 = off0[1] * m_to_disp
+        oy0 = off0[2] * m_to_disp
+        ox1 = off1[1] * m_to_disp
+        oy1 = off1[2] * m_to_disp
+
+        push!(segs, (
+            ax0=ax0, ay0=ay0, ax1=ax1, ay1=ay1,
+            sx0=ax0 + ox0, sy0=ay0 + oy0, sx1=ax1 + ox1, sy1=ay1 + oy1,
+            ox0=ox0, oy0=oy0, ox1=ox1, oy1=oy1,
+        ))
+    end
+    return segs
+end
+
+"""
+Align naked-boundary mesh vertices to architectural slab boundary.
+
+A vertex is shifted only when it is demonstrably closer to a structural-shifted
+boundary segment than to the architectural baseline segment.
+"""
+function _align_mesh_boundary_to_architectural_edges!(
+    vertices::Vector{Vector{Float64}},
+    faces::Vector{Vector{Int}},
+    boundary_segments
+)
+    isempty(vertices) && return nothing
+    isempty(faces) && return nothing
+    isempty(boundary_segments) && return nothing
+
+    for vid in _mesh_naked_boundary_vertices(faces)
+        (vid < 1 || vid > length(vertices)) && continue
+        p = vertices[vid]
+        length(p) >= 2 || continue
+        px = p[1]
+        py = p[2]
+
+        d2_struct_best = Inf
+        d2_arch_best = Inf
+        seg_best = nothing
+        t_best = 0.0
+
+        for seg in boundary_segments
+            _, _, t_s, d2_s = _project_to_segment_2d(px, py, seg.sx0, seg.sy0, seg.sx1, seg.sy1)
+            if d2_s < d2_struct_best
+                d2_struct_best = d2_s
+                t_best = t_s
+                seg_best = seg
+            end
+            _, _, _, d2_a = _project_to_segment_2d(px, py, seg.ax0, seg.ay0, seg.ax1, seg.ay1)
+            d2_a < d2_arch_best && (d2_arch_best = d2_a)
+        end
+
+        isnothing(seg_best) && continue
+        if d2_struct_best + 1e-10 < d2_arch_best
+            ox = (1.0 - t_best) * seg_best.ox0 + t_best * seg_best.ox1
+            oy = (1.0 - t_best) * seg_best.oy0 + t_best * seg_best.oy1
+            p[1] = _round_val(px - ox; digits=6)
+            p[2] = _round_val(py - oy; digits=6)
+        end
+    end
+    return nothing
+end
+
+"""
+Ensure there is exactly one deflected slab mesh token per slab_id.
+Merges duplicate tokens by welding vertices on exported coordinates and remapping
+faces, analytical arrays, and drop_panel_meshes face indices accordingly.
+"""
+function _merge_deflected_slab_meshes_by_slab_id(
+    meshes::Vector{APIDeflectedSlabMesh})
+    isempty(meshes) && return meshes
+
+    grouped = Dict{Int, Vector{APIDeflectedSlabMesh}}()
+    for m in meshes
+        push!(get!(grouped, m.slab_id, APIDeflectedSlabMesh[]), m)
+    end
+
+    slab_ids = sort(collect(keys(grouped)))
+    merged = APIDeflectedSlabMesh[]
+    sizehint!(merged, length(slab_ids))
+
+    for sid in slab_ids
+        tokens = grouped[sid]
+        if length(tokens) == 1
+            push!(merged, tokens[1])
+            continue
+        end
+        push!(merged, _merge_deflected_slab_mesh_group(tokens))
+    end
+
+    return merged
+end
+
+function _merge_deflected_slab_mesh_group(tokens::Vector{APIDeflectedSlabMesh})
+    isempty(tokens) && return APIDeflectedSlabMesh()
+
+    # Quantized welding in exported coordinates (display units).
+    # 1e6 => 1e-6 coordinate bins, consistent with serializer rounding.
+    key_scale = 1_000_000
+
+    vertices = Vector{Float64}[]
+    disps_g = Vector{Float64}[]
+    disps_l = Vector{Float64}[]
+    faces = Vector{Int}[]
+    fb = Float64[]
+    fm = Float64[]
+    fs = Float64[]
+    fvm = Float64[]
+    fss = Float64[]
+    dp_meshes = APIDeflectedDropPanel[]
+
+    vertex_key_map = Dict{NTuple{3, Int}, Int}()
+
+    for tok in tokens
+        local_to_global = Dict{Int, Int}()
+        sizehint!(local_to_global, length(tok.vertices))
+
+        for (li, v) in enumerate(tok.vertices)
+            length(v) < 3 && continue
+            key = (
+                round(Int, v[1] * key_scale),
+                round(Int, v[2] * key_scale),
+                round(Int, v[3] * key_scale),
+            )
+            if haskey(vertex_key_map, key)
+                local_to_global[li] = vertex_key_map[key]
+            else
+                push!(vertices, v)
+                push!(disps_g, li <= length(tok.vertex_displacements) ? tok.vertex_displacements[li] : [0.0, 0.0, 0.0])
+                push!(disps_l, li <= length(tok.vertex_displacements_local) ? tok.vertex_displacements_local[li] : [0.0, 0.0, 0.0])
+                gi = length(vertices)
+                vertex_key_map[key] = gi
+                local_to_global[li] = gi
+            end
+        end
+
+        # Map old face index (1-based) -> merged face index (1-based)
+        old_to_new_face = Dict{Int, Int}()
+        for (fi, face) in enumerate(tok.faces)
+            length(face) < 3 && continue
+            i1 = get(local_to_global, face[1], 0)
+            i2 = get(local_to_global, face[2], 0)
+            i3 = get(local_to_global, face[3], 0)
+            (i1 <= 0 || i2 <= 0 || i3 <= 0) && continue
+
+            push!(faces, [i1, i2, i3])
+            new_fi = length(faces)
+            old_to_new_face[fi] = new_fi
+
+            push!(fb, fi <= length(tok.face_bending_moment) ? tok.face_bending_moment[fi] : 0.0)
+            push!(fm, fi <= length(tok.face_membrane_force) ? tok.face_membrane_force[fi] : 0.0)
+            push!(fs, fi <= length(tok.face_shear_force) ? tok.face_shear_force[fi] : 0.0)
+            push!(fvm, fi <= length(tok.face_von_mises) ? tok.face_von_mises[fi] : 0.0)
+            push!(fss, fi <= length(tok.face_surface_stress) ? tok.face_surface_stress[fi] : 0.0)
+        end
+
+        for dpm in tok.drop_panel_meshes
+            mapped_faces = Int[]
+            for old_fi in dpm.face_indices
+                if haskey(old_to_new_face, old_fi)
+                    push!(mapped_faces, old_to_new_face[old_fi])
+                end
+            end
+            if !isempty(mapped_faces)
+                push!(dp_meshes, APIDeflectedDropPanel(
+                    face_indices = mapped_faces,
+                    extra_depth = dpm.extra_depth,
+                ))
+            end
+        end
+    end
+
+    # Slab-level fields should be identical across tokens; use robust reductions.
+    first_tok = tokens[1]
+    utilization = maximum(getfield.(tokens, :utilization_ratio))
+    ok = all(getfield.(tokens, :ok))
+    thickness = maximum(getfield.(tokens, :thickness))
+    is_vault = any(getfield.(tokens, :is_vault))
+    mat_hex = first_tok.material_color_hex
+    for t in tokens
+        if !isempty(t.material_color_hex)
+            mat_hex = t.material_color_hex
+            break
+        end
+    end
+
+    drop_panels = first_tok.drop_panels
+    for t in tokens
+        if !isempty(t.drop_panels)
+            drop_panels = t.drop_panels
+            break
+        end
+    end
+
+    return APIDeflectedSlabMesh(
+        slab_id = first_tok.slab_id,
+        vertices = vertices,
+        vertex_displacements = disps_g,
+        vertex_displacements_local = disps_l,
+        faces = faces,
+        thickness = thickness,
+        drop_panels = drop_panels,
+        drop_panel_meshes = dp_meshes,
+        utilization_ratio = utilization,
+        ok = ok,
+        material_color_hex = mat_hex,
+        is_vault = is_vault,
+        face_bending_moment = fb,
+        face_membrane_force = fm,
+        face_shear_force = fs,
+        face_von_mises = fvm,
+        face_surface_stress = fss,
+    )
 end
 
 """Compute per-face analytical scalars from ShellInternalForces and append to arrays.

@@ -13,7 +13,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("Menegroth")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Debug")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+8a4eae72ef0d5c944f6e2b5e24f776115046fe87")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+2c27393583316d0c2ef28f70b989b345688b945b")]
 [assembly: System.Reflection.AssemblyProductAttribute("Menegroth")]
 [assembly: System.Reflection.AssemblyTitleAttribute("Menegroth")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]

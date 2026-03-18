@@ -1093,9 +1093,8 @@ function build_analysis_model!(design::BuildingDesign;
                                           refinement_targets=effective_refinement_targets)
         elseif length(boundary_vert_indices) >= 3
             # Flat slabs/plates: Delaunay mesh of entire slab outer boundary.
-            # IMPORTANT: only enable shell patches for true flat slabs with an
-            # explicit drop-panel geometry. For flat plates, patches can create
-            # disconnected visualization artifacts near columns.
+            # Keep patch-based stiffness for flat slabs, but constrain patch creation
+            # to slab-owned vertices so patches cannot form disconnected islands.
             n_cells = length(slab.cell_indices)
             scale_factor = ceil(Int, sqrt(n_cells))
             effective_n = mesh_density * scale_factor
@@ -1104,12 +1103,18 @@ function build_analysis_model!(design::BuildingDesign;
             column_refinement_nodes = _get_slab_column_nodes(struc, slab, nodes)
             slab_columns = _get_slab_columns(struc, slab)
             use_shell_patches = slab.floor_type == :flat_slab && !isnothing(slab.drop_panel)
+            slab_vertex_set = Set{Int}()
+            for ci in slab.cell_indices
+                for vi in skel.face_vertex_indices[struc.cells[ci].face_idx]
+                    push!(slab_vertex_set, vi)
+                end
+            end
             interior_patches = use_shell_patches ?
                 StructuralSizer.build_slab_shell_patches(
                     struc, slab_columns, section;
                     drop_panel=slab.drop_panel,
                     patch_stiffness_factor=1.0,
-                    vertex_set=nothing) :
+                    vertex_set=slab_vertex_set) :
                 Asap.ShellPatch[]
             effective_target_edge_length = _resolve_slab_target_edge_length(
                 struc, slab, mesh_controls.target_edge_length)
@@ -1149,12 +1154,18 @@ function build_analysis_model!(design::BuildingDesign;
             column_refinement_nodes = _get_slab_column_nodes(struc, slab, nodes)
             slab_columns = _get_slab_columns(struc, slab)
             use_shell_patches = slab.floor_type == :flat_slab && !isnothing(slab.drop_panel)
+            slab_vertex_set = Set{Int}()
+            for ci in slab.cell_indices
+                for vi in skel.face_vertex_indices[struc.cells[ci].face_idx]
+                    push!(slab_vertex_set, vi)
+                end
+            end
             interior_patches = use_shell_patches ?
                 StructuralSizer.build_slab_shell_patches(
                     struc, slab_columns, section;
                     drop_panel=slab.drop_panel,
                     patch_stiffness_factor=1.0,
-                    vertex_set=nothing) :
+                    vertex_set=slab_vertex_set) :
                 Asap.ShellPatch[]
             effective_target_edge_length = _resolve_slab_target_edge_length(
                 struc, slab, mesh_controls.target_edge_length)

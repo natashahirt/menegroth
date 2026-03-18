@@ -2024,7 +2024,11 @@ namespace Menegroth.GH.Components
                     {
                         double thickness = m["thickness"]?.ToObject<double>() ?? 0;
                         bool isVault = m["is_vault"]?.ToObject<bool>() == true;
-                        if (thickness > 0 && TryBuildDeflectedSlabVolume(rhinoMesh, thickness, output, offsetAlongNormal: isVault))
+                        bool preserveInterpolatedColors =
+                            colorBy == COLOR_DEFLECTION || isAnalyticalSlab;
+                        if (!preserveInterpolatedColors &&
+                            thickness > 0 &&
+                            TryBuildDeflectedSlabVolume(rhinoMesh, thickness, output, offsetAlongNormal: isVault))
                         {
                             AppendSlabColor(colors, m, colorBy, maxDisp, dispField, maxima);
                         }
@@ -2566,7 +2570,10 @@ namespace Menegroth.GH.Components
 
                 // Volume path: reuse TryBuildSizedSlabFromMesh for correct solid geometry
                 bool isVault = m["is_vault"]?.ToObject<bool>() == true;
-                if (showVolumes && TryBuildSizedSlabFromMesh(m, thickness, true, output, offsetAlongNormal: isVault))
+                bool preserveInterpolatedColors =
+                    colorBy == COLOR_DEFLECTION || isAnalyticalSlab;
+                if (showVolumes && !preserveInterpolatedColors &&
+                    TryBuildSizedSlabFromMesh(m, thickness, true, output, offsetAlongNormal: isVault))
                 {
                     AppendSlabColor(colors, m, colorBy, maxDisp, "vertex_displacements", maxima);
                     continue;

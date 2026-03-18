@@ -1,9 +1,10 @@
 # Type Hierarchy
 
 > ```julia
-> # Functions dispatch on (section_type, material_type):
-> get_ϕMn(section::ISymmSection, steel::StructuralSteel, geom::SteelMemberGeometry)
-> get_ϕMn(section::RCBeamSection, conc::Concrete, geom::ConcreteMemberGeometry)
+> # Functions commonly dispatch on (checker, section, material, demand, geometry):
+> is_feasible(checker::AISCChecker, cache::AISCCapacityCache, j::Int,
+>     section::AbstractSection, steel::StructuralSteel,
+>     demand::MemberDemand, geom::SteelMemberGeometry)
 > ```
 
 ## Overview

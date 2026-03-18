@@ -83,7 +83,7 @@ Each floor system has its own options type inheriting from `AbstractFloorOptions
 ```julia
 FlatPlateOptions(method=DDM(), ...)      # Flat plate / flat slab / waffle / PT
 OneWayOptions(material=RC_4000_60, ...)  # One-way slab settings
-VaultOptions(lambda_bounds=(10, 20), ...)# Vault-specific settings
+VaultOptions(lambda_bounds=(10.0, 20.0), ...)# Vault-specific settings
 CompositeDeckOptions(...)                # Composite steel deck
 TimberOptions(...)                       # Timber panel floors
 ```

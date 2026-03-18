@@ -7,7 +7,7 @@
 > struc = BuildingStructure(skeleton)
 > length(struc.columns)  # number of columns
 > length(struc.beams)     # number of beams
-> struc.asap_model        # Asap FEM model (nothing until to_asap!)
+> struc.asap_model        # Asap FEM model (empty until to_asap!)
 > ```
 
 ## Overview

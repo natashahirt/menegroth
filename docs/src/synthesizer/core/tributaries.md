@@ -17,7 +17,7 @@
 
 ## Overview
 
-Tributary area accessors provide convenient functions to query the cached Voronoi tributary results for columns and cell edges. These functions read from the `TributaryCache` stored in the `BuildingStructure`, computing and caching results on first access.
+Tributary area accessors provide convenient functions to query the cached Voronoi tributary results for columns and cell edges. These functions **read from** the `TributaryCache` stored in the `BuildingStructure` and return `nothing`/empty results if tributaries have not been computed yet. Compute and populate the cache with `compute_cell_tributaries!(struc)` before calling the accessors.
 
 ## Key Types
 

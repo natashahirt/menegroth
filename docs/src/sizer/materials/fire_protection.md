@@ -152,7 +152,7 @@ Concrete fire resistance is governed by:
 
 ## Limitations & Future Work
 
-- **Fire ratings**: Currently supports 1, 1.5, 2, 3, and 4 hour ratings. Non-standard ratings are interpolated.
+- **Fire ratings**: `sfrm_thickness_x772` accepts any positive `fire_rating` (hours). `intumescent_thickness_n643` is table-based and currently supports 1, 1.5, and 2 hour ratings for the unrestrained-beam table (and up to 3 hours for the restrained table). `compute_surface_coating(IntumescentCoating, ...)` currently uses the unrestrained table (`restrained=false`).
 - **Concrete spalling**: ACI 216.1-14 spalling provisions (supplementary reinforcement for covers > 2.5") are not modeled.
 - **Composite fire resistance**: Fire resistance of composite steel-concrete members (AISC Design Guide 19 Chapter 5) is not yet implemented.
 - **Cost model**: Fire protection cost (installed \$/ft²) is not tracked. Only embodied carbon is computed.

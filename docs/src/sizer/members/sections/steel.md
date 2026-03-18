@@ -158,8 +158,6 @@ RebarLocation
 - `section_width(s)` — returns the width (flange width for I-sections, outside width for HSS).
 - `weight_per_length(s, mat)` — computes weight per unit length as `section_area(s) * mat.ρ`.
 
-`weight_per_length(s, mat)` computes weight per unit length as `section_area(s) * mat.ρ`.
-
 ### Section Properties
 
 - `Ix(s)` — strong-axis moment of inertia.
@@ -199,7 +197,7 @@ For `HSSRoundSection`, `Ix` and `Iy` both return `s.I`; `Sx` and `Sy` both retur
 
 ## Implementation Details
 
-All section types are **mutable** to allow post-construction assignment of the `material` field and catalog loading. Derived properties (slenderness ratios, section moduli) are computed once at construction time and stored, not recomputed on access.
+Most catalog-based steel section types are **mutable** to allow post-construction assignment of the `material` field and catalog loading. (Rebar is an immutable section type.) Derived properties (slenderness ratios, section moduli) are computed once at construction time and stored, not recomputed on access.
 
 `ISymmSection` stores both elastic (`Sx`, `Sy`) and plastic (`Zx`, `Zy`) section moduli because AISC 360 requires both for different limit states (e.g. `Mp = Fy × Zx` for yielding vs. `0.7 Fy × Sx` for the LTB anchor point).
 

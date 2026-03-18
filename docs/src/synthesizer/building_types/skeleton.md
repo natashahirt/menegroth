@@ -11,7 +11,7 @@
 
 ## Overview
 
-`BuildingSkeleton` is the core geometry container for a building's structural layout. It stores the topological mesh — vertices (`Meshes.Point`), edges, and faces — along with spatial indices and precomputed geometric properties. The skeleton is the input to `BuildingStructure` and is immutable during design.
+`BuildingSkeleton` is the core geometry container for a building's structural layout. It stores the topological mesh — vertices (`Meshes.Point`), edges, and faces — along with spatial indices and precomputed geometric properties. The skeleton is the input to `BuildingStructure` and is typically treated as fixed after initialization, but it is a mutable container (you can add/remove geometry and then rebuild caches/stories).
 
 A skeleton represents a building as a half-edge mesh:
 
@@ -61,13 +61,14 @@ Edges are classified into named groups stored in `groups_edges`:
 
 ### Face Groups
 
-Faces are classified in `groups_faces`:
+Faces are classified in `groups_faces`. Auto-detected faces from `find_faces!` are added under `:slabs`, and building generators typically also populate story-level groups:
 
 | Group | Symbol | Description |
 |:------|:-------|:------------|
 | Floor | `:floor` | Interior floor slabs |
 | Roof | `:roof` | Top-level faces |
 | Grade | `:grade` | Ground-level faces (for foundation loading) |
+| Detected slabs | `:slabs` | Faces found by `find_faces!` before being categorized into `:floor` / `:roof` / `:grade` |
 
 ### Spatial Indexing — SkeletonLookup
 
@@ -92,5 +93,5 @@ The skeleton maintains a `Graphs.jl` `SimpleGraph` in the `graph` field, where v
 
 ## Limitations & Future Work
 
-- Face detection (`find_faces!`) assumes planar, convex polygons. Non-convex or non-planar faces require manual specification or splitting via `validate_and_split_slab`.
+- Face detection (`find_faces!`) operates per-story on the planar graph of vertices/edges. It assumes simple cycle boundaries (no holes) and may not behave well on non-manifold or self-intersecting layouts. Non-convex faces may be detected, but downstream slab workflows often require splitting/validation (see `validate_and_split_slab` and `is_convex_face`).
 - Curved edges (arches, spirals) are not supported; all edges are straight line segments.

@@ -18,7 +18,6 @@ Source: `StructuralSizer/src/members/codes/aisc/generic/*.jl`
 
 ```@docs
 AISCCapacityCache
-ASD
 B2StoryProperties
 ```
 

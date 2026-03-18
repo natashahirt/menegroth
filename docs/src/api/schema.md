@@ -22,7 +22,7 @@ The top-level input object sent to `POST /design` and `POST /validate`.
 | `units` | `String` | yes | Coordinate units: `"feet"/"ft"`, `"inches"/"in"`, `"meters"/"m"`, `"millimeters"/"mm"`, or `"centimeters"/"cm"` |
 | `vertices` | `Vector{Vector{Float64}}` | yes | 3D vertex coordinates `[[x,y,z], ...]` |
 | `edges` | `APIEdgeGroups` | yes | Edge connectivity by group |
-| `supports` | `Vector{Int}` | yes | 1-based vertex indices with support conditions |
+| `supports` | `Vector{Int}` | yes | 1-based vertex indices that are fixed supports |
 | `stories_z` | `Vector{Float64}` | no | Story elevation Z coordinates (inferred from vertices if empty / omitted) |
 | `faces` | `APIFaceGroups` | no | Optional face-group selectors. The server always detects faces from the edge mesh; when `faces` is provided, its polygons are used to *assign* detected faces to groups like `"floor"`, `"roof"`, and `"grade"`. |
 | `params` | `APIParams` | yes | Design parameters |
@@ -70,6 +70,7 @@ A dictionary mapping face group names to face-coordinate polylines:
 | `pixelframe_options` | `Union{APIPixelFrameOptions, Nothing}` | `nothing` | Optional PixelFrame concrete strength settings. If omitted/`null`, the server uses the `"standard"` preset. |
 | `fire_rating` | `Float64` | `0.0` | Fire resistance in hours. Accepted values are `0`, `1`, `1.5`, `2`, `3`, or `4`. |
 | `optimize_for` | `String` | `"weight"` | Optimization target (lowercase): `"weight"`, `"carbon"`, or `"cost"` |
+| `max_iterations` | `Union{Int, Nothing}` | `nothing` | Optional. Maximum beam/column sizing iterations (integer ≥ 1). If omitted/`null`, the server uses 20. |
 | `size_foundations` | `Bool` | `false` | Whether to size foundations |
 | `foundation_soil` | `String` | `"medium_sand"` | Soil type name (used when `size_foundations=true`): `"loose_sand"`, `"medium_sand"`, `"dense_sand"`, `"soft_clay"`, `"stiff_clay"`, `"hard_clay"` |
 | `foundation_concrete` | `String` | `"NWC_3000"` | Foundation concrete grade (used when `size_foundations=true`) |
@@ -531,7 +532,9 @@ Example snippet (abbreviated) showing beamless-state and one drop-panel patch:
 
 See [`APIError`](@ref) in [API Overview](overview.md).
 
-## Structural Column Offsets
+## Implementation Details
+
+### Structural Column Offsets
 
 When `geometry_is_centerline` is `false` (the default), the server treats input
 vertex coordinates as **architectural reference points** — panel corners and

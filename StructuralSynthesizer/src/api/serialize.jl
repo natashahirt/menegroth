@@ -966,11 +966,14 @@ function _serialize_deflected_slab_meshes(design::BuildingDesign, struc::Buildin
         sizehint!(faces, n_shells)
         vertex_map = Dict{Asap.Node, Int}()
         sizehint!(vertex_map, n_verts_est)
-        # Weld nodes by exported position so patch shells (e.g. col_patch/drop_panel)
-        # share vertices with adjacent slab shells when they are geometrically coincident.
-        # Key tolerance follows export precision (1e-6 display-length units).
-        vertex_key_map = Dict{NTuple{3, Int}, Int}()
-        sizehint!(vertex_key_map, n_verts_est)
+        # Weld nodes by geometric proximity so patch shells (e.g. col_patch/drop_panel)
+        # share vertices with adjacent slab shells even when coordinates differ by tiny
+        # numeric drift after export transforms/rounding.
+        weld_eps = 5e-5
+        weld_eps2 = weld_eps^2
+        weld_inv = 1.0 / weld_eps
+        vertex_bin_map = Dict{NTuple{3, Int}, Vector{Int}}()
+        sizehint!(vertex_bin_map, n_verts_est)
 
         # Per-face analytical values (one entry per triangle, parallel to `faces`)
         face_bending = Float64[]
@@ -1000,16 +1003,11 @@ function _serialize_deflected_slab_meshes(design::BuildingDesign, struc::Buildin
                         py = _round_val((ustrip(u"m", npos[2]) - off[2]) * _m_to_disp; digits=6)
                         pz = _round_val(ustrip(u"m", npos[3]) * _m_to_disp; digits=6)
 
-                        key = (
-                            round(Int, px * 1_000_000),
-                            round(Int, py * 1_000_000),
-                            round(Int, pz * 1_000_000),
-                        )
-                        if haskey(vertex_key_map, key)
-                            vertex_map[node] = vertex_key_map[key]
+                        vidx, is_new = _register_welded_vertex!(vertices, vertex_bin_map,
+                            px, py, pz, weld_eps2, weld_inv)
+                        if !is_new
+                            vertex_map[node] = vidx
                         else
-                            push!(vertices, [px, py, pz])
-
                             nid = objectid(node)
                             disp_global_m = get(total_disp, nid, Asap.to_displacement_vec(node.displacement)[1:3])
                             disp_local_m = get(local_disp, nid, disp_global_m)
@@ -1017,9 +1015,7 @@ function _serialize_deflected_slab_meshes(design::BuildingDesign, struc::Buildin
                             push!(vertex_displacements, [_round_val(d * _m_to_disp; digits=6) for d in disp_global_m])
                             push!(vertex_displacements_local, [_round_val(d * _m_to_disp; digits=6) for d in disp_local_m])
 
-                            vidx = length(vertices)
                             vertex_map[node] = vidx
-                            vertex_key_map[key] = vidx
                         end
                     end
                     push!(tri_indices, vertex_map[node])
@@ -1204,6 +1200,53 @@ function _align_mesh_boundary_to_architectural_edges!(
     return nothing
 end
 
+@inline function _weld_bin_key(x::Float64, y::Float64, z::Float64, inv::Float64)
+    return (
+        floor(Int, x * inv),
+        floor(Int, y * inv),
+        floor(Int, z * inv),
+    )
+end
+
+function _find_welded_vertex(
+    vertices::Vector{Vector{Float64}},
+    bin_map::Dict{NTuple{3, Int}, Vector{Int}},
+    x::Float64, y::Float64, z::Float64,
+    eps2::Float64, inv::Float64
+)
+    bx, by, bz = _weld_bin_key(x, y, z, inv)
+    for dx in -1:1, dy in -1:1, dz in -1:1
+        key = (bx + dx, by + dy, bz + dz)
+        haskey(bin_map, key) || continue
+        for vi in bin_map[key]
+            p = vertices[vi]
+            d2 = (p[1] - x)^2 + (p[2] - y)^2 + (p[3] - z)^2
+            if d2 <= eps2
+                return vi
+            end
+        end
+    end
+    return 0
+end
+
+function _register_welded_vertex!(
+    vertices::Vector{Vector{Float64}},
+    bin_map::Dict{NTuple{3, Int}, Vector{Int}},
+    x::Float64, y::Float64, z::Float64,
+    eps2::Float64, inv::Float64
+)
+    vi = _find_welded_vertex(vertices, bin_map, x, y, z, eps2, inv)
+    if vi > 0
+        return vi, false
+    end
+
+    push!(vertices, [x, y, z])
+    vi = length(vertices)
+    key = _weld_bin_key(x, y, z, inv)
+    push!(get!(bin_map, key, Int[]), vi)
+    return vi, true
+end
+
 """
 Ensure there is exactly one deflected slab mesh token per slab_id.
 Merges duplicate tokens by welding vertices on exported coordinates and remapping
@@ -1224,10 +1267,6 @@ function _merge_deflected_slab_meshes_by_slab_id(
 
     for sid in slab_ids
         tokens = grouped[sid]
-        if length(tokens) == 1
-            push!(merged, tokens[1])
-            continue
-        end
         push!(merged, _merge_deflected_slab_mesh_group(tokens))
     end
 
@@ -1237,9 +1276,10 @@ end
 function _merge_deflected_slab_mesh_group(tokens::Vector{APIDeflectedSlabMesh})
     isempty(tokens) && return APIDeflectedSlabMesh()
 
-    # Quantized welding in exported coordinates (display units).
-    # 1e6 => 1e-6 coordinate bins, consistent with serializer rounding.
-    key_scale = 1_000_000
+    # Tolerance-based welding in exported coordinates (display units).
+    weld_eps = 5e-5
+    weld_eps2 = weld_eps^2
+    weld_inv = 1.0 / weld_eps
 
     vertices = Vector{Float64}[]
     disps_g = Vector{Float64}[]
@@ -1252,7 +1292,7 @@ function _merge_deflected_slab_mesh_group(tokens::Vector{APIDeflectedSlabMesh})
     fss = Float64[]
     dp_meshes = APIDeflectedDropPanel[]
 
-    vertex_key_map = Dict{NTuple{3, Int}, Int}()
+    vertex_bin_map = Dict{NTuple{3, Int}, Vector{Int}}()
 
     for tok in tokens
         local_to_global = Dict{Int, Int}()
@@ -1260,21 +1300,13 @@ function _merge_deflected_slab_mesh_group(tokens::Vector{APIDeflectedSlabMesh})
 
         for (li, v) in enumerate(tok.vertices)
             length(v) < 3 && continue
-            key = (
-                round(Int, v[1] * key_scale),
-                round(Int, v[2] * key_scale),
-                round(Int, v[3] * key_scale),
-            )
-            if haskey(vertex_key_map, key)
-                local_to_global[li] = vertex_key_map[key]
-            else
-                push!(vertices, v)
+            vi, is_new = _register_welded_vertex!(vertices, vertex_bin_map,
+                v[1], v[2], v[3], weld_eps2, weld_inv)
+            if is_new
                 push!(disps_g, li <= length(tok.vertex_displacements) ? tok.vertex_displacements[li] : [0.0, 0.0, 0.0])
                 push!(disps_l, li <= length(tok.vertex_displacements_local) ? tok.vertex_displacements_local[li] : [0.0, 0.0, 0.0])
-                gi = length(vertices)
-                vertex_key_map[key] = gi
-                local_to_global[li] = gi
             end
+            local_to_global[li] = vi
         end
 
         # Map old face index (1-based) -> merged face index (1-based)

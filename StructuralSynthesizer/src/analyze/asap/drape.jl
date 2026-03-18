@@ -524,16 +524,24 @@ function compute_draped_displacements(design::BuildingDesign)
     @debug "Drape shell grouping" n_total=length(shell_model.shell_elements) n_patch=length(patch_shells) n_drop_panel n_col_patch slab_keys=collect(keys(slab_shells))
 
     # ── Merge patch shells into parent slab groups ──
-    # Assign each col_patch/drop_panel shell to the slab whose boundary contains its centroid.
+    # Assign each col_patch/drop_panel shell to the slab whose boundary contains its centroid
+    # at a matching elevation band (important for stacked floors with similar XY footprints).
     struc = design.structure
     offsets = design.structural_offsets
+    z_tol = 0.15
     for shell in patch_shells
         n1, n2, n3 = shell.nodes
         cx = (ustrip(u"m", n1.position[1]) + ustrip(u"m", n2.position[1]) + ustrip(u"m", n3.position[1])) / 3
         cy = (ustrip(u"m", n1.position[2]) + ustrip(u"m", n2.position[2]) + ustrip(u"m", n3.position[2])) / 3
+        cz = (ustrip(u"m", n1.position[3]) + ustrip(u"m", n2.position[3]) + ustrip(u"m", n3.position[3])) / 3
         centroid = (cx, cy)
         assigned = false
         for (slab_idx, slab) in enumerate(struc.slabs)
+            first_cell = struc.cells[first(slab.cell_indices)]
+            first_vi = struc.skeleton.face_vertex_indices[first_cell.face_idx][1]
+            slab_z = struc.skeleton.geometry.vertex_coords[first_vi, 3]
+            abs(cz - slab_z) <= z_tol || continue
+
             boundary_vis, _ = _get_slab_boundary_vertices(struc, slab)
             vc = struc.skeleton.geometry.vertex_coords
             boundary_pts = Tuple{Float64, Float64}[
@@ -551,12 +559,12 @@ function compute_draped_displacements(design::BuildingDesign)
         end
         # If no slab contains the centroid (e.g. degenerate), attach to first slab with matching elevation
         if !assigned && !isempty(struc.slabs)
-            slab_z = ustrip(u"m", n1.position[3])
+            slab_z = cz
             for (slab_idx, slab) in enumerate(struc.slabs)
                 first_cell = struc.cells[first(slab.cell_indices)]
                 first_vi = struc.skeleton.face_vertex_indices[first_cell.face_idx][1]
                 cell_z = struc.skeleton.geometry.vertex_coords[first_vi, 3]
-                if abs(slab_z - cell_z) < 0.15
+                if abs(slab_z - cell_z) < z_tol
                     slab_id = Symbol("slab_$(slab_idx)")
                     shells = get!(slab_shells, slab_id, Asap.ShellElement[])
                     push!(shells, shell)

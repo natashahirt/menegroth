@@ -85,7 +85,7 @@ Faces are classified in `groups_faces`. Auto-detected faces from `find_faces!` a
 
 ### Stories
 
-Stories are inferred from vertex Z coordinates. Each `Story` stores the elevation and the indices of vertices, edges, and faces at that level. Stories are rebuilt automatically via `rebuild_stories!` whenever the skeleton geometry changes.
+Stories are inferred from vertex Z coordinates. Each `Story` stores the elevation and the indices of vertices, edges, and faces at that level. After direct geometry edits (or if story indices are missing/stale), call `rebuild_stories!` to recompute story assignments.
 
 ### Graph Representation
 

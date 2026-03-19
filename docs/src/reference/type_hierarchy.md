@@ -57,9 +57,9 @@ AbstractMaterial
 ### Material Type Subtypes
 
 ```
-MetalType
-├── StructuralSteelType       # Hot-rolled structural steel
-└── RebarType                 # Reinforcing steel
+StructuralSizer.MetalType            # Internal dispatch tag (not exported)
+├── StructuralSizer.StructuralSteelType
+└── StructuralSizer.RebarType
 ```
 
 See [Steel](../sizer/materials/steel.md), [Concrete](../sizer/materials/concrete.md), [FRC](../sizer/materials/frc.md), and [Timber](../sizer/materials/timber.md) for full type documentation.
@@ -83,6 +83,7 @@ AbstractSection
 ├── ISymmSection              # Doubly-symmetric I-shapes (W, S, HP)
 ├── HSSRectSection            # Rectangular HSS
 ├── HSSRoundSection           # Round HSS and Pipe
+├── PipeSection               # Alias of HSSRoundSection (pipe-specific constructors/catalogs)
 ├── Rebar                     # Reinforcing bar (for rebar design)
 ├── RCBeamSection             # RC rectangular beam
 ├── RCTBeamSection            # RC T-beam

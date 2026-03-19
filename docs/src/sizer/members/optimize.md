@@ -179,7 +179,7 @@ size_columns
 size_beams
 ```
 
-`size_beams(Mu, Vu, geometries, opts; Nu=0, Tu=0)` — size beams for the given demands. Dispatches on `opts`:
+`size_beams(Mu, Vu, geometries, opts; Nu=zeros_like(Vu), Tu=Float64[])` — size beams for the given demands. `Nu` and `Tu` are **vectors** (one per member); if `Tu` is omitted (empty), it is treated as zero torsion for all members. Dispatches on `opts`:
 - `SteelBeamOptions` → AISC checker + MIP (and optional deflection constraints when analysis deflections are provided)
 - `ConcreteBeamOptions` → ACI checker + MIP
 - `PixelFrameBeamOptions` → PixelFrame checker + MIP

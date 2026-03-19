@@ -32,7 +32,7 @@ compute_geometry_hash
 2. **Vertex creation** — `Meshes.Point` objects from coordinate arrays
 3. **Edge creation** — skeleton edges from `APIEdgeGroups`, classified into `:beams`, `:columns`, `:braces`
 4. **Support marking** — vertices listed in `input.supports` are marked as restrained
-5. **Story setup** — if `input.stories_z` is provided (non-empty), those elevations are used; otherwise story elevations are inferred from vertex Z via `rebuild_stories!`
+5. **Story setup** — story elevations are inferred from vertex Z via `rebuild_stories!` (note: `input.stories_z` is currently ignored during skeleton construction, but it is still validated and included in `compute_geometry_hash`)
 6. **Face detection + grouping** — faces are always detected from the edge mesh; if `input.faces` is provided, its polygons are used as selectors to assign detected faces to groups (`"floor"`, `"roof"`, `"grade"`), otherwise the server auto-categorizes faces by story level
 
 ### json_to_params

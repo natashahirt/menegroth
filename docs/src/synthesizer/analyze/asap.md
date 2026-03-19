@@ -31,9 +31,8 @@ add_coating_loads!
 
 1. **Create nodes** — one Asap node per skeleton vertex, with support conditions at ground-level vertices
 2. **Create frame elements** — one Asap frame element per beam/column/strut segment:
-   - Section properties (A, Ix, Iy, J) from member section assignments
-   - Material properties (E, G, ρ) from member materials or `params.default_frame_*`
-   - Stiffness reduction factors: `params.column_I_factor` (default 0.70 per ACI 318-11 §10.10.4.1) and `params.beam_I_factor` (default 0.35)
+   - Initial section properties use a **placeholder** `Asap.Section` (topology-first). Sizing/reconciliation stages later overwrite element sections with sized properties.
+   - Material properties (E, G, ρ) use `params.default_frame_*` before member sizing assigns section-specific properties.
 3. **Apply loads** — gravity loads from cells converted to distributed loads on beam elements:
    - Self-weight of members
    - Tributary-width distributed dead and live loads on beams
@@ -45,10 +44,10 @@ add_coating_loads!
 
 `sync_asap!(struc; params)` updates the existing Asap model after section changes without rebuilding from scratch:
 
-1. Updates section properties for all elements whose sections have changed
+1. Assumes element sections have already been updated by sizing routines
 2. Updates slab self-weights (which may change if slab thickness changed)
-3. Recalculates tributary loads
-4. Re-solves the model
+3. Recalculates tributary loads / pressures
+4. Calls `Asap.update!` / `Asap.process!`, then re-solves the model
 
 This is more efficient than `to_asap!` for iterative design because the topology is unchanged.
 

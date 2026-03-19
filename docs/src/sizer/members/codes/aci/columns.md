@@ -162,7 +162,7 @@ generate_PM_diagram
 check_PM_capacity
 ```
 
-`check_PM_capacity(diagram, Pu, Mu)` — returns `true` if the (Pu, Mu) point lies inside the interaction diagram.
+`check_PM_capacity(diagram, Pu, Mu)` — returns a `NamedTuple`; use `result.adequate` (Bool) and `result.utilization` (Float64) to interpret the check.
 
 ```@docs
 capacity_at_axial
@@ -318,6 +318,7 @@ checker = ACIColumnChecker(;
     include_biaxial = true,       # Check biaxial interaction
     α_biaxial = 1.5,              # Bresler exponent
     fy_ksi = 60.0,                # Rebar yield strength
+    Es_ksi = Es_ksi(Rebar_60),     # Rebar elastic modulus
     max_depth = 0.6               # Max section depth [m]
 )
 

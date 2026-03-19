@@ -195,7 +195,7 @@ Response fields:
 julia --project=StructuralSynthesizer scripts/api/sizer_bootstrap.jl
 ```
 
-Bootstrap mode starts a lightweight HTTP server immediately with `/health`, `/status`, and `/debug` endpoints. It then loads `StructuralSynthesizer` in a background task. Once loaded, it registers the full route set (`/design`, `/validate`, `/schema`, `/result`, `/env-check`). This provides fast cold starts for container deployments while the heavy package precompilation happens in the background.
+Bootstrap mode starts a lightweight HTTP server immediately with `/health`, `/status`, and `/debug` endpoints. It then loads `StructuralSynthesizer` in a background task. Once loaded, it registers the full route set (including `/design`, `/validate`, `/schema`, `/result`, `/env-check`, `/logs`, `/report`, and `/rebuild_visualization`). This provides fast cold starts for container deployments while the heavy package precompilation happens in the background.
 
 In bootstrap mode (before the full API is loaded), `GET /status` returns:
 

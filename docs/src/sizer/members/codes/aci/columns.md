@@ -30,31 +30,6 @@ The central data structure is the `PMInteractionDiagram`, which stores the full 
 
 Source: `StructuralSizer/src/members/codes/aci/columns/*.jl`
 
-### Design Philosophy
-
-- **LRFD only** — Strength design with φ factors per §9.3.2
-- **US units internally** — P–M helper functions use kip and kip-ft (bare `Real`); section geometry uses Unitful lengths and is converted internally to inches
-- **Strain compatibility** — Full fiber analysis, not approximate methods
-- **Catalog-based optimization** — Sections from predefined catalogs
-
-### Units & Input Flexibility
-
-The API accepts **any Unitful quantity** — conversions are automatic:
-
-```julia
-using StructuralSizer: kip  # Asap custom unit
-using Unitful
-
-geoms = [ConcreteMemberGeometry(12.0u"ft")]
-
-# All equivalent — units converted internally to ACI (kip, kip·ft)
-size_columns([2200u"kN"], [400u"kN*m"], geoms, ConcreteColumnOptions())
-size_columns([500kip], [300kip*u"ft"], geoms, ConcreteColumnOptions())
-size_columns([500.0], [300.0], geoms, ConcreteColumnOptions())  # Raw Float64 assumed kip, kip·ft
-```
-
-Unit helpers: `to_kip(x)`, `to_kipft(x)` for US customary; `to_newtons(x)`, `to_newton_meters(x)` for SI. Raw `Real` values pass through as-is (assumed correct units).
-
 ## Key Types
 
 ### P-M Interaction Diagram
@@ -266,6 +241,31 @@ Q = \frac{\sum P_u \cdot \Delta_o}{V_{us} \cdot l_c}
 If ``Q \leq 0.05``, the story is classified as nonsway.
 
 ## Implementation Details
+
+### Design Philosophy
+
+- **LRFD only** — Strength design with φ factors per ACI 318-11 §9.3.2
+- **US units internally** — P–M helper functions use kip and kip-ft (bare `Real`); section geometry uses Unitful lengths and is converted internally to inches
+- **Strain compatibility** — Full fiber analysis, not approximate methods
+- **Catalog-based optimization** — Sections from predefined catalogs
+
+### Units & Input Flexibility
+
+The public sizing APIs accept **any Unitful quantity** — conversions are automatic:
+
+```julia
+using StructuralSizer: kip  # Asap custom unit
+using Unitful
+
+geoms = [ConcreteMemberGeometry(12.0u"ft")]
+
+# All equivalent — units converted internally to ACI (kip, kip·ft)
+size_columns([2200u"kN"], [400u"kN*m"], geoms, ConcreteColumnOptions())
+size_columns([500kip], [300kip*u"ft"], geoms, ConcreteColumnOptions())
+size_columns([500.0], [300.0], geoms, ConcreteColumnOptions())  # Raw Float64 assumed kip, kip·ft
+```
+
+Unit helpers: `to_kip(x)`, `to_kipft(x)` for US customary; `to_newtons(x)`, `to_newton_meters(x)` for SI. Raw `Real` values pass through as-is (assumed correct units).
 
 ### Strain Compatibility
 

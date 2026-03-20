@@ -26,7 +26,9 @@ APIError
 register_routes!
 ```
 
-## Endpoints
+## Implementation Details
+
+### Endpoints
 
 ### GET /health
 
@@ -117,7 +119,7 @@ Run the full design pipeline.
 Because AWS App Runner enforces a 120-second per-request timeout, the API uses an **async submit-then-poll** flow:
 
 1. Submit the job with `POST /design` (returns immediately).
-2. Poll `GET /status` until it returns `"idle"`.
+2. Poll `GET /status` until `state == "idle"`.
 3. Fetch the last completed result with `GET /result`.
 
 ```bash
@@ -185,15 +187,15 @@ Response fields:
 - `next_since`: the cursor to use on the next request
 - `lines`: an array of log lines
 
-## Starting the Server
+### Starting the Server
 
-### Bootstrap Mode (Production)
+#### Bootstrap Mode (Production)
 
 ```bash
 julia --project=StructuralSynthesizer scripts/api/sizer_bootstrap.jl
 ```
 
-Bootstrap mode starts a lightweight HTTP server immediately with `/health`, `/status`, and `/debug` endpoints. It then loads `StructuralSynthesizer` in a background task. Once loaded, it registers the full route set (`/design`, `/validate`, `/schema`, `/result`, `/env-check`). This provides fast cold starts for container deployments while the heavy package precompilation happens in the background.
+Bootstrap mode starts a lightweight HTTP server immediately with `/health`, `/status`, and `/debug` endpoints. It then loads `StructuralSynthesizer` in a background task. Once loaded, it registers the full route set (including `/design`, `/validate`, `/schema`, `/result`, `/env-check`, `/logs`, `/report`, and `/rebuild_visualization`). This provides fast cold starts for container deployments while the heavy package precompilation happens in the background.
 
 In bootstrap mode (before the full API is loaded), `GET /status` returns:
 
@@ -201,14 +203,13 @@ In bootstrap mode (before the full API is loaded), `GET /status` returns:
 {"status":"ok","mode":"bootstrap","ready":false,"state":"warming","has_result":false,"message":"Full API not ready yet","error":null}
 ```
 
-### Full Service Mode (Development)
+#### Full Service Mode (Development)
 
 ```bash
 julia --project=StructuralSynthesizer scripts/api/sizer_service.jl
 ```
 
 Full service mode loads everything upfront with `using StructuralSynthesizer`, registers all routes, and starts serving. This is simpler but has a longer startup time.
-## Implementation Details
 
 ### Request Queuing
 
@@ -217,7 +218,7 @@ If the server is already processing a design request, it keeps a **single-slot q
 1. `POST /design` attempts to start work via `try_start!(SERVER_STATUS)`
 2. If busy → `enqueue!(SERVER_STATUS, input)` and return `{"status": "queued", ...}`
 3. If accepted → the server runs the design in a background task and returns HTTP 202
-4. Clients poll `GET /status` until `"idle"`, then fetch the last result with `GET /result`
+4. Clients poll `GET /status` until `state == "idle"`, then fetch the last result with `GET /result`
 
 ### Geometry Caching
 

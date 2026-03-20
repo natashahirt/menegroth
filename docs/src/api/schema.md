@@ -22,8 +22,8 @@ The top-level input object sent to `POST /design` and `POST /validate`.
 | `units` | `String` | yes | Coordinate units: `"feet"/"ft"`, `"inches"/"in"`, `"meters"/"m"`, `"millimeters"/"mm"`, or `"centimeters"/"cm"` |
 | `vertices` | `Vector{Vector{Float64}}` | yes | 3D vertex coordinates `[[x,y,z], ...]` |
 | `edges` | `APIEdgeGroups` | yes | Edge connectivity by group |
-| `supports` | `Vector{Int}` | yes | 1-based vertex indices with support conditions |
-| `stories_z` | `Vector{Float64}` | no | Story elevation Z coordinates (inferred from vertices if empty / omitted) |
+| `supports` | `Vector{Int}` | yes | 1-based vertex indices that are fixed supports |
+| `stories_z` | `Vector{Float64}` | no | Accepted but currently ignored by `json_to_skeleton` (stories are inferred from vertex Z). Still validated (if non-empty) and included in `compute_geometry_hash`. |
 | `faces` | `APIFaceGroups` | no | Optional face-group selectors. The server always detects faces from the edge mesh; when `faces` is provided, its polygons are used to *assign* detected faces to groups like `"floor"`, `"roof"`, and `"grade"`. |
 | `params` | `APIParams` | yes | Design parameters |
 
@@ -70,6 +70,7 @@ A dictionary mapping face group names to face-coordinate polylines:
 | `pixelframe_options` | `Union{APIPixelFrameOptions, Nothing}` | `nothing` | Optional PixelFrame concrete strength settings. If omitted/`null`, the server uses the `"standard"` preset. |
 | `fire_rating` | `Float64` | `0.0` | Fire resistance in hours. Accepted values are `0`, `1`, `1.5`, `2`, `3`, or `4`. |
 | `optimize_for` | `String` | `"weight"` | Optimization target (lowercase): `"weight"`, `"carbon"`, or `"cost"` |
+| `max_iterations` | `Union{Int, Nothing}` | `nothing` | Optional. Maximum beam/column sizing iterations (integer ≥ 1). If omitted/`null`, the server uses 20. |
 | `size_foundations` | `Bool` | `false` | Whether to size foundations |
 | `foundation_soil` | `String` | `"medium_sand"` | Soil type name (used when `size_foundations=true`): `"loose_sand"`, `"medium_sand"`, `"dense_sand"`, `"soft_clay"`, `"stiff_clay"`, `"hard_clay"` |
 | `foundation_concrete` | `String` | `"NWC_3000"` | Foundation concrete grade (used when `size_foundations=true`) |
@@ -434,7 +435,7 @@ Example snippet (abbreviated) showing beamless-state and one drop-panel patch:
 | `utilization_ratio` | `Float64` | Governing utilization ratio (D/C) for the element |
 | `ok` | `Bool` | Element pass/fail flag |
 | `section_name` | `String` | Section designation |
-| `material_color_hex` | `String` | Optional material display color (e.g. `#6E6E6E`) |
+| `material_color_hex` | `String` | Material display color (e.g. `#6E6E6E`); empty string when unavailable |
 | `section_type` | `String` | Section shape family |
 | `section_depth` | `Float64` | Section depth |
 | `section_width` | `Float64` | Section width |
@@ -463,7 +464,7 @@ Example snippet (abbreviated) showing beamless-state and one drop-panel patch:
 | `drop_panels` | `Vector{APIDropPanelPatch}` | Drop-panel footprint patches (may be empty) |
 | `utilization_ratio` | `Float64` | Governing utilization (e.g. max(deflection_ratio, punching_ratio)) |
 | `ok` | `Bool` | Slab pass/fail flag |
-| `material_color_hex` | `String` | Optional material display color (empty string when unavailable) |
+| `material_color_hex` | `String` | Material display color; empty string when unavailable |
 | `is_vault` | `Bool` | True for vault floor systems |
 | `vault_mesh_vertices` | `Vector{Vector{Float64}}` | Optional vault intrados mesh vertices `[[x,y,z], ...]` in display length units |
 | `vault_mesh_faces` | `Vector{Vector{Int}}` | Optional vault intrados mesh faces `[[i1,i2,i3], ...]` (1-based) |
@@ -498,7 +499,7 @@ Example snippet (abbreviated) showing beamless-state and one drop-panel patch:
 | `drop_panel_meshes` | `Vector{APIDeflectedDropPanel}` | Optional drop-panel sub-mesh indices (may be empty) |
 | `utilization_ratio` | `Float64` | Governing utilization ratio for the slab mesh |
 | `ok` | `Bool` | Slab pass/fail flag |
-| `material_color_hex` | `String` | Optional material display color (empty string when unavailable) |
+| `material_color_hex` | `String` | Material display color; empty string when unavailable |
 | `is_vault` | `Bool` | True for vault floor systems |
 | `face_bending_moment` | `Vector{Float64}` | Signed dominant principal bending moment per face \([N·m/m]\); length matches `faces` |
 | `face_membrane_force` | `Vector{Float64}` | Signed dominant principal membrane force per face \([N/m]\); length matches `faces` |
@@ -517,7 +518,7 @@ Example snippet (abbreviated) showing beamless-state and one drop-panel patch:
 | `depth` | `Float64` | Foundation depth (display length units) |
 | `utilization_ratio` | `Float64` | Bearing utilization ratio |
 | `ok` | `Bool` | Foundation pass/fail flag |
-| `material_color_hex` | `String` | Optional material display color (empty string when unavailable) |
+| `material_color_hex` | `String` | Material display color; empty string when unavailable |
 | `along_x` | `Bool` | True when a strip footing’s long axis runs along global X (client may swap length/width mapping) |
 
 ### APIError
@@ -531,7 +532,9 @@ Example snippet (abbreviated) showing beamless-state and one drop-panel patch:
 
 See [`APIError`](@ref) in [API Overview](overview.md).
 
-## Structural Column Offsets
+## Implementation Details
+
+### Structural Column Offsets
 
 When `geometry_is_centerline` is `false` (the default), the server treats input
 vertex coordinates as **architectural reference points** — panel corners and

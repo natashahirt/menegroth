@@ -17,7 +17,7 @@
 
 ## Overview
 
-Tributary area accessors provide convenient functions to query the cached Voronoi tributary results for columns and cell edges. These functions read from the `TributaryCache` stored in the `BuildingStructure`, computing and caching results on first access.
+Tributary area accessors provide convenient functions to query the cached Voronoi tributary results for columns and cell edges. These functions **read from** the `TributaryCache` stored in the `BuildingStructure` and return `nothing`/empty results if tributaries have not been computed yet. Compute and populate the cache with `compute_cell_tributaries!(struc)` before calling the accessors.
 
 ## Key Types
 
@@ -75,11 +75,11 @@ clear_geometry_caches!
 
 ### Cell Edge Tributaries
 
-`cell_edge_tributaries(struc, cell)` returns the tributary widths along each edge of a cell. These widths determine how much load each edge's beam collects from the slab. For two-way systems, the tributary width varies along the edge based on the Voronoi partition.
+`cell_edge_tributaries(struc, cell_idx)` returns the tributary widths along each edge of a cell (where `cell_idx` is an index into `struc.cells`). These widths determine how much load each edge's beam collects from the slab. For two-way systems, the tributary width varies along the edge based on the Voronoi partition.
 
 ### Cell Strip Geometry
 
-`cell_strip_geometry(struc, cell)` returns the column strip / middle strip split per ACI 318-11 §13.6.4. The strip geometry defines:
+`cell_strip_geometry(struc, cell_idx)` returns the column strip / middle strip split per ACI 318-11 §13.6.4 (where `cell_idx` is an index into `struc.cells`). The strip geometry defines:
 - Column strip width: the lesser of `l₂/2` or `l₁/4` on each side of the column centerline
 - Middle strip: the remainder between column strips
 
@@ -96,5 +96,5 @@ The cache key (`TributaryCacheKey`) ensures that different spanning behaviors an
 
 ## Limitations & Future Work
 
-- Voronoi tributary computation assumes convex cell polygons; non-convex cells may produce incorrect tributary areas.
+- Voronoi tributary computation requires simple (non-self-intersecting) cell polygons; degenerate or self-intersecting boundaries can yield empty or invalid tributary polygons.
 - Strip geometry is only computed for two-way systems (DDM/EFM); one-way systems use simpler half-span tributary widths.

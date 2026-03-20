@@ -79,11 +79,11 @@ min_dimension_fire_column
 
 | Function | ACI 216.1-14 Reference | Returns |
 |:---------|:-----------------------|:--------|
-| `min_thickness_fire(rating, agg)` | Table 4.3.1 | Minimum slab thickness for fire rating |
-| `min_cover_fire_slab(rating, agg; restrained)` | Table 4.4.1 | Minimum rebar cover for slab |
-| `min_cover_fire_beam(rating, width; restrained)` | Table 4.4.2 | Minimum rebar cover for beam |
-| `min_cover_fire_column(rating)` | Table 4.3.2 | Minimum rebar cover for column |
-| `min_dimension_fire_column(rating, agg)` | Table 4.3.2 | Minimum column dimension |
+| `min_thickness_fire(rating, agg)` | Table 4.2 | Minimum slab thickness for fire rating |
+| `min_cover_fire_slab(rating, agg; restrained)` | Table 4.3.1.1 | Minimum rebar cover for slab |
+| `min_cover_fire_beam(rating, width; restrained)` | Table 4.3.1.2 | Minimum rebar cover for beam |
+| `min_cover_fire_column(rating)` | §4.5.3 | Minimum rebar cover for column |
+| `min_dimension_fire_column(rating, agg)` | Table 4.5.1a | Minimum column dimension |
 
 ## Embodied Carbon Functions
 
@@ -102,6 +102,8 @@ coating_ec
 | `coating_volume(section, coating, L; exposure)` | Volume of coating (m³) |
 | `coating_mass(section, coating, L; exposure)` | Mass of coating (kg) |
 | `coating_ec(section, coating, L; exposure, ecc)` | Embodied carbon (kgCO₂e) |
+
+**Note:** `exposed_perimeter` (and therefore `coating_volume`, `coating_mass`, and `coating_ec`) is currently implemented for `ISymmSection` (W-shapes) only.
 
 The `exposure` keyword controls which perimeter is used:
 - `:three_sided` (default, beams) — top flange against deck, `PA` perimeter
@@ -134,11 +136,11 @@ Intumescent thickness is determined by table lookup from UL Design N643, interpo
 ### ACI 216.1-14 — Concrete Fire Resistance
 
 Concrete fire resistance is governed by:
-- **Slab thickness** (Table 4.3.1): Thicker slabs act as better thermal barriers. Carbonate aggregate provides ~15% better fire resistance than siliceous.
-- **Rebar cover** (Tables 4.4.1, 4.4.2): Minimum concrete cover protects reinforcement from reaching critical temperature (~1000°F for conventional rebar).
-- **Column dimensions** (Table 4.3.2): Minimum column width ensures the core remains cool enough to carry load.
+- **Slab thickness** (Table 4.2): Thicker slabs act as better thermal barriers. Carbonate aggregate provides ~15% better fire resistance than siliceous.
+- **Rebar cover** (Tables 4.3.1.1, 4.3.1.2; and §4.5.3 for columns): Minimum concrete cover protects reinforcement from reaching critical temperature (~1000°F for conventional rebar).
+- **Column dimensions** (Table 4.5.1a): Minimum column width ensures the core remains cool enough to carry load.
 
-`AggregateType` affects all concrete fire provisions — `carbonate` and `lightweight` aggregates provide better fire resistance than `siliceous`.
+`AggregateType` affects `min_thickness_fire`, `min_cover_fire_slab` (unrestrained table), and `min_dimension_fire_column`. `min_cover_fire_beam` depends on beam width and restrained/unrestrained configuration, and `min_cover_fire_column` is independent of aggregate type.
 
 ## Options & Configuration
 
@@ -152,7 +154,7 @@ Concrete fire resistance is governed by:
 
 ## Limitations & Future Work
 
-- **Fire ratings**: Currently supports 1, 1.5, 2, 3, and 4 hour ratings. Non-standard ratings are interpolated.
+- **Fire ratings**: `sfrm_thickness_x772` accepts any positive `fire_rating` (hours). `intumescent_thickness_n643` is table-based and currently supports 1, 1.5, and 2 hour ratings for the unrestrained-beam table (and up to 3 hours for the restrained table). `compute_surface_coating(IntumescentCoating, ...)` currently uses the unrestrained table (`restrained=false`).
 - **Concrete spalling**: ACI 216.1-14 spalling provisions (supplementary reinforcement for covers > 2.5") are not modeled.
 - **Composite fire resistance**: Fire resistance of composite steel-concrete members (AISC Design Guide 19 Chapter 5) is not yet implemented.
 - **Cost model**: Fire protection cost (installed \$/ft²) is not tracked. Only embodied carbon is computed.

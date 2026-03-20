@@ -5,12 +5,12 @@
 > col = RCColumnSection(b=16u"inch", h=16u"inch", bar_size=9, n_bars=8, cover=1.5u"inch")
 > mat = RC_4000_60
 > diagram = generate_PM_diagram(col, mat)
-> ur = utilization_ratio(diagram, 200u"kip", 100u"kip*ft")
+> ur = utilization_ratio(diagram, 200.0, 100.0)  # Pu [kip], Mu [kip-ft]
 > ```
 
 ## Overview
 
-This module implements ACI 318-11 provisions for reinforced concrete column design, including P-M interaction diagrams (§22.4), biaxial bending checks (§22.4), and slenderness effects (§6.6). It supports both rectangular and circular column cross-sections.
+This module implements ACI 318-11 provisions for reinforced concrete column design, including P–M interaction diagrams, biaxial bending checks, and slenderness (moment magnification) effects. It supports both rectangular and circular column cross-sections.
 
 The central data structure is the `PMInteractionDiagram`, which stores the full interaction surface from pure compression to pure tension. Capacity checks interpolate on this diagram to determine whether a given (Pu, Mu) pair is within the capacity envelope.
 
@@ -19,7 +19,7 @@ Source: `StructuralSizer/src/members/codes/aci/columns/*.jl`
 ### Design Philosophy
 
 - **LRFD only** — Strength design with φ factors per §9.3.2
-- **US units internally** — kip, kip-ft, inches (accepts Unitful, converts internally)
+- **US units internally** — P–M helper functions use kip and kip-ft (bare `Real`); section geometry uses Unitful lengths and is converted internally to inches
 - **Strain compatibility** — Full fiber analysis, not approximate methods
 - **Catalog-based optimization** — Sections from predefined catalogs
 
@@ -52,11 +52,10 @@ section = RCColumnSection(
 )
 
 # Material
-material = NWC_4000  # 4 ksi normal weight concrete
+material = RC_4000_60  # 4 ksi concrete + Grade 60 rebar
 
 # Generate P-M diagram
-mat = (fc = 4.0, fy = 60.0, Es = 29000.0, εcu = 0.003)
-diagram = generate_PM_diagram(section, mat)
+diagram = generate_PM_diagram(section, material)
 
 # Check capacity
 result = check_PM_capacity(diagram, 300.0, 150.0)  # Pu=300 kip, Mu=150 kip-ft
@@ -163,7 +162,7 @@ generate_PM_diagram
 check_PM_capacity
 ```
 
-`check_PM_capacity(diagram, Pu, Mu)` — returns `true` if the (Pu, Mu) point lies inside the interaction diagram.
+`check_PM_capacity(diagram, Pu, Mu)` — returns a `NamedTuple`; use `result.adequate` (Bool) and `result.utilization` (Float64) to interpret the check.
 
 ```@docs
 capacity_at_axial
@@ -215,19 +214,19 @@ check_biaxial_capacity
 
 `check_biaxial_capacity(diagram_x, diagram_y, Pu, Mux, Muy; method=:contour, α=1.5)` — biaxial check using either `:bresler` or `:contour` method. Requires separate P-M diagrams for each axis.
 
-### Slenderness (ACI §6.6)
+### Slenderness (ACI 318-11 §10.10)
 
 ```@docs
 slenderness_ratio
 ```
 
-`slenderness_ratio(section, geometry)` — computes ``kL_u/r`` per §10.10.1.2 (ACI 318-14) / §6.6.4 (ACI 318-19). Uses ``r = 0.3h`` for rectangular sections and ``r = 0.25D`` for circular sections.
+`slenderness_ratio(section, geometry)` — computes ``kL_u/r`` per ACI 318-11 §10.10.1.2. Uses ``r = 0.3h`` for rectangular sections and ``r = 0.25D`` for circular sections.
 
 ```@docs
 magnification_factor_nonsway
 ```
 
-`magnification_factor_nonsway(Pu, Pc; Cm=1.0)` — moment magnification factor for nonsway frames (§10.10.6.3 / §6.6.4.5):
+`magnification_factor_nonsway(Pu, Pc; Cm=1.0)` — moment magnification factor for nonsway frames (ACI 318-11 §10.10.6.3):
 
 ```math
 \delta_{ns} = \frac{C_m}{1 - \dfrac{P_u}{0.75\,P_c}} \geq 1.0
@@ -239,7 +238,7 @@ where ``P_c = \pi^2 EI / (k L_u)^2`` is the Euler buckling load using the effect
 magnify_moment_nonsway
 ```
 
-`magnify_moment_nonsway(section, mat, geometry, Pu, M1, M2; βdns, transverse_load)` — complete nonsway moment magnification. Computes `EI` per §6.6.4.4.4:
+`magnify_moment_nonsway(section, mat, geometry, Pu, M1, M2; βdns, transverse_load)` — complete nonsway moment magnification. Computes `EI` per ACI 318-11 §10.10.6.1:
 
 ```math
 EI = \frac{0.2\,E_c\,I_g + E_s\,I_{se}}{1 + \beta_{dns}} \quad \text{or} \quad EI = \frac{0.4\,E_c\,I_g}{1 + \beta_{dns}}
@@ -267,7 +266,7 @@ SwayStoryProperties
 stability_index
 ```
 
-`stability_index(story)` — stability index Q per §10.10.5.2 / §6.6.4.4.1:
+`stability_index(story)` — stability index Q per ACI 318-11 §10.10.5.2:
 
 ```math
 Q = \frac{\sum P_u \cdot \Delta_o}{V_{us} \cdot l_c}
@@ -319,6 +318,7 @@ checker = ACIColumnChecker(;
     include_biaxial = true,       # Check biaxial interaction
     α_biaxial = 1.5,              # Bresler exponent
     fy_ksi = 60.0,                # Rebar yield strength
+    Es_ksi = Es_ksi(Rebar_60),     # Rebar elastic modulus
     max_depth = 0.6               # Max section depth [m]
 )
 

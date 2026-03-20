@@ -32,7 +32,7 @@ compute_geometry_hash
 2. **Vertex creation** — `Meshes.Point` objects from coordinate arrays
 3. **Edge creation** — skeleton edges from `APIEdgeGroups`, classified into `:beams`, `:columns`, `:braces`
 4. **Support marking** — vertices listed in `input.supports` are marked as restrained
-5. **Story setup** — if `input.stories_z` is provided (non-empty), those elevations are used; otherwise story elevations are inferred from vertex Z via `rebuild_stories!`
+5. **Story setup** — story elevations are inferred from vertex Z via `rebuild_stories!` (note: `input.stories_z` is currently ignored during skeleton construction, but it is still validated and included in `compute_geometry_hash`)
 6. **Face detection + grouping** — faces are always detected from the edge mesh; if `input.faces` is provided, its polygons are used as selectors to assign detected faces to groups (`"floor"`, `"roof"`, `"grade"`), otherwise the server auto-categorizes faces by story level
 
 ### json_to_params
@@ -44,17 +44,17 @@ compute_geometry_hash
 | `floor_type` | `"flat_plate"` | `FlatPlateOptions(...)` |
 | `floor_type` | `"flat_slab"` | `FlatSlabOptions(base=FlatPlateOptions(...))` |
 | `floor_type` | `"one_way"` | `OneWayOptions()` (currently ignores `floor_options.*`) |
-| `floor_type` | `"vault"` | `VaultOptions(...)` |
-| `column_type` | `"rc_rect"` | `ConcreteColumnOptions(material=..., rebar_material=..., section_shape=:rect, catalog=column_catalog)` |
-| `column_type` | `"rc_circular"` | `ConcreteColumnOptions(material=..., rebar_material=..., section_shape=:circular, catalog=column_catalog)` |
-| `column_type` | `"steel_w"` | `SteelColumnOptions(material=steel, section_type=:w, catalog=column_catalog)` |
-| `column_type` | `"steel_hss"` | `SteelColumnOptions(material=steel, section_type=:hss, catalog=column_catalog)` |
-| `column_type` | `"steel_pipe"` | `SteelColumnOptions(material=steel, section_type=:pipe, catalog=column_catalog)` |
+| `floor_type` | `"vault"` | `VaultOptions(lambda = something(floor_options.vault_lambda, 10.0))` (vault currently uses only `vault_lambda`; other `floor_options.*` fields are ignored) |
+| `column_type` | `"rc_rect"` | `ConcreteColumnOptions(material=column_concrete, rebar_material=..., section_shape=:rect, catalog=..., sizing_strategy=..., time_limit_sec=something(mip_time_limit_sec, 30.0))` |
+| `column_type` | `"rc_circular"` | `ConcreteColumnOptions(material=column_concrete, rebar_material=..., section_shape=:circular, catalog=..., sizing_strategy=..., time_limit_sec=something(mip_time_limit_sec, 30.0))` |
+| `column_type` | `"steel_w"` | `SteelColumnOptions(material=steel, section_type=:w, catalog=..., sizing_strategy=..., time_limit_sec=something(mip_time_limit_sec, 30.0))` |
+| `column_type` | `"steel_hss"` | `SteelColumnOptions(material=steel, section_type=:hss, catalog=..., sizing_strategy=..., time_limit_sec=something(mip_time_limit_sec, 30.0))` |
+| `column_type` | `"steel_pipe"` | `SteelColumnOptions(material=steel, section_type=:pipe, catalog=..., sizing_strategy=..., time_limit_sec=something(mip_time_limit_sec, 30.0))` |
 | `column_type` | `"pixelframe"` | `PixelFrameColumnOptions(fc_values=...)` |
-| `beam_type` | `"steel_w"` | `SteelBeamOptions(material=steel, section_type=:w)` |
-| `beam_type` | `"steel_hss"` | `SteelBeamOptions(material=steel, section_type=:hss)` |
-| `beam_type` | `"rc_rect"` | `ConcreteBeamOptions(material=concrete, rebar_material=rebar, include_flange=false)` |
-| `beam_type` | `"rc_tbeam"` | `ConcreteBeamOptions(material=concrete, rebar_material=rebar, include_flange=true)` |
+| `beam_type` | `"steel_w"` | `SteelBeamOptions(material=steel, section_type=:w, sizing_strategy=..., time_limit_sec=something(mip_time_limit_sec, 30.0))` |
+| `beam_type` | `"steel_hss"` | `SteelBeamOptions(material=steel, section_type=:hss, sizing_strategy=..., time_limit_sec=something(mip_time_limit_sec, 30.0))` |
+| `beam_type` | `"rc_rect"` | `ConcreteBeamOptions(material=concrete, rebar_material=rebar, include_flange=false, catalog=..., custom_catalog=..., sizing_strategy=..., time_limit_sec=something(mip_time_limit_sec, 30.0))` |
+| `beam_type` | `"rc_tbeam"` | `ConcreteBeamOptions(material=concrete, rebar_material=rebar, include_flange=true, catalog=..., custom_catalog=..., sizing_strategy=..., time_limit_sec=something(mip_time_limit_sec, 30.0))` |
 | `beam_type` | `"pixelframe"` | `PixelFrameBeamOptions(fc_values=...)` |
 | `materials.concrete` | `"NWC_4000"` | `NWC_4000` |
 | `materials.concrete` | `"NWC_5000"` | `NWC_5000` |
@@ -72,12 +72,13 @@ compute_geometry_hash
 | `column_sizing_strategy` | `"discrete"` / `"nlp"` | Sets `ConcreteColumnOptions(...; sizing_strategy=...)` and `SteelColumnOptions(...; sizing_strategy=...)` |
 | `beam_sizing_strategy` | `"discrete"` / `"nlp"` | Sets `ConcreteBeamOptions(...; sizing_strategy=...)` and `SteelBeamOptions(...; sizing_strategy=...)` |
 | `mip_time_limit_sec` | — | Sets `time_limit_sec` on discrete column/beam options (defaults to 30s when omitted/`null`) |
-| `beam_catalog` | `"custom"` + `beam_catalog_bounds` | Builds `custom_catalog = rc_beam_catalog_from_bounds(...)` (RC beams only) |
+| `beam_catalog` | `"custom"` + `beam_catalog_bounds` | Builds `custom_catalog = rc_beam_catalog_from_bounds(...)` and sets `ConcreteBeamOptions(catalog=:standard, custom_catalog=custom_catalog)` |
 | `pixelframe_options.fc_preset` | `"standard"`, `"low"`, `"high"`, `"extended"` | Selects preset `fc_values` (MPa) for PixelFrame catalogs |
-| `pixelframe_options.fc_preset` | `"custom"` | Uses `fc_min_ksi`, `fc_max_ksi`, `fc_resolution_ksi` to build `fc_values` (MPa). If `pixelframe_options` is omitted entirely, the server uses the `"standard"` preset. |
+| `pixelframe_options.fc_preset` | `"custom"` | Uses `fc_min_ksi`, `fc_max_ksi`, `fc_resolution_ksi` to build `fc_values` (MPa). The resolution is clamped to at least 0.5 ksi. If `pixelframe_options` is omitted entirely, the server uses the `"standard"` preset. |
 | `foundation_soil` | `"medium_sand"` | `FoundationParameters(soil=medium_sand, ...)` when `size_foundations=true` |
 | `foundation_concrete` | `"NWC_3000"` | `FoundationParameters(concrete=NWC_3000, ...)` when `size_foundations=true` |
 | `foundation_options.*` | — | Builds `FoundationOptions(strategy=..., mat_coverage_threshold=..., spread_params=..., strip_params=..., mat_params=...)` |
+| `max_iterations` | — | Sets `DesignParameters.max_iterations = something(api_params.max_iterations, 20)` |
 | `scoped_overrides` | — | Builds `DesignParameters.scoped_floor_overrides` (face-scoped floor overrides; coordinates converted to meters) |
 | `visualization_target_edge_m` | — | Sets `DesignParameters.visualization_target_edge_m` (shell mesh target edge length in meters) |
 | `skip_visualization` | — | When `true`, sets `DesignParameters.skip_visualization` so `design_to_json` returns `visualization = null` |

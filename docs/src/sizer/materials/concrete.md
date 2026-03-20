@@ -132,7 +132,17 @@ concrete_wc
 
 ## Implementation Details
 
-- **Elastic modulus**: Standard concrete presets compute `Ec` via the simplified ACI relationship `Ec(fc) = 57,000 √f'c` (psi units) for normal-weight concrete. When unit weight matters (e.g., lightweight concrete), use the general form `Ec(fc, wc_pcf) = 33 wc^{1.5} √f'c` (with `wc_pcf` in pcf) via the exported overload `Ec(fc, wc_pcf)`.
+- **Elastic modulus**: Standard concrete presets compute `Ec` via the simplified ACI relationship (psi units) for normal-weight concrete:
+
+```math
+E_c = 57{,}000 \sqrt{f'_c}
+```
+
+When unit weight matters (e.g., lightweight concrete), use the general form (with `wc_pcf` in pcf) via the exported overload `Ec(fc, wc_pcf)`:
+
+```math
+E_c = 33\, w_c^{1.5}\sqrt{f'_c}
+```
 - **Aggregate type**: Defaults to `siliceous`. Fire resistance functions (`min_thickness_fire`, `min_cover_fire_slab`, etc.) dispatch on `AggregateType` — carbonate aggregates provide better fire resistance than siliceous.
 - **Name registry**: Like steel, concrete presets are registered via `register_material!` for display. Unregistered instances fall back to `"Concrete (XXXX psi)"` formatting.
 - **Embodied carbon**: ECC values from ICE Database v4.1 (Oct 2025). Values range from 0.01 kgCO₂e/kg for unfired earth to 0.173 kgCO₂e/kg for 6000 psi OPC concrete. GGBS and PFA replacements reduce ECC by ~28% and ~19% respectively.

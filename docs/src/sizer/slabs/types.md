@@ -83,7 +83,7 @@ Each floor system has its own options type inheriting from `AbstractFloorOptions
 ```julia
 FlatPlateOptions(method=DDM(), ...)      # Flat plate / flat slab / waffle / PT
 OneWayOptions(material=RC_4000_60, ...)  # One-way slab settings
-VaultOptions(lambda_bounds=(10, 20), ...)# Vault-specific settings
+VaultOptions(lambda_bounds=(10.0, 20.0), ...)# Vault-specific settings
 CompositeDeckOptions(...)                # Composite steel deck
 TimberOptions(...)                       # Timber panel floors
 ```
@@ -375,8 +375,7 @@ analysis toggles.
 - `HollowCore`, `CompositeDeck`, `NonCompositeDeck`, `JoistRoofDeck`, `CLT`,
   `DLT`, `NLT`, and `MassTimberJoist` sizing functions are **stubs** that raise
   no result (they are skipped by `size_slabs!` / `size_slab!` via the `_size_slab!` fallback). Catalog-based selection is planned.
-- `PTBanded` uses heuristic thickness from PTI DC20.9; full tendon design is not
-  yet implemented.
+- `PTBanded` currently has a span-based helper (`_size_span_floor(::PTBanded, ...)`) using PTI-style minimum-thickness heuristics, but structure-based sizing via `size_slabs!` does not yet dispatch to it (so `:pt_banded` slabs are skipped by the `_size_slab!` fallback).
 - `Grade` (slab-on-grade) has no structural sizing—thickness is user-specified.
 - The `ShapedSlab` escape hatch relies on the user supplying a correct
   `sizing_fn`; no internal validation is performed on the returned result.

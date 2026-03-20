@@ -43,7 +43,7 @@ SteelColumnOptions
 | `material` | Steel material (e.g. `A992_Steel`) |
 | `materials` | Optional vector of steel grades for multi-material MIP (`nothing` for single material) |
 | `section_type` | Section family symbol: `:w`, `:hss`, `:pipe`, `:w_and_hss` |
-| `catalog` | Catalog selector: `:common`, `:preferred`, `:all` |
+| `catalog` | Catalog selector: `:compact_only`, `:preferred`, `:all` (legacy `:common` is normalized to `:all`) |
 | `custom_catalog` | Optional custom section vector (overrides `catalog`) |
 | `max_depth` | Maximum section depth (Length) |
 | `n_max_sections` | Max unique sections across groups (0 = no limit) |
@@ -179,7 +179,7 @@ size_columns
 size_beams
 ```
 
-`size_beams(Mu, Vu, geometries, opts; Nu=0, Tu=0)` — size beams for the given demands. Dispatches on `opts`:
+`size_beams(Mu, Vu, geometries, opts; Nu=zeros_like(Vu), Tu=Float64[])` — size beams for the given demands. `Nu` and `Tu` are **vectors** (one per member); if `Tu` is omitted (empty), it is treated as zero torsion for all members. Dispatches on `opts`:
 - `SteelBeamOptions` → AISC checker + MIP (and optional deflection constraints when analysis deflections are provided)
 - `ConcreteBeamOptions` → ACI checker + MIP
 - `PixelFrameBeamOptions` → PixelFrame checker + MIP

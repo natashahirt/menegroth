@@ -1,9 +1,10 @@
 # Type Hierarchy
 
 > ```julia
-> # Functions dispatch on (section_type, material_type):
-> get_ϕMn(section::ISymmSection, steel::StructuralSteel, geom::SteelMemberGeometry)
-> get_ϕMn(section::RCBeamSection, conc::Concrete, geom::ConcreteMemberGeometry)
+> # Functions commonly dispatch on (checker, section, material, demand, geometry):
+> is_feasible(checker::AISCChecker, cache::AISCCapacityCache, j::Int,
+>     section::AbstractSection, steel::StructuralSteel,
+>     demand::MemberDemand, geom::SteelMemberGeometry)
 > ```
 
 ## Overview
@@ -56,9 +57,9 @@ AbstractMaterial
 ### Material Type Subtypes
 
 ```
-MetalType
-├── StructuralSteelType       # Hot-rolled structural steel
-└── RebarType                 # Reinforcing steel
+StructuralSizer.MetalType            # Internal dispatch tag (not exported)
+├── StructuralSizer.StructuralSteelType
+└── StructuralSizer.RebarType
 ```
 
 See [Steel](../sizer/materials/steel.md), [Concrete](../sizer/materials/concrete.md), [FRC](../sizer/materials/frc.md), and [Timber](../sizer/materials/timber.md) for full type documentation.
@@ -82,6 +83,7 @@ AbstractSection
 ├── ISymmSection              # Doubly-symmetric I-shapes (W, S, HP)
 ├── HSSRectSection            # Rectangular HSS
 ├── HSSRoundSection           # Round HSS and Pipe
+├── PipeSection               # Alias of HSSRoundSection (pipe-specific constructors/catalogs)
 ├── Rebar                     # Reinforcing bar (for rebar design)
 ├── RCBeamSection             # RC rectangular beam
 ├── RCTBeamSection            # RC T-beam

@@ -68,7 +68,7 @@ compute_geometry_hash
 | `floor_options.method` | `"DDM_SIMPLIFIED"` | `DDM(:simplified)` |
 | `floor_options.method` | `"EFM"` | `EFM()` |
 | `floor_options.method` | `"EFM_HARDY_CROSS"` | `EFM(solver=:hardy_cross)` |
-| `floor_options.method` | `"FEA"` | `FEA(target_edge = params.floor_options.target_edge_m * u"m" or nothing)` |
+| `floor_options.method` | `"FEA"` | `FEA(target_edge = floor_options.target_edge_m * u"m")` when provided; otherwise `FEA(target_edge = nothing)` and the mesher uses an adaptive default (`clamp(min_span_m/20, 0.15, 0.75)` m). |
 | `column_sizing_strategy` | `"discrete"` / `"nlp"` | Sets `ConcreteColumnOptions(...; sizing_strategy=...)` and `SteelColumnOptions(...; sizing_strategy=...)` |
 | `beam_sizing_strategy` | `"discrete"` / `"nlp"` | Sets `ConcreteBeamOptions(...; sizing_strategy=...)` and `SteelBeamOptions(...; sizing_strategy=...)` |
 | `mip_time_limit_sec` | — | Sets `time_limit_sec` on discrete column/beam options (defaults to 30s when omitted/`null`) |

@@ -173,7 +173,7 @@ P_r = P_{nt} + B_2 P_{lt}
 
 ### P-M Interaction Switch Point
 
-The H1-1a/H1-1b equations create a continuous but non-smooth interaction surface with a kink at `Pr/Pc = 0.2`. This switch point was chosen by AISC to provide a better fit to test data for members with low axial load, where the linear interaction (H1-1a) would be too conservative.
+The H1-1a/H1-1b equations create a continuous but non-smooth interaction surface with a kink at \(P_r/(\phi P_n) = 0.2\). This switch point was chosen by AISC to provide a better fit to test data for members with low axial load, where the linear interaction (H1-1a) would be too conservative.
 
 The implementation computes both equations and selects based on the `Pr/Pc` ratio. For biaxial interaction, moments about both axes are added in the moment term, which is conservative for biaxial bending per AISC Commentary §H1.1.
 

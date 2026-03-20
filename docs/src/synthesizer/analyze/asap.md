@@ -55,7 +55,7 @@ This is more efficient than `to_asap!` for iterative design because the topology
 
 When `params.pattern_loading` is not `:none`, the analysis applies pattern loading per ACI 318-11 §13.7.6:
 - Factored dead load on all spans
-- Factored live load on alternate spans to maximize positive and negative moments
+- Factored live load is partitioned into two **checkerboard** patterns across non-grade cells (plus the full-live-load case) to envelope member forces.
 - In `:auto` mode, pattern loading runs only when any non-grade cell satisfies \(L/D > 0.75\) (ACI 318-11 §13.7.6.2). Use `:checkerboard` to force pattern loading regardless of \(L/D\).
 
 ### build_analysis_model!

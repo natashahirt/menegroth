@@ -2,10 +2,24 @@
 
 > ```julia
 > using StructuralSizer
-> col = RCColumnSection(b=16u"inch", h=16u"inch", bar_size=9, n_bars=8, cover=1.5u"inch")
-> mat = RC_4000_60
-> diagram = generate_PM_diagram(col, mat)
-> ur = utilization_ratio(diagram, 200.0, 100.0)  # Pu [kip], Mu [kip-ft]
+> using Unitful
+>
+> # Define section (18"×18" with 8-#8 bars)
+> section = RCColumnSection(
+>     b = 18u"inch", h = 18u"inch",
+>     bar_size = 8, n_bars = 8,
+>     cover = 2.5u"inch", tie_type = :tied,
+> )
+>
+> # Material (4 ksi concrete + Grade 60 rebar)
+> material = RC_4000_60
+>
+> # Generate P-M diagram
+> diagram = generate_PM_diagram(section, material)
+>
+> # Check capacity (Pu=300 kip, Mu=150 kip-ft)
+> result = check_PM_capacity(diagram, 300.0, 150.0)
+> result.adequate
 > ```
 
 ## Overview
@@ -15,54 +29,6 @@ This module implements ACI 318-11 provisions for reinforced concrete column desi
 The central data structure is the `PMInteractionDiagram`, which stores the full interaction surface from pure compression to pure tension. Capacity checks interpolate on this diagram to determine whether a given (Pu, Mu) pair is within the capacity envelope.
 
 Source: `StructuralSizer/src/members/codes/aci/columns/*.jl`
-
-### Design Philosophy
-
-- **LRFD only** — Strength design with φ factors per §9.3.2
-- **US units internally** — P–M helper functions use kip and kip-ft (bare `Real`); section geometry uses Unitful lengths and is converted internally to inches
-- **Strain compatibility** — Full fiber analysis, not approximate methods
-- **Catalog-based optimization** — Sections from predefined catalogs
-
-### Units & Input Flexibility
-
-The API accepts **any Unitful quantity** — conversions are automatic:
-
-```julia
-using StructuralSizer: kip  # Asap custom unit
-
-# All equivalent — units converted internally to ACI (kip, kip·ft)
-size_columns([2200u"kN"], [400u"kN*m"], geoms, ConcreteColumnOptions())
-size_columns([500kip], [300kip*u"ft"], geoms, ConcreteColumnOptions())
-size_columns([500.0], [300.0], geoms, ConcreteColumnOptions())  # Raw Float64 assumed kip, kip·ft
-```
-
-Unit helpers: `to_kip(x)`, `to_kipft(x)` for US customary; `to_newtons(x)`, `to_newton_meters(x)` for SI. Raw `Real` values pass through as-is (assumed correct units).
-
-## Quick Start
-
-```julia
-using StructuralSizer
-using Unitful
-
-# Define section (18"×18" with 8-#8 bars)
-section = RCColumnSection(
-    b = 18u"inch", h = 18u"inch",
-    bar_size = 8, n_bars = 8,
-    cover = 2.5u"inch", tie_type = :tied
-)
-
-# Material
-material = RC_4000_60  # 4 ksi concrete + Grade 60 rebar
-
-# Generate P-M diagram
-diagram = generate_PM_diagram(section, material)
-
-# Check capacity
-result = check_PM_capacity(diagram, 300.0, 150.0)  # Pu=300 kip, Mu=150 kip-ft
-# result.adequate     → true/false
-# result.utilization  → demand/capacity ratio
-# result.φMn_at_Pu    → moment capacity at given axial
-```
 
 ## Key Types
 
@@ -78,8 +44,8 @@ PMInteractionDiagram
 |:------|:------------|
 | `section` | The column section (`RCColumnSection` or `RCCircularSection`) |
 | `material` | Concrete material |
-| `points` | Vector of `(ϕPn, ϕMn)` tuples forming the interaction curve |
-| `control_points` | Dictionary mapping `ControlPointType` to indices |
+| `points` | Vector of `PMDiagramPoint` ordered from compression → tension |
+| `control_points` | `Dict{Symbol, Int}` mapping named control points (e.g. `:pure_compression`, `:balanced`) to indices in `points` |
 
 ```@docs
 PMDiagramRect
@@ -276,6 +242,31 @@ If ``Q \leq 0.05``, the story is classified as nonsway.
 
 ## Implementation Details
 
+### Design Philosophy
+
+- **LRFD only** — Strength design with φ factors per ACI 318-11 §9.3.2
+- **US units internally** — P–M helper functions use kip and kip-ft (bare `Real`); section geometry uses Unitful lengths and is converted internally to inches
+- **Strain compatibility** — Full fiber analysis, not approximate methods
+- **Catalog-based optimization** — Sections from predefined catalogs
+
+### Units & Input Flexibility
+
+The public sizing APIs accept **any Unitful quantity** — conversions are automatic:
+
+```julia
+using StructuralSizer: kip  # Asap custom unit
+using Unitful
+
+geoms = [ConcreteMemberGeometry(12.0u"ft")]
+
+# All equivalent — units converted internally to ACI (kip, kip·ft)
+size_columns([2200u"kN"], [400u"kN*m"], geoms, ConcreteColumnOptions())
+size_columns([500kip], [300kip*u"ft"], geoms, ConcreteColumnOptions())
+size_columns([500.0], [300.0], geoms, ConcreteColumnOptions())  # Raw Float64 assumed kip, kip·ft
+```
+
+Unit helpers: `to_kip(x)`, `to_kipft(x)` for US customary; `to_newtons(x)`, `to_newton_meters(x)` for SI. Raw `Real` values pass through as-is (assumed correct units).
+
 ### Strain Compatibility
 
 The P-M diagram is generated using a full strain compatibility analysis at each neutral axis depth ``c``. The concrete compressive force uses the Whitney stress block (``a = \beta_1 c``), and each bar's stress is determined from its strain (assuming elastic-perfectly-plastic steel behavior):
@@ -345,6 +336,7 @@ geometry = ConcreteMemberGeometry(3.66;  # L = 12 ft in meters
 )
 
 # Check feasibility
+j = 1
 feasible = is_feasible(checker, cache, j, section, material, demand, geometry)
 ```
 

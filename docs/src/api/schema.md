@@ -202,7 +202,7 @@ Face-scoped floor override blocks (used for region-specific floor types like vau
 | `method` | `String` | `"DDM"` | Analysis method: `"DDM"`, `"DDM_SIMPLIFIED"`, `"EFM"`, `"EFM_HARDY_CROSS"`, or `"FEA"` |
 | `deflection_limit` | `String` | `"L_360"` | Deflection limit: `"L_240"`, `"L_360"`, `"L_480"` |
 | `punching_strategy` | `String` | `"grow_columns"` | `"grow_columns"`, `"reinforce_first"`, `"reinforce_last"` |
-| `target_edge_m` | `Union{Float64, Nothing}` | `nothing` | Optional FEA mesh target edge length in meters (used when `method == "FEA"`). If omitted, the solver chooses an adaptive mesh size. |
+| `target_edge_m` | `Union{Float64, Nothing}` | `nothing` | Optional FEA shell-mesh target edge length in meters (used when `method == "FEA"`). If omitted, the mesher uses an adaptive default based on the slab’s minimum span: `clamp(min_span_m/20, 0.15, 0.75)` meters. |
 | `vault_lambda` | `Union{Float64, Nothing}` | `nothing` | Optional vault \(\lambda = \frac{\text{span}}{\text{rise}}\) (dimensionless, > 0). Used when `floor_type == "vault"`. |
 
 `APIFloorOptions` controls floor-specific design settings including the analysis method (DDM, EFM, or FEA), deflection limits, and the punching shear mitigation strategy.

@@ -128,6 +128,8 @@ curl -X POST http://localhost:8080/design \
   -d @input.json
 ```
 
+On acceptance, the server responds with **HTTP 202**:
+
 ```json
 {
   "status": "accepted",
@@ -135,7 +137,7 @@ curl -X POST http://localhost:8080/design \
 }
 ```
 
-When the server is busy, `POST /design` enqueues the request and returns:
+When the server is busy, `POST /design` enqueues the request and returns **HTTP 200**:
 
 ```json
 {

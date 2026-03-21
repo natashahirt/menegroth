@@ -23,7 +23,7 @@ The top-level input object sent to `POST /design` and `POST /validate`.
 | `vertices` | `Vector{Vector{Float64}}` | yes | 3D vertex coordinates `[[x,y,z], ...]` |
 | `edges` | `APIEdgeGroups` | yes | Edge connectivity by group |
 | `supports` | `Vector{Int}` | yes | 1-based vertex indices that are fixed supports |
-| `stories_z` | `Vector{Float64}` | no | Accepted but currently ignored by `json_to_skeleton` (stories are inferred from vertex Z). Still validated (if non-empty) and included in `compute_geometry_hash`. |
+| `stories_z` | `Vector{Float64}` | no | Optional story elevations in coordinate units. If non-empty, `json_to_skeleton` copies them into the skeleton (converted to meters) before face detection; if empty/omitted, story elevations are inferred from vertex Z via `rebuild_stories!`. Still validated (if non-empty) and included in `compute_geometry_hash`. |
 | `faces` | `APIFaceGroups` | no | Optional face-group selectors. The server always detects faces from the edge mesh; when `faces` is provided, its polygons are used to *assign* detected faces to groups like `"floor"`, `"roof"`, and `"grade"`. |
 | `params` | `APIParams` | yes | Design parameters |
 
@@ -61,11 +61,11 @@ A dictionary mapping face group names to face-coordinate polylines:
 | `materials` | `APIMaterials` | `APIMaterials()` | Material selections |
 | `column_type` | `String` | `"rc_rect"` | `"rc_rect"`, `"rc_circular"`, `"steel_w"`, `"steel_hss"`, `"steel_pipe"`, or `"pixelframe"` |
 | `column_catalog` | `Union{String, Nothing}` | `nothing` | Optional. If omitted or `null`, the server chooses a safe default based on `column_type` (**steel** → `"preferred"`, **RC** → `"standard"`). If provided (lowercase strings): **Steel** (steel_w/steel_hss/steel_pipe): `"compact_only"`, `"preferred"`, `"all"`. **RC rectangular** (rc_rect): `"standard"`, `"square"`, `"rectangular"`, `"low_capacity"`, `"high_capacity"`, `"all"`. **RC circular** (rc_circular): `"standard"`, `"low_capacity"`, `"high_capacity"`, `"all"`. Ignored for pixelframe. |
-| `column_sizing_strategy` | `String` | `"discrete"` | `"discrete"` (catalog/MIP) or `"nlp"` (continuous Ipopt). Applies to columns. |
+| `column_sizing_strategy` | `String` | `"discrete"` | `"discrete"` (catalog/MIP) or `"nlp"` (continuous Ipopt). Applies to RC and steel columns (pixelframe uses a fixed catalog). |
 | `mip_time_limit_sec` | `Union{Float64, Nothing}` | `nothing` | Optional MIP time limit in seconds for discrete sizing. If omitted/`null`, the server uses 30 seconds. |
 | `beam_type` | `String` | `"steel_w"` | `"steel_w"`, `"steel_hss"`, `"rc_rect"`, `"rc_tbeam"`, or `"pixelframe"` |
 | `beam_catalog` | `String` | `"large"` | RC beam catalog (when `beam_type` is RC): `"standard"`, `"small"`, `"large"`, `"xlarge"`, `"all"`, or `"custom"`. Ignored for steel and pixelframe. |
-| `beam_sizing_strategy` | `String` | `"discrete"` | `"discrete"` (catalog/MIP) or `"nlp"` (continuous Ipopt). Applies to beams. |
+| `beam_sizing_strategy` | `String` | `"discrete"` | `"discrete"` (catalog/MIP) or `"nlp"` (continuous Ipopt). Applies to RC and steel beams (pixelframe uses a fixed catalog). |
 | `beam_catalog_bounds` | `Union{APIBeamCatalogBounds, Nothing}` | `nothing` | Required when `beam_catalog == "custom"`; bounds and resolution (inches) for generating a custom RC beam catalog. |
 | `pixelframe_options` | `Union{APIPixelFrameOptions, Nothing}` | `nothing` | Optional PixelFrame concrete strength settings. If omitted/`null`, the server uses the `"standard"` preset. |
 | `fire_rating` | `Float64` | `0.0` | Fire resistance in hours. Accepted values are `0`, `1`, `1.5`, `2`, `3`, or `4`. |

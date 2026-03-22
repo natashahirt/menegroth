@@ -60,19 +60,19 @@ jobs:
             echo "cursor_agent_running=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Check for documentation-relevant changes
+      - name: Check for source changes relevant to docs
         id: check
         run: |
           CHANGED=$(git log origin/main --since="24 hours ago" --name-only --pretty=format: | \
-            grep -E '^(StructuralSizer/src/|StructuralSynthesizer/src/|docs/)' | \
+            grep -E '^(StructuralSizer/src/|StructuralSynthesizer/src/)' | \
             sort -u)
 
           if [ -z "$CHANGED" ]; then
-            echo "No doc-relevant changes in last 24h — skipping."
+            echo "No source changes in last 24h — skipping."
             echo "has_changes=false" >> "$GITHUB_OUTPUT"
           else
             COUNT=$(echo "$CHANGED" | wc -l)
-            echo "Changes detected in $COUNT files:"
+            echo "Source changes detected in $COUNT files:"
             echo "$CHANGED"
             echo "$CHANGED" > doc_audit_changed_files.txt
             echo "has_changes=true" >> "$GITHUB_OUTPUT"

@@ -1,10 +1,18 @@
 # Asap FEM Integration
 
 > ```julia
-> to_asap!(struc; params = design_params)
-> struc.asap_model  # Asap.Model — solved frame model
-> sync_asap!(struc; params = design_params)  # re-solve after section changes
-> build_analysis_model!(design; load_combination = service)
+> using StructuralSynthesizer
+> using Unitful
+>
+> skel = gen_medium_office(30u"m", 20u"m", 3u"m", 3, 2, 2)
+> struc = BuildingStructure(skel)
+> params = DesignParameters()
+>
+> to_asap!(struc; params = params)
+> struc.asap_model  # Asap.Model — solved frame model (placeholder sections until sizing)
+>
+> # Re-solve after section/loads change (topology unchanged)
+> sync_asap!(struc; params = params)
 > ```
 
 ## Overview

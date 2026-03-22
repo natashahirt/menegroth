@@ -2,6 +2,7 @@
 
 > ```julia
 > using StructuralSizer
+> using Unitful
 > ur = check_PMxMy_interaction(200u"kip", 100u"kip*ft", 50u"kip*ft",
 >     500u"kip", 300u"kip*ft", 150u"kip*ft")
 > B1 = compute_B1(200u"kip", 5000u"kip", 0.85)
@@ -175,7 +176,7 @@ P_r = P_{nt} + B_2 P_{lt}
 
 The H1-1a/H1-1b equations create a continuous but non-smooth interaction surface with a kink at \(P_r/(\phi P_n) = 0.2\). This switch point was chosen by AISC to provide a better fit to test data for members with low axial load, where the linear interaction (H1-1a) would be too conservative.
 
-The implementation computes both equations and selects based on the `Pr/Pc` ratio. For biaxial interaction, moments about both axes are added in the moment term, which is conservative for biaxial bending per AISC Commentary §H1.1.
+The implementation computes both equations and selects based on the `Pr/ϕPn` ratio. For biaxial interaction, moments about both axes are added in the moment term, which is conservative for biaxial bending per AISC Commentary §H1.1.
 
 ### Moment Amplification Strategy
 

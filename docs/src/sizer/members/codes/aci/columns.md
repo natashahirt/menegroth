@@ -119,7 +119,7 @@ generate_PM_diagram
 1. Compute strain profiles for each control point (c from 0 to ∞)
 2. At each neutral axis depth `c`, compute bar strains from linear strain distribution
 3. Sum bar forces and moments about the centroid
-4. Apply strength reduction factor `φ` per §21.2.2 (varies from 0.65/0.75 to 0.90)
+4. Apply strength reduction factor `φ` per ACI 318-11 §9.3.2 (varies from 0.65/0.75 to 0.90)
 5. Add `n_intermediate` points between control points for smooth interpolation
 
 ### Capacity Checks
@@ -169,16 +169,19 @@ pca_load_contour
 `pca_load_contour(Mux, Muy, φMnox, φMnoy, Pu, φPn, φP0; β=0.65)` — PCA load contour method:
 
 ```math
-\left(\frac{M_{ux}}{\phi M_{nox}}\right)^\alpha + \left(\frac{M_{uy}}{\phi M_{noy}}\right)^\alpha \leq 1.0
+u_r = \max\left(
+\frac{M_{ux}}{\phi M_{nox}} + \beta\frac{M_{uy}}{\phi M_{noy}},
+\beta\frac{M_{ux}}{\phi M_{nox}} + \frac{M_{uy}}{\phi M_{noy}}
+\right) \le 1.0
 ```
 
-where ``\alpha \approx 1.5`` for typical columns (``\beta`` maps to ``\alpha`` via ``\alpha = \log 0.5 / \log \beta``).
+where ``\beta`` is a biaxial interaction factor (default 0.65). Note that the current implementation keeps `Pu`, `φPn`, and `φP0` in the signature for API completeness, but the utilization calculation above depends only on moments and uniaxial moment capacities.
 
 ```@docs
 check_biaxial_capacity
 ```
 
-`check_biaxial_capacity(diagram_x, diagram_y, Pu, Mux, Muy; method=:contour, α=1.5)` — biaxial check using either `:bresler` or `:contour` method. Requires separate P-M diagrams for each axis.
+`check_biaxial_capacity(diagram_x, diagram_y, Pu, Mux, Muy; method=:contour, α=1.5)` — biaxial check using either `:contour` (Bresler load contour) or `:reciprocal` (Bresler reciprocal load) method. Requires separate P-M diagrams for each axis.
 
 ### Slenderness (ACI 318-11 §10.10)
 
@@ -299,7 +302,7 @@ where ``\alpha = 0.80`` for tied columns and ``0.85`` for spiral columns.
 
 The PCA load contour method (`:contour`) is generally preferred for design because it uses the moment interaction directly. The Bresler reciprocal load method (`:bresler`) is simpler but less accurate for low axial loads (`Pn/P0 < 0.1`).
 
-## ACIColumnChecker (Optimization Interface)
+### ACIColumnChecker (Optimization Interface)
 
 For discrete optimization, `ACIColumnChecker` caches P-M diagrams and checks feasibility efficiently:
 
@@ -342,9 +345,9 @@ feasible = is_feasible(checker, cache, j, section, material, demand, geometry)
 
 When `include_slenderness = false`, the checker skips moment magnification (appropriate when second-order effects are captured in the analysis). When `include_biaxial = false`, only uniaxial P-M checks are performed.
 
-## Chapter Coverage
+### Chapter Coverage
 
-### P-M Interaction (Chapter 10 — Sectional Strength)
+#### P-M Interaction (Chapter 10 — Sectional Strength)
 
 Strain compatibility analysis with Whitney stress block:
 
@@ -370,7 +373,7 @@ balanced = get_control_point(diagram, :balanced)
 7. Pure bending (Pn ≈ 0)
 8. Pure tension
 
-### Slenderness Effects (Chapter 10 — Moment Magnification)
+#### Slenderness Effects (Chapter 10 — Moment Magnification)
 
 Non-sway frame magnification per §10.10.6:
 
@@ -396,7 +399,7 @@ result = magnify_moment_nonsway(section, mat, geometry, Pu, M1, M2; βdns=0.6)
 
 **Radius of Gyration:** r = 0.3h (rectangular), r = 0.25D (circular)
 
-### Sway Frame Functions (Not Integrated)
+#### Sway Frame Functions (Not Integrated)
 
 Functions exist for sway frame analysis but are not yet wired into the checker:
 
@@ -417,7 +420,7 @@ result = magnify_moment_sway_complete(
 )
 ```
 
-### Biaxial Bending
+#### Biaxial Bending
 
 Multiple methods for biaxial interaction:
 
@@ -437,7 +440,7 @@ result = check_biaxial_capacity(diagrams.x, diagrams.y, Pu, Mux, Muy; method=:co
 
 **Methods:** `:contour` (Bresler Load Contour, recommended, α ≈ 1.5) or `:reciprocal` (Bresler Reciprocal Load, high axial cases).
 
-## Material Utilities
+### Material Utilities
 
 Unified material property functions in `aci_material_utils.jl`:
 
@@ -494,9 +497,9 @@ mat_tuple = to_material_tuple(material, fy_ksi, Es_ksi)
 | L-shaped, T-shaped | — | Not yet implemented |
 | Walls | — | Not yet implemented |
 
-## API Summary
+### API Summary
 
-### P-M Diagram Functions
+#### P-M Diagram Functions
 
 | Function | Description |
 |:---------|:------------|
@@ -508,7 +511,7 @@ mat_tuple = to_material_tuple(material, fy_ksi, Es_ksi)
 | `get_factored_curve(diagram)` | (φPn, φMn) arrays |
 | `get_control_point(diagram, :balanced)` | Specific control point |
 
-### Slenderness Functions
+#### Slenderness Functions
 
 | Function | ACI Reference | Description |
 |:---------|:--------------|:------------|
@@ -520,7 +523,7 @@ mat_tuple = to_material_tuple(material, fy_ksi, Es_ksi)
 | `magnification_factor_nonsway(Pu, Pc)` | §10.10.6.3 | δns factor |
 | `magnify_moment_nonsway(...)` | §10.10.6 | Complete magnification |
 
-### Sway Frame Functions
+#### Sway Frame Functions
 
 | Function | ACI Reference | Description |
 |:---------|:--------------|:------------|
@@ -530,7 +533,7 @@ mat_tuple = to_material_tuple(material, fy_ksi, Es_ksi)
 | `magnification_factor_sway_Q(Q)` | §10.10.7.3(a) | δs = 1/(1−Q) |
 | `magnify_moment_sway_complete(...)` | §10.10.6–7 | Full sway magnification |
 
-### Biaxial Functions
+#### Biaxial Functions
 
 | Function | Method | Description |
 |:---------|:-------|:------------|
@@ -540,7 +543,7 @@ mat_tuple = to_material_tuple(material, fy_ksi, Es_ksi)
 | `check_biaxial_capacity(...)` | Full | Uses separate x/y diagrams |
 | `check_biaxial_auto(...)` | Auto | Detects square vs rectangular |
 
-### Checker Interface
+#### Checker Interface
 
 | Function | Description |
 |:---------|:------------|

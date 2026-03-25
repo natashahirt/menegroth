@@ -372,10 +372,10 @@ println("Testing chat API…")
     # ─── Tool schema ─────────────────────────────────────────────────────────
 
     @testset "api_tool_schema — has clarify_user_intent" begin
-        schema = api_tool_schema()
-        @test haskey(schema, "tools")
-        tools = schema["tools"]
-        names = [t["name"] for t in tools]
+        registry = api_tool_schema()
+        @test registry isa Vector
+        @test !isempty(registry)
+        names = [t["name"] for t in registry]
         @test "clarify_user_intent" in names
         @test "validate_params" in names
         @test "run_design" in names

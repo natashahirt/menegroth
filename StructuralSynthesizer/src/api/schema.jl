@@ -507,52 +507,6 @@ function api_diagnose_schema()
     )
 end
 
-# ─── Tool Schema ──────────────────────────────────────────────────────────────
-
-"""
-    api_tool_schema() -> Dict
-
-Structured tool registry exposed at `GET /schema/tools`.  Lists every tool
-available via `POST /chat/action` with its phase, description, arguments, and
-return shape.
-"""
-function api_tool_schema()
-    Dict{String, Any}(
-        "version" => "v1",
-        "tools" => [
-            # Phase 1 — Orientation
-            Dict("name" => "get_building_summary",      "phase" => "orientation",   "description" => "Stories, footprint, span statistics, regularity indicators.", "args" => Dict{String,Any}(), "returns" => "object"),
-            Dict("name" => "get_current_params",         "phase" => "orientation",   "description" => "Fully resolved parameter set from the last design.",        "args" => Dict{String,Any}(), "returns" => "object"),
-            Dict("name" => "get_design_history",         "phase" => "orientation",   "description" => "Past designs in session: params, pass/fail, critical ratio, EC.", "args" => Dict{String,Any}(), "returns" => "{history:[], count:int}"),
-            # Phase 2 — Diagnosis
-            Dict("name" => "get_diagnose",               "phase" => "diagnosis",     "description" => "Per-element diagnostics: governing checks, demand/capacity, code clauses, levers.", "args" => Dict("units" => "optional string: imperial|metric"), "returns" => "object"),
-            Dict("name" => "query_elements",             "phase" => "diagnosis",     "description" => "Filter elements by type, ratio range, governing_check, story, or pass/fail.",       "args" => Dict("type" => "optional string", "min_ratio" => "optional float", "max_ratio" => "optional float", "governing_check" => "optional string", "ok" => "optional bool"), "returns" => "object"),
-            Dict("name" => "get_implemented_provisions", "phase" => "diagnosis",     "description" => "Design code clause index.", "args" => Dict("code" => "optional string e.g. ACI_318"), "returns" => "object"),
-            Dict("name" => "explain_field",              "phase" => "diagnosis",     "description" => "Parameter definition, units, range, related checks.", "args" => Dict("field" => "required string"), "returns" => "object"),
-            Dict("name" => "get_result_summary",         "phase" => "diagnosis",     "description" => "Structured per-element JSON summary (ratios, sections, failures).", "args" => Dict{String,Any}(), "returns" => "object"),
-            Dict("name" => "get_condensed_result",       "phase" => "diagnosis",     "description" => "~500-token plain-text result summary.", "args" => Dict{String,Any}(), "returns" => "{text:string}"),
-            Dict("name" => "get_applicability",          "phase" => "diagnosis",     "description" => "DDM/EFM/FEA eligibility and compatibility rules.", "args" => Dict{String,Any}(), "returns" => "object"),
-            # Phase 3 — Exploration
-            Dict("name" => "validate_params",            "phase" => "exploration",   "description" => "Check a params patch for compatibility violations.", "args" => Dict("params" => "required object: parameter patch"), "returns" => "{ok:bool, violations:string[]}"),
-            Dict("name" => "run_design",                 "phase" => "exploration",   "description" => "Fast parameter-only what-if check (60s timeout, max 2 iterations).", "args" => Dict("params" => "required object: parameter patch"), "returns" => "{ok:bool, quick_check:bool, summary:string, ...}"),
-            Dict("name" => "compare_designs",            "phase" => "exploration",   "description" => "Delta table between two designs from history.", "args" => Dict("index_a" => "required int", "index_b" => "required int"), "returns" => "object"),
-            Dict("name" => "suggest_next_action",        "phase" => "exploration",   "description" => "Ranked parameter changes for a goal.", "args" => Dict("goal" => "required string: fix_failures|reduce_column_size|reduce_slab_thickness|reduce_ec"), "returns" => "object"),
-            # Phase 4 — Communication
-            Dict("name" => "narrate_element",            "phase" => "communication", "description" => "Plain-English explanation of one element.", "args" => Dict("element_type" => "required string", "element_id" => "required int", "audience" => "optional: architect|engineer"), "returns" => "object"),
-            Dict("name" => "narrate_comparison",         "phase" => "communication", "description" => "Plain-English comparison of two designs.", "args" => Dict("index_a" => "required int", "index_b" => "required int", "audience" => "optional: architect|engineer"), "returns" => "object"),
-            Dict("name" => "clarify_user_intent",        "phase" => "communication", "description" => "Structured multiple-choice clarification prompt for the UI.", "args" => Dict(
-                "id"             => "optional string: unique clarification key (auto-generated if omitted)",
-                "prompt"         => "required string: the question to present",
-                "options"        => "required array: [{id, label}] — 2-4 concise choices",
-                "allow_multiple" => "optional bool (default false)",
-                "rationale"      => "optional string: why this matters",
-                "required_for"   => "optional string: decision this unblocks",
-                "session_id"     => "optional string: for dedup tracking",
-            ), "returns" => "{ok:bool, type:\"clarification\", duplicate:bool, clarification:{id,prompt,options,allow_multiple,rationale?,required_for?}}"),
-        ],
-    )
-end
-
 # ─── Input Schema ────────────────────────────────────────────────────────────
 # Input structs are `mutable` so that StructTypes.Mutable() can construct them
 # via the no-arg constructor and then set only the fields present in JSON.

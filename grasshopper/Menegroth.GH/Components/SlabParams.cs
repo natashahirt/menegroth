@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Windows.Forms;
 using Grasshopper.Kernel;
+using Menegroth.GH.Config;
 using Menegroth.GH.Helpers;
 using Menegroth.GH.Types;
 using Rhino.Geometry;
@@ -77,7 +78,7 @@ namespace Menegroth.GH.Components
             : base("Slab Params",
                    "SlabParams",
                    "Face-scoped slab overrides (type/options/category) for Geometry Input + Design Params",
-                   "Menegroth", "Component Params")
+                   "Menegroth", MenegrothSubcategories.ComponentParameters)
         { }
 
         public override Guid ComponentGuid =>

@@ -143,7 +143,7 @@ end
         floor = FlatPlateOptions(method = FEA()),
         materials = MaterialOptions(concrete = NWC_4000),
         max_iterations = 2,
-        display_units = metric,  # mesh vertices in m, matches col_xy
+        display_units = DisplayUnits(:metric),  # mesh vertices in m, matches col_xy
     )
 
     design = design_building(struc, params)
@@ -398,7 +398,7 @@ end
             floor = FlatPlateOptions(method = FEA()),
             materials = MaterialOptions(concrete = NWC_4000),
             max_iterations = 2,
-            display_units = metric,
+            display_units = DisplayUnits(:metric),
         )
         design_ngon = design_building(struc_ngon, params_ngon)
         @test all_ok(design_ngon)

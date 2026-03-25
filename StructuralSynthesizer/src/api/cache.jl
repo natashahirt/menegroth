@@ -81,3 +81,74 @@ function is_geometry_cached(cache::DesignCache, hash::String)
     return !isempty(hash) && cache.geometry_hash == hash &&
            !isnothing(cache.skeleton) && !isnothing(cache.structure)
 end
+
+# ─── Design history ring buffer ───────────────────────────────────────────────
+
+"""
+Snapshot of a completed design for session history.
+Enables compare_designs and get_design_history tools.
+"""
+Base.@kwdef struct DesignHistoryEntry
+    timestamp::DateTime        = now()
+    params_patch::Dict{String, Any} = Dict{String, Any}()
+    all_pass::Bool             = false
+    critical_ratio::Float64    = 0.0
+    critical_element::String   = ""
+    embodied_carbon::Float64   = 0.0
+    n_columns::Int             = 0
+    n_beams::Int               = 0
+    n_slabs::Int               = 0
+    n_failing::Int             = 0
+    source::String             = "design"
+end
+
+const DESIGN_HISTORY      = DesignHistoryEntry[]
+const DESIGN_HISTORY_LOCK = ReentrantLock()
+const DESIGN_HISTORY_MAX  = 10
+
+"""
+    record_design_history!(entry::DesignHistoryEntry)
+
+Append a design snapshot to session history, evicting the oldest when full.
+"""
+function record_design_history!(entry::DesignHistoryEntry)
+    lock(DESIGN_HISTORY_LOCK) do
+        push!(DESIGN_HISTORY, entry)
+        while length(DESIGN_HISTORY) > DESIGN_HISTORY_MAX
+            popfirst!(DESIGN_HISTORY)
+        end
+    end
+end
+
+"""
+    get_design_history_entries() -> Vector{DesignHistoryEntry}
+
+Return a copy of the current design history.
+"""
+function get_design_history_entries()
+    lock(DESIGN_HISTORY_LOCK) do
+        copy(DESIGN_HISTORY)
+    end
+end
+
+"""
+    design_history_to_json(entries::Vector{DesignHistoryEntry}) -> Vector{Dict{String, Any}}
+
+Serialize design history entries for JSON output.
+"""
+function design_history_to_json(entries::Vector{DesignHistoryEntry})
+    return [Dict{String, Any}(
+        "index"            => i,
+        "timestamp"        => Dates.format(e.timestamp, "yyyy-mm-dd HH:MM:SS"),
+        "params_patch"     => e.params_patch,
+        "all_pass"         => e.all_pass,
+        "critical_ratio"   => round(e.critical_ratio; digits=3),
+        "critical_element" => e.critical_element,
+        "embodied_carbon"  => round(e.embodied_carbon; digits=0),
+        "n_columns"        => e.n_columns,
+        "n_beams"          => e.n_beams,
+        "n_slabs"          => e.n_slabs,
+        "n_failing"        => e.n_failing,
+        "source"           => e.source,
+    ) for (i, e) in enumerate(entries)]
+end

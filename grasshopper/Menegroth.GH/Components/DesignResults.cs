@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Windows.Forms;
 using Grasshopper.Kernel;
+using Menegroth.GH.Config;
 using Menegroth.GH.Types;
 
 namespace Menegroth.GH.Components
@@ -22,10 +23,10 @@ namespace Menegroth.GH.Components
         private string _filter = "all";
 
         public DesignResults()
-            : base("Design Results",
-                   "DesignRes",
-                   "Design results: summary statistics and per-element data",
-                   "Menegroth", " Results")
+            : base("Results Summary",
+                   "ResSummary",
+                   "Summary statistics and per-element data from a design run",
+                   "Menegroth", MenegrothSubcategories.Results)
         { }
 
         public override Guid ComponentGuid =>
@@ -235,7 +236,7 @@ namespace Menegroth.GH.Components
         {
             string msg = $"Slab {s.Id}";
             if (!s.Converged)
-                msg += $": {s.FailureReason}" + (string.IsNullOrEmpty(s.FailingCheck) ? "" : $" ({s.FailingCheck})");
+                msg += $": {s.FailureReason}" + (s.FailingChecks.Count == 0 ? "" : $" ({string.Join(", ", s.FailingChecks)})");
             else
                 msg += $": defl={s.DeflectionRatio:F2}, punch={s.PunchingMaxRatio:F2}";
             return msg;

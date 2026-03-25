@@ -148,7 +148,7 @@ using StructuralSizer
         
         # Get visualization data
         output = design_to_json(design)
-        @test haskey(output, :visualization) || output.status == "ok"
+        @test output.status == "ok"
         
         viz = output.visualization
         @test !isnothing(viz)

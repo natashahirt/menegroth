@@ -25,7 +25,7 @@ function api_input_schema()
             "type" => "string",
             "required" => true,
             "description" => "Coordinate units for vertices and story elevations.",
-            "accepted" => "feet, ft, inches, in, meters, m, millimeters, mm, centimeters, cm",
+            "accepted" => _accepted_doc(API_UNIT_ALIASES),
         ),
         "vertices" => Dict(
             "type" => "array of [x, y, z]",
@@ -69,12 +69,12 @@ function api_input_schema()
                     "roof_SDL_psf" => "Roof superimposed dead (psf). Default: 15.",
                     "wall_SDL_psf" => "Wall superimposed dead (psf). Default: 10.",
                 ),
-                "floor_type" => "flat_plate | flat_slab | one_way | vault. Default: flat_plate.",
+                "floor_type" => "$(join(API_FLOOR_TYPES, " | ")). Default: flat_plate.",
                 "max_iterations" => "Optional. Maximum beam/column sizing iterations (integer >= 1). Default: 20.",
                 "floor_options" => Dict(
-                    "method" => "DDM | DDM_SIMPLIFIED | EFM | EFM_HARDY_CROSS | FEA. Default: DDM.",
-                    "deflection_limit" => "L_240 | L_360 | L_480. Default: L_360.",
-                    "punching_strategy" => "grow_columns | reinforce_last | reinforce_first. Default: grow_columns.",
+                    "method" => "$(join(API_FLOOR_ANALYSIS_METHODS, " | ")). Default: DDM.",
+                    "deflection_limit" => "$(join(API_DEFLECTION_LIMITS, " | ")). Default: L_360.",
+                    "punching_strategy" => "$(join(API_PUNCHING_STRATEGIES, " | ")). Default: grow_columns.",
                     "target_edge_m" => "Optional. FEA mesh target edge length (m). Default: adaptive clamp(min_span/20, 0.15, 0.75). Used when method is FEA.",
                     "vault_lambda" => "Optional vault span/rise ratio (dimensionless, > 0). Used when floor_type is vault.",
                 ),
@@ -88,29 +88,468 @@ function api_input_schema()
                     "rebar" => "Rebar name (e.g. Rebar_60). Default: Rebar_60.",
                     "steel" => "Steel name (e.g. A992). Default: A992.",
                 ),
-                "column_type" => "rc_rect | rc_circular | steel_w | steel_hss | steel_pipe | pixelframe. Default: rc_rect.",
+                "column_type" => "$(join(API_COLUMN_TYPES, " | ")). Default: rc_rect.",
                 "column_catalog" => "Optional column catalog (string or null). Steel (steel_w/steel_hss/steel_pipe): compact_only | preferred | all. RC rectangular (rc_rect): standard | square | rectangular | low_capacity | high_capacity | all. RC circular (rc_circular): standard | low_capacity | high_capacity | all. Ignored for pixelframe. If omitted or null: defaults to preferred (steel) or standard (RC).",
                 "column_sizing_strategy" => "discrete (MIP catalog) or nlp (continuous Ipopt). Default: discrete. Applies to RC and steel columns.",
                 "mip_time_limit_sec" => "MIP solver time limit (seconds) when discrete sizing. Default: 30.",
-                "beam_type" => "steel_w | steel_hss | rc_rect | rc_tbeam | pixelframe. Default: steel_w.",
-                "beam_catalog" => "RC beam catalog when beam_type is rc_rect or rc_tbeam: standard | small | large | xlarge | all | custom. Default: large. Use xlarge for vaults with high thrust. Use custom with beam_catalog_bounds for bounds-based catalog. Ignored for pixelframe.",
+                "beam_type" => "$(join(API_BEAM_TYPES, " | ")). Default: steel_w.",
+                "beam_catalog" => "RC beam catalog when beam_type is rc_rect or rc_tbeam: $(join(API_BEAM_CATALOGS, " | ")). Default: large. Use xlarge for vaults with high thrust. Use custom with beam_catalog_bounds for bounds-based catalog. Ignored for pixelframe.",
                 "beam_sizing_strategy" => "discrete (MIP catalog) or nlp (continuous Ipopt). Default: discrete. Applies to RC and steel beams.",
                 "beam_catalog_bounds" => "Required when beam_catalog is custom. Object: min_width_in, max_width_in, min_depth_in, max_depth_in, resolution_in (all in inches).",
                 "pixelframe_options" => "When column_type or beam_type is pixelframe. Object: fc_preset (standard | low | high | extended | custom) or fc_min_ksi, fc_max_ksi, fc_resolution_ksi when custom. Default: standard.",
                 "fire_rating" => "Fire rating (hours): 0, 1, 1.5, 2, 3, or 4. Default: 0.",
-                "optimize_for" => "weight | carbon | cost. Default: weight.",
+                "optimize_for" => "$(join(API_OPTIMIZE_FOR, " | ")). Default: weight.",
                 "size_foundations" => "Boolean. Default: false.",
                 "foundation_soil" => "Soil name (e.g. medium_sand). Required when size_foundations is true. Default: medium_sand.",
                 "foundation_concrete" => "Foundation concrete (e.g. NWC_3000). Default: NWC_3000.",
                 "foundation_options" => Dict(
-                    "strategy" => "auto | auto_strip_spread | all_spread | all_strip | mat. Default: auto.",
+                    "strategy" => "$(join(API_FOUNDATION_STRATEGIES, " | ")). Default: auto.",
                     "mat_coverage_threshold" => "Switch to mat when coverage ratio exceeds this (0–1). Default: 0.5.",
                     "spread_params" => "Optional. cover_in, min_depth_in, bar_size, depth_increment_in, size_increment_in (inches).",
                     "strip_params" => "Optional. cover_in, min_depth_in, bar_size_long, bar_size_trans, width_increment_in, max_depth_ratio, merge_gap_factor, eccentricity_limit.",
-                    "mat_params" => "Optional. cover_in, min_depth_in, bar_size_x, bar_size_y, depth_increment_in, edge_overhang_in, analysis_method (rigid | shukla | winkler).",
+                    "mat_params" => "Optional. cover_in, min_depth_in, bar_size_x, bar_size_y, depth_increment_in, edge_overhang_in, analysis_method ($(join(API_MAT_ANALYSIS_METHODS, " | "))).",
                 ),
             ),
         ),
+    )
+end
+
+# ─── Structured Parameter Schema (for LLM agents) ───────────────────────────
+
+"""
+    api_params_schema_structured() -> Dict
+
+Return a machine-readable description of every `APIParams` field.
+Each entry has: `type`, `default`, `allowed` (for enums), `range` (for numerics),
+`depends_on` (conditional availability), and `guidance` (engineering heuristic text
+for the LLM to use when recommending or explaining parameters).
+"""
+function api_params_schema_structured()
+    Dict{String, Any}(
+        "unit_system" => Dict(
+            "type" => "enum", "default" => "imperial",
+            "allowed" => collect(API_UNIT_SYSTEMS),
+            "guidance" => "Use imperial (ft, in, psf, ksi) for US projects, metric (m, mm, kPa, MPa) for international. Affects all display units in results.",
+        ),
+        "floor_type" => Dict(
+            "type" => "enum", "default" => "flat_plate",
+            "allowed" => collect(API_FLOOR_TYPES),
+            "guidance" => "flat_plate: beamless two-way slab system (typically economical for regular bays, moderate spans). flat_slab: flat_plate with drop panels for punching/shear demand control. one_way: use when load path is dominantly one direction (long narrow bays). vault: parabolic shell behavior with horizontal thrust; requires RC beams/columns and rectangular orthogonal faces in current implementation. Compatibility checks enforced in API validation: flat_plate/flat_slab require RC columns (steel/pixelframe columns rejected); vault requires RC columns and RC beams.",
+            "compatibility_checks" => Dict{String, Any}(
+                "implemented_in" => "StructuralSynthesizer/src/api/validation.jl",
+                "rules" => Any[
+                    Dict{String, Any}(
+                        "id" => "floor_rc_columns_for_beamless",
+                        "when" => Dict("floor_type" => ["flat_plate", "flat_slab"]),
+                        "requires" => Dict("column_type" => ["rc_rect", "rc_circular"]),
+                        "rejects" => Dict("column_type" => ["steel_w", "steel_hss", "steel_pipe", "pixelframe"]),
+                        "severity" => "error",
+                    ),
+                    Dict{String, Any}(
+                        "id" => "vault_requires_rc_columns_and_beams",
+                        "when" => Dict("floor_type" => "vault"),
+                        "requires" => Dict(
+                            "column_type" => ["rc_rect", "rc_circular"],
+                            "beam_type" => ["rc_rect", "rc_tbeam"],
+                        ),
+                        "rejects" => Dict(
+                            "column_type" => ["steel_w", "steel_hss", "steel_pipe"],
+                            "beam_type" => ["steel_w", "steel_hss"],
+                        ),
+                        "severity" => "error",
+                    ),
+                ],
+            ),
+        ),
+        "column_type" => Dict(
+            "type" => "enum", "default" => "rc_rect",
+            "allowed" => collect(API_COLUMN_TYPES),
+            "guidance" => "rc_rect: standard for concrete buildings, good for fire resistance. rc_circular: aesthetics or round plan. steel_w: common for steel-framed buildings, lighter for tall buildings. steel_hss: compact columns for limited space. pixelframe: experimental 3D-printed concrete.",
+        ),
+        "beam_type" => Dict(
+            "type" => "enum", "default" => "steel_w",
+            "allowed" => collect(API_BEAM_TYPES),
+            "guidance" => "steel_w: standard W-shapes, widely available. rc_rect: concrete beams for all-concrete buildings. rc_tbeam: T-beams (flange from slab), efficient for one-way systems. steel_hss: compact rectangular tubes. pixelframe: experimental.",
+        ),
+        "loads" => Dict(
+            "type" => "object",
+            "fields" => Dict{String, Any}(
+                "floor_LL_psf" => Dict("type" => "number", "default" => 80.0, "range" => [20.0, 250.0], "unit" => "psf",
+                    "guidance" => "ASCE 7 Table 4.3-1: office=50, residential=40, assembly=100, retail=75-100, storage=125-250. 80 psf is a safe general default."),
+                "roof_LL_psf" => Dict("type" => "number", "default" => "same as floor_LL_psf", "range" => [20.0, 100.0], "unit" => "psf",
+                    "guidance" => "ASCE 7: ordinary flat roof=20, reducible. Higher for rooftop gardens or equipment."),
+                "floor_SDL_psf" => Dict("type" => "number", "default" => 15.0, "range" => [5.0, 50.0], "unit" => "psf",
+                    "guidance" => "Superimposed dead load: MEP, partitions, finishes. 15 psf typical for office. 25-30 for heavy MEP."),
+                "roof_SDL_psf" => Dict("type" => "number", "default" => 15.0, "range" => [5.0, 40.0], "unit" => "psf",
+                    "guidance" => "Roof superimposed dead: roofing, insulation, equipment pads."),
+                "wall_SDL_psf" => Dict("type" => "number", "default" => 10.0, "range" => [0.0, 30.0], "unit" => "psf",
+                    "guidance" => "Facade dead load applied to perimeter beams. 10 psf for curtain wall, 15-25 for masonry."),
+            ),
+        ),
+        "floor_options" => Dict(
+            "type" => "object",
+            "fields" => Dict{String, Any}(
+                "method" => Dict("type" => "enum", "default" => "DDM",
+                    "allowed" => collect(API_FLOOR_ANALYSIS_METHODS),
+                    "guidance" => "DDM/DDM_SIMPLIFIED (ACI 318-11 §13.6 / §8.10 checks as implemented): requires rectangular panel geometry, aspect ratio 0.5<=l2/l1<=2.0 (§8.10.2.2), L/D<=2.0 using estimated self-weight (§8.10.2.6), and adequate continuous spans/column lines (>=3 spans target; warning/violation when insufficient, §8.10.2.1). Additional implemented checks include adjacent-span variation <=1/3 when adjacency data exists (§8.10.2.3), column offset <=10% of span from column lines (§8.10.2.4), and practical clear-span minimum ln>=4 ft. EFM/EFM_HARDY_CROSS (ACI 318-11 §13.7 / §8.11 checks as implemented): still requires rectangular/orthogonal panel geometry for frame idealization (§8.11.2), gravity-load framing assumptions (§8.11.1.1), at least two supporting columns, and column-size limits for torsional-stiffness formulation (§8.11.5, c2/l2<=0.5 check). FEA: shell analysis is the most general and allowed for irregular geometry; however, if design_approach=:frame, post-processing uses ACI §8.10.5-style fractions and emits warnings when DDM regularity checks fail. Use FEA for non-rectangular panels, setbacks, or free-form column layouts.",
+                    "applicability_checks" => Dict{String, Any}(
+                        "implemented_in" => Dict(
+                            "DDM" => "StructuralSizer/src/slabs/codes/concrete/flat_plate/analysis/ddm.jl",
+                            "EFM" => "StructuralSizer/src/slabs/codes/concrete/flat_plate/analysis/efm.jl",
+                            "FEA" => "StructuralSizer/src/slabs/codes/concrete/flat_plate/utils/helpers.jl",
+                        ),
+                        "DDM" => Dict{String, Any}(
+                            "code_basis" => "ACI 318-11 §13.6 / §8.10 (implemented checks)",
+                            "hard_checks" => Any[
+                                Dict("id" => "ddm_rectangular_geometry", "clause" => "§8.10.2.2", "check" => "panel geometry rectangular/orthogonal"),
+                                Dict("id" => "ddm_aspect_ratio", "clause" => "§8.10.2.2", "check" => "0.5 <= l2/l1 <= 2.0"),
+                                Dict("id" => "ddm_live_dead_ratio", "clause" => "§8.10.2.6", "check" => "L/D <= 2.0 using estimated self-weight"),
+                                Dict("id" => "ddm_min_clear_span", "clause" => "implementation guardrail", "check" => "clear span ln >= 4 ft"),
+                            ],
+                            "context_checks" => Any[
+                                Dict("id" => "ddm_min_span_continuity", "clause" => "§8.10.2.1", "check" => ">=3 continuous spans target (column-line adequacy check)"),
+                                Dict("id" => "ddm_successive_span_variation", "clause" => "§8.10.2.3", "check" => "adjacent span difference <= longer span / 3", "applies_when" => "adjacent slab metadata available"),
+                                Dict("id" => "ddm_column_offset", "clause" => "§8.10.2.4", "check" => "column offset <= 10% of span from column lines", "applies_when" => "column coordinates resolvable"),
+                            ],
+                            "loads_assumption" => Dict("clause" => "§8.10.2.5", "assumption" => "gravity/uniform slab loading model in current workflow"),
+                        ),
+                        "DDM_SIMPLIFIED" => Dict{String, Any}(
+                            "inherits" => "DDM",
+                            "note" => "Uses simplified DDM coefficients but same applicability checks in current implementation.",
+                        ),
+                        "EFM" => Dict{String, Any}(
+                            "code_basis" => "ACI 318-11 §13.7 / §8.11 (implemented checks)",
+                            "hard_checks" => Any[
+                                Dict("id" => "efm_rectangular_geometry", "clause" => "§8.11.2", "check" => "panel geometry rectangular/orthogonal for frame idealization"),
+                                Dict("id" => "efm_min_supporting_columns", "clause" => "§8.11.2 (implementation)", "check" => "at least 2 supporting columns"),
+                                Dict("id" => "efm_torsion_stiffness_limit", "clause" => "§8.11.5", "check" => "column dimension ratio c2/l2 <= 0.5"),
+                                Dict("id" => "efm_min_clear_span", "clause" => "implementation guardrail", "check" => "clear span ln >= 4 ft"),
+                            ],
+                            "loads_assumption" => Dict("clause" => "§8.11.1.1", "assumption" => "gravity-load frame analysis in current workflow"),
+                        ),
+                        "EFM_HARDY_CROSS" => Dict{String, Any}(
+                            "inherits" => "EFM",
+                            "note" => "Same applicability as EFM; differs only in frame-solver backend.",
+                        ),
+                        "FEA" => Dict{String, Any}(
+                            "code_basis" => "Implementation policy + ACI-referenced post-processing",
+                            "hard_checks" => Any[
+                                Dict("id" => "fea_min_supporting_columns", "clause" => "implementation", "check" => "at least 2 supporting columns"),
+                            ],
+                            "advisory_checks" => Any[
+                                Dict(
+                                    "id" => "fea_frame_design_approach_guardrail",
+                                    "clause" => "ACI §8.10.5 style CS/MS fraction use in implementation",
+                                    "check" => "if design_approach=:frame and DDM regularity checks fail, emit warning (results may be approximate)",
+                                ),
+                                Dict(
+                                    "id" => "fea_strip_non_quad_guardrail",
+                                    "clause" => "implementation",
+                                    "check" => "for design_approach=:strip, non-quad/non-convex cells trigger integration warnings/fallback behavior",
+                                ),
+                                Dict(
+                                    "id" => "fea_area_transform_guardrail",
+                                    "clause" => "implementation",
+                                    "check" => "for design_approach=:area, projection/no_torsion transforms are warned as potentially unconservative",
+                                ),
+                            ],
+                        ),
+                    )),
+                "deflection_limit" => Dict("type" => "enum", "default" => "L_360",
+                    "allowed" => collect(API_DEFLECTION_LIMITS),
+                    "guidance" => "L_240: lenient (partitions unlikely). L_360: standard for supported partitions. L_480: strict for sensitive finishes."),
+                "punching_strategy" => Dict("type" => "enum", "default" => "grow_columns",
+                    "allowed" => collect(API_PUNCHING_STRATEGIES),
+                    "guidance" => "grow_columns: increase column size to pass punching (preferred). reinforce_first: add shear reinforcement before growing. reinforce_last: grow first, reinforce only if needed. For irregular plans with non-uniform tributary areas, punching shear demands can vary widely — review results carefully at re-entrant corners and edge columns."),
+                "target_edge_m" => Dict("type" => "number", "default" => "adaptive", "range" => [0.05, 2.0], "unit" => "m",
+                    "depends_on" => Dict("method" => "FEA"),
+                    "guidance" => "FEA mesh target edge length. Smaller = more accurate but slower. Default: adaptive based on span."),
+                "vault_lambda" => Dict("type" => "number", "default" => 10.0, "range" => [4.0, 30.0],
+                    "depends_on" => Dict("floor_type" => "vault"),
+                    "guidance" => "Span-to-rise ratio for vault floors. Lower = deeper arch (more efficient structurally, taller). 8-12 typical."),
+            ),
+        ),
+        "materials" => Dict(
+            "type" => "object",
+            "fields" => Dict{String, Any}(
+                "concrete" => Dict("type" => "string", "default" => "NWC_4000",
+                    "guidance" => "Slab/floor concrete. NWC_4000 (4 ksi) standard for slabs. NWC_5000 for higher loads. Earthen_2000 for low-carbon."),
+                "column_concrete" => Dict("type" => "string", "default" => "NWC_6000",
+                    "guidance" => "Column concrete. Higher f'c (6-8 ksi) allows smaller columns for high axial loads."),
+                "rebar" => Dict("type" => "string", "default" => "Rebar_60",
+                    "guidance" => "Rebar grade. Rebar_60 (Grade 60, fy=60 ksi) is standard. Rebar_80 for reduced congestion."),
+                "steel" => Dict("type" => "string", "default" => "A992",
+                    "guidance" => "Structural steel. A992 (Fy=50 ksi) standard for W-shapes. A500_GrB for HSS."),
+            ),
+        ),
+        "column_catalog" => Dict(
+            "type" => "enum_or_null", "default" => "null (auto: preferred for steel, standard for RC)",
+            "allowed" => Dict(
+                "steel_w" => collect(API_STEEL_COLUMN_CATALOGS),
+                "rc_rect" => collect(API_RC_RECT_COLUMN_CATALOGS),
+                "rc_circular" => collect(API_RC_CIRCULAR_COLUMN_CATALOGS),
+            ),
+            "depends_on" => Dict("column_type" => "not pixelframe"),
+            "guidance" => "Controls the pool of available sections. 'preferred' or 'standard' for typical projects. 'all' maximizes optimization range but increases solve time.",
+        ),
+        "column_sizing_strategy" => Dict(
+            "type" => "enum", "default" => "discrete",
+            "allowed" => collect(API_SIZING_STRATEGIES),
+            "guidance" => "discrete: mixed-integer programming over catalog sections (standard). nlp: continuous optimization (experimental, may find lighter solutions for RC).",
+        ),
+        "mip_time_limit_sec" => Dict(
+            "type" => "number_or_null", "default" => 30.0, "range" => [1.0, 300.0], "unit" => "seconds",
+            "depends_on" => Dict("column_sizing_strategy" => "discrete"),
+            "guidance" => "MIP solver time limit. 30s is sufficient for most regular buildings. Increase to 60-120s for large or irregular buildings with many distinct column groups.",
+        ),
+        "beam_catalog" => Dict(
+            "type" => "enum", "default" => "large",
+            "allowed" => collect(API_BEAM_CATALOGS),
+            "depends_on" => Dict("beam_type" => ["rc_rect", "rc_tbeam"]),
+            "guidance" => "RC beam catalog size. 'large' is standard. 'xlarge' for vault tie-beams with high thrust. 'custom' allows explicit bounds via beam_catalog_bounds.",
+        ),
+        "beam_sizing_strategy" => Dict(
+            "type" => "enum", "default" => "discrete",
+            "allowed" => collect(API_SIZING_STRATEGIES),
+            "guidance" => "Same as column_sizing_strategy but for beams.",
+        ),
+        "beam_catalog_bounds" => Dict(
+            "type" => "object_or_null", "default" => "null",
+            "depends_on" => Dict("beam_catalog" => "custom"),
+            "fields" => Dict(
+                "min_width_in" => Dict("type" => "number", "unit" => "in"),
+                "max_width_in" => Dict("type" => "number", "unit" => "in"),
+                "min_depth_in" => Dict("type" => "number", "unit" => "in"),
+                "max_depth_in" => Dict("type" => "number", "unit" => "in"),
+                "resolution_in" => Dict("type" => "number", "unit" => "in"),
+            ),
+            "guidance" => "Custom beam size bounds when beam_catalog='custom'. Width 10-24 in, depth 12-36 in is typical. Resolution 2 in is standard.",
+        ),
+        "fire_rating" => Dict(
+            "type" => "number", "default" => 0.0,
+            "allowed" => [0.0, 1.0, 1.5, 2.0, 3.0, 4.0],
+            "guidance" => "IBC fire rating in hours. 0 = no fire design. 1-2 hrs typical for most occupancies. Affects concrete cover, minimum thickness, and steel fire protection.",
+        ),
+        "optimize_for" => Dict(
+            "type" => "enum", "default" => "weight",
+            "allowed" => collect(API_OPTIMIZE_FOR),
+            "guidance" => "Optimization objective. weight: minimize material weight (cheapest). carbon: minimize embodied carbon (greenest). cost: minimize estimated construction cost.",
+        ),
+        "max_iterations" => Dict(
+            "type" => "integer_or_null", "default" => 20, "range" => [1, 100],
+            "guidance" => "Maximum column/beam sizing iterations. 20 is usually sufficient for regular buildings. Increase to 30-50 for irregular plans where load redistribution may need more iterations to converge.",
+        ),
+        "size_foundations" => Dict(
+            "type" => "boolean", "default" => false,
+            "guidance" => "When true, size spread/strip/mat foundations based on column reactions and soil properties.",
+        ),
+        "foundation_soil" => Dict(
+            "type" => "string", "default" => "medium_sand",
+            "depends_on" => Dict("size_foundations" => true),
+            "guidance" => "Soil bearing class. medium_sand: qa ~4 ksf. stiff_clay: qa ~3 ksf. Affects footing sizes.",
+        ),
+        "foundation_concrete" => Dict(
+            "type" => "string", "default" => "NWC_3000",
+            "depends_on" => Dict("size_foundations" => true),
+            "guidance" => "Foundation concrete. NWC_3000 (3 ksi) is standard for footings.",
+        ),
+        "foundation_options" => Dict(
+            "type" => "object_or_null", "default" => "null",
+            "depends_on" => Dict("size_foundations" => true),
+            "fields" => Dict{String, Any}(
+                "strategy" => Dict("type" => "enum", "default" => "auto",
+                    "allowed" => collect(API_FOUNDATION_STRATEGIES),
+                    "guidance" => "auto: engine picks spread/strip/mat based on coverage. all_spread: force isolated footings. mat: force mat foundation."),
+                "mat_coverage_threshold" => Dict("type" => "number", "default" => 0.5, "range" => [0.0, 1.0],
+                    "guidance" => "When auto strategy, switch from spread to mat when footing coverage > this fraction of plan area."),
+            ),
+        ),
+        "geometry_is_centerline" => Dict(
+            "type" => "boolean", "default" => false,
+            "guidance" => "When false, vertices are architectural reference points and columns are offset inward. When true, vertices are structural centerlines — no offset is applied.",
+        ),
+        "skip_visualization" => Dict(
+            "type" => "boolean", "default" => false,
+            "guidance" => "Skip visualization mesh generation for faster response. Use when only structural data is needed.",
+        ),
+        "visualization_detail" => Dict(
+            "type" => "enum", "default" => "full",
+            "allowed" => collect(API_VISUALIZATION_DETAILS),
+            "guidance" => "minimal: frame + slab boundaries only (fast). full: deflected meshes and per-face analytical values.",
+        ),
+        "pixelframe_options" => Dict(
+            "type" => "object_or_null", "default" => "null",
+            "depends_on" => Dict("column_type_or_beam_type" => "pixelframe"),
+            "fields" => Dict(
+                "fc_preset" => Dict("type" => "enum", "default" => "standard",
+                    "allowed" => collect(API_PIXELFRAME_FC_PRESETS),
+                    "guidance" => "Concrete strength range preset for PixelFrame optimization. standard covers typical 3D-printable mixes."),
+            ),
+            "guidance" => "PixelFrame options for 3D-printed concrete columns/beams. Only used when column_type or beam_type is pixelframe.",
+        ),
+    )
+end
+
+"""
+    api_applicability_schema() -> Dict
+
+Return a compact, machine-readable subset of `api_params_schema_structured()`
+containing only method/floor compatibility and applicability rules. Intended for
+LLM assistants that need fast eligibility checks without loading the full schema.
+"""
+function api_applicability_schema()
+    s = api_params_schema_structured()
+
+    floor_type = s["floor_type"]
+    method = s["floor_options"]["fields"]["method"]
+
+    return Dict{String, Any}(
+        "version" => "v1",
+        "source" => "api_params_schema_structured",
+        "rules" => Dict{String, Any}(
+            "floor_type" => Dict{String, Any}(
+                "default" => floor_type["default"],
+                "allowed" => floor_type["allowed"],
+                "compatibility_checks" => floor_type["compatibility_checks"],
+            ),
+            "analysis_method" => Dict{String, Any}(
+                "default" => method["default"],
+                "allowed" => method["allowed"],
+                "applicability_checks" => method["applicability_checks"],
+            ),
+        ),
+    )
+end
+
+"""
+    api_diagnose_schema() -> Dict
+
+Return a compact, versioned contract for the `GET /diagnose` payload.
+This describes the stable top-level sections and key per-element fields so
+assistants/clients can validate presence and parse semantics.
+"""
+function api_diagnose_schema()
+    return Dict{String, Any}(
+        "version" => "v1",
+        "endpoint" => "GET /diagnose",
+        "description" => "High-resolution, machine-readable causal diagnostics for structural sizing decisions.",
+        "top_level" => Dict{String, Any}(
+            "status" => "string",
+            "unit_system" => "enum(imperial|metric)",
+            "length_unit" => "string",
+            "thickness_unit" => "string",
+            "force_unit" => "string",
+            "moment_unit" => "string",
+            "pressure_unit" => "string",
+            "design_context" => "object",
+            "agent_summary" => "object",
+            "columns" => "array<object>",
+            "beams" => "array<object>",
+            "slabs" => "array<object>",
+            "foundations" => "array<object>",
+            "architectural" => "object",
+            "constraints" => "object",
+        ),
+        "design_context" => Dict{String, Any}(
+            "required_keys" => [
+                "floor_type", "column_type", "beam_type",
+                "analysis_method", "deflection_limit", "unit_system", "loads",
+            ],
+            "loads_keys" => ["floor_SDL", "floor_LL", "roof_SDL", "roof_LL", "unit"],
+            "optional_keys" => ["punching_strategy", "punching_strategy_description"],
+        ),
+        "agent_summary" => Dict{String, Any}(
+            "required_keys" => [
+                "all_pass", "critical_element", "critical_ratio",
+                "total_ec_kgco2e", "governing_check_distribution", "per_type",
+            ],
+            "distribution_item" => Dict("check" => "string", "count" => "int"),
+        ),
+        "element_contracts" => Dict{String, Any}(
+            "common_required" => [
+                "id", "governing_check", "governing_ratio",
+                "governing_mode", "ok", "checks", "levers",
+                "limit_state_description",
+            ],
+            "columns_required" => [
+                "section", "shape", "Pu", "Mu_x", "Mu_y",
+                "axial_ratio", "interaction_ratio", "ec_kgco2e",
+            ],
+            "beams_required" => [
+                "section", "Mu", "Vu", "ec_kgco2e",
+            ],
+            "slabs_required" => [
+                "thickness", "l1", "l2", "M0", "qu",
+                "deflection", "deflection_limit", "deflection_unit", "ec_kgco2e",
+            ],
+            "foundations_required" => [
+                "length", "width", "depth", "reaction",
+            ],
+            "check_required" => [
+                "name", "code_clause", "ratio", "headroom", "governing",
+            ],
+            "check_optional" => [
+                "demand", "capacity", "demand_unit", "capacity_phiVc",
+                "demand_Mu_x", "demand_Mu_y", "demand_Vu", "demand_vu",
+            ],
+        ),
+        "architectural" => Dict{String, Any}(
+            "required_keys" => ["system_narrative", "scale_references", "goal_recommendations"],
+        ),
+        "constraints" => Dict{String, Any}(
+            "required_keys" => ["fixed_by_geometry", "lever_impacts"],
+        ),
+        "notes" => [
+            "All numeric values are emitted in the selected display unit system.",
+            "Some fields (e.g., ec_kgco2e) may be null when unavailable.",
+            "Keys are ASCII-only for robust machine parsing.",
+        ],
+    )
+end
+
+# ─── Tool Schema ──────────────────────────────────────────────────────────────
+
+"""
+    api_tool_schema() -> Dict
+
+Structured tool registry exposed at `GET /schema/tools`.  Lists every tool
+available via `POST /chat/action` with its phase, description, arguments, and
+return shape.
+"""
+function api_tool_schema()
+    Dict{String, Any}(
+        "version" => "v1",
+        "tools" => [
+            # Phase 1 — Orientation
+            Dict("name" => "get_building_summary",      "phase" => "orientation",   "description" => "Stories, footprint, span statistics, regularity indicators.", "args" => Dict{String,Any}(), "returns" => "object"),
+            Dict("name" => "get_current_params",         "phase" => "orientation",   "description" => "Fully resolved parameter set from the last design.",        "args" => Dict{String,Any}(), "returns" => "object"),
+            Dict("name" => "get_design_history",         "phase" => "orientation",   "description" => "Past designs in session: params, pass/fail, critical ratio, EC.", "args" => Dict{String,Any}(), "returns" => "{history:[], count:int}"),
+            # Phase 2 — Diagnosis
+            Dict("name" => "get_diagnose",               "phase" => "diagnosis",     "description" => "Per-element diagnostics: governing checks, demand/capacity, code clauses, levers.", "args" => Dict("units" => "optional string: imperial|metric"), "returns" => "object"),
+            Dict("name" => "query_elements",             "phase" => "diagnosis",     "description" => "Filter elements by type, ratio range, governing_check, story, or pass/fail.",       "args" => Dict("type" => "optional string", "min_ratio" => "optional float", "max_ratio" => "optional float", "governing_check" => "optional string", "ok" => "optional bool"), "returns" => "object"),
+            Dict("name" => "get_implemented_provisions", "phase" => "diagnosis",     "description" => "Design code clause index.", "args" => Dict("code" => "optional string e.g. ACI_318"), "returns" => "object"),
+            Dict("name" => "explain_field",              "phase" => "diagnosis",     "description" => "Parameter definition, units, range, related checks.", "args" => Dict("field" => "required string"), "returns" => "object"),
+            Dict("name" => "get_result_summary",         "phase" => "diagnosis",     "description" => "Structured per-element JSON summary (ratios, sections, failures).", "args" => Dict{String,Any}(), "returns" => "object"),
+            Dict("name" => "get_condensed_result",       "phase" => "diagnosis",     "description" => "~500-token plain-text result summary.", "args" => Dict{String,Any}(), "returns" => "{text:string}"),
+            Dict("name" => "get_applicability",          "phase" => "diagnosis",     "description" => "DDM/EFM/FEA eligibility and compatibility rules.", "args" => Dict{String,Any}(), "returns" => "object"),
+            # Phase 3 — Exploration
+            Dict("name" => "validate_params",            "phase" => "exploration",   "description" => "Check a params patch for compatibility violations.", "args" => Dict("params" => "required object: parameter patch"), "returns" => "{ok:bool, violations:string[]}"),
+            Dict("name" => "run_design",                 "phase" => "exploration",   "description" => "Fast parameter-only what-if check (60s timeout, max 2 iterations).", "args" => Dict("params" => "required object: parameter patch"), "returns" => "{ok:bool, quick_check:bool, summary:string, ...}"),
+            Dict("name" => "compare_designs",            "phase" => "exploration",   "description" => "Delta table between two designs from history.", "args" => Dict("index_a" => "required int", "index_b" => "required int"), "returns" => "object"),
+            Dict("name" => "suggest_next_action",        "phase" => "exploration",   "description" => "Ranked parameter changes for a goal.", "args" => Dict("goal" => "required string: fix_failures|reduce_column_size|reduce_slab_thickness|reduce_ec"), "returns" => "object"),
+            # Phase 4 — Communication
+            Dict("name" => "narrate_element",            "phase" => "communication", "description" => "Plain-English explanation of one element.", "args" => Dict("element_type" => "required string", "element_id" => "required int", "audience" => "optional: architect|engineer"), "returns" => "object"),
+            Dict("name" => "narrate_comparison",         "phase" => "communication", "description" => "Plain-English comparison of two designs.", "args" => Dict("index_a" => "required int", "index_b" => "required int", "audience" => "optional: architect|engineer"), "returns" => "object"),
+            Dict("name" => "clarify_user_intent",        "phase" => "communication", "description" => "Structured multiple-choice clarification prompt for the UI.", "args" => Dict(
+                "id"             => "optional string: unique clarification key (auto-generated if omitted)",
+                "prompt"         => "required string: the question to present",
+                "options"        => "required array: [{id, label}] — 2-4 concise choices",
+                "allow_multiple" => "optional bool (default false)",
+                "rationale"      => "optional string: why this matters",
+                "required_for"   => "optional string: decision this unblocks",
+                "session_id"     => "optional string: for dedup tracking",
+            ), "returns" => "{ok:bool, type:\"clarification\", duplicate:bool, clarification:{id,prompt,options,allow_multiple,rationale?,required_for?}}"),
+        ],
     )
 end
 
@@ -300,6 +739,94 @@ StructTypes.StructType(::Type{APIInput}) = StructTypes.Mutable()
 # ─── Output Schema ───────────────────────────────────────────────────────────
 # Output structs are immutable (write-only, never parsed from JSON).
 
+"""Canonical failure reason codes for slab results."""
+const API_SLAB_FAILURE_REASONS = (
+    "non_convergence",
+    "section_inadequate",
+    "high_aspect_ratio",
+    "ddm_ineligible",
+    "applicability",
+    "skeleton_build_failed",
+    "solver_error",
+    "unknown",
+    "",
+)
+
+"""Canonical failing check codes for slab results."""
+const API_SLAB_FAILING_CHECKS = (
+    "punching_shear",
+    "two_way_deflection",
+    "two_way_deflection_secondary",
+    "one_way_shear",
+    "flexural_adequacy",
+    "reinforcement_design",
+    "reinforcement_design_secondary",
+    "transfer_reinforcement",
+    "column_pm",
+    "applicability",
+    "none",
+    "",
+)
+
+"""
+    _normalize_failure_reason(raw::String) -> String
+
+Map a raw failure_reason string to a canonical enum token.
+Joined multi-value strings, exception type names, and stack traces
+are mapped to the closest canonical value.
+"""
+function _normalize_failure_reason(raw::String)
+    isempty(raw) && return ""
+    stripped = strip(raw)
+    stripped in API_SLAB_FAILURE_REASONS && return stripped
+    occursin("non_convergence", stripped) && return "non_convergence"
+    occursin("section_inadequate", stripped) && return "section_inadequate"
+    occursin("high_aspect_ratio", stripped) && return "high_aspect_ratio"
+    occursin("ddm_ineligible", stripped) && return "ddm_ineligible"
+    occursin("applicability", stripped) && return "applicability"
+    occursin("skeleton_build_failed", stripped) && return "skeleton_build_failed"
+    occursin("column_pm_infeasible", stripped) && return "section_inadequate"
+    occursin("Error", stripped) || occursin("error", stripped) && return "solver_error"
+    return "unknown"
+end
+
+"""
+    _normalize_failing_checks(raw::String) -> Vector{String}
+
+Parse a raw failing_check string into an array of canonical check codes.
+Handles comma-separated values, single tokens, and stack trace fallback.
+"""
+function _normalize_failing_checks(raw::String)
+    isempty(raw) && return String[]
+    parts = [strip(p) for p in split(raw, r"[,;]")]
+    result = String[]
+    for part in parts
+        isempty(part) && continue
+        if part in API_SLAB_FAILING_CHECKS
+            push!(result, part)
+        elseif occursin("punching", part)
+            push!(result, "punching_shear")
+        elseif occursin("deflection", part)
+            push!(result, "two_way_deflection")
+        elseif occursin("shear", part)
+            push!(result, "one_way_shear")
+        elseif occursin("flexur", part)
+            push!(result, "flexural_adequacy")
+        elseif occursin("reinforcement", part)
+            push!(result, "reinforcement_design")
+        elseif occursin("transfer", part)
+            push!(result, "transfer_reinforcement")
+        elseif occursin("column_pm", part)
+            push!(result, "column_pm")
+        elseif occursin("applicability", part)
+            push!(result, "applicability")
+        else
+            push!(result, part)
+        end
+    end
+    return unique(result)
+end
+
 """Slab result for JSON output."""
 Base.@kwdef struct APISlabResult
     id::Int = 0
@@ -307,7 +834,8 @@ Base.@kwdef struct APISlabResult
     thickness::Float64 = 0.0
     converged::Bool = true
     failure_reason::String = ""
-    failing_check::String = ""
+    failing_checks::Vector{String} = String[]
+    failure_detail::Union{String, Nothing} = nothing
     iterations::Int = 0
     deflection_ok::Bool = true
     deflection_ratio::Float64 = 0.0
@@ -315,10 +843,24 @@ Base.@kwdef struct APISlabResult
     punching_max_ratio::Float64 = 0.0
 end
 
+"""Canonical section type codes for column and beam results."""
+const API_SECTION_TYPES = (
+    "steel_w",
+    "steel_hss_rect",
+    "steel_hss_round",
+    "rc_rect",
+    "rc_circular",
+    "rc_tbeam",
+    "pixelframe",
+    "other",
+    "",
+)
+
 """Column result for JSON output."""
 Base.@kwdef struct APIColumnResult
     id::Int = 0
     section::String = ""
+    section_type::String = ""
     c1::Float64 = 0.0
     c2::Float64 = 0.0
     shape::String = "rectangular"
@@ -331,6 +873,9 @@ end
 Base.@kwdef struct APIBeamResult
     id::Int = 0
     section::String = ""
+    section_type::String = ""
+    depth::Float64 = 0.0
+    width::Float64 = 0.0
     flexure_ratio::Float64 = 0.0
     shear_ratio::Float64 = 0.0
     ok::Bool = true
@@ -398,13 +943,13 @@ Base.@kwdef struct APIVisualizationFrameElement
     # Non-zero for columns with θ ≠ 0; beams always 0.
     orientation_angle::Float64 = 0.0
     # 2D section polygon in local y-z coordinates (centroid at origin)
-    # Each vertex is [y, z] in feet, where y = width direction, z = depth direction
+    # Each vertex is [y, z] in display length units, where y = width direction, z = depth direction
     section_polygon::Vector{Vector{Float64}} = []  # [[y1, z1], [y2, z2], ...]
     # Inner boundary for hollow sections (HSS rect/round); empty for solid sections
     section_polygon_inner::Vector{Vector{Float64}} = []  # [[y1, z1], [y2, z2], ...]
     # Interpolated deflected curve (cubic interpolation from FEA)
-    original_points::Vector{Vector{Float64}} = []   # [[x,y,z], ...] original positions in feet
-    displacement_vectors::Vector{Vector{Float64}} = []  # [[dx,dy,dz], ...] displacements at each point in feet
+    original_points::Vector{Vector{Float64}} = []   # [[x,y,z], ...] original positions in display length units
+    displacement_vectors::Vector{Vector{Float64}} = []  # [[dx,dy,dz], ...] displacements at each point in display length units
     # Analytical: signed extremum along element length (value with largest |·|, sign preserved)
     max_axial_force::Float64 = 0.0   # signed P extremum [N] (+ tension, − compression)
     max_moment::Float64 = 0.0        # signed M extremum [N·m] (largest |My| or |Mz|)
@@ -426,7 +971,7 @@ end
 """Slab geometry for sized mode (3D boxes from cell boundaries)."""
 Base.@kwdef struct APISizedSlab
     slab_id::Int = 0
-    boundary_vertices::Vector{Vector{Float64}} = []  # [[x,y,z], ...] cell boundary vertices in feet
+    boundary_vertices::Vector{Vector{Float64}} = []  # [[x,y,z], ...] cell boundary vertices in display length units
     thickness::Float64 = 0.0
     z_top::Float64 = 0.0  # Top surface elevation
     drop_panels::Vector{APIDropPanelPatch} = []
@@ -453,9 +998,9 @@ end
 """Slab mesh for deflected mode (analysis model triangulation)."""
 Base.@kwdef struct APIDeflectedSlabMesh
     slab_id::Int = 0
-    vertices::Vector{Vector{Float64}} = []  # [[x,y,z], ...] original positions in feet
-    vertex_displacements::Vector{Vector{Float64}} = []  # [[dx,dy,dz], ...] displacements at each vertex in feet
-    vertex_displacements_local::Vector{Vector{Float64}} = []  # [[dx,dy,dz], ...] local-bending displacements in feet
+    vertices::Vector{Vector{Float64}} = []  # [[x,y,z], ...] original positions in display length units
+    vertex_displacements::Vector{Vector{Float64}} = []  # [[dx,dy,dz], ...] displacements at each vertex in display length units
+    vertex_displacements_local::Vector{Vector{Float64}} = []  # [[dx,dy,dz], ...] local-bending displacements in display length units
     faces::Vector{Vector{Int}} = []         # [[i1,i2,i3], ...] triangle indices (1-based)
     thickness::Float64 = 0.0
     drop_panels::Vector{APIDropPanelPatch} = []
@@ -486,6 +1031,18 @@ Base.@kwdef struct APIVisualizationFoundation
     along_x::Bool = false  # true when strip long axis runs along X (swap length/width mapping)
 end
 
+"""Unit labels for visualization analytical fields.
+Positions/displacements use the display length unit; analytical quantities use SI."""
+Base.@kwdef struct APIVisualizationUnits
+    position::String = "ft"
+    displacement::String = "ft"
+    force::String = "N"
+    moment::String = "N_m"
+    distributed_moment::String = "N_m_per_m"
+    distributed_force::String = "N_per_m"
+    stress::String = "Pa"
+end
+
 """Complete visualization data from analysis model."""
 Base.@kwdef struct APIVisualization
     nodes::Vector{APIVisualizationNode} = []
@@ -497,14 +1054,15 @@ Base.@kwdef struct APIVisualization
     suggested_scale_factor::Float64 = 1.0
     max_displacement::Float64 = 0.0
     # Global maxima for analytical color normalization (max |value| for diverging scale symmetry)
-    max_frame_axial::Float64 = 0.0      # max |P| across all frame elements [N]
-    max_frame_moment::Float64 = 0.0     # max |M| across all frame elements [N·m]
-    max_frame_shear::Float64 = 0.0      # max |V| across all frame elements [N]
-    max_slab_bending::Float64 = 0.0     # max |principal moment| across all slab faces [N·m/m]
-    max_slab_membrane::Float64 = 0.0    # max |principal membrane force| across all faces [N/m]
-    max_slab_shear::Float64 = 0.0       # max transverse shear across all faces [N/m] (≥ 0)
-    max_slab_von_mises::Float64 = 0.0   # max von Mises stress across all faces [Pa] (≥ 0)
-    max_slab_surface_stress::Float64 = 0.0 # max |principal stress| across all faces [Pa]
+    max_frame_axial::Float64 = 0.0      # max |P| across all frame elements
+    max_frame_moment::Float64 = 0.0     # max |M| across all frame elements
+    max_frame_shear::Float64 = 0.0      # max |V| across all frame elements
+    max_slab_bending::Float64 = 0.0     # max |principal moment| across all slab faces
+    max_slab_membrane::Float64 = 0.0    # max |principal membrane force| across all faces
+    max_slab_shear::Float64 = 0.0       # max transverse shear across all faces (>= 0)
+    max_slab_von_mises::Float64 = 0.0   # max von Mises stress across all faces (>= 0)
+    max_slab_surface_stress::Float64 = 0.0 # max |principal stress| across all faces
+    units::APIVisualizationUnits = APIVisualizationUnits()
 end
 
 """Top-level output payload."""
@@ -538,4 +1096,5 @@ StructTypes.StructType(::Type{APIDropPanelPatch}) = StructTypes.Struct()
 StructTypes.StructType(::Type{APISizedSlab}) = StructTypes.Struct()
 StructTypes.StructType(::Type{APIDeflectedSlabMesh}) = StructTypes.Struct()
 StructTypes.StructType(::Type{APIVisualizationFoundation}) = StructTypes.Struct()
+StructTypes.StructType(::Type{APIVisualizationUnits}) = StructTypes.Struct()
 StructTypes.StructType(::Type{APIVisualization}) = StructTypes.Struct()

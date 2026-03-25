@@ -112,13 +112,19 @@ function _serialize_slabs(design::BuildingDesign, du::DisplayUnits)
         sr = design.slabs[idx]
         t_display = _to_display(du, :thickness, sr.thickness)
         slab_ok = sr.converged && sr.deflection_ok && sr.punching_ok
+        raw_reason = sr.failure_reason
+        normalized_reason = _normalize_failure_reason(raw_reason)
+        normalized_checks = _normalize_failing_checks(sr.failing_check)
+        detail = (normalized_reason in ("solver_error", "unknown") && !isempty(raw_reason)) ?
+                 raw_reason : nothing
         push!(results, APISlabResult(
             id = idx,
             ok = slab_ok,
             thickness = _round_val(t_display; digits=2),
             converged = sr.converged,
-            failure_reason = sr.failure_reason,
-            failing_check = sr.failing_check,
+            failure_reason = normalized_reason,
+            failing_checks = normalized_checks,
+            failure_detail = detail,
             iterations = sr.iterations,
             deflection_ok = sr.deflection_ok,
             deflection_ratio = _round_val(sr.deflection_ratio),
@@ -131,6 +137,25 @@ end
 
 # ─── Columns ──────────────────────────────────────────────────────────────────
 
+"""
+    _api_section_type(sec_obj) -> String
+
+Map a StructuralSizer section object to a canonical API section type code.
+Reuses the geometry trait dispatch already used by the visualization layer.
+"""
+function _api_section_type(sec_obj)
+    isnothing(sec_obj) && return ""
+    sec_obj isa StructuralSizer.PixelFrameSection && return "pixelframe"
+    geom = StructuralSizer.section_geometry(sec_obj)
+    geom isa StructuralSizer.IShape && return "steel_w"
+    geom isa StructuralSizer.HollowRect && return "steel_hss_rect"
+    geom isa StructuralSizer.HollowRound && return "steel_hss_round"
+    geom isa StructuralSizer.SolidRect && return "rc_rect"
+    geom isa StructuralSizer.SolidRound && return "rc_circular"
+    geom isa StructuralSizer.TShape && return "rc_tbeam"
+    return "other"
+end
+
 """Serialize column design results into `APIColumnResult` records."""
 function _serialize_columns(design::BuildingDesign, du::DisplayUnits)
     results = APIColumnResult[]
@@ -141,6 +166,7 @@ function _serialize_columns(design::BuildingDesign, du::DisplayUnits)
         push!(results, APIColumnResult(
             id = idx,
             section = cr.section_size,
+            section_type = _api_section_type(cr.section_obj),
             c1 = _round_val(c1_display; digits=1),
             c2 = _round_val(c2_display; digits=1),
             shape = string(cr.shape),
@@ -159,9 +185,25 @@ function _serialize_beams(design::BuildingDesign, du::DisplayUnits)
     results = APIBeamResult[]
     for idx in _sorted_indices(design.beams)
         br = design.beams[idx]
+        sec = br.section_obj
+        sec_type = _api_section_type(sec)
+        d_disp = 0.0
+        w_disp = 0.0
+        if !isnothing(sec)
+            try
+                d_disp = _round_val(_to_display(du, :thickness,
+                    StructuralSizer.section_depth(sec)); digits=2)
+                w_disp = _round_val(_to_display(du, :thickness,
+                    StructuralSizer.section_width(sec)); digits=2)
+            catch
+            end
+        end
         push!(results, APIBeamResult(
             id = idx,
             section = br.section_size,
+            section_type = sec_type,
+            depth = d_disp,
+            width = w_disp,
             flexure_ratio = _round_val(br.flexure_ratio),
             shear_ratio = _round_val(br.shear_ratio),
             ok = br.ok,
@@ -302,6 +344,17 @@ function _serialize_visualization(design::BuildingDesign, du::DisplayUnits)
         end
     end
 
+    len_label = du.units[:length] == u"ft" ? "ft" : "m"
+    viz_units = APIVisualizationUnits(
+        position = len_label,
+        displacement = len_label,
+        force = "N",
+        moment = "N_m",
+        distributed_moment = "N_m_per_m",
+        distributed_force = "N_per_m",
+        stress = "Pa",
+    )
+
     return APIVisualization(
         nodes = nodes,
         frame_elements = frame_elements,
@@ -319,6 +372,7 @@ function _serialize_visualization(design::BuildingDesign, du::DisplayUnits)
         max_slab_shear = _round_val(max_ss; digits=4),
         max_slab_von_mises = _round_val(max_sv; digits=4),
         max_slab_surface_stress = _round_val(max_sp; digits=4),
+        units = viz_units,
     )
 end
 

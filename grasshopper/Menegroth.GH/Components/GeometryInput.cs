@@ -4,6 +4,7 @@ using System.Linq;
 using System.Windows.Forms;
 using Grasshopper.Kernel;
 using Rhino.Geometry;
+using Menegroth.GH.Config;
 using Menegroth.GH.Helpers;
 using Menegroth.GH.Types;
 
@@ -37,7 +38,7 @@ namespace Menegroth.GH.Components
             : base("Geometry Input",
                    "GeoInput",
                    "Extract building geometry for structural sizing",
-                   "Menegroth", "   Input")
+                   "Menegroth", MenegrothSubcategories.Inputs)
         { }
 
         public override Guid ComponentGuid =>
@@ -306,11 +307,12 @@ namespace Menegroth.GH.Components
             sb.Append(", ").Append(nStrut).Append(" struts");
             sb.Append(", ").Append(nSup).AppendLine(" supports");
 
+            // ── Bounding box ────────────────────────────────────────────
+            double minX = double.MaxValue, maxX = double.MinValue;
+            double minY = double.MaxValue, maxY = double.MinValue;
+            double minZ = double.MaxValue, maxZ = double.MinValue;
             if (nV > 0 && geo.Vertices != null)
             {
-                double minX = double.MaxValue, maxX = double.MinValue;
-                double minY = double.MaxValue, maxY = double.MinValue;
-                double minZ = double.MaxValue, maxZ = double.MinValue;
                 foreach (var v in geo.Vertices)
                 {
                     if (v == null || v.Length < 3) continue;
@@ -318,60 +320,306 @@ namespace Menegroth.GH.Components
                     minY = Math.Min(minY, v[1]); maxY = Math.Max(maxY, v[1]);
                     minZ = Math.Min(minZ, v[2]); maxZ = Math.Max(maxZ, v[2]);
                 }
-                sb.Append("Bounds: X [").Append(minX.ToString("F2")).Append(", ").Append(maxX.ToString("F2")).Append("]");
+                sb.Append("Bounding box: X [").Append(minX.ToString("F2")).Append(", ").Append(maxX.ToString("F2")).Append("]");
                 sb.Append(" Y [").Append(minY.ToString("F2")).Append(", ").Append(maxY.ToString("F2")).Append("]");
                 sb.Append(" Z [").Append(minZ.ToString("F2")).Append(", ").Append(maxZ.ToString("F2")).AppendLine("]");
+                sb.Append("Bounding box extents: ").Append((maxX - minX).ToString("F2"))
+                  .Append(" x ").Append((maxY - minY).ToString("F2"))
+                  .Append(" ").Append(geo.Units)
+                  .AppendLine(" (NOTE: actual plan may be smaller if geometry is non-rectangular)");
             }
 
+            // ── Z levels and story heights ──────────────────────────────
+            var zVals = new List<double>();
             if (nV > 0 && geo.Vertices != null)
             {
-                var zVals = geo.Vertices
+                zVals = geo.Vertices
                     .Where(v => v != null && v.Length >= 3)
-                    .Select(v => v[2])
+                    .Select(v => Math.Round(v[2], 6))
                     .Distinct()
                     .OrderBy(z => z)
                     .ToList();
                 if (zVals.Count > 0 && zVals.Count <= 20)
                 {
-                    sb.Append("Inferred Z levels: ");
+                    sb.Append("Z levels (").Append(zVals.Count).Append("): ");
                     sb.AppendLine(string.Join(", ", zVals.Select(z => z.ToString("F2"))));
                 }
                 else if (zVals.Count > 20)
                 {
-                    sb.Append("Inferred Z levels: ").Append(zVals.Count).Append(" distinct (first 5: ");
+                    sb.Append("Z levels: ").Append(zVals.Count).Append(" distinct (first 5: ");
                     sb.Append(string.Join(", ", zVals.Take(5).Select(z => z.ToString("F2"))));
                     sb.AppendLine(" ...)");
                 }
+
+                if (zVals.Count >= 2)
+                {
+                    var storyHeights = new List<double>();
+                    for (int i = 1; i < zVals.Count; i++)
+                        storyHeights.Add(zVals[i] - zVals[i - 1]);
+
+                    bool uniformHeight = storyHeights.Distinct().Count() == 1;
+                    if (uniformHeight)
+                    {
+                        sb.Append("Story heights: uniform ").Append(storyHeights[0].ToString("F2"))
+                          .Append(" (").Append(zVals.Count - 1).Append(" stories)").AppendLine();
+                    }
+                    else
+                    {
+                        sb.Append("Story heights: ").AppendLine(string.Join(", ", storyHeights.Select(h => h.ToString("F2"))));
+                        sb.Append("  min ").Append(storyHeights.Min().ToString("F2"));
+                        sb.Append(", max ").Append(storyHeights.Max().ToString("F2"));
+                        sb.Append(", typical ").Append(storyHeights.GroupBy(h => Math.Round(h, 2)).OrderByDescending(g => g.Count()).First().Key.ToString("F2"));
+                        sb.Append(" (").Append(zVals.Count - 1).Append(" stories, VARYING heights)").AppendLine();
+                    }
+                }
             }
 
-            if (nBeam > 0 || nCol > 0 || nStrut > 0)
+            // ── Per-level plan analysis (handles irregular/setback plans) ─
+            if (nV > 0 && geo.Vertices != null && zVals.Count >= 2)
             {
-                var lengths = new List<double>();
+                var vertsByLevel = zVals.Select(z =>
+                    geo.Vertices.Where(v => v != null && v.Length >= 3 && Math.Abs(v[2] - z) < 0.01).ToList()
+                ).ToList();
+
+                var countsByLevel = vertsByLevel.Select(vl => vl.Count).ToList();
+                bool sameVertCount = countsByLevel.Distinct().Count() == 1;
+
+                // Check plan extents per level to detect setbacks even with same vertex count
+                var levelExtents = vertsByLevel.Select(vl =>
+                {
+                    if (vl.Count == 0) return (0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+                    double lMinX = vl.Min(v => v[0]), lMaxX = vl.Max(v => v[0]);
+                    double lMinY = vl.Min(v => v[1]), lMaxY = vl.Max(v => v[1]);
+                    return (lMinX, lMaxX, lMinY, lMaxY, lMaxX - lMinX, lMaxY - lMinY);
+                }).ToList();
+
+                bool samePlanExtents = levelExtents.Select(e => (Math.Round(e.Item5, 2), Math.Round(e.Item6, 2))).Distinct().Count() == 1;
+                bool samePlanOrigin = levelExtents.Select(e => (Math.Round(e.Item1, 2), Math.Round(e.Item3, 2))).Distinct().Count() == 1;
+
+                bool verticallyRegular = sameVertCount && samePlanExtents && samePlanOrigin;
+
+                if (verticallyRegular)
+                {
+                    sb.Append("Vertical regularity: REGULAR (").Append(countsByLevel[0]).Append(" vertices per level, ")
+                      .Append(levelExtents[0].Item5.ToString("F2")).Append(" x ").Append(levelExtents[0].Item6.ToString("F2"))
+                      .Append(" plan at all levels)").AppendLine();
+                }
+                else
+                {
+                    sb.AppendLine("Vertical regularity: IRREGULAR");
+                    var irregularityReasons = new List<string>();
+                    if (!sameVertCount) irregularityReasons.Add("varying vertex count per level");
+                    if (!samePlanExtents) irregularityReasons.Add("varying plan dimensions (setbacks or step-backs)");
+                    if (sameVertCount && samePlanExtents && !samePlanOrigin) irregularityReasons.Add("plan offset shifts between levels");
+                    sb.Append("  Irregularity: ").AppendLine(string.Join("; ", irregularityReasons));
+
+                    for (int i = 0; i < vertsByLevel.Count; i++)
+                    {
+                        var vl = vertsByLevel[i];
+                        if (vl.Count == 0) continue;
+                        var ext = levelExtents[i];
+                        sb.Append("  Level z=").Append(zVals[i].ToString("F2"))
+                          .Append(": ").Append(vl.Count).Append(" vertices, plan ")
+                          .Append(ext.Item5.ToString("F2")).Append(" x ").Append(ext.Item6.ToString("F2"));
+                        if (ext.Item1 != minX || ext.Item3 != minY)
+                            sb.Append(" offset=(").Append((ext.Item1 - minX).ToString("F2")).Append(", ").Append((ext.Item3 - minY).ToString("F2")).Append(")");
+                        sb.AppendLine();
+                    }
+                }
+
+                // Per-level member counts (detect levels where beams/columns drop off)
+                var beamCountByLevel = new Dictionary<double, int>();
+                var colCountByLevel = new Dictionary<double, int>();
                 foreach (var e in geo.BeamEdges ?? Enumerable.Empty<int[]>())
                 {
-                    if (e != null && e.Length >= 2)
-                        lengths.Add(EdgeLength(geo, e[0], e[1]));
+                    if (e == null || e.Length < 2) continue;
+                    double z = GetEdgeMidZ(geo, e[0], e[1]);
+                    double closest = zVals.OrderBy(zl => Math.Abs(zl - z)).First();
+                    if (!beamCountByLevel.TryGetValue(closest, out int beamCount))
+                        beamCount = 0;
+                    beamCountByLevel[closest] = beamCount + 1;
                 }
                 foreach (var e in geo.ColumnEdges ?? Enumerable.Empty<int[]>())
                 {
-                    if (e != null && e.Length >= 2)
-                        lengths.Add(EdgeLength(geo, e[0], e[1]));
+                    if (e == null || e.Length < 2) continue;
+                    double z = GetEdgeMidZ(geo, e[0], e[1]);
+                    double closest = zVals.OrderBy(zl => Math.Abs(zl - z)).First();
+                    if (!colCountByLevel.TryGetValue(closest, out int colCount))
+                        colCount = 0;
+                    colCountByLevel[closest] = colCount + 1;
                 }
-                foreach (var e in geo.StrutEdges ?? Enumerable.Empty<int[]>())
+
+                bool uniformBeams = beamCountByLevel.Values.Distinct().Count() <= 1;
+                bool uniformCols = colCountByLevel.Values.Distinct().Count() <= 1;
+                if (!uniformBeams || !uniformCols)
                 {
-                    if (e != null && e.Length >= 2)
-                        lengths.Add(EdgeLength(geo, e[0], e[1]));
-                }
-                if (lengths.Count > 0)
-                {
-                    double minL = lengths.Min(), maxL = lengths.Max(), avgL = lengths.Average();
-                    sb.Append("Edge lengths: min ").Append(minL.ToString("F3"));
-                    sb.Append(", max ").Append(maxL.ToString("F3"));
-                    sb.Append(", avg ").Append(avgL.ToString("F3"));
-                    sb.Append(" (").Append(geo.Units).AppendLine(")");
+                    sb.AppendLine("  Member counts vary by level:");
+                    foreach (var z in zVals)
+                    {
+                        beamCountByLevel.TryGetValue(z, out int bCount);
+                        colCountByLevel.TryGetValue(z, out int cCount);
+                        if (bCount > 0 || cCount > 0)
+                            sb.Append("    z=").Append(z.ToString("F2")).Append(": ").Append(bCount).Append(" beams, ").Append(cCount).AppendLine(" columns");
+                    }
                 }
             }
 
+            // ── Beam span analysis ──────────────────────────────────────
+            if (nBeam > 0 && geo.BeamEdges != null)
+            {
+                var beamLengths = new List<double>();
+                foreach (var e in geo.BeamEdges)
+                {
+                    if (e != null && e.Length >= 2)
+                    {
+                        double len = EdgeLength(geo, e[0], e[1]);
+                        if (len > 0) beamLengths.Add(len);
+                    }
+                }
+                if (beamLengths.Count > 0)
+                {
+                    beamLengths.Sort();
+                    sb.Append("Beam spans: min ").Append(beamLengths.First().ToString("F2"));
+                    sb.Append(", max ").Append(beamLengths.Last().ToString("F2"));
+                    sb.Append(", median ").Append(beamLengths[beamLengths.Count / 2].ToString("F2"));
+                    sb.Append(", avg ").Append(beamLengths.Average().ToString("F2"));
+                    sb.Append(" (").Append(geo.Units).AppendLine(")");
+
+                    int nDistinct = beamLengths.Select(l => Math.Round(l, 1)).Distinct().Count();
+                    if (nDistinct == 1)
+                    {
+                        sb.AppendLine("  Span uniformity: all beams same length (regular grid)");
+                    }
+                    else
+                    {
+                        double spanRange = beamLengths.Last() - beamLengths.First();
+                        double cv = StdDev(beamLengths) / beamLengths.Average();
+                        sb.Append("  Span uniformity: ").Append(nDistinct).Append(" distinct lengths, range ")
+                          .Append(spanRange.ToString("F2")).Append(", CV=").Append(cv.ToString("F2"));
+                        if (cv > 0.3) sb.Append(" [HIGHLY VARIABLE — non-rectangular or irregular bays]");
+                        else if (cv > 0.15) sb.Append(" [moderately variable]");
+                        sb.AppendLine();
+
+                        // Show span histogram (buckets)
+                        if (beamLengths.Count >= 4)
+                        {
+                            var groups = beamLengths.GroupBy(l => Math.Round(l, 1)).OrderByDescending(g => g.Count()).Take(5);
+                            sb.Append("  Most common spans: ");
+                            sb.AppendLine(string.Join(", ", groups.Select(g => $"{g.Key:F1} ({g.Count()}x)")));
+                        }
+                    }
+                }
+            }
+
+            // ── Column heights ──────────────────────────────────────────
+            if (nCol > 0 && geo.ColumnEdges != null)
+            {
+                var colLengths = new List<double>();
+                foreach (var e in geo.ColumnEdges)
+                {
+                    if (e != null && e.Length >= 2)
+                    {
+                        double len = EdgeLength(geo, e[0], e[1]);
+                        if (len > 0) colLengths.Add(len);
+                    }
+                }
+                if (colLengths.Count > 0)
+                {
+                    sb.Append("Column heights: min ").Append(colLengths.Min().ToString("F2"));
+                    sb.Append(", max ").Append(colLengths.Max().ToString("F2"));
+                    sb.Append(", avg ").Append(colLengths.Average().ToString("F2"));
+                    sb.Append(" (").Append(geo.Units).Append(")");
+                    if (colLengths.Min() < colLengths.Max() * 0.8)
+                        sb.Append(" [VARYING — check for mixed story heights or mezzanines]");
+                    sb.AppendLine();
+                }
+            }
+
+            // ── Column position analysis ────────────────────────────────
+            // Reports nearest-neighbor spacings instead of assuming an orthogonal grid.
+            if (nCol > 0 && geo.ColumnEdges != null && geo.Vertices != null && zVals.Count >= 1)
+            {
+                var baseLevel = zVals[0];
+                var baseColPositions = new List<(double x, double y)>();
+                foreach (var e in geo.ColumnEdges ?? Enumerable.Empty<int[]>())
+                {
+                    if (e == null || e.Length < 2) continue;
+                    foreach (int vi in new[] { e[0], e[1] })
+                    {
+                        if (vi < 1 || vi > nV) continue;
+                        var v = geo.Vertices[vi - 1];
+                        if (v == null || v.Length < 3) continue;
+                        if (Math.Abs(v[2] - baseLevel) < 0.01)
+                            baseColPositions.Add((v[0], v[1]));
+                    }
+                }
+                var uniquePositions = baseColPositions.Distinct().ToList();
+
+                if (uniquePositions.Count >= 2)
+                {
+                    sb.Append("Base level column positions: ").Append(uniquePositions.Count).AppendLine(" unique");
+
+                    // Nearest-neighbor distances (works for any layout)
+                    var nnDists = new List<double>();
+                    for (int i = 0; i < uniquePositions.Count; i++)
+                    {
+                        double nearest = double.MaxValue;
+                        for (int j = 0; j < uniquePositions.Count; j++)
+                        {
+                            if (i == j) continue;
+                            double dx = uniquePositions[i].x - uniquePositions[j].x;
+                            double dy = uniquePositions[i].y - uniquePositions[j].y;
+                            double d = Math.Sqrt(dx * dx + dy * dy);
+                            if (d < nearest) nearest = d;
+                        }
+                        if (nearest < double.MaxValue) nnDists.Add(nearest);
+                    }
+                    if (nnDists.Count > 0)
+                    {
+                        sb.Append("  Column-to-column nearest spacing: min ").Append(nnDists.Min().ToString("F2"));
+                        sb.Append(", max ").Append(nnDists.Max().ToString("F2"));
+                        sb.Append(", avg ").Append(nnDists.Average().ToString("F2"));
+                        sb.Append(" ").AppendLine(geo.Units);
+                    }
+
+                    // Check if columns form a recognizable orthogonal grid
+                    var xCoords = uniquePositions.Select(p => Math.Round(p.x, 2)).Distinct().OrderBy(x => x).ToList();
+                    var yCoords = uniquePositions.Select(p => Math.Round(p.y, 2)).Distinct().OrderBy(y => y).ToList();
+                    int gridCount = xCoords.Count * yCoords.Count;
+                    double gridFill = (double)uniquePositions.Count / gridCount;
+
+                    if (gridFill > 0.85 && xCoords.Count >= 2 && yCoords.Count >= 2)
+                    {
+                        sb.AppendLine("  Grid pattern: approximately rectangular");
+                        var xSpacings = new List<double>();
+                        for (int i = 1; i < xCoords.Count; i++) xSpacings.Add(xCoords[i] - xCoords[i - 1]);
+                        var ySpacings = new List<double>();
+                        for (int i = 1; i < yCoords.Count; i++) ySpacings.Add(yCoords[i] - yCoords[i - 1]);
+
+                        bool uniformX = xSpacings.Select(s => Math.Round(s, 1)).Distinct().Count() == 1;
+                        bool uniformY = ySpacings.Select(s => Math.Round(s, 1)).Distinct().Count() == 1;
+
+                        sb.Append("  X gridlines (").Append(xCoords.Count).Append("): spacings ");
+                        sb.Append(uniformX ? $"uniform {xSpacings[0]:F2}" : string.Join(", ", xSpacings.Select(s => s.ToString("F2"))));
+                        sb.AppendLine();
+
+                        sb.Append("  Y gridlines (").Append(yCoords.Count).Append("): spacings ");
+                        sb.Append(uniformY ? $"uniform {ySpacings[0]:F2}" : string.Join(", ", ySpacings.Select(s => s.ToString("F2"))));
+                        sb.AppendLine();
+                    }
+                    else if (gridFill > 0.5)
+                    {
+                        sb.Append("  Grid pattern: partially rectangular (").Append((gridFill * 100).ToString("F0")).AppendLine("% fill of bounding grid)");
+                        sb.AppendLine("  NOTE: some grid positions are empty — L-shape, T-shape, or other non-rectangular plan");
+                    }
+                    else
+                    {
+                        sb.AppendLine("  Grid pattern: non-rectangular or free-form column layout");
+                    }
+                }
+            }
+
+            // ── Face / slab panel counts ────────────────────────────────
             if (geo.Faces != null && geo.Faces.Count > 0)
             {
                 sb.Append("Faces: ");
@@ -381,8 +629,29 @@ namespace Menegroth.GH.Components
                     sb.Append(kv.Key).Append("=").Append(n).Append(" ");
                 }
                 sb.AppendLine();
+
+                // Analyze face shapes for irregularity
+                if (geo.Faces.TryGetValue("floor", out var floorFaces) && floorFaces != null)
+                {
+                    int quadCount = 0, triCount = 0, otherCount = 0;
+                    foreach (var face in floorFaces)
+                    {
+                        if (face == null) continue;
+                        int nPts = face.Count;
+                        if (nPts == 4) quadCount++;
+                        else if (nPts == 3) triCount++;
+                        else otherCount++;
+                    }
+                    sb.Append("  Floor panels: ").Append(quadCount).Append(" quads");
+                    if (triCount > 0) sb.Append(", ").Append(triCount).Append(" triangles");
+                    if (otherCount > 0) sb.Append(", ").Append(otherCount).Append(" other polygons");
+                    if (triCount > 0 || otherCount > 0)
+                        sb.Append(" [non-rectangular panels present — irregular plan]");
+                    sb.AppendLine();
+                }
             }
 
+            // ── Support connectivity ────────────────────────────────────
             if (nSup > 0 && geo.Supports != null)
             {
                 var supportedSet = new HashSet<int>(geo.Supports);
@@ -408,6 +677,25 @@ namespace Menegroth.GH.Components
             }
 
             return sb.ToString().TrimEnd();
+        }
+
+        private static double GetEdgeMidZ(BuildingGeometry geo, int v1, int v2)
+        {
+            if (geo?.Vertices == null || v1 < 1 || v2 < 1 ||
+                v1 > geo.Vertices.Count || v2 > geo.Vertices.Count)
+                return 0;
+            var a = geo.Vertices[v1 - 1];
+            var b = geo.Vertices[v2 - 1];
+            if (a == null || b == null || a.Length < 3 || b.Length < 3) return 0;
+            return (a[2] + b[2]) / 2.0;
+        }
+
+        private static double StdDev(List<double> values)
+        {
+            if (values.Count <= 1) return 0;
+            double avg = values.Average();
+            double sumSq = values.Sum(v => (v - avg) * (v - avg));
+            return Math.Sqrt(sumSq / (values.Count - 1));
         }
 
         private static double EdgeLength(BuildingGeometry geo, int v1, int v2)

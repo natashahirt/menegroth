@@ -319,6 +319,171 @@ namespace Menegroth.GH.Helpers
             }
         }
 
+        /// <summary>
+        /// POST to /chat and read the SSE stream. Invokes <paramref name="onToken"/> for each
+        /// content token, <paramref name="onSummary"/> when the <c>agent_turn_summary</c> event
+        /// arrives, and <paramref name="onError"/> if the server returns a non-200 or an error
+        /// event. The stream ends when the server sends <c>data: [DONE]</c>.
+        /// </summary>
+        public static async Task PostChatStreamAsync(
+            string baseUrl,
+            string jsonBody,
+            Action<string> onToken,
+            Action<string> onError,
+            CancellationToken ct,
+            Action<JObject>? onSummary = null)
+        {
+            var content = new StringContent(jsonBody, Encoding.UTF8, "application/json");
+            using var req = new HttpRequestMessage(HttpMethod.Post, NormalizeUrl(baseUrl, "chat")) { Content = content };
+            AddAuthHeader(req);
+
+            HttpResponseMessage response;
+            try
+            {
+                response = await Client.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, ct);
+            }
+            catch (Exception ex)
+            {
+                onError?.Invoke($"Connection failed: {ex.Message}");
+                return;
+            }
+
+            if (!response.IsSuccessStatusCode)
+            {
+                var errBody = await response.Content.ReadAsStringAsync();
+                onError?.Invoke($"Server returned {(int)response.StatusCode}: {errBody}");
+                return;
+            }
+
+            using var stream = await response.Content.ReadAsStreamAsync();
+            using var reader = new System.IO.StreamReader(stream, Encoding.UTF8);
+
+            while (!reader.EndOfStream)
+            {
+                ct.ThrowIfCancellationRequested();
+                var line = await reader.ReadLineAsync();
+                if (string.IsNullOrEmpty(line)) continue;
+                if (!line.StartsWith("data: ")) continue;
+
+                var data = line.Substring(6);
+                if (data == "[DONE]") break;
+
+                try
+                {
+                    var obj = JObject.Parse(data);
+                    if (obj.TryGetValue("error", out var errToken))
+                    {
+                        var msg = obj["message"]?.ToString() ?? errToken.ToString();
+                        var hint = obj["recovery_hint"]?.ToString();
+                        if (!string.IsNullOrWhiteSpace(hint))
+                            msg += $"\n  Hint: {hint}";
+                        onError?.Invoke(msg);
+                        continue;
+                    }
+                    // Structured summary event emitted by the server after streaming finishes.
+                    if (obj["type"]?.ToString() == "agent_turn_summary")
+                    {
+                        onSummary?.Invoke(obj);
+                        continue;
+                    }
+                    var token = obj["token"]?.ToString();
+                    if (token != null) onToken?.Invoke(token);
+                }
+                catch
+                {
+                    // Skip unparseable SSE data lines
+                }
+            }
+        }
+
+        /// <summary>
+        /// Fetches the compact applicability and compatibility schema from GET /schema/applicability.
+        /// Returns null on failure.
+        /// </summary>
+        public static async Task<JObject?> GetApplicabilitySchemaAsync(string baseUrl, CancellationToken ct = default)
+        {
+            try
+            {
+                using var req = new HttpRequestMessage(HttpMethod.Get, NormalizeUrl(baseUrl, "schema/applicability"));
+                AddAuthHeader(req);
+                var resp = await Client.SendAsync(req, ct);
+                if (!resp.IsSuccessStatusCode) return null;
+                var body = await resp.Content.ReadAsStringAsync();
+                return string.IsNullOrWhiteSpace(body) ? null : JObject.Parse(body);
+            }
+            catch { return null; }
+        }
+
+        /// <summary>
+        /// Retrieves stored conversation history for a session from GET /chat/history.
+        /// Returns an empty list on failure or when no history exists.
+        /// </summary>
+        public static async Task<List<JObject>> GetChatHistoryAsync(string baseUrl, string sessionId, CancellationToken ct = default)
+        {
+            var result = new List<JObject>();
+            if (string.IsNullOrWhiteSpace(sessionId)) return result;
+            try
+            {
+                using var req = new HttpRequestMessage(HttpMethod.Get,
+                    NormalizeUrl(baseUrl, $"chat/history?session_id={Uri.EscapeDataString(sessionId)}"));
+                AddAuthHeader(req);
+                var resp = await Client.SendAsync(req, ct);
+                if (!resp.IsSuccessStatusCode) return result;
+                var body = await resp.Content.ReadAsStringAsync();
+                if (string.IsNullOrWhiteSpace(body)) return result;
+                var obj = JObject.Parse(body);
+                if (obj["messages"] is JArray arr)
+                {
+                    foreach (var item in arr)
+                    {
+                        if (item is JObject msg)
+                            result.Add(msg);
+                    }
+                }
+            }
+            catch { /* return empty on any error */ }
+            return result;
+        }
+
+        /// <summary>
+        /// Clears stored conversation history via DELETE /chat/history.
+        /// Pass null or empty to clear all sessions.
+        /// </summary>
+        public static async Task DeleteChatHistoryAsync(string baseUrl, string? sessionId = null, CancellationToken ct = default)
+        {
+            try
+            {
+                var path = string.IsNullOrWhiteSpace(sessionId)
+                    ? "chat/history"
+                    : $"chat/history?session_id={Uri.EscapeDataString(sessionId!)}";
+                using var req = new HttpRequestMessage(HttpMethod.Delete, NormalizeUrl(baseUrl, path));
+                AddAuthHeader(req);
+                await Client.SendAsync(req, ct);
+            }
+            catch { /* fire and forget — non-critical */ }
+        }
+
+        /// <summary>
+        /// POST to /chat/action to invoke a structural tool from the agent.
+        /// Returns the parsed JSON response, or null on failure.
+        /// </summary>
+        public static async Task<JObject?> PostChatActionAsync(
+            string baseUrl, string tool, JObject? args = null, CancellationToken ct = default)
+        {
+            try
+            {
+                var body = new JObject { ["tool"] = tool };
+                if (args != null) body["args"] = args;
+                var content = new StringContent(body.ToString(Newtonsoft.Json.Formatting.None), Encoding.UTF8, "application/json");
+                using var req = new HttpRequestMessage(HttpMethod.Post, NormalizeUrl(baseUrl, "chat/action")) { Content = content };
+                AddAuthHeader(req);
+                var resp = await Client.SendAsync(req, ct);
+                var respBody = await resp.Content.ReadAsStringAsync();
+                return string.IsNullOrWhiteSpace(respBody) ? null : JObject.Parse(respBody);
+            }
+            catch { return null; }
+        }
+
         private static string NormalizeUrl(string baseUrl, string path)
         {
             return $"{baseUrl.TrimEnd('/')}/{path}";

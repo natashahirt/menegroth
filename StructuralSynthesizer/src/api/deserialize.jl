@@ -17,7 +17,7 @@ function parse_unit(unit_str::String)
     s in ("centimeters", "cm")   && return u"cm"
     throw(ArgumentError(
         "Unknown unit \"$unit_str\". " *
-        "Accepted: feet/ft, inches/in, meters/m, millimeters/mm, centimeters/cm"))
+        "Accepted: $(_accepted_doc(API_UNIT_ALIASES))"))
 end
 
 # =============================================================================

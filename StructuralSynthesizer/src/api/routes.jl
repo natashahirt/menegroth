@@ -114,11 +114,21 @@ end
 
 """Build a standard 400 validation-error response from a `ValidationResult`."""
 function _validation_error_response(vr::ValidationResult)
+    structured = [
+        Dict(
+            "field" => e.field,
+            "value" => e.value,
+            "constraint" => e.constraint,
+            "allowed" => e.allowed,
+            "message" => e.message,
+        )
+        for e in vr.errors
+    ]
     return _json_bad(Dict(
         "status" => "error",
         "error" => "ValidationError",
         "message" => "Validation failed: $(length(vr.errors)) error(s)",
-        "errors" => vr.errors,
+        "errors" => structured,
     ))
 end
 
@@ -160,6 +170,9 @@ function register_routes!()
     @get "/schema" function (_::HTTP.Request)
         schema_doc = Dict(
             "input" => api_input_schema(),
+            "params_structured" => api_params_schema_structured(),
+            "applicability" => api_applicability_schema(),
+            "diagnose_schema" => api_diagnose_schema(),
             "endpoints" => Dict(
                 "POST /design" => "Start design (returns 202 immediately; poll GET /status then GET /result)",
                 "POST /validate" => "Validate input without running design",
@@ -169,11 +182,40 @@ function register_routes!()
                 "GET /logs?since=N" => "Streaming design logs; returns lines after cursor N",
                 "GET /result" => "Last completed design result (after POST /design and status idle)",
                 "POST /rebuild_visualization" => "Rebuild visualization mesh only. Body: {\"target_edge_m\": <positive float>}. Requires a cached design.",
-                "GET /report" => "Engineering report for the last design (plain text; after POST /design and status idle)",
+                "GET /report" => "Engineering report (plain text by default; ?format=json for structured summary)",
+                "GET /diagnose" => "High-resolution agent diagnostic JSON: per-element checks with demand/capacity, governing_check, levers, embodied carbon, plus architectural narrative and lever impact estimates. ?units=imperial|metric",
+                "POST /chat" => "LLM chat endpoint (SSE streaming). Body: {mode, messages, params, geometry_summary, session_id?}. " *
+                    "SSE events: {token:string}, " *
+                    "{type:\"agent_turn_summary\", suggested_next_questions:string[], clarification_prompt?:{id,prompt,options:[{id,label}],allow_multiple,rationale?,required_for?}, tool_actions?:[{tool,status,elapsed_ms?,summary?}]}, " *
+                    "error events: {error:string, message:string, recovery_hint:string}, " *
+                    "[DONE]. All errors include recovery_hint.",
+                "POST /chat/action" => "Agent tool dispatch. Body: {tool, args}. " *
+                    "clarify_user_intent => {ok,type:\"clarification\",duplicate,clarification:{id,prompt,options:[{id,label}],allow_multiple,rationale?,required_for?}}. " *
+                    "All error responses include recovery_hint. See GET /schema/tools for full registry.",
+                "GET /chat/history" => "Retrieve stored conversation history. ?session_id=<hash>",
+                "DELETE /chat/history" => "Clear conversation history. ?session_id=<hash> (omit to clear all)",
+                "GET /schema/applicability" => "Compact method/floor applicability and compatibility rules for assistants",
+                "GET /schema/diagnose" => "Versioned contract for GET /diagnose payload structure",
+                "GET /schema/tools" => "Structured tool registry: name, description, phase, use_when, args, returns for all agent tools",
                 "GET /schema" => "This documentation",
             ),
         )
         return _json_ok(schema_doc)
+    end
+
+    # ─── GET /schema/applicability ────────────────────────────────────────
+    @get "/schema/applicability" function (_::HTTP.Request)
+        return _json_ok(api_applicability_schema())
+    end
+
+    # ─── GET /schema/diagnose ─────────────────────────────────────────────
+    @get "/schema/diagnose" function (_::HTTP.Request)
+        return _json_ok(api_diagnose_schema())
+    end
+
+    # ─── GET /schema/tools ────────────────────────────────────────────────
+    @get "/schema/tools" function (_::HTTP.Request)
+        return _json_ok(api_tool_schema())
     end
 
     # ─── POST /validate ───────────────────────────────────────────────────
@@ -228,9 +270,49 @@ function register_routes!()
         ))
     end
 
+    # ─── GET /diagnose ───────────────────────────────────────────────────
+    # Returns a high-resolution, machine-readable diagnostic JSON for the last
+    # completed design. Three-layer output: engineering (per-element checks),
+    # architectural (narrative + goal recommendations), and constraints
+    # (lever impact estimates). Designed for LLM agent consumption.
+    # Query params:
+    #   ?units=imperial|metric  — override display units
+    @get "/diagnose" function (req::HTTP.Request)
+        st = status_string(SERVER_STATUS)
+        if st != "idle"
+            return _json_resp(503, Dict(
+                "status"  => "running",
+                "message" => "Design still in progress. Poll GET /status until idle.",
+            ))
+        end
+        if isnothing(DESIGN_CACHE.last_design)
+            return _json_resp(404, Dict(
+                "status"  => "error",
+                "message" => "No design available. Submit a design first.",
+            ))
+        end
+        report_units = nothing
+        units_val = _query_string(req, "units")
+        if units_val in ("imperial", "metric")
+            report_units = Symbol(units_val)
+        end
+        try
+            payload = design_to_diagnose(DESIGN_CACHE.last_design; report_units=report_units)
+            return _json_ok(payload)
+        catch e
+            @error "Diagnose generation failed" exception=(e, catch_backtrace())
+            return _json_err(Dict(
+                "status"  => "error",
+                "message" => "Diagnose generation failed: $(sprint(showerror, e))",
+            ))
+        end
+    end
+
     # ─── GET /report ─────────────────────────────────────────────────────
-    # Returns the engineering report for the last completed design as plain text.
-    # Query param: ?units=imperial or ?units=metric to override DesignParams display units.
+    # Returns the engineering report for the last completed design.
+    # Query params:
+    #   ?units=imperial|metric  — override display units
+    #   ?format=json            — structured JSON summary instead of plain text
     @get "/report" function (req::HTTP.Request)
         st = status_string(SERVER_STATUS)
         if st != "idle"
@@ -250,11 +332,17 @@ function register_routes!()
         if units_val in ("imperial", "metric")
             report_units = Symbol(units_val)
         end
+        fmt = _query_string(req, "format")
         try
-            buf = IOBuffer()
-            engineering_report(DESIGN_CACHE.last_design; io=buf, report_units=report_units)
-            report_text = String(take!(buf))
-            return HTTP.Response(200, ["Content-Type" => "text/plain; charset=utf-8"], report_text)
+            if fmt == "json"
+                summary = report_summary_json(DESIGN_CACHE.last_design; report_units=report_units)
+                return _json_ok(summary)
+            else
+                buf = IOBuffer()
+                engineering_report(DESIGN_CACHE.last_design; io=buf, report_units=report_units)
+                report_text = String(take!(buf))
+                return HTTP.Response(200, ["Content-Type" => "text/plain; charset=utf-8"], report_text)
+            end
         catch e
             @error "Report generation failed" exception=(e, catch_backtrace())
             return _json_err(Dict(
@@ -358,6 +446,9 @@ function register_routes!()
         # Plain JSON (no gzip) — avoids client parse errors with AutomaticDecompression.
         return _json_resp(200, DESIGN_CACHE.last_result)
     end
+
+    # ─── Chat routes (LLM-powered assistant) ─────────────────────────
+    register_chat_routes!()
 
     return nothing
 end
@@ -484,6 +575,24 @@ function _execute_design(input::APIInput)
         DESIGN_CACHE.last_result = output
         DESIGN_CACHE.last_design = design
         _append_design_log!("Design result serialized.")
+
+        # Record in session history for compare_designs / get_design_history
+        s = design.summary
+        n_fail = count(p -> !p.second.ok, design.columns) +
+                 count(p -> !p.second.ok, design.beams) +
+                 count(p -> !(p.second.converged && p.second.deflection_ok && p.second.punching_ok), design.slabs) +
+                 count(p -> !p.second.ok, design.foundations)
+        record_design_history!(DesignHistoryEntry(;
+            all_pass         = s.all_checks_pass,
+            critical_ratio   = s.critical_ratio,
+            critical_element = s.critical_element,
+            embodied_carbon  = s.embodied_carbon,
+            n_columns        = length(design.columns),
+            n_beams          = length(design.beams),
+            n_slabs          = length(design.slabs),
+            n_failing        = n_fail,
+            source           = "design",
+        ))
 
         return _json_ok(output)
 

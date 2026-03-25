@@ -71,7 +71,7 @@ using Test
 
         vr = validate_input(bad_input)
         @test !vr.ok
-        @test any(e -> occursin("scoped_overrides[1].floor_options.vault_lambda", e), vr.errors)
-        @test any(e -> occursin("expected 3", e), vr.errors)
+        @test any(e -> occursin("scoped_overrides[1].floor_options.vault_lambda", e.field), vr.errors)
+        @test any(e -> occursin("expected 3", e.message), vr.errors)
     end
 end

@@ -64,10 +64,10 @@ namespace Menegroth.GH.Components
         private volatile bool _cancelRequested;
 
         public DesignRun()
-            : base("Design Run",
-                   "DesignRun",
+            : base("Run",
+                   "Run",
                    "Send geometry and parameters to the Julia sizing server",
-                   "Menegroth", "  Analysis")
+                   "Menegroth", MenegrothSubcategories.Analysis)
         { }
 
         public override Guid ComponentGuid =>

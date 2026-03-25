@@ -4,6 +4,7 @@ using System.Linq;
 using System.Windows.Forms;
 using Grasshopper.Kernel;
 using Grasshopper.Kernel.Parameters;
+using Menegroth.GH.Config;
 using Menegroth.GH.Types;
 
 namespace Menegroth.GH.Components
@@ -53,7 +54,7 @@ namespace Menegroth.GH.Components
             : base("Element Params",
                    "ElemParams",
                    "Configure element sizing parameters (beam/column, MIP/NLP bounds)",
-                   "Menegroth", "Component Params")
+                   "Menegroth", MenegrothSubcategories.ComponentParameters)
         { }
 
         public override Guid ComponentGuid =>

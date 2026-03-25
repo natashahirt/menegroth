@@ -1,6 +1,7 @@
 using System;
 using System.Linq;
 using Grasshopper.Kernel;
+using Menegroth.GH.Config;
 using Menegroth.GH.Types;
 
 namespace Menegroth.GH.Components
@@ -45,7 +46,7 @@ namespace Menegroth.GH.Components
             : base("Foundation Params",
                    "FoundationParams",
                    "Foundation design overrides: soil, concrete, strategy",
-                   "Menegroth", "Component Params")
+                   "Menegroth", MenegrothSubcategories.ComponentParameters)
         { }
 
         public override Guid ComponentGuid =>

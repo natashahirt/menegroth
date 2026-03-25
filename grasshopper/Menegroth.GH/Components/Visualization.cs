@@ -98,6 +98,24 @@ namespace Menegroth.GH.Components
         private readonly List<bool> _previewShadedUseVertexColors = new List<bool>();
         private readonly List<Rhino.Display.DisplayMaterial> _previewShadedMaterials = new List<Rhino.Display.DisplayMaterial>();
 
+        // ─── Element identity tracking (parallel to preview lists) ───────
+        private readonly List<int> _previewMeshElementIds = new List<int>();
+        private readonly List<string> _previewMeshElementTypes = new List<string>();
+        private readonly List<int> _previewColumnIds = new List<int>();
+        private readonly List<int> _previewBeamIds = new List<int>();
+
+        /// <summary>Read-only access for ElementInspector ray-hit lookups.</summary>
+        public IReadOnlyList<Mesh> PreviewMeshes => _previewShadedMeshes;
+        public IReadOnlyList<int> PreviewMeshElementIds => _previewMeshElementIds;
+        public IReadOnlyList<string> PreviewMeshElementTypes => _previewMeshElementTypes;
+        public IReadOnlyList<Curve> PreviewColumnCurves => _previewColumnCurves;
+        public IReadOnlyList<int> PreviewColumnIds => _previewColumnIds;
+        public IReadOnlyList<Curve> PreviewBeamCurves => _previewBeamCurves;
+        public IReadOnlyList<int> PreviewBeamIds => _previewBeamIds;
+
+        /// <summary>True when preview geometry has been loaded from a design result.</summary>
+        public bool HasLoadedDesign => _previewShadedMeshes.Count > 0 || _previewColumnCurves.Count > 0;
+
         // ─── Mesh rebuild async state ────────────────────────────────────
         private enum RebuildState { Idle, Running, Done, Error }
         private RebuildState _rebuildState = RebuildState.Idle;
@@ -110,7 +128,7 @@ namespace Menegroth.GH.Components
             : base("Visualization",
                    "Visualization",
                    "Visualize structural design with geometry, deflections, and color mapping",
-                   "Menegroth", " Results")
+                   "Menegroth", MenegrothSubcategories.Results)
         { }
 
         public override Guid ComponentGuid =>
@@ -552,6 +570,10 @@ namespace Menegroth.GH.Components
             var columnGeometry = new List<IGH_GeometricGoo>();
             var beamGeometry = new List<IGH_GeometricGoo>();
             var originalCurves = new List<Curve>();
+            var frameElementIds = new List<int>();
+            var frameElementTypes = new List<string>();
+            var columnCurveIds = new List<int>();
+            var beamCurveIds = new List<int>();
             var frameElements = viz["frame_elements"] as JArray ?? new JArray();
 
             foreach (var elem in frameElements)
@@ -560,6 +582,7 @@ namespace Menegroth.GH.Components
                 var dispVecs = elem["displacement_vectors"]?.ToObject<double[][]>() ?? new double[0][];
                 int ns = elem["node_start"]?.ToObject<int>() ?? 0;
                 int ne = elem["node_end"]?.ToObject<int>() ?? 0;
+                int elemId = elem["element_id"]?.ToObject<int>() ?? -1;
                 string elemType = NormalizeElementType(elem["element_type"]?.ToString() ?? "");
                 bool isBeam = elemType == "beam";
                 bool isColumn = elemType == "column";
@@ -721,6 +744,8 @@ namespace Menegroth.GH.Components
                         var ghMesh = new GH_Mesh(frameMesh);
                         frameGeometry.Add(ghMesh);
                         frameGeometryColors.Add(elementColor);
+                        frameElementIds.Add(elemId);
+                        frameElementTypes.Add(elemType);
                         if (elemType == "column")
                             columnGeometry.Add(ghMesh);
                         else if (elemType == "beam")
@@ -733,6 +758,7 @@ namespace Menegroth.GH.Components
 
                 if (elemType == "column")
                 {
+                    int countBefore = columnCurves.Count;
                     if (effectiveColorByColumn == COLOR_DEFLECTION)
                     {
                         AppendDeflectionSegmentedCurves(
@@ -744,9 +770,12 @@ namespace Menegroth.GH.Components
                         columnCurves.Add(elementCurve);
                         columnColors.Add(elementColor);
                     }
+                    for (int ci = countBefore; ci < columnCurves.Count; ci++)
+                        columnCurveIds.Add(elemId);
                 }
                 else if (elemType == "beam")
                 {
+                    int countBefore = beamCurves.Count;
                     if (effectiveColorByBeam == COLOR_DEFLECTION)
                     {
                         AppendDeflectionSegmentedCurves(
@@ -758,32 +787,37 @@ namespace Menegroth.GH.Components
                         beamCurves.Add(elementCurve);
                         beamColors.Add(elementColor);
                     }
+                    for (int bi = countBefore; bi < beamCurves.Count; bi++)
+                        beamCurveIds.Add(elemId);
                 }
             }
 
             // ─── Slabs + foundations: sized volumes or deflected meshes ───
             var slabGeometry = new List<IGH_GeometricGoo>();
             var slabColors = new List<Color>();
+            var slabElementIds = new List<int>();
+            var slabElementTypes = new List<string>();
             var foundationGeometry = new List<IGH_GeometricGoo>();
             var foundationColors = new List<Color>();
+            var foundationElementIds = new List<int>();
+            var foundationElementTypes = new List<string>();
             if (_showSlabs)
             {
                 if (isOriginalMode)
                     BuildOriginalSlabs(viz, slabGeometry, slabColors, effectiveColorBySlab, maxDisp, slabMaxima,
-                        showVolumes: modeInt == MODE_SIZED);
-                // In Analytical mode, keep slab rendering on the deflected-mesh path
-                // even at scale=0 so per-face/per-vertex analytical coloring remains visible.
+                        showVolumes: modeInt == MODE_SIZED, elementIds: slabElementIds, elementTypes: slabElementTypes);
                 else if (isDeflected && (finalScale > 0 || modeInt == MODE_ANALYTICAL))
                     BuildDeflectedSlabs(viz, finalScale, slabGeometry,
                         slabColors, effectiveColorBySlab, maxDisp, isLocal, slabMaxima, nodes,
-                        showVolumes: modeInt == MODE_SIZED);
+                        showVolumes: modeInt == MODE_SIZED, elementIds: slabElementIds, elementTypes: slabElementTypes);
                 else
                     BuildSizedSlabs(viz, slabGeometry, slabColors, effectiveColorBySlab, maxDisp, slabMaxima,
-                        showVolumes: modeInt == MODE_SIZED);
+                        showVolumes: modeInt == MODE_SIZED, elementIds: slabElementIds, elementTypes: slabElementTypes);
             }
 
             if (showFoundationsEffective)
-                BuildFoundations(viz, foundationGeometry, foundationColors, effectiveColorBySlab);
+                BuildFoundations(viz, foundationGeometry, foundationColors, effectiveColorBySlab,
+                    elementIds: foundationElementIds, elementTypes: foundationElementTypes);
 
             var visibleSlabGeometry = new List<IGH_GeometricGoo>();
             if (_showSlabs)
@@ -812,12 +846,12 @@ namespace Menegroth.GH.Components
             DA.SetDataList(6, foundationGeometry);
 
             UpdateInternalPreviewCache(
-                columnCurves, columnColors,
-                beamCurves, beamColors,
+                columnCurves, columnColors, columnCurveIds,
+                beamCurves, beamColors, beamCurveIds,
                 originalCurves,
-                frameGeometry, frameGeometryColors,
-                slabGeometry, slabColors,
-                foundationGeometry, foundationColors);
+                frameGeometry, frameGeometryColors, frameElementIds, frameElementTypes,
+                slabGeometry, slabColors, slabElementIds, slabElementTypes,
+                foundationGeometry, foundationColors, foundationElementIds, foundationElementTypes);
 
             // Update message bar
             string deflectionName = deflectionInt == DEFLECTION_LOCAL ? "Local"
@@ -1486,30 +1520,36 @@ namespace Menegroth.GH.Components
         }
 
         private void UpdateInternalPreviewCache(
-            List<Curve> columnCurves, List<Color> columnColors,
-            List<Curve> beamCurves, List<Color> beamColors,
+            List<Curve> columnCurves, List<Color> columnColors, List<int> columnCurveIds,
+            List<Curve> beamCurves, List<Color> beamColors, List<int> beamCurveIds,
             List<Curve> originalCurves,
             List<IGH_GeometricGoo> frameGeometry, List<Color> frameGeometryColors,
+            List<int> frameElementIds, List<string> frameElementTypes,
             List<IGH_GeometricGoo> slabGeometry, List<Color> slabColors,
-            List<IGH_GeometricGoo> foundationGeometry, List<Color> foundationColors)
+            List<int> slabElementIds, List<string> slabElementTypes,
+            List<IGH_GeometricGoo> foundationGeometry, List<Color> foundationColors,
+            List<int> foundationElementIds, List<string> foundationElementTypes)
         {
             _previewColumnCurves.Clear();
             _previewColumnColors.Clear();
+            _previewColumnIds.Clear();
             _previewBeamCurves.Clear();
             _previewBeamColors.Clear();
+            _previewBeamIds.Clear();
             _previewOriginalCurves.Clear();
             _previewShadedMeshes.Clear();
             _previewShadedColors.Clear();
             _previewShadedUseVertexColors.Clear();
             _previewShadedMaterials.Clear();
+            _previewMeshElementIds.Clear();
+            _previewMeshElementTypes.Clear();
 
-            // Transfer ownership directly -- source lists are freshly built
-            // in SolveInstance and never referenced again, so duplication is unnecessary.
             for (int i = 0; i < Math.Min(columnCurves.Count, columnColors.Count); i++)
             {
                 if (columnCurves[i] == null) continue;
                 _previewColumnCurves.Add(columnCurves[i]);
                 _previewColumnColors.Add(columnColors[i]);
+                _previewColumnIds.Add(i < columnCurveIds.Count ? columnCurveIds[i] : -1);
             }
 
             for (int i = 0; i < Math.Min(beamCurves.Count, beamColors.Count); i++)
@@ -1517,6 +1557,7 @@ namespace Menegroth.GH.Components
                 if (beamCurves[i] == null) continue;
                 _previewBeamCurves.Add(beamCurves[i]);
                 _previewBeamColors.Add(beamColors[i]);
+                _previewBeamIds.Add(i < beamCurveIds.Count ? beamCurveIds[i] : -1);
             }
 
             foreach (var c in originalCurves)
@@ -1525,20 +1566,25 @@ namespace Menegroth.GH.Components
                 _previewOriginalCurves.Add(c);
             }
 
-            CacheShadedGeometry(frameGeometry, frameGeometryColors);
-            CacheShadedGeometry(slabGeometry, slabColors);
-            CacheShadedGeometry(foundationGeometry, foundationColors);
+            CacheShadedGeometry(frameGeometry, frameGeometryColors, frameElementIds, frameElementTypes);
+            CacheShadedGeometry(slabGeometry, slabColors, slabElementIds, slabElementTypes);
+            CacheShadedGeometry(foundationGeometry, foundationColors, foundationElementIds, foundationElementTypes);
         }
 
         /// <summary>
         /// Cache geometry for internal shaded preview. Handles both GH_Mesh (direct) and GH_Brep (tessellated).
+        /// When elementIds/elementTypes are provided they are kept parallel to _previewShadedMeshes.
         /// </summary>
-        private void CacheShadedGeometry(List<IGH_GeometricGoo> geometry, List<Color> colors)
+        private void CacheShadedGeometry(List<IGH_GeometricGoo> geometry, List<Color> colors,
+            List<int> elementIds = null, List<string> elementTypes = null)
         {
             if (geometry == null || colors == null) return;
             int n = Math.Min(geometry.Count, colors.Count);
             for (int i = 0; i < n; i++)
             {
+                int eid = (elementIds != null && i < elementIds.Count) ? elementIds[i] : -1;
+                string etype = (elementTypes != null && i < elementTypes.Count) ? elementTypes[i] : "";
+
                 var color = colors[i];
                 if (geometry[i] is GH_Brep ghBrep && ghBrep.Value != null)
                 {
@@ -1553,6 +1599,8 @@ namespace Menegroth.GH.Components
                             _previewShadedColors.Add(color);
                             _previewShadedUseVertexColors.Add(false);
                             _previewShadedMaterials.Add(mat);
+                            _previewMeshElementIds.Add(eid);
+                            _previewMeshElementTypes.Add(etype);
                         }
                     }
                 }
@@ -1572,6 +1620,8 @@ namespace Menegroth.GH.Components
                         _previewShadedUseVertexColors.Add(hasVertexColors);
                         _previewShadedMaterials.Add(new Rhino.Display.DisplayMaterial(
                             hasVertexColors ? Color.White : color));
+                        _previewMeshElementIds.Add(eid);
+                        _previewMeshElementTypes.Add(etype);
                     }
                 }
             }
@@ -1604,7 +1654,8 @@ namespace Menegroth.GH.Components
 
         private static void BuildSizedSlabs(JToken viz, List<IGH_GeometricGoo> output,
             List<Color> colors, int colorBy, double maxDisp,
-            SlabAnalyticalMaxima maxima, bool showVolumes = true)
+            SlabAnalyticalMaxima maxima, bool showVolumes = true,
+            List<int> elementIds = null, List<string> elementTypes = null)
         {
             var slabs = viz["sized_slabs"] as JArray ?? new JArray();
             var deflectedMeshes = viz["deflected_slab_meshes"] as JArray ?? new JArray();
@@ -1620,6 +1671,7 @@ namespace Menegroth.GH.Components
             foreach (var slab in slabs)
             {
                 int slabId = slab["slab_id"]?.ToObject<int>() ?? -1;
+                int countBefore = output.Count;
                 double thickness = slab["thickness"]?.ToObject<double>() ?? 0;
                 double zTop = slab["z_top"]?.ToObject<double>() ?? 0;
                 meshBySlabId.TryGetValue(slabId, out var analyticalMesh);
@@ -1689,6 +1741,15 @@ namespace Menegroth.GH.Components
                 {
                     AddSlabMeshAndColor(output, colors, CreatePlanarPolygonMesh(topPts),
                         analyticalSource, colorBy, maxDisp, maxima);
+                }
+
+                if (elementIds != null && elementTypes != null)
+                {
+                    for (int added = countBefore; added < output.Count; added++)
+                    {
+                        elementIds.Add(slabId);
+                        elementTypes.Add("slab");
+                    }
                 }
             }
         }
@@ -1937,13 +1998,16 @@ namespace Menegroth.GH.Components
             List<Color> colors, int colorBy, double maxDisp, bool isLocal,
             SlabAnalyticalMaxima maxima,
             Dictionary<int, (Point3d pos, Vector3d disp, Point3d defPos)> nodes,
-            bool showVolumes = false)
+            bool showVolumes = false,
+            List<int> elementIds = null, List<string> elementTypes = null)
         {
             bool isAnalyticalSlab = colorBy >= COLOR_SLAB_BENDING && colorBy <= COLOR_SLAB_SURFACE_STRESS;
             var meshes = viz["deflected_slab_meshes"] as JArray ?? new JArray();
             var localColumnTops = BuildLocalColumnTopDisplacements(viz, nodes);
             foreach (var m in meshes)
             {
+                int slabId = m["slab_id"]?.ToObject<int>() ?? -1;
+                int countBefore = output.Count;
                 var verts = m["vertices"]?.ToObject<double[][]>() ?? new double[0][];
                 var dispsGlobal = m["vertex_displacements"]?.ToObject<double[][]>() ?? new double[0][];
                 var dispsLocal = m["vertex_displacements_local"]?.ToObject<double[][]>() ?? new double[0][];
@@ -2046,6 +2110,15 @@ namespace Menegroth.GH.Components
 
                     // Intentionally ignore drop-panel mesh add-ons in deflected/original rendering.
                     // Drop panels are rendered only from sized, undeformed data.
+                }
+
+                if (elementIds != null && elementTypes != null)
+                {
+                    for (int added = countBefore; added < output.Count; added++)
+                    {
+                        elementIds.Add(slabId);
+                        elementTypes.Add("slab");
+                    }
                 }
             }
         }
@@ -2537,13 +2610,15 @@ namespace Menegroth.GH.Components
         /// </summary>
         private static void BuildOriginalSlabs(JToken viz, List<IGH_GeometricGoo> output,
             List<Color> colors, int colorBy, double maxDisp, SlabAnalyticalMaxima maxima,
-            bool showVolumes = false)
+            bool showVolumes = false,
+            List<int> elementIds = null, List<string> elementTypes = null)
         {
             bool isAnalyticalSlab = colorBy >= COLOR_SLAB_BENDING && colorBy <= COLOR_SLAB_SURFACE_STRESS;
             var meshes = viz["deflected_slab_meshes"] as JArray ?? new JArray();
             if (meshes.Count == 0)
             {
-                BuildSizedSlabs(viz, output, colors, colorBy, maxDisp, maxima, showVolumes);
+                BuildSizedSlabs(viz, output, colors, colorBy, maxDisp, maxima, showVolumes,
+                    elementIds: elementIds, elementTypes: elementTypes);
                 return;
             }
 
@@ -2563,6 +2638,7 @@ namespace Menegroth.GH.Components
                 if (verts.Length == 0) continue;
 
                 int slabId = m["slab_id"]?.ToObject<int>() ?? -1;
+                int countBefore = output.Count;
                 sizedBySlabId.TryGetValue(slabId, out var sizedSlab);
                 double thickness = m["thickness"]?.ToObject<double>()
                     ?? sizedSlab?["thickness"]?.ToObject<double>() ?? 0;
@@ -2576,6 +2652,9 @@ namespace Menegroth.GH.Components
                     TryBuildSizedSlabFromMesh(m, thickness, true, output, offsetAlongNormal: isVault))
                 {
                     AppendSlabColor(colors, m, colorBy, maxDisp, "vertex_displacements", maxima);
+                    if (elementIds != null && elementTypes != null)
+                        for (int added = countBefore; added < output.Count; added++)
+                        { elementIds.Add(slabId); elementTypes.Add("slab"); }
                     continue;
                 }
 
@@ -2635,15 +2714,26 @@ namespace Menegroth.GH.Components
                     output.Add(new GH_Mesh(rhinoMesh));
                     AppendSlabColor(colors, m, colorBy, maxDisp, "vertex_displacements", maxima);
                 }
+
+                if (elementIds != null && elementTypes != null)
+                {
+                    for (int added = countBefore; added < output.Count; added++)
+                    {
+                        elementIds.Add(slabId);
+                        elementTypes.Add("slab");
+                    }
+                }
             }
         }
 
         private static void BuildFoundations(JToken viz, List<IGH_GeometricGoo> output,
-            List<Color> foundationColors, int colorBy)
+            List<Color> foundationColors, int colorBy,
+            List<int> elementIds = null, List<string> elementTypes = null)
         {
             var foundations = viz["foundations"] as JArray ?? new JArray();
             foreach (var f in foundations)
             {
+                int fId = f["foundation_id"]?.ToObject<int>() ?? -1;
                 var c = f["center"]?.ToObject<double[]>() ?? new double[3];
                 if (c.Length < 3) continue;
                 double length = f["length"]?.ToObject<double>() ?? 0;
@@ -2691,6 +2781,8 @@ namespace Menegroth.GH.Components
                     {
                         foundationColors.Add(VisualizationColorMapper.ConcreteMaterialColor);
                     }
+                    elementIds?.Add(fId);
+                    elementTypes?.Add("foundation");
                 }
             }
         }

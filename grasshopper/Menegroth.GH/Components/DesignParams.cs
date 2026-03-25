@@ -5,6 +5,7 @@ using System.Windows.Forms;
 using Grasshopper.Kernel;
 using Grasshopper.Kernel.Parameters;
 using Grasshopper.Kernel.Types;
+using Menegroth.GH.Config;
 using Menegroth.GH.Types;
 
 namespace Menegroth.GH.Components
@@ -216,7 +217,7 @@ namespace Menegroth.GH.Components
             : base("Design Params",
                    "DesignParams",
                    "Configure design parameters for structural sizing",
-                   "Menegroth", "   Input")
+                   "Menegroth", MenegrothSubcategories.Inputs)
         { }
 
         public override Guid ComponentGuid =>

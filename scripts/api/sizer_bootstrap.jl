@@ -17,6 +17,32 @@ flush(stdout)
 ENV["SS_ENABLE_VISUALIZATION"] = get(ENV, "SS_ENABLE_VISUALIZATION", "false")
 ENV["SS_ENABLE_HEAVY_PRECOMPILE_WORKLOAD"] = get(ENV, "SS_ENABLE_HEAVY_PRECOMPILE_WORKLOAD", "false")
 
+# ── LLM chat configuration ───────────────────────────────────────────────────
+# Load the OpenAI API key from secrets/openai_api_key if not already set via ENV.
+# The file should contain only the key on a single line.
+let key_file = joinpath(@__DIR__, "..", "..", "secrets", "openai_api_key")
+    if !haskey(ENV, "CHAT_LLM_API_KEY") && isfile(key_file)
+        api_key = strip(read(key_file, String))
+        if !isempty(api_key)
+            ENV["CHAT_LLM_API_KEY"] = api_key
+            println(stdout, "[bootstrap] CHAT_LLM_API_KEY loaded from secrets/openai_api_key")
+        end
+    elseif haskey(ENV, "CHAT_LLM_API_KEY")
+        println(stdout, "[bootstrap] CHAT_LLM_API_KEY set via environment")
+    else
+        println(stdout, "[bootstrap] WARNING: CHAT_LLM_API_KEY not set — /chat will return 503")
+    end
+end
+# Base URL and model default to OpenAI gpt-4o; override via ENV if needed.
+if !haskey(ENV, "CHAT_LLM_BASE_URL")
+    ENV["CHAT_LLM_BASE_URL"] = "https://api.openai.com"
+end
+if !haskey(ENV, "CHAT_LLM_MODEL")
+    ENV["CHAT_LLM_MODEL"] = "gpt-4o"
+end
+println(stdout, "[bootstrap] LLM: base=$(ENV["CHAT_LLM_BASE_URL"]) model=$(ENV["CHAT_LLM_MODEL"])")
+flush(stdout)
+
 println(stdout, "[bootstrap] loading Oxygen...")
 flush(stdout)
 using Oxygen

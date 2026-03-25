@@ -3,6 +3,7 @@ using System.Linq;
 using System.Text;
 using System.Windows.Forms;
 using Grasshopper.Kernel;
+using Menegroth.GH.Config;
 using Menegroth.GH.Types;
 
 namespace Menegroth.GH.Components
@@ -53,7 +54,7 @@ namespace Menegroth.GH.Components
             : base("Analysis Params",
                    "AnalysisParams",
                    "Analysis-focused design parameters for Design Run (iterations + mesh controls)",
-                   "Menegroth", "Inputs")
+                   "Menegroth", MenegrothSubcategories.Inputs)
         { }
 
         public override Guid ComponentGuid =>

@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using System.Linq;
 using Newtonsoft.Json.Linq;
 
 namespace Menegroth.GH.Types
@@ -130,6 +131,12 @@ namespace Menegroth.GH.Types
                     bool converged = s["converged"]?.ToObject<bool>() ?? true;
                     bool deflOk = s["deflection_ok"]?.ToObject<bool>() ?? true;
                     bool punchOk = s["punching_ok"]?.ToObject<bool>() ?? true;
+
+                    var failingChecks = new List<string>();
+                    var checksToken = s["failing_checks"] as JArray;
+                    if (checksToken != null)
+                        failingChecks = checksToken.Select(t => t.ToString()).ToList();
+
                     r.Slabs.Add(new SlabResult
                     {
                         Id = s["id"]?.ToObject<int>() ?? 0,
@@ -137,7 +144,8 @@ namespace Menegroth.GH.Types
                         Ok = converged && deflOk && punchOk,
                         Converged = converged,
                         FailureReason = s["failure_reason"]?.ToString() ?? "",
-                        FailingCheck = s["failing_check"]?.ToString() ?? "",
+                        FailingChecks = failingChecks,
+                        FailureDetail = s["failure_detail"]?.ToString(),
                         DeflectionRatio = s["deflection_ratio"]?.ToObject<double>() ?? 0,
                         PunchingMaxRatio = s["punching_max_ratio"]?.ToObject<double>() ?? 0,
                     });
@@ -154,6 +162,7 @@ namespace Menegroth.GH.Types
                     {
                         Id = c["id"]?.ToObject<int>() ?? 0,
                         Section = c["section"]?.ToString() ?? "",
+                        SectionType = c["section_type"]?.ToString() ?? "",
                         AxialRatio = c["axial_ratio"]?.ToObject<double>() ?? 0,
                         InteractionRatio = c["interaction_ratio"]?.ToObject<double>() ?? 0,
                         Ok = c["ok"]?.ToObject<bool>() ?? true,
@@ -171,6 +180,9 @@ namespace Menegroth.GH.Types
                     {
                         Id = b["id"]?.ToObject<int>() ?? 0,
                         Section = b["section"]?.ToString() ?? "",
+                        SectionType = b["section_type"]?.ToString() ?? "",
+                        Depth = b["depth"]?.ToObject<double>() ?? 0,
+                        Width = b["width"]?.ToObject<double>() ?? 0,
                         FlexureRatio = b["flexure_ratio"]?.ToObject<double>() ?? 0,
                         ShearRatio = b["shear_ratio"]?.ToObject<double>() ?? 0,
                         Ok = b["ok"]?.ToObject<bool>() ?? true,
@@ -217,8 +229,12 @@ namespace Menegroth.GH.Types
         public double ThicknessIn { get; set; }
         public bool Ok { get; set; }
         public bool Converged { get; set; }
+        /// <summary>Canonical failure reason enum: non_convergence, section_inadequate, solver_error, etc.</summary>
         public string FailureReason { get; set; } = "";
-        public string FailingCheck { get; set; } = "";
+        /// <summary>Array of canonical failing check codes: punching_shear, two_way_deflection, etc.</summary>
+        public List<string> FailingChecks { get; set; } = new List<string>();
+        /// <summary>Full error detail when failure_reason is solver_error or unknown (stack trace, exception text).</summary>
+        public string? FailureDetail { get; set; }
         public double DeflectionRatio { get; set; }
         public double PunchingMaxRatio { get; set; }
         public double MaxRatio => System.Math.Max(DeflectionRatio, PunchingMaxRatio);
@@ -229,6 +245,8 @@ namespace Menegroth.GH.Types
     {
         public int Id { get; set; }
         public string Section { get; set; } = "";
+        /// <summary>Canonical section type: steel_w, rc_rect, rc_circular, steel_hss_rect, etc.</summary>
+        public string SectionType { get; set; } = "";
         public double AxialRatio { get; set; }
         public double InteractionRatio { get; set; }
         public bool Ok { get; set; }
@@ -239,6 +257,12 @@ namespace Menegroth.GH.Types
     {
         public int Id { get; set; }
         public string Section { get; set; } = "";
+        /// <summary>Canonical section type: steel_w, rc_rect, rc_tbeam, steel_hss_rect, etc.</summary>
+        public string SectionType { get; set; } = "";
+        /// <summary>Section depth in display units (in or mm).</summary>
+        public double Depth { get; set; }
+        /// <summary>Section width in display units (in or mm).</summary>
+        public double Width { get; set; }
         public double FlexureRatio { get; set; }
         public double ShearRatio { get; set; }
         public bool Ok { get; set; }

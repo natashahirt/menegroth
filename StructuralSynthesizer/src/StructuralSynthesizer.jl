@@ -195,10 +195,17 @@ export ElementECResult, BuildingECResult
 export engineering_report
 
 # --- API server ---
-export register_routes!, json_to_skeleton, json_to_params, design_to_json
+export register_routes!, json_to_skeleton, json_to_params, design_to_json, design_to_diagnose
 export validate_input, compute_geometry_hash
 export APIInput, APIOutput, APIError, APIParams
 export status_string, SERVER_STATUS  # for lightweight bootstrap /status delegation
+export DESIGN_CACHE
+# --- API schema ---
+export api_input_schema, api_params_schema_structured, api_applicability_schema, api_diagnose_schema, api_tool_schema
+# --- Report / summary ---
+export report_summary_json, condense_result
+# --- Chat (public-facing) ---
+export register_chat_routes!
 
 # =============================================================================
 # Precompilation Workload

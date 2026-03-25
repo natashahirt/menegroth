@@ -82,9 +82,6 @@ include("test_data/biaxial_rect_18x24.jl")
         
         util = StructuralSizer.pca_load_contour(
             Mux, Muy, φMnox, φMnoy,
-            ref.demands.Pu, 
-            ref.required.Pn_req * ref.required.φ,
-            ref.uniaxial.P0 * ref.required.φ;
             β = ref.pca_contour.β
         )
         

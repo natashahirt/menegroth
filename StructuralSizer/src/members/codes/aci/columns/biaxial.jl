@@ -112,7 +112,7 @@ end
 # ==============================================================================
 
 """
-    pca_load_contour(Mux, Muy, φMnox, φMnoy, Pu, φPn, φP0; β=0.65) -> Float64
+    pca_load_contour(Mux, Muy, φMnox, φMnoy; β=0.65) -> Float64
 
 Check biaxial capacity using PCA Load Contour Method.
 Per Portland Cement Association Notes on ACI 318.
@@ -125,22 +125,18 @@ Formula: Mux/φMnox + β(Muy/φMnoy) ≤ 1.0  (for Mnx/Mny > b/h)
 - `Muy`: Factored moment about y-axis (kip-ft)
 - `φMnox`: Factored uniaxial x-moment capacity (Muy=0) at given Pu (kip-ft)
 - `φMnoy`: Factored uniaxial y-moment capacity (Mux=0) at given Pu (kip-ft)
-- `Pu`: Factored axial load (kip)
-- `φPn`: Factored axial capacity (kip)
-- `φP0`: Factored pure axial capacity (kip)
 - `β`: Biaxial factor (default 0.65)
 
 # Returns
 - Utilization ratio (≤ 1.0 is adequate)
 
 # Note
-β is approximated as: β = (φPn - Pu) / (φPn - φPb)
-where φPb is the balanced load. For typical columns, β ≈ 0.65.
+This implementation uses a caller-provided `β` (default 0.65). If axial-load-
+dependent behavior is needed, compute `β` externally and pass it in.
 """
 function pca_load_contour(
     Mux::Real, Muy::Real,
-    φMnox::Real, φMnoy::Real,
-    Pu::Real, φPn::Real, φP0::Real;
+    φMnox::Real, φMnoy::Real;
     β::Real = 0.65
 )
     if φMnox ≤ 0 || φMnoy ≤ 0

@@ -205,6 +205,72 @@ namespace Menegroth.GH.Types
         }
 
         /// <summary>
+        /// Apply a partial JSON patch to this instance. Only fields present in the
+        /// patch are updated; all others retain their current values. Supports nested
+        /// objects (loads, floor_options, materials, foundation_options).
+        /// </summary>
+        public void MergeFromJson(JObject patch)
+        {
+            if (patch == null) return;
+
+            if (patch.TryGetValue("unit_system", out var us)) UnitSystem = us.ToString();
+            if (patch.TryGetValue("floor_type", out var ft)) FloorType = ft.ToString();
+            if (patch.TryGetValue("column_type", out var ct)) ColumnType = ct.ToString();
+            if (patch.TryGetValue("column_catalog", out var cc)) ColumnCatalog = cc.ToString();
+            if (patch.TryGetValue("column_sizing_strategy", out var css)) ColumnSizingStrategy = css.ToString();
+            if (patch.TryGetValue("mip_time_limit_sec", out var mip)) MipTimeLimitSec = mip.Type == JTokenType.Null ? null : (double?)mip;
+            if (patch.TryGetValue("beam_type", out var bt)) BeamType = bt.ToString();
+            if (patch.TryGetValue("beam_catalog", out var bc)) BeamCatalog = bc.ToString();
+            if (patch.TryGetValue("beam_sizing_strategy", out var bss)) BeamSizingStrategy = bss.ToString();
+            if (patch.TryGetValue("fire_rating", out var fr)) FireRating = (double)fr;
+            if (patch.TryGetValue("optimize_for", out var of)) OptimizeFor = of.ToString();
+            if (patch.TryGetValue("max_iterations", out var mi)) MaxIterations = mi.Type == JTokenType.Null ? null : (int?)mi;
+            if (patch.TryGetValue("size_foundations", out var sf)) SizeFoundations = (bool)sf;
+            if (patch.TryGetValue("foundation_soil", out var fs)) FoundationSoil = fs.ToString();
+            if (patch.TryGetValue("foundation_concrete", out var fc)) FoundationConcrete = fc.ToString();
+
+            if (patch.TryGetValue("loads", out var loadsToken) && loadsToken is JObject loads)
+            {
+                if (loads.TryGetValue("floor_LL_psf", out var fll)) FloorLL = (double)fll;
+                if (loads.TryGetValue("roof_LL_psf", out var rll)) RoofLL = (double)rll;
+                if (loads.TryGetValue("grade_LL_psf", out var gll)) GradeLL = (double)gll;
+                if (loads.TryGetValue("floor_SDL_psf", out var fsdl)) FloorSDL = (double)fsdl;
+                if (loads.TryGetValue("roof_SDL_psf", out var rsdl)) RoofSDL = (double)rsdl;
+                if (loads.TryGetValue("wall_SDL_psf", out var wsdl)) WallSDL = (double)wsdl;
+            }
+
+            if (patch.TryGetValue("floor_options", out var foToken) && foToken is JObject fo)
+            {
+                if (fo.TryGetValue("method", out var m)) AnalysisMethod = m.ToString();
+                if (fo.TryGetValue("deflection_limit", out var dl)) DeflectionLimit = dl.ToString();
+                if (fo.TryGetValue("punching_strategy", out var ps)) PunchingStrategy = ps.ToString();
+                if (fo.TryGetValue("vault_lambda", out var vl)) VaultLambda = vl.Type == JTokenType.Null ? null : (double?)vl;
+                if (fo.TryGetValue("target_edge_m", out var te)) FeaTargetEdgeM = te.Type == JTokenType.Null ? null : (double?)te;
+            }
+
+            if (patch.TryGetValue("materials", out var matToken) && matToken is JObject mat)
+            {
+                if (mat.TryGetValue("concrete", out var c)) Concrete = c.ToString();
+                if (mat.TryGetValue("rebar", out var r)) Rebar = r.ToString();
+                if (mat.TryGetValue("steel", out var s)) Steel = s.ToString();
+            }
+
+            if (patch.TryGetValue("foundation_options", out var fdnToken) && fdnToken is JObject fdn)
+            {
+                if (fdn.TryGetValue("strategy", out var strat)) FoundationStrategy = strat.ToString();
+                if (fdn.TryGetValue("mat_coverage_threshold", out var mct)) MatCoverageThreshold = (double)mct;
+            }
+
+            if (patch.TryGetValue("pixelframe_options", out var pfToken) && pfToken is JObject pf)
+            {
+                if (pf.TryGetValue("fc_preset", out var fcp)) PixelFrameFcPreset = fcp.ToString();
+                if (pf.TryGetValue("fc_min_ksi", out var pfmin)) PixelFrameFcMinKsi = pfmin.Type == JTokenType.Null ? null : (double?)pfmin;
+                if (pf.TryGetValue("fc_max_ksi", out var pfmax)) PixelFrameFcMaxKsi = pfmax.Type == JTokenType.Null ? null : (double?)pfmax;
+                if (pf.TryGetValue("fc_resolution_ksi", out var pfres)) PixelFrameFcResolutionKsi = pfres.Type == JTokenType.Null ? null : (double?)pfres;
+            }
+        }
+
+        /// <summary>
         /// Compute a SHA-256 hash for change detection.
         /// Streams JSON directly to the hasher to avoid intermediate string allocation.
         /// </summary>

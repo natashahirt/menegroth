@@ -119,6 +119,9 @@ Bootstrap mode starts the HTTP server immediately with `/health` and `/status` e
 |:---------|:--------|:------------|
 | `PORT` or `SIZER_PORT` | `8080` | Server port |
 | `SIZER_HOST` | `"0.0.0.0"` | Bind address |
+| `CHAT_LLM_BASE_URL` | *(unset)* | LLM API base URL (e.g. `https://api.openai.com`). Required for `/chat`. |
+| `CHAT_LLM_API_KEY` | *(unset)* | LLM API key. Required for `/chat`. |
+| `CHAT_LLM_MODEL` | `gpt-4o` | Model name passed to the LLM completions endpoint. |
 
 ### Example requests
 
@@ -129,8 +132,11 @@ curl http://localhost:8080/health
 # Server status
 curl http://localhost:8080/status
 
-# Input schema
+# Input schema (includes structured params with guidance text)
 curl http://localhost:8080/schema
+
+# Compact applicability/compatibility rules for assistants
+curl http://localhost:8080/schema/applicability
 
 # Submit a design (async)
 curl -X POST http://localhost:8080/design \
@@ -140,7 +146,113 @@ curl -X POST http://localhost:8080/design \
 # Poll until idle, then fetch the last result
 curl http://localhost:8080/status
 curl http://localhost:8080/result
+
+# Engineering report (plain text)
+curl http://localhost:8080/report
+
+# Engineering report (structured JSON summary)
+curl http://localhost:8080/report?format=json
 ```
+
+### POST /chat — LLM Chat Endpoint
+
+The `/chat` endpoint provides a conversational AI assistant for design parameter selection and results analysis. Responses are streamed via Server-Sent Events (SSE).
+
+**Request body:**
+
+```json
+{
+  "mode": "design",
+  "messages": [
+    {"role": "user", "content": "What floor system should I use for 35ft spans?"}
+  ],
+  "params": { "floor_type": "flat_plate", "column_type": "rc_rect" },
+  "geometry_summary": "5-story building, 3x4 grid, 30ft bays..."
+}
+```
+
+| Field | Type | Required | Description |
+|:------|:-----|:---------|:------------|
+| `mode` | `"design"` or `"results"` | Yes | Design mode injects parameter schema and guidance; results mode injects design results. |
+| `messages` | Array of `{role, content}` | Yes | Full conversation history. At least one message required. |
+| `params` | Object | No | Current design parameters (JSON matching APIParams). |
+| `geometry_summary` | String | No | Building geometry summary text for context. |
+| `session_id` | String | No | Stable identifier (e.g., geometry hash) for server-side history persistence. |
+
+**Response:** SSE stream with `Content-Type: text/event-stream`.
+
+Token events are followed by a structured summary event before `[DONE]`:
+
+```
+data: {"token": "For 35ft spans"}
+data: {"token": ", flat plate is a good starting point."}
+data: {"type": "agent_turn_summary", "suggested_next_questions": ["What live load do you expect?", "Any aesthetic preferences for slab depth?"]}
+data: [DONE]
+```
+
+**Error responses** (non-streaming JSON):
+
+| Status | Error code | Condition |
+|:-------|:-----------|:----------|
+| 503 | `llm_not_configured` | `CHAT_LLM_BASE_URL` or `CHAT_LLM_API_KEY` not set |
+| 400 | `invalid_json` | Malformed request body |
+| 400 | `invalid_mode` | Mode not "design" or "results" |
+| 400 | `empty_messages` | No messages provided |
+| 404 | `no_design` | Results mode with no design available |
+
+### POST /chat/action — Agent Tool Dispatch
+
+Invoke a structural tool directly from the agent (or test it manually). Requires LLM to be configured.
+
+```bash
+curl -X POST http://localhost:8080/chat/action \
+  -H 'Content-Type: application/json' \
+  -d '{"tool": "validate_params", "args": {"params": {"floor_type": "vault", "column_type": "steel_w"}}}'
+```
+
+Available tools:
+
+| Tool | Description |
+|:-----|:------------|
+| `validate_params` | Check a params patch for compatibility violations (no geometry required). |
+| `get_result_summary` | Structured JSON summary of the latest design result. |
+| `get_condensed_result` | Plain-text ~500-token condensed result for context injection. |
+| `get_applicability` | Compact method/floor eligibility rules from the schema. |
+| `run_design` | Fast parameter-only what-if check: skips visualization, caps iterations at 2, MIP at 20 s, 60 s total timeout. **Geometric changes (column layout, bay dimensions, story heights) cannot be applied here** — they must be made in Grasshopper. Purely geometric patches are rejected with a `geometric_change_required` error and actionable Grasshopper guidance. |
+
+**Geometric vs. parameter changes:** The system has two separate layers. *Parameters* (floor type, material, loads, analysis method, sizing strategy) live in the API and can be tested with `run_design`. *Geometry* (column positions, span lengths, story heights, plan shape) lives in the Grasshopper model and must be changed there. The agent is aware of this distinction and will tell the user what to change in Grasshopper when a geometric recommendation is made.
+
+### GET /chat/history — Retrieve Conversation History
+
+```bash
+curl "http://localhost:8080/chat/history?session_id=abc123"
+```
+
+Returns stored messages for the session. Session IDs are typically geometry hashes.
+
+### DELETE /chat/history — Clear Conversation History
+
+```bash
+# Clear a specific session
+curl -X DELETE "http://localhost:8080/chat/history?session_id=abc123"
+
+# Clear all sessions
+curl -X DELETE "http://localhost:8080/chat/history"
+```
+
+### GET /schema/applicability — Compact Applicability Rules
+
+```bash
+curl http://localhost:8080/schema/applicability
+```
+
+Returns a compact JSON with method/floor compatibility and applicability checks — useful for assistants to quickly determine method eligibility without the full schema.
+
+### Grasshopper Components
+
+**DesignAssistant** — Opens a chat dialog for conversational parameter selection. Connect BuildingGeometry, DesignParams, and a geometry summary. Toggle the Open input to launch the dialog. On first open, the assistant automatically analyzes the design space. Proposed parameter changes are shown with an Apply/Reject UI before being accepted. Outputs the accepted params and transcript.
+
+**ResultsAssistant** — Opens a chat dialog for results analysis. Connect a DesignResult, BuildingGeometry, and geometry summary. On first open, the assistant automatically summarizes failures and governing limit states. Suggested follow-up questions appear as clickable buttons. Outputs the conversation transcript.
 
 ## Building the Docs
 

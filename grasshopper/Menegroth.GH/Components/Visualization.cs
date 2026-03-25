@@ -1657,6 +1657,17 @@ namespace Menegroth.GH.Components
             SlabAnalyticalMaxima maxima, bool showVolumes = true,
             List<int> elementIds = null, List<string> elementTypes = null)
         {
+            void AppendSlabIdentityForNewGeometry(int countBefore, int slabId)
+            {
+                if (elementIds == null || elementTypes == null)
+                    return;
+                for (int added = countBefore; added < output.Count; added++)
+                {
+                    elementIds.Add(slabId);
+                    elementTypes.Add("slab");
+                }
+            }
+
             var slabs = viz["sized_slabs"] as JArray ?? new JArray();
             var deflectedMeshes = viz["deflected_slab_meshes"] as JArray ?? new JArray();
 
@@ -1681,6 +1692,7 @@ namespace Menegroth.GH.Components
                 if (slab["is_vault"]?.ToObject<bool>() == true && TryBuildVaultMesh(slab, thickness, output))
                 {
                     AppendSlabColor(colors, analyticalSource, colorBy, maxDisp, "vertex_displacements", maxima);
+                    AppendSlabIdentityForNewGeometry(countBefore, slabId);
                     continue;
                 }
 
@@ -1692,6 +1704,7 @@ namespace Menegroth.GH.Components
                     AppendSlabColor(colors, analyticalSource, colorBy, maxDisp, "vertex_displacements", maxima);
                     AppendDropPanelSizedGeometry(slab, zTop, thickness, output, colors, analyticalSource,
                         colorBy, maxDisp, maxima);
+                    AppendSlabIdentityForNewGeometry(countBefore, slabId);
                     continue;
                 }
 
@@ -1743,14 +1756,7 @@ namespace Menegroth.GH.Components
                         analyticalSource, colorBy, maxDisp, maxima);
                 }
 
-                if (elementIds != null && elementTypes != null)
-                {
-                    for (int added = countBefore; added < output.Count; added++)
-                    {
-                        elementIds.Add(slabId);
-                        elementTypes.Add("slab");
-                    }
-                }
+                AppendSlabIdentityForNewGeometry(countBefore, slabId);
             }
         }
 

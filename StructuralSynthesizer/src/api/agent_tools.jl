@@ -80,7 +80,47 @@ function agent_building_summary(struc::BuildingStructure)::Dict{String, Any}
         end
     end
 
-    return Dict{String, Any}(
+    # Structural semantics: flags that help the LLM identify important characteristics
+    flags = String[]
+
+    if !isempty(beam_lengths)
+        max_span_ft = maximum(beam_lengths) * 3.28084
+        if max_span_ft > 30.0
+            push!(flags, "long_spans_over_30ft")
+        end
+        if span_stats !== nothing && span_stats["cv"] > 0.25
+            push!(flags, "highly_variable_spans")
+        end
+    end
+
+    if !isempty(story_heights)
+        if maximum(story_heights) - minimum(story_heights) > 0.5
+            push!(flags, "variable_story_heights")
+        end
+        if any(h -> h > 5.0, story_heights)
+            push!(flags, "tall_story_over_5m")
+        end
+    end
+
+    if n_stories > 1
+        col_per_story = try
+            [count(c -> c.second isa StructuralSizer.AbstractMember, struc.columns)]
+        catch
+            Int[]
+        end
+        if length(col_per_story) > 1 && maximum(col_per_story) != minimum(col_per_story)
+            push!(flags, "varying_columns_per_level")
+        end
+    end
+
+    if n_slabs > 0 && n_cols > 0
+        slab_to_col = n_slabs / n_cols
+        if slab_to_col > 2.0
+            push!(flags, "high_slab_to_column_ratio")
+        end
+    end
+
+    result = Dict{String, Any}(
         "n_stories"     => n_stories,
         "n_columns"     => n_cols,
         "n_beams"       => n_beams,
@@ -90,6 +130,12 @@ function agent_building_summary(struc::BuildingStructure)::Dict{String, Any}
         "span_stats"    => span_stats,
         "regularity"    => regularity,
     )
+
+    if !isempty(flags)
+        result["structural_flags"] = flags
+    end
+
+    return result
 end
 
 """
@@ -118,6 +164,109 @@ function agent_current_params(design::BuildingDesign)::Dict{String, Any}
     )
 
     return ctx
+end
+
+"""
+    agent_situation_card(struc, design, history) -> Dict{String, Any}
+
+Single-call orientation snapshot. Combines geometry overview, resolved params,
+results health, and session history status into one compact payload so the
+LLM can orient itself without multiple tool calls.
+"""
+function agent_situation_card(
+    struc::Union{BuildingStructure, Nothing},
+    design::Union{BuildingDesign, Nothing},
+    history::Vector{DesignHistoryEntry},
+)::Dict{String, Any}
+    card = Dict{String, Any}("has_geometry" => !isnothing(struc), "has_design" => !isnothing(design))
+
+    if !isnothing(struc)
+        card["geometry"] = agent_building_summary(struc)
+    end
+
+    if !isnothing(design)
+        card["params"] = agent_current_params(design)
+
+        s = design.summary
+        n_fail = count(p -> !p.second.ok, design.columns) +
+                 count(p -> !p.second.ok, design.beams) +
+                 count(p -> !(p.second.converged && p.second.deflection_ok && p.second.punching_ok), design.slabs) +
+                 count(p -> !p.second.ok, design.foundations)
+        card["health"] = Dict{String, Any}(
+            "all_pass"         => s.all_checks_pass,
+            "critical_ratio"   => round(s.critical_ratio; digits=3),
+            "critical_element" => s.critical_element,
+            "embodied_carbon"  => round(s.embodied_carbon; digits=0),
+            "n_elements"       => length(design.columns) + length(design.beams) +
+                                  length(design.slabs) + length(design.foundations),
+            "n_failing"        => n_fail,
+        )
+        card["has_trace"] = !isempty(design.solver_trace)
+    end
+
+    card["session"] = Dict{String, Any}(
+        "n_designs" => length(history),
+        "latest_passed" => isempty(history) ? nothing : last(history).all_pass,
+    )
+
+    return card
+end
+
+"""
+    agent_diagnose_summary(design::BuildingDesign) -> Dict{String, Any}
+
+Lightweight failure overview: counts by element type, top-N critical elements,
+and failure breakdown by governing check — without the full per-element dump.
+Designed for progressive disclosure: call this first, then `get_diagnose` or
+`query_elements` for detail.
+"""
+function agent_diagnose_summary(design::BuildingDesign)::Dict{String, Any}
+    diag = design_to_diagnose(design)
+    eng = get(diag, "engineering", Dict())
+
+    type_stats = Dict{String, Any}()
+    all_elements = Pair{Float64, Dict{String, Any}}[]
+    check_counts = Dict{String, Int}()
+
+    for (etype, plural) in [("column", "columns"), ("beam", "beams"),
+                             ("slab", "slabs"), ("foundation", "foundations")]
+        elems = get(eng, plural, Any[])
+        n_total = length(elems)
+        n_fail = count(e -> !get(e, "ok", true), elems)
+        type_stats[etype] = Dict{String, Any}("total" => n_total, "failing" => n_fail)
+
+        for e in elems
+            ratio = get(e, "governing_ratio", 0.0)
+            push!(all_elements, ratio => e)
+            if !get(e, "ok", true)
+                gc = get(e, "governing_check", "unknown")
+                check_counts[gc] = get(check_counts, gc, 0) + 1
+            end
+        end
+    end
+
+    sort!(all_elements; by=first, rev=true)
+    top_n = min(5, length(all_elements))
+    top_critical = [Dict{String, Any}(
+        "type"             => get(e, "type", ""),
+        "id"               => get(e, "id", ""),
+        "governing_ratio"  => round(ratio; digits=3),
+        "governing_check"  => get(e, "governing_check", ""),
+        "ok"               => get(e, "ok", true),
+    ) for (ratio, e) in all_elements[1:top_n]]
+
+    # Rank failure checks by frequency
+    sorted_checks = sort(collect(check_counts); by=last, rev=true)
+    failure_breakdown = [Dict("check" => k, "count" => v) for (k, v) in sorted_checks]
+
+    return Dict{String, Any}(
+        "by_type"           => type_stats,
+        "top_critical"      => top_critical,
+        "failure_breakdown" => failure_breakdown,
+        "n_total_elements"  => length(all_elements),
+        "n_total_failing"   => sum(s -> s["failing"], values(type_stats)),
+        "note"              => "Use query_elements or get_diagnose for full per-element detail.",
+    )
 end
 
 # ─── Phase 2: Diagnosis ──────────────────────────────────────────────────────

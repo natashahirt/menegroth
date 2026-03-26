@@ -232,14 +232,17 @@ TOOLS — WHAT YOU CAN AND CANNOT DO:
 You have access to structural tools via POST /chat/action. Use them to ground recommendations in computed results rather than estimates.
 
 ORIENTATION (understand the building):
-- get_building_summary: Stories, footprint, column/beam/slab counts, span statistics, regularity. No design needed — geometry only.
-- get_current_params: Full resolved parameter set (defaults + overrides as the solver sees them). Requires a completed design.
+- get_situation_card: PREFERRED FIRST CALL. Single-call snapshot: geometry overview + resolved params + results health + session history + trace availability. Works even with no geometry/design (returns what's available).
+- get_building_summary: Detailed geometry only (stories, spans, regularity). Use when you need more geometry detail than the situation card provides.
+- get_current_params: Full resolved parameter set. Use when you need parameter detail beyond the situation card.
 - get_design_history: Past designs in this session (params, pass/fail, critical ratio, EC). Prevents re-suggesting things already tried.
 
-DIAGNOSIS (what's wrong and why):
-- get_diagnose: High-resolution per-element diagnostics — governing checks, demand/capacity, code clauses, levers, embodied carbon, recommendations. Optional arg: units ("imperial"|"metric").
-- query_elements: Filter elements by type, ratio range, governing_check, story, or pass/fail. Avoids dumping all elements into context.
+DIAGNOSIS (what's wrong and why — progressive disclosure):
+- get_diagnose_summary: PREFERRED FIRST DIAGNOSTIC. Lightweight overview: counts by type, top-5 critical elements, failure breakdown by check. ~200 tokens.
+- get_diagnose: FULL per-element diagnostics — governing checks, demand/capacity, code clauses, levers, embodied carbon, recommendations. Use after get_diagnose_summary when you need detail. Optional arg: units ("imperial"|"metric").
+- query_elements: Filter elements by type, ratio range, governing_check, story, or pass/fail. Use to drill into specific failures.
 - get_solver_trace: Tiered solver decision trace — WHY the solver chose sections, fell back, converged/diverged. Tiers: "summary" (pipeline overview), "failures" (default — all failures/fallbacks), "decisions" (+ iteration/decision detail), "full" (everything). Optional filters: element (e.g. "slab_2"), layer (e.g. "optimizer").
+- get_lever_map: Which parameters/geometry changes affect a given failure check. ALWAYS consult before recommending a fix. Arg: check (e.g. "punching_shear", "deflection").
 - get_implemented_provisions: List of all design code clauses the solver implements. Optional arg: code (e.g., "ACI_318").
 - explain_field: Definition, units, valid values, and related checks for any API parameter. Arg: field (e.g., "deflection_limit").
 - get_applicability: DDM/EFM/FEA eligibility rules for the current geometry.
@@ -258,18 +261,30 @@ COMMUNICATION (explain to the user):
 - clarify_user_intent: Structured multiple-choice clarification payload for the UI.
 
 TOOL SELECTION POLICY — match user intent to tool sequence:
-  "What is this building?"         -> get_building_summary + get_current_params
-  "Why is element X failing?"      -> query_elements(ok=false) or get_diagnose, then narrate_element
+  START OF CONVERSATION            -> get_situation_card (always, before anything else)
+  "What is this building?"         -> get_situation_card covers this; get_building_summary if more detail needed
+  "Why is element X failing?"      -> get_diagnose_summary → query_elements(ok=false) → narrate_element
   "Why did the solver pick that?"  -> get_solver_trace(tier=failures), drill with tier=decisions or element filter
-  "What should I change?"          -> suggest_next_action(goal) + validate_params
+  "What should I change?"          -> get_diagnose_summary → suggest_next_action(goal) → validate_params
   "Try changing X"                 -> validate_params -> run_design -> compare_designs
   "Explain this to me"             -> narrate_element or narrate_comparison
   "Did it help?" / "Compare"       -> compare_designs + get_design_history
   "Does the solver check X?"       -> get_implemented_provisions
   "What does parameter Y do?"      -> explain_field(Y)
-  When unsure, start with get_building_summary to orient, then get_diagnose for full context.
-  After get_diagnose, if the user needs to understand the solver's reasoning, use get_solver_trace(tier=failures) to see what drove the design.
+  Always start with get_situation_card. Then get_diagnose_summary for failure overview.
+  Use get_diagnose or query_elements only when you need specific element detail.
+  Use get_solver_trace when the user needs to understand WHY, not just WHAT.
   Always validate_params before run_design. Always compare_designs after run_design.
+
+EVIDENCE-FIRST REASONING:
+Before making any recommendation, you MUST have tool evidence. Follow this protocol:
+  1. OBSERVE: Call a diagnostic tool (get_diagnose_summary, query_elements, get_solver_trace) to get data.
+  2. CITE: Reference specific ratios, check names, or trace events in your explanation.
+  3. CONSULT LEVERS: Call get_lever_map(check=<governing_check>) to see which parameters actually affect this failure.
+  4. RECOMMEND: Suggest a parameter change from the lever map, grounded in the evidence.
+  5. VERIFY: Use validate_params → run_design → compare_designs to confirm.
+  NEVER skip steps 1–3 and jump to recommendations based on general structural knowledge.
+  If you catch yourself saying "typically" or "usually" without citing a tool result, stop and call a tool first.
 
 EPISTEMIC BOUNDARY — WHAT YOU KNOW AND DO NOT KNOW:
 You do NOT have direct access to ACI 318, AISC 360, ASCE 7, IBC, or any building-code text.
@@ -283,6 +298,20 @@ When referencing a code check:
   4. NEVER fabricate equations, load-combination formulas, or clause numbers.
   5. Use get_implemented_provisions to check whether a specific code clause is implemented before claiming it is or is not.
   6. If the user asks for code-text knowledge you do not have, say so and suggest consulting the standard directly.
+
+SOLVER SCOPE LIMITS — WHAT THE SYSTEM CANNOT DO:
+The solver has specific boundaries. Do NOT suggest actions outside these:
+  ✗ Lateral load analysis (wind, seismic) — gravity framing only in current version.
+  ✗ Connection design — member sizing only; no bolted/welded joint checks.
+  ✗ Progressive collapse or blast loading.
+  ✗ Serviceability vibration checks (walking, rhythmic).
+  ✗ Pre/post-tensioned concrete — mild reinforcement only.
+  ✗ Composite steel deck slabs — concrete flat plate/flat slab/one-way/vault only.
+  ✗ Timber or masonry structural systems.
+  ✗ Geometry modification — column positions, spans, story heights are set in Grasshopper.
+  ✗ Multi-objective Pareto optimization — single objective (weight, carbon, or cost).
+  ✗ Non-rectangular column grids for DDM/EFM — use FEA for irregular layouts.
+  If the user asks about any of these, clearly state it is outside the current solver scope.
 
 CRITICAL CONSTRAINT — GEOMETRY VS. PARAMETERS:
 The system has two completely separate layers:
@@ -318,7 +347,20 @@ GEOMETRY AND IRREGULARITY:
 $_TOOLS_GUIDANCE
 $_CLARIFICATION_INSTRUCTION
 $_NEXT_QUESTIONS_INSTRUCTION
-AVAILABLE PARAMETERS AND THEIR ENGINEERING GUIDANCE:
+
+KEY PARAMETERS (use explain_field for full detail on any parameter):
+  floor_type:        flat_plate | flat_slab | one_way | vault — controls floor system, biggest design lever
+  column_type:       rc_rect | rc_circular | steel_w | steel_hss | pixelframe
+  beam_type:         steel_w | rc_rect | rc_tbeam | steel_hss | pixelframe
+  method:            DDM | DDM_SIMPLIFIED | EFM | EFM_HARDY_CROSS | FEA — analysis method for slab design
+  deflection_limit:  L_240 | L_360 | L_480 — stricter limit → thicker slabs
+  punching_strategy: grow_columns | reinforce_first | reinforce_last — how punching shear failures are resolved
+  loads:             floor_LL_psf, roof_LL_psf, floor_SDL_psf, roof_SDL_psf, wall_SDL_psf
+  materials:         concrete, column_concrete, rebar, steel — material grades
+  column_catalog:    controls available section pool for column optimizer
+  optimize_for:      weight | carbon | cost — optimization objective
+  fire_rating:       0 | 1 | 1.5 | 2 | 3 | 4 hours — affects cover, thickness, fire protection
+  size_foundations:   true/false — enable foundation sizing
 """
 
 const _RESULTS_SYSTEM_PREAMBLE = """
@@ -345,8 +387,7 @@ DESIGN RESULTS SUMMARY:
 
 function _build_system_prompt(mode::String, params_json, geometry_summary::String)
     if mode == "design"
-        schema_text = JSON3.write(api_params_schema_structured())
-        parts = [_DESIGN_SYSTEM_PREAMBLE, schema_text]
+        parts = [_DESIGN_SYSTEM_PREAMBLE]
         if !isempty(geometry_summary)
             push!(parts, "\n\nBUILDING GEOMETRY:\n", geometry_summary)
         end
@@ -893,14 +934,17 @@ Dispatch a named structural tool call from the agent. Returns a
 JSON-serialisable result dict.
 
 Phase 1 — Orientation:
-- `get_building_summary`     — geometry summary (stories, spans, counts, regularity).
+- `get_situation_card`       — single-call snapshot: geometry + params + health + history + trace availability.
+- `get_building_summary`     — detailed geometry summary (stories, spans, counts, regularity).
 - `get_design_history`       — past designs in session (params, pass/fail, EC).
 - `get_current_params`       — fully resolved parameter set from the last design.
 
 Phase 2 — Diagnosis:
+- `get_diagnose_summary`     — lightweight failure overview: counts, top-5 critical, failure breakdown.
 - `get_diagnose`             — high-resolution per-element diagnostics.
 - `query_elements`           — filtered element subset from /diagnose data.
 - `get_solver_trace`         — tiered solver decision trace (why it chose sections, fell back, converged). Use tier=summary → failures → decisions → full.
+- `get_lever_map`            — which parameters affect a given failure check. Consult before recommending fixes.
 - `get_implemented_provisions` — design code clause index.
 - `explain_field`            — parameter definition, units, range, related checks.
 - `get_result_summary`       — structured JSON summary of the latest design result.
@@ -997,6 +1041,9 @@ function _dispatch_chat_tool(tool::String, args::Dict{String, Any})::Dict{String
         )
 
     # ── Phase 1: Orientation ────────────────────────────────────────────────
+    elseif tool == "get_situation_card"
+        return agent_situation_card(DESIGN_CACHE.structure, DESIGN_CACHE.last_design, get_design_history_entries())
+
     elseif tool == "get_building_summary"
         isnothing(DESIGN_CACHE.structure) && return Dict("error" => "no_geometry", "message" => "No geometry loaded. Submit geometry via POST /design first.", "recovery_hint" => _NO_GEOMETRY_HINT)
         return agent_building_summary(DESIGN_CACHE.structure)
@@ -1011,6 +1058,10 @@ function _dispatch_chat_tool(tool::String, args::Dict{String, Any})::Dict{String
         return Dict("history" => design_history_to_json(entries), "count" => length(entries))
 
     # ── Phase 2: Diagnosis ───────────────────────────────────────────────────
+    elseif tool == "get_diagnose_summary"
+        isnothing(DESIGN_CACHE.last_design) && return Dict("error" => "no_design", "message" => "No design has been run yet.", "recovery_hint" => _NO_DESIGN_HINT)
+        return agent_diagnose_summary(DESIGN_CACHE.last_design)
+
     elseif tool == "get_diagnose"
         isnothing(DESIGN_CACHE.last_design) && return Dict("error" => "no_design", "message" => "No design has been run yet.", "recovery_hint" => _NO_DESIGN_HINT)
         units_arg = get(args, "units", nothing)
@@ -1039,6 +1090,10 @@ function _dispatch_chat_tool(tool::String, args::Dict{String, Any})::Dict{String
             element = isnothing(element_arg) ? nothing : string(element_arg),
             layer   = layer_sym,
         )
+
+    elseif tool == "get_lever_map"
+        check_arg = get(args, "check", nothing)
+        return get_lever_map(; check=isnothing(check_arg) ? nothing : string(check_arg))
 
     elseif tool == "get_implemented_provisions"
         code_arg = get(args, "code", nothing)
@@ -1268,8 +1323,9 @@ function _dispatch_chat_tool(tool::String, args::Dict{String, Any})::Dict{String
         return Dict(
             "error"   => "unknown_tool",
             "message" => "Unknown tool: \"$tool\". Available: " *
-                "get_building_summary, get_design_history, get_current_params, " *
-                "get_diagnose, query_elements, get_solver_trace, get_implemented_provisions, explain_field, " *
+                "get_situation_card, get_building_summary, get_design_history, get_current_params, " *
+                "get_diagnose_summary, get_diagnose, query_elements, get_solver_trace, " *
+                "get_lever_map, get_implemented_provisions, explain_field, " *
                 "get_result_summary, get_condensed_result, get_applicability, " *
                 "validate_params, run_design, compare_designs, suggest_next_action, " *
                 "narrate_element, narrate_comparison, clarify_user_intent.",

@@ -155,14 +155,116 @@ function get_provisions(; code::Union{String, Nothing}=nothing)
     )
 end
 
+# ─── Lever Surface Map ─────────────────────────────────────────────────────────
+#
+# Canonical mapping: failure check name → actionable parameters (levers).
+# The LLM consults this instead of guessing which parameter affects which check.
+# Each entry lists API-level parameters and, where applicable, geometric changes
+# (prefixed with "geometry:") that require Grasshopper modification.
+
+const LEVER_SURFACE_MAP = Dict{String, Any}(
+    "punching_shear" => Dict(
+        "parameters" => ["punching_strategy", "column_concrete", "floor_type"],
+        "geometry"   => ["column_size", "slab_span"],
+        "direction"  => "grow_columns or reinforce_first reduces demand/capacity ratio; higher f'c increases Vc",
+    ),
+    "flexure" => Dict(
+        "parameters" => ["deflection_limit", "floor_type", "concrete", "rebar"],
+        "geometry"   => ["span_length"],
+        "direction"  => "thicker slab or higher rebar grade increases capacity; shorter spans reduce demand",
+    ),
+    "deflection" => Dict(
+        "parameters" => ["deflection_limit", "concrete", "floor_type"],
+        "geometry"   => ["span_length"],
+        "direction"  => "relaxing L/360→L/240 allows thinner slabs; higher f'c increases Ec and reduces deflection",
+    ),
+    "one_way_shear" => Dict(
+        "parameters" => ["concrete", "floor_type"],
+        "geometry"   => ["span_length"],
+        "direction"  => "thicker slab increases Vc; shorter spans reduce Vu",
+    ),
+    "P-M_interaction" => Dict(
+        "parameters" => ["column_catalog", "column_concrete", "column_type", "column_sizing_strategy"],
+        "geometry"   => ["column_count", "story_height"],
+        "direction"  => "larger catalog pool or higher f'c increases capacity; more columns redistribute load",
+    ),
+    "axial_capacity" => Dict(
+        "parameters" => ["column_catalog", "column_concrete", "column_type"],
+        "geometry"   => ["column_count"],
+        "direction"  => "upsizing catalog or increasing f'c increases φPn",
+    ),
+    "combined_forces" => Dict(
+        "parameters" => ["beam_catalog", "beam_type", "beam_sizing_strategy"],
+        "geometry"   => ["span_length", "beam_spacing"],
+        "direction"  => "larger beam catalog or deeper sections increase capacity",
+    ),
+    "shear" => Dict(
+        "parameters" => ["beam_catalog", "beam_type"],
+        "geometry"   => ["span_length"],
+        "direction"  => "deeper beams increase Vn; shorter spans reduce Vu",
+    ),
+    "LTB" => Dict(
+        "parameters" => ["beam_catalog", "beam_type"],
+        "geometry"   => ["unbraced_length"],
+        "direction"  => "shorter unbraced lengths or stockier sections increase LTB capacity",
+    ),
+    "fire_protection" => Dict(
+        "parameters" => ["fire_rating"],
+        "geometry"   => [],
+        "direction"  => "reducing fire_rating reduces required concrete cover and steel protection thickness",
+    ),
+    "foundation_bearing" => Dict(
+        "parameters" => ["foundation_soil", "foundation_concrete", "foundation_options"],
+        "geometry"   => ["column_count"],
+        "direction"  => "stiffer soil or larger footings increase bearing capacity",
+    ),
+    "convergence" => Dict(
+        "parameters" => ["max_iterations", "mip_time_limit_sec", "column_sizing_strategy"],
+        "geometry"   => [],
+        "direction"  => "more iterations or longer MIP time allows optimizer to find feasible assignment",
+    ),
+)
+
+"""
+    get_lever_map(; check::Union{String, Nothing}=nothing) -> Dict
+
+Return the lever surface map, optionally filtered to a single check family.
+"""
+function get_lever_map(; check::Union{String, Nothing}=nothing)
+    if isnothing(check)
+        return LEVER_SURFACE_MAP
+    end
+    key = lowercase(replace(check, " " => "_", "-" => "_"))
+    for k in keys(LEVER_SURFACE_MAP)
+        if lowercase(k) == key
+            return Dict{String, Any}(k => LEVER_SURFACE_MAP[k])
+        end
+    end
+    return Dict{String, Any}(
+        "error"     => "unknown_check",
+        "message"   => "Check \"$check\" not found. Available: $(join(sort(collect(keys(LEVER_SURFACE_MAP))), ", ")).",
+        "available" => sort(collect(keys(LEVER_SURFACE_MAP))),
+    )
+end
+
 # ─── Tool Registry ────────────────────────────────────────────────────────────
 
 const TOOL_REGISTRY = [
     Dict{String, Any}(
+        "name"              => "get_situation_card",
+        "description"       => "Single-call orientation snapshot: geometry overview, resolved params, results health, session history status, and trace availability.",
+        "phase"             => "orientation",
+        "use_when"          => "FIRST tool call in any conversation. Gives complete orientation in one call instead of three. Also useful after a design run to refresh context.",
+        "args"              => Dict{String, Any}(),
+        "returns"           => "Dict with has_geometry, has_design, geometry (summary), params, health (pass/fail, critical ratio, n_failing, EC), session (n_designs), has_trace.",
+        "requires_design"   => false,
+        "requires_geometry" => false,
+    ),
+    Dict{String, Any}(
         "name"              => "get_building_summary",
         "description"       => "Geometry summary: stories, footprint, column/beam/slab counts, span statistics, regularity.",
         "phase"             => "orientation",
-        "use_when"          => "Starting a new conversation, or the user asks about the building's shape, size, or layout.",
+        "use_when"          => "You need geometry details not covered by get_situation_card, or no design exists yet.",
         "args"              => Dict{String, Any}(),
         "returns"           => "Dict with stories, n_columns, n_beams, n_slabs, span statistics, regularity classification.",
         "requires_design"   => false,
@@ -189,10 +291,20 @@ const TOOL_REGISTRY = [
         "requires_geometry" => false,
     ),
     Dict{String, Any}(
+        "name"              => "get_diagnose_summary",
+        "description"       => "Lightweight failure overview: counts by element type, top-5 critical elements, failure breakdown by governing check.",
+        "phase"             => "diagnosis",
+        "use_when"          => "First diagnostic step after orientation. Shows where the problems are without dumping all element data. Follow up with query_elements or get_diagnose for detail.",
+        "args"              => Dict{String, Any}(),
+        "returns"           => "Dict with by_type (counts), top_critical (top 5 elements), failure_breakdown (checks ranked by frequency).",
+        "requires_design"   => true,
+        "requires_geometry" => false,
+    ),
+    Dict{String, Any}(
         "name"              => "get_diagnose",
         "description"       => "High-resolution per-element diagnostics: governing checks, demand/capacity, code clauses, levers, EC, recommendations.",
         "phase"             => "diagnosis",
-        "use_when"          => "You need detailed per-element structural data, or the user asks why something is sized a certain way.",
+        "use_when"          => "You need detailed per-element structural data, or the user asks why something is sized a certain way. Prefer get_diagnose_summary first.",
         "args"              => Dict{String, Any}("units" => Dict("type" => "string", "enum" => ["imperial", "metric"], "optional" => true)),
         "returns"           => "Three-layer Dict: engineering (elements), architectural (narrative), constraints (levers).",
         "requires_design"   => true,
@@ -221,6 +333,16 @@ const TOOL_REGISTRY = [
         "use_when"          => "The user asks whether the solver checks a specific code provision, or you need to verify before citing a clause.",
         "args"              => Dict{String, Any}("code" => Dict("type" => "string", "optional" => true, "description" => "Filter by code, e.g. ACI_318, AISC_360_16")),
         "returns"           => "Dict mapping code names to arrays of {section, provision} entries.",
+        "requires_design"   => false,
+        "requires_geometry" => false,
+    ),
+    Dict{String, Any}(
+        "name"              => "get_lever_map",
+        "description"       => "Which API parameters and geometry changes affect a given failure check. Canonical source of truth for 'what can I change to fix X'.",
+        "phase"             => "diagnosis",
+        "use_when"          => "Before recommending a fix for a specific failure check. Tells you exactly which knobs to turn.",
+        "args"              => Dict{String, Any}("check" => Dict("type" => "string", "optional" => true, "description" => "Filter to one check family (e.g. 'punching_shear', 'deflection', 'P-M_interaction'). Omit for full map.")),
+        "returns"           => "Dict mapping check names to {parameters, geometry, direction}.",
         "requires_design"   => false,
         "requires_geometry" => false,
     ),

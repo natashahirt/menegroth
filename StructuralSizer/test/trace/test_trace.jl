@@ -103,6 +103,20 @@ end
     reg = registered_functions()
     @test reg isa Dict
     @test length(reg) >= 2  # at least the two we just defined
+
+    # Verify manual registry entries for docstring-annotated functions
+    @test haskey(reg, (:optimize_discrete, :optimizer))
+    @test haskey(reg, (:optimize_discrete_multi, :optimizer))
+    @test haskey(reg, (:size_flat_plate!, :slab))
+
+    od_meta = reg[(:optimize_discrete, :optimizer)]
+    @test :enter in od_meta.events
+    @test :exit in od_meta.events
+    @test :decision in od_meta.events
+
+    sfp_meta = reg[(:size_flat_plate!, :slab)]
+    @test :iteration in sfp_meta.events
+    @test :fallback in sfp_meta.events
 end
 
 # ==============================================================================

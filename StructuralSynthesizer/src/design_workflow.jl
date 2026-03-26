@@ -159,7 +159,8 @@ struct PipelineStage
     needs_sync::Bool
 end
 
-function build_pipeline(params::DesignParameters)
+function build_pipeline(params::DesignParameters;
+                        tc::Union{Nothing, StructuralSizer.TraceCollector} = nothing)
     stages = PipelineStage[]
     
     floor_opts = resolve_floor_options(params)
@@ -175,25 +176,38 @@ function build_pipeline(params::DesignParameters)
     
     # ─── Stage 1: Slab sizing (always) ─── needs sync to push slab self-weight
     push!(stages, PipelineStage(struc -> begin
+        StructuralSizer.emit!(tc, :pipeline, "build_pipeline", "stage_1_slabs", :enter;
+                              floor_type=string(floor_type))
         StructuralSizer.size_slabs!(struc; options=floor_opts, verbose=false,
                                     max_iterations=params.max_iterations,
                                     fire_rating=params.fire_rating,
-                                    column_opts=column_opts)
+                                    column_opts=column_opts, tc=tc)
         update_slab_volumes!(struc; options=floor_opts)
+        StructuralSizer.emit!(tc, :pipeline, "build_pipeline", "stage_1_slabs", :exit)
     end, true))
     
     # ─── Stage 2: Beam + column sizing ───
     if floor_type in (:flat_plate, :flat_slab)
-        # Flat plate/slab: _reconcile_columns! self-syncs when columns grow
-        push!(stages, PipelineStage(struc -> _reconcile_columns!(struc, params), false))
+        push!(stages, PipelineStage(struc -> begin
+            StructuralSizer.emit!(tc, :pipeline, "build_pipeline", "stage_2_reconcile", :enter)
+            _reconcile_columns!(struc, params)
+            StructuralSizer.emit!(tc, :pipeline, "build_pipeline", "stage_2_reconcile", :exit)
+        end, false))
     else
-        # Beam-based systems: iterative beam/column sizing — needs full sync
-        push!(stages, PipelineStage(struc -> _size_beams_columns!(struc, params), true))
+        push!(stages, PipelineStage(struc -> begin
+            StructuralSizer.emit!(tc, :pipeline, "build_pipeline", "stage_2_beams_columns", :enter)
+            _size_beams_columns!(struc, params; tc=tc)
+            StructuralSizer.emit!(tc, :pipeline, "build_pipeline", "stage_2_beams_columns", :exit)
+        end, true))
     end
     
     # ─── Stage 3: Foundations (if requested) ─── no Asap model changes
     if !isnothing(params.foundation_options)
-        push!(stages, PipelineStage(struc -> _size_foundations!(struc, params.foundation_options), false))
+        push!(stages, PipelineStage(struc -> begin
+            StructuralSizer.emit!(tc, :pipeline, "build_pipeline", "stage_3_foundations", :enter)
+            _size_foundations!(struc, params.foundation_options)
+            StructuralSizer.emit!(tc, :pipeline, "build_pipeline", "stage_3_foundations", :exit)
+        end, false))
     end
     
     return stages
@@ -271,8 +285,13 @@ end
 design = capture_design(struc, params)
 ```
 """
-function capture_design(struc::BuildingStructure, params::DesignParameters; t_start=nothing)
+function capture_design(struc::BuildingStructure, params::DesignParameters;
+                        t_start=nothing,
+                        tc::Union{Nothing, StructuralSizer.TraceCollector} = nothing)
     design = BuildingDesign(struc, params)
+    if tc !== nothing
+        append!(design.solver_trace, tc.events)
+    end
     _populate_slab_results!(design, struc)
     _populate_column_results!(design, struc)
     _populate_beam_results!(design, struc)
@@ -321,9 +340,13 @@ compare_designs(d1, d2)
 3. `capture_design` — populate BuildingDesign with all results
 4. Restore to pristine state
 """
-function design_building(struc::BuildingStructure, params::DesignParameters)
+function design_building(struc::BuildingStructure, params::DesignParameters;
+                         tc::Union{Nothing, StructuralSizer.TraceCollector} = nothing)
     t_start = time()
     
+    StructuralSizer.emit!(tc, :pipeline, "design_building", "", :enter;
+                          n_slabs=length(struc.slabs), n_columns=length(struc.columns))
+
     t0 = time()
     prepare!(struc, params)
     t_prepare = time() - t0
@@ -335,14 +358,14 @@ function design_building(struc::BuildingStructure, params::DesignParameters)
     end
     
     t0 = time()
-    for stage in build_pipeline(params)
+    for stage in build_pipeline(params; tc=tc)
         stage.fn(struc)
         stage.needs_sync && sync_asap!(struc; params=params)
     end
     t_pipeline = time() - t0
     
     t0 = time()
-    design = capture_design(struc, params; t_start=t_start)
+    design = capture_design(struc, params; t_start=t_start, tc=tc)
     t_capture = time() - t0
 
     # Build the visualization analysis model while struc still has sized
@@ -372,6 +395,10 @@ function design_building(struc::BuildingStructure, params::DesignParameters)
     design.phase_timings["analysis_model"] = round(t_analysis; digits=3)
     design.phase_timings["restore"] = round(t_restore; digits=3)
 
+    StructuralSizer.emit!(tc, :pipeline, "design_building", "", :exit;
+                          t_total=round(time() - t_start; digits=3),
+                          t_pipeline=round(t_pipeline; digits=3))
+
     @info "design_building timing" prepare=round(t_prepare; digits=2) pipeline=round(t_pipeline; digits=2) capture=round(t_capture; digits=2) analysis_model=round(t_analysis; digits=2) restore=round(t_restore; digits=2) total=round(time() - t_start; digits=2)
     
     return design
@@ -382,9 +409,9 @@ end
 
 Convenience method that creates DesignParameters from keyword arguments.
 """
-function design_building(struc::BuildingStructure; kwargs...)
+function design_building(struc::BuildingStructure; tc::Union{Nothing, StructuralSizer.TraceCollector} = nothing, kwargs...)
     params = DesignParameters(; kwargs...)
-    return design_building(struc, params)
+    return design_building(struc, params; tc=tc)
 end
 
 # =============================================================================
@@ -568,7 +595,8 @@ Iterative beam + column sizing for beam-based floor systems.
 Beams and columns are coupled: beam self-weight affects column demands, and
 column stiffness affects beam moments. This loop converges their sizes.
 """
-function _size_beams_columns!(struc::BuildingStructure, params::DesignParameters)
+function _size_beams_columns!(struc::BuildingStructure, params::DesignParameters;
+                              tc::Union{Nothing, StructuralSizer.TraceCollector} = nothing)
     # Defensive guard: slab-only systems should not run beam sizing.
     # This keeps flat-plate/flat-slab workflows resilient even if an upstream
     # caller accidentally routes into the beam+column stage.
@@ -617,6 +645,11 @@ function _size_beams_columns!(struc::BuildingStructure, params::DesignParameters
     curr_demands = Vector{Float64}(undef, n_cols_bc)
     first_iter = true
     
+    StructuralSizer.emit!(tc, :workflow, "_size_beams_columns!", "", :enter;
+                          n_beams=length(beam_edge_ids), n_columns=n_cols_bc,
+                          beam_type=string(typeof(beam_opts)),
+                          column_type=string(typeof(column_opts)))
+
     for iter in 1:max_iter
         size_beams!(struc, beam_opts; reanalyze=false)
         
@@ -638,6 +671,8 @@ function _size_beams_columns!(struc::BuildingStructure, params::DesignParameters
         
         _extract_column_demands!(curr_demands, struc)
         if !first_iter && _max_demand_change(prev_demands, curr_demands) < tol
+            StructuralSizer.emit!(tc, :workflow, "_size_beams_columns!", "", :decision;
+                                  outcome="converged", iterations=iter)
             break
         end
         copyto!(prev_demands, curr_demands)

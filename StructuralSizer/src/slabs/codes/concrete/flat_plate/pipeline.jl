@@ -598,6 +598,12 @@ end
 # Main Pipeline Function
 # =============================================================================
 
+# Register trace contract for size_flat_plate!
+TRACE_REGISTRY[(:size_flat_plate!, :slab)] =
+    TracedFunctionMeta(:size_flat_plate!, :slab,
+                       [:enter, :exit, :decision, :iteration, :fallback, :failure], nothing,
+                       @__FILE__, @__LINE__)
+
 """
     size_flat_plate!(struc, slab, column_opts; method, opts, max_iterations, verbose)
 
@@ -668,6 +674,7 @@ function size_flat_plate!(
     slab_idx::Int = 0,
     drop_panel::Union{Nothing, DropPanelGeometry} = nothing,
     fire_rating::Real = 0.0,
+    tc::Union{Nothing, TraceCollector} = nothing,
 )
     # ─── PixelFrame: rejected same as steel (validation + design_workflow should catch first) ───
     if column_opts isa PixelFrameColumnOptions
@@ -929,6 +936,16 @@ function size_flat_plate!(
     deflection_result = nothing
     ρ_prime_est = 0.0
     
+    _slab_id = "slab_$(slab_idx)"
+    emit!(tc, :slab, "size_flat_plate!", _slab_id, :enter;
+          method=method_name(method),
+          n_columns=n_cols,
+          h_initial=string(h_initial),
+          primary_span=string(slab.spans.primary),
+          secondary_span=string(slab.spans.secondary),
+          punching_strategy=string(opts.punching_strategy),
+          has_drop_panel=!isnothing(drop_panel))
+
     # =====================================================================
     # OUTER LOOP: ties Phase A → B → C together.
     # Phase B (punching) or C (rebar) may signal "need more depth", which
@@ -1128,6 +1145,8 @@ function size_flat_plate!(
             if !_defl_ok
                 h = round_up_thickness(h + h_increment, h_increment)
                 verbose && @warn "Deflection FAILED (primary). Increasing h → $h"
+                emit!(tc, :slab, "size_flat_plate!", _slab_id, :iteration;
+                      phase="A", check="two_way_deflection", passed=false, h_new=string(h))
                 last_failing_check = "two_way_deflection"
                 continue
             end
@@ -1188,6 +1207,8 @@ function size_flat_plate!(
             if !shear_result.ok
                 h = round_up_thickness(h + h_increment, h_increment)
                 verbose && @warn "One-way shear FAILED. Increasing h → $h"
+                emit!(tc, :slab, "size_flat_plate!", _slab_id, :iteration;
+                      phase="A", check="one_way_shear", passed=false, h_new=string(h))
                 last_failing_check = "one_way_shear"
                 continue
             end
@@ -1200,6 +1221,10 @@ function size_flat_plate!(
             if !flexure_result.ok
                 h = round_up_thickness(h + h_increment, h_increment)
                 verbose && @warn "Flexure not tension-controlled (Rn/Rn_max=$(round(flexure_result.max_ratio, digits=2)) at $(flexure_result.governing_strip)). Increasing h → $h"
+                emit!(tc, :slab, "size_flat_plate!", _slab_id, :iteration;
+                      phase="A", check="flexural_adequacy", passed=false,
+                      h_new=string(h), ratio=flexure_result.max_ratio,
+                      governing_strip=string(flexure_result.governing_strip))
                 last_failing_check = "flexural_adequacy"
                 continue
             end
@@ -1207,6 +1232,8 @@ function size_flat_plate!(
             # All depth-driven checks pass — h is stable
             depth_converged = true
             verbose && @debug "Phase A converged: h=$h (iter=$iter_a)"
+            emit!(tc, :slab, "size_flat_plate!", _slab_id, :decision;
+                  phase="A", outcome="converged", h=string(h), iterations=iter_a)
             break
         end  # Phase A loop
         
@@ -1367,13 +1394,21 @@ function size_flat_plate!(
             all_fails = vcat(interior_fails, edge_corner_fails)
             
             if isempty(all_fails)
-                # All columns pass punching — done
                 punching_resolved = true
                 verbose && @debug "Phase B converged: all punching OK (iter=$iter_b)"
+                emit!(tc, :slab, "size_flat_plate!", _slab_id, :decision;
+                      phase="B", outcome="all_punching_ok", iterations=iter_b,
+                      punching_ratios=[round(punching_local[i].ratio, digits=3) for i in 1:n_cols_ps])
                 break
             end
             
             # ── B4: Resolve failures ──
+            emit!(tc, :slab, "size_flat_plate!", _slab_id, :iteration;
+                  phase="B", n_interior_fails=length(interior_fails),
+                  n_edge_corner_fails=length(edge_corner_fails),
+                  strategy=string(opts.punching_strategy),
+                  failing_ratios=Dict(
+                      "col_$i" => round(punching_local[i].ratio, digits=3) for i in all_fails))
             columns_grew, h = _resolve_punching_failures!(
                 punching_local, columns, all_fails, opts, column_opts,
                 moment_results, secondary_results,
@@ -1385,6 +1420,8 @@ function size_flat_plate!(
             if h != h_before_punch
                 last_failing_check = "punching_shear"
                 verbose && @warn "Phase B bumped h → $h (last resort). Restarting Phase A."
+                emit!(tc, :slab, "size_flat_plate!", _slab_id, :fallback;
+                      phase="B", reason="punching_h_bump", h_new=string(h))
                 break
             end
             
@@ -1444,6 +1481,12 @@ function size_flat_plate!(
         )
         
         # If rebar design failed, bump h and restart from Phase A
+        if hasproperty(result, :converged) && result.converged
+            emit!(tc, :slab, "size_flat_plate!", _slab_id, :exit;
+                  converged=true, h_final=string(h), h_initial=string(h_initial),
+                  iterations=total_iters,
+                  column_sizes=[string(col.c1) * "×" * string(col.c2) for col in columns])
+        end
         if hasproperty(result, :needs_more_depth) && result.needs_more_depth
             h = round_up_thickness(h + h_increment, h_increment)
             verbose && @warn "Rebar design failed (section inadequate). Increasing h → $h, restarting Phase A."
@@ -1460,6 +1503,9 @@ function size_flat_plate!(
     end  # outer loop
     
     # ─── Non-convergence: return structured failure ───
+    emit!(tc, :slab, "size_flat_plate!", _slab_id, :failure;
+          reason="non_convergence", failing_check=last_failing_check,
+          h_final=string(h), iterations=total_iters)
     @warn "Flat plate design did not converge in $max_iterations outer iterations" last_check=last_failing_check h_final=h
     return (
         converged       = false,

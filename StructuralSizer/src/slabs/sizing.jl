@@ -28,6 +28,7 @@ function size_slabs!(
     max_iterations::Int = 10,
     verbose::Bool = false,
     fire_rating::Real = 0.0,
+    tc::Union{Nothing, TraceCollector} = nothing,
 )
     # ─── Validate: flat plate/slab require RC columns; one_way/vault accept RC or PixelFrame ───
     has_flat_plate_slab = any(s -> s.floor_type in (:flat_plate, :flat_slab), struc.slabs)
@@ -67,7 +68,7 @@ function size_slabs!(
             tasks = map(batch) do slab_idx
                 Threads.@spawn size_slab!(struc, slab_idx; options=options,
                     column_opts=column_opts, max_iterations=max_iterations,
-                    verbose=verbose, _col_cache=_col_cache, fire_rating=fire_rating)
+                    verbose=verbose, _col_cache=_col_cache, fire_rating=fire_rating, tc=tc)
             end
             fetch.(tasks)
         end
@@ -75,7 +76,7 @@ function size_slabs!(
         for slab_idx in eachindex(struc.slabs)
             size_slab!(struc, slab_idx; options=options, column_opts=column_opts,
                        max_iterations=max_iterations, verbose=verbose,
-                       _col_cache=_col_cache, fire_rating=fire_rating)
+                       _col_cache=_col_cache, fire_rating=fire_rating, tc=tc)
         end
     end
     return struc
@@ -119,13 +120,14 @@ function size_slab!(
     verbose::Bool = false,
     _col_cache = nothing,
     fire_rating::Real = 0.0,
+    tc::Union{Nothing, TraceCollector} = nothing,
 )
     slab = struc.slabs[slab_idx]
     ft = floor_type(slab.floor_type)
     return _size_slab!(ft, struc, slab, slab_idx;
                       options=options, column_opts=column_opts,
                       max_iterations=max_iterations, verbose=verbose,
-                      _col_cache=_col_cache, fire_rating=fire_rating)
+                      _col_cache=_col_cache, fire_rating=fire_rating, tc=tc)
 end
 
 # =============================================================================
@@ -149,7 +151,8 @@ function _size_slab!(::FlatPlate, struc, slab, slab_idx;
                      max_iterations::Int = 10,
                      verbose::Bool = false,
                      _col_cache = nothing,
-                     fire_rating::Real = 0.0)
+                     fire_rating::Real = 0.0,
+                     tc::Union{Nothing, TraceCollector} = nothing)
     col_opts = isnothing(column_opts) ? ConcreteColumnOptions() : column_opts
     fp_opts = options isa FlatSlabOptions ? options.base : options
     method = fp_opts.method
@@ -163,7 +166,8 @@ function _size_slab!(::FlatPlate, struc, slab, slab_idx;
                               verbose=verbose,
                               _col_cache=_col_cache,
                               slab_idx=slab_idx,
-                              fire_rating=fire_rating)
+                              fire_rating=fire_rating,
+                              tc=tc)
     
     # Handle non-convergence gracefully
     if hasproperty(result, :converged) && !result.converged
@@ -190,7 +194,8 @@ function _size_slab!(::FlatSlab, struc, slab, slab_idx;
                      max_iterations::Int = 10,
                      verbose::Bool = false,
                      _col_cache = nothing,
-                     fire_rating::Real = 0.0)
+                     fire_rating::Real = 0.0,
+                     tc::Union{Nothing, TraceCollector} = nothing)
     col_opts = isnothing(column_opts) ? ConcreteColumnOptions() : column_opts
 
     fs_opts = options isa FlatSlabOptions ? options : FlatSlabOptions(base = options)
@@ -213,7 +218,8 @@ function _size_slab!(::FlatSlab, struc, slab, slab_idx;
                               _col_cache=_col_cache,
                               slab_idx=slab_idx,
                               drop_panel=drop_panel,
-                              fire_rating=fire_rating)
+                              fire_rating=fire_rating,
+                              tc=tc)
     
     # Always persist drop panel geometry (pipeline adjusts it for ACI compliance
     # even when the overall design doesn't converge)

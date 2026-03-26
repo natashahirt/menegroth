@@ -129,6 +129,12 @@ end
 # Generic Discrete Optimization (Checker-Based)
 # =============================================================================
 
+# Register trace contract for single-material optimize_discrete
+TRACE_REGISTRY[(:optimize_discrete, :optimizer)] =
+    TracedFunctionMeta(:optimize_discrete, :optimizer,
+                       [:enter, :exit, :decision, :failure], nothing,
+                       @__FILE__, @__LINE__)
+
 """
     optimize_discrete(
         checker::AbstractCapacityChecker,
@@ -187,11 +193,18 @@ function optimize_discrete(
     output_flag::Integer = 0,
     time_limit_sec::Real = 30.0,
     cache::Union{Nothing, AbstractCapacityCache} = nothing,
+    tc::Union{Nothing, TraceCollector} = nothing,
 )
     n_groups = length(demands)
     n_groups == length(geometries) || throw(ArgumentError("demands and geometries must have the same length"))
     n_sections = length(catalog)
     
+    emit!(tc, :optimizer, "optimize_discrete", "", :enter;
+          n_groups=n_groups, n_sections=n_sections,
+          checker_type=string(typeof(checker)),
+          objective_type=string(typeof(objective)),
+          n_max_sections=n_max_sections)
+
     # Extract lengths for objective calculation
     # Strip units — JuMP can't handle Unitful quantities in expressions
     lengths = [g.L isa Length ? ustrip(u"m", g.L) : Float64(g.L) for g in geometries]
@@ -234,6 +247,11 @@ function optimize_discrete(
         end
     end
 
+    emit!(tc, :optimizer, "optimize_discrete", "", :decision;
+          phase="feasibility_screening",
+          feasible_counts=[length(f) for f in feasible],
+          any_infeasible=any(!isnothing, errors))
+
     # Check for infeasible groups (sequential — only on error path)
     for i in 1:n_groups
         if !isnothing(errors[i])
@@ -242,6 +260,8 @@ function optimize_discrete(
             if !isnothing(diag)
                 msg *= ". Diagnostic: $diag"
             end
+            emit!(tc, :optimizer, "optimize_discrete", "group_$i", :failure;
+                  reason="no_feasible_sections", message=msg)
             throw(ArgumentError(msg))
         end
     end
@@ -250,6 +270,9 @@ function optimize_discrete(
     opt_factory, solver = _choose_mip_optimizer(optimizer)
     m = JuMP.Model(opt_factory)
     
+    emit!(tc, :optimizer, "optimize_discrete", "", :decision;
+          phase="solver_selection", solver=string(solver))
+
     if solver === :highs
         # HiGHS expects Bool for output_flag
         JuMP.set_optimizer_attribute(m, "output_flag", output_flag > 0)
@@ -306,7 +329,32 @@ function optimize_discrete(
         sections[i] = catalog[bestj]
     end
     
-    return (; section_indices, sections, status, objective_value=JuMP.objective_value(m))
+    # Post-solve: generate explain_feasibility for each assigned section
+    explanations = if tc !== nothing
+        map(1:n_groups) do i
+            j = section_indices[i]
+            expl = explain_feasibility(checker, cache, j, catalog[j], material, demands[i], geometries[i])
+            emit!(tc, :optimizer, "optimize_discrete", "group_$i", :decision;
+                  phase="post_solve_explanation",
+                  section=string(catalog[j]),
+                  passed=expl.passed,
+                  governing_check=expl.governing_check,
+                  governing_ratio=expl.governing_ratio,
+                  n_checks=length(expl.checks),
+                  checks=[(name=c.name, passed=c.passed, ratio=c.ratio,
+                           code_clause=c.code_clause) for c in expl.checks])
+            expl
+        end
+    else
+        nothing
+    end
+
+    obj_val = JuMP.objective_value(m)
+    emit!(tc, :optimizer, "optimize_discrete", "", :exit;
+          status=string(status), objective_value=obj_val,
+          n_unique_sections=length(unique(section_indices)))
+
+    return (; section_indices, sections, status, objective_value=obj_val)
 end
 
 # =============================================================================
@@ -346,6 +394,12 @@ function expand_catalog_with_materials(
 
     return expanded, sec_idx, mat_idx
 end
+
+# Register trace contract for multi-material optimize_discrete
+TRACE_REGISTRY[(:optimize_discrete_multi, :optimizer)] =
+    TracedFunctionMeta(:optimize_discrete_multi, :optimizer,
+                       [:enter, :exit, :decision, :failure], nothing,
+                       @__FILE__, @__LINE__)
 
 """
     optimize_discrete(
@@ -389,11 +443,18 @@ function optimize_discrete(
     mip_gap::Real = 1e-4,
     output_flag::Integer = 0,
     time_limit_sec::Real = 30.0,
+    tc::Union{Nothing, TraceCollector} = nothing,
 )
     n_groups = length(demands)
     n_groups == length(geometries) || throw(ArgumentError("demands and geometries must have the same length"))
     n_sec = length(catalog)
     n_mat = length(materials)
+
+    emit!(tc, :optimizer, "optimize_discrete_multi", "", :enter;
+          n_groups=n_groups, n_sections=n_sec, n_materials=n_mat,
+          checker_type=string(typeof(checker)),
+          objective_type=string(typeof(objective)),
+          n_max_sections=n_max_sections)
 
     # Expand catalog: k = (m-1)*n_sec + j
     expanded, sec_idx_map, mat_idx_map = expand_catalog_with_materials(catalog, materials)
@@ -428,9 +489,16 @@ function optimize_discrete(
         feasible[i] = idxs
     end
 
+    emit!(tc, :optimizer, "optimize_discrete_multi", "", :decision;
+          phase="feasibility_screening",
+          feasible_counts=[length(f) for f in feasible],
+          any_infeasible=any(!isnothing, errors))
+
     # Check for infeasible groups
     for i in 1:n_groups
         if !isnothing(errors[i])
+            emit!(tc, :optimizer, "optimize_discrete_multi", "group_$i", :failure;
+                  reason="no_feasible_sections", message=errors[i])
             throw(ArgumentError("No feasible sections for group $i (multi-material): $(errors[i])"))
         end
     end
@@ -438,6 +506,9 @@ function optimize_discrete(
     # Build MIP model
     opt_factory, solver = _choose_mip_optimizer(optimizer)
     m = JuMP.Model(opt_factory)
+
+    emit!(tc, :optimizer, "optimize_discrete_multi", "", :decision;
+          phase="solver_selection", solver=string(solver))
 
     if solver === :highs
         JuMP.set_optimizer_attribute(m, "output_flag", output_flag > 0)
@@ -500,6 +571,31 @@ function optimize_discrete(
         materials_chosen[i] = materials[mi]
     end
 
+    # Post-solve: generate explain_feasibility for each assigned section
+    if tc !== nothing
+        for i in 1:n_groups
+            j = section_indices[i]
+            mi = material_indices[i]
+            expl = explain_feasibility(checker, caches[mi], j, catalog[j], materials[mi], demands[i], geometries[i])
+            emit!(tc, :optimizer, "optimize_discrete_multi", "group_$i", :decision;
+                  phase="post_solve_explanation",
+                  section=string(catalog[j]),
+                  material=string(materials[mi]),
+                  passed=expl.passed,
+                  governing_check=expl.governing_check,
+                  governing_ratio=expl.governing_ratio,
+                  n_checks=length(expl.checks),
+                  checks=[(name=c.name, passed=c.passed, ratio=c.ratio,
+                           code_clause=c.code_clause) for c in expl.checks])
+        end
+    end
+
+    obj_val = JuMP.objective_value(m)
+    emit!(tc, :optimizer, "optimize_discrete_multi", "", :exit;
+          status=string(status), objective_value=obj_val,
+          n_unique_sections=length(unique(section_indices)),
+          n_unique_materials=length(unique(material_indices)))
+
     return (; section_indices, sections, material_indices, materials_chosen,
-              status, objective_value=JuMP.objective_value(m))
+              status, objective_value=obj_val)
 end

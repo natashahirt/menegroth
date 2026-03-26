@@ -809,6 +809,9 @@ mutable struct BuildingDesign{T, A, P}
     
     # Wall-clock time for each design phase (prepare, pipeline, capture, etc.)
     phase_timings::Dict{String, Float64}
+
+    # Solver decision trace (populated when TraceCollector is passed to design_building)
+    solver_trace::Vector{StructuralSizer.TraceEvent}
     
     # Metadata
     created::DateTime
@@ -833,6 +836,7 @@ function BuildingDesign(struc::BuildingStructure{T, A, P}, params::DesignParamet
         Int[],    # asap_model_frame_edge_indices (populated by build_analysis_model!)
         Dict{Int, NTuple{2, Float64}}(),  # structural_offsets (captured by capture_design)
         Dict{String, Float64}(),          # phase_timings (populated by design_building)
+        StructuralSizer.TraceEvent[],     # solver_trace (populated when tc is passed)
         now(),
         0.0
     )

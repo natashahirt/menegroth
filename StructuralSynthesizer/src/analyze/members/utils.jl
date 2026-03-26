@@ -1407,6 +1407,7 @@ function size_beams!(
     resolution::Int = 200,
     reanalyze::Bool = true,
     gravity_factor::Quantity = GRAVITY,
+    tc::Union{Nothing, StructuralSizer.TraceCollector} = nothing,
 )
     dp = (hasproperty(struc, :design_parameters) && !isnothing(struc.design_parameters)) ?
          struc.design_parameters : nothing
@@ -1429,12 +1430,18 @@ function size_beams!(
         :discrete
     end
 
+    StructuralSizer.emit!(tc, :sizing, "size_beams!", "", :enter;
+                          opts_type=string(typeof(effective_opts)),
+                          strategy=string(strategy))
+
     if hasproperty(struc, :design_parameters) && !isnothing(struc.design_parameters) && struc.design_parameters.collinear_grouping
         group_collinear_members!(struc; member_type=:beams)
     end
 
-    _size_beams_impl!(struc, effective_opts, Val(strategy);
-                      resolution, reanalyze, gravity_factor)
+    result = _size_beams_impl!(struc, effective_opts, Val(strategy);
+                               resolution, reanalyze, gravity_factor)
+    StructuralSizer.emit!(tc, :sizing, "size_beams!", "", :exit)
+    return result
 end
 
 # --- Steel beams (discrete) — calls public StructuralSizer.size_beams ---
@@ -1988,6 +1995,7 @@ function size_columns!(
     resolution::Int = 200,
     reanalyze::Bool = true,
     gravity_factor::Quantity = GRAVITY,
+    tc::Union{Nothing, StructuralSizer.TraceCollector} = nothing,
 )
     dp = (hasproperty(struc, :design_parameters) && !isnothing(struc.design_parameters)) ?
          struc.design_parameters : nothing
@@ -2001,11 +2009,16 @@ function size_columns!(
         StructuralSizer.SteelColumnOptions(objective=obj)
     end
 
+    StructuralSizer.emit!(tc, :sizing, "size_columns!", "", :enter;
+                          opts_type=string(typeof(effective_opts)))
+
     if !isnothing(dp) && dp.collinear_grouping
         group_collinear_members!(struc; member_type=:columns)
     end
     
-    _size_columns_impl!(struc, effective_opts; resolution, reanalyze, gravity_factor)
+    result = _size_columns_impl!(struc, effective_opts; resolution, reanalyze, gravity_factor)
+    StructuralSizer.emit!(tc, :sizing, "size_columns!", "", :exit)
+    return result
 end
 
 # Steel implementation

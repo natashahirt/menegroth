@@ -411,6 +411,11 @@ Convenience method that creates DesignParameters from keyword arguments.
 """
 function design_building(struc::BuildingStructure; tc::Union{Nothing, StructuralSizer.TraceCollector} = nothing, kwargs...)
     params = DesignParameters(; kwargs...)
+    # This wrapper is part of the trace threading chain; emit a minimal event so
+    # audit tooling doesn't flag it as a silent `tc` sink.
+    StructuralSizer.emit!(tc, :pipeline, "design_building", "", :decision;
+                          entrypoint="kwargs_wrapper",
+                          n_kwargs=length(kwargs))
     return design_building(struc, params; tc=tc)
 end
 

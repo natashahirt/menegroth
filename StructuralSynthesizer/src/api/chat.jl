@@ -239,6 +239,7 @@ ORIENTATION (understand the building):
 DIAGNOSIS (what's wrong and why):
 - get_diagnose: High-resolution per-element diagnostics — governing checks, demand/capacity, code clauses, levers, embodied carbon, recommendations. Optional arg: units ("imperial"|"metric").
 - query_elements: Filter elements by type, ratio range, governing_check, story, or pass/fail. Avoids dumping all elements into context.
+- get_solver_trace: Tiered solver decision trace — WHY the solver chose sections, fell back, converged/diverged. Tiers: "summary" (pipeline overview), "failures" (default — all failures/fallbacks), "decisions" (+ iteration/decision detail), "full" (everything). Optional filters: element (e.g. "slab_2"), layer (e.g. "optimizer").
 - get_implemented_provisions: List of all design code clauses the solver implements. Optional arg: code (e.g., "ACI_318").
 - explain_field: Definition, units, valid values, and related checks for any API parameter. Arg: field (e.g., "deflection_limit").
 - get_applicability: DDM/EFM/FEA eligibility rules for the current geometry.
@@ -259,6 +260,7 @@ COMMUNICATION (explain to the user):
 TOOL SELECTION POLICY — match user intent to tool sequence:
   "What is this building?"         -> get_building_summary + get_current_params
   "Why is element X failing?"      -> query_elements(ok=false) or get_diagnose, then narrate_element
+  "Why did the solver pick that?"  -> get_solver_trace(tier=failures), drill with tier=decisions or element filter
   "What should I change?"          -> suggest_next_action(goal) + validate_params
   "Try changing X"                 -> validate_params -> run_design -> compare_designs
   "Explain this to me"             -> narrate_element or narrate_comparison
@@ -266,6 +268,7 @@ TOOL SELECTION POLICY — match user intent to tool sequence:
   "Does the solver check X?"       -> get_implemented_provisions
   "What does parameter Y do?"      -> explain_field(Y)
   When unsure, start with get_building_summary to orient, then get_diagnose for full context.
+  After get_diagnose, if the user needs to understand the solver's reasoning, use get_solver_trace(tier=failures) to see what drove the design.
   Always validate_params before run_design. Always compare_designs after run_design.
 
 EPISTEMIC BOUNDARY — WHAT YOU KNOW AND DO NOT KNOW:
@@ -897,6 +900,7 @@ Phase 1 — Orientation:
 Phase 2 — Diagnosis:
 - `get_diagnose`             — high-resolution per-element diagnostics.
 - `query_elements`           — filtered element subset from /diagnose data.
+- `get_solver_trace`         — tiered solver decision trace (why it chose sections, fell back, converged). Use tier=summary → failures → decisions → full.
 - `get_implemented_provisions` — design code clause index.
 - `explain_field`            — parameter definition, units, range, related checks.
 - `get_result_summary`       — structured JSON summary of the latest design result.
@@ -1021,6 +1025,19 @@ function _dispatch_chat_tool(tool::String, args::Dict{String, Any})::Dict{String
             max_ratio        = let v = get(args, "max_ratio", nothing); isnothing(v) ? nothing : Float64(v) end,
             governing_check  = get(args, "governing_check", nothing),
             ok               = let v = get(args, "ok", nothing); isnothing(v) ? nothing : Bool(v) end,
+        )
+
+    elseif tool == "get_solver_trace"
+        isnothing(DESIGN_CACHE.last_design) && return Dict("error" => "no_design", "message" => "No design has been run yet.", "recovery_hint" => _NO_DESIGN_HINT)
+        tier_arg    = get(args, "tier", "failures")
+        element_arg = get(args, "element", nothing)
+        layer_arg   = get(args, "layer", nothing)
+        tier_sym    = Symbol(tier_arg)
+        layer_sym   = isnothing(layer_arg) ? nothing : Symbol(layer_arg)
+        return agent_solver_trace(DESIGN_CACHE.last_design;
+            tier    = tier_sym,
+            element = isnothing(element_arg) ? nothing : string(element_arg),
+            layer   = layer_sym,
         )
 
     elseif tool == "get_implemented_provisions"
@@ -1252,7 +1269,7 @@ function _dispatch_chat_tool(tool::String, args::Dict{String, Any})::Dict{String
             "error"   => "unknown_tool",
             "message" => "Unknown tool: \"$tool\". Available: " *
                 "get_building_summary, get_design_history, get_current_params, " *
-                "get_diagnose, query_elements, get_implemented_provisions, explain_field, " *
+                "get_diagnose, query_elements, get_solver_trace, get_implemented_provisions, explain_field, " *
                 "get_result_summary, get_condensed_result, get_applicability, " *
                 "validate_params, run_design, compare_designs, suggest_next_action, " *
                 "narrate_element, narrate_comparison, clarify_user_intent.",

@@ -306,6 +306,20 @@ const TOOL_REGISTRY = [
         "requires_geometry" => false,
     ),
     Dict{String, Any}(
+        "name"              => "get_solver_trace",
+        "description"       => "Tiered solver decision trace: why the solver chose specific sections, fell back, converged/diverged, and what check ratios it computed.",
+        "phase"             => "diagnosis",
+        "use_when"          => "You need to understand WHY a design looks the way it does — not just what passed/failed, but the solver's reasoning path. Start with tier=summary or tier=failures; drill deeper with tier=decisions or tier=full.",
+        "args"              => Dict{String, Any}(
+            "tier"    => Dict("type" => "string", "enum" => ["summary", "failures", "decisions", "full"], "optional" => true, "description" => "Detail level. Default: failures."),
+            "element" => Dict("type" => "string", "optional" => true, "description" => "Filter to events for a specific element (e.g. 'column_group_3', 'slab_2')."),
+            "layer"   => Dict("type" => "string", "enum" => ["pipeline", "workflow", "sizing", "optimizer", "checker", "slab"], "optional" => true, "description" => "Filter to a specific trace layer."),
+        ),
+        "returns"           => "Dict with tier, total_events, shown_events, stage_timeline, events array, and optional hints for deeper inspection.",
+        "requires_design"   => true,
+        "requires_geometry" => false,
+    ),
+    Dict{String, Any}(
         "name"              => "get_result_summary",
         "description"       => "Per-element JSON summary (check ratios, sections, failures).",
         "phase"             => "diagnosis",

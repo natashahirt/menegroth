@@ -2,7 +2,7 @@
 # Agent Tools — implementation functions for LLM agent tool dispatch
 #
 # Phase 1 (Orientation): get_building_summary, get_current_params
-# Phase 2 (Diagnosis):   query_elements, explain_field
+# Phase 2 (Diagnosis):   query_elements, explain_field, get_solver_trace
 # Phase 3 (Exploration):  compare_designs, suggest_next_action
 # =============================================================================
 
@@ -340,4 +340,92 @@ function agent_suggest_next_action(design::BuildingDesign, goal::String)::Dict{S
         "note" => "Recommendations are from the /diagnose architectural layer. " *
                   "Lever impacts are analytical or estimated — use run_design for exact results.",
     )
+end
+
+# ─── Phase 2 continued: Solver Trace ─────────────────────────────────────────
+#
+# Core serialization helpers (serialize_trace_event, build_stage_timeline,
+# filter_trace, TIER_EVENT_FILTERS, etc.) live in StructuralSizer.trace so
+# they can be tested independently. This function assembles the LLM-facing
+# response Dict using those shared primitives.
+# ─────────────────────────────────────────────────────────────────────────────
+
+"""
+    agent_solver_trace(design::BuildingDesign; tier, element, layer) -> Dict{String, Any}
+
+Tiered serializer for the solver decision trace. Returns a structured Dict
+optimized for LLM consumption.
+
+# Tiers (progressive disclosure)
+- `:summary`   — pipeline/workflow enter/exit only (~5–15 events)
+- `:failures`  — summary + all failure/fallback events
+- `:decisions` — failures + decision/iteration events
+- `:full`      — every recorded event
+
+# Filters
+- `element::String` — restrict to events matching this `element_id`
+- `layer::Symbol`   — restrict to events from this trace layer
+
+The return Dict includes metadata (`tier`, `total_events`, `shown_events`,
+`layers_present`) so the LLM knows what it's seeing and can request a
+deeper tier or narrower filter if needed.
+"""
+function agent_solver_trace(
+    design::BuildingDesign;
+    tier::Symbol = :failures,
+    element::Union{String, Nothing} = nothing,
+    layer::Union{Symbol, Nothing} = nothing,
+)::Dict{String, Any}
+    events = design.solver_trace
+
+    if isempty(events)
+        return Dict{String, Any}(
+            "tier"         => string(tier),
+            "total_events" => 0,
+            "shown_events" => 0,
+            "events"       => Any[],
+            "note"         => "No solver trace available. The design may have been run " *
+                              "without tracing enabled, or from Grasshopper (which does " *
+                              "not yet pass a TraceCollector).",
+        )
+    end
+
+    tier in StructuralSizer.TRACE_TIERS || return Dict{String, Any}(
+        "error"   => "invalid_tier",
+        "message" => "Tier must be one of: $(join(StructuralSizer.TRACE_TIERS, ", ")). Got: :$tier",
+    )
+
+    filtered = StructuralSizer.filter_trace(events; tier, element, layer)
+
+    layers_present = sort(unique(string(ev.layer) for ev in events))
+    elements_present = sort(unique(ev.element_id for ev in events if !isempty(ev.element_id)))
+
+    serialized = StructuralSizer.serialize_trace_event.(filtered)
+    timeline   = StructuralSizer.build_stage_timeline(events)
+
+    result = Dict{String, Any}(
+        "tier"              => string(tier),
+        "total_events"      => length(events),
+        "shown_events"      => length(serialized),
+        "layers_present"    => layers_present,
+        "elements_present"  => elements_present,
+        "stage_timeline"    => timeline,
+        "events"            => serialized,
+    )
+
+    if !isnothing(element)
+        result["filter_element"] = element
+    end
+    if !isnothing(layer)
+        result["filter_layer"] = string(layer)
+    end
+
+    if tier == :summary && any(ev -> ev.event_type in (:failure, :fallback), events)
+        result["hint"] = "Failures detected in trace. Use tier=failures to see them."
+    elseif tier == :failures && any(ev -> ev.event_type in (:decision, :iteration), events)
+        n_decisions = count(ev -> ev.event_type in (:decision, :iteration), events)
+        result["hint"] = "$n_decisions decision/iteration events available. Use tier=decisions for detail."
+    end
+
+    return result
 end

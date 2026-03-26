@@ -260,3 +260,102 @@ function _extract_func_name(ex::Expr)
     end
     error("Cannot extract function name from signature")
 end
+
+# ==============================================================================
+# Tiered Trace Serialization
+# ==============================================================================
+# Pure functions that transform TraceEvent vectors into LLM-readable Dicts.
+# These live here (with TraceEvent) so both StructuralSizer tests and
+# StructuralSynthesizer can use them without circular dependencies.
+# ==============================================================================
+
+const TRACE_TIERS  = (:summary, :failures, :decisions, :full)
+const TRACE_LAYERS = (:pipeline, :workflow, :sizing, :optimizer, :checker, :slab)
+
+const TIER_EVENT_FILTERS = Dict{Symbol, Set{Symbol}}(
+    :summary   => Set([:enter, :exit]),
+    :failures  => Set([:enter, :exit, :failure, :fallback]),
+    :decisions => Set([:enter, :exit, :failure, :fallback, :decision, :iteration]),
+    :full      => Set([:enter, :exit, :failure, :fallback, :decision, :iteration]),
+)
+
+const TIER_LAYER_FILTERS = Dict{Symbol, Set{Symbol}}(
+    :summary   => Set([:pipeline, :workflow]),
+    :failures  => Set(TRACE_LAYERS),
+    :decisions => Set(TRACE_LAYERS),
+    :full      => Set(TRACE_LAYERS),
+)
+
+"""
+    serialize_trace_event(ev::TraceEvent) -> Dict{String, Any}
+
+Convert a TraceEvent to a JSON-serializable Dict. The raw timestamp is rounded
+to millisecond precision. Empty `element_id` and `data` fields are omitted
+to keep payloads compact.
+"""
+function serialize_trace_event(ev::TraceEvent)::Dict{String, Any}
+    d = Dict{String, Any}(
+        "t"       => round(ev.timestamp; digits=3),
+        "layer"   => string(ev.layer),
+        "stage"   => ev.stage,
+        "type"    => string(ev.event_type),
+    )
+    !isempty(ev.element_id) && (d["element"] = ev.element_id)
+    !isempty(ev.data)       && (d["data"] = ev.data)
+    return d
+end
+
+"""
+    build_stage_timeline(events::Vector{TraceEvent}) -> Vector{Dict{String, Any}}
+
+Pair enter/exit events at the pipeline and workflow layers into a compact
+timeline with durations. Serves as a table-of-contents for the full trace.
+"""
+function build_stage_timeline(events::Vector{TraceEvent})
+    timeline = Dict{String, Any}[]
+    enter_stack = Dict{String, Float64}()
+
+    for ev in events
+        ev.layer in (:pipeline, :workflow) || continue
+        key = "$(ev.layer)/$(ev.stage)"
+        if ev.event_type == :enter
+            enter_stack[key] = ev.timestamp
+        elseif ev.event_type == :exit && haskey(enter_stack, key)
+            dt = ev.timestamp - enter_stack[key]
+            push!(timeline, Dict{String, Any}(
+                "stage"      => ev.stage,
+                "layer"      => string(ev.layer),
+                "duration_s" => round(dt; digits=3),
+            ))
+            delete!(enter_stack, key)
+        end
+    end
+
+    return timeline
+end
+
+"""
+    filter_trace(events::Vector{TraceEvent}; tier, element, layer) -> Vector{TraceEvent}
+
+Apply tier-based and optional element/layer filters to a trace event vector.
+Returns the filtered subset.
+"""
+function filter_trace(
+    events::Vector{TraceEvent};
+    tier::Symbol = :failures,
+    element::Union{String, Nothing} = nothing,
+    layer::Union{Symbol, Nothing} = nothing,
+)::Vector{TraceEvent}
+    tier in TRACE_TIERS || error("Invalid tier :$tier. Must be one of: $(join(TRACE_TIERS, ", "))")
+
+    allowed_types  = TIER_EVENT_FILTERS[tier]
+    allowed_layers = TIER_LAYER_FILTERS[tier]
+
+    return filter(events) do ev
+        ev.event_type in allowed_types || return false
+        ev.layer in allowed_layers     || return false
+        !isnothing(element) && ev.element_id != element && return false
+        !isnothing(layer)   && ev.layer != layer        && return false
+        return true
+    end
+end

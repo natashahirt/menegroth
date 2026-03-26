@@ -119,6 +119,8 @@ include("visualization/_visualization.jl")
 export TraceEvent, TraceCollector, emit!, reset!
 export TracedFunctionMeta, registered_functions, TRACE_REGISTRY
 export @traced
+export TRACE_TIERS, TRACE_LAYERS, TIER_EVENT_FILTERS, TIER_LAYER_FILTERS
+export serialize_trace_event, build_stage_timeline, filter_trace
 
 # --- Abstract types ---
 export AbstractMaterial, AbstractDesignCode, AbstractSection

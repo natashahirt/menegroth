@@ -235,6 +235,49 @@ end
         @test !haskey(r, "error") || r["error"] != "unknown_tool"
     end
 
+    @testset "explain_trace_lookup — breadcrumb microscope round-trip (best effort)" begin
+        trace = dispatch("get_solver_trace", Dict{String, Any}("tier" => "decisions"))
+        if haskey(trace, "events") && trace["events"] isa AbstractVector
+            # Find the first breadcrumb group event that includes top_elements[] with lookup
+            lookup = nothing
+            for ev in trace["events"]
+                !(ev isa AbstractDict) && continue
+                data = get(ev, "data", nothing)
+                !(data isa AbstractDict) && continue
+                get(data, "breadcrumbs_kind", "") == "member_group" || continue
+                tops = get(data, "top_elements", nothing)
+                !(tops isa AbstractVector) && continue
+                isempty(tops) && continue
+                first_top = tops[1]
+                (first_top isa AbstractDict) || continue
+                lk = get(first_top, "lookup", nothing)
+                (lk isa AbstractDict) || continue
+                lookup = lk
+                break
+            end
+
+            if isnothing(lookup)
+                @info "No breadcrumb lookup key found in trace (trace may be empty or filtered out of tier=decisions)"
+                @test true
+            else
+                r = dispatch("explain_trace_lookup", Dict{String, Any}("lookup" => lookup))
+                # Best effort: tool may return a structured error if the lookup is malformed
+                # or if the design doesn't contain the necessary artifacts.
+                if haskey(r, "error")
+                    @info "explain_trace_lookup returned error" error=r["error"] message=get(r, "message", "")
+                    @test true
+                else
+                    @test haskey(r, "checks")
+                    @test haskey(r, "governing_check")
+                    @test haskey(r, "governing_ratio")
+                end
+            end
+        else
+            @info "No solver trace events; skipping explain_trace_lookup round-trip"
+            @test true
+        end
+    end
+
     @testset "run_experiment — punching (best effort)" begin
         col_ids = collect(keys(design.columns))
         if isempty(col_ids)

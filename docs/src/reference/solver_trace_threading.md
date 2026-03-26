@@ -11,6 +11,38 @@ This page documents the **intended `tc` threading chain** from the building-leve
 - Never guard `emit!` with `if tc !== nothing` — the `Nothing` method is already a no-op.
 - Trace **at function/decision level**, not inside hot inner loops.
 
+## Breadcrumb bundles (post-hoc microscope handles)
+
+In addition to the regular decision trace (optimizer iterations, fallbacks, etc.), the pipeline emits **low-volume breadcrumb bundles** that make it possible to “zoom in later” during post-processing even if you didn’t know ahead of time which element you would want to inspect.
+
+Current behavior:
+
+- Breadcrumbs are emitted during `StructuralSynthesizer.capture_design(...)` after column/beam results have been populated.
+- Breadcrumb events live at `layer = :workflow`, `stage = "breadcrumbs_members"`, `event_type = :decision`.
+- A summary event is emitted per member type, plus up to a bounded number of per-group events.
+
+Schema (stable contract, `version=1`):
+
+- Group event: `data.breadcrumbs_kind == "member_group"`
+  - `data.member_type`: `"beams"` or `"columns"`
+  - `data.group_id`: `String` (the resolved `UInt64` group id)
+  - `data.group_max_ratio`: `Float64`
+  - `data.top_elements`: array of top‑k exemplars (default k=3), each with:
+    - `element_id`: `"beam_<idx>"` or `"column_<idx>"`
+    - `governing_check`: `String`
+    - `governing_ratio`: `Float64`
+    - `ok`: `Bool`
+    - `lookup`: compact key used for post-hoc resolution:
+      - `version`: `1`
+      - `kind`: `"member"`
+      - `member_type`: `"beam"` or `"column"`
+      - `member_idx`: `Int` (1-based index into `struc.beams` / `struc.columns`)
+      - `group_id`: `String` (same as above)
+
+Post-hoc microscope:
+
+- The API tool `explain_trace_lookup` accepts the `lookup` dict from a breadcrumb and reconstructs the inputs needed to run `StructuralSizer.explain_feasibility` for the designed section of that element.
+
 ## StructuralSynthesizer → StructuralSizer (building-level workflow)
 
 Entry points:

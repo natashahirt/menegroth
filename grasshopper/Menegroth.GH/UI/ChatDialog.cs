@@ -98,7 +98,11 @@ namespace Menegroth.GH.UI
         /// Create the chat dialog.
         /// </summary>
         /// <param name="mode">"design" or "results"</param>
-        /// <param name="geometrySummary">Geometry summary text from GeometryInput.</param>
+        /// <param name="geometrySummary">Optional geometry summary text for prompt context.</param>
+        /// <param name="sessionSeed">
+        ///   Optional stable seed for session/history keying. When omitted, geometrySummary
+        ///   is used as the seed to preserve legacy behavior.
+        /// </param>
         /// <param name="currentParams">Current design params (design mode).</param>
         /// <param name="result">Current design result (results mode).</param>
         /// <param name="applicabilitySchema">
@@ -116,6 +120,7 @@ namespace Menegroth.GH.UI
         public ChatDialog(
             string mode,
             string geometrySummary,
+            string? sessionSeed,
             DesignParamsData? currentParams,
             DesignResult? result,
             JObject? applicabilitySchema = null,
@@ -127,7 +132,7 @@ namespace Menegroth.GH.UI
             _geometrySummary   = geometrySummary ?? "";
             _paramsJson        = currentParams?.ToJson();
             _applicabilitySchema = applicabilitySchema;
-            _sessionId         = ComputeSessionId(geometrySummary);
+            _sessionId         = ComputeSessionId(string.IsNullOrWhiteSpace(sessionSeed) ? geometrySummary : sessionSeed);
             _autoAnalyze       = autoAnalyze;
 
             Title       = mode == "design" ? "Design Assistant" : "Results Assistant";

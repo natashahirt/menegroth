@@ -1,11 +1,24 @@
 # =============================================================================
 # Narrate — audience-aware LLM explanations for the agent
 #
-# narrate_element:    explain one element's design for an architect or engineer
+# narrate_element:    explain one element's design for an architect, engineer, or custom audience
 # narrate_comparison: explain the difference between two designs
 # =============================================================================
 
 using HTTP
+
+"""
+    _normalize_audience(audience) -> String
+
+Normalize audience labels for narration tools:
+- "architect", "engineer", "custom" are accepted (case-insensitive)
+- unknown values are treated as "custom" instead of throwing validation errors
+"""
+function _normalize_audience(audience::String)::String
+    a = lowercase(strip(audience))
+    a in ("architect", "engineer", "custom") && return a
+    return "custom"
+end
 
 """
     agent_narrate_element(design::BuildingDesign, element_type::String,
@@ -26,10 +39,7 @@ function agent_narrate_element(
         "error"   => "invalid_type",
         "message" => "element_type must be one of: $(join(valid_types, ", ")).",
     )
-    audience in ("architect", "engineer") || return Dict(
-        "error"   => "invalid_audience",
-        "message" => "audience must be \"architect\" or \"engineer\".",
-    )
+    audience = _normalize_audience(audience)
 
     diag = design_to_diagnose(design)
     type_key = element_type * "s"
@@ -181,7 +191,9 @@ function _narrate_element_llm(
     facts_json = JSON3.write(facts)
     audience_style = audience == "architect" ?
         "Use plain language with physical intuition and avoid code jargon." :
-        "Use concise engineering language and mention governing check details when available."
+        audience == "engineer" ?
+        "Use concise engineering language and mention governing check details when available." :
+        "Use concise, neutral language tailored to a custom audience. Avoid fluff and avoid architectural analogies."
 
     system_prompt = """
 You are a structural engineering explainer for Menegroth.
@@ -324,10 +336,7 @@ Compose a plain-English paragraph comparing two designs using the configured
 LLM, grounded in the structured deltas from `agent_compare_designs`.
 """
 function agent_narrate_comparison(index_a::Int, index_b::Int, audience::String)::Dict{String, Any}
-    audience in ("architect", "engineer") || return Dict(
-        "error"   => "invalid_audience",
-        "message" => "audience must be \"architect\" or \"engineer\".",
-    )
+    audience = _normalize_audience(audience)
 
     delta = agent_compare_designs(index_a, index_b)
     haskey(delta, "error") && return delta
@@ -435,7 +444,9 @@ function _narrate_comparison_llm(
     facts_json = JSON3.write(facts)
     audience_style = audience == "architect" ?
         "Use plain language focused on implications, risk, and design intent." :
-        "Use concise engineering language focused on checks, ratios, and trade-offs."
+        audience == "engineer" ?
+        "Use concise engineering language focused on checks, ratios, and trade-offs." :
+        "Use concise neutral language for a custom audience, with explicit numbers and no stylistic analogies."
 
     system_prompt = """
 You are a structural engineering explainer for Menegroth.

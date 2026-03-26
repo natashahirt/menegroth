@@ -285,7 +285,7 @@ const TOOL_REGISTRY = [
         "args"              => Dict{String, Any}(
             "element_type" => Dict("type" => "string", "required" => true, "enum" => ["column", "beam", "slab", "foundation"]),
             "element_id"   => Dict("type" => "integer", "required" => true),
-            "audience"     => Dict("type" => "string", "required" => true, "enum" => ["architect", "engineer"]),
+            "audience"     => Dict("type" => "string", "required" => true, "enum" => ["architect", "engineer", "custom"]),
         ),
         "returns"           => "Dict with narrative (string) and key_facts (dict).",
         "requires_design"   => true,
@@ -299,7 +299,7 @@ const TOOL_REGISTRY = [
         "args"              => Dict{String, Any}(
             "index_a"  => Dict("type" => "integer", "required" => true),
             "index_b"  => Dict("type" => "integer", "required" => true),
-            "audience" => Dict("type" => "string", "required" => true, "enum" => ["architect", "engineer"]),
+            "audience" => Dict("type" => "string", "required" => true, "enum" => ["architect", "engineer", "custom"]),
         ),
         "returns"           => "Dict with narrative (string) and deltas (dict).",
         "requires_design"   => true,

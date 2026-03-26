@@ -250,8 +250,8 @@ EXPLORATION (what to try):
 - suggest_next_action: Ranked parameter changes for a goal. Arg: goal ("fix_failures"|"reduce_column_size"|"reduce_slab_thickness"|"reduce_ec").
 
 COMMUNICATION (explain to the user):
-- narrate_element: Plain-English explanation of one element's design. Args: element_type, element_id, audience ("architect"|"engineer").
-- narrate_comparison: Plain-English comparison of two designs. Args: index_a, index_b, audience ("architect"|"engineer").
+- narrate_element: Plain-English explanation of one element's design. Args: element_type, element_id, audience ("architect"|"engineer"|"custom").
+- narrate_comparison: Plain-English comparison of two designs. Args: index_a, index_b, audience ("architect"|"engineer"|"custom").
 - get_result_summary: Per-element JSON summary (check ratios, sections, failures).
 - get_condensed_result: ~500-token plain-text result summary.
 - clarify_user_intent: Structured multiple-choice clarification payload for the UI.
@@ -499,16 +499,172 @@ end
 
 # ─── LLM streaming client ────────────────────────────────────────────────────
 
+const MAX_AGENT_TOOL_ROUNDS = 4
+
+"""Read dictionary values by string/symbol key with fallback."""
+function _dict_get(d, key::String, default=nothing)
+    if d isa AbstractDict
+        haskey(d, key) && return d[key]
+        sym = Symbol(key)
+        haskey(d, sym) && return d[sym]
+    end
+    return default
+end
+
+"""
+    _json_schema_from_tool_arg(desc) -> Dict{String, Any}
+
+Convert one tool-arg descriptor from `TOOL_REGISTRY` into an OpenAI tool JSON schema.
+"""
+function _json_schema_from_tool_arg(desc::AbstractDict)::Dict{String, Any}
+    d = Dict{String, Any}(string(k) => v for (k, v) in desc)
+    t = lowercase(string(get(d, "type", "string")))
+    base_type = if startswith(t, "integer")
+        "integer"
+    elseif startswith(t, "number")
+        "number"
+    elseif startswith(t, "boolean")
+        "boolean"
+    elseif startswith(t, "array")
+        "array"
+    elseif startswith(t, "object")
+        "object"
+    else
+        "string"
+    end
+
+    schema = Dict{String, Any}("type" => base_type)
+    haskey(d, "description") && (schema["description"] = string(d["description"]))
+    haskey(d, "enum") && (schema["enum"] = collect(d["enum"]))
+
+    if base_type == "array" && !haskey(schema, "items")
+        schema["items"] = Dict{String, Any}("type" => "string")
+    end
+
+    if base_type == "object"
+        fields = get(d, "fields", Dict{String, Any}())
+        if fields isa AbstractDict && !isempty(fields)
+            props = Dict{String, Any}()
+            req = String[]
+            for (fk, fv) in fields
+                if fv isa AbstractDict
+                    fdesc = Dict{String, Any}(string(k) => v for (k, v) in fv)
+                    props[string(fk)] = _json_schema_from_tool_arg(fdesc)
+                    Bool(get(fdesc, "required", false)) && push!(req, string(fk))
+                else
+                    props[string(fk)] = Dict{String, Any}("type" => "string")
+                end
+            end
+            schema["properties"] = props
+            schema["additionalProperties"] = false
+            !isempty(req) && (schema["required"] = req)
+        end
+    end
+    return schema
+end
+
+"""
+    _openai_tool_specs() -> Vector{Dict{String, Any}}
+
+Build OpenAI tool-function specs from the backend tool registry.
+"""
+function _openai_tool_specs()::Vector{Dict{String, Any}}
+    specs = Dict{String, Any}[]
+    for entry in api_tool_schema()
+        name = string(get(entry, "name", ""))
+        isempty(name) && continue
+        desc = string(get(entry, "description", ""))
+        args = get(entry, "args", Dict{String, Any}())
+
+        params = Dict{String, Any}(
+            "type" => "object",
+            "properties" => Dict{String, Any}(),
+            "additionalProperties" => false,
+        )
+        required = String[]
+        if args isa AbstractDict
+            for (arg_name, arg_desc) in args
+                if arg_desc isa AbstractDict
+                    d = Dict{String, Any}(string(k) => v for (k, v) in arg_desc)
+                    params["properties"][string(arg_name)] = _json_schema_from_tool_arg(d)
+                    Bool(get(d, "required", false)) && push!(required, string(arg_name))
+                else
+                    params["properties"][string(arg_name)] = Dict{String, Any}("type" => "string")
+                end
+            end
+        end
+        !isempty(required) && (params["required"] = required)
+
+        push!(specs, Dict{String, Any}(
+            "type" => "function",
+            "function" => Dict{String, Any}(
+                "name" => name,
+                "description" => desc,
+                "parameters" => params,
+            ),
+        ))
+    end
+    return specs
+end
+
+"""Normalize assistant message content into plain text."""
+function _coerce_message_content(raw)::String
+    isnothing(raw) && return ""
+    raw isa AbstractString && return string(raw)
+    if raw isa AbstractVector
+        parts = String[]
+        for item in raw
+            if item isa AbstractDict
+                txt = _dict_get(item, "text", nothing)
+                !isnothing(txt) && push!(parts, string(txt))
+            else
+                push!(parts, string(item))
+            end
+        end
+        return join(parts)
+    end
+    return string(raw)
+end
+
+"""
+    _parse_tool_args(args_json) -> Union{Dict{String, Any}, Nothing}
+
+Parse a JSON argument blob from OpenAI tool-calls into a mutable Dict.
+"""
+function _parse_tool_args(args_json::String)::Union{Dict{String, Any}, Nothing}
+    s = strip(args_json)
+    isempty(s) && return Dict{String, Any}()
+    try
+        raw = JSON3.read(s)
+        raw isa AbstractDict || return nothing
+        return Dict{String, Any}(string(k) => v for (k, v) in raw)
+    catch
+        return nothing
+    end
+end
+
+"""Compact one-line summary of tool execution result for turn-summary telemetry."""
+function _tool_action_summary(result::Dict{String, Any})::String
+    haskey(result, "message") && return string(result["message"])[1:min(end, 240)]
+    haskey(result, "note") && return string(result["note"])[1:min(end, 240)]
+    if haskey(result, "error")
+        return "error: " * string(result["error"])[1:min(end, 180)]
+    end
+    if haskey(result, "ok")
+        return Bool(result["ok"]) ? "ok" : "not_ok"
+    end
+    return "completed"
+end
+
 """
     _stream_llm_to_sse(stream, system_prompt, messages; session_id="")
 
-Call the OpenAI-compatible chat completions endpoint with streaming enabled
-and forward SSE token events directly to the client stream.
+Call the OpenAI-compatible chat completions endpoint and forward response text
+as SSE token events.
 
-After the LLM finishes, extracts the structured suggestions block from the
-accumulated response and emits a final `agent_turn_summary` SSE event before
-the `[DONE]` sentinel. If `session_id` is provided, the assistant response is
-appended to server-side conversation history.
+If the model emits tool calls, execute them server-side via `_dispatch_chat_tool`,
+append tool results to the chat context, and continue until a final assistant
+message is produced (or `MAX_AGENT_TOOL_ROUNDS` is reached).
 """
 function _stream_llm_to_sse(
     stream::HTTP.Stream,
@@ -522,66 +678,127 @@ function _stream_llm_to_sse(
 
     url = rstrip(base_url, '/') * "/v1/chat/completions"
 
-    all_messages = vcat(
+    conversation = vcat(
         [Dict("role" => "system", "content" => system_prompt)],
         messages,
     )
-
-    body = JSON3.write(Dict(
-        "model"    => model,
-        "messages" => all_messages,
-        "stream"   => true,
-    ))
+    tools = _openai_tool_specs()
 
     headers = [
         "Content-Type"  => "application/json",
         "Authorization" => "Bearer $api_key",
     ]
 
-    response_buf = IOBuffer()
+    full_text = ""
+    tool_actions = Dict{String, Any}[]
 
     try
-        # NOTE: HTTP.open has been unreliable against api.openai.com in this environment
-        # (frequent ECONNRESET). HTTP.post is stable, so we parse returned SSE lines.
-        r = HTTP.post(
-            url,
-            headers,
-            body;
-            connect_timeout=10,
-            readtimeout=120,
-            status_exception=false,
-            cookies=false,
-        )
-
-        if r.status >= 400
-            err_body = String(r.body)
-            err_preview = err_body[1:min(end, 500)]
-            throw(ErrorException("OpenAI returned HTTP $(r.status): $(err_preview)"))
-        end
-
-        sse_payload = String(r.body)
-        for raw_line in split(sse_payload, '\n')
-            line = strip(raw_line)
-            startswith(line, "data: ") || continue
-            data_str = line[7:end]
-            data_str == "[DONE]" && break
-            try
-                chunk = JSON3.read(data_str)
-                choices = get(chunk, :choices, nothing)
-                isnothing(choices) && continue
-                delta = get(choices[1], :delta, nothing)
-                isnothing(delta) && continue
-                content = get(delta, :content, nothing)
-                isnothing(content) && continue
-                token_str = string(content)
-                write(response_buf, token_str)
-                write(stream, "data: $(JSON3.write(Dict("token" => token_str)))\n\n")
-            catch parse_err
-                @debug "SSE chunk parse skip" err=parse_err
+        for round in 1:MAX_AGENT_TOOL_ROUNDS
+            payload = Dict{String, Any}(
+                "model" => model,
+                "messages" => conversation,
+                "stream" => false,
+            )
+            if !isempty(tools)
+                payload["tools"] = tools
+                payload["tool_choice"] = "auto"
+                payload["parallel_tool_calls"] = false
             end
+
+            r = HTTP.post(
+                url,
+                headers,
+                JSON3.write(payload);
+                connect_timeout=10,
+                readtimeout=120,
+                status_exception=false,
+                cookies=false,
+            )
+
+            if r.status >= 400
+                err_body = String(r.body)
+                err_preview = err_body[1:min(end, 500)]
+                throw(ErrorException("OpenAI returned HTTP $(r.status): $(err_preview)"))
+            end
+
+            resp = JSON3.read(String(r.body))
+            choices = get(resp, :choices, nothing)
+            (isnothing(choices) || isempty(choices)) && throw(ErrorException("OpenAI response missing choices."))
+            msg = get(choices[1], :message, nothing)
+            isnothing(msg) && throw(ErrorException("OpenAI response missing message payload."))
+
+            assistant_content = _coerce_message_content(get(msg, :content, nothing))
+            tool_calls_raw = get(msg, :tool_calls, nothing)
+
+            if tool_calls_raw isa AbstractVector && !isempty(tool_calls_raw)
+                assistant_tool_calls = Dict{String, Any}[]
+                tool_results = Dict{String, Any}[]
+
+                for (i, tc) in enumerate(tool_calls_raw)
+                    fn_obj = _dict_get(tc, "function", Dict{String, Any}())
+                    tool_name = string(_dict_get(fn_obj, "name", ""))
+                    args_json = string(_dict_get(fn_obj, "arguments", "{}"))
+                    call_id = string(_dict_get(tc, "id", "call_$(round)_$(i)"))
+                    isempty(call_id) && (call_id = "call_$(round)_$(i)")
+
+                    push!(assistant_tool_calls, Dict{String, Any}(
+                        "id" => call_id,
+                        "type" => "function",
+                        "function" => Dict{String, Any}(
+                            "name" => tool_name,
+                            "arguments" => args_json,
+                        ),
+                    ))
+
+                    t0 = time()
+                    args_dict = _parse_tool_args(args_json)
+                    result = if isnothing(args_dict)
+                        Dict{String, Any}(
+                            "error" => "tool_args_parse_failed",
+                            "message" => "Could not parse tool arguments as JSON.",
+                            "tool" => tool_name,
+                            "raw_arguments" => args_json,
+                        )
+                    else
+                        _dispatch_chat_tool(tool_name, args_dict)
+                    end
+                    elapsed_ms = round(Int, (time() - t0) * 1000)
+
+                    push!(tool_actions, Dict{String, Any}(
+                        "tool" => tool_name,
+                        "status" => haskey(result, "error") ? "error" : "ok",
+                        "elapsed_ms" => elapsed_ms,
+                        "summary" => _tool_action_summary(result),
+                    ))
+
+                    push!(tool_results, Dict{String, Any}(
+                        "role" => "tool",
+                        "tool_call_id" => call_id,
+                        "content" => JSON3.write(result),
+                    ))
+                end
+
+                push!(conversation, Dict{String, Any}(
+                    "role" => "assistant",
+                    "content" => assistant_content,
+                    "tool_calls" => assistant_tool_calls,
+                ))
+                append!(conversation, tool_results)
+                continue
+            end
+
+            full_text = assistant_content
+            break
         end
 
-        full_text          = String(take!(response_buf))
+        if isempty(full_text) && !isempty(tool_actions)
+            full_text = "I executed the requested tool calls but did not receive a final response message. Please retry."
+        end
+
+        if !isempty(full_text)
+            write(stream, "data: $(JSON3.write(Dict("token" => full_text)))\n\n")
+        end
+
         suggestions        = _extract_suggestions(full_text)
         clarification_data = _extract_clarification_prompt(full_text)
 
@@ -593,6 +810,7 @@ function _stream_llm_to_sse(
         summary = _build_turn_summary(;
             suggestions        = suggestions,
             clarification_data = clarification_data,
+            tool_actions       = tool_actions,
         )
         write(stream, "data: $(JSON3.write(summary))\n\n")
 

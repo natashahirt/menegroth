@@ -40,10 +40,6 @@ namespace Menegroth.GH.Components
         {
             pManager.AddGenericParameter("Result", "Result",
                 "DesignResult from the DesignRun component", GH_ParamAccess.item);
-            pManager.AddGenericParameter("Geometry", "Geometry",
-                "BuildingGeometry from the GeometryInput component", GH_ParamAccess.item);
-            pManager.AddTextParameter("Geometry Summary", "GeoSummary",
-                "Geometry summary text (from GeometryInput)", GH_ParamAccess.item, "");
             pManager.AddBooleanParameter("Open", "Open",
                 "Set to true to open the chat dialog", GH_ParamAccess.item, false);
         }
@@ -57,8 +53,6 @@ namespace Menegroth.GH.Components
         protected override void SolveInstance(IGH_DataAccess DA)
         {
             DesignResultGoo?    resultGoo = null;
-            BuildingGeometryGoo? geoGoo   = null;
-            string geoSummary = "";
             bool   open       = false;
 
             if (!DA.GetData(0, ref resultGoo) || resultGoo?.Value == null)
@@ -67,9 +61,7 @@ namespace Menegroth.GH.Components
                 DA.SetData(0, "");
                 return;
             }
-            DA.GetData(1, ref geoGoo);
-            DA.GetData(2, ref geoSummary);
-            DA.GetData(3, ref open);
+            DA.GetData(1, ref open);
 
             if (!open)
             {
@@ -85,7 +77,7 @@ namespace Menegroth.GH.Components
                 // Pre-fetch conversation history for this geometry session.
                 var historyTask = DesignRunHttpClient.GetChatHistoryAsync(
                     baseUrl,
-                    ComputeSessionId(geoSummary),
+                    ComputeSessionId(BuildSessionSeed(resultGoo.Value)),
                     cts.Token);
 
                 List<JObject> history = new List<JObject>();
@@ -98,9 +90,10 @@ namespace Menegroth.GH.Components
 
                 var dialog = new ChatDialog(
                     mode:               "results",
-                    geometrySummary:    geoSummary,
+                    geometrySummary:    "",
                     currentParams:      null,
                     result:             resultGoo.Value,
+                    sessionSeed:        BuildSessionSeed(resultGoo.Value),
                     applicabilitySchema: null,
                     initialHistory:     history.Count > 0 ? history : null,
                     autoAnalyze:        true);
@@ -118,14 +111,23 @@ namespace Menegroth.GH.Components
 
         /// <summary>
         /// Derive the session ID that <see cref="ChatDialog"/> uses internally.
-        /// Keying by geometry summary ensures history is tied to the specific geometry.
+        /// Keying by result geometry hash ensures history is tied to one geometry.
         /// </summary>
-        private static string ComputeSessionId(string? geoSummary)
+        private static string ComputeSessionId(string? seed)
         {
-            if (string.IsNullOrEmpty(geoSummary)) return "";
+            if (string.IsNullOrEmpty(seed)) return "";
             using var sha = System.Security.Cryptography.SHA256.Create();
-            var bytes = sha.ComputeHash(System.Text.Encoding.UTF8.GetBytes(geoSummary));
+            var bytes = sha.ComputeHash(System.Text.Encoding.UTF8.GetBytes(seed));
             return BitConverter.ToString(bytes).Replace("-", "").Substring(0, 16).ToLowerInvariant();
+        }
+
+        private static string BuildSessionSeed(DesignResult result)
+        {
+            if (!string.IsNullOrWhiteSpace(result.GeometryHash))
+                return result.GeometryHash;
+            if (!string.IsNullOrWhiteSpace(result.RawJson))
+                return result.RawJson;
+            return $"results:{result.Status}:{result.ComputeTime:F3}";
         }
     }
 }

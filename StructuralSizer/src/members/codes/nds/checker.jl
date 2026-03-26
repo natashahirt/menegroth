@@ -78,6 +78,43 @@ function is_feasible(
     error("NDSChecker.is_feasible not yet implemented")
 end
 
+# ==============================================================================
+# Feasibility Explanation (Solver Trace)
+# ==============================================================================
+
+"""
+    explain_feasibility(checker::NDSChecker, cache, j, section, material, demand, geometry)
+
+Stub feasibility explanation for NDS timber checking.
+
+The NDS checker is not yet implemented; this method exists so the solver trace
+system has a stable, explicit explanation path rather than falling back to the
+generic `is_feasible` wrapper.
+
+Returns a single failing `CheckResult` with `ratio=Inf`.
+"""
+function explain_feasibility(
+    checker::NDSChecker,
+    cache,
+    j::Int,
+    section::GlulamSection,
+    material::Timber,
+    demand::AbstractDemand,
+    geometry::TimberMemberGeometry,
+)::FeasibilityExplanation
+    checks = CheckResult[
+        CheckResult(
+            "nds_checker_unimplemented",
+            false,
+            Inf,
+            0.0,
+            0.0,
+            "NDS checker not implemented",
+        ),
+    ]
+    return FeasibilityExplanation(false, checks, "nds_checker_unimplemented", Inf)
+end
+
 """
     precompute_capacities!(checker::NDSChecker, cache, catalog, material, objective)
 

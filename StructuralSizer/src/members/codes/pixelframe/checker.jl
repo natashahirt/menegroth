@@ -254,3 +254,100 @@ function get_feasibility_error_msg(
     end
     msg
 end
+
+# ==============================================================================
+# Feasibility Explanation (Solver Trace)
+# ==============================================================================
+
+"""
+    explain_feasibility(checker::PixelFrameChecker, cache, j, section, material, demand, geometry)
+
+Evaluate all PixelFrame capacity filters without short-circuiting and return per-check
+demand/capacity ratios. Mirrors `is_feasible` exactly but collects every intermediate result.
+
+Checks are reported in SI units (N, N·m, m) to match the trace contract in
+`StructuralSizer/src/optimize/core/interface.jl`.
+"""
+function explain_feasibility(
+    checker::PixelFrameChecker,
+    cache::PixelFrameCapacityCache,
+    j::Int,
+    section::PixelFrameSection,
+    material::AbstractMaterial,
+    demand::MemberDemand,
+    geometry::AbstractMemberGeometry,
+)::FeasibilityExplanation
+    checks = CheckResult[]
+
+    # --- 1. Bounding box minimums (meters) ---
+    depth_m = cache.depth_mm[j] / 1000.0
+    width_m = cache.width_mm[j] / 1000.0
+    min_depth_m = checker.min_depth_mm / 1000.0
+    min_width_m = checker.min_width_mm / 1000.0
+
+    depth_ratio = depth_m > 0 ? min_depth_m / depth_m : (min_depth_m > 0 ? Inf : 0.0)
+    width_ratio = width_m > 0 ? min_width_m / width_m : (min_width_m > 0 ? Inf : 0.0)
+
+    push!(checks, CheckResult(
+        "min_depth",
+        depth_m ≥ min_depth_m,
+        depth_ratio,
+        min_depth_m,
+        depth_m,
+        "",
+    ))
+    push!(checks, CheckResult(
+        "min_width",
+        width_m ≥ min_width_m,
+        width_ratio,
+        min_width_m,
+        width_m,
+        "",
+    ))
+
+    # --- 2. Axial (ACI 318-19 §22.4.2.3) ---
+    Pu_dem = to_newtons(demand.Pu_c)
+    Pu_cap = cache.Pu[j]
+    Pu_ratio = Pu_cap > 0 ? Pu_dem / Pu_cap : (Pu_dem > 0 ? Inf : 0.0)
+    push!(checks, CheckResult(
+        "axial",
+        Pu_cap ≥ Pu_dem,
+        Pu_ratio,
+        Pu_dem,
+        Pu_cap,
+        "ACI 318-19 22.4.2.3",
+    ))
+
+    # --- 3. Flexure (ACI 318-19 §22.4.1.2) ---
+    Mu_dem = to_newton_meters(demand.Mux)
+    Mu_cap = cache.Mu[j]
+    Mu_ratio = Mu_cap > 0 ? Mu_dem / Mu_cap : (Mu_dem > 0 ? Inf : 0.0)
+    push!(checks, CheckResult(
+        "flexure",
+        Mu_cap ≥ Mu_dem,
+        Mu_ratio,
+        Mu_dem,
+        Mu_cap,
+        "ACI 318-19 22.4.1.2",
+    ))
+
+    # --- 4. Shear (fib MC2010 §7.7-5) ---
+    Vu_dem = to_newtons(demand.Vu_strong)
+    Vu_cap = cache.Vu[j]
+    Vu_ratio = Vu_cap > 0 ? Vu_dem / Vu_cap : (Vu_dem > 0 ? Inf : 0.0)
+    push!(checks, CheckResult(
+        "shear",
+        Vu_cap ≥ Vu_dem,
+        Vu_ratio,
+        Vu_dem,
+        Vu_cap,
+        "fib MC2010 7.7-5",
+    ))
+
+    all_pass = all(c -> c.passed, checks)
+    ratios = [c.ratio for c in checks]
+    gov_idx = argmax(ratios)
+    gov = checks[gov_idx]
+
+    FeasibilityExplanation(all_pass, checks, gov.name, gov.ratio)
+end

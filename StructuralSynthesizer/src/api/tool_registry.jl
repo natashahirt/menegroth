@@ -400,6 +400,41 @@ const TOOL_REGISTRY = [
         "requires_geometry" => false,
     ),
     Dict{String, Any}(
+        "name"              => "run_experiment",
+        "description"       => "Fast micro-experiment: re-check one element with a modified parameter (column size, slab thickness, deflection limit) using cached design data. No full re-run needed.",
+        "phase"             => "exploration",
+        "use_when"          => "Before run_design, to quickly test whether a specific change would help a specific element. Much faster than a full design run.",
+        "args"              => Dict{String, Any}(
+            "type" => Dict("type" => "string", "required" => true, "enum" => ["punching", "pm_column", "deflection", "catalog_screen"], "description" => "Experiment type"),
+            "args" => Dict("type" => "object", "required" => true, "description" => "Experiment-specific args. punching: {col_idx, c1_in?, c2_in?, h_in?}. pm_column: {col_idx, section_size}. deflection: {slab_idx, deflection_limit}. catalog_screen: {col_idx, candidates: [12,14,16,...]}"),
+        ),
+        "returns"           => "Dict with original vs modified ratios, ok status, and delta.",
+        "requires_design"   => true,
+        "requires_geometry" => false,
+    ),
+    Dict{String, Any}(
+        "name"              => "list_experiments",
+        "description"       => "List available micro-experiment types with their argument schemas.",
+        "phase"             => "exploration",
+        "use_when"          => "You want to know what micro-experiments are available before running one.",
+        "args"              => Dict{String, Any}(),
+        "returns"           => "Dict with experiment names, descriptions, and argument schemas.",
+        "requires_design"   => false,
+        "requires_geometry" => false,
+    ),
+    Dict{String, Any}(
+        "name"              => "batch_experiments",
+        "description"       => "Run multiple micro-experiments in one call.",
+        "phase"             => "exploration",
+        "use_when"          => "You want to test several alternatives simultaneously (e.g. screen 5 column sizes).",
+        "args"              => Dict{String, Any}(
+            "experiments" => Dict("type" => "array", "required" => true, "description" => "Array of {type, args} objects"),
+        ),
+        "returns"           => "Dict with array of results, one per experiment.",
+        "requires_design"   => true,
+        "requires_geometry" => false,
+    ),
+    Dict{String, Any}(
         "name"              => "narrate_element",
         "description"       => "Plain-English explanation of one element's design, scaled to audience.",
         "phase"             => "communication",
@@ -407,7 +442,11 @@ const TOOL_REGISTRY = [
         "args"              => Dict{String, Any}(
             "element_type" => Dict("type" => "string", "required" => true, "enum" => ["column", "beam", "slab", "foundation"]),
             "element_id"   => Dict("type" => "integer", "required" => true),
-            "audience"     => Dict("type" => "string", "required" => true, "enum" => ["architect", "engineer", "custom"]),
+            "audience"     => Dict(
+                "type" => "string",
+                "required" => true,
+                "description" => "Preset \"architect\" or \"engineer\", or free text describing the reader (language, role, tone, format — e.g. German-speaking engineer, ASCII tables).",
+            ),
         ),
         "returns"           => "Dict with narrative (string) and key_facts (dict).",
         "requires_design"   => true,
@@ -421,7 +460,11 @@ const TOOL_REGISTRY = [
         "args"              => Dict{String, Any}(
             "index_a"  => Dict("type" => "integer", "required" => true),
             "index_b"  => Dict("type" => "integer", "required" => true),
-            "audience" => Dict("type" => "string", "required" => true, "enum" => ["architect", "engineer", "custom"]),
+            "audience" => Dict(
+                "type" => "string",
+                "required" => true,
+                "description" => "Preset \"architect\" or \"engineer\", or free text describing the reader (language, role, format preferences).",
+            ),
         ),
         "returns"           => "Dict with narrative (string) and deltas (dict).",
         "requires_design"   => true,
@@ -486,6 +529,39 @@ const TOOL_REGISTRY = [
         "requires_design"   => false,
         "requires_geometry" => false,
     ),
+    Dict{String, Any}(
+        "name"              => "record_insight",
+        "description"       => "Record a structured learning from the current design iteration.",
+        "phase"             => "exploration",
+        "use_when"          => "After observing a design outcome, record what you learned so you don't repeat dead ends in future turns. Categories: observation (general), discovery (found something useful), dead_end (this didn't work), sensitivity (parameter X has big/small effect), geometry_note (geometry-specific constraint).",
+        "args"              => Dict{String, Any}(
+            "category"       => Dict("type" => "string", "required" => true, "enum" => ["observation", "discovery", "dead_end", "sensitivity", "geometry_note"]),
+            "summary"        => Dict("type" => "string", "required" => true, "description" => "One-line summary of the insight"),
+            "detail"         => Dict("type" => "string", "optional" => true),
+            "related_checks" => Dict("type" => "array", "optional" => true, "description" => "Check families involved (e.g. punching_shear, flexure)"),
+            "related_params" => Dict("type" => "array", "optional" => true, "description" => "Parameter names involved (e.g. column_concrete, floor_type)"),
+            "design_index"   => Dict("type" => "integer", "optional" => true, "description" => "Which design history entry this relates to (0 = general)"),
+            "confidence"     => Dict("type" => "number", "optional" => true, "description" => "0-1 confidence level (default 0.5)"),
+        ),
+        "returns"           => "Dict confirming the insight was recorded.",
+        "requires_design"   => false,
+        "requires_geometry" => false,
+    ),
+    Dict{String, Any}(
+        "name"              => "get_session_insights",
+        "description"       => "Retrieve accumulated learnings from this session.",
+        "phase"             => "orientation",
+        "use_when"          => "Before making a recommendation, check what you've already learned in this session. Especially useful after multiple design iterations.",
+        "args"              => Dict{String, Any}(
+            "category"       => Dict("type" => "string", "optional" => true, "enum" => ["observation", "discovery", "dead_end", "sensitivity", "geometry_note"]),
+            "check"          => Dict("type" => "string", "optional" => true, "description" => "Filter to insights about a specific check family"),
+            "param"          => Dict("type" => "string", "optional" => true, "description" => "Filter to insights about a specific parameter"),
+            "min_confidence" => Dict("type" => "number", "optional" => true, "description" => "Minimum confidence threshold (default 0.0)"),
+        ),
+        "returns"           => "Dict with insights array.",
+        "requires_design"   => false,
+        "requires_geometry" => false,
+    ),
 ]
 
 """
@@ -494,3 +570,82 @@ const TOOL_REGISTRY = [
 Return the full tool registry for the `/schema/tools` endpoint.
 """
 api_tool_schema() = TOOL_REGISTRY
+
+const _LLM_CONTRACT_VERSION = "1.0.0"
+
+"""
+    api_llm_contract() -> Dict{String, Any}
+
+Versioned machine-readable contract describing the system's capabilities,
+tools, parameters, scope limits, and experiment types. Intended for LLM
+consumption at session start or for external integrations.
+"""
+function api_llm_contract()::Dict{String, Any}
+    tools_compact = [Dict{String, Any}(
+        "name" => t["name"],
+        "phase" => t["phase"],
+        "description" => t["description"],
+        "requires_design" => get(t, "requires_design", false),
+        "requires_geometry" => get(t, "requires_geometry", false),
+    ) for t in TOOL_REGISTRY]
+
+    params_list = [
+        Dict("name" => "floor_type", "type" => "enum", "values" => ["flat_plate", "flat_slab", "one_way", "vault"], "impact" => "high"),
+        Dict("name" => "column_concrete", "type" => "enum", "values" => ["4000", "5000", "6000", "8000", "10000"], "unit" => "psi", "impact" => "high"),
+        Dict("name" => "column_material", "type" => "enum", "values" => ["rc", "steel_w", "steel_hss"], "impact" => "high"),
+        Dict("name" => "slab_concrete", "type" => "enum", "values" => ["4000", "5000", "6000"], "unit" => "psi", "impact" => "medium"),
+        Dict("name" => "punching_strategy", "type" => "enum", "values" => ["grow_columns", "reinforce_first", "reinforce_last"], "impact" => "high"),
+        Dict("name" => "deflection_limit", "type" => "enum", "values" => ["L_240", "L_360", "L_480"], "impact" => "medium"),
+        Dict("name" => "analysis_method", "type" => "enum", "values" => ["DDM", "EFM", "FEA"], "impact" => "medium"),
+        Dict("name" => "live_load", "type" => "float", "unit" => "psf", "range" => [40, 250], "impact" => "high"),
+        Dict("name" => "superimposed_dead", "type" => "float", "unit" => "psf", "range" => [0, 50], "impact" => "medium"),
+        Dict("name" => "fire_rating", "type" => "enum", "values" => ["0", "1", "1.5", "2", "3", "4"], "unit" => "hours", "impact" => "medium"),
+        Dict("name" => "sizing_strategy", "type" => "enum", "values" => ["discrete", "nlp"], "impact" => "low"),
+        Dict("name" => "column_catalog", "type" => "enum", "values" => ["standard", "low_capacity", "high_capacity", "all"], "impact" => "medium"),
+    ]
+
+    scope_limits = [
+        "Cannot modify geometry (spans, heights, column grid) — geometry comes from Grasshopper",
+        "Cannot add or remove structural members",
+        "Cannot change load paths or framing topology",
+        "Cannot perform lateral/seismic analysis — gravity only",
+        "Cannot design connections or details",
+        "Cannot model construction staging or time-dependent effects",
+        "Cannot optimize across multiple floor types simultaneously",
+        "Single-material per member type (no hybrid steel-concrete columns)",
+    ]
+
+    experiment_types = [
+        Dict("name" => "punching", "speed" => "instant", "args" => ["col_idx", "c1_in?", "c2_in?", "h_in?"]),
+        Dict("name" => "pm_column", "speed" => "instant", "args" => ["col_idx", "section_size"]),
+        Dict("name" => "deflection", "speed" => "instant", "args" => ["slab_idx", "deflection_limit"]),
+        Dict("name" => "catalog_screen", "speed" => "instant", "args" => ["col_idx", "candidates[]"]),
+    ]
+
+    insight_categories = ["observation", "discovery", "dead_end", "sensitivity", "geometry_note"]
+
+    return Dict{String, Any}(
+        "contract_version" => _LLM_CONTRACT_VERSION,
+        "system" => "menegroth structural synthesizer",
+        "description" => "Automated structural engineering design: gravity sizing for RC and steel buildings",
+        "tools" => tools_compact,
+        "n_tools" => length(tools_compact),
+        "parameters" => params_list,
+        "lever_map_checks" => sort(collect(keys(LEVER_SURFACE_MAP))),
+        "scope_limits" => scope_limits,
+        "experiments" => experiment_types,
+        "insight_categories" => insight_categories,
+        "trace_tiers" => [string(t) for t in StructuralSizer.TRACE_TIERS],
+        "trace_layers" => [string(l) for l in StructuralSizer.TRACE_LAYERS],
+        "workflow_sequence" => [
+            "get_situation_card → orient",
+            "get_diagnose_summary → identify failures",
+            "get_lever_map(check=...) → find relevant parameters",
+            "run_experiment → instant what-if",
+            "validate_params → check compatibility",
+            "run_design → full design with new params",
+            "compare_designs → measure improvement",
+            "record_insight → capture learning",
+        ],
+    )
+end

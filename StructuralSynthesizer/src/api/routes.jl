@@ -197,6 +197,7 @@ function register_routes!()
                 "GET /schema/applicability" => "Compact method/floor applicability and compatibility rules for assistants",
                 "GET /schema/diagnose" => "Versioned contract for GET /diagnose payload structure",
                 "GET /schema/tools" => "Structured tool registry: name, description, phase, use_when, args, returns for all agent tools",
+                "GET /schema/llm_contract" => "Versioned LLM contract: system capabilities, tools, parameters, scope limits, experiment types",
                 "GET /schema" => "This documentation",
             ),
         )
@@ -216,6 +217,11 @@ function register_routes!()
     # ─── GET /schema/tools ────────────────────────────────────────────────
     @get "/schema/tools" function (_::HTTP.Request)
         return _json_ok(api_tool_schema())
+    end
+
+    # ─── GET /schema/llm_contract ─────────────────────────────────────────
+    @get "/schema/llm_contract" function (_::HTTP.Request)
+        return _json_ok(api_llm_contract())
     end
 
     # ─── POST /validate ───────────────────────────────────────────────────

@@ -23,8 +23,8 @@ namespace Menegroth.GH.Components
     /// <c>narrate_element</c> agent tool.
     ///
     /// No wire inputs — the Visualization component is auto-discovered on the
-    /// canvas.  Audience and element selection are controlled through right-click
-    /// menus.
+    /// canvas.  Audience / role (reader persona for the LLM) and element selection
+    /// are controlled through right-click menus.
     /// </summary>
     public class ElementInspector : GH_Component
     {
@@ -96,7 +96,7 @@ namespace Menegroth.GH.Components
 
             Menu_AppendSeparator(menu);
 
-            var audienceMenu = Menu_AppendItem(menu, "Audience");
+            var audienceMenu = Menu_AppendItem(menu, "Audience / role");
             foreach (var (label, value) in new[]
             {
                 ("Architect", "architect"),
@@ -122,8 +122,10 @@ namespace Menegroth.GH.Components
             customItem.Click += (s, _) =>
             {
                 if (Rhino.UI.Dialogs.ShowEditBox(
-                    "Custom Audience",
-                    "Describe who you are and what you're interested in.\nExample: \"sustainability consultant focused on embodied carbon\"",
+                    "Custom audience / role",
+                    "This text is sent to the server as the reader persona (like a system prompt): " +
+                    "language, role, tone, and format (e.g. German only, ASCII tables).\n" +
+                    "Example: German structural engineer focused on sustainability.",
                     _audience,
                     false,
                     out string result))

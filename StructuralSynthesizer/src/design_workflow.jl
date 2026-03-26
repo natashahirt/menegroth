@@ -1237,29 +1237,55 @@ end
 
 """Populate foundation design results from struc.foundations (all values normalized to SI)."""
 function _populate_foundation_results!(design::BuildingDesign, struc::BuildingStructure)
+    fdn_params = design.params.foundation_options
+    soil = isnothing(fdn_params) ? StructuralSizer.medium_sand : fdn_params.soil
+    qa = uconvert(u"kPa", soil.qa)
+
     for (fdn_idx, fdn) in enumerate(struc.foundations)
         isnothing(fdn.result) && continue
-        
+
         total_reaction = 0.0u"kN"
         for sup_idx in fdn.support_indices
             sup = struc.supports[sup_idx]
             total_reaction += uconvert(u"kN", sup.forces[3])
         end
-        
+
         gid = isnothing(fdn.group_id) ? 0 : Int(fdn.group_id % typemax(Int))
-        
+
+        r = fdn.result
+        fdn_L = uconvert(u"m", StructuralSizer.footing_length(r))
+        fdn_W = uconvert(u"m", StructuralSizer.footing_width(r))
+        gov_util = StructuralSizer.utilization(r)
+
+        # Re-derive bearing ratio: service reaction / (qa × footprint)
+        # The design routine uses service-level Ps, but we only have factored
+        # reaction here. Use a 1.4 factor approximation to get service load.
+        footprint = fdn_L * fdn_W
+        Ps_approx = total_reaction / 1.4  # approximate service from factored
+        bearing = if ustrip(u"kPa", qa) > 0 && ustrip(u"m^2", footprint) > 0
+            ustrip(u"kPa", Ps_approx / footprint) / ustrip(u"kPa", qa)
+        else
+            0.0
+        end
+        bearing_ratio = clamp(bearing, 0.0, gov_util)
+
+        # Punching ratio: if governing utilization exceeds bearing, the
+        # difference is attributable to punching shear.
+        punching_ratio = gov_util > bearing_ratio ? gov_util : 0.0
+
         result = FoundationDesignResult(
-            length = uconvert(u"m", StructuralSizer.footing_length(fdn.result)),
-            width = uconvert(u"m", StructuralSizer.footing_width(fdn.result)),
-            depth = uconvert(u"m", fdn.result.D),
+            length = fdn_L,
+            width = fdn_W,
+            depth = uconvert(u"m", r.D),
             reaction = total_reaction,
-            bearing_ratio = StructuralSizer.utilization(fdn.result),
-            ok = StructuralSizer.utilization(fdn.result) <= 1.0,
-            concrete_volume = uconvert(u"m^3", StructuralSizer.concrete_volume(fdn.result)),
-            steel_volume = uconvert(u"m^3", StructuralSizer.steel_volume(fdn.result)),
+            bearing_ratio = bearing_ratio,
+            punching_ratio = punching_ratio,
+            ok = gov_util <= 1.0,
+            concrete_volume = uconvert(u"m^3", StructuralSizer.concrete_volume(r)),
+            steel_volume = uconvert(u"m^3", StructuralSizer.steel_volume(r)),
             group_id = gid,
         )
-        
+
         design.foundations[fdn_idx] = result
     end
 end
@@ -1346,9 +1372,16 @@ function _compute_design_summary!(design::BuildingDesign, struc::BuildingStructu
     end
 
     for (idx, fdn_result) in design.foundations
-        if fdn_result.bearing_ratio > max_ratio
-            max_ratio = fdn_result.bearing_ratio
-            critical_elem = "Foundation $idx (bearing)"
+        fdn_ratios = (
+            fdn_result.bearing_ratio  => "bearing",
+            fdn_result.punching_ratio => "punching",
+            fdn_result.flexure_ratio  => "flexure",
+        )
+        for (r, check_name) in fdn_ratios
+            if r > max_ratio
+                max_ratio = r
+                critical_elem = "Foundation $idx ($check_name)"
+            end
         end
         if !fdn_result.ok
             all_ok = false

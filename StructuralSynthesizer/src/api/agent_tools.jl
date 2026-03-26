@@ -209,6 +209,12 @@ function agent_situation_card(
         "latest_passed" => isempty(history) ? nothing : last(history).all_pass,
     )
 
+    insights = get_session_insights()
+    if !isempty(insights)
+        card["session"]["n_insights"] = length(insights)
+        card["session"]["insight_categories"] = sort(unique(string(s.category) for s in insights))
+    end
+
     return card
 end
 

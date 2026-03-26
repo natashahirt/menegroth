@@ -152,3 +152,91 @@ function design_history_to_json(entries::Vector{DesignHistoryEntry})
         "source"           => e.source,
     ) for (i, e) in enumerate(entries)]
 end
+
+# ─── Session Insights ─────────────────────────────────────────────────────────
+
+"""
+Structured learning from a design iteration. The LLM records these after
+observing design outcomes so it can avoid re-exploring dead ends and build
+on what worked. Cross-referenced with design history indices.
+"""
+Base.@kwdef struct SessionInsight
+    timestamp::DateTime             = now()
+    category::Symbol                = :observation  # :observation, :discovery, :dead_end, :sensitivity, :geometry_note
+    summary::String                 = ""            # One-line human-readable summary
+    detail::String                  = ""            # Longer explanation (optional)
+    related_checks::Vector{String}  = String[]      # Governing check families involved
+    related_params::Vector{String}  = String[]      # Parameters that were changed/relevant
+    design_index::Int               = 0             # Which design history entry this relates to (0 = general)
+    confidence::Float64             = 0.5           # 0-1 how confident the LLM is in this insight
+end
+
+const SESSION_INSIGHTS      = SessionInsight[]
+const SESSION_INSIGHTS_LOCK = ReentrantLock()
+const SESSION_INSIGHTS_MAX  = 50
+
+"""
+    record_session_insight!(insight::SessionInsight)
+
+Append a session insight. Evicts oldest when at capacity.
+"""
+function record_session_insight!(insight::SessionInsight)
+    lock(SESSION_INSIGHTS_LOCK) do
+        push!(SESSION_INSIGHTS, insight)
+        while length(SESSION_INSIGHTS) > SESSION_INSIGHTS_MAX
+            popfirst!(SESSION_INSIGHTS)
+        end
+    end
+end
+
+"""
+    get_session_insights(; category, check, param, min_confidence) -> Vector{SessionInsight}
+
+Retrieve session insights with optional filtering.
+"""
+function get_session_insights(;
+    category::Union{Symbol, Nothing} = nothing,
+    check::Union{String, Nothing} = nothing,
+    param::Union{String, Nothing} = nothing,
+    min_confidence::Float64 = 0.0,
+)::Vector{SessionInsight}
+    lock(SESSION_INSIGHTS_LOCK) do
+        filter(SESSION_INSIGHTS) do s
+            !isnothing(category) && s.category != category && return false
+            !isnothing(check) && !(check in s.related_checks) && return false
+            !isnothing(param) && !(param in s.related_params) && return false
+            s.confidence < min_confidence && return false
+            return true
+        end
+    end
+end
+
+"""
+    clear_session_insights!()
+
+Clear all session insights (e.g. when geometry changes).
+"""
+function clear_session_insights!()
+    lock(SESSION_INSIGHTS_LOCK) do
+        empty!(SESSION_INSIGHTS)
+    end
+end
+
+"""
+    session_insights_to_json(insights::Vector{SessionInsight}) -> Vector{Dict{String, Any}}
+
+Serialize session insights for JSON output.
+"""
+function session_insights_to_json(insights::Vector{SessionInsight})
+    return [Dict{String, Any}(
+        "index"           => i,
+        "timestamp"       => Dates.format(s.timestamp, "yyyy-mm-dd HH:MM:SS"),
+        "category"        => string(s.category),
+        "summary"         => s.summary,
+        "detail"          => s.detail,
+        "related_checks"  => s.related_checks,
+        "related_params"  => s.related_params,
+        "design_index"    => s.design_index,
+        "confidence"      => round(s.confidence; digits=2),
+    ) for (i, s) in enumerate(insights)]
+end

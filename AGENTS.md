@@ -72,3 +72,13 @@ This error means the Cursor API key’s **GitHub App installation** does not hav
 3. **Org repos:** If the repo is under an organization, install the app on the **organization** and grant access to this repo (or all repos). User-level install only covers your personal repos.
 
 After fixing, re-run the workflow. The Launch step now fails explicitly (exit 1) when the API returns an error, so the run is red and the error is visible in the log.
+
+### Weekly Trace Coverage Audit (Cursor Cloud Agent)
+
+The **Trace Coverage Audit** workflow (`.github/workflows/trace-audit.yml`) launches a Cursor Cloud Agent to ensure every structurally significant decision in the design pipeline emits trace events. It runs weekly on Monday, on push to `main` (source paths), or via **Actions → Run workflow**.
+
+The audit has two layers:
+1. **Static script** (`scripts/runners/audit_trace_coverage.jl`): Checks `TRACE_REGISTRY` entries for `emit!` calls, discovers unregistered decision functions, detects `tc` threading gaps, and verifies `explain_feasibility` coverage across all checker types. Run locally with: `julia --project=StructuralSizer scripts/runners/audit_trace_coverage.jl`
+2. **Agent prompt** (`scripts/prompts/trace-audit.md`): Heuristic-based instructions that guide the Cursor Cloud Agent through a semantic audit — discovering decision points, verifying trace contracts, and checking the `tc` threading chain from `design_building` to leaf functions.
+
+**Required:** Same `CURSOR_API_KEY` as the doc audit.

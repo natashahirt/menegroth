@@ -1,23 +1,36 @@
 # =============================================================================
 # Narrate — audience-aware LLM explanations for the agent
 #
-# narrate_element:    explain one element's design for an architect, engineer, or custom audience
-# narrate_comparison: explain the difference between two designs
+# narrate_element:    explain one element's design
+#   - Presets: architect / engineer (fixed single-paragraph style).
+#   - Free-text audience: treated as a reader persona in the system prompt; JSON
+#     facts stay in the user message (Grasshopper Element Inspector).
+# narrate_comparison: explain the difference between two designs (same audience rules)
 # =============================================================================
 
 using HTTP
 
 """
-    _normalize_audience(audience) -> String
+    _audience_profile(audience::String) -> NamedTuple
 
-Normalize audience labels for narration tools:
-- "architect", "engineer", "custom" are accepted (case-insensitive)
-- unknown values are treated as "custom" instead of throwing validation errors
+Classify the narration audience:
+
+- `kind` is `:architect` or `:engineer` for the two preset styles (case-insensitive).
+- Any other non-empty string is `kind === :persona` and `text` is the trimmed original
+  (preserved for language, tone, and format hints — e.g. Grasshopper \"Custom…\").
+- The legacy token `custom` (alone) maps to a neutral default persona line.
+- Empty string falls back to `:architect`.
 """
-function _normalize_audience(audience::String)::String
-    a = lowercase(strip(audience))
-    a in ("architect", "engineer", "custom") && return a
-    return "custom"
+function _audience_profile(audience::String)
+    s = strip(audience)
+    if isempty(s)
+        return (kind=:architect, text="architect")
+    end
+    sl = lowercase(s)
+    sl == "architect" && return (kind=:architect, text="architect")
+    sl == "engineer" && return (kind=:engineer, text="engineer")
+    sl == "custom" && return (kind=:persona, text="A reader who wants a concise, neutral explanation without fluff or architectural analogies.")
+    return (kind=:persona, text=s)
 end
 
 """
@@ -39,7 +52,8 @@ function agent_narrate_element(
         "error"   => "invalid_type",
         "message" => "element_type must be one of: $(join(valid_types, ", ")).",
     )
-    audience = _normalize_audience(audience)
+    profile = _audience_profile(audience)
+    audience_out = profile.text
 
     diag = design_to_diagnose(design)
     type_key = element_type * "s"
@@ -64,7 +78,7 @@ function agent_narrate_element(
     ok          = get(elem, "ok", true)
     ec          = get(elem, "ec_kgco2e", nothing)
 
-    llm_narrative = _narrate_element_llm(elem, element_type, element_id, audience)
+    llm_narrative = _narrate_element_llm(elem, element_type, element_id, profile)
     if isnothing(llm_narrative)
         bullets = _element_basic_fallback_bullets(diag, elem, element_type, element_id)
         return Dict{String, Any}(
@@ -76,7 +90,7 @@ function agent_narrate_element(
             "recovery_hint"   => "Check CHAT_LLM_API_KEY and CHAT_LLM_BASE_URL, then retry for LLM narration.",
             "element_type"    => element_type,
             "element_id"      => element_id,
-            "audience"        => audience,
+            "audience"        => audience_out,
             "key_facts"       => Dict{String, Any}(
                 "governing_check" => governing,
                 "ratio"           => ratio,
@@ -92,7 +106,7 @@ function agent_narrate_element(
         "narrative_source" => "llm",
         "element_type" => element_type,
         "element_id"   => element_id,
-        "audience"     => audience,
+        "audience"     => audience_out,
         "key_facts"    => Dict{String, Any}(
             "governing_check" => governing,
             "ratio"           => ratio,
@@ -177,7 +191,7 @@ function _narrate_element_llm(
     elem::Dict,
     element_type::String,
     element_id::Int,
-    audience::String,
+    profile,
 )::Union{String, Nothing}
     _llm_configured() || return nothing
 
@@ -185,33 +199,65 @@ function _narrate_element_llm(
     facts = Dict{String, Any}(
         "element_type" => element_type,
         "element_id" => element_id,
-        "audience" => audience,
+        "audience" => profile.text,
         "diagnose" => elem,
     )
     facts_json = JSON3.write(facts)
-    audience_style = audience == "architect" ?
-        "Use plain language with physical intuition and avoid code jargon." :
-        audience == "engineer" ?
-        "Use concise engineering language and mention governing check details when available." :
-        "Use concise, neutral language tailored to a custom audience. Avoid fluff and avoid architectural analogies."
 
-    system_prompt = """
+    grounding = """
+Rules (non-negotiable):
+- Use only facts present in the JSON the user message provides under "diagnose".
+- If a field is missing, say "not available in current results" instead of guessing.
+- Be numerically faithful to the provided values; do not invent checks, clauses, or ratios.
+"""
+
+    if profile.kind === :persona
+        persona_block = strip(profile.text)
+        system_prompt = string(
+            """
 You are a structural engineering explainer for Menegroth.
 
-Rules:
-- Use only facts present in the provided JSON.
-- If a field is missing, say "not available in current results" instead of guessing.
+The user you are assisting describes themselves as:
+
+""",
+            persona_block,
+            """
+
+Explain the selected structural element to them in a way that fits that description — including natural language (e.g. respond in German if they are a German-speaking user), tone, level of detail, and presentation (e.g. ASCII tables if they want tables). Adapt format to their preferences; do not force a rigid outline.
+
+""",
+            grounding,
+        )
+        user_prompt = """
+The user is asking about this one structural element. Give them the explanation.
+
+JSON facts (ground truth):
+$facts_json
+"""
+        temperature = 0.35
+        max_tokens = 520
+    else
+        audience_style = profile.kind === :architect ?
+            "Use plain language with physical intuition and avoid code jargon." :
+            "Use concise engineering language and mention governing check details when available."
+
+        system_prompt = """
+You are a structural engineering explainer for Menegroth.
+
+$grounding
 - Write exactly one paragraph, 3-6 sentences.
-- Be numerically faithful to the provided values.
 - Do not include bullet points, headings, or markdown.
 """
-    user_prompt = """
+        user_prompt = """
 Write a narrative for this one element.
 $audience_style
 
 JSON facts:
 $facts_json
 """
+        temperature = 0.2
+        max_tokens = 320
+    end
 
     body = JSON3.write(Dict(
         "model" => _chat_llm_model(),
@@ -220,8 +266,8 @@ $facts_json
             Dict("role" => "user", "content" => user_prompt),
         ],
         "stream" => false,
-        "temperature" => 0.2,
-        "max_tokens" => 320,
+        "temperature" => temperature,
+        "max_tokens" => max_tokens,
     ))
     headers = [
         "Content-Type" => "application/json",
@@ -336,7 +382,8 @@ Compose a plain-English paragraph comparing two designs using the configured
 LLM, grounded in the structured deltas from `agent_compare_designs`.
 """
 function agent_narrate_comparison(index_a::Int, index_b::Int, audience::String)::Dict{String, Any}
-    audience = _normalize_audience(audience)
+    profile = _audience_profile(audience)
+    audience_out = profile.text
 
     delta = agent_compare_designs(index_a, index_b)
     haskey(delta, "error") && return delta
@@ -346,13 +393,13 @@ function agent_narrate_comparison(index_a::Int, index_b::Int, audience::String):
     d = delta["deltas"]
     changed = delta["changed_params"]
 
-    llm_narrative = _narrate_comparison_llm(a, b, d, changed, audience)
+    llm_narrative = _narrate_comparison_llm(a, b, d, changed, profile)
     if isnothing(llm_narrative)
         return Dict{String, Any}(
             "error"         => "llm_unavailable",
             "message"       => "Narration is LLM-only and no template fallback is used.",
             "recovery_hint" => "Check CHAT_LLM_API_KEY and CHAT_LLM_BASE_URL, then retry.",
-            "audience"      => audience,
+            "audience"      => audience_out,
             "deltas"        => d,
             "changed_params" => changed,
         )
@@ -361,7 +408,7 @@ function agent_narrate_comparison(index_a::Int, index_b::Int, audience::String):
     return Dict{String, Any}(
         "narrative" => llm_narrative,
         "narrative_source" => "llm",
-        "audience"  => audience,
+        "audience"  => audience_out,
         "deltas"    => d,
         "changed_params" => changed,
     )
@@ -430,41 +477,73 @@ function _narrate_comparison_llm(
     b::Dict,
     d::Dict,
     changed::Dict,
-    audience::String,
+    profile,
 )::Union{String, Nothing}
     _llm_configured() || return nothing
 
     facts = Dict{String, Any}(
-        "audience" => audience,
+        "audience" => profile.text,
         "design_a" => a,
         "design_b" => b,
         "deltas" => d,
         "changed_params" => changed,
     )
     facts_json = JSON3.write(facts)
-    audience_style = audience == "architect" ?
-        "Use plain language focused on implications, risk, and design intent." :
-        audience == "engineer" ?
-        "Use concise engineering language focused on checks, ratios, and trade-offs." :
-        "Use concise neutral language for a custom audience, with explicit numbers and no stylistic analogies."
 
-    system_prompt = """
+    grounding = """
+Rules (non-negotiable):
+- Use only facts present in the JSON the user message provides.
+- If a field is missing, say "not available in current results" instead of guessing.
+- Be numerically faithful to the provided values.
+"""
+
+    if profile.kind === :persona
+        persona_block = strip(profile.text)
+        system_prompt = string(
+            """
 You are a structural engineering explainer for Menegroth.
 
-Rules:
-- Use only facts present in the provided JSON.
-- If a field is missing, say "not available in current results" instead of guessing.
+The user you are assisting describes themselves as:
+
+""",
+            persona_block,
+            """
+
+Compare design A and design B for them in a way that fits that description — language, tone, level of detail, and format (e.g. ASCII tables if they want tables).
+
+""",
+            grounding,
+        )
+        user_prompt = """
+The user wants a comparison of two designs. Respond for them.
+
+JSON facts (ground truth):
+$facts_json
+"""
+        temperature = 0.35
+        max_tokens = 560
+    else
+        audience_style = profile.kind === :architect ?
+            "Use plain language focused on implications, risk, and design intent." :
+            "Use concise engineering language focused on checks, ratios, and trade-offs."
+
+        system_prompt = """
+You are a structural engineering explainer for Menegroth.
+
+$grounding
 - Write exactly one paragraph, 4-7 sentences.
-- Be numerically faithful to the provided values.
 - Do not include bullet points, headings, or markdown.
 """
-    user_prompt = """
+        user_prompt = """
 Write a comparison narrative between design A and design B.
 $audience_style
 
 JSON facts:
 $facts_json
 """
+        temperature = 0.2
+        max_tokens = 380
+    end
 
     body = JSON3.write(Dict(
         "model" => _chat_llm_model(),
@@ -473,8 +552,8 @@ $facts_json
             Dict("role" => "user", "content" => user_prompt),
         ],
         "stream" => false,
-        "temperature" => 0.2,
-        "max_tokens" => 380,
+        "temperature" => temperature,
+        "max_tokens" => max_tokens,
     ))
     headers = [
         "Content-Type" => "application/json",

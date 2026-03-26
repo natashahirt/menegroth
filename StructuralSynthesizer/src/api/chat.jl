@@ -248,8 +248,11 @@ DIAGNOSIS (what's wrong and why — progressive disclosure):
 - get_applicability: DDM/EFM/FEA eligibility rules for the current geometry.
 
 EXPLORATION (what to try):
+- run_experiment: INSTANT micro-experiment on a single element using cached data. Types: "punching" (vary column size/slab thickness), "pm_column" (try alt RC section), "deflection" (change limit), "catalog_screen" (screen multiple sizes). Much faster than run_design — use to narrow down options first.
+- list_experiments: See available experiment types and their argument schemas.
+- batch_experiments: Run multiple experiments in one call (e.g. screen 5 column sizes).
 - validate_params: Check a params patch for compatibility violations. Fast, no geometry needed. Always call this before run_design.
-- run_design: FAST PARAMETER-ONLY what-if check (skips visualization, max 2 iterations, 20 s MIP cap, 60 s total timeout).
+- run_design: FAST PARAMETER-ONLY what-if check (skips visualization, max 2 iterations, 20 s MIP cap, 60 s total timeout). Use after narrowing with experiments.
 - compare_designs: Delta table between two designs from history (pass/fail, ratios, EC, changed governing checks). Args: index_a, index_b.
 - suggest_next_action: Ranked parameter changes for a goal. Arg: goal ("fix_failures"|"reduce_column_size"|"reduce_slab_thickness"|"reduce_ec").
 
@@ -266,7 +269,8 @@ TOOL SELECTION POLICY — match user intent to tool sequence:
   "Why is element X failing?"      -> get_diagnose_summary → query_elements(ok=false) → narrate_element
   "Why did the solver pick that?"  -> get_solver_trace(tier=failures), drill with tier=decisions or element filter
   "What should I change?"          -> get_diagnose_summary → suggest_next_action(goal) → validate_params
-  "Try changing X"                 -> validate_params -> run_design -> compare_designs
+  "Would a bigger column help?"   -> run_experiment(type=punching or pm_column) for instant check
+  "Try changing X"                 -> run_experiment first to preview → validate_params → run_design → compare_designs
   "Explain this to me"             -> narrate_element or narrate_comparison
   "Did it help?" / "Compare"       -> compare_designs + get_design_history
   "Does the solver check X?"       -> get_implemented_provisions
@@ -275,6 +279,8 @@ TOOL SELECTION POLICY — match user intent to tool sequence:
   Use get_diagnose or query_elements only when you need specific element detail.
   Use get_solver_trace when the user needs to understand WHY, not just WHAT.
   Always validate_params before run_design. Always compare_designs after run_design.
+  After each design iteration, use record_insight to capture what you learned.
+  Before making recommendations, check get_session_insights for accumulated learnings.
 
 EVIDENCE-FIRST REASONING:
 Before making any recommendation, you MUST have tool evidence. Follow this protocol:
@@ -737,7 +743,8 @@ function _stream_llm_to_sse(
     tool_actions = Dict{String, Any}[]
 
     try
-        for round in 1:MAX_AGENT_TOOL_ROUNDS
+        # Not `round` — that name shadows `Base.round` and breaks `round(Int, x)` below.
+        for tool_round in 1:MAX_AGENT_TOOL_ROUNDS
             payload = Dict{String, Any}(
                 "model" => model,
                 "messages" => conversation,
@@ -782,8 +789,8 @@ function _stream_llm_to_sse(
                     fn_obj = _dict_get(tc, "function", Dict{String, Any}())
                     tool_name = string(_dict_get(fn_obj, "name", ""))
                     args_json = string(_dict_get(fn_obj, "arguments", "{}"))
-                    call_id = string(_dict_get(tc, "id", "call_$(round)_$(i)"))
-                    isempty(call_id) && (call_id = "call_$(round)_$(i)")
+                    call_id = string(_dict_get(tc, "id", "call_$(tool_round)_$(i)"))
+                    isempty(call_id) && (call_id = "call_$(tool_round)_$(i)")
 
                     push!(assistant_tool_calls, Dict{String, Any}(
                         "id" => call_id,
@@ -952,10 +959,17 @@ Phase 2 — Diagnosis:
 - `get_applicability`        — compact method/floor eligibility rules.
 
 Phase 3 — Exploration:
+- `run_experiment`           — instant micro-experiment on a single element (punching, P-M, deflection, catalog screen).
+- `list_experiments`         — available experiment types and arg schemas.
+- `batch_experiments`        — run multiple experiments in one call.
 - `validate_params`          — check a params patch for compatibility violations.
 - `run_design`               — fast parameter-only what-if check (60 s timeout).
 - `compare_designs`          — delta table between two designs from history.
 - `suggest_next_action`      — ranked parameter changes for a goal.
+
+Session Insights:
+- `record_insight`           — record a structured learning from a design iteration.
+- `get_session_insights`     — retrieve accumulated learnings (filterable by category/check/param).
 
 Phase 4 — Communication:
 - `narrate_element`          — plain-English explanation of one element.
@@ -1040,6 +1054,51 @@ function _dispatch_chat_tool(tool::String, args::Dict{String, Any})::Dict{String
             ),
         )
 
+    # ── Session Insights ──────────────────────────────────────────────────
+    elseif tool == "record_insight"
+        cat_str = string(get(args, "category", "observation"))
+        cat = Symbol(cat_str)
+        summary_str = string(get(args, "summary", ""))
+        isempty(summary_str) && return Dict("error" => "missing_summary", "message" => "Provide a 'summary' for the insight.")
+        detail_str = string(get(args, "detail", ""))
+        checks = String[string(c) for c in get(args, "related_checks", String[])]
+        params = String[string(p) for p in get(args, "related_params", String[])]
+        didx = Int(get(args, "design_index", 0))
+        conf = Float64(get(args, "confidence", 0.5))
+
+        insight = SessionInsight(;
+            category = cat,
+            summary = summary_str,
+            detail = detail_str,
+            related_checks = checks,
+            related_params = params,
+            design_index = didx,
+            confidence = conf,
+        )
+        record_session_insight!(insight)
+        n_total = length(SESSION_INSIGHTS)
+        return Dict{String, Any}(
+            "ok" => true,
+            "message" => "Insight recorded ($(n_total) total in session).",
+            "insight" => Dict("category" => cat_str, "summary" => summary_str),
+        )
+
+    elseif tool == "get_session_insights"
+        cat_arg = get(args, "category", nothing)
+        cat = isnothing(cat_arg) ? nothing : Symbol(string(cat_arg))
+        check_arg = get(args, "check", nothing)
+        check = isnothing(check_arg) ? nothing : string(check_arg)
+        param_arg = get(args, "param", nothing)
+        param = isnothing(param_arg) ? nothing : string(param_arg)
+        min_conf = Float64(get(args, "min_confidence", 0.0))
+
+        insights = get_session_insights(; category=cat, check=check, param=param, min_confidence=min_conf)
+        return Dict{String, Any}(
+            "n_insights" => length(insights),
+            "insights" => session_insights_to_json(insights),
+            "note" => isempty(insights) ? "No insights recorded yet. Use record_insight after observing design outcomes." : nothing,
+        )
+
     # ── Phase 1: Orientation ────────────────────────────────────────────────
     elseif tool == "get_situation_card"
         return agent_situation_card(DESIGN_CACHE.structure, DESIGN_CACHE.last_design, get_design_history_entries())
@@ -1116,6 +1175,23 @@ function _dispatch_chat_tool(tool::String, args::Dict{String, Any})::Dict{String
         goal = get(args, "goal", nothing)
         isnothing(goal) && return Dict("error" => "missing_goal", "message" => "Provide a 'goal' argument (fix_failures, reduce_column_size, reduce_slab_thickness, reduce_ec).")
         return agent_suggest_next_action(DESIGN_CACHE.last_design, string(goal))
+
+    elseif tool == "run_experiment"
+        isnothing(DESIGN_CACHE.last_design) && return Dict("error" => "no_design", "message" => "No design has been run yet.", "recovery_hint" => _NO_DESIGN_HINT)
+        exp_type = get(args, "type", nothing)
+        exp_args = get(args, "args", Dict{String, Any}())
+        isnothing(exp_type) && return Dict("error" => "missing_type", "message" => "Provide experiment 'type' (punching, pm_column, deflection, catalog_screen).")
+        exp_args_dict = Dict{String, Any}(string(k) => v for (k, v) in exp_args)
+        return evaluate_experiment(DESIGN_CACHE.last_design, string(exp_type), exp_args_dict)
+
+    elseif tool == "list_experiments"
+        return list_experiments()
+
+    elseif tool == "batch_experiments"
+        isnothing(DESIGN_CACHE.last_design) && return Dict("error" => "no_design", "message" => "No design has been run yet.", "recovery_hint" => _NO_DESIGN_HINT)
+        experiments_raw = get(args, "experiments", Any[])
+        experiments = [Dict{String, Any}(string(k) => v for (k, v) in e) for e in experiments_raw]
+        return batch_evaluate(DESIGN_CACHE.last_design, experiments)
 
     # ── Phase 4: Communication ───────────────────────────────────────────────
     elseif tool == "narrate_element"
@@ -1327,7 +1403,9 @@ function _dispatch_chat_tool(tool::String, args::Dict{String, Any})::Dict{String
                 "get_diagnose_summary, get_diagnose, query_elements, get_solver_trace, " *
                 "get_lever_map, get_implemented_provisions, explain_field, " *
                 "get_result_summary, get_condensed_result, get_applicability, " *
+                "run_experiment, list_experiments, batch_experiments, " *
                 "validate_params, run_design, compare_designs, suggest_next_action, " *
+                "record_insight, get_session_insights, " *
                 "narrate_element, narrate_comparison, clarify_user_intent.",
         )
     end

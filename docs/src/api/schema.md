@@ -226,7 +226,7 @@ The top-level response from `POST /design`.
 
 | Field | Type | Description |
 |:------|:-----|:------------|
-| `status` | `String` | `"ok"` or `"error"` |
+| `status` | `String` | Always `"ok"` for a successful `POST /design` response (`APIOutput`). Error responses use `APIError` or an error-shaped `Dict` depending on the failure mode. |
 | `compute_time_s` | `Float64` | Wall-clock design time in seconds |
 | `phase_timings` | `Dict{String, Float64}` | Timing breakdown by phase (seconds). Always includes `"serialize_visualization"` (near-zero when `skip_visualization=true`). |
 | `length_unit` | `String` | Length unit label for length-category outputs (`"ft"` or `"m"`) |
@@ -294,8 +294,9 @@ Output field names are unit-neutral. Unit interpretation comes from top-level un
 | `ok` | `Bool` | Slab passes all slab checks (`converged && deflection_ok && punching_ok`) |
 | `thickness` | `Float64` | Slab thickness (see `thickness_unit`) |
 | `converged` | `Bool` | Design converged |
-| `failure_reason` | `String` | Failure description (empty if ok) |
-| `failing_check` | `String` | Which check failed |
+| `failure_reason` | `String` | Canonical failure reason code (empty string when ok). |
+| `failing_checks` | `Vector{String}` | Canonical failing check code(s) (empty when ok). |
+| `failure_detail` | `Union{String, Nothing}` | Optional raw failure detail (present only for `"solver_error"` / `"unknown"` style failures). |
 | `iterations` | `Int` | Design iterations used |
 | `deflection_ok` | `Bool` | Deflection within limit |
 | `deflection_ratio` | `Float64` | Actual L/n ratio |
@@ -310,6 +311,7 @@ Output field names are unit-neutral. Unit interpretation comes from top-level un
 |:------|:-----|:------------|
 | `id` | `Int` | Column index |
 | `section` | `String` | Section designation |
+| `section_type` | `String` | Canonical section type code (e.g., `"steel_w"`, `"steel_hss_rect"`, `"rc_rect"`, `"pixelframe"`, `"other"`, or `""`). |
 | `c1` | `Float64` | Depth dimension (see `thickness_unit`) |
 | `c2` | `Float64` | Width dimension (see `thickness_unit`) |
 | `shape` | `String` | `"rectangular"` or `"circular"` |
@@ -325,6 +327,9 @@ Output field names are unit-neutral. Unit interpretation comes from top-level un
 |:------|:-----|:------------|
 | `id` | `Int` | Beam index |
 | `section` | `String` | Section designation |
+| `section_type` | `String` | Canonical section type code (same family as `APIColumnResult.section_type`). |
+| `depth` | `Float64` | Section depth (see `thickness_unit`; 0.0 when unavailable). |
+| `width` | `Float64` | Section width (see `thickness_unit`; 0.0 when unavailable). |
 | `flexure_ratio` | `Float64` | Mu / ϕMn |
 | `shear_ratio` | `Float64` | Vu / ϕVn |
 | `ok` | `Bool` | Passes all checks |
@@ -364,6 +369,7 @@ Output field names are unit-neutral. Unit interpretation comes from top-level un
 | `max_slab_shear` | `Float64` | Maximum transverse shear across all slab faces |
 | `max_slab_von_mises` | `Float64` | Maximum von Mises stress across all slab faces |
 | `max_slab_surface_stress` | `Float64` | Maximum \(|\sigma|\) across all slab faces |
+| `units` | `APIVisualizationUnits` | Unit labels for visualization payloads (`position`/`displacement` use display length units; analytical fields use fixed SI strings like `"N"`, `"N_m"`, `"Pa"`). |
 
 The visualization schema contains several related types:
 
@@ -428,7 +434,7 @@ Example snippet (abbreviated) showing beamless-state and one drop-panel patch:
 
 | Field | Type | Description |
 |:------|:-----|:------------|
-| `element_id` | `Int` | Analysis element index |
+| `element_id` | `Int` | Client-facing element id. For beams/columns this matches the corresponding `beams[].id` / `columns[].id` member index; for struts/other elements it is the Asap analysis `elementID`. |
 | `node_start` | `Int` | 1-based start node index |
 | `node_end` | `Int` | 1-based end node index |
 | `element_type` | `String` | `"beam"`, `"column"`, `"strut"`, or `"other"` |

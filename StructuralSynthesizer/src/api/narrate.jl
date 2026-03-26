@@ -1,17 +1,18 @@
 # =============================================================================
-# Narrate — audience-aware plain-English explanations for the LLM agent
+# Narrate — audience-aware LLM explanations for the agent
 #
 # narrate_element:    explain one element's design for an architect or engineer
 # narrate_comparison: explain the difference between two designs
 # =============================================================================
 
+using HTTP
+
 """
     agent_narrate_element(design::BuildingDesign, element_type::String,
                           element_id::Int, audience::String) -> Dict{String, Any}
 
-Compose a plain-English paragraph about one element, using data from
-the /diagnose output. Architect version uses physical analogies and scale
-references; engineer version uses code clauses and ratios.
+Compose a plain-English paragraph about one element using the configured
+LLM. The model is grounded with /diagnose output facts.
 """
 function agent_narrate_element(
     design::BuildingDesign,
@@ -51,28 +52,34 @@ function agent_narrate_element(
     ratio       = get(elem, "governing_ratio", 0.0)
     mode        = get(elem, "governing_mode", "")
     ok          = get(elem, "ok", true)
-    levers      = get(elem, "levers", String[])
-    description = get(elem, "limit_state_description", "")
-    scale_ref   = get(elem, "scale_ref", nothing)
     ec          = get(elem, "ec_kgco2e", nothing)
 
-    # Build checks summary
-    checks = get(elem, "checks", [])
-    checks_summary = join([
-        "$(get(c, "name", "?")) (ratio=$(get(c, "ratio", "?")))"
-        for c in checks
-    ], ", ")
-
-    if audience == "architect"
-        narrative = _narrate_architect(element_type, element_id, governing, ratio,
-                                       ok, mode, scale_ref, ec, description, levers)
-    else
-        narrative = _narrate_engineer(element_type, element_id, governing, ratio,
-                                      ok, mode, checks_summary, ec, description, levers, checks)
+    llm_narrative = _narrate_element_llm(elem, element_type, element_id, audience)
+    if isnothing(llm_narrative)
+        bullets = _element_basic_fallback_bullets(diag, elem, element_type, element_id)
+        return Dict{String, Any}(
+            "narrative"       => join(["- $b" for b in bullets], "\n"),
+            "bullet_points"   => bullets,
+            "narrative_source" => "deterministic_basic_fallback",
+            "llm_status"      => "unavailable",
+            "message"         => "LLM narration unavailable; returning deterministic basic facts.",
+            "recovery_hint"   => "Check CHAT_LLM_API_KEY and CHAT_LLM_BASE_URL, then retry for LLM narration.",
+            "element_type"    => element_type,
+            "element_id"      => element_id,
+            "audience"        => audience,
+            "key_facts"       => Dict{String, Any}(
+                "governing_check" => governing,
+                "ratio"           => ratio,
+                "ok"              => ok,
+                "mode"            => mode,
+                "ec_kgco2e"       => ec,
+            ),
+        )
     end
 
     return Dict{String, Any}(
-        "narrative"    => narrative,
+        "narrative"    => llm_narrative,
+        "narrative_source" => "llm",
         "element_type" => element_type,
         "element_id"   => element_id,
         "audience"     => audience,
@@ -84,6 +91,163 @@ function agent_narrate_element(
             "ec_kgco2e"       => ec,
         ),
     )
+end
+
+function _element_basic_fallback_bullets(
+    diag::Dict,
+    elem::Dict,
+    element_type::String,
+    element_id::Int,
+)::Vector{String}
+    bullets = String[]
+    push!(bullets, "Element: $element_type #$element_id")
+
+    analysis_method = string(get(diag, "analysis_method", "not available in current results"))
+    push!(bullets, "Analysis method: $analysis_method")
+
+    section = get(elem, "section", nothing)
+    !isnothing(section) && !isempty(string(section)) && push!(bullets, "Section/size: $(section)")
+
+    # Material is not consistently explicit in current per-element diagnose payload.
+    # Prefer explicit fields; otherwise clearly report unavailable.
+    material = if haskey(elem, "material")
+        string(get(elem, "material", ""))
+    elseif haskey(elem, "shape")
+        "shape=$(get(elem, "shape", "unknown")); material not explicitly provided"
+    else
+        "not explicitly provided in current results"
+    end
+    push!(bullets, "Material: $material")
+
+    if haskey(elem, "thickness")
+        t = get(elem, "thickness", "n/a")
+        tu = get(elem, "thickness_unit", "")
+        push!(bullets, "Sizing result: thickness=$(t) $(tu)")
+    elseif haskey(elem, "depth")
+        d = get(elem, "depth", "n/a")
+        du = get(elem, "depth_unit", "")
+        push!(bullets, "Sizing result: depth=$(d) $(du)")
+    elseif haskey(elem, "c1") || haskey(elem, "c2")
+        c1 = get(elem, "c1", "n/a")
+        c2 = get(elem, "c2", "n/a")
+        u = get(elem, "section_unit", "")
+        push!(bullets, "Sizing result: c1=$(c1), c2=$(c2) $(u)")
+    elseif haskey(elem, "length") || haskey(elem, "width")
+        l = get(elem, "length", "n/a")
+        w = get(elem, "width", "n/a")
+        lu = get(elem, "length_unit", "")
+        push!(bullets, "Sizing result: length=$(l), width=$(w) $(lu)")
+    end
+
+    ok = get(elem, "ok", true)
+    ratio = get(elem, "governing_ratio", "n/a")
+    gchk = get(elem, "governing_check", "unknown")
+    mode = get(elem, "governing_mode", "unknown")
+    push!(bullets, "Status: $(ok ? "PASS" : "FAIL"), governing_check=$(gchk), governing_ratio=$(ratio), mode=$(mode)")
+
+    checks = get(elem, "checks", Any[])
+    if checks isa AbstractVector && !isempty(checks)
+        brief = String[]
+        for c in checks
+            name = get(c, "name", "?")
+            r = get(c, "ratio", "n/a")
+            push!(brief, "$(name):$(r)")
+            length(brief) >= 4 && break
+        end
+        push!(bullets, "Check ratios: $(join(brief, ", "))")
+    end
+
+    ec = get(elem, "ec_kgco2e", nothing)
+    !isnothing(ec) && push!(bullets, "Embodied carbon: $(ec) kgCO2e")
+
+    return bullets
+end
+
+function _narrate_element_llm(
+    elem::Dict,
+    element_type::String,
+    element_id::Int,
+    audience::String,
+)::Union{String, Nothing}
+    _llm_configured() || return nothing
+
+    # Keep generation tightly grounded in diagnose output to avoid fabrication.
+    facts = Dict{String, Any}(
+        "element_type" => element_type,
+        "element_id" => element_id,
+        "audience" => audience,
+        "diagnose" => elem,
+    )
+    facts_json = JSON3.write(facts)
+    audience_style = audience == "architect" ?
+        "Use plain language with physical intuition and avoid code jargon." :
+        "Use concise engineering language and mention governing check details when available."
+
+    system_prompt = """
+You are a structural engineering explainer for Menegroth.
+
+Rules:
+- Use only facts present in the provided JSON.
+- If a field is missing, say "not available in current results" instead of guessing.
+- Write exactly one paragraph, 3-6 sentences.
+- Be numerically faithful to the provided values.
+- Do not include bullet points, headings, or markdown.
+"""
+    user_prompt = """
+Write a narrative for this one element.
+$audience_style
+
+JSON facts:
+$facts_json
+"""
+
+    body = JSON3.write(Dict(
+        "model" => _chat_llm_model(),
+        "messages" => [
+            Dict("role" => "system", "content" => system_prompt),
+            Dict("role" => "user", "content" => user_prompt),
+        ],
+        "stream" => false,
+        "temperature" => 0.2,
+        "max_tokens" => 320,
+    ))
+    headers = [
+        "Content-Type" => "application/json",
+        "Authorization" => "Bearer $(_chat_llm_api_key())",
+    ]
+    url = rstrip(_chat_llm_base_url(), '/') * "/v1/chat/completions"
+
+    try
+        r = HTTP.post(
+            url,
+            headers,
+            body;
+            connect_timeout=10,
+            readtimeout=90,
+            status_exception=false,
+            cookies=false,
+        )
+        if r.status >= 400
+            @warn "LLM narrate unavailable (HTTP error)" status=r.status
+            return nothing
+        end
+
+        obj = JSON3.read(String(r.body))
+        if !haskey(obj, :choices) || length(obj.choices) == 0
+            @warn "LLM narrate unavailable (missing choices)"
+            return nothing
+        end
+        msg = get(obj.choices[1], :message, nothing)
+        isnothing(msg) && return nothing
+        content = get(msg, :content, nothing)
+        isnothing(content) && return nothing
+        text = strip(string(content))
+        isempty(text) && return nothing
+        return replace(text, r"\s+" => " ")
+    catch e
+        @warn "LLM narrate unavailable (request failed)" error=_compact_llm_error(e)
+        return nothing
+    end
 end
 
 function _narrate_architect(type, id, governing, ratio, ok, mode, scale_ref, ec, description, levers)
@@ -156,7 +320,8 @@ _capitalize(s::String) = isempty(s) ? s : uppercase(s[1:1]) * s[2:end]
 """
     agent_narrate_comparison(index_a::Int, index_b::Int, audience::String) -> Dict{String, Any}
 
-Compose a plain-English paragraph comparing two designs from session history.
+Compose a plain-English paragraph comparing two designs using the configured
+LLM, grounded in the structured deltas from `agent_compare_designs`.
 """
 function agent_narrate_comparison(index_a::Int, index_b::Int, audience::String)::Dict{String, Any}
     audience in ("architect", "engineer") || return Dict(
@@ -172,14 +337,21 @@ function agent_narrate_comparison(index_a::Int, index_b::Int, audience::String):
     d = delta["deltas"]
     changed = delta["changed_params"]
 
-    if audience == "architect"
-        narrative = _narrate_comparison_architect(a, b, d, changed)
-    else
-        narrative = _narrate_comparison_engineer(a, b, d, changed)
+    llm_narrative = _narrate_comparison_llm(a, b, d, changed, audience)
+    if isnothing(llm_narrative)
+        return Dict{String, Any}(
+            "error"         => "llm_unavailable",
+            "message"       => "Narration is LLM-only and no template fallback is used.",
+            "recovery_hint" => "Check CHAT_LLM_API_KEY and CHAT_LLM_BASE_URL, then retry.",
+            "audience"      => audience,
+            "deltas"        => d,
+            "changed_params" => changed,
+        )
     end
 
     return Dict{String, Any}(
-        "narrative" => narrative,
+        "narrative" => llm_narrative,
+        "narrative_source" => "llm",
         "audience"  => audience,
         "deltas"    => d,
         "changed_params" => changed,
@@ -242,4 +414,92 @@ function _narrate_comparison_engineer(a, b, d, changed)
     end
 
     return join(parts, " ")
+end
+
+function _narrate_comparison_llm(
+    a::Dict,
+    b::Dict,
+    d::Dict,
+    changed::Dict,
+    audience::String,
+)::Union{String, Nothing}
+    _llm_configured() || return nothing
+
+    facts = Dict{String, Any}(
+        "audience" => audience,
+        "design_a" => a,
+        "design_b" => b,
+        "deltas" => d,
+        "changed_params" => changed,
+    )
+    facts_json = JSON3.write(facts)
+    audience_style = audience == "architect" ?
+        "Use plain language focused on implications, risk, and design intent." :
+        "Use concise engineering language focused on checks, ratios, and trade-offs."
+
+    system_prompt = """
+You are a structural engineering explainer for Menegroth.
+
+Rules:
+- Use only facts present in the provided JSON.
+- If a field is missing, say "not available in current results" instead of guessing.
+- Write exactly one paragraph, 4-7 sentences.
+- Be numerically faithful to the provided values.
+- Do not include bullet points, headings, or markdown.
+"""
+    user_prompt = """
+Write a comparison narrative between design A and design B.
+$audience_style
+
+JSON facts:
+$facts_json
+"""
+
+    body = JSON3.write(Dict(
+        "model" => _chat_llm_model(),
+        "messages" => [
+            Dict("role" => "system", "content" => system_prompt),
+            Dict("role" => "user", "content" => user_prompt),
+        ],
+        "stream" => false,
+        "temperature" => 0.2,
+        "max_tokens" => 380,
+    ))
+    headers = [
+        "Content-Type" => "application/json",
+        "Authorization" => "Bearer $(_chat_llm_api_key())",
+    ]
+    url = rstrip(_chat_llm_base_url(), '/') * "/v1/chat/completions"
+
+    try
+        r = HTTP.post(
+            url,
+            headers,
+            body;
+            connect_timeout=10,
+            readtimeout=90,
+            status_exception=false,
+            cookies=false,
+        )
+        if r.status >= 400
+            @warn "LLM comparison narrate unavailable (HTTP error)" status=r.status
+            return nothing
+        end
+
+        obj = JSON3.read(String(r.body))
+        if !haskey(obj, :choices) || length(obj.choices) == 0
+            @warn "LLM comparison narrate unavailable (missing choices)"
+            return nothing
+        end
+        msg = get(obj.choices[1], :message, nothing)
+        isnothing(msg) && return nothing
+        content = get(msg, :content, nothing)
+        isnothing(content) && return nothing
+        text = strip(string(content))
+        isempty(text) && return nothing
+        return replace(text, r"\s+" => " ")
+    catch e
+        @warn "LLM comparison narrate unavailable (request failed)" error=_compact_llm_error(e)
+        return nothing
+    end
 end

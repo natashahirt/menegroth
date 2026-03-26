@@ -22,10 +22,11 @@ end
 
 function _chat_llm_api_key()::String
     k = get(ENV, "CHAT_LLM_API_KEY", "")
+    k = normalize_llm_api_key_secret(k)
     !isempty(k) && return k
     path = _repo_root_secrets_path()
     isfile(path) || return ""
-    k = strip(read(path, String))
+    k = normalize_llm_api_key_secret(read(path, String))
     isempty(k) && return ""
     ENV["CHAT_LLM_API_KEY"] = k
     return k

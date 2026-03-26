@@ -877,7 +877,9 @@ end
 
 """Frame element with connectivity and design data."""
 Base.@kwdef struct APIVisualizationFrameElement
-    element_id::Int = 0           # Element index in analysis model
+    # For beams/columns: matches `columns[].id` / `beams[].id` in the design payload (skeleton member index).
+    # For struts and unmapped edges: Asap analysis `elementID` (internal to the FE model).
+    element_id::Int = 0
     node_start::Int = 0            # 1-based start node index
     node_end::Int = 0              # 1-based end node index
     element_type::String = ""     # "beam", "column", "strut", or "other"

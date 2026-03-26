@@ -418,6 +418,9 @@ function _serialize_visualization_frame_elements(design::BuildingDesign, model, 
     element_section_obj = Dict{Int, StructuralSizer.AbstractSection}()
     element_material_color = Dict{Int, String}()
     element_orientation = Dict{Int, Float64}()
+    # Skeleton edge index → design member id (matches API `columns[].id` / `beams[].id`).
+    edge_to_column_id = Dict{Int, Int}()
+    edge_to_beam_id = Dict{Int, Int}()
 
     # Material color cache: same material object → same hex string
     _mat_color_cache = Dict{UInt64, String}()
@@ -435,6 +438,7 @@ function _serialize_visualization_frame_elements(design::BuildingDesign, model, 
         for seg_idx in segment_indices(col)
             seg_idx > length(struc.segments) && continue
             edge_idx = struc.segments[seg_idx].edge_idx
+            edge_to_column_id[edge_idx] = col_idx
             element_ratios[edge_idx] = ratio
             element_ok[edge_idx] = result.ok
             element_section[edge_idx] = result.section_size
@@ -455,6 +459,7 @@ function _serialize_visualization_frame_elements(design::BuildingDesign, model, 
         for seg_idx in segment_indices(beam)
             seg_idx > length(struc.segments) && continue
             edge_idx = struc.segments[seg_idx].edge_idx
+            edge_to_beam_id[edge_idx] = beam_idx
             element_ratios[edge_idx] = ratio
             element_ok[edge_idx] = result.ok
             element_section[edge_idx] = result.section_size
@@ -590,8 +595,17 @@ function _serialize_visualization_frame_elements(design::BuildingDesign, model, 
             mesh_verts, mesh_fcs = _build_frame_element_mesh(section_poly, p1, p2, orient_angle)
         end
 
+        # Expose design member ids for beams/columns so clients (inspectors, tools) match `columns`/`beams` arrays.
+        client_element_id = if elem_type == :column && src_edge_idx > 0
+            get(edge_to_column_id, src_edge_idx, edisp_key)
+        elseif elem_type == :beam && src_edge_idx > 0
+            get(edge_to_beam_id, src_edge_idx, edisp_key)
+        else
+            edisp_key
+        end
+
         push!(elements, APIVisualizationFrameElement(
-            element_id = edisp_key,
+            element_id = client_element_id,
             node_start = node_start_id,
             node_end = node_end_id,
             element_type = get(_type_str, elem_type, string(elem_type)),

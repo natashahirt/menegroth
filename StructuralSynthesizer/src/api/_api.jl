@@ -1,5 +1,6 @@
 include("constants.jl")
 include("schema.jl")
+include("llm_secrets.jl")
 include("deserialize.jl")
 include("validation.jl")
 include("serialize.jl")

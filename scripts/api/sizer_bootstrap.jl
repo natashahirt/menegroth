@@ -17,18 +17,29 @@ flush(stdout)
 ENV["SS_ENABLE_VISUALIZATION"] = get(ENV, "SS_ENABLE_VISUALIZATION", "false")
 ENV["SS_ENABLE_HEAVY_PRECOMPILE_WORKLOAD"] = get(ENV, "SS_ENABLE_HEAVY_PRECOMPILE_WORKLOAD", "false")
 
+using JSON3
+include(joinpath(@__DIR__, "..", "..", "StructuralSynthesizer", "src", "api", "llm_secrets.jl"))
+
 # ── LLM chat configuration ───────────────────────────────────────────────────
 # Load the OpenAI API key from secrets/openai_api_key if not already set via ENV.
-# The file should contain only the key on a single line.
+# Prefer a single raw `sk-...` line; `normalize_llm_api_key_secret` also accepts
+# `CHAT_LLM_API_KEY=...` or one-line JSON (see llm_secrets.jl).
 let key_file = joinpath(@__DIR__, "..", "..", "secrets", "openai_api_key")
-    if !haskey(ENV, "CHAT_LLM_API_KEY") && isfile(key_file)
-        api_key = strip(read(key_file, String))
+    if haskey(ENV, "CHAT_LLM_API_KEY")
+        k0 = get(ENV, "CHAT_LLM_API_KEY", "")
+        k = normalize_llm_api_key_secret(k0)
+        if k != k0
+            ENV["CHAT_LLM_API_KEY"] = k
+            println(stdout, "[bootstrap] CHAT_LLM_API_KEY normalized (was env assignment / JSON style)")
+        else
+            println(stdout, "[bootstrap] CHAT_LLM_API_KEY set via environment")
+        end
+    elseif isfile(key_file)
+        api_key = normalize_llm_api_key_secret(read(key_file, String))
         if !isempty(api_key)
             ENV["CHAT_LLM_API_KEY"] = api_key
             println(stdout, "[bootstrap] CHAT_LLM_API_KEY loaded from secrets/openai_api_key")
         end
-    elseif haskey(ENV, "CHAT_LLM_API_KEY")
-        println(stdout, "[bootstrap] CHAT_LLM_API_KEY set via environment")
     else
         println(stdout, "[bootstrap] WARNING: CHAT_LLM_API_KEY not set — /chat will return 503")
     end
@@ -49,7 +60,6 @@ using Oxygen
 println(stdout, "[bootstrap] loading HTTP...")
 flush(stdout)
 using HTTP
-using JSON3
 using Unitful
 
 const PORT = parse(Int, get(ENV, "PORT", get(ENV, "SIZER_PORT", "8080")))

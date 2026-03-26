@@ -98,6 +98,12 @@ Returns documentation of the API input payload schema and a short endpoint summa
 curl http://localhost:8080/schema
 ```
 
+The schema route also exposes several more focused schema endpoints:
+
+- `GET /schema/applicability` — compact floor-type compatibility + analysis-method applicability rules (for assistants / lightweight clients)
+- `GET /schema/diagnose` — versioned contract for the `GET /diagnose` payload structure
+- `GET /schema/tools` — structured registry of available agent tools and their argument/return contracts
+
 ### POST /validate
 
 Validate input JSON without running the design.
@@ -173,6 +179,7 @@ Fetch a plain-text engineering report for the last completed design. Clients sho
 Optional query parameter:
 
 - `units`: `"imperial"` or `"metric"` — overrides the report display units (default: uses the last design’s `params.unit_system`)
+- `format`: `"json"` — when set, returns a structured JSON summary instead of plain text
 
 ### GET /logs
 
@@ -189,6 +196,32 @@ Response fields:
 - `next_since`: the cursor to use on the next request
 - `lines`: an array of log lines
 
+### GET /diagnose
+
+Returns a high-resolution, machine-readable diagnostic payload for the last completed design. This is intended for LLM agents and debugging tools: it includes per-element checks (with demand/capacity and governing check), suggested levers, embodied carbon, and a short architectural narrative.
+
+Optional query parameter:
+
+- `units`: `"imperial"` or `"metric"` — overrides the display units in the payload
+
+Returns **503** if a design is still running/queued, or **404** if no design has been cached yet.
+
+### POST /chat
+
+LLM chat endpoint (SSE streaming). Returns **503** when `CHAT_LLM_API_KEY` is not configured.
+
+### POST /chat/action
+
+Agent tool dispatch endpoint used by the chat assistant.
+
+### GET /chat/history
+
+Retrieve stored conversation history (query `session_id`).
+
+### DELETE /chat/history
+
+Clear stored conversation history (query `session_id`; omit to clear all stored history).
+
 ### Starting the Server
 
 #### Bootstrap Mode (Production)
@@ -197,7 +230,7 @@ Response fields:
 julia --project=StructuralSynthesizer scripts/api/sizer_bootstrap.jl
 ```
 
-Bootstrap mode starts a lightweight HTTP server immediately with `/health`, `/status`, and `/debug` endpoints. It then loads `StructuralSynthesizer` in a background task. Once loaded, it registers the full route set (including `/design`, `/validate`, `/schema`, `/result`, `/env-check`, `/logs`, `/report`, and `/rebuild_visualization`). This provides fast cold starts for container deployments while the heavy package precompilation happens in the background.
+Bootstrap mode starts a lightweight HTTP server immediately with `/health`, `/status`, and `/debug` endpoints. It then loads `StructuralSynthesizer` in a background task. Once loaded, it registers the full route set (including `/design`, `/validate`, `/schema`, `/schema/applicability`, `/schema/diagnose`, `/schema/tools`, `/result`, `/env-check`, `/logs`, `/report`, `/diagnose`, `/chat`, `/chat/action`, `/chat/history`, `/rebuild_visualization`). This provides fast cold starts for container deployments while the heavy package precompilation happens in the background.
 
 In bootstrap mode (before the full API is loaded), `GET /status` returns:
 

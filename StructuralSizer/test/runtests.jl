@@ -157,4 +157,9 @@ using Asap  # custom units (kip, ksi, ksf, psf, etc.)
         include("test_element_rebar.jl")
     end
 
+    # ─── Solver Trace ────────────────────────────────────────────────────
+    @testset "Solver Trace" begin
+        include("trace/test_trace.jl")
+    end
+
 end

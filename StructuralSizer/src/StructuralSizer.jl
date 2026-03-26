@@ -70,6 +70,12 @@ function __init__()
 end
 
 # =============================================================================
+# Solver Decision Trace (must be first — @traced macro used in all submodules)
+# =============================================================================
+
+include("trace/trace.jl")
+
+# =============================================================================
 # Local Modules
 # =============================================================================
 
@@ -108,6 +114,11 @@ include("visualization/_visualization.jl")
 # =============================================================================
 # Exports
 # =============================================================================
+
+# --- Solver trace ---
+export TraceEvent, TraceCollector, emit!, reset!
+export TracedFunctionMeta, registered_functions, TRACE_REGISTRY
+export @traced
 
 # --- Abstract types ---
 export AbstractMaterial, AbstractDesignCode, AbstractSection
@@ -198,6 +209,7 @@ export extreme_tension_depth, get_bar_depths, bar_depth_from_compression
 # --- Capacity checkers ---
 export AbstractCapacityChecker, AbstractCapacityCache
 export create_cache, is_feasible, precompute_capacities!, get_objective_coeff, get_feasibility_error_msg
+export explain_feasibility, FeasibilityExplanation, CheckResult
 export SteelMemberGeometry, TimberMemberGeometry, ConcreteMemberGeometry
 export AISCChecker, AISCCapacityCache
 export ACIBeamChecker, ACIBeamCapacityCache

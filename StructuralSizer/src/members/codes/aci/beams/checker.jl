@@ -519,3 +519,109 @@ function objective_value(
     mass_kg = ustrip(volume) * ustrip(u"kg/m^3", material.ρ)
     mass_kg * material.ecc
 end
+
+# ==============================================================================
+# Feasibility Explanation (Solver Trace)
+# ==============================================================================
+
+"""
+    explain_feasibility(checker::ACIBeamChecker, cache, j, section, material, demand, geometry)
+
+Evaluate ALL ACI 318 beam checks without short-circuiting and return per-check
+demand/capacity ratios. Mirrors `is_feasible` for ACIBeamChecker exactly but
+collects every intermediate result.
+"""
+function explain_feasibility(
+    checker::ACIBeamChecker,
+    cache::ACIBeamCapacityCache,
+    j::Int,
+    section::RCBeamSection,
+    material::Concrete,
+    demand::RCBeamDemand,
+    geometry::ConcreteMemberGeometry,
+)::FeasibilityExplanation
+    checks = CheckResult[]
+
+    Mu = to_kipft(demand.Mu)
+    Vu = to_kip(demand.Vu)
+
+    # --- 1. Depth Check ---
+    d_section = cache.depths[j]
+    d_limit = checker.max_depth
+    d_ratio = d_limit > 0 ? d_section / d_limit : 0.0
+    push!(checks, CheckResult("depth", d_section <= d_limit,
+          d_ratio, d_section, d_limit, ""))
+
+    # --- 2. Flexural Check — ACI 318-19 §9.5 ---
+    φMn = cache.φMn[j]
+    flex_ratio = φMn > 0 ? Mu / φMn : (Mu > 0 ? Inf : 0.0)
+    push!(checks, CheckResult("flexure", φMn >= Mu,
+          flex_ratio, Mu, φMn, "ACI 318-19 9.5"))
+
+    # --- 3. Shear Adequacy — ACI 318-19 §22.5 ---
+    Nu_kip = _get_Nu_kip(demand)
+    if Nu_kip > 0
+        fc_psi_s = cache.fc_ksi * 1000.0
+        b_in_s   = ustrip(u"inch", section.b)
+        d_in_s   = ustrip(u"inch", section.d)
+        h_in_s   = ustrip(u"inch", section.h)
+        Ag_in2   = b_in_s * h_in_s
+        axial_factor = 1 + (Nu_kip * 1000) / (2000 * Ag_in2)
+        sqrt_fc  = sqrt(fc_psi_s)
+        Vc_lb     = 2 * checker.λ * axial_factor * sqrt_fc * b_in_s * d_in_s
+        Vs_max_lb = 8 * sqrt_fc * b_in_s * d_in_s
+        φVn_kip   = 0.75 * (Vc_lb + Vs_max_lb) / 1000.0
+    else
+        φVn_kip = cache.φVn_max[j]
+    end
+    shear_ratio = φVn_kip > 0 ? Vu / φVn_kip : (Vu > 0 ? Inf : 0.0)
+    push!(checks, CheckResult("shear", φVn_kip >= Vu,
+          shear_ratio, Vu, φVn_kip, "ACI 318-19 22.5"))
+
+    # --- 4. Net Tensile Strain — ACI 318-19 §9.3.3.1 ---
+    εt = cache.εt[j]
+    εt_limit = 0.004
+    εt_ratio = εt_limit > 0 ? εt_limit / max(εt, 1e-10) : 0.0
+    push!(checks, CheckResult("net_tensile_strain", εt >= εt_limit,
+          εt_ratio, εt_limit, εt, "ACI 318-19 9.3.3.1"))
+
+    # --- 5. Minimum Reinforcement — ACI 318-19 §9.6.1 ---
+    fc_psi = cache.fc_ksi * 1000.0
+    fy_psi = cache.fy_ksi * 1000.0
+    b_in   = ustrip(u"inch", section.b)
+    d_in   = ustrip(u"inch", section.d)
+    As_in  = ustrip(u"inch^2", section.As)
+    As_min = max(3.0 * sqrt(fc_psi) * b_in * d_in / fy_psi,
+                 200.0 * b_in * d_in / fy_psi)
+    min_reinf_ratio = As_min > 0 ? As_min / max(As_in, 1e-10) : 0.0
+    push!(checks, CheckResult("min_reinforcement", As_in >= As_min,
+          min_reinf_ratio, As_min, As_in, "ACI 318-19 9.6.1"))
+
+    # --- 6. Torsion Section Adequacy — ACI 318-19 §22.7 ---
+    Tu_val = _get_Tu_kipin(demand)
+    if Tu_val > 0.0
+        h_in = ustrip(u"inch", section.h)
+        d_stir = ustrip(u"inch", rebar(section.stirrup_size).diameter)
+        cov_in = ustrip(u"inch", section.cover)
+        c_ctr  = cov_in + d_stir / 2
+
+        props = torsion_section_properties(section.b, section.h, c_ctr * u"inch")
+        Tth = threshold_torsion(props.Acp, props.pcp, fc_psi; λ=checker.λ)
+
+        if Tu_val > Tth
+            torsion_ok = torsion_section_adequate(Vu, Tu_val, b_in, d_in,
+                                                   props.Aoh, props.ph, fc_psi;
+                                                   λ=checker.λ)
+            torsion_ratio = torsion_ok ? 0.9 : 1.1  # approximate — exact ratio is internal
+            push!(checks, CheckResult("torsion_adequacy", torsion_ok,
+                  torsion_ratio, Tu_val, Tth, "ACI 318-19 22.7"))
+        end
+    end
+
+    # --- Aggregate ---
+    all_pass = all(c -> c.passed, checks)
+    gov_idx = argmax([c.ratio for c in checks])
+    gov = checks[gov_idx]
+
+    FeasibilityExplanation(all_pass, checks, gov.name, gov.ratio)
+end

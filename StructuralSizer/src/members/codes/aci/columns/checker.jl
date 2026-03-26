@@ -502,3 +502,99 @@ function objective_value(
     return mass_kg * material.ecc  # kgCO₂e
 end
 
+# ==============================================================================
+# Feasibility Explanation (Solver Trace)
+# ==============================================================================
+
+"""
+    explain_feasibility(checker::ACIColumnChecker, cache, j, section, material, demand, geometry)
+
+Evaluate ALL ACI 318 column checks without short-circuiting and return per-check
+demand/capacity ratios. Mirrors `_is_feasible_rc_column` exactly but collects
+every intermediate result.
+"""
+function explain_feasibility(
+    checker::ACIColumnChecker,
+    cache::ACIColumnCapacityCache,
+    j::Int,
+    section::Union{RCColumnSection, RCCircularSection},
+    material::Concrete,
+    demand::RCColumnDemand,
+    geometry::ConcreteMemberGeometry
+)::FeasibilityExplanation
+    checks = CheckResult[]
+
+    Pu = to_kip(demand.Pu)
+    Mux = to_kipft(demand.Mux)
+    Muy = to_kipft(demand.Muy)
+    βdns = Float64(demand.βdns)
+
+    # --- Depth Check ---
+    d_section = cache.depths[j]
+    d_limit = checker.max_depth
+    d_ratio = d_limit > 0 ? d_section / d_limit : 0.0
+    push!(checks, CheckResult("depth", d_section <= d_limit,
+          d_ratio, d_section, d_limit, ""))
+
+    # --- Slenderness Effects — ACI 318-19 §6.6.4 ---
+    if checker.include_slenderness
+        mat = (fc = cache.fc_ksi, fy = cache.fy_ksi, Es = cache.Es_ksi, εcu = cache.εcu)
+        M1x = to_kipft(demand.M1x)
+        M2x = to_kipft(demand.M2x)
+        M1y = to_kipft(demand.M1y)
+        M2y = to_kipft(demand.M2y)
+
+        result_x = magnify_moment_nonsway(section, mat, geometry, Pu, M1x, M2x; βdns=βdns)
+        Mux = result_x.Mc
+
+        if Muy > 0 && checker.include_biaxial
+            result_y = magnify_moment_nonsway(section, mat, geometry, Pu, M1y, M2y; βdns=βdns)
+            Muy = result_y.Mc
+        end
+
+        # Report slenderness amplification ratio (Mc/M2)
+        slend_ratio = M2x > 0 ? Mux / M2x : 1.0
+        push!(checks, CheckResult("slenderness_magnification", true,
+              slend_ratio, Mux, M2x > 0 ? M2x : Mux, "ACI 318-19 6.6.4"))
+    end
+
+    # --- Uniaxial P-M Check (x-axis) — ACI 318-19 §22.4 ---
+    diagram = cache.diagrams[j]
+    check_x = check_PM_capacity(diagram, Pu, Mux)
+    pm_ratio_x = check_x.adequate ? (check_x.φMn_at_Pu > 0 ? Mux / check_x.φMn_at_Pu : 0.0) : Inf
+    push!(checks, CheckResult("pm_interaction_x", check_x.adequate,
+          pm_ratio_x, Mux, check_x.φMn_at_Pu, "ACI 318-19 22.4"))
+
+    # --- Biaxial Check — ACI 318-19 via Bresler Load Contour ---
+    if checker.include_biaxial && Muy > 0
+        φMnx = check_x.φMn_at_Pu
+
+        φMny = if cache.is_square[j] || isnothing(cache.diagrams_y[j])
+            φMnx
+        else
+            check_y = check_PM_capacity(cache.diagrams_y[j], Pu, Muy)
+            if !check_y.adequate
+                push!(checks, CheckResult("pm_interaction_y", false,
+                      Inf, Muy, 0.0, "ACI 318-19 22.4"))
+            end
+            check_y.φMn_at_Pu
+        end
+
+        if φMnx > 0 && φMny > 0
+            util_biaxial = bresler_load_contour(Mux, Muy, φMnx, φMny; α=checker.α_biaxial)
+            push!(checks, CheckResult("biaxial_bresler", util_biaxial <= 1.0,
+                  util_biaxial, max(Mux, Muy), 1.0, "ACI 318-19 R22.4 / Bresler"))
+        else
+            push!(checks, CheckResult("biaxial_bresler", false,
+                  Inf, max(Mux, Muy), 0.0, "ACI 318-19 R22.4 / Bresler"))
+        end
+    end
+
+    # --- Aggregate ---
+    all_pass = all(c -> c.passed, checks)
+    gov_idx = argmax([c.ratio for c in checks])
+    gov = checks[gov_idx]
+
+    FeasibilityExplanation(all_pass, checks, gov.name, gov.ratio)
+end
+

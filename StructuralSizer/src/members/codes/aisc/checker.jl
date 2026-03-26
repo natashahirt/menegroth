@@ -515,3 +515,147 @@ function composite_stud_contribution(
         return 0.0
     end
 end
+
+# ==============================================================================
+# Feasibility Explanation (Solver Trace)
+# ==============================================================================
+
+"""
+    explain_feasibility(checker::AISCChecker, cache, j, section, material, demand, geometry)
+
+Evaluate ALL AISC 360-16 checks without short-circuiting and return per-check
+demand/capacity ratios. Mirrors the logic of `is_feasible` exactly but collects
+every intermediate result.
+
+Used post-solve by the trace system to explain section selection and rejection.
+"""
+function explain_feasibility(
+    checker::AISCChecker,
+    cache::AISCCapacityCache,
+    j::Int,
+    section::AbstractSection,
+    material::StructuralSteel,
+    demand::MemberDemand,
+    geometry::SteelMemberGeometry
+)::FeasibilityExplanation
+    checks = CheckResult[]
+
+    # --- Extract demands (SI) ---
+    Pu_c = to_newtons(demand.Pu_c)
+    Pu_t = to_newtons(demand.Pu_t)
+    Mux = to_newton_meters(demand.Mux)
+    Muy = to_newton_meters(demand.Muy)
+    M1x = to_newton_meters(demand.M1x)
+    M2x = to_newton_meters(demand.M2x)
+    M1y = to_newton_meters(demand.M1y)
+    M2y = to_newton_meters(demand.M2y)
+    Vus = to_newtons(demand.Vu_strong)
+    Vuw = to_newtons(demand.Vu_weak)
+    δ_max_LL = to_meters(demand.δ_max_LL)
+    δ_max_total = to_meters(demand.δ_max_total)
+    I_ref = to_meters_fourth(demand.I_ref)
+    L_m = to_meters(geometry.L)
+    Lb_m = to_meters(geometry.Lb)
+
+    # --- Depth Check ---
+    d_section = cache.depths[j]
+    d_limit = checker.max_depth
+    d_ratio = d_limit > 0 ? d_section / d_limit : 0.0
+    push!(checks, CheckResult("depth", d_section <= d_limit,
+          d_ratio, d_section, d_limit, ""))
+
+    # --- Shear: Strong Axis — AISC 360-16 G2 ---
+    ϕVn_s = cache.ϕVn_strong[j]
+    s_ratio_s = ϕVn_s > 0 ? Vus / ϕVn_s : (Vus > 0 ? Inf : 0.0)
+    push!(checks, CheckResult("shear_strong", ϕVn_s >= Vus,
+          s_ratio_s, Vus, ϕVn_s, "AISC 360-16 G2"))
+
+    # --- Shear: Weak Axis ---
+    ϕVn_w = cache.ϕVn_weak[j]
+    s_ratio_w = ϕVn_w > 0 ? Vuw / ϕVn_w : (Vuw > 0 ? Inf : 0.0)
+    push!(checks, CheckResult("shear_weak", ϕVn_w >= Vuw,
+          s_ratio_w, Vuw, ϕVn_w, "AISC 360-16 G2"))
+
+    # --- Flexural + Compression Capacities (needed for interaction) ---
+    ϕMnx = _get_ϕMnx_cached!(cache, j, Lb_m, geometry.Cb, section, material, checker.ϕ_b)
+    ϕMny = cache.ϕMn_weak[j]
+
+    Lc_x = geometry.Kx * L_m
+    Lc_y = geometry.Ky * L_m
+    ϕPn_x = _get_ϕPn_cached!(cache, :strong, j, Lc_x, section, material)
+    ϕPn_y = _get_ϕPn_cached!(cache, :weak, j, Lc_y, section, material)
+    ϕPn_z = _get_ϕPn_cached!(cache, :torsional, j, Lc_y, section, material)
+    ϕPnc = min(ϕPn_x, ϕPn_y, ϕPn_z)
+
+    # --- B1 Moment Amplification — AISC Appendix 8 ---
+    Mux_amp = Mux
+    Muy_amp = Muy
+    b1_feasible = true
+
+    if Pu_c > 0.0
+        E = to_pascals(material.E)
+        Ix_j = cache.Ix[j]
+        Iy_j = to_meters_fourth(StructuralSizer.Iy(section))
+        Lc1_x = geometry.Kx * L_m
+        Lc1_y = geometry.Ky * L_m
+
+        if Lc1_x > 0 && Lc1_y > 0
+            Pe1_x = π^2 * E * Ix_j / Lc1_x^2
+            Pe1_y = π^2 * E * Iy_j / Lc1_y^2
+            Cm_x = compute_Cm(M1x, M2x; transverse_loading=demand.transverse_load)
+            Cm_y = compute_Cm(M1y, M2y; transverse_loading=demand.transverse_load)
+            B1_x = compute_B1(Pu_c, Pe1_x, Cm_x; α=1.0)
+            B1_y = compute_B1(Pu_c, Pe1_y, Cm_y; α=1.0)
+            b1_feasible = !isinf(B1_x) && !isinf(B1_y)
+            if b1_feasible
+                Mux_amp = B1_x * Mux
+                Muy_amp = B1_y * Muy
+            end
+        else
+            b1_feasible = false
+        end
+    end
+
+    # Report B1 amplification as a check (Pu/Pe ratio indicates stability)
+    if Pu_c > 0.0 && Lc_x > 0
+        Pe1_approx = ϕPnc > 0 ? Pu_c / ϕPnc : Inf
+        push!(checks, CheckResult("b1_amplification", b1_feasible,
+              b1_feasible ? Pe1_approx : Inf, Pu_c, ϕPnc, "AISC 360-16 App. 8"))
+    end
+
+    # --- Interaction: Compression — AISC 360-16 H1 ---
+    ur_c = b1_feasible ? check_PMxMy_interaction(Pu_c, Mux_amp, Muy_amp, ϕPnc, ϕMnx, ϕMny) : Inf
+    push!(checks, CheckResult("pm_interaction_compression", ur_c <= 1.0,
+          ur_c, max(Pu_c, Mux_amp, Muy_amp), 1.0, "AISC 360-16 H1"))
+
+    # --- Interaction: Tension — AISC 360-16 H1 ---
+    ϕPn_t = cache.ϕPn_tension[j]
+    ur_t = check_PMxMy_interaction(Pu_t, Mux, Muy, ϕPn_t, ϕMnx, ϕMny)
+    push!(checks, CheckResult("pm_interaction_tension", ur_t <= 1.0,
+          ur_t, max(Pu_t, Mux, Muy), 1.0, "AISC 360-16 H1"))
+
+    # --- LL Deflection Check ---
+    if !isnothing(checker.deflection_limit) && I_ref > 0 && δ_max_LL > 0
+        δ_scaled = δ_max_LL * I_ref / cache.Ix[j]
+        δ_ratio = δ_scaled / L_m
+        limit_val = checker.deflection_limit
+        push!(checks, CheckResult("deflection_ll", δ_ratio <= limit_val,
+              δ_ratio / limit_val, δ_ratio, limit_val, "AISC 360-16 L"))
+    end
+
+    # --- Total Deflection Check ---
+    if !isnothing(checker.total_deflection_limit) && I_ref > 0 && δ_max_total > 0
+        δ_scaled = δ_max_total * I_ref / cache.Ix[j]
+        δ_ratio = δ_scaled / L_m
+        limit_val = checker.total_deflection_limit
+        push!(checks, CheckResult("deflection_total", δ_ratio <= limit_val,
+              δ_ratio / limit_val, δ_ratio, limit_val, "AISC 360-16 L"))
+    end
+
+    # --- Aggregate ---
+    all_pass = all(c -> c.passed, checks)
+    gov_idx = argmax([c.ratio for c in checks])
+    gov = checks[gov_idx]
+
+    FeasibilityExplanation(all_pass, checks, gov.name, gov.ratio)
+end

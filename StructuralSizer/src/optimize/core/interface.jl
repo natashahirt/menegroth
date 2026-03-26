@@ -105,6 +105,70 @@ function diagnose_infeasibility(::AbstractCapacityChecker, cache, catalog, mater
 end
 
 # ==============================================================================
+# Feasibility Explanation (for Solver Trace)
+# ==============================================================================
+
+"""
+    CheckResult
+
+Result of a single design code check within `explain_feasibility`.
+
+# Fields
+- `name::String` — check name (e.g. "shear_strong", "pm_interaction_compression")
+- `passed::Bool` — whether this check passed
+- `ratio::Float64` — demand/capacity ratio (< 1.0 passes, > 1.0 fails)
+- `demand::Float64` — demand value in SI units
+- `capacity::Float64` — capacity value in SI units
+- `code_clause::String` — governing code clause (e.g. "AISC 360-16 G2", "ACI 318-19 22.6")
+"""
+struct CheckResult
+    name::String
+    passed::Bool
+    ratio::Float64
+    demand::Float64
+    capacity::Float64
+    code_clause::String
+end
+
+"""
+    FeasibilityExplanation
+
+Detailed breakdown of all design code checks for a single section/demand pair.
+Returned by `explain_feasibility` — the diagnostic sibling of `is_feasible`.
+
+# Fields
+- `passed::Bool` — overall feasibility (all checks pass)
+- `checks::Vector{CheckResult}` — individual check results in evaluation order
+- `governing_check::String` — name of the check with the highest ratio
+- `governing_ratio::Float64` — the highest ratio across all checks
+"""
+struct FeasibilityExplanation
+    passed::Bool
+    checks::Vector{CheckResult}
+    governing_check::String
+    governing_ratio::Float64
+end
+
+"""
+    explain_feasibility(checker, cache, j, section, material, demand, geometry) -> FeasibilityExplanation
+
+Detailed diagnostic version of `is_feasible`. Evaluates ALL design code checks
+(does not short-circuit on first failure) and returns per-check ratios.
+
+Used by the solver trace to explain why a section was selected or rejected.
+NOT used in the hot MIP loop — `is_feasible` remains the fast path.
+
+The default implementation returns a single-check explanation based on
+`is_feasible` (pass/fail only, no ratios). Checkers should override this
+with their code-specific check breakdown.
+"""
+function explain_feasibility(checker::AbstractCapacityChecker, cache, j, section, material, demand, geometry)
+    ok = is_feasible(checker, cache, j, section, material, demand, geometry)
+    check = CheckResult("aggregate", ok, ok ? 0.0 : Inf, 0.0, 0.0, "")
+    FeasibilityExplanation(ok, [check], "aggregate", ok ? 0.0 : Inf)
+end
+
+# ==============================================================================
 # NLP Problem Interface (for Continuous Optimization)
 # ==============================================================================
 # Abstract interface for continuous optimization problems (floors, custom members).

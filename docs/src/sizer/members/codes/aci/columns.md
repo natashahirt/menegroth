@@ -5,10 +5,13 @@
 > using Unitful
 >
 > # Define section (18"×18" with 8-#8 bars)
-> section = RCColumnSection(
->     b = 18u"inch", h = 18u"inch",
->     bar_size = 8, n_bars = 8,
->     cover = 2.5u"inch", tie_type = :tied,
+> section = RCColumnSection(;
+>     b = 18u"inch",
+>     h = 18u"inch",
+>     bar_size = 8,
+>     n_bars = 8,
+>     cover = 2.5u"inch",
+>     tie_type = :tied,
 > )
 >
 > # Material (4 ksi concrete + Grade 60 rebar)
@@ -166,7 +169,7 @@ where ``P_{nx}`` = nominal axial capacity at eccentricity ``e_x`` only, ``P_{ny}
 pca_load_contour
 ```
 
-`pca_load_contour(Mux, Muy, φMnox, φMnoy, Pu, φPn, φP0; β=0.65)` — PCA load contour method:
+`pca_load_contour(Mux, Muy, φMnox, φMnoy; β=0.65)` — PCA load contour method:
 
 ```math
 u_r = \max\left(

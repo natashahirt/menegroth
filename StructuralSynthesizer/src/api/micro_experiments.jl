@@ -15,6 +15,47 @@
 
 using Unitful
 
+# ─── Argument Coercion Helpers ────────────────────────────────────────────────
+
+"""
+    _coerce_float(x) -> Union{Float64, Nothing}
+
+Convert JSON/tool argument `x` to `Float64` when possible. Returns `nothing` for
+missing or invalid values.
+"""
+function _coerce_float(x)::Union{Float64, Nothing}
+    isnothing(x) && return nothing
+    x isa Real && return Float64(x)
+    if x isa AbstractString
+        s = strip(x)
+        isempty(s) && return nothing
+        # Accept simple numeric strings from tool JSON payloads.
+        v = tryparse(Float64, replace(s, "," => ""))
+        return v
+    end
+    return nothing
+end
+
+"""
+    _coerce_int(x) -> Union{Int, Nothing}
+
+Convert JSON/tool argument `x` to `Int` when possible. Returns `nothing` for
+missing or invalid values.
+"""
+function _coerce_int(x)::Union{Int, Nothing}
+    isnothing(x) && return nothing
+    if x isa Integer
+        return Int(x)
+    elseif x isa Real
+        return isinteger(x) ? Int(x) : nothing
+    elseif x isa AbstractString
+        s = strip(x)
+        isempty(s) && return nothing
+        return tryparse(Int, s)
+    end
+    return nothing
+end
+
 # ─── Punching Experiments ─────────────────────────────────────────────────────
 
 """
@@ -147,7 +188,15 @@ function experiment_pm_column(
             "error" => "section_size_required",
             "message" => "Provide section_size (inches) for RC column experiment.",
         )
-        new_dim = Float64(section_size)
+        new_dim = _coerce_float(section_size)
+        isnothing(new_dim) && return Dict{String, Any}(
+            "error" => "invalid_section_size",
+            "message" => "section_size must be numeric inches (e.g., 18 or \"18\"). Got: $(repr(section_size))",
+        )
+        new_dim <= 0 && return Dict{String, Any}(
+            "error" => "invalid_section_size",
+            "message" => "section_size must be > 0. Got: $new_dim",
+        )
         col_concrete = resolve_column_concrete(mats)
         col_rebar = resolve_column_rebar(mats)
         fc = col_concrete.fc′
@@ -390,31 +439,44 @@ function evaluate_experiment(
     args::Dict{String, Any},
 )::Dict{String, Any}
     if experiment_type == "punching"
-        col_idx = get(args, "col_idx", nothing)
+        col_idx = _coerce_int(get(args, "col_idx", nothing))
         isnothing(col_idx) && return Dict("error" => "missing_col_idx", "message" => "punching experiment requires col_idx")
-        return experiment_punching(design, Int(col_idx);
-            c1_in = get(args, "c1_in", nothing),
-            c2_in = get(args, "c2_in", nothing),
-            h_in = get(args, "h_in", nothing),
+        c1_in = _coerce_float(get(args, "c1_in", nothing))
+        c2_in = _coerce_float(get(args, "c2_in", nothing))
+        h_in = _coerce_float(get(args, "h_in", nothing))
+        return experiment_punching(design, col_idx;
+            c1_in = c1_in,
+            c2_in = c2_in,
+            h_in = h_in,
         )
     elseif experiment_type == "pm_column"
-        col_idx = get(args, "col_idx", nothing)
+        col_idx = _coerce_int(get(args, "col_idx", nothing))
         isnothing(col_idx) && return Dict("error" => "missing_col_idx", "message" => "pm_column experiment requires col_idx")
-        return experiment_pm_column(design, Int(col_idx);
+        return experiment_pm_column(design, col_idx;
             section_size = get(args, "section_size", nothing),
         )
     elseif experiment_type == "deflection"
-        slab_idx = get(args, "slab_idx", nothing)
+        slab_idx = _coerce_int(get(args, "slab_idx", nothing))
         isnothing(slab_idx) && return Dict("error" => "missing_slab_idx", "message" => "deflection experiment requires slab_idx")
-        return experiment_deflection(design, Int(slab_idx);
+        return experiment_deflection(design, slab_idx;
             deflection_limit = string(get(args, "deflection_limit", "L_360")),
         )
     elseif experiment_type == "catalog_screen"
-        col_idx = get(args, "col_idx", nothing)
+        col_idx = _coerce_int(get(args, "col_idx", nothing))
         isnothing(col_idx) && return Dict("error" => "missing_col_idx", "message" => "catalog_screen experiment requires col_idx")
         candidates_raw = get(args, "candidates", Float64[])
-        candidates = Float64[Float64(c) for c in candidates_raw]
-        return experiment_catalog_screen(design, Int(col_idx); candidates)
+        candidates = Float64[]
+        for c in candidates_raw
+            v = _coerce_float(c)
+            if isnothing(v)
+                return Dict(
+                    "error" => "invalid_candidates",
+                    "message" => "All candidates must be numeric inches. Got invalid value: $(repr(c))",
+                )
+            end
+            push!(candidates, v)
+        end
+        return experiment_catalog_screen(design, col_idx; candidates)
     else
         return Dict{String, Any}(
             "error" => "unknown_experiment",

@@ -108,6 +108,35 @@ end
         @test r["error"] == "missing_slab_idx"
     end
 
+    @testset "evaluate_experiment string numeric args" begin
+        col = _mock_punching_column(c1_m=0.4, c2_m=0.4, Vu_kN=200.0, ratio=0.85)
+        slab = _mock_slab(deflection_in=0.4, limit_in=0.5, ok=true)
+        design = _mock_design(columns = Dict(1 => col), slabs = Dict(1 => slab))
+
+        r_pm = StructuralSynthesizer.evaluate_experiment(
+            design,
+            "pm_column",
+            Dict{String, Any}("col_idx" => "1", "section_size" => "18"),
+        )
+        @test r_pm["experiment"] == "pm_column"
+        @test r_pm["modified"]["section"] == "18x18"
+
+        r_catalog = StructuralSynthesizer.evaluate_experiment(
+            design,
+            "catalog_screen",
+            Dict{String, Any}("col_idx" => "1", "candidates" => ["12", "16", "20"]),
+        )
+        @test r_catalog["experiment"] == "catalog_screen"
+        @test length(r_catalog["candidates"]) == 3
+
+        r_bad = StructuralSynthesizer.evaluate_experiment(
+            design,
+            "catalog_screen",
+            Dict{String, Any}("col_idx" => 1, "candidates" => ["12", "bad"]),
+        )
+        @test r_bad["error"] == "invalid_candidates"
+    end
+
     @testset "experiment_punching" begin
         col = _mock_punching_column(c1_m=0.4, c2_m=0.4, Vu_kN=200.0, ratio=0.85)
         slab = _mock_slab(thickness_m=0.2)

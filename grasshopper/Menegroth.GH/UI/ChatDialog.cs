@@ -496,8 +496,10 @@ namespace Menegroth.GH.UI
 
             if (!hadError)
             {
-                if (_mode == "design")
-                    ExtractAndPresentProposedParams(fullResponse);
+                // Allow param proposals in both design and results phases.
+                // The unified assistant can stage updates regardless of whether
+                // a result is already available.
+                ExtractAndPresentProposedParams(fullResponse);
                 if (_pendingClarification == null &&
                     TryExtractClarificationPrompt(fullResponse, out var fallbackPrompt) &&
                     fallbackPrompt != null)

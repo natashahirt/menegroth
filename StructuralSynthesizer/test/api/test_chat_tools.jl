@@ -113,6 +113,37 @@ dispatch = SS._dispatch_chat_tool
         SS.clear_session_insights!()
     end
 
+    @testset "clarify_user_intent bool coercion" begin
+        r = dispatch("clarify_user_intent", Dict{String, Any}(
+            "id" => "decision",
+            "prompt" => "Pick one",
+            "allow_multiple" => "true",
+            "options" => [
+                Dict("id" => "a", "label" => "A"),
+                Dict("id" => "b", "label" => "B"),
+            ],
+        ))
+        @test r["ok"] == true
+        @test r["clarification"]["allow_multiple"] == true
+    end
+
+    @testset "record_insight numeric coercion + validation" begin
+        r = dispatch("record_insight", Dict{String, Any}(
+            "category" => "observation",
+            "summary" => "String numeric coercion",
+            "design_index" => "0",
+            "confidence" => "0.7",
+        ))
+        @test r["ok"] == true
+
+        r_bad = dispatch("record_insight", Dict{String, Any}(
+            "category" => "observation",
+            "summary" => "Bad confidence",
+            "confidence" => "nope",
+        ))
+        @test r_bad["error"] == "invalid_confidence"
+    end
+
     @testset "record_insight — missing summary → error" begin
         r = dispatch("record_insight", Dict{String, Any}("category" => "dead_end"))
         @test r["error"] == "missing_summary"
@@ -219,6 +250,18 @@ end
         @test !haskey(r, "error")
     end
 
+    @testset "query_elements — string arg coercion" begin
+        r = dispatch("query_elements", Dict{String, Any}(
+            "min_ratio" => "0.0",
+            "max_ratio" => "2.0",
+            "ok" => "false",
+        ))
+        @test !haskey(r, "error")
+
+        r_bad = dispatch("query_elements", Dict{String, Any}("min_ratio" => "bad"))
+        @test r_bad["error"] == "invalid_min_ratio"
+    end
+
     @testset "get_current_params" begin
         r = dispatch("get_current_params", Dict{String, Any}())
         @test !haskey(r, "error")
@@ -269,6 +312,20 @@ end
         end
     end
 
+    @testset "run_experiment — string numeric args" begin
+        col_ids = collect(keys(design.columns))
+        if isempty(col_ids)
+            @test true
+        else
+            cid = string(first(col_ids))
+            r = dispatch("run_experiment", Dict{String, Any}(
+                "type" => "pm_column",
+                "args" => Dict{String, Any}("col_idx" => cid, "section_size" => "18"),
+            ))
+            @test haskey(r, "experiment") || haskey(r, "error")
+        end
+    end
+
     @testset "run_experiment — missing type → error" begin
         r = dispatch("run_experiment", Dict{String, Any}("args" => Dict{String, Any}()))
         @test r["error"] == "missing_type"
@@ -278,6 +335,11 @@ end
         r = dispatch("batch_experiments", Dict{String, Any}("experiments" => Any[]))
         @test haskey(r, "results")
         @test isempty(r["results"])
+    end
+
+    @testset "batch_experiments — invalid payload shape" begin
+        r = dispatch("batch_experiments", Dict{String, Any}("experiments" => "not-an-array"))
+        @test r["error"] == "invalid_experiments"
     end
 
     @testset "suggest_next_action — requires goal" begin

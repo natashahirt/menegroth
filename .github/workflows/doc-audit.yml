@@ -71,11 +71,29 @@ jobs:
             echo "No source changes in last 24h — skipping."
             echo "has_changes=false" >> "$GITHUB_OUTPUT"
           else
-            COUNT=$(echo "$CHANGED" | wc -l)
-            echo "Source changes detected in $COUNT files:"
-            echo "$CHANGED"
-            echo "$CHANGED" > doc_audit_changed_files.txt
-            echo "has_changes=true" >> "$GITHUB_OUTPUT"
+            # Ignore trace-only instrumentation churn so it doesn't self-trigger
+            # the nightly doc-audit + trace-audit chain.
+            PATCH=$(git log origin/main --since="24 hours ago" -p --pretty=format: -- \
+              StructuralSizer/src StructuralSynthesizer/src)
+
+            NON_TRACE=$(echo "$PATCH" | \
+              grep -E '^[+-]' | \
+              grep -Ev '^(\+\+\+|---)' | \
+              sed -E 's/^[+-][[:space:]]*//' | \
+              sed -E 's/[[:space:]]+$//' | \
+              grep -Ev '^(#|$)' | \
+              grep -Evi '(emit!\(|TRACE_REGISTRY\[|TracedFunctionMeta\(|@traced\b|TraceCollector|tc::|[,(;][[:space:]]*tc[[:space:]]*=)')
+
+            if [ -z "$NON_TRACE" ]; then
+              echo "Only trace-instrumentation changes detected in last 24h — skipping doc audit launch."
+              echo "has_changes=false" >> "$GITHUB_OUTPUT"
+            else
+              COUNT=$(echo "$CHANGED" | wc -l)
+              echo "Relevant (non-trace-only) source changes detected in $COUNT files:"
+              echo "$CHANGED"
+              echo "$CHANGED" > doc_audit_changed_files.txt
+              echo "has_changes=true" >> "$GITHUB_OUTPUT"
+            fi
           fi
 
       # Launch step: Cursor Cloud Agent needs repo access via the Cursor GitHub App.

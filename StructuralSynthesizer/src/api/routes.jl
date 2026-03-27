@@ -14,6 +14,35 @@ const DESIGN_LOG_LOCK = ReentrantLock()
 const DESIGN_LOG_BASE_INDEX = Ref(0)
 const DESIGN_LOG_MAX_LINES = 2000
 
+"""Best-effort integer coercion for route/query values."""
+function _route_coerce_int(x)::Union{Int, Nothing}
+    isnothing(x) && return nothing
+    x isa Integer && return Int(x)
+    if x isa Real
+        return isinteger(x) ? Int(x) : nothing
+    elseif x isa AbstractString
+        s = strip(x)
+        isempty(s) && return nothing
+        i = tryparse(Int, s)
+        !isnothing(i) && return i
+        f = tryparse(Float64, s)
+        (!isnothing(f) && isfinite(f) && isinteger(f)) && return Int(f)
+    end
+    return nothing
+end
+
+"""Best-effort float coercion for route/body values."""
+function _route_coerce_float(x)::Union{Float64, Nothing}
+    isnothing(x) && return nothing
+    x isa Real && return Float64(x)
+    if x isa AbstractString
+        s = strip(x)
+        isempty(s) && return nothing
+        return tryparse(Float64, replace(s, "," => ""))
+    end
+    return nothing
+end
+
 function _reset_design_logs!()
     lock(DESIGN_LOG_LOCK) do
         empty!(DESIGN_LOG_LINES)
@@ -57,11 +86,8 @@ function _query_int(req::HTTP.Request, key::String, default::Int=0)
         kv = split(pair, '='; limit=2)
         length(kv) == 2 || continue
         kv[1] == key || continue
-        try
-            return parse(Int, kv[2])
-        catch
-            return default
-        end
+        v = _route_coerce_int(kv[2])
+        return isnothing(v) ? default : v
     end
     return default
 end
@@ -383,11 +409,12 @@ function register_routes!()
             return _json_bad(Dict("status" => "error", "message" => "Invalid JSON: $(sprint(showerror, e))"))
         end
 
-        target_edge_val = get(body, :target_edge_m, nothing)
-        if isnothing(target_edge_val) || !(target_edge_val isa Number) || target_edge_val <= 0
+        target_edge_raw = get(body, :target_edge_m, nothing)
+        target_edge_val = _route_coerce_float(target_edge_raw)
+        if isnothing(target_edge_val) || target_edge_val <= 0
             return _json_bad(Dict(
                 "status" => "error",
-                "message" => "target_edge_m must be a positive number (meters).",
+                "message" => "target_edge_m must be a positive number (meters). Got: $(repr(target_edge_raw))",
             ))
         end
         target_edge = Float64(target_edge_val) * u"m"

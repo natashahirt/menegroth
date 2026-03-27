@@ -16,6 +16,14 @@ etc.). For all other files, do a lighter pass: only fix obvious errors or skip
 unless you find clear discrepancies. This keeps the audit focused on what
 actually changed.
 
+## Workflow trigger note
+
+The nightly workflow that launches this prompt ignores source diffs that are
+trace-instrumentation-only (for example `emit!` calls, `tc` threading, and
+`TRACE_REGISTRY`/`@traced` updates). This is intentional to avoid self-trigger
+loops between documentation and trace audits. If the Changed files list is
+empty because of that filter, do not force code edits.
+
 ---
 
 ## 1. API Accuracy (highest priority)

@@ -561,6 +561,49 @@ function _dict_get(d, key::String, default=nothing)
     return default
 end
 
+"""Best-effort Integer coercion for tool args."""
+function _chat_coerce_int(x)::Union{Int, Nothing}
+    isnothing(x) && return nothing
+    x isa Integer && return Int(x)
+    if x isa Real
+        return isinteger(x) ? Int(x) : nothing
+    elseif x isa AbstractString
+        s = strip(x)
+        isempty(s) && return nothing
+        return tryparse(Int, s)
+    end
+    return nothing
+end
+
+"""Best-effort Float64 coercion for tool args."""
+function _chat_coerce_float(x)::Union{Float64, Nothing}
+    isnothing(x) && return nothing
+    x isa Real && return Float64(x)
+    if x isa AbstractString
+        s = strip(x)
+        isempty(s) && return nothing
+        return tryparse(Float64, replace(s, "," => ""))
+    end
+    return nothing
+end
+
+"""Best-effort Bool coercion for tool args."""
+function _chat_coerce_bool(x)::Union{Bool, Nothing}
+    isnothing(x) && return nothing
+    x isa Bool && return x
+    if x isa Integer
+        x == 1 && return true
+        x == 0 && return false
+        return nothing
+    elseif x isa AbstractString
+        s = lowercase(strip(x))
+        s in ("true", "t", "yes", "y", "1") && return true
+        s in ("false", "f", "no", "n", "0") && return false
+        return nothing
+    end
+    return nothing
+end
+
 """
     _json_schema_from_tool_arg(desc) -> Dict{String, Any}
 
@@ -994,7 +1037,8 @@ function _dispatch_chat_tool(tool::String, args::Dict{String, Any})::Dict{String
     elseif tool == "clarify_user_intent"
         clarification_id = string(get(args, "id", ""))
         prompt_text      = string(get(args, "prompt", ""))
-        allow_multiple   = Bool(get(args, "allow_multiple", false))
+        allow_multiple_raw = get(args, "allow_multiple", false)
+        allow_multiple = something(_chat_coerce_bool(allow_multiple_raw), false)
         rationale        = string(get(args, "rationale", ""))
         required_for     = string(get(args, "required_for", ""))
         session_id       = string(get(args, "session_id", ""))
@@ -1063,8 +1107,11 @@ function _dispatch_chat_tool(tool::String, args::Dict{String, Any})::Dict{String
         detail_str = string(get(args, "detail", ""))
         checks = String[string(c) for c in get(args, "related_checks", String[])]
         params = String[string(p) for p in get(args, "related_params", String[])]
-        didx = Int(get(args, "design_index", 0))
-        conf = Float64(get(args, "confidence", 0.5))
+        didx = _chat_coerce_int(get(args, "design_index", 0))
+        isnothing(didx) && return Dict("error" => "invalid_design_index", "message" => "design_index must be an integer (0 for general).")
+        conf = _chat_coerce_float(get(args, "confidence", 0.5))
+        isnothing(conf) && return Dict("error" => "invalid_confidence", "message" => "confidence must be numeric in [0, 1].")
+        (conf < 0.0 || conf > 1.0) && return Dict("error" => "invalid_confidence", "message" => "confidence must be in [0, 1]. Got: $conf")
 
         insight = SessionInsight(;
             category = cat,
@@ -1090,7 +1137,8 @@ function _dispatch_chat_tool(tool::String, args::Dict{String, Any})::Dict{String
         check = isnothing(check_arg) ? nothing : string(check_arg)
         param_arg = get(args, "param", nothing)
         param = isnothing(param_arg) ? nothing : string(param_arg)
-        min_conf = Float64(get(args, "min_confidence", 0.0))
+        min_conf = _chat_coerce_float(get(args, "min_confidence", 0.0))
+        isnothing(min_conf) && return Dict("error" => "invalid_min_confidence", "message" => "min_confidence must be numeric.")
 
         insights = get_session_insights(; category=cat, check=check, param=param, min_confidence=min_conf)
         return Dict{String, Any}(
@@ -1124,26 +1172,54 @@ function _dispatch_chat_tool(tool::String, args::Dict{String, Any})::Dict{String
     elseif tool == "get_diagnose"
         isnothing(DESIGN_CACHE.last_design) && return Dict("error" => "no_design", "message" => "No design has been run yet.", "recovery_hint" => _NO_DESIGN_HINT)
         units_arg = get(args, "units", nothing)
-        report_units = isnothing(units_arg) ? nothing : Symbol(units_arg)
+        report_units = nothing
+        if !isnothing(units_arg)
+            units_str = lowercase(strip(string(units_arg)))
+            if units_str in ("imperial", "metric")
+                report_units = Symbol(units_str)
+            else
+                return Dict("error" => "invalid_units", "message" => "units must be \"imperial\" or \"metric\".")
+            end
+        end
         return design_to_diagnose(DESIGN_CACHE.last_design; report_units=report_units)
 
     elseif tool == "query_elements"
         isnothing(DESIGN_CACHE.last_design) && return Dict("error" => "no_design", "message" => "No design has been run yet.", "recovery_hint" => _NO_DESIGN_HINT)
+        min_ratio_raw = get(args, "min_ratio", nothing)
+        max_ratio_raw = get(args, "max_ratio", nothing)
+        ok_raw = get(args, "ok", nothing)
+        min_ratio = isnothing(min_ratio_raw) ? nothing : _chat_coerce_float(min_ratio_raw)
+        max_ratio = isnothing(max_ratio_raw) ? nothing : _chat_coerce_float(max_ratio_raw)
+        ok_val = isnothing(ok_raw) ? nothing : _chat_coerce_bool(ok_raw)
+        ( !isnothing(min_ratio_raw) && isnothing(min_ratio) ) && return Dict("error" => "invalid_min_ratio", "message" => "min_ratio must be numeric.")
+        ( !isnothing(max_ratio_raw) && isnothing(max_ratio) ) && return Dict("error" => "invalid_max_ratio", "message" => "max_ratio must be numeric.")
+        ( !isnothing(ok_raw) && isnothing(ok_val) ) && return Dict("error" => "invalid_ok", "message" => "ok must be boolean (true/false).")
         return agent_query_elements(DESIGN_CACHE.last_design;
-            type             = get(args, "type", nothing),
-            min_ratio        = let v = get(args, "min_ratio", nothing); isnothing(v) ? nothing : Float64(v) end,
-            max_ratio        = let v = get(args, "max_ratio", nothing); isnothing(v) ? nothing : Float64(v) end,
-            governing_check  = get(args, "governing_check", nothing),
-            ok               = let v = get(args, "ok", nothing); isnothing(v) ? nothing : Bool(v) end,
+            type             = let t = get(args, "type", nothing); isnothing(t) ? nothing : string(t) end,
+            min_ratio        = min_ratio,
+            max_ratio        = max_ratio,
+            governing_check  = let gc = get(args, "governing_check", nothing); isnothing(gc) ? nothing : string(gc) end,
+            ok               = ok_val,
         )
 
     elseif tool == "get_solver_trace"
         isnothing(DESIGN_CACHE.last_design) && return Dict("error" => "no_design", "message" => "No design has been run yet.", "recovery_hint" => _NO_DESIGN_HINT)
-        tier_arg    = get(args, "tier", "failures")
+        tier_arg    = lowercase(strip(string(get(args, "tier", "failures"))))
         element_arg = get(args, "element", nothing)
         layer_arg   = get(args, "layer", nothing)
+        !(tier_arg in ("summary", "failures", "decisions", "full")) &&
+            return Dict("error" => "invalid_tier", "message" => "tier must be one of: summary, failures, decisions, full.")
         tier_sym    = Symbol(tier_arg)
-        layer_sym   = isnothing(layer_arg) ? nothing : Symbol(layer_arg)
+        layer_sym   = if isnothing(layer_arg)
+            nothing
+        else
+            layer_str = lowercase(strip(string(layer_arg)))
+            if layer_str in ("pipeline", "workflow", "sizing", "optimizer", "checker", "slab")
+                Symbol(layer_str)
+            else
+                return Dict("error" => "invalid_layer", "message" => "layer must be one of: pipeline, workflow, sizing, optimizer, checker, slab.")
+            end
+        end
         return agent_solver_trace(DESIGN_CACHE.last_design;
             tier    = tier_sym,
             element = isnothing(element_arg) ? nothing : string(element_arg),
@@ -1165,10 +1241,10 @@ function _dispatch_chat_tool(tool::String, args::Dict{String, Any})::Dict{String
 
     # ── Phase 3: Exploration ─────────────────────────────────────────────────
     elseif tool == "compare_designs"
-        idx_a = get(args, "index_a", nothing)
-        idx_b = get(args, "index_b", nothing)
+        idx_a = _chat_coerce_int(get(args, "index_a", nothing))
+        idx_b = _chat_coerce_int(get(args, "index_b", nothing))
         (isnothing(idx_a) || isnothing(idx_b)) && return Dict("error" => "missing_args", "message" => "Provide index_a and index_b (1-based history index, or 0 for current).")
-        return agent_compare_designs(Int(idx_a), Int(idx_b))
+        return agent_compare_designs(idx_a, idx_b)
 
     elseif tool == "suggest_next_action"
         isnothing(DESIGN_CACHE.last_design) && return Dict("error" => "no_design", "message" => "No design has been run yet.", "recovery_hint" => _NO_DESIGN_HINT)
@@ -1181,6 +1257,7 @@ function _dispatch_chat_tool(tool::String, args::Dict{String, Any})::Dict{String
         exp_type = get(args, "type", nothing)
         exp_args = get(args, "args", Dict{String, Any}())
         isnothing(exp_type) && return Dict("error" => "missing_type", "message" => "Provide experiment 'type' (punching, pm_column, deflection, catalog_screen).")
+        !(exp_args isa AbstractDict) && return Dict("error" => "invalid_args", "message" => "run_experiment args must be an object.")
         exp_args_dict = Dict{String, Any}(string(k) => v for (k, v) in exp_args)
         return evaluate_experiment(DESIGN_CACHE.last_design, string(exp_type), exp_args_dict)
 
@@ -1190,6 +1267,10 @@ function _dispatch_chat_tool(tool::String, args::Dict{String, Any})::Dict{String
     elseif tool == "batch_experiments"
         isnothing(DESIGN_CACHE.last_design) && return Dict("error" => "no_design", "message" => "No design has been run yet.", "recovery_hint" => _NO_DESIGN_HINT)
         experiments_raw = get(args, "experiments", Any[])
+        !(experiments_raw isa AbstractVector) && return Dict("error" => "invalid_experiments", "message" => "experiments must be an array of {type,args} objects.")
+        for e in experiments_raw
+            !(e isa AbstractDict) && return Dict("error" => "invalid_experiments", "message" => "Each experiments entry must be an object with type and args.")
+        end
         experiments = [Dict{String, Any}(string(k) => v for (k, v) in e) for e in experiments_raw]
         return batch_evaluate(DESIGN_CACHE.last_design, experiments)
 
@@ -1197,17 +1278,17 @@ function _dispatch_chat_tool(tool::String, args::Dict{String, Any})::Dict{String
     elseif tool == "narrate_element"
         isnothing(DESIGN_CACHE.last_design) && return Dict("error" => "no_design", "message" => "No design has been run yet.", "recovery_hint" => _NO_DESIGN_HINT)
         etype    = get(args, "element_type", nothing)
-        eid      = get(args, "element_id", nothing)
+        eid      = _chat_coerce_int(get(args, "element_id", nothing))
         audience = get(args, "audience", "architect")
         (isnothing(etype) || isnothing(eid)) && return Dict("error" => "missing_args", "message" => "Provide element_type and element_id.")
-        return agent_narrate_element(DESIGN_CACHE.last_design, string(etype), Int(eid), string(audience))
+        return agent_narrate_element(DESIGN_CACHE.last_design, string(etype), eid, string(audience))
 
     elseif tool == "narrate_comparison"
-        idx_a    = get(args, "index_a", nothing)
-        idx_b    = get(args, "index_b", nothing)
+        idx_a    = _chat_coerce_int(get(args, "index_a", nothing))
+        idx_b    = _chat_coerce_int(get(args, "index_b", nothing))
         audience = get(args, "audience", "architect")
         (isnothing(idx_a) || isnothing(idx_b)) && return Dict("error" => "missing_args", "message" => "Provide index_a and index_b.")
-        return agent_narrate_comparison(Int(idx_a), Int(idx_b), string(audience))
+        return agent_narrate_comparison(idx_a, idx_b, string(audience))
 
     # ── Original tools ───────────────────────────────────────────────────────
     elseif tool == "validate_params"
@@ -1268,6 +1349,10 @@ function _dispatch_chat_tool(tool::String, args::Dict{String, Any})::Dict{String
             "error"   => "params_required",
             "message" => "Provide the parameter patch in args.params.",
         )
+        !(param_patch_raw isa AbstractDict) && return Dict(
+            "error"   => "invalid_params",
+            "message" => "args.params must be an object (key-value parameter patch).",
+        )
 
         # ── Classify patch keys ──────────────────────────────────────────────
         patch_dict = Dict{String, Any}(string(k) => v for (k, v) in param_patch_raw)
@@ -1291,8 +1376,10 @@ function _dispatch_chat_tool(tool::String, args::Dict{String, Any})::Dict{String
         # to keep the conversational loop responsive.
         fast_patch = copy(patch_dict)
         fast_patch["skip_visualization"]  = true
-        fast_patch["max_iterations"]      = min(get(fast_patch, "max_iterations", 20), 2)
-        fast_patch["mip_time_limit_sec"]  = min(get(fast_patch, "mip_time_limit_sec", 30.0), 20.0)
+        max_iter = something(_chat_coerce_int(get(fast_patch, "max_iterations", 20)), 20)
+        mip_limit = something(_chat_coerce_float(get(fast_patch, "mip_time_limit_sec", 30.0)), 30.0)
+        fast_patch["max_iterations"]      = max(1, min(max_iter, 2))
+        fast_patch["mip_time_limit_sec"]  = max(1.0, min(mip_limit, 20.0))
 
         # ── Acquire server lock ──────────────────────────────────────────────
         if !try_start!(SERVER_STATUS)

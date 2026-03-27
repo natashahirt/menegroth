@@ -1,20 +1,17 @@
 name: Trace Coverage Audit
 
 on:
-  schedule:
-    - cron: '0 6 * * 1'  # Weekly: Monday 01:00 EST / 06:00 UTC
-  push:
-    branches: [main]
-    paths:
-      - 'StructuralSizer/src/**'
-      - 'StructuralSynthesizer/src/**'
-  workflow_dispatch:       # allow manual trigger from GitHub UI
+  workflow_run:
+    workflows: ["Nightly Doc Audit"]
+    types:
+      - completed
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
 jobs:
   check-and-launch:
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -68,12 +65,12 @@ jobs:
       - name: Check for source changes relevant to trace
         id: check
         run: |
-          CHANGED=$(git log origin/main --since="7 days ago" --name-only --pretty=format: | \
+          CHANGED=$(git log origin/main --since="24 hours ago" --name-only --pretty=format: | \
             grep -E '^(StructuralSizer/src/|StructuralSynthesizer/src/)' | \
             sort -u)
 
           if [ -z "$CHANGED" ]; then
-            echo "No source changes in last 7 days — skipping."
+            echo "No source changes in last 24h — skipping."
             echo "has_changes=false" >> "$GITHUB_OUTPUT"
           else
             COUNT=$(echo "$CHANGED" | wc -l)

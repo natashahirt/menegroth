@@ -9,6 +9,8 @@ using Menegroth.GH.Helpers;
 using Menegroth.GH.Types;
 using Menegroth.GH.UI;
 using Newtonsoft.Json.Linq;
+using Rhino;
+using Rhino.UI;
 
 namespace Menegroth.GH.Components
 {
@@ -29,6 +31,10 @@ namespace Menegroth.GH.Components
         private string _lastTranscript = "";
         private string _lastSourceHash = "";
         private bool _prevApply;
+        private bool _prevOpen;
+        private ChatDialog? _chatDialog;
+        private string _chatDialogMode = "";
+        private string _chatDialogSessionSeed = "";
 
         public UnifiedAssistant()
             : base("Unified Assistant",
@@ -104,10 +110,14 @@ namespace Menegroth.GH.Components
             bool hasResult = resultGoo?.Value != null &&
                              !string.Equals(resultGoo.Value.Status, "unknown", StringComparison.OrdinalIgnoreCase);
             string phase = hasResult ? "post_result" : "pre_result";
+            string mode = hasResult ? "results" : "design";
+            string sessionSeed = hasResult ? BuildResultSessionSeed(resultGoo!.Value) : geometry.ComputeHash();
 
             bool applyRising = apply && !_prevApply;
             _prevApply = apply;
             bool appliedThisSolve = false;
+            bool openRising = open && !_prevOpen;
+            _prevOpen = open;
 
             if (applyRising && _pendingProposal != null)
             {
@@ -118,10 +128,11 @@ namespace Menegroth.GH.Components
                 appliedThisSolve = true;
             }
 
-            if (open)
-            {
-                OpenDialog(geometry, _lastAppliedParams ?? currentParams, hasResult ? resultGoo!.Value : null);
-            }
+            if (openRising)
+                EnsureDialog(geometry, _lastAppliedParams ?? currentParams, hasResult ? resultGoo!.Value : null, mode, sessionSeed);
+
+            // Keep outputs synced from the live modeless dialog without requiring close.
+            SyncDialogState();
 
             // Canvas UX cue: compact state indicator for phase + patch/apply flow.
             Message = BuildStatusMessage(
@@ -130,7 +141,8 @@ namespace Menegroth.GH.Components
                 applySignal: apply,
                 applyRising: applyRising,
                 appliedThisSolve: appliedThisSolve,
-                openSignal: open
+                openSignal: open,
+                windowOpen: _chatDialog != null
             );
 
             DA.SetData(0, new DesignParamsDataGoo(_lastAppliedParams ?? currentParams));
@@ -139,14 +151,33 @@ namespace Menegroth.GH.Components
             DA.SetData(3, phase);
         }
 
-        private void OpenDialog(BuildingGeometry geometry, DesignParamsData currentParams, DesignResult? result)
+        private void EnsureDialog(
+            BuildingGeometry geometry,
+            DesignParamsData currentParams,
+            DesignResult? result,
+            string mode,
+            string sessionSeed)
         {
             try
             {
+                // Reuse and foreground existing window when context matches.
+                if (_chatDialog != null &&
+                    string.Equals(_chatDialogMode, mode, StringComparison.Ordinal) &&
+                    string.Equals(_chatDialogSessionSeed, sessionSeed, StringComparison.Ordinal))
+                {
+                    _chatDialog.BringToFrontAndFocus();
+                    return;
+                }
+
+                // If context changed, close old window and create a fresh one.
+                if (_chatDialog != null)
+                {
+                    _chatDialog.Close();
+                    _chatDialog = null;
+                }
+
                 string baseUrl = MenegrothConfig.LastServerUrl;
-                string mode = result == null ? "design" : "results";
                 string geometrySummary = BuildAssistantGeometrySummary(geometry);
-                string sessionSeed = result == null ? geometry.ComputeHash() : BuildResultSessionSeed(result);
                 string sessionId = ComputeSessionId(sessionSeed);
 
                 using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
@@ -174,7 +205,7 @@ namespace Menegroth.GH.Components
                     // Non-critical; continue with defaults.
                 }
 
-                var dialog = new ChatDialog(
+                _chatDialog = new ChatDialog(
                     mode: mode,
                     geometrySummary: geometrySummary,
                     sessionSeed: sessionSeed,
@@ -183,18 +214,41 @@ namespace Menegroth.GH.Components
                     applicabilitySchema: applicabilitySchema,
                     initialHistory: history.Count > 0 ? history : null,
                     autoAnalyze: true);
+                _chatDialogMode = mode;
+                _chatDialogSessionSeed = sessionSeed;
 
-                dialog.ShowModal();
-                _lastTranscript = dialog.Transcript;
+                _chatDialog.Closed += (_, __) =>
+                {
+                    SyncDialogState();
+                    _chatDialog = null;
+                    _chatDialogMode = "";
+                    _chatDialogSessionSeed = "";
+                    ExpireSolution(true);
+                };
 
-                // Stage proposal; external Apply input controls commit.
-                if (dialog.ProposedParams != null && dialog.ProposedParams.Count > 0)
-                    _pendingProposal = (JObject)dialog.ProposedParams.DeepClone();
+                // Modeless show: keeps GH canvas interactive and avoids hidden-modal dead-ends.
+                var doc = RhinoDoc.ActiveDoc;
+                if (doc != null)
+                    _chatDialog.Show(doc);
+                else
+                    _chatDialog.Show();
+
+                _chatDialog.BringToFrontAndFocus();
             }
             catch (Exception ex)
             {
                 AddRuntimeMessage(GH_RuntimeMessageLevel.Error, $"Chat dialog error: {ex.Message}");
             }
+        }
+
+        private void SyncDialogState()
+        {
+            if (_chatDialog == null)
+                return;
+
+            _lastTranscript = _chatDialog.Transcript;
+            if (_chatDialog.ProposedParams != null && _chatDialog.ProposedParams.Count > 0)
+                _pendingProposal = (JObject)_chatDialog.ProposedParams.DeepClone();
         }
 
         private static string BuildResultSessionSeed(DesignResult result)
@@ -215,7 +269,8 @@ namespace Menegroth.GH.Components
             bool applySignal,
             bool applyRising,
             bool appliedThisSolve,
-            bool openSignal)
+            bool openSignal,
+            bool windowOpen)
         {
             var parts = new List<string>
             {
@@ -236,6 +291,8 @@ namespace Menegroth.GH.Components
 
             if (openSignal)
                 parts.Add("open");
+            if (windowOpen)
+                parts.Add("window");
 
             return string.Join(" | ", parts);
         }
@@ -330,5 +387,26 @@ namespace Menegroth.GH.Components
             UnitSystem                = src.UnitSystem,
             ScopedSlabOverrides       = src.ScopedSlabOverrides?.Select(s => s.Clone()).ToList() ?? new List<SlabParamsData>(),
         };
+
+        public override void RemovedFromDocument(GH_Document document)
+        {
+            try
+            {
+                if (_chatDialog != null)
+                    _chatDialog.Close();
+            }
+            catch
+            {
+                // Best-effort cleanup.
+            }
+            finally
+            {
+                _chatDialog = null;
+                _chatDialogMode = "";
+                _chatDialogSessionSeed = "";
+            }
+
+            base.RemovedFromDocument(document);
+        }
     }
 }

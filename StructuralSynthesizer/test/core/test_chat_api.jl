@@ -13,12 +13,39 @@ using StructuralSynthesizer:
     CHAT_HISTORY, _SUGGESTIONS_START, _SUGGESTIONS_END, _CLARIFY_START, _CLARIFY_END,
     _dispatch_chat_tool, _classify_patch,
     _build_turn_summary, _normalize_clarification,
+    _query_int, _route_coerce_int, _route_coerce_float,
     api_applicability_schema, api_params_schema_structured, api_tool_schema
 using Test
+using HTTP
 
 println("Testing chat API…")
 
 @testset "Chat API" begin
+
+    # ─── Route parsing/coercion helpers ─────────────────────────────────────
+    @testset "Route coercion helpers" begin
+        @test _route_coerce_int(5) == 5
+        @test _route_coerce_int("7") == 7
+        @test _route_coerce_int("7.0") == 7
+        @test isnothing(_route_coerce_int("7.2"))
+        @test isnothing(_route_coerce_int("bad"))
+
+        @test _route_coerce_float(0.5) == 0.5
+        @test _route_coerce_float("0.5") == 0.5
+        @test _route_coerce_float("1,200.25") == 1200.25
+        @test isnothing(_route_coerce_float("bad"))
+    end
+
+    @testset "_query_int tolerates numeric strings" begin
+        req_ok = HTTP.Request("GET", "/logs?since=12")
+        @test _query_int(req_ok, "since", 0) == 12
+
+        req_float = HTTP.Request("GET", "/logs?since=12.0")
+        @test _query_int(req_float, "since", 0) == 12
+
+        req_bad = HTTP.Request("GET", "/logs?since=bad")
+        @test _query_int(req_bad, "since", 9) == 9
+    end
 
     # ─── Suggestions extraction ─────────────────────────────────────────────
     @testset "Suggestions extraction" begin

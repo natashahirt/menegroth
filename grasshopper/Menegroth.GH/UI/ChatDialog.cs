@@ -16,7 +16,7 @@ using Newtonsoft.Json.Linq;
 namespace Menegroth.GH.UI
 {
     /// <summary>
-    /// Modal chat dialog for interacting with the LLM assistant.
+    /// Chat dialog for interacting with the LLM assistant.
     ///
     /// Supports two modes:
     /// - "design": recommends parameter changes based on geometry and engineering guidance.
@@ -26,10 +26,10 @@ namespace Menegroth.GH.UI
     /// - Proactive opening analysis fired automatically on first open.
     /// - Applicability banner summarizing method eligibility (design mode).
     /// - Param diff panel with Apply/Reject when the agent proposes changes.
-    /// - Clickable suggestion buttons populated from each agent turn's structured summary.
+    /// - Reflection prompts from each agent turn: pick a card, then answer in the box (prompt shown above input).
     /// - Persistent conversation history keyed by geometry session ID.
     /// </summary>
-    public class ChatDialog : Dialog
+    public class ChatDialog : Form
     {
         // ─── Core state ──────────────────────────────────────────────────────
         private readonly string _mode;
@@ -58,6 +58,17 @@ namespace Menegroth.GH.UI
         // Suggestions panel — populated after each agent turn.
         private readonly Panel _suggestionsPanel;
         private readonly Panel _suggestionButtonsContainer;
+        private readonly Label _suggestionsHeaderLabel;
+
+        // Selected reflection prompt — shown above the input until sent or dismissed.
+        private readonly Panel _activeReflectionPanel;
+        private readonly Label _activeReflectionQuestionLabel;
+        private readonly Button _activeReflectionBackButton;
+        private string? _activeReflectionPrompt;
+        private string[] _lastSuggestionItems = Array.Empty<string>();
+
+        private const string DefaultInputPlaceholder = "Type your message…";
+        private const string AnswerInputPlaceholder  = "Type your answer…";
 
         // Clarification panel — structured multiple-choice prompt.
         private readonly Panel _clarificationPanel;
@@ -91,6 +102,27 @@ namespace Menegroth.GH.UI
 
         /// <summary>Full conversation transcript (user + assistant messages).</summary>
         public string Transcript => _chatArea?.Text ?? "";
+
+        /// <summary>
+        /// Bring this window to the foreground and focus the message input.
+        /// Safe to call repeatedly (e.g., when the component Open input is pressed again).
+        /// </summary>
+        public void BringToFrontAndFocus()
+        {
+            try
+            {
+                if (WindowState == WindowState.Minimized)
+                    WindowState = WindowState.Normal;
+            }
+            catch
+            {
+                // Best-effort restore; some platforms may not expose all states.
+            }
+
+            BringToFront();
+            Focus();
+            _inputBox.Focus();
+        }
 
         // ─── Constructor ─────────────────────────────────────────────────────
 
@@ -149,7 +181,7 @@ namespace Menegroth.GH.UI
             };
 
             // ── Input row ────────────────────────────────────────────────────
-            _inputBox = new TextBox { PlaceholderText = "Type your message…" };
+            _inputBox = new TextBox { PlaceholderText = DefaultInputPlaceholder };
             _inputBox.KeyDown += (s, e) =>
             {
                 if (e.Key == Keys.Enter && !e.Modifiers.HasFlag(Keys.Shift))
@@ -195,6 +227,12 @@ namespace Menegroth.GH.UI
 
             // ── Suggestions panel ─────────────────────────────────────────────
             _suggestionButtonsContainer = new Panel();
+            _suggestionsHeaderLabel = new Label
+            {
+                Text      = "Pick a question to answer — it appears above your reply:",
+                Font      = new Font(SystemFont.Label, 8.5f),
+                TextColor = Color.FromArgb(0x44, 0x44, 0x88),
+            };
             _suggestionsPanel = new Panel
             {
                 BackgroundColor = Color.FromArgb(0xF0, 0xF4, 0xFF),
@@ -203,13 +241,41 @@ namespace Menegroth.GH.UI
                 {
                     Rows =
                     {
-                        new TableRow(new Label
-                        {
-                            Text      = "Suggested questions:",
-                            Font      = new Font(SystemFont.Label, 8.5f),
-                            TextColor = Color.FromArgb(0x44, 0x44, 0x88),
-                        }),
+                        new TableRow(_suggestionsHeaderLabel),
                         new TableRow(_suggestionButtonsContainer),
+                    }
+                },
+                Visible = false,
+            };
+
+            // ── Active reflection prompt (replaces cards until sent or "different prompt") ──
+            var activeReflectionHeader = new Label
+            {
+                Text      = "You're answering:",
+                Font      = new Font(SystemFont.Label, 8.5f),
+                TextColor = Color.FromArgb(0x22, 0x44, 0x66),
+            };
+            _activeReflectionQuestionLabel = new Label
+            {
+                Wrap      = WrapMode.Word,
+                Font      = new Font(SystemFont.Label, 9f),
+                TextColor = Color.FromArgb(0x11, 0x22, 0x44),
+            };
+            _activeReflectionBackButton = new Button { Text = "Choose a different prompt", Width = 200 };
+            _activeReflectionBackButton.Click += (_, __) => OnBackToReflectionPromptsClicked();
+
+            _activeReflectionPanel = new Panel
+            {
+                BackgroundColor = Color.FromArgb(0xE8, 0xF2, 0xFC),
+                Padding         = new Padding(10, 8),
+                Content         = new TableLayout
+                {
+                    Spacing = new Size(0, 6),
+                    Rows =
+                    {
+                        new TableRow(activeReflectionHeader),
+                        new TableRow(_activeReflectionQuestionLabel),
+                        new TableRow(_activeReflectionBackButton),
                     }
                 },
                 Visible = false,
@@ -306,13 +372,18 @@ namespace Menegroth.GH.UI
             mainLayout.Rows.Add(new TableRow(_paramDiffPanel));
             mainLayout.Rows.Add(new TableRow(_clarificationPanel));
             mainLayout.Rows.Add(new TableRow(_suggestionsPanel));
+            mainLayout.Rows.Add(new TableRow(_activeReflectionPanel));
             mainLayout.Rows.Add(new TableRow(inputRow));
 
             Content = mainLayout;
 
-            var closeButton = new Button { Text = "Close" };
+            var closeButton = new Button { Text = "Close", Width = 80 };
             closeButton.Click += (s, e) => Close();
-            PositiveButtons.Add(closeButton);
+            mainLayout.Rows.Add(new TableRow(new TableLayout
+            {
+                Spacing = new Size(5, 0),
+                Rows = { new TableRow(null, closeButton) }
+            }));
 
             Closed += (s, e) => _cts?.Cancel();
 
@@ -391,11 +462,30 @@ namespace Menegroth.GH.UI
             var text = _inputBox.Text?.Trim();
             if (string.IsNullOrEmpty(text) || _isStreaming) return;
 
+            string outgoing;
+            if (!string.IsNullOrEmpty(_activeReflectionPrompt))
+            {
+                outgoing = BuildReflectionOutgoingMessage(_activeReflectionPrompt, text);
+                HideActiveReflectionPrompt();
+            }
+            else
+            {
+                outgoing = text;
+            }
+
             _inputBox.Text = "";
             HideSuggestions();
-            AppendChat("You", text);
-            _messages.Add(new ChatMessage("user", text));
+            AppendChat("You", outgoing);
+            _messages.Add(new ChatMessage("user", outgoing));
             _ = StreamResponseAsync();
+        }
+
+        /// <summary>
+        /// User message sent to the LLM: ties the assistant's reflection prompt to the user's reply.
+        /// </summary>
+        private static string BuildReflectionOutgoingMessage(string prompt, string answer)
+        {
+            return "The assistant asked me to consider:\n" + prompt + "\n\nMy response:\n" + answer;
         }
 
         private async Task StreamResponseAsync()
@@ -622,6 +712,9 @@ namespace Menegroth.GH.UI
                 return;
             }
 
+            HideActiveReflectionPrompt();
+            _lastSuggestionItems = questions;
+
             // Rebuild the button container with fresh buttons for this turn.
             var buttonLayout = new TableLayout { Spacing = new Size(5, 3) };
             var row = new TableRow();
@@ -651,9 +744,34 @@ namespace Menegroth.GH.UI
         private void OnSuggestionClicked(string question)
         {
             if (_isStreaming) return;
-            HideSuggestions();
-            _inputBox.Text = question;
-            SendMessage();
+
+            _activeReflectionPrompt = question;
+            _activeReflectionQuestionLabel.Text = question;
+            _activeReflectionPanel.Visible = true;
+            _suggestionsPanel.Visible = false;
+
+            _inputBox.Text = "";
+            _inputBox.PlaceholderText = AnswerInputPlaceholder;
+            _inputBox.Focus();
+        }
+
+        private void OnBackToReflectionPromptsClicked()
+        {
+            if (_isStreaming) return;
+            HideActiveReflectionPrompt();
+            if (_lastSuggestionItems.Length > 0)
+                _suggestionsPanel.Visible = true;
+        }
+
+        /// <summary>
+        /// Clears the selected reflection prompt strip and restores the default input placeholder.
+        /// </summary>
+        private void HideActiveReflectionPrompt()
+        {
+            _activeReflectionPrompt = null;
+            _activeReflectionQuestionLabel.Text = "";
+            _activeReflectionPanel.Visible = false;
+            _inputBox.PlaceholderText = DefaultInputPlaceholder;
         }
 
         // ─── Clarification UI ────────────────────────────────────────────────
@@ -760,6 +878,7 @@ namespace Menegroth.GH.UI
 
             HideClarificationPrompt();
             _inputBox.Text = "";
+            HideActiveReflectionPrompt();
             HideSuggestions();
             AppendChat("You", responseText);
             _messages.Add(new ChatMessage("user", responseText));
@@ -889,6 +1008,7 @@ namespace Menegroth.GH.UI
             HideParamDiff();
             HideClarificationPrompt();
             HideSuggestions();
+            HideActiveReflectionPrompt();
             HideRetryPanel();
 
             AppendChat("System", "[Session cleared]");

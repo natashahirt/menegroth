@@ -7,6 +7,13 @@ trace events via the `TraceCollector` system. The trace is what makes the
 solver's reasoning legible to the LLM chat agent — if a decision isn't traced,
 the LLM can't explain it to the user.
 
+## Nightly trigger context
+
+This audit is launched by the `Trace Coverage Audit` workflow only after the
+`Nightly Doc Audit` workflow completes successfully. Prioritize recent source
+changes from the nightly window (the workflow appends a "Changed files" section
+to this prompt). If there are no relevant source changes, make no code edits.
+
 ---
 
 ## 1. Understand the Trace System

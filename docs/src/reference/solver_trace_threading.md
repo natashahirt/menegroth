@@ -1,102 +1,71 @@
-# Solver Trace (`TraceCollector`) Threading
+# Solver trace threading
 
-The solver trace is the mechanism that makes design decisions explainable to downstream agents. A trace is a sequence of `TraceEvent`s emitted through a `TraceCollector` (`tc`) that is threaded through the design pipeline. When `tc === nothing`, `emit!` is a zero-cost no-op.
+The **solver trace** is a structured log of *decision points* in the sizing pipeline: which strategy ran, when a fallback fired, how an iteration ended, or why validation failed. It is **not** a dump of every numerical step—the goal is to make solver behavior legible to humans and to **LLM assistants** (chat tools, `GET /diagnose`, tiered trace payloads).
 
-This page documents the **intended `tc` threading chain** from the building-level workflow down to the leaf sizing/optimizer functions. If a function in the chain fails to accept or forward `tc`, trace collection silently stops for everything below it.
+Implementation lives in `StructuralSizer/src/trace/trace.jl` (`TraceEvent`, `TraceCollector`, `emit!`, tier filters, serialization). The **design workflow** threads an optional collector through `design_building` and stores the result on the returned **`BuildingDesign`** in the **`solver_trace`** field.
 
-## Core contract
+## What gets recorded: `TraceEvent`
 
-- `tc` is passed as `tc::Union{Nothing, TraceCollector} = nothing`.
-- Instrumentation uses `emit!(tc, layer, stage, element_id, event_type; kwargs...)`.
-- Never guard `emit!` with `if tc !== nothing` — the `Nothing` method is already a no-op.
-- Trace **at function/decision level**, not inside hot inner loops.
+Each event has:
 
-## Breadcrumb bundles (post-hoc microscope handles)
+| Field | Meaning |
+|:------|:--------|
+| `timestamp` | Seconds since trace start |
+| `layer` | One of **`:pipeline`**, **`:workflow`**, **`:sizing`**, **`:optimizer`**, **`:checker`**, **`:slab`** |
+| `stage` | Human-readable label (e.g. `"design_building"`, `"size_slabs!"`) |
+| `element_id` | Optional scope (e.g. slab index); may be empty |
+| `event_type` | **`:enter`**, **`:exit`**, **`:decision`**, **`:iteration`**, **`:fallback`**, **`:failure`** |
+| `data` | Keyword payload as a `Dict` (ratios, reasons, flags, counts) |
 
-In addition to the regular decision trace (optimizer iterations, fallbacks, etc.), the pipeline emits **low-volume breadcrumb bundles** that make it possible to “zoom in later” during post-processing even if you didn’t know ahead of time which element you would want to inspect.
+## `TraceCollector` and `emit!`
 
-Current behavior:
+- Create a collector with `TraceCollector()` and pass it as **`tc`** into `design_building(struc, params; tc=tc)` (and through downstream calls that accept `tc`).
+- At decision points, code calls **`emit!(tc, layer, stage, element_id, event_type; kwargs...)`**; each keyword becomes an entry in `data`.
+- If **`tc === nothing`**, `emit!` is a **no-op**—no events and negligible cost, so call sites do not need `if tc !== nothing` guards.
 
-- Breadcrumbs are emitted during `StructuralSynthesizer.capture_design(...)` after column/beam results have been populated.
-- Breadcrumb events live at `layer = :workflow`, `stage = "breadcrumbs_members"`, `event_type = :decision`.
-- A summary event is emitted per member type, plus up to a bounded number of per-group events.
+```@docs
+TraceCollector
+emit!
+TraceEvent
+```
 
-Schema (stable contract, `version=1`):
+## `@traced` and `TRACE_REGISTRY`
 
-- Group event: `data.breadcrumbs_kind == "member_group"`
-  - `data.member_type`: `"beams"` or `"columns"`
-  - `data.group_id`: `String` (the resolved `UInt64` group id)
-  - `data.group_max_ratio`: `Float64`
-  - `data.top_elements`: array of top‑k exemplars (default k=3), each with:
-    - `element_id`: `"beam_<idx>"` or `"column_<idx>"`
-    - `governing_check`: `String`
-    - `governing_ratio`: `Float64`
-    - `ok`: `Bool`
-    - `lookup`: compact key used for post-hoc resolution:
-      - `version`: `1`
-      - `kind`: `"member"`
-      - `member_type`: `"beam"` or `"column"`
-      - `member_idx`: `Int` (1-based index into `struc.beams` / `struc.columns`)
-      - `group_id`: `String` (same as above)
+The **`@traced`** macro **does not** rewrite the function body. It only registers a **contract** in **`TRACE_REGISTRY`**: function name, layer, which `event_type`s the implementation should emit, and an optional **companion** symbol (e.g. post-hoc explainers). That supports automated trace-coverage audits and keeps obligations visible in source.
 
-Post-hoc microscope:
+Where **`@traced` conflicts with docstrings**, the same metadata can be registered **manually** (see slab sizing: `TRACE_REGISTRY[(...)] = TracedFunctionMeta(...)`).
 
-- The API tool `explain_trace_lookup` accepts the `lookup` dict from a breadcrumb and reconstructs the inputs needed to run `StructuralSizer.explain_feasibility` for the designed section of that element.
+## End-to-end flow
 
-## StructuralSynthesizer → StructuralSizer (building-level workflow)
+1. **`design_building(struc, params; tc=tc)`** emits pipeline **`:enter`** / **`:exit`** around the full run (with timing metadata on exit).
+2. **`build_pipeline(params; tc=tc)`** runs pipeline stages (slabs, reconcile, beams/columns, foundations, …) and passes **`tc`** into routines that emit events (e.g. `size_slabs!`).
+3. **`capture_design(struc, params; tc=tc, ...)`** copies accumulated events onto **`design.solver_trace`**.
 
-Entry points:
+So the trace is a linear **`Vector{TraceEvent}`** attached to the returned **`BuildingDesign`**, suitable for JSON serialization or LLM-facing summaries.
 
-- `StructuralSynthesizer.design_building(struc, params; tc=tc)`
-- `StructuralSynthesizer.design_building(struc; tc=tc, kwargs...)` (keyword convenience wrapper)
+## Breadcrumbs when `tc` is not passed
 
-Threading chain:
+**`capture_design`** is written so that **some** trace is still useful when the caller never passed a collector (typical for HTTP/API paths that do not yet thread `tc` everywhere):
 
-1. `design_building` emits `:pipeline` events for the overall run and passes `tc` into `build_pipeline`.
-2. `build_pipeline(params; tc=tc)` builds stage closures that **close over** `tc`.
-3. Each stage closure calls into sizing routines and forwards `tc` via keyword argument where supported.
+- A temporary `TraceCollector` may be used so **`_emit_member_breadcrumbs!`** can append **low-volume** “post-processing” events after results exist (e.g. top exemplars by ratio), without re-running checkers.
+- Those events are merged into **`design.solver_trace`** alongside any events from a real **`tc`**.
 
-Key pipeline stages (typical):
+If **`solver_trace` is empty**, the design may have been produced outside this path, or tracing was not enabled for that client.
 
-- Slabs: `StructuralSizer.size_slabs!(struc; ... , tc=tc)`  
-  - Per-slab dispatch: `StructuralSizer.size_slab!(...)` → `_size_slab!(...)` → method pipelines (e.g. `size_flat_plate!`) with `tc` passed through.
-- Members: `size_beams!` / `size_columns!` / `size_members!` in Synthesizer analysis utilities (these already accept and emit trace events) ultimately call StructuralSizer’s member sizing APIs with `tc`.
-- Foundations: `size_foundations!` stage(s) (some deeper helpers may not yet be traced; see the audit report).
+## Tiers, filters, and LLM-oriented output
 
-## StructuralSizer slab sizing chain
+**`TRACE_TIERS`** (`:summary`, `:failures`, `:decisions`, `:full`) control how much detail is exposed: e.g. summary focuses on pipeline/workflow **enter/exit**; broader tiers include **failure**, **fallback**, **decision**, and **iteration** events across layers.
 
-Public entrypoints (emit and accept `tc`):
+Helpers **`filter_trace`**, **`serialize_trace_event`**, and **`build_stage_timeline`** turn raw events into JSON-friendly structures. The HTTP agent layer uses **`agent_solver_trace`** (see `StructuralSynthesizer/src/api/agent_tools.jl`) to return a **tiered** dict (with hints to request a deeper tier or a narrower element/layer filter).
 
-- `StructuralSizer.size_slabs!(struc; ... , tc=tc)`
-- `StructuralSizer.size_slab!(struc, slab_idx; ... , tc=tc)`
+The versioned **`GET /schema/llm_contract`** response includes **`trace_tiers`** and **`trace_layers`** so clients know the vocabulary.
 
-Dispatch chain:
+```@docs
+filter_trace
+```
 
-- `size_slab!` determines `ft = floor_type(slab.floor_type)` and calls:
-  - `_size_slab!(ft, struc, slab, slab_idx; ... , tc=tc)`
-  - which calls the method-specific pipeline (e.g. `size_flat_plate!(...; tc=tc)`).
+## See also
 
-## StructuralSizer member sizing chain
-
-Public entrypoints (emit and accept `tc`):
-
-- `StructuralSizer.size_columns(...; tc=tc)`
-- `StructuralSizer.size_beams(...; tc=tc)`
-- `StructuralSizer.size_members(...; tc=tc)` (dispatcher)
-
-Leaf optimizer chain:
-
-- Discrete catalog sizing forwards `tc` into:
-  - `StructuralSizer.optimize_discrete(...; tc=tc)`
-  - which emits `:optimizer` decisions (solver selection, feasibility screening, outcome).
-
-## Optimizer alternatives (where tracing should land)
-
-The codebase contains other solver backends (e.g. binary search, continuous/NLP). These should follow the same convention:
-
-- Accept `tc` as a kwarg (default `nothing`)
-- Emit a small set of `:enter`/`:decision`/`:exit`/`:failure` events
-- Forward `tc` into any downstream decisions that already trace (or add trace events at the boundary)
-
-If you add a new optimization backend, update this page to keep the documented threading chain accurate.
-
+- [Design workflow & pipeline](../synthesizer/design/workflow.md) — entry point `design_building` and pipeline stages
+- `StructuralSynthesizer/src/api/agent_tools.jl` — `agent_solver_trace`
+- `StructuralSizer/src/trace/trace.jl` — definitions and filters

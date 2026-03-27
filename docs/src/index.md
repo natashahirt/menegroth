@@ -48,7 +48,7 @@ The platform consists of two Julia packages plus an HTTP API:
   - Analyze — FEM integration, member/slab/foundation analysis
   - Post-Processing — embodied carbon, reports
 - **[HTTP API](api/overview.md)** — endpoints, schema, deployment
-- **Reference** — design codes index, type hierarchy
+- **Reference** — design codes index, [solver trace threading](reference/solver_trace_threading.md), type hierarchy
 
 ## Test Coverage
 

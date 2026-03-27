@@ -14,11 +14,18 @@ The design workflow orchestrates the full structural design of a building. The e
 
 The pipeline is built dynamically based on the floor type and design parameters, allowing different sequencing for flat plate systems (where columns depend on punching shear) versus beam-based systems (where iterative beam–column sizing is needed).
 
-## Solver Trace (`TraceCollector`)
+## Solver trace (`TraceCollector`)
 
-When you pass a `TraceCollector` as `tc` to `design_building`, key decision points emit trace events (strategy selection, fallbacks, iteration outcomes) that can be serialized and explained to an LLM.
+The **solver trace** is a structured timeline of *decisions* (not every internal numeric step): which stage ran, whether the solver took a fallback, how iterations ended, or why a validation path failed. That makes runs explainable to users and to **LLM tools** (tiered summaries, chat, diagnostics).
 
-For a map of how `tc` is threaded through the pipeline and where function-level trace events are emitted, see [`Solver Trace Threading`](../../reference/solver_trace_threading.md).
+**How it works (short version):**
+
+- Pass an optional **`TraceCollector()`** as **`tc`** into **`design_building(struc, params; tc=tc)`**. Downstream code calls **`StructuralSizer.emit!(tc, layer, stage, element_id, event_type; ...)`** at meaningful points. If **`tc === nothing`**, those calls are **no-ops** (tracing off, negligible cost).
+- Events are **`TraceEvent`** records (layer, stage, event type, optional element id, payload dict). Layers include **`:pipeline`**, **`:workflow`**, **`:slab`**, **`:optimizer`**, etc.; event types include **`:enter`**, **`:exit`**, **`:decision`**, **`:failure`**, **`:fallback`**, …
+- After sizing, **`capture_design`** merges the collector’s events into **`design.solver_trace`**. Even when the caller did not pass **`tc`**, the workflow can still attach **low-volume “breadcrumb”** events post hoc so API runs are not always empty—see the reference page below.
+- **`@traced`** and **`TRACE_REGISTRY`** record *contracts* for which functions must emit which kinds of events (the macro does not rewrite function bodies); this supports coverage audits.
+
+For the full threading diagram, tier filters (`:summary` … `:full`), serialization helpers, and HTTP/LLM surfaces (**`agent_solver_trace`**, **`GET /schema/llm_contract`**), see **[Solver trace threading](../../reference/solver_trace_threading.md)**.
 
 ## Key Types
 
@@ -91,6 +98,7 @@ The pipeline runner iterates through stages, calling `stage.fn(struc)` (params a
 - Extracts `SlabDesignResult`, `ColumnDesignResult`, `BeamDesignResult`, `FoundationDesignResult` from each element
 - Computes `DesignSummary` including material takeoffs and embodied carbon
 - Records `compute_time_s` and timestamp
+- Merges the optional **`tc`** trace (and post-hoc breadcrumb events when applicable) into **`design.solver_trace`**; see [Solver trace threading](../../reference/solver_trace_threading.md)
 
 ### Snapshot / Restore
 

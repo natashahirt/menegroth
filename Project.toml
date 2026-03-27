@@ -21,7 +21,7 @@ StructuralVisualization = "7f2a2d5c-9cbb-4a20-9f9a-1a11d13f4d27"
 Unitful = "1986cc42-f94f-5a68-af5c-568840ba703d"
 
 [sources]
-Asap = {path = "external\\Asap"}
+Asap = {path = "external/Asap"}
 StructuralSizer = {path = "StructuralSizer"}
 StructuralSynthesizer = {path = "StructuralSynthesizer"}
 StructuralVisualization = {path = "StructuralVisualization"}

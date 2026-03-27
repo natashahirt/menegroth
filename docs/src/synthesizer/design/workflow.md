@@ -14,6 +14,12 @@ The design workflow orchestrates the full structural design of a building. The e
 
 The pipeline is built dynamically based on the floor type and design parameters, allowing different sequencing for flat plate systems (where columns depend on punching shear) versus beam-based systems (where iterative beam–column sizing is needed).
 
+## Solver Trace (`TraceCollector`)
+
+When you pass a `TraceCollector` as `tc` to `design_building`, key decision points emit trace events (strategy selection, fallbacks, iteration outcomes) that can be serialized and explained to an LLM.
+
+For a map of how `tc` is threaded through the pipeline and where function-level trace events are emitted, see [`Solver Trace Threading`](../../reference/solver_trace_threading.md).
+
 ## Key Types
 
 ```@docs

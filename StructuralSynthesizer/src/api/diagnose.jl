@@ -130,17 +130,6 @@ _round_or_nothing(x; digits=3) = isnothing(x) ? nothing : _round_val(x; digits=d
 # ─── Governing check helpers ──────────────────────────────────────────────────
 
 """
-Return the name of the governing limit-state check for a `ColumnDesignResult`.
-Compares axial, P-M interaction, and punching ratios and picks the largest.
-"""
-function _column_governing_check(cr::ColumnDesignResult)
-    punch_ratio = isnothing(cr.punching) ? 0.0 : cr.punching.ratio
-    ratios = [cr.axial_ratio, cr.interaction_ratio, punch_ratio]
-    names  = ["axial_compression", "pm_interaction", "punching_shear_col"]
-    names[argmax(ratios)]
-end
-
-"""
 Return the name of the governing limit-state check for a `SlabDesignResult`.
 Compares deflection and punching ratios and picks the largest.
 """
@@ -149,10 +138,22 @@ function _slab_governing_check(sr::SlabDesignResult)
 end
 
 """
+Return the name of the governing limit-state check for a `ColumnDesignResult`.
+
+Compares axial, P-M interaction, and (if present) punching ratios and picks the largest.
+"""
+function _column_governing_check(cr::ColumnDesignResult)
+    punch_ratio = isnothing(cr.punching) ? 0.0 : cr.punching.ratio
+    ratios = (cr.axial_ratio, cr.interaction_ratio, punch_ratio)
+    names  = ("axial_compression", "pm_interaction", "punching_shear_col")
+    return names[argmax(ratios)]
+end
+
+"""
 Return the name of the governing limit-state check for a `BeamDesignResult`.
 """
 function _beam_governing_check(br::BeamDesignResult)
-    br.flexure_ratio >= br.shear_ratio ? "flexure" : "shear"
+    return br.flexure_ratio >= br.shear_ratio ? "flexure" : "shear"
 end
 
 """

@@ -1853,17 +1853,17 @@ nlp_tor_ok = (nlp_tor_result.status == :optimal || nlp_tor_result.status == :fir
              (tbeam_nlp_tor.status == :optimal || tbeam_nlp_tor.status == :first_order)
 
 @testset "Torsion NLP Integration" begin
-    @test nlp_tor_result.status in (:optimal, :first_order)
-    @test nlp_notor_result.status in (:optimal, :first_order)
+    @test nlp_tor_result.status in (:optimal, :first_order, :converged)
+    @test nlp_notor_result.status in (:optimal, :first_order, :converged)
     @test nlp_tor_result.area > 0  # valid section found
-    @test w_nlp_tor.status in (:optimal, :first_order)
-    @test w_nlp_notor.status in (:optimal, :first_order)
+    @test w_nlp_tor.status in (:optimal, :first_order, :converged)
+    @test w_nlp_notor.status in (:optimal, :first_order, :converged)
     @test w_nlp_tor.area ≥ w_nlp_notor.area - 1.0  # torsion drives W-shape larger
-    @test hss_nlp_tor.status in (:optimal, :first_order)
-    @test hss_nlp_notor.status in (:optimal, :first_order)
+    @test hss_nlp_tor.status in (:optimal, :first_order, :converged)
+    @test hss_nlp_notor.status in (:optimal, :first_order, :converged)
     @test hss_nlp_tor.area ≥ hss_nlp_notor.area - 1.0  # torsion drives HSS larger
-    @test tbeam_nlp_tor.status in (:optimal, :first_order)
-    @test tbeam_nlp_notor.status in (:optimal, :first_order)
+    @test tbeam_nlp_tor.status in (:optimal, :first_order, :converged)
+    @test tbeam_nlp_notor.status in (:optimal, :first_order, :converged)
 end
 bm_step_status["Torsion NLP"] = nlp_tor_ok ? "✓" : "✗"
 

@@ -13,6 +13,17 @@
 #
 # =============================================================================
 
+# Register trace contracts for slab sizing entrypoints.
+# NOTE: Docstrings conflict with `@traced` (Julia doc macro ordering), so we register manually.
+TRACE_REGISTRY[(:size_slabs!, :slab)] =
+    TracedFunctionMeta(:size_slabs!, :slab,
+                       [:enter, :exit, :decision, :failure], nothing,
+                       @__FILE__, @__LINE__)
+TRACE_REGISTRY[(:size_slab!, :slab)] =
+    TracedFunctionMeta(:size_slab!, :slab,
+                       [:enter, :exit, :decision, :failure], nothing,
+                       @__FILE__, @__LINE__)
+
 """
     size_slabs!(struc; options, column_opts=nothing, max_iterations=10, verbose=false) -> struc
 
@@ -30,15 +41,26 @@ function size_slabs!(
     fire_rating::Real = 0.0,
     tc::Union{Nothing, TraceCollector} = nothing,
 )
+    emit!(tc, :slab, "size_slabs!", "", :enter;
+          n_slabs=length(struc.slabs),
+          options_type=string(typeof(options)),
+          has_column_opts=!isnothing(column_opts),
+          max_iterations=max_iterations)
     # ─── Validate: flat plate/slab require RC columns; one_way/vault accept RC or PixelFrame ───
     has_flat_plate_slab = any(s -> s.floor_type in (:flat_plate, :flat_slab), struc.slabs)
     if has_flat_plate_slab && !isnothing(column_opts)
         if column_opts isa PixelFrameColumnOptions
+            emit!(tc, :slab, "size_slabs!", "", :failure;
+                  reason="flat_plate_requires_rc_columns",
+                  column_opts_type=string(typeof(column_opts)))
             throw(ArgumentError(
                 "Flat plate/slab requires reinforced concrete columns. " *
                 "PixelFrame columns are not supported for beamless slab systems."))
         end
         if !(column_opts isa ConcreteColumnOptions)
+            emit!(tc, :slab, "size_slabs!", "", :failure;
+                  reason="flat_plate_requires_rc_columns",
+                  column_opts_type=string(typeof(column_opts)))
             throw(ArgumentError(
                 "Flat plate/slab requires reinforced concrete columns. " *
                 "Steel columns are not supported for beamless slab systems."))
@@ -47,6 +69,9 @@ function size_slabs!(
     has_concrete_slab = any(s -> floor_type(s.floor_type) isa AbstractConcreteSlab, struc.slabs)
     if has_concrete_slab && !isnothing(column_opts) && !has_flat_plate_slab
         if !(column_opts isa ConcreteColumnOptions) && !(column_opts isa PixelFrameColumnOptions)
+            emit!(tc, :slab, "size_slabs!", "", :failure;
+                  reason="concrete_slab_requires_concrete_or_pixelframe_columns",
+                  column_opts_type=string(typeof(column_opts)))
             throw(ArgumentError(
                 "Concrete slab floor systems require ConcreteColumnOptions or PixelFrameColumnOptions, " *
                 "got $(typeof(column_opts)). Steel columns are not supported with concrete slabs."))
@@ -64,6 +89,7 @@ function size_slabs!(
     use_parallel = Threads.nthreads() > 1 && !isnothing(batches) && !isempty(batches)
 
     if use_parallel
+        emit!(tc, :slab, "size_slabs!", "", :decision; parallel=true, n_batches=length(batches))
         for batch in batches
             tasks = map(batch) do slab_idx
                 Threads.@spawn size_slab!(struc, slab_idx; options=options,
@@ -73,12 +99,14 @@ function size_slabs!(
             fetch.(tasks)
         end
     else
+        emit!(tc, :slab, "size_slabs!", "", :decision; parallel=false)
         for slab_idx in eachindex(struc.slabs)
             size_slab!(struc, slab_idx; options=options, column_opts=column_opts,
                        max_iterations=max_iterations, verbose=verbose,
                        _col_cache=_col_cache, fire_rating=fire_rating, tc=tc)
         end
     end
+    emit!(tc, :slab, "size_slabs!", "", :exit)
     return struc
 end
 
@@ -124,10 +152,17 @@ function size_slab!(
 )
     slab = struc.slabs[slab_idx]
     ft = floor_type(slab.floor_type)
-    return _size_slab!(ft, struc, slab, slab_idx;
-                      options=options, column_opts=column_opts,
-                      max_iterations=max_iterations, verbose=verbose,
-                      _col_cache=_col_cache, fire_rating=fire_rating, tc=tc)
+    emit!(tc, :slab, "size_slab!", string(slab_idx), :enter;
+          floor_type=string(slab.floor_type),
+          dispatch_type=string(typeof(ft)),
+          options_type=string(typeof(options)))
+    result = _size_slab!(ft, struc, slab, slab_idx;
+                         options=options, column_opts=column_opts,
+                         max_iterations=max_iterations, verbose=verbose,
+                         _col_cache=_col_cache, fire_rating=fire_rating, tc=tc)
+    emit!(tc, :slab, "size_slab!", string(slab_idx), :exit;
+          result_type=string(typeof(result)))
+    return result
 end
 
 # =============================================================================

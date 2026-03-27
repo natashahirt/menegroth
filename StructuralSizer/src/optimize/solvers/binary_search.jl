@@ -9,6 +9,12 @@
 # are not needed. Falls back gracefully when the feasibility landscape is
 # non-monotonic (rare for weight-sorted W catalogs).
 
+# Register trace contract for optimize_binary_search (docstring conflict with @traced).
+TRACE_REGISTRY[(:optimize_binary_search, :optimizer)] =
+    TracedFunctionMeta(:optimize_binary_search, :optimizer,
+                       [:enter, :exit, :decision, :failure], nothing,
+                       @__FILE__, @__LINE__)
+
 """
     optimize_binary_search(
         checker::AbstractCapacityChecker,
@@ -18,6 +24,7 @@
         material::AbstractMaterial;
         objective::AbstractObjective = MinVolume(),
         cache::Union{Nothing, AbstractCapacityCache} = nothing,
+        tc::Union{Nothing, TraceCollector} = nothing,
     )
 
 Lightest-feasible section assignment via binary search.
@@ -47,12 +54,18 @@ function optimize_binary_search(
     material::AbstractMaterial;
     objective::AbstractObjective = MinVolume(),
     cache::Union{Nothing, AbstractCapacityCache} = nothing,
+    tc::Union{Nothing, TraceCollector} = nothing,
 )
     n_groups = length(demands)
     n_groups == length(geometries) || throw(ArgumentError(
         "demands and geometries must have the same length"))
     n_sections = length(catalog)
     n_sections > 0 || throw(ArgumentError("catalog must be non-empty"))
+
+    emit!(tc, :optimizer, "optimize_binary_search", "", :enter;
+          n_groups=n_groups, n_sections=n_sections,
+          checker_type=string(typeof(checker)),
+          objective_type=string(typeof(objective)))
 
     lengths = [g.L isa Length ? ustrip(u"m", g.L) : Float64(g.L) for g in geometries]
 
@@ -92,6 +105,10 @@ function optimize_binary_search(
         infeasible = findall(==(0), section_indices)
         msgs = [get_feasibility_error_msg(checker, demands[i], geometries[i])
                 for i in infeasible]
+        emit!(tc, :optimizer, "optimize_binary_search", "", :failure;
+              reason="no_feasible_sections",
+              infeasible_groups=infeasible,
+              n_infeasible=length(infeasible))
         throw(ArgumentError(
             "No feasible sections for group(s) $(infeasible): $(join(msgs, "; "))"))
     end
@@ -99,6 +116,9 @@ function optimize_binary_search(
     status = :OPTIMAL
     obj_val = sum(group_obj)
 
+    emit!(tc, :optimizer, "optimize_binary_search", "", :exit;
+          status=string(status),
+          objective_value=obj_val)
     return (; section_indices, sections, status, objective_value=obj_val)
 end
 

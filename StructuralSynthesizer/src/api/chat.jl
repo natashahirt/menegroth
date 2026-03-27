@@ -1150,6 +1150,14 @@ function _dispatch_chat_tool(tool::String, args::Dict{String, Any})::Dict{String
             layer   = layer_sym,
         )
 
+    elseif tool == "explain_trace_lookup"
+        isnothing(DESIGN_CACHE.last_design) && return Dict("error" => "no_design", "message" => "No design has been run yet.", "recovery_hint" => _NO_DESIGN_HINT)
+        lookup_raw = get(args, "lookup", nothing)
+        isnothing(lookup_raw) && return Dict("error" => "missing_lookup", "message" => "Provide a 'lookup' object from a breadcrumb bundle (top_elements[].lookup).")
+        lookup = lookup_raw isa AbstractDict ? Dict{String, Any}(string(k) => v for (k, v) in lookup_raw) :
+                 Dict{String, Any}("raw" => lookup_raw)
+        return agent_explain_trace_lookup(DESIGN_CACHE.last_design; lookup=lookup)
+
     elseif tool == "get_lever_map"
         check_arg = get(args, "check", nothing)
         return get_lever_map(; check=isnothing(check_arg) ? nothing : string(check_arg))

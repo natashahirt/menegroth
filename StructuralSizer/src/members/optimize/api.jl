@@ -5,6 +5,21 @@
 # One function, material-specific options types.
 # All inputs can be Unitful quantities - conversions handled internally.
 
+# Register trace contracts for member sizing entrypoints.
+# NOTE: Docstrings conflict with `@traced` (Julia doc macro ordering), so we register manually.
+TRACE_REGISTRY[(:size_columns, :sizing)] =
+    TracedFunctionMeta(:size_columns, :sizing,
+                       [:enter, :exit, :decision, :failure], nothing,
+                       @__FILE__, @__LINE__)
+TRACE_REGISTRY[(:size_beams, :sizing)] =
+    TracedFunctionMeta(:size_beams, :sizing,
+                       [:enter, :exit, :decision, :failure], nothing,
+                       @__FILE__, @__LINE__)
+TRACE_REGISTRY[(:size_members, :sizing)] =
+    TracedFunctionMeta(:size_members, :sizing,
+                       [:enter, :exit, :decision, :failure], nothing,
+                       @__FILE__, @__LINE__)
+
 """Create zero vector matching the units of the input vector."""
 function zeros_like(v::Vector)
     if !isempty(v) && v[1] isa Unitful.Quantity
@@ -80,17 +95,27 @@ function size_columns(
     I_ref_vec::Union{Nothing, Vector} = nothing,
     mip_gap::Real = 1e-4,
     output_flag::Integer = 0,
+    tc::Union{Nothing, TraceCollector} = nothing,
 )
     n = length(Pu)
     n == length(Mux) || throw(ArgumentError("Pu and Mux must have same length"))
     n == length(geometries) || throw(ArgumentError("demands and geometries must have same length"))
     
+    emit!(tc, :sizing, "size_columns", "", :enter;
+          material="steel",
+          n_members=n,
+          options_type=string(typeof(opts)),
+          sizing_strategy=string(opts.sizing_strategy),
+          section_type=string(opts.section_type))
+
     steel_geoms = [to_steel_geometry(g) for g in geometries]
 
     # ─── Steel NLP path (W and HSS only) ───
     if opts.sizing_strategy == :nlp && opts.section_type in (:w, :hss)
+        emit!(tc, :sizing, "size_columns", "", :decision; path="nlp")
         return _size_steel_columns_nlp(Pu, Mux, steel_geoms, opts; Muy=Muy)
     end
+    emit!(tc, :sizing, "size_columns", "", :decision; path="discrete_mip")
     
     cat = isnothing(opts.custom_catalog) ? 
         steel_column_catalog(opts.section_type, opts.catalog) : 
@@ -116,7 +141,7 @@ function size_columns(
     
     # Optimize — multi-material if materials vector is provided
     if !isnothing(opts.materials)
-        return optimize_discrete(
+        result = optimize_discrete(
             checker, demands, steel_geoms, cat, opts.materials;
             objective = opts.objective,
             n_max_sections = opts.n_max_sections,
@@ -124,9 +149,10 @@ function size_columns(
             mip_gap = mip_gap,
             output_flag = output_flag,
             time_limit_sec = opts.time_limit_sec,
+            tc = tc,
         )
     else
-        return optimize_discrete(
+        result = optimize_discrete(
             checker, demands, steel_geoms, cat, opts.material;
             objective = opts.objective,
             n_max_sections = opts.n_max_sections,
@@ -134,8 +160,11 @@ function size_columns(
             mip_gap = mip_gap,
             output_flag = output_flag,
             time_limit_sec = opts.time_limit_sec,
+            tc = tc,
         )
     end
+    emit!(tc, :sizing, "size_columns", "", :exit; status=string(result.status))
+    return result
 end
 
 # ==============================================================================
@@ -151,9 +180,16 @@ function size_columns(
     mip_gap::Real = 1e-4,
     output_flag::Integer = 0,
     cache::Union{Nothing, AbstractCapacityCache} = nothing,
+    tc::Union{Nothing, TraceCollector} = nothing,
 )
     # ─── NLP path ───
     if opts.sizing_strategy == :nlp
+        emit!(tc, :sizing, "size_columns", "", :enter;
+              material="concrete",
+              n_members=length(Pu),
+              options_type=string(typeof(opts)),
+              sizing_strategy=string(opts.sizing_strategy),
+              path="nlp")
         return _size_columns_nlp(Pu, Mux, geometries, opts; Muy=Muy)
     end
 
@@ -161,6 +197,16 @@ function size_columns(
     n = length(Pu)
     n == length(Mux) || throw(ArgumentError("Pu and Mux must have same length"))
     n == length(geometries) || throw(ArgumentError("demands and geometries must have same length"))
+
+    emit!(tc, :sizing, "size_columns", "", :enter;
+          material="concrete",
+          n_members=n,
+          options_type=string(typeof(opts)),
+          sizing_strategy=string(opts.sizing_strategy),
+          path="discrete_mip",
+          include_slenderness=opts.include_slenderness,
+          include_biaxial=opts.include_biaxial,
+          section_shape=string(opts.section_shape))
     
     # Convert geometries if needed
     conc_geoms = [to_concrete_geometry(g) for g in geometries]
@@ -189,7 +235,7 @@ function size_columns(
     
     # Optimize — multi-material if grades vector is provided
     if !isnothing(opts.materials)
-        return optimize_discrete(
+        result = optimize_discrete(
             checker, demands, conc_geoms, cat, opts.materials;
             objective = opts.objective,
             n_max_sections = opts.n_max_sections,
@@ -197,9 +243,10 @@ function size_columns(
             mip_gap = mip_gap,
             output_flag = output_flag,
             time_limit_sec = opts.time_limit_sec,
+            tc = tc,
         )
     else
-        return optimize_discrete(
+        result = optimize_discrete(
             checker, demands, conc_geoms, cat, opts.material;
             objective = opts.objective,
             n_max_sections = opts.n_max_sections,
@@ -208,8 +255,11 @@ function size_columns(
             output_flag = output_flag,
             time_limit_sec = opts.time_limit_sec,
             cache = cache,
+            tc = tc,
         )
     end
+    emit!(tc, :sizing, "size_columns", "", :exit; status=string(result.status))
+    return result
 end
 
 """
@@ -431,10 +481,17 @@ function size_beams(
     Tu::Vector = Float64[],
     mip_gap::Real = 1e-4,
     output_flag::Integer = 0,
+    tc::Union{Nothing, TraceCollector} = nothing,
 )
     n = length(Mu)
     n == length(Vu)          || throw(ArgumentError("Mu and Vu must have same length"))
     n == length(geometries)  || throw(ArgumentError("demands and geometries must have same length"))
+
+    emit!(tc, :sizing, "size_beams", "", :enter;
+          material="concrete",
+          n_members=n,
+          options_type=string(typeof(opts)),
+          sizing_strategy="discrete_mip")
 
     # Convert geometries
     conc_geoms = [to_concrete_geometry(g) for g in geometries]
@@ -470,7 +527,7 @@ function size_beams(
 
     # Optimize — multi-material if grades vector is provided
     if !isnothing(opts.materials)
-        return optimize_discrete(
+        result = optimize_discrete(
             checker, demands, conc_geoms, cat, opts.materials;
             objective      = opts.objective,
             n_max_sections = opts.n_max_sections,
@@ -478,9 +535,10 @@ function size_beams(
             mip_gap        = mip_gap,
             output_flag    = output_flag,
             time_limit_sec = opts.time_limit_sec,
+            tc             = tc,
         )
     else
-        return optimize_discrete(
+        result = optimize_discrete(
             checker, demands, conc_geoms, cat, opts.material;
             objective      = opts.objective,
             n_max_sections = opts.n_max_sections,
@@ -488,8 +546,11 @@ function size_beams(
             mip_gap        = mip_gap,
             output_flag    = output_flag,
             time_limit_sec = opts.time_limit_sec,
+            tc             = tc,
         )
     end
+    emit!(tc, :sizing, "size_beams", "", :exit; status=string(result.status))
+    return result
 end
 
 # ==============================================================================
@@ -564,6 +625,7 @@ function size_beams(
     I_ref_vec::Union{Nothing, Vector} = nothing,
     mip_gap::Real = 1e-4,
     output_flag::Integer = 0,
+    tc::Union{Nothing, TraceCollector} = nothing,
 )
     Pu_zero = [zero(Vu[1]) for _ in Mu]
     return size_columns(Pu_zero, Mu, geometries, opts;
@@ -571,7 +633,8 @@ function size_beams(
                         δ_max_vec=δ_max_vec,
                         δ_max_total_vec=δ_max_total_vec,
                         I_ref_vec=I_ref_vec,
-                        mip_gap=mip_gap, output_flag=output_flag)
+                        mip_gap=mip_gap, output_flag=output_flag,
+                        tc=tc)
 end
 
 # ==============================================================================
@@ -625,10 +688,17 @@ function size_beams(
     Pu::Vector = zeros_like(Vu),
     mip_gap::Real = 1e-4,
     output_flag::Integer = 0,
+    tc::Union{Nothing, TraceCollector} = nothing,
 )
     n = length(Mu)
     n == length(Vu)         || throw(ArgumentError("Mu and Vu must have same length"))
     n == length(geometries) || throw(ArgumentError("demands and geometries must have same length"))
+
+    emit!(tc, :sizing, "size_beams", "", :enter;
+          material="pixelframe",
+          n_members=n,
+          options_type=string(typeof(opts)),
+          sizing_strategy="discrete_mip")
 
     # Convert geometries
     conc_geoms = [to_concrete_geometry(g) for g in geometries]
@@ -673,8 +743,10 @@ function size_beams(
         mip_gap        = mip_gap,
         output_flag    = output_flag,
         time_limit_sec = opts.time_limit_sec,
+        tc             = tc,
     )
 
+    emit!(tc, :sizing, "size_beams", "", :exit; status=string(mip_result.status))
     return (; mip_result..., n_pixels=n_pixels_vec)
 end
 
@@ -729,10 +801,17 @@ function size_columns(
     Muy::Vector = zeros_like(Mux),
     mip_gap::Real = 1e-4,
     output_flag::Integer = 0,
+    tc::Union{Nothing, TraceCollector} = nothing,
 )
     n = length(Pu)
     n == length(Mux)        || throw(ArgumentError("Pu and Mux must have same length"))
     n == length(geometries) || throw(ArgumentError("demands and geometries must have same length"))
+
+    emit!(tc, :sizing, "size_columns", "", :enter;
+          material="pixelframe",
+          n_members=n,
+          options_type=string(typeof(opts)),
+          sizing_strategy="discrete_mip")
 
     # Convert geometries
     conc_geoms = [to_concrete_geometry(g) for g in geometries]
@@ -776,8 +855,10 @@ function size_columns(
         mip_gap        = mip_gap,
         output_flag    = output_flag,
         time_limit_sec = opts.time_limit_sec,
+        tc             = tc,
     )
 
+    emit!(tc, :sizing, "size_columns", "", :exit; status=string(mip_result.status))
     return (; mip_result..., n_pixels=n_pixels_vec)
 end
 
@@ -827,28 +908,56 @@ function size_members(
     Pu::Vector, Mux::Vector, geometries::Vector,
     opts::ConcreteColumnOptions; kwargs...
 )
-    size_columns(Pu, Mux, geometries, opts; kwargs...)
+    tc = get(kwargs, :tc, nothing)
+    emit!(tc, :sizing, "size_members", "", :enter;
+          dispatch="concrete_columns",
+          n_members=length(Pu),
+          options_type=string(typeof(opts)))
+    result = size_columns(Pu, Mux, geometries, opts; kwargs...)
+    emit!(tc, :sizing, "size_members", "", :exit; status=string(result.status))
+    return result
 end
 
 function size_members(
     Mu::Vector, Vu::Vector, geometries::Vector,
     opts::ConcreteBeamOptions; kwargs...
 )
-    size_beams(Mu, Vu, geometries, opts; kwargs...)
+    tc = get(kwargs, :tc, nothing)
+    emit!(tc, :sizing, "size_members", "", :enter;
+          dispatch="concrete_beams",
+          n_members=length(Mu),
+          options_type=string(typeof(opts)))
+    result = size_beams(Mu, Vu, geometries, opts; kwargs...)
+    emit!(tc, :sizing, "size_members", "", :exit; status=string(result.status))
+    return result
 end
 
 function size_members(
     Mu::Vector, Vu::Vector, geometries::Vector,
     opts::PixelFrameBeamOptions; kwargs...
 )
-    size_beams(Mu, Vu, geometries, opts; kwargs...)
+    tc = get(kwargs, :tc, nothing)
+    emit!(tc, :sizing, "size_members", "", :enter;
+          dispatch="pixelframe_beams",
+          n_members=length(Mu),
+          options_type=string(typeof(opts)))
+    result = size_beams(Mu, Vu, geometries, opts; kwargs...)
+    emit!(tc, :sizing, "size_members", "", :exit; status=string(result.status))
+    return result
 end
 
 function size_members(
     Pu::Vector, Mux::Vector, geometries::Vector,
     opts::PixelFrameColumnOptions; kwargs...
 )
-    size_columns(Pu, Mux, geometries, opts; kwargs...)
+    tc = get(kwargs, :tc, nothing)
+    emit!(tc, :sizing, "size_members", "", :enter;
+          dispatch="pixelframe_columns",
+          n_members=length(Pu),
+          options_type=string(typeof(opts)))
+    result = size_columns(Pu, Mux, geometries, opts; kwargs...)
+    emit!(tc, :sizing, "size_members", "", :exit; status=string(result.status))
+    return result
 end
 
 # ==============================================================================

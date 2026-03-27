@@ -14,6 +14,11 @@
 
 import JuMP
 
+TRACE_REGISTRY[(:optimize_continuous, :optimizer)] =
+    TracedFunctionMeta(:optimize_continuous, :optimizer,
+                       [:enter, :exit, :decision, :failure], nothing,
+                       @__FILE__, @__LINE__)
+
 """
     optimize_continuous(
         problem::AbstractNLPProblem;
@@ -75,23 +80,42 @@ function optimize_continuous(
     verbose::Bool = false,
     x0::Union{Nothing,Vector{Float64}} = nothing,
     n_multistart::Int = 1,
+    tc::Union{Nothing, TraceCollector} = nothing,
 )
+    emit!(tc, :optimizer, "optimize_continuous", "", :enter;
+          problem_type=string(typeof(problem)),
+          objective_type=string(typeof(objective)),
+          solver=string(solver),
+          n_vars=n_variables(problem),
+          n_constraints=n_constraints(problem))
+
     if solver === :grid
-        return _optimize_grid(problem, objective; n_grid, n_refine, verbose)
+        emit!(tc, :optimizer, "optimize_continuous", "", :decision; backend="grid")
+        result = _optimize_grid(problem, objective; n_grid, n_refine, verbose)
     elseif solver === :ipopt
+        emit!(tc, :optimizer, "optimize_continuous", "", :decision; backend="ipopt", n_multistart=n_multistart)
         if n_multistart > 1
-            return _multistart_ipopt(problem, objective;
+            result = _multistart_ipopt(problem, objective;
                 maxiter, tol, verbose, x0, n_starts=n_multistart)
         else
-            return _optimize_ipopt(problem, objective; maxiter, tol, verbose, x0)
+            result = _optimize_ipopt(problem, objective; maxiter, tol, verbose, x0)
         end
     elseif solver === :nlopt
-        return _optimize_nlopt(problem, objective; maxiter, tol, verbose)
+        emit!(tc, :optimizer, "optimize_continuous", "", :decision; backend="nlopt")
+        result = _optimize_nlopt(problem, objective; maxiter, tol, verbose)
     elseif solver === :nonconvex
-        return _optimize_nonconvex(problem, objective; maxiter, tol, verbose)
+        emit!(tc, :optimizer, "optimize_continuous", "", :decision; backend="nonconvex")
+        result = _optimize_nonconvex(problem, objective; maxiter, tol, verbose)
     else
+        emit!(tc, :optimizer, "optimize_continuous", "", :failure;
+              reason="unknown_backend", solver=string(solver))
         throw(ArgumentError("Unknown solver=$solver. Use :grid, :ipopt, :nlopt, or :nonconvex."))
     end
+
+    emit!(tc, :optimizer, "optimize_continuous", "", :exit;
+          status=string(getproperty(result, :status)),
+          objective_value=getproperty(result, :objective_value))
+    return result
 end
 
 # ==============================================================================

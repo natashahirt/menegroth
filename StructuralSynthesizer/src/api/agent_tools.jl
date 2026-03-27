@@ -218,6 +218,197 @@ function agent_situation_card(
     return card
 end
 
+# ─── Phase 2 continued: Breadcrumb Microscope (post-hoc explain_feasibility) ───
+#
+# Breadcrumbs are emitted into the solver trace (stage="breadcrumbs_members") as
+# compact group-level bundles with per-element lookup keys. This tool resolves a
+# lookup key and runs StructuralSizer.explain_feasibility for the chosen section.
+#
+
+"""
+    agent_explain_trace_lookup(design::BuildingDesign; lookup, section_mode="chosen") -> Dict{String, Any}
+
+Resolve a breadcrumb lookup key (emitted in the solver trace) and return a
+machine-readable `explain_feasibility` breakdown for that specific element.
+
+This is a post-hoc "microscope": it does not require the design run to have
+focused tracing enabled, as long as the design result still contains the
+necessary sizing inputs (section, demand, geometry, materials/options).
+
+# Arguments
+- `lookup`: Dict with keys `{version, kind, member_type, member_idx, group_id}` as emitted by breadcrumbs.
+- `section_mode`: `"chosen"` (default) uses the designed section; `"catalog_screen"` (future) could explain rejection.
+"""
+function agent_explain_trace_lookup(
+    design::BuildingDesign;
+    lookup::AbstractDict,
+    section_mode::String = "chosen",
+)::Dict{String, Any}
+    # --- Validate lookup payload ---
+    ver = Int(get(lookup, "version", 0))
+    kind = string(get(lookup, "kind", ""))
+    ver == 1 || return Dict("error" => "invalid_lookup_version", "message" => "Expected lookup.version=1", "lookup" => lookup)
+    kind == "member" || return Dict("error" => "invalid_lookup_kind", "message" => "Expected lookup.kind=\"member\"", "lookup" => lookup)
+
+    mtype = string(get(lookup, "member_type", ""))
+    midx  = Int(get(lookup, "member_idx", 0))
+    (mtype in ("beam", "column")) || return Dict("error" => "invalid_member_type", "message" => "member_type must be \"beam\" or \"column\"", "lookup" => lookup)
+    midx > 0 || return Dict("error" => "invalid_member_idx", "message" => "member_idx must be positive", "lookup" => lookup)
+    section_mode == "chosen" || return Dict("error" => "invalid_section_mode", "message" => "section_mode must be \"chosen\" for now")
+
+    struc = design.structure
+    params = design.params
+
+    if mtype == "beam"
+        midx <= length(struc.beams) || return Dict("error" => "beam_not_found", "message" => "beam_idx out of range", "member_idx" => midx)
+        beam = struc.beams[midx]
+        sec = section(beam)
+        isnothing(sec) && return Dict("error" => "no_section", "message" => "Beam has no designed section", "member_idx" => midx)
+
+        # Determine which sizing path was used from params.beams
+        opts = something(params.beams, StructuralSizer.SteelBeamOptions())
+        # Reconstruct geometry (SI Unitful)
+        L = member_length(beam); Lq = L isa Unitful.Quantity ? uconvert(u"m", L) : Float64(L) * u"m"
+        Lb = unbraced_length(beam); Lbq = Lb isa Unitful.Quantity ? uconvert(u"m", Lb) : Float64(Lb) * u"m"
+        geom = if opts isa StructuralSizer.SteelBeamOptions
+            StructuralSizer.SteelMemberGeometry(Lq; Lb=Lbq, Cb=beam.base.Cb, Kx=beam.base.Kx, Ky=beam.base.Ky)
+        else
+            StructuralSizer.ConcreteMemberGeometry(Lq; Lu=Lbq, k=beam.base.Ky)
+        end
+
+        # Use design result demands (already in SI units)
+        br = get(design.beams, midx, nothing)
+        isnothing(br) && return Dict("error" => "no_beam_result", "message" => "No BeamDesignResult available", "member_idx" => midx)
+        dem = if opts isa StructuralSizer.SteelBeamOptions
+            StructuralSizer.MemberDemand(1;
+                Pu_c = 0.0,
+                Mux = ustrip(u"N*m", br.Mu),
+                Vu_strong = ustrip(u"N", br.Vu),
+            )
+        else
+            StructuralSizer.RCBeamDemand(1;
+                Mu = ustrip(StructuralSizer.Asap.kip*u"ft", uconvert(StructuralSizer.Asap.kip*u"ft", br.Mu)),
+                Vu = ustrip(StructuralSizer.Asap.kip, uconvert(StructuralSizer.Asap.kip, br.Vu)),
+            )
+        end
+
+        # Run explain_feasibility with a single-entry cache/catalog.
+        if opts isa StructuralSizer.SteelBeamOptions
+            mat = StructuralSynthesizer.resolve_beam_steel(params.materials)
+            checker = StructuralSizer.AISCChecker(; max_depth=opts.max_depth,
+                deflection_limit = getfield(opts, :deflection_limit, nothing),
+                total_deflection_limit = getfield(opts, :total_deflection_limit, nothing),
+            )
+            cat = [sec]
+            cache = StructuralSizer.create_cache(checker, 1)
+            StructuralSizer.precompute_capacities!(checker, cache, cat, mat, opts.objective)
+            expl = StructuralSizer.explain_feasibility(checker, cache, 1, sec, mat, dem, geom)
+        else
+            # Concrete beam: use ACIBeamChecker with params materials
+            rc = resolve_rc_material(params)
+            checker = StructuralSizer.ACIBeamChecker(;
+                fy_ksi  = ustrip(StructuralSizer.Asap.ksi, rc.rebar.Fy),
+                fyt_ksi = ustrip(StructuralSizer.Asap.ksi, StructuralSizer.get_transverse_rebar(opts).Fy),
+                Es_ksi  = ustrip(StructuralSizer.Asap.ksi, rc.rebar.E),
+                λ       = rc.concrete.λ,
+                max_depth = opts.max_depth,
+            )
+            cat = [sec]
+            cache = StructuralSizer.create_cache(checker, 1)
+            StructuralSizer.precompute_capacities!(checker, cache, cat, rc.concrete, opts.objective)
+            expl = StructuralSizer.explain_feasibility(checker, cache, 1, sec, rc.concrete, dem, geom)
+        end
+
+        # Serialize explanation into JSON-friendly Dict
+        return Dict{String, Any}(
+            "member_type" => "beam",
+            "member_idx"  => midx,
+            "section"     => string(sec),
+            "passed"      => expl.passed,
+            "governing_check" => expl.governing_check,
+            "governing_ratio" => expl.governing_ratio,
+            "checks" => [Dict(
+                "name" => c.name,
+                "passed" => c.passed,
+                "ratio" => c.ratio,
+                "demand" => c.demand,
+                "capacity" => c.capacity,
+                "code_clause" => c.code_clause,
+            ) for c in expl.checks],
+        )
+    else
+        # column
+        midx <= length(struc.columns) || return Dict("error" => "column_not_found", "message" => "column_idx out of range", "member_idx" => midx)
+        col = struc.columns[midx]
+        sec = section(col)
+        isnothing(sec) && return Dict("error" => "no_section", "message" => "Column has no designed section", "member_idx" => midx)
+
+        opts = something(params.columns, StructuralSizer.SteelColumnOptions())
+        L = member_length(col); Lq = L isa Unitful.Quantity ? uconvert(u"m", L) : Float64(L) * u"m"
+        Lb = unbraced_length(col); Lbq = Lb isa Unitful.Quantity ? uconvert(u"m", Lb) : Float64(Lb) * u"m"
+        geom = if opts isa StructuralSizer.SteelColumnOptions
+            StructuralSizer.SteelMemberGeometry(Lq; Lb=Lbq, Cb=col.base.Cb, Kx=col.base.Kx, Ky=col.base.Ky)
+        else
+            StructuralSizer.ConcreteMemberGeometry(Lq; Lu=Lbq, k=col.base.Ky)
+        end
+
+        cr = get(design.columns, midx, nothing)
+        isnothing(cr) && return Dict("error" => "no_column_result", "message" => "No ColumnDesignResult available", "member_idx" => midx)
+
+        if opts isa StructuralSizer.SteelColumnOptions
+            mat = something(params.materials.steel, StructuralSizer.A992_Steel)
+            checker = StructuralSizer.AISCChecker(; max_depth=opts.max_depth)
+            dem = StructuralSizer.MemberDemand(1;
+                Pu_c = ustrip(u"N", cr.Pu),
+                Mux  = ustrip(u"N*m", cr.Mu_x),
+                Muy  = ustrip(u"N*m", cr.Mu_y),
+            )
+            cat = [sec]
+            cache = StructuralSizer.create_cache(checker, 1)
+            StructuralSizer.precompute_capacities!(checker, cache, cat, mat, opts.objective)
+            expl = StructuralSizer.explain_feasibility(checker, cache, 1, sec, mat, dem, geom)
+        else
+            rc = resolve_rc_material(params)
+            checker = StructuralSizer.ACIColumnChecker(;
+                include_slenderness = opts.include_slenderness,
+                include_biaxial = opts.include_biaxial,
+                fy_ksi = ustrip(StructuralSizer.Asap.ksi, rc.rebar.Fy),
+                Es_ksi = ustrip(StructuralSizer.Asap.ksi, rc.rebar.E),
+                max_depth = opts.max_depth,
+            )
+            Pu_kip = uconvert(StructuralSizer.Asap.kip, cr.Pu)
+            Mux_kipft = uconvert(StructuralSizer.Asap.kip*u"ft", cr.Mu_x)
+            Muy_kipft = uconvert(StructuralSizer.Asap.kip*u"ft", cr.Mu_y)
+            dem = StructuralSizer.RCColumnDemand(1;
+                Pu = ustrip(Pu_kip),
+                Mux = ustrip(Mux_kipft),
+                Muy = ustrip(Muy_kipft),
+            )
+            cat = [sec]
+            cache = StructuralSizer.create_cache(checker, 1)
+            StructuralSizer.precompute_capacities!(checker, cache, cat, rc.concrete, opts.objective)
+            expl = StructuralSizer.explain_feasibility(checker, cache, 1, sec, rc.concrete, dem, geom)
+        end
+
+        return Dict{String, Any}(
+            "member_type" => "column",
+            "member_idx"  => midx,
+            "section"     => string(sec),
+            "passed"      => expl.passed,
+            "governing_check" => expl.governing_check,
+            "governing_ratio" => expl.governing_ratio,
+            "checks" => [Dict(
+                "name" => c.name,
+                "passed" => c.passed,
+                "ratio" => c.ratio,
+                "demand" => c.demand,
+                "capacity" => c.capacity,
+                "code_clause" => c.code_clause,
+            ) for c in expl.checks],
+        )
+    end
+end
+
 """
     agent_diagnose_summary(design::BuildingDesign) -> Dict{String, Any}
 

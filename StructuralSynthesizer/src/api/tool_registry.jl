@@ -485,6 +485,18 @@ const TOOL_REGISTRY = [
         "requires_geometry" => false,
     ),
     Dict{String, Any}(
+        "name"              => "explain_trace_lookup",
+        "description"       => "Post-hoc microscope: resolve a breadcrumb lookup key (from solver trace bundles) and return per-check feasibility explanation for that exact element/section/demand/geometry.",
+        "phase"             => "diagnosis",
+        "use_when"          => "You have a breadcrumb lookup object (from get_solver_trace tier=decisions) and want detailed per-check ratios for that element without re-running the full design.",
+        "args"              => Dict{String, Any}(
+            "lookup" => Dict("type" => "object", "required" => true, "description" => "Lookup dict from solver trace breadcrumbs: events[].data.top_elements[].lookup"),
+        ),
+        "returns"           => "Dict with lookup echo, element id, checker/material/section types, and FeasibilityExplanation (passed, governing_check, governing_ratio, checks array).",
+        "requires_design"   => true,
+        "requires_geometry" => false,
+    ),
+    Dict{String, Any}(
         "name"              => "get_result_summary",
         "description"       => "Per-element JSON summary (check ratios, sections, failures).",
         "phase"             => "diagnosis",

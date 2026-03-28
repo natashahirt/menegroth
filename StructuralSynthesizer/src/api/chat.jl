@@ -634,16 +634,18 @@ You SHOULD give short, mechanism-level expectations for how the design problem m
         if !isnothing(params_json) && !isempty(string(params_json))
             push!(parts, "\n\nCURRENT PARAMETERS:\n", JSON3.write(params_json))
         end
-        if !stale && !isnothing(DESIGN_CACHE.last_design)
-            push!(parts, "\n\nLATEST RESULTS SUMMARY:\n", condense_result(DESIGN_CACHE.last_design))
+        cached_design = _get_last_design()
+        if !stale && !isnothing(cached_design)
+            push!(parts, "\n\nLATEST RESULTS SUMMARY:\n", condense_result(cached_design))
         end
         return join(parts)
     elseif mode == "results"
         parts = [_RESULTS_SYSTEM_PREAMBLE, geo_ctx_block]
         !isempty(stale_note) && push!(parts, stale_note)
-        if !stale && !isnothing(DESIGN_CACHE.last_design)
-            push!(parts, condense_result(DESIGN_CACHE.last_design))
-            push!(parts, "\n\nDETAILED RESULTS:\n", JSON3.write(report_summary_json(DESIGN_CACHE.last_design)))
+        cached_design = _get_last_design()
+        if !stale && !isnothing(cached_design)
+            push!(parts, condense_result(cached_design))
+            push!(parts, "\n\nDETAILED RESULTS:\n", JSON3.write(report_summary_json(cached_design)))
         end
         _append_chat_building_geometry_sections!(parts, geometry_summary, structured_geometry)
         if !isnothing(params_json) && !isempty(string(params_json))
@@ -1518,13 +1520,16 @@ function _get_last_design()::Union{BuildingDesign, Nothing}
 end
 
 function _dispatch_chat_tool(tool::String, args::Dict{String, Any})::Dict{String, Any}
+    design = _get_last_design()
+    struc = with_cache_read(c -> c.structure, DESIGN_CACHE)
+
     if tool == "get_result_summary"
-        isnothing(DESIGN_CACHE.last_design) && return Dict("error" => "no_design", "message" => "No design has been run yet.", "recovery_hint" => _NO_DESIGN_HINT)
-        return report_summary_json(DESIGN_CACHE.last_design)
+        isnothing(design) && return Dict("error" => "no_design", "message" => "No design has been run yet.", "recovery_hint" => _NO_DESIGN_HINT)
+        return report_summary_json(design)
 
     elseif tool == "get_condensed_result"
-        isnothing(DESIGN_CACHE.last_design) && return Dict("error" => "no_design", "message" => "No design has been run yet.", "recovery_hint" => _NO_DESIGN_HINT)
-        return Dict("text" => condense_result(DESIGN_CACHE.last_design))
+        isnothing(design) && return Dict("error" => "no_design", "message" => "No design has been run yet.", "recovery_hint" => _NO_DESIGN_HINT)
+        return Dict("text" => condense_result(design))
 
     elseif tool == "get_applicability"
         return api_applicability_schema()
@@ -1645,21 +1650,22 @@ function _dispatch_chat_tool(tool::String, args::Dict{String, Any})::Dict{String
     # ── Phase 1: Orientation ────────────────────────────────────────────────
     elseif tool == "get_situation_card"
         cli = string(get(args, "client_geometry_hash", ""))
+        geo_hash = with_cache_read(c -> c.geometry_hash, DESIGN_CACHE)
         return agent_situation_card(
-            DESIGN_CACHE.structure,
-            DESIGN_CACHE.last_design,
+            struc,
+            design,
             get_design_history_entries();
-            server_geometry_hash = DESIGN_CACHE.geometry_hash,
+            server_geometry_hash = geo_hash,
             client_geometry_hash = cli,
         )
 
     elseif tool == "get_building_summary"
-        isnothing(DESIGN_CACHE.structure) && return Dict("error" => "no_geometry", "message" => "No geometry loaded. Submit geometry via POST /design first.", "recovery_hint" => _NO_GEOMETRY_HINT)
-        return agent_building_summary(DESIGN_CACHE.structure)
+        isnothing(struc) && return Dict("error" => "no_geometry", "message" => "No geometry loaded. Submit geometry via POST /design first.", "recovery_hint" => _NO_GEOMETRY_HINT)
+        return agent_building_summary(struc)
 
     elseif tool == "get_current_params"
-        isnothing(DESIGN_CACHE.last_design) && return Dict("error" => "no_design", "message" => "No design has been run yet.", "recovery_hint" => _NO_DESIGN_HINT)
-        return agent_current_params(DESIGN_CACHE.last_design)
+        isnothing(design) && return Dict("error" => "no_design", "message" => "No design has been run yet.", "recovery_hint" => _NO_DESIGN_HINT)
+        return agent_current_params(design)
 
     elseif tool == "get_design_history"
         entries = get_design_history_entries()
@@ -1668,11 +1674,11 @@ function _dispatch_chat_tool(tool::String, args::Dict{String, Any})::Dict{String
 
     # ── Phase 2: Diagnosis ───────────────────────────────────────────────────
     elseif tool == "get_diagnose_summary"
-        isnothing(DESIGN_CACHE.last_design) && return Dict("error" => "no_design", "message" => "No design has been run yet.", "recovery_hint" => _NO_DESIGN_HINT)
-        return agent_diagnose_summary(DESIGN_CACHE.last_design)
+        isnothing(design) && return Dict("error" => "no_design", "message" => "No design has been run yet.", "recovery_hint" => _NO_DESIGN_HINT)
+        return agent_diagnose_summary(design)
 
     elseif tool == "get_diagnose"
-        isnothing(DESIGN_CACHE.last_design) && return Dict("error" => "no_design", "message" => "No design has been run yet.", "recovery_hint" => _NO_DESIGN_HINT)
+        isnothing(design) && return Dict("error" => "no_design", "message" => "No design has been run yet.", "recovery_hint" => _NO_DESIGN_HINT)
         units_arg = get(args, "units", nothing)
         report_units = nothing
         if !isnothing(units_arg)
@@ -1683,10 +1689,10 @@ function _dispatch_chat_tool(tool::String, args::Dict{String, Any})::Dict{String
                 return Dict("error" => "invalid_units", "message" => "units must be \"imperial\" or \"metric\".")
             end
         end
-        return design_to_diagnose(DESIGN_CACHE.last_design; report_units=report_units)
+        return design_to_diagnose(design; report_units=report_units)
 
     elseif tool == "query_elements"
-        isnothing(DESIGN_CACHE.last_design) && return Dict("error" => "no_design", "message" => "No design has been run yet.", "recovery_hint" => _NO_DESIGN_HINT)
+        isnothing(design) && return Dict("error" => "no_design", "message" => "No design has been run yet.", "recovery_hint" => _NO_DESIGN_HINT)
         min_ratio_raw = get(args, "min_ratio", nothing)
         max_ratio_raw = get(args, "max_ratio", nothing)
         ok_raw = get(args, "ok", nothing)
@@ -1696,7 +1702,7 @@ function _dispatch_chat_tool(tool::String, args::Dict{String, Any})::Dict{String
         ( !isnothing(min_ratio_raw) && isnothing(min_ratio) ) && return Dict("error" => "invalid_min_ratio", "message" => "min_ratio must be numeric.")
         ( !isnothing(max_ratio_raw) && isnothing(max_ratio) ) && return Dict("error" => "invalid_max_ratio", "message" => "max_ratio must be numeric.")
         ( !isnothing(ok_raw) && isnothing(ok_val) ) && return Dict("error" => "invalid_ok", "message" => "ok must be boolean (true/false).")
-        return agent_query_elements(DESIGN_CACHE.last_design;
+        return agent_query_elements(design;
             type             = let t = get(args, "type", nothing); isnothing(t) ? nothing : string(t) end,
             min_ratio        = min_ratio,
             max_ratio        = max_ratio,
@@ -1705,7 +1711,7 @@ function _dispatch_chat_tool(tool::String, args::Dict{String, Any})::Dict{String
         )
 
     elseif tool == "get_solver_trace"
-        isnothing(DESIGN_CACHE.last_design) && return Dict("error" => "no_design", "message" => "No design has been run yet.", "recovery_hint" => _NO_DESIGN_HINT)
+        isnothing(design) && return Dict("error" => "no_design", "message" => "No design has been run yet.", "recovery_hint" => _NO_DESIGN_HINT)
         tier_arg    = lowercase(strip(string(get(args, "tier", "failures"))))
         element_arg = get(args, "element", nothing)
         layer_arg   = get(args, "layer", nothing)
@@ -1722,19 +1728,19 @@ function _dispatch_chat_tool(tool::String, args::Dict{String, Any})::Dict{String
                 return Dict("error" => "invalid_layer", "message" => "layer must be one of: pipeline, workflow, sizing, optimizer, checker, slab.")
             end
         end
-        return agent_solver_trace(DESIGN_CACHE.last_design;
+        return agent_solver_trace(design;
             tier    = tier_sym,
             element = isnothing(element_arg) ? nothing : string(element_arg),
             layer   = layer_sym,
         )
 
     elseif tool == "explain_trace_lookup"
-        isnothing(DESIGN_CACHE.last_design) && return Dict("error" => "no_design", "message" => "No design has been run yet.", "recovery_hint" => _NO_DESIGN_HINT)
+        isnothing(design) && return Dict("error" => "no_design", "message" => "No design has been run yet.", "recovery_hint" => _NO_DESIGN_HINT)
         lookup_raw = get(args, "lookup", nothing)
         isnothing(lookup_raw) && return Dict("error" => "missing_lookup", "message" => "Provide a 'lookup' object from a breadcrumb bundle (top_elements[].lookup).")
         lookup = lookup_raw isa AbstractDict ? Dict{String, Any}(string(k) => v for (k, v) in lookup_raw) :
                  Dict{String, Any}("raw" => lookup_raw)
-        return agent_explain_trace_lookup(DESIGN_CACHE.last_design; lookup=lookup)
+        return agent_explain_trace_lookup(design; lookup=lookup)
 
     elseif tool == "get_lever_map"
         check_arg = get(args, "check", nothing)
@@ -1772,41 +1778,41 @@ function _dispatch_chat_tool(tool::String, args::Dict{String, Any})::Dict{String
         return agent_compare_designs(idx_a, idx_b)
 
     elseif tool == "suggest_next_action"
-        isnothing(DESIGN_CACHE.last_design) && return Dict("error" => "no_design", "message" => "No design has been run yet.", "recovery_hint" => _NO_DESIGN_HINT)
+        isnothing(design) && return Dict("error" => "no_design", "message" => "No design has been run yet.", "recovery_hint" => _NO_DESIGN_HINT)
         goal = get(args, "goal", nothing)
         isnothing(goal) && return Dict("error" => "missing_goal", "message" => "Provide a 'goal' argument (fix_failures, reduce_column_size, reduce_slab_thickness, reduce_ec).")
-        return agent_suggest_next_action(DESIGN_CACHE.last_design, string(goal))
+        return agent_suggest_next_action(design, string(goal))
 
     elseif tool == "run_experiment"
-        isnothing(DESIGN_CACHE.last_design) && return Dict("error" => "no_design", "message" => "No design has been run yet.", "recovery_hint" => _NO_DESIGN_HINT)
+        isnothing(design) && return Dict("error" => "no_design", "message" => "No design has been run yet.", "recovery_hint" => _NO_DESIGN_HINT)
         exp_type = get(args, "type", nothing)
         exp_args = get(args, "args", Dict{String, Any}())
         isnothing(exp_type) && return Dict("error" => "missing_type", "message" => "Provide experiment 'type' (punching, pm_column, deflection, catalog_screen).")
         !(exp_args isa AbstractDict) && return Dict("error" => "invalid_args", "message" => "run_experiment args must be an object.")
         exp_args_dict = Dict{String, Any}(string(k) => v for (k, v) in exp_args)
-        return evaluate_experiment(DESIGN_CACHE.last_design, string(exp_type), exp_args_dict)
+        return evaluate_experiment(design, string(exp_type), exp_args_dict)
 
     elseif tool == "list_experiments"
         return list_experiments()
 
     elseif tool == "batch_experiments"
-        isnothing(DESIGN_CACHE.last_design) && return Dict("error" => "no_design", "message" => "No design has been run yet.", "recovery_hint" => _NO_DESIGN_HINT)
+        isnothing(design) && return Dict("error" => "no_design", "message" => "No design has been run yet.", "recovery_hint" => _NO_DESIGN_HINT)
         experiments_raw = get(args, "experiments", Any[])
         !(experiments_raw isa AbstractVector) && return Dict("error" => "invalid_experiments", "message" => "experiments must be an array of {type,args} objects.")
         for e in experiments_raw
             !(e isa AbstractDict) && return Dict("error" => "invalid_experiments", "message" => "Each experiments entry must be an object with type and args.")
         end
         experiments = [Dict{String, Any}(string(k) => v for (k, v) in e) for e in experiments_raw]
-        return batch_evaluate(DESIGN_CACHE.last_design, experiments)
+        return batch_evaluate(design, experiments)
 
     # ── Phase 4: Communication ───────────────────────────────────────────────
     elseif tool == "narrate_element"
-        isnothing(DESIGN_CACHE.last_design) && return Dict("error" => "no_design", "message" => "No design has been run yet.", "recovery_hint" => _NO_DESIGN_HINT)
+        isnothing(design) && return Dict("error" => "no_design", "message" => "No design has been run yet.", "recovery_hint" => _NO_DESIGN_HINT)
         etype    = get(args, "element_type", nothing)
         eid      = _chat_coerce_int(get(args, "element_id", nothing))
         audience = get(args, "audience", "architect")
         (isnothing(etype) || isnothing(eid)) && return Dict("error" => "missing_args", "message" => "Provide element_type and element_id.")
-        return agent_narrate_element(DESIGN_CACHE.last_design, string(etype), eid, string(audience))
+        return agent_narrate_element(design, string(etype), eid, string(audience))
 
     elseif tool == "narrate_comparison"
         idx_a    = _chat_coerce_int(get(args, "index_a", nothing))
@@ -1901,12 +1907,17 @@ function _dispatch_chat_tool(tool::String, args::Dict{String, Any})::Dict{String
         result_ref = Ref{Any}(nothing)
         error_ref  = Ref{Any}(nothing)
 
+        cached_struc = with_cache_read(c -> c.structure, DESIGN_CACHE)
+        cached_geo_hash = with_cache_read(c -> c.geometry_hash, DESIGN_CACHE)
+
         design_task = @async begin
             try
                 tc = TraceCollector()
-                d = design_building(DESIGN_CACHE.structure, fast_params; tc=tc)
-                DESIGN_CACHE.last_design = d
-                DESIGN_CACHE.last_result = design_to_json(d; geometry_hash=DESIGN_CACHE.geometry_hash)
+                d = design_building(cached_struc, fast_params; tc=tc)
+                lock(DESIGN_CACHE.lock) do
+                    DESIGN_CACHE.last_design = d
+                    DESIGN_CACHE.last_result = design_to_json(d; geometry_hash=cached_geo_hash)
+                end
                 invalidate_diagnose_cache!(DESIGN_CACHE)
                 result_ref[] = d
             catch e
@@ -2069,7 +2080,7 @@ function register_chat_routes!()
             return
         end
 
-        if mode == "results" && isnothing(DESIGN_CACHE.last_design)
+        if mode == "results" && isnothing(_get_last_design())
             HTTP.setstatus(stream, 404)
             HTTP.setheader(stream, "Content-Type" => "application/json")
             startwrite(stream)

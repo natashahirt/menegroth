@@ -34,8 +34,8 @@ const PROVISION_ONTOLOGY = Dict{String, Any}(
             "Edge/corner columns have the same capacity as interior (they don't — reduced critical perimeter).",
             "Unbalanced moment can be ignored for gravity-only design (it can't when frame analysis shows moment transfer).",
         ],
-        "api_params"      => ["punching_strategy", "concrete"],
-        "geometry_levers" => ["column_size", "slab_thickness"],
+        "api_params"      => ["punching_strategy", "column_concrete", "floor_type"],
+        "geometry_levers" => ["column_size", "slab_span"],
         "coverage" => "full",
     ),
     "ACI_318.24.2" => Dict{String, Any}(
@@ -67,8 +67,8 @@ const PROVISION_ONTOLOGY = Dict{String, Any}(
             "Bigger is always stronger (adding depth without rebar may shift from tension-controlled to compression-controlled, lowering φ).",
             "Axial load always makes columns less safe (moderate compression actually increases moment capacity in the tension-controlled region).",
         ],
-        "api_params"      => ["column_catalog", "concrete", "rebar", "column_sizing_strategy"],
-        "geometry_levers" => ["column_size", "story_height"],
+        "api_params"      => ["column_catalog", "column_concrete", "column_type", "column_sizing_strategy"],
+        "geometry_levers" => ["column_count", "story_height"],
         "coverage" => "full",
     ),
     "AISC_360.H1" => Dict{String, Any}(
@@ -83,8 +83,8 @@ const PROVISION_ONTOLOGY = Dict{String, Any}(
             "W-shapes are always governed by strong-axis bending (weak-axis flexural buckling often controls for columns).",
             "Increasing Fy always helps (higher-grade steel can be more slender and trigger local buckling).",
         ],
-        "api_params"      => ["column_catalog", "steel", "column_sizing_strategy"],
-        "geometry_levers" => ["story_height", "bracing_length"],
+        "api_params"      => ["column_catalog", "column_type", "column_sizing_strategy"],
+        "geometry_levers" => ["column_count", "story_height"],
         "coverage" => "full",
     ),
     "ACI_318.9.5" => Dict{String, Any}(
@@ -98,8 +98,8 @@ const PROVISION_ONTOLOGY = Dict{String, Any}(
         "common_misconceptions" => [
             "Thicker slabs always need less reinforcement (the minimum ratio ρ_min may require more steel in a thicker section).",
         ],
-        "api_params"      => ["concrete", "rebar", "floor_type"],
-        "geometry_levers" => ["slab_thickness", "span_length"],
+        "api_params"      => ["deflection_limit", "floor_type", "concrete", "rebar"],
+        "geometry_levers" => ["span_length"],
         "coverage" => "partial",
     ),
     "ACI_318.11.2" => Dict{String, Any}(
@@ -113,8 +113,8 @@ const PROVISION_ONTOLOGY = Dict{String, Any}(
         "common_misconceptions" => [
             "Shear only matters near supports (critical section is at d from face of support; the entire shear diagram matters).",
         ],
-        "api_params"      => ["concrete", "beam_catalog"],
-        "geometry_levers" => ["beam_depth", "span_length"],
+        "api_params"      => ["concrete", "floor_type"],
+        "geometry_levers" => ["span_length"],
         "coverage" => "partial",
     ),
     "AISC_360.F2" => Dict{String, Any}(
@@ -144,8 +144,8 @@ const PROVISION_ONTOLOGY = Dict{String, Any}(
         "common_misconceptions" => [
             "Strong-axis buckling always governs (it rarely does for W-shapes — check weak axis).",
         ],
-        "api_params"      => ["column_catalog", "steel"],
-        "geometry_levers" => ["story_height", "bracing_length"],
+        "api_params"      => ["column_catalog", "column_concrete", "column_type"],
+        "geometry_levers" => ["column_count", "story_height"],
         "coverage" => "partial",
     ),
     "ACI_318.10.10" => Dict{String, Any}(
@@ -159,9 +159,41 @@ const PROVISION_ONTOLOGY = Dict{String, Any}(
         "common_misconceptions" => [
             "Slenderness only matters for tall columns (short stocky columns with high axial load can also be affected).",
         ],
-        "api_params"      => ["column_catalog", "concrete"],
-        "geometry_levers" => ["column_size", "story_height"],
+        "api_params"      => ["column_catalog", "column_concrete", "column_type"],
+        "geometry_levers" => ["column_count", "story_height"],
         "coverage" => "partial",
+    ),
+    "IBC.Table_601" => Dict{String, Any}(
+        "section" => "Table_601",
+        "code" => "IBC",
+        "provision" => "Fire resistance rating",
+        "mechanism" => "Structural members must maintain load-carrying capacity during the rated fire duration. Concrete relies on cover depth; steel requires applied fire protection (SFRM or intumescent coating).",
+        "rationale" => "Fire-rated assemblies prevent structural collapse during evacuation and firefighting. Rating depends on building occupancy, height, and construction type.",
+        "failure_consequence" => "catastrophic",
+        "code_philosophy" => "Prescriptive ratings from IBC Table 601 based on construction type. ACI 216.1 for concrete cover requirements; AISC DG19/UL designs for steel protection.",
+        "common_misconceptions" => [
+            "Concrete is automatically fire rated (it requires minimum cover and thickness per ACI 216.1).",
+            "Fire rating only affects cost (it drives minimum slab thickness, concrete cover, and steel protection — all affect structural sizing).",
+        ],
+        "api_params"      => ["fire_rating"],
+        "geometry_levers" => String[],
+        "coverage" => "stub",
+    ),
+    "general.foundation_bearing" => Dict{String, Any}(
+        "section" => "foundation",
+        "code" => "ACI_318",
+        "provision" => "Foundation bearing capacity",
+        "mechanism" => "Column reactions must be transferred to soil through footings without exceeding allowable bearing pressure. Footing size is driven by reaction magnitude and soil capacity.",
+        "rationale" => "Foundation failure causes settlement or bearing capacity exceedance. Spread footings distribute column loads over sufficient area; when footings merge, a mat foundation is more economical.",
+        "failure_consequence" => "structural",
+        "code_philosophy" => "ASD bearing design against allowable soil pressure (qa). ACI 318 for footing structural design (flexure, shear, punching).",
+        "common_misconceptions" => [
+            "Stronger concrete always helps (footing size is governed by soil bearing, not concrete strength).",
+            "Mat foundation is always more expensive than spread footings (when footing coverage exceeds ~50% of plan area, a mat can be cheaper).",
+        ],
+        "api_params"      => ["foundation_soil", "foundation_concrete", "foundation_options"],
+        "geometry_levers" => ["column_count"],
+        "coverage" => "stub",
     ),
     "general.convergence" => Dict{String, Any}(
         "section" => "solver",
@@ -175,7 +207,7 @@ const PROVISION_ONTOLOGY = Dict{String, Any}(
             "More iterations always help (if the design is diverging, more iterations just waste time).",
             "Convergence failure means the building can't be built (it means the current parameter set doesn't work — different parameters might).",
         ],
-        "api_params"      => ["max_iterations", "floor_type", "mip_time_limit_sec"],
+        "api_params"      => ["max_iterations", "mip_time_limit_sec", "column_sizing_strategy"],
         "geometry_levers" => ["column_grid", "span_lengths"],
         "coverage" => "partial",
     ),
@@ -355,23 +387,31 @@ const CODE_RATIONALE = Dict{String, Any}(
 # rationale using the names it already sees in tool results.
 
 const CHECK_FAMILY_TO_PROVISION = Dict{String, Vector{String}}(
-    "punching_shear"    => ["ACI_318.22.6"],
-    "punching"          => ["ACI_318.22.6"],
-    "deflection"        => ["ACI_318.24.2"],
-    "PM_interaction"    => ["ACI_318.22.4", "AISC_360.H1"],
-    "P-M_interaction"   => ["ACI_318.22.4", "AISC_360.H1"],
-    "pm_interaction"    => ["ACI_318.22.4", "AISC_360.H1"],
-    "flexure"           => ["ACI_318.9.5"],
-    "one_way_shear"     => ["ACI_318.11.2"],
-    "shear"             => ["ACI_318.11.2"],
-    "LTB"              => ["AISC_360.F2"],
-    "ltb"              => ["AISC_360.F2"],
-    "flexural_buckling" => ["AISC_360.E3"],
-    "buckling"          => ["AISC_360.E3"],
-    "slenderness"       => ["ACI_318.10.10"],
-    "convergence"       => ["general.convergence"],
-    "combined_forces"   => ["AISC_360.H1"],
-    "axial_capacity"    => ["AISC_360.E3", "ACI_318.22.4"],
+    "punching_shear"      => ["ACI_318.22.6"],
+    "punching_shear_col"  => ["ACI_318.22.6"],
+    "punching_shear_slab" => ["ACI_318.22.6"],
+    "punching_shear_fdn"  => ["ACI_318.22.6"],
+    "punching"            => ["ACI_318.22.6"],
+    "deflection"          => ["ACI_318.24.2"],
+    "PM_interaction"      => ["ACI_318.22.4", "AISC_360.H1"],
+    "P-M_interaction"     => ["ACI_318.22.4", "AISC_360.H1"],
+    "pm_interaction"      => ["ACI_318.22.4", "AISC_360.H1"],
+    "flexure"             => ["ACI_318.9.5"],
+    "flexure_fdn"         => ["ACI_318.9.5"],
+    "one_way_shear"       => ["ACI_318.11.2"],
+    "shear"               => ["ACI_318.11.2"],
+    "LTB"                 => ["AISC_360.F2"],
+    "ltb"                 => ["AISC_360.F2"],
+    "flexural_buckling"   => ["AISC_360.E3"],
+    "buckling"            => ["AISC_360.E3"],
+    "slenderness"         => ["ACI_318.10.10"],
+    "convergence"         => ["general.convergence"],
+    "combined_forces"     => ["AISC_360.H1"],
+    "axial_capacity"      => ["AISC_360.E3", "ACI_318.22.4"],
+    "axial_compression"   => ["AISC_360.E3", "ACI_318.22.4"],
+    "bearing"             => String[],
+    "fire_protection"     => ["IBC.Table_601"],
+    "foundation_bearing"  => ["general.foundation_bearing"],
 )
 
 # ─── Lookup helpers ──────────────────────────────────────────────────────────
@@ -394,6 +434,10 @@ function get_provision_ontology(section::String)::Union{Dict{String, Any}, Nothi
     if isnothing(prov_keys)
         prov_keys = get(CHECK_FAMILY_TO_PROVISION, lowercase(section), nothing)
     end
+    if isnothing(prov_keys)
+        base = replace(lowercase(section), r"_(col|slab|fdn|beam)$" => "")
+        prov_keys = get(CHECK_FAMILY_TO_PROVISION, base, nothing)
+    end
     if !isnothing(prov_keys) && !isempty(prov_keys)
         return get(PROVISION_ONTOLOGY, prov_keys[1], nothing)
     end
@@ -404,11 +448,17 @@ end
     get_provisions_for_check(check_family::String) -> Vector{Dict{String, Any}}
 
 Return all PROVISION_ONTOLOGY entries that govern a given check family.
+Handles element-type suffixes (`_col`, `_slab`, `_fdn`) and case variations.
 """
 function get_provisions_for_check(check_family::String)::Vector{Dict{String, Any}}
     prov_keys = get(CHECK_FAMILY_TO_PROVISION, check_family, nothing)
     if isnothing(prov_keys)
         prov_keys = get(CHECK_FAMILY_TO_PROVISION, lowercase(check_family), nothing)
+    end
+    if isnothing(prov_keys)
+        # Strip common element-type suffixes and retry
+        base = replace(lowercase(check_family), r"_(col|slab|fdn|beam)$" => "")
+        prov_keys = get(CHECK_FAMILY_TO_PROVISION, base, nothing)
     end
     isnothing(prov_keys) && return Dict{String, Any}[]
     return [PROVISION_ONTOLOGY[k] for k in prov_keys if haskey(PROVISION_ONTOLOGY, k)]

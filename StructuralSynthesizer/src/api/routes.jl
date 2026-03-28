@@ -176,7 +176,7 @@ function register_routes!()
             "mode" => "full",
             "ready" => true,
             "state" => state,
-            "has_result" => !isnothing(DESIGN_CACHE.last_result),
+            "has_result" => with_cache_read(c -> !isnothing(c.last_result), DESIGN_CACHE),
             "message" => nothing,
             "error" => nothing,
         )
@@ -281,7 +281,7 @@ function register_routes!()
 
         # Run design in background so we can return before App Runner's 120s request limit.
         # Client polls GET /status until idle then GET /result for the result.
-        DESIGN_CACHE.last_result = nothing
+        with_cache_write!(c -> (c.last_result = nothing), DESIGN_CACHE)
         _reset_design_logs!()
         _append_design_log!("Design request accepted.")
         @async _run_design_loop(input)
@@ -318,7 +318,8 @@ function register_routes!()
                 "message" => "Design still in progress. Poll GET /status until idle.",
             ))
         end
-        if isnothing(DESIGN_CACHE.last_design)
+        cached_design = with_cache_read(c -> c.last_design, DESIGN_CACHE)
+        if isnothing(cached_design)
             return _json_resp(404, Dict(
                 "status"  => "error",
                 "message" => "No design available. Submit a design first.",
@@ -331,9 +332,9 @@ function register_routes!()
         end
         try
             payload = if isnothing(report_units)
-                get_cached_diagnose(DESIGN_CACHE, DESIGN_CACHE.last_design)
+                get_cached_diagnose(DESIGN_CACHE, cached_design)
             else
-                design_to_diagnose(DESIGN_CACHE.last_design; report_units=report_units)
+                design_to_diagnose(cached_design; report_units=report_units)
             end
             return _json_ok(payload)
         catch e
@@ -358,7 +359,8 @@ function register_routes!()
                 "message" => "Design still in progress. Poll GET /status until idle.",
             ))
         end
-        if isnothing(DESIGN_CACHE.last_design)
+        cached_design = with_cache_read(c -> c.last_design, DESIGN_CACHE)
+        if isnothing(cached_design)
             return _json_resp(404, Dict(
                 "status" => "error",
                 "message" => "No design available. Submit a design first.",
@@ -372,11 +374,11 @@ function register_routes!()
         fmt = _query_string(req, "format")
         try
             if fmt == "json"
-                summary = report_summary_json(DESIGN_CACHE.last_design; report_units=report_units)
+                summary = report_summary_json(cached_design; report_units=report_units)
                 return _json_ok(summary)
             else
                 buf = IOBuffer()
-                engineering_report(DESIGN_CACHE.last_design; io=buf, report_units=report_units)
+                engineering_report(cached_design; io=buf, report_units=report_units)
                 report_text = String(take!(buf))
                 return HTTP.Response(200, ["Content-Type" => "text/plain; charset=utf-8"], report_text)
             end
@@ -400,7 +402,7 @@ function register_routes!()
                 "message" => "Server is busy. Wait until idle.",
             ))
         end
-        design = DESIGN_CACHE.last_design
+        design = with_cache_read(c -> c.last_design, DESIGN_CACHE)
         if isnothing(design)
             return _json_resp(404, Dict(
                 "status" => "error",
@@ -439,25 +441,26 @@ function register_routes!()
         du = design.params.display_units
         viz = _serialize_visualization(design, du)
 
-        # Patch the cached result with the new visualization
-        prev = DESIGN_CACHE.last_result
-        if !isnothing(prev) && prev isa APIOutput
-            DESIGN_CACHE.last_result = APIOutput(
-                status             = prev.status,
-                compute_time_s     = prev.compute_time_s,
-                phase_timings      = prev.phase_timings,
-                length_unit        = prev.length_unit,
-                thickness_unit     = prev.thickness_unit,
-                volume_unit        = prev.volume_unit,
-                mass_unit          = prev.mass_unit,
-                summary            = prev.summary,
-                slabs              = prev.slabs,
-                columns            = prev.columns,
-                beams              = prev.beams,
-                foundations         = prev.foundations,
-                geometry_hash      = prev.geometry_hash,
-                visualization      = viz,
-            )
+        lock(DESIGN_CACHE.lock) do
+            prev = DESIGN_CACHE.last_result
+            if !isnothing(prev) && prev isa APIOutput
+                DESIGN_CACHE.last_result = APIOutput(
+                    status             = prev.status,
+                    compute_time_s     = prev.compute_time_s,
+                    phase_timings      = prev.phase_timings,
+                    length_unit        = prev.length_unit,
+                    thickness_unit     = prev.thickness_unit,
+                    volume_unit        = prev.volume_unit,
+                    mass_unit          = prev.mass_unit,
+                    summary            = prev.summary,
+                    slabs              = prev.slabs,
+                    columns            = prev.columns,
+                    beams              = prev.beams,
+                    foundations         = prev.foundations,
+                    geometry_hash      = prev.geometry_hash,
+                    visualization      = viz,
+                )
+            end
         end
 
         _append_design_log!("Visualization rebuild complete.")
@@ -475,14 +478,15 @@ function register_routes!()
                 "message" => "Design still in progress. Poll GET /status until idle.",
             ))
         end
-        if isnothing(DESIGN_CACHE.last_result)
+        cached_result = with_cache_read(c -> c.last_result, DESIGN_CACHE)
+        if isnothing(cached_result)
             return _json_resp(404, Dict(
                 "status" => "error",
                 "message" => "No result available. Submit a design first.",
             ))
         end
         # Plain JSON (no gzip) — avoids client parse errors with AutomaticDecompression.
-        return _json_resp(200, DESIGN_CACHE.last_result)
+        return _json_resp(200, cached_result)
     end
 
     # ─── Chat routes (LLM-powered assistant) ─────────────────────────
@@ -521,12 +525,12 @@ function _run_design_loop(input::APIInput)
     catch e
         @error "Design loop crashed — resetting server status" exception=(e, catch_backtrace())
         _append_design_log!("Design loop crashed: $(sprint(showerror, e))")
-        DESIGN_CACHE.last_result = APIError(
+        with_cache_write!(c -> (c.last_result = APIError(
             status = "error",
             error = string(typeof(e)),
             message = sprint(showerror, e),
             traceback = sprint(Base.show_backtrace, catch_backtrace()),
-        )
+        )), DESIGN_CACHE)
         finish!(SERVER_STATUS)
     end
 
@@ -547,7 +551,7 @@ function _execute_design(input::APIInput)
         if is_geometry_cached(DESIGN_CACHE, geo_hash)
             @info "Geometry cache hit — reusing skeleton/structure"
             _append_design_log!("Geometry cache hit: reusing structure.")
-            struc = DESIGN_CACHE.structure
+            struc = with_cache_read(c -> c.structure, DESIGN_CACHE)
         else
             @info "Building new skeleton from JSON input"
             _append_design_log!("Building new skeleton from input.")
@@ -582,15 +586,17 @@ function _execute_design(input::APIInput)
                     "message" => error_msg,
                     "errors" => [error_msg],
                 )
-                DESIGN_CACHE.last_result = validation_err
+                with_cache_write!(c -> (c.last_result = validation_err), DESIGN_CACHE)
                 _append_design_log!("Validation error: $error_msg")
                 return _json_bad(validation_err)
             end
             
             struc = BuildingStructure(skel)
-            DESIGN_CACHE.geometry_hash = geo_hash
-            DESIGN_CACHE.skeleton = skel
-            DESIGN_CACHE.structure = struc
+            lock(DESIGN_CACHE.lock) do
+                DESIGN_CACHE.geometry_hash = geo_hash
+                DESIGN_CACHE.skeleton = skel
+                DESIGN_CACHE.structure = struc
+            end
         end
 
         # Thread TraceCollector so solver_trace is populated for GET /diagnose, chat tools
@@ -651,7 +657,7 @@ function _execute_design(input::APIInput)
                 "message" => "Method applicability check failed: $(length(e.errors)) violation(s)",
                 "errors" => e.errors,
             )
-            DESIGN_CACHE.last_result = resp
+            with_cache_write!(c -> (c.last_result = resp), DESIGN_CACHE)
             return _json_bad(resp)
         end
         @error "Design failed" exception=(e, catch_backtrace())
@@ -662,7 +668,7 @@ function _execute_design(input::APIInput)
             message = sprint(showerror, e),
             traceback = sprint(Base.show_backtrace, catch_backtrace()),
         )
-        DESIGN_CACHE.last_result = err
+        with_cache_write!(c -> (c.last_result = err), DESIGN_CACHE)
         return _json_err(err)
     end
 end

@@ -122,8 +122,10 @@ end
 Check whether the cache holds a skeleton/structure for the given geometry hash.
 """
 function is_geometry_cached(cache::DesignCache, hash::String)
-    return !isempty(hash) && cache.geometry_hash == hash &&
-           !isnothing(cache.skeleton) && !isnothing(cache.structure)
+    lock(cache.lock) do
+        !isempty(hash) && cache.geometry_hash == hash &&
+        !isnothing(cache.skeleton) && !isnothing(cache.structure)
+    end
 end
 
 # ─── Design history ring buffer ───────────────────────────────────────────────

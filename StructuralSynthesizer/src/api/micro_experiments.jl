@@ -654,10 +654,20 @@ function batch_evaluate(
 )::Dict{String, Any}
     results = Dict{String, Any}[]
     for (i, exp) in enumerate(experiments)
-        exp_type = string(get(exp, "type", ""))
-        exp_args = Dict{String, Any}(string(k) => v for (k, v) in get(exp, "args", Dict()))
-        r = evaluate_experiment(design, exp_type, exp_args)
+        r = try
+            !(exp isa AbstractDict) && error("experiment entry must be an object with type and args")
+            exp_type = string(get(exp, "type", ""))
+            exp_args = Dict{String, Any}(string(k) => v for (k, v) in get(exp, "args", Dict()))
+            evaluate_experiment(design, exp_type, exp_args)
+        catch e
+            Dict{String, Any}(
+                "error"   => "experiment_failed",
+                "message" => sprint(showerror, e),
+                "type"    => string(get(exp, "type", "")),
+            )
+        end
         r["experiment_index"] = i
+        r["type"] = string(get(exp, "type", ""))
         push!(results, r)
     end
     return Dict{String, Any}(

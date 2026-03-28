@@ -1050,27 +1050,28 @@ end
 
 """
 Extract a frequency-sorted list of failing check families from diagnose data.
+
+The diagnose dict stores elements under `engineering.columns`, `engineering.beams`,
+`engineering.slabs`, `engineering.foundations`. Each element has top-level `ok`,
+`governing_check`, and `governing_ratio` fields.
 """
 function _extract_failing_checks(diag::Dict)::Vector{Dict{String, Any}}
-    elements = get(diag, "elements", Dict())
+    eng = get(diag, "engineering", Dict())
     check_counts = Dict{String, Int}()
     check_worst = Dict{String, Float64}()
 
-    for (_, etype_data) in elements
-        items = etype_data isa AbstractVector ? etype_data : [etype_data]
-        for item in items
-            !(item isa AbstractDict) && continue
-            checks = get(item, "checks", Dict())
-            for (check_name, check_data) in checks
-                !(check_data isa AbstractDict) && continue
-                ok = get(check_data, "ok", true)
-                ratio = get(check_data, "ratio", 0.0)
-                if !ok
-                    cn = string(check_name)
-                    check_counts[cn] = get(check_counts, cn, 0) + 1
-                    check_worst[cn] = max(get(check_worst, cn, 0.0), ratio isa Number ? Float64(ratio) : 0.0)
-                end
-            end
+    for plural in ("columns", "beams", "slabs", "foundations")
+        elems = get(eng, plural, Any[])
+        !(elems isa AbstractVector) && continue
+        for elem in elems
+            !(elem isa AbstractDict) && continue
+            ok = get(elem, "ok", true)
+            ok && continue
+            gc = string(get(elem, "governing_check", "unknown"))
+            ratio_raw = get(elem, "governing_ratio", 0.0)
+            ratio = ratio_raw isa Number ? Float64(ratio_raw) : 0.0
+            check_counts[gc] = get(check_counts, gc, 0) + 1
+            check_worst[gc] = max(get(check_worst, gc, 0.0), ratio)
         end
     end
 
@@ -1092,8 +1093,16 @@ function _rank_actions_by_failure(
     failing_checks::Vector{Dict{String, Any}},
     related_params::Vector{String},
 )::Vector{Dict{String, Any}}
-    failing_names = Set(get(fc, "check", "") for fc in failing_checks)
     total_failing = sum(get(fc, "n_failing", 0) for fc in failing_checks; init=0)
+
+    # Normalize failing check names: diagnose uses "pm_interaction", lever map
+    # uses "P-M_interaction". Build a lookup keyed by lowercased underscored form.
+    _norm(s) = lowercase(replace(s, "-" => "_"))
+    failing_by_norm = Dict{String, Dict{String, Any}}()
+    for fc in failing_checks
+        cn = get(fc, "check", "")
+        failing_by_norm[_norm(cn)] = fc
+    end
 
     param_scores = Dict{String, Dict{String, Any}}()
     for param in related_params
@@ -1102,12 +1111,10 @@ function _rank_actions_by_failure(
         provisions_involved = Dict{String, Any}[]
         for (check_name, lever_info) in LEVER_SURFACE_MAP
             params_list = get(lever_info, "parameters", String[])
-            if param in params_list && check_name in failing_names
+            fc = get(failing_by_norm, _norm(check_name), nothing)
+            if param in params_list && !isnothing(fc)
                 push!(addressed, check_name)
-                fc_match = findfirst(fc -> get(fc, "check", "") == check_name, failing_checks)
-                if !isnothing(fc_match)
-                    addressed_count += get(failing_checks[fc_match], "n_failing", 0)
-                end
+                addressed_count += get(fc, "n_failing", 0)
                 for prov in get_provisions_for_check(check_name)
                     push!(provisions_involved, Dict{String, Any}(
                         "section"              => get(prov, "section", ""),

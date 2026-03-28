@@ -372,19 +372,23 @@ function agent_current_params(design::BuildingDesign)::Dict{String, Any}
     params = design.params
     du = params.display_units
 
-    ctx = _diagnose_design_context(params, du)
+    ctx = _diagnose_design_context(params, du; design=design)
 
     ctx["optimize_for"]    = string(params.optimize_for)
     ctx["max_iterations"]  = params.max_iterations
     ctx["fire_rating"]     = params.fire_rating
     ctx["pattern_loading"] = string(params.pattern_loading)
 
-    # Material details
+    # Material details (use cascade resolvers; Concrete uses `fc′`, not `fc`)
     mats = params.materials
+    slab_fc = try round(ustrip(u"psi", resolve_slab_concrete(mats).fc′); digits=0) catch; nothing end
+    col_fc  = try round(ustrip(u"psi", resolve_column_concrete(mats).fc′); digits=0) catch; nothing end
     ctx["materials"] = Dict{String, Any}(
-        "concrete_fc_psi" => try round(ustrip(u"psi", mats.concrete.fc); digits=0) catch; nothing end,
-        "rebar_fy_ksi"    => try round(ustrip(u"ksi", mats.rebar.fy); digits=1) catch; nothing end,
-        "steel_Fy_ksi"    => try round(ustrip(u"ksi", mats.steel.Fy); digits=1) catch; nothing end,
+        "concrete_fc_psi"        => slab_fc,  # alias: slab concrete (legacy key)
+        "slab_concrete_fc_psi"   => slab_fc,
+        "column_concrete_fc_psi" => col_fc,
+        "rebar_fy_ksi"           => try round(ustrip(u"ksi", resolve_slab_rebar(mats).Fy); digits=1) catch; nothing end,
+        "steel_Fy_ksi"           => try round(ustrip(u"ksi", resolve_beam_steel(mats).Fy); digits=1) catch; nothing end,
     )
 
     return ctx
@@ -431,6 +435,15 @@ function agent_situation_card(
 
     if !isnothing(struc)
         card["geometry"] = agent_building_summary(struc)
+    else
+        card["geometry_availability"] = Dict{String, Any}(
+            "server_has_building_structure" => false,
+            "note" =>
+                "The API server has no cached BuildingStructure yet (POST /design has not completed for this model). " *
+                "get_situation_card.geometry and get_building_summary are therefore absent. " *
+                "The chat POST /chat body may still include `building_geometry` (same JSON as Design Run geometry) and/or `geometry_summary` — both are copied into the system prompt when present; " *
+                "parse structured vertices/edges/faces from that JSON. For computed span_stats, slab_panel_plan, and member counts from the solver graph, run Design so the server ingests geometry.",
+        )
     end
 
     if !isnothing(design)
@@ -678,7 +691,7 @@ Designed for progressive disclosure: call this first, then `get_diagnose` or
 `query_elements` for detail.
 """
 function agent_diagnose_summary(design::BuildingDesign)::Dict{String, Any}
-    diag = design_to_diagnose(design)
+    diag = get_cached_diagnose(DESIGN_CACHE, design)
     eng = get(diag, "engineering", Dict())
 
     type_stats = Dict{String, Any}()
@@ -741,7 +754,7 @@ function agent_query_elements(
     governing_check::Union{String, Nothing}=nothing,
     ok::Union{Bool, Nothing}=nothing,
 )::Dict{String, Any}
-    diag = design_to_diagnose(design)
+    diag = get_cached_diagnose(DESIGN_CACHE, design)
 
     function _matches(d::Dict)
         if !isnothing(min_ratio)
@@ -794,43 +807,78 @@ function agent_explain_field(field_name::String)::Dict{String, Any}
     schema = api_params_schema_structured()
     fn_lower = lowercase(field_name)
 
-    # Walk the schema looking for the field
+    found_field = nothing
+    found_details = nothing
+
     for (top_key, top_val) in schema
         if lowercase(string(top_key)) == fn_lower
-            return Dict{String, Any}(
-                "field"   => string(top_key),
-                "details" => top_val,
-            )
+            found_field = string(top_key)
+            found_details = top_val
+            break
         end
         if top_val isa Dict
             for (sub_key, sub_val) in top_val
                 full_key = "$(top_key).$(sub_key)"
                 if lowercase(string(sub_key)) == fn_lower || lowercase(full_key) == fn_lower
-                    return Dict{String, Any}(
-                        "field"   => full_key,
-                        "details" => sub_val,
-                    )
+                    found_field = full_key
+                    found_details = sub_val
+                    break
                 end
                 if sub_val isa Dict
                     for (inner_key, inner_val) in sub_val
                         full_inner = "$(top_key).$(sub_key).$(inner_key)"
                         if lowercase(string(inner_key)) == fn_lower || lowercase(full_inner) == fn_lower
-                            return Dict{String, Any}(
-                                "field"   => full_inner,
-                                "details" => inner_val,
-                            )
+                            found_field = full_inner
+                            found_details = inner_val
+                            break
                         end
                     end
                 end
+                !isnothing(found_field) && break
             end
         end
+        !isnothing(found_field) && break
     end
 
-    return Dict{String, Any}(
-        "error"   => "field_not_found",
-        "message" => "Field \"$field_name\" not found in the parameter schema. " *
-                     "Use get_applicability or check the /schema endpoint for valid field names.",
-    )
+    if isnothing(found_field)
+        return Dict{String, Any}(
+            "error"   => "field_not_found",
+            "message" => "Field \"$field_name\" not found in the parameter schema. " *
+                         "Use get_applicability or check the /schema endpoint for valid field names.",
+        )
+    end
+
+    result = Dict{String, Any}("field" => found_field, "details" => found_details)
+
+    # Enrich with ontology rationale when available
+    leaf = split(found_field, ".")[end]
+    rationale = get_code_rationale(string(leaf))
+    if !isnothing(rationale)
+        result["rationale"] = rationale
+    end
+
+    # Surface related checks with provision summaries via LEVER_SURFACE_MAP + ontology
+    related_checks = Dict{String, Any}[]
+    for (check_name, lever_info) in LEVER_SURFACE_MAP
+        params = get(lever_info, "parameters", String[])
+        if string(leaf) in params
+            entry = Dict{String, Any}("check" => check_name)
+            provs = get_provisions_for_check(check_name)
+            if !isempty(provs)
+                p = provs[1]
+                entry["provision"] = get(p, "provision", "")
+                entry["failure_consequence"] = get(p, "failure_consequence", "")
+                mech = get(p, "mechanism", "")
+                entry["mechanism"] = length(mech) > 120 ? mech[1:117] * "..." : mech
+            end
+            push!(related_checks, entry)
+        end
+    end
+    if !isempty(related_checks)
+        result["related_checks"] = related_checks
+    end
+
+    return result
 end
 
 # ─── Phase 3: Exploration ─────────────────────────────────────────────────────
@@ -931,17 +979,15 @@ function agent_suggest_next_action(design::BuildingDesign, goal::String)::Dict{S
         "message" => "Goal must be one of: $(join(valid_goals, ", ")). Got: \"$goal\".",
     )
 
-    diag = design_to_diagnose(design)
+    diag = get_cached_diagnose(DESIGN_CACHE, design)
     arch = get(diag, "architectural", Dict())
     cons = get(diag, "constraints", Dict())
 
     recs = get(arch, "goal_recommendations", [])
     impacts = get(cons, "lever_impacts", [])
 
-    # Filter recommendations matching this goal
     goal_recs = filter(r -> get(r, "goal", "") == goal, recs)
 
-    # Map goal to related lever impacts
     goal_params = Dict(
         "fix_failures"          => ["punching_strategy", "deflection_limit", "column_catalog", "beam_catalog"],
         "reduce_column_size"    => ["punching_strategy", "column_catalog"],
@@ -953,18 +999,167 @@ function agent_suggest_next_action(design::BuildingDesign, goal::String)::Dict{S
 
     summary = get(diag, "agent_summary", Dict())
 
-    return Dict{String, Any}(
-        "goal"               => goal,
-        "recommendations"    => goal_recs,
-        "lever_impacts"      => goal_impacts,
-        "current_status"     => Dict(
+    # ── Runtime failure analysis ──
+    failing_checks = _extract_failing_checks(diag)
+    ranked_actions = _rank_actions_by_failure(goal, failing_checks, related_params)
+
+    # ── System dependency context ──
+    floor_type = _extract_floor_type(design)
+    sys_context = isnothing(floor_type) ? nothing : get_system_dependencies(floor_type)
+
+    # ── Build tl;dr summary for fast LLM parsing ──
+    total_failing_n = sum(get(fc, "n_failing", 0) for fc in failing_checks; init=0)
+    check_parts = [
+        "$(get(fc, "check", "?")): $(get(fc, "n_failing", 0)) elements"
+        for fc in failing_checks[1:min(end, 3)]
+    ]
+    top_action = isempty(ranked_actions) ? "none" :
+        "$(get(ranked_actions[1], "parameter", "?")) (addresses $(round(Int, get(ranked_actions[1], "coverage_fraction", 0.0) * 100))% of failures)"
+    tldr = if total_failing_n == 0
+        "All checks pass. Goal: $goal."
+    else
+        "$(length(failing_checks)) check families failing ($(join(check_parts, ", "))). Top action: $top_action."
+    end
+
+    result = Dict{String, Any}(
+        "goal"           => goal,
+        "tldr"           => tldr,
+        "ranked_actions" => ranked_actions,
+        "failing_checks" => failing_checks,
+        "current_status" => Dict(
             "all_pass"       => get(summary, "all_pass", false),
             "critical_ratio" => get(summary, "critical_ratio", 0.0),
-            "n_failing"      => get(summary, "n_failing", 0),
+            "n_failing"      => total_failing_n,
         ),
-        "note" => "Recommendations are from the /diagnose architectural layer. " *
-                  "Lever impacts are analytical or estimated — use run_design for exact results.",
     )
+
+    if !isnothing(sys_context)
+        result["system_context"] = sys_context
+    end
+
+    # Demote less-processed data to a secondary key
+    if !isempty(goal_recs) || !isempty(goal_impacts)
+        result["raw_data"] = Dict{String, Any}(
+            "recommendations" => goal_recs,
+            "lever_impacts"   => goal_impacts,
+        )
+    end
+
+    return result
+end
+
+"""
+Extract a frequency-sorted list of failing check families from diagnose data.
+"""
+function _extract_failing_checks(diag::Dict)::Vector{Dict{String, Any}}
+    elements = get(diag, "elements", Dict())
+    check_counts = Dict{String, Int}()
+    check_worst = Dict{String, Float64}()
+
+    for (_, etype_data) in elements
+        items = etype_data isa AbstractVector ? etype_data : [etype_data]
+        for item in items
+            !(item isa AbstractDict) && continue
+            checks = get(item, "checks", Dict())
+            for (check_name, check_data) in checks
+                !(check_data isa AbstractDict) && continue
+                ok = get(check_data, "ok", true)
+                ratio = get(check_data, "ratio", 0.0)
+                if !ok
+                    cn = string(check_name)
+                    check_counts[cn] = get(check_counts, cn, 0) + 1
+                    check_worst[cn] = max(get(check_worst, cn, 0.0), ratio isa Number ? Float64(ratio) : 0.0)
+                end
+            end
+        end
+    end
+
+    sorted = sort(collect(check_counts); by=last, rev=true)
+    return [Dict{String, Any}(
+        "check"       => name,
+        "n_failing"   => count,
+        "worst_ratio" => get(check_worst, name, 0.0),
+    ) for (name, count) in sorted]
+end
+
+"""
+Rank actionable parameters by how many distinct failing check families they address,
+using LEVER_SURFACE_MAP to connect parameters to checks and PROVISION_ONTOLOGY for
+cross-references.
+"""
+function _rank_actions_by_failure(
+    goal::String,
+    failing_checks::Vector{Dict{String, Any}},
+    related_params::Vector{String},
+)::Vector{Dict{String, Any}}
+    failing_names = Set(get(fc, "check", "") for fc in failing_checks)
+    total_failing = sum(get(fc, "n_failing", 0) for fc in failing_checks; init=0)
+
+    param_scores = Dict{String, Dict{String, Any}}()
+    for param in related_params
+        addressed = String[]
+        addressed_count = 0
+        provisions_involved = Dict{String, Any}[]
+        for (check_name, lever_info) in LEVER_SURFACE_MAP
+            params_list = get(lever_info, "parameters", String[])
+            if param in params_list && check_name in failing_names
+                push!(addressed, check_name)
+                fc_match = findfirst(fc -> get(fc, "check", "") == check_name, failing_checks)
+                if !isnothing(fc_match)
+                    addressed_count += get(failing_checks[fc_match], "n_failing", 0)
+                end
+                for prov in get_provisions_for_check(check_name)
+                    push!(provisions_involved, Dict{String, Any}(
+                        "section"              => get(prov, "section", ""),
+                        "provision"            => get(prov, "provision", ""),
+                        "failure_consequence"  => get(prov, "failure_consequence", ""),
+                    ))
+                end
+            end
+        end
+        direction = _lever_direction(param)
+        rationale = get_code_rationale(param)
+        entry = Dict{String, Any}(
+            "parameter"         => param,
+            "addresses_checks"  => addressed,
+            "addresses_n"       => addressed_count,
+            "coverage_fraction" => total_failing > 0 ? addressed_count / total_failing : 0.0,
+            "direction"         => direction,
+            "provisions"        => unique(provisions_involved),
+        )
+        if !isnothing(rationale)
+            entry["rationale"] = rationale
+        end
+        param_scores[param] = entry
+    end
+
+    sorted = sort(collect(values(param_scores)); by=d -> -get(d, "addresses_n", 0))
+    return sorted
+end
+
+function _lever_direction(param::String)::String
+    for (_, lever_info) in LEVER_SURFACE_MAP
+        params_list = get(lever_info, "parameters", String[])
+        if param in params_list
+            return get(lever_info, "direction", "")
+        end
+    end
+    return ""
+end
+
+"""
+Extract floor_type string from a BuildingDesign for system dependency lookup.
+"""
+function _extract_floor_type(design::BuildingDesign)::Union{String, Nothing}
+    try
+        params = design.params
+        if hasproperty(params, :floor_type)
+            ft = params.floor_type
+            return ft isa Symbol ? string(ft) : string(ft)
+        end
+    catch
+    end
+    return nothing
 end
 
 # ─── Phase 2 continued: Solver Trace ─────────────────────────────────────────

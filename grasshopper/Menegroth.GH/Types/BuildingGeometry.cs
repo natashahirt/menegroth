@@ -31,7 +31,10 @@ namespace Menegroth.GH.Types
             = new Dictionary<string, List<List<double[]>>>();
 
         /// <summary>
-        /// Serialise the geometry portion to a JObject for inclusion in the API payload.
+        /// Serialise the geometry portion to a JObject for inclusion in the API payload
+        /// (POST /design). The same object (without merging params) may be sent as
+        /// <c>building_geometry</c> on POST /chat so the assistant parses the same topology
+        /// as Design Run.
         /// </summary>
         public JObject ToJson()
         {

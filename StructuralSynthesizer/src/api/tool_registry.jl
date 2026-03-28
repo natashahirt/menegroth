@@ -252,7 +252,7 @@ end
 const TOOL_REGISTRY = [
     Dict{String, Any}(
         "name"              => "get_situation_card",
-        "description"       => "Single-call orientation snapshot: geometry overview, resolved params, results health, session history status, and trace availability.",
+        "description"       => "Single-call orientation snapshot: geometry overview (from server cache when POST /design has run), resolved params, results health, session history, trace availability. When has_geometry is false, geometry_availability explains that BUILDING GEOMETRY text in the chat prompt may still describe the model for qualitative use.",
         "phase"             => "orientation",
         "use_when"          => "FIRST tool call in any conversation. Gives complete orientation in one call instead of three. Also useful after a design run to refresh context.",
         "args"              => Dict{String, Any}(),
@@ -348,11 +348,21 @@ const TOOL_REGISTRY = [
     ),
     Dict{String, Any}(
         "name"              => "explain_field",
-        "description"       => "Definition, units, valid values, default, and related checks for any API parameter.",
+        "description"       => "Definition, units, valid values, default, related checks, and ontology rationale (when available) for any API parameter.",
         "phase"             => "diagnosis",
-        "use_when"          => "The user asks what a parameter does, or you need to understand a parameter before recommending it.",
+        "use_when"          => "The user asks what a parameter does, or you need to understand a parameter before recommending it. Now includes code rationale and related structural checks.",
         "args"              => Dict{String, Any}("field" => Dict("type" => "string", "required" => true)),
-        "returns"           => "Dict with description, type, default, valid values, related checks.",
+        "returns"           => "Dict with field, details, rationale (ontology), related_checks (from lever map).",
+        "requires_design"   => false,
+        "requires_geometry" => false,
+    ),
+    Dict{String, Any}(
+        "name"              => "get_provision_rationale",
+        "description"       => "Deep ontology lookup: mechanism, rationale, failure consequence, code philosophy, common misconceptions, and actionable levers (split into api_params vs geometry_levers) for a structural code provision.",
+        "phase"             => "diagnosis",
+        "use_when"          => "The user asks WHY a check failed, what the provision guards against, or common misconceptions. Accepts section numbers, full keys, OR check family names from diagnose output (e.g. 'punching_shear').",
+        "args"              => Dict{String, Any}("section" => Dict("type" => "string", "required" => true, "description" => "Section number ('22.6', 'H1'), full key ('ACI_318.22.6'), or check family name ('punching_shear', 'deflection', 'PM_interaction')")),
+        "returns"           => "Dict with section, code, provision, mechanism, rationale, failure_consequence, code_philosophy, common_misconceptions, api_params, geometry_levers, coverage.",
         "requires_design"   => false,
         "requires_geometry" => false,
     ),
@@ -391,11 +401,11 @@ const TOOL_REGISTRY = [
     ),
     Dict{String, Any}(
         "name"              => "suggest_next_action",
-        "description"       => "Ranked parameter changes for a design goal.",
+        "description"       => "Ontology-informed ranked parameter changes for a design goal. Analyzes runtime failures, ranks actions by how many failing checks each parameter addresses, and attaches code rationale.",
         "phase"             => "exploration",
-        "use_when"          => "The user asks what to change, or you need a starting point for optimization.",
+        "use_when"          => "The user asks what to change, or you need a starting point for optimization. More informative than raw lever_impacts because it knows which checks are actually failing.",
         "args"              => Dict{String, Any}("goal" => Dict("type" => "string", "required" => true, "enum" => ["fix_failures", "reduce_column_size", "reduce_slab_thickness", "reduce_ec"])),
-        "returns"           => "Array of ranked suggestions with parameter, value, confidence, estimated impact.",
+        "returns"           => "Dict with ranked_actions (sorted by failure coverage), enriched lever_impacts (with rationale), failing_checks (frequency + worst ratio), system_context, recommendations.",
         "requires_design"   => true,
         "requires_geometry" => false,
     ),
@@ -583,7 +593,45 @@ Return the full tool registry for the `/schema/tools` endpoint.
 """
 api_tool_schema() = TOOL_REGISTRY
 
-const _LLM_CONTRACT_VERSION = "1.0.0"
+const _LLM_CONTRACT_VERSION = "1.1.0"
+
+"""
+    _generate_params_list() -> Vector{Dict{String, Any}}
+
+Walk `api_params_schema_structured()` and flatten it into a compact parameter
+list for the LLM contract. Nested `object` types are flattened with dot notation.
+"""
+function _generate_params_list()::Vector{Dict{String, Any}}
+    schema = api_params_schema_structured()
+    out = Dict{String, Any}[]
+    _flatten_schema!(out, schema, "")
+    return out
+end
+
+function _flatten_schema!(out::Vector{Dict{String, Any}}, schema::Dict, prefix::String)
+    for (key, spec) in sort(collect(schema); by=first)
+        name = isempty(prefix) ? key : "$(prefix).$(key)"
+        if !isa(spec, Dict)
+            continue
+        end
+        ptype = get(spec, "type", "")
+        if ptype == "object"
+            sub = get(spec, "fields", nothing)
+            !isnothing(sub) && _flatten_schema!(out, sub, name)
+        else
+            entry = Dict{String, Any}("name" => name, "type" => ptype)
+            allowed = get(spec, "allowed", nothing)
+            !isnothing(allowed) && (entry["values"] = allowed)
+            rng = get(spec, "range", nothing)
+            !isnothing(rng) && (entry["range"] = rng)
+            unit = get(spec, "unit", nothing)
+            !isnothing(unit) && (entry["unit"] = unit)
+            impact = get(spec, "impact", nothing)
+            !isnothing(impact) && (entry["impact"] = impact)
+            push!(out, entry)
+        end
+    end
+end
 
 """
     api_llm_contract() -> Dict{String, Any}
@@ -601,20 +649,7 @@ function api_llm_contract()::Dict{String, Any}
         "requires_geometry" => get(t, "requires_geometry", false),
     ) for t in TOOL_REGISTRY]
 
-    params_list = [
-        Dict("name" => "floor_type", "type" => "enum", "values" => ["flat_plate", "flat_slab", "one_way", "vault"], "impact" => "high"),
-        Dict("name" => "column_concrete", "type" => "enum", "values" => ["4000", "5000", "6000", "8000", "10000"], "unit" => "psi", "impact" => "high"),
-        Dict("name" => "column_material", "type" => "enum", "values" => ["rc", "steel_w", "steel_hss"], "impact" => "high"),
-        Dict("name" => "slab_concrete", "type" => "enum", "values" => ["4000", "5000", "6000"], "unit" => "psi", "impact" => "medium"),
-        Dict("name" => "punching_strategy", "type" => "enum", "values" => ["grow_columns", "reinforce_first", "reinforce_last"], "impact" => "high"),
-        Dict("name" => "deflection_limit", "type" => "enum", "values" => ["L_240", "L_360", "L_480"], "impact" => "medium"),
-        Dict("name" => "analysis_method", "type" => "enum", "values" => ["DDM", "EFM", "FEA"], "impact" => "medium"),
-        Dict("name" => "live_load", "type" => "float", "unit" => "psf", "range" => [40, 250], "impact" => "high"),
-        Dict("name" => "superimposed_dead", "type" => "float", "unit" => "psf", "range" => [0, 50], "impact" => "medium"),
-        Dict("name" => "fire_rating", "type" => "enum", "values" => ["0", "1", "1.5", "2", "3", "4"], "unit" => "hours", "impact" => "medium"),
-        Dict("name" => "sizing_strategy", "type" => "enum", "values" => ["discrete", "nlp"], "impact" => "low"),
-        Dict("name" => "column_catalog", "type" => "enum", "values" => ["standard", "low_capacity", "high_capacity", "all"], "impact" => "medium"),
-    ]
+    params_list = _generate_params_list()
 
     scope_limits = [
         "Cannot modify geometry (spans, heights, column grid) — geometry comes from Grasshopper",

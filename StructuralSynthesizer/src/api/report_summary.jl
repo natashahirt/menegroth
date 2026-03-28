@@ -52,6 +52,63 @@ function _beam_type_code(params::DesignParameters)
     return "other"
 end
 
+"""First key in a design-result component dict (stable numeric order)."""
+function _first_design_result_idx(d::Dict{Int, <:Any})::Union{Int, Nothing}
+    isempty(d) && return nothing
+    return minimum(keys(d))
+end
+
+"""
+    _column_type_code_from_design(design::BuildingDesign) -> String
+
+When `params.columns === nothing`, infer the API column-type string from sized
+`ColumnDesignResult.section_obj` (still populated after `restore!`; member `section`
+on `BuildingStructure` may be cleared).
+"""
+function _column_type_code_from_design(design::BuildingDesign)::String
+    k = _first_design_result_idx(design.columns)
+    isnothing(k) && return "unknown"
+    cr = design.columns[k]
+    so = cr.section_obj
+    isnothing(so) && return "unknown"
+    so isa StructuralSizer.RCCircularSection && return "rc_circular"
+    so isa StructuralSizer.RCColumnSection && return cr.shape == :circular ? "rc_circular" : "rc_rect"
+    so isa StructuralSizer.ISymmSection && return "steel_w"
+    so isa StructuralSizer.HSSRectSection && return "steel_hss"
+    so isa StructuralSizer.HSSRoundSection && return "steel_hss"
+    so isa StructuralSizer.PixelFrameSection && return "pixelframe"
+    return "other"
+end
+
+"""
+    _beam_type_code_from_design(design::BuildingDesign, params::DesignParameters) -> String
+
+Infer beam API code from `BeamDesignResult.section_obj`. Returns `"n_a"` when the
+beam-result map is empty, or when every entry lacks a section (common for flat
+plate / flat slab: `struc.beams` may still carry unsized placeholders).
+"""
+function _beam_type_code_from_design(design::BuildingDesign, params::DesignParameters)::String
+    beams = design.beams
+    isempty(beams) && return "n_a"
+    for k in sort!(collect(keys(beams)))
+        so = beams[k].section_obj
+        isnothing(so) && continue
+        so isa StructuralSizer.ISymmSection && return "steel_w"
+        so isa StructuralSizer.HSSRectSection && return "steel_hss"
+        so isa StructuralSizer.HSSRoundSection && return "steel_hss"
+        so isa StructuralSizer.RCTBeamSection && return "rc_tbeam"
+        so isa StructuralSizer.RCBeamSection && return "rc_rect"
+        so isa StructuralSizer.PixelFrameSection && return "pixelframe"
+        return "other"
+    end
+    f = params.floor
+    if !isnothing(f) &&
+       (f isa StructuralSizer.FlatPlateOptions || f isa StructuralSizer.FlatSlabOptions)
+        return "n_a"
+    end
+    return "unknown"
+end
+
 # ─── Structured JSON Report Summary ──────────────────────────────────────────
 
 """

@@ -210,7 +210,8 @@ function register_routes!()
                 "POST /rebuild_visualization" => "Rebuild visualization mesh only. Body: {\"target_edge_m\": <positive float>}. Requires a cached design.",
                 "GET /report" => "Engineering report (plain text by default; ?format=json for structured summary)",
                 "GET /diagnose" => "High-resolution agent diagnostic JSON: per-element checks with demand/capacity, governing_check, levers, embodied carbon, plus architectural narrative and lever impact estimates. ?units=imperial|metric",
-                "POST /chat" => "LLM chat endpoint (SSE streaming). Body: {mode, messages, params, geometry_summary, session_id?, client_geometry_hash?}. " *
+                "POST /chat" => "LLM chat endpoint (SSE streaming). Body: {mode, messages, params?, geometry_summary?, building_geometry? (same JSON as POST /design geometry, without params), geometry? (alias), session_id?, client_geometry_hash?}. " *
+                    "When building_geometry is present, the server derives the same geometry hash as POST /design (params excluded) and injects GEOMETRY_CONTEXT (aligned_with_server, geometry_stale) into the system prompt; client_geometry_hash is optional when structured geometry is sent. " *
                     "SSE events: {token:string}, " *
                     "{type:\"agent_turn_summary\", suggested_next_questions:string[], clarification_prompt?:{id,prompt,options:[{id,label}],allow_multiple,rationale?,required_for?}, tool_actions?:[{tool,status,elapsed_ms?,summary?}]}, " *
                     "error events: {error:string, message:string, recovery_hint:string}, " *
@@ -329,7 +330,11 @@ function register_routes!()
             report_units = Symbol(units_val)
         end
         try
-            payload = design_to_diagnose(DESIGN_CACHE.last_design; report_units=report_units)
+            payload = if isnothing(report_units)
+                get_cached_diagnose(DESIGN_CACHE, DESIGN_CACHE.last_design)
+            else
+                design_to_diagnose(DESIGN_CACHE.last_design; report_units=report_units)
+            end
             return _json_ok(payload)
         catch e
             @error "Diagnose generation failed" exception=(e, catch_backtrace())
@@ -608,8 +613,11 @@ function _execute_design(input::APIInput)
         end
 
         output = design_to_json(design; geometry_hash=geo_hash)
-        DESIGN_CACHE.last_result = output
-        DESIGN_CACHE.last_design = design
+        lock(DESIGN_CACHE.lock) do
+            DESIGN_CACHE.last_result = output
+            DESIGN_CACHE.last_design = design
+        end
+        invalidate_diagnose_cache!(DESIGN_CACHE)
         _append_design_log!("Design result serialized.")
 
         # Record in session history for compare_designs / get_design_history

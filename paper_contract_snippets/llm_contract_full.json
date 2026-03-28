@@ -1,0 +1,576 @@
+{
+    "experiments": [
+        {
+            "name": "punching",
+            "speed": "instant",
+            "args": [
+                "col_idx",
+                "c1_in?",
+                "c2_in?",
+                "h_in?"
+            ]
+        },
+        {
+            "name": "pm_column",
+            "speed": "instant",
+            "args": [
+                "col_idx",
+                "section_size"
+            ]
+        },
+        {
+            "name": "deflection",
+            "speed": "instant",
+            "args": [
+                "slab_idx",
+                "deflection_limit"
+            ]
+        },
+        {
+            "name": "catalog_screen",
+            "speed": "instant",
+            "args": [
+                "col_idx",
+                "candidates[]"
+            ]
+        }
+    ],
+    "insight_categories": [
+        "observation",
+        "discovery",
+        "dead_end",
+        "sensitivity",
+        "geometry_note"
+    ],
+    "trace_tiers": [
+        "summary",
+        "failures",
+        "decisions",
+        "full"
+    ],
+    "trace_layers": [
+        "pipeline",
+        "workflow",
+        "sizing",
+        "optimizer",
+        "checker",
+        "slab"
+    ],
+    "workflow_sequence": [
+        "get_situation_card → orient",
+        "get_diagnose_summary → identify failures",
+        "get_lever_map(check=...) → find relevant parameters",
+        "run_experiment → instant what-if",
+        "validate_params → check compatibility",
+        "run_design → full design with new params",
+        "compare_designs → measure improvement",
+        "record_insight → capture learning"
+    ],
+    "tools": [
+        {
+            "name": "get_situation_card",
+            "requires_design": false,
+            "requires_geometry": false,
+            "phase": "orientation",
+            "description": "Single-call orientation snapshot: geometry overview (from server cache when POST /design has run), resolved params, results health, session history, trace availability. When has_geometry is false, geometry_availability explains that BUILDING GEOMETRY text in the chat prompt may still describe the model for qualitative use."
+        },
+        {
+            "name": "get_building_summary",
+            "requires_design": false,
+            "requires_geometry": true,
+            "phase": "orientation",
+            "description": "Geometry summary: stories, counts, beam span_stats (all frame edges — not slab cells), span_diversity, slab_panel_plan from slab face outlines in plan (quad corner deviation from 90°, panel aspect ratios, plan_shape_classification), regularity (story heights). span_cv_note ties the two: beam CV ≠ plan irregularity."
+        },
+        {
+            "name": "get_current_params",
+            "requires_design": true,
+            "requires_geometry": false,
+            "phase": "orientation",
+            "description": "Fully resolved parameter set (defaults + overrides as the solver sees them)."
+        },
+        {
+            "name": "get_design_history",
+            "requires_design": false,
+            "requires_geometry": false,
+            "phase": "orientation",
+            "description": "Past designs in this session (params patch, pass/fail, critical ratio, EC), each tagged with geometry_hash of the model used for that run."
+        },
+        {
+            "name": "get_diagnose_summary",
+            "requires_design": true,
+            "requires_geometry": false,
+            "phase": "diagnosis",
+            "description": "Lightweight failure overview: counts by element type, top-5 critical elements, failure breakdown by governing check."
+        },
+        {
+            "name": "get_diagnose",
+            "requires_design": true,
+            "requires_geometry": false,
+            "phase": "diagnosis",
+            "description": "High-resolution per-element diagnostics: governing checks, demand/capacity, code clauses, levers, EC, recommendations."
+        },
+        {
+            "name": "query_elements",
+            "requires_design": true,
+            "requires_geometry": false,
+            "phase": "diagnosis",
+            "description": "Filter elements by type, ratio range, governing_check, story, or pass/fail status."
+        },
+        {
+            "name": "get_implemented_provisions",
+            "requires_design": false,
+            "requires_geometry": false,
+            "phase": "diagnosis",
+            "description": "List of all design code clauses the solver implements (ACI 318, AISC 360, etc.)."
+        },
+        {
+            "name": "get_lever_map",
+            "requires_design": false,
+            "requires_geometry": false,
+            "phase": "diagnosis",
+            "description": "Which API parameters and geometry changes affect a given failure check. Canonical source of truth for 'what can I change to fix X'."
+        },
+        {
+            "name": "explain_field",
+            "requires_design": false,
+            "requires_geometry": false,
+            "phase": "diagnosis",
+            "description": "Definition, units, valid values, default, related checks, and ontology rationale (when available) for any API parameter."
+        },
+        {
+            "name": "get_provision_rationale",
+            "requires_design": false,
+            "requires_geometry": false,
+            "phase": "diagnosis",
+            "description": "Deep ontology lookup: mechanism, rationale, failure consequence, code philosophy, common misconceptions, and design levers for a structural code provision."
+        },
+        {
+            "name": "validate_params",
+            "requires_design": false,
+            "requires_geometry": false,
+            "phase": "exploration",
+            "description": "Check a params patch for compatibility violations before running."
+        },
+        {
+            "name": "run_design",
+            "requires_design": false,
+            "requires_geometry": true,
+            "phase": "exploration",
+            "description": "Fast parameter-only what-if check (skips visualization, max 2 iterations, 60s timeout)."
+        },
+        {
+            "name": "compare_designs",
+            "requires_design": true,
+            "requires_geometry": false,
+            "phase": "exploration",
+            "description": "Delta table between two designs from session history; includes geometry_hash per side and cross_geometry_comparison when the two runs used different models."
+        },
+        {
+            "name": "suggest_next_action",
+            "requires_design": true,
+            "requires_geometry": false,
+            "phase": "exploration",
+            "description": "Ontology-informed ranked parameter changes for a design goal. Analyzes runtime failures, ranks actions by how many failing checks each parameter addresses, and attaches code rationale."
+        },
+        {
+            "name": "run_experiment",
+            "requires_design": true,
+            "requires_geometry": false,
+            "phase": "exploration",
+            "description": "Fast micro-experiment: re-check one element with a modified parameter (column size, slab thickness, deflection limit) using cached design data. No full re-run needed."
+        },
+        {
+            "name": "list_experiments",
+            "requires_design": false,
+            "requires_geometry": false,
+            "phase": "exploration",
+            "description": "List available micro-experiment types with their argument schemas."
+        },
+        {
+            "name": "batch_experiments",
+            "requires_design": true,
+            "requires_geometry": false,
+            "phase": "exploration",
+            "description": "Run multiple micro-experiments in one call."
+        },
+        {
+            "name": "narrate_element",
+            "requires_design": true,
+            "requires_geometry": false,
+            "phase": "communication",
+            "description": "Plain-English explanation of one element's design, scaled to audience."
+        },
+        {
+            "name": "narrate_comparison",
+            "requires_design": true,
+            "requires_geometry": false,
+            "phase": "communication",
+            "description": "Plain-English comparison of two designs from session history."
+        },
+        {
+            "name": "get_solver_trace",
+            "requires_design": true,
+            "requires_geometry": false,
+            "phase": "diagnosis",
+            "description": "Tiered solver decision trace: why the solver chose specific sections, fell back, converged/diverged, and what check ratios it computed."
+        },
+        {
+            "name": "explain_trace_lookup",
+            "requires_design": true,
+            "requires_geometry": false,
+            "phase": "diagnosis",
+            "description": "Post-hoc microscope: resolve a breadcrumb lookup key (from solver trace bundles) and return per-check feasibility explanation for that exact element/section/demand/geometry."
+        },
+        {
+            "name": "get_result_summary",
+            "requires_design": true,
+            "requires_geometry": false,
+            "phase": "diagnosis",
+            "description": "Per-element JSON summary (check ratios, sections, failures)."
+        },
+        {
+            "name": "get_condensed_result",
+            "requires_design": true,
+            "requires_geometry": false,
+            "phase": "diagnosis",
+            "description": "~500-token plain-text result summary."
+        },
+        {
+            "name": "get_applicability",
+            "requires_design": false,
+            "requires_geometry": false,
+            "phase": "diagnosis",
+            "description": "DDM/EFM/FEA eligibility rules for the current geometry."
+        },
+        {
+            "name": "clarify_user_intent",
+            "requires_design": false,
+            "requires_geometry": false,
+            "phase": "communication",
+            "description": "Structured multiple-choice clarification for the UI."
+        },
+        {
+            "name": "record_insight",
+            "requires_design": false,
+            "requires_geometry": false,
+            "phase": "exploration",
+            "description": "Record a structured learning from the current design iteration."
+        },
+        {
+            "name": "get_session_insights",
+            "requires_design": false,
+            "requires_geometry": false,
+            "phase": "orientation",
+            "description": "Retrieve accumulated learnings from this session."
+        }
+    ],
+    "system": "menegroth structural synthesizer",
+    "lever_map_checks": [
+        "LTB",
+        "P-M_interaction",
+        "axial_capacity",
+        "combined_forces",
+        "convergence",
+        "deflection",
+        "fire_protection",
+        "flexure",
+        "foundation_bearing",
+        "one_way_shear",
+        "punching_shear",
+        "shear"
+    ],
+    "contract_version": "1.1.0",
+    "parameters": [
+        {
+            "name": "beam_catalog",
+            "values": [
+                "standard",
+                "small",
+                "large",
+                "xlarge",
+                "all",
+                "custom"
+            ],
+            "type": "enum"
+        },
+        {
+            "name": "beam_catalog_bounds",
+            "type": "object_or_null"
+        },
+        {
+            "name": "beam_sizing_strategy",
+            "values": [
+                "discrete",
+                "nlp"
+            ],
+            "type": "enum"
+        },
+        {
+            "name": "beam_type",
+            "values": [
+                "steel_w",
+                "steel_hss",
+                "rc_rect",
+                "rc_tbeam",
+                "pixelframe"
+            ],
+            "type": "enum"
+        },
+        {
+            "name": "column_catalog",
+            "values": {
+                "steel_w": [
+                    "compact_only",
+                    "preferred",
+                    "all"
+                ],
+                "rc_rect": [
+                    "standard",
+                    "square",
+                    "rectangular",
+                    "low_capacity",
+                    "high_capacity",
+                    "all"
+                ],
+                "rc_circular": [
+                    "standard",
+                    "low_capacity",
+                    "high_capacity",
+                    "all"
+                ]
+            },
+            "type": "enum_or_null"
+        },
+        {
+            "name": "column_sizing_strategy",
+            "values": [
+                "discrete",
+                "nlp"
+            ],
+            "type": "enum"
+        },
+        {
+            "name": "column_type",
+            "values": [
+                "rc_rect",
+                "rc_circular",
+                "steel_w",
+                "steel_hss",
+                "steel_pipe",
+                "pixelframe"
+            ],
+            "type": "enum"
+        },
+        {
+            "name": "fire_rating",
+            "values": [
+                0,
+                1,
+                1.5,
+                2,
+                3,
+                4
+            ],
+            "type": "number"
+        },
+        {
+            "name": "floor_options.deflection_limit",
+            "values": [
+                "L_240",
+                "L_360",
+                "L_480"
+            ],
+            "type": "enum"
+        },
+        {
+            "name": "floor_options.method",
+            "values": [
+                "DDM",
+                "DDM_SIMPLIFIED",
+                "EFM",
+                "EFM_HARDY_CROSS",
+                "FEA"
+            ],
+            "type": "enum"
+        },
+        {
+            "name": "floor_options.punching_strategy",
+            "values": [
+                "grow_columns",
+                "reinforce_last",
+                "reinforce_first"
+            ],
+            "type": "enum"
+        },
+        {
+            "name": "floor_options.target_edge_m",
+            "range": [
+                0.05,
+                2.0
+            ],
+            "unit": "m",
+            "type": "number"
+        },
+        {
+            "name": "floor_options.vault_lambda",
+            "range": [
+                4,
+                30
+            ],
+            "type": "number"
+        },
+        {
+            "name": "floor_type",
+            "values": [
+                "flat_plate",
+                "flat_slab",
+                "one_way",
+                "vault"
+            ],
+            "type": "enum"
+        },
+        {
+            "name": "foundation_concrete",
+            "type": "string"
+        },
+        {
+            "name": "foundation_options",
+            "type": "object_or_null"
+        },
+        {
+            "name": "foundation_soil",
+            "type": "string"
+        },
+        {
+            "name": "geometry_is_centerline",
+            "type": "boolean"
+        },
+        {
+            "name": "loads.floor_LL_psf",
+            "range": [
+                20,
+                250
+            ],
+            "unit": "psf",
+            "type": "number"
+        },
+        {
+            "name": "loads.floor_SDL_psf",
+            "range": [
+                5,
+                50
+            ],
+            "unit": "psf",
+            "type": "number"
+        },
+        {
+            "name": "loads.roof_LL_psf",
+            "range": [
+                20,
+                100
+            ],
+            "unit": "psf",
+            "type": "number"
+        },
+        {
+            "name": "loads.roof_SDL_psf",
+            "range": [
+                5,
+                40
+            ],
+            "unit": "psf",
+            "type": "number"
+        },
+        {
+            "name": "loads.wall_SDL_psf",
+            "range": [
+                0,
+                30
+            ],
+            "unit": "psf",
+            "type": "number"
+        },
+        {
+            "name": "materials.column_concrete",
+            "type": "string"
+        },
+        {
+            "name": "materials.concrete",
+            "type": "string"
+        },
+        {
+            "name": "materials.rebar",
+            "type": "string"
+        },
+        {
+            "name": "materials.steel",
+            "type": "string"
+        },
+        {
+            "name": "max_iterations",
+            "range": [
+                1,
+                100
+            ],
+            "type": "integer_or_null"
+        },
+        {
+            "name": "mip_time_limit_sec",
+            "range": [
+                1,
+                300
+            ],
+            "unit": "seconds",
+            "type": "number_or_null"
+        },
+        {
+            "name": "optimize_for",
+            "values": [
+                "weight",
+                "carbon",
+                "cost"
+            ],
+            "type": "enum"
+        },
+        {
+            "name": "pixelframe_options",
+            "type": "object_or_null"
+        },
+        {
+            "name": "size_foundations",
+            "type": "boolean"
+        },
+        {
+            "name": "skip_visualization",
+            "type": "boolean"
+        },
+        {
+            "name": "unit_system",
+            "values": [
+                "imperial",
+                "metric"
+            ],
+            "type": "enum"
+        },
+        {
+            "name": "visualization_detail",
+            "values": [
+                "minimal",
+                "full"
+            ],
+            "type": "enum"
+        }
+    ],
+    "n_tools": 28,
+    "scope_limits": [
+        "Cannot modify geometry (spans, heights, column grid) — geometry comes from Grasshopper",
+        "Cannot add or remove structural members",
+        "Cannot change load paths or framing topology",
+        "Cannot perform lateral/seismic analysis — gravity only",
+        "Cannot design connections or details",
+        "Cannot model construction staging or time-dependent effects",
+        "Cannot optimize across multiple floor types simultaneously",
+        "Single-material per member type (no hybrid steel-concrete columns)"
+    ],
+    "description": "Automated structural engineering design: gravity sizing for RC and steel buildings"
+}

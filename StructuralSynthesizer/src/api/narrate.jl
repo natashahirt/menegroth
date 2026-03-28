@@ -55,7 +55,7 @@ function agent_narrate_element(
     profile = _audience_profile(audience)
     audience_out = profile.text
 
-    diag = design_to_diagnose(design)
+    diag = get_cached_diagnose(DESIGN_CACHE, design)
     type_key = element_type * "s"
     elements = get(diag, type_key, [])
 
@@ -80,18 +80,19 @@ function agent_narrate_element(
 
     llm_narrative = _narrate_element_llm(elem, element_type, element_id, profile)
     if isnothing(llm_narrative)
-        bullets = _element_basic_fallback_bullets(diag, elem, element_type, element_id)
+        # Wire up audience-specific deterministic templates, falling back to basic bullets.
+        narrative = _deterministic_narration(profile, elem, diag, element_type, element_id,
+                                             governing, ratio, ok, mode, ec)
         return Dict{String, Any}(
-            "narrative"       => join(["- $b" for b in bullets], "\n"),
-            "bullet_points"   => bullets,
-            "narrative_source" => "deterministic_basic_fallback",
-            "llm_status"      => "unavailable",
-            "message"         => "LLM narration unavailable; returning deterministic basic facts.",
-            "recovery_hint"   => "Check CHAT_LLM_API_KEY and CHAT_LLM_BASE_URL, then retry for LLM narration.",
-            "element_type"    => element_type,
-            "element_id"      => element_id,
-            "audience"        => audience_out,
-            "key_facts"       => Dict{String, Any}(
+            "narrative"        => narrative,
+            "narrative_source" => "deterministic_template",
+            "llm_status"       => "unavailable",
+            "message"          => "LLM narration unavailable; returning deterministic narration.",
+            "recovery_hint"    => "Check CHAT_LLM_API_KEY and CHAT_LLM_BASE_URL, then retry for LLM narration.",
+            "element_type"     => element_type,
+            "element_id"       => element_id,
+            "audience"         => audience_out,
+            "key_facts"        => Dict{String, Any}(
                 "governing_check" => governing,
                 "ratio"           => ratio,
                 "ok"              => ok,
@@ -115,6 +116,50 @@ function agent_narrate_element(
             "ec_kgco2e"       => ec,
         ),
     )
+end
+
+"""
+    _deterministic_narration(profile, elem, diag, ...) -> String
+
+Dispatch to `_narrate_architect`, `_narrate_engineer`, or basic bullets depending
+on the audience profile. Extracts the extra fields needed by the template functions
+from the diagnose element dict.
+"""
+function _deterministic_narration(
+    profile, elem::Dict, diag::Dict,
+    element_type::String, element_id::Int,
+    governing::String, ratio, ok::Bool, mode::String, ec,
+)::String
+    # Extract fields the templates need from the elem dict.
+    description = get(elem, "description", "")
+    levers_raw  = get(elem, "levers", String[])
+    levers      = levers_raw isa AbstractVector ? [string(l) for l in levers_raw] : String[]
+    checks_raw  = get(elem, "checks", Any[])
+    # Normalize: diagnose may return checks as a Dict{name => data} or a Vector of Dicts.
+    checks = if checks_raw isa AbstractDict
+        [merge(Dict{String, Any}("name" => string(k)), v isa AbstractDict ? Dict{String, Any}(string(kk) => vv for (kk, vv) in v) : Dict{String, Any}()) for (k, v) in checks_raw]
+    elseif checks_raw isa AbstractVector
+        checks_raw
+    else
+        Any[]
+    end
+    section     = get(elem, "section", "")
+    scale_ref   = !isempty(string(section)) ? "the section is $section" : ""
+
+    checks_summary = if !isempty(checks)
+        join([string(get(c, "name", "?"), ":", round(Float64(get(c, "ratio", get(c, "governing_ratio", 0.0))); digits=2)) for c in checks[1:min(end, 5)]], ", ")
+    else
+        "no detailed checks available"
+    end
+
+    if profile.kind === :architect
+        return _narrate_architect(element_type, element_id, governing, ratio, ok, mode, scale_ref, ec, description, levers)
+    elseif profile.kind === :engineer
+        return _narrate_engineer(element_type, element_id, governing, ratio, ok, mode, checks_summary, ec, description, levers, checks)
+    else
+        bullets = _element_basic_fallback_bullets(diag, elem, element_type, element_id)
+        return join(["- $b" for b in bullets], "\n")
+    end
 end
 
 function _element_basic_fallback_bullets(

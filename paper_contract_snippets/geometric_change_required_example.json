@@ -1,0 +1,9 @@
+{
+    "note": "run_design only applies changes to API parameters (floor type, material, loads, sizing strategy, etc.). Geometric changes — column positions, bay dimensions, story heights, setbacks — must be made in Grasshopper.",
+    "error": "geometric_change_required",
+    "message": "This recommendation requires changing the building geometry in Grasshopper. The following are geometry properties, not API parameters: bay_width, story_height. Adjust the Rhino model or the GeometryInput component, then re-run the design from Grasshopper.",
+    "geometric_fields": [
+        "bay_width",
+        "story_height"
+    ]
+}

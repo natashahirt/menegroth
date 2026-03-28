@@ -698,7 +698,8 @@ end
 Build a Dict that describes the design configuration (parameters, methods,
 limits) in machine-readable form. This is the input-side context layer.
 """
-function _diagnose_design_context(params::DesignParameters, du::DisplayUnits)
+function _diagnose_design_context(params::DesignParameters, du::DisplayUnits;
+                                  design::Union{BuildingDesign, Nothing} = nothing)
     punit = _pressure_unit_str(du)
     lunit = _length_unit_string(du)
 
@@ -709,9 +710,18 @@ function _diagnose_design_context(params::DesignParameters, du::DisplayUnits)
     roof_LL   = try _to_display(du, :pressure, params.loads.roof_LL)   catch; floor_LL  end
 
     # Floor options
-    floor_type       = _floor_type_code(params)
-    col_type         = _column_type_code(params)
-    beam_type        = _beam_type_code(params)
+    floor_type = _floor_type_code(params)
+    col_type   = _column_type_code(params)
+    beam_type  = _beam_type_code(params)
+    # `params.columns` / `params.beams` are often unset when using prepare! defaults;
+    # infer from sized results on `BuildingDesign` (still valid after `restore!`).
+    if col_type == "unknown" && !isnothing(design)
+        inferred = _column_type_code_from_design(design)
+        inferred != "unknown" && (col_type = inferred)
+    end
+    if beam_type == "unknown" && !isnothing(design)
+        beam_type = _beam_type_code_from_design(design, params)
+    end
     analysis_method  = _analysis_method_code(params)
     defl_divisor     = _deflection_limit_divisor(params)
     punching_strat   = _punching_strategy_code(params)
@@ -839,9 +849,18 @@ function _diagnose_architectural(
     n_beams   = length(beam_dicts)
     n_fdns    = length(fdn_dicts)
 
-    floor_name  = get(_FLOOR_NAMES, _floor_type_code(params), _floor_type_code(params))
-    col_name    = get(_COLUMN_NAMES, _column_type_code(params), _column_type_code(params))
-    beam_name   = get(_BEAM_NAMES, _beam_type_code(params), _beam_type_code(params))
+    floor_name = get(_FLOOR_NAMES, _floor_type_code(params), _floor_type_code(params))
+    col_code   = _column_type_code(params)
+    if col_code == "unknown"
+        inferred = _column_type_code_from_design(design)
+        inferred != "unknown" && (col_code = inferred)
+    end
+    col_name  = get(_COLUMN_NAMES, col_code, col_code)
+    beam_code = _beam_type_code(params)
+    if beam_code == "unknown"
+        beam_code = _beam_type_code_from_design(design, params)
+    end
+    beam_name = get(_BEAM_NAMES, beam_code, beam_code)
 
     beam_clause = n_beams > 0 ? " with $n_beams $beam_name members" : ""
     narrative = "This is a $n_stories-story structure with a $floor_name and $n_cols $col_name" *
@@ -1137,7 +1156,7 @@ function design_to_diagnose(design::BuildingDesign; report_units=nothing)
     slab_dicts = _diagnose_slabs(design, struc, du)
     fdn_dicts  = _diagnose_foundations(design, du)
 
-    design_context = _diagnose_design_context(params, du)
+    design_context = _diagnose_design_context(params, du; design=design)
     agent_summary  = _diagnose_agent_summary(design, du, col_dicts, beam_dicts, slab_dicts, fdn_dicts)
     architectural  = _diagnose_architectural(design, params, du, col_dicts, beam_dicts, slab_dicts, fdn_dicts)
     constraints    = _diagnose_constraints(design, struc, params, du, col_dicts, beam_dicts, slab_dicts, fdn_dicts)

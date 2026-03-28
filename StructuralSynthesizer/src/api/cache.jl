@@ -17,10 +17,54 @@ mutable struct DesignCache
     structure::Union{BuildingStructure, Nothing}
     last_result::Union{APIOutput, APIError, Nothing}
     last_design::Union{BuildingDesign, Nothing}
+    last_diagnose::Union{Dict{String, Any}, Nothing}
+    diagnose_design_id::UInt64
+    lock::ReentrantLock
 end
 
 """Create an empty `DesignCache` with no stored geometry or results."""
-DesignCache() = DesignCache("", nothing, nothing, nothing, nothing)
+DesignCache() = DesignCache("", nothing, nothing, nothing, nothing, nothing, UInt64(0), ReentrantLock())
+
+"""Thread-safe read from the design cache."""
+function with_cache_read(f, cache::DesignCache)
+    lock(cache.lock) do
+        f(cache)
+    end
+end
+
+"""Thread-safe write to the design cache."""
+function with_cache_write!(f, cache::DesignCache)
+    lock(cache.lock) do
+        f(cache)
+    end
+end
+
+"""
+    get_cached_diagnose(cache::DesignCache, design::BuildingDesign; kwargs...) -> Dict
+
+Return the cached diagnose result if the design hasn't changed, otherwise
+recompute and cache it.
+"""
+function get_cached_diagnose(cache::DesignCache, design::BuildingDesign; kwargs...)
+    design_id = objectid(design)
+    lock(cache.lock) do
+        if !isnothing(cache.last_diagnose) && cache.diagnose_design_id == design_id
+            return cache.last_diagnose
+        end
+        result = design_to_diagnose(design; kwargs...)
+        cache.last_diagnose = result
+        cache.diagnose_design_id = design_id
+        return result
+    end
+end
+
+"""Invalidate the cached diagnose result (call when design changes)."""
+function invalidate_diagnose_cache!(cache::DesignCache)
+    lock(cache.lock) do
+        cache.last_diagnose = nothing
+        cache.diagnose_design_id = UInt64(0)
+    end
+end
 
 """
     compute_geometry_hash(input::APIInput) -> String

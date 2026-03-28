@@ -86,11 +86,14 @@ end
 
 const MAX_CONTEXT_TOKENS = 120_000
 
+using OrderedCollections: OrderedDict
+
 # Server-side conversation history keyed by session_id (typically geometry hash).
-const CHAT_HISTORY      = Dict{String, Vector{Dict{String, String}}}()
+# OrderedDict preserves insertion order for correct LRU eviction via first(keys(...)).
+const CHAT_HISTORY      = OrderedDict{String, Vector{Dict{String, String}}}()
 const CHAT_HISTORY_LOCK = ReentrantLock()
-const CHAT_HISTORY_MAX_SESSIONS = 20  # evict LRU when cap reached
-const CHAT_CLARIFICATION_KEYS = Dict{String, Set{String}}()
+const CHAT_HISTORY_MAX_SESSIONS = 20
+const CHAT_CLARIFICATION_KEYS = OrderedDict{String, Set{String}}()
 
 # Delimiters that the LLM is instructed to wrap its next-steps block in.
 # Keep these unique enough that the LLM won't produce them accidentally.
@@ -133,10 +136,16 @@ end
 
 # ─── Session history ──────────────────────────────────────────────────────────
 
-"""Return a copy of stored messages for `session_id`, or an empty vector."""
+"""Return a copy of stored messages for `session_id`, or an empty vector.
+Marks the session as recently used (LRU touch)."""
 function _get_history(session_id::String)
     lock(CHAT_HISTORY_LOCK) do
-        copy(get(CHAT_HISTORY, session_id, Dict{String, String}[]))
+        msgs = get(CHAT_HISTORY, session_id, nothing)
+        isnothing(msgs) && return Dict{String, String}[]
+        # Touch: move to end of OrderedDict for LRU freshness.
+        delete!(CHAT_HISTORY, session_id)
+        CHAT_HISTORY[session_id] = msgs
+        return copy(msgs)
     end
 end
 
@@ -148,13 +157,18 @@ Append one message to the session history. Evicts the oldest session when the
 """
 function _append_history!(session_id::String, role::String, content::String)
     lock(CHAT_HISTORY_LOCK) do
-        if !haskey(CHAT_HISTORY, session_id)
+        if haskey(CHAT_HISTORY, session_id)
+            # Move to end for LRU freshness.
+            msgs = CHAT_HISTORY[session_id]
+            delete!(CHAT_HISTORY, session_id)
+            push!(msgs, Dict("role" => role, "content" => content))
+            CHAT_HISTORY[session_id] = msgs
+        else
             if length(CHAT_HISTORY) >= CHAT_HISTORY_MAX_SESSIONS
                 delete!(CHAT_HISTORY, first(keys(CHAT_HISTORY)))
             end
-            CHAT_HISTORY[session_id] = Dict{String, String}[]
+            CHAT_HISTORY[session_id] = [Dict("role" => role, "content" => content)]
         end
-        push!(CHAT_HISTORY[session_id], Dict("role" => role, "content" => content))
     end
 end
 
@@ -228,138 +242,86 @@ after the bracket as additional context. Incorporate the selection into your rea
 
 const _TOOLS_GUIDANCE = """
 
-TOOLS — WHAT YOU CAN AND CANNOT DO:
-You have access to structural tools via POST /chat/action. Use them to ground recommendations in computed results rather than estimates.
+TOOLS (descriptions in tool specs — consult use_when for details):
+  Orient:      get_situation_card (FIRST), get_building_summary, get_current_params, get_design_history
+  Diagnose:    get_diagnose_summary (FIRST), get_diagnose, query_elements, get_solver_trace, get_lever_map
+  Explore:     run_experiment (FAST), validate_params → run_design, compare_designs, suggest_next_action
+  Communicate: narrate_element, narrate_comparison, get_result_summary, get_condensed_result, clarify_user_intent
+  Reference:   explain_field, get_implemented_provisions, get_applicability, get_provision_rationale
+  Memory:      record_insight (after every design), get_session_insights (before recommending)
+  Experiments: list_experiments, batch_experiments
 
-ORIENTATION (understand the building):
-- get_situation_card: PREFERRED FIRST CALL. Single-call snapshot: geometry overview + resolved params + results health + session history + trace availability. Works even with no geometry/design (returns what's available).
-- get_building_summary: Detailed geometry only (stories, spans, regularity). Use when you need more geometry detail than the situation card provides.
-- get_current_params: Full resolved parameter set. Use when you need parameter detail beyond the situation card.
-- get_design_history: Past designs in this session (params, pass/fail, critical ratio, EC). Prevents re-suggesting things already tried.
+TOOL SELECTION (match intent → sequence):
+  Start of conversation     → get_situation_card; if no design yet → baseline per BASELINE DESIGN block
+  "Why is X failing?"       → get_diagnose_summary → get_provision_rationale(governing_check) → narrate_element
+  "What should I change?"   → get_diagnose_summary → suggest_next_action → validate_params
+  "Would bigger col help?"  → run_experiment(punching/pm_column)
+  "Try changing X"          → run_experiment → validate_params → run_design → compare_designs (if ≥2 designs)
+  "Explain this"            → narrate_element / narrate_comparison
+  "Compare" / "Did it help?"→ compare_designs + get_design_history
+  "What does X do?"         → explain_field(X) — returns schema + rationale + related structural checks
+  "Why does the code say…?" → get_provision_rationale(section_or_check) — mechanism, philosophy, misconceptions
+  Always: validate_params before run_design. record_insight after each design. get_session_insights before recommending.
 
-DIAGNOSIS (what's wrong and why — progressive disclosure):
-- get_diagnose_summary: PREFERRED FIRST DIAGNOSTIC. Lightweight overview: counts by type, top-5 critical elements, failure breakdown by check. ~200 tokens.
-- get_diagnose: FULL per-element diagnostics — governing checks, demand/capacity, code clauses, levers, embodied carbon, recommendations. Use after get_diagnose_summary when you need detail. Optional arg: units ("imperial"|"metric").
-- query_elements: Filter elements by type, ratio range, governing_check, story, or pass/fail. Use to drill into specific failures.
-- get_solver_trace: Tiered solver decision trace — WHY the solver chose sections, fell back, converged/diverged. Tiers: "summary" (pipeline overview), "failures" (default — all failures/fallbacks), "decisions" (+ iteration/decision detail), "full" (everything). Optional filters: element (e.g. "slab_2"), layer (e.g. "optimizer").
-- get_lever_map: Which parameters/geometry changes affect a given failure check. ALWAYS consult before recommending a fix. Arg: check (e.g. "punching_shear", "deflection").
-- get_implemented_provisions: List of all design code clauses the solver implements. Optional arg: code (e.g., "ACI_318").
-- explain_field: Definition, units, valid values, and related checks for any API parameter. Arg: field (e.g., "deflection_limit").
-- get_applicability: DDM/EFM/FEA eligibility rules for the current geometry.
+CLIENT GEOMETRY VS SERVER TOOLS:
+  POST /chat may include building_geometry JSON and/or geometry_summary narrative — use them.
+  get_situation_card.has_geometry only reflects server cache from POST /design, NOT prompt geometry.
+  For span_stats, slab_panel_plan, member counts: server cache needed → suggest Design run.
 
-EXPLORATION (what to try):
-- run_experiment: INSTANT micro-experiment on a single element using cached data. Types: "punching" (vary column size/slab thickness), "pm_column" (try alt RC section), "deflection" (change limit), "catalog_screen" (screen multiple sizes). Much faster than run_design — use to narrow down options first.
-- list_experiments: See available experiment types and their argument schemas.
-- batch_experiments: Run multiple experiments in one call (e.g. screen 5 column sizes).
-- validate_params: Check a params patch for compatibility violations. Fast, no geometry needed. Always call this before run_design.
-- run_design: FAST PARAMETER-ONLY what-if check (skips visualization, max 2 iterations, 20 s MIP cap, 60 s total timeout). Use after narrowing with experiments.
-- compare_designs: Delta table between two designs from history (pass/fail, ratios, EC, changed governing checks). Args: index_a, index_b.
-- suggest_next_action: Ranked parameter changes for a goal. Arg: goal ("fix_failures"|"reduce_column_size"|"reduce_slab_thickness"|"reduce_ec").
+EVIDENCE-FIRST PROTOCOL (mandatory):
+  1. OBSERVE — call a diagnostic tool (get_diagnose_summary, query_elements, get_solver_trace).
+  2. CITE — reference specific ratios, check names, trace events.
+  3. CONSULT — get_lever_map(check=<governing_check>) for actionable parameters.
+  4. RECOMMEND — grounded in evidence from steps 1–3.
+  5. VERIFY — validate_params → run_design → compare_designs.
+  NEVER skip 1–3 for numerical claims. If no design exists, discuss qualitatively only.
 
-COMMUNICATION (explain to the user):
-- narrate_element: Plain-English explanation of one element's design. Args: element_type, element_id, audience ("architect"|"engineer"|"custom").
-- narrate_comparison: Plain-English comparison of two designs. Args: index_a, index_b, audience ("architect"|"engineer"|"custom").
-- get_result_summary: Per-element JSON summary (check ratios, sections, failures).
-- get_condensed_result: ~500-token plain-text result summary.
-- clarify_user_intent: Structured multiple-choice clarification payload for the UI.
+GEOMETRY VS PARAMETERS (mandatory):
+  GEOMETRY (Grasshopper): column positions, spans, story heights, plan shape — CANNOT change via API.
+  PARAMETERS (API): floor_type, materials, loads, method, sizing — CAN change via run_design.
+  Geometric recommendations → tell user what to change in Grasshopper; do NOT call run_design with geometric keys.
 
-TOOL SELECTION POLICY — match user intent to tool sequence:
-  START OF CONVERSATION            -> get_situation_card (always, before anything else). If no design in session yet and params are valid, baseline per BASELINE DESIGN block (validate_params → run_design and/or ask user).
-  "What is this building?"         -> get_situation_card covers this; get_building_summary if more detail needed
-  "Why is element X failing?"      -> get_diagnose_summary → query_elements(ok=false) → narrate_element
-  "Why did the solver pick that?"  -> get_solver_trace(tier=failures), drill with tier=decisions or element filter
-  "What should I change?"          -> get_diagnose_summary → suggest_next_action(goal) → validate_params
-  "Would a bigger column help?"   -> run_experiment(type=punching or pm_column) for instant check
-  "Try changing X"                 -> run_experiment first to preview → validate_params → run_design → compare_designs only if get_design_history has ≥2 entries
-  "Explain this to me"             -> narrate_element or narrate_comparison
-  "Did it help?" / "Compare"       -> compare_designs + get_design_history
-  "Does the solver check X?"       -> get_implemented_provisions
-  "What does parameter Y do?"      -> explain_field(Y)
-  Always start with get_situation_card. Then get_diagnose_summary for failure overview.
-  Use get_diagnose or query_elements only when you need specific element detail.
-  Use get_solver_trace when the user needs to understand WHY, not just WHAT.
-  Always validate_params before run_design. compare_designs is for deltas between two stored session designs — not for a "before/after" unless history has at least two entries.
-  After each design iteration, use record_insight to capture what you learned.
-  Before making recommendations, check get_session_insights for accumulated learnings.
+GEOMETRY HASH / STALE CACHE:
+  If GEOMETRY_CONTEXT.geometry_stale is true, cached tools describe the last solved model, not current geometry.
+  Explain directional effects qualitatively; do NOT invent numerical results for unsolved geometry.
+  get_design_history is valid: entries include geometry_hash for cross-geometry awareness.
 
-GEOMETRY HASH / STALE CACHE (when the client sends client_geometry_hash on POST /chat):
-- If geometry_stale is true (or geometry_context.aligned is false), the server's cached structure/design snapshot and element-level tools reflect the last POST /design geometry, not necessarily the Grasshopper model in BUILDING GEOMETRY.
-- get_design_history is still valid: every entry includes geometry_hash. You may compare two runs on the same hash, or contrast summary metrics across geometry changes — use compare_designs and read cross_geometry_comparison / comparison_note; do not treat cross-geometry deltas as a same-model parameter experiment.
-- Do not predict element-level behavior for the current Grasshopper model from stale cached diagnostics; say a Design run is needed for fresh solver output on that model.
-- If geometry_context.aligned is null, the client did not send a hash — treat cached results as authoritative for the server only; still prefer tool calls over guessing.
+EPISTEMIC BOUNDARY:
+  You lack direct code text (ACI, AISC, ASCE 7). All code logic is in the solver.
+  Quote code_clause / limit_state_description from tool results. Do NOT invent section numbers or formulas.
+  Use get_implemented_provisions to check code coverage. If unsure, say so.
 
-EVIDENCE-FIRST REASONING:
-Before making any recommendation, you MUST have tool evidence. Follow this protocol:
-  1. OBSERVE: Call a diagnostic tool (get_diagnose_summary, query_elements, get_solver_trace) to get data.
-  2. CITE: Reference specific ratios, check names, or trace events in your explanation.
-  3. CONSULT LEVERS: Call get_lever_map(check=<governing_check>) to see which parameters actually affect this failure.
-  4. RECOMMEND: Suggest a parameter change from the lever map, grounded in the evidence.
-  5. VERIFY: Use validate_params → run_design to confirm. Use compare_designs only when two designs exist in get_design_history.
-  NEVER skip steps 1–3 and jump to recommendations based on general structural knowledge.
-  If you catch yourself saying "typically" or "usually" without citing a tool result, stop and call a tool first.
-
-EPISTEMIC BOUNDARY — WHAT YOU KNOW AND DO NOT KNOW:
-You do NOT have direct access to ACI 318, AISC 360, ASCE 7, IBC, or any building-code text.
-All code-based logic is implemented inside the deterministic structural solver.
-Your role is to INTERPRET and COMMUNICATE solver outputs, not to independently derive or cite code provisions.
-
-When referencing a code check:
-  1. If a tool result includes a code_clause field, quote it verbatim (e.g., "The solver reports this check per ACI 318-19 §22.4.2").
-  2. If a tool result includes a limit_state_description, use that text.
-  3. Otherwise, say "the solver applies [check name] per the relevant code provision" — do NOT invent a section number.
-  4. NEVER fabricate equations, load-combination formulas, or clause numbers.
-  5. Use get_implemented_provisions to check whether a specific code clause is implemented before claiming it is or is not.
-  6. If the user asks for code-text knowledge you do not have, say so and suggest consulting the standard directly.
-
-SOLVER SCOPE LIMITS — WHAT THE SYSTEM CANNOT DO:
-The solver has specific boundaries. Do NOT suggest actions outside these:
-  ✗ Lateral load analysis (wind, seismic) — gravity framing only in current version.
-  ✗ Connection design — member sizing only; no bolted/welded joint checks.
-  ✗ Progressive collapse or blast loading.
-  ✗ Serviceability vibration checks (walking, rhythmic).
-  ✗ Pre/post-tensioned concrete — mild reinforcement only.
-  ✗ Composite steel deck slabs — concrete flat plate/flat slab/one-way/vault only.
-  ✗ Timber or masonry structural systems.
-  ✗ Geometry modification — column positions, spans, story heights are set in Grasshopper.
-  ✗ Multi-objective Pareto optimization — single objective (weight, carbon, or cost).
-  ✗ Non-rectangular column grids for DDM/EFM — use FEA for irregular layouts.
-  If the user asks about any of these, clearly state it is outside the current solver scope.
-
-CRITICAL CONSTRAINT — GEOMETRY VS. PARAMETERS:
-The system has two completely separate layers:
-  1. GEOMETRY (Grasshopper/Rhino): column positions, bay spans, story heights, plan shape, number of columns — these are defined in the CAD model and CANNOT be changed via run_design or any API call.
-  2. PARAMETERS (API): floor system type, analysis method, material specs, loads, sizing strategy, iteration limits — these CAN be changed via run_design.
-
-When you recommend a GEOMETRIC change (e.g., "add columns", "reduce column spacing", "shorten spans", "change story height", "add a shear wall"), you MUST:
-  1. Clearly tell the user it is a geometry change.
-  2. Explain exactly what to change in the Grasshopper model (which GeometryInput parameter, which Rhino element, etc.).
-  3. Do NOT call run_design with geometric keys — it will be rejected.
-
-When you recommend a PARAMETER change (floor_type, column_type, analysis method, loads, etc.), you MAY call run_design to show a quick result. Always validate_params first.
+SCOPE LIMITS — the solver CANNOT:
+  ✗ Lateral/seismic analysis (gravity only)  ✗ Connection design  ✗ Progressive collapse/blast
+  ✗ Vibration serviceability  ✗ PT concrete  ✗ Composite deck slabs  ✗ Timber/masonry
+  ✗ Geometry modification  ✗ Multi-objective Pareto  ✗ Non-rectangular grids for DDM/EFM (use FEA)
 """
 
 # Appended to both design and results preambles — prevents fabricated "reduced from X to Y" when no prior design exists in session.
 const _SESSION_DESIGN_HISTORY_RULE = """
-SESSION DESIGN HISTORY — NO FABRICATED BEFORE/AFTER:
-- get_situation_card includes session.n_designs and session.can_compare_deltas (true only when at least two designs are stored this session). get_design_history returns the list and count.
-- NEVER invent a "previous" embodied carbon, rebar weight, concrete volume, or pass/fail. NEVER say "reduced from X to Y", "down from", "improved vs the prior run", or "compared to baseline" unless get_design_history has at least TWO entries OR compare_designs was invoked with two valid indices and you cite those numbers.
-- If n_designs is 0 or 1, report this run only: absolute metrics from tool output (e.g. health.embodied_carbon). Say clearly that there is no earlier design in this session to compare against if the user has not run multiple stored designs.
-- A full Grasshopper DesignRun may not have executed yet; do not treat the chat as "iteration 2" unless session history shows multiple completed designs.
-- Each history entry has geometry_hash. Prefer comparing entries that share the same hash for parameter-only narratives. If the user asks about an older model vs a new one, compare_designs is allowed — explicitly state when cross_geometry_comparison is true and avoid implying element-level equivalence.
-- When geometry_context.geometry_stale is true, cached diagnostics do not describe the current BUILDING GEOMETRY until a Design run completes; history remains useful for past runs and labeled cross-geometry contrasts.
+SESSION HISTORY (no fabricated before/after):
+- NEVER say "reduced from X to Y" or "improved vs baseline" unless get_design_history has ≥2 entries or compare_designs was called with valid indices.
+- n_designs=0|1 → report absolute metrics only; no comparison language.
+- Entries include geometry_hash. Prefer same-hash comparisons; flag cross_geometry_comparison explicitly.
+- Stale geometry → cached diagnostics describe last solved model, not current geometry.
 """
 
 # Design mode only — establishes a real baseline before iteration language.
 const _DESIGN_MODE_BASELINE_WORKFLOW = """
-BASELINE DESIGN (this mode only):
-- After get_situation_card, if there is no completed design in this API session yet (has_design is false, or session.n_designs is 0), you do not have solver-backed results to cite. Establish a baseline before discussing "changes" or optimizations.
-- If the current parameters are valid (call validate_params; no blocking errors), prefer one of: (1) run run_design to create a baseline result for the session, or (2) ask the user once before running, for example: "Do you want to run a design with these parameters now to get a baseline result, or keep adjusting parameters in chat first?" If they choose to run, use validate_params then run_design.
-- Once a baseline exists (n_designs >= 1), you can discuss follow-up runs and use compare_designs only when can_compare_deltas is true.
+BASELINE DESIGN:
+- No design yet (n_designs=0) → no solver ratios/EC to cite. Use prompt geometry qualitatively.
+- BUILDING GEOMETRY in the prompt (JSON/narrative) = user's model. Do NOT say you "cannot see" it.
+  Server-side analytics (slab_panel_plan, member counts) require POST /design.
+- Valid params → either run_design for baseline, or ask user first.
+- Once n_designs≥1, use compare_designs when can_compare_deltas is true.
 """
 
 const _DESIGN_SYSTEM_PREAMBLE = """
 You are a structural engineering design assistant for the Menegroth automated design system.
 Your role is to help the user choose appropriate design parameters for their building.
+
+GEOMETRY IN THE PROMPT:
+- When BUILDING GEOMETRY appears below, the client may send (1) structured `building_geometry` JSON — same schema as Design Run geometry (vertices, edges, supports, faces, units), plus (2) optional `geometry_summary` narrative. Parse and reason over the structured fields when present; use the narrative as a supplement. This is separate from get_situation_card.has_geometry, which only reflects whether the server has ingested the model via POST /design.
 
 IMPORTANT RULES:
 - All code provisions (ACI 318, AISC 360, ASCE 7) are enforced by the solver — rely on tool outputs for code-level detail. Do not invent or cite specific code clauses unless a tool result provides them.
@@ -401,6 +363,9 @@ const _RESULTS_SYSTEM_PREAMBLE = """
 You are a structural engineering results analyst for the Menegroth automated design system.
 Your role is to help the user understand their building's design results.
 
+GEOMETRY IN THE PROMPT:
+- If BUILDING GEOMETRY appears in this chat's system prompt (structured JSON and/or narrative), treat it as the user's model — same source as Design Run when the client sends `building_geometry`. It may differ from server-cached geometry when GEOMETRY_CONTEXT.geometry_stale is true — follow GEOMETRY_CONTEXT and tool payloads, not assumptions.
+
 IMPORTANT RULES:
 - Explain structural engineering concepts clearly for the user's level of expertise.
 - Reference specific check ratios, element IDs, and failure modes from the results data.
@@ -420,6 +385,180 @@ $_NEXT_QUESTIONS_INSTRUCTION
 DESIGN RESULTS SUMMARY:
 """
 
+"""Max characters of structured geometry JSON in the chat system prompt (limits context size)."""
+const _MAX_CHAT_BUILDING_GEOMETRY_JSON_CHARS = 120_000
+
+"""
+    _parse_chat_building_geometry(raw) -> Union{Nothing, Dict{String, Any}}
+
+Normalize `building_geometry` or `geometry` from POST /chat into a string-keyed dict. Expected
+shape matches the geometry section of POST /design (Grasshopper `BuildingGeometry.ToJson()`):
+`units`, `vertices`, `edges`::{beams,columns,braces}, `supports`, `faces`::{category -> polygons}, optional `stories_z`.
+"""
+function _parse_chat_building_geometry(raw)::Union{Nothing, Dict{String, Any}}
+    isnothing(raw) && return nothing
+    if raw isa Dict{String, Any}
+        return raw
+    end
+    if raw isa AbstractDict
+        return Dict{String, Any}(string(k) => v for (k, v) in pairs(raw))
+    end
+    try
+        d = JSON3.read(JSON3.write(raw))
+        d isa AbstractDict || return nothing
+        return Dict{String, Any}(string(k) => v for (k, v) in pairs(d))
+    catch
+        return nothing
+    end
+end
+
+"""Counts for quick orientation before scanning full vertex/edge arrays."""
+function _chat_structured_geometry_stats(g::Dict{String, Any})::Dict{String, Any}
+    verts = get(g, "vertices", [])
+    nv = verts isa AbstractVector ? length(verts) : 0
+    eg = get(g, "edges", nothing)
+    nb, nc, nz = 0, 0, 0
+    if eg isa AbstractDict
+        b = get(eg, "beams", [])
+        c = get(eg, "columns", [])
+        z = get(eg, "braces", [])
+        nb = b isa AbstractVector ? length(b) : 0
+        nc = c isa AbstractVector ? length(c) : 0
+        nz = z isa AbstractVector ? length(z) : 0
+    end
+    sup = get(g, "supports", [])
+    ns = sup isa AbstractVector ? length(sup) : 0
+    sz = get(g, "stories_z", [])
+    nzs = sz isa AbstractVector ? length(sz) : 0
+    nfaces = 0
+    try
+        faces = get(g, "faces", nothing)
+        if faces isa AbstractDict
+            for (_, polys) in pairs(faces)
+                polys isa AbstractVector && (nfaces += length(polys))
+            end
+        end
+    catch
+    end
+    return Dict{String, Any}(
+        "units"                 => get(g, "units", ""),
+        "n_vertices"            => nv,
+        "n_beam_edges"          => nb,
+        "n_column_edges"        => nc,
+        "n_brace_edges"         => nz,
+        "n_supports"            => ns,
+        "n_stories_z_entries"   => nzs,
+        "n_face_polygon_loops"  => nfaces,
+    )
+end
+
+"""
+Append structured design geometry JSON and/or the optional human Summary line to the system prompt.
+Structured data is the same model the client sends to POST /design (without `params`).
+"""
+function _append_chat_building_geometry_sections!(
+    parts::Vector,
+    geometry_summary::String,
+    structured::Union{Nothing, Dict{String, Any}},
+)
+    if !isnothing(structured)
+        stats = _chat_structured_geometry_stats(structured)
+        json_txt = JSON3.write(structured)
+        push!(parts, "\n\nBUILDING GEOMETRY (structured — same JSON as Design Run geometry, without params):\n")
+        push!(parts, "Schema: units (string); vertices: array of [x,y,z] in those units; edges: {beams, columns, braces} arrays of [i,j] 1-based vertex indices; supports: vertex indices; faces: object mapping category (e.g. floor, roof, grade) to arrays of polygon loops (each loop: array of [x,y,z] points). Optional stories_z if the client sends it.\n")
+        push!(parts, "Quick counts: ", JSON3.write(stats), "\n")
+        if length(json_txt) > _MAX_CHAT_BUILDING_GEOMETRY_JSON_CHARS
+            push!(parts, "Full geometry JSON omitted (length ", string(length(json_txt)), " chars > limit ", string(_MAX_CHAT_BUILDING_GEOMETRY_JSON_CHARS), "). Use the counts above, the narrative summary if present, or run Design so the server caches the structure.\n")
+        else
+            push!(parts, "Full geometry JSON:\n", json_txt, "\n")
+        end
+    end
+    if !isempty(strip(geometry_summary))
+        label = isnothing(structured) ? "BUILDING GEOMETRY" : "BUILDING GEOMETRY (narrative summary — same model as structured block above when both are present)"
+        push!(parts, "\n\n", label, ":\n", geometry_summary)
+    end
+    return nothing
+end
+
+"""
+    _api_input_geometry_only_from_chat_dict(g) -> APIInput
+
+Build an `APIInput` from chat `building_geometry` dict using default `params`, for hashing only.
+Matches the geometry slice of POST /design / Grasshopper `BuildingGeometry.ToJson()`.
+"""
+function _api_input_geometry_only_from_chat_dict(g::Dict{String, Any})::APIInput
+    edges_in = get(g, "edges", nothing)
+    edges_blob = if edges_in isa AbstractDict
+        Dict{String, Any}(
+            "beams"   => collect(Any, get(edges_in, "beams", [])),
+            "columns" => collect(Any, get(edges_in, "columns", [])),
+            "braces"  => collect(Any, get(edges_in, "braces", [])),
+        )
+    else
+        Dict{String, Any}("beams" => Any[], "columns" => Any[], "braces" => Any[])
+    end
+    faces_in = get(g, "faces", nothing)
+    faces_blob = if faces_in isa AbstractDict
+        Dict{String, Any}(string(k) => v for (k, v) in pairs(faces_in))
+    else
+        Dict{String, Any}()
+    end
+    blob = Dict{String, Any}(
+        "units"      => string(get(g, "units", "feet")),
+        "vertices"   => get(g, "vertices", Any[]),
+        "edges"      => edges_blob,
+        "supports"   => get(g, "supports", Any[]),
+        "stories_z"  => get(g, "stories_z", Any[]),
+        "faces"      => faces_blob,
+        "params"     => Dict{String, Any}(),
+    )
+    return JSON3.read(JSON3.write(blob), APIInput)
+end
+
+"""SHA-256 geometry hash for chat `building_geometry`, or `nothing` if parsing fails."""
+function _try_geometry_hash_from_chat_dict(g::Dict{String, Any})::Union{Nothing, String}
+    try
+        return compute_geometry_hash(_api_input_geometry_only_from_chat_dict(g))
+    catch
+        return nothing
+    end
+end
+
+"""
+Resolve which geometry fingerprint to compare to the server: prefer hash derived from structured
+`building_geometry` when available; otherwise `client_geometry_hash`.
+Returns `(resolved_hash_or_nothing, source, derived_or_nothing)` where `derived_or_nothing` is
+the hash from structured JSON when that was attempted (even if resolution fell back to client).
+"""
+function _chat_geometry_resolution(
+    structured::Union{Nothing, Dict{String, Any}},
+    client_geometry_hash::String,
+)::Tuple{Union{Nothing, String}, String, Union{Nothing, String}}
+    derived::Union{Nothing, String} = nothing
+    if !isnothing(structured)
+        derived = _try_geometry_hash_from_chat_dict(structured)
+        if !isnothing(derived) && !isempty(derived)
+            return (derived, "building_geometry", derived)
+        end
+    end
+    ch = strip(client_geometry_hash)
+    !isempty(ch) && return (ch, "client_geometry_hash", derived)
+    return (nothing, "none", derived)
+end
+
+"""True when chat-resolved geometry (body or client hash) disagrees with the server's last POST /design hash."""
+function _geometry_prompt_stale(
+    resolved::Union{Nothing, String},
+    client_geometry_hash::String,
+)::Bool
+    srv = strip(DESIGN_CACHE.geometry_hash)
+    isempty(srv) && return false
+    if !isnothing(resolved) && !isempty(resolved)
+        return resolved != srv
+    end
+    return _geometry_stale_for_client(client_geometry_hash)
+end
+
 """True when client hash is present and differs from the server's cached POST /design geometry."""
 function _geometry_stale_for_client(client_geometry_hash::String)::Bool
     cli = strip(client_geometry_hash)
@@ -438,30 +577,60 @@ function _attach_geometry_alignment!(result::Dict{String, Any}, args::Dict{Strin
     return result
 end
 
-function _build_system_prompt(mode::String, params_json, geometry_summary::String, client_geometry_hash::String = "")
-    stale = _geometry_stale_for_client(client_geometry_hash)
+function _build_system_prompt(
+    mode::String,
+    params_json,
+    geometry_summary::String,
+    client_geometry_hash::String = "",
+    structured_geometry::Union{Nothing, Dict{String, Any}} = nothing,
+)
+    resolved_h, res_src, derived_h = _chat_geometry_resolution(structured_geometry, client_geometry_hash)
+    stale = _geometry_prompt_stale(resolved_h, client_geometry_hash)
+    srv = strip(DESIGN_CACHE.geometry_hash)
+    aligned = if isempty(srv) || isnothing(resolved_h) || isempty(resolved_h)
+        "unknown"
+    elseif resolved_h == srv
+        "yes"
+    else
+        "no"
+    end
+    derived_str = isnothing(derived_h) ? "" : derived_h
+    resolved_str = isnothing(resolved_h) ? "" : resolved_h
+    geo_ctx = Dict{String, Any}(
+        "server_cached_geometry_hash"           => srv,
+        "client_geometry_hash"                    => strip(client_geometry_hash),
+        "derived_from_building_geometry_hash"   => derived_str,
+        "resolved_chat_geometry_hash"           => resolved_str,
+        "resolved_source"                       => res_src,
+        "aligned_with_server"                   => aligned,
+        "geometry_stale"                        => stale,
+    )
+    geo_ctx_block = string("\n\nGEOMETRY_CONTEXT (authoritative for this turn — compare to BUILDING GEOMETRY below):\n", JSON3.write(geo_ctx), "\n")
+
     stale_note = if stale
         cli = strip(client_geometry_hash)
-        srv = strip(DESIGN_CACHE.geometry_hash)
+        res_show = !isempty(resolved_str) ? resolved_str : cli
+        how = res_src == "building_geometry" ? "derived from structured building_geometry (same hash as POST /design geometry)" :
+              res_src == "client_geometry_hash" ? "from client_geometry_hash" :
+              "could not fully resolve from body; stale detection used client_geometry_hash fallback if present"
         """
 
 GEOMETRY / CACHE MISMATCH (MANDATORY):
-- client_geometry_hash (current Grasshopper model): $cli
+- Resolved geometry fingerprint for this chat request ($how): $res_show
 - server_cached_geometry_hash (last completed POST /design on this server): $srv
-The BUILDING GEOMETRY section below describes the CURRENT Grasshopper model.
+The BUILDING GEOMETRY section(s) below describe the CURRENT client model when present (structured JSON and/or narrative).
 Any \"LATEST RESULTS\" or \"DETAILED RESULTS\" section would refer to the SERVER hash above — a different model. Those sections are OMITTED from this prompt because they would mislead you.
-Do not estimate forces, utilization ratios, pass/fail, embodied carbon, or element-level behavior for the current geometry using old cache data. Tell the user to run Design in Grasshopper so POST /design refreshes the server for this geometry. You may still discuss parameters, scope, qualitative structural concepts, and past runs via get_design_history / compare_designs (use geometry_hash and comparison_note).
+Do not estimate forces, utilization ratios, pass/fail, embodied carbon, or element-level behavior for the current geometry using old cache data. Tell the user to run Design in Grasshopper so POST /design refreshes the server for this geometry.
+You SHOULD give short, mechanism-level expectations for how the design problem may shift with this geometry change (spans, columns, stories, panel shapes) — without fabricated numbers. You may still discuss parameters, scope, and past runs via get_design_history / compare_designs (use geometry_hash and comparison_note).
 """
     else
         ""
     end
 
     if mode == "design"
-        parts = [_DESIGN_SYSTEM_PREAMBLE]
+        parts = [_DESIGN_SYSTEM_PREAMBLE, geo_ctx_block]
         !isempty(stale_note) && push!(parts, stale_note)
-        if !isempty(geometry_summary)
-            push!(parts, "\n\nBUILDING GEOMETRY:\n", geometry_summary)
-        end
+        _append_chat_building_geometry_sections!(parts, geometry_summary, structured_geometry)
         if !isnothing(params_json) && !isempty(string(params_json))
             push!(parts, "\n\nCURRENT PARAMETERS:\n", JSON3.write(params_json))
         end
@@ -470,15 +639,13 @@ Do not estimate forces, utilization ratios, pass/fail, embodied carbon, or eleme
         end
         return join(parts)
     elseif mode == "results"
-        parts = [_RESULTS_SYSTEM_PREAMBLE]
+        parts = [_RESULTS_SYSTEM_PREAMBLE, geo_ctx_block]
         !isempty(stale_note) && push!(parts, stale_note)
         if !stale && !isnothing(DESIGN_CACHE.last_design)
             push!(parts, condense_result(DESIGN_CACHE.last_design))
             push!(parts, "\n\nDETAILED RESULTS:\n", JSON3.write(report_summary_json(DESIGN_CACHE.last_design)))
         end
-        if !isempty(geometry_summary)
-            push!(parts, "\n\nBUILDING GEOMETRY:\n", geometry_summary)
-        end
+        _append_chat_building_geometry_sections!(parts, geometry_summary, structured_geometry)
         if !isnothing(params_json) && !isempty(string(params_json))
             push!(parts, "\n\nDESIGN PARAMETERS:\n", JSON3.write(params_json))
         end
@@ -498,26 +665,49 @@ embedded in `full_text`. Returns an empty vector if the block is absent or
 malformed.
 """
 function _extract_suggestions(full_text::String)::Vector{String}
-    start_idx = findfirst(_SUGGESTIONS_START, full_text)
-    isnothing(start_idx) && return String[]
-    end_idx = findfirst(_SUGGESTIONS_END, full_text)
-    isnothing(end_idx) && return String[]
+    # Try exact delimiters first, then case/whitespace-insensitive fallback.
+    block = _extract_delimited_block(full_text, _SUGGESTIONS_START, _SUGGESTIONS_END)
+    if isnothing(block)
+        block = _extract_delimited_block_fuzzy(full_text, "NEXT QUESTIONS", "END")
+    end
+    isnothing(block) && return String[]
 
-    block_start = last(start_idx) + 1
-    block_end   = first(end_idx) - 1
-    block_start > block_end && return String[]
-
-    block = full_text[block_start:block_end]
     suggestions = String[]
     for line in split(block, '\n')
         s = strip(line)
         isempty(s) && continue
-        if startswith(s, "•") || startswith(s, "-") || startswith(s, "*")
-            item = strip(lstrip(s, ['•', '-', '*', ' ']))
-            isempty(item) || push!(suggestions, item)
-        end
+        # Accept bullet markers: •, -, *, numbered (1.), or bare text lines.
+        s = replace(s, r"^(?:[•\-\*]\s*|\d+\.\s*)" => "")
+        s = strip(s)
+        isempty(s) || push!(suggestions, s)
     end
     return suggestions
+end
+
+"""Extract text between exact start/end delimiters, or nothing."""
+function _extract_delimited_block(text::String, start_delim::String, end_delim::String)::Union{String, Nothing}
+    si = findfirst(start_delim, text)
+    isnothing(si) && return nothing
+    ei = findnext(end_delim, text, last(si) + 1)
+    isnothing(ei) && return nothing
+    b = last(si) + 1
+    e = first(ei) - 1
+    b > e && return nothing
+    return strip(text[b:e])
+end
+
+"""Fuzzy extraction: match `---<keyword>---` with flexible whitespace/dashes."""
+function _extract_delimited_block_fuzzy(text::String, start_kw::String, end_kw::String)::Union{String, Nothing}
+    start_re = Regex("---\\s*" * start_kw * "\\s*---", "i")
+    end_re   = Regex("---\\s*" * end_kw * "\\s*---", "i")
+    sm = match(start_re, text)
+    isnothing(sm) && return nothing
+    em = match(end_re, text, sm.offset + length(sm.match))
+    isnothing(em) && return nothing
+    b = sm.offset + length(sm.match)
+    e = em.offset - 1
+    b > e && return nothing
+    return strip(text[b:e])
 end
 
 """
@@ -527,16 +717,14 @@ Parse a JSON clarification payload from the `$_CLARIFY_START` ... `$_CLARIFY_END
 block. Returns `nothing` when absent or malformed.
 """
 function _extract_clarification_prompt(full_text::String)::Union{Dict{String, Any}, Nothing}
-    start_idx = findfirst(_CLARIFY_START, full_text)
-    isnothing(start_idx) && return nothing
-    end_idx = findfirst(_CLARIFY_END, full_text)
-    isnothing(end_idx) && return nothing
+    # Try exact delimiters first, then fuzzy fallback.
+    payload = _extract_delimited_block(full_text, _CLARIFY_START, _CLARIFY_END)
+    if isnothing(payload)
+        payload = _extract_delimited_block_fuzzy(full_text, "CLARIFY", "END.?CLARIFY")
+    end
+    isnothing(payload) && return nothing
 
-    block_start = last(start_idx) + 1
-    block_end   = first(end_idx) - 1
-    block_start > block_end && return nothing
-
-    payload = strip(full_text[block_start:block_end])
+    payload = strip(payload)
     isempty(payload) && return nothing
 
     try
@@ -588,6 +776,56 @@ function _normalize_clarification(raw)::Union{Dict{String, Any}, Nothing}
         d["options"] = normalized
     end
     return d
+end
+
+"""
+    _preprocess_clarification_response(messages) -> Vector
+
+If the last user message starts with `[CLARIFICATION_RESPONSE ...]`, parse
+the structured fields and insert a system message that presents the selection
+in plain language so the LLM can skip bracket parsing.
+"""
+function _preprocess_clarification_response(messages)
+    isempty(messages) && return messages
+    last_msg = messages[end]
+    content = string(get(last_msg, "content", get(last_msg, :content, "")))
+    role = string(get(last_msg, "role", get(last_msg, :role, "")))
+    role == "user" || return messages
+
+    m = match(r"^\[CLARIFICATION_RESPONSE\s+id=(\S+)\s+options=([^\]]*)\]\s*(.*)"s, strip(content))
+    isnothing(m) && return messages
+
+    clar_id = m.captures[1]
+    selected = filter(!isempty, split(m.captures[2], ","))
+    extra_text = strip(string(m.captures[3]))
+
+    ctx = "The user responded to clarification \"$clar_id\" by selecting: $(join(selected, ", "))."
+    if !isempty(extra_text)
+        ctx *= " Additional context: \"$extra_text\""
+    end
+    ctx *= " Incorporate this choice and proceed — do NOT re-ask the same clarification."
+
+    out = collect(messages)
+    # Insert a system context message before the user message.
+    insert!(out, length(out), Dict("role" => "system", "content" => ctx))
+    return out
+end
+
+"""
+    _contains_numerical_claims(text) -> Bool
+
+Heuristic check for text that appears to contain specific numerical structural
+claims (ratios, percentages near pass/fail language, utilization values) that
+should have been grounded in tool evidence.
+"""
+function _contains_numerical_claims(text::AbstractString)::Bool
+    isempty(text) && return false
+    # Ratio patterns: "0.85", "1.02", percentage patterns near structural language
+    has_ratio = occursin(r"(?:ratio|utilization|DCR)\s*(?:of|=|is|:)\s*\d+\.\d+"i, text)
+    has_pct = occursin(r"\d{1,3}(?:\.\d+)?%\s*(?:utilization|capacity|overloaded|stressed)"i, text)
+    has_passfail_number = occursin(r"(?:pass|fail|exceed|violat)\w*\s+(?:at|with|by)\s+\d+\.\d+"i, text)
+    has_specific_value = occursin(r"(?:φ[PVM]n|ϕ[PVM]n|Vu|Mu|Pu)\s*(?:=|of|is)\s*[\d,]+\.?\d*\s*(?:kip|kN|psi|ksi|MPa)"i, text)
+    return has_ratio || has_pct || has_passfail_number || has_specific_value
 end
 
 """
@@ -1013,6 +1251,15 @@ function _stream_llm_to_sse(
         suggestions        = _extract_suggestions(full_text)
         clarification_data = _extract_clarification_prompt(full_text)
 
+        # Evidence-first enforcement: warn when no tools were called but the
+        # response appears to contain numerical structural claims.
+        if isempty(tool_actions) && _contains_numerical_claims(full_text)
+            warning = "\n\n⚠️ This response was generated without consulting structural tools. Numerical results should be verified with a tool call."
+            write(stream, "data: $(JSON3.write(Dict("token" => warning)))\n\n")
+            full_text *= warning
+            @warn "Evidence-first warning triggered — no tool calls but numerical claims detected"
+        end
+
         # Persist assistant turn to server-side history.
         if !isempty(session_id) && !isempty(full_text)
             _append_history!(session_id, "assistant", full_text)
@@ -1088,6 +1335,130 @@ function _classify_patch(patch::Dict)
     return api_keys, geo_hints, other_unknown
 end
 
+"""
+    _validate_params_patch(patch) -> Dict{String, Any}
+
+Validate a params patch against the full schema: enum membership, numeric
+ranges, unknown keys, and floor/column/beam compatibility rules.
+Returns `{ok, violations, warnings}`.
+"""
+function _validate_params_patch(patch::Dict{String, Any})::Dict{String, Any}
+    violations = Dict{String, Any}[]
+    warnings   = String[]
+    schema     = api_params_schema_structured()
+
+    # 1. Check for unknown keys.
+    api_keys, geo_hints, unknowns = _classify_patch(patch)
+    for k in unknowns
+        push!(warnings, "Unknown parameter \"$k\". Not a recognized API field.")
+    end
+    for k in geo_hints
+        push!(warnings, "\"$k\" looks like a geometric parameter — geometry is set in Grasshopper, not via the API.")
+    end
+
+    # 2. Enum and range checks — walk top-level and nested fields.
+    _check_schema_constraints!(violations, patch, schema, "")
+
+    # 3. Compatibility rules (floor ↔ column ↔ beam).
+    floor_type  = get(patch, "floor_type", nothing)
+    column_type = get(patch, "column_type", nothing)
+    beam_type   = get(patch, "beam_type", nothing)
+    if !isnothing(floor_type)
+        floor_schema = get(schema, "floor_type", nothing)
+        if !isnothing(floor_schema)
+            compat = get(floor_schema, "compatibility_checks", nothing)
+            if !isnothing(compat)
+                for rule in get(compat, "rules", Any[])
+                    when_clause = get(rule, "when", Dict())
+                    rejects     = get(rule, "rejects", Dict())
+                    when_floor  = get(when_clause, "floor_type", nothing)
+                    active = if !isnothing(when_floor)
+                        when_floor isa Vector ? floor_type in when_floor : floor_type == when_floor
+                    else
+                        false
+                    end
+                    active || continue
+                    rule_id = get(rule, "id", "compatibility")
+                    sev     = get(rule, "severity", "error")
+                    reject_cols  = get(rejects, "column_type", String[])
+                    reject_beams = get(rejects, "beam_type",   String[])
+                    if !isnothing(column_type) && column_type in reject_cols
+                        push!(violations, Dict{String, Any}(
+                            "field" => "column_type", "value" => column_type,
+                            "constraint" => "compatibility",
+                            "message" => "$rule_id: column_type \"$column_type\" incompatible with floor_type \"$floor_type\"",
+                            "severity" => sev,
+                        ))
+                    end
+                    if !isnothing(beam_type) && beam_type in reject_beams
+                        push!(violations, Dict{String, Any}(
+                            "field" => "beam_type", "value" => beam_type,
+                            "constraint" => "compatibility",
+                            "message" => "$rule_id: beam_type \"$beam_type\" incompatible with floor_type \"$floor_type\"",
+                            "severity" => sev,
+                        ))
+                    end
+                end
+            end
+        end
+    end
+
+    return Dict{String, Any}(
+        "ok" => isempty(violations),
+        "violations" => violations,
+        "warnings" => warnings,
+    )
+end
+
+function _check_schema_constraints!(violations, patch, schema, prefix)
+    for (key, val) in patch
+        full_key = isempty(prefix) ? key : "$(prefix).$(key)"
+        spec = get(schema, key, nothing)
+        isnothing(spec) && continue
+        !isa(spec, Dict) && continue
+
+        ptype = get(spec, "type", "")
+
+        if ptype == "object"
+            sub_fields = get(spec, "fields", nothing)
+            if !isnothing(sub_fields) && val isa Dict
+                _check_schema_constraints!(violations, Dict{String, Any}(string(k) => v for (k, v) in val), sub_fields, full_key)
+            end
+        elseif ptype == "enum"
+            allowed = get(spec, "allowed", nothing)
+            if !isnothing(allowed) && !(string(val) in [string(a) for a in allowed])
+                push!(violations, Dict{String, Any}(
+                    "field" => full_key, "value" => val,
+                    "constraint" => "enum",
+                    "allowed" => allowed,
+                    "message" => "\"$full_key\" = \"$val\" not in allowed values: $(join(allowed, ", "))",
+                ))
+            end
+        elseif ptype == "number" || ptype == "float" || ptype == "integer"
+            rng = get(spec, "range", nothing)
+            if !isnothing(rng) && length(rng) >= 2 && val isa Real
+                lo, hi = rng[1], rng[2]
+                if val < lo || val > hi
+                    push!(violations, Dict{String, Any}(
+                        "field" => full_key, "value" => val,
+                        "constraint" => "range",
+                        "range" => rng,
+                        "message" => "\"$full_key\" = $val out of range [$lo, $hi]",
+                    ))
+                end
+            end
+        elseif ptype == "bool" || ptype == "boolean"
+            if !(val isa Bool)
+                push!(violations, Dict{String, Any}(
+                    "field" => full_key, "value" => val,
+                    "constraint" => "type",
+                    "message" => "\"$full_key\" must be a boolean, got $(typeof(val))",
+                ))
+            end
+        end
+    end
+end
+
 # Timeout for a quick-check design run. Large complex buildings can take 2-5 min
 # for a full design; this cap keeps the conversational loop responsive.
 const QUICK_DESIGN_TIMEOUT_S = 60.0
@@ -1138,6 +1509,13 @@ Phase 4 — Communication:
 """
 const _NO_DESIGN_HINT   = "Run a design from Grasshopper before opening Results Assistant."
 const _NO_GEOMETRY_HINT = "Submit geometry via the GeometryInput component first."
+
+"""Read `DESIGN_CACHE.last_design` under lock to avoid torn reads."""
+function _get_last_design()::Union{BuildingDesign, Nothing}
+    lock(DESIGN_CACHE.lock) do
+        DESIGN_CACHE.last_design
+    end
+end
 
 function _dispatch_chat_tool(tool::String, args::Dict{String, Any})::Dict{String, Any}
     if tool == "get_result_summary"
@@ -1371,6 +1749,21 @@ function _dispatch_chat_tool(tool::String, args::Dict{String, Any})::Dict{String
         isnothing(field) && return Dict("error" => "missing_field", "message" => "Provide a 'field' argument (e.g., \"deflection_limit\").")
         return agent_explain_field(string(field))
 
+    elseif tool == "get_provision_rationale"
+        section = get(args, "section", nothing)
+        isnothing(section) && return Dict("error" => "missing_section", "message" => "Provide a 'section' argument (e.g., \"22.6\", \"H1\", \"ACI_318.22.6\", or a check family like \"punching_shear\").")
+        entry = get_provision_ontology(string(section))
+        if isnothing(entry)
+            return Dict{String, Any}(
+                "error"   => "provision_not_found",
+                "message" => "No ontology entry for \"$section\". " *
+                    "Available sections: $(join(sort(collect(keys(PROVISION_ONTOLOGY))), ", ")). " *
+                    "Check families: $(join(sort(collect(keys(CHECK_FAMILY_TO_PROVISION))), ", ")).",
+                "hint"    => "Try a section number (\"22.6\"), full key (\"ACI_318.22.6\"), or check family name (\"punching_shear\").",
+            )
+        end
+        return entry
+
     # ── Phase 3: Exploration ─────────────────────────────────────────────────
     elseif tool == "compare_designs"
         idx_a = _chat_coerce_int(get(args, "index_a", nothing))
@@ -1424,51 +1817,16 @@ function _dispatch_chat_tool(tool::String, args::Dict{String, Any})::Dict{String
 
     # ── Original tools ───────────────────────────────────────────────────────
     elseif tool == "validate_params"
-        # Validate a params patch against the compatibility rules in the schema
-        # without requiring a full geometry input.
-        schema_rules = get(get(api_applicability_schema(), "rules", Dict()), "floor_type", Dict())
-        compat = get(schema_rules, "compatibility_checks", Dict())
-        rules  = get(compat, "rules", Any[])
-
-        param_patch  = Dict{String, Any}(string(k) => v for (k, v) in get(args, "params", Dict()))
+        param_patch = Dict{String, Any}(string(k) => v for (k, v) in get(args, "params", Dict()))
         if isempty(param_patch)
             return Dict{String, Any}(
                 "ok" => true,
-                "violations" => String[],
-                "note" =>
-                    "Empty args.params: no compatibility rules were evaluated. " *
-                    "Pass a non-empty patch (e.g. {\"punching_strategy\": \"reinforce_last\"}) to check floor/column/beam rules from the applicability schema.",
+                "violations" => Dict{String, Any}[],
+                "warnings" => String[],
+                "note" => "Empty params patch — nothing to validate.",
             )
         end
-        floor_type   = get(param_patch, "floor_type", nothing)
-        column_type  = get(param_patch, "column_type", nothing)
-        beam_type    = get(param_patch, "beam_type", nothing)
-
-        violations = String[]
-        for rule in rules
-            when_clause = get(rule, "when", Dict())
-            rejects     = get(rule, "rejects", Dict())
-
-            # Determine whether the rule's "when" condition is active.
-            when_floor = get(when_clause, "floor_type", nothing)
-            active = false
-            if !isnothing(when_floor) && !isnothing(floor_type)
-                active = when_floor isa Vector ? floor_type in when_floor : floor_type == when_floor
-            end
-            active || continue
-
-            reject_cols  = get(rejects, "column_type", String[])
-            reject_beams = get(rejects, "beam_type",   String[])
-            rule_id      = get(rule, "id", "rule")
-
-            if !isnothing(column_type) && column_type in reject_cols
-                push!(violations, "$rule_id: column_type \"$column_type\" is incompatible with floor_type \"$floor_type\"")
-            end
-            if !isnothing(beam_type) && beam_type in reject_beams
-                push!(violations, "$rule_id: beam_type \"$beam_type\" is incompatible with floor_type \"$floor_type\"")
-            end
-        end
-        return Dict("ok" => isempty(violations), "violations" => violations)
+        return _validate_params_patch(param_patch)
 
     elseif tool == "run_design"
         # ── Guard: server state ──────────────────────────────────────────────
@@ -1549,6 +1907,7 @@ function _dispatch_chat_tool(tool::String, args::Dict{String, Any})::Dict{String
                 d = design_building(DESIGN_CACHE.structure, fast_params; tc=tc)
                 DESIGN_CACHE.last_design = d
                 DESIGN_CACHE.last_result = design_to_json(d; geometry_hash=DESIGN_CACHE.geometry_hash)
+                invalidate_diagnose_cache!(DESIGN_CACHE)
                 result_ref[] = d
             catch e
                 @error "run_design task failed" exception=(e, catch_backtrace())
@@ -1631,7 +1990,7 @@ function _dispatch_chat_tool(tool::String, args::Dict{String, Any})::Dict{String
             "message" => "Unknown tool: \"$tool\". Available: " *
                 "get_situation_card, get_building_summary, get_design_history, get_current_params, " *
                 "get_diagnose_summary, get_diagnose, query_elements, get_solver_trace, " *
-                "get_lever_map, get_implemented_provisions, explain_field, " *
+                "get_lever_map, get_implemented_provisions, get_provision_rationale, explain_field, " *
                 "get_result_summary, get_condensed_result, get_applicability, " *
                 "run_experiment, list_experiments, batch_experiments, " *
                 "validate_params, run_design, compare_designs, suggest_next_action, " *
@@ -1723,9 +2082,15 @@ function register_chat_routes!()
         end
 
         params_json           = get(parsed, :params, nothing)
-        geometry_summary      = string(get(parsed, :geometry_summary, ""))
+        geometry_summary      = string(get(parsed, :geometry_summary, get(parsed, "geometry_summary", "")))
         session_id            = string(get(parsed, :session_id, ""))
         client_geometry_hash  = string(get(parsed, :client_geometry_hash, ""))
+        bg_raw = get(parsed, :building_geometry, get(parsed, "building_geometry", nothing))
+        structured_geo = _parse_chat_building_geometry(bg_raw)
+        if isnothing(structured_geo)
+            g_raw = get(parsed, :geometry, get(parsed, "geometry", nothing))
+            structured_geo = _parse_chat_building_geometry(g_raw)
+        end
 
         # Persist the latest user message to server-side history.
         if !isempty(session_id) && !isempty(messages)
@@ -1735,7 +2100,12 @@ function register_chat_routes!()
             _append_history!(session_id, role, content)
         end
 
-        system_prompt = _build_system_prompt(mode, params_json, geometry_summary, client_geometry_hash)
+        # Server-side clarification response pre-processing: when the last user
+        # message is a structured clarification reply, parse it and inject a
+        # system-context message so the LLM doesn't need to regex-parse brackets.
+        messages = _preprocess_clarification_response(messages)
+
+        system_prompt = _build_system_prompt(mode, params_json, geometry_summary, client_geometry_hash, structured_geo)
         budgeted      = _budget_messages(system_prompt, messages, MAX_CONTEXT_TOKENS)
 
         HTTP.setstatus(stream, 200)

@@ -1,0 +1,201 @@
+{
+    "source": "api_params_schema_structured",
+    "rules": {
+        "analysis_method": {
+            "default": "DDM",
+            "allowed": [
+                "DDM",
+                "DDM_SIMPLIFIED",
+                "EFM",
+                "EFM_HARDY_CROSS",
+                "FEA"
+            ],
+            "applicability_checks": {
+                "implemented_in": {
+                    "DDM": "StructuralSizer/src/slabs/codes/concrete/flat_plate/analysis/ddm.jl",
+                    "EFM": "StructuralSizer/src/slabs/codes/concrete/flat_plate/analysis/efm.jl",
+                    "FEA": "StructuralSizer/src/slabs/codes/concrete/flat_plate/utils/helpers.jl"
+                },
+                "DDM_SIMPLIFIED": {
+                    "note": "Uses simplified DDM coefficients but same applicability checks in current implementation.",
+                    "inherits": "DDM"
+                },
+                "EFM_HARDY_CROSS": {
+                    "note": "Same applicability as EFM; differs only in frame-solver backend.",
+                    "inherits": "EFM"
+                },
+                "DDM": {
+                    "hard_checks": [
+                        {
+                            "clause": "§8.10.2.2",
+                            "id": "ddm_rectangular_geometry",
+                            "check": "panel geometry rectangular/orthogonal"
+                        },
+                        {
+                            "clause": "§8.10.2.2",
+                            "id": "ddm_aspect_ratio",
+                            "check": "0.5 <= l2/l1 <= 2.0"
+                        },
+                        {
+                            "clause": "§8.10.2.6",
+                            "id": "ddm_live_dead_ratio",
+                            "check": "L/D <= 2.0 using estimated self-weight"
+                        },
+                        {
+                            "clause": "implementation guardrail",
+                            "id": "ddm_min_clear_span",
+                            "check": "clear span ln >= 4 ft"
+                        }
+                    ],
+                    "code_basis": "ACI 318-11 §13.6 / §8.10 (implemented checks)",
+                    "context_checks": [
+                        {
+                            "clause": "§8.10.2.1",
+                            "id": "ddm_min_span_continuity",
+                            "check": ">=3 continuous spans target (column-line adequacy check)"
+                        },
+                        {
+                            "clause": "§8.10.2.3",
+                            "id": "ddm_successive_span_variation",
+                            "applies_when": "adjacent slab metadata available",
+                            "check": "adjacent span difference <= longer span / 3"
+                        },
+                        {
+                            "clause": "§8.10.2.4",
+                            "id": "ddm_column_offset",
+                            "applies_when": "column coordinates resolvable",
+                            "check": "column offset <= 10% of span from column lines"
+                        }
+                    ],
+                    "loads_assumption": {
+                        "assumption": "gravity/uniform slab loading model in current workflow",
+                        "clause": "§8.10.2.5"
+                    }
+                },
+                "EFM": {
+                    "hard_checks": [
+                        {
+                            "clause": "§8.11.2",
+                            "id": "efm_rectangular_geometry",
+                            "check": "panel geometry rectangular/orthogonal for frame idealization"
+                        },
+                        {
+                            "clause": "§8.11.2 (implementation)",
+                            "id": "efm_min_supporting_columns",
+                            "check": "at least 2 supporting columns"
+                        },
+                        {
+                            "clause": "§8.11.5",
+                            "id": "efm_torsion_stiffness_limit",
+                            "check": "column dimension ratio c2/l2 <= 0.5"
+                        },
+                        {
+                            "clause": "implementation guardrail",
+                            "id": "efm_min_clear_span",
+                            "check": "clear span ln >= 4 ft"
+                        }
+                    ],
+                    "code_basis": "ACI 318-11 §13.7 / §8.11 (implemented checks)",
+                    "loads_assumption": {
+                        "assumption": "gravity-load frame analysis in current workflow",
+                        "clause": "§8.11.1.1"
+                    }
+                },
+                "FEA": {
+                    "hard_checks": [
+                        {
+                            "clause": "implementation",
+                            "id": "fea_min_supporting_columns",
+                            "check": "at least 2 supporting columns"
+                        }
+                    ],
+                    "advisory_checks": [
+                        {
+                            "clause": "ACI §8.10.5 style CS/MS fraction use in implementation",
+                            "id": "fea_frame_design_approach_guardrail",
+                            "check": "if design_approach=:frame and DDM regularity checks fail, emit warning (results may be approximate)"
+                        },
+                        {
+                            "clause": "implementation",
+                            "id": "fea_strip_non_quad_guardrail",
+                            "check": "for design_approach=:strip, non-quad/non-convex cells trigger integration warnings/fallback behavior"
+                        },
+                        {
+                            "clause": "implementation",
+                            "id": "fea_area_transform_guardrail",
+                            "check": "for design_approach=:area, projection/no_torsion transforms are warned as potentially unconservative"
+                        }
+                    ],
+                    "code_basis": "Implementation policy + ACI-referenced post-processing"
+                }
+            }
+        },
+        "floor_type": {
+            "default": "flat_plate",
+            "allowed": [
+                "flat_plate",
+                "flat_slab",
+                "one_way",
+                "vault"
+            ],
+            "compatibility_checks": {
+                "implemented_in": "StructuralSynthesizer/src/api/validation.jl",
+                "rules": [
+                    {
+                        "requires": {
+                            "column_type": [
+                                "rc_rect",
+                                "rc_circular"
+                            ]
+                        },
+                        "when": {
+                            "floor_type": [
+                                "flat_plate",
+                                "flat_slab"
+                            ]
+                        },
+                        "id": "floor_rc_columns_for_beamless",
+                        "rejects": {
+                            "column_type": [
+                                "steel_w",
+                                "steel_hss",
+                                "steel_pipe",
+                                "pixelframe"
+                            ]
+                        },
+                        "severity": "error"
+                    },
+                    {
+                        "requires": {
+                            "beam_type": [
+                                "rc_rect",
+                                "rc_tbeam"
+                            ],
+                            "column_type": [
+                                "rc_rect",
+                                "rc_circular"
+                            ]
+                        },
+                        "when": {
+                            "floor_type": "vault"
+                        },
+                        "id": "vault_requires_rc_columns_and_beams",
+                        "rejects": {
+                            "beam_type": [
+                                "steel_w",
+                                "steel_hss"
+                            ],
+                            "column_type": [
+                                "steel_w",
+                                "steel_hss",
+                                "steel_pipe"
+                            ]
+                        },
+                        "severity": "error"
+                    }
+                ]
+            }
+        }
+    },
+    "version": "v1"
+}

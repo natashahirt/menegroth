@@ -8,7 +8,7 @@
 #
 # Experiment types:
 #   - punching:    vary column size or slab thickness for a punching check
-#   - pm:          try alternative column sections against cached P-M demands
+#   - pm_column:   try alternative column sections against cached P-M demands
 #   - deflection:  test different deflection limits against stored slab data
 #   - catalog:     screen a section catalog against a single demand envelope
 # =============================================================================
@@ -29,7 +29,6 @@ function _coerce_float(x)::Union{Float64, Nothing}
     if x isa AbstractString
         s = strip(x)
         isempty(s) && return nothing
-        # Accept simple numeric strings from tool JSON payloads.
         v = tryparse(Float64, replace(s, "," => ""))
         return v
     end
@@ -56,16 +55,47 @@ function _coerce_int(x)::Union{Int, Nothing}
     return nothing
 end
 
+# ─── Helpers: resolve column position from BuildingStructure ──────────────────
+
+"""
+    _resolve_column_position(design, col_idx) -> Symbol
+
+Look up the column's position (:interior, :edge, :corner) from the
+BuildingStructure stored on the design. Falls back to :interior when the
+structure is unavailable.
+"""
+function _resolve_column_position(design::BuildingDesign, col_idx::Int)::Symbol
+    struc = design.structure
+    isnothing(struc) && return :interior
+    (col_idx < 1 || col_idx > length(struc.columns)) && return :interior
+    return struc.columns[col_idx].position
+end
+
+"""
+    _resolve_column_shape(design, col_idx) -> Symbol
+
+Look up the column's cross-section shape from the BuildingStructure.
+Falls back to the ColumnDesignResult.shape if the structure is unavailable.
+"""
+function _resolve_column_shape(design::BuildingDesign, col_idx::Int)::Symbol
+    struc = design.structure
+    if !isnothing(struc) && col_idx >= 1 && col_idx <= length(struc.columns)
+        return struc.columns[col_idx].shape
+    end
+    col_result = get(design.columns, col_idx, nothing)
+    isnothing(col_result) && return :rectangular
+    return col_result.shape
+end
+
 # ─── Punching Experiments ─────────────────────────────────────────────────────
 
 """
     experiment_punching(design, col_idx; c1_in, c2_in, h_in) -> Dict
 
 Re-run the ACI punching shear check for column `col_idx` with modified column
-dimensions or slab thickness. Uses the stored shear demand `Vu` from the
-original design.
-
-Only the specified parameters are changed; others are taken from the design.
+dimensions or slab thickness. Uses the actual `check_punching_for_column`
+from StructuralSizer, respecting column position (interior/edge/corner) and
+stored unbalanced moment.
 """
 function experiment_punching(
     design::BuildingDesign,
@@ -93,7 +123,6 @@ function experiment_punching(
     new_c1 = isnothing(c1_in) ? orig_c1 : c1_in * u"inch"
     new_c2 = isnothing(c2_in) ? orig_c2 : c2_in * u"inch"
 
-    # Slab effective depth: approximate from stored data
     slab_concrete = resolve_slab_concrete(design.params.materials)
     fc = slab_concrete.fc′
     cover = 0.75u"inch"
@@ -115,16 +144,22 @@ function experiment_punching(
     new_h = isnothing(h_in) ? orig_h : h_in * u"inch"
     d = new_h - cover - bar_d
 
-    # Determine column position from shape
-    position = :interior
-    shape = col_result.shape == :circular ? :circular : :rectangular
+    position = _resolve_column_position(design, col_idx)
+    shape = _resolve_column_shape(design, col_idx)
 
-    Mub = 0.0u"kip*ft"  # Conservative: no unbalanced moment in simplified check
+    # Use stored unbalanced moment when available; fall back to Mu_x from frame analysis.
+    Mub = if hasproperty(punching, :Mub) && !isnothing(punching.Mub)
+        punching.Mub
+    else
+        abs(col_result.Mu_x)
+    end
 
-    result = StructuralSizer.punching_check(
-        orig_Vu, Mub, 0.0u"kip*ft",
-        d, fc, new_c1, new_c2;
-        position = position, shape = shape,
+    # Build a duck-typed column object for check_punching_for_column.
+    col_proxy = (c1 = new_c1, c2 = new_c2, position = position, shape = shape)
+
+    result = StructuralSizer.check_punching_for_column(
+        col_proxy, orig_Vu, Mub, d, new_h, fc;
+        col_idx = col_idx,
     )
 
     orig_ratio = punching.ratio
@@ -132,6 +167,7 @@ function experiment_punching(
     return Dict{String, Any}(
         "experiment" => "punching",
         "column_idx" => col_idx,
+        "position" => string(position),
         "original" => Dict{String, Any}(
             "c1_in" => round(ustrip(u"inch", orig_c1); digits=1),
             "c2_in" => round(ustrip(u"inch", orig_c2); digits=1),
@@ -142,13 +178,13 @@ function experiment_punching(
             "c1_in" => round(ustrip(u"inch", new_c1); digits=1),
             "c2_in" => round(ustrip(u"inch", new_c2); digits=1),
             "h_in" => round(ustrip(u"inch", new_h); digits=1),
-            "ratio" => round(result.utilization; digits=3),
+            "ratio" => round(result.ratio; digits=3),
             "ok" => result.ok,
             "vu_psi" => round(ustrip(u"psi", result.vu); digits=1),
-            "φvc_psi" => round(ustrip(u"psi", result.ϕvc); digits=1),
+            "φvc_psi" => round(ustrip(u"psi", result.φvc); digits=1),
         ),
-        "delta_ratio" => round(result.utilization - orig_ratio; digits=3),
-        "improved" => result.utilization < orig_ratio,
+        "delta_ratio" => round(result.ratio - orig_ratio; digits=3),
+        "improved" => result.ratio < orig_ratio,
     )
 end
 
@@ -157,12 +193,12 @@ end
 """
     experiment_pm_column(design, col_idx; section_size) -> Dict
 
-Test a column against its cached P-M demands with a different section size.
-Uses the stored Pu, Mu_x, Mu_y from the original design and computes a
-simplified interaction ratio.
+Test a column against its cached P-M demands with a different section size,
+using the real StructuralSizer checkers (ACIColumnChecker for RC,
+AISCChecker for steel) via `explain_feasibility`.
 
 For RC columns, `section_size` is the new dimension in inches (square assumed).
-For steel columns, `section_size` is the W-shape designation string.
+For steel columns, `section_size` is the W-shape designation string (e.g. "W14X82").
 """
 function experiment_pm_column(
     design::BuildingDesign,
@@ -181,74 +217,198 @@ function experiment_pm_column(
     orig_ratio = max(col.axial_ratio, col.interaction_ratio)
 
     mats = design.params.materials
+    params = design.params
     is_rc = col.shape in (:rectangular, :circular, :rc_rect, :rc_circular)
 
     if is_rc
-        isnothing(section_size) && return Dict{String, Any}(
-            "error" => "section_size_required",
-            "message" => "Provide section_size (inches) for RC column experiment.",
-        )
-        new_dim = _coerce_float(section_size)
-        isnothing(new_dim) && return Dict{String, Any}(
-            "error" => "invalid_section_size",
-            "message" => "section_size must be numeric inches (e.g., 18 or \"18\"). Got: $(repr(section_size))",
-        )
-        new_dim <= 0 && return Dict{String, Any}(
-            "error" => "invalid_section_size",
-            "message" => "section_size must be > 0. Got: $new_dim",
-        )
-        col_concrete = resolve_column_concrete(mats)
-        col_rebar = resolve_column_rebar(mats)
-        fc = col_concrete.fc′
-        fy = col_rebar.Fy
-        fc_psi = ustrip(u"psi", fc)
-        fy_psi = ustrip(u"psi", fy)
-
-        Ag = new_dim^2  # in²
-        rho_g = 0.02  # Assume 2% reinforcement
-        As = rho_g * Ag
-
-        # ACI simplified axial capacity (no slenderness)
-        φPn_kip = 0.65 * 0.80 * (0.85 * fc_psi * (Ag - As) + fy_psi * As) / 1000
-        Pu_kip = ustrip(u"kip", Pu)
-        axial_ratio = Pu_kip / φPn_kip
-
-        # Rough M capacity: 0.12 * fc * b * d² (simplified flexural capacity)
-        d_in = new_dim - 2.5  # cover + half bar
-        φMn_kipft = 0.9 * 0.12 * fc_psi * new_dim * d_in^2 / 12000
-        Mux_kipft = ustrip(u"kip*ft", Mux)
-        moment_ratio = Mux_kipft / max(φMn_kipft, 1e-6)
-
-        new_ratio = max(axial_ratio, moment_ratio)
-
-        return Dict{String, Any}(
-            "experiment" => "pm_column",
-            "column_idx" => col_idx,
-            "column_type" => "RC",
-            "original" => Dict{String, Any}(
-                "section" => col.section_size,
-                "ratio" => round(orig_ratio; digits=3),
-                "ok" => col.ok,
-            ),
-            "modified" => Dict{String, Any}(
-                "section" => "$(Int(new_dim))x$(Int(new_dim))",
-                "axial_ratio" => round(axial_ratio; digits=3),
-                "moment_ratio" => round(moment_ratio; digits=3),
-                "interaction_ratio" => round(new_ratio; digits=3),
-                "ok" => new_ratio <= 1.0,
-                "φPn_kip" => round(φPn_kip; digits=0),
-                "φMn_kipft" => round(φMn_kipft; digits=0),
-            ),
-            "delta_ratio" => round(new_ratio - orig_ratio; digits=3),
-            "improved" => new_ratio < orig_ratio,
-            "note" => "Simplified estimate (ACI §10.3.6.2 axial + approximate flexure, 2% ρg assumed, no slenderness). Use run_design for exact results.",
-        )
+        return _experiment_pm_rc(design, col_idx, col, section_size, params, mats, orig_ratio)
     else
+        return _experiment_pm_steel(design, col_idx, col, section_size, params, mats, orig_ratio)
+    end
+end
+
+function _experiment_pm_rc(
+    design::BuildingDesign,
+    col_idx::Int,
+    col,
+    section_size,
+    params,
+    mats,
+    orig_ratio::Float64,
+)::Dict{String, Any}
+    isnothing(section_size) && return Dict{String, Any}(
+        "error" => "section_size_required",
+        "message" => "Provide section_size (inches) for RC column experiment.",
+    )
+    new_dim = _coerce_float(section_size)
+    isnothing(new_dim) && return Dict{String, Any}(
+        "error" => "invalid_section_size",
+        "message" => "section_size must be numeric inches (e.g., 18 or \"18\"). Got: $(repr(section_size))",
+    )
+    new_dim <= 0 && return Dict{String, Any}(
+        "error" => "invalid_section_size",
+        "message" => "section_size must be > 0. Got: $new_dim",
+    )
+
+    col_concrete = resolve_column_concrete(mats)
+    col_rebar = resolve_column_rebar(mats)
+
+    cover = 1.5u"inch"
+    new_b = new_dim * u"inch"
+    new_section = try
+        StructuralSizer.RCColumnSection(
+            b = new_b, h = new_b,
+            bar_size = 8, n_bars = 8, cover = cover,
+            tie_type = :tied, arrangement = :perimeter,
+        )
+    catch e
         return Dict{String, Any}(
-            "error" => "steel_pm_not_yet_supported",
-            "message" => "Steel column P-M micro-experiment not yet implemented. Use run_design for steel column what-if checks.",
+            "error" => "section_build_failed",
+            "message" => "Could not build RC section at $(new_dim)in: $(sprint(showerror, e))",
         )
     end
+
+    col_opts = params.columns
+    include_slenderness = col_opts isa StructuralSizer.ConcreteColumnOptions ? col_opts.include_slenderness : true
+    include_biaxial = col_opts isa StructuralSizer.ConcreteColumnOptions ? col_opts.include_biaxial : true
+    max_depth_val = col_opts isa StructuralSizer.ConcreteColumnOptions ? col_opts.max_depth : Inf * u"mm"
+    objective = col_opts isa StructuralSizer.ConcreteColumnOptions ? col_opts.objective : StructuralSizer.MinWeight()
+
+    struc = design.structure
+    col_member = (!isnothing(struc) && col_idx >= 1 && col_idx <= length(struc.columns)) ?
+        struc.columns[col_idx] : nothing
+    L = !isnothing(col_member) ? member_length(col_member) : 10.0u"ft"
+    Ky = !isnothing(col_member) ? col_member.base.Ky : 1.0
+    geom = StructuralSizer.ConcreteMemberGeometry(L; Lu=L, k=Ky)
+
+    fy_ksi_val = ustrip(StructuralSizer.Asap.ksi, col_rebar.Fy)
+    Es_ksi_val = ustrip(StructuralSizer.Asap.ksi, col_rebar.E)
+    checker = StructuralSizer.ACIColumnChecker(;
+        include_slenderness = include_slenderness,
+        include_biaxial = include_biaxial,
+        fy_ksi = fy_ksi_val,
+        Es_ksi = Es_ksi_val,
+        max_depth = max_depth_val,
+    )
+
+    # RCColumnDemand takes bare Float64 in kip / kip·ft.
+    Pu_kip = StructuralSizer.to_kip(col.Pu)
+    Mux_kipft = StructuralSizer.to_kipft(col.Mu_x)
+    Muy_kipft = StructuralSizer.to_kipft(col.Mu_y)
+    dem = StructuralSizer.RCColumnDemand(1; Pu=Pu_kip, Mux=Mux_kipft, Muy=Muy_kipft)
+
+    cat = [new_section]
+    cache = StructuralSizer.create_cache(checker, 1)
+    StructuralSizer.precompute_capacities!(checker, cache, cat, col_concrete, objective)
+    expl = StructuralSizer.explain_feasibility(checker, cache, 1, new_section, col_concrete, dem, geom)
+
+    return Dict{String, Any}(
+        "experiment" => "pm_column",
+        "column_idx" => col_idx,
+        "column_type" => "RC",
+        "original" => Dict{String, Any}(
+            "section" => col.section_size,
+            "ratio" => round(orig_ratio; digits=3),
+            "ok" => col.ok,
+        ),
+        "modified" => Dict{String, Any}(
+            "section" => "$(Int(new_dim))x$(Int(new_dim))",
+            "interaction_ratio" => round(expl.governing_ratio; digits=3),
+            "governing_check" => expl.governing_check,
+            "ok" => expl.passed,
+            "checks" => [Dict(
+                "name" => c.name,
+                "passed" => c.passed,
+                "ratio" => round(c.ratio; digits=3),
+            ) for c in expl.checks],
+        ),
+        "delta_ratio" => round(expl.governing_ratio - orig_ratio; digits=3),
+        "improved" => expl.governing_ratio < orig_ratio,
+    )
+end
+
+function _experiment_pm_steel(
+    design::BuildingDesign,
+    col_idx::Int,
+    col,
+    section_size,
+    params,
+    mats,
+    orig_ratio::Float64,
+)::Dict{String, Any}
+    isnothing(section_size) && return Dict{String, Any}(
+        "error" => "section_size_required",
+        "message" => "Provide section_size (W-shape designation, e.g. \"W14X82\") for steel column experiment.",
+    )
+    size_str = strip(string(section_size))
+    isempty(size_str) && return Dict{String, Any}(
+        "error" => "invalid_section_size",
+        "message" => "section_size must be a non-empty W-shape designation string.",
+    )
+
+    new_section = try
+        StructuralSizer.W(uppercase(size_str))
+    catch e
+        return Dict{String, Any}(
+            "error" => "section_not_found",
+            "message" => "W-shape \"$size_str\" not found in catalog: $(sprint(showerror, e))",
+        )
+    end
+
+    col_opts = params.columns
+    mat = if col_opts isa StructuralSizer.SteelColumnOptions
+        col_opts.material
+    else
+        resolve_beam_steel(mats)
+    end
+    max_depth_val = col_opts isa StructuralSizer.SteelColumnOptions ? col_opts.max_depth : Inf * u"mm"
+    objective = col_opts isa StructuralSizer.SteelColumnOptions ? col_opts.objective : StructuralSizer.MinWeight()
+
+    struc = design.structure
+    col_member = (!isnothing(struc) && col_idx >= 1 && col_idx <= length(struc.columns)) ?
+        struc.columns[col_idx] : nothing
+
+    L = !isnothing(col_member) ? member_length(col_member) : 10.0u"ft"
+    Kx = !isnothing(col_member) ? col_member.base.Kx : 1.0
+    Ky = !isnothing(col_member) ? col_member.base.Ky : 1.0
+    Cb = !isnothing(col_member) ? col_member.base.Cb : 1.0
+    geom = StructuralSizer.SteelMemberGeometry(L; Lb=L, Cb=Cb, Kx=Kx, Ky=Ky)
+
+    # MemberDemand takes bare Float64 in SI (N, N·m).
+    Pu_N = StructuralSizer.to_newtons(col.Pu)
+    Mux_Nm = StructuralSizer.to_newton_meters(col.Mu_x)
+    Muy_Nm = StructuralSizer.to_newton_meters(col.Mu_y)
+    dem = StructuralSizer.MemberDemand(1; Pu_c=Pu_N, Mux=Mux_Nm, Muy=Muy_Nm)
+
+    checker = StructuralSizer.AISCChecker(; max_depth=max_depth_val)
+    cat = [new_section]
+    cache = StructuralSizer.create_cache(checker, 1)
+    StructuralSizer.precompute_capacities!(checker, cache, cat, mat, objective)
+    expl = StructuralSizer.explain_feasibility(checker, cache, 1, new_section, mat, dem, geom)
+
+    return Dict{String, Any}(
+        "experiment" => "pm_column",
+        "column_idx" => col_idx,
+        "column_type" => "steel",
+        "original" => Dict{String, Any}(
+            "section" => col.section_size,
+            "ratio" => round(orig_ratio; digits=3),
+            "ok" => col.ok,
+        ),
+        "modified" => Dict{String, Any}(
+            "section" => size_str,
+            "interaction_ratio" => round(expl.governing_ratio; digits=3),
+            "governing_check" => expl.governing_check,
+            "ok" => expl.passed,
+            "checks" => [Dict(
+                "name" => c.name,
+                "passed" => c.passed,
+                "ratio" => round(c.ratio; digits=3),
+            ) for c in expl.checks],
+        ),
+        "delta_ratio" => round(expl.governing_ratio - orig_ratio; digits=3),
+        "improved" => expl.governing_ratio < orig_ratio,
+    )
 end
 
 # ─── Deflection Experiments ───────────────────────────────────────────────────
@@ -282,20 +442,13 @@ function experiment_deflection(
         )
     end
 
-    # Determine span length from the limit and divisor
-    # orig_limit = span / divisor, so span = orig_limit * divisor
+    # Back-compute the divisor and span from the original design.
     orig_divisor = if orig_ratio > 0
         round(orig_limit / orig_deflection * orig_ratio; digits=0)
     else
         360.0
     end
-
-    # Approximate span from the original limit
-    # deflection_limit_in = span_in / divisor
-    # We can back-compute span_in if we know the original divisor
-    # span_in ≈ orig_limit * orig_divisor (where orig_divisor = orig_limit / orig_deflection * ratio)
-    # Simpler: use orig_limit and the ratio to determine the span
-    span_in = orig_limit * 360.0  # Assumes original was L/360 as default
+    span_in = orig_limit * orig_divisor
 
     new_divisor = if deflection_limit == "L_240"
         240.0
@@ -310,7 +463,6 @@ function experiment_deflection(
         )
     end
 
-    # The deflection itself doesn't change (same loads, same slab), only the limit
     new_limit = span_in / new_divisor
     new_ratio = orig_deflection / new_limit
     new_ok = new_ratio <= 1.0
@@ -342,14 +494,15 @@ end
     experiment_catalog_screen(design, col_idx; candidates) -> Dict
 
 Screen a list of candidate sections against the stored demands for a column.
-Returns a feasibility assessment for each candidate.
+Returns a feasibility assessment for each candidate using the real checkers.
 
-`candidates` is a vector of section size dimensions (inches, for RC) to test.
+For RC columns, `candidates` is a vector of section dimensions (inches).
+For steel columns, `candidates` is a vector of W-shape designation strings.
 """
 function experiment_catalog_screen(
     design::BuildingDesign,
     col_idx::Int;
-    candidates::Vector{Float64} = Float64[],
+    candidates::Union{Vector{Float64}, Vector} = Float64[],
 )::Dict{String, Any}
     col = get(design.columns, col_idx, nothing)
     isnothing(col) && return Dict{String, Any}(
@@ -363,17 +516,17 @@ function experiment_catalog_screen(
     )
 
     results = Dict{String, Any}[]
-    for dim in candidates
-        r = experiment_pm_column(design, col_idx; section_size=dim)
+    for cand in candidates
+        r = experiment_pm_column(design, col_idx; section_size=cand)
         if haskey(r, "error")
-            push!(results, Dict{String, Any}("section" => "$(Int(dim))x$(Int(dim))", "error" => r["error"]))
+            push!(results, Dict{String, Any}("section" => string(cand), "error" => r["error"]))
         else
             mod = r["modified"]
             push!(results, Dict{String, Any}(
                 "section" => mod["section"],
                 "interaction_ratio" => mod["interaction_ratio"],
+                "governing_check" => get(mod, "governing_check", ""),
                 "ok" => mod["ok"],
-                "φPn_kip" => get(mod, "φPn_kip", nothing),
             ))
         end
     end
@@ -389,7 +542,6 @@ function experiment_catalog_screen(
         "best_feasible" => let feas = filter(r -> get(r, "ok", false), results)
             isempty(feas) ? nothing : first(feas)["section"]
         end,
-        "note" => "Simplified ACI capacity estimates. Use run_design for exact results.",
     )
 end
 
@@ -405,13 +557,13 @@ function list_experiments()::Dict{String, Any}
         "experiments" => [
             Dict{String, Any}(
                 "name" => "punching",
-                "description" => "Re-check punching shear with modified column size or slab thickness",
+                "description" => "Re-check punching shear with modified column size or slab thickness. Respects column position (interior/edge/corner) and unbalanced moment.",
                 "args" => Dict("col_idx" => "required Int", "c1_in" => "optional Float64", "c2_in" => "optional Float64", "h_in" => "optional Float64"),
             ),
             Dict{String, Any}(
                 "name" => "pm_column",
-                "description" => "Test P-M interaction for an RC column with a different section size",
-                "args" => Dict("col_idx" => "required Int", "section_size" => "Float64 (inches)"),
+                "description" => "Test P-M interaction with a different section using the real checker (ACIColumnChecker for RC, AISCChecker for steel).",
+                "args" => Dict("col_idx" => "required Int", "section_size" => "Float64 (inches) for RC, or String (W-shape, e.g. \"W14X82\") for steel"),
             ),
             Dict{String, Any}(
                 "name" => "deflection",
@@ -420,11 +572,11 @@ function list_experiments()::Dict{String, Any}
             ),
             Dict{String, Any}(
                 "name" => "catalog_screen",
-                "description" => "Screen multiple RC column sizes against stored demands",
-                "args" => Dict("col_idx" => "required Int", "candidates" => "Float64[] (inches)"),
+                "description" => "Screen multiple column sizes against stored demands using real checkers. RC: pass Float64[] (inches). Steel: pass String[] (W-shapes).",
+                "args" => Dict("col_idx" => "required Int", "candidates" => "Float64[] or String[]"),
             ),
         ],
-        "note" => "Micro-experiments use cached design data for fast what-if checks. Results are approximate — use run_design for exact verification.",
+        "note" => "Micro-experiments use cached design data and real StructuralSizer checkers. Use run_design for full multi-element verification.",
     )
 end
 
@@ -464,17 +616,22 @@ function evaluate_experiment(
     elseif experiment_type == "catalog_screen"
         col_idx = _coerce_int(get(args, "col_idx", nothing))
         isnothing(col_idx) && return Dict("error" => "missing_col_idx", "message" => "catalog_screen experiment requires col_idx")
-        candidates_raw = get(args, "candidates", Float64[])
-        candidates = Float64[]
+        candidates_raw = get(args, "candidates", Any[])
+        # Accept both numeric (RC) and string (steel) candidates.
+        candidates = Any[]
         for c in candidates_raw
-            v = _coerce_float(c)
-            if isnothing(v)
-                return Dict(
-                    "error" => "invalid_candidates",
-                    "message" => "All candidates must be numeric inches. Got invalid value: $(repr(c))",
-                )
+            if c isa AbstractString
+                push!(candidates, strip(c))
+            else
+                v = _coerce_float(c)
+                if isnothing(v)
+                    return Dict(
+                        "error" => "invalid_candidates",
+                        "message" => "All candidates must be numeric inches (RC) or W-shape strings (steel). Got invalid value: $(repr(c))",
+                    )
+                end
+                push!(candidates, v)
             end
-            push!(candidates, v)
         end
         return experiment_catalog_screen(design, col_idx; candidates)
     else

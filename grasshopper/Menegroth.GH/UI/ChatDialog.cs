@@ -35,6 +35,10 @@ namespace Menegroth.GH.UI
         private readonly string _mode;
         private readonly string _baseUrl;
         private readonly string _geometrySummary;
+        /// <summary>Short structured summary for results mode (shown in chat and merged into API context).</summary>
+        private readonly string _resultsSummary;
+        /// <summary>geometry_summary + results_summary for POST /chat (single field on the server).</summary>
+        private readonly string _contextForApi;
         private readonly JObject? _paramsJson;
         private readonly JObject? _applicabilitySchema;
         private readonly string _sessionId;
@@ -53,7 +57,12 @@ namespace Menegroth.GH.UI
         private readonly Panel _paramDiffPanel;
         private readonly Label _paramDiffLabel;
         private readonly Button _applyParamsButton;
+        private readonly Button _applyAndRunParamsButton;
         private readonly Button _rejectParamsButton;
+        /// <summary>Apply patch to Grasshopper params only (queue for Design Run merge).</summary>
+        private readonly Action<JObject>? _onApplyPatch;
+        /// <summary>Apply patch and request one Design Run (Run input forced true once).</summary>
+        private readonly Action<JObject>? _onApplyAndRunPatch;
 
         // Suggestions panel — populated after each agent turn.
         private readonly Panel _suggestionsPanel;
@@ -103,6 +112,21 @@ namespace Menegroth.GH.UI
         /// <summary>Full conversation transcript (user + assistant messages).</summary>
         public string Transcript => _chatArea?.Text ?? "";
 
+        /// <summary>Staged JSON from the last assistant proposal (before Apply / Reject).</summary>
+        internal JObject? PeekPendingStagedPatch()
+        {
+            if (_pendingProposedParams == null || _pendingProposedParams.Count == 0)
+                return null;
+            return (JObject)_pendingProposedParams.DeepClone();
+        }
+
+        /// <summary>Clear staged proposal after canvas Apply merged it into Grasshopper.</summary>
+        public void DismissStagedProposedParams()
+        {
+            ProposedParams = null;
+            HideParamDiff();
+        }
+
         /// <summary>
         /// Bring this window to the foreground and focus the message input.
         /// Safe to call repeatedly (e.g., when the component Open input is pressed again).
@@ -149,6 +173,12 @@ namespace Menegroth.GH.UI
         ///   When true and there is no initial history, the dialog fires an opening
         ///   analysis automatically on first show.
         /// </param>
+        /// <param name="resultsSummary">
+        ///   Optional short summary when <paramref name="mode"/> is <c>results</c> (e.g. pass/fail, utilization, counts).
+        ///   Shown at the top of the chat and appended to <c>geometry_summary</c> for the model.
+        /// </param>
+        /// <param name="onApplyPatch">When set, Apply merges the JSON patch into the Unified Assistant / Design Run pipeline.</param>
+        /// <param name="onApplyAndRunPatch">When set, Apply &amp; Run merges the patch and triggers one design run.</param>
         public ChatDialog(
             string mode,
             string geometrySummary,
@@ -157,15 +187,22 @@ namespace Menegroth.GH.UI
             DesignResult? result,
             JObject? applicabilitySchema = null,
             List<JObject>? initialHistory = null,
-            bool autoAnalyze = true)
+            bool autoAnalyze = true,
+            string? resultsSummary = null,
+            Action<JObject>? onApplyPatch = null,
+            Action<JObject>? onApplyAndRunPatch = null)
         {
             _mode              = mode;
             _baseUrl           = MenegrothConfig.LastServerUrl;
             _geometrySummary   = geometrySummary ?? "";
+            _resultsSummary    = resultsSummary?.Trim() ?? "";
+            _contextForApi     = BuildCombinedContext(_geometrySummary, _resultsSummary);
             _paramsJson        = currentParams?.ToJson();
             _applicabilitySchema = applicabilitySchema;
             _sessionId         = ComputeSessionId(string.IsNullOrWhiteSpace(sessionSeed) ? geometrySummary : sessionSeed);
             _autoAnalyze       = autoAnalyze;
+            _onApplyPatch      = onApplyPatch;
+            _onApplyAndRunPatch = onApplyAndRunPatch;
 
             Title       = mode == "design" ? "Design Assistant" : "Results Assistant";
             MinimumSize = new Size(660, 520);
@@ -206,15 +243,17 @@ namespace Menegroth.GH.UI
                 Wrap      = WrapMode.Word,
                 TextColor = Color.FromArgb(0x33, 0x33, 0x00),
             };
-            _applyParamsButton = new Button { Text = "Apply", Width = 70 };
+            _applyParamsButton = new Button { Text = "Apply", Width = 72, ToolTip = "Merge patch into params (queue for Design Run on next run)" };
             _applyParamsButton.Click += OnApplyParamsClicked;
-            _rejectParamsButton = new Button { Text = "Reject", Width = 70 };
+            _applyAndRunParamsButton = new Button { Text = "Apply & Run", Width = 100, ToolTip = "Merge patch and start one design run" };
+            _applyAndRunParamsButton.Click += OnApplyAndRunParamsClicked;
+            _rejectParamsButton = new Button { Text = "Reject", Width = 72 };
             _rejectParamsButton.Click += OnRejectParamsClicked;
 
             var diffButtons = new TableLayout
             {
                 Spacing = new Size(5, 0),
-                Rows    = { new TableRow(new TableCell(_paramDiffLabel, true), _applyParamsButton, _rejectParamsButton) }
+                Rows    = { new TableRow(new TableCell(_paramDiffLabel, true), _applyParamsButton, _applyAndRunParamsButton, _rejectParamsButton) }
             };
 
             _paramDiffPanel = new Panel
@@ -400,6 +439,8 @@ namespace Menegroth.GH.UI
                 {
                     Application.Instance.AsyncInvoke(() =>
                     {
+                        if (_mode == "results" && !string.IsNullOrEmpty(_resultsSummary))
+                            AppendChat("Results", _resultsSummary);
                         AppendChat("System", $"[New session — {_sessionId.Substring(0, 8)}]");
                         FireProactiveAnalysis();
                     });
@@ -407,6 +448,18 @@ namespace Menegroth.GH.UI
             }
 
             UpdateInputEnabled();
+        }
+
+        /// <summary>
+        /// Merge building geometry text with a results digest for the single <c>geometry_summary</c> API field.
+        /// </summary>
+        private static string BuildCombinedContext(string geometrySummary, string resultsSummary)
+        {
+            if (string.IsNullOrWhiteSpace(resultsSummary))
+                return geometrySummary ?? "";
+            if (string.IsNullOrWhiteSpace(geometrySummary))
+                return resultsSummary;
+            return geometrySummary + "\n\n" + resultsSummary;
         }
 
         // ─── History loading ──────────────────────────────────────────────────
@@ -511,7 +564,7 @@ namespace Menegroth.GH.UI
             {
                 ["mode"]             = _mode,
                 ["messages"]         = messagesArray,
-                ["geometry_summary"] = _geometrySummary,
+                ["geometry_summary"] = _contextForApi,
                 ["session_id"]       = _sessionId,
             };
             if (_paramsJson != null) requestBody["params"] = _paramsJson;
@@ -661,10 +714,20 @@ namespace Menegroth.GH.UI
 
         private void ShowParamDiff(JObject proposed)
         {
-            var sb = new StringBuilder("Proposed changes: ");
+            var sb = new StringBuilder();
+            if (proposed.TryGetValue("_history_label", out var hl) && hl.Type == JTokenType.String)
+            {
+                var summary = hl.ToString().Trim();
+                if (!string.IsNullOrEmpty(summary))
+                    sb.Append("Summary: ").Append(summary).Append("  |  ");
+            }
+
+            sb.Append("Proposed changes: ");
             bool first = true;
             foreach (var prop in proposed.Properties())
             {
+                if (string.Equals(prop.Name, "_history_label", StringComparison.Ordinal))
+                    continue;
                 if (!first) sb.Append("  |  ");
                 first = false;
 
@@ -691,9 +754,42 @@ namespace Menegroth.GH.UI
 
         private void OnApplyParamsClicked(object? sender, EventArgs e)
         {
-            ProposedParams = _pendingProposedParams;
-            HideParamDiff();
-            AppendChat("System", "[Proposed params accepted]");
+            if (_pendingProposedParams == null || _pendingProposedParams.Count == 0)
+                return;
+
+            var patch = (JObject)_pendingProposedParams.DeepClone();
+            if (_onApplyPatch != null)
+            {
+                _onApplyPatch.Invoke(patch);
+                ProposedParams = null;
+                HideParamDiff();
+                AppendChat("System", "[Patch applied to Design Params / assistant output]");
+            }
+            else
+            {
+                ProposedParams = _pendingProposedParams;
+                HideParamDiff();
+                AppendChat("System", "[Proposed params accepted — toggle Apply on the Unified Assistant component to merge]");
+            }
+        }
+
+        private void OnApplyAndRunParamsClicked(object? sender, EventArgs e)
+        {
+            if (_pendingProposedParams == null || _pendingProposedParams.Count == 0)
+                return;
+
+            var patch = (JObject)_pendingProposedParams.DeepClone();
+            if (_onApplyAndRunPatch != null)
+            {
+                _onApplyAndRunPatch.Invoke(patch);
+                ProposedParams = null;
+                HideParamDiff();
+                AppendChat("System", "[Patch applied — design run started]");
+            }
+            else
+            {
+                AppendChat("System", "[Apply & Run requires Unified Assistant wiring — use Apply on the component]");
+            }
         }
 
         private void OnRejectParamsClicked(object? sender, EventArgs e)

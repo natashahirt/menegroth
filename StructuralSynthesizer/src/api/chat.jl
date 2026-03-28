@@ -264,13 +264,13 @@ COMMUNICATION (explain to the user):
 - clarify_user_intent: Structured multiple-choice clarification payload for the UI.
 
 TOOL SELECTION POLICY — match user intent to tool sequence:
-  START OF CONVERSATION            -> get_situation_card (always, before anything else)
+  START OF CONVERSATION            -> get_situation_card (always, before anything else). If no design in session yet and params are valid, baseline per BASELINE DESIGN block (validate_params → run_design and/or ask user).
   "What is this building?"         -> get_situation_card covers this; get_building_summary if more detail needed
   "Why is element X failing?"      -> get_diagnose_summary → query_elements(ok=false) → narrate_element
   "Why did the solver pick that?"  -> get_solver_trace(tier=failures), drill with tier=decisions or element filter
   "What should I change?"          -> get_diagnose_summary → suggest_next_action(goal) → validate_params
   "Would a bigger column help?"   -> run_experiment(type=punching or pm_column) for instant check
-  "Try changing X"                 -> run_experiment first to preview → validate_params → run_design → compare_designs
+  "Try changing X"                 -> run_experiment first to preview → validate_params → run_design → compare_designs only if get_design_history has ≥2 entries
   "Explain this to me"             -> narrate_element or narrate_comparison
   "Did it help?" / "Compare"       -> compare_designs + get_design_history
   "Does the solver check X?"       -> get_implemented_provisions
@@ -278,9 +278,15 @@ TOOL SELECTION POLICY — match user intent to tool sequence:
   Always start with get_situation_card. Then get_diagnose_summary for failure overview.
   Use get_diagnose or query_elements only when you need specific element detail.
   Use get_solver_trace when the user needs to understand WHY, not just WHAT.
-  Always validate_params before run_design. Always compare_designs after run_design.
+  Always validate_params before run_design. compare_designs is for deltas between two stored session designs — not for a "before/after" unless history has at least two entries.
   After each design iteration, use record_insight to capture what you learned.
   Before making recommendations, check get_session_insights for accumulated learnings.
+
+GEOMETRY HASH / STALE CACHE (when the client sends client_geometry_hash on POST /chat):
+- If geometry_stale is true (or geometry_context.aligned is false), the server's cached structure/design snapshot and element-level tools reflect the last POST /design geometry, not necessarily the Grasshopper model in BUILDING GEOMETRY.
+- get_design_history is still valid: every entry includes geometry_hash. You may compare two runs on the same hash, or contrast summary metrics across geometry changes — use compare_designs and read cross_geometry_comparison / comparison_note; do not treat cross-geometry deltas as a same-model parameter experiment.
+- Do not predict element-level behavior for the current Grasshopper model from stale cached diagnostics; say a Design run is needed for fresh solver output on that model.
+- If geometry_context.aligned is null, the client did not send a hash — treat cached results as authoritative for the server only; still prefer tool calls over guessing.
 
 EVIDENCE-FIRST REASONING:
 Before making any recommendation, you MUST have tool evidence. Follow this protocol:
@@ -288,7 +294,7 @@ Before making any recommendation, you MUST have tool evidence. Follow this proto
   2. CITE: Reference specific ratios, check names, or trace events in your explanation.
   3. CONSULT LEVERS: Call get_lever_map(check=<governing_check>) to see which parameters actually affect this failure.
   4. RECOMMEND: Suggest a parameter change from the lever map, grounded in the evidence.
-  5. VERIFY: Use validate_params → run_design → compare_designs to confirm.
+  5. VERIFY: Use validate_params → run_design to confirm. Use compare_designs only when two designs exist in get_design_history.
   NEVER skip steps 1–3 and jump to recommendations based on general structural knowledge.
   If you catch yourself saying "typically" or "usually" without citing a tool result, stop and call a tool first.
 
@@ -332,6 +338,25 @@ When you recommend a GEOMETRIC change (e.g., "add columns", "reduce column spaci
 When you recommend a PARAMETER change (floor_type, column_type, analysis method, loads, etc.), you MAY call run_design to show a quick result. Always validate_params first.
 """
 
+# Appended to both design and results preambles — prevents fabricated "reduced from X to Y" when no prior design exists in session.
+const _SESSION_DESIGN_HISTORY_RULE = """
+SESSION DESIGN HISTORY — NO FABRICATED BEFORE/AFTER:
+- get_situation_card includes session.n_designs and session.can_compare_deltas (true only when at least two designs are stored this session). get_design_history returns the list and count.
+- NEVER invent a "previous" embodied carbon, rebar weight, concrete volume, or pass/fail. NEVER say "reduced from X to Y", "down from", "improved vs the prior run", or "compared to baseline" unless get_design_history has at least TWO entries OR compare_designs was invoked with two valid indices and you cite those numbers.
+- If n_designs is 0 or 1, report this run only: absolute metrics from tool output (e.g. health.embodied_carbon). Say clearly that there is no earlier design in this session to compare against if the user has not run multiple stored designs.
+- A full Grasshopper DesignRun may not have executed yet; do not treat the chat as "iteration 2" unless session history shows multiple completed designs.
+- Each history entry has geometry_hash. Prefer comparing entries that share the same hash for parameter-only narratives. If the user asks about an older model vs a new one, compare_designs is allowed — explicitly state when cross_geometry_comparison is true and avoid implying element-level equivalence.
+- When geometry_context.geometry_stale is true, cached diagnostics do not describe the current BUILDING GEOMETRY until a Design run completes; history remains useful for past runs and labeled cross-geometry contrasts.
+"""
+
+# Design mode only — establishes a real baseline before iteration language.
+const _DESIGN_MODE_BASELINE_WORKFLOW = """
+BASELINE DESIGN (this mode only):
+- After get_situation_card, if there is no completed design in this API session yet (has_design is false, or session.n_designs is 0), you do not have solver-backed results to cite. Establish a baseline before discussing "changes" or optimizations.
+- If the current parameters are valid (call validate_params; no blocking errors), prefer one of: (1) run run_design to create a baseline result for the session, or (2) ask the user once before running, for example: "Do you want to run a design with these parameters now to get a baseline result, or keep adjusting parameters in chat first?" If they choose to run, use validate_params then run_design.
+- Once a baseline exists (n_designs >= 1), you can discuss follow-up runs and use compare_designs only when can_compare_deltas is true.
+"""
+
 const _DESIGN_SYSTEM_PREAMBLE = """
 You are a structural engineering design assistant for the Menegroth automated design system.
 Your role is to help the user choose appropriate design parameters for their building.
@@ -340,22 +365,25 @@ IMPORTANT RULES:
 - All code provisions (ACI 318, AISC 360, ASCE 7) are enforced by the solver — rely on tool outputs for code-level detail. Do not invent or cite specific code clauses unless a tool result provides them.
 - If you are uncertain about a parameter, ask the user a clarifying question.
 - When recommending parameter changes, output a JSON code block with only the changed fields.
+- In that same JSON object, always include a top-level string field `_history_label` (exact key) with a VERY brief label (≤6 words, no quotes/newlines) summarizing the change for the Grasshopper params history list (e.g. `"_history_label": "Increase floor live load"`). It is metadata only — not a structural parameter.
 - Explain your reasoning by referencing solver results (check ratios, governing checks, code_clause fields). If no tool output covers the point, say so rather than guessing.
 - Ask guiding questions to understand the project: occupancy, spans, desired aesthetics, sustainability goals.
 
+$_DESIGN_MODE_BASELINE_WORKFLOW
+
 GEOMETRY AND IRREGULARITY:
-- The building geometry may be irregular: L-shaped plans, setbacks, varying story heights, non-rectangular bays, free-form column layouts, mixed panel shapes.
-- Do NOT assume a rectangular plan or uniform grid. Read the geometry summary carefully.
-- If the geometry summary indicates irregularity (varying plan extents, non-rectangular grid, triangular panels, varying member counts per level), factor this into every recommendation.
-- Irregular geometries may require special attention to: torsional effects, transfer beams at setbacks, varying slab panel sizes, column load redistribution, and diaphragm continuity.
-- When span lengths are highly variable (high CV), a single floor_type may not be optimal for all bays — note this to the user.
+- True plan irregularity (setbacks, re-entrant corners, non-orthogonal grids, free-form columns) must be inferred from geometry cues: vertical regularity lines, grid-pattern / column-position section, floor panel shapes (quads vs triangles), and tool outputs — NOT from span-length CV alone.
+- Span CV in summaries aggregates ALL beam edge lengths (X-oriented, Y-oriented, etc.). Different bay sizes in X vs Y produce a high CV even on a perfectly rectangular orthogonal grid — that is normal, not "irregular spans."
+- Do NOT claim torsional effects or "irregular geometry" from beam span variability or span_stats.cv alone. get_building_summary includes slab_panel_plan (slab face outlines in plan): use plan_shape_classification and quad corner deviation from 90° to distinguish non-orthogonal/skewed panels from an orthogonal grid with different X vs Y bay sizes. Read span_cv_note; use get_applicability (and DDM/EFM applicability rules) when discussing whether the slab method fits the actual grid and panels.
+- When story heights vary significantly, the geometry summary flags vertical irregularity — that is separate from plan regularity.
 - For non-rectangular column layouts, closest-spacing values are more meaningful than gridline spacings.
 $_TOOLS_GUIDANCE
+$_SESSION_DESIGN_HISTORY_RULE
 $_CLARIFICATION_INSTRUCTION
 $_NEXT_QUESTIONS_INSTRUCTION
 
 KEY PARAMETERS (use explain_field for full detail on any parameter):
-  floor_type:        flat_plate | flat_slab | one_way | vault — controls floor system, biggest design lever
+  floor_type:        flat_plate | flat_slab | one_way | vault — biggest system lever. flat_plate vs flat_slab: same two-way slab pipeline (DDM/EFM/FEA from method); flat_slab adds solver-built drop panels at columns (extra depth for punching / column region) while flat_plate does not inject drops. one_way and vault use different solver paths.
   column_type:       rc_rect | rc_circular | steel_w | steel_hss | pixelframe
   beam_type:         steel_w | rc_rect | rc_tbeam | steel_hss | pixelframe
   method:            DDM | DDM_SIMPLIFIED | EFM | EFM_HARDY_CROSS | FEA — analysis method for slab design
@@ -379,34 +407,72 @@ IMPORTANT RULES:
 - If a check fails, explain what it means physically and suggest parameter changes that might help.
 - Code provisions are enforced by the solver — quote code_clause and limit_state_description fields from results rather than inventing clause numbers or formulas.
 - When suggesting parameter changes, output a JSON code block with only the changed fields.
+- In that same JSON object, include `_history_label` (string): VERY brief (≤6 words) summary for the params history UI, same rules as design mode.
 
 GEOMETRY AND IRREGULARITY:
-- The building geometry may be irregular. Read the geometry summary carefully — do not assume a simple rectangular plan.
-- Irregular geometries often cause localized failures: re-entrant corners concentrate stress, setbacks create load-path discontinuities, non-uniform bays produce uneven demand-capacity ratios.
-- When discussing failing elements, correlate their location with geometry features (e.g., "this column is at a setback transition" or "this beam spans a non-rectangular bay").
-- If member counts vary by level, there may be transfer conditions — flag these as critical.
+- Do not attribute failures to "irregular geometry" based only on beam span statistics or CV — use slab_panel_plan / plan_shape_classification (situation card geometry includes the same summary) and get_applicability, not span_stats alone.
+- When discussing failing elements, correlate with real geometry features when tools/summary support them: re-entrant corners, setbacks, non-orthogonal grids, triangular panels — not merely different span lengths in X vs Y.
+- If member counts vary by level, there may be transfer conditions — flag when the geometry summary shows that.
 $_TOOLS_GUIDANCE
+$_SESSION_DESIGN_HISTORY_RULE
 $_CLARIFICATION_INSTRUCTION
 $_NEXT_QUESTIONS_INSTRUCTION
 DESIGN RESULTS SUMMARY:
 """
 
-function _build_system_prompt(mode::String, params_json, geometry_summary::String)
+"""True when client hash is present and differs from the server's cached POST /design geometry."""
+function _geometry_stale_for_client(client_geometry_hash::String)::Bool
+    cli = strip(client_geometry_hash)
+    srv = strip(DESIGN_CACHE.geometry_hash)
+    !isempty(cli) && !isempty(srv) && cli != srv
+end
+
+"""Merge geometry alignment fields into tool JSON for the LLM (optional client_geometry_hash in args)."""
+function _attach_geometry_alignment!(result::Dict{String, Any}, args::Dict{String, Any})
+    cli = strip(string(get(args, "client_geometry_hash", "")))
+    isempty(cli) && return result
+    srv = strip(DESIGN_CACHE.geometry_hash)
+    result["client_geometry_hash"] = cli
+    result["server_cached_geometry_hash"] = srv
+    result["geometry_stale"] = !isempty(srv) && cli != srv
+    return result
+end
+
+function _build_system_prompt(mode::String, params_json, geometry_summary::String, client_geometry_hash::String = "")
+    stale = _geometry_stale_for_client(client_geometry_hash)
+    stale_note = if stale
+        cli = strip(client_geometry_hash)
+        srv = strip(DESIGN_CACHE.geometry_hash)
+        """
+
+GEOMETRY / CACHE MISMATCH (MANDATORY):
+- client_geometry_hash (current Grasshopper model): $cli
+- server_cached_geometry_hash (last completed POST /design on this server): $srv
+The BUILDING GEOMETRY section below describes the CURRENT Grasshopper model.
+Any \"LATEST RESULTS\" or \"DETAILED RESULTS\" section would refer to the SERVER hash above — a different model. Those sections are OMITTED from this prompt because they would mislead you.
+Do not estimate forces, utilization ratios, pass/fail, embodied carbon, or element-level behavior for the current geometry using old cache data. Tell the user to run Design in Grasshopper so POST /design refreshes the server for this geometry. You may still discuss parameters, scope, qualitative structural concepts, and past runs via get_design_history / compare_designs (use geometry_hash and comparison_note).
+"""
+    else
+        ""
+    end
+
     if mode == "design"
         parts = [_DESIGN_SYSTEM_PREAMBLE]
+        !isempty(stale_note) && push!(parts, stale_note)
         if !isempty(geometry_summary)
             push!(parts, "\n\nBUILDING GEOMETRY:\n", geometry_summary)
         end
         if !isnothing(params_json) && !isempty(string(params_json))
             push!(parts, "\n\nCURRENT PARAMETERS:\n", JSON3.write(params_json))
         end
-        if !isnothing(DESIGN_CACHE.last_design)
+        if !stale && !isnothing(DESIGN_CACHE.last_design)
             push!(parts, "\n\nLATEST RESULTS SUMMARY:\n", condense_result(DESIGN_CACHE.last_design))
         end
         return join(parts)
     elseif mode == "results"
         parts = [_RESULTS_SYSTEM_PREAMBLE]
-        if !isnothing(DESIGN_CACHE.last_design)
+        !isempty(stale_note) && push!(parts, stale_note)
+        if !stale && !isnothing(DESIGN_CACHE.last_design)
             push!(parts, condense_result(DESIGN_CACHE.last_design))
             push!(parts, "\n\nDETAILED RESULTS:\n", JSON3.write(report_summary_json(DESIGN_CACHE.last_design)))
         end
@@ -549,7 +615,7 @@ end
 
 # ─── LLM streaming client ────────────────────────────────────────────────────
 
-const MAX_AGENT_TOOL_ROUNDS = 4
+const MAX_AGENT_TOOL_ROUNDS = 8
 
 """Read dictionary values by string/symbol key with fallback."""
 function _dict_get(d, key::String, default=nothing)
@@ -764,6 +830,7 @@ function _stream_llm_to_sse(
     system_prompt::String,
     messages::Vector;
     session_id::String = "",
+    client_geometry_hash::String = "",
 )
     base_url = _chat_llm_base_url()
     api_key  = _chat_llm_api_key()
@@ -854,7 +921,15 @@ function _stream_llm_to_sse(
                             "raw_arguments" => args_json,
                         )
                     else
+                        if !isempty(client_geometry_hash)
+                            args_dict["client_geometry_hash"] = client_geometry_hash
+                        end
                         _dispatch_chat_tool(tool_name, args_dict)
+                    end
+                    if !isnothing(args_dict)
+                        _attach_geometry_alignment!(result, args_dict)
+                    elseif !isempty(client_geometry_hash)
+                        _attach_geometry_alignment!(result, Dict{String, Any}("client_geometry_hash" => client_geometry_hash))
                     end
                     elapsed_ms = round(Int, (time() - t0) * 1000)
 
@@ -883,6 +958,48 @@ function _stream_llm_to_sse(
 
             full_text = assistant_content
             break
+        end
+
+        # The model may exhaust tool rounds or keep emitting tool calls without a final text turn.
+        # Request one non-tool completion that summarizes tool results so the user always gets prose.
+        if isempty(full_text) && !isempty(tool_actions)
+            synth_conv = copy(conversation)
+            push!(synth_conv, Dict{String, Any}(
+                "role" => "user",
+                "content" =>
+                    "Summarize the tool results above for the user in complete sentences. " *
+                    "If any tool returned an error, explain it and suggest recovery. " *
+                    "If compare_designs or two run_design results are needed for a 'difference', say what is still missing. " *
+                    "Do not call tools.",
+            ))
+            synth_payload = Dict{String, Any}(
+                "model" => model,
+                "messages" => synth_conv,
+                "stream" => false,
+            )
+            try
+                rs = HTTP.post(
+                    url,
+                    headers,
+                    JSON3.write(synth_payload);
+                    connect_timeout=10,
+                    readtimeout=120,
+                    status_exception=false,
+                    cookies=false,
+                )
+                if rs.status < 400
+                    resp2 = JSON3.read(String(rs.body))
+                    choices2 = get(resp2, :choices, nothing)
+                    if choices2 isa AbstractVector && !isempty(choices2)
+                        msg2 = get(choices2[1], :message, nothing)
+                        if !isnothing(msg2)
+                            full_text = _coerce_message_content(get(msg2, :content, nothing))
+                        end
+                    end
+                end
+            catch e
+                @warn "Chat synthesis pass failed" exception=(e,)
+            end
         end
 
         if isempty(full_text) && !isempty(tool_actions)
@@ -1149,7 +1266,14 @@ function _dispatch_chat_tool(tool::String, args::Dict{String, Any})::Dict{String
 
     # ── Phase 1: Orientation ────────────────────────────────────────────────
     elseif tool == "get_situation_card"
-        return agent_situation_card(DESIGN_CACHE.structure, DESIGN_CACHE.last_design, get_design_history_entries())
+        cli = string(get(args, "client_geometry_hash", ""))
+        return agent_situation_card(
+            DESIGN_CACHE.structure,
+            DESIGN_CACHE.last_design,
+            get_design_history_entries();
+            server_geometry_hash = DESIGN_CACHE.geometry_hash,
+            client_geometry_hash = cli,
+        )
 
     elseif tool == "get_building_summary"
         isnothing(DESIGN_CACHE.structure) && return Dict("error" => "no_geometry", "message" => "No geometry loaded. Submit geometry via POST /design first.", "recovery_hint" => _NO_GEOMETRY_HINT)
@@ -1307,6 +1431,15 @@ function _dispatch_chat_tool(tool::String, args::Dict{String, Any})::Dict{String
         rules  = get(compat, "rules", Any[])
 
         param_patch  = Dict{String, Any}(string(k) => v for (k, v) in get(args, "params", Dict()))
+        if isempty(param_patch)
+            return Dict{String, Any}(
+                "ok" => true,
+                "violations" => String[],
+                "note" =>
+                    "Empty args.params: no compatibility rules were evaluated. " *
+                    "Pass a non-empty patch (e.g. {\"punching_strategy\": \"reinforce_last\"}) to check floor/column/beam rules from the applicability schema.",
+            )
+        end
         floor_type   = get(param_patch, "floor_type", nothing)
         column_type  = get(param_patch, "column_type", nothing)
         beam_type    = get(param_patch, "beam_type", nothing)
@@ -1412,7 +1545,8 @@ function _dispatch_chat_tool(tool::String, args::Dict{String, Any})::Dict{String
 
         design_task = @async begin
             try
-                d = design_building(DESIGN_CACHE.structure, fast_params)
+                tc = TraceCollector()
+                d = design_building(DESIGN_CACHE.structure, fast_params; tc=tc)
                 DESIGN_CACHE.last_design = d
                 DESIGN_CACHE.last_result = design_to_json(d; geometry_hash=DESIGN_CACHE.geometry_hash)
                 result_ref[] = d
@@ -1465,6 +1599,7 @@ function _dispatch_chat_tool(tool::String, args::Dict{String, Any})::Dict{String
                  count(p -> !(p.second.converged && p.second.deflection_ok && p.second.punching_ok), design.slabs) +
                  count(p -> !p.second.ok, design.foundations)
         record_design_history!(DesignHistoryEntry(;
+            geometry_hash    = DESIGN_CACHE.geometry_hash,
             params_patch     = patch_dict,
             all_pass         = s.all_checks_pass,
             critical_ratio   = s.critical_ratio,
@@ -1587,9 +1722,10 @@ function register_chat_routes!()
             return
         end
 
-        params_json      = get(parsed, :params, nothing)
-        geometry_summary = string(get(parsed, :geometry_summary, ""))
-        session_id       = string(get(parsed, :session_id, ""))
+        params_json           = get(parsed, :params, nothing)
+        geometry_summary      = string(get(parsed, :geometry_summary, ""))
+        session_id            = string(get(parsed, :session_id, ""))
+        client_geometry_hash  = string(get(parsed, :client_geometry_hash, ""))
 
         # Persist the latest user message to server-side history.
         if !isempty(session_id) && !isempty(messages)
@@ -1599,7 +1735,7 @@ function register_chat_routes!()
             _append_history!(session_id, role, content)
         end
 
-        system_prompt = _build_system_prompt(mode, params_json, geometry_summary)
+        system_prompt = _build_system_prompt(mode, params_json, geometry_summary, client_geometry_hash)
         budgeted      = _budget_messages(system_prompt, messages, MAX_CONTEXT_TOKENS)
 
         HTTP.setstatus(stream, 200)
@@ -1608,7 +1744,7 @@ function register_chat_routes!()
         HTTP.setheader(stream, "Connection"    => "keep-alive")
         startwrite(stream)
 
-        _stream_llm_to_sse(stream, system_prompt, budgeted; session_id=session_id)
+        _stream_llm_to_sse(stream, system_prompt, budgeted; session_id=session_id, client_geometry_hash=client_geometry_hash)
     end
 
     # ── POST /chat/action ────────────────────────────────────────────────────
@@ -1641,8 +1777,14 @@ function register_chat_routes!()
             Dict{String, Any}() :
             Dict{String, Any}(string(k) => v for (k, v) in args_raw)
 
+        client_gh = string(get(parsed, :client_geometry_hash, ""))
+        if !isempty(client_gh)
+            args["client_geometry_hash"] = client_gh
+        end
+
         t0     = time()
         result = _dispatch_chat_tool(tool, args)
+        _attach_geometry_alignment!(result, args)
         elapsed_ms = round(Int, (time() - t0) * 1000)
 
         result["_tool"]       = tool

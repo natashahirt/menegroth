@@ -1,4 +1,6 @@
 using System;
+using System.Threading;
+using Newtonsoft.Json.Linq;
 
 namespace Menegroth.GH.Config
 {
@@ -28,6 +30,47 @@ namespace Menegroth.GH.Config
 
         // ─── UI / Solution scheduling ──────────────────────────────────────
         public const int ScheduleSolutionIntervalMs = 100;
+
+        /// <summary>
+        /// Assistant Apply queues a JSON params patch here; <see cref="Components.DesignRun"/> consumes it
+        /// and merges into wired params. This avoids wiring Unified Assistant → Design Run Params (recursive data stream).
+        /// </summary>
+        private static readonly object AssistantParamsPatchLock = new object();
+        private static JObject? _queuedAssistantParamsPatch;
+
+        /// <summary>Queue a patch for the next <see cref="Components.DesignRun"/> solve (merged after reading Design Params wire).</summary>
+        public static void QueueAssistantParamsPatch(JObject? patch)
+        {
+            if (patch == null || patch.Count == 0)
+                return;
+            lock (AssistantParamsPatchLock)
+            {
+                _queuedAssistantParamsPatch = (JObject)patch.DeepClone();
+            }
+        }
+
+        /// <summary>Take queued patch for merge, or null if none.</summary>
+        public static JObject? TryConsumeAssistantParamsPatch()
+        {
+            lock (AssistantParamsPatchLock)
+            {
+                var p = _queuedAssistantParamsPatch;
+                _queuedAssistantParamsPatch = null;
+                return p;
+            }
+        }
+
+        private static int _designRunRequestedAfterAssistantPatch;
+
+        /// <summary>
+        /// Unified Assistant "Apply &amp; Run" sets this; the next <see cref="Components.DesignRun"/> solve treats Run as true once.
+        /// </summary>
+        public static void RequestDesignRunAfterAssistantPatch() =>
+            Interlocked.Exchange(ref _designRunRequestedAfterAssistantPatch, 1);
+
+        /// <summary>Returns true once after a request, then clears the flag.</summary>
+        public static bool TryConsumeDesignRunRequest() =>
+            Interlocked.Exchange(ref _designRunRequestedAfterAssistantPatch, 0) == 1;
 
         // ─── Geometry ─────────────────────────────────────────────────────
         public const double GeometryTolerance = 1e-6;

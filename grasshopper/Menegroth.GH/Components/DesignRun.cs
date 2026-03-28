@@ -82,7 +82,7 @@ namespace Menegroth.GH.Components
                 GH_ParamAccess.item);
 
             pManager.AddGenericParameter("Params", "Params",
-                "DesignParams from the DesignParams component",
+                "Design Params from the Design Params component only. Assistant patches merge here on Run (do not wire Unified Assistant output into this input).",
                 GH_ParamAccess.item);
 
             pManager.AddTextParameter("Server URL", "ServerUrl",
@@ -325,6 +325,9 @@ namespace Menegroth.GH.Components
             DA.GetData(2, ref urlInput);
             DA.GetData(3, ref run);
 
+            if (MenegrothConfig.TryConsumeDesignRunRequest())
+                run = true;
+
             string url = string.IsNullOrWhiteSpace(urlInput) ? _serverUrl : urlInput;
             _serverUrl = url;
             MenegrothConfig.LastServerUrl = url;
@@ -403,10 +406,20 @@ namespace Menegroth.GH.Components
             // 5. Check for unchanged inputs
             var geo = geoGoo.Value;
             var prms = paramsGoo.Value;
+            var assistantPatch = MenegrothConfig.TryConsumeAssistantParamsPatch();
+            bool hadAssistantPatch = assistantPatch != null;
+            if (assistantPatch != null)
+            {
+                prms = prms.Clone();
+                prms.MergeFromJson(assistantPatch);
+            }
+
             string geoHash = geo.ComputeHash();
             string paramsHash = prms.ComputeHash() + (_enableVisualization ? "" : "|noviz");
 
-            if (geoHash == _lastGeoHash && paramsHash == _lastParamsHash && _lastParsed != null)
+            // Assistant-queued patches must always bypass this cache: MergeFromJson may be a no-op if the
+            // model uses keys we do not map, or the wire already matched the last run while a patch was pending.
+            if (geoHash == _lastGeoHash && paramsHash == _lastParamsHash && _lastParsed != null && !hadAssistantPatch)
             {
                 // If report units changed, re-fetch report in background
                 if (_reportUnitsOverride != _lastReportUnitsOverride)

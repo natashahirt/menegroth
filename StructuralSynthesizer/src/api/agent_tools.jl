@@ -8,6 +8,181 @@
 
 using Statistics: mean, std
 
+# ─── Slab panel plan metrics (face outlines, XY — not beam spans) ─────────────
+
+function _slab_face_indices(skel::BuildingSkeleton)::Vector{Int}
+    g = get(skel.groups_faces, :slabs, Int[])
+    return !isempty(g) ? Int[gi for gi in g] : collect(1:length(skel.faces))
+end
+
+function _panel_xy_outline(skel::BuildingSkeleton, face_idx::Int)::Vector{NTuple{2,Float64}}
+    vidx = skel.face_vertex_indices[face_idx]
+    return map(vi -> begin
+        c = vertex_coords(skel, vi)
+        (c.x, c.y)
+    end, vidx)
+end
+
+function _polygon_edge_lengths_m(pts::Vector{NTuple{2,Float64}})::Vector{Float64}
+    n = length(pts)
+    n < 2 && return Float64[]
+    ls = Float64[]
+    @inbounds for i in 1:n
+        j = i == n ? 1 : i + 1
+        push!(ls, hypot(pts[j][1] - pts[i][1], pts[j][2] - pts[i][2]))
+    end
+    return ls
+end
+
+"""Interior angles (degrees) at each vertex of a simple polygon in the XY plane."""
+function _polygon_interior_angles_deg(pts::Vector{NTuple{2,Float64}})::Vector{Float64}
+    n = length(pts)
+    n < 3 && return Float64[]
+    angs = Float64[]
+    @inbounds for i in 1:n
+        im = i == 1 ? n : i - 1
+        ip = i == n ? 1 : i + 1
+        p_im, p_i, p_ip = pts[im], pts[i], pts[ip]
+        v1x, v1y = p_im[1] - p_i[1], p_im[2] - p_i[2]
+        v2x, v2y = p_ip[1] - p_i[1], p_ip[2] - p_i[2]
+        nv1 = hypot(v1x, v1y)
+        nv2 = hypot(v2x, v2y)
+        (nv1 < 1e-9 || nv2 < 1e-9) && continue
+        d = clamp((v1x * v2x + v1y * v2y) / (nv1 * nv2), -1.0, 1.0)
+        push!(angs, rad2deg(acos(d)))
+    end
+    return angs
+end
+
+"""
+    _agent_slab_panel_plan_metrics(skel) -> Union{Nothing, Dict}
+
+Per-slab-face outline analysis in plan (XY): topology (tri/quad/other), corner
+orthogonality for quads, and per-panel edge aspect ratio (max/min boundary edge).
+Used to separate true non-orthogonal / mixed-panel plans from “different X vs Y
+bay sizes” on an orthogonal grid (which mostly shows up in beam span CV, not here).
+"""
+function _agent_slab_panel_plan_metrics(skel::BuildingSkeleton)::Union{Nothing, Dict{String, Any}}
+    faces_idx = _slab_face_indices(skel)
+    isempty(faces_idx) && return nothing
+
+    n_tri = 0
+    n_quad = 0
+    n_oth = 0
+    panel_aspects = Float64[]
+    quad_corner_devs = Float64[]
+    quad_panel_max_dev = Float64[]
+    n_quad_orthogonal = 0
+
+    for fi in faces_idx
+        (fi < 1 || fi > length(skel.face_vertex_indices)) && continue
+        pts = _panel_xy_outline(skel, fi)
+        nv = length(pts)
+        if nv == 3
+            n_tri += 1
+        elseif nv == 4
+            n_quad += 1
+        else
+            n_oth += 1
+        end
+        ls = _polygon_edge_lengths_m(pts)
+        if !isempty(ls)
+            mn = minimum(ls)
+            mx = maximum(ls)
+            if mn > 1.0e-4
+                push!(panel_aspects, mx / mn)
+            end
+        end
+        if nv == 4
+            angs = _polygon_interior_angles_deg(pts)
+            if length(angs) == 4
+                devs = [abs(a - 90.0) for a in angs]
+                append!(quad_corner_devs, devs)
+                push!(quad_panel_max_dev, maximum(devs))
+                if mean(devs) < 6.0
+                    n_quad_orthogonal += 1
+                end
+            end
+        end
+    end
+
+    n_panels = length(faces_idx)
+    n_panels == 0 && return nothing
+
+    tri_frac = n_tri / n_panels
+    aspect_stats = if length(panel_aspects) > 1
+        μ = mean(panel_aspects)
+        cv = std(panel_aspects) / μ
+        Dict{String, Any}(
+            "mean" => round(μ; digits=3),
+            "cv"   => round(cv; digits=3),
+            "min"  => round(minimum(panel_aspects); digits=3),
+            "max"  => round(maximum(panel_aspects); digits=3),
+            "n"    => length(panel_aspects),
+        )
+    elseif length(panel_aspects) == 1
+        Dict{String, Any}(
+            "mean" => round(panel_aspects[1]; digits=3),
+            "cv"   => 0.0,
+            "min"  => round(panel_aspects[1]; digits=3),
+            "max"  => round(panel_aspects[1]; digits=3),
+            "n"    => 1,
+        )
+    else
+        nothing
+    end
+
+    q_mean_dev = isempty(quad_corner_devs) ? nothing : mean(quad_corner_devs)
+    q_max_dev = isempty(quad_panel_max_dev) ? nothing : maximum(quad_panel_max_dev)
+
+    # Plan-shape classification from slab cells (not from beam spans).
+    classification = "no_slab_faces"
+    if n_panels == 0
+        classification = "no_slab_faces"
+    elseif n_oth > 0 || tri_frac > 0.35 || (n_quad == 0 && n_tri > 0)
+        classification = "triangular_mixed_or_complex_panels"
+    elseif n_quad > 0 && !isnothing(q_mean_dev) && !isnothing(q_max_dev) &&
+           (q_mean_dev > 8.0 || q_max_dev > 15.0)
+        classification = "non_orthogonal_or_skewed_quads"
+    elseif n_quad > 0 && !isnothing(aspect_stats) && !isnothing(q_mean_dev) &&
+           aspect_stats["cv"] > 0.28 && q_mean_dev <= 8.0
+        classification = "orthogonal_cells_variable_bay_aspect"
+    elseif n_quad > 0 && !isnothing(q_mean_dev) && q_mean_dev <= 8.0
+        classification = "orthogonal_rectangular_cells"
+    else
+        classification = "undetermined_mixed_topology"
+    end
+
+    ortho_frac = n_quad > 0 ? n_quad_orthogonal / n_quad : nothing
+
+    return Dict{String, Any}(
+        "basis" => "slab_face_outlines_projected_to_xy",
+        "n_panels" => n_panels,
+        "topology" => Dict{String, Any}(
+            "triangular"     => n_tri,
+            "quadrilateral"  => n_quad,
+            "other_vertex_count" => n_oth,
+        ),
+        "triangular_fraction" => round(tri_frac; digits=3),
+        "quad_corner_deviation_from_90_deg" =>
+            (isnothing(q_mean_dev) && isnothing(q_max_dev)) ? nothing :
+            Dict{String, Any}(
+                "mean" => round(something(q_mean_dev, 0.0); digits=2),
+                "max"  => round(something(q_max_dev, 0.0); digits=2),
+            ),
+        "fraction_of_quads_orthogonal_mean_dev_lt_6_deg" =>
+            isnothing(ortho_frac) ? nothing : round(ortho_frac; digits=3),
+        "panel_edge_aspect_ratio_max_over_min" => aspect_stats,
+        "plan_shape_classification" => classification,
+        "interpretation" =>
+            "Use this block (slab face outlines) for plan irregularity vs orthogonal grids. " *
+            "Beam span_stats mix all frame edges and are misleading for plan regularity when X and Y bay sizes differ. " *
+            "orthogonal_cells_variable_bay_aspect = rectangular panels with ~90° corners but different cell proportions across the floor; " *
+            "non_orthogonal_or_skewed_quads = corners deviate from 90°; triangular_mixed_or_complex_panels = triangulated or non-quad dominant layouts. " *
+            "Angles use XY projection (typical for level slabs); strongly sloped or warped faces may distort corner metrics.",
+    )
+end
+
 # ─── Phase 1: Orientation ─────────────────────────────────────────────────────
 
 """
@@ -47,6 +222,7 @@ function agent_building_summary(struc::BuildingStructure)::Dict{String, Any}
         μ  = mean(beam_lengths)
         cv = length(beam_lengths) > 1 ? std(beam_lengths) / μ : 0.0
         Dict{String, Any}(
+            "basis"  => "beam_frame_edges_all_directions",
             "min_m"  => round(mn; digits=2),
             "max_m"  => round(mx; digits=2),
             "mean_m" => round(μ;  digits=2),
@@ -67,18 +243,20 @@ function agent_building_summary(struc::BuildingStructure)::Dict{String, Any}
         nothing
     end
 
-    # Regularity classification
+    # Span length CV mixes all beam edges (X- and Y-oriented). Different orthogonal bay sizes
+    # inflate CV — do NOT treat that as "plan irregularity". Regularity here = story-height variation only.
+    span_diversity = nothing
+    if !isnothing(span_stats)
+        cv = span_stats["cv"]
+        span_diversity = cv <= 0.15 ? "low" : (cv <= 0.30 ? "moderate" : "high")
+    end
+
     regularity = "regular"
-    if !isnothing(span_stats) && span_stats["cv"] > 0.15
-        regularity = "irregular_spans"
-    end
     if !isempty(story_heights) && maximum(story_heights) - minimum(story_heights) > 0.3
-        if regularity == "regular"
-            regularity = "irregular_heights"
-        else
-            regularity = "irregular_spans_and_heights"
-        end
+        regularity = "irregular_story_heights"
     end
+
+    slab_panel_plan = _agent_slab_panel_plan_metrics(skel)
 
     # Structural semantics: flags that help the LLM identify important characteristics
     flags = String[]
@@ -89,7 +267,19 @@ function agent_building_summary(struc::BuildingStructure)::Dict{String, Any}
             push!(flags, "long_spans_over_30ft")
         end
         if span_stats !== nothing && span_stats["cv"] > 0.25
-            push!(flags, "highly_variable_spans")
+            # Beam graph only — not plan irregularity; see slab_panel_plan for cell shape.
+            push!(flags, "diverse_beam_edge_lengths")
+        end
+    end
+
+    if !isnothing(slab_panel_plan)
+        cls = string(slab_panel_plan["plan_shape_classification"])
+        if cls == "non_orthogonal_or_skewed_quads"
+            push!(flags, "non_orthogonal_slab_panel_corners")
+        elseif cls == "triangular_mixed_or_complex_panels"
+            push!(flags, "mixed_or_triangulated_slab_panels")
+        elseif cls == "orthogonal_cells_variable_bay_aspect"
+            push!(flags, "orthogonal_grid_different_bay_sizes_in_plan")
         end
     end
 
@@ -131,6 +321,40 @@ function agent_building_summary(struc::BuildingStructure)::Dict{String, Any}
         "regularity"    => regularity,
     )
 
+    if !isnothing(span_diversity)
+        result["span_diversity"] = span_diversity
+    end
+    if !isnothing(slab_panel_plan)
+        result["slab_panel_plan"] = slab_panel_plan
+    end
+    result["span_cv_note"] =
+        "span_stats.cv uses all beam/frame edge lengths (see span_stats.basis). That mixes X- and Y-oriented members, so different orthogonal bay sizes in X vs Y inflate CV — that is not plan irregularity. " *
+        "For irregularity vs rectangular bays, use slab_panel_plan: it is derived from slab face outlines in plan (XY), including quad corner deviation from 90° and per-panel edge aspect ratio; see plan_shape_classification and interpretation."
+
+    if !isnothing(DESIGN_CACHE.last_design)
+        ftc = _floor_type_code(DESIGN_CACHE.last_design.params)
+        sol_note = if ftc == "flat_plate"
+            "Uses the two-way flat-plate sizing pipeline (DDM/EFM/FEA per floor_options). " *
+                "No drop-panel geometry is injected; punching and thickness are based on the uniform slab depth at the column region unless studs/column growth change the check outcome."
+        elseif ftc == "flat_slab"
+            "Uses the same two-way sizing pipeline as flat_plate, but the solver builds drop-panel geometry (depth/plan extent from FlatSlabOptions or auto-sizing) and passes it through that pipeline so column-region checks use the extra concrete depth/footprint — primary structural distinction vs flat_plate. " *
+                "Visualization JSON may include drop panel patches/meshes."
+        elseif ftc == "one_way"
+            "Different floor system path than two-way plate/slab (one-way slab-and-beam assumptions in the solver)."
+        elseif ftc == "vault"
+            "Shell/vault sizing path (thrust, geometry from vault options) — not the flat-plate pipeline."
+        else
+            "See explain_field(\"floor_type\") and solver outputs for this floor system."
+        end
+        result["floor_system"] = Dict{String, Any}(
+            "floor_type"   => ftc,
+            "description"  => get(_FLOOR_NAMES, ftc, ftc),
+            "source"       => "last_completed_design_parameters",
+            "note"         =>
+                "floor_type is an API / DesignParameters choice — not inferred from slab panel outlines. " * sol_note,
+        )
+    end
+
     if !isempty(flags)
         result["structural_flags"] = flags
     end
@@ -167,18 +391,43 @@ function agent_current_params(design::BuildingDesign)::Dict{String, Any}
 end
 
 """
-    agent_situation_card(struc, design, history) -> Dict{String, Any}
+    agent_situation_card(struc, design, history; server_geometry_hash="", client_geometry_hash="") -> Dict{String, Any}
 
 Single-call orientation snapshot. Combines geometry overview, resolved params,
 results health, and session history status into one compact payload so the
 LLM can orient itself without multiple tool calls.
+
+When `client_geometry_hash` is provided and differs from `server_geometry_hash`,
+`geometry_stale` is true: cached `geometry` / `health` / `params` describe the
+last POST /design model, not necessarily the client's current Grasshopper geometry.
 """
 function agent_situation_card(
     struc::Union{BuildingStructure, Nothing},
     design::Union{BuildingDesign, Nothing},
-    history::Vector{DesignHistoryEntry},
+    history::Vector{DesignHistoryEntry};
+    server_geometry_hash::String = "",
+    client_geometry_hash::String = "",
 )::Dict{String, Any}
     card = Dict{String, Any}("has_geometry" => !isnothing(struc), "has_design" => !isnothing(design))
+
+    srv = strip(server_geometry_hash)
+    cli = strip(client_geometry_hash)
+    aligned = isempty(cli) || isempty(srv) ? nothing : cli == srv
+    geometry_stale = aligned === false
+    card["geometry_context"] = Dict{String, Any}(
+        "server_cached_geometry_hash" => srv,
+        "client_geometry_hash"        => cli,
+        "aligned"                     => aligned,
+        "geometry_stale"              => geometry_stale,
+    )
+    if geometry_stale
+        card["geometry_context"]["note"] =
+            "Cached structure/design snapshot below is for server_cached_geometry_hash, not necessarily the current Grasshopper model. " *
+            "Design history is retained: each get_design_history entry includes geometry_hash — compare runs on the same hash, or explicitly contrast across geometry changes. " *
+            "Do not map element IDs or detailed diagnostics from the cached design onto BUILDING GEOMETRY text until a Design run completes for this model."
+    elseif aligned === true
+        card["geometry_context"]["note"] = "Client geometry hash matches the server's cached POST /design geometry."
+    end
 
     if !isnothing(struc)
         card["geometry"] = agent_building_summary(struc)
@@ -204,10 +453,21 @@ function agent_situation_card(
         card["has_trace"] = !isempty(design.solver_trace)
     end
 
-    card["session"] = Dict{String, Any}(
+    hist_hashes = String[strip(e.geometry_hash) for e in history]
+    distinct = sort(unique(h for h in hist_hashes if !isempty(h)))
+    session = Dict{String, Any}(
         "n_designs" => length(history),
         "latest_passed" => isempty(history) ? nothing : last(history).all_pass,
+        "can_compare_deltas" => length(history) >= 2,
+        "n_distinct_geometry_hashes_in_history" => length(distinct),
     )
+    if !isempty(distinct)
+        session["geometry_hashes_in_history"] = distinct
+    end
+    if !isempty(cli)
+        session["n_designs_on_client_geometry_hash"] = count(h -> h == cli, hist_hashes)
+    end
+    card["session"] = session
 
     insights = get_session_insights()
     if !isempty(insights)
@@ -611,9 +871,24 @@ function agent_compare_designs(index_a::Int, index_b::Int)::Dict{String, Any}
         end
     end
 
-    return Dict{String, Any}(
+    ha = strip(a.geometry_hash)
+    hb = strip(b.geometry_hash)
+    cross_geo = !isempty(ha) && !isempty(hb) && ha != hb
+    unknown_geo = isempty(ha) || isempty(hb)
+
+    note = if cross_geo
+        "These two history entries used different geometry_hash values. Deltas summarize stored summary metrics only — " *
+            "they are not a same-model parameter A/B test. Say so when explaining results."
+    elseif unknown_geo
+        "One or both entries lack geometry_hash (legacy). Treat cross-run deltas as approximate unless hashes match."
+    else
+        nothing
+    end
+
+    out = Dict{String, Any}(
         "design_a" => Dict(
             "index"          => index_a == 0 ? length(history) : index_a,
+            "geometry_hash"  => ha,
             "all_pass"       => a.all_pass,
             "critical_ratio" => a.critical_ratio,
             "embodied_carbon" => a.embodied_carbon,
@@ -622,6 +897,7 @@ function agent_compare_designs(index_a::Int, index_b::Int)::Dict{String, Any}
         ),
         "design_b" => Dict(
             "index"          => index_b == 0 ? length(history) : index_b,
+            "geometry_hash"  => hb,
             "all_pass"       => b.all_pass,
             "critical_ratio" => b.critical_ratio,
             "embodied_carbon" => b.embodied_carbon,
@@ -636,7 +912,10 @@ function agent_compare_designs(index_a::Int, index_b::Int)::Dict{String, Any}
             "pass_regressed"        => a.all_pass && !b.all_pass,
         ),
         "changed_params" => changed_params,
+        "cross_geometry_comparison" => cross_geo,
     )
+    isnothing(note) || (out["comparison_note"] = note)
+    return out
 end
 
 """
@@ -730,9 +1009,8 @@ function agent_solver_trace(
             "total_events" => 0,
             "shown_events" => 0,
             "events"       => Any[],
-            "note"         => "No solver trace available. The design may have been run " *
-                              "without tracing enabled, or from Grasshopper (which does " *
-                              "not yet pass a TraceCollector).",
+            "note"         => "No solver trace available. The design may have been produced " *
+                              "outside design_building (e.g. tests) or tracing failed to record events.",
         )
     end
 

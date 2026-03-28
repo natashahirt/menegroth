@@ -210,12 +210,12 @@ function register_routes!()
                 "POST /rebuild_visualization" => "Rebuild visualization mesh only. Body: {\"target_edge_m\": <positive float>}. Requires a cached design.",
                 "GET /report" => "Engineering report (plain text by default; ?format=json for structured summary)",
                 "GET /diagnose" => "High-resolution agent diagnostic JSON: per-element checks with demand/capacity, governing_check, levers, embodied carbon, plus architectural narrative and lever impact estimates. ?units=imperial|metric",
-                "POST /chat" => "LLM chat endpoint (SSE streaming). Body: {mode, messages, params, geometry_summary, session_id?}. " *
+                "POST /chat" => "LLM chat endpoint (SSE streaming). Body: {mode, messages, params, geometry_summary, session_id?, client_geometry_hash?}. " *
                     "SSE events: {token:string}, " *
                     "{type:\"agent_turn_summary\", suggested_next_questions:string[], clarification_prompt?:{id,prompt,options:[{id,label}],allow_multiple,rationale?,required_for?}, tool_actions?:[{tool,status,elapsed_ms?,summary?}]}, " *
                     "error events: {error:string, message:string, recovery_hint:string}, " *
                     "[DONE]. All errors include recovery_hint.",
-                "POST /chat/action" => "Agent tool dispatch. Body: {tool, args}. " *
+                "POST /chat/action" => "Agent tool dispatch. Body: {tool, args, client_geometry_hash?}. " *
                     "clarify_user_intent => {ok,type:\"clarification\",duplicate,clarification:{id,prompt,options:[{id,label}],allow_multiple,rationale?,required_for?}}. " *
                     "All error responses include recovery_hint. See GET /schema/tools for full registry.",
                 "GET /chat/history" => "Retrieve stored conversation history. ?session_id=<hash>",
@@ -588,7 +588,10 @@ function _execute_design(input::APIInput)
             DESIGN_CACHE.structure = struc
         end
 
-        design = design_building(struc, params)
+        # Thread TraceCollector so solver_trace is populated for GET /diagnose, chat tools
+        # (get_solver_trace), and JSON serialization — same as interactive Julia runs.
+        tc = TraceCollector()
+        design = design_building(struc, params; tc=tc)
         _append_design_log!("Design sizing completed.")
         
         # Build analysis model for visualization (if not already built).
@@ -616,6 +619,7 @@ function _execute_design(input::APIInput)
                  count(p -> !(p.second.converged && p.second.deflection_ok && p.second.punching_ok), design.slabs) +
                  count(p -> !p.second.ok, design.foundations)
         record_design_history!(DesignHistoryEntry(;
+            geometry_hash    = geo_hash,
             all_pass         = s.all_checks_pass,
             critical_ratio   = s.critical_ratio,
             critical_element = s.critical_element,

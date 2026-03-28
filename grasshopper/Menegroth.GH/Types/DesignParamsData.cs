@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using Newtonsoft.Json.Linq;
 
 namespace Menegroth.GH.Types
@@ -69,6 +70,56 @@ namespace Menegroth.GH.Types
         public double MatCoverageThreshold { get; set; } = 0.5;
         public string UnitSystem { get; set; } = "imperial";
         public List<SlabParamsData> ScopedSlabOverrides { get; set; } = new List<SlabParamsData>();
+
+        /// <summary>
+        /// Deep enough copy for merging patches without mutating upstream <see cref="DesignParamsDataGoo"/>.
+        /// </summary>
+        public DesignParamsData Clone()
+        {
+            return new DesignParamsData
+            {
+                FloorLL                   = FloorLL,
+                RoofLL                    = RoofLL,
+                GradeLL                   = GradeLL,
+                FloorSDL                  = FloorSDL,
+                RoofSDL                   = RoofSDL,
+                WallSDL                   = WallSDL,
+                FloorType                 = FloorType,
+                AnalysisMethod            = AnalysisMethod,
+                DeflectionLimit           = DeflectionLimit,
+                PunchingStrategy          = PunchingStrategy,
+                VaultLambda               = VaultLambda,
+                MaxIterations             = MaxIterations,
+                FeaTargetEdgeM            = FeaTargetEdgeM,
+                Concrete                  = Concrete,
+                Rebar                     = Rebar,
+                Steel                     = Steel,
+                ColumnType                = ColumnType,
+                ColumnCatalog             = ColumnCatalog,
+                ColumnSizingStrategy      = ColumnSizingStrategy,
+                MipTimeLimitSec           = MipTimeLimitSec,
+                BeamType                  = BeamType,
+                BeamCatalog               = BeamCatalog,
+                BeamSizingStrategy        = BeamSizingStrategy,
+                SteelWBounds              = SteelWBounds,
+                SteelHSSBounds            = SteelHSSBounds,
+                RCRectBounds              = RCRectBounds,
+                RCCircularBounds          = RCCircularBounds,
+                PixelFrameFcPreset        = PixelFrameFcPreset,
+                PixelFrameFcMinKsi        = PixelFrameFcMinKsi,
+                PixelFrameFcMaxKsi        = PixelFrameFcMaxKsi,
+                PixelFrameFcResolutionKsi = PixelFrameFcResolutionKsi,
+                FireRating                = FireRating,
+                OptimizeFor               = OptimizeFor,
+                SizeFoundations           = SizeFoundations,
+                FoundationSoil            = FoundationSoil,
+                FoundationConcrete        = FoundationConcrete,
+                FoundationStrategy        = FoundationStrategy,
+                MatCoverageThreshold      = MatCoverageThreshold,
+                UnitSystem                = UnitSystem,
+                ScopedSlabOverrides       = ScopedSlabOverrides?.Select(s => s.Clone()).ToList() ?? new List<SlabParamsData>(),
+            };
+        }
 
         /// <summary>
         /// Serialise to a JObject matching the API params schema.

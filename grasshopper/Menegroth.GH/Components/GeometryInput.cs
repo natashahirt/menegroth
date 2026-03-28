@@ -496,9 +496,10 @@ namespace Menegroth.GH.Components
                         double cv = StdDev(beamLengths) / beamLengths.Average();
                         sb.Append("  Span uniformity: ").Append(nDistinct).Append(" distinct lengths, range ")
                           .Append(spanRange.ToString("F2")).Append(", CV=").Append(cv.ToString("F2"));
-                        if (cv > 0.3) sb.Append(" [HIGHLY VARIABLE — non-rectangular or irregular bays]");
-                        else if (cv > 0.15) sb.Append(" [moderately variable]");
+                        if (cv > 0.3) sb.Append(" [high diversity]");
+                        else if (cv > 0.15) sb.Append(" [moderate diversity]");
                         sb.AppendLine();
+                        sb.AppendLine("  NOTE: CV is over ALL beam edge lengths (every direction). Different bay sizes in X vs Y naturally increase CV — that is not, by itself, evidence of a non-rectangular plan or \"irregular\" framing. Use the grid-pattern / column-line section below and face shapes for plan regularity.");
 
                         // Show span histogram (buckets)
                         if (beamLengths.Count >= 4)

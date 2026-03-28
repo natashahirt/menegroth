@@ -90,6 +90,8 @@ Enables compare_designs and get_design_history tools.
 """
 Base.@kwdef struct DesignHistoryEntry
     timestamp::DateTime        = now()
+    # geometry_hash: hex from compute_geometry_hash for this run; empty if unknown (legacy entries).
+    geometry_hash::String      = ""
     params_patch::Dict{String, Any} = Dict{String, Any}()
     all_pass::Bool             = false
     critical_ratio::Float64    = 0.0
@@ -132,6 +134,20 @@ function get_design_history_entries()
 end
 
 """
+    clear_design_history!()
+
+Remove all entries from the design-history ring buffer. Call when the server
+loads a new geometry hash so `compare_designs` / `get_design_history` are not
+mixed across different models.
+"""
+function clear_design_history!()
+    lock(DESIGN_HISTORY_LOCK) do
+        empty!(DESIGN_HISTORY)
+    end
+    return nothing
+end
+
+"""
     design_history_to_json(entries::Vector{DesignHistoryEntry}) -> Vector{Dict{String, Any}}
 
 Serialize design history entries for JSON output.
@@ -140,6 +156,7 @@ function design_history_to_json(entries::Vector{DesignHistoryEntry})
     return [Dict{String, Any}(
         "index"            => i,
         "timestamp"        => Dates.format(e.timestamp, "yyyy-mm-dd HH:MM:SS"),
+        "geometry_hash"    => e.geometry_hash,
         "params_patch"     => e.params_patch,
         "all_pass"         => e.all_pass,
         "critical_ratio"   => round(e.critical_ratio; digits=3),

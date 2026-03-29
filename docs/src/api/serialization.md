@@ -21,7 +21,7 @@
 >
 > api_input = JSON3.read(input_json, APIInput)
 > vr = validate_input(api_input)
-> @assert vr.ok join(vr.errors, "\n")
+> @assert vr.ok join(getfield.(vr.errors, :message), "\n")
 >
 > skeleton = json_to_skeleton(api_input)
 > params   = json_to_params(api_input.params, api_input.units)

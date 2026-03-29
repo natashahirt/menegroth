@@ -46,13 +46,13 @@ curl http://localhost:8080/health
 
 Server state endpoint.
 
-The response shape is stable. In the production **bootstrap script** (`scripts/api/sizer_bootstrap.jl`), the server initially serves a lightweight `/status` implementation (`mode = "bootstrap"`) while `StructuralSynthesizer` loads in the background. Once the load completes, the full route set is registered (replacing `/status`), and the response switches to the full service payload (`mode = "full"`).
+The response shape is stable. In the production **bootstrap script** (`scripts/api/sizer_bootstrap.jl`), `/status` is served by a lightweight handler while `StructuralSynthesizer` loads in the background (`mode = "bootstrap"`). Once the background load completes, `register_routes!()` replaces the bootstrap `/status` route with the full service handler (`mode = "full"`), and `has_result` becomes a real cache check.
 
 - `status`: `"ok"`
 - `mode`: `"bootstrap"` during background load, then `"full"` once routes are registered
-- `ready`: `true` only once the full route set is registered and design endpoints are available
-- `state`: `"warming"` / `"error"` during bootstrap load; `"idle"` / `"running"` / `"queued"` in full mode
-- `has_result`: whether a completed design result is available via `GET /result` (full mode only; always `false` during bootstrap load)
+- `ready`: `true` only when the full API routes have been registered
+- `state`: `"warming"` / `"error"` during background load; `"idle"` / `"running"` / `"queued"` once the full API is ready
+- `has_result`: `false` during bootstrap; in full mode, whether a completed design result is available via `GET /result`
 - `message`: optional human-readable message (or `null`)
 - `error`: optional load error details (or `null`, bootstrap only)
 
@@ -103,6 +103,7 @@ The schema route also exposes several more focused schema endpoints:
 - `GET /schema/applicability` — compact floor-type compatibility + analysis-method applicability rules (for assistants / lightweight clients)
 - `GET /schema/diagnose` — versioned contract for the `GET /diagnose` payload structure
 - `GET /schema/tools` — structured registry of available agent tools and their argument/return contracts
+- `GET /schema/llm_contract` — versioned machine-readable contract (capabilities, tool list, parameter list, scope limits, experiment types)
 
 ### POST /validate
 

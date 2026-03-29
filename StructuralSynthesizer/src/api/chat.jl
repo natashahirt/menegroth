@@ -86,6 +86,11 @@ end
 
 const MAX_CONTEXT_TOKENS = 120_000
 
+const MAX_TOOL_RESULT_CHARS = 60_000
+
+"""Target: system prompt should use at most this fraction of the total budget."""
+const _SYSTEM_PROMPT_BUDGET_FRACTION = 0.45
+
 using OrderedCollections: OrderedDict
 
 # Server-side conversation history keyed by session_id (typically geometry hash).
@@ -108,6 +113,22 @@ const _CLARIFY_END       = "---END-CLARIFY---"
 _estimate_tokens(text::AbstractString) = cld(length(text), 4)
 
 """
+    _truncate_tool_result(json_str::String; max_chars=MAX_TOOL_RESULT_CHARS) -> String
+
+Cap a tool result JSON string at `max_chars`. When truncated, the result is
+replaced with a summary indicating the original size and advising the LLM
+to use more specific queries.
+"""
+function _truncate_tool_result(json_str::String; max_chars::Int=MAX_TOOL_RESULT_CHARS)::String
+    length(json_str) <= max_chars && return json_str
+    return "{\"_truncated\":true,\"original_chars\":$(length(json_str)),\"max_chars\":$max_chars," *
+           "\"note\":\"Tool result too large for context window. Use more targeted queries " *
+           "(query_elements with filters, get_diagnose_summary instead of get_diagnose, " *
+           "get_condensed_result instead of get_result_summary).\"," *
+           "\"preview\":$(JSON3.write(json_str[1:min(2000, max_chars)]))}"
+end
+
+"""
     _budget_messages(system_prompt, messages, max_tokens) -> Vector
 
 Fit the message history within the context budget, preserving the most recent
@@ -115,6 +136,10 @@ messages first. Older messages are dropped and replaced with a truncation marker
 """
 function _budget_messages(system_prompt::String, messages::Vector, max_tokens::Int)
     sys_tokens = _estimate_tokens(system_prompt)
+    sys_budget = round(Int, max_tokens * _SYSTEM_PROMPT_BUDGET_FRACTION)
+    if sys_tokens > sys_budget
+        @warn "System prompt is large" sys_tokens sys_budget max_tokens pct=round(100 * sys_tokens / max_tokens; digits=1)
+    end
     remaining  = max_tokens - sys_tokens
     remaining <= 0 && return []
 
@@ -132,6 +157,50 @@ function _budget_messages(system_prompt::String, messages::Vector, max_tokens::I
         total += cost
     end
     return budgeted
+end
+
+"""
+    _compact_conversation!(conversation, system_prompt, max_tokens)
+
+Mid-conversation compaction: if the accumulated conversation (system + messages)
+exceeds 85% of the token budget, truncate the *content* of older tool-result
+messages (keeping the most recent 3 tool results intact).  This prevents the
+multi-round agent loop from silently blowing the context window.
+"""
+function _compact_conversation!(conversation::Vector, system_prompt::String, max_tokens::Int)
+    total = _estimate_tokens(system_prompt)
+    for msg in conversation
+        total += _estimate_tokens(string(get(msg, "content", ""))) + 10
+    end
+    threshold = round(Int, max_tokens * 0.85)
+    total <= threshold && return nothing
+
+    # Find tool-result messages (role == "tool") and compact all but the last 3.
+    tool_indices = [i for (i, m) in enumerate(conversation) if get(m, "role", "") == "tool"]
+    keep_count = min(3, length(tool_indices))
+    compact_indices = tool_indices[1:end-keep_count]
+    isempty(compact_indices) && return nothing
+
+    for idx in compact_indices
+        old_content = string(get(conversation[idx], "content", ""))
+        old_len = length(old_content)
+        if old_len > 500
+            conversation[idx] = Dict{String, Any}(
+                "role" => "tool",
+                "tool_call_id" => get(conversation[idx], "tool_call_id", ""),
+                "content" => "{\"_compacted\":true,\"original_chars\":$old_len," *
+                             "\"note\":\"Earlier tool result compacted to fit context window. " *
+                             "Call the tool again if you need this data.\"}",
+            )
+        end
+    end
+
+    new_total = _estimate_tokens(system_prompt)
+    for msg in conversation
+        new_total += _estimate_tokens(string(get(msg, "content", ""))) + 10
+    end
+    @info "Mid-conversation compaction" before_tokens=total after_tokens=new_total budget=max_tokens compacted_messages=length(compact_indices)
+    return nothing
 end
 
 # ─── Session history ──────────────────────────────────────────────────────────
@@ -319,13 +388,16 @@ BASELINE DESIGN:
 
 OPENING ANALYSIS (your first response — CRITICAL):
   Your opening message must demonstrate that you have read and understood THIS SPECIFIC geometry.
-  Lead with concrete structural observations derived from the Geometry analysis block, NOT generic questions.
+  Lead with concrete structural observations derived from the GEOMETRY DIGEST block, NOT generic questions.
+  The digest contains plaintext lines with exact span lengths, column heights, story counts, panel
+  aspect ratios, and column spacing — quote these numbers directly.
 
   Structure your opening as:
   1. GEOMETRY READ — 2-3 sentences that prove you parsed the numbers. Reference specific span
-     lengths (ft/m), column count, story heights, panel aspect ratios, column spacing.
+     lengths (ft/m), column count, story heights, panel aspect ratios, column spacing FROM THE DIGEST.
      Example: "Your 4×4 bay grid has 28 ft spans with 12 interior columns across 3 stories at 12 ft each."
      NOT: "I see you have a multi-story building."
+     NOT: "Your building features a structured layout with N vertices."
 
   2. STRUCTURAL IMPLICATIONS — what these numbers mean for the design. Be specific:
      - Long spans + small column grid → punching shear will likely govern
@@ -1184,6 +1256,109 @@ function _chat_structured_geometry_stats(g::Dict{String, Any})::Dict{String, Any
 end
 
 """
+Convert geometry stats dict into a concise plaintext digest that the LLM reads before the JSON.
+Every critical number appears as a direct sentence — no nesting, no parsing required.
+"""
+function _geometry_digest_plaintext(stats::Dict{String, Any})::String
+    lines = String["── GEOMETRY DIGEST (use these numbers in your opening analysis) ──"]
+
+    unit = get(stats, "units", "")
+    nc = get(stats, "n_column_edges", 0)
+    nb = get(stats, "n_beam_edges", 0)
+    ns = get(stats, "n_supports", 0)
+    nf = get(stats, "n_face_polygon_loops", 0)
+    push!(lines, "Elements: $nb beams, $nc columns, $ns supports, $nf slab faces")
+
+    # Beam spans
+    bs = get(stats, "beam_spans", nothing)
+    if !isnothing(bs)
+        all_s = get(bs, "all", nothing)
+        if !isnothing(all_s)
+            u = get(all_s, "unit", unit)
+            push!(lines, "Beam spans (all): min=$(all_s["min"]) $u, max=$(all_s["max"]) $u, mean=$(all_s["mean"]) $u, n=$(all_s["n"])")
+        end
+        xd = get(bs, "x_direction", nothing)
+        if !isnothing(xd)
+            u = get(xd, "unit", unit)
+            push!(lines, "  X-direction: min=$(xd["min"]) $u, max=$(xd["max"]) $u, mean=$(xd["mean"]) $u")
+        end
+        yd = get(bs, "y_direction", nothing)
+        if !isnothing(yd)
+            u = get(yd, "unit", unit)
+            push!(lines, "  Y-direction: min=$(yd["min"]) $u, max=$(yd["max"]) $u, mean=$(yd["mean"]) $u")
+        end
+    end
+
+    # Column heights
+    ch = get(stats, "column_heights", nothing)
+    if !isnothing(ch)
+        u = get(ch, "unit", unit)
+        push!(lines, "Column heights: min=$(ch["min"]) $u, max=$(ch["max"]) $u, mean=$(ch["mean"]) $u, n=$(ch["n"])")
+    end
+
+    # Stories
+    st = get(stats, "stories", nothing)
+    if !isnothing(st)
+        n = get(st, "n_stories", nothing)
+        !isnothing(n) && push!(lines, "Stories: $n")
+        sh = get(st, "story_heights", nothing)
+        if !isnothing(sh) && sh isa AbstractVector && !isempty(sh)
+            u = get(st, "unit", unit)
+            push!(lines, "Story heights: $(join(sh, ", ")) $u")
+        end
+    end
+
+    # Column grid
+    cg = get(stats, "column_grid", nothing)
+    if !isnothing(cg)
+        n_unique = get(cg, "n_unique_positions", nothing)
+        !isnothing(n_unique) && push!(lines, "Column grid: $n_unique unique positions")
+        nn = get(cg, "nearest_neighbour_spacing", nothing)
+        if !isnothing(nn)
+            u = get(nn, "unit", unit)
+            push!(lines, "  Nearest-neighbour spacing: min=$(nn["min"]) $u, max=$(nn["max"]) $u")
+        end
+        edge_int = get(cg, "edge_vs_interior", nothing)
+        if !isnothing(edge_int)
+            push!(lines, "  Edge columns: $(get(edge_int, "edge", "?")), Interior columns: $(get(edge_int, "interior", "?"))")
+        end
+    end
+
+    # Slab panels
+    sp = get(stats, "slab_panels", nothing)
+    if !isnothing(sp)
+        cls = get(sp, "plan_shape_classification", "")
+        n_panels = get(sp, "n_polygons", 0)
+        push!(lines, "Slab panels: $n_panels panels, classification: $cls")
+        ar = get(sp, "panel_edge_aspect_ratio", nothing)
+        if !isnothing(ar)
+            push!(lines, "  Aspect ratio: min=$(get(ar, "min", "?"))  max=$(get(ar, "max", "?"))  mean=$(get(ar, "mean", "?"))")
+        end
+    end
+
+    # Envelope
+    env = get(stats, "envelope", nothing)
+    if !isnothing(env)
+        u = get(env, "unit", unit)
+        fp = get(env, "footprint_dim", nothing)
+        h = get(env, "total_height", nothing)
+        if !isnothing(fp)
+            push!(lines, "Footprint: $(fp["x"]) × $(fp["y"]) $u")
+        end
+        !isnothing(h) && push!(lines, "Total height: $h $u")
+    end
+
+    # Flags
+    flags = get(stats, "structural_flags", nothing)
+    if !isnothing(flags) && !isempty(flags)
+        push!(lines, "Structural flags: $(join(flags, ", "))")
+    end
+
+    push!(lines, "── END DIGEST ──")
+    return join(lines, "\n") * "\n"
+end
+
+"""
 Append structured design geometry JSON and/or the optional human Summary line to the system prompt.
 Structured data is the same model the client sends to POST /design (without `params`).
 """
@@ -1196,14 +1371,18 @@ function _append_chat_building_geometry_sections!(
         stats = _chat_structured_geometry_stats(structured)
         json_txt = JSON3.write(structured)
         push!(parts, "\n\nBUILDING GEOMETRY (structured — same JSON as Design Run geometry, without params):\n")
-        push!(parts, "Schema: units (string); vertices: array of [x,y,z] in those units; edges: {beams, columns, braces} arrays of [i,j] 1-based vertex indices; supports: vertex indices; faces: object mapping category (e.g. floor, roof, grade) to arrays of polygon loops (each loop: array of [x,y,z] points). Optional stories_z if the client sends it.\n")
-        push!(parts, "Geometry analysis (pre-computed from raw JSON — includes spans, story heights, panel shapes, column grid, flags, and warnings): ", JSON3.write(stats), "\n")
+
+        # ── Plain-text geometry digest (LLM reads this FIRST) ─────────────
+        push!(parts, _geometry_digest_plaintext(stats))
+
         if haskey(stats, "warnings") && !isempty(stats["warnings"])
-            push!(parts, "⚠ GEOMETRY WARNINGS (address these in your opening analysis — they are advisory, not blocking):\n")
+            push!(parts, "\n⚠ GEOMETRY WARNINGS (address these in your opening analysis — they are advisory, not blocking):\n")
             for w in stats["warnings"]
                 push!(parts, "  • ", w, "\n")
             end
         end
+
+        push!(parts, "\nFull geometry analysis JSON (detail behind the digest above): ", JSON3.write(stats), "\n")
         if length(json_txt) > _MAX_CHAT_BUILDING_GEOMETRY_JSON_CHARS
             push!(parts, "Full geometry JSON omitted (length ", string(length(json_txt)), " chars > limit ", string(_MAX_CHAT_BUILDING_GEOMETRY_JSON_CHARS), "). Use the counts above, the narrative summary if present, or run Design so the server caches the structure.\n")
         else
@@ -1319,7 +1498,8 @@ function _build_system_prompt(
     params_json,
     geometry_summary::String,
     client_geometry_hash::String = "",
-    structured_geometry::Union{Nothing, Dict{String, Any}} = nothing,
+    structured_geometry::Union{Nothing, Dict{String, Any}} = nothing;
+    max_tokens::Int = MAX_CONTEXT_TOKENS,
 )
     resolved_h, res_src, derived_h = _chat_geometry_resolution(structured_geometry, client_geometry_hash)
     stale = _geometry_prompt_stale(resolved_h, client_geometry_hash)
@@ -1364,6 +1544,8 @@ You SHOULD give short, mechanism-level expectations for how the design problem m
         ""
     end
 
+    sys_budget_tokens = round(Int, max_tokens * _SYSTEM_PROMPT_BUDGET_FRACTION)
+
     if mode == "design"
         parts = [_DESIGN_SYSTEM_PREAMBLE, geo_ctx_block]
         !isempty(stale_note) && push!(parts, stale_note)
@@ -1375,7 +1557,7 @@ You SHOULD give short, mechanism-level expectations for how the design problem m
         if !stale && !isnothing(cached_design)
             push!(parts, "\n\nLATEST RESULTS SUMMARY:\n", condense_result(cached_design))
         end
-        return join(parts)
+        return _trim_system_prompt(parts, sys_budget_tokens)
     elseif mode == "results"
         parts = [_RESULTS_SYSTEM_PREAMBLE, geo_ctx_block]
         !isempty(stale_note) && push!(parts, stale_note)
@@ -1388,10 +1570,51 @@ You SHOULD give short, mechanism-level expectations for how the design problem m
         if !isnothing(params_json) && !isempty(string(params_json))
             push!(parts, "\n\nDESIGN PARAMETERS:\n", JSON3.write(params_json))
         end
-        return join(parts)
+        return _trim_system_prompt(parts, sys_budget_tokens)
     else
         return "You are a helpful structural engineering assistant."
     end
+end
+
+"""
+    _trim_system_prompt(parts::Vector, budget_tokens::Int) -> String
+
+Join prompt `parts`, then progressively strip lower-priority content if the
+result exceeds `budget_tokens`.  Trimming order (least → most important):
+
+1. Full geometry JSON blob  (`Full geometry JSON:`)
+2. Detailed results JSON    (`DETAILED RESULTS:`)
+3. Full geometry analysis JSON (`Full geometry analysis JSON`)
+
+The plain-text digest, warnings, condensed results summary, and preamble are
+never trimmed — the LLM needs those for reasoning.
+"""
+function _trim_system_prompt(parts::Vector, budget_tokens::Int)::String
+    prompt = join(parts)
+    tok = _estimate_tokens(prompt)
+    tok <= budget_tokens && return prompt
+
+    # Each pattern: (regex for the section, replacement note)
+    trim_stages = [
+        (r"Full geometry JSON:\n[\s\S]*?(?=\n\n[A-Z]|\z)"s,
+         "[Full geometry JSON trimmed to fit context — use design tools for detail]\n"),
+        (r"DETAILED RESULTS:\n[\s\S]*?(?=\n\n[A-Z]|\z)"s,
+         "DETAILED RESULTS: [trimmed to fit context — use get_result_summary or get_condensed_result]\n"),
+        (r"Full geometry analysis JSON \(detail behind the digest above\): [\s\S]*?(?=\n\n[A-Z]|\z)"s,
+         "[Geometry analysis JSON trimmed — digest and warnings above are authoritative]\n"),
+    ]
+
+    for (pattern, replacement) in trim_stages
+        prompt = replace(prompt, pattern => replacement)
+        tok = _estimate_tokens(prompt)
+        if tok <= budget_tokens
+            @info "System prompt trimmed to fit budget" tokens=tok budget=budget_tokens
+            return prompt
+        end
+    end
+
+    @warn "System prompt still exceeds budget after all trims" tokens=tok budget=budget_tokens
+    return prompt
 end
 
 # ─── Suggestions extraction ───────────────────────────────────────────────────
@@ -1917,10 +2140,12 @@ function _stream_llm_to_sse(
                         "summary" => _tool_action_summary(result),
                     ))
 
+                    result_json = JSON3.write(result)
+                    result_json = _truncate_tool_result(result_json)
                     push!(tool_results, Dict{String, Any}(
                         "role" => "tool",
                         "tool_call_id" => call_id,
-                        "content" => JSON3.write(result),
+                        "content" => result_json,
                     ))
                 end
 
@@ -1930,6 +2155,11 @@ function _stream_llm_to_sse(
                     "tool_calls" => assistant_tool_calls,
                 ))
                 append!(conversation, tool_results)
+
+                # Mid-conversation context budget check: compress old tool
+                # results if accumulated conversation is getting large.
+                _compact_conversation!(conversation, system_prompt, MAX_CONTEXT_TOKENS)
+
                 continue
             end
 
@@ -2008,6 +2238,17 @@ function _stream_llm_to_sse(
             suggestions        = suggestions,
             clarification_data = clarification_data,
             tool_actions       = tool_actions,
+        )
+
+        # Attach context usage so the front-end can show a budget indicator.
+        conv_tokens = sum(_estimate_tokens(string(get(m, "content", ""))) + 10 for m in conversation; init=0)
+        sys_tokens  = _estimate_tokens(system_prompt)
+        summary["context_usage"] = Dict{String, Any}(
+            "system_prompt_tokens"  => sys_tokens,
+            "conversation_tokens"   => conv_tokens,
+            "total_tokens"          => sys_tokens + conv_tokens,
+            "budget_tokens"         => MAX_CONTEXT_TOKENS,
+            "utilization_pct"       => round(100 * (sys_tokens + conv_tokens) / MAX_CONTEXT_TOKENS; digits=1),
         )
         write(stream, "data: $(JSON3.write(summary))\n\n")
 

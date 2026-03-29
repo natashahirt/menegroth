@@ -398,6 +398,16 @@ BASELINE DESIGN:
 - Valid params → either run_design for baseline, or ask user first.
 - Once n_designs≥1, use compare_designs when can_compare_deltas is true.
 
+GEOMETRY FACTS POLICY (MANDATORY):
+- Treat the GEOMETRY DIGEST as authoritative for this turn. Use its numbers directly.
+- Do NOT claim span/story/panel/grid data is "missing" unless GEOMETRY DIGEST explicitly marks it unavailable
+  or Data gaps lists the corresponding item.
+- When structured BUILDING GEOMETRY is present (new or updated geometry), your opening must include a concise
+  geometry fact summary with the key structural drivers:
+  (1) beam span range, (2) stories and story heights, (3) column grid / spacing, (4) slab panel classification,
+  (5) envelope footprint/height when available.
+- After listing facts, immediately interpret structural implications (what is likely to govern and why).
+
 OPENING ANALYSIS (your first response — CRITICAL):
   Your opening message must demonstrate that you have read and understood THIS SPECIFIC geometry.
   Lead with concrete structural observations derived from the GEOMETRY DIGEST block, NOT generic questions.
@@ -496,6 +506,9 @@ IMPORTANT RULES:
 - When suggesting parameter changes, output a JSON code block with only the changed fields.
 - In that same JSON object, include `_history_label` (string): VERY brief (≤6 words) summary for the params history UI, same rules as design mode.
 - Only ask questions that cannot be answered from geometry data or solver output. Never ask about information already visible in the prompt.
+- Treat GEOMETRY DIGEST as authoritative for geometry facts in this turn.
+- Do NOT claim geometry details are missing unless GEOMETRY DIGEST explicitly marks them unavailable
+  or Data gaps lists the corresponding missing item.
 
 OPENING ANALYSIS (your first response when results exist):
   Lead with what matters most — the critical failure mode and why it governs for THIS geometry.
@@ -1247,7 +1260,29 @@ function _chat_structured_geometry_stats(g::Dict{String, Any})::Dict{String, Any
     story_heights_raw, story_stats = _chat_geo_story_analysis(
         sz isa AbstractVector ? sz : [], unit_label,
     )
-    !isnothing(story_stats) && (result["stories"] = story_stats)
+    if !isnothing(story_stats)
+        story_stats["source"] = "stories_z"
+        result["stories"] = story_stats
+    else
+        # Fallback: infer story elevations from unique vertex Z levels when
+        # stories_z is omitted by the client payload.
+        vz = Float64[]
+        for v in verts
+            pt = _chat_geo_vertex(v)
+            isnothing(pt) && continue
+            push!(vz, pt[3])
+        end
+        if !isempty(vz)
+            uniqz = sort(unique(round.(vz; digits=6)))
+            result["n_unique_vertex_z"] = length(uniqz)
+            inf_heights, inf_stats = _chat_geo_story_analysis(uniqz, unit_label)
+            if !isnothing(inf_stats)
+                inf_stats["source"] = "inferred_from_vertex_z"
+                result["stories"] = inf_stats
+                story_heights_raw = inf_heights
+            end
+        end
+    end
 
     # ── Slab panel analysis ──────────────────────────────────────────────
     panel_analysis = _chat_geo_panel_analysis(faces_dict, unit_label)
@@ -1270,6 +1305,17 @@ function _chat_structured_geometry_stats(g::Dict{String, Any})::Dict{String, Any
     )
     !isempty(flags)       && (result["structural_flags"] = flags)
     !isempty(geo_warnings) && (result["warnings"] = geo_warnings)
+
+    # ── Geometry data coverage (helps LLM avoid vague "missing detail" text) ─
+    missing = String[]
+    !haskey(result, "beam_spans") && push!(missing, "beam_spans_from_edges.beams")
+    !haskey(result, "stories") && push!(missing, "story_heights_from_stories_z_or_vertex_z")
+    !haskey(result, "column_heights") && push!(missing, "column_heights_from_edges.columns")
+    !haskey(result, "slab_panels") && push!(missing, "slab_panel_shapes_from_faces.floor_or_roof")
+    result["data_coverage"] = Dict{String, Any}(
+        "missing_items" => missing,
+        "has_all_primary_metrics" => isempty(missing),
+    )
     result["unit_to_m"] = to_m
 
     return result
@@ -1307,6 +1353,8 @@ function _geometry_digest_plaintext(stats::Dict{String, Any})::String
             u = get(yd, "unit", unit)
             push!(lines, "  Y-direction: min=$(yd["min"]) $u, max=$(yd["max"]) $u, mean=$(yd["mean"]) $u")
         end
+    else
+        push!(lines, "Beam spans: unavailable (no valid edges.beams payload).")
     end
 
     # Column heights
@@ -1326,6 +1374,10 @@ function _geometry_digest_plaintext(stats::Dict{String, Any})::String
             u = get(st, "unit", unit)
             push!(lines, "Story heights: $(join(sh, ", ")) $u")
         end
+        src = get(st, "source", "")
+        !isempty(src) && push!(lines, "Story-height source: $src")
+    else
+        push!(lines, "Stories: unavailable (neither stories_z nor inferable vertex Z levels).")
     end
 
     # Column grid
@@ -1354,6 +1406,8 @@ function _geometry_digest_plaintext(stats::Dict{String, Any})::String
         if !isnothing(ar)
             push!(lines, "  Aspect ratio: min=$(get(ar, "min", "?"))  max=$(get(ar, "max", "?"))  mean=$(get(ar, "mean", "?"))")
         end
+    else
+        push!(lines, "Slab panels: unavailable (faces.floor/roof not provided or empty).")
     end
 
     # Envelope
@@ -1401,6 +1455,16 @@ function _geometry_digest_plaintext(stats::Dict{String, Any})::String
     flags = get(stats, "structural_flags", nothing)
     if !isnothing(flags) && !isempty(flags)
         push!(lines, "Structural flags: $(join(flags, ", "))")
+    end
+
+    cov = get(stats, "data_coverage", nothing)
+    if cov isa AbstractDict
+        missing = get(cov, "missing_items", String[])
+        if missing isa AbstractVector && !isempty(missing)
+            push!(lines, "Data gaps: $(join(string.(missing), ", ")).")
+        else
+            push!(lines, "Data coverage: complete for primary geometry metrics.")
+        end
     end
 
     push!(lines, "── END DIGEST ──")

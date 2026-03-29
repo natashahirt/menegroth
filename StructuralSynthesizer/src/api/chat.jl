@@ -1511,12 +1511,17 @@ function _chat_geometry_resolution(
     return (nothing, "none", derived)
 end
 
+"""Read the server-cached geometry hash under lock."""
+function _server_geometry_hash()::String
+    with_cache_read(c -> c.geometry_hash, DESIGN_CACHE)
+end
+
 """True when chat-resolved geometry (body or client hash) disagrees with the server's last POST /design hash."""
 function _geometry_prompt_stale(
     resolved::Union{Nothing, String},
     client_geometry_hash::String,
 )::Bool
-    srv = strip(DESIGN_CACHE.geometry_hash)
+    srv = strip(_server_geometry_hash())
     isempty(srv) && return false
     if !isnothing(resolved) && !isempty(resolved)
         return resolved != srv
@@ -1527,7 +1532,7 @@ end
 """True when client hash is present and differs from the server's cached POST /design geometry."""
 function _geometry_stale_for_client(client_geometry_hash::String)::Bool
     cli = strip(client_geometry_hash)
-    srv = strip(DESIGN_CACHE.geometry_hash)
+    srv = strip(_server_geometry_hash())
     !isempty(cli) && !isempty(srv) && cli != srv
 end
 
@@ -1535,7 +1540,7 @@ end
 function _attach_geometry_alignment!(result::Dict{String, Any}, args::Dict{String, Any})
     cli = strip(string(get(args, "client_geometry_hash", "")))
     isempty(cli) && return result
-    srv = strip(DESIGN_CACHE.geometry_hash)
+    srv = strip(_server_geometry_hash())
     result["client_geometry_hash"] = cli
     result["server_cached_geometry_hash"] = srv
     result["geometry_stale"] = !isempty(srv) && cli != srv
@@ -1552,7 +1557,7 @@ function _build_system_prompt(
 )
     resolved_h, res_src, derived_h = _chat_geometry_resolution(structured_geometry, client_geometry_hash)
     stale = _geometry_prompt_stale(resolved_h, client_geometry_hash)
-    srv = strip(DESIGN_CACHE.geometry_hash)
+    srv = strip(_server_geometry_hash())
     aligned = if isempty(srv) || isnothing(resolved_h) || isempty(resolved_h)
         "unknown"
     elseif resolved_h == srv
@@ -2173,7 +2178,17 @@ function _stream_llm_to_sse(
                         if !isempty(client_geometry_hash)
                             args_dict["client_geometry_hash"] = client_geometry_hash
                         end
-                        _dispatch_chat_tool(tool_name, args_dict)
+                        try
+                            _dispatch_chat_tool(tool_name, args_dict)
+                        catch e
+                            @error "Chat tool execution failed" tool=tool_name exception=(e, catch_backtrace())
+                            Dict{String, Any}(
+                                "error" => "tool_execution_failed",
+                                "tool" => tool_name,
+                                "message" => sprint(showerror, e),
+                                "recovery_hint" => "Retry this tool call; if it persists, run GET /status and share this error.",
+                            )
+                        end
                     end
                     if !isnothing(args_dict)
                         _attach_geometry_alignment!(result, args_dict)
@@ -2558,12 +2573,65 @@ Phase 4 — Communication:
 """
 const _NO_DESIGN_HINT   = "Run a design from Grasshopper before opening Results Assistant."
 const _NO_GEOMETRY_HINT = "Submit geometry via the GeometryInput component first."
+const CHAT_AUTOWAIT_TIMEOUT_S = 90.0
+
+# Tools that should prefer waiting for an in-flight design to finish so they
+# return the freshest cached result set rather than stale data.
+const _TOOLS_REQUIRE_FRESH_DESIGN = Set([
+    "get_situation_card",
+    "get_result_summary",
+    "get_condensed_result",
+    "get_current_params",
+    "get_design_history",
+    "get_diagnose_summary",
+    "get_diagnose",
+    "query_elements",
+    "get_solver_trace",
+    "explain_trace_lookup",
+    "run_experiment",
+    "batch_experiments",
+    "suggest_next_action",
+    "compare_designs",
+    "narrate_element",
+    "narrate_comparison",
+])
 
 """Read `DESIGN_CACHE.last_design` under lock to avoid torn reads."""
 function _get_last_design()::Union{BuildingDesign, Nothing}
     lock(DESIGN_CACHE.lock) do
         DESIGN_CACHE.last_design
     end
+end
+
+"""Wait for the async design loop to return to idle."""
+function _wait_until_server_idle(; timeout_s::Float64=CHAT_AUTOWAIT_TIMEOUT_S)::Symbol
+    timedwait(() -> status_string(SERVER_STATUS) == "idle", timeout_s; pollint=1.0)
+end
+
+"""Infer coordinate-unit string for chat quick-check runs from cached context."""
+function _quick_check_coord_unit()::String
+    # Prefer latest solved design context when available.
+    d = _get_last_design()
+    if !isnothing(d)
+        du = d.params.display_units
+        return du.units[:length] == u"ft" ? "feet" : "meters"
+    end
+
+    # Fallback: infer from cached geometry story elevations.
+    struc = with_cache_read(c -> c.structure, DESIGN_CACHE)
+    if !isnothing(struc)
+        zvals = Float64[]
+        for z in struc.skeleton.stories_z
+            push!(zvals, z isa Unitful.Quantity ? ustrip(u"m", z) : Float64(z))
+        end
+        if !isempty(zvals)
+            zmax = maximum(abs.(zvals))
+            # Meter-coordinate buildings are typically < ~250 m tall.
+            # Far larger magnitudes usually indicate feet coordinates.
+            return zmax > 250.0 ? "feet" : "meters"
+        end
+    end
+    return "meters"
 end
 
 """
@@ -2573,7 +2641,7 @@ Returns a warning string if stale, or `nothing` if aligned or unknown.
 function _stale_geometry_warning(args::Dict{String, Any})::Union{Nothing, String}
     cli = strip(string(get(args, "client_geometry_hash", "")))
     isempty(cli) && return nothing
-    srv = strip(DESIGN_CACHE.geometry_hash)
+    srv = strip(_server_geometry_hash())
     isempty(srv) && return nothing
     cli == srv && return nothing
     return "GEOMETRY MISMATCH: This tool executed against the server's cached geometry (hash=$srv), " *
@@ -2657,6 +2725,22 @@ end
 function _dispatch_chat_tool(tool::String, args::Dict{String, Any})::Dict{String, Any}
     design = _get_last_design()
     struc = with_cache_read(c -> c.structure, DESIGN_CACHE)
+
+    # If a design is currently running, wait briefly for completion on tools
+    # that consume result-layer data so the assistant responds with fresh data.
+    if tool in _TOOLS_REQUIRE_FRESH_DESIGN && status_string(SERVER_STATUS) != "idle"
+        wait_state = _wait_until_server_idle()
+        if wait_state == :timed_out
+            return Dict{String, Any}(
+                "error" => "design_still_running",
+                "message" => "A design run is still in progress. I waited, but it has not completed yet.",
+                "recovery_hint" => "Retry in a moment, or poll GET /status until idle.",
+                "status" => status_string(SERVER_STATUS),
+            )
+        end
+        design = _get_last_design()
+        struc = with_cache_read(c -> c.structure, DESIGN_CACHE)
+    end
 
     if tool == "get_result_summary"
         isnothing(design) && return Dict("error" => "no_design", "message" => "No design has been run yet.", "recovery_hint" => _NO_DESIGN_HINT)
@@ -2997,7 +3081,8 @@ function _dispatch_chat_tool(tool::String, args::Dict{String, Any})::Dict{String
                 "recovery_hint"  => "Wait for the current design to finish, then retry.",
             )
         end
-        isnothing(DESIGN_CACHE.structure) && return Dict(
+        cached_struc = with_cache_read(c -> c.structure, DESIGN_CACHE)
+        isnothing(cached_struc) && return Dict(
             "error"          => "no_geometry",
             "message"        => "No geometry loaded. Submit geometry via POST /design first.",
             "recovery_hint"  => _NO_GEOMETRY_HINT,
@@ -3047,9 +3132,10 @@ function _dispatch_chat_tool(tool::String, args::Dict{String, Any})::Dict{String
 
         # ── Parse params ─────────────────────────────────────────────────────
         local fast_params
+        coord_unit_assumed = _quick_check_coord_unit()
         try
             api_params = JSON3.read(JSON3.write(fast_patch), APIParams)
-            fast_params = json_to_params(api_params, "feet")
+            fast_params = json_to_params(api_params, coord_unit_assumed)
         catch e
             finish!(SERVER_STATUS)
             return Dict("error" => "param_parse_failed", "message" => sprint(showerror, e))
@@ -3061,7 +3147,6 @@ function _dispatch_chat_tool(tool::String, args::Dict{String, Any})::Dict{String
         result_ref = Ref{Any}(nothing)
         error_ref  = Ref{Any}(nothing)
 
-        cached_struc = with_cache_read(c -> c.structure, DESIGN_CACHE)
         cached_geo_hash = with_cache_read(c -> c.geometry_hash, DESIGN_CACHE)
 
         design_task = @async begin
@@ -3123,7 +3208,7 @@ function _dispatch_chat_tool(tool::String, args::Dict{String, Any})::Dict{String
                  count(p -> !(p.second.converged && p.second.deflection_ok && p.second.punching_ok), design.slabs) +
                  count(p -> !p.second.ok, design.foundations)
         record_design_history!(DesignHistoryEntry(;
-            geometry_hash    = DESIGN_CACHE.geometry_hash,
+            geometry_hash    = _server_geometry_hash(),
             params_patch     = patch_dict,
             all_pass         = s.all_checks_pass,
             critical_ratio   = s.critical_ratio,
@@ -3142,6 +3227,7 @@ function _dispatch_chat_tool(tool::String, args::Dict{String, Any})::Dict{String
         return Dict(
             "ok"               => true,
             "quick_check"      => true,
+            "coord_unit_assumed" => coord_unit_assumed,
             "applied_params"   => api_keys,
             "summary"          => condense_result(design),
             "all_pass"         => design.summary.all_checks_pass,
@@ -3235,6 +3321,26 @@ function register_chat_routes!()
                 "message" => "messages array must contain at least one message.",
             )))
             return
+        end
+
+        # If a run is in progress, wait briefly so the interface can respond
+        # automatically once the design completes instead of forcing manual retry.
+        if status_string(SERVER_STATUS) != "idle"
+            wait_state = _wait_until_server_idle()
+            if wait_state == :timed_out
+                HTTP.setstatus(stream, 200)
+                HTTP.setheader(stream, "Content-Type"  => "text/event-stream")
+                HTTP.setheader(stream, "Cache-Control" => "no-cache")
+                HTTP.setheader(stream, "Connection"    => "keep-alive")
+                startwrite(stream)
+                write(stream, "data: $(JSON3.write(Dict(
+                    "error"          => "design_still_running",
+                    "message"        => "Design run is still in progress. Chat will respond once the run completes.",
+                    "recovery_hint"  => "Retry shortly, or poll GET /status until idle.",
+                )))\n\n")
+                write(stream, "data: [DONE]\n\n")
+                return
+            end
         end
 
         if mode == "results" && isnothing(_get_last_design())

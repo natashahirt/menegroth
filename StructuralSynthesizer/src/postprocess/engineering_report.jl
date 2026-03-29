@@ -200,7 +200,8 @@ function _report_slabs(io::IO, design::BuildingDesign;
     for (s_idx, slab) in enumerate(struc.slabs)
         sr = get(design.slabs, s_idx, nothing)
         isnothing(sr) && continue
-        r = sr.sizer_result
+        r_raw = sr.sizer_result
+        r = r_raw isa Pair ? r_raw.second : r_raw
         isnothing(r) && continue
         _report_slab_panel(io, design, s_idx, slab, r; conc=conc, reb=reb, du=du)
     end
@@ -750,7 +751,8 @@ function _report_takeoff(io::IO, design::BuildingDesign; du::DisplayUnits=design
     for (s_idx, slab) in enumerate(struc.slabs)
         sr = get(design.slabs, s_idx, nothing)
         isnothing(sr) && continue
-        r = sr.sizer_result
+        r_raw = sr.sizer_result
+        r = r_raw isa Pair ? r_raw.second : r_raw
         isnothing(r) && continue
         slab_area = sum(struc.cells[ci].area for ci in slab.cell_indices)
         total_slab_area += slab_area

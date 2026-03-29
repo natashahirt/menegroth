@@ -26,6 +26,10 @@ const LEVER_MAP = Dict{String, Vector{String}}(
     "shear"               => ["beam_catalog"],
     "deflection"          => ["deflection_limit", "fc_slab"],
     "punching_shear_slab" => ["column_catalog", "punching_strategy"],
+    "reinforcement_design" => ["fc_slab", "deflection_limit"],
+    "reinforcement_design_secondary" => ["fc_slab", "deflection_limit"],
+    "transfer_reinforcement" => ["fc_slab", "column_catalog"],
+    "non_convergence"     => ["max_iterations", "fc_slab"],
     "bearing"             => ["bearing_capacity"],
     "punching_shear_fdn"  => ["bearing_capacity"],
     "flexure_fdn"         => ["bearing_capacity"],
@@ -74,6 +78,24 @@ const LIMIT_STATE_DESCRIPTIONS = Dict{String, String}(
         "This is the slab-level punching check at a column location. " *
         "ACI 318-19 §22.6. A larger column increases the critical perimeter, " *
         "directly reducing the punching stress demand.",
+
+    "reinforcement_design" =>
+        "The slab thickness and effective depth are insufficient to provide the required " *
+        "flexural reinforcement in a column strip or middle strip (Whitney block / strain compatibility). " *
+        "ACI 318-19 Ch. 8–9. Increase slab thickness or concrete strength, or reduce span / load.",
+
+    "reinforcement_design_secondary" =>
+        "Same as primary-direction flexural adequacy but in the orthogonal strip direction. " *
+        "ACI 318-19 Ch. 8–9. Often resolved by increasing thickness or fc′.",
+
+    "transfer_reinforcement" =>
+        "Moment transfer reinforcement at a column (ACI 318-19 §8.4.2.3) cannot fit within " *
+        "the available depth — the section is inadequate for unbalanced moment. " *
+        "Thicker slab, larger column, or revised geometry at that connection.",
+
+    "non_convergence" =>
+        "The slab design loop did not reach a consistent solution (iterations exhausted or " *
+        "intermediate failure). Try max_iterations, fc_slab, or relieving span/load in Grasshopper.",
 
     "bearing" =>
         "The footing is pressing on the soil harder than the allowable bearing capacity. " *
@@ -128,40 +150,24 @@ _round_or_nothing(x; digits=3) = isnothing(x) ? nothing : _round_val(x; digits=d
 
 # ─── Governing check helpers ──────────────────────────────────────────────────
 
-"""
-Return the name of the governing limit-state check for a `SlabDesignResult`.
-Compares deflection and punching ratios and picks the largest.
-"""
+"""Return the governing limit-state check for a `SlabDesignResult` (see `slab_diagnostic_governing_check`)."""
 function _slab_governing_check(sr::SlabDesignResult)
-    sr.deflection_ratio >= sr.punching_max_ratio ? "deflection" : "punching_shear_slab"
+    slab_diagnostic_governing_check(sr)
 end
 
-"""
-Return the name of the governing limit-state check for a `ColumnDesignResult`.
-
-Compares axial, P-M interaction, and (if present) punching ratios and picks the largest.
-"""
+"""Governing limit-state for columns (see `column_diagnostic_governing_check`)."""
 function _column_governing_check(cr::ColumnDesignResult)
-    punch_ratio = isnothing(cr.punching) ? 0.0 : cr.punching.ratio
-    ratios = (cr.axial_ratio, cr.interaction_ratio, punch_ratio)
-    names  = ("axial_compression", "pm_interaction", "punching_shear_col")
-    return names[argmax(ratios)]
+    column_diagnostic_governing_check(cr)
 end
 
-"""
-Return the name of the governing limit-state check for a `BeamDesignResult`.
-"""
+"""Governing limit-state for beams (see `beam_diagnostic_governing_check`)."""
 function _beam_governing_check(br::BeamDesignResult)
-    return br.flexure_ratio >= br.shear_ratio ? "flexure" : "shear"
+    beam_diagnostic_governing_check(br)
 end
 
-"""
-Return the name of the governing limit-state check for a `FoundationDesignResult`.
-"""
+"""Governing limit-state for foundations (see `foundation_diagnostic_governing_check`)."""
 function _fdn_governing_check(fr::FoundationDesignResult)
-    ratios = [fr.bearing_ratio, fr.punching_ratio, fr.flexure_ratio]
-    names  = ["bearing", "punching_shear_fdn", "flexure_fdn"]
-    names[argmax(ratios)]
+    foundation_diagnostic_governing_check(fr)
 end
 
 """
@@ -308,6 +314,9 @@ function _diagnose_column(
     governing = _column_governing_check(cr)
     punch_ratio = isnothing(cr.punching) ? 0.0 : cr.punching.ratio
     max_ratio   = max(cr.axial_ratio, cr.interaction_ratio, punch_ratio)
+    if !cr.ok && max_ratio < 1.0
+        max_ratio = 1.0
+    end
 
     # Section dimensions in display (thickness) units
     c1_disp = _to_display(du, :thickness, cr.c1)
@@ -415,6 +424,9 @@ function _diagnose_beam(
 
     governing = _beam_governing_check(br)
     max_ratio = max(br.flexure_ratio, br.shear_ratio)
+    if !br.ok && max_ratio < 1.0
+        max_ratio = 1.0
+    end
 
     mu_disp = _to_display(du, :moment, br.Mu)
     vu_disp = _to_display(du, :force,  br.Vu)
@@ -484,7 +496,14 @@ function _diagnose_slab(
     munit = _moment_unit_str(du)
 
     governing = _slab_governing_check(sr)
-    max_ratio = max(sr.deflection_ratio, sr.punching_max_ratio)
+    base_ratio = max(sr.deflection_ratio, sr.punching_max_ratio)
+    reinf_or_conv_fail = governing in (
+        "reinforcement_design",
+        "reinforcement_design_secondary",
+        "transfer_reinforcement",
+        "non_convergence",
+    )
+    max_ratio = reinf_or_conv_fail ? max(base_ratio, 1.0) : base_ratio
 
     h_disp = _to_display(du, :thickness, sr.thickness)
     defl_disp       = _to_display(du, :deflection, sr.deflection_in * u"inch")
@@ -503,6 +522,9 @@ function _diagnose_slab(
         0.0
     end
 
+    gov_defl = governing == "deflection"
+    gov_punch = governing == "punching_shear_slab"
+
     checks = Dict{String, Any}[
         Dict{String, Any}(
             "name"          => "deflection",
@@ -512,7 +534,7 @@ function _diagnose_slab(
             "deflection_unit" => _thickness_unit_string(du),
             "ratio"         => _round_val(sr.deflection_ratio),
             "headroom"      => _round_val(1.0 - sr.deflection_ratio),
-            "governing"     => governing == "deflection",
+            "governing"     => gov_defl,
         ),
         Dict{String, Any}(
             "name"          => "punching_shear_slab",
@@ -521,7 +543,7 @@ function _diagnose_slab(
             "demand_unit"   => _is_imperial(du) ? "ksi" : "MPa",
             "ratio"         => _round_val(sr.punching_max_ratio),
             "headroom"      => _round_val(1.0 - sr.punching_max_ratio),
-            "governing"     => governing == "punching_shear_slab",
+            "governing"     => gov_punch,
             "has_studs"     => sr.has_studs,
         ),
     ]
@@ -545,6 +567,7 @@ function _diagnose_slab(
         "deflection"     => _round_val(defl_disp),
         "deflection_limit" => _round_val(defl_limit_disp),
         "deflection_unit" => _thickness_unit_string(du),
+        "failure_reason"  => _normalize_failure_reason(sr.failure_reason),
         "governing_check" => governing,
         "governing_ratio" => _round_val(max_ratio),
         "governing_mode"  => _governing_mode(max_ratio),
@@ -599,6 +622,9 @@ function _diagnose_foundation(
 
     governing = _fdn_governing_check(fr)
     max_ratio = max(fr.bearing_ratio, fr.punching_ratio, fr.flexure_ratio)
+    if !fr.ok && max_ratio < 1.0
+        max_ratio = 1.0
+    end
 
     L_disp     = _to_display_length(du, fr.length)
     W_disp     = _to_display_length(du, fr.width)
@@ -1165,7 +1191,8 @@ function _element_reasonableness_checks(
     end
 
     # Self-weight dominance: check from the design result objects directly
-    for (idx, sr) in enumerate(design.slabs)
+    # design.slabs is Dict{Int,SlabDesignResult}; enumerate(dict) yields (n, Pair{K,V}), not results.
+    for (slab_idx, sr) in design.slabs
         qu_val  = sr.qu
         sw_val  = sr.self_weight
         (isnothing(qu_val) || isnothing(sw_val)) && continue
@@ -1175,7 +1202,7 @@ function _element_reasonableness_checks(
         sw_frac = sw_raw / qu_raw
         if sw_frac > slab_t["self_weight_dominance"]
             push!(warnings, Dict{String, Any}(
-                "element_type" => "slab", "element_id" => "slab_$idx",
+                "element_type" => "slab", "element_id" => "slab_$slab_idx",
                 "check" => "self_weight_dominance", "severity" => "critical",
                 "value" => _round_val(sw_frac; digits=2), "threshold" => slab_t["self_weight_dominance"], "unit" => "fraction",
                 "interpretation" => "Slab self-weight is $(round(sw_frac * 100; digits=0))% of " *

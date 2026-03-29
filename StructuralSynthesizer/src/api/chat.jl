@@ -312,7 +312,7 @@ after the bracket as additional context. Incorporate the selection into your rea
 const _TOOLS_GUIDANCE = """
 
 TOOLS (descriptions in tool specs — consult use_when for details):
-  Orient:      get_situation_card (FIRST), get_building_summary, get_current_params, get_design_history
+  Orient:      get_situation_card (FIRST), get_building_summary, get_geometry_digest, get_current_params, get_design_history
   Diagnose:    get_diagnose_summary (FIRST), get_diagnose, query_elements, get_solver_trace, get_lever_map
   Explore:     run_experiment (FAST), validate_params → run_design, compare_designs, suggest_next_action
   Communicate: narrate_element, narrate_comparison, get_result_summary, get_condensed_result, clarify_user_intent
@@ -330,11 +330,15 @@ TOOL SELECTION (match intent → sequence):
   "Compare" / "Did it help?"→ compare_designs + get_design_history
   "What does X do?"         → explain_field(X) — returns schema + rationale + related structural checks
   "Why does the code say…?" → get_provision_rationale(section_or_check) — mechanism, philosophy, misconceptions
+  Geometry seems missing?   → get_geometry_digest — NEVER claim spans/heights are unavailable without calling this first
   Always: validate_params before run_design. record_insight after each design. get_session_insights before recommending.
 
 CLIENT GEOMETRY VS SERVER TOOLS:
   POST /chat may include building_geometry JSON and/or geometry_summary narrative — use them.
   get_situation_card.has_geometry only reflects server cache from POST /design, NOT prompt geometry.
+  get_situation_card.health: when health.n_failing > 0, report health.failing_by_type (counts per slabs/columns/beams/foundations)
+  together with health.critical_element. critical_element is only the single worst failing element — never substitute it
+  for a full failure inventory. For a complete list, call get_diagnose_summary or query_elements(ok=false).
   When a STRUCTURE-BASED GEOMETRY DIGEST is present, the server has built a real BuildingStructure from the geometry
   (skeleton → cells → slabs → members → tributaries) — the same pipeline the solver uses. This gives you real cell
   spans, slab panel data, member lengths, and column tributary areas with grid regularity analysis. Use these directly.
@@ -444,12 +448,22 @@ OPENING ANALYSIS (your first response — CRITICAL):
      Do NOT ask about spans, story count, or floor system if the geometry already tells you.
      Good questions: occupancy type (affects live load), fire rating requirements, aesthetic preferences.
 
-  ANTI-PATTERNS (never do these in opening):
+  GEOMETRY RECOVERY RULE:
+  If you believe geometry data is missing, stale, or incomplete — DO NOT say so.
+  Instead, call the `get_geometry_digest` tool to fetch a fresh, authoritative digest.
+  Only after that tool returns an error may you tell the user geometry is unavailable.
+
+  ANTI-PATTERNS (FORBIDDEN — never do these):
   - "I'd be happy to help with your structural design" or similar filler
   - Listing all possible floor types without recommending one
-  - Asking questions the geometry data already answers
+  - Asking questions the geometry data already answers (spans, stories, column count)
   - Generic descriptions that could apply to any building
   - Repeating the geometry stats back without interpretation
+  - "For a more detailed breakdown, a tool would be needed" — the GEOMETRY DIGEST IS the detailed breakdown
+  - "The specific span lengths are not provided" — they ARE provided in the digest
+  - "Some spans exceeding X feet" — say the EXACT range from the digest: "Beam spans: min–max ft"
+  - Any hedging about span or height data when the digest contains it
+  - Saying geometry is missing without first calling `get_geometry_digest`
 """
 
 const _DESIGN_SYSTEM_PREAMBLE = """
@@ -534,6 +548,19 @@ GEOMETRY AND IRREGULARITY:
 - When discussing failing elements, correlate with real geometry features: re-entrant corners, setbacks, non-orthogonal grids, triangular panels — not merely different span lengths in X vs Y.
 - Use cell position counts (corner/edge/interior) and slab panel aspect ratios to characterize plan shape.
 - If member counts vary by level, there may be transfer conditions — flag when the geometry summary shows that.
+
+GEOMETRY RECOVERY RULE:
+If you believe geometry data is missing, stale, or incomplete — DO NOT say so.
+Instead, call the `get_geometry_digest` tool to fetch a fresh, authoritative digest.
+Only after that tool returns an error may you tell the user geometry is unavailable.
+
+ANTI-PATTERNS (FORBIDDEN — never do these):
+- "For a more detailed breakdown of specific span lengths, a tool would be needed" — the digest HAS exact spans
+- "The specific span lengths are not provided" — they ARE provided; quote the exact min–max range
+- "Some spans exceeding X feet" — say the EXACT span range
+- Any hedging about geometry data when the GEOMETRY DIGEST contains it
+- Suggesting the user "provide" span or height data that is already in the digest
+- Saying geometry is missing without first calling `get_geometry_digest`
 $_TOOLS_GUIDANCE
 $_SESSION_DESIGN_HISTORY_RULE
 $_CLARIFICATION_INSTRUCTION
@@ -606,29 +633,122 @@ function _chat_initialize_structure(geo_dict::Dict{String, Any})
 end
 
 """
-    _chat_get_or_build_structure(geo_dict) -> Union{BuildingStructure, Nothing}
+    _chat_geometry_sse_emit!(stream, phase; kwargs...)
+
+Emit one SSE `data:` line with `type` = `geometry_init` for client loading traces.
+`stream` may be `nothing` (no-op).
+"""
+function _chat_geometry_sse_emit!(
+    stream::Union{Nothing, HTTP.Stream},
+    phase::String;
+    message::Union{Nothing, String} = nothing,
+    geometry_hash_prefix::Union{Nothing, String} = nothing,
+    elapsed_ms::Union{Nothing, Int} = nothing,
+    cached::Union{Nothing, Bool} = nothing,
+    extra::Union{Nothing, Dict{String, Any}} = nothing,
+)
+    isnothing(stream) && return
+    d = Dict{String, Any}("type" => "geometry_init", "phase" => phase)
+    !isnothing(message) && (d["message"] = message)
+    !isnothing(geometry_hash_prefix) && (d["geometry_hash_prefix"] = geometry_hash_prefix)
+    !isnothing(elapsed_ms) && (d["elapsed_ms"] = elapsed_ms)
+    !isnothing(cached) && (d["cached"] = cached)
+    if !isnothing(extra)
+        for (k, v) in extra
+            d[string(k)] = v
+        end
+    end
+    write(stream, "data: $(JSON3.write(d))\n\n")
+    return nothing
+end
+
+"""
+    _chat_get_or_build_structure(geo_dict; sse_stream=nothing) -> Union{BuildingStructure, Nothing}
 
 Thread-safe access to the chat structure cache. Returns a fully initialized
 `BuildingStructure` with cells, members, and tributaries computed.
 Returns `nothing` if initialization fails (logs warning).
+
+When `sse_stream` is set, emits phased `geometry_init` SSE events for the UI.
 """
-function _chat_get_or_build_structure(geo_dict::Dict{String, Any})::Union{BuildingStructure, Nothing}
+function _chat_get_or_build_structure(
+    geo_dict::Dict{String, Any};
+    sse_stream::Union{Nothing, HTTP.Stream} = nothing,
+)::Union{BuildingStructure, Nothing}
     geo_hash = try
         compute_geometry_hash(_api_input_geometry_only_from_chat_dict(geo_dict))
     catch
+        _chat_geometry_sse_emit!(
+            sse_stream, "error";
+            message = "Could not compute geometry hash for structure build.",
+        )
         return nothing
     end
+    hp = length(geo_hash) >= 8 ? geo_hash[1:8] : geo_hash
 
     lock(_CHAT_STRUCTURE_CACHE.lock) do
         if _CHAT_STRUCTURE_CACHE.geometry_hash == geo_hash && !isnothing(_CHAT_STRUCTURE_CACHE.structure)
+            _chat_geometry_sse_emit!(
+                sse_stream, "cache_hit_structure";
+                message = "Reusing initialized BuildingStructure from server cache (same geometry).",
+                geometry_hash_prefix = hp,
+                cached = true,
+            )
             return _CHAT_STRUCTURE_CACHE.structure
         end
     end
 
+    _chat_geometry_sse_emit!(
+        sse_stream, "start";
+        message = "Building analytical model from geometry (no structural solver).",
+        geometry_hash_prefix = hp,
+    )
+    _chat_geometry_sse_emit!(
+        sse_stream, "skeleton";
+        message = "Parsing vertices, edges, faces, supports → BuildingSkeleton…",
+        geometry_hash_prefix = hp,
+    )
+    t_skel = time()
     struc = try
-        s, h = _chat_initialize_structure(geo_dict)
-        s
+        api_input = _api_input_geometry_only_from_chat_dict(geo_dict)
+        skel = json_to_skeleton(api_input)
+        _chat_geometry_sse_emit!(
+            sse_stream, "skeleton_done";
+            message = "Skeleton built.",
+            geometry_hash_prefix = hp,
+            elapsed_ms = round(Int, (time() - t_skel) * 1000),
+            extra = Dict{String, Any}(
+                "n_vertices" => length(skel.vertices),
+                "n_edges" => length(skel.edges),
+            ),
+        )
+        _chat_geometry_sse_emit!(
+            sse_stream, "initialize";
+            message = "initialize! — cells, slabs, framing, column tributaries…",
+            geometry_hash_prefix = hp,
+        )
+        t_ini = time()
+        struc = BuildingStructure(skel)
+        initialize!(struc)
+        _chat_geometry_sse_emit!(
+            sse_stream, "initialize_done";
+            message = "Structure initialized.",
+            geometry_hash_prefix = hp,
+            elapsed_ms = round(Int, (time() - t_ini) * 1000),
+            extra = Dict{String, Any}(
+                "n_cells" => length(struc.cells),
+                "n_slabs" => length(struc.slabs),
+                "n_beams" => length(struc.beams),
+                "n_columns" => length(struc.columns),
+            ),
+        )
+        struc
     catch e
+        _chat_geometry_sse_emit!(
+            sse_stream, "error";
+            message = "Structure build failed: $(sprint(showerror, e))",
+            geometry_hash_prefix = hp,
+        )
         @warn "Chat structure initialization failed — falling back to raw JSON analysis" exception=(e, catch_backtrace())
         return nothing
     end
@@ -945,7 +1065,8 @@ end
 Render the structure-based geometry digest as a compact LLM-readable block.
 """
 function _structure_digest_plaintext(d::Dict{String, Any})::String
-    lines = String["── STRUCTURE-BASED GEOMETRY DIGEST (authoritative) ──"]
+    lines = String["── STRUCTURE-BASED GEOMETRY DIGEST (authoritative — MUST USE) ──"]
+    push!(lines, "MANDATORY: Quote the numbers below directly. Do NOT say spans are unknown or need further analysis.")
     push!(lines, "Source: BuildingStructure (skeleton → initialize! — same pipeline as solver)")
 
     # Counts
@@ -1051,31 +1172,149 @@ function _structure_digest_plaintext(d::Dict{String, Any})::String
 end
 
 """
-    _chat_get_structure_digest(geo_dict) -> Union{Dict{String, Any}, Nothing}
+    _chat_get_structure_digest(geo_dict; sse_stream=nothing) -> Union{Dict{String, Any}, Nothing}
 
 Get (or compute + cache) a structure-based geometry digest.
 Returns `nothing` if structure initialization fails.
+
+When `sse_stream` is set, emits `geometry_init` phases (`cache_hit_digest`, `digest`,
+`digest_done`, `complete`, `fallback`) for client loading traces.
 """
-function _chat_get_structure_digest(geo_dict::Dict{String, Any})::Union{Dict{String, Any}, Nothing}
-    struc = _chat_get_or_build_structure(geo_dict)
-    isnothing(struc) && return nothing
+function _chat_get_structure_digest(
+    geo_dict::Dict{String, Any};
+    sse_stream::Union{Nothing, HTTP.Stream} = nothing,
+)::Union{Dict{String, Any}, Nothing}
+    t0 = time()
+    geo_hash = try
+        compute_geometry_hash(_api_input_geometry_only_from_chat_dict(geo_dict))
+    catch
+        _chat_geometry_sse_emit!(
+            sse_stream, "error";
+            message = "Could not compute geometry hash for digest.",
+        )
+        return nothing
+    end
+    hp = length(geo_hash) >= 8 ? geo_hash[1:8] : geo_hash
 
     lock(_CHAT_STRUCTURE_CACHE.lock) do
-        if !isnothing(_CHAT_STRUCTURE_CACHE.digest)
-            return _CHAT_STRUCTURE_CACHE.digest
+        if _CHAT_STRUCTURE_CACHE.geometry_hash == geo_hash && !isnothing(_CHAT_STRUCTURE_CACHE.digest)
+            d = _CHAT_STRUCTURE_CACHE.digest
+            _chat_geometry_sse_emit!(
+                sse_stream, "cache_hit_digest";
+                message = "Geometry digest already cached for this model.",
+                geometry_hash_prefix = hp,
+                cached = true,
+            )
+            _chat_geometry_sse_emit!(
+                sse_stream, "complete";
+                message = "Geometry ready for assistant.",
+                geometry_hash_prefix = hp,
+                elapsed_ms = round(Int, (time() - t0) * 1000),
+                cached = true,
+                extra = Dict{String, Any}(
+                    "structure_digest_ok" => true,
+                    "n_cells" => get(d, "n_cells", 0),
+                    "n_slabs" => get(d, "n_slabs", 0),
+                    "n_beams" => get(d, "n_beams", 0),
+                    "n_columns" => get(d, "n_columns", 0),
+                ),
+            )
+            return d
         end
     end
 
+    struc = _chat_get_or_build_structure(geo_dict; sse_stream=sse_stream)
+    if isnothing(struc)
+        _chat_geometry_sse_emit!(
+            sse_stream, "fallback";
+            message = "Using lightweight raw-JSON geometry stats (structure init unavailable).",
+            geometry_hash_prefix = hp,
+            extra = Dict{String, Any}("structure_digest_ok" => false),
+        )
+        _chat_geometry_sse_emit!(
+            sse_stream, "complete";
+            message = "Geometry preprocessing finished (fallback mode).",
+            geometry_hash_prefix = hp,
+            elapsed_ms = round(Int, (time() - t0) * 1000),
+            extra = Dict{String, Any}("structure_digest_ok" => false),
+        )
+        return nothing
+    end
+
+    lock(_CHAT_STRUCTURE_CACHE.lock) do
+        if _CHAT_STRUCTURE_CACHE.geometry_hash == geo_hash && !isnothing(_CHAT_STRUCTURE_CACHE.digest)
+            d = _CHAT_STRUCTURE_CACHE.digest
+            _chat_geometry_sse_emit!(
+                sse_stream, "complete";
+                message = "Geometry ready for assistant.",
+                geometry_hash_prefix = hp,
+                elapsed_ms = round(Int, (time() - t0) * 1000),
+                cached = true,
+                extra = Dict{String, Any}(
+                    "structure_digest_ok" => true,
+                    "n_cells" => get(d, "n_cells", 0),
+                    "n_slabs" => get(d, "n_slabs", 0),
+                    "n_beams" => get(d, "n_beams", 0),
+                    "n_columns" => get(d, "n_columns", 0),
+                ),
+            )
+            return d
+        end
+    end
+
+    _chat_geometry_sse_emit!(
+        sse_stream, "digest";
+        message = "Computing assistant geometry digest (spans, tributaries, flags)…",
+        geometry_hash_prefix = hp,
+    )
+    t_d = time()
     digest = try
         _structure_geometry_digest(struc)
     catch e
+        _chat_geometry_sse_emit!(
+            sse_stream, "error";
+            message = "Digest failed: $(sprint(showerror, e))",
+            geometry_hash_prefix = hp,
+        )
         @warn "Structure geometry digest failed" exception=(e, catch_backtrace())
+        _chat_geometry_sse_emit!(
+            sse_stream, "fallback";
+            message = "Digest computation failed; assistant will use raw JSON stats if available.",
+            geometry_hash_prefix = hp,
+            extra = Dict{String, Any}("structure_digest_ok" => false),
+        )
+        _chat_geometry_sse_emit!(
+            sse_stream, "complete";
+            message = "Geometry preprocessing finished (digest error).",
+            geometry_hash_prefix = hp,
+            elapsed_ms = round(Int, (time() - t0) * 1000),
+            extra = Dict{String, Any}("structure_digest_ok" => false),
+        )
         return nothing
     end
 
     lock(_CHAT_STRUCTURE_CACHE.lock) do
         _CHAT_STRUCTURE_CACHE.digest = digest
     end
+    _chat_geometry_sse_emit!(
+        sse_stream, "digest_done";
+        message = "Digest computed.",
+        geometry_hash_prefix = hp,
+        elapsed_ms = round(Int, (time() - t_d) * 1000),
+    )
+    _chat_geometry_sse_emit!(
+        sse_stream, "complete";
+        message = "Geometry ready for assistant.",
+        geometry_hash_prefix = hp,
+        elapsed_ms = round(Int, (time() - t0) * 1000),
+        extra = Dict{String, Any}(
+            "structure_digest_ok" => true,
+            "n_cells" => get(digest, "n_cells", 0),
+            "n_slabs" => get(digest, "n_slabs", 0),
+            "n_beams" => get(digest, "n_beams", 0),
+            "n_columns" => get(digest, "n_columns", 0),
+        ),
+    )
     return digest
 end
 
@@ -1844,7 +2083,7 @@ Convert geometry stats dict into a concise plaintext digest that the LLM reads b
 Every critical number appears as a direct sentence — no nesting, no parsing required.
 """
 function _geometry_digest_plaintext(stats::Dict{String, Any})::String
-    lines = String["── GEOMETRY DIGEST (use these numbers in your opening analysis) ──"]
+    lines = String["── GEOMETRY DIGEST (MANDATORY — quote these numbers directly, NEVER say they are missing) ──"]
 
     unit = get(stats, "units", "")
     nc = get(stats, "n_column_edges", 0)
@@ -2006,7 +2245,10 @@ function _append_chat_building_geometry_sections!(
         struc_digest = _chat_get_structure_digest(structured)
 
         if !isnothing(struc_digest)
+            @info "Chat geometry: structure-based digest OK" n_cells=get(struc_digest, "n_cells", 0) n_beams=get(struc_digest, "n_beams", 0)
             push!(parts, "\n\nBUILDING GEOMETRY (structure-initialized — cells, members, tributaries computed):\n")
+            push!(parts, "⚠ The digest below contains EXACT span lengths, story heights, tributary areas, and element counts.\n")
+            push!(parts, "  You MUST quote these numbers directly. NEVER say spans are unknown or need a tool to retrieve.\n\n")
             push!(parts, _structure_digest_plaintext(struc_digest))
 
             warnings = get(struc_digest, "warnings", nothing)
@@ -2019,10 +2261,12 @@ function _append_chat_building_geometry_sections!(
 
             push!(parts, "\nFull structure analysis JSON: ", JSON3.write(struc_digest), "\n")
         else
-            # Fallback: raw JSON analysis (no BuildingStructure available)
+            @warn "Chat geometry: structure-based digest FAILED — using raw JSON fallback"
             stats = _chat_structured_geometry_stats(structured)
             json_txt = JSON3.write(structured)
             push!(parts, "\n\nBUILDING GEOMETRY (raw JSON analysis — structure init failed, using geometric approximation):\n")
+            push!(parts, "⚠ The digest below contains span lengths, story heights, and element counts from the geometry JSON.\n")
+            push!(parts, "  You MUST quote these numbers directly. NEVER say spans are unknown or need a tool to retrieve.\n\n")
             push!(parts, _geometry_digest_plaintext(stats))
 
             if haskey(stats, "warnings") && !isempty(stats["warnings"])
@@ -3490,6 +3734,36 @@ function _dispatch_chat_tool(tool::String, args::Dict{String, Any})::Dict{String
         isnothing(struc) && return Dict("error" => "no_geometry", "message" => "No geometry loaded. Submit geometry via POST /design first.", "recovery_hint" => _NO_GEOMETRY_HINT)
         return agent_building_summary(struc)
 
+    elseif tool == "get_geometry_digest"
+        # Try the chat-side structure cache first (from building_geometry in POST /chat)
+        cached_digest = lock(_CHAT_STRUCTURE_CACHE.lock) do
+            _CHAT_STRUCTURE_CACHE.digest
+        end
+        if !isnothing(cached_digest)
+            cached_digest["_source"] = "chat_structure_cache"
+            cached_digest["_plaintext"] = _structure_digest_plaintext(cached_digest)
+            return cached_digest
+        end
+        # Fall back: build from the design cache's structure if available
+        if !isnothing(struc)
+            digest = try
+                _structure_geometry_digest(struc)
+            catch e
+                @warn "get_geometry_digest: digest from server structure failed" exception=(e, catch_backtrace())
+                nothing
+            end
+            if !isnothing(digest)
+                digest["_source"] = "design_cache_structure"
+                digest["_plaintext"] = _structure_digest_plaintext(digest)
+                return digest
+            end
+        end
+        return Dict{String, Any}(
+            "error" => "no_geometry",
+            "message" => "No geometry available. Neither chat building_geometry nor server POST /design geometry is loaded.",
+            "recovery_hint" => "Ask the user to load geometry from Grasshopper, or ensure building_geometry is included in the chat request.",
+        )
+
     elseif tool == "get_current_params"
         isnothing(design) && return Dict("error" => "no_design", "message" => "No design has been run yet.", "recovery_hint" => _NO_DESIGN_HINT)
         return agent_current_params(design)
@@ -3868,6 +4142,13 @@ Endpoints:
 - `POST /chat/action`   — structural tool dispatch
 - `GET  /chat/history`  — retrieve session history
 - `DELETE /chat/history`— clear session history
+
+**Geometry init trace (SSE):** When the request includes structured `building_geometry`, the
+response begins with one or more `data:` lines where the JSON object has `"type":"geometry_init"`.
+Phases include: `start`, `skeleton`, `skeleton_done`, `initialize`, `initialize_done`, `digest`,
+`digest_done`, `cache_hit_structure`, `cache_hit_digest`, `fallback`, `error`, `complete`.
+Each line may include `message`, `elapsed_ms`, `geometry_hash_prefix`, `cached`, and counts
+(`n_cells`, etc.). The assistant token stream follows the same format as before (`token`, summary, `[DONE]`).
 """
 function register_chat_routes!()
 
@@ -3981,14 +4262,29 @@ function register_chat_routes!()
         # system-context message so the LLM doesn't need to regex-parse brackets.
         messages = _preprocess_clarification_response(messages)
 
+        # When structured geometry is present, open SSE immediately and stream
+        # geometry-init phases so the client can show a loading trace while
+        # BuildingStructure + digest run (can take tens of seconds on large models).
+        early_sse_geo = !isnothing(structured_geo)
+        if early_sse_geo
+            HTTP.setstatus(stream, 200)
+            HTTP.setheader(stream, "Content-Type"  => "text/event-stream")
+            HTTP.setheader(stream, "Cache-Control" => "no-cache")
+            HTTP.setheader(stream, "Connection"    => "keep-alive")
+            startwrite(stream)
+            _chat_get_structure_digest(structured_geo; sse_stream=stream)
+        end
+
         system_prompt = _build_system_prompt(mode, params_json, geometry_summary, client_geometry_hash, structured_geo)
         budgeted      = _budget_messages(system_prompt, messages, MAX_CONTEXT_TOKENS)
 
-        HTTP.setstatus(stream, 200)
-        HTTP.setheader(stream, "Content-Type"  => "text/event-stream")
-        HTTP.setheader(stream, "Cache-Control" => "no-cache")
-        HTTP.setheader(stream, "Connection"    => "keep-alive")
-        startwrite(stream)
+        if !early_sse_geo
+            HTTP.setstatus(stream, 200)
+            HTTP.setheader(stream, "Content-Type"  => "text/event-stream")
+            HTTP.setheader(stream, "Cache-Control" => "no-cache")
+            HTTP.setheader(stream, "Connection"    => "keep-alive")
+            startwrite(stream)
+        end
 
         _stream_llm_to_sse(stream, system_prompt, budgeted; session_id=session_id, client_geometry_hash=client_geometry_hash)
     end

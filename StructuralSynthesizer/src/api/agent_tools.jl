@@ -452,10 +452,11 @@ function agent_situation_card(
         card["params"] = agent_current_params(design)
 
         s = design.summary
-        n_fail = count(p -> !p.second.ok, design.columns) +
-                 count(p -> !p.second.ok, design.beams) +
-                 count(p -> !(p.second.converged && p.second.deflection_ok && p.second.punching_ok), design.slabs) +
-                 count(p -> !p.second.ok, design.foundations)
+        n_fail_cols = count(p -> !p.second.ok, design.columns)
+        n_fail_beams = count(p -> !p.second.ok, design.beams)
+        n_fail_slabs = count(p -> !(p.second.converged && p.second.deflection_ok && p.second.punching_ok), design.slabs)
+        n_fail_fdns = count(p -> !p.second.ok, design.foundations)
+        n_fail = n_fail_cols + n_fail_beams + n_fail_slabs + n_fail_fdns
         card["health"] = Dict{String, Any}(
             "all_pass"         => s.all_checks_pass,
             "critical_ratio"   => round(s.critical_ratio; digits=3),
@@ -464,6 +465,15 @@ function agent_situation_card(
             "n_elements"       => length(design.columns) + length(design.beams) +
                                   length(design.slabs) + length(design.foundations),
             "n_failing"        => n_fail,
+            "failing_by_type"  => Dict{String, Any}(
+                "columns"     => n_fail_cols,
+                "beams"       => n_fail_beams,
+                "slabs"       => n_fail_slabs,
+                "foundations" => n_fail_fdns,
+            ),
+            "health_note"      => "When n_failing > 0, cite failing_by_type and critical_element together. " *
+                "critical_element is the worst failing element (same `ok` rules as GET /result). " *
+                "Do not infer failures only from critical_element if failing_by_type shows otherwise.",
         )
         card["has_trace"] = !isempty(design.solver_trace)
     end

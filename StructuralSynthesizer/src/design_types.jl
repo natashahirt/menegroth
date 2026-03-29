@@ -643,6 +643,43 @@ Base.@kwdef mutable struct SlabDesignResult
 end
 
 """
+    slab_diagnostic_governing_check(sr::SlabDesignResult) -> String
+
+Canonical limit-state key for `/diagnose` and design summaries. When the slab passes API-style
+`ok` (`converged && deflection_ok && punching_ok`), returns whichever of deflection vs slab
+punching has the higher ratio. When it fails, prefers the sizer's `failing_check` and
+`failure_reason` (e.g. Whitney / rebar inadequacy reports `section_inadequate` and
+`reinforcement_design`) so diagnostics are not mislabeled as deflection or punching alone.
+"""
+function slab_diagnostic_governing_check(sr::SlabDesignResult)::String
+    if sr.converged && sr.deflection_ok && sr.punching_ok
+        return sr.deflection_ratio >= sr.punching_max_ratio ? "deflection" : "punching_shear_slab"
+    end
+    fc = strip(sr.failing_check)
+    if !isempty(fc)
+        fc == "reinforcement_design" && return "reinforcement_design"
+        fc == "reinforcement_design_secondary" && return "reinforcement_design_secondary"
+        fc == "transfer_reinforcement" && return "transfer_reinforcement"
+        occursin("punching", fc) && return "punching_shear_slab"
+        occursin("deflection", fc) && return "deflection"
+    end
+    fr = strip(sr.failure_reason)
+    if fr == "section_inadequate"
+        return "reinforcement_design"
+    end
+    if !sr.converged
+        return "non_convergence"
+    end
+    if !sr.punching_ok
+        return "punching_shear_slab"
+    end
+    if !sr.deflection_ok
+        return "deflection"
+    end
+    return sr.deflection_ratio >= sr.punching_max_ratio ? "deflection" : "punching_shear_slab"
+end
+
+"""
 Punching shear check result for a column.
 All values stored in coherent SI (kN, m, m²).
 """
@@ -705,6 +742,71 @@ Base.@kwdef mutable struct BeamDesignResult
 end
 
 """
+    column_diagnostic_governing_check(cr::ColumnDesignResult) -> String
+
+When `cr.ok`, returns the limit state with the highest demand/capacity ratio. When the column
+fails, returns the check that actually drives failure: ratios above 1.0, or punching with
+`punching.ok == false`, rather than whichever ratio is largest among still-passing checks.
+"""
+function column_diagnostic_governing_check(cr::ColumnDesignResult)::String
+    punch_r = isnothing(cr.punching) ? 0.0 : cr.punching.ratio
+    if cr.ok
+        if cr.axial_ratio >= cr.interaction_ratio && cr.axial_ratio >= punch_r
+            return "axial_compression"
+        elseif cr.interaction_ratio >= punch_r
+            return "pm_interaction"
+        else
+            return "punching_shear_col"
+        end
+    end
+    candidates = Tuple{String, Float64}[]
+    if cr.axial_ratio > 1.0
+        push!(candidates, ("axial_compression", cr.axial_ratio))
+    end
+    if cr.interaction_ratio > 1.0
+        push!(candidates, ("pm_interaction", cr.interaction_ratio))
+    end
+    if !isnothing(cr.punching) && (!cr.punching.ok || punch_r > 1.0)
+        push!(candidates, ("punching_shear_col", punch_r))
+    end
+    if !isempty(candidates)
+        _, j = findmax([c[2] for c in candidates])
+        return candidates[j][1]
+    end
+    if cr.axial_ratio >= cr.interaction_ratio && cr.axial_ratio >= punch_r
+        return "axial_compression"
+    elseif cr.interaction_ratio >= punch_r
+        return "pm_interaction"
+    else
+        return "punching_shear_col"
+    end
+end
+
+"""
+    beam_diagnostic_governing_check(br::BeamDesignResult) -> String
+
+When `br.ok`, flexure vs shear by larger ratio. When `br.ok` is false, attributes failure to
+checks with demand/capacity above 1.0 (worst among them), not merely the larger of two passing ratios.
+"""
+function beam_diagnostic_governing_check(br::BeamDesignResult)::String
+    if br.ok
+        return br.flexure_ratio >= br.shear_ratio ? "flexure" : "shear"
+    end
+    candidates = Tuple{String, Float64}[]
+    if br.flexure_ratio > 1.0
+        push!(candidates, ("flexure", br.flexure_ratio))
+    end
+    if br.shear_ratio > 1.0
+        push!(candidates, ("shear", br.shear_ratio))
+    end
+    if !isempty(candidates)
+        _, j = findmax([c[2] for c in candidates])
+        return candidates[j][1]
+    end
+    return br.flexure_ratio >= br.shear_ratio ? "flexure" : "shear"
+end
+
+"""
 Design result for a foundation.
 """
 Base.@kwdef mutable struct FoundationDesignResult
@@ -731,6 +833,43 @@ Base.@kwdef mutable struct FoundationDesignResult
 end
 
 """
+    foundation_diagnostic_governing_check(fr::FoundationDesignResult) -> String
+
+When `fr.ok`, highest utilization among bearing, punching, and flexure. When the footing fails,
+picks the limit state(s) over capacity (ratio > 1) with the worst ratio, not the largest ratio
+among checks that still pass.
+"""
+function foundation_diagnostic_governing_check(fr::FoundationDesignResult)::String
+    rb = fr.bearing_ratio
+    rp = fr.punching_ratio
+    rf = fr.flexure_ratio
+    if fr.ok
+        if rb >= rp && rb >= rf
+            return "bearing"
+        elseif rp >= rf
+            return "punching_shear_fdn"
+        else
+            return "flexure_fdn"
+        end
+    end
+    candidates = Tuple{String, Float64}[]
+    rb > 1.0 && push!(candidates, ("bearing", rb))
+    rp > 1.0 && push!(candidates, ("punching_shear_fdn", rp))
+    rf > 1.0 && push!(candidates, ("flexure_fdn", rf))
+    if !isempty(candidates)
+        _, j = findmax([c[2] for c in candidates])
+        return candidates[j][1]
+    end
+    if rb >= rp && rb >= rf
+        return "bearing"
+    elseif rp >= rf
+        return "punching_shear_fdn"
+    else
+        return "flexure_fdn"
+    end
+end
+
+"""
 Design summary with aggregate metrics.
 """
 Base.@kwdef mutable struct DesignSummary
@@ -746,7 +885,9 @@ Base.@kwdef mutable struct DesignSummary
     
     # Status
     all_checks_pass::Bool = true
-    critical_element::String = ""      # Element with highest ratio
+    # When any element fails API-style `ok`, this names the worst failing element and its governing ratio.
+    # When all pass, this is the highest utilization anywhere (demand/limit style ratios).
+    critical_element::String = ""
     critical_ratio::Float64 = 0.0
 end
 

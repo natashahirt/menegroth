@@ -61,6 +61,87 @@ println("Testing design architecture types...")
         @test all_ok(design)  # No failures yet
         @test critical_ratio(design) == 0.0
     end
+
+    @testset "DesignSummary critical element prefers failing slabs over high-ratio passing foundations" begin
+        skel = gen_medium_office(10.0u"m", 10.0u"m", 3.0u"m", 1, 1, 1)
+        struc = BuildingStructure(skel)
+        params = DesignParameters()
+        design = BuildingDesign(struc, params)
+        design.slabs[1] = SlabDesignResult(;
+            thickness = 0.2u"m",
+            self_weight = 1.0u"kPa",
+            converged = true,
+            deflection_ok = true,
+            deflection_ratio = 0.1,
+            punching_ok = false,
+            punching_max_ratio = 1.5,
+        )
+        design.foundations[1] = FoundationDesignResult(;
+            ok = true,
+            bearing_ratio = 0.3,
+            punching_ratio = 2.21,
+            flexure_ratio = 0.2,
+        )
+        StructuralSynthesizer._compute_design_summary!(design, struc, params)
+        @test !design.summary.all_checks_pass
+        @test occursin("Slab", design.summary.critical_element)
+        @test occursin("punching", design.summary.critical_element)
+        @test design.summary.critical_ratio ≈ 1.5
+    end
+
+    @testset "slab_diagnostic_governing_check maps section_inadequate to reinforcement_design" begin
+        sr = SlabDesignResult(;
+            thickness = 0.2u"m",
+            self_weight = 1.0u"kPa",
+            converged = false,
+            failure_reason = "section_inadequate",
+            failing_check = "reinforcement_design",
+            deflection_ok = true,
+            punching_ok = true,
+            deflection_ratio = 0.2,
+            punching_max_ratio = 0.3,
+        )
+        @test StructuralSynthesizer.slab_diagnostic_governing_check(sr) == "reinforcement_design"
+    end
+
+    @testset "column_diagnostic_governing_check picks failing limit state, not max passing ratio" begin
+        pc = PunchingDesignResult(;
+            Vu = 100.0u"kN",
+            φVc = 100.0u"kN",
+            ratio = 1.3,
+            ok = false,
+            critical_perimeter = 4.0u"m",
+            tributary_area = 25.0u"m^2",
+        )
+        col = ColumnDesignResult(;
+            ok = false,
+            axial_ratio = 0.2,
+            interaction_ratio = 0.4,
+            punching = pc,
+        )
+        @test StructuralSynthesizer.column_diagnostic_governing_check(col) == "punching_shear_col"
+    end
+
+    @testset "beam_diagnostic_governing_check picks shear when only shear exceeds 1" begin
+        br = BeamDesignResult(;
+            ok = false,
+            flexure_ratio = 0.5,
+            shear_ratio = 1.15,
+            Mu = 0.0u"kN*m",
+            Vu = 0.0u"kN",
+        )
+        @test StructuralSynthesizer.beam_diagnostic_governing_check(br) == "shear"
+    end
+
+    @testset "foundation_diagnostic_governing_check picks failing check over high passing bearing" begin
+        fr = FoundationDesignResult(;
+            ok = false,
+            bearing_ratio = 0.55,
+            punching_ratio = 1.4,
+            flexure_ratio = 0.2,
+        )
+        @test StructuralSynthesizer.foundation_diagnostic_governing_check(fr) == "punching_shear_fdn"
+    end
     
     @testset "Existing Material Types (StructuralSizer)" begin
         # Test that we can use existing material types

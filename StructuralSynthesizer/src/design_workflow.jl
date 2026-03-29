@@ -1328,48 +1328,102 @@ function _trimmed_drop_extents_m(dp::StructuralSizer.DropPanelGeometry, cx::Floa
     return (eff1, eff2)
 end
 
+# Must match `_serialize_slabs` / `agent_situation_card` slab failure predicate.
+_slab_design_ok(sr::SlabDesignResult) = sr.converged && sr.deflection_ok && sr.punching_ok
+
+function _slab_governing_ratio_label(idx::Int, sr::SlabDesignResult)
+    rd = sr.deflection_ratio
+    rp = sr.punching_max_ratio
+    if rd >= rp
+        return rd, "Slab $idx (deflection)"
+    else
+        return rp, "Slab $idx (punching)"
+    end
+end
+
 """Compute summary metrics: critical element search + material quantity aggregation."""
 function _compute_design_summary!(design::BuildingDesign, struc::BuildingStructure, params::DesignParameters)
     summary = design.summary
 
     # ── Critical element search ──────────────────────────────────────────
-    max_ratio = 0.0
-    critical_elem = ""
+    # `glob_*` = highest ratio anywhere (utilization narrative).
+    # `fail_*` = worst among elements that fail API-style `ok` (matches chat / GET /result).
+    glob_ratio = 0.0
+    glob_elem = ""
+    fail_ratio = 0.0
+    fail_elem = ""
     all_ok = true
 
     for (idx, slab_result) in design.slabs
-        if slab_result.deflection_ratio > max_ratio
-            max_ratio = slab_result.deflection_ratio
-            critical_elem = "Slab $idx (deflection)"
+        r_glob, lab_glob = _slab_governing_ratio_label(idx, slab_result)
+        if r_glob > glob_ratio
+            glob_ratio = r_glob
+            glob_elem = lab_glob
         end
-        if !slab_result.deflection_ok
+        if !_slab_design_ok(slab_result)
             all_ok = false
+            g = slab_diagnostic_governing_check(slab_result)
+            rd = slab_result.deflection_ratio
+            rp = slab_result.punching_max_ratio
+            r_fail = max(rd, rp)
+            if g in ("reinforcement_design", "reinforcement_design_secondary", "transfer_reinforcement", "non_convergence")
+                r_fail = max(r_fail, 1.0)
+            end
+            lab_fail = "Slab $idx ($g)"
+            if r_fail > fail_ratio || isempty(fail_elem)
+                fail_ratio = max(fail_ratio, r_fail)
+                fail_elem = lab_fail
+            end
         end
     end
 
     for (idx, col_result) in design.columns
-        r = col_result.interaction_ratio
-        if r > max_ratio
-            max_ratio = r
-            critical_elem = "Column $idx (interaction)"
+        r_ax = col_result.axial_ratio
+        r_int = col_result.interaction_ratio
+        r_punch = (!isnothing(col_result.punching) ? col_result.punching.ratio : 0.0)
+        r_glob = max(r_ax, r_int, r_punch)
+        g_glob = if r_ax >= r_int && r_ax >= r_punch
+            "axial_compression"
+        elseif r_int >= r_punch
+            "pm_interaction"
+        else
+            "punching_shear_col"
         end
-        if !isnothing(col_result.punching) && col_result.punching.ratio > max_ratio
-            max_ratio = col_result.punching.ratio
-            critical_elem = "Column $idx (punching)"
+        lab_glob = "Column $idx ($g_glob)"
+        if r_glob > glob_ratio
+            glob_ratio = r_glob
+            glob_elem = lab_glob
         end
         if !col_result.ok
             all_ok = false
+            r_fail = max(r_ax, r_int, r_punch)
+            if r_fail < 1.0
+                r_fail = 1.0
+            end
+            lab_fail = "Column $idx ($(column_diagnostic_governing_check(col_result)))"
+            if r_fail > fail_ratio || isempty(fail_elem)
+                fail_ratio = max(fail_ratio, r_fail)
+                fail_elem = lab_fail
+            end
         end
     end
 
     for (idx, beam_result) in design.beams
-        r = max(beam_result.flexure_ratio, beam_result.shear_ratio)
-        if r > max_ratio
-            max_ratio = r
-            critical_elem = "Beam $idx (flexure/shear)"
+        r_glob = max(beam_result.flexure_ratio, beam_result.shear_ratio)
+        g_glob = beam_result.flexure_ratio >= beam_result.shear_ratio ? "flexure" : "shear"
+        lab_glob = "Beam $idx ($g_glob)"
+        if r_glob > glob_ratio
+            glob_ratio = r_glob
+            glob_elem = lab_glob
         end
         if !beam_result.ok
             all_ok = false
+            r_fail = r_glob < 1.0 ? 1.0 : r_glob
+            lab_fail = "Beam $idx ($(beam_diagnostic_governing_check(beam_result)))"
+            if r_fail > fail_ratio || isempty(fail_elem)
+                fail_ratio = max(fail_ratio, r_fail)
+                fail_elem = lab_fail
+            end
         end
     end
 
@@ -1380,18 +1434,32 @@ function _compute_design_summary!(design::BuildingDesign, struc::BuildingStructu
             fdn_result.flexure_ratio  => "flexure",
         )
         for (r, check_name) in fdn_ratios
-            if r > max_ratio
-                max_ratio = r
-                critical_elem = "Foundation $idx ($check_name)"
+            if r > glob_ratio
+                glob_ratio = r
+                glob_elem = "Foundation $idx ($check_name)"
             end
         end
         if !fdn_result.ok
             all_ok = false
+            r_fail = max(fdn_result.bearing_ratio, fdn_result.punching_ratio, fdn_result.flexure_ratio)
+            if r_fail < 1.0
+                r_fail = 1.0
+            end
+            lab_fail = "Foundation $idx ($(foundation_diagnostic_governing_check(fdn_result)))"
+            if r_fail > fail_ratio || isempty(fail_elem)
+                fail_ratio = max(fail_ratio, r_fail)
+                fail_elem = lab_fail
+            end
         end
     end
 
-    summary.critical_ratio = max_ratio
-    summary.critical_element = critical_elem
+    if !all_ok && (!isempty(fail_elem) || fail_ratio > 0)
+        summary.critical_ratio = fail_ratio > 0 ? fail_ratio : glob_ratio
+        summary.critical_element = !isempty(fail_elem) ? fail_elem : glob_elem
+    else
+        summary.critical_ratio = glob_ratio
+        summary.critical_element = glob_elem
+    end
     summary.all_checks_pass = all_ok
 
     # ── Material quantity aggregation ────────────────────────────────────

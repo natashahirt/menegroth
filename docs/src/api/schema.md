@@ -23,8 +23,8 @@ The top-level input object sent to `POST /design` and `POST /validate`.
 | `vertices` | `Vector{Vector{Float64}}` | yes | 3D vertex coordinates `[[x,y,z], ...]` |
 | `edges` | `APIEdgeGroups` | yes | Edge connectivity by group |
 | `supports` | `Vector{Int}` | yes | 1-based vertex indices that are fixed supports |
-| `stories_z` | `Vector{Float64}` | no | Optional story elevations in coordinate units. If non-empty, `json_to_skeleton` copies them into the skeleton (converted to meters) before face detection; if empty/omitted, story elevations are inferred from vertex Z via `rebuild_stories!`. Still validated (if non-empty) and included in `compute_geometry_hash`. |
-| `faces` | `APIFaceGroups` | no | Optional face-group selectors. The server always detects faces from the edge mesh; when `faces` is provided, its polygons are used to *assign* detected faces to groups like `"floor"`, `"roof"`, and `"grade"`. |
+| `stories_z` | `Vector{Float64}` | no | Optional story elevations in coordinate units. **Validation only**: if provided, must contain at least 2 elevations. The server currently infers story assignments from vertex Z coordinates via `rebuild_stories!` during skeleton build (so `stories_z` does not override story detection). It is still included in `compute_geometry_hash`. |
+| `faces` | `APIFaceGroups` | no | Optional face-group selectors. The server always detects faces from the edge mesh; when `faces` is provided, its polygons are used to *assign* detected faces to groups. Keys are face group names (commonly `"floor"`, `"roof"`, `"grade"`). |
 | `params` | `APIParams` | yes | Design parameters |
 
 See [`APIInput`](@ref) in [API Overview](overview.md).
@@ -376,7 +376,7 @@ The visualization schema contains several related types:
 - **`APIVisualization`** — Top-level container for all visualization payloads.
 - **`APIVisualizationNode`** — A single node with `position`, `displacement`, `deflected_position`, and support metadata (`is_support`).
 - **`APIVisualizationFrameElement`** — A frame element with start/end node indices, section geometry, member type, optional `material_color_hex`, and (when available) a pre-built solid mesh (`mesh_vertices`, `mesh_faces`).
-- **`APISizedSlab`** — A slab boundary polygon (`boundary_vertices`) with thickness (`thickness`, `z_top`), utilization, optional `drop_panels`, and (for vaults) a curved intrados mesh (`vault_mesh_vertices`, `vault_mesh_faces`).
+- **`APISizedSlab`** — A slab boundary polygon (`boundary_vertices`) with thickness (`thickness`, `z_top`), utilization, optional `drop_panels`, and (for vaults) a curved intrados mesh (`vault_mesh_vertices`, `vault_mesh_faces`). All geometry is in `length_unit` (ft or m).
 - **`APIDropPanelPatch`** — A rectangular drop-panel patch (`center`, `length`, `width`, `extra_depth`) used in both sized and deflected slab views.
 - **`APIDeflectedSlabMesh`** — A triangulated deflected slab mesh with global and local displacements, optional drop-panel submesh indices, and optional per-face analytical scalars for visualization.
 - **`APIDeflectedDropPanel`** — Drop-panel sub-mesh indices into the parent `APIDeflectedSlabMesh.faces` array (used to reconstruct drop-panel volumes in clients).
@@ -465,7 +465,7 @@ Example snippet (abbreviated) showing beamless-state and one drop-panel patch:
 |:------|:-----|:------------|
 | `slab_id` | `Int` | 1-based slab index |
 | `boundary_vertices` | `Vector{Vector{Float64}}` | Boundary polygon vertices `[[x,y,z], ...]` in display length units |
-| `thickness` | `Float64` | Slab thickness (display thickness units) |
+| `thickness` | `Float64` | Slab thickness (display length units; `length_unit`) |
 | `z_top` | `Float64` | Slab top-surface elevation (display length units) |
 | `drop_panels` | `Vector{APIDropPanelPatch}` | Drop-panel footprint patches (may be empty) |
 | `utilization_ratio` | `Float64` | Governing utilization (e.g. max(deflection_ratio, punching_ratio)) |
@@ -482,7 +482,7 @@ Example snippet (abbreviated) showing beamless-state and one drop-panel patch:
 | `center` | `Vector{Float64}` | Patch center `[x,y,z_top]` in display length units |
 | `length` | `Float64` | Full patch extent in the global-x/local-x direction (display length units) |
 | `width` | `Float64` | Full patch extent in the global-y/local-y direction (display length units) |
-| `extra_depth` | `Float64` | Projection below slab soffit (display thickness units) |
+| `extra_depth` | `Float64` | Projection below slab soffit (display length units; `length_unit`) |
 
 #### APIDeflectedDropPanel
 
@@ -500,7 +500,7 @@ Example snippet (abbreviated) showing beamless-state and one drop-panel patch:
 | `vertex_displacements` | `Vector{Vector{Float64}}` | Global displacements `[[dx,dy,dz], ...]` in display length units |
 | `vertex_displacements_local` | `Vector{Vector{Float64}}` | Local-bending displacements `[[dx,dy,dz], ...]` in display length units |
 | `faces` | `Vector{Vector{Int}}` | Triangle connectivity `[[i1,i2,i3], ...]` (1-based) |
-| `thickness` | `Float64` | Slab thickness (display thickness units) |
+| `thickness` | `Float64` | Slab thickness (display length units; `length_unit`) |
 | `drop_panels` | `Vector{APIDropPanelPatch}` | Drop-panel footprint patches (may be empty) |
 | `drop_panel_meshes` | `Vector{APIDeflectedDropPanel}` | Optional drop-panel sub-mesh indices (may be empty) |
 | `utilization_ratio` | `Float64` | Governing utilization ratio for the slab mesh |

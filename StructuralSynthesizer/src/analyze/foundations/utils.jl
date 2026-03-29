@@ -1,5 +1,37 @@
 # Foundation initialization and sizing utilities
 
+# =============================================================================
+# Solver Trace Contracts (manual registry; functions are documented)
+# =============================================================================
+#
+# Note: StructuralSynthesizer re-exports StructuralSizer, so we register into
+# StructuralSizer.TRACE_REGISTRY here for audit tooling.
+
+StructuralSizer.TRACE_REGISTRY[(:size_foundations!, :workflow)] =
+    StructuralSizer.TracedFunctionMeta(:size_foundations!, :workflow,
+                                       [:enter, :exit, :decision, :failure], nothing,
+                                       @__FILE__, @__LINE__)
+
+StructuralSizer.TRACE_REGISTRY[(:size_foundations_grouped!, :workflow)] =
+    StructuralSizer.TracedFunctionMeta(:size_foundations_grouped!, :workflow,
+                                       [:enter, :exit, :decision, :failure], nothing,
+                                       @__FILE__, @__LINE__)
+
+StructuralSizer.TRACE_REGISTRY[(:_resolve_strategy, :workflow)] =
+    StructuralSizer.TracedFunctionMeta(:_resolve_strategy, :workflow,
+                                       [:decision, :failure], nothing,
+                                       @__FILE__, @__LINE__)
+
+StructuralSizer.TRACE_REGISTRY[(:_auto_merge_to_strips!, :workflow)] =
+    StructuralSizer.TracedFunctionMeta(:_auto_merge_to_strips!, :workflow,
+                                       [:decision, :failure], nothing,
+                                       @__FILE__, @__LINE__)
+
+StructuralSizer.TRACE_REGISTRY[(:_size_foundation!, :workflow)] =
+    StructuralSizer.TracedFunctionMeta(:_size_foundation!, :workflow,
+                                       [:enter, :exit, :failure], nothing,
+                                       @__FILE__, @__LINE__)
+
 """
     initialize_supports!(struc::BuildingStructure)
 
@@ -183,6 +215,7 @@ function _size_foundation!(
     soil::StructuralSizer.Soil,
     opts::StructuralSizer.FoundationOptions = StructuralSizer.FoundationOptions(),
     demands::Union{Nothing, Vector{StructuralSizer.FoundationDemand}} = nothing,
+    tc::Union{Nothing, StructuralSizer.TraceCollector} = nothing,
     concrete::StructuralSizer.Concrete = StructuralSizer.NWC_4000,
     rebar::StructuralSizer.Metal = StructuralSizer.Rebar_60,
     pier_width = 0.3u"m",
@@ -194,16 +227,20 @@ function _size_foundation!(
     demands = isnothing(demands) ? support_demands(struc) : demands
     n_fnd = length(struc.foundations)
 
+    StructuralSizer.emit!(tc, :workflow, "_size_foundation!", "", :enter;
+                          n_foundations=n_fnd,
+                          code=string(opts.code))
+
     # ── Per-foundation sizing closure ────────────────────────────────────
     _size_one_fnd!(f_idx) = begin
         fnd = struc.foundations[f_idx]
         n_supp = length(fnd.support_indices)
 
         if opts.code == :aci
-            _size_fnd_aci!(struc, f_idx, fnd, n_supp, demands, soil, opts)
+            _size_fnd_aci!(struc, f_idx, fnd, n_supp, demands, soil, opts; tc=tc)
         else
             _size_fnd_is!(struc, f_idx, fnd, n_supp, demands, soil,
-                          concrete, rebar, pier_width; kwargs...)
+                          concrete, rebar, pier_width; tc=tc, kwargs...)
         end
     end
 
@@ -222,6 +259,10 @@ function _size_foundation!(
     total_steel    = sum(StructuralSizer.steel_volume(f.result)    for f in struc.foundations)
     @info "Sized $(length(struc.foundations)) foundations ($(opts.code))" total_concrete total_steel
 
+    StructuralSizer.emit!(tc, :workflow, "_size_foundation!", "", :exit;
+                          total_concrete_m3=Float64(ustrip(u"m^3", total_concrete)),
+                          total_steel_m3=Float64(ustrip(u"m^3", total_steel)))
+
     return struc
 end
 
@@ -230,27 +271,34 @@ end
 # ─────────────────────────────────────────────────────────────────────────────
 
 """Dispatch a single foundation through the ACI 318 sizing path (spread, strip, or mat)."""
-function _size_fnd_aci!(struc, f_idx, fnd, n_supp, demands, soil, opts)
+function _size_fnd_aci!(struc, f_idx, fnd, n_supp, demands, soil, opts;
+                        tc::Union{Nothing, StructuralSizer.TraceCollector} = nothing)
     mat = opts.spread_params.material   # ReinforcedConcreteMaterial (concrete + rebar)
+
+    # Keep this lightweight: this function is called once per foundation.
+    # Use :decision (not :enter/:exit) to avoid bloating tier=:failures traces.
+    StructuralSizer.emit!(tc, :workflow, "_size_fnd_aci!", "foundation_$f_idx", :decision;
+                          foundation_type=string(fnd.foundation_type),
+                          n_supports=n_supp)
 
     if fnd.foundation_type == :mat
         # Mat foundation — all supports in one slab
         mat_demands = [demands[i] for i in fnd.support_indices]
         positions = _support_positions_xy(struc, fnd.support_indices)
         result = StructuralSizer.design_footing(StructuralSizer.MatFoundation(), 
-            mat_demands, positions, soil; opts=opts.mat_params)
+            mat_demands, positions, soil; opts=opts.mat_params, tc=tc)
         _assign_foundation!(struc, f_idx, fnd, result, :mat, mat)
 
     elseif fnd.foundation_type == :spread && n_supp == 1
         demand = demands[fnd.support_indices[1]]
-        result = StructuralSizer.design_footing(StructuralSizer.SpreadFooting(), demand, soil; opts=opts.spread_params)
+        result = StructuralSizer.design_footing(StructuralSizer.SpreadFooting(), demand, soil; opts=opts.spread_params, tc=tc)
         _assign_foundation!(struc, f_idx, fnd, result, :spread, mat)
 
     elseif fnd.foundation_type in (:combined, :strip) || n_supp > 1
         strip_demands = [demands[i] for i in fnd.support_indices]
         positions = _support_positions_along_axis(struc, fnd.support_indices)
         result = StructuralSizer.design_footing(StructuralSizer.StripFooting(), 
-            strip_demands, positions, soil; opts=opts.strip_params)
+            strip_demands, positions, soil; opts=opts.strip_params, tc=tc)
         _assign_foundation!(struc, f_idx, fnd, result, :strip, mat)
     else
         @warn "Foundation type $(fnd.foundation_type) not wired for ACI, skipping"
@@ -263,7 +311,7 @@ end
 
 """Dispatch a single foundation through the IS 456 legacy sizing path."""
 function _size_fnd_is!(struc, f_idx, fnd, n_supp, demands, soil,
-                       concrete, rebar, pier_width; kwargs...)
+                       concrete, rebar, pier_width; tc::Union{Nothing, StructuralSizer.TraceCollector} = nothing, kwargs...)
     if fnd.foundation_type == :spread && n_supp == 1
         demand = demands[fnd.support_indices[1]]
         result = StructuralSizer.design_footing(StructuralSizer.SpreadFooting(), 
@@ -543,6 +591,7 @@ function size_foundations_grouped!(
     soil::StructuralSizer.Soil,
     opts::StructuralSizer.FoundationOptions = StructuralSizer.FoundationOptions(),
     demands::Union{Nothing, Vector{StructuralSizer.FoundationDemand}} = nothing,
+    tc::Union{Nothing, StructuralSizer.TraceCollector} = nothing,
     # Legacy IS kwargs
     concrete::StructuralSizer.Concrete = StructuralSizer.NWC_4000,
     rebar::StructuralSizer.Metal = StructuralSizer.Rebar_60,
@@ -559,6 +608,11 @@ function size_foundations_grouped!(
     n_fnd_groups = length(gids)
     group_results_vec = Vector{Any}(nothing, n_fnd_groups)
 
+    StructuralSizer.emit!(tc, :workflow, "size_foundations_grouped!", "", :enter;
+                          n_groups=n_fnd_groups,
+                          n_foundations=length(struc.foundations),
+                          code=string(opts.code))
+
     _size_one_group!(k) = begin
         gid = gids[k]
         fg = struc.foundation_groups[gid]
@@ -571,47 +625,66 @@ function size_foundations_grouped!(
         gov_Vux = 0.0u"kN"
         gov_Vuy = 0.0u"kN"
 
-        for f_idx in f_indices
-            fnd = struc.foundations[f_idx]
-            if length(fnd.support_indices) == 1
-                d = demands[fnd.support_indices[1]]
-                gov_Pu  = max(gov_Pu,  d.Pu)
-                gov_Mux = max(gov_Mux, abs(d.Mux))
-                gov_Muy = max(gov_Muy, abs(d.Muy))
-                gov_Vux = max(gov_Vux, abs(d.Vux))
-                gov_Vuy = max(gov_Vuy, abs(d.Vuy))
+        try
+            for f_idx in f_indices
+                fnd = struc.foundations[f_idx]
+                if length(fnd.support_indices) == 1
+                    d = demands[fnd.support_indices[1]]
+                    gov_Pu  = max(gov_Pu,  d.Pu)
+                    gov_Mux = max(gov_Mux, abs(d.Mux))
+                    gov_Muy = max(gov_Muy, abs(d.Muy))
+                    gov_Vux = max(gov_Vux, abs(d.Vux))
+                    gov_Vuy = max(gov_Vuy, abs(d.Vuy))
+                else
+                    total_Pu = sum(demands[i].Pu for i in fnd.support_indices)
+                    gov_Pu = max(gov_Pu, total_Pu)
+                end
+            end
+
+            gov_Ps = gov_Pu / 1.4
+            # Use the largest column dimensions in the group (conservative for punching)
+            gov_c1 = 18.0u"inch"
+            gov_c2 = 18.0u"inch"
+            gov_shape = :rectangular
+            for f_idx in f_indices
+                fnd = struc.foundations[f_idx]
+                for si in fnd.support_indices
+                    d = demands[si]
+                    gov_c1 = max(gov_c1, d.c1)
+                    gov_c2 = max(gov_c2, d.c2)
+                    d.shape == :circular && (gov_shape = :circular)
+                end
+            end
+            gov_demand = StructuralSizer.FoundationDemand(1;
+                Pu=gov_Pu, Mux=gov_Mux, Muy=gov_Muy,
+                Vux=gov_Vux, Vuy=gov_Vuy, Ps=gov_Ps,
+                c1=gov_c1, c2=gov_c2, shape=gov_shape)
+
+            if opts.code == :aci
+                group_results_vec[k] = StructuralSizer.design_footing(StructuralSizer.SpreadFooting(), 
+                    gov_demand, soil; opts=opts.spread_params, tc=tc)
             else
-                total_Pu = sum(demands[i].Pu for i in fnd.support_indices)
-                gov_Pu = max(gov_Pu, total_Pu)
+                group_results_vec[k] = StructuralSizer.design_footing(StructuralSizer.SpreadFooting(), 
+                    gov_demand, soil, concrete, rebar;
+                    pier_width=pier_width, kwargs...)
             end
-        end
 
-        gov_Ps = gov_Pu / 1.4
-        # Use the largest column dimensions in the group (conservative for punching)
-        gov_c1 = 18.0u"inch"
-        gov_c2 = 18.0u"inch"
-        gov_shape = :rectangular
-        for f_idx in f_indices
-            fnd = struc.foundations[f_idx]
-            for si in fnd.support_indices
-                d = demands[si]
-                gov_c1 = max(gov_c1, d.c1)
-                gov_c2 = max(gov_c2, d.c2)
-                d.shape == :circular && (gov_shape = :circular)
-            end
-        end
-        gov_demand = StructuralSizer.FoundationDemand(1;
-            Pu=gov_Pu, Mux=gov_Mux, Muy=gov_Muy,
-            Vux=gov_Vux, Vuy=gov_Vuy, Ps=gov_Ps,
-            c1=gov_c1, c2=gov_c2, shape=gov_shape)
-
-        if opts.code == :aci
-            group_results_vec[k] = StructuralSizer.design_footing(StructuralSizer.SpreadFooting(), 
-                gov_demand, soil; opts=opts.spread_params)
-        else
-            group_results_vec[k] = StructuralSizer.design_footing(StructuralSizer.SpreadFooting(), 
-                gov_demand, soil, concrete, rebar;
-                pier_width=pier_width, kwargs...)
+            r = group_results_vec[k]
+            StructuralSizer.emit!(tc, :workflow, "size_foundations_grouped!", "foundation_group_$(gid)", :decision;
+                                  n_foundations=length(f_indices),
+                                  gov_Pu_kN=Float64(ustrip(u"kN", gov_Pu)),
+                                  gov_c1_in=Float64(ustrip(u"inch", gov_c1)),
+                                  gov_c2_in=Float64(ustrip(u"inch", gov_c2)),
+                                  shape=string(gov_shape),
+                                  B_m=Float64(ustrip(u"m", StructuralSizer.footing_width(r))),
+                                  L_m=Float64(ustrip(u"m", StructuralSizer.footing_length(r))),
+                                  D_m=Float64(ustrip(u"m", StructuralSizer.footing_depth(r))),
+                                  utilization=Float64(StructuralSizer.utilization(r)))
+        catch e
+            StructuralSizer.emit!(tc, :workflow, "size_foundations_grouped!", "foundation_group_$(gid)", :failure;
+                                  error=string(typeof(e)),
+                                  message=sprint(showerror, e))
+            rethrow()
         end
     end
 
@@ -656,6 +729,11 @@ function size_foundations_grouped!(
     total_concrete = sum(StructuralSizer.concrete_volume(f.result) for f in struc.foundations)
     total_steel    = sum(StructuralSizer.steel_volume(f.result)    for f in struc.foundations)
     @info "Sized $n_groups foundation groups ($(opts.code))" total_concrete total_steel
+
+    StructuralSizer.emit!(tc, :workflow, "size_foundations_grouped!", "", :exit;
+                          n_groups=n_groups,
+                          total_concrete_m3=Float64(ustrip(u"m^3", total_concrete)),
+                          total_steel_m3=Float64(ustrip(u"m^3", total_steel)))
 
     return struc
 end
@@ -745,45 +823,64 @@ Determine foundation strategy: `:spread`, `:strip`, or `:mat`.
 - `:auto_strip_spread` — Same as auto but never picks mat; high coverage → strip.
 - `:all_spread`, `:all_strip`, `:mat` — Explicit override.
 """
-function _resolve_strategy(struc, demands, soil, opts)
+function _resolve_strategy(struc, demands, soil, opts;
+                           tc::Union{Nothing, StructuralSizer.TraceCollector} = nothing)
     strat = opts.strategy
     strat == :all_spread && return :spread
     strat == :all_strip  && return :strip
     strat == :mat        && return :mat
     strat != :auto && strat != :auto_strip_spread && return strat
 
-    # Auto: estimate required spread footing area per support
-    qa = soil.qa
-    total_req = 0.0u"m^2"
-    for d in demands
-        A_req = d.Ps / qa
-        total_req += A_req
+    try
+        # Auto: estimate required spread footing area per support
+        qa = soil.qa
+        total_req = 0.0u"m^2"
+        for d in demands
+            A_req = d.Ps / qa
+            total_req += A_req
+        end
+
+        # Building footprint from skeleton bounding box
+        skel = struc.skeleton
+        verts = skel.vertices
+        isempty(verts) && return :spread
+        xs = [ustrip(u"m", Meshes.coords(v).x) for v in verts]
+        ys = [ustrip(u"m", Meshes.coords(v).y) for v in verts]
+        footprint_m2 = (maximum(xs) - minimum(xs)) * (maximum(ys) - minimum(ys))
+        footprint_m2 < 1.0 && return :spread
+
+        coverage = ustrip(u"m^2", total_req) / footprint_m2
+
+        result = if coverage > opts.mat_coverage_threshold
+            :mat
+        elseif coverage > 0.30
+            :strip
+        else
+            :spread
+        end
+
+        emitted = result
+        # auto_strip_spread: never pick mat; high coverage → strip
+        if strat == :auto_strip_spread && result == :mat
+            emitted = :strip
+        end
+
+        StructuralSizer.emit!(tc, :workflow, "_resolve_strategy", "", :decision;
+                              opts_strategy=string(strat),
+                              chosen_strategy=string(emitted),
+                              coverage=Float64(coverage),
+                              mat_threshold=Float64(opts.mat_coverage_threshold),
+                              strip_threshold=0.30,
+                              n_supports=length(demands),
+                              qa_kPa=Float64(ustrip(u"kPa", qa)))
+
+        return emitted
+    catch e
+        StructuralSizer.emit!(tc, :workflow, "_resolve_strategy", "", :failure;
+                              error=string(typeof(e)),
+                              message=sprint(showerror, e))
+        rethrow()
     end
-
-    # Building footprint from skeleton bounding box
-    skel = struc.skeleton
-    verts = skel.vertices
-    isempty(verts) && return :spread
-    xs = [ustrip(u"m", Meshes.coords(v).x) for v in verts]
-    ys = [ustrip(u"m", Meshes.coords(v).y) for v in verts]
-    footprint_m2 = (maximum(xs) - minimum(xs)) * (maximum(ys) - minimum(ys))
-    footprint_m2 < 1.0 && return :spread
-
-    coverage = ustrip(u"m^2", total_req) / footprint_m2
-
-    result = if coverage > opts.mat_coverage_threshold
-        :mat
-    elseif coverage > 0.30
-        :strip
-    else
-        :spread
-    end
-
-    # auto_strip_spread: never pick mat; high coverage → strip
-    if strat == :auto_strip_spread && result == :mat
-        return :strip
-    end
-    return result
 end
 
 """
@@ -867,7 +964,8 @@ strip footings. After this call, `struc.foundations` may contain a mix of
 
 Merge criterion: gap between footing edges < `merge_gap_factor × D_max`.
 """
-function _auto_merge_to_strips!(struc, demands, soil, opts)
+function _auto_merge_to_strips!(struc, demands, soil, opts;
+                                tc::Union{Nothing, StructuralSizer.TraceCollector} = nothing)
     N = length(struc.foundations)
     N < 2 && return struc
 
@@ -944,6 +1042,12 @@ function _auto_merge_to_strips!(struc, demands, soil, opts)
     n_spreads = count(f -> f.foundation_type == :spread, struc.foundations)
     @info "Auto-merge: $n_strips strips + $n_spreads spreads (from $(N) original)"
 
+    StructuralSizer.emit!(tc, :workflow, "_auto_merge_to_strips!", "", :decision;
+                          n_original=N,
+                          n_strips=n_strips,
+                          n_spreads=n_spreads,
+                          merge_gap_factor=Float64(opts.strip_params.merge_gap_factor))
+
     return struc
 end
 
@@ -969,60 +1073,96 @@ function size_foundations!(
     demands::Union{Nothing, Vector{StructuralSizer.FoundationDemand}} = nothing,
     group_tolerance::Float64 = 0.15,
     verbose::Bool = true,
+    tc::Union{Nothing, StructuralSizer.TraceCollector} = nothing,
     # Legacy IS kwargs
     concrete::StructuralSizer.Concrete = StructuralSizer.NWC_4000,
     rebar::StructuralSizer.Metal = StructuralSizer.Rebar_60,
     pier_width = 0.3u"m",
     kwargs...
 )
-    demands = isnothing(demands) ? support_demands(struc) : demands
-    strategy = _resolve_strategy(struc, demands, soil, opts)
-    verbose && @info "Foundation strategy: $strategy" opts_strategy=opts.strategy
+    try
+        demands = isnothing(demands) ? support_demands(struc) : demands
+        StructuralSizer.emit!(tc, :workflow, "size_foundations!", "", :enter;
+                              n_supports=length(struc.supports),
+                              n_foundations=length(struc.foundations),
+                              opts_strategy=string(opts.strategy),
+                              code=string(opts.code))
 
-    if strategy == :mat
-        # Single mat foundation covering all supports
-        all_supp = collect(1:length(struc.supports))
-        placeholder = _placeholder_foundation_result(typeof(struc).parameters[1])
-        empty!(struc.foundations)
-        push!(struc.foundations, Foundation(all_supp, placeholder; foundation_type=:mat))
-        _size_foundation!(struc; soil=soil, opts=opts, demands=demands,
-                               concrete=concrete, rebar=rebar, pier_width=pier_width, kwargs...)
+        strategy = _resolve_strategy(struc, demands, soil, opts; tc=tc)
+        verbose && @info "Foundation strategy: $strategy" opts_strategy=opts.strategy
 
-    elseif strategy == :strip
-        initialize_foundations!(struc)
-        strip_groups = _strip_groupings_from_orthogonal_grid(struc)
-        if !isempty(strip_groups)
-            # Orthogonal grid detected: create strip foundations along shorter-spacing axis
+        StructuralSizer.emit!(tc, :workflow, "size_foundations!", "", :decision;
+                              chosen_strategy=string(strategy),
+                              group_tolerance=group_tolerance)
+
+        if strategy == :mat
+            # Single mat foundation covering all supports
+            all_supp = collect(1:length(struc.supports))
             placeholder = _placeholder_foundation_result(typeof(struc).parameters[1])
-            in_strip = Set{Int}()
-            new_foundations = Foundation[]
-            for g in strip_groups
-                length(g) > 1 || continue
-                union!(in_strip, g)
-                push!(new_foundations, Foundation(g, placeholder; foundation_type=:strip))
-            end
-            for fnd in struc.foundations
-                length(fnd.support_indices) == 1 || continue
-                fnd.support_indices[1] in in_strip && continue
-                push!(new_foundations, fnd)
-            end
             empty!(struc.foundations)
-            append!(struc.foundations, new_foundations)
-            verbose && @info "Strip groupings from orthogonal grid: $(count(g -> length(g) > 1, strip_groups)) strips"
-        else
-            # Non-orthogonal or irregular: merge foundations that are too close
-            _auto_merge_to_strips!(struc, demands, soil, opts)
+            push!(struc.foundations, Foundation(all_supp, placeholder; foundation_type=:mat))
+            _size_foundation!(struc; soil=soil, opts=opts, demands=demands,
+                              tc=tc,
+                              concrete=concrete, rebar=rebar, pier_width=pier_width, kwargs...)
+
+        elseif strategy == :strip
+            initialize_foundations!(struc)
+            strip_groups = _strip_groupings_from_orthogonal_grid(struc)
+            if !isempty(strip_groups)
+                # Orthogonal grid detected: create strip foundations along shorter-spacing axis
+                placeholder = _placeholder_foundation_result(typeof(struc).parameters[1])
+                in_strip = Set{Int}()
+                new_foundations = Foundation[]
+                for g in strip_groups
+                    length(g) > 1 || continue
+                    union!(in_strip, g)
+                    push!(new_foundations, Foundation(g, placeholder; foundation_type=:strip))
+                end
+                for fnd in struc.foundations
+                    length(fnd.support_indices) == 1 || continue
+                    fnd.support_indices[1] in in_strip && continue
+                    push!(new_foundations, fnd)
+                end
+                empty!(struc.foundations)
+                append!(struc.foundations, new_foundations)
+                n_strips = count(g -> length(g) > 1, strip_groups)
+                verbose && @info "Strip groupings from orthogonal grid: $n_strips strips"
+                StructuralSizer.emit!(tc, :workflow, "size_foundations!", "", :decision;
+                                      strip_grouping="orthogonal_grid",
+                                      n_strips=n_strips,
+                                      n_foundations=length(struc.foundations))
+            else
+                # Non-orthogonal or irregular: merge foundations that are too close
+                StructuralSizer.emit!(tc, :workflow, "size_foundations!", "", :decision;
+                                      strip_grouping="auto_merge_fallback")
+                _auto_merge_to_strips!(struc, demands, soil, opts; tc=tc)
+            end
+            _size_foundation!(struc; soil=soil, opts=opts, demands=demands,
+                              tc=tc,
+                              concrete=concrete, rebar=rebar, pier_width=pier_width, kwargs...)
+
+        else  # :spread
+            # Pure spread → group by reaction for efficiency
+            initialize_foundations!(struc)
+            group_foundations_by_reaction!(struc; tolerance=group_tolerance, demands=demands)
+            StructuralSizer.emit!(tc, :workflow, "size_foundations!", "", :decision;
+                                  spread_grouping="reaction_similarity",
+                                  n_groups=length(struc.foundation_groups),
+                                  tolerance=group_tolerance)
+            size_foundations_grouped!(struc; soil=soil, opts=opts, demands=demands,
+                                      tc=tc,
+                                      concrete=concrete, rebar=rebar, pier_width=pier_width, kwargs...)
         end
-        _size_foundation!(struc; soil=soil, opts=opts, demands=demands,
-                               concrete=concrete, rebar=rebar, pier_width=pier_width, kwargs...)
 
-    else  # :spread
-        # Pure spread → group by reaction for efficiency
-        initialize_foundations!(struc)
-        group_foundations_by_reaction!(struc; tolerance=group_tolerance, demands=demands)
-        size_foundations_grouped!(struc; soil=soil, opts=opts, demands=demands,
-                                  concrete=concrete, rebar=rebar, pier_width=pier_width, kwargs...)
+        StructuralSizer.emit!(tc, :workflow, "size_foundations!", "", :exit;
+                              n_foundations=length(struc.foundations),
+                              n_groups=length(struc.foundation_groups))
+
+        return struc
+    catch e
+        StructuralSizer.emit!(tc, :workflow, "size_foundations!", "", :failure;
+                              error=string(typeof(e)),
+                              message=sprint(showerror, e))
+        rethrow()
     end
-
-    return struc
 end

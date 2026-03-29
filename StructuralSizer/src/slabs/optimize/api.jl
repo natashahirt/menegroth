@@ -5,6 +5,23 @@
 # Parallel to members/optimize/api.jl for columns.
 
 # ==============================================================================
+# Solver Trace Contracts (manual registry; this file uses docstrings)
+# ==============================================================================
+#
+# Note: documented functions can't use @traced due to Julia doc macro conflicts.
+#
+
+TRACE_REGISTRY[(:optimize_vault, :optimizer)] =
+    TracedFunctionMeta(:optimize_vault, :optimizer,
+                       [:enter, :exit, :decision, :failure], nothing,
+                       @__FILE__, @__LINE__)
+
+TRACE_REGISTRY[(:size_flat_plate_optimized, :slab)] =
+    TracedFunctionMeta(:size_flat_plate_optimized, :slab,
+                       [:enter, :exit, :decision, :failure], nothing,
+                       @__FILE__, @__LINE__)
+
+# ==============================================================================
 # Optimization Mode Detection
 # ==============================================================================
 
@@ -251,6 +268,7 @@ function optimize_vault(
     n_grid::Int = 20,
     n_refine::Int = 2,
     verbose::Bool = false,
+    tc::Union{Nothing, TraceCollector} = nothing,
 ) where {L<:Length, F<:Pressure}
     
     # Resolve rise and thickness to bounds/fixed values (in meters)
@@ -264,6 +282,14 @@ function optimize_vault(
     mode = _detect_mode(eff_rise_bounds, eff_fixed_rise, 
                         eff_thickness_bounds, eff_fixed_thickness)
     
+    StructuralSizer.emit!(tc, :optimizer, "optimize_vault", "", :enter;
+                          span_m=Float64(ustrip(u"m", span)),
+                          mode=_mode_description(mode),
+                          solver=string(solver),
+                          n_grid=n_grid,
+                          n_refine=n_refine,
+                          objective=string(typeof(objective)))
+
     if verbose
         @info "Vault optimization" mode=_mode_description(mode) span
     end
@@ -319,6 +345,12 @@ function optimize_vault(
         @info "Optimization complete" status=opt_result.status rise=h_opt thickness=t_opt
     end
     
+    StructuralSizer.emit!(tc, :optimizer, "optimize_vault", "", :exit;
+                          status=string(opt_result.status),
+                          rise_m=Float64(ustrip(u"m", h_opt)),
+                          thickness_m=Float64(ustrip(u"m", t_opt)),
+                          objective_value=Float64(opt_result.objective_value))
+
     return (
         rise = h_opt,
         thickness = t_opt,
@@ -384,11 +416,19 @@ function size_flat_plate_optimized(
     n_grid::Int                    = 20,
     n_refine::Int                  = 2,
     verbose::Bool                  = false,
+    tc::Union{Nothing, TraceCollector} = nothing,
 )
+    StructuralSizer.emit!(tc, :slab, "size_flat_plate_optimized", "", :enter;
+                          n_grid=n_grid,
+                          n_refine=n_refine,
+                          objective=string(typeof(opts.objective)),
+                          n_bar_sizes=length(bar_sizes))
     # ── Find supporting columns ──
     slab_cell_indices = Set(slab.cell_indices)
     columns = find_supporting_columns(struc, slab_cell_indices)
     if isempty(columns)
+        StructuralSizer.emit!(tc, :slab, "size_flat_plate_optimized", "", :failure;
+                              reason="no_supporting_columns")
         error("No supporting columns found for slab.")
     end
 
@@ -421,6 +461,9 @@ function size_flat_plate_optimized(
         if verbose
             @warn "No feasible (h, c) found in grid search"
         end
+        StructuralSizer.emit!(tc, :slab, "size_flat_plate_optimized", "", :failure;
+                              status=string(opt.status),
+                              n_evals=Int(opt.n_evals))
         return (
             h              = nothing,
             c              = nothing,
@@ -438,6 +481,14 @@ function size_flat_plate_optimized(
     if verbose
         @info "Optimization complete" h=h_opt c=c_opt bar_size=opt.eval_result.bar_size objective=round(opt.objective_value, sigdigits=4) status=opt.status
     end
+
+    StructuralSizer.emit!(tc, :slab, "size_flat_plate_optimized", "", :exit;
+                          status=string(opt.status),
+                          n_evals=Int(opt.n_evals),
+                          objective_value=Float64(opt.objective_value),
+                          h_in=Float64(ustrip(u"inch", h_opt)),
+                          c_in=Float64(ustrip(u"inch", c_opt)),
+                          bar_size=Int(opt.eval_result.bar_size))
 
     return (
         h              = h_opt,

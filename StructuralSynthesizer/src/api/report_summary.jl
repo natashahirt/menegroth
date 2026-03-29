@@ -109,40 +109,11 @@ function _beam_type_code_from_design(design::BuildingDesign, params::DesignParam
     return "unknown"
 end
 
-# ─── Helpers for failing-detail normalization ─────────────────────────────────
-
-"""Map a section object to an API-friendly type string."""
-function _api_section_type(so)::String
-    isnothing(so) && return "unknown"
-    so isa StructuralSizer.RCCircularSection && return "rc_circular"
-    so isa StructuralSizer.RCColumnSection   && return "rc_rect"
-    so isa StructuralSizer.RCBeamSection     && return "rc_rect"
-    so isa StructuralSizer.ISymmSection      && return "steel_w"
-    so isa StructuralSizer.HSSRectSection    && return "steel_hss"
-    so isa StructuralSizer.HSSRoundSection   && return "steel_hss"
-    so isa StructuralSizer.PixelFrameSection && return "pixelframe"
-    return "other"
-end
-
-"""Normalize a raw failure_reason string (strip whitespace, lowercase)."""
-function _normalize_failure_reason(s::String)::String
-    stripped = strip(s)
-    isempty(stripped) && return ""
-    return stripped
-end
-
-"""
-Normalize a failing_check string into an array of check names.
-Handles comma-separated or semicolon-separated lists.
-"""
-function _normalize_failing_checks(s::String)::Vector{String}
-    stripped = strip(s)
-    isempty(stripped) && return String[]
-    parts = split(stripped, r"[,;]\s*")
-    return [strip(p) for p in parts if !isempty(strip(p))]
-end
-
 # ─── Structured JSON Report Summary ──────────────────────────────────────────
+# _api_section_type        → serialize.jl
+# _normalize_failure_reason → schema.jl
+# _normalize_failing_checks → schema.jl
+# _column_governing_check, _beam_governing_check, _fdn_governing_check → diagnose.jl
 
 """
     report_summary_json(design::BuildingDesign; report_units=nothing) -> Dict

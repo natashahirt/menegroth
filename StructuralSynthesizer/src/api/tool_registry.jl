@@ -253,14 +253,15 @@ const LEVER_SURFACE_MAP = Dict{String, Any}(
     ),
 )
 
+_lever_norm(s::String) = lowercase(replace(s, r"[-\s]+" => "_"))
+
 """
     get_lever_map(; check::Union{String, Nothing}=nothing) -> Dict
 
 Return the lever surface map, optionally filtered to a single check family.
+Uses `_lever_norm` to match diagnose check names (e.g. "pm_interaction")
+against map keys regardless of casing or dash/underscore differences.
 """
-"""Normalize a check name for lever map lookup: lowercase, strip dashes/spaces to underscores."""
-_lever_norm(s::String) = lowercase(replace(s, r"[-\s]+" => "_"))
-
 function get_lever_map(; check::Union{String, Nothing}=nothing)
     if isnothing(check)
         return LEVER_SURFACE_MAP

@@ -440,13 +440,20 @@ function agent_narrate_comparison(index_a::Int, index_b::Int, audience::String):
 
     llm_narrative = _narrate_comparison_llm(a, b, d, changed, profile)
     if isnothing(llm_narrative)
+        narrative = if profile.kind === :architect
+            _narrate_comparison_architect(a, b, d, changed)
+        else
+            _narrate_comparison_engineer(a, b, d, changed)
+        end
         return Dict{String, Any}(
-            "error"         => "llm_unavailable",
-            "message"       => "Narration is LLM-only and no template fallback is used.",
-            "recovery_hint" => "Check CHAT_LLM_API_KEY and CHAT_LLM_BASE_URL, then retry.",
-            "audience"      => audience_out,
-            "deltas"        => d,
-            "changed_params" => changed,
+            "narrative"        => narrative,
+            "narrative_source" => "deterministic_template",
+            "llm_status"       => "unavailable",
+            "message"          => "LLM narration unavailable; returning deterministic narration.",
+            "recovery_hint"    => "Check CHAT_LLM_API_KEY and CHAT_LLM_BASE_URL, then retry for LLM narration.",
+            "audience"         => audience_out,
+            "deltas"           => d,
+            "changed_params"   => changed,
         )
     end
 

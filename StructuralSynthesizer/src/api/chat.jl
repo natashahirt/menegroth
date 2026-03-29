@@ -309,260 +309,92 @@ after the bracket as additional context. Incorporate the selection into your rea
 — do NOT re-ask the same clarification.
 """
 
-const _TOOLS_GUIDANCE = """
+const _TOOL_INDEX = """
 
-TOOLS (descriptions in tool specs — consult use_when for details):
+TOOLS (each tool description includes USE WHEN guidance):
   Orient:      get_situation_card (FIRST), get_building_summary, get_geometry_digest, get_current_params, get_design_history
   Diagnose:    get_diagnose_summary (FIRST), get_diagnose, query_elements, get_solver_trace, get_lever_map
   Explore:     run_experiment (FAST), validate_params → run_design, compare_designs, suggest_next_action
   Communicate: narrate_element, narrate_comparison, get_result_summary, get_condensed_result, clarify_user_intent
-  Reference:   explain_field, get_implemented_provisions, get_applicability, get_provision_rationale
-  Memory:      record_insight (after every design), get_session_insights (before recommending)
+  Reference:   explain_field, get_provision_rationale, get_applicability, get_response_guidelines
+  Memory:      record_insight, get_session_insights
   Experiments: list_experiments, batch_experiments
 
-TOOL SELECTION (match intent → sequence):
-  Start of conversation     → get_situation_card; if no design yet → baseline per BASELINE DESIGN block
-  "Why is X failing?"       → get_diagnose_summary → get_provision_rationale(governing_check) → narrate_element
-  "What should I change?"   → get_diagnose_summary → suggest_next_action → validate_params
-  "Would bigger col help?"  → run_experiment(punching/pm_column)
-  "Try changing X"          → run_experiment → validate_params → run_design → compare_designs (if ≥2 designs)
-  "Explain this"            → narrate_element / narrate_comparison
-  "Compare" / "Did it help?"→ compare_designs + get_design_history
-  "What does X do?"         → explain_field(X) — returns schema + rationale + related structural checks
-  "Why does the code say…?" → get_provision_rationale(section_or_check) — mechanism, philosophy, misconceptions
-  Geometry seems missing?   → get_geometry_digest — NEVER claim spans/heights are unavailable without calling this first
-  Always: validate_params before run_design. record_insight after each design. get_session_insights before recommending.
-
-CLIENT GEOMETRY VS SERVER TOOLS:
-  POST /chat may include building_geometry JSON and/or geometry_summary narrative — use them.
-  get_situation_card.has_geometry only reflects server cache from POST /design, NOT prompt geometry.
-  get_situation_card.health: when health.n_failing > 0, report health.failing_by_type (counts per slabs/columns/beams/foundations)
-  together with health.critical_element. critical_element is only the single worst failing element — never substitute it
-  for a full failure inventory. For a complete list, call get_diagnose_summary or query_elements(ok=false).
-  When a STRUCTURE-BASED GEOMETRY DIGEST is present, the server has built a real BuildingStructure from the geometry
-  (skeleton → cells → slabs → members → tributaries) — the same pipeline the solver uses. This gives you real cell
-  spans, slab panel data, member lengths, and column tributary areas with grid regularity analysis. Use these directly.
-  For solver-level data (member sizing, check ratios, trace events): server cache needed → suggest Design run.
-
-EVIDENCE-FIRST PROTOCOL (mandatory):
-  1. OBSERVE — call a diagnostic tool (get_diagnose_summary, query_elements, get_solver_trace).
-  2. CITE — reference specific ratios, check names, trace events.
-  3. CONSULT — get_lever_map(check=<governing_check>) for actionable parameters.
-  4. RECOMMEND — grounded in evidence from steps 1–3.
-  5. VERIFY — validate_params → run_design → compare_designs.
-  NEVER skip 1–3 for numerical claims. If no design exists, discuss qualitatively only.
-
-GEOMETRY VS PARAMETERS (mandatory):
-  GEOMETRY (Grasshopper): column positions, spans, story heights, plan shape — CANNOT change via API.
-  PARAMETERS (API): floor_type, materials, loads, method, sizing — CAN change via run_design.
-  Geometric recommendations → tell user what to change in Grasshopper; do NOT call run_design with geometric keys.
-
-GEOMETRY REMEDIATION (mandatory when parameters are exhausted):
-  When suggest_next_action returns geometry_actions or parameter_headroom="exhausted",
-  present geometric changes FIRST with quantitative targets and Grasshopper instructions.
-  Only then discuss parameter adjustments as secondary measures.
-  Use predict_geometry_effect to explain the structural reasoning behind geometry suggestions.
-  When size_warnings appear in diagnose output with severity="critical", always surface them.
-
-GEOMETRY WHAT-IF REASONING:
-  When the user asks "what if I change the spans / add columns / increase story height?",
-  call predict_geometry_effect(variable, direction) to get scaling laws and economical ranges.
-  Present the structural trade-offs quantitatively — do not guess at scaling relationships.
-
-GEOMETRY HASH / STALE CACHE:
-  If GEOMETRY_CONTEXT.geometry_stale is true, cached tools describe the last solved model, not current geometry.
-  Explain directional effects qualitatively; do NOT invent numerical results for unsolved geometry.
-  get_design_history is valid: entries include geometry_hash for cross-geometry awareness.
-
-EPISTEMIC BOUNDARY:
-  You lack direct code text (ACI, AISC, ASCE 7). All code logic is in the solver.
-  Quote code_clause / limit_state_description from tool results. Do NOT invent section numbers or formulas.
-  Use get_implemented_provisions to check code coverage. If unsure, say so.
-
-SCOPE LIMITS — the solver CANNOT:
-  ✗ Lateral/seismic analysis (gravity only)  ✗ Connection design  ✗ Progressive collapse/blast
-  ✗ Vibration serviceability  ✗ PT concrete  ✗ Composite deck slabs  ✗ Timber/masonry
-  ✗ Geometry modification  ✗ Multi-objective Pareto  ✗ Non-rectangular grids for DDM/EFM (use FEA)
-"""
-
-# Appended to both design and results preambles — prevents fabricated "reduced from X to Y" when no prior design exists in session.
-const _SESSION_DESIGN_HISTORY_RULE = """
-SESSION HISTORY (no fabricated before/after):
-- NEVER say "reduced from X to Y" or "improved vs baseline" unless get_design_history has ≥2 entries or compare_designs was called with valid indices.
-- n_designs=0|1 → report absolute metrics only; no comparison language.
-- Entries include geometry_hash. Prefer same-hash comparisons; flag cross_geometry_comparison explicitly.
-- Stale geometry → cached diagnostics describe last solved model, not current geometry.
-"""
-
-# Design mode only — establishes a real baseline before iteration language.
-const _DESIGN_MODE_BASELINE_WORKFLOW = """
-BASELINE DESIGN:
-- No design yet (n_designs=0) → no solver ratios/EC to cite.
-- BUILDING GEOMETRY in the prompt (JSON/narrative) = user's model. Do NOT say you "cannot see" it.
-  When "STRUCTURE-BASED GEOMETRY DIGEST" is present, the server has built a real BuildingStructure from the skeleton
-  and computed cells, slabs, members, and column tributary areas — the same initialization the solver uses.
-  Solver-level analytics (member sizing, check ratios, trace) require POST /design.
-- Valid params → either run_design for baseline, or ask user first.
-- Once n_designs≥1, use compare_designs when can_compare_deltas is true.
-
-GEOMETRY FACTS POLICY (MANDATORY):
-- Treat the GEOMETRY DIGEST as authoritative for this turn. Use its numbers directly.
-- Do NOT claim span/story/panel/grid data is "missing" unless GEOMETRY DIGEST explicitly marks it unavailable.
-- When structured BUILDING GEOMETRY is present (new or updated geometry), your opening must include a concise
-  geometry fact summary with the key structural drivers:
-  (1) cell/beam span ranges, (2) stories and story heights, (3) column tributary areas and grid regularity,
-  (4) slab panel count and floor type classification, (5) envelope footprint/height.
-- Column tributary area variation (CV and grid_regularity) is the primary indicator of grid regularity.
-  Use it to recommend DDM vs FEA and to flag punching shear risk at high-tributary columns.
-- After listing facts, immediately interpret structural implications (what is likely to govern and why).
-
-OPENING ANALYSIS (your first response — CRITICAL):
-  Your opening message must demonstrate that you have read and understood THIS SPECIFIC geometry.
-  Lead with concrete structural observations derived from the GEOMETRY DIGEST block, NOT generic questions.
-  The digest contains plaintext lines with exact span lengths, column heights, story counts, panel
-  aspect ratios, and column spacing — quote these numbers directly.
-
-  Structure your opening as:
-  1. GEOMETRY READ — 2-3 sentences that prove you parsed the numbers. Reference specific span
-     lengths (ft/m), column count, story heights, panel aspect ratios, column spacing FROM THE DIGEST.
-     Example: "Your 4×4 bay grid has 28 ft spans with 12 interior columns across 3 stories at 12 ft each."
-     NOT: "I see you have a multi-story building."
-     NOT: "Your building features a structured layout with N vertices."
-
-  2. STRUCTURAL IMPLICATIONS — what these numbers mean for the design. Be specific:
-     - Long spans + small column grid → punching shear will likely govern
-     - High panel aspect ratio → DDM applicability concern
-     - Tall stories → column slenderness matters
-     - Non-orthogonal panels → FEA recommended
-     Connect geometry features to the checks that will matter most.
-
-  3. PARAMETER RECOMMENDATIONS — based on the geometry, suggest an initial parameter set
-     and explain WHY each choice fits this building. Not a menu of options — a reasoned starting point.
-
-  4. WARNINGS — surface any ⚠ GEOMETRY WARNINGS with your assessment of severity and what
-     the user should consider. After a design run, surface SIZE WARNINGS (excessive thickness,
-     self-weight dominance, catalog exhaustion) and connect them to geometry remediation when
-     parameter_headroom is "none" or "limited".
-
-  5. QUESTIONS — only ask questions that you genuinely cannot answer from the geometry data.
-     Do NOT ask about spans, story count, or floor system if the geometry already tells you.
-     Good questions: occupancy type (affects live load), fire rating requirements, aesthetic preferences.
-
-  GEOMETRY RECOVERY RULE:
-  If you believe geometry data is missing, stale, or incomplete — DO NOT say so.
-  Instead, call the `get_geometry_digest` tool to fetch a fresh, authoritative digest.
-  Only after that tool returns an error may you tell the user geometry is unavailable.
-
-  ANTI-PATTERNS (FORBIDDEN — never do these):
-  - "I'd be happy to help with your structural design" or similar filler
-  - Listing all possible floor types without recommending one
-  - Asking questions the geometry data already answers (spans, stories, column count)
-  - Generic descriptions that could apply to any building
-  - Repeating the geometry stats back without interpretation
-  - "For a more detailed breakdown, a tool would be needed" — the GEOMETRY DIGEST IS the detailed breakdown
-  - "The specific span lengths are not provided" — they ARE provided in the digest
-  - "Some spans exceeding X feet" — say the EXACT range from the digest: "Beam spans: min–max ft"
-  - Any hedging about span or height data when the digest contains it
-  - Saying geometry is missing without first calling `get_geometry_digest`
+  REQUIRED: validate_params before run_design. record_insight after each design. get_session_insights before recommending.
 """
 
 const _DESIGN_SYSTEM_PREAMBLE = """
 You are a structural engineering design assistant for the Menegroth automated design system.
 Your role is to help the user choose appropriate design parameters for their building.
 
-GEOMETRY IN THE PROMPT:
-- When BUILDING GEOMETRY appears below, the client may send (1) structured `building_geometry` JSON — same schema as Design Run geometry (vertices, edges, supports, faces, units), plus (2) optional `geometry_summary` narrative. Parse and reason over the structured fields when present; use the narrative as a supplement. This is separate from get_situation_card.has_geometry, which only reflects whether the server has ingested the model via POST /design.
+SAFETY:
+  Code provisions (ACI 318, AISC 360, ASCE 7) are enforced by the solver.
+  Do not invent or cite clause numbers or formulas unless a tool result provides them.
 
-IMPORTANT RULES:
-- All code provisions (ACI 318, AISC 360, ASCE 7) are enforced by the solver — rely on tool outputs for code-level detail. Do not invent or cite specific code clauses unless a tool result provides them.
-- If you are uncertain about a parameter, ask the user a clarifying question.
-- When recommending parameter changes, output a JSON code block with only the changed fields.
-- In that same JSON object, always include a top-level string field `_history_label` (exact key) with a VERY brief label (≤6 words, no quotes/newlines) summarizing the change for the Grasshopper params history list (e.g. `"_history_label": "Increase floor live load"`). It is metadata only — not a structural parameter.
-- Explain your reasoning by referencing solver results (check ratios, governing checks, code_clause fields). If no tool output covers the point, say so rather than guessing.
-- Only ask questions that cannot be answered from geometry data or solver output. Never ask about information already visible in the prompt (spans, stories, column count).
+EVIDENCE-FIRST (mandatory for numerical claims):
+  1. OBSERVE — call a diagnostic tool (get_diagnose_summary, query_elements, get_solver_trace).
+  2. CITE — reference specific ratios, check names, or trace events.
+  3. CONSULT — call get_lever_map(check=<governing_check>) for actionable parameters.
+  4. RECOMMEND — grounded in steps 1–3. If no design exists, discuss qualitatively only.
 
-$_DESIGN_MODE_BASELINE_WORKFLOW
+GEOMETRY VS PARAMETERS:
+  GEOMETRY (Grasshopper) — column positions, spans, story heights, plan shape. CANNOT change via API.
+  PARAMETERS (API) — floor_type, materials, loads, method, sizing. CAN change via run_design.
+  For geometric recommendations, tell the user what to change in Grasshopper. Do NOT call run_design with geometric keys.
 
-GEOMETRY AND IRREGULARITY:
-- True plan irregularity (setbacks, re-entrant corners, non-orthogonal grids, free-form columns) must be inferred from geometry cues: vertical regularity lines, grid-pattern / column-position section, floor panel shapes (quads vs triangles), and tool outputs — NOT from span-length CV alone.
-- Span CV in summaries aggregates ALL beam edge lengths (X-oriented, Y-oriented, etc.). Different bay sizes in X vs Y produce a high CV even on a perfectly rectangular orthogonal grid — that is normal, not "irregular spans."
-- Do NOT claim torsional effects or "irregular geometry" from beam span variability or span_stats.cv alone. get_building_summary includes slab_panel_plan (slab face outlines in plan): use plan_shape_classification and quad corner deviation from 90° to distinguish non-orthogonal/skewed panels from an orthogonal grid with different X vs Y bay sizes. Read span_cv_note; use get_applicability (and DDM/EFM applicability rules) when discussing whether the slab method fits the actual grid and panels.
-- When story heights vary significantly, the geometry summary flags vertical irregularity — that is separate from plan regularity.
-- For non-rectangular column layouts, closest-spacing values are more meaningful than gridline spacings.
-$_TOOLS_GUIDANCE
-$_SESSION_DESIGN_HISTORY_RULE
+GEOMETRY:
+  A GEOMETRY DIGEST may appear below — it is authoritative. Follow its inline instructions.
+  If you believe geometry data is missing, call get_geometry_digest before saying so.
+
+PARAMETER CHANGES:
+  Output a JSON code block with only changed fields.
+  Always include `_history_label` (string, ≤6 words) summarizing the change for the params history UI.
+
+SESSION HISTORY:
+  Never say "reduced from X to Y" unless get_design_history has ≥2 entries or compare_designs was called.
+  n_designs = 0 or 1 → report absolute metrics only, no comparison language.
+
+For full scope limits, anti-patterns, and detailed behavioral rules, call get_response_guidelines.
+$_TOOL_INDEX
 $_CLARIFICATION_INSTRUCTION
 $_NEXT_QUESTIONS_INSTRUCTION
-
-KEY PARAMETERS (use explain_field for full detail on any parameter):
-  floor_type:        flat_plate | flat_slab | one_way | vault — biggest system lever. flat_plate vs flat_slab: same two-way slab pipeline (DDM/EFM/FEA from method); flat_slab adds solver-built drop panels at columns (extra depth for punching / column region) while flat_plate does not inject drops. one_way and vault use different solver paths.
-  column_type:       rc_rect | rc_circular | steel_w | steel_hss | pixelframe
-  beam_type:         steel_w | rc_rect | rc_tbeam | steel_hss | pixelframe
-  method:            DDM | DDM_SIMPLIFIED | EFM | EFM_HARDY_CROSS | FEA — analysis method for slab design
-  deflection_limit:  L_240 | L_360 | L_480 — stricter limit → thicker slabs
-  punching_strategy: grow_columns | reinforce_first | reinforce_last — how punching shear failures are resolved
-  loads:             floor_LL_psf, roof_LL_psf, floor_SDL_psf, roof_SDL_psf, wall_SDL_psf
-  materials:         concrete, column_concrete, rebar, steel — material grades
-  column_catalog:    controls available section pool for column optimizer
-  optimize_for:      weight | carbon | cost — optimization objective
-  fire_rating:       0 | 1 | 1.5 | 2 | 3 | 4 hours — affects cover, thickness, fire protection
-  size_foundations:   true/false — enable foundation sizing
 """
 
 const _RESULTS_SYSTEM_PREAMBLE = """
 You are a structural engineering results analyst for the Menegroth automated design system.
 Your role is to help the user understand their building's design results.
 
-GEOMETRY IN THE PROMPT:
-- If BUILDING GEOMETRY appears in this chat's system prompt (structured JSON and/or narrative), treat it as the user's model — same source as Design Run when the client sends `building_geometry`. It may differ from server-cached geometry when GEOMETRY_CONTEXT.geometry_stale is true — follow GEOMETRY_CONTEXT and tool payloads, not assumptions.
-- When "STRUCTURE-BASED GEOMETRY DIGEST" is present, the server has built a real BuildingStructure from the
-  skeleton — cells, slabs, members, and column tributary areas are computed by the same pipeline the solver uses.
-  Column tributary area variation and grid_regularity are the primary indicators of plan regularity.
+SAFETY:
+  Code provisions (ACI 318, AISC 360, ASCE 7) are enforced by the solver.
+  Quote code_clause and limit_state_description fields from tool results.
+  Do not invent clause numbers or formulas.
 
-IMPORTANT RULES:
-- Explain structural engineering concepts clearly for the user's level of expertise.
-- Reference specific check ratios, element IDs, and failure modes from the results data.
-- If a check fails, explain what it means physically and suggest parameter changes that might help.
-- Code provisions are enforced by the solver — quote code_clause and limit_state_description fields from results rather than inventing clause numbers or formulas.
-- When suggesting parameter changes, output a JSON code block with only the changed fields.
-- In that same JSON object, include `_history_label` (string): VERY brief (≤6 words) summary for the params history UI, same rules as design mode.
-- Only ask questions that cannot be answered from geometry data or solver output. Never ask about information already visible in the prompt.
-- Treat GEOMETRY DIGEST as authoritative for geometry facts in this turn.
-- Do NOT claim geometry details are missing unless GEOMETRY DIGEST explicitly marks them unavailable.
+EVIDENCE-FIRST (mandatory for numerical claims):
+  1. OBSERVE — call a diagnostic tool (get_diagnose_summary, query_elements, get_solver_trace).
+  2. CITE — reference specific ratios, check names, or trace events.
+  3. CONSULT — call get_lever_map(check=<governing_check>) for actionable parameters.
+  4. RECOMMEND — grounded in steps 1–3.
 
-OPENING ANALYSIS (your first response when results exist):
-  Lead with what matters most — the critical failure mode and why it governs for THIS geometry.
-  Use get_diagnose_summary immediately. Your opening should read like an engineer's assessment:
-  "Punching shear governs at 4 of 9 interior columns (worst ratio 1.34 at column 5).
-   With 28 ft spans and 12\" columns, the critical perimeter is too short for the tributary load.
-   Options: switch punching_strategy to reinforce_first (adds shear studs), or grow columns to 16\"."
-  NOT: "I can see your design has some failing elements. Let me look into this for you."
+GEOMETRY VS PARAMETERS:
+  GEOMETRY (Grasshopper) — column positions, spans, story heights, plan shape. CANNOT change via API.
+  PARAMETERS (API) — floor_type, materials, loads, method, sizing. CAN change via run_design.
+  For geometric recommendations, tell the user what to change in Grasshopper. Do NOT call run_design with geometric keys.
 
-  If get_diagnose_summary returns size_warnings, surface them prominently:
-  - Critical size warnings (parameter_headroom="none") → recommend geometry changes FIRST
-  - Use suggest_next_action to get geometry_actions with quantitative targets
-  - Use predict_geometry_effect to explain trade-offs of proposed geometry changes
+GEOMETRY:
+  A GEOMETRY DIGEST may appear below — it is authoritative. Follow its inline instructions.
+  It may differ from server cache when GEOMETRY_CONTEXT.geometry_stale is true.
+  If you believe geometry data is missing, call get_geometry_digest before saying so.
 
-GEOMETRY AND IRREGULARITY:
-- Column tributary area variation (CV and grid_regularity in the digest) is the most reliable indicator of plan irregularity. Use it over beam span CV.
-- When discussing failing elements, correlate with real geometry features: re-entrant corners, setbacks, non-orthogonal grids, triangular panels — not merely different span lengths in X vs Y.
-- Use cell position counts (corner/edge/interior) and slab panel aspect ratios to characterize plan shape.
-- If member counts vary by level, there may be transfer conditions — flag when the geometry summary shows that.
+PARAMETER CHANGES:
+  Output a JSON code block with only changed fields.
+  Always include `_history_label` (string, ≤6 words) summarizing the change for the params history UI.
 
-GEOMETRY RECOVERY RULE:
-If you believe geometry data is missing, stale, or incomplete — DO NOT say so.
-Instead, call the `get_geometry_digest` tool to fetch a fresh, authoritative digest.
-Only after that tool returns an error may you tell the user geometry is unavailable.
+SESSION HISTORY:
+  Never say "reduced from X to Y" unless get_design_history has ≥2 entries or compare_designs was called.
+  n_designs = 0 or 1 → report absolute metrics only, no comparison language.
 
-ANTI-PATTERNS (FORBIDDEN — never do these):
-- "For a more detailed breakdown of specific span lengths, a tool would be needed" — the digest HAS exact spans
-- "The specific span lengths are not provided" — they ARE provided; quote the exact min–max range
-- "Some spans exceeding X feet" — say the EXACT span range
-- Any hedging about geometry data when the GEOMETRY DIGEST contains it
-- Suggesting the user "provide" span or height data that is already in the digest
-- Saying geometry is missing without first calling `get_geometry_digest`
-$_TOOLS_GUIDANCE
-$_SESSION_DESIGN_HISTORY_RULE
+For full scope limits, anti-patterns, and detailed behavioral rules, call get_response_guidelines.
+$_TOOL_INDEX
 $_CLARIFICATION_INSTRUCTION
 $_NEXT_QUESTIONS_INSTRUCTION
 DESIGN RESULTS SUMMARY:
@@ -2247,8 +2079,6 @@ function _append_chat_building_geometry_sections!(
         if !isnothing(struc_digest)
             @info "Chat geometry: structure-based digest OK" n_cells=get(struc_digest, "n_cells", 0) n_beams=get(struc_digest, "n_beams", 0)
             push!(parts, "\n\nBUILDING GEOMETRY (structure-initialized — cells, members, tributaries computed):\n")
-            push!(parts, "⚠ The digest below contains EXACT span lengths, story heights, tributary areas, and element counts.\n")
-            push!(parts, "  You MUST quote these numbers directly. NEVER say spans are unknown or need a tool to retrieve.\n\n")
             push!(parts, _structure_digest_plaintext(struc_digest))
 
             warnings = get(struc_digest, "warnings", nothing)
@@ -2265,8 +2095,6 @@ function _append_chat_building_geometry_sections!(
             stats = _chat_structured_geometry_stats(structured)
             json_txt = JSON3.write(structured)
             push!(parts, "\n\nBUILDING GEOMETRY (raw JSON analysis — structure init failed, using geometric approximation):\n")
-            push!(parts, "⚠ The digest below contains span lengths, story heights, and element counts from the geometry JSON.\n")
-            push!(parts, "  You MUST quote these numbers directly. NEVER say spans are unknown or need a tool to retrieve.\n\n")
             push!(parts, _geometry_digest_plaintext(stats))
 
             if haskey(stats, "warnings") && !isempty(stats["warnings"])
@@ -2446,14 +2274,38 @@ You SHOULD give short, mechanism-level expectations for how the design problem m
 
     sys_budget_tokens = round(Int, max_tokens * _SYSTEM_PROMPT_BUDGET_FRACTION)
 
+    has_geometry_in_prompt = !isnothing(structured_geometry) || !isempty(strip(geometry_summary))
+
     if mode == "design"
         parts = [_DESIGN_SYSTEM_PREAMBLE, geo_ctx_block]
         !isempty(stale_note) && push!(parts, stale_note)
+
+        # Context-dependent opening analysis for design mode (first turn only)
+        cached_design = _get_last_design()
+        if isnothing(cached_design) && has_geometry_in_prompt
+            push!(parts, """
+
+OPENING ANALYSIS (first response — no design yet):
+  Your opening must demonstrate you read THIS SPECIFIC geometry. Lead with concrete
+  structural observations from the GEOMETRY DIGEST, not generic questions.
+
+  Structure your response as:
+    1. GEOMETRY READ — quote specific spans (ft/m), column count, story heights, panel
+       aspect ratios directly from the digest.
+    2. STRUCTURAL IMPLICATIONS — what will likely govern: long spans → punching shear,
+       high panel aspect ratio → DDM applicability concern, tall stories → column slenderness.
+    3. PARAMETER RECOMMENDATIONS — a reasoned starting point for THIS building, not a menu.
+    4. WARNINGS — surface any geometry warnings from the digest with severity assessment.
+    5. QUESTIONS — only ask what the geometry cannot answer (occupancy, fire rating, preferences).
+
+  If geometry data seems missing, call get_geometry_digest before claiming it is unavailable.
+""")
+        end
+
         _append_chat_building_geometry_sections!(parts, geometry_summary, structured_geometry)
         if !isnothing(params_json) && !isempty(string(params_json))
             push!(parts, "\n\nCURRENT PARAMETERS:\n", JSON3.write(params_json))
         end
-        cached_design = _get_last_design()
         if !stale && !isnothing(cached_design)
             push!(parts, "\n\nLATEST RESULTS SUMMARY:\n", condense_result(cached_design))
         end
@@ -2461,6 +2313,22 @@ You SHOULD give short, mechanism-level expectations for how the design problem m
     elseif mode == "results"
         parts = [_RESULTS_SYSTEM_PREAMBLE, geo_ctx_block]
         !isempty(stale_note) && push!(parts, stale_note)
+
+        # Context-dependent opening analysis for results mode
+        push!(parts, """
+
+OPENING ANALYSIS (results exist):
+  Lead with the critical failure mode and why it governs for THIS geometry.
+  Call get_diagnose_summary immediately. Your opening should read like an engineer's assessment:
+
+    "Punching shear governs at 4 of 9 interior columns (worst ratio 1.34 at column 5).
+     With 28 ft spans and 12 in. columns, the critical perimeter is too short for the
+     tributary load. Options: reinforce_first (shear studs) or grow columns to 16 in."
+
+  If get_diagnose_summary returns size_warnings with parameter_headroom="none",
+  recommend geometry changes FIRST via suggest_next_action.
+""")
+
         cached_design = _get_last_design()
         if !stale && !isnothing(cached_design)
             push!(parts, condense_result(cached_design))
@@ -2482,9 +2350,10 @@ end
 Join prompt `parts`, then progressively strip lower-priority content if the
 result exceeds `budget_tokens`.  Trimming order (least → most important):
 
-1. Full geometry JSON blob  (`Full geometry JSON:`)
-2. Detailed results JSON    (`DETAILED RESULTS:`)
-3. Full geometry analysis JSON (`Full geometry analysis JSON`)
+1. Full structure analysis JSON  (`Full structure analysis JSON:`)
+2. Full geometry JSON blob       (`Full geometry JSON:`)
+3. Detailed results JSON         (`DETAILED RESULTS:`)
+4. Full geometry analysis JSON   (`Full geometry analysis JSON`)
 
 The plain-text digest, warnings, condensed results summary, and preamble are
 never trimmed — the LLM needs those for reasoning.
@@ -2494,8 +2363,11 @@ function _trim_system_prompt(parts::Vector, budget_tokens::Int)::String
     tok = _estimate_tokens(prompt)
     tok <= budget_tokens && return prompt
 
-    # Each pattern: (regex for the section, replacement note)
+    # Each pattern: (regex for the section, replacement note).
+    # Ordered from least to most important for reasoning.
     trim_stages = [
+        (r"Full structure analysis JSON: [\s\S]*?(?=\n\n[A-Z]|\z)"s,
+         "[Structure analysis JSON trimmed — plain-text digest above is authoritative]\n"),
         (r"Full geometry JSON:\n[\s\S]*?(?=\n\n[A-Z]|\z)"s,
          "[Full geometry JSON trimmed to fit context — use design tools for detail]\n"),
         (r"DETAILED RESULTS:\n[\s\S]*?(?=\n\n[A-Z]|\z)"s,
@@ -2832,7 +2704,17 @@ function _openai_tool_specs()::Vector{Dict{String, Any}}
     for entry in api_tool_schema()
         name = string(get(entry, "name", ""))
         isempty(name) && continue
-        desc = string(get(entry, "description", ""))
+
+        # Build a rich description from registry fields: description + use_when + returns.
+        # The OpenAI tools payload only has a single `description` string, so we merge
+        # the registry's separate fields here so the LLM sees when/why to call each tool.
+        desc_parts = String[string(get(entry, "description", ""))]
+        use_when = get(entry, "use_when", nothing)
+        !isnothing(use_when) && !isempty(string(use_when)) && push!(desc_parts, "USE WHEN: " * string(use_when))
+        returns = get(entry, "returns", nothing)
+        !isnothing(returns) && !isempty(string(returns)) && push!(desc_parts, "RETURNS: " * string(returns))
+        desc = join(desc_parts, " | ")
+
         args = get(entry, "args", Dict{String, Any}())
 
         params = Dict{String, Any}(
@@ -3120,7 +3002,11 @@ function _stream_llm_to_sse(
         end
 
         if isempty(full_text) && !isempty(tool_actions)
-            full_text = "I executed the requested tool calls but did not receive a final response message. Please retry."
+            n_actions = length(tool_actions)
+            tool_names = join(unique(string(get(a, "tool", "?")) for a in tool_actions), ", ")
+            full_text = "I executed $n_actions tool calls ($tool_names) but hit the processing limit " *
+                "before producing a summary. The tool results are available — please ask your " *
+                "question again and I'll summarize them."
         end
 
         if !isempty(full_text)
@@ -4100,7 +3986,18 @@ function _dispatch_chat_tool(tool::String, args::Dict{String, Any})::Dict{String
         geo_warn = _stale_geometry_warning(args)
         !isnothing(geo_warn) && push!(warnings, geo_warn)
 
-        return Dict(
+        n_history = length(get_design_history_entries())
+        guidance_parts = String["RECORD: Call record_insight to log what this run taught you."]
+        if n_history >= 2
+            push!(guidance_parts,
+                "COMPARE: Call compare_designs to show the user what changed from the previous run.")
+        end
+        if !design.summary.all_checks_pass
+            push!(guidance_parts,
+                "FAILURES: Call get_diagnose_summary to identify which checks are failing and why.")
+        end
+
+        result = Dict(
             "ok"               => true,
             "quick_check"      => true,
             "coord_unit_assumed" => coord_unit_assumed,
@@ -4112,19 +4009,24 @@ function _dispatch_chat_tool(tool::String, args::Dict{String, Any})::Dict{String
             "warnings"         => warnings,
             "note"             => "Quick-check result: visualization skipped, max 2 sizing iterations, MIP capped at 20s. " *
                 "Ratios may shift slightly in a full run. The canvas will update on next Grasshopper solve.",
+            "_guidance"        => join(guidance_parts, "\n"),
         )
+        return result
+
+    elseif tool == "get_response_guidelines"
+        return agent_response_guidelines()
 
     else
         return Dict(
             "error"   => "unknown_tool",
             "message" => "Unknown tool: \"$tool\". Available: " *
-                "get_situation_card, get_building_summary, get_design_history, get_current_params, " *
+                "get_situation_card, get_building_summary, get_geometry_digest, get_design_history, get_current_params, " *
                 "get_diagnose_summary, get_diagnose, query_elements, get_solver_trace, " *
                 "get_lever_map, get_implemented_provisions, get_provision_rationale, explain_field, " *
                 "get_result_summary, get_condensed_result, get_applicability, explain_trace_lookup, " *
                 "run_experiment, list_experiments, batch_experiments, " *
                 "validate_params, run_design, compare_designs, suggest_next_action, predict_geometry_effect, " *
-                "record_insight, get_session_insights, " *
+                "record_insight, get_session_insights, get_response_guidelines, " *
                 "narrate_element, narrate_comparison, clarify_user_intent.",
         )
     end

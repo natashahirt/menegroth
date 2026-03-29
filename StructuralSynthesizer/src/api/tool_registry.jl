@@ -2,8 +2,8 @@
 # Tool Registry — structured metadata for agent tools + implemented provisions
 #
 # TOOL_REGISTRY: each entry has name, description, phase, use_when, args,
-# returns, requires_design, requires_geometry. The LLM reads `use_when` to
-# self-select the right tool.
+# returns, requires_design, requires_geometry. _openai_tool_specs() in chat.jl
+# merges description + use_when + returns into a single OpenAI description string.
 #
 # IMPLEMENTED_PROVISIONS: machine-readable index of every design code clause
 # the solver implements. Sourced from docs/src/reference/design_codes.md.
@@ -1021,6 +1021,16 @@ const TOOL_REGISTRY = [
             "min_confidence" => Dict("type" => "number", "optional" => true, "description" => "Minimum confidence threshold (default 0.0)"),
         ),
         "returns"           => "Dict with insights array.",
+        "requires_design"   => false,
+        "requires_geometry" => false,
+    ),
+    Dict{String, Any}(
+        "name"              => "get_response_guidelines",
+        "description"       => "Full behavioral rules, scope limits, anti-patterns, tool selection recipes, irregularity rules, and key parameter reference. The system prompt is intentionally lean — this tool provides the complete guideline set on demand.",
+        "phase"             => "reference",
+        "use_when"          => "You need to check behavioral rules, scope limits, or anti-patterns. Call when uncertain about response protocol, tool sequencing, or what the solver can and cannot do.",
+        "args"              => Dict{String, Any}(),
+        "returns"           => "Dict with tool_selection_recipes (intent→sequence array), required_sequences, scope_limits, epistemic_boundary, anti_patterns, geometry rules (recovery, remediation, what_if, stale_cache, client_vs_server), irregularity_rules, key_parameters (array with name/values/note).",
         "requires_design"   => false,
         "requires_geometry" => false,
     ),

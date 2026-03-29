@@ -14,6 +14,8 @@ using StructuralSynthesizer:
     _dispatch_chat_tool, _classify_patch,
     _build_turn_summary, _normalize_clarification,
     _query_int, _route_coerce_int, _route_coerce_float,
+    _build_system_prompt, _estimate_tokens, MAX_CONTEXT_TOKENS, _SYSTEM_PROMPT_BUDGET_FRACTION,
+    agent_response_guidelines, agent_building_summary,
     api_applicability_schema, api_params_schema_structured, api_tool_schema
 using Test
 using HTTP
@@ -407,6 +409,78 @@ println("Testing chat API…")
         @test "validate_params" in names
         @test "run_design" in names
         @test "get_building_summary" in names
+    end
+
+    # ─── get_response_guidelines dispatch ─────────────────────────────────
+
+    @testset "Tool dispatch — get_response_guidelines" begin
+        result = _dispatch_chat_tool("get_response_guidelines", Dict{String,Any}())
+        @test !haskey(result, "error")
+        @test haskey(result, "tool_selection_recipes")
+        @test haskey(result, "required_sequences")
+        @test haskey(result, "scope_limits")
+        @test haskey(result, "epistemic_boundary")
+        @test haskey(result, "anti_patterns")
+        @test haskey(result, "geometry_recovery_rule")
+        @test haskey(result, "geometry_remediation")
+        @test haskey(result, "geometry_what_if")
+        @test haskey(result, "geometry_hash_stale_cache")
+        @test haskey(result, "client_geometry_vs_server")
+        @test haskey(result, "irregularity_rules")
+        @test haskey(result, "key_parameters")
+        @test result["scope_limits"] isa Vector
+        @test !isempty(result["scope_limits"])
+        @test result["tool_selection_recipes"] isa Vector
+        @test result["key_parameters"] isa Vector
+    end
+
+    @testset "api_tool_schema — has get_response_guidelines" begin
+        registry = api_tool_schema()
+        names = [t["name"] for t in registry]
+        @test "get_response_guidelines" in names
+    end
+
+    @testset "agent_response_guidelines — direct call" begin
+        g = agent_response_guidelines()
+        @test g isa Dict{String, Any}
+        @test haskey(g, "tool_selection_recipes")
+        @test g["tool_selection_recipes"] isa Vector
+        @test !isempty(g["tool_selection_recipes"])
+        @test haskey(g["tool_selection_recipes"][1], "intent")
+        @test haskey(g["tool_selection_recipes"][1], "sequence")
+        @test haskey(g, "required_sequences")
+        @test g["key_parameters"] isa Vector
+    end
+
+    # ─── System prompt token budget ──────────────────────────────────────
+
+    @testset "System prompt — design mode stays under token budget" begin
+        prompt = _build_system_prompt("design", nothing, "")
+        tokens = _estimate_tokens(prompt)
+        budget = round(Int, MAX_CONTEXT_TOKENS * _SYSTEM_PROMPT_BUDGET_FRACTION)
+        @test tokens <= budget
+        @test occursin("structural engineering design assistant", prompt)
+        @test occursin("EVIDENCE-FIRST", prompt)
+    end
+
+    @testset "System prompt — results mode stays under token budget" begin
+        prompt = _build_system_prompt("results", nothing, "")
+        tokens = _estimate_tokens(prompt)
+        budget = round(Int, MAX_CONTEXT_TOKENS * _SYSTEM_PROMPT_BUDGET_FRACTION)
+        @test tokens <= budget
+        @test occursin("structural engineering results analyst", prompt)
+        @test occursin("EVIDENCE-FIRST", prompt)
+    end
+
+    @testset "System prompt — design mode with geometry gets opening analysis" begin
+        prompt = _build_system_prompt("design", nothing, "", "", Dict{String, Any}("vertices" => []))
+        @test occursin("OPENING ANALYSIS", prompt)
+        @test occursin("GEOMETRY READ", prompt)
+    end
+
+    @testset "System prompt — unknown mode returns fallback" begin
+        prompt = _build_system_prompt("unknown", nothing, "")
+        @test prompt == "You are a helpful structural engineering assistant."
     end
 
 end # @testset "Chat API"

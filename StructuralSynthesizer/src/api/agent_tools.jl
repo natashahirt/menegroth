@@ -359,6 +359,13 @@ function agent_building_summary(struc::BuildingStructure)::Dict{String, Any}
         result["structural_flags"] = flags
     end
 
+    result["_guidance"] =
+        "IRREGULARITY NOTE: span_stats.cv aggregates ALL beam edges (X + Y). Different bay sizes " *
+        "in X vs Y produce high CV even on a rectangular orthogonal grid — that is NOT plan " *
+        "irregularity. Use slab_panel_plan.plan_shape_classification and quad corner deviation " *
+        "from 90° for true irregularity. Column tributary area variation (from get_geometry_digest) " *
+        "is the most reliable plan regularity indicator."
+
     return result
 end
 
@@ -471,9 +478,9 @@ function agent_situation_card(
                 "slabs"       => n_fail_slabs,
                 "foundations" => n_fail_fdns,
             ),
-            "health_note"      => "When n_failing > 0, cite failing_by_type and critical_element together. " *
-                "critical_element is the worst failing element (same `ok` rules as GET /result). " *
-                "Do not infer failures only from critical_element if failing_by_type shows otherwise.",
+            "health_note"      => "critical_element = single worst element (highest ratio). " *
+                "failing_by_type = counts per category. These may disagree: " *
+                "e.g. critical_element can be a slab while most failures are columns.",
         )
         card["has_trace"] = !isempty(design.solver_trace)
     end
@@ -498,6 +505,32 @@ function agent_situation_card(
     if !isempty(insights)
         card["session"]["n_insights"] = length(insights)
         card["session"]["insight_categories"] = sort(unique(string(s.category) for s in insights))
+    end
+
+    # Inline guidance — state-dependent, delivered at the moment the model needs it
+    guidance_parts = String[]
+    if geometry_stale
+        push!(guidance_parts,
+            "STALE GEOMETRY: Cached results describe a different model. " *
+            "Do not map diagnostic data onto current geometry. " *
+            "Suggest the user run Design from Grasshopper to update the server.")
+    end
+    if !isnothing(design)
+        n_fail = card["health"]["n_failing"]
+        if n_fail > 0
+            push!(guidance_parts,
+                "FAILURES DETECTED: Report failing_by_type counts to the user. " *
+                "Call get_diagnose_summary next for failure detail. " *
+                "Do not guess at causes — use tool data.")
+        end
+    elseif !isnothing(struc)
+        push!(guidance_parts,
+            "NO DESIGN YET: Geometry is loaded but no design has run. " *
+            "Quote exact span/height numbers from the geometry digest in your opening. " *
+            "Call get_geometry_digest if you need more detail.")
+    end
+    if !isempty(guidance_parts)
+        card["_guidance"] = join(guidance_parts, "\n")
     end
 
     return card
@@ -769,6 +802,19 @@ function agent_diagnose_summary(design::BuildingDesign)::Dict{String, Any}
         )
     end
 
+    # Inline guidance — delivered at the moment the model is reviewing failures
+    n_failing = result["n_total_failing"]
+    if n_failing > 0 && n_critical_sw > 0
+        result["_guidance"] =
+            "GEOMETRY BOTTLENECK: Size warnings with parameter_headroom='none' mean parameter " *
+            "changes alone cannot fix this. Call suggest_next_action(goal='fix_failures') to " *
+            "get geometry_actions with Grasshopper targets."
+    elseif n_failing > 0
+        result["_guidance"] =
+            "NEXT STEP: Call get_lever_map(check=<governing_check>) before recommending " *
+            "parameter changes. Always validate_params before run_design."
+    end
+
     return result
 end
 
@@ -1015,6 +1061,29 @@ function agent_compare_designs(index_a::Int, index_b::Int)::Dict{String, Any}
     )
     !isnothing(mechanism_shift) && (out["mechanism_shift"] = mechanism_shift)
     isnothing(note) || (out["comparison_note"] = note)
+
+    guidance_parts = String[]
+    if cross_geo
+        push!(guidance_parts,
+            "CROSS-GEOMETRY: These runs used different geometry. Deltas are not a controlled " *
+            "A/B test — tell the user both geometry and parameters changed. " *
+            "Cite comparison_note in your response.")
+    end
+    if mechanism_shift == "critical_element_changed"
+        push!(guidance_parts,
+            "MECHANISM SHIFT: The governing element changed between runs. " *
+            "Explain what failure mode now dominates and why the change shifted it.")
+    end
+    deltas = out["deltas"]
+    if get(deltas, "pass_improved", false)
+        push!(guidance_parts, "PASS IMPROVED: Design went from failing to passing — highlight this.")
+    elseif get(deltas, "pass_regressed", false)
+        push!(guidance_parts, "REGRESSION: Design went from passing to failing — warn the user.")
+    end
+    if !isempty(guidance_parts)
+        out["_guidance"] = join(guidance_parts, "\n")
+    end
+
     return out
 end
 
@@ -1112,6 +1181,15 @@ function agent_suggest_next_action(design::BuildingDesign, goal::String)::Dict{S
             "recommendations" => goal_recs,
             "lever_impacts"   => goal_impacts,
         )
+    end
+
+    # Inline guidance — geometry bottleneck vs parameter path
+    result["_guidance"] = if !isempty(geo_remediations)
+        "GEOMETRY IS THE BOTTLENECK: Present geometry_actions FIRST with quantitative targets " *
+        "and Grasshopper instructions. Parameter changes are secondary. " *
+        "Use predict_geometry_effect to explain the structural reasoning."
+    else
+        "NEXT STEP: Call validate_params before run_design to test recommended parameter changes."
     end
 
     return result
@@ -1311,11 +1389,37 @@ function agent_solver_trace(
         result["filter_layer"] = string(layer)
     end
 
+    # Tier-dependent hints for progressive disclosure
     if tier == :summary && any(ev -> ev.event_type in (:failure, :fallback), events)
         result["hint"] = "Failures detected in trace. Use tier=failures to see them."
     elseif tier == :failures && any(ev -> ev.event_type in (:decision, :iteration), events)
         n_decisions = count(ev -> ev.event_type in (:decision, :iteration), events)
         result["hint"] = "$n_decisions decision/iteration events available. Use tier=decisions for detail."
+    end
+
+    # Operational guidance — tell the LLM what to do with these results
+    guidance_parts = String[]
+    has_failures = any(ev -> ev.event_type in (:failure, :fallback), filtered)
+    has_breadcrumbs = any(ev -> haskey(ev.data, "top_elements") || haskey(ev.data, "lookup"), filtered)
+
+    if has_failures && tier in (:summary, :failures)
+        push!(guidance_parts,
+            "FAILURES IN TRACE: Cite the failure stage and element_id to the user. " *
+            "Call get_diagnose_summary to correlate trace failures with check ratios.")
+    end
+    if has_breadcrumbs
+        push!(guidance_parts,
+            "BREADCRUMBS AVAILABLE: Events contain lookup keys. " *
+            "Call explain_trace_lookup(lookup=<lookup_dict>) for per-check feasibility " *
+            "detail on specific elements without re-running the design.")
+    end
+    if tier == :full && length(serialized) > 100
+        push!(guidance_parts,
+            "LARGE TRACE: $(length(serialized)) events shown. " *
+            "Filter by element or layer for targeted analysis.")
+    end
+    if !isempty(guidance_parts)
+        result["_guidance"] = join(guidance_parts, "\n")
     end
 
     return result
@@ -1477,4 +1581,149 @@ function agent_predict_geometry_effect(
     )
 
     return result
+end
+
+# ─── Meta-tool: full behavioral rules on demand ─────────────────────────────
+
+"""
+    agent_response_guidelines() -> Dict{String, Any}
+
+Return the full set of behavioral rules, scope limits, anti-patterns, and
+tool selection recipes. The system prompt is intentionally lean; the LLM
+calls this tool when it needs detailed guidance.
+"""
+function agent_response_guidelines()::Dict{String, Any}
+    Dict{String, Any}(
+        # ── Tool Selection Recipes ─────────────────────────────────────────
+        # Match user intent to tool sequence. Each key describes the user's
+        # question; the value is the recommended tool chain.
+        "tool_selection_recipes" => [
+            Dict("intent" => "Start of conversation",
+                 "sequence" => "get_situation_card → if no design: read geometry digest, recommend initial parameters"),
+            Dict("intent" => "Why is X failing?",
+                 "sequence" => "get_diagnose_summary → get_provision_rationale(governing_check) → narrate_element"),
+            Dict("intent" => "What should I change?",
+                 "sequence" => "get_diagnose_summary → suggest_next_action → validate_params"),
+            Dict("intent" => "Would a bigger column help?",
+                 "sequence" => "run_experiment(punching or pm_column)"),
+            Dict("intent" => "Try changing X",
+                 "sequence" => "run_experiment → validate_params → run_design → compare_designs (if ≥2 designs)"),
+            Dict("intent" => "Explain this element/result",
+                 "sequence" => "narrate_element or narrate_comparison"),
+            Dict("intent" => "Compare runs / Did it help?",
+                 "sequence" => "compare_designs + get_design_history"),
+            Dict("intent" => "What does parameter X do?",
+                 "sequence" => "explain_field(X) — returns schema, rationale, related structural checks"),
+            Dict("intent" => "Why does the code require this?",
+                 "sequence" => "get_provision_rationale(section_or_check) — mechanism, philosophy, misconceptions"),
+            Dict("intent" => "Geometry data seems missing",
+                 "sequence" => "get_geometry_digest — NEVER claim spans/heights are unavailable without calling this first"),
+        ],
+        "required_sequences" => [
+            "Always call validate_params before run_design.",
+            "Always call record_insight after each design run.",
+            "Always call get_session_insights before making recommendations.",
+        ],
+
+        # ── Scope Limits ──────────────────────────────────────────────────
+        # The solver CANNOT do these. Do not promise or attempt them.
+        "scope_limits" => [
+            "Lateral / seismic analysis (gravity only)",
+            "Connection design",
+            "Progressive collapse / blast",
+            "Vibration serviceability",
+            "PT concrete",
+            "Composite deck slabs",
+            "Timber / masonry",
+            "Geometry modification (must be done in Grasshopper)",
+            "Multi-objective Pareto optimization",
+            "Non-rectangular grids for DDM/EFM (use FEA instead)",
+        ],
+
+        # ── Epistemic Boundary ────────────────────────────────────────────
+        "epistemic_boundary" =>
+            "You lack direct code text (ACI, AISC, ASCE 7). All code logic is in the solver. " *
+            "Quote code_clause / limit_state_description from tool results. " *
+            "Do NOT invent section numbers or formulas. " *
+            "Use get_implemented_provisions to check code coverage. If unsure, say so.",
+
+        # ── Anti-patterns (FORBIDDEN) ─────────────────────────────────────
+        "anti_patterns" => [
+            "Filler openings like 'I'd be happy to help with your structural design'",
+            "Listing all possible floor types without recommending one",
+            "Asking questions the geometry data already answers (spans, stories, column count)",
+            "Generic descriptions that could apply to any building",
+            "Repeating geometry stats without structural interpretation",
+            "Claiming 'a tool would be needed for more detail' — the GEOMETRY DIGEST IS the detail",
+            "Claiming 'span lengths are not provided' — they ARE in the digest; quote the exact range",
+            "Vague references like 'some spans exceeding X ft' — give the EXACT min–max range",
+            "Any hedging about geometry data when the digest contains it",
+            "Claiming geometry is missing without first calling get_geometry_digest",
+            "Suggesting the user 'provide' data that is already in the digest",
+        ],
+
+        # ── Geometry Rules ────────────────────────────────────────────────
+        "geometry_recovery_rule" =>
+            "If you believe geometry data is missing, stale, or incomplete — do NOT say so. " *
+            "Call get_geometry_digest to fetch a fresh authoritative digest. " *
+            "Only after that tool returns an error may you tell the user geometry is unavailable.",
+
+        "geometry_remediation" =>
+            "When suggest_next_action returns geometry_actions or parameter_headroom='exhausted': " *
+            "(1) present geometric changes FIRST with quantitative targets and Grasshopper instructions, " *
+            "(2) then discuss parameter adjustments as secondary measures. " *
+            "Use predict_geometry_effect to explain the structural reasoning. " *
+            "When size_warnings have severity='critical', always surface them.",
+
+        "geometry_what_if" =>
+            "When the user asks about changing spans, adding columns, or adjusting story height: " *
+            "call predict_geometry_effect(variable, direction) to get scaling laws and economical ranges. " *
+            "Present trade-offs quantitatively — do not guess at scaling relationships.",
+
+        "geometry_hash_stale_cache" =>
+            "If GEOMETRY_CONTEXT.geometry_stale is true, cached tools describe the last solved model, " *
+            "not current geometry. Explain directional effects qualitatively; do NOT invent numerical " *
+            "results for unsolved geometry. get_design_history entries include geometry_hash for " *
+            "cross-geometry awareness.",
+
+        "client_geometry_vs_server" =>
+            "POST /chat may include building_geometry JSON and/or geometry_summary narrative — use them. " *
+            "get_situation_card.has_geometry only reflects the server cache from POST /design, NOT prompt geometry. " *
+            "When a STRUCTURE-BASED GEOMETRY DIGEST is present, the server has built a real BuildingStructure — " *
+            "use cell spans, slab panel data, member lengths, and column tributary areas directly. " *
+            "For solver-level data (sizing, check ratios, trace): server cache needed → suggest a Design run.",
+
+        # ── Irregularity Interpretation ───────────────────────────────────
+        "irregularity_rules" => Dict{String, Any}(
+            "span_cv" =>
+                "span_stats.cv aggregates ALL beam edge lengths (X + Y). Different bay sizes in X vs Y " *
+                "produce a high CV even on a perfectly rectangular orthogonal grid — that is normal, not irregular.",
+            "true_irregularity" =>
+                "True plan irregularity (setbacks, re-entrant corners, non-orthogonal grids, free-form columns) " *
+                "must be inferred from: slab_panel_plan.plan_shape_classification, quad corner deviation from 90°, " *
+                "column tributary area CV and grid_regularity — NOT from span-length CV alone.",
+            "vertical" =>
+                "When story heights vary significantly, the geometry summary flags vertical irregularity — " *
+                "that is separate from plan regularity.",
+            "column_layouts" =>
+                "For non-rectangular column layouts, closest-spacing values are more meaningful than gridline spacings.",
+        ),
+
+        # ── Key Parameters Quick Reference ────────────────────────────────
+        # Use explain_field(field_name) for full detail on any parameter.
+        "key_parameters" => [
+            Dict("name" => "floor_type",        "values" => "flat_plate | flat_slab | one_way | vault",
+                 "note" => "Biggest system lever"),
+            Dict("name" => "column_type",       "values" => "rc_rect | rc_circular | steel_w | steel_hss | pixelframe"),
+            Dict("name" => "beam_type",         "values" => "steel_w | rc_rect | rc_tbeam | steel_hss | pixelframe"),
+            Dict("name" => "method",            "values" => "DDM | DDM_SIMPLIFIED | EFM | EFM_HARDY_CROSS | FEA",
+                 "note" => "Slab analysis method"),
+            Dict("name" => "deflection_limit",  "values" => "L_240 | L_360 | L_480",
+                 "note" => "Stricter limit → thicker slabs"),
+            Dict("name" => "punching_strategy", "values" => "grow_columns | reinforce_first | reinforce_last"),
+            Dict("name" => "optimize_for",      "values" => "weight | carbon | cost"),
+            Dict("name" => "fire_rating",       "values" => "0 | 1 | 1.5 | 2 | 3 | 4",
+                 "note" => "Hours; affects cover, thickness, fire protection"),
+        ],
+    )
 end

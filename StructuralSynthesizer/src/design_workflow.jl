@@ -205,7 +205,7 @@ function build_pipeline(params::DesignParameters;
     if !isnothing(params.foundation_options)
         push!(stages, PipelineStage(struc -> begin
             StructuralSizer.emit!(tc, :pipeline, "build_pipeline", "stage_3_foundations", :enter)
-            _size_foundations!(struc, params.foundation_options)
+            _size_foundations!(struc, params.foundation_options; tc=tc)
             StructuralSizer.emit!(tc, :pipeline, "build_pipeline", "stage_3_foundations", :exit)
         end, false))
     end
@@ -920,12 +920,19 @@ end
 Uses the strategy-aware `size_foundations!` pipeline so that
 `fp.options.strategy` (:mat, :all_spread, :all_strip, :auto, :auto_strip_spread) is respected.
 """
-function _size_foundations!(struc::BuildingStructure, fp::FoundationParameters)
+function _size_foundations!(
+    struc::BuildingStructure,
+    fp::FoundationParameters;
+    tc::Union{Nothing, StructuralSizer.TraceCollector} = nothing,
+)
     initialize_supports!(struc)
     if isempty(struc.supports)
         @warn "Skipping foundation sizing: no supports found. Ensure support vertices are at grade."
         return
     end
+    StructuralSizer.emit!(tc, :workflow, "_size_foundations!", "", :enter;
+                          strategy=string(fp.options.strategy),
+                          code=string(fp.options.code))
     size_foundations!(struc;
         soil = fp.soil,
         opts = fp.options,
@@ -934,7 +941,11 @@ function _size_foundations!(struc::BuildingStructure, fp::FoundationParameters)
         rebar = fp.rebar,
         pier_width = fp.pier_width,
         min_depth = fp.min_depth,
+        tc = tc,
     )
+    StructuralSizer.emit!(tc, :workflow, "_size_foundations!", "", :exit;
+                          n_foundations=length(struc.foundations),
+                          n_groups=length(struc.foundation_groups))
 end
 
 """Extract column axial demands into pre-allocated buffer (zero-alloc)."""

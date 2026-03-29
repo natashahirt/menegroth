@@ -16,6 +16,14 @@
 # Reference: StructurePoint ACI 318-11, Wight 7th Ed. Ex 15-2.
 # =============================================================================
 
+# =============================================================================
+# Solver Trace Contract (manual registry; function is documented)
+# =============================================================================
+TRACE_REGISTRY[(:design_footing, :checker)] =
+    TracedFunctionMeta(:design_footing, :checker,
+                       [:enter, :exit, :decision, :iteration, :failure], nothing,
+                       @__FILE__, @__LINE__)
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Internal Unitful helpers (also used by strip & mat footings)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -150,8 +158,19 @@ result = design_footing(SpreadFooting(), d, s; opts)
 function design_footing(::SpreadFooting,
     demand::FoundationDemand,
     soil::Soil;
-    opts::SpreadParams = SpreadParams()
+    opts::SpreadParams = SpreadParams(),
+    tc::Union{Nothing, TraceCollector} = nothing,
 )
+    StructuralSizer.emit!(tc, :checker, "design_footing_spread_aci", "foundation_group_$(demand.group_idx)", :enter;
+                          qa_kPa=Float64(ustrip(u"kPa", soil.qa)),
+                          Pu_kN=Float64(ustrip(u"kN", demand.Pu)),
+                          Ps_kN=Float64(ustrip(u"kN", demand.Ps)),
+                          c1_in=Float64(ustrip(u"inch", demand.c1)),
+                          c2_in=Float64(ustrip(u"inch", demand.c2)),
+                          shape=string(demand.shape),
+                          min_depth_in=Float64(ustrip(u"inch", opts.min_depth)),
+                          depth_increment_in=Float64(ustrip(u"inch", opts.depth_increment)),
+                          size_increment_in=Float64(ustrip(u"inch", opts.size_increment)))
     # Column geometry: single source of truth is FoundationDemand (ACI 318-11)
     c1     = demand.c1
     c2     = demand.c2
@@ -225,8 +244,16 @@ function design_footing(::SpreadFooting,
 
         punch.ok && ow_ok && break
         h += h_incr
-        iter == 60 && error("Spread footing depth did not converge after 60 iterations (h=$h). " *
-                            "Check bearing pressure, column dimensions, or increase max depth.")
+        if iter == 60
+            StructuralSizer.emit!(tc, :checker, "design_footing_spread_aci", "foundation_group_$(demand.group_idx)", :failure;
+                                  reason="depth_iteration_nonconvergence",
+                                  h_in=Float64(ustrip(u"inch", h)),
+                                  last_punch_ok=Bool(punch === nothing ? false : punch.ok),
+                                  last_punch_ratio=punch === nothing ? nothing : Float64(punch.utilization),
+                                  last_one_way_ok=Bool(ow_ok))
+            error("Spread footing depth did not converge after 60 iterations (h=$h). " *
+                  "Check bearing pressure, column dimensions, or increase max depth.")
+        end
     end
     d = h - cover - db
 
@@ -282,7 +309,7 @@ function design_footing(::SpreadFooting,
     bar_len = B - 2cover
     V_steel = uconvert(u"m^3", 2 * n_bars * Ab * bar_len)
 
-    return SpreadFootingResult{typeof(uconvert(u"m", B)),
+    result = SpreadFootingResult{typeof(uconvert(u"m", B)),
                                typeof(V_conc),
                                typeof(Pu)}(
         uconvert(u"m", B),
@@ -296,4 +323,11 @@ function design_footing(::SpreadFooting,
         V_steel,
         utilization,
     )
+    StructuralSizer.emit!(tc, :checker, "design_footing_spread_aci", "foundation_group_$(demand.group_idx)", :exit;
+                          B_m=Float64(ustrip(u"m", result.B)),
+                          L_m=Float64(ustrip(u"m", result.L_ftg)),
+                          D_m=Float64(ustrip(u"m", result.D)),
+                          utilization=Float64(result.utilization))
+    return result
+    # (unreachable) — kept to avoid accidentally placing emit! after return
 end

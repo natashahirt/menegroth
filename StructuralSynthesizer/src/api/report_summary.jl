@@ -109,6 +109,39 @@ function _beam_type_code_from_design(design::BuildingDesign, params::DesignParam
     return "unknown"
 end
 
+# ─── Helpers for failing-detail normalization ─────────────────────────────────
+
+"""Map a section object to an API-friendly type string."""
+function _api_section_type(so)::String
+    isnothing(so) && return "unknown"
+    so isa StructuralSizer.RCCircularSection && return "rc_circular"
+    so isa StructuralSizer.RCColumnSection   && return "rc_rect"
+    so isa StructuralSizer.RCBeamSection     && return "rc_rect"
+    so isa StructuralSizer.ISymmSection      && return "steel_w"
+    so isa StructuralSizer.HSSRectSection    && return "steel_hss"
+    so isa StructuralSizer.HSSRoundSection   && return "steel_hss"
+    so isa StructuralSizer.PixelFrameSection && return "pixelframe"
+    return "other"
+end
+
+"""Normalize a raw failure_reason string (strip whitespace, lowercase)."""
+function _normalize_failure_reason(s::String)::String
+    stripped = strip(s)
+    isempty(stripped) && return ""
+    return stripped
+end
+
+"""
+Normalize a failing_check string into an array of check names.
+Handles comma-separated or semicolon-separated lists.
+"""
+function _normalize_failing_checks(s::String)::Vector{String}
+    stripped = strip(s)
+    isempty(stripped) && return String[]
+    parts = split(stripped, r"[,;]\s*")
+    return [strip(p) for p in parts if !isempty(strip(p))]
+end
+
 # ─── Structured JSON Report Summary ──────────────────────────────────────────
 
 """
@@ -224,6 +257,7 @@ function _summary_columns(design::BuildingDesign, du::DisplayUnits)
             "id"                => k,
             "section"           => cr.section_size,
             "section_type"      => _api_section_type(cr.section_obj),
+            "governing_check"   => _column_governing_check(cr),
             "axial_ratio"       => _round_val(cr.axial_ratio),
             "interaction_ratio" => _round_val(cr.interaction_ratio),
         )
@@ -258,11 +292,12 @@ function _summary_beams(design::BuildingDesign, du::DisplayUnits)
 
     failing_details = [
         Dict{String, Any}(
-            "id"            => k,
-            "section"       => br.section_size,
-            "section_type"  => _api_section_type(br.section_obj),
-            "flexure_ratio" => _round_val(br.flexure_ratio),
-            "shear_ratio"   => _round_val(br.shear_ratio),
+            "id"              => k,
+            "section"         => br.section_size,
+            "section_type"    => _api_section_type(br.section_obj),
+            "governing_check" => _beam_governing_check(br),
+            "flexure_ratio"   => _round_val(br.flexure_ratio),
+            "shear_ratio"     => _round_val(br.shear_ratio),
         )
         for (k, br) in beam_vec if !br.ok
     ]
@@ -292,10 +327,13 @@ function _summary_foundations(design::BuildingDesign, du::DisplayUnits)
 
     failing_details = [
         Dict{String, Any}(
-            "id"            => k,
-            "length"        => _round_val(_to_display_length(du, fr.length); digits=2),
-            "width"         => _round_val(_to_display_length(du, fr.width); digits=2),
-            "bearing_ratio" => _round_val(fr.bearing_ratio),
+            "id"              => k,
+            "governing_check" => _fdn_governing_check(fr),
+            "length"          => _round_val(_to_display_length(du, fr.length); digits=2),
+            "width"           => _round_val(_to_display_length(du, fr.width); digits=2),
+            "bearing_ratio"   => _round_val(fr.bearing_ratio),
+            "punching_ratio"  => _round_val(fr.punching_ratio),
+            "flexure_ratio"   => _round_val(fr.flexure_ratio),
         )
         for (k, fr) in fdn_vec if !fr.ok
     ]
@@ -330,6 +368,30 @@ function condense_result(design::BuildingDesign; report_units=nothing)
     if !isempty(ov["critical_element"])
         push!(lines, "Critical element: $(ov["critical_element"]), ratio=$(ov["critical_ratio"])")
     end
+
+    # Top failure modes by governing check
+    check_freqs = Dict{String, Int}()
+    for key in ("slabs", "columns", "beams", "foundations")
+        sec = get(d, key, Dict())
+        for fd in get(sec, "failing_details", [])
+            for gc_key in ("governing_check", "failing_checks")
+                gc = get(fd, gc_key, nothing)
+                if gc isa AbstractString && !isempty(gc)
+                    check_freqs[gc] = get(check_freqs, gc, 0) + 1
+                elseif gc isa AbstractVector
+                    for c in gc
+                        c isa AbstractString && !isempty(c) && (check_freqs[c] = get(check_freqs, c, 0) + 1)
+                    end
+                end
+            end
+        end
+    end
+    if !isempty(check_freqs)
+        sorted_checks = sort(collect(check_freqs); by=last, rev=true)
+        top_checks = [first(c) for c in sorted_checks[1:min(3, length(sorted_checks))]]
+        push!(lines, "Top failure modes: $(join(top_checks, ", "))")
+    end
+
     push!(lines, "Compute: $(ov["compute_time_s"])s")
     push!(lines, "")
 

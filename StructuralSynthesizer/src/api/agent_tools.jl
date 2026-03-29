@@ -441,8 +441,10 @@ function agent_situation_card(
             "note" =>
                 "The API server has no cached BuildingStructure yet (POST /design has not completed for this model). " *
                 "get_situation_card.geometry and get_building_summary are therefore absent. " *
-                "The chat POST /chat body may still include `building_geometry` (same JSON as Design Run geometry) and/or `geometry_summary` — both are copied into the system prompt when present; " *
-                "parse structured vertices/edges/faces from that JSON. For computed span_stats, slab_panel_plan, and member counts from the solver graph, run Design so the server ingests geometry.",
+                "However, the system prompt's 'Geometry analysis' block contains pre-computed beam spans, " *
+                "story heights, slab panel shapes, column grid, structural flags, and warnings derived from " *
+                "the raw building_geometry JSON — use those quantitatively. " *
+                "For solver-level data (member sizing, check ratios, trace events), run Design so the server ingests geometry.",
         )
     end
 
@@ -692,7 +694,6 @@ Designed for progressive disclosure: call this first, then `get_diagnose` or
 """
 function agent_diagnose_summary(design::BuildingDesign)::Dict{String, Any}
     diag = get_cached_diagnose(DESIGN_CACHE, design)
-    eng = get(diag, "engineering", Dict())
 
     type_stats = Dict{String, Any}()
     all_elements = Pair{Float64, Dict{String, Any}}[]
@@ -700,8 +701,7 @@ function agent_diagnose_summary(design::BuildingDesign)::Dict{String, Any}
 
     for (etype, plural) in [("column", "columns"), ("beam", "beams"),
                              ("slab", "slabs"), ("foundation", "foundations")]
-        elems = get(eng, plural, Any[])
-        n_total = length(elems)
+        elems = get(diag, plural, Any[])
         n_fail = count(e -> !get(e, "ok", true), elems)
         type_stats[etype] = Dict{String, Any}("total" => n_total, "failing" => n_fail)
 
@@ -753,6 +753,7 @@ function agent_query_elements(
     max_ratio::Union{Float64, Nothing}=nothing,
     governing_check::Union{String, Nothing}=nothing,
     ok::Union{Bool, Nothing}=nothing,
+    story::Union{Int, Nothing}=nothing,
 )::Dict{String, Any}
     diag = get_cached_diagnose(DESIGN_CACHE, design)
 
@@ -768,6 +769,10 @@ function agent_query_elements(
         end
         if !isnothing(ok)
             get(d, "ok", true) != ok && return false
+        end
+        if !isnothing(story)
+            elem_story = get(d, "story", nothing)
+            !isnothing(elem_story) && elem_story != story && return false
         end
         return true
     end
@@ -933,24 +938,37 @@ function agent_compare_designs(index_a::Int, index_b::Int)::Dict{String, Any}
         nothing
     end
 
+    # Mechanism shift: did the governing element or its check family change?
+    crit_a = strip(a.critical_element)
+    crit_b = strip(b.critical_element)
+    mechanism_shift = if isempty(crit_a) || isempty(crit_b)
+        nothing
+    elseif crit_a == crit_b
+        "same_critical_element"
+    else
+        "critical_element_changed"
+    end
+
     out = Dict{String, Any}(
         "design_a" => Dict(
-            "index"          => index_a == 0 ? length(history) : index_a,
-            "geometry_hash"  => ha,
-            "all_pass"       => a.all_pass,
-            "critical_ratio" => a.critical_ratio,
-            "embodied_carbon" => a.embodied_carbon,
-            "n_failing"      => a.n_failing,
-            "source"         => a.source,
+            "index"            => index_a == 0 ? length(history) : index_a,
+            "geometry_hash"    => ha,
+            "all_pass"         => a.all_pass,
+            "critical_ratio"   => a.critical_ratio,
+            "critical_element" => crit_a,
+            "embodied_carbon"  => a.embodied_carbon,
+            "n_failing"        => a.n_failing,
+            "source"           => a.source,
         ),
         "design_b" => Dict(
-            "index"          => index_b == 0 ? length(history) : index_b,
-            "geometry_hash"  => hb,
-            "all_pass"       => b.all_pass,
-            "critical_ratio" => b.critical_ratio,
-            "embodied_carbon" => b.embodied_carbon,
-            "n_failing"      => b.n_failing,
-            "source"         => b.source,
+            "index"            => index_b == 0 ? length(history) : index_b,
+            "geometry_hash"    => hb,
+            "all_pass"         => b.all_pass,
+            "critical_ratio"   => b.critical_ratio,
+            "critical_element" => crit_b,
+            "embodied_carbon"  => b.embodied_carbon,
+            "n_failing"        => b.n_failing,
+            "source"           => b.source,
         ),
         "deltas" => Dict(
             "critical_ratio_delta"  => Δ_ratio,
@@ -962,6 +980,7 @@ function agent_compare_designs(index_a::Int, index_b::Int)::Dict{String, Any}
         "changed_params" => changed_params,
         "cross_geometry_comparison" => cross_geo,
     )
+    !isnothing(mechanism_shift) && (out["mechanism_shift"] = mechanism_shift)
     isnothing(note) || (out["comparison_note"] = note)
     return out
 end
@@ -1056,12 +1075,11 @@ The diagnose dict stores elements under `engineering.columns`, `engineering.beam
 `governing_check`, and `governing_ratio` fields.
 """
 function _extract_failing_checks(diag::Dict)::Vector{Dict{String, Any}}
-    eng = get(diag, "engineering", Dict())
     check_counts = Dict{String, Int}()
     check_worst = Dict{String, Float64}()
 
     for plural in ("columns", "beams", "slabs", "foundations")
-        elems = get(eng, plural, Any[])
+        elems = get(diag, plural, Any[])
         !(elems isa AbstractVector) && continue
         for elem in elems
             !(elem isa AbstractDict) && continue
@@ -1095,13 +1113,10 @@ function _rank_actions_by_failure(
 )::Vector{Dict{String, Any}}
     total_failing = sum(get(fc, "n_failing", 0) for fc in failing_checks; init=0)
 
-    # Normalize failing check names: diagnose uses "pm_interaction", lever map
-    # uses "P-M_interaction". Build a lookup keyed by lowercased underscored form.
-    _norm(s) = lowercase(replace(s, "-" => "_"))
     failing_by_norm = Dict{String, Dict{String, Any}}()
     for fc in failing_checks
         cn = get(fc, "check", "")
-        failing_by_norm[_norm(cn)] = fc
+        failing_by_norm[_lever_norm(cn)] = fc
     end
 
     param_scores = Dict{String, Dict{String, Any}}()
@@ -1111,7 +1126,7 @@ function _rank_actions_by_failure(
         provisions_involved = Dict{String, Any}[]
         for (check_name, lever_info) in LEVER_SURFACE_MAP
             params_list = get(lever_info, "parameters", String[])
-            fc = get(failing_by_norm, _norm(check_name), nothing)
+            fc = get(failing_by_norm, _lever_norm(check_name), nothing)
             if param in params_list && !isnothing(fc)
                 push!(addressed, check_name)
                 addressed_count += get(fc, "n_failing", 0)

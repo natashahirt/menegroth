@@ -572,7 +572,10 @@ function _diagnose_slab(
         ),
     ]
 
-    return Dict{String, Any}(
+    # Reinforcement summary — expose bar sizes, spacings, and provided/required ratios
+    rebar_summary = _slab_rebar_summary(sr, du)
+
+    d = Dict{String, Any}(
         "id"             => idx,
         "floor_type"     => string(slab_obj.floor_type),
         "position"       => string(slab_obj.position),
@@ -598,6 +601,35 @@ function _diagnose_slab(
         "scale_ref"      => _slab_thickness_scale_ref(h_disp, du),
         "ec_kgco2e"      => _round_or_nothing(_slab_ec_kgco2e(struc, idx); digits=1),
     )
+    !isempty(rebar_summary) && (d["reinforcement"] = rebar_summary)
+    return d
+end
+
+"""
+Summarize slab strip reinforcement: bar size, spacing, provided/required ratio.
+Returns a Dict with column_strip and middle_strip sub-dicts keyed by location.
+"""
+function _slab_rebar_summary(sr::SlabDesignResult, du::DisplayUnits)::Dict{String, Any}
+    out = Dict{String, Any}()
+    for (strip_name, strip_data) in [("column_strip", sr.column_strip), ("middle_strip", sr.middle_strip)]
+        isempty(strip_data) && continue
+        strip_out = Dict{String, Any}()
+        for (loc, rd) in strip_data
+            as_req = ustrip(u"mm^2", rd.As_required)
+            as_prov = ustrip(u"mm^2", rd.As_provided)
+            prov_req = as_req > 0 ? round(as_prov / as_req; digits=2) : Inf
+            spacing_disp = _to_display(du, :thickness, rd.spacing)
+            strip_out[string(loc)] = Dict{String, Any}(
+                "bar_size"       => rd.bar_size,
+                "spacing"        => _round_val(spacing_disp),
+                "spacing_unit"   => _thickness_unit_string(du),
+                "n_bars"         => rd.n_bars,
+                "As_provided_over_required" => _round_val(prov_req),
+            )
+        end
+        out[strip_name] = strip_out
+    end
+    return out
 end
 
 """

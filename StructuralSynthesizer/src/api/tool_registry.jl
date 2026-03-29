@@ -163,15 +163,40 @@ end
 # (prefixed with "geometry:") that require Grasshopper modification.
 
 const LEVER_SURFACE_MAP = Dict{String, Any}(
-    "punching_shear" => Dict(
+    # Slab punching (diagnose: "punching_shear_slab")
+    "punching_shear_slab" => Dict(
         "parameters" => ["punching_strategy", "column_concrete", "floor_type"],
         "geometry"   => ["column_size", "slab_span"],
         "direction"  => "grow_columns or reinforce_first reduces demand/capacity ratio; higher f'c increases Vc",
+    ),
+    # Column punching (diagnose: "punching_shear_col")
+    "punching_shear_col" => Dict(
+        "parameters" => ["punching_strategy", "column_catalog", "column_concrete", "floor_type"],
+        "geometry"   => ["column_size", "slab_span"],
+        "direction"  => "grow_columns increases critical perimeter; reinforce_first adds shear studs; higher f'c increases Vc",
+    ),
+    # Foundation punching (diagnose: "punching_shear_fdn")
+    "punching_shear_fdn" => Dict(
+        "parameters" => ["foundation_concrete", "foundation_options"],
+        "geometry"   => ["column_count"],
+        "direction"  => "thicker footing or higher f'c increases punching capacity",
+    ),
+    # Generic alias — matches any "punching_shear" query
+    "punching_shear" => Dict(
+        "parameters" => ["punching_strategy", "column_concrete", "floor_type", "column_catalog"],
+        "geometry"   => ["column_size", "slab_span"],
+        "direction"  => "grow_columns or reinforce_first reduces demand/capacity ratio; higher f'c increases Vc. See punching_shear_col / punching_shear_slab / punching_shear_fdn for element-specific levers.",
     ),
     "flexure" => Dict(
         "parameters" => ["deflection_limit", "floor_type", "concrete", "rebar"],
         "geometry"   => ["span_length"],
         "direction"  => "thicker slab or higher rebar grade increases capacity; shorter spans reduce demand",
+    ),
+    # Foundation flexure (diagnose: "flexure_fdn")
+    "flexure_fdn" => Dict(
+        "parameters" => ["foundation_concrete", "foundation_options"],
+        "geometry"   => ["column_count"],
+        "direction"  => "thicker footing or higher f'c increases flexural capacity",
     ),
     "deflection" => Dict(
         "parameters" => ["deflection_limit", "concrete", "floor_type"],
@@ -183,12 +208,14 @@ const LEVER_SURFACE_MAP = Dict{String, Any}(
         "geometry"   => ["span_length"],
         "direction"  => "thicker slab increases Vc; shorter spans reduce Vu",
     ),
-    "P-M_interaction" => Dict(
+    # Column P-M interaction (diagnose: "pm_interaction")
+    "pm_interaction" => Dict(
         "parameters" => ["column_catalog", "column_concrete", "column_type", "column_sizing_strategy"],
         "geometry"   => ["column_count", "story_height"],
         "direction"  => "larger catalog pool or higher f'c increases capacity; more columns redistribute load",
     ),
-    "axial_capacity" => Dict(
+    # Column axial (diagnose: "axial_compression")
+    "axial_compression" => Dict(
         "parameters" => ["column_catalog", "column_concrete", "column_type"],
         "geometry"   => ["column_count"],
         "direction"  => "upsizing catalog or increasing f'c increases φPn",
@@ -208,15 +235,16 @@ const LEVER_SURFACE_MAP = Dict{String, Any}(
         "geometry"   => ["unbraced_length"],
         "direction"  => "shorter unbraced lengths or stockier sections increase LTB capacity",
     ),
+    # Foundation bearing (diagnose: "bearing")
+    "bearing" => Dict(
+        "parameters" => ["foundation_soil", "foundation_concrete", "foundation_options"],
+        "geometry"   => ["column_count"],
+        "direction"  => "stiffer soil or larger footings increase bearing capacity",
+    ),
     "fire_protection" => Dict(
         "parameters" => ["fire_rating"],
         "geometry"   => [],
         "direction"  => "reducing fire_rating reduces required concrete cover and steel protection thickness",
-    ),
-    "foundation_bearing" => Dict(
-        "parameters" => ["foundation_soil", "foundation_concrete", "foundation_options"],
-        "geometry"   => ["column_count"],
-        "direction"  => "stiffer soil or larger footings increase bearing capacity",
     ),
     "convergence" => Dict(
         "parameters" => ["max_iterations", "mip_time_limit_sec", "column_sizing_strategy"],
@@ -230,13 +258,16 @@ const LEVER_SURFACE_MAP = Dict{String, Any}(
 
 Return the lever surface map, optionally filtered to a single check family.
 """
+"""Normalize a check name for lever map lookup: lowercase, strip dashes/spaces to underscores."""
+_lever_norm(s::String) = lowercase(replace(s, r"[-\s]+" => "_"))
+
 function get_lever_map(; check::Union{String, Nothing}=nothing)
     if isnothing(check)
         return LEVER_SURFACE_MAP
     end
-    key = lowercase(replace(check, " " => "_", "-" => "_"))
+    key = _lever_norm(check)
     for k in keys(LEVER_SURFACE_MAP)
-        if lowercase(k) == key
+        if _lever_norm(k) == key
             return Dict{String, Any}(k => LEVER_SURFACE_MAP[k])
         end
     end
@@ -302,11 +333,11 @@ const TOOL_REGISTRY = [
     ),
     Dict{String, Any}(
         "name"              => "get_diagnose",
-        "description"       => "High-resolution per-element diagnostics: governing checks, demand/capacity, code clauses, levers, EC, recommendations.",
+        "description"       => "High-resolution per-element diagnostics: governing checks, demand/capacity, code clauses, levers, EC, recommendations. Slabs include reinforcement detail (bar sizes, spacings, As_provided/As_required).",
         "phase"             => "diagnosis",
         "use_when"          => "You need detailed per-element structural data, or the user asks why something is sized a certain way. Prefer get_diagnose_summary first.",
         "args"              => Dict{String, Any}("units" => Dict("type" => "string", "enum" => ["imperial", "metric"], "optional" => true)),
-        "returns"           => "Three-layer Dict: engineering (elements), architectural (narrative), constraints (levers).",
+        "returns"           => "Three-layer Dict: columns, beams, slabs (with reinforcement), foundations, agent_summary, architectural, constraints.",
         "requires_design"   => true,
         "requires_geometry" => false,
     ),
@@ -321,6 +352,7 @@ const TOOL_REGISTRY = [
             "max_ratio"       => Dict("type" => "number", "optional" => true),
             "governing_check" => Dict("type" => "string", "optional" => true),
             "ok"              => Dict("type" => "boolean", "optional" => true),
+            "story"           => Dict("type" => "integer", "optional" => true, "description" => "Filter by story index (0=ground). Currently available for columns."),
         ),
         "returns"           => "Filtered subset of /diagnose elements matching criteria, with count.",
         "requires_design"   => true,
@@ -368,11 +400,11 @@ const TOOL_REGISTRY = [
     ),
     Dict{String, Any}(
         "name"              => "validate_params",
-        "description"       => "Check a params patch for compatibility violations before running.",
+        "description"       => "Check a params patch for compatibility violations before running. Returns field_guidance: which checks each parameter affects and its impact level.",
         "phase"             => "exploration",
         "use_when"          => "Before calling run_design — always validate first.",
         "args"              => Dict{String, Any}("params" => Dict("type" => "object", "required" => true)),
-        "returns"           => "Dict with ok (bool) and violations (array of strings).",
+        "returns"           => "Dict with ok (bool), violations (array), warnings (array), and field_guidance (per-param check impacts from lever map).",
         "requires_design"   => false,
         "requires_geometry" => false,
     ),
@@ -388,14 +420,14 @@ const TOOL_REGISTRY = [
     ),
     Dict{String, Any}(
         "name"              => "compare_designs",
-        "description"       => "Delta table between two designs from session history; includes geometry_hash per side and cross_geometry_comparison when the two runs used different models.",
+        "description"       => "Delta table between two designs from session history; includes geometry_hash per side, cross_geometry_comparison, critical_element per side, and mechanism_shift (whether the governing element changed).",
         "phase"             => "exploration",
         "use_when"          => "After run_design, to show what changed. Or the user asks to compare two runs (including across geometry changes — cite comparison_note when cross_geometry_comparison is true).",
         "args"              => Dict{String, Any}(
             "index_a" => Dict("type" => "integer", "required" => true, "description" => "History index (1-based) or 0 for current"),
             "index_b" => Dict("type" => "integer", "required" => true, "description" => "History index (1-based) or 0 for current"),
         ),
-        "returns"           => "Dict with design_a/design_b (incl. geometry_hash), deltas, changed_params, cross_geometry_comparison, optional comparison_note.",
+        "returns"           => "Dict with design_a/design_b (incl. geometry_hash, critical_element), deltas, changed_params, mechanism_shift, cross_geometry_comparison, optional comparison_note.",
         "requires_design"   => true,
         "requires_geometry" => false,
     ),
@@ -528,11 +560,11 @@ const TOOL_REGISTRY = [
     ),
     Dict{String, Any}(
         "name"              => "get_applicability",
-        "description"       => "DDM/EFM/FEA eligibility rules for the current geometry.",
+        "description"       => "DDM/EFM/FEA eligibility rules, plus geometry_evaluation (DDM prerequisite checks against actual panel spans and aspect ratios) when server has cached geometry.",
         "phase"             => "diagnosis",
-        "use_when"          => "Checking which analysis methods are valid for this building.",
+        "use_when"          => "Checking which analysis methods are valid for this building. When geometry is loaded, reports whether DDM prerequisites (aspect ratio, span differences) are met or violated.",
         "args"              => Dict{String, Any}(),
-        "returns"           => "Dict with rules per floor_type.",
+        "returns"           => "Dict with rules per floor_type and optional geometry_evaluation with per-DDM-check verdicts.",
         "requires_design"   => false,
         "requires_geometry" => false,
     ),

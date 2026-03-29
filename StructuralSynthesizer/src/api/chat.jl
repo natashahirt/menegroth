@@ -351,6 +351,18 @@ GEOMETRY VS PARAMETERS (mandatory):
   PARAMETERS (API): floor_type, materials, loads, method, sizing — CAN change via run_design.
   Geometric recommendations → tell user what to change in Grasshopper; do NOT call run_design with geometric keys.
 
+GEOMETRY REMEDIATION (mandatory when parameters are exhausted):
+  When suggest_next_action returns geometry_actions or parameter_headroom="exhausted",
+  present geometric changes FIRST with quantitative targets and Grasshopper instructions.
+  Only then discuss parameter adjustments as secondary measures.
+  Use predict_geometry_effect to explain the structural reasoning behind geometry suggestions.
+  When size_warnings appear in diagnose output with severity="critical", always surface them.
+
+GEOMETRY WHAT-IF REASONING:
+  When the user asks "what if I change the spans / add columns / increase story height?",
+  call predict_geometry_effect(variable, direction) to get scaling laws and economical ranges.
+  Present the structural trade-offs quantitatively — do not guess at scaling relationships.
+
 GEOMETRY HASH / STALE CACHE:
   If GEOMETRY_CONTEXT.geometry_stale is true, cached tools describe the last solved model, not current geometry.
   Explain directional effects qualitatively; do NOT invent numerical results for unsolved geometry.
@@ -410,7 +422,9 @@ OPENING ANALYSIS (your first response — CRITICAL):
      and explain WHY each choice fits this building. Not a menu of options — a reasoned starting point.
 
   4. WARNINGS — surface any ⚠ GEOMETRY WARNINGS with your assessment of severity and what
-     the user should consider.
+     the user should consider. After a design run, surface SIZE WARNINGS (excessive thickness,
+     self-weight dominance, catalog exhaustion) and connect them to geometry remediation when
+     parameter_headroom is "none" or "limited".
 
   5. QUESTIONS — only ask questions that you genuinely cannot answer from the geometry data.
      Do NOT ask about spans, story count, or floor system if the geometry already tells you.
@@ -490,6 +504,11 @@ OPENING ANALYSIS (your first response when results exist):
    With 28 ft spans and 12\" columns, the critical perimeter is too short for the tributary load.
    Options: switch punching_strategy to reinforce_first (adds shear studs), or grow columns to 16\"."
   NOT: "I can see your design has some failing elements. Let me look into this for you."
+
+  If get_diagnose_summary returns size_warnings, surface them prominently:
+  - Critical size warnings (parameter_headroom="none") → recommend geometry changes FIRST
+  - Use suggest_next_action to get geometry_actions with quantitative targets
+  - Use predict_geometry_effect to explain trade-offs of proposed geometry changes
 
 GEOMETRY AND IRREGULARITY:
 - Do not attribute failures to "irregular geometry" based only on beam span statistics or CV — use slab_panel_plan / plan_shape_classification (situation card geometry includes the same summary) and get_applicability, not span_stats alone.
@@ -1251,6 +1270,7 @@ function _chat_structured_geometry_stats(g::Dict{String, Any})::Dict{String, Any
     )
     !isempty(flags)       && (result["structural_flags"] = flags)
     !isempty(geo_warnings) && (result["warnings"] = geo_warnings)
+    result["unit_to_m"] = to_m
 
     return result
 end
@@ -1346,6 +1366,35 @@ function _geometry_digest_plaintext(stats::Dict{String, Any})::String
             push!(lines, "Footprint: $(fp["x"]) × $(fp["y"]) $u")
         end
         !isnothing(h) && push!(lines, "Total height: $h $u")
+    end
+
+    # Economical ranges from GEOMETRIC_SENSITIVITY_MAP
+    span_ranges = get(get(GEOMETRIC_SENSITIVITY_MAP, "span_length", Dict()), "typical_economical_ranges", nothing)
+    story_ranges = get(get(GEOMETRIC_SENSITIVITY_MAP, "story_height", Dict()), "typical_economical_ranges", nothing)
+    if !isnothing(span_ranges)
+        bs_all = get(get(stats, "beam_spans", Dict()), "all", nothing)
+        if !isnothing(bs_all)
+            max_span_m = get(bs_all, "max", 0.0)
+            # Convert to meters if needed for comparison
+            to_m = get(stats, "unit_to_m", 1.0)
+            max_m = max_span_m * to_m
+            if max_m > 9.1
+                push!(lines, "⚡ Economical span ranges: " * join(["$k: $v" for (k, v) in span_ranges], "; "))
+            end
+        end
+    end
+    if !isnothing(story_ranges)
+        story_data = get(stats, "stories", nothing)
+        if !isnothing(story_data)
+            sh = get(story_data, "story_heights", nothing)
+            if !isnothing(sh) && sh isa AbstractVector && !isempty(sh)
+                to_m = get(stats, "unit_to_m", 1.0)
+                max_h = maximum(sh) * to_m
+                if max_h > 4.5
+                    push!(lines, "⚡ Economical story height ranges: " * join(["$k: $v" for (k, v) in story_ranges], "; "))
+                end
+            end
+        end
     end
 
     # Flags
@@ -2878,6 +2927,13 @@ function _dispatch_chat_tool(tool::String, args::Dict{String, Any})::Dict{String
         isnothing(goal) && return Dict("error" => "missing_goal", "message" => "Provide a 'goal' argument (fix_failures, reduce_column_size, reduce_slab_thickness, reduce_ec).")
         return agent_suggest_next_action(design, string(goal))
 
+    elseif tool == "predict_geometry_effect"
+        variable  = get(args, "variable", nothing)
+        direction = get(args, "direction", nothing)
+        isnothing(variable) && return Dict("error" => "missing_variable", "message" => "Provide 'variable' (span_length, story_height, column_count, column_spacing_uniformity, plan_aspect_ratio).")
+        isnothing(direction) && return Dict("error" => "missing_direction", "message" => "Provide 'direction' (increase, decrease).")
+        return agent_predict_geometry_effect(string(variable), string(direction))
+
     elseif tool == "run_experiment"
         isnothing(design) && return Dict("error" => "no_design", "message" => "No design has been run yet.", "recovery_hint" => _NO_DESIGN_HINT)
         exp_type = get(args, "type", nothing)
@@ -3105,7 +3161,7 @@ function _dispatch_chat_tool(tool::String, args::Dict{String, Any})::Dict{String
                 "get_lever_map, get_implemented_provisions, get_provision_rationale, explain_field, " *
                 "get_result_summary, get_condensed_result, get_applicability, explain_trace_lookup, " *
                 "run_experiment, list_experiments, batch_experiments, " *
-                "validate_params, run_design, compare_designs, suggest_next_action, " *
+                "validate_params, run_design, compare_designs, suggest_next_action, predict_geometry_effect, " *
                 "record_insight, get_session_insights, " *
                 "narrate_element, narrate_comparison, clarify_user_intent.",
         )

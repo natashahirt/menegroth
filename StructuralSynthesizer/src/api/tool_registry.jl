@@ -253,6 +253,488 @@ const LEVER_SURFACE_MAP = Dict{String, Any}(
     ),
 )
 
+# ─── Element Reasonableness Thresholds ────────────────────────────────────────
+# Industry-norm thresholds for detecting abnormally large/small sized elements.
+# All dimension thresholds in inches; areas in ft².
+
+const ELEMENT_REASONABLENESS_THRESHOLDS = Dict{String, Any}(
+    "slab" => Dict{String, Any}(
+        "thickness_max_in"          => 16.0,   # flat plate practical limit
+        "thickness_extreme_in"      => 24.0,   # any slab type
+        "span_to_depth_min"         => 20,     # below → unreasonably thick for span
+        "self_weight_dominance"     => 0.6,    # self_weight / qu fraction
+        "deflection_ratio_marginal" => 0.95,   # nearly deflection-governed
+    ),
+    "column" => Dict{String, Any}(
+        "max_dimension_in" => 36.0,   # RC; unusual below ~20 stories
+        "min_dimension_in" => 10.0,   # practical minimum
+        "rho_g_high"       => 0.06,   # congested reinforcement (ACI max 0.08)
+        "rho_g_low"        => 0.015,  # near ACI minimum 0.01
+    ),
+    "beam" => Dict{String, Any}(
+        "depth_max_in"          => 36.0,   # deep beam territory
+        "span_to_depth_min"     => 12.0,   # unusually deep for span
+        "span_to_depth_max"     => 30.0,   # very slender
+        "weight_per_ft_extreme" => 200.0,  # plf; W36x256+ territory
+    ),
+    "foundation" => Dict{String, Any}(
+        "plan_area_max_ft2" => 100.0,  # per footing
+        "depth_max_in"      => 36.0,   # very thick footing
+    ),
+)
+
+# ─── Geometry Remediation Map ─────────────────────────────────────────────────
+# Maps failing check families → geometric root-cause thresholds and
+# specific Grasshopper geometry changes. Used by agent_suggest_next_action
+# when parameter headroom is exhausted.
+
+const GEOMETRY_REMEDIATION_MAP = Dict{String, Any}(
+    "deflection" => Dict{String, Any}(
+        "geometry_likely_governs_when" => Dict{String, Any}(
+            "condition"  => "max_span_m > 9.1 AND floor_type in (flat_plate, flat_slab)",
+            "max_span_m" => 9.1,
+            "rationale"  => "Deflection scales with L⁴/h³; beyond ~30 ft for flat plate, " *
+                            "even maximum practical slab depth (~16 in) cannot satisfy L/360.",
+        ),
+        "geometric_actions" => [
+            Dict{String, Any}(
+                "action"    => "reduce_column_spacing",
+                "target"    => "Max span ≤ 30 ft (9.1 m) for flat plate; ≤ 40 ft (12.2 m) for beam-and-slab",
+                "mechanism" => "Deflection ∝ L⁴: halving span reduces deflection 16×",
+                "grasshopper" => "Add intermediate columns along the long-span direction",
+            ),
+            Dict{String, Any}(
+                "action"    => "switch_floor_system",
+                "target"    => "One-way beam-and-slab or composite deck for spans > 30 ft",
+                "mechanism" => "Beams carry load to columns, reducing effective slab span",
+                "grasshopper" => "Change floor_type to beam_slab and add beam edges in the model",
+            ),
+        ],
+    ),
+    "punching_shear_slab" => Dict{String, Any}(
+        "geometry_likely_governs_when" => Dict{String, Any}(
+            "condition"  => "tributary_area_m2 > 51.1 (≈550 ft²) per column",
+            "max_trib_area_m2" => 51.1,
+            "rationale"  => "Punching demand = tributary_area × factored_load. " *
+                            "Large tributary areas create shear demands that exceed " *
+                            "what column growth or shear studs can provide.",
+        ),
+        "geometric_actions" => [
+            Dict{String, Any}(
+                "action"    => "reduce_column_spacing",
+                "target"    => "Column tributary area ≤ 400–500 ft² for flat plate",
+                "mechanism" => "Reduces shear demand per column linearly with tributary area",
+                "grasshopper" => "Add columns to subdivide large bays",
+            ),
+        ],
+    ),
+    "punching_shear_col" => Dict{String, Any}(
+        "geometry_likely_governs_when" => Dict{String, Any}(
+            "condition"  => "tributary_area_m2 > 51.1 (≈550 ft²) per column",
+            "max_trib_area_m2" => 51.1,
+            "rationale"  => "Same mechanism as slab punching — large tributary area drives " *
+                            "high shear demand at the column critical section.",
+        ),
+        "geometric_actions" => [
+            Dict{String, Any}(
+                "action"    => "reduce_column_spacing",
+                "target"    => "Column tributary area ≤ 400–500 ft² for flat plate",
+                "mechanism" => "Reduces shear demand per column linearly with tributary area",
+                "grasshopper" => "Add columns to subdivide large bays",
+            ),
+        ],
+    ),
+    "pm_interaction" => Dict{String, Any}(
+        "geometry_likely_governs_when" => Dict{String, Any}(
+            "condition"  => "story_height_m > 4.5 AND column_tributary_area large",
+            "max_story_height_m" => 4.5,
+            "rationale"  => "Tall stories amplify P-Δ moments (∝ H²); large tributary areas " *
+                            "create high axial loads. The combination can exhaust available sections.",
+        ),
+        "geometric_actions" => [
+            Dict{String, Any}(
+                "action"    => "reduce_story_height",
+                "target"    => "Story height ≤ 14 ft (4.3 m) for typical office floors",
+                "mechanism" => "Reduces unbraced length, lowering slenderness and P-Δ amplification",
+                "grasshopper" => "Adjust stories_z values to reduce floor-to-floor height",
+            ),
+            Dict{String, Any}(
+                "action"    => "add_columns",
+                "target"    => "Distribute axial load across more columns",
+                "mechanism" => "Reduces P per column, moving interaction point closer to origin",
+                "grasshopper" => "Add intermediate columns in the plan",
+            ),
+        ],
+    ),
+    "axial_compression" => Dict{String, Any}(
+        "geometry_likely_governs_when" => Dict{String, Any}(
+            "condition"  => "story_height_m > 4.5 OR very few columns for the floor area",
+            "max_story_height_m" => 4.5,
+            "rationale"  => "KL/r increases with story height → lower φPn from buckling. " *
+                            "Few columns mean each carries more tributary load.",
+        ),
+        "geometric_actions" => [
+            Dict{String, Any}(
+                "action"    => "reduce_story_height",
+                "target"    => "Story height ≤ 14 ft (4.3 m) for typical floors",
+                "mechanism" => "Shorter columns → lower KL/r → higher buckling capacity",
+                "grasshopper" => "Adjust stories_z values",
+            ),
+            Dict{String, Any}(
+                "action"    => "add_columns",
+                "target"    => "More columns to share axial load",
+                "mechanism" => "Axial load per column ∝ 1/n_columns",
+                "grasshopper" => "Add intermediate columns",
+            ),
+        ],
+    ),
+    "flexure" => Dict{String, Any}(
+        "geometry_likely_governs_when" => Dict{String, Any}(
+            "condition"  => "max_span_m > 9.1 for slab flexure; > 15 for beam flexure",
+            "max_span_m" => 9.1,
+            "rationale"  => "Moment ∝ wL²/8. Beyond ~30 ft for flat plates, " *
+                            "flexural demands require very thick slabs.",
+        ),
+        "geometric_actions" => [
+            Dict{String, Any}(
+                "action"    => "reduce_column_spacing",
+                "target"    => "Max span ≤ 30 ft for flat plate; ≤ 45 ft for beams",
+                "mechanism" => "Moment ∝ L²: halving span reduces moment by 4×",
+                "grasshopper" => "Add intermediate columns or supports",
+            ),
+        ],
+    ),
+    "one_way_shear" => Dict{String, Any}(
+        "geometry_likely_governs_when" => Dict{String, Any}(
+            "condition"  => "max_span_m > 9.1 for flat plate",
+            "max_span_m" => 9.1,
+            "rationale"  => "Shear demand ∝ wL/2. Long spans with thick (heavy) slabs " *
+                            "compound the problem through self-weight.",
+        ),
+        "geometric_actions" => [
+            Dict{String, Any}(
+                "action"    => "reduce_column_spacing",
+                "target"    => "Max span ≤ 30 ft for flat plate",
+                "mechanism" => "Shorter span reduces both load path and slab self-weight",
+                "grasshopper" => "Add intermediate columns",
+            ),
+        ],
+    ),
+    "bearing" => Dict{String, Any}(
+        "geometry_likely_governs_when" => Dict{String, Any}(
+            "condition"  => "high column reaction (many stories or large tributary area)",
+            "rationale"  => "Bearing pressure = reaction / footing_area. High reactions " *
+                            "from large tributary areas require very large footings.",
+        ),
+        "geometric_actions" => [
+            Dict{String, Any}(
+                "action"    => "add_columns",
+                "target"    => "More columns to distribute total gravity load",
+                "mechanism" => "Reaction per column ∝ 1/n_columns; smaller footings needed",
+                "grasshopper" => "Add columns — each new column gets its own smaller footing",
+            ),
+        ],
+    ),
+    "combined_forces" => Dict{String, Any}(
+        "geometry_likely_governs_when" => Dict{String, Any}(
+            "condition"  => "max_span_m > 15 for steel beams",
+            "max_span_m" => 15.0,
+            "rationale"  => "Long unbraced beams face combined flexure + axial + LTB interaction.",
+        ),
+        "geometric_actions" => [
+            Dict{String, Any}(
+                "action"    => "reduce_span",
+                "target"    => "Beam spans ≤ 45 ft for most steel beams",
+                "mechanism" => "Shorter spans reduce moment and improve LTB resistance",
+                "grasshopper" => "Add intermediate columns or secondary beams",
+            ),
+        ],
+    ),
+    "LTB" => Dict{String, Any}(
+        "geometry_likely_governs_when" => Dict{String, Any}(
+            "condition"  => "unbraced_length > 20 ft (6.1 m)",
+            "max_unbraced_m" => 6.1,
+            "rationale"  => "Lateral-torsional buckling capacity degrades rapidly " *
+                            "with increasing unbraced length.",
+        ),
+        "geometric_actions" => [
+            Dict{String, Any}(
+                "action"    => "add_bracing_points",
+                "target"    => "Unbraced length ≤ Lp for the chosen section",
+                "mechanism" => "Shorter unbraced segments stay in the plastic LTB plateau",
+                "grasshopper" => "Add intermediate supports, secondary framing, or reduce beam span",
+            ),
+        ],
+    ),
+)
+
+# ─── Geometric Sensitivity Map ────────────────────────────────────────────────
+# Maps geometric variables → structural effects with scaling laws and
+# economical ranges. Used by predict_geometry_effect tool.
+
+const GEOMETRIC_SENSITIVITY_MAP = Dict{String, Any}(
+    "span_length" => Dict{String, Any}(
+        "affects" => [
+            Dict{String, Any}(
+                "check"        => "deflection",
+                "relationship" => "L⁴",
+                "direction"    => "increase_span → much_worse",
+                "explanation"  => "Deflection ∝ wL⁴/(EI). Doubling span increases deflection 16×.",
+            ),
+            Dict{String, Any}(
+                "check"        => "flexure",
+                "relationship" => "L²",
+                "direction"    => "increase_span → worse",
+                "explanation"  => "Moment ∝ wL²/8. Doubling span quadruples bending moment.",
+            ),
+            Dict{String, Any}(
+                "check"        => "punching_shear",
+                "relationship" => "L²",
+                "direction"    => "increase_span → worse",
+                "explanation"  => "Tributary area ∝ L². More area per column = more shear demand.",
+            ),
+            Dict{String, Any}(
+                "check"        => "slab_thickness",
+                "relationship" => "L",
+                "direction"    => "increase_span → thicker",
+                "explanation"  => "ACI minimum h ≈ L/33 for flat plate. 48 ft → 17.5 in minimum.",
+            ),
+            Dict{String, Any}(
+                "check"        => "self_weight_spiral",
+                "relationship" => "L⁵ (effective)",
+                "direction"    => "increase_span → nonlinear_worsening",
+                "explanation"  => "Thicker slab → heavier → needs even thicker slab. " *
+                                  "Beyond ~35 ft flat plate, this positive feedback loop " *
+                                  "makes the system increasingly uneconomical.",
+            ),
+        ],
+        "typical_economical_ranges" => Dict{String, Any}(
+            "flat_plate"      => "20–30 ft (6–9 m)",
+            "flat_slab"       => "25–35 ft (7.5–10.5 m)",
+            "beam_slab"       => "25–45 ft (7.5–14 m)",
+            "steel_composite" => "30–50 ft (9–15 m)",
+            "PT_slab"         => "30–45 ft (9–14 m)",
+        ),
+        "trade_offs" => "Longer spans give more open floor space but increase member sizes, " *
+                        "self-weight, and cost. Beyond the economical range, cost escalates nonlinearly.",
+    ),
+    "story_height" => Dict{String, Any}(
+        "affects" => [
+            Dict{String, Any}(
+                "check"        => "pm_interaction",
+                "relationship" => "H²",
+                "direction"    => "increase_height → worse",
+                "explanation"  => "P-Δ amplification ∝ H². Taller columns buckle more easily " *
+                                  "and develop larger second-order moments.",
+            ),
+            Dict{String, Any}(
+                "check"        => "axial_compression",
+                "relationship" => "H²",
+                "direction"    => "increase_height → worse",
+                "explanation"  => "KL/r increases → lower φPn from flexural buckling.",
+            ),
+            Dict{String, Any}(
+                "check"        => "column_size",
+                "relationship" => "H",
+                "direction"    => "increase_height → larger_columns",
+                "explanation"  => "Longer columns need stockier sections for stability.",
+            ),
+        ],
+        "typical_economical_ranges" => Dict{String, Any}(
+            "office"      => "12–14 ft (3.6–4.3 m)",
+            "retail"      => "14–18 ft (4.3–5.5 m)",
+            "residential" => "9–11 ft (2.7–3.4 m)",
+            "parking"     => "10–12 ft (3.0–3.6 m)",
+        ),
+        "trade_offs" => "Taller stories improve daylight and flexibility but increase " *
+                        "column slenderness, cladding area, and vertical MEP runs.",
+    ),
+    "column_count" => Dict{String, Any}(
+        "affects" => [
+            Dict{String, Any}(
+                "check"        => "punching_shear",
+                "relationship" => "1/n",
+                "direction"    => "add_columns → better",
+                "explanation"  => "More columns = smaller tributary area = less shear per column.",
+            ),
+            Dict{String, Any}(
+                "check"        => "axial_compression",
+                "relationship" => "1/n",
+                "direction"    => "add_columns → better",
+                "explanation"  => "Axial load per column decreases linearly with column count.",
+            ),
+            Dict{String, Any}(
+                "check"        => "foundation_bearing",
+                "relationship" => "1/n",
+                "direction"    => "add_columns → better",
+                "explanation"  => "Each footing carries less load → smaller footings.",
+            ),
+            Dict{String, Any}(
+                "check"        => "cost_and_usability",
+                "relationship" => "n",
+                "direction"    => "add_columns → worse",
+                "explanation"  => "More columns = more formwork, more footings, less open floor space.",
+            ),
+        ],
+        "typical_economical_ranges" => Dict{String, Any}(
+            "open_office" => "25–35 ft column spacing (fewer columns)",
+            "residential" => "20–28 ft column spacing",
+            "parking"     => "28–35 ft × 55–60 ft bays",
+        ),
+        "trade_offs" => "Adding columns improves structural efficiency but reduces usable " *
+                        "open area and increases foundations. Balance against architectural program.",
+    ),
+    "column_spacing_uniformity" => Dict{String, Any}(
+        "affects" => [
+            Dict{String, Any}(
+                "check"        => "DDM_applicability",
+                "relationship" => "ratio",
+                "direction"    => "unequal_spacing → method_restriction",
+                "explanation"  => "ACI DDM requires successive spans differ by ≤ 1/3 of longer span. " *
+                                  "Irregular spacing may force EFM or FEA.",
+            ),
+            Dict{String, Any}(
+                "check"        => "slab_reinforcement",
+                "relationship" => "nonlinear",
+                "direction"    => "unequal_spacing → more_complex",
+                "explanation"  => "Unequal spans create unbalanced moments at columns, " *
+                                  "increasing reinforcement at wide-side supports.",
+            ),
+        ],
+        "typical_economical_ranges" => Dict{String, Any}(
+            "general" => "Successive spans within 1/3 ratio for DDM; within 20% for best economy",
+        ),
+        "trade_offs" => "Regular grids are cheaper and easier to build. Irregular grids " *
+                        "suit complex programs but complicate analysis and increase rebar.",
+    ),
+    "plan_aspect_ratio" => Dict{String, Any}(
+        "affects" => [
+            Dict{String, Any}(
+                "check"        => "two_way_slab_efficiency",
+                "relationship" => "ratio",
+                "direction"    => "increase_ratio → one_way_behavior",
+                "explanation"  => "Panel aspect ratios > 2:1 → slab acts as one-way, " *
+                                  "negating two-way slab benefits. DDM limited to ≤ 2:1.",
+            ),
+            Dict{String, Any}(
+                "check"        => "building_drift",
+                "relationship" => "L/B",
+                "direction"    => "increase_ratio → worse_lateral",
+                "explanation"  => "Very elongated plans are more sensitive to lateral loads " *
+                                  "in the narrow direction (outside this solver's gravity scope).",
+            ),
+        ],
+        "typical_economical_ranges" => Dict{String, Any}(
+            "flat_plate_panel" => "Panel long/short ≤ 2:1 for DDM; ≤ 3:1 for EFM",
+            "building_plan"    => "L/B ≤ 3:1 for gravity-only without expansion joints",
+        ),
+        "trade_offs" => "Elongated panels require more reinforcement in the short direction " *
+                        "and may need one-way slab treatment.",
+    ),
+)
+
+# ─── Helper: lookup functions used by agent_tools.jl ─────────────────────────
+
+"""
+    get_system_dependencies(floor_type::String) -> Union{Dict, Nothing}
+
+Return system-level dependencies for a floor type (e.g., which column and beam
+types are compatible). Returns `nothing` for unknown floor types.
+"""
+function get_system_dependencies(floor_type::String)::Union{Dict{String, Any}, Nothing}
+    deps = Dict{String, Any}(
+        "flat_plate" => Dict{String, Any}(
+            "compatible_columns" => ["concrete_rectangular", "concrete_circular"],
+            "compatible_beams"   => [],
+            "notes" => "Flat plate: no beams; columns must support slab punching directly.",
+        ),
+        "flat_slab" => Dict{String, Any}(
+            "compatible_columns" => ["concrete_rectangular", "concrete_circular"],
+            "compatible_beams"   => [],
+            "notes" => "Flat slab with drop panels: similar to flat plate but drop panels increase punching capacity.",
+        ),
+        "beam_slab" => Dict{String, Any}(
+            "compatible_columns" => ["concrete_rectangular", "concrete_circular", "steel_wide_flange", "steel_hss"],
+            "compatible_beams"   => ["concrete", "steel_wide_flange", "steel_hss"],
+            "notes" => "Beam-and-slab: beams carry slab load to columns.",
+        ),
+        "one_way" => Dict{String, Any}(
+            "compatible_columns" => ["concrete_rectangular", "concrete_circular", "steel_wide_flange", "steel_hss"],
+            "compatible_beams"   => ["concrete", "steel_wide_flange", "steel_hss"],
+            "notes" => "One-way slab-and-beam: slab spans one direction to beams.",
+        ),
+    )
+    return get(deps, floor_type, nothing)
+end
+
+"""
+    get_provisions_for_check(check_name::String) -> Vector{Dict{String, Any}}
+
+Return implemented code provisions related to a failing check family.
+Cross-references `IMPLEMENTED_PROVISIONS` using known check→provision mappings.
+"""
+function get_provisions_for_check(check_name::String)::Vector{Dict{String, Any}}
+    check_to_codes = Dict{String, Vector{Tuple{String, Vector{String}}}}(
+        "deflection"          => [("ACI_318", ["8.3.1", "9.5"])],
+        "punching_shear_slab" => [("ACI_318", ["22.6.5", "8.4.2.3"])],
+        "punching_shear_col"  => [("ACI_318", ["22.6.5"])],
+        "punching_shear_fdn"  => [("ACI_318", ["22.6.5"])],
+        "flexure"             => [("ACI_318", ["9.5", "9.3.2"]), ("AISC_360_16", ["F2", "F3", "F7", "F8"])],
+        "shear"               => [("ACI_318", ["9.3.2"]), ("AISC_360_16", ["G2", "G4", "G5"])],
+        "one_way_shear"       => [("ACI_318", ["9.3.2"])],
+        "pm_interaction"      => [("AISC_360_16", ["H1", "H1.1"]), ("ACI_318", ["6.6"])],
+        "axial_compression"   => [("AISC_360_16", ["E3", "E7"]), ("ACI_318", ["6.6"])],
+        "bearing"             => [],
+        "LTB"                 => [("AISC_360_16", ["F2", "F3", "F4"])],
+        "combined_forces"     => [("AISC_360_16", ["H1"])],
+    )
+    norm = _lever_norm(check_name)
+    code_refs = get(check_to_codes, norm, nothing)
+    isnothing(code_refs) && return Dict{String, Any}[]
+
+    result = Dict{String, Any}[]
+    for (code, sections) in code_refs
+        provs = get(IMPLEMENTED_PROVISIONS, code, [])
+        for prov in provs
+            if get(prov, "section", "") in sections
+                push!(result, prov)
+            end
+        end
+    end
+    return result
+end
+
+"""
+    get_code_rationale(parameter::String) -> Union{String, Nothing}
+
+Return a brief code-based rationale for why a parameter matters structurally.
+"""
+function get_code_rationale(parameter::String)::Union{String, Nothing}
+    rationales = Dict{String, String}(
+        "punching_strategy"    => "ACI 318 §22.6: punching shear at slab-column joints. " *
+                                  "grow_columns increases critical perimeter b₀; " *
+                                  "reinforce_first adds headed shear studs per ACI 318 §22.6.8.",
+        "deflection_limit"     => "ACI 318 §24.2: immediate + long-term deflection limits. " *
+                                  "L/360 for floors supporting nonstructural elements; " *
+                                  "L/240 for roofs or floors without sensitive attachments.",
+        "column_catalog"       => "AISC 360 Ch. E/H or ACI 318 §22.4: larger sections increase " *
+                                  "axial and flexural capacity; expanding the catalog pool gives " *
+                                  "the optimizer more feasible options.",
+        "beam_catalog"         => "AISC 360 Ch. F/G: deeper or heavier beams increase moment " *
+                                  "and shear capacity.",
+        "column_concrete"      => "ACI 318 §22.2: higher f'c increases Ec (stiffness) and φPn. " *
+                                  "Reduces column size for a given load.",
+        "floor_type"           => "Choice of floor system (flat plate, flat slab, beam-slab) " *
+                                  "fundamentally changes load paths, analysis method eligibility, " *
+                                  "and economical span ranges.",
+        "fire_rating"          => "ACI 216.1 / AISC DG19: higher fire ratings require thicker " *
+                                  "concrete cover or added fire protection, increasing member sizes.",
+        "foundation_soil"      => "Allowable bearing pressure determines footing size. " *
+                                  "Stiffer soils allow smaller footings.",
+    )
+    return get(rationales, parameter, nothing)
+end
+
 _lever_norm(s::String) = lowercase(replace(s, r"[-\s]+" => "_"))
 
 """
@@ -434,12 +916,25 @@ const TOOL_REGISTRY = [
     ),
     Dict{String, Any}(
         "name"              => "suggest_next_action",
-        "description"       => "Ontology-informed ranked parameter changes for a design goal. Analyzes runtime failures, ranks actions by how many failing checks each parameter addresses, and attaches code rationale.",
+        "description"       => "Ontology-informed ranked parameter AND geometry changes for a design goal. Analyzes runtime failures, evaluates whether geometry is the bottleneck (parameter_headroom=exhausted), and returns geometry_actions (Grasshopper changes) when applicable.",
         "phase"             => "exploration",
-        "use_when"          => "The user asks what to change, or you need a starting point for optimization. More informative than raw lever_impacts because it knows which checks are actually failing.",
+        "use_when"          => "The user asks what to change, or you need a starting point for optimization. When geometry_actions is present, recommend those FIRST — parameter changes cannot fix geometry bottlenecks.",
         "args"              => Dict{String, Any}("goal" => Dict("type" => "string", "required" => true, "enum" => ["fix_failures", "reduce_column_size", "reduce_slab_thickness", "reduce_ec"])),
-        "returns"           => "Dict with ranked_actions (sorted by failure coverage), enriched lever_impacts (with rationale), failing_checks (frequency + worst ratio), system_context, recommendations.",
+        "returns"           => "Dict with geometry_actions (when geometry is the bottleneck — Grasshopper changes with targets and mechanisms), parameter_headroom (exhausted/available), ranked_actions (parameter changes sorted by failure coverage), failing_checks, system_context.",
         "requires_design"   => true,
+        "requires_geometry" => false,
+    ),
+    Dict{String, Any}(
+        "name"              => "predict_geometry_effect",
+        "description"       => "Predict structural effects of changing a geometric variable (span_length, story_height, column_count, column_spacing_uniformity, plan_aspect_ratio). Returns affected checks with scaling laws, economical ranges by floor system, and trade-offs.",
+        "phase"             => "exploration",
+        "use_when"          => "The user asks 'what if I change the spans/add columns/increase story height?' or you need to explain why a geometric change would help or hurt.",
+        "args"              => Dict{String, Any}(
+            "variable"  => Dict("type" => "string", "required" => true, "enum" => ["span_length", "story_height", "column_count", "column_spacing_uniformity", "plan_aspect_ratio"]),
+            "direction" => Dict("type" => "string", "required" => true, "enum" => ["increase", "decrease"]),
+        ),
+        "returns"           => "Dict with affected_checks (scaling relationship + direction for each check), economical_ranges (by floor system), trade_offs.",
+        "requires_design"   => false,
         "requires_geometry" => false,
     ),
     Dict{String, Any}(

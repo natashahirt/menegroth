@@ -7,8 +7,7 @@
 # Architecture: three layers in one response
 #   1. Engineering layer — per-element checks with demand/capacity pairs,
 #      governing_check, code clause, headroom, and lever parameters.
-#   2. Architectural layer — goal-ranked recommendations, system narrative,
-#      scale references (physical intuition anchors), and element positions.
+#   2. Architectural layer — goal-ranked recommendations and system narrative.
 #   3. Constraint layer — fixed-by-geometry vs. mutable parameters, and
 #      analytical lever-impact estimates for available alternatives.
 # =============================================================================
@@ -173,50 +172,6 @@ without violating minimum requirements.
 """
 _governing_mode(max_ratio::Float64) =
     (1.0 - max_ratio) > 0.40 ? "minimum_governed" : "structural_demand"
-
-# ─── Scale references ─────────────────────────────────────────────────────────
-
-"""
-Return a plain-English physical scale reference for a column cross-section.
-Dimensions are in display units (inches for imperial, mm for metric).
-"""
-function _column_scale_ref(c1_disp::Float64, c2_disp::Float64, du::DisplayUnits)
-    is_imp = _is_imperial(du)
-    avg    = (c1_disp + c2_disp) / 2
-    # Convert to approximate inches for the lookup (display units: in or mm)
-    avg_in = is_imp ? avg : avg / 25.4
-    if avg_in <= 10
-        "narrower than a standard hardcover book"
-    elseif avg_in <= 14
-        "about the width of a laptop"
-    elseif avg_in <= 18
-        "about the depth of a kitchen counter"
-    elseif avg_in <= 24
-        "about the width of a standard door panel"
-    elseif avg_in <= 30
-        "about the width of a compact refrigerator"
-    else
-        "about the width of a compact car"
-    end
-end
-
-"""
-Return a plain-English physical scale reference for a slab thickness.
-"""
-function _slab_thickness_scale_ref(h_disp::Float64, du::DisplayUnits)
-    h_in = _is_imperial(du) ? h_disp : h_disp / 25.4
-    if h_in < 6
-        "thinner than a hardcover book"
-    elseif h_in < 8
-        "about as thick as a hardcover reference book"
-    elseif h_in < 10
-        "about as thick as two stacked hardcover books"
-    elseif h_in < 12
-        "about as thick as a standard briefcase"
-    else
-        "thicker than a standard carry-on bag"
-    end
-end
 
 # ─── Analysis method / floor option codes ────────────────────────────────────
 
@@ -441,7 +396,6 @@ function _diagnose_column(
         "checks"         => checks,
         "levers"         => get(LEVER_MAP, governing, String[]),
         "limit_state_description" => get(LIMIT_STATE_DESCRIPTIONS, governing, ""),
-        "scale_ref"      => _column_scale_ref(c1_disp, c2_disp, du),
         "ec_kgco2e"      => _round_or_nothing(_col_ec_kgco2e(struc, idx); digits=1),
     )
 end
@@ -598,7 +552,6 @@ function _diagnose_slab(
         "checks"         => checks,
         "levers"         => get(LEVER_MAP, governing, String[]),
         "limit_state_description" => get(LIMIT_STATE_DESCRIPTIONS, governing, ""),
-        "scale_ref"      => _slab_thickness_scale_ref(h_disp, du),
         "ec_kgco2e"      => _round_or_nothing(_slab_ec_kgco2e(struc, idx); digits=1),
     )
     !isempty(rebar_summary) && (d["reinforcement"] = rebar_summary)
@@ -863,8 +816,7 @@ end
 # ─── Architectural layer ──────────────────────────────────────────────────────
 
 """
-Build the architectural layer: system narrative, scale references for the
-largest element of each type, and goal-ranked recommendations.
+Build the architectural layer: system narrative and goal-ranked recommendations.
 """
 function _diagnose_architectural(
     design::BuildingDesign,
@@ -900,26 +852,11 @@ function _diagnose_architectural(
                 "There $(n_slabs == 1 ? "is" : "are") $n_slabs slab panel$(n_slabs == 1 ? "" : "s")" *
                 " and $n_fdns foundation$(n_fdns == 1 ? "" : "s")."
 
-    # Physical scale references for the widest column and thickest slab
-    col_scale_ref  = isempty(col_dicts)  ? nothing : begin
-        worst = col_dicts[argmax(get(d, "governing_ratio", 0.0) for d in col_dicts)]
-        Dict{String, Any}("element_id" => worst["id"], "reference" => worst["scale_ref"])
-    end
-    slab_scale_ref = isempty(slab_dicts) ? nothing : begin
-        thickest = slab_dicts[argmax(get(d, "thickness", 0.0) for d in slab_dicts)]
-        Dict{String, Any}("element_id" => thickest["id"], "reference" => thickest["scale_ref"])
-    end
-
-    scale_refs = Dict{String, Any}()
-    !isnothing(col_scale_ref)  && (scale_refs["column_worst"]   = col_scale_ref)
-    !isnothing(slab_scale_ref) && (scale_refs["slab_thickest"]  = slab_scale_ref)
-
     # Goal-ranked recommendations
     goal_recs = _build_goal_recommendations(design, params, du, col_dicts, beam_dicts, slab_dicts, fdn_dicts)
 
     return Dict{String, Any}(
         "system_narrative"  => narrative,
-        "scale_references"  => scale_refs,
         "goal_recommendations" => goal_recs,
     )
 end
@@ -1160,6 +1097,235 @@ function _diagnose_lever_impacts(
     return impacts
 end
 
+# ─── Element Reasonableness Checks ────────────────────────────────────────────
+
+"""
+    _element_reasonableness_checks(design, du, col_dicts, beam_dicts, slab_dicts, fdn_dicts)
+
+Compare sized element dimensions against industry-norm thresholds from
+`ELEMENT_REASONABLENESS_THRESHOLDS`. Returns a `Vector{Dict{String,Any}}`
+of warnings sorted by severity (critical first).
+"""
+function _element_reasonableness_checks(
+    design::BuildingDesign,
+    du::DisplayUnits,
+    col_dicts::Vector,
+    beam_dicts::Vector,
+    slab_dicts::Vector,
+    fdn_dicts::Vector,
+)::Vector{Dict{String, Any}}
+    warnings = Dict{String, Any}[]
+    is_imp = _is_imperial(du)
+    t = ELEMENT_REASONABLENESS_THRESHOLDS
+
+    slab_t = t["slab"]
+    col_t  = t["column"]
+    beam_t = t["beam"]
+    fdn_t  = t["foundation"]
+
+    # ── Slab checks ──────────────────────────────────────────────────────
+    for sd in slab_dicts
+        h_disp = get(sd, "thickness", 0.0)
+        h_in   = is_imp ? h_disp : h_disp / 25.4
+
+        if h_in > slab_t["thickness_extreme_in"]
+            push!(warnings, Dict{String, Any}(
+                "element_type" => "slab", "element_id" => get(sd, "id", "?"),
+                "check" => "extreme_thickness", "severity" => "critical",
+                "value" => _round_val(h_in), "threshold" => slab_t["thickness_extreme_in"], "unit" => "in",
+                "interpretation" => "Slab thickness $(round(h_in; digits=1)) in is extreme " *
+                    "(> $(slab_t["thickness_extreme_in"]) in). This almost certainly indicates " *
+                    "spans are too long for any slab system. Reduce column spacing in Grasshopper.",
+                "parameter_headroom" => "none",
+            ))
+        elseif h_in > slab_t["thickness_max_in"]
+            push!(warnings, Dict{String, Any}(
+                "element_type" => "slab", "element_id" => get(sd, "id", "?"),
+                "check" => "excessive_thickness", "severity" => "warning",
+                "value" => _round_val(h_in), "threshold" => slab_t["thickness_max_in"], "unit" => "in",
+                "interpretation" => "Slab thickness $(round(h_in; digits=1)) in exceeds typical " *
+                    "flat plate limit (~$(slab_t["thickness_max_in"]) in). Consider reducing spans " *
+                    "or switching to a beam-and-slab system.",
+                "parameter_headroom" => "limited",
+            ))
+        end
+
+        defl_ratio = get(sd, "deflection_ratio", 0.0)
+        if defl_ratio > slab_t["deflection_ratio_marginal"]
+            push!(warnings, Dict{String, Any}(
+                "element_type" => "slab", "element_id" => get(sd, "id", "?"),
+                "check" => "deflection_marginal", "severity" => "warning",
+                "value" => _round_val(defl_ratio), "threshold" => slab_t["deflection_ratio_marginal"], "unit" => "ratio",
+                "interpretation" => "Deflection ratio $(round(defl_ratio; digits=2)) is near " *
+                    "the limit — almost no margin. Deeper slab would add self-weight, " *
+                    "creating diminishing returns.",
+                "parameter_headroom" => "limited",
+            ))
+        end
+    end
+
+    # Self-weight dominance: check from the design result objects directly
+    for (idx, sr) in enumerate(design.slabs)
+        qu_val  = sr.qu
+        sw_val  = sr.self_weight
+        (isnothing(qu_val) || isnothing(sw_val)) && continue
+        qu_raw = Float64(ustrip(u"kPa", qu_val))
+        sw_raw = Float64(ustrip(u"kPa", sw_val))
+        qu_raw <= 0 && continue
+        sw_frac = sw_raw / qu_raw
+        if sw_frac > slab_t["self_weight_dominance"]
+            push!(warnings, Dict{String, Any}(
+                "element_type" => "slab", "element_id" => "slab_$idx",
+                "check" => "self_weight_dominance", "severity" => "critical",
+                "value" => _round_val(sw_frac; digits=2), "threshold" => slab_t["self_weight_dominance"], "unit" => "fraction",
+                "interpretation" => "Slab self-weight is $(round(sw_frac * 100; digits=0))% of " *
+                    "factored load — the slab is mostly carrying itself. " *
+                    "This is a classic sign of spans being too long for the floor system.",
+                "parameter_headroom" => "none",
+            ))
+        end
+    end
+
+    # ── Column checks ────────────────────────────────────────────────────
+    for cd in col_dicts
+        c1_disp = get(cd, "c1", 0.0)
+        c2_disp = get(cd, "c2", 0.0)
+        c_max_disp = max(c1_disp, c2_disp)
+        c_min_disp = min(c1_disp, c2_disp)
+        c_max_in = is_imp ? c_max_disp : c_max_disp / 25.4
+        c_min_in = is_imp ? c_min_disp : c_min_disp / 25.4
+
+        if c_max_in > col_t["max_dimension_in"]
+            push!(warnings, Dict{String, Any}(
+                "element_type" => "column", "element_id" => get(cd, "id", "?"),
+                "check" => "oversized_column", "severity" => "warning",
+                "value" => _round_val(c_max_in), "threshold" => col_t["max_dimension_in"], "unit" => "in",
+                "interpretation" => "Column dimension $(round(c_max_in; digits=1)) in exceeds " *
+                    "$(col_t["max_dimension_in"]) in — unusual for buildings under ~20 stories. " *
+                    "Consider adding columns to redistribute load.",
+                "parameter_headroom" => "limited",
+            ))
+        end
+
+        if c_min_in > 0 && c_min_in < col_t["min_dimension_in"]
+            push!(warnings, Dict{String, Any}(
+                "element_type" => "column", "element_id" => get(cd, "id", "?"),
+                "check" => "undersized_column", "severity" => "warning",
+                "value" => _round_val(c_min_in), "threshold" => col_t["min_dimension_in"], "unit" => "in",
+                "interpretation" => "Column dimension $(round(c_min_in; digits=1)) in is below " *
+                    "practical minimum (~$(col_t["min_dimension_in"]) in).",
+                "parameter_headroom" => "available",
+            ))
+        end
+
+        rho_g = get(cd, "rho_g", 0.0)
+        if rho_g > col_t["rho_g_high"]
+            push!(warnings, Dict{String, Any}(
+                "element_type" => "column", "element_id" => get(cd, "id", "?"),
+                "check" => "congested_reinforcement", "severity" => "warning",
+                "value" => _round_val(rho_g; digits=4), "threshold" => col_t["rho_g_high"], "unit" => "ratio",
+                "interpretation" => "Reinforcement ratio $(round(rho_g; digits=3)) exceeds " *
+                    "$(col_t["rho_g_high"]) — congested rebar makes construction difficult. " *
+                    "ACI max is 0.08. Consider larger column section or higher f'c.",
+                "parameter_headroom" => "limited",
+            ))
+        end
+    end
+
+    # ── Beam checks ──────────────────────────────────────────────────────
+    for bd in beam_dicts
+        section = get(bd, "section", "")
+        member_len = get(bd, "member_length", 0.0)
+        len_in = is_imp ? member_len * 12.0 : member_len / 25.4
+
+        # Extract depth from W-shape section name (e.g. "W24x94" → 24 in)
+        m = match(r"W(\d+)", section)
+        if !isnothing(m)
+            depth_in = parse(Float64, m.captures[1])
+
+            if depth_in > beam_t["depth_max_in"]
+                push!(warnings, Dict{String, Any}(
+                    "element_type" => "beam", "element_id" => get(bd, "id", "?"),
+                    "check" => "very_deep_beam", "severity" => "warning",
+                    "value" => depth_in, "threshold" => beam_t["depth_max_in"], "unit" => "in",
+                    "interpretation" => "Beam depth $(round(depth_in; digits=0)) in is very deep — " *
+                        "may conflict with MEP routing and ceiling clearance.",
+                    "parameter_headroom" => "limited",
+                ))
+            end
+
+            if len_in > 0 && depth_in > 0
+                l_d = len_in / depth_in
+                if l_d < beam_t["span_to_depth_min"]
+                    push!(warnings, Dict{String, Any}(
+                        "element_type" => "beam", "element_id" => get(bd, "id", "?"),
+                        "check" => "low_span_depth_ratio", "severity" => "warning",
+                        "value" => _round_val(l_d), "threshold" => beam_t["span_to_depth_min"], "unit" => "L/d",
+                        "interpretation" => "Span-to-depth ratio $(round(l_d; digits=1)) is unusually low — " *
+                            "beam is very deep relative to its span, suggesting heavy loads or geometry issues.",
+                        "parameter_headroom" => "limited",
+                    ))
+                end
+            end
+        end
+
+        # Weight per foot for steel beams (from section name, e.g. "W24x94" → 94 plf)
+        mw = match(r"W\d+x(\d+)", section)
+        if !isnothing(mw)
+            wt_plf = parse(Float64, mw.captures[1])
+            if wt_plf > beam_t["weight_per_ft_extreme"]
+                push!(warnings, Dict{String, Any}(
+                    "element_type" => "beam", "element_id" => get(bd, "id", "?"),
+                    "check" => "heavy_beam", "severity" => "warning",
+                    "value" => wt_plf, "threshold" => beam_t["weight_per_ft_extreme"], "unit" => "plf",
+                    "interpretation" => "Beam weight $(round(wt_plf; digits=0)) plf is very heavy — " *
+                        "suggests high demands. Consider reducing span or adding intermediate supports.",
+                    "parameter_headroom" => "limited",
+                ))
+            end
+        end
+    end
+
+    # ── Foundation checks ────────────────────────────────────────────────
+    for fd in fdn_dicts
+        fl = get(fd, "length", 0.0)
+        fw = get(fd, "width", 0.0)
+        fdepth = get(fd, "depth", 0.0)
+
+        fl_ft = is_imp ? fl : fl * 3.28084
+        fw_ft = is_imp ? fw : fw * 3.28084
+        area_ft2 = fl_ft * fw_ft
+        d_in = is_imp ? fdepth * 12.0 : fdepth / 25.4
+
+        if area_ft2 > fdn_t["plan_area_max_ft2"]
+            push!(warnings, Dict{String, Any}(
+                "element_type" => "foundation", "element_id" => get(fd, "id", "?"),
+                "check" => "oversized_footing", "severity" => "warning",
+                "value" => _round_val(area_ft2), "threshold" => fdn_t["plan_area_max_ft2"], "unit" => "ft²",
+                "interpretation" => "Footing area $(round(area_ft2; digits=0)) ft² is very large — " *
+                    "adjacent footings may overlap. Consider adding columns or switching to " *
+                    "strip/mat foundation.",
+                "parameter_headroom" => "limited",
+            ))
+        end
+
+        if d_in > fdn_t["depth_max_in"]
+            push!(warnings, Dict{String, Any}(
+                "element_type" => "foundation", "element_id" => get(fd, "id", "?"),
+                "check" => "deep_footing", "severity" => "warning",
+                "value" => _round_val(d_in), "threshold" => fdn_t["depth_max_in"], "unit" => "in",
+                "interpretation" => "Footing depth $(round(d_in; digits=1)) in is very thick — " *
+                    "high punching or flexure demands from large column reactions.",
+                "parameter_headroom" => "limited",
+            ))
+        end
+    end
+
+    # Sort: critical first, then by element type
+    sort!(warnings; by=w -> (get(w, "severity", "") == "critical" ? 0 : 1, get(w, "element_type", "")))
+    return warnings
+end
+
 # ─── Top-level ────────────────────────────────────────────────────────────────
 
 """
@@ -1171,8 +1337,9 @@ Returns a three-layer Dict:
 - `columns`, `beams`, `slabs`, `foundations`: per-element engineering data
   (checks, demands, capacities, governing check, levers, EC).
 - `agent_summary`: overall pass/fail status, check distribution, worst elements.
-- `architectural`: system narrative, scale references, goal recommendations.
+- `architectural`: system narrative, goal recommendations.
 - `constraints`: geometry-fixed values and analytical lever impact estimates.
+- `size_warnings`: element reasonableness checks (abnormal sizes, parameter headroom).
 - `design_context`: input parameters (loads, methods, limits) in machine-readable form.
 
 All numeric values are in the display unit system specified by `report_units`
@@ -1192,6 +1359,7 @@ function design_to_diagnose(design::BuildingDesign; report_units=nothing)
     agent_summary  = _diagnose_agent_summary(design, du, col_dicts, beam_dicts, slab_dicts, fdn_dicts)
     architectural  = _diagnose_architectural(design, params, du, col_dicts, beam_dicts, slab_dicts, fdn_dicts)
     constraints    = _diagnose_constraints(design, struc, params, du, col_dicts, beam_dicts, slab_dicts, fdn_dicts)
+    size_warnings  = _element_reasonableness_checks(design, du, col_dicts, beam_dicts, slab_dicts, fdn_dicts)
 
     return Dict{String, Any}(
         "status"         => "ok",
@@ -1209,5 +1377,6 @@ function design_to_diagnose(design::BuildingDesign; report_units=nothing)
         "foundations"    => fdn_dicts,
         "architectural"  => architectural,
         "constraints"    => constraints,
+        "size_warnings"  => size_warnings,
     )
 end

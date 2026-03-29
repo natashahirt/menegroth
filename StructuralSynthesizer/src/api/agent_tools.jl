@@ -703,7 +703,7 @@ function agent_diagnose_summary(design::BuildingDesign)::Dict{String, Any}
                              ("slab", "slabs"), ("foundation", "foundations")]
         elems = get(diag, plural, Any[])
         n_fail = count(e -> !get(e, "ok", true), elems)
-        type_stats[etype] = Dict{String, Any}("total" => n_total, "failing" => n_fail)
+        type_stats[etype] = Dict{String, Any}("total" => length(elems), "failing" => n_fail)
 
         for e in elems
             ratio = get(e, "governing_ratio", 0.0)
@@ -725,11 +725,23 @@ function agent_diagnose_summary(design::BuildingDesign)::Dict{String, Any}
         "ok"               => get(e, "ok", true),
     ) for (ratio, e) in all_elements[1:top_n]]
 
-    # Rank failure checks by frequency
     sorted_checks = sort(collect(check_counts); by=last, rev=true)
     failure_breakdown = [Dict("check" => k, "count" => v) for (k, v) in sorted_checks]
 
-    return Dict{String, Any}(
+    # Size warnings from element reasonableness checks
+    raw_sw = get(diag, "size_warnings", Any[])
+    n_critical_sw = count(w -> get(w, "severity", "") == "critical", raw_sw)
+    n_warning_sw  = length(raw_sw) - n_critical_sw
+    top_sw = [Dict{String, Any}(
+        "element_type" => get(w, "element_type", ""),
+        "element_id"   => get(w, "element_id", ""),
+        "check"        => get(w, "check", ""),
+        "severity"     => get(w, "severity", ""),
+        "interpretation" => get(w, "interpretation", ""),
+        "parameter_headroom" => get(w, "parameter_headroom", ""),
+    ) for w in raw_sw[1:min(5, length(raw_sw))]]
+
+    result = Dict{String, Any}(
         "by_type"           => type_stats,
         "top_critical"      => top_critical,
         "failure_breakdown" => failure_breakdown,
@@ -737,6 +749,17 @@ function agent_diagnose_summary(design::BuildingDesign)::Dict{String, Any}
         "n_total_failing"   => sum(s -> s["failing"], values(type_stats)),
         "note"              => "Use query_elements or get_diagnose for full per-element detail.",
     )
+
+    if !isempty(raw_sw)
+        result["size_warnings"] = Dict{String, Any}(
+            "n_critical" => n_critical_sw,
+            "n_warning"  => n_warning_sw,
+            "top"        => top_sw,
+            "note"       => "Elements with abnormal sizes. 'parameter_headroom=none' means geometry change needed.",
+        )
+    end
+
+    return result
 end
 
 # ─── Phase 2: Diagnosis ──────────────────────────────────────────────────────
@@ -1022,6 +1045,14 @@ function agent_suggest_next_action(design::BuildingDesign, goal::String)::Dict{S
     failing_checks = _extract_failing_checks(diag)
     ranked_actions = _rank_actions_by_failure(goal, failing_checks, related_params)
 
+    # ── Geometry remediation evaluation ──
+    geo_remediations = _geometry_remediation_eval(design, diag, failing_checks)
+
+    # ── Parameter headroom from size warnings ──
+    size_warnings = get(diag, "size_warnings", Any[])
+    any_exhausted = any(w -> get(w, "parameter_headroom", "") == "none", size_warnings)
+    param_headroom = any_exhausted ? "exhausted" : "available"
+
     # ── System dependency context ──
     floor_type = _extract_floor_type(design)
     sys_context = isnothing(floor_type) ? nothing : get_system_dependencies(floor_type)
@@ -1034,29 +1065,38 @@ function agent_suggest_next_action(design::BuildingDesign, goal::String)::Dict{S
     ]
     top_action = isempty(ranked_actions) ? "none" :
         "$(get(ranked_actions[1], "parameter", "?")) (addresses $(round(Int, get(ranked_actions[1], "coverage_fraction", 0.0) * 100))% of failures)"
+
     tldr = if total_failing_n == 0
         "All checks pass. Goal: $goal."
+    elseif !isempty(geo_remediations)
+        geo_gap = get(geo_remediations[1], "gap", "")
+        "Geometry is the bottleneck: $geo_gap Parameter changes alone cannot resolve this. " *
+        "$(length(failing_checks)) check families failing ($(join(check_parts, ", ")))."
     else
         "$(length(failing_checks)) check families failing ($(join(check_parts, ", "))). Top action: $top_action."
     end
 
     result = Dict{String, Any}(
-        "goal"           => goal,
-        "tldr"           => tldr,
-        "ranked_actions" => ranked_actions,
-        "failing_checks" => failing_checks,
-        "current_status" => Dict(
+        "goal"               => goal,
+        "tldr"               => tldr,
+        "ranked_actions"     => ranked_actions,
+        "failing_checks"     => failing_checks,
+        "parameter_headroom" => param_headroom,
+        "current_status"     => Dict(
             "all_pass"       => get(summary, "all_pass", false),
             "critical_ratio" => get(summary, "critical_ratio", 0.0),
             "n_failing"      => total_failing_n,
         ),
     )
 
+    if !isempty(geo_remediations)
+        result["geometry_actions"] = geo_remediations
+    end
+
     if !isnothing(sys_context)
         result["system_context"] = sys_context
     end
 
-    # Demote less-processed data to a secondary key
     if !isempty(goal_recs) || !isempty(goal_impacts)
         result["raw_data"] = Dict{String, Any}(
             "recommendations" => goal_recs,
@@ -1267,6 +1307,164 @@ function agent_solver_trace(
         n_decisions = count(ev -> ev.event_type in (:decision, :iteration), events)
         result["hint"] = "$n_decisions decision/iteration events available. Use tier=decisions for detail."
     end
+
+    return result
+end
+
+# ─── Geometry Remediation Evaluation ──────────────────────────────────────────
+
+"""
+    _geometry_remediation_eval(design, diag, failing_checks) -> Vector{Dict}
+
+For each failing check, evaluate whether the actual geometry exceeds the
+`GEOMETRY_REMEDIATION_MAP` thresholds. Returns matched remediations with
+quantified gaps and specific Grasshopper instructions.
+"""
+function _geometry_remediation_eval(
+    design::BuildingDesign,
+    diag::Dict,
+    failing_checks::Vector{Dict{String, Any}},
+)::Vector{Dict{String, Any}}
+    results = Dict{String, Any}[]
+    struc = design.structure
+    skel = struc.skeleton
+
+    # Extract geometry metrics
+    edge_lengths_m = Float64[]
+    for eidx in eachindex(skel.geometry.edges)
+        e = skel.geometry.edges[eidx]
+        v1 = skel.geometry.vertices[e[1]]
+        v2 = skel.geometry.vertices[e[2]]
+        dx = v1[1] - v2[1]; dy = v1[2] - v2[2]; dz = v1[3] - v2[3]
+        push!(edge_lengths_m, sqrt(dx^2 + dy^2 + dz^2))
+    end
+    max_span_m = isempty(edge_lengths_m) ? 0.0 : maximum(edge_lengths_m)
+    max_span_ft = max_span_m * 3.28084
+
+    story_heights_m = Float64[]
+    zs = skel.stories_z
+    if length(zs) > 1
+        for i in 2:length(zs)
+            push!(story_heights_m, abs(zs[i] - zs[i-1]))
+        end
+    end
+    max_story_m = isempty(story_heights_m) ? 0.0 : maximum(story_heights_m)
+
+    n_columns = haskey(skel.groups_edges, :columns) ? length(skel.groups_edges[:columns]) : 0
+
+    for fc in failing_checks
+        check = get(fc, "check", "")
+        norm_check = _lever_norm(check)
+        remed = get(GEOMETRY_REMEDIATION_MAP, norm_check, nothing)
+        isnothing(remed) && continue
+
+        governs_when = get(remed, "geometry_likely_governs_when", Dict())
+        matched = false
+        gap_description = ""
+
+        # Evaluate condition based on available thresholds
+        thresh_span = get(governs_when, "max_span_m", nothing)
+        thresh_story = get(governs_when, "max_story_height_m", nothing)
+        thresh_trib = get(governs_when, "max_trib_area_m2", nothing)
+
+        if !isnothing(thresh_span) && max_span_m > thresh_span
+            matched = true
+            target_ft = round(thresh_span * 3.28084; digits=0)
+            gap_description = "Max span $(round(max_span_ft; digits=0)) ft exceeds " *
+                "target ~$(target_ft) ft. Reduce by ~$(round(max_span_ft - target_ft; digits=0)) ft."
+        end
+
+        if !isnothing(thresh_story) && max_story_m > thresh_story
+            matched = true
+            target_ft = round(thresh_story * 3.28084; digits=0)
+            actual_ft = round(max_story_m * 3.28084; digits=0)
+            gap_description *= isempty(gap_description) ? "" : " "
+            gap_description *= "Max story height $(actual_ft) ft exceeds target ~$(target_ft) ft."
+        end
+
+        !matched && continue
+
+        push!(results, Dict{String, Any}(
+            "check"        => check,
+            "n_failing"    => get(fc, "n_failing", 0),
+            "rationale"    => get(governs_when, "rationale", ""),
+            "gap"          => gap_description,
+            "actions"      => get(remed, "geometric_actions", []),
+            "geometry_now" => Dict{String, Any}(
+                "max_span_ft"    => round(max_span_ft; digits=1),
+                "max_story_ft"   => round(max_story_m * 3.28084; digits=1),
+                "n_columns"      => n_columns,
+            ),
+        ))
+    end
+
+    return results
+end
+
+# ─── Geometric Sensitivity Tool ──────────────────────────────────────────────
+
+"""
+    agent_predict_geometry_effect(variable, direction) -> Dict{String, Any}
+
+Predict the structural effects of changing a geometric variable. Uses the static
+`GEOMETRIC_SENSITIVITY_MAP` for scaling laws and economical ranges.
+"""
+function agent_predict_geometry_effect(
+    variable::String,
+    direction::String,
+)::Dict{String, Any}
+    valid_dirs = ["increase", "decrease"]
+    direction in valid_dirs || return Dict{String, Any}(
+        "error"   => "invalid_direction",
+        "message" => "Direction must be one of: $(join(valid_dirs, ", ")). Got: \"$direction\".",
+    )
+
+    entry = get(GEOMETRIC_SENSITIVITY_MAP, variable, nothing)
+    if isnothing(entry)
+        available = sort(collect(keys(GEOMETRIC_SENSITIVITY_MAP)))
+        return Dict{String, Any}(
+            "error"     => "unknown_variable",
+            "message"   => "Variable \"$variable\" not found. Available: $(join(available, ", ")).",
+            "available" => available,
+        )
+    end
+
+    # Build effects list, flipping direction labels for "decrease"
+    effects = Dict{String, Any}[]
+    for eff in get(entry, "affects", [])
+        raw_dir = get(eff, "direction", "")
+        effective_dir = if direction == "decrease"
+            # Flip: "increase_span → worse" becomes "decrease_span → better"
+            if occursin("worse", raw_dir)
+                replace(raw_dir, "worse" => "better")
+            elseif occursin("better", raw_dir)
+                replace(raw_dir, "better" => "worse")
+            elseif occursin("larger", raw_dir)
+                replace(raw_dir, "larger" => "smaller")
+            elseif occursin("thicker", raw_dir)
+                replace(raw_dir, "thicker" => "thinner")
+            else
+                raw_dir
+            end
+        else
+            raw_dir
+        end
+
+        push!(effects, Dict{String, Any}(
+            "check"        => get(eff, "check", ""),
+            "relationship" => get(eff, "relationship", ""),
+            "direction"    => effective_dir,
+            "explanation"  => get(eff, "explanation", ""),
+        ))
+    end
+
+    result = Dict{String, Any}(
+        "variable"          => variable,
+        "direction"         => direction,
+        "affected_checks"   => effects,
+        "economical_ranges" => get(entry, "typical_economical_ranges", Dict()),
+        "trade_offs"        => get(entry, "trade_offs", ""),
+    )
 
     return result
 end

@@ -363,6 +363,24 @@ function condense_result(design::BuildingDesign; report_units=nothing)
         push!(lines, "Top failure modes: $(join(top_checks, ", "))")
     end
 
+    # Size warnings from element reasonableness checks
+    try
+        diag = design_to_diagnose(design)
+        sw = get(diag, "size_warnings", Any[])
+        if !isempty(sw)
+            n_crit = count(w -> get(w, "severity", "") == "critical", sw)
+            n_warn = length(sw) - n_crit
+            parts = String[]
+            n_crit > 0 && push!(parts, "$n_crit critical")
+            n_warn > 0 && push!(parts, "$n_warn warning")
+            detail_parts = String[]
+            for w in sw[1:min(3, length(sw))]
+                push!(detail_parts, get(w, "interpretation", ""))
+            end
+            push!(lines, "Size warnings: $(join(parts, ", ")). $(join(detail_parts, "; "))")
+        end
+    catch; end
+
     push!(lines, "Compute: $(ov["compute_time_s"])s")
     push!(lines, "")
 

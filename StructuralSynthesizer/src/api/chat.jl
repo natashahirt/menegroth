@@ -335,7 +335,9 @@ TOOL SELECTION (match intent → sequence):
 CLIENT GEOMETRY VS SERVER TOOLS:
   POST /chat may include building_geometry JSON and/or geometry_summary narrative — use them.
   get_situation_card.has_geometry only reflects server cache from POST /design, NOT prompt geometry.
-  Pre-design geometry analysis (beam spans, story heights, slab panel shapes, column grid, flags, warnings) is pre-computed from raw JSON and included in the prompt — use it directly.
+  When a STRUCTURE-BASED GEOMETRY DIGEST is present, the server has built a real BuildingStructure from the geometry
+  (skeleton → cells → slabs → members → tributaries) — the same pipeline the solver uses. This gives you real cell
+  spans, slab panel data, member lengths, and column tributary areas with grid regularity analysis. Use these directly.
   For solver-level data (member sizing, check ratios, trace events): server cache needed → suggest Design run.
 
 EVIDENCE-FIRST PROTOCOL (mandatory):
@@ -393,19 +395,21 @@ const _DESIGN_MODE_BASELINE_WORKFLOW = """
 BASELINE DESIGN:
 - No design yet (n_designs=0) → no solver ratios/EC to cite.
 - BUILDING GEOMETRY in the prompt (JSON/narrative) = user's model. Do NOT say you "cannot see" it.
-  The "Geometry analysis" block contains pre-computed beam spans, story heights, slab panel shapes, column grid, structural_flags, and warnings — use them quantitatively.
+  When "STRUCTURE-BASED GEOMETRY DIGEST" is present, the server has built a real BuildingStructure from the skeleton
+  and computed cells, slabs, members, and column tributary areas — the same initialization the solver uses.
   Solver-level analytics (member sizing, check ratios, trace) require POST /design.
 - Valid params → either run_design for baseline, or ask user first.
 - Once n_designs≥1, use compare_designs when can_compare_deltas is true.
 
 GEOMETRY FACTS POLICY (MANDATORY):
 - Treat the GEOMETRY DIGEST as authoritative for this turn. Use its numbers directly.
-- Do NOT claim span/story/panel/grid data is "missing" unless GEOMETRY DIGEST explicitly marks it unavailable
-  or Data gaps lists the corresponding item.
+- Do NOT claim span/story/panel/grid data is "missing" unless GEOMETRY DIGEST explicitly marks it unavailable.
 - When structured BUILDING GEOMETRY is present (new or updated geometry), your opening must include a concise
   geometry fact summary with the key structural drivers:
-  (1) beam span range, (2) stories and story heights, (3) column grid / spacing, (4) slab panel classification,
-  (5) envelope footprint/height when available.
+  (1) cell/beam span ranges, (2) stories and story heights, (3) column tributary areas and grid regularity,
+  (4) slab panel count and floor type classification, (5) envelope footprint/height.
+- Column tributary area variation (CV and grid_regularity) is the primary indicator of grid regularity.
+  Use it to recommend DDM vs FEA and to flag punching shear risk at high-tributary columns.
 - After listing facts, immediately interpret structural implications (what is likely to govern and why).
 
 OPENING ANALYSIS (your first response — CRITICAL):
@@ -497,6 +501,9 @@ Your role is to help the user understand their building's design results.
 
 GEOMETRY IN THE PROMPT:
 - If BUILDING GEOMETRY appears in this chat's system prompt (structured JSON and/or narrative), treat it as the user's model — same source as Design Run when the client sends `building_geometry`. It may differ from server-cached geometry when GEOMETRY_CONTEXT.geometry_stale is true — follow GEOMETRY_CONTEXT and tool payloads, not assumptions.
+- When "STRUCTURE-BASED GEOMETRY DIGEST" is present, the server has built a real BuildingStructure from the
+  skeleton — cells, slabs, members, and column tributary areas are computed by the same pipeline the solver uses.
+  Column tributary area variation and grid_regularity are the primary indicators of plan regularity.
 
 IMPORTANT RULES:
 - Explain structural engineering concepts clearly for the user's level of expertise.
@@ -507,8 +514,7 @@ IMPORTANT RULES:
 - In that same JSON object, include `_history_label` (string): VERY brief (≤6 words) summary for the params history UI, same rules as design mode.
 - Only ask questions that cannot be answered from geometry data or solver output. Never ask about information already visible in the prompt.
 - Treat GEOMETRY DIGEST as authoritative for geometry facts in this turn.
-- Do NOT claim geometry details are missing unless GEOMETRY DIGEST explicitly marks them unavailable
-  or Data gaps lists the corresponding missing item.
+- Do NOT claim geometry details are missing unless GEOMETRY DIGEST explicitly marks them unavailable.
 
 OPENING ANALYSIS (your first response when results exist):
   Lead with what matters most — the critical failure mode and why it governs for THIS geometry.
@@ -524,8 +530,9 @@ OPENING ANALYSIS (your first response when results exist):
   - Use predict_geometry_effect to explain trade-offs of proposed geometry changes
 
 GEOMETRY AND IRREGULARITY:
-- Do not attribute failures to "irregular geometry" based only on beam span statistics or CV — use slab_panel_plan / plan_shape_classification (situation card geometry includes the same summary) and get_applicability, not span_stats alone.
-- When discussing failing elements, correlate with real geometry features when tools/summary support them: re-entrant corners, setbacks, non-orthogonal grids, triangular panels — not merely different span lengths in X vs Y.
+- Column tributary area variation (CV and grid_regularity in the digest) is the most reliable indicator of plan irregularity. Use it over beam span CV.
+- When discussing failing elements, correlate with real geometry features: re-entrant corners, setbacks, non-orthogonal grids, triangular panels — not merely different span lengths in X vs Y.
+- Use cell position counts (corner/edge/interior) and slab panel aspect ratios to characterize plan shape.
 - If member counts vary by level, there may be transfer conditions — flag when the geometry summary shows that.
 $_TOOLS_GUIDANCE
 $_SESSION_DESIGN_HISTORY_RULE
@@ -559,6 +566,517 @@ function _parse_chat_building_geometry(raw)::Union{Nothing, Dict{String, Any}}
     catch
         return nothing
     end
+end
+
+# ─── Chat-side structure cache ────────────────────────────────────────────────
+#
+# When POST /chat receives `building_geometry`, we build a lightweight
+# BuildingSkeleton → BuildingStructure → initialize! to get real structural
+# data (cells, slabs, members, tributaries) without running the solver.
+# The result is cached by geometry hash to avoid re-initializing every turn.
+
+mutable struct _ChatStructureCache
+    geometry_hash::String
+    structure::Union{BuildingStructure, Nothing}
+    digest::Union{Dict{String, Any}, Nothing}
+    lock::ReentrantLock
+end
+_ChatStructureCache() = _ChatStructureCache("", nothing, nothing, ReentrantLock())
+
+const _CHAT_STRUCTURE_CACHE = _ChatStructureCache()
+
+"""
+    _chat_initialize_structure(geo_dict) -> (BuildingStructure, String)
+
+Build a real `BuildingStructure` from chat `building_geometry` JSON.
+Returns `(structure, geometry_hash)` or throws on failure.
+
+Uses `json_to_skeleton` → `BuildingStructure` → `initialize!` with default
+loads/material/floor options — enough to compute cells, slabs, members, and
+tributaries without running the full design solver.
+"""
+function _chat_initialize_structure(geo_dict::Dict{String, Any})
+    api_input = _api_input_geometry_only_from_chat_dict(geo_dict)
+    geo_hash = compute_geometry_hash(api_input)
+
+    skel = json_to_skeleton(api_input)
+    struc = BuildingStructure(skel)
+    initialize!(struc)  # defaults: flat_plate, GravityLoads(), NWC_4000
+    return (struc, geo_hash)
+end
+
+"""
+    _chat_get_or_build_structure(geo_dict) -> Union{BuildingStructure, Nothing}
+
+Thread-safe access to the chat structure cache. Returns a fully initialized
+`BuildingStructure` with cells, members, and tributaries computed.
+Returns `nothing` if initialization fails (logs warning).
+"""
+function _chat_get_or_build_structure(geo_dict::Dict{String, Any})::Union{BuildingStructure, Nothing}
+    geo_hash = try
+        compute_geometry_hash(_api_input_geometry_only_from_chat_dict(geo_dict))
+    catch
+        return nothing
+    end
+
+    lock(_CHAT_STRUCTURE_CACHE.lock) do
+        if _CHAT_STRUCTURE_CACHE.geometry_hash == geo_hash && !isnothing(_CHAT_STRUCTURE_CACHE.structure)
+            return _CHAT_STRUCTURE_CACHE.structure
+        end
+    end
+
+    struc = try
+        s, h = _chat_initialize_structure(geo_dict)
+        s
+    catch e
+        @warn "Chat structure initialization failed — falling back to raw JSON analysis" exception=(e, catch_backtrace())
+        return nothing
+    end
+
+    lock(_CHAT_STRUCTURE_CACHE.lock) do
+        _CHAT_STRUCTURE_CACHE.geometry_hash = geo_hash
+        _CHAT_STRUCTURE_CACHE.structure = struc
+        _CHAT_STRUCTURE_CACHE.digest = nothing  # invalidate cached digest
+    end
+    return struc
+end
+
+"""
+    _structure_geometry_digest(struc::BuildingStructure) -> Dict{String, Any}
+
+Extract a rich geometry digest from an initialized `BuildingStructure`.
+Includes real structural data: cell spans, slab panels, member lengths,
+column tributary areas with variation metrics, beam spans, story info,
+and grid regularity flags.
+
+This replaces the raw-JSON `_chat_structured_geometry_stats` approach with
+data computed by the same pipeline the solver uses.
+"""
+function _structure_geometry_digest(struc::BuildingStructure)::Dict{String, Any}
+    skel = struc.skeleton
+    result = Dict{String, Any}()
+    warnings = String[]
+    flags = String[]
+    to_ft(x) = ustrip(u"ft", x)
+    to_m2(x) = ustrip(u"m^2", x)
+
+    # ── Counts ────────────────────────────────────────────────────────────
+    result["n_cells"] = length(struc.cells)
+    result["n_slabs"] = length(struc.slabs)
+    result["n_beams"] = length(struc.beams)
+    result["n_columns"] = length(struc.columns)
+    result["n_stories"] = length(skel.stories)
+    result["n_vertices"] = length(skel.vertices)
+    result["n_supports"] = length(struc.supports)
+
+    # ── Story heights ─────────────────────────────────────────────────────
+    if length(skel.stories_z) >= 2
+        sorted_z = sort(skel.stories_z)
+        heights_ft = [to_ft(sorted_z[i+1] - sorted_z[i]) for i in 1:length(sorted_z)-1]
+        result["stories"] = Dict{String, Any}(
+            "n_stories" => length(sorted_z),
+            "story_heights_ft" => round.(heights_ft; digits=2),
+            "min_ft" => round(minimum(heights_ft); digits=2),
+            "max_ft" => round(maximum(heights_ft); digits=2),
+            "source" => "stories_z",
+        )
+        if maximum(heights_ft) > 18.0
+            push!(flags, "tall_story_>18ft")
+        end
+    end
+
+    # ── Cell spans ────────────────────────────────────────────────────────
+    if !isempty(struc.cells)
+        cell_data = Dict{String, Any}[]
+        areas_ft2 = Float64[]
+        primary_spans_ft = Float64[]
+        secondary_spans_ft = Float64[]
+        for (i, cell) in enumerate(struc.cells)
+            a_ft2 = ustrip(u"ft^2", cell.area)
+            p_ft = to_ft(cell.spans.primary)
+            s_ft = to_ft(cell.spans.secondary)
+            push!(areas_ft2, a_ft2)
+            push!(primary_spans_ft, p_ft)
+            push!(secondary_spans_ft, s_ft)
+            push!(cell_data, Dict{String, Any}(
+                "idx" => i,
+                "area_ft2" => round(a_ft2; digits=1),
+                "primary_span_ft" => round(p_ft; digits=2),
+                "secondary_span_ft" => round(s_ft; digits=2),
+                "position" => string(cell.position),
+                "floor_type" => string(cell.floor_type),
+            ))
+        end
+        result["cells"] = Dict{String, Any}(
+            "count" => length(cell_data),
+            "area_ft2" => Dict{String, Any}(
+                "min" => round(minimum(areas_ft2); digits=1),
+                "max" => round(maximum(areas_ft2); digits=1),
+                "mean" => round(sum(areas_ft2) / length(areas_ft2); digits=1),
+            ),
+            "primary_span_ft" => Dict{String, Any}(
+                "min" => round(minimum(primary_spans_ft); digits=2),
+                "max" => round(maximum(primary_spans_ft); digits=2),
+                "mean" => round(sum(primary_spans_ft) / length(primary_spans_ft); digits=2),
+            ),
+            "secondary_span_ft" => Dict{String, Any}(
+                "min" => round(minimum(secondary_spans_ft); digits=2),
+                "max" => round(maximum(secondary_spans_ft); digits=2),
+                "mean" => round(sum(secondary_spans_ft) / length(secondary_spans_ft); digits=2),
+            ),
+            "positions" => Dict{String, Int}(
+                string(k) => count(c -> c.position == k, struc.cells)
+                for k in unique(c.position for c in struc.cells)
+            ),
+        )
+        # Truncate per-cell detail if too many
+        if length(cell_data) <= 30
+            result["cells"]["detail"] = cell_data
+        else
+            result["cells"]["detail_note"] = "$(length(cell_data)) cells (detail truncated). Use stats above."
+        end
+    end
+
+    # ── Slab panels ───────────────────────────────────────────────────────
+    if !isempty(struc.slabs)
+        slab_data = Dict{String, Any}[]
+        for (i, slab) in enumerate(struc.slabs)
+            p_ft = to_ft(slab.spans.primary)
+            s_ft = to_ft(slab.spans.secondary)
+            ratio = s_ft > 0.01 ? round(p_ft / s_ft; digits=2) : 0.0
+            push!(slab_data, Dict{String, Any}(
+                "idx" => i,
+                "n_cells" => length(slab.cell_indices),
+                "primary_span_ft" => round(p_ft; digits=2),
+                "secondary_span_ft" => round(s_ft; digits=2),
+                "aspect_ratio" => ratio,
+                "position" => string(slab.position),
+                "floor_type" => string(slab.floor_type),
+            ))
+        end
+        result["slabs"] = Dict{String, Any}(
+            "count" => length(slab_data),
+            "detail" => slab_data,
+        )
+    end
+
+    # ── Beam spans ────────────────────────────────────────────────────────
+    if !isempty(struc.beams)
+        beam_spans_ft = Float64[]
+        x_spans = Float64[]
+        y_spans = Float64[]
+        for beam in struc.beams
+            L_ft = to_ft(beam.base.L)
+            push!(beam_spans_ft, L_ft)
+            seg_indices = beam.base.segment_indices
+            if !isempty(seg_indices)
+                seg = struc.segments[first(seg_indices)]
+                vi1, vi2 = skel.edge_indices[seg.edge_idx]
+                v1 = skel.vertices[vi1]
+                v2 = skel.vertices[vi2]
+                dx = abs(ustrip(u"m", Meshes.coords(v2).x - Meshes.coords(v1).x))
+                dy = abs(ustrip(u"m", Meshes.coords(v2).y - Meshes.coords(v1).y))
+                if dx >= dy
+                    push!(x_spans, L_ft)
+                else
+                    push!(y_spans, L_ft)
+                end
+            end
+        end
+        beam_stats = Dict{String, Any}(
+            "count" => length(beam_spans_ft),
+            "all" => _stats_dict(beam_spans_ft, "ft"),
+        )
+        !isempty(x_spans) && (beam_stats["x_direction"] = _stats_dict(x_spans, "ft"))
+        !isempty(y_spans) && (beam_stats["y_direction"] = _stats_dict(y_spans, "ft"))
+        result["beam_spans"] = beam_stats
+
+        max_span_ft = maximum(beam_spans_ft)
+        if max_span_ft > 30.0
+            push!(flags, "long_beam_span_>30ft ($(round(max_span_ft; digits=1)) ft)")
+        end
+    end
+
+    # ── Column heights ────────────────────────────────────────────────────
+    if !isempty(struc.columns)
+        col_heights_ft = [to_ft(col.base.L) for col in struc.columns]
+        result["column_heights"] = _stats_dict(col_heights_ft, "ft")
+    end
+
+    # ── Column tributary areas ────────────────────────────────────────────
+    if !isempty(struc.columns)
+        trib_areas_ft2 = Float64[]
+        per_column = Dict{String, Any}[]
+        # Group by position for within-class CV (the real irregularity signal)
+        by_position = Dict{Symbol, Vector{Float64}}()
+        for (i, col) in enumerate(struc.columns)
+            At = column_tributary_area(struc, col)
+            if !isnothing(At)
+                a_ft2 = ustrip(u"ft^2", At)
+                push!(trib_areas_ft2, a_ft2)
+                pos = col.position
+                haskey(by_position, pos) || (by_position[pos] = Float64[])
+                push!(by_position[pos], a_ft2)
+                push!(per_column, Dict{String, Any}(
+                    "idx" => i,
+                    "story" => col.story,
+                    "position" => string(pos),
+                    "tributary_ft2" => round(a_ft2; digits=1),
+                    "height_ft" => round(to_ft(col.base.L); digits=2),
+                ))
+            end
+        end
+        if !isempty(trib_areas_ft2)
+            mean_a = sum(trib_areas_ft2) / length(trib_areas_ft2)
+            std_a = length(trib_areas_ft2) > 1 ? sqrt(sum((x - mean_a)^2 for x in trib_areas_ft2) / (length(trib_areas_ft2) - 1)) : 0.0
+            cv_overall = mean_a > 0 ? std_a / mean_a : 0.0
+            sorted = sort(trib_areas_ft2)
+            p10 = sorted[max(1, round(Int, 0.1 * length(sorted)))]
+            p90 = sorted[min(length(sorted), round(Int, 0.9 * length(sorted)))]
+
+            # Within-position CV: measures true grid irregularity, filtering out the
+            # natural corner/edge/interior variation present in any regular grid.
+            within_cvs = Float64[]
+            position_stats = Dict{String, Any}()
+            for (pos, areas) in by_position
+                n = length(areas)
+                m = sum(areas) / n
+                s = n > 1 ? sqrt(sum((x - m)^2 for x in areas) / (n - 1)) : 0.0
+                wcv = m > 0 ? s / m : 0.0
+                push!(within_cvs, wcv)
+                position_stats[string(pos)] = Dict{String, Any}(
+                    "count" => n,
+                    "mean_ft2" => round(m; digits=1),
+                    "cv" => round(wcv; digits=3),
+                )
+            end
+            max_within_cv = isempty(within_cvs) ? 0.0 : maximum(within_cvs)
+
+            trib_stats = Dict{String, Any}(
+                "count" => length(trib_areas_ft2),
+                "min_ft2" => round(minimum(trib_areas_ft2); digits=1),
+                "max_ft2" => round(maximum(trib_areas_ft2); digits=1),
+                "mean_ft2" => round(mean_a; digits=1),
+                "cv_overall" => round(cv_overall; digits=3),
+                "cv_within_position" => round(max_within_cv; digits=3),
+                "p10_ft2" => round(p10; digits=1),
+                "p90_ft2" => round(p90; digits=1),
+                "by_position" => position_stats,
+            )
+
+            # Irregularity classification uses within-position CV to avoid
+            # flagging the natural 4:2:1 ratio of interior:edge:corner tributaries.
+            regularity = if max_within_cv < 0.15
+                "regular"
+            elseif max_within_cv < 0.30
+                "moderately_irregular"
+            else
+                "irregular"
+            end
+            trib_stats["grid_regularity"] = regularity
+            trib_stats["interpretation"] = if regularity == "regular"
+                "Column tributary areas are consistent within each position class " *
+                "(corner/edge/interior) — grid is regular. DDM assumptions apply."
+            elseif regularity == "moderately_irregular"
+                "Moderate within-position tributary variation (max CV=$(round(max_within_cv; digits=2))). " *
+                "Some same-position columns carry different loads — check punching shear. Consider FEA."
+            else
+                "Large within-position tributary variation (max CV=$(round(max_within_cv; digits=2))). " *
+                "Grid is irregular — DDM regularity assumptions may not hold. FEA recommended. " *
+                "Punching shear likely governs at high-tributary columns."
+            end
+            result["column_tributaries"] = trib_stats
+
+            if regularity != "regular"
+                push!(flags, "irregular_grid_tributaries ($(regularity), within-position CV=$(round(max_within_cv; digits=2)))")
+            end
+
+            if length(per_column) <= 40
+                trib_stats["per_column"] = per_column
+            else
+                trib_stats["per_column_note"] = "$(length(per_column)) columns (detail truncated)."
+            end
+        end
+    end
+
+    # ── Envelope ──────────────────────────────────────────────────────────
+    if !isempty(skel.vertices)
+        xs = [ustrip(u"ft", Meshes.coords(v).x) for v in skel.vertices]
+        ys = [ustrip(u"ft", Meshes.coords(v).y) for v in skel.vertices]
+        zs = [ustrip(u"ft", Meshes.coords(v).z) for v in skel.vertices]
+        result["envelope"] = Dict{String, Any}(
+            "footprint_x_ft" => round(maximum(xs) - minimum(xs); digits=2),
+            "footprint_y_ft" => round(maximum(ys) - minimum(ys); digits=2),
+            "total_height_ft" => round(maximum(zs) - minimum(zs); digits=2),
+            "unit" => "ft",
+        )
+    end
+
+    # ── Structural flags ──────────────────────────────────────────────────
+    !isempty(flags) && (result["structural_flags"] = flags)
+    !isempty(warnings) && (result["warnings"] = warnings)
+    result["source"] = "BuildingStructure_initialized"
+    result["unit_system"] = "imperial"
+    return result
+end
+
+"""Helper: compute min/max/mean/CV stats dict from a numeric vector."""
+function _stats_dict(vals::Vector{Float64}, unit::String)::Dict{String, Any}
+    n = length(vals)
+    n == 0 && return Dict{String, Any}("count" => 0)
+    mn = minimum(vals)
+    mx = maximum(vals)
+    mean_v = sum(vals) / n
+    std_v = n > 1 ? sqrt(sum((x - mean_v)^2 for x in vals) / (n - 1)) : 0.0
+    cv = mean_v > 0 ? std_v / mean_v : 0.0
+    return Dict{String, Any}(
+        "count" => n,
+        "min" => round(mn; digits=2),
+        "max" => round(mx; digits=2),
+        "mean" => round(mean_v; digits=2),
+        "cv" => round(cv; digits=3),
+        "unit" => unit,
+    )
+end
+
+"""
+    _structure_digest_plaintext(d::Dict{String, Any}) -> String
+
+Render the structure-based geometry digest as a compact LLM-readable block.
+"""
+function _structure_digest_plaintext(d::Dict{String, Any})::String
+    lines = String["── STRUCTURE-BASED GEOMETRY DIGEST (authoritative) ──"]
+    push!(lines, "Source: BuildingStructure (skeleton → initialize! — same pipeline as solver)")
+
+    # Counts
+    push!(lines, "Elements: $(get(d, "n_cells", 0)) cells, $(get(d, "n_slabs", 0)) slabs, " *
+                  "$(get(d, "n_beams", 0)) beams, $(get(d, "n_columns", 0)) columns")
+
+    # Stories
+    st = get(d, "stories", nothing)
+    if !isnothing(st)
+        n = get(st, "n_stories", "?")
+        push!(lines, "Stories: $n levels")
+        sh = get(st, "story_heights_ft", nothing)
+        if !isnothing(sh) && !isempty(sh)
+            push!(lines, "  Heights: $(join(sh, ", ")) ft")
+        end
+    end
+
+    # Envelope
+    env = get(d, "envelope", nothing)
+    if !isnothing(env)
+        push!(lines, "Footprint: $(env["footprint_x_ft"]) × $(env["footprint_y_ft"]) ft")
+        push!(lines, "Total height: $(env["total_height_ft"]) ft")
+    end
+
+    # Cell spans
+    cells = get(d, "cells", nothing)
+    if !isnothing(cells)
+        ps = get(cells, "primary_span_ft", nothing)
+        ss = get(cells, "secondary_span_ft", nothing)
+        if !isnothing(ps)
+            push!(lines, "Cell primary spans: $(ps["min"])–$(ps["max"]) ft (mean $(ps["mean"]) ft)")
+        end
+        if !isnothing(ss)
+            push!(lines, "Cell secondary spans: $(ss["min"])–$(ss["max"]) ft (mean $(ss["mean"]) ft)")
+        end
+        pos = get(cells, "positions", nothing)
+        if !isnothing(pos)
+            push!(lines, "  Positions: " * join(["$k=$v" for (k, v) in pos], ", "))
+        end
+    end
+
+    # Beam spans
+    bs = get(d, "beam_spans", nothing)
+    if !isnothing(bs)
+        all_s = get(bs, "all", nothing)
+        if !isnothing(all_s)
+            push!(lines, "Beam spans: $(all_s["min"])–$(all_s["max"]) ft (mean $(all_s["mean"]) ft, $(all_s["count"]) beams)")
+        end
+        xd = get(bs, "x_direction", nothing)
+        yd = get(bs, "y_direction", nothing)
+        if !isnothing(xd)
+            push!(lines, "  X-direction: $(xd["min"])–$(xd["max"]) ft ($(xd["count"]) beams)")
+        end
+        if !isnothing(yd)
+            push!(lines, "  Y-direction: $(yd["min"])–$(yd["max"]) ft ($(yd["count"]) beams)")
+        end
+    end
+
+    # Column heights
+    ch = get(d, "column_heights", nothing)
+    if !isnothing(ch)
+        push!(lines, "Column heights: $(ch["min"])–$(ch["max"]) ft (mean $(ch["mean"]) ft)")
+    end
+
+    # Column tributaries
+    ct = get(d, "column_tributaries", nothing)
+    if !isnothing(ct)
+        push!(lines, "Column tributary areas: $(ct["min_ft2"])–$(ct["max_ft2"]) ft² (mean $(ct["mean_ft2"]) ft²)")
+        cv_overall = get(ct, "cv_overall", get(ct, "cv", "?"))
+        cv_within = get(ct, "cv_within_position", "?")
+        push!(lines, "  Overall CV=$(cv_overall), within-position CV=$(cv_within), p10=$(ct["p10_ft2"]) ft², p90=$(ct["p90_ft2"]) ft²")
+        bp = get(ct, "by_position", nothing)
+        if !isnothing(bp)
+            for (pos, ps) in bp
+                push!(lines, "  $(pos): n=$(ps["count"]), mean=$(ps["mean_ft2"]) ft², CV=$(ps["cv"])")
+            end
+        end
+        push!(lines, "  Grid regularity: $(ct["grid_regularity"])")
+        interp = get(ct, "interpretation", nothing)
+        !isnothing(interp) && push!(lines, "  → $interp")
+    end
+
+    # Slab panels (compact)
+    slabs = get(d, "slabs", nothing)
+    if !isnothing(slabs) && !isempty(get(slabs, "detail", []))
+        details = slabs["detail"]
+        types_count = Dict{String, Int}()
+        for s in details
+            ft = get(s, "floor_type", "unknown")
+            types_count[ft] = get(types_count, ft, 0) + 1
+        end
+        push!(lines, "Slab panels: $(slabs["count"]) (" * join(["$v×$k" for (k, v) in types_count], ", ") * ")")
+    end
+
+    # Flags
+    fl = get(d, "structural_flags", nothing)
+    if !isnothing(fl) && !isempty(fl)
+        push!(lines, "⚡ Structural flags: " * join(fl, ", "))
+    end
+
+    push!(lines, "── END DIGEST ──")
+    return join(lines, "\n") * "\n"
+end
+
+"""
+    _chat_get_structure_digest(geo_dict) -> Union{Dict{String, Any}, Nothing}
+
+Get (or compute + cache) a structure-based geometry digest.
+Returns `nothing` if structure initialization fails.
+"""
+function _chat_get_structure_digest(geo_dict::Dict{String, Any})::Union{Dict{String, Any}, Nothing}
+    struc = _chat_get_or_build_structure(geo_dict)
+    isnothing(struc) && return nothing
+
+    lock(_CHAT_STRUCTURE_CACHE.lock) do
+        if !isnothing(_CHAT_STRUCTURE_CACHE.digest)
+            return _CHAT_STRUCTURE_CACHE.digest
+        end
+    end
+
+    digest = try
+        _structure_geometry_digest(struc)
+    catch e
+        @warn "Structure geometry digest failed" exception=(e, catch_backtrace())
+        return nothing
+    end
+
+    lock(_CHAT_STRUCTURE_CACHE.lock) do
+        _CHAT_STRUCTURE_CACHE.digest = digest
+    end
+    return digest
 end
 
 # ─── Pre-design geometry analysis (raw JSON → enriched stats for LLM) ────────
@@ -1473,7 +1991,10 @@ end
 
 """
 Append structured design geometry JSON and/or the optional human Summary line to the system prompt.
-Structured data is the same model the client sends to POST /design (without `params`).
+
+Prefers a **structure-based digest** (from `BuildingStructure` → `initialize!`) which provides
+real cell spans, slab panels, member lengths, column tributary areas, and grid regularity analysis.
+Falls back to the raw-JSON `_chat_structured_geometry_stats` approach if initialization fails.
 """
 function _append_chat_building_geometry_sections!(
     parts::Vector,
@@ -1481,25 +2002,42 @@ function _append_chat_building_geometry_sections!(
     structured::Union{Nothing, Dict{String, Any}},
 )
     if !isnothing(structured)
-        stats = _chat_structured_geometry_stats(structured)
-        json_txt = JSON3.write(structured)
-        push!(parts, "\n\nBUILDING GEOMETRY (structured — same JSON as Design Run geometry, without params):\n")
+        # Try the structure-based path first (real structural data)
+        struc_digest = _chat_get_structure_digest(structured)
 
-        # ── Plain-text geometry digest (LLM reads this FIRST) ─────────────
-        push!(parts, _geometry_digest_plaintext(stats))
+        if !isnothing(struc_digest)
+            push!(parts, "\n\nBUILDING GEOMETRY (structure-initialized — cells, members, tributaries computed):\n")
+            push!(parts, _structure_digest_plaintext(struc_digest))
 
-        if haskey(stats, "warnings") && !isempty(stats["warnings"])
-            push!(parts, "\n⚠ GEOMETRY WARNINGS (address these in your opening analysis — they are advisory, not blocking):\n")
-            for w in stats["warnings"]
-                push!(parts, "  • ", w, "\n")
+            warnings = get(struc_digest, "warnings", nothing)
+            if !isnothing(warnings) && !isempty(warnings)
+                push!(parts, "\n⚠ GEOMETRY WARNINGS:\n")
+                for w in warnings
+                    push!(parts, "  • ", w, "\n")
+                end
             end
-        end
 
-        push!(parts, "\nFull geometry analysis JSON (detail behind the digest above): ", JSON3.write(stats), "\n")
-        if length(json_txt) > _MAX_CHAT_BUILDING_GEOMETRY_JSON_CHARS
-            push!(parts, "Full geometry JSON omitted (length ", string(length(json_txt)), " chars > limit ", string(_MAX_CHAT_BUILDING_GEOMETRY_JSON_CHARS), "). Use the counts above, the narrative summary if present, or run Design so the server caches the structure.\n")
+            push!(parts, "\nFull structure analysis JSON: ", JSON3.write(struc_digest), "\n")
         else
-            push!(parts, "Full geometry JSON:\n", json_txt, "\n")
+            # Fallback: raw JSON analysis (no BuildingStructure available)
+            stats = _chat_structured_geometry_stats(structured)
+            json_txt = JSON3.write(structured)
+            push!(parts, "\n\nBUILDING GEOMETRY (raw JSON analysis — structure init failed, using geometric approximation):\n")
+            push!(parts, _geometry_digest_plaintext(stats))
+
+            if haskey(stats, "warnings") && !isempty(stats["warnings"])
+                push!(parts, "\n⚠ GEOMETRY WARNINGS (address these in your opening analysis — they are advisory, not blocking):\n")
+                for w in stats["warnings"]
+                    push!(parts, "  • ", w, "\n")
+                end
+            end
+
+            push!(parts, "\nFull geometry analysis JSON (detail behind the digest above): ", JSON3.write(stats), "\n")
+            if length(json_txt) > _MAX_CHAT_BUILDING_GEOMETRY_JSON_CHARS
+                push!(parts, "Full geometry JSON omitted (length ", string(length(json_txt)), " chars > limit ", string(_MAX_CHAT_BUILDING_GEOMETRY_JSON_CHARS), "). Use the counts above, the narrative summary if present, or run Design so the server caches the structure.\n")
+            else
+                push!(parts, "Full geometry JSON:\n", json_txt, "\n")
+            end
         end
     end
     if !isempty(strip(geometry_summary))

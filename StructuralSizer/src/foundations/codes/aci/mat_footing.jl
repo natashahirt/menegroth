@@ -14,6 +14,14 @@
 # Fully Unitful throughout.
 # =============================================================================
 
+# =============================================================================
+# Solver Trace Contract (manual registry; function is documented)
+# =============================================================================
+TRACE_REGISTRY[(:design_footing, :checker)] =
+    TracedFunctionMeta(:design_footing, :checker,
+                       [:enter, :exit, :decision, :failure], nothing,
+                       @__FILE__, @__LINE__)
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Shared utilities
 # ─────────────────────────────────────────────────────────────────────────────
@@ -265,20 +273,49 @@ function design_footing(::MatFoundation,
     demands::Vector{<:FoundationDemand},
     positions::Vector{<:NTuple{2, <:Length}},
     soil::Soil;
-    opts::MatParams = MatParams()
+    opts::MatParams = MatParams(),
+    tc::Union{Nothing, TraceCollector} = nothing,
 )
     N = length(demands)
     length(positions) == N ||
         throw(DimensionMismatch("positions and demands must match"))
 
     method = opts.analysis_method
+    StructuralSizer.emit!(tc, :checker, "design_footing_mat_aci", "", :enter;
+                          n_columns=N,
+                          analysis_method=string(typeof(method)),
+                          qa_kPa=Float64(ustrip(u"kPa", soil.qa)))
     if method isa RigidMat
-        return _design_mat_rigid(demands, positions, soil; opts = opts)
+        result = _design_mat_rigid(demands, positions, soil; opts = opts)
+        StructuralSizer.emit!(tc, :checker, "design_footing_mat_aci", "", :exit;
+                              status="ok",
+                              B_m=Float64(ustrip(u"m", result.B)),
+                              L_m=Float64(ustrip(u"m", result.Lm)),
+                              D_m=Float64(ustrip(u"m", result.D)),
+                              utilization=Float64(result.utilization))
+        return result
     elseif method isa ShuklaAFM
-        return _design_mat_shukla(demands, positions, soil, method; opts = opts)
+        result = _design_mat_shukla(demands, positions, soil, method; opts = opts)
+        StructuralSizer.emit!(tc, :checker, "design_footing_mat_aci", "", :exit;
+                              status="ok",
+                              B_m=Float64(ustrip(u"m", result.B)),
+                              L_m=Float64(ustrip(u"m", result.Lm)),
+                              D_m=Float64(ustrip(u"m", result.D)),
+                              utilization=Float64(result.utilization))
+        return result
     elseif method isa WinklerFEA
-        return _design_mat_winkler_fea(demands, positions, soil, method; opts = opts)
+        result = _design_mat_winkler_fea(demands, positions, soil, method; opts = opts)
+        StructuralSizer.emit!(tc, :checker, "design_footing_mat_aci", "", :exit;
+                              status="ok",
+                              B_m=Float64(ustrip(u"m", result.B)),
+                              L_m=Float64(ustrip(u"m", result.Lm)),
+                              D_m=Float64(ustrip(u"m", result.D)),
+                              utilization=Float64(result.utilization))
+        return result
     else
+        StructuralSizer.emit!(tc, :checker, "design_footing_mat_aci", "", :failure;
+                              reason="unknown_analysis_method",
+                              analysis_method=string(typeof(method)))
         error("Unknown mat analysis method: $(typeof(method))")
     end
 end

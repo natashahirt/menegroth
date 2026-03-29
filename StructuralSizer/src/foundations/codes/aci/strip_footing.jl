@@ -71,6 +71,14 @@ end
 # Public API
 # ─────────────────────────────────────────────────────────────────────────────
 
+# =============================================================================
+# Solver Trace Contract (manual registry; function is documented)
+# =============================================================================
+TRACE_REGISTRY[(:design_footing, :checker)] =
+    TracedFunctionMeta(:design_footing, :checker,
+                       [:enter, :exit, :decision, :iteration, :failure], nothing,
+                       @__FILE__, @__LINE__)
+
 """
     design_footing(::StripFooting, demands, positions, soil; opts) → StripFootingResult
 
@@ -98,12 +106,17 @@ function design_footing(::StripFooting,
     demands::Vector{<:FoundationDemand},
     positions::Vector{<:Length},
     soil::Soil;
-    opts::StripParams = StripParams()
+    opts::StripParams = StripParams(),
+    tc::Union{Nothing, TraceCollector} = nothing,
 )
     N = length(demands)
     N ≥ 2 || throw(ArgumentError("Strip footing requires ≥ 2 columns (got $N)"))
     length(positions) == N ||
         throw(DimensionMismatch("positions length must match demands"))
+
+    StructuralSizer.emit!(tc, :checker, "design_footing_strip_aci", "", :enter;
+                          n_columns=N,
+                          qa_kPa=Float64(ustrip(u"kPa", soil.qa)))
 
     # Material / options
     fc     = opts.material.concrete.fc′
@@ -360,7 +373,7 @@ function design_footing(::StripFooting,
         (n_top + n_bot) * Ab_l * bar_len_long +
         N * n_tran * Ab_t * bar_len_trans)
 
-    return StripFootingResult{typeof(uconvert(u"m", B)),
+    result = StripFootingResult{typeof(uconvert(u"m", B)),
                               typeof(As_bot_m2),
                               typeof(V_conc),
                               typeof(demands[1].Pu)}(
@@ -373,5 +386,11 @@ function design_footing(::StripFooting,
         V_conc, V_steel,
         utilization,
     )
+    StructuralSizer.emit!(tc, :checker, "design_footing_strip_aci", "", :exit;
+                          B_m=Float64(ustrip(u"m", result.B)),
+                          L_m=Float64(ustrip(u"m", result.L_ftg)),
+                          D_m=Float64(ustrip(u"m", result.D)),
+                          utilization=Float64(result.utilization))
+    return result
 end
 

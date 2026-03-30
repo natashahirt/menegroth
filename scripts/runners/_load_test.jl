@@ -32,7 +32,7 @@ println("All $(length(expected)) experiment types present.")
 
 # Verify tool registry includes new types
 contract = StructuralSynthesizer.api_llm_contract()
-exp_names = [e["name"] for e in contract["experiment_types"]]
+exp_names = [e["name"] for e in contract["experiments"]]
 println("\nContract experiment types: $exp_names")
 for e in expected
     @assert e in exp_names "Missing from contract: $e"

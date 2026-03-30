@@ -7,8 +7,8 @@
 # regular length units (ft or m) so the API always returns consistent numeric data.
 # =============================================================================
 
-"""Round a number to the given decimal digits (default 3). Used for consistent API output."""
-_round_val(x; digits=3) = round(x; digits=digits)
+"""Round a number to the given decimal digits (default 3). JSON-safe: Inf/NaN → nothing."""
+_round_val(x; digits=3) = isfinite(x) ? round(x; digits=digits) : nothing
 
 """Return sorted indices of a dict (e.g. design.slabs, design.columns)."""
 _sorted_indices(d::AbstractDict) = sort(collect(keys(d)))

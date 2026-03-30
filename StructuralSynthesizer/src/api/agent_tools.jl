@@ -762,7 +762,8 @@ function agent_diagnose_summary(design::BuildingDesign)::Dict{String, Any}
         type_stats[etype] = Dict{String, Any}("total" => length(elems), "failing" => n_fail)
 
         for e in elems
-            ratio = get(e, "governing_ratio", 0.0)
+            ratio_raw = get(e, "governing_ratio", 0.0)
+            ratio = ratio_raw isa Number ? Float64(ratio_raw) : 0.0
             push!(all_elements, ratio => e)
             if !get(e, "ok", true)
                 gc = get(e, "governing_check", "unknown")
@@ -851,10 +852,12 @@ function agent_query_elements(
 
     function _matches(d::Dict)
         if !isnothing(min_ratio)
-            get(d, "governing_ratio", 0.0) < min_ratio && return false
+            r = something(get(d, "governing_ratio", 0.0), 0.0)
+            r < min_ratio && return false
         end
         if !isnothing(max_ratio)
-            get(d, "governing_ratio", 0.0) > max_ratio && return false
+            r = something(get(d, "governing_ratio", 0.0), 0.0)
+            r > max_ratio && return false
         end
         if !isnothing(governing_check)
             get(d, "governing_check", "") != governing_check && return false

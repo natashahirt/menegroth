@@ -169,6 +169,28 @@ function report_summary_json(design::BuildingDesign; report_units=nothing)
         "embodied_carbon" => Dict("value" => _round_val(s.embodied_carbon; digits=0), "unit" => "kgCO2e"),
     )
 
+    # ─── Floor Area & EC Intensity ────────────────────────────────────
+    struc = design.structure
+    floor_area_m2 = sum(ustrip(u"m^2", c.area) for c in struc.cells; init=0.0)
+    is_imp = du.units[:length] == u"ft"
+    floor_area_disp = is_imp ? floor_area_m2 * 10.7639 : floor_area_m2
+    area_unit = is_imp ? "ft2" : "m2"
+    ec_intensity_m2 = floor_area_m2 > 0 ? s.embodied_carbon / floor_area_m2 : 0.0
+    ec_intensity_disp = is_imp ? ec_intensity_m2 / 10.7639 : ec_intensity_m2
+    intensity_unit = is_imp ? "kgCO2e/ft2" : "kgCO2e/m2"
+
+    result["floor_area"] = Dict{String, Any}(
+        "value" => _round_val(floor_area_disp; digits=0),
+        "unit"  => area_unit,
+        "value_m2" => _round_val(floor_area_m2; digits=0),
+    )
+    result["ec_intensity"] = Dict{String, Any}(
+        "value"    => _round_val(ec_intensity_disp; digits=1),
+        "unit"     => intensity_unit,
+        "value_m2" => _round_val(ec_intensity_m2; digits=1),
+        "unit_m2"  => "kgCO2e/m2",
+    )
+
     return result
 end
 
@@ -423,6 +445,13 @@ function condense_result(design::BuildingDesign; report_units=nothing)
                  "steel=$(mat["steel_weight"]["value"]) $(mat["steel_weight"]["unit"]), " *
                  "rebar=$(mat["rebar_weight"]["value"]) $(mat["rebar_weight"]["unit"]), " *
                  "EC=$(mat["embodied_carbon"]["value"]) $(mat["embodied_carbon"]["unit"])")
+
+    fa = get(d, "floor_area", nothing)
+    eci = get(d, "ec_intensity", nothing)
+    if !isnothing(fa) && !isnothing(eci)
+        push!(lines, "Floor area: $(fa["value"]) $(fa["unit"]) ($(fa["value_m2"]) m2). " *
+                     "EC intensity: $(eci["value"]) $(eci["unit"]) ($(eci["value_m2"]) kgCO2e/m2)")
+    end
 
     return join(lines, "\n")
 end

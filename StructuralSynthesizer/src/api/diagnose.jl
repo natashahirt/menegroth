@@ -594,7 +594,7 @@ function _slab_rebar_summary(sr::SlabDesignResult, du::DisplayUnits)::Dict{Strin
         for (loc, rd) in strip_data
             as_req = ustrip(u"mm^2", rd.As_required)
             as_prov = ustrip(u"mm^2", rd.As_provided)
-            prov_req = as_req > 0 ? round(as_prov / as_req; digits=2) : Inf
+            prov_req = as_req > 0 ? round(as_prov / as_req; digits=2) : nothing
             spacing_disp = _to_display(du, :thickness, rd.spacing)
             strip_out[string(loc)] = Dict{String, Any}(
                 "bar_size"       => rd.bar_size,
@@ -789,7 +789,7 @@ function _diagnose_agent_summary(
     # Per-type pass/fail counts and worst ratios
     function _stats(dicts, type_label)
         isempty(dicts) && return nothing
-        ratios   = [get(d, "governing_ratio", 0.0) for d in dicts]
+        ratios   = [something(get(d, "governing_ratio", 0.0), 0.0) for d in dicts]
         failing  = count(d -> !get(d, "ok", true), dicts)
         worst_id = argmax(ratios)
         Dict{String, Any}(
@@ -821,6 +821,16 @@ function _diagnose_agent_summary(
     # EC total
     total_ec = _round_val(s.embodied_carbon; digits=0)
 
+    # Floor area & EC intensity
+    struc = design.structure
+    floor_area_m2 = sum(ustrip(u"m^2", c.area) for c in struc.cells; init=0.0)
+    is_imp = du.units[:length] == u"ft"
+    floor_area_disp = is_imp ? floor_area_m2 * 10.7639 : floor_area_m2
+    area_unit = is_imp ? "ft2" : "m2"
+    ec_intensity_m2 = floor_area_m2 > 0 ? s.embodied_carbon / floor_area_m2 : 0.0
+    ec_intensity_disp = is_imp ? ec_intensity_m2 / 10.7639 : ec_intensity_m2
+    intensity_unit = is_imp ? "kgCO2e/ft2" : "kgCO2e/m2"
+
     stats_vec = filter(!isnothing, [
         _stats(col_dicts,  "columns"),
         _stats(beam_dicts, "beams"),
@@ -833,6 +843,10 @@ function _diagnose_agent_summary(
         "critical_element"   => s.critical_element,
         "critical_ratio"     => _round_val(s.critical_ratio),
         "total_ec_kgco2e"    => total_ec,
+        "floor_area"         => Dict("value" => _round_val(floor_area_disp; digits=0), "unit" => area_unit,
+                                     "value_m2" => _round_val(floor_area_m2; digits=0)),
+        "ec_intensity"       => Dict("value" => _round_val(ec_intensity_disp; digits=1), "unit" => intensity_unit,
+                                     "value_m2" => _round_val(ec_intensity_m2; digits=1), "unit_m2" => "kgCO2e/m2"),
         "governing_check_distribution" => [
             Dict("check" => c, "count" => n) for (c, n) in check_dist
         ],
@@ -905,7 +919,7 @@ function _build_goal_recommendations(
 
     # ── Goal: reduce_column_size ──────────────────────────────────────
     if !isempty(col_dicts)
-        worst_col = col_dicts[argmax(get(d, "governing_ratio", 0.0) for d in col_dicts)]
+        worst_col = col_dicts[argmax(something(get(d, "governing_ratio", 0.0), 0.0) for d in col_dicts)]
         gc = get(worst_col, "governing_check", "")
         if gc == "punching_shear_col"
             ps = _punching_strategy_code(params)
@@ -942,11 +956,11 @@ function _build_goal_recommendations(
 
     # ── Goal: reduce_slab_thickness ──────────────────────────────────
     if !isempty(slab_dicts)
-        worst_slab = slab_dicts[argmax(get(d, "governing_ratio", 0.0) for d in slab_dicts)]
+        worst_slab = slab_dicts[argmax(something(get(d, "governing_ratio", 0.0), 0.0) for d in slab_dicts)]
         if get(worst_slab, "governing_check", "") == "deflection"
             d_curr = _deflection_limit_divisor(params)
             if d_curr > 240
-                new_ratio = _round_val(get(worst_slab, "governing_ratio", 0.0) * 240 / d_curr)
+                new_ratio = _round_val(something(get(worst_slab, "governing_ratio", 0.0), 0.0) * 240 / d_curr)
                 push!(recs, Dict{String, Any}(
                     "goal"             => "reduce_slab_thickness",
                     "primary_lever"    => "deflection_limit",
@@ -1110,7 +1124,7 @@ function _diagnose_lever_impacts(
                 "direction"         => "relaxed_column_size",
                 "n_punching_governed_columns" => length(punching_cols),
                 "worst_punching_ratio_current" =>
-                    _round_val(maximum(get(d, "governing_ratio", 0.0) for d in punching_cols)),
+                    _round_val(maximum(something(get(d, "governing_ratio", 0.0), 0.0) for d in punching_cols)),
                 "estimated_new_governing_ratio" => _round_val(maximum(pm_ratios)),
                 "confidence"        => "estimated",
                 "basis"             => "Under reinforce_first, shear studs handle the punching demand; " *

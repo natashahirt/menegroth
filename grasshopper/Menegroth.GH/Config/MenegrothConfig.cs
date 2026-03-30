@@ -94,9 +94,22 @@ namespace Menegroth.GH.Config
         {
             lock (BuildingGeometryLock)
             {
+                if (geo == null)
+                {
+                    _lastBuildingGeometry = null;
+                    _lastBuildingGeometryHash = null;
+                    _lastGeometrySummary = null;
+                    return;
+                }
+
+                string? newHash = geo.ComputeHash();
+                if (summary != null)
+                    _lastGeometrySummary = summary;
+                else if (newHash != _lastBuildingGeometryHash)
+                    _lastGeometrySummary = null;
+
                 _lastBuildingGeometry = geo;
-                _lastBuildingGeometryHash = geo?.ComputeHash();
-                _lastGeometrySummary = summary;
+                _lastBuildingGeometryHash = newHash;
             }
         }
 

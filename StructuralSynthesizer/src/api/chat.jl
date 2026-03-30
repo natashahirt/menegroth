@@ -107,6 +107,41 @@ const _SUGGESTIONS_END   = "---END---"
 const _CLARIFY_START     = "---CLARIFY---"
 const _CLARIFY_END       = "---END-CLARIFY---"
 
+# Human-readable labels for tool_progress SSE events.
+const _TOOL_DISPLAY_LABELS = Dict{String, String}(
+    "get_situation_card"       => "Checking status",
+    "get_building_summary"     => "Analyzing geometry",
+    "get_geometry_digest"      => "Computing geometry digest",
+    "get_current_params"       => "Reading parameters",
+    "get_design_history"       => "Fetching design history",
+    "get_diagnose_summary"     => "Summarizing diagnostics",
+    "get_diagnose"             => "Running diagnostics",
+    "query_elements"           => "Querying elements",
+    "get_implemented_provisions" => "Looking up code provisions",
+    "get_lever_map"            => "Mapping design levers",
+    "explain_field"            => "Explaining parameter",
+    "get_provision_rationale"  => "Fetching code rationale",
+    "validate_params"          => "Validating parameters",
+    "run_design"               => "Running design",
+    "compare_designs"          => "Comparing designs",
+    "suggest_next_action"      => "Suggesting next steps",
+    "predict_geometry_effect"  => "Predicting geometry effect",
+    "run_experiment"           => "Running experiment",
+    "list_experiments"         => "Listing experiments",
+    "batch_experiments"        => "Running experiments",
+    "narrate_element"          => "Narrating element",
+    "narrate_comparison"       => "Narrating comparison",
+    "get_solver_trace"         => "Reading solver trace",
+    "explain_trace_lookup"     => "Explaining trace entry",
+    "get_result_summary"       => "Summarizing results",
+    "get_condensed_result"     => "Condensing results",
+    "get_applicability"        => "Checking applicability",
+    "clarify_user_intent"      => "Asking clarification",
+    "record_insight"           => "Recording insight",
+    "get_session_insights"     => "Fetching insights",
+    "get_response_guidelines"  => "Loading guidelines",
+)
+
 # ─── Token budget ─────────────────────────────────────────────────────────────
 
 """Approximate token count via character-length heuristic (1 token ≈ 4 chars)."""
@@ -289,24 +324,16 @@ $_SUGGESTIONS_END
 
 const _CLARIFICATION_INSTRUCTION = """
 
-CLARIFICATION MODE (when key intent is missing):
-If you need a constrained user choice, include a machine-readable clarification block:
+CLARIFICATION (when user intent is genuinely ambiguous):
+Include at most ONE machine-readable block per response:
 
 $_CLARIFY_START
 {"id":"short_key","prompt":"question text","options":[{"id":"opt_a","label":"Option A"},{"id":"opt_b","label":"Option B"}],"allow_multiple":false,"required_for":"decision this unblocks","rationale":"why this matters"}
 $_CLARIFY_END
 
-Rules:
-- Emit at most ONE clarification block per response.
-- Keep options to 2-4 concise choices.
-- Use this only when user intent is genuinely ambiguous.
+Keep options to 2–4 concise choices. Only use when truly ambiguous.
 
-INTERPRETING CLARIFICATION RESPONSES:
-When the user replies with a message prefixed `[CLARIFICATION_RESPONSE id=<key> options=<comma_ids>]`,
-this is a structured answer to a previous clarification prompt you issued. The `id` matches the
-clarification you sent, and `options` lists the selected option IDs. Treat the human-readable text
-after the bracket as additional context. Incorporate the selection into your reasoning and proceed
-— do NOT re-ask the same clarification.
+When the user replies with `[CLARIFICATION_RESPONSE id=<key> options=<comma_ids>]`, incorporate the selection and proceed — do NOT re-ask the same clarification.
 """
 
 const _TOOL_INDEX = """
@@ -320,41 +347,44 @@ TOOLS (each tool description includes USE WHEN guidance):
   Memory:      record_insight, get_session_insights
   Experiments: list_experiments, batch_experiments
 
-  REQUIRED: validate_params before run_design. record_insight after each design. get_session_insights before recommending.
+  REQUIRED: get_situation_card before run_design (confirm has_geometry). validate_params before run_design. record_insight after each design. get_session_insights before recommending.
 """
 
 const _DESIGN_SYSTEM_PREAMBLE = """
 You are a structural engineering design assistant for the Menegroth automated design system.
-Your role is to help the user choose appropriate design parameters for their building.
+Help the user choose design parameters for their building.
 
 SAFETY:
   Code provisions (ACI 318, AISC 360, ASCE 7) are enforced by the solver.
-  Do not invent or cite clause numbers or formulas unless a tool result provides them.
+  Never invent clause numbers or formulas — only cite what tool results provide.
 
-EVIDENCE-FIRST (mandatory for numerical claims):
-  1. OBSERVE — call a diagnostic tool (get_diagnose_summary, query_elements, get_solver_trace).
-  2. CITE — reference specific ratios, check names, or trace events.
-  3. CONSULT — call get_lever_map(check=<governing_check>) for actionable parameters.
-  4. RECOMMEND — grounded in steps 1–3. If no design exists, discuss qualitatively only.
+EVIDENCE-FIRST:
+  After a design exists → OBSERVE (get_diagnose_summary) → CITE ratios/checks → CONSULT get_lever_map → RECOMMEND.
+  Before any design → use the geometry digest and predict_geometry_effect for qualitative guidance. Do NOT invent ratios, pass/fail, or EC totals.
 
-GEOMETRY VS PARAMETERS:
-  GEOMETRY (Grasshopper) — column positions, spans, story heights, plan shape. CANNOT change via API.
-  PARAMETERS (API) — floor_type, materials, loads, method, sizing. CAN change via run_design.
-  For geometric recommendations, tell the user what to change in Grasshopper. Do NOT call run_design with geometric keys.
+SERVER CACHE GATES:
+  has_geometry (from get_situation_card) = geometry on the server from Grasshopper POST /design, NOT text in this chat.
+  has_design = a solved design exists on the server.
+  run_design requires has_geometry. If false → tell user to run Design from Grasshopper; meanwhile advise from the digest.
+  suggest_next_action, run_experiment, diagnose, query_elements, get_solver_trace require has_design.
 
-GEOMETRY:
-  A GEOMETRY DIGEST may appear below — it is authoritative. Follow its inline instructions.
-  If you believe geometry data is missing, call get_geometry_digest before saying so.
+GEOMETRY vs PARAMETERS:
+  GEOMETRY (Grasshopper) — column positions, spans, heights, plan shape. Cannot change via API.
+  PARAMETERS (API) — floor_type, materials, loads, method, sizing. Change via run_design.
+  For geometry changes → tell user what to adjust in Grasshopper.
+
+$(_parameter_space_card())
+
+GEOMETRY DIGEST:
+  If a digest appears below, it is authoritative — quote it. If you think geometry is missing, call get_geometry_digest before saying so.
 
 PARAMETER CHANGES:
-  Output a JSON code block with only changed fields.
-  Always include `_history_label` (string, ≤6 words) summarizing the change for the params history UI.
+  Output a JSON code block with only changed fields. Include `_history_label` (≤6 words).
 
 SESSION HISTORY:
-  Never say "reduced from X to Y" unless get_design_history has ≥2 entries or compare_designs was called.
-  n_designs = 0 or 1 → report absolute metrics only, no comparison language.
+  No comparison language ("reduced from X to Y") unless get_design_history has ≥2 entries.
 
-For full scope limits, anti-patterns, and detailed behavioral rules, call get_response_guidelines.
+For anti-patterns and detailed rules, call get_response_guidelines.
 $_TOOL_INDEX
 $_CLARIFICATION_INSTRUCTION
 $_NEXT_QUESTIONS_INSTRUCTION
@@ -362,38 +392,31 @@ $_NEXT_QUESTIONS_INSTRUCTION
 
 const _RESULTS_SYSTEM_PREAMBLE = """
 You are a structural engineering results analyst for the Menegroth automated design system.
-Your role is to help the user understand their building's design results.
+Help the user understand their building's design results.
 
 SAFETY:
-  Code provisions (ACI 318, AISC 360, ASCE 7) are enforced by the solver.
-  Quote code_clause and limit_state_description fields from tool results.
-  Do not invent clause numbers or formulas.
+  Code provisions are enforced by the solver. Quote code_clause / limit_state_description from tool results. Never invent clause numbers or formulas.
 
-EVIDENCE-FIRST (mandatory for numerical claims):
-  1. OBSERVE — call a diagnostic tool (get_diagnose_summary, query_elements, get_solver_trace).
-  2. CITE — reference specific ratios, check names, or trace events.
-  3. CONSULT — call get_lever_map(check=<governing_check>) for actionable parameters.
-  4. RECOMMEND — grounded in steps 1–3.
+EVIDENCE-FIRST:
+  OBSERVE (get_diagnose_summary) → CITE ratios/checks → CONSULT get_lever_map → RECOMMEND.
 
-GEOMETRY VS PARAMETERS:
-  GEOMETRY (Grasshopper) — column positions, spans, story heights, plan shape. CANNOT change via API.
-  PARAMETERS (API) — floor_type, materials, loads, method, sizing. CAN change via run_design.
-  For geometric recommendations, tell the user what to change in Grasshopper. Do NOT call run_design with geometric keys.
+GEOMETRY vs PARAMETERS:
+  GEOMETRY (Grasshopper) — column positions, spans, heights, plan shape. Cannot change via API.
+  PARAMETERS (API) — floor_type, materials, loads, method, sizing. Change via run_design.
+  For geometry changes → tell user what to adjust in Grasshopper.
 
-GEOMETRY:
-  A GEOMETRY DIGEST may appear below — it is authoritative. Follow its inline instructions.
-  It may differ from server cache when GEOMETRY_CONTEXT.geometry_stale is true.
-  If you believe geometry data is missing, call get_geometry_digest before saying so.
+$(_parameter_space_card())
+
+GEOMETRY DIGEST:
+  If a digest appears below, it is authoritative — quote it. When GEOMETRY_CONTEXT.geometry_stale is true, cached results describe the last solved model, not current geometry.
 
 PARAMETER CHANGES:
-  Output a JSON code block with only changed fields.
-  Always include `_history_label` (string, ≤6 words) summarizing the change for the params history UI.
+  Output a JSON code block with only changed fields. Include `_history_label` (≤6 words).
 
 SESSION HISTORY:
-  Never say "reduced from X to Y" unless get_design_history has ≥2 entries or compare_designs was called.
-  n_designs = 0 or 1 → report absolute metrics only, no comparison language.
+  No comparison language unless get_design_history has ≥2 entries.
 
-For full scope limits, anti-patterns, and detailed behavioral rules, call get_response_guidelines.
+For anti-patterns and detailed rules, call get_response_guidelines.
 $_TOOL_INDEX
 $_CLARIFICATION_INSTRUCTION
 $_NEXT_QUESTIONS_INSTRUCTION
@@ -2260,13 +2283,12 @@ function _build_system_prompt(
               "could not fully resolve from body; stale detection used client_geometry_hash fallback if present"
         """
 
-GEOMETRY / CACHE MISMATCH (MANDATORY):
-- Resolved geometry fingerprint for this chat request ($how): $res_show
-- server_cached_geometry_hash (last completed POST /design on this server): $srv
-The BUILDING GEOMETRY section(s) below describe the CURRENT client model when present (structured JSON and/or narrative).
-Any \"LATEST RESULTS\" or \"DETAILED RESULTS\" section would refer to the SERVER hash above — a different model. Those sections are OMITTED from this prompt because they would mislead you.
-Do not estimate forces, utilization ratios, pass/fail, embodied carbon, or element-level behavior for the current geometry using old cache data. Tell the user to run Design in Grasshopper so POST /design refreshes the server for this geometry.
-You SHOULD give short, mechanism-level expectations for how the design problem may shift with this geometry change (spans, columns, stories, panel shapes) — without fabricated numbers. You may still discuss parameters, scope, and past runs via get_design_history / compare_designs (use geometry_hash and comparison_note).
+GEOMETRY / CACHE MISMATCH:
+  Prompt geometry ($how): $res_show
+  Server cache (last POST /design): $srv
+  These differ — cached results are OMITTED because they describe a different model.
+  Do NOT invent ratios, pass/fail, or EC for the current geometry. Tell the user to run Design from Grasshopper.
+  You may give mechanism-level expectations (qualitative) for how the design problem shifts, and discuss past runs via get_design_history.
 """
     else
         ""
@@ -2286,19 +2308,15 @@ You SHOULD give short, mechanism-level expectations for how the design problem m
             push!(parts, """
 
 OPENING ANALYSIS (first response — no design yet):
-  Your opening must demonstrate you read THIS SPECIFIC geometry. Lead with concrete
-  structural observations from the GEOMETRY DIGEST, not generic questions.
+  Prove you read THIS geometry. Lead with structural observations, not generic questions.
 
-  Structure your response as:
-    1. GEOMETRY READ — quote specific spans (ft/m), column count, story heights, panel
-       aspect ratios directly from the digest.
-    2. STRUCTURAL IMPLICATIONS — what will likely govern: long spans → punching shear,
-       high panel aspect ratio → DDM applicability concern, tall stories → column slenderness.
-    3. PARAMETER RECOMMENDATIONS — a reasoned starting point for THIS building, not a menu.
-    4. WARNINGS — surface any geometry warnings from the digest with severity assessment.
-    5. QUESTIONS — only ask what the geometry cannot answer (occupancy, fire rating, preferences).
+  1. GEOMETRY — quote exact spans, column count, story heights, aspect ratios from the digest.
+  2. IMPLICATIONS — what governs: long spans → punching shear, high aspect ratio → DDM concern, tall stories → slenderness.
+  3. PARAMETERS — recommend floor_type, column_type, method, optimize_for ONLY from the PARAMETER SPACE card. Tie each to a digest number. If spans exceed ~30 ft for flat_plate, recommend adding columns in Grasshopper or switching to one_way — never systems outside the card.
+  4. WARNINGS — surface digest warnings with severity.
+  5. QUESTIONS — only what the digest cannot answer (occupancy, fire rating, preferences).
 
-  If geometry data seems missing, call get_geometry_digest before claiming it is unavailable.
+  If geometry seems missing, call get_geometry_digest first.
 """)
         end
 
@@ -2318,15 +2336,11 @@ OPENING ANALYSIS (first response — no design yet):
         push!(parts, """
 
 OPENING ANALYSIS (results exist):
-  Lead with the critical failure mode and why it governs for THIS geometry.
-  Call get_diagnose_summary immediately. Your opening should read like an engineer's assessment:
+  Lead with the critical failure mode for THIS geometry. Call get_diagnose_summary immediately.
 
-    "Punching shear governs at 4 of 9 interior columns (worst ratio 1.34 at column 5).
-     With 28 ft spans and 12 in. columns, the critical perimeter is too short for the
-     tributary load. Options: reinforce_first (shear studs) or grow columns to 16 in."
+  Example tone: "Punching shear governs at 4 of 9 interior columns (worst ratio 1.34 at col 5). With 28 ft spans and 12 in columns, the critical perimeter is too short. Options: reinforce_first or grow columns to 16 in."
 
-  If get_diagnose_summary returns size_warnings with parameter_headroom="none",
-  recommend geometry changes FIRST via suggest_next_action.
+  If parameter_headroom="exhausted" → recommend geometry changes first via suggest_next_action.
 """)
 
         cached_design = _get_last_design()
@@ -2472,6 +2486,26 @@ function _extract_clarification_prompt(full_text::String)::Union{Dict{String, An
     end
 end
 
+"""
+    _strip_marker_blocks(text) -> String
+
+Remove machine-readable delimiter blocks (suggestions and clarification) from
+the assistant text so the client displays clean prose. The structured data is
+delivered separately via the `agent_turn_summary` SSE event.
+"""
+function _strip_marker_blocks(text::String)::String
+    out = text
+    # Delimiter constants contain only dashes/letters/spaces — safe to embed literally.
+    sug_re = Regex("\\Q$(_SUGGESTIONS_START)\\E[\\s\\S]*?\\Q$(_SUGGESTIONS_END)\\E", "s")
+    out = replace(out, sug_re => "")
+    clar_re = Regex("\\Q$(_CLARIFY_START)\\E[\\s\\S]*?\\Q$(_CLARIFY_END)\\E", "s")
+    out = replace(out, clar_re => "")
+    # Fuzzy variants the LLM might use
+    out = replace(out, r"---+\s*NEXT\s*QUESTIONS\s*---+[\s\S]*?---+\s*END\s*---+"si => "")
+    out = replace(out, r"---+\s*CLARIFY\s*---+[\s\S]*?---+\s*END[- ]?CLARIFY\s*---+"si => "")
+    return strip(out)
+end
+
 # ─── Turn summary contract ────────────────────────────────────────────────────
 
 """
@@ -2563,16 +2597,64 @@ function _contains_numerical_claims(text::AbstractString)::Bool
 end
 
 """
-    _build_turn_summary(; suggestions, clarification_data, tool_actions) -> Dict
+    _extract_params_patch(text) -> Union{Dict{String,Any}, Nothing}
+
+Extract a JSON code block from the assistant text that looks like a parameter
+patch (contains at least one known API param key or a `_history_label`).
+Returns the parsed dict with validation info, or `nothing` if no patch found.
+"""
+function _extract_params_patch(text::String)::Union{Dict{String, Any}, Nothing}
+    isempty(text) && return nothing
+    m = match(r"```json\s*\n([\s\S]*?)\n\s*```"i, text)
+    isnothing(m) && return nothing
+    json_str = strip(m.captures[1])
+    isempty(json_str) && return nothing
+
+    local parsed
+    try
+        parsed = Dict{String, Any}(string(k) => v for (k, v) in JSON3.read(json_str))
+    catch
+        return nothing
+    end
+    isempty(parsed) && return nothing
+
+    api_keys, geo_hints, _ = _classify_patch(parsed)
+    (isempty(api_keys) && !haskey(parsed, "_history_label")) && return nothing
+
+    history_label = pop!(parsed, "_history_label", nothing)
+    clean_patch = Dict{String, Any}(k => v for (k, v) in parsed if lowercase(k) in _API_PARAM_KEYS)
+    isempty(clean_patch) && return nothing
+
+    validation = _validate_params_patch(clean_patch)
+    result = Dict{String, Any}(
+        "patch"      => clean_patch,
+        "valid"      => get(validation, "ok", false),
+        "violations" => get(validation, "violations", []),
+        "warnings"   => get(validation, "warnings", []),
+    )
+    if !isempty(geo_hints)
+        result["geometric_hints"] = geo_hints
+    end
+    if !isnothing(history_label)
+        result["history_label"] = string(history_label)
+    end
+    return result
+end
+
+"""
+    _build_turn_summary(; suggestions, clarification_data, tool_actions, params_patch) -> Dict
 
 Canonical turn-summary event.  Guarantees `suggested_next_questions` is always
 present (empty array when absent) and `clarification_prompt` is either a valid
 dict or `nothing`.  `tool_actions` is an optional array of tool-action records.
+When `params_patch` is present, includes validated parameter changes for the
+client's "Apply & Run" button.
 """
 function _build_turn_summary(;
     suggestions::Vector{String}         = String[],
     clarification_data                  = nothing,
     tool_actions::Vector{Dict{String,Any}} = Dict{String,Any}[],
+    params_patch::Union{Dict{String,Any}, Nothing} = nothing,
 )::Dict{String, Any}
     summary = Dict{String, Any}(
         "type"                     => "agent_turn_summary",
@@ -2582,12 +2664,40 @@ function _build_turn_summary(;
     if !isempty(tool_actions)
         summary["tool_actions"] = tool_actions
     end
+    if !isnothing(params_patch)
+        summary["params_patch"] = params_patch
+    end
     return summary
 end
 
 # ─── LLM streaming client ────────────────────────────────────────────────────
 
 const MAX_AGENT_TOOL_ROUNDS = 8
+
+"""
+    _emit_text_chunked(sse_stream, text; chunk_chars=80)
+
+Emit pre-generated text to the SSE stream in small chunks so the client
+receives incremental `token` events rather than one monolithic blob.
+Chunks at whitespace boundaries near `chunk_chars` characters.
+"""
+function _emit_text_chunked(sse_stream::HTTP.Stream, text::String; chunk_chars::Int=80)
+    isempty(text) && return
+    pos = 1
+    n = length(text)
+    while pos <= n
+        stop = min(pos + chunk_chars - 1, n)
+        if stop < n
+            sp = findprev(' ', text, stop)
+            if !isnothing(sp) && sp >= pos
+                stop = sp
+            end
+        end
+        chunk = text[pos:stop]
+        write(sse_stream, "data: $(JSON3.write(Dict("token" => chunk)))\n\n")
+        pos = stop + 1
+    end
+end
 
 """Read dictionary values by string/symbol key with fallback."""
 function _dict_get(d, key::String, default=nothing)
@@ -2893,6 +3003,17 @@ function _stream_llm_to_sse(
                         ),
                     ))
 
+                    # Emit tool-start progress event so the client can show live status.
+                    write(stream, "data: $(JSON3.write(Dict{String,Any}(
+                        "tool_progress" => Dict{String,Any}(
+                            "tool"   => tool_name,
+                            "label"  => get(_TOOL_DISPLAY_LABELS, tool_name, tool_name),
+                            "status" => "running",
+                            "round"  => tool_round,
+                            "index"  => i,
+                        ),
+                    )))\n\n")
+
                     t0 = time()
                     args_dict = _parse_tool_args(args_json)
                     result = if isnothing(args_dict)
@@ -2924,10 +3045,23 @@ function _stream_llm_to_sse(
                         _attach_geometry_alignment!(result, Dict{String, Any}("client_geometry_hash" => client_geometry_hash))
                     end
                     elapsed_ms = round(Int, (time() - t0) * 1000)
+                    tool_status = haskey(result, "error") ? "error" : "ok"
+
+                    # Emit tool-done progress event.
+                    write(stream, "data: $(JSON3.write(Dict{String,Any}(
+                        "tool_progress" => Dict{String,Any}(
+                            "tool"       => tool_name,
+                            "label"      => get(_TOOL_DISPLAY_LABELS, tool_name, tool_name),
+                            "status"     => tool_status,
+                            "round"      => tool_round,
+                            "index"      => i,
+                            "elapsed_ms" => elapsed_ms,
+                        ),
+                    )))\n\n")
 
                     push!(tool_actions, Dict{String, Any}(
                         "tool" => tool_name,
-                        "status" => haskey(result, "error") ? "error" : "ok",
+                        "status" => tool_status,
                         "elapsed_ms" => elapsed_ms,
                         "summary" => _tool_action_summary(result),
                     ))
@@ -3009,18 +3143,24 @@ function _stream_llm_to_sse(
                 "question again and I'll summarize them."
         end
 
-        if !isempty(full_text)
-            write(stream, "data: $(JSON3.write(Dict("token" => full_text)))\n\n")
-        end
-
         suggestions        = _extract_suggestions(full_text)
         clarification_data = _extract_clarification_prompt(full_text)
 
+        # Strip machine-readable markers from the user-facing text.
+        # The structured data is delivered via agent_turn_summary instead.
+        display_text = _strip_marker_blocks(full_text)
+
+        # Emit text as incremental token chunks for a responsive typing feel.
+        if !isempty(display_text)
+            _emit_text_chunked(stream, display_text)
+        end
+
         # Evidence-first enforcement: warn when no tools were called but the
         # response appears to contain numerical structural claims.
-        if isempty(tool_actions) && _contains_numerical_claims(full_text)
+        if isempty(tool_actions) && _contains_numerical_claims(display_text)
             warning = "\n\n⚠️ This response was generated without consulting structural tools. Numerical results should be verified with a tool call."
             write(stream, "data: $(JSON3.write(Dict("token" => warning)))\n\n")
+            display_text *= warning
             full_text *= warning
             @warn "Evidence-first warning triggered — no tool calls but numerical claims detected"
         end
@@ -3030,10 +3170,13 @@ function _stream_llm_to_sse(
             _append_history!(session_id, "assistant", full_text)
         end
 
+        params_patch = _extract_params_patch(full_text)
+
         summary = _build_turn_summary(;
             suggestions        = suggestions,
             clarification_data = clarification_data,
             tool_actions       = tool_actions,
+            params_patch       = params_patch,
         )
 
         # Attach context usage so the front-end can show a budget indicator.
@@ -3303,8 +3446,8 @@ Phase 4 — Communication:
 - `narrate_comparison`       — plain-English comparison of two designs.
 - `clarify_user_intent`      — structured multiple-choice clarification.
 """
-const _NO_DESIGN_HINT   = "Run a design from Grasshopper before opening Results Assistant."
-const _NO_GEOMETRY_HINT = "Submit geometry via the GeometryInput component first."
+const _NO_DESIGN_HINT   = "No solved design on the server yet. Run Design from Grasshopper (POST /design) first. Until then, use the geometry digest and predict_geometry_effect for qualitative advice."
+const _NO_GEOMETRY_HINT = "Server-cached geometry comes from a Grasshopper Design run (POST /design). If a digest is in the prompt, you can still advise on geometry changes via predict_geometry_effect — but run_design and get_building_summary require server geometry."
 const CHAT_AUTOWAIT_TIMEOUT_S = 90.0
 
 # Tools that should prefer waiting for an in-flight design to finish so they
@@ -3647,7 +3790,7 @@ function _dispatch_chat_tool(tool::String, args::Dict{String, Any})::Dict{String
         return Dict{String, Any}(
             "error" => "no_geometry",
             "message" => "No geometry available. Neither chat building_geometry nor server POST /design geometry is loaded.",
-            "recovery_hint" => "Ask the user to load geometry from Grasshopper, or ensure building_geometry is included in the chat request.",
+            "recovery_hint" => _NO_GEOMETRY_HINT,
         )
 
     elseif tool == "get_current_params"
@@ -3755,7 +3898,7 @@ function _dispatch_chat_tool(tool::String, args::Dict{String, Any})::Dict{String
                 "message" => "No ontology entry for \"$section\". " *
                     "Available sections: $(join(sort(collect(keys(PROVISION_ONTOLOGY))), ", ")). " *
                     "Check families: $(join(sort(collect(keys(CHECK_FAMILY_TO_PROVISION))), ", ")).",
-                "hint"    => "Try a section number (\"22.6\"), full key (\"ACI_318.22.6\"), or check family name (\"punching_shear\").",
+                "recovery_hint" => "Try a section number (\"22.6\"), full key (\"ACI_318.22.6\"), or check family name (\"punching_shear\").",
             )
         end
         return entry
@@ -3846,7 +3989,7 @@ function _dispatch_chat_tool(tool::String, args::Dict{String, Any})::Dict{String
         cached_struc = with_cache_read(c -> c.structure, DESIGN_CACHE)
         isnothing(cached_struc) && return Dict(
             "error"          => "no_geometry",
-            "message"        => "No geometry loaded. Submit geometry via POST /design first.",
+            "message"        => "No server-cached geometry for run_design. Run Design from Grasshopper (POST /design) first. A chat digest does not populate the design cache.",
             "recovery_hint"  => _NO_GEOMETRY_HINT,
         )
 
@@ -4047,8 +4190,9 @@ Endpoints:
 
 **Geometry init trace (SSE):** When the request includes structured `building_geometry`, the
 response begins with one or more `data:` lines where the JSON object has `"type":"geometry_init"`.
-Phases include: `start`, `skeleton`, `skeleton_done`, `initialize`, `initialize_done`, `digest`,
-`digest_done`, `cache_hit_structure`, `cache_hit_digest`, `fallback`, `error`, `complete`.
+Phases include: `opening` (immediate “why you’re waiting”), `start`, `skeleton`, `skeleton_done`,
+`initialize`, `initialize_done`, `digest`, `digest_done`, `cache_hit_structure`, `cache_hit_digest`,
+`fallback`, `error`, `complete`.
 Each line may include `message`, `elapsed_ms`, `geometry_hash_prefix`, `cached`, and counts
 (`n_cells`, etc.). The assistant token stream follows the same format as before (`token`, summary, `[DONE]`).
 """
@@ -4174,6 +4318,10 @@ function register_chat_routes!()
             HTTP.setheader(stream, "Cache-Control" => "no-cache")
             HTTP.setheader(stream, "Connection"    => "keep-alive")
             startwrite(stream)
+            _chat_geometry_sse_emit!(
+                stream, "opening";
+                message = "Loading your building geometry for the assistant — larger models can take a little while.",
+            )
             _chat_get_structure_digest(structured_geo; sse_stream=stream)
         end
 

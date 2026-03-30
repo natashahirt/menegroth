@@ -391,6 +391,125 @@ function api_params_schema_structured()
 end
 
 """
+    _parameter_space_card() -> String
+
+Generate a compact, plain-text summary of the solver's parameter space from
+`api_params_schema_structured()`.  Injected into the LLM system prompt so the
+model sees every valid enum, default, numeric range, and compatibility rule
+**before** it generates any recommendations.  This is the single source of
+truth — hand-written capability lists are no longer needed.
+"""
+function _parameter_space_card()::String
+    s = api_params_schema_structured()
+
+    function _enum_line(label::String, spec::Dict)
+        allowed = get(spec, "allowed", nothing)
+        isnothing(allowed) && return ""
+        default = get(spec, "default", nothing)
+        vals = if allowed isa Dict
+            unique(vcat(values(allowed)...))
+        else
+            collect(allowed)
+        end
+        parts = [isnothing(default) || v != string(default) ? string(v) : "$(v)*" for v in vals]
+        "  $label: $(join(parts, " | "))"
+    end
+
+    function _num_line(label::String, spec::Dict)
+        rng = get(spec, "range", nothing)
+        isnothing(rng) && return ""
+        unit = get(spec, "unit", "")
+        default = get(spec, "default", nothing)
+        def_str = isnothing(default) ? "" : " (default $(default))"
+        unit_str = isempty(unit) ? "" : " $unit"
+        "  $label: [$(rng[1])–$(rng[2])]$unit_str$def_str"
+    end
+
+    lines = String["PARAMETER SPACE (authoritative — recommend ONLY values from this card):"]
+
+    push!(lines, _enum_line("floor_type", s["floor_type"]))
+    push!(lines, _enum_line("column_type", s["column_type"]))
+    push!(lines, _enum_line("beam_type", s["beam_type"]))
+
+    fo = get(s, "floor_options", Dict())
+    ff = get(fo, "fields", Dict())
+    haskey(ff, "method")           && push!(lines, _enum_line("method", ff["method"]))
+    haskey(ff, "deflection_limit") && push!(lines, _enum_line("deflection_limit", ff["deflection_limit"]))
+    haskey(ff, "punching_strategy") && push!(lines, _enum_line("punching_strategy", ff["punching_strategy"]))
+
+    push!(lines, _enum_line("optimize_for", s["optimize_for"]))
+
+    haskey(s, "column_sizing_strategy") && push!(lines, _enum_line("column_sizing_strategy", s["column_sizing_strategy"]))
+    haskey(s, "beam_sizing_strategy")   && push!(lines, _enum_line("beam_sizing_strategy", s["beam_sizing_strategy"]))
+
+    col_cat = get(s, "column_catalog", Dict())
+    col_cat_allowed = get(col_cat, "allowed", nothing)
+    if col_cat_allowed isa Dict
+        cat_vals = sort(unique(vcat(values(col_cat_allowed)...)))
+        push!(lines, "  column_catalog: $(join(cat_vals, " | "))  (varies by column_type; null = auto)")
+    end
+    haskey(s, "beam_catalog") && push!(lines, _enum_line("beam_catalog", s["beam_catalog"]))
+
+    fo2 = get(s, "foundation_options", Dict())
+    ff2 = get(fo2, "fields", Dict())
+    haskey(ff2, "strategy") && push!(lines, _enum_line("foundation_strategy", ff2["strategy"]))
+
+    fr = get(s, "fire_rating", Dict())
+    fr_allowed = get(fr, "allowed", nothing)
+    if !isnothing(fr_allowed)
+        fr_def = get(fr, "default", nothing)
+        fr_parts = [v == fr_def ? "$(v)*" : "$(v)" for v in fr_allowed]
+        push!(lines, "  fire_rating: $(join(fr_parts, " | "))  (hours)")
+    end
+
+    loads = get(s, "loads", Dict())
+    load_fields = get(loads, "fields", Dict())
+    load_items = String[]
+    for (k, spec) in sort(collect(load_fields); by=first)
+        rng = get(spec, "range", nothing)
+        isnothing(rng) && continue
+        unit = get(spec, "unit", "")
+        push!(load_items, "$k [$(rng[1])–$(rng[2])] $unit")
+    end
+    !isempty(load_items) && push!(lines, "  loads: $(join(load_items, ", "))")
+
+    mats = get(s, "materials", Dict())
+    mat_fields = get(mats, "fields", Dict())
+    mat_items = String[]
+    for (k, spec) in sort(collect(mat_fields); by=first)
+        def = get(spec, "default", "")
+        push!(mat_items, "$k ($def*)")
+    end
+    !isempty(mat_items) && push!(lines, "  materials: $(join(mat_items, ", "))")
+
+    push!(lines, "  (* = default)")
+
+    # Compatibility rules from floor_type schema
+    push!(lines, "COMPATIBILITY:")
+    compat = get(get(s, "floor_type", Dict()), "compatibility_checks", nothing)
+    if !isnothing(compat)
+        for rule in get(compat, "rules", Any[])
+            when_clause = get(rule, "when", Dict())
+            requires    = get(rule, "requires", Dict())
+            when_ft     = get(when_clause, "floor_type", nothing)
+            ft_str = when_ft isa Vector ? join(when_ft, "/") : string(something(when_ft, "?"))
+            req_parts = String[]
+            for (param, vals) in requires
+                vstr = vals isa Vector ? join(vals, " | ") : string(vals)
+                push!(req_parts, "$param must be $vstr")
+            end
+            push!(lines, "  $ft_str -> $(join(req_parts, "; "))")
+        end
+    end
+
+    push!(lines, "SCOPE BOUNDARY:")
+    push!(lines, "  Gravity loads only. Systems not listed above do not exist in the solver.")
+    push!(lines, "  If asked about PT, composite deck, voided/bubble/waffle slabs, timber, CLT, modular: say unsupported, redirect to closest option above.")
+
+    return join(lines, "\n")
+end
+
+"""
     api_applicability_schema() -> Dict
 
 Return a compact, machine-readable subset of `api_params_schema_structured()`

@@ -306,6 +306,11 @@ footing_width(r::AbstractFoundationResult) = r.B
 """Pile cap width (plan dimension)."""
 footing_width(r::PileCapResult) = r.cap_B
 
+"""Footing overall thickness (depth)."""
+footing_depth(r::AbstractFoundationResult) = r.D
+"""Pile cap thickness (depth)."""
+footing_depth(r::PileCapResult) = r.cap_D
+
 """Utilization ratio (demand/capacity)."""
 utilization(r::AbstractFoundationResult) = r.utilization
 

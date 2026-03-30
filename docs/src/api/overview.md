@@ -211,6 +211,17 @@ Returns **503** if a design is still running/queued, or **404** if no design has
 
 LLM chat endpoint (SSE streaming). Returns **503** when `CHAT_LLM_API_KEY` is not configured.
 
+The SSE stream emits the following event types (each as `data: <JSON>\n\n`):
+
+| Event key | Description |
+|---|---|
+| `token` | Incremental text chunk (~80 chars). Suggestion/clarification markers are stripped; structured data is in `agent_turn_summary`. |
+| `tool_progress` | Real-time tool execution status. Fields: `tool` (name), `label` (human-readable), `status` (`"running"` / `"ok"` / `"error"`), `round`, `index`, and `elapsed_ms` (present when done). |
+| `agent_turn_summary` | End-of-turn structured data: `suggested_next_questions`, `clarification_prompt`, `tool_actions`, `context_usage`, and optionally `params_patch` (validated parameter changes for an "Apply & Run" button). |
+| `geometry_init` | Geometry initialization acknowledgement (when `building_geometry` is provided in the request). |
+| `error` | Error object with `error`, `message`, and `recovery_hint` fields. |
+| `[DONE]` | Literal string (not JSON) signaling end of stream. |
+
 ### POST /chat/action
 
 Agent tool dispatch endpoint used by the chat assistant.

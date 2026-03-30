@@ -8,6 +8,13 @@
 
 using Statistics: mean, std
 
+const _FLOOR_NAMES = Dict{String, String}(
+    "flat_plate" => "Flat Plate (two-way beamless slab)",
+    "flat_slab"  => "Flat Slab (flat plate with drop panels)",
+    "one_way"    => "One-Way Slab-and-Beam",
+    "vault"      => "Unreinforced Concrete Vault",
+)
+
 # ─── Slab panel plan metrics (face outlines, XY — not beam spans) ─────────────
 
 function _slab_face_indices(skel::BuildingSkeleton)::Vector{Int}
@@ -451,6 +458,7 @@ function agent_situation_card(
                 "However, the system prompt's 'Geometry analysis' block contains pre-computed beam spans, " *
                 "story heights, slab panel shapes, column grid, structural flags, and warnings derived from " *
                 "the raw building_geometry JSON — use those quantitatively. " *
+                "run_design will fail with no_geometry until Grasshopper runs a full Design — do not call it. " *
                 "For solver-level data (member sizing, check ratios, trace events), run Design so the server ingests geometry.",
         )
     end
@@ -528,6 +536,11 @@ function agent_situation_card(
             "NO DESIGN YET: Geometry is loaded but no design has run. " *
             "Quote exact span/height numbers from the geometry digest in your opening. " *
             "Call get_geometry_digest if you need more detail.")
+    elseif isnothing(struc)
+        push!(guidance_parts,
+            "NO SERVER GEOMETRY: run_design and diagnose tools are unavailable. " *
+            "Advise from the digest — quote spans, recommend geometry changes (add columns, shorten bays), use predict_geometry_effect. " *
+            "Tell the user to run Design from Grasshopper to enable solver tools.")
     end
     if !isempty(guidance_parts)
         card["_guidance"] = join(guidance_parts, "\n")
@@ -1599,131 +1612,80 @@ function agent_response_guidelines()::Dict{String, Any}
         # question; the value is the recommended tool chain.
         "tool_selection_recipes" => [
             Dict("intent" => "Start of conversation",
-                 "sequence" => "get_situation_card → if no design: read geometry digest, recommend initial parameters"),
+                 "sequence" => "get_situation_card → read digest → recommend initial parameters"),
             Dict("intent" => "Why is X failing?",
-                 "sequence" => "get_diagnose_summary → get_provision_rationale(governing_check) → narrate_element"),
+                 "sequence" => "get_diagnose_summary → get_provision_rationale → narrate_element"),
             Dict("intent" => "What should I change?",
                  "sequence" => "get_diagnose_summary → suggest_next_action → validate_params"),
             Dict("intent" => "Would a bigger column help?",
                  "sequence" => "run_experiment(punching or pm_column)"),
             Dict("intent" => "Try changing X",
-                 "sequence" => "run_experiment → validate_params → run_design → compare_designs (if ≥2 designs)"),
+                 "sequence" => "run_experiment → validate_params → run_design → compare_designs"),
             Dict("intent" => "Explain this element/result",
                  "sequence" => "narrate_element or narrate_comparison"),
-            Dict("intent" => "Compare runs / Did it help?",
+            Dict("intent" => "Compare runs",
                  "sequence" => "compare_designs + get_design_history"),
             Dict("intent" => "What does parameter X do?",
-                 "sequence" => "explain_field(X) — returns schema, rationale, related structural checks"),
-            Dict("intent" => "Why does the code require this?",
-                 "sequence" => "get_provision_rationale(section_or_check) — mechanism, philosophy, misconceptions"),
-            Dict("intent" => "Geometry data seems missing",
-                 "sequence" => "get_geometry_digest — NEVER claim spans/heights are unavailable without calling this first"),
-        ],
-        "required_sequences" => [
-            "Always call validate_params before run_design.",
-            "Always call record_insight after each design run.",
-            "Always call get_session_insights before making recommendations.",
+                 "sequence" => "explain_field(X)"),
+            Dict("intent" => "Missing geometry data",
+                 "sequence" => "get_geometry_digest — never claim data is unavailable without calling this first"),
+            Dict("intent" => "Carbon / sustainability (pre-design)",
+                 "sequence" => "get_situation_card → quote digest → recommend shorter spans, optimize_for=carbon, predict_geometry_effect — ONLY systems from PARAMETER SPACE card"),
         ],
 
-        # ── Scope Limits ──────────────────────────────────────────────────
-        # The solver CANNOT do these. Do not promise or attempt them.
-        "scope_limits" => [
-            "Lateral / seismic analysis (gravity only)",
-            "Connection design",
-            "Progressive collapse / blast",
-            "Vibration serviceability",
-            "PT concrete",
-            "Composite deck slabs",
-            "Timber / masonry",
-            "Geometry modification (must be done in Grasshopper)",
-            "Multi-objective Pareto optimization",
-            "Non-rectangular grids for DDM/EFM (use FEA instead)",
+        "required_sequences" => [
+            "get_situation_card before run_design (confirm has_geometry)",
+            "validate_params before run_design",
+            "record_insight after each design run",
+            "get_session_insights before recommending",
         ],
+
+        # ── Parameter Space (generated from schema — single source of truth) ──
+        "parameter_space" => _parameter_space_card(),
 
         # ── Epistemic Boundary ────────────────────────────────────────────
         "epistemic_boundary" =>
-            "You lack direct code text (ACI, AISC, ASCE 7). All code logic is in the solver. " *
-            "Quote code_clause / limit_state_description from tool results. " *
-            "Do NOT invent section numbers or formulas. " *
-            "Use get_implemented_provisions to check code coverage. If unsure, say so.",
+            "All code logic is in the solver. Quote code_clause / limit_state_description from tool results. " *
+            "Never invent section numbers or formulas. Use get_implemented_provisions to check coverage.",
 
         # ── Anti-patterns (FORBIDDEN) ─────────────────────────────────────
         "anti_patterns" => [
-            "Filler openings like 'I'd be happy to help with your structural design'",
-            "Listing all possible floor types without recommending one",
-            "Asking questions the geometry data already answers (spans, stories, column count)",
+            "Filler openings ('I'd be happy to help…')",
+            "Listing all floor types without recommending one for THIS geometry",
+            "Asking what the digest already answers (spans, stories, column count)",
             "Generic descriptions that could apply to any building",
-            "Repeating geometry stats without structural interpretation",
-            "Claiming 'a tool would be needed for more detail' — the GEOMETRY DIGEST IS the detail",
-            "Claiming 'span lengths are not provided' — they ARE in the digest; quote the exact range",
-            "Vague references like 'some spans exceeding X ft' — give the EXACT min–max range",
-            "Any hedging about geometry data when the digest contains it",
-            "Claiming geometry is missing without first calling get_geometry_digest",
-            "Suggesting the user 'provide' data that is already in the digest",
+            "Claiming geometry is missing without calling get_geometry_digest first",
+            "Hedging ('some spans exceeding…') — quote the EXACT min–max from the digest",
+            "Calling run_design when has_geometry is false",
+            "Calling suggest_next_action / run_experiment / diagnose when has_design is false",
+            "Confusing 'no server cache' with 'no digest' — the digest can exist without a design run",
+            "Recommending systems outside the PARAMETER SPACE card (PT, composite deck, voided/bubble/waffle slab, timber, CLT, modular, passive cooling, etc.)",
         ],
 
         # ── Geometry Rules ────────────────────────────────────────────────
-        "geometry_recovery_rule" =>
-            "If you believe geometry data is missing, stale, or incomplete — do NOT say so. " *
-            "Call get_geometry_digest to fetch a fresh authoritative digest. " *
-            "Only after that tool returns an error may you tell the user geometry is unavailable.",
-
-        "geometry_remediation" =>
-            "When suggest_next_action returns geometry_actions or parameter_headroom='exhausted': " *
-            "(1) present geometric changes FIRST with quantitative targets and Grasshopper instructions, " *
-            "(2) then discuss parameter adjustments as secondary measures. " *
-            "Use predict_geometry_effect to explain the structural reasoning. " *
-            "When size_warnings have severity='critical', always surface them.",
-
-        "geometry_what_if" =>
-            "When the user asks about changing spans, adding columns, or adjusting story height: " *
-            "call predict_geometry_effect(variable, direction) to get scaling laws and economical ranges. " *
-            "Present trade-offs quantitatively — do not guess at scaling relationships.",
-
-        "geometry_hash_stale_cache" =>
-            "If GEOMETRY_CONTEXT.geometry_stale is true, cached tools describe the last solved model, " *
-            "not current geometry. Explain directional effects qualitatively; do NOT invent numerical " *
-            "results for unsolved geometry. get_design_history entries include geometry_hash for " *
-            "cross-geometry awareness.",
-
-        "client_geometry_vs_server" =>
-            "POST /chat may include building_geometry JSON and/or geometry_summary narrative — use them. " *
-            "get_situation_card.has_geometry only reflects the server cache from POST /design, NOT prompt geometry. " *
-            "When a STRUCTURE-BASED GEOMETRY DIGEST is present, the server has built a real BuildingStructure — " *
-            "use cell spans, slab panel data, member lengths, and column tributary areas directly. " *
-            "For solver-level data (sizing, check ratios, trace): server cache needed → suggest a Design run.",
+        "geometry_rules" => Dict{String, Any}(
+            "recovery" =>
+                "If geometry seems missing → call get_geometry_digest. Only report 'unavailable' if that tool errors.",
+            "remediation" =>
+                "When parameter_headroom='exhausted' → present geometry changes FIRST (Grasshopper), then parameter tweaks. Use predict_geometry_effect for reasoning. Surface critical size_warnings.",
+            "what_if" =>
+                "For span/column/height questions → call predict_geometry_effect. Present trade-offs quantitatively.",
+            "stale_cache" =>
+                "When geometry_stale is true, cached results are for the old model. Explain directional effects only — no invented numbers.",
+            "client_vs_server" =>
+                "has_geometry = server cache from POST /design. A prompt digest can exist without has_geometry. Quote the digest for layout advice; solver data requires a Design run.",
+        ),
 
         # ── Irregularity Interpretation ───────────────────────────────────
         "irregularity_rules" => Dict{String, Any}(
             "span_cv" =>
-                "span_stats.cv aggregates ALL beam edge lengths (X + Y). Different bay sizes in X vs Y " *
-                "produce a high CV even on a perfectly rectangular orthogonal grid — that is normal, not irregular.",
+                "span_stats.cv aggregates X+Y beam lengths. Different bay sizes in each direction produce high CV on a regular grid — not irregular.",
             "true_irregularity" =>
-                "True plan irregularity (setbacks, re-entrant corners, non-orthogonal grids, free-form columns) " *
-                "must be inferred from: slab_panel_plan.plan_shape_classification, quad corner deviation from 90°, " *
-                "column tributary area CV and grid_regularity — NOT from span-length CV alone.",
+                "Infer from plan_shape_classification, quad corner deviation, tributary area CV, and grid_regularity — NOT span CV alone.",
             "vertical" =>
-                "When story heights vary significantly, the geometry summary flags vertical irregularity — " *
-                "that is separate from plan regularity.",
+                "Varying story heights are flagged separately from plan regularity.",
             "column_layouts" =>
-                "For non-rectangular column layouts, closest-spacing values are more meaningful than gridline spacings.",
+                "Non-rectangular layouts: closest-spacing values > gridline spacings.",
         ),
-
-        # ── Key Parameters Quick Reference ────────────────────────────────
-        # Use explain_field(field_name) for full detail on any parameter.
-        "key_parameters" => [
-            Dict("name" => "floor_type",        "values" => "flat_plate | flat_slab | one_way | vault",
-                 "note" => "Biggest system lever"),
-            Dict("name" => "column_type",       "values" => "rc_rect | rc_circular | steel_w | steel_hss | pixelframe"),
-            Dict("name" => "beam_type",         "values" => "steel_w | rc_rect | rc_tbeam | steel_hss | pixelframe"),
-            Dict("name" => "method",            "values" => "DDM | DDM_SIMPLIFIED | EFM | EFM_HARDY_CROSS | FEA",
-                 "note" => "Slab analysis method"),
-            Dict("name" => "deflection_limit",  "values" => "L_240 | L_360 | L_480",
-                 "note" => "Stricter limit → thicker slabs"),
-            Dict("name" => "punching_strategy", "values" => "grow_columns | reinforce_first | reinforce_last"),
-            Dict("name" => "optimize_for",      "values" => "weight | carbon | cost"),
-            Dict("name" => "fire_rating",       "values" => "0 | 1 | 1.5 | 2 | 3 | 4",
-                 "note" => "Hours; affects cover, thickness, fire protection"),
-        ],
     )
 end

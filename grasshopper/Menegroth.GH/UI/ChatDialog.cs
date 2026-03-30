@@ -569,6 +569,8 @@ namespace Menegroth.GH.UI
             };
             if (_paramsJson != null) requestBody["params"] = _paramsJson;
 
+            DesignRunHttpClient.EnrichChatBodyWithGeometry(requestBody);
+
             var responseBuilder = new StringBuilder();
             bool hadError = false;
             AppendChat("Assistant", "");

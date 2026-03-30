@@ -290,7 +290,7 @@ function design_footing(::MatFoundation,
         StructuralSizer.emit!(tc, :checker, "design_footing_mat_aci", "", :exit;
                               status="ok",
                               B_m=Float64(ustrip(u"m", result.B)),
-                              L_m=Float64(ustrip(u"m", result.Lm)),
+                              L_m=Float64(ustrip(u"m", result.L_ftg)),
                               D_m=Float64(ustrip(u"m", result.D)),
                               utilization=Float64(result.utilization))
         return result
@@ -299,7 +299,7 @@ function design_footing(::MatFoundation,
         StructuralSizer.emit!(tc, :checker, "design_footing_mat_aci", "", :exit;
                               status="ok",
                               B_m=Float64(ustrip(u"m", result.B)),
-                              L_m=Float64(ustrip(u"m", result.Lm)),
+                              L_m=Float64(ustrip(u"m", result.L_ftg)),
                               D_m=Float64(ustrip(u"m", result.D)),
                               utilization=Float64(result.utilization))
         return result
@@ -308,7 +308,7 @@ function design_footing(::MatFoundation,
         StructuralSizer.emit!(tc, :checker, "design_footing_mat_aci", "", :exit;
                               status="ok",
                               B_m=Float64(ustrip(u"m", result.B)),
-                              L_m=Float64(ustrip(u"m", result.Lm)),
+                              L_m=Float64(ustrip(u"m", result.L_ftg)),
                               D_m=Float64(ustrip(u"m", result.D)),
                               utilization=Float64(result.utilization))
         return result

@@ -8,15 +8,19 @@ using StructuralSynthesizer
 using StructuralSynthesizer:
     _extract_suggestions,
     _extract_clarification_prompt,
+    _extract_params_patch,
+    _strip_marker_blocks,
     _get_history, _append_history!, _clear_history!,
     _remember_clarification!, CHAT_CLARIFICATION_KEYS,
     CHAT_HISTORY, _SUGGESTIONS_START, _SUGGESTIONS_END, _CLARIFY_START, _CLARIFY_END,
+    _TOOL_DISPLAY_LABELS,
     _dispatch_chat_tool, _classify_patch,
     _build_turn_summary, _normalize_clarification,
     _query_int, _route_coerce_int, _route_coerce_float,
     _build_system_prompt, _estimate_tokens, MAX_CONTEXT_TOKENS, _SYSTEM_PROMPT_BUDGET_FRACTION,
     agent_response_guidelines, agent_building_summary,
-    api_applicability_schema, api_params_schema_structured, api_tool_schema
+    api_applicability_schema, api_params_schema_structured, api_tool_schema,
+    _parameter_space_card
 using Test
 using HTTP
 
@@ -418,20 +422,17 @@ println("Testing chat API…")
         @test !haskey(result, "error")
         @test haskey(result, "tool_selection_recipes")
         @test haskey(result, "required_sequences")
-        @test haskey(result, "scope_limits")
+        @test haskey(result, "parameter_space")
         @test haskey(result, "epistemic_boundary")
         @test haskey(result, "anti_patterns")
-        @test haskey(result, "geometry_recovery_rule")
-        @test haskey(result, "geometry_remediation")
-        @test haskey(result, "geometry_what_if")
-        @test haskey(result, "geometry_hash_stale_cache")
-        @test haskey(result, "client_geometry_vs_server")
+        @test haskey(result, "geometry_rules")
         @test haskey(result, "irregularity_rules")
-        @test haskey(result, "key_parameters")
-        @test result["scope_limits"] isa Vector
-        @test !isempty(result["scope_limits"])
+        @test result["parameter_space"] isa String
+        @test occursin("PARAMETER SPACE", result["parameter_space"])
         @test result["tool_selection_recipes"] isa Vector
-        @test result["key_parameters"] isa Vector
+        @test result["geometry_rules"] isa Dict
+        @test haskey(result["geometry_rules"], "recovery")
+        @test haskey(result["geometry_rules"], "client_vs_server")
     end
 
     @testset "api_tool_schema — has get_response_guidelines" begin
@@ -449,7 +450,76 @@ println("Testing chat API…")
         @test haskey(g["tool_selection_recipes"][1], "intent")
         @test haskey(g["tool_selection_recipes"][1], "sequence")
         @test haskey(g, "required_sequences")
-        @test g["key_parameters"] isa Vector
+        @test haskey(g, "parameter_space")
+        @test !haskey(g, "key_parameters")  # removed — redundant with parameter_space card
+    end
+
+    # ─── Parameter space card (schema-driven, single source of truth) ───
+
+    @testset "_parameter_space_card — contains all schema enums" begin
+        card = _parameter_space_card()
+        @test card isa String
+        @test startswith(card, "PARAMETER SPACE")
+
+        schema = api_params_schema_structured()
+
+        # Every floor_type enum value must appear
+        for v in schema["floor_type"]["allowed"]
+            @test occursin(string(v), card)
+        end
+        # Every column_type enum value must appear
+        for v in schema["column_type"]["allowed"]
+            @test occursin(string(v), card)
+        end
+        # Every beam_type enum value must appear
+        for v in schema["beam_type"]["allowed"]
+            @test occursin(string(v), card)
+        end
+        # Analysis methods
+        for v in schema["floor_options"]["fields"]["method"]["allowed"]
+            @test occursin(string(v), card)
+        end
+        # Optimization targets
+        for v in schema["optimize_for"]["allowed"]
+            @test occursin(string(v), card)
+        end
+
+        # Sizing strategies
+        for v in schema["column_sizing_strategy"]["allowed"]
+            @test occursin(string(v), card)
+        end
+        # Foundation strategy
+        fo = schema["foundation_options"]["fields"]["strategy"]
+        for v in fo["allowed"]
+            @test occursin(string(v), card)
+        end
+        # Beam catalog
+        for v in schema["beam_catalog"]["allowed"]
+            @test occursin(string(v), card)
+        end
+
+        # Structural sections
+        @test occursin("COMPATIBILITY:", card)
+        @test occursin("SCOPE BOUNDARY:", card)
+        @test occursin("Gravity loads only", card)
+
+        # Defaults are marked with *
+        @test occursin("flat_plate*", card)
+        @test occursin("rc_rect*", card)
+        @test occursin("discrete*", card)
+    end
+
+    @testset "_parameter_space_card — stays under character budget" begin
+        card = _parameter_space_card()
+        @test length(card) <= 2500
+    end
+
+    @testset "System prompt — contains parameter space card" begin
+        prompt = _build_system_prompt("design", nothing, "")
+        @test occursin("PARAMETER SPACE", prompt)
+        @test occursin("SCOPE BOUNDARY:", prompt)
+        # Must NOT contain the old hand-written block
+        @test !occursin("SOLVER CAPABILITIES (HARD BOUNDARY", prompt)
     end
 
     # ─── System prompt token budget ──────────────────────────────────────
@@ -481,6 +551,130 @@ println("Testing chat API…")
     @testset "System prompt — unknown mode returns fallback" begin
         prompt = _build_system_prompt("unknown", nothing, "")
         @test prompt == "You are a helpful structural engineering assistant."
+    end
+
+    # ─── Marker stripping ─────────────────────────────────────────────────
+    @testset "Strip markers — suggestions block removed" begin
+        text = """
+        Here is my analysis.
+
+        $_SUGGESTIONS_START
+        • Question one
+        • Question two
+        $_SUGGESTIONS_END
+        """
+        stripped = _strip_marker_blocks(text)
+        @test !occursin(_SUGGESTIONS_START, stripped)
+        @test !occursin("Question one", stripped)
+        @test occursin("Here is my analysis.", stripped)
+    end
+
+    @testset "Strip markers — clarification block removed" begin
+        text = """
+        Analysis result.
+        $_CLARIFY_START
+        {"id":"test","prompt":"Q?","options":[]}
+        $_CLARIFY_END
+        Done.
+        """
+        stripped = _strip_marker_blocks(text)
+        @test !occursin(_CLARIFY_START, stripped)
+        @test !occursin("test", stripped)
+        @test occursin("Analysis result.", stripped)
+        @test occursin("Done.", stripped)
+    end
+
+    @testset "Strip markers — no markers returns text unchanged" begin
+        text = "Plain text with no markers."
+        @test _strip_marker_blocks(text) == text
+    end
+
+    @testset "Strip markers — both blocks removed" begin
+        text = """
+        Intro.
+        $_SUGGESTIONS_START
+        • S1
+        $_SUGGESTIONS_END
+        Middle.
+        $_CLARIFY_START
+        {"id":"x","prompt":"Q","options":[]}
+        $_CLARIFY_END
+        End.
+        """
+        stripped = _strip_marker_blocks(text)
+        @test !occursin(_SUGGESTIONS_START, stripped)
+        @test !occursin(_CLARIFY_START, stripped)
+        @test occursin("Intro.", stripped)
+        @test occursin("Middle.", stripped)
+        @test occursin("End.", stripped)
+    end
+
+    # ─── Params patch extraction ──────────────────────────────────────────
+    @testset "Extract params patch — valid JSON code block" begin
+        text = """
+        I recommend changing the floor type:
+
+        ```json
+        {"floor_type": "flat_slab", "_history_label": "Switch to flat slab"}
+        ```
+
+        This should improve performance.
+        """
+        patch = _extract_params_patch(text)
+        @test !isnothing(patch)
+        @test haskey(patch, "patch")
+        @test patch["patch"]["floor_type"] == "flat_slab"
+        @test haskey(patch, "valid")
+        @test haskey(patch, "history_label")
+        @test patch["history_label"] == "Switch to flat slab"
+    end
+
+    @testset "Extract params patch — no JSON block" begin
+        @test isnothing(_extract_params_patch("No code block here."))
+    end
+
+    @testset "Extract params patch — JSON with no API keys" begin
+        text = """
+        ```json
+        {"totally_unknown_key": 42}
+        ```
+        """
+        @test isnothing(_extract_params_patch(text))
+    end
+
+    @testset "Extract params patch — geometric-only keys rejected" begin
+        text = """
+        ```json
+        {"column_spacing": 25, "bay_width": 30}
+        ```
+        """
+        @test isnothing(_extract_params_patch(text))
+    end
+
+    # ─── Turn summary with params_patch ───────────────────────────────────
+    @testset "Turn summary — with params_patch" begin
+        patch = Dict{String,Any}(
+            "patch" => Dict{String,Any}("floor_type" => "flat_slab"),
+            "valid" => true,
+            "violations" => [],
+            "warnings" => [],
+        )
+        s = _build_turn_summary(; params_patch=patch)
+        @test haskey(s, "params_patch")
+        @test s["params_patch"]["valid"] == true
+    end
+
+    @testset "Turn summary — no params_patch when nothing" begin
+        s = _build_turn_summary()
+        @test !haskey(s, "params_patch")
+    end
+
+    # ─── Tool display labels ──────────────────────────────────────────────
+    @testset "Tool display labels — coverage" begin
+        @test haskey(_TOOL_DISPLAY_LABELS, "run_design")
+        @test haskey(_TOOL_DISPLAY_LABELS, "get_situation_card")
+        @test haskey(_TOOL_DISPLAY_LABELS, "get_solver_trace")
+        @test _TOOL_DISPLAY_LABELS["run_design"] == "Running design"
     end
 
 end # @testset "Chat API"

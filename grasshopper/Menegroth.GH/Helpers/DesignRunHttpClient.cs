@@ -322,7 +322,8 @@ namespace Menegroth.GH.Helpers
         /// <summary>
         /// POST to /chat and read the SSE stream. Invokes <paramref name="onToken"/> for each
         /// content token, <paramref name="onSummary"/> when the <c>agent_turn_summary</c> event
-        /// arrives, and <paramref name="onError"/> if the server returns a non-200 or an error
+        /// arrives, <paramref name="onToolProgress"/> for real-time tool execution status,
+        /// and <paramref name="onError"/> if the server returns a non-200 or an error
         /// event. The stream ends when the server sends <c>data: [DONE]</c>.
         /// </summary>
         public static async Task PostChatStreamAsync(
@@ -331,7 +332,8 @@ namespace Menegroth.GH.Helpers
             Action<string> onToken,
             Action<string> onError,
             CancellationToken ct,
-            Action<JObject>? onSummary = null)
+            Action<JObject>? onSummary = null,
+            Action<JObject>? onToolProgress = null)
         {
             var content = new StringContent(jsonBody, Encoding.UTF8, "application/json");
             using var req = new HttpRequestMessage(HttpMethod.Post, NormalizeUrl(baseUrl, "chat")) { Content = content };
@@ -384,6 +386,12 @@ namespace Menegroth.GH.Helpers
                     if (obj["type"]?.ToString() == "agent_turn_summary")
                     {
                         onSummary?.Invoke(obj);
+                        continue;
+                    }
+                    // Real-time tool execution progress (running / ok / error).
+                    if (obj["tool_progress"] is JObject progress)
+                    {
+                        onToolProgress?.Invoke(progress);
                         continue;
                     }
                     var token = obj["token"]?.ToString();
@@ -472,7 +480,7 @@ namespace Menegroth.GH.Helpers
         /// </summary>
         public static async Task<JObject?> PostChatActionAsync(
             string baseUrl, string tool, JObject? args = null,
-            bool includeBuildingGeometry = true, CancellationToken ct = default)
+            CancellationToken ct = default, bool includeBuildingGeometry = true)
         {
             try
             {
@@ -516,7 +524,10 @@ namespace Menegroth.GH.Helpers
                 baseBody["building_geometry"] = geoJson;
             if (!string.IsNullOrEmpty(geoHash))
                 baseBody["client_geometry_hash"] = geoHash;
-            if (!string.IsNullOrEmpty(summary))
+            // Do not replace geometry_summary when the caller already set it (e.g. ChatDialog merges
+            // geometry + results digest). Only fall back to the global snapshot when absent.
+            var existing = baseBody["geometry_summary"]?.ToString();
+            if (string.IsNullOrWhiteSpace(existing) && !string.IsNullOrEmpty(summary))
                 baseBody["geometry_summary"] = summary;
             return baseBody;
         }

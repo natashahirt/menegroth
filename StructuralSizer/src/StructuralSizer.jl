@@ -560,7 +560,7 @@ export FoundationDemand
 export foundation_type, foundation_symbol
 
 # Common interface
-export concrete_volume, steel_volume, footprint_area, footing_length, footing_width, utilization
+export concrete_volume, steel_volume, footprint_area, footing_length, footing_width, footing_depth, utilization
 
 # Foundation options
 export SpreadParams, StripParams, MatParams, FoundationOptions

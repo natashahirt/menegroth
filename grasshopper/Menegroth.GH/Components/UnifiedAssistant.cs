@@ -119,6 +119,9 @@ namespace Menegroth.GH.Components
             DA.GetData(4, ref open);
 
             var geometry = geoGoo.Value;
+            if (geoGoo.IsValid)
+                MenegrothConfig.UpdateBuildingGeometry(geometry, summary: null);
+
             var currentParams = paramsGoo.Value;
             var currentHash = currentParams.ComputeHash();
 

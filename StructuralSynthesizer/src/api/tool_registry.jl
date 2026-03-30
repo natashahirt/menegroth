@@ -225,7 +225,11 @@ const LEVER_SURFACE_MAP = Dict{String, Any}(
     "deflection" => Dict(
         "parameters" => ["deflection_limit", "concrete", "floor_type"],
         "geometry"   => ["span_length"],
-        "direction"  => "relaxing L/360→L/240 allows thinner slabs; higher f'c increases Ec and reduces deflection",
+        "direction"  => "PRIMARY: Reduce span length (deflection ∝ L⁴) — adding columns or subdividing bays " *
+                         "in Grasshopper is the most effective lever. " *
+                         "SECONDARY: Relaxing L/360→L/240 allows a thinner section but should only be " *
+                         "suggested if the project can tolerate additional deflection (no sensitive " *
+                         "partitions or equipment). Higher f'c increases Ec and reduces deflection.",
     ),
     "one_way_shear" => Dict(
         "parameters" => ["concrete", "floor_type"],

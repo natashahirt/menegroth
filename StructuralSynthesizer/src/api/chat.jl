@@ -340,7 +340,7 @@ const _TOOL_INDEX = """
 
 TOOLS (each tool description includes USE WHEN guidance):
   Orient:      get_situation_card (FIRST), get_building_summary, get_geometry_digest, get_current_params, get_design_history
-  Diagnose:    get_diagnose_summary (FIRST), get_diagnose, query_elements, get_solver_trace, get_lever_map
+  Diagnose:    get_diagnose_summary (FIRST — returns total_ec_kgco2e, critical_ratio, pass/fail, per-element EC), get_diagnose, query_elements, get_solver_trace, get_lever_map
   Explore:     run_experiment (FAST), validate_params → run_design, compare_designs, suggest_next_action
   Communicate: narrate_element, narrate_comparison, get_result_summary, get_condensed_result, clarify_user_intent
   Reference:   explain_field, get_provision_rationale, get_applicability, get_response_guidelines
@@ -348,6 +348,7 @@ TOOLS (each tool description includes USE WHEN guidance):
   Experiments: list_experiments, batch_experiments
 
   REQUIRED: get_situation_card before run_design (confirm has_geometry). validate_params before run_design. record_insight after each design. get_session_insights before recommending.
+  FOR ANY "what is X?" QUESTION: call the relevant tool BEFORE answering. Never quote numbers from memory.
 
 MICRO-EXPERIMENTS — PREFER OVER FULL REDESIGN FOR QUICK WHAT-IFS:
   run_experiment is INSTANT (~0.1s) and uses the cached design — no full re-run.
@@ -390,7 +391,12 @@ Help the user choose design parameters for their building.
 
 SAFETY:
   Code provisions (ACI 318, AISC 360, ASCE 7) are enforced by the solver.
-  Never invent clause numbers or formulas — only cite what tool results provide.
+  NEVER invent numbers — no fabricated EC totals, ratios, areas, thicknesses, or quantities.
+  NEVER invent clause numbers or formulas — only cite what tool results provide.
+  Every quantitative claim MUST come from either:
+    (a) the CACHED DESIGN SUMMARY / LATEST RESULTS SUMMARY in this system prompt, OR
+    (b) a tool call you made in this conversation.
+  If the number is not in (a) or (b), call a tool before quoting it.
 
 EVIDENCE-FIRST:
   After a design exists → OBSERVE (get_diagnose_summary) → CITE ratios/checks → CONSULT get_lever_map → RECOMMEND.
@@ -398,12 +404,25 @@ EVIDENCE-FIRST:
   For single-element what-ifs → use run_experiment FIRST (instant, no re-run). Only escalate to run_design for global changes.
   When the user asks "would X help?" or "what about Y?" → run_experiment to get real numbers, then present the result.
 
+RETRIEVAL QUESTIONS — CALL A TOOL IF DATA IS NOT IN THE SYSTEM PROMPT:
+  You may quote numbers directly from the CACHED DESIGN SUMMARY or LATEST RESULTS SUMMARY above.
+  For anything NOT already in this prompt, call the relevant tool FIRST:
+    - Per-element EC breakdown → get_diagnose_summary (returns total_ec_kgco2e and per-element ec_kgco2e)
+    - Detailed checks, per-element ratios → get_diagnose_summary or query_elements
+    - Element dimensions, sections → query_elements or get_diagnose
+    - Geometry (spans, heights, floor area, column count) → get_geometry_digest
+    - Current parameters → get_current_params
+    - Design history / comparison → get_design_history or compare_designs
+    - Derived metrics (e.g. EC intensity = EC/area) → call get_geometry_digest for area, then compute
+  NEVER answer a factual question by guessing. If the data is not in this prompt and you haven't called a tool, call one.
+
 STRUCTURAL REASONING — DO NOT HALLUCINATE TRADE-OFFS:
   NEVER invent structural relationships. Use predict_geometry_effect or get_lever_map to verify directions.
   Key relationships to get RIGHT:
     - Reducing spans REDUCES tributary area (∝ L²) → REDUCES punching demand. Never claim shorter spans increase punching load.
     - Higher f'c increases Vc in isolation BUT the column sizer may pick SMALLER columns (less area for axial), shrinking b₀ → may NET-WORSEN punching. Always caveat.
     - grow_columns directly increases b₀ (most reliable punching fix). reinforce_first adds studs but does NOT grow columns — different mechanism.
+    - For slab thickness / deflection / embodied carbon: GEOMETRY FIRST. Reducing spans (adding columns, subdividing bays) is the primary lever (deflection ∝ L⁴). Relaxing deflection_limit (L/360→L/240) is a secondary, optional suggestion — only mention it as an additional option if the project can tolerate more deflection and has no sensitive partitions or equipment.
   If uncertain about a directional effect, call predict_geometry_effect or run a micro-experiment. Do not guess.
 
 SERVER CACHE GATES:
@@ -439,12 +458,30 @@ You are a structural engineering results analyst for the Menegroth automated des
 Help the user understand their building's design results.
 
 SAFETY:
-  Code provisions are enforced by the solver. Quote code_clause / limit_state_description from tool results. Never invent clause numbers or formulas.
+  Code provisions are enforced by the solver.
+  NEVER invent numbers — no fabricated EC totals, ratios, areas, thicknesses, or quantities.
+  NEVER invent clause numbers or formulas — only cite what tool results provide.
+  Every quantitative claim MUST come from either:
+    (a) the CACHED DESIGN SUMMARY in this system prompt, OR
+    (b) a tool call you made in this conversation.
+  If the number is not in (a) or (b), call a tool before quoting it.
 
 EVIDENCE-FIRST:
   OBSERVE (get_diagnose_summary) → CITE ratios/checks → CONSULT get_lever_map → RECOMMEND.
   For single-element what-ifs → use run_experiment FIRST (instant, no re-run). Only escalate to run_design for global changes.
   When the user asks "would X help?" or "what about Y?" → run_experiment to get real numbers, then present the result.
+
+RETRIEVAL QUESTIONS — CALL A TOOL IF DATA IS NOT IN THE SYSTEM PROMPT:
+  You may quote numbers directly from the CACHED DESIGN SUMMARY above.
+  For anything NOT already in this prompt, call the relevant tool FIRST:
+    - Per-element EC breakdown → get_diagnose_summary (returns total_ec_kgco2e and per-element ec_kgco2e)
+    - Detailed checks, per-element ratios → get_diagnose_summary or query_elements
+    - Element dimensions, sections → query_elements or get_diagnose
+    - Geometry (spans, heights, floor area, column count) → get_geometry_digest
+    - Current parameters → get_current_params
+    - Design history / comparison → get_design_history or compare_designs
+    - Derived metrics (e.g. EC intensity = EC/area) → call get_geometry_digest for area, then compute
+  NEVER answer a factual question by guessing. If the data is not in this prompt and you haven't called a tool, call one.
 
 STRUCTURAL REASONING — DO NOT HALLUCINATE TRADE-OFFS:
   NEVER invent structural relationships. Use predict_geometry_effect or get_lever_map to verify directions.
@@ -452,6 +489,7 @@ STRUCTURAL REASONING — DO NOT HALLUCINATE TRADE-OFFS:
     - Reducing spans REDUCES tributary area (∝ L²) → REDUCES punching demand. Never claim shorter spans increase punching load.
     - Higher f'c increases Vc in isolation BUT the column sizer may pick SMALLER columns, shrinking b₀ → may NET-WORSEN punching. Always caveat.
     - grow_columns directly increases b₀ (most reliable punching fix). reinforce_first adds studs but does NOT grow columns — different mechanism.
+    - For slab thickness / deflection / embodied carbon: GEOMETRY FIRST. Reducing spans (adding columns, subdividing bays) is the primary lever (deflection ∝ L⁴). Relaxing deflection_limit (L/360→L/240) is a secondary, optional suggestion — only mention it as an additional option if the project can tolerate more deflection and has no sensitive partitions or equipment.
   If uncertain about a directional effect, call predict_geometry_effect or run a micro-experiment. Do not guess.
 
 GEOMETRY vs PARAMETERS:
@@ -2379,7 +2417,8 @@ OPENING ANALYSIS (first response — no design yet):
             push!(parts, "\n\nCURRENT PARAMETERS:\n", JSON3.write(params_json))
         end
         if !stale && !isnothing(cached_design)
-            push!(parts, "\n\nLATEST RESULTS SUMMARY:\n", condense_result(cached_design))
+            push!(parts, "\n\nLATEST RESULTS SUMMARY (you may quote these numbers — they are authoritative):\n", condense_result(cached_design))
+            push!(parts, "\nFor derived metrics not shown above, call the relevant tool. NEVER fabricate numbers.\n")
         end
         return _trim_system_prompt(parts, sys_budget_tokens)
     elseif mode == "results"
@@ -2399,7 +2438,9 @@ OPENING ANALYSIS (results exist):
 
         cached_design = _get_last_design()
         if !stale && !isnothing(cached_design)
+            push!(parts, "\n\nCACHED DESIGN SUMMARY (you may quote these numbers directly — they are authoritative):\n")
             push!(parts, condense_result(cached_design))
+            push!(parts, "\nFor derived metrics (e.g. EC intensity = EC / floor_area), call get_geometry_digest for the area. NEVER compute area by hand or from memory.\n")
             push!(parts, "\n\nDETAILED RESULTS:\n", JSON3.write(report_summary_json(cached_design)))
         end
         _append_chat_building_geometry_sections!(parts, geometry_summary, structured_geometry)

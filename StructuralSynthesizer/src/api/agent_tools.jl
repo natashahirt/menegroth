@@ -1126,8 +1126,12 @@ function agent_suggest_next_action(design::BuildingDesign, goal::String)::Dict{S
         "fix_failures"          => ["punching_strategy", "deflection_limit", "column_catalog", "beam_catalog"],
         "reduce_column_size"    => ["punching_strategy", "column_catalog"],
         "reduce_slab_thickness" => ["deflection_limit"],
-        "reduce_ec"             => ["deflection_limit", "punching_strategy"],
+        "reduce_ec"             => ["punching_strategy", "deflection_limit"],
     )
+
+    # deflection_limit is a secondary lever — geometric changes (shorter spans,
+    # added columns) are far more effective for reducing slab thickness / EC.
+    _secondary_params = Set(["deflection_limit"])
     related_params = get(goal_params, goal, String[])
     goal_impacts = filter(i -> get(i, "parameter", "") in related_params, impacts)
 
@@ -1136,6 +1140,16 @@ function agent_suggest_next_action(design::BuildingDesign, goal::String)::Dict{S
     # ── Runtime failure analysis ──
     failing_checks = _extract_failing_checks(diag)
     ranked_actions = _rank_actions_by_failure(goal, failing_checks, related_params)
+
+    # Tag secondary levers so the LLM presents them as optional, not primary
+    for action in ranked_actions
+        if get(action, "parameter", "") in _secondary_params
+            action["priority"] = "secondary"
+            action["priority_note"] = "Geometric changes (reducing spans, adding columns) are " *
+                "far more effective. Relaxing deflection limit is a secondary option if the " *
+                "project can tolerate additional deflection."
+        end
+    end
 
     # ── Geometry remediation evaluation (non-fatal on error) ──
     geo_remediations = try
@@ -1202,10 +1216,18 @@ function agent_suggest_next_action(design::BuildingDesign, goal::String)::Dict{S
     end
 
     # Inline guidance — geometry bottleneck vs parameter path
+    _geometry_first_goals = Set(["reduce_slab_thickness", "reduce_ec"])
     result["_guidance"] = if !isempty(geo_remediations)
         "GEOMETRY IS THE BOTTLENECK: Present geometry_actions FIRST with quantitative targets " *
         "and Grasshopper instructions. Parameter changes are secondary. " *
         "Use predict_geometry_effect to explain the structural reasoning."
+    elseif goal in _geometry_first_goals
+        "PRIORITIZE GEOMETRY: For $goal, reducing span lengths (adding columns, " *
+        "subdividing bays) in Grasshopper is the primary lever — deflection scales with L⁴. " *
+        "Relaxing deflection_limit (L/360→L/240) is a secondary, optional measure only if " *
+        "the project can tolerate more deflection and has no sensitive partitions/equipment. " *
+        "Present geometry changes first, then mention deflection_limit relaxation as " *
+        "an additional option the user may consider."
     else
         "NEXT STEP: Call validate_params before run_design to test recommended parameter changes."
     end
@@ -1636,13 +1658,20 @@ function agent_response_guidelines()::Dict{String, Any}
                                "Test with: run_experiment(type=punching, args={c1_in=larger}) for grow_columns effect, " *
                                "run_experiment(type=punching_reinforcement) for stud effect. Compare both."),
             Dict("intent" => "What about a different deflection limit?",
-                 "sequence" => "run_experiment(type=deflection, args={slab_idx, deflection_limit})"),
+                 "sequence" => "run_experiment(type=deflection, args={slab_idx, deflection_limit}) — " *
+                               "BUT NOTE: deflection_limit relaxation (L/360→L/240) is a SECONDARY lever. " *
+                               "Always recommend geometric changes first (shorter spans, added columns). " *
+                               "Only suggest deflection relaxation as an additional option if the project " *
+                               "can tolerate more deflection (no sensitive partitions/equipment)."),
             Dict("intent" => "Which column sizes would work?",
                  "sequence" => "run_experiment(type=catalog_screen, args={col_idx, candidates=[...]}) or batch_experiments with multiple pm_column checks"),
             Dict("intent" => "Would stronger concrete / different material help?",
                  "sequence" => "run_experiment(type=punching, args={col_idx, fc_in=5000}) — BUT NOTE: the punching micro-experiment holds column size constant. In a full redesign higher f'c lets the column sizer pick SMALLER columns, which may NET-WORSEN punching (smaller b₀). Always caveat this coupling when interpreting results."),
             Dict("intent" => "How can I reduce embodied carbon / lower-carbon building?",
-                 "sequence" => "suggest_next_action(goal=reduce_ec) → run_experiment on critical elements to quantify savings → validate_params → run_design"),
+                 "sequence" => "suggest_next_action(goal=reduce_ec) → prioritize geometric changes (shorter spans, " *
+                               "added columns) as the PRIMARY lever for reducing slab concrete volume. " *
+                               "Deflection limit relaxation is SECONDARY. " *
+                               "run_experiment on critical elements to quantify savings → validate_params → run_design"),
             Dict("intent" => "Try changing X (global parameter change)",
                  "sequence" => "run_experiment first for instant preview → validate_params → run_design → compare_designs"),
             Dict("intent" => "Explain this element/result",
@@ -1655,6 +1684,16 @@ function agent_response_guidelines()::Dict{String, Any}
                  "sequence" => "get_geometry_digest — never claim data is unavailable without calling this first"),
             Dict("intent" => "Carbon / sustainability (pre-design)",
                  "sequence" => "get_situation_card → quote digest → recommend shorter spans, optimize_for=carbon, predict_geometry_effect — ONLY systems from PARAMETER SPACE card"),
+            Dict("intent" => "What is the EC / embodied carbon / carbon intensity?",
+                 "sequence" => "get_diagnose_summary — returns total_ec_kgco2e and per-element ec_kgco2e. " *
+                               "For EC intensity (per ft² or per m²), divide total_ec by floor area from get_geometry_digest. " *
+                               "NEVER fabricate numbers — always call the tool first."),
+            Dict("intent" => "What is the critical ratio / does the design pass / what's failing?",
+                 "sequence" => "get_diagnose_summary — returns all_pass, critical_ratio, critical_element, governing_check_distribution, per-type stats"),
+            Dict("intent" => "What are the slab thicknesses / column sizes / beam sections?",
+                 "sequence" => "query_elements(type=slabs/columns/beams) or get_diagnose for full per-element data. NEVER guess dimensions."),
+            Dict("intent" => "What are the current spans / heights / geometry?",
+                 "sequence" => "get_geometry_digest — returns spans, story heights, column count, plan area. NEVER recall from memory."),
         ],
 
         "required_sequences" => [
@@ -1691,6 +1730,9 @@ function agent_response_guidelines()::Dict{String, Any}
                 "Always caveat with the coupling effect and recommend a micro-experiment.",
             "Treating reinforce_first and grow_columns as equivalent for punching (grow_columns increases b₀ directly; " *
                 "reinforce_first adds studs but columns stay at P-M minimum — may be smaller).",
+            "Answering retrieval questions (EC, ratio, thickness, area, section size) from memory or by fabricating numbers. " *
+                "ALWAYS call the relevant tool (get_diagnose_summary, query_elements, get_geometry_digest, get_current_params) " *
+                "before quoting ANY number. If you haven't called a tool, you don't have the data.",
         ],
 
         # ── Geometry Rules ────────────────────────────────────────────────
@@ -1699,6 +1741,12 @@ function agent_response_guidelines()::Dict{String, Any}
                 "If geometry seems missing → call get_geometry_digest. Only report 'unavailable' if that tool errors.",
             "remediation" =>
                 "When parameter_headroom='exhausted' → present geometry changes FIRST (Grasshopper), then parameter tweaks. Use predict_geometry_effect for reasoning. Surface critical size_warnings.",
+            "geometry_first_for_slabs" =>
+                "For reduce_slab_thickness / reduce_ec goals, ALWAYS recommend geometric changes " *
+                "(shorter spans, added columns) as the PRIMARY lever. Deflection ∝ L⁴ makes span " *
+                "reduction far more effective than deflection limit relaxation. Relaxing " *
+                "deflection_limit (L/360→L/240) is a SECONDARY, optional suggestion — only if the " *
+                "project can tolerate more deflection and has no sensitive partitions or equipment.",
             "what_if" =>
                 "For span/column/height questions → call predict_geometry_effect. Present trade-offs quantitatively.",
             "stale_cache" =>

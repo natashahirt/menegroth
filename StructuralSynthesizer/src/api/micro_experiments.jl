@@ -17,6 +17,29 @@
 
 using Unitful
 
+# ─── Experimental Setup Reporter ─────────────────────────────────────────────
+
+"""
+    _experimental_setup(; changed, held_constant, source, note=nothing) -> Dict
+
+Build a structured `experimental_setup` block that documents what was varied,
+what was held constant, and where the baseline data comes from.
+"""
+function _experimental_setup(;
+    changed::Vector{String},
+    held_constant::Vector{String},
+    source::String,
+    note::Union{String, Nothing} = nothing,
+)::Dict{String, Any}
+    out = Dict{String, Any}(
+        "changed"       => changed,
+        "held_constant" => held_constant,
+        "source"        => source,
+    )
+    !isnothing(note) && (out["note"] = note)
+    return out
+end
+
 # ─── Argument Coercion Helpers ────────────────────────────────────────────────
 
 """
@@ -290,8 +313,41 @@ function experiment_punching(
             "Consider verifying with a full run_design."
     end
 
+    # ── f'c coupling caveat: column size held constant in this experiment ──
+    fc_only_change = !isnothing(fc_in) && isnothing(c1_in) && isnothing(c2_in) && isnothing(h_in)
+    if fc_only_change
+        coupling_caveat = "IMPORTANT: This experiment holds column size constant while " *
+            "changing f'c. In a full redesign, higher f'c allows the column sizer to " *
+            "select SMALLER columns (less area needed for axial P-M), which would SHRINK " *
+            "b₀ and potentially WORSEN punching despite the higher Vc. This result shows " *
+            "only the isolated Vc improvement. Run a full run_design to see the net system effect."
+    else
+        coupling_caveat = nothing
+    end
+
+    # ── Build experimental_setup ──
+    changed = String[]
+    held = String[]
+    !isnothing(c1_in) ? push!(changed, "c1 (column dim 1): $(round(ustrip(u"inch", inp.orig_c1); digits=1)) → $(c1_in) in") :
+                         push!(held, "c1 = $(round(ustrip(u"inch", inp.orig_c1); digits=1)) in")
+    !isnothing(c2_in) ? push!(changed, "c2 (column dim 2): $(round(ustrip(u"inch", inp.orig_c2); digits=1)) → $(c2_in) in") :
+                         push!(held, "c2 = $(round(ustrip(u"inch", inp.orig_c2); digits=1)) in")
+    !isnothing(h_in)  ? push!(changed, "h (slab thickness): $(round(ustrip(u"inch", inp.orig_h); digits=1)) → $(h_in) in") :
+                         push!(held, "h = $(round(ustrip(u"inch", inp.orig_h); digits=1)) in")
+    !isnothing(fc_in) ? push!(changed, "f'c: $(round(ustrip(u"psi", orig_fc); digits=0)) → $(fc_in) psi") :
+                         push!(held, "f'c = $(round(ustrip(u"psi", orig_fc); digits=0)) psi")
+    push!(held, "Vu (factored shear, adjusted for critical-area change)", "Mub (unbalanced moment)", "tributary area", "column position ($(inp.position))")
+
+    setup = _experimental_setup(;
+        changed = changed,
+        held_constant = held,
+        source = "Cached design — column $col_idx",
+        note = isempty(changed) ? "Baseline re-check with no modifications." : nothing,
+    )
+
     out = Dict{String, Any}(
         "experiment" => "punching",
+        "experimental_setup" => setup,
         "column_idx" => col_idx,
         "position" => string(inp.position),
         "original" => Dict{String, Any}(
@@ -331,6 +387,7 @@ function experiment_punching(
     )
 
     !isnothing(sanity_warning) && (out["sanity_warning"] = sanity_warning)
+    !isnothing(coupling_caveat) && (out["coupling_caveat"] = coupling_caveat)
 
     return out
 end
@@ -458,8 +515,18 @@ function _experiment_pm_rc(
     new_ratio = expl.governing_ratio
     dim_str = new_dim == round(new_dim) ? "$(Int(new_dim))x$(Int(new_dim))" : "$(round(new_dim; digits=1))x$(round(new_dim; digits=1))"
 
+    setup = _experimental_setup(;
+        changed = ["section size: $(col.section_size) → $(dim_str) in", "rebar layout: scaled to $(n_bars)-#$(bar_size)"],
+        held_constant = ["Pu = $(round(Pu_kip; digits=1)) kip", "Mux = $(round(Mux_kipft; digits=1)) kip·ft",
+                         "Muy = $(round(Muy_kipft; digits=1)) kip·ft", "height = $(round(ustrip(u"ft", L); digits=1)) ft",
+                         "Ky = $(round(Ky; digits=2))", "f'c, rebar grade, cover, slenderness parameters"],
+        source = "Cached design — column $col_idx",
+        note = "Rebar count/size scaled heuristically to section dimension. Actual optimizer may choose differently.",
+    )
+
     return Dict{String, Any}(
         "experiment" => "pm_column",
+        "experimental_setup" => setup,
         "column_idx" => col_idx,
         "column_type" => "RC",
         "demands" => Dict{String, Any}(
@@ -489,7 +556,6 @@ function _experiment_pm_rc(
         ),
         "delta_ratio" => round(new_ratio - orig_ratio; digits=3),
         "improved" => new_ratio < orig_ratio,
-        "note" => "RC experiment uses $(n_bars)-#$(bar_size) bars (scaled to section size). Actual design may optimize rebar layout differently.",
     )
 end
 
@@ -560,14 +626,28 @@ function _experiment_pm_steel(
         isnothing(m) ? nothing : parse(Float64, m.captures[1])
     catch; nothing end
 
+    Pu_kip_val = round(ustrip(u"kip", col.Pu); digits=1)
+    Mux_kipft_val = round(ustrip(u"kip*ft", col.Mu_x); digits=1)
+    Muy_kipft_val = round(ustrip(u"kip*ft", col.Mu_y); digits=1)
+
+    setup = _experimental_setup(;
+        changed = ["section: $(col.section_size) → $(size_str)"],
+        held_constant = ["Pu = $(Pu_kip_val) kip", "Mux = $(Mux_kipft_val) kip·ft",
+                         "Muy = $(Muy_kipft_val) kip·ft", "height = $(round(ustrip(u"ft", L); digits=1)) ft",
+                         "Kx = $(round(Kx; digits=2))", "Ky = $(round(Ky; digits=2))",
+                         "Cb = $(round(Cb; digits=2))", "steel grade"],
+        source = "Cached design — column $col_idx",
+    )
+
     result = Dict{String, Any}(
         "experiment" => "pm_column",
+        "experimental_setup" => setup,
         "column_idx" => col_idx,
         "column_type" => "steel",
         "demands" => Dict{String, Any}(
-            "Pu_kip" => round(ustrip(u"kip", col.Pu); digits=1),
-            "Mux_kipft" => round(ustrip(u"kip*ft", col.Mu_x); digits=1),
-            "Muy_kipft" => round(ustrip(u"kip*ft", col.Mu_y); digits=1),
+            "Pu_kip" => Pu_kip_val,
+            "Mux_kipft" => Mux_kipft_val,
+            "Muy_kipft" => Muy_kipft_val,
             "height_ft" => round(ustrip(u"ft", L); digits=1),
             "Kx" => round(Kx; digits=2),
             "Ky" => round(Ky; digits=2),
@@ -687,12 +767,25 @@ function experiment_beam(
         isnothing(m) ? nothing : parse(Float64, m.captures[1])
     catch; nothing end
 
+    Mu_kipft_val = round(ustrip(u"kip*ft", beam.Mu); digits=1)
+    Vu_kip_val = round(ustrip(u"kip", beam.Vu); digits=1)
+
+    setup = _experimental_setup(;
+        changed = ["section: $(beam.section_size) → $(size_str)"],
+        held_constant = ["Mu = $(Mu_kipft_val) kip·ft", "Vu = $(Vu_kip_val) kip",
+                         "span = $(round(ustrip(u"ft", L); digits=1)) ft",
+                         "Lb = $(round(ustrip(u"ft", Lb); digits=1)) ft",
+                         "Cb = $(round(Cb; digits=2))", "steel grade, loading"],
+        source = "Cached design — beam $beam_idx",
+    )
+
     result = Dict{String, Any}(
         "experiment" => "beam",
+        "experimental_setup" => setup,
         "beam_idx" => beam_idx,
         "demands" => Dict{String, Any}(
-            "Mu_kipft" => round(ustrip(u"kip*ft", beam.Mu); digits=1),
-            "Vu_kip" => round(ustrip(u"kip", beam.Vu); digits=1),
+            "Mu_kipft" => Mu_kipft_val,
+            "Vu_kip" => Vu_kip_val,
             "length_ft" => round(ustrip(u"ft", L); digits=1),
             "Lb_ft" => round(ustrip(u"ft", Lb); digits=1),
             "Cb" => round(Cb; digits=2),
@@ -786,6 +879,14 @@ function experiment_punching_reinforcement(
     unreinforced_ratio = check.ratio
     unreinforced_ok = check.ok
 
+    # Common held-constant items for both reinforcement types
+    reinf_held = [
+        "column size = $(round(ustrip(u"inch", inp.orig_c1); digits=1))×$(round(ustrip(u"inch", inp.orig_c2); digits=1)) in",
+        "slab thickness = $(round(ustrip(u"inch", inp.orig_h); digits=1)) in",
+        "f'c = $(round(ustrip(u"psi", fc); digits=0)) psi",
+        "Vu (factored shear)", "Mub (unbalanced moment)", "column position ($(position))",
+    ]
+
     if lowercase(reinforcement_type) == "stirrups"
         bs = isnothing(bar_size) ? 4 : bar_size
         fyt = isnothing(fyt_psi) ? 60_000.0u"psi" : fyt_psi * u"psi"
@@ -804,8 +905,16 @@ function experiment_punching_reinforcement(
 
         reinforced_check = StructuralSizer.check_punching_with_stirrups(vu, design_result)
 
+        setup = _experimental_setup(;
+            changed = ["adding closed stirrups (#$(bs) bars, fyt=$(round(ustrip(u"psi", fyt); digits=0)) psi)"],
+            held_constant = reinf_held,
+            source = "Cached design — column $col_idx",
+            note = "Column dimensions unchanged — this tests capacity-side improvement only (adds Vs to Vc).",
+        )
+
         return Dict{String, Any}(
             "experiment" => "punching_reinforcement",
+            "experimental_setup" => setup,
             "column_idx" => col_idx,
             "position" => string(position),
             "reinforcement_type" => "stirrups",
@@ -851,8 +960,16 @@ function experiment_punching_reinforcement(
 
         reinforced_check = StructuralSizer.check_punching_with_studs(vu, design_result)
 
+        setup = _experimental_setup(;
+            changed = ["adding shear studs (ø$(round(ustrip(u"inch", sd); digits=3))\" studs, fyt=$(round(ustrip(u"psi", fyt); digits=0)) psi)"],
+            held_constant = reinf_held,
+            source = "Cached design — column $col_idx",
+            note = "Column dimensions unchanged — this tests capacity-side improvement only (adds Vs to Vc).",
+        )
+
         return Dict{String, Any}(
             "experiment" => "punching_reinforcement",
+            "experimental_setup" => setup,
             "column_idx" => col_idx,
             "position" => string(position),
             "reinforcement_type" => "studs",
@@ -961,13 +1078,26 @@ function experiment_deflection(
 
     thickness_in = try round(ustrip(u"inch", slab.thickness); digits=2) catch; nothing end
 
+    orig_criterion = orig_divisor_approx > 0 ? "L/$(orig_divisor_approx)" : "unknown"
+
+    setup = _experimental_setup(;
+        changed = ["deflection limit: $(orig_criterion) → $(deflection_limit)"],
+        held_constant = ["actual deflection = $(round(orig_deflection; digits=3)) in (not recomputed)",
+                         "slab thickness = $(isnothing(thickness_in) ? "N/A" : "$(thickness_in) in")",
+                         "span = $(isnothing(span_ft) ? "N/A" : "$(round(span_ft; digits=1)) ft")",
+                         "concrete properties, loading, reinforcement"],
+        source = "Cached design — slab $slab_idx",
+        note = "Only the allowable limit changes. Actual deflection stays fixed. To reduce actual deflection, increase slab thickness via run_design.",
+    )
+
     result = Dict{String, Any}(
         "experiment" => "deflection",
+        "experimental_setup" => setup,
         "slab_idx" => slab_idx,
         "slab_context" => Dict{String, Any}(
             "span_ft" => isnothing(span_ft) ? nothing : round(span_ft; digits=1),
             "thickness_in" => thickness_in,
-            "current_limit_criterion" => orig_divisor_approx > 0 ? "L/$(orig_divisor_approx)" : "unknown",
+            "current_limit_criterion" => orig_criterion,
         ),
         "original" => Dict{String, Any}(
             "deflection_in" => round(orig_deflection; digits=3),
@@ -1063,14 +1193,27 @@ function experiment_catalog_screen(
         end
     end
 
+    Pu_kip_val = round(ustrip(u"kip", col.Pu); digits=1)
+    Mux_kipft_val = round(ustrip(u"kip*ft", col.Mu_x); digits=1)
+    Muy_kipft_val = round(ustrip(u"kip*ft", col.Mu_y); digits=1)
+    cand_strs = [string(c) for c in candidates]
+
+    setup = _experimental_setup(;
+        changed = ["section — screening $(length(candidates)) candidates: $(join(cand_strs[1:min(end, 5)], ", "))$(length(cand_strs) > 5 ? "…" : "")"],
+        held_constant = ["Pu = $(Pu_kip_val) kip", "Mux = $(Mux_kipft_val) kip·ft",
+                         "Muy = $(Muy_kipft_val) kip·ft", "height, K-factors, material properties"],
+        source = "Cached design — column $col_idx",
+    )
+
     return Dict{String, Any}(
         "experiment" => "catalog_screen",
+        "experimental_setup" => setup,
         "column_idx" => col_idx,
         "column_type" => is_rc ? "RC" : "steel",
         "demands" => Dict{String, Any}(
-            "Pu_kip" => round(ustrip(u"kip", col.Pu); digits=1),
-            "Mux_kipft" => round(ustrip(u"kip*ft", col.Mu_x); digits=1),
-            "Muy_kipft" => round(ustrip(u"kip*ft", col.Mu_y); digits=1),
+            "Pu_kip" => Pu_kip_val,
+            "Mux_kipft" => Mux_kipft_val,
+            "Muy_kipft" => Muy_kipft_val,
         ),
         "original" => Dict{String, Any}(
             "section" => col.section_size,

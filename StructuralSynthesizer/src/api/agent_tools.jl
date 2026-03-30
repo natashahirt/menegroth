@@ -1631,13 +1631,16 @@ function agent_response_guidelines()::Dict{String, Any}
             Dict("intent" => "Can I add shear studs or stirrups for punching?",
                  "sequence" => "run_experiment(type=punching_reinforcement, args={col_idx, reinforcement_type=\"studs\"}) — designs full stud/stirrup layout and checks if column passes"),
             Dict("intent" => "Would reinforce_first / grow_columns / reinforce_last help?",
-                 "sequence" => "run_experiment(type=punching_reinforcement) to see if studs fix it, then run_experiment(type=punching, args={c1_in=larger}) to compare with column growth"),
+                 "sequence" => "grow_columns is the most reliable punching lever — it directly increases b₀ (critical perimeter). " *
+                               "reinforce_first adds shear studs/stirrups but does NOT grow columns; columns may be SMALLER (sized for P-M only). " *
+                               "Test with: run_experiment(type=punching, args={c1_in=larger}) for grow_columns effect, " *
+                               "run_experiment(type=punching_reinforcement) for stud effect. Compare both."),
             Dict("intent" => "What about a different deflection limit?",
                  "sequence" => "run_experiment(type=deflection, args={slab_idx, deflection_limit})"),
             Dict("intent" => "Which column sizes would work?",
                  "sequence" => "run_experiment(type=catalog_screen, args={col_idx, candidates=[...]}) or batch_experiments with multiple pm_column checks"),
             Dict("intent" => "Would stronger concrete / different material help?",
-                 "sequence" => "run_experiment(type=punching, args={col_idx, fc_in=5000}) — instantly see ratio change from higher f'c"),
+                 "sequence" => "run_experiment(type=punching, args={col_idx, fc_in=5000}) — BUT NOTE: the punching micro-experiment holds column size constant. In a full redesign higher f'c lets the column sizer pick SMALLER columns, which may NET-WORSEN punching (smaller b₀). Always caveat this coupling when interpreting results."),
             Dict("intent" => "How can I reduce embodied carbon / lower-carbon building?",
                  "sequence" => "suggest_next_action(goal=reduce_ec) → run_experiment on critical elements to quantify savings → validate_params → run_design"),
             Dict("intent" => "Try changing X (global parameter change)",
@@ -1681,6 +1684,13 @@ function agent_response_guidelines()::Dict{String, Any}
             "Calling suggest_next_action / run_experiment / diagnose when has_design is false",
             "Confusing 'no server cache' with 'no digest' — the digest can exist without a design run",
             "Recommending systems outside the PARAMETER SPACE card (PT, composite deck, voided/bubble/waffle slab, timber, CLT, modular, passive cooling, etc.)",
+            "Inventing structural trade-offs not grounded in tool data. WRONG: 'reducing spans may increase punching shear due to higher tributary areas'. " *
+                "CORRECT: reducing spans REDUCES tributary area (∝ L²), which REDUCES punching demand. " *
+                "Always use predict_geometry_effect or get_lever_map to verify directional effects before stating them.",
+            "Claiming higher f'c always improves punching (system coupling: column sizer may pick smaller columns, shrinking b₀). " *
+                "Always caveat with the coupling effect and recommend a micro-experiment.",
+            "Treating reinforce_first and grow_columns as equivalent for punching (grow_columns increases b₀ directly; " *
+                "reinforce_first adds studs but columns stay at P-M minimum — may be smaller).",
         ],
 
         # ── Geometry Rules ────────────────────────────────────────────────

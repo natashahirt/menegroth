@@ -260,7 +260,10 @@ function api_params_schema_structured()
                     "guidance" => "L_240: lenient (partitions unlikely). L_360: standard for supported partitions. L_480: strict for sensitive finishes."),
                 "punching_strategy" => Dict("type" => "enum", "default" => "grow_columns",
                     "allowed" => collect(API_PUNCHING_STRATEGIES),
-                    "guidance" => "grow_columns: increase column size to pass punching (preferred). reinforce_first: add shear reinforcement before growing. reinforce_last: grow first, reinforce only if needed. For irregular plans with non-uniform tributary areas, punching shear demands can vary widely — review results carefully at re-entrant corners and edge columns."),
+                    "guidance" => "grow_columns: increase column dimensions to enlarge critical perimeter b₀ — most reliable punching fix (preferred). " *
+                                 "reinforce_first: add shear studs/stirrups before growing columns — columns stay at P-M minimum (may be smaller than grow_columns would produce). " *
+                                 "reinforce_last: grow first, add reinforcement only if growth alone is insufficient. " *
+                                 "For irregular plans with non-uniform tributary areas, punching demands vary — review at re-entrant corners and edge columns."),
                 "target_edge_m" => Dict("type" => "number", "default" => "adaptive", "range" => [0.05, 2.0], "unit" => "m",
                     "depends_on" => Dict("method" => "FEA"),
                     "guidance" => "FEA mesh target edge length. Smaller = more accurate but slower. Default: adaptive based on span."),

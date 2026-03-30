@@ -167,30 +167,54 @@ const LEVER_SURFACE_MAP = Dict{String, Any}(
     "punching_shear_slab" => Dict(
         "parameters" => ["punching_strategy", "column_concrete", "floor_type"],
         "geometry"   => ["column_size", "slab_span"],
-        "direction"  => "grow_columns or reinforce_first reduces demand/capacity ratio; higher f'c increases Vc",
+        "direction"  => "DEMAND-SIDE: Punching stress = Vu/(b₀·d). Larger column → larger b₀ (critical perimeter) → lower stress. " *
+                         "grow_columns directly increases b₀, which is the most reliable lever. " *
+                         "CAPACITY-SIDE: reinforce_first adds shear stud/stirrup capacity but does NOT grow columns — " *
+                         "columns may be SMALLER (sized for P-M only) so unreinforced punching ratio worsens. " *
+                         "⚠ COUPLING: Higher f'c increases Vc in isolation but the column sizer may pick SMALLER columns " *
+                         "(less area needed for axial load), shrinking b₀ and potentially NET-WORSENING punching. " *
+                         "Always run a micro-experiment before recommending f'c changes for punching.",
     ),
     # Column punching (diagnose: "punching_shear_col")
     "punching_shear_col" => Dict(
         "parameters" => ["punching_strategy", "column_catalog", "column_concrete", "floor_type"],
         "geometry"   => ["column_size", "slab_span"],
-        "direction"  => "grow_columns increases critical perimeter; reinforce_first adds shear studs; higher f'c increases Vc",
+        "direction"  => "DEMAND-SIDE: Punching stress = Vu/(b₀·d). Larger column → larger b₀ → lower stress. " *
+                         "grow_columns directly increases column dimensions to improve b₀. " *
+                         "Enlarging the column_catalog pool allows the sizer to pick bigger sections. " *
+                         "CAPACITY-SIDE: reinforce_first adds stud/stirrup capacity but columns stay at P-M minimum — " *
+                         "may be SMALLER than grow_columns would produce. " *
+                         "⚠ COUPLING: Higher f'c increases Vc but the column sizer may select SMALLER columns " *
+                         "(less area needed for axial), shrinking b₀ and potentially NET-WORSENING punching. " *
+                         "Always run a micro-experiment before recommending f'c changes for punching.",
     ),
     # Foundation punching (diagnose: "punching_shear_fdn")
     "punching_shear_fdn" => Dict(
         "parameters" => ["foundation_concrete", "foundation_options"],
         "geometry"   => ["column_count"],
-        "direction"  => "thicker footing or higher f'c increases punching capacity",
+        "direction"  => "Thicker footing increases d (effective depth) and therefore punching capacity. " *
+                         "Higher f'c increases Vc. Foundation punching is less coupled because footing " *
+                         "depth is sized for punching directly, not for a separate check like column P-M.",
     ),
     # Generic alias — matches any "punching_shear" query
     "punching_shear" => Dict(
         "parameters" => ["punching_strategy", "column_concrete", "floor_type", "column_catalog"],
         "geometry"   => ["column_size", "slab_span"],
-        "direction"  => "grow_columns or reinforce_first reduces demand/capacity ratio; higher f'c increases Vc. See punching_shear_col / punching_shear_slab / punching_shear_fdn for element-specific levers.",
+        "direction"  => "DEMAND-SIDE: Punching stress = Vu/(b₀·d). Larger columns → larger b₀ → lower stress. " *
+                         "grow_columns is the most reliable lever because it directly increases b₀. " *
+                         "CAPACITY-SIDE: reinforce_first adds shear stud/stirrup capacity but does NOT grow columns — " *
+                         "columns may end up SMALLER (sized for P-M only). " *
+                         "⚠ COUPLING: Higher f'c increases Vc in isolation, but the column sizer may pick SMALLER " *
+                         "columns (less area for axial), shrinking b₀ and potentially WORSENING punching. " *
+                         "Always run a micro-experiment to verify before recommending f'c or reinforce_first. " *
+                         "See punching_shear_col / punching_shear_slab / punching_shear_fdn for element-specific details.",
     ),
     "flexure" => Dict(
-        "parameters" => ["deflection_limit", "floor_type", "concrete", "rebar"],
+        "parameters" => ["floor_type", "concrete", "rebar"],
         "geometry"   => ["span_length"],
-        "direction"  => "thicker slab or higher rebar grade increases capacity; shorter spans reduce demand",
+        "direction"  => "thicker slab or higher rebar grade increases capacity; shorter spans reduce demand. " *
+                         "Note: deflection_limit does NOT affect flexural strength — it is a serviceability lever " *
+                         "(though a stricter limit may force a thicker slab, which indirectly adds flexural capacity).",
     ),
     # Foundation flexure (diagnose: "flexure_fdn")
     "flexure_fdn" => Dict(
@@ -239,7 +263,8 @@ const LEVER_SURFACE_MAP = Dict{String, Any}(
     "bearing" => Dict(
         "parameters" => ["foundation_soil", "foundation_concrete", "foundation_options"],
         "geometry"   => ["column_count"],
-        "direction"  => "stiffer soil or larger footings increase bearing capacity",
+        "direction"  => "higher allowable bearing pressure (qa) or larger footings improve bearing adequacy; " *
+                         "more columns reduce reaction per footing",
     ),
     "fire_protection" => Dict(
         "parameters" => ["fire_rating"],

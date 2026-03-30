@@ -33,6 +33,8 @@ const PROVISION_ONTOLOGY = Dict{String, Any}(
             "Increasing slab thickness is always the best fix (column size or shear reinforcement may be more efficient).",
             "Edge/corner columns have the same capacity as interior (they don't — reduced critical perimeter).",
             "Unbalanced moment can be ignored for gravity-only design (it can't when frame analysis shows moment transfer).",
+            "Higher f'c always improves punching (it increases Vc in isolation, but the column sizer may pick SMALLER columns for axial, shrinking b₀ and potentially net-worsening punching — the system effect can be opposite to the isolated effect).",
+            "reinforce_first and grow_columns are equivalent (reinforce_first adds stud/stirrup capacity but does NOT grow columns — columns stay at P-M minimum, which may be smaller).",
         ],
         "api_params"      => ["punching_strategy", "column_concrete", "floor_type"],
         "geometry_levers" => ["column_size", "slab_span"],
@@ -48,7 +50,8 @@ const PROVISION_ONTOLOGY = Dict{String, Any}(
         "code_philosophy" => "ACI Table 24.2.2 limits: L/360 for floors with attached partitions (standard), L/480 for sensitive finishes, L/240 without attached nonstructural elements. Computed using effective moment of inertia (Branson's equation).",
         "common_misconceptions" => [
             "Deflection is only about comfort (it can crack partitions and damage door frames).",
-            "Higher concrete strength always reduces deflection (modulus helps, but cracking moment matters more).",
+            "Higher concrete strength dramatically reduces deflection (Ec ∝ √f'c, so going from 4000→6000 psi only increases Ec by ~22%. " *
+                "For already-cracked sections this modest stiffness gain is often not worth the extra cost).",
             "The minimum-thickness table exempts you from deflection calculation (it does, but the table is often unconservative for irregular panels).",
         ],
         "api_params"      => ["deflection_limit", "concrete", "floor_type"],
@@ -64,8 +67,10 @@ const PROVISION_ONTOLOGY = Dict{String, Any}(
         "failure_consequence" => "catastrophic",
         "code_philosophy" => "Strain-compatibility analysis with Whitney stress block. φ=0.65 for compression-controlled, 0.90 for tension-controlled, linear interpolation in transition. Slenderness amplifies moments via moment magnification.",
         "common_misconceptions" => [
-            "Bigger is always stronger (adding depth without rebar may shift from tension-controlled to compression-controlled, lowering φ).",
-            "Axial load always makes columns less safe (moderate compression actually increases moment capacity in the tension-controlled region).",
+            "Bigger is always stronger (for compression-controlled columns, upsizing gives diminishing returns at φ=0.65; " *
+                "also, adding area without proportional rebar dilutes the reinforcement ratio, potentially requiring more steel to meet ρ_min).",
+            "Axial load always makes columns less safe (moderate compression actually increases moment capacity in the tension-controlled region — " *
+                "the P-M diagram curves outward before turning over at the balance point).",
         ],
         "api_params"      => ["column_catalog", "column_concrete", "column_type", "column_sizing_strategy"],
         "geometry_levers" => ["column_count", "story_height"],
@@ -275,7 +280,7 @@ const SYSTEM_DEPENDENCIES = Dict{String, Any}(
         "enables"  => ["aisc_pm_interaction", "flexural_buckling", "ltb_check"],
         "design_implications" => [
             "Lighter than RC for same capacity, but requires fire protection (SFRM or intumescent coating).",
-            "Cannot be used with flat plate/flat slab floor systems.",
+            "Not supported with flat plate/flat slab in this solver (punching shear interface requires RC column-slab connection).",
             "Faster erection but higher material cost per unit capacity compared to RC for moderate loads.",
         ],
         "coverage" => "partial",

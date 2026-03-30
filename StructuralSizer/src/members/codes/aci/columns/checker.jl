@@ -591,9 +591,16 @@ function explain_feasibility(
     end
 
     # --- Aggregate ---
+    # Exclude informational checks (slenderness_magnification is an amplification
+    # factor, not a demand/capacity utilization ratio) from governing determination.
+    capacity_checks = filter(c -> c.name != "slenderness_magnification", checks)
     all_pass = all(c -> c.passed, checks)
-    gov_idx = argmax([c.ratio for c in checks])
-    gov = checks[gov_idx]
+    if isempty(capacity_checks)
+        gov = CheckResult("none", true, 0.0, 0.0, 0.0, "")
+    else
+        gov_idx = argmax([c.ratio for c in capacity_checks])
+        gov = capacity_checks[gov_idx]
+    end
 
     FeasibilityExplanation(all_pass, checks, gov.name, gov.ratio)
 end

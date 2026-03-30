@@ -203,7 +203,7 @@ end
 # ─── Step 7: Micro-experiments ───────────────────────────────────────────────
 println("\n▸ Step 7a: list_experiments()")
 exp_list = list_experiments()
-println("  Available types: $(collect(keys(exp_list)))")
+println("  Available types: $(map(e -> e["name"], exp_list["experiments"]))")
 
 # Punching experiment: try larger column on first column with punching data
 println("\n▸ Step 7b: punching micro-experiment")
@@ -232,10 +232,14 @@ println("\n▸ Step 7c: deflection micro-experiment")
 if !isempty(design1.slabs)
     slab_idx = first(keys(design1.slabs))
     dexp = experiment_deflection(design1, slab_idx; deflection_limit="L_360")
-    println("  Slab $slab_idx:")
-    println("    Original: limit=$(dexp["original"]["limit"]) ratio=$(dexp["original"]["ratio"])")
-    println("    Modified: limit=$(dexp["modified"]["limit"]) ratio=$(dexp["modified"]["ratio"])")
-    println("    Improved: $(dexp["improved"])")
+    if haskey(dexp, "error")
+        println("  Slab $slab_idx: $(dexp["error"]) — $(dexp["message"])")
+    else
+        println("  Slab $slab_idx:")
+        println("    Original: limit_in=$(dexp["original"]["limit_in"]) ratio=$(dexp["original"]["ratio"])")
+        println("    Modified: limit_in=$(dexp["modified"]["limit_in"]) ratio=$(dexp["modified"]["ratio"])")
+        println("    Improved: $(dexp["improved"])")
+    end
 end
 
 # ─── Step 8: Second design with improved params ─────────────────────────────

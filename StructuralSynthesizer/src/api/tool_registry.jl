@@ -856,8 +856,49 @@ const TOOL_REGISTRY = [
         "phase"             => "exploration",
         "use_when"          => "ALWAYS use when the user asks about: punching shear impact, column sizing, deflection limits, material effects on a specific element, 'would X help?', 'what if I change Y?', strategy changes (reinforce_first vs grow_columns), or any single-element what-if. Use BEFORE run_design to give instant feedback. Requires has_design=true.",
         "args"              => Dict{String, Any}(
-            "type" => Dict("type" => "string", "required" => true, "enum" => ["punching", "pm_column", "deflection", "catalog_screen"], "description" => "Experiment type. punching: test column size or slab thickness on punching shear. pm_column: test a different column section against P-M demands. deflection: test a different L/N limit. catalog_screen: screen multiple candidate sections."),
-            "args" => Dict("type" => "object", "required" => true, "description" => "Experiment-specific args. punching: {col_idx (required), c1_in?, c2_in?, h_in?}. pm_column: {col_idx (required), section_size (inches for RC, W-shape string for steel)}. deflection: {slab_idx (required), deflection_limit (L_240|L_360|L_480)}. catalog_screen: {col_idx (required), candidates: [12,14,16,...] for RC or [\"W14X82\",\"W14X90\",...] for steel}"),
+            "type" => Dict(
+                "type" => "string", "required" => true,
+                "enum" => ["punching", "pm_column", "deflection", "catalog_screen"],
+                "description" => "Experiment type. punching: test column/slab size on punching shear. pm_column: test a different column section. deflection: test a different L/N limit. catalog_screen: screen multiple candidate sections.",
+            ),
+            "args" => Dict(
+                "type" => "object", "required" => true,
+                "description" => "Experiment-specific arguments. Include only the fields relevant to the chosen type.",
+                "fields" => Dict{String, Any}(
+                    "col_idx" => Dict(
+                        "type" => "integer",
+                        "description" => "Column index (from diagnose). Required for: punching, pm_column, catalog_screen.",
+                    ),
+                    "slab_idx" => Dict(
+                        "type" => "integer",
+                        "description" => "Slab index (from diagnose). Required for: deflection.",
+                    ),
+                    "c1_in" => Dict(
+                        "type" => "number",
+                        "description" => "New column c1 dimension in inches. Used by: punching. Optional — defaults to current size.",
+                    ),
+                    "c2_in" => Dict(
+                        "type" => "number",
+                        "description" => "New column c2 dimension in inches. Used by: punching. Optional — defaults to current size.",
+                    ),
+                    "h_in" => Dict(
+                        "type" => "number",
+                        "description" => "New slab thickness in inches. Used by: punching. Optional — defaults to current thickness.",
+                    ),
+                    "section_size" => Dict(
+                        "type" => "string",
+                        "description" => "New section size. Used by: pm_column. For RC: numeric inches (e.g. \"18\"). For steel: W-shape designation (e.g. \"W14X82\").",
+                    ),
+                    "deflection_limit" => Dict(
+                        "type" => "string",
+                        "description" => "Deflection limit criterion. Used by: deflection. One of: L_240, L_360, L_480.",
+                    ),
+                    "candidates" => Dict(
+                        "type" => "array",
+                        "description" => "List of candidate section sizes. Used by: catalog_screen. RC: numeric inches [12,14,16,...]. Steel: W-shape strings [\"W14X82\",\"W14X90\",...].",
+                    ),
+                ),
+            ),
         ),
         "returns"           => "Dict with original vs modified ratios, ok status, delta, and whether the change improved the element.",
         "requires_design"   => true,
@@ -879,7 +920,24 @@ const TOOL_REGISTRY = [
         "phase"             => "exploration",
         "use_when"          => "User asks 'which column sizes would work?' or 'compare these options' — run multiple punching/pm_column experiments in parallel. Also useful after suggest_next_action to test the top-ranked changes instantly.",
         "args"              => Dict{String, Any}(
-            "experiments" => Dict("type" => "array", "required" => true, "description" => "Array of {type, args} objects. Example: [{type: \"punching\", args: {col_idx: 1, c1_in: 18}}, {type: \"punching\", args: {col_idx: 1, c1_in: 20}}]"),
+            "experiments" => Dict(
+                "type" => "array", "required" => true,
+                "description" => "Array of experiment objects. Each has 'type' (punching|pm_column|deflection|catalog_screen) and 'args' (same fields as run_experiment args). Example: [{type: \"punching\", args: {col_idx: 1, c1_in: 18}}, {type: \"punching\", args: {col_idx: 1, c1_in: 20}}]",
+                "items" => Dict(
+                    "type" => "object",
+                    "fields" => Dict{String, Any}(
+                        "type" => Dict(
+                            "type" => "string", "required" => true,
+                            "enum" => ["punching", "pm_column", "deflection", "catalog_screen"],
+                            "description" => "Experiment type.",
+                        ),
+                        "args" => Dict(
+                            "type" => "object", "required" => true,
+                            "description" => "Experiment-specific arguments (col_idx, slab_idx, c1_in, c2_in, h_in, section_size, deflection_limit, candidates — same as run_experiment).",
+                        ),
+                    ),
+                ),
+            ),
         ),
         "returns"           => "Dict with array of results, one per experiment.",
         "requires_design"   => true,

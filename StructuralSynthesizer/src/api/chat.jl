@@ -2812,8 +2812,13 @@ function _json_schema_from_tool_arg(desc::AbstractDict)::Dict{String, Any}
     haskey(d, "description") && (schema["description"] = string(d["description"]))
     haskey(d, "enum") && (schema["enum"] = collect(d["enum"]))
 
-    if base_type == "array" && !haskey(schema, "items")
-        schema["items"] = Dict{String, Any}("type" => "string")
+    if base_type == "array"
+        items_desc = get(d, "items", nothing)
+        if items_desc isa AbstractDict
+            schema["items"] = _json_schema_from_tool_arg(Dict{String, Any}(string(k) => v for (k, v) in items_desc))
+        elseif !haskey(schema, "items")
+            schema["items"] = Dict{String, Any}("type" => "string")
+        end
     end
 
     if base_type == "object"

@@ -348,6 +348,36 @@ TOOLS (each tool description includes USE WHEN guidance):
   Experiments: list_experiments, batch_experiments
 
   REQUIRED: get_situation_card before run_design (confirm has_geometry). validate_params before run_design. record_insight after each design. get_session_insights before recommending.
+
+MICRO-EXPERIMENTS — PREFER OVER FULL REDESIGN FOR QUICK WHAT-IFS:
+  run_experiment is INSTANT (~0.1s) and uses the cached design — no full re-run.
+  ALWAYS use run_experiment FIRST when the user asks about:
+    - Punching shear: "would a bigger column help?" → run_experiment(type=punching, args={col_idx, c1_in?, c2_in?})
+    - Column sizing: "what if I use a W14x82?" → run_experiment(type=pm_column, args={col_idx, section_size})
+    - Deflection: "what about L/480?" → run_experiment(type=deflection, args={slab_idx, deflection_limit})
+    - Section screening: "which column sizes work?" → run_experiment(type=catalog_screen, args={col_idx, candidates})
+    - Punching strategy: "would reinforce_first help?" → run_experiment(type=punching) on the critical column
+    - Material changes: "what if I use stronger concrete?" → run_experiment(type=punching) to see ratio impact
+    - Any "would X help?" / "what's the effect of Y?" question about a single element
+  Use batch_experiments to test multiple alternatives at once (e.g. screen 5 column sizes).
+  Only escalate to run_design when you need to test a GLOBAL parameter change across all elements.
+
+TOOL USAGE RULES — DO NOT SKIP THESE:
+  DIAGNOSING FAILURES:
+    "How do I fix X?" → get_lever_map(check=X) FIRST — it tells you exactly which parameters and geometry changes affect that check. NEVER guess at fixes without consulting the lever map.
+    "Why is the column so big?" / "Why did the solver pick this section?" → get_solver_trace(tier=failures) then explain_trace_lookup on the relevant breadcrumb. The trace shows the solver's actual reasoning.
+    "Why did X fail?" → get_provision_rationale(section=check_family) for the code mechanism, then narrate_element for plain-English explanation.
+
+  EXPLAINING RESULTS:
+    When the user asks to explain an element or result → call narrate_element or narrate_comparison. Do NOT write your own explanation — these tools produce calibrated, evidence-based narratives from the actual design data.
+
+  ANALYSIS METHOD CHOICE:
+    "Should I use DDM, EFM, or FEA?" → get_applicability — it evaluates DDM prerequisite checks against the actual geometry and tells you which methods are valid.
+
+  SESSION MEMORY:
+    After EVERY run_design → call record_insight with what you learned (sensitivity, dead_end, discovery).
+    Before recommending a change → call get_session_insights to avoid repeating dead ends.
+    These are REQUIRED sequences, not optional.
 """
 
 const _DESIGN_SYSTEM_PREAMBLE = """
@@ -361,6 +391,8 @@ SAFETY:
 EVIDENCE-FIRST:
   After a design exists → OBSERVE (get_diagnose_summary) → CITE ratios/checks → CONSULT get_lever_map → RECOMMEND.
   Before any design → use the geometry digest and predict_geometry_effect for qualitative guidance. Do NOT invent ratios, pass/fail, or EC totals.
+  For single-element what-ifs → use run_experiment FIRST (instant, no re-run). Only escalate to run_design for global changes.
+  When the user asks "would X help?" or "what about Y?" → run_experiment to get real numbers, then present the result.
 
 SERVER CACHE GATES:
   has_geometry (from get_situation_card) = geometry on the server from Grasshopper POST /design, NOT text in this chat.
@@ -399,6 +431,8 @@ SAFETY:
 
 EVIDENCE-FIRST:
   OBSERVE (get_diagnose_summary) → CITE ratios/checks → CONSULT get_lever_map → RECOMMEND.
+  For single-element what-ifs → use run_experiment FIRST (instant, no re-run). Only escalate to run_design for global changes.
+  When the user asks "would X help?" or "what about Y?" → run_experiment to get real numbers, then present the result.
 
 GEOMETRY vs PARAMETERS:
   GEOMETRY (Grasshopper) — column positions, spans, heights, plan shape. Cannot change via API.
@@ -4388,7 +4422,17 @@ function register_chat_routes!()
         end
 
         t0     = time()
-        result = _dispatch_chat_tool(tool, args)
+        result = try
+            _dispatch_chat_tool(tool, args)
+        catch e
+            @error "POST /chat/action: tool execution failed" tool=tool exception=(e, catch_backtrace())
+            Dict{String, Any}(
+                "error"          => "tool_execution_failed",
+                "tool"           => tool,
+                "message"        => sprint(showerror, e),
+                "recovery_hint"  => "Retry this tool call; if it persists, run GET /status and share this error.",
+            )
+        end
         _attach_geometry_alignment!(result, args)
         elapsed_ms = round(Int, (time() - t0) * 1000)
 

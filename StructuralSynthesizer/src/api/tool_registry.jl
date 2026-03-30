@@ -766,9 +766,9 @@ const TOOL_REGISTRY = [
     ),
     Dict{String, Any}(
         "name"              => "get_lever_map",
-        "description"       => "Which API parameters and geometry changes affect a given failure check. Canonical source of truth for 'what can I change to fix X'.",
+        "description"       => "Which API parameters and geometry changes affect a given failure check. Canonical source of truth for 'what can I change to fix X'. MUST consult before recommending any fix.",
         "phase"             => "diagnosis",
-        "use_when"          => "Before recommending a fix for a specific failure check. Tells you exactly which knobs to turn.",
+        "use_when"          => "REQUIRED before recommending a fix for any failure. User asks 'how do I fix punching shear / deflection / P-M interaction?' → call get_lever_map(check=that_check) FIRST. Also use when the user asks about reducing carbon, column size, or slab thickness — the lever map shows which parameters move the needle.",
         "args"              => Dict{String, Any}("check" => Dict("type" => "string", "optional" => true, "description" => "Filter to one check family (e.g. 'punching_shear', 'deflection', 'P-M_interaction'). Omit for full map.")),
         "returns"           => "Dict mapping check names to {parameters, geometry, direction}.",
         "requires_design"   => false,
@@ -852,14 +852,14 @@ const TOOL_REGISTRY = [
     ),
     Dict{String, Any}(
         "name"              => "run_experiment",
-        "description"       => "Fast micro-experiment: re-check one element with a modified parameter (column size, slab thickness, deflection limit) using cached design data. No full re-run needed.",
+        "description"       => "INSTANT micro-experiment (~0.1s): re-check one element with a modified parameter using cached design data. No full re-run needed. PREFER THIS over run_design for single-element what-if questions.",
         "phase"             => "exploration",
-        "use_when"          => "After a design exists (has_design=true). Quickly test whether a specific change would help a specific element without a full re-run.",
+        "use_when"          => "ALWAYS use when the user asks about: punching shear impact, column sizing, deflection limits, material effects on a specific element, 'would X help?', 'what if I change Y?', strategy changes (reinforce_first vs grow_columns), or any single-element what-if. Use BEFORE run_design to give instant feedback. Requires has_design=true.",
         "args"              => Dict{String, Any}(
-            "type" => Dict("type" => "string", "required" => true, "enum" => ["punching", "pm_column", "deflection", "catalog_screen"], "description" => "Experiment type"),
-            "args" => Dict("type" => "object", "required" => true, "description" => "Experiment-specific args. punching: {col_idx, c1_in?, c2_in?, h_in?}. pm_column: {col_idx, section_size}. deflection: {slab_idx, deflection_limit}. catalog_screen: {col_idx, candidates: [12,14,16,...]}"),
+            "type" => Dict("type" => "string", "required" => true, "enum" => ["punching", "pm_column", "deflection", "catalog_screen"], "description" => "Experiment type. punching: test column size or slab thickness on punching shear. pm_column: test a different column section against P-M demands. deflection: test a different L/N limit. catalog_screen: screen multiple candidate sections."),
+            "args" => Dict("type" => "object", "required" => true, "description" => "Experiment-specific args. punching: {col_idx (required), c1_in?, c2_in?, h_in?}. pm_column: {col_idx (required), section_size (inches for RC, W-shape string for steel)}. deflection: {slab_idx (required), deflection_limit (L_240|L_360|L_480)}. catalog_screen: {col_idx (required), candidates: [12,14,16,...] for RC or [\"W14X82\",\"W14X90\",...] for steel}"),
         ),
-        "returns"           => "Dict with original vs modified ratios, ok status, and delta.",
+        "returns"           => "Dict with original vs modified ratios, ok status, delta, and whether the change improved the element.",
         "requires_design"   => true,
         "requires_geometry" => false,
     ),
@@ -867,7 +867,7 @@ const TOOL_REGISTRY = [
         "name"              => "list_experiments",
         "description"       => "List available micro-experiment types with their argument schemas.",
         "phase"             => "exploration",
-        "use_when"          => "You want to know what micro-experiments are available before running one.",
+        "use_when"          => "You need the exact argument schema for an experiment type. Usually not needed — run_experiment args are documented inline.",
         "args"              => Dict{String, Any}(),
         "returns"           => "Dict with experiment names, descriptions, and argument schemas.",
         "requires_design"   => false,
@@ -875,11 +875,11 @@ const TOOL_REGISTRY = [
     ),
     Dict{String, Any}(
         "name"              => "batch_experiments",
-        "description"       => "Run multiple micro-experiments in one call.",
+        "description"       => "Run multiple micro-experiments in one call. Use to screen several alternatives at once.",
         "phase"             => "exploration",
-        "use_when"          => "You want to test several alternatives simultaneously (e.g. screen 5 column sizes).",
+        "use_when"          => "User asks 'which column sizes would work?' or 'compare these options' — run multiple punching/pm_column experiments in parallel. Also useful after suggest_next_action to test the top-ranked changes instantly.",
         "args"              => Dict{String, Any}(
-            "experiments" => Dict("type" => "array", "required" => true, "description" => "Array of {type, args} objects"),
+            "experiments" => Dict("type" => "array", "required" => true, "description" => "Array of {type, args} objects. Example: [{type: \"punching\", args: {col_idx: 1, c1_in: 18}}, {type: \"punching\", args: {col_idx: 1, c1_in: 20}}]"),
         ),
         "returns"           => "Dict with array of results, one per experiment.",
         "requires_design"   => true,
@@ -887,9 +887,9 @@ const TOOL_REGISTRY = [
     ),
     Dict{String, Any}(
         "name"              => "narrate_element",
-        "description"       => "Plain-English explanation of one element's design, scaled to audience.",
+        "description"       => "Plain-English explanation of one element's design, scaled to audience. Produces calibrated narratives from actual design data — ALWAYS prefer this over writing your own explanation.",
         "phase"             => "communication",
-        "use_when"          => "The user asks why an element is sized a certain way, or you want to explain a result.",
+        "use_when"          => "User asks to explain a column, beam, slab, or foundation result. Use INSTEAD of writing your own explanation — this tool uses real ratios, code clauses, and solver data. Also use after diagnosing a failure to give the user a clear narrative.",
         "args"              => Dict{String, Any}(
             "element_type" => Dict("type" => "string", "required" => true, "enum" => ["column", "beam", "slab", "foundation"]),
             "element_id"   => Dict("type" => "integer", "required" => true),
@@ -905,9 +905,9 @@ const TOOL_REGISTRY = [
     ),
     Dict{String, Any}(
         "name"              => "narrate_comparison",
-        "description"       => "Plain-English comparison of two designs from session history.",
+        "description"       => "Plain-English comparison of two designs from session history. Use AFTER compare_designs for a human-friendly summary.",
         "phase"             => "communication",
-        "use_when"          => "The user asks to explain the difference between two runs.",
+        "use_when"          => "After compare_designs, when the user wants to understand the differences in plain English. Also use when the user asks 'what changed?' or 'was that better?'.",
         "args"              => Dict{String, Any}(
             "index_a"  => Dict("type" => "integer", "required" => true),
             "index_b"  => Dict("type" => "integer", "required" => true),
@@ -923,9 +923,9 @@ const TOOL_REGISTRY = [
     ),
     Dict{String, Any}(
         "name"              => "get_solver_trace",
-        "description"       => "Tiered solver decision trace: why the solver chose specific sections, fell back, converged/diverged, and what check ratios it computed.",
+        "description"       => "Tiered solver decision trace: why the solver chose specific sections, fell back, converged/diverged, and what check ratios it computed. This is the 'show your work' tool.",
         "phase"             => "diagnosis",
-        "use_when"          => "You need to understand WHY a design looks the way it does — not just what passed/failed, but the solver's reasoning path. Start with tier=summary or tier=failures; drill deeper with tier=decisions or tier=full.",
+        "use_when"          => "User asks 'why is the column so big?', 'why did it pick this section?', 'why did the solver fall back?', 'why didn't it converge?', or any WHY question about solver behavior. Start with tier=failures for failing elements, tier=decisions for section selection reasoning. Use element filter to focus on a specific member.",
         "args"              => Dict{String, Any}(
             "tier"    => Dict("type" => "string", "enum" => ["summary", "failures", "decisions", "full"], "optional" => true, "description" => "Detail level. Default: failures."),
             "element" => Dict("type" => "string", "optional" => true, "description" => "Filter to events for a specific element (e.g. 'column_group_3', 'slab_2')."),
@@ -971,7 +971,7 @@ const TOOL_REGISTRY = [
         "name"              => "get_applicability",
         "description"       => "DDM/EFM/FEA eligibility rules, plus geometry_evaluation (DDM prerequisite checks against actual panel spans and aspect ratios) when server has cached geometry.",
         "phase"             => "diagnosis",
-        "use_when"          => "Checking which analysis methods are valid for this building. When geometry is loaded, reports whether DDM prerequisites (aspect ratio, span differences) are met or violated.",
+        "use_when"          => "User asks 'should I use DDM, EFM, or FEA?', 'which method is best for this building?', or 'why is DDM not working?'. Also use when the user changes floor_type or geometry and you need to check method compatibility. Reports whether DDM prerequisites (aspect ratio, span differences) are met or violated.",
         "args"              => Dict{String, Any}(),
         "returns"           => "Dict with rules per floor_type and optional geometry_evaluation with per-DDM-check verdicts.",
         "requires_design"   => false,
@@ -994,9 +994,9 @@ const TOOL_REGISTRY = [
     ),
     Dict{String, Any}(
         "name"              => "record_insight",
-        "description"       => "Record a structured learning from the current design iteration.",
+        "description"       => "Record a structured learning from the current design iteration. REQUIRED after every run_design or run_experiment.",
         "phase"             => "exploration",
-        "use_when"          => "After observing a design outcome, record what you learned so you don't repeat dead ends in future turns. Categories: observation (general), discovery (found something useful), dead_end (this didn't work), sensitivity (parameter X has big/small effect), geometry_note (geometry-specific constraint).",
+        "use_when"          => "REQUIRED after every run_design call and recommended after run_experiment. Record what you learned: did the change help? Was it a dead end? How sensitive is the design to this parameter? Categories: observation (general), discovery (found something useful), dead_end (this didn't work), sensitivity (parameter X has big/small effect), geometry_note (geometry-specific constraint). Skipping this leads to repeated dead ends.",
         "args"              => Dict{String, Any}(
             "category"       => Dict("type" => "string", "required" => true, "enum" => ["observation", "discovery", "dead_end", "sensitivity", "geometry_note"]),
             "summary"        => Dict("type" => "string", "required" => true, "description" => "One-line summary of the insight"),
@@ -1012,9 +1012,9 @@ const TOOL_REGISTRY = [
     ),
     Dict{String, Any}(
         "name"              => "get_session_insights",
-        "description"       => "Retrieve accumulated learnings from this session.",
+        "description"       => "Retrieve accumulated learnings from this session. Check before recommending to avoid repeating failed approaches.",
         "phase"             => "orientation",
-        "use_when"          => "Before making a recommendation, check what you've already learned in this session. Especially useful after multiple design iterations.",
+        "use_when"          => "REQUIRED before recommending a parameter change (especially after 2+ design iterations). Prevents you from suggesting something already tried as a dead_end. Also useful to summarize what's been learned when the user asks 'what have we tried?'.",
         "args"              => Dict{String, Any}(
             "category"       => Dict("type" => "string", "optional" => true, "enum" => ["observation", "discovery", "dead_end", "sensitivity", "geometry_note"]),
             "check"          => Dict("type" => "string", "optional" => true, "description" => "Filter to insights about a specific check family"),

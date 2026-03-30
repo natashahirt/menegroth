@@ -1137,8 +1137,13 @@ function agent_suggest_next_action(design::BuildingDesign, goal::String)::Dict{S
     failing_checks = _extract_failing_checks(diag)
     ranked_actions = _rank_actions_by_failure(goal, failing_checks, related_params)
 
-    # ── Geometry remediation evaluation ──
-    geo_remediations = _geometry_remediation_eval(design, diag, failing_checks)
+    # ── Geometry remediation evaluation (non-fatal on error) ──
+    geo_remediations = try
+        _geometry_remediation_eval(design, diag, failing_checks)
+    catch e
+        @warn "Geometry remediation eval failed — skipping" exception=(e, catch_backtrace())
+        Dict{String, Any}[]
+    end
 
     # ── Parameter headroom from size warnings ──
     size_warnings = get(diag, "size_warnings", Any[])
@@ -1456,14 +1461,13 @@ function _geometry_remediation_eval(
     struc = design.structure
     skel = struc.skeleton
 
-    # Extract geometry metrics
+    # Extract geometry metrics from the cached geometry
     edge_lengths_m = Float64[]
-    for eidx in eachindex(skel.geometry.edges)
-        e = skel.geometry.edges[eidx]
-        v1 = skel.geometry.vertices[e[1]]
-        v2 = skel.geometry.vertices[e[2]]
-        dx = v1[1] - v2[1]; dy = v1[2] - v2[2]; dz = v1[3] - v2[3]
-        push!(edge_lengths_m, sqrt(dx^2 + dy^2 + dz^2))
+    if !isnothing(skel.geometry)
+        for len in skel.geometry.edge_lengths
+            lm = try ustrip(u"m", len) catch; Float64(len) end
+            lm > 0.1 && push!(edge_lengths_m, lm)
+        end
     end
     max_span_m = isempty(edge_lengths_m) ? 0.0 : maximum(edge_lengths_m)
     max_span_ft = max_span_m * 3.28084
@@ -1472,7 +1476,8 @@ function _geometry_remediation_eval(
     zs = skel.stories_z
     if length(zs) > 1
         for i in 2:length(zs)
-            push!(story_heights_m, abs(zs[i] - zs[i-1]))
+            dz = try ustrip(u"m", zs[i] - zs[i-1]) catch; Float64(zs[i] - zs[i-1]) end
+            push!(story_heights_m, abs(dz))
         end
     end
     max_story_m = isempty(story_heights_m) ? 0.0 : maximum(story_heights_m)
@@ -1617,10 +1622,22 @@ function agent_response_guidelines()::Dict{String, Any}
                  "sequence" => "get_diagnose_summary → get_provision_rationale → narrate_element"),
             Dict("intent" => "What should I change?",
                  "sequence" => "get_diagnose_summary → suggest_next_action → validate_params"),
-            Dict("intent" => "Would a bigger column help?",
-                 "sequence" => "run_experiment(punching or pm_column)"),
-            Dict("intent" => "Try changing X",
-                 "sequence" => "run_experiment → validate_params → run_design → compare_designs"),
+            Dict("intent" => "Would a bigger column help? / punching shear concern",
+                 "sequence" => "run_experiment(type=punching, args={col_idx from diagnose, c1_in=larger}) — INSTANT, no full re-run"),
+            Dict("intent" => "What if I use a different column section?",
+                 "sequence" => "run_experiment(type=pm_column, args={col_idx, section_size}) or batch_experiments to screen multiple sizes"),
+            Dict("intent" => "Would reinforce_first / grow_columns / reinforce_last help?",
+                 "sequence" => "run_experiment(type=punching) on the critical column to see ratio change, then explain trade-off"),
+            Dict("intent" => "What about a different deflection limit?",
+                 "sequence" => "run_experiment(type=deflection, args={slab_idx, deflection_limit})"),
+            Dict("intent" => "Which column sizes would work?",
+                 "sequence" => "run_experiment(type=catalog_screen, args={col_idx, candidates=[...]}) or batch_experiments with multiple pm_column checks"),
+            Dict("intent" => "Would stronger concrete / different material help?",
+                 "sequence" => "run_experiment(type=punching) to see slab-column impact, then explain how fc affects φVc"),
+            Dict("intent" => "How can I reduce embodied carbon / lower-carbon building?",
+                 "sequence" => "suggest_next_action(goal=reduce_ec) → run_experiment on critical elements to quantify savings → validate_params → run_design"),
+            Dict("intent" => "Try changing X (global parameter change)",
+                 "sequence" => "run_experiment first for instant preview → validate_params → run_design → compare_designs"),
             Dict("intent" => "Explain this element/result",
                  "sequence" => "narrate_element or narrate_comparison"),
             Dict("intent" => "Compare runs",

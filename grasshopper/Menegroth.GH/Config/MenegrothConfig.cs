@@ -1,5 +1,6 @@
 using System;
 using System.Threading;
+using Menegroth.GH.Types;
 using Newtonsoft.Json.Linq;
 
 namespace Menegroth.GH.Config
@@ -74,6 +75,46 @@ namespace Menegroth.GH.Config
 
         // ─── Geometry ─────────────────────────────────────────────────────
         public const double GeometryTolerance = 1e-6;
+
+        /// <summary>
+        /// Latest <see cref="BuildingGeometry"/> produced by GeometryInput.
+        /// Chat clients read this to include <c>building_geometry</c> in
+        /// <c>POST /chat</c> and <c>POST /chat/action</c> requests so the
+        /// assistant can access geometry without a prior design run.
+        /// </summary>
+        private static readonly object BuildingGeometryLock = new object();
+        private static BuildingGeometry? _lastBuildingGeometry;
+        private static string? _lastBuildingGeometryHash;
+        private static string? _lastGeometrySummary;
+
+        /// <summary>
+        /// Called by GeometryInput when it produces a new BuildingGeometry.
+        /// </summary>
+        public static void UpdateBuildingGeometry(BuildingGeometry? geo, string? summary)
+        {
+            lock (BuildingGeometryLock)
+            {
+                _lastBuildingGeometry = geo;
+                _lastBuildingGeometryHash = geo?.ComputeHash();
+                _lastGeometrySummary = summary;
+            }
+        }
+
+        /// <summary>
+        /// Returns the latest geometry JSON, hash, and summary for chat requests.
+        /// All outputs are null when no geometry has been produced yet.
+        /// </summary>
+        public static (JObject? geoJson, string? geoHash, string? summary) GetBuildingGeometryForChat()
+        {
+            lock (BuildingGeometryLock)
+            {
+                return (
+                    _lastBuildingGeometry?.ToJson(),
+                    _lastBuildingGeometryHash,
+                    _lastGeometrySummary
+                );
+            }
+        }
 
         // ─── Visualization ───────────────────────────────────────────────
         public const int SlabVertexWarningThreshold = 200_000;

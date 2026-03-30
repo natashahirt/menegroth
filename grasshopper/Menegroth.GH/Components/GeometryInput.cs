@@ -277,8 +277,11 @@ namespace Menegroth.GH.Components
                 }
             }
 
+            var summary = BuildGeometrySummary(geo);
+            MenegrothConfig.UpdateBuildingGeometry(geo, summary);
+
             DA.SetData(0, new BuildingGeometryGoo(geo));
-            DA.SetData(1, BuildGeometrySummary(geo));
+            DA.SetData(1, summary);
         }
 
         /// <summary>

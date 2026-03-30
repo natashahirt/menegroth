@@ -465,15 +465,31 @@ namespace Menegroth.GH.Helpers
 
         /// <summary>
         /// POST to /chat/action to invoke a structural tool from the agent.
+        /// When <paramref name="includeBuildingGeometry"/> is true, the latest
+        /// <see cref="Config.MenegrothConfig"/> building geometry is included so
+        /// geometry-dependent tools work without a prior design run.
         /// Returns the parsed JSON response, or null on failure.
         /// </summary>
         public static async Task<JObject?> PostChatActionAsync(
-            string baseUrl, string tool, JObject? args = null, CancellationToken ct = default)
+            string baseUrl, string tool, JObject? args = null,
+            bool includeBuildingGeometry = true, CancellationToken ct = default)
         {
             try
             {
                 var body = new JObject { ["tool"] = tool };
                 if (args != null) body["args"] = args;
+
+                if (includeBuildingGeometry)
+                {
+                    var (geoJson, geoHash, _) = Config.MenegrothConfig.GetBuildingGeometryForChat();
+                    if (geoJson != null)
+                    {
+                        body["building_geometry"] = geoJson;
+                        if (!string.IsNullOrEmpty(geoHash))
+                            body["client_geometry_hash"] = geoHash;
+                    }
+                }
+
                 var content = new StringContent(body.ToString(Newtonsoft.Json.Formatting.None), Encoding.UTF8, "application/json");
                 using var req = new HttpRequestMessage(HttpMethod.Post, NormalizeUrl(baseUrl, "chat/action")) { Content = content };
                 AddAuthHeader(req);
@@ -482,6 +498,27 @@ namespace Menegroth.GH.Helpers
                 return string.IsNullOrWhiteSpace(respBody) ? null : JObject.Parse(respBody);
             }
             catch { return null; }
+        }
+
+        /// <summary>
+        /// Builds a JSON request body for <c>POST /chat</c> that includes the
+        /// latest building geometry from the GH canvas. Call sites that construct
+        /// chat payloads should use this to ensure geometry-dependent tools work.
+        /// </summary>
+        /// <param name="baseBody">
+        /// The caller's partial body (must already contain <c>messages</c>, <c>mode</c>,
+        /// <c>session_id</c>, etc.). Geometry fields are merged in.
+        /// </param>
+        public static JObject EnrichChatBodyWithGeometry(JObject baseBody)
+        {
+            var (geoJson, geoHash, summary) = Config.MenegrothConfig.GetBuildingGeometryForChat();
+            if (geoJson != null)
+                baseBody["building_geometry"] = geoJson;
+            if (!string.IsNullOrEmpty(geoHash))
+                baseBody["client_geometry_hash"] = geoHash;
+            if (!string.IsNullOrEmpty(summary))
+                baseBody["geometry_summary"] = summary;
+            return baseBody;
         }
 
         private static string NormalizeUrl(string baseUrl, string path)

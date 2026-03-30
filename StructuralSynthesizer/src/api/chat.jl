@@ -4226,6 +4226,19 @@ function register_chat_routes!()
             args["client_geometry_hash"] = client_gh
         end
 
+        # When the client includes building_geometry, eagerly populate the
+        # chat structure cache so geometry-dependent tools (get_geometry_digest,
+        # get_situation_card, etc.) work without a prior POST /chat or /design.
+        bg_raw = get(parsed, :building_geometry, get(parsed, "building_geometry", nothing))
+        structured_geo = _parse_chat_building_geometry(bg_raw)
+        if !isnothing(structured_geo)
+            try
+                _chat_get_structure_digest(structured_geo)
+            catch e
+                @warn "POST /chat/action: building_geometry structure init failed" exception=(e, catch_backtrace())
+            end
+        end
+
         t0     = time()
         result = _dispatch_chat_tool(tool, args)
         _attach_geometry_alignment!(result, args)

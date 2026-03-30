@@ -70,9 +70,10 @@ const LIMIT_STATE_DESCRIPTIONS = Dict{String, String}(
 
     "deflection" =>
         "The slab deflects more than the code allows relative to its span. " *
-        "ACI 318-19 §24.2: Δ ≤ l/360 (default) or l/240 under sustained loads. " *
+        "ACI 318-19 §24.2: L/360 for floors with attached partitions (default), " *
+        "L/240 for floors without damage-sensitive attachments, L/480 for sensitive finishes. " *
         "Thickness, concrete grade, and the chosen deflection limit all affect this. " *
-        "L/240 allows 50 % more deflection than L/360; L/480 is 33 % stricter.",
+        "L/240 allows 50% more deflection than L/360; L/480 allows 25% less (ratio increases by 33%).",
 
     "punching_shear_slab" =>
         "This is the slab-level punching check at a column location. " *
@@ -953,9 +954,9 @@ function _build_goal_recommendations(
                     "current_ratio"    => get(worst_slab, "governing_ratio", 0.0),
                     "estimated_new_ratio" => new_ratio,
                     "confidence"       => "analytical",
-                    "rationale"        => "Deflection governs the critical slab. Relaxing to L/240 allows " *
-                                        "50% more deflection (L/240 vs L/$(d_curr)). The ratio scales exactly " *
-                                        "with the divisor: new_ratio = old × 240 / $d_curr. " *
+                    "rationale"        => "Deflection governs the critical slab. Relaxing to L/240 from L/$(d_curr) " *
+                                        "increases the allowable deflection by a factor of $(round(d_curr / 240; digits=2))×. " *
+                                        "The ratio scales exactly: new_ratio = old × 240 / $d_curr = old × $(round(240 / d_curr; digits=3)). " *
                                         "Actual thickness reduction requires a rerun.",
                 ))
             end
@@ -1080,8 +1081,9 @@ function _diagnose_lever_impacts(
                 "worst_slab_deflection_ratio_estimated" => _round_val(new_worst),
                 "delta"             => _round_val(new_worst - worst_defl),
                 "confidence"        => "analytical",
-                "basis"             => "ratio ∝ 1/divisor: new_ratio = old_ratio × ($d_alt / $d_curr). " *
-                                       "The actual slab deflection Δ is unchanged; only the limit changes. " *
+                "basis"             => "ratio = Δ/(L/d) = Δ·d/L, so ratio ∝ divisor: " *
+                                       "new_ratio = old_ratio × ($d_alt / $d_curr). " *
+                                       "The actual slab deflection Δ is unchanged; only the allowable changes. " *
                                        "Thickness changes require a rerun.",
                 "affected_element_type" => "slabs",
                 "n_affected"        => length(slab_dicts),

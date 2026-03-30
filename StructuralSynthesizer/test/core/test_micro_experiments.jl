@@ -77,13 +77,15 @@ end
     @test haskey(result, "note")
 
     experiments = result["experiments"]
-    @test length(experiments) == 4
+    @test length(experiments) >= 4
 
     names = Set(e["name"] for e in experiments)
     @test "punching" in names
     @test "pm_column" in names
     @test "deflection" in names
     @test "catalog_screen" in names
+    @test "beam" in names
+    @test "punching_reinforcement" in names
 
     for e in experiments
         @test haskey(e, "description")

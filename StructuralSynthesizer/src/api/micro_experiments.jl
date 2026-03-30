@@ -7,10 +7,12 @@
 # APIs directly.
 #
 # Experiment types:
-#   - punching:    vary column size or slab thickness for a punching check
-#   - pm_column:   try alternative column sections against cached P-M demands
-#   - deflection:  test different deflection limits against stored slab data
-#   - catalog:     screen a section catalog against a single demand envelope
+#   - punching:                vary column size, slab thickness, or fc for punching check
+#   - pm_column:               try alternative column sections against cached P-M demands
+#   - beam:                    try alternative W-shapes against cached beam demands
+#   - punching_reinforcement:  design studs/stirrups for a punching-failing column
+#   - deflection:              test different deflection limits against stored slab data
+#   - catalog_screen:          screen a section catalog against a single demand envelope
 # =============================================================================
 
 using Unitful
@@ -90,20 +92,47 @@ end
 # ─── Punching Experiments ─────────────────────────────────────────────────────
 
 """
-    experiment_punching(design, col_idx; c1_in, c2_in, h_in) -> Dict
+    _punching_critical_area(c1, c2, d, position) → Area
 
-Re-run the ACI punching shear check for column `col_idx` with modified column
-dimensions or slab thickness. Uses the actual `check_punching_for_column`
-from StructuralSizer, respecting column position (interior/edge/corner) and
-stored unbalanced moment.
+Area enclosed by the punching critical section, accounting for column position.
+Interior uses full 4-sided perimeter; edge uses 3-sided; corner uses 2-sided.
 """
-function experiment_punching(
-    design::BuildingDesign,
-    col_idx::Int;
-    c1_in::Union{Float64, Nothing} = nothing,
-    c2_in::Union{Float64, Nothing} = nothing,
-    h_in::Union{Float64, Nothing} = nothing,
-)::Dict{String, Any}
+function _punching_critical_area(c1, c2, d, position::Symbol)
+    if position == :interior
+        return (c1 + d) * (c2 + d)
+    elseif position == :edge
+        return (c1 + d / 2) * (c2 + d)
+    else  # :corner
+        return (c1 + d / 2) * (c2 + d / 2)
+    end
+end
+
+"""
+    _governing_vc_equation(fc, β, αs, b0, d; λ=1.0) → String
+
+Return a label identifying which ACI 318-11 equation governs `vc`:
+  "11-31" (aspect ratio), "11-32" (perimeter-to-depth), or "11-33" (upper bound).
+"""
+function _governing_vc_equation(fc, β::Float64, αs::Int, b0, d; λ::Float64 = 1.0)
+    sqrt_fc = sqrt(ustrip(u"psi", fc))
+    vc_a = (2 + 4 / β) * λ * sqrt_fc
+    vc_b = (αs * ustrip(u"inch", d) / ustrip(u"inch", b0) + 2) * λ * sqrt_fc
+    vc_c = 4 * λ * sqrt_fc
+    vc_min = min(vc_a, vc_b, vc_c)
+    vc_min ≈ vc_a && return "11-31"
+    vc_min ≈ vc_b && return "11-32"
+    return "11-33"
+end
+
+"""
+    _resolve_punching_inputs(design, col_idx) → NamedTuple or Dict (error)
+
+Extract and compute all punching-shear inputs from the cached design for a
+given column.  Returns either an error Dict (caller should return it) or a
+NamedTuple with fields used by both `experiment_punching` and
+`experiment_punching_reinforcement`.
+"""
+function _resolve_punching_inputs(design::BuildingDesign, col_idx::Int)
     col_result = get(design.columns, col_idx, nothing)
     isnothing(col_result) && return Dict{String, Any}(
         "error" => "column_not_found",
@@ -119,9 +148,6 @@ function experiment_punching(
     orig_c1 = col_result.c1
     orig_c2 = col_result.c2
     orig_Vu = punching.Vu
-
-    new_c1 = isnothing(c1_in) ? orig_c1 : c1_in * u"inch"
-    new_c2 = isnothing(c2_in) ? orig_c2 : c2_in * u"inch"
 
     slab_concrete = resolve_slab_concrete(design.params.materials)
     fc = slab_concrete.fc′
@@ -141,70 +167,165 @@ function experiment_punching(
         "message" => "Cannot determine slab thickness from design.",
     )
 
-    new_h = isnothing(h_in) ? orig_h : h_in * u"inch"
-    d = new_h - cover - bar_d
-
+    d_orig = orig_h - cover - bar_d
     position = _resolve_column_position(design, col_idx)
     shape = _resolve_column_shape(design, col_idx)
 
-    # Use stored unbalanced moment when available; fall back to Mu_x from frame analysis.
     Mub = if hasproperty(punching, :Mub) && !isnothing(punching.Mub)
         punching.Mub
     else
         abs(col_result.Mu_x)
     end
 
-    # Build a duck-typed column object for check_punching_for_column.
-    col_proxy = (c1 = new_c1, c2 = new_c2, position = position, shape = shape)
+    return (
+        col_result = col_result,
+        punching   = punching,
+        orig_c1    = orig_c1,
+        orig_c2    = orig_c2,
+        orig_Vu    = orig_Vu,
+        fc         = fc,
+        orig_h     = orig_h,
+        d_orig     = d_orig,
+        position   = position,
+        shape      = shape,
+        Mub        = Mub,
+        At         = punching.tributary_area,
+        cover      = cover,
+        bar_d      = bar_d,
+    )
+end
+
+"""
+    experiment_punching(design, col_idx; c1_in, c2_in, h_in, fc_in) -> Dict
+
+Re-run the ACI punching shear check for column `col_idx` with modified column
+dimensions, slab thickness, or concrete strength. Uses `check_punching_for_column`
+from StructuralSizer, respecting column position (interior/edge/corner) and
+stored unbalanced moment.
+
+When column size or slab thickness changes, `Vu` is adjusted to account for
+the change in the area enclosed by the critical perimeter (ACI §11.11.1.2):
+the factored load per unit area `qu` is held constant while the net tributary
+area outside the critical section is updated.
+"""
+function experiment_punching(
+    design::BuildingDesign,
+    col_idx::Int;
+    c1_in::Union{Float64, Nothing} = nothing,
+    c2_in::Union{Float64, Nothing} = nothing,
+    h_in::Union{Float64, Nothing} = nothing,
+    fc_in::Union{Float64, Nothing} = nothing,
+)::Dict{String, Any}
+    inp = _resolve_punching_inputs(design, col_idx)
+    inp isa Dict && return inp  # error dict
+
+    new_c1 = isnothing(c1_in) ? inp.orig_c1 : c1_in * u"inch"
+    new_c2 = isnothing(c2_in) ? inp.orig_c2 : c2_in * u"inch"
+    new_h  = isnothing(h_in)  ? inp.orig_h  : h_in * u"inch"
+    d = new_h - inp.cover - inp.bar_d
+
+    # Concrete strength override: build a new Concrete with ACI Ec = 57000√f'c
+    orig_fc = inp.fc
+    fc = if !isnothing(fc_in)
+        fc_new = fc_in * u"psi"
+        Ec_new = 57000 * sqrt(fc_in) * u"psi"  # ACI 318-11 §8.5.1
+        StructuralSizer.Concrete(Ec_new, fc_new, 2380.0u"kg/m^3", 0.20, 0.138).fc′
+    else
+        orig_fc
+    end
+
+    # ── Adjust Vu for the change in critical-section enclosed area ──
+    Ac_orig = _punching_critical_area(inp.orig_c1, inp.orig_c2, inp.d_orig, inp.position)
+    Ac_new  = _punching_critical_area(new_c1,  new_c2,  d, inp.position)
+    net_orig = inp.At - Ac_orig
+    Vu_adjusted = if ustrip(u"m^2", net_orig) > 0
+        qu = inp.orig_Vu / net_orig
+        net_new = inp.At - Ac_new
+        max(qu * net_new, 0.0u"kN")
+    else
+        inp.orig_Vu
+    end
+
+    col_proxy = (c1 = new_c1, c2 = new_c2, position = inp.position, shape = inp.shape)
 
     result = StructuralSizer.check_punching_for_column(
-        col_proxy, orig_Vu, Mub, d, new_h, fc;
+        col_proxy, Vu_adjusted, inp.Mub, d, new_h, fc;
         col_idx = col_idx,
     )
 
-    orig_ratio = punching.ratio
-
+    orig_ratio = inp.punching.ratio
     new_ratio = result.ratio
     delta = new_ratio - orig_ratio
     improved = new_ratio < orig_ratio
 
-    # Sanity check: larger columns and thicker slabs should improve punching.
-    # If the result contradicts this, flag it for the LLM.
+    # ── Stress decomposition for diagnostic clarity ──
+    b0 = result.b0
+    vu_direct   = Vu_adjusted / (b0 * d)
+    vu_eccentric = result.vu - vu_direct
+
+    c1_eff = new_c1
+    c2_eff = new_c2
+    if inp.shape == :circular && inp.position != :interior
+        side = StructuralSizer.equivalent_square_column(new_c1)
+        c1_eff = side
+        c2_eff = side
+    end
+    β = inp.shape == :circular && inp.position == :interior ? 1.0 :
+        max(ustrip(u"inch", c1_eff), ustrip(u"inch", c2_eff)) /
+        max(min(ustrip(u"inch", c1_eff), ustrip(u"inch", c2_eff)), 1.0)
+    αs = StructuralSizer.punching_αs(inp.position)
+    governing_eq = _governing_vc_equation(fc, β, αs, b0, d)
+
+    # ── Sanity warning (now rare with Vu adjustment) ──
     sanity_warning = nothing
-    col_grew = ustrip(u"inch", new_c1) >= ustrip(u"inch", orig_c1) &&
-               ustrip(u"inch", new_c2) >= ustrip(u"inch", orig_c2)
-    slab_grew = ustrip(u"inch", new_h) >= ustrip(u"inch", orig_h)
+    col_grew = ustrip(u"inch", new_c1) >= ustrip(u"inch", inp.orig_c1) &&
+               ustrip(u"inch", new_c2) >= ustrip(u"inch", inp.orig_c2)
+    slab_grew = ustrip(u"inch", new_h) >= ustrip(u"inch", inp.orig_h)
     if col_grew && slab_grew && !improved && abs(delta) > 0.05
-        sanity_warning = "WARNING: Increasing column size and/or slab thickness " *
-            "worsened punching ratio. This is structurally unexpected. " *
-            "Possible causes: (1) geometry mismatch between experiment and server cache, " *
-            "(2) unbalanced moment Mub dominates over direct shear, " *
-            "(3) edge/corner eccentricity correction. Verify with a full run_design."
+        sanity_warning = "WARNING: Ratio worsened despite larger column/slab. " *
+            "With Vu adjusted for critical-area change this is unusual. " *
+            "Likely cause: unbalanced moment dominates (eccentric stress = " *
+            "$(round(ustrip(u"psi", vu_eccentric); digits=1)) psi vs direct = " *
+            "$(round(ustrip(u"psi", vu_direct); digits=1)) psi). " *
+            "Consider verifying with a full run_design."
     end
 
     out = Dict{String, Any}(
         "experiment" => "punching",
         "column_idx" => col_idx,
-        "position" => string(position),
+        "position" => string(inp.position),
         "original" => Dict{String, Any}(
-            "c1_in" => round(ustrip(u"inch", orig_c1); digits=1),
-            "c2_in" => round(ustrip(u"inch", orig_c2); digits=1),
-            "h_in" => round(ustrip(u"inch", orig_h); digits=1),
+            "c1_in" => round(ustrip(u"inch", inp.orig_c1); digits=1),
+            "c2_in" => round(ustrip(u"inch", inp.orig_c2); digits=1),
+            "h_in" => round(ustrip(u"inch", inp.orig_h); digits=1),
+            "fc_psi" => round(ustrip(u"psi", orig_fc); digits=0),
             "ratio" => round(orig_ratio; digits=3),
-            "ok" => punching.ok,
-            "Vu_kip" => round(ustrip(u"kip", orig_Vu); digits=2),
-            "Mub_kipft" => round(ustrip(u"kip*ft", Mub); digits=2),
+            "ok" => inp.punching.ok,
+            "Vu_kip" => round(ustrip(u"kip", inp.orig_Vu); digits=2),
+            "Mub_kipft" => round(ustrip(u"kip*ft", inp.Mub); digits=2),
         ),
         "modified" => Dict{String, Any}(
             "c1_in" => round(ustrip(u"inch", new_c1); digits=1),
             "c2_in" => round(ustrip(u"inch", new_c2); digits=1),
             "h_in" => round(ustrip(u"inch", new_h); digits=1),
+            "fc_psi" => round(ustrip(u"psi", fc); digits=0),
             "ratio" => round(new_ratio; digits=3),
             "ok" => result.ok,
             "vu_psi" => round(ustrip(u"psi", result.vu); digits=1),
             "φvc_psi" => round(ustrip(u"psi", result.φvc); digits=1),
-            "b0_in" => round(ustrip(u"inch", result.b0); digits=1),
+            "b0_in" => round(ustrip(u"inch", b0); digits=1),
+            "Vu_adjusted_kip" => round(ustrip(u"kip", Vu_adjusted); digits=2),
         ),
+        "stress_decomposition" => Dict{String, Any}(
+            "vu_direct_psi" => round(ustrip(u"psi", vu_direct); digits=1),
+            "vu_eccentric_psi" => round(ustrip(u"psi", vu_eccentric); digits=1),
+            "governing_vc_eq" => governing_eq,
+            "β" => round(β; digits=2),
+            "αs" => αs,
+        ),
+        "Vu_note" => "Vu adjusted from $(round(ustrip(u"kip", inp.orig_Vu); digits=2)) kip " *
+                      "to $(round(ustrip(u"kip", Vu_adjusted); digits=2)) kip " *
+                      "for critical-area change (At=$(round(ustrip(u"ft^2", inp.At); digits=1)) ft²).",
         "delta_ratio" => round(delta; digits=3),
         "improved" => improved,
     )
@@ -487,6 +608,281 @@ function _experiment_pm_steel(
     return result
 end
 
+# ─── Beam Experiments ─────────────────────────────────────────────────────────
+
+"""
+    experiment_beam(design, beam_idx; section_size) -> Dict
+
+Test a steel beam against its cached demands with a different W-shape section,
+using the real AISC checker via `explain_feasibility`.  Returns original vs
+modified ratios plus all individual check results (flexure, shear, LTB, etc.).
+"""
+function experiment_beam(
+    design::BuildingDesign,
+    beam_idx::Int;
+    section_size::Union{String, Nothing} = nothing,
+)::Dict{String, Any}
+    beam = get(design.beams, beam_idx, nothing)
+    isnothing(beam) && return Dict{String, Any}(
+        "error" => "beam_not_found",
+        "message" => "Beam index $beam_idx not found. Available: $(sort(collect(keys(design.beams))))",
+    )
+
+    isnothing(section_size) && return Dict{String, Any}(
+        "error" => "section_size_required",
+        "message" => "Provide section_size (W-shape designation, e.g. \"W16X40\") for beam experiment.",
+    )
+    size_str = strip(string(section_size))
+    isempty(size_str) && return Dict{String, Any}(
+        "error" => "invalid_section_size",
+        "message" => "section_size must be a non-empty W-shape designation string.",
+    )
+
+    new_section = try
+        StructuralSizer.W(uppercase(size_str))
+    catch e
+        return Dict{String, Any}(
+            "error" => "section_not_found",
+            "message" => "W-shape \"$size_str\" not found in catalog: $(sprint(showerror, e))",
+        )
+    end
+
+    mats = design.params.materials
+    params = design.params
+    beam_opts = params.beams
+    mat = if beam_opts isa StructuralSizer.SteelBeamOptions
+        beam_opts.material
+    else
+        resolve_beam_steel(mats)
+    end
+    max_depth_val = beam_opts isa StructuralSizer.SteelBeamOptions ? beam_opts.max_depth : Inf * u"mm"
+    objective = beam_opts isa StructuralSizer.SteelBeamOptions ? beam_opts.objective : StructuralSizer.MinWeight()
+
+    struc = design.structure
+    beam_member = (!isnothing(struc) && beam_idx >= 1 && beam_idx <= length(struc.beams)) ?
+        struc.beams[beam_idx] : nothing
+
+    L  = !isnothing(beam_member) ? member_length(beam_member) : 20.0u"ft"
+    Lb = !isnothing(beam_member) && hasproperty(beam_member.base, :Lb) ? beam_member.base.Lb : L
+    Kx = !isnothing(beam_member) && hasproperty(beam_member.base, :Kx) ? beam_member.base.Kx : 1.0
+    Ky = !isnothing(beam_member) && hasproperty(beam_member.base, :Ky) ? beam_member.base.Ky : 1.0
+    Cb = !isnothing(beam_member) && hasproperty(beam_member.base, :Cb) ? beam_member.base.Cb : 1.0
+    geom = StructuralSizer.SteelMemberGeometry(L; Lb=Lb, Cb=Cb, Kx=Kx, Ky=Ky)
+
+    Mux_Nm = StructuralSizer.to_newton_meters(beam.Mu)
+    Vu_N   = StructuralSizer.to_newtons(beam.Vu)
+    dem = StructuralSizer.MemberDemand(1; Mux=Mux_Nm, Vu_strong=Vu_N)
+
+    checker = StructuralSizer.AISCChecker(; max_depth=max_depth_val)
+    cat = [new_section]
+    cache = StructuralSizer.create_cache(checker, 1)
+    StructuralSizer.precompute_capacities!(checker, cache, cat, mat, objective)
+    expl = StructuralSizer.explain_feasibility(checker, cache, 1, new_section, mat, dem, geom)
+
+    new_ratio = expl.governing_ratio
+    orig_ratio = max(beam.flexure_ratio, beam.shear_ratio)
+
+    new_weight = try
+        m = match(r"X(\d+\.?\d*)", uppercase(size_str))
+        isnothing(m) ? nothing : parse(Float64, m.captures[1])
+    catch; nothing end
+
+    result = Dict{String, Any}(
+        "experiment" => "beam",
+        "beam_idx" => beam_idx,
+        "demands" => Dict{String, Any}(
+            "Mu_kipft" => round(ustrip(u"kip*ft", beam.Mu); digits=1),
+            "Vu_kip" => round(ustrip(u"kip", beam.Vu); digits=1),
+            "length_ft" => round(ustrip(u"ft", L); digits=1),
+            "Lb_ft" => round(ustrip(u"ft", Lb); digits=1),
+            "Cb" => round(Cb; digits=2),
+        ),
+        "original" => Dict{String, Any}(
+            "section" => beam.section_size,
+            "flexure_ratio" => round(beam.flexure_ratio; digits=3),
+            "shear_ratio" => round(beam.shear_ratio; digits=3),
+            "governing_ratio" => round(orig_ratio; digits=3),
+            "ok" => beam.ok,
+            "governing_check" => beam_diagnostic_governing_check(beam),
+        ),
+        "modified" => Dict{String, Any}(
+            "section" => size_str,
+            "weight_plf" => new_weight,
+            "governing_ratio" => round(new_ratio; digits=3),
+            "governing_check" => expl.governing_check,
+            "ok" => expl.passed,
+            "checks" => [Dict(
+                "name" => c.name,
+                "passed" => c.passed,
+                "ratio" => round(c.ratio; digits=3),
+            ) for c in expl.checks],
+        ),
+        "delta_ratio" => round(new_ratio - orig_ratio; digits=3),
+        "improved" => new_ratio < orig_ratio,
+    )
+
+    if !isnothing(new_weight)
+        orig_weight = try
+            m = match(r"X(\d+\.?\d*)", uppercase(beam.section_size))
+            isnothing(m) ? nothing : parse(Float64, m.captures[1])
+        catch; nothing end
+        if !isnothing(orig_weight) && new_weight > orig_weight && new_ratio > orig_ratio
+            result["sanity_warning"] = "Heavier section $(size_str) ($(new_weight) plf) " *
+                "has worse ratio than $(beam.section_size) ($(orig_weight) plf). " *
+                "Check governing_check — may indicate LTB, depth, or local buckling issue."
+        end
+    end
+
+    return result
+end
+
+# ─── Punching Reinforcement Experiments ──────────────────────────────────────
+
+"""
+    experiment_punching_reinforcement(design, col_idx; reinforcement_type, ...) -> Dict
+
+Design shear studs or closed stirrups for a column that fails punching shear,
+using the cached design demands.  Returns the reinforcement layout and whether
+it makes the column pass.
+"""
+function experiment_punching_reinforcement(
+    design::BuildingDesign,
+    col_idx::Int;
+    reinforcement_type::String = "studs",
+    stud_diameter_in::Union{Float64, Nothing} = nothing,
+    bar_size::Union{Int, Nothing} = nothing,
+    fyt_psi::Union{Float64, Nothing} = nothing,
+)::Dict{String, Any}
+    inp = _resolve_punching_inputs(design, col_idx)
+    inp isa Dict && return inp
+
+    d = inp.d_orig
+    fc = inp.fc
+    position = inp.position
+    shape = inp.shape
+
+    # Recompute vu from the stored check (using current dimensions)
+    col_proxy = (c1 = inp.orig_c1, c2 = inp.orig_c2, position = position, shape = shape)
+    check = StructuralSizer.check_punching_for_column(
+        col_proxy, inp.orig_Vu, inp.Mub, d, inp.orig_h, fc;
+        col_idx = col_idx,
+    )
+    vu = check.vu
+
+    # Compute geometry parameters for the design functions
+    c1_eff = inp.orig_c1
+    c2_eff = inp.orig_c2
+    if shape == :circular && position != :interior
+        side = StructuralSizer.equivalent_square_column(inp.orig_c1)
+        c1_eff = side
+        c2_eff = side
+    end
+    β = shape == :circular && position == :interior ? 1.0 :
+        max(ustrip(u"inch", c1_eff), ustrip(u"inch", c2_eff)) /
+        max(min(ustrip(u"inch", c1_eff), ustrip(u"inch", c2_eff)), 1.0)
+    αs = StructuralSizer.punching_αs(position)
+    b0 = check.b0
+
+    unreinforced_ratio = check.ratio
+    unreinforced_ok = check.ok
+
+    if lowercase(reinforcement_type) == "stirrups"
+        bs = isnothing(bar_size) ? 4 : bar_size
+        fyt = isnothing(fyt_psi) ? 60_000.0u"psi" : fyt_psi * u"psi"
+
+        design_result = try
+            StructuralSizer.design_closed_stirrups(
+                vu, fc, β, αs, b0, d, position, fyt, bs;
+                c1 = inp.orig_c1, c2 = inp.orig_c2,
+            )
+        catch e
+            return Dict{String, Any}(
+                "error" => "stirrup_design_failed",
+                "message" => "Could not design stirrups: $(sprint(showerror, e))",
+            )
+        end
+
+        reinforced_check = StructuralSizer.check_punching_with_stirrups(vu, design_result)
+
+        return Dict{String, Any}(
+            "experiment" => "punching_reinforcement",
+            "column_idx" => col_idx,
+            "position" => string(position),
+            "reinforcement_type" => "stirrups",
+            "unreinforced" => Dict{String, Any}(
+                "ratio" => round(unreinforced_ratio; digits=3),
+                "ok" => unreinforced_ok,
+                "vu_psi" => round(ustrip(u"psi", vu); digits=1),
+                "φvc_psi" => round(ustrip(u"psi", check.φvc); digits=1),
+            ),
+            "reinforced" => Dict{String, Any}(
+                "ratio" => round(reinforced_check.ratio; digits=3),
+                "ok" => reinforced_check.ok,
+                "required" => design_result.required,
+            ),
+            "layout" => Dict{String, Any}(
+                "bar_size" => bs,
+                "n_legs" => design_result.n_legs,
+                "n_lines" => design_result.n_lines,
+                "s0_in" => round(ustrip(u"inch", design_result.s0); digits=2),
+                "s_in" => round(ustrip(u"inch", design_result.s); digits=2),
+                "fyt_psi" => round(ustrip(u"psi", fyt); digits=0),
+                "vs_psi" => round(ustrip(u"psi", design_result.vs); digits=1),
+                "vcs_psi" => round(ustrip(u"psi", design_result.vcs); digits=1),
+            ),
+            "improved" => reinforced_check.ratio < unreinforced_ratio,
+            "delta_ratio" => round(reinforced_check.ratio - unreinforced_ratio; digits=3),
+        )
+    else  # studs (default)
+        sd = isnothing(stud_diameter_in) ? 0.5u"inch" : stud_diameter_in * u"inch"
+        fyt = isnothing(fyt_psi) ? 51_000.0u"psi" : fyt_psi * u"psi"
+
+        design_result = try
+            StructuralSizer.design_shear_studs(
+                vu, fc, β, αs, b0, d, position, fyt, sd;
+                c1 = inp.orig_c1, c2 = inp.orig_c2,
+            )
+        catch e
+            return Dict{String, Any}(
+                "error" => "stud_design_failed",
+                "message" => "Could not design studs: $(sprint(showerror, e))",
+            )
+        end
+
+        reinforced_check = StructuralSizer.check_punching_with_studs(vu, design_result)
+
+        return Dict{String, Any}(
+            "experiment" => "punching_reinforcement",
+            "column_idx" => col_idx,
+            "position" => string(position),
+            "reinforcement_type" => "studs",
+            "unreinforced" => Dict{String, Any}(
+                "ratio" => round(unreinforced_ratio; digits=3),
+                "ok" => unreinforced_ok,
+                "vu_psi" => round(ustrip(u"psi", vu); digits=1),
+                "φvc_psi" => round(ustrip(u"psi", check.φvc); digits=1),
+            ),
+            "reinforced" => Dict{String, Any}(
+                "ratio" => round(reinforced_check.ratio; digits=3),
+                "ok" => reinforced_check.ok,
+                "required" => design_result.required,
+            ),
+            "layout" => Dict{String, Any}(
+                "stud_diameter_in" => round(ustrip(u"inch", sd); digits=3),
+                "n_rails" => design_result.n_rails,
+                "n_studs_per_rail" => design_result.n_studs_per_rail,
+                "s0_in" => round(ustrip(u"inch", design_result.s0); digits=2),
+                "s_in" => round(ustrip(u"inch", design_result.s); digits=2),
+                "fyt_psi" => round(ustrip(u"psi", fyt); digits=0),
+                "vs_psi" => round(ustrip(u"psi", design_result.vs); digits=1),
+                "vcs_psi" => round(ustrip(u"psi", design_result.vcs); digits=1),
+            ),
+            "improved" => reinforced_check.ratio < unreinforced_ratio,
+            "delta_ratio" => round(reinforced_check.ratio - unreinforced_ratio; digits=3),
+        )
+    end
+end
+
 # ─── Deflection Experiments ───────────────────────────────────────────────────
 
 """
@@ -705,14 +1101,15 @@ function list_experiments()::Dict{String, Any}
         "experiments" => [
             Dict{String, Any}(
                 "name" => "punching",
-                "description" => "Re-check punching shear with modified column size or slab thickness. " *
+                "description" => "Re-check punching shear with modified column size, slab thickness, or concrete strength. " *
                     "Respects column position (interior/edge/corner) and unbalanced moment. " *
-                    "Returns demand (Vu, Mub), capacity (φVc, b0), and ratio for both original and modified.",
+                    "Adjusts Vu for critical-area change. Returns demand, capacity, stress decomposition.",
                 "args" => Dict(
                     "col_idx" => "required Int — column index from diagnose",
                     "c1_in" => "optional Float64 — new column c1 dimension (inches)",
                     "c2_in" => "optional Float64 — new column c2 dimension (inches)",
                     "h_in" => "optional Float64 — new slab thickness (inches)",
+                    "fc_in" => "optional Float64 — new concrete compressive strength (psi, e.g. 5000)",
                 ),
                 "example" => "run_experiment(type=punching, args={col_idx=3, c1_in=20, c2_in=20})",
             ),
@@ -726,6 +1123,31 @@ function list_experiments()::Dict{String, Any}
                     "section_size" => "Float64 (inches, for RC square column) or String (W-shape, e.g. \"W14X82\")",
                 ),
                 "example" => "run_experiment(type=pm_column, args={col_idx=5, section_size=24})",
+            ),
+            Dict{String, Any}(
+                "name" => "beam",
+                "description" => "Test a steel beam against its cached demands with a different W-shape. " *
+                    "Uses full AISC checker (flexure, shear, LTB, etc.). " *
+                    "Returns original/modified ratios and all individual check results.",
+                "args" => Dict(
+                    "beam_idx" => "required Int — beam index from diagnose",
+                    "section_size" => "required String — W-shape designation (e.g. \"W16X40\")",
+                ),
+                "example" => "run_experiment(type=beam, args={beam_idx=1, section_size=\"W16X40\"})",
+            ),
+            Dict{String, Any}(
+                "name" => "punching_reinforcement",
+                "description" => "Design shear studs or closed stirrups for a column failing punching shear. " *
+                    "Uses cached demands to run the full stud/stirrup design algorithm. " *
+                    "Returns reinforcement layout and whether the column now passes.",
+                "args" => Dict(
+                    "col_idx" => "required Int — column index from diagnose",
+                    "reinforcement_type" => "optional String — \"studs\" (default) or \"stirrups\"",
+                    "stud_diameter_in" => "optional Float64 — stud diameter in inches (default 0.5, studs only)",
+                    "bar_size" => "optional Int — stirrup bar designation: 3, 4, or 5 (default 4, stirrups only)",
+                    "fyt_psi" => "optional Float64 — reinforcement yield strength in psi (default 51000 studs / 60000 stirrups)",
+                ),
+                "example" => "run_experiment(type=punching_reinforcement, args={col_idx=3, reinforcement_type=\"studs\"})",
             ),
             Dict{String, Any}(
                 "name" => "deflection",
@@ -771,10 +1193,31 @@ function evaluate_experiment(
         c1_in = _coerce_float(get(args, "c1_in", nothing))
         c2_in = _coerce_float(get(args, "c2_in", nothing))
         h_in = _coerce_float(get(args, "h_in", nothing))
+        fc_in = _coerce_float(get(args, "fc_in", nothing))
         return experiment_punching(design, col_idx;
             c1_in = c1_in,
             c2_in = c2_in,
             h_in = h_in,
+            fc_in = fc_in,
+        )
+    elseif experiment_type == "beam"
+        beam_idx = _coerce_int(get(args, "beam_idx", nothing))
+        isnothing(beam_idx) && return Dict("error" => "missing_beam_idx", "message" => "beam experiment requires beam_idx")
+        return experiment_beam(design, beam_idx;
+            section_size = get(args, "section_size", nothing),
+        )
+    elseif experiment_type == "punching_reinforcement"
+        col_idx = _coerce_int(get(args, "col_idx", nothing))
+        isnothing(col_idx) && return Dict("error" => "missing_col_idx", "message" => "punching_reinforcement experiment requires col_idx")
+        rt = string(get(args, "reinforcement_type", "studs"))
+        sd_in = _coerce_float(get(args, "stud_diameter_in", nothing))
+        bs = _coerce_int(get(args, "bar_size", nothing))
+        fyt = _coerce_float(get(args, "fyt_psi", nothing))
+        return experiment_punching_reinforcement(design, col_idx;
+            reinforcement_type = rt,
+            stud_diameter_in = sd_in,
+            bar_size = bs,
+            fyt_psi = fyt,
         )
     elseif experiment_type == "pm_column"
         col_idx = _coerce_int(get(args, "col_idx", nothing))

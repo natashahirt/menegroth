@@ -353,11 +353,12 @@ MICRO-EXPERIMENTS — PREFER OVER FULL REDESIGN FOR QUICK WHAT-IFS:
   run_experiment is INSTANT (~0.1s) and uses the cached design — no full re-run.
   ALWAYS use run_experiment FIRST when the user asks about:
     - Punching shear: "would a bigger column help?" → run_experiment(type=punching, args={col_idx, c1_in?, c2_in?})
+    - Stronger concrete: "what if I use 5000 psi?" → run_experiment(type=punching, args={col_idx, fc_in=5000})
     - Column sizing: "what if I use a W14x82?" → run_experiment(type=pm_column, args={col_idx, section_size})
+    - Beam sizing: "what if I use a W16x40?" → run_experiment(type=beam, args={beam_idx, section_size})
+    - Shear reinforcement: "can I add studs?" → run_experiment(type=punching_reinforcement, args={col_idx, reinforcement_type="studs"})
     - Deflection: "what about L/480?" → run_experiment(type=deflection, args={slab_idx, deflection_limit})
     - Section screening: "which column sizes work?" → run_experiment(type=catalog_screen, args={col_idx, candidates})
-    - Punching strategy: "would reinforce_first help?" → run_experiment(type=punching) on the critical column
-    - Material changes: "what if I use stronger concrete?" → run_experiment(type=punching) to see ratio impact
     - Any "would X help?" / "what's the effect of Y?" question about a single element
   Use batch_experiments to test multiple alternatives at once (e.g. screen 5 column sizes).
   Only escalate to run_design when you need to test a GLOBAL parameter change across all elements.
@@ -3468,7 +3469,7 @@ Phase 2 — Diagnosis:
 - `get_applicability`        — compact method/floor eligibility rules.
 
 Phase 3 — Exploration:
-- `run_experiment`           — instant micro-experiment on a single element (punching, P-M, deflection, catalog screen).
+- `run_experiment`           — instant micro-experiment on a single element (punching, P-M, beam, punching reinforcement, deflection, catalog screen).
 - `list_experiments`         — available experiment types and arg schemas.
 - `batch_experiments`        — run multiple experiments in one call.
 - `validate_params`          — check a params patch for compatibility violations.
@@ -3966,7 +3967,7 @@ function _dispatch_chat_tool(tool::String, args::Dict{String, Any})::Dict{String
         isnothing(design) && return Dict("error" => "no_design", "message" => "No design has been run yet.", "recovery_hint" => _NO_DESIGN_HINT)
         exp_type = get(args, "type", nothing)
         exp_args = get(args, "args", Dict{String, Any}())
-        isnothing(exp_type) && return Dict("error" => "missing_type", "message" => "Provide experiment 'type' (punching, pm_column, deflection, catalog_screen).")
+        isnothing(exp_type) && return Dict("error" => "missing_type", "message" => "Provide experiment 'type' (punching, pm_column, beam, punching_reinforcement, deflection, catalog_screen).")
         !(exp_args isa AbstractDict) && return Dict("error" => "invalid_args", "message" => "run_experiment args must be an object.")
         exp_args_dict = Dict{String, Any}(string(k) => v for (k, v) in exp_args)
         result = evaluate_experiment(design, string(exp_type), exp_args_dict)

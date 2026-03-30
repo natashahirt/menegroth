@@ -1123,6 +1123,134 @@ function _diagnose_lever_impacts(
     return impacts
 end
 
+# ─── Footing Proximity ─────────────────────────────────────────────────────────
+
+"""
+    _check_footing_proximity!(warnings, design, fdn_dicts, is_imp, fdn_t)
+
+Compute actual edge-to-edge clearances between spread footings using their designed
+plan dimensions and column positions. Emits a warning for each pair of footings
+whose edges are closer than 12 in (or overlap), and a warning for footings whose
+plan area exceeds the threshold.
+"""
+function _check_footing_proximity!(
+    warnings::Vector{Dict{String, Any}},
+    design::BuildingDesign,
+    fdn_dicts::Vector,
+    is_imp::Bool,
+    fdn_t::Dict{String, Any},
+)
+    struc = design.structure
+    (isnothing(struc) || isempty(struc.foundations)) && return
+
+    skel = struc.skeleton
+    nf = length(struc.foundations)
+    nf < 2 && return
+
+    # Build a vector of (fdn_idx, centroid_x_m, centroid_y_m, half_L_m, half_W_m)
+    # for single-support (spread) footings only.
+    fdata = NamedTuple{(:fi, :x, :y, :hL, :hW),
+                       NTuple{5, Float64}}[]
+
+    for (fi, fnd) in enumerate(struc.foundations)
+        length(fnd.support_indices) != 1 && continue
+        si = fnd.support_indices[1]
+        (si < 1 || si > length(struc.supports)) && continue
+        sup = struc.supports[si]
+        v = skel.vertices[sup.vertex_idx]
+        c = Meshes.coords(v)
+        cx = ustrip(u"m", c.x)
+        cy = ustrip(u"m", c.y)
+
+        # Get designed plan dimensions from FoundationDesignResult
+        !haskey(design.foundations, fi) && continue
+        fr = design.foundations[fi]
+        L_m = ustrip(u"m", fr.length)
+        W_m = ustrip(u"m", fr.width)
+        (L_m <= 0 || W_m <= 0) && continue
+
+        push!(fdata, (fi=fi, x=cx, y=cy, hL=L_m/2, hW=W_m/2))
+    end
+
+    length(fdata) < 2 && return
+
+    min_clearance_m = 0.3048   # 12 inches
+
+    for i in eachindex(fdata)
+        for j in (i+1):length(fdata)
+            a = fdata[i]
+            b = fdata[j]
+
+            # Axis-aligned edge-to-edge gap between rectangles centered on columns.
+            # gap_x, gap_y are edge separations along each axis (negative = overlap).
+            gap_x = abs(a.x - b.x) - a.hL - b.hL
+            gap_y = abs(a.y - b.y) - a.hW - b.hW
+
+            # If both gaps are negative, footings fully overlap in plan.
+            # If one is negative, footings overlap on that axis; clearance = the other.
+            # If both positive, closest corner distance = hypot(gap_x, gap_y).
+            gap = if gap_x < 0 && gap_y < 0
+                max(gap_x, gap_y)   # both overlap; report the smaller intrusion
+            elseif gap_x < 0
+                gap_y               # overlap in x, clearance determined by y
+            elseif gap_y < 0
+                gap_x               # overlap in y, clearance determined by x
+            else
+                hypot(gap_x, gap_y) # diagonal separation
+            end
+
+            if gap < min_clearance_m
+                gap_in = gap * 39.3701
+                gap_disp = is_imp ? round(gap_in; digits=1) : round(gap * 1000; digits=0)
+                gap_unit = is_imp ? "in" : "mm"
+
+                if gap <= 0
+                    severity = "critical"
+                    interp = "Footings $(a.fi) and $(b.fi) overlap by $(abs(round(gap_in; digits=1))) in — " *
+                        "consider combining into a combined/strip footing or adding columns."
+                else
+                    severity = "warning"
+                    interp = "Footings $(a.fi) and $(b.fi) have only $(gap_disp) $(gap_unit) " *
+                        "edge clearance — construction may be impractical. " *
+                        "Consider combining into a strip footing or adding columns."
+                end
+
+                push!(warnings, Dict{String, Any}(
+                    "element_type" => "foundation",
+                    "element_id" => "$(a.fi)-$(b.fi)",
+                    "check" => "footing_proximity",
+                    "severity" => severity,
+                    "value" => _round_val(gap_disp),
+                    "threshold" => is_imp ? 12.0 : 305.0,
+                    "unit" => gap_unit,
+                    "interpretation" => interp,
+                    "parameter_headroom" => gap <= 0 ? "none" : "limited",
+                ))
+            end
+        end
+    end
+
+    # Also check individual footing plan area
+    for fd in fdn_dicts
+        fl = get(fd, "length", 0.0)
+        fw = get(fd, "width", 0.0)
+        fl_ft = is_imp ? fl : fl * 3.28084
+        fw_ft = is_imp ? fw : fw * 3.28084
+        area_ft2 = fl_ft * fw_ft
+
+        if area_ft2 > fdn_t["plan_area_max_ft2"]
+            push!(warnings, Dict{String, Any}(
+                "element_type" => "foundation", "element_id" => get(fd, "id", "?"),
+                "check" => "oversized_footing", "severity" => "warning",
+                "value" => _round_val(area_ft2), "threshold" => fdn_t["plan_area_max_ft2"], "unit" => "ft²",
+                "interpretation" => "Footing plan area $(round(area_ft2; digits=0)) ft² is very large. " *
+                    "Consider adding columns or switching to strip/mat foundation.",
+                "parameter_headroom" => "limited",
+            ))
+        end
+    end
+end
+
 # ─── Element Reasonableness Checks ────────────────────────────────────────────
 
 """
@@ -1262,8 +1390,8 @@ function _element_reasonableness_checks(
     # ── Beam checks ──────────────────────────────────────────────────────
     for bd in beam_dicts
         section = get(bd, "section", "")
-        member_len = get(bd, "member_length", 0.0)
-        len_in = is_imp ? member_len * 12.0 : member_len / 25.4
+        member_len = get(bd, "member_length", 0.0)  # ft (imp) or m (metric)
+        len_in = is_imp ? member_len * 12.0 : member_len * 39.3701  # → inches
 
         # Extract depth from W-shape section name (e.g. "W24x94" → 24 in)
         m = match(r"W(\d+)", section)
@@ -1315,26 +1443,8 @@ function _element_reasonableness_checks(
 
     # ── Foundation checks ────────────────────────────────────────────────
     for fd in fdn_dicts
-        fl = get(fd, "length", 0.0)
-        fw = get(fd, "width", 0.0)
         fdepth = get(fd, "depth", 0.0)
-
-        fl_ft = is_imp ? fl : fl * 3.28084
-        fw_ft = is_imp ? fw : fw * 3.28084
-        area_ft2 = fl_ft * fw_ft
-        d_in = is_imp ? fdepth * 12.0 : fdepth / 25.4
-
-        if area_ft2 > fdn_t["plan_area_max_ft2"]
-            push!(warnings, Dict{String, Any}(
-                "element_type" => "foundation", "element_id" => get(fd, "id", "?"),
-                "check" => "oversized_footing", "severity" => "warning",
-                "value" => _round_val(area_ft2), "threshold" => fdn_t["plan_area_max_ft2"], "unit" => "ft²",
-                "interpretation" => "Footing area $(round(area_ft2; digits=0)) ft² is very large — " *
-                    "adjacent footings may overlap. Consider adding columns or switching to " *
-                    "strip/mat foundation.",
-                "parameter_headroom" => "limited",
-            ))
-        end
+        d_in = is_imp ? fdepth : fdepth / 25.4         # depth is in in (imp) or mm (metric)
 
         if d_in > fdn_t["depth_max_in"]
             push!(warnings, Dict{String, Any}(
@@ -1347,6 +1457,9 @@ function _element_reasonableness_checks(
             ))
         end
     end
+
+    # ── Foundation proximity (actual edge-to-edge clearance) ──────────
+    _check_footing_proximity!(warnings, design, fdn_dicts, is_imp, fdn_t)
 
     # Sort: critical first, then by element type
     sort!(warnings; by=w -> (get(w, "severity", "") == "critical" ? 0 : 1, get(w, "element_type", "")))

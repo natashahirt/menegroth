@@ -858,8 +858,8 @@ const TOOL_REGISTRY = [
         "args"              => Dict{String, Any}(
             "type" => Dict(
                 "type" => "string", "required" => true,
-                "enum" => ["punching", "pm_column", "deflection", "catalog_screen"],
-                "description" => "Experiment type. punching: test column/slab size on punching shear. pm_column: test a different column section. deflection: test a different L/N limit. catalog_screen: screen multiple candidate sections.",
+                "enum" => ["punching", "pm_column", "beam", "punching_reinforcement", "deflection", "catalog_screen"],
+                "description" => "Experiment type. punching: test column/slab size or concrete strength on punching shear. pm_column: test a different column section. beam: test a different beam W-shape. punching_reinforcement: design studs/stirrups for a failing column. deflection: test a different L/N limit. catalog_screen: screen multiple candidate sections.",
             ),
             "args" => Dict(
                 "type" => "object", "required" => true,
@@ -867,7 +867,11 @@ const TOOL_REGISTRY = [
                 "fields" => Dict{String, Any}(
                     "col_idx" => Dict(
                         "type" => "integer",
-                        "description" => "Column index (from diagnose). Required for: punching, pm_column, catalog_screen.",
+                        "description" => "Column index (from diagnose). Required for: punching, pm_column, punching_reinforcement, catalog_screen.",
+                    ),
+                    "beam_idx" => Dict(
+                        "type" => "integer",
+                        "description" => "Beam index (from diagnose). Required for: beam.",
                     ),
                     "slab_idx" => Dict(
                         "type" => "integer",
@@ -885,9 +889,29 @@ const TOOL_REGISTRY = [
                         "type" => "number",
                         "description" => "New slab thickness in inches. Used by: punching. Optional — defaults to current thickness.",
                     ),
+                    "fc_in" => Dict(
+                        "type" => "number",
+                        "description" => "New concrete f'c in psi (e.g. 5000). Used by: punching. Optional — defaults to design concrete.",
+                    ),
                     "section_size" => Dict(
                         "type" => "string",
-                        "description" => "New section size. Used by: pm_column. For RC: numeric inches (e.g. \"18\"). For steel: W-shape designation (e.g. \"W14X82\").",
+                        "description" => "New section size. Used by: pm_column (RC: numeric inches, steel: W-shape), beam (W-shape designation).",
+                    ),
+                    "reinforcement_type" => Dict(
+                        "type" => "string",
+                        "description" => "Shear reinforcement type. Used by: punching_reinforcement. \"studs\" (default) or \"stirrups\".",
+                    ),
+                    "stud_diameter_in" => Dict(
+                        "type" => "number",
+                        "description" => "Stud diameter in inches (default 0.5). Used by: punching_reinforcement (studs only).",
+                    ),
+                    "bar_size" => Dict(
+                        "type" => "integer",
+                        "description" => "Stirrup bar designation: 3, 4, or 5 (default 4). Used by: punching_reinforcement (stirrups only).",
+                    ),
+                    "fyt_psi" => Dict(
+                        "type" => "number",
+                        "description" => "Reinforcement yield strength in psi. Used by: punching_reinforcement. Default: 51000 (studs) or 60000 (stirrups).",
                     ),
                     "deflection_limit" => Dict(
                         "type" => "string",
@@ -922,18 +946,18 @@ const TOOL_REGISTRY = [
         "args"              => Dict{String, Any}(
             "experiments" => Dict(
                 "type" => "array", "required" => true,
-                "description" => "Array of experiment objects. Each has 'type' (punching|pm_column|deflection|catalog_screen) and 'args' (same fields as run_experiment args). Example: [{type: \"punching\", args: {col_idx: 1, c1_in: 18}}, {type: \"punching\", args: {col_idx: 1, c1_in: 20}}]",
+                "description" => "Array of experiment objects. Each has 'type' and 'args' (same fields as run_experiment). Example: [{type: \"punching\", args: {col_idx: 1, c1_in: 18}}, {type: \"beam\", args: {beam_idx: 1, section_size: \"W16X40\"}}]",
                 "items" => Dict(
                     "type" => "object",
                     "fields" => Dict{String, Any}(
                         "type" => Dict(
                             "type" => "string", "required" => true,
-                            "enum" => ["punching", "pm_column", "deflection", "catalog_screen"],
+                            "enum" => ["punching", "pm_column", "beam", "punching_reinforcement", "deflection", "catalog_screen"],
                             "description" => "Experiment type.",
                         ),
                         "args" => Dict(
                             "type" => "object", "required" => true,
-                            "description" => "Experiment-specific arguments (col_idx, slab_idx, c1_in, c2_in, h_in, section_size, deflection_limit, candidates — same as run_experiment).",
+                            "description" => "Experiment-specific arguments — same as run_experiment args.",
                         ),
                     ),
                 ),
@@ -1172,8 +1196,10 @@ function api_llm_contract()::Dict{String, Any}
     ]
 
     experiment_types = [
-        Dict("name" => "punching", "speed" => "instant", "args" => ["col_idx", "c1_in?", "c2_in?", "h_in?"]),
+        Dict("name" => "punching", "speed" => "instant", "args" => ["col_idx", "c1_in?", "c2_in?", "h_in?", "fc_in?"]),
         Dict("name" => "pm_column", "speed" => "instant", "args" => ["col_idx", "section_size"]),
+        Dict("name" => "beam", "speed" => "instant", "args" => ["beam_idx", "section_size"]),
+        Dict("name" => "punching_reinforcement", "speed" => "instant", "args" => ["col_idx", "reinforcement_type?", "stud_diameter_in?", "bar_size?", "fyt_psi?"]),
         Dict("name" => "deflection", "speed" => "instant", "args" => ["slab_idx", "deflection_limit"]),
         Dict("name" => "catalog_screen", "speed" => "instant", "args" => ["col_idx", "candidates[]"]),
     ]

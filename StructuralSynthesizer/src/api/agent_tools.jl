@@ -1004,95 +1004,86 @@ end
 # ─── Phase 3: Exploration ─────────────────────────────────────────────────────
 
 """
-    agent_compare_designs(index_a::Int, index_b::Int) -> Dict{String, Any}
+    _compare_design_history_pair(prev::DesignHistoryEntry, cur::DesignHistoryEntry;
+        idx_prev::Int, idx_cur::Int) -> Dict{String, Any}
 
-Compare two designs from session history. Index 0 means "current" (latest).
+Build the LLM-facing comparison dict for two history entries. Deltas are **current − previous**
+(`pass_improved` means the previous run failed and the latest passes).
 """
-function agent_compare_designs(index_a::Int, index_b::Int)::Dict{String, Any}
-    history = get_design_history_entries()
-    isempty(history) && return Dict("error" => "no_history", "message" => "No designs in session history yet.")
+function _compare_design_history_pair(
+    prev::DesignHistoryEntry,
+    cur::DesignHistoryEntry;
+    idx_prev::Int,
+    idx_cur::Int,
+)::Dict{String, Any}
+    Δ_ratio = round(cur.critical_ratio - prev.critical_ratio; digits=4)
+    Δ_ec    = round(cur.embodied_carbon - prev.embodied_carbon; digits=0)
+    Δ_fail  = cur.n_failing - prev.n_failing
 
-    function _get_entry(idx)
-        idx == 0 && return last(history)
-        (idx < 1 || idx > length(history)) && return nothing
-        return history[idx]
-    end
-
-    a = _get_entry(index_a)
-    b = _get_entry(index_b)
-    isnothing(a) && return Dict("error" => "invalid_index", "message" => "index_a=$index_a is out of range (1..$(length(history)), or 0 for current).")
-    isnothing(b) && return Dict("error" => "invalid_index", "message" => "index_b=$index_b is out of range (1..$(length(history)), or 0 for current).")
-
-    # Compute deltas
-    Δ_ratio = round(b.critical_ratio - a.critical_ratio; digits=4)
-    Δ_ec    = round(b.embodied_carbon - a.embodied_carbon; digits=0)
-    Δ_fail  = b.n_failing - a.n_failing
-
-    # Diff the full resolved params when available; fall back to patch-only for legacy entries
-    params_a = isempty(a.cumulative_params) ? a.params_patch : a.cumulative_params
-    params_b = isempty(b.cumulative_params) ? b.params_patch : b.cumulative_params
-    all_keys = union(keys(params_a), keys(params_b))
+    params_prev = isempty(prev.cumulative_params) ? prev.params_patch : prev.cumulative_params
+    params_cur  = isempty(cur.cumulative_params) ? cur.params_patch : cur.cumulative_params
+    all_keys = union(keys(params_prev), keys(params_cur))
     changed_params = Dict{String, Any}()
     for k in all_keys
-        va = get(params_a, k, nothing)
-        vb = get(params_b, k, nothing)
+        va = get(params_prev, k, nothing)
+        vb = get(params_cur, k, nothing)
         if va != vb
             changed_params[k] = Dict("from" => va, "to" => vb)
         end
     end
 
-    ha = strip(a.geometry_hash)
-    hb = strip(b.geometry_hash)
+    ha = strip(prev.geometry_hash)
+    hb = strip(cur.geometry_hash)
     cross_geo = !isempty(ha) && !isempty(hb) && ha != hb
     unknown_geo = isempty(ha) || isempty(hb)
 
     note = if cross_geo
         "These two history entries used different geometry_hash values. Deltas summarize stored summary metrics only — " *
-            "they are not a same-model parameter A/B test. Say so when explaining results."
+            "they are not a same-geometry parameter study. Say so when explaining results."
     elseif unknown_geo
         "One or both entries lack geometry_hash (legacy). Treat cross-run deltas as approximate unless hashes match."
     else
         nothing
     end
 
-    # Mechanism shift: did the governing element or its check family change?
-    crit_a = strip(a.critical_element)
-    crit_b = strip(b.critical_element)
-    mechanism_shift = if isempty(crit_a) || isempty(crit_b)
+    crit_prev = strip(prev.critical_element)
+    crit_cur  = strip(cur.critical_element)
+    mechanism_shift = if isempty(crit_prev) || isempty(crit_cur)
         nothing
-    elseif crit_a == crit_b
+    elseif crit_prev == crit_cur
         "same_critical_element"
     else
         "critical_element_changed"
     end
 
     out = Dict{String, Any}(
-        "design_a" => Dict(
-            "index"            => index_a == 0 ? length(history) : index_a,
+        "comparison_mode" => "previous_vs_current",
+        "previous" => Dict(
+            "history_index"    => idx_prev,
             "geometry_hash"    => ha,
-            "all_pass"         => a.all_pass,
-            "critical_ratio"   => a.critical_ratio,
-            "critical_element" => crit_a,
-            "embodied_carbon"  => a.embodied_carbon,
-            "n_failing"        => a.n_failing,
-            "source"           => a.source,
+            "all_pass"         => prev.all_pass,
+            "critical_ratio"   => prev.critical_ratio,
+            "critical_element" => crit_prev,
+            "embodied_carbon"  => prev.embodied_carbon,
+            "n_failing"        => prev.n_failing,
+            "source"           => prev.source,
         ),
-        "design_b" => Dict(
-            "index"            => index_b == 0 ? length(history) : index_b,
+        "current" => Dict(
+            "history_index"    => idx_cur,
             "geometry_hash"    => hb,
-            "all_pass"         => b.all_pass,
-            "critical_ratio"   => b.critical_ratio,
-            "critical_element" => crit_b,
-            "embodied_carbon"  => b.embodied_carbon,
-            "n_failing"        => b.n_failing,
-            "source"           => b.source,
+            "all_pass"         => cur.all_pass,
+            "critical_ratio"   => cur.critical_ratio,
+            "critical_element" => crit_cur,
+            "embodied_carbon"  => cur.embodied_carbon,
+            "n_failing"        => cur.n_failing,
+            "source"           => cur.source,
         ),
         "deltas" => Dict(
             "critical_ratio_delta"  => Δ_ratio,
             "embodied_carbon_delta" => Δ_ec,
             "n_failing_delta"       => Δ_fail,
-            "pass_improved"         => !a.all_pass && b.all_pass,
-            "pass_regressed"        => a.all_pass && !b.all_pass,
+            "pass_improved"         => !prev.all_pass && cur.all_pass,
+            "pass_regressed"        => prev.all_pass && !cur.all_pass,
         ),
         "changed_params" => changed_params,
         "cross_geometry_comparison" => cross_geo,
@@ -1104,7 +1095,7 @@ function agent_compare_designs(index_a::Int, index_b::Int)::Dict{String, Any}
     if cross_geo
         push!(guidance_parts,
             "CROSS-GEOMETRY: These runs used different geometry. Deltas are not a controlled " *
-            "A/B test — tell the user both geometry and parameters changed. " *
+            "parameter comparison on one model — tell the user both geometry and parameters may have changed. " *
             "Cite comparison_note in your response.")
     end
     if mechanism_shift == "critical_element_changed"
@@ -1114,15 +1105,37 @@ function agent_compare_designs(index_a::Int, index_b::Int)::Dict{String, Any}
     end
     deltas = out["deltas"]
     if get(deltas, "pass_improved", false)
-        push!(guidance_parts, "PASS IMPROVED: Design went from failing to passing — highlight this.")
+        push!(guidance_parts, "PASS IMPROVED: Latest run passes while the previous run failed — highlight this.")
     elseif get(deltas, "pass_regressed", false)
-        push!(guidance_parts, "REGRESSION: Design went from passing to failing — warn the user.")
+        push!(guidance_parts, "REGRESSION: Latest run fails while the previous run passed — warn the user.")
     end
     if !isempty(guidance_parts)
         out["_guidance"] = join(guidance_parts, "\n")
     end
 
     return out
+end
+
+"""
+    agent_compare_previous_vs_current() -> Dict{String, Any}
+
+Compare the **immediately previous** session history entry to the **latest** (most recent).
+No indices — always the last two completed designs (POST /design and/or chat `run_design`).
+"""
+function agent_compare_previous_vs_current()::Dict{String, Any}
+    history = get_design_history_entries()
+    isempty(history) && return Dict(
+        "error" => "no_history",
+        "message" => "No designs in session history yet.",
+        "recovery_hint" => "Complete a design (Grasshopper POST /design or chat run_design) first.",
+    )
+    length(history) < 2 && return Dict(
+        "error" => "need_two_runs",
+        "message" => "Need at least two completed designs in session history to compare previous vs current. Only $(length(history)) run(s) recorded.",
+        "recovery_hint" => "Run another design, then call compare_designs again (no index arguments).",
+    )
+    n = length(history)
+    return _compare_design_history_pair(history[end-1], history[end]; idx_prev=n - 1, idx_cur=n)
 end
 
 """
@@ -1699,11 +1712,11 @@ function agent_response_guidelines()::Dict{String, Any}
                                "column material (quick parameter win). " *
                                "run_experiment on critical elements to quantify savings → validate_params → run_design"),
             Dict("intent" => "Try changing X (global parameter change)",
-                 "sequence" => "run_experiment first for instant preview → validate_params → run_design → compare_designs"),
+                 "sequence" => "run_experiment first for instant preview → validate_params → run_design → compare_designs (no args: previous vs latest)"),
             Dict("intent" => "Explain this element/result",
                  "sequence" => "narrate_element or narrate_comparison"),
             Dict("intent" => "Compare runs",
-                 "sequence" => "compare_designs + get_design_history"),
+                 "sequence" => "compare_designs (previous vs latest); get_design_history only to list past runs"),
             Dict("intent" => "What does parameter X do?",
                  "sequence" => "explain_field(X)"),
             Dict("intent" => "Missing geometry data",

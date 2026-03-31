@@ -858,16 +858,11 @@ const TOOL_REGISTRY = [
     ),
     Dict{String, Any}(
         "name"              => "compare_designs",
-        "description"       => "Delta table between two designs from session history; includes geometry_hash per side, cross_geometry_comparison, critical_element per side, and mechanism_shift (whether the governing element changed).",
+        "description"       => "Delta table: **previous** vs **latest** entry in session design history (no indices). Includes geometry_hash per side, cross_geometry_comparison, mechanism_shift, changed_params.",
         "phase"             => "exploration",
-        "use_when"          => "After run_design, to show what changed. Or the user asks to compare two runs (including across geometry changes — cite comparison_note when cross_geometry_comparison is true). " *
-            "Convention: index_a = baseline (before), index_b = new (after). After a run, use index_a = N-1, index_b = N where N is the latest history entry. " *
-            "Present results as 'before → after' (A → B). Do NOT compare the latest run against run 1 unless the user explicitly asks.",
-        "args"              => Dict{String, Any}(
-            "index_a" => Dict("type" => "integer", "required" => true, "description" => "History index (1-based) or 0 for current. Convention: the BASELINE (before) run."),
-            "index_b" => Dict("type" => "integer", "required" => true, "description" => "History index (1-based) or 0 for current. Convention: the NEW (after) run."),
-        ),
-        "returns"           => "Dict with design_a/design_b (index, all_pass, critical_element, embodied_carbon, n_failing, geometry_hash), deltas (pass_improved, pass_regressed), changed_params, mechanism_shift?, cross_geometry_comparison, comparison_note?, _guidance?.",
+        "use_when"          => "After run_design or when the user asks what changed vs the last run. Always pairs the immediately previous completed design with the latest. For older runs, use get_design_history to list entries only — this tool does not pick arbitrary indices. Cite comparison_note when cross_geometry_comparison is true.",
+        "args"              => Dict{String, Any}(),
+        "returns"           => "Dict with comparison_mode=previous_vs_current, previous/current (history_index, all_pass, critical_element, embodied_carbon, n_failing, geometry_hash, source), deltas (pass_improved, pass_regressed; values are current−previous), changed_params, mechanism_shift?, cross_geometry_comparison, comparison_note?, _guidance?.",
         "requires_design"   => true,
         "requires_geometry" => false,
     ),
@@ -1031,12 +1026,10 @@ const TOOL_REGISTRY = [
     ),
     Dict{String, Any}(
         "name"              => "narrate_comparison",
-        "description"       => "Plain-English comparison of two designs from session history. Use AFTER compare_designs for a human-friendly summary.",
+        "description"       => "Plain-English comparison of **previous vs latest** session run (same pairing as compare_designs).",
         "phase"             => "communication",
-        "use_when"          => "After compare_designs, when the user wants to understand the differences in plain English. Also use when the user asks 'what changed?' or 'was that better?'.",
+        "use_when"          => "After compare_designs or when the user wants a narrative of what changed vs the last run. Requires ≥2 history entries.",
         "args"              => Dict{String, Any}(
-            "index_a"  => Dict("type" => "integer", "required" => true, "description" => "Baseline (before) history index. Same convention as compare_designs."),
-            "index_b"  => Dict("type" => "integer", "required" => true, "description" => "New (after) history index. Same convention as compare_designs."),
             "audience" => Dict(
                 "type" => "string",
                 "required" => true,
@@ -1170,7 +1163,7 @@ Return the full tool registry for the `/schema/tools` endpoint.
 """
 api_tool_schema() = TOOL_REGISTRY
 
-const _LLM_CONTRACT_VERSION = "1.2.1"
+const _LLM_CONTRACT_VERSION = "1.2.2"
 
 """
     _generate_params_list() -> Vector{Dict{String, Any}}
@@ -1288,7 +1281,7 @@ function api_llm_contract()::Dict{String, Any}
             "get_situation_card",
             "get_lever_map(check=…) before recommending fixes to a named check",
             "run_experiment (element) or validate_params→run_design (global API)",
-            "compare_designs; record_insight",
+            "compare_designs (previous vs latest, no args); record_insight",
         ],
     )
 end

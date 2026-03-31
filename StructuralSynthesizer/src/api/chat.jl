@@ -377,8 +377,8 @@ const _TOOL_INDEX = """
 TOOLS (each tool description includes USE WHEN guidance):
   Orient:      get_situation_card (FIRST), get_building_summary, get_geometry_digest, get_current_params, get_design_history
   Diagnose:    get_diagnose_summary (FIRST — returns total_ec_kgco2e, critical_ratio, pass/fail, per-element EC), get_diagnose, query_elements, get_solver_trace, get_lever_map
-  Explore:     run_experiment (FAST), validate_params → run_design, compare_designs, suggest_next_action
-  Communicate: narrate_element, narrate_comparison, get_result_summary, get_condensed_result, clarify_user_intent
+  Explore:     run_experiment (FAST), validate_params → run_design, compare_designs (previous vs latest, no args), suggest_next_action
+  Communicate: narrate_element, narrate_comparison (previous vs latest), get_result_summary, get_condensed_result, clarify_user_intent
   Reference:   explain_field, get_provision_rationale, get_applicability, get_response_guidelines, get_api_params_ssot (wire JSON / patch-debug only)
   Memory:      record_insight, get_session_insights
   Experiments: list_experiments, batch_experiments
@@ -438,7 +438,7 @@ RETRIEVAL QUESTIONS — CALL A TOOL IF DATA IS NOT IN THE SYSTEM PROMPT:
     - Element dimensions, sections → query_elements or get_diagnose
     - Geometry (spans, heights, floor area, column count) → get_geometry_digest
     - Parameters → get_current_params; raw wire JSON (merge-debug only) → get_api_params_ssot
-    - Design history / comparison → get_design_history or compare_designs
+    - Design history / comparison → get_design_history lists past runs; compare_designs compares **previous vs latest** only (no indices)
     - Derived metrics (e.g. EC intensity = EC/area) → call get_geometry_digest for area, then compute
   NEVER answer a factual question by guessing. If the data is not in this prompt and you haven't called a tool, call one.
 
@@ -489,7 +489,7 @@ RETRIEVAL QUESTIONS — CALL A TOOL IF DATA IS NOT IN THE SYSTEM PROMPT:
     - Element dimensions, sections → query_elements or get_diagnose
     - Geometry (spans, heights, floor area, column count) → get_geometry_digest
     - Parameters → get_current_params; raw wire JSON (merge-debug only) → get_api_params_ssot
-    - Design history / comparison → get_design_history or compare_designs
+    - Design history / comparison → get_design_history lists past runs; compare_designs compares **previous vs latest** only (no indices)
     - Derived metrics (e.g. EC intensity = EC/area) → call get_geometry_digest for area, then compute
   NEVER answer a factual question by guessing. If the data is not in this prompt and you haven't called a tool, call one.
 
@@ -3221,7 +3221,7 @@ function _stream_llm_to_sse(
                 "content" =>
                     "Summarize the tool results above for the user in complete sentences. " *
                     "If any tool returned an error, explain it and suggest recovery. " *
-                    "If compare_designs or two run_design results are needed for a 'difference', say what is still missing. " *
+                    "If compare_designs (previous vs latest) is unavailable (e.g. only one run in history), say what is still missing. " *
                     "Do not call tools.",
             ))
             synth_payload = Dict{String, Any}(
@@ -3659,7 +3659,7 @@ Phase 3 — Exploration:
 - `batch_experiments`        — run multiple experiments in one call.
 - `validate_params`          — check a params patch for compatibility violations.
 - `run_design`               — fast parameter-only what-if check (60 s timeout).
-- `compare_designs`          — delta table between two designs from history.
+- `compare_designs`          — delta table: **previous** vs **latest** session history entry (no indices).
 - `suggest_next_action`      — ranked parameter changes for a goal.
 
 Session Insights:
@@ -3668,7 +3668,7 @@ Session Insights:
 
 Phase 4 — Communication:
 - `narrate_element`          — plain-English explanation of one element.
-- `narrate_comparison`       — plain-English comparison of two designs.
+- `narrate_comparison`       — plain-English **previous vs latest** run (same pairing as compare_designs).
 - `clarify_user_intent`      — structured multiple-choice clarification.
 """
 const _NO_DESIGN_HINT   = "No solved design on the server yet. Run Design from Grasshopper (POST /design) first. Until then, use the geometry digest and predict_geometry_effect for qualitative advice."
@@ -4182,10 +4182,7 @@ function _dispatch_chat_tool(tool::String, args::Dict{String, Any})::Dict{String
 
     # ── Phase 3: Exploration ─────────────────────────────────────────────────
     elseif tool == "compare_designs"
-        idx_a = _chat_coerce_int(get(args, "index_a", nothing))
-        idx_b = _chat_coerce_int(get(args, "index_b", nothing))
-        (isnothing(idx_a) || isnothing(idx_b)) && return Dict("error" => "missing_args", "message" => "Provide index_a and index_b (1-based history index, or 0 for current).")
-        return agent_compare_designs(idx_a, idx_b)
+        return agent_compare_previous_vs_current()
 
     elseif tool == "suggest_next_action"
         isnothing(design) && return Dict("error" => "no_design", "message" => "No design has been run yet.", "recovery_hint" => _NO_DESIGN_HINT)
@@ -4235,11 +4232,8 @@ function _dispatch_chat_tool(tool::String, args::Dict{String, Any})::Dict{String
         return agent_narrate_element(design, string(etype), eid, string(audience))
 
     elseif tool == "narrate_comparison"
-        idx_a    = _chat_coerce_int(get(args, "index_a", nothing))
-        idx_b    = _chat_coerce_int(get(args, "index_b", nothing))
         audience = get(args, "audience", "architect")
-        (isnothing(idx_a) || isnothing(idx_b)) && return Dict("error" => "missing_args", "message" => "Provide index_a and index_b.")
-        return agent_narrate_comparison(idx_a, idx_b, string(audience))
+        return agent_narrate_comparison(string(audience))
 
     # ── Original tools ───────────────────────────────────────────────────────
     elseif tool == "validate_params"
@@ -4433,9 +4427,8 @@ function _dispatch_chat_tool(tool::String, args::Dict{String, Any})::Dict{String
         guidance_parts = String["RECORD: Call record_insight to log what this run taught you."]
         if n_history >= 2
             push!(guidance_parts,
-                "COMPARE: Call compare_designs with index_a=$(n_history - 1) index_b=$(n_history) " *
-                "to compare the PREVIOUS run (baseline) against THIS run (latest). " *
-                "index_a is the baseline, index_b is the new run. Always present A as 'before' and B as 'after'.")
+                "COMPARE: Call compare_designs (no arguments) — it compares the **previous** run to **this** run automatically. " *
+                "Present as previous → current; do not use 'design A/B' labels.")
         end
         if n_history >= 3
             push!(guidance_parts,

@@ -421,29 +421,29 @@ _capitalize(s::String) = isempty(s) ? s : uppercase(s[1:1]) * s[2:end]
 # ─── Comparison Narration ─────────────────────────────────────────────────────
 
 """
-    agent_narrate_comparison(index_a::Int, index_b::Int, audience::String) -> Dict{String, Any}
+    agent_narrate_comparison(audience::String) -> Dict{String, Any}
 
-Compose a plain-English paragraph comparing two designs using the configured
-LLM, grounded in the structured deltas from `agent_compare_designs`.
+Compose a plain-English paragraph comparing the **previous** vs **latest** design in session
+history, using the configured LLM and structured deltas from `agent_compare_previous_vs_current`.
 """
-function agent_narrate_comparison(index_a::Int, index_b::Int, audience::String)::Dict{String, Any}
+function agent_narrate_comparison(audience::String)::Dict{String, Any}
     profile = _audience_profile(audience)
     audience_out = profile.text
 
-    delta = agent_compare_designs(index_a, index_b)
+    delta = agent_compare_previous_vs_current()
     haskey(delta, "error") && return delta
 
-    a = delta["design_a"]
-    b = delta["design_b"]
+    prev = delta["previous"]
+    cur  = delta["current"]
     d = delta["deltas"]
     changed = delta["changed_params"]
 
-    llm_narrative = _narrate_comparison_llm(a, b, d, changed, profile)
+    llm_narrative = _narrate_comparison_llm(prev, cur, d, changed, profile)
     if isnothing(llm_narrative)
         narrative = if profile.kind === :architect
-            _narrate_comparison_architect(a, b, d, changed)
+            _narrate_comparison_architect(prev, cur, d, changed)
         else
-            _narrate_comparison_engineer(a, b, d, changed)
+            _narrate_comparison_engineer(prev, cur, d, changed)
         end
         return Dict{String, Any}(
             "narrative"        => narrative,
@@ -466,48 +466,48 @@ function agent_narrate_comparison(index_a::Int, index_b::Int, audience::String):
     )
 end
 
-function _narrate_comparison_architect(a, b, d, changed)
+function _narrate_comparison_architect(prev, cur, d, changed)
     parts = String[]
 
     if d["pass_improved"]
-        push!(parts, "The new design fixes all structural issues — every element now passes.")
+        push!(parts, "The latest run fixes all structural issues — every element now passes compared to the previous run.")
     elseif d["pass_regressed"]
-        push!(parts, "Warning: the new design introduced failures that weren't present before.")
-    elseif b["all_pass"] && a["all_pass"]
-        push!(parts, "Both designs pass all checks.")
+        push!(parts, "Warning: the latest run introduced failures that weren't present in the previous run.")
+    elseif cur["all_pass"] && prev["all_pass"]
+        push!(parts, "Both the previous and latest runs pass all checks.")
     end
 
     Δ_ec = d["embodied_carbon_delta"]
     if abs(Δ_ec) > 10
-        pct = round(Δ_ec / max(a["embodied_carbon"], 1.0) * 100; digits=0)
+        pct = round(Δ_ec / max(prev["embodied_carbon"], 1.0) * 100; digits=0)
         direction = Δ_ec < 0 ? "less" : "more"
-        push!(parts, "The new design uses about $(abs(round(Δ_ec; digits=0))) kgCO2e $direction carbon ($(abs(pct))% change).")
+        push!(parts, "The latest run uses about $(abs(round(Δ_ec; digits=0))) kgCO2e $direction carbon than the previous ($(abs(pct))% vs previous).")
     end
 
     Δ_fail = d["n_failing_delta"]
     if Δ_fail != 0
         direction = Δ_fail < 0 ? "fewer" : "more"
-        push!(parts, "There are $(abs(Δ_fail)) $direction failing elements.")
+        push!(parts, "There are $(abs(Δ_fail)) $direction failing elements than in the previous run.")
     end
 
     if !isempty(changed)
         push!(parts, "Changed parameters: $(join(keys(changed), ", ")).")
     end
 
-    isempty(parts) && push!(parts, "The two designs are very similar in overall performance.")
+    isempty(parts) && push!(parts, "The previous and latest runs are very similar in overall performance.")
     return join(parts, " ")
 end
 
-function _narrate_comparison_engineer(a, b, d, changed)
+function _narrate_comparison_engineer(prev, cur, d, changed)
     parts = String[]
 
     Δ_ratio = d["critical_ratio_delta"]
-    push!(parts, "Critical ratio: $(a["critical_ratio"]) -> $(b["critical_ratio"]) (Δ=$(round(Δ_ratio; digits=4))).")
+    push!(parts, "Critical ratio: $(prev["critical_ratio"]) -> $(cur["critical_ratio"]) (Δ=$(round(Δ_ratio; digits=4))).")
 
-    push!(parts, "Failing elements: $(a["n_failing"]) -> $(b["n_failing"]).")
+    push!(parts, "Failing elements: $(prev["n_failing"]) -> $(cur["n_failing"]).")
 
     Δ_ec = d["embodied_carbon_delta"]
-    push!(parts, "Embodied carbon: $(a["embodied_carbon"]) -> $(b["embodied_carbon"]) kgCO2e (Δ=$(round(Δ_ec; digits=0))).")
+    push!(parts, "Embodied carbon: $(prev["embodied_carbon"]) -> $(cur["embodied_carbon"]) kgCO2e (Δ=$(round(Δ_ec; digits=0))).")
 
     if !isempty(changed)
         for (k, v) in changed
@@ -535,8 +535,8 @@ function _narrate_comparison_llm(
 
     facts = Dict{String, Any}(
         "audience" => profile.text,
-        "design_a" => a,
-        "design_b" => b,
+        "previous" => a,
+        "current" => b,
         "deltas" => d,
         "changed_params" => changed,
     )
@@ -561,13 +561,13 @@ The user you are assisting describes themselves as:
             persona_block,
             """
 
-Compare design A and design B for them in a way that fits that description — language, tone, level of detail, and format (e.g. ASCII tables if they want tables).
+Compare the **previous** run to the **latest** run for them in a way that fits that description — language, tone, level of detail, and format (e.g. ASCII tables if they want tables). Do not call them "design A/B".
 
 """,
             grounding,
         )
         user_prompt = """
-The user wants a comparison of two designs. Respond for them.
+The user wants a comparison of the previous vs latest design run. Respond for them.
 
 JSON facts (ground truth):
 $facts_json
@@ -587,7 +587,7 @@ $grounding
 - Do not include bullet points, headings, or markdown.
 """
         user_prompt = """
-Write a comparison narrative between design A and design B.
+Write a comparison narrative between the previous run and the latest run (JSON keys `previous` and `current`).
 $audience_style
 
 JSON facts:

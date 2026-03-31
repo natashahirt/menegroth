@@ -23,14 +23,13 @@ import StructuralSynthesizer as SS
 using StructuralSynthesizer: DESIGN_CACHE, DesignCache,
     agent_situation_card, agent_diagnose_summary, agent_query_elements,
     agent_suggest_next_action, agent_narrate_element, agent_building_summary,
-    agent_current_params, agent_compare_designs, agent_predict_geometry_effect,
+    agent_current_params, agent_predict_geometry_effect,
     experiment_punching, experiment_deflection, list_experiments,
     evaluate_experiment, batch_evaluate,
     design_to_diagnose, condense_result
 const record_design_history! = SS.record_design_history!
 const DesignHistoryEntry = SS.DesignHistoryEntry
 const get_design_history_entries = SS.get_design_history_entries
-const clear_design_history! = SS.clear_design_history!
 using Asap
 using JSON3
 
@@ -95,7 +94,7 @@ record_design_history!(DesignHistoryEntry(;
 
 # ─── Step 2: Situation card ──────────────────────────────────────────────────
 println("\n▸ Step 2: get_situation_card")
-clear_design_history!()
+# Keep session history (baseline from step 1) so compare_designs has two entries after step 8.
 card = agent_situation_card(struc, design1, get_design_history_entries())
 health = card["health"]
 println("  health.all_pass:         $(health["all_pass"])")
@@ -294,8 +293,8 @@ record_design_history!(DesignHistoryEntry(;
 ))
 
 # ─── Step 9: Compare designs ────────────────────────────────────────────────
-println("\n▸ Step 9: compare_designs(1, 2)")
-comparison = agent_compare_designs(1, 2)
+println("\n▸ Step 9: agent_compare_previous_vs_current()")
+comparison = SS.agent_compare_previous_vs_current()
 if haskey(comparison, "error")
     println("  ERROR: $(comparison["error"]) — $(get(comparison, "message", ""))")
 else

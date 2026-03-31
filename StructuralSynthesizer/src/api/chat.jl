@@ -425,6 +425,13 @@ STRUCTURAL REASONING — DO NOT HALLUCINATE TRADE-OFFS:
     - For slab thickness / deflection / embodied carbon: GEOMETRY FIRST. Reducing spans (adding columns, subdividing bays) is the primary lever (deflection ∝ L⁴). Relaxing deflection_limit (L/360→L/240) is a secondary, optional suggestion — only mention it as an additional option if the project can tolerate more deflection and has no sensitive partitions or equipment.
     - uniform_column_sizing = off (independent sizing) is an embodied-carbon reduction strategy: each column is right-sized to its own demand. per_story/building promote every column to the governing (largest) section, adding unnecessary material to lightly-loaded columns. Mention this trade-off when the user asks about reducing carbon or material use.
 
+  SOLVER OUTPUTS vs USER INPUTS — CRITICAL DISTINCTION:
+    Slab thickness, column size, beam section, and rebar layout are SOLVER OUTPUTS determined by the optimization. The user CANNOT directly set these.
+    NEVER suggest "increase slab thickness", "use a larger column", or "change beam section" as user actions. These are not levers the user controls.
+    The user controls DESIGN PARAMETERS (floor_type, optimize_for, material grades, method, punching_strategy, fire_rating, column_catalog, etc.) and GEOMETRY (column positions, spans, heights — changed in Grasshopper).
+    When a design fails, recommend changes to parameters or geometry that will CAUSE the solver to produce adequate sections — not direct section changes.
+    Non-converged slabs show 0.0 for deflection/punching ratios — these are default placeholders, NOT real computed values. Always flag them as "did not converge" and never interpret 0.0 as passing.
+
   GRID TOPOLOGY vs SPAN VARIANCE — KEEP THESE CONCEPTS SEPARATE:
     Grid topology describes whether columns form a rectangular grid (all quad panels) or not (triangulated, offset, skewed). A rectangular grid is always regular — DDM/EFM apply.
     Span variance describes how much bay sizes differ across the plan. High span variance means some bays are wider than others, producing different tributary loads for same-position columns. This is NORMAL for any rectangular grid with unequal bay spacings — it is NOT a grid irregularity and does NOT affect DDM/EFM applicability. Each column is checked for punching shear with its own actual tributary load.
@@ -440,6 +447,7 @@ SERVER CACHE GATES:
 GEOMETRY vs PARAMETERS:
   GEOMETRY (Grasshopper) — column positions, spans, heights, plan shape. Cannot change via API.
   PARAMETERS (API) — floor_type, materials, loads, method, sizing. Change via run_design.
+  SOLVER OUTPUTS (read-only) — slab thickness, column sections, beam sections, rebar. Determined by the optimizer. Cannot be directly set by the user.
   For geometry changes → tell user what to adjust in Grasshopper.
 
 $(_parameter_space_card())
@@ -498,6 +506,13 @@ STRUCTURAL REASONING — DO NOT HALLUCINATE TRADE-OFFS:
     - For slab thickness / deflection / embodied carbon: GEOMETRY FIRST. Reducing spans (adding columns, subdividing bays) is the primary lever (deflection ∝ L⁴). Relaxing deflection_limit (L/360→L/240) is a secondary, optional suggestion — only mention it as an additional option if the project can tolerate more deflection and has no sensitive partitions or equipment.
     - uniform_column_sizing = off (independent sizing) is an embodied-carbon reduction strategy: each column is right-sized to its own demand. per_story/building promote every column to the governing (largest) section, adding unnecessary material to lightly-loaded columns. Mention this trade-off when the user asks about reducing carbon or material use.
 
+  SOLVER OUTPUTS vs USER INPUTS — CRITICAL DISTINCTION:
+    Slab thickness, column size, beam section, and rebar layout are SOLVER OUTPUTS determined by the optimization. The user CANNOT directly set these.
+    NEVER suggest "increase slab thickness", "use a larger column", or "change beam section" as user actions. These are not levers the user controls.
+    The user controls DESIGN PARAMETERS (floor_type, optimize_for, material grades, method, punching_strategy, fire_rating, column_catalog, etc.) and GEOMETRY (column positions, spans, heights — changed in Grasshopper).
+    When a design fails, recommend changes to parameters or geometry that will CAUSE the solver to produce adequate sections — not direct section changes.
+    Non-converged slabs show 0.0 for deflection/punching ratios — these are default placeholders, NOT real computed values. Always flag them as "did not converge" and never interpret 0.0 as passing.
+
   GRID TOPOLOGY vs SPAN VARIANCE — KEEP THESE CONCEPTS SEPARATE:
     Grid topology describes whether columns form a rectangular grid (all quad panels) or not (triangulated, offset, skewed). A rectangular grid is always regular — DDM/EFM apply.
     Span variance describes how much bay sizes differ across the plan. High span variance means some bays are wider than others, producing different tributary loads for same-position columns. This is NORMAL for any rectangular grid with unequal bay spacings — it is NOT a grid irregularity and does NOT affect DDM/EFM applicability. Each column is checked for punching shear with its own actual tributary load.
@@ -507,6 +522,7 @@ STRUCTURAL REASONING — DO NOT HALLUCINATE TRADE-OFFS:
 GEOMETRY vs PARAMETERS:
   GEOMETRY (Grasshopper) — column positions, spans, heights, plan shape. Cannot change via API.
   PARAMETERS (API) — floor_type, materials, loads, method, sizing. Change via run_design.
+  SOLVER OUTPUTS (read-only) — slab thickness, column sections, beam sections, rebar. Determined by the optimizer. Cannot be directly set by the user.
   For geometry changes → tell user what to adjust in Grasshopper.
 
 $(_parameter_space_card())

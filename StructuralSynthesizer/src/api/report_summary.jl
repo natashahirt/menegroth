@@ -202,35 +202,52 @@ function _summary_slabs(design::BuildingDesign, du::DisplayUnits, thick_label::S
 
     slab_vec = sort(collect(design.slabs); by=first)
     passing = count(((_, sr),) -> sr.converged && sr.deflection_ok && sr.punching_ok, slab_vec)
+    n_non_converged = count(((_, sr),) -> !sr.converged, slab_vec)
 
     thicknesses = [_round_val(_to_display(du, :thickness, sr.thickness); digits=2) for (_, sr) in slab_vec]
-    defl_ratios = [sr.deflection_ratio for (_, sr) in slab_vec]
-    punch_ratios = [sr.punching_max_ratio for (_, sr) in slab_vec]
 
-    worst_defl = argmax(defl_ratios)
-    worst_punch = argmax(punch_ratios)
+    # Only consider converged slabs for "worst" ratios — non-converged slabs
+    # have 0.0 defaults that would mask real failures.
+    converged_vec = [(k, sr) for (k, sr) in slab_vec if sr.converged]
+    if !isempty(converged_vec)
+        defl_ratios_c  = [sr.deflection_ratio     for (_, sr) in converged_vec]
+        punch_ratios_c = [sr.punching_max_ratio    for (_, sr) in converged_vec]
+        wd_idx = argmax(defl_ratios_c)
+        wp_idx = argmax(punch_ratios_c)
+        worst_defl  = Dict("id" => converged_vec[wd_idx][1], "ratio" => _round_val(defl_ratios_c[wd_idx]))
+        worst_punch = Dict("id" => converged_vec[wp_idx][1], "ratio" => _round_val(punch_ratios_c[wp_idx]))
+    else
+        worst_defl  = Dict{String, Any}("id" => 0, "ratio" => -1.0, "note" => "no converged slabs")
+        worst_punch = Dict{String, Any}("id" => 0, "ratio" => -1.0, "note" => "no converged slabs")
+    end
 
     failing_details = [
-        Dict{String, Any}(
-            "id"              => k,
-            "failure_reason"  => _normalize_failure_reason(sr.failure_reason),
-            "failing_checks"  => _normalize_failing_checks(sr.failing_check),
-            "deflection_ratio" => _round_val(sr.deflection_ratio),
-            "punching_ratio"  => _round_val(sr.punching_max_ratio),
-        )
+        let
+            nc = !sr.converged
+            Dict{String, Any}(
+                "id"              => k,
+                "non_converged"   => nc,
+                "failure_reason"  => _normalize_failure_reason(sr.failure_reason),
+                "failing_checks"  => _normalize_failing_checks(sr.failing_check),
+                "deflection_ratio" => nc ? -1.0 : _round_val(sr.deflection_ratio),
+                "punching_ratio"  => nc ? -1.0 : _round_val(sr.punching_max_ratio),
+            )
+        end
         for (k, sr) in slab_vec
         if !(sr.converged && sr.deflection_ok && sr.punching_ok)
     ]
 
-    return Dict{String, Any}(
+    result = Dict{String, Any}(
         "count"   => n,
         "passing" => passing,
         "failing" => n - passing,
         "thickness_range" => Dict("min" => minimum(thicknesses), "max" => maximum(thicknesses), "unit" => thick_label),
-        "worst_deflection" => Dict("id" => slab_vec[worst_defl][1], "ratio" => _round_val(defl_ratios[worst_defl])),
-        "worst_punching"   => Dict("id" => slab_vec[worst_punch][1], "ratio" => _round_val(punch_ratios[worst_punch])),
+        "worst_deflection" => worst_defl,
+        "worst_punching"   => worst_punch,
         "failing_details"  => failing_details,
     )
+    n_non_converged > 0 && (result["non_converged"] = n_non_converged)
+    return result
 end
 
 function _summary_columns(design::BuildingDesign, du::DisplayUnits)
@@ -413,10 +430,15 @@ function condense_result(design::BuildingDesign; report_units=nothing)
         p = sec["passing"]
         f = sec["failing"]
         line = "$label: $n total, $p pass, $f fail"
+        n_nc = get(sec, "non_converged", 0)
+        if n_nc > 0
+            line *= " ($n_nc non-converged — ratios are N/A, not real zeros)"
+        end
         if haskey(sec, "worst_deflection")
             wd = sec["worst_deflection"]
             wp = sec["worst_punching"]
-            line *= ". Worst deflection=$(wd["ratio"]) (id=$(wd["id"])), punching=$(wp["ratio"]) (id=$(wp["id"]))"
+            _fmt_ratio(r) = r isa Number && r < 0 ? "N/A" : string(r)
+            line *= ". Worst deflection=$(_fmt_ratio(wd["ratio"])) (id=$(wd["id"])), punching=$(_fmt_ratio(wp["ratio"])) (id=$(wp["id"]))"
         end
         if haskey(sec, "worst_interaction")
             wi = sec["worst_interaction"]

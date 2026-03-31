@@ -1741,6 +1741,15 @@ function agent_response_guidelines()::Dict{String, Any}
             "Answering retrieval questions (EC, ratio, thickness, area, section size) from memory or by fabricating numbers. " *
                 "ALWAYS call the relevant tool (get_diagnose_summary, query_elements, get_geometry_digest, get_current_params) " *
                 "before quoting ANY number. If you haven't called a tool, you don't have the data.",
+            "Suggesting changes to SOLVER OUTPUTS as user actions. WRONG: 'increase slab thickness to 13 in', " *
+                "'use a larger column section', 'change beam to W21×50'. Slab thickness, column size, beam section, " *
+                "and rebar layout are determined by the optimization — the user cannot set them directly. " *
+                "Instead recommend changes to DESIGN PARAMETERS (floor_type, optimize_for, material grades, " *
+                "punching_strategy, fire_rating, column_catalog, etc.) or GEOMETRY (column positions, spans in Grasshopper) " *
+                "that will cause the solver to produce adequate sections.",
+            "Interpreting 0.0 deflection/punching ratios on non-converged slabs as real results. " *
+                "A non-converged slab never completed its design checks — its ratios are default placeholders. " *
+                "Always flag non-convergence explicitly and explain the failure_reason, not the 0.0 ratio.",
         ],
 
         # ── Geometry Rules ────────────────────────────────────────────────

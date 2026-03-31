@@ -4140,7 +4140,7 @@ function _dispatch_chat_tool(tool::String, args::Dict{String, Any})::Dict{String
         isnothing(exp_type) && return Dict("error" => "missing_type", "message" => "Provide experiment 'type' (punching, pm_column, beam, punching_reinforcement, deflection, catalog_screen).")
         !(exp_args isa AbstractDict) && return Dict("error" => "invalid_args", "message" => "run_experiment args must be an object.")
         exp_args_dict = Dict{String, Any}(string(k) => v for (k, v) in exp_args)
-        result = evaluate_experiment(design, string(exp_type), exp_args_dict)
+        result = _sanitize_for_json(evaluate_experiment(design, string(exp_type), exp_args_dict))
         geo_warn = _stale_geometry_warning(args)
         !isnothing(geo_warn) && (result["geometry_warning"] = geo_warn)
         return result
@@ -4322,18 +4322,20 @@ function _dispatch_chat_tool(tool::String, args::Dict{String, Any})::Dict{String
                  count(p -> !p.second.ok, design.beams) +
                  count(p -> !(p.second.converged && p.second.deflection_ok && p.second.punching_ok), design.slabs) +
                  count(p -> !p.second.ok, design.foundations)
+        full_params = try agent_current_params(design) catch; Dict{String, Any}() end
         record_design_history!(DesignHistoryEntry(;
-            geometry_hash    = _server_geometry_hash(),
-            params_patch     = patch_dict,
-            all_pass         = s.all_checks_pass,
-            critical_ratio   = s.critical_ratio,
-            critical_element = s.critical_element,
-            embodied_carbon  = s.embodied_carbon,
-            n_columns        = length(design.columns),
-            n_beams          = length(design.beams),
-            n_slabs          = length(design.slabs),
-            n_failing        = n_fail,
-            source           = "run_design",
+            geometry_hash     = _server_geometry_hash(),
+            params_patch      = patch_dict,
+            cumulative_params = full_params,
+            all_pass          = s.all_checks_pass,
+            critical_ratio    = s.critical_ratio,
+            critical_element  = s.critical_element,
+            embodied_carbon   = s.embodied_carbon,
+            n_columns         = length(design.columns),
+            n_beams           = length(design.beams),
+            n_slabs           = length(design.slabs),
+            n_failing         = n_fail,
+            source            = "run_design",
         ))
 
         geo_warn = _stale_geometry_warning(args)

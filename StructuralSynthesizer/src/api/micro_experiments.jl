@@ -17,6 +17,19 @@
 
 using Unitful
 
+# ─── JSON safety ──────────────────────────────────────────────────────────────
+
+"""
+    _sanitize_for_json(x)
+
+Recursively walk a Dict/Array structure and replace non-finite Float64 values
+(`Inf`, `-Inf`, `NaN`) with `nothing` so the result is valid JSON.
+"""
+_sanitize_for_json(x::AbstractFloat) = isfinite(x) ? x : nothing
+_sanitize_for_json(x::AbstractDict) = Dict(k => _sanitize_for_json(v) for (k, v) in x)
+_sanitize_for_json(x::AbstractVector) = [_sanitize_for_json(v) for v in x]
+_sanitize_for_json(x) = x
+
 # ─── Experimental Setup Reporter ─────────────────────────────────────────────
 
 """
@@ -398,6 +411,14 @@ function experiment_punching(
     !isnothing(sanity_warning) && (out["sanity_warning"] = sanity_warning)
     !isnothing(coupling_caveat) && (out["coupling_caveat"] = coupling_caveat)
 
+    # Cross-check coupling: punching experiment does not re-check P-M or foundations
+    out["cross_check_caveat"] =
+        "This experiment isolates punching shear only. Changing column size here does NOT " *
+        "update the P-M interaction check (axial + bending capacity), slab flexural design, " *
+        "or foundation sizing. A column that passes punching at a new size may still fail " *
+        "P-M or require a different foundation. Run a full run_design to see all checks together, " *
+        "or use pm_column experiment to test the same column size against P-M demands."
+
     return out
 end
 
@@ -565,6 +586,12 @@ function _experiment_pm_rc(
         ),
         "delta_ratio" => round(new_ratio - orig_ratio; digits=3),
         "improved" => new_ratio < orig_ratio,
+        "cross_check_caveat" =>
+            "This experiment isolates P-M interaction only. Changing column section size " *
+            "directly affects punching shear (b₀ changes with column dimensions) and may " *
+            "alter foundation demands. A column that passes P-M at a new size may worsen or " *
+            "improve punching. Run a full run_design to see all checks together, or use the " *
+            "punching experiment to test the same column size against punching demands.",
     )
 end
 
@@ -693,6 +720,11 @@ function _experiment_pm_steel(
             result["sanity_warning"] = "Heavier section $(size_str) ($(new_weight) plf) has worse ratio than $(col.section_size) ($(orig_weight) plf). This may indicate a slenderness or local buckling issue — check the governing_check field."
         end
     end
+
+    result["cross_check_caveat"] =
+        "This experiment isolates P-M interaction only. Changing column section affects " *
+        "punching shear (b₀ scales with flange/web dimensions) and may alter foundation " *
+        "demands. Run a full run_design to see all checks together."
 
     return result
 end
@@ -845,6 +877,11 @@ function experiment_beam(
         end
     end
 
+    result["cross_check_caveat"] =
+        "This experiment isolates beam flexure/shear only. Beam depth affects floor-to-floor " *
+        "height and connection demands. Slab tributary loads and deflections are held constant. " *
+        "Run a full run_design to see all checks together."
+
     return result
 end
 
@@ -977,6 +1014,11 @@ function experiment_punching_reinforcement(
         elseif !isfinite(reinforced_check.ratio)
             out_st["note"] = "Reinforced check ratio is not finite — verify demand vs ACI limits for stirrup-reinforced punching."
         end
+        out_st["cross_check_caveat"] =
+            "This experiment isolates punching shear capacity with reinforcement. Column size, " *
+            "slab thickness, and P-M interaction are held constant. Adding shear reinforcement " *
+            "does not change column axial/bending capacity or foundation demands. Run a full " *
+            "run_design to verify all checks together."
         return out_st
     else  # studs (default)
         sd = isnothing(stud_diameter_in) ? 0.5u"inch" : stud_diameter_in * u"inch"
@@ -1039,6 +1081,11 @@ function experiment_punching_reinforcement(
         elseif !isfinite(reinforced_check.ratio)
             out_sd["note"] = "Reinforced check ratio is not finite — verify demand vs ACI stress limits for stud-reinforced punching."
         end
+        out_sd["cross_check_caveat"] =
+            "This experiment isolates punching shear capacity with reinforcement. Column size, " *
+            "slab thickness, and P-M interaction are held constant. Adding shear reinforcement " *
+            "does not change column axial/bending capacity or foundation demands. Run a full " *
+            "run_design to verify all checks together."
         return out_sd
     end
 end
@@ -1462,7 +1509,7 @@ function batch_evaluate(
         r = try
             !(exp isa AbstractDict) && error("experiment entry must be an object with type and args")
             exp_args = Dict{String, Any}(string(k) => v for (k, v) in get(exp, "args", Dict()))
-            evaluate_experiment(design, exp_type_str, exp_args)
+            _sanitize_for_json(evaluate_experiment(design, exp_type_str, exp_args))
         catch e
             Dict{String, Any}(
                 "error"   => "experiment_failed",

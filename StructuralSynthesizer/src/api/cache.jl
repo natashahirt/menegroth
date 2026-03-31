@@ -136,9 +136,10 @@ Enables compare_designs and get_design_history tools.
 """
 Base.@kwdef struct DesignHistoryEntry
     timestamp::DateTime        = now()
-    # geometry_hash: hex from compute_geometry_hash for this run; empty if unknown (legacy entries).
     geometry_hash::String      = ""
     params_patch::Dict{String, Any} = Dict{String, Any}()
+    """Full resolved parameter snapshot for accurate cross-run comparison."""
+    cumulative_params::Dict{String, Any} = Dict{String, Any}()
     all_pass::Bool             = false
     critical_ratio::Float64    = 0.0
     critical_element::String   = ""
@@ -200,19 +201,20 @@ Serialize design history entries for JSON output.
 """
 function design_history_to_json(entries::Vector{DesignHistoryEntry})
     return [Dict{String, Any}(
-        "index"            => i,
-        "timestamp"        => Dates.format(e.timestamp, "yyyy-mm-dd HH:MM:SS"),
-        "geometry_hash"    => e.geometry_hash,
-        "params_patch"     => e.params_patch,
-        "all_pass"         => e.all_pass,
-        "critical_ratio"   => round(e.critical_ratio; digits=3),
-        "critical_element" => e.critical_element,
-        "embodied_carbon"  => round(e.embodied_carbon; digits=0),
-        "n_columns"        => e.n_columns,
-        "n_beams"          => e.n_beams,
-        "n_slabs"          => e.n_slabs,
-        "n_failing"        => e.n_failing,
-        "source"           => e.source,
+        "index"             => i,
+        "timestamp"         => Dates.format(e.timestamp, "yyyy-mm-dd HH:MM:SS"),
+        "geometry_hash"     => e.geometry_hash,
+        "params_patch"      => e.params_patch,
+        "cumulative_params" => e.cumulative_params,
+        "all_pass"          => e.all_pass,
+        "critical_ratio"    => round(e.critical_ratio; digits=3),
+        "critical_element"  => e.critical_element,
+        "embodied_carbon"   => round(e.embodied_carbon; digits=0),
+        "n_columns"         => e.n_columns,
+        "n_beams"           => e.n_beams,
+        "n_slabs"           => e.n_slabs,
+        "n_failing"         => e.n_failing,
+        "source"            => e.source,
     ) for (i, e) in enumerate(entries)]
 end
 

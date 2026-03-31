@@ -1009,12 +1009,14 @@ function agent_compare_designs(index_a::Int, index_b::Int)::Dict{String, Any}
     Δ_ec    = round(b.embodied_carbon - a.embodied_carbon; digits=0)
     Δ_fail  = b.n_failing - a.n_failing
 
-    # Find params that differ
-    all_keys = union(keys(a.params_patch), keys(b.params_patch))
+    # Diff the full resolved params when available; fall back to patch-only for legacy entries
+    params_a = isempty(a.cumulative_params) ? a.params_patch : a.cumulative_params
+    params_b = isempty(b.cumulative_params) ? b.params_patch : b.cumulative_params
+    all_keys = union(keys(params_a), keys(params_b))
     changed_params = Dict{String, Any}()
     for k in all_keys
-        va = get(a.params_patch, k, nothing)
-        vb = get(b.params_patch, k, nothing)
+        va = get(params_a, k, nothing)
+        vb = get(params_b, k, nothing)
         if va != vb
             changed_params[k] = Dict("from" => va, "to" => vb)
         end

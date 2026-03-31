@@ -11,6 +11,7 @@
 #   - pm_column:               try alternative column sections against cached P-M demands
 #   - beam:                    try alternative W-shapes against cached beam demands
 #   - punching_reinforcement:  design studs/stirrups for a punching-failing column
+#   - punching_column_downsize: smallest scaled column plan (fixed Vu/Mub) that passes with studs/stirrups
 #   - deflection:              test different deflection limits against stored slab data
 #   - catalog_screen:          screen a section catalog against a single demand envelope
 # =============================================================================
@@ -1090,6 +1091,260 @@ function experiment_punching_reinforcement(
     end
 end
 
+# ─── Punching: min column with reinforcement at constant Vu ───────────────────
+
+"""
+    _punching_reinforced_ok_at_scale(inp, scale, use_stirrups; stud_diameter_in, bar_size, fyt_psi) -> (ok, ratio, err)
+
+`Vu` and `Mub` are held at the cached design values (no tributary-area adjustment).
+`scale` multiplies both column plan dimensions relative to the cached section.
+"""
+function _punching_reinforced_ok_at_scale(
+    inp,
+    col_idx::Int,
+    scale::Float64,
+    use_stirrups::Bool;
+    stud_diameter_in::Union{Float64, Nothing} = nothing,
+    bar_size::Union{Int, Nothing} = nothing,
+    fyt_psi::Union{Float64, Nothing} = nothing,
+)::Tuple{Bool, Float64, Union{Nothing, String}}
+    scale <= 0 && return (false, Inf, "invalid_scale")
+
+    new_c1 = inp.orig_c1 * scale
+    new_c2 = inp.orig_c2 * scale
+    col_proxy = (c1 = new_c1, c2 = new_c2, position = inp.position, shape = inp.shape)
+    d = inp.d_orig
+    fc = inp.fc
+    h = inp.orig_h
+
+    local check
+    try
+        check = StructuralSizer.check_punching_for_column(
+            col_proxy, inp.orig_Vu, inp.Mub, d, h, fc;
+            col_idx = col_idx,
+        )
+    catch e
+        return (false, Inf, sprint(showerror, e))
+    end
+    vu = check.vu
+    b0 = check.b0
+
+    c1_eff = new_c1
+    c2_eff = new_c2
+    if inp.shape == :circular && inp.position != :interior
+        side = StructuralSizer.equivalent_square_column(new_c1)
+        c1_eff = side
+        c2_eff = side
+    end
+    β = inp.shape == :circular && inp.position == :interior ? 1.0 :
+        max(ustrip(u"inch", c1_eff), ustrip(u"inch", c2_eff)) /
+        max(min(ustrip(u"inch", c1_eff), ustrip(u"inch", c2_eff)), 1.0)
+    αs = StructuralSizer.punching_αs(inp.position)
+
+    if use_stirrups
+        bs = isnothing(bar_size) ? 4 : bar_size
+        fyt = isnothing(fyt_psi) ? 60_000.0u"psi" : fyt_psi * u"psi"
+        design_result = try
+            StructuralSizer.design_closed_stirrups(
+                vu, fc, β, αs, b0, d, inp.position, fyt, bs;
+                c1 = new_c1, c2 = new_c2,
+            )
+        catch e
+            return (false, Inf, sprint(showerror, e))
+        end
+        reinforced = try
+            StructuralSizer.check_punching_with_stirrups(vu, design_result)
+        catch e
+            return (false, Inf, sprint(showerror, e))
+        end
+        return (reinforced.ok, reinforced.ratio, nothing)
+    else
+        sd = isnothing(stud_diameter_in) ? 0.5u"inch" : stud_diameter_in * u"inch"
+        fyt = isnothing(fyt_psi) ? 51_000.0u"psi" : fyt_psi * u"psi"
+        design_result = try
+            StructuralSizer.design_shear_studs(
+                vu, fc, β, αs, b0, d, inp.position, fyt, sd;
+                c1 = new_c1, c2 = new_c2,
+            )
+        catch e
+            return (false, Inf, sprint(showerror, e))
+        end
+        reinforced = try
+            StructuralSizer.check_punching_with_studs(vu, design_result)
+        catch e
+            return (false, Inf, sprint(showerror, e))
+        end
+        return (reinforced.ok, reinforced.ratio, nothing)
+    end
+end
+
+function _binary_search_min_punching_scale(feasible, lo::Float64, hi::Float64; tol::Float64 = 0.002, maxiter::Int = 50)::Union{Float64, Nothing}
+    feasible(hi) || return nothing
+    feasible(lo) && return lo
+    for _ in 1:maxiter
+        if hi - lo < tol
+            return hi
+        end
+        mid = (lo + hi) / 2
+        if feasible(mid)
+            hi = mid
+        else
+            lo = mid
+        end
+    end
+    return hi
+end
+
+"""
+    experiment_punching_column_downsize(design, col_idx; ...) -> Dict
+
+With **factored shear `Vu` and unbalanced moment `Mub` fixed** to the cached design values,
+search for the **smallest uniform scale** of the column footprint (c1×c2) for which
+punching can be made to pass using **shear studs or closed stirrups** (same detailing
+model as `punching_reinforcement`).
+
+Compares that plan to the as-designed section and optionally runs `pm_column` at the
+downsized square size (max side) to flag P-M infeasibility — punching-only minima can be
+smaller than axial/bending would allow in a full redesign.
+"""
+function experiment_punching_column_downsize(
+    design::BuildingDesign,
+    col_idx::Int;
+    reinforcement_type::String = "studs",
+    min_column_dim_in::Float64 = 8.0,
+    stud_diameter_in::Union{Float64, Nothing} = nothing,
+    bar_size::Union{Int, Nothing} = nothing,
+    fyt_psi::Union{Float64, Nothing} = nothing,
+    check_pm::Bool = true,
+)::Dict{String, Any}
+    inp = _resolve_punching_inputs(design, col_idx)
+    inp isa Dict && return inp
+
+    rt_key = lowercase(strip(reinforcement_type))
+    if rt_key ∉ ("studs", "stud", "stirrups", "stirrup")
+        return Dict{String, Any}(
+            "error" => "invalid_reinforcement_type",
+            "message" => "reinforcement_type must be \"studs\" or \"stirrups\". Got: $(repr(reinforcement_type))",
+        )
+    end
+    use_stirrups = rt_key in ("stirrups", "stirrup")
+
+    c1_in = ustrip(u"inch", inp.orig_c1)
+    c2_in = ustrip(u"inch", inp.orig_c2)
+    min_c = min(c1_in, c2_in)
+    min_c <= 0 && return Dict{String, Any}("error" => "invalid_column_dims", "message" => "Column dimensions must be positive.")
+
+    lo_scale = max(min_column_dim_in / min_c, 0.05)
+    if lo_scale >= 1.0
+        return Dict{String, Any}(
+            "error" => "min_column_dim_in_not_downsizing",
+            "message" => "min_column_dim_in ($min_column_dim_in in) is not smaller than the current smaller plan dimension ($min_c in). Lower min_column_dim_in or pick a different column.",
+        )
+    end
+
+    feasible(s) = begin
+        ok, _, _ = _punching_reinforced_ok_at_scale(inp, col_idx, s, use_stirrups;
+            stud_diameter_in = stud_diameter_in,
+            bar_size = bar_size,
+            fyt_psi = fyt_psi,
+        )
+        ok
+    end
+
+    if !feasible(1.0)
+        return Dict{String, Any}(
+            "error" => "reinforced_punching_infeasible_at_design_size",
+            "message" => "Even at the as-designed column size, stud/stirrup-reinforced punching does not pass at the cached Vu/Mub. " *
+                "Try punching_reinforcement on this column for details, or run_design with different slab/column parameters.",
+        )
+    end
+
+    best_scale = _binary_search_min_punching_scale(feasible, lo_scale, 1.0)
+    isnothing(best_scale) && return Dict{String, Any}(
+        "error" => "search_failed",
+        "message" => "Could not bracket a feasible reinforced punching solution.",
+    )
+
+    ok_b, ratio_b, err_b = _punching_reinforced_ok_at_scale(inp, col_idx, best_scale, use_stirrups;
+        stud_diameter_in = stud_diameter_in,
+        bar_size = bar_size,
+        fyt_psi = fyt_psi,
+    )
+    !ok_b && return Dict{String, Any}(
+        "error" => "numeric_inconsistency",
+        "message" => "Binary search reported feasible scale $(round(best_scale; digits=4)) but recheck failed. $(something(err_b, ""))",
+    )
+
+    new_c1_in = round(c1_in * best_scale; digits=2)
+    new_c2_in = round(c2_in * best_scale; digits=2)
+    orig_area = c1_in * c2_in
+    new_area = new_c1_in * new_c2_in
+    area_ratio = orig_area > 0 ? new_area / orig_area : nothing
+
+    setup = _experimental_setup(;
+        changed = ["uniform column plan scale (c1,c2) × $(round(best_scale; digits=4)) with $(use_stirrups ? "closed stirrups" : "shear studs")"],
+        held_constant = [
+            "Vu (factored shear from cached design)",
+            "Mub (unbalanced moment from cached design)",
+            "slab thickness h and effective depth d",
+            "f'c (slab concrete)",
+            "column position ($(inp.position))",
+        ],
+        source = "Cached design — column $col_idx",
+        note = "Demand-side Vu/Mub are NOT recomputed from tributary area when the column shrinks — this isolates capacity vs footprint at fixed shear/moment transfer.",
+    )
+
+    out = Dict{String, Any}(
+        "experiment" => "punching_column_downsize",
+        "experimental_setup" => setup,
+        "column_idx" => col_idx,
+        "reinforcement_type" => use_stirrups ? "stirrups" : "studs",
+        "original" => Dict{String, Any}(
+            "c1_in" => round(c1_in; digits=2),
+            "c2_in" => round(c2_in; digits=2),
+            "plan_area_in2" => round(orig_area; digits=1),
+        ),
+        "min_with_reinforcement" => Dict{String, Any}(
+            "scale" => round(best_scale; digits=4),
+            "c1_in" => new_c1_in,
+            "c2_in" => new_c2_in,
+            "plan_area_in2" => round(new_area; digits=1),
+            "punching_ratio" => round(ratio_b; digits=3),
+            "ok" => ok_b,
+        ),
+        "plan_area_fraction_of_original" => isnothing(area_ratio) ? nothing : round(area_ratio; digits=3),
+        "column_smaller_than_design" => best_scale < 1.0 - 1e-6,
+    )
+
+    if check_pm
+        col_res = get(design.columns, col_idx, nothing)
+        is_rc = !isnothing(col_res) && col_res.shape in (:rectangular, :circular, :rc_rect, :rc_circular)
+        if is_rc
+            sq = max(new_c1_in, new_c2_in)
+            pmr = experiment_pm_column(design, col_idx; section_size = sq)
+            out["pm_at_downsized_square"] = Dict{String, Any}(
+                "section_side_in" => sq,
+                "pm_ok" => get(get(pmr, "modified", Dict()), "ok", nothing),
+                "pm_interaction_ratio" => get(get(pmr, "modified", Dict()), "interaction_ratio", nothing),
+            )
+            out["cross_check_caveat"] =
+                "P-M check uses a square RC section with side = max(c1,c2) at the downsized footprint (heuristic). " *
+                "True rectangular detailing may differ; run_design confirms all limit states together."
+        else
+            out["pm_at_downsized_square"] = Dict{String, Any}(
+                "note" => "pm_column downsize cross-check skipped — not an RC column in cached results.",
+            )
+        end
+    end
+
+    if !haskey(out, "cross_check_caveat")
+        out["cross_check_caveat"] =
+            "Vu/Mub are frozen from the cached analysis. Shrinking the column in the real structure would change stiffness and load distribution — use this experiment as an indicative trade-off, then confirm with run_design."
+    end
+
+    return out
+end
+
 # ─── Deflection Experiments ───────────────────────────────────────────────────
 
 """
@@ -1383,6 +1638,23 @@ function list_experiments()::Dict{String, Any}
                 "example" => "run_experiment(type=punching_reinforcement, args={col_idx=3, reinforcement_type=\"studs\"})",
             ),
             Dict{String, Any}(
+                "name" => "punching_column_downsize",
+                "description" => "With Vu and Mub fixed to the cached design values, find the smallest uniform scale of the column footprint " *
+                    "such that punching passes with shear studs or closed stirrups. " *
+                    "Optionally cross-checks P-M at a square section (max side). " *
+                    "Use this to see whether reinforce_first-style capacity could allow a smaller column than grow_columns, before a full run_design.",
+                "args" => Dict(
+                    "col_idx" => "required Int — column index from diagnose",
+                    "reinforcement_type" => "optional String — \"studs\" (default) or \"stirrups\"",
+                    "min_column_dim_in" => "optional Float64 — minimum smaller plan dimension in inches (default 8)",
+                    "stud_diameter_in" => "optional Float64 — stud diameter (studs only)",
+                    "bar_size" => "optional Int — stirrup bar #3–5 (stirrups only)",
+                    "fyt_psi" => "optional Float64 — reinforcement yield (psi)",
+                    "check_pm" => "optional Bool — run pm_column heuristic at downsized size (default true)",
+                ),
+                "example" => "run_experiment(type=punching_column_downsize, args={col_idx=3, reinforcement_type=\"studs\"})",
+            ),
+            Dict{String, Any}(
                 "name" => "deflection",
                 "description" => "Test a slab under a different deflection limit (L/240, L/360, L/480). " *
                     "Does NOT re-compute actual deflection — only changes the allowable limit. " *
@@ -1451,6 +1723,32 @@ function evaluate_experiment(
             stud_diameter_in = sd_in,
             bar_size = bs,
             fyt_psi = fyt,
+        )
+    elseif experiment_type == "punching_column_downsize"
+        col_idx = _coerce_int(get(args, "col_idx", nothing))
+        isnothing(col_idx) && return Dict("error" => "missing_col_idx", "message" => "punching_column_downsize experiment requires col_idx")
+        rt = string(get(args, "reinforcement_type", "studs"))
+        min_dim = _coerce_float(get(args, "min_column_dim_in", nothing))
+        sd_in = _coerce_float(get(args, "stud_diameter_in", nothing))
+        bs = _coerce_int(get(args, "bar_size", nothing))
+        fyt = _coerce_float(get(args, "fyt_psi", nothing))
+        check_pm_raw = get(args, "check_pm", true)
+        check_pm = if check_pm_raw isa Bool
+            check_pm_raw
+        elseif check_pm_raw isa Integer
+            check_pm_raw != 0
+        elseif check_pm_raw isa AbstractString
+            lowercase(strip(string(check_pm_raw))) in ("true", "1", "yes", "y")
+        else
+            true
+        end
+        return experiment_punching_column_downsize(design, col_idx;
+            reinforcement_type = rt,
+            min_column_dim_in = something(min_dim, 8.0),
+            stud_diameter_in = sd_in,
+            bar_size = bs,
+            fyt_psi = fyt,
+            check_pm = check_pm,
         )
     elseif experiment_type == "pm_column"
         col_idx = _coerce_int(get(args, "col_idx", nothing))

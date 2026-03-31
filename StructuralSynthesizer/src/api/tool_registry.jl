@@ -737,6 +737,16 @@ const TOOL_REGISTRY = [
         "requires_geometry" => false,
     ),
     Dict{String, Any}(
+        "name"              => "get_api_params_ssot",
+        "description"       => "Raw API-params JSON the server merges for validate_params/run_design (debugging only; prefer get_current_params for narration).",
+        "phase"             => "orientation",
+        "use_when"          => "Patch/debug only — e.g. user says params were 'forgotten' or you need the exact merge base.",
+        "args"              => Dict{String, Any}(),
+        "returns"           => "Dict with api_params (object), empty (bool), note (string).",
+        "requires_design"   => false,
+        "requires_geometry" => false,
+    ),
+    Dict{String, Any}(
         "name"              => "get_design_history",
         "description"       => "Past designs in this session (params patch, pass/fail, critical ratio, EC), each tagged with geometry_hash of the model used for that run.",
         "phase"             => "orientation",
@@ -795,9 +805,9 @@ const TOOL_REGISTRY = [
     ),
     Dict{String, Any}(
         "name"              => "get_lever_map",
-        "description"       => "Which API parameters and geometry changes affect a given failure check. Canonical source of truth for 'what can I change to fix X'. MUST consult before recommending any fix.",
+        "description"       => "Maps a failure check to API parameters + geometry moves (what actually moves the needle).",
         "phase"             => "diagnosis",
-        "use_when"          => "REQUIRED before recommending a fix for any failure. User asks 'how do I fix punching shear / deflection / P-M interaction?' → call get_lever_map(check=that_check) FIRST. Also use when the user asks about reducing carbon, column size, or slab thickness — the lever map shows which parameters move the needle.",
+        "use_when"          => "REQUIRED before recommending a fix for a specific check. Omit check only when you need the full map.",
         "args"              => Dict{String, Any}("check" => Dict("type" => "string", "optional" => true, "description" => "Filter to one check family (e.g. 'punching_shear', 'deflection', 'P-M_interaction'). Omit for full map.")),
         "returns"           => "Dict mapping check names to {parameters, geometry, direction}.",
         "requires_design"   => false,
@@ -825,17 +835,20 @@ const TOOL_REGISTRY = [
     ),
     Dict{String, Any}(
         "name"              => "validate_params",
-        "description"       => "Check a params patch for compatibility violations before running. Returns field_guidance: which checks each parameter affects and its impact level.",
+        "description"       => "Validate API params; default merge_with_ssot=true validates patch merged into server snapshot.",
         "phase"             => "exploration",
-        "use_when"          => "Before calling run_design — always validate first.",
-        "args"              => Dict{String, Any}("params" => Dict("type" => "object", "required" => true)),
-        "returns"           => "Dict with ok (bool), violations (array), warnings (array), and field_guidance (per-param check impacts from lever map).",
+        "use_when"          => "Immediately before run_design.",
+        "args"              => Dict{String, Any}(
+            "params" => Dict("type" => "object", "required" => true),
+            "merge_with_ssot" => Dict("type" => "boolean", "optional" => true, "description" => "If true (default), validate deep_merge(server_ssot, params). If false, validate only the patch object."),
+        ),
+        "returns"           => "Dict with ok, violations, warnings, field_guidance, validated_against_ssot (bool).",
         "requires_design"   => false,
         "requires_geometry" => false,
     ),
     Dict{String, Any}(
         "name"              => "run_design",
-        "description"       => "Fast parameter-only what-if check (skips visualization, max 2 iterations, 60s timeout).",
+        "description"       => "Quick parameter-only re-solve (capped iterations, ~60s). Merges args.params into server API snapshot; overwrites snapshot on success.",
         "phase"             => "exploration",
         "use_when"          => "ONLY if get_situation_card has_geometry is true (server received POST /design from Grasshopper). After validate_params passes. Never call when has_geometry is false — use digest + predict_geometry_effect for Grasshopper geometry advice instead.",
         "args"              => Dict{String, Any}("params" => Dict("type" => "object", "required" => true)),
@@ -1157,7 +1170,7 @@ Return the full tool registry for the `/schema/tools` endpoint.
 """
 api_tool_schema() = TOOL_REGISTRY
 
-const _LLM_CONTRACT_VERSION = "1.1.0"
+const _LLM_CONTRACT_VERSION = "1.2.1"
 
 """
     _generate_params_list() -> Vector{Dict{String, Any}}
@@ -1231,9 +1244,27 @@ function api_llm_contract()::Dict{String, Any}
         Dict("name" => "pm_column", "speed" => "instant", "args" => ["col_idx", "section_size"]),
         Dict("name" => "beam", "speed" => "instant", "args" => ["beam_idx", "section_size"]),
         Dict("name" => "punching_reinforcement", "speed" => "instant", "args" => ["col_idx", "reinforcement_type?", "stud_diameter_in?", "bar_size?", "fyt_psi?"]),
+        Dict("name" => "punching_column_downsize", "speed" => "instant", "args" => ["col_idx", "reinforcement_type?", "min_column_dim_in?", "stud_diameter_in?", "bar_size?", "fyt_psi?", "check_pm?"]),
         Dict("name" => "deflection", "speed" => "instant", "args" => ["slab_idx", "deflection_limit"]),
         Dict("name" => "catalog_screen", "speed" => "instant", "args" => ["col_idx", "candidates[]"]),
     ]
+
+    agent_levers = Dict{String, Any}(
+        "geometry" => "Grasshopper/Rhino only; assistant advises (predict_geometry_effect).",
+        "api_parameters" => "validate_params → run_design; use get_lever_map(check=…) to map failures to API fields.",
+        "micro_experiments" => "run_experiment: cached per-element what-if. RC column → pm_column numeric in or catalog_screen Float64[]; steel column → pm_column W-string; steel beam → beam W-string only.",
+        "solver_outputs" => "Read-only (thicknesses, sections, rebar); recommend geometry or API changes instead.",
+    )
+
+    member_type_experiments = Dict{String, Any}(
+        "rc_rect_column" => "pm_column numeric; catalog_screen Float64[]; punching*; never W-strings.",
+        "rc_circular_column" => "pm_column numeric; punching*.",
+        "steel_column" => "pm_column W-string; catalog_screen String[].",
+        "steel_beam" => "beam W-string only.",
+    )
+
+    params_ssot_note =
+        "One server-stored API JSON; validate_params (default merge) and run_design merge patches then overwrite on success; POST /design overwrites with request body; get_api_params_ssot reads it."
 
     insight_categories = ["observation", "discovery", "dead_end", "sensitivity", "geometry_note"]
 
@@ -1247,18 +1278,17 @@ function api_llm_contract()::Dict{String, Any}
         "lever_map_checks" => sort(collect(keys(LEVER_SURFACE_MAP))),
         "scope_limits" => scope_limits,
         "experiments" => experiment_types,
+        "agent_levers" => agent_levers,
+        "member_type_experiments" => member_type_experiments,
+        "params_ssot" => params_ssot_note,
         "insight_categories" => insight_categories,
         "trace_tiers" => [string(t) for t in StructuralSizer.TRACE_TIERS],
         "trace_layers" => [string(l) for l in StructuralSizer.TRACE_LAYERS],
         "workflow_sequence" => [
-            "get_situation_card → orient",
-            "get_diagnose_summary → identify failures",
-            "get_lever_map(check=...) → find relevant parameters",
-            "run_experiment → instant what-if",
-            "validate_params → check compatibility",
-            "run_design → quick-check design with new params",
-            "compare_designs → measure improvement",
-            "record_insight → capture learning",
+            "get_situation_card",
+            "get_lever_map(check=…) before recommending fixes to a named check",
+            "run_experiment (element) or validate_params→run_design (global API)",
+            "compare_designs; record_insight",
         ],
     )
 end

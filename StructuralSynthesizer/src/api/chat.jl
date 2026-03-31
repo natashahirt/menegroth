@@ -113,6 +113,7 @@ const _TOOL_DISPLAY_LABELS = Dict{String, String}(
     "get_building_summary"     => "Analyzing geometry",
     "get_geometry_digest"      => "Computing geometry digest",
     "get_current_params"       => "Reading parameters",
+    "get_api_params_ssot"      => "Reading API params snapshot",
     "get_design_history"       => "Fetching design history",
     "get_diagnose_summary"     => "Summarizing diagnostics",
     "get_diagnose"             => "Running diagnostics",
@@ -354,6 +355,23 @@ action you are blocked on.
 When the user replies with `[CLARIFICATION_RESPONSE id=<key> options=<comma_ids>]`, incorporate the selection and proceed — do NOT re-ask the same clarification.
 """
 
+"""Shared design + results preamble: lever taxonomy, param snapshot, key relationships (single source — keep in sync with api_llm_contract `agent_levers`)."""
+const _CHAT_LEVERS_AND_LIMITS = raw"""
+YOUR LEVERS — four categories; do not mix them:
+  (1) GEOMETRY — User changes Grasshopper/Rhino (spans, column positions, story heights). You explain effects (predict_geometry_effect); nothing in the API moves geometry.
+  (2) API PARAMETERS — Fields in PARAMETER SPACE / get_current_params. Applied with validate_params → run_design (server merges into one stored JSON). If a check fails and you are not sure which knobs apply → get_lever_map(check=...) first; do not invent levers.
+  (3) MICRO-EXPERIMENTS — run_experiment: instant, cached design only; per-element what-if. pm_column: numeric inches ⇒ RC square; "W14X82"-style string ⇒ steel column; type=beam ⇒ steel W-beams only (never for RC columns). punching / punching_reinforcement / punching_column_downsize / deflection / catalog_screen as in list_experiments.
+  (4) SOLVER OUTPUTS — Thicknesses, chosen sections, rebar layouts: results of optimization, not user levers. Do not say "set slab to 10 in"; recommend (1) or (2) so the solver changes outputs.
+
+PARAM SNAPSHOT: get_current_params = readable resolved settings. get_api_params_ssot = raw wire JSON (use only when debugging merges). Each successful design overwrites the stored JSON.
+
+STRUCTURAL HOOKS (use tools if unsure): Shorter spans → lower tributary/punching demand (never claim the opposite). Higher f'c helps Vc locally but a full run may shrink columns → smaller b₀; caveat. grow_columns increases b₀; reinforce_first adds studs without growing the column. Deflection/EC: prefer geometry; L/360→L/240 only if finishes tolerate it. uniform_column_sizing off minimizes column steel/concrete; per_story/building trades material for uniform sections.
+
+GRID NOTE: Unequal bay sizes on a still-rectangular grid are not "irregular plan." Irregular = non-orthogonal or non-rectangular panels.
+
+GATES: run_design requires has_geometry. run_experiment, diagnose, suggest_next_action require has_design.
+"""
+
 const _TOOL_INDEX = """
 
 TOOLS (each tool description includes USE WHEN guidance):
@@ -361,7 +379,7 @@ TOOLS (each tool description includes USE WHEN guidance):
   Diagnose:    get_diagnose_summary (FIRST — returns total_ec_kgco2e, critical_ratio, pass/fail, per-element EC), get_diagnose, query_elements, get_solver_trace, get_lever_map
   Explore:     run_experiment (FAST), validate_params → run_design, compare_designs, suggest_next_action
   Communicate: narrate_element, narrate_comparison, get_result_summary, get_condensed_result, clarify_user_intent
-  Reference:   explain_field, get_provision_rationale, get_applicability, get_response_guidelines
+  Reference:   explain_field, get_provision_rationale, get_applicability, get_response_guidelines, get_api_params_ssot (wire JSON / patch-debug only)
   Memory:      record_insight, get_session_insights
   Experiments: list_experiments, batch_experiments
 
@@ -369,21 +387,11 @@ TOOLS (each tool description includes USE WHEN guidance):
   FOR ANY "what is X?" QUESTION: call the relevant tool BEFORE answering. Never quote numbers from memory.
 
 MICRO-EXPERIMENTS — PREFER OVER FULL REDESIGN FOR QUICK WHAT-IFS:
-  run_experiment is INSTANT (~0.1s) and uses the cached design — no full re-run.
-  ALWAYS use run_experiment FIRST when the user asks about:
-    - Punching shear (column size): "would a bigger column help?" → run_experiment(type=punching, args={col_idx, c1_in?, c2_in?})
-    - Punching shear (concrete): "what if I use 5000 psi?" → run_experiment(type=punching, args={col_idx, fc_in=5000})
-      ⚠ CAVEAT: This holds column size constant. In a full redesign, higher f'c lets the sizer
-      pick SMALLER columns (less area for axial), which shrinks b₀ and may NET-WORSEN punching.
-      Always explain this coupling when presenting f'c results for punching.
-    - Column sizing: "what if I use a W14x82?" → run_experiment(type=pm_column, args={col_idx, section_size})
-    - Beam sizing: "what if I use a W16x40?" → run_experiment(type=beam, args={beam_idx, section_size})
-    - Shear reinforcement: "can I add studs?" → run_experiment(type=punching_reinforcement, args={col_idx, reinforcement_type="studs"})
-    - Deflection: "what about L/480?" → run_experiment(type=deflection, args={slab_idx, deflection_limit})
-    - Section screening: "which column sizes work?" → run_experiment(type=catalog_screen, args={col_idx, candidates})
-    - Any "would X help?" / "what's the effect of Y?" question about a single element
-  Use batch_experiments to test multiple alternatives at once (e.g. screen 5 column sizes).
-  Only escalate to run_design when you need to test a GLOBAL parameter change across all elements.
+  run_experiment is instant; uses cached design. Escalate to run_design only for global API changes.
+  Examples: punching (c1/c2/h/f'c); punching_reinforcement; punching_column_downsize (smaller plan at fixed Vu/Mub with studs/stirrups); deflection limit swap; catalog_screen.
+  pm_column / beam: match member type (see YOUR LEVERS (3)) — RC → numeric inches; steel column → "W#X##"; steel beam → type=beam + W string only.
+  f'c punching caveat: micro-experiment holds column size; full run may shrink columns and worsen punching — say so.
+  batch_experiments for multiple candidates. list_experiments for full arg list.
 
 TOOL USAGE RULES — DO NOT SKIP THESE:
   DIAGNOSING FAILURES:
@@ -429,44 +437,14 @@ RETRIEVAL QUESTIONS — CALL A TOOL IF DATA IS NOT IN THE SYSTEM PROMPT:
     - Detailed checks, per-element ratios → get_diagnose_summary or query_elements
     - Element dimensions, sections → query_elements or get_diagnose
     - Geometry (spans, heights, floor area, column count) → get_geometry_digest
-    - Current parameters → get_current_params
+    - Parameters → get_current_params; raw wire JSON (merge-debug only) → get_api_params_ssot
     - Design history / comparison → get_design_history or compare_designs
     - Derived metrics (e.g. EC intensity = EC/area) → call get_geometry_digest for area, then compute
   NEVER answer a factual question by guessing. If the data is not in this prompt and you haven't called a tool, call one.
 
-STRUCTURAL REASONING — DO NOT HALLUCINATE TRADE-OFFS:
-  NEVER invent structural relationships. Use predict_geometry_effect or get_lever_map to verify directions.
-  Key relationships to get RIGHT:
-    - Reducing spans REDUCES tributary area (∝ L²) → REDUCES punching demand. Never claim shorter spans increase punching load.
-    - Higher f'c increases Vc in isolation BUT the column sizer may pick SMALLER columns (less area for axial), shrinking b₀ → may NET-WORSEN punching. Always caveat.
-    - grow_columns directly increases b₀ (most reliable punching fix). reinforce_first adds studs but does NOT grow columns — different mechanism.
-    - For slab thickness / deflection / embodied carbon: GEOMETRY FIRST. Reducing spans (adding columns, subdividing bays) is the primary lever (deflection ∝ L⁴). Relaxing deflection_limit (L/360→L/240) is a secondary, optional suggestion — only mention it as an additional option if the project can tolerate more deflection and has no sensitive partitions or equipment.
-    - uniform_column_sizing = off (independent sizing) is an embodied-carbon reduction strategy: each column is right-sized to its own demand. per_story/building promote every column to the governing (largest) section, adding unnecessary material to lightly-loaded columns. Mention this trade-off when the user asks about reducing carbon or material use.
+Non-converged slabs may show 0.0 for deflection/punching — placeholders, not passing.
 
-  SOLVER OUTPUTS vs USER INPUTS — CRITICAL DISTINCTION:
-    Slab thickness, column size, beam section, and rebar layout are SOLVER OUTPUTS determined by the optimization. The user CANNOT directly set these.
-    NEVER suggest "increase slab thickness", "use a larger column", or "change beam section" as user actions. These are not levers the user controls.
-    The user controls DESIGN PARAMETERS (floor_type, optimize_for, material grades, method, punching_strategy, fire_rating, column_catalog, etc.) and GEOMETRY (column positions, spans, heights — changed in Grasshopper).
-    When a design fails, recommend changes to parameters or geometry that will CAUSE the solver to produce adequate sections — not direct section changes.
-    Non-converged slabs show 0.0 for deflection/punching ratios — these are default placeholders, NOT real computed values. Always flag them as "did not converge" and never interpret 0.0 as passing.
-
-  GRID TOPOLOGY vs SPAN VARIANCE — KEEP THESE CONCEPTS SEPARATE:
-    Grid topology describes whether columns form a rectangular grid (all quad panels) or not (triangulated, offset, skewed). A rectangular grid is always regular — DDM/EFM apply.
-    Span variance describes how much bay sizes differ across the plan. High span variance means some bays are wider than others, producing different tributary loads for same-position columns. This is NORMAL for any rectangular grid with unequal bay spacings — it is NOT a grid irregularity and does NOT affect DDM/EFM applicability. Each column is checked for punching shear with its own actual tributary load.
-    NEVER describe a rectangular grid with variable bay sizes as "irregular." NEVER conflate span variance (different bay sizes) with grid topology (rectangular vs non-rectangular). Only flag grid irregularity when panels are non-orthogonal or non-rectangular.
-  If uncertain about a directional effect, call predict_geometry_effect or run a micro-experiment. Do not guess.
-
-SERVER CACHE GATES:
-  has_geometry (from get_situation_card) = geometry on the server from Grasshopper POST /design, NOT text in this chat.
-  has_design = a solved design exists on the server.
-  run_design requires has_geometry. If false → tell user to run Design from Grasshopper; meanwhile advise from the digest.
-  suggest_next_action, run_experiment, diagnose, query_elements, get_solver_trace require has_design.
-
-GEOMETRY vs PARAMETERS:
-  GEOMETRY (Grasshopper) — column positions, spans, heights, plan shape. Cannot change via API.
-  PARAMETERS (API) — floor_type, materials, loads, method, sizing. Change via run_design.
-  SOLVER OUTPUTS (read-only) — slab thickness, column sections, beam sections, rebar. Determined by the optimizer. Cannot be directly set by the user.
-  For geometry changes → tell user what to adjust in Grasshopper.
+$_CHAT_LEVERS_AND_LIMITS
 
 $(_parameter_space_card())
 
@@ -510,38 +488,14 @@ RETRIEVAL QUESTIONS — CALL A TOOL IF DATA IS NOT IN THE SYSTEM PROMPT:
     - Detailed checks, per-element ratios → get_diagnose_summary or query_elements
     - Element dimensions, sections → query_elements or get_diagnose
     - Geometry (spans, heights, floor area, column count) → get_geometry_digest
-    - Current parameters → get_current_params
+    - Parameters → get_current_params; raw wire JSON (merge-debug only) → get_api_params_ssot
     - Design history / comparison → get_design_history or compare_designs
     - Derived metrics (e.g. EC intensity = EC/area) → call get_geometry_digest for area, then compute
   NEVER answer a factual question by guessing. If the data is not in this prompt and you haven't called a tool, call one.
 
-STRUCTURAL REASONING — DO NOT HALLUCINATE TRADE-OFFS:
-  NEVER invent structural relationships. Use predict_geometry_effect or get_lever_map to verify directions.
-  Key relationships to get RIGHT:
-    - Reducing spans REDUCES tributary area (∝ L²) → REDUCES punching demand. Never claim shorter spans increase punching load.
-    - Higher f'c increases Vc in isolation BUT the column sizer may pick SMALLER columns, shrinking b₀ → may NET-WORSEN punching. Always caveat.
-    - grow_columns directly increases b₀ (most reliable punching fix). reinforce_first adds studs but does NOT grow columns — different mechanism.
-    - For slab thickness / deflection / embodied carbon: GEOMETRY FIRST. Reducing spans (adding columns, subdividing bays) is the primary lever (deflection ∝ L⁴). Relaxing deflection_limit (L/360→L/240) is a secondary, optional suggestion — only mention it as an additional option if the project can tolerate more deflection and has no sensitive partitions or equipment.
-    - uniform_column_sizing = off (independent sizing) is an embodied-carbon reduction strategy: each column is right-sized to its own demand. per_story/building promote every column to the governing (largest) section, adding unnecessary material to lightly-loaded columns. Mention this trade-off when the user asks about reducing carbon or material use.
+Non-converged slabs may show 0.0 for deflection/punching — placeholders, not passing.
 
-  SOLVER OUTPUTS vs USER INPUTS — CRITICAL DISTINCTION:
-    Slab thickness, column size, beam section, and rebar layout are SOLVER OUTPUTS determined by the optimization. The user CANNOT directly set these.
-    NEVER suggest "increase slab thickness", "use a larger column", or "change beam section" as user actions. These are not levers the user controls.
-    The user controls DESIGN PARAMETERS (floor_type, optimize_for, material grades, method, punching_strategy, fire_rating, column_catalog, etc.) and GEOMETRY (column positions, spans, heights — changed in Grasshopper).
-    When a design fails, recommend changes to parameters or geometry that will CAUSE the solver to produce adequate sections — not direct section changes.
-    Non-converged slabs show 0.0 for deflection/punching ratios — these are default placeholders, NOT real computed values. Always flag them as "did not converge" and never interpret 0.0 as passing.
-
-  GRID TOPOLOGY vs SPAN VARIANCE — KEEP THESE CONCEPTS SEPARATE:
-    Grid topology describes whether columns form a rectangular grid (all quad panels) or not (triangulated, offset, skewed). A rectangular grid is always regular — DDM/EFM apply.
-    Span variance describes how much bay sizes differ across the plan. High span variance means some bays are wider than others, producing different tributary loads for same-position columns. This is NORMAL for any rectangular grid with unequal bay spacings — it is NOT a grid irregularity and does NOT affect DDM/EFM applicability. Each column is checked for punching shear with its own actual tributary load.
-    NEVER describe a rectangular grid with variable bay sizes as "irregular." NEVER conflate span variance (different bay sizes) with grid topology (rectangular vs non-rectangular). Only flag grid irregularity when panels are non-orthogonal or non-rectangular.
-  If uncertain about a directional effect, call predict_geometry_effect or run a micro-experiment. Do not guess.
-
-GEOMETRY vs PARAMETERS:
-  GEOMETRY (Grasshopper) — column positions, spans, heights, plan shape. Cannot change via API.
-  PARAMETERS (API) — floor_type, materials, loads, method, sizing. Change via run_design.
-  SOLVER OUTPUTS (read-only) — slab thickness, column sections, beam sections, rebar. Determined by the optimizer. Cannot be directly set by the user.
-  For geometry changes → tell user what to adjust in Grasshopper.
+$_CHAT_LEVERS_AND_LIMITS
 
 $(_parameter_space_card())
 
@@ -3455,6 +3409,28 @@ function _deep_merge(base::Dict{String, Any}, patch::Dict{String, Any})::Dict{St
     return out
 end
 
+"""Default wire-format API params (all `APIParams` defaults) as a plain Dict."""
+function _default_api_params_wire_dict()::Dict{String, Any}
+    JSON3.read(JSON3.write(APIParams()), Dict{String, Any})
+end
+
+"""
+    _chat_api_params_base() -> Dict{String, Any}
+
+Single source of truth for chat-side parameter patching: the last successful design's
+`api_params` JSON, or default `APIParams()` when empty. There is no parallel \"original\"
+snapshot — this object is replaced in full after each successful `POST /design` or chat `run_design`.
+"""
+function _chat_api_params_base()::Dict{String, Any}
+    snap = with_cache_read(c -> copy(c.last_api_params_json), DESIGN_CACHE)
+    isempty(snap) ? _default_api_params_wire_dict() : snap
+end
+
+"""Deep-merge `patch_norm` (already `_normalize_flat_patch` when needed) into the server SSOT."""
+function _chat_merge_api_params_patch(patch_norm::Dict{String, Any})::Dict{String, Any}
+    _deep_merge(_chat_api_params_base(), patch_norm)
+end
+
 # Keyword fragments that suggest a geometric (Grasshopper-side) change.
 const _GEOMETRIC_PATTERNS = [
     "spacing", "span", "bay_width", "bay_depth", "story_height", "floor_height",
@@ -3663,6 +3639,7 @@ Phase 1 — Orientation:
 - `get_building_summary`     — detailed geometry summary (stories, spans, counts, regularity).
 - `get_design_history`       — past designs in session (params, pass/fail, EC).
 - `get_current_params`       — fully resolved parameter set from the last design.
+- `get_api_params_ssot`      — raw API JSON merge base (patch debugging; prefer get_current_params for narration).
 
 Phase 2 — Diagnosis:
 - `get_diagnose_summary`     — lightweight failure overview: counts, top-5 critical, failure breakdown.
@@ -4094,6 +4071,9 @@ function _dispatch_chat_tool(tool::String, args::Dict{String, Any})::Dict{String
         isnothing(design) && return Dict("error" => "no_design", "message" => "No design has been run yet.", "recovery_hint" => _NO_DESIGN_HINT)
         return agent_current_params(design)
 
+    elseif tool == "get_api_params_ssot"
+        return agent_api_params_ssot()
+
     elseif tool == "get_design_history"
         entries = get_design_history_entries()
         isempty(entries) && return Dict("history" => [], "message" => "No designs in session history yet.")
@@ -4224,7 +4204,7 @@ function _dispatch_chat_tool(tool::String, args::Dict{String, Any})::Dict{String
         isnothing(design) && return Dict("error" => "no_design", "message" => "No design has been run yet.", "recovery_hint" => _NO_DESIGN_HINT)
         exp_type = get(args, "type", nothing)
         exp_args = get(args, "args", Dict{String, Any}())
-        isnothing(exp_type) && return Dict("error" => "missing_type", "message" => "Provide experiment 'type' (punching, pm_column, beam, punching_reinforcement, deflection, catalog_screen).")
+        isnothing(exp_type) && return Dict("error" => "missing_type", "message" => "Provide experiment 'type' (punching, pm_column, beam, punching_reinforcement, punching_column_downsize, deflection, catalog_screen).")
         !(exp_args isa AbstractDict) && return Dict("error" => "invalid_args", "message" => "run_experiment args must be an object.")
         exp_args_dict = Dict{String, Any}(string(k) => v for (k, v) in exp_args)
         result = _sanitize_for_json(evaluate_experiment(design, string(exp_type), exp_args_dict))
@@ -4272,7 +4252,15 @@ function _dispatch_chat_tool(tool::String, args::Dict{String, Any})::Dict{String
                 "note" => "Empty params patch — nothing to validate.",
             )
         end
-        return _validate_params_patch(param_patch)
+        merge_raw = get(args, "merge_with_ssot", true)
+        merge_ssot = merge_raw isa Bool ? merge_raw :
+            (merge_raw isa Integer ? merge_raw != 0 :
+             merge_raw isa AbstractString ? lowercase(strip(string(merge_raw))) in ("true", "1", "yes", "y") : true)
+        patch_norm = _normalize_flat_patch(param_patch)
+        to_validate = merge_ssot ? _chat_merge_api_params_patch(patch_norm) : patch_norm
+        res = _validate_params_patch(to_validate)
+        res["validated_against_ssot"] = merge_ssot
+        return res
 
     elseif tool == "run_design"
         # ── Guard: server state ──────────────────────────────────────────────
@@ -4322,12 +4310,10 @@ function _dispatch_chat_tool(tool::String, args::Dict{String, Any})::Dict{String
         # sub-struct so JSON3 deserialization sees them.
         patch_dict = _normalize_flat_patch(patch_dict)
 
-        # ── Merge onto last design's params so previous changes persist ──
-        # Without this, each run_design starts from APIParams defaults and
-        # loses parameters set in earlier runs (e.g. floor_type change in run 2
-        # would revert to the default in run 3 if the patch only sets punching_strategy).
-        base_params_json = with_cache_read(c -> copy(c.last_api_params_json), DESIGN_CACHE)
-        merged = _deep_merge(base_params_json, patch_dict)
+        # ── Single source of truth: merge patch into server api_params snapshot ──
+        # (last POST /design or last successful chat run_design), then overwrite
+        # that snapshot entirely after success — no separate "original" params.
+        merged = _chat_merge_api_params_patch(patch_dict)
 
         # Build fast-mode patch: force skip_visualization and cap iterations/MIP
         # to keep the conversational loop responsive.
@@ -4486,7 +4472,7 @@ function _dispatch_chat_tool(tool::String, args::Dict{String, Any})::Dict{String
         return Dict(
             "error"   => "unknown_tool",
             "message" => "Unknown tool: \"$tool\". Available: " *
-                "get_situation_card, get_building_summary, get_geometry_digest, get_design_history, get_current_params, " *
+                "get_situation_card, get_building_summary, get_geometry_digest, get_design_history, get_current_params, get_api_params_ssot, " *
                 "get_diagnose_summary, get_diagnose, query_elements, get_solver_trace, " *
                 "get_lever_map, get_implemented_provisions, get_provision_rationale, explain_field, " *
                 "get_result_summary, get_condensed_result, get_applicability, explain_trace_lookup, " *

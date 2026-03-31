@@ -410,6 +410,25 @@ function agent_current_params(design::BuildingDesign)::Dict{String, Any}
 end
 
 """
+    agent_api_params_ssot() -> Dict{String, Any}
+
+Return the server's canonical wire-format `APIParams` JSON (`DESIGN_CACHE.last_api_params_json`).
+This is overwritten in full on each successful `POST /design` or chat `run_design` — there is no
+separate \"original Grasshopper\" copy. Used as the merge base for `validate_params` / `run_design`
+patches when `merge_with_ssot` is true.
+"""
+function agent_api_params_ssot()::Dict{String, Any}
+    snap = with_cache_read(c -> copy(c.last_api_params_json), DESIGN_CACHE)
+    Dict{String, Any}(
+        "api_params" => snap,
+        "empty" => isempty(snap),
+        "note" => isempty(snap) ?
+            "No snapshot yet — the merge base falls back to default APIParams() until a design completes." :
+            "Single source of truth for API parameters on the server; next successful design replaces this object entirely.",
+    )
+end
+
+"""
     agent_situation_card(struc, design, history; server_geometry_hash="", client_geometry_hash="") -> Dict{String, Any}
 
 Single-call orientation snapshot. Combines geometry overview, resolved params,
@@ -1661,10 +1680,7 @@ function agent_response_guidelines()::Dict{String, Any}
             Dict("intent" => "Can I add shear studs or stirrups for punching?",
                  "sequence" => "run_experiment(type=punching_reinforcement, args={col_idx, reinforcement_type=\"studs\"}) — designs full stud/stirrup layout and checks if column passes"),
             Dict("intent" => "Would reinforce_first / grow_columns / reinforce_last help?",
-                 "sequence" => "grow_columns is the most reliable punching lever — it directly increases b₀ (critical perimeter). " *
-                               "reinforce_first adds shear studs/stirrups but does NOT grow columns; columns may be SMALLER (sized for P-M only). " *
-                               "Test with: run_experiment(type=punching, args={c1_in=larger}) for grow_columns effect, " *
-                               "run_experiment(type=punching_reinforcement) for stud effect. Compare both."),
+                 "sequence" => "get_lever_map(check=punching…) then run_experiment: punching (larger c1/c2), punching_reinforcement (studs), punching_column_downsize (min plan at fixed Vu/Mub). Global strategy change → validate_params→run_design."),
             Dict("intent" => "What about a different deflection limit?",
                  "sequence" => "run_experiment(type=deflection, args={slab_idx, deflection_limit}) — " *
                                "BUT NOTE: deflection_limit relaxation (L/360→L/240) is a SECONDARY lever. " *

@@ -19,7 +19,7 @@ mutable struct DesignCache
     last_design::Union{BuildingDesign, Nothing}
     last_diagnose::Union{Dict{String, Any}, Nothing}
     diagnose_design_id::UInt64
-    """JSON dict of the last APIParams used, for incremental patching in run_design."""
+    """Canonical wire-format API params snapshot (SSoT). Set on each successful POST /design or chat `run_design`; overwritten in full — no separate 'original' copy."""
     last_api_params_json::Dict{String, Any}
     lock::ReentrantLock
 end

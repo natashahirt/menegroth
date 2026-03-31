@@ -19,7 +19,7 @@ namespace Menegroth.GH.Components
     ///
     /// Menu structure:
     ///   Beams ▸ Type ▸ Beam Catalog ▸ Steel
-    ///   Columns ▸ Type ▸ Column Catalog ▸ Sizing Strategy ▸ Column Concrete
+    ///   Columns ▸ Type ▸ Column Catalog ▸ Sizing Strategy ▸ Punching Shear Strategy ▸ Column Concrete
     ///   Slabs ▸ Floor System ▸ Flat Plate ▸ Analysis Method ▸ Punching Strategy
     ///                        ▸ Flat Slab  ▸ ...
     ///                        ▸ One-Way, Vault
@@ -301,6 +301,7 @@ namespace Menegroth.GH.Components
             }
 
             AddSubChoices(colMenu, "Sizing Strategy", SizingStrategies, _columnSizingStrategy);
+            AddSubChoices(colMenu, "Punching Shear Strategy", PunchStrategies, _punchStrat);
             colMenu.DropDownItems.Add(new ToolStripSeparator());
             AddSubChoices(colMenu, "Column Concrete", Concretes, _columnConcrete);
 
@@ -491,7 +492,10 @@ namespace Menegroth.GH.Components
                 case "Floor Type":        _floorType   = tag.Value; break;
                 case "Analysis Method":   _method      = tag.Value; break;
                 case "Deflection Limit":  _deflLimit   = tag.Value; break;
-                case "Punching Strategy": _punchStrat  = tag.Value; break;
+                case "Punching Strategy":
+                case "Punching Shear Strategy":
+                    _punchStrat = tag.Value;
+                    break;
                 case "Concrete":          _concrete    = tag.Value; break;
                 case "Rebar":             _rebar       = tag.Value; break;
                 case "Steel":             _steel        = tag.Value; break;

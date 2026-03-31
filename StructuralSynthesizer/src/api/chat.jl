@@ -4344,15 +4344,18 @@ function _dispatch_chat_tool(tool::String, args::Dict{String, Any})::Dict{String
 
         design_task = @async begin
             try
+                # Persist merged API params as soon as we commit to this attempt so
+                # validate_params / the next merge see the patch even if design_building
+                # throws, the quick-check times out, or the client disconnects. Semantic
+                # params only — not fast_patch (skip_visualization, capped iterations/MIP).
+                lock(DESIGN_CACHE.lock) do
+                    DESIGN_CACHE.last_api_params_json = copy(merged)
+                end
                 tc = TraceCollector()
                 d = design_building(cached_struc, fast_params; tc=tc)
                 lock(DESIGN_CACHE.lock) do
                     DESIGN_CACHE.last_design = d
                     DESIGN_CACHE.last_result = design_to_json(d; geometry_hash=cached_geo_hash)
-                    # Persist semantic API params only — not fast_patch (skip_visualization,
-                    # capped max_iterations/MIP), or the next run_design merge inherits
-                    # chat-only overrides and baselines get corrupted across turns.
-                    DESIGN_CACHE.last_api_params_json = copy(merged)
                 end
                 invalidate_diagnose_cache!(DESIGN_CACHE)
                 result_ref[] = d

@@ -350,6 +350,11 @@ namespace Menegroth.GH.Components
                 _lastComputeTime = _lastParsed?.ComputeTime ?? 0;
                 _state = RunState.Idle;
 
+                // Assistant patch was peeked at solve start; drop it only after a successful response
+                // so errors/timeouts leave the queue intact for retry.
+                if (_lastParsed != null && !_lastParsed.IsError)
+                    MenegrothConfig.ClearAssistantParamsPatch();
+
                 EmitResult(DA, _lastParsed);
                 Message = FormatDoneMessage(_lastParsed);
                 return;
@@ -412,7 +417,7 @@ namespace Menegroth.GH.Components
             // 5. Check for unchanged inputs
             var geo = geoGoo.Value;
             var prms = paramsGoo.Value;
-            var assistantPatch = MenegrothConfig.TryConsumeAssistantParamsPatch();
+            var assistantPatch = MenegrothConfig.PeekAssistantParamsPatchClone();
             bool hadAssistantPatch = assistantPatch != null;
             if (assistantPatch != null)
             {

@@ -39,7 +39,7 @@ namespace Menegroth.GH.Config
         private static readonly object AssistantParamsPatchLock = new object();
         private static JObject? _queuedAssistantParamsPatch;
 
-        /// <summary>Queue a patch for the next <see cref="Components.DesignRun"/> solve (merged after reading Design Params wire).</summary>
+        /// <summary>Queue a patch for the next <see cref="Components.DesignRun"/> solve (peek-merged; cleared after a successful response).</summary>
         public static void QueueAssistantParamsPatch(JObject? patch)
         {
             if (patch == null || patch.Count == 0)
@@ -50,7 +50,29 @@ namespace Menegroth.GH.Config
             }
         }
 
-        /// <summary>Take queued patch for merge, or null if none.</summary>
+        /// <summary>
+        /// Deep clone of the queued patch for merge without removing it from the queue.
+        /// Use with <see cref="ClearAssistantParamsPatch"/> after a successful design response
+        /// so failed runs (validation, network, server error) can retry without re-applying.
+        /// </summary>
+        public static JObject? PeekAssistantParamsPatchClone()
+        {
+            lock (AssistantParamsPatchLock)
+            {
+                return _queuedAssistantParamsPatch == null ? null : (JObject)_queuedAssistantParamsPatch.DeepClone();
+            }
+        }
+
+        /// <summary>Clears the assistant params patch queue after a successful design run.</summary>
+        public static void ClearAssistantParamsPatch()
+        {
+            lock (AssistantParamsPatchLock)
+            {
+                _queuedAssistantParamsPatch = null;
+            }
+        }
+
+        /// <summary>Take queued patch for merge and remove it from the queue (legacy one-shot consume).</summary>
         public static JObject? TryConsumeAssistantParamsPatch()
         {
             lock (AssistantParamsPatchLock)

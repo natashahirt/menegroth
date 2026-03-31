@@ -620,9 +620,15 @@ function _execute_design(input::APIInput)
         end
 
         output = design_to_json(design; geometry_hash=geo_hash)
+        api_params_snapshot = try
+            JSON3.read(JSON3.write(input.params), Dict{String, Any})
+        catch
+            Dict{String, Any}()
+        end
         lock(DESIGN_CACHE.lock) do
             DESIGN_CACHE.last_result = output
             DESIGN_CACHE.last_design = design
+            DESIGN_CACHE.last_api_params_json = api_params_snapshot
         end
         invalidate_diagnose_cache!(DESIGN_CACHE)
         _append_design_log!("Design result serialized.")
@@ -633,17 +639,25 @@ function _execute_design(input::APIInput)
                  count(p -> !p.second.ok, design.beams) +
                  count(p -> !(p.second.converged && p.second.deflection_ok && p.second.punching_ok), design.slabs) +
                  count(p -> !p.second.ok, design.foundations)
+        api_patch = try
+            JSON3.read(JSON3.write(input.params), Dict{String, Any})
+        catch
+            Dict{String, Any}()
+        end
+        full_params = try agent_current_params(design) catch; Dict{String, Any}() end
         record_design_history!(DesignHistoryEntry(;
-            geometry_hash    = geo_hash,
-            all_pass         = s.all_checks_pass,
-            critical_ratio   = s.critical_ratio,
-            critical_element = s.critical_element,
-            embodied_carbon  = s.embodied_carbon,
-            n_columns        = length(design.columns),
-            n_beams          = length(design.beams),
-            n_slabs          = length(design.slabs),
-            n_failing        = n_fail,
-            source           = "design",
+            geometry_hash     = geo_hash,
+            params_patch      = api_patch,
+            cumulative_params = full_params,
+            all_pass          = s.all_checks_pass,
+            critical_ratio    = s.critical_ratio,
+            critical_element  = s.critical_element,
+            embodied_carbon   = s.embodied_carbon,
+            n_columns         = length(design.columns),
+            n_beams           = length(design.beams),
+            n_slabs           = length(design.slabs),
+            n_failing         = n_fail,
+            source            = "design",
         ))
 
         return _json_ok(output)

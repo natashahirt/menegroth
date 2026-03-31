@@ -18,12 +18,12 @@ namespace Menegroth.GH.Components
     /// no external ValueList components needed.
     ///
     /// Menu structure:
-    ///   Beams ▸ Type ▸ Beam Catalog ▸ ...
-    ///   Columns ▸ Type ▸ ...
-    ///   Slabs ▸ Floor System ▸ Flat Plate ▸ Analysis Method ▸ ...
-    ///                        ▸ Flat Slab ▸ Punching Strategy ▸ ...
+    ///   Beams ▸ Type ▸ Beam Catalog ▸ Steel
+    ///   Columns ▸ Type ▸ Column Catalog ▸ Sizing Strategy ▸ Column Concrete
+    ///   Slabs ▸ Floor System ▸ Flat Plate ▸ Analysis Method ▸ Punching Strategy
+    ///                        ▸ Flat Slab  ▸ ...
     ///                        ▸ One-Way, Vault
-    ///         ▸ Deflection Limit ▸ ...
+    ///         ▸ Deflection Limit ▸ Slab Concrete ▸ Rebar
     ///   Foundations ▸ Size Foundations ▸ Soil Type ▸ Foundation Type ▸ ...
     ///   Default Materials ▸ Concrete ▸ Rebar ▸ Steel ▸ ...
     ///   Design Options ▸ Optimize For ▸ Fire Rating ▸ ...
@@ -45,6 +45,8 @@ namespace Menegroth.GH.Components
         private string _steel = "A992";
         private string _columnType = "rc_rect";
         private string _columnCatalog = "standard";
+        private string _columnConcrete = "NWC_6000";
+        private string _columnSizingStrategy = "discrete";
         private string _beamType = "steel_w";
         private string _beamCatalog = "large";
         private string _optimizeFor = "weight";
@@ -122,6 +124,12 @@ namespace Menegroth.GH.Components
             new("Steel W-shape", "steel_w"),
             new("PixelFrame",   "pixelframe"),
             new("Steel Pipe",    "steel_pipe"),
+        };
+
+        private static readonly Choice[] SizingStrategies =
+        {
+            new("Discrete (MIP catalog)", "discrete"),
+            new("NLP (continuous)",       "nlp"),
         };
 
         /// <summary>Steel column catalog: compact only, preferred, or all. Used when Column Type is steel_hss or steel_w.</summary>
@@ -275,21 +283,26 @@ namespace Menegroth.GH.Components
             base.AppendAdditionalComponentMenuItems(menu);
             Menu_AppendSeparator(menu);
 
-            // ── Beams ▸ ──
+            // ── Beams ▸ Type ▸ Catalog ▸ Steel ──
             var beamMenu = Menu_AppendItem(menu, "Beams");
             AddSubChoices(beamMenu, "Beam Type", BeamTypes, _beamType);
             AddSubChoices(beamMenu, "Beam Catalog", BeamCatalogs, _beamCatalog);
+            beamMenu.DropDownItems.Add(new ToolStripSeparator());
+            AddSubChoices(beamMenu, "Steel", Steels, _steel);
 
-            // ── Columns ▸ Column Type (top-level) ▸ Column Catalog (second, updates by type) ──
+            // ── Columns ▸ Column Type ▸ Column Catalog ▸ Sizing Strategy ▸ Column Concrete ──
             var colMenu = Menu_AppendItem(menu, "Columns");
             AddSubChoices(colMenu, "Column Type", ColumnTypes, _columnType);
 
-            // Column Catalog: choices depend on selected column type
             if (ColumnTypeUsesCatalog(_columnType))
             {
                 var catalogChoices = GetCatalogChoicesForColumnType(_columnType);
                 AddSubChoices(colMenu, "Column Catalog", catalogChoices, _columnCatalog);
             }
+
+            AddSubChoices(colMenu, "Sizing Strategy", SizingStrategies, _columnSizingStrategy);
+            colMenu.DropDownItems.Add(new ToolStripSeparator());
+            AddSubChoices(colMenu, "Column Concrete", Concretes, _columnConcrete);
 
             // ── Slabs ▸ Floor System ▸ ──
             var slabParamsMenu = Menu_AppendItem(menu, "Slabs");
@@ -345,8 +358,10 @@ namespace Menegroth.GH.Components
 
             Menu_AppendSeparator(slabParamsMenu.DropDown);
 
-            // Deflection limit (shared across all slab/floor types) at slab menu level.
             AddSubChoices(slabParamsMenu, "Deflection Limit", DeflLimits, _deflLimit);
+            slabParamsMenu.DropDownItems.Add(new ToolStripSeparator());
+            AddSubChoices(slabParamsMenu, "Slab Concrete", Concretes, _concrete);
+            AddSubChoices(slabParamsMenu, "Rebar", Rebars, _rebar);
 
             // ── Foundations ▸ ──
             var fdnMenu = Menu_AppendItem(menu, "Foundations");
@@ -482,12 +497,20 @@ namespace Menegroth.GH.Components
                 case "Steel":             _steel        = tag.Value; break;
                 case "Column Type":
                     _columnType = tag.Value;
-                    // Set default catalog when switching type
                     if (ColumnTypeUsesCatalog(tag.Value))
                         _columnCatalog = tag.Value.StartsWith("steel_") ? "preferred" : "standard";
                     break;
                 case "Column Catalog":
                     _columnCatalog = tag.Value;
+                    break;
+                case "Sizing Strategy":
+                    _columnSizingStrategy = tag.Value;
+                    break;
+                case "Column Concrete":
+                    _columnConcrete = tag.Value;
+                    break;
+                case "Slab Concrete":
+                    _concrete = tag.Value;
                     break;
                 case "Beam Type":         _beamType    = tag.Value; break;
                 case "RC Catalog":         _beamCatalog = tag.Value; break; // Backward-compatible legacy field name.
@@ -515,6 +538,8 @@ namespace Menegroth.GH.Components
             writer.SetString("Steel",       _steel);
             writer.SetString("ColumnType",    _columnType);
             writer.SetString("ColumnCatalog", _columnCatalog);
+            writer.SetString("ColumnConcrete", _columnConcrete);
+            writer.SetString("ColumnSizingStrategy", _columnSizingStrategy);
             writer.SetString("BeamType",    _beamType);
             writer.SetString("BeamCatalog", _beamCatalog);
             writer.SetString("OptimizeFor", _optimizeFor);
@@ -538,6 +563,8 @@ namespace Menegroth.GH.Components
             if (reader.ItemExists("Steel"))        _steel       = reader.GetString("Steel");
             if (reader.ItemExists("ColumnType"))     _columnType    = reader.GetString("ColumnType");
             if (reader.ItemExists("ColumnCatalog"))  _columnCatalog = reader.GetString("ColumnCatalog");
+            if (reader.ItemExists("ColumnConcrete")) _columnConcrete = reader.GetString("ColumnConcrete");
+            if (reader.ItemExists("ColumnSizingStrategy")) _columnSizingStrategy = reader.GetString("ColumnSizingStrategy");
             if (reader.ItemExists("BeamType"))     _beamType    = reader.GetString("BeamType");
             if (reader.ItemExists("BeamCatalog"))  _beamCatalog = reader.GetString("BeamCatalog");
             if (reader.ItemExists("OptimizeFor"))  _optimizeFor = reader.GetString("OptimizeFor");
@@ -672,10 +699,12 @@ namespace Menegroth.GH.Components
                 DeflectionLimit = _deflLimit,
                 PunchingStrategy = _punchStrat,
                 Concrete        = _concrete,
+                ColumnConcrete  = _columnConcrete,
                 Rebar           = _rebar,
                 Steel           = _steel,
                 ColumnType      = _columnType,
                 ColumnCatalog   = _columnCatalog,
+                ColumnSizingStrategy = _columnSizingStrategy,
                 BeamType        = _beamType,
                 BeamCatalog     = _beamCatalog,
                 OptimizeFor     = _optimizeFor,
@@ -724,14 +753,20 @@ namespace Menegroth.GH.Components
                 sb.Append("  Vault λ: ").AppendLine(p.VaultLambda.Value.ToString("F2"));
 
             sb.Append("Columns: ").Append(LabelForColumnTypeSummary(p))
-              .Append(" (").Append(p.ColumnType).Append(ColumnTypeUsesCatalog(p.ColumnType) ? " / " + (p.ColumnCatalog ?? (p.ColumnType?.StartsWith("steel_") == true ? "preferred" : "standard")) : "").AppendLine(")");
+              .Append(" (").Append(p.ColumnType).Append(ColumnTypeUsesCatalog(p.ColumnType) ? " / " + (p.ColumnCatalog ?? (p.ColumnType?.StartsWith("steel_") == true ? "preferred" : "standard")) : "").Append(")");
+            sb.Append(", sizing=").Append(p.ColumnSizingStrategy ?? "discrete");
+            sb.Append(", concrete=").Append(LabelFor(Concretes, p.ColumnConcrete ?? "NWC_6000"));
+            sb.Append(" (").Append(p.ColumnConcrete ?? "NWC_6000").AppendLine(")");
+
             sb.Append("Beams: ").Append(LabelFor(BeamTypes, p.BeamType))
               .Append(" (").Append(p.BeamType).Append(")");
             sb.Append(" | Catalog: ").Append(LabelFor(BeamCatalogs, p.BeamCatalog))
-              .Append(" (").Append(p.BeamCatalog).AppendLine(")");
-            sb.Append("Materials: ").Append(LabelFor(Concretes, p.Concrete)).Append(" (").Append(p.Concrete).Append(")");
-            sb.Append(", ").Append(LabelFor(Rebars, p.Rebar)).Append(" (").Append(p.Rebar).Append(")");
-            sb.Append(", ").Append(LabelFor(Steels, p.Steel)).Append(" (").Append(p.Steel).AppendLine(")");
+              .Append(" (").Append(p.BeamCatalog).Append(")");
+            sb.Append(" | Steel: ").Append(LabelFor(Steels, p.Steel))
+              .Append(" (").Append(p.Steel).AppendLine(")");
+
+            sb.Append("Slabs: Concrete=").Append(LabelFor(Concretes, p.Concrete)).Append(" (").Append(p.Concrete).Append(")");
+            sb.Append(", Rebar=").Append(LabelFor(Rebars, p.Rebar)).Append(" (").Append(p.Rebar).AppendLine(")");
 
             sb.Append("Loads (psf): Floor LL ").Append(p.FloorLL.ToString("F0"));
             sb.Append(", Roof LL ").Append(p.RoofLL.ToString("F0"));
@@ -931,6 +966,7 @@ namespace Menegroth.GH.Components
             public static readonly HashSet<string> DeflectionLimits = ToSet(DesignParams.DeflLimits);
             public static readonly HashSet<string> PunchStrategies = ToSet(DesignParams.PunchStrategies);
             public static readonly HashSet<string> ColumnTypes = ToSet(DesignParams.ColumnTypes);
+            public static readonly HashSet<string> SizingStrategies = ToSet(DesignParams.SizingStrategies);
             public static readonly HashSet<string> BeamTypes = ToSet(DesignParams.BeamTypes);
             public static readonly HashSet<string> SteelColumnCatalogs = ToSet(DesignParams.SteelColumnCatalogs);
             public static readonly HashSet<string> RCRectColumnCatalogs = ToSet(DesignParams.RCRectColumnCatalogs);

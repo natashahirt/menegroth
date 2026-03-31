@@ -19,11 +19,13 @@ mutable struct DesignCache
     last_design::Union{BuildingDesign, Nothing}
     last_diagnose::Union{Dict{String, Any}, Nothing}
     diagnose_design_id::UInt64
+    """JSON dict of the last APIParams used, for incremental patching in run_design."""
+    last_api_params_json::Dict{String, Any}
     lock::ReentrantLock
 end
 
 """Create an empty `DesignCache` with no stored geometry or results."""
-DesignCache() = DesignCache("", nothing, nothing, nothing, nothing, nothing, UInt64(0), ReentrantLock())
+DesignCache() = DesignCache("", nothing, nothing, nothing, nothing, nothing, UInt64(0), Dict{String, Any}(), ReentrantLock())
 
 """Thread-safe read from the design cache."""
 function with_cache_read(f, cache::DesignCache)

@@ -1752,6 +1752,15 @@ function agent_response_guidelines()::Dict{String, Any}
             "Interpreting 0.0 deflection/punching ratios on non-converged slabs as real results. " *
                 "A non-converged slab never completed its design checks — its ratios are default placeholders. " *
                 "Always flag non-convergence explicitly and explain the failure_reason, not the 0.0 ratio.",
+            "Using the CLARIFY block for suggested follow-ups. " *
+                "WRONG: emitting a CLARIFY block with options like 'Ask about results', 'Let me know what to focus on'. " *
+                "Those are SUGGESTIONS, not clarifications. The CLARIFY block is ONLY for genuine blocking ambiguity " *
+                "where you cannot proceed without the user's choice. Suggested next actions go in the SUGGESTIONS block.",
+            "Comparing the latest run against run 1 instead of the immediately previous run. " *
+                "After run N, compare_designs should use index_a=N-1, index_b=N (previous vs latest). " *
+                "WRONG: comparing run 3 against run 1 and attributing all improvement to the last parameter change. " *
+                "If run 2 had a geometry change and run 3 had a parameter change, comparing 3 vs 1 conflates both. " *
+                "Always compare adjacent runs unless the user explicitly asks for a different comparison.",
         ],
 
         # ── Geometry Rules ────────────────────────────────────────────────

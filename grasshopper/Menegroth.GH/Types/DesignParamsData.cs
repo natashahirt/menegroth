@@ -29,6 +29,8 @@ namespace Menegroth.GH.Types
 
         // Materials
         public string Concrete { get; set; } = "NWC_4000";
+        /// <summary>Column concrete (independent of slab concrete). Default NWC_6000 per API.</summary>
+        public string ColumnConcrete { get; set; } = "NWC_6000";
         public string Rebar { get; set; } = "Rebar_60";
         public string Steel { get; set; } = "A992";
 
@@ -94,6 +96,7 @@ namespace Menegroth.GH.Types
                 MaxIterations             = MaxIterations,
                 FeaTargetEdgeM            = FeaTargetEdgeM,
                 Concrete                  = Concrete,
+                ColumnConcrete            = ColumnConcrete,
                 Rebar                     = Rebar,
                 Steel                     = Steel,
                 ColumnType                = ColumnType,
@@ -151,6 +154,7 @@ namespace Menegroth.GH.Types
                 ["materials"] = new JObject
                 {
                     ["concrete"] = Concrete,
+                    ["column_concrete"] = ColumnConcrete ?? "NWC_6000",
                     ["rebar"] = Rebar,
                     ["steel"] = Steel
                 },
@@ -307,6 +311,7 @@ namespace Menegroth.GH.Types
             if (patch.TryGetValue("materials", out var matToken) && matToken is JObject mat)
             {
                 if (mat.TryGetValue("concrete", out var c)) Concrete = c.ToString();
+                if (mat.TryGetValue("column_concrete", out var colc)) ColumnConcrete = colc.ToString();
                 if (mat.TryGetValue("rebar", out var r)) Rebar = r.ToString();
                 if (mat.TryGetValue("steel", out var s)) Steel = s.ToString();
             }

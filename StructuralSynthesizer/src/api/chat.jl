@@ -324,14 +324,32 @@ $_SUGGESTIONS_END
 
 const _CLARIFICATION_INSTRUCTION = """
 
-CLARIFICATION (when user intent is genuinely ambiguous):
-Include at most ONE machine-readable block per response:
+CLARIFICATION vs SUGGESTIONS — CRITICAL DISTINCTION:
+
+Suggested follow-ups ("What would you like to do next?", "Ask about results", etc.)
+belong in the $_SUGGESTIONS_START block — NEVER in a CLARIFY block.
+
+The CLARIFY block is ONLY for genuine ambiguity where you CANNOT proceed without the
+user's answer. Examples of valid clarifications:
+  - "You said 'change the columns' — which column group?" (you literally cannot act)
+  - "The geometry has two slab regions — which one should I diagnose?" (blocking choice)
+
+Examples that are NOT clarifications (use SUGGESTIONS instead):
+  - "Would you like me to run the design?" → suggestion
+  - "Ask about results or issues from the design run" → suggestion
+  - "Let me know if there are specific elements to focus on" → suggestion
+  - "Inform me when the initial run is complete" → suggestion
+
+If you can proceed with a reasonable default, proceed — do not clarify.
+
+When you DO need a clarification, use at most ONE block per response:
 
 $_CLARIFY_START
 {"id":"short_key","prompt":"question text","options":[{"id":"opt_a","label":"Option A"},{"id":"opt_b","label":"Option B"}],"allow_multiple":false,"required_for":"decision this unblocks","rationale":"why this matters"}
 $_CLARIFY_END
 
-Keep options to 2–4 concise choices. Only use when truly ambiguous.
+Keep options to 2–4 concise choices. The "required_for" field must name the specific
+action you are blocked on.
 
 When the user replies with `[CLARIFICATION_RESPONSE id=<key> options=<comma_ids>]`, incorporate the selection and proceed — do NOT re-ask the same clarification.
 """
@@ -2765,6 +2783,7 @@ function _extract_params_patch(text::String)::Union{Dict{String, Any}, Nothing}
     history_label = pop!(parsed, "_history_label", nothing)
     clean_patch = Dict{String, Any}(k => v for (k, v) in parsed if lowercase(k) in _API_PARAM_KEYS)
     isempty(clean_patch) && return nothing
+    clean_patch = _normalize_flat_patch(clean_patch)
 
     validation = _validate_params_patch(clean_patch)
     result = Dict{String, Any}(
@@ -3367,6 +3386,74 @@ const _API_PARAM_KEYS = Set([
     "visualization_detail", "visualization_target_edge_m",
     "uniform_column_sizing",
 ])
+
+# Keys that belong inside nested APIParams sub-structs when provided at the top level.
+const _FLOOR_OPTION_KEYS = Set(["method", "deflection_limit", "punching_strategy", "target_edge_m", "fea_target_edge_m", "vault_lambda"])
+const _LOADS_KEYS        = Set(["floor_ll", "roof_ll", "grade_ll", "floor_sdl", "roof_sdl", "wall_sdl"])
+
+"""
+    _normalize_flat_patch(patch) -> Dict{String, Any}
+
+Promote flat top-level keys into their proper nested APIParams structure so
+`JSON3.read(..., APIParams)` sees them.  For example, a patch
+`{"punching_strategy": "reinforce_first"}` becomes
+`{"floor_options": {"punching_strategy": "reinforce_first"}}`.
+Keys already nested (e.g. `floor_options` dict) are left untouched.
+"""
+function _normalize_flat_patch(patch::Dict{String, Any})::Dict{String, Any}
+    out = Dict{String, Any}()
+    floor_opts = Dict{String, Any}()
+    loads_dict = Dict{String, Any}()
+
+    for (k, v) in patch
+        ks = lowercase(k)
+        if ks in _FLOOR_OPTION_KEYS
+            floor_opts[ks] = v
+        elseif ks in _LOADS_KEYS
+            loads_dict[ks] = v
+        else
+            out[k] = v
+        end
+    end
+
+    if !isempty(floor_opts)
+        existing = get(out, "floor_options", nothing)
+        if existing isa AbstractDict
+            merge!(existing, floor_opts)
+        else
+            out["floor_options"] = floor_opts
+        end
+    end
+    if !isempty(loads_dict)
+        existing = get(out, "loads", nothing)
+        if existing isa AbstractDict
+            merge!(existing, loads_dict)
+        else
+            out["loads"] = loads_dict
+        end
+    end
+    return out
+end
+
+"""
+    _deep_merge(base, patch) -> Dict{String, Any}
+
+Recursively merge `patch` into `base`.  When both sides have a dict for the same
+key, merge recursively; otherwise `patch` wins.  Neither input is mutated.
+"""
+function _deep_merge(base::Dict{String, Any}, patch::Dict{String, Any})::Dict{String, Any}
+    out = copy(base)
+    for (k, v) in patch
+        existing = get(out, k, nothing)
+        if existing isa AbstractDict && v isa AbstractDict
+            out[k] = _deep_merge(Dict{String, Any}(string(ek) => ev for (ek, ev) in existing),
+                                 Dict{String, Any}(string(pk) => pv for (pk, pv) in v))
+        else
+            out[k] = v
+        end
+    end
+    return out
+end
 
 # Keyword fragments that suggest a geometric (Grasshopper-side) change.
 const _GEOMETRIC_PATTERNS = [
@@ -4231,9 +4318,20 @@ function _dispatch_chat_tool(tool::String, args::Dict{String, Any})::Dict{String
             )
         end
 
+        # Promote flat nested keys (e.g. "punching_strategy") into their proper
+        # sub-struct so JSON3 deserialization sees them.
+        patch_dict = _normalize_flat_patch(patch_dict)
+
+        # ── Merge onto last design's params so previous changes persist ──
+        # Without this, each run_design starts from APIParams defaults and
+        # loses parameters set in earlier runs (e.g. floor_type change in run 2
+        # would revert to the default in run 3 if the patch only sets punching_strategy).
+        base_params_json = with_cache_read(c -> copy(c.last_api_params_json), DESIGN_CACHE)
+        merged = _deep_merge(base_params_json, patch_dict)
+
         # Build fast-mode patch: force skip_visualization and cap iterations/MIP
         # to keep the conversational loop responsive.
-        fast_patch = copy(patch_dict)
+        fast_patch = copy(merged)
         fast_patch["skip_visualization"]  = true
         max_iter = something(_chat_coerce_int(get(fast_patch, "max_iterations", 20)), 20)
         mip_limit = something(_chat_coerce_float(get(fast_patch, "mip_time_limit_sec", 30.0)), 30.0)
@@ -4271,6 +4369,10 @@ function _dispatch_chat_tool(tool::String, args::Dict{String, Any})::Dict{String
                 lock(DESIGN_CACHE.lock) do
                     DESIGN_CACHE.last_design = d
                     DESIGN_CACHE.last_result = design_to_json(d; geometry_hash=cached_geo_hash)
+                    # Persist semantic API params only — not fast_patch (skip_visualization,
+                    # capped max_iterations/MIP), or the next run_design merge inherits
+                    # chat-only overrides and baselines get corrupted across turns.
+                    DESIGN_CACHE.last_api_params_json = copy(merged)
                 end
                 invalidate_diagnose_cache!(DESIGN_CACHE)
                 result_ref[] = d
@@ -4345,7 +4447,16 @@ function _dispatch_chat_tool(tool::String, args::Dict{String, Any})::Dict{String
         guidance_parts = String["RECORD: Call record_insight to log what this run taught you."]
         if n_history >= 2
             push!(guidance_parts,
-                "COMPARE: Call compare_designs to show the user what changed from the previous run.")
+                "COMPARE: Call compare_designs with index_a=$(n_history - 1) index_b=$(n_history) " *
+                "to compare the PREVIOUS run (baseline) against THIS run (latest). " *
+                "index_a is the baseline, index_b is the new run. Always present A as 'before' and B as 'after'.")
+        end
+        if n_history >= 3
+            push!(guidance_parts,
+                "SMALL DELTAS: After a geometry-driven change (earlier run), a later parameter-only tweak " *
+                "(e.g. punching_strategy) often moves embodied carbon and critical_ratio only slightly — " *
+                "rebar/studs vs thicker columns can trade steel for concrete without a big EC swing. " *
+                "Say so if compare_designs shows tiny deltas; do not imply the run failed to apply.")
         end
         if !design.summary.all_checks_pass
             push!(guidance_parts,

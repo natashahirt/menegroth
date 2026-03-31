@@ -56,6 +56,8 @@ namespace Menegroth.GH.Components
         private string _pendingError = "";
         private string _pendingGeoHash = "";
         private string _pendingParamsHash = "";
+        /// <summary>Previous Run input — used to detect a new Run pulse vs Grasshopper recompute with Run held true.</summary>
+        private bool _prevRunWire;
 
         // ─── Status log ─────────────────────────────────────────────────
         private readonly object _logLock = new object();
@@ -200,6 +202,7 @@ namespace Menegroth.GH.Components
             _lastReport = "";
             _lastReportUnitsOverride = null;
             _lastComputeTime = 0;
+            _prevRunWire = false;
             lock (_logLock) { _statusLog.Clear(); _waitStatusLine = null; }
             Message = "Cache cleared";
             ExpireSolution(true);
@@ -328,6 +331,9 @@ namespace Menegroth.GH.Components
             if (MenegrothConfig.TryConsumeDesignRunRequest())
                 run = true;
 
+            bool runEdge = run && !_prevRunWire;
+            _prevRunWire = run;
+
             string url = string.IsNullOrWhiteSpace(urlInput) ? _serverUrl : urlInput;
             _serverUrl = url;
             MenegrothConfig.LastServerUrl = url;
@@ -421,6 +427,13 @@ namespace Menegroth.GH.Components
             // model uses keys we do not map, or the wire already matched the last run while a patch was pending.
             if (geoHash == _lastGeoHash && paramsHash == _lastParamsHash && _lastParsed != null && !hadAssistantPatch)
             {
+                if (runEdge)
+                {
+                    var docCache = OnPingDocument();
+                    AppendLog(docCache,
+                        "Same geometry and parameters as the last completed Run — no request sent to the server (not a new design run).");
+                }
+
                 // If report units changed, re-fetch report in background
                 if (_reportUnitsOverride != _lastReportUnitsOverride)
                 {

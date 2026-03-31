@@ -388,10 +388,11 @@ function agent_current_params(design::BuildingDesign)::Dict{String, Any}
 
     ctx = _diagnose_design_context(params, du; design=design)
 
-    ctx["optimize_for"]    = string(params.optimize_for)
-    ctx["max_iterations"]  = params.max_iterations
-    ctx["fire_rating"]     = params.fire_rating
-    ctx["pattern_loading"] = string(params.pattern_loading)
+    ctx["optimize_for"]            = string(params.optimize_for)
+    ctx["max_iterations"]          = params.max_iterations
+    ctx["fire_rating"]             = params.fire_rating
+    ctx["pattern_loading"]         = string(params.pattern_loading)
+    ctx["uniform_column_sizing"]   = string(params.uniform_column_sizing)
 
     # Material details (use cascade resolvers; Concrete uses `fc′`, not `fc`)
     mats = params.materials
@@ -1129,7 +1130,7 @@ function agent_suggest_next_action(design::BuildingDesign, goal::String)::Dict{S
         "fix_failures"          => ["punching_strategy", "deflection_limit", "column_catalog", "beam_catalog"],
         "reduce_column_size"    => ["punching_strategy", "column_catalog"],
         "reduce_slab_thickness" => ["deflection_limit"],
-        "reduce_ec"             => ["punching_strategy", "deflection_limit"],
+        "reduce_ec"             => ["punching_strategy", "deflection_limit", "uniform_column_sizing"],
     )
 
     # deflection_limit is a secondary lever — geometric changes (shorter spans,
@@ -1229,8 +1230,10 @@ function agent_suggest_next_action(design::BuildingDesign, goal::String)::Dict{S
         "subdividing bays) in Grasshopper is the primary lever — deflection scales with L⁴. " *
         "Relaxing deflection_limit (L/360→L/240) is a secondary, optional measure only if " *
         "the project can tolerate more deflection and has no sensitive partitions/equipment. " *
-        "Present geometry changes first, then mention deflection_limit relaxation as " *
-        "an additional option the user may consider."
+        "If uniform_column_sizing is per_story or building, switching to off (independent " *
+        "sizing) eliminates excess material in lightly-loaded columns — a quick parameter win. " *
+        "Present geometry changes first, then mention deflection_limit relaxation and " *
+        "uniform_column_sizing=off as additional options the user may consider."
     else
         "NEXT STEP: Call validate_params before run_design to test recommended parameter changes."
     end
@@ -1674,6 +1677,8 @@ function agent_response_guidelines()::Dict{String, Any}
                  "sequence" => "suggest_next_action(goal=reduce_ec) → prioritize geometric changes (shorter spans, " *
                                "added columns) as the PRIMARY lever for reducing slab concrete volume. " *
                                "Deflection limit relaxation is SECONDARY. " *
+                               "If uniform_column_sizing is per_story/building, switching to off removes excess " *
+                               "column material (quick parameter win). " *
                                "run_experiment on critical elements to quantify savings → validate_params → run_design"),
             Dict("intent" => "Try changing X (global parameter change)",
                  "sequence" => "run_experiment first for instant preview → validate_params → run_design → compare_designs"),

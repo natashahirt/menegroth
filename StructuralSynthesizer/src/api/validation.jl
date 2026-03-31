@@ -279,6 +279,16 @@ function validate_input(input::APIInput)
         _push_enum!(errors, "column_catalog", p.column_catalog, API_RC_CIRCULAR_COLUMN_CATALOGS)
     end
 
+    # ─── Uniform column sizing ─────────────────────────────────────────────
+    ucs = lowercase(strip(p.uniform_column_sizing))
+    if !(ucs in API_UNIFORM_COLUMN_SIZING)
+        _push_enum!(errors, "uniform_column_sizing", p.uniform_column_sizing, API_UNIFORM_COLUMN_SIZING)
+    end
+    if ucs != "off" && p.column_type == "pixelframe"
+        _push_compat!(errors, "uniform_column_sizing", p.uniform_column_sizing,
+            "uniform_column_sizing \"$(p.uniform_column_sizing)\" is not supported with pixelframe columns.")
+    end
+
     if !(p.beam_type in API_BEAM_TYPES)
         _push_enum!(errors, "beam_type", p.beam_type, API_BEAM_TYPES)
     end

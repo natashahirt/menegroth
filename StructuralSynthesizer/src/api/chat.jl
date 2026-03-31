@@ -423,6 +423,7 @@ STRUCTURAL REASONING — DO NOT HALLUCINATE TRADE-OFFS:
     - Higher f'c increases Vc in isolation BUT the column sizer may pick SMALLER columns (less area for axial), shrinking b₀ → may NET-WORSEN punching. Always caveat.
     - grow_columns directly increases b₀ (most reliable punching fix). reinforce_first adds studs but does NOT grow columns — different mechanism.
     - For slab thickness / deflection / embodied carbon: GEOMETRY FIRST. Reducing spans (adding columns, subdividing bays) is the primary lever (deflection ∝ L⁴). Relaxing deflection_limit (L/360→L/240) is a secondary, optional suggestion — only mention it as an additional option if the project can tolerate more deflection and has no sensitive partitions or equipment.
+    - uniform_column_sizing = off (independent sizing) is an embodied-carbon reduction strategy: each column is right-sized to its own demand. per_story/building promote every column to the governing (largest) section, adding unnecessary material to lightly-loaded columns. Mention this trade-off when the user asks about reducing carbon or material use.
   If uncertain about a directional effect, call predict_geometry_effect or run a micro-experiment. Do not guess.
 
 SERVER CACHE GATES:
@@ -490,6 +491,7 @@ STRUCTURAL REASONING — DO NOT HALLUCINATE TRADE-OFFS:
     - Higher f'c increases Vc in isolation BUT the column sizer may pick SMALLER columns, shrinking b₀ → may NET-WORSEN punching. Always caveat.
     - grow_columns directly increases b₀ (most reliable punching fix). reinforce_first adds studs but does NOT grow columns — different mechanism.
     - For slab thickness / deflection / embodied carbon: GEOMETRY FIRST. Reducing spans (adding columns, subdividing bays) is the primary lever (deflection ∝ L⁴). Relaxing deflection_limit (L/360→L/240) is a secondary, optional suggestion — only mention it as an additional option if the project can tolerate more deflection and has no sensitive partitions or equipment.
+    - uniform_column_sizing = off (independent sizing) is an embodied-carbon reduction strategy: each column is right-sized to its own demand. per_story/building promote every column to the governing (largest) section, adding unnecessary material to lightly-loaded columns. Mention this trade-off when the user asks about reducing carbon or material use.
   If uncertain about a directional effect, call predict_geometry_effect or run a micro-experiment. Do not guess.
 
 GEOMETRY vs PARAMETERS:
@@ -3319,6 +3321,7 @@ const _API_PARAM_KEYS = Set([
     "optimize_for", "size_foundations", "foundation_soil", "foundation_concrete",
     "foundation_strategy", "mat_coverage_threshold", "unit_system",
     "visualization_detail", "visualization_target_edge_m",
+    "uniform_column_sizing",
 ])
 
 # Keyword fragments that suggest a geometric (Grasshopper-side) change.
@@ -3419,6 +3422,20 @@ function _validate_params_patch(patch::Dict{String, Any})::Dict{String, Any}
                     end
                 end
             end
+        end
+    end
+
+    # 4. uniform_column_sizing + pixelframe compatibility
+    # Only check when both fields are present in the patch; if column_type is not
+    # in the patch we can't know the current type — full API validation catches it.
+    ucs = get(patch, "uniform_column_sizing", nothing)
+    if !isnothing(ucs) && lowercase(string(ucs)) != "off" && !isnothing(column_type)
+        if column_type == "pixelframe"
+            push!(violations, Dict{String, Any}(
+                "field" => "uniform_column_sizing", "value" => ucs,
+                "constraint" => "compatibility",
+                "message" => "uniform_column_sizing \"$ucs\" is not supported with pixelframe columns.",
+            ))
         end
     end
 
@@ -3550,6 +3567,19 @@ const _NO_DESIGN_HINT   = "No solved design on the server yet. Run Design from G
 const _NO_GEOMETRY_HINT = "Server-cached geometry comes from a Grasshopper Design run (POST /design). If a digest is in the prompt, you can still advise on geometry changes via predict_geometry_effect — but run_design and get_building_summary require server geometry."
 const CHAT_AUTOWAIT_TIMEOUT_S = 90.0
 
+"""
+Upper bound for POST /chat blocking on an in-flight `POST /design` (e.g. Grasshopper).
+Uses SSE heartbeats so clients show progress; default matches the Grasshopper poll horizon (~1 h).
+Override with env `CHAT_PRE_CHAT_DESIGN_WAIT_TIMEOUT_S` (positive seconds).
+"""
+function _pre_chat_design_wait_timeout_s()::Float64
+    s = strip(get(ENV, "CHAT_PRE_CHAT_DESIGN_WAIT_TIMEOUT_S", ""))
+    isempty(s) && return 3600.0
+    v = tryparse(Float64, s)
+    (isnothing(v) || !isfinite(v) || v <= 0.0) && return 3600.0
+    return v
+end
+
 # Tools that should prefer waiting for an in-flight design to finish so they
 # return the freshest cached result set rather than stale data.
 const _TOOLS_REQUIRE_FRESH_DESIGN = Set([
@@ -3581,6 +3611,42 @@ end
 """Wait for the async design loop to return to idle."""
 function _wait_until_server_idle(; timeout_s::Float64=CHAT_AUTOWAIT_TIMEOUT_S)::Symbol
     timedwait(() -> status_string(SERVER_STATUS) == "idle", timeout_s; pollint=1.0)
+end
+
+"""
+Wait until `SERVER_STATUS` is idle, emitting periodic SSE `design_wait` events so the
+client connection stays alive and the UI can show that chat is blocked on the design job.
+
+Returns `:ok` or `:timed_out`.
+"""
+function _wait_until_server_idle_sse!(
+    stream::HTTP.Stream;
+    timeout_s::Float64,
+    heartbeat_s::Float64=15.0,
+    pollint::Float64=1.0,
+)::Symbol
+    t0 = time()
+    last_hb = t0
+    while status_string(SERVER_STATUS) != "idle"
+        now = time()
+        if now - t0 >= timeout_s
+            return :timed_out
+        end
+        if now - last_hb >= heartbeat_s
+            elapsed = round(Int, now - t0)
+            payload = Dict{String, Any}(
+                "type"          => "design_wait",
+                "phase"         => "polling",
+                "message"       => "Waiting for the in-flight design run to finish…",
+                "elapsed_s"     => elapsed,
+                "server_status" => status_string(SERVER_STATUS),
+            )
+            write(stream, "data: $(JSON3.write(payload))\n\n")
+            last_hb = now
+        end
+        sleep(pollint)
+    end
+    return :ok
 end
 
 """Infer coordinate-unit string for chat quick-check runs from cached context."""
@@ -4294,7 +4360,13 @@ Phases include: `opening` (immediate “why you’re waiting”), `start`, `skel
 `initialize`, `initialize_done`, `digest`, `digest_done`, `cache_hit_structure`, `cache_hit_digest`,
 `fallback`, `error`, `complete`.
 Each line may include `message`, `elapsed_ms`, `geometry_hash_prefix`, `cached`, and counts
-(`n_cells`, etc.). The assistant token stream follows the same format as before (`token`, summary, `[DONE]`).
+(`n_cells`, etc.).
+
+**Design completion wait (SSE):** If a full design (`POST /design`, e.g. Grasshopper) is in progress
+when `/chat` is called, the handler opens the event stream immediately and emits `type:"design_wait"`
+(`phase:"start"` then periodic `phase:"polling"` with `elapsed_s`) until the server is `idle`, then
+`type:"design_ready"`, then the usual `token` / `agent_turn_summary` / `[DONE]` stream. Timeout: env
+`CHAT_PRE_CHAT_DESIGN_WAIT_TIMEOUT_S` (default 3600 s).
 """
 function register_chat_routes!()
 
@@ -4352,35 +4424,59 @@ function register_chat_routes!()
             return
         end
 
-        # If a run is in progress, wait briefly so the interface can respond
-        # automatically once the design completes instead of forcing manual retry.
+        sse_started = false
+        wait_timeout_s = _pre_chat_design_wait_timeout_s()
+
+        # If a full design is in progress, open SSE immediately and wait (with heartbeats) so the
+        # client stays connected and the assistant can respond as soon as the run finishes.
         if status_string(SERVER_STATUS) != "idle"
-            wait_state = _wait_until_server_idle()
+            HTTP.setstatus(stream, 200)
+            HTTP.setheader(stream, "Content-Type"  => "text/event-stream")
+            HTTP.setheader(stream, "Cache-Control" => "no-cache")
+            HTTP.setheader(stream, "Connection"    => "keep-alive")
+            startwrite(stream)
+            sse_started = true
+            write(stream, "data: $(JSON3.write(Dict{String, Any}(
+                "type"          => "design_wait",
+                "phase"         => "start",
+                "message"       => "A design run is in progress. Chat will continue automatically when it finishes.",
+                "server_status" => status_string(SERVER_STATUS),
+                "timeout_s"     => round(Int, wait_timeout_s),
+            )))\n\n")
+            wait_state = _wait_until_server_idle_sse!(stream; timeout_s=wait_timeout_s)
             if wait_state == :timed_out
-                HTTP.setstatus(stream, 200)
-                HTTP.setheader(stream, "Content-Type"  => "text/event-stream")
-                HTTP.setheader(stream, "Cache-Control" => "no-cache")
-                HTTP.setheader(stream, "Connection"    => "keep-alive")
-                startwrite(stream)
                 write(stream, "data: $(JSON3.write(Dict(
                     "error"          => "design_still_running",
-                    "message"        => "Design run is still in progress. Chat will respond once the run completes.",
-                    "recovery_hint"  => "Retry shortly, or poll GET /status until idle.",
+                    "message"        => "Design run did not finish within $(Int(wait_timeout_s)) s. Chat stopped waiting.",
+                    "recovery_hint"  => "Retry after GET /status is idle, or increase CHAT_PRE_CHAT_DESIGN_WAIT_TIMEOUT_S.",
                 )))\n\n")
                 write(stream, "data: [DONE]\n\n")
                 return
             end
+            write(stream, "data: $(JSON3.write(Dict{String, Any}(
+                "type"    => "design_ready",
+                "message" => "Design run finished. Generating the assistant response…",
+            )))\n\n")
         end
 
         if mode == "results" && isnothing(_get_last_design())
-            HTTP.setstatus(stream, 404)
-            HTTP.setheader(stream, "Content-Type" => "application/json")
-            startwrite(stream)
-            write(stream, JSON3.write(Dict(
-                "error"          => "no_design",
-                "message"        => "No design results available. Run a design first.",
-                "recovery_hint"  => "Run a design from Grasshopper before opening Results Assistant.",
-            )))
+            if sse_started
+                write(stream, "data: $(JSON3.write(Dict(
+                    "error"          => "no_design",
+                    "message"        => "No design results available after the run completed.",
+                    "recovery_hint"  => "Run a successful design from Grasshopper before opening Results Assistant.",
+                )))\n\n")
+                write(stream, "data: [DONE]\n\n")
+            else
+                HTTP.setstatus(stream, 404)
+                HTTP.setheader(stream, "Content-Type" => "application/json")
+                startwrite(stream)
+                write(stream, JSON3.write(Dict(
+                    "error"          => "no_design",
+                    "message"        => "No design results available. Run a design first.",
+                    "recovery_hint"  => "Run a design from Grasshopper before opening Results Assistant.",
+                )))
+            end
             return
         end
 
@@ -4413,11 +4509,14 @@ function register_chat_routes!()
         # BuildingStructure + digest run (can take tens of seconds on large models).
         early_sse_geo = !isnothing(structured_geo)
         if early_sse_geo
-            HTTP.setstatus(stream, 200)
-            HTTP.setheader(stream, "Content-Type"  => "text/event-stream")
-            HTTP.setheader(stream, "Cache-Control" => "no-cache")
-            HTTP.setheader(stream, "Connection"    => "keep-alive")
-            startwrite(stream)
+            if !sse_started
+                HTTP.setstatus(stream, 200)
+                HTTP.setheader(stream, "Content-Type"  => "text/event-stream")
+                HTTP.setheader(stream, "Cache-Control" => "no-cache")
+                HTTP.setheader(stream, "Connection"    => "keep-alive")
+                startwrite(stream)
+                sse_started = true
+            end
             _chat_geometry_sse_emit!(
                 stream, "opening";
                 message = "Loading your building geometry for the assistant — larger models can take a little while.",
@@ -4428,7 +4527,7 @@ function register_chat_routes!()
         system_prompt = _build_system_prompt(mode, params_json, geometry_summary, client_geometry_hash, structured_geo)
         budgeted      = _budget_messages(system_prompt, messages, MAX_CONTEXT_TOKENS)
 
-        if !early_sse_geo
+        if !early_sse_geo && !sse_started
             HTTP.setstatus(stream, 200)
             HTTP.setheader(stream, "Content-Type"  => "text/event-stream")
             HTTP.setheader(stream, "Cache-Control" => "no-cache")

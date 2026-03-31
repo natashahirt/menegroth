@@ -177,6 +177,7 @@ function _resolve_punching_inputs(design::BuildingDesign, col_idx::Int)
     cover = 0.75u"inch"
     bar_d = 0.5u"inch"
 
+    # First slab with a thickness (typical single-slab buildings; multi-slab is rare in this path).
     orig_h = nothing
     for (_, slab) in design.slabs
         if !isnothing(slab.thickness)
@@ -194,11 +195,8 @@ function _resolve_punching_inputs(design::BuildingDesign, col_idx::Int)
     position = _resolve_column_position(design, col_idx)
     shape = _resolve_column_shape(design, col_idx)
 
-    Mub = if hasproperty(punching, :Mub) && !isnothing(punching.Mub)
-        punching.Mub
-    else
-        abs(col_result.Mu_x)
-    end
+    # PunchingDesignResult does not store Mub; use |Mu_x| from the column result as unbalanced-moment proxy.
+    Mub = abs(col_result.Mu_x)
 
     return (
         col_result = col_result,
@@ -246,12 +244,23 @@ function experiment_punching(
     new_c2 = isnothing(c2_in) ? inp.orig_c2 : c2_in * u"inch"
     new_h  = isnothing(h_in)  ? inp.orig_h  : h_in * u"inch"
     d = new_h - inp.cover - inp.bar_d
+    if ustrip(u"inch", d) <= 0
+        return Dict{String, Any}(
+            "error" => "invalid_slab_thickness",
+            "message" => "Effective depth d = h − cover − bar_d must be positive. " *
+                "Got h ≈ $(round(ustrip(u"inch", new_h); digits=2)) in.",
+        )
+    end
 
-    # Concrete strength override: build a new Concrete with ACI Ec = 57000√f'c
+    # Concrete strength override: build a new Concrete with ACI Ec = 57000√f'c (ACI 318-11 §8.5.1)
     orig_fc = inp.fc
     fc = if !isnothing(fc_in)
+        fc_in ≤ 0 && return Dict{String, Any}(
+            "error" => "invalid_fc_in",
+            "message" => "fc_in must be positive (psi). Got: $fc_in",
+        )
         fc_new = fc_in * u"psi"
-        Ec_new = 57000 * sqrt(fc_in) * u"psi"  # ACI 318-11 §8.5.1
+        Ec_new = 57000 * sqrt(fc_in) * u"psi"
         StructuralSizer.Concrete(Ec_new, fc_new, 2380.0u"kg/m^3", 0.20, 0.138).fc′
     else
         orig_fc
@@ -693,9 +702,9 @@ end
 """
     experiment_beam(design, beam_idx; section_size) -> Dict
 
-Test a steel beam against its cached demands with a different W-shape section,
-using the real AISC checker via `explain_feasibility`.  Returns original vs
-modified ratios plus all individual check results (flexure, shear, LTB, etc.).
+Steel W-shapes only: test cached demands against a different AISC W section via
+`explain_feasibility`. Returns original vs modified ratios and per-check results.
+Non-steel beams respond with `beam_not_steel_w`.
 """
 function experiment_beam(
     design::BuildingDesign,
@@ -717,6 +726,16 @@ function experiment_beam(
         "error" => "invalid_section_size",
         "message" => "section_size must be a non-empty W-shape designation string.",
     )
+
+    sec0 = beam.section_obj
+    if isnothing(sec0) || !(sec0 isa StructuralSizer.ISymmSection)
+        return Dict{String, Any}(
+            "error" => "beam_not_steel_w",
+            "message" => "Beam experiment supports AISC W-shapes (rolled steel) only. " *
+                (isnothing(sec0) ? "This beam has no section assigned in the cached design." :
+                 "Got section type $(nameof(typeof(sec0))) — use run_design for RC or other systems."),
+        )
+    end
 
     new_section = try
         StructuralSizer.W(uppercase(size_str))
@@ -743,10 +762,10 @@ function experiment_beam(
         struc.beams[beam_idx] : nothing
 
     L  = !isnothing(beam_member) ? member_length(beam_member) : 20.0u"ft"
-    Lb = !isnothing(beam_member) && hasproperty(beam_member.base, :Lb) ? beam_member.base.Lb : L
-    Kx = !isnothing(beam_member) && hasproperty(beam_member.base, :Kx) ? beam_member.base.Kx : 1.0
-    Ky = !isnothing(beam_member) && hasproperty(beam_member.base, :Ky) ? beam_member.base.Ky : 1.0
-    Cb = !isnothing(beam_member) && hasproperty(beam_member.base, :Cb) ? beam_member.base.Cb : 1.0
+    Lb = !isnothing(beam_member) ? beam_member.base.Lb : L
+    Kx = !isnothing(beam_member) ? beam_member.base.Kx : 1.0
+    Ky = !isnothing(beam_member) ? beam_member.base.Ky : 1.0
+    Cb = !isnothing(beam_member) ? beam_member.base.Cb : 1.0
     geom = StructuralSizer.SteelMemberGeometry(L; Lb=Lb, Cb=Cb, Kx=Kx, Ky=Ky)
 
     Mux_Nm = StructuralSizer.to_newton_meters(beam.Mu)
@@ -849,6 +868,15 @@ function experiment_punching_reinforcement(
     inp = _resolve_punching_inputs(design, col_idx)
     inp isa Dict && return inp
 
+    rt_key = lowercase(strip(reinforcement_type))
+    if rt_key ∉ ("studs", "stud", "stirrups", "stirrup")
+        return Dict{String, Any}(
+            "error" => "invalid_reinforcement_type",
+            "message" => "reinforcement_type must be \"studs\" or \"stirrups\". Got: $(repr(reinforcement_type))",
+        )
+    end
+    use_stirrups = rt_key in ("stirrups", "stirrup")
+
     d = inp.d_orig
     fc = inp.fc
     position = inp.position
@@ -887,7 +915,7 @@ function experiment_punching_reinforcement(
         "Vu (factored shear)", "Mub (unbalanced moment)", "column position ($(position))",
     ]
 
-    if lowercase(reinforcement_type) == "stirrups"
+    if use_stirrups
         bs = isnothing(bar_size) ? 4 : bar_size
         fyt = isnothing(fyt_psi) ? 60_000.0u"psi" : fyt_psi * u"psi"
 
@@ -912,7 +940,7 @@ function experiment_punching_reinforcement(
             note = "Column dimensions unchanged — this tests capacity-side improvement only (adds Vs to Vc).",
         )
 
-        return Dict{String, Any}(
+        out_st = Dict{String, Any}(
             "experiment" => "punching_reinforcement",
             "experimental_setup" => setup,
             "column_idx" => col_idx,
@@ -938,10 +966,18 @@ function experiment_punching_reinforcement(
                 "fyt_psi" => round(ustrip(u"psi", fyt); digits=0),
                 "vs_psi" => round(ustrip(u"psi", design_result.vs); digits=1),
                 "vcs_psi" => round(ustrip(u"psi", design_result.vcs); digits=1),
+                "outer_ok" => design_result.outer_ok,
             ),
             "improved" => reinforced_check.ratio < unreinforced_ratio,
             "delta_ratio" => round(reinforced_check.ratio - unreinforced_ratio; digits=3),
         )
+        if !design_result.required || design_result.n_legs == 0
+            out_st["note"] = "Stirrups were not required by the design routine, or layout is empty — " *
+                "demand may be within φVc or exceed code limits for closed stirrups."
+        elseif !isfinite(reinforced_check.ratio)
+            out_st["note"] = "Reinforced check ratio is not finite — verify demand vs ACI limits for stirrup-reinforced punching."
+        end
+        return out_st
     else  # studs (default)
         sd = isnothing(stud_diameter_in) ? 0.5u"inch" : stud_diameter_in * u"inch"
         fyt = isnothing(fyt_psi) ? 51_000.0u"psi" : fyt_psi * u"psi"
@@ -967,7 +1003,7 @@ function experiment_punching_reinforcement(
             note = "Column dimensions unchanged — this tests capacity-side improvement only (adds Vs to Vc).",
         )
 
-        return Dict{String, Any}(
+        out_sd = Dict{String, Any}(
             "experiment" => "punching_reinforcement",
             "experimental_setup" => setup,
             "column_idx" => col_idx,
@@ -993,10 +1029,17 @@ function experiment_punching_reinforcement(
                 "fyt_psi" => round(ustrip(u"psi", fyt); digits=0),
                 "vs_psi" => round(ustrip(u"psi", design_result.vs); digits=1),
                 "vcs_psi" => round(ustrip(u"psi", design_result.vcs); digits=1),
+                "outer_ok" => design_result.outer_ok,
             ),
             "improved" => reinforced_check.ratio < unreinforced_ratio,
             "delta_ratio" => round(reinforced_check.ratio - unreinforced_ratio; digits=3),
         )
+        if !design_result.required || design_result.n_rails == 0
+            out_sd["note"] = "Studs were not laid out (n_rails = 0) — demand may exceed code limits for headed stud reinforcement, or φVc already suffices."
+        elseif !isfinite(reinforced_check.ratio)
+            out_sd["note"] = "Reinforced check ratio is not finite — verify demand vs ACI stress limits for stud-reinforced punching."
+        end
+        return out_sd
     end
 end
 
@@ -1269,9 +1312,9 @@ function list_experiments()::Dict{String, Any}
             ),
             Dict{String, Any}(
                 "name" => "beam",
-                "description" => "Test a steel beam against its cached demands with a different W-shape. " *
+                "description" => "Steel beams only: test cached Mu/Vu against a different AISC W-shape. " *
                     "Uses full AISC checker (flexure, shear, LTB, etc.). " *
-                    "Returns original/modified ratios and all individual check results.",
+                    "RC or other section types return beam_not_steel_w — use run_design for those.",
                 "args" => Dict(
                     "beam_idx" => "required Int — beam index from diagnose",
                     "section_size" => "required String — W-shape designation (e.g. \"W16X40\")",

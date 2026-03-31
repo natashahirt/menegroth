@@ -78,6 +78,7 @@ function api_input_schema()
                     "target_edge_m" => "Optional. FEA mesh target edge length (m). Default: adaptive clamp(min_span/20, 0.15, 0.75). Used when method is FEA.",
                     "vault_lambda" => "Optional vault span/rise ratio (dimensionless, > 0). Used when floor_type is vault.",
                 ),
+                "uniform_column_sizing" => "$(join(API_UNIFORM_COLUMN_SIZING, " | ")). Default: off (independent sizing — lowest material / embodied carbon). per_story: all columns on a story match the governing size (constructability). building: single governing size for the whole structure.",
                 "visualization_target_edge_m" => "Optional. Visualization shell mesh target edge (m). Default: inherits from FEA target_edge when method is FEA, else adaptive. Coarser = faster viz.",
                 "skip_visualization" => "When true, skip shell mesh build and visualization serialization (faster response, frame-only). Default: false.",
                 "visualization_detail" => "minimal | full. minimal = frame elements + slab boundaries only (no deflected meshes, no per-face analytical). full = full visualization. Default: full.",
@@ -366,6 +367,17 @@ function api_params_schema_structured()
                 "mat_coverage_threshold" => Dict("type" => "number", "default" => 0.5, "range" => [0.0, 1.0],
                     "guidance" => "When auto strategy, switch from spread to mat when footing coverage > this fraction of plan area."),
             ),
+        ),
+        "uniform_column_sizing" => Dict(
+            "type" => "enum", "default" => "off",
+            "allowed" => collect(API_UNIFORM_COLUMN_SIZING),
+            "guidance" => "off: each column sized independently (default) — minimises material by right-sizing each column to its own demand; " *
+                         "this is an effective embodied-carbon reduction strategy because uniform sizing promotes every column to the governing (largest) size, " *
+                         "adding unnecessary concrete/steel to lightly-loaded columns. " *
+                         "per_story: all columns on the same story use the governing (largest) size — common for constructability and formwork reuse. " *
+                         "building: every column in the structure matches the single governing size — simplest to construct but highest material use. " *
+                         "Harmonization is conservative (bigger column only improves capacity). " *
+                         "Not supported for pixelframe columns.",
         ),
         "geometry_is_centerline" => Dict(
             "type" => "boolean", "default" => false,
@@ -777,6 +789,7 @@ Base.@kwdef mutable struct APIParams
     foundation_concrete::String = "NWC_3000"
     foundation_options::Union{APIFoundationOptions, Nothing} = nothing
     scoped_overrides::Vector{APIScopedOverride} = APIScopedOverride[]
+    uniform_column_sizing::String = "off"  # off | per_story | building. Force uniform column sizes.
     geometry_is_centerline::Bool = false
     visualization_target_edge_m::Union{Float64, Nothing} = nothing  # Viz shell mesh target edge (m). Default: FEA or adaptive.
     skip_visualization::Bool = false  # Skip shell mesh + viz serialization for faster response.

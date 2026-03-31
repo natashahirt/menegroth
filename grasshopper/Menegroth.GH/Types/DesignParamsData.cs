@@ -63,6 +63,8 @@ namespace Menegroth.GH.Types
         // Design targets
         public double FireRating { get; set; } = 0;
         public string OptimizeFor { get; set; } = "weight";
+        /// <summary>off | per_story | building. Force uniform column sizes within each group.</summary>
+        public string UniformColumnSizing { get; set; } = "off";
         public bool SizeFoundations { get; set; } = true;
         public string FoundationSoil { get; set; } = "medium_sand";
         public string FoundationConcrete { get; set; } = "NWC_3000";
@@ -111,6 +113,7 @@ namespace Menegroth.GH.Types
                 PixelFrameFcResolutionKsi = PixelFrameFcResolutionKsi,
                 FireRating                = FireRating,
                 OptimizeFor               = OptimizeFor,
+                UniformColumnSizing       = UniformColumnSizing,
                 SizeFoundations           = SizeFoundations,
                 FoundationSoil            = FoundationSoil,
                 FoundationConcrete        = FoundationConcrete,
@@ -207,6 +210,7 @@ namespace Menegroth.GH.Types
                     : null,
                 ["fire_rating"] = FireRating,
                 ["optimize_for"] = OptimizeFor,
+                ["uniform_column_sizing"] = UniformColumnSizing ?? "off",
                 ["size_foundations"] = SizeFoundations,
                 ["foundation_soil"] = FoundationSoil,
                 ["foundation_concrete"] = FoundationConcrete,
@@ -275,6 +279,7 @@ namespace Menegroth.GH.Types
             if (patch.TryGetValue("beam_sizing_strategy", out var bss)) BeamSizingStrategy = bss.ToString();
             if (patch.TryGetValue("fire_rating", out var fr)) FireRating = (double)fr;
             if (patch.TryGetValue("optimize_for", out var of)) OptimizeFor = of.ToString();
+            if (patch.TryGetValue("uniform_column_sizing", out var ucs)) UniformColumnSizing = ucs.ToString();
             if (patch.TryGetValue("max_iterations", out var mi)) MaxIterations = mi.Type == JTokenType.Null ? null : (int?)mi;
             if (patch.TryGetValue("size_foundations", out var sf)) SizeFoundations = (bool)sf;
             if (patch.TryGetValue("foundation_soil", out var fs)) FoundationSoil = fs.ToString();

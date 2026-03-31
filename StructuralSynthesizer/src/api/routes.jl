@@ -212,6 +212,7 @@ function register_routes!()
                 "GET /diagnose" => "High-resolution agent diagnostic JSON: per-element checks with demand/capacity, governing_check, levers, embodied carbon, plus architectural narrative and lever impact estimates. ?units=imperial|metric",
                 "POST /chat" => "LLM chat endpoint (SSE streaming). Body: {mode, messages, params?, geometry_summary?, building_geometry? (same JSON as POST /design geometry, without params), geometry? (alias), session_id?, client_geometry_hash?}. " *
                     "When building_geometry is present, the server derives the same geometry hash as POST /design (params excluded) and injects GEOMETRY_CONTEXT (aligned_with_server, geometry_stale) into the system prompt; client_geometry_hash is optional when structured geometry is sent. " *
+                    "If POST /design is in progress, SSE begins with {type:\"design_wait\", phase:\"start\"|\"polling\", message, elapsed_s?, server_status?} until idle, then {type:\"design_ready\"} (wait up to CHAT_PRE_CHAT_DESIGN_WAIT_TIMEOUT_S, default 3600 s). " *
                     "SSE events: {token:string}, " *
                     "{type:\"agent_turn_summary\", suggested_next_questions:string[], clarification_prompt?:{id,prompt,options:[{id,label}],allow_multiple,rationale?,required_for?}, tool_actions?:[{tool,status,elapsed_ms?,summary?}]}, " *
                     "error events: {error:string, message:string, recovery_hint:string}, " *

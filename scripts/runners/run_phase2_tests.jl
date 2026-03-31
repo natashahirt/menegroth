@@ -214,6 +214,28 @@ println("═"^60)
         end
     end
 
+    # =========================================================================
+    # 5. DesignParameters.uniform_column_sizing field
+    # =========================================================================
+    @testset "DesignParameters — uniform_column_sizing field" begin
+        using StructuralSynthesizer
+
+        @testset "default is :off" begin
+            p = DesignParameters()
+            @test p.uniform_column_sizing === :off
+        end
+
+        @testset "can set to :per_story" begin
+            p = DesignParameters(uniform_column_sizing=:per_story)
+            @test p.uniform_column_sizing === :per_story
+        end
+
+        @testset "can set to :building" begin
+            p = DesignParameters(uniform_column_sizing=:building)
+            @test p.uniform_column_sizing === :building
+        end
+    end
+
 end
 
 println("\n✓ All Phase 2 tests passed!")

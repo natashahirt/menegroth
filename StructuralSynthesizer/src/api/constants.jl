@@ -67,5 +67,8 @@ const API_UNIT_SYSTEMS = ("imperial", "metric")
 """Accepted API visualization detail strings."""
 const API_VISUALIZATION_DETAILS = ("minimal", "full")
 
+"""Accepted uniform_column_sizing modes."""
+const API_UNIFORM_COLUMN_SIZING = ("off", "per_story", "building")
+
 """Return comma-separated documentation string for accepted string constants."""
 _accepted_doc(values::Tuple) = join(values, ", ")

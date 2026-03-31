@@ -888,7 +888,7 @@ const TOOL_REGISTRY = [
             "type" => Dict(
                 "type" => "string", "required" => true,
                 "enum" => ["punching", "pm_column", "beam", "punching_reinforcement", "deflection", "catalog_screen"],
-                "description" => "Experiment type. punching: test column/slab size or concrete strength on punching shear. pm_column: test a different column section. beam: test a different beam W-shape. punching_reinforcement: design studs/stirrups for a failing column. deflection: test a different L/N limit. catalog_screen: screen multiple candidate sections.",
+                "description" => "Experiment type. punching: test column/slab size or concrete strength on punching shear. pm_column: test a different column section. beam: steel W-shapes only — alternate AISC section vs cached Mu/Vu. punching_reinforcement: design studs/stirrups for a failing column. deflection: test a different L/N limit. catalog_screen: screen multiple candidate sections.",
             ),
             "args" => Dict(
                 "type" => "object", "required" => true,
@@ -900,7 +900,7 @@ const TOOL_REGISTRY = [
                     ),
                     "beam_idx" => Dict(
                         "type" => "integer",
-                        "description" => "Beam index (from diagnose). Required for: beam.",
+                        "description" => "Beam index (from diagnose). Required for: beam (steel W-shapes only; RC beams error with beam_not_steel_w).",
                     ),
                     "slab_idx" => Dict(
                         "type" => "integer",

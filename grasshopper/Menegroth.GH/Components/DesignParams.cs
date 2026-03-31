@@ -49,6 +49,7 @@ namespace Menegroth.GH.Components
         private string _beamCatalog = "large";
         private string _optimizeFor = "weight";
         private string _fireRating = "0";
+        private string _uniformColumnSizing = "off";
         private bool _sizeFoundations = true;
         private string _foundationSoil = "medium_sand";
         private string _foundationType = "auto";
@@ -184,6 +185,13 @@ namespace Menegroth.GH.Components
             new("2 hour",   "2"),
             new("3 hour",   "3"),
             new("4 hour",   "4"),
+        };
+
+        private static readonly Choice[] UniformColumnSizingModes =
+        {
+            new("Off (independent)",    "off"),
+            new("Per Story (uniform)",  "per_story"),
+            new("Whole Building",       "building"),
         };
 
         private static readonly Choice[] SoilTypes =
@@ -370,8 +378,9 @@ namespace Menegroth.GH.Components
 
             // ── Design Options ▸ ──
             var designMenu = Menu_AppendItem(menu, "Design Options");
-            AddSubChoices(designMenu, "Optimize For", Objectives,  _optimizeFor);
-            AddSubChoices(designMenu, "Fire Rating",  FireRatings, _fireRating);
+            AddSubChoices(designMenu, "Optimize For",           Objectives,               _optimizeFor);
+            AddSubChoices(designMenu, "Fire Rating",            FireRatings,               _fireRating);
+            AddSubChoices(designMenu, "Uniform Column Sizing",  UniformColumnSizingModes,  _uniformColumnSizing);
 
             Menu_AppendSeparator(menu);
 
@@ -483,9 +492,10 @@ namespace Menegroth.GH.Components
                 case "Beam Type":         _beamType    = tag.Value; break;
                 case "RC Catalog":         _beamCatalog = tag.Value; break; // Backward-compatible legacy field name.
                 case "Beam Catalog":       _beamCatalog = tag.Value; break;
-                case "Optimize For":      _optimizeFor = tag.Value; break;
-                case "Fire Rating":       _fireRating  = tag.Value; break;
-                case "Soil Type":         _foundationSoil = tag.Value; break;
+                case "Optimize For":           _optimizeFor         = tag.Value; break;
+                case "Fire Rating":            _fireRating          = tag.Value; break;
+                case "Uniform Column Sizing":  _uniformColumnSizing = tag.Value; break;
+                case "Soil Type":              _foundationSoil      = tag.Value; break;
                 case "Foundation Type":   _foundationType = tag.Value; break;
             }
 
@@ -509,6 +519,7 @@ namespace Menegroth.GH.Components
             writer.SetString("BeamCatalog", _beamCatalog);
             writer.SetString("OptimizeFor", _optimizeFor);
             writer.SetString("FireRating",  _fireRating);
+            writer.SetString("UniformColumnSizing", _uniformColumnSizing);
             writer.SetBoolean("SizeFoundations", _sizeFoundations);
             writer.SetString("FoundationSoil", _foundationSoil);
             writer.SetString("FoundationType", _foundationType);
@@ -531,6 +542,7 @@ namespace Menegroth.GH.Components
             if (reader.ItemExists("BeamCatalog"))  _beamCatalog = reader.GetString("BeamCatalog");
             if (reader.ItemExists("OptimizeFor"))  _optimizeFor = reader.GetString("OptimizeFor");
             if (reader.ItemExists("FireRating"))   _fireRating  = reader.GetString("FireRating");
+            if (reader.ItemExists("UniformColumnSizing")) _uniformColumnSizing = reader.GetString("UniformColumnSizing");
             if (reader.ItemExists("SizeFoundations")) _sizeFoundations = reader.GetBoolean("SizeFoundations");
             if (reader.ItemExists("FoundationSoil"))  _foundationSoil  = reader.GetString("FoundationSoil");
             if (reader.ItemExists("FoundationType"))
@@ -610,6 +622,12 @@ namespace Menegroth.GH.Components
                     errors.Add($"{floorLabel} requires reinforced concrete beams. {beamLabel} is not supported.");
             }
 
+            var ucs = (p.UniformColumnSizing ?? "off").ToLowerInvariant();
+            if (ucs != "off" && colType == "pixelframe")
+            {
+                errors.Add($"Uniform column sizing \"{p.UniformColumnSizing}\" is not supported with PixelFrame columns.");
+            }
+
             return errors;
         }
 
@@ -661,6 +679,7 @@ namespace Menegroth.GH.Components
                 BeamType        = _beamType,
                 BeamCatalog     = _beamCatalog,
                 OptimizeFor     = _optimizeFor,
+                UniformColumnSizing = _uniformColumnSizing,
                 SizeFoundations = _sizeFoundations,
                 FoundationSoil  = _foundationSoil,
                 FoundationStrategy = _foundationType,
@@ -723,7 +742,9 @@ namespace Menegroth.GH.Components
             var fireLabel = LabelFor(FireRatings,
                 p.FireRating.ToString(System.Globalization.CultureInfo.InvariantCulture));
             sb.Append("Design: Optimize for ").Append(LabelFor(Objectives, p.OptimizeFor)).Append(" (").Append(p.OptimizeFor).Append(")");
-            sb.Append(" | Fire rating: ").Append(fireLabel).Append(" (").Append(p.FireRating.ToString("F1")).Append(" hr)").AppendLine();
+            sb.Append(" | Fire rating: ").Append(fireLabel).Append(" (").Append(p.FireRating.ToString("F1")).Append(" hr)");
+            var ucsLabel = LabelFor(UniformColumnSizingModes, p.UniformColumnSizing ?? "off");
+            sb.Append(" | Column uniformity: ").Append(ucsLabel).Append(" (").Append(p.UniformColumnSizing ?? "off").Append(")").AppendLine();
 
             if (p.SizeFoundations)
             {
@@ -919,6 +940,7 @@ namespace Menegroth.GH.Components
             public static readonly HashSet<string> Rebars = ToSet(DesignParams.Rebars);
             public static readonly HashSet<string> Steels = ToSet(DesignParams.Steels);
             public static readonly HashSet<string> Objectives = ToSet(DesignParams.Objectives);
+            public static readonly HashSet<string> UniformColumnSizingModes = ToSet(DesignParams.UniformColumnSizingModes);
             public static readonly HashSet<string> SoilTypes = ToSet(DesignParams.SoilTypes);
             public static readonly HashSet<string> UnitSystems = ToSet(DesignParams.UnitSystems);
 

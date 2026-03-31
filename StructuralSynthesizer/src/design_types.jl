@@ -385,7 +385,23 @@ Base.@kwdef mutable struct DesignParameters
     # When true, detect collinear beams (sharing a node with aligned direction)
     # and assign them the same group_id before sizing. Forces the optimizer to
     # assign the same section to all members along a continuous line.
+    # NOTE: This is orthogonal to `uniform_column_sizing` — collinear_grouping
+    # operates on beam-line continuity in plan, not column uniformity per story.
     collinear_grouping::Bool = false
+    
+    # ─── Uniform Column Sizing ───
+    # :off      — each column sized independently (default). Minimises material
+    #             and embodied carbon by right-sizing each column to its own demand.
+    # :per_story — all columns on the same story get the governing (largest) size.
+    #              Common for constructability / formwork reuse, but adds material
+    #              to lightly-loaded columns.
+    # :building  — every column in the structure gets the governing size. Simplest
+    #              to construct but highest material use.
+    # Harmonization is conservative: the largest required section in each group
+    # is promoted to all siblings (safe because a bigger column only improves
+    # axial/punching capacity vs what was already checked).
+    # Not supported for PixelFrame columns (rejected at API validation).
+    uniform_column_sizing::Symbol = :off
     
     # ─── Design Targets ───
     deflection_limit::Symbol = :L_360        # :L_240, :L_360, :L_480

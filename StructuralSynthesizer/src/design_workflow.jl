@@ -205,7 +205,7 @@ function build_pipeline(params::DesignParameters;
     if !isnothing(params.foundation_options)
         push!(stages, PipelineStage(struc -> begin
             StructuralSizer.emit!(tc, :pipeline, "build_pipeline", "stage_3_foundations", :enter)
-            _size_foundations!(struc, params.foundation_options; tc=tc)
+            _size_foundations!(struc, params.foundation_options)
             StructuralSizer.emit!(tc, :pipeline, "build_pipeline", "stage_3_foundations", :exit)
         end, false))
     end
@@ -361,6 +361,14 @@ function design_building(struc::BuildingStructure, params::DesignParameters;
     for stage in build_pipeline(params; tc=tc)
         stage.fn(struc)
         stage.needs_sync && sync_asap!(struc; params=params)
+    end
+
+    # Uniform column harmonization (after all sizing stages, before capture)
+    if params.uniform_column_sizing !== :off
+        n_harmonized = harmonize_uniform_column_sizes!(struc, params)
+        if n_harmonized > 0
+            sync_asap!(struc; params=params)
+        end
     end
     t_pipeline = time() - t0
     
@@ -550,6 +558,189 @@ function _reconcile_columns!(struc::BuildingStructure, params::DesignParameters)
     end
 
     return (struc = struc, n_reconciled = grew, synced = synced)
+end
+
+# =============================================================================
+# Uniform Column Size Harmonization
+# =============================================================================
+
+"""
+    harmonize_uniform_column_sizes!(struc, params) -> Int
+
+Post-pipeline pass that promotes column sizes within each uniformity group to
+the governing (largest) member.  Groups are defined by `params.uniform_column_sizing`:
+
+- `:per_story` — one group per `Column.story`
+- `:building`  — single group for all columns
+
+Returns the number of columns that were enlarged.
+
+**Conservative guarantee:** A larger column never degrades axial, flexural, or
+punching capacity vs the individually-sized result — only improves it.
+
+For **RC columns** (`c1`/`c2` dimensions), the maximum `c1` and `c2` within
+each group are propagated.  For **steel columns** (catalog sections), the
+section with the largest cross-sectional area is propagated.  After
+propagation, ASAP element sections and structural offsets are refreshed.
+"""
+function harmonize_uniform_column_sizes!(struc::BuildingStructure, params::DesignParameters)
+    mode = params.uniform_column_sizing
+    mode === :off && return 0
+
+    columns = struc.columns
+    isempty(columns) && return 0
+
+    # --- Build groups: story → indices (or single group for :building) ---
+    groups = Dict{Int, Vector{Int}}()
+    for (i, col) in enumerate(columns)
+        key = mode === :building ? 0 : col.story
+        push!(get!(Vector{Int}, groups, key), i)
+    end
+
+    col_opts = params.columns
+    is_steel = col_opts isa StructuralSizer.SteelColumnOptions
+
+    changed = 0
+
+    for (_, indices) in groups
+        length(indices) <= 1 && continue
+
+        if is_steel
+            changed += _harmonize_steel_group!(struc, indices)
+        else
+            changed += _harmonize_rc_group!(struc, params, indices)
+        end
+    end
+
+    if changed > 0
+        update_structural_offsets!(struc; input_is_centerline=params.geometry_is_centerline)
+        if struc.asap_model.processed
+            Asap.update!(struc.asap_model; values_only=true)
+            Asap.solve!(struc.asap_model)
+        end
+        @info "Uniform column harmonization: $changed columns enlarged" mode=string(mode)
+    end
+
+    return changed
+end
+
+"""Promote RC columns in `indices` to max(c1) × max(c2). Returns count of enlarged columns."""
+function _harmonize_rc_group!(struc::BuildingStructure, params::DesignParameters, indices::Vector{Int})
+    columns = struc.columns
+    cols = [columns[i] for i in indices]
+
+    sized = filter(c -> !isnothing(c.c1) && !isnothing(c.c2), cols)
+    isempty(sized) && return 0
+
+    gov_c1 = maximum(c.c1 for c in sized)
+    gov_c2 = maximum(c.c2 for c in sized)
+
+    # Resolve concrete properties for ASAP section
+    conc = resolve_column_concrete(params.materials)
+    E_Pa  = ustrip(u"Pa", conc.E)
+    ν_c   = conc.ν
+    G_Pa  = E_Pa / (2.0 * (1.0 + ν_c))
+    ρ_kg  = ustrip(u"kg/m^3", conc.ρ)
+    I_factor = params.column_I_factor
+
+    changed = 0
+    for i in indices
+        col = columns[i]
+        (isnothing(col.c1) || isnothing(col.c2)) && continue
+        col.c1 == gov_c1 && col.c2 == gov_c2 && continue
+
+        col.c1 = gov_c1
+        col.c2 = gov_c2
+        changed += 1
+
+        # Rebuild nominal RC section for visualization
+        if col.shape == :circular
+            set_section!(col, StructuralSizer.RCCircularSection(
+                D = col.c1, bar_size = 8, n_bars = 6))
+        else
+            set_section!(col, StructuralSizer.RCColumnSection(
+                b = col.c1, h = col.c2, bar_size = 8, n_bars = 4))
+        end
+
+        # Rebuild ASAP element section
+        b_m = ustrip(u"m", col.c1)
+        h_m = ustrip(u"m", col.c2)
+        asap_sec = if col.shape == :circular
+            D_m = b_m
+            A = π * D_m^2 / 4
+            I = π * D_m^4 / 64
+            J = π * D_m^4 / 32
+            Asap.Section(
+                A * u"m^2", E_Pa * u"Pa", G_Pa * u"Pa",
+                I_factor * I * u"m^4", I_factor * I * u"m^4",
+                I_factor * J * u"m^4", ρ_kg * u"kg/m^3")
+        else
+            A    = b_m * h_m
+            Ig_x = b_m * h_m^3 / 12
+            Ig_y = h_m * b_m^3 / 12
+            a_dim = max(b_m, h_m); b_dim = min(b_m, h_m)
+            β = 1/3 - 0.21 * (b_dim / a_dim) * (1 - (b_dim / a_dim)^4 / 12)
+            Asap.Section(
+                A * u"m^2", E_Pa * u"Pa", G_Pa * u"Pa",
+                I_factor * Ig_x * u"m^4", I_factor * Ig_y * u"m^4",
+                I_factor * β * a_dim * b_dim^3 * u"m^4", ρ_kg * u"kg/m^3")
+        end
+
+        for seg_idx in segment_indices(col)
+            edge_idx = struc.segments[seg_idx].edge_idx
+            (edge_idx < 1 || edge_idx > length(struc.asap_model.elements)) && continue
+            struc.asap_model.elements[edge_idx].section = asap_sec
+        end
+    end
+
+    return changed
+end
+
+"""Promote steel columns in `indices` to the heaviest section. Returns count of changed columns."""
+function _harmonize_steel_group!(struc::BuildingStructure, indices::Vector{Int})
+    columns = struc.columns
+
+    # Find governing section (largest cross-sectional area)
+    gov_sec = nothing
+    gov_area = -Inf
+    gov_vols = nothing
+    for i in indices
+        sec = section(columns[i])
+        isnothing(sec) && continue
+        a = ustrip(u"m^2", StructuralSizer.section_area(sec))
+        if a > gov_area
+            gov_area = a
+            gov_sec = sec
+            gov_vols = volumes(columns[i])
+        end
+    end
+    isnothing(gov_sec) && return 0
+
+    gov_mat_key = (isnothing(gov_vols) || isempty(gov_vols)) ?
+        StructuralSizer.A992_Steel : first(keys(gov_vols))
+    asap_sec = StructuralSizer.to_asap_section(gov_sec, gov_mat_key)
+
+    changed = 0
+    for i in indices
+        col = columns[i]
+        sec = section(col)
+        isnothing(sec) && continue
+        sec === gov_sec && continue
+        a = ustrip(u"m^2", StructuralSizer.section_area(sec))
+        a >= gov_area && continue
+
+        set_section!(col, gov_sec)
+        !isnothing(gov_vols) && !isempty(gov_vols) && set_volumes!(col, copy(gov_vols))
+        changed += 1
+
+        for seg_idx in segment_indices(col)
+            edge_idx = struc.segments[seg_idx].edge_idx
+            (edge_idx < 1 || edge_idx > length(struc.asap_model.elements)) && continue
+            struc.asap_model.elements[edge_idx].section = asap_sec
+        end
+    end
+
+    return changed
 end
 
 """
@@ -764,19 +955,12 @@ end
 Uses the strategy-aware `size_foundations!` pipeline so that
 `fp.options.strategy` (:mat, :all_spread, :all_strip, :auto, :auto_strip_spread) is respected.
 """
-function _size_foundations!(
-    struc::BuildingStructure,
-    fp::FoundationParameters;
-    tc::Union{Nothing, StructuralSizer.TraceCollector} = nothing,
-)
+function _size_foundations!(struc::BuildingStructure, fp::FoundationParameters)
     initialize_supports!(struc)
     if isempty(struc.supports)
         @warn "Skipping foundation sizing: no supports found. Ensure support vertices are at grade."
         return
     end
-    StructuralSizer.emit!(tc, :workflow, "_size_foundations!", "", :enter;
-                          strategy=string(fp.options.strategy),
-                          code=string(fp.options.code))
     size_foundations!(struc;
         soil = fp.soil,
         opts = fp.options,
@@ -785,11 +969,7 @@ function _size_foundations!(
         rebar = fp.rebar,
         pier_width = fp.pier_width,
         min_depth = fp.min_depth,
-        tc = tc,
     )
-    StructuralSizer.emit!(tc, :workflow, "_size_foundations!", "", :exit;
-                          n_foundations=length(struc.foundations),
-                          n_groups=length(struc.foundation_groups))
 end
 
 """Extract column axial demands into pre-allocated buffer (zero-alloc)."""

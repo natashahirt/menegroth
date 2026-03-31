@@ -180,6 +180,13 @@ namespace Menegroth.GH.Helpers
                 errors.Add($"Invalid fire rating {prms.FireRating}. Options: 0, 1, 1.5, 2, 3, 4");
             if (!V.Objectives.Contains(prms.OptimizeFor))
                 errors.Add($"Invalid optimize_for \"{prms.OptimizeFor}\". Options: weight, carbon, cost");
+
+            var ucs = (prms.UniformColumnSizing ?? "off").ToLowerInvariant();
+            if (!V.UniformColumnSizingModes.Contains(ucs))
+                errors.Add($"Invalid uniform_column_sizing \"{prms.UniformColumnSizing}\". Options: off, per_story, building");
+            if (ucs != "off" && colType == "pixelframe")
+                errors.Add($"uniform_column_sizing \"{prms.UniformColumnSizing}\" is not supported with pixelframe columns.");
+
             if (!V.UnitSystems.Contains(prms.UnitSystem?.ToLowerInvariant() ?? ""))
                 errors.Add($"Invalid unit system \"{prms.UnitSystem}\". Options: imperial, metric");
             if (prms.VaultLambda.HasValue && prms.VaultLambda.Value <= 0)

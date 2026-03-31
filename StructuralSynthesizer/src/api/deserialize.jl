@@ -395,6 +395,8 @@ function json_to_params(api_params::APIParams, coord_unit_str::String="meters")
     display_units_sys = lowercase(api_params.unit_system) == "metric" ? :metric : :imperial
     scoped_overrides = _resolve_scoped_floor_overrides(api_params, coord_unit_str)
 
+    ucs = Symbol(lowercase(strip(api_params.uniform_column_sizing)))
+
     return DesignParameters(
         loads = loads,
         materials = materials,
@@ -406,6 +408,7 @@ function json_to_params(api_params::APIParams, coord_unit_str::String="meters")
         max_iterations = something(api_params.max_iterations, 20),
         foundation_options = foundation_options,
         scoped_floor_overrides = scoped_overrides,
+        uniform_column_sizing = ucs,
         geometry_is_centerline = api_params.geometry_is_centerline,
         display_units = DisplayUnits(display_units_sys),
         visualization_target_edge_m = api_params.visualization_target_edge_m,

@@ -424,6 +424,11 @@ STRUCTURAL REASONING — DO NOT HALLUCINATE TRADE-OFFS:
     - grow_columns directly increases b₀ (most reliable punching fix). reinforce_first adds studs but does NOT grow columns — different mechanism.
     - For slab thickness / deflection / embodied carbon: GEOMETRY FIRST. Reducing spans (adding columns, subdividing bays) is the primary lever (deflection ∝ L⁴). Relaxing deflection_limit (L/360→L/240) is a secondary, optional suggestion — only mention it as an additional option if the project can tolerate more deflection and has no sensitive partitions or equipment.
     - uniform_column_sizing = off (independent sizing) is an embodied-carbon reduction strategy: each column is right-sized to its own demand. per_story/building promote every column to the governing (largest) section, adding unnecessary material to lightly-loaded columns. Mention this trade-off when the user asks about reducing carbon or material use.
+
+  GRID TOPOLOGY vs SPAN VARIANCE — KEEP THESE CONCEPTS SEPARATE:
+    Grid topology describes whether columns form a rectangular grid (all quad panels) or not (triangulated, offset, skewed). A rectangular grid is always regular — DDM/EFM apply.
+    Span variance describes how much bay sizes differ across the plan. High span variance means some bays are wider than others, producing different tributary loads for same-position columns. This is NORMAL for any rectangular grid with unequal bay spacings — it is NOT a grid irregularity and does NOT affect DDM/EFM applicability. Each column is checked for punching shear with its own actual tributary load.
+    NEVER describe a rectangular grid with variable bay sizes as "irregular." NEVER conflate span variance (different bay sizes) with grid topology (rectangular vs non-rectangular). Only flag grid irregularity when panels are non-orthogonal or non-rectangular.
   If uncertain about a directional effect, call predict_geometry_effect or run a micro-experiment. Do not guess.
 
 SERVER CACHE GATES:
@@ -492,6 +497,11 @@ STRUCTURAL REASONING — DO NOT HALLUCINATE TRADE-OFFS:
     - grow_columns directly increases b₀ (most reliable punching fix). reinforce_first adds studs but does NOT grow columns — different mechanism.
     - For slab thickness / deflection / embodied carbon: GEOMETRY FIRST. Reducing spans (adding columns, subdividing bays) is the primary lever (deflection ∝ L⁴). Relaxing deflection_limit (L/360→L/240) is a secondary, optional suggestion — only mention it as an additional option if the project can tolerate more deflection and has no sensitive partitions or equipment.
     - uniform_column_sizing = off (independent sizing) is an embodied-carbon reduction strategy: each column is right-sized to its own demand. per_story/building promote every column to the governing (largest) section, adding unnecessary material to lightly-loaded columns. Mention this trade-off when the user asks about reducing carbon or material use.
+
+  GRID TOPOLOGY vs SPAN VARIANCE — KEEP THESE CONCEPTS SEPARATE:
+    Grid topology describes whether columns form a rectangular grid (all quad panels) or not (triangulated, offset, skewed). A rectangular grid is always regular — DDM/EFM apply.
+    Span variance describes how much bay sizes differ across the plan. High span variance means some bays are wider than others, producing different tributary loads for same-position columns. This is NORMAL for any rectangular grid with unequal bay spacings — it is NOT a grid irregularity and does NOT affect DDM/EFM applicability. Each column is checked for punching shear with its own actual tributary load.
+    NEVER describe a rectangular grid with variable bay sizes as "irregular." NEVER conflate span variance (different bay sizes) with grid topology (rectangular vs non-rectangular). Only flag grid irregularity when panels are non-orthogonal or non-rectangular.
   If uncertain about a directional effect, call predict_geometry_effect or run a micro-experiment. Do not guess.
 
 GEOMETRY vs PARAMETERS:
@@ -716,7 +726,7 @@ end
 Extract a rich geometry digest from an initialized `BuildingStructure`.
 Includes real structural data: cell spans, slab panels, member lengths,
 column tributary areas with variation metrics, beam spans, story info,
-and grid regularity flags.
+grid topology, and span variance flags.
 
 This replaces the raw-JSON `_chat_structured_geometry_stats` approach with
 data computed by the same pipeline the solver uses.
@@ -876,7 +886,6 @@ function _structure_geometry_digest(struc::BuildingStructure)::Dict{String, Any}
     if !isempty(struc.columns)
         trib_areas_ft2 = Float64[]
         per_column = Dict{String, Any}[]
-        # Group by position for within-class CV (the real irregularity signal)
         by_position = Dict{Symbol, Vector{Float64}}()
         for (i, col) in enumerate(struc.columns)
             At = column_tributary_area(struc, col)
@@ -903,8 +912,6 @@ function _structure_geometry_digest(struc::BuildingStructure)::Dict{String, Any}
             p10 = sorted[max(1, round(Int, 0.1 * length(sorted)))]
             p90 = sorted[min(length(sorted), round(Int, 0.9 * length(sorted)))]
 
-            # Within-position CV: measures true grid irregularity, filtering out the
-            # natural corner/edge/interior variation present in any regular grid.
             within_cvs = Float64[]
             position_stats = Dict{String, Any}()
             for (pos, areas) in by_position
@@ -921,6 +928,17 @@ function _structure_geometry_digest(struc::BuildingStructure)::Dict{String, Any}
             end
             max_within_cv = isempty(within_cvs) ? 0.0 : maximum(within_cvs)
 
+            # Check cell topology: if all cells are quads (4-vertex faces),
+            # the grid is rectangular regardless of tributary area variation.
+            # Variable bay sizes on a rectangular grid produce different
+            # tributary areas for same-position columns — that is normal
+            # geometry, not irregularity (ACI 318 DDM/EFM both handle it).
+            all_cells_quad = all(
+                length(skel.face_vertex_indices[cell.face_idx]) == 4
+                for cell in struc.cells
+                if cell.face_idx >= 1 && cell.face_idx <= length(skel.face_vertex_indices)
+            )
+
             trib_stats = Dict{String, Any}(
                 "count" => length(trib_areas_ft2),
                 "min_ft2" => round(minimum(trib_areas_ft2); digits=1),
@@ -931,33 +949,41 @@ function _structure_geometry_digest(struc::BuildingStructure)::Dict{String, Any}
                 "p10_ft2" => round(p10; digits=1),
                 "p90_ft2" => round(p90; digits=1),
                 "by_position" => position_stats,
+                "all_cells_quad" => all_cells_quad,
             )
 
-            # Irregularity classification uses within-position CV to avoid
-            # flagging the natural 4:2:1 ratio of interior:edge:corner tributaries.
-            regularity = if max_within_cv < 0.15
-                "regular"
+            span_variance = if max_within_cv < 0.15
+                "uniform"
             elseif max_within_cv < 0.30
-                "moderately_irregular"
+                "moderate"
             else
-                "irregular"
+                "high"
             end
-            trib_stats["grid_regularity"] = regularity
-            trib_stats["interpretation"] = if regularity == "regular"
-                "Column tributary areas are consistent within each position class " *
-                "(corner/edge/interior) — grid is regular. DDM assumptions apply."
-            elseif regularity == "moderately_irregular"
-                "Moderate within-position tributary variation (max CV=$(round(max_within_cv; digits=2))). " *
+            trib_stats["grid_topology"] = all_cells_quad ? "rectangular" : "non_rectangular"
+            trib_stats["span_variance"] = span_variance
+            trib_stats["interpretation"] = if all_cells_quad && span_variance == "uniform"
+                "Rectangular grid with uniform bay sizes. " *
+                "Tributary areas are consistent within each position class. DDM/EFM assumptions apply."
+            elseif all_cells_quad
+                "Rectangular grid with variable bay sizes (within-position CV=$(round(max_within_cv; digits=2))). " *
+                "Different bay sizes produce different tributary loads per column — this is normal geometry, " *
+                "not a grid irregularity. DDM/EFM assumptions apply. " *
+                "Punching shear is checked per-column with each column's actual tributary load."
+            elseif span_variance == "uniform"
+                "Non-rectangular grid but tributary areas are consistent within each position class. " *
+                "Consider FEA for non-orthogonal panel geometry."
+            elseif span_variance == "moderate"
+                "Non-rectangular grid with moderate tributary spread (within-position CV=$(round(max_within_cv; digits=2))). " *
                 "Some same-position columns carry different loads — check punching shear. Consider FEA."
             else
-                "Large within-position tributary variation (max CV=$(round(max_within_cv; digits=2))). " *
-                "Grid is irregular — DDM regularity assumptions may not hold. FEA recommended. " *
-                "Punching shear likely governs at high-tributary columns."
+                "Non-rectangular grid with high tributary spread (within-position CV=$(round(max_within_cv; digits=2))). " *
+                "DDM assumptions may not hold for non-orthogonal panels. FEA recommended. " *
+                "Punching shear is checked per-column with each column's actual tributary load."
             end
             result["column_tributaries"] = trib_stats
 
-            if regularity != "regular"
-                push!(flags, "irregular_grid_tributaries ($(regularity), within-position CV=$(round(max_within_cv; digits=2)))")
+            if !all_cells_quad && span_variance != "uniform"
+                push!(flags, "non_rectangular_grid_high_span_variance ($(span_variance), within-position CV=$(round(max_within_cv; digits=2)))")
             end
 
             if length(per_column) <= 40
@@ -1093,7 +1119,9 @@ function _structure_digest_plaintext(d::Dict{String, Any})::String
                 push!(lines, "  $(pos): n=$(ps["count"]), mean=$(ps["mean_ft2"]) ft², CV=$(ps["cv"])")
             end
         end
-        push!(lines, "  Grid regularity: $(ct["grid_regularity"])")
+        topo = get(ct, "grid_topology", nothing)
+        sv = get(ct, "span_variance", nothing)
+        !isnothing(topo) && push!(lines, "  Grid topology: $(topo), span variance: $(sv)")
         interp = get(ct, "interpretation", nothing)
         !isnothing(interp) && push!(lines, "  → $interp")
     end
@@ -1620,7 +1648,7 @@ function _chat_geo_column_grid_analysis(
         nothing
     end
 
-    # Grid regularity: cluster X and Y coordinates independently
+    # Grid topology: cluster X and Y coordinates independently
     xs = sort(unique(round(p[1]; digits=3) for p in col_xy))
     ys = sort(unique(round(p[2]; digits=3) for p in col_xy))
 
@@ -2181,7 +2209,7 @@ end
 Append structured design geometry JSON and/or the optional human Summary line to the system prompt.
 
 Prefers a **structure-based digest** (from `BuildingStructure` → `initialize!`) which provides
-real cell spans, slab panels, member lengths, column tributary areas, and grid regularity analysis.
+real cell spans, slab panels, member lengths, column tributary areas, grid topology, and span variance analysis.
 Falls back to the raw-JSON `_chat_structured_geometry_stats` approach if initialization fails.
 """
 function _append_chat_building_geometry_sections!(

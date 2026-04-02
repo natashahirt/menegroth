@@ -2758,18 +2758,63 @@ end
     _contains_numerical_claims(text) -> Bool
 
 Heuristic check for text that appears to contain specific numerical structural
-claims (ratios, percentages near pass/fail language, utilization values) that
-should have been grounded in tool evidence.
+claims (ratios, percentages near pass/fail language, utilization values, EC
+totals, material quantities, or fabricated comparison deltas) that should have
+been grounded in tool evidence.
 """
 function _contains_numerical_claims(text::AbstractString)::Bool
     isempty(text) && return false
-    # Ratio patterns: "0.85", "1.02", percentage patterns near structural language
     has_ratio = occursin(r"(?:ratio|utilization|DCR)\s*(?:of|=|is|:)\s*\d+\.\d+"i, text)
     has_pct = occursin(r"\d{1,3}(?:\.\d+)?%\s*(?:utilization|capacity|overloaded|stressed)"i, text)
     has_passfail_number = occursin(r"(?:pass|fail|exceed|violat)\w*\s+(?:at|with|by)\s+\d+\.\d+"i, text)
     has_specific_value = occursin(r"(?:φ[PVM]n|ϕ[PVM]n|Vu|Mu|Pu)\s*(?:=|of|is)\s*[\d,]+\.?\d*\s*(?:kip|kN|psi|ksi|MPa)"i, text)
-    return has_ratio || has_pct || has_passfail_number || has_specific_value
+    has_ec = occursin(r"\d[\d,]+\s*(?:kgCO2e|kgCO₂e|kg\s*CO2)"i, text)
+    has_material_qty = occursin(r"\d[\d,]*\.?\d*\s*(?:ft[³3]|m[³3]|lb|kg|kip)\b"i, text)
+    has_delta_claim = occursin(r"(?:increase|decrease|reduced|changed|rose|fell|dropped|gained)\w*\s+(?:of|by|from)\s+[\d,]+"i, text)
+    return has_ratio || has_pct || has_passfail_number || has_specific_value ||
+           has_ec || has_material_qty || has_delta_claim
 end
+
+# ─── Per-inference grounding messages ─────────────────────────────────────────
+
+"""
+    _most_recent_design_snapshot() -> String
+
+Short authoritative summary of the latest cached design results, injected as a
+system message into the conversation before every LLM inference so the model
+cannot contradict real numbers. Returns a no-design fallback when nothing is cached.
+"""
+function _most_recent_design_snapshot()::String
+    design = _get_last_design()
+    isnothing(design) && return (
+        "MOST RECENT DESIGN RESULTS: No design has been run yet. " *
+        "Do not invent ratios, pass/fail status, embodied carbon, or material quantities.")
+    s = design.summary
+    conc_m3  = round(ustrip(u"m^3", s.concrete_volume); digits=1)
+    steel_kg = round(ustrip(u"kg",  s.steel_weight); digits=0)
+    rebar_kg = round(ustrip(u"kg",  s.rebar_weight); digits=0)
+    ec       = round(s.embodied_carbon; digits=0)
+    n_fail_cols  = count(p -> !p.second.ok, design.columns)
+    n_fail_beams = count(p -> !p.second.ok, design.beams)
+    n_fail_slabs = count(p -> !(p.second.converged && p.second.deflection_ok && p.second.punching_ok), design.slabs)
+    n_fail_fdns  = count(p -> !p.second.ok, design.foundations)
+    n_fail = n_fail_cols + n_fail_beams + n_fail_slabs + n_fail_fdns
+
+    "MOST RECENT DESIGN RESULTS (authoritative — do not contradict these numbers):\n" *
+    "all_pass=$(s.all_checks_pass), critical_element=\"$(s.critical_element)\", " *
+    "critical_ratio=$(round(s.critical_ratio; digits=3)), " *
+    "embodied_carbon=$(Int(ec)) kgCO2e, " *
+    "concrete=$(conc_m3) m³, steel=$(Int(steel_kg)) kg, rebar=$(Int(rebar_kg)) kg, " *
+    "n_failing=$n_fail (cols=$n_fail_cols beams=$n_fail_beams slabs=$n_fail_slabs fdns=$n_fail_fdns).\n" *
+    "If you need detail beyond these totals, call a tool. Do not extrapolate or invent."
+end
+
+const _TOOLS_FIRST_INSTRUCTION =
+    "BEFORE responding to the user: identify which tools you need to answer accurately. " *
+    "If the user asks about results, comparisons, or any quantitative data not in the " *
+    "MOST RECENT DESIGN RESULTS above, call the appropriate tool FIRST. " *
+    "Do not generate a text response until you have tool evidence for every numerical " *
+    "claim you plan to make."
 
 """
     _extract_params_patch(text) -> Union{Dict{String,Any}, Nothing}
@@ -3128,6 +3173,18 @@ function _stream_llm_to_sse(
     try
         # Not `round` — that name shadows `Base.round` and breaks `round(Int, x)` below.
         for tool_round in 1:MAX_AGENT_TOOL_ROUNDS
+            # ── Ephemeral grounding messages (not persisted to history) ──
+            # Inject authoritative design snapshot + tools-first instruction at
+            # the tail of the conversation so they are the LLM's most recent context.
+            n_injected = 0
+            snapshot_msg = _most_recent_design_snapshot()
+            push!(conversation, Dict{String, Any}("role" => "system", "content" => snapshot_msg))
+            n_injected += 1
+            if tool_round == 1
+                push!(conversation, Dict{String, Any}("role" => "system", "content" => _TOOLS_FIRST_INSTRUCTION))
+                n_injected += 1
+            end
+
             payload = Dict{String, Any}(
                 "model" => model,
                 "messages" => conversation,
@@ -3139,15 +3196,24 @@ function _stream_llm_to_sse(
                 payload["parallel_tool_calls"] = false
             end
 
-            r = HTTP.post(
-                url,
-                headers,
-                JSON3.write(payload);
-                connect_timeout=10,
-                readtimeout=120,
-                status_exception=false,
-                cookies=false,
-            )
+            local r
+            try
+                r = HTTP.post(
+                    url,
+                    headers,
+                    JSON3.write(payload);
+                    connect_timeout=10,
+                    readtimeout=120,
+                    status_exception=false,
+                    cookies=false,
+                )
+            finally
+                # Remove ephemeral grounding messages so they don't accumulate
+                # in the conversation or leak into persisted history.
+                for _ in 1:n_injected
+                    pop!(conversation)
+                end
+            end
 
             if r.status >= 400
                 err_body = String(r.body)
@@ -3156,6 +3222,7 @@ function _stream_llm_to_sse(
             end
 
             resp = JSON3.read(String(r.body))
+
             choices = get(resp, :choices, nothing)
             (isnothing(choices) || isempty(choices)) && throw(ErrorException("OpenAI response missing choices."))
             msg = get(choices[1], :message, nothing)

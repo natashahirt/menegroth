@@ -376,7 +376,7 @@ const _TOOL_INDEX = """
 
 TOOLS (each tool description includes USE WHEN guidance):
   Orient:      get_situation_card (FIRST), get_building_summary, get_geometry_digest, get_current_params, get_design_history
-  Diagnose:    get_diagnose_summary (FIRST — returns total_ec_kgco2e, critical_ratio, pass/fail, per-element EC), get_diagnose, query_elements, get_solver_trace, get_lever_map
+  Diagnose:    get_diagnose_summary (FIRST — failure overview + total_ec_kgco2e, floor_area, ec_intensity, embodied_carbon_by_system_kgco2e; per-element ec_kgco2e → get_diagnose), get_diagnose, query_elements, get_solver_trace, get_lever_map
   Explore:     run_experiment (FAST), validate_params → run_design, compare_designs (previous vs latest, no args), suggest_next_action
   Communicate: narrate_element, narrate_comparison (previous vs latest), get_result_summary, get_condensed_result, clarify_user_intent
   Reference:   explain_field, get_provision_rationale, get_applicability, get_response_guidelines, get_api_params_ssot (wire JSON / patch-debug only)
@@ -433,13 +433,13 @@ EVIDENCE-FIRST:
 RETRIEVAL QUESTIONS — CALL A TOOL IF DATA IS NOT IN THE SYSTEM PROMPT:
   You may quote numbers directly from the CACHED DESIGN SUMMARY or LATEST RESULTS SUMMARY above.
   For anything NOT already in this prompt, call the relevant tool FIRST:
-    - Per-element EC breakdown → get_diagnose_summary (returns total_ec_kgco2e and per-element ec_kgco2e)
+    - Building-wide EC, intensity, by-system split → get_diagnose_summary (see embodied_carbon_note). Per-element ec_kgco2e → get_diagnose
     - Detailed checks, per-element ratios → get_diagnose_summary or query_elements
     - Element dimensions, sections → query_elements or get_diagnose
     - Geometry (spans, heights, floor area, column count) → get_geometry_digest
     - Parameters → get_current_params; raw wire JSON (merge-debug only) → get_api_params_ssot
     - Design history / comparison → get_design_history lists past runs; compare_designs compares **previous vs latest** only (no indices)
-    - Derived metrics (e.g. EC intensity = EC/area) → call get_geometry_digest for area, then compute
+    - Derived metrics: EC intensity and floor area → get_diagnose_summary (or get_result_summary); geometry-only metrics → get_geometry_digest
   NEVER answer a factual question by guessing. If the data is not in this prompt and you haven't called a tool, call one.
 
 Non-converged slabs may show 0.0 for deflection/punching — placeholders, not passing.
@@ -484,13 +484,13 @@ EVIDENCE-FIRST:
 RETRIEVAL QUESTIONS — CALL A TOOL IF DATA IS NOT IN THE SYSTEM PROMPT:
   You may quote numbers directly from the CACHED DESIGN SUMMARY above.
   For anything NOT already in this prompt, call the relevant tool FIRST:
-    - Per-element EC breakdown → get_diagnose_summary (returns total_ec_kgco2e and per-element ec_kgco2e)
+    - Building-wide EC, intensity, by-system split → get_diagnose_summary (see embodied_carbon_note). Per-element ec_kgco2e → get_diagnose
     - Detailed checks, per-element ratios → get_diagnose_summary or query_elements
     - Element dimensions, sections → query_elements or get_diagnose
     - Geometry (spans, heights, floor area, column count) → get_geometry_digest
     - Parameters → get_current_params; raw wire JSON (merge-debug only) → get_api_params_ssot
     - Design history / comparison → get_design_history lists past runs; compare_designs compares **previous vs latest** only (no indices)
-    - Derived metrics (e.g. EC intensity = EC/area) → call get_geometry_digest for area, then compute
+    - Derived metrics: EC intensity and floor area → get_diagnose_summary (or get_result_summary); geometry-only metrics → get_geometry_digest
   NEVER answer a factual question by guessing. If the data is not in this prompt and you haven't called a tool, call one.
 
 Non-converged slabs may show 0.0 for deflection/punching — placeholders, not passing.
@@ -500,7 +500,12 @@ $_CHAT_LEVERS_AND_LIMITS
 $(_parameter_space_card())
 
 GEOMETRY DIGEST:
-  If a digest appears below, it is authoritative — quote it. When GEOMETRY_CONTEXT.geometry_stale is true, cached results describe the last solved model, not current geometry.
+  If a digest appears below, it is authoritative — quote it.
+  Check GEOMETRY_CONTEXT.aligned_with_server:
+    "aligned" → cached results match the current geometry.
+    "server_behind_client" → user changed geometry; cached results are for the OLD model. Do NOT report them as current.
+    "client_behind_server" → server completed a Design since the last chat snapshot. Cached results are CURRENT — report them.
+    "unknown" → hash comparison not possible; use tool data.
 
 PARAMETER CHANGES:
   Output a JSON code block with only changed fields. Include `_history_label` (≤6 words).
@@ -2343,14 +2348,29 @@ function _geometry_stale_for_client(client_geometry_hash::String)::Bool
     !isempty(cli) && !isempty(srv) && cli != srv
 end
 
-"""Merge geometry alignment fields into tool JSON for the LLM (optional client_geometry_hash in args)."""
+"""Merge geometry alignment fields into tool JSON for the LLM. Uses resolved hash when available."""
 function _attach_geometry_alignment!(result::Dict{String, Any}, args::Dict{String, Any})
     cli = strip(string(get(args, "client_geometry_hash", "")))
-    isempty(cli) && return result
+    resolved = lock(_CHAT_STRUCTURE_CACHE.lock) do
+        h = _CHAT_STRUCTURE_CACHE.geometry_hash
+        isempty(h) ? "" : h
+    end
+    effective = !isempty(resolved) ? resolved : cli
+    isempty(effective) && return result
     srv = strip(_server_geometry_hash())
     result["client_geometry_hash"] = cli
+    result["resolved_geometry_hash"] = effective
     result["server_cached_geometry_hash"] = srv
-    result["geometry_stale"] = !isempty(srv) && cli != srv
+    if isempty(srv)
+        result["geometry_alignment"] = "unknown"
+    elseif effective == srv
+        result["geometry_alignment"] = "aligned"
+    else
+        history = get_design_history_entries()
+        client_is_old = any(strip(e.geometry_hash) == effective for e in history)
+        result["geometry_alignment"] = client_is_old ? "client_behind_server" : "server_behind_client"
+    end
+    result["geometry_stale"] = result["geometry_alignment"] == "server_behind_client"
     return result
 end
 
@@ -2365,13 +2385,24 @@ function _build_system_prompt(
     resolved_h, res_src, derived_h = _chat_geometry_resolution(structured_geometry, client_geometry_hash)
     stale = _geometry_prompt_stale(resolved_h, client_geometry_hash)
     srv = strip(_server_geometry_hash())
-    aligned = if isempty(srv) || isnothing(resolved_h) || isempty(resolved_h)
-        "unknown"
-    elseif resolved_h == srv
-        "yes"
+    dv = with_cache_read(c -> c.design_version, DESIGN_CACHE)
+    effective_h = if !isnothing(resolved_h) && !isempty(resolved_h)
+        resolved_h
     else
-        "no"
+        strip(client_geometry_hash)
     end
+
+    # Determine direction of mismatch
+    alignment_dir = if isempty(srv) || isempty(effective_h)
+        "unknown"
+    elseif effective_h == srv
+        "aligned"
+    else
+        history = get_design_history_entries()
+        client_is_old = any(strip(e.geometry_hash) == effective_h for e in history)
+        client_is_old ? "client_behind_server" : "server_behind_client"
+    end
+
     derived_str = isnothing(derived_h) ? "" : derived_h
     resolved_str = isnothing(resolved_h) ? "" : resolved_h
     geo_ctx = Dict{String, Any}(
@@ -2380,17 +2411,39 @@ function _build_system_prompt(
         "derived_from_building_geometry_hash"   => derived_str,
         "resolved_chat_geometry_hash"           => resolved_str,
         "resolved_source"                       => res_src,
-        "aligned_with_server"                   => aligned,
-        "geometry_stale"                        => stale,
+        "aligned_with_server"                   => alignment_dir,
+        "geometry_stale"                        => alignment_dir == "server_behind_client",
+        "design_version"                        => dv,
     )
     geo_ctx_block = string("\n\nGEOMETRY_CONTEXT (authoritative for this turn — compare to BUILDING GEOMETRY below):\n", JSON3.write(geo_ctx), "\n")
 
-    stale_note = if stale
-        cli = strip(client_geometry_hash)
-        res_show = !isempty(resolved_str) ? resolved_str : cli
+    stale_note = if alignment_dir == "server_behind_client"
+        res_show = !isempty(resolved_str) ? resolved_str : strip(client_geometry_hash)
         how = res_src == "building_geometry" ? "derived from structured building_geometry (same hash as POST /design geometry)" :
               res_src == "client_geometry_hash" ? "from client_geometry_hash" :
               "could not fully resolve from body; stale detection used client_geometry_hash fallback if present"
+        """
+
+GEOMETRY / CACHE MISMATCH (server behind):
+  Prompt geometry ($how): $res_show
+  Server cache (last POST /design): $srv
+  The user changed geometry but hasn't re-run Design — cached results are OMITTED because they describe a different model.
+  Do NOT invent ratios, pass/fail, or EC for the current geometry. Tell the user to run Design from Grasshopper.
+  You may give mechanism-level expectations (qualitative) for how the design problem shifts, and discuss past runs via get_design_history.
+"""
+    elseif alignment_dir == "client_behind_server"
+        """
+
+GEOMETRY NOTE (server has newer results):
+  The server completed a Design run since the last chat geometry snapshot.
+  Server hash: $srv  |  Chat hash: $effective_h  |  Design version: $dv
+  Cached results are CURRENT — report them to the user. Do not tell the user to re-run Design.
+"""
+    elseif stale
+        res_show = !isempty(resolved_str) ? resolved_str : strip(client_geometry_hash)
+        how = res_src == "building_geometry" ? "derived from structured building_geometry" :
+              res_src == "client_geometry_hash" ? "from client_geometry_hash" :
+              "could not fully resolve from body"
         """
 
 GEOMETRY / CACHE MISMATCH:
@@ -2398,7 +2451,6 @@ GEOMETRY / CACHE MISMATCH:
   Server cache (last POST /design): $srv
   These differ — cached results are OMITTED because they describe a different model.
   Do NOT invent ratios, pass/fail, or EC for the current geometry. Tell the user to run Design from Grasshopper.
-  You may give mechanism-level expectations (qualitative) for how the design problem shifts, and discuss past runs via get_design_history.
 """
     else
         ""
@@ -2434,8 +2486,13 @@ OPENING ANALYSIS (first response — no design yet):
         if !isnothing(params_json) && !isempty(string(params_json))
             push!(parts, "\n\nCURRENT PARAMETERS:\n", JSON3.write(params_json))
         end
-        if !stale && !isnothing(cached_design)
-            push!(parts, "\n\nLATEST RESULTS SUMMARY (you may quote these numbers — they are authoritative):\n", condense_result(cached_design))
+        results_ok = !isnothing(cached_design) && (!stale || alignment_dir == "client_behind_server")
+        if results_ok
+            if alignment_dir == "client_behind_server"
+                push!(parts, "\n\nLATEST RESULTS SUMMARY (FRESH — server completed a Design since last chat snapshot; report to user):\n", condense_result(cached_design))
+            else
+                push!(parts, "\n\nLATEST RESULTS SUMMARY (you may quote these numbers — they are authoritative):\n", condense_result(cached_design))
+            end
             push!(parts, "\nFor derived metrics not shown above, call the relevant tool. NEVER fabricate numbers.\n")
         end
         return _trim_system_prompt(parts, sys_budget_tokens)
@@ -2455,10 +2512,15 @@ OPENING ANALYSIS (results exist):
 """)
 
         cached_design = _get_last_design()
-        if !stale && !isnothing(cached_design)
-            push!(parts, "\n\nCACHED DESIGN SUMMARY (you may quote these numbers directly — they are authoritative):\n")
+        results_available = !isnothing(cached_design) && (!stale || alignment_dir == "client_behind_server")
+        if results_available
+            if alignment_dir == "client_behind_server"
+                push!(parts, "\n\nCACHED DESIGN SUMMARY (FRESH — server has newer results than the chat geometry snapshot; report these to the user):\n")
+            else
+                push!(parts, "\n\nCACHED DESIGN SUMMARY (you may quote these numbers directly — they are authoritative):\n")
+            end
             push!(parts, condense_result(cached_design))
-            push!(parts, "\nFor derived metrics (e.g. EC intensity = EC / floor_area), call get_geometry_digest for the area. NEVER compute area by hand or from memory.\n")
+            push!(parts, "\nFloor area and EC intensity are included above. For per-element detail use get_diagnose_summary or get_diagnose. NEVER fabricate numbers.\n")
             push!(parts, "\n\nDETAILED RESULTS:\n", JSON3.write(report_summary_json(cached_design)))
         end
         _append_chat_building_geometry_sections!(parts, geometry_summary, structured_geometry)
@@ -3784,19 +3846,34 @@ function _quick_check_coord_unit()::String
 end
 
 """
-Check if the client geometry hash (from args) differs from the server's cached geometry.
-Returns a warning string if stale, or `nothing` if aligned or unknown.
+Check if the effective geometry hash (resolved from building_geometry or client_geometry_hash)
+differs from the server's cached geometry. Returns a directional warning string, or `nothing`
+if aligned or unknown.
 """
 function _stale_geometry_warning(args::Dict{String, Any})::Union{Nothing, String}
     cli = strip(string(get(args, "client_geometry_hash", "")))
-    isempty(cli) && return nothing
+    resolved = lock(_CHAT_STRUCTURE_CACHE.lock) do
+        h = _CHAT_STRUCTURE_CACHE.geometry_hash
+        isempty(h) ? "" : h
+    end
+    effective = !isempty(resolved) ? resolved : cli
+    isempty(effective) && return nothing
     srv = strip(_server_geometry_hash())
     isempty(srv) && return nothing
-    cli == srv && return nothing
-    return "GEOMETRY MISMATCH: This tool executed against the server's cached geometry (hash=$srv), " *
-           "which differs from the client's current model (hash=$cli). " *
-           "Results apply to the CACHED model, not the current Grasshopper geometry. " *
-           "Tell the user to run Design from Grasshopper to update the server before interpreting these results for the current model."
+    effective == srv && return nothing
+
+    history = get_design_history_entries()
+    client_is_old = any(strip(e.geometry_hash) == effective for e in history)
+    if client_is_old
+        return "NOTE: The server's cached design (hash=$srv) is NEWER than the chat geometry hash ($effective). " *
+               "A Design was completed since the last geometry snapshot. " *
+               "Results are current — report them to the user."
+    else
+        return "GEOMETRY MISMATCH: This tool executed against the server's cached geometry (hash=$srv), " *
+               "which differs from the client's current model (hash=$effective). " *
+               "Results apply to the CACHED model, not the current Grasshopper geometry. " *
+               "Tell the user to run Design from Grasshopper to update the server."
+    end
 end
 
 """
@@ -4024,13 +4101,19 @@ function _dispatch_chat_tool(tool::String, args::Dict{String, Any})::Dict{String
     # ── Phase 1: Orientation ────────────────────────────────────────────────
     elseif tool == "get_situation_card"
         cli = string(get(args, "client_geometry_hash", ""))
-        geo_hash = with_cache_read(c -> c.geometry_hash, DESIGN_CACHE)
+        geo_hash, dv = with_cache_read(c -> (c.geometry_hash, c.design_version), DESIGN_CACHE)
+        resolved = lock(_CHAT_STRUCTURE_CACHE.lock) do
+            h = _CHAT_STRUCTURE_CACHE.geometry_hash
+            isempty(h) ? "" : h
+        end
         return agent_situation_card(
             struc,
             design,
             get_design_history_entries();
             server_geometry_hash = geo_hash,
             client_geometry_hash = cli,
+            resolved_geometry_hash = resolved,
+            design_version = dv,
         )
 
     elseif tool == "get_building_summary"
@@ -4358,6 +4441,7 @@ function _dispatch_chat_tool(tool::String, args::Dict{String, Any})::Dict{String
                     DESIGN_CACHE.last_result = design_to_json(d; geometry_hash=cached_geo_hash)
                 end
                 invalidate_diagnose_cache!(DESIGN_CACHE)
+                bump_design_version!(DESIGN_CACHE)
                 result_ref[] = d
             catch e
                 @error "run_design task failed" exception=(e, catch_backtrace())
@@ -4454,6 +4538,8 @@ function _dispatch_chat_tool(tool::String, args::Dict{String, Any})::Dict{String
             "all_pass"         => design.summary.all_checks_pass,
             "critical_element" => design.summary.critical_element,
             "critical_ratio"   => design.summary.critical_ratio,
+            "embodied_carbon_kgco2e" => round(design.summary.embodied_carbon; digits=0),
+            "n_failing"        => n_fail,
             "warnings"         => warnings,
             "note"             => "Quick-check result: visualization skipped, max 2 sizing iterations, MIP capped at 20s. " *
                 "Ratios may shift slightly in a full run. The canvas will update on next Grasshopper solve.",

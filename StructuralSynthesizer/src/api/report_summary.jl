@@ -162,12 +162,25 @@ function report_summary_json(design::BuildingDesign; report_units=nothing)
     result["foundations"] = _summary_foundations(design, du)
 
     # ─── Materials ────────────────────────────────────────────────────
-    result["materials"] = Dict{String, Any}(
+    materials = Dict{String, Any}(
         "concrete_volume" => Dict("value" => _round_val(_to_display(du, :volume, s.concrete_volume); digits=1), "unit" => vol_label),
         "steel_weight"    => Dict("value" => _round_val(_to_display(du, :mass, s.steel_weight); digits=0),     "unit" => mass_label),
         "rebar_weight"    => Dict("value" => _round_val(_to_display(du, :mass, s.rebar_weight); digits=0),     "unit" => mass_label),
         "embodied_carbon" => Dict("value" => _round_val(s.embodied_carbon; digits=0), "unit" => "kgCO2e"),
     )
+    ec_parts = s.embodied_carbon_slabs + s.embodied_carbon_columns + s.embodied_carbon_beams +
+               s.embodied_carbon_struts + s.embodied_carbon_foundations + s.embodied_carbon_fireproofing
+    if s.embodied_carbon > 0 || ec_parts > 1e-9
+        materials["embodied_carbon_by_system_kgco2e"] = Dict{String, Any}(
+            "slabs"        => _round_val(s.embodied_carbon_slabs; digits=0),
+            "columns"      => _round_val(s.embodied_carbon_columns; digits=0),
+            "beams"        => _round_val(s.embodied_carbon_beams; digits=0),
+            "struts"       => _round_val(s.embodied_carbon_struts; digits=0),
+            "foundations"  => _round_val(s.embodied_carbon_foundations; digits=0),
+            "fireproofing" => _round_val(s.embodied_carbon_fireproofing; digits=0),
+        )
+    end
+    result["materials"] = materials
 
     # ─── Floor Area & EC Intensity ────────────────────────────────────
     struc = design.structure
@@ -467,6 +480,16 @@ function condense_result(design::BuildingDesign; report_units=nothing)
                  "steel=$(mat["steel_weight"]["value"]) $(mat["steel_weight"]["unit"]), " *
                  "rebar=$(mat["rebar_weight"]["value"]) $(mat["rebar_weight"]["unit"]), " *
                  "EC=$(mat["embodied_carbon"]["value"]) $(mat["embodied_carbon"]["unit"])")
+
+    by_sys = get(mat, "embodied_carbon_by_system_kgco2e", nothing)
+    if by_sys isa AbstractDict
+        parts = String[]
+        for k in ("slabs", "columns", "beams", "struts", "foundations", "fireproofing")
+            v = get(by_sys, k, 0)
+            (v isa Number && v > 0) && push!(parts, "$k=$(Int(round(v)))")
+        end
+        !isempty(parts) && push!(lines, "EC by system (kgCO2e): $(join(parts, ", "))")
+    end
 
     fa = get(d, "floor_area", nothing)
     eci = get(d, "ec_intensity", nothing)

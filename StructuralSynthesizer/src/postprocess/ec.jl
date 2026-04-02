@@ -3,6 +3,60 @@
 # EC = Σ(volume × density × embodied_carbon_coefficient) for each material
 
 """
+    _sorted_volume_pairs(volumes::MaterialVolumes)
+
+Return `(material, volume)` pairs sorted by a **semantic** key so EC sums are
+reproducible across Julia sessions. (`MaterialVolumes` is a `Dict`; iterating it
+in raw insertion order makes floating-point totals order-dependent.)
+"""
+function _sorted_volume_pairs(volumes::MaterialVolumes)
+    isempty(volumes) && return Tuple{AbstractMaterial, VolumeType}[]
+    pairs = collect(volumes)
+    sort!(pairs; by = mv -> (_material_ec_semantic_key(mv[1]), ustrip(u"m^3", mv[2])))
+    return pairs
+end
+
+"""Stable tuple for sorting materials in EC sums (type + salient physical fields)."""
+function _material_ec_semantic_key(mat::StructuralSizer.Concrete)
+    (
+        1,
+        Int(mat.aggregate_type),
+        ustrip(u"Pa", mat.fc′),
+        ustrip(u"kg/m^3", mat.ρ),
+        mat.ecc,
+        mat.ν,
+        mat.εcu,
+        mat.λ,
+    )
+end
+function _material_ec_semantic_key(mat::StructuralSizer.ReinforcedConcreteMaterial)
+    (2, _material_ec_semantic_key(mat.concrete)..., ustrip(u"Pa", mat.rebar.Fy), ustrip(u"Pa", mat.rebar.Fu), mat.rebar.ecc)
+end
+function _material_ec_semantic_key(mat::StructuralSizer.FiberReinforcedConcrete)
+    c = getfield(mat, :concrete)
+    (
+        3,
+        _material_ec_semantic_key(c)...,
+        getfield(mat, :fiber_dosage),
+        getfield(mat, :fR1),
+        getfield(mat, :fR3),
+        getfield(mat, :fiber_ecc),
+    )
+end
+function _material_ec_semantic_key(mat::StructuralSizer.RebarSteel)
+    (4, ustrip(u"Pa", mat.Fy), ustrip(u"Pa", mat.Fu), ustrip(u"Pa", mat.E), mat.ecc)
+end
+function _material_ec_semantic_key(mat::StructuralSizer.StructuralSteel)
+    (5, ustrip(u"Pa", mat.Fy), ustrip(u"Pa", mat.Fu), mat.ecc, ustrip(u"kg/m^3", mat.ρ))
+end
+function _material_ec_semantic_key(mat::StructuralSizer.Timber)
+    (6, ustrip(u"Pa", mat.E), ustrip(u"kg/m^3", mat.ρ), mat.ecc)
+end
+function _material_ec_semantic_key(mat::AbstractMaterial)
+    (999, string(typeof(mat)), repr(mat))
+end
+
+"""
     element_ec(volumes::MaterialVolumes) -> Float64
 
 Compute total embodied carbon (kgCO₂e) for an element from its material volumes dict.
@@ -13,11 +67,11 @@ slab_ec = element_ec(slab.volumes)  # → kgCO₂e
 ```
 """
 function element_ec(volumes::MaterialVolumes)
-    sum(
-        ustrip(u"kg", vol * mat.ρ) * mat.ecc 
-        for (mat, vol) in volumes;
-        init=0.0
-    )
+    s = 0.0
+    for (mat, vol) in _sorted_volume_pairs(volumes)
+        s += ustrip(u"kg", vol * mat.ρ) * mat.ecc
+    end
+    return s
 end
 
 """
@@ -41,8 +95,9 @@ Compute EC for a single element (slab, member, or foundation).
 function compute_element_ec(elem, element_type::Symbol, idx::Int)
     vols = elem.volumes
     ec = element_ec(vols)
-    vol_total = sum(values(vols); init=0.0u"m^3")
-    mass_total = sum(vol * mat.ρ for (mat, vol) in vols; init=0.0u"kg")
+    pairs = _sorted_volume_pairs(vols)
+    vol_total = sum((v for (_, v) in pairs); init=0.0u"m^3")
+    mass_total = sum(vol * mat.ρ for (mat, vol) in pairs; init=0.0u"kg")
     ElementECResult(element_type, idx, ec, vol_total, mass_total)
 end
 
@@ -158,8 +213,14 @@ function _compute_fireproofing_ec(struc::BuildingStructure, params::Union{Design
             # Extract steel material from member volumes
             vols = volumes(m)
             isempty(vols) && continue
-            mat = first(keys(vols))
-            mat isa StructuralSizer.StructuralSteel || continue
+            mat = nothing
+            for (mm, _) in _sorted_volume_pairs(vols)
+                if mm isa StructuralSizer.StructuralSteel
+                    mat = mm
+                    break
+                end
+            end
+            isnothing(mat) && continue
             
             W_plf = ustrip(u"lb/ft", StructuralSizer.weight_per_length(sec, mat))
             P_in = ustrip(u"inch", exposure === :four_sided ? sec.PB : sec.PA)
@@ -182,8 +243,9 @@ end
 function compute_element_ec_member(m::AbstractMember, element_type::Symbol, idx::Int)
     vols = volumes(m)
     ec = element_ec(vols)
-    vol_total = sum(values(vols); init=0.0u"m^3")
-    mass_total = sum(vol * mat.ρ for (mat, vol) in vols; init=0.0u"kg")
+    pairs = _sorted_volume_pairs(vols)
+    vol_total = sum((v for (_, v) in pairs); init=0.0u"m^3")
+    mass_total = sum(vol * mat.ρ for (mat, vol) in pairs; init=0.0u"kg")
     ElementECResult(element_type, idx, ec, vol_total, mass_total)
 end
 

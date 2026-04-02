@@ -1762,13 +1762,25 @@ function _compute_design_summary!(design::BuildingDesign, struc::BuildingStructu
     summary.rebar_weight = total_rebar_wt
     summary.timber_volume = total_timber_vol
 
-    # ── Embodied carbon ──
+    # ── Embodied carbon (totals + breakdown frozen here — same numbers as API / reports) ──
     try
         ec = compute_building_ec(struc, params)
         summary.embodied_carbon = ec.total_ec
+        summary.embodied_carbon_slabs = ec.slab_ec
+        summary.embodied_carbon_columns = sum(r.ec for r in ec.members if r.element_type == :column; init=0.0)
+        summary.embodied_carbon_beams = sum(r.ec for r in ec.members if r.element_type == :beam; init=0.0)
+        summary.embodied_carbon_struts = sum(r.ec for r in ec.members if r.element_type == :strut; init=0.0)
+        summary.embodied_carbon_foundations = ec.foundation_ec
+        summary.embodied_carbon_fireproofing = ec.fireproofing_ec
     catch e
         @warn "Embodied carbon computation failed — defaulting to 0.0" exception=(e, catch_backtrace())
         summary.embodied_carbon = 0.0
+        summary.embodied_carbon_slabs = 0.0
+        summary.embodied_carbon_columns = 0.0
+        summary.embodied_carbon_beams = 0.0
+        summary.embodied_carbon_struts = 0.0
+        summary.embodied_carbon_foundations = 0.0
+        summary.embodied_carbon_fireproofing = 0.0
     end
 end
 

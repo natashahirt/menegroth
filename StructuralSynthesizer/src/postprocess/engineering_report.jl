@@ -737,7 +737,6 @@ end
 """Print the material takeoff (concrete volumes, floor area, embodied carbon)."""
 function _report_takeoff(io::IO, design::BuildingDesign; du::DisplayUnits=design.params.display_units)
     struc = design.structure
-    params = design.params
 
     vol_u = _ul(du, :volume)
     area_u = _ul(du, :area)
@@ -801,39 +800,34 @@ function _report_takeoff(io::IO, design::BuildingDesign; du::DisplayUnits=design
     Printf.@printf(io, "  %-16s %12.1f\n", "TOTAL", conc_total)
     println(io)
 
-    # Embodied carbon — full breakdown (columns listed explicitly for takeoff readability)
-    try
-        ec = compute_building_ec(struc, params)
-        col_ec = sum(r.ec for r in ec.members if r.element_type == :column; init=0.0)
-        beam_ec = sum(r.ec for r in ec.members if r.element_type == :beam; init=0.0)
-        strut_ec = sum(r.ec for r in ec.members if r.element_type == :strut; init=0.0)
-        println(io, "  Embodied carbon (kgCO₂e)")
-        Printf.@printf(io, "  %-20s %12.0f\n", "Slabs", ec.slab_ec)
-        Printf.@printf(io, "  %-20s %12.0f\n", "Columns", col_ec)
-        Printf.@printf(io, "  %-20s %12.0f\n", "Beams", beam_ec)
-        if strut_ec > 0.0
-            Printf.@printf(io, "  %-20s %12.0f\n", "Struts", strut_ec)
-        end
-        Printf.@printf(io, "  %-20s %12.0f\n", "Foundations", ec.foundation_ec)
-        if ec.fireproofing_ec > 0.0
-            Printf.@printf(io, "  %-20s %12.0f\n", "Fireproofing", ec.fireproofing_ec)
-        end
-        Printf.@printf(io, "  %-20s %12s\n", "─"^18, "─"^12)
-        Printf.@printf(io, "  %-20s %12.0f\n", "TOTAL", ec.total_ec)
-        area_m2 = ustrip(u"m^2", total_slab_area)
-        if area_m2 > 0 && ec.total_ec > 0.0
-            Printf.@printf(io, "  EC intensity (floor): %.1f kgCO₂e/m²\n", ec.total_ec / area_m2)
-        end
-    catch e
-        ec_total = design.summary.embodied_carbon
-        if ec_total > 0.0
-            Printf.@printf(io, "  Embodied carbon:  %.0f kgCO₂e (breakdown unavailable)\n", ec_total)
-            area_m2 = ustrip(u"m^2", total_slab_area)
-            if area_m2 > 0
-                Printf.@printf(io, "  EC intensity:     %.1f kgCO₂e/m²\n", ec_total / area_m2)
+    # Embodied carbon — use `design.summary` (same TOTAL as API; breakdown stored at capture with `compute_building_ec`)
+    s = design.summary
+    ec_total = s.embodied_carbon
+    if ec_total > 0.0
+        sub_sum = s.embodied_carbon_slabs + s.embodied_carbon_columns + s.embodied_carbon_beams +
+                  s.embodied_carbon_struts + s.embodied_carbon_foundations + s.embodied_carbon_fireproofing
+        # Designs captured before per-system fields existed: all breakdown zeros but total set.
+        if sub_sum <= 1e-9
+            Printf.@printf(io, "  Embodied carbon:  %.0f kgCO₂e (per-system breakdown unavailable for this design)\n", ec_total)
+        else
+            println(io, "  Embodied carbon (kgCO₂e)")
+            Printf.@printf(io, "  %-20s %12.0f\n", "Slabs", s.embodied_carbon_slabs)
+            Printf.@printf(io, "  %-20s %12.0f\n", "Columns", s.embodied_carbon_columns)
+            Printf.@printf(io, "  %-20s %12.0f\n", "Beams", s.embodied_carbon_beams)
+            if s.embodied_carbon_struts > 0.0
+                Printf.@printf(io, "  %-20s %12.0f\n", "Struts", s.embodied_carbon_struts)
             end
+            Printf.@printf(io, "  %-20s %12.0f\n", "Foundations", s.embodied_carbon_foundations)
+            if s.embodied_carbon_fireproofing > 0.0
+                Printf.@printf(io, "  %-20s %12.0f\n", "Fireproofing", s.embodied_carbon_fireproofing)
+            end
+            Printf.@printf(io, "  %-20s %12s\n", "─"^18, "─"^12)
+            Printf.@printf(io, "  %-20s %12.0f\n", "TOTAL", ec_total)
         end
-        @debug "Material takeoff: embodied carbon breakdown failed" exception = (e, catch_backtrace())
+        area_m2 = ustrip(u"m^2", total_slab_area)
+        if area_m2 > 0
+            Printf.@printf(io, "  EC intensity (floor): %.1f kgCO₂e/m²\n", ec_total / area_m2)
+        end
     end
     println(io)
 end

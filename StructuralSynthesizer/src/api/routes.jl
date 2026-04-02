@@ -631,6 +631,7 @@ function _execute_design(input::APIInput)
             DESIGN_CACHE.last_api_params_json = api_params_snapshot
         end
         invalidate_diagnose_cache!(DESIGN_CACHE)
+        bump_design_version!(DESIGN_CACHE)
         _append_design_log!("Design result serialized.")
 
         # Record in session history for compare_designs / get_design_history

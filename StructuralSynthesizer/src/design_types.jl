@@ -897,6 +897,13 @@ Base.@kwdef mutable struct DesignSummary
     
     # Derived metrics
     embodied_carbon::Float64 = 0.0    # kgCO₂e
+    # Populated with `embodied_carbon` in `_compute_design_summary!` (same `compute_building_ec` call).
+    embodied_carbon_slabs::Float64 = 0.0
+    embodied_carbon_columns::Float64 = 0.0
+    embodied_carbon_beams::Float64 = 0.0
+    embodied_carbon_struts::Float64 = 0.0
+    embodied_carbon_foundations::Float64 = 0.0
+    embodied_carbon_fireproofing::Float64 = 0.0
     cost_estimate::Float64 = 0.0      # $
     
     # Status

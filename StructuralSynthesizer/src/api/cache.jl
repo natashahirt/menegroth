@@ -21,11 +21,13 @@ mutable struct DesignCache
     diagnose_design_id::UInt64
     """Canonical wire-format API params snapshot (SSoT). Set on each successful POST /design or chat `run_design`; overwritten in full — no separate 'original' copy."""
     last_api_params_json::Dict{String, Any}
+    """Monotonically increasing counter incremented on every successful design completion (POST /design or chat run_design). Lets chat detect that results were refreshed between turns."""
+    design_version::Int
     lock::ReentrantLock
 end
 
 """Create an empty `DesignCache` with no stored geometry or results."""
-DesignCache() = DesignCache("", nothing, nothing, nothing, nothing, nothing, UInt64(0), Dict{String, Any}(), ReentrantLock())
+DesignCache() = DesignCache("", nothing, nothing, nothing, nothing, nothing, UInt64(0), Dict{String, Any}(), 0, ReentrantLock())
 
 """Thread-safe read from the design cache."""
 function with_cache_read(f, cache::DesignCache)
@@ -57,6 +59,13 @@ function get_cached_diagnose(cache::DesignCache, design::BuildingDesign; kwargs.
         cache.last_diagnose = result
         cache.diagnose_design_id = design_id
         return result
+    end
+end
+
+"""Increment `design_version` under lock. Call after every successful design completion."""
+function bump_design_version!(cache::DesignCache)
+    lock(cache.lock) do
+        cache.design_version += 1
     end
 end
 
@@ -211,7 +220,7 @@ function design_history_to_json(entries::Vector{DesignHistoryEntry})
         "all_pass"          => e.all_pass,
         "critical_ratio"    => round(e.critical_ratio; digits=3),
         "critical_element"  => e.critical_element,
-        "embodied_carbon"   => round(e.embodied_carbon; digits=0),
+        "embodied_carbon_kgco2e" => round(e.embodied_carbon; digits=0),
         "n_columns"         => e.n_columns,
         "n_beams"           => e.n_beams,
         "n_slabs"           => e.n_slabs,

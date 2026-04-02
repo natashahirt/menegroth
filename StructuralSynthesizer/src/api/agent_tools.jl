@@ -429,15 +429,20 @@ function agent_api_params_ssot()::Dict{String, Any}
 end
 
 """
-    agent_situation_card(struc, design, history; server_geometry_hash="", client_geometry_hash="") -> Dict{String, Any}
+    agent_situation_card(struc, design, history; ...) -> Dict{String, Any}
 
 Single-call orientation snapshot. Combines geometry overview, resolved params,
 results health, and session history status into one compact payload so the
 LLM can orient itself without multiple tool calls.
 
-When `client_geometry_hash` is provided and differs from `server_geometry_hash`,
-`geometry_stale` is true: cached `geometry` / `health` / `params` describe the
-last POST /design model, not necessarily the client's current Grasshopper geometry.
+Staleness detection uses `resolved_geometry_hash` (derived from structured
+`building_geometry` when available, falling back to `client_geometry_hash`).
+When the resolved hash differs from `server_geometry_hash`, `geometry_context`
+reports which side is outdated:
+  - `"server_behind_client"`: user changed geometry but hasn't re-run Design
+  - `"client_behind_server"`: a Design completed but the chat session carries an old hash
+  - `"aligned"`: hashes match
+  - `"unknown"`: one or both hashes are missing — cannot determine staleness
 """
 function agent_situation_card(
     struc::Union{BuildingStructure, Nothing},
@@ -445,25 +450,45 @@ function agent_situation_card(
     history::Vector{DesignHistoryEntry};
     server_geometry_hash::String = "",
     client_geometry_hash::String = "",
+    resolved_geometry_hash::String = "",
+    design_version::Int = 0,
 )::Dict{String, Any}
     card = Dict{String, Any}("has_geometry" => !isnothing(struc), "has_design" => !isnothing(design))
 
     srv = strip(server_geometry_hash)
     cli = strip(client_geometry_hash)
-    aligned = isempty(cli) || isempty(srv) ? nothing : cli == srv
-    geometry_stale = aligned === false
+    res = strip(resolved_geometry_hash)
+    effective = !isempty(res) ? res : cli
+
+    alignment = if isempty(effective) || isempty(srv)
+        "unknown"
+    elseif effective == srv
+        "aligned"
+    else
+        in_history = any(strip(e.geometry_hash) == effective for e in history)
+        in_history ? "client_behind_server" : "server_behind_client"
+    end
+    geometry_stale = alignment == "server_behind_client"
+
     card["geometry_context"] = Dict{String, Any}(
         "server_cached_geometry_hash" => srv,
         "client_geometry_hash"        => cli,
-        "aligned"                     => aligned,
+        "resolved_geometry_hash"      => effective,
+        "alignment"                   => alignment,
         "geometry_stale"              => geometry_stale,
+        "design_version"              => design_version,
     )
-    if geometry_stale
+    if alignment == "server_behind_client"
         card["geometry_context"]["note"] =
-            "Cached structure/design snapshot below is for server_cached_geometry_hash, not necessarily the current Grasshopper model. " *
-            "Design history is retained: each get_design_history entry includes geometry_hash — compare runs on the same hash, or explicitly contrast across geometry changes. " *
-            "Do not map element IDs or detailed diagnostics from the cached design onto BUILDING GEOMETRY text until a Design run completes for this model."
-    elseif aligned === true
+            "The client's geometry is NEWER than the server's cached design. " *
+            "Cached results below describe the previous model (server hash), not the current Grasshopper geometry. " *
+            "Tell the user to run Design from Grasshopper to update the server."
+    elseif alignment == "client_behind_server"
+        card["geometry_context"]["note"] =
+            "The server has NEWER design results than the client hash suggests. " *
+            "A Design was run (e.g. from Grasshopper) since the last chat geometry snapshot. " *
+            "The cached results below are current — report them to the user."
+    elseif alignment == "aligned"
         card["geometry_context"]["note"] = "Client geometry hash matches the server's cached POST /design geometry."
     end
 
@@ -492,11 +517,19 @@ function agent_situation_card(
         n_fail_slabs = count(p -> !(p.second.converged && p.second.deflection_ok && p.second.punching_ok), design.slabs)
         n_fail_fdns = count(p -> !p.second.ok, design.foundations)
         n_fail = n_fail_cols + n_fail_beams + n_fail_slabs + n_fail_fdns
-        card["health"] = Dict{String, Any}(
+        du = design.params.display_units
+        is_imp = du.units[:length] == u"ft"
+        vol_label  = is_imp ? "ft3"  : "m3"
+        mass_label = is_imp ? "lb"   : "kg"
+        conc_vol  = round(ustrip(is_imp ? u"ft^3" : u"m^3", s.concrete_volume); digits=1)
+        steel_wt  = round(ustrip(is_imp ? u"lb"   : u"kg",  s.steel_weight); digits=0)
+        rebar_wt  = round(ustrip(is_imp ? u"lb"   : u"kg",  s.rebar_weight); digits=0)
+
+        health = Dict{String, Any}(
             "all_pass"         => s.all_checks_pass,
             "critical_ratio"   => round(s.critical_ratio; digits=3),
             "critical_element" => s.critical_element,
-            "embodied_carbon"  => round(s.embodied_carbon; digits=0),
+            "embodied_carbon_kgco2e" => round(s.embodied_carbon; digits=0),
             "n_elements"       => length(design.columns) + length(design.beams) +
                                   length(design.slabs) + length(design.foundations),
             "n_failing"        => n_fail,
@@ -506,10 +539,30 @@ function agent_situation_card(
                 "slabs"       => n_fail_slabs,
                 "foundations" => n_fail_fdns,
             ),
+            "materials" => Dict{String, Any}(
+                "concrete_volume" => Dict("value" => conc_vol, "unit" => vol_label),
+                "steel_weight"    => Dict("value" => steel_wt, "unit" => mass_label),
+                "rebar_weight"    => Dict("value" => rebar_wt, "unit" => mass_label),
+            ),
             "health_note"      => "critical_element = single worst element (highest ratio). " *
                 "failing_by_type = counts per category. These may disagree: " *
                 "e.g. critical_element can be a slab while most failures are columns.",
         )
+
+        ec_parts = s.embodied_carbon_slabs + s.embodied_carbon_columns + s.embodied_carbon_beams +
+                   s.embodied_carbon_struts + s.embodied_carbon_foundations + s.embodied_carbon_fireproofing
+        if s.embodied_carbon > 0 || ec_parts > 1e-9
+            health["embodied_carbon_by_system_kgco2e"] = Dict{String, Any}(
+                "slabs"        => round(s.embodied_carbon_slabs; digits=0),
+                "columns"      => round(s.embodied_carbon_columns; digits=0),
+                "beams"        => round(s.embodied_carbon_beams; digits=0),
+                "struts"       => round(s.embodied_carbon_struts; digits=0),
+                "foundations"  => round(s.embodied_carbon_foundations; digits=0),
+                "fireproofing" => round(s.embodied_carbon_fireproofing; digits=0),
+            )
+        end
+
+        card["health"] = health
         card["has_trace"] = !isempty(design.solver_trace)
     end
 
@@ -524,8 +577,8 @@ function agent_situation_card(
     if !isempty(distinct)
         session["geometry_hashes_in_history"] = distinct
     end
-    if !isempty(cli)
-        session["n_designs_on_client_geometry_hash"] = count(h -> h == cli, hist_hashes)
+    if !isempty(effective)
+        session["n_designs_on_resolved_geometry_hash"] = count(h -> h == effective, hist_hashes)
     end
     card["session"] = session
 
@@ -537,11 +590,17 @@ function agent_situation_card(
 
     # Inline guidance — state-dependent, delivered at the moment the model needs it
     guidance_parts = String[]
-    if geometry_stale
+    if alignment == "server_behind_client"
         push!(guidance_parts,
-            "STALE GEOMETRY: Cached results describe a different model. " *
-            "Do not map diagnostic data onto current geometry. " *
+            "STALE SERVER: The user changed geometry but hasn't re-run Design. " *
+            "Cached results describe the PREVIOUS model. " *
+            "Do not map diagnostic data onto the current geometry. " *
             "Suggest the user run Design from Grasshopper to update the server.")
+    elseif alignment == "client_behind_server"
+        push!(guidance_parts,
+            "FRESH RESULTS: The server has newer results than the client's last-known hash. " *
+            "A Design was completed (likely from Grasshopper). " *
+            "The cached results are current — report them directly to the user.")
     end
     if !isnothing(design)
         n_fail = card["health"]["n_failing"]
@@ -765,6 +824,8 @@ end
 
 Lightweight failure overview: counts by element type, top-N critical elements,
 and failure breakdown by governing check — without the full per-element dump.
+Also forwards `agent_summary` EC fields (`total_ec_kgco2e`, `floor_area`, `ec_intensity`),
+`embodied_carbon_by_system_kgco2e`, and `embodied_carbon_note` (total vs summed per-element EC).
 Designed for progressive disclosure: call this first, then `get_diagnose` or
 `query_elements` for detail.
 """
@@ -848,6 +909,31 @@ function agent_diagnose_summary(design::BuildingDesign)::Dict{String, Any}
             "NEXT STEP: Call get_lever_map(check=<governing_check>) before recommending " *
             "parameter changes. Always validate_params before run_design."
     end
+
+    # Same EC / floor / intensity as full `get_diagnose` → `agent_summary` (design.summary.embodied_carbon).
+    as = get(diag, "agent_summary", nothing)
+    if as isa AbstractDict
+        for k in ("all_pass", "critical_element", "critical_ratio", "total_ec_kgco2e", "floor_area", "ec_intensity")
+            haskey(as, k) && (result[k] = as[k])
+        end
+    end
+
+    s = design.summary
+    ec_parts = s.embodied_carbon_slabs + s.embodied_carbon_columns + s.embodied_carbon_beams +
+               s.embodied_carbon_struts + s.embodied_carbon_foundations + s.embodied_carbon_fireproofing
+    if s.embodied_carbon > 0 || ec_parts > 1e-9
+        result["embodied_carbon_by_system_kgco2e"] = Dict{String, Any}(
+            "slabs"         => round(s.embodied_carbon_slabs; digits=0),
+            "columns"       => round(s.embodied_carbon_columns; digits=0),
+            "beams"         => round(s.embodied_carbon_beams; digits=0),
+            "struts"        => round(s.embodied_carbon_struts; digits=0),
+            "foundations"   => round(s.embodied_carbon_foundations; digits=0),
+            "fireproofing"  => round(s.embodied_carbon_fireproofing; digits=0),
+        )
+    end
+    result["embodied_carbon_note"] =
+        "total_ec_kgco2e matches design.summary.embodied_carbon (includes struts and fireproofing when present). " *
+        "Summing per-element ec_kgco2e from get_diagnose can be lower: that payload omits struts and fireproofing."
 
     return result
 end
@@ -1064,7 +1150,7 @@ function _compare_design_history_pair(
             "all_pass"         => prev.all_pass,
             "critical_ratio"   => prev.critical_ratio,
             "critical_element" => crit_prev,
-            "embodied_carbon"  => prev.embodied_carbon,
+            "embodied_carbon_kgco2e" => prev.embodied_carbon,
             "n_failing"        => prev.n_failing,
             "source"           => prev.source,
         ),
@@ -1074,7 +1160,7 @@ function _compare_design_history_pair(
             "all_pass"         => cur.all_pass,
             "critical_ratio"   => cur.critical_ratio,
             "critical_element" => crit_cur,
-            "embodied_carbon"  => cur.embodied_carbon,
+            "embodied_carbon_kgco2e" => cur.embodied_carbon,
             "n_failing"        => cur.n_failing,
             "source"           => cur.source,
         ),
@@ -1807,7 +1893,11 @@ function agent_response_guidelines()::Dict{String, Any}
             "what_if" =>
                 "For span/column/height questions → call predict_geometry_effect. Present trade-offs quantitatively.",
             "stale_cache" =>
-                "When geometry_stale is true, cached results are for the old model. Explain directional effects only — no invented numbers.",
+                "Check geometry_context.alignment: " *
+                "'server_behind_client' → cached results are for the OLD model, do not report as current. " *
+                "'client_behind_server' → server has NEWER results, report them to the user. " *
+                "'aligned' → hashes match, results are current. " *
+                "'unknown' → cannot determine, explain directional effects only — no invented numbers.",
             "client_vs_server" =>
                 "has_geometry = server cache from POST /design. A prompt digest can exist without has_geometry. Quote the digest for layout advice; solver data requires a Design run.",
         ),

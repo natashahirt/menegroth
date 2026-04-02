@@ -662,6 +662,16 @@ function _harmonize_rc_group!(struc::BuildingStructure, params::DesignParameters
                 b = col.c1, h = col.c2, bar_size = 8, n_bars = 4))
         end
 
+        # Embodied carbon uses `volumes(column)` in compute_building_ec — refresh after enlarging
+        # so EC matches harmonized geometry (same pattern as _apply_column_results! in analyze/members/utils.jl).
+        col_sec = section(col)
+        if !isnothing(col_sec)
+            L_raw = sum(struc.segments[seg_idx].L for seg_idx in segment_indices(col))
+            L_total = L_raw isa Unitful.Quantity ? uconvert(u"m", L_raw) : L_raw * u"m"
+            col_mat = something(col.concrete, resolve_column_concrete(params.materials))
+            set_volumes!(col, MaterialVolumes(col_mat => StructuralSizer.section_area(col_sec) * L_total))
+        end
+
         # Rebuild ASAP element section
         b_m = ustrip(u"m", col.c1)
         h_m = ustrip(u"m", col.c2)

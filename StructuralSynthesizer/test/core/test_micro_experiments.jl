@@ -159,6 +159,45 @@ end
             @test isfinite(r["modified"]["ratio"])
         end
 
+        # Isolated physics: vc ∝ √f'c with fixed Vu, Mub, d, h, b₀ → ratio falls as fc rises.
+        @testset "StructuralSizer.check_punching_for_column: higher fc lowers utilization" begin
+            col = (c1 = 16.0u"inch", c2 = 16.0u"inch", position = :interior, shape = :rectangular)
+            Vu = 200.0u"kip"
+            Mub = 30.0u"kip*ft"
+            d = 8.0u"inch"
+            h = 10.0u"inch"
+            fc_4k = 4000.0u"psi"
+            fc_8k = 8000.0u"psi"
+            r_lo = StructuralSizer.check_punching_for_column(col, Vu, Mub, d, h, fc_4k)
+            r_hi = StructuralSizer.check_punching_for_column(col, Vu, Mub, d, h, fc_8k)
+            @test ustrip(u"psi", r_hi.φvc) > ustrip(u"psi", r_lo.φvc)
+            @test r_hi.ratio < r_lo.ratio
+        end
+
+        # Micro-experiment modified.* uses the same checker; fc_in only → lower modified ratio at higher fc.
+        @testset "experiment_punching fc_in sweep: modified ratio decreases" begin
+            fcs = (3000.0, 4500.0, 6000.0, 8000.0)
+            ratios = Float64[]
+            for fc in fcs
+                r = experiment_punching(TEST_DESIGN, col_idx; fc_in = fc)
+                @test !haskey(r, "error")
+                @test r["experiment"] == "punching"
+                push!(ratios, r["modified"]["ratio"])
+            end
+            for i in 1:length(fcs)-1
+                @test ratios[i] >= ratios[i + 1]
+            end
+            @test ratios[1] > ratios[end]
+        end
+
+        # delta_ratio / improved compare to design-stored original.ratio, not to a recomputed baseline.
+        @testset "experiment_punching: higher fc lowers modified ratio (compare fc extremes)" begin
+            r_hi = experiment_punching(TEST_DESIGN, col_idx; fc_in = 8000.0)
+            r_lo = experiment_punching(TEST_DESIGN, col_idx; fc_in = 3000.0)
+            @test r_hi["modified"]["ratio"] < r_lo["modified"]["ratio"]
+            @test haskey(r_hi, "improved")
+        end
+
         @testset "error: bad column index" begin
             r = experiment_punching(TEST_DESIGN, 99999)
             @test haskey(r, "error")
@@ -191,7 +230,8 @@ end
                 @test haskey(r, "modified")
                 @test haskey(r, "delta_ratio")
                 @test haskey(r, "improved")
-                @test haskey(r, "note")
+                @test haskey(r, "experimental_setup")
+                @test haskey(r["experimental_setup"], "note")
 
                 dem = r["demands"]
                 @test haskey(dem, "Pu_kip")

@@ -581,11 +581,11 @@ function _execute_design(input::APIInput)
                     "Ensure vertices have different Z coordinates."
                 end
                 
-                validation_err = Dict(
-                    "status" => "error",
-                    "error" => "ValidationError",
-                    "message" => error_msg,
-                    "errors" => [error_msg],
+                validation_err = APIError(
+                    status = "error",
+                    error = "ValidationError",
+                    message = error_msg,
+                    traceback = "",
                 )
                 with_cache_write!(c -> (c.last_result = validation_err), DESIGN_CACHE)
                 _append_design_log!("Validation error: $error_msg")
@@ -665,12 +665,13 @@ function _execute_design(input::APIInput)
     catch e
         if e isa PreSizingValidationError
             @warn "Pre-sizing validation failed" errors=e.errors
-            _append_design_log!("Pre-sizing validation failed: $(join(e.errors, "; "))")
-            resp = Dict(
-                "status" => "error",
-                "error" => "ValidationError",
-                "message" => "Method applicability check failed: $(length(e.errors)) violation(s)",
-                "errors" => e.errors,
+            detail = join(e.errors, "; ")
+            _append_design_log!("Pre-sizing validation failed: $detail")
+            resp = APIError(
+                status = "error",
+                error = "ValidationError",
+                message = "Method applicability check failed ($(length(e.errors)) violation(s)): $detail",
+                traceback = "",
             )
             with_cache_write!(c -> (c.last_result = resp), DESIGN_CACHE)
             return _json_bad(resp)

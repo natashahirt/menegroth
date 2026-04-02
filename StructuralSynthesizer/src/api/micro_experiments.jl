@@ -1815,6 +1815,8 @@ function batch_evaluate(
                 "type"    => exp_type_str,
             )
         end
+        # _sanitize_for_json may infer Dict{String,String}; widen before adding Int metadata.
+        r = Dict{String, Any}(r)
         r["experiment_index"] = i
         r["type"] = exp_type_str
         push!(results, r)

@@ -801,14 +801,39 @@ function _report_takeoff(io::IO, design::BuildingDesign; du::DisplayUnits=design
     Printf.@printf(io, "  %-16s %12.1f\n", "TOTAL", conc_total)
     println(io)
 
-    # Embodied carbon — read from design.summary (computed before restore!)
-    ec_total = design.summary.embodied_carbon
-    if ec_total > 0
-        Printf.@printf(io, "  Embodied Carbon:  %.0f kgCO₂e\n", ec_total)
-        area_m2 = ustrip(u"m^2", total_slab_area)
-        if area_m2 > 0
-            Printf.@printf(io, "  EC Intensity:     %.1f kgCO₂e/m²\n", ec_total / area_m2)
+    # Embodied carbon — full breakdown (columns listed explicitly for takeoff readability)
+    try
+        ec = compute_building_ec(struc, params)
+        col_ec = sum(r.ec for r in ec.members if r.element_type == :column; init=0.0)
+        beam_ec = sum(r.ec for r in ec.members if r.element_type == :beam; init=0.0)
+        strut_ec = sum(r.ec for r in ec.members if r.element_type == :strut; init=0.0)
+        println(io, "  Embodied carbon (kgCO₂e)")
+        Printf.@printf(io, "  %-20s %12.0f\n", "Slabs", ec.slab_ec)
+        Printf.@printf(io, "  %-20s %12.0f\n", "Columns", col_ec)
+        Printf.@printf(io, "  %-20s %12.0f\n", "Beams", beam_ec)
+        if strut_ec > 0.0
+            Printf.@printf(io, "  %-20s %12.0f\n", "Struts", strut_ec)
         end
+        Printf.@printf(io, "  %-20s %12.0f\n", "Foundations", ec.foundation_ec)
+        if ec.fireproofing_ec > 0.0
+            Printf.@printf(io, "  %-20s %12.0f\n", "Fireproofing", ec.fireproofing_ec)
+        end
+        Printf.@printf(io, "  %-20s %12s\n", "─"^18, "─"^12)
+        Printf.@printf(io, "  %-20s %12.0f\n", "TOTAL", ec.total_ec)
+        area_m2 = ustrip(u"m^2", total_slab_area)
+        if area_m2 > 0 && ec.total_ec > 0.0
+            Printf.@printf(io, "  EC intensity (floor): %.1f kgCO₂e/m²\n", ec.total_ec / area_m2)
+        end
+    catch e
+        ec_total = design.summary.embodied_carbon
+        if ec_total > 0.0
+            Printf.@printf(io, "  Embodied carbon:  %.0f kgCO₂e (breakdown unavailable)\n", ec_total)
+            area_m2 = ustrip(u"m^2", total_slab_area)
+            if area_m2 > 0
+                Printf.@printf(io, "  EC intensity:     %.1f kgCO₂e/m²\n", ec_total / area_m2)
+            end
+        end
+        @debug "Material takeoff: embodied carbon breakdown failed" exception = (e, catch_backtrace())
     end
     println(io)
 end

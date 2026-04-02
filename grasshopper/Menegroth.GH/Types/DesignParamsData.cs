@@ -283,7 +283,14 @@ namespace Menegroth.GH.Types
             if (patch.TryGetValue("beam_sizing_strategy", out var bss)) BeamSizingStrategy = bss.ToString();
             if (patch.TryGetValue("fire_rating", out var fr)) FireRating = (double)fr;
             if (patch.TryGetValue("optimize_for", out var of)) OptimizeFor = of.ToString();
-            if (patch.TryGetValue("uniform_column_sizing", out var ucs)) UniformColumnSizing = ucs.ToString();
+            // JSON booleans are common from assistants / hand-written JSON; ToString() would yield "False"/"True".
+            if (patch.TryGetValue("uniform_column_sizing", out var ucs))
+            {
+                if (ucs.Type == JTokenType.Boolean)
+                    UniformColumnSizing = ucs.Value<bool>() ? "building" : "off";
+                else
+                    UniformColumnSizing = ucs.ToString();
+            }
             if (patch.TryGetValue("max_iterations", out var mi)) MaxIterations = mi.Type == JTokenType.Null ? null : (int?)mi;
             if (patch.TryGetValue("size_foundations", out var sf)) SizeFoundations = (bool)sf;
             if (patch.TryGetValue("foundation_soil", out var fs)) FoundationSoil = fs.ToString();

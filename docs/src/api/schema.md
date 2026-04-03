@@ -76,6 +76,7 @@ A dictionary mapping face group names to face-coordinate polylines:
 | `foundation_concrete` | `String` | `"NWC_3000"` | Foundation concrete grade (used when `size_foundations=true`) |
 | `foundation_options` | `Union{APIFoundationOptions, Nothing}` | `nothing` | Optional strategy + per-type overrides (spread/strip/mat). Applied when `size_foundations=true`. |
 | `scoped_overrides` | `Vector{APIScopedOverride}` | `[]` | Optional face-scoped floor overrides (e.g., vault-only regions). |
+| `uniform_column_sizing` | `String` | `"off"` | Uniform column sizing policy: `"off"` (independent), `"per_story"` (governing size per story), or `"building"` (single governing size). Not supported for `column_type="pixelframe"` (rejected by validation). |
 | `geometry_is_centerline` | `Bool` | `false` | How to interpret input vertex coordinates — see [Structural Column Offsets](#structural-column-offsets) |
 | `visualization_target_edge_m` | `Union{Float64, Nothing}` | `nothing` | Optional visualization shell-mesh target edge length in meters (coarser = faster). |
 | `skip_visualization` | `Bool` | `false` | When `true`, skips shell-mesh build and returns `visualization = null` (faster responses; frame-only behavior). |
@@ -222,11 +223,16 @@ Face-scoped floor override blocks (used for region-specific floor types like vau
 
 ### APIOutput
 
-The top-level response from `POST /design`.
+The top-level **design result** payload returned by `GET /result` (after a `POST /design`
+submission completes and `GET /status` reports `state == "idle"`).
+
+`POST /design` itself is asynchronous: it returns either **HTTP 202** with
+`{"status":"accepted", ...}` or **HTTP 200** with `{"status":"queued", ...}`. The
+result is fetched via `GET /result`.
 
 | Field | Type | Description |
 |:------|:-----|:------------|
-| `status` | `String` | Always `"ok"` for a successful `POST /design` response (`APIOutput`). Error responses use `APIError` or an error-shaped `Dict` depending on the failure mode. |
+| `status` | `String` | Always `"ok"` for a successful design result (`APIOutput`). Error responses use `APIError` (or an error-shaped `Dict`) depending on the failure mode. |
 | `compute_time_s` | `Float64` | Wall-clock design time in seconds |
 | `phase_timings` | `Dict{String, Float64}` | Timing breakdown by phase (seconds). Always includes `"serialize_visualization"` (near-zero when `skip_visualization=true`). |
 | `length_unit` | `String` | Length unit label for length-category outputs (`"ft"` or `"m"`) |

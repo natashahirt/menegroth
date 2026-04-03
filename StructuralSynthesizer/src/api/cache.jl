@@ -299,6 +299,26 @@ function clear_session_insights!()
 end
 
 """
+    reset_session_state!(cache::DesignCache; reason::String="")
+
+Clear all session-scoped state: design history, session insights, and the
+cached diagnose result. Call when the geometry hash changes (new building model)
+so the LLM does not confuse old results with the current model.
+
+Does NOT clear the `DesignCache` geometry/skeleton/structure — those are
+overwritten by the new POST /design. Also does NOT clear `CHAT_HISTORY` here;
+that is managed by `_clear_history!` in `chat.jl`.
+"""
+function reset_session_state!(cache::DesignCache; reason::String="")
+    clear_design_history!()
+    clear_session_insights!()
+    invalidate_diagnose_cache!(cache)
+    if !isempty(reason)
+        @info "Session state reset" reason
+    end
+end
+
+"""
     session_insights_to_json(insights::Vector{SessionInsight}) -> Vector{Dict{String, Any}}
 
 Serialize session insights for JSON output.

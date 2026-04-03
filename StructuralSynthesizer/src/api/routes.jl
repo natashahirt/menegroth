@@ -210,7 +210,8 @@ function register_routes!()
                 "POST /rebuild_visualization" => "Rebuild visualization mesh only. Body: {\"target_edge_m\": <positive float>}. Requires a cached design.",
                 "GET /report" => "Engineering report (plain text by default; ?format=json for structured summary)",
                 "GET /diagnose" => "High-resolution agent diagnostic JSON: per-element checks with demand/capacity, governing_check, levers, embodied carbon, plus architectural narrative and lever impact estimates. ?units=imperial|metric",
-                "POST /chat" => "LLM chat endpoint (SSE streaming). Body: {mode, messages, params?, geometry_summary?, building_geometry? (same JSON as POST /design geometry, without params), geometry? (alias), session_id?, client_geometry_hash?}. " *
+                "POST /chat" => "LLM chat endpoint (SSE streaming). Body: {mode, messages, params?, geometry_summary?, building_geometry? (same JSON as POST /design geometry, without params), geometry? (alias), session_id?, client_geometry_hash?, reset_session?:bool}. " *
+                    "When reset_session is true, all server-side conversation history, design history, and session insights are cleared before processing the message (use on Grasshopper restart or new session). " *
                     "When building_geometry is present, the server derives the same geometry hash as POST /design (params excluded) and injects GEOMETRY_CONTEXT (aligned_with_server, geometry_stale) into the system prompt; client_geometry_hash is optional when structured geometry is sent. " *
                     "If POST /design is in progress, SSE begins with {type:\"design_wait\", phase:\"start\"|\"polling\", message, elapsed_s?, server_status?} until idle, then {type:\"design_ready\"} (wait up to CHAT_PRE_CHAT_DESIGN_WAIT_TIMEOUT_S, default 3600 s). " *
                     "SSE events: {token:string}, " *
@@ -226,6 +227,7 @@ function register_routes!()
                 "GET /schema/diagnose" => "Versioned contract for GET /diagnose payload structure",
                 "GET /schema/tools" => "Structured tool registry: name, description, phase, use_when, args, returns for all agent tools",
                 "GET /schema/llm_contract" => "Versioned LLM contract: system capabilities, tools, parameters, scope limits, experiment types",
+                "POST /reset" => "Clear all session state (design cache, history, insights, chat history). Call on Grasshopper restart or document change. Fails with 503 if server is busy.",
                 "GET /schema" => "This documentation",
             ),
         )
@@ -490,6 +492,37 @@ function register_routes!()
         return _json_resp(200, cached_result)
     end
 
+    # ─── POST /reset ─────────────────────────────────────────────────
+    # Wipe all session-scoped state so the next interaction starts fresh.
+    # Grasshopper should call this on plugin load / document change.
+    @post "/reset" function (_::HTTP.Request)
+        st = status_string(SERVER_STATUS)
+        if st != "idle"
+            return _json_resp(503, Dict(
+                "status" => "running",
+                "message" => "Server is busy. Wait until idle before resetting.",
+            ))
+        end
+        reset_session_state!(DESIGN_CACHE; reason="explicit POST /reset")
+        with_cache_write!(DESIGN_CACHE) do c
+            c.geometry_hash = ""
+            c.skeleton = nothing
+            c.structure = nothing
+            c.last_result = nothing
+            c.last_design = nothing
+            c.last_api_params_json = Dict{String, Any}()
+            c.design_version = 0
+        end
+        _reset_design_logs!()
+        _clear_history!("all")
+        lock(_CHAT_STRUCTURE_CACHE.lock) do
+            _CHAT_STRUCTURE_CACHE.geometry_hash = ""
+            _CHAT_STRUCTURE_CACHE.structure = nothing
+            _CHAT_STRUCTURE_CACHE.digest = nothing
+        end
+        return _json_ok(Dict("status" => "ok", "message" => "All session state cleared."))
+    end
+
     # ─── Chat routes (LLM-powered assistant) ─────────────────────────
     register_chat_routes!()
 
@@ -556,6 +589,17 @@ function _execute_design(input::APIInput)
         else
             @info "Building new skeleton from JSON input"
             _append_design_log!("Building new skeleton from input.")
+            prev_hash = with_cache_read(c -> c.geometry_hash, DESIGN_CACHE)
+            if !isempty(prev_hash) && prev_hash != geo_hash
+                reset_session_state!(DESIGN_CACHE; reason="geometry hash changed (POST /design)")
+                _clear_history!("all")
+                lock(_CHAT_STRUCTURE_CACHE.lock) do
+                    _CHAT_STRUCTURE_CACHE.geometry_hash = ""
+                    _CHAT_STRUCTURE_CACHE.structure = nothing
+                    _CHAT_STRUCTURE_CACHE.digest = nothing
+                end
+                _append_design_log!("Geometry changed — session history/insights/chat cleared.")
+            end
             skel = json_to_skeleton(input)
             
             # Validate that we have at least 2 stories (after rebuild_stories!)

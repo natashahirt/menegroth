@@ -650,6 +650,19 @@ function _chat_get_or_build_structure(
         end
     end
 
+    prev_chat_hash = lock(_CHAT_STRUCTURE_CACHE.lock) do
+        _CHAT_STRUCTURE_CACHE.geometry_hash
+    end
+    if !isempty(prev_chat_hash) && prev_chat_hash != geo_hash
+        reset_session_state!(DESIGN_CACHE; reason="geometry hash changed (POST /chat)")
+        _clear_history!("all")
+        _chat_geometry_sse_emit!(
+            sse_stream, "session_reset";
+            message = "New geometry detected — previous session history and insights cleared.",
+            geometry_hash_prefix = hp,
+        )
+    end
+
     _chat_geometry_sse_emit!(
         sse_stream, "start";
         message = "Building analytical model from geometry (no structural solver).",
@@ -4776,11 +4789,19 @@ function register_chat_routes!()
         geometry_summary      = string(get(parsed, :geometry_summary, get(parsed, "geometry_summary", "")))
         session_id            = string(get(parsed, :session_id, ""))
         client_geometry_hash  = string(get(parsed, :client_geometry_hash, ""))
+        reset_session         = something(_chat_coerce_bool(get(parsed, :reset_session, get(parsed, "reset_session", false))), false)
         bg_raw = get(parsed, :building_geometry, get(parsed, "building_geometry", nothing))
         structured_geo = _parse_chat_building_geometry(bg_raw)
         if isnothing(structured_geo)
             g_raw = get(parsed, :geometry, get(parsed, "geometry", nothing))
             structured_geo = _parse_chat_building_geometry(g_raw)
+        end
+
+        if reset_session
+            _clear_history!("all")
+            clear_design_history!()
+            clear_session_insights!()
+            @info "Chat session reset requested by client"
         end
 
         # Persist the latest user message to server-side history.

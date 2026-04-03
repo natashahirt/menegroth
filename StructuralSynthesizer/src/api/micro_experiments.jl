@@ -328,22 +328,22 @@ function experiment_punching(
                ustrip(u"inch", new_c2) >= ustrip(u"inch", inp.orig_c2)
     slab_grew = ustrip(u"inch", new_h) >= ustrip(u"inch", inp.orig_h)
     if col_grew && slab_grew && !improved && abs(delta) > 0.05
-        sanity_warning = "WARNING: Ratio worsened despite larger column/slab. " *
-            "With Vu adjusted for critical-area change this is unusual. " *
-            "Likely cause: unbalanced moment dominates (eccentric stress = " *
-            "$(round(ustrip(u"psi", vu_eccentric); digits=1)) psi vs direct = " *
-            "$(round(ustrip(u"psi", vu_direct); digits=1)) psi). " *
-            "Consider verifying with a full run_design."
+        sanity_warning = "NOTE: Ratio increased despite larger column/slab. " *
+            "Eccentric stress = $(round(ustrip(u"psi", vu_eccentric); digits=1)) psi, " *
+            "direct stress = $(round(ustrip(u"psi", vu_direct); digits=1)) psi. " *
+            "Run run_design for the full system check."
     end
 
     # ── f'c coupling caveat: column size held constant in this experiment ──
     fc_only_change = !isnothing(fc_in) && isnothing(c1_in) && isnothing(c2_in) && isnothing(h_in)
     if fc_only_change
-        coupling_caveat = "IMPORTANT: This experiment holds column size constant while " *
-            "changing f'c. In a full redesign, higher f'c allows the column sizer to " *
-            "select SMALLER columns (less area needed for axial P-M), which would SHRINK " *
-            "b₀ and potentially WORSEN punching despite the higher Vc. This result shows " *
-            "only the isolated Vc improvement. Run a full run_design to see the net system effect."
+        dir = improved ? "decreased" : (delta == 0 ? "unchanged" : "increased")
+        coupling_caveat =
+            "ISOLATED RESULT: Column size held constant. Ratio $dir " *
+            "from $(round(orig_ratio; digits=3)) to $(round(new_ratio; digits=3)) " *
+            "(f'c: $(round(ustrip(u"psi", orig_fc); digits=0)) → $(round(ustrip(u"psi", fc); digits=0)) psi). " *
+            "NOT TESTED HERE: A full redesign re-sizes columns for axial P-M at the new f'c, " *
+            "which changes b₀. Run run_design to see the net system effect."
     else
         coupling_caveat = nothing
     end
@@ -368,8 +368,14 @@ function experiment_punching(
         note = isempty(changed) ? "Baseline re-check with no modifications." : nothing,
     )
 
+    dir_word = improved ? "decreased" : (delta == 0.0 ? "unchanged" : "increased")
+    ok_word  = result.ok ? "PASS" : "FAIL"
+
     out = Dict{String, Any}(
         "experiment" => "punching",
+        "result_summary" => "Ratio $dir_word from $(round(orig_ratio; digits=3)) to " *
+            "$(round(new_ratio; digits=3)) ($(ok_word)). " *
+            "Delta = $(round(delta; digits=3)).",
         "experimental_setup" => setup,
         "column_idx" => col_idx,
         "position" => string(inp.position),
@@ -412,13 +418,10 @@ function experiment_punching(
     !isnothing(sanity_warning) && (out["sanity_warning"] = sanity_warning)
     !isnothing(coupling_caveat) && (out["coupling_caveat"] = coupling_caveat)
 
-    # Cross-check coupling: punching experiment does not re-check P-M or foundations
     out["cross_check_caveat"] =
-        "This experiment isolates punching shear only. Changing column size here does NOT " *
-        "update the P-M interaction check (axial + bending capacity), slab flexural design, " *
-        "or foundation sizing. A column that passes punching at a new size may still fail " *
-        "P-M or require a different foundation. Run a full run_design to see all checks together, " *
-        "or use pm_column experiment to test the same column size against P-M demands."
+        "SCOPE: Punching shear only. P-M interaction, slab flexure, and foundation sizing " *
+        "are NOT re-checked. Use pm_column to test the same column size against P-M demands, " *
+        "or run_design for all checks together."
 
     return out
 end
@@ -555,8 +558,13 @@ function _experiment_pm_rc(
         note = "Rebar count/size scaled heuristically to section dimension. Actual optimizer may choose differently.",
     )
 
+    _dir = new_ratio < orig_ratio ? "decreased" : (new_ratio == orig_ratio ? "unchanged" : "increased")
+    _ok  = expl.passed ? "PASS" : "FAIL"
+
     return Dict{String, Any}(
         "experiment" => "pm_column",
+        "result_summary" => "Ratio $_dir from $(round(orig_ratio; digits=3)) to " *
+            "$(round(new_ratio; digits=3)) ($_ok). Delta = $(round(new_ratio - orig_ratio; digits=3)).",
         "experimental_setup" => setup,
         "column_idx" => col_idx,
         "column_type" => "RC",
@@ -588,11 +596,9 @@ function _experiment_pm_rc(
         "delta_ratio" => round(new_ratio - orig_ratio; digits=3),
         "improved" => new_ratio < orig_ratio,
         "cross_check_caveat" =>
-            "This experiment isolates P-M interaction only. Changing column section size " *
-            "directly affects punching shear (b₀ changes with column dimensions) and may " *
-            "alter foundation demands. A column that passes P-M at a new size may worsen or " *
-            "improve punching. Run a full run_design to see all checks together, or use the " *
-            "punching experiment to test the same column size against punching demands.",
+            "SCOPE: P-M interaction only. Punching shear (b₀ depends on column dimensions) " *
+            "and foundation sizing are NOT re-checked. Use the punching experiment to test " *
+            "the same section against punching demands, or run_design for all checks together.",
     )
 end
 
@@ -676,8 +682,13 @@ function _experiment_pm_steel(
         source = "Cached design — column $col_idx",
     )
 
+    _dir_s = new_ratio < orig_ratio ? "decreased" : (new_ratio == orig_ratio ? "unchanged" : "increased")
+    _ok_s  = expl.passed ? "PASS" : "FAIL"
+
     result = Dict{String, Any}(
         "experiment" => "pm_column",
+        "result_summary" => "Ratio $_dir_s from $(round(orig_ratio; digits=3)) to " *
+            "$(round(new_ratio; digits=3)) ($_ok_s). Delta = $(round(new_ratio - orig_ratio; digits=3)).",
         "experimental_setup" => setup,
         "column_idx" => col_idx,
         "column_type" => "steel",
@@ -718,14 +729,13 @@ function _experiment_pm_steel(
             isnothing(m) ? nothing : parse(Float64, m.captures[1])
         catch; nothing end
         if !isnothing(orig_weight) && new_weight > orig_weight && new_ratio > orig_ratio
-            result["sanity_warning"] = "Heavier section $(size_str) ($(new_weight) plf) has worse ratio than $(col.section_size) ($(orig_weight) plf). This may indicate a slenderness or local buckling issue — check the governing_check field."
+            result["sanity_warning"] = "Heavier section $(size_str) ($(new_weight) plf) has worse ratio than $(col.section_size) ($(orig_weight) plf). See the governing_check field for which limit state controls."
         end
     end
 
     result["cross_check_caveat"] =
-        "This experiment isolates P-M interaction only. Changing column section affects " *
-        "punching shear (b₀ scales with flange/web dimensions) and may alter foundation " *
-        "demands. Run a full run_design to see all checks together."
+        "SCOPE: P-M interaction only. Punching shear (b₀ depends on section dimensions) " *
+        "and foundation sizing are NOT re-checked. Run run_design for all checks together."
 
     return result
 end
@@ -831,8 +841,13 @@ function experiment_beam(
         source = "Cached design — beam $beam_idx",
     )
 
+    _dir_b = new_ratio < orig_ratio ? "decreased" : (new_ratio == orig_ratio ? "unchanged" : "increased")
+    _ok_b  = expl.passed ? "PASS" : "FAIL"
+
     result = Dict{String, Any}(
         "experiment" => "beam",
+        "result_summary" => "Ratio $_dir_b from $(round(orig_ratio; digits=3)) to " *
+            "$(round(new_ratio; digits=3)) ($_ok_b). Delta = $(round(new_ratio - orig_ratio; digits=3)).",
         "experimental_setup" => setup,
         "beam_idx" => beam_idx,
         "demands" => Dict{String, Any}(
@@ -874,14 +889,13 @@ function experiment_beam(
         if !isnothing(orig_weight) && new_weight > orig_weight && new_ratio > orig_ratio
             result["sanity_warning"] = "Heavier section $(size_str) ($(new_weight) plf) " *
                 "has worse ratio than $(beam.section_size) ($(orig_weight) plf). " *
-                "Check governing_check — may indicate LTB, depth, or local buckling issue."
+                "See governing_check for which limit state controls."
         end
     end
 
     result["cross_check_caveat"] =
-        "This experiment isolates beam flexure/shear only. Beam depth affects floor-to-floor " *
-        "height and connection demands. Slab tributary loads and deflections are held constant. " *
-        "Run a full run_design to see all checks together."
+        "SCOPE: Beam flexure/shear only. Slab tributary loads, deflections, floor-to-floor " *
+        "height, and connection demands are NOT re-checked. Run run_design for all checks together."
 
     return result
 end
@@ -975,11 +989,18 @@ function experiment_punching_reinforcement(
             changed = ["adding closed stirrups (#$(bs) bars, fyt=$(round(ustrip(u"psi", fyt); digits=0)) psi)"],
             held_constant = reinf_held,
             source = "Cached design — column $col_idx",
-            note = "Column dimensions unchanged — this tests capacity-side improvement only (adds Vs to Vc).",
+            note = "Column dimensions unchanged. Stirrups add Vs to Vc on the capacity side; demand is unchanged.",
         )
+
+        _dir_st = reinforced_check.ratio < unreinforced_ratio ? "decreased" :
+                  (reinforced_check.ratio == unreinforced_ratio ? "unchanged" : "increased")
+        _ok_st  = reinforced_check.ok ? "PASS" : "FAIL"
 
         out_st = Dict{String, Any}(
             "experiment" => "punching_reinforcement",
+            "result_summary" => "Ratio $_dir_st from $(round(unreinforced_ratio; digits=3)) to " *
+                "$(round(reinforced_check.ratio; digits=3)) ($_ok_st). " *
+                "Delta = $(round(reinforced_check.ratio - unreinforced_ratio; digits=3)).",
             "experimental_setup" => setup,
             "column_idx" => col_idx,
             "position" => string(position),
@@ -1010,16 +1031,15 @@ function experiment_punching_reinforcement(
             "delta_ratio" => round(reinforced_check.ratio - unreinforced_ratio; digits=3),
         )
         if !design_result.required || design_result.n_legs == 0
-            out_st["note"] = "Stirrups were not required by the design routine, or layout is empty — " *
-                "demand may be within φVc or exceed code limits for closed stirrups."
+            out_st["note"] = "Stirrups not required or layout is empty (n_legs=0). " *
+                "Check unreinforced ratio and φVc vs vu above."
         elseif !isfinite(reinforced_check.ratio)
-            out_st["note"] = "Reinforced check ratio is not finite — verify demand vs ACI limits for stirrup-reinforced punching."
+            out_st["note"] = "Reinforced ratio is non-finite. Check demand vs ACI stress limits."
         end
         out_st["cross_check_caveat"] =
-            "This experiment isolates punching shear capacity with reinforcement. Column size, " *
-            "slab thickness, and P-M interaction are held constant. Adding shear reinforcement " *
-            "does not change column axial/bending capacity or foundation demands. Run a full " *
-            "run_design to verify all checks together."
+            "SCOPE: Punching shear capacity with stirrup reinforcement only. Column size, " *
+            "slab thickness, P-M interaction, and foundation sizing are NOT re-checked. " *
+            "Run run_design for all checks together."
         return out_st
     else  # studs (default)
         sd = isnothing(stud_diameter_in) ? 0.5u"inch" : stud_diameter_in * u"inch"
@@ -1043,11 +1063,18 @@ function experiment_punching_reinforcement(
             changed = ["adding shear studs (ø$(round(ustrip(u"inch", sd); digits=3))\" studs, fyt=$(round(ustrip(u"psi", fyt); digits=0)) psi)"],
             held_constant = reinf_held,
             source = "Cached design — column $col_idx",
-            note = "Column dimensions unchanged — this tests capacity-side improvement only (adds Vs to Vc).",
+            note = "Column dimensions unchanged. Studs add Vs to Vc on the capacity side; demand is unchanged.",
         )
+
+        _dir_sd = reinforced_check.ratio < unreinforced_ratio ? "decreased" :
+                  (reinforced_check.ratio == unreinforced_ratio ? "unchanged" : "increased")
+        _ok_sd  = reinforced_check.ok ? "PASS" : "FAIL"
 
         out_sd = Dict{String, Any}(
             "experiment" => "punching_reinforcement",
+            "result_summary" => "Ratio $_dir_sd from $(round(unreinforced_ratio; digits=3)) to " *
+                "$(round(reinforced_check.ratio; digits=3)) ($_ok_sd). " *
+                "Delta = $(round(reinforced_check.ratio - unreinforced_ratio; digits=3)).",
             "experimental_setup" => setup,
             "column_idx" => col_idx,
             "position" => string(position),
@@ -1078,15 +1105,15 @@ function experiment_punching_reinforcement(
             "delta_ratio" => round(reinforced_check.ratio - unreinforced_ratio; digits=3),
         )
         if !design_result.required || design_result.n_rails == 0
-            out_sd["note"] = "Studs were not laid out (n_rails = 0) — demand may exceed code limits for headed stud reinforcement, or φVc already suffices."
+            out_sd["note"] = "Studs not laid out (n_rails=0). " *
+                "Check unreinforced ratio and φVc vs vu above."
         elseif !isfinite(reinforced_check.ratio)
-            out_sd["note"] = "Reinforced check ratio is not finite — verify demand vs ACI stress limits for stud-reinforced punching."
+            out_sd["note"] = "Reinforced ratio is non-finite. Check demand vs ACI stress limits."
         end
         out_sd["cross_check_caveat"] =
-            "This experiment isolates punching shear capacity with reinforcement. Column size, " *
-            "slab thickness, and P-M interaction are held constant. Adding shear reinforcement " *
-            "does not change column axial/bending capacity or foundation demands. Run a full " *
-            "run_design to verify all checks together."
+            "SCOPE: Punching shear capacity with stud reinforcement only. Column size, " *
+            "slab thickness, P-M interaction, and foundation sizing are NOT re-checked. " *
+            "Run run_design for all checks together."
         return out_sd
     end
 end
@@ -1294,8 +1321,15 @@ function experiment_punching_column_downsize(
         note = "Demand-side Vu/Mub are NOT recomputed from tributary area when the column shrinks — this isolates capacity vs footprint at fixed shear/moment transfer.",
     )
 
+    _smaller = best_scale < 1.0 - 1e-6
+    _area_pct = isnothing(area_ratio) ? "" : " ($(round(area_ratio * 100; digits=1))% of original area)"
+
     out = Dict{String, Any}(
         "experiment" => "punching_column_downsize",
+        "result_summary" => "Min feasible column $(new_c1_in)×$(new_c2_in) in " *
+            "(scale=$(round(best_scale; digits=4)))$(_area_pct). " *
+            "Punching ratio = $(round(ratio_b; digits=3)), $(ok_b ? "PASS" : "FAIL"). " *
+            "$(_smaller ? "Column CAN be reduced." : "Column cannot be reduced further.")",
         "experimental_setup" => setup,
         "column_idx" => col_idx,
         "reinforcement_type" => use_stirrups ? "stirrups" : "studs",
@@ -1313,7 +1347,7 @@ function experiment_punching_column_downsize(
             "ok" => ok_b,
         ),
         "plan_area_fraction_of_original" => isnothing(area_ratio) ? nothing : round(area_ratio; digits=3),
-        "column_smaller_than_design" => best_scale < 1.0 - 1e-6,
+        "column_smaller_than_design" => _smaller,
     )
 
     if check_pm
@@ -1328,8 +1362,8 @@ function experiment_punching_column_downsize(
                 "pm_interaction_ratio" => get(get(pmr, "modified", Dict()), "interaction_ratio", nothing),
             )
             out["cross_check_caveat"] =
-                "P-M check uses a square RC section with side = max(c1,c2) at the downsized footprint (heuristic). " *
-                "True rectangular detailing may differ; run_design confirms all limit states together."
+                "P-M check uses a heuristic square RC section with side = max(c1,c2) at the downsized footprint. " *
+                "Rectangular detailing and other limit states are NOT tested. Run run_design for confirmation."
         else
             out["pm_at_downsized_square"] = Dict{String, Any}(
                 "note" => "pm_column downsize cross-check skipped — not an RC column in cached results.",
@@ -1339,7 +1373,8 @@ function experiment_punching_column_downsize(
 
     if !haskey(out, "cross_check_caveat")
         out["cross_check_caveat"] =
-            "Vu/Mub are frozen from the cached analysis. Shrinking the column in the real structure would change stiffness and load distribution — use this experiment as an indicative trade-off, then confirm with run_design."
+            "SCOPE: Punching capacity at frozen Vu/Mub only. Stiffness, load distribution, " *
+            "and other limit states are NOT re-checked. Run run_design for confirmation."
     end
 
     return out
@@ -1432,11 +1467,16 @@ function experiment_deflection(
                          "span = $(isnothing(span_ft) ? "N/A" : "$(round(span_ft; digits=1)) ft")",
                          "concrete properties, loading, reinforcement"],
         source = "Cached design — slab $slab_idx",
-        note = "Only the allowable limit changes. Actual deflection stays fixed. To reduce actual deflection, increase slab thickness via run_design.",
+        note = "Only the allowable limit changes. Actual deflection stays fixed. Actual deflection is not recomputed here.",
     )
+
+    _dir_d = new_ratio < orig_ratio ? "decreased" : (new_ratio == orig_ratio ? "unchanged" : "increased")
+    _ok_d  = new_ok ? "PASS" : "FAIL"
 
     result = Dict{String, Any}(
         "experiment" => "deflection",
+        "result_summary" => "Ratio $_dir_d from $(round(orig_ratio; digits=3)) to " *
+            "$(round(new_ratio; digits=3)) ($_ok_d). Delta = $(round(new_ratio - orig_ratio; digits=3)).",
         "experimental_setup" => setup,
         "slab_idx" => slab_idx,
         "slab_context" => Dict{String, Any}(
@@ -1461,11 +1501,11 @@ function experiment_deflection(
     )
 
     if !new_ok && orig_ok
-        result["warning"] = "Changing to $(deflection_limit) makes this slab FAIL deflection (ratio $(round(new_ratio; digits=2)) > 1.0). A thicker slab or higher-stiffness concrete would be needed."
+        result["warning"] = "At $(deflection_limit), slab FAILS deflection: ratio = $(round(new_ratio; digits=3)) > 1.0."
     elseif new_ok && !orig_ok
-        result["note"] = "Relaxing to $(deflection_limit) makes this slab PASS deflection. Current deflection $(round(orig_deflection; digits=3))\" < new limit $(round(new_limit; digits=3))\"."
+        result["note"] = "At $(deflection_limit), slab PASSES deflection: $(round(orig_deflection; digits=3))\" < new limit $(round(new_limit; digits=3))\"."
     else
-        result["note"] = "Actual deflection is unchanged at $(round(orig_deflection; digits=3))\". Only the allowable limit changes. To reduce actual deflection, increase slab thickness via run_design."
+        result["note"] = "Actual deflection unchanged at $(round(orig_deflection; digits=3))\". Only the allowable limit changed."
     end
 
     return result
@@ -1550,8 +1590,14 @@ function experiment_catalog_screen(
         source = "Cached design — column $col_idx",
     )
 
+    _best_sec = isempty(feasible) ? "none" : first(feasible)["section"]
+    _best_rat = isempty(feasible) ? "" : " (ratio=$(first(feasible)["interaction_ratio"]))"
+
     return Dict{String, Any}(
         "experiment" => "catalog_screen",
+        "result_summary" => "$(length(feasible))/$(length(results)) candidates pass. " *
+            "Best feasible: $(_best_sec)$(_best_rat). " *
+            (isnothing(lightest_feasible) ? "" : "Lightest feasible: $(lightest_feasible)."),
         "experimental_setup" => setup,
         "column_idx" => col_idx,
         "column_type" => is_rc ? "RC" : "steel",

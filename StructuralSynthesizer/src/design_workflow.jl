@@ -205,7 +205,7 @@ function build_pipeline(params::DesignParameters;
     if !isnothing(params.foundation_options)
         push!(stages, PipelineStage(struc -> begin
             StructuralSizer.emit!(tc, :pipeline, "build_pipeline", "stage_3_foundations", :enter)
-            _size_foundations!(struc, params.foundation_options)
+            _size_foundations!(struc, params.foundation_options; tc=tc)
             StructuralSizer.emit!(tc, :pipeline, "build_pipeline", "stage_3_foundations", :exit)
         end, false))
     end
@@ -418,8 +418,12 @@ end
 Convenience method that creates DesignParameters from keyword arguments.
 """
 function design_building(struc::BuildingStructure; tc::Union{Nothing, StructuralSizer.TraceCollector} = nothing, kwargs...)
+    StructuralSizer.emit!(tc, :pipeline, "design_building_kwargs", "", :enter;
+                          n_kwargs=length(kwargs))
     params = DesignParameters(; kwargs...)
-    return design_building(struc, params; tc=tc)
+    out = design_building(struc, params; tc=tc)
+    StructuralSizer.emit!(tc, :pipeline, "design_building_kwargs", "", :exit)
+    return out
 end
 
 # =============================================================================
@@ -965,7 +969,11 @@ end
 Uses the strategy-aware `size_foundations!` pipeline so that
 `fp.options.strategy` (:mat, :all_spread, :all_strip, :auto, :auto_strip_spread) is respected.
 """
-function _size_foundations!(struc::BuildingStructure, fp::FoundationParameters)
+function _size_foundations!(
+    struc::BuildingStructure,
+    fp::FoundationParameters;
+    tc::Union{Nothing, StructuralSizer.TraceCollector} = nothing,
+)
     initialize_supports!(struc)
     if isempty(struc.supports)
         @warn "Skipping foundation sizing: no supports found. Ensure support vertices are at grade."
@@ -979,6 +987,7 @@ function _size_foundations!(struc::BuildingStructure, fp::FoundationParameters)
         rebar = fp.rebar,
         pier_width = fp.pier_width,
         min_depth = fp.min_depth,
+        tc = tc,
     )
 end
 

@@ -1345,7 +1345,7 @@ function _populate_column_results!(design::BuildingDesign, struc::BuildingStruct
                 ok = pr.ok,
                 critical_perimeter = pr.b0 |> u"m",
                 tributary_area = trib_area_m2,
-                Mub = uconvert(u"kN*m", pr.Mub),
+                Mub = hasproperty(pr, :Mub) ? uconvert(u"kN*m", pr.Mub) : 0.0u"kN*m",
             )
         elseif !isnothing(trib_area)
             result.punching = PunchingDesignResult(

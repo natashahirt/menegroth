@@ -148,6 +148,14 @@ const _TOOL_DISPLAY_LABELS = Dict{String, String}(
 """Approximate token count via character-length heuristic (1 token ≈ 4 chars)."""
 _estimate_tokens(text::AbstractString) = cld(length(text), 4)
 
+"""Recursively replace `Inf`/`-Inf`/`NaN` with JSON-safe values in nested Dict/Vector structures."""
+function _sanitize_ieee_specials(x::AbstractDict)
+    Dict{String, Any}(string(k) => _sanitize_ieee_specials(v) for (k, v) in pairs(x))
+end
+_sanitize_ieee_specials(x::AbstractVector) = [_sanitize_ieee_specials(v) for v in x]
+_sanitize_ieee_specials(x::AbstractFloat) = isfinite(x) ? x : (isnan(x) ? nothing : (x > 0 ? 1.0e308 : -1.0e308))
+_sanitize_ieee_specials(x) = x
+
 """
     _truncate_tool_result(json_str::String; max_chars=MAX_TOOL_RESULT_CHARS) -> String
 
@@ -3327,7 +3335,8 @@ function _stream_llm_to_sse(
                         "summary" => _tool_action_summary(result),
                     ))
 
-                    result_json = JSON3.write(result)
+                    result_safe = result isa AbstractDict ? _sanitize_ieee_specials(result) : result
+                    result_json = JSON3.write(result_safe)
                     result_json = _truncate_tool_result(result_json)
                     push!(tool_results, Dict{String, Any}(
                         "role" => "tool",
@@ -4516,12 +4525,17 @@ function _dispatch_chat_tool(tool::String, args::Dict{String, Any})::Dict{String
 
         cached_geo_hash = with_cache_read(c -> c.geometry_hash, DESIGN_CACHE)
 
+        # Snapshot the SSOT *before* we persist the merged patch so we can
+        # roll back on failure.  Without this, a failed run_design leaves the
+        # SSOT pointing at params that never produced a successful result,
+        # causing the next retry's merge to treat the patch as already applied
+        # (no-op) and the agent to conclude "EC didn't change".
+        params_before = with_cache_read(c -> copy(c.last_api_params_json), DESIGN_CACHE)
+
         design_task = @async begin
             try
-                # Persist merged API params as soon as we commit to this attempt so
-                # validate_params / the next merge see the patch even if design_building
-                # throws, the quick-check times out, or the client disconnects. Semantic
-                # params only — not fast_patch (skip_visualization, capped iterations/MIP).
+                # Persist merged API params eagerly so validate_params / the
+                # next merge see the patch even while design_building runs.
                 lock(DESIGN_CACHE.lock) do
                     DESIGN_CACHE.last_api_params_json = copy(merged)
                 end
@@ -4536,6 +4550,11 @@ function _dispatch_chat_tool(tool::String, args::Dict{String, Any})::Dict{String
                 result_ref[] = d
             catch e
                 @error "run_design task failed" exception=(e, catch_backtrace())
+                # Roll back the SSOT so the next attempt re-applies the patch
+                # instead of treating it as a no-op against stale results.
+                lock(DESIGN_CACHE.lock) do
+                    DESIGN_CACHE.last_api_params_json = params_before
+                end
                 error_ref[] = e
             finally
                 finish!(SERVER_STATUS)
@@ -4562,7 +4581,13 @@ function _dispatch_chat_tool(tool::String, args::Dict{String, Any})::Dict{String
         end
 
         if !isnothing(error_ref[])
-            return Dict("error" => "design_failed", "message" => sprint(showerror, error_ref[]))
+            return Dict(
+                "error"          => "design_failed",
+                "message"        => sprint(showerror, error_ref[]),
+                "params_rolled_back" => true,
+                "recovery_hint"  => "The design failed and the parameter snapshot was rolled back to its pre-attempt state. " *
+                    "Retrying with the same params will re-apply the patch correctly.",
+            )
         end
 
         design = result_ref[]

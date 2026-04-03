@@ -18,6 +18,10 @@
 
 using Unitful
 
+"""Replace `Inf`/`-Inf`/`NaN` with JSON-safe sentinels (JSON spec forbids IEEE specials)."""
+_json_safe(x::Float64) = isfinite(x) ? x : (isnan(x) ? nothing : (x > 0 ? 1.0e308 : -1.0e308))
+_json_safe(x) = x
+
 # ─── Experimental Setup Reporter ─────────────────────────────────────────────
 
 """
@@ -125,8 +129,11 @@ function _punching_critical_area(c1, c2, d, position::Symbol)
     if position == :interior
         return (c1 + d) * (c2 + d)
     elseif position == :edge
+        # 3-sided: slab edge at exterior face, critical section at d/2 past interior face
+        # b1 = c1 + d/2 (full column width + d/2 on interior side only)
         return (c1 + d / 2) * (c2 + d)
     else  # :corner
+        # 2-sided: two slab edges at exterior faces
         return (c1 + d / 2) * (c2 + d / 2)
     end
 end
@@ -178,10 +185,10 @@ function _resolve_punching_inputs(design::BuildingDesign, col_idx::Int)
     cover = 0.75u"inch"
     bar_d = 0.5u"inch"
 
-    # First slab with a thickness (typical single-slab buildings; multi-slab is rare in this path).
+    # First slab with a positive thickness (typical single-slab buildings).
     orig_h = nothing
     for (_, slab) in design.slabs
-        if !isnothing(slab.thickness)
+        if ustrip(u"m", slab.thickness) > 0
             orig_h = slab.thickness
             break
         end
@@ -193,6 +200,13 @@ function _resolve_punching_inputs(design::BuildingDesign, col_idx::Int)
     )
 
     d_orig = orig_h - cover - bar_d
+    if ustrip(u"inch", d_orig) <= 0
+        return Dict{String, Any}(
+            "error" => "invalid_slab_thickness",
+            "message" => "Effective depth d = h − cover − bar_d is non-positive " *
+                "(h ≈ $(round(ustrip(u"inch", orig_h); digits=2)) in). Slab may not be designed yet.",
+        )
+    end
     position = _resolve_column_position(design, col_idx)
     shape = _resolve_column_shape(design, col_idx)
 
@@ -550,7 +564,8 @@ function _experiment_pm_rc(
     return Dict{String, Any}(
         "experiment" => "pm_column",
         "result_summary" => "Ratio $_dir from $(round(orig_ratio; digits=3)) to " *
-            "$(round(new_ratio; digits=3)) ($_ok). Delta = $(round(new_ratio - orig_ratio; digits=3)).",
+            "$(isfinite(new_ratio) ? string(round(new_ratio; digits=3)) : "∞ (capacity zero)") ($_ok). " *
+            "Delta = $(isfinite(new_ratio) ? string(round(new_ratio - orig_ratio; digits=3)) : "N/A").",
         "experimental_setup" => setup,
         "column_idx" => col_idx,
         "column_type" => "RC",
@@ -563,23 +578,23 @@ function _experiment_pm_rc(
         ),
         "original" => Dict{String, Any}(
             "section" => col.section_size,
-            "ratio" => round(orig_ratio; digits=3),
+            "ratio" => _json_safe(round(orig_ratio; digits=3)),
             "ok" => col.ok,
             "governing_check" => column_diagnostic_governing_check(col),
         ),
         "modified" => Dict{String, Any}(
             "section" => dim_str,
             "rebar" => "$(n_bars)-#$(bar_size)",
-            "interaction_ratio" => round(new_ratio; digits=3),
+            "interaction_ratio" => _json_safe(round(new_ratio; digits=3)),
             "governing_check" => expl.governing_check,
             "ok" => expl.passed,
             "checks" => [Dict(
                 "name" => c.name,
                 "passed" => c.passed,
-                "ratio" => round(c.ratio; digits=3),
+                "ratio" => _json_safe(round(c.ratio; digits=3)),
             ) for c in expl.checks],
         ),
-        "delta_ratio" => round(new_ratio - orig_ratio; digits=3),
+        "delta_ratio" => _json_safe(round(new_ratio - orig_ratio; digits=3)),
         "improved" => new_ratio < orig_ratio,
         "cross_check_caveat" =>
             "SCOPE: P-M interaction only. Punching shear (b₀ depends on column dimensions) " *
@@ -674,7 +689,8 @@ function _experiment_pm_steel(
     result = Dict{String, Any}(
         "experiment" => "pm_column",
         "result_summary" => "Ratio $_dir_s from $(round(orig_ratio; digits=3)) to " *
-            "$(round(new_ratio; digits=3)) ($_ok_s). Delta = $(round(new_ratio - orig_ratio; digits=3)).",
+            "$(isfinite(new_ratio) ? string(round(new_ratio; digits=3)) : "∞ (capacity zero)") ($_ok_s). " *
+            "Delta = $(isfinite(new_ratio) ? string(round(new_ratio - orig_ratio; digits=3)) : "N/A").",
         "experimental_setup" => setup,
         "column_idx" => col_idx,
         "column_type" => "steel",
@@ -688,24 +704,24 @@ function _experiment_pm_steel(
         ),
         "original" => Dict{String, Any}(
             "section" => col.section_size,
-            "ratio" => round(orig_ratio; digits=3),
+            "ratio" => _json_safe(round(orig_ratio; digits=3)),
             "ok" => col.ok,
             "governing_check" => column_diagnostic_governing_check(col),
         ),
         "modified" => Dict{String, Any}(
             "section" => size_str,
             "weight_plf" => new_weight,
-            "interaction_ratio" => round(new_ratio; digits=3),
+            "interaction_ratio" => _json_safe(round(new_ratio; digits=3)),
             "governing_check" => expl.governing_check,
             "ok" => expl.passed,
             "checks" => [Dict(
                 "name" => c.name,
                 "passed" => c.passed,
-                "ratio" => round(c.ratio; digits=3),
+                "ratio" => _json_safe(round(c.ratio; digits=3)),
             ) for c in expl.checks],
         ),
-        "delta_ratio" => round(new_ratio - orig_ratio; digits=3),
-        "improved" => new_ratio < orig_ratio,
+        "delta_ratio" => _json_safe(round(new_ratio - orig_ratio; digits=3)),
+        "improved" => isfinite(new_ratio) && new_ratio < orig_ratio,
     )
 
     # Sanity check: heavier section should generally reduce ratio
@@ -833,7 +849,8 @@ function experiment_beam(
     result = Dict{String, Any}(
         "experiment" => "beam",
         "result_summary" => "Ratio $_dir_b from $(round(orig_ratio; digits=3)) to " *
-            "$(round(new_ratio; digits=3)) ($_ok_b). Delta = $(round(new_ratio - orig_ratio; digits=3)).",
+            "$(isfinite(new_ratio) ? string(round(new_ratio; digits=3)) : "∞ (capacity zero)") ($_ok_b). " *
+            "Delta = $(isfinite(new_ratio) ? string(round(new_ratio - orig_ratio; digits=3)) : "N/A").",
         "experimental_setup" => setup,
         "beam_idx" => beam_idx,
         "demands" => Dict{String, Any}(
@@ -845,26 +862,26 @@ function experiment_beam(
         ),
         "original" => Dict{String, Any}(
             "section" => beam.section_size,
-            "flexure_ratio" => round(beam.flexure_ratio; digits=3),
-            "shear_ratio" => round(beam.shear_ratio; digits=3),
-            "governing_ratio" => round(orig_ratio; digits=3),
+            "flexure_ratio" => _json_safe(round(beam.flexure_ratio; digits=3)),
+            "shear_ratio" => _json_safe(round(beam.shear_ratio; digits=3)),
+            "governing_ratio" => _json_safe(round(orig_ratio; digits=3)),
             "ok" => beam.ok,
             "governing_check" => beam_diagnostic_governing_check(beam),
         ),
         "modified" => Dict{String, Any}(
             "section" => size_str,
             "weight_plf" => new_weight,
-            "governing_ratio" => round(new_ratio; digits=3),
+            "governing_ratio" => _json_safe(round(new_ratio; digits=3)),
             "governing_check" => expl.governing_check,
             "ok" => expl.passed,
             "checks" => [Dict(
                 "name" => c.name,
                 "passed" => c.passed,
-                "ratio" => round(c.ratio; digits=3),
+                "ratio" => _json_safe(round(c.ratio; digits=3)),
             ) for c in expl.checks],
         ),
-        "delta_ratio" => round(new_ratio - orig_ratio; digits=3),
-        "improved" => new_ratio < orig_ratio,
+        "delta_ratio" => _json_safe(round(new_ratio - orig_ratio; digits=3)),
+        "improved" => isfinite(new_ratio) && new_ratio < orig_ratio,
     )
 
     if !isnothing(new_weight)
@@ -978,15 +995,17 @@ function experiment_punching_reinforcement(
             note = "Column dimensions unchanged. Stirrups add Vs to Vc on the capacity side; demand is unchanged.",
         )
 
-        _dir_st = reinforced_check.ratio < unreinforced_ratio ? "decreased" :
-                  (reinforced_check.ratio == unreinforced_ratio ? "unchanged" : "increased")
+        r_ratio = reinforced_check.ratio
+        r_ratio_safe = _json_safe(round(r_ratio; digits=3))
+        _dir_st = r_ratio < unreinforced_ratio ? "decreased" :
+                  (r_ratio == unreinforced_ratio ? "unchanged" : "increased")
         _ok_st  = reinforced_check.ok ? "PASS" : "FAIL"
 
         out_st = Dict{String, Any}(
             "experiment" => "punching_reinforcement",
             "result_summary" => "Ratio $_dir_st from $(round(unreinforced_ratio; digits=3)) to " *
-                "$(round(reinforced_check.ratio; digits=3)) ($_ok_st). " *
-                "Delta = $(round(reinforced_check.ratio - unreinforced_ratio; digits=3)).",
+                "$(isfinite(r_ratio) ? string(round(r_ratio; digits=3)) : "∞ (exceeds ACI limits)") ($_ok_st). " *
+                "Delta = $(isfinite(r_ratio) ? string(round(r_ratio - unreinforced_ratio; digits=3)) : "N/A").",
             "experimental_setup" => setup,
             "column_idx" => col_idx,
             "position" => string(position),
@@ -998,7 +1017,7 @@ function experiment_punching_reinforcement(
                 "φvc_psi" => round(ustrip(u"psi", check.φvc); digits=1),
             ),
             "reinforced" => Dict{String, Any}(
-                "ratio" => round(reinforced_check.ratio; digits=3),
+                "ratio" => r_ratio_safe,
                 "ok" => reinforced_check.ok,
                 "required" => design_result.required,
             ),
@@ -1013,14 +1032,14 @@ function experiment_punching_reinforcement(
                 "vcs_psi" => round(ustrip(u"psi", design_result.vcs); digits=1),
                 "outer_ok" => design_result.outer_ok,
             ),
-            "improved" => reinforced_check.ratio < unreinforced_ratio,
-            "delta_ratio" => round(reinforced_check.ratio - unreinforced_ratio; digits=3),
+            "improved" => isfinite(r_ratio) && r_ratio < unreinforced_ratio,
+            "delta_ratio" => _json_safe(round(r_ratio - unreinforced_ratio; digits=3)),
         )
         if !design_result.required || design_result.n_legs == 0
             out_st["note"] = "Stirrups not required or layout is empty (n_legs=0). " *
                 "Check unreinforced ratio and φVc vs vu above."
-        elseif !isfinite(reinforced_check.ratio)
-            out_st["note"] = "Reinforced ratio is non-finite. Check demand vs ACI stress limits."
+        elseif !isfinite(r_ratio)
+            out_st["note"] = "Reinforced ratio is non-finite — demand exceeds ACI maximum capacity with stirrups."
         end
         out_st["cross_check_caveat"] =
             "SCOPE: Punching shear capacity with stirrup reinforcement only. Column size, " *
@@ -1052,15 +1071,17 @@ function experiment_punching_reinforcement(
             note = "Column dimensions unchanged. Studs add Vs to Vc on the capacity side; demand is unchanged.",
         )
 
-        _dir_sd = reinforced_check.ratio < unreinforced_ratio ? "decreased" :
-                  (reinforced_check.ratio == unreinforced_ratio ? "unchanged" : "increased")
+        r_ratio_sd = reinforced_check.ratio
+        r_ratio_sd_safe = _json_safe(round(r_ratio_sd; digits=3))
+        _dir_sd = r_ratio_sd < unreinforced_ratio ? "decreased" :
+                  (r_ratio_sd == unreinforced_ratio ? "unchanged" : "increased")
         _ok_sd  = reinforced_check.ok ? "PASS" : "FAIL"
 
         out_sd = Dict{String, Any}(
             "experiment" => "punching_reinforcement",
             "result_summary" => "Ratio $_dir_sd from $(round(unreinforced_ratio; digits=3)) to " *
-                "$(round(reinforced_check.ratio; digits=3)) ($_ok_sd). " *
-                "Delta = $(round(reinforced_check.ratio - unreinforced_ratio; digits=3)).",
+                "$(isfinite(r_ratio_sd) ? string(round(r_ratio_sd; digits=3)) : "∞ (exceeds ACI limits)") ($_ok_sd). " *
+                "Delta = $(isfinite(r_ratio_sd) ? string(round(r_ratio_sd - unreinforced_ratio; digits=3)) : "N/A").",
             "experimental_setup" => setup,
             "column_idx" => col_idx,
             "position" => string(position),
@@ -1072,7 +1093,7 @@ function experiment_punching_reinforcement(
                 "φvc_psi" => round(ustrip(u"psi", check.φvc); digits=1),
             ),
             "reinforced" => Dict{String, Any}(
-                "ratio" => round(reinforced_check.ratio; digits=3),
+                "ratio" => r_ratio_sd_safe,
                 "ok" => reinforced_check.ok,
                 "required" => design_result.required,
             ),
@@ -1087,14 +1108,14 @@ function experiment_punching_reinforcement(
                 "vcs_psi" => round(ustrip(u"psi", design_result.vcs); digits=1),
                 "outer_ok" => design_result.outer_ok,
             ),
-            "improved" => reinforced_check.ratio < unreinforced_ratio,
-            "delta_ratio" => round(reinforced_check.ratio - unreinforced_ratio; digits=3),
+            "improved" => isfinite(r_ratio_sd) && r_ratio_sd < unreinforced_ratio,
+            "delta_ratio" => _json_safe(round(r_ratio_sd - unreinforced_ratio; digits=3)),
         )
         if !design_result.required || design_result.n_rails == 0
             out_sd["note"] = "Studs not laid out (n_rails=0). " *
                 "Check unreinforced ratio and φVc vs vu above."
-        elseif !isfinite(reinforced_check.ratio)
-            out_sd["note"] = "Reinforced ratio is non-finite. Check demand vs ACI stress limits."
+        elseif !isfinite(r_ratio_sd)
+            out_sd["note"] = "Reinforced ratio is non-finite — demand exceeds ACI maximum capacity with studs."
         end
         out_sd["cross_check_caveat"] =
             "SCOPE: Punching shear capacity with stud reinforcement only. Column size, " *

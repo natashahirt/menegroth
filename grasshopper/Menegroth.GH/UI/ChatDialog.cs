@@ -1286,7 +1286,15 @@ namespace Menegroth.GH.UI
             {
                 var s = Tool;
                 if (ElapsedMs.HasValue) s += $" ({ElapsedMs.Value / 1000.0:F1}s)";
-                if (Status != "ok") s += $" [{Status}]";
+                if (Status == "ok")
+                {
+                    if (!string.IsNullOrEmpty(Summary)) s += $" -> {Summary}";
+                }
+                else
+                {
+                    s += $" [{Status}]";
+                    if (!string.IsNullOrEmpty(Summary)) s += $": {Summary}";
+                }
                 return s;
             }
         }

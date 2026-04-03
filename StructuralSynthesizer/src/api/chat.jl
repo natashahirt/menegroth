@@ -430,6 +430,12 @@ EVIDENCE-FIRST:
   For single-element what-ifs → use run_experiment FIRST (instant, no re-run). Only escalate to run_design for global changes.
   When the user asks "would X help?" or "what about Y?" → run_experiment to get real numbers, then present the result.
 
+TOOL ERRORS — CRITICAL:
+  When a tool call returns an "error" field, you have ZERO usable results from that call.
+  You MUST tell the user the tool failed and show the error message and recovery hint.
+  You MUST NOT present numbers, ratios, or outcomes as if the tool succeeded.
+  Do NOT retry with different arguments unless the error message suggests a specific fix.
+
 RETRIEVAL QUESTIONS — CALL A TOOL IF DATA IS NOT IN THE SYSTEM PROMPT:
   You may quote numbers directly from the CACHED DESIGN SUMMARY or LATEST RESULTS SUMMARY above.
   For anything NOT already in this prompt, call the relevant tool FIRST:
@@ -480,6 +486,12 @@ EVIDENCE-FIRST:
   OBSERVE (get_diagnose_summary) → CITE ratios/checks → CONSULT get_lever_map → RECOMMEND.
   For single-element what-ifs → use run_experiment FIRST (instant, no re-run). Only escalate to run_design for global changes.
   When the user asks "would X help?" or "what about Y?" → run_experiment to get real numbers, then present the result.
+
+TOOL ERRORS — CRITICAL:
+  When a tool call returns an "error" field, you have ZERO usable results from that call.
+  You MUST tell the user the tool failed and show the error message and recovery hint.
+  You MUST NOT present numbers, ratios, or outcomes as if the tool succeeded.
+  Do NOT retry with different arguments unless the error message suggests a specific fix.
 
 RETRIEVAL QUESTIONS — CALL A TOOL IF DATA IS NOT IN THE SYSTEM PROMPT:
   You may quote numbers directly from the CACHED DESIGN SUMMARY above.
@@ -563,26 +575,6 @@ end
 _ChatStructureCache() = _ChatStructureCache("", nothing, nothing, ReentrantLock())
 
 const _CHAT_STRUCTURE_CACHE = _ChatStructureCache()
-
-"""
-    _chat_initialize_structure(geo_dict) -> (BuildingStructure, String)
-
-Build a real `BuildingStructure` from chat `building_geometry` JSON.
-Returns `(structure, geometry_hash)` or throws on failure.
-
-Uses `json_to_skeleton` → `BuildingStructure` → `initialize!` with default
-loads/material/floor options — enough to compute cells, slabs, members, and
-tributaries without running the full design solver.
-"""
-function _chat_initialize_structure(geo_dict::Dict{String, Any})
-    api_input = _api_input_geometry_only_from_chat_dict(geo_dict)
-    geo_hash = compute_geometry_hash(api_input)
-
-    skel = json_to_skeleton(api_input)
-    struc = BuildingStructure(skel)
-    initialize!(struc)  # defaults: flat_plate, GravityLoads(), NWC_4000
-    return (struc, geo_hash)
-end
 
 """
     _chat_geometry_sse_emit!(stream, phase; kwargs...)
@@ -739,10 +731,8 @@ data computed by the same pipeline the solver uses.
 function _structure_geometry_digest(struc::BuildingStructure)::Dict{String, Any}
     skel = struc.skeleton
     result = Dict{String, Any}()
-    warnings = String[]
     flags = String[]
     to_ft(x) = ustrip(u"ft", x)
-    to_m2(x) = ustrip(u"m^2", x)
 
     # ── Counts ────────────────────────────────────────────────────────────
     result["n_cells"] = length(struc.cells)
@@ -1014,7 +1004,6 @@ function _structure_geometry_digest(struc::BuildingStructure)::Dict{String, Any}
 
     # ── Structural flags ──────────────────────────────────────────────────
     !isempty(flags) && (result["structural_flags"] = flags)
-    !isempty(warnings) && (result["warnings"] = warnings)
     result["source"] = "BuildingStructure_initialized"
     result["unit_system"] = "imperial"
     return result
@@ -1479,7 +1468,6 @@ function _chat_geo_panel_analysis(faces_dict, unit_label::String)::Union{Nothing
     quad_corner_devs = Float64[]
     quad_max_devs = Float64[]
     panel_max_spans = Float64[]
-    panel_min_spans = Float64[]
     n_quad_orthogonal = 0
 
     for poly in slab_polys
@@ -1511,7 +1499,6 @@ function _chat_geo_panel_analysis(faces_dict, unit_label::String)::Union{Nothing
         filter!(l -> l > 1e-6, edge_ls)
         if !isempty(edge_ls)
             push!(panel_max_spans, maximum(edge_ls))
-            push!(panel_min_spans, minimum(edge_ls))
             mn_e = minimum(edge_ls)
             mn_e > 1e-4 && push!(panel_aspects, maximum(edge_ls) / mn_e)
         end
@@ -2108,7 +2095,7 @@ function _geometry_digest_plaintext(stats::Dict{String, Any})::String
     if !isnothing(st)
         n = get(st, "n_stories", nothing)
         !isnothing(n) && push!(lines, "Stories: $n")
-        sh = get(st, "story_heights", nothing)
+        sh = get(st, "heights", nothing)
         if !isnothing(sh) && sh isa AbstractVector && !isempty(sh)
             u = get(st, "unit", unit)
             push!(lines, "Story heights: $(join(sh, ", ")) $u")
@@ -2129,9 +2116,13 @@ function _geometry_digest_plaintext(stats::Dict{String, Any})::String
             u = get(nn, "unit", unit)
             push!(lines, "  Nearest-neighbour spacing: min=$(nn["min"]) $u, max=$(nn["max"]) $u")
         end
-        edge_int = get(cg, "edge_vs_interior", nothing)
-        if !isnothing(edge_int)
-            push!(lines, "  Edge columns: $(get(edge_int, "edge", "?")), Interior columns: $(get(edge_int, "interior", "?"))")
+        grid = get(cg, "grid", nothing)
+        if !isnothing(grid)
+            n_edge = get(grid, "n_edge_columns", nothing)
+            n_int  = get(grid, "n_interior_columns", nothing)
+            if !isnothing(n_edge) && !isnothing(n_int)
+                push!(lines, "  Edge columns: $n_edge, Interior columns: $n_int")
+            end
         end
     end
 
@@ -2139,7 +2130,7 @@ function _geometry_digest_plaintext(stats::Dict{String, Any})::String
     sp = get(stats, "slab_panels", nothing)
     if !isnothing(sp)
         cls = get(sp, "plan_shape_classification", "")
-        n_panels = get(sp, "n_polygons", 0)
+        n_panels = get(sp, "n_panels", 0)
         push!(lines, "Slab panels: $n_panels panels, classification: $cls")
         ar = get(sp, "panel_edge_aspect_ratio", nothing)
         if !isnothing(ar)
@@ -2153,10 +2144,11 @@ function _geometry_digest_plaintext(stats::Dict{String, Any})::String
     env = get(stats, "envelope", nothing)
     if !isnothing(env)
         u = get(env, "unit", unit)
-        fp = get(env, "footprint_dim", nothing)
+        fp_x = get(env, "footprint_x", nothing)
+        fp_y = get(env, "footprint_y", nothing)
         h = get(env, "total_height", nothing)
-        if !isnothing(fp)
-            push!(lines, "Footprint: $(fp["x"]) × $(fp["y"]) $u")
+        if !isnothing(fp_x) && !isnothing(fp_y)
+            push!(lines, "Footprint: $fp_x × $fp_y $u")
         end
         !isnothing(h) && push!(lines, "Total height: $h $u")
     end
@@ -2179,7 +2171,7 @@ function _geometry_digest_plaintext(stats::Dict{String, Any})::String
     if !isnothing(story_ranges)
         story_data = get(stats, "stories", nothing)
         if !isnothing(story_data)
-            sh = get(story_data, "story_heights", nothing)
+            sh = get(story_data, "heights", nothing)
             if !isnothing(sh) && sh isa AbstractVector && !isempty(sh)
                 to_m = get(stats, "unit_to_m", 1.0)
                 max_h = maximum(sh) * to_m
@@ -3296,6 +3288,9 @@ function _stream_llm_to_sse(
                                 "tool" => tool_name,
                                 "message" => sprint(showerror, e),
                                 "recovery_hint" => "Retry this tool call; if it persists, run GET /status and share this error.",
+                                "INSTRUCTION" => "This tool call FAILED. You have NO results from it. " *
+                                    "Tell the user the tool errored and show the error message. " *
+                                    "Do NOT present fabricated results. Do NOT invent ratios, capacities, or outcomes.",
                             )
                         end
                     end
@@ -3306,6 +3301,12 @@ function _stream_llm_to_sse(
                     end
                     elapsed_ms = round(Int, (time() - t0) * 1000)
                     tool_status = haskey(result, "error") ? "error" : "ok"
+
+                    if tool_status == "error" && !haskey(result, "INSTRUCTION")
+                        result["INSTRUCTION"] = "This tool call FAILED. You have NO results from it. " *
+                            "Tell the user the tool errored and show the error message. " *
+                            "Do NOT present fabricated results. Do NOT invent ratios, capacities, or outcomes."
+                    end
 
                     # Emit tool-done progress event.
                     write(stream, "data: $(JSON3.write(Dict{String,Any}(
@@ -3423,6 +3424,17 @@ function _stream_llm_to_sse(
             display_text *= warning
             full_text *= warning
             @warn "Evidence-first warning triggered — no tool calls but numerical claims detected"
+        end
+
+        # Evidence-first enforcement: warn when ALL tool calls errored but the
+        # response still contains numerical claims (likely fabricated from error context).
+        all_errored = !isempty(tool_actions) && all(a -> get(a, "status", "") == "error", tool_actions)
+        if all_errored && _contains_numerical_claims(display_text)
+            warning = "\n\n⚠️ All tool calls in this turn returned errors. The numerical results above may not be accurate — please retry or ask me to investigate the error."
+            write(stream, "data: $(JSON3.write(Dict("token" => warning)))\n\n")
+            display_text *= warning
+            full_text *= warning
+            @warn "Evidence-first warning triggered — all tools errored but numerical claims present"
         end
 
         # Persist assistant turn to server-side history.
@@ -3769,49 +3781,6 @@ const QUICK_DESIGN_TIMEOUT_S = 60.0
 
 # ─── Tool dispatch ────────────────────────────────────────────────────────────
 
-"""
-    _dispatch_chat_tool(tool, args) -> Dict
-
-Dispatch a named structural tool call from the agent. Returns a
-JSON-serialisable result dict.
-
-Phase 1 — Orientation:
-- `get_situation_card`       — single-call snapshot: geometry + params + health + history + trace availability.
-- `get_building_summary`     — detailed geometry summary (stories, spans, counts, regularity).
-- `get_design_history`       — past designs in session (params, pass/fail, EC).
-- `get_current_params`       — fully resolved parameter set from the last design.
-- `get_api_params_ssot`      — raw API JSON merge base (patch debugging; prefer get_current_params for narration).
-
-Phase 2 — Diagnosis:
-- `get_diagnose_summary`     — lightweight failure overview: counts, top-5 critical, failure breakdown.
-- `get_diagnose`             — high-resolution per-element diagnostics.
-- `query_elements`           — filtered element subset from /diagnose data.
-- `get_solver_trace`         — tiered solver decision trace (why it chose sections, fell back, converged). Use tier=summary → failures → decisions → full.
-- `get_lever_map`            — which parameters affect a given failure check. Consult before recommending fixes.
-- `get_implemented_provisions` — design code clause index.
-- `explain_field`            — parameter definition, units, range, related checks.
-- `get_result_summary`       — structured JSON summary of the latest design result.
-- `get_condensed_result`     — plain-text condensed result summary (~500 tokens).
-- `get_applicability`        — compact method/floor eligibility rules.
-
-Phase 3 — Exploration:
-- `run_experiment`           — instant micro-experiment on a single element (punching, P-M, beam, punching reinforcement, deflection, catalog screen).
-- `list_experiments`         — available experiment types and arg schemas.
-- `batch_experiments`        — run multiple experiments in one call.
-- `validate_params`          — check a params patch for compatibility violations.
-- `run_design`               — fast parameter-only what-if check (60 s timeout).
-- `compare_designs`          — delta table: **previous** vs **latest** session history entry (no indices).
-- `suggest_next_action`      — ranked parameter changes for a goal.
-
-Session Insights:
-- `record_insight`           — record a structured learning from a design iteration.
-- `get_session_insights`     — retrieve accumulated learnings (filterable by category/check/param).
-
-Phase 4 — Communication:
-- `narrate_element`          — plain-English explanation of one element.
-- `narrate_comparison`       — plain-English **previous vs latest** run (same pairing as compare_designs).
-- `clarify_user_intent`      — structured multiple-choice clarification.
-"""
 const _NO_DESIGN_HINT   = "No solved design on the server yet. Run Design from Grasshopper (POST /design) first. Until then, use the geometry digest and predict_geometry_effect for qualitative advice."
 const _NO_GEOMETRY_HINT = "Server-cached geometry comes from a Grasshopper Design run (POST /design). If a digest is in the prompt, you can still advise on geometry changes via predict_geometry_effect — but run_design and get_building_summary require server geometry."
 const CHAT_AUTOWAIT_TIMEOUT_S = 90.0
@@ -4027,6 +3996,49 @@ function _evaluate_applicability_against_geometry(struc::BuildingStructure)::Dic
     )
 end
 
+"""
+    _dispatch_chat_tool(tool, args) -> Dict
+
+Dispatch a named structural tool call from the agent. Returns a
+JSON-serialisable result dict.
+
+Phase 1 — Orientation:
+- `get_situation_card`       — single-call snapshot: geometry + params + health + history + trace availability.
+- `get_building_summary`     — detailed geometry summary (stories, spans, counts, regularity).
+- `get_design_history`       — past designs in session (params, pass/fail, EC).
+- `get_current_params`       — fully resolved parameter set from the last design.
+- `get_api_params_ssot`      — raw API JSON merge base (patch debugging; prefer get_current_params for narration).
+
+Phase 2 — Diagnosis:
+- `get_diagnose_summary`     — lightweight failure overview: counts, top-5 critical, failure breakdown.
+- `get_diagnose`             — high-resolution per-element diagnostics.
+- `query_elements`           — filtered element subset from /diagnose data.
+- `get_solver_trace`         — tiered solver decision trace.
+- `get_lever_map`            — which parameters affect a given failure check.
+- `get_implemented_provisions` — design code clause index.
+- `explain_field`            — parameter definition, units, range, related checks.
+- `get_result_summary`       — structured JSON summary of the latest design result.
+- `get_condensed_result`     — plain-text condensed result summary (~500 tokens).
+- `get_applicability`        — compact method/floor eligibility rules.
+
+Phase 3 — Exploration:
+- `run_experiment`           — instant micro-experiment on a single element.
+- `list_experiments`         — available experiment types and arg schemas.
+- `batch_experiments`        — run multiple experiments in one call.
+- `validate_params`          — check a params patch for compatibility violations.
+- `run_design`               — fast parameter-only what-if check (60 s timeout).
+- `compare_designs`          — delta table: previous vs latest session history entry.
+- `suggest_next_action`      — ranked parameter changes for a goal.
+
+Session Insights:
+- `record_insight`           — record a structured learning from a design iteration.
+- `get_session_insights`     — retrieve accumulated learnings.
+
+Phase 4 — Communication:
+- `narrate_element`          — plain-English explanation of one element.
+- `narrate_comparison`       — plain-English previous vs latest run comparison.
+- `clarify_user_intent`      — structured multiple-choice clarification.
+"""
 function _dispatch_chat_tool(tool::String, args::Dict{String, Any})::Dict{String, Any}
     design = _get_last_design()
     struc = with_cache_read(c -> c.structure, DESIGN_CACHE)
@@ -4366,7 +4378,7 @@ function _dispatch_chat_tool(tool::String, args::Dict{String, Any})::Dict{String
         isnothing(exp_type) && return Dict("error" => "missing_type", "message" => "Provide experiment 'type' (punching, pm_column, beam, punching_reinforcement, punching_column_downsize, deflection, catalog_screen).")
         !(exp_args isa AbstractDict) && return Dict("error" => "invalid_args", "message" => "run_experiment args must be an object.")
         exp_args_dict = Dict{String, Any}(string(k) => v for (k, v) in exp_args)
-        result = _sanitize_for_json(evaluate_experiment(design, string(exp_type), exp_args_dict))
+        result = evaluate_experiment(design, string(exp_type), exp_args_dict)
         geo_warn = _stale_geometry_warning(args)
         !isnothing(geo_warn) && (result["geometry_warning"] = geo_warn)
         return result

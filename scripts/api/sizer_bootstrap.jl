@@ -14,6 +14,27 @@
 println(stdout, "[bootstrap] starting (JULIA_DEPOT_PATH=$(get(ENV, "JULIA_DEPOT_PATH", "unset")))")
 flush(stdout)
 
+# ── Force unbuffered logging to stdout for Docker/App Runner ──────────────────
+# Julia's default ConsoleLogger writes to stderr, which AWS App Runner may not
+# surface in Application Logs (only stdout appears reliably).  Additionally,
+# non-interactive containers block-buffer stderr.  This wrapper sends all
+# @info/@warn/@error to stdout and flushes after every message.
+using Logging
+struct FlushLogger <: AbstractLogger
+    inner::ConsoleLogger
+end
+FlushLogger(io::IO=stdout; kw...) = FlushLogger(ConsoleLogger(io; kw...))
+Logging.min_enabled_level(l::FlushLogger) = Logging.min_enabled_level(l.inner)
+Logging.shouldlog(l::FlushLogger, args...) = Logging.shouldlog(l.inner, args...)
+Logging.catch_exceptions(l::FlushLogger) = Logging.catch_exceptions(l.inner)
+function Logging.handle_message(l::FlushLogger, args...; kw...)
+    Logging.handle_message(l.inner, args...; kw...)
+    flush(stdout)
+end
+global_logger(FlushLogger(stdout; meta_formatter=Logging.default_metafmt))
+println(stdout, "[bootstrap] installed FlushLogger (stdout, auto-flush)")
+flush(stdout)
+
 ENV["SS_ENABLE_VISUALIZATION"] = get(ENV, "SS_ENABLE_VISUALIZATION", "false")
 ENV["SS_ENABLE_HEAVY_PRECOMPILE_WORKLOAD"] = get(ENV, "SS_ENABLE_HEAVY_PRECOMPILE_WORKLOAD", "false")
 

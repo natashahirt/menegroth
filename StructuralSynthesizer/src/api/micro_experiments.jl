@@ -18,19 +18,6 @@
 
 using Unitful
 
-# ─── JSON safety ──────────────────────────────────────────────────────────────
-
-"""
-    _sanitize_for_json(x)
-
-Recursively walk a Dict/Array structure and replace non-finite Float64 values
-(`Inf`, `-Inf`, `NaN`) with `nothing` so the result is valid JSON.
-"""
-_sanitize_for_json(x::AbstractFloat) = isfinite(x) ? x : nothing
-_sanitize_for_json(x::AbstractDict) = Dict(k => _sanitize_for_json(v) for (k, v) in x)
-_sanitize_for_json(x::AbstractVector) = [_sanitize_for_json(v) for v in x]
-_sanitize_for_json(x) = x
-
 # ─── Experimental Setup Reporter ─────────────────────────────────────────────
 
 """
@@ -1853,7 +1840,7 @@ function batch_evaluate(
         r = try
             !(exp isa AbstractDict) && error("experiment entry must be an object with type and args")
             exp_args = Dict{String, Any}(string(k) => v for (k, v) in get(exp, "args", Dict()))
-            _sanitize_for_json(evaluate_experiment(design, exp_type_str, exp_args))
+            evaluate_experiment(design, exp_type_str, exp_args)
         catch e
             Dict{String, Any}(
                 "error"   => "experiment_failed",
@@ -1861,7 +1848,6 @@ function batch_evaluate(
                 "type"    => exp_type_str,
             )
         end
-        # _sanitize_for_json may infer Dict{String,String}; widen before adding Int metadata.
         r = Dict{String, Any}(r)
         r["experiment_index"] = i
         r["type"] = exp_type_str

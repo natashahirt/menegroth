@@ -168,6 +168,12 @@ function validate_input(input::APIInput)
 
     # ─── Params ──────────────────────────────────────────────────────────
     p = input.params
+    # Legacy Grasshopper Element Params used wire value "mip" for catalog (MIP) sizing; API expects "discrete".
+    for strat in (:column_sizing_strategy, :beam_sizing_strategy)
+        if lowercase(strip(getfield(p, strat))) == "mip"
+            setfield!(p, strat, "discrete")
+        end
+    end
 
     if !(p.floor_type in API_FLOOR_TYPES)
         _push_enum!(errors, "floor_type", p.floor_type, API_FLOOR_TYPES)

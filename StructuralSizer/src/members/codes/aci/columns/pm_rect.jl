@@ -745,27 +745,32 @@ NamedTuple with:
 Uses linear interpolation between diagram points.
 """
 function check_PM_capacity(diagram::PMInteractionDiagram, Pu::Real, Mu::Real)
-    Mu = abs(Mu)  # Ensure positive moment
-    
+    Mu_abs = abs(Mu)  # Demand magnitude (kip-ft)
+
     # Get factored curve
     curve = get_factored_curve(diagram)
     φPn = curve.φPn
     φMn = curve.φMn
-    
+
     # Find φMn capacity at the given Pu by interpolation
     φMn_at_Pu = _interpolate_moment_at_P(φPn, φMn, Pu)
-    
+
     # Find φPn capacity at the given Mu by interpolation
-    φPn_at_Mu = _interpolate_axial_at_M(φPn, φMn, Mu)
-    
-    # Calculate utilization
-    # For P-M interaction, the radial distance ratio is a good measure
-    if φMn_at_Pu > 0 && abs(φPn_at_Mu) > 0
+    φPn_at_Mu = _interpolate_axial_at_M(φPn, φMn, Mu_abs)
+
+    # Near-pure axial (Mu = 0 is common from symmetric framing): at this P the diagram can
+    # report φMn_at_Pu = 0 even when axial capacity is ample. The old fallback (utilization = 1.5)
+    # incorrectly marked every such point inadequate and broke `design_column_reinforcement`.
+    axial_tol_M = 1e-6  # kip-ft
+    if Mu_abs ≤ axial_tol_M && abs(φPn_at_Mu) > 0
+        utilization = abs(Pu) / abs(φPn_at_Mu)
+        governing = :axial
+    elseif φMn_at_Pu > 0 && abs(φPn_at_Mu) > 0
         # Combined check: ratio of demand to capacity at constant P/M ratio
-        utilization_M = Mu / max(φMn_at_Pu, 1e-6)
+        utilization_M = Mu_abs / max(φMn_at_Pu, 1e-6)
         utilization_P = abs(Pu) / max(abs(φPn_at_Mu), 1e-6)
         utilization = max(utilization_M, utilization_P)
-        
+
         if utilization_M > utilization_P
             governing = :moment
         elseif utilization_P > utilization_M
@@ -774,15 +779,18 @@ function check_PM_capacity(diagram::PMInteractionDiagram, Pu::Real, Mu::Real)
             governing = :combined
         end
     elseif φMn_at_Pu > 0
-        utilization = Mu / φMn_at_Pu
+        utilization = Mu_abs / φMn_at_Pu
         governing = :moment
+    elseif abs(φPn_at_Mu) > 0
+        utilization = abs(Pu) / abs(φPn_at_Mu)
+        governing = :axial
     else
-        utilization = 1.5  # Over capacity
+        utilization = 1.5  # Over capacity / indeterminate
         governing = :combined
     end
-    
+
     adequate = utilization ≤ 1.0
-    
+
     return (
         adequate = adequate,
         utilization = utilization,
@@ -1370,7 +1378,7 @@ function design_column_reinforcement(
     cover::Length = 1.5u"inch",
     tie_type::Symbol = :tied,
     bar_sizes = [6, 7, 8, 9, 10, 11],
-    n_bars_options = [4, 6, 8, 10, 12, 14, 16, 20],
+    n_bars_options::Union{Nothing, Vector{Int}} = nothing,
     min_rho::Float64 = 0.01,
     max_rho::Float64 = 0.08
 )
@@ -1388,6 +1396,20 @@ function design_column_reinforcement(
     
     # Minimum number of bars (ACI 10.7.3.1)
     min_bars = tie_type == :spiral ? 6 : 4
+
+    # Auto-extend bar counts for large columns so ρ_min is reachable.
+    # With the largest standard bar (#11, Ab=1.56 in²), n_bars_max must satisfy
+    # n * 1.56 / Ag ≥ min_rho ⟹ n ≥ ceil(min_rho * Ag / 1.56).
+    # Use even counts only (symmetric placement) and cap at a practical 40.
+    if n_bars_options === nothing
+        As_min = min_rho * Ag
+        Ab_max = maximum(bar_areas[bs] for bs in bar_sizes)
+        n_needed = Int(ceil(As_min / Ab_max))
+        n_ceil = max(20, n_needed + mod(n_needed, 2))   # round up to even
+        n_ceil = min(n_ceil, 40)                          # practical ceiling
+        n_bars_options = sort(unique([4, 6, 8, 10, 12, 14, 16, 20,
+                                      collect(22:2:n_ceil)...]))
+    end
     
     # Generate candidates sorted by steel area (ascending = minimum weight first)
     candidates = Tuple{Int, Int, Float64}[]  # (bar_size, n_bars, As)

@@ -18,7 +18,7 @@ namespace Menegroth.GH.Components
     /// no external ValueList components needed.
     ///
     /// Menu structure:
-    ///   Beams ▸ Type ▸ Beam Catalog ▸ Steel
+    ///   Beams ▸ Type ▸ Beam Catalog ▸ Beam Sizing Strategy ▸ Steel
     ///   Columns ▸ Type ▸ Column Catalog ▸ Sizing Strategy ▸ Punching Shear Strategy ▸ Column Concrete
     ///   Slabs ▸ Floor System ▸ Flat Plate ▸ Analysis Method ▸ Punching Strategy
     ///                        ▸ Flat Slab  ▸ ...
@@ -29,8 +29,8 @@ namespace Menegroth.GH.Components
     ///   Design Options ▸ Optimize For ▸ Fire Rating ▸ ...
     ///   Load Units ▸ Imperial (psf, ft, in) | Metric (kN/m², m) ▸ ...
     ///
-    /// Override hierarchy when multiple params conflict: geometry-scoped overrides general;
-    /// Slab Params / Foundation Params (specific inputs) override generic Params; earlier in a list overrides later.
+    /// Override order: generic Params run first, then Slab Params, then Foundation Params.
+    /// Within each input list, later wires override earlier wires.
     /// Use the + button to add optional "Slab Params" and "Foundation Params" inputs.
     /// </summary>
     public class DesignParams : GH_Component, IGH_VariableParameterComponent
@@ -49,6 +49,7 @@ namespace Menegroth.GH.Components
         private string _columnSizingStrategy = "discrete";
         private string _beamType = "steel_w";
         private string _beamCatalog = "large";
+        private string _beamSizingStrategy = "discrete";
         private string _optimizeFor = "weight";
         private string _fireRating = "0";
         private string _uniformColumnSizing = "off";
@@ -287,6 +288,7 @@ namespace Menegroth.GH.Components
             var beamMenu = Menu_AppendItem(menu, "Beams");
             AddSubChoices(beamMenu, "Beam Type", BeamTypes, _beamType);
             AddSubChoices(beamMenu, "Beam Catalog", BeamCatalogs, _beamCatalog);
+            AddSubChoices(beamMenu, "Beam Sizing Strategy", SizingStrategies, _beamSizingStrategy);
             beamMenu.DropDownItems.Add(new ToolStripSeparator());
             AddSubChoices(beamMenu, "Steel", Steels, _steel);
 
@@ -519,6 +521,9 @@ namespace Menegroth.GH.Components
                 case "Beam Type":         _beamType    = tag.Value; break;
                 case "RC Catalog":         _beamCatalog = tag.Value; break; // Backward-compatible legacy field name.
                 case "Beam Catalog":       _beamCatalog = tag.Value; break;
+                case "Beam Sizing Strategy":
+                    _beamSizingStrategy = tag.Value;
+                    break;
                 case "Optimize For":           _optimizeFor         = tag.Value; break;
                 case "Fire Rating":            _fireRating          = tag.Value; break;
                 case "Uniform Column Sizing":  _uniformColumnSizing = tag.Value; break;
@@ -546,6 +551,7 @@ namespace Menegroth.GH.Components
             writer.SetString("ColumnSizingStrategy", _columnSizingStrategy);
             writer.SetString("BeamType",    _beamType);
             writer.SetString("BeamCatalog", _beamCatalog);
+            writer.SetString("BeamSizingStrategy", _beamSizingStrategy);
             writer.SetString("OptimizeFor", _optimizeFor);
             writer.SetString("FireRating",  _fireRating);
             writer.SetString("UniformColumnSizing", _uniformColumnSizing);
@@ -571,6 +577,7 @@ namespace Menegroth.GH.Components
             if (reader.ItemExists("ColumnSizingStrategy")) _columnSizingStrategy = reader.GetString("ColumnSizingStrategy");
             if (reader.ItemExists("BeamType"))     _beamType    = reader.GetString("BeamType");
             if (reader.ItemExists("BeamCatalog"))  _beamCatalog = reader.GetString("BeamCatalog");
+            if (reader.ItemExists("BeamSizingStrategy")) _beamSizingStrategy = reader.GetString("BeamSizingStrategy");
             if (reader.ItemExists("OptimizeFor"))  _optimizeFor = reader.GetString("OptimizeFor");
             if (reader.ItemExists("FireRating"))   _fireRating  = reader.GetString("FireRating");
             if (reader.ItemExists("UniformColumnSizing")) _uniformColumnSizing = reader.GetString("UniformColumnSizing");
@@ -711,6 +718,7 @@ namespace Menegroth.GH.Components
                 ColumnSizingStrategy = _columnSizingStrategy,
                 BeamType        = _beamType,
                 BeamCatalog     = _beamCatalog,
+                BeamSizingStrategy = _beamSizingStrategy,
                 OptimizeFor     = _optimizeFor,
                 UniformColumnSizing = _uniformColumnSizing,
                 SizeFoundations = _sizeFoundations,
@@ -719,7 +727,7 @@ namespace Menegroth.GH.Components
                 UnitSystem      = _unitSystem,
             };
 
-            // Override hierarchy (highest wins): geometry-scoped > Slab/Foundation Params > generic Params; within a list, earlier > later.
+            // Override hierarchy: Slab/Foundation Params after generic Params; within each list, later overrides earlier.
             var allOverrides = BuildOverrideList(paramsList, slabParams, foundationParams);
             ApplyOverrides(p, allOverrides);
 
@@ -766,6 +774,7 @@ namespace Menegroth.GH.Components
               .Append(" (").Append(p.BeamType).Append(")");
             sb.Append(" | Catalog: ").Append(LabelFor(BeamCatalogs, p.BeamCatalog))
               .Append(" (").Append(p.BeamCatalog).Append(")");
+            sb.Append(" | Sizing: ").Append(p.BeamSizingStrategy ?? "discrete");
             sb.Append(" | Steel: ").Append(LabelFor(Steels, p.Steel))
               .Append(" (").Append(p.Steel).AppendLine(")");
 
@@ -820,9 +829,8 @@ namespace Menegroth.GH.Components
         }
 
         /// <summary>
-        /// Build override list in application order so that hierarchy is respected:
-        /// geometry-scoped overrides general; Slab/Foundation Params override generic Params; earlier overrides later.
-        /// List is ordered: generic Params (reversed so earlier wins), then Slab Params (reversed), then Foundation Params (reversed).
+        /// Build override list in application order: generic Params, then Slab Params, then Foundation Params.
+        /// Within each group, wires are applied in list order so <b>later</b> overrides win.
         /// </summary>
         private static List<IGH_Goo> BuildOverrideList(
             List<IGH_Goo> paramsList,
@@ -830,16 +838,16 @@ namespace Menegroth.GH.Components
             List<IGH_Goo> foundationParams)
         {
             var allOverrides = new List<IGH_Goo>(paramsList.Count + slabParams.Count + foundationParams.Count);
-            for (int i = paramsList.Count - 1; i >= 0; i--)
+            for (int i = 0; i < paramsList.Count; i++)
                 allOverrides.Add(paramsList[i]);
-            for (int i = slabParams.Count - 1; i >= 0; i--)
+            for (int i = 0; i < slabParams.Count; i++)
                 allOverrides.Add(slabParams[i]);
-            for (int i = foundationParams.Count - 1; i >= 0; i--)
+            for (int i = 0; i < foundationParams.Count; i++)
                 allOverrides.Add(foundationParams[i]);
             return allOverrides;
         }
 
-        /// <summary>Apply all overrides (SlabParams, ElementParams, FoundationParams). Order reflects hierarchy: later in list wins.</summary>
+        /// <summary>Apply all overrides (SlabParams, ElementParams, FoundationParams). Later entries in the combined list win.</summary>
         private void ApplyOverrides(DesignParamsData target, List<IGH_Goo> allOverrides)
         {
             if (target == null || allOverrides == null || allOverrides.Count == 0)

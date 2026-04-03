@@ -6,9 +6,9 @@ namespace Menegroth.GH.Types
     /// </summary>
     public class ElementParamsData
     {
-        /// <summary>Solver type: mip or nlp.</summary>
+        /// <summary>Solver type: discrete (catalog / MIP) or nlp (continuous), matching API column/beam_sizing_strategy.</summary>
         public string SolverType { get; set; } = "nlp";
-        /// <summary>MIP solver time limit (seconds) when SolverType is mip. Default: 30.</summary>
+        /// <summary>MIP solver time limit (seconds) when SolverType is discrete. Default: 30.</summary>
         public double? MipTimeLimitSec { get; set; } = null;
 
         /// <summary>Section type: beam or column.</summary>
@@ -16,6 +16,11 @@ namespace Menegroth.GH.Types
 
         /// <summary>Element type: steel_w, steel_hss, rc_rect, rc_tbeam, rc_circular, pixelframe.</summary>
         public string ElementType { get; set; } = "steel_w";
+
+        /// <summary>
+        /// Member catalog: <c>beam_catalog</c> when <see cref="Section"/> is beam, else <c>column_catalog</c> when the column type uses a catalog.
+        /// </summary>
+        public string Catalog { get; set; } = "large";
 
         // Steel W bounds (inches)
         public (double Min, double Max)? DepthIn { get; set; }
@@ -41,18 +46,21 @@ namespace Menegroth.GH.Types
         {
             if (target == null) return;
 
-            // Set section type and sizing strategy
+            // Set section type, catalog, and sizing strategy
             if (Section == "beam")
             {
                 target.BeamType = ElementType;
+                target.BeamCatalog = Catalog;
                 target.BeamSizingStrategy = SolverType;
             }
             else
             {
                 target.ColumnType = ElementType;
+                if (ColumnElementUsesCatalog(ElementType))
+                    target.ColumnCatalog = Catalog;
                 target.ColumnSizingStrategy = SolverType;
             }
-            if (SolverType == "mip" && MipTimeLimitSec.HasValue)
+            if (SolverType == "discrete" && MipTimeLimitSec.HasValue)
                 target.MipTimeLimitSec = MipTimeLimitSec;
 
             // Apply bounds based on element type
@@ -123,6 +131,11 @@ namespace Menegroth.GH.Types
                     break;
             }
         }
+
+        /// <summary>True when column type has an API column_catalog (matches Design Params).</summary>
+        private static bool ColumnElementUsesCatalog(string elementType) =>
+            elementType == "rc_rect" || elementType == "rc_circular"
+            || elementType == "steel_hss" || elementType == "steel_w";
     }
 
     /// <summary>Bounds for Steel W NLP sizing (inches).</summary>

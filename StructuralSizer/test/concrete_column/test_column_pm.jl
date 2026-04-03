@@ -445,9 +445,9 @@ end
         
         # Test 4: Pure axial at max allowable compression (Pn,max = 0.80 * φP0)
         # φPn,max = 0.65 * 0.80 * P0 = 797.7 kip (from StructurePoint)
-        # Use a value below this
+        # Use a value below this. Mu = 0 must be adequate (symmetric columns report φMn_at_Pu = 0 at Pu).
         Pu_axial = 700.0  # Well below 797.7 kip max
-        result_axial = StructuralSizer.check_PM_capacity(diagram, Pu_axial, 10.0)  # Small moment
+        result_axial = StructuralSizer.check_PM_capacity(diagram, Pu_axial, 0.0)
         @test result_axial.adequate == true
         
         # Test 5: Capacity at specific axial load

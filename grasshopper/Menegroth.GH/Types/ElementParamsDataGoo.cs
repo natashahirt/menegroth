@@ -13,7 +13,7 @@ namespace Menegroth.GH.Types
 
         public override bool IsValid => Value != null;
         public override string TypeName => "ElementParamsData";
-        public override string TypeDescription => "Element sizing parameters (beam/column, NLP bounds)";
+        public override string TypeDescription => "Element sizing parameters (catalog, discrete/NLP, bounds)";
 
         public override IGH_Goo Duplicate() => new ElementParamsDataGoo(this);
 
@@ -46,7 +46,7 @@ namespace Menegroth.GH.Types
             else if (Value.ElementType == "pixelframe" && Value.FcKsi.HasValue)
                 bounds = $" fc=[{Value.FcKsi.Value.Min:F1}-{Value.FcKsi.Value.Max:F1}ksi]";
 
-            return $"{type} {section} {solver}{bounds}";
+            return $"{type} {section} {solver} cat={Value.Catalog}{bounds}";
         }
     }
 }

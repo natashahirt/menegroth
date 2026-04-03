@@ -582,6 +582,7 @@ function _resolve_sizing_strategy(s::String)
     key = lowercase(strip(s))
     key == "nlp" && return :nlp
     key == "discrete" && return :discrete
+    key == "mip" && return :discrete  # legacy GH wire value; same as discrete (catalog MIP)
     @warn "Unknown sizing_strategy '$s' — defaulting to discrete"
     return :discrete
 end

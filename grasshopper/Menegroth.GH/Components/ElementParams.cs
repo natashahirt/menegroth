@@ -10,7 +10,7 @@ using Menegroth.GH.Types;
 namespace Menegroth.GH.Components
 {
     /// <summary>
-    /// Configures element-specific sizing parameters with NLP bounds.
+    /// Configures element-specific sizing parameters: catalog, discrete vs NLP, and optional bounds.
     /// Component name updates dynamically based on selection (e.g., "Steel W Beam NLP").
     /// </summary>
     public class ElementParams : GH_Component
@@ -18,11 +18,13 @@ namespace Menegroth.GH.Components
         private string _solverType = "nlp";
         private string _section = "beam";
         private string _elementType = "steel_w";
+        /// <summary>API beam_catalog or column_catalog string for the current section/type.</summary>
+        private string _catalog = "large";
         private double _mipTimeLimitSec = 30.0;
 
         private static readonly (string L, string V)[] SolverChoices =
         {
-            ("MIP (discrete)", "mip"),
+            ("MIP (discrete)", "discrete"),
             ("NLP (continuous)", "nlp"),
         };
 
@@ -50,10 +52,45 @@ namespace Menegroth.GH.Components
             ("PixelFrame", "pixelframe"),
         };
 
+        private static readonly (string L, string V)[] BeamCatalogChoices =
+        {
+            ("Standard (light–moderate loads)", "standard"),
+            ("Small (light loads)", "small"),
+            ("Large (heavy loads)", "large"),
+            ("XLarge (vaults, heavy thrust)", "xlarge"),
+            ("All (comprehensive)", "all"),
+            ("Custom", "custom"),
+        };
+
+        private static readonly (string L, string V)[] SteelColumnCatalogChoices =
+        {
+            ("Compact only", "compact_only"),
+            ("Preferred", "preferred"),
+            ("All", "all"),
+        };
+
+        private static readonly (string L, string V)[] RCRectColumnCatalogChoices =
+        {
+            ("Standard (square)", "standard"),
+            ("Square only", "square"),
+            ("Rectangular", "rectangular"),
+            ("Low capacity", "low_capacity"),
+            ("High capacity", "high_capacity"),
+            ("All", "all"),
+        };
+
+        private static readonly (string L, string V)[] RCCircularColumnCatalogChoices =
+        {
+            ("Standard", "standard"),
+            ("Low capacity", "low_capacity"),
+            ("High capacity", "high_capacity"),
+            ("All", "all"),
+        };
+
         public ElementParams()
             : base("Element Params",
                    "ElemParams",
-                   "Configure element sizing parameters (beam/column, MIP/NLP bounds)",
+                   "Configure element sizing (catalog, discrete/NLP, bounds)",
                    "Menegroth", MenegrothSubcategories.ComponentParameters)
         { }
 
@@ -109,6 +146,44 @@ namespace Menegroth.GH.Components
                 item.Click += OnChoiceClicked;
                 typeSub.DropDownItems.Add(item);
             }
+
+            var catalogChoices = CatalogChoicesFor(_section, _elementType);
+            if (catalogChoices.Length > 0)
+            {
+                var catSub = new ToolStripMenuItem($"Catalog: {LabelFor(catalogChoices, _catalog)}");
+                menu.Items.Add(catSub);
+                foreach (var (label, value) in catalogChoices)
+                {
+                    var item = new ToolStripMenuItem(label) { Checked = _catalog == value, Tag = ("catalog", value) };
+                    item.Click += OnChoiceClicked;
+                    catSub.DropDownItems.Add(item);
+                }
+            }
+        }
+
+        private static (string L, string V)[] CatalogChoicesFor(string section, string elementType)
+        {
+            if (section == "beam")
+                return BeamCatalogChoices;
+            return elementType switch
+            {
+                "rc_rect" => RCRectColumnCatalogChoices,
+                "rc_circular" => RCCircularColumnCatalogChoices,
+                "steel_w" or "steel_hss" => SteelColumnCatalogChoices,
+                _ => System.Array.Empty<(string, string)>(),
+            };
+        }
+
+        private static string DefaultCatalog(string section, string elementType)
+        {
+            if (section == "beam")
+                return "large";
+            return elementType switch
+            {
+                "steel_w" or "steel_hss" => "preferred",
+                "rc_rect" or "rc_circular" => "standard",
+                _ => "standard",
+            };
         }
 
         private void OnChoiceClicked(object sender, EventArgs e)
@@ -124,8 +199,15 @@ namespace Menegroth.GH.Components
                     var choices = value == "beam" ? BeamTypeChoices : ColumnTypeChoices;
                     if (!choices.Any(c => c.V == _elementType))
                         _elementType = choices[0].V;
+                    _catalog = DefaultCatalog(_section, _elementType);
                     break;
-                case "elementType": _elementType = value; break;
+                case "elementType":
+                    _elementType = value;
+                    _catalog = DefaultCatalog(_section, _elementType);
+                    break;
+                case "catalog":
+                    _catalog = value;
+                    break;
             }
 
             UpdateInputsForCurrentType();
@@ -167,7 +249,7 @@ namespace Menegroth.GH.Components
 
         private void UpdateInputsForCurrentType()
         {
-            bool needMipInput = _solverType == "mip";
+            bool needMipInput = _solverType == "discrete";
             string expectedFirstParam = GetExpectedFirstParamName(_elementType, _solverType);
             if (Params.Input.Count > 0 && Params.Input[0].Name == expectedFirstParam)
                 return; // Already correct
@@ -221,7 +303,7 @@ namespace Menegroth.GH.Components
 
         private static string GetExpectedFirstParamName(string elementType, string solverType)
         {
-            if (solverType == "mip") return "MIP Time Limit (s)";
+            if (solverType == "discrete") return "MIP Time Limit (s)";
             return elementType switch
             {
                 "steel_w" => "Depth (in)",
@@ -253,7 +335,12 @@ namespace Menegroth.GH.Components
 
         private void UpdateComponentName()
         {
-            string solver = _solverType.ToUpperInvariant();
+            string solver = _solverType switch
+            {
+                "discrete" => "MIP",
+                "nlp" => "NLP",
+                _ => _solverType.ToUpperInvariant()
+            };
             string section = _section == "beam" ? "Beam" : "Col";
             string type = GetTypeLabel();
             
@@ -269,15 +356,25 @@ namespace Menegroth.GH.Components
             writer.SetString("SolverType", _solverType);
             writer.SetString("Section", _section);
             writer.SetString("ElementType", _elementType);
+            writer.SetString("Catalog", _catalog);
             writer.SetDouble("MipTimeLimitSec", _mipTimeLimitSec);
             return base.Write(writer);
         }
 
         public override bool Read(GH_IO.Serialization.GH_IReader reader)
         {
-            if (reader.ItemExists("SolverType")) _solverType = reader.GetString("SolverType");
+            if (reader.ItemExists("SolverType"))
+            {
+                _solverType = reader.GetString("SolverType");
+                if (_solverType == "mip")
+                    _solverType = "discrete";
+            }
             if (reader.ItemExists("Section")) _section = reader.GetString("Section");
             if (reader.ItemExists("ElementType")) _elementType = reader.GetString("ElementType");
+            if (reader.ItemExists("Catalog"))
+                _catalog = reader.GetString("Catalog");
+            else
+                _catalog = DefaultCatalog(_section, _elementType);
             if (reader.ItemExists("MipTimeLimitSec")) _mipTimeLimitSec = reader.GetDouble("MipTimeLimitSec");
             return base.Read(reader);
         }
@@ -295,11 +392,12 @@ namespace Menegroth.GH.Components
             {
                 SolverType = _solverType,
                 Section = _section,
-                ElementType = _elementType
+                ElementType = _elementType,
+                Catalog = _catalog,
             };
 
             int idx = 0;
-            if (_solverType == "mip")
+            if (_solverType == "discrete")
             {
                 double t = _mipTimeLimitSec;
                 if (Params.Input.Count > 0 && DA.GetData(0, ref t))

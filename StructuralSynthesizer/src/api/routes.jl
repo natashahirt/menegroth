@@ -514,13 +514,12 @@ function register_routes!()
             c.design_version = 0
         end
         _reset_design_logs!()
-        _clear_history!("all")
         lock(_CHAT_STRUCTURE_CACHE.lock) do
             _CHAT_STRUCTURE_CACHE.geometry_hash = ""
             _CHAT_STRUCTURE_CACHE.structure = nothing
             _CHAT_STRUCTURE_CACHE.digest = nothing
         end
-        return _json_ok(Dict("status" => "ok", "message" => "All session state cleared."))
+        return _json_ok(Dict("status" => "ok", "message" => "Design cache and session insights cleared. Chat history preserved — use reset_session in POST /chat to clear conversation."))
     end
 
     # ─── Chat routes (LLM-powered assistant) ─────────────────────────
@@ -592,13 +591,12 @@ function _execute_design(input::APIInput)
             prev_hash = with_cache_read(c -> c.geometry_hash, DESIGN_CACHE)
             if !isempty(prev_hash) && prev_hash != geo_hash
                 reset_session_state!(DESIGN_CACHE; reason="geometry hash changed (POST /design)")
-                _clear_history!("all")
                 lock(_CHAT_STRUCTURE_CACHE.lock) do
                     _CHAT_STRUCTURE_CACHE.geometry_hash = ""
                     _CHAT_STRUCTURE_CACHE.structure = nothing
                     _CHAT_STRUCTURE_CACHE.digest = nothing
                 end
-                _append_design_log!("Geometry changed — session history/insights/chat cleared.")
+                _append_design_log!("Geometry changed — design history/insights cleared (chat preserved).")
             end
             skel = json_to_skeleton(input)
             

@@ -100,6 +100,8 @@ namespace Menegroth.GH.UI
         // ─── Pending proposed params ─────────────────────────────────────────
         private JObject? _pendingProposedParams;
         private ClarificationPrompt? _pendingClarification;
+        /// <summary>When true, the next POST /chat includes reset_session=true to clear server-side design history and insights.</summary>
+        private bool _resetSessionOnNextSend;
 
         // ─── Public outputs ───────────────────────────────────────────────────
 
@@ -387,10 +389,13 @@ namespace Menegroth.GH.UI
             var newSessionButton = new Button { Text = "New Session", Width = 100 };
             newSessionButton.Click += OnNewSessionClicked;
 
+            var clearHistoryButton = new Button { Text = "Clear History", Width = 100 };
+            clearHistoryButton.Click += OnClearHistoryClicked;
+
             var sessionToolbar = new TableLayout
             {
                 Spacing = new Size(5, 0),
-                Rows    = { new TableRow(newSessionButton, null) }
+                Rows    = { new TableRow(newSessionButton, clearHistoryButton, null) }
             };
 
             // ── Main layout ──────────────────────────────────────────────────
@@ -568,6 +573,11 @@ namespace Menegroth.GH.UI
                 ["session_id"]       = _sessionId,
             };
             if (_paramsJson != null) requestBody["params"] = _paramsJson;
+            if (_resetSessionOnNextSend)
+            {
+                requestBody["reset_session"] = true;
+                _resetSessionOnNextSend = false;
+            }
 
             DesignRunHttpClient.EnrichChatBodyWithGeometry(requestBody);
 
@@ -1110,6 +1120,32 @@ namespace Menegroth.GH.UI
             HideRetryPanel();
 
             AppendChat("System", "[Session cleared]");
+            FireProactiveAnalysis();
+        }
+
+        /// <summary>
+        /// Clear all server-side session state: chat history, design history,
+        /// and session insights. The next agent turn starts completely fresh
+        /// with no memory of prior designs or conversations.
+        /// </summary>
+        private async void OnClearHistoryClicked(object? sender, EventArgs e)
+        {
+            if (_isStreaming) return;
+
+            await DesignRunHttpClient.DeleteChatHistoryAsync(_baseUrl, _sessionId);
+
+            _messages.Clear();
+            _turnActions.Clear();
+            _chatArea.Text = "";
+            _pendingProposedParams = null;
+            _resetSessionOnNextSend = true;
+            HideParamDiff();
+            HideClarificationPrompt();
+            HideSuggestions();
+            HideActiveReflectionPrompt();
+            HideRetryPanel();
+
+            AppendChat("System", "[History cleared — design history and insights will reset on next message]");
             FireProactiveAnalysis();
         }
 

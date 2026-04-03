@@ -655,10 +655,9 @@ function _chat_get_or_build_structure(
     end
     if !isempty(prev_chat_hash) && prev_chat_hash != geo_hash
         reset_session_state!(DESIGN_CACHE; reason="geometry hash changed (POST /chat)")
-        _clear_history!("all")
         _chat_geometry_sse_emit!(
             sse_stream, "session_reset";
-            message = "New geometry detected — previous session history and insights cleared.",
+            message = "New geometry detected — design history and insights cleared (chat preserved).",
             geometry_hash_prefix = hp,
         )
     end

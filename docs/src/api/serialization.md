@@ -101,6 +101,8 @@ compute_geometry_hash
 | `foundation_options.*` | — | Builds `FoundationOptions(strategy=..., mat_coverage_threshold=..., spread_params=..., strip_params=..., mat_params=...)` |
 | `max_iterations` | — | Sets `DesignParameters.max_iterations = something(api_params.max_iterations, 20)` |
 | `scoped_overrides` | — | Builds `DesignParameters.scoped_floor_overrides` (face-scoped floor overrides; coordinates converted to meters) |
+| `uniform_column_sizing` | `"off"`, `"per_story"`, `"building"` | Sets `DesignParameters.uniform_column_sizing = Symbol(lowercase(strip(api_params.uniform_column_sizing)))`. Not supported for PixelFrame columns (rejected by `validate_input`). |
+| `geometry_is_centerline` | `true` / `false` | Sets `DesignParameters.geometry_is_centerline` — controls whether the server applies automatic structural column offsets (default `false`, architectural reference input). |
 | `visualization_target_edge_m` | — | Sets `DesignParameters.visualization_target_edge_m` (shell mesh target edge length in meters) |
 | `skip_visualization` | — | When `true`, sets `DesignParameters.skip_visualization` so `design_to_json` returns `visualization = null` |
 | `visualization_detail` | `"minimal"` / `"full"` | Controls serialization detail; `"minimal"` omits deflected slab meshes |

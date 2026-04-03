@@ -58,6 +58,7 @@ validate_input
 | Scoped overrides | `scoped_overrides[...]` | `enum` / `required` / `range` / `general` | Validates override floor type + floor options; requires non-empty `faces`; validates each polygon shape and optional `concrete` override. |
 | Member type enums | `column_type`, `beam_type` | `enum` | Must be one of the supported API type strings. |
 | Column catalog | `column_catalog` | `enum` | Only validated when non-null; allowed catalogs depend on `column_type`. |
+| Uniform column sizing | `uniform_column_sizing` | `enum` / `compatibility` | Must be `"off"`, `"per_story"`, or `"building"` (case-insensitive). When not `"off"`, `column_type="pixelframe"` is rejected. |
 | Sizing strategies | `column_sizing_strategy`, `beam_sizing_strategy` | `enum` | Compared case-insensitively against `discrete` / `nlp`. |
 | Beam catalog bounds | `beam_catalog_bounds.*` | `required` / `range` | Only when `beam_catalog == "custom"`; checks min/max ordering and positive resolution. |
 | PixelFrame options | `pixelframe_options.*` | `enum` / `required` / `range` | Only validated when `column_type` or `beam_type` is `"pixelframe"`. |

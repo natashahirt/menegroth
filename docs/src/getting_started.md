@@ -177,7 +177,10 @@ The `/chat` endpoint provides a conversational AI assistant for design parameter
 | `messages` | Array of `{role, content}` | Yes | Full conversation history. At least one message required. |
 | `params` | Object | No | Current design parameters (JSON matching APIParams). |
 | `geometry_summary` | String | No | Building geometry summary text for context. |
-| `session_id` | String | No | Stable identifier (e.g., geometry hash) for server-side history persistence. |
+| `building_geometry` | Object | No | Optional structured geometry (same shape as the geometry portion of `POST /design`, without `params`). Alias: `geometry`. When present, the server derives the same geometry hash used for caching and injects geometry context. |
+| `client_geometry_hash` | String | No | Optional client-side geometry hash. Used for alignment/staleness checks when `building_geometry` is absent (or fails to parse). |
+| `session_id` | String | No | Stable identifier for server-side conversation history persistence. Typically a geometry hash (derived or client-provided). |
+| `reset_session` | Bool | No | When `true`, clears server-side conversation history, design history, and session insights before processing this message (use on Grasshopper restart / new session). |
 
 **Response:** SSE stream with `Content-Type: text/event-stream`.
 
@@ -189,6 +192,19 @@ data: {"token": ", flat plate is a good starting point."}
 data: {"type": "agent_turn_summary", "suggested_next_questions": ["What live load do you expect?", "Any aesthetic preferences for slab depth?"]}
 data: [DONE]
 ```
+
+**SSE event types** (each emitted as `data: <JSON>\n\n`):
+
+| Event key | Description |
+|---|---|
+| `token` | Incremental text chunk (the assistant’s response). |
+| `tool_progress` | Real-time tool execution status (`tool`, `label`, `status`, `round`, `index`, `elapsed_ms`). |
+| `agent_turn_summary` | End-of-turn structured event with `suggested_next_questions` and optional `clarification_prompt` / `tool_actions`. |
+| `geometry_init` | Geometry initialization trace when `building_geometry` is provided. |
+| `design_wait` | Emitted when a `POST /design` run is in flight; chat waits until the server is idle, then continues automatically. |
+| `design_ready` | Emitted when the in-flight design run finishes and chat begins generating a response. |
+| `error` | Error object (`error`, `message`, `recovery_hint`). |
+| `[DONE]` | Literal string signaling end of stream. |
 
 **Error responses** (non-streaming JSON):
 

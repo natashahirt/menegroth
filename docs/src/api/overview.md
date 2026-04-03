@@ -219,6 +219,8 @@ The SSE stream emits the following event types (each as `data: <JSON>\n\n`):
 | `tool_progress` | Real-time tool execution status. Fields: `tool` (name), `label` (human-readable), `status` (`"running"` / `"ok"` / `"error"`), `round`, `index`, and `elapsed_ms` (present when done). |
 | `agent_turn_summary` | End-of-turn structured data: `suggested_next_questions`, `clarification_prompt`, `tool_actions`, `context_usage`, and optionally `params_patch` (validated parameter changes for an "Apply & Run" button). |
 | `geometry_init` | Geometry initialization acknowledgement (when `building_geometry` is provided in the request). |
+| `design_wait` | Emitted when a full design is in progress at chat start. Phases: `"start"` then periodic `"polling"` with `elapsed_s` until the server is idle. |
+| `design_ready` | Emitted once the in-flight design finishes; chat proceeds immediately after. |
 | `error` | Error object with `error`, `message`, and `recovery_hint` fields. |
 | `[DONE]` | Literal string (not JSON) signaling end of stream. |
 

@@ -196,8 +196,7 @@ function _resolve_punching_inputs(design::BuildingDesign, col_idx::Int)
     position = _resolve_column_position(design, col_idx)
     shape = _resolve_column_shape(design, col_idx)
 
-    # PunchingDesignResult does not store Mub; use |Mu_x| from the column result as unbalanced-moment proxy.
-    Mub = abs(col_result.Mu_x)
+    Mub = punching.Mub
 
     return (
         col_result = col_result,

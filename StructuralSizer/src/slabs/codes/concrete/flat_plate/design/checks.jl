@@ -43,7 +43,7 @@ where e_centroid is the distance from column centerline to critical section cent
 - `φ_shear`: Strength reduction factor (default: 0.75)
 
 # Returns
-Named tuple with `(ok, ratio, vu, φvc, b0, Jc)`
+Named tuple with `(ok, ratio, vu, φvc, b0, Jc, Mub)`
 """
 function check_punching_for_column(col, Vu, Mub, d, h, fc;
                                    verbose=false, col_idx=1, λ=1.0, φ_shear=0.75,
@@ -138,7 +138,7 @@ function check_punching_for_column(col, Vu, Mub, d, h, fc;
         @debug "  Stress" vu=round(ustrip(u"psi", vu), digits=1) φvc=round(ustrip(u"psi", φvc), digits=1) ratio=round(ratio, digits=2) status=status
     end
     
-    return (ok=ok, ratio=ratio, vu=vu, φvc=φvc, b0=b0, Jc=Jc)
+    return (ok=ok, ratio=ratio, vu=vu, φvc=φvc, b0=b0, Jc=Jc, Mub=Mub)
 end
 
 # =============================================================================
@@ -256,7 +256,7 @@ Per ACI 318-11 §11.11.1.2, flat slabs with drop panels require TWO checks:
 The governing (worst) result is returned.
 
 # Returns
-Named tuple `(ok, ratio, vu, φvc, b0, Jc, governing_section)` where
+Named tuple `(ok, ratio, vu, φvc, b0, Jc, Mub, governing_section)` where
 `governing_section` is `:column` or `:drop_edge`.
 
 # Reference
@@ -277,14 +277,16 @@ function check_punching(col, Vu, Mub, h_slab, d_slab, h_total, d_total,
                                               verbose=verbose, col_idx=col_idx, λ=λ, φ_shear=φ_shear)
     
     # Governing check: higher ratio controls
+    # Mub is the slab-column unbalanced moment from moment analysis, carried through
+    # for downstream consumers (PunchingDesignResult, micro-experiments).
     if check_drop.ratio >= check_col.ratio
         return (ok=check_drop.ok, ratio=check_drop.ratio, vu=check_drop.vu,
                 φvc=check_drop.φvc, b0=check_drop.b0, Jc=check_drop.Jc,
-                governing_section=:drop_edge)
+                Mub=Mub, governing_section=:drop_edge)
     else
         return (ok=check_col.ok, ratio=check_col.ratio, vu=check_col.vu,
                 φvc=check_col.φvc, b0=check_col.b0, Jc=check_col.Jc,
-                governing_section=:column)
+                Mub=Mub, governing_section=:column)
     end
 end
 

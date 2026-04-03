@@ -697,15 +697,20 @@ end
 
 """
 Punching shear check result for a column.
-All values stored in coherent SI (kN, m, m²).
+All values stored in coherent SI (kN, kN·m, m, m²).
+
+`Mub` is the slab-column unbalanced moment from the moment analysis (DDM/EFM/FEA),
+**not** the column frame bending demand `Mu_x`. Micro-experiments must use this
+value for `check_punching_for_column` so results match the full design.
 """
 Base.@kwdef mutable struct PunchingDesignResult
-    Vu::typeof(1.0u"kN")             # Demand
+    Vu::typeof(1.0u"kN")             # Punching shear force demand
     φVc::typeof(1.0u"kN")            # Capacity (factored)
-    ratio::Float64                    # Vu / φVc
+    ratio::Float64                    # vu_stress / φvc_stress
     ok::Bool                          # ratio ≤ 1.0
     critical_perimeter::typeof(1.0u"m")
     tributary_area::typeof(1.0u"m^2")
+    Mub::typeof(1.0u"kN*m") = 0.0u"kN*m"  # Slab-column unbalanced moment (ACI 318-19 §8.4.4.2)
 end
 
 """

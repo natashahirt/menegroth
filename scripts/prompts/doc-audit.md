@@ -144,8 +144,32 @@ pages for inline equations that should be math blocks.
 
 ## 9. When Done
 
-Once all changes are committed, send a summary to the Slack channel
-`#menegroth-nightly-documentation` (channel ID `C0AL4NPK1SA`) **as the Menegroth Slack bot** using the Slack Web API (not the Cursor user Slack integration, and not Incoming Webhooks). The bot token is in the environment variable `SLACK_BOT_TOKEN` (configure the same variable in Cursor workspace/agent secrets so the Cloud Agent can read it). Use `curl` to POST JSON to `https://slack.com/api/chat.postMessage` with header `Authorization: Bearer $SLACK_BOT_TOKEN` and a JSON body like `{"channel":"C0AL4NPK1SA","text":"..."}` (escape the summary for JSON or build the payload with `jq`). The summary must include:
+Once all changes are committed, you **must deliver** the audit summary to Slack —
+not draft it in this chat, not only paste what you *would* send, and not write
+it to a repo file instead of posting. **Requirement:** call the Slack Web API and
+receive `"ok": true` from `chat.postMessage` (or explicitly report the Slack
+`error` field if the call fails after a reasonable retry).
+
+Post to `#menegroth-nightly-documentation` (channel ID `C0AL4NPK1SA`) **as the
+Menegroth Slack bot** using the Slack Web API (not the Cursor user Slack
+integration, not Incoming Webhooks, not any Slack UI that leaves a local draft).
+The bot token is in the environment variable `SLACK_BOT_TOKEN` (Cursor
+workspace/agent secrets). Build the message body in a shell variable or file,
+then post (do not send a literal placeholder string):
+
+```bash
+# SUMMARY must be your real audit text (heredoc, file, or exported variable).
+curl -s -X POST https://slack.com/api/chat.postMessage \
+  -H "Authorization: Bearer $SLACK_BOT_TOKEN" \
+  -H "Content-Type: application/json; charset=utf-8" \
+  -d "$(jq -n --arg t "$SUMMARY" '{channel:"C0AL4NPK1SA", text:$t}')"
+```
+
+Inspect the JSON response: if `"ok"` is not `true`, fix the issue (token,
+scopes, bot not in channel) and call again until the message is **visible in
+Slack** or you document the blocking error in your final reply.
+
+The posted summary must include:
 - Number of files changed
 - Brief description of each fix (grouped by category: API accuracy, stale
   limitations, math formatting, etc.)

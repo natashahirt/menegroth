@@ -29,7 +29,7 @@ The `Project.toml` files use Windows-style backslash paths (`..\\external\\Asap`
 
 ### Slack bot
 
-The GitHub Actions secret `SLACK_BOT_TOKEN` powers `.github/workflows/cursor-slack-test.yml` and should match the token you configure under the same variable name in **Cursor workspace / agent secrets** so Cloud Agents can follow `scripts/prompts/doc-audit.md`.
+You need the **same token value in two independent stores**: (1) **GitHub** — *Settings → Secrets and variables → Actions* → **Secrets** (not Variables); name `SLACK_BOT_TOKEN`. This is what `.github/workflows/cursor-slack-test.yml` reads. (2) **Cursor** — *Cloud Agents / My Secrets* with the same name for `scripts/prompts/doc-audit.md`. Cursor secrets are **not** visible to GitHub Actions and vice versa.
 
 After you **add or remove bot scopes** in the Slack app settings, you must **reinstall the app** to the workspace (OAuth reinstall) and copy the new **Bot User OAuth Token** into GitHub, Cursor, and `secrets/slack_bot_token`. Old `xoxb-` tokens keep their previous scopes until replaced.
 

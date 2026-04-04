@@ -26,7 +26,16 @@ end
 
 using StructuralSynthesizer
 
-const PORT = parse(Int, get(ENV, "PORT", get(ENV, "SIZER_PORT", "8080")))
+function _listen_port()
+    for key in ("PORT", "SIZER_PORT")
+        haskey(ENV, key) || continue
+        p = tryparse(Int, strip(ENV[key]))
+        isnothing(p) || return p
+    end
+    return 8080
+end
+
+const PORT = _listen_port()
 const HOST = get(ENV, "SIZER_HOST", "localhost")
 
 @info "Registering API routes..."

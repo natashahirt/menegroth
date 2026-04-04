@@ -1,5 +1,7 @@
 # Manual run: verify Slack bot token by opening a DM and posting as the bot (not a user integration).
-# Requires repo secret SLACK_BOT_TOKEN (Bot User OAuth Token, xoxb-...) with im:write and chat:write.
+# Requires GitHub Actions *repository* secret SLACK_BOT_TOKEN (github.com/.../settings/secrets/actions).
+# Cursor Cloud Agent secrets are separate — they do not apply to this workflow.
+# Token: Bot User OAuth (xoxb-...) with im:write and chat:write.
 name: Slack bot test
 
 on:
@@ -14,7 +16,12 @@ jobs:
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
         run: |
           if [ -z "${SLACK_BOT_TOKEN}" ]; then
-            echo "::error::SLACK_BOT_TOKEN secret is not set."
+            echo "::error::SLACK_BOT_TOKEN is empty for this run (GitHub did not inject secrets.SLACK_BOT_TOKEN)."
+            echo "Checklist:"
+            echo "  - Add under Repo Settings → Secrets and variables → Actions → Repository secrets (not the Variables tab; variables are vars.* not secrets.*)."
+            echo "  - Name must be exactly: SLACK_BOT_TOKEN"
+            echo "  - Org-level secret: open the secret → Repository access → ensure this repo is allowed."
+            echo "  - You are running the workflow on the same GitHub repo where the secret was saved (not only on a local fork without secrets)."
             exit 1
           fi
           # Open (or reuse) DM between the bot and this user; messages appear from the app/bot.

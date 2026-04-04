@@ -378,6 +378,16 @@ function capture_design(struc::BuildingStructure, params::DesignParameters;
     return design
 end
 
+StructuralSizer.TRACE_REGISTRY[(:design_building, :pipeline)] =
+    StructuralSizer.TracedFunctionMeta(
+        :design_building,
+        :pipeline,
+        [:enter, :exit, :failure],
+        nothing,
+        @__FILE__,
+        @__LINE__,
+    )
+
 """
     design_building(struc::BuildingStructure, params::DesignParameters) -> BuildingDesign
 
@@ -398,17 +408,6 @@ compare_designs(d1, d2)
 3. `capture_design` — populate BuildingDesign with all results
 4. Restore to pristine state
 """
-# Trace registry entries for documented functions.
-StructuralSizer.TRACE_REGISTRY[(:design_building, :pipeline)] =
-    StructuralSizer.TracedFunctionMeta(
-        :design_building,
-        :pipeline,
-        [:enter, :exit, :failure],
-        nothing,
-        @__FILE__,
-        @__LINE__,
-    )
-
 function design_building(struc::BuildingStructure, params::DesignParameters;
                          tc::Union{Nothing, StructuralSizer.TraceCollector} = nothing)
     t_start = time()
@@ -486,11 +485,6 @@ function design_building(struc::BuildingStructure, params::DesignParameters;
     return design
 end
 
-"""
-    design_building(struc::BuildingStructure; kwargs...) -> BuildingDesign
-
-Convenience method that creates DesignParameters from keyword arguments.
-"""
 StructuralSizer.TRACE_REGISTRY[(:design_building_kwargs, :pipeline)] =
     StructuralSizer.TracedFunctionMeta(
         :design_building_kwargs,
@@ -501,6 +495,11 @@ StructuralSizer.TRACE_REGISTRY[(:design_building_kwargs, :pipeline)] =
         @__LINE__,
     )
 
+"""
+    design_building(struc::BuildingStructure; kwargs...) -> BuildingDesign
+
+Convenience method that creates DesignParameters from keyword arguments.
+"""
 function design_building(struc::BuildingStructure; tc::Union{Nothing, StructuralSizer.TraceCollector} = nothing, kwargs...)
     StructuralSizer.emit!(tc, :pipeline, "design_building_kwargs", "", :enter;
                           n_kwargs=length(kwargs))
@@ -522,6 +521,16 @@ function _get_column_opts(params::DesignParameters)
     (opts isa ConcreteColumnOptions || opts isa StructuralSizer.PixelFrameColumnOptions) ? opts : nothing
 end
 
+StructuralSizer.TRACE_REGISTRY[(:_reconcile_columns!, :workflow)] =
+    StructuralSizer.TracedFunctionMeta(
+        :_reconcile_columns!,
+        :workflow,
+        [:enter, :exit, :decision],
+        nothing,
+        @__FILE__,
+        @__LINE__,
+    )
+
 """
     _reconcile_columns!(struc, params) -> (struc=struc, n_reconciled=Int)
 
@@ -535,16 +544,6 @@ compression capacity: ϕPn = 0.65 × 0.80 × f′c × Ag  (ACI 318-11 §10.3.6.2
 
 Returns the mutated structure and the number of columns that grew.
 """
-StructuralSizer.TRACE_REGISTRY[(:_reconcile_columns!, :workflow)] =
-    StructuralSizer.TracedFunctionMeta(
-        :_reconcile_columns!,
-        :workflow,
-        [:enter, :exit, :decision],
-        nothing,
-        @__FILE__,
-        @__LINE__,
-    )
-
 function _reconcile_columns!(
     struc::BuildingStructure,
     params::DesignParameters;
@@ -1031,12 +1030,6 @@ function _size_beams_columns!(struc::BuildingStructure, params::DesignParameters
     return struc
 end
 
-"""
-    _run_p_delta_if_needed!(struc, column_opts; verbose=false)
-
-Check whether any story requires P-Δ analysis (δs > 1.5 from both Q and ΣPc
-methods).  If so, run `p_delta_iterate!` and re-size columns.
-"""
 StructuralSizer.TRACE_REGISTRY[(:_run_p_delta_if_needed!, :workflow)] =
     StructuralSizer.TracedFunctionMeta(
         :_run_p_delta_if_needed!,
@@ -1047,6 +1040,12 @@ StructuralSizer.TRACE_REGISTRY[(:_run_p_delta_if_needed!, :workflow)] =
         @__LINE__,
     )
 
+"""
+    _run_p_delta_if_needed!(struc, column_opts; verbose=false)
+
+Check whether any story requires P-Δ analysis (δs > 1.5 from both Q and ΣPc
+methods).  If so, run `p_delta_iterate!` and re-size columns.
+"""
 function _run_p_delta_if_needed!(
     struc::BuildingStructure,
     column_opts;

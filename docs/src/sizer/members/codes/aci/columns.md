@@ -76,14 +76,14 @@ PMDiagramPoint
 
 | Value | Description |
 |:------|:------------|
-| `PURE_COMPRESSION` | ϕPn_max = ϕ × 0.80 × P0 (tied) or ϕ × 0.85 × P0 (spiral) |
-| `MAX_COMPRESSION` | Maximum unreduced compression capacity |
+| `PURE_COMPRESSION` | Pure compression point: \(P_0 = 0.85 f'_c (A_g - A_{st}) + f_y A_{st}\) with \(M_n = 0\). Uses the compression-controlled ϕ (0.65 tied / 0.75 spiral). |
+| `MAX_COMPRESSION` | Maximum permitted compression point \(P_{n,\max} = \alpha P_0\) (α = 0.80 tied / 0.85 spiral) with \(M_n\) taken from the large-\(c\) strain state. |
 | `FS_ZERO` | Extreme tension fiber strain = 0 |
 | `FS_HALF_FY` | Extreme tension steel at fy/2 |
 | `BALANCED` | Simultaneous concrete crushing and steel yielding (εs = εy) |
-| `TENSION_CONTROLLED` | εt = 0.005 (transition point for φ = 0.90) |
+| `TENSION_CONTROLLED` | Tension-controlled threshold \( \varepsilon_t = \varepsilon_y + 0.003 \) (ϕ = 0.90). |
 | `PURE_BENDING` | Pu = 0, maximum moment capacity |
-| `PURE_TENSION` | ϕTn = ϕ × As_total × fy |
+| `PURE_TENSION` | Pure tension point \(P_n = -f_y A_{st}\) with \(M_n = 0\) (ϕ = 0.90). |
 | `INTERMEDIATE` | Interpolated points between control points |
 
 ### Checker & Cache
@@ -98,7 +98,7 @@ ACIColumnChecker
 |:------|:------------|
 | `include_slenderness` | Whether to apply slenderness magnification |
 | `include_biaxial` | Whether to check biaxial bending |
-| `α_biaxial` | Exponent for PCA load contour method |
+| `α_biaxial` | Exponent for **Bresler load contour** method (`bresler_load_contour`); default 1.5 |
 | `fy_ksi` | Rebar yield strength (ksi) |
 | `Es_ksi` | Steel elastic modulus (ksi) |
 | `max_depth` | Maximum column dimension constraint |
@@ -133,6 +133,9 @@ check_PM_capacity
 
 `check_PM_capacity(diagram, Pu, Mu)` — returns a `NamedTuple`; use `result.adequate` (Bool) and `result.utilization` (Float64) to interpret the check.
 
+!!! note "Near-pure axial demand (Mu ≈ 0)"
+    The interaction curve has \( \phi M_n = 0 \) at the pure-axial ends, so a naive moment-based utilization would incorrectly mark any \(M_u = 0\) check as failing. The implementation special-cases near-zero moments and reports utilization based on the interpolated axial capacity \( \phi P_n(M_u) \) when \( |M_u| \le 10^{-6} \) kip-ft.
+
 ```@docs
 capacity_at_axial
 ```
@@ -149,7 +152,7 @@ capacity_at_moment
 utilization_ratio
 ```
 
-`utilization_ratio(diagram, Pu, Mu)` — returns a scalar utilization ratio (≤ 1.0 is adequate). Computed by finding the intersection of the load ray with the interaction curve.
+`utilization_ratio(diagram, Pu, Mu)` — returns a scalar utilization ratio (≤ 1.0 is adequate). This is a convenience wrapper around `check_PM_capacity(diagram, Pu, Mu).utilization`.
 
 ### Biaxial Bending (ACI §22.4)
 

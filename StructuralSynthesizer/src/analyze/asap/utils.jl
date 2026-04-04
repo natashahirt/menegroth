@@ -1082,6 +1082,7 @@ function build_analysis_model!(design::BuildingDesign;
             
             @debug "Vault slab $slab_idx" rise=rise span_axis=span_axis n_refinement=length(column_refinement_nodes)
             
+            warn_span_m = _slab_min_primary_span_m(struc, slab)
             slab_shells = Asap.VaultShell(corners, section, span_axis, rise;
                                           n=mesh_density,
                                           id=Symbol("slab_$(slab_idx)"),
@@ -1090,7 +1091,8 @@ function build_analysis_model!(design::BuildingDesign;
                                           target_edge_length=effective_target_edge_length,
                                           refinement_edge_length=effective_refinement_edge_length,
                                           refinement_radius=mesh_controls.refinement_radius,
-                                          refinement_targets=effective_refinement_targets)
+                                          refinement_targets=effective_refinement_targets,
+                                          mesh_density_warn_shortest_side_m=warn_span_m)
         elseif length(boundary_vert_indices) >= 3
             # Flat slabs/plates: Delaunay mesh of entire slab outer boundary.
             # Keep patch-based stiffness for flat slabs, but constrain patch creation
@@ -1137,7 +1139,8 @@ function build_analysis_model!(design::BuildingDesign;
             end
             
             corners = tuple([nodes[vi] for vi in boundary_vert_indices]...)
-            
+            warn_span_m = _slab_min_primary_span_m(struc, slab)
+
             slab_shells = Asap.Shell(corners, section; n=effective_n,
                                      id=Symbol("slab_$(slab_idx)"),
                                      interior_nodes=interior_nodes,
@@ -1146,7 +1149,8 @@ function build_analysis_model!(design::BuildingDesign;
                                      target_edge_length=effective_target_edge_length,
                                      refinement_edge_length=effective_refinement_edge_length,
                                      refinement_radius=mesh_controls.refinement_radius,
-                                     refinement_targets=effective_refinement_targets)
+                                     refinement_targets=effective_refinement_targets,
+                                     mesh_density_warn_shortest_side_m=warn_span_m)
         else
             # Degenerate fallback: per-cell meshing
             slab_shells = Asap.ShellElement[]
@@ -1273,6 +1277,15 @@ function _resolve_visualization_shell_mesh_controls(design::BuildingDesign;
     )
 end
 
+"""Minimum primary span (m) across cells in `slab` — characteristic cell size for mesh-density warnings."""
+function _slab_min_primary_span_m(struc::BuildingStructure, slab::Slab)::Float64
+    try
+        minimum(ustrip(u"m", struc.cells[ci].spans.primary) for ci in slab.cell_indices)
+    catch
+        1.0
+    end
+end
+
 """
 Resolve slab target edge length, matching flat-plate FEA adaptive default:
 clamp(min_span/20, 0.15, 0.75) m when no explicit target is provided.
@@ -1282,11 +1295,7 @@ function _resolve_slab_target_edge_length(struc::BuildingStructure, slab::Slab, 
         return target_edge_length
     end
 
-    min_span_m = try
-        minimum(ustrip(u"m", struc.cells[ci].spans.primary) for ci in slab.cell_indices)
-    catch
-        1.0
-    end
+    min_span_m = _slab_min_primary_span_m(struc, slab)
     return clamp(min_span_m / 20.0, 0.15, 0.75) * u"m"
 end
 

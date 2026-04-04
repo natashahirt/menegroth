@@ -1,44 +1,50 @@
-# Manual run: launch a Cursor Cloud Agent that posts a test message to Slack.
-# Uses the connected Slack integration (no webhook required).
-name: Cursor Slack test
+# Manual run: verify Slack bot token by opening a DM and posting as the bot (not a user integration).
+# Requires repo secret SLACK_BOT_TOKEN (Bot User OAuth Token, xoxb-...) with im:write and chat:write.
+name: Slack bot test
 
 on:
   workflow_dispatch:
 
 jobs:
-  launch:
+  post:
     runs-on: ubuntu-latest
     steps:
-      - name: Launch Cursor agent (Slack test)
+      - name: Post test DM via Slack Web API
         env:
-          CURSOR_API_KEY: ${{ secrets.CURSOR_API_KEY }}
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
         run: |
-          if [ -z "${CURSOR_API_KEY}" ]; then
-            echo "::error::CURSOR_API_KEY secret is not set."
+          if [ -z "${SLACK_BOT_TOKEN}" ]; then
+            echo "::error::SLACK_BOT_TOKEN secret is not set."
             exit 1
           fi
-          PROMPT='Your only task: send one short message to Slack using the connected Slack integration.
-
-          - Send a DM to Tasha (Slack user ID U0AKVLWEJ7J) with the exact text: "Test from Cursor cloud agent (GitHub Actions)".
-          - Confirm in your response that you sent it and include the Slack message link.'
-          REPO_URL="https://github.com/${{ github.repository }}"
-          BRANCH="cursor/slack-test"
-          RESPONSE=$(curl -s -X POST https://api.cursor.com/v0/agents \
-            -u "$CURSOR_API_KEY:" \
-            -H "Content-Type: application/json" \
-            -d "$(jq -n \
-              --arg prompt "$PROMPT" \
-              --arg repo "$REPO_URL" \
-              --arg branch "$BRANCH" \
-              '{
-                prompt: { text: $prompt },
-                model: "gpt-5.2",
-                source: { repository: $repo, ref: "main" },
-                target: { autoCreatePr: false, branchName: $branch }
-              }')")
-          echo "Agent launched:"
-          echo "$RESPONSE" | jq .
-          if echo "$RESPONSE" | jq -e '.error' >/dev/null 2>&1; then
-            echo "::error::Cursor API error: $(echo "$RESPONSE" | jq -r '.error')"
+          # Open (or reuse) DM between the bot and this user; messages appear from the app/bot.
+          OPEN=$(curl -s -X POST https://slack.com/api/conversations.open \
+            -H "Authorization: Bearer ${SLACK_BOT_TOKEN}" \
+            -H "Content-Type: application/json; charset=utf-8" \
+            -d '{"users":"U0AKVLWEJ7J"}')
+          echo "$OPEN" | jq .
+          if ! echo "$OPEN" | jq -e '.ok == true' >/dev/null 2>&1; then
+            echo "::error::conversations.open failed: $(echo "$OPEN" | jq -r '.error // "unknown"')"
             exit 1
+          fi
+          CHANNEL=$(echo "$OPEN" | jq -r '.channel.id')
+          MSG='Test from Menegroth Slack bot (GitHub Actions)'
+          POST=$(curl -s -X POST https://slack.com/api/chat.postMessage \
+            -H "Authorization: Bearer ${SLACK_BOT_TOKEN}" \
+            -H "Content-Type: application/json; charset=utf-8" \
+            -d "$(jq -n --arg ch "$CHANNEL" --arg text "$MSG" '{channel: $ch, text: $text}')")
+          echo "$POST" | jq .
+          if ! echo "$POST" | jq -e '.ok == true' >/dev/null 2>&1; then
+            echo "::error::chat.postMessage failed: $(echo "$POST" | jq -r '.error // "unknown"')"
+            exit 1
+          fi
+          TS=$(echo "$POST" | jq -r '.ts')
+          LINK=$(curl -s -X POST https://slack.com/api/chat.getPermalink \
+            -H "Authorization: Bearer ${SLACK_BOT_TOKEN}" \
+            -H "Content-Type: application/x-www-form-urlencoded" \
+            --data-urlencode "channel=${CHANNEL}" \
+            --data-urlencode "message_ts=${TS}")
+          echo "$LINK" | jq .
+          if echo "$LINK" | jq -e '.ok == true' >/dev/null 2>&1; then
+            echo "Permalink: $(echo "$LINK" | jq -r '.permalink')"
           fi

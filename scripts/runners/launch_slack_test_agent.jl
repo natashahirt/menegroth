@@ -1,16 +1,20 @@
 # =============================================================================
-# Launch a Cursor Cloud Agent that posts a test message to Slack.
+# Launch a Cursor Cloud Agent that posts a test message to Slack as the bot.
 #
 # Prerequisites:
 #   1. CURSOR_API_KEY set in your environment (same key as in GitHub secrets).
-#   2. SLACK_WEBHOOK_URL configured in Cursor Dashboard for the agent's
-#      workspace (Settings → Environment / Secrets) so the agent can see it.
+#   2. SLACK_BOT_TOKEN (Bot User OAuth Token, xoxb-...) in Cursor workspace /
+#      agent environment secrets, with im:write and chat:write.
+#      Locally you can mirror the token in secrets/slack_bot_token (gitignored);
+#      that file is not sent to the Cloud Agent — use Cursor secrets for the
+#      agent, or run slack_bot_local_smoke.jl to test the token without Cursor.
 #
 # Usage:
 #   set CURSOR_API_KEY=your_key
 #   julia scripts/runners/launch_slack_test_agent.jl
 #
-# The agent is given a single task: run curl to POST to SLACK_WEBHOOK_URL.
+# The agent opens a DM with the configured user and posts via chat.postMessage
+# so the message appears from the app, not from a human Slack account.
 # =============================================================================
 
 using Pkg
@@ -25,13 +29,16 @@ if isempty(api_key)
     error("CURSOR_API_KEY is not set. Set it in your environment and run again.")
 end
 
-prompt = """
-Your only task: send one short message to Slack.
+prompt = raw"""
+Your only task: send one short test message to Slack **as the bot** (not via the Cursor user Slack integration).
 
-1. The webhook URL is in the environment variable SLACK_WEBHOOK_URL in this environment.
-2. Use curl to POST a JSON payload to that URL. The body must be JSON with a "text" field. Example (run this, substituting the value of SLACK_WEBHOOK_URL):
-   curl -s -X POST -H "Content-Type: application/json" -d '{"text":"Test from Cursor agent"}' "\$SLACK_WEBHOOK_URL"
-3. Run the curl command. Confirm in your response that you did it, or report any error (e.g. if SLACK_WEBHOOK_URL is not set).
+1. The Bot User OAuth token is in the environment variable `SLACK_BOT_TOKEN` in this environment.
+2. Open (or reuse) a DM with Slack user `U0AKVLWEJ7J` using the Slack Web API:
+   - POST `https://slack.com/api/conversations.open` with JSON body `{"users":"U0AKVLWEJ7J"}`, headers `Authorization: Bearer $SLACK_BOT_TOKEN` and `Content-Type: application/json`.
+3. From the response, read `channel.id` and POST to `https://slack.com/api/chat.postMessage` with JSON `{"channel":"<that id>","text":"Test from Menegroth Slack bot (Cursor agent)"}` and the same auth header.
+4. Use `curl` or an equivalent shell command. Confirm `ok: true` in both responses, or report the `error` field from Slack.
+
+If `SLACK_BOT_TOKEN` is not set, say so and do not invent a token.
 """
 
 repo = "https://github.com/natashahirt/menegroth"

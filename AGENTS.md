@@ -25,6 +25,26 @@ The `Project.toml` files use Windows-style backslash paths (`..\\external\\Asap`
 | `SS_ENABLE_VISUALIZATION` | Disable GLMakie loading (set `false` for headless) | `false` |
 | `SS_ENABLE_HEAVY_PRECOMPILE_WORKLOAD` | Skip heavy precompile (set `false` for faster startup) | `false` |
 | `GRB_LICENSE_FILE` | Gurobi license file path | `/opt/gurobi/gurobi.lic` |
+| `SLACK_BOT_TOKEN` | Slack Web API (bot user OAuth token, `xoxb-...`) for workflows and doc-audit notifications | — |
+
+### Slack bot
+
+The GitHub Actions secret `SLACK_BOT_TOKEN` powers `.github/workflows/cursor-slack-test.yml` and should match the token you configure under the same variable name in **Cursor workspace / agent secrets** so Cloud Agents can follow `scripts/prompts/doc-audit.md`.
+
+After you **add or remove bot scopes** in the Slack app settings, you must **reinstall the app** to the workspace (OAuth reinstall) and copy the new **Bot User OAuth Token** into GitHub, Cursor, and `secrets/slack_bot_token`. Old `xoxb-` tokens keep their previous scopes until replaced.
+
+For local use, you can store the same token in `secrets/slack_bot_token` (the whole `secrets/` directory is gitignored). Smoke-test the bot without Actions or Cursor:
+
+```bash
+julia --project=StructuralSynthesizer scripts/runners/slack_bot_local_smoke.jl
+```
+
+The default smoke test opens a DM and needs the **`im:write`** bot scope. If your app only has **`chat:write`**, set `SLACK_SMOKE_CHANNEL` to a channel ID where the bot is already a member (for example the nightly docs channel) and the script will skip `conversations.open`:
+
+```bash
+set SLACK_SMOKE_CHANNEL=C0AL4NPK1SA
+julia --project=StructuralSynthesizer scripts/runners/slack_bot_local_smoke.jl
+```
 
 ### Gurobi license
 

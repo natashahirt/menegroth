@@ -145,7 +145,7 @@ pages for inline equations that should be math blocks.
 ## 9. When Done
 
 Once all changes are committed, send a summary to the Slack channel
-`#menegroth-nightly-documentation` (channel ID `C0AL4NPK1SA`) using the connected Slack integration (do not use webhooks) including:
+`#menegroth-nightly-documentation` (channel ID `C0AL4NPK1SA`) **as the Menegroth Slack bot** using the Slack Web API (not the Cursor user Slack integration, and not Incoming Webhooks). The bot token is in the environment variable `SLACK_BOT_TOKEN` (configure the same variable in Cursor workspace/agent secrets so the Cloud Agent can read it). Use `curl` to POST JSON to `https://slack.com/api/chat.postMessage` with header `Authorization: Bearer $SLACK_BOT_TOKEN` and a JSON body like `{"channel":"C0AL4NPK1SA","text":"..."}` (escape the summary for JSON or build the payload with `jq`). The summary must include:
 - Number of files changed
 - Brief description of each fix (grouped by category: API accuracy, stale
   limitations, math formatting, etc.)

@@ -14,19 +14,6 @@ The design workflow orchestrates the full structural design of a building. The e
 
 The pipeline is built dynamically based on the floor type and design parameters, allowing different sequencing for flat plate systems (where columns depend on punching shear) versus beam-based systems (where iterative beam–column sizing is needed).
 
-## Solver trace (`TraceCollector`)
-
-The **solver trace** is a structured timeline of *decisions* (not every internal numeric step): which stage ran, whether the solver took a fallback, how iterations ended, or why a validation path failed. That makes runs explainable to users and to **LLM tools** (tiered summaries, chat, diagnostics).
-
-**How it works (short version):**
-
-- Pass an optional **`TraceCollector()`** as **`tc`** into **`design_building(struc, params; tc=tc)`**. Downstream code calls **`StructuralSizer.emit!(tc, layer, stage, element_id, event_type; ...)`** at meaningful points. If **`tc === nothing`**, those calls are **no-ops** (tracing off, negligible cost).
-- Events are **`TraceEvent`** records (layer, stage, event type, optional element id, payload dict). Layers include **`:pipeline`**, **`:workflow`**, **`:slab`**, **`:optimizer`**, etc.; event types include **`:enter`**, **`:exit`**, **`:decision`**, **`:failure`**, **`:fallback`**, …
-- After sizing, **`capture_design`** merges the collector’s events into **`design.solver_trace`**. Even when the caller did not pass **`tc`**, the workflow can still attach **low-volume “breadcrumb”** events post hoc so API runs are not always empty—see the reference page below.
-- **`@traced`** and **`TRACE_REGISTRY`** record *contracts* for which functions must emit which kinds of events (the macro does not rewrite function bodies); this supports coverage audits.
-
-For the full threading diagram, tier filters (`:summary` … `:full`), serialization helpers, and HTTP/LLM surfaces (**`agent_solver_trace`**, **`GET /schema/llm_contract`**), see **[Solver trace threading](../../reference/solver_trace_threading.md)**.
-
 ## Key Types
 
 ```@docs
@@ -64,7 +51,7 @@ The pipeline runner iterates through stages, calling `stage.fn(struc)` (params a
 | Stage | Function | Sync | Description |
 |:------|:---------|:-----|:------------|
 | 1 | `size_slabs!` | yes | Size all slabs (DDM, EFM, or FEA) |
-| 2 | `_reconcile_columns!` | yes | Grow columns if Asap axial > slab-design capacity |
+| 2 | `_reconcile_columns!` | no | Grow columns if Asap axial > slab-design capacity (this stage self-syncs Asap when growth occurs) |
 | 3 | `size_foundations!` | no | Size foundations (optional) |
 
 **Beam-based systems (one-way, two-way, composite deck, timber):**
@@ -90,7 +77,7 @@ The pipeline runner iterates through stages, calling `stage.fn(struc)` (params a
 1. `initialize!(struc; ...)` — set up cells, slabs, segments, members
 2. `estimate_column_sizes!(struc; fc)` — initial column sizing from tributary area
 3. `to_asap!(struc; params)` — build Asap frame model and solve
-4. `snapshot!(struc, :prepare)` — save state for restoration
+4. `snapshot!(struc)` — save state for restoration (default key `:prepare`)
 
 ### capture_design
 
@@ -98,15 +85,23 @@ The pipeline runner iterates through stages, calling `stage.fn(struc)` (params a
 - Extracts `SlabDesignResult`, `ColumnDesignResult`, `BeamDesignResult`, `FoundationDesignResult` from each element
 - Computes `DesignSummary` including material takeoffs and embodied carbon
 - Records `compute_time_s` and timestamp
-- Merges the optional **`tc`** trace (and post-hoc breadcrumb events when applicable) into **`design.solver_trace`**; see [Solver trace threading](../../reference/solver_trace_threading.md)
+- Merges the optional **`tc`** trace into **`design.solver_trace`**; see [Solver trace threading](../../reference/solver_trace_threading.md)
 
 ### Snapshot / Restore
 
 `design_building` uses the snapshot mechanism to leave `struc` unchanged:
 
-1. `prepare!` calls `snapshot!(struc, :prepare)` before any sizing
-2. After `capture_design`, `restore!(struc, :prepare)` reverts the structure
+1. `prepare!` calls `snapshot!(struc)` before any sizing (default key `:prepare`)
+2. After `capture_design`, `restore!(struc; geometry_is_centerline=params.geometry_is_centerline)` reverts the structure
 3. The caller can call `design_building` again with different parameters
+
+### Pre-sizing validation (method applicability)
+
+After `prepare!` builds the structure and analysis model, `design_building` runs `run_pre_sizing_validation(struc, params)` to check method applicability (DDM / EFM / FEA) for the selected floor system. If any slab panel is ineligible for its chosen method, `design_building` throws `PreSizingValidationError` (the HTTP API converts this into a 400 validation-style response).
+
+### Uniform column sizing
+
+If `params.uniform_column_sizing` is not `:off`, `design_building` performs a post-sizing harmonization pass via `harmonize_uniform_column_sizes!` **after** all sizing stages and **before** `capture_design`. This promotes columns within each group (per story or building-wide) to the governing size and re-solves the Asap model when any columns grow.
 
 ### P-Δ Second-Order Analysis
 
@@ -126,6 +121,16 @@ In flat plate systems, `_reconcile_columns!` handles the circular dependency bet
 
 `compare_designs(d1, d2)` produces a side-by-side comparison of two `BuildingDesign` objects, highlighting differences in member sizes, material quantities, embodied carbon, and pass/fail status. Useful for parameter studies.
 
+### Solver trace (`TraceCollector`)
+
+The **solver trace** is a structured timeline of solver/pipeline *decisions* (not every internal numeric step): which stage ran, whether the solver took a fallback, how iterations ended, or why a validation path failed. This makes runs explainable to users and to downstream tools (tiered summaries, chat, diagnostics).
+
+- Pass an optional `tc = TraceCollector()` to `design_building(struc, params; tc=tc)`. Downstream code calls `StructuralSizer.emit!(tc, layer, stage, element_id, event_type; ...)` at meaningful points. If `tc === nothing`, those calls are no-ops.
+- `capture_design` appends `tc.events` to `design.solver_trace` when `tc` is provided.
+- The HTTP API always supplies a `TraceCollector()` so API runs have a populated solver trace for diagnostics and chat tooling.
+
+For the full threading diagram, tier filters (`:summary` … `:full`), serialization helpers, and HTTP/LLM surfaces, see **[Solver trace threading](../../reference/solver_trace_threading.md)**.
+
 ## Options & Configuration
 
 Key parameters affecting the pipeline:
@@ -139,3 +144,7 @@ Key parameters affecting the pipeline:
 - The pipeline is sequential; parallel sizing of independent stories is planned.
 - Convergence of iterative beam–column sizing is monitored by section change but not formally proven to converge for all geometries.
 - Lateral load stages (seismic, wind) are not yet integrated into the pipeline as explicit stages.
+
+## References
+
+- `StructuralSynthesizer/src/design_workflow.jl`

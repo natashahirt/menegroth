@@ -53,8 +53,15 @@ compute_geometry_hash
 2. **Vertex creation** — `Meshes.Point` objects from coordinate arrays
 3. **Edge creation** — skeleton edges from `APIEdgeGroups`, classified into `:beams`, `:columns`, `:braces`
 4. **Support marking** — vertices listed in `input.supports` are marked as restrained
-5. **Story setup** — if `input.stories_z` is provided (non-empty), it is copied into `skel.stories_z` (after unit conversion to meters) before `rebuild_stories!` runs. Note that `rebuild_stories!` will then recompute stories from vertex Z coordinates (rounded), overwriting `skel.stories_z`; `input.stories_z` still participates in `compute_geometry_hash` for caching behavior.
-6. **Face detection + grouping** — faces are always detected from the edge mesh; if `input.faces` is provided, its polygons are used as selectors to assign detected faces to groups (`"floor"`, `"roof"`, `"grade"`), otherwise the server auto-categorizes faces by story level
+5. **Story setup** — if `input.stories_z` is provided (non-empty), it is copied into `skel.stories_z` (after unit conversion to meters) *before* `rebuild_stories!` runs. **Important:** `rebuild_stories!` always recomputes stories from vertex Z coordinates (rounded), so `input.stories_z` does **not** override story detection. It does still participate in `compute_geometry_hash` for caching behavior.
+6. **Edge shattering** — long edges that pass through intermediate vertices are automatically split into sub-segments (`skel.edge_chains` records the mapping so `initialize_members!` can merge them back into one member later).
+7. **Bounds checks** — edge and support vertex indices are validated during skeleton build; out-of-range indices throw `ArgumentError` even if `validate_input` was not called.
+8. **Face detection + grouping** — faces are always detected from the edge mesh; if `input.faces` is provided, its polygons are used as selectors to assign detected faces to groups (`"floor"`, `"roof"`, `"grade"`), otherwise the server auto-categorizes faces by story level
+
+Additional behavior implemented in `StructuralSynthesizer/src/api/deserialize.jl`:
+
+- **Edge shattering** — if an input edge `[v1, v2]` passes through other existing vertices (collinear intermediate points), it is automatically split into ordered sub-segments. The original user-line is recorded in `skel.edge_chains` so `initialize_members!` can later merge sub-segments into one continuous member.
+- **Bounds checks** — `json_to_skeleton` validates that all edge and support vertex indices are within `1:n_vertices` and throws `ArgumentError` on out-of-range indices, even if `validate_input` was not called first.
 
 ### json_to_params
 

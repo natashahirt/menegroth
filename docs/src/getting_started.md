@@ -67,14 +67,10 @@ struc = BuildingStructure(skeleton)
 
 # 3. Configure design parameters
 params = DesignParameters(
-    loads = office_loads,                    # 50 psf LL, 15 psf SDL
-    materials = MaterialOptions(
-        steel = A992_Steel,
-        concrete = NWC_4000,
-        rebar = Rebar_60,
-    ),
+    loads = office_loads,                    # 50 psf LL (ASCE 7-22), 15 psf SDL
+    materials = MaterialOptions(concrete = NWC_4000, rebar = Rebar_60),
     fire_rating = 2.0,                      # 2-hour fire resistance
-    fire_protection = SFRM(),               # spray-applied fireproofing
+    fire_protection = SFRM(),               # steel coating type (ignored for RC-only systems)
     optimize_for = :weight,                 # minimize structural weight
 )
 
@@ -89,11 +85,10 @@ println("All checks pass: ", result.summary.all_checks_pass)
 
 `design_building` runs the full multi-stage pipeline:
 
-1. `initialize!` — create cells, members, and slabs from the skeleton
-2. `estimate_column_sizes!` — assign initial column sections from the catalog
-3. `to_asap!` — build the finite element model (Asap)
-4. `size!` — run AISC/ACI code checks and select sections from catalogs (binary search by default; MIP when enabled by options)
-5. Post-process — compute embodied carbon, fire protection, reports
+1. `prepare!` — initialize the structure, estimate columns, build the Asap model, and snapshot the pristine state
+2. Run the stage vector from `build_pipeline(params)` (with `sync_asap!` where needed)
+3. `capture_design` — populate the `BuildingDesign` (results + summary + timings)
+4. `restore!` — revert `struc` to the pristine pre-design state
 
 ## Running the HTTP API
 

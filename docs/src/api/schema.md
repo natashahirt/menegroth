@@ -23,7 +23,7 @@ The top-level input object sent to `POST /design` and `POST /validate`.
 | `vertices` | `Vector{Vector{Float64}}` | yes | 3D vertex coordinates `[[x,y,z], ...]` |
 | `edges` | `APIEdgeGroups` | yes | Edge connectivity by group |
 | `supports` | `Vector{Int}` | yes | 1-based vertex indices that are fixed supports |
-| `stories_z` | `Vector{Float64}` | no | Optional story elevations in coordinate units. **Validation only**: if provided, must contain at least 2 elevations. The server currently infers story assignments from vertex Z coordinates via `rebuild_stories!` during skeleton build (so `stories_z` does not override story detection). It is still included in `compute_geometry_hash`. |
+| `stories_z` | `Vector{Float64}` | no | Optional story elevations in coordinate units. **Validation only**: if provided, must contain at least 2 elevations. **Note:** `json_to_skeleton` currently calls `rebuild_stories!` unconditionally, so any provided `stories_z` does **not** override story detection (stories are inferred from vertex Z coordinates rounded to 2 decimals). `stories_z` is still included in `compute_geometry_hash` for caching behavior. |
 | `faces` | `APIFaceGroups` | no | Optional face-group selectors. The server always detects faces from the edge mesh; when `faces` is provided, its polygons are used to *assign* detected faces to groups. Keys are face group names (commonly `"floor"`, `"roof"`, `"grade"`). |
 | `params` | `APIParams` | yes | Design parameters |
 
@@ -234,7 +234,7 @@ result is fetched via `GET /result`.
 |:------|:-----|:------------|
 | `status` | `String` | Always `"ok"` for a successful design result (`APIOutput`). Error responses use `APIError` (or an error-shaped `Dict`) depending on the failure mode. |
 | `compute_time_s` | `Float64` | Wall-clock design time in seconds |
-| `phase_timings` | `Dict{String, Float64}` | Timing breakdown by phase (seconds). Always includes `"serialize_visualization"` (near-zero when `skip_visualization=true`). |
+| `phase_timings` | `Dict{String, Float64}` | Timing breakdown by phase (seconds). Includes the design pipeline timings plus `"serialize_visualization"` (near-zero when `skip_visualization=true`). |
 | `length_unit` | `String` | Length unit label for length-category outputs (`"ft"` or `"m"`) |
 | `thickness_unit` | `String` | Thickness unit label for thickness-category outputs (`"in"` or `"mm"`) |
 | `volume_unit` | `String` | Volume unit label for volume-category outputs (`"ft3"` or `"m3"`) |

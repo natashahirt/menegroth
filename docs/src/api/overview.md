@@ -46,13 +46,16 @@ curl http://localhost:8080/health
 
 Server state endpoint.
 
-The response shape is stable. In the production **bootstrap script** (`scripts/api/sizer_bootstrap.jl`), `/status` is served by a lightweight handler while `StructuralSynthesizer` loads in the background (`mode = "bootstrap"`). Once the background load completes, `register_routes!()` replaces the bootstrap `/status` route with the full service handler (`mode = "full"`), and `has_result` becomes a real cache check.
+The response shape is stable across modes, but **bootstrap mode** and **full service mode** differ slightly:
+
+- In **bootstrap mode** (`scripts/api/sizer_bootstrap.jl`), `/status` is served by the bootstrap script while `StructuralSynthesizer` loads in the background. The payload uses `mode = "bootstrap"`. Once loading completes, `ready` flips to `true` and `state` becomes `"idle" | "running" | "queued"`; however **`mode` remains `"bootstrap"`** and **`has_result` remains `false`** in bootstrap mode.
+- In **full service mode** (`scripts/api/sizer_service.jl`), `/status` is served by the main API routes (`StructuralSynthesizer/src/api/routes.jl`) and reports `mode = "full"`, `ready = true`, and a real `has_result` cache check.
 
 - `status`: `"ok"`
-- `mode`: `"bootstrap"` during background load, then `"full"` once routes are registered
-- `ready`: `true` only when the full API routes have been registered
-- `state`: `"warming"` / `"error"` during background load; `"idle"` / `"running"` / `"queued"` once the full API is ready
-- `has_result`: `false` during bootstrap; in full mode, whether a completed design result is available via `GET /result`
+- `mode`: `"bootstrap"` in bootstrap mode; `"full"` in full service mode
+- `ready`: `false` while bootstrap is warming; `true` once the full API has been loaded (bootstrap) / always `true` in full service mode
+- `state`: `"warming"` / `"error"` during bootstrap load; `"idle"` / `"running"` / `"queued"` once ready
+- `has_result`: `false` in bootstrap mode; in full service mode, whether a completed design result is available via `GET /result`
 - `message`: optional human-readable message (or `null`)
 - `error`: optional load error details (or `null`, bootstrap only)
 
@@ -60,13 +63,19 @@ The response shape is stable. In the production **bootstrap script** (`scripts/a
 curl http://localhost:8080/status
 ```
 
-Bootstrap load (before full routes are registered):
+Bootstrap load (before package load completes):
 
 ```json
 {"status":"ok","mode":"bootstrap","ready":false,"state":"warming","has_result":false,"message":"Full API not ready yet","error":null}
 ```
 
-Full service mode (or bootstrap after load completes):
+Bootstrap after load completes (note `mode` remains `"bootstrap"` and `has_result` remains `false`):
+
+```json
+{"status":"ok","mode":"bootstrap","ready":true,"state":"idle","has_result":false,"message":null,"error":null}
+```
+
+Full service mode:
 
 ```json
 {"status":"ok","mode":"full","ready":true,"state":"idle","has_result":false,"message":null,"error":null}

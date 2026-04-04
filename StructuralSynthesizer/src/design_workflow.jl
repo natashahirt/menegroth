@@ -40,6 +40,18 @@ using Dates
 # Pre-Sizing Validation
 # =============================================================================
 
+# NOTE: `@traced` cannot be used on documented functions (Julia doc macro conflict).
+# Register trace contracts manually before docstrings.
+StructuralSizer.TRACE_REGISTRY[(:run_pre_sizing_validation, :workflow)] =
+    StructuralSizer.TracedFunctionMeta(
+        :run_pre_sizing_validation,
+        :workflow,
+        [:enter, :exit, :decision],
+        nothing,
+        @__FILE__,
+        @__LINE__,
+    )
+
 """
     PreSizingValidationError <: Exception
 
@@ -64,21 +76,36 @@ otherwise `(true, String[])`.
 Used to fail fast with a 400 validation response instead of discovering
 inapplicability mid-pipeline (or silently falling back to FEA).
 """
-function run_pre_sizing_validation(struc::BuildingStructure, params::DesignParameters)
+function run_pre_sizing_validation(
+    struc::BuildingStructure,
+    params::DesignParameters;
+    tc::Union{Nothing, StructuralSizer.TraceCollector} = nothing,
+)
     errors = String[]
     floor_opts = resolve_floor_options(params)
     fp_opts = floor_opts isa StructuralSizer.FlatSlabOptions ? floor_opts.base : floor_opts
 
     # Only FlatPlateOptions / FlatSlabOptions have method applicability checks
     if !(fp_opts isa StructuralSizer.FlatPlateOptions)
+        StructuralSizer.emit!(tc, :workflow, "run_pre_sizing_validation", "", :decision;
+                              outcome="skipped", reason="non_flat_plate_floor_options",
+                              floor_opts_type=string(typeof(floor_opts)))
         return (true, String[])
     end
 
     method = fp_opts.method
     ρ_concrete = fp_opts.material.concrete.ρ
 
+    StructuralSizer.emit!(tc, :workflow, "run_pre_sizing_validation", "", :enter;
+                          n_slabs=length(struc.slabs),
+                          method=string(typeof(method)))
+
+    n_checked = 0
+    n_violations = 0
+
     for (slab_idx, slab) in enumerate(struc.slabs)
         slab.floor_type in (:flat_plate, :flat_slab) || continue
+        n_checked += 1
 
         slab_cell_indices = Set(slab.cell_indices)
         columns = StructuralSizer.find_supporting_columns(struc, slab_cell_indices)
@@ -93,6 +120,7 @@ function run_pre_sizing_validation(struc::BuildingStructure, params::DesignParam
                 for v in result.violations
                     push!(errors, prefix * v)
                 end
+                n_violations += length(result.violations)
             end
         elseif method isa StructuralSizer.EFM
             result = StructuralSizer.check_efm_applicability(
@@ -101,16 +129,21 @@ function run_pre_sizing_validation(struc::BuildingStructure, params::DesignParam
                 for v in result.violations
                     push!(errors, prefix * v)
                 end
+                n_violations += length(result.violations)
             end
         elseif method isa StructuralSizer.FEA
             if n_cols < 2
                 push!(errors, prefix * "FEA requires at least 2 supporting columns; found $n_cols")
+                n_violations += 1
             end
         end
         # RuleOfThumb has no applicability checks
     end
 
-    return (isempty(errors), errors)
+    ok = isempty(errors)
+    StructuralSizer.emit!(tc, :workflow, "run_pre_sizing_validation", "", :exit;
+                          ok=ok, n_slabs_checked=n_checked, n_violations=n_violations)
+    return (ok, errors)
 end
 
 # =============================================================================
@@ -159,20 +192,43 @@ struct PipelineStage
     needs_sync::Bool
 end
 
+# Trace registry entries for documented functions.
+StructuralSizer.TRACE_REGISTRY[(:build_pipeline, :pipeline)] =
+    StructuralSizer.TracedFunctionMeta(
+        :build_pipeline,
+        :pipeline,
+        [:enter, :exit, :decision],
+        nothing,
+        @__FILE__,
+        @__LINE__,
+    )
+
 function build_pipeline(params::DesignParameters;
                         tc::Union{Nothing, StructuralSizer.TraceCollector} = nothing)
     stages = PipelineStage[]
     
     floor_opts = resolve_floor_options(params)
     floor_type = _infer_floor_type(floor_opts)
+
+    StructuralSizer.emit!(tc, :pipeline, "build_pipeline", "", :enter;
+                          floor_type=string(floor_type),
+                          floor_opts_type=string(typeof(floor_opts)))
     
     # Extract column options for flat plate/slab sizing (needed for design_details)
     column_opts = _get_column_opts(params)
     if floor_type in (:flat_plate, :flat_slab) && column_opts isa StructuralSizer.PixelFrameColumnOptions
+        StructuralSizer.emit!(tc, :pipeline, "build_pipeline", "", :failure;
+                              error="ArgumentError",
+                              message="Flat plate/slab requires reinforced concrete columns; PixelFrame columns not supported.")
         throw(ArgumentError(
             "Flat plate/slab requires reinforced concrete columns. " *
             "PixelFrame columns are not supported for beamless slab systems."))
     end
+    
+    StructuralSizer.emit!(tc, :pipeline, "build_pipeline", "", :decision;
+                          floor_type=string(floor_type),
+                          needs_beams_columns=(floor_type ∉ (:flat_plate, :flat_slab)),
+                          needs_foundations=(!isnothing(params.foundation_options)))
     
     # ─── Stage 1: Slab sizing (always) ─── needs sync to push slab self-weight
     push!(stages, PipelineStage(struc -> begin
@@ -190,7 +246,7 @@ function build_pipeline(params::DesignParameters;
     if floor_type in (:flat_plate, :flat_slab)
         push!(stages, PipelineStage(struc -> begin
             StructuralSizer.emit!(tc, :pipeline, "build_pipeline", "stage_2_reconcile", :enter)
-            _reconcile_columns!(struc, params)
+            _reconcile_columns!(struc, params; tc=tc)
             StructuralSizer.emit!(tc, :pipeline, "build_pipeline", "stage_2_reconcile", :exit)
         end, false))
     else
@@ -210,6 +266,8 @@ function build_pipeline(params::DesignParameters;
         end, false))
     end
     
+    StructuralSizer.emit!(tc, :pipeline, "build_pipeline", "", :exit;
+                          n_stages=length(stages))
     return stages
 end
 
@@ -320,6 +378,16 @@ function capture_design(struc::BuildingStructure, params::DesignParameters;
     return design
 end
 
+StructuralSizer.TRACE_REGISTRY[(:design_building, :pipeline)] =
+    StructuralSizer.TracedFunctionMeta(
+        :design_building,
+        :pipeline,
+        [:enter, :exit, :failure],
+        nothing,
+        @__FILE__,
+        @__LINE__,
+    )
+
 """
     design_building(struc::BuildingStructure, params::DesignParameters) -> BuildingDesign
 
@@ -352,8 +420,13 @@ function design_building(struc::BuildingStructure, params::DesignParameters;
     t_prepare = time() - t0
 
     # Pre-sizing validation: fail fast if DDM/EFM/FEA applicability checks fail
-    ok, val_errors = run_pre_sizing_validation(struc, params)
+    ok, val_errors = run_pre_sizing_validation(struc, params; tc=tc)
     if !ok
+        preview = isempty(val_errors) ? "" : join(val_errors[1:min(end, 3)], " | ")
+        StructuralSizer.emit!(tc, :pipeline, "design_building", "", :failure;
+                              error="PreSizingValidationError",
+                              n_errors=length(val_errors),
+                              preview=preview)
         throw(PreSizingValidationError(val_errors))
     end
     
@@ -412,6 +485,16 @@ function design_building(struc::BuildingStructure, params::DesignParameters;
     return design
 end
 
+StructuralSizer.TRACE_REGISTRY[(:design_building_kwargs, :pipeline)] =
+    StructuralSizer.TracedFunctionMeta(
+        :design_building_kwargs,
+        :pipeline,
+        [:enter, :exit],
+        nothing,
+        @__FILE__,
+        @__LINE__,
+    )
+
 """
     design_building(struc::BuildingStructure; kwargs...) -> BuildingDesign
 
@@ -438,6 +521,16 @@ function _get_column_opts(params::DesignParameters)
     (opts isa ConcreteColumnOptions || opts isa StructuralSizer.PixelFrameColumnOptions) ? opts : nothing
 end
 
+StructuralSizer.TRACE_REGISTRY[(:_reconcile_columns!, :workflow)] =
+    StructuralSizer.TracedFunctionMeta(
+        :_reconcile_columns!,
+        :workflow,
+        [:enter, :exit, :decision],
+        nothing,
+        @__FILE__,
+        @__LINE__,
+    )
+
 """
     _reconcile_columns!(struc, params) -> (struc=struc, n_reconciled=Int)
 
@@ -451,7 +544,11 @@ compression capacity: ϕPn = 0.65 × 0.80 × f′c × Ag  (ACI 318-11 §10.3.6.2
 
 Returns the mutated structure and the number of columns that grew.
 """
-function _reconcile_columns!(struc::BuildingStructure, params::DesignParameters)
+function _reconcile_columns!(
+    struc::BuildingStructure,
+    params::DesignParameters;
+    tc::Union{Nothing, StructuralSizer.TraceCollector} = nothing,
+)
     _col_opts = _get_column_opts(params)
     conc = resolve_concrete(params)
     fc_Pa = ustrip(u"Pa", conc.fc′)
@@ -465,6 +562,9 @@ function _reconcile_columns!(struc::BuildingStructure, params::DesignParameters)
     _shape_con = !isnothing(_col_opts) ? _col_opts.shape_constraint : :square
     _max_ar   = !isnothing(_col_opts) ? _col_opts.max_aspect_ratio : 2.0
     _c_inc    = !isnothing(_col_opts) ? _col_opts.size_increment : 0.5u"inch"
+
+    StructuralSizer.emit!(tc, :workflow, "_reconcile_columns!", "", :enter;
+                          n_columns=length(struc.columns))
 
     for col in struc.columns
         isnothing(col.c1) && continue
@@ -560,6 +660,16 @@ function _reconcile_columns!(struc::BuildingStructure, params::DesignParameters)
         Asap.solve!(struc.asap_model)
         synced = true
     end
+
+    if grew > 0
+        StructuralSizer.emit!(tc, :workflow, "_reconcile_columns!", "", :decision;
+                              outcome="grew_columns", n_reconciled=grew, self_synced=synced)
+    else
+        StructuralSizer.emit!(tc, :workflow, "_reconcile_columns!", "", :decision;
+                              outcome="no_change", n_reconciled=0, self_synced=false)
+    end
+    StructuralSizer.emit!(tc, :workflow, "_reconcile_columns!", "", :exit;
+                          n_reconciled=grew, self_synced=synced)
 
     return (struc = struc, n_reconciled = grew, synced = synced)
 end
@@ -809,8 +919,13 @@ function _size_beams_columns!(struc::BuildingStructure, params::DesignParameters
         floor_types = Set(s.floor_type for s in struc.slabs)
         if all(ft -> ft in (:flat_plate, :flat_slab, :grade, :roof), floor_types)
             @warn "Skipping beam sizing for slab-only floor system in beam+column stage" floor_types=collect(floor_types)
-            _reconcile_columns!(struc, params)
+            StructuralSizer.emit!(tc, :workflow, "_size_beams_columns!", "", :decision;
+                                  outcome="skipped", reason="slab_only_system",
+                                  floor_types=collect(string.(collect(floor_types))))
+            _reconcile_columns!(struc, params; tc=tc)
             _ensure_beam_sections_for_visualization!(struc, params)
+            StructuralSizer.emit!(tc, :workflow, "_size_beams_columns!", "", :exit;
+                                  outcome="skipped")
             return struc
         end
     end
@@ -823,14 +938,16 @@ function _size_beams_columns!(struc::BuildingStructure, params::DesignParameters
     # Skip beam sizing when no beam edges (e.g. beam-based floor type but geometry has no beams)
     if isempty(beam_edge_ids)
         @warn "Skipping beam sizing: no beam edges in geometry. Sizing columns only."
-        size_columns!(struc, column_opts; reanalyze=false)
+        StructuralSizer.emit!(tc, :workflow, "_size_beams_columns!", "", :decision;
+                              outcome="skipped_beams", reason="no_beam_edges")
+        size_columns!(struc, column_opts; reanalyze=false, tc=tc)
         if struc.asap_model.processed
             Asap.update!(struc.asap_model)
         else
             Asap.process!(struc.asap_model)
         end
         Asap.solve!(struc.asap_model)
-        _run_p_delta_if_needed!(struc, column_opts; verbose=false)
+        _run_p_delta_if_needed!(struc, column_opts; verbose=false, tc=tc)
         if has_fire_rating(params)
             n_col = add_coating_loads!(struc, params; member_edge_group=:columns, resolve=false)
             if n_col > 0
@@ -838,6 +955,8 @@ function _size_beams_columns!(struc::BuildingStructure, params::DesignParameters
                 Asap.solve!(struc.asap_model)
             end
         end
+        StructuralSizer.emit!(tc, :workflow, "_size_beams_columns!", "", :exit;
+                              outcome="columns_only")
         return struc
     end
 
@@ -849,6 +968,8 @@ function _size_beams_columns!(struc::BuildingStructure, params::DesignParameters
     prev_demands = Vector{Float64}(undef, n_cols_bc)
     curr_demands = Vector{Float64}(undef, n_cols_bc)
     first_iter = true
+    converged = false
+    iters_used = 0
     
     StructuralSizer.emit!(tc, :workflow, "_size_beams_columns!", "", :enter;
                           n_beams=length(beam_edge_ids), n_columns=n_cols_bc,
@@ -856,7 +977,8 @@ function _size_beams_columns!(struc::BuildingStructure, params::DesignParameters
                           column_type=string(typeof(column_opts)))
 
     for iter in 1:max_iter
-        size_beams!(struc, beam_opts; reanalyze=false)
+        iters_used = iter
+        size_beams!(struc, beam_opts; reanalyze=false, tc=tc)
         
         if struc.asap_model.processed
             Asap.update!(struc.asap_model)
@@ -865,7 +987,7 @@ function _size_beams_columns!(struc::BuildingStructure, params::DesignParameters
         end
         Asap.solve!(struc.asap_model)
         
-        size_columns!(struc, column_opts; reanalyze=false)
+        size_columns!(struc, column_opts; reanalyze=false, tc=tc)
         
         if struc.asap_model.processed
             Asap.update!(struc.asap_model)
@@ -878,6 +1000,7 @@ function _size_beams_columns!(struc::BuildingStructure, params::DesignParameters
         if !first_iter && _max_demand_change(prev_demands, curr_demands) < tol
             StructuralSizer.emit!(tc, :workflow, "_size_beams_columns!", "", :decision;
                                   outcome="converged", iterations=iter)
+            converged = true
             break
         end
         copyto!(prev_demands, curr_demands)
@@ -888,7 +1011,7 @@ function _size_beams_columns!(struc::BuildingStructure, params::DesignParameters
     # After first-order sizing converges, check if any story has δs > 1.5.
     # If so, run iterative P-Δ to capture second-order effects, then re-size
     # columns with the updated forces.
-    _run_p_delta_if_needed!(struc, column_opts; verbose=verbose)
+    _run_p_delta_if_needed!(struc, column_opts; verbose=verbose, tc=tc)
     
     # ─── Fire protection coating loads (steel members only) ───
     # After sizing, add SFRM/intumescent self-weight and re-solve.
@@ -901,8 +1024,21 @@ function _size_beams_columns!(struc::BuildingStructure, params::DesignParameters
         end
     end
     
+    StructuralSizer.emit!(tc, :workflow, "_size_beams_columns!", "", :exit;
+                          converged=converged,
+                          iterations=iters_used)
     return struc
 end
+
+StructuralSizer.TRACE_REGISTRY[(:_run_p_delta_if_needed!, :workflow)] =
+    StructuralSizer.TracedFunctionMeta(
+        :_run_p_delta_if_needed!,
+        :workflow,
+        [:enter, :exit, :decision],
+        nothing,
+        @__FILE__,
+        @__LINE__,
+    )
 
 """
     _run_p_delta_if_needed!(struc, column_opts; verbose=false)
@@ -910,7 +1046,14 @@ end
 Check whether any story requires P-Δ analysis (δs > 1.5 from both Q and ΣPc
 methods).  If so, run `p_delta_iterate!` and re-size columns.
 """
-function _run_p_delta_if_needed!(struc::BuildingStructure, column_opts; verbose::Bool = false)
+function _run_p_delta_if_needed!(
+    struc::BuildingStructure,
+    column_opts;
+    verbose::Bool = false,
+    tc::Union{Nothing, StructuralSizer.TraceCollector} = nothing,
+)
+    StructuralSizer.emit!(tc, :workflow, "_run_p_delta_if_needed!", "", :enter;
+                          n_columns=length(struc.columns))
     # Compute story properties with the current solved model
     compute_story_properties!(struc; verbose=false)
     
@@ -934,6 +1077,10 @@ function _run_p_delta_if_needed!(struc::BuildingStructure, column_opts; verbose:
     end
     
     if !needs_pdelta
+        StructuralSizer.emit!(tc, :workflow, "_run_p_delta_if_needed!", "", :decision;
+                              outcome="skipped", reason="delta_s_below_threshold")
+        StructuralSizer.emit!(tc, :workflow, "_run_p_delta_if_needed!", "", :exit;
+                              ran=false)
         return
     end
     
@@ -946,7 +1093,13 @@ function _run_p_delta_if_needed!(struc::BuildingStructure, column_opts; verbose:
     end
     
     # Re-size columns with updated second-order forces
-    size_columns!(struc, column_opts; reanalyze=false)
+    size_columns!(struc, column_opts; reanalyze=false, tc=tc)
+    StructuralSizer.emit!(tc, :workflow, "_run_p_delta_if_needed!", "", :decision;
+                          outcome="ran",
+                          n_stories_attention=length(result.stories_needing_attention),
+                          max_drift_ratio=round(result.max_drift_ratio; digits=3))
+    StructuralSizer.emit!(tc, :workflow, "_run_p_delta_if_needed!", "", :exit;
+                          ran=true)
     
     return
 end
@@ -977,8 +1130,13 @@ function _size_foundations!(
     initialize_supports!(struc)
     if isempty(struc.supports)
         @warn "Skipping foundation sizing: no supports found. Ensure support vertices are at grade."
+        StructuralSizer.emit!(tc, :workflow, "_size_foundations!", "", :decision;
+                              outcome="skipped", reason="no_supports")
         return
     end
+    StructuralSizer.emit!(tc, :workflow, "_size_foundations!", "", :enter;
+                          n_supports=length(struc.supports),
+                          strategy=string(fp.options.strategy))
     size_foundations!(struc;
         soil = fp.soil,
         opts = fp.options,
@@ -989,6 +1147,8 @@ function _size_foundations!(
         min_depth = fp.min_depth,
         tc = tc,
     )
+    StructuralSizer.emit!(tc, :workflow, "_size_foundations!", "", :exit;
+                          n_foundations=length(struc.foundations))
 end
 
 """Extract column axial demands into pre-allocated buffer (zero-alloc)."""

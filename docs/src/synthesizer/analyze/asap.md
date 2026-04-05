@@ -79,6 +79,9 @@ When `params.pattern_loading` is not `:none`, the analysis applies pattern loadi
 - Solves under the specified `LoadCombination` (for example `service` or `strength_1_2D_1_6L`)
 - Used for deflection visualization and draping
 
+If `build_analysis_model!` fails, `design_building` logs a warning and the design still completes;
+visualization consumers should fall back to the frame-only model.
+
 ### Draping
 
 `StructuralSynthesizer.compute_draped_displacements(design)` (internal, unexported) interpolates total and local bending displacements across slab surfaces for deflected shape visualization. It separates global column shortening from local slab bending to show realistic deflected shapes.

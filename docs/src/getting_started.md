@@ -86,9 +86,14 @@ println("All checks pass: ", result.summary.all_checks_pass)
 `design_building` runs the full multi-stage pipeline:
 
 1. `prepare!` — initialize the structure, estimate columns, build the Asap model, and snapshot the pristine state
-2. Run the stage vector from `build_pipeline(params)` (with `sync_asap!` where needed)
+2. Run the stage vector from `build_pipeline(params; tc=nothing)` (with `sync_asap!` where needed)
 3. `capture_design` — populate the `BuildingDesign` (results + summary + timings)
 4. `restore!` — revert `struc` to the pristine pre-design state
+
+Note: `design_building` also attempts to build a separate frame+shell visualization model via
+`build_analysis_model!` (unless `params.skip_visualization=true`). If that step fails (for example
+due to an Asap shell-meshing API mismatch), the design still completes and visualization falls back
+to the frame-only model.
 
 ## Running the HTTP API
 

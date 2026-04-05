@@ -33,7 +33,7 @@ capture_design
 
 ### Pipeline Architecture
 
-`build_pipeline(params)` returns a `Vector{PipelineStage}`, where each stage is:
+`build_pipeline(params; tc=nothing)` returns a `Vector{PipelineStage}`, where each stage is:
 
 ```julia
 struct PipelineStage
@@ -50,25 +50,25 @@ The pipeline runner iterates through stages, calling `stage.fn(struc)` (params a
 
 | Stage | Function | Sync | Description |
 |:------|:---------|:-----|:------------|
-| 1 | `size_slabs!` | yes | Size all slabs (DDM, EFM, or FEA) |
-| 2 | `_reconcile_columns!` | no | Grow columns if Asap axial > slab-design capacity (this stage self-syncs Asap when growth occurs) |
-| 3 | `size_foundations!` | no | Size foundations (optional) |
+| 1 | slab sizing | yes | `size_slabs!` via the selected floor options (DDM, EFM, or FEA) |
+| 2 | column reconciliation | no | Internal pass that may grow columns from Asap axial demand; if growth occurs it may self-sync (so the pipeline stage sets `needs_sync=false`) |
+| 3 | foundation sizing | no | Internal call to `size_foundations!` when `params.foundation_options` is provided |
 
 **Beam-based systems (one-way, two-way, composite deck, timber):**
 
 | Stage | Function | Sync | Description |
 |:------|:---------|:-----|:------------|
-| 1 | `size_slabs!` | yes | Size slabs to determine beam tributary loads |
-| 2 | `_size_beams_columns!` | yes | Iterative beam and column sizing until convergence |
-| 3 | `size_foundations!` | no | Size foundations (optional) |
+| 1 | slab sizing | yes | Size slabs to establish self-weight and tributary loads |
+| 2 | member sizing | yes | Internal iterative sizing for beams + columns (converges demands, may run P-Δ if required) |
+| 3 | foundation sizing | no | Internal call to `size_foundations!` when requested |
 
 **Vault:**
 
 | Stage | Function | Sync | Description |
 |:------|:---------|:-----|:------------|
-| 1 | `size_slabs!` | yes | Size vault shells |
-| 2 | `_size_beams_columns!` | yes | Size supporting members |
-| 3 | `size_foundations!` | no | Size foundations (optional) |
+| 1 | slab sizing | yes | Size vault shells |
+| 2 | member sizing | yes | Internal iterative sizing for supporting members (beam must resist thrust effects) |
+| 3 | foundation sizing | no | Internal call to `size_foundations!` when requested |
 
 ### prepare!
 
@@ -97,7 +97,7 @@ The pipeline runner iterates through stages, calling `stage.fn(struc)` (params a
 
 ### Pre-sizing validation (method applicability)
 
-After `prepare!` builds the structure and analysis model, `design_building` runs `run_pre_sizing_validation(struc, params)` to check method applicability (DDM / EFM / FEA) for the selected floor system. If any slab panel is ineligible for its chosen method, `design_building` throws `PreSizingValidationError` (the HTTP API converts this into a 400 validation-style response).
+After `prepare!` builds the structure and analysis model, `design_building` runs `run_pre_sizing_validation(struc, params; tc=nothing)` to check method applicability (DDM / EFM / FEA) for the selected floor system. If any slab panel is ineligible for its chosen method, `design_building` throws `PreSizingValidationError` (the HTTP API converts this into a 400 validation-style response).
 
 ### Uniform column sizing
 
@@ -112,7 +112,7 @@ When second-order effects are significant, P-Δ analysis is triggered:
 
 ### Column Reconciliation
 
-In flat plate systems, `_reconcile_columns!` handles the circular dependency between column size and punching shear:
+In flat plate systems, the pipeline includes a column reconciliation stage to handle the circular dependency between column size and punching shear:
 - After slab design, the punching shear check may assume a column size that the slab design requires
 - If the Asap axial demand exceeds the slab-implied column capacity, the column is grown
 - The FEM model is re-solved and slabs are re-checked

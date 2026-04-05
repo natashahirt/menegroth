@@ -41,12 +41,16 @@ add_coating_loads!
 2. **Create frame elements** — one Asap frame element per beam/column/strut segment:
    - Initial section properties use a **placeholder** `Asap.Section` (topology-first). Sizing/reconciliation stages later overwrite element sections with sized properties.
    - Material properties (E, G, ρ) use `params.default_frame_*` before member sizing assigns section-specific properties.
-3. **Apply loads** — gravity loads from cells converted to distributed loads on beam elements:
-   - Self-weight of members
-   - Tributary-width distributed dead and live loads on beams
-   - Coating/fireproofing loads if applicable (`add_coating_loads!`)
+3. **Apply loads** — gravity loads from cells converted to `Asap.TributaryLoad`s on frame elements:
+   - Tributary-width distributed dead/live pressures factored by the governing `LoadCombination`
+   - Structural effects that are expressed as line loads (e.g., vault lateral thrust) when present in slab results
 4. **Solve** — calls `Asap.solve!` for the assembled model
 5. Stores the model in `struc.asap_model`
+
+Notes:
+
+- `to_asap!` returns a **frame-only** `Asap.Model`. Shell elements created for diaphragm modeling are not currently coupled into `struc.asap_model` (use `build_analysis_model!` for the frame+shell visualization/deflection model).
+- Fire protection self-weight is added by calling `add_coating_loads!(struc, params; ...)` **after** member sizing assigns sections, then re-solving (typically via `sync_asap!`).
 
 ### sync_asap!
 
@@ -72,7 +76,7 @@ When `params.pattern_loading` is not `:none`, the analysis applies pattern loadi
 
 - Frame elements with actual section dimensions
 - Shell elements for sized slabs with correct thickness
-- Solves under the specified load combination (`:service`, `:ultimate`, or custom)
+- Solves under the specified `LoadCombination` (for example `service` or `strength_1_2D_1_6L`)
 - Used for deflection visualization and draping
 
 ### Draping
@@ -81,7 +85,12 @@ When `params.pattern_loading` is not `:none`, the analysis applies pattern loadi
 
 ### Diaphragm Modeling
 
-`create_slab_diaphragm_shells(struc, slab, nodes; E, ν, t_factor)` creates shell elements representing the in-plane stiffness of the slab diaphragm. These are used for lateral load distribution when `params.diaphragm_mode` is enabled.
+`create_slab_diaphragm_shells(struc, slab, nodes; E, ν, t_factor)` creates shell elements representing the in-plane stiffness of the slab diaphragm.
+
+At the moment:
+
+- `to_asap!` may construct diaphragm shells for `:rigid` / `:shell` modes, but the returned `struc.asap_model` remains frame-only.
+- `build_analysis_model!` is the supported path for a frame+shell model used in visualization/deflection analysis.
 
 ## Options & Configuration
 
@@ -99,3 +108,8 @@ When `params.pattern_loading` is not `:none`, the analysis applies pattern loadi
 - Only frame elements are used for the primary analysis model; shell elements are added only for visualization and diaphragm stiffness.
 - Dynamic analysis (modal, response spectrum) is not yet supported.
 - Asap model updates via `sync_asap!` do not update topology; adding/removing members requires a full `to_asap!` rebuild.
+
+## References
+
+- `StructuralSynthesizer/src/analyze/asap/utils.jl`
+- `StructuralSynthesizer/src/analyze/asap/drape.jl`

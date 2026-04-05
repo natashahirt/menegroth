@@ -110,29 +110,29 @@ StructuralSizer re-exports unit quantities from [Unitful.jl](https://github.com/
 | `Density` | ML⁻³ | `kg/m³`, `pcf` |
 
 ```@docs
-Length
-Area
-Volume
-SectionModulus
-SecondMomentOfArea
-TorsionalConstant
-MomentOfInertia
-WarpingConstant
-Pressure
-Force
-Moment
-Torque
-LinearLoad
-AreaLoadQuantity
-Density
-Acceleration
-LengthQuantity
-AreaQuantity
-VolumeQuantity
-PressureQuantity
-ForceQuantity
-MomentQuantity
-ForcePerLength
+StructuralSizer.Length
+StructuralSizer.Area
+StructuralSizer.Volume
+StructuralSizer.SectionModulus
+StructuralSizer.SecondMomentOfArea
+StructuralSizer.TorsionalConstant
+StructuralSizer.MomentOfInertia
+StructuralSizer.WarpingConstant
+StructuralSizer.Pressure
+StructuralSizer.Force
+StructuralSizer.Moment
+StructuralSizer.Torque
+StructuralSizer.LinearLoad
+StructuralSizer.AreaLoadQuantity
+StructuralSizer.Density
+StructuralSizer.Acceleration
+StructuralSizer.LengthQuantity
+StructuralSizer.AreaQuantity
+StructuralSizer.VolumeQuantity
+StructuralSizer.PressureQuantity
+StructuralSizer.ForceQuantity
+StructuralSizer.MomentQuantity
+StructuralSizer.ForcePerLength
 ```
 
 ### Unit Conversion Helpers

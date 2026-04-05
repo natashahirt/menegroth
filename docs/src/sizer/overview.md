@@ -109,32 +109,6 @@ StructuralSizer re-exports unit quantities from [Unitful.jl](https://github.com/
 | `LinearLoad` | MT⁻² | `N/m`, `kip/ft` |
 | `Density` | ML⁻³ | `kg/m³`, `pcf` |
 
-```@docs
-StructuralSizer.Asap.Length
-StructuralSizer.Asap.Area
-StructuralSizer.Asap.Volume
-StructuralSizer.Asap.SectionModulus
-StructuralSizer.Asap.SecondMomentOfArea
-StructuralSizer.Asap.TorsionalConstant
-StructuralSizer.Asap.MomentOfInertia
-StructuralSizer.Asap.WarpingConstant
-StructuralSizer.Asap.Pressure
-StructuralSizer.Asap.Force
-StructuralSizer.Asap.Moment
-StructuralSizer.Asap.Torque
-StructuralSizer.Asap.LinearLoad
-StructuralSizer.Asap.AreaLoadQuantity
-StructuralSizer.Asap.Density
-StructuralSizer.Asap.Acceleration
-StructuralSizer.Asap.LengthQuantity
-StructuralSizer.Asap.AreaQuantity
-StructuralSizer.Asap.VolumeQuantity
-StructuralSizer.Asap.PressureQuantity
-StructuralSizer.Asap.ForceQuantity
-StructuralSizer.Asap.MomentQuantity
-StructuralSizer.Asap.ForcePerLength
-```
-
 ### Unit Conversion Helpers
 
 | Function | Description |

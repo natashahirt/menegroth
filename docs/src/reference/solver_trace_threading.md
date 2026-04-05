@@ -27,6 +27,7 @@ Each event has:
 TraceCollector
 emit!
 TraceEvent
+TracedFunctionMeta
 ```
 
 ## `@traced` and `TRACE_REGISTRY`

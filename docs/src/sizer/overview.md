@@ -110,29 +110,29 @@ StructuralSizer re-exports unit quantities from [Unitful.jl](https://github.com/
 | `Density` | ML⁻³ | `kg/m³`, `pcf` |
 
 ```@docs
-Asap.Length
-Asap.Area
-Asap.Volume
-Asap.SectionModulus
-Asap.SecondMomentOfArea
-Asap.TorsionalConstant
-Asap.MomentOfInertia
-Asap.WarpingConstant
-Asap.Pressure
-Asap.Force
-Asap.Moment
-Asap.Torque
-Asap.LinearLoad
-Asap.AreaLoadQuantity
-Asap.Density
-Asap.Acceleration
-Asap.LengthQuantity
-Asap.AreaQuantity
-Asap.VolumeQuantity
-Asap.PressureQuantity
-Asap.ForceQuantity
-Asap.MomentQuantity
-Asap.ForcePerLength
+StructuralSizer.Asap.Length
+StructuralSizer.Asap.Area
+StructuralSizer.Asap.Volume
+StructuralSizer.Asap.SectionModulus
+StructuralSizer.Asap.SecondMomentOfArea
+StructuralSizer.Asap.TorsionalConstant
+StructuralSizer.Asap.MomentOfInertia
+StructuralSizer.Asap.WarpingConstant
+StructuralSizer.Asap.Pressure
+StructuralSizer.Asap.Force
+StructuralSizer.Asap.Moment
+StructuralSizer.Asap.Torque
+StructuralSizer.Asap.LinearLoad
+StructuralSizer.Asap.AreaLoadQuantity
+StructuralSizer.Asap.Density
+StructuralSizer.Asap.Acceleration
+StructuralSizer.Asap.LengthQuantity
+StructuralSizer.Asap.AreaQuantity
+StructuralSizer.Asap.VolumeQuantity
+StructuralSizer.Asap.PressureQuantity
+StructuralSizer.Asap.ForceQuantity
+StructuralSizer.Asap.MomentQuantity
+StructuralSizer.Asap.ForcePerLength
 ```
 
 ### Unit Conversion Helpers

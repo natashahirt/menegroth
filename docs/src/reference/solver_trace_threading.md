@@ -27,6 +27,7 @@ Each event has:
 TraceCollector
 emit!
 TraceEvent
+TracedFunctionMeta
 ```
 
 ## `@traced` and `TRACE_REGISTRY`
@@ -38,8 +39,9 @@ Where **`@traced` conflicts with docstrings**, the same metadata can be register
 ## End-to-end flow
 
 1. **`design_building(struc, params; tc=tc)`** emits pipeline **`:enter`** / **`:exit`** around the full run (with timing metadata on exit).
-2. **`build_pipeline(params; tc=tc)`** runs pipeline stages (slabs, reconcile, beams/columns, foundations, …) and passes **`tc`** into routines that emit events (e.g. `size_slabs!`).
-3. **`capture_design(struc, params; tc=tc, ...)`** copies accumulated events onto **`design.solver_trace`**.
+2. **`build_pipeline(params; tc=tc)`** *composes* the stage vector (slabs, reconcile, beams/columns, foundations, …). Each stage closure captures `params` and (when provided) threads **`tc`** into the routines that emit events (for example `size_slabs!`).
+3. **`design_building`** executes the returned stages, calling each `stage.fn(struc)` and then (when `stage.needs_sync`) calling `sync_asap!(struc; params=params)`.
+4. **`capture_design(struc, params; tc=tc, ...)`** copies accumulated events onto **`design.solver_trace`**.
 
 So the trace is a linear **`Vector{TraceEvent}`** attached to the returned **`BuildingDesign`**, suitable for JSON serialization or LLM-facing summaries.
 

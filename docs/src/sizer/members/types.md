@@ -116,6 +116,8 @@ TimberMemberGeometry
 ```@docs
 AbstractCapacityChecker
 AbstractCapacityCache
+CheckResult
+FeasibilityExplanation
 ```
 
 **`AbstractCapacityChecker`**

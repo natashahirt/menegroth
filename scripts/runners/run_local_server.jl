@@ -3,6 +3,9 @@
 #
 # Grasshopper defaults to http://localhost:8080 — no URL change needed.
 # For chat, set CHAT_LLM_API_KEY or place key in secrets/openai_api_key.
+#
+# Port/host: same precedence as sizer_service.jl (PORT, then SIZER_PORT, default 8080).
+# Some launchers set PORT to the hostname "localhost"; non-integer values are skipped.
 
 ENV["SS_ENABLE_VISUALIZATION"] = get(ENV, "SS_ENABLE_VISUALIZATION", "false")
 ENV["SS_ENABLE_HEAVY_PRECOMPILE_WORKLOAD"] = get(ENV, "SS_ENABLE_HEAVY_PRECOMPILE_WORKLOAD", "false")
@@ -36,7 +39,7 @@ function _listen_port()
 end
 
 const PORT = _listen_port()
-const HOST = get(ENV, "SIZER_HOST", "localhost")
+const HOST = get(ENV, "SIZER_HOST", "0.0.0.0")
 
 @info "Registering API routes..."
 register_routes!()

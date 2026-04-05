@@ -110,29 +110,29 @@ StructuralSizer re-exports unit quantities from [Unitful.jl](https://github.com/
 | `Density` | ML⁻³ | `kg/m³`, `pcf` |
 
 ```@docs
-StructuralSizer.Length
-StructuralSizer.Area
-StructuralSizer.Volume
-StructuralSizer.SectionModulus
-StructuralSizer.SecondMomentOfArea
-StructuralSizer.TorsionalConstant
-StructuralSizer.MomentOfInertia
-StructuralSizer.WarpingConstant
-StructuralSizer.Pressure
-StructuralSizer.Force
-StructuralSizer.Moment
-StructuralSizer.Torque
-StructuralSizer.LinearLoad
-StructuralSizer.AreaLoadQuantity
-StructuralSizer.Density
-StructuralSizer.Acceleration
-StructuralSizer.LengthQuantity
-StructuralSizer.AreaQuantity
-StructuralSizer.VolumeQuantity
-StructuralSizer.PressureQuantity
-StructuralSizer.ForceQuantity
-StructuralSizer.MomentQuantity
-StructuralSizer.ForcePerLength
+Asap.Length
+Asap.Area
+Asap.Volume
+Asap.SectionModulus
+Asap.SecondMomentOfArea
+Asap.TorsionalConstant
+Asap.MomentOfInertia
+Asap.WarpingConstant
+Asap.Pressure
+Asap.Force
+Asap.Moment
+Asap.Torque
+Asap.LinearLoad
+Asap.AreaLoadQuantity
+Asap.Density
+Asap.Acceleration
+Asap.LengthQuantity
+Asap.AreaQuantity
+Asap.VolumeQuantity
+Asap.PressureQuantity
+Asap.ForceQuantity
+Asap.MomentQuantity
+Asap.ForcePerLength
 ```
 
 ### Unit Conversion Helpers

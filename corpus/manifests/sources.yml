@@ -1,0 +1,448 @@
+# corpus/manifests/sources.yml
+#
+# Allowlist of source documents to copy into corpus/sources/ (and mirror their
+# sibling .txt into corpus/text/). Consumed by scripts/corpus/ingest.py.
+#
+# Fields per entry:
+#   id            : stable, human-meaningful identifier (kebab-case)
+#   origin        : repo-relative path to upstream document
+#   source_path   : repo-relative destination under corpus/sources/
+#   text_path     : repo-relative destination under corpus/text/ (sibling .txt)
+#   family        : code family (aci|aisc|csa|fib|foundations|slabs|...)
+#   role          : codes | code_guides | examples | research | textbooks
+#   edition       : free-form version/edition string
+#   tier          : 1 (highest priority) ... 4
+#   encrypted     : true if the PDF requires a password (handled by ingest)
+#   notes         : free-form
+
+# ── Tier 1 — authoritative codes ──────────────────────────────────────────
+- id: aci-318-11
+  origin: StructuralSizer/src/codes/reference/ACI-318-11.pdf
+  source_path: corpus/sources/codes/aci/ACI-318-11.pdf
+  text_path:   corpus/text/codes/aci/ACI-318-11.txt
+  family: aci
+  role: codes
+  edition: ACI 318-11
+  tier: 1
+  encrypted: false
+  notes: "Cross-cutting authoritative ACI 318 standard."
+
+- id: aci-216-1-fire
+  origin: StructuralSizer/src/codes/reference/ACI216_1_Fire.pdf
+  source_path: corpus/sources/codes/aci/ACI216_1_Fire.pdf
+  text_path:   corpus/text/codes/aci/ACI216_1_Fire.txt
+  family: aci
+  role: codes
+  edition: ACI/TMS 216.1
+  tier: 1
+  encrypted: false
+  notes: "Code for fire endurance of concrete and masonry."
+
+- id: fib-model-code-2010
+  origin: "StructuralSizer/src/codes/reference/fib Model Code for Concrete Structures 2010 - 2013 - fib.pdf"
+  source_path: corpus/sources/codes/fib/fib_model_code_2010.pdf
+  text_path:   corpus/text/codes/fib/fib_model_code_2010.txt
+  family: fib
+  role: codes
+  edition: fib MC 2010
+  tier: 1
+  encrypted: false
+  notes: "fib Model Code for Concrete Structures 2010."
+
+- id: aisc-360-16
+  origin: StructuralSizer/src/members/codes/aisc/reference/AISC-360-16.pdf
+  source_path: corpus/sources/codes/aisc/AISC-360-16.pdf
+  text_path:   corpus/text/codes/aisc/AISC-360-16.txt
+  family: aisc
+  role: codes
+  edition: AISC 360-16
+  tier: 1
+  encrypted: false
+  notes: "AISC Specification for Structural Steel Buildings."
+
+# ── Tier 1 — official guides / committee reports ──────────────────────────
+- id: aci-421-3r-15
+  origin: "StructuralSizer/src/slabs/codes/concrete/reference/ACI 421-3R-15.pdf"
+  source_path: corpus/sources/code_guides/aci/ACI-421-3R-15.pdf
+  text_path:   corpus/text/code_guides/aci/ACI-421-3R-15.txt
+  family: aci
+  role: code_guides
+  edition: ACI 421.3R-15
+  tier: 1
+  encrypted: false
+  notes: "Guide to design of reinforced two-way slab systems for punching."
+
+- id: aci-216r-89
+  origin: "StructuralSizer/src/members/codes/aisc/reference/fire/216R-89 Guide for Determining the Fire Endurance of Concrete Elements.pdf"
+  source_path: corpus/sources/code_guides/aci/ACI-216R-89.pdf
+  text_path:   corpus/text/code_guides/aci/ACI-216R-89.txt
+  family: aci
+  role: code_guides
+  edition: ACI 216R-89
+  tier: 1
+  encrypted: false
+  notes: "Guide for determining fire endurance of concrete elements."
+
+- id: aisc-dg9-torsion
+  origin: "StructuralSizer/src/members/codes/aisc/reference/Design Guide 9 Torsion.pdf"
+  source_path: corpus/sources/code_guides/aisc/AISC-DG9-Torsion.pdf
+  text_path:   corpus/text/code_guides/aisc/AISC-DG9-Torsion.txt
+  family: aisc
+  role: code_guides
+  edition: AISC Design Guide 9
+  tier: 1
+  encrypted: false
+  notes: "Torsional analysis of structural steel members."
+
+- id: aci-336-combined-footings-mats
+  origin: "StructuralSizer/src/foundations/codes/reference/Suggested analysis and design procedures for combined footings and mats.pdf"
+  source_path: corpus/sources/code_guides/aci/ACI-336-combined-footings-mats.pdf
+  text_path:   corpus/text/code_guides/aci/ACI-336-combined-footings-mats.txt
+  family: aci
+  role: code_guides
+  edition: ACI 336.2R
+  tier: 1
+  encrypted: false
+  notes: "Suggested analysis and design procedures for combined footings and mats."
+
+- id: pca-eb712
+  origin: StructuralSizer/src/codes/reference/EB712_8-31-14.pdf
+  source_path: corpus/sources/code_guides/aci/EB712_8-31-14.pdf
+  text_path:   corpus/text/code_guides/aci/EB712_8-31-14.txt
+  family: aci
+  role: code_guides
+  edition: PCA EB712 (2014-08-31)
+  tier: 1
+  encrypted: true
+  notes: "PCA Notes on ACI 318 (encrypted; password handled by convert_pdfs_to_text.py)."
+
+# ── Tier 2 — research papers ──────────────────────────────────────────────
+# Peer-reviewed academic papers with grounded citations. Tier 2 because the
+# methods are not normative but are widely used as references for algorithmic
+# / topology / sizing work. ``family`` is set by topic (walls, slabs, ...)
+# rather than by code-publishing organization, since research papers are
+# typically not tied to a specific code edition.
+- id: zhang-mueller-2017-shear-wall-layout-opt
+  origin: "StructuralSizer/src/walls/reference/algorithms/Zhang-Mueller_2017_Published-Version.pdf"
+  source_path: corpus/sources/research/walls/Zhang-Mueller-2017-Shear-Wall-Layout-Optimization.pdf
+  text_path:   corpus/text/research/walls/Zhang-Mueller-2017-Shear-Wall-Layout-Optimization.txt
+  family: walls
+  role: research
+  edition: "Engineering Structures 140 (2017) 225–240"
+  tier: 2
+  encrypted: false
+  notes: "Zhang & Mueller (MIT), 'Shear wall layout optimization for conceptual design of tall buildings' — algorithmic / topology-optimization reference for shear-wall placement."
+
+# ── Tier 2 — vendor design guides / technical notes (StructurePoint) ──────
+# StructurePoint (publisher of spWall / spColumn / spMats) commentaries and
+# flowcharts. Tier 2 because they are well-cited industry references that
+# quote ACI 318 clauses directly, but are not committee-published.
+- id: sp-cracking-coefficient-walls
+  origin: "StructuralSizer/src/walls/reference/Cracking Coefficient and Flexural Stiffness of Concrete Walls.pdf"
+  source_path: corpus/sources/code_guides/aci/SP-Cracking-Coefficient-Concrete-Walls.pdf
+  text_path:   corpus/text/code_guides/aci/SP-Cracking-Coefficient-Concrete-Walls.txt
+  family: aci
+  role: code_guides
+  edition: ACI 318 (StructurePoint TN)
+  tier: 2
+  encrypted: false
+  notes: "StructurePoint technical note: cracking coefficient and effective flexural stiffness of concrete walls (spWall background)."
+
+- id: sp-effective-flexural-stiffness-aci318-14
+  origin: "StructuralSizer/src/walls/reference/Effective Flexural Stiffness ACI 318-14.pdf"
+  source_path: corpus/sources/code_guides/aci/SP-Effective-Flexural-Stiffness-ACI318-14.pdf
+  text_path:   corpus/text/code_guides/aci/SP-Effective-Flexural-Stiffness-ACI318-14.txt
+  family: aci
+  role: code_guides
+  edition: ACI 318-14 (StructurePoint TN)
+  tier: 2
+  encrypted: false
+  notes: "StructurePoint technical note: effective flexural stiffness of walls per ACI 318-14."
+
+- id: sp-flowchart-governing-reinforcement
+  origin: "StructuralSizer/src/walls/reference/Flow Chart Governing Reinforcement.pdf"
+  source_path: corpus/sources/code_guides/aci/SP-Flowchart-Governing-Reinforcement.pdf
+  text_path:   corpus/text/code_guides/aci/SP-Flowchart-Governing-Reinforcement.txt
+  family: aci
+  role: code_guides
+  edition: ACI 318 (StructurePoint TN)
+  tier: 2
+  encrypted: false
+  notes: "StructurePoint flowchart: governing reinforcement (As) selection logic for wall design."
+
+- id: sp-tilt-up-panel-commentary-aci318-14
+  origin: "StructuralSizer/src/walls/reference/Multi-Story Tilt-Up Panel Design Commentary.pdf"
+  source_path: corpus/sources/code_guides/aci/SP-Multi-Story-Tilt-Up-Panel-Commentary.pdf
+  text_path:   corpus/text/code_guides/aci/SP-Multi-Story-Tilt-Up-Panel-Commentary.txt
+  family: aci
+  role: code_guides
+  edition: ACI 318-14 / ACI 551.2R-15 (StructurePoint TN)
+  tier: 2
+  encrypted: false
+  notes: "StructurePoint commentary on multi-story tilt-up panel design referencing ACI 318-14 and ACI 551.2R-15."
+
+- id: sp-structural-wall-reinforcement-design
+  origin: "StructuralSizer/src/walls/reference/Structural Wall Reinforcement Design.pdf"
+  source_path: corpus/sources/code_guides/aci/SP-Structural-Wall-Reinforcement-Design.pdf
+  text_path:   corpus/text/code_guides/aci/SP-Structural-Wall-Reinforcement-Design.txt
+  family: aci
+  role: code_guides
+  edition: ACI 318 (StructurePoint TN)
+  tier: 2
+  encrypted: false
+  notes: "StructurePoint design considerations for structural wall reinforcement (Asx/Asy two-curtain design in spWall)."
+
+- id: sp-wall-shear-strength-flowchart
+  origin: "StructuralSizer/src/walls/reference/Wall Shear Strength Concrete Flowchart ACI 318.pdf"
+  source_path: corpus/sources/code_guides/aci/SP-Wall-Shear-Strength-Flowchart.pdf
+  text_path:   corpus/text/code_guides/aci/SP-Wall-Shear-Strength-Flowchart.txt
+  family: aci
+  role: code_guides
+  edition: ACI 318 (StructurePoint TN)
+  tier: 2
+  encrypted: false
+  notes: "StructurePoint flowchart: wall shear strength check per ACI 318."
+
+- id: sp-deep-beam-transfer-girder-aci318-14
+  origin: "StructuralSizer/src/walls/reference/Deep Beam Transfer Girder Design.pdf"
+  source_path: corpus/sources/code_guides/aci/SP-Deep-Beam-Transfer-Girder-Design.pdf
+  text_path:   corpus/text/code_guides/aci/SP-Deep-Beam-Transfer-Girder-Design.txt
+  family: aci
+  role: code_guides
+  edition: ACI 318-14 (StructurePoint TN)
+  tier: 2
+  encrypted: false
+  notes: "StructurePoint design example: deep beam (transfer girder) using strut-and-tie per ACI 318-14. Filed under wall references because transfer girders typically support walls."
+
+# StructurePoint spMats foundations technical notes
+- id: sp-fiber-reinforced-slabs-on-grade
+  origin: "StructuralSizer/src/foundations/codes/reference/Fiber Reinforced Concrete Slabs.pdf"
+  source_path: corpus/sources/code_guides/aci/SP-Fiber-Reinforced-Slabs-on-Grade.pdf
+  text_path:   corpus/text/code_guides/aci/SP-Fiber-Reinforced-Slabs-on-Grade.txt
+  family: aci
+  role: code_guides
+  edition: ACI 318 (StructurePoint TN)
+  tier: 2
+  encrypted: false
+  notes: "StructurePoint technical note: fiber-reinforced concrete slabs on grade (membrane / floating / filler slabs)."
+
+- id: sp-fea-aspect-ratio-foundations
+  origin: "StructuralSizer/src/foundations/codes/reference/Finite Element Aspect Ratio Influence in Concrete Foundations.pdf"
+  source_path: corpus/sources/code_guides/aci/SP-FEA-Aspect-Ratio-Foundations.pdf
+  text_path:   corpus/text/code_guides/aci/SP-FEA-Aspect-Ratio-Foundations.txt
+  family: aci
+  role: code_guides
+  edition: spMats (StructurePoint TN)
+  tier: 2
+  encrypted: false
+  notes: "StructurePoint technical note: influence of finite-element aspect ratio in concrete foundation FEA models (spMats)."
+
+- id: sp-fea-mesh-density-spmats
+  origin: "StructuralSizer/src/foundations/codes/reference/Finite Element Mesh Density Influence.pdf"
+  source_path: corpus/sources/code_guides/aci/SP-FEA-Mesh-Density-spMats.pdf
+  text_path:   corpus/text/code_guides/aci/SP-FEA-Mesh-Density-spMats.txt
+  family: aci
+  role: code_guides
+  edition: spMats (StructurePoint TN)
+  tier: 2
+  encrypted: false
+  notes: "StructurePoint technical note: influence of finite-element mesh density on spMats foundation results."
+
+- id: sp-fea-mesh-sizing-mat-reinforcement
+  origin: "StructuralSizer/src/foundations/codes/reference/Finite Element Mesh Sizing Influence on Mat Foundation Reinforcement.pdf"
+  source_path: corpus/sources/code_guides/aci/SP-FEA-Mesh-Sizing-Mat-Reinforcement.pdf
+  text_path:   corpus/text/code_guides/aci/SP-FEA-Mesh-Sizing-Mat-Reinforcement.txt
+  family: aci
+  role: code_guides
+  edition: spMats (StructurePoint TN)
+  tier: 2
+  encrypted: false
+  notes: "StructurePoint technical note: mesh-sizing influence on mat-foundation reinforcement (concentrated-load convergence study, 8' down to 3'' grids)."
+
+- id: sp-foundation-slabs-dissimilar-soils
+  origin: "StructuralSizer/src/foundations/codes/reference/Foundation Slabs Dissimilar Soils.pdf"
+  source_path: corpus/sources/code_guides/aci/SP-Foundation-Slabs-Dissimilar-Soils.pdf
+  text_path:   corpus/text/code_guides/aci/SP-Foundation-Slabs-Dissimilar-Soils.txt
+  family: aci
+  role: code_guides
+  edition: spMats v8.10 (StructurePoint TN)
+  tier: 2
+  encrypted: false
+  notes: "StructurePoint technical note: analysis and design of foundation slabs supported by dissimilar soils (subgrade-modulus mismatch case study)."
+
+- id: sp-modeling-construction-joints-spmats
+  origin: "StructuralSizer/src/foundations/codes/reference/Modeling Construction Joints in Structural Foundations.pdf"
+  source_path: corpus/sources/code_guides/aci/SP-Modeling-Construction-Joints-spMats.pdf
+  text_path:   corpus/text/code_guides/aci/SP-Modeling-Construction-Joints-spMats.txt
+  family: aci
+  role: code_guides
+  edition: spMats (StructurePoint TN)
+  tier: 2
+  encrypted: false
+  notes: "StructurePoint technical note: modeling construction joints (shear-only transfer) in mat foundations and slabs on grade in spMats."
+
+- id: sp-pile-reaction-distribution
+  origin: "StructuralSizer/src/foundations/codes/reference/Pile Reaction Distribution Guide.pdf"
+  source_path: corpus/sources/code_guides/aci/SP-Pile-Reaction-Distribution.pdf
+  text_path:   corpus/text/code_guides/aci/SP-Pile-Reaction-Distribution.txt
+  family: aci
+  role: code_guides
+  edition: spMats (StructurePoint TN)
+  tier: 2
+  encrypted: false
+  notes: "StructurePoint technical note: pile-reaction distribution in pile-cap foundations — comparison of CRSI Design Guide rigid-cap method vs spMats FEA."
+
+- id: sp-plain-unreinforced-slabs-on-grade
+  origin: "StructuralSizer/src/foundations/codes/reference/Plain Unreinforced Concrete Slabs.pdf"
+  source_path: corpus/sources/code_guides/aci/SP-Plain-Unreinforced-Slabs-on-Grade.pdf
+  text_path:   corpus/text/code_guides/aci/SP-Plain-Unreinforced-Slabs-on-Grade.txt
+  family: aci
+  role: code_guides
+  edition: ACI 318 (StructurePoint TN)
+  tier: 2
+  encrypted: false
+  notes: "StructurePoint technical note: plain (unreinforced) concrete slabs on grade — design under concentrated point loads."
+
+- id: sp-slabs-on-grade-single-layer
+  origin: "StructuralSizer/src/foundations/codes/reference/Slabs on Grade Analysis.pdf"
+  source_path: corpus/sources/code_guides/aci/SP-Slabs-on-Grade-Single-Layer.pdf
+  text_path:   corpus/text/code_guides/aci/SP-Slabs-on-Grade-Single-Layer.txt
+  family: aci
+  role: code_guides
+  edition: ACI 318 (StructurePoint TN)
+  tier: 2
+  encrypted: false
+  notes: "StructurePoint technical note: analysis and design of slabs on grade with a single layer of reinforcement."
+
+# ── Tier 3 — industry articles & technical notes (mixed publishers) ───────
+# Magazine articles, Q&A columns, and short technical notes whose publisher
+# is either non-StructurePoint or unverified. Tier 3 because they are
+# illustrative rather than normative; treat the citations as anecdotal.
+- id: woc-constructing-mat-slab-2005
+  origin: "StructuralSizer/src/foundations/codes/reference/Constructing Mat Slab.pdf"
+  source_path: corpus/sources/examples/aci/WOC-Constructing-Mat-Slab-2005.pdf
+  text_path:   corpus/text/examples/aci/WOC-Constructing-Mat-Slab-2005.txt
+  family: aci
+  role: examples
+  edition: "World of Concrete, February 2005 (Joe Nasvik)"
+  tier: 3
+  encrypted: false
+  notes: "World of Concrete magazine article: Lindblad Construction case study on a low-heat mat-slab placement for a coal-fired power-plant replacement (Corn Products International, Bedford Park, IL)."
+
+- id: industry-soil-pressure-load-factors
+  origin: "StructuralSizer/src/foundations/codes/reference/Soil Pressure Load Factors.pdf"
+  source_path: corpus/sources/code_guides/aci/Industry-Soil-Pressure-Load-Factors.pdf
+  text_path:   corpus/text/code_guides/aci/Industry-Soil-Pressure-Load-Factors.txt
+  family: aci
+  role: code_guides
+  edition: "Industry Q&A (publisher unverified — likely Concrete International)"
+  tier: 3
+  encrypted: false
+  notes: "Magazine Q&A column on whether to factor reactive soil pressures when sizing footing reinforcement (wind-turbine-foundation context). Publisher not confirmed from first page; verify before citing in normative work."
+
+- id: industry-soil-subgrade-modulus
+  origin: "StructuralSizer/src/foundations/codes/reference/Soil Sub-Grade Modulus.pdf"
+  source_path: corpus/sources/code_guides/aci/Industry-Soil-Subgrade-Modulus.pdf
+  text_path:   corpus/text/code_guides/aci/Industry-Soil-Subgrade-Modulus.txt
+  family: aci
+  role: code_guides
+  edition: "Industry technical note (publisher unverified)"
+  tier: 3
+  encrypted: false
+  notes: "Industry tech note covering soil bearing capacity, compressibility, and modulus of subgrade reaction for floor-slab design. Publisher not confirmed from first page; verify before citing in normative work."
+
+# ── Tier 3 — vendor worked design examples (StructurePoint) ───────────────
+# StructurePoint Design Example (DE) PDFs — illustrative spWall / spColumn
+# walkthroughs. Tier 3 because they are application-level demos rather than
+# normative references; useful for cross-checking Julia implementations
+# against an industry-accepted worked solution.
+- id: sp-de-cantilever-retaining-wall-aci19
+  origin: "StructuralSizer/src/walls/reference/Cantilever Retaining Wall ACI 19.pdf"
+  source_path: corpus/sources/examples/aci/SP-DE-Cantilever-Retaining-Wall-ACI19.pdf
+  text_path:   corpus/text/examples/aci/SP-DE-Cantilever-Retaining-Wall-ACI19.txt
+  family: aci
+  role: examples
+  edition: ACI 318-19 (StructurePoint DE)
+  tier: 3
+  encrypted: false
+  notes: "StructurePoint worked design example: cantilever retaining wall per ACI 318-19."
+
+- id: sp-de-bearing-wall-aci19
+  origin: "StructuralSizer/src/walls/reference/DE Bearing Wall ACI 19 v1.0.pdf"
+  source_path: corpus/sources/examples/aci/SP-DE-Bearing-Wall-ACI19.pdf
+  text_path:   corpus/text/examples/aci/SP-DE-Bearing-Wall-ACI19.txt
+  family: aci
+  role: examples
+  edition: ACI 318-19 (StructurePoint DE)
+  tier: 3
+  encrypted: false
+  notes: "StructurePoint worked design example: bearing wall per ACI 318-19 (spWall v1.0)."
+
+- id: sp-de-multi-story-solid-aci19
+  origin: "StructuralSizer/src/walls/reference/DE Multi-Story Solid ACI 19 spWall v1050.pdf"
+  source_path: corpus/sources/examples/aci/SP-DE-Multi-Story-Solid-ACI19.pdf
+  text_path:   corpus/text/examples/aci/SP-DE-Multi-Story-Solid-ACI19.txt
+  family: aci
+  role: examples
+  edition: ACI 318-19 (StructurePoint DE)
+  tier: 3
+  encrypted: false
+  notes: "StructurePoint worked design example: multi-story solid wall per ACI 318-19 (spWall v10.50)."
+
+- id: sp-de-shear-wall-aci19
+  origin: "StructuralSizer/src/walls/reference/DE Shear Wall ACI 19 v1.050.pdf"
+  source_path: corpus/sources/examples/aci/SP-DE-Shear-Wall-ACI19.pdf
+  text_path:   corpus/text/examples/aci/SP-DE-Shear-Wall-ACI19.txt
+  family: aci
+  role: examples
+  edition: ACI 318-19 (StructurePoint DE)
+  tier: 3
+  encrypted: false
+  notes: "StructurePoint worked design example: shear wall per ACI 318-19 (spWall v1.050)."
+
+- id: sp-de-multi-story-openings-aci19
+  origin: "StructuralSizer/src/walls/reference/Multi-Story Openings ACI 19.pdf"
+  source_path: corpus/sources/examples/aci/SP-DE-Multi-Story-Openings-ACI19.pdf
+  text_path:   corpus/text/examples/aci/SP-DE-Multi-Story-Openings-ACI19.txt
+  family: aci
+  role: examples
+  edition: ACI 318-19 (StructurePoint DE)
+  tier: 3
+  encrypted: false
+  notes: "StructurePoint worked design example: multi-story walls with openings per ACI 318-19."
+
+- id: sp-de-tilt-up-wall-aci19
+  origin: "StructuralSizer/src/walls/reference/Tilt-Up Wall ACI 19.pdf"
+  source_path: corpus/sources/examples/aci/SP-DE-Tilt-Up-Wall-ACI19.pdf
+  text_path:   corpus/text/examples/aci/SP-DE-Tilt-Up-Wall-ACI19.txt
+  family: aci
+  role: examples
+  edition: ACI 318-19 (StructurePoint DE)
+  tier: 3
+  encrypted: false
+  notes: "StructurePoint worked design example: tilt-up wall per ACI 318-19."
+
+- id: sp-de-tilt-up-wall-with-opening-aci19
+  origin: "StructuralSizer/src/walls/reference/Tilt-Up Wall with Opening ACI 19.pdf"
+  source_path: corpus/sources/examples/aci/SP-DE-Tilt-Up-Wall-with-Opening-ACI19.pdf
+  text_path:   corpus/text/examples/aci/SP-DE-Tilt-Up-Wall-with-Opening-ACI19.txt
+  family: aci
+  role: examples
+  edition: ACI 318-19 (StructurePoint DE)
+  tier: 3
+  encrypted: false
+  notes: "StructurePoint worked design example: tilt-up wall with opening per ACI 318-19."
+
+# ── Tier 1 — already-curated AISC chapter excerpts (text-only seeds) ──────
+# These have no upstream PDF; they are pre-extracted plain-text excerpts of
+# AISC 360 chapters used as few-shot seeds for LangExtract tasks. The ingest
+# script copies them straight into corpus/text/ (no source_path).
+- id: aisc-txt-extracts
+  origin_dir: StructuralSizer/src/members/codes/aisc/reference/txt_extracts
+  text_dir:   corpus/text/codes/aisc/txt_extracts
+  family: aisc
+  role: codes
+  edition: AISC 360-16 excerpts
+  tier: 1
+  text_only: true
+  notes: "Curated AISC chapter excerpts (B4, E, E3E4, E7, F, F7F8, G, G45, exam) used as LangExtract few-shot seeds."

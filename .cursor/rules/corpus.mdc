@@ -1,0 +1,171 @@
+---
+description: Use the curated building-code corpus via MCP tools instead of grepping raw files
+alwaysApply: true
+---
+
+# Building-code corpus & MCP tools
+
+**For any code-derived question, your first action MUST be a `corpus.*` MCP
+tool call — never raw file search.** This composes with `code-accuracy.mdc`.
+
+The repo ships a curated building-code corpus under `corpus/` (manifest at
+`corpus/manifests/sources.yml`) and a local MCP server (`menegroth-corpus`)
+that exposes it as eight queryable tools.
+
+## When this rule applies
+
+Any user request that depends on a **published structural design code** or
+**official guide / commentary**, including but not limited to:
+
+- "implement an ACI 318 …", "build a … per AISC 360", "fib model code …".
+- "what does `<some code>` say about …?", "find the clause for …".
+- "find an example for …", "look in `<some reference>` for …".
+- Any prompt that should cite a clause, equation, table, or code provision.
+- Any change to engineering Julia that adds, modifies, or removes a numerical
+  factor, equation, table value, limit, or check tied to a published code.
+
+If you are unsure whether the rule applies, **assume it does**.
+
+## MUST decision tree (run before writing or recommending Julia)
+
+1. **Identify the source.** Call `corpus.list_sources(family=<aci|aisc|csa|fib|...>)`
+   (and/or filter by `role` / `edition`) to confirm the standard or guide is in
+   the corpus. If it is **not**, stop and report what is missing — do not
+   substitute a different edition.
+2. **Look up the structured fact.** Call `corpus.get_clause`,
+   `corpus.search_extractions`, or `corpus.search_by_attributes` for the
+   relevant clause / extraction class. Prefer these whenever they apply.
+3. **Fall back to grounded text.** If structured tools return
+   `status: "no_extractions_available"` or `confidence: "not-found"`, call
+   `corpus.search_text` (and/or `corpus.page_window` if you know the page
+   range) on the same source. Do **not** fabricate extractions.
+4. **Direct-read fallback.** If `corpus.search_text` does not surface a
+   useful hit (e.g., the user's vocabulary doesn't match the text, or you
+   need to scan headings / chapter structure), you may **directly `Read` or
+   `Grep` the underlying file** for the same source — typically
+   `corpus/text/<...>.txt` (the curated copy) or, when needed,
+   `StructuralSizer/**/reference/<...>.{txt,pdf}` (the upstream source).
+   Use this only after the MCP tools have been tried; treat it as the same
+   file the MCP tools wrap, just accessed directly. Carry over the
+   manifest's `source_id` and the PAGE markers (`===== PAGE N =====`) for
+   citations.
+5. **Report and stop on dead end.** If after steps 1–4 you still cannot
+   ground the answer, **say so explicitly and ask the user before guessing**.
+   Do not invent a clause id, factor, or equation.
+6. **Cite every result.** When you write or recommend Julia derived from a
+   tool result *or a direct file read*, include the citation comment
+   described in *Citation contract* below. Every numerical or normative line
+   must trace back to a corpus source.
+
+## Forbidden actions (hard "do NOT")
+
+- Do **NOT** skip the MCP tools (`list_sources`, `get_clause`,
+  `search_extractions`, `search_text`) and jump straight to `Read`/`Grep`.
+  The structured tools are step 1; direct file reads are the step-4 fallback.
+- Do **NOT** `Grep` outside the corpus + reference scope for code-derived
+  questions. Permitted scope is `corpus/**` and `StructuralSizer/**/reference/**`;
+  paths like `StructuralStudies/`, `docs/`, or arbitrary repo files are
+  forbidden as a fallback for code lookup.
+- Do **NOT** generate Julia citing a clause number (e.g., `ACI 318-19 §22.4.2.1`)
+  that did not come from a tool result or a direct read of the corresponding
+  source file in the current conversation.
+- Do **NOT** paraphrase a verbatim equation, factor, or table value returned
+  by the corpus — reproduce it exactly. Paraphrase only the surrounding
+  explanation.
+- Do **NOT** invent, paraphrase, "complete", or generalize **mechanics**.
+  Mechanics includes equation forms, variable definitions, sign conventions,
+  unit assumptions, applicability conditions / scope limits, assumed
+  failure modes, stress-block models, partial-safety / load factors, and
+  boundary / continuity assumptions. Every one of these must be readable
+  from a specific corpus clause, equation, or table. If the source does
+  not state it, do **not** state it on the source's behalf.
+- Do **NOT** mix mechanics from different codes / editions in a single
+  derivation. If you need a value from ACI 318-11 and a method from
+  ACI 318-19, that mismatch must be raised with the user before writing
+  any code.
+- Do **NOT** treat a `corpus.search_text` hit as a substitute for a structured
+  extraction once an `extraction_class` exists for that concept; re-run the
+  query against `corpus.search_extractions` first.
+- Do **NOT** promote MCP-discovered facts directly into engineering Julia
+  without the review gate (`scripts/runners/corpus_promote.jl`). The MCP
+  tools surface candidates; promotion is the safety-critical, auditable step.
+
+## Citation contract (strict)
+
+Every code-derived Julia change must include, in a comment near the
+implementation, all of:
+
+- The corpus `source_id` (e.g., `aci-318-11`, `aisc-360-16`, `aci-421-3r-15`).
+- The exact clause / section / equation reference (e.g., `ACI 318-19 §22.4.2.1`,
+  `AISC 360-16 §Eq. F2-1`, `fib MC 2010 §7.3.3`).
+- The PDF page number when available from the tool result's `page_range`
+  or from the source file's `===== PAGE N =====` markers when read directly.
+
+The contract applies whether the fact came from a `corpus.*` tool or a
+direct file read. There is **no** "informal" path that bypasses it.
+
+### Mechanics must trace to source
+
+In addition to numerical factors, the citation contract covers **all
+mechanics**: equation forms, variable definitions, sign conventions,
+unit assumptions, applicability conditions, assumed failure modes /
+stress-block models, partial-safety / load factors, and boundary
+conditions. Each of these must be readable from the cited source —
+not inferred, paraphrased, or completed by the model.
+
+Equation example:
+
+```julia
+# AISC 360-16 §F2.1, Eq. F2-1 — yielding limit state of doubly-symmetric
+# compact I-shaped members (corpus: aisc-360-16, page F-30).
+# Variables and units per §F2.1: Mp = Fy * Zx, Fy in ksi, Zx in in^3, Mp in kip-in.
+M_p = F_y * Z_x
+M_n = M_p
+```
+
+Factor example:
+
+```julia
+# ACI 318-19 §21.2.2 — strength reduction factor for compression-controlled
+# sections (corpus: aci-318-11, page 244).
+phi_compression_controlled = 0.65
+```
+
+### Engineering judgment (allowed but must be flagged)
+
+Decisions that are **not** taken from a code (e.g., applying a 1.2× factor
+on top of a code minimum for conservatism, choosing a default among
+permissible options, or restricting an open code provision to a narrower
+case) are legitimate but must be marked explicitly so reviewers can spot
+them:
+
+```julia
+# ENGINEERING JUDGMENT: ACI 318-19 §9.3.3 permits As >= As,min; we use
+# 1.2 * As,min as the default to keep deflection-controlled sections from
+# governing in early sizing iterations. Not a code requirement.
+A_s_default = 1.2 * A_s_min
+```
+
+Engineering-judgment comments must **not** be styled as code citations —
+no clause id pinned to a non-code decision, no ambiguous "per ACI 318".
+If a reviewer cannot tell at a glance whether a line is code-derived or
+judgment-derived, the comment is wrong.
+
+## Fallback summary
+
+Direct `Read`/`Grep` on a corpus source file (or its upstream
+`StructuralSizer/**/reference/` original) is **legitimate** in any of:
+
+- The MCP tools have been tried (steps 2–3) and did not surface what's needed
+  — typical when vocabulary doesn't match the published wording, or you need
+  to scan headings to find the right clause.
+- `corpus.list_sources` confirms the relevant source is **not** in the
+  corpus; in that case, also propose a `corpus/manifests/sources.yml`
+  addition rather than silently bypassing.
+- You are explicitly asked to evaluate or extend the corpus pipeline itself
+  (manifest edits, new task configs, etc.).
+- The question is **not** code-derived (e.g., a pure Julia refactor).
+
+In all other cases, MCP-first; in all cases, every code-derived Julia change
+must carry the citation defined above, regardless of whether the fact came
+from a `corpus.*` tool or a direct file read.

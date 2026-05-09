@@ -1,0 +1,26 @@
+# corpus/.gitignore
+# Raw and derived corpus artifacts are gitignored by default. Only curated
+# manifests (and any explicit committed fixtures) are version-controlled.
+#
+# Layout (see docs / plan):
+#   sources/      - copied source documents (PDFs, etc.) [ignored]
+#   text/         - normalized .txt outputs              [ignored]
+#   extractions/  - LangExtract .jsonl outputs            [ignored]
+#   review/       - LangExtract HTML visualizations       [ignored]
+#   manifests/    - committed YAML/JSON allowlist + curation/promotion status
+#   samples/      - (optional) small committed regression fixtures
+
+sources/
+text/
+extractions/
+review/
+
+# Allow a small samples/ tree for committed regression fixtures (opt-in).
+!samples/
+!samples/**
+
+# Always track manifests and this gitignore itself.
+!manifests/
+!manifests/**
+!.gitignore
+!README.md

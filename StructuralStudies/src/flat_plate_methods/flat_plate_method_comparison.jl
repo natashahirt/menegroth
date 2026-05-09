@@ -319,6 +319,16 @@ function _extract_results(struc;
     # ── Foundations (post-sizing — pipeline Stage 3) ──────────────────
     fdn = _extract_foundation_results(struc)
 
+    # ── Embodied carbon (per-slab, A1–A3 product stage) ──────────────
+    # element_ec uses slab.volumes (concrete + rebar), populated by the
+    # pipeline via _compute_slab_volumes. Area sums struc.cells indexed by
+    # slab.cell_indices (matches compute_building_ec's floor_area logic).
+    slab_ec_kgco2e = isempty(slab.volumes) ? NaN : element_ec(slab.volumes)
+    slab_area_m2   = ustrip(u"m^2",
+        sum(struc.cells[ci].area for ci in slab.cell_indices; init = 0.0u"m^2"))
+    slab_ec_per_m2 = (isnan(slab_ec_kgco2e) || slab_area_m2 ≤ 0.0) ?
+        NaN : slab_ec_kgco2e / slab_area_m2
+
     # ── Pattern loading flag ────────────────────────────────────────────
     _pattern = !isnothing(dd) && hasproperty(dd, :pattern_loading) ? dd.pattern_loading : false
 
@@ -367,6 +377,9 @@ function _extract_results(struc;
         h_drop_in         = h_drop_in,
         a_drop1_ft        = a_drop1_ft,
         a_drop2_ft        = a_drop2_ft,
+        slab_ec_kgco2e    = slab_ec_kgco2e,
+        slab_area_m2      = slab_area_m2,
+        slab_ec_per_m2    = slab_ec_per_m2,
         failures          = _failures,
     ), fdn)
 end
@@ -466,6 +479,9 @@ function _blank_failure_row(;
         h_drop_in         = 0.0,
         a_drop1_ft        = 0.0,
         a_drop2_ft        = 0.0,
+        slab_ec_kgco2e    = NaN,
+        slab_area_m2      = NaN,
+        slab_ec_per_m2    = NaN,
         failures          = failure_reason,
         fdn_n_sized       = 0,
         fdn_n_groups      = 0,
@@ -584,6 +600,9 @@ function _extract_rot_failure(struc, dd;
         h_drop_in         = 0.0,
         a_drop1_ft        = 0.0,
         a_drop2_ft        = 0.0,
+        slab_ec_kgco2e    = NaN,
+        slab_area_m2      = NaN,
+        slab_ec_per_m2    = NaN,
         failures          = _failures,
         # Foundation fields — not sized for invalid geometry
         fdn_n_sized       = 0,

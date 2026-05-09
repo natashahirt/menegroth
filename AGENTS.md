@@ -93,6 +93,198 @@ This error means the Cursor API key’s **GitHub App installation** does not hav
 
 After fixing, re-run the workflow. The Launch step now fails explicitly (exit 1) when the API returns an error, so the run is red and the error is visible in the log.
 
+### Building-code corpus & MCP server
+
+The repo ships a curated building-code corpus under `corpus/` (manifest at
+`corpus/manifests/sources.yml`) and a local **MCP server** that exposes the
+corpus and (when present) LangExtract structured extractions as queryable
+tools. The Cursor rule `.cursor/rules/corpus.mdc` directs the agent to
+prefer these MCP tools over raw file search whenever a question is derived
+from a published code or guide.
+
+Pipeline overview:
+
+```text
+StructuralSizer/**/reference/   →  scripts/corpus/ingest.py
+                                →  corpus/sources/ + corpus/text/
+                                →  scripts/corpus/extract.py (LangExtract)
+                                →  corpus/extractions/ (JSONL, grounded)
+                                →  scripts/runners/corpus_promote.jl
+                                →  Julia constants / tests / docs
+```
+
+#### Tool surface (eight `corpus.*` tools)
+
+| Tool | Purpose |
+|---|---|
+| `list_sources` | Browse manifest entries (filter by family / role / tier / edition). |
+| `get_source_text` | Read a slice of a source's normalized text by character offsets. |
+| `search_text` | Regex/substring search across `corpus/text/` (fallback path). |
+| `page_window` | Read text spanning a PDF page range. |
+| `search_extractions` | Query LangExtract JSONL for grounded structured entries. |
+| `get_extraction_by_id` | Fetch a single extraction by stable id. |
+| `search_by_attributes` | Typed attribute filter for a class. |
+| `get_clause` | Best-effort clause lookup with explicit `confidence` field. |
+
+Pre-extraction state: extraction tools return `status: "no_extractions_available"`
+with a hint instead of failing, so the server is useful from day one for
+text search.
+
+#### MCP registration
+
+The repo intentionally does **not** ship a `.cursor/mcp.json` — Cursor
+treats project-level and user-level entries with the same `name` as
+separate registrations (it does *not* dedupe), and the right Python
+invocation differs between Mac and Windows (see "Why the asymmetry"
+below). Instead we ship `.cursor/mcp.json.example` as a template that
+you copy into your **user-level** Cursor config and edit once per
+machine.
+
+User-level config locations:
+
+- macOS / Linux : `~/.cursor/mcp.json`
+- Windows       : `%USERPROFILE%\.cursor\mcp.json`
+
+If a user-level config already exists with other servers, merge the
+`menegroth-corpus` entry into the existing `mcpServers` object rather
+than replacing the file.
+
+##### Quick setup — Windows
+
+1. Install Python ≥ 3.10 from [python.org](https://www.python.org/downloads/)
+   (check **"Add Python to PATH"** during install) **or** from the
+   Microsoft Store (auto-adds `python` and `python3` aliases).
+2. Install the runtime deps:
+
+   ```powershell
+   python -m pip install mcp pyyaml
+   ```
+
+3. Find the absolute path of that interpreter — `where python` from a
+   shell — then write `%USERPROFILE%\.cursor\mcp.json`. Use absolute
+   paths for **both** the interpreter and the script (`cwd` is silently
+   ignored in user-level configs — see the cheat sheet below):
+
+   ```json
+   {
+     "mcpServers": {
+       "menegroth-corpus": {
+         "command": "C:\\Users\\<you>\\AppData\\Local\\Programs\\Python\\Python313\\python.exe",
+         "args": [
+           "C:\\absolute\\path\\to\\menegroth\\scripts\\corpus\\mcp_server.py"
+         ]
+       }
+     }
+   }
+   ```
+
+   You can use bare `"command": "python"` on Windows since GUI launches
+   inherit the user `PATH`, but absolute paths are more robust against
+   future Python re-installs that shuffle which interpreter `python`
+   resolves to.
+4. Restart Cursor (or "Reload MCP Servers"). The server should appear
+   connected in Settings → MCP.
+
+##### Quick setup — macOS
+
+1. Install Python ≥ 3.10 via Homebrew (or the python.org installer):
+
+   ```bash
+   brew install python@3.13
+   ```
+
+   The prefix is `/usr/local/bin/` on Intel and `/opt/homebrew/bin/`
+   on Apple Silicon.
+2. Install the runtime deps into that exact interpreter (Homebrew
+   Python is PEP 668 "externally managed" — `--break-system-packages`
+   is the intended escape hatch for non-formula installs):
+
+   ```bash
+   /usr/local/bin/python3.13 -m pip install --break-system-packages mcp pyyaml
+   ```
+
+3. Write `~/.cursor/mcp.json` using absolute paths for **both** the
+   interpreter and the script (`cwd` is silently ignored in user-level
+   configs — see the cheat sheet below):
+
+   ```json
+   {
+     "mcpServers": {
+       "menegroth-corpus": {
+         "command": "/usr/local/bin/python3.13",
+         "args": [
+           "/absolute/path/to/menegroth/scripts/corpus/mcp_server.py"
+         ]
+       }
+     }
+   }
+   ```
+
+4. Restart Cursor (or "Reload MCP Servers").
+
+##### Why the asymmetry
+
+Cursor inherits its child-process `PATH` from however the OS launched it:
+
+- **Windows**: GUI launches inherit the user `PATH` from the registry,
+  which Python installers populate. So bare `python` works.
+- **macOS**: GUI launches (Spotlight, Dock, Finder) inherit launchd's
+  default `PATH` — `/usr/bin:/bin:/usr/sbin:/sbin` only. **Neither**
+  `/usr/local/bin/` (Intel Homebrew) nor `/opt/homebrew/bin/` (Apple
+  Silicon Homebrew) is included. Bare `python` / `python3` therefore
+  resolves to Apple's system interpreter (`/usr/bin/python3` =
+  Python 3.9), which is too old for the `mcp` SDK
+  (`requires_python: >=3.10`). The only reliable fix is an absolute
+  path in user-level `~/.cursor/mcp.json`.
+
+##### Failure-mode cheat sheet
+
+| Symptom in Cursor's MCP panel | Likely cause | Fix |
+|---|---|---|
+| Two `menegroth-corpus` entries appear | Both a project `.cursor/mcp.json` and `~/.cursor/mcp.json` exist; Cursor lists them separately, it does not merge by name | Delete (or rename to `.example`) the project-level `.cursor/mcp.json` so only the user-level entry remains |
+| New manifest entry doesn't show up in `list_sources` after `ingest --apply` | The MCP server caches the manifest at startup (`CorpusIndex._sources` is set on first call and never refreshed); manifest edits and new ingests are invisible until restart | "Reload MCP Servers" in Cursor (or restart Cursor) after every `corpus/manifests/sources.yml` change |
+| `can't open file '/Users/<you>/scripts/corpus/mcp_server.py'` (or similar `$HOME`-rooted path) | Cursor silently ignores the `cwd` field in user-level `~/.cursor/mcp.json` and launches from the user home directory | Put the **absolute** path to `mcp_server.py` in `args` instead of relying on `cwd`; remove the `cwd` field |
+| `spawn python ENOENT` (Windows) | Python not on the user `PATH` (or only `py` is installed) | Reinstall Python with "Add to PATH" checked, install via Microsoft Store, or set `"command": "py"` with `"args": ["-3", "scripts/corpus/mcp_server.py"]` |
+| `spawn <path>/python3.13 ENOENT` (macOS) | Homebrew Python uninstalled or a different minor is installed | `brew install python@3.13`, or change `command` in `~/.cursor/mcp.json` to whatever `ls /usr/local/bin/python3.*` (Intel) or `ls /opt/homebrew/bin/python3.*` (Apple Silicon) shows |
+| `TypeError: dataclass() got an unexpected keyword argument 'slots'` | Pre-fix bug; should not recur | Pull latest `scripts/corpus/mcp_schemas.py` |
+| `ERROR: the 'mcp' Python SDK is required` | `mcp` not installed in the interpreter Cursor is using | `pip install mcp` against that exact interpreter (use its absolute path, not bare `python`) |
+| `Error executing tool list_sources: No module named 'yaml'` | `pyyaml` not installed in the interpreter Cursor is using | `pip install pyyaml` against that exact interpreter |
+| `Connection failed: MCP error -32000: Connection closed` with no other context | Server crashed during init; the real traceback is *above* this line in Cursor's MCP log panel | Read upward in the panel for the underlying Python exception |
+
+##### Verifying which interpreter Cursor is actually using
+
+When in doubt, temporarily add at the top of `build_server` in
+`scripts/corpus/mcp_server.py`:
+
+```python
+import sys
+sys.stderr.write(f"[corpus-mcp] running on {sys.executable} ({sys.version})\n")
+```
+
+Restart the MCP server; the line appears in Cursor's MCP log panel
+(tagged `[error]` because it's on stderr — that's normal for FastMCP and
+not a real error). Remove the diagnostic when done.
+
+#### Local diagnostics (no Cursor needed)
+
+```bash
+# Sanity check that the manifest loads and sources resolve:
+julia scripts/runners/corpus_mcp_serve.jl --self-test
+
+# Run unit tests for the tool functions:
+python3 scripts/corpus/tests/test_mcp_tools.py
+
+# End-to-end stdio handshake against the live MCP server:
+python3 scripts/runners/corpus_mcp_smoke.py
+```
+
+#### Citation contract
+
+Every Julia change derived from a corpus result must cite, in a comment, the
+`source_id`, the clause / equation reference, and (when available) the PDF
+page from the tool result's `page_range`. See `.cursor/rules/corpus.mdc` for
+the full rule.
+
 ### Weekly Trace Coverage Audit (Cursor Cloud Agent)
 
 The **Trace Coverage Audit** workflow (`.github/workflows/trace-audit.yml`) launches a Cursor Cloud Agent to ensure every structurally significant decision in the design pipeline emits trace events. It runs weekly on Monday, on push to `main` (source paths), or via **Actions → Run workflow**.

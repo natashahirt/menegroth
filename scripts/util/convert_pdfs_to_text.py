@@ -394,6 +394,7 @@ if __name__ == "__main__":
             sizer / "slabs" / "codes" / "concrete" / "reference" / "two_way",
             sizer / "slabs" / "codes" / "concrete" / "reference" / "papers",
             sizer / "slabs" / "codes" / "concrete" / "reference" / "studs",
+            sizer / "walls" / "reference",
             sizer / "foundations" / "codes" / "reference",
             sizer / "codes" / "reference",
         ]

@@ -152,6 +152,11 @@ using Asap  # custom units (kip, ksi, ksf, psf, etc.)
         include("test_fire_provisions.jl")
     end
 
+    # ─── Material Presets (LWC) ───────────────────────────────────────────
+    @testset "Material Presets" begin
+        include("test_lwc_materials.jl")
+    end
+
     # ─── Element Rebar ────────────────────────────────────────────────────
     @testset "Element Rebar" begin
         include("test_element_rebar.jl")

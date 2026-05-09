@@ -1,6 +1,0 @@
-{
-    "ok": false,
-    "violations": [
-        "floor_rc_columns_for_beamless: column_type \"steel_w\" is incompatible with floor_type \"flat_plate\""
-    ]
-}

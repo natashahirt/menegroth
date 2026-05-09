@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "menegroth-corpus": {
+      "command": "REPLACE_WITH_ABSOLUTE_PYTHON_PATH",
+      "args": [
+        "REPLACE_WITH_ABSOLUTE_PATH_TO/scripts/corpus/mcp_server.py"
+      ]
+    }
+  }
+}

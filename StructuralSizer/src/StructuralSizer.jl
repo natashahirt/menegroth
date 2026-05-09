@@ -153,8 +153,9 @@ export Metal, StructuralSteel, RebarSteel, Concrete, ReinforcedConcreteMaterial
 export Timber, NDSChecker
 export material_name
 export A992_Steel, S355_Steel, Rebar_40, Rebar_60, Rebar_75, Rebar_80, Stud_51
-export NWC_3000, NWC_4000, NWC_5000, NWC_6000, NWC_GGBS, NWC_PFA
-export RC_3000_60, RC_4000_60, RC_5000_60, RC_6000_60, RC_5000_75, RC_6000_75, RC_GGBS_60
+export NWC_3000, NWC_4000, NWC_5000, NWC_6000, NWC_GGBS, NWC_PFA, LWC_4000, LWC_4000_AL
+export RC_3000_60, RC_4000_60, RC_5000_60, RC_6000_60, RC_5000_75, RC_6000_75
+export RC_GGBS_60, RC_LWC_4000_60, RC_LWC_4000_AL_60
 export Earthen_500, Earthen_1000, Earthen_2000, Earthen_4000, Earthen_8000
 export FiberReinforcedConcrete
 export concrete_fc, concrete_fc_mpa, concrete_E, concrete_wc

@@ -29,11 +29,6 @@ FlatPlateNLPProblem
 VaultNLPProblem
 ```
 
-- `VaultOptMode` — abstract type for vault optimization mode selection.
-- `OptBoth` — optimize both rise and thickness (2 variables).
-- `OptRise` — optimize rise only (thickness fixed, 1 variable).
-- `OptThickness` — optimize thickness only (rise fixed, 1 variable).
-
 ## Functions
 
 ### Vault Optimization
@@ -87,9 +82,9 @@ The vault optimization solves for the minimum-volume shell geometry subject to
 stress and convergence constraints:
 
 **Variables:**
-- `OptBoth`: rise ``f`` and thickness ``t`` (2 variables)
-- `OptRise`: rise ``f`` only (thickness fixed, 1 variable)
-- `OptThickness`: thickness ``t`` only (rise fixed, 1 variable)
+- Rise + thickness (2 variables)
+- Rise only (thickness fixed, 1 variable)
+- Thickness only (rise fixed, 1 variable)
 
 **Objective:** Shell volume per plan area = ``t \times S / L`` where ``S`` is
 the parabolic arc length.
@@ -99,9 +94,9 @@ the parabolic arc length.
 2. Convergence: elastic shortening iteration must converge
 
 The mode is auto-detected from which bounds/values are provided:
-- `lambda_bounds` or `rise_bounds` → rise is a variable
+- `lambda_bounds`, `rise_bounds` → rise is a variable
 - `thickness_bounds` → thickness is a variable
-- Fixed `lambda`/`rise` + fixed `thickness` → direct evaluation (no optimization)
+- Fixed `lambda`/`rise` *and* fixed `thickness` → throws an error (nothing to optimize)
 
 ### Solver Integration
 
@@ -113,31 +108,31 @@ supports:
 
 ## Options & Configuration
 
-### FlatPlateNLPProblem
+### FlatPlate Optimization (`size_flat_plate_optimized`)
 
 | Parameter | Default | Description |
 |:----------|:--------|:------------|
-| `h_max` | `24 in.` | Maximum slab thickness |
-| `c_min` | `12 in.` | Minimum column dimension |
-| `c_max` | `48 in.` | Maximum column dimension |
-| `bar_sizes` | `[4, 5, 6, 7]` | Candidate rebar sizes |
-| `n_grid` | `20` | Grid resolution per dimension |
-| `n_refine` | `2` | Refinement iterations |
+| `h_max` | `nothing` | Optional slab-thickness upper bound (default is computed inside `FlatPlateNLPProblem`, typically ACI minimum thickness + 6"). |
+| `c_min` | `nothing` | Optional minimum column dimension (default computed from span, typically span/15). |
+| `c_max` | `nothing` | Optional maximum column dimension (defaults to `opts.max_column_size`). |
+| `bar_sizes` | `[4, 5, 6, 7, 8]` | Candidate rebar sizes for the inner sweep. |
+| `n_grid` | `20` | Grid resolution per dimension. |
+| `n_refine` | `2` | Refinement iterations around the best point. |
 
 ### VaultNLPProblem
 
 | Parameter | Default | Description |
 |:----------|:--------|:------------|
 | `lambda_bounds` | `(10, 20)` | Span-to-rise ratio bounds (λ = span/rise) |
-| `thickness_bounds` | `(0.03m, 0.30m)` | Shell thickness bounds |
+| `thickness_bounds` | `2 in – 4 in` | Shell thickness bounds (default when omitted) |
 | `allowable_stress` | ``0.45 f'_c`` | Maximum compressive stress |
-| `deflection_limit` | ``L/360`` | Elastic shortening convergence |
+| `deflection_limit` | ``L/240`` | Maximum rise reduction from elastic shortening (default when omitted) |
 
 ### optimize_vault API
 
 The `optimize_vault` function provides a high-level API that internally:
 1. Resolves rise/thickness from mixed input formats
-2. Detects the optimization mode (`OptBoth`, `OptRise`, `OptThickness`)
+2. Detects the optimization mode (rise + thickness, rise only, or thickness only)
 3. Builds and solves the `VaultNLPProblem`
 4. Returns a `VaultResult` with full geometry and checks
 

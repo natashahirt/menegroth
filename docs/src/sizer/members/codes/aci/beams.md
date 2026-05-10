@@ -2,14 +2,24 @@
 
 > ```julia
 > using StructuralSizer
-> result = design_beam_flexure(200u"kip*ft", 12u"inch", 20u"inch", 4000u"psi", 60000u"psi", 29000u"ksi")
-> Vc = Vc_beam(12u"inch", 20u"inch", 4000u"psi")
-> shear = design_beam_shear(50u"kip", 12u"inch", 20u"inch", 4000u"psi", 60000u"psi")
+> using Unitful
+>
+> mat = RC_4000_60
+> Mu  = 200u"kip*ft"
+> Vu  = 50u"kip"
+>
+> b = 12u"inch"
+> h = 20u"inch"
+> d = beam_effective_depth(h)  # defaults match ACI beam helpers (cover/stirrups/bar dia)
+>
+> flex  = design_beam_flexure(Mu, b, d, mat.concrete.fc′, mat.rebar.Fy, mat.rebar.E)
+> Vc    = Vc_beam(b, d, mat.concrete.fc′)
+> shear = design_beam_shear(Vu, b, d, mat.concrete.fc′, mat.transverse.Fy)
 > ```
 
 ## Overview
 
-This module implements ACI 318 design provisions for reinforced concrete beams, covering flexure (§9.5 / §22.2), shear (§22.5), torsion (§22.7), and serviceability (§24.2). It supports singly reinforced, doubly reinforced, and T-beam designs.
+This module implements ACI 318-11 design provisions for reinforced concrete beams, covering flexure (Chapter 10), shear (Chapter 11), torsion (§11.5), and serviceability (deflection per §9.5.2). It supports singly reinforced, doubly reinforced, and T-beam designs.
 
 The flexure design determines the required reinforcement area for a given factored moment. The shear design provides concrete shear capacity and required transverse reinforcement. The torsion design checks threshold and cracking torsion and determines reinforcement. Serviceability checks compute deflections using effective moment of inertia methods.
 
@@ -56,7 +66,7 @@ ACIBeamCapacityCache
 stress_block_depth
 ```
 
-`stress_block_depth(As, fc, fy, b)` — Whitney stress block depth per §22.2.2.4:
+`stress_block_depth(As, fc, fy, b)` — Whitney stress block depth per ACI 318-11 §10.2.7:
 
 ```math
 a = \frac{A_s \, f_y}{0.85 \, f'_c \, b}
@@ -66,13 +76,13 @@ a = \frac{A_s \, f_y}{0.85 \, f'_c \, b}
 neutral_axis_depth
 ```
 
-`neutral_axis_depth(a, fc)` — neutral axis depth from stress block:
+`neutral_axis_depth(a, fc)` — neutral axis depth per ACI 318-11 §10.2.7.3:
 
 ```math
 c = \frac{a}{\beta_1}
 ```
 
-where ``\beta_1`` is determined from ``f'_c`` per §22.2.2.4.3.
+where ``\beta_1`` is determined from ``f'_c`` per ACI 318-11 §10.2.7.3.
 
 ```@docs
 design_beam_flexure
@@ -97,18 +107,17 @@ design_tbeam_flexure
 effective_flange_width
 ```
 
-`effective_flange_width(; bw, hf, sw, ln, position=:interior)` — effective flange width per ACI §8.12.2 (now §6.3.2). For interior beams, the effective width is the minimum of:
-- `sw` (center-to-center beam spacing)
-- `bw + 16hf`
-- `bw + ln/4` (span/4 on each side)
+`effective_flange_width(; bw, hf, sw, ln, position=:interior)` — effective flange width per ACI 318-11 §8.12.2. The helper follows the ACI 318-11 overhang limits:
+- **Interior**: each side overhang ≤ min(8hf, sw/2, ln/8)
+- **Edge**: overhang ≤ min(6hf, sw/2, ln/12)
 
-### Shear (ACI §22.5)
+### Shear (ACI 318-11 §11.2, §11.4)
 
 ```@docs
 Vc_beam
 ```
 
-`Vc_beam(bw, d, fc; λ=1.0, Nu=nothing, Ag=nothing)` — concrete shear capacity per Eq. 11-3 (ACI 318-14) / §22.5.5:
+`Vc_beam(bw, d, fc; λ=1.0, Nu=nothing, Ag=nothing)` — concrete shear capacity per ACI 318-11 Eq. (11-3) / §11.2.1.1:
 
 ```math
 V_c = 2 \lambda \sqrt{f'_c} \, b_w \, d
@@ -146,7 +155,7 @@ design_stirrups
 s = \frac{A_v \, f_{yt} \, d}{V_s}
 ```
 
-Subject to ACI maximum spacing limits (``d/2`` or ``d/4`` when ``V_s > 4\sqrt{f'_c}\, b_w\, d``).
+Subject to ACI 318-11 maximum spacing limits (§11.4.5): ``d/2`` or ``d/4`` when ``V_s > 4\sqrt{f'_c}\, b_w\, d``.
 
 ```@docs
 design_beam_shear
@@ -154,7 +163,7 @@ design_beam_shear
 
 `design_beam_shear(Vu, bw, d, fc, fyt; ...)` — complete shear design returning `Vc`, required `Vs`, stirrup size, and spacing.
 
-### Torsion (ACI §22.7)
+### Torsion (ACI 318-11 §11.5)
 
 ```@docs
 threshold_torsion
@@ -204,7 +213,7 @@ design_beam_torsion
 
 `design_beam_torsion(Tu, Vu, bw, h, d, fc, fy, fyt; ...)` — complete torsion design including compatibility torsion redistribution.
 
-### Serviceability (ACI §24.2)
+### Serviceability (ACI 318-11 §9.5.2)
 
 ```@docs
 design_beam_deflection
@@ -216,7 +225,7 @@ design_beam_deflection
 effective_moment_of_inertia
 ```
 
-`effective_moment_of_inertia(Mcr, Ma, Ig, Icr)` — effective moment of inertia per Branson's equation (ACI 318-14 §24.2.3.5):
+`effective_moment_of_inertia(Mcr, Ma, Ig, Icr)` — effective moment of inertia per Branson's equation (ACI 318-11 Eq. (9-10)):
 
 ```math
 I_e = \left(\frac{M_{cr}}{M_a}\right)^3 I_g + \left[1 - \left(\frac{M_{cr}}{M_a}\right)^3\right] I_{cr} \leq I_g
@@ -226,7 +235,7 @@ I_e = \left(\frac{M_{cr}}{M_a}\right)^3 I_g + \left[1 - \left(\frac{M_{cr}}{M_a}
 effective_moment_of_inertia_bischoff
 ```
 
-`effective_moment_of_inertia_bischoff(Mcr, Ma, Ig, Icr)` — Bischoff (2005) formulation, adopted in ACI 318-19 §24.2.3.5:
+`effective_moment_of_inertia_bischoff(Mcr, Ma, Ig, Icr)` — Bischoff (2005) reciprocal interpolation:
 
 ```math
 I_e = \frac{I_{cr}}{1 - \left(1 - \frac{I_{cr}}{I_g}\right)\left(\frac{M_{cr}}{M_a}\right)^2} \leq I_g
@@ -258,7 +267,7 @@ The flexure design uses direct solution of the Whitney stress block equilibrium 
 \varepsilon_t \ge 0.005 \qquad (\phi = 0.9)
 ```
 
-4. Check minimum reinforcement (ACI 318-19 §9.6.1):
+4. Check minimum reinforcement (ACI 318-11 §10.5.1):
 
 ```math
 \rho \ge \rho_{\min} = \max\!\left(\frac{3\sqrt{f'_c}}{f_y}, \frac{200}{f_y}\right)
@@ -268,13 +277,13 @@ When the section cannot be tension-controlled as singly reinforced, the design a
 
 ### T-Beam Effective Width
 
-The effective flange width calculation follows §6.3.2 (ACI 318-19) which unified the previous §8.12.2 provisions. For interior beams, three limits are checked. For edge beams, the overhang is limited to min(6hf, sw/2, ln/8).
+The effective flange width helper follows the ACI 318-11 §8.12.2 overhang limits (interior: min(8hf, sw/2, ln/8); edge: min(6hf, sw/2, ln/12)).
 
 ### Deflection Methods
 
 Two methods are available for `Ie`:
 - **Branson** (default): traditional cubic interpolation, conservative for heavily reinforced sections
-- **Bischoff**: more accurate for lightly reinforced sections, adopted in ACI 318-19
+- **Bischoff**: more accurate for lightly reinforced sections and irregular members (reciprocal interpolation)
 
 Long-term deflection multiplier:
 

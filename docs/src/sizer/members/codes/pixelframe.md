@@ -3,7 +3,7 @@
 > ```julia
 > using StructuralSizer
 > sec = generate_pixelframe_catalog(fc_values=[40.0], A_s_values=[226.0], d_ps_values=[150.0])[1]
-> Mu = pf_flexural_capacity(sec; E_s=200_000.0, f_py=1615.0)
+> Mu = pf_flexural_capacity(sec; E_s=200_000.0, f_py=1860.0)
 > Pu = pf_axial_capacity(sec; E_s=200_000.0)
 > carbon = pf_carbon_per_meter(sec)
 > ```
@@ -298,8 +298,8 @@ The per-pixel material assignment enables embodied carbon optimization by using 
 ```julia
 checker = PixelFrameChecker(
     E_s_MPa = 200_000.0,
-    f_py_MPa = 1615.0,
-    γ_c = 1.5,
+    f_py_MPa = 1860.0,
+    γ_c = 1.0,
     min_depth_mm = 200.0,
     min_width_mm = 200.0
 )

@@ -132,8 +132,11 @@ Finite element plate model on Winkler springs:
 
 ### Common Mat Utilities
 
-- `_mat_plan_sizing`: Computes plan dimensions with overhang from the outermost
-  columns, checks minimum overhang per ACI 318 §22.6
+- `_mat_plan_sizing`: Computes plan dimensions and (when `MatParams.edge_overhang === nothing`)
+  auto-selects an edge overhang that satisfies a full critical punching perimeter at outer columns
+  (ACI critical section at \(d/2\) from the column face) and meets the service-level bearing area
+  requirement \(A \ge \sum P_s / q_a\). If demands/soil are not provided, it falls back to a
+  simple span-based heuristic.
 - `_mat_punching_util`: Punching utilization at each column
 - `_unique_spans`: Sorted unique span lengths for strip-moment computation
 
@@ -149,6 +152,7 @@ Finite element plate model on Winkler springs:
 | `pier_shape` | `:rectangular` | Legacy field (ignored for ACI spread footings); use `FoundationDemand.shape` |
 | `pier_c1` | 18 in. | Legacy field (ignored for ACI spread footings); use `FoundationDemand.c1` |
 | `pier_c2` | 18 in. | Legacy field (ignored for ACI spread footings); use `FoundationDemand.c2` |
+| `footing_shape` | `:rectangular` | Footing plan shape (`:rectangular`; square when `B == L`) |
 | `min_depth` | 12 in. | Minimum footing thickness before iteration |
 | `depth_increment` | 1 in. | Round-up increment for footing thickness during iteration |
 | `size_increment` | 3 in. | Round plan dimensions up to this increment |
@@ -160,17 +164,24 @@ Finite element plate model on Winkler springs:
 | `check_bearing` | `true` | Perform ACI 22.8 bearing check at column–footing interface |
 | `check_dowels` | `true` | Design dowels when bearing in the column concrete controls |
 | `check_development` | `true` | Verify simplified tension development length (ACI 25.4.2) |
+| `objective` | `MinVolume()` | Optimization objective for plan/depth sizing |
 
 ### MatParams
 
 | Field | Default | Description |
 |:------|:--------|:------------|
-| `analysis_method` | `RigidMat()` | Analysis method selector (`RigidMat`, `ShuklaAFM`, `WinklerFEA`) |
+| `material` | `RC_4000_60` | Concrete + rebar material bundle |
 | `cover` | 3 in. | Clear cover |
 | `bar_size_x` | 8 | Rebar bar size in x |
 | `bar_size_y` | 8 | Rebar bar size in y |
 | `min_depth` | 24 in. | Minimum mat thickness |
+| `depth_increment` | 1 in. | Round-up increment for mat thickness during iteration |
 | `edge_overhang` | `nothing` | Edge overhang (auto if `nothing`) |
+| `analysis_method` | `RigidMat()` | Analysis method selector (`RigidMat`, `ShuklaAFM`, `WinklerFEA`) |
+| `ϕ_flexure` | 0.90 | ACI 318-11 §9.3.2 strength reduction |
+| `ϕ_shear` | 0.75 | ACI 318-11 §9.3.2 strength reduction |
+| `λ` | `nothing` | Lightweight factor (`nothing` → pull from `material.concrete.λ`) |
+| `objective` | `MinVolume()` | Optimization objective for mat thickness (and plan sizing when applicable) |
 
 ## Limitations & Future Work
 

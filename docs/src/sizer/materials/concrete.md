@@ -58,6 +58,8 @@ AggregateType
 | `NWC_4000` | 4000 psi | ACI §8.5.1 | 2380 kg/m³ | 0.138 | Standard |
 | `NWC_5000` | 5000 psi | ACI §8.5.1 | 2385 kg/m³ | 0.155 | Higher strength |
 | `NWC_6000` | 6000 psi | ACI §8.5.1 | 2385 kg/m³ | 0.173 | High strength |
+| `LWC_4000` | 4000 psi | ACI §8.5.1 | 1840 kg/m³ | 0.349 | Sand-lightweight (λ = 0.85) |
+| `LWC_4000_AL` | 4000 psi | ACI §8.5.1 | 1680 kg/m³ | 0.382 | All-lightweight (λ = 0.75) |
 
 ```@docs
 NWC_3000
@@ -66,6 +68,8 @@ NWC_5000
 NWC_6000
 NWC_GGBS
 NWC_PFA
+LWC_4000
+LWC_4000_AL
 ```
 
 ### Low-Carbon Alternatives
@@ -86,6 +90,8 @@ NWC_PFA
 | `RC_5000_75` | NWC_5000 | Rebar_75 | High-strength RC |
 | `RC_6000_75` | NWC_6000 | Rebar_75 | High-strength RC |
 | `RC_GGBS_60` | NWC_GGBS | Rebar_60 | Low-carbon RC |
+| `RC_LWC_4000_60` | LWC_4000 | Rebar_60 | Lightweight concrete RC |
+| `RC_LWC_4000_AL_60` | LWC_4000_AL | Rebar_60 | All-lightweight concrete RC |
 
 ```@docs
 RC_3000_60
@@ -95,6 +101,8 @@ RC_6000_60
 RC_5000_75
 RC_6000_75
 RC_GGBS_60
+RC_LWC_4000_60
+RC_LWC_4000_AL_60
 ```
 
 ## Earthen Material Presets
@@ -150,6 +158,6 @@ E_c = 33\, w_c^{1.5}\sqrt{f'_c}
 
 ## Limitations & Future Work
 
-- **Lightweight concrete**: Only the `λ` factor and `AggregateType` enum support lightweight concrete. Full LWC presets with adjusted Ec formulas are not yet provided.
+- **Lightweight concrete**: Lightweight presets exist (`LWC_4000`, `LWC_4000_AL`) and are exposed through reinforced presets (`RC_LWC_4000_60`, `RC_LWC_4000_AL_60`). Other strengths and a unit-weight-dependent Ec formulation path are not yet provided as presets.
 - **High-strength concrete**: Presets go up to 6000 psi. For higher strengths (8000–12000 psi), create instances manually and consider reducing `εcu` below 0.003.
 - **Creep and shrinkage**: Not modeled. Long-term deflection calculations use ACI 318 multipliers externally.

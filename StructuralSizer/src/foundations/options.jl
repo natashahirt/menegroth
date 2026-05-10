@@ -66,13 +66,31 @@ Requires `soil.ks` to be provided.
   sizing `clamp(min_span / 20, 0.15, 0.75) m`, giving ~20 elements per bay
   (same heuristic as the slab FEA).
 - `double_edge_springs`: Apply ACI 336.2R §6.9 edge spring doubling (default true).
+- `no_tension_springs`: Compression-only soil springs (default `true`).
+  Iteratively deactivates springs whose nodes lift (w > 0) and reactivates
+  springs whose nodes are pushed back into contact (w < 0).  This matches
+  the standard production-tool convention (e.g. spMats) and the physical
+  reality that soil cannot pull a mat downward.  Set to `false` to recover
+  the legacy two-way (tension+compression) Winkler model — useful for
+  diagnostic comparisons but generally non-physical for cohesionless soils.
+- `max_no_tension_iters`: Iteration cap for the deactivate/reactivate loop
+  (default `20`).  Exceeding this raises an error per the strict policy:
+  no silent fallback to a non-converged solution.
+- `no_tension_tol`: Relative residual tolerance |ΣF_applied − ΣF_react|/
+  ΣF_applied at convergence (default `5e-3`, i.e. 0.5 %).  Independent of
+  the active-set fixed point; both must hold.
 
 # References
 - ACI 336.2R-88 §6.4 (FEM), §6.7 (Winkler springs), §6.9 (edge springs).
+- StructurePoint *spMats Engineering Software Program Manual* v8.12 (2016)
+  §3.4 — soil-pressure springs are taken as compression-only by default.
 """
 Base.@kwdef struct WinklerFEA <: AbstractMatMethod
     target_edge::Union{Nothing, Unitful.Length} = nothing
     double_edge_springs::Bool = true
+    no_tension_springs::Bool   = true
+    max_no_tension_iters::Int  = 20
+    no_tension_tol::Float64    = 5e-3
 end
 
 # =============================================================================

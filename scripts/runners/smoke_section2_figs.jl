@@ -125,13 +125,14 @@ df_keep = sweep_ecc(df; n_samples = 500, save = false, keep_samples = true)
 @assert :slab_ec_samples in propertynames(df_keep)
 @assert all(length.(df_keep.slab_ec_samples) .== 500)
 # p50 from the summary should match the median of the realized samples
-mismatches = 0
-for r in eachrow(df_keep)
-    s = sort(r.slab_ec_samples)
-    p50_from_samples = s[ceil(Int, 0.50 * length(s))]
-    isapprox(p50_from_samples, r.slab_ec_p50; rtol = 1e-9) || (mismatches += 1)
+let mismatches = 0
+    for r in eachrow(df_keep)
+        s = sort(r.slab_ec_samples)
+        p50_from_samples = s[ceil(Int, 0.50 * length(s))]
+        isapprox(p50_from_samples, r.slab_ec_p50; rtol = 1e-9) || (mismatches += 1)
+    end
+    @assert mismatches == 0 "p50 mismatch with realized samples in $mismatches rows"
 end
-@assert mismatches == 0 "p50 mismatch with realized samples in $mismatches rows"
 println("✓ keep_samples round-trip clean.")
 
 # ---------------------------------------------------------------------------

@@ -67,7 +67,8 @@ Effective depth for a beam section.
 
 # Arguments
 - `h`: Total beam depth
-- `cover`: Clear cover (default 1.5" per ACI Table 20.6.1.3.1 for beams)
+- `cover`: Clear cover (default 1.5" per ACI 318-11 §7.7.1 for cast-in-place,
+  non-prestressed beams not exposed to weather or in contact with ground)
 - `d_stirrup`: Stirrup bar diameter (default 0.375" = #3)
 - `d_bar`: Longitudinal bar diameter (default 1.128" = #9)
 

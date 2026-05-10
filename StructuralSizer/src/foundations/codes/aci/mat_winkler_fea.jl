@@ -86,6 +86,102 @@ function _mat_winkler_springs(
 end
 
 # ─────────────────────────────────────────────────────────────────────────────
+# No-tension (compression-only) Winkler iteration
+# ─────────────────────────────────────────────────────────────────────────────
+
+"""
+    _solve_winkler!(nodes, shells, loads, springs;
+                    no_tension, max_iters, tol) → (model, active, n_uplift)
+
+Solve the shell-on-Winkler model.  When `no_tension == true`, iteratively
+deactivates soil springs whose nodes lift (`w > 0`) and reactivates springs
+whose nodes are pushed back into compression (`w < 0`); this is the standard
+compression-only Winkler model used by production tools such as spMats.
+
+Returns the converged `Model`, the per-spring active mask, and the count of
+uplifted (deactivated) springs at convergence.
+
+Raises an error if the active set fails to settle within `max_iters` (no
+silent fallback).  A spring is treated as numerically pinned to `w = 0` if
+`|w| ≤ 1e-9 m`; this hysteresis band prevents oscillation on near-zero
+displacements without affecting any practical case.
+
+The two-way model (`no_tension == false`) corresponds to the legacy linear
+Winkler analysis kept for diagnostic comparisons.
+"""
+function _solve_winkler!(
+    nodes::Vector{Node},
+    shells::Vector{<:ShellTri3},
+    loads::Vector{<:NodeForce},
+    springs::Vector{Spring};
+    no_tension::Bool = true,
+    max_iters::Int = 20,
+    tol::Float64 = 5e-3,
+)
+    n_springs = length(springs)
+    active = trues(n_springs)
+    eps_w  = 1e-9            # |w| below this is numerical zero (m)
+
+    if !no_tension
+        # Single-shot two-way Winkler (legacy diagnostic path)
+        model = Model(nodes, shells, loads)
+        process!(model)
+        add_springs!(model, springs)
+        solve!(model)
+        return model, active, 0
+    end
+
+    # No-tension iteration: deactivate uplift, reactivate re-engagement
+    local model
+    for it in 1:max_iters
+        model = Model(nodes, shells, loads)
+        process!(model)
+        active_springs = springs[active]
+        isempty(active_springs) &&
+            error("WinklerFEA no-tension solve diverged: every soil spring " *
+                  "deactivated at iteration $it (model has lost all soil " *
+                  "support — load case is non-physical or mesh is wrong).")
+        add_springs!(model, active_springs)
+        solve!(model)
+
+        # Update active mask from the just-solved displacement field
+        changed = false
+        for i in 1:n_springs
+            w = ustrip(u"m", springs[i].node.displacement[3])  # m, signed
+            if active[i] && w >  eps_w
+                active[i] = false; changed = true
+            elseif !active[i] && w < -eps_w
+                active[i] = true;  changed = true
+            end
+        end
+
+        # Convergence: active set settled and net vertical residual within tol
+        if !changed
+            F_applied = sum(abs(ustrip(u"N", l.value[3])) for l in loads)
+            F_react   = 0.0
+            for i in 1:n_springs
+                active[i] || continue
+                kz = springs[i].stiffness[3]
+                w  = ustrip(u"m", springs[i].node.displacement[3])
+                F_react += kz * (-w)   # w < 0 ⇒ positive upward reaction
+            end
+            residual = F_applied > 0 ? abs(F_applied - F_react) / F_applied : 0.0
+            residual ≤ tol &&
+                return model, active, count(.!active)
+            error("WinklerFEA no-tension solve: active set converged at " *
+                  "iteration $it but residual " *
+                  "$(round(100*residual, digits=2))% exceeds tol " *
+                  "$(round(100*tol, digits=2))% (numerical issue — check " *
+                  "spring stiffness and applied loads).")
+        end
+    end
+
+    error("WinklerFEA no-tension solve did not converge in $max_iters " *
+          "iterations (oscillating active set — consider raising " *
+          "`max_no_tension_iters` or relaxing `no_tension_tol`).")
+end
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Column load application
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -285,7 +381,9 @@ function _design_mat_winkler_fea(
 
     Ec_Pa = ustrip(u"Pa", Ec_c)
     local gov_Mx_total_pos, gov_Mx_total_neg, gov_My_total_pos, gov_My_total_neg
-    local loads, springs  # saved for equilibrium check
+    local loads, springs              # saved for equilibrium check
+    local active_springs_mask
+    local n_uplift_springs
 
     for iter in 1:60
         d_eff = h - cover - db_eff
@@ -318,17 +416,22 @@ function _design_mat_winkler_fea(
         # Apply column loads (ShellPatch guarantees a node at each column)
         loads = _mat_apply_column_loads(nodes, positions_loc_m, demands)
 
-        # Build model — springs added after process!
-        model = Model(nodes, shells, loads)
-        process!(model)
-
-        # Add Winkler springs (tributary-area based)
+        # Generate Winkler springs (one per node, tributary-area based).
+        # Whether they are treated as compression-only or two-way is decided
+        # inside `_solve_winkler!` based on `method.no_tension_springs`.
         springs = _mat_winkler_springs(
             nodes, shells, B_m, Lm_m, ks_Pa_m, method.double_edge_springs)
-        add_springs!(model, springs)
 
-        # Solve
-        solve!(model)
+        # Solve plate-on-Winkler model (compression-only by default; iterates
+        # the active set until uplifted springs are deactivated and any
+        # re-engaged springs are reactivated).  Throws on non-convergence —
+        # there is no silent fallback to a partially-converged solution.
+        model, active_springs_mask, n_uplift_springs = _solve_winkler!(
+            nodes, shells, loads, springs;
+            no_tension = method.no_tension_springs,
+            max_iters  = method.max_no_tension_iters,
+            tol        = method.no_tension_tol,
+        )
 
         # ── Extract governing moments (column-strip integration) ──
         # Mirrors the slab FEA's _integrate_at() / _extract_cell_strip_moments()
@@ -449,25 +552,31 @@ function _design_mat_winkler_fea(
 
     d_eff = h - cover - db_eff  # ACI 318-11 §2.2 — centroid of tension reinforcement
 
-    # ── Step 3b: Vertical equilibrium check ──
-    # Static equilibrium of a 2-way Winkler model: ΣF_applied (downward) =
-    # Σ kz × (−w), where w is the signed vertical displacement (w < 0
-    # downward).  For a stiff mat under a concentrated load, corner nodes
-    # commonly heave (w > 0); their springs carry a *downward* reaction
-    # (F_spring = −kz·w) which must be subtracted from the gross "soil
-    # pushing up" sum.  The earlier `Σ kz·|w|` form ignored that sign and
-    # over-counted by 2·Σ kz·|w_lifted| — typically 20-30% on stiff,
-    # point-loaded mats — falsely flagging a converged FEA as imbalanced.
+    # ── Step 3b: Vertical equilibrium & uplift diagnostics ──
+    # Sums the signed reaction Σ kz·(−w) over the active springs (only
+    # springs in compression contribute under the no-tension model; under
+    # the legacy two-way model both signs contribute and partially cancel).
+    # The two-way path keeps a separate uplift accumulator so a stiff
+    # point-loaded mat doesn't false-alarm equilibrium when corners heave.
     F_applied = sum(abs(ustrip(u"N", l.value[3])) for l in loads)
     F_reaction_compr  = 0.0  # springs in compression (w < 0): push up
-    F_reaction_uplift = 0.0  # springs in tension    (w > 0): pull down
-    for s in springs
-        kz = s.stiffness[3]                            # N/m
-        w  = ustrip(u"m", s.node.displacement[3])      # m (signed)
-        if w < 0
-            F_reaction_compr  += kz * (-w)
+    F_reaction_uplift = 0.0  # springs in tension    (w > 0): pull down (2-way only)
+    n_lifted_off = 0          # nodes that lifted off (no-tension only)
+    for (i, s) in enumerate(springs)
+        kz = s.stiffness[3]                          # N/m
+        w  = ustrip(u"m", s.node.displacement[3])    # m (signed)
+        if method.no_tension_springs
+            if active_springs_mask[i]
+                F_reaction_compr += kz * (-w)        # active ⇒ w ≤ 0
+            else
+                n_lifted_off += 1                    # deactivated by iteration
+            end
         else
-            F_reaction_uplift += kz *   w
+            if w < 0
+                F_reaction_compr  += kz * (-w)
+            else
+                F_reaction_uplift += kz *   w
+            end
         end
     end
     F_reaction_net = F_reaction_compr - F_reaction_uplift
@@ -477,16 +586,26 @@ function _design_mat_winkler_fea(
         "applied=$(round(F_applied/1e3, digits=1)) kN, " *
         "reaction_net=$(round(F_reaction_net/1e3, digits=1)) kN, " *
         "error=$(round(100*eq_imbalance, digits=2))%")
-    # Separately, a large uplift fraction means the model is leaning on
-    # tension in soil springs — physical mats either have enough self-
-    # weight to suppress uplift, or need 1-way / no-tension springs.  Flag
-    # so the engineer can decide whether the linear-spring approximation
-    # is adequate for this load case.
-    uplift_frac = F_applied > 0 ? F_reaction_uplift / F_applied : 0.0
-    uplift_frac > 0.05 && @warn(
-        "WinklerFEA: $(round(100*uplift_frac, digits=1))% of applied load " *
-        "is balanced by tension in soil springs (corner heave). " *
-        "Consider 1-way springs or larger overhang if uplift is unphysical.")
+
+    # Diagnostic: how much of the mat lost soil contact?  Under the no-
+    # tension model this is a *node count* (force is zero by construction);
+    # under the two-way model it's a force fraction (legacy diagnostic).
+    if method.no_tension_springs
+        n_total = length(springs)
+        lift_frac_nodes = n_total > 0 ? n_lifted_off / n_total : 0.0
+        lift_frac_nodes > 0.20 && @info(
+            "WinklerFEA: $(n_lifted_off) / $n_total spring nodes " *
+            "($(round(100*lift_frac_nodes, digits=1))%) lifted off the " *
+            "soil (no-tension model).  Significant edge / corner uplift " *
+            "is expected on stiff, concentrically loaded mats.")
+    else
+        uplift_frac = F_applied > 0 ? F_reaction_uplift / F_applied : 0.0
+        uplift_frac > 0.05 && @warn(
+            "WinklerFEA (2-way mode): $(round(100*uplift_frac, digits=1))% " *
+            "of applied load is balanced by tension in soil springs " *
+            "(corner heave).  Switch to compression-only springs " *
+            "(`WinklerFEA(no_tension_springs=true)`) if uplift is unphysical.")
+    end
 
     # ── Step 4: Flexural reinforcement from FEA moments ──
     # Column-strip integration gives the governing average moment per unit

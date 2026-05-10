@@ -27,9 +27,15 @@ const _DEMO_METHODS = [
 
 const _DEMO_SPANS = (24.0, 30.0, 36.0)   # 3×3 grid — enough cells to read off
 
-println("\n=== UNCAPPED DEMO ($(length(_DEMO_SPANS))×$(length(_DEMO_SPANS)) grid, ",
-        "$(length(_DEMO_METHODS)) methods, 1 LL, flat-plate only) ===\n")
+# Helper: print + flush so progress is visible in real time even when stdout
+# is redirected to a file (Julia full-buffers redirected stdout by default).
+_say(args...) = (println(args...); flush(stdout))
+
+_say("\n=== UNCAPPED DEMO ($(length(_DEMO_SPANS))×$(length(_DEMO_SPANS)) grid, ",
+     "$(length(_DEMO_METHODS)) methods, 1 LL, flat-plate only) ===\n")
 df = NamedTuple[]
+n_total = length(_DEMO_SPANS)^2 * length(_DEMO_METHODS)
+n_done  = 0
 for span_x in _DEMO_SPANS, span_y in _DEMO_SPANS
     ht      = _adaptive_story_ht(max(span_x, span_y))
     max_col = _uncapped_max_col(max(span_x, span_y))   # uncapped column ceiling
@@ -39,17 +45,20 @@ for span_x in _DEMO_SPANS, span_y in _DEMO_SPANS
     struc = BuildingStructure(skel)
     prepare!(struc, base_params)
     for mcfg in _DEMO_METHODS
+        n_done += 1
+        _say(@sprintf("  [%d/%d] %dx%d  %-12s  …", n_done, n_total,
+                      round(Int, span_x), round(Int, span_y), mcfg.name))
+        t0 = time()
         row = _run_method(struc, base_params, mcfg;
                           lx_ft = span_x, ly_ft = span_y, live_psf = 50.0,
                           floor_type = :flat_plate)
+        dt = time() - t0
         if !isnothing(row)
             push!(df, row)
             tag = hasproperty(row, :converged) && row.converged ? "OK" : "FAIL"
-            println(@sprintf("  %dx%d  %-12s  → %-4s  col_max=%.1f\"  failures=%s",
-                             round(Int, span_x), round(Int, span_y),
-                             mcfg.name, tag,
-                             coalesce(row.col_max_in, NaN),
-                             coalesce(row.failures, "-")))
+            _say(@sprintf("        → %-4s  (%.1fs)  col_max=%.1f\"  failures=%s",
+                          tag, dt, coalesce(row.col_max_in, NaN),
+                          coalesce(row.failures, "-")))
         end
     end
 end

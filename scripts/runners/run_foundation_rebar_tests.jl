@@ -24,5 +24,6 @@ const _FOUND_TEST_DIR =
     include(joinpath(_FOUND_TEST_DIR, "test_strip_aci.jl"))
     include(joinpath(_FOUND_TEST_DIR, "test_mat_aci.jl"))
     include(joinpath(_FOUND_TEST_DIR, "test_rebar_quantity.jl"))
+    include(joinpath(_FOUND_TEST_DIR, "test_no_tension_springs.jl"))
     include(joinpath(_FOUND_TEST_DIR, "test_types_load.jl"))
 end

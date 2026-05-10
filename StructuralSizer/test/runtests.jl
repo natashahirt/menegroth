@@ -4,6 +4,10 @@
 # Not included here (standalone scripts, not @testset):
 #   - flat_plate_full_pipeline_validation.jl  (cross-project, uses StructuralSynthesizer)
 #   - test_rebar_volume.jl                    (cross-project, uses StructuralSynthesizer)
+#   - test_fea_flat_plate.jl                  (cross-project, uses StructuralSynthesizer
+#                                              fixtures like `gen_medium_office`; the
+#                                              `using StructuralSynthesizer` import only
+#                                              resolves under StructuralSynthesizer's test env)
 #   - concrete_column/test_catalog_gen.jl     (smoke test, println-based)
 #   - concrete_column/test_biaxial_fix.jl     (debug script, println-based)
 #   - slabs/test_ddm_multispan.jl             (assert-based, not @testset)
@@ -115,8 +119,10 @@ using Asap  # custom units (kip, ksi, ksf, psf, etc.)
         include("slabs/test_waffle_geometry.jl")
         # Optimizer
         include("slabs/test_flat_plate_optimizer.jl")
-        # FEA flat plate
-        include("test_fea_flat_plate.jl")
+        # `test_fea_flat_plate.jl` is intentionally NOT included here — it
+        # uses `StructuralSynthesizer` fixtures (`gen_medium_office`, etc.)
+        # and only resolves under that project's test env. Run it via
+        # `julia --project=StructuralSynthesizer` instead.
     end
 
     # ─── Foundations ──────────────────────────────────────────────────────
@@ -126,6 +132,7 @@ using Asap  # custom units (kip, ksi, ksf, psf, etc.)
         include("foundations/test_strip_aci.jl")
         include("foundations/test_mat_aci.jl")
         include("foundations/test_rebar_quantity.jl")
+        include("foundations/test_no_tension_springs.jl")
         include("foundations/test_types_load.jl")
     end
 

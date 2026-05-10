@@ -251,29 +251,35 @@ end
 """
     torsion_transverse_reinforcement(Tu_kipin, Ao, fyt_psi; θ=45.0, φ=0.75) -> Float64
 
-Required transverse reinforcement for torsion (At/s) per ACI 318-11 §11.5.3.6:
+Required transverse reinforcement for torsion (At/s) derived from ACI 318-11
+§11.5.3.6, Eq. (11-21):
 
-    At/s = Tu / (φ · 2 · fyt · Ao · cot(θ))
+    Tn = 2·Ao·At·fyt·cot(θ) / s    ⇒    At/s = Tu / (φ · 2 · fyt · Ao · cot(θ))
 
-Returns At/s in in²/in (area of ONE leg of closed stirrup per unit spacing).
+Returns At/s in in²/in (area of ONE leg of a closed stirrup per unit spacing).
 
 # Arguments
 - `Tu_kipin`: Design torsional moment (kip·in) — may be capped for compatibility
 - `Ao`: Gross area enclosed by shear flow path (in²), typically 0.85·Aoh
 - `fyt_psi`: Stirrup yield strength (psi)
-- `θ`: Angle of compression diagonals (degrees, typically 45° for non-prestressed)
-- `φ`: Strength reduction factor (0.75 for torsion + shear)
+- `θ`: Angle of compression diagonals (degrees). Per §11.5.3.6 must satisfy
+       30° ≤ θ ≤ 60°. Default 45° (non-prestressed members, §11.5.3.6(a));
+       use 37.5° for prestressed members satisfying §11.5.3.6(b).
+- `φ`: Strength reduction factor (0.75 per ACI 318-11 §9.3.2.3)
 
 # Reference
-- ACI 445.1R-12 Example 1: At/s = 0.61 mm²/mm = 0.0227 in²/in
+- ACI 318-11 §11.5.3.6, Eq. (11-21) (PDF p. 184)
+- ACI 445.1R-12 Example 1 cross-check: At/s = 0.61 mm²/mm = 0.0227 in²/in
 """
 function torsion_transverse_reinforcement(
     Tu_kipin::Real, Ao::Real, fyt_psi::Real;
     θ::Real=45.0, φ::Real=0.75,
 )
-    Ao > 0 || throw(ArgumentError("Ao must be positive (got $Ao)"))
+    Ao > 0      || throw(ArgumentError("Ao must be positive (got $Ao)"))
     fyt_psi > 0 || throw(ArgumentError("fyt_psi must be positive (got $fyt_psi)"))
-    θ > 0 || throw(ArgumentError("θ must be positive (got $θ)"))
+    # ACI 318-11 §11.5.3.6: θ shall not be smaller than 30° nor larger than 60°.
+    (30.0 ≤ θ ≤ 60.0) || throw(ArgumentError(
+        "θ must be in [30°, 60°] per ACI 318-11 §11.5.3.6 (got $θ)"))
     Tu_lbin = Tu_kipin * 1000.0
     cot_θ = 1.0 / tand(θ)
     At_s = Tu_lbin / (φ * 2 * fyt_psi * Ao * cot_θ)
@@ -283,18 +289,34 @@ end
 """
     torsion_longitudinal_reinforcement(At_s, ph, fyt_psi, fy_psi; θ=45.0) -> Float64
 
-Required longitudinal reinforcement for torsion (Al) per ACI 318-11 §11.5.3.7:
+Required longitudinal reinforcement for torsion (Al) per ACI 318-11 §11.5.3.7,
+Eq. (11-22):
 
     Al = (At/s) · ph · (fyt/fy) · cot²(θ)
 
+Per §11.5.3.7, the same θ used in Eq. (11-21) (and therefore in
+`torsion_transverse_reinforcement`) must be used here.
+
 Returns Al in in².
 
+# Arguments
+- `At_s`: Transverse torsion reinforcement per unit length (in²/in)
+- `ph`: Perimeter of the stirrup centerline (in)
+- `fyt_psi`: Stirrup yield strength (psi)
+- `fy_psi`: Longitudinal reinforcement yield strength (psi)
+- `θ`: Compression diagonal angle (degrees). Must satisfy 30° ≤ θ ≤ 60° per
+       §11.5.3.6 (default 45°).
+
 # Reference
-- ACI 445.1R-12 Example 1: Al = 780.8 mm² = 1.18 in²
+- ACI 318-11 §11.5.3.7, Eq. (11-22) (PDF p. 185)
+- ACI 445.1R-12 Example 1 cross-check: Al = 780.8 mm² = 1.18 in²
 """
 function torsion_longitudinal_reinforcement(
     At_s::Real, ph::Real, fyt_psi::Real, fy_psi::Real; θ::Real=45.0,
 )
+    fy_psi > 0  || throw(ArgumentError("fy_psi must be positive (got $fy_psi)"))
+    (30.0 ≤ θ ≤ 60.0) || throw(ArgumentError(
+        "θ must be in [30°, 60°] per ACI 318-11 §11.5.3.6 (got $θ)"))
     cot_θ = 1.0 / tand(θ)
     Al = At_s * ph * (fyt_psi / fy_psi) * cot_θ^2
     return Al  # in²
@@ -307,50 +329,61 @@ end
 """
     min_torsion_transverse(bw_in, fc_psi, fyt_psi) -> Float64
 
-Minimum transverse reinforcement for torsion per ACI 318-11 §11.5.5.2:
+Minimum transverse reinforcement for torsion per ACI 318-11 §11.5.5.2,
+Eq. (11-23). Conservatively assumes shear is carried by other reinforcement
+(Av = 0), so the entire minimum (Av + 2At) is supplied by closed torsion
+stirrups:
 
-    (At/s)_min = max(0.75·√f'c · bw / (2·fyt), 0.175·bw / fyt)
+    (At/s)_min = max(0.75·√f'c · bw / (2·fyt),  25·bw / fyt)         (psi)
 
-Note: This is At/s for ONE LEG (torsion), not Av/s for two legs (shear).
-The factor of 2 in the first term accounts for this.
+This is At/s for ONE LEG of a closed stirrup. The factor of 2 in the first
+term and the `25` in the second term come from re-arranging Eq. (11-23)
+`(Av + 2At) ≥ max(0.75·√f'c · bw·s / fyt,  50·bw·s / fyt)` for `Av = 0`.
 
 Returns At/s_min in in²/in.
 
 # Reference
-- ACI 445.1R-12 Example 1: At/s_min = 0.125 mm²/mm = 0.005 in²/in
+- ACI 318-11 §11.5.5.2, Eq. (11-23) (PDF p. 188)
+- ACI 445.1R-12 Example 1 cross-check: At/s_min = 0.125 mm²/mm = 0.005 in²/in
 """
 function min_torsion_transverse(bw_in::Real, fc_psi::Real, fyt_psi::Real)
     fyt_psi > 0 || throw(ArgumentError("fyt_psi must be positive (got $fyt_psi)"))
-    fc_psi > 0 || throw(ArgumentError("fc_psi must be positive (got $fc_psi)"))
-    # ACI 318-11 §11.5.5.2: Av+2At ≥ max(0.75√f'c·bw/fyt, 50bw/fyt)
-    # For torsion alone (Av=0): 2At ≥ max(...)
-    # So At/s ≥ max(0.75√f'c·bw/(2·fyt), 50bw/(2·fyt))
-    # In ACI psi units: 50 psi → 0.175 ksi → 0.175·bw/fyt... no, keep in psi:
-    # At/s ≥ max(0.75√f'c·bw/(2·fyt), 25·bw/fyt)
+    fc_psi  > 0 || throw(ArgumentError("fc_psi must be positive (got $fc_psi)"))
+    bw_in   > 0 || throw(ArgumentError("bw_in must be positive (got $bw_in)"))
     a = 0.75 * sqrt(fc_psi) * bw_in / (2 * fyt_psi)
     b = 25.0 * bw_in / fyt_psi
     return max(a, b)
 end
 
 """
-    min_torsion_longitudinal(Acp, At_s, ph, fc_psi, fy_psi, fyt_psi; θ=45.0) -> Float64
+    min_torsion_longitudinal(Acp, At_s, ph, bw_in, fc_psi, fy_psi, fyt_psi) -> Float64
 
-Minimum longitudinal reinforcement for torsion per ACI 318-11 §11.5.5.3:
+Minimum longitudinal reinforcement for torsion per ACI 318-11 §11.5.5.3, Eq. (11-24):
 
-    Al,min = (5·√f'c · Acp / (12·fy)) − (At/s) · ph · (fyt/fy)
+    Al,min = 5·√f'c · Acp / fy − (At/s) · ph · (fyt/fy)
 
-If Al,min < 0, use Al from the required calculation.
+Per §11.5.5.3, in this equation `At/s` shall not be taken less than `25·bw/fyt`;
+this floor is applied internally so that callers can pass the demand-based
+`At/s` from Eq. (11-21) directly.
 
-Returns Al,min in in².
+Returns Al,min in in² (clamped at 0).
+
+# Reference
+- ACI 318-11 §11.5.5.3, Eq. (11-24) (PDF p. 185)
+- PCA EB712 (PCA Notes on ACI 318), Example 13.1, p. 426 — verifies
+  `Al,min = 5·√5000·896/60000 − (0.025)(132) = 1.98 in²`
 """
 function min_torsion_longitudinal(
-    Acp::Real, At_s::Real, ph::Real,
-    fc_psi::Real, fy_psi::Real, fyt_psi::Real;
-    θ::Real=45.0,
+    Acp::Real, At_s::Real, ph::Real, bw_in::Real,
+    fc_psi::Real, fy_psi::Real, fyt_psi::Real,
 )
-    fy_psi > 0 || throw(ArgumentError("fy_psi must be positive (got $fy_psi)"))
-    fc_psi > 0 || throw(ArgumentError("fc_psi must be positive (got $fc_psi)"))
-    Al_min = 5 * sqrt(fc_psi) * Acp / (12 * fy_psi) - At_s * ph * (fyt_psi / fy_psi)
+    fy_psi  > 0 || throw(ArgumentError("fy_psi must be positive (got $fy_psi)"))
+    fyt_psi > 0 || throw(ArgumentError("fyt_psi must be positive (got $fyt_psi)"))
+    fc_psi  > 0 || throw(ArgumentError("fc_psi must be positive (got $fc_psi)"))
+    bw_in   > 0 || throw(ArgumentError("bw_in must be positive (got $bw_in)"))
+    # ACI 318-11 §11.5.5.3 caveat: At/s shall not be taken less than 25·bw/fyt
+    At_s_eff = max(At_s, 25.0 * bw_in / fyt_psi)
+    Al_min = 5 * sqrt(fc_psi) * Acp / fy_psi - At_s_eff * ph * (fyt_psi / fy_psi)
     return max(Al_min, 0.0)
 end
 
@@ -505,7 +538,7 @@ function design_beam_torsion(
 
     # ---- Step 6: Required longitudinal reinforcement (Al) ----
     Al_req = torsion_longitudinal_reinforcement(At_s_req, ph, fyt_psi, fy_psi; θ=θ)
-    Al_min = min_torsion_longitudinal(Acp, At_s_req, ph, fc_psi, fy_psi, fyt_psi; θ=θ)
+    Al_min = min_torsion_longitudinal(Acp, At_s_req, ph, bw_in, fc_psi, fy_psi, fyt_psi)
     Al = max(Al_req, Al_min)
 
     # ---- Step 7: Maximum torsion stirrup spacing ----

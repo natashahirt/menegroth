@@ -20,7 +20,20 @@ using Unitful
 """
     effective_flange_width(; bw, hf, sw, ln, position=:interior) -> Length
 
-Effective flange width for a T-beam per ACI 318-11 §8.12.2.
+Effective flange width for a T-beam per ACI 318-11 §8.12.2 (interior beams)
+and §8.12.3 (edge beams).
+
+# Span-length cap (ENGINEERING JUDGMENT — see note below)
+ACI 318-11 §8.12.2 caps the *total* effective flange width at one-quarter of
+the beam's span length (`bf ≤ L/4`); §8.12.3 caps the *overhang* on an edge
+beam at `L/12`. Both are written in terms of "span length" (typically c-c).
+
+This implementation follows the long-standing PCA Notes / ACI 318-14
+§6.3.2.1 simplification, which re-expresses the §8.12.2 total cap as a
+per-side cap of `ln/8` (and §8.12.3's `L/12` cap as `ln/12`) using the
+*clear* span `ln`. For typical interior bays this gives the same answer as
+strict §8.12.2 to within a width `bw`; it is the form universally used in
+PCA EB712 and in ACI 318-14 onward.
 
 # Arguments
 - `bw`: Web width
@@ -29,17 +42,17 @@ Effective flange width for a T-beam per ACI 318-11 §8.12.2.
 - `ln`: Clear span length
 - `position`: `:interior` (flanges both sides) or `:edge` (flange one side)
 
-# Interior beams (flanges on each side)
+# Interior beams (§8.12.2 — both sides)
 Each overhanging flange width ≤ least of:
-- 8hf
+- 8·hf
 - sw/2
-- ln/8
+- ln/8     (per-side simplification of `bf ≤ L/4`)
 
-# Edge beams (flange on one side only)
+# Edge beams (§8.12.3 — one side only)
 Overhanging flange width ≤ least of:
-- 6hf
+- 6·hf
 - sw/2
-- ln/12
+- ln/12    (per-side simplification of `overhang ≤ L/12`)
 
 # Returns
 Effective flange width bf (with units).
@@ -49,6 +62,11 @@ Effective flange width bf (with units).
 bf = effective_flange_width(bw=12u"inch", hf=5u"inch", sw=48u"inch", ln=240u"inch")
 # Each side: min(40, 24, 30) = 24 → bf = 12 + 2×24 = 60 in
 ```
+
+# Reference
+- ACI 318-11 §8.12.2, §8.12.3 (PDF p. 119)
+- ACI 318-14 §6.3.2.1 (per-side `ln/8` form)
+- PCA EB712 (PCA Notes on ACI 318), Part 4
 """
 function effective_flange_width(;
     bw::Length, hf::Length, sw::Length, ln::Length,

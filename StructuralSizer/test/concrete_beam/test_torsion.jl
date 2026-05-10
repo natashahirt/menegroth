@@ -1,17 +1,19 @@
 # =============================================================================
-# Tests for ACI 318-19 Torsion Design
+# Tests for ACI 318-11 Torsion Design (Chapter 11, §11.5)
 # =============================================================================
 # Validates:
 #   1. Section properties (Acp, pcp, Aoh, ph, Ao) for rectangular & T-beam
-#   2. Threshold torsion (§22.7.4)
-#   3. Cracking torsion (§22.7.5.1)
-#   4. Cross-section adequacy (§22.7.7.1)
-#   5. Transverse reinforcement At/s (§22.7.6.1)
-#   6. Longitudinal reinforcement Al (§22.7.6.1.2)
-#   7. Full design_beam_torsion — validated against ACI 445.1R-12 Example 1
-#   8. Compatibility torsion capping
-#   9. Checker integration (is_feasible with Tu > 0)
-#  10. Adversarial / edge cases
+#   2. Threshold torsion (§11.5.1)
+#   3. Cracking torsion (§11.5.2.4 / Eq. 11-21 derivation)
+#   4. Cross-section adequacy (§11.5.3.1, Eq. 11-18)
+#   5. Transverse reinforcement At/s (§11.5.3.6, Eq. 11-21)
+#   6. Longitudinal reinforcement Al (§11.5.3.7, Eq. 11-22)
+#   7. Min transverse At/s (§11.5.5.2, Eq. 11-23)
+#   8. Min longitudinal Al,min (§11.5.5.3, Eq. 11-24) vs PCA EB712 Example 13.1
+#   9. Full design_beam_torsion — validated against ACI 445.1R-12 Example 1
+#  10. Compatibility torsion capping
+#  11. Checker integration (is_feasible with Tu > 0)
+#  12. Adversarial / edge cases
 # =============================================================================
 
 using Test
@@ -20,7 +22,7 @@ using Unitful: @u_str
 using StructuralSizer
 using Asap
 
-@testset "ACI 318-19 Torsion Design" begin
+@testset "ACI 318-11 Torsion Design" begin
 
     # =========================================================================
     # Reference Data — ACI 445.1R-12 Design Example 1
@@ -160,6 +162,59 @@ using Asap
         # Higher fc should increase minimum
         At_s_min_6000 = min_torsion_transverse(bw_in, 6000.0, fyt_psi)
         @test At_s_min_6000 > At_s_min
+    end
+
+    @testset "Min Longitudinal Al,min — PCA EB712 Example 13.1 (Eq. 11-24)" begin
+        # PCA Notes on ACI 318 (PCA EB712, 2014), Example 13.1, p. 426:
+        #   bw = 16 in, h = 48 in, f'c = 5000 psi, fy = fyt = 60,000 psi
+        #   Acp ≈ 896 in², ph = 132 in, At/s = 0.025 in²/in (governs over min)
+        #
+        # Worked: Al,min = 5·√5000·896/60,000 − (0.025)(132)·(60/60)
+        #               = (5·70.711·896)/60,000 − 3.30
+        #               = 5.279 − 3.30 = 1.979 ≈ 1.98 in²
+        Acp     = 896.0
+        ph      = 132.0
+        bw_in   = 16.0
+        At_s    = 0.025
+        fc_psi  = 5000.0
+        fy_psi  = 60_000.0
+        fyt_psi = 60_000.0
+
+        Al_min = min_torsion_longitudinal(Acp, At_s, ph, bw_in,
+                                          fc_psi, fy_psi, fyt_psi)
+        @test Al_min ≈ 1.98 atol = 0.02
+
+        # 25·bw/fyt floor on At/s (per §11.5.5.3 caveat):
+        # for very low At/s, the floor must be applied → first term dominates,
+        # giving the same Al,min as the floor-based calc.
+        Al_min_low_Ats = min_torsion_longitudinal(Acp, 0.0, ph, bw_in,
+                                                  fc_psi, fy_psi, fyt_psi)
+        At_s_floor = 25.0 * bw_in / fyt_psi
+        Al_min_at_floor = min_torsion_longitudinal(Acp, At_s_floor, ph, bw_in,
+                                                    fc_psi, fy_psi, fyt_psi)
+        @test Al_min_low_Ats ≈ Al_min_at_floor atol = 1e-9
+        @test Al_min_low_Ats > 0  # cannot be silently disabled
+
+        # Argument validation
+        @test_throws ArgumentError min_torsion_longitudinal(Acp, At_s, ph, -1.0,
+                                                            fc_psi, fy_psi, fyt_psi)
+        @test_throws ArgumentError min_torsion_longitudinal(Acp, At_s, ph, bw_in,
+                                                            fc_psi, 0.0, fyt_psi)
+    end
+
+    @testset "θ bounds enforced per §11.5.3.6" begin
+        # Equation (11-21) and (11-22) require 30° ≤ θ ≤ 60°
+        @test_throws ArgumentError torsion_transverse_reinforcement(
+            100.0, 130.05, 60_000.0; θ=20.0)
+        @test_throws ArgumentError torsion_transverse_reinforcement(
+            100.0, 130.05, 60_000.0; θ=70.0)
+        @test_throws ArgumentError torsion_longitudinal_reinforcement(
+            0.02, 50.0, 60_000.0, 60_000.0; θ=25.0)
+        @test_throws ArgumentError torsion_longitudinal_reinforcement(
+            0.02, 50.0, 60_000.0, 60_000.0; θ=65.0)
+        # Boundary values (30° and 60°) are allowed.
+        @test torsion_transverse_reinforcement(100.0, 130.05, 60_000.0; θ=30.0) > 0
+        @test torsion_transverse_reinforcement(100.0, 130.05, 60_000.0; θ=60.0) > 0
     end
 
     @testset "Max Torsion Stirrup Spacing" begin

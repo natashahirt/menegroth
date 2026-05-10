@@ -8,10 +8,11 @@
 #            ACI-318-11-spBeam-v1000 (StructurePoint)
 #
 # Key ACI sections:
-#   §11.2.1.1 (Eq. 11-3) - Concrete shear capacity Vc
+#   §11.2.1.1 (Eq. 11-3) - Concrete shear capacity Vc (shear and flexure only)
+#   §11.2.1.2 (Eq. 11-4) - Vc with axial compression
 #   §11.4.7.9            - Maximum shear capacity Vs,max
-#   §11.4.5              - Maximum stirrup spacing
-#   §11.4.6.3            - Minimum shear reinforcement
+#   §11.4.5.1, .3        - Maximum stirrup spacing (and half-reduction at high Vs)
+#   §11.4.6.3 (Eq. 11-13)- Minimum shear reinforcement
 #   §9.3.2.3             - Strength reduction factor φ = 0.75
 # ==============================================================================
 
@@ -28,14 +29,17 @@ using Asap: kip, ksi, psf, ksf, pcf
 Nominal concrete shear capacity per ACI 318.
 
 When `Nu` and `Ag` are omitted (pure flexural members), uses the
-simplified formula (ACI 318-11 Eq. (11-3)):
+simplified formula (ACI 318-11 §11.2.1.1, Eq. (11-3)):
 
     Vc = 2 λ √f'c bw d
 
 When `Nu > 0` and `Ag > 0` (members under axial compression), uses
-the detailed formula (ACI 318-11 §11.2.2.1, Eq. (11-4)):
+the simplified axial-compression formula (ACI 318-11 §11.2.1.2, Eq. (11-4)):
 
     Vc = 2 λ (1 + Nu / (2000 Ag)) √f'c bw d
+
+(The more detailed Vc per ACI 318-11 §11.2.2.1, Eq. (11-5) — which uses
+ρw and Vu·d/Mu — is not implemented here.)
 
 where `Nu` is in lbf and `Ag` is in in² (or Unitful equivalents).
 
@@ -57,7 +61,7 @@ function Vc_beam(bw::Length, d::Length, fc::Pressure;
     bw_in  = ustrip(u"inch", bw)
     d_in   = ustrip(u"inch", d)
 
-    # Axial compression modifier (ACI 318-11 §11.2.2.1, Eq. (11-4))
+    # Axial compression modifier (ACI 318-11 §11.2.1.2, Eq. (11-4))
     axial_factor = 1.0
     if !isnothing(Nu) && !isnothing(Ag)
         Nu_lb  = Nu isa Unitful.Quantity ? ustrip(u"lbf", Nu) : Float64(Nu)
@@ -153,12 +157,14 @@ end
 """
     max_stirrup_spacing(d, Vs, bw, fc) -> Length
 
-Maximum stirrup spacing per ACI 318-11 §11.4.5:
+Maximum stirrup spacing for non-prestressed members per ACI 318-11
+§11.4.5.1 (base limit) and §11.4.5.3 (one-half reduction at high `Vs`):
 
-- If Vs ≤ 4√f'c × bw × d:  s_max = min(d/2, 24 in)
-- If Vs >  4√f'c × bw × d:  s_max = min(d/4, 12 in)
+- If Vs ≤ 4√f'c × bw × d:  s_max = min(d/2, 24 in)   (§11.4.5.1)
+- If Vs >  4√f'c × bw × d:  s_max = min(d/4, 12 in)   (§11.4.5.1 reduced by §11.4.5.3)
 
 # Reference
+- ACI 318-11 §11.4.5.1, §11.4.5.3 (PDF p. 174)
 - StructurePoint Example: Vs < 4√f'c×bw×d → s_max = min(17.56/2, 24) = 8.78 in
 """
 function max_stirrup_spacing(d::Length, Vs::Force, bw::Length, fc::Pressure)
@@ -245,7 +251,7 @@ Complete beam shear design per ACI 318.
 - `fyt`: Stirrup yield strength
 - `λ`: Lightweight factor (1.0 normal weight)
 - `stirrup_bar`: Bar number for stirrups (default #3)
-- `Nu`: Factored axial compression (positive). Increases Vc per ACI 318-11 §11.2.2.1.
+- `Nu`: Factored axial compression (positive). Increases Vc per ACI 318-11 §11.2.1.2.
 - `Ag`: Gross cross-section area (bw × h). Required when Nu is provided.
 
 # Returns

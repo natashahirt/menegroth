@@ -119,7 +119,7 @@ Bootstrap mode starts the HTTP server immediately with `/health` and `/status` e
 |:---------|:--------|:------------|
 | `PORT` or `SIZER_PORT` | `8080` | Server port |
 | `SIZER_HOST` | `"0.0.0.0"` | Bind address |
-| `CHAT_LLM_BASE_URL` | *(unset)* | LLM API base URL (e.g. `https://api.openai.com`). Required for `/chat`. |
+| `CHAT_LLM_BASE_URL` | `"https://api.openai.com"` | LLM API base URL. Optional; override for OpenAI-compatible providers. |
 | `CHAT_LLM_API_KEY` | *(unset)* | LLM API key. Required for `/chat`. |
 | `CHAT_LLM_MODEL` | `gpt-4o` | Model name passed to the LLM completions endpoint. |
 
@@ -210,7 +210,7 @@ data: [DONE]
 
 | Status | Error code | Condition |
 |:-------|:-----------|:----------|
-| 503 | `llm_not_configured` | `CHAT_LLM_BASE_URL` or `CHAT_LLM_API_KEY` not set |
+| 503 | `llm_not_configured` | `CHAT_LLM_API_KEY` not set |
 | 400 | `invalid_json` | Malformed request body |
 | 400 | `invalid_mode` | Mode not "design" or "results" |
 | 400 | `empty_messages` | No messages provided |

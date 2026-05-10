@@ -96,6 +96,9 @@ using Asap  # custom units (kip, ksi, ksf, psf, etc.)
         include("slabs/test_flat_slab.jl")
         # Pipeline provisions (edge beam, ρ', integrity, transfer, face-of-support)
         include("slabs/test_pipeline_provisions.jl")
+        # ACI 318-11 audit — Tier 1 correctness gaps (encodes correct behaviour;
+        # currently fails / @test_broken on main until fixes land)
+        include("slabs/test_aci_audit_tier1.jl")
         # Punching / shear
         include("slabs/test_shear_transfer.jl")
         include("slabs/test_shear_studs.jl")
@@ -122,6 +125,7 @@ using Asap  # custom units (kip, ksi, ksf, psf, etc.)
         include("foundations/test_spread_aci.jl")
         include("foundations/test_strip_aci.jl")
         include("foundations/test_mat_aci.jl")
+        include("foundations/test_rebar_quantity.jl")
         include("foundations/test_types_load.jl")
     end
 

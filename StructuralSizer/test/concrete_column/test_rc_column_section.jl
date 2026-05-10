@@ -139,18 +139,113 @@ end
             tie_type = :tied,
             arrangement = :perimeter
         )
-        
+
         # Perimeter arrangement should have bars around all faces
         y_coords = sort([ustrip(u"inch", bar.y) for bar in sec.bars])
         x_coords = sort([ustrip(u"inch", bar.x) for bar in sec.bars])
-        
+
         # Should have bars at multiple y levels (corners + sides)
         unique_y = unique(round.(y_coords, digits=1))
         @test length(unique_y) >= 2  # At least top and bottom
-        
+
         # Should have bars at multiple x levels
         unique_x = unique(round.(x_coords, digits=1))
         @test length(unique_x) >= 2  # At least left and right
+    end
+
+    # ==========================================================================
+    # Test 5b: Generalized Perimeter Layout (PR-5)
+    # ==========================================================================
+    @testset "Bar Positions - Perimeter (generalized counts)" begin
+        # ────────────────────────────────────────────────────────────────────
+        # Shared helper: count distinct bar locations on each face for a square
+        # column of side `s` with edge_to_center distance `etc`.
+        # ────────────────────────────────────────────────────────────────────
+        function _face_counts(sec; etc=2.064, side=20.0)
+            x_left  = etc; x_right = side - etc
+            y_bot   = etc; y_top   = side - etc
+            n_top    = count(b -> isapprox(ustrip(u"inch", b.y), y_top, atol=0.05), sec.bars)
+            n_bot    = count(b -> isapprox(ustrip(u"inch", b.y), y_bot, atol=0.05), sec.bars)
+            n_left   = count(b -> isapprox(ustrip(u"inch", b.x), x_left,  atol=0.05), sec.bars)
+            n_right  = count(b -> isapprox(ustrip(u"inch", b.x), x_right, atol=0.05), sec.bars)
+            return (top=n_top, bot=n_bot, left=n_left, right=n_right)
+        end
+
+        # cover + tie_diameter (#3 → 0.375") + bar_diameter/2 (#9 → 1.128/2)
+        # Numbers below match `RCColumnSection`'s edge_to_center calc for #9 bars
+        # in a 20×20 column with 1.5" clear cover.
+        etc = 1.5 + 0.375 + 1.128/2  # ≈ 2.439, but we'll just use sec geometry
+        side = 20.0
+
+        @testset "Square 20×20, n_bars in 6:2:20" begin
+            for n in (6, 8, 10, 12, 14, 16, 18, 20)
+                sec = RCColumnSection(
+                    b = side*u"inch",
+                    h = side*u"inch",
+                    bar_size = 9,
+                    n_bars = n,
+                    cover = 1.5u"inch",
+                    tie_type = :tied,
+                    arrangement = :perimeter,
+                )
+                @test length(sec.bars) == n
+                # All bars distinct positions
+                xs = [round(ustrip(u"inch", b.x), digits=3) for b in sec.bars]
+                ys = [round(ustrip(u"inch", b.y), digits=3) for b in sec.bars]
+                @test length(unique(zip(xs, ys))) == n
+                # Symmetry: counts on opposite faces match (top/bottom may
+                # differ by one for odd n_int per spColumn convention).
+                fc = _face_counts(sec; side=side)
+                @test fc.left == fc.right
+                @test abs(fc.top - fc.bot) <= 1
+            end
+        end
+
+        @testset "Rectangular 16×32 — long faces get more bars" begin
+            # 16×32 with n_bars = 16: interior bars = 12, paired = 6.
+            # Long faces are vertical (h = 32), so |left|+|right| > |top|+|bot|.
+            sec = RCColumnSection(
+                b = 16u"inch",
+                h = 32u"inch",
+                bar_size = 9,
+                n_bars = 16,
+                cover = 1.5u"inch",
+                tie_type = :tied,
+                arrangement = :perimeter,
+            )
+            @test length(sec.bars) == 16
+            # Helper indexes faces by (x, y) ≈ corner. Use the section's own
+            # b, h and edge_to_center.
+            b_in  = ustrip(u"inch", sec.b);  h_in = ustrip(u"inch", sec.h)
+            etc_x = sec.bars[1].x  # corner bar lives at edge_to_center
+            etc_y = sec.bars[1].y
+            x_left = ustrip(u"inch", etc_x);  x_right = b_in - x_left
+            y_bot  = ustrip(u"inch", etc_y);  y_top  = h_in - y_bot
+            n_top   = count(b -> isapprox(ustrip(u"inch", b.y), y_top, atol=0.05), sec.bars)
+            n_bot   = count(b -> isapprox(ustrip(u"inch", b.y), y_bot, atol=0.05), sec.bars)
+            n_left  = count(b -> isapprox(ustrip(u"inch", b.x), x_left,  atol=0.05), sec.bars)
+            n_right = count(b -> isapprox(ustrip(u"inch", b.x), x_right, atol=0.05), sec.bars)
+            # Vertical-face counts include corners (which are also horizontal).
+            # On the long axis we expect strictly more bars than on the short.
+            @test (n_left + n_right) > (n_top + n_bot)
+        end
+
+        @testset "_split_perimeter invariants" begin
+            f = StructuralSizer._split_perimeter
+            for n_int in 0:20
+                for (Lb, Lh) in ((10.0, 10.0), (10.0, 20.0), (20.0, 10.0), (5.0, 35.0))
+                    n_tb, n_lr, extra = f(n_int, Lb, Lh)
+                    @test 2*n_tb + 2*n_lr + extra == n_int
+                    @test extra in (0, 1)
+                    @test n_tb >= 0 && n_lr >= 0
+                    if n_int > 0 && Lb > Lh
+                        @test n_tb >= n_lr  # long b-direction → more on top/bottom
+                    elseif n_int > 0 && Lh > Lb
+                        @test n_lr >= n_tb  # long h-direction → more on left/right
+                    end
+                end
+            end
+        end
     end
 
     # ==========================================================================

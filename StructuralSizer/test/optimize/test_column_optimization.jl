@@ -96,25 +96,31 @@ const MOI = JuMP.MOI
     end
     
     @testset "Geometry Conversion" begin
-        # Steel to concrete
+        # Steel to concrete: Kx → kx, Ky → ky (per-axis preserved)
         steel_geom = SteelMemberGeometry(5.0; Lb=2.5, Kx=1.0, Ky=0.8)
         conc_geom = to_concrete_geometry(steel_geom)
-        
+
         @test conc_geom isa ConcreteMemberGeometry
         @test conc_geom.L == 5.0u"m"
         @test conc_geom.Lu == 2.5u"m"  # Maps from Lb
-        @test conc_geom.k == 0.8   # Maps from Ky
-        
-        # Concrete to steel
-        conc_geom2 = ConcreteMemberGeometry(4.0; Lu=4.0, k=1.2)
+        @test conc_geom.kx == 1.0      # Maps from Kx
+        @test conc_geom.ky == 0.8      # Maps from Ky
+
+        # Concrete to steel: kx → Kx, ky → Ky.
+        conc_geom2 = ConcreteMemberGeometry(4.0; Lu=4.0, kx=1.2, ky=0.9)
         steel_geom2 = to_steel_geometry(conc_geom2)
-        
+
         @test steel_geom2 isa SteelMemberGeometry
         @test steel_geom2.L == 4.0u"m"
         @test steel_geom2.Lb == 4.0u"m"  # Maps from Lu
-        @test steel_geom2.Kx == 1.2  # Maps from k
-        @test steel_geom2.Ky == 1.2
-        
+        @test steel_geom2.Kx == 1.2      # Maps from kx
+        @test steel_geom2.Ky == 0.9      # Maps from ky
+
+        # Single-`k` legacy constructor still sets both kx and ky.
+        conc_geom3 = ConcreteMemberGeometry(4.0; Lu=4.0, k=1.2)
+        @test conc_geom3.kx == 1.2
+        @test conc_geom3.ky == 1.2
+
         # Batch conversion
         geoms = [ConcreteMemberGeometry(3.0), ConcreteMemberGeometry(4.0)]
         steel_geoms = convert_geometries(geoms, :steel)

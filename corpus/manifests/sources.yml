@@ -105,6 +105,17 @@
   encrypted: false
   notes: "Suggested analysis and design procedures for combined footings and mats."
 
+- id: aci-sp-152-mat-foundations
+  origin: "StructuralSizer/src/foundations/codes/reference/Mat foundation guide.pdf"
+  source_path: corpus/sources/code_guides/aci/ACI-SP-152-Mat-Foundations.pdf
+  text_path:   corpus/text/code_guides/aci/ACI-SP-152-Mat-Foundations.txt
+  family: aci
+  role: code_guides
+  edition: "ACI SP-152 (1995)"
+  tier: 1
+  encrypted: false
+  notes: "ACI Special Publication 152, 'Design and Performance of Mat Foundations: State-of-the-Art Review' — opens with SP 152-1 by E. J. Ulrich Jr. (then secretary / past chairman of ACI 336). 260-page committee-published collection covering subgrade response, discrete-area method, and mat behavior."
+
 - id: pca-eb712
   origin: StructuralSizer/src/codes/reference/EB712_8-31-14.pdf
   source_path: corpus/sources/code_guides/aci/EB712_8-31-14.pdf
@@ -115,6 +126,23 @@
   tier: 1
   encrypted: true
   notes: "PCA Notes on ACI 318 (encrypted; password handled by convert_pdfs_to_text.py)."
+
+# ── Tier 2 — textbooks / classical references ─────────────────────────────
+# Canonical engineering textbooks and classical references. Tier 2 because
+# they are widely cited but not normative; like research papers ``family``
+# is topic-based (foundations, walls, ...). Many are scanned reproductions
+# whose ``corpus/text/`` artifact is OCR-pending — flag in ``notes`` so
+# search_text consumers know full-text search may be incomplete.
+- id: textbook-beams-on-elastic-foundation
+  origin: "StructuralSizer/src/foundations/codes/reference/Beams on Elastic Foundations.pdf"
+  source_path: corpus/sources/textbooks/foundations/Beams-on-Elastic-Foundations.pdf
+  text_path:   corpus/text/textbooks/foundations/Beams-on-Elastic-Foundations.txt
+  family: foundations
+  role: textbooks
+  edition: "scanned reproduction (publisher unverified — likely Hetényi 1946)"
+  tier: 2
+  encrypted: false
+  notes: "282-page scanned PDF on Winkler / elastic-foundation beam theory; PDF metadata shows tiff2pdf 2015 with no embedded text layer. Title and page count match Hetényi, M., 'Beams on Elastic Foundation' (Univ. of Michigan Press, 1946) — verify before citing. The ``corpus/text/`` artifact is a stub (OCR pending: ``brew install tesseract`` then ``python3 scripts/util/convert_pdfs_to_text.py --force --ocr <pdf>``); search_text will not return useful hits until OCR is rerun."
 
 # ── Tier 2 — research papers ──────────────────────────────────────────────
 # Peer-reviewed academic papers with grounded citations. Tier 2 because the
@@ -432,6 +460,28 @@
   tier: 3
   encrypted: false
   notes: "StructurePoint worked design example: tilt-up wall with opening per ACI 318-19."
+
+- id: sp-de-combined-footing-aci318-14
+  origin: "StructuralSizer/src/foundations/codes/reference/Reinforced-Concrete-Column-Combined-Footing-Analysis-Design.pdf"
+  source_path: corpus/sources/examples/aci/SP-DE-Combined-Footing-ACI318-14.pdf
+  text_path:   corpus/text/examples/aci/SP-DE-Combined-Footing-ACI318-14.txt
+  family: aci
+  role: examples
+  edition: ACI 318-14 (StructurePoint DE)
+  tier: 3
+  encrypted: false
+  notes: "StructurePoint worked design example: reinforced concrete column combined footing (24 in. x 16 in. exterior + 24 in. x 24 in. interior column) per ACI 318-14, with spMats v8.12 (2016) FEA cross-check including punching shear."
+
+- id: sp-de-square-spread-footing-aci318-14
+  origin: "StructuralSizer/src/foundations/codes/reference/Reinforced-Concrete-Square-Spread-Footing-Analysis-Design-ACI318-14.pdf"
+  source_path: corpus/sources/examples/aci/SP-DE-Square-Spread-Footing-ACI318-14.pdf
+  text_path:   corpus/text/examples/aci/SP-DE-Square-Spread-Footing-ACI318-14.txt
+  family: aci
+  role: examples
+  edition: ACI 318-14 (StructurePoint DE)
+  tier: 3
+  encrypted: false
+  notes: "StructurePoint worked design example: reinforced concrete square spread (isolated) footing supporting an 18 in. square column (DL = 400 kips, LL = 270 kips) per ACI 318-14, including one-way and punching shear checks."
 
 # ── Tier 1 — already-curated AISC chapter excerpts (text-only seeds) ──────
 # These have no upstream PDF; they are pre-extracted plain-text excerpts of

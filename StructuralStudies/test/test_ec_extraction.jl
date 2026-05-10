@@ -46,10 +46,14 @@ include(joinpath(@__DIR__, "..", "src", "flat_plate_methods",
                       lx_ft = span_ft, ly_ft = span_ft, live_psf = ll_psf,
                       floor_type = :flat_plate)
 
-    @testset "schema includes new EC fields" begin
-        @test :slab_ec_kgco2e in propertynames(row)
-        @test :slab_area_m2   in propertynames(row)
-        @test :slab_ec_per_m2 in propertynames(row)
+    @testset "schema includes new EC + MUI fields" begin
+        for f in (:slab_ec_kgco2e, :slab_area_m2, :slab_ec_per_m2,
+                  :concrete_vol_m3, :rebar_vol_m3,
+                  :concrete_mass_kg, :rebar_mass_kg, :slab_mass_kg,
+                  :mui_kg_per_m2, :concrete_kg_per_m2, :rebar_kg_per_m2,
+                  :concrete_t_eq_m, :rebar_vol_per_m2)
+            @test f in propertynames(row)
+        end
     end
 
     @testset "converged FEA row has positive, finite EC" begin
@@ -59,9 +63,43 @@ include(joinpath(@__DIR__, "..", "src", "flat_plate_methods",
         @test isfinite(row.slab_ec_per_m2) && row.slab_ec_per_m2 > 0
     end
 
+    @testset "MUI breakdown is internally consistent" begin
+        # Mass total = concrete + rebar
+        @test isapprox(row.slab_mass_kg,
+                       row.concrete_mass_kg + row.rebar_mass_kg; rtol = 1e-9)
+        # Per-m² intensities = totals / area
+        @test isapprox(row.mui_kg_per_m2,
+                       row.slab_mass_kg / row.slab_area_m2; rtol = 1e-9)
+        @test isapprox(row.concrete_kg_per_m2,
+                       row.concrete_mass_kg / row.slab_area_m2; rtol = 1e-9)
+        @test isapprox(row.rebar_kg_per_m2,
+                       row.rebar_mass_kg / row.slab_area_m2; rtol = 1e-9)
+        # Equivalent thickness = concrete volume / area
+        @test isapprox(row.concrete_t_eq_m,
+                       row.concrete_vol_m3 / row.slab_area_m2; rtol = 1e-9)
+        # All quantities strictly positive
+        @test row.concrete_vol_m3   > 0 && row.rebar_vol_m3   > 0
+        @test row.concrete_mass_kg  > 0 && row.rebar_mass_kg  > 0
+        @test row.concrete_t_eq_m   > 0 && row.rebar_vol_per_m2 > 0
+    end
+
+    @testset "MUI within sane bounds for NWC_4000 + Gr60 flat plate" begin
+        # Concrete: 7-10 in × 2380 kg/m³ ≈ 420-600 kg/m²
+        @test 350.0 ≤ row.concrete_kg_per_m2 ≤ 700.0
+        # Rebar: ~5-25 kg/m² for typical flat plate at 50 psf
+        @test 2.0   ≤ row.rebar_kg_per_m2    ≤ 40.0
+        # Concrete equivalent thickness ≈ slab thickness in m
+        # (8 in ≈ 0.203 m). Allow tolerance because slab.h is post-design.
+        @test 0.15  ≤ row.concrete_t_eq_m    ≤ 0.30
+        # Rebar volume ratio: typically 0.5-2% of slab gross volume
+        rebar_vol_ratio = row.rebar_vol_m3 / row.concrete_vol_m3
+        @test 0.002 ≤ rebar_vol_ratio        ≤ 0.025
+    end
+
     @testset "EC density within sane bounds for NWC_4000 + Gr60" begin
         # A 20 ft square bay flat plate at 50 psf typically lands ~7–9 in.
-        # Concrete EC ≈ 0.203 m × 2380 kg/m³ × 0.138 kg/kg ≈ 67 kg/m².
+        # Concrete EC ≈ 0.203 m × 2380 kg/m³ × 0.127 kg/kg ≈ 61 kg/m²
+        # (NWC_4000 anchored to RMC EPD median, see concrete.jl).
         # Add rebar (rebar volume ratio ~0.005–0.02, ECC ≈ 1.0–1.5 kg/kg
         # for Gr60 → ~10–40 kg/m² rebar contribution).
         # Total expected: ~50–200 kgCO₂e/m². Use a wider 40–400 to allow

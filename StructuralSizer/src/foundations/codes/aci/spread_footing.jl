@@ -68,10 +68,25 @@ function _flexural_steel_footing(Mu::Torque, b::Length, d::Length,
     return As
 end
 
-"""ACI 7.6.1.1 — minimum reinforcement for footings (temperature/shrinkage)."""
+"""
+Minimum shrinkage/temperature reinforcement area for a footing strip of
+width `b` and thickness `h`.
+
+Per ACI 318-11 §7.12.2.1 (corpus: aci-318-11, page 106):
+- (a) Grade 40 or 50 deformed bars              → ρ_min = 0.0020
+- (b) Grade 60 deformed bars or welded wire     → ρ_min = 0.0018
+- (c) reinforcement with fy > 60,000 psi        → ρ_min = max(0.0014, 0.0018·60,000/fy)
+
+Yield strengths between Grade 50 and Grade 60 are uncommon in practice;
+when they do occur (e.g. some imported reinforcement) the conservative
+0.0020 value from clause (a) is applied because §7.12.2.1(b) explicitly
+restricts itself to "Grade 60 deformed bars or welded wire reinforcement".
+"""
 function _min_steel_footing(b::Length, h::Length, fy::Pressure)
     fy_psi = ustrip(u"psi", fy)
-    ρ_min = fy_psi ≤ 60000.0 ? 0.0018 : max(0.0014, 0.0018 * 60000.0 / fy_psi)
+    ρ_min = fy_psi <  60_000.0 ? 0.0020 :        # ACI 318-11 §7.12.2.1(a)
+            fy_psi == 60_000.0 ? 0.0018 :        # ACI 318-11 §7.12.2.1(b)
+            max(0.0014, 0.0018 * 60_000.0 / fy_psi)  # ACI 318-11 §7.12.2.1(c)
     return ρ_min * b * h
 end
 
@@ -216,8 +231,13 @@ function design_footing(::SpreadFooting,
     d = 0.0u"inch"
     punch = nothing
 
+    # Effective depth d per ACI 318-11 §2.2 — "distance from extreme
+    # compression fiber to centroid of longitudinal tension reinforcement"
+    # (corpus: aci-318-11, page 37).  For a single layer of bars in a
+    # footing, the centroid sits db/2 above the bar's clear-cover face,
+    # so d = h − cover − db/2.
     for iter in 1:60
-        d = h - cover - db
+        d = h - cover - db / 2
         d < 4.0u"inch" && (h += h_incr; continue)
 
         # Two-way (punching) shear with biaxial moments
@@ -255,7 +275,7 @@ function design_footing(::SpreadFooting,
                   "Check bearing pressure, column dimensions, or increase max depth.")
         end
     end
-    d = h - cover - db
+    d = h - cover - db / 2  # ACI 318-11 §2.2 — centroid of tension reinforcement
 
     # =====================================================================
     # Step 4: Flexural Reinforcement (ACI 7.5)
@@ -271,9 +291,12 @@ function design_footing(::SpreadFooting,
                _min_steel_footing(Lf, h, fy))
     As_gov = max(As_x, As_y)
 
-    # Bar selection
+    # Bar selection — n_bars is the larger of (As / A_bar) and the count
+    # required to keep spacing ≤ `min(3h, 18 in.)` for primary flexural
+    # reinforcement in slabs / footings (ACI 318-11 §7.6.5, corpus:
+    # aci-318-11, page 96).  Floor of 2 bars each way for constructability.
     n_bars = max(ceil(Int, As_gov / Ab), 2)
-    max_s  = min(3h, 18.0u"inch")               # ACI 7.7.2.3
+    max_s  = min(3h, 18.0u"inch")
     n_bars = max(n_bars, ceil(Int, B / max_s))
     As_provided = n_bars * Ab
 

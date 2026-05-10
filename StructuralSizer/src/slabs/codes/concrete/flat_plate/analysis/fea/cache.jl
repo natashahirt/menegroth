@@ -94,6 +94,16 @@ mutable struct FEAModelCache
     # through every call site.  Set by `_build_or_update_fea!`.
     drop_panel::Union{Nothing, DropPanelGeometry}
 
+    # Edge-beam frame elements (ACI 318-11 §13.6.4.2 / §13.7.5).  Empty when
+    # `has_edge_beam=false` and `edge_beam_βt=0`.  When configured, holds one
+    # `Asap.Element` per skeleton boundary edge connecting consecutive
+    # `boundary_vis` nodes (generalizes to non-rectangular polygons).
+    edge_beam_elements::Vector{Any}
+
+    # Active edge-beam βt (for `_update_and_resolve!` to refresh sections when
+    # the user changes βt or h between iterations).  0.0 when no edge beam.
+    edge_beam_βt::Float64
+
     FEAModelCache() = new(
         false, nothing, Dict{Int,ColStubData}(), nothing,
         FEAElementData[], Dict{Int,Vector{Int}}(),
@@ -104,5 +114,7 @@ mutable struct FEAModelCache
         Dict{Int,NamedTuple}(),
         0.0,
         nothing,
+        Any[],
+        0.0,
     )
 end

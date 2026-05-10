@@ -739,13 +739,37 @@ NamedTuple with:
 - `utilization`: Float64 - demand/capacity ratio (1.0 = at limit)
 - `φPn_at_Mu`: Float64 - factored axial capacity at the given moment
 - `φMn_at_Pu`: Float64 - factored moment capacity at the given axial load
-- `governing`: Symbol - which limit governs (:axial, :moment, :combined)
+- `governing`: Symbol - which limit governs (`:axial`, `:moment`, `:combined`,
+  or `:axial_cap` when ACI 318-11 §10.3.6 limits design φPn to φPn,max)
 
 # Notes
-Uses linear interpolation between diagram points.
+- Uses linear interpolation between diagram points.
+- Enforces ACI 318-11 §10.3.6 (Eq. 10-1, 10-2): design φPn ≤ φPn,max =
+  α·φP0, where α = 0.85 (spiral) / 0.80 (tied). The diagram retains the
+  theoretical PURE_COMPRESSION point (φP0) for plotting/diagnostics, but
+  the design check refuses any Pu above the MAX_COMPRESSION cap.
 """
 function check_PM_capacity(diagram::PMInteractionDiagram, Pu::Real, Mu::Real)
     Mu_abs = abs(Mu)  # Demand magnitude (kip-ft)
+
+    # ACI 318-11 §10.3.6 — design axial strength shall not exceed φPn,max.
+    # Eq. (10-1) spiral:  φPn,max = 0.85·φ·[0.85·f'c·(Ag - Ast) + fy·Ast]
+    # Eq. (10-2) tied:    φPn,max = 0.80·φ·[0.85·f'c·(Ag - Ast) + fy·Ast]
+    # The MAX_COMPRESSION control point is constructed with α·P0 already, so
+    # its φPn is the design cap. Short-circuit before interpolation so the
+    # PURE_COMPRESSION point (φP0) — kept on the curve for plotting — never
+    # leaks into the design utilization above the cap.
+    max_pt = get_control_point(diagram, :max_compression)
+    φPn_cap = max_pt.φPn
+    if Pu > φPn_cap
+        return (
+            adequate   = false,
+            utilization = Pu / φPn_cap,
+            φMn_at_Pu  = 0.0,
+            φPn_at_Mu  = φPn_cap,
+            governing  = :axial_cap,
+        )
+    end
 
     # Get factored curve
     curve = get_factored_curve(diagram)
@@ -757,6 +781,14 @@ function check_PM_capacity(diagram::PMInteractionDiagram, Pu::Real, Mu::Real)
 
     # Find φPn capacity at the given Mu by interpolation
     φPn_at_Mu = _interpolate_axial_at_M(φPn, φMn, Mu_abs)
+
+    # Cap the reported "axial capacity at this moment" at φPn,max so callers
+    # (e.g., biaxial Bresler, NLP gradient) never see a compression capacity
+    # above the ACI design ceiling, even at Mu = 0 where the curve reaches
+    # φP0. Tension-side values (φPn_at_Mu < 0) are left untouched.
+    if φPn_at_Mu > φPn_cap
+        φPn_at_Mu = φPn_cap
+    end
 
     # Near-pure axial (Mu = 0 is common from symmetric framing): at this P the diagram can
     # report φMn_at_Pu = 0 even when axial capacity is ample. The old fallback (utilization = 1.5)

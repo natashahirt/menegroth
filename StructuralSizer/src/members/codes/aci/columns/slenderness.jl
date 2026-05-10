@@ -15,62 +15,88 @@ using Asap: to_inches, to_sqinches, ksi
 # Slenderness Check
 # ==============================================================================
 
-"""
-    slenderness_ratio(section::RCColumnSection, geometry::ConcreteMemberGeometry) -> Float64
+# ------------------------------------------------------------------------------
+# Per-axis property helpers (rectangular sections)
+# ------------------------------------------------------------------------------
+# ACI 318-11 §10.10 evaluates slenderness in the *plane of bending*. For a
+# rectangular column that means:
+#   strong axis (bending about x):  dim = h, r = 0.3·h, k = kx,  Ig = b·h³/12
+#   weak axis   (bending about y):  dim = b, r = 0.3·b, k = ky,  Ig = h·b³/12
+# These tiny helpers keep the per-axis branch in one place so every downstream
+# slenderness function reads the right number for the axis it was called with.
 
-Calculate slenderness ratio kLu/r per ACI 318-11.
+"Section dimension (in.) parallel to the bending plane (i.e. the depth used by ACI for r ≈ 0.3·dim)."
+_axis_dim(section::RCColumnSection, ::StrongAxis) = to_inches(section.h)
+_axis_dim(section::RCColumnSection, ::WeakAxis)   = to_inches(section.b)
 
-# Arguments
-- `section`: RC column section
-- `geometry`: Column geometry with Lu, k
+"Effective length factor for the requested axis."
+_axis_k(geometry, ::StrongAxis) = geometry.kx
+_axis_k(geometry, ::WeakAxis)   = geometry.ky
 
-# Returns
-- Slenderness ratio (dimensionless)
-"""
-function slenderness_ratio(section::RCColumnSection, geometry)
-    # ACI convention: all internal calculations in inches
-    h = to_inches(section.h)
-    r = 0.3 * h
-    
-    Lu = to_inches(geometry.Lu)
-    
-    return geometry.k * Lu / r
+"Gross moment of inertia (in⁴) about the requested bending axis."
+function _axis_Ig(section::RCColumnSection, ::StrongAxis)
+    b = to_inches(section.b); h = to_inches(section.h)
+    return b * h^3 / 12
+end
+function _axis_Ig(section::RCColumnSection, ::WeakAxis)
+    b = to_inches(section.b); h = to_inches(section.h)
+    return h * b^3 / 12
 end
 
 """
-    should_consider_slenderness(section, geometry; M1::Real=0.0, M2::Real=1.0) -> Bool
+    slenderness_ratio(section, geometry, axis=StrongAxis()) -> Float64
 
-Check if slenderness effects should be considered per ACI 318-11 §10.10.1.
+Slenderness ratio `k·Lu/r` per ACI 318-11 §10.10.1, evaluated in the plane of
+`axis` (`StrongAxis()` = bending about x, `WeakAxis()` = bending about y).
+"""
+function slenderness_ratio(section::RCColumnSection, geometry,
+                           axis::BendingAxis = StrongAxis())
+    # ACI §10.10.1.2: r ≈ 0.3·(section dimension in plane of bending).
+    r = 0.3 * _axis_dim(section, axis)
+    Lu = to_inches(geometry.Lu)
+    return _axis_k(geometry, axis) * Lu / r
+end
+
+"""
+    should_consider_slenderness(section, geometry, axis=StrongAxis(); M1=0.0, M2=1.0) -> Bool
+
+Check whether slenderness effects govern per ACI 318-19 §6.2.5.1
+(historically ACI 318-11 §10.10.1, but the M1/M2 sign convention was
+updated in 318-19 to match AISC 360 — see commentary R6.2.5).
 
 # Arguments
 - `section`: RC column section
-- `geometry`: Column geometry with Lu, k, braced
-- `M1`: Smaller factored end moment (kip-ft)
+- `geometry`: Column geometry with `Lu`, `kx`, `ky`, `braced`
+- `axis`: Bending axis (`StrongAxis()` default, `WeakAxis()` for weak-axis check)
+- `M1`: Smaller factored end moment (kip-ft, |M1| ≤ |M2|)
 - `M2`: Larger factored end moment (kip-ft)
 
-# Returns
-- `true` if slenderness effects must be considered
+# Sign convention (ACI 318-19 / AISC 360-16)
+`M1/M2 > 0` ⇔ **double** curvature (best case),
+`M1/M2 < 0` ⇔ **single** curvature (worst case).
 
-# ACI 318-11 Limits
-- Non-sway (braced): kLu/r ≤ 34 - 12(M1/M2), max 40
-- Sway (unbraced): kLu/r ≤ 22
+# ACI 318-19 limits
+- Non-sway (braced):  k·Lu/r ≤ 34 + 12·(M1/M2), capped at 40   (Eq. 6.2.5.1b/c)
+- Sway (unbraced):    k·Lu/r ≤ 22                              (Eq. 6.2.5.1a)
 """
 function should_consider_slenderness(
-    section::RCColumnSection, 
-    geometry;
+    section::RCColumnSection,
+    geometry,
+    axis::BendingAxis = StrongAxis();
     M1::Real = 0.0,
-    M2::Real = 1.0
+    M2::Real = 1.0,
 )
-    λ = slenderness_ratio(section, geometry)
-    
+    λ = slenderness_ratio(section, geometry, axis)
+
     if geometry.braced
-        # Non-sway: ACI §10.10.1(b)
-        # M1/M2 is positive for single curvature, negative for double
+        # ACI 318-19 §6.2.5.1(b), Eq. (6.2.5.1b)+(6.2.5.1c). Single curvature
+        # (M1/M2 < 0) gives the *smaller* limit (more conservative); double
+        # curvature (M1/M2 > 0) gives the *larger* limit (up to 40).
         M_ratio = M2 ≈ 0 ? 0.0 : M1 / M2
-        limit = min(34 - 12 * M_ratio, 40)
+        limit = min(34 + 12 * M_ratio, 40)
         return λ > limit
     else
-        # Sway: ACI §10.10.1(a)
+        # ACI 318-19 §6.2.5.1(a)
         return λ > 22
     end
 end
@@ -80,74 +106,75 @@ end
 # ==============================================================================
 
 """
-    effective_stiffness(section, mat; βdns::Real=0.6, method::Symbol=:accurate) -> Float64
+    effective_stiffness(section, mat, axis=StrongAxis(); βdns=0.6, method=:accurate) -> Float64
 
-Calculate effective flexural stiffness (EI)_eff for buckling analysis.
-Per ACI 318-11 §10.10.6.1.
+Effective flexural stiffness `(EI)_eff` per ACI 318-11 §10.10.6.1, computed in
+the plane of `axis`. For a rectangular column the gross moment of inertia and
+the steel inertia about that axis differ between strong and weak directions:
+
+* Strong (bending about x):  `Ig = b·h³/12`,  `Ise` summed about y = h/2
+* Weak   (bending about y):  `Ig = h·b³/12`,  `Ise` summed about x = b/2
 
 # Arguments
 - `section`: RC column section
 - `mat`: Material properties (fc, fy, Es)
+- `axis`: Bending axis (`StrongAxis()` default, `WeakAxis()` available)
 - `βdns`: Ratio of sustained to total factored axial load (default 0.6)
-- `method`: `:accurate` (includes steel) or `:simplified` (0.4EcIg)
-
-# Returns
-- (EI)_eff in kip-in²
+- `method`: `:accurate` (includes steel) or `:simplified` (0.4·Ec·Ig)
 
 # Methods (ACI §10.10.6.1)
-- `:accurate` (b): (EI)_eff = (0.2*Ec*Ig + Es*Ise) / (1 + βdns)
-- `:simplified` (a): (EI)_eff = 0.4*Ec*Ig / (1 + βdns)
+- `:accurate` (b):   (EI)_eff = (0.2·Ec·Ig + Es·Ise) / (1 + βdns)
+- `:simplified` (a): (EI)_eff = 0.4·Ec·Ig / (1 + βdns)
 
-Note: spColumn uses the `:accurate` method.
+spColumn uses the `:accurate` method.
 """
 function effective_stiffness(
-    section::RCColumnSection, 
-    mat;
+    section::RCColumnSection,
+    mat,
+    axis::BendingAxis = StrongAxis();
     βdns::Real = 0.6,
-    method::Symbol = :accurate
+    method::Symbol = :accurate,
 )
-    # Material properties (using unified extractors)
-    fc = fc_ksi(mat)
     Es = Es_ksi(mat)
     Ec = Ec_ksi(mat)
-    
-    # Gross moment of inertia (units: in⁴)
-    b = to_inches(section.b)
-    h = to_inches(section.h)
-    Ig = b * h^3 / 12
-    
+
+    Ig = _axis_Ig(section, axis)
+
     if method == :accurate
-        # Method (b): Accounts for reinforcement
-        # Ise = moment of inertia of reinforcement about centroid
-        Ise = _calc_Ise(section)
-        EI_eff = (0.2 * Ec * Ig + Es * Ise) / (1 + βdns)
+        # Method (b): includes the reinforcement's contribution about the axis.
+        Ise = _calc_Ise(section, axis)
+        return (0.2 * Ec * Ig + Es * Ise) / (1 + βdns)
     else
-        # Method (a): Simplified
-        EI_eff = 0.4 * Ec * Ig / (1 + βdns)
+        # Method (a): gross-only.
+        return 0.4 * Ec * Ig / (1 + βdns)
     end
-    
-    return EI_eff  # kip-in²
 end
 
 """
-    _calc_Ise(section::RCColumnSection) -> Float64
+    _calc_Ise(section::RCColumnSection, axis=StrongAxis()) -> Float64
 
-Moment of inertia of longitudinal reinforcement about the section centroid (in⁴).
-Uses the parallel-axis theorem, ignoring each bar's own moment of inertia.
+Moment of inertia of longitudinal reinforcement about the section centroid for
+the requested bending `axis` (in⁴). Parallel-axis theorem only — each bar's
+own inertia is negligible at typical bar diameters.
+
+For strong-axis bending (about x) the lever arm is `bar.y − h/2`; for weak-axis
+bending (about y) it is `bar.x − b/2`.
 """
-function _calc_Ise(section::RCColumnSection)
-    # All computations in inches
+function _calc_Ise(section::RCColumnSection, axis::BendingAxis = StrongAxis())
     h = to_inches(section.h)
-    centroid = h / 2
-    
+    b = to_inches(section.b)
+    cy, cx = h / 2, b / 2  # geometric centroid
+
     Ise = 0.0
     for bar in section.bars
-        y = to_inches(bar.y)
         As = to_sqinches(bar.As)
-        d = y - centroid  # Distance from centroid
-        Ise += As * d^2   # Parallel axis theorem (ignore bar's own I)
+        d = if axis isa StrongAxis
+            to_inches(bar.y) - cy
+        else
+            to_inches(bar.x) - cx
+        end
+        Ise += As * d^2
     end
-    
     return Ise
 end
 
@@ -156,28 +183,26 @@ end
 # ==============================================================================
 
 """
-    critical_buckling_load(section, mat, geometry; βdns::Real=0.6) -> Float64
+    critical_buckling_load(section, mat, geometry, axis=StrongAxis(); βdns=0.6) -> Float64
 
-Calculate Euler critical buckling load Pc per ACI 318-11 §10.10.6.1.
+Euler critical buckling load `Pc = π²·(EI)_eff / (k·Lu)²` per ACI 318-11
+§10.10.6.1, evaluated in the plane of `axis`. Both `(EI)_eff` and `k` are
+axis-specific (`kx`, `ky`); for a non-square rectangular column `Pc` differs
+between strong and weak axes.
 
-Pc = π² * (EI)_eff / (k*Lu)²
-
-# Returns
-- Critical load Pc (kip)
+Returns Pc in kip.
 """
 function critical_buckling_load(
     section::RCColumnSection,
     mat,
-    geometry;
-    βdns::Real = 0.6
+    geometry,
+    axis::BendingAxis = StrongAxis();
+    βdns::Real = 0.6,
 )
-    EI_eff = effective_stiffness(section, mat; βdns=βdns)
-    
+    EI_eff = effective_stiffness(section, mat, axis; βdns=βdns)
     Lu = to_inches(geometry.Lu)
-    kLu = geometry.k * Lu
-    
-    Pc = π^2 * EI_eff / kLu^2
-    return Pc  # kip
+    kLu = _axis_k(geometry, axis) * Lu
+    return π^2 * EI_eff / kLu^2  # kip
 end
 
 # ==============================================================================
@@ -213,33 +238,39 @@ end
 """
     calc_Cm(M1::Real, M2::Real; transverse_load::Bool=false) -> Float64
 
-Calculate equivalent uniform moment factor Cm.
-Per ACI 318-11 §10.10.6.4.
+Equivalent uniform moment factor `Cm` per ACI 318-19 §6.6.4.5.3
+(Eq. 6.6.4.5.3a, historically ACI 318-11 §10.10.6.4 / AISC 360-16 §C2.1b).
+
+`Cm = 0.6 − 0.4·(M1/M2)` if there are no transverse loads on the member
+between supports; otherwise `Cm = 1.0`. ACI does not impose an explicit
+floor on `Cm`, but `Cm ≥ 0.4` is the long-standing AISC/ACI convention
+adopted here to avoid spurious negatives when `M1/M2 → +1`.
 
 # Arguments
-- `M1`: Smaller factored end moment (kip-ft)
+- `M1`: Smaller factored end moment (kip-ft, |M1| ≤ |M2|)
 - `M2`: Larger factored end moment (kip-ft)
-- `transverse_load`: True if transverse loads exist between supports
+- `transverse_load`: True if transverse loads act between supports
+
+# Sign convention (ACI 318-19 / AISC 360-16)
+`M1/M2 > 0` ⇔ **double** curvature (best case → low Cm),
+`M1/M2 < 0` ⇔ **single** curvature (worst case → high Cm).
 
 # Returns
-- Cm factor
-
-# Notes
-- M1/M2 is positive for single curvature, negative for double curvature
-- Cm = 1.0 for transverse loads
+- `Cm` factor (dimensionless)
 """
 function calc_Cm(M1::Real, M2::Real; transverse_load::Bool = false)
     if transverse_load
         return 1.0
     end
-    
+
     if abs(M2) < 1e-6
-        return 1.0  # Avoid division by zero
+        return 1.0
     end
-    
+
+    # ACI 318-19 Eq. (6.6.4.5.3a). Sign convention: M1/M2 > 0 = double curvature.
     M_ratio = M1 / M2
     Cm = 0.6 - 0.4 * M_ratio
-    return max(Cm, 0.4)  # ACI minimum
+    return max(Cm, 0.4)
 end
 
 """
@@ -263,32 +294,39 @@ function minimum_moment(Pu::Real, h::Real)
 end
 
 """
-    magnify_moment_nonsway(section, mat, geometry, Pu, M1, M2; 
+    magnify_moment_nonsway(section, mat, geometry, Pu, M1, M2, axis=StrongAxis();
                            βdns=0.6, transverse_load=false) -> NamedTuple
 
-Calculate magnified design moment for non-sway frame column.
-Per ACI 318-11 §10.10.6.
+Magnified design moment for a non-sway-frame column per ACI 318-11 §10.10.6,
+evaluated in the plane of `axis`. For non-square rectangular columns the
+weak-axis path uses the column's `b` (not `h`), `Ig = h·b³/12`, and `ky` from
+the geometry, so a column non-slender about its strong axis can still amplify
+about its weak axis.
 
 # Arguments
 - `section`: RC column section
 - `mat`: Material properties
-- `geometry`: Column geometry (Lu, k, braced=true)
+- `geometry`: Column geometry (`Lu`, `kx`, `ky`, `braced=true`)
 - `Pu`: Factored axial load (kip)
-- `M1`: Smaller factored end moment (kip-ft)
+- `M1`: Smaller factored end moment (kip-ft; |M1| ≤ |M2|). ACI 318-19 sign
+  convention: `M1/M2 > 0` ⇔ **double** curvature, `M1/M2 < 0` ⇔ single
+  curvature.
 - `M2`: Larger factored end moment (kip-ft)
+- `axis`: Bending axis to evaluate (`StrongAxis()` default, `WeakAxis()` available)
 - `βdns`: Sustained load ratio (default 0.6)
-- `transverse_load`: Whether transverse loads exist
+- `transverse_load`: Whether transverse loads act between supports
+  (ACI 318-19 §6.6.4.5.3 forces `Cm = 1.0`)
 
 # Returns
 NamedTuple with:
-- `Mc`: Magnified design moment (kip-ft)
-- `δns`: Magnification factor
-- `Cm`: Equivalent uniform moment factor
-- `Pc`: Critical buckling load (kip)
-- `slender`: Whether slenderness was considered
+- `Mc`:      magnified design moment (kip-ft)
+- `δns`:     non-sway magnification factor
+- `Cm`:      equivalent uniform moment factor
+- `Pc`:      critical buckling load (kip)
+- `slender`: whether slenderness governed
 
 # Reference
-StructurePoint: "Slender Column Design in Non-Sway Frame"
+StructurePoint: "Slender Column Design in Non-Sway Frame".
 """
 function magnify_moment_nonsway(
     section::RCColumnSection,
@@ -296,34 +334,32 @@ function magnify_moment_nonsway(
     geometry,
     Pu::Real,
     M1::Real,
-    M2::Real;
+    M2::Real,
+    axis::BendingAxis = StrongAxis();
     βdns::Real = 0.6,
-    transverse_load::Bool = false
+    transverse_load::Bool = false,
 )
-    # Check if slenderness should be considered
-    slender = should_consider_slenderness(section, geometry; M1=M1, M2=M2)
-    h = to_inches(section.h)  # inches for ACI formula
-    
+    slender = should_consider_slenderness(section, geometry, axis; M1=M1, M2=M2)
+
+    # M_min applies only inside the slenderness procedure per ACI 318-19
+    # §6.6.4.5.4 (historically ACI 318-11 §10.10.6.5). When the slenderness
+    # check does not trigger amplification we return |M2| unmodified — the
+    # eccentricity floor is *not* a generic minimum on column moments, only a
+    # check against the magnified moment when slenderness governs.
     if !slender
-        # No magnification needed
-        M_min = minimum_moment(Pu, h)
-        Mc = max(abs(M2), M_min)
-        return (Mc=Mc, δns=1.0, Cm=1.0, Pc=Inf, slender=false)
+        return (Mc=abs(M2), δns=1.0, Cm=1.0, Pc=Inf, slender=false)
     end
-    
-    # Calculate critical load
-    Pc = critical_buckling_load(section, mat, geometry; βdns=βdns)
-    
-    # Calculate Cm
-    Cm = calc_Cm(M1, M2; transverse_load=transverse_load)
-    
-    # Calculate magnification factor
+
+    h_axis = _axis_dim(section, axis)
+    Pc  = critical_buckling_load(section, mat, geometry, axis; βdns=βdns)
+    Cm  = calc_Cm(M1, M2; transverse_load=transverse_load)
     δns = magnification_factor_nonsway(Pu, Pc; Cm=Cm)
-    
-    # Magnified moment
-    M_min = minimum_moment(Pu, h)
+
+    # ACI 318-19 §6.6.4.5.4 — minimum eccentricity check (M_min = Pu·(15+0.03·h) mm
+    # in SI; here Pu·(0.6+0.03·h)/12 in kip·ft for h in inches).
+    M_min = minimum_moment(Pu, h_axis)
     Mc = max(δns * abs(M2), M_min)
-    
+
     return (Mc=Mc, δns=δns, Cm=Cm, Pc=Pc, slender=true)
 end
 
@@ -547,14 +583,17 @@ Per ACI 318-11 §10.10.6.1.
 function critical_buckling_load_sway(
     section::RCColumnSection,
     mat,
-    geometry;
-    βds::Real = 0.0
+    geometry,
+    axis::BendingAxis = StrongAxis();
+    βds::Real = 0.0,
 )
     EI_eff = effective_stiffness_sway(section, mat; βds=βds)
-    
+
     Lu = to_inches(geometry.Lu)
-    kLu = geometry.k * Lu
-    
+    # ACI 318-11 §10.10.7: sway k is taken in the plane of sidesway, so per-axis
+    # k_x / k_y matters here just as it does for the non-sway path.
+    kLu = _axis_k(geometry, axis) * Lu
+
     return π^2 * EI_eff / kLu^2  # kip
 end
 
@@ -679,37 +718,42 @@ function magnify_moment_sway_complete(
     Lu = to_inches(geometry.Lu)
     λ = k_nonsway * Lu / r
     
-    # Check if along-length magnification is needed
+    # Check if along-length magnification is needed (ACI 318-19 §6.2.5.1).
+    # Sign convention: M1/M2 > 0 ⇔ double curvature (best case → larger limit).
     M_ratio = M2 ≈ 0 ? 0.0 : M1 / M2
-    limit = min(34 - 12 * M_ratio, 40)
-    
+    limit = min(34 + 12 * M_ratio, 40)
+
     length_magnified = false
     δns = 1.0
     Mc = max(abs(M1), abs(M2))
-    
+
     if λ > limit
         # Need to magnify for P-δ effects along length
-        # Use non-sway procedure per ACI §10.10.6
-        
-        # Create temporary geometry for non-sway check
-        geometry_nonsway = (Lu = geometry.Lu, k = k_nonsway, braced = true)
-        
-        # Calculate Pc for non-sway
+        # Use non-sway procedure per ACI 318-19 §6.6.4.5 (historically §10.10.6).
+
+        # Synthetic geometry for the along-length check. Needs `kx`/`ky` because
+        # the new `critical_buckling_load` signature reads `geometry.kx` /
+        # `geometry.ky` via `_axis_k`. Both default to `k_nonsway = 1.0` since
+        # this is the post-sway P-δ check inside the column length.
+        geometry_nonsway = (Lu = geometry.Lu,
+                            kx = k_nonsway, ky = k_nonsway,
+                            braced = true)
+
+        # Calculate Pc for non-sway (strong-axis: this sway path is
+        # rectangular-section bending in the plane of sway, which by
+        # convention is the strong axis here).
         Pc = critical_buckling_load(section, mat, geometry_nonsway; βdns=βdns)
-        
-        # Calculate Cm using magnified moments
-        Cm = calc_Cm(M1, M2; transverse_load=transverse_load)
-        
-        # Calculate δns
+
+        Cm  = calc_Cm(M1, M2; transverse_load=transverse_load)
         δns = magnification_factor_nonsway(Pu, Pc; Cm=Cm)
-        
+
         # Final design moment (ACI §10.10.7)
         M_min = minimum_moment(Pu, h)
         Mc = max(δns * max(abs(M1), abs(M2)), M_min)
-        
+
         length_magnified = δns > 1.0
     end
-    
+
     return (
         M1 = M1,
         M2 = M2,
@@ -757,21 +801,24 @@ function effective_stiffness_sway(
 end
 
 """
-    critical_buckling_load_sway(section::RCCircularSection, mat, geometry; βds=0.0)
+    critical_buckling_load_sway(section::RCCircularSection, mat, geometry, axis=StrongAxis(); βds=0.0)
 
-Calculate critical buckling load for circular columns in sway frames.
+Critical buckling load for circular columns in sway frames. The geometric
+properties (D, Ig, Ise) are axisymmetric, but `k` may differ between axes
+(e.g., one-way bracing), so this still dispatches on the requested axis.
 """
 function critical_buckling_load_sway(
     section::RCCircularSection,
     mat,
-    geometry;
-    βds::Real = 0.0
+    geometry,
+    axis::BendingAxis = StrongAxis();
+    βds::Real = 0.0,
 )
     EI_eff = effective_stiffness_sway(section, mat; βds=βds)
-    
+
     Lu = to_inches(geometry.Lu)
-    kLu = geometry.k * Lu
-    
+    kLu = _axis_k(geometry, axis) * Lu
+
     return π^2 * EI_eff / kLu^2  # kip
 end
 
@@ -828,19 +875,25 @@ function magnify_moment_sway_complete(
     k_nonsway = 1.0
     Lu = to_inches(geometry.Lu)
     λ = k_nonsway * Lu / r
+    # ACI 318-19 §6.2.5.1 — M1/M2 > 0 ⇔ double curvature.
     M_ratio = M2 ≈ 0 ? 0.0 : M1 / M2
-    limit = min(34 - 12 * M_ratio, 40)
+    limit = min(34 + 12 * M_ratio, 40)
     
     length_magnified = false
     δns = 1.0
     Mc = max(abs(M1), abs(M2))
     
     if λ > limit
-        geometry_nonsway = (Lu = geometry.Lu, k = k_nonsway, braced = true)
+        # `critical_buckling_load(::RCCircularSection, ...)` reads
+        # `geometry.kx` / `geometry.ky` via `_axis_k`. Both default to
+        # `k_nonsway = 1.0` for the post-sway P-δ check inside the column.
+        geometry_nonsway = (Lu = geometry.Lu,
+                            kx = k_nonsway, ky = k_nonsway,
+                            braced = true)
         Pc = critical_buckling_load(section, mat, geometry_nonsway; βdns=βdns)
         Cm = calc_Cm(M1, M2; transverse_load=transverse_load)
         δns = magnification_factor_nonsway(Pu, Pc; Cm=Cm)
-        
+
         M_min = minimum_moment(Pu, D)
         Mc = max(δns * max(abs(M1), abs(M2)), M_min)
         length_magnified = δns > 1.0
@@ -864,37 +917,38 @@ end
 # ==============================================================================
 
 """
-    slenderness_ratio(section::RCCircularSection, geometry) -> Float64
+    slenderness_ratio(section::RCCircularSection, geometry, axis=StrongAxis()) -> Float64
 
-Calculate slenderness ratio kLu/r for circular sections.
-Per ACI 318-11 §10.10.1.2: r = 0.25D for circular sections.
+Slenderness ratio `k·Lu/r` for circular sections per ACI 318-11 §10.10.1.2,
+where `r = 0.25·D`. The radius of gyration is axisymmetric; only `k` is
+axis-specific (one-way bracing → `kx ≠ ky`).
 """
-function slenderness_ratio(section::RCCircularSection, geometry)
-    # ACI convention: all internal calculations in inches
-    # r = 0.25D for circular sections (ACI §10.10.1.2)
+function slenderness_ratio(section::RCCircularSection, geometry,
+                           axis::BendingAxis = StrongAxis())
     D = to_inches(section.D)
-    r = 0.25 * D
-    
+    r = 0.25 * D  # ACI §10.10.1.2
     Lu = to_inches(geometry.Lu)
-    return geometry.k * Lu / r
+    return _axis_k(geometry, axis) * Lu / r
 end
 
 """
-    should_consider_slenderness(section::RCCircularSection, geometry; M1, M2) -> Bool
+    should_consider_slenderness(section::RCCircularSection, geometry, axis=StrongAxis(); M1, M2) -> Bool
 
-Check slenderness for circular columns.
+Check slenderness for circular columns about the requested `axis`.
 """
 function should_consider_slenderness(
-    section::RCCircularSection, 
-    geometry;
+    section::RCCircularSection,
+    geometry,
+    axis::BendingAxis = StrongAxis();
     M1::Real = 0.0,
-    M2::Real = 1.0
+    M2::Real = 1.0,
 )
-    λ = slenderness_ratio(section, geometry)
-    
+    λ = slenderness_ratio(section, geometry, axis)
+
     if geometry.braced
+        # ACI 318-19 §6.2.5.1(b). Sign convention: M1/M2 > 0 = double curvature.
         M_ratio = M2 ≈ 0 ? 0.0 : M1 / M2
-        limit = min(34 - 12 * M_ratio, 40)
+        limit = min(34 + 12 * M_ratio, 40)
         return λ > limit
     else
         return λ > 22
@@ -902,82 +956,85 @@ function should_consider_slenderness(
 end
 
 """
-    effective_stiffness(section::RCCircularSection, mat; βdns=0.6, method=:accurate) -> Float64
+    effective_stiffness(section::RCCircularSection, mat, axis=StrongAxis(); βdns=0.6, method=:accurate) -> Float64
 
-Calculate effective flexural stiffness for circular columns.
-Ig = πD⁴/64 for circular sections.
+Effective flexural stiffness for a circular section. `Ig = π·D⁴/64` and `Ise`
+are axisymmetric (independent of `axis`); the argument is accepted to keep the
+dispatch shape identical to the rectangular path.
 """
 function effective_stiffness(
-    section::RCCircularSection, 
-    mat;
+    section::RCCircularSection,
+    mat,
+    ::BendingAxis = StrongAxis();
     βdns::Real = 0.6,
-    method::Symbol = :accurate
+    method::Symbol = :accurate,
 )
-    # Material properties (using unified extractors)
-    fc = fc_ksi(mat)
     Es = Es_ksi(mat)
     Ec = Ec_ksi(mat)
-    
+
     # Gross moment of inertia for circular: Ig = πD⁴/64
     D = to_inches(section.D)
     Ig = π * D^4 / 64  # in⁴
-    
+
     if method == :accurate
-        Ise = _calc_Ise(section)
-        EI_eff = (0.2 * Ec * Ig + Es * Ise) / (1 + βdns)
+        Ise = _calc_Ise(section)  # axisymmetric — no axis arg needed
+        return (0.2 * Ec * Ig + Es * Ise) / (1 + βdns)
     else
-        EI_eff = 0.4 * Ec * Ig / (1 + βdns)
+        return 0.4 * Ec * Ig / (1 + βdns)
     end
-    
-    return EI_eff  # kip-in²
 end
 
 """
     _calc_Ise(section::RCCircularSection) -> Float64
 
-Moment of inertia of longitudinal reinforcement about the circular section centroid (in⁴).
-Uses the parallel-axis theorem, ignoring each bar's own moment of inertia.
+Moment of inertia of longitudinal reinforcement about the section centroid
+(in⁴). Axisymmetric — same value for strong- and weak-axis bending.
 """
 function _calc_Ise(section::RCCircularSection)
-    # All computations in inches
     D = to_inches(section.D)
-    centroid = D / 2  # Center of circle
-    
+    centroid = D / 2
+
     Ise = 0.0
     for bar in section.bars
-        y_bar = to_inches(bar.y)
+        y_bar  = to_inches(bar.y)
         As_bar = to_sqinches(bar.As)
         d = y_bar - centroid
         Ise += As_bar * d^2
     end
-    
-    return Ise  # in⁴
+    return Ise
 end
 
-"""
-    critical_buckling_load(section::RCCircularSection, mat, geometry; βdns=0.6) -> Float64
+# Trailing-axis form mirrors the rectangular API; circular Ise is axisymmetric
+# so the axis tag is ignored here.
+_calc_Ise(section::RCCircularSection, ::BendingAxis) = _calc_Ise(section)
 
-Calculate critical buckling load for circular columns.
+"""
+    critical_buckling_load(section::RCCircularSection, mat, geometry, axis=StrongAxis(); βdns=0.6) -> Float64
+
+Critical buckling load for a circular column. Geometry is axisymmetric, so the
+only per-axis quantity is `k` (`kx` vs `ky`).
 """
 function critical_buckling_load(
     section::RCCircularSection,
     mat,
-    geometry;
-    βdns::Real = 0.6
+    geometry,
+    axis::BendingAxis = StrongAxis();
+    βdns::Real = 0.6,
 )
-    EI_eff = effective_stiffness(section, mat; βdns=βdns)
-    
+    EI_eff = effective_stiffness(section, mat, axis; βdns=βdns)
     Lu = to_inches(geometry.Lu)
-    kLu = geometry.k * Lu
-    
+    kLu = _axis_k(geometry, axis) * Lu
     return π^2 * EI_eff / kLu^2  # kip
 end
 
 """
-    magnify_moment_nonsway(section::RCCircularSection, mat, geometry, Pu, M1, M2; 
+    magnify_moment_nonsway(section::RCCircularSection, mat, geometry, Pu, M1, M2, axis=StrongAxis();
                            βdns=0.6, transverse_load=false) -> NamedTuple
 
-Calculate magnified design moment for circular column in non-sway frame.
+Magnified design moment for a non-sway-frame circular column per ACI 318-11
+§10.10.6, evaluated about `axis`. Geometric properties are axisymmetric; the
+axis argument is honoured by `_axis_k(geometry, axis)` so columns with
+direction-specific bracing still see the right `kx`/`ky`.
 """
 function magnify_moment_nonsway(
     section::RCCircularSection,
@@ -985,27 +1042,27 @@ function magnify_moment_nonsway(
     geometry,
     Pu::Real,
     M1::Real,
-    M2::Real;
+    M2::Real,
+    axis::BendingAxis = StrongAxis();
     βdns::Real = 0.6,
-    transverse_load::Bool = false
+    transverse_load::Bool = false,
 )
-    slender = should_consider_slenderness(section, geometry; M1=M1, M2=M2)
-    
-    # Use diameter (inches) for minimum moment calculation
-    D = to_inches(section.D)
-    
+    slender = should_consider_slenderness(section, geometry, axis; M1=M1, M2=M2)
+
+    # ACI 318-19 §6.6.4.5.4 — M_min only applies inside the slenderness
+    # procedure. Non-slender circular columns return |M2| unmodified.
     if !slender
-        M_min = minimum_moment(Pu, D)
-        Mc = max(abs(M2), M_min)
-        return (Mc=Mc, δns=1.0, Cm=1.0, Pc=Inf, slender=false)
+        return (Mc=abs(M2), δns=1.0, Cm=1.0, Pc=Inf, slender=false)
     end
-    
-    Pc = critical_buckling_load(section, mat, geometry; βdns=βdns)
-    Cm = calc_Cm(M1, M2; transverse_load=transverse_load)
+
+    D = to_inches(section.D)
+    Pc  = critical_buckling_load(section, mat, geometry, axis; βdns=βdns)
+    Cm  = calc_Cm(M1, M2; transverse_load=transverse_load)
     δns = magnification_factor_nonsway(Pu, Pc; Cm=Cm)
-    
+
+    # ACI 318-19 §6.6.4.5.4 minimum-eccentricity check on the magnified moment.
     M_min = minimum_moment(Pu, D)
     Mc = max(δns * abs(M2), M_min)
-    
+
     return (Mc=Mc, δns=δns, Cm=Cm, Pc=Pc, slender=true)
 end

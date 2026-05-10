@@ -171,6 +171,16 @@ end
 # Concrete Implementation
 # ==============================================================================
 
+"""
+    size_columns(Pu, Mux, geometries, opts::ConcreteColumnOptions; Muy=...) -> NamedTuple
+
+Positional adapter retained for back-compat. Synthesises `RCColumnDemand`s from
+the envelope vectors (using `M1=0`, `transverse_load=false` as conservative
+stand-ins) and forwards to the demand-driven overload below. Callers that
+already have signed end moments (e.g. extracted from FEA in
+`StructuralSynthesizer`) should pass demands directly via the second overload
+to avoid this lossy step.
+"""
 function size_columns(
     Pu::Vector,
     Mux::Vector,
@@ -182,22 +192,63 @@ function size_columns(
     cache::Union{Nothing, AbstractCapacityCache} = nothing,
     tc::Union{Nothing, TraceCollector} = nothing,
 )
-    # ─── NLP path ───
-    if opts.sizing_strategy == :nlp
-        emit!(tc, :sizing, "size_columns", "", :enter;
-              material="concrete",
-              n_members=length(Pu),
-              options_type=string(typeof(opts)),
-              sizing_strategy=string(opts.sizing_strategy),
-              path="nlp")
-        return _size_columns_nlp(Pu, Mux, geometries, opts; Muy=Muy)
-    end
-
-    # ─── MIP catalog path ───
     n = length(Pu)
     n == length(Mux) || throw(ArgumentError("Pu and Mux must have same length"))
     n == length(geometries) || throw(ArgumentError("demands and geometries must have same length"))
 
+    Pu_kip    = [to_kip(p)    for p in Pu]
+    Mux_kipft = [to_kipft(m)  for m in Mux]
+    Muy_kipft = [to_kipft(m)  for m in Muy]
+
+    demands = [RCColumnDemand(i;
+                   Pu  = Pu_kip[i],
+                   Mux = Mux_kipft[i],
+                   Muy = Muy_kipft[i],
+                   βdns = opts.βdns) for i in 1:n]
+
+    return size_columns(demands, geometries, opts;
+                        mip_gap=mip_gap, output_flag=output_flag,
+                        cache=cache, tc=tc)
+end
+
+"""
+    size_columns(demands::Vector{<:RCColumnDemand}, geometries, opts::ConcreteColumnOptions; ...) -> NamedTuple
+
+Demand-driven concrete column sizing. Preserves end moments
+(`M1x/M2x/M1y/M2y`) and the `transverse_load` flag from the demand so the
+slenderness path computes `Cm` per ACI 318-19 §6.6.4.5.3 instead of the
+conservative `M1 = 0` stand-in.
+
+Routes to the NLP path when `opts.sizing_strategy == :nlp`; otherwise runs the
+discrete MIP catalog optimisation.
+"""
+function size_columns(
+    demands::Vector{<:RCColumnDemand},
+    geometries::Vector,
+    opts::ConcreteColumnOptions;
+    mip_gap::Real = 1e-4,
+    output_flag::Integer = 0,
+    cache::Union{Nothing, AbstractCapacityCache} = nothing,
+    tc::Union{Nothing, TraceCollector} = nothing,
+)
+    n = length(demands)
+    n == length(geometries) || throw(ArgumentError("demands and geometries must have same length"))
+
+    # ─── NLP path ───
+    if opts.sizing_strategy == :nlp
+        emit!(tc, :sizing, "size_columns", "", :enter;
+              material="concrete",
+              n_members=n,
+              options_type=string(typeof(opts)),
+              sizing_strategy=string(opts.sizing_strategy),
+              path="nlp")
+        Pu_v  = [d.Pu  for d in demands]
+        Mux_v = [d.Mux for d in demands]
+        Muy_v = [d.Muy for d in demands]
+        return _size_columns_nlp(Pu_v, Mux_v, geometries, opts; Muy=Muy_v)
+    end
+
+    # ─── MIP catalog path ───
     emit!(tc, :sizing, "size_columns", "", :enter;
           material="concrete",
           n_members=n,
@@ -207,24 +258,13 @@ function size_columns(
           include_slenderness=opts.include_slenderness,
           include_biaxial=opts.include_biaxial,
           section_shape=string(opts.section_shape))
-    
-    # Convert geometries if needed
+
     conc_geoms = [to_concrete_geometry(g) for g in geometries]
-    
-    # Build catalog (with section_shape dispatch)
-    cat = isnothing(opts.custom_catalog) ? 
-        rc_column_catalog(opts.section_shape, opts.catalog) : 
+
+    cat = isnothing(opts.custom_catalog) ?
+        rc_column_catalog(opts.section_shape, opts.catalog) :
         opts.custom_catalog
-    
-    # Convert forces/moments to ACI units (kip, kip·ft) - handles any Unitful input
-    Pu_kip = [to_kip(p) for p in Pu]
-    Mux_kipft = [to_kipft(m) for m in Mux]
-    Muy_kipft = [to_kipft(m) for m in Muy]
-    
-    # Build demands (ACI units)
-    demands = [RCColumnDemand(i; Pu=Pu_kip[i], Mux=Mux_kipft[i], Muy=Muy_kipft[i], βdns=opts.βdns) for i in 1:n]
-    
-    # Create checker (rebar properties from user's material)
+
     checker = ACIColumnChecker(;
         include_slenderness = opts.include_slenderness,
         include_biaxial = opts.include_biaxial,
@@ -232,8 +272,7 @@ function size_columns(
         Es_ksi = ustrip(ksi, opts.rebar_material.E),
         max_depth = opts.max_depth,
     )
-    
-    # Optimize — multi-material if grades vector is provided
+
     if !isnothing(opts.materials)
         result = optimize_discrete(
             checker, demands, conc_geoms, cat, opts.materials;
@@ -365,20 +404,23 @@ end
 """
     to_steel_geometry(geom) -> SteelMemberGeometry
 
-Convert any geometry to steel geometry.
+Convert any geometry to steel geometry. Concrete geometry now carries per-axis
+`kx`/`ky`, which map directly onto `SteelMemberGeometry`'s `Kx`/`Ky`.
 """
 function to_steel_geometry(geom::ConcreteMemberGeometry)
-    SteelMemberGeometry(geom.L; Lb=geom.Lu, Kx=geom.k, Ky=geom.k)
+    SteelMemberGeometry(geom.L; Lb=geom.Lu, Kx=geom.kx, Ky=geom.ky)
 end
 to_steel_geometry(geom::SteelMemberGeometry) = geom
 
 """
     to_concrete_geometry(geom) -> ConcreteMemberGeometry
 
-Convert any geometry to concrete geometry.
+Convert any geometry to concrete geometry, preserving per-axis effective length
+factors (`Kx → kx`, `Ky → ky`). The previous version collapsed both axes onto
+`Ky`, which silently discarded strong-axis bracing information.
 """
 function to_concrete_geometry(geom::SteelMemberGeometry)
-    ConcreteMemberGeometry(geom.L; Lu=geom.Lb, k=geom.Ky)
+    ConcreteMemberGeometry(geom.L; Lu=geom.Lb, kx=geom.Kx, ky=geom.Ky)
 end
 to_concrete_geometry(geom::ConcreteMemberGeometry) = geom
 
@@ -404,20 +446,34 @@ end
 """
     to_steel_demands(demands) -> Vector{MemberDemand}
 
-Convert RC demands to steel demands.
+Convert RC demands to steel demands. Preserves end moments (M1x, M2x, M1y, M2y)
+and the `transverse_load` flag so the AISC B1 amplification path sees the
+same Cm context as the ACI slenderness path.
 """
 function to_steel_demands(demands::Vector{<:RCColumnDemand})
-    [MemberDemand(d.member_idx; Pu_c=d.Pu, Mux=d.Mux, Muy=d.Muy) for d in demands]
+    [MemberDemand(d.member_idx;
+                  Pu_c=d.Pu, Mux=d.Mux, Muy=d.Muy,
+                  M1x=d.M1x, M2x=d.M2x, M1y=d.M1y, M2y=d.M2y,
+                  transverse_load=d.transverse_load)
+     for d in demands]
 end
 to_steel_demands(demands::Vector{<:MemberDemand}) = demands
 
 """
     to_rc_demands(demands; βdns=0.6) -> Vector{RCColumnDemand}
 
-Convert steel demands to RC demands.
+Convert steel/general member demands to RC column demands. Forwards end
+moments (`M1x/M2x/M1y/M2y`) and the `transverse_load` flag so the ACI
+slenderness path can compute `Cm = 0.6 − 0.4·(M1/M2)` per ACI 318-19
+§6.6.4.5.3 instead of falling back on the conservative `M1=0` stand-in.
 """
 function to_rc_demands(demands::Vector{<:MemberDemand}; βdns=0.6)
-    [RCColumnDemand(d.member_idx; Pu=d.Pu_c, Mux=d.Mux, Muy=d.Muy, βdns=βdns) for d in demands]
+    [RCColumnDemand(d.member_idx;
+                    Pu=d.Pu_c, Mux=d.Mux, Muy=d.Muy,
+                    M1x=d.M1x, M2x=d.M2x, M1y=d.M1y, M2y=d.M2y,
+                    βdns=βdns,
+                    transverse_load=d.transverse_load)
+     for d in demands]
 end
 to_rc_demands(demands::Vector{<:RCColumnDemand}; βdns=nothing) = demands
 

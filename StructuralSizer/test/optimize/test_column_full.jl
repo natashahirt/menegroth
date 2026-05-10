@@ -190,24 +190,25 @@ const MOI = JuMP.MOI
     
     # =========================================================================
     @testset "Geometry Conversions" begin
-        # Steel to concrete (geometry fields are now Unitful)
+        # Steel → concrete preserves per-axis k (Kx → kx, Ky → ky).
         steel_geom = SteelMemberGeometry(5.0; Lb=2.5, Kx=1.0, Ky=0.8)
         conc_geom = to_concrete_geometry(steel_geom)
-        
+
         @test conc_geom isa ConcreteMemberGeometry
         @test ustrip(u"m", conc_geom.L) ≈ 5.0
         @test ustrip(u"m", conc_geom.Lu) ≈ 2.5
-        @test conc_geom.k == 0.8
-        
-        # Concrete to steel
-        conc_geom2 = ConcreteMemberGeometry(4.0; Lu=4.0, k=1.2)
+        @test conc_geom.kx == 1.0
+        @test conc_geom.ky == 0.8
+
+        # Concrete → steel preserves per-axis k (kx → Kx, ky → Ky).
+        conc_geom2 = ConcreteMemberGeometry(4.0; Lu=4.0, kx=1.2, ky=0.9)
         steel_geom2 = to_steel_geometry(conc_geom2)
-        
+
         @test steel_geom2 isa SteelMemberGeometry
         @test ustrip(u"m", steel_geom2.L) ≈ 4.0
         @test ustrip(u"m", steel_geom2.Lb) ≈ 4.0
         @test steel_geom2.Kx == 1.2
-        @test steel_geom2.Ky == 1.2
+        @test steel_geom2.Ky == 0.9
         
         # Batch conversion
         geoms = [ConcreteMemberGeometry(3.0), ConcreteMemberGeometry(4.0)]

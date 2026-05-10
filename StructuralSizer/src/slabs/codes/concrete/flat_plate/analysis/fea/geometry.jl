@@ -92,6 +92,125 @@ _col_asap_sec(col, Ec, ν; I_factor=0.70) =
     column_asap_section(col.c1, col.c2, col_shape(col), Ec, ν; I_factor=I_factor)
 
 # =============================================================================
+# Edge-Beam Section (FEA perimeter line elements)
+# =============================================================================
+
+"""
+    _edge_beam_dims(βt, h, c1_avg, l2) -> (b, h_eb)
+
+Back-solve a rectangular edge-beam cross-section `(b, h_eb)` (width × depth)
+that produces the user-specified torsional stiffness ratio `βt` per
+ACI 318-11 §13.6.4.2:
+
+    β_t = E_cb · C / (2 · E_cs · I_s)            ACI 318-11 Eq. (13-5)
+    C   = (1 − 0.63 · x/y) · x³ · y / 3          ACI 318-11 Eq. (13-6),
+                                                 with x = min(b, h_eb), y = max(b, h_eb)
+    I_s = l2 · h³ / 12                           ACI 318-11 §13.6.4.2
+
+Assumes E_cb = E_cs (monolithic construction, ACI 318-11 §13.7.5.1(b)).
+
+The system has two unknowns (b, h_eb) and one equation.  We fix `b = c1_avg`
+(the column dimension parallel to the edge — PCA Notes on ACI 318-11 §R13.7.5
+torsional-member width when no transverse beam is present) and solve for `h_eb`.
+
+For the typical case `h_eb ≥ b` (a deeper-than-wide edge beam below the slab),
+the equation is linear in h_eb after expansion:
+
+    h_eb · b³ − 0.63 · b⁴ = 3 · C_target   ⇒
+    h_eb = (3 · C_target + 0.63 · b⁴) / b³,   where C_target = 2 · βt · I_s.
+
+For low βt the trial h_eb falls below b (squat beam, h_eb < b → x = h_eb,
+y = b); we then bisect Eq. (13-6) on (0, b) to recover a valid h_eb.
+
+ENGINEERING JUDGMENT: the choice `b = c1_avg` is a default; users can override
+via `edge_beam_βt` directly (the dimensions are then back-solved from the
+requested βt).  This default mirrors PCA EB712 §R13.7.5 commentary.
+
+# Reference
+- ACI 318-11 §13.6.4.2 Eq. (13-5), Eq. (13-6) (page 250)
+- ACI 318-11 §13.7.5 (torsional members, page 256)
+"""
+function _edge_beam_dims(βt::Float64, h::Length, c1_avg::Length, l2::Length)
+    βt > 0 || error("_edge_beam_dims: βt must be > 0 (got $βt)")
+
+    h_m  = ustrip(u"m", h)
+    b_m  = ustrip(u"m", c1_avg)
+    l2_m = ustrip(u"m", l2)
+
+    Is_m4       = l2_m * h_m^3 / 12               # ACI Eq. (13-5) denominator
+    C_target_m4 = 2 * βt * Is_m4                  # invert Eq. (13-5)
+
+    # Trial assuming h_eb ≥ b (slender edge beam, x=b, y=h_eb)
+    h_eb_trial = (3 * C_target_m4 + 0.63 * b_m^4) / b_m^3
+
+    if h_eb_trial >= b_m
+        return (uconvert(u"m", c1_avg), h_eb_trial * u"m")
+    end
+
+    # Squat beam (h_eb < b): bisect Eq. (13-6) with x=h_eb, y=b
+    f(x) = (1 - 0.63 * x / b_m) * x^3 * b_m / 3 - C_target_m4
+    lo, hi = 1e-9, b_m
+    for _ in 1:100
+        mid = (lo + hi) / 2
+        if f(mid) > 0
+            hi = mid
+        else
+            lo = mid
+        end
+    end
+    return (uconvert(u"m", c1_avg), ((lo + hi) / 2) * u"m")
+end
+
+"""
+    _edge_beam_asap_sec(βt, h, c1_avg, l2, Ecs, ν) -> Asap.Section
+
+Build an `Asap.Section` for the perimeter edge-beam frame elements.
+
+Cross-section is rectangular `b × h_eb` with dimensions back-solved from
+`βt` via [`_edge_beam_dims`](@ref).  Section properties use the gross
+rectangular section (no cracking reduction) — flat-plate edge beams are
+governed by serviceability and torsional stiffness rather than ultimate
+capacity, and ACI 318-11 §13.7 stiffness conventions use gross properties.
+
+Generalizes to non-rectangular slab layouts: a single cross-section is
+applied uniformly along every consecutive boundary-vertex pair returned
+by `_get_slab_face_boundary`.  Frame-element local axes are derived from
+endpoint geometry, so slanted, kinked, or polygonal boundaries are
+handled automatically.
+
+# Reference
+- ACI 318-11 §13.6.4.2 Eq. (13-6) for J (= C of Eq. 13-6)
+- ACI 318-11 §13.7.5.1 / §13.2.4 (effective beam section)
+"""
+function _edge_beam_asap_sec(
+    βt::Float64, h::Length, c1_avg::Length, l2::Length,
+    Ecs::Pressure, ν::Float64,
+)
+    b, h_eb = _edge_beam_dims(βt, h, c1_avg, l2)
+    G = Ecs / (2 * (1 + ν))
+
+    # Rectangular b × h_eb beam — gross section (matches column convention
+    # in `column_asap_section`: A=c1*c2, Ix=c1*c2³/12, Iy=c2*c1³/12).
+    A  = b * h_eb
+    Ix = b * h_eb^3 / 12
+    Iy = h_eb * b^3 / 12
+
+    # Torsional constant — ACI 318-11 §13.6.4.2 Eq. (13-6), reproduced verbatim
+    # via `torsional_constant_C(x, y)`.  By construction this matches the user's
+    # requested βt because `_edge_beam_dims` solved the inverse problem.
+    J = torsional_constant_C(min(b, h_eb), max(b, h_eb))
+
+    return Asap.Section(
+        uconvert(u"m^2", A),
+        uconvert(u"Pa", Ecs),
+        uconvert(u"Pa", G),
+        uconvert(u"m^4", Ix),
+        uconvert(u"m^4", Iy),
+        uconvert(u"m^4", J),
+    )
+end
+
+# =============================================================================
 # Skeleton Vertex → (x, y) Cache
 # =============================================================================
 

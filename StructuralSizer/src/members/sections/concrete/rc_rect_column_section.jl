@@ -290,63 +290,51 @@ function _generate_bar_positions(
         end
         
     elseif arrangement == :perimeter
-        # Distribute bars around perimeter
-        if n_bars == 8
-            # Standard 8-bar: 3 per face (corners shared)
-            # Bottom: 2 corners + 1 middle
-            push!(bars, RebarLocation(x_left, y_bot, As_f))
-            push!(bars, RebarLocation((x_left + x_right) / 2, y_bot, As_f))
-            push!(bars, RebarLocation(x_right, y_bot, As_f))
-            # Right side middle
-            push!(bars, RebarLocation(x_right, (y_bot + y_top) / 2, As_f))
-            # Top: 2 corners + 1 middle
-            push!(bars, RebarLocation(x_right, y_top, As_f))
-            push!(bars, RebarLocation((x_left + x_right) / 2, y_top, As_f))
-            push!(bars, RebarLocation(x_left, y_top, As_f))
-            # Left side middle
-            push!(bars, RebarLocation(x_left, (y_bot + y_top) / 2, As_f))
-            
-        elseif n_bars == 12
-            # 4 per face (corners shared)
-            # Equal spacing along each face
-            dx = (x_right - x_left) / 3
-            dy = (y_top - y_bot) / 3
-            
-            # Bottom
-            for i in 0:3
-                push!(bars, RebarLocation(x_left + i * dx, y_bot, As_f))
-            end
-            # Right (excluding corners)
-            for i in 1:2
-                push!(bars, RebarLocation(x_right, y_bot + i * dy, As_f))
-            end
-            # Top (excluding right corner)
-            for i in 3:-1:0
-                push!(bars, RebarLocation(x_left + i * dx, y_top, As_f))
-            end
-            # Left (excluding corners)
-            for i in 2:-1:1
-                push!(bars, RebarLocation(x_left, y_bot + i * dy, As_f))
-            end
-            
-        else
-            # Generic: distribute evenly around perimeter
-            # For now, fall back to corners + distribute remainder
-            # Start with corners
-            push!(bars, RebarLocation(x_left, y_bot, As_f))
-            push!(bars, RebarLocation(x_right, y_bot, As_f))
-            push!(bars, RebarLocation(x_right, y_top, As_f))
-            push!(bars, RebarLocation(x_left, y_top, As_f))
-            
-            # Distribute remaining bars (simplified)
-            remaining = n_bars - 4
-            if remaining > 0
-                # Add to top and bottom faces
-                n_per_face = remaining ÷ 2
-                dx = (x_right - x_left) / (n_per_face + 1)
-                for i in 1:n_per_face
-                    push!(bars, RebarLocation(x_left + i * dx, y_bot, As_f))
+        # Generalized 4-face perimeter layout. Always places 4 corner bars,
+        # then distributes the remaining `n_bars - 4` interior bars across
+        # the four faces *proportional to face length* — square sections get
+        # an equal split, rectangular sections get more bars on the long
+        # faces. Symmetry is preserved: top == bottom (by `n_tb_pair`) and
+        # left == right (by `n_lr_pair`). For odd remainders the extra bar
+        # goes on the bottom face (spColumn convention).
+        #
+        # ACI 318-19 §10.7.6.1.2 governs the maximum spacing for transverse
+        # ties; the solver enforces this by selecting the rebar size and
+        # tie type, not by adjusting the longitudinal layout.
+        push!(bars, RebarLocation(x_left,  y_bot, As_f))
+        push!(bars, RebarLocation(x_right, y_bot, As_f))
+        push!(bars, RebarLocation(x_right, y_top, As_f))
+        push!(bars, RebarLocation(x_left,  y_top, As_f))
+
+        n_int = n_bars - 4
+        if n_int > 0
+            # Strip units before the proportional split — only the ratio matters.
+            L_b_in = ustrip(u"inch", x_right - x_left)   # top/bottom face length
+            L_h_in = ustrip(u"inch", y_top   - y_bot)    # left/right face length
+
+            n_tb_pair, n_lr_pair, extra_bottom = _split_perimeter(n_int, L_b_in, L_h_in)
+
+            # Top/bottom interior bars (n_tb_pair on each, plus extra_bottom on bottom).
+            n_bottom = n_tb_pair + extra_bottom
+            if n_tb_pair > 0
+                dx = (x_right - x_left) / (n_tb_pair + 1)
+                for i in 1:n_tb_pair
                     push!(bars, RebarLocation(x_left + i * dx, y_top, As_f))
+                end
+            end
+            if n_bottom > 0
+                dx = (x_right - x_left) / (n_bottom + 1)
+                for i in 1:n_bottom
+                    push!(bars, RebarLocation(x_left + i * dx, y_bot, As_f))
+                end
+            end
+
+            # Left/right interior bars (n_lr_pair on each).
+            if n_lr_pair > 0
+                dy = (y_top - y_bot) / (n_lr_pair + 1)
+                for i in 1:n_lr_pair
+                    push!(bars, RebarLocation(x_left,  y_bot + i * dy, As_f))
+                    push!(bars, RebarLocation(x_right, y_bot + i * dy, As_f))
                 end
             end
         end
@@ -355,6 +343,53 @@ function _generate_bar_positions(
     end
     
     return bars
+end
+
+"""
+    _split_perimeter(n_int, L_b, L_h) -> (n_tb_pair, n_lr_pair, extra_bottom)
+
+Allocate `n_int` interior bars (i.e. `n_bars - 4` after corner placement)
+across the four faces of a rectangular column proportional to face length.
+Symmetry is enforced where possible:
+
+- `n_tb_pair`: bars on the **top** face (and matching count on bottom).
+- `n_lr_pair`: bars on the **left** face (and matching count on right).
+- `extra_bottom`: remaining bar (0 or 1) placed on the bottom face when
+  `n_int` is odd. This is the spColumn convention for odd interior counts;
+  ACI does not require strict symmetry of longitudinal bars about the
+  bending axis.
+
+The function maintains the invariant
+`2*n_tb_pair + 2*n_lr_pair + extra_bottom == n_int`
+and biases interior bars onto the *longer* pair of faces.
+"""
+function _split_perimeter(n_int::Int, L_b::Real, L_h::Real)
+    @assert n_int >= 0 "negative interior bar count: $n_int"
+    n_int == 0 && return (0, 0, 0)
+
+    # Reserve one extra bar for the bottom face when n_int is odd. The
+    # remaining (even) count is split symmetrically across the four faces.
+    extra_bottom = isodd(n_int) ? 1 : 0
+    n_pairs = (n_int - extra_bottom) ÷ 2  # bars per "axis" (top+bottom counted once)
+
+    n_pairs == 0 && return (0, 0, extra_bottom)
+
+    L_total = L_b + L_h
+    if L_total <= 0
+        # Degenerate dimensions: fall back to equal split.
+        n_tb_pair = n_pairs ÷ 2
+        n_lr_pair = n_pairs - n_tb_pair
+        return (n_tb_pair, n_lr_pair, extra_bottom)
+    end
+
+    # Proportional split: long face gets more bars. Round half-away-from-zero
+    # so on a *square* section the tie (e.g., n_pairs = 1, share = 0.5) goes
+    # to the b-direction (top/bottom face) — that's the common bending plane
+    # for gravity columns and matches spColumn's defaults for n_bars ∈ {6, 10}.
+    n_tb_pair = round(Int, n_pairs * L_b / L_total, RoundNearestTiesAway)
+    n_tb_pair = clamp(n_tb_pair, 0, n_pairs)
+    n_lr_pair = n_pairs - n_tb_pair
+    return (n_tb_pair, n_lr_pair, extra_bottom)
 end
 
 """Validate column section against ACI requirements."""

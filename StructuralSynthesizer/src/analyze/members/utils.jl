@@ -942,6 +942,46 @@ function _service_load_deflections(
 end
 
 """
+    _fem_to_aci_endmoments(M_start, M_end) -> (M1, M2)
+
+Convert a pair of signed FEM internal end moments to ACI 318-19 / AISC 360-16
+end-moment convention `(M1, M2)` with `|M2| ≥ |M1|`.
+
+# FEM convention
+For a column under purely end moments, the *internal* moment field is
+linear and antisymmetric in single curvature (`M_start`, `M_end` opposite
+signs) and even-symmetric in double curvature (same signs).
+
+# ACI 318-19 / AISC 360-16 convention
+`M1/M2 > 0` ⇔ **double** curvature (best case, low Cm),
+`M1/M2 < 0` ⇔ **single** curvature (worst case, high Cm).
+
+So same-sign FEM end moments map to a **positive** `M1/M2` ratio, and
+opposite-sign FEM end moments map to a **negative** ratio.
+
+`M2` is always returned positive (defines the reference direction);
+`M1` carries the relative sign.
+"""
+function _fem_to_aci_endmoments(M_start::Real, M_end::Real)
+    if abs(M_start) >= abs(M_end)
+        M2_signed = M_start
+        M1_signed = M_end
+    else
+        M2_signed = M_end
+        M1_signed = M_start
+    end
+
+    M2 = abs(M2_signed)
+    if M2 < 1e-12
+        return (0.0, 0.0)
+    end
+
+    same_sign = sign(M2_signed) == sign(M1_signed) || iszero(M1_signed)
+    M1 = same_sign ? abs(M1_signed) : -abs(M1_signed)
+    return (M1, M2)
+end
+
+"""
     member_group_demands(struc; member_edge_group=:beams, resolution=200, params=DesignParameters())
 
 Compute governing demands and geometry for each `MemberGroup` by enveloping ASAP internal
@@ -952,6 +992,14 @@ Conventions:
 - weak-axis bending demand uses `Mz`
 - shear demand uses `Vy`/`Vz` (mapped to weak/strong)
 - deflection uses max local Z displacement from `ElementDisplacements.ulocal`
+
+For columns (`member_edge_group == :columns`), signed end moments are
+extracted at the start of the first segment and the end of the last
+segment of each member, then converted to ACI 318-19 / AISC 360-16
+`(M1, M2)` convention via [`_fem_to_aci_endmoments`](@ref). The group's
+`M1x/M2x/M1y/M2y` are taken from the column with the largest |M2|.
+This lets the slenderness path compute `Cm = 0.6 − 0.4·(M1/M2)`
+instead of falling back on the conservative `M1 = 0` stand-in.
 
 When `params` is provided and cell dead/live loads are available, a service-load
 multi-RHS solve separates LL-only and total (DL+LL) deflections. Otherwise
@@ -986,6 +1034,10 @@ function member_group_demands(struc::BuildingStructure;
     # Use lazy-cached element-to-loads map (avoids O(n_loads) rebuild per call)
     element_loads = Asap.get_elemental_loads(struc.asap_model)
 
+    # Whether to extract signed end moments for ACI 318-19 slenderness Cm.
+    # Only meaningful for columns; beams/struts use the conservative M1=0 default.
+    extract_end_moments = member_type === :columns
+
     # Preallocated per-group parallel storage
     par_has  = Vector{Bool}(undef, n_groups)
     par_Pu_c = Vector{Float64}(undef, n_groups)
@@ -1002,6 +1054,11 @@ function member_group_demands(struc::BuildingStructure;
     par_Kx   = Vector{Float64}(undef, n_groups)
     par_Ky   = Vector{Float64}(undef, n_groups)
     par_Ldefl = Vector{Float64}(undef, n_groups)  # deflection span (longest sub-segment)
+    # Signed (M1, M2) per group, ACI 318-19 sign convention. Selected from the
+    # member with the largest |M2| in each axis. Defaulted to (0,0) when no
+    # column member is present (e.g., beam/strut groups).
+    par_M1x = zeros(Float64, n_groups); par_M2x = zeros(Float64, n_groups)
+    par_M1y = zeros(Float64, n_groups); par_M2y = zeros(Float64, n_groups)
 
     Threads.@threads for g in 1:n_groups
         gid = all_group_ids[g]
@@ -1016,12 +1073,29 @@ function member_group_demands(struc::BuildingStructure;
         has_any = false
         δ_max = 0.0; I_ref = 0.0
 
+        # End-moment selection (column groups only). We pick the (M1, M2) from
+        # whichever member in the group has the largest |M2| in that axis —
+        # the worst-case Cm dominates the slenderness amplification.
+        best_M2x = 0.0; best_M1x = 0.0
+        best_M2y = 0.0; best_M1y = 0.0
+
         for m_idx in mg.member_indices
             m = member_array[m_idx]
             Kx_gov = max(Kx_gov, m.base.Kx)
             Ky_gov = max(Ky_gov, m.base.Ky)
 
-            for seg_idx in segment_indices(m)
+            seg_list = segment_indices(m)
+            n_segs = length(seg_list)
+
+            # Per-member end-moment scratch (FEM internal-moment convention).
+            # Walked in segment order: start = f.M[1] of first segment, end =
+            # f.M[end] of last segment. Multi-segment columns walk through
+            # interior splice points; only the outermost values matter for Cm.
+            local_My_start = 0.0; local_My_end = 0.0
+            local_Mz_start = 0.0; local_Mz_end = 0.0
+            saw_first_seg = false; saw_last_seg = false
+
+            for (seg_pos, seg_idx) in enumerate(seg_list)
                 seg = struc.segments[seg_idx]
                 edge_idx = seg.edge_idx
                 edge_idx in beam_edge_ids || continue
@@ -1056,6 +1130,30 @@ function member_group_demands(struc::BuildingStructure;
 
                 I_current = ustrip(u"m^4", el.section.Ix)
                 I_ref = max(I_ref, I_current)
+
+                if extract_end_moments
+                    if seg_pos == 1
+                        local_My_start = Float64(f.My[1])
+                        local_Mz_start = Float64(f.Mz[1])
+                        saw_first_seg = true
+                    end
+                    if seg_pos == n_segs
+                        local_My_end = Float64(f.My[end])
+                        local_Mz_end = Float64(f.Mz[end])
+                        saw_last_seg = true
+                    end
+                end
+            end
+
+            if extract_end_moments && saw_first_seg && saw_last_seg
+                M1x_m, M2x_m = _fem_to_aci_endmoments(local_My_start, local_My_end)
+                M1y_m, M2y_m = _fem_to_aci_endmoments(local_Mz_start, local_Mz_end)
+                if M2x_m > best_M2x
+                    best_M2x = M2x_m; best_M1x = M1x_m
+                end
+                if M2y_m > best_M2y
+                    best_M2y = M2y_m; best_M1y = M1y_m
+                end
             end
         end
 
@@ -1067,6 +1165,8 @@ function member_group_demands(struc::BuildingStructure;
         par_L[g]    = L_total; par_Lb[g]   = Lb_gov
         par_Cb[g]   = Cb_gov;  par_Kx[g]   = Kx_gov; par_Ky[g] = Ky_gov
         par_Ldefl[g] = L_defl
+        par_M1x[g] = best_M1x; par_M2x[g] = best_M2x
+        par_M1y[g] = best_M1y; par_M2y[g] = best_M2y
     end
 
     # ── Service-load deflection split (LL-only vs DL+LL) ──
@@ -1128,12 +1228,28 @@ function member_group_demands(struc::BuildingStructure;
         δ_ll_adj    = has_split ? par_δ_LL[g] * scale    : par_δ[g] * scale
         δ_total_adj = has_split ? par_δ_total[g] * scale  : 0.0
 
-        d = StructuralSizer.MemberDemand(g_idx;
-            Pu_c=par_Pu_c[g], Pu_t=par_Pu_t[g],
-            Mux=par_Mux[g], Muy=par_Muy[g],
-            Vu_strong=par_Vus[g], Vu_weak=par_Vuw[g],
-            δ_max_LL=δ_ll_adj, δ_max_total=δ_total_adj,
-            I_ref=par_Ir[g])
+        # For column groups, par_M*x/par_M*y carry signed (M1, M2) per ACI
+        # 318-19 from FEA. For other member types we leave M1/M2 unset so
+        # the `MemberDemand` constructor falls back to its conservative
+        # default (`M1 = 0`, `M2 = Mux/Muy` ⇒ Cm = 0.6).
+        if extract_end_moments
+            d = StructuralSizer.MemberDemand(g_idx;
+                Pu_c=par_Pu_c[g], Pu_t=par_Pu_t[g],
+                Mux=par_Mux[g], Muy=par_Muy[g],
+                M1x=par_M1x[g], M2x=par_M2x[g],
+                M1y=par_M1y[g], M2y=par_M2y[g],
+                Vu_strong=par_Vus[g], Vu_weak=par_Vuw[g],
+                δ_max_LL=δ_ll_adj, δ_max_total=δ_total_adj,
+                I_ref=par_Ir[g],
+                transverse_load=false)
+        else
+            d = StructuralSizer.MemberDemand(g_idx;
+                Pu_c=par_Pu_c[g], Pu_t=par_Pu_t[g],
+                Mux=par_Mux[g], Muy=par_Muy[g],
+                Vu_strong=par_Vus[g], Vu_weak=par_Vuw[g],
+                δ_max_LL=δ_ll_adj, δ_max_total=δ_total_adj,
+                I_ref=par_Ir[g])
+        end
 
         push!(demands, d)
         push!(L_totals, par_L[g])
@@ -2075,34 +2191,55 @@ function _size_columns_impl!(
     skel = struc.skeleton
     member_edge_group = :columns
     edge_ids_in_group = Set(get(skel.groups_edges, member_edge_group, Int[]))
-    
-    # Add gravity loads
+
     _add_gravity_loads!(struc, edge_ids_in_group, gravity_factor)
-    
-    # Get group demands
+
     group_ids, demands, L_totals, Lb_govs, Cb_govs, Kx_govs, Ky_govs =
         member_group_demands(struc; member_edge_group=member_edge_group, resolution=resolution)
-    
-    # Build geometries (concrete uses Lu, k)
-    geometries = [StructuralSizer.ConcreteMemberGeometry(L; Lu=Lb, k=Ky)
-                  for (L, Lb, Ky) in zip(L_totals, Lb_govs, Ky_govs)]
-    
-    # Convert demands to Unitful quantities then strip for size_columns API
-    Pu = [uconvert(Asap.kip, d.Pu_c * u"N") for d in demands]
-    Mux = [uconvert(Asap.kip*u"ft", d.Mux * u"N*m") for d in demands]
-    Muy = [uconvert(Asap.kip*u"ft", d.Muy * u"N*m") for d in demands]
-    
-    # Run optimization (size_columns expects stripped values in kip, kip*ft)
-    result = StructuralSizer.size_columns(ustrip.(Pu), ustrip.(Mux), geometries, opts; Muy=ustrip.(Muy))
-    
-    # Apply results
+
+    # Concrete columns now carry per-axis effective length factors so the ACI
+    # 318 slenderness check evaluates the strong (kx, h, b·h³/12) and weak
+    # (ky, b, h·b³/12) axes independently. Previously both axes collapsed
+    # onto Ky, which silently lost the strong-axis bracing information.
+    geometries = [StructuralSizer.ConcreteMemberGeometry(L; Lu=Lb, kx=Kx, ky=Ky)
+                  for (L, Lb, Kx, Ky) in zip(L_totals, Lb_govs, Kx_govs, Ky_govs)]
+
+    # Build RC demands directly from the analysis output. `member_group_demands`
+    # already populated `M1x/M2x/M1y/M2y` from FEA at the column ends in
+    # ACI 318-19 sign convention. We just need to re-unit SI → ACI (kip,
+    # kip·ft) before constructing `RCColumnDemand`s; the demand-driven
+    # `size_columns` overload preserves the signed end moments end-to-end so
+    # the slenderness path can compute `Cm = 0.6 − 0.4·(M1/M2)` instead of
+    # the conservative `M1 = 0` stand-in.
+    rc_demands = StructuralSizer.RCColumnDemand[]
+    for (i, d) in enumerate(demands)
+        Pu_kip   = ustrip(uconvert(Asap.kip,         d.Pu_c * u"N"))
+        Mux_kipf = ustrip(uconvert(Asap.kip*u"ft",   d.Mux  * u"N*m"))
+        Muy_kipf = ustrip(uconvert(Asap.kip*u"ft",   d.Muy  * u"N*m"))
+        M1x_kipf = ustrip(uconvert(Asap.kip*u"ft",   d.M1x  * u"N*m"))
+        M2x_kipf = ustrip(uconvert(Asap.kip*u"ft",   d.M2x  * u"N*m"))
+        M1y_kipf = ustrip(uconvert(Asap.kip*u"ft",   d.M1y  * u"N*m"))
+        M2y_kipf = ustrip(uconvert(Asap.kip*u"ft",   d.M2y  * u"N*m"))
+
+        push!(rc_demands, StructuralSizer.RCColumnDemand(i;
+            Pu  = Pu_kip,
+            Mux = Mux_kipf, Muy = Muy_kipf,
+            M1x = M1x_kipf, M2x = M2x_kipf,
+            M1y = M1y_kipf, M2y = M2y_kipf,
+            βdns = opts.βdns,
+            transverse_load = d.transverse_load,
+        ))
+    end
+
+    result = StructuralSizer.size_columns(rc_demands, geometries, opts)
+
     _apply_column_results!(struc, result, group_ids, opts.material, :concrete, edge_ids_in_group)
-    
+
     if reanalyze
         Asap.process!(struc.asap_model)
         Asap.solve!(struc.asap_model)
     end
-    
+
     @info "Sized $(length(group_ids)) column groups" material=StructuralSizer.material_name(opts.material)
     return struc
 end
@@ -2135,9 +2272,11 @@ function _size_columns_impl!(
     Mux = [d.Mux * u"N*m"   for d in demands]
     Muy = [d.Muy * u"N*m"   for d in demands]
 
-    # Build geometries
-    geometries = [StructuralSizer.ConcreteMemberGeometry(L; Lu=Lb, k=Ky)
-                  for (L, Lb, Ky) in zip(L_totals, Lb_govs, Ky_govs)]
+    # PixelFrame columns are graded by pixel material, but slenderness still
+    # uses ACI 318 mechanics. Carry per-axis kx/ky so weak-axis Muy magnification
+    # uses (ky, b, h·b³/12) instead of the strong-axis dimensions.
+    geometries = [StructuralSizer.ConcreteMemberGeometry(L; Lu=Lb, kx=Kx, ky=Ky)
+                  for (L, Lb, Kx, Ky) in zip(L_totals, Lb_govs, Kx_govs, Ky_govs)]
 
     # Call PixelFrame column sizing (validates pixel divisibility, runs MIP)
     result = StructuralSizer.size_columns(Pu, Mux, geometries, opts; Muy=Muy)

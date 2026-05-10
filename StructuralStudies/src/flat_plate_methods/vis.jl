@@ -107,6 +107,22 @@ function _pick_variant(df)
     return filter(r -> r.min_h_rule == preferred, df)
 end
 
+"""
+    _pick_concrete(df; preferred = "NWC_4000")
+
+Filter to a single concrete preset so plots that don't facet by concrete
+don't double-plot lines per method. Defaults to `"NWC_4000"`. If the
+preferred preset is missing the first available is used; if the dataframe
+has no `concrete` column it is returned untouched (legacy CSV layout).
+"""
+function _pick_concrete(df; preferred::String = "NWC_4000")
+    hasproperty(df, :concrete) || return df
+    presets = sort(unique(df.concrete))
+    isempty(presets) && return df
+    chosen = preferred in presets ? preferred : first(presets)
+    return filter(r -> r.concrete == chosen, df)
+end
+
 """Add `span_ft` column (= `lx_ft`) if missing."""
 function _ensure_span(df)
     isempty(df) && return DataFrame(span_ft=Float64[], lx_ft=Float64[])
@@ -157,8 +173,10 @@ function _grid_plot(df, col::Symbol, ylabel::String,
                     suptitle::String, filename::String;
                     limit_line::Union{Nothing,Float64} = nothing,
                     yscale = identity,
-                    bay_filter::Function = _square_bays)
-    work = bay_filter(_pick_variant(_ensure_span(df)))
+                    bay_filter::Function = _square_bays,
+                    concrete::String = "NWC_4000")
+    work = bay_filter(_pick_concrete(_pick_variant(_ensure_span(df));
+                                      preferred = concrete))
     fp_all, fs_all = _split_ft(work)
 
     live_loads = sort(unique(work.live_psf))
@@ -286,6 +304,321 @@ plot_rebar(df) =
 plot_runtime(df) =
     _grid_plot(df, :runtime_s, "Runtime (s)", "Runtime (Square Bays)",
                "07_runtime.png"; yscale = log10)
+
+# ── Embodied carbon (Section 1) ──
+
+"""Slab embodied carbon intensity grid (square bays).
+
+Plots `slab_ec_per_m2` (kgCO₂e/m² of floor) vs span across methods × LL.
+EC = element_ec(slab.volumes) in `_extract_results`, normalized by slab
+footprint area. ECC source: empirical median of the RMC EPD dataset
+(NRMCA-listed plants 2021–2025, A1–A3, n = 1078) — see
+`StructuralSizer/src/materials/ecc/data/README.md` and `concrete.jl`."""
+plot_slab_ec(df) =
+    _grid_plot(df, :slab_ec_per_m2, "Slab EC (kgCO₂e/m²)",
+               "Slab Embodied Carbon Intensity (Square Bays)", "12_slab_ec.png")
+
+"""Slab embodied carbon intensity grid (rectangular bays)."""
+plot_slab_ec_rect(df) =
+    _grid_plot(df, :slab_ec_per_m2, "Slab EC (kgCO₂e/m²)",
+               "Slab Embodied Carbon Intensity (Rectangular Bays)",
+               "12_slab_ec_rect.png"; bay_filter = _rect_bays)
+
+# ── Material Use Intensity (Section 1) ──
+
+"""Slab Material Use Intensity grid (square bays).
+
+Plots `mui_kg_per_m2` (total slab mass / floor area) — the material-quantity
+analog of EC, decoupled from the ECC assumption."""
+plot_slab_mui(df) =
+    _grid_plot(df, :mui_kg_per_m2, "Slab MUI (kg/m²)",
+               "Slab Material Use Intensity (Square Bays)", "13_slab_mui.png")
+
+"""Slab Material Use Intensity grid (rectangular bays)."""
+plot_slab_mui_rect(df) =
+    _grid_plot(df, :mui_kg_per_m2, "Slab MUI (kg/m²)",
+               "Slab Material Use Intensity (Rectangular Bays)",
+               "13_slab_mui_rect.png"; bay_filter = _rect_bays)
+
+"""Concrete equivalent thickness grid (square bays).
+
+`concrete_t_eq_m` = concrete volume / floor area = effective uniform slab
+thickness in metres. Method-agnostic mass proxy (independent of rebar)."""
+plot_slab_t_eq(df) =
+    _grid_plot(df, :concrete_t_eq_m, "Concrete t_eq (m)",
+               "Equivalent Concrete Thickness (Square Bays)",
+               "13b_concrete_t_eq.png")
+
+# ── Concrete-axis overlays (Section 1 sensitivity) ──
+#
+# Same grid shape as `_grid_plot` but rows = concrete preset (replacing
+# floor-type rows). Filters to a single floor type (default flat plate)
+# and overlays one line per method. Blank if df has no `concrete` column.
+
+"""
+    _concrete_grid_plot(df, col, ylabel, suptitle, filename;
+                        limit_line, yscale, floor_type)
+
+Grid: rows = concrete preset, columns = live load. Color = method.
+Used for plotting EC and MUI sensitivity to slab concrete choice
+(Section 1 of the journal paper).
+"""
+function _concrete_grid_plot(df, col::Symbol, ylabel::String,
+                             suptitle::String, filename::String;
+                             limit_line::Union{Nothing,Float64} = nothing,
+                             yscale = identity,
+                             floor_type::String = "flat_plate")
+    hasproperty(df, :concrete) || begin
+        @info "Skipping $filename — DataFrame has no `concrete` column"
+        return nothing
+    end
+
+    work = _square_bays(_pick_variant(_ensure_span(df)))
+    hasproperty(work, :floor_type) && (work = filter(r -> r.floor_type == floor_type, work))
+    isempty(work) && return nothing
+
+    concretes  = sort(unique(work.concrete))
+    live_loads = sort(unique(work.live_psf))
+    n_rows = length(concretes)
+    n_cols = length(live_loads)
+    (n_rows == 0 || n_cols == 0) && return nothing
+
+    fig = Figure(size = (350 * n_cols + 80, 280 * n_rows + 140))
+    Label(fig[0, 1:n_cols], suptitle;
+          fontsize = 16, font = :bold, tellwidth = false)
+
+    # Shared axis ranges
+    all_vals = filter(!isnan, work[!, col])
+    if yscale === identity
+        y_lo = 0.0
+        y_hi = isempty(all_vals) ? 1.0 : maximum(all_vals)
+        !isnothing(limit_line) && (y_hi = max(y_hi, limit_line))
+        y_hi += y_hi * 0.08
+    else
+        y_lo = isempty(all_vals) ? 0.1 : minimum(all_vals)
+        y_hi = isempty(all_vals) ? 1.0 : maximum(all_vals)
+        y_lo = max(y_lo * 0.8, 1e-6)
+        y_hi *= 1.2
+    end
+    x_lo = minimum(work.span_ft);  x_hi = maximum(work.span_ft)
+    x_pad = (x_hi - x_lo) * 0.04
+    x_lo -= x_pad;  x_hi += x_pad
+
+    axs = Matrix{Axis}(undef, n_rows, n_cols)
+    for (i, conc) in enumerate(concretes)
+        sub_conc = filter(r -> r.concrete == conc, work)
+        for (j, ll) in enumerate(live_loads)
+            sub = filter(r -> r.live_psf ≈ ll, sub_conc)
+
+            ax = Axis(fig[i, j];
+                      xlabel = i == n_rows ? "Span (ft)" : "",
+                      ylabel = j == 1 ? ylabel : "",
+                      title  = i == 1 ? "LL = $(Int(ll)) psf" : "",
+                      yscale = yscale,
+                      width  = 300, height = 250,
+                      alignmode = Outside(15))
+            axs[i, j] = ax
+            i < n_rows && hidexdecorations!(ax; ticks = false, grid = false)
+            j > 1     && hideydecorations!(ax; ticks = false, grid = false)
+
+            !isnothing(limit_line) && hlines!(ax, [limit_line];
+                color = :red, linestyle = :dash, linewidth = 1, label = "Limit")
+
+            for (k, m) in enumerate(METHOD_ORDER)
+                md = filter(r -> r.method == m, sub)
+                isempty(md) && continue
+                sp = sort(unique(md.span_ft))
+                yv = Float64[filter(r -> r.span_ft == s, md)[1, col] for s in sp]
+                lw = 2.5 - 0.2 * (k - 1)
+                lines!(ax, sp, yv; label = m, color = (_color(m), 0.85),
+                       linestyle = _linestyle(m), linewidth = lw)
+                scatter!(ax, sp, yv; color = _color(m), marker = _marker(m),
+                         markersize = 9)
+            end
+            ylims!(ax, y_lo, y_hi)
+            xlims!(ax, x_lo, x_hi)
+        end
+
+        Label(fig[i, 0], conc;
+              fontsize = 11, font = :bold, rotation = π/2, tellheight = false)
+    end
+
+    CairoMakie.linkaxes!(axs...)
+    legend_entries = [(m, _color(m), _linestyle(m)) for m in METHOD_ORDER]
+    leg_elements   = [LineElement(color = c, linestyle = ls, linewidth = 2) for (_, c, ls) in legend_entries]
+    leg_labels     = [m for (m, _, _) in legend_entries]
+    Legend(fig[n_rows + 1, 1:n_cols], leg_elements, leg_labels;
+           orientation = :horizontal, labelsize = 10, tellwidth = false)
+
+    rowgap!(fig.layout, 8)
+    colgap!(fig.layout, 8)
+    resize_to_layout!(fig)
+    return _save_fig(fig, filename)
+end
+
+"""Slab EC intensity grid faceted by concrete preset (rows) × LL (columns).
+Use this to read off the dominant axis of EC variability for Section 1."""
+plot_slab_ec_by_concrete(df) =
+    _concrete_grid_plot(df, :slab_ec_per_m2, "Slab EC (kgCO₂e/m²)",
+                        "Slab EC by Concrete Preset (Square Bays, Flat Plate)",
+                        "14_slab_ec_by_concrete.png")
+
+"""Slab MUI grid faceted by concrete preset (rows) × LL (columns)."""
+plot_slab_mui_by_concrete(df) =
+    _concrete_grid_plot(df, :mui_kg_per_m2, "Slab MUI (kg/m²)",
+                        "Slab MUI by Concrete Preset (Square Bays, Flat Plate)",
+                        "15_slab_mui_by_concrete.png")
+
+"""Slab equivalent concrete thickness grid faceted by concrete preset.
+
+Diagnostic: if `concrete_t_eq_m` is invariant across rows for a given
+(method, span, LL), then differences in EC-by-concrete are driven entirely
+by ECC × ρ, not by sizing changes — useful for separating the two effects."""
+plot_slab_t_eq_by_concrete(df) =
+    _concrete_grid_plot(df, :concrete_t_eq_m, "Concrete t_eq (m)",
+                        "Equivalent Concrete Thickness by Preset (Square Bays, Flat Plate)",
+                        "15b_concrete_t_eq_by_concrete.png")
+
+# ==============================================================================
+# Section 2 — ECC Monte Carlo bands (post-hoc on Section 1 MUI table)
+# ==============================================================================
+#
+# Inputs come from `sweep_ecc(df_section1)` and carry per-row Monte Carlo
+# summary columns: slab_ec_p05, slab_ec_p10, slab_ec_p25, slab_ec_p50,
+# slab_ec_p75, slab_ec_p90, slab_ec_p95, slab_ec_mean, slab_ec_std.
+#
+# The band shows procurement variability (bootstrap of the empirical EPD
+# distribution) at fixed structural sizing, decoupled from method-driven
+# variation. Reading Section 1 (`plot_slab_ec_by_concrete`) and Section 2
+# (`plot_slab_ec_band`) side-by-side is the headline figure:
+#
+#   * Section 1 line position  → method-driven EC variation (sizing).
+#   * Section 2 band thickness → procurement-driven EC variation (mix).
+
+"""
+    _band_grid_plot(df, row_col, suptitle, filename;
+                    band_lo, band_hi, band_mid, ylabel,
+                    floor_type, alpha_band)
+
+Generic grid plot for percentile bands. `row_col` is the column whose
+unique sorted values become rows of the panel grid (e.g. `:concrete`
+for Section 2 main figure or `:composition` for the composition
+decomposition). Columns of the panel grid are live loads.
+
+Each panel shows, per method:
+  * a shaded `band!` between `band_lo` and `band_hi` (default p10–p90),
+  * a solid `lines!` at `band_mid` (default p50).
+"""
+function _band_grid_plot(df, row_col::Symbol,
+                         suptitle::String, filename::String;
+                         band_lo::Symbol = :slab_ec_p10,
+                         band_hi::Symbol = :slab_ec_p90,
+                         band_mid::Symbol = :slab_ec_p50,
+                         ylabel::String  = "Slab EC (kgCO₂e/m²)",
+                         floor_type::String = "flat_plate",
+                         alpha_band::Float64 = 0.18)
+    for col in (band_lo, band_hi, band_mid, row_col, :live_psf, :method)
+        col in propertynames(df) || begin
+            @info "Skipping $filename — DataFrame missing `$col`"
+            return nothing
+        end
+    end
+
+    work = _square_bays(_pick_variant(_ensure_span(df)))
+    hasproperty(work, :floor_type) && (work = filter(r -> r.floor_type == floor_type, work))
+    isempty(work) && return nothing
+
+    # Drop rows where the band is missing (e.g. unsupported composition).
+    work = filter(r -> !isnan(r[band_lo]) && !isnan(r[band_hi]) &&
+                       !isnan(r[band_mid]), work)
+    isempty(work) && return nothing
+
+    rows_keys  = sort(unique(work[!, row_col]))
+    live_loads = sort(unique(work.live_psf))
+    n_rows = length(rows_keys)
+    n_cols = length(live_loads)
+    (n_rows == 0 || n_cols == 0) && return nothing
+
+    fig = Figure(size = (350 * n_cols + 80, 280 * n_rows + 140))
+    Label(fig[0, 1:n_cols], suptitle;
+          fontsize = 16, font = :bold, tellwidth = false)
+
+    # Shared y range: 0 → 1.08 × global max p90.
+    y_hi = maximum(work[!, band_hi])
+    y_lo = 0.0
+    y_hi += y_hi * 0.08
+
+    x_lo = minimum(work.span_ft);  x_hi = maximum(work.span_ft)
+    x_pad = (x_hi - x_lo) * 0.04
+    x_lo -= x_pad;  x_hi += x_pad
+
+    axs = Matrix{Axis}(undef, n_rows, n_cols)
+    for (i, rkey) in enumerate(rows_keys)
+        sub_row = filter(r -> r[row_col] == rkey, work)
+        for (j, ll) in enumerate(live_loads)
+            sub = filter(r -> r.live_psf ≈ ll, sub_row)
+
+            ax = Axis(fig[i, j];
+                      xlabel = i == n_rows ? "Span (ft)" : "",
+                      ylabel = j == 1 ? ylabel : "",
+                      title  = i == 1 ? "LL = $(Int(ll)) psf" : "",
+                      width  = 300, height = 250,
+                      alignmode = Outside(15))
+            axs[i, j] = ax
+            i < n_rows && hidexdecorations!(ax; ticks = false, grid = false)
+            j > 1     && hideydecorations!(ax; ticks = false, grid = false)
+
+            for m in METHOD_ORDER
+                md = filter(r -> r.method == m, sub)
+                isempty(md) && continue
+                sp  = sort(unique(md.span_ft))
+                lo  = Float64[filter(r -> r.span_ft == s, md)[1, band_lo]  for s in sp]
+                hi  = Float64[filter(r -> r.span_ft == s, md)[1, band_hi]  for s in sp]
+                mid = Float64[filter(r -> r.span_ft == s, md)[1, band_mid] for s in sp]
+                col_m = _color(m)
+                band!(ax, sp, lo, hi; color = (col_m, alpha_band))
+                lines!(ax, sp, mid; color = (col_m, 0.95),
+                       linestyle = _linestyle(m), linewidth = 2.0)
+                scatter!(ax, sp, mid; color = col_m,
+                         marker = _marker(m), markersize = 8)
+            end
+
+            ylims!(ax, y_lo, y_hi)
+            xlims!(ax, x_lo, x_hi)
+        end
+
+        Label(fig[i, 0], string(rkey);
+              fontsize = 11, font = :bold, rotation = π/2, tellheight = false)
+    end
+
+    CairoMakie.linkaxes!(axs...)
+    leg_elements = [LineElement(color = _color(m), linestyle = _linestyle(m),
+                                 linewidth = 2) for m in METHOD_ORDER]
+    Legend(fig[n_rows + 1, 1:n_cols], leg_elements, METHOD_ORDER;
+           orientation = :horizontal, labelsize = 10, tellwidth = false)
+
+    rowgap!(fig.layout, 8)
+    colgap!(fig.layout, 8)
+    resize_to_layout!(fig)
+    return _save_fig(fig, filename)
+end
+
+"""
+    plot_slab_ec_band(df_band)
+
+Section 2 main figure. Rows = concrete preset, columns = LL. Each panel
+shows, per method, a p10–p90 shaded band and a p50 line for slab embodied
+carbon (kgCO₂e/m²) vs span. Input `df_band` must come from
+`sweep_ecc(df_section1)` — Monte Carlo bootstrap of the empirical RMC
+EPD distribution.
+
+Read together with `plot_slab_ec_by_concrete(df_section1)`: the line
+positions there reveal method-driven (sizing) variation; the band
+thickness here reveals procurement (mix) variation."""
+plot_slab_ec_band(df) =
+    _band_grid_plot(df, :concrete,
+                    "Slab EC Band by Concrete Preset (RMC EPD MC p10–p90, Square Bays)",
+                    "21_slab_ec_band.png")
 
 # ── Rectangular bay versions ──
 
@@ -789,6 +1122,166 @@ function plot_dual_heatmaps(df; title_suffix::String = "", file_suffix::String =
 end
 
 # ==============================================================================
+# Section 1 — slab EC intensity heatmap (kgCO₂e/m²)
+# ==============================================================================
+#
+# Structurally parallel to plot_depth_heatmap but keyed on slab_ec_per_m2,
+# which we extract from element_ec(slab.volumes) in _extract_results. ECC
+# source: empirical median of the RMC EPD dataset (n = 1078, 2021–2025,
+# A1–A3) — see StructuralSizer/src/materials/concrete.jl and
+# StructuralSizer/src/materials/ecc/data/README.md.
+
+"""
+    plot_ec_heatmap(df; floor_type, ec_range, title_suffix, file_suffix)
+
+Heatmap grid of slab embodied-carbon intensity (kgCO₂e/m²): methods (rows)
+× live loads (columns), Lx × Ly. Pass `ec_range = (lo, hi)` to lock the
+colorbar across companion plots (same pattern as `plot_depth_heatmap`).
+"""
+function plot_ec_heatmap(df; floor_type::String = "flat_plate",
+                              ec_range = nothing,
+                              title_suffix::String = "",
+                              file_suffix::String = "")
+    work = hasproperty(df, :floor_type) ? filter(r -> r.floor_type == floor_type, df) : df
+    isempty(work) && begin
+        println("  Skipping EC heatmap for $floor_type — no data")
+        return nothing
+    end
+    hasproperty(work, :slab_ec_per_m2) || begin
+        println("  Skipping EC heatmap for $floor_type — DataFrame missing slab_ec_per_m2 column")
+        return nothing
+    end
+
+    ft_label = floor_type == "flat_slab" ? "Flat Slab" : "Flat Plate"
+
+    methods    = METHOD_ORDER
+    live_loads = sort(unique(work.live_psf))
+    lx_vals    = sort(unique(work.lx_ft))
+    ly_vals    = sort(unique(work.ly_ft))
+    n_methods  = length(methods)
+    n_loads    = length(live_loads)
+
+    valid_ec = filter(!isnan, work.slab_ec_per_m2)
+    if isempty(valid_ec)
+        println("  Skipping EC heatmap for $floor_type — no valid slab_ec_per_m2 values")
+        return nothing
+    end
+    ec_lo_raw = isnothing(ec_range) ? 0.0                 : ec_range[1]
+    ec_hi_raw = isnothing(ec_range) ? ceil(maximum(valid_ec)) : ec_range[2]
+    isnan(ec_lo_raw) && (ec_lo_raw = 0.0)
+    isnan(ec_hi_raw) && (ec_hi_raw = ceil(maximum(valid_ec)))
+
+    lo_x, hi_x = extrema(lx_vals)
+    lo_y, hi_y = extrema(ly_vals)
+
+    fig = Figure(size = (300 * n_loads + 100, 200 * n_methods + 80),
+                 figure_padding = (5, 5, 5, 5))
+    Label(fig[0, 1:n_loads],
+          "$ft_label — Slab Embodied Carbon Intensity by Plan Dimensions$title_suffix";
+          fontsize = 16, font = :bold, tellwidth = false)
+
+    axs = Matrix{Axis}(undef, n_methods, n_loads)
+
+    for (i, m) in enumerate(methods)
+        for (j, ll) in enumerate(live_loads)
+            sub = filter(r -> r.method == m && r.live_psf ≈ ll, work)
+            if m in ("MDDM", "DDM (Full)") && hasproperty(work, :ddm_eligible)
+                sub = filter(r -> r.ddm_eligible, sub)
+            end
+
+            Z = fill(NaN, length(lx_vals), length(ly_vals))
+            for row in eachrow(sub)
+                xi = findfirst(≈(row.lx_ft), lx_vals)
+                yi = findfirst(≈(row.ly_ft), ly_vals)
+                isnothing(xi) || isnothing(yi) && continue
+                is_converged = hasproperty(row, :converged) ? coalesce(row.converged, false) : true
+                if is_converged && !isnan(row.slab_ec_per_m2)
+                    Z[xi, yi] = row.slab_ec_per_m2
+                end
+            end
+
+            tick_step = 5.0  # ft
+            x_ticks = collect(ceil(lo_x / tick_step) * tick_step : tick_step : hi_x)
+            y_ticks = collect(ceil(lo_y / tick_step) * tick_step : tick_step : hi_y)
+
+            ax = Axis(fig[i, j];
+                      xlabel = i == n_methods ? "Lx (ft)" : "",
+                      ylabel = j == 1         ? "Ly (ft)" : "",
+                      title  = i == 1         ? "LL = $(Int(ll)) psf" : "",
+                      aspect = DataAspect(),
+                      width  = 200, height = 200,
+                      xticklabelsize = 9, yticklabelsize = 9,
+                      titlesize = 12,
+                      xticks = x_ticks, yticks = y_ticks,
+                      alignmode = Outside(15))
+            axs[i, j] = ax
+
+            i < n_methods && hidexdecorations!(ax; ticks = false, grid = false)
+            j > 1         && hideydecorations!(ax; ticks = false, grid = false)
+
+            if !all(isnan.(Z))
+                interpolated_heatmap!(ax, Float64.(lx_vals), Float64.(ly_vals), Z;
+                                      colormap = :viridis,
+                                      colorrange = (ec_lo_raw, ec_hi_raw),
+                                      k = 8)
+            end
+            xlims!(ax, lo_x, hi_x)
+            ylims!(ax, lo_y, hi_y)
+
+            # Diagonal reference (1:1 aspect)
+            diag_hi = min(hi_x, hi_y)
+            lines!(ax, [lo_x, diag_hi], [lo_x, diag_hi];
+                   color = :white, linestyle = :dash, linewidth = 0.8)
+
+            # Annotate diagonal (square-bay) cells with rounded EC value
+            label_dx = (hi_x - lo_x) * 0.06
+            label_dy = (hi_y - lo_y) * 0.06
+            for row in eachrow(sub)
+                row.lx_ft ≈ row.ly_ft || continue
+                is_converged = hasproperty(row, :converged) ? coalesce(row.converged, false) : true
+                is_converged || continue
+                isnan(row.slab_ec_per_m2) && continue
+                text!(ax, row.lx_ft + label_dx, row.ly_ft + label_dy;
+                      text = @sprintf("%d", round(Int, row.slab_ec_per_m2)),
+                      align = (:center, :center), fontsize = 8,
+                      color = :white, strokewidth = 0.5, strokecolor = :black)
+            end
+        end
+        Label(fig[i, 0], m;
+              fontsize = 11, font = :bold, rotation = π/2, tellheight = false)
+    end
+
+    CairoMakie.linkaxes!(axs...)
+    Colorbar(fig[1:n_methods, n_loads + 1];
+             colormap = :viridis, colorrange = (ec_lo_raw, ec_hi_raw),
+             label = "Slab EC (kgCO₂e/m²)", labelsize = 11, width = 12)
+
+    rowgap!(fig.layout, 8); colgap!(fig.layout, 8)
+    resize_to_layout!(fig)
+
+    tag = floor_type == "flat_slab" ? "flat_slab" : "flat_plate"
+    num = floor_type == "flat_slab" ? "15" : "14"
+    return _save_fig(fig, "$(num)_ec_heatmap_$(tag)$(file_suffix).png")
+end
+
+"""Generate flat-plate + flat-slab EC heatmaps with a matched colorbar."""
+function plot_dual_ec_heatmaps(df; title_suffix::String = "",
+                                    file_suffix::String = "")
+    hasproperty(df, :slab_ec_per_m2) || begin
+        println("  Skipping EC heatmaps — no slab_ec_per_m2 column")
+        return nothing
+    end
+    valid = filter(!isnan, df.slab_ec_per_m2)
+    isempty(valid) && begin
+        println("  Skipping EC heatmaps — no valid slab_ec_per_m2 values")
+        return nothing
+    end
+    ec_range = (0.0, ceil(maximum(valid)))
+    plot_ec_heatmap(df; floor_type = "flat_plate", ec_range, title_suffix, file_suffix)
+    plot_ec_heatmap(df; floor_type = "flat_slab",  ec_range, title_suffix, file_suffix)
+end
+
+# ==============================================================================
 # 12 — Failure mode heatmaps (categorical)
 # ==============================================================================
 
@@ -873,14 +1366,25 @@ end
 _categorize_failure(failures::AbstractString) = _categorize_failure(failures, "", "true")
 
 """
-    plot_failure_heatmap(df; floor_type, title_suffix, file_suffix)
+    plot_failure_heatmap(df; floor_type, title_suffix, file_suffix,
+                         col_overlay_threshold)
 
 Categorical heatmap showing failure modes: methods (rows) × live loads (columns).
 Uses discrete colors for each failure category.
+
+# Keyword arguments
+- `col_overlay_threshold::Union{Nothing, Float64} = nothing` — when set
+  (e.g. `60.0` inches), draws a black contour line on each panel where the
+  achieved `col_max_in` crosses this value. Intended for use with sweeps
+  run with `dual_heatmap_sweep(...; uncap_columns = true)`: the heatmap
+  shows the *underlying* failure mode (punching, deflection, …) and the
+  contour shows where the design would have been "Max Column"–limited
+  under conventional practice.
 """
 function plot_failure_heatmap(df; floor_type::String = "flat_plate",
                                   title_suffix::String = "",
-                                  file_suffix::String = "")
+                                  file_suffix::String = "",
+                                  col_overlay_threshold::Union{Nothing, Float64} = nothing)
     work = hasproperty(df, :floor_type) ? filter(r -> r.floor_type == floor_type, df) : df
     isempty(work) && begin
         println("  Skipping failure heatmap for $floor_type — no data")
@@ -996,6 +1500,28 @@ function plot_failure_heatmap(df; floor_type::String = "flat_plate",
                          nan_color = :white)
             end
 
+            # Practical-column contour overlay (uncapped sweeps only).
+            # NaN in col_max_in (failed cells) is replaced with `+Inf` so
+            # the contour treats those cells as "above the threshold" — the
+            # contour then traces the boundary between feasible cells and
+            # cells that would need a column larger than the threshold.
+            if !isnothing(col_overlay_threshold) && hasproperty(sub, :col_max_in)
+                C = fill(Inf, length(lx_vals), length(ly_vals))
+                for row in eachrow(sub)
+                    xi = findfirst(≈(row.lx_ft), lx_vals)
+                    yi = findfirst(≈(row.ly_ft), ly_vals)
+                    (isnothing(xi) || isnothing(yi)) && continue
+                    cval = coalesce(row.col_max_in, NaN)
+                    isnan(cval) && continue
+                    C[xi, yi] = Float64(cval)
+                end
+                if any(isfinite, C) && length(lx_vals) ≥ 2 && length(ly_vals) ≥ 2
+                    contour!(ax, lx_vals, ly_vals, C;
+                             levels = [Float64(col_overlay_threshold)],
+                             color = :black, linewidth = 1.4)
+                end
+            end
+
             xlims!(ax, lo_x, hi_x)
             ylims!(ax, lo_y, hi_y)
 
@@ -1018,13 +1544,18 @@ function plot_failure_heatmap(df; floor_type::String = "flat_plate",
     Legend(fig[1:n_methods, n_loads + 1], legend_elements, legend_labels;
            labelsize = 10, framevisible = false, rowgap = 2)
 
-    # Footnote explaining failure modes
-    footnote = """
-    Max Column: exceeded 1.1×span limit (36-60")
-    DDM Ineligible: aspect ratio >2 or LL/DL >2
-    Non Convergence: design failed after 150 iterations
-    """
-    Label(fig[n_methods + 1, 1:n_loads], footnote;
+    # Footnote explaining failure modes (extended when a column-overlay contour is drawn).
+    footnote_lines = [
+        "Max Column: exceeded 1.1×span limit (36-60\")",
+        "DDM Ineligible: aspect ratio >2 or LL/DL >2",
+        "Non Convergence: design failed after 150 iterations",
+    ]
+    if !isnothing(col_overlay_threshold)
+        push!(footnote_lines,
+              "Black contour: practical-column boundary " *
+              "(col_max_in = $(round(Int, col_overlay_threshold))\")")
+    end
+    Label(fig[n_methods + 1, 1:n_loads], join(footnote_lines, "\n");
           fontsize = 8, halign = :left, valign = :top,
           tellwidth = false, tellheight = true)
 
@@ -1038,9 +1569,12 @@ function plot_failure_heatmap(df; floor_type::String = "flat_plate",
 end
 
 """Generate both failure heatmap images."""
-function plot_dual_failure_heatmaps(df; title_suffix::String = "", file_suffix::String = "")
-    plot_failure_heatmap(df; floor_type = "flat_plate", title_suffix, file_suffix)
-    plot_failure_heatmap(df; floor_type = "flat_slab",  title_suffix, file_suffix)
+function plot_dual_failure_heatmaps(df; title_suffix::String = "", file_suffix::String = "",
+                                       col_overlay_threshold::Union{Nothing, Float64} = nothing)
+    plot_failure_heatmap(df; floor_type = "flat_plate", title_suffix, file_suffix,
+                             col_overlay_threshold)
+    plot_failure_heatmap(df; floor_type = "flat_slab",  title_suffix, file_suffix,
+                             col_overlay_threshold)
 end
 
 # ==============================================================================
@@ -1069,6 +1603,25 @@ function generate_all(df; include_rect::Bool = true)
     plot_columns(df)
     plot_rebar(df)
     plot_runtime(df)
+    if hasproperty(df, :slab_ec_per_m2)
+        plot_slab_ec(df)
+    end
+    if hasproperty(df, :mui_kg_per_m2)
+        plot_slab_mui(df)
+    end
+    if hasproperty(df, :concrete_t_eq_m)
+        plot_slab_t_eq(df)
+    end
+
+    # Concrete-axis overlays (Section 1 sensitivity). Only meaningful when the
+    # sweep covered multiple concrete presets; emit a brief skip message and
+    # move on otherwise.
+    if hasproperty(df, :concrete) && length(unique(df.concrete)) > 1
+        println("\n── Concrete-axis overlays ──")
+        hasproperty(df, :slab_ec_per_m2) && plot_slab_ec_by_concrete(df)
+        hasproperty(df, :mui_kg_per_m2)  && plot_slab_mui_by_concrete(df)
+        hasproperty(df, :concrete_t_eq_m) && plot_slab_t_eq_by_concrete(df)
+    end
 
     # Rectangular bay plots
     if include_rect
@@ -1080,11 +1633,23 @@ function generate_all(df; include_rect::Bool = true)
         plot_columns_rect(df)
         plot_rebar_rect(df)
         plot_runtime_rect(df)
+        if hasproperty(df, :slab_ec_per_m2)
+            plot_slab_ec_rect(df)
+        end
+        if hasproperty(df, :mui_kg_per_m2)
+            plot_slab_mui_rect(df)
+        end
     end
 
     # Drop panels only for flat slab at default LL (50 psf if available)
     default_ll = 50.0 in live_loads ? 50.0 : first(live_loads)
     plot_drop_panels(df; ll = default_ll)
+
+    # Heatmaps (Hartwell-style, methods × LL × Lx × Ly)
+    plot_dual_heatmaps(df)
+    if hasproperty(df, :slab_ec_per_m2)
+        plot_dual_ec_heatmaps(df)
+    end
 
     println("\nDone — figures saved to $FP_FIGS_DIR")
 end

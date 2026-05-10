@@ -226,9 +226,9 @@ function check_flat_plate_at_thickness!(
     _dist_factors = column_moment_distribution_factors(struc, columns, column_opts)
     Mu = [ustrip(kip * u"ft", moment_results.unbalanced_moments[i]) * _dist_factors[i] for i in 1:n_cols]
 
-    # 5b. Column P-M design
+    # 5b. Column P-M design — pinned-pinned about both axes (rule-of-thumb pass).
     geometries = [
-        ConcreteMemberGeometry(col.base.L; Lu=col.base.L, k=1.0, braced=true)
+        ConcreteMemberGeometry(col.base.L; Lu=col.base.L, kx=1.0, ky=1.0, braced=true)
         for col in columns
     ]
     column_result = size_columns(Pu, Mu, geometries, column_opts; cache=_col_cache)
@@ -327,7 +327,7 @@ function check_flat_plate_at_thickness!(
 
     # 5f. Flexural adequacy
     flexure_result = check_flexural_adequacy(moment_results, columns, d, fc;
-                                              verbose=verbose)
+                                              βt=_βt, verbose=verbose)
     if !flexure_result.ok
         push!(failures, "flexural_adequacy")
     end
@@ -378,7 +378,8 @@ function check_flat_plate_at_thickness!(
 
     rebar_design = try
         result = design_strip_reinforcement(
-            moment_results, columns, h, d, fc, fy, cover; verbose=verbose
+            moment_results, columns, h, d, fc, fy, cover;
+            βt=_βt, verbose=verbose
         )
         # Check for inadequate section (new graceful failure mode)
         if !result.section_adequate
@@ -410,7 +411,9 @@ function check_flat_plate_at_thickness!(
             end
             cs_neg_idx = col.position == :interior ? 3 : 1
             As_provided_cs = rebar_design.column_strip_reinf[cs_neg_idx].As_provided
-            selected = select_bars(As_provided_cs, rebar_design.column_strip_width)
+            # ACI 318-11 §13.3.2 + §7.6.5 — slab-thickness-dependent s_max
+            selected = select_bars(As_provided_cs, rebar_design.column_strip_width;
+                                   max_spacing=max_bar_spacing(h))
             Ab = bar_area(selected.bar_size)
             transfer_results[i] = additional_transfer_bars(
                 As_transfer, As_provided_cs, bb,
@@ -429,7 +432,9 @@ function check_flat_plate_at_thickness!(
         chk = check_integrity_reinforcement(cs_pos_reinf.As_provided, integrity.As_integrity)
         if !chk.ok
             cs_width = rebar_design.column_strip_width
-            bumped = select_bars(integrity.As_integrity, cs_width)
+            # ACI 318-11 §13.3.2 + §7.6.5 — slab-thickness-dependent s_max
+            bumped = select_bars(integrity.As_integrity, cs_width;
+                                 max_spacing=max_bar_spacing(h))
             rebar_design.column_strip_reinf[2] = StripReinforcement(
                 :pos, cs_pos_reinf.Mu, cs_pos_reinf.As_reqd, cs_pos_reinf.As_min,
                 uconvert(u"m^2", bumped.As_provided), bumped.bar_size,

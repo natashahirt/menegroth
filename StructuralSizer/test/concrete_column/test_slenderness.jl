@@ -237,16 +237,57 @@ include("test_data/slenderness_sway_18x18.jl")
             βdns = ref.loading.βdns
         )
         
-        # For this case, slenderness is NOT required (λ < limit)
-        # So the function returns Mc = max(M2, M_min) without magnification
+        # For this case slenderness is NOT triggered (λ < limit), so per
+        # ACI 318-19 §6.6.4.5.4 the M_min check does not apply and the
+        # function returns Mc = |M2| unmodified.
         @test result.slender == false
-        
+
         # When slender=false, Cm and δns are defaults (1.0)
         @test result.δns ≈ 1.0
-        
-        # Mc should be max(M2, M_min) = max(105, 48.56) = 105
+
+        # Mc = |M2| = 105 (the SP example happens to have M2 > M_min anyway,
+        # so the regression value is the same as before the M_min fix).
         @test result.Mc ≈ ref.slenderness.Mc rtol=0.01
     end
+
+    # =========================================================================
+    @testset "Non-slender column drops M_min (ACI 318-19 §6.6.4.5.4)" begin
+        # Use the SP 17×17 geometry but with a much smaller M2 so that
+        # |M2| < M_min. The pre-fix code would have returned Mc = M_min
+        # (≈ 48.56 kip·ft), spuriously inflating the demand on a non-slender
+        # column. ACI 318-19 §6.6.4.5.4 only invokes the eccentricity floor
+        # inside the slenderness procedure, so the corrected code returns
+        # Mc = |M2|.
+        section = RCColumnSection(
+            b = 17.0u"inch",
+            h = 17.0u"inch",
+            cover = 2.5u"inch",
+            bar_size = 9,
+            n_bars = 10,
+            tie_type = :tied,
+            arrangement = :two_layer,
+        )
+        mat = RC_3000_60
+        Lu_m = ref.column.Lu / 39.37
+        geometry = ConcreteMemberGeometry(Lu_m; k = ref.frame.k_calc, braced = true)
+
+        Pu = ref.loading.Pu
+        M2_small = 10.0  # kip-ft, much smaller than M_min ≈ 48.56 kip·ft
+
+        # Sanity check: M_min for this geometry/load is well above M2_small.
+        M_min_kipft = StructuralSizer.minimum_moment(Pu, ref.column.h)
+        @test M_min_kipft > M2_small
+
+        result = StructuralSizer.magnify_moment_nonsway(
+            section, mat, geometry, Pu, 0.0, M2_small;
+            βdns = ref.loading.βdns,
+        )
+
+        @test result.slender == false
+        @test result.Mc ≈ M2_small atol = 1e-6   # M_min must NOT inflate Mc
+        @test result.Mc < M_min_kipft            # explicit: M_min did not apply
+    end
+
     
     # =========================================================================
     @testset "Sway Frame Magnification" begin
@@ -584,5 +625,78 @@ end
         # Verify moments magnified correctly: M2 = M2ns + δs × M2s
         expected_M2 = 60.0 + result_circ.δs * 40.0
         @test result_circ.M2 ≈ expected_M2 rtol=0.01
+    end
+
+    # =========================================================================
+    # Weak-axis slenderness on a non-square column (PR-2)
+    # =========================================================================
+    # ACI 318-11 §10.10.1.2 evaluates λ = k·Lu/r in the *plane of bending*.
+    # For a 16×32 column the strong-axis r ≈ 0.3·32 = 9.6 in. is much larger
+    # than the weak-axis r ≈ 0.3·16 = 4.8 in., so a column non-slender about
+    # its strong axis can still amplify about its weak axis. Before the per-
+    # axis split this case silently used the strong-axis dimension for both,
+    # underestimating the weak-axis slenderness.
+    @testset "Weak-axis slenderness on 16×32 column" begin
+        section = RCColumnSection(
+            b = 16.0u"inch",
+            h = 32.0u"inch",
+            cover = 1.5u"inch",
+            bar_size = 9,
+            n_bars = 8,
+            tie_type = :tied,
+            arrangement = :two_layer,
+        )
+
+        # Pick Lu so kLu/r straddles ACI's 34 limit between the two axes:
+        # strong-axis r = 0.3·32 = 9.6 in → λ_x = 1·216/9.6 = 22.5 (< 34, non-slender)
+        # weak-axis   r = 0.3·16 = 4.8 in → λ_y = 1·216/4.8 = 45.0 (> 34, slender)
+        Lu_in = 216.0
+        Lu_m  = Lu_in / 39.37
+        geometry = ConcreteMemberGeometry(Lu_m; kx = 1.0, ky = 1.0, braced = true)
+
+        # Per-axis slenderness ratios. The 16×32 section gives λ_y = 2·λ_x
+        # *exactly* (h = 2·b), so use ≈ on the ratio rather than a strict
+        # inequality.
+        λx = StructuralSizer.slenderness_ratio(section, geometry, StructuralSizer.StrongAxis())
+        λy = StructuralSizer.slenderness_ratio(section, geometry, StructuralSizer.WeakAxis())
+        @test λx ≈ Lu_in / (0.3 * 32.0) rtol = 0.01
+        @test λy ≈ Lu_in / (0.3 * 16.0) rtol = 0.01
+        @test λy ≈ 2 * λx               rtol = 1e-6
+
+        # Per-axis slenderness limit check at M1/M2 = 0 (so limit = 34):
+        # strong-axis 22.5 < 34 (non-slender); weak-axis 45 > 34 (slender).
+        @test !StructuralSizer.should_consider_slenderness(
+            section, geometry, StructuralSizer.StrongAxis(); M1=0.0, M2=100.0)
+        @test  StructuralSizer.should_consider_slenderness(
+            section, geometry, StructuralSizer.WeakAxis();   M1=0.0, M2=100.0)
+
+        # Magnified moment about each axis. To make the magnification
+        # observable we (a) push Pu up so Pu/(0.75·Pc) is meaningful, and
+        # (b) use `transverse_load = true` so Cm = 1.0 (otherwise the floor
+        # `max(δns, 1.0)` clamps the small Cm·1/(1−x) products to 1.0 for
+        # this geometry, hiding the very effect we want to test).
+        mat = RC_3000_60
+        Pu = 200.0  # kip
+        result_x = StructuralSizer.magnify_moment_nonsway(
+            section, mat, geometry, Pu, 0.0, 100.0, StructuralSizer.StrongAxis();
+            transverse_load = true)
+        result_y = StructuralSizer.magnify_moment_nonsway(
+            section, mat, geometry, Pu, 0.0, 100.0, StructuralSizer.WeakAxis();
+            transverse_load = true)
+
+        @test result_x.slender == false        # 22.5 < 34
+        @test result_x.δns      == 1.0         # no magnification on strong axis
+        @test result_y.slender == true         # 45 > 34
+        @test result_y.δns      > 1.0          # weak-axis amplifies
+        @test result_y.Mc       > result_x.Mc  # → larger design moment about y
+
+        # Pc must differ between axes (different Ig): weak-axis Pc < strong-axis Pc
+        # for a 16×32 column. The geometry argument carries kx = ky here, so the
+        # difference is driven purely by Ig.
+        Pc_y = StructuralSizer.critical_buckling_load(
+            section, mat, geometry, StructuralSizer.WeakAxis())
+        Pc_x = StructuralSizer.critical_buckling_load(
+            section, mat, geometry, StructuralSizer.StrongAxis())
+        @test Pc_y < Pc_x   # weaker axis has smaller Ig → smaller Pc
     end
 end

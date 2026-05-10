@@ -161,6 +161,11 @@ export FiberReinforcedConcrete
 export concrete_fc, concrete_fc_mpa, concrete_E, concrete_wc
 export AggregateType, siliceous, carbonate, sand_lightweight, lightweight
 
+# Empirical ECC distribution registry (NRMCA / RMC EPD dataset).
+export ECCDistribution, ecc_distribution, ecc_distribution_per_kg
+export ecc_samples, sample_ecc_per_kg
+export list_strength_classes, list_compositions
+
 # --- Fire protection ---
 export FireProtection, NoFireProtection, SFRM, IntumescentCoating, CustomCoating
 export SurfaceCoating, coating_weight_per_foot
@@ -206,7 +211,7 @@ export standard_rc_columns, standard_rc_circular_columns
 export square_rc_columns, rectangular_rc_columns, low_capacity_rc_columns, high_capacity_rc_columns, all_rc_rect_columns
 export standard_circular_columns, low_capacity_circular_columns, high_capacity_circular_columns
 export common_rc_circular_columns, all_rc_circular_columns
-export effective_depth, compression_steel_depth, moment_of_inertia, radius_of_gyration, n_bars
+export effective_depth, inner_layer_effective_depth, compression_steel_depth, moment_of_inertia, radius_of_gyration, n_bars
 export extreme_tension_depth, get_bar_depths, bar_depth_from_compression
 
 # --- Capacity checkers ---

@@ -92,47 +92,51 @@ function _smooth_PnMn(b::Float64, h::Float64, ρg::Float64, c::Float64,
     Cc = 0.85 * fc * a_eff * b
     Mc = Cc * (h / 2.0 - a_eff / 2.0)
 
-    # Bar-count-adaptive steel distribution via window functions
+    # Bar-count-adaptive steel distribution: matches the generalized
+    # `:perimeter` layout in `_generate_bar_positions` (PR-5).  After PR-5
+    # the section places 4 corner bars plus `n_int = n_bars - 4` interior
+    # bars distributed proportionally across the 4 faces.  For an
+    # approximately-square section the split is half-and-half between the
+    # bending faces (top + bottom) and the side faces (left + right), so:
     #
-    # The RCColumnSection constructor has three bar-placement branches:
-    #   n_act = 8   → 6 face + 2 side   (f_face = 0.75)     special
-    #   n_act = 12  → 8 face + 4 side   (f_face = 0.67)     special
-    #   all other n → remaining bars at faces (f_face = 1.0)  generic
+    #   face_bars = 4 corners + n_int / 2          (top + bottom combined)
+    #   side_bars = n_int / 2                      (left + right combined)
+    #   f_face    = face_bars / n_bars = 0.5 + 2 / n_bars
     #
-    # n_act = max(4, ceil_even(ρg·b·h / As_bar)), so:
-    #   n_est ∈ (6, 8]  → n_act = 8   (special)
-    #   n_est ∈ (10,12] → n_act = 12  (special)
-    #   everything else → n_act = generic (f_face = 1.0)
+    # Sanity points: f_face(4) = 1.0, f_face(8) = 0.75, f_face(12) = 0.667,
+    # f_face(16) = 0.625, f_face(32) = 0.5625.  All consistent with the
+    # `:perimeter` distribution computed by `_split_perimeter`.
     #
-    # We approximate these intervals with smooth window functions
-    # (product of two opposing sigmoids) which are C∞ and sharply
-    # localised to the correct n_est range.  Unlike Gaussians, they
-    # do NOT bleed into neighbouring intervals.
+    # For non-square sections the proportional split skews bars onto the
+    # longer face — this is a small correction relative to the 0.5+2/n
+    # baseline and is absorbed by the 10% conservatism factor applied in
+    # `_smooth_rc_pm_util` / `_smooth_rc_pm_capacity`.
     #
     # Two conservatism mechanisms:
-    #   a. Bar count hard cap at 32 (matches _build_nlp_trial_section)
-    #   b. 5% capacity reduction in util/capacity functions (accounts for
-    #      smooth-vs-discrete approximation errors in φ, stress clamp, etc.)
+    #   a. Bar count hard cap at 32 (matches `_build_nlp_trial_section`)
+    #   b. 10% capacity reduction in util/capacity functions (accounts for
+    #      smooth-vs-discrete approximation errors in φ, stress clamp,
+    #      finite layer count, and the square-section bar-split assumption).
 
     d = h - cover
     As_bar_est = 0.79                       # #8 bar (in²)
 
-    # Raw continuous bar count
     n_est_raw = ρg * b * h / As_bar_est
 
-    # Hard cap at 32 bars (matches _build_nlp_trial_section constructor cap)
-    # Using _smooth_min for NLP differentiability
+    # Hard cap at 32 bars (matches `_build_nlp_trial_section` cap); smooth
+    # min keeps the NLP differentiable.  Floor at 4 (corners) for sanity.
     n_est = _smooth_min(n_est_raw, 32.0; k=2.0)
+    n_est = _smooth_max(n_est, 4.0; k=2.0)
     As_total = n_est * As_bar_est
 
-    # Window functions: 1 inside interval, 0 outside (steep sigmoid)
-    _sig(x) = 1.0 / (1.0 + exp(-20.0 * x))
-    w8  = _sig(n_est -  6.0) * _sig( 8.0 - n_est)   # n_est ∈ ~(6, 8)
-    w12 = _sig(n_est - 10.0) * _sig(12.0 - n_est)   # n_est ∈ ~(10,12)
-
-    # Face fraction: drops only inside the special-case windows
-    f_face = 1.0 - 0.25 * w8 - 0.33 * w12
-    f_face = _smooth_max(f_face, 0.60; k=20.0)       # Safety floor
+    # Face fraction from the new `:perimeter` algorithm: 4 corners are
+    # always face bars; remaining n_int bars split evenly between bending
+    # and side faces for a square section, so f_face = 0.5 + 2 / n_est.
+    # Clamp to [0.5, 1.0] so smooth-min/max wobble cannot over- or
+    # under-credit face steel.
+    f_face = 0.5 + 2.0 / n_est
+    f_face = _smooth_min(f_face, 1.0; k=20.0)
+    f_face = _smooth_max(f_face, 0.5; k=20.0)
 
     f_side = 1.0 - f_face
 

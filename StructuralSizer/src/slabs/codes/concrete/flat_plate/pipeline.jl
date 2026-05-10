@@ -376,6 +376,21 @@ function _run_final_design(method, struc, slab, columns, moment_results, seconda
     # Lightweight concrete factor — shared by torsion discount in both directions
     _λ_val = _fea_direct_mode ? Float64(isnothing(opts.λ) ? material.concrete.λ : opts.λ) : 1.0
 
+    # ACI 318-11 §13.6.4.2 — torsional stiffness ratio βt of the edge-supporting
+    # member (used to interpolate the exterior-negative column-strip fraction
+    # between 100 % at βt = 0 and 75 % at βt ≥ 2.5).  Mirrors the resolution
+    # done in the moment-analysis caller; centralised here so the strip-design
+    # path has it without duplicating the βt computation.
+    _βt_design = if !isnothing(opts.edge_beam_βt)
+        Float64(opts.edge_beam_βt)
+    elseif opts.has_edge_beam
+        _c1_avg_eb = sum(col.c1 for col in columns) / length(columns)
+        _c2_avg_eb = sum(col.c2 for col in columns) / length(columns)
+        Float64(edge_beam_βt(h, _c1_avg_eb, _c2_avg_eb, slab.spans.secondary))
+    else
+        0.0
+    end
+
     rebar_design = if _fea_direct_mode
         # FEA direct extraction — extract CS/MS moments from the shell model.
         _setup = _moment_analysis_setup(struc, slab, columns, h, γ_concrete)
@@ -412,10 +427,11 @@ function _run_final_design(method, struc, slab, columns, moment_results, seconda
                 _setup.span_axis; rebar_axis=_rebar_ax,
                 torsion_discount=_td, verbose=verbose)
         end
-        design_strip_reinforcement_fea(_fea_strips, _setup.l2, h, d, fc, fy, cover;
+        design_strip_reinforcement_fea(_fea_strips, _setup.l1, _setup.l2, h, d, fc, fy, cover;
                                         verbose=verbose)
     else
-        design_strip_reinforcement(moment_results, columns, h, d, fc, fy, cover; verbose=verbose)
+        design_strip_reinforcement(moment_results, columns, h, d, fc, fy, cover;
+                                    βt=_βt_design, verbose=verbose)
     end
 
     # Check for inadequate section (Whitney block solution failed)
@@ -431,8 +447,31 @@ function _run_final_design(method, struc, slab, columns, moment_results, seconda
     end
 
     # ─── Secondary Direction Reinforcement ───
-    _db_inner = 0.625u"inch"
-    d_inner = d - _db_inner
+    #
+    # In a two-way slab the secondary-direction bars sit *below* the primary
+    # bars in the section (cover requirements per ACI 318-11 §7.7 plus the
+    # bar-spacing geometry of §7.6 imply a layered placement).  The effective
+    # depth of the inner (secondary) layer is therefore:
+    #
+    #   d_inner = h − cover − db_primary − db_secondary/2     (geometric)
+    #
+    # The actual primary bar diameter comes from the reinforcement just
+    # selected by the primary design; we take the MAX across all strip
+    # locations (CS ext-neg, pos, int-neg + MS pos, int-neg) so d_inner is
+    # conservative even when mixed sizes are chosen.  We assume
+    # `db_secondary == db_primary` (PCA flat-plate convention — same bar
+    # size in both directions).  Engineering judgment: if the secondary
+    # design later selects a smaller bar, d_inner will be slightly
+    # conservative; on the next iteration this self-corrects via the bar
+    # size feeding back into the next primary pass.
+    _db_primary_max = let
+        _strips = vcat(rebar_design.column_strip_reinf,
+                       rebar_design.middle_strip_reinf)
+        _bar_dias = [bar_diameter(sr.bar_size) for sr in _strips if sr.bar_size > 0]
+        isempty(_bar_dias) ? bar_dia : maximum(_bar_dias)
+    end
+    _db_secondary = _db_primary_max  # PCA flat-plate convention (engineering judgment)
+    d_inner = inner_layer_effective_depth(h, cover, _db_primary_max, _db_secondary)
     _secondary_element_rebar_field = nothing
 
     secondary_rebar_design = if !isnothing(secondary_results) && d_inner > 0.0u"inch"
@@ -470,10 +509,11 @@ function _run_final_design(method, struc, slab, columns, moment_results, seconda
                     _sec_setup.span_axis; rebar_axis=_sec_rebar_ax,
                     torsion_discount=_td_sec, verbose=verbose)
             end
-            design_strip_reinforcement_fea(_sec_fea_strips, _sec_setup.l2, h, d_inner, fc, fy, cover;
+            design_strip_reinforcement_fea(_sec_fea_strips, _sec_setup.l1, _sec_setup.l2, h, d_inner, fc, fy, cover;
                                             verbose=verbose)
         else
-            design_strip_reinforcement(secondary_results, columns, h, d_inner, fc, fy, cover; verbose=verbose)
+            design_strip_reinforcement(secondary_results, columns, h, d_inner, fc, fy, cover;
+                                        βt=_βt_design, verbose=verbose)
         end
     else
         nothing
@@ -516,7 +556,9 @@ function _run_final_design(method, struc, slab, columns, moment_results, seconda
 
         cs_neg_idx = col.position == :interior ? 3 : 1
         As_provided_cs = rebar_design.column_strip_reinf[cs_neg_idx].As_provided
-        selected = select_bars(As_provided_cs, rebar_design.column_strip_width)
+        # ACI 318-11 §13.3.2 + §7.6.5 — slab-thickness-dependent s_max
+        selected = select_bars(As_provided_cs, rebar_design.column_strip_width;
+                               max_spacing=max_bar_spacing(h))
         Ab = bar_area(selected.bar_size)
 
         transfer = additional_transfer_bars(As_transfer, As_provided_cs, bb,
@@ -537,7 +579,9 @@ function _run_final_design(method, struc, slab, columns, moment_results, seconda
 
     if !integrity_check.ok
         cs_width = rebar_design.column_strip_width
-        bumped = select_bars(integrity.As_integrity, cs_width)
+        # ACI 318-11 §13.3.2 + §7.6.5 — slab-thickness-dependent s_max
+        bumped = select_bars(integrity.As_integrity, cs_width;
+                             max_spacing=max_bar_spacing(h))
         rebar_design.column_strip_reinf[2] = StripReinforcement(
             :pos, cs_pos_reinf.Mu, cs_pos_reinf.As_reqd, cs_pos_reinf.As_min,
             uconvert(u"m^2", bumped.As_provided), bumped.bar_size,
@@ -907,9 +951,12 @@ function size_flat_plate!(
     # Cleared when h changes (d changes) — column size changes auto-miss
     _punch_geom_cache = Dict{Tuple{Float64,Float64,Float64,Symbol,Symbol}, NamedTuple}()
     
-    # Preallocate column geometries (only column height matters; updated if it changes)
+    # Preallocate column geometries (only column height matters; updated if it changes).
+    # Slab pipeline assumes pinned-pinned about both axes, so kx = ky = 1.0
+    # is set explicitly (rather than relying on the legacy single-axis `k`)
+    # to make the pinned-pinned assumption obvious to readers.
     geometries = [
-        ConcreteMemberGeometry(col.base.L; Lu=col.base.L, k=1.0, braced=true)
+        ConcreteMemberGeometry(col.base.L; Lu=col.base.L, kx=1.0, ky=1.0, braced=true)
         for col in columns
     ]
     
@@ -1017,6 +1064,13 @@ function size_flat_plate!(
             end
             
             # ─── A1: Moment Analysis ───
+            # `_βt` drives DDM/EFM moment-fraction interpolation (ACI 318-11
+            # Table 13.6.4.2).  For `has_edge_beam=true` without an explicit
+            # value, this falls back to the slab-strip torsional constant (a
+            # small number ≈ 0.1–0.2 for a typical flat plate with no real
+            # perimeter beam).  FEA receives the user's *intent* separately
+            # via `_eb_βt_explicit` so it can distinguish "no real edge beam"
+            # from "edge beam present" and avoid double-counting.
             _βt = 0.0
             if !isnothing(opts.edge_beam_βt)
                 _βt = opts.edge_beam_βt
@@ -1025,6 +1079,13 @@ function size_flat_plate!(
                 _c2_avg = sum(col.c2 for col in columns) / length(columns)
                 _βt = edge_beam_βt(h, _c1_avg, _c2_avg, slab.spans.secondary)
             end
+
+            # FEA-specific edge-beam input: only the user's explicitly provided
+            # `edge_beam_βt` triggers explicit edge-beam frame elements.  When
+            # only `has_edge_beam=true` was set, we let FEA apply its own
+            # ACI 318-11 §13.6.4.2 default (Table 13.6.4.2 cap of βt = 2.5).
+            _eb_βt_explicit = (opts.edge_beam_βt isa Number) ?
+                Float64(opts.edge_beam_βt) : 0.0
             
             moment_results = run_moment_analysis(
                 method, struc, slab, columns, h, fc, Ecs, γ_concrete;
@@ -1034,6 +1095,8 @@ function size_flat_plate!(
                 cache     = analysis_cache isa FEAModelCache ? analysis_cache : nothing,
                 drop_panel = drop_panel,
                 βt = _βt,
+                has_edge_beam = opts.has_edge_beam,
+                edge_beam_βt  = _eb_βt_explicit,
                 col_I_factor = opts.col_I_factor,
             )
             
@@ -1043,6 +1106,8 @@ function size_flat_plate!(
                 run_secondary_moment_analysis(
                     method, struc, slab, columns, h, fc, Ecs, γ_concrete;
                     verbose=verbose, drop_panel=drop_panel, βt=_βt,
+                    has_edge_beam = opts.has_edge_beam,
+                    edge_beam_βt  = _eb_βt_explicit,
                 )
             end
             
@@ -1216,7 +1281,8 @@ function size_flat_plate!(
             # ─── A5: Flexural Adequacy (Tension-Controlled) ───
             verbose && @debug "FLEXURAL ADEQUACY CHECK (ACI 21.2.2)"
             
-            flexure_result = check_flexural_adequacy(moment_results, columns, d, fc; verbose=verbose)
+            flexure_result = check_flexural_adequacy(moment_results, columns, d, fc;
+                                                     βt=_βt, verbose=verbose)
             
             if !flexure_result.ok
                 h = round_up_thickness(h + h_increment, h_increment)

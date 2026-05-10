@@ -328,20 +328,29 @@ function _is_feasible_rc_column(
         M1y = to_kipft(demand.M1y)
         M2y = to_kipft(demand.M2y)
         
-        # Magnify moment if slender (using actual end moments for Cm)
+        transverse_load = demand.transverse_load
+
+        # Magnify moment if slender — strong-axis (bending about x).
+        # Uses geometry.kx, r ≈ 0.3·h, Ig = b·h³/12.
         result = magnify_moment_nonsway(
             section, mat, geometry,
-            Pu, M1x, M2x;
-            βdns = βdns
+            Pu, M1x, M2x, StrongAxis();
+            βdns = βdns,
+            transverse_load = transverse_load,
         )
         Mux = result.Mc
-        
-        # Also magnify Muy if biaxial
+
+        # Also magnify Muy if biaxial — weak-axis (bending about y).
+        # WeakAxis() forces the slenderness path to use geometry.ky,
+        # r ≈ 0.3·b, and Ig = h·b³/12, which differs from the strong axis
+        # for non-square columns (e.g., a 16×32 column non-slender about
+        # x can still be slender about y).
         if Muy > 0 && checker.include_biaxial
             result_y = magnify_moment_nonsway(
                 section, mat, geometry,
-                Pu, M1y, M2y;
-                βdns = βdns
+                Pu, M1y, M2y, WeakAxis();
+                βdns = βdns,
+                transverse_load = transverse_load,
             )
             Muy = result_y.Mc
         end
@@ -401,7 +410,7 @@ function get_feasibility_error_msg(
     Muy = to_kipft(demand.Muy)
     
     "No feasible RC sections: Pu=$(Pu) kip, Mux=$(Mux) kip·ft, Muy=$(Muy) kip·ft, " *
-    "Lu=$(geometry.Lu), k=$(geometry.k)"
+    "Lu=$(geometry.Lu), kx=$(geometry.kx), ky=$(geometry.ky)"
 end
 
 # ==============================================================================
@@ -536,6 +545,16 @@ function explain_feasibility(
     push!(checks, CheckResult("depth", d_section <= d_limit,
           d_ratio, d_section, d_limit, ""))
 
+    # --- ACI 318-11 §10.3.6 Maximum Axial Cap (φPn ≤ φPn,max) ---
+    # Eq. (10-1) spiral: φPn,max = 0.85·φ·P0; Eq. (10-2) tied: 0.80·φ·P0.
+    # Reported as a separate check so traces show the cap explicitly when it
+    # governs (utilization > 1.0) and as informational otherwise.
+    diagram = cache.diagrams[j]
+    φPn_cap = get_control_point(diagram, :max_compression).φPn
+    cap_ratio = φPn_cap > 0 ? Pu / φPn_cap : Inf
+    push!(checks, CheckResult("axial_cap", cap_ratio <= 1.0,
+          cap_ratio, Pu, φPn_cap, "ACI 318-11 10.3.6"))
+
     # --- Slenderness Effects — ACI 318-19 §6.6.4 ---
     if checker.include_slenderness
         mat = (fc = cache.fc_ksi, fy = cache.fy_ksi, Es = cache.Es_ksi, εcu = cache.εcu)
@@ -544,11 +563,21 @@ function explain_feasibility(
         M1y = to_kipft(demand.M1y)
         M2y = to_kipft(demand.M2y)
 
-        result_x = magnify_moment_nonsway(section, mat, geometry, Pu, M1x, M2x; βdns=βdns)
+        transverse_load = demand.transverse_load
+
+        # Strong axis (about x): geometry.kx, r ≈ 0.3·h, Ig = b·h³/12.
+        result_x = magnify_moment_nonsway(section, mat, geometry, Pu, M1x, M2x,
+                                          StrongAxis();
+                                          βdns=βdns,
+                                          transverse_load=transverse_load)
         Mux = result_x.Mc
 
         if Muy > 0 && checker.include_biaxial
-            result_y = magnify_moment_nonsway(section, mat, geometry, Pu, M1y, M2y; βdns=βdns)
+            # Weak axis (about y): geometry.ky, r ≈ 0.3·b, Ig = h·b³/12.
+            result_y = magnify_moment_nonsway(section, mat, geometry, Pu, M1y, M2y,
+                                              WeakAxis();
+                                              βdns=βdns,
+                                              transverse_load=transverse_load)
             Muy = result_y.Mc
         end
 
@@ -559,7 +588,7 @@ function explain_feasibility(
     end
 
     # --- Uniaxial P-M Check (x-axis) — ACI 318-19 §22.4 ---
-    diagram = cache.diagrams[j]
+    # `diagram` was bound above for the §10.3.6 axial-cap check.
     check_x = check_PM_capacity(diagram, Pu, Mux)
     pm_ratio_x = check_x.adequate ? (check_x.φMn_at_Pu > 0 ? Mux / check_x.φMn_at_Pu : 0.0) : Inf
     push!(checks, CheckResult("pm_interaction_x", check_x.adequate,

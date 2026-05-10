@@ -80,7 +80,8 @@ function _mat_plan_sizing(
         #     ACI 318 §22.6.4.1 — critical section at d/2 from column face.
         c_max = maximum(max(d.c1, d.c2) for d in demands)
         db_max = bar_diameter(max(opts.bar_size_x, opts.bar_size_y))
-        d_est  = opts.min_depth - opts.cover - db_max
+        # d per ACI 318-11 §2.2 (corpus: aci-318-11, page 37): d = h − cover − db/2.
+        d_est  = opts.min_depth - opts.cover - db_max / 2
         d_est  = max(d_est, 6.0u"inch")
         oh_punch = c_max / 2 + d_est / 2   # ACI 318 §22.6.4.1
 
@@ -157,26 +158,32 @@ Reused by all mat methods.
 """
 function _mat_punching_util(demands, plan, qu, d_eff, fc, λ, ϕv)
     util = 0.0
-    B, Lm, overhang = plan.B, plan.Lm, plan.overhang
+    B, Lm = plan.B, plan.Lm
     xs_loc, ys_loc = plan.xs_loc, plan.ys_loc
 
+    # Geometric edge / corner detection per ACI 318-11 §22.6.4.1 (corpus:
+    # aci-318-11, page 397).  The critical section lies at d/2 from each
+    # column face; a column has full 4-sided critical perimeter iff the mat
+    # extends at least `c/2 + d/2` beyond the column face on that side.
+    # The earlier `overhang ± 0.5 ft` threshold conflated "leftmost column
+    # in the grid" with "perimeter extends off the mat", which silently
+    # misclassified centered single-column mats (overhang ≈ B/2) as corner.
+    # A 0.5 ft tolerance keeps numerical noise from flipping classification.
+    tol = 0.5u"ft"
     for j in eachindex(demands)
         c1j, c2j = demands[j].c1, demands[j].c2
-        is_edge = (
-            xs_loc[j] < overhang + 0.5u"ft" ||
-            xs_loc[j] > (B - overhang - 0.5u"ft") ||
-            ys_loc[j] < overhang + 0.5u"ft" ||
-            ys_loc[j] > (Lm - overhang - 0.5u"ft")
-        )
-        pos_sym = is_edge ? :edge : :interior
-        # Corner detection: within tolerance of two edges simultaneously
-        n_close_edges = (
-            (xs_loc[j] < overhang + 0.5u"ft") +
-            (xs_loc[j] > (B - overhang - 0.5u"ft")) +
-            (ys_loc[j] < overhang + 0.5u"ft") +
-            (ys_loc[j] > (Lm - overhang - 0.5u"ft"))
-        )
+        # Half-extent of the critical section, taken as the larger column
+        # dimension to be conservative when c1 ≠ c2.
+        half_crit = max(c1j, c2j) / 2 + d_eff / 2
+
+        edge_left   = xs_loc[j]      < half_crit + tol
+        edge_right  = (B  - xs_loc[j]) < half_crit + tol
+        edge_bottom = ys_loc[j]      < half_crit + tol
+        edge_top    = (Lm - ys_loc[j]) < half_crit + tol
+        n_close_edges = edge_left + edge_right + edge_bottom + edge_top
+        is_edge = n_close_edges >= 1
         is_corner = n_close_edges >= 2
+        pos_sym = is_edge ? :edge : :interior
         Ac = if demands[j].shape == :circular
             A_full = π * (c1j + d_eff)^2 / 4
             is_corner ? A_full / 2 :       # 2-sided critical perimeter
@@ -218,10 +225,22 @@ function _mat_build_result(
 
     Ab_x = bar_area(opts.bar_size_x)
     Ab_y = bar_area(opts.bar_size_y)
-    n_xb = ceil(Int, As_x_bot / Ab_x)
-    n_xt = ceil(Int, As_x_top / Ab_x)
-    n_yb = ceil(Int, As_y_bot / Ab_y)
-    n_yt = ceil(Int, As_y_top / Ab_y)
+
+    # Maximum spacing for primary flexural reinforcement in slabs / footings:
+    # ACI 318-11 §7.6.5 (corpus: aci-318-11, page 96) — `min(3h, 18 in.)`.
+    # The mat carries column reactions in two-way action so each layer is
+    # treated as primary flexural everywhere; this is more conservative than
+    # falling back to the §7.12.2.2 T&S limit (5h, 18 in.) for regions where
+    # only minimum steel governs.
+    max_s_flex = min(3h, 18.0u"inch")
+
+    # x-direction bars (running along x) are distributed across mat width Lm;
+    # y-direction bars are distributed across mat width B.  Bar count is the
+    # larger of `As / A_bar` and `(perpendicular width) / max_s_flex`.
+    n_xb = max(ceil(Int, As_x_bot / Ab_x), ceil(Int, Lm / max_s_flex))
+    n_xt = max(ceil(Int, As_x_top / Ab_x), ceil(Int, Lm / max_s_flex))
+    n_yb = max(ceil(Int, As_y_bot / Ab_y), ceil(Int, B  / max_s_flex))
+    n_yt = max(ceil(Int, As_y_top / Ab_y), ceil(Int, B  / max_s_flex))
     len_x = B  - 2cover
     len_y = Lm - 2cover
     V_steel = uconvert(u"m^3",
@@ -327,10 +346,23 @@ end
 """
 Governing moment for a strip of the mat in one direction.
 
-Treats column-line strips as continuous beams: negative ≈ wL²/10,
-positive ≈ wL²/12 (interior); end spans use wL²/11.
+Treats column-line strips as continuous beams using ACI approximate
+moment coefficients: negative ≈ wL²/10 (interior), wL²/10 (first
+interior), wL²/11 (positive at end span), wL²/12 (positive at
+interior span); cantilever single span uses wL²/2.
 
-Returns (M_pos, M_neg) both as positive Unitful Torques.
+The argument `trib_width` is the section width over which the
+returned moment acts. For the "uniform mat reinforcement at the
+worst per-unit-width intensity" convention used by `_design_mat_rigid`
+and the rigid envelope component of `_design_mat_shukla`, callers
+pass the full mat width perpendicular to the strip span (Lm for
+x-strips, B for y-strips) so the result is a total moment that
+matches the per-unit-length × full-width convention used by the
+Shukla and FEA paths. The previous convention of passing the
+average tributary width undercounted reinforcement when flexure
+governed (corpus: aci-336-combined-footings-mats §6.1.2 Step 3).
+
+Returns `(M_pos, M_neg)` both as positive Unitful Torques.
 """
 function _rigid_mat_strip_moments(qu::Pressure, trib_width::Length,
                                    spans::Vector{<:Length})
@@ -395,11 +427,14 @@ function _design_mat_rigid(
     # ── Step 2: Thickness from Punching Shear (per-column dimensions) ──
     # Uses _mat_punching_util (with corner detection) so thickness iteration
     # and final utilization are computed by the same code path.
+    # Effective depth per ACI 318-11 §2.2 (corpus: aci-318-11, page 37):
+    # d = h − cover − db/2 to the centroid of the worst-case bar layer.
     h = opts.min_depth
     h_incr = opts.depth_increment
+    db_eff = max(db_x, db_y) / 2
 
     for iter in 1:60
-        d_eff = h - cover - max(db_x, db_y)
+        d_eff = h - cover - db_eff
         d_eff < 6.0u"inch" && (h += h_incr; continue)
 
         util_p = _mat_punching_util(demands, plan, qu, d_eff, fc, λ, ϕv)
@@ -408,14 +443,19 @@ function _design_mat_rigid(
         iter == 60 && @warn "Mat footing thickness did not converge at h=$h"
     end
 
-    d_eff = h - cover - max(db_x, db_y)
+    d_eff = h - cover - db_eff
 
     # ── Step 4: Flexural Reinforcement via Strip Statics ──
-    avg_trib_x = isempty(plan.y_spans) ? Lm : sum(plan.y_spans) / length(plan.y_spans)
-    mom_x = _rigid_mat_strip_moments(qu, avg_trib_x, plan.x_spans)
-
-    avg_trib_y = isempty(plan.x_spans) ? B : sum(plan.x_spans) / length(plan.x_spans)
-    mom_y = _rigid_mat_strip_moments(qu, avg_trib_y, plan.y_spans)
+    # ACI 336.2R-88 §6.1.2 Step 3 (Kramrisch strip method, corpus:
+    # aci-336-combined-footings-mats Chapter 6). Pass the full mat
+    # width perpendicular to the strip span so the returned moment is
+    # the total mat moment under the worst per-unit-width intensity
+    # (qu × Ls²/coeff). This matches the convention used by the Shukla
+    # and Winkler-FEA paths (per-unit-length moment × full mat width)
+    # and is what `_mat_build_result` expects when it converts As to
+    # bar count distributed across the full mat width.
+    mom_x = _rigid_mat_strip_moments(qu, Lm, plan.x_spans)
+    mom_y = _rigid_mat_strip_moments(qu, B,  plan.y_spans)
 
     As_x_bot = max(_flexural_steel_footing(mom_x.M_pos, Lm, d_eff, fc, fy, ϕf),
                    _min_steel_footing(Lm, h, fy))

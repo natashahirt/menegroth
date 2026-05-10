@@ -214,6 +214,8 @@ function run_moment_analysis(
     cache = nothing,  # API parity (unused by EFM)
     drop_panel::Union{Nothing, DropPanelGeometry} = nothing,
     βt::Float64 = 0.0,  # API parity (unused by EFM — torsion captured in Kt)
+    has_edge_beam::Bool = false,    # API parity (EFM uses Kt directly)
+    edge_beam_βt::Float64 = 0.0,    # API parity (EFM uses Kt directly)
     col_I_factor::Float64 = 0.70,  # ignored — determined by method.cracked_columns
 )
     # Derive col_I_factor from method fields:
@@ -438,12 +440,20 @@ end
 Run EFM in the perpendicular direction (swapped l1↔l2).
 
 Builds a fresh equivalent frame for the perpendicular direction using
-`_secondary_moment_analysis_setup`.  The EFM span properties, joint Kec,
-and moment distribution are recomputed for the swapped geometry — the frame
-model cannot be reused because stiffnesses change when l1↔l2 swap and the
-column dimension facing the span switches from c1 to c2.
+`_secondary_moment_analysis_setup`.  The EFM span properties, joint Kec
+(or `Kec`-reduced ASAP stubs), and frame solve are recomputed for the
+swapped geometry — the frame model cannot be reused because stiffnesses
+change when l1↔l2 swap and the column dimension facing the span switches
+from c1 to c2.
+
+Honors `method.solver` (`:asap` or `:hardy_cross`), `method.column_stiffness`,
+`method.cracked_columns`, and `method.pattern_loading` — same option matrix
+as the primary direction.
 
 Returns a full `MomentAnalysisResult` for consistency with the primary direction.
+
+# Reference
+- ACI 318-11 §13.7
 """
 function run_secondary_moment_analysis(
     method::EFM,
@@ -454,7 +464,10 @@ function run_secondary_moment_analysis(
     drop_panel = nothing,
     kwargs...
 )
-    use_kc_only = method.column_stiffness == :Kc
+    # ASAP stubs: gross Ig (1.0) unless cracked_columns=true (0.70).
+    # Hardy Cross: always gross Ig (PCA convention).
+    col_I_factor = (method.solver == :asap && method.cracked_columns) ? 0.70 : 1.0
+    use_kc_only  = method.column_stiffness == :Kc
 
     setup = _secondary_moment_analysis_setup(struc, slab, supporting_columns, h, γ_concrete)
     (; l1, l2, ln, span_axis, c1_avg, qD, qL, qu, M0) = setup
@@ -466,28 +479,78 @@ function run_secondary_moment_analysis(
     Ecc = Ec(fc_col, wc_pcf)
     H = _get_column_height(supporting_columns)
 
-    # Build EFM spans for perpendicular direction (fresh — no cache reuse)
+    # Build EFM spans for perpendicular direction (fresh — no cache reuse).
+    # Unlike the primary direction, we cannot reuse the frame model because
+    # spans, stiffnesses, and column orientation all change under l1↔l2 swap.
     spans = _build_efm_spans(supporting_columns, l1, l2, ln, h, Ecs; drop_panel=drop_panel)
     joint_positions = [col.position for col in supporting_columns]
 
     n_spans = length(spans)
     use_pattern = method.pattern_loading && requires_pattern_loading(qD, qL) && n_spans >= 2
 
-    # Solve via moment distribution (lightweight, always available)
-    jKec = _compute_joint_Kec(spans, joint_positions, H, Ecs, Ecc; 
-                              column_shape=col_shape_val, use_kc_only=use_kc_only,
-                              columns=supporting_columns)
-    span_moments = solve_moment_distribution(spans, jKec, joint_positions, qu; verbose=false)
+    # Precompute solver inputs once: jKec for Hardy Cross, Kec reduction
+    # factors for ASAP column stubs (ACI 318-11 §13.7.4).
+    _cached_jKec = method.solver == :hardy_cross ?
+        _compute_joint_Kec(spans, joint_positions, H, Ecs, Ecc;
+                           column_shape=col_shape_val, use_kc_only=use_kc_only,
+                           columns=supporting_columns) :
+        nothing
+
+    _kec_factors = method.solver == :asap ?
+        _compute_kec_reduction_factors(spans, joint_positions, H, Ecs, Ecc;
+                                       column_shape=col_shape_val, use_kc_only=use_kc_only,
+                                       columns=supporting_columns) :
+        nothing
+
+    # ─── Helper: run the chosen solver for a given (scalar or per-span) load ───
+    # Mirrors the primary direction's `_solve_once`, minus the cache reuse
+    # (secondary frame is built fresh each call — see comment above).
+    function _solve_once(qu_arg)
+        if method.solver == :asap
+            model, span_elements, _col_stubs = build_efm_asap_model(
+                spans, joint_positions, qu;
+                Ecs = Ecs, Ecc = Ecc,
+                ν_concrete = ν_concrete,
+                ρ_concrete = γ_concrete,
+                columns = supporting_columns,
+                verbose = false,
+                col_I_factor = col_I_factor,
+                kec_factors = _kec_factors,
+            )
+            if qu_arg isa Vector
+                n_loads = length(model.loads)
+                n_per_span = n_loads ÷ n_spans
+                for (i, load) in enumerate(model.loads)
+                    span_idx = (i - 1) ÷ n_per_span + 1
+                    span_idx > n_spans && break
+                    w_N_m = uconvert(u"N/m", qu_arg[span_idx] * l2)
+                    load.value = [0.0u"N/m", 0.0u"N/m", -w_N_m]
+                end
+            end
+            solve_efm_frame!(model)
+            return extract_span_moments(model, span_elements, spans; qu=qu)
+
+        elseif method.solver == :hardy_cross
+            return solve_moment_distribution(spans, _cached_jKec, joint_positions,
+                                             qu_arg; verbose=false)
+        else
+            error("Unknown EFM solver: $(method.solver)")
+        end
+    end
+
+    # Baseline (full-load) solve
+    span_moments = _solve_once(qu)
 
     M_neg_ext = span_moments[1].M_neg_left
     M_neg_int = span_moments[1].M_neg_right
-    M_pos = span_moments[1].M_pos
+    M_pos     = span_moments[1].M_pos
 
+    # Pattern-loading envelope (ACI 318-11 §13.7.6)
     if use_pattern
         for pat in generate_load_patterns(n_spans)
             all(==(:dead_plus_live), pat) && continue
             qu_ps = factored_pattern_loads(pat, qD, qL)
-            sm_pat = solve_moment_distribution(spans, jKec, joint_positions, qu_ps; verbose=false)
+            sm_pat = _solve_once(qu_ps)
             abs(sm_pat[1].M_neg_left)  > abs(M_neg_ext) && (M_neg_ext = sm_pat[1].M_neg_left)
             abs(sm_pat[1].M_neg_right) > abs(M_neg_int) && (M_neg_int = sm_pat[1].M_neg_right)
             abs(sm_pat[1].M_pos)       > abs(M_pos)     && (M_pos     = sm_pat[1].M_pos)
@@ -499,10 +562,10 @@ function run_secondary_moment_analysis(
     )
 
     if verbose
-        @debug "EFM SECONDARY DIRECTION" l1=l1 l2=l2 ln=ln M0=uconvert(kip*u"ft", M0)
+        solver_name = method.solver == :asap ? "EFM FRAME" : "MOMENT DISTRIBUTION"
+        @debug "EFM SECONDARY DIRECTION ($(solver_name))" l1=l1 l2=l2 ln=ln M0=uconvert(kip*u"ft", M0)
     end
 
-    # Return full MomentAnalysisResult for consistency with primary direction
     Vu_max = uconvert(kip, qu * l2 * ln / 2)
     return MomentAnalysisResult(
         uconvert(kip * u"ft", M0),
@@ -1817,73 +1880,107 @@ function run_moment_analysis(
     col_I_factor = (method.solver == :asap && method.cracked_columns) ? 0.70 : 1.0
     use_kc_only = method.column_stiffness == :Kc
     
-    # Kec reduction factors for ASAP column stubs
+    # Precompute solver inputs once: jKec for Hardy Cross, Kec reduction
+    # factors for ASAP column stubs (ACI 318-11 §13.7.4).
+    _cached_jKec = method.solver == :hardy_cross ?
+        _compute_joint_Kec(spans, joint_positions, H, Ecs, Ecc;
+                           column_shape=col_shape_val, use_kc_only=use_kc_only,
+                           columns=sorted_columns) :
+        nothing
+
     _kec_factors = method.solver == :asap ?
         _compute_kec_reduction_factors(spans, joint_positions, H, Ecs, Ecc;
                                        column_shape=col_shape_val, use_kc_only=use_kc_only,
                                        columns=sorted_columns) :
         nothing
-    
-    # Solve using selected method
-    if method.solver == :asap
-        if !isnothing(efm_cache) && efm_cache.initialized
-            _update_efm_sections_and_loads!(
-                efm_cache, spans, qu, Ecs, Ecc,
-                ν_concrete, ρ_concrete, sorted_columns;
-                col_I_factor = col_I_factor,
-                kec_factors = _kec_factors,
-            )
-            solve_efm_frame!(efm_cache.model; full_process=false)
-            span_moments = extract_span_moments(
-                efm_cache.model, efm_cache.span_elements, spans; qu=qu
-            )
-        else
-            model, span_elements, col_stubs = build_efm_asap_model(
-                spans, joint_positions, qu;
-                Ecs = Ecs, Ecc = Ecc,
-                ν_concrete = ν_concrete,
-                ρ_concrete = ρ_concrete,
-                columns = sorted_columns,
-                verbose = verbose,
-                col_I_factor = col_I_factor,
-                kec_factors = _kec_factors,
-            )
-            solve_efm_frame!(model)
-            span_moments = extract_span_moments(model, span_elements, spans; qu=qu)
 
-            !isnothing(efm_cache) && _populate_efm_cache!(efm_cache, model, span_elements, col_stubs, spans)
+    # Helper: run the chosen solver for a given (scalar or per-span) load.
+    # Hoisting this fixes a latent crash where the previous pattern loop
+    # referenced `joint_Kec` even under :asap (joint_Kec was scoped to the
+    # :hardy_cross branch only).
+    function _solve_once(qu_arg)
+        if method.solver == :asap
+            if !isnothing(efm_cache) && efm_cache.initialized
+                _update_efm_sections_and_loads!(
+                    efm_cache, spans, qu, Ecs, Ecc,
+                    ν_concrete, ρ_concrete, sorted_columns;
+                    col_I_factor = col_I_factor,
+                    kec_factors = _kec_factors,
+                )
+                _is_pattern = qu_arg isa Vector
+                if _is_pattern
+                    n_loads = length(efm_cache.model.loads)
+                    n_per_span = n_loads ÷ n_spans
+                    for (i, load) in enumerate(efm_cache.model.loads)
+                        span_idx = (i - 1) ÷ n_per_span + 1
+                        span_idx > n_spans && break
+                        w_N_m = uconvert(u"N/m", qu_arg[span_idx] * l2)
+                        load.value = [0.0u"N/m", 0.0u"N/m", -w_N_m]
+                    end
+                end
+                solve_efm_frame!(efm_cache.model; full_process=false, loads_only=_is_pattern)
+                return extract_span_moments(
+                    efm_cache.model, efm_cache.span_elements, spans; qu=qu
+                )
+            else
+                model, span_elements, col_stubs = build_efm_asap_model(
+                    spans, joint_positions, qu;
+                    Ecs = Ecs, Ecc = Ecc,
+                    ν_concrete = ν_concrete,
+                    ρ_concrete = ρ_concrete,
+                    columns = sorted_columns,
+                    verbose = verbose,
+                    col_I_factor = col_I_factor,
+                    kec_factors = _kec_factors,
+                )
+                if qu_arg isa Vector
+                    n_loads = length(model.loads)
+                    n_per_span = n_loads ÷ n_spans
+                    for (i, load) in enumerate(model.loads)
+                        span_idx = (i - 1) ÷ n_per_span + 1
+                        span_idx > n_spans && break
+                        w_N_m = uconvert(u"N/m", qu_arg[span_idx] * l2)
+                        load.value = [0.0u"N/m", 0.0u"N/m", -w_N_m]
+                    end
+                end
+                solve_efm_frame!(model)
+                sm = extract_span_moments(model, span_elements, spans; qu=qu)
+                !isnothing(efm_cache) && _populate_efm_cache!(efm_cache, model, span_elements, col_stubs, spans)
+                return sm
+            end
+
+        elseif method.solver == :hardy_cross
+            return solve_moment_distribution(spans, _cached_jKec, joint_positions,
+                                             qu_arg; verbose=verbose && !(qu_arg isa Vector))
+        else
+            error("Unknown EFM solver: $(method.solver)")
         end
-        
-    elseif method.solver == :hardy_cross
-        joint_Kec = _compute_joint_Kec(spans, joint_positions, H, Ecs, Ecc;
-                                       column_shape=col_shape_val, use_kc_only=use_kc_only,
-                                       columns=sorted_columns)
-        span_moments = solve_moment_distribution(spans, joint_Kec, joint_positions, qu; verbose=verbose)
-    else
-        error("Unknown EFM solver: $(method.solver)")
     end
-    
+
+    # Baseline (full-load) solve
+    span_moments = _solve_once(qu)
+
     if verbose
+        solver_name = method.solver == :asap ? "EFM FRAME" : "MOMENT DISTRIBUTION"
         @debug "───────────────────────────────────────────────────────────────────"
-        @debug "EFM RESULTS"
+        @debug "EFM RESULTS ($(solver_name))"
         @debug "───────────────────────────────────────────────────────────────────"
         for (i, sm) in enumerate(span_moments)
             @debug "Span $i" M_neg_left=uconvert(kip*u"ft", sm.M_neg_left) M_pos=uconvert(kip*u"ft", sm.M_pos) M_neg_right=uconvert(kip*u"ft", sm.M_neg_right)
         end
     end
-    
+
     M_neg_ext = span_moments[1].M_neg_left
     M_neg_int = span_moments[1].M_neg_right
     M_pos = span_moments[1].M_pos
-    
+
     # ─── Pattern loading envelope (ACI 318-11 §13.7.6) ───
     use_pattern = method.pattern_loading && requires_pattern_loading(qD, qL) && n_spans >= 2
     if use_pattern
-        # Reuse joint_Kec from baseline solve — invariant across patterns
         for pat in generate_load_patterns(n_spans)
             all(==(:dead_plus_live), pat) && continue
             qu_ps = factored_pattern_loads(pat, qD, qL)
-            sm_p = solve_moment_distribution(spans, joint_Kec, joint_positions, qu_ps)
+            sm_p  = _solve_once(qu_ps)
             abs(sm_p[1].M_neg_left)  > abs(M_neg_ext) && (M_neg_ext = sm_p[1].M_neg_left)
             abs(sm_p[1].M_neg_right) > abs(M_neg_int) && (M_neg_int = sm_p[1].M_neg_right)
             abs(sm_p[1].M_pos)       > abs(M_pos)     && (M_pos     = sm_p[1].M_pos)

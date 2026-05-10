@@ -192,7 +192,9 @@ function constraint_fns(p::RCCircularNLPProblem, x::Vector{Float64})
         EI = 0.4 * Ec_ksi * Ig / (1.0 + p.opts.βdns)
 
         Lu_in = ustrip(u"inch", p.geometry.Lu)
-        k = Float64(p.geometry.k)
+        # Circular sections are axisymmetric, so kx and ky give the same
+        # geometry; use kx to mirror the convention in the rectangular NLP.
+        k = Float64(p.geometry.kx)
         Pc = π^2 * EI / (k * Lu_in)^2
 
         M1x = to_kipft(p.demand.M1x)

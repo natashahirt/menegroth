@@ -4,7 +4,7 @@
 
 """
     run_moment_analysis(method::FEA, struc, slab, columns, h, fc, Ecs, γ_concrete;
-                        ν_concrete, verbose, cache)
+                        ν_concrete, verbose, cache, has_edge_beam, edge_beam_βt)
 
 Run moment analysis using 2D shell FEA with column stub frame elements.
 
@@ -13,6 +13,11 @@ own `fc′` when available, falling back to the slab `fc`.
 
 If `cache::FEAModelCache` is provided, the mesh is reused between
 iterations (only section + load + stubs are updated).
+
+When `has_edge_beam=true` or `edge_beam_βt > 0`, perimeter edge-beam frame
+elements are added along every free boundary edge per ACI 318-11 §13.6.4.2 /
+§13.7.5 (cross-section back-solved from the requested βt).  This generalizes
+to non-rectangular slabs because the boundary is iterated as a CCW polygon.
 
 Returns `MomentAnalysisResult` with `secondary = nothing`.
 """
@@ -30,13 +35,32 @@ function run_moment_analysis(
     cache::Union{Nothing, FEAModelCache} = nothing,
     efm_cache = nothing,  # API parity (unused by FEA)
     drop_panel::Union{Nothing, DropPanelGeometry} = nothing,
-    βt::Float64 = 0.0,  # API parity (unused by FEA — torsion in shell model)
+    βt::Float64 = 0.0,  # alias of edge_beam_βt for API parity with DDM/EFM
+    has_edge_beam::Bool = false,
+    edge_beam_βt::Float64 = 0.0,
     col_I_factor::Float64 = 0.70,  # ACI 318-11 §10.10.4.1
 )
     setup = _moment_analysis_setup(struc, slab, supporting_columns, h, γ_concrete)
     (; l1, l2, ln, span_axis, c1_avg, qD, qL, qu, M0) = setup
     n_cols = length(supporting_columns)
     Lc = _get_column_height(supporting_columns)
+
+    # Resolve effective βt for the FEA edge-beam construction.  The pipeline
+    # may pass `βt` (computed in pipeline.jl from has_edge_beam / edge_beam_βt)
+    # or callers may pass `edge_beam_βt` / `has_edge_beam` directly.
+    eb_βt = if edge_beam_βt > 0
+        edge_beam_βt
+    elseif βt > 0
+        βt
+    elseif has_edge_beam
+        # Default for `has_edge_beam=true` without explicit βt: assume the
+        # full-edge-beam value from ACI 318-11 Table 13.6.4.2 (βt = 2.5).
+        # ENGINEERING JUDGMENT: matches the `edge_beam=true` boolean fallback
+        # used by `distribute_moments_aci` in DDM (see test_pipeline_provisions.jl).
+        2.5
+    else
+        0.0
+    end
 
     # Column concrete modulus (may differ from slab fc)
     fc_col = _get_column_fc(supporting_columns, fc)
@@ -50,6 +74,7 @@ function run_moment_analysis(
         @debug "Geometry" l1=l1 l2=l2 ln=ln c_avg=c1_avg h=h target_edge=method.target_edge
         @debug "Loads" qD=qD qL=qL qu=qu
         @debug "Reference M₀" M0=uconvert(kip * u"ft", M0)
+        @debug "Edge beam" eb_βt=eb_βt has_edge_beam=has_edge_beam
     end
 
     # Build (or update) FEA model + precompute element data
@@ -63,24 +88,39 @@ function run_moment_analysis(
         col_I_factor=col_I_factor,
         qD=qD, qL=qL,
         patch_stiffness_factor=method.patch_stiffness_factor,
+        edge_beam_βt   = eb_βt,
+        edge_beam_l2   = l2,
+        edge_beam_c1_avg = c1_avg,
     )
     model = cache.model
 
     # ── Edge/corner column diagnostic ──
-    # The FEA shell model has free edges (no edge beams).  At edge and corner
-    # columns the slab boundary can rotate freely, which may underestimate
-    # negative moments and overestimate deflection at edges.  Log a one-time
-    # diagnostic so the user is aware.
+    # Two distinct cases:
+    # (1) Edge beam configured → frame elements have been added on the free
+    #     perimeter (see `_build_fea_slab_model` and `_edge_beam_asap_sec`).
+    # (2) No edge beam configured → edges remain free.  This is *physically
+    #     correct* for a true flat plate (no perimeter beam in the structure).
+    #     Only flag a warning if the user has edge/corner columns AND no
+    #     edge beam, in case they intended to model one.
     if verbose
         edge_cols = [(i, col.position) for (i, col) in enumerate(supporting_columns)
                      if col.position in (:edge, :corner)]
         if !isempty(edge_cols)
             n_edge   = count(x -> x[2] == :edge,   edge_cols)
             n_corner = count(x -> x[2] == :corner, edge_cols)
-            @debug "FEA EDGE DIAGNOSTIC: $n_edge edge + $n_corner corner columns detected. " *
-                   "Model uses free slab edges (no edge beams). Edge/corner negative moments " *
-                   "may be underestimated. Consider βt adjustment or edge beam modelling for " *
-                   "exterior bays."
+            if eb_βt > 0
+                @debug "FEA: edge-beam frame elements modelled on free perimeter " *
+                       "(ACI 318-11 §13.6.4.2 / §13.7.5)" *
+                       " — βt=$(round(eb_βt, digits=3)), " *
+                       "$(n_edge) edge + $(n_corner) corner columns."
+            else
+                @debug "FEA EDGE DIAGNOSTIC: $n_edge edge + $n_corner corner columns " *
+                       "with free slab perimeter.  This is physically correct for a " *
+                       "true flat plate (no perimeter beam).  If a perimeter beam " *
+                       "exists in the actual structure, set has_edge_beam=true or " *
+                       "edge_beam_βt>0 in FlatPlateOptions to model it explicitly " *
+                       "(ACI 318-11 §13.6.4.2)."
+            end
         end
     end
 

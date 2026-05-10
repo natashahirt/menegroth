@@ -277,12 +277,18 @@ function _design_mat_winkler_fea(
     h = opts.min_depth
     h_incr = opts.depth_increment
 
+    # Effective depth per ACI 318-11 §2.2 (corpus: aci-318-11, page 37):
+    # d = h − cover − db/2, measured from extreme compression fiber to the
+    # centroid of the longitudinal tension reinforcement.  We use the
+    # larger of the two layer diameters (worst case for d_eff in punching).
+    db_eff = max(db_x, db_y) / 2
+
     Ec_Pa = ustrip(u"Pa", Ec_c)
     local gov_Mx_total_pos, gov_Mx_total_neg, gov_My_total_pos, gov_My_total_neg
     local loads, springs  # saved for equilibrium check
 
     for iter in 1:60
-        d_eff = h - cover - max(db_x, db_y)
+        d_eff = h - cover - db_eff
         d_eff < 6.0u"inch" && (h += h_incr; continue)
 
         h_m = ustrip(u"m", h)
@@ -441,23 +447,46 @@ function _design_mat_winkler_fea(
         iter == 60 && @warn "WinklerFEA mat thickness did not converge at h=$h"
     end
 
-    d_eff = h - cover - max(db_x, db_y)
+    d_eff = h - cover - db_eff  # ACI 318-11 §2.2 — centroid of tension reinforcement
 
     # ── Step 3b: Vertical equilibrium check ──
-    # ΣF_applied (downward) should equal ΣF_spring (upward).
-    # Springs: F_up = kz × |w|.  Applied: Fz < 0 (downward).
+    # Static equilibrium of a 2-way Winkler model: ΣF_applied (downward) =
+    # Σ kz × (−w), where w is the signed vertical displacement (w < 0
+    # downward).  For a stiff mat under a concentrated load, corner nodes
+    # commonly heave (w > 0); their springs carry a *downward* reaction
+    # (F_spring = −kz·w) which must be subtracted from the gross "soil
+    # pushing up" sum.  The earlier `Σ kz·|w|` form ignored that sign and
+    # over-counted by 2·Σ kz·|w_lifted| — typically 20-30% on stiff,
+    # point-loaded mats — falsely flagging a converged FEA as imbalanced.
     F_applied = sum(abs(ustrip(u"N", l.value[3])) for l in loads)
-    F_reaction = sum(
-        let kz = s.stiffness[3]             # N/m
-            w  = ustrip(u"m", s.node.displacement[3])  # m (negative = down)
-            kz * abs(w)
-        end for s in springs)
-    eq_imbalance = F_applied > 0 ? abs(F_applied - F_reaction) / F_applied : 0.0
-    eq_imbalance > 0.05 && @warn(
+    F_reaction_compr  = 0.0  # springs in compression (w < 0): push up
+    F_reaction_uplift = 0.0  # springs in tension    (w > 0): pull down
+    for s in springs
+        kz = s.stiffness[3]                            # N/m
+        w  = ustrip(u"m", s.node.displacement[3])      # m (signed)
+        if w < 0
+            F_reaction_compr  += kz * (-w)
+        else
+            F_reaction_uplift += kz *   w
+        end
+    end
+    F_reaction_net = F_reaction_compr - F_reaction_uplift
+    eq_imbalance = F_applied > 0 ? abs(F_applied - F_reaction_net) / F_applied : 0.0
+    eq_imbalance > 0.02 && @warn(
         "WinklerFEA vertical equilibrium imbalance: " *
         "applied=$(round(F_applied/1e3, digits=1)) kN, " *
-        "reaction=$(round(F_reaction/1e3, digits=1)) kN, " *
+        "reaction_net=$(round(F_reaction_net/1e3, digits=1)) kN, " *
         "error=$(round(100*eq_imbalance, digits=2))%")
+    # Separately, a large uplift fraction means the model is leaning on
+    # tension in soil springs — physical mats either have enough self-
+    # weight to suppress uplift, or need 1-way / no-tension springs.  Flag
+    # so the engineer can decide whether the linear-spring approximation
+    # is adequate for this load case.
+    uplift_frac = F_applied > 0 ? F_reaction_uplift / F_applied : 0.0
+    uplift_frac > 0.05 && @warn(
+        "WinklerFEA: $(round(100*uplift_frac, digits=1))% of applied load " *
+        "is balanced by tension in soil springs (corner heave). " *
+        "Consider 1-way springs or larger overhang if uplift is unphysical.")
 
     # ── Step 4: Flexural reinforcement from FEA moments ──
     # Column-strip integration gives the governing average moment per unit

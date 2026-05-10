@@ -915,17 +915,56 @@ function effective_depth(h::Length; cover=0.75u"inch", bar_diameter=0.5u"inch", 
 end
 
 """
-    max_bar_spacing(h)
+    inner_layer_effective_depth(h, cover, db_primary, db_secondary) -> Length
 
-Maximum bar spacing per ACI 318-11 §13.3.2.
+Effective depth of the inner (secondary-direction) reinforcement layer in a
+two-way slab.  The secondary bars sit physically below the primary bars
+(cover requirements per ACI 318-11 §7.7 plus the bar-spacing geometry of
+§7.6 force a layered placement), so:
 
-    s_max = min(2h, 18 in)
+    d_inner = h − cover − db_primary − db_secondary / 2
+
+with `db_primary` the diameter of the bars in the outer (primary) layer and
+`db_secondary` the diameter of the bars in the inner (secondary) layer.
 
 # Reference
-- ACI 318-11 §13.3.2
+- ACI 318-11 §7.7 (concrete cover, page 100)
+- ACI 318-11 §7.6 (spacing of reinforcement, page 96)
+"""
+function inner_layer_effective_depth(h::Length, cover::Length,
+                                     db_primary::Length, db_secondary::Length)
+    return h - cover - db_primary - db_secondary / 2
+end
+
+"""
+    max_bar_spacing(h)
+
+Maximum spacing of primary flexural reinforcement at critical sections in
+two-way slabs.
+
+    s_max = min(2·h, 18 in)
+
+The combined limit comes from two ACI 318-11 clauses:
+
+  §13.3.2 (verbatim, p. 245):
+    "Spacing of reinforcement at critical sections shall not exceed two times
+     the slab thickness, except for portions of slab area of cellular or
+     ribbed construction. ..."
+
+  §7.6.5  (verbatim, p. 96):
+    "In walls and slabs other than concrete joist construction, primary
+     flexural reinforcement shall not be spaced farther apart than three
+     times the wall or slab thickness, nor farther apart than 18 in."
+
+§13.3.2 governs at critical sections of two-way slabs (2h is more stringent
+than the 3h of §7.6.5 for the same h); §7.6.5 contributes the absolute 18 in
+ceiling that takes over once 2h > 18 in (i.e. h > 9 in).
+
+# Reference
+- ACI 318-11 §13.3.2 (page 245)
+- ACI 318-11 §7.6.5  (page 96)
 """
 function max_bar_spacing(h::Length)
-    # ACI 318-11 §13.3.2: s_max = min(2h, 18")
     return min(2 * h, 18.0u"inch")
 end
 

@@ -225,7 +225,9 @@ function constraint_fns(p::RCColumnNLPProblem, x::Vector{Float64})
         EI = 0.4 * Ec_ksi * Ig / (1.0 + p.opts.βdns)   # kip·in²
 
         Lu_in = ustrip(u"inch", p.geometry.Lu)
-        k = Float64(p.geometry.k)
+        # Strong-axis NLP path: Mux is bending about x, so use kx (matches
+        # the b·h³/12 Ig used a few lines above).
+        k = Float64(p.geometry.kx)
         Pc = π^2 * EI / (k * Lu_in)^2   # Euler buckling (kip)
 
         # Cm factor from end moments

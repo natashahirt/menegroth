@@ -351,6 +351,10 @@ function _design_mat_shukla(
     h = opts.min_depth
     h_incr = opts.depth_increment
 
+    # Effective depth per ACI 318-11 §2.2 (corpus: aci-318-11, page 37):
+    # d = h − cover − db/2 to the centroid of the worst-case bar layer.
+    db_eff = max(db_x, db_y) / 2
+
     # Pre-define mat sampling grid for bearing check
     mat_corners = [
         (plan.x_left, plan.y_bot),
@@ -363,7 +367,7 @@ function _design_mat_shukla(
     local M_x_f, M_y_f, q_f  # saved for flexure + equilibrium steps
 
     for iter in 1:80
-        d_eff = h - cover - max(db_x, db_y)
+        d_eff = h - cover - db_eff
         d_eff < 6.0u"inch" && (h += h_incr; continue)
 
         # Run Shukla analysis for this thickness
@@ -397,7 +401,7 @@ function _design_mat_shukla(
         iter == 80 && @warn "Shukla mat thickness did not converge at h=$h"
     end
 
-    d_eff = h - cover - max(db_x, db_y)
+    d_eff = h - cover - db_eff  # ACI 318-11 §2.2 — centroid of tension reinforcement
 
     # ── Step 4b: Vertical equilibrium check ──
     # Shukla is an infinite-plate solution; integrating soil pressure q = ks·δ
@@ -454,14 +458,17 @@ function _design_mat_shukla(
     M_shukla_y_top = My_neg * B
 
     # ── Step 5b: Rigid strip moments — ACI 336.2R §6.1.2 Step 3 ──
-    # These satisfy global statics exactly.
+    # These satisfy global statics exactly. Pass the full mat width
+    # perpendicular to the strip span (Lm for x-strips, B for y-strips)
+    # so the rigid moments share the same "total moment for full mat
+    # width at worst per-unit-width intensity" scale as the Shukla
+    # peaks below; otherwise the rigid contribution to the envelope
+    # would always be silently dominated by Shukla on multi-bay grids.
+    # (corpus: aci-336-combined-footings-mats Chapter 6 §6.1.2 Step 3)
     qu_rigid = sum(d.Pu for d in demands) / (B * Lm)
 
-    avg_trib_x = isempty(plan.y_spans) ? Lm : sum(plan.y_spans) / length(plan.y_spans)
-    mom_x_rigid = _rigid_mat_strip_moments(qu_rigid, avg_trib_x, plan.x_spans)
-
-    avg_trib_y = isempty(plan.x_spans) ? B : sum(plan.x_spans) / length(plan.x_spans)
-    mom_y_rigid = _rigid_mat_strip_moments(qu_rigid, avg_trib_y, plan.y_spans)
+    mom_x_rigid = _rigid_mat_strip_moments(qu_rigid, Lm, plan.x_spans)
+    mom_y_rigid = _rigid_mat_strip_moments(qu_rigid, B,  plan.y_spans)
 
     # ── Step 5c: Envelope — face-by-face max (ACI 336.2R §6.1.2 Steps 3+4) ──
     M_env_x_bot = max(M_shukla_x_bot, mom_x_rigid.M_pos)   # sagging

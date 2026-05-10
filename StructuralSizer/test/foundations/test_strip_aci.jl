@@ -9,6 +9,7 @@ println("Testing ACI 318-14 Strip (Combined) Footing Design...")
 # =============================================================================
 # Source: "Reinforced Concrete Column Combined Footing Analysis and Design"
 #         Wight 7th Ed., Example 15-5
+#         (corpus: sp-de-combined-footing-aci318-14)
 #
 # Given:
 #   Exterior column: 24" x 16", PD=200 kip, PL=150 kip
@@ -26,6 +27,17 @@ println("Testing ACI 318-14 Strip (Combined) Footing Design...")
 #   Negative Mu = 2100 kip-ft → As = 13.4 in², use 17 #8
 #   Interior punching: vu = 80.2 psi < ϕvc = 164 psi
 #   Exterior punching (at h=40): vu = 157 psi < ϕvc = 164 psi
+#
+# Note on h convergence:  the reference's h = 40 in. is set by exterior-column
+# punching with unbalanced moment ALONE; the StructurePoint document explicitly
+# defers the one-way shear check to a different example (page 10: "this example
+# focus on the calculation of two-way shear capacity for combined foundation").
+# Our routine enforces BOTH punching (ACI 318-11 §11.11) and one-way shear (ACI
+# 318-11 §11.2.1, Eq. 11-3) using bw = B; with d = 36.5 in. and B = 8 ft, the
+# strip's V(x) at d from the interior column face exceeds ϕVc = 2λ√f'c·B·d,
+# so one-way shear governs and our routine converges one increment higher
+# (h = 43 in.) — more conservative than, and consistent with, the literal ACI
+# formula.  Asserted bound: h ∈ [40, 44].
 # =============================================================================
 
 # Demands
@@ -50,7 +62,7 @@ opts = StripParams(
     material = RC_3000_60,
     bar_size_long = 8,
     bar_size_trans = 5,
-    cover = 3.5u"inch",  # 3" clear + half bar for d calculation
+    cover = 3.0u"inch",  # ACI 318-11 §7.7.1 clear cover (true clear; d = h − cover − db/2)
     min_depth = 12.0u"inch",
     depth_increment = 1.0u"inch",
     width_increment = 1.0u"inch",
@@ -84,17 +96,27 @@ println("  utilization = $(round(result.utilization, digits=3))")
 # =============================================================================
 println("\n=== Validation ===")
 
-# Thickness: reference = 40 in. (after failing at 36 in.)
-@test h_in ≥ 36.0 && h_in ≤ 44.0
-println("  h = $(h_in) in. (ref: 40 in.) ✓")
+# Thickness: reference = 40 in. (set by punching only; ref defers one-way to
+# a separate example).  Our routine enforces both punching and ACI 11.2.1
+# one-way shear, so we converge one increment higher (~43 in.).  Tight band
+# [40, 44] keeps both ours and the reference inside.
+@test h_in ≥ 40.0 && h_in ≤ 44.0
+println("  h = $(h_in) in. (ref: 40 in., ours ~43 in. due to one-way shear) ✓")
 
 # Width: reference = 8 ft = 96 in.
 @test B_in ≥ 80.0 && B_in ≤ 120.0
 println("  B = $(round(B_in/12, digits=2)) ft (ref: 8 ft) ✓")
 
-# Top steel should be significant (Mu_neg = 2100 kip-ft → As ≈ 13.4 in²)
-@test As_top ≥ 10.0
-println("  As_top = $(round(As_top, digits=2)) in² (ref: ≈13.4 in²) ✓")
+# Top steel under midspan negative moment Mu = 2100 kip-ft.
+# StructurePoint hand calc and spMats both give As_required ≈ 13.4 in² and
+# select 17 #8 (As_provided ≈ 13.43 in²).  Allow ±15 % to accommodate the
+# small differences in B / h convergence (our plan dim and depth iterate to
+# B ≈ 7.83 ft, h ≈ 43 in. vs. the reference B = 8 ft, h = 40 in.).  A larger
+# d gives slightly less As, so As_top tends to come in just under 13.4 in².
+@test isapprox(As_top, 13.4; rtol = 0.15)
+@test isapprox(As_bot, 13.4; rtol = 0.15)
+println("  As_top = $(round(As_top, digits=2)) in² (ref: ≈13.4 in², ±15%) ✓")
+println("  As_bot = $(round(As_bot, digits=2)) in² (ref: ≈13.4 in², ±15%) ✓")
 
 # Utilization should be < 1.0
 @test result.utilization < 1.0

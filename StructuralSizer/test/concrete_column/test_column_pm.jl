@@ -458,6 +458,43 @@ end
         util = StructuralSizer.utilization_ratio(diagram, Pu_safe, Mu_safe)
         @test util < 1.0
     end
+
+    # ==========================================================================
+    # Test 12b: ACI 318-11 §10.3.6 maximum-axial-cap enforcement
+    # Eq. (10-2) tied: φPn,max = 0.80·φ·P0. With f'c = 5 ksi, 16×16, 8 #9 bars
+    # and φ = 0.65: φP0 ≈ 997 kip, φPn,max ≈ 797.7 kip (StructurePoint).
+    # `check_PM_capacity` must refuse Pu > φPn,max even when the curve still
+    # reaches φP0, because ACI 318-11 §10.3.6 caps design φPn at φPn,max.
+    # ==========================================================================
+    @testset "ACI 10.3.6 axial cap (tied)" begin
+        diagram = StructuralSizer.generate_PM_diagram(section, mat; n_intermediate=20)
+        φPn_max = StructuralSizer.get_control_point(diagram, :max_compression).φPn
+        φP0     = StructuralSizer.get_control_point(diagram, :pure_compression).φPn
+
+        # Sanity: cap is strictly below φP0 (by α = 0.80 for tied).
+        @test φPn_max < φP0
+        @test φPn_max ≈ 0.80 * φP0 atol = 1.0  # MAX_COMPRESSION uses α·P0 exactly
+
+        # 95 % of the cap, Mu = 0 → adequate.
+        r_under = StructuralSizer.check_PM_capacity(diagram, 0.95 * φPn_max, 0.0)
+        @test r_under.adequate
+        @test r_under.utilization < 1.0
+
+        # 105 % of the cap, Mu = 0 → not adequate, governing :axial_cap.
+        r_over_axial = StructuralSizer.check_PM_capacity(diagram, 1.05 * φPn_max, 0.0)
+        @test !r_over_axial.adequate
+        @test r_over_axial.governing == :axial_cap
+        @test r_over_axial.utilization ≈ 1.05 atol = 1e-6
+
+        # 105 % of the cap with a small moment → still not adequate.
+        r_over_combined = StructuralSizer.check_PM_capacity(diagram, 1.05 * φPn_max, 10.0)
+        @test !r_over_combined.adequate
+        @test r_over_combined.governing == :axial_cap
+
+        # Reported φPn_at_Mu must never exceed the cap (no leak of φP0).
+        r_at_zero_M = StructuralSizer.check_PM_capacity(diagram, 0.5 * φPn_max, 0.0)
+        @test r_at_zero_M.φPn_at_Mu <= φPn_max + 1e-6
+    end
     
     # ==========================================================================
     # Test 13: P-M Trend Validation

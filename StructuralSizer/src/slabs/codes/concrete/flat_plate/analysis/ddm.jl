@@ -295,6 +295,8 @@ function run_moment_analysis(
     cache = nothing,        # API parity (unused by DDM)
     drop_panel = nothing,   # For flat slab: adjusts M0 with equivalent uniform load
     βt::Float64 = 0.0,     # Edge beam torsional stiffness ratio (ACI 8.10.5.2)
+    has_edge_beam::Bool = false,    # API parity (DDM uses βt directly)
+    edge_beam_βt::Float64 = 0.0,    # API parity (DDM uses βt directly)
     col_I_factor::Float64 = 0.70,  # API parity (unused by DDM)
 )
     # Shared setup: l1, l2, ln, span_axis, c1_avg, qD, qL, qu, M0
@@ -380,11 +382,12 @@ function run_moment_analysis(
         @debug "Moments" M0=uconvert(kip*u"ft", M0) M_neg_ext=uconvert(kip*u"ft", M_neg_ext) M_pos=uconvert(kip*u"ft", M_pos) M_neg_int=uconvert(kip*u"ft", M_neg_int)
     end
     
-    # Build column-level results using simplified DDM
-    # For flat plates, unbalanced moment at exterior supports = M_neg_ext
-    # For interior supports = difference between adjacent panel moments (zero for uniform load)
+    # Build column-level results using simplified DDM.
+    # Exterior unbalanced moment = M_neg_ext (transferred fully to col).
+    # Interior unbalanced moment per ACI 318-11 §13.6.9.2 Eq. (13-7).
     column_moments, column_shears, unbalanced_moments = _compute_column_demands_ddm(
-        struc, supporting_columns, M_neg_ext, M_neg_int, M_pos, qu, l2, ln, span_axis
+        struc, supporting_columns, M_neg_ext, M_neg_int, M_pos,
+        qu, qD, qL, l2, ln, span_axis
     )
     
     # Convert all outputs to consistent US units for MomentAnalysisResult
@@ -477,7 +480,8 @@ function run_secondary_moment_analysis(
 
     # Column demands in secondary direction (uses perpendicular span_axis)
     column_moments, column_shears, unbalanced_moments = _compute_column_demands_ddm(
-        struc, supporting_columns, M_neg_ext, M_neg_int, M_pos, qu, l2, ln, span_axis
+        struc, supporting_columns, M_neg_ext, M_neg_int, M_pos,
+        qu, qD, qL, l2, ln, span_axis
     )
 
     if verbose
@@ -509,103 +513,140 @@ end
 # =============================================================================
 
 """
-    _compute_column_demands_ddm(struc, columns, M_neg_ext, M_neg_int, M_pos, qu, l2, ln, span_axis)
+    _compute_column_demands_ddm(struc, columns, M_neg_ext, M_neg_int, M_pos,
+                                 qu, qD, qL, l2, ln, span_axis)
 
 Compute column-level demands for simplified DDM (single panel approach).
 
 For each column:
-- Exterior columns: use M_neg_ext as design moment and unbalanced moment
-- Interior columns: use M_neg_int as design moment, Mub = 0 for uniform loading
-- Shear from tributary area (preferred) or span-based fallback
+- Exterior columns: use M_neg_ext as design moment and unbalanced moment.
+- Interior columns: use M_neg_int as design moment; the *unbalanced* moment
+  for punching shear is the live-load-pattern moment from
+  ACI 318-11 §13.6.9.2 Eq. (13-7):
+
+      Mu = 0.07·[(qDu + 0.5·qLu)·ℓ2·ℓn² − qDu'·ℓ2'·(ℓn')²]                (13-7)
+
+  where the primed quantities refer to the *shorter* of the two adjacent
+  spans.  In the simplified single-panel DDM path we have only one
+  geometry (l1, l2, ln), so by symmetry ℓ2' = ℓ2, ℓn' = ℓn, qDu' = qDu and
+  Eq. (13-7) collapses to
+
+      Mu = 0.07·0.5·qLu·ℓ2·ℓn² = 0.035·qLu·ℓ2·ℓn²
+
+  This is the live-load-pattern unbalanced moment that previously was set
+  to zero (interior columns assumed perfectly symmetric).  Multi-span DDM
+  (which carries per-span ℓn, ℓ2 data) uses the full Eq. (13-7) form via
+  `_compute_column_demands_from_spans`.
+
+ENGINEERING JUDGMENT: the symmetric collapse only holds for regular grids
+where adjacent panels have the same `(ℓ2, ℓn)`.  For irregular bays the
+multi-span path is required.
+
+# References
+- ACI 318-11 §13.6.9.2 / Eq. (13-7) (page 254)
+- ACI 318-11 R13.6.9   (commentary, page 254)
 """
-function _compute_column_demands_ddm(struc, columns, M_neg_ext, M_neg_int, M_pos, qu, l2, ln, span_axis)
+function _compute_column_demands_ddm(struc, columns, M_neg_ext, M_neg_int, M_pos,
+                                     qu, qD, qL, l2, ln, span_axis)
     column_moments = Vector{typeof(1.0kip*u"ft")}()
     column_shears = Vector{typeof(1.0kip)}()
     unbalanced_moments = Vector{typeof(1.0kip*u"ft")}()
-    
+
+    # Eq. (13-7) symmetric form — same for every interior column in this path.
+    Mub_int_137 = uconvert(kip*u"ft", 0.07 * 0.5 * qL * l2 * ln^2)
+
     for col in columns
-        # Classify column as exterior or interior for this span direction
         is_ext = is_exterior_support(col, span_axis)
-        
-        # Design moment based on position
         M = is_ext ? M_neg_ext : M_neg_int
-        
-        # Unbalanced moment for punching shear
-        # For exterior: use design moment
-        # For interior with uniform loading: ~0 (symmetric)
-        Mub = is_ext ? M : 0.0 * M
-        
+
+        # Exterior: full design moment is unbalanced (transferred to col).
+        # Interior: live-load pattern moment per Eq. (13-7).
+        Mub = is_ext ? M : Mub_int_137
+
         push!(column_moments, uconvert(kip*u"ft", M))
         push!(unbalanced_moments, uconvert(kip*u"ft", Mub))
-        
-        # Shear: prefer tributary area, fallback to span-based
+
         Vu = _compute_column_shear(struc, col, qu, l2, ln)
         push!(column_shears, Vu)
     end
-    
+
     return column_moments, column_shears, unbalanced_moments
 end
 
 """
-    _compute_column_demands_from_spans(struc, sorted_columns, column_is_exterior, span_moments, qu, l2)
+    _compute_column_demands_from_spans(struc, sorted_columns, column_is_exterior,
+                                        span_moments, qu, qD, qL, l2)
 
-Compute column-level demands from per-span DDM moments (legacy multi-span version).
+Compute column-level demands from per-span DDM moments (multi-span version).
 
 For each column:
-- Design moment = max of moments from adjacent spans at this support
-- Unbalanced moment = |M_left_span - M_right_span| at interior supports
-- Shear from tributary area or span-based fallback
+- Exterior columns: design moment = M_neg from the adjacent span; unbalanced
+  moment = full design moment (transferred to column).
+- Interior columns: design moment = max of M_neg from the two adjacent spans;
+  unbalanced moment per ACI 318-11 §13.6.9.2 Eq. (13-7) using the actual ℓn
+  of the longer / shorter adjacent span:
+
+      Mu = 0.07·[(qDu + 0.5·qLu)·ℓ2·ℓn² − qDu'·ℓ2'·(ℓn')²]               (13-7)
+
+  where the primed quantities refer to the *shorter* of the two adjacent
+  spans.  In this multi-span path ℓ2 is constant across spans (one tributary
+  width is used for the whole frame) but ℓn may vary; qDu' = qDu (uniform
+  dead load between bays).
 
 # Arguments
 - `struc`: BuildingStructure (for tributary area lookup)
 - `sorted_columns`: Columns ordered along span axis
 - `column_is_exterior`: Boolean for each column
 - `span_moments`: Vector of per-span moment results
-- `qu`: Factored uniform load
+- `qu`, `qD`, `qL`: Factored, dead, and live uniform pressures
 - `l2`: Tributary width
+
+# References
+- ACI 318-11 §13.6.9.2 / Eq. (13-7) (page 254)
 """
-function _compute_column_demands_from_spans(struc, sorted_columns, column_is_exterior, 
-                                             span_moments, qu, l2)
+function _compute_column_demands_from_spans(struc, sorted_columns, column_is_exterior,
+                                            span_moments, qu, qD, qL, l2)
     n_cols = length(sorted_columns)
     column_moments = Vector{typeof(1.0kip*u"ft")}()
     column_shears = Vector{typeof(1.0kip)}()
     unbalanced_moments = Vector{typeof(1.0kip*u"ft")}()
-    
+
     for (i, col) in enumerate(sorted_columns)
-        # Get moment from adjacent spans
         if i == 1
-            # First column - use left moment of first span
-            M = span_moments[1].M_neg_left
-            Mub = M  # Unbalanced at exterior (full moment)
+            # Exterior — first column.
+            M  = span_moments[1].M_neg_left
+            Mub = M
             ln_for_shear = span_moments[1].ln
         elseif i == n_cols
-            # Last column - use right moment of last span
-            M = span_moments[end].M_neg_right
-            Mub = M  # Unbalanced at exterior (full moment)
+            # Exterior — last column.
+            M  = span_moments[end].M_neg_right
+            Mub = M
             ln_for_shear = span_moments[end].ln
         else
-            # Interior column - max of adjacent spans' moments at this support
-            # span_moments[i-1] is the span to the LEFT of column i
-            # span_moments[i] is the span to the RIGHT of column i
-            M_from_left_span = span_moments[i-1].M_neg_right
+            # Interior column.  span_moments[i-1] is the span to the LEFT,
+            # span_moments[i] to the RIGHT.
+            M_from_left_span  = span_moments[i-1].M_neg_right
             M_from_right_span = span_moments[i].M_neg_left
             M = max(M_from_left_span, M_from_right_span)
-            
-            # Unbalanced = difference of moments from adjacent spans
-            Mub = abs(M_from_left_span - M_from_right_span)
-            
-            # Average ln for shear calculation
-            ln_for_shear = (span_moments[i-1].ln + span_moments[i].ln) / 2
+
+            # ACI 318-11 §13.6.9.2 Eq. (13-7) — identify longer and shorter ℓn.
+            ln_left  = span_moments[i-1].ln
+            ln_right = span_moments[i].ln
+            ln_long  = max(ln_left, ln_right)
+            ln_short = min(ln_left, ln_right)
+            Mub = 0.07 * ((qD + 0.5 * qL) * l2 * ln_long^2 - qD * l2 * ln_short^2)
+            Mub = abs(Mub)   # always reported as a magnitude
+
+            ln_for_shear = (ln_left + ln_right) / 2
         end
-        
-        push!(column_moments, M)
-        
-        # Shear: prefer tributary area, else use span-based fallback
+
+        push!(column_moments, uconvert(kip*u"ft", M))
+        push!(unbalanced_moments, uconvert(kip*u"ft", Mub))
+
         Vu = _compute_column_shear(struc, col, qu, l2, ln_for_shear)
         push!(column_shears, Vu)
-        push!(unbalanced_moments, abs(Mub))
     end
-    
+
     return column_moments, column_shears, unbalanced_moments
 end
 
@@ -1030,9 +1071,9 @@ function run_moment_analysis(
         end
     end
     
-    # Build column-level results
+    # Build column-level results — interior columns use ACI 318-11 §13.6.9.2 Eq. (13-7).
     column_moments, column_shears, unbalanced_moments = _compute_column_demands_from_spans(
-        struc, sorted_columns, column_is_exterior, span_moments, qu, l2
+        struc, sorted_columns, column_is_exterior, span_moments, qu, qD, qL, l2
     )
     
     # Use first span values for aggregate/representative fields

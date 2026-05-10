@@ -28,11 +28,15 @@ Unified demand for framing members (beams, columns, beam-columns).
 - `composite`: Composite beam context (`nothing` = bare steel)
 - `transverse_load`: Whether transverse loading exists between supports (for Cm)
 
-# End Moment Convention (AISC Appendix 8)
-- M1 = smaller end moment, M2 = larger end moment (|M2| ≥ |M1|)
-- M1/M2 > 0: Double curvature (reverse curvature bending)
-- M1/M2 < 0: Single curvature
-- If M1/M2 not provided, assumes M1=0 (Cm=0.6, conservative for single curvature)
+# End Moment Convention (ACI 318-19 / AISC 360-16 Appendix 8)
+- `M1` = smaller end moment, `M2` = larger end moment (|M2| ≥ |M1|).
+- `M1/M2 > 0`: **double** curvature (reverse curvature bending — best case).
+- `M1/M2 < 0`: **single** curvature (worst case).
+- Used by both `Cm = 0.6 − 0.4·(M1/M2)` and the slenderness limit
+  `34 + 12·(M1/M2)` (capped at 40); see `calc_Cm` and
+  `should_consider_slenderness` in `slenderness.jl`.
+- If `M1`/`M2` are not provided, defaults to `M1 = 0`, `M2 = Mux`/`Muy`
+  (conservative single-curvature stand-in: `Cm = 0.6`).
 """
 struct MemberDemand{T, C} <: AbstractDemand
     member_idx::Int
@@ -117,18 +121,22 @@ converted internally to kip/kip-ft for ACI calculations.
 - `Pu`: Factored axial load (positive = compression)
 - `Mux`: Maximum factored moment about x-axis (= max(|M1x|, |M2x|))
 - `Muy`: Maximum factored moment about y-axis (= max(|M1y|, |M2y|))
-- `M1x`: Smaller end moment about x-axis (for slenderness Cm factor)
-- `M2x`: Larger end moment about x-axis (absolute value, same sign as M1x for single curvature)
-- `M1y`: Smaller end moment about y-axis
-- `M2y`: Larger end moment about y-axis
+- `M1x`: Smaller end moment about x-axis, signed (for slenderness Cm factor)
+- `M2x`: Larger end moment about x-axis, signed (|M2x| ≥ |M1x|)
+- `M1y`: Smaller end moment about y-axis, signed
+- `M2y`: Larger end moment about y-axis, signed (|M2y| ≥ |M1y|)
 - `βdns`: Ratio of sustained to total factored load (for slenderness)
+- `transverse_load`: True if transverse loads act between member ends; forces
+  `Cm = 1.0` per ACI 318-19 §6.6.4.5.3
 
-# End Moment Convention (ACI 318-11 §10.10.6.4)
-- M1 = smaller end moment, M2 = larger end moment (|M2| ≥ |M1|)
-- M1/M2 > 0: Single curvature (both ends rotate same direction)
-- M1/M2 < 0: Double curvature (ends rotate opposite directions)
-- For columns with significant end moments, provide M1x/M2x and M1y/M2y
-- If not provided, defaults to M1=0 (conservative single curvature assumption)
+# End Moment Convention (ACI 318-19 / AISC 360-16)
+- `M1` = smaller end moment, `M2` = larger end moment (|M2| ≥ |M1|).
+- `M1/M2 > 0`: **double** curvature (reverse curvature — best case).
+- `M1/M2 < 0`: **single** curvature (worst case).
+- Used by `Cm = 0.6 − 0.4·(M1/M2)` (Eq. 6.6.4.5.3a) and slenderness limit
+  `34 + 12·(M1/M2)` capped at 40 (Eq. 6.2.5.1b/c).
+- If not provided, defaults to `M1 = 0` (Cm = 0.6, conservative
+  single-curvature stand-in).
 
 # Examples
 ```julia
@@ -136,47 +144,51 @@ converted internally to kip/kip-ft for ACI calculations.
 demand = RCColumnDemand(1; Pu=500.0, Mux=100.0, Muy=50.0)
 
 # Full: with end moments for proper slenderness (double curvature)
-demand = RCColumnDemand(1; 
-    Pu=500.0, 
-    M1x=-80.0, M2x=100.0,  # Double curvature (opposite signs)
-    M1y=-40.0, M2y=50.0,
+demand = RCColumnDemand(1;
+    Pu=500.0,
+    M1x= 80.0, M2x=100.0,   # Double curvature: same sign → M1/M2 > 0
+    M1y= 40.0, M2y= 50.0,
 )
 ```
 """
 struct RCColumnDemand{T} <: AbstractDemand
     member_idx::Int
-    Pu::T           # Factored axial (positive = compression)
-    Mux::T          # Maximum moment about x-axis = max(|M1x|, |M2x|)
-    Muy::T          # Maximum moment about y-axis = max(|M1y|, |M2y|)
-    M1x::T          # Smaller end moment about x-axis (for Cm)
-    M2x::T          # Larger end moment about x-axis
-    M1y::T          # Smaller end moment about y-axis
-    M2y::T          # Larger end moment about y-axis
-    βdns::Float64   # Sustained load ratio (for slenderness) - always Float64
+    Pu::T                  # Factored axial (positive = compression)
+    Mux::T                 # Envelope moment about x-axis = max(|M1x|, |M2x|)
+    Muy::T                 # Envelope moment about y-axis = max(|M1y|, |M2y|)
+    M1x::T                 # Smaller signed end moment about x-axis (for Cm)
+    M2x::T                 # Larger signed end moment about x-axis
+    M1y::T                 # Smaller signed end moment about y-axis
+    M2y::T                 # Larger signed end moment about y-axis
+    βdns::Float64          # Sustained load ratio (slenderness)
+    transverse_load::Bool  # ACI 318-19 §6.6.4.5.3 — forces Cm = 1.0
 end
 
 """
     RCColumnDemand(idx; Pu=0.0, Mux=nothing, Muy=nothing,
                    M1x=0.0, M2x=nothing, M1y=0.0, M2y=nothing,
-                   βdns=0.6) -> RCColumnDemand
+                   βdns=0.6, transverse_load=false) -> RCColumnDemand
 
 Keyword constructor with defaults for [`RCColumnDemand`](@ref).
 
 When `Mux`/`Muy` are `nothing`, they are computed as `max(|M1|, |M2|)`.
 When `M2x`/`M2y` are `nothing`, they default to `Mux`/`Muy`.
-`βdns` defaults to 0.6 (60 % sustained load, typical for gravity per ACI 318-11 §10.10.6.2).
+`βdns` defaults to 0.6 (60 % sustained load, typical for gravity per
+ACI 318-19 §6.6.4.4.4 / historically ACI 318-11 §10.10.6.2).
+`transverse_load` defaults to `false`; set `true` for columns with
+transverse loads between supports so `calc_Cm` returns 1.0.
 """
 function RCColumnDemand(idx::Int;
     Pu = 0.0,
-    Mux = nothing,  # If nothing, computed from M1x/M2x
-    Muy = nothing,  # If nothing, computed from M1y/M2y
-    M1x = 0.0,      # Default: M1=0 (conservative single curvature)
-    M2x = nothing,  # If nothing, uses Mux
+    Mux = nothing,
+    Muy = nothing,
+    M1x = 0.0,
+    M2x = nothing,
     M1y = 0.0,
-    M2y = nothing,  # If nothing, uses Muy
-    βdns = 0.6      # Default: 60% sustained (typical for gravity)
+    M2y = nothing,
+    βdns = 0.6,
+    transverse_load::Bool = false,
 )
-    # Resolve Mux: either provided directly, or max of |M1x|, |M2x|
     if isnothing(Mux)
         if isnothing(M2x)
             Mux = abs(M1x)
@@ -184,13 +196,10 @@ function RCColumnDemand(idx::Int;
             Mux = max(abs(M1x), abs(M2x))
         end
     end
-    
-    # Resolve M2x: either provided, or equals Mux (assuming M1x=0 convention)
     if isnothing(M2x)
         M2x = Mux
     end
-    
-    # Same for y-axis
+
     if isnothing(Muy)
         if isnothing(M2y)
             Muy = abs(M1y)
@@ -198,13 +207,15 @@ function RCColumnDemand(idx::Int;
             Muy = max(abs(M1y), abs(M2y))
         end
     end
-    
     if isnothing(M2y)
         M2y = Muy
     end
-    
-    T = promote_type(typeof(Pu), typeof(Mux), typeof(Muy), typeof(M1x), typeof(M2x), typeof(M1y), typeof(M2y))
-    RCColumnDemand{T}(idx, T(Pu), T(Mux), T(Muy), T(M1x), T(M2x), T(M1y), T(M2y), Float64(βdns))
+
+    T = promote_type(typeof(Pu), typeof(Mux), typeof(Muy),
+                     typeof(M1x), typeof(M2x), typeof(M1y), typeof(M2y))
+    RCColumnDemand{T}(idx, T(Pu), T(Mux), T(Muy),
+                      T(M1x), T(M2x), T(M1y), T(M2y),
+                      Float64(βdns), transverse_load)
 end
 
 # ==============================================================================

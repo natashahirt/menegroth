@@ -182,7 +182,10 @@ function design_footing(::StripFooting,
         depth_ok = false
 
         for iter in 1:80       # inner h-ratchet loop
-            d = h - cover - db_l
+            # Effective depth d per ACI 318-11 §2.2 — distance from extreme
+            # compression fiber to centroid of longitudinal tension steel
+            # (corpus: aci-318-11, page 37).  Single layer ⇒ d = h − cover − db/2.
+            d = h - cover - db_l / 2
             d < 4.0u"inch" && (h += h_incr; continue)
 
             # --- Two-way (punching) at each column ---
@@ -247,7 +250,7 @@ function design_footing(::StripFooting,
     end
     converged || @warn "Strip footing (B, h) did not converge; B=$B, h=$h"
 
-    d = h - cover - db_l
+    d = h - cover - db_l / 2  # ACI 318-11 §2.2 — centroid of tension reinforcement
 
     # Recompute qu for the final B
     qu = Pu_total / (B * L)
@@ -364,14 +367,39 @@ function design_footing(::StripFooting,
     # Approximate steel volume
     Ab_l = bar_area(opts.bar_size_long)
     Ab_t = bar_area(opts.bar_size_trans)
-    n_top  = ceil(Int, As_top / Ab_l)
-    n_bot  = ceil(Int, As_bot / Ab_l)
-    n_tran = ceil(Int, As_trans / Ab_t)
+
+    # Maximum spacing for primary flexural reinforcement in slabs / footings:
+    # ACI 318-11 §7.6.5 (corpus: aci-318-11, page 96) — `min(3h, 18 in.)`.
+    # Maximum spacing for shrinkage/temperature reinforcement: ACI 318-11
+    # §7.12.2.2 (corpus: aci-318-11, page 106) — `min(5h, 18 in.)`.
+    max_s_flex = min(3h, 18.0u"inch")
+    max_s_TS   = min(5h, 18.0u"inch")
+
+    # Bar count per direction is the larger of (As / A_bar) and the count
+    # required to keep spacing ≤ max_s.  Spacing is approximated as
+    # (section width) / n_bars; the small overrun from cover/end clearance
+    # is ignored, matching the spread footing convention.
+    n_top  = max(ceil(Int, As_top   / Ab_l), ceil(Int, B / max_s_flex))
+    n_bot  = max(ceil(Int, As_bot   / Ab_l), ceil(Int, B / max_s_flex))
+    n_tran = max(ceil(Int, As_trans / Ab_t), ceil(Int, band_w / max_s_flex))
     bar_len_long  = L - 2cover
     bar_len_trans = B - 2cover
+
+    # Inter-band transverse temperature/shrinkage steel — ACI 318-11
+    # §7.12.2.1 (corpus: aci-318-11, page 106). The N concentrated
+    # bands of width band_w each carry the localized cantilever moment
+    # under their column; the remaining footing length still requires
+    # minimum T&S steel transverse to the strip's long axis.  The bar
+    # count is the larger of (As_min / A_bar) and (inter-band length /
+    # max_s_TS) so the §7.12.2.2 spacing limit is satisfied.
+    inter_band_length = max(L - N * band_w, zero(L))
+    As_min_inter = _min_steel_footing(inter_band_length, h, fy)
+    n_tran_inter = max(ceil(Int, As_min_inter / Ab_t),
+                       ceil(Int, inter_band_length / max_s_TS))
+
     V_steel = uconvert(u"m^3",
         (n_top + n_bot) * Ab_l * bar_len_long +
-        N * n_tran * Ab_t * bar_len_trans)
+        (N * n_tran + n_tran_inter) * Ab_t * bar_len_trans)
 
     result = StripFootingResult{typeof(uconvert(u"m", B)),
                               typeof(As_bot_m2),

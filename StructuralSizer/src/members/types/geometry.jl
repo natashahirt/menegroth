@@ -110,39 +110,54 @@ Geometric parameters for RC member capacity calculations per ACI 318.
 # Fields
 - `L::Length`: Total member length (span)
 - `Lu::Length`: Unsupported length for slenderness effects
-- `k::Float64`: Effective length factor
+- `kx::Float64`: Effective length factor for **strong-axis** buckling
+  (bending about x, dimension `h` in plane of buckling)
+- `ky::Float64`: Effective length factor for **weak-axis** buckling
+  (bending about y, dimension `b` in plane of buckling)
 - `braced::Bool`: Whether the frame is braced against sidesway
 
-# ACI Slenderness
-- Slenderness ratio kLu/r determines if second-order effects are significant
-- Braced frames: magnify moments if kLu/r > 34 - 12(M1/M2)
-- Unbraced frames: always consider P-Δ effects
+# ACI Slenderness (ACI 318-11 §10.10 / 318-19 §6.6.4)
+The slenderness ratio `k·Lu/r` is evaluated **per axis** because for a
+non-square rectangular column the radius of gyration `r ≈ 0.3·h` (strong)
+differs from `r ≈ 0.3·b` (weak), and `k` may also differ when the column
+is braced about one axis only. A 16×32 column, for example, can be
+non-slender about its strong axis but slender about its weak axis.
+
+For backward compatibility, `k=...` (single value) sets `kx = ky = k`.
 """
 struct ConcreteMemberGeometry{T<:Unitful.Length} <: AbstractMemberGeometry
     L::T             # Span length
     Lu::T            # Unsupported length
-    k::Float64       # Effective length factor
+    kx::Float64      # Effective length factor (strong axis, x)
+    ky::Float64      # Effective length factor (weak axis, y)
     braced::Bool     # Frame braced against sidesway?
 end
 
 """
-    ConcreteMemberGeometry(L::Unitful.Length; Lu=L, k=1.0, braced=true) -> ConcreteMemberGeometry
+    ConcreteMemberGeometry(L::Unitful.Length; Lu=L, k=1.0, kx=k, ky=k, braced=true)
 
-Construct from `Unitful.Length` values. All lengths are stored internally in metres.
+Construct from `Unitful.Length` values; lengths are stored in metres.
+
+`k` (single scalar, default `1.0`) is a convenience that sets both
+`kx` and `ky`. If `kx` or `ky` is given explicitly it overrides `k`
+on that axis only — a common case for columns braced about just one
+axis (e.g., `kx = 1.0`, `ky = 0.7`).
 """
-function ConcreteMemberGeometry(L::Unitful.Length; Lu::Unitful.Length=L, k=1.0, braced=true)
+function ConcreteMemberGeometry(L::Unitful.Length; Lu::Unitful.Length=L,
+                                k=1.0, kx=k, ky=k, braced=true)
     L_m = uconvert(u"m", L)
     Lu_m = uconvert(u"m", Lu)
-    ConcreteMemberGeometry{typeof(L_m)}(L_m, Lu_m, Float64(k), braced)
+    ConcreteMemberGeometry{typeof(L_m)}(L_m, Lu_m, Float64(kx), Float64(ky), braced)
 end
 
 """
-    ConcreteMemberGeometry(L::Real; Lu=L, k=1.0, braced=true) -> ConcreteMemberGeometry
+    ConcreteMemberGeometry(L::Real; Lu=L, k=1.0, kx=k, ky=k, braced=true)
 
 Backward-compatible constructor: bare `Real` values are treated as metres.
 """
-function ConcreteMemberGeometry(L::Real; Lu::Real=L, k=1.0, braced=true)
-    ConcreteMemberGeometry(Float64(L) * u"m"; Lu=Float64(Lu) * u"m", k=k, braced=braced)
+function ConcreteMemberGeometry(L::Real; Lu::Real=L, k=1.0, kx=k, ky=k, braced=true)
+    ConcreteMemberGeometry(Float64(L) * u"m"; Lu=Float64(Lu) * u"m",
+                           k=k, kx=kx, ky=ky, braced=braced)
 end
 
 # =============================================================================

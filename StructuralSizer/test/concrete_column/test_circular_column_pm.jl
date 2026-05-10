@@ -203,7 +203,29 @@ end
         @test result3.adequate == false
         @test result3.utilization > 1.0
     end
-    
+
+    @testset "ACI 10.3.6 axial cap (spiral)" begin
+        # ACI 318-11 §10.3.6 Eq. (10-1): φPn,max = 0.85·φ·P0 (spiral). The
+        # design check must refuse Pu > φPn,max even though the diagram still
+        # carries the theoretical PURE_COMPRESSION point at φP0.
+        diagram = StructuralSizer.generate_PM_diagram(section, mat; n_intermediate=10)
+        φPn_max = StructuralSizer.get_control_point(diagram, :max_compression).φPn
+        φP0     = StructuralSizer.get_control_point(diagram, :pure_compression).φPn
+
+        @test φPn_max ≈ 0.85 * φP0 atol = 1.0  # MAX_COMPRESSION uses α·P0 exactly
+        @test φPn_max < φP0
+
+        # 95 % of cap → adequate (no moment).
+        r_under = StructuralSizer.check_PM_capacity(diagram, 0.95 * φPn_max, 0.0)
+        @test r_under.adequate
+
+        # 105 % of cap → governs as :axial_cap.
+        r_over = StructuralSizer.check_PM_capacity(diagram, 1.05 * φPn_max, 0.0)
+        @test !r_over.adequate
+        @test r_over.governing == :axial_cap
+        @test r_over.utilization ≈ 1.05 atol = 1e-6
+    end
+
     @testset "Capacity Interpolation" begin
         diagram = StructuralSizer.generate_PM_diagram(section, mat; n_intermediate=20)
         
@@ -212,9 +234,12 @@ end
         φMn_at_bal = StructuralSizer.capacity_at_axial(diagram, Pu_balanced)
         @test φMn_at_bal ≈ SP_CIRCULAR_20_RESULTS.balanced.φMn atol=10.0
         
-        # Axial capacity at zero moment returns pure compression (not allowable limit)
+        # Diagram query: `capacity_at_moment(diagram, 0.0)` returns the curve's
+        # extreme point φP0 by design, since the curve still carries the
+        # theoretical PURE_COMPRESSION point for plotting/diagnostics. The ACI
+        # §10.3.6 cap is enforced one layer up in `check_PM_capacity`, NOT on
+        # the curve itself — see the "ACI 10.3.6 axial cap" testset above.
         φPn_at_zero_M = StructuralSizer.capacity_at_moment(diagram, 0.0)
-        # At M=0, we're at the pure compression point (φP0), not the allowable compression
         @test φPn_at_zero_M ≈ SP_CIRCULAR_20_RESULTS.max_compression.φPn atol=10.0
     end
 end

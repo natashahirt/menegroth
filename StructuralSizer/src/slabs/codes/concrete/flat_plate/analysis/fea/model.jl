@@ -211,15 +211,28 @@ end
 
 """
     _build_fea_slab_model(struc, slab, columns, h, Ecs, ν_concrete, qu, Lc;
-                          Ecc=Ecs, target_edge=nothing, verbose=false)
+                          Ecc=Ecs, target_edge=nothing, verbose=false,
+                          edge_beam_βt=0.0, edge_beam_l2=nothing,
+                          edge_beam_c1_avg=nothing)
 
 Build a standalone Asap mixed model (shell + frame) with column elements
 and ShellPatch mesh conformity at each column.
 
 Delegates shell meshing to `build_slab_shell_mesh`, then adds column stubs,
-loads, and assembles/solves.
+optional perimeter edge-beam frame elements, loads, and assembles/solves.
 
-Returns `(model, col_stubs, shells)`.
+When `edge_beam_βt > 0`, an `Asap.Element` is added for every consecutive
+pair of boundary-vertex nodes returned by `_get_slab_face_boundary`.  This
+generalizes to non-rectangular slabs (L-shapes, T-shapes, polygonal floors)
+because the boundary is always a CCW closed polygon — the iteration only
+relies on the polygon being closed, and each frame element's local axes
+are derived from its endpoint geometry.
+
+Returns `(model, col_stubs, shells, edge_beam_elements)`.
+
+# Reference
+- ACI 318-11 §13.6.4.2 (β_t, Eq. 13-5/13-6)
+- ACI 318-11 §13.7.5 (torsional members)
 """
 function _build_fea_slab_model(
     struc, slab, columns, h, Ecs, ν_concrete, qu, Lc;
@@ -229,6 +242,9 @@ function _build_fea_slab_model(
     drop_panel::Union{Nothing, DropPanelGeometry} = nothing,
     col_I_factor::Float64 = 0.70,
     patch_stiffness_factor::Float64 = 1.0,
+    edge_beam_βt::Float64 = 0.0,
+    edge_beam_l2::Union{Nothing, Length} = nothing,
+    edge_beam_c1_avg::Union{Nothing, Length} = nothing,
 )
     skel = struc.skeleton
     shell_section = Asap.ShellSection(uconvert(u"m", h), uconvert(u"Pa", Ecs), ν_concrete)
@@ -296,6 +312,45 @@ function _build_fea_slab_model(
         end
     end
 
+    # ─── Edge-beam frame elements (ACI 318-11 §13.6.4.2 / §13.7.5) ───
+    # Generalizes to non-rectangular slabs: `_get_slab_face_boundary` returns
+    # a CCW-ordered closed polygon for any face shape (single-cell or chained
+    # multi-cell), and we add one frame element per consecutive vertex pair.
+    edge_beam_elements = Asap.FrameElement[]
+    if edge_beam_βt > 0 && !isnothing(edge_beam_l2) && !isnothing(edge_beam_c1_avg)
+        boundary_vis, _, _ = _get_slab_face_boundary(struc, slab)
+        n_b = length(boundary_vis)
+        if n_b >= 2
+            eb_section = _edge_beam_asap_sec(
+                edge_beam_βt, h, edge_beam_c1_avg, edge_beam_l2, Ecs, ν_concrete,
+            )
+            for i in 1:n_b
+                vi_a = boundary_vis[i]
+                vi_b = boundary_vis[mod1(i + 1, n_b)]
+                (haskey(node_map, vi_a) && haskey(node_map, vi_b)) || continue
+                node_a = node_map[vi_a]
+                node_b = node_map[vi_b]
+                # Skip degenerate (coincident) endpoints — possible in certain
+                # multi-cell collapses.  Asap requires nonzero element length.
+                pa = node_a.position; pb = node_b.position
+                ustrip(u"m", hypot(pa[1] - pb[1], pa[2] - pb[2])) < 1e-6 && continue
+                eb_elem = Asap.Element(node_a, node_b, eb_section, :edge_beam)
+                push!(frame_elements, eb_elem)
+                push!(edge_beam_elements, eb_elem)
+            end
+            if verbose
+                b_eb, h_eb = _edge_beam_dims(edge_beam_βt, h, edge_beam_c1_avg, edge_beam_l2)
+                @debug "FEA: edge-beam elements added on free perimeter " *
+                       "(ACI 318-11 §13.6.4.2 Eq. 13-5/13-6)" begin
+                    n=length(edge_beam_elements)
+                    βt=edge_beam_βt
+                    b=uconvert(u"inch", b_eb)
+                    h_eb=uconvert(u"inch", h_eb)
+                end
+            end
+        end
+    end
+
     # ─── Load ───
     loads = Asap.AbstractLoad[Asap.AreaLoad(shells, uconvert(u"Pa", qu))]
 
@@ -308,12 +363,13 @@ function _build_fea_slab_model(
     if verbose
         @debug "FEA MODEL BUILT (column stubs + ShellPatch)" begin
             "nodes=$(length(model.nodes)) shells=$(length(model.shell_elements)) " *
-            "stubs=$(length(frame_elements)) " *
+            "stubs=$(length(frame_elements)) edge_beams=$(length(edge_beam_elements)) " *
             "dof=$(length(model.u)) target_edge=$(target_edge)"
         end
     end
 
-    return (model=model, col_stubs=col_stubs, shells=shells)
+    return (model=model, col_stubs=col_stubs, shells=shells,
+            edge_beam_elements=edge_beam_elements)
 end
 
 # =============================================================================
@@ -332,6 +388,8 @@ function _update_and_resolve!(
     verbose::Bool = false,
     col_I_factor::Float64 = 0.70,
     patch_stiffness_factor::Float64 = 1.0,
+    edge_beam_l2::Union{Nothing, Length} = nothing,
+    edge_beam_c1_avg::Union{Nothing, Length} = nothing,
 )
     model = cache.model
     t_m = ustrip(u"m", h)
@@ -378,6 +436,19 @@ function _update_and_resolve!(
         stubs.below.element.section = _col_asap_sec(col, Ecc, ν_concrete; I_factor=col_I_factor)
         if !isnothing(stubs.above) && !isnothing(col.column_above)
             stubs.above.element.section = _col_asap_sec(col.column_above, Ecc, ν_concrete; I_factor=col_I_factor)
+        end
+    end
+
+    # 3b. Refresh edge-beam sections — h, Ecs, or βt may have changed between
+    # iterations.  Cross-section is invariant across all perimeter elements
+    # (single βt per slab, ACI 318-11 §13.6.4.2), so we compute once and assign.
+    if !isempty(cache.edge_beam_elements) && cache.edge_beam_βt > 0 &&
+       !isnothing(edge_beam_l2) && !isnothing(edge_beam_c1_avg)
+        eb_section = _edge_beam_asap_sec(
+            cache.edge_beam_βt, h, edge_beam_c1_avg, edge_beam_l2, Ecs, ν_concrete,
+        )
+        for elem in cache.edge_beam_elements
+            elem.section = eb_section
         end
     end
 

@@ -33,6 +33,7 @@ using Asap  # ensures `u"kip"`, `u"ksi"`, etc resolve via Asap unit module
         include("analyze/test_pattern_loading.jl")
         include("analyze/test_structural_offset.jl")
         include("analyze/test_mesh_refinement.jl")
+        include("analyze/test_member_group_demands.jl")
     end
 
     # ─── Visualization ───────────────────────────────────────────────────

@@ -57,6 +57,39 @@ const ALL_METHODS = [
     (key=:fea_d,  name="FEA (strip)", method=SR.FEA(; pattern_loading=false, design_approach=:strip)),
 ]
 
+# ==============================================================================
+# Concrete preset axis (Section 1 sensitivity)
+# ==============================================================================
+# Each entry pairs a `Concrete` preset with its matching `ReinforcedConcreteMaterial`
+# (concrete + Rebar_60). The label is the canonical name from the material
+# registry (`material_name(c)`) and is what gets recorded in the result CSV's
+# `concrete` column.
+#
+# To add a new concrete to the sweep:
+#   1. Define the `Concrete` preset in StructuralSizer/src/materials/concrete.jl
+#      (with grounded ρ, Ec, ECC, and the matching `RC_<…>_60` reinforced preset).
+#   2. Append `(label, concrete, material)` to CONCRETE_PRESETS below.
+#   3. Add the label to DEFAULT_CONCRETES if you want it in the default sweep.
+const CONCRETE_PRESETS = (
+    NWC_3000 = (concrete = SR.NWC_3000, material = SR.RC_3000_60),
+    NWC_4000 = (concrete = SR.NWC_4000, material = SR.RC_4000_60),
+    NWC_5000 = (concrete = SR.NWC_5000, material = SR.RC_5000_60),
+    NWC_6000 = (concrete = SR.NWC_6000, material = SR.RC_6000_60),
+    LWC_4000 = (concrete = SR.LWC_4000, material = SR.RC_LWC_4000_60),
+)
+
+"""Default concrete-preset axis for the Section 1 sweep — four NWC strengths
+(3, 4, 5, 6 ksi) plus one sand-LWC at 4 ksi."""
+const DEFAULT_CONCRETES = ["NWC_3000", "NWC_4000", "NWC_5000", "NWC_6000", "LWC_4000"]
+
+"""Look up a concrete preset by label, with a clear error if missing."""
+function _concrete_preset(label::AbstractString)
+    sym = Symbol(label)
+    haskey(CONCRETE_PRESETS, sym) ||
+        error("Unknown concrete preset \"$label\". Known: $(collect(keys(CONCRETE_PRESETS)))")
+    return CONCRETE_PRESETS[sym]
+end
+
 # Full factorial of EFM options for side-by-side comparison:
 #
 #   Solver        × Column Stiffness × Cracked Columns
@@ -89,18 +122,37 @@ _adaptive_story_ht(span_ft::Float64) = max(12.0, round(span_ft / 3.0))
 _adaptive_max_col(span_ft::Float64; ratio::Float64 = 1.1) =
     clamp(round(span_ft * ratio), 36.0, 60.0)
 
+"""
+    _uncapped_max_col(span_ft) -> Float64
+
+Generous max-column constraint scaled to span, intended for **failure-mode
+diagnostics** rather than realistic design. Returns `clamp(round(span_ft × 2), 60, 240)`,
+i.e. always at least 60″ (the conventional flat-plate practical limit) and
+never beyond 240″ (20 ft, reserved for clearly impossible designs).
+
+Use this with `dual_heatmap_sweep(...; uncap_columns = true)` to expose the
+underlying engineering failure mode (punching, deflection, flexural)
+instead of the parameter-bound "Max Column" failure that otherwise swamps
+long-span cells in failure-mode heatmaps.
+"""
+_uncapped_max_col(span_ft::Float64) = clamp(round(span_ft * 2.0), 60.0, 240.0)
+
 # ==============================================================================
 # DesignParameters construction
 # ==============================================================================
 
 """
-    _make_params(; method, floor_type, sdl_psf, live_psf, max_col_in, ...)
+    _make_params(; method, floor_type, concrete_label, ...)
 
 Build `DesignParameters` for one sweep run.  The `method` kwarg selects
-which analysis method the pipeline's `size_slabs!` stage will use. 
+which analysis method the pipeline's `size_slabs!` stage will use, and
+`concrete_label` selects which slab concrete (and matching reinforced
+preset) is used — see `CONCRETE_PRESETS`.  Columns and foundations are
+intentionally held at fixed presets (`NWC_6000` and `NWC_4000`
+respectively) so that the concrete sensitivity isolates the slab.
 
 Pipeline stages (handled automatically by `build_pipeline`):
-  1. size_slabs!  (with selected method)
+  1. size_slabs!  (with selected method + slab concrete)
   2. reconcile_columns!  (flat plate / flat slab)
   3. size_foundations!  (spread footings on medium sand)
 """
@@ -115,10 +167,12 @@ function _make_params(;
     max_iterations::Int = 150,
     deflection_limit::Symbol = :L_360,
     column_strategy::Symbol = :catalog,
+    concrete_label::AbstractString = "NWC_4000",
 )
+    preset = _concrete_preset(concrete_label)
     fp = SR.FlatPlateOptions(
         method           = method,
-        material         = SR.RC_4000_60,
+        material         = preset.material,
         shear_studs      = shear_studs,
         max_column_size  = max_col_in * u"inch",
         min_h            = min_h,
@@ -133,9 +187,9 @@ function _make_params(;
             floor_SDL = sdl_psf * psf,
             roof_SDL  = sdl_psf * psf,
         ),
-        materials = MaterialOptions(concrete = SR.NWC_4000, rebar = SR.Rebar_60),
+        materials = MaterialOptions(concrete = preset.concrete, rebar = SR.Rebar_60),
         columns   = SR.ConcreteColumnOptions(
-            grade           = SR.NWC_6000,
+            material        = SR.NWC_6000,
             catalog         = :high_capacity,
             sizing_strategy = column_strategy,
         ),
@@ -211,13 +265,18 @@ end
 # Build & prepare helpers
 # ==============================================================================
 
-"""Build a `BuildingSkeleton` for the given rectangular bay grid."""
+"""Build a `BuildingSkeleton` for the given rectangular bay grid.
+
+Defaults to a single-story skeleton (the slab-method comparison case).
+Pass `n_stories > 1` to generate a multi-story building for full-pipeline
+EC sweeps (Section 3)."""
 function _build_skeleton(lx_ft::Float64, ly_ft::Float64,
-                         story_ht_ft::Float64, n_bays::Int)
+                         story_ht_ft::Float64, n_bays::Int;
+                         n_stories::Int = 1)
     total_x = lx_ft * n_bays * u"ft"
     total_y = ly_ft * n_bays * u"ft"
     ht      = story_ht_ft * u"ft"
-    gen_medium_office(total_x, total_y, ht, n_bays, n_bays, 1)
+    gen_medium_office(total_x, total_y, ht, n_bays, n_bays, n_stories)
 end
 
 """Override every cell's live load and re-sync the Asap model."""
@@ -234,6 +293,60 @@ end
 # ==============================================================================
 
 """
+    _extract_slab_mui(volumes, floor_area_m2) -> NamedTuple
+
+Split a slab's `MaterialVolumes` into concrete- vs rebar-side contributions
+and normalize by floor area to produce Material Use Intensity metrics.
+
+Concrete-side materials = `Concrete`, `ReinforcedConcreteMaterial`,
+`FiberReinforcedConcrete`. Rebar-side materials = `RebarSteel`. This split
+matches the material taxonomy in `StructuralSizer/src/materials/types.jl`.
+
+Returns a NamedTuple with both volume (m³, m³/m²) and mass (kg, kg/m²)
+breakdowns. `concrete_t_eq_m` is the equivalent uniform concrete thickness
+(m³ concrete / m² floor) — useful as a method-agnostic mass proxy.
+
+Returns NaNs when `volumes` is empty or `floor_area_m2 ≤ 0` (failed runs).
+"""
+function _extract_slab_mui(volumes, floor_area_m2::Float64)
+    nan_result = (
+        concrete_vol_m3    = NaN, rebar_vol_m3       = NaN,
+        concrete_mass_kg   = NaN, rebar_mass_kg      = NaN,
+        slab_mass_kg       = NaN, mui_kg_per_m2      = NaN,
+        concrete_kg_per_m2 = NaN, rebar_kg_per_m2    = NaN,
+        concrete_t_eq_m    = NaN, rebar_vol_per_m2   = NaN,
+    )
+    (isempty(volumes) || floor_area_m2 ≤ 0.0) && return nan_result
+
+    c_vol_m3 = 0.0;  c_mass_kg = 0.0
+    r_vol_m3 = 0.0;  r_mass_kg = 0.0
+    for (mat, vol) in volumes
+        v_m3   = ustrip(u"m^3", vol)
+        mass_kg = ustrip(u"kg", vol * mat.ρ)
+        if mat isa StructuralSizer.RebarSteel
+            r_vol_m3  += v_m3
+            r_mass_kg += mass_kg
+        else  # Concrete, ReinforcedConcreteMaterial, FiberReinforcedConcrete, …
+            c_vol_m3  += v_m3
+            c_mass_kg += mass_kg
+        end
+    end
+    slab_mass_kg = c_mass_kg + r_mass_kg
+    return (
+        concrete_vol_m3    = c_vol_m3,
+        rebar_vol_m3       = r_vol_m3,
+        concrete_mass_kg   = c_mass_kg,
+        rebar_mass_kg      = r_mass_kg,
+        slab_mass_kg       = slab_mass_kg,
+        mui_kg_per_m2      = slab_mass_kg / floor_area_m2,
+        concrete_kg_per_m2 = c_mass_kg   / floor_area_m2,
+        rebar_kg_per_m2    = r_mass_kg   / floor_area_m2,
+        concrete_t_eq_m    = c_vol_m3    / floor_area_m2,
+        rebar_vol_per_m2   = r_vol_m3    / floor_area_m2,
+    )
+end
+
+"""
     _extract_results(struc; kw...) -> NamedTuple or nothing
 
 Extract a flat result row from the current (post-pipeline) state of `struc`.
@@ -248,7 +361,8 @@ function _extract_results(struc;
                           live_psf::Float64,
                           floor_type::Symbol,
                           method_name::String,
-                          elapsed::Float64)
+                          elapsed::Float64,
+                          concrete_label::AbstractString = "NWC_4000")
     slab = struc.slabs[1]
     r = slab.result
     isnothing(r) && return nothing
@@ -319,15 +433,18 @@ function _extract_results(struc;
     # ── Foundations (post-sizing — pipeline Stage 3) ──────────────────
     fdn = _extract_foundation_results(struc)
 
-    # ── Embodied carbon (per-slab, A1–A3 product stage) ──────────────
+    # ── Embodied carbon + MUI (per-slab, A1–A3 product stage) ────────
     # element_ec uses slab.volumes (concrete + rebar), populated by the
-    # pipeline via _compute_slab_volumes. Area sums struc.cells indexed by
-    # slab.cell_indices (matches compute_building_ec's floor_area logic).
+    # pipeline via _compute_slab_volumes. Area sums struc.cells indexed
+    # by slab.cell_indices (matches compute_building_ec's floor_area logic).
+    # MUI splits volume / mass by material class so EC = MUI × ECC can
+    # be decoupled from material assumptions in Section 2 sensitivity.
     slab_ec_kgco2e = isempty(slab.volumes) ? NaN : element_ec(slab.volumes)
     slab_area_m2   = ustrip(u"m^2",
         sum(struc.cells[ci].area for ci in slab.cell_indices; init = 0.0u"m^2"))
     slab_ec_per_m2 = (isnan(slab_ec_kgco2e) || slab_area_m2 ≤ 0.0) ?
         NaN : slab_ec_kgco2e / slab_area_m2
+    mui = _extract_slab_mui(slab.volumes, slab_area_m2)
 
     # ── Pattern loading flag ────────────────────────────────────────────
     _pattern = !isnothing(dd) && hasproperty(dd, :pattern_loading) ? dd.pattern_loading : false
@@ -341,6 +458,7 @@ function _extract_results(struc;
 
     return merge((
         floor_type        = string(floor_type),
+        concrete          = String(concrete_label),
         lx_ft             = lx_ft,
         ly_ft             = ly_ft,
         story_ht_ft       = ht_ft,
@@ -380,6 +498,17 @@ function _extract_results(struc;
         slab_ec_kgco2e    = slab_ec_kgco2e,
         slab_area_m2      = slab_area_m2,
         slab_ec_per_m2    = slab_ec_per_m2,
+        # Material Use Intensity (per-slab, normalized by floor area)
+        concrete_vol_m3       = mui.concrete_vol_m3,
+        rebar_vol_m3          = mui.rebar_vol_m3,
+        concrete_mass_kg      = mui.concrete_mass_kg,
+        rebar_mass_kg         = mui.rebar_mass_kg,
+        slab_mass_kg          = mui.slab_mass_kg,
+        mui_kg_per_m2         = mui.mui_kg_per_m2,
+        concrete_kg_per_m2    = mui.concrete_kg_per_m2,
+        rebar_kg_per_m2       = mui.rebar_kg_per_m2,
+        concrete_t_eq_m       = mui.concrete_t_eq_m,
+        rebar_vol_per_m2      = mui.rebar_vol_per_m2,
         failures          = _failures,
     ), fdn)
 end
@@ -440,9 +569,11 @@ function _blank_failure_row(;
     elapsed::Float64,
     failure_reason::String = "",
     failing_check::String  = "",
+    concrete_label::AbstractString = "NWC_4000",
 )
     return (
         floor_type        = string(floor_type),
+        concrete          = String(concrete_label),
         lx_ft             = lx_ft,
         ly_ft             = ly_ft,
         story_ht_ft       = story_ht_ft,
@@ -482,6 +613,16 @@ function _blank_failure_row(;
         slab_ec_kgco2e    = NaN,
         slab_area_m2      = NaN,
         slab_ec_per_m2    = NaN,
+        concrete_vol_m3       = NaN,
+        rebar_vol_m3          = NaN,
+        concrete_mass_kg      = NaN,
+        rebar_mass_kg         = NaN,
+        slab_mass_kg          = NaN,
+        mui_kg_per_m2         = NaN,
+        concrete_kg_per_m2    = NaN,
+        rebar_kg_per_m2       = NaN,
+        concrete_t_eq_m       = NaN,
+        rebar_vol_per_m2      = NaN,
         failures          = failure_reason,
         fdn_n_sized       = 0,
         fdn_n_groups      = 0,
@@ -512,7 +653,8 @@ function _extract_rot_failure(struc, dd;
                               live_psf::Float64,
                               floor_type::Symbol,
                               method_name::String,
-                              elapsed::Float64)
+                              elapsed::Float64,
+                              concrete_label::AbstractString = "NWC_4000")
     zs = struc.skeleton.stories_z
     ht_ft = length(zs) >= 2 ? ustrip(u"ft", zs[2] - zs[1]) : NaN
 
@@ -564,6 +706,7 @@ function _extract_rot_failure(struc, dd;
 
     return (
         floor_type        = string(floor_type),
+        concrete          = String(concrete_label),
         lx_ft             = lx_ft,
         ly_ft             = ly_ft,
         story_ht_ft       = ht_ft,
@@ -603,6 +746,16 @@ function _extract_rot_failure(struc, dd;
         slab_ec_kgco2e    = NaN,
         slab_area_m2      = NaN,
         slab_ec_per_m2    = NaN,
+        concrete_vol_m3       = NaN,
+        rebar_vol_m3          = NaN,
+        concrete_mass_kg      = NaN,
+        rebar_mass_kg         = NaN,
+        slab_mass_kg          = NaN,
+        mui_kg_per_m2         = NaN,
+        concrete_kg_per_m2    = NaN,
+        rebar_kg_per_m2       = NaN,
+        concrete_t_eq_m       = NaN,
+        rebar_vol_per_m2      = NaN,
         failures          = _failures,
         # Foundation fields — not sized for invalid geometry
         fdn_n_sized       = 0,
@@ -681,7 +834,8 @@ by `build_pipeline`.  Returns a result NamedTuple, or `nothing` on failure.
 function _run_method(struc, base_params::DesignParameters, method_cfg;
                      lx_ft::Float64, ly_ft::Float64,
                      live_psf::Float64,
-                     floor_type::Symbol = :flat_plate)
+                     floor_type::Symbol = :flat_plate,
+                     concrete_label::AbstractString = "NWC_4000")
     restore!(struc)
     _set_live_load!(struc, live_psf)
 
@@ -690,7 +844,7 @@ function _run_method(struc, base_params::DesignParameters, method_cfg;
     aspect = max(lx_ft, ly_ft) / min(lx_ft, ly_ft)
     if aspect > 2.0
         return _blank_failure_row(;
-            floor_type, lx_ft, ly_ft, live_psf,
+            floor_type, lx_ft, ly_ft, live_psf, concrete_label,
             method_name = method_cfg.name, elapsed = 0.0,
             failure_reason = "high_aspect_ratio",
             failing_check = "Aspect ratio $(round(aspect; digits=2)) > 2.0")
@@ -700,7 +854,7 @@ function _run_method(struc, base_params::DesignParameters, method_cfg;
     applicable, reason = _check_applicability_detailed(struc, method_cfg.method)
     if !applicable
         return _blank_failure_row(;
-            floor_type, lx_ft, ly_ft, live_psf,
+            floor_type, lx_ft, ly_ft, live_psf, concrete_label,
             method_name = method_cfg.name, elapsed = 0.0,
             failure_reason = "ddm_ineligible",
             failing_check = reason)
@@ -735,9 +889,9 @@ function _run_method(struc, base_params::DesignParameters, method_cfg;
         elapsed = time() - t0
         failure_reason = string(typeof(e))
         failing_check  = sprint(showerror, e)
-        @warn "$(method_cfg.name) exception ($(round(elapsed; digits=1))s)" lx=lx_ft ly=ly_ft live=live_psf err=failing_check
+        @warn "$(method_cfg.name) exception ($(round(elapsed; digits=1))s)" lx=lx_ft ly=ly_ft live=live_psf concrete=concrete_label err=failing_check
         return _blank_failure_row(;
-            floor_type, lx_ft, ly_ft, live_psf,
+            floor_type, lx_ft, ly_ft, live_psf, concrete_label,
             method_name = method_cfg.name, elapsed,
             failure_reason, failing_check)
     end
@@ -753,11 +907,11 @@ function _run_method(struc, base_params::DesignParameters, method_cfg;
         # For other methods: return a minimal failure row.
         if is_rot
             return _extract_rot_failure(struc, dd;
-                lx_ft, ly_ft, live_psf, floor_type,
+                lx_ft, ly_ft, live_psf, floor_type, concrete_label,
                 method_name = method_cfg.name, elapsed)
         else
             return _blank_failure_row(;
-                floor_type, lx_ft, ly_ft, live_psf,
+                floor_type, lx_ft, ly_ft, live_psf, concrete_label,
                 method_name = method_cfg.name, elapsed,
                 failure_reason = "non_convergence",
                 failing_check = dd.failing_check)
@@ -765,7 +919,7 @@ function _run_method(struc, base_params::DesignParameters, method_cfg;
     end
 
     row = _extract_results(struc;
-        lx_ft, ly_ft, live_psf, floor_type,
+        lx_ft, ly_ft, live_psf, floor_type, concrete_label,
         method_name = method_cfg.name, elapsed)
     isnothing(row) && return nothing
     return merge(row, (converged = true, failure_reason = "", failing_check = ""))
@@ -776,33 +930,42 @@ end
 # ==============================================================================
 
 """
-    sweep(; spans, live_loads, n_bays, sdl, save, floor_type)
+    sweep(; spans, live_loads, concretes, n_bays, sdl, save, floor_type)
 
-Run all method × span × live-load combinations.
+Run all concrete × span × method × live-load combinations.
 
-Each span prepares the structure once via `prepare!`; all (LL, method)
-combinations reuse it via snapshot/restore + `build_pipeline`.
+For each (concrete, span) pair the structure is prepared once via
+`prepare!`; all (LL, method) combinations reuse it via snapshot/restore +
+`build_pipeline`. Different concretes require fresh `prepare!` because the
+slab self-weight, ECC, and Ec all change.
+
+`concretes` is a vector of label strings into `CONCRETE_PRESETS`. The
+default sweep covers three NWC strengths plus one sand-LWC at 4 ksi.
 """
 function sweep(;
     spans::Vector{Float64}     = [16.0, 20.0, 24.0, 28.0, 32.0, 36.0, 40.0, 44.0, 48.0, 52.0],
     live_loads::Vector{Float64} = [50.0, 150.0, 250.0],
+    concretes::Vector{String}  = DEFAULT_CONCRETES,
     n_bays::Int                = 3,
     sdl::Float64               = 20.0,
     save::Bool                 = true,
     floor_type::Symbol         = :flat_plate,
 )
+    foreach(_concrete_preset, concretes)  # validate up-front
+
     ft_label  = floor_type === :flat_slab ? "Flat Slab" : "Flat Plate"
     n_methods = length(ALL_METHODS)
-    n_total   = length(spans) * length(live_loads) * n_methods
+    n_total   = length(concretes) * length(spans) * length(live_loads) * n_methods
 
     print_header("$(ft_label) Method Comparison — Full Pipeline")
     println("  Floor type:  $(ft_label)")
+    println("  Concretes:   $(concretes)")
     println("  Spans:       $(spans) ft")
     println("  Story hts:   $([_adaptive_story_ht(s) for s in spans]) ft")
     println("  Live loads:  $(live_loads) psf")
     println("  Methods:     $n_methods")
     println("  Pipeline:    slab → columns → spread foundations")
-    println("  Geometries:  $(length(spans))  (prepared once each)")
+    println("  Geometries:  $(length(concretes) * length(spans))  (concrete × span; prepared once each)")
     println("  Total runs:  $n_total")
     println()
 
@@ -812,18 +975,20 @@ function sweep(;
     p         = Progress(n_total; desc = "Sweep ($(ft_label)): ")
 
     n_runs = length(live_loads) * n_methods
-    for span in spans
+    for concrete_label in concretes, span in spans
         ht      = _adaptive_story_ht(span)
         max_col = _adaptive_max_col(span)
 
         local struc, base_params
         try
-            base_params = _make_params(; floor_type, sdl_psf = sdl, max_col_in = max_col)
+            base_params = _make_params(; floor_type, sdl_psf = sdl,
+                                          max_col_in = max_col,
+                                          concrete_label = concrete_label)
             skel   = _build_skeleton(span, span, ht, n_bays)
             struc  = BuildingStructure(skel)
             prepare!(struc, base_params)
         catch e
-            @warn "Geometry build failed — skipping" span floor_type exception=e
+            @warn "Geometry build failed — skipping" concrete=concrete_label span floor_type exception=e
             n_fail += n_runs
             for _ in 1:n_runs; next!(p); end
             continue
@@ -832,7 +997,8 @@ function sweep(;
         for ll in live_loads, mcfg in ALL_METHODS
             row = _run_method(struc, base_params, mcfg;
                               lx_ft = span, ly_ft = span, live_psf = ll,
-                              floor_type = floor_type)
+                              floor_type = floor_type,
+                              concrete_label = concrete_label)
             if isnothing(row)
                 n_fail += 1
             elseif hasproperty(row, :converged) && !row.converged
@@ -864,6 +1030,186 @@ function sweep(;
 end
 
 # ==============================================================================
+# Section 2 — ECC Monte Carlo sweep (post-hoc, no re-sizing)
+# ==============================================================================
+#
+# `sweep_ecc(df_section1)` reuses the Material Use Intensity columns
+# (`concrete_kg_per_m2`, `rebar_kg_per_m2`) populated by `sweep` and
+# Monte-Carlo-samples the empirical RMC EPD distribution (per
+# strength × density class, pooled across mix compositions) from
+# `StructuralSizer/src/materials/ecc/distributions.jl` via
+# `sample_ecc_per_kg`. Each Section 1 row is paired with `n_samples`
+# slab-EC realizations:
+#
+#     slab_ec_i = concrete_kg_per_m2 * ecc_concrete_i + rebar_kg_per_m2 * ecc_rebar
+#
+# Sampling is non-parametric bootstrap (rand-with-replacement) — no
+# Gaussian / log-normal fit is assumed, so tail mass is preserved.
+#
+# Pure post-processing: sizing is not re-run because ECC does not enter
+# any structural calculation. Boundary system is A1–A3 cradle-to-gate
+# per the EPD dataset.
+#
+# `concrete` label → (strength_psi, density_class, ρ) is read off the
+# `Concrete` preset for the label; rebar ECC defaults to `Rebar_60`'s
+# value from `materials/steel.jl` (1.72 kgCO₂e/kg, ICE DB v4.1) and is
+# treated as a single point value (no distributional rebar EPD in the
+# corpus yet).
+
+using Random: AbstractRNG, MersenneTwister
+import Statistics: mean, std
+
+"""Resolve a `concrete` label (e.g. `"NWC_4000"`) to the lookup args
+needed by `sample_ecc_per_kg` / `ecc_distribution_per_kg`."""
+function _ecc_lookup_args(label::AbstractString)
+    sym = Symbol(label)
+    haskey(CONCRETE_PRESETS, sym) ||
+        error("sweep_ecc: unknown concrete label \"$label\". " *
+              "Known: $(collect(keys(CONCRETE_PRESETS)))")
+    c = CONCRETE_PRESETS[sym].concrete
+    fc_psi = round(Int, ustrip(u"psi", c.fc′))
+    dens = (c.aggregate_type === SR.sand_lightweight ||
+            c.aggregate_type === SR.lightweight) ? :LWC : :NWC
+    return fc_psi, c.ρ, dens
+end
+
+"""Nearest-rank percentile on a presorted vector. Falls back to NaN on
+empty input. Matches numpy's default `interpolation='lower'` for direct
+comparison with `_summarize` in `distributions.jl`."""
+@inline function _q_sorted(sorted_vals::Vector{Float64}, p::Float64)
+    n = length(sorted_vals)
+    n == 0 && return NaN
+    n == 1 && return sorted_vals[1]
+    idx = max(1, min(n, ceil(Int, p * n)))
+    return sorted_vals[idx]
+end
+
+"""
+    sweep_ecc(df;
+              n_samples = 2000,
+              rng       = MersenneTwister(0x_EC_C_5_E_E_D),
+              rebar_ecc = SR.Rebar_60.ecc,
+              save      = true,
+              keep_samples = false)
+
+Monte-Carlo apply the empirical RMC EPD distribution to the Section 1
+sweep result `df`, producing per-row slab-EC summary columns:
+
+* `slab_ec_p05`, `slab_ec_p10`, `slab_ec_p25`, `slab_ec_p50`,
+  `slab_ec_p75`, `slab_ec_p90`, `slab_ec_p95` — bootstrap percentiles.
+* `slab_ec_mean`, `slab_ec_std` — sample mean / std deviation.
+* `n_epd` — number of EPD records backing each strength bucket.
+
+If `keep_samples = true` the raw `n_samples`-long vector is also stored
+in column `slab_ec_samples` (a `Vector{Vector{Float64}}` column), which
+is useful for KDE / violin diagnostics but not written to CSV.
+
+# Sampling design
+For each unique concrete label in `df`, a single `n_samples`-length
+realization of concrete ECC is drawn from the empirical EPD population
+for that `(strength_psi, density_class)` and reused across every row of
+that label. This keeps method-vs-method comparisons within a strength
+internally consistent (the same procurement realization is applied to
+all spans / live loads / methods), so spread between methods reflects
+structural variability, while the band envelope reflects procurement
+variability.
+
+`rng` is seeded by default for reproducibility; pass a fresh
+`MersenneTwister(seed)` if you need an independent realization.
+"""
+function sweep_ecc(df::DataFrame;
+                   n_samples::Integer = 2000,
+                   rng::AbstractRNG = MersenneTwister(0xECC_5EED),
+                   rebar_ecc::Float64 = SR.Rebar_60.ecc,
+                   save::Bool = true,
+                   keep_samples::Bool = false)
+    n_samples > 0 || error("sweep_ecc: n_samples must be positive, got $n_samples")
+    for col in (:concrete, :concrete_kg_per_m2, :rebar_kg_per_m2)
+        col in propertynames(df) || error(
+            "sweep_ecc: input DataFrame missing required column `$col` " *
+            "(produce it via `sweep(...)` first).")
+    end
+
+    # Per-label cache of (samples vector, n_epd backing the bucket).
+    # One realization is drawn per unique concrete label (see docstring).
+    cache = Dict{String, Tuple{Vector{Float64}, Int}}()
+    function _ecc_for(label::AbstractString)
+        key = String(label)
+        haskey(cache, key) && return cache[key]
+        fc_psi, ρ, dens = _ecc_lookup_args(label)
+        ecc_vec = SR.sample_ecc_per_kg(fc_psi, ρ;
+                                       density_class = dens,
+                                       n             = n_samples,
+                                       rng           = rng)
+        n_epd = length(SR.ecc_samples(fc_psi; density_class = dens))
+        cache[key] = (ecc_vec, n_epd)
+        return cache[key]
+    end
+
+    # Pre-allocate one realization per row and build NamedTuples.
+    out_rows = NamedTuple[]
+    sizehint!(out_rows, nrow(df))
+    samples_buf = keep_samples ? Vector{Vector{Float64}}() : nothing
+
+    for row in eachrow(df)
+        c_kg = row.concrete_kg_per_m2
+        r_kg = row.rebar_kg_per_m2
+        rebar_term = isnan(r_kg) ? NaN : r_kg * rebar_ecc
+
+        # Default NaN summary for non-converged rows / unknown buckets.
+        summary = (
+            slab_ec_p05 = NaN, slab_ec_p10 = NaN, slab_ec_p25 = NaN,
+            slab_ec_p50 = NaN, slab_ec_p75 = NaN, slab_ec_p90 = NaN,
+            slab_ec_p95 = NaN,
+            slab_ec_mean = NaN, slab_ec_std = NaN,
+            n_epd = 0,
+        )
+        row_samples = Float64[]
+
+        if !isnan(c_kg) && !isnan(r_kg)
+            try
+                ecc_vec, n_epd = _ecc_for(row.concrete)
+                # slab_ec_i = c_kg * ecc_i + rebar_term  (vectorized)
+                row_samples = @. c_kg * ecc_vec + rebar_term
+                sorted_samples = sort(row_samples)
+                summary = (
+                    slab_ec_p05 = _q_sorted(sorted_samples, 0.05),
+                    slab_ec_p10 = _q_sorted(sorted_samples, 0.10),
+                    slab_ec_p25 = _q_sorted(sorted_samples, 0.25),
+                    slab_ec_p50 = _q_sorted(sorted_samples, 0.50),
+                    slab_ec_p75 = _q_sorted(sorted_samples, 0.75),
+                    slab_ec_p90 = _q_sorted(sorted_samples, 0.90),
+                    slab_ec_p95 = _q_sorted(sorted_samples, 0.95),
+                    slab_ec_mean = mean(row_samples),
+                    slab_ec_std  = std(row_samples; corrected = true),
+                    n_epd        = n_epd,
+                )
+            catch e
+                @debug "sweep_ecc bucket missing" concrete=row.concrete exception=e
+            end
+        end
+
+        push!(out_rows, merge(NamedTuple(row), summary))
+        keep_samples && push!(samples_buf, row_samples)
+    end
+
+    df_out = DataFrame(out_rows)
+    if keep_samples
+        df_out.slab_ec_samples = samples_buf
+    end
+    if save && !isempty(df_out)
+        outfile = output_filename("flat_plate_ecc_mc", FP_RESULTS_DIR)
+        # Drop the samples column for CSV — vector-of-vector is awkward
+        # to round-trip and not what downstream consumers want.
+        df_csv = "slab_ec_samples" in names(df_out) ?
+                 select(df_out, Not(:slab_ec_samples)) : df_out
+        CSV.write(outfile, df_csv)
+        println("  ECC sweep:   $outfile  ($(nrow(df_csv)) rows, n_samples=$n_samples)")
+    end
+    return df_out
+end
+
+# ==============================================================================
 # Convenience sweeps
 # ==============================================================================
 
@@ -890,6 +1236,7 @@ function dual_heatmap_sweep(;
     spans_x::Vector{Float64}    = [16.0, 20.0, 24.0, 28.0, 32.0, 36.0, 40.0, 44.0, 48.0, 52.0],
     spans_y::Vector{Float64}    = [16.0, 20.0, 24.0, 28.0, 32.0, 36.0, 40.0, 44.0, 48.0, 52.0],
     live_loads::Vector{Float64} = [50.0, 150.0, 250.0],
+    concretes::Vector{String}   = ["NWC_4000"],
     n_bays::Int                 = 3,
     sdl::Float64                = 20.0,
     save::Bool                  = true,
@@ -897,12 +1244,20 @@ function dual_heatmap_sweep(;
     min_h_variants::Vector{<:Tuple{String, Any}} = Tuple{String,Any}[],
     max_col_in::Union{Nothing, Float64} = nothing,
     col_ratio::Float64                  = 1.1,
+    uncap_columns::Bool                 = false,
     deflection_limit::Symbol            = :L_360,
     column_strategies::Vector{Symbol}   = [:catalog],
 )
+    foreach(_concrete_preset, concretes)  # validate up-front
     if isempty(min_h_variants)
         label = isnothing(min_h) ? "ACI" : "override"
         min_h_variants = [(label, min_h)]
+    end
+    # `uncap_columns = true` overrides the per-cell max-column derivation
+    # with `_uncapped_max_col` — see its docstring. An explicit `max_col_in`
+    # still wins (caller knows what they want).
+    if uncap_columns && !isnothing(max_col_in)
+        @info "uncap_columns=true ignored because max_col_in=$(max_col_in) is explicitly set"
     end
 
     floor_types = [:flat_plate, :flat_slab]
@@ -910,11 +1265,13 @@ function dual_heatmap_sweep(;
     n_geom      = length(spans_x) * length(spans_y)
     n_strats    = length(column_strategies)
     n_runs_per  = length(live_loads) * n_methods
-    n_variants  = length(min_h_variants) * length(floor_types) * n_strats
+    n_concretes = length(concretes)
+    n_variants  = length(min_h_variants) * length(floor_types) * n_strats * n_concretes
     n_total     = n_geom * n_runs_per * n_variants
 
     print_header("Dual Heatmap — Full Pipeline")
     println("  Floor types:  $(floor_types)")
+    println("  Concretes:    $(concretes)")
     println("  Lx spans:     $(spans_x) ft")
     println("  Ly spans:     $(spans_y) ft")
     println("  Live loads:   $(live_loads) psf")
@@ -932,16 +1289,23 @@ function dual_heatmap_sweep(;
 
     for lx in spans_x, ly in spans_y
         ht      = _adaptive_story_ht(max(lx, ly))
-        max_col = isnothing(max_col_in) ? _adaptive_max_col(max(lx, ly); ratio = col_ratio) : max_col_in
+        max_col = if !isnothing(max_col_in)
+            max_col_in
+        elseif uncap_columns
+            _uncapped_max_col(max(lx, ly))
+        else
+            _adaptive_max_col(max(lx, ly); ratio = col_ratio)
+        end
 
         local skel
         try
             skel = _build_skeleton(lx, ly, ht, n_bays)
         catch e
             @warn "Skeleton build failed — skipping" lx ly exception=e
-            for (mh_label, _) in min_h_variants, ft in floor_types, cs in column_strategies, ll in live_loads, mcfg in ALL_METHODS
+            for (mh_label, _) in min_h_variants, ft in floor_types, cs in column_strategies, conc in concretes, ll in live_loads, mcfg in ALL_METHODS
                 row = _blank_failure_row(;
                     floor_type=ft, lx_ft=lx, ly_ft=ly, live_psf=ll,
+                    concrete_label = conc,
                     method_name=mcfg.name, elapsed=0.0,
                     failure_reason="skeleton_build_failed",
                     failing_check=string(e),
@@ -955,19 +1319,20 @@ function dual_heatmap_sweep(;
         end
 
         for (mh_label, mh_val) in min_h_variants
-            for ft in floor_types, cs in column_strategies
+            for ft in floor_types, cs in column_strategies, conc in concretes
                 local struc, base_params
                 try
                     base_params = _make_params(; floor_type = ft, sdl_psf = sdl,
                                                   max_col_in = max_col, min_h = mh_val,
                                                   deflection_limit = deflection_limit,
-                                                  column_strategy = cs)
+                                                  column_strategy = cs,
+                                                  concrete_label = conc)
                     struc = BuildingStructure(skel)
                     prepare!(struc, base_params)
                 catch e
                     ft_label = ft === :flat_slab ? "Flat Slab" : "Flat Plate"
                     strat_label = cs == :nlp ? " [NLP]" : ""
-                    @warn "$(ft_label)$(strat_label) [$(mh_label)] prepare failed" lx ly exception=e
+                    @warn "$(ft_label)$(strat_label) [$(mh_label)] [$(conc)] prepare failed" lx ly exception=e
                     n_fail += n_runs_per
                     for _ in 1:n_runs_per; next!(p); end
                     continue
@@ -976,7 +1341,8 @@ function dual_heatmap_sweep(;
                 for ll in live_loads, mcfg in ALL_METHODS
                     row = _run_method(struc, base_params, mcfg;
                                       lx_ft = lx, ly_ft = ly, live_psf = ll,
-                                      floor_type = ft)
+                                      floor_type = ft,
+                                      concrete_label = conc)
                     if isnothing(row)
                         n_fail += 1
                     elseif hasproperty(row, :converged) && !row.converged
@@ -1029,17 +1395,19 @@ end
 # Pretty-print comparison table
 # ==============================================================================
 
-function compare(; span = 20.0, ll = 50.0, n_bays = 3, sdl = 20.0)
+function compare(; span = 20.0, ll = 50.0, n_bays = 3, sdl = 20.0,
+                   concrete::AbstractString = "NWC_4000")
     ht      = _adaptive_story_ht(span)
     max_col = _adaptive_max_col(span)
-    base_params = _make_params(; sdl_psf = sdl, live_psf = ll, max_col_in = max_col)
+    base_params = _make_params(; sdl_psf = sdl, live_psf = ll, max_col_in = max_col,
+                                  concrete_label = concrete)
     skel    = _build_skeleton(span, span, ht, n_bays)
     struc   = BuildingStructure(skel)
     prepare!(struc, base_params)
 
     println()
-    @printf("  Flat plate: %.0f ft × %.0f ft bays  |  LL = %.0f psf  |  %d×%d grid\n",
-            span, span, ll, n_bays, n_bays)
+    @printf("  Flat plate: %.0f ft × %.0f ft bays  |  LL = %.0f psf  |  Concrete: %s  |  %d×%d grid\n",
+            span, span, ll, concrete, n_bays, n_bays)
     bar = "─" ^ 130
     println("  $bar")
     @printf("  %-16s │ h (in) │ h_min │ h/h_min │ M₀ (k-ft) │ Punch │ Defl  │ Columns    │ Ftg B(ft) │  Time  │ Failures\n", "Method")
@@ -1047,7 +1415,8 @@ function compare(; span = 20.0, ll = 50.0, n_bays = 3, sdl = 20.0)
 
     for mcfg in ALL_METHODS
         row = _run_method(struc, base_params, mcfg;
-                          lx_ft = span, ly_ft = span, live_psf = ll)
+                          lx_ft = span, ly_ft = span, live_psf = ll,
+                          concrete_label = concrete)
         if isnothing(row)
             @printf("  %-16s │  FAIL\n", mcfg.name)
         elseif hasproperty(row, :h_in)

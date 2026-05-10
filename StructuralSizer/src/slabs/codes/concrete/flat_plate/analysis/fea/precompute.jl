@@ -119,19 +119,40 @@ function _build_or_update_fea!(
     qD::Union{Nothing, Pressure} = nothing,
     qL::Union{Nothing, Pressure} = nothing,
     patch_stiffness_factor::Float64 = 1.0,
+    edge_beam_βt::Float64 = 0.0,
+    edge_beam_l2::Union{Nothing, Length} = nothing,
+    edge_beam_c1_avg::Union{Nothing, Length} = nothing,
 )
     split_dl = !isnothing(qD) && !isnothing(qL)
 
-    if !cache.initialized
+    # If the user toggled edge-beam configuration between iterations (added or
+    # removed), we must rebuild the mesh — `_update_and_resolve!` cannot add or
+    # remove frame elements.
+    eb_active_now = edge_beam_βt > 0
+    eb_active_cache = cache.edge_beam_βt > 0
+    eb_topology_changed = cache.initialized && (eb_active_now != eb_active_cache)
+
+    if !cache.initialized || eb_topology_changed
+        if eb_topology_changed
+            cache.initialized = false
+            empty!(cache.element_data)
+            empty!(cache.cell_tri_indices)
+            empty!(cache.edge_beam_elements)
+        end
         # Build model with qu for mesh generation (load magnitude doesn't affect mesh)
         fea = _build_fea_slab_model(
             struc, slab, columns, h, Ecs, ν_concrete, qu, Lc;
             Ecc=Ecc, target_edge=target_edge, verbose=verbose, drop_panel=drop_panel,
             col_I_factor=col_I_factor, patch_stiffness_factor=patch_stiffness_factor,
+            edge_beam_βt=edge_beam_βt,
+            edge_beam_l2=edge_beam_l2,
+            edge_beam_c1_avg=edge_beam_c1_avg,
         )
         cache.model      = fea.model
         cache.col_stubs  = fea.col_stubs
         cache.shells     = fea.shells
+        cache.edge_beam_elements = fea.edge_beam_elements
+        cache.edge_beam_βt = edge_beam_βt
         cache.initialized = true
         cache.drop_panel  = drop_panel
 
@@ -156,21 +177,29 @@ function _build_or_update_fea!(
             return _build_or_update_fea!(cache, struc, slab, columns, h, Ecs, ν_concrete, qu, Lc;
                 Ecc=Ecc, target_edge=target_edge, verbose=verbose, drop_panel=drop_panel,
                 col_I_factor=col_I_factor, patch_stiffness_factor=patch_stiffness_factor,
-                qD=qD, qL=qL)
+                qD=qD, qL=qL,
+                edge_beam_βt=edge_beam_βt,
+                edge_beam_l2=edge_beam_l2,
+                edge_beam_c1_avg=edge_beam_c1_avg)
         end
-        cache.drop_panel = drop_panel  # may have changed between iterations (same topology)
+        cache.drop_panel  = drop_panel  # may have changed between iterations (same topology)
+        cache.edge_beam_βt = edge_beam_βt  # refresh the stored target for this iteration
         if split_dl
             # Update section/stubs (use qu for the initial update), then D/L split
             _update_and_resolve!(cache, h, Ecs, ν_concrete, qu, columns, Lc;
                                  Ecc=Ecc, verbose=verbose, col_I_factor=col_I_factor,
-                                 patch_stiffness_factor=patch_stiffness_factor)
+                                 patch_stiffness_factor=patch_stiffness_factor,
+                                 edge_beam_l2=edge_beam_l2,
+                                 edge_beam_c1_avg=edge_beam_c1_avg)
             _precompute_element_data!(cache, cache.model, struc, slab)
             _solve_dl_cases!(cache, qD, qL; verbose=verbose)
             _combine_element_moments!(cache; verbose=verbose)
         else
             _update_and_resolve!(cache, h, Ecs, ν_concrete, qu, columns, Lc;
                                  Ecc=Ecc, verbose=verbose, col_I_factor=col_I_factor,
-                                 patch_stiffness_factor=patch_stiffness_factor)
+                                 patch_stiffness_factor=patch_stiffness_factor,
+                                 edge_beam_l2=edge_beam_l2,
+                                 edge_beam_c1_avg=edge_beam_c1_avg)
             _precompute_element_data!(cache, cache.model, struc, slab)
         end
     end

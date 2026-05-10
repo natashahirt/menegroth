@@ -357,10 +357,13 @@ function check_two_way_deflection(
     position = has_exterior ? :exterior : :interior
 
     # ── Section properties ──
-    Ig_frame = slab_moment_of_inertia(l2, h)         # full frame strip
-    Ig_half  = slab_moment_of_inertia(l2 / 2, h)     # half-width strip
-    Ig_cs    = Ig_half                                 # column strip
-    Ig_ms    = Ig_half                                 # middle strip
+    # ACI 318-11 §13.2.1 / §13.2.2 — column-strip width = min(ℓ1, ℓ2)/2;
+    # middle strip occupies the remainder of ℓ2.
+    cs_width = min(l1, l2) / 2
+    ms_width = l2 - cs_width
+    Ig_frame = slab_moment_of_inertia(l2, h)            # full frame strip
+    Ig_cs    = slab_moment_of_inertia(cs_width, h)      # column strip
+    Ig_ms    = slab_moment_of_inertia(ms_width, h)      # middle strip
 
     # ── Cracking check ──
     fr_val = fr(fc)
@@ -681,8 +684,12 @@ function check_two_way_deflection(
         w_DL = (moment_results.qD + moment_results.qL) * l2
         Δ_frame_D  = frame_deflection_fixed(w_D,  l1, Ecs, Ie_D)
         Δ_frame_DL = frame_deflection_fixed(w_DL, l1, Ecs, Ie_DL)
-        Ig_cs = slab_moment_of_inertia(l2 / 2, h_slab)
-        Ig_ms = slab_moment_of_inertia(l2 / 2, h_slab)
+        # ACI 318-11 §13.2.1 / §13.2.2 — column strip = min(ℓ1,ℓ2)/2;
+        # middle strip = remainder of ℓ2.
+        cs_width = min(l1, l2) / 2
+        ms_width = l2 - cs_width
+        Ig_cs = slab_moment_of_inertia(cs_width, h_slab)
+        Ig_ms = slab_moment_of_inertia(ms_width, h_slab)
         Δc_fixed_D  = strip_deflection_fixed(Δ_frame_D,  LDF_c, Ie_D,  Ig_cs)
         Δm_fixed_D  = strip_deflection_fixed(Δ_frame_D,  LDF_m, Ie_D,  Ig_ms)
         Δc_fixed_DL = strip_deflection_fixed(Δ_frame_DL, LDF_c, Ie_DL, Ig_cs)
@@ -815,18 +822,28 @@ Named tuple `(ok, max_ratio, governing_strip)` where
 - `max_ratio`: worst-case Rn / Rn_max across all strips
 - `governing_strip`: symbol identifying the controlling location
 """
-function check_flexural_adequacy(moment_results, columns, d, fc; verbose=false)
+function check_flexural_adequacy(moment_results, columns, d, fc;
+                                 βt::Float64 = 0.0, verbose=false)
     φ = 0.9
     β = beta1(fc)
     Rn_max = 0.319 * β * fc   # tension-controlled limit (units of pressure)
 
+    l1 = moment_results.l1
     l2 = moment_results.l2
-    cs_width = l2 / 2   # column strip width
-    ms_width = l2 / 2   # middle strip width
+    # ACI 318-11 §13.2.1 / §13.2.2 — column strip = min(ℓ1, ℓ2)/2 total width;
+    # middle strip = remainder of ℓ2.
+    cs_width = min(l1, l2) / 2
+    ms_width = l2 - cs_width
+
+    # ACI 318-11 §13.6.4.2 — exterior-negative column-strip fraction depends
+    # on edge-beam torsional stiffness βt (linear interp 100%→75% over [0, 2.5]).
+    cs_ext_frac = aci_col_strip_ext_neg_fraction(βt)
+    ms_ext_frac = 1.0 - cs_ext_frac
 
     # Derive strip design moments (mirrors design_strip_reinforcement)
     zero_M = zero(moment_results.M0)
     M_neg_ext_cs = zero_M
+    M_neg_ext_ms = zero_M
     M_neg_int_cs = zero_M
     M_neg_int_ms = zero_M
 
@@ -836,7 +853,8 @@ function check_flexural_adequacy(moment_results, columns, d, fc; verbose=false)
             M_neg_int_cs = max(M_neg_int_cs, 0.75 * m)
             M_neg_int_ms = max(M_neg_int_ms, 0.25 * m)
         else
-            M_neg_ext_cs = max(M_neg_ext_cs, 1.00 * m)
+            M_neg_ext_cs = max(M_neg_ext_cs, cs_ext_frac * m)
+            M_neg_ext_ms = max(M_neg_ext_ms, ms_ext_frac * m)
         end
     end
 
@@ -846,6 +864,7 @@ function check_flexural_adequacy(moment_results, columns, d, fc; verbose=false)
     # Collect (label, Mu, strip width) for every strip location
     strips = [
         (:ext_neg_cs,  M_neg_ext_cs, cs_width),
+        (:ext_neg_ms,  M_neg_ext_ms, ms_width),
         (:int_neg_cs,  M_neg_int_cs, cs_width),
         (:pos_cs,      M_pos_cs,     cs_width),
         (:int_neg_ms,  M_neg_int_ms, ms_width),

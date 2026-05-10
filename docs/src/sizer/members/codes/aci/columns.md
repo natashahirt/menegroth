@@ -166,7 +166,7 @@ bresler_reciprocal_load
 \frac{1}{P_n} = \frac{1}{P_{nx}} + \frac{1}{P_{ny}} - \frac{1}{P_0}
 ```
 
-where ``P_{nx}`` = nominal axial capacity at eccentricity ``e_x`` only, ``P_{ny}`` at ``e_y`` only, ``P_0`` = pure axial capacity. Valid when ``P_n / P_0 \geq 0.1``.
+where ``P_{nx}`` = nominal axial capacity at eccentricity ``e_x`` only, ``P_{ny}`` at ``e_y`` only, ``P_0`` = pure axial capacity. This method is best for high axial / low moment combinations and is not accurate near pure bending.
 
 ```@docs
 pca_load_contour
@@ -181,7 +181,7 @@ u_r = \max\left(
 \right) \le 1.0
 ```
 
-where ``\beta`` is a biaxial interaction factor (default 0.65). Note that the current implementation keeps `Pu`, `φPn`, and `φP0` in the signature for API completeness, but the utilization calculation above depends only on moments and uniaxial moment capacities.
+where ``\beta`` is a biaxial interaction factor (default 0.65).
 
 ```@docs
 check_biaxial_capacity
@@ -306,7 +306,7 @@ where ``\alpha = 0.80`` for tied columns and ``0.85`` for spiral columns.
 
 ### Biaxial Method Selection
 
-The PCA load contour method (`:contour`) is generally preferred for design because it uses the moment interaction directly. The Bresler reciprocal load method (`:bresler`) is simpler but less accurate for low axial loads (`Pn/P0 < 0.1`).
+The PCA load contour / Bresler load contour method (`:contour`) is generally preferred for design because it uses the moment interaction directly. The Bresler reciprocal load method (`:reciprocal`) is intended for high axial / low moment cases.
 
 ### ACIColumnChecker (Optimization Interface)
 

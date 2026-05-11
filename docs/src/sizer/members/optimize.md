@@ -43,7 +43,7 @@ SteelColumnOptions
 | `material` | Steel material (e.g. `A992_Steel`) |
 | `materials` | Optional vector of steel grades for multi-material MIP (`nothing` for single material) |
 | `section_type` | Section family symbol: `:w`, `:hss`, `:pipe`, `:w_and_hss` |
-| `catalog` | Catalog selector: `:compact_only`, `:preferred`, `:all` (legacy `:common` is normalized to `:all`) |
+| `catalog` | Catalog selector: `:common`, `:preferred`, `:all` |
 | `custom_catalog` | Optional custom section vector (overrides `catalog`) |
 | `max_depth` | Maximum section depth (Length) |
 | `n_max_sections` | Max unique sections across groups (0 = no limit) |

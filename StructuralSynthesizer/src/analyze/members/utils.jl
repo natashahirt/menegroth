@@ -996,7 +996,7 @@ Conventions:
 For columns (`member_edge_group == :columns`), signed end moments are
 extracted at the start of the first segment and the end of the last
 segment of each member, then converted to ACI 318-19 / AISC 360-16
-`(M1, M2)` convention via [`_fem_to_aci_endmoments`](@ref). The group's
+`(M1, M2)` convention via `_fem_to_aci_endmoments`. The group's
 `M1x/M2x/M1y/M2y` are taken from the column with the largest |M2|.
 This lets the slenderness path compute `Cm = 0.6 − 0.4·(M1/M2)`
 instead of falling back on the conservative `M1 = 0` stand-in.

@@ -73,5 +73,5 @@ The platform consists of two Julia packages plus an HTTP API:
 
     - All design code implementations cite specific clause numbers (e.g., AISC 360-16 §F2, ACI 318-19 §22.2).
     - Unit consistency is enforced via [Unitful.jl](https://github.com/PainterQubits/Unitful.jl) throughout.
-    - Embodied carbon coefficients are sourced from the ICE Database v4.1.
+    - Embodied carbon coefficients are embedded in the StructuralSizer material presets (concrete presets are anchored to the NRMCA / RMC ready-mix EPD dataset; see `StructuralSizer/src/materials/ecc/data/README.md`).
     - Results should always be verified by a licensed professional engineer.

@@ -147,15 +147,15 @@ Finite element plate model on Winkler springs:
 | Field | Default | Description |
 |:------|:--------|:------------|
 | `material` | `RC_4000_60` | Concrete + rebar material bundle |
-| `cover` | 3 in. | Clear cover to reinforcement |
+| `cover` | `3.0u"inch"` | Clear cover to reinforcement |
 | `bar_size` | 8 | Rebar bar size (#8, etc.) |
 | `pier_shape` | `:rectangular` | Legacy field (ignored for ACI spread footings); use `FoundationDemand.shape` |
-| `pier_c1` | 18 in. | Legacy field (ignored for ACI spread footings); use `FoundationDemand.c1` |
-| `pier_c2` | 18 in. | Legacy field (ignored for ACI spread footings); use `FoundationDemand.c2` |
+| `pier_c1` | `18.0u"inch"` | Legacy field (ignored for ACI spread footings); use `FoundationDemand.c1` |
+| `pier_c2` | `18.0u"inch"` | Legacy field (ignored for ACI spread footings); use `FoundationDemand.c2` |
 | `footing_shape` | `:rectangular` | Footing plan shape (`:rectangular`; square when `B == L`) |
-| `min_depth` | 12 in. | Minimum footing thickness before iteration |
-| `depth_increment` | 1 in. | Round-up increment for footing thickness during iteration |
-| `size_increment` | 3 in. | Round plan dimensions up to this increment |
+| `min_depth` | `12.0u"inch"` | Minimum footing thickness before iteration |
+| `depth_increment` | `1.0u"inch"` | Round-up increment for footing thickness during iteration |
+| `size_increment` | `3.0u"inch"` | Round plan dimensions up to this increment |
 | `ϕ_flexure` | 0.90 | ACI 318-11 §9.3.2 strength reduction |
 | `ϕ_shear` | 0.75 | ACI 318-11 §9.3.2 strength reduction |
 | `ϕ_bearing` | 0.65 | Bearing strength reduction factor |
@@ -171,11 +171,11 @@ Finite element plate model on Winkler springs:
 | Field | Default | Description |
 |:------|:--------|:------------|
 | `material` | `RC_4000_60` | Concrete + rebar material bundle |
-| `cover` | 3 in. | Clear cover |
+| `cover` | `3.0u"inch"` | Clear cover |
 | `bar_size_x` | 8 | Rebar bar size in x |
 | `bar_size_y` | 8 | Rebar bar size in y |
-| `min_depth` | 24 in. | Minimum mat thickness |
-| `depth_increment` | 1 in. | Round-up increment for mat thickness during iteration |
+| `min_depth` | `24.0u"inch"` | Minimum mat thickness |
+| `depth_increment` | `1.0u"inch"` | Round-up increment for mat thickness during iteration |
 | `edge_overhang` | `nothing` | Edge overhang (auto if `nothing`) |
 | `analysis_method` | `RigidMat()` | Analysis method selector (`RigidMat`, `ShuklaAFM`, `WinklerFEA`) |
 | `ϕ_flexure` | 0.90 | ACI 318-11 §9.3.2 strength reduction |

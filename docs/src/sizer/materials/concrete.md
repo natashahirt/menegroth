@@ -16,7 +16,9 @@ Concrete materials in StructuralSizer cover three categories:
 2. **`ReinforcedConcreteMaterial`** — a concrete + rebar pair for RC design
 3. **Earthen materials** — low-strength concrete variants for masonry/vault analysis
 
-All presets compute elastic modulus per ACI 318-11 §8.5.1. The `AggregateType` enum controls fire resistance calculations (ACI 216.1-14).
+All presets compute elastic modulus per ACI 318-11 §8.5.1 using the **density-aware** form (not the simplified normal-weight shortcut). The `AggregateType` enum controls fire resistance calculations (ACI 216.1-14).
+
+Concrete embodied carbon (`Concrete.ecc`, kgCO₂e/kg) is anchored to the empirical median of the **NRMCA / RMC ready-mix EPD dataset** (2021–2025, A1–A3 cradle-to-gate, US plants only), binned by strength and density class. See `StructuralSizer/src/materials/ecc/data/README.md` for provenance and caveats.
 
 ## Key Types
 
@@ -25,6 +27,7 @@ AbstractMaterial
 Concrete
 ReinforcedConcreteMaterial
 AggregateType
+ECCDistribution
 ```
 
 ### Concrete Fields
@@ -54,12 +57,12 @@ AggregateType
 
 | Preset | fc′ | Ec | ρ | ecc | Notes |
 |:-------|:----|:---|:--|:----|:------|
-| `NWC_3000` | 3000 psi | ACI §8.5.1 | 2380 kg/m³ | 0.130 | Low strength |
-| `NWC_4000` | 4000 psi | ACI §8.5.1 | 2380 kg/m³ | 0.138 | Standard |
-| `NWC_5000` | 5000 psi | ACI §8.5.1 | 2385 kg/m³ | 0.155 | Higher strength |
-| `NWC_6000` | 6000 psi | ACI §8.5.1 | 2385 kg/m³ | 0.173 | High strength |
-| `LWC_4000` | 4000 psi | ACI §8.5.1 | 1840 kg/m³ | 0.349 | Sand-lightweight (λ = 0.85) |
-| `LWC_4000_AL` | 4000 psi | ACI §8.5.1 | 1680 kg/m³ | 0.382 | All-lightweight (λ = 0.75) |
+| `NWC_3000` | 3000 psi | ACI §8.5.1 | 2380 kg/m³ | 0.111 | RMC EPD median (NWC 3 ksi, n = 159) |
+| `NWC_4000` | 4000 psi | ACI §8.5.1 | 2380 kg/m³ | 0.127 | RMC EPD median (NWC 4 ksi, n = 263) |
+| `NWC_5000` | 5000 psi | ACI §8.5.1 | 2385 kg/m³ | 0.142 | RMC EPD median (NWC 5 ksi, n = 156) |
+| `NWC_6000` | 6000 psi | ACI §8.5.1 | 2385 kg/m³ | 0.130 | RMC EPD median (NWC 6 ksi, n = 53; SCM-heavy mixes) |
+| `LWC_4000` | 4000 psi | ACI §8.5.1 | 1840 kg/m³ | 0.243 | Sand-lightweight (λ = 0.85), RMC EPD median (LWC 4 ksi, n = 447) |
+| `LWC_4000_AL` | 4000 psi | ACI §8.5.1 | 1680 kg/m³ | 0.267 | All-lightweight (λ = 0.75), extrapolated from LWC bucket (no all-LWC-specific EPDs yet) |
 
 ```@docs
 NWC_3000
@@ -76,8 +79,8 @@ LWC_4000_AL
 
 | Preset | fc′ | ecc | Notes |
 |:-------|:----|:----|:------|
-| `NWC_GGBS` | 4000 psi | 0.099 | 50% GGBS cement replacement |
-| `NWC_PFA` | 4000 psi | 0.112 | 30% PFA (fly ash) replacement |
+| `NWC_GGBS` | 4000 psi | 0.131 | Slag-present mixes only (RMC EPD median, n = 60; not a fixed replacement rate) |
+| `NWC_PFA` | 4000 psi | 0.121 | Fly-ash-present mixes only (RMC EPD median, n = 121; not a fixed replacement rate) |
 
 ## Reinforced Concrete Presets
 
@@ -140,21 +143,30 @@ concrete_wc
 
 ## Implementation Details
 
-- **Elastic modulus**: Standard concrete presets compute `Ec` via the simplified ACI relationship (psi units) for normal-weight concrete:
-
-```math
-E_c = 57{,}000 \sqrt{f'_c}
-```
-
-When unit weight matters (e.g., lightweight concrete), use the general form (with `wc_pcf` in pcf) via the exported overload `Ec(fc, wc_pcf)`:
+- **Elastic modulus**: Concrete presets compute elastic modulus using the ACI 318-11 §8.5.1 density-aware form (psi units). With `w_c` in pcf and `f'_c` in psi:
 
 ```math
 E_c = 33\, w_c^{1.5}\sqrt{f'_c}
 ```
+
+This form is used for *both* normal-weight and lightweight presets to keep stiffness calculations consistent across the codebase.
 - **Aggregate type**: Defaults to `siliceous`. Fire resistance functions (`min_thickness_fire`, `min_cover_fire_slab`, etc.) dispatch on `AggregateType` — carbonate aggregates provide better fire resistance than siliceous.
 - **Name registry**: Like steel, concrete presets are registered via `register_material!` for display. Unregistered instances fall back to `"Concrete (XXXX psi)"` formatting.
-- **Embodied carbon**: ECC values from ICE Database v4.1 (Oct 2025). Values range from 0.01 kgCO₂e/kg for unfired earth to 0.173 kgCO₂e/kg for 6000 psi OPC concrete. GGBS and PFA replacements reduce ECC by ~28% and ~19% respectively.
+- **Embodied carbon**: `Concrete.ecc` is stored as kgCO₂e/kg and is computed from the NRMCA / RMC ready-mix EPD dataset medians (reported per m³) divided by the preset density. ICE Database v4.1 values are used only as a regional cross-check reference (not as the primary source).
 - **Unit weight helpers**: `concrete_wc` converts mass density to weight density (lbf/ft³) by multiplying by gravitational acceleration.
+
+### ECC Distributions (RMC EPD dataset)
+
+The empirical EPD dataset is also exposed as a distribution API so you can inspect percentile ranges (per m³) or convert them to per-kg values consistent with `Concrete.ecc`:
+
+```@docs
+ecc_distribution
+ecc_distribution_per_kg
+ecc_samples
+sample_ecc_per_kg
+list_strength_classes
+list_compositions
+```
 
 ## Limitations & Future Work
 

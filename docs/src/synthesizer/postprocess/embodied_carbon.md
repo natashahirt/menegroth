@@ -2,14 +2,26 @@
 
 > ```julia
 > ec = compute_building_ec(struc)
-> ec.total_kgCO2e        # total building embodied carbon
-> ec.by_element_type      # breakdown by element type
-> summary = ec_summary(design; du = imperial)
+> ec.total_ec             # total building embodied carbon [kgCO₂e]
+> ec.ec_per_floor_area     # intensity [kgCO₂e/m²]
+>
+> # Pretty-printed summary (returns the same BuildingECResult)
+> ec_summary(struc; du = imperial)
 > ```
 
 ## Overview
 
-The embodied carbon (EC) module computes the total greenhouse gas emissions (kgCO₂e) associated with the structural materials in a building design. It operates on `MaterialVolumes` attached to each structural element — slabs, beams, columns, and foundations — and applies emission coefficients (ECC) from material presets sourced from the ICE Database v4.1.
+The embodied carbon (EC) module computes the total greenhouse gas emissions (kgCO₂e) associated with the structural materials in a building design. It operates on `MaterialVolumes` attached to each structural element — slabs, beams, columns, and foundations — and applies emission coefficients (`ecc`) embedded in the StructuralSizer material presets.
+
+At the calculation boundary, every material is treated consistently as:
+
+```math
+\mathrm{EC} = \sum_i \left(V_i \, \rho_i \, \mathrm{ecc}_i\right)
+```
+
+where \(V\) is volume (m³), \(\rho\) is density (kg/m³), and `ecc` is kgCO₂e/kg.
+
+Concrete preset ECC values are anchored to the empirical median of the NRMCA / RMC ready-mix EPD dataset (2021–2025, A1–A3 cradle-to-gate, US plants only); see `StructuralSizer/src/materials/ecc/data/README.md` for provenance and caveats.
 
 **Source:** `StructuralSynthesizer/src/postprocess/ec.jl`
 
@@ -36,12 +48,11 @@ ec_summary
 
 `element_ec(volumes::MaterialVolumes)` computes the embodied carbon for a single element from its material volumes:
 
-| Material | Input | ECC Unit | Source |
-|:---------|:------|:---------|:-------|
-| Concrete | `concrete_m3` | kgCO₂e / m³ | Material preset (varies by fc′) |
-| Steel | `steel_kg` | kgCO₂e / kg | Material preset (structural steel) |
-| Rebar | `rebar_kg` | kgCO₂e / kg | Material preset (reinforcing steel) |
-| Timber | `timber_m3` | kgCO₂e / m³ | Material preset (glulam, CLT, etc.) |
+| Term | Meaning | Units |
+|:-----|:--------|:------|
+| `vol` | Material volume stored in `MaterialVolumes` | m³ |
+| `mat.ρ` | Material density | kg/m³ |
+| `mat.ecc` | Material embodied carbon coefficient | kgCO₂e/kg |
 
 Returns a `Float64` in kgCO₂e.
 
@@ -52,35 +63,36 @@ Returns a `Float64` in kgCO₂e.
 1. **Slabs** — EC from concrete, rebar, and steel deck in each slab's `volumes`
 2. **Members** — EC from steel sections (beams, columns, struts) via `compute_element_ec_member`
 3. **Foundations** — EC from foundation concrete and rebar
-4. **Fireproofing** — EC from SFRM or intumescent coating via `_compute_fireproofing_ec`
+4. **Fireproofing** — EC from SFRM or intumescent coating (only when design parameters are provided)
 
 Returns a `BuildingECResult` with the total and per-element-type breakdown.
 
 ### ElementECResult
 
 Stores the EC result for a single element:
-- Element type (`:slab`, `:beam`, `:column`, `:foundation`, `:fireproofing`)
-- Element index
+- Element type (`:slab`, `:beam`, `:column`, `:strut`, `:foundation`)
+- Element index (within that element vector)
 - EC value in kgCO₂e
-- Material breakdown
+- Total material volume (m³) and mass (kg) for that element (summing across materials)
 
 ### BuildingECResult
 
 Aggregates all element results:
-- `total_kgCO2e` — grand total
-- `by_element_type` — dictionary mapping element type to subtotal
-- `elements` — vector of individual `ElementECResult`s
+- `slabs`, `members`, `foundations` — vectors of `ElementECResult`
+- `slab_ec`, `member_ec`, `foundation_ec`, `fireproofing_ec`, `total_ec` — subtotals and grand total [kgCO₂e]
+- `floor_area` — total floor area [m²]
+- `ec_per_floor_area` — intensity [kgCO₂e/m²]
 
 ### Fireproofing EC
 
-`_compute_fireproofing_ec(struc)` accounts for the embodied carbon of fire protection materials:
+Fireproofing EC is included when `compute_building_ec(struc, params)` is called (internally used by `ec_summary(design)`):
 - SFRM (sprayed fire-resistive material): per UL X772 thickness tables
 - Intumescent coating: per UL N643 thickness tables
 - Material density × coverage area × ECC
 
 ### ec_summary
 
-`ec_summary(design; du)` produces a formatted summary string:
+`ec_summary(design)` (or `ec_summary(struc; du=..., params=...)`) prints a formatted summary and returns the computed `BuildingECResult`:
 - Total building EC
 - EC per unit floor area (kgCO₂e/m² or kgCO₂e/ft²)
 - Breakdown by element type (slabs, beams, columns, foundations, fireproofing)

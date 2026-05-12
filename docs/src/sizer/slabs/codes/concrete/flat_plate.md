@@ -390,7 +390,7 @@ See also `FlatPlateOptions` and `FlatSlabOptions` in
 ```julia
 FlatPlateOptions(
     material = RC_4000_60,       # Concrete + rebar bundle
-    cover = 0.75u"inch",         # Clear cover (ACI Table 20.6.1.3.1)
+    cover = 19.05u"mm",          # Clear cover (0.75")
     bar_size = 5,                # Typical bar (#3-#11)
     method = DDM(),              # DDM(), EFM(), FEA(), or RuleOfThumb()
     has_edge_beam = false,       # Spandrel beam at exterior?
@@ -431,7 +431,7 @@ Key `FEA` options:
 
 | Field | Default | Description |
 |:------|:--------|:------------|
-| `target_edge` | adaptive | Target mesh edge length (`Length` or `nothing` for auto) |
+| `target_edge` | `nothing` | Target mesh edge length (`Length` or `nothing` for adaptive sizing) |
 | `pattern_loading` | `true` | ACI 318-11 §13.7.6 pattern loading |
 | `pattern_mode` | `:efm_amp` | `:efm_amp` (one FEA + cheap EFM factors) or `:fea_resolve` (full re-solve per pattern) |
 | `design_approach` | `:frame` | `:frame`, `:strip`, or `:area` |

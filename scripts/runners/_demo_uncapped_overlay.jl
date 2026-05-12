@@ -45,7 +45,7 @@ for span_x in _DEMO_SPANS, span_y in _DEMO_SPANS
     struc = BuildingStructure(skel)
     prepare!(struc, base_params)
     for mcfg in _DEMO_METHODS
-        n_done += 1
+        global n_done += 1
         _say(@sprintf("  [%d/%d] %dx%d  %-12s  …", n_done, n_total,
                       round(Int, span_x), round(Int, span_y), mcfg.name))
         t0 = time()

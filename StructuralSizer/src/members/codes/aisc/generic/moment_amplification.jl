@@ -4,37 +4,43 @@
 """
     compute_Cm(M1, M2; transverse_loading=false)
 
-Equivalent uniform moment factor (AISC Appendix 8, Eq. A-8-4).
+Equivalent uniform moment factor `Cm` per AISC 360-16 Appendix 8, Eq. A-8-4
+(corpus aisc-360-16, p. 244).
 
-For beam-columns NOT subject to transverse loading between supports:
-    Cm = 0.6 - 0.4(M1/M2)
+For beam-columns **without** transverse loading between supports:
 
-where M1 and M2 are the smaller and larger end moments, respectively.
-M1/M2 is positive for reverse curvature (double curvature), negative for single curvature.
+    Cm = 0.6 - 0.4 (M1 / M2)                                    (Eq. A-8-4)
 
-For beam-columns WITH transverse loading between supports:
-    Cm = 1.0 (conservative)
+where `M1` and `M2` are the smaller and larger end moments respectively.
+The sign convention from §App.8.2.1.2 is `M1/M2 > 0` for reverse curvature
+(both ends bent in the same direction) and `M1/M2 < 0` for single curvature.
+
+For beam-columns **with** transverse loading between supports, Cm may be
+determined by analysis or, conservatively, taken as `Cm = 1.0`.
 
 # Arguments
-- `M1`: Smaller end moment (absolute value)
+- `M1`: Smaller end moment, signed per the §App.8.2.1.2 convention
+        (positive for reverse curvature, negative for single curvature)
 - `M2`: Larger end moment (absolute value), must be > 0
-- `transverse_loading`: Whether transverse loads exist between supports
+- `transverse_loading`: `true` to use the conservative `Cm = 1.0` for members
+        with transverse loads between supports
 
 # Notes
-- Input M1 should already have the correct sign convention:
-  - Positive M1 → reverse curvature (M1/M2 > 0)
-  - Negative M1 → single curvature (M1/M2 < 0)
+- AISC 360-16 Eq. A-8-4 has **no upper or lower bound** on `Cm`. Values can
+  range from `Cm = 1.0` (single curvature, M1 = -M2) down to `Cm = 0.2`
+  (full reverse curvature, M1 = +M2). The lower values are physically
+  beneficial because reverse curvature reduces the destabilizing P-δ effect.
 """
 function compute_Cm(M1, M2; transverse_loading::Bool=false)
     if transverse_loading
         return 1.0
     end
-    # Avoid division by zero
+    # Guard against M2 = 0 (e.g., pinned-pinned with no end moments).
     if abs(M2) < 1e-10
         return 1.0
     end
-    Cm = 0.6 - 0.4 * (M1 / M2)
-    return clamp(Cm, 0.4, 1.0)  # Cm typically ranges 0.4 to 1.0
+    # AISC 360-16 §App.8.2.1.2, Eq. A-8-4 — no clamp; the spec gives Cm directly.
+    return 0.6 - 0.4 * (M1 / M2)
 end
 
 """

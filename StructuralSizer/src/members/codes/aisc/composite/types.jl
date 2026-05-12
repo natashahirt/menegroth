@@ -64,12 +64,27 @@ end
 """
     DeckSlabOnBeam <: AbstractSlabOnBeam
 
-Metal-deck composite slab on steel beam per AISC 360-16 Section I3.2c.
+Metal-deck composite slab on steel beam per AISC 360-16 §I3.2c (corpus
+aisc-360-16, p. 167).
 
-The concrete area `Ac` used for crushing capacity is the concrete *above*
-the top of the deck ribs: `Ac = b_eff × t_slab` (AISC I3.2c(2) for
-perpendicular deck). For parallel deck with `wr/hr ≥ 1.5`, the full depth
-is used. In all cases `t_slab` is concrete thickness above the deck top.
+# `Ac` for crushing capacity (current implementation)
+
+`Ac = b_eff × t_slab` is used for **both** perpendicular and parallel deck.
+This is the concrete strictly *above* the top of the steel deck ribs:
+
+- **Perpendicular deck** (§I3.2c(2)): rib concrete must be neglected, so
+  excluding it is required and exact.
+- **Parallel deck** (§I3.2c(3)): rib concrete *may* be included when
+  `wr/hr ≥ 1.5` and the longitudinal rib is uninterrupted across the beam
+  flange. Excluding it here is **conservative** (it under-reports the
+  available compression block, leading to a smaller plastic neutral-axis
+  shift and a smaller `Mn`). Using the rib concrete on parallel deck is a
+  future enhancement; until then `t_slab` alone defines the available
+  block.
+
+In all cases `t_slab` is the concrete thickness above the deck top, and
+the total slab depth above the steel flange is `hr + t_slab` (used for
+the composite section's elastic neutral axis and `I_transformed`).
 
 # Fields
 - `t_slab`: Concrete thickness **above** deck ribs
@@ -80,7 +95,7 @@ is used. In all cases `t_slab` is concrete thickness above the deck top.
 - `hr`:     Nominal rib height
 - `wr`:     Average rib width
 - `deck_orientation`: `:perpendicular` or `:parallel` to beam
-- `beam_spacing_left`, `beam_spacing_right`, `edge_dist_left`, `edge_dist_right`: Same as SolidSlabOnBeam
+- `beam_spacing_left`, `beam_spacing_right`, `edge_dist_left`, `edge_dist_right`: as `SolidSlabOnBeam`
 """
 struct DeckSlabOnBeam{T_P<:Pressure, T_D<:Density} <: AbstractSlabOnBeam
     t_slab::typeof(1.0u"m")

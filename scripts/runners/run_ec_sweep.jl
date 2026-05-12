@@ -82,7 +82,10 @@ df_heat = dual_heatmap_sweep(;
 )
 
 println("\n--- (3/3) Section 2 ECC Monte Carlo sweep (post-hoc) ---")
-df_band = sweep_ecc(df_line; n_samples = 2000)
+# `keep_samples = true` retains the per-row 2000-sample vectors so the
+# violin figure has access to the raw MC distribution. CSV write drops
+# the samples column automatically.
+df_band = sweep_ecc(df_line; n_samples = 2000, keep_samples = true)
 
 # ── Generate figures ─────────────────────────────────────────────────────────
 
@@ -112,9 +115,11 @@ println("\n--- Bay-shape heatmaps ---")
 Base.invokelatest(plot_dual_ec_heatmaps, df_heat)
 Base.invokelatest(plot_dual_heatmaps,    df_heat)
 
-println("\n=== Section 2 figures (ECC Monte Carlo band) ===\n")
-Base.invokelatest(plot_slab_ec_band, df_band)
+println("\n=== Section 2 figures (ECC Monte Carlo) ===\n")
+Base.invokelatest(plot_slab_ec_errorbars, df_band)   # 21 — main
+Base.invokelatest(plot_slab_ec_envelope,  df_band)   # 22 — supplementary
+Base.invokelatest(plot_slab_ec_violins,   df_band)   # 23 — appendix (full PDF shape)
 
 println("\nDone. Line: $(nrow(df_line)) records.  Heatmap: $(nrow(df_heat)) records.")
-println("       Section 2 MC band: $(nrow(df_band)) rows.")
+println("       Section 2 MC: $(nrow(df_band)) rows.")
 println("Figures saved to StructuralStudies/src/flat_plate_methods/figs/")

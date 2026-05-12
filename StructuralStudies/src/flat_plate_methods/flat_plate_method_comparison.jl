@@ -55,6 +55,11 @@ const ALL_METHODS = [
     (key=:efm_kc, name="EFM (Kc)",    method=SR.EFM(solver=:asap, column_stiffness=:Kc, pattern_loading=false)),
     (key=:fea,    name="FEA (frame)", method=SR.FEA(; pattern_loading=false, design_approach=:frame)),
     (key=:fea_d,  name="FEA (strip)", method=SR.FEA(; pattern_loading=false, design_approach=:strip)),
+    # `:area` requires `moment_transform=:wood_armer` to envelope twisting
+    # moments per element (StructuralSizer/.../helpers.jl §_check_fea_approach_applicability).
+    (key=:fea_a,  name="FEA (area)",  method=SR.FEA(; pattern_loading=false,
+                                                      design_approach=:area,
+                                                      moment_transform=:wood_armer)),
 ]
 
 # ==============================================================================

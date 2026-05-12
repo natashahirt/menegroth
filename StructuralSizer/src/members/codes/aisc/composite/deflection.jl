@@ -1,7 +1,13 @@
 # ==============================================================================
 # Composite Deflection — Transformed Moment of Inertia & I_LB
 # ==============================================================================
-# AISC 360-16 Commentary on Section I3.2 and AISC Manual Table 3-20 approach.
+# References:
+#   - AISC 360-16 Commentary on §I3.2 (corpus aisc-360-16, p. 167+).
+#   - AISC *Steel Construction Manual*, **15th Edition** (2017), Part 3
+#     "Design of Composite Beams", Tables 3-19 and 3-20 (lower-bound moment
+#     of inertia, I_LB) and the accompanying Y2 stress-block formulation.
+#   - AISC Design Guide 11 "Vibrations of Steel-Framed Structural Systems
+#     Due to Human Activity" (2nd Ed.) for serviceability ratios.
 
 # ==============================================================================
 # Transformed Moment of Inertia (Full Composite)
@@ -52,17 +58,17 @@ end
     get_I_LB(section::ISymmSection, material, slab::AbstractSlabOnBeam,
              b_eff, ΣQn) -> SecondMomentOfArea
 
-Lower-bound moment of inertia for partially composite beams per AISC Manual
-Eq. C-I3-1 (Commentary on Section I3.2).
+Lower-bound moment of inertia `I_LB` for partially composite beams, per
+AISC 360-16 Commentary on §I3.2 (Eq. C-I3-1) and the AISC *Steel
+Construction Manual*, 15th Ed. (2017), Part 3, Tables 3-19 / 3-20.
 
-Uses the stress-block centroid (Y2 method) consistent with AISC Manual
-Tables 3-19/3-20:
+Uses the stress-block centroid ("Y2" method) consistent with the Manual:
 
-    a  = Cf / (0.85 fc′ b_eff)
-    Y2 = (gap + ts) − a/2          (top of steel to concrete resultant)
-    Aₑ = Cf / Fy                   (effective area, transformed to steel)
-    YENA from bottom of steel via parallel axis theorem
-    I_LB = Is + As×(YENA − d/2)² + Aₑ×(d + Y2 − YENA)²
+    a    = Cf / (0.85 · fc′ · b_eff)         (concrete stress-block depth)
+    Y2   = (gap + ts) − a/2                  (top of steel to concrete resultant)
+    Aₑ   = Cf / Fy                           (effective area, transformed to steel)
+    YENA = (As · d/2 + Aₑ · (d + Y2)) / (As + Aₑ)
+    I_LB = Is + As · (YENA − d/2)² + Aₑ · (d + Y2 − YENA)²
 
 For full composite (`ΣQn ≥ Cf_max`), delegates to `get_I_transformed`.
 For zero composite, returns `section.Ix`.

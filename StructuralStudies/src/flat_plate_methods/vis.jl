@@ -63,37 +63,64 @@ end
 # Constants
 # ==============================================================================
 
-const METHOD_ORDER = ["ACI Min", "MDDM", "DDM (Full)", "EFM (HC)", "EFM (ASAP)", "EFM (Kc)", "FEA"]
+# Method order, colors, linestyles, and markers.
+#
+# The FEA family is split into three sibling variants per
+# `flat_plate_method_comparison.jl ALL_METHODS` (keys `:fea`, `:fea_d`,
+# `:fea_a`). They are rendered in the green family with distinct
+# linestyles and markers so they are immediately distinguishable in a
+# multi-method comparison plot.
+#
+# The legacy `"FEA"` label is kept as a backward-compat alias because
+# existing tests and ad-hoc runners build their own `name="FEA"` method
+# configs (see `StructuralStudies/test/test_*.jl`). It inherits the same
+# visual style as `"FEA (frame)"` since that is the closest to what
+# legacy single-FEA runs computed.
+const METHOD_ORDER = [
+    "ACI Min", "MDDM", "DDM (Full)",
+    "EFM (HC)", "EFM (ASAP)", "EFM (Kc)",
+    "FEA (frame)", "FEA (strip)", "FEA (area)",
+    "FEA",   # legacy alias — matches tests / older sweeps
+]
 const METHOD_COLORS = Dict(
     "ACI Min"     => :black,
-    "MDDM"       => :steelblue,
+    "MDDM"        => :steelblue,
     "DDM (Full)"  => :royalblue,
     "EFM (HC)"    => :darkorange,
     "EFM (ASAP)"  => :orangered,
-    "EFM (Kc)"    => :gold,        # Raw column stiffness (no torsional reduction)
-    "FEA"         => :forestgreen,
+    "EFM (Kc)"    => :gold,            # Raw column stiffness (no torsional reduction)
+    "FEA (frame)" => :forestgreen,     # 2D shell + ACI 8.10.5 fractions
+    "FEA (strip)" => :mediumseagreen,  # 2D shell, direct CS/MS strip integration
+    "FEA (area)"  => :darkgreen,       # 2D shell, per-element Wood–Armer
+    "FEA"         => :forestgreen,     # Legacy alias
 )
 _color(m) = get(METHOD_COLORS, m, :gray)
 
 const METHOD_LINESTYLES = Dict(
-    "ACI Min"    => :dash,
-    "MDDM"      => :solid,
-    "DDM (Full)" => :solid,
-    "EFM (HC)"   => :dashdot,
-    "EFM (ASAP)" => :dashdot,
-    "EFM (Kc)"   => :dot,
-    "FEA"        => :dot,
+    "ACI Min"     => :dash,
+    "MDDM"        => :solid,
+    "DDM (Full)"  => :solid,
+    "EFM (HC)"    => :dashdot,
+    "EFM (ASAP)"  => :dashdot,
+    "EFM (Kc)"    => :dot,
+    "FEA (frame)" => :solid,
+    "FEA (strip)" => :dashdotdot,
+    "FEA (area)"  => :dot,
+    "FEA"         => :solid,           # Legacy alias
 )
 _linestyle(m) = get(METHOD_LINESTYLES, m, :solid)
 
 const METHOD_MARKERS = Dict(
-    "ACI Min"    => :xcross,
-    "MDDM"      => :circle,
-    "DDM (Full)" => :rect,
-    "EFM (HC)"   => :diamond,
+    "ACI Min"     => :xcross,
+    "MDDM"        => :circle,
+    "DDM (Full)"  => :rect,
+    "EFM (HC)"    => :diamond,
     "EFM (ASAP)" => :utriangle,
-    "EFM (Kc)"   => :dtriangle,   # Down triangle to distinguish from EFM (ASAP)
-    "FEA"        => :star5,
+    "EFM (Kc)"    => :dtriangle,       # Down triangle to distinguish from EFM (ASAP)
+    "FEA (frame)" => :star5,
+    "FEA (strip)" => :hexagon,
+    "FEA (area)"  => :pentagon,
+    "FEA"         => :star5,           # Legacy alias
 )
 _marker(m) = get(METHOD_MARKERS, m, :circle)
 
@@ -495,45 +522,48 @@ plot_slab_t_eq_by_concrete(df) =
 #   * Section 1 line position  → method-driven EC variation (sizing).
 #   * Section 2 band thickness → procurement-driven EC variation (mix).
 
-"""
-    _band_grid_plot(df, row_col, suptitle, filename;
-                    band_lo, band_hi, band_mid, ylabel,
-                    floor_type, alpha_band)
+# ──────────────────────────────────────────────────────────────────────────────
+# Shared scaffolding for Section 2 panel grids
+# ──────────────────────────────────────────────────────────────────────────────
 
-Generic grid plot for percentile bands. `row_col` is the column whose
-unique sorted values become rows of the panel grid (e.g. `:concrete`
-for Section 2 main figure or `:composition` for the composition
-decomposition). Columns of the panel grid are live loads.
-
-Each panel shows, per method:
-  * a shaded `band!` between `band_lo` and `band_hi` (default p10–p90),
-  * a solid `lines!` at `band_mid` (default p50).
-"""
-function _band_grid_plot(df, row_col::Symbol,
-                         suptitle::String, filename::String;
-                         band_lo::Symbol = :slab_ec_p10,
-                         band_hi::Symbol = :slab_ec_p90,
-                         band_mid::Symbol = :slab_ec_p50,
-                         ylabel::String  = "Slab EC (kgCO₂e/m²)",
-                         floor_type::String = "flat_plate",
-                         alpha_band::Float64 = 0.18)
-    for col in (band_lo, band_hi, band_mid, row_col, :live_psf, :method)
+"""Filter `df` to square bays + ACI minimum-thickness variant and drop rows
+whose required columns are missing. Returns `nothing` if nothing is left."""
+function _section2_clean(df, required_cols; floor_type::String = "flat_plate")
+    for col in required_cols
         col in propertynames(df) || begin
-            @info "Skipping $filename — DataFrame missing `$col`"
+            @info "Section 2 plot — DataFrame missing `$col`; skipping"
             return nothing
         end
     end
-
     work = _square_bays(_pick_variant(_ensure_span(df)))
-    hasproperty(work, :floor_type) && (work = filter(r -> r.floor_type == floor_type, work))
-    isempty(work) && return nothing
+    hasproperty(work, :floor_type) &&
+        (work = filter(r -> r.floor_type == floor_type, work))
+    isempty(work) ? nothing : work
+end
 
-    # Drop rows where the band is missing (e.g. unsupported composition).
-    work = filter(r -> !isnan(r[band_lo]) && !isnan(r[band_hi]) &&
-                       !isnan(r[band_mid]), work)
-    isempty(work) && return nothing
+"""Compute a list of method-dodge x-positions centered on each span. The
+total dodge width is 60 % of the smallest span gap so adjacent groups
+never overlap."""
+function _dodge_offsets(spans::AbstractVector{<:Real}, n_methods::Integer)
+    n_methods <= 1 && return (zeros(n_methods), 1.0)
+    s = sort(unique(spans))
+    gap = length(s) > 1 ? minimum(diff(s)) : 1.0
+    span_total = 0.60 * gap                       # total dodge band per span
+    step       = span_total / (n_methods - 1)
+    offsets    = collect(range(-span_total/2, span_total/2; length = n_methods))
+    return offsets, step
+end
 
-    rows_keys  = sort(unique(work[!, row_col]))
+"""Build the rows × cols Figure scaffolding (concrete-preset rows ×
+live-load columns) and call `panel_render!(ax, sub_df, ll, rkey)` for
+each panel. `y_hi_of(work)` produces the shared upper y-limit. Returns
+the saved figure path (or `nothing`)."""
+function _section2_grid(work, filename::String, suptitle::String;
+                        ylabel::String = "Slab EC (kgCO₂e/m²)",
+                        y_hi_of::Function,
+                        panel_render!::Function,
+                        legend_func::Function = _method_line_legend)
+    rows_keys  = sort(unique(work.concrete))
     live_loads = sort(unique(work.live_psf))
     n_rows = length(rows_keys)
     n_cols = length(live_loads)
@@ -543,21 +573,17 @@ function _band_grid_plot(df, row_col::Symbol,
     Label(fig[0, 1:n_cols], suptitle;
           fontsize = 16, font = :bold, tellwidth = false)
 
-    # Shared y range: 0 → 1.08 × global max p90.
-    y_hi = maximum(work[!, band_hi])
-    y_lo = 0.0
+    y_hi = y_hi_of(work)
     y_hi += y_hi * 0.08
-
     x_lo = minimum(work.span_ft);  x_hi = maximum(work.span_ft)
-    x_pad = (x_hi - x_lo) * 0.04
+    x_pad = (x_hi - x_lo) * 0.06
     x_lo -= x_pad;  x_hi += x_pad
 
     axs = Matrix{Axis}(undef, n_rows, n_cols)
     for (i, rkey) in enumerate(rows_keys)
-        sub_row = filter(r -> r[row_col] == rkey, work)
+        sub_row = filter(r -> r.concrete == rkey, work)
         for (j, ll) in enumerate(live_loads)
             sub = filter(r -> r.live_psf ≈ ll, sub_row)
-
             ax = Axis(fig[i, j];
                       xlabel = i == n_rows ? "Span (ft)" : "",
                       ylabel = j == 1 ? ylabel : "",
@@ -568,57 +594,252 @@ function _band_grid_plot(df, row_col::Symbol,
             i < n_rows && hidexdecorations!(ax; ticks = false, grid = false)
             j > 1     && hideydecorations!(ax; ticks = false, grid = false)
 
-            for m in METHOD_ORDER
-                md = filter(r -> r.method == m, sub)
-                isempty(md) && continue
-                sp  = sort(unique(md.span_ft))
-                lo  = Float64[filter(r -> r.span_ft == s, md)[1, band_lo]  for s in sp]
-                hi  = Float64[filter(r -> r.span_ft == s, md)[1, band_hi]  for s in sp]
-                mid = Float64[filter(r -> r.span_ft == s, md)[1, band_mid] for s in sp]
-                col_m = _color(m)
-                band!(ax, sp, lo, hi; color = (col_m, alpha_band))
-                lines!(ax, sp, mid; color = (col_m, 0.95),
-                       linestyle = _linestyle(m), linewidth = 2.0)
-                scatter!(ax, sp, mid; color = col_m,
-                         marker = _marker(m), markersize = 8)
-            end
+            isempty(sub) || panel_render!(ax, sub, ll, rkey)
 
-            ylims!(ax, y_lo, y_hi)
+            ylims!(ax, 0.0, y_hi)
             xlims!(ax, x_lo, x_hi)
         end
-
         Label(fig[i, 0], string(rkey);
               fontsize = 11, font = :bold, rotation = π/2, tellheight = false)
     end
 
     CairoMakie.linkaxes!(axs...)
-    leg_elements = [LineElement(color = _color(m), linestyle = _linestyle(m),
-                                 linewidth = 2) for m in METHOD_ORDER]
-    Legend(fig[n_rows + 1, 1:n_cols], leg_elements, METHOD_ORDER;
-           orientation = :horizontal, labelsize = 10, tellwidth = false)
-
+    legend_func(fig, n_rows, n_cols)
     rowgap!(fig.layout, 8)
     colgap!(fig.layout, 8)
     resize_to_layout!(fig)
     return _save_fig(fig, filename)
 end
 
+"""Default legend for Section 2 figures: per-method line elements,
+filtered to the methods actually present in the work df so absent
+variants (e.g. legacy `"FEA"` when the data has the three split
+variants) do not bloat the legend."""
+function _method_line_legend(fig, n_rows, n_cols; methods = METHOD_ORDER)
+    elems = [LineElement(color = _color(m), linestyle = _linestyle(m),
+                         linewidth = 2) for m in methods]
+    Legend(fig[n_rows + 1, 1:n_cols], elems, methods;
+           orientation = :horizontal, labelsize = 10, tellwidth = false,
+           nbanks = length(methods) > 5 ? 2 : 1)
+end
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Plot 21 — Dodged errorbars per (span, method)
+# ──────────────────────────────────────────────────────────────────────────────
+
 """
-    plot_slab_ec_band(df_band)
+    plot_slab_ec_errorbars(df_band)
 
-Section 2 main figure. Rows = concrete preset, columns = LL. Each panel
-shows, per method, a p10–p90 shaded band and a p50 line for slab embodied
-carbon (kgCO₂e/m²) vs span. Input `df_band` must come from
-`sweep_ecc(df_section1)` — Monte Carlo bootstrap of the empirical RMC
-EPD distribution.
+Section 2 main figure. Rows = concrete preset, columns = LL. At each
+span position, dodged uncertainty bars per method:
 
-Read together with `plot_slab_ec_by_concrete(df_section1)`: the line
-positions there reveal method-driven (sizing) variation; the band
-thickness here reveals procurement (mix) variation."""
-plot_slab_ec_band(df) =
-    _band_grid_plot(df, :concrete,
-                    "Slab EC Band by Concrete Preset (RMC EPD MC p10–p90, Square Bays)",
-                    "21_slab_ec_band.png")
+  * thin whisker spans p10 → p90 (procurement 80 % credible band),
+  * thick segment spans p25 → p75 (IQR),
+  * marker at p50 (method-shaped, method-colored).
+
+A faint dotted line connects each method's medians across spans so the
+span trend remains readable without overlapping translucent bands.
+
+Input must come from `sweep_ecc(df_section1)` (Monte Carlo bootstrap of
+the empirical RMC EPD distribution)."""
+function plot_slab_ec_errorbars(df)
+    required = (:slab_ec_p10, :slab_ec_p25, :slab_ec_p50,
+                :slab_ec_p75, :slab_ec_p90, :concrete, :live_psf, :method)
+    work = _section2_clean(df, required)
+    work === nothing && return nothing
+    work = filter(r -> !isnan(r.slab_ec_p10) && !isnan(r.slab_ec_p90), work)
+    isempty(work) && return nothing
+
+    methods_present = filter(m -> m in unique(work.method), METHOD_ORDER)
+    offsets, _ = _dodge_offsets(unique(work.span_ft), length(methods_present))
+    method_offset = Dict(m => offsets[k] for (k, m) in enumerate(methods_present))
+
+    function panel!(ax, sub, _ll, _rkey)
+        for m in methods_present
+            md = filter(r -> r.method == m, sub)
+            isempty(md) && continue
+            sp  = sort(unique(md.span_ft))
+            p10 = Float64[filter(r -> r.span_ft == s, md)[1, :slab_ec_p10] for s in sp]
+            p25 = Float64[filter(r -> r.span_ft == s, md)[1, :slab_ec_p25] for s in sp]
+            p50 = Float64[filter(r -> r.span_ft == s, md)[1, :slab_ec_p50] for s in sp]
+            p75 = Float64[filter(r -> r.span_ft == s, md)[1, :slab_ec_p75] for s in sp]
+            p90 = Float64[filter(r -> r.span_ft == s, md)[1, :slab_ec_p90] for s in sp]
+            x = sp .+ method_offset[m]
+            col_m = _color(m)
+            # p10–p90 thin whisker
+            for k in eachindex(x)
+                lines!(ax, [x[k], x[k]], [p10[k], p90[k]];
+                       color = (col_m, 0.55), linewidth = 1.0)
+            end
+            # p25–p75 thick IQR segment
+            for k in eachindex(x)
+                lines!(ax, [x[k], x[k]], [p25[k], p75[k]];
+                       color = (col_m, 0.95), linewidth = 3.0)
+            end
+            # Faint median trend connector
+            lines!(ax, x, p50; color = (col_m, 0.35),
+                   linestyle = :dot, linewidth = 1.0)
+            # Median markers
+            scatter!(ax, x, p50; color = col_m,
+                     marker = _marker(m), markersize = 7,
+                     strokecolor = :white, strokewidth = 0.5)
+        end
+    end
+
+    return _section2_grid(work,
+        "21_slab_ec_errorbars.png",
+        "Slab EC by Concrete Preset — RMC EPD MC (Square Bays, p10–p90 + IQR)";
+        y_hi_of  = w -> maximum(w.slab_ec_p90),
+        panel_render! = panel!,
+        legend_func   = (fig, nr, nc) ->
+            _method_line_legend(fig, nr, nc; methods = methods_present),
+    )
+end
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Plot 22 — Procurement envelope + per-method median lines
+# ──────────────────────────────────────────────────────────────────────────────
+
+"""
+    plot_slab_ec_envelope(df_band)
+
+Section 2 supplementary figure. Same panel grid, but separates
+procurement uncertainty from method variation visually:
+
+  * a single grey **procurement envelope** per panel — the across-method
+    average of the per-row p10–p90 bounds at each span. Reads as "what
+    the EPD distribution does at fixed sizing".
+  * five thin colored **median lines** per method on top, showing the
+    sizing-driven shift between methods.
+
+This is the cleanest figure for the journal claim *"procurement
+variability dominates method variability"* — the grey band is fixed,
+the lines fan out within it."""
+function plot_slab_ec_envelope(df)
+    required = (:slab_ec_p10, :slab_ec_p50, :slab_ec_p90,
+                :concrete, :live_psf, :method)
+    work = _section2_clean(df, required)
+    work === nothing && return nothing
+    work = filter(r -> !isnan(r.slab_ec_p10) && !isnan(r.slab_ec_p90), work)
+    isempty(work) && return nothing
+
+    methods_present = filter(m -> m in unique(work.method), METHOD_ORDER)
+
+    function panel!(ax, sub, _ll, _rkey)
+        sp_all = sort(unique(sub.span_ft))
+        # Across-method average of (p10, p90) at each span — the
+        # representative procurement envelope for that panel.
+        env_lo = Float64[]
+        env_hi = Float64[]
+        for s in sp_all
+            row_s = filter(r -> r.span_ft == s, sub)
+            push!(env_lo, mean(row_s.slab_ec_p10))
+            push!(env_hi, mean(row_s.slab_ec_p90))
+        end
+        band!(ax, sp_all, env_lo, env_hi;
+              color = (:gray, 0.28))
+        # p50-of-p50 line for the envelope's central tendency.
+        env_mid = Float64[
+            mean(filter(r -> r.span_ft == s, sub).slab_ec_p50) for s in sp_all
+        ]
+        lines!(ax, sp_all, env_mid; color = (:gray30, 0.6),
+               linestyle = :solid, linewidth = 1.2)
+
+        for m in methods_present
+            md = filter(r -> r.method == m, sub)
+            isempty(md) && continue
+            sp  = sort(unique(md.span_ft))
+            mid = Float64[filter(r -> r.span_ft == s, md)[1, :slab_ec_p50] for s in sp]
+            col_m = _color(m)
+            lines!(ax, sp, mid; color = (col_m, 0.95),
+                   linestyle = _linestyle(m), linewidth = 2.0)
+            scatter!(ax, sp, mid; color = col_m,
+                     marker = _marker(m), markersize = 7,
+                     strokecolor = :white, strokewidth = 0.5)
+        end
+    end
+
+    function legend!(fig, n_rows, n_cols)
+        line_elems = [LineElement(color = _color(m), linestyle = _linestyle(m),
+                                  linewidth = 2) for m in methods_present]
+        env_elem = PolyElement(color = (:gray, 0.28), strokecolor = :transparent)
+        Legend(fig[n_rows + 1, 1:n_cols],
+               [env_elem; line_elems],
+               ["Procurement (p10–p90)"; methods_present];
+               orientation = :horizontal, labelsize = 10, tellwidth = false,
+               nbanks = 2)
+    end
+
+    return _section2_grid(work,
+        "22_slab_ec_envelope.png",
+        "Slab EC — Procurement Envelope vs Method Medians (Square Bays)";
+        y_hi_of      = w -> maximum(w.slab_ec_p90),
+        panel_render! = panel!,
+        legend_func  = legend!,
+    )
+end
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Plot 23 — Side-by-side violins per (span, method)
+# ──────────────────────────────────────────────────────────────────────────────
+
+"""
+    plot_slab_ec_violins(df_keep)
+
+Section 2 appendix figure. At each span position, dodged half-violins
+show the full Monte Carlo distribution shape per method. Requires
+`sweep_ecc(...; keep_samples = true)` so the `:slab_ec_samples` column
+is populated.
+
+The shape is bootstrapped from the empirical EPD distribution, so it
+shows the same skew / multi-modality that the underlying procurement
+data carries (e.g. PLC vs non-PLC sub-populations). Provided as
+diagnostic context for the headline errorbar / envelope figures."""
+function plot_slab_ec_violins(df)
+    required = (:slab_ec_samples, :concrete, :live_psf, :method, :slab_ec_p90)
+    work = _section2_clean(df, required)
+    work === nothing && return nothing
+    # Drop rows with empty samples (e.g. non-converged sizing).
+    work = filter(r -> r.slab_ec_samples isa AbstractVector &&
+                       !isempty(r.slab_ec_samples), work)
+    isempty(work) && return nothing
+
+    methods_present = filter(m -> m in unique(work.method), METHOD_ORDER)
+    offsets, dodge_step = _dodge_offsets(unique(work.span_ft),
+                                         length(methods_present))
+    method_offset = Dict(m => offsets[k] for (k, m) in enumerate(methods_present))
+    violin_w = 0.85 * dodge_step
+
+    function panel!(ax, sub, _ll, _rkey)
+        for m in methods_present
+            md = filter(r -> r.method == m, sub)
+            isempty(md) && continue
+            col_m = _color(m)
+            for r in eachrow(md)
+                xpos = r.span_ft + method_offset[m]
+                ys   = r.slab_ec_samples
+                isempty(ys) && continue
+                violin!(ax, fill(xpos, length(ys)), ys;
+                        width = violin_w,
+                        color = (col_m, 0.55),
+                        strokecolor = (col_m, 0.95),
+                        strokewidth = 0.6,
+                        show_median = true,
+                        mediancolor = :black,
+                        medianlinewidth = 1.0)
+            end
+        end
+    end
+
+    return _section2_grid(work,
+        "23_slab_ec_violins.png",
+        "Slab EC — MC Sample Distributions (Square Bays)";
+        y_hi_of      = w -> maximum(w.slab_ec_p90) * 1.05,
+        panel_render! = panel!,
+        legend_func  = (fig, nr, nc) ->
+            _method_line_legend(fig, nr, nc; methods = methods_present),
+    )
+end
 
 # ── Rectangular bay versions ──
 

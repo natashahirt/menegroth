@@ -153,10 +153,12 @@ feasible = is_feasible(checker, cache, j, section, material, demand, geometry)
 
 ### Chapter E — Compression
 
-Flexural, torsional, and flexural-torsional buckling with slender element reduction (Q factors).
+Flexural, torsional, and flexural-torsional buckling with slender-element
+reduction via the AISC 360-16 §E7 effective-area method
+(`Pn = Fcr · Ae`, Eq. E7-1).
 
 ```julia
-# Nominal strength
+# Nominal strength (Pn = Fcr · Ae internally)
 Pn = get_Pn(section, material, KL; axis=:weak)
 Pn = get_Pn(section, material, KL; axis=:strong)
 Pn = get_Pn(section, material, KL; axis=:torsional)
@@ -164,17 +166,19 @@ Pn = get_Pn(section, material, KL; axis=:torsional)
 # Design strength (LRFD)
 ϕPn = get_ϕPn(section, material, KL; axis=:weak, ϕ=0.9)
 
-# Slenderness factors (E7)
+# Legacy slender-element summary (re-grounded in §E7 at Fcr = Fy):
 factors = get_compression_factors(section, material)
-# factors.Qs  — Unstiffened elements (flanges)
-# factors.Qa  — Stiffened elements (webs/walls)
-# factors.Q   — Combined Q = Qs × Qa
+# factors.Qs  — effective-area fraction from flange elements at Fcr = Fy
+# factors.Qa  — effective-area fraction from web element    at Fcr = Fy
+# factors.Q   — combined Ae/Ag at Fcr = Fy = Qs + Qa − 1
+#               (NOT Qs · Qa; that was the AISC 360-10 multiplicative form
+#                and is replaced by the §E7 effective-area approach.)
 ```
 
 **Equations:**
-- Fe: Euler buckling (E3-4, E4-4)
-- Fcr: Critical stress (E3-2/E3-3 or E7-2/E7-3)
-- Q factors: Table B4.1a limits, E7 effective width
+- Fe: Euler buckling (E3-4 flexural, E4-2 torsional)
+- Fcr: §E3-2/E3-3 from full Ag (no Q multiplier under 360-16)
+- Ae: §E7-1 — E7-5 effective-area reduction with Table E7.1 imperfection factors
 
 ### Chapter F — Flexure
 
@@ -445,9 +449,11 @@ aisc/
 | `check_composite_deflection` | I3 | Shored / unshored deflection |
 | `check_construction` | I3.1b | Construction-stage bare steel check |
 | `find_required_ΣQn` | I3.2d | Partial composite solver (binary search) |
-| `validate_stud_diameter` | I8.1 | Stud d_sa ≤ 2.5tf check |
-| `validate_stud_length` | I8.2 | Stud l_sa ≥ 4d_sa and cover check |
-| `check_stud_spacing` | I8.2d | Min/max longitudinal spacing |
+| `validate_stud_diameter` | I8.1 | Stud `d_sa ≤ 2.5·tf` (unless welded directly over web) |
+| `validate_stud_length` | I8.2 | Stud `l_sa ≥ 4·d_sa` (composite **beams**) + slab-cover check |
+| `check_stud_spacing` | I8.2d | Min/max longitudinal spacing (max uses **total** slab thickness for deck) |
+| `check_stud_edge_distance` | I8.2d(b)/(c) | Lateral cover and free-edge warnings |
+| `check_stud_deck_projection` | I3.2c(b) | Stud projection ≥ 1.5 in. above deck |
 | `stud_mass` | — | Single stud mass (for ECC/weight objectives) |
 | `composite_stud_contribution` | — | Total stud cost contribution to objective |
 | `extract_parallel_Asr` | I3.2b | Extract parallel slab rebar for negative moment |

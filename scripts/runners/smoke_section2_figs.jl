@@ -1,5 +1,5 @@
 # =============================================================================
-# Smoke test: Section 2 ECC Monte Carlo band figure
+# Smoke test: Section 2 ECC Monte Carlo figures
 # =============================================================================
 #
 # Builds a synthetic Section 1 DataFrame (mimicking `sweep` output with the
@@ -9,7 +9,8 @@
 #   1. the percentile / mean / std summary columns are populated,
 #   2. p10 ≤ p25 ≤ p50 ≤ p75 ≤ p90 row-wise (sanity ordering),
 #   3. `keep_samples = true` round-trips the raw realizations,
-#   4. `plot_slab_ec_band` renders without error.
+#   4. all three Section 2 plotters render without error
+#      (errorbars, envelope+lines, violins).
 #
 # Avoids the cost of the real structural sizing pipeline.
 #
@@ -36,7 +37,25 @@ CairoMakie.activate!(type = "png")
 const CONCRETES = ["NWC_3000", "NWC_4000", "NWC_5000", "NWC_6000", "LWC_4000"]
 const SPANS     = collect(16.0:4.0:36.0)
 const LLS       = [50.0, 100.0]
-const METHODS   = ["MDDM", "DDM (Full)", "EFM (HC)", "EFM (ASAP)", "FEA"]
+# Use the real method names from `flat_plate_method_comparison.jl ALL_METHODS`
+# so the smoke test exercises the same plot-filter / dodge logic the real
+# pipeline does.
+const METHODS   = ["MDDM", "DDM (Full)",
+                   "EFM (HC)", "EFM (ASAP)",
+                   "FEA (frame)", "FEA (strip)", "FEA (area)"]
+
+# Synthetic per-method scale factors used **only** to keep the smoke-test
+# figures visually distinguishable. These are NOT representative of any
+# real method behavior — see the journal sweep for actual results.
+const _SYNTHETIC_METHOD_SCALE = Dict(
+    "MDDM"        => 1.00,
+    "DDM (Full)"  => 0.99,
+    "EFM (HC)"    => 0.97,
+    "EFM (ASAP)"  => 0.96,
+    "FEA (frame)" => 0.95,
+    "FEA (strip)" => 0.93,
+    "FEA (area)"  => 0.91,
+)
 
 function _density(label)
     label == "LWC_4000" && return 1840.0
@@ -52,7 +71,7 @@ for c in CONCRETES, span in SPANS, ll in LLS, m in METHODS
     fc = _strength(c)
     ρ  = _density(c)
     h_in = 5.0 + 0.20*span + 0.005*ll - 0.0005*fc
-    h_in *= (m == "FEA") ? 0.92 : 1.0
+    h_in *= _SYNTHETIC_METHOD_SCALE[m]
     t_eq_m = 0.0254 * h_in
     conc_kg = t_eq_m * ρ
     rebar_kg = 0.005 * t_eq_m * 7850.0
@@ -82,8 +101,8 @@ println("Synthetic Section 1 df: $(nrow(df)) rows × $(ncol(df)) cols")
 # Monte Carlo sweep
 # ---------------------------------------------------------------------------
 
-println("\n--- sweep_ecc (Monte Carlo, n_samples = 2000) ---")
-df_band = sweep_ecc(df; n_samples = 2000, save = false)
+println("\n--- sweep_ecc (Monte Carlo, n_samples = 2000, keep_samples = true) ---")
+df_band = sweep_ecc(df; n_samples = 2000, save = false, keep_samples = true)
 println("df_band: $(nrow(df_band)) rows × $(ncol(df_band)) cols")
 
 # ---------------------------------------------------------------------------
@@ -139,9 +158,16 @@ println("✓ keep_samples round-trip clean.")
 # Plot rendering
 # ---------------------------------------------------------------------------
 
-println("\n--- plot_slab_ec_band ---")
-fig = Base.invokelatest(plot_slab_ec_band, df_band)
-@assert fig !== nothing "plot_slab_ec_band returned nothing"
+println("\n--- plot_slab_ec_errorbars (Option A — main) ---")
+@assert Base.invokelatest(plot_slab_ec_errorbars, df_band) !== nothing
+println("✓ figure rendered.")
+
+println("\n--- plot_slab_ec_envelope (Option B — supplementary) ---")
+@assert Base.invokelatest(plot_slab_ec_envelope, df_band) !== nothing
+println("✓ figure rendered.")
+
+println("\n--- plot_slab_ec_violins (Option C — appendix) ---")
+@assert Base.invokelatest(plot_slab_ec_violins, df_band) !== nothing
 println("✓ figure rendered.")
 
 println("\nAll Section 2 MC checks passed.")

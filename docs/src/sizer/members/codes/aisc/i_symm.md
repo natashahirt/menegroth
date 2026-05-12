@@ -186,7 +186,13 @@ check_torsion_yielding
 - Flange (Case 10): ``\lambda_p = 0.38\sqrt{E/F_y}``, ``\lambda_r = 1.0\sqrt{E/F_y}``
 - Web (Case 15): ``\lambda_p = 3.76\sqrt{E/F_y}``, ``\lambda_r = 5.70\sqrt{E/F_y}``
 
-`get_compression_factors(s, mat)` — computes the Q factor (Qs × Qa) for compression per Table B4.1a / §E7.
+`get_compression_factors(s, mat)` — legacy `(Qs, Qa, Q)` summary, re-grounded in
+the AISC 360-16 §E7 effective-area approach evaluated at the conservative
+bound ``F_{cr} = F_y``. The production `get_Pn` path uses the §E7
+machinery directly with the actual member ``F_{cr}`` from §E3, which is
+the correct AISC 360-16 procedure. Note that the combined ``Q`` is now
+``A_e/A_g = Q_s + Q_a - 1``, **not** ``Q_s \cdot Q_a`` (the latter was
+the AISC 360-10 multiplicative form).
 
 ```@docs
 is_compact
@@ -208,7 +214,29 @@ For the elastic LTB critical stress (F2-4), the constant ``c = 1.0`` for doubly-
 
 ### Compression Algorithm
 
-Compression considers both flexural buckling (E3) about the weak axis (governing for most W shapes) and flexural-torsional buckling (E4). For sections with slender elements, the Q-factor approach (E7) reduces the effective area. The implementation uses iterative convergence for Qa when web effective width depends on Fcr.
+Compression follows the AISC 360-16 §E7 unified procedure
+(``P_n = F_{cr} \cdot A_e``, Eq. E7-1):
+
+1. Compute ``F_e`` for flexural buckling about the strong/weak axis (§E3,
+   Eq. E3-4) or torsional buckling about the shear center for doubly
+   symmetric I-shapes (§E4(a), Eq. E4-2).
+2. Compute ``F_{cr}`` from §E3-2/E3-3 using the **full ``A_g``**
+   slenderness ratio. Under AISC 360-16 there is no ``Q`` multiplier on
+   ``F_{cr}`` — the slender-element reduction acts through ``A_e``.
+3. For each compression plate element (four half-flanges and one web for
+   a doubly-symmetric I-shape), apply Eqs. E7-2 / E7-3 with the
+   appropriate Table E7.1 imperfection factors (``c_1, c_2``) and
+   Table B4.1a compression limit ``\lambda_r``. The local-buckling
+   threshold is ``\lambda \le \lambda_r \sqrt{F_y/F_{cr}}``, so long
+   columns with ``F_{cr} < F_y`` correctly recover effective width that
+   would be lost at the ``F_y`` reference.
+4. ``A_e = A_g - \sum (b - b_e)\,t`` and ``P_n = F_{cr}\,A_e``.
+
+This approach handles slender flanges (e.g. plate girders) and slender
+webs uniformly. For the rolled-W catalog at ``F_y \le 65`` ksi essentially
+all members have ``A_e = A_g``, so the result matches the older Q-based
+path numerically; for built-up sections it produces the correct AISC
+360-16 capacity rather than the legacy 360-10 stress-reduction form.
 
 ### Torsion
 

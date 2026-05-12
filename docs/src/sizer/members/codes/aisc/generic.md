@@ -84,7 +84,11 @@ compute_Cm
 C_m = 0.6 - 0.4\,(M_1/M_2)
 ```
 
-clamped to \([0.4, 1.0]\).
+with the §App.8.2.1.2 sign convention (``M_1/M_2 > 0`` for reverse
+curvature, ``M_1/M_2 < 0`` for single curvature). AISC 360-16 places no
+upper or lower bound on ``C_m``; reverse-curvature configurations
+correctly produce ``C_m < 0.4``, which physically reduces the
+destabilizing P-δ amplification.
 
 When `transverse_loading = true`, ``C_m = 1.0`` regardless of end moments.
 

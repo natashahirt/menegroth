@@ -249,7 +249,8 @@ export SolidSlabOnBeam, DeckSlabOnBeam
 export HeadedStudAnchor, stud_mass
 export CompositeContext
 export get_b_eff
-export get_Qn, validate_stud_diameter, validate_stud_length, check_stud_spacing
+export get_Qn, validate_stud_diameter, validate_stud_length, check_stud_spacing,
+       check_stud_edge_distance, check_stud_deck_projection
 export get_Cf, get_Mn_composite, get_ϕMn_composite
 export find_required_ΣQn, get_Mn_negative
 export check_construction

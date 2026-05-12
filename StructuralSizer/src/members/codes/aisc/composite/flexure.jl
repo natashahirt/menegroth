@@ -35,12 +35,20 @@ function get_Cf(section::ISymmSection, material, slab::AbstractSlabOnBeam, b_eff
     return min(V_concrete, V_steel, ΣQn)
 end
 
-"""Concrete slab area within effective width (solid slab)."""
+"""Concrete slab area within the effective width for a solid slab —
+`Ac = b_eff · t_slab` per AISC 360-16 §I3.2a (corpus aisc-360-16, p. 165)."""
 _Ac(slab::SolidSlabOnBeam, b_eff) = b_eff * slab.t_slab
 
 """
-Concrete slab area within effective width for deck slab (AISC I3.2c(2)).
-Only concrete above the top of the deck ribs participates in the stress block.
+Concrete slab area within the effective width for a deck slab.
+
+Concrete *above* the top of the deck ribs is always counted; rib concrete is
+not included for either deck orientation. For perpendicular deck this is
+required by AISC 360-16 §I3.2c(2) (corpus aisc-360-16, p. 167). For
+parallel deck with `wr/hr ≥ 1.5`, §I3.2c(3) *permits* including rib
+concrete; excluding it here is therefore conservative for parallel deck —
+under-reporting the available compression block reduces the plastic
+neutral-axis shift and the resulting `Mn`. See `DeckSlabOnBeam` docstring.
 """
 _Ac(slab::DeckSlabOnBeam, b_eff) = b_eff * slab.t_slab
 
@@ -271,39 +279,56 @@ end
 
 """
     find_required_ΣQn(section::ISymmSection, material, slab::AbstractSlabOnBeam,
-                      b_eff, Mu_required, Qn; ϕ=0.9) -> (ΣQn, n_studs_half, sufficient)
+                      b_eff, Mu_required, Qn; ϕ=0.9, partial_composite_min=0.25)
+        -> (ΣQn, n_studs_half, sufficient)
 
-Find the minimum number of studs per half-span such that `ϕMn ≥ Mu_required`.
+Find the minimum number of studs per half-span such that `ϕ Mn ≥ Mu_required`.
 
-Uses a binary search on continuous ΣQn to locate the capacity threshold, then
-rounds up to the next integer stud count (`n = ceil(ΣQn / Qn)`).  This matches
-the AISC partial-composite design procedure where you determine the required
-ΣQn and then provide enough studs to achieve it.
+Uses a binary search on continuous `ΣQn` to locate the capacity threshold,
+then rounds up to the next integer stud count (`n = ceil(ΣQn / Qn)`). This
+matches the AISC partial-composite design procedure: determine the required
+`ΣQn`, then provide enough studs to achieve it.
 
-`Mu_required` is the *factored* moment demand (e.g. `Mu`).  The function applies
-`ϕ` internally: it searches for the smallest ΣQn where `ϕ × Mn(ΣQn) ≥ Mu`.
+`Mu_required` is the *factored* moment demand (e.g. `Mu`). The function
+applies `ϕ` internally: it searches for the smallest `ΣQn` where
+`ϕ · Mn(ΣQn) ≥ Mu_required`.
 
-AISC I3.2d(5) minimum `ΣQn ≥ 0.25 Cf_max` is enforced.
+# Partial-composite lower bound
+
+ENGINEERING JUDGMENT: AISC 360-16 §I3.2d itself does **not** prescribe a
+hard lower bound on `ΣQn / Cf_max`. The default `partial_composite_min =
+0.25` reflects the strength-based research lower limit discussed in the
+Commentary on §I3.2 (AISC 360-16 Commentary on Chapter I; AISC *Steel
+Construction Manual*, 15th Ed., Part 3, "Composite Design"). The Manual
+notes that values below ~0.50 introduce serviceability and stud-fatigue
+concerns; users producing production designs should typically pass
+`partial_composite_min = 0.5` (or higher). The 0.25 default is retained
+here because early sizing iterations can otherwise force unnecessary
+full-composite layouts. **Not an AISC 360-16 code requirement.**
 
 # Arguments
 - `Mu_required`: Required flexural strength (factored moment).
 - `Qn`: Nominal shear strength of a single stud (from `get_Qn`).
-- `ϕ`: Resistance factor (default 0.9, AISC I3.2a).
+- `ϕ`: Resistance factor (default `0.90`, AISC 360-16 §I3.2 — corpus
+       aisc-360-16, p. 165).
+- `partial_composite_min`: Lower bound on `ΣQn / Cf_max` for the binary
+       search (default `0.25`; see engineering-judgment note above).
 """
 function find_required_ΣQn(section::ISymmSection, material, slab::AbstractSlabOnBeam,
-                           b_eff, Mu_required, Qn; ϕ=0.9)
+                           b_eff, Mu_required, Qn; ϕ=0.9, partial_composite_min::Real=0.25)
     Cf_max = _Cf_max(section, material, slab, b_eff)
 
-    # Check if even full composite is insufficient
+    # Bail out if even full composite is insufficient.
     result_full = get_Mn_composite(section, material, slab, b_eff, Cf_max)
     if ϕ * result_full.Mn < Mu_required
         return (; ΣQn=Cf_max, n_studs_half=ceil(Int, ustrip(u"N", Cf_max) / ustrip(u"N", Qn)),
                  sufficient=false)
     end
 
-    # Binary search for the continuous ΣQn threshold
-    # AISC I3.2d(5): minimum ΣQn ≥ 0.25 × Cf_max
-    ΣQn_lo = 0.25 * Cf_max
+    # Binary search for the continuous ΣQn threshold. The lower bound is the
+    # engineering-judgment partial-composite minimum (see docstring), not an
+    # AISC 360-16 code requirement.
+    ΣQn_lo = partial_composite_min * Cf_max
     ΣQn_hi = Cf_max
 
     for _ in 1:50

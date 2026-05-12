@@ -27,6 +27,9 @@
 using Asap: Node, ShellTri3, ShellSection, ShellPatch, Shell, Spring, NodeForce,
             Model, process!, solve!, add_springs!, get_nodes,
             bending_moments, bending_moments!, ShellMomentWorkspace, shell_centroid
+# `Asap.update!` is invoked qualified (StructuralSizer already exports its
+# own `update!`, so we avoid importing the symbol unqualified to keep the
+# two semantically-distinct functions clearly separated).
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Winkler spring generation — ACI 336.2R §6.7, Fig 6.8
@@ -90,16 +93,23 @@ end
 # ─────────────────────────────────────────────────────────────────────────────
 
 """
-    _solve_winkler!(nodes, shells, loads, springs;
-                    no_tension, max_iters, tol) → (model, active, n_uplift)
+    _solve_winkler!(model, springs, loads;
+                    no_tension, max_iters, tol) → active
 
-Solve the shell-on-Winkler model.  When `no_tension == true`, iteratively
-deactivates soil springs whose nodes lift (`w > 0`) and reactivates springs
-whose nodes are pushed back into compression (`w < 0`); this is the standard
-compression-only Winkler model used by production tools such as spMats.
+Solve the shell-on-Winkler model in place on an already-`process!`-d
+`model`.  When `no_tension == true`, iteratively deactivates soil springs
+whose nodes lift (`w > 0`) and reactivates springs whose nodes are pushed
+back into compression (`w < 0`); this is the standard compression-only
+Winkler model used by production tools such as spMats.
 
-Returns the converged `Model`, the per-spring active mask, and the count of
-uplifted (deactivated) springs at convergence.
+Returns the per-spring active mask at convergence.
+
+The model is updated in place each iteration via `Asap.update!(model;
+values_only=true)`, which rewrites `model.S` in place from the current
+shell `K` matrices (so any thickness mutation made by the caller before
+calling this function takes effect) and clears the cached factorization.
+The active-set subset of springs is then re-added to `model.S` and the
+linear system is re-solved.
 
 Raises an error if the active set fails to settle within `max_iters` (no
 silent fallback).  A spring is treated as numerically pinned to `w = 0` if
@@ -110,10 +120,9 @@ The two-way model (`no_tension == false`) corresponds to the legacy linear
 Winkler analysis kept for diagnostic comparisons.
 """
 function _solve_winkler!(
-    nodes::Vector{Node},
-    shells::Vector{<:ShellTri3},
-    loads::Vector{<:NodeForce},
-    springs::Vector{Spring};
+    model::Model,
+    springs::Vector{Spring},
+    loads::Vector{<:NodeForce};
     no_tension::Bool = true,
     max_iters::Int = 20,
     tol::Float64 = 5e-3,
@@ -124,18 +133,17 @@ function _solve_winkler!(
 
     if !no_tension
         # Single-shot two-way Winkler (legacy diagnostic path)
-        model = Model(nodes, shells, loads)
-        process!(model)
+        Asap.update!(model; values_only=true)   # refresh K + S from current section
         add_springs!(model, springs)
         solve!(model)
-        return model, active, 0
+        return active
     end
 
     # No-tension iteration: deactivate uplift, reactivate re-engagement
-    local model
     for it in 1:max_iters
-        model = Model(nodes, shells, loads)
-        process!(model)
+        # Refresh element K from current properties and rewrite S in place,
+        # then add the current active subset of springs on top.
+        Asap.update!(model; values_only=true)
         active_springs = springs[active]
         isempty(active_springs) &&
             error("WinklerFEA no-tension solve diverged: every soil spring " *
@@ -166,8 +174,7 @@ function _solve_winkler!(
                 F_react += kz * (-w)   # w < 0 ⇒ positive upward reaction
             end
             residual = F_applied > 0 ? abs(F_applied - F_react) / F_applied : 0.0
-            residual ≤ tol &&
-                return model, active, count(.!active)
+            residual ≤ tol && return active
             error("WinklerFEA no-tension solve: active set converged at " *
                   "iteration $it but residual " *
                   "$(round(100*residual, digits=2))% exceeds tol " *
@@ -369,7 +376,13 @@ function _design_mat_winkler_fea(
     # Soil spring stiffness in SI
     ks_Pa_m = ustrip(u"N/m^3", soil.ks)
 
-    # ── Step 3: Iterate on thickness ──
+    # ── Step 3: Build mesh + model + springs ONCE (outside thickness loop) ──
+    # Mesh topology, node positions, tributary spring stiffnesses, and
+    # column loads are all independent of thickness.  Only the per-element
+    # `K` matrices change with `h` (via the in-place section update below),
+    # so we build the mesh/model exactly once and reuse them for every
+    # thickness trial.  Saves an O(N_iter) Delaunay triangulation +
+    # full-model assembly that previously dominated runtime.
     h = opts.min_depth
     h_incr = opts.depth_increment
 
@@ -380,10 +393,53 @@ function _design_mat_winkler_fea(
     db_eff = max(db_x, db_y) / 2
 
     Ec_Pa = ustrip(u"Pa", Ec_c)
+    h_init_m = ustrip(u"m", h)
+
+    # Shell section seeded at the initial thickness; per-element thickness
+    # is mutated in place each iteration of the thickness loop (see below).
+    section_init = ShellSection(h_init_m * u"m", Ec_Pa * u"Pa", ν_c)
+
+    # ShellPatch at each column (per-column dimensions, same section as slab).
+    # Patch sections share the same initial thickness as the main mat —
+    # they are mutated together with the main shell elements.
+    patches = ShellPatch[]
+    for (j, (cx, cy)) in enumerate(positions_loc_m)
+        push!(patches, ShellPatch(cx, cy, col_c1_m[j], col_c2_m[j],
+                                  section_init; id=:col_patch))
+    end
+
+    # Build Delaunay mesh with Ruppert refinement at column patches
+    shells = Shell(corner_nodes, section_init;
+                   id=:mat_fea,
+                   interior_nodes=interior_nodes,
+                   interior_patches=patches,
+                   edge_support_type=edge_dofs,
+                   interior_support_type=:free,
+                   target_edge_length=target_edge,
+                   refinement_edge_length=refine_edge)
+
+    nodes = get_nodes(shells)
+
+    # Apply column loads (ShellPatch guarantees a node at each column).
+    # NodeForce magnitudes are independent of thickness, so this is built once.
+    loads = _mat_apply_column_loads(nodes, positions_loc_m, demands)
+
+    # Generate Winkler springs (one per node, tributary-area based).
+    # `elem.area` is computed from node positions (independent of thickness),
+    # so the spring stiffnesses are constant across the thickness sweep.
+    springs = _mat_winkler_springs(
+        nodes, shells, B_m, Lm_m, ks_Pa_m, method.double_edge_springs)
+
+    # Build model and process once.  Subsequent thickness changes are
+    # propagated by mutating elem.thickness on each ShellTri3 and calling
+    # Asap.update!(model; values_only=true) inside _solve_winkler!.
+    model = Model(nodes, shells, loads)
+    process!(model)
+
+    # Storage for results from the final (converged) thickness iteration —
+    # only the last iteration's moments and active mask flow downstream.
     local gov_Mx_total_pos, gov_Mx_total_neg, gov_My_total_pos, gov_My_total_neg
-    local loads, springs              # saved for equilibrium check
     local active_springs_mask
-    local n_uplift_springs
 
     for iter in 1:60
         d_eff = h - cover - db_eff
@@ -391,43 +447,20 @@ function _design_mat_winkler_fea(
 
         h_m = ustrip(u"m", h)
 
-        # Shell section (updated each iteration for new thickness)
-        section = ShellSection(h_m * u"m", Ec_Pa * u"Pa", ν_c)
-
-        # ShellPatch at each column (per-column dimensions, same section as slab)
-        patches = ShellPatch[]
-        for (j, (cx, cy)) in enumerate(positions_loc_m)
-            push!(patches, ShellPatch(cx, cy, col_c1_m[j], col_c2_m[j],
-                                      section; id=:col_patch))
+        # In-place section update: mutate thickness on every shell element
+        # (main mat + column patches share the same section schedule).
+        # E and ν are invariant across thickness iterations.
+        for elem in shells
+            elem.thickness = h_m
         end
-
-        # Build Delaunay mesh with Ruppert refinement at column patches
-        shells = Shell(corner_nodes, section;
-                       id=:mat_fea,
-                       interior_nodes=interior_nodes,
-                       interior_patches=patches,
-                       edge_support_type=edge_dofs,
-                       interior_support_type=:free,
-                       target_edge_length=target_edge,
-                       refinement_edge_length=refine_edge)
-
-        nodes = get_nodes(shells)
-
-        # Apply column loads (ShellPatch guarantees a node at each column)
-        loads = _mat_apply_column_loads(nodes, positions_loc_m, demands)
-
-        # Generate Winkler springs (one per node, tributary-area based).
-        # Whether they are treated as compression-only or two-way is decided
-        # inside `_solve_winkler!` based on `method.no_tension_springs`.
-        springs = _mat_winkler_springs(
-            nodes, shells, B_m, Lm_m, ks_Pa_m, method.double_edge_springs)
 
         # Solve plate-on-Winkler model (compression-only by default; iterates
         # the active set until uplifted springs are deactivated and any
         # re-engaged springs are reactivated).  Throws on non-convergence —
         # there is no silent fallback to a partially-converged solution.
-        model, active_springs_mask, n_uplift_springs = _solve_winkler!(
-            nodes, shells, loads, springs;
+        # Reuses `model` with refreshed K from the new thickness.
+        active_springs_mask = _solve_winkler!(
+            model, springs, loads;
             no_tension = method.no_tension_springs,
             max_iters  = method.max_no_tension_iters,
             tol        = method.no_tension_tol,

@@ -39,6 +39,7 @@ using Asap  # custom units (kip, ksi, ksf, psf, etc.)
         include("steel_member/test_w_torsion.jl")
         # Slenderness / local buckling
         include("steel_member/test_qa_slender_web.jl")
+        include("steel_member/test_qa_slender_flange.jl")
         # AISC reference examples
         include("steel_member/test_aisc_companion_manual_1.jl")
         include("steel_member/test_aisc_360_reference.jl")

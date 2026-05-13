@@ -1,10 +1,27 @@
 # Member Analysis
 
 > ```julia
+> using StructuralSynthesizer
+> using Unitful
+> using Asap
+>
+> # Minimal structure for member analysis (small grid, 1 story)
+> skel = gen_medium_office(54.0u"ft", 42.0u"ft", 10.0u"ft", 2, 2, 1)
+> struc = BuildingStructure(skel)
+>
+> # Build + solve the first-order model
+> initialize!(struc; floor_type = :flat_plate)
+> to_asap!(struc)
+> Asap.process!(struc.asap_model)
+> Asap.solve!(struc.asap_model)
+>
+> # Size steel members and run story/P-Δ utilities
+> beam_opts = SteelBeamOptions(deflection_limit = 1/360)
+> col_opts  = SteelColumnOptions()
 > size_beams!(struc, beam_opts)
 > size_columns!(struc, col_opts)
 > compute_story_properties!(struc)
-> p_delta_iterate!(struc; params = design_params)
+> p_delta_iterate!(struc)
 > ```
 
 ## Overview

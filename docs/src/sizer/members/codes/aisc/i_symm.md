@@ -2,6 +2,7 @@
 
 > ```julia
 > using StructuralSizer
+> using Unitful
 > w = W("W14X22")
 > mat = A992_Steel
 > ϕMn = get_ϕMn(w, mat; Lb=12u"ft", Cb=1.0)
@@ -19,46 +20,6 @@ The `AISCChecker` type dispatches capacity calculations based on section type. F
 - [Fire](fire.md) — fire protection sizing
 
 Source: `StructuralSizer/src/members/codes/aisc/i_symm/*.jl`
-
-## Design Philosophy
-
-- **LRFD only** — ASD (Ω factors) not implemented
-- **US/SI units via Unitful** — functions accept any consistent unit; conversions are automatic
-- **Member-level design** — no system-level checks (diaphragm, stability bracing)
-- **Catalog-based optimization** — sections must come from predefined catalogs
-
-## Units & Input Flexibility
-
-The API accepts **any Unitful quantity** — conversions happen internally:
-
-```julia
-using StructuralSizer: kip  # Asap custom unit
-
-# All equivalent — units converted internally to SI (N, N·m)
-size_columns([500u"kN"], [100u"kN*m"], geoms, SteelColumnOptions())
-size_columns([112.4kip], [73.76kip*u"ft"], geoms, SteelColumnOptions())
-size_columns([500e3], [100.0], geoms, SteelColumnOptions())  # Raw Float64 assumed N, N·m
-```
-
-Unit helpers: `to_newtons(x)`, `to_newton_meters(x)` for SI; `to_kip(x)`, `to_kipft(x)` for US customary. Raw `Real` values pass through as-is (assumed correct units).
-
-## Quick Start
-
-```julia
-using StructuralSizer
-using Unitful
-
-section = W("W14X22")
-material = A992_Steel
-
-ϕPn = get_ϕPn(section, material, 12u"ft"; axis=:weak)      # Compression (Ch. E)
-ϕMn = get_ϕMn(section, material; Lb=12u"ft", Cb=1.0)       # Flexure (Ch. F)
-ϕVn = get_ϕVn(section, material; axis=:strong)              # Shear (Ch. G)
-ϕPn_t = StructuralSizer.get_ϕPn_tension(section, material)  # Tension (Ch. D)
-
-ratio = check_PMxMy_interaction(Pu, Mux, Muy, ϕPn, ϕMnx, ϕMny)
-# ratio ≤ 1.0 → OK
-```
 
 ## Key Types
 
@@ -206,6 +167,35 @@ See [AISC — Generic](generic.md) for `check_PM_interaction` and `check_PMxMy_i
 
 ## Implementation Details
 
+### Design Philosophy
+
+- **LRFD only** — ASD (Ω factors) not implemented
+- **US/SI units via Unitful** — functions accept any consistent unit; conversions are automatic
+- **Member-level design** — no system-level checks (diaphragm, stability bracing)
+- **Catalog-based optimization** — sections must come from predefined catalogs
+
+### Units & Input Flexibility
+
+The sizing APIs accept Unitful quantities, so you can work in US customary or SI.
+
+```julia
+using StructuralSizer
+using Unitful
+
+geoms_ft = [SteelMemberGeometry(12u"ft"; Lb=12u"ft")]
+
+# US customary (kip, kip-ft, ft)
+Pu  = [200u"kip"]
+Mux = [100u"kip*ft"]
+size_columns(Pu, Mux, geoms_ft, SteelColumnOptions())
+
+# Equivalent SI (kN, kN-m, m)
+geoms_m = [SteelMemberGeometry(3.6576u"m"; Lb=3.6576u"m")]  # 12 ft
+Pu_si  = [889.6u"kN"]
+Mux_si = [135.6u"kN*m"]
+size_columns(Pu_si, Mux_si, geoms_m, SteelColumnOptions())
+```
+
 ### Flexure Algorithm
 
 The flexure calculation first checks LTB against `Lp` and `Lr` (F2-5, F2-6), then checks FLB against Table B4.1b limits. The governing `Mn` is the minimum of all applicable limit states, capped by `Mp`.
@@ -337,7 +327,7 @@ CompositeContext
 | Single-Angle Members | Chapter E, F | Special provisions for single angles not implemented. |
 | Asymmetric I-Shapes | — | Only doubly-symmetric W/S shapes; no channels, WT, or singly-symmetric I. |
 | Composite Columns | I2 | Composite beams (I3) are implemented; composite columns are not. |
-| Formed Metal Deck (parallel wr/hr < 1.5) | I3.2c | `DeckSlabOnBeam` is fully implemented for perpendicular deck and parallel deck with wr/hr ≥ 1.5. Parallel deck with wr/hr < 1.5 uses conservative Rg=0.85 but may need additional rib-level checks. |
+| Formed Metal Deck | I3.2c, I8.2a | `DeckSlabOnBeam` supports `:parallel` and `:perpendicular` orientations. The current implementation uses `Ac = b_eff · t_slab` (excludes rib concrete): required for perpendicular deck and conservative for parallel deck (even when `wr/hr ≥ 1.5`). For perpendicular deck, `Rp = 0.6` is used by default (conservative) because `e_mid_ht` is not modeled; the User Note footnote allows `Rp = 0.75` when `e_mid_ht ≥ 2 in.`. |
 | Elastic Stress Distribution | I3.2a(b) | Only plastic distribution implemented. Raises error when h/tw > 3.76√(E/Fy). |
 | Seismic Provisions | AISC 341 | No seismic compactness, expected strengths, or special detailing. |
 | Fire Design | Appendix 4 | No elevated temperature capacity reduction. |

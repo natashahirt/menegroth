@@ -193,7 +193,7 @@ For braced frames, `B2 = 1.0` and only B1 applies. For moment frames, both B1 an
 
 ### Cm Convention
 
-The sign convention for `M1` and `M2` follows AISC Appendix 8: `M1` is the smaller end moment and `M2` is the larger, with `M1` **signed** to indicate curvature. **Reverse curvature (double curvature)** corresponds to `M1/M2 > 0`; **single curvature** corresponds to `M1/M2 < 0`. The result is clamped to `Cm ≥ 0.4`.
+The sign convention for `M1` and `M2` follows AISC Appendix 8: `M1` is the smaller end moment and `M2` is the larger, with `M1` **signed** to indicate curvature. **Reverse curvature (double curvature)** corresponds to `M1/M2 > 0`; **single curvature** corresponds to `M1/M2 < 0`. The implementation uses Eq. A-8-4 directly (no clamping).
 
 ## Options & Configuration
 
@@ -204,3 +204,7 @@ These functions are standalone and do not require a checker object. The LRFD fac
 - Tension rupture uses a simplified `Ae_ratio` rather than computing actual effective net area from connection geometry.
 - No direct support for combined torsion + axial + flexure interaction (§H3) in the generic module; this is handled in section-specific torsion modules.
 - Story stability calculations (`Pe_story`, `B2`) assume a regular story geometry; irregular configurations may need manual adjustment.
+
+## References
+
+- AISC 360-16: Specification for Structural Steel Buildings (Appendix 8, Chapters D and H)

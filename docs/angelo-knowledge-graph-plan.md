@@ -100,8 +100,25 @@ init and advertising tools — the symptom *"server loaded but no tools/prompts/
 resources."* Worked around by setting **`MEMORY_SKIP_EMBEDDINGS=1`** in each server's
 `env` in `mcp.json`; the servers now boot instantly and search falls back to keyword
 matching (fine for the 25-entry tree). A background `snapshot_download` with HF `xet`
-disabled is caching the model; **once cached, delete the three `MEMORY_SKIP_EMBEDDINGS`
-lines from `mcp.json` and reload Cursor** to restore semantic search.
+disabled is caching the model; **once cached, delete the skip-embeddings lines from
+`mcp.json` and reload Cursor** to restore semantic search.
+
+> **Zettelkasten uses a *separate* switch.** `MEMORY_SKIP_EMBEDDINGS=1` only
+> governs `memory.embedders`' own eager load. The zettelkasten indexing path
+> (`zettelkasten/embeddings.py::_build_embedder`) reads
+> **`ZETTEL_SKIP_EMBEDDINGS`** instead, and only short-circuits before the
+> model2vec download when *that* var is `1`. Because `create_extraction_graph`
+> runs its prep (source-graph + spine builds → note indexing) **in the
+> coordinator process**, a missing `ZETTEL_SKIP_EMBEDDINGS` made the coordinator
+> block ~7 min on the throttled HF download and exceed the MCP client timeout
+> (`Connection closed`), even though `MEMORY_SKIP_EMBEDDINGS` was set. Fix:
+> set **`ZETTEL_SKIP_EMBEDDINGS=1`** on the **zettelkasten and coordinator**
+> servers too. Grounding (verbatim string-match) and coverage are deterministic
+> and unaffected; only semantic `note search` / `suggest` / richer `remine`
+> classification want vectors, and those matter at Stage 4 (spines), not during
+> extraction. **Backfill path:** once the model is cached, drop both
+> `*_SKIP_EMBEDDINGS` lines and reload — indexes rebuild from the on-disk `.md`
+> notes on next load, so no re-extraction is needed.
 
 > Note: the GitHub-release mirror for the model fails with `SSL:
 > CERTIFICATE_VERIFY_FAILED` (the `/usr/local` Python 3.11 lacks a system cert
@@ -157,6 +174,39 @@ answerable across every source. Proposed dimensions:
 Set `grounded: true` (every load-bearing claim needs a quote/equation/data
 citation). Add a `synthesis` block so each spine is pre-scaffolded.
 
+**Facet tags (stamped by the scribe, not schema dimensions).** Beyond the
+dimension tags, every note carries cross-cutting facet tags so the corpus can be
+re-arranged into other spines later without re-extraction: `family:*`,
+`edition:*`, `limit-state:*`, `element:*`, `material:*`, and — see below —
+`clause:*`. These are additional tags (they don't violate `strict`, which only
+requires *one* valid dimension tag); they are set by scribe instruction, since
+the schema YAML can't express per-note tag values.
+
+### 4.2a Join keys: preserve `corpus_id`, address at clause level
+
+Two decisions here are **load-bearing and expensive to redo after extraction**, so
+they are locked into the schema description as a contract:
+
+- **Document join key = the graph name.** `create_extraction_graph` takes
+  `sources[].name` as the kebab-case **graph id**. Set it to the manifest
+  `corpus_id` verbatim (`aci-318-11`, `sp-de-combined-footing-aci318-14` — already
+  kebab-case). The zk source graph then *is* `aci-318-11`, so every existing Julia
+  citation `corpus: aci-318-11` upgrades from "reference to an old-pipeline file"
+  to a live zk edge with **no migration mapping**. Minting fresh ids instead would
+  inherit a stale-citation remap problem — so we carry the identifiers across and
+  swap the backend underneath them.
+- **Clause join key = a per-note alias + tag.** The pipeline already mints
+  **sub-document notes** (the scribe writes `claim`+`quote` pairs per dimension —
+  ~60 claims/source, not one blob/PDF), so a clause like `aci-318-11 §8.5.1`
+  becomes several notes (provision/equation/parameters/applicability). But nothing
+  auto-stamps a machine-parseable clause id. So the scribe MUST stamp each such
+  note with a `clause:<section>` tag AND an alias `<corpus_id>#<section>` (e.g.
+  `aci-318-11#8.5.1`). Note primary ids are server-minted from the title, so the
+  clause key rides the **alias** channel (resolvable), not the id. This is what
+  lets synapse pin an implementation to the exact provision and makes the
+  "suspicious number → exact clause" report loop land — instead of resolving only
+  to the whole code.
+
 ### 4.3 Spines (how the corpus is arranged)
 
 Choose `synthesis_label` to control spine granularity. Recommended: **one spine per
@@ -170,11 +220,33 @@ Keep worked **examples** as their own sources under the same family label so tha
 design example's numbers attach to the same dimensions as the clause it demonstrates
 — this is what makes goal (c) (code ↔ examples) fall out of the arrangement.
 
+#### 4.3a The manifest taxonomy IS the zk seed structure
+
+`sources.yml`'s `family × role × tier` axes map directly onto zk structure, so the
+corpus's organizing metadata survives even as the pipeline underneath it is
+replaced — nothing about the arrangement is invented fresh:
+
+- **`family`** (`aci` / `aisc` / `fib` / `foundations` / `walls` / …) → **spines**
+  (the `synthesis_label` per family; the primary matrix axis in §4.3).
+- **`role`** (`codes` / `code_guides` / `examples` / `research` / `textbooks`) →
+  **note-type + authority + an additional spine axis.** `codes` are normative
+  `provision`/`equation` claims; `code_guides`/`commentary` are `commentary`;
+  `examples` become the **machine-readable case notes** (`finding` + `data`
+  grounding) that generate tests (goal c → a); `research`/`textbooks` are
+  supporting `concept`/`model` context. Role is a second spine axis we can add: a
+  "normative canon vs. worked-practice vs. background" arrangement that reuses the
+  same notes.
+- **`tier`** (1–4) → **priority / authority weighting on retrieval.** Stamp
+  `tier:<n>` as a facet tag so ranked retrieval and synapse can prefer the
+  higher-authority source when two sources speak to the same clause (a primary
+  standard outranks a secondary guide).
+
 ### 4.4 Migration from the current corpus pipeline
 
 - Reuse `corpus/manifests/sources.yml` as the source list for
-  `create_extraction_graph` (role/family/edition/tier map cleanly to schema tags and
-  `synthesis_label`).
+  `create_extraction_graph`; set each `sources[].name = corpus_id` (§4.2a) and map
+  `family → synthesis_label`, `role → note-type/authority`, `tier → tier:<n>` facet
+  (§4.3a).
 - Reuse `corpus/text/` normalized text and `corpus/sources/` PDFs for ingestion
   (page markers already exist for equation snapshots).
 - The old `corpus.*` MCP tools (`search_extractions`, `get_clause`, …) can stay live
@@ -199,6 +271,14 @@ edges, then curate the high-value ones:
 This is what closes the loop for goal (a): an agent extending menegroth can ask
 "what does the canon say about X, and where do we already implement it?" and get both
 the grounded clause and the code, cross-linked.
+
+**Resolution rides the join keys from §4.2a.** A Julia citation `corpus: aci-318-11`
+resolves to the source graph (document level); a citation carrying a clause
+(`aci-318-11 §8.5.1`) resolves to the exact note via its `<corpus_id>#<section>`
+alias (clause level). So synapse edges reconstruct mechanically from citations
+already dotted through the code and tests — no hand-mapping — and an `implements`
+edge points at the provision itself, which is what makes the "suspicious number →
+exact clause" report loop land.
 
 ---
 

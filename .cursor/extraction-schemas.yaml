@@ -1,0 +1,68 @@
+building-code-extraction:
+  description: 'Union grounded extraction of structural design-code clauses, key equations,
+    and worked examples. Facets (family/edition/limit-state/element/material) are
+    stamped on notes as tags by the extractor so the corpus can be re-arranged into
+    multiple spines without re-extraction. JOIN-KEY CONTRACT (load-bearing, hard to
+    change post-extraction): (1) the source graph name MUST be the corpus_id from
+    sources.yml verbatim (e.g. aci-318-11, sp-de-combined-footing-aci318-14) so
+    existing Julia citations `corpus: <id>` resolve to a live zk graph with no mapping
+    table; (2) every provision/equation/parameters/applicability note for a given
+    clause MUST carry the clause id both as a tag `clause:<section>` (e.g.
+    clause:8.5.1) and as an ALIAS `<corpus_id>#<section>` (e.g. aci-318-11#8.5.1) so
+    synapse pins an implementation to the exact provision, not the whole document.
+    Note primary ids are server-minted from the title, so the clause key rides the
+    alias channel, not the id.'
+  grounded: true
+  strict: true
+  link_relation: component-of
+  hub:
+    type: concept
+    title_template: '{source_title}: Overview'
+  synthesis:
+    graph: '{label}-canon'
+    node:
+      type: synthesis
+      title_template: '{label}: Canon'
+      link_relation: related
+    dimension_node:
+      type: concept
+      title_template: '{label} - {dimension}'
+      attach_relation: input-to
+      relation: component-of
+  dimensions:
+  - tag: scope
+    desc: the limit-state / action / element the clause governs (e.g. flexure, shear,
+      punching, development, deflection, fire)
+  - tag: provision
+    desc: the normative rule / capacity relation / limit stated by the clause
+  - tag: equation
+    desc: the design equation transcribed as LaTeX, with its symbol list
+    note_type: equation
+  - tag: parameters
+    desc: symbols, units, and their definitions used by the provision/equation
+  - tag: applicability
+    desc: material, geometry, and code-edition bounds under which the provision applies
+  - tag: example
+    desc: worked-example given inputs and solution outputs (test-oracle numbers)
+    note_type: finding
+  - tag: commentary
+    desc: rationale / intent / background behind the provision
+  relations:
+  - from: provision
+    to: scope
+    relation: component-of
+  - from: equation
+    to: provision
+    relation: input-to
+  - from: parameters
+    to: equation
+    relation: input-to
+  - from: applicability
+    to: provision
+    relation: qualifies
+  - from: example
+    to: provision
+    relation: example-of
+  - from: commentary
+    to: provision
+    relation: derives-from

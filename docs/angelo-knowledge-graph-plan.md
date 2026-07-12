@@ -61,43 +61,51 @@ grounded-extraction capability when the zettelkasten bundle is enabled.
 
 ---
 
-## 3. The one real blocker: kglite native crash
+## 3. The kglite native crash — RESOLVED via a dedicated Python 3.11 venv
 
-`memory.server` builds a KGLite graph at import; under this machine's conda
-**Python 3.13** build that import crashes natively — **SIGFPE** (integer
-divide-by-zero) at `memory/server.py:1284` (`kglite.KnowledgeGraph()`),
-nondeterministically also SIGSEGV. In isolation `kglite.KnowledgeGraph()` works
-(8 CPUs); the crash only appears *after* `memory.server`'s heavy imports (numpy /
-pandas / model2vec / tokenizers), pointing at an FP-exception or thread-init
-interaction between those extensions and the kglite Rust extension.
+**Original problem.** `memory.server` builds a KGLite graph at import; under this
+machine's conda **Python 3.13** build that import crashed natively — **SIGFPE**
+(integer divide-by-zero) at `memory/server.py:1284` (`kglite.KnowledgeGraph()`),
+nondeterministically also SIGSEGV. In isolation `kglite.KnowledgeGraph()` worked;
+the crash only appeared *after* `memory.server`'s heavy imports (numpy / pandas /
+model2vec / tokenizers), pointing at an FP-exception or thread-init interaction
+between those native extensions and the kglite Rust extension. Because the
+in-editor MCP servers used the same interpreter (`/opt/miniconda3/bin/python3.13`),
+they hit the same crash.
 
-Because the in-editor MCP servers use the **same interpreter**
-(`/opt/miniconda3/bin/python3.13`), they will hit the same crash. **This must be
-fixed before the MCP servers, coordinator, or `create_extraction_graph` can run
-in-editor.** The memory tree above was authored by writing `.memory/` files
-directly through the crash-free `memory.storage` layer (angelo rebuilds its cache
-from those files, so the result is identical).
+**Fix applied (2026-07-12) — option 1, the dedicated venv.**
 
-**Reproduce:** `MEMORY_SKIP_EMBEDDINGS=1 python -c 'import memory.server'`
+- Created **`~/.venvs/angelo`** on **Python 3.11.1** and installed
+  `angelo[zettelkasten]` **1.7.8** into it (from the local clone `/tmp/angelo_src`;
+  scientific deps are cp311 wheels, and `cryptography 49` was compiled from source
+  via the system Rust 1.84 — no prebuilt cp311 x86_64 wheel exists).
+- Repointed all four servers in `.cursor/mcp.json` (memory, coordinator,
+  zettelkasten, memory-artifacts) from `/opt/miniconda3/bin` to
+  `~/.venvs/angelo/bin`.
+- **Verified:** `import memory.server` and `KnowledgeGraph()` no longer SIGFPE
+  under 3.11 (the crash was specific to the conda 3.13 native stack). The server
+  rebuilds the kglite cache from the 25 committed `.memory/` files cleanly, and an
+  MCP `initialize` + `tools/list` handshake returns tools fast — **memory 16,
+  coordinator 15, zettelkasten 21**.
 
-**Fix options (in rough order of preference):**
+**Reproduce the original crash (for reference):**
+`MEMORY_SKIP_EMBEDDINGS=1 /opt/miniconda3/bin/python -c 'import memory.server'`
 
-1. **Dedicated Python 3.11 venv for angelo.** Create `~/.venvs/angelo` on 3.11,
-   `pip install "angelo[zettelkasten]"`, and repoint `.cursor/mcp.json` commands to
-   that venv's `angelo-*` console scripts (or run `angelo init --local-paths` from
-   it). 3.11 is angelo's most-tested line and most likely to dodge the 3.13/native
-   ABI interaction.
-2. **Rebuild/reinstall kglite** against 3.13 (`pip install --force-reinstall --no-binary kglite` if a source build is available), in case the `cp310-abi3` wheel is the culprit.
-3. **Isolate and neutralize the offending import** — bisect which of numpy /
-   tokenizers / model2vec flips FP-exception trapping, and set the corresponding
-   thread/FP env (`RAYON_NUM_THREADS`, `TOKENIZERS_PARALLELISM=false`, etc.) in the
-   server launch env.
+### 3a. Embeddings: `MEMORY_SKIP_EMBEDDINGS=1` (temporary)
 
-A secondary, non-blocking degradation: the **embedding model** (model2vec
-`minishlab/potion-retrieval-32M`, ~120 MB) is fetched from a GitHub-release mirror
-(HF fallback), and both endpoints return 0 bytes on the current (throttled) network.
-Until it caches, set `MEMORY_SKIP_EMBEDDINGS=1` and memory/zk search degrade to
-keyword matching; embeddings backfill automatically once the model is present.
+The servers **eagerly load** the model2vec embedding model
+(`minishlab/potion-retrieval-32M`) at startup. On the current throttled network the
+HuggingFace `xet` chunked download stalls, which blocked the servers from finishing
+init and advertising tools — the symptom *"server loaded but no tools/prompts/
+resources."* Worked around by setting **`MEMORY_SKIP_EMBEDDINGS=1`** in each server's
+`env` in `mcp.json`; the servers now boot instantly and search falls back to keyword
+matching (fine for the 25-entry tree). A background `snapshot_download` with HF `xet`
+disabled is caching the model; **once cached, delete the three `MEMORY_SKIP_EMBEDDINGS`
+lines from `mcp.json` and reload Cursor** to restore semantic search.
+
+> Note: the GitHub-release mirror for the model fails with `SSL:
+> CERTIFICATE_VERIFY_FAILED` (the `/usr/local` Python 3.11 lacks a system cert
+> bundle); the HuggingFace fallback works, so this is not blocking.
 
 ---
 
@@ -194,14 +202,16 @@ the grounded clause and the code, cross-linked.
 
 ---
 
-## 6. Runbook (once the kglite blocker is fixed)
+## 6. Runbook
 
-1. Fix kglite (Section 3) and restart Cursor; confirm `angelo-memory`,
-   `angelo-coordinator`, `angelo-zettelkasten` show green in Settings → MCP.
-2. Cache the embedding model on a good network (or `angelo doctor` /
-   `prefetch_model`), then drop `MEMORY_SKIP_EMBEDDINGS`.
+1. ~~Fix kglite~~ **DONE (Section 3):** reload Cursor and confirm `angelo-memory`,
+   `angelo-coordinator`, `angelo-zettelkasten` show green with their tools in
+   Settings → MCP (they run from `~/.venvs/angelo/bin`).
+2. Finish caching the embedding model (background `snapshot_download` with HF `xet`
+   disabled), then delete the three `MEMORY_SKIP_EMBEDDINGS` lines from `mcp.json`
+   and reload to restore semantic search.
 3. Call `sync()` then `health()` — confirm the cache rebuilt from the committed
-   `.memory/` tree (10 entries) and `format_version: "1.0"`.
+   `.memory/` tree (25 entries) and `format_version: "1.0"`.
 4. Deepen the code memory tree: per-package `decision`/`note` entries under the
    phase nodes (from the codebase exploration), each pinned with `files=`.
 5. Author the building-code **schema**, then run `create_extraction_graph` over
@@ -215,8 +225,8 @@ the grounded clause and the code, cross-linked.
 
 ## 7. Open questions for the owner
 
-- **Interpreter:** OK to stand up a dedicated Python 3.11 venv for the angelo MCP
-  servers (Section 3, option 1)? It is the lowest-risk fix.
+- **Interpreter:** ✅ Resolved — a dedicated Python 3.11 venv (`~/.venvs/angelo`)
+  now backs the angelo MCP servers (Section 3).
 - **Zotero:** the zettelkasten can pull from Zotero (`zotero(action="lookup")`). Is
   there a menegroth Zotero library to wire in, or is `corpus/` the whole universe?
 - **Spine granularity:** one spine per code family (recommended) vs per document vs a

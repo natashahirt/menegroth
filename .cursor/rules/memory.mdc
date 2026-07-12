@@ -1,0 +1,285 @@
+---
+alwaysApply: true
+---
+
+# Memory Protocol
+
+This rule tells agents how to use the Memory MCP server for persistent knowledge across sessions.
+
+> **Reach for memory deliberately.** Several memory actions are folded into
+> action-dispatch tools: `record`/`recall`/`search` stay top-level, but skills,
+> relationships, and session handoff/pickup now live under `skill(action=...)`,
+> `relate(action=...)`, and `session(action=...)`. Because these are no longer
+> standalone tool *names* in your tool list, it is easy to forget they exist —
+> treat "save a skill", "link entries", "hand off", and especially **"offer to
+> note this"** as first-class reflexes, not afterthoughts. When you discover a
+> gotcha/limitation or the user shares a finding, proactively offer to record it
+> (see "Notes and Annotations" below) rather than waiting to be asked.
+
+## When to Write
+
+Record to memory when:
+
+- The user says "remember this", "save this", "record", "log this decision"
+- A significant design decision is made (even implicitly — use type "annotation")
+- An experiment succeeds or fails
+- **A plan is confirmed and you begin implementation** — record it as type='plan' with the plan title and a brief scope summary, placed under the active phase
+- A checkpoint is reached
+- You learn a reusable procedure or pattern (save as a skill)
+
+## Committing Code Writes to Memory
+
+**MANDATORY: Every git commit MUST be preceded by a memory record.** Recording what happened is a
+built-in step of committing, not an optional extra — never run `git commit` without first calling
+`record()`.
+
+When the user asks you to commit and/or push code (e.g. "commit and push", "commit this", "push it up"):
+
+1. **First, record what happened — _before_ you run git.** Write one concise entry capturing what
+   this commit represents. Choose the type that fits:
+   - `decision` — a design/approach choice made during the work
+   - `checkpoint` — a state summary (what's done, what's next) for completed work
+   - `experiment` — something tried with a pass/fail outcome
+   - `note` — a smaller observation or change summary
+
+   Place it under the most specific related entry (active phase or deeper), and pass the changed
+   files in `files` so it is git-pinned to the code being committed. Do this automatically — never
+   stop to ask the user whether to record.
+2. **Then run git** (add/commit/push). The entry you just wrote is committed automatically (as
+   `memory-mcp`) and rides up with your push, so the code commit and its memory record travel
+   together.
+
+**The ONLY exception** is a commit touching zero substantive code or docs — a pure `.gitignore`
+tweak, a formatting-only linter fix, or a WIP/"commit-for-safety" snapshot. If you are unsure
+whether a commit is substantive, it is — record it.
+
+Never write a second entry for work you already recorded earlier this session (avoid duplicates).
+But if the commit includes additional unrecorded work beyond what you logged earlier, write a new
+entry for that additional work.
+
+This is partially automated: a git `commit`/`push` also fires a hook (`angelo memory commit`) that
+flushes any pending `.memory/` files into git. The hook owns the *plumbing* (getting memory files
+committed and pushed); **you** own the *content* (deciding what happened and recording it before
+you commit).
+
+## When to Read
+
+**Search memory before exploring the codebase.** Before you start grepping or reading files to
+answer a question or scope a task, call `search` / `recall` first — prior work, decisions, or the
+answer to the same question often already live in the tree. This saves time and keeps you aligned
+with earlier decisions.
+
+Read from memory when:
+
+- Starting a new session (call `session(action='pickup')` for focused last-session context, then `recall` for the full tree)
+- **Before exploring or grepping the codebase** for a question or task — check `search` / `recall` first
+- Before starting work that might repeat past experiments (call `search`)
+- When you need a procedure you've done before (call `skill(action='search')`)
+- When navigating unfamiliar code (call `codebase`)
+
+## Storage Model
+
+Entries are stored as **markdown files with YAML frontmatter** in `.memory/`. The
+KGLite cache (`.angelo/memory.kgl`) is disposable and rebuilt on startup. The
+`.memory/` directory is the source of truth and should be committed to git; the
+`.angelo/` directory holds runtime state and derived caches and is gitignored.
+
+Entry file writes are committed in debounced batches (authored as `memory-mcp`).
+Auto-push only fires when all unpushed commits are memory-mcp authored — it never
+pushes user WIP commits.
+
+Live sessions are runtime sidecars in `.memory/active-sessions/<session-id>.json`.
+They include heartbeat/process metadata and the entries created, accessed, or
+modified by the current MCP process. The dashboard reads these files directly so
+multiple live chats can appear as separate session cards. Sidecars are ephemeral
+and gitignored; finalized handoffs are written to `.memory/sessions/`.
+
+## Research Tree Tools (MCP: memory)
+
+| Tool | Use |
+|------|-----|
+| `create_project(name, description)` | Bootstrap root project (only registered while the repo has no project yet) |
+| `record(project, title, body, ...)` | Add an entry to the tree |
+| `discard(entry_id, reason?)` | Mark something as discarded |
+| `move(entry_id, new_parent_id)` | Reparent an entry |
+| `relate(action='link', entry_a, entry_b, rationale)` | Cross-reference entries |
+| `recall(project, entry_id?, type?, view?, depth?)` | Get tree state. Returns a nested `tree` + `summary` + `open_phases`. `view="outline"` for a plan-node scaffold (best first call on a big tree), `view="flat"` for a paginated list; `depth=N` collapses deep branches |
+| `search(query, project?)` | Find entries by file path or keyword |
+| `codebase(query?, scope?)` | Navigate code structure |
+| `drift(project?)` | Scan pinned files for changes since pin |
+| `session(action='handoff', project, summary?)` | Persist session activity for next agent (auto-called by stop hook) |
+| `session(action='pickup', project, query?)` | Load previous session's focused context. No query = latest session. With query = semantic search past sessions by topic (e.g. "auto-invalidation work") |
+
+## Maintenance Tools (MCP: memory)
+
+| Tool | Use |
+|------|-----|
+| `health()` | Report system health: cache freshness, counts, unpushed commits, install info |
+
+The server auto-syncs external `.memory/` changes before each tool call, so
+manual cache rebuilds are not needed. `sync` and `vacuum` exist as Python
+functions (`memory.server.sync` / `memory.server.vacuum`) for rare manual
+maintenance but are not exposed as MCP tools.
+
+## Experiment Artifacts (MCP: memory-artifacts)
+
+Large or regenerable files live in DVC (one S3 remote per repo); git keeps
+manifests and lightweight pointers. Requires the `[artifacts]` extra and a
+configured remote (`artifact(action='configure_remote')`). **These tools live in the
+separate `memory-artifacts` MCP server** (not the core `memory` server), so the
+block can be enabled or disabled on its own from Cursor's MCP settings without
+affecting the core memory tools. If the tools aren't visible, check that
+`memory-artifacts` is enabled.
+
+| Tool | Use |
+|------|-----|
+| `experiment(action='run', experiment_id, command, artifacts_json, ...)` | Capture a provenance manifest (code SHA, data hashes, env, command); optionally execute |
+| `artifact(action='backup', path)` | One-step DVC add + push + verify for a local file; the file stays where it is |
+| `experiment(action='push_manifest', experiment_id)` / `experiment(action='verify_manifest', experiment_id)` | Ship or check a manifest's artifacts on the S3 remote |
+| `experiment(action='rerun', experiment_id, where, dry_run)` | Rerun from a manifest in a clean sandbox at the original commit; `where="cloud"` enqueues for a runner, `where="local"` runs here |
+| `experiment(action='get_job', job_id)` | Poll a queued/running rerun's state and log tail |
+| `experiment(action='export_catalog', experiment_id)` | Human-readable S3 catalog beside DVC's hash-addressed cache |
+
+Conventions:
+
+- Experiments are series of dated runs sharing an `experiment` family id; reruns carry `rerun_of`, `executor`, and a replication check (`exact` / `divergent`)
+- Rerun outputs land in `.memory/artifacts/experiments/<family>/runs/<stamp>/` and never overwrite originals or local files
+- The rerun job queue lives at `<DVC remote>/jobs`; an `angelo-runner` daemon on any machine with bucket credentials executes cloud reruns
+- Prefer `dry_run=true` first for any tool that touches the remote
+
+## Skills Tools (MCP: memory)
+
+| Tool | Use |
+|------|-----|
+| `skill(action='save', name, category, content, tags)` | Store a reusable procedure or pattern |
+| `skill(action='get', name)` | Retrieve full skill content |
+| `skill(action='search', query?, mode?, category?, tags?)` | Find skills by keyword/semantics; empty query lists the library |
+| `skill(action='delete', name)` | Remove a skill |
+
+## Entry Types
+
+- **plan**: Forward-looking goals and steps
+- **checkpoint**: Present-state summary (what's done, what's next)
+- **experiment**: Approach + result + success/failure flag
+- **decision**: Resolved choice with rationale
+- **todo**: User-initiated reminder of something to do later. Record when the user says "todo", "remind me to", "we should do X later", or similar. Nest under the deepest (most specific) existing entry it relates to — same placement rule as notes/annotations. Mark as done by discarding with reason "completed".
+- **note**: User-initiated observation worth preserving (findings, limitations, gotchas). Record when the user says "note this", "remember this", or shares a finding. If the user shares something interesting but doesn't ask to record, ask: "Want me to note that?"
+- **annotation**: Agent-initiated breadcrumb, recorded automatically (no confirmation or approval prompt — see "Notes and Annotations"). Conservative — only record when: (1) you discover a tool/API limitation that caused a retry or workaround, or (2) the user states a preference that will affect future agent behavior across sessions. Do NOT annotate obvious things, single-session context, things already captured in a decision, or style preferences that don't affect behavior.
+
+## Tree Hierarchy
+
+The tree uses a 4-level structure under a **single root project**:
+
+```
+Project > Subproject (plan) > Phase (plan) > Entries
+```
+
+- **Project**: the single root project node for all research lineage. There is exactly ONE project — never create additional projects. Use `recall` to discover the project name on session start.
+- **Subproject**: major workstream (plan node, child of project) — e.g. `agent-coordinator`, `agent-memory`
+- **Phase**: temporal grouping of work (plan node, child of subproject) — e.g. "Phase 1: Design + Build"
+- **Entries**: decisions, experiments, notes, annotations, checkpoints (children of phase)
+
+A phase is "done" when it contains a concluding checkpoint. To start a new phase, create a new plan node as a **sibling** of the completed phase (under the same subproject).
+
+**Important**: Only call `create_project` once per repo to bootstrap — it will reject if a project already exists. If you need a new workstream, create a subproject plan node under the existing root. This rule applies to the research tree only; skills and code graph are separate stores with their own tools.
+
+## Placement Protocol
+
+When calling `record()`, determine the parent:
+
+1. Identify the active **subproject** for the current work
+2. Find the active **phase** within that subproject (the one without a concluding checkpoint, or the most recent one)
+3. Record **decisions** and **checkpoints** as direct children of the phase plan node
+4. Record **experiments** under the decision or plan they're testing — experiments are rarely first-class phase children unless they represent a major standalone investigation
+5. Record **notes and annotations** under the most specific (deepest) existing entry they relate to — e.g. a gotcha discovered while implementing a decision should be a child of that decision, not the phase
+6. If unsure, omit `parent_id` — the entry will default to the project root (but try to always be explicit)
+
+## Git-Pinned References
+
+When an entry references files, pass them in the `files` parameter. The server will:
+1. Classify the dirty working tree before pinning (`clean`, `memory_only`, `relevant`, `unrelated`, or `risky`)
+2. Auto-commit requested files if they have uncommitted changes — even when unrelated staged files exist (the server never refuses a pin)
+3. Pin references to the resulting commit SHA (e.g. `server.py@a3f7c2e`)
+4. Every reference is immutable and reproducible via `git show`
+
+**Always pass `files` when recording an entry that references code.** It is better
+to commit too many files to a SHA than to leave an entry unanchored. The server
+commits only the requested dirty files (not unrelated ones), so worst case is an
+extra memory-authored commit — never a corrupted history.
+
+## Notes and Annotations
+
+**Notes** are user-initiated. When to offer:
+- User shares a finding or limitation ("oh, X doesn't support Y")
+- User describes a gotcha they hit ("turns out you have to restart the server")
+- User makes an observation about how something works
+
+If the user doesn't explicitly say "note this" or "remember this", ask:
+"Want me to note that?" — then record with type='note' if confirmed.
+
+If the agent itself discovers something interesting (a limitation, unexpected behavior,
+a workaround that wasn't obvious), proactively surface it: "I noticed X — want me to
+note this for future sessions?"
+
+**Annotations** are agent-initiated breadcrumbs. **Always record them automatically** —
+do not ask the user first, do not surface an approval prompt, and do not wait for
+confirmation. Recording the annotation is part of doing the work, not a separate step to
+clear with the user. Record one ONLY when:
+1. A tool/API limitation caused you to retry or apply a workaround
+2. The user states a preference that will affect agent behavior in future sessions
+
+Noise filter — do NOT annotate:
+- Things already captured in a decision
+- Single-session context (temporary debugging, one-off commands)
+- Obvious facts about well-documented tools
+- Style/formatting preferences unless they affect code generation
+
+**File references**: Always pass the `files` parameter when recording a note or annotation.
+Pin the file(s) the observation relates to — this ensures the note is anchored to the
+exact version of the code where the finding applies. Example:
+- Note about a KGLite limitation → files: "memory/server.py"
+- Annotation about a canvas SDK constraint → files: "canvases/memory-tree.canvas.tsx"
+
+## Visualization
+
+**NEVER build a canvas manually to render the knowledge graph.** Always call the MCP tool
+`visualize()` — it generates the canvas file with the correct layout, styling, and data.
+
+- To show the tree: call `visualize()` — project is auto-detected from the graph
+- To refresh after changes: call `visualize()` again
+- Do NOT create or edit `memory-tree.canvas.tsx` by hand
+- Do NOT write custom React/SVG/canvas code to display the tree
+
+The visualizer is self-contained — it reads the graph, computes layout, and writes the
+canvas file in one call.
+
+## Live Session Cards
+
+The Sessions dashboard reads `.memory/active-sessions/*.json` plus finalized
+records from `.memory/sessions/`.
+
+- Healthy live sidecars have a recent heartbeat and appear as live cards.
+- Stale sidecars from crashed or old MCP processes are shown as stale and do not
+  count as live.
+- If a live session card is missing, restart the MCP server/Cursor so the latest
+  memory server writes sidecars, then call `health()` if the problem persists.
+- `session(action='handoff')` finalizes the current session into `.memory/sessions/` and removes
+  that session's live sidecar.
+
+## Documents
+
+Use the `documents` tool to manage markdown reports linked to the memory tree.
+Documents are their own node type — distinct from entries — and appear in the
+visualizer with gray styling. One tool, three actions:
+
+- `documents(action="register", path, title, description?, links_to?)` — register a report
+- `documents(action="list")` — see what's already registered
+- `documents(action="deregister", doc_id)` — soft-delete a document
+
+When to register:
+- After creating or updating a design report (e.g. `documents/260605_report_*.md`)
+- After creating a plan file that captures significant design work
+- When a document represents a deliverable tied to a tree phase or decision
+
+Always provide `links_to` pointing to the most relevant entry (usually the phase or
+decision the document describes).

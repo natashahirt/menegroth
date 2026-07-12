@@ -1,0 +1,47 @@
+{
+  "version": 1,
+  "hooks": {
+    "stop": [
+      {
+        "type": "prompt",
+        "prompt": "Before ending: 1. Call the memory MCP's `session` tool with action='handoff', the active project name, and a brief summary of what was accomplished and what remains. This persists the session's activity (entries created, accessed, modified) for the next agent to pick up. If nothing meaningful happened (e.g. only a question was asked), skip. 2. Review the session for unrecorded gotchas: did you discover any tool/API limitations, hit any unexpected errors that required workarounds, or notice the user state a cross-session preference? If so, record each as type='annotation' with the relevant file(s) in the `files` parameter so the observation is git-pinned to the code it relates to (1-2 annotations max, only genuine gotchas). If nothing qualifies, skip.",
+        "timeout": 30
+      }
+    ],
+    "sessionStart": [
+      {
+        "type": "prompt",
+        "prompt": "At the start of this session: 1. Call the memory MCP's `session` tool with action='pickup' and the active project to load the previous session's focused context (what was created, accessed, modified). 2. Call `recall` on the project to load the full research tree. If you don't know which project is active, call `skill` with action='search' as a lightweight ping to confirm the memory server is available, then ask the user which project to recall. If pickup/recall report that no project exists (fresh install), this repo hasn't been onboarded yet: tell the user, and offer to bootstrap memory by running the onboard-project skill (or calling `create_project` directly with the repo name and a one-line description). Don't treat empty results as an error.",
+        "timeout": 15
+      }
+    ],
+    "subagentStop": [
+      {
+        "type": "prompt",
+        "prompt": "A subagent just finished. If it was part of a coordinator run (an engineer, reviewer, critic, tester, explore, bugbot, security-review, or memory task you spawned while coordinating), do these IN ORDER before spawning the next wave or doing anything else:\n1. UPDATE THE COORDINATOR GRAPH FIRST. Call the coordinator MCP's `submit_result` for this task's task_id with the subagent's output and the correct success flag, so the DAG advances and the dashboard / coordinator view reflects the true state. This is mandatory: an un-submitted task leaves the run and its view window stale and out of date, strands the write lease, and stalls the next wave. If the subagent was a multi-pass agent that is still mid-run (not yet done), call `record_pass` instead. If you don't have the task_id handy, call `get_report` to find the still-running task before submitting.\n2. THEN record the outcome to memory: type='experiment' for engineer work (set success from the result), type='decision' for reviewer/critic verdicts. Title = the task description, body = the subagent's key findings.\nIf this subagent was NOT part of a coordinator run (e.g. a standalone explore or shell task), skip both steps.",
+        "timeout": 30,
+        "matcher": "generalPurpose|explore|bugbot|security-review"
+      }
+    ],
+    "postToolUse": [
+      {
+        "type": "prompt",
+        "prompt": "A memory MCP tool just completed. If it was a write operation (record, discard, move, create_project, relate, skill with action='save'/'delete', or session with action='handoff'), call the memory MCP's `visualize()` tool to refresh the tree canvas. If it was a read operation (recall, search, codebase, drift, skill with action='get'/'search', or session with action='pickup'/'search') or visualize itself, do nothing.",
+        "timeout": 15,
+        "matcher": "MCP: memory"
+      },
+      {
+        "type": "prompt",
+        "prompt": "The user just answered a structured question via AskQuestion. If this was a meaningful design/architecture decision (not a trivial clarification like 'yes/no to proceed'), record it to memory: call the memory MCP's `record` tool with type='decision', using the question as the title and the selected option(s) as the body. Include the rationale if the user provided one. If it was a trivial confirmation or navigation choice, skip recording.",
+        "timeout": 20,
+        "matcher": "AskQuestion"
+      }
+    ],
+    "afterShellExecution": [
+      {
+        "command": "angelo memory commit --quiet",
+        "matcher": "git\\s+(commit|push)"
+      }
+    ]
+  }
+}

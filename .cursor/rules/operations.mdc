@@ -1,0 +1,72 @@
+---
+description: How to operate the angelo CLI (init, update, doctor, kill) and fix common setup problems — most importantly "MCP servers won't start" and what `angelo update` actually does. Consult whenever the user mentions installing/updating angelo, running doctor, or MCP servers that won't start.
+alwaysApply: false
+---
+
+# Angelo CLI Operations & Troubleshooting
+
+This rule keeps the agent from improvising on angelo's own setup commands. When
+the user asks about installing, updating, or fixing angelo, follow this — don't
+hand-edit `mcp.json`, reinstall blindly, or guess at commands.
+
+## The commands (what each one is for)
+
+| Command | What it does | When |
+|---|---|---|
+| `angelo init [--cursor\|--claude] [--with-zettelkasten] [--local-paths]` | Scaffolds editor config (`mcp.json`, rules, hooks, skills). | First-time setup in a project. |
+| `angelo update` | Reconciles the managed rules/hooks/skills and `mcp.json` to match the **installed** package version. On a **normal (copied) install** it also self-upgrades the package first (`pip install --upgrade` from git when newer); on an **editable install** it never runs pip and only reconciles config. `--no-upgrade` skips the package step. | To pick up new managed files, or to upgrade + reconcile in one step. |
+| `angelo doctor` | Verifies the install: PATH commands, dependencies, config files, onboarding state. Read-only. | Anytime something seems off. |
+| `angelo doctor --fix` | Repairs `mcp.json` in place — rewrites the `angelo-*` `command` entries to absolute console-script paths. | When MCP servers won't start (see below). |
+| `angelo kill [--dry-run]` | Kills every running angelo process (servers + dashboard/runner children). | Before an editable reinstall (the running servers lock the scripts). |
+
+## "MCP servers won't start" (the most common problem)
+
+The editor launches MCP servers with **its own PATH**, which usually does *not*
+include the venv/`Scripts`/`bin` directory where the `angelo-*` commands live.
+So a bare command like `angelo-memory` that runs fine in your shell can still
+fail to start inside Cursor/Claude Code — especially when angelo is installed in
+a virtualenv. Fix it deterministically:
+
+1. Run `angelo doctor` — it reports whether each command resolves and prints the
+   absolute paths.
+2. Run **`angelo doctor --fix`** — it rewrites the `command` fields in `mcp.json`
+   to those absolute paths (env blocks and non-angelo servers are left intact).
+3. Restart the MCP servers in the editor (Cursor/Claude settings).
+
+Do **not** hand-edit `mcp.json` or reinstall the package for this — `--fix` is
+the intended repair. Note the rewritten paths are machine-specific, so for a
+shared repo each teammate runs `--fix` (or `angelo init --local-paths`) in their
+own environment rather than committing the absolute paths.
+
+## Upgrading angelo vs. `angelo update` (know which case you're in)
+
+Upgrading has two parts — new **package code** and reconciled **managed config** — and how much `angelo update` does for you depends on the install type:
+
+- **Normal (copied) install:** `angelo update` does both. By default it self-upgrades the package (`pip install --upgrade` from git when a newer version is published), then re-runs itself to reconcile config against the new version. Pass `--no-upgrade` to reconcile config only.
+- **Editable / dev checkout:** `angelo update` reconciles config but **never touches the package** — running pip would silently replace your editable install with a copy (local edits stop taking effect). Get new code yourself with `git pull`; only re-run `pip install -e ".[...]"` when dependencies or entry points changed, and run `angelo kill` first.
+
+Then **restart** the editor / MCP servers so they load the new code and config.
+
+So: on a normal install, `angelo update` → restart. On an editable checkout, `git pull` → `angelo update` (or `--no-upgrade`) → restart. The one hard invariant is that `angelo update` never pip-upgrades an *editable* install.
+
+## Local edits to managed rules survive updates
+
+`angelo update` is **non-destructive to files you edited.** It tracks the version it installed in a committed manifest (`.cursor/angelo-manifest.json`, and `.claude/angelo-manifest.json` for the Claude layer):
+
+- A managed file you never touched is refreshed to the new bundled version (normal upgrade).
+- A managed file you edited is **never silently overwritten.** Commit the manifest along with `.cursor/` so the baseline travels with the repo (a fresh clone on another machine then knows which files are pristine vs. edited).
+
+**When `angelo update` finds an edited managed Cursor rule**, it offers to move your changes into a matching local override:
+
+- **Interactive (a TTY):** it prompts per edited rule — `[m]` migrate your edits into `<name>-local.mdc` and refresh the managed rule (recommended), `[k]` keep your edits and write the upstream version as `<file>.new`, or `[o]` overwrite (discard your edits). For non-rule files only `[k]`/`[o]` are offered.
+- **Non-interactive:** pass `--migrate-edits` to auto-migrate edited Cursor rules, or `--keep-edits` to always keep + write `.new`. With neither flag and no TTY (CI, scripts), it keeps your edits and writes `.new` (safe default).
+
+**Migration** extracts the lines you added relative to the version you installed, appends them as a dated block to `.cursor/rules/<name>-local.mdc` (an un-managed rule Cursor loads alongside the managed one, with `alwaysApply: true`), then refreshes the managed rule to the new upstream and re-baselines it. Review the migrated block and trim it to just your customizations.
+
+**Prefer a separate, un-managed rule for customizations from the start.** If you keep project-specific coordinator behavior (e.g. instructions for your custom agents) in its own `*-local.mdc` from the beginning, `angelo update` never has anything to migrate — it loads alongside the managed rule but is outside angelo's managed set, so it is never touched.
+
+## After any setup change
+
+Restart the MCP servers in the editor (Settings > MCP in Cursor) so they pick up
+new code, rules, or `mcp.json` changes. The running server holds the old state in
+memory until restarted.

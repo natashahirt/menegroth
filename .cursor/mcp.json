@@ -1,0 +1,31 @@
+{
+  "mcpServers": {
+    "zettelkasten": {
+      "command": "/opt/miniconda3/bin/angelo-zettelkasten",
+      "env": {
+        "ANGELO_WORKSPACE": "${workspaceFolder}",
+        "ZETTELKASTEN_PATH": "${workspaceFolder}/.zettelkasten"
+      }
+    },
+    "coordinator": {
+      "command": "/opt/miniconda3/bin/angelo-coordinator",
+      "env": {
+        "ANGELO_WORKSPACE": "${workspaceFolder}",
+        "ANGELO_ZETTELKASTEN": "1"
+      }
+    },
+    "memory": {
+      "command": "/opt/miniconda3/bin/angelo-memory",
+      "env": {
+        "ANGELO_WORKSPACE": "${workspaceFolder}",
+        "MEMORY_FILE_PATH": "${workspaceFolder}/.angelo/memory.kgl"
+      }
+    },
+    "memory-artifacts": {
+      "command": "/opt/miniconda3/bin/angelo-memory-artifacts",
+      "env": {
+        "ANGELO_WORKSPACE": "${workspaceFolder}"
+      }
+    }
+  }
+}

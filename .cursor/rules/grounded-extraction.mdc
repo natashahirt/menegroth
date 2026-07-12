@@ -1,0 +1,556 @@
+# Grounded Extraction Protocol
+
+This rule tells the orchestrating agent how to read a corpus into the
+zettelkasten **against a goal** using the grounded-extraction pipeline. It fires
+when the user wants to pull a set of sources (papers, repos, a PM's letters,
+product pages) into the knowledge graph against a rubric -- e.g. "how was this
+system built and what decisions were made," "this PM's transferable decision
+behavior," "a lit-review matrix," "every statistic + its grounding quote."
+
+This bundle is only available when the zettelkasten capability is enabled for
+the project (the coordinator's `agents(action="list")` shows `extractor` / `scribe` /
+`auditor`, and `create_extraction_graph` exists). If they are absent, the project
+was set up without `--with-zettelkasten`; tell the user.
+
+## The pipeline
+
+A grounded-extraction run is one fixed pipeline applied to N sources, all
+parameterized by a single **schema** (the rubric):
+
+```
+per source:  [prep: ingest + seed hub note]  ->  extractor (planner, parallel)
+                                              ->  scribe   (implementer, serialized)
+                                              ->  auditor  (checker)
+then once:    linker (cross-source links)     ->  synthesizer (author spine prose)
+                                              ->  memory (record)
+```
+
+- **extractor** (read-only planner): reads the ingested source against the
+  SCHEMA and emits grounded claim+quote candidates mapped to the schema's
+  dimensions. Extractors run **in parallel** across sources.
+- **scribe** (implementer): commits candidates as `claim` + `quote` note pairs in
+  the source's graph, tagged with the schema dimension tags and linked to the
+  per-source **hub** note. Scribes are **serialized** -- the coordinator's
+  write-lease already enforces one writer at a time, so never run two in a wave.
+- **auditor** (checker, different model family): verifies grounding integrity
+  (every claim has a verbatim supporting quote) and **schema-dimension coverage**.
+
+## How a schema is selected and injected
+
+A schema is to an extraction task what `model` already is to every task: a named
+attribute the coordinator resolves and flows into task context.
+
+1. **Pick or author a schema.**
+   - Reuse a registry schema by name (see `extraction-schemas.yaml` shipped with
+     the bundle: `architecture-extraction`, `lit-review-matrix`,
+     `statistic-extraction`).
+   - Or author a new one (see the authoring guide below) in the project's
+     `extraction-schemas.yaml` (next to `agents.yaml`, in `.cursor/` or
+     `.claude/`). Restart the coordinator MCP server after editing it.
+2. **The coordinator flows it for you.** When a task carries `schema: <name>`,
+   the coordinator expands the rubric and puts the full schema object in that
+   task's context (`get_task_context` -> `task.schema`). You do NOT re-read the
+   registry.
+3. **Paste the same dimension block into all three roles' prompts.** When you
+   assemble the extractor / scribe / auditor prompts, include the schema's
+   `dimensions` (tag + desc + any `claim_framing`) verbatim so all three share
+   one rubric. `create_extraction_graph` already stamps `schema` on every task,
+   so the object is present in context; surface it in the prompt text too.
+
+### Prompt Assembly for the trio
+
+For each trio task, build the prompt as:
+
+```
+<persona from agents(action="get", agent=<extractor|scribe|auditor>)>
+
+TASK: <description from get_task_context>
+PROJECT: <project>
+SOURCE: <source graph name with ingested fulltext>
+HUB: <hub note id> (graph: <source>)
+SLICE: <"full", or the assigned window for a sliced book>
+SLICE_READ: <for a sliced source only: the exact source(action="fulltext", ...)
+        windowed call the extractor/scribe must use to read this slice>
+SCHEMA: <paste the WHOLE schema: dimensions (each {tag, desc, claim_framing?,
+        note_type?, connect_to?}) AND the relations backbone (`relations` +
+        any per-dimension `connect_to`/`relation`) if the schema declares one>
+SPINE: <when the schema has a `synthesis` block: the materialized spine prep
+        pre-created -- the synthesis graph name, apex id, attach_relation, and the
+        dimension tag->node-id map. `create_extraction_graph` stamps this into each
+        task's context automatically; paste it for the scribe + auditor>
+LINK_RELATION: <schema.link_relation>   # scribe + auditor
+```
+
+The scribe also receives the extractor's CANDIDATES (from the predecessor task
+output). Keep the SCHEMA block identical across all three roles -- and include the
+backbone: it is the relations template the scribe instantiates and the auditor
+checks, so dropping it collapses the graph back into a hub-and-spokes dandelion.
+
+## Prep / ingest mechanics (and why prep is not a graph task)
+
+A planner (extractor) **cannot depend on an implementer** (graph validation
+enforces this), so the ingest + hub-seeding cannot be a graph task -- it must
+happen before the extractor runs. `create_extraction_graph` does this for you,
+synchronously, tool-side: for each source it runs `source(action="ingest", path=...)`
+-> `source(action="create", content_hash=..., source_path=..., <metadata>)`, then
+seeds the per-source hub note per the schema's `hub` block and captures its id.
+If you build the graph by hand instead, do this prep yourself first.
+
+## Driving a run
+
+1. Call `create_extraction_graph(sources, schema, project, target_entry_id?,
+   synthesis_label?)`. It ingests, seeds hubs, and -- when the schema declares a
+   `synthesis` block -- pre-creates the materialized spine (synthesis graph + apex
+   + dimension nodes, registered as a project source) under `synthesis_label`
+   (defaults to the project name). It builds the `extractor -> scribe -> auditor`
+   DAG (+ a trailing `memory` task) and returns `{run_id, task_ids, graph, sources,
+   structure?, graph_summary}` -- `structure` (the synthesis graph + apex/spec ids
+   + dimension tag->node map) is present iff the schema materialized a spine.
+2. Drive the normal wave loop: `get_ready_tasks` -> `claim_task` -> spawn the
+   subagent (Prompt Assembly above) -> `submit_result`. Remember scribes are
+   serialized (a second `claim_task` on an implementer returns `blocked`).
+3. **Batch:** run a pilot batch (`batch_size=N`, e.g. 2-3 sources), verify the
+   scribe's tags and the auditor's coverage matrix look right, then fan out the
+   rest.
+
+## Book-scale sources (automatic slicing)
+
+A paper is one trio; a 500-666pg book is not. `create_extraction_graph` slices a
+large source natively -- you do NOT hand-build per-chapter DAGs or force-refresh
+caches:
+
+- **Whole-document cache.** Prep ingests a run's sources with the full document
+  cached (plus a page/outline sidecar), so a later chapter is physically present.
+  The 200k cap now bounds only what a single `source(action="fulltext")` READ
+  returns, not what is stored.
+- **Per-slice fan-out.** A source above ~200k chars / ~60 pages is split into
+  windows -- snapped to the PDF's chapter bookmarks when present, else fixed char
+  windows with a small overlap. Each slice gets its own `extractor -> scribe`
+  pair sharing the one per-source hub, and a SINGLE `auditor` per source runs
+  after all its scribes (so coverage stays whole-source). A source at/below the
+  threshold keeps the exact single-trio shape.
+- **The returned graph names the fan-out.** `graph_summary.extractor_slices` and
+  `sliced_sources` (`[{name, slices}]`) report which sources fanned out. Slice
+  extractor aliases are `ext_{i}_{k}` (vs `ext_{i}` for a single-trio source).
+- **The extractor reads its window.** Each sliced task carries a `SLICE_READ`
+  line -- the exact `source(action="fulltext", offset=.../page_start=...)` call
+  that returns that slice. Paste it into the extractor/scribe prompt; quotes must
+  be verbatim substrings of the returned window.
+- **Overrides.** Pass an explicit `slices` list on a source (page ranges
+  `{page_start, page_end}`, char ranges `{char_start, char_end}`, or chapter
+  titles `{chapter: "<bookmark title>"}`), or tune `slice_window` /
+  `slice_overlap` / `slice_threshold` on the call.
+
+## The cross-source linker pass (after scribes)
+
+After the per-source scribes have run, do a cross-source linker pass: it needs
+the global view of sibling note ids, so it is an orchestrator/human step, not a
+per-source graph task. Use `note(action="search")` / `suggest` to find notes
+that share a dimension tag across sources and link related claims (e.g. one
+system's `topology` answer to another's). This is where the schema pays off as an
+index (next section). Then let the `memory` task record the run.
+
+## The synthesis stage (authoring the spine prose)
+
+When the schema declares a `synthesis` policy, prep pre-creates the spine nodes
+EMPTY: each apex/dimension node carries `synthesis_status: scaffold` and a
+placeholder "claims attach here" body. The scribes attach every source's claims
+to those nodes, but the nodes' own PROSE is authored by no shipped agent. So
+after the auditors (and the linker pass) there is one more orchestrator/human
+step -- the **synthesizer** -- which reads each dimension's grounding, writes the
+node body, and flips `synthesis_status` to `materialized`.
+
+Per dimension node (then the apex last):
+
+1. **Roll up the grounding in one call.** A dimension's claims live in the
+   per-source graphs (attached cross-graph), so use the project-scoped incoming
+   follow -- no custom script needed:
+
+```
+note(action="follow", graph=<synthesis-graph>, note_id=<dimension-node>,
+     relation="input-to", direction="incoming", project=<project>)
+```
+
+   Its `cross_graph_backlinks` are every source's claims for that dimension --
+   the evidence to synthesize from.
+
+2. **Write the body in the house format**, grounded ONLY in those claims:
+   - a **bold one-line headline** -- the dimension's through-line across sources;
+   - a **grounded paragraph** -- the synthesis, every assertion traceable to a
+     rolled-up claim (introduce no ungrounded judgments);
+   - a closing footer: *"Grounded in N claims across M sources feed this node."*
+
+   REPLACE the skeleton's placeholder sentence rather than appending above it:
+
+```
+note(action="update", graph=<synthesis-graph>, note_id=<dimension-node>,
+     replace_body=<authored body>, synthesis_status="materialized")
+```
+
+3. **The apex last.** Once every dimension is materialized, synthesize the apex
+   portrait the same way (its grounding is the dimension nodes rolling up into
+   it) and flip its `synthesis_status` too.
+
+Track what is left with `schema(action="spines")`: each spine reports an
+`incomplete` list (apex/dimensions still `scaffold`) and a `materialized` flag,
+so "which personas are unfinished?" is one query -- not body-char-count forensics.
+
+## The payoff: tag -> note-tag -> queryable comparison
+
+Each schema dimension's `tag` becomes the **note tag** the scribe writes. After a
+run, notes tagged `decision-sizing` / `topology` / `autonomy-placement` exist
+across every source. So the schema is simultaneously the **extraction rubric and
+the cross-source comparison index**: query one tag and line up every system's
+answer. Treat the schema as the index -- author tags you will want to compare on.
+
+## The data-grounding half: grounding a claim by re-computation
+
+Everything above grounds a claim in a **verbatim quote** (the prose trio
+`extractor -> scribe -> auditor`). A claim can instead be grounded in a
+**re-computable statistic over a stored dataset** -- `grounding.method='data'`,
+verified by the auditor RE-RUNNING the computation rather than string-matching.
+This is the THIRD grounding modality alongside `quote` and `equation`. angelo
+VERIFIES and STORES this evidence; it NEVER composes beliefs from it -- a
+derivation is an opaque, deterministic function angelo can only invoke and
+compare. The application that consumes these verified cells (e.g. a genome
+estimator) is what composes them; the generalist store does not.
+
+### When the data trio runs
+
+A source declared `kind: data` in `create_extraction_graph` references an
+EXISTING zettelkasten dataset box (its `graph`) plus a list of `derivations`,
+SKIPS document ingest, and builds a `data-extractor -> data-scribe -> auditor`
+trio instead of the prose trio. Under the same `synthesis_label`, a data trio
+and a prose trio attach to ONE shared spine -- a data claim threads the same
+dimension nodes as a prose claim, so the synthesizer/matrix treat them alike. A
+source with no `kind` is a prose source and is unaffected (byte-identical path).
+
+### The `evidence: data` dimension + its derivation
+
+A schema dimension declares which grounding channel it expects:
+
+```yaml
+dimensions:
+  - {tag: sizing, desc: "position concentration", evidence: data,
+     derivation: freischutz.concentration.mean_top5}
+```
+
+`evidence` is `text` (default -- the verbatim-quote channel) or `data` (a
+dimension a registered derivation can ground). `evidence: data` is GENERIC: it
+says the dimension CAN be data-grounded, nothing about what the derivation
+means. The `derivation` id is either an `expr` (a whitelisted expression --
+`mean:col` / `quantile:col:0.9` / `sum:col`) that re-verifies anywhere with no
+host registration, or a REGISTERED id (`freischutz.concentration.mean_top5`)
+contributed by host code (same trust boundary as `agents.yaml`). Prose and data
+dimensions coexist in one schema; only `evidence: data` dimensions are the data
+trio's job.
+
+### Prompt assembly for the data trio
+
+The data trio reuses the prose Prompt Assembly with a data-source header:
+
+```
+<persona from agents(action="get", agent=<data-extractor|data-scribe|auditor>)>
+
+TASK: <description from get_task_context>
+PROJECT: <project>
+SOURCE: <dataset box name -- read its type=dataset notes via dataset(action="values")>
+HUB: <hub note id> (graph: <source>)
+DERIVATIONS: <the source's declared derivation ids>
+SCHEMA: <the whole schema; attend to the evidence:data dimensions + their derivation>
+STRUCTURE: <as for the prose trio, when the schema materializes a spine>
+```
+
+- **data-extractor** (planner, read-only): reads the dataset box's `type=dataset`
+  notes (`dataset(action="values"|"get")`) and, for each `evidence: data`
+  dimension, emits a DATA_CANDIDATE -- a proposed data-citation (`dataset_note`,
+  `derivation_id`, `selection`, expected `value`, `epistemic_status`,
+  `confidence`). It does not write; it emits a `question` candidate for a
+  dimension whose data is missing rather than inventing a value.
+- **data-scribe** (implementer): commits each candidate as a `claim`/`finding`
+  note with a `method: data` grounding, sets `epistemic_status`, and attaches it
+  to the schema's dimension node via the SAME `note(action="attach")` seam the
+  prose scribe uses (the server resolves the node, relation, and edge direction).
+  A data claim needs NO supporting quote note -- its evidence is the citation.
+
+### The `method: data` citation shape
+
+The data-scribe writes it via `note(action="add", ..., grounding=…,
+epistemic_status=…)`:
+
+```yaml
+grounding:
+  method: data
+  dataset_note: <a type=dataset note id (+ its graph)>
+  dataset_hash: <the dataset's pinned content_hash>   # from dataset(action="snapshot")
+  selection: {where: "quarter >= 2005-01-01"}          # deterministic row/col filter
+  derivation_id: mean:top5_concentration               # an expr OR a registered id
+  derivation_version: 3                                 # omit for an expr
+  params: {seed: 7}                                     # e.g. an RNG seed for a fit; omit if none
+  value: 0.68                                           # the asserted result
+  tolerance: 1.0e-6                                     # abs (rel_tolerance also accepted)
+  confidence: 0.9                                       # opaque: stored/displayed, never computed with
+epistemic_status: measured
+```
+
+- `dataset_hash` + `derivation_id` + `derivation_version` + `selection` +
+  `params` are the reproducibility pin. Pin the dataset FIRST with
+  `dataset(action="snapshot")` so the citation grounds on a frozen frame.
+- `epistemic_status` is `grounded` (a verified quote/equation), `measured` (a
+  directly-observed statistic -- mean/quantile/…), or `inferred` (a fitted
+  quantity -- an inverse-optimization / model fit). Descriptive `expr`
+  derivations are `measured`; a derivation declared `fit: true` is `inferred`.
+- The scribe does NOT stamp `verified`/`verified_at`/`verified_in` -- those are
+  the auditor's on a clean re-run. `confidence`/`validation`/`method_meta` are
+  OPAQUE: angelo stores and surfaces them but never computes with them (it only
+  shape-checks that a present `validation` is a `{kind, ...}` dict).
+
+### The auditor: recompute + epistemic-status reporting
+
+The auditor gains a recompute check alongside the quote check. For each
+`method: data` claim it calls
+`note(action="verify_grounding", note_id=<claim id>, graph=<SOURCE>)`, which
+re-resolves the pinned dataset, re-runs the `derivation_id`, and compares the
+result to the asserted `value` within `tolerance`. It does NOT trust the stored
+`verified` stamp. Outcomes split two tiers:
+
+- **HARD violation** (blocks coverage, like an unverified quote -- angelo COULD
+  re-run and it disagreed): `dataset_hash_mismatch` (the pinned data changed),
+  `value_not_reproduced` (re-run disagrees beyond `tolerance`),
+  `nondeterministic_unpinned` (a `deterministic=False` derivation with no pinned
+  `seed`), `validation_malformed` (`validation` present but not a `{kind, ...}`
+  dict). These surface as `unreproduced_data_claims` in the coverage audit.
+- **SOFT unavailable** (informational, NOT a defect -- the claim RETAINS its
+  prior `verified`/`verified_in` stamp): `derivation_unavailable` (the id is not
+  registered here -- expected for a fitted claim off-site) and
+  `dataset_unavailable` (the dataset note isn't resolvable here). A descriptive
+  `expr` claim re-verifies anywhere, so a soft outcome on one means a genuinely
+  missing dataset.
+
+A clean reproduce flips `grounding.verified` to true and stamps `verified_at` +
+`verified_in`; a verified data claim counts as covered exactly like a
+quote-backed claim. The auditor also reports, per dimension, the
+EPISTEMIC-STATUS MIX -- `{grounded, measured, inferred}` -- so "is this dimension
+verbatim, measured, or fitted?" is answerable from the ledger, not char-count
+forensics.
+
+## A schema is two policies: an extraction policy AND a synthesis policy
+
+Authoring a schema means deciding BOTH halves, not just the first. Leaving the
+second implicit is what strands a run half-done with no way to tell (see the
+cautionary example below).
+
+- **Extraction policy** -- how claims come OUT of each source: the `dimensions`
+  (the tags to pull + their `desc`/`claim_framing`), `grounded`/`strict`, and the
+  per-source `hub`. This half decides what the extractor looks for and what the
+  scribe commits per source. It has a built-in finish line: the auditor's
+  grounding + coverage check.
+- **Synthesis policy** -- how those per-source claims ROLL UP into a shared
+  spine. Choose one **on purpose**:
+  - a `synthesis` block (the materialized spine -- an apex node + one node per
+    dimension that every source's claims attach to), OR
+  - a deliberate flat checklist (no `synthesis` block -- every claim links to its
+    source hub; right for goals like `statistic-extraction` where there is
+    nothing to roll up).
+  Do not let this default by omission -- "no synthesis block" must be a decision,
+  not an oversight.
+
+The synthesis half does NOT yet auto-complete: prep pre-creates the spine nodes,
+but the apex/dimension-node *prose* is authored by hand after the scribes run. So
+a schema that declares a synthesis policy is only DONE once that prose is written
+-- until then the spine is a skeleton, not a portrait.
+
+> **Cautionary example -- pm-personas.** The persona schemas were authored with a
+> clear extraction policy, but the synthesis policy was treated as tribal
+> knowledge. Several personas (Lynch, Livermore) were left as empty spine
+> skeletons -- the dimension/apex nodes existed, but their portrait prose was
+> never written, and nothing flagged them as unfinished. The only way to tell a
+> half-done persona from a finished one was to measure body char-counts. Author
+> the synthesis policy explicitly so "is this persona finished?" is answerable
+> from the schema, not from forensics.
+
+## One spine per instance vs one pooled spine (the comparison-matrix decision)
+
+Before driving a run whose schema declares a `synthesis` block, decide the spine
+GRANULARITY -- it is as load-bearing as the schema choice and it is easy to get
+wrong by omission. The lever is `synthesis_label`: **each distinct label mints its
+own `{label}` synthesis graph (one spine); all sources run under the same label
+roll their claims up into ONE pooled spine.** `synthesis_label` defaults to the
+project name, so a naive single run pools the WHOLE corpus into one spine.
+
+Choose by the goal:
+
+- **Comparison corpus (N comparable instances of the same kind).** When the
+  sources describe DISTINCT instances you want to line up side by side -- multiple
+  PMs, multiple hedge-fund architectures, competing products, different models --
+  you want **one spine per instance**, not one pool. Every instance's spine shares
+  the schema's dimension column-keys -- that shared column-key set is the
+  **spine-schema** (the grouping rubric, distinct from this extraction `schema`) --
+  so they **auto-unite into a spine-group matrix** (each instance = one row, each
+  dimension = one column) -- the comparison surface the schema's tags were chosen
+  for. Drive it by giving each instance its own
+  `synthesis_label` (run the pipeline once per instance), and group multiple
+  sources that describe the SAME instance under ONE label (e.g. two papers on the
+  same system -> one spine). This is exactly the shape `pm-personas` uses: one
+  spine per investor, united into a "Decision Profile" matrix.
+- **Single-subject corpus (one thing, many sources).** When the sources are many
+  views of ONE subject (one system's docs, one company's filings), a single pooled
+  spine under one label is correct -- there is one thing to synthesize.
+
+The ONLY non-mechanical step is deciding which sources are the same instance (a
+model/human judgment over the corpus); once labels are assigned the attach is
+deterministic. If a corpus was already extracted as one POOLED spine and you later
+want the per-instance comparison, re-partition it: split the pool into one
+per-instance spine (sharing the same dimension column-keys so they join the
+matrix) and retire the pool -- do NOT leave both, or the pool shows up as a stray
+matrix row. Filling several EXISTING spines from one run is the `spines=[...]` +
+`multi_spine=True` path; minting fresh per-instance spines is the per-label path
+above.
+
+Pick this on purpose. Defaulting to the project-name label silently pools a
+comparison corpus into a single spine -- the same "decide the synthesis policy
+explicitly" failure as leaving a spine's prose unwritten.
+
+## Generating a schema (the extraction helper)
+
+A schema is the FOCUS RUBRIC a run reads documents through, so authoring one is the
+first step when a user wants to look at a corpus "with a certain focus." You can
+hand-write the YAML (below), or generate it with the zettelkasten `schema` tool --
+you supply the judgment, the tool guarantees a valid block:
+
+1. Check what's already there: `schema(action="spines")` lists the materialized
+   spines this project has built (apex type + dimension tags). When extending an
+   existing spine, mirror its shape rather than starting cold. Then, from the
+   user's focus goal, draft a `spec` dict: `dimensions` (the tags you'll want to
+   compare on), an optional `relations` backbone, and -- for a real spine -- a
+   `synthesis` block. Ground the dimensions in the corpus when sources exist by
+   reading a sample with `source(action="fulltext")`; the goal alone is enough when
+   there are no documents yet.
+2. `schema(action="validate", name=..., spec=...)` -- expands the draft WITHOUT
+   writing; fix any reported error (dangling tag ref, invalid relation/type).
+3. `schema(action="save", name=..., spec=...)` -- writes the validated block into
+   the project's `extraction-schemas.yaml`. Then RESTART the coordinator +
+   zettelkasten MCP servers (the registry is cached at load) before the new schema
+   is usable in `create_extraction_graph`.
+
+`schema(action="list")` / `schema(action="get", name=...)` inspect the registry;
+`schema(action="spines")` discovers the live materialized spines in the current
+project (model or extend them instead of a shipped example).
+
+## Authoring a new schema
+
+Add a block to the project's `extraction-schemas.yaml`:
+
+```yaml
+my-rubric:
+  description: "One line: what this rubric extracts."
+  grounded: true          # require a verbatim contiguous quote per claim (default true)
+  strict: true            # reject a written note lacking a valid schema tag (default true)
+  link_relation: component-of   # relation from each claim note -> the source's hub
+  hub:                    # how to seed the per-source hub note
+    type: model           # a zettelkasten note type (model, concept, ...)
+    title_template: "{source_title}: Overview"   # {source_title}/{persona}/{source}/{year}
+  dimensions:
+    - {tag: my-dimension, desc: "what to look for", claim_framing: "optional framing hint"}
+    - {tag: another,      desc: "...", note_type: finding}
+  relations:              # OPTIONAL relations backbone (the intended spine)
+    - {from: another, to: my-dimension, relation: depends-on}
+```
+
+Field contract:
+- `tag` IS the contract -- it becomes the note tag (the comparison index) and the
+  auditor's coverage-matrix row. **Tags must be unique within a schema.** Choose
+  tags you will want to query and compare across sources.
+- `grounded: false` is for goals with no quotable source (e.g. synthesizing
+  across many inputs); the scribe then skips the quote-note + grounding step.
+- `strict: false` relaxes the tag-required check (use sparingly -- it weakens the
+  index).
+- `claim_framing` / `note_type` are optional per-dimension hints passed to the
+  extractor (and they steer the scribe's note type).
+- `evidence` (`text` default | `data`) picks the dimension's grounding channel: a
+  `data` dimension is grounded by a re-computable statistic instead of a quote,
+  and names its `derivation` (an `expr` like `mean:col`, or a registered id). See
+  "The data-grounding half" above.
+
+### Shape: make the schema a template, not just a checklist
+
+Plain dimensions produce a *checklist* -- the scribe can only safely attach every
+claim to the hub, yielding a flat dandelion. Declare the intended **shape** so the
+scribe builds a real spine. Two complementary mechanisms (use either or both):
+
+- **`relations`** (top-level): the backbone edges *between dimensions*, each
+  `{from, to, relation}` where `from`/`to` are dimension tags and `relation` is a
+  valid zettelkasten relation. The scribe wires these between each dimension's
+  representative claims -- but only where the source actually supports the edge
+  (the extractor confirms each; unsupported ones are skipped, not fabricated).
+- **per-dimension `connect_to` + `relation`**: a dimension's claims attach to
+  *another dimension's node* (a parent) instead of the hub. This is how you build
+  hierarchy -- the parent carries the path to the hub, so a `connect_to` dimension
+  is one level deeper rather than another spoke.
+
+```yaml
+  dimensions:
+    - {tag: topology,      desc: "the backbone shape"}              # the spine root
+    - {tag: orchestration, desc: "...", connect_to: topology, relation: depends-on}
+    - {tag: evaluation,    desc: "..."}
+  relations:
+    - {from: evaluation, to: topology, relation: motivated-by}
+```
+
+#### The strongest form: a `synthesis` block (materialized spine)
+
+`relations`/`connect_to` alone still wire edges between per-source *representative
+claims* -- there is no durable node to hold synthesis, so at N sources x ~60
+claims the graph fans into a dandelion. A **`synthesis` block** fixes this: prep
+PRE-CREATES a persistent spine -- an apex synthesis node + one node per dimension,
+in a DEDICATED synthesis graph (added as a normal project source) -- and the
+scribe ATTACHES each source's claims to the matching dimension node instead of the
+hub. The spine is then `claim -> dimension node -> synthesis (apex) -> hub`:
+O(dimensions) per run, with the dimension/apex nodes as a real synthesis surface.
+
+```yaml
+my-rubric:
+  link_relation: input-to
+  synthesis:
+    graph: "{label}-profile"               # dedicated graph; {label}/{persona}/{project}/{schema}
+    node: {type: synthesis, title_template: "{label}: Profile", link_relation: related}
+    dimension_node:
+      type: concept
+      title_template: "{label} - {dimension}"
+      attach_relation: input-to            # claim --input-to--> its dimension node
+      relation: component-of               # dimension node --component-of--> apex
+    spec: {type: model, title_template: "{label}: Spec", relation: derives-from}  # optional
+  dimensions:
+    - {tag: attends-to, desc: "..."}       # materialize: false opts a dimension out
+  relations:
+    - {from: ranking-rule, to: attends-to, relation: depends-on}  # wired between dimension NODES
+```
+
+With a `synthesis` block: every field defaults (a minimal `synthesis: {graph: "..."}`
+works); each dimension materializes a node unless it sets `materialize: false`;
+top-level `relations` are wired between the materialized dimension nodes (stable
+across sources), not representative claims. `{label}` comes from
+`create_extraction_graph`'s `synthesis_label` (defaults to the project name).
+The YAML above is a complete worked example.
+
+Validation is strict and happens at expand time: every `from`/`to`/`connect_to`
+must reference a real dimension tag, a dimension cannot `connect_to` itself, and
+every relation (including `link_relation`) must be in the zettelkasten relation
+vocabulary -- a malformed backbone surfaces as a schema error, not a silent
+flatten. Schemas with no backbone keep behaving as a flat checklist (the claim ->
+hub `link_relation` for every dimension), so this is fully optional and backward
+compatible. See the shipped `architecture-extraction` (a `relations` spine) and
+`lit-review-matrix` (per-dimension `connect_to`) for worked examples.
+
+## Deferred / not yet shipped
+
+- The cross-source `linker` and the `synthesizer` (authoring the spine prose, see
+  "The synthesis stage") are orchestrator/human steps, not shipped agents. A
+  schema's `synthesis` block gives cross-source synthesis a materialized home (the
+  per-dimension + apex nodes every source's claims converge on) and the
+  `synthesis_status` field tracks `scaffold` -> `materialized`, but the apex/dimension
+  *prose* is authored by hand, not auto-drafted.
+- Schemas do not support inheritance/composition yet -- duplicate shared
+  dimensions across related rubrics.
+- Notes are not stamped with the schema version that produced them, so a schema
+  change does not auto-trigger a backfill.

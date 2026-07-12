@@ -1,0 +1,180 @@
+# Zettelkasten Auto-Note Protocol
+
+This rule tells agents how to automatically create and maintain knowledge graph notes when the user provides definitions, concepts, or learnings.
+
+## Trigger
+
+Activate this protocol when the user:
+- Shares a definition (e.g. "information ratio is the ratio between...")
+- Describes a concept, formula, or model
+- Says "note this", "add to zettelkasten", or provides textbook content
+- Asks to record something they're learning
+- Shares any piece of knowledge that belongs in a concept box
+
+## Process: Creating a New Note
+
+1. **Identify the graph**: Ask which concept box if ambiguous, or infer from context (e.g. investment terminology → "investments" graph)
+
+2. **Check for existing notes**: Call `note(action="get")` with the title to see if the concept already exists. Also call `note(action="search")` with mode="semantic" and the key terms to find semantically related notes that might not share the exact title.
+
+3. **If the concept exists → Growth/Update path** (see below)
+
+4. **If the concept is new → Extract structure**:
+   - **Title**: The primary term/concept name
+   - **Type**: Classify as one of: definition, concept, model, example, question, synthesis
+   - **Body**: The explanation in clear markdown. Include:
+     - A concise definition or description
+     - Formal notation if applicable (formulas, equations)
+     - Intuition or plain-English explanation
+     - Key implications or edge cases (if the user provides them)
+   - **Source**: Book, chapter, page if provided or inferrable
+   - **Tags**: Infer relevant topic tags
+   - **Aliases**: Alternative names (e.g. "IR" for "Information Ratio")
+
+5. **Identify links**: Scan the body for references to other concepts. For each:
+   - Call `note(action="get")` with the title to check if a note exists
+   - If it exists: add a link with the appropriate relation type
+   - If it doesn't exist: note it for the user as a candidate for future creation
+
+6. **Identify prerequisites**: What must someone understand before this note makes sense?
+
+7. **Create the note**: Call `note(action="add")` with all extracted fields.
+
+8. **Post-creation intelligence**:
+   - Call `suggest` with kind="connections" on the new note to find semantically related notes the user might not have thought of
+   - Report: what was created, what links were made, what related concepts are missing, and any surprising connections found
+
+## Process: Growing an Existing Note
+
+When the user provides more information about a concept that already has a note:
+
+1. **Determine if this is truly new content or a separate concept**:
+   - "IR = IC * sqrt(breadth)" → This is the Fundamental Law of Active Management, a SEPARATE concept that involves IR. Create a new note and link it.
+   - "IR above 0.5 is considered good" → This is additional depth on IR itself. Update the existing note.
+   - Rule of thumb: if the new info has its own name, theorem name, or formula name → it's a new note. If it's interpretation, caveats, context → update existing.
+
+2. **If updating existing**:
+   - Call `note(action="update")` with `append_body` containing the new section
+   - Consider type upgrade: if a bare `definition` now has multiple sections (formula + interpretation + caveats), upgrade to `concept`
+   - Add any new links, tags, or aliases discovered
+
+3. **If creating a related new note**:
+   - Create it as a new note with appropriate links back to the existing concept
+   - Update the existing note with a reciprocal link if relevant
+
+## Proactive Structural Engagement
+
+The agent should NOT be passive. Be creative and proactive about structure:
+
+### After every note creation or update:
+- Call `suggest` (kind="connections") and share interesting findings: "I notice this is semantically close to [X] — should they be linked?"
+- If you see a pattern forming (e.g. "you now have 4 notes about risk measures"), suggest: "Want me to create a synthesis note tying these together?"
+
+### Periodically (every 5-10 notes, or when the user seems to be finishing a chapter):
+- Call `suggest` (kind="structure") and report findings
+- Proactively suggest:
+  - Synthesis notes for clusters ("You have 6 notes about portfolio optimization — a synthesis map would help")
+  - Missing definitions ("'standard deviation' is referenced in 4 notes but has no definition of its own")
+  - Potential links the user might not see ("'Jensen's alpha' and 'information ratio' are both performance measures but aren't linked")
+
+### Creative structure suggestions:
+- If you notice a hierarchy forming (A generalizes B, B generalizes C), point it out: "There's a taxonomy forming here: Risk → Systematic Risk → Beta"
+- If you notice a process/flow (A depends-on B depends-on C), suggest visualizing it as a learning path
+- If concepts from different chapters are surprisingly connected, highlight it as a cross-cutting insight
+- Suggest "question" notes when you see gaps: "The relationship between X and Y isn't clear — want me to add a question note?"
+
+### Tone for structural suggestions:
+- Be genuinely curious and intellectually engaged
+- Frame suggestions as discoveries: "Interesting — this creates a triangle between A, B, and C"
+- Don't over-suggest. 1-2 structural observations per interaction is ideal.
+- Let the graph grow organically; don't force structure prematurely
+
+## Relation Type Selection Guide
+
+When choosing relation types for links:
+- X "is defined as" Y → `defines` (from Y to X)
+- X "requires understanding" Y → `depends-on`
+- X "is a type of" Y → `specializes`
+- X "is the general case of" Y → `generalizes`
+- X "is used to calculate" Y → `input-to`
+- X "is part of" Y → `component-of`
+- X "is the opposite of" / "is confused with" Y → `contrasts`
+- X "is derived from" Y → `derives-from`
+- X "is a real-world case of" Y → `example-of`
+- X "replaced" / "improved upon" Y → `supersedes`
+
+## Note Type Guide
+
+- **definition**: A term with a precise meaning. Lead with the formal definition, then intuition. These are the backbone of the graph — most other notes link to definitions.
+- **concept**: A broader idea or principle (e.g. "Traditional Methods of Asset Valuation"). Often serves as a parent/category node that other notes link to via `component-of`.
+- **model**: A framework, formula, or named method (e.g. "Dividend Discount Model", "CAPM"). Include the formula, inputs, outputs, pros/cons.
+- **example**: A concrete instance illustrating a concept. Always link back to what it exemplifies.
+- **question**: An open question or area of confusion. Great for marking things to revisit.
+- **synthesis**: A note connecting multiple ideas into a new insight. Created proactively when clusters form.
+- **quote**: A direct quote from the text. Preserve the exact wording in blockquote format. Add a brief note on why it matters or what it illustrates. Always include page number.
+
+## Statistic Findings: Independent Two-Pass Rule
+
+Any extracted statistic, coefficient, table value, figure value, sample count, return, alpha, percentage, p-value, or numeric empirical result MUST be recorded as a `finding` note tagged `statistic`.
+
+Statistic findings are not `complete` after one read. Use this lifecycle:
+- `draft`: initial extraction only.
+- `needs-check`: one extraction pass exists and an independent second pass is still required.
+- `complete`: a second pass independently checked the source locator and agreed with the recorded value.
+- `revised`: the second pass corrected the value, units, sign, scaling, or interpretation.
+
+The second pass must be independent: re-open the source locator, re-read the table/figure/caption/footnotes, verify row and column labels, units, decimal scaling, sign, sample period, and whether the value is annualized/monthly/log/raw/percentage. Do not merely rephrase or trust the first extraction.
+
+Each statistic finding should include structured fields in the body or frontmatter:
+- `source_value`: the value exactly as shown in the source.
+- `normalized_value`: the value converted into the note's preferred units.
+- `units`: e.g. monthly return, annual alpha, percentage points, observations.
+- `locator`: page plus table/figure/column/row where applicable.
+- `verification`: two pass records with `by`, `method`, `checked_at` if known, and `notes`.
+
+Every statistic finding must be backed by evidence: create or link a source `quote` note for the relevant sentence, caption, table row, figure note, or surrounding text, with `quote --supports--> finding`. If the source value comes from an image/table that text extraction cannot faithfully quote, preserve the exact locator and caption/row text and mark the finding `needs-check` until the independent pass inspects the source image/PDF.
+
+## Style Guide for Note Bodies
+
+- Write in neutral tone ("The information ratio measures...")
+- Lead with the formal definition, then give intuition
+- Use LaTeX-style notation for formulas: `IR = α / σ(ε)`
+- Keep each note atomic — one concept per note
+- If a concept has both a formal definition AND significant practical implications, those can coexist under separate headings (## Definition, ## Intuition, ## Implications)
+- Use bullet points for lists of properties or edge cases
+- For quotes: use `>` blockquote syntax for the exact text, then add context below
+
+## Semantic Search Usage
+
+`note(action="search")` handles both modes via the `mode` param. Use mode="semantic" when:
+- Looking for conceptually related notes (not exact keyword matches)
+- Checking if a concept exists under a different name
+- Finding notes that discuss similar ideas with different terminology
+- Building link suggestions
+
+Use the default keyword mode for:
+- Exact term lookups
+- Tag-based filtering
+- Quick existence checks on specific titles (or `note(action="get")` with title)
+
+## Federated Repos (read-only)
+
+Another repo's zettelkasten can be browsed alongside this one as a read-only
+overlay in the dashboard. It is configured by adding a `federated_repos` list to
+`.zettelkasten/config.yaml` (each entry: `id`, `name`, `path` to a repo that has
+a `.zettelkasten/` directory). Federated graphs appear namespaced as
+`<repo_id>:<graph>` and are read-only — the MCP tools and the dashboard agent
+operate on the LOCAL repo only, so never try to add/edit notes in a federated
+graph. Federation is a dashboard concern; surface it via `launch_dashboard` (see
+its docstring) rather than the note tools.
+
+## Example Interaction
+
+User: "information ratio is the ratio between annual residual return and the volatility of residual return"
+
+Agent should:
+1. `note(action="get", graph="investments", title="Information Ratio")` → Not found
+2. `note(action="search", graph="investments", query="residual return performance ratio", mode="semantic")` → Check for related notes
+3. Create note with: title "Information Ratio", type "definition", body with formula + intuition, aliases ["IR"], tags [performance-measurement, active-management]
+4. `suggest` (kind="connections") on the new note → Find semantically similar notes
+5. Report: "Created 'Information Ratio'. Related concepts that don't have notes yet: residual return (alpha), tracking error. I also notice this is semantically close to 'Sharpe Ratio' — both measure risk-adjusted performance but for different contexts. Want me to link them with a 'contrasts' relation?"

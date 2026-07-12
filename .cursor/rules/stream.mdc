@@ -1,0 +1,155 @@
+# Stream: live ingestion into the zettelkasten
+
+This rule explains how to use **Stream** -- the capability that turns a live feed
+of documents into grounded zettelkasten notes by driving a coordinator graph with
+a portable agent backend. It fires when the user wants to ingest a stream of
+documents (earnings reports, filings, papers, letters, product pages) on a
+schedule or on demand, extract them under one or more schemas, and analyze the
+result per project.
+
+Stream is general-purpose. Earnings reports are the first worked recipe, not the
+only use. It builds on the grounded-extraction pipeline (extractor -> scribe ->
+auditor) and the schema registry, so the zettelkasten capability must be enabled.
+
+## Portability (no Cursor required)
+
+The core path has no Cursor dependency. Agents run through a portable `Driver`:
+
+- `claude` -- Anthropic API (set `ANTHROPIC_API_KEY`). Default.
+- `gpt` -- OpenAI-compatible API (set `OPENAI_API_KEY`), or a local/open-weight
+  model via `base_url` (e.g. a vLLM server -- also the reference setup for
+  logprob-based confidence).
+- `cursor` -- optional plugin that runs each task as a local Cursor agent
+  (needs the `cursor-sdk` package, a running Cursor backend, and a key in
+  `CURSOR_API_KEY` or `secrets/cursor_api`). Unlike the API drivers it reaches
+  the zettelkasten tools through the `angelo-zettelkasten` MCP server, so it is
+  **single-flight** (a `concurrency` above 1 is serialized, not parallel -- no
+  bridge pool yet) and read-only roles (checker/planner) are enforced by a
+  persona instruction rather than by withholding write tools.
+
+Install the SDK(s) you use: `pip install "angelo[stream]"` (both), or just
+`anthropic` / `openai`.
+
+## Two ways to run
+
+### Programmatic
+
+```python
+import stream
+
+# One batch, in hand:
+report = stream.apply(
+    ["./inbox/AAPL-10Q.pdf"],
+    project="aapl",
+    schemas=["earnings"],     # one or more global schemas
+    driver="claude",          # or "gpt", optionally model=..., base_url=...
+)
+
+# Build a comparison matrix and export CSV (deterministic, no LLM):
+stream.export_csv("aapl", "aapl.csv", schema="earnings")
+
+# Or synthesize a grounded narrative with an agent:
+out = stream.synthesize_narrative("aapl", schema="earnings",
+                                  driver=stream.make_driver("claude"),
+                                  write_back=True)  # writes a _cross synthesis note
+```
+
+`apply()` = `prepare()` (build + register the coordinator graph) + `run()` (drive
+it to completion with the Driver). Multi-schema: one extraction pass over the
+sources, one synthesis spine per schema; each claim attaches to every relevant
+spine.
+
+### Config-driven (always-on)
+
+Drop a `stream.yaml` at the project root, then:
+
+```bash
+angelo-stream --once                 # single pass over the feeds
+angelo-stream --config stream.yaml   # daemon: poll + ingest forever
+```
+
+The daemon polls each feed, selects schema(s) per document, routes to project(s),
+applies, then archives + (optionally) deletes the originals.
+
+## Starter stream.yaml
+
+```yaml
+defaults:
+  driver: claude            # claude | gpt | cursor
+  model: ""                 # optional model override
+  base_url: ""              # for gpt against a local/OpenAI-compatible endpoint
+  concurrency: 2            # parallel agents per wave
+  rigor: medium             # low | medium | high (extension cycles + passes)
+  template: extraction      # workflow template (built-in: extraction)
+  project: research         # fallback project when routing yields none
+  score_driver: ""          # advisory confidence pass; "" disables. logprob-
+                            # capable backend (e.g. gpt against a vLLM endpoint)
+  score_model: ""           # model for the scorer (e.g. an open-weight model)
+  score_base_url: ""        # OpenAI-compatible endpoint for the scorer (vLLM)
+
+archive: local              # none | local | dvc  (what to keep of the original
+                            # binary before the feed deletes it)
+
+feeds:
+  - name: inbox
+    type: drop_dir          # built-in; custom feeds via entry points
+    options:
+      path: ./inbox
+      glob: "*.pdf"
+      delete_after: true    # remove the file once its run succeeds
+
+schemas:                    # document -> schema name(s) (UNION)
+  default: []               # applied when no rule matches ([] = semantic only)
+  rules:
+    - match: {doc_type: pdf}
+      schemas: [earnings]
+  # classifier: my_classifier   # optional entry-point fallback
+
+router:                     # document -> project name(s) (orthogonal to schemas)
+  default: [research]
+  axes:
+    - type: metadata
+      key: ticker           # one project per distinct ticker value
+      # template: "{value}"  # or map: {AAPL: apple, MSFT: microsoft}
+```
+
+Schemas are GLOBAL organizing lenses; projects are read-time SCOPES. A document
+can be extracted under several schemas and routed to several projects.
+
+## Customizing (Python entry points)
+
+Register plugins in your `pyproject.toml`:
+
+- `angelo.stream.feeds` -- `name = module:factory(FeedConfig) -> FeedAdapter`
+  (e.g. an API poller, a Snowflake/warehouse query, a webhook sink).
+- `angelo.stream.routers` -- custom project routing.
+- `angelo.stream.selectors` -- `name = module:fn(Document) -> list[str]` schema
+  classifier fallback.
+- `angelo.stream.templates` -- a custom `WorkflowTemplate` building an arbitrary
+  coordinator graph.
+
+Custom agent types use the normal coordinator mechanism (`.cursor/agents.yaml`).
+Reinstall (`pip install -e .`) after adding entry points so they're discovered.
+
+## New-repo setup
+
+1. `pip install "angelo[stream]"` and `angelo init --with-zettelkasten`.
+2. Set the provider key (`ANTHROPIC_API_KEY` or `OPENAI_API_KEY`).
+3. Define or pick a schema (see the grounded-extraction rule + the schema
+   registry). Schemas live globally; projects filter at read time.
+4. Write `stream.yaml` (above), create `./inbox`, drop a document in.
+5. `angelo-stream --once` to process, then inspect the project in the
+   zettelkasten dashboard or export a matrix with `stream.export_csv(...)`.
+
+## Notes
+
+- Confidence (logprobs) is ADVISORY under auto-publish: recorded/flagged, never a
+  gate. Set `score_driver` (+ `score_model`/`score_base_url`) to a logprob-capable
+  `gpt` backend (e.g. vLLM) and a post-extraction pass scores each claim against
+  its evidence, persisting the result onto the note's grounding. It then surfaces
+  in the dashboard note panel and the synthesis-matrix cells (low-confidence cells
+  are flagged). Without a logprob backend the pass degrades gracefully (no score
+  persisted) and the run still publishes.
+- "Distill and discard": with a schema + `archive`/`delete_after`, you can take
+  grounded notes off a stream and drop the originals -- the notes stay
+  self-contained and quote-grounded.

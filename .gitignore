@@ -19,3 +19,22 @@ secrets/
 
 # Documenter.jl build output
 docs/build/
+
+# >>> angelo >>>
+# Runtime state and derived caches (source of truth is .memory/ and
+# .zettelkasten/, which should be committed)
+.angelo/
+.memory/session-active.json
+.memory/active-sessions/
+
+# Legacy locations (pre-.angelo layouts)
+.cassius/
+.memory.kgl
+.memory.index.json
+.memory.embeddings.json
+.coordinator-state.json
+.coordinator-meta.json
+
+# Claude Code local settings (not shared)
+.claude/settings.local.json
+# <<< angelo <<<

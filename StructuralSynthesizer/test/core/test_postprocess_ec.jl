@@ -66,7 +66,7 @@ using StructuralSynthesizer
     end
 
     @testset "BuildingECResult.to_dict — metric display units" begin
-        d = to_dict(bldg; du = metric)
+        d = to_dict(bldg; du = StructuralSynthesizer.metric)
         @test d["floor_area"] ≈ 500.0 rtol=1e-9
         @test occursin("m", d["floor_area_unit"])
         @test d["intensity_kgco2e_per_display_area"] ≈ 0.37 rtol=1e-9

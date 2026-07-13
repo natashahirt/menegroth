@@ -233,7 +233,7 @@ Compute embodied carbon (kgCO₂e) for column at `idx`. Returns 0.0 on failure.
 function _col_ec_kgco2e(struc::BuildingStructure, idx::Int)
     try
         col = struc.columns[idx]
-        return element_ec(volumes(col))
+        return ustrip(u"kgCO2e", element_ec(volumes(col)))
     catch e
         @warn "Column EC unavailable" column_id=idx exception=(e, catch_backtrace())
         return nothing
@@ -241,12 +241,12 @@ function _col_ec_kgco2e(struc::BuildingStructure, idx::Int)
 end
 
 """
-Compute embodied carbon (kgCO₂e) for beam at `idx`. Returns 0.0 on failure.
+Compute embodied carbon (kgCO₂e) for beam at `idx`. Returns `nothing` on failure.
 """
 function _beam_ec_kgco2e(struc::BuildingStructure, idx::Int)
     try
         bm = struc.beams[idx]
-        return element_ec(volumes(bm))
+        return ustrip(u"kgCO2e", element_ec(volumes(bm)))
     catch e
         @warn "Beam EC unavailable" beam_id=idx exception=(e, catch_backtrace())
         return nothing
@@ -254,12 +254,12 @@ function _beam_ec_kgco2e(struc::BuildingStructure, idx::Int)
 end
 
 """
-Compute embodied carbon (kgCO₂e) for slab at `idx`. Returns 0.0 on failure.
+Compute embodied carbon (kgCO₂e) for slab at `idx`. Returns `nothing` on failure.
 """
 function _slab_ec_kgco2e(struc::BuildingStructure, idx::Int)
     try
         sl = struc.slabs[idx]
-        return element_ec(sl.volumes)
+        return ustrip(u"kgCO2e", element_ec(sl.volumes))
     catch e
         @warn "Slab EC unavailable" slab_id=idx exception=(e, catch_backtrace())
         return nothing

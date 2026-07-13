@@ -2117,13 +2117,13 @@ begin
 
     # Build material pool from catalog (unique materials sorted by carbon)
     all_mats = unique([s.material for s in cat])
-    sort!(all_mats; by = m -> StructuralSizer.pf_concrete_ecc(m.fc′) + m.fiber_ecc * m.fiber_dosage)
+    sort!(all_mats; by = m -> ustrip(u"kgCO2e/m^3", StructuralSizer.pf_material_ecc_per_m3(m)))
 
     println("\n    ── Material Pool ($(length(all_mats)) unique, sorted by carbon) ──")
     @printf("    %-4s  %8s  %10s  %10s\n", "#", "fc′(MPa)", "dosage", "ecc(kgCO₂e/m³)")
     @printf("    %-4s  %8s  %10s  %10s\n", "─"^4, "─"^8, "─"^10, "─"^10)
     for (k, m) in enumerate(all_mats)
-        ec = StructuralSizer.pf_concrete_ecc(m.fc′)
+        ec = ustrip(u"kgCO2e/m^3", StructuralSizer.pf_material_ecc_per_m3(m))
         @printf("    %-4d  %8.1f  %10.1f  %10.1f\n", k, ustrip(u"MPa", m.fc′), m.fiber_dosage, ec)
     end
 
@@ -2255,12 +2255,12 @@ begin
     end
 end
 
-pf_workflow_ok = design.n_pixels > 0 && total_carbon > 0 && total_carbon ≤ uniform_carbon * 1.01
+pf_workflow_ok = design.n_pixels > 0 && total_carbon > 0.0u"kgCO2e" && total_carbon ≤ uniform_carbon * 1.01
 
 @testset "PixelFrame Design Workflow" begin
     @test design.n_pixels == 12  # 6000mm / 500mm
     @test length(design.pixel_materials) == design.n_pixels
-    @test total_carbon > 0
+    @test total_carbon > 0.0u"kgCO2e"
     @test total_carbon ≤ uniform_carbon * 1.01  # relaxed ≤ uniform
     # Symmetry check: pixel i should match pixel n+1-i
     for i in 1:div(design.n_pixels, 2)

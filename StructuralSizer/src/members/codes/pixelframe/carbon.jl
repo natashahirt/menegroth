@@ -42,6 +42,16 @@ function pf_concrete_ecc(fc′::Pressure)
 end
 
 """
+    pf_material_ecc_per_m3(m::FiberReinforcedConcrete) -> CarbonPerVolQuantity
+
+Total embodied-carbon intensity of an FRC mix [kgCO₂e/m³]: concrete ECC (Eq. 2.17)
+plus fiber contribution `fiber_ecc × fiber_dosage`.
+"""
+function pf_material_ecc_per_m3(m::FiberReinforcedConcrete)
+    return pf_concrete_ecc(m.fc′) + m.fiber_ecc * (m.fiber_dosage * u"kg/m^3")
+end
+
+"""
     pf_carbon_per_meter(s::PixelFrameSection) -> Quantity{Float64, 𝐗/𝐋}
 
 Embodied carbon per unit length of a PixelFrame section [kgCO₂e/m].

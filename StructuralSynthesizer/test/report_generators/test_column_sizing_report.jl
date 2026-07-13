@@ -787,13 +787,13 @@ begin
 
     # Build material pool from catalog (unique materials sorted by carbon)
     col_all_mats = unique([s.material for s in col_cat])
-    sort!(col_all_mats; by = m -> StructuralSizer.pf_concrete_ecc(m.fc′) + m.fiber_ecc * m.fiber_dosage)
+    sort!(col_all_mats; by = m -> ustrip(u"kgCO2e/m^3", StructuralSizer.pf_material_ecc_per_m3(m)))
 
     println("\n    ── Material Pool ($(length(col_all_mats)) unique, sorted by carbon) ──")
     @printf("    %-4s  %8s  %10s  %10s\n", "#", "fc′(MPa)", "dosage", "ecc(kgCO₂e/m³)")
     @printf("    %-4s  %8s  %10s  %10s\n", "─"^4, "─"^8, "─"^10, "─"^10)
     for (k, m) in enumerate(col_all_mats)
-        ec = StructuralSizer.pf_concrete_ecc(m.fc′)
+        ec = ustrip(u"kgCO2e/m^3", StructuralSizer.pf_material_ecc_per_m3(m))
         @printf("    %-4d  %8.1f  %10.1f  %10.1f\n", k, ustrip(u"MPa", m.fc′), m.fiber_dosage, ec)
     end
 
@@ -927,12 +927,12 @@ begin
     end
 end
 
-col_wf_ok = col_design.n_pixels > 0 && col_total_carbon > 0 && col_total_carbon ≤ col_uniform_carbon * 1.01
+col_wf_ok = col_design.n_pixels > 0 && col_total_carbon > 0.0u"kgCO2e" && col_total_carbon ≤ col_uniform_carbon * 1.01
 
 @testset "PixelFrame Column Design Workflow" begin
     @test col_design.n_pixels == 8  # 4000mm / 500mm
     @test length(col_design.pixel_materials) == col_design.n_pixels
-    @test col_total_carbon > 0
+    @test col_total_carbon > 0.0u"kgCO2e"
     @test col_total_carbon ≤ col_uniform_carbon * 1.01  # relaxed ≤ uniform
     # Base pixel (highest moment) should have fc′ ≥ top pixel (lowest moment)
     @test ustrip(u"MPa", col_design.pixel_materials[1].fc′) ≥

@@ -326,7 +326,7 @@ export check_biaxial_rectangular, check_biaxial_auto
 # --- PixelFrame (ACI 318-19 + fib MC2010) ---
 export pf_axial_capacity, pf_flexural_capacity
 export frc_shear_capacity
-export pf_carbon_per_meter, pf_concrete_ecc
+export pf_carbon_per_meter, pf_concrete_ecc, pf_material_ecc_per_m3
 export fc′_dosage2fR1, fc′_dosage2fR3
 export DeflectionRegime, UNCRACKED, CRACKED
 export LINEAR_ELASTIC_UNCRACKED, LINEAR_ELASTIC_CRACKED, NONLINEAR_CRACKED
@@ -419,6 +419,9 @@ export SpanningBehavior, OneWaySpanning, TwoWaySpanning, BeamlessSpanning
 export spanning_behavior, is_one_way, is_two_way, is_beamless, requires_column_tributaries
 export SupportCondition, SIMPLE, ONE_END_CONT, BOTH_ENDS_CONT, CANTILEVER
 export floor_type, floor_symbol, infer_floor_type
+
+# --- Joist pattern abstraction + trait (Phase 4; concrete patterns in Synthesizer) ---
+export AbstractJoistPattern, joist_geometry
 
 # --- Floor options ---
 export AbstractFloorOptions

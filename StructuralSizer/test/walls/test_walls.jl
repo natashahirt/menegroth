@@ -122,3 +122,34 @@ end
                                   objective=WeightedLayoutObjective(1.0, 1.0, 1e3, 0.02))
     @test isfinite(objective_fn(prob_w, x0))
 end
+
+@testset "FEM evaluator vs reduced-model oracle (S3)" begin
+    # Symmetric 4-wall core, 1 story. FEM (Asap shells + stiff diaphragm) must
+    # equilibrate the applied shear and agree with the reduced model on the load
+    # split; drift is the same order (FEM stiffer for these squat piers).
+    E = 25e9; ν = 0.2; t = 0.3; H = 3.0; lw = 4.0
+    panels = WallPanel[
+        WallPanel(1, -2.0, -5.0,  2.0, -5.0, 0.0, H, t, E, ν, 1),
+        WallPanel(2, -2.0,  5.0,  2.0,  5.0, 0.0, H, t, E, ν, 1),
+        WallPanel(3, -5.0, -2.0, -5.0,  2.0, 0.0, H, t, E, ν, 1),
+        WallPanel(4,  5.0, -2.0,  5.0,  2.0, 0.0, H, t, E, ν, 1),
+    ]
+    femev = FEMLateralEvaluator(story_heights=[H], mesh_div=3, plan_halfwidth=(5.0, 5.0))
+    Fx = 1e5
+    res = evaluate_lateral(femev, panels, [StoryLoad(1, Fx, 0.0, 0.0, 0.0)])
+    @test res.drift[1] > 0 && isfinite(res.drift[1])
+    # Base-reaction recovery ⇒ X-walls equilibrate the applied shear (exact).
+    @test isapprox(res.wall_forces[1] + res.wall_forces[2], Fx; rtol=0.05)
+    @test isapprox(res.wall_forces[1], res.wall_forces[2]; rtol=0.05)     # symmetric split
+    @test res.wall_forces[3] < 0.02 * Fx && res.wall_forces[4] < 0.02 * Fx # transverse ~0
+    @test res.torsion[1] ≈ 1.0 atol=1e-3                                  # symmetric
+
+    # Cross-check drift against the reduced model (gross stiffness, same order).
+    k = wall_stiffness_from_thickness_si(t, lw, E, ν, H; cracked=false)
+    rwalls = [WallLine(1, 0.0, -5.0, 0.0, k, 1), WallLine(2, 0.0, 5.0, 0.0, k, 1),
+              WallLine(3, -5.0, 0.0, pi/2, k, 1), WallLine(4, 5.0, 0.0, pi/2, k, 1)]
+    redev = ReducedDiaphragmEvaluator(story_heights=[H], plan_halfwidth=(5.0, 5.0),
+                                      accidental_ecc=0.0)
+    rdrift = evaluate_lateral(redev, rwalls, [StoryLoad(1, Fx, 0.0, 0.0, 0.0)]).drift[1]
+    @test 0.3 < res.drift[1] / rdrift < 1.3
+end

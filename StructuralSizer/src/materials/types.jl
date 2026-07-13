@@ -75,7 +75,7 @@ struct Metal{K<:MetalType, T_P, T_D} <: AbstractMaterial
     Fu::T_P     # Ultimate strength
     ρ::T_D      # Density
     ν::Float64  # Poisson's ratio
-    ecc::Float64  # Embodied carbon [kgCO₂e/kg]
+    ecc::CarbonPerMassQuantity  # Embodied carbon [kgCO₂e/kg], typed via Asap `𝐗` dimension
     cost::Float64 # Unit cost [$/kg] (NaN = not set)
     color::Union{Nothing, String} # Optional display color hex (or nothing)
 end
@@ -86,13 +86,20 @@ const StructuralSteel{T_P, T_D} = Metal{StructuralSteelType, T_P, T_D}
 """Alias for `Metal{RebarType}` — reinforcing bar steel."""
 const RebarSteel{T_P, T_D} = Metal{RebarType, T_P, T_D}
 
+"""Convert a numeric or unitful ECC literal to the canonical `kgCO₂e/kg` storage
+type used by every material struct. Bare numbers are interpreted as already in
+`kgCO₂e/kg` to ease migration from the pre-typed era; quantities are converted
+through `uconvert` so callers may pass any equivalent unit."""
+_normalize_ecc(x::CarbonPerMass) = uconvert(u"kgCO2e/kg", x)
+_normalize_ecc(x::Real) = Float64(x) * u"kgCO2e/kg"
+
 """Construct a `StructuralSteel` from elastic constants, strengths, density, and ECC."""
 StructuralSteel(E, G, Fy, Fu, ρ, ν, ecc; cost=NaN, color=nothing) = Metal{StructuralSteelType, typeof(E), typeof(ρ)}(
-    E, G, Fy, Fu, ρ, Float64(ν), Float64(ecc), Float64(cost), isnothing(color) ? nothing : String(color))
+    E, G, Fy, Fu, ρ, Float64(ν), _normalize_ecc(ecc), Float64(cost), isnothing(color) ? nothing : String(color))
 
 """Construct a `RebarSteel` from elastic constants, strengths, density, and ECC."""
 RebarSteel(E, G, Fy, Fu, ρ, ν, ecc; cost=NaN, color=nothing) = Metal{RebarType, typeof(E), typeof(ρ)}(
-    E, G, Fy, Fu, ρ, Float64(ν), Float64(ecc), Float64(cost), isnothing(color) ? nothing : String(color))
+    E, G, Fy, Fu, ρ, Float64(ν), _normalize_ecc(ecc), Float64(cost), isnothing(color) ? nothing : String(color))
 
 # =============================================================================
 # Concrete
@@ -137,7 +144,7 @@ struct Concrete{T_P, T_D} <: AbstractMaterial
     ρ::T_D        # Density
     ν::Float64    # Poisson's ratio
     εcu::Float64  # Ultimate compressive strain
-    ecc::Float64  # Embodied carbon [kgCO₂e/kg]
+    ecc::CarbonPerMassQuantity  # Embodied carbon [kgCO₂e/kg], typed via Asap `𝐗` dimension
     cost::Float64 # Unit cost [$/kg] (NaN = not set)
     λ::Float64    # Lightweight concrete factor (ACI 318-11 §8.6.1)
     aggregate_type::AggregateType  # Aggregate type for fire resistance (ACI 216.1)
@@ -148,11 +155,12 @@ end
     Concrete(E, fc′, ρ, ν, ecc; εcu=0.003, cost=NaN, λ=1.0, aggregate_type=siliceous, color=nothing)
 
 Construct a `Concrete` material from elastic modulus, strength, density, Poisson's
-ratio, and embodied carbon coefficient.
+ratio, and embodied carbon coefficient. `ecc` may be a bare number (interpreted
+as kgCO₂e/kg) or any `CarbonPerMass` Unitful quantity.
 """
 function Concrete(E, fc′, ρ, ν, ecc; εcu::Real=0.003, cost::Real=NaN, λ::Real=1.0,
                   aggregate_type::AggregateType=siliceous, color=nothing)
-    Concrete{typeof(E), typeof(ρ)}(E, fc′, ρ, Float64(ν), Float64(εcu), Float64(ecc),
+    Concrete{typeof(E), typeof(ρ)}(E, fc′, ρ, Float64(ν), Float64(εcu), _normalize_ecc(ecc),
                                     Float64(cost), Float64(λ), aggregate_type,
                                     isnothing(color) ? nothing : String(color))
 end
@@ -234,7 +242,7 @@ struct FiberReinforcedConcrete{C<:Concrete} <: AbstractMaterial
     fiber_dosage::Float64  # kg-fiber / m³ concrete
     fR1::Float64           # residual flexural tensile strength at CMOD=0.5mm (MPa)
     fR3::Float64           # residual flexural tensile strength at CMOD=2.5mm (MPa)
-    fiber_ecc::Float64     # embodied carbon of fiber [kgCO₂e/kg-fiber]
+    fiber_ecc::CarbonPerMassQuantity  # Embodied carbon of fiber [kgCO₂e/kg-fiber]
 end
 
 """
@@ -242,11 +250,13 @@ end
 
 Construct an FRC material from a base `Concrete`, fiber dosage [kg/m³],
 residual tensile strengths [MPa], and optional fiber embodied carbon.
+`fiber_ecc` may be a bare number (kgCO₂e/kg-fiber) or any `CarbonPerMass`
+Unitful quantity.
 """
 function FiberReinforcedConcrete(concrete::Concrete, fiber_dosage::Real, fR1::Real, fR3::Real;
-                                  fiber_ecc::Real=1.4)
+                                  fiber_ecc=1.4)
     FiberReinforcedConcrete(concrete, Float64(fiber_dosage), Float64(fR1), Float64(fR3),
-                            Float64(fiber_ecc))
+                            _normalize_ecc(fiber_ecc))
 end
 
 """Delegate property access on `FiberReinforcedConcrete` to the inner `Concrete`."""
@@ -301,7 +311,7 @@ struct Timber{T_P<:Pressure, T_D<:Density} <: AbstractMaterial
     Fc::T_P              # Reference compression parallel to grain
     Fc_perp::T_P         # Reference compression perpendicular to grain
     ρ::T_D               # Density
-    ecc::Float64         # Embodied carbon [kgCO₂e/kg]
+    ecc::CarbonPerMassQuantity  # Embodied carbon [kgCO₂e/kg], typed via Asap `𝐗` dimension
     cost::Float64        # Unit cost [$/kg] (NaN = not set)
     color::Union{Nothing, String} # Optional display color hex (or nothing)
 end
@@ -309,9 +319,11 @@ end
 """
     Timber(species, grade, E, Emin, Fb, Ft, Fv, Fc, Fc_perp, ρ, ecc; cost=NaN, color=nothing)
 
-Construct a `Timber` material from NDS reference design values and species/grade identifiers.
+Construct a `Timber` material from NDS reference design values and species/grade
+identifiers. `ecc` may be a bare number (kgCO₂e/kg) or any `CarbonPerMass`
+Unitful quantity.
 """
 function Timber(species::Symbol, grade::Symbol, E, Emin, Fb, Ft, Fv, Fc, Fc_perp, ρ, ecc; cost::Real=NaN, color=nothing)
-    Timber{typeof(E), typeof(ρ)}(species, grade, E, Emin, Fb, Ft, Fv, Fc, Fc_perp, ρ, Float64(ecc), Float64(cost),
+    Timber{typeof(E), typeof(ρ)}(species, grade, E, Emin, Fb, Ft, Fv, Fc, Fc_perp, ρ, _normalize_ecc(ecc), Float64(cost),
                                  isnothing(color) ? nothing : String(color))
 end

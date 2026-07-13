@@ -57,6 +57,7 @@ using Asap  # ensures `u"kip"`, `u"ksi"`, etc resolve via Asap unit module
         include("report_generators/test_flat_plate_methods_comparison.jl")
         include("report_generators/test_foundation_integration.jl")
         include("report_generators/test_fire_rating_report.jl")
+        include("report_generators/test_walls_report.jl")
     end
 
     # ─── Slab Sizing (non-report tests) ──────────────────────────────────

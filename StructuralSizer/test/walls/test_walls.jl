@@ -3,9 +3,16 @@
 # ==============================================================================
 # Validates the differentiable analytic stiffness, the reduced rigid-diaphragm
 # evaluator, its analytic sensitivities, and the ACI 318-19 in-plane shear
-# capacity (against hand calculations). The StructurePoint spWall worked example
-# (corpus: sp-de-shear-wall-aci19) is the intended full-capacity validation
-# oracle; its exact numbers are pending zettelkasten extraction (VERIFY).
+# capacity. The StructurePoint spWall worked example (corpus:
+# sp-de-shear-wall-aci19) is used directly as a numeric known-answer oracle
+# (see "spWall worked example" testset below); its exact reported values
+# (φVc = 204.92, φVs = 243.00, φVn = 447.92 kips) are reproduced to <0.2 %.
+
+# US-customary → SI conversion factors used by the corpus-oracle tests.
+const _PSI = 6894.757      # Pa per psi
+const _KIP = 4448.2216     # N per kip (1000 lbf)
+const _IN  = 0.0254        # m per inch
+const _FT  = 0.3048        # m per foot
 
 @testset "analytic wall stiffness (S1)" begin
     E = 25e9; ν = 0.2; lw = 4.0; H = 3.0
@@ -44,6 +51,71 @@ end
     chk = check_wall_inplane_shear(ws, conc, 800e3u"N", 6.0u"m")
     @test chk.code_clause == "ACI 318-19 11.5.4.3"
     @test isapprox(chk.ratio, 800e3 / cap.ϕVn; rtol=1e-3)
+end
+
+@testset "spWall worked example — shear (ACI 318-19 §11.5.4)" begin
+    # StructurePoint "Reinforced Concrete Shear Wall (ACI 318-19)", Step 5
+    # (corpus: sp-de-shear-wall-aci19). 5-story wall:
+    #   f'c = 4000 psi, fyt = 60 ksi, t = 10 in, lw = 18 ft (= 216 in),
+    #   ρt = 0.0025, hw = 54 ft ⇒ hw/lw = 3.0 ⇒ αc = 2.0.
+    # Reported: φVc = 204.92, φVs = 243.00, φVn = 447.92 kips; Vu = 121 kips.
+    fc = 4000 * _PSI; fy = 60_000 * _PSI
+    lw = 216 * _IN;   t  = 10 * _IN
+    ρt = 0.0025;      hw = 54 * _FT
+    cap = wall_shear_capacity_si(fc, fy, lw, t, ρt, hw)
+
+    @test isapprox(cap.αc, 2.0; atol=1e-9)                       # hw/lw = 3 ≥ 2
+    # Combined design shear φVn = 447.92 kips.
+    @test isapprox(cap.ϕVn, 447.92 * _KIP; rtol=2e-3)
+    @test isapprox(cap.Vn, (447.92 / 0.75) * _KIP; rtol=2e-3)    # Vn = 597.23 kips
+    # Concrete contribution alone (ρt = 0) ⇒ φVc = 204.92 kips.
+    cap_c = wall_shear_capacity_si(fc, fy, lw, t, 0.0, hw)
+    @test isapprox(cap_c.ϕVn, 204.92 * _KIP; rtol=2e-3)
+    # Steel contribution = combined − concrete ⇒ φVs = 243.00 kips.
+    @test isapprox(cap.ϕVn - cap_c.ϕVn, 243.00 * _KIP; rtol=2e-3)
+    # §11.5.4.2 cap (8√f'c·Acv) does not govern here (Vn = 597 < 1093 kips).
+    @test cap.Vn < cap.Vn_max
+
+    # Demand-decoupled check at the reported Vu = 121 kips passes comfortably.
+    ws   = WallSection(lw * u"m", t * u"m"; ρl=0.00344, ρt=ρt)
+    conc = Concrete(25e9u"Pa", (4000 * _PSI)u"Pa", 2400u"kg/m^3", 0.2, 0.1)
+    chk  = check_wall_inplane_shear(ws, conc, (121 * _KIP)u"N", hw * u"m")
+    @test chk.passed
+    @test isapprox(chk.ratio, 121 / 447.92; rtol=3e-3)          # utilization ≈ 0.27
+    @test chk.code_clause == "ACI 318-19 11.5.4.3"
+
+    # Minimum web reinforcement (Step 2): ρt = 0.0025, and for hw/lw = 3.0 the
+    # §11.6.2(a) longitudinal minimum collapses to the 0.0025 floor.
+    minr = check_wall_min_reinforcement(ws; hw=hw * u"m")
+    @test all(c.passed for c in minr)
+    @test isapprox(minr[1].demand, 0.0025; atol=1e-9)           # ρl,min floor
+    @test isapprox(minr[2].demand, 0.0025; atol=1e-9)           # ρt,min
+end
+
+@testset "§11.5.4.2 shear cap = 8√f'c·Acv (ACI 318-11 §11.9.3, d=0.8lw)" begin
+    fc = 28e6; fy = 60_000 * _PSI; lw = 4.0; t = 0.3
+    # Force the cap to govern with a very high (unphysical) transverse ratio.
+    cap = wall_shear_capacity_si(fc, fy, lw, t, 0.05, 2.0)      # hw/lw = 0.5, αc = 3
+    fc_psi = fc / _PSI; Acv_in2 = (lw / _IN) * (t / _IN)
+    # 8·√f'c·Acv is in lbf; convert with N-per-lbf (= _KIP/1000).
+    @test isapprox(cap.Vn_max, 8.0 * sqrt(fc_psi) * Acv_in2 * (_KIP / 1000); rtol=1e-9)
+    @test isapprox(cap.Vn, cap.Vn_max; rtol=1e-9)              # capped
+    # Edition equivalence: 8·√f'c·(lw·t) == 10·√f'c·(0.8·lw)·t.
+    @test isapprox(8.0 * sqrt(fc_psi) * (lw / _IN) * (t / _IN),
+                   10.0 * sqrt(fc_psi) * (0.8 * lw / _IN) * (t / _IN); rtol=1e-12)
+end
+
+@testset "§11.6.2(a) hw/lw-dependent longitudinal min reinforcement" begin
+    # Squat wall (hw/lw = 1.0) with ρt = 0.005 raises the longitudinal minimum:
+    #   ρl,min = 0.0025 + 0.5·(2.5 − 1.0)·(0.005 − 0.0025) = 0.004375.
+    ws = WallSection(4.0u"m", 0.3u"m"; ρl=0.003, ρt=0.005)
+    minr = check_wall_min_reinforcement(ws; hw=4.0u"m")
+    @test isapprox(minr[1].demand, 0.004375; atol=1e-9)
+    @test !minr[1].passed                       # ρl = 0.003 < 0.004375
+    @test minr[2].passed                        # ρt = 0.005 ≥ 0.0025
+    @test minr[1].code_clause == "ACI 318-19 11.6.2(a)"
+    # Without hw the coupling term collapses to the 0.0025 floor (ρl passes).
+    @test all(c.passed for c in check_wall_min_reinforcement(ws))
 end
 
 @testset "reduced diaphragm: symmetric core (S2)" begin

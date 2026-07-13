@@ -6,19 +6,17 @@
 # concrete wall pier. This is what lets the layout optimizer evaluate thousands
 # of candidate layouts without an FE mesh (see `lateral_evaluator.jl`).
 #
-# Code basis (cite verbatim clauses once the corpus/zettelkasten is extracted):
-#   - Effective (cracked/uncracked) flexural stiffness of walls:
-#       ACI 318-19 Table 6.6.3.1.1(a)
-#       (corpus: sp-effective-flexural-stiffness-aci318-14, sp-cracking-coefficient-walls)
+# Code basis — reconciled against the extracted corpus:
+#   - Effective (cracked/uncracked) flexural stiffness of walls: 0.70/0.35 Ig,
+#       ACI 318-19 Table 6.6.3.1.1(a) = ACI 318-11 §10.10.4.1 (verified verbatim).
+#       (corpus: aci-318-11, sp-effective-flexural-stiffness-aci318-14)
 #   - In-plane shear strength provisions consumed by the checker: ACI 318-19 §11.5.4
-#       (corpus: sp-wall-shear-strength-flowchart)
+#       (corpus: sp-wall-shear-strength-flowchart; see checker.jl)
 #   - Validation oracle (worked example): StructurePoint spWall shear wall
-#       (corpus: sp-de-shear-wall-aci19)
+#       (corpus: sp-de-shear-wall-aci19) — see test/walls/test_walls.jl.
 #
-# VERIFY: clause numbers / page references below are recorded from ACI 318-19
-# from memory and MUST be reconciled against the extracted corpus before this
-# module is used for production design (see skill `implement-design-system`,
-# stage 1 "gather canon" HARD STOP).
+# Still pending canon reconciliation: axial-flexure P–M interaction / boundary
+# elements (not yet implemented).
 
 using Unitful
 
@@ -27,7 +25,9 @@ using Unitful
 # ------------------------------------------------------------------------------
 # For elastic (service/first-order) lateral analysis the code permits a reduced
 # moment of inertia to approximate cracking. Walls: 0.70 Ig uncracked,
-# 0.35 Ig cracked. (corpus: sp-effective-flexural-stiffness-aci318-14; VERIFY)
+# 0.35 Ig cracked — verified verbatim against ACI 318-11 §10.10.4.1 (identical
+# to ACI 318-19 Table 6.6.3.1.1(a)); corpus: aci-318-11, and confirmed in the
+# StructurePoint effective-stiffness guide Eq. 1 (α = 0.35 cracked).
 const WALL_ISTIFF_UNCRACKED = 0.70
 const WALL_ISTIFF_CRACKED   = 0.35
 

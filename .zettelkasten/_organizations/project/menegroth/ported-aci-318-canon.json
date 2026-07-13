@@ -1,0 +1,197 @@
+{
+  "id": "ported-aci-318-canon",
+  "owner": {
+    "type": "project",
+    "name": "menegroth"
+  },
+  "title": "aci-318: Canon",
+  "state": "spine",
+  "row_axis": {
+    "kind": "group",
+    "ref": "",
+    "include": [],
+    "strategy": "link",
+    "relation": "input-to",
+    "direction": "incoming",
+    "apex": "",
+    "instruction": "",
+    "graph": "aci-318-canon"
+  },
+  "columns": [
+    {
+      "key": "applicability",
+      "label": "aci-318 - applicability",
+      "type": "extractive",
+      "backing": "schema_tag",
+      "ref": "applicability",
+      "prompt": "",
+      "relation": "input-to",
+      "apex": "20260713-0610-aci-318-applicability",
+      "graph": "aci-318-canon"
+    },
+    {
+      "key": "commentary",
+      "label": "aci-318 - commentary",
+      "type": "extractive",
+      "backing": "schema_tag",
+      "ref": "commentary",
+      "prompt": "",
+      "relation": "input-to",
+      "apex": "20260713-0610-aci-318-commentary",
+      "graph": "aci-318-canon"
+    },
+    {
+      "key": "equation",
+      "label": "aci-318 - equation",
+      "type": "extractive",
+      "backing": "schema_tag",
+      "ref": "equation",
+      "prompt": "",
+      "relation": "input-to",
+      "apex": "20260713-0610-aci-318-equation",
+      "graph": "aci-318-canon"
+    },
+    {
+      "key": "example",
+      "label": "aci-318 - example",
+      "type": "extractive",
+      "backing": "schema_tag",
+      "ref": "example",
+      "prompt": "",
+      "relation": "input-to",
+      "apex": "20260713-0610-aci-318-example",
+      "graph": "aci-318-canon"
+    },
+    {
+      "key": "parameters",
+      "label": "aci-318 - parameters",
+      "type": "extractive",
+      "backing": "schema_tag",
+      "ref": "parameters",
+      "prompt": "",
+      "relation": "input-to",
+      "apex": "20260713-0610-aci-318-parameters",
+      "graph": "aci-318-canon"
+    },
+    {
+      "key": "provision",
+      "label": "aci-318 - provision",
+      "type": "extractive",
+      "backing": "schema_tag",
+      "ref": "provision",
+      "prompt": "",
+      "relation": "input-to",
+      "apex": "20260713-0610-aci-318-provision",
+      "graph": "aci-318-canon"
+    },
+    {
+      "key": "scope",
+      "label": "aci-318 - scope",
+      "type": "extractive",
+      "backing": "schema_tag",
+      "ref": "scope",
+      "prompt": "",
+      "relation": "input-to",
+      "apex": "20260713-0610-aci-318-scope",
+      "graph": "aci-318-canon"
+    }
+  ],
+  "matrix_view": {
+    "cols_level": null,
+    "rollup": true
+  },
+  "overlay": {
+    "member_adds": [],
+    "member_removes": [],
+    "cell_overrides": [],
+    "attributions": []
+  },
+  "spine_ref": "aci-318-canon",
+  "last_spine_ref": "",
+  "lens_definition": null,
+  "schema": {
+    "name": "aci-318-canon",
+    "description": "Schema reverse-engineered from ported spine 'aci-318: Canon'.",
+    "grounded": true,
+    "strict": true,
+    "link_relation": "related",
+    "hub": null,
+    "dimensions": [
+      {
+        "tag": "applicability",
+        "desc": "aci-318 - applicability",
+        "note_type": "concept",
+        "materialize": true
+      },
+      {
+        "tag": "commentary",
+        "desc": "aci-318 - commentary",
+        "note_type": "concept",
+        "materialize": true
+      },
+      {
+        "tag": "equation",
+        "desc": "aci-318 - equation",
+        "note_type": "concept",
+        "materialize": true
+      },
+      {
+        "tag": "example",
+        "desc": "aci-318 - example",
+        "note_type": "concept",
+        "materialize": true
+      },
+      {
+        "tag": "parameters",
+        "desc": "aci-318 - parameters",
+        "note_type": "concept",
+        "materialize": true
+      },
+      {
+        "tag": "provision",
+        "desc": "aci-318 - provision",
+        "note_type": "concept",
+        "materialize": true
+      },
+      {
+        "tag": "scope",
+        "desc": "aci-318 - scope",
+        "note_type": "concept",
+        "materialize": true
+      }
+    ],
+    "tags": [
+      "applicability",
+      "commentary",
+      "equation",
+      "example",
+      "parameters",
+      "provision",
+      "scope"
+    ],
+    "relations": [],
+    "synthesis": {
+      "graph": "aci-318-canon",
+      "node": {
+        "type": "synthesis",
+        "title_template": "aci-318: Canon",
+        "link_relation": "related"
+      },
+      "dimension_node": {
+        "type": "concept",
+        "title_template": "{label} - {dimension}",
+        "attach_relation": "input-to",
+        "relation": "component-of"
+      },
+      "spec": null
+    }
+  },
+  "review": "",
+  "table_id": "",
+  "migrated": false,
+  "signature": "",
+  "synced_sig": "",
+  "generated_at": "",
+  "created_at": "2026-07-13T10:10:34Z",
+  "updated_at": "2026-07-13T10:10:34Z"
+}

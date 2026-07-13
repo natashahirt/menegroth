@@ -1,0 +1,10 @@
+cross: []
+description: 'Grounded building-code canon: structural design-code clauses, key equations,
+  and worked examples extracted from corpus/ under the building-code-extraction schema,
+  arranged into per-family/limit-state/element/material spines and linked to the menegroth
+  Julia checkers.'
+name: menegroth
+sources:
+- aisc-360-16
+- sp-de-square-spread-footing-aci318-14
+- sp-de-combined-footing-aci318-14

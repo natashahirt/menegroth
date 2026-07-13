@@ -1,0 +1,197 @@
+{
+  "id": "ported-aisc-360-canon",
+  "owner": {
+    "type": "project",
+    "name": "menegroth"
+  },
+  "title": "aisc-360: Canon",
+  "state": "spine",
+  "row_axis": {
+    "kind": "group",
+    "ref": "",
+    "include": [],
+    "strategy": "link",
+    "relation": "input-to",
+    "direction": "incoming",
+    "apex": "",
+    "instruction": "",
+    "graph": "aisc-360-canon"
+  },
+  "columns": [
+    {
+      "key": "applicability",
+      "label": "aisc-360 - applicability",
+      "type": "extractive",
+      "backing": "schema_tag",
+      "ref": "applicability",
+      "prompt": "",
+      "relation": "input-to",
+      "apex": "20260712-1906-aisc-360-applicability",
+      "graph": "aisc-360-canon"
+    },
+    {
+      "key": "commentary",
+      "label": "aisc-360 - commentary",
+      "type": "extractive",
+      "backing": "schema_tag",
+      "ref": "commentary",
+      "prompt": "",
+      "relation": "input-to",
+      "apex": "20260712-1906-aisc-360-commentary",
+      "graph": "aisc-360-canon"
+    },
+    {
+      "key": "equation",
+      "label": "aisc-360 - equation",
+      "type": "extractive",
+      "backing": "schema_tag",
+      "ref": "equation",
+      "prompt": "",
+      "relation": "input-to",
+      "apex": "20260712-1906-aisc-360-equation",
+      "graph": "aisc-360-canon"
+    },
+    {
+      "key": "example",
+      "label": "aisc-360 - example",
+      "type": "extractive",
+      "backing": "schema_tag",
+      "ref": "example",
+      "prompt": "",
+      "relation": "input-to",
+      "apex": "20260712-1906-aisc-360-example",
+      "graph": "aisc-360-canon"
+    },
+    {
+      "key": "parameters",
+      "label": "aisc-360 - parameters",
+      "type": "extractive",
+      "backing": "schema_tag",
+      "ref": "parameters",
+      "prompt": "",
+      "relation": "input-to",
+      "apex": "20260712-1906-aisc-360-parameters",
+      "graph": "aisc-360-canon"
+    },
+    {
+      "key": "provision",
+      "label": "aisc-360 - provision",
+      "type": "extractive",
+      "backing": "schema_tag",
+      "ref": "provision",
+      "prompt": "",
+      "relation": "input-to",
+      "apex": "20260712-1906-aisc-360-provision",
+      "graph": "aisc-360-canon"
+    },
+    {
+      "key": "scope",
+      "label": "aisc-360 - scope",
+      "type": "extractive",
+      "backing": "schema_tag",
+      "ref": "scope",
+      "prompt": "",
+      "relation": "input-to",
+      "apex": "20260712-1906-aisc-360-scope",
+      "graph": "aisc-360-canon"
+    }
+  ],
+  "matrix_view": {
+    "cols_level": null,
+    "rollup": true
+  },
+  "overlay": {
+    "member_adds": [],
+    "member_removes": [],
+    "cell_overrides": [],
+    "attributions": []
+  },
+  "spine_ref": "aisc-360-canon",
+  "last_spine_ref": "",
+  "lens_definition": null,
+  "schema": {
+    "name": "aisc-360-canon",
+    "description": "Schema reverse-engineered from ported spine 'aisc-360: Canon'.",
+    "grounded": true,
+    "strict": true,
+    "link_relation": "related",
+    "hub": null,
+    "dimensions": [
+      {
+        "tag": "applicability",
+        "desc": "aisc-360 - applicability",
+        "note_type": "concept",
+        "materialize": true
+      },
+      {
+        "tag": "commentary",
+        "desc": "aisc-360 - commentary",
+        "note_type": "concept",
+        "materialize": true
+      },
+      {
+        "tag": "equation",
+        "desc": "aisc-360 - equation",
+        "note_type": "concept",
+        "materialize": true
+      },
+      {
+        "tag": "example",
+        "desc": "aisc-360 - example",
+        "note_type": "concept",
+        "materialize": true
+      },
+      {
+        "tag": "parameters",
+        "desc": "aisc-360 - parameters",
+        "note_type": "concept",
+        "materialize": true
+      },
+      {
+        "tag": "provision",
+        "desc": "aisc-360 - provision",
+        "note_type": "concept",
+        "materialize": true
+      },
+      {
+        "tag": "scope",
+        "desc": "aisc-360 - scope",
+        "note_type": "concept",
+        "materialize": true
+      }
+    ],
+    "tags": [
+      "applicability",
+      "commentary",
+      "equation",
+      "example",
+      "parameters",
+      "provision",
+      "scope"
+    ],
+    "relations": [],
+    "synthesis": {
+      "graph": "aisc-360-canon",
+      "node": {
+        "type": "synthesis",
+        "title_template": "aisc-360: Canon",
+        "link_relation": "related"
+      },
+      "dimension_node": {
+        "type": "concept",
+        "title_template": "{label} - {dimension}",
+        "attach_relation": "input-to",
+        "relation": "component-of"
+      },
+      "spec": null
+    }
+  },
+  "review": "",
+  "table_id": "",
+  "migrated": false,
+  "signature": "",
+  "synced_sig": "",
+  "generated_at": "",
+  "created_at": "2026-07-13T10:10:34Z",
+  "updated_at": "2026-07-13T10:10:34Z"
+}

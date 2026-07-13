@@ -1,0 +1,34 @@
+{
+  "owner": {
+    "type": "project",
+    "name": "menegroth"
+  },
+  "organizations": [
+    {
+      "id": "ported-aisc-360-canon",
+      "title": "aisc-360: Canon",
+      "state": "spine",
+      "spine_ref": "aisc-360-canon",
+      "column_count": 7,
+      "row_axis_kind": "group",
+      "review": "",
+      "table_id": "",
+      "has_schema": true,
+      "generated_at": "",
+      "updated_at": "2026-07-13T10:10:34Z"
+    },
+    {
+      "id": "ported-aci-318-canon",
+      "title": "aci-318: Canon",
+      "state": "spine",
+      "spine_ref": "aci-318-canon",
+      "column_count": 7,
+      "row_axis_kind": "group",
+      "review": "",
+      "table_id": "",
+      "has_schema": true,
+      "generated_at": "",
+      "updated_at": "2026-07-13T10:10:34Z"
+    }
+  ]
+}

@@ -368,9 +368,13 @@ for (name, sec, fc, dose, Aps_val) in [
     ("Thesis (fc'=57)", s1, 57.0, 20.0, 157.0),
     ("FullScale (fc'=77)", s2, 77.0, 1.0, 142.40),
 ]
-    our_carbon = pf_carbon_per_meter(sec)
-    area_mm2 = ustrip(u"mm^2", section_area(sec))
-    area_m2 = area_mm2 / 1e6
+    # `pf_carbon_per_meter` is now a typed `kgCO₂e/m` quantity — strip for
+    # @printf at the very end of the comparison. Keep the hand-rolled
+    # "orig" formula in bare Float64 so this script keeps documenting the
+    # raw thesis equation (Eq. 2.16) without unit bookkeeping.
+    our_carbon  = ustrip(u"kgCO2e/m", pf_carbon_per_meter(sec))
+    area_mm2    = ustrip(u"mm^2", section_area(sec))
+    area_m2     = area_mm2 / 1e6
 
     # Original formula (Eq. 2.16): carbon = ec*Ac + 1.7*(7860*(dosage*Ac + As))
     # But note: the original uses 1.7 for fiber_ecc while our default is 1.4

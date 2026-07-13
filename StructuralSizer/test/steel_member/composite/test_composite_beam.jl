@@ -77,7 +77,7 @@ end
                              7850.0u"kg/m^3")
         @test isapprox(a.d_sa, uconvert(u"m", 0.75u"inch"); rtol=0.001)
         @test a.n_per_row == 1
-        @test a.ecc ≈ 1.72
+        @test a.ecc ≈ 1.72u"kgCO2e/kg"
     end
     
     @testset "HeadedStudAnchor with multi-row" begin
@@ -703,26 +703,25 @@ end
 
     @testset "Weight contribution" begin
         w = composite_stud_contribution(ctx, fix.section, fix.material, MinWeight())
-        @test w > 0.0
-        m_one_kg = ustrip(u"kg", stud_mass(fix.anchor))
-        @test m_one_kg > 0.0
-        # Weight = n_studs_total × m_one
-        # n_studs_total should be > 0 (at least a few dozen for this span)
-        n_studs_est = w / m_one_kg
+        @test w > 0.0u"kg"
+        m_one = stud_mass(fix.anchor)
+        @test m_one > 0.0u"kg"
+        # Weight = n_studs_total × m_one — number of studs falls out cleanly.
+        n_studs_est = w / m_one
         @test n_studs_est > 10  # reasonable for a 45 ft beam
     end
 
     @testset "Carbon contribution" begin
         c = composite_stud_contribution(ctx, fix.section, fix.material, MinCarbon())
-        @test c > 0.0
-        # Carbon = weight × ecc
+        @test c > 0.0u"kgCO2e"
+        # Carbon = weight × ecc — typed quantity arithmetic does the unit math.
         w = composite_stud_contribution(ctx, fix.section, fix.material, MinWeight())
         @test isapprox(c, w * fix.anchor.ecc; rtol=1e-10)
     end
 
     @testset "Volume objective returns zero (no stud volume)" begin
         v = composite_stud_contribution(ctx, fix.section, fix.material, MinVolume())
-        @test v ≈ 0.0
+        @test v ≈ 0.0u"m^3"
     end
 end
 

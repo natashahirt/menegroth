@@ -28,6 +28,7 @@ using Asap
 
 # Re-export units for downstream packages
 @reexport using Asap: kip, ksi, psf, ksf, pcf
+@reexport using Asap: kgCO2e, CarbonEquivalent
 @reexport using Asap: GRAVITY
 
 # Re-export type aliases (dimension-based, for function signatures)
@@ -35,10 +36,13 @@ using Asap
 @reexport using Asap: SecondMomentOfArea, TorsionalConstant, MomentOfInertia, WarpingConstant
 @reexport using Asap: Pressure, Force, Moment, Torque
 @reexport using Asap: LinearLoad, AreaLoadQuantity, Density, Acceleration
+@reexport using Asap: CarbonMass, CarbonPerMass, CarbonPerArea, CarbonPerVol
 
 # Re-export concrete type aliases (for struct fields)
 @reexport using Asap: LengthQuantity, AreaQuantity, VolumeQuantity
 @reexport using Asap: PressureQuantity, ForceQuantity, MomentQuantity, ForcePerLength
+@reexport using Asap: CarbonMassQuantity, CarbonPerMassQuantity
+@reexport using Asap: CarbonPerAreaQuantity, CarbonPerVolQuantity
 
 # Re-export conversion helpers
 @reexport using Asap: to_inches, to_sqinches, to_ksi, to_kip, to_kipft
@@ -105,6 +109,11 @@ include("members/_members.jl")
 # Slabs (types, codes, optimization)
 include("slabs/_slabs.jl")
 
+# Structural walls (lateral-force-resisting system: section, checker, lateral
+# evaluators, layout optimization). After members/optimize (uses AbstractNLPProblem,
+# MinCarbon, CheckResult) and materials (uses Concrete).
+include("walls/_walls.jl")
+
 # Foundations (types, soils, design codes)
 include("foundations/_foundations.jl")
 
@@ -165,6 +174,7 @@ export AggregateType, siliceous, carbonate, sand_lightweight, lightweight
 export ECCDistribution, ecc_distribution, ecc_distribution_per_kg
 export ecc_samples, sample_ecc_per_kg
 export list_strength_classes, list_compositions
+export ECC_PROVENANCE_NOTE
 
 # --- Fire protection ---
 export FireProtection, NoFireProtection, SFRM, IntumescentCoating, CustomCoating
@@ -224,6 +234,7 @@ export ACIBeamChecker, ACIBeamCapacityCache
 export ACIColumnChecker, ACIColumnCapacityCache
 export PixelFrameChecker, PixelFrameCapacityCache
 export PixelFrameBeamOptions, PixelFrameColumnOptions
+export ASTM_A416_GR270_FPU, ASTM_A416_GR270_LR_FPY
 
 # --- Capacity interface ---
 export get_Mn, get_Vn, get_Pn, get_Tn
@@ -363,6 +374,29 @@ export SteelWBeamNLPProblem, build_w_beam_nlp_result
 export size_steel_w_beam_nlp, size_steel_w_beams_nlp
 export SteelHSSBeamNLPProblem, build_hss_beam_nlp_result
 export size_steel_hss_beam_nlp, size_steel_hss_beams_nlp
+
+# --- Structural walls: section + analytic lateral stiffness (S1) ---
+export WallSection, gross_shear_area, gross_inertia_inplane, effective_inertia_inplane
+export wall_lateral_stiffness, pier_lateral_stiffness_si
+export wall_stiffness_from_thickness_si, dwall_stiffness_dthickness_si
+export WALL_ISTIFF_UNCRACKED, WALL_ISTIFF_CRACKED
+
+# --- Structural walls: ACI in-plane shear checker (S1, demand-decoupled) ---
+export wall_alpha_c, wall_shear_capacity_si
+export check_wall_inplane_shear, check_wall_min_reinforcement, WALL_PHI_SHEAR
+
+# --- Structural walls: lateral evaluators (S2 reduced, S3 FEM) ---
+export AbstractLateralEvaluator, evaluate_lateral
+export WallLine, StoryLoad, LateralResult
+export ReducedDiaphragmEvaluator, story_drift_sensitivity
+export FEMLateralEvaluator, WallPanel, walls_to_panels
+
+# --- Structural walls: layout optimization (S4) ---
+export WallCandidate, WallLayoutNLPProblem, solve_wall_layout
+export MinDrift, WeightedLayoutObjective
+
+# --- Member connection defaults ((role, material, lateral_role) dispatch) ---
+export default_release, default_torsion_released, default_seat_eccentricity
 
 # --- Sizing options ---
 export SteelColumnOptions, SteelBeamOptions, SteelMemberOptions

@@ -1933,24 +1933,34 @@ function _compute_design_summary!(design::BuildingDesign, struc::BuildingStructu
     summary.timber_volume = total_timber_vol
 
     # ── Embodied carbon (totals + breakdown frozen here — same numbers as API / reports) ──
+    # `BuildingECResult` now carries typed `kgCO₂e` quantities (Asap `𝐗` dimension);
+    # `DesignSummary` keeps bare Float64 fields for JSON / API compatibility, so
+    # we strip at this boundary. T2.3 will type the summary fields themselves
+    # and move stripping to the API serializer.
     try
         ec = compute_building_ec(struc, params)
-        summary.embodied_carbon = ec.total_ec
-        summary.embodied_carbon_slabs = ec.slab_ec
-        summary.embodied_carbon_columns = sum(r.ec for r in ec.members if r.element_type == :column; init=0.0)
-        summary.embodied_carbon_beams = sum(r.ec for r in ec.members if r.element_type == :beam; init=0.0)
-        summary.embodied_carbon_struts = sum(r.ec for r in ec.members if r.element_type == :strut; init=0.0)
+        # `DesignSummary.embodied_carbon_*` are typed `kgCO₂e` quantities
+        # since T2.3; assign the typed quantities directly and let the
+        # serialize / narrate / agent_tools paths strip at the API edge.
+        summary.embodied_carbon             = ec.total_ec
+        summary.embodied_carbon_slabs       = ec.slab_ec
+        summary.embodied_carbon_columns     =
+            sum(r.ec for r in ec.members if r.element_type == :column; init=0.0u"kgCO2e")
+        summary.embodied_carbon_beams       =
+            sum(r.ec for r in ec.members if r.element_type == :beam;   init=0.0u"kgCO2e")
+        summary.embodied_carbon_struts      =
+            sum(r.ec for r in ec.members if r.element_type == :strut;  init=0.0u"kgCO2e")
         summary.embodied_carbon_foundations = ec.foundation_ec
-        summary.embodied_carbon_fireproofing = ec.fireproofing_ec
+        summary.embodied_carbon_fireproofing= ec.fireproofing_ec
     catch e
         @warn "Embodied carbon computation failed — defaulting to 0.0" exception=(e, catch_backtrace())
-        summary.embodied_carbon = 0.0
-        summary.embodied_carbon_slabs = 0.0
-        summary.embodied_carbon_columns = 0.0
-        summary.embodied_carbon_beams = 0.0
-        summary.embodied_carbon_struts = 0.0
-        summary.embodied_carbon_foundations = 0.0
-        summary.embodied_carbon_fireproofing = 0.0
+        summary.embodied_carbon              = 0.0u"kgCO2e"
+        summary.embodied_carbon_slabs        = 0.0u"kgCO2e"
+        summary.embodied_carbon_columns      = 0.0u"kgCO2e"
+        summary.embodied_carbon_beams        = 0.0u"kgCO2e"
+        summary.embodied_carbon_struts       = 0.0u"kgCO2e"
+        summary.embodied_carbon_foundations  = 0.0u"kgCO2e"
+        summary.embodied_carbon_fireproofing = 0.0u"kgCO2e"
     end
 end
 

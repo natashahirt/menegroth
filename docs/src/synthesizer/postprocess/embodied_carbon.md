@@ -21,7 +21,7 @@ At the calculation boundary, every material is treated consistently as:
 
 where \(V\) is volume (m³), \(\rho\) is density (kg/m³), and `ecc` is kgCO₂e/kg.
 
-Concrete preset ECC values are anchored to the empirical median of the NRMCA / RMC ready-mix EPD dataset (2021–2025, A1–A3 cradle-to-gate, US plants only); see `StructuralSizer/src/materials/ecc/data/README.md` for provenance and caveats.
+Concrete preset ECC values are anchored to the empirical median of the dataset described canonically by [`ECC_PROVENANCE_NOTE`](@ref) (single source of truth — refresh that constant when the dataset is updated, and every docstring / docs page that interpolates it follows along). For inclusion criteria, per-bucket counts, and composition tagging see `StructuralSizer/src/materials/ecc/data/README.md`.
 
 **Source:** `StructuralSynthesizer/src/postprocess/ec.jl`
 
@@ -40,6 +40,7 @@ BuildingECResult
 element_ec
 compute_building_ec
 ec_summary
+to_dict
 ```
 
 ## Implementation Details
@@ -97,6 +98,12 @@ Fireproofing EC is included when `compute_building_ec(struc, params)` is called 
 - EC per unit floor area (kgCO₂e/m² or kgCO₂e/ft²)
 - Breakdown by element type (slabs, beams, columns, foundations, fireproofing)
 - Percentage of total for each element type
+
+### to_dict
+
+`to_dict(::BuildingECResult; du=imperial)` and `to_dict(::ElementECResult)` produce JSON-friendly `Dict{String, Any}` views with all Unitful quantities stripped to numeric scalars. Use these when serializing EC results for an HTTP payload, CSV export, or history snapshot — the raw `BuildingECResult` struct carries `Unitful` floor-area / mass quantities that JSON3 cannot encode directly.
+
+Field naming: EC values are always reported as `*_kgco2e` (unit baked into the key), so downstream consumers do not need to track an implicit unit convention. Floor area is converted to the requested display unit (`du.units[:area]`) and tagged with an explicit `floor_area_unit` string; the canonical kgCO₂e/m² intensity is also retained alongside the display-unit intensity.
 
 ## Options & Configuration
 

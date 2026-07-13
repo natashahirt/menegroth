@@ -34,9 +34,12 @@ MinCost() = MinCost(NaN)
 struct MinCarbon <: AbstractObjective end
 
 """
-    objective_value(obj::AbstractObjective, section, material, L) -> Float64
+    objective_value(obj::AbstractObjective, section, material, L) -> Unitful.Quantity
 
-Compute the objective function value for a single section of length `L`.
+Compute the objective function value for a single section of length `L`. The
+return is always a typed quantity (`kg` for [`MinWeight`](@ref), `m^3` for
+[`MinVolume`](@ref), unit-cost × kg for [`MinCost`](@ref), `kgCO2e` for
+[`MinCarbon`](@ref)); callers strip units at the solver / API boundary.
 """
 function objective_value end
 
@@ -72,18 +75,21 @@ function objective_value(::MinCarbon, s::AbstractSection, mat::AbstractMaterial,
 end
 
 """
-    total_objective(obj, sections, materials, lengths) -> Float64
+    total_objective(obj, sections, materials, lengths) -> Unitful.Quantity
 
-Sum of `objective_value` over all member groups (one material per group).
+Sum of [`objective_value`](@ref) over all member groups (one material per
+group). Returns the same typed quantity that the underlying `objective_value`
+produces (`kg`, `m^3`, USD, or `kgCO2e`).
 """
 function total_objective(obj::AbstractObjective, sections, materials, lengths)
     sum(objective_value(obj, s, m, L) for (s, m, L) in zip(sections, materials, lengths))
 end
 
 """
-    total_objective(obj, sections, mat::AbstractMaterial, lengths) -> Float64
+    total_objective(obj, sections, mat::AbstractMaterial, lengths) -> Unitful.Quantity
 
-Sum of `objective_value` over all member groups sharing a single material.
+Sum of [`objective_value`](@ref) over all member groups sharing a single
+material.
 """
 function total_objective(obj::AbstractObjective, sections, mat::AbstractMaterial, lengths)
     sum(objective_value(obj, s, mat, L) for (s, L) in zip(sections, lengths))

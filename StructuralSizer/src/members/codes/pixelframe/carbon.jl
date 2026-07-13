@@ -18,11 +18,12 @@
 
 using Unitful
 
-# Steel density for tendon + fiber carbon calculation
-const _STEEL_DENSITY_KGM3 = 7860.0  # kg/m³
+# Steel density for tendon + fiber carbon contributions. Typed once so the
+# carbon arithmetic below stays dimensionally clean (kg/m³ × m² = kg/m).
+const _STEEL_DENSITY = 7860.0u"kg/m^3"
 
 """
-    pf_concrete_ecc(fc′) -> Float64
+    pf_concrete_ecc(fc′) -> CarbonPerVolQuantity
 
 Embodied carbon coefficient of concrete as a function of fc′.
 Linear fit from ASME data (Wongsittikan 2024, Eq. 2.17).
@@ -33,15 +34,15 @@ Linear fit from ASME data (Wongsittikan 2024, Eq. 2.17).
 - `fc′`: Concrete compressive strength (Unitful Pressure)
 
 # Returns
-Embodied carbon in kgCO₂e per m³ of concrete.
+Embodied carbon in `u"kgCO2e/m^3"` (typed `CarbonPerVolQuantity`).
 """
 function pf_concrete_ecc(fc′::Pressure)
     fc′_MPa = ustrip(u"MPa", fc′)
-    return 4.57 * fc′_MPa + 217.0
+    return (4.57 * fc′_MPa + 217.0) * u"kgCO2e/m^3"
 end
 
 """
-    pf_carbon_per_meter(s::PixelFrameSection) -> Float64
+    pf_carbon_per_meter(s::PixelFrameSection) -> Quantity{Float64, 𝐗/𝐋}
 
 Embodied carbon per unit length of a PixelFrame section [kgCO₂e/m].
 
@@ -53,25 +54,22 @@ Accounts for three contributions:
 Reference: Wongsittikan (2024) Eq. 2.16
 
 # Returns
-Carbon intensity in kgCO₂e/m (bare Float64).
+Typed `kgCO₂e / m` quantity — dimensions flow through Unitful, so the
+result composes with a typed length to give a `CarbonMassQuantity` (see
+[`objective_value(::MinCarbon, ::PixelFrameSection, …)`](@ref)).
 """
 function pf_carbon_per_meter(s::PixelFrameSection)
-    A_c_m2 = ustrip(u"m^2", section_area(s))
-    A_s_m2 = ustrip(u"m^2", s.A_s)
-    fc′ = s.material.fc′
-    dosage = s.material.fiber_dosage  # kg-fiber / m³ concrete
-    fiber_ecc = s.material.fiber_ecc  # kgCO₂e / kg-steel
+    A_c       = section_area(s)                                  # m²
+    A_s       = s.A_s                                            # m²
+    dosage    = s.material.fiber_dosage * u"kg/m^3"              # typed
+    fiber_ecc = s.material.fiber_ecc                             # kgCO₂e/kg
+    ec        = pf_concrete_ecc(s.material.fc′)                  # kgCO₂e/m³
 
-    # Concrete carbon [kgCO₂e/m]
-    ec = pf_concrete_ecc(fc′)  # kgCO₂e/m³
-    carbon_concrete = ec * A_c_m2
+    carbon_concrete = ec * A_c                                   # kgCO₂e/m
+    # (kg/m³ × m² + kg/m³ × m²) × kgCO₂e/kg = kgCO₂e/m
+    carbon_steel    = fiber_ecc * (dosage * A_c + _STEEL_DENSITY * A_s)
 
-    # Steel (fiber + tendon) carbon [kgCO₂e/m]
-    # Fiber: dosage [kg/m³] × A_c [m²] → kg-fiber/m
-    # Tendon: ρ_steel [kg/m³] × A_s [m²] → kg-tendon/m
-    carbon_steel = fiber_ecc * (dosage * A_c_m2 + _STEEL_DENSITY_KGM3 * A_s_m2)
-
-    return carbon_concrete + carbon_steel
+    return uconvert(u"kgCO2e/m", carbon_concrete + carbon_steel)
 end
 
 # ==============================================================================
@@ -79,16 +77,19 @@ end
 # ==============================================================================
 
 """
-    objective_value(::MinCarbon, s::PixelFrameSection, ::AbstractMaterial, L) -> Float64
+    objective_value(::MinCarbon, s::PixelFrameSection, ::AbstractMaterial, L)
+        -> CarbonMassQuantity
 
 PixelFrame-specific embodied carbon objective.
 
 Overrides the generic `A × L × ρ × ecc` formula to include concrete, fiber,
 and tendon contributions per Wongsittikan (2024) Eq. 2.16.
 
-Returns total carbon in kgCO₂e (bare Float64, no units) for use in MIP.
+Returns total carbon as a typed `kgCO₂e` quantity. The MIP cache builder
+calls `ustrip(unit(ref_obj), val)` once when populating `obj_coeffs`, so
+the JuMP boundary sees a bare Float64.
 """
 function objective_value(::MinCarbon, s::PixelFrameSection, ::AbstractMaterial, L)
-    L_m = L isa Unitful.Quantity ? ustrip(u"m", L) : Float64(L)
-    pf_carbon_per_meter(s) * L_m
+    L_q = L isa Unitful.Quantity ? L : Float64(L) * u"m"
+    return uconvert(u"kgCO2e", pf_carbon_per_meter(s) * L_q)
 end

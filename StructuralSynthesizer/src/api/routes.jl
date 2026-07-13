@@ -695,7 +695,7 @@ function _execute_design(input::APIInput)
             all_pass          = s.all_checks_pass,
             critical_ratio    = s.critical_ratio,
             critical_element  = s.critical_element,
-            embodied_carbon   = s.embodied_carbon,
+            embodied_carbon   = ustrip(u"kgCO2e", s.embodied_carbon),
             n_columns         = length(design.columns),
             n_beams           = length(design.beams),
             n_slabs           = length(design.slabs),

@@ -124,25 +124,25 @@ function pixel_volumes(design::PixelFrameDesign)
 end
 
 """
-    pixel_carbon(design::PixelFrameDesign) -> Float64
+    pixel_carbon(design::PixelFrameDesign) -> CarbonMassQuantity
 
-Total embodied carbon [kgCO₂e] for the full member, summing per-pixel
-contributions with their individual materials.
+Total embodied carbon for the full member, summing per-pixel contributions
+with their individual materials. Returns a typed `kgCO₂e` quantity;
+callers strip with `ustrip(u"kgCO2e", …)` at presentation boundaries.
 """
 function pixel_carbon(design::PixelFrameDesign)
-    A_c_m2 = ustrip(u"m^2", section_area(design.section))
-    A_s_m2 = ustrip(u"m^2", design.section.A_s)
-    L_px_m = ustrip(u"m", design.pixel_length)
-    fiber_ecc = design.section.material.fiber_ecc
+    A_c       = section_area(design.section)
+    A_s       = design.section.A_s
+    L_px      = design.pixel_length
+    fiber_ecc = design.section.material.fiber_ecc                # kgCO₂e/kg
 
-    total = 0.0
+    total = 0.0u"kgCO2e"
     for mat in design.pixel_materials
-        fc′ = mat.fc′
-        dosage = mat.fiber_dosage
-        ec = pf_concrete_ecc(fc′)
-        carbon_concrete = ec * A_c_m2 * L_px_m
-        carbon_steel = fiber_ecc * (dosage * A_c_m2 + _STEEL_DENSITY_KGM3 * A_s_m2) * L_px_m
-        total += carbon_concrete + carbon_steel
+        dosage          = mat.fiber_dosage * u"kg/m^3"
+        ec              = pf_concrete_ecc(mat.fc′)                # kgCO₂e/m³
+        carbon_concrete = ec * A_c * L_px                         # kgCO₂e
+        carbon_steel    = fiber_ecc * (dosage * A_c + _STEEL_DENSITY * A_s) * L_px
+        total += uconvert(u"kgCO2e", carbon_concrete + carbon_steel)
     end
     return total
 end
@@ -212,9 +212,12 @@ function assign_pixel_materials(
     isempty(material_pool) &&
         throw(ArgumentError("material_pool is empty"))
 
-    # Sort material pool by carbon (ascending) for greedy selection
+    # Sort material pool by per-volume carbon (ascending) for greedy
+    # selection. Both terms are typed `kgCO₂e/m³` quantities so the sort
+    # comparison is dimension-checked and unit-safe.
     sorted_mats = sort(material_pool; by = mat -> begin
-        pf_concrete_ecc(mat.fc′) + mat.fiber_ecc * mat.fiber_dosage
+        pf_concrete_ecc(mat.fc′) +
+            mat.fiber_ecc * (mat.fiber_dosage * u"kg/m^3")
     end)
 
     E_s = checker.E_s_MPa * u"MPa"

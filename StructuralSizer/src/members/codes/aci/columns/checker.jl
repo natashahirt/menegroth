@@ -486,7 +486,9 @@ function objective_value(
     return uconvert(u"m^3", section.Ag * length)
 end
 
-"""Minimum-carbon objective for a rectangular RC column (kgCO₂e)."""
+"""Minimum-carbon objective for a rectangular RC column. Returns a typed
+`kgCO₂e` quantity (Asap `𝐗` dimension); the cache-build site strips to a
+bare Float64 at the JuMP boundary."""
 function objective_value(
     ::MinCarbon,
     section::RCColumnSection,
@@ -495,11 +497,11 @@ function objective_value(
 )
     Ag = section.b * section.h
     volume = uconvert(u"m^3", Ag * length)
-    mass_kg = ustrip(volume) * ustrip(u"kg/m^3", material.ρ)
-    return mass_kg * material.ecc  # kgCO₂e
+    return uconvert(u"kgCO2e", volume * material.ρ * material.ecc)
 end
 
-"""Minimum-carbon objective for a circular RC column (kgCO₂e)."""
+"""Minimum-carbon objective for a circular RC column. Returns a typed
+`kgCO₂e` quantity."""
 function objective_value(
     ::MinCarbon,
     section::RCCircularSection,
@@ -507,8 +509,7 @@ function objective_value(
     length::Length
 )
     volume = uconvert(u"m^3", section.Ag * length)
-    mass_kg = ustrip(volume) * ustrip(u"kg/m^3", material.ρ)
-    return mass_kg * material.ecc  # kgCO₂e
+    return uconvert(u"kgCO2e", volume * material.ρ * material.ecc)
 end
 
 # ==============================================================================

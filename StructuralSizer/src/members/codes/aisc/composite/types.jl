@@ -156,14 +156,14 @@ struct HeadedStudAnchor{T_P<:Pressure, T_D<:Density} <: AbstractSteelAnchor
     Fu::T_P
     Fy::T_P
     ρ::T_D
-    ecc::Float64
+    ecc::CarbonPerMassQuantity  # Embodied carbon [kgCO₂e/kg], typed via Asap `𝐗` dimension
     n_per_row::Int
 end
 
-function HeadedStudAnchor(d_sa, l_sa, Fu, Fy, ρ; ecc=1.72, n_per_row=1)
+function HeadedStudAnchor(d_sa, l_sa, Fu, Fy, ρ; ecc=1.72u"kgCO2e/kg", n_per_row=1)
     n_per_row >= 1 || throw(ArgumentError("n_per_row must be ≥ 1"))
     HeadedStudAnchor(uconvert(u"m", d_sa), uconvert(u"m", l_sa),
-                     Fu, Fy, ρ, Float64(ecc), n_per_row)
+                     Fu, Fy, ρ, _normalize_ecc(ecc), n_per_row)
 end
 
 """

@@ -72,10 +72,12 @@ end
             @test sec.section.area > 0
         end
 
-        # Every section should have converged flexure
+        # Every section should have converged flexure. Use the same default
+        # f_py as PixelFrameChecker (ASTM A416 Gr 270 LR, ACI 318-11 R18.7.2)
+        # so both code paths agree.
         checker = PixelFrameChecker()
         E_s = 200.0u"GPa"
-        f_py = (0.85 * 1900.0)u"MPa"
+        f_py = checker.f_py_MPa * u"MPa"
         for sec in catalog
             fl = pf_flexural_capacity(sec; E_s, f_py)
             @test fl.converged
@@ -112,6 +114,41 @@ end
         fl_low = pf_flexural_capacity(cat_low[1])
         fl_high = pf_flexural_capacity(cat_high[1])
         @test ustrip(u"kN*m", fl_high.Mu) > ustrip(u"kN*m", fl_low.Mu)
+    end
+
+    # =========================================================================
+    # Tendon yield default consistency
+    # =========================================================================
+    # Pins that PixelFrameChecker's f_py_MPa default matches
+    # ASTM_A416_GR270_LR_FPY (ACI 318-11 R18.7.2 commentary, low-relaxation
+    # strand: f_py / f_pu ≥ 0.90 with f_pu = 1860 MPa). Catches accidental
+    # drift between the checker default and pf_flexural_capacity's default.
+    @testset "Checker default f_py matches ASTM A416 Gr 270 LR constant" begin
+        checker = PixelFrameChecker()
+        @test isapprox(
+            checker.f_py_MPa,
+            ustrip(u"MPa", StructuralSizer.ASTM_A416_GR270_LR_FPY);
+            atol = 1e-9,
+        )
+        @test isapprox(checker.f_py_MPa, 1674.0; atol = 1e-9)
+    end
+
+    # Pins that the checker capacity-precompute path and the direct
+    # pf_flexural_capacity call agree on Mu when both use their defaults.
+    # Previously these diverged silently (checker default was 1860 MPa /
+    # i.e. f_pu mislabeled as yield; direct default was 0.85*1900 = 1615 MPa).
+    @testset "Mu from checker path == Mu from direct pf_flexural_capacity (defaults)" begin
+        catalog = _test_catalog()
+        checker = PixelFrameChecker()
+        mat = _dummy_frc()
+        cache = create_cache(checker, length(catalog))
+        precompute_capacities!(checker, cache, catalog, mat, MinVolume())
+
+        for (j, sec) in enumerate(catalog)
+            fl = pf_flexural_capacity(sec)  # all defaults
+            Mu_direct_Nm = ustrip(u"N*m", fl.Mu)
+            @test isapprox(cache.Mu[j], Mu_direct_Nm; rtol = 1e-9)
+        end
     end
 
     @testset "Catalog generation — multi-layup" begin
@@ -277,9 +314,11 @@ end
         @test result.objective_value > 0
 
         chosen = result.sections[1]
+        # `pf_carbon_per_meter` returns typed `kgCO₂e/m`; the MIP cache strips
+        # to bare `kgCO₂e` (the JuMP boundary), so compute the expected value
+        # in typed space and strip on the same side for the comparison.
         carbon_per_m = pf_carbon_per_meter(chosen)
-        L_m = 6.0
-        expected_obj = carbon_per_m * L_m
+        expected_obj = ustrip(u"kgCO2e", carbon_per_m * 6.0u"m")
         @test isapprox(result.objective_value, expected_obj; rtol=0.01)
     end
 
@@ -301,7 +340,9 @@ end
         chosen_co2 = result_co2.sections[1]
         carbon_vol = pf_carbon_per_meter(chosen_vol)
         carbon_co2 = pf_carbon_per_meter(chosen_co2)
-        @test carbon_co2 ≤ carbon_vol + 1e-6
+        # `1e-6` slack carried in typed `kgCO₂e/m` so the inequality stays
+        # dimensionally consistent with the carbon-intensity terms.
+        @test carbon_co2 ≤ carbon_vol + 1e-6u"kgCO2e/m"
     end
 
     # =========================================================================
@@ -398,12 +439,14 @@ end
             @test isapprox(coeff, expected; rtol=1e-4)
         end
 
-        # MinCarbon
+        # MinCarbon — cache stores stripped `kgCO₂e/m` (`ref_unit`-stripped
+        # at the JuMP boundary); strip the typed `pf_carbon_per_meter` on the
+        # comparison side so both operands are bare Float64.
         cache_co2 = create_cache(checker, length(catalog))
         precompute_capacities!(checker, cache_co2, catalog, mat, MinCarbon())
         for j in 1:length(catalog)
             coeff = get_objective_coeff(checker, cache_co2, j)
-            carbon_per_m = pf_carbon_per_meter(catalog[j])
+            carbon_per_m = ustrip(u"kgCO2e/m", pf_carbon_per_meter(catalog[j]))
             @test isapprox(coeff, carbon_per_m; rtol=1e-4)
         end
     end

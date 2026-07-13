@@ -1,10 +1,11 @@
 # PixelFrame Design
 
 > ```julia
-> using StructuralSizer
+> using StructuralSizer, Unitful
 > sec = generate_pixelframe_catalog(fc_values=[40.0], A_s_values=[226.0], d_ps_values=[150.0])[1]
-> Mu = pf_flexural_capacity(sec; E_s=200_000.0, f_py=1860.0)
-> Pu = pf_axial_capacity(sec; E_s=200_000.0)
+> # f_py defaults to ASTM_A416_GR270_LR_FPY (1674 MPa, ACI 318-11 R18.7.2)
+> Mu = pf_flexural_capacity(sec; E_s=200.0u"GPa")
+> Pu = pf_axial_capacity(sec; E_s=200.0u"GPa")
 > carbon = pf_carbon_per_meter(sec)
 > ```
 
@@ -298,12 +299,18 @@ The per-pixel material assignment enables embodied carbon optimization by using 
 ```julia
 checker = PixelFrameChecker(
     E_s_MPa = 200_000.0,
-    f_py_MPa = 1860.0,
+    f_py_MPa = 1674.0,   # ASTM A416 Gr 270 low-relaxation strand,
+                          # f_py = 0.90 × f_pu per ACI 318-11 R18.7.2
     γ_c = 1.0,
     min_depth_mm = 200.0,
     min_width_mm = 200.0
 )
 ```
+
+The default `f_py_MPa` is anchored to ASTM A416 / A416M Grade 270 low-relaxation
+seven-wire strand (`f_pu = 1860 MPa`, `f_py = 0.90 × f_pu = 1674 MPa`), per the
+ACI 318-11 R18.7.2 commentary minimum (preserved in ACI 318-19). Override for
+stress-relieved strand (`f_py / f_pu ≥ 0.85` → 1581 MPa) or non–Grade 270 products.
 
 PixelFrame sections use SI units (mm, MPa) throughout, unlike the US-customary units in the AISC and ACI modules.
 

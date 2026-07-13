@@ -1,13 +1,13 @@
 # ==============================================================================
 # Concrete Material Presets
 # ==============================================================================
-# ECC values are anchored to the empirical median of the NRMCA / RMC
-# ready-mix EPD dataset (n = 1078 individual plant-mix EPDs, 2021–2025,
-# A1–A3 cradle-to-gate, US plants only). See:
+# ECC values are anchored to the empirical median of the dataset described
+# canonically by `ECC_PROVENANCE_NOTE` (defined in
+# `StructuralSizer/src/materials/ecc/distributions.jl`). The per-bucket
+# medians and counts below are quoted directly from that dataset. See also:
 #
 #   StructuralSizer/src/materials/ecc/data/rmc_epd_2021_2025.csv
 #   StructuralSizer/src/materials/ecc/data/README.md
-#   StructuralSizer/src/materials/ecc/distributions.jl
 #
 # Per-strength medians (kg CO₂e / m³ → divide by ρ for kg/kg below):
 #
@@ -66,22 +66,22 @@ end
 
 """Normal-weight concrete, f'c = 3000 psi (ECC = 0.111 kgCO₂e/kg, RMC EPD median, n = 159)."""
 const NWC_3000 = let fc = 3000u"psi", ρ = 2380.0u"kg/m^3"
-    Concrete(_aci_Ec(fc, ρ), fc, ρ, 0.20, 0.111; color = "#C8C8C8")
+    Concrete(_aci_Ec(fc, ρ), fc, ρ, 0.20, 0.111u"kgCO2e/kg"; color = "#C8C8C8")
 end
 
 """Normal-weight concrete, f'c = 4000 psi (ECC = 0.127 kgCO₂e/kg, RMC EPD median, n = 263)."""
 const NWC_4000 = let fc = 4000u"psi", ρ = 2380.0u"kg/m^3"
-    Concrete(_aci_Ec(fc, ρ), fc, ρ, 0.20, 0.127; color = "#C8C8C8")
+    Concrete(_aci_Ec(fc, ρ), fc, ρ, 0.20, 0.127u"kgCO2e/kg"; color = "#C8C8C8")
 end
 
 """Normal-weight concrete, f'c = 5000 psi (ECC = 0.142 kgCO₂e/kg, RMC EPD median, n = 156)."""
 const NWC_5000 = let fc = 5000u"psi", ρ = 2385.0u"kg/m^3"
-    Concrete(_aci_Ec(fc, ρ), fc, ρ, 0.20, 0.142; color = "#C8C8C8")
+    Concrete(_aci_Ec(fc, ρ), fc, ρ, 0.20, 0.142u"kgCO2e/kg"; color = "#C8C8C8")
 end
 
 """Normal-weight concrete, f'c = 6000 psi (ECC = 0.130 kgCO₂e/kg, RMC EPD median, n = 53)."""
 const NWC_6000 = let fc = 6000u"psi", ρ = 2385.0u"kg/m^3"
-    Concrete(_aci_Ec(fc, ρ), fc, ρ, 0.20, 0.130; color = "#C8C8C8")
+    Concrete(_aci_Ec(fc, ρ), fc, ρ, 0.20, 0.130u"kgCO2e/kg"; color = "#C8C8C8")
 end
 
 # NWC_GGBS / NWC_PFA: empirical sub-bucket medians from the same
@@ -96,12 +96,12 @@ end
 
 """Normal-weight concrete, f'c = 4000 psi, slag-blended (ECC = 0.131 kgCO₂e/kg, RMC EPD slag-only p50, n = 60)."""
 const NWC_GGBS = let fc = 4000u"psi", ρ = 2380.0u"kg/m^3"
-    Concrete(_aci_Ec(fc, ρ), fc, ρ, 0.20, 0.131; color = "#C8C8C8")
+    Concrete(_aci_Ec(fc, ρ), fc, ρ, 0.20, 0.131u"kgCO2e/kg"; color = "#C8C8C8")
 end
 
 """Normal-weight concrete, f'c = 4000 psi, fly-ash-blended (ECC = 0.121 kgCO₂e/kg, RMC EPD fa-only p50, n = 121)."""
 const NWC_PFA = let fc = 4000u"psi", ρ = 2380.0u"kg/m^3"
-    Concrete(_aci_Ec(fc, ρ), fc, ρ, 0.20, 0.121; color = "#C8C8C8")
+    Concrete(_aci_Ec(fc, ρ), fc, ρ, 0.20, 0.121u"kgCO2e/kg"; color = "#C8C8C8")
 end
 
 # ==============================================================================
@@ -133,13 +133,13 @@ end
 
 """Sand-lightweight concrete, f'c = 4000 psi (ECC = 0.243 kgCO₂e/kg, λ = 0.85, ρ = 1840 kg/m³, Ec ≈ 2,567 ksi)."""
 const LWC_4000 = let fc = 4000u"psi", ρ = 1840.0u"kg/m^3"
-    Concrete(_aci_Ec(fc, ρ), fc, ρ, 0.20, 0.243;
+    Concrete(_aci_Ec(fc, ρ), fc, ρ, 0.20, 0.243u"kgCO2e/kg";
              λ = 0.85, aggregate_type = sand_lightweight, color = "#D8D8D8")
 end
 
 """All-lightweight concrete, f'c = 4000 psi (ECC = 0.267 kgCO₂e/kg, λ = 0.75, ρ = 1680 kg/m³, Ec ≈ 2,239 ksi)."""
 const LWC_4000_AL = let fc = 4000u"psi", ρ = 1680.0u"kg/m^3"
-    Concrete(_aci_Ec(fc, ρ), fc, ρ, 0.20, 0.267;
+    Concrete(_aci_Ec(fc, ρ), fc, ρ, 0.20, 0.267u"kgCO2e/kg";
              λ = 0.75, aggregate_type = lightweight, color = "#E0E0E0")
 end
 
@@ -190,7 +190,7 @@ const Earthen_500 = Concrete(
     0.5u"MPa",          # fc' (conservative estimate)
     2000.0u"kg/m^3",    # ρ (from Matlab reference)
     0.20,               # ν
-    0.01;               # ecc [kgCO₂e/kg] - very low for unfired earth
+    0.01u"kgCO2e/kg";   # ecc — very low for unfired earth
     εcu = 0.002,
     color = "#B8926A"
 )
@@ -201,7 +201,7 @@ const Earthen_1000 = Concrete(
     1.0u"MPa",          # fc'
     2000.0u"kg/m^3",    # ρ
     0.20,               # ν
-    0.01;               # ecc
+    0.01u"kgCO2e/kg";   # ecc
     εcu = 0.002,
     color = "#B8926A"
 )
@@ -212,7 +212,7 @@ const Earthen_2000 = Concrete(
     2.0u"MPa",          # fc'
     2000.0u"kg/m^3",    # ρ
     0.20,               # ν
-    0.02;               # ecc - slightly higher for stabilized earth
+    0.02u"kgCO2e/kg";   # ecc — slightly higher for stabilized earth
     εcu = 0.002,
     color = "#A97C50"
 )
@@ -223,7 +223,7 @@ const Earthen_4000 = Concrete(
     4.0u"MPa",          # fc'
     2000.0u"kg/m^3",    # ρ
     0.20,               # ν
-    0.05;               # ecc - compressed earth blocks
+    0.05u"kgCO2e/kg";   # ecc — compressed earth blocks
     εcu = 0.002,
     color = "#9A6B43"
 )
@@ -234,7 +234,7 @@ const Earthen_8000 = Concrete(
     8.0u"MPa",          # fc'
     2000.0u"kg/m^3",    # ρ
     0.20,               # ν
-    0.10;               # ecc - fired clay brick
+    0.10u"kgCO2e/kg";   # ecc — fired clay brick
     εcu = 0.002,
     color = "#8A5B34"
 )
@@ -278,3 +278,29 @@ function _fallback_material_name(mat::ReinforcedConcreteMaterial)
     fy = round(Int, ustrip(ksi, mat.rebar.Fy))
     "$(conc) + Gr$(fy)"
 end
+
+# =============================================================================
+# (role, material, lateral_role) connection defaults for concrete
+# =============================================================================
+# Entry points and fallbacks are declared in `members/defaults.jl`; these are the
+# per-combination specializations for `Concrete`.
+#
+# Cast-in-place reinforced concrete framing is monolithic with its supports, so
+# beams, girders and ribs/joists are continuous (moment-resisting) at their
+# supports — modeled as fixed ends. ACI 318-11 §8.9.3 (corpus: aci-318-11, page
+# 118): "For beams built integrally with supports, design on the basis of
+# moments at faces of support shall be permitted." (§8.9.4 extends the same
+# integral-support continuity to solid or ribbed slabs.) No connection is a seat
+# offset — cast-in-place centroids frame in plane — so eccentricity is zero.
+
+default_release(::Val{:joist}, ::Concrete, ::Val{:gravity}) = (:fixed, :fixed)
+default_release(::Val{:girder}, ::Concrete, ::Val{:gravity}) = (:fixed, :fixed)
+default_release(::Val{:beam}, ::Concrete, ::Val{:gravity}) = (:fixed, :fixed)
+
+default_torsion_released(::Val{:joist}, ::Concrete) = false
+default_torsion_released(::Val{:girder}, ::Concrete) = false
+default_torsion_released(::Val{:beam}, ::Concrete) = false
+
+default_seat_eccentricity(::Val{:joist}, ::Concrete, host_depth, member_depth) = (0.0, 0.0, 0.0, 0.0)
+default_seat_eccentricity(::Val{:girder}, ::Concrete, host_depth, member_depth) = (0.0, 0.0, 0.0, 0.0)
+default_seat_eccentricity(::Val{:beam}, ::Concrete, host_depth, member_depth) = (0.0, 0.0, 0.0, 0.0)

@@ -50,6 +50,11 @@ using Asap  # custom units (kip, ksi, ksf, psf, etc.)
         include("steel_member/composite/test_composite_beam.jl")
     end
 
+    # ─── Members: connection defaults ────────────────────────────────────
+    @testset "Member Defaults" begin
+        include("members/test_defaults.jl")
+    end
+
     # ─── Concrete Beams ──────────────────────────────────────────────────
     @testset "Concrete Beams" begin
         include("concrete_beam/test_beam_section.jl")
@@ -146,6 +151,11 @@ using Asap  # custom units (kip, ksi, ksf, psf, etc.)
         include("optimize/test_hss_column_nlp.jl")
         include("optimize/test_w_column_nlp.jl")
         include("optimize/test_multi_material_mip.jl")
+    end
+
+    # ─── Structural Walls (lateral system) ───────────────────────────────
+    @testset "Walls" begin
+        include("walls/test_walls.jl")
     end
 
     # ─── PixelFrame ──────────────────────────────────────────────────────

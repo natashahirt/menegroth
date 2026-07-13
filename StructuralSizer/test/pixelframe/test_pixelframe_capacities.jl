@@ -152,7 +152,7 @@ end
         @test frc.fiber_dosage == 20.0
         @test frc.fR1 > 0.0  # from regression
         @test frc.fR3 > 0.0  # from regression
-        @test frc.fiber_ecc == 1.4  # updated default
+        @test frc.fiber_ecc == 1.4u"kgCO2e/kg"  # updated default (typed kgCO₂e/kg)
 
         # Delegated from Concrete
         @test isapprox(ustrip(u"MPa", frc.fc′), 57.0; atol=1e-6)
@@ -393,17 +393,19 @@ end
     # Embodied carbon
     # =========================================================================
     @testset "Embodied carbon — concrete ECC formula" begin
-        @test isapprox(pf_concrete_ecc(28.0u"MPa"), 4.57 * 28.0 + 217.0; rtol=1e-6)
-        @test isapprox(pf_concrete_ecc(57.0u"MPa"), 4.57 * 57.0 + 217.0; rtol=1e-6)
-        @test isapprox(pf_concrete_ecc(100.0u"MPa"), 4.57 * 100.0 + 217.0; rtol=1e-6)
+        # `pf_concrete_ecc` returns a typed `kgCO₂e/m³` quantity; compare
+        # against the same typed reference rather than a bare Float64.
+        @test isapprox(pf_concrete_ecc(28.0u"MPa"),  (4.57 * 28.0  + 217.0)u"kgCO2e/m^3"; rtol=1e-6)
+        @test isapprox(pf_concrete_ecc(57.0u"MPa"),  (4.57 * 57.0  + 217.0)u"kgCO2e/m^3"; rtol=1e-6)
+        @test isapprox(pf_concrete_ecc(100.0u"MPa"), (4.57 * 100.0 + 217.0)u"kgCO2e/m^3"; rtol=1e-6)
     end
 
     @testset "Embodied carbon — per meter" begin
         s = _thesis_section()
-        carbon = pf_carbon_per_meter(s)
+        carbon = pf_carbon_per_meter(s)  # typed kgCO₂e/m
 
-        @test carbon > 0
-        @test 0.1 < carbon < 100.0  # Broad sanity bounds
+        @test carbon > 0.0u"kgCO2e/m"
+        @test 0.1u"kgCO2e/m" < carbon < 100.0u"kgCO2e/m"  # broad sanity bounds
     end
 
     @testset "Embodied carbon — higher fc' gives higher carbon" begin
@@ -420,17 +422,19 @@ end
         s = _thesis_section()
         frc = s.material
 
-        carbon_1m = objective_value(MinCarbon(), s, frc, 1.0u"m")
-        carbon_2m = objective_value(MinCarbon(), s, frc, 2.0u"m")
+        carbon_1m = objective_value(MinCarbon(), s, frc, 1.0u"m")   # typed kgCO₂e
+        carbon_2m = objective_value(MinCarbon(), s, frc, 2.0u"m")   # typed kgCO₂e
 
-        @test carbon_1m > 0
+        @test carbon_1m > 0.0u"kgCO2e"
         @test isapprox(carbon_2m, 2.0 * carbon_1m; rtol=1e-6)
-        @test isapprox(carbon_1m, pf_carbon_per_meter(s); rtol=1e-6)
+        # `pf_carbon_per_meter(s) * 1.0u"m"` is `kgCO₂e/m × m = kgCO₂e`; Unitful
+        # normalises the resulting unit so the comparison matches the objective.
+        @test isapprox(carbon_1m, pf_carbon_per_meter(s) * 1.0u"m"; rtol=1e-6)
     end
 
     @testset "Embodied carbon — fiber_ecc default is 1.4" begin
         s = _thesis_section()
-        @test s.material.fiber_ecc == 1.4
+        @test s.material.fiber_ecc == 1.4u"kgCO2e/kg"
     end
 
     @testset "Embodied carbon — layup comparison" begin

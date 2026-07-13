@@ -442,8 +442,10 @@ function _flat_plate_objective(p::FlatPlateNLPProblem, h, c, rebar)
     elseif obj isa MinWeight
         return V_conc * ρ_c + V_steel * ρ_s
     elseif obj isa MinCarbon
-        return V_conc * ρ_c * p.material.concrete.ecc +
-               V_steel * ρ_s * p.material.rebar.ecc
+        # Strip typed `ecc` once at the NLP boundary — JuMP needs bare Float64.
+        ecc_c = ustrip(u"kgCO2e/kg", p.material.concrete.ecc)
+        ecc_s = ustrip(u"kgCO2e/kg", p.material.rebar.ecc)
+        return V_conc * ρ_c * ecc_c + V_steel * ρ_s * ecc_s
     elseif obj isa MinCost
         cc = p.material.concrete.cost
         cs = p.material.rebar.cost

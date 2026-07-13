@@ -575,10 +575,11 @@ function _convert_objective(objective::MinWeight, problem::AbstractNLPProblem, v
     volume * density
 end
 
-"""_convert_objective for MinCarbon: volume × ρ × ecc."""
+"""_convert_objective for MinCarbon: volume × ρ × ecc (returns bare Float64
+in kgCO₂e for the NLP solver; the typed `ecc` is stripped once here)."""
 function _convert_objective(objective::MinCarbon, problem::AbstractNLPProblem, volume::Float64)
     density = ustrip(u"kg/m^3", problem.material.ρ)
-    ecc = problem.material.ecc
+    ecc = ustrip(u"kgCO2e/kg", problem.material.ecc)
     volume * density * ecc
 end
 

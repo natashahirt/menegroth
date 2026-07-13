@@ -42,7 +42,14 @@ after convergence).
 - `f_pe_values`: Effective prestress values [MPa] (default: [500.0])
 - `d_ps_values`: Tendon eccentricity from centroid [mm] (default: 50:25:250)
 - `E_s`: Tendon modulus [MPa] (default: 200_000)
-- `f_py`: Tendon yield strength [MPa] (default: 0.85×1900 = 1615)
+- `f_py`: Tendon yield strength [MPa] (default
+  `ustrip(u"MPa", ASTM_A416_GR270_LR_FPY) = 1674`, Grade 270 low-relaxation
+  strand per ACI 318-11 R18.7.2). Used **only** as the filter threshold —
+  the catalog itself is `f_py`-agnostic, so this controls which sections
+  are excluded for failing the ε_c convergence check, not the capacity
+  later computed by the checker. Keep it aligned with
+  [`PixelFrameChecker`](@ref) `f_py_MPa` to avoid drift between
+  "sections in the catalog" and "sections the checker can size".
 - `fiber_ecc`: Fiber embodied carbon [kgCO₂e/kg] (default: 1.4)
 
 # Returns
@@ -76,7 +83,9 @@ function generate_pixelframe_catalog(;
     f_pe_values::AbstractVector{<:Real} = [500.0],
     d_ps_values::AbstractVector{<:Real} = collect(Float64, 50:25:250),
     E_s::Real = 200_000.0,
-    f_py::Real = 0.85 * 1900.0,  # 1615 MPa, per thesis convention
+    # f_py default = ASTM A416 Gr 270 low-relaxation minimum yield, kept in
+    # sync with the PixelFrameChecker default (ACI 318-11 R18.7.2).
+    f_py::Real = ustrip(u"MPa", ASTM_A416_GR270_LR_FPY),
     fiber_ecc::Real = 1.4,       # kgCO₂e/kg-steel (original Pixelframe.jl value)
 )
     catalog = PixelFrameSection[]

@@ -51,9 +51,9 @@ println("═"^60)
             @test ustrip(u"kg", mass) > 0
 
             ec = coating_ec(sec, coating, L; exposure=:three_sided, ecc=ECC_SFRM)
-            @test ec > 0
-            # EC = mass_kg * ecc
-            @test isapprox(ec, ustrip(u"kg", mass) * ECC_SFRM; rtol=1e-6)
+            @test ec > 0.0u"kgCO2e"
+            # EC = mass × ecc (both typed; Unitful checks the dimensions).
+            @test isapprox(ec, mass * ECC_SFRM; rtol=1e-6)
         end
 
         @testset "zero thickness → zero EC" begin
@@ -62,7 +62,7 @@ println("═"^60)
             L = 6.0u"m"
 
             @test ustrip(u"m^3", coating_volume(sec, coating, L)) == 0.0
-            @test coating_ec(sec, coating, L) == 0.0
+            @test coating_ec(sec, coating, L) == 0.0u"kgCO2e"
         end
 
         @testset "compute_surface_coating → coating_ec round-trip" begin
@@ -75,7 +75,7 @@ println("═"^60)
             @test coating.thickness_in > 0.25
 
             ec = coating_ec(sec, coating, 6.0u"m"; exposure=:three_sided)
-            @test ec > 0
+            @test ec > 0.0u"kgCO2e"
         end
     end
 

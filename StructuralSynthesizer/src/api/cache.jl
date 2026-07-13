@@ -81,8 +81,15 @@ end
     compute_geometry_hash(input::APIInput) -> String
 
 Compute a deterministic SHA-256 hash of the geometry portion of the input
-(units, vertices, edges, supports, stories_z, faces). Params are excluded
-so that parameter-only changes produce the same hash.
+(`units`, `vertices`, `edges`, `supports`, `faces`). Params are excluded so
+that parameter-only changes produce the same hash.
+
+`stories_z` is deliberately **not** included: `json_to_skeleton` calls
+`rebuild_stories!` unconditionally, which overwrites any incoming
+`stories_z` with story elevations inferred from rounded vertex Z values.
+Including `stories_z` in the hash therefore caused spurious cache misses
+when clients sent the same geometry with cosmetically different
+`stories_z` payloads.
 """
 function compute_geometry_hash(input::APIInput)
     ctx = SHA.SHA256_CTX()
@@ -110,9 +117,6 @@ function compute_geometry_hash(input::APIInput)
 
     # Supports
     SHA.update!(ctx, reinterpret(UInt8, Int64.(input.supports)))
-
-    # Stories Z
-    SHA.update!(ctx, reinterpret(UInt8, Float64.(input.stories_z)))
 
     # Faces (sorted by category for determinism)
     for cat in sort(collect(keys(input.faces)))

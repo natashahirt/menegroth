@@ -44,7 +44,7 @@ using Unitful
 
         # ── ECC: RMC EPD dataset LWC 4 ksi p50 / ρ ───────────────────────
         # 448 kgCO₂e/m³ ÷ 1840 kg/m³ ≈ 0.243 kgCO₂e/kg
-        @test isapprox(c.ecc, 0.243; atol = 0.005)
+        @test isapprox(c.ecc, 0.243u"kgCO2e/kg"; atol = 0.005u"kgCO2e/kg")
         # Sanity: LWC ECC is meaningfully higher than NWC_4000 (kiln-fired
         # aggregate dominates) — at empirical medians, ~1.6×–2.5× NWC.
         @test c.ecc > 1.5 * NWC_4000.ecc
@@ -70,7 +70,7 @@ using Unitful
 
         # ── ECC: same RMC EPD per-m³ baseline / smaller ρ → higher per-kg
         # 448 / 1680 ≈ 0.267 kgCO₂e/kg (extrapolated — no all-LWC EPD)
-        @test isapprox(c.ecc, 0.267; atol = 0.005)
+        @test isapprox(c.ecc, 0.267u"kgCO2e/kg"; atol = 0.005u"kgCO2e/kg")
         # Per-kg ECC must be larger than sand-LWC because the GWP/m³ is held
         # constant and ρ is smaller (extrapolated assumption — flagged in source).
         @test c.ecc > LWC_4000.ecc
@@ -114,10 +114,11 @@ using Unitful
     # against accidental decoupling of (ρ, ECC) when the values get swapped.
     # =========================================================================
     @testset "EC per m³ matches RMC EPD median" begin
-        gwp_per_m3(c) = c.ecc * ustrip(u"kg/m^3", c.ρ)
-        # Both presets ought to land near 448 kgCO₂e/m³ (within rounding)
-        @test isapprox(gwp_per_m3(LWC_4000),    448.0; atol = 5.0)
-        @test isapprox(gwp_per_m3(LWC_4000_AL), 448.0; atol = 5.0)
+        # `c.ecc * c.ρ` now flows through Unitful: kgCO₂e/kg × kg/m³ = kgCO₂e/m³,
+        # so we compare directly to the typed RMC EPD median.
+        gwp_per_m3(c) = uconvert(u"kgCO2e/m^3", c.ecc * c.ρ)
+        @test isapprox(gwp_per_m3(LWC_4000),    448.0u"kgCO2e/m^3"; atol = 5.0u"kgCO2e/m^3")
+        @test isapprox(gwp_per_m3(LWC_4000_AL), 448.0u"kgCO2e/m^3"; atol = 5.0u"kgCO2e/m^3")
     end
 
     # =========================================================================
@@ -153,7 +154,6 @@ using Unitful
         # Per-kg ECC: LWC > NWC (manufactured aggregate); per-m³ ECC: LWC > NWC
         # (the NRMCA mix-design difference outweighs density savings).
         @test LWC_4000.ecc > NWC_4000.ecc
-        @test (LWC_4000.ecc * ustrip(u"kg/m^3", LWC_4000.ρ)) >
-              (NWC_4000.ecc * ustrip(u"kg/m^3", NWC_4000.ρ))
+        @test (LWC_4000.ecc * LWC_4000.ρ) > (NWC_4000.ecc * NWC_4000.ρ)
     end
 end

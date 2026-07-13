@@ -876,23 +876,30 @@ begin
                 ustrip(u"MPa", mat.fc′), mat.fiber_dosage, ustrip(u"m^3", vol))
     end
     @printf("    %-12s  %10s  %12.6f\n", "TOTAL", "", sum(ustrip(u"m^3", v) for v in values(col_vols)))
-    println("    Total carbon: $(round(col_total_carbon, digits=2)) kgCO₂e")
+    col_total_carbon_kgco2e = ustrip(u"kgCO2e", col_total_carbon)
+    println("    Total carbon: $(round(col_total_carbon_kgco2e, digits=2)) kgCO₂e")
 
     # ── Step 5: Compare uniform vs relaxed carbon ──
+    # See `test_beam_sizing_report.jl` for the matching beam-side helper.
+    # Kept in typed-quantity form to mirror `pf_carbon_per_meter` and
+    # let Unitful catch any dimensional drift between the two pipelines.
     col_uniform_carbon = let
-        A_c_m2 = ustrip(u"m^2", section_area(cwf_sec))
-        A_s_m2 = ustrip(u"m^2", cwf_sec.A_s)
-        L_px_m = col_px_mm / 1000.0
-        fc_gov = cwf_sec.material.fc′
-        dosage_gov = cwf_sec.material.fiber_dosage
-        ec_gov = StructuralSizer.pf_concrete_ecc(fc_gov)
-        col_n_px * (ec_gov * A_c_m2 * L_px_m + cwf_sec.material.fiber_ecc * (dosage_gov * A_c_m2 + StructuralSizer._STEEL_DENSITY_KGM3 * A_s_m2) * L_px_m)
+        A_c        = section_area(cwf_sec)
+        A_s        = cwf_sec.A_s
+        L_px       = col_px_mm * u"mm"
+        dosage_gov = cwf_sec.material.fiber_dosage * u"kg/m^3"
+        ec_gov     = StructuralSizer.pf_concrete_ecc(cwf_sec.material.fc′)
+        per_pixel  = ec_gov * A_c * L_px +
+                     cwf_sec.material.fiber_ecc * (dosage_gov * A_c +
+                                                   StructuralSizer._STEEL_DENSITY * A_s) * L_px
+        uconvert(u"kgCO2e", col_n_px * per_pixel)
     end
+    col_uniform_carbon_kgco2e = ustrip(u"kgCO2e", col_uniform_carbon)
 
-    col_savings = (1 - col_total_carbon / col_uniform_carbon) * 100
+    col_savings = (1 - col_total_carbon_kgco2e / col_uniform_carbon_kgco2e) * 100
     println()
-    @printf("    Uniform material carbon : %.2f kgCO₂e\n", col_uniform_carbon)
-    @printf("    Per-pixel relaxed carbon: %.2f kgCO₂e\n", col_total_carbon)
+    @printf("    Uniform material carbon : %.2f kgCO₂e\n", col_uniform_carbon_kgco2e)
+    @printf("    Per-pixel relaxed carbon: %.2f kgCO₂e\n", col_total_carbon_kgco2e)
     @printf("    Carbon savings          : %+.1f%%\n", col_savings)
     println()
     col_note("Columns with triangular moment envelope benefit from per-pixel relaxation:")

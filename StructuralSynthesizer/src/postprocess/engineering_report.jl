@@ -800,26 +800,33 @@ function _report_takeoff(io::IO, design::BuildingDesign; du::DisplayUnits=design
     Printf.@printf(io, "  %-16s %12.1f\n", "TOTAL", conc_total)
     println(io)
 
-    # Embodied carbon — use `design.summary` (same TOTAL as API; breakdown stored at capture with `compute_building_ec`)
+    # Embodied carbon — use `design.summary` (same TOTAL as API; breakdown
+    # stored at capture with `compute_building_ec`). Fields are typed
+    # `kgCO₂e` quantities — strip once at this report-rendering boundary.
     s = design.summary
-    ec_total = s.embodied_carbon
+    ec_total        = ustrip(u"kgCO2e", s.embodied_carbon)
+    ec_slabs        = ustrip(u"kgCO2e", s.embodied_carbon_slabs)
+    ec_columns      = ustrip(u"kgCO2e", s.embodied_carbon_columns)
+    ec_beams        = ustrip(u"kgCO2e", s.embodied_carbon_beams)
+    ec_struts       = ustrip(u"kgCO2e", s.embodied_carbon_struts)
+    ec_foundations  = ustrip(u"kgCO2e", s.embodied_carbon_foundations)
+    ec_fireproofing = ustrip(u"kgCO2e", s.embodied_carbon_fireproofing)
     if ec_total > 0.0
-        sub_sum = s.embodied_carbon_slabs + s.embodied_carbon_columns + s.embodied_carbon_beams +
-                  s.embodied_carbon_struts + s.embodied_carbon_foundations + s.embodied_carbon_fireproofing
+        sub_sum = ec_slabs + ec_columns + ec_beams + ec_struts + ec_foundations + ec_fireproofing
         # Designs captured before per-system fields existed: all breakdown zeros but total set.
         if sub_sum <= 1e-9
             Printf.@printf(io, "  Embodied carbon:  %.0f kgCO₂e (per-system breakdown unavailable for this design)\n", ec_total)
         else
             println(io, "  Embodied carbon (kgCO₂e)")
-            Printf.@printf(io, "  %-20s %12.0f\n", "Slabs", s.embodied_carbon_slabs)
-            Printf.@printf(io, "  %-20s %12.0f\n", "Columns", s.embodied_carbon_columns)
-            Printf.@printf(io, "  %-20s %12.0f\n", "Beams", s.embodied_carbon_beams)
-            if s.embodied_carbon_struts > 0.0
-                Printf.@printf(io, "  %-20s %12.0f\n", "Struts", s.embodied_carbon_struts)
+            Printf.@printf(io, "  %-20s %12.0f\n", "Slabs",   ec_slabs)
+            Printf.@printf(io, "  %-20s %12.0f\n", "Columns", ec_columns)
+            Printf.@printf(io, "  %-20s %12.0f\n", "Beams",   ec_beams)
+            if ec_struts > 0.0
+                Printf.@printf(io, "  %-20s %12.0f\n", "Struts", ec_struts)
             end
-            Printf.@printf(io, "  %-20s %12.0f\n", "Foundations", s.embodied_carbon_foundations)
-            if s.embodied_carbon_fireproofing > 0.0
-                Printf.@printf(io, "  %-20s %12.0f\n", "Fireproofing", s.embodied_carbon_fireproofing)
+            Printf.@printf(io, "  %-20s %12.0f\n", "Foundations", ec_foundations)
+            if ec_fireproofing > 0.0
+                Printf.@printf(io, "  %-20s %12.0f\n", "Fireproofing", ec_fireproofing)
             end
             Printf.@printf(io, "  %-20s %12s\n", "─"^18, "─"^12)
             Printf.@printf(io, "  %-20s %12.0f\n", "TOTAL", ec_total)

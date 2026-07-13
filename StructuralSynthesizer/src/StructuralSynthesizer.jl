@@ -22,8 +22,10 @@ function __init__()
 end
 
 # Expected Asap custom-unit symbols. Used by the runtime sanity check.
+# `:KgCO2e` is the embodied-carbon-equivalent ref-unit (Asap dimension `𝐗`),
+# added alongside the existing US-customary units.
 const _ASAP_UNIT_SYMS = (:Kip, :KipPerSquareInch, :PoundPerSquareFoot,
-                          :KipPerSquareFoot, :PoundPerCubicFoot)
+                          :KipPerSquareFoot, :PoundPerCubicFoot, :KgCO2e)
 
 """
     _ensure_asap_units!()
@@ -139,9 +141,15 @@ export governing_combo, validate_fire_rating, has_fire_rating  # defined locally
 export add_coating_loads!
 
 # --- Member type hierarchy ---
-export AbstractMember, MemberBase, Beam, Column, Strut
+export AbstractMember, MemberBase, Beam, Column, Strut, Wall
+export wall_center, wall_length, wall_orientation, to_wall_line  # Shear-wall geometry + lateral-system bridge
 export all_members, segment_indices, member_length, unbraced_length
 export group_id, section, volumes, set_group_id!, set_section!, set_volumes!
+# Framing-hierarchy role / level helpers (Phase 1)
+export is_girder, is_joist, is_beam, level_of, lateral_role_of
+# Variable tributary profile (Phase 0)
+export TributaryProfile, tributary_profile, tributary_width_scalar, tributary_width_envelope
+export compute_member_tributaries!
 export classify_column_position, is_exterior_support  # Column position classification for DDM/EFM
 export update_structural_offsets!, structural_center_xy_m  # Architectural → structural centerline
 export Support, Foundation, FoundationGroup, FoundationDemand
@@ -192,6 +200,7 @@ export group_foundations_by_reaction!, size_foundations_grouped!, foundation_gro
 # --- Postprocessing (Embodied Carbon + Engineering Report) ---
 export element_ec, compute_building_ec, ec_summary
 export ElementECResult, BuildingECResult
+export to_dict
 export engineering_report
 
 # --- API server ---

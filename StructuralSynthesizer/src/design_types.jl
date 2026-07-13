@@ -899,18 +899,22 @@ Base.@kwdef mutable struct DesignSummary
     steel_weight::typeof(1.0u"kg") = 0.0u"kg"
     rebar_weight::typeof(1.0u"kg") = 0.0u"kg"
     timber_volume::typeof(1.0u"m^3") = 0.0u"m^3"
-    
-    # Derived metrics
-    embodied_carbon::Float64 = 0.0    # kgCO₂e
-    # Populated with `embodied_carbon` in `_compute_design_summary!` (same `compute_building_ec` call).
-    embodied_carbon_slabs::Float64 = 0.0
-    embodied_carbon_columns::Float64 = 0.0
-    embodied_carbon_beams::Float64 = 0.0
-    embodied_carbon_struts::Float64 = 0.0
-    embodied_carbon_foundations::Float64 = 0.0
-    embodied_carbon_fireproofing::Float64 = 0.0
+
+    # Derived metrics. All `embodied_carbon_*` fields carry typed
+    # `kgCO₂e` quantities (Asap `𝐗` dimension); serialize / report /
+    # narrate / agent-tool paths strip via `ustrip(u"kgCO2e", …)` at the
+    # JSON / Printf boundary. Populated by `_compute_design_summary!` from
+    # the single `compute_building_ec` call so the per-element parts sum
+    # exactly to `embodied_carbon`.
+    embodied_carbon::CarbonMassQuantity              = 0.0u"kgCO2e"
+    embodied_carbon_slabs::CarbonMassQuantity        = 0.0u"kgCO2e"
+    embodied_carbon_columns::CarbonMassQuantity      = 0.0u"kgCO2e"
+    embodied_carbon_beams::CarbonMassQuantity        = 0.0u"kgCO2e"
+    embodied_carbon_struts::CarbonMassQuantity       = 0.0u"kgCO2e"
+    embodied_carbon_foundations::CarbonMassQuantity  = 0.0u"kgCO2e"
+    embodied_carbon_fireproofing::CarbonMassQuantity = 0.0u"kgCO2e"
     cost_estimate::Float64 = 0.0      # $
-    
+
     # Status
     all_checks_pass::Bool = true
     # When any element fails API-style `ok`, this names the worst failing element and its governing ratio.

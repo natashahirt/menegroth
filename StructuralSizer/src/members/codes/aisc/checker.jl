@@ -484,11 +484,13 @@ end
 
 """
     composite_stud_contribution(ctx::CompositeContext, section::ISymmSection,
-                                 material::StructuralSteel, objective) -> Float64
+                                 material::StructuralSteel, objective) -> Unitful.Quantity
 
 Compute the stud contribution to the objective function for a composite beam.
-Returns the additional objective value (weight in kg, or ECC in kgCO₂e, etc.)
-from all studs on the beam.
+Returns the additional objective value as a typed quantity (`kg` for
+[`MinWeight`](@ref), `kgCO2e` for [`MinCarbon`](@ref), `m^3` for
+[`MinVolume`](@ref)) so it composes cleanly with `objective_value` at the
+cache-build site.
 
 Assumes full composite (conservative for stud count).
 """
@@ -507,10 +509,18 @@ function composite_stud_contribution(
     n_studs_total = 2 * n_studs_half  # both sides of max moment
     m_one = stud_mass(ctx.anchor)
 
+    # Returns a typed Unitful quantity that matches the objective dimension —
+    # the cache-build site (`precompute_capacities!`) reads `ref_unit` from
+    # `objective_value` and applies `ustrip(ref_unit, ...)` at the JuMP boundary.
     if objective isa MinWeight
-        return ustrip(u"kg", m_one) * n_studs_total
+        return m_one * n_studs_total                           # kg
     elseif objective isa MinCarbon
-        return ustrip(u"kg", m_one) * n_studs_total * ctx.anchor.ecc
+        return m_one * n_studs_total * ctx.anchor.ecc          # kgCO₂e
+    elseif objective isa MinVolume
+        # Stud volume is small compared to beam steel; treat as zero per the
+        # historical convention. Returning typed zero keeps caller arithmetic
+        # type-stable.
+        return 0.0u"m^3"
     else
         return 0.0
     end

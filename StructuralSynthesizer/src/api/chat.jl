@@ -2805,7 +2805,7 @@ function _most_recent_design_snapshot()::String
     conc_m3  = round(ustrip(u"m^3", s.concrete_volume); digits=1)
     steel_kg = round(ustrip(u"kg",  s.steel_weight); digits=0)
     rebar_kg = round(ustrip(u"kg",  s.rebar_weight); digits=0)
-    ec       = round(s.embodied_carbon; digits=0)
+    ec       = round(ustrip(u"kgCO2e", s.embodied_carbon); digits=0)
     n_fail_cols  = count(p -> !p.second.ok, design.columns)
     n_fail_beams = count(p -> !p.second.ok, design.beams)
     n_fail_slabs = count(p -> !(p.second.converged && p.second.deflection_ok && p.second.punching_ok), design.slabs)
@@ -4615,7 +4615,7 @@ function _dispatch_chat_tool(tool::String, args::Dict{String, Any})::Dict{String
             all_pass          = s.all_checks_pass,
             critical_ratio    = s.critical_ratio,
             critical_element  = s.critical_element,
-            embodied_carbon   = s.embodied_carbon,
+            embodied_carbon   = ustrip(u"kgCO2e", s.embodied_carbon),
             n_columns         = length(design.columns),
             n_beams           = length(design.beams),
             n_slabs           = length(design.slabs),
@@ -4654,7 +4654,7 @@ function _dispatch_chat_tool(tool::String, args::Dict{String, Any})::Dict{String
             "all_pass"         => design.summary.all_checks_pass,
             "critical_element" => design.summary.critical_element,
             "critical_ratio"   => design.summary.critical_ratio,
-            "embodied_carbon_kgco2e" => round(design.summary.embodied_carbon; digits=0),
+            "embodied_carbon_kgco2e" => round(ustrip(u"kgCO2e", design.summary.embodied_carbon); digits=0),
             "n_failing"        => n_fail,
             "warnings"         => warnings,
             "note"             => "Quick-check result: visualization skipped, max 2 sizing iterations, MIP capped at 20s. " *

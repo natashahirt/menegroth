@@ -1949,3 +1949,361 @@ function plot_stud_comparison(df; ll = 50.0)
         _save_fig(fig, "11_stud_$(slug).png")
     end
 end
+
+# ==============================================================================
+# Section 3 — Whole-Building EC Cascade (figures 30–33)
+# ==============================================================================
+#
+# Inputs are DataFrames produced by `sweep_building` (and `cascade_table`
+# in `building_scale_analysis.jl`). Schema highlights:
+#   span_ft, n_stories, concrete, method
+#   slab_ec, column_ec, beam_ec, foundation_ec, fireproofing_ec, total_ec
+#   intensity_kgco2e_per_m2, slab_h_in, col_avg_in, fdn_B_max_ft
+#
+# The figures answer four sequential questions:
+#   30 — How does total EC split across systems for each operating point?
+#   31 — How much building-EC do thinner slabs save vs the ACI-min baseline,
+#        and which systems contribute the savings?
+#   32 — What is the kgCO₂e/m² intensity at each operating point?
+#   33 — Does slab-EC change linearly translate to building-EC change?
+#        (slope > 1 ⇒ cascade amplifies; slope ≈ 1 ⇒ slab dominates totals.)
+
+"""Per-system EC columns and their human labels for stacked bars."""
+const SECTION3_SYSTEM_COLS = [:slab_ec, :column_ec, :beam_ec, :foundation_ec, :fireproofing_ec]
+const SECTION3_SYSTEM_LABEL = Dict(
+    :slab_ec         => "Slabs",
+    :column_ec       => "Columns",
+    :beam_ec         => "Beams",
+    :foundation_ec   => "Foundations",
+    :fireproofing_ec => "Fireproofing",
+)
+const SECTION3_SYSTEM_COLOR = Dict(
+    :slab_ec         => :steelblue,
+    :column_ec       => :forestgreen,
+    :beam_ec         => :gold,
+    :foundation_ec   => :sienna,
+    :fireproofing_ec => :gray70,
+)
+
+# Section 3 share METHOD_ORDER / METHOD_COLORS with Sections 1/2 (METHOD_ORDER
+# entries above), so a single colour family is consistent across the paper.
+
+"""Return the converged-rows-only subset filtered by `n_stories`."""
+function _section3_filter(df::DataFrame, n_stories::Int)
+    work = filter(r -> r.converged === true && r.n_stories == n_stories, df)
+    isempty(work) && return work
+    # Drop fully-empty system columns so stacks don't show an all-zero band.
+    return work
+end
+
+"""
+    plot_building_ec_stacked(df; n_stories=6, file_suffix="")
+
+Stacked bars of per-system EC for each (span × concrete × method) operating
+point. Layout: rows = spans, cols = concretes; within each cell one bar per
+method, stacked by system (slabs / columns / beams / foundations / fireproof).
+"""
+function plot_building_ec_stacked(df::DataFrame; n_stories::Int = 6,
+                                   file_suffix::String = "")
+    work = _section3_filter(df, n_stories)
+    if isempty(work)
+        println("  Skipping stacked EC — no converged rows at n_stories=$n_stories")
+        return nothing
+    end
+
+    spans     = sort(unique(work.span_ft))
+    concretes = sort(unique(work.concrete))
+    methods   = [m for m in METHOD_ORDER if any(work.method .== m)]
+
+    n_rows = length(spans); n_cols = length(concretes)
+    fig = Figure(size = (320 * n_cols + 220, 280 * n_rows + 100))
+    Label(fig[0, 1:n_cols],
+          "Whole-Building EC by System — $(n_stories)-Story Medium Office";
+          fontsize = 16, font = :bold, tellwidth = false)
+
+    y_max = maximum(work.total_ec; init = 0.0) * 1.05
+
+    for (i, span) in enumerate(spans), (j, conc) in enumerate(concretes)
+        cell = filter(r -> r.span_ft ≈ span && r.concrete == conc, work)
+        ax = Axis(fig[i, j];
+                  xlabel  = i == n_rows ? "" : "",
+                  ylabel  = j == 1     ? "EC (kgCO₂e)" : "",
+                  title   = i == 1     ? "$(conc)" : "",
+                  xticks  = (1:length(methods), methods),
+                  xticklabelrotation = π/6,
+                  xticklabelsize = 9, yticklabelsize = 9,
+                  alignmode = Outside(15))
+        ylims!(ax, 0, y_max)
+
+        for (xi, m) in enumerate(methods)
+            row_idx = findfirst(r -> r.method == m, eachrow(cell))
+            isnothing(row_idx) && continue
+            row = cell[row_idx, :]
+            bottom = 0.0
+            for sys in SECTION3_SYSTEM_COLS
+                v = getproperty(row, sys)
+                (ismissing(v) || isnan(v) || v ≤ 0.0) && continue
+                barplot!(ax, [xi], [v];
+                         offset       = [bottom],
+                         color        = SECTION3_SYSTEM_COLOR[sys],
+                         width        = 0.7,
+                         strokewidth  = 0.4,
+                         strokecolor  = :black)
+                bottom += v
+            end
+        end
+
+        Label(fig[i, 0], "$(round(Int, span)) ft bay";
+              fontsize = 11, font = :bold, rotation = π/2, tellheight = false)
+    end
+
+    # Legend
+    sys_present = filter(s -> any(any(getproperty(work, s) .> 0)), SECTION3_SYSTEM_COLS)
+    elements    = [PolyElement(color = SECTION3_SYSTEM_COLOR[s]) for s in sys_present]
+    labels      = [SECTION3_SYSTEM_LABEL[s] for s in sys_present]
+    Legend(fig[1:n_rows, n_cols + 1], elements, labels;
+           framevisible = false, labelsize = 10, rowgap = 4)
+
+    rowgap!(fig.layout, 8); colgap!(fig.layout, 12)
+    resize_to_layout!(fig)
+    return _save_fig(fig, "30_building_ec_stacked$(file_suffix).png")
+end
+
+"""
+    plot_building_ec_cascade(df; n_stories=6, baseline_method="ACI Min",
+                              file_suffix="")
+
+Cascade chart: Δ EC vs the `baseline_method` for each system, grouped by
+method within each (span × concrete) cell. Negative values are *savings*.
+Shows directly how going DDM → FEA cascades from slab → columns → foundations.
+"""
+function plot_building_ec_cascade(df::DataFrame; n_stories::Int = 6,
+                                   baseline_method::String = "ACI Min",
+                                   file_suffix::String = "")
+    work = _section3_filter(df, n_stories)
+    if isempty(work)
+        println("  Skipping cascade — no converged rows at n_stories=$n_stories")
+        return nothing
+    end
+
+    # Compute Δ vs baseline within each (span, concrete) cell.
+    cas = cascade_table(work; baseline_method = baseline_method)
+    isempty(cas) && (println("  Skipping cascade — baseline absent"); return nothing)
+
+    # Drop baseline rows (all zero by construction).
+    cas = filter(r -> r.method != baseline_method, cas)
+    isempty(cas) && (println("  Skipping cascade — only baseline present"); return nothing)
+
+    spans     = sort(unique(cas.span_ft))
+    concretes = sort(unique(cas.concrete))
+    methods   = [m for m in METHOD_ORDER if any(cas.method .== m)]
+
+    n_rows = length(spans); n_cols = length(concretes)
+    fig = Figure(size = (340 * n_cols + 220, 280 * n_rows + 100))
+    Label(fig[0, 1:n_cols],
+          "EC Cascade vs $(baseline_method) — $(n_stories)-Story Medium Office";
+          fontsize = 16, font = :bold, tellwidth = false)
+
+    cascade_cols = [:Δslab_ec, :Δcolumn_ec, :Δbeam_ec, :Δfoundation_ec]
+    label_map    = Dict(:Δslab_ec       => "Slabs",
+                        :Δcolumn_ec     => "Columns",
+                        :Δbeam_ec       => "Beams",
+                        :Δfoundation_ec => "Foundations")
+    color_map    = Dict(:Δslab_ec       => SECTION3_SYSTEM_COLOR[:slab_ec],
+                        :Δcolumn_ec     => SECTION3_SYSTEM_COLOR[:column_ec],
+                        :Δbeam_ec       => SECTION3_SYSTEM_COLOR[:beam_ec],
+                        :Δfoundation_ec => SECTION3_SYSTEM_COLOR[:foundation_ec])
+
+    # Augment cas with Δbeam_ec by joining back to df (cascade_table doesn't
+    # include it because beams are usually empty for the flat-plate cases).
+    base_idx = Dict((r.span_ft, r.n_stories, r.concrete) => r.beam_ec
+                    for r in eachrow(work) if r.method == baseline_method)
+    cas.Δbeam_ec = map(eachrow(cas)) do r
+        row = filter(rr -> rr.span_ft ≈ r.span_ft && rr.concrete == r.concrete &&
+                           rr.n_stories == r.n_stories && rr.method == r.method, work)
+        isempty(row) && return NaN
+        b = get(base_idx, (r.span_ft, r.n_stories, r.concrete), NaN)
+        (isnan(b) || isnan(row.beam_ec[1])) ? NaN : row.beam_ec[1] - b
+    end
+
+    # Symmetric ymax so positive and negative bars share the scale.
+    abs_max = 0.0
+    for sys in cascade_cols
+        col = getproperty(cas, sys)
+        v = maximum(abs.(filter(!isnan, col)); init = 0.0)
+        v > abs_max && (abs_max = v)
+    end
+    yspan = abs_max * 1.1
+
+    for (i, span) in enumerate(spans), (j, conc) in enumerate(concretes)
+        cell = filter(r -> r.span_ft ≈ span && r.concrete == conc, cas)
+        ax = Axis(fig[i, j];
+                  ylabel = j == 1 ? "Δ EC vs $(baseline_method) (kgCO₂e)" : "",
+                  title  = i == 1 ? "$(conc)" : "",
+                  xticks = (1:length(methods), methods),
+                  xticklabelrotation = π/6,
+                  xticklabelsize = 9, yticklabelsize = 9,
+                  alignmode = Outside(15))
+        ylims!(ax, -yspan, yspan)
+        hlines!(ax, [0]; color = :black, linewidth = 0.6)
+
+        # Each system is its own thin bar offset within the group.
+        n_sys = length(cascade_cols)
+        bar_w = 0.7 / n_sys
+        for (k, sys) in enumerate(cascade_cols)
+            xs = Float64[]; ys = Float64[]
+            for (xi, m) in enumerate(methods)
+                row_idx = findfirst(r -> r.method == m, eachrow(cell))
+                isnothing(row_idx) && continue
+                v = getproperty(cell[row_idx, :], sys)
+                (ismissing(v) || isnan(v)) && continue
+                push!(xs, xi + (k - (n_sys + 1) / 2) * bar_w)
+                push!(ys, v)
+            end
+            isempty(xs) && continue
+            barplot!(ax, xs, ys; width = bar_w * 0.95,
+                     color = color_map[sys], strokewidth = 0.4)
+        end
+
+        Label(fig[i, 0], "$(round(Int, span)) ft bay";
+              fontsize = 11, font = :bold, rotation = π/2, tellheight = false)
+    end
+
+    elements = [PolyElement(color = color_map[s]) for s in cascade_cols]
+    labels   = [label_map[s] for s in cascade_cols]
+    Legend(fig[1:n_rows, n_cols + 1], elements, labels;
+           framevisible = false, labelsize = 10, rowgap = 4)
+
+    rowgap!(fig.layout, 8); colgap!(fig.layout, 12)
+    resize_to_layout!(fig)
+    return _save_fig(fig, "31_building_ec_cascade$(file_suffix).png")
+end
+
+"""
+    plot_building_ec_intensity(df; n_stories=6, file_suffix="")
+
+Span × concrete intensity heatmap (kgCO₂e/m²), one panel per method. Annotates
+each cell with the value so absolute numbers are readable alongside the colour.
+"""
+function plot_building_ec_intensity(df::DataFrame; n_stories::Int = 6,
+                                     file_suffix::String = "")
+    work = _section3_filter(df, n_stories)
+    if isempty(work)
+        println("  Skipping intensity heatmap — no converged rows at n_stories=$n_stories")
+        return nothing
+    end
+
+    spans     = sort(unique(work.span_ft))
+    concretes = sort(unique(work.concrete))
+    methods   = [m for m in METHOD_ORDER if any(work.method .== m)]
+
+    int_vals = filter(!isnan, work.intensity_kgco2e_per_m2)
+    isempty(int_vals) && (println("  Skipping intensity — no values"); return nothing)
+    lo, hi = extrema(int_vals)
+
+    fig = Figure(size = (320 * length(methods) + 180, 280 + 100))
+    Label(fig[0, 1:length(methods)],
+          "Building EC Intensity (kgCO₂e/m²) — $(n_stories)-Story";
+          fontsize = 16, font = :bold, tellwidth = false)
+
+    for (k, m) in enumerate(methods)
+        sub = filter(r -> r.method == m, work)
+        Z = fill(NaN, length(spans), length(concretes))
+        for (i, sp) in enumerate(spans), (j, cc) in enumerate(concretes)
+            row = filter(r -> r.span_ft ≈ sp && r.concrete == cc, sub)
+            isempty(row) && continue
+            Z[i, j] = row.intensity_kgco2e_per_m2[1]
+        end
+        ax = Axis(fig[1, k];
+                  xlabel  = "Concrete",
+                  ylabel  = k == 1 ? "Bay span (ft)" : "",
+                  title   = m,
+                  xticks  = (1:length(concretes), concretes),
+                  yticks  = (1:length(spans), [string(round(Int, s)) for s in spans]),
+                  xticklabelsize = 9, yticklabelsize = 9,
+                  titlesize = 12, alignmode = Outside(15))
+        heatmap!(ax, 1:length(spans), 1:length(concretes), Z;
+                 colormap = :viridis, colorrange = (lo, hi), nan_color = :white)
+        for i in 1:length(spans), j in 1:length(concretes)
+            isnan(Z[i, j]) && continue
+            text!(ax, i, j; text = @sprintf("%.0f", Z[i, j]),
+                  align = (:center, :center), fontsize = 10, color = :white)
+        end
+    end
+
+    Colorbar(fig[1, length(methods) + 1];
+             colormap = :viridis, colorrange = (lo, hi),
+             label = "kgCO₂e/m²", labelsize = 10, ticklabelsize = 9)
+
+    rowgap!(fig.layout, 8); colgap!(fig.layout, 12)
+    resize_to_layout!(fig)
+    return _save_fig(fig, "32_building_ec_intensity$(file_suffix).png")
+end
+
+"""
+    plot_slab_vs_building_ec(df; n_stories=6, file_suffix="")
+
+Scatter of slab-only EC intensity (slab_ec / floor_area) vs whole-building
+EC intensity. One marker per (span, method, concrete). The slope above the
+1-to-1 line is the *cascade amplification* — every kgCO₂e/m² of slab savings
+that gets multiplied through column and foundation downsizing.
+"""
+function plot_slab_vs_building_ec(df::DataFrame; n_stories::Int = 6,
+                                   file_suffix::String = "")
+    work = _section3_filter(df, n_stories)
+    if isempty(work)
+        println("  Skipping slab-vs-building scatter — no converged rows at n_stories=$n_stories")
+        return nothing
+    end
+
+    # Slab-only intensity (kgCO₂e/m²) computed from the building totals so the
+    # axes share the exact same floor-area denominator.
+    slab_intensity = work.slab_ec ./ work.floor_area_m2
+
+    fig = Figure(size = (640, 540))
+    Label(fig[0, 1], "Slab vs Whole-Building EC — $(n_stories)-Story";
+          fontsize = 14, font = :bold, tellwidth = false)
+    ax = Axis(fig[1, 1];
+              xlabel = "Slab EC intensity (kgCO₂e/m²)",
+              ylabel = "Building EC intensity (kgCO₂e/m²)",
+              alignmode = Outside(15))
+
+    # 1:1 reference line.
+    xy_lo = 0.0
+    xy_hi = max(maximum(filter(!isnan, slab_intensity); init = 0.0),
+                maximum(filter(!isnan, work.intensity_kgco2e_per_m2); init = 0.0)) * 1.05
+    lines!(ax, [xy_lo, xy_hi], [xy_lo, xy_hi];
+           color = (:black, 0.4), linestyle = :dash, linewidth = 1)
+
+    methods = [m for m in METHOD_ORDER if any(work.method .== m)]
+    for m in methods
+        idx = findall(work.method .== m)
+        isempty(idx) && continue
+        scatter!(ax, slab_intensity[idx], work.intensity_kgco2e_per_m2[idx];
+                 color = _color(m), marker = _marker(m), markersize = 11,
+                 label = m, strokewidth = 0.4)
+    end
+    axislegend(ax; position = :lt, labelsize = 9, framevisible = false)
+
+    resize_to_layout!(fig)
+    return _save_fig(fig, "33_slab_vs_building_ec$(file_suffix).png")
+end
+
+"""
+    plot_section3_all(df; n_stories=nothing)
+
+Render all four Section 3 figures. When `n_stories` is omitted, generates one
+copy per unique value of `df.n_stories`, suffixed with `_<n>st`.
+"""
+function plot_section3_all(df::DataFrame; n_stories::Union{Int, Nothing} = nothing)
+    isempty(df) && return nothing
+    heights = isnothing(n_stories) ? sort(unique(df.n_stories)) : [n_stories]
+    for h in heights
+        sfx = length(heights) > 1 ? "_$(h)st" : ""
+        plot_building_ec_stacked(df;   n_stories = h, file_suffix = sfx)
+        plot_building_ec_cascade(df;   n_stories = h, file_suffix = sfx)
+        plot_building_ec_intensity(df; n_stories = h, file_suffix = sfx)
+        plot_slab_vs_building_ec(df;   n_stories = h, file_suffix = sfx)
+    end
+    return nothing
+end

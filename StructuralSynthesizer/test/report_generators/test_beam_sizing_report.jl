@@ -2189,24 +2189,31 @@ begin
                 ustrip(u"MPa", mat.fc′), mat.fiber_dosage, ustrip(u"m^3", vol))
     end
     @printf("    %-12s  %10s  %12.6f\n", "TOTAL", "", sum(ustrip(u"m^3", v) for v in values(vols)))
-    println("    Total carbon: $(round(total_carbon, digits=2)) kgCO₂e")
+    total_carbon_kgco2e = ustrip(u"kgCO2e", total_carbon)
+    println("    Total carbon: $(round(total_carbon_kgco2e, digits=2)) kgCO₂e")
 
     # ── Step 5: Compare uniform vs relaxed carbon ──
-    # Uniform: all pixels use governing material
+    # Uniform = governing material applied to every pixel. Mirror
+    # `pf_carbon_per_meter` / `pixel_carbon` arithmetic in typed-quantity
+    # form so this independent computation stays in sync with the Asap
+    # `kgCO2e` dimension and survives any future Unitful refactor.
     uniform_carbon = let
-        A_c_m2 = ustrip(u"m^2", section_area(wf_sec))
-        A_s_m2 = ustrip(u"m^2", wf_sec.A_s)
-        L_px_m = px_mm / 1000.0
-        fc_gov = wf_sec.material.fc′
-        dosage_gov = wf_sec.material.fiber_dosage
-        ec_gov = StructuralSizer.pf_concrete_ecc(fc_gov)
-        n_px * (ec_gov * A_c_m2 * L_px_m + wf_sec.material.fiber_ecc * (dosage_gov * A_c_m2 + StructuralSizer._STEEL_DENSITY_KGM3 * A_s_m2) * L_px_m)
+        A_c        = section_area(wf_sec)
+        A_s        = wf_sec.A_s
+        L_px       = px_mm * u"mm"
+        dosage_gov = wf_sec.material.fiber_dosage * u"kg/m^3"
+        ec_gov     = StructuralSizer.pf_concrete_ecc(wf_sec.material.fc′)
+        per_pixel  = ec_gov * A_c * L_px +
+                     wf_sec.material.fiber_ecc * (dosage_gov * A_c +
+                                                  StructuralSizer._STEEL_DENSITY * A_s) * L_px
+        uconvert(u"kgCO2e", n_px * per_pixel)
     end
+    uniform_carbon_kgco2e = ustrip(u"kgCO2e", uniform_carbon)
 
-    savings = (1 - total_carbon / uniform_carbon) * 100
+    savings = (1 - total_carbon_kgco2e / uniform_carbon_kgco2e) * 100
     println()
-    @printf("    Uniform material carbon : %.2f kgCO₂e\n", uniform_carbon)
-    @printf("    Per-pixel relaxed carbon: %.2f kgCO₂e\n", total_carbon)
+    @printf("    Uniform material carbon : %.2f kgCO₂e\n", uniform_carbon_kgco2e)
+    @printf("    Per-pixel relaxed carbon: %.2f kgCO₂e\n", total_carbon_kgco2e)
     @printf("    Carbon savings          : %+.1f%%\n", savings)
     println()
     bm_note("Per-pixel relaxation uses lower-grade concrete at low-demand positions (near supports),")

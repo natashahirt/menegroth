@@ -178,17 +178,20 @@ end
 
 """
     coating_ec(section, coating::SurfaceCoating, L;
-              exposure::Symbol=:three_sided, ecc=0.85)
+              exposure::Symbol=:three_sided, ecc=ECC_SFRM)
 
-Compute the embodied carbon (kgCO₂e) of fire protection coating on a member.
+Compute the embodied carbon of a fire protection coating on a member as a
+typed `kgCO₂e` quantity (Asap `𝐗` dimension).
 
-Default ECC for SFRM is 0.85 kgCO₂e/kg (cementitious product, CLF baseline).
+`ecc` may be a bare number (interpreted as kgCO₂e/kg) or any `CarbonPerMass`
+Unitful quantity. Default is `ECC_SFRM` (0.85 kgCO₂e/kg, CLF baseline for
+cementitious fireproofing). Returns `0.0u"kgCO2e"` for zero-thickness coatings.
 """
 function coating_ec(section, coating::SurfaceCoating, L::Unitful.Length;
-                    exposure::Symbol=:three_sided, ecc::Real=0.85)
+                    exposure::Symbol=:three_sided, ecc=ECC_SFRM)
     m = coating_mass(section, coating, L; exposure=exposure)
-    return ustrip(u"kg", m) * ecc
+    return uconvert(u"kgCO2e", m * _normalize_ecc(ecc))
 end
 
 """Embodied carbon coefficient for SFRM: 0.85 kgCO₂e/kg (CLF baseline for cementitious fireproofing)."""
-const ECC_SFRM = 0.85
+const ECC_SFRM = 0.85u"kgCO2e/kg"

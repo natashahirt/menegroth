@@ -23,7 +23,7 @@ The top-level input object sent to `POST /design` and `POST /validate`.
 | `vertices` | `Vector{Vector{Float64}}` | yes | 3D vertex coordinates `[[x,y,z], ...]` |
 | `edges` | `APIEdgeGroups` | yes | Edge connectivity by group |
 | `supports` | `Vector{Int}` | yes | 1-based vertex indices that are fixed supports |
-| `stories_z` | `Vector{Float64}` | no | Optional story elevations in coordinate units. **Validation only**: if provided, must contain at least 2 elevations. **Note:** `json_to_skeleton` currently calls `rebuild_stories!` unconditionally, so any provided `stories_z` does **not** override story detection (stories are inferred from vertex Z coordinates rounded to 2 decimals). `stories_z` is still included in `compute_geometry_hash` for caching behavior. |
+| `stories_z` | `Vector{Float64}` | no | Optional story elevations in coordinate units. **Validation only**: if provided, must contain at least 2 elevations. **Note:** `json_to_skeleton` currently calls `rebuild_stories!` unconditionally, so any provided `stories_z` does **not** override story detection (stories are inferred from vertex Z coordinates rounded to 2 decimals). `stories_z` is **excluded** from `compute_geometry_hash` to avoid spurious cache misses when clients send the same geometry with cosmetically different `stories_z` payloads. |
 | `faces` | `APIFaceGroups` | no | Optional face-group selectors. The server always detects faces from the edge mesh; when `faces` is provided, its polygons are used to *assign* detected faces to groups. Keys are face group names (commonly `"floor"`, `"roof"`, `"grade"`). |
 | `params` | `APIParams` | yes | Design parameters |
 

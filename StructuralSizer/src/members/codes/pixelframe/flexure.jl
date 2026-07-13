@@ -1,8 +1,10 @@
 # ==============================================================================
 # PixelFrame Flexural Capacity
 # ==============================================================================
-# Flexural capacity of PixelFrame sections per ACI 318-19 §22.4.1.2
-# (unbonded post-tensioned tendons).
+# Flexural capacity of PixelFrame sections per ACI 318-11 §18.7.2(b), Eq. (18-2)
+# (unbonded post-tensioned tendons, span-to-depth ratio ≤ 35). The equation
+# form is preserved verbatim in ACI 318-19 §20.3.2.4.1; we cite the 318-11
+# clause because that is the edition present in the project corpus.
 # Reference: Wongsittikan (2024), Eqs. 2.3–2.12.
 #
 # Uses polygon-based compression zone analysis via Asap's CompoundSection:
@@ -11,7 +13,7 @@
 #   - Compression centroid is computed from the actual clipped polygon
 #
 # Algorithm:
-#   1. Estimate f_ps from ACI unbonded tendon stress equation (Eq. 2.3)
+#   1. Estimate f_ps from ACI 318-11 Eq. (18-2)
 #   2. Compute compression area A_comp = A_s × f_ps / (0.85 × fc′)
 #   3. Clamp to 0.99 × A_g if needed; recalc f_ps
 #   4. Find compression depth from polygon (depth_from_area)
@@ -30,13 +32,40 @@ using Unitful
 using Asap: CompoundSection, SolidSection, depth_from_area, sutherland_hodgman, sutherland_hodgman_abs, poly_area
 
 # ==============================================================================
+# ASTM A416 / A416M Grade 270 low-relaxation strand — design defaults
+# ==============================================================================
+# ACI 318-11 §3.5.6.1(c) (corpus: aci-318-11, page 53) lists ASTM A416 as the
+# governing standard for seven-wire prestressing strand. Grade 270 specifies a
+# minimum tensile strength f_pu = 270 ksi ≈ 1860 MPa (this is the standard
+# product designation; the value itself is not quoted as a clause in ACI 318
+# but follows ASTM A416 Grade 270 by reference).
+#
+# ACI 318-11 R18.7.2 (commentary, corpus: aci-318-11, page 300) sets the
+# minimum f_py / f_pu ratio for ASTM A416 / A421 strand:
+#   - low-relaxation strand and wire:  f_py / f_pu ≥ 0.90
+#   - stress-relieved strand and wire: f_py / f_pu ≥ 0.85
+#
+# These defaults assume Grade 270 low-relaxation strand — the overwhelmingly
+# common product in modern post-tensioned construction. Pass an explicit
+# `f_py` kwarg when a different grade or stress-relieved product is in use.
+"""ASTM A416 / A416M Grade 270 specified tensile strength `f_pu` (270 ksi ≈ 1860 MPa)."""
+const ASTM_A416_GR270_FPU = 1860.0u"MPa"
+
+"""ASTM A416 / A416M Grade 270 low-relaxation strand minimum specified yield strength
+`f_py = 0.90 × f_pu = 1674 MPa` (per ACI 318-11 R18.7.2 commentary, corpus: aci-318-11,
+page 300)."""
+const ASTM_A416_GR270_LR_FPY = 0.90 * ASTM_A416_GR270_FPU
+
+# ==============================================================================
 # Helper: Whitney β₁ factor
 # ==============================================================================
 
 """
     _pf_β1(fc′_MPa) -> Float64
 
-Whitney stress block factor β₁ per ACI 318-19 §22.2.2.4.3.
+Whitney stress block factor β₁ per ACI 318-11 §10.2.7.3 (preserved as
+ACI 318-19 §22.2.2.4.3). Metric form: β₁ = 0.85 for `fc′ ≤ 28 MPa`,
+linearly reduced by 0.05 per 7 MPa above 28 MPa, floored at 0.65.
 """
 function _pf_β1(fc′_MPa::Real)
     clamp(0.85 - 0.05 * (fc′_MPa - 28.0) / 7.0, 0.65, 0.85)
@@ -49,8 +78,11 @@ end
 """
     _pf_ϕ_flexure(εs) -> Float64
 
-Strength reduction factor ϕ as a function of net tensile strain εs.
-ACI 318-19 §21.2.2, thesis Eq. 2.12.
+Strength reduction factor ϕ as a function of net tensile strain εs,
+linearly interpolated across the transition region between
+compression-controlled (ϕ = 0.65) and tension-controlled (ϕ = 0.90)
+limits. Form per Wongsittikan (2024) Eq. 2.12, which mirrors
+ACI 318-11 §9.3.2 / R9.3.2 (preserved as ACI 318-19 §21.2.2).
 """
 function _pf_ϕ_flexure(εs::Real)
     clamp(0.65 + 0.25 * (εs - 0.002) / 0.003, 0.65, 0.90)
@@ -103,7 +135,8 @@ compression zone analysis.
 # Arguments
 - `s`: PixelFrameSection (provides geometry, material, tendon properties)
 - `E_s`: Tendon elastic modulus (default 200 GPa)
-- `f_py`: Tendon yield strength (default 0.85 × 1900 = 1615 MPa, per thesis)
+- `f_py`: Tendon yield strength (default [`ASTM_A416_GR270_LR_FPY`](@ref) = 1674 MPa,
+  Grade 270 low-relaxation strand per ACI 318-11 R18.7.2 commentary)
 - `Ω`: Strain reduction factor for unbonded tendons (default 0.33, conservative)
 - `max_iter`: Maximum iterations for ε_c convergence loop (default 50)
 
@@ -118,12 +151,14 @@ Named tuple `(Mu, f_ps, εs, εc, ϕ, c, converged)` where:
 - `converged`: Whether the ε_c iteration converged
 
 # Reference
-ACI 318-19 §22.4.1.2 (unbonded tendons)
-Wongsittikan (2024) Eqs. 2.3–2.12
+ACI 318-11 §18.7.2(b), Eq. (18-2) — unbonded tendons, span-to-depth ≤ 35
+  (corpus: aci-318-11, page 299). The equation form is preserved in
+  ACI 318-19 §20.3.2.4.1.
+Wongsittikan (2024) Eqs. 2.3–2.12.
 """
 function pf_flexural_capacity(s::PixelFrameSection;
                                E_s::Pressure = 200.0u"GPa",
-                               f_py::Pressure = (0.85 * 1900.0)u"MPa",
+                               f_py::Pressure = ASTM_A416_GR270_LR_FPY,
                                Ω::Real = 0.33,
                                max_iter::Int = 50)
     cs = s.section  # CompoundSection (unitless, mm)
@@ -161,7 +196,11 @@ function pf_flexural_capacity(s::PixelFrameSection;
                   εc=0.0, ϕ=0.65, c=0.0u"mm", converged=true)
     end
 
-    # Step 1: Initial estimate of f_ps (ACI 318-19 Table 20.3.2.4.1)
+    # Step 1: Initial estimate of f_ps — ACI 318-11 §18.7.2(b), Eq. (18-2)
+    # (unbonded tendons, span/depth ≤ 35; corpus: aci-318-11, page 299).
+    # Metric: 10,000 psi → 70 MPa, 60,000 psi → 420 MPa.
+    #   f_ps = f_se + 70 + f'_c / (100 ρ_p),
+    #   capped by the lesser of f_py and (f_se + 420 MPa).
     if f_pe_MPa ≈ 0.0
         f_ps_MPa = f_py_MPa
     else

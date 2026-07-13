@@ -14,10 +14,17 @@
 # =============================================================================
 
 using StructuralSizer
+using Asap  # registers `kgCO2e` so `u"kgCO2e/m^3"` resolves in this script
 using Unitful
 using Printf
 using Random: MersenneTwister
 using Statistics: mean
+
+# `ECCDistribution` is now typed — strip to bare floats at the print boundary
+# only. The helpers below keep `@printf` calls clean and document the unit
+# expected on each side of the strip.
+_per_m3(x) = ustrip(u"kgCO2e/m^3", x)
+_per_kg(x) = ustrip(u"kgCO2e/kg", x)
 
 println("Strength classes present:")
 for (psi, dens) in list_strength_classes()
@@ -30,25 +37,29 @@ println("  class           n     p10    p50    p90   mean")
 for (psi, dens) in list_strength_classes()
     d = ecc_distribution(psi; density_class=dens, composition=:all)
     @printf("  %s %5d  %4d  %5.0f  %5.0f  %5.0f  %5.0f\n",
-            dens, psi, d.n, d.p10, d.p50, d.p90, d.mean)
+            dens, psi, d.n, _per_m3(d.p10), _per_m3(d.p50),
+            _per_m3(d.p90), _per_m3(d.mean))
 end
 
 println("\nPer-kg conversion (NWC_4000 :all, ρ = 2380 kg/m³):")
 d_kg = ecc_distribution_per_kg(4000, 2380.0; density_class=:NWC, composition=:all)
-@printf("  p50 = %.4f kg CO₂e / kg concrete  (n = %d)\n", d_kg.p50, d_kg.n)
+@printf("  p50 = %.4f kg CO₂e / kg concrete  (n = %d)\n", _per_kg(d_kg.p50), d_kg.n)
 
 println("\nPer-kg conversion using a Density quantity (LWC, ρ = 1840 kg/m³):")
 d_lwc = ecc_distribution_per_kg(4000, 1840.0u"kg/m^3"; density_class=:LWC)
-@printf("  p50 = %.4f kg CO₂e / kg concrete  (n = %d)\n", d_lwc.p50, d_lwc.n)
+@printf("  p50 = %.4f kg CO₂e / kg concrete  (n = %d)\n", _per_kg(d_lwc.p50), d_lwc.n)
 
 println("\nMonte Carlo bootstrap (NWC_4000, ρ = 2380 kg/m³, n = 50_000):")
 samples = sample_ecc_per_kg(4000, 2380.0;
                             density_class = :NWC,
                             n   = 50_000,
                             rng = MersenneTwister(2026))
+# `mean` of a typed Vector{Quantity} returns a typed mean — compare in
+# typed space (Unitful handles the dimensionality), strip only for @printf.
 sample_mean = mean(samples)
 @printf("  mean(samples) = %.4f vs registry mean = %.4f (rtol = %.2e)\n",
-        sample_mean, d_kg.mean, abs(sample_mean - d_kg.mean) / d_kg.mean)
+        _per_kg(sample_mean), _per_kg(d_kg.mean),
+        abs(_per_kg(sample_mean - d_kg.mean)) / _per_kg(d_kg.mean))
 @assert isapprox(sample_mean, d_kg.mean; rtol = 0.01) (
     "MC bootstrap mean diverges by >1% from registry — increase n or check sampler")
 println("  ✓ within 1% of registry mean.")

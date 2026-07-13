@@ -97,7 +97,8 @@ All inputs and outputs are in mm / MPa / N·mm units (bare Float64).
 - `Ls_mm`: Distance from support to first load point [mm]
 - `Ld_mm`: Distance from support to first deviator [mm]
 - `E_s`: Tendon elastic modulus (default 200 GPa)
-- `f_py`: Tendon yield strength (default 0.85 × 1900 MPa)
+- `f_py`: Tendon yield strength (default [`ASTM_A416_GR270_LR_FPY`](@ref) = 1674 MPa,
+  Grade 270 low-relaxation strand per ACI 318-11 R18.7.2)
 
 # Returns
 NamedTuple with 27 properties matching the original Pixelframe.jl Properties struct.
@@ -108,13 +109,15 @@ Original Pixelframe.jl: Properties struct
 """
 function pf_element_properties(s::PixelFrameSection, L_mm::Real, Ls_mm::Real, Ld_mm::Real;
                                 E_s::Pressure = 200.0u"GPa",
-                                f_py::Pressure = (0.85 * 1900.0)u"MPa")
+                                f_py::Pressure = ASTM_A416_GR270_LR_FPY)
     cs = s.section
     fc′_MPa = ustrip(u"MPa", s.material.fc′)
     Ec_MPa  = ustrip(u"MPa", s.material.E)
     Eps_MPa = ustrip(u"MPa", E_s)
     fpy_MPa = ustrip(u"MPa", f_py)
-    fr_MPa  = 0.62 * sqrt(fc′_MPa)  # ACI 318-19 §19.2.3.1
+    # Modulus of rupture per ACI 318-11 §9.5.2.3 (metric form 0.62 √f'c MPa,
+    # preserved as ACI 318-19 §19.2.3.1).
+    fr_MPa  = 0.62 * sqrt(fc′_MPa)
 
     A_s_mm2 = ustrip(u"mm^2", s.A_s)
     f_pe_MPa = ustrip(u"MPa", s.f_pe)
@@ -705,7 +708,7 @@ This is the equivalent of the original Pixelframe.jl `get_deflection_curve`.
 - `method`: `PFThirdPointLoad()` or `PFSinglePointLoad()` (default: `PFThirdPointLoad()`)
 - `n_samples`: Number of sample points (default 100)
 - `E_s`: Tendon elastic modulus (default 200 GPa)
-- `f_py`: Tendon yield strength (default 0.85 × 1900 MPa)
+- `f_py`: Tendon yield strength (default [`ASTM_A416_GR270_LR_FPY`](@ref) = 1674 MPa)
 
 # Returns
 NamedTuple with:
@@ -719,7 +722,7 @@ function pf_deflection_curve(s::PixelFrameSection, L, max_moment;
                               method::Union{PFThirdPointLoad, PFSinglePointLoad} = PFThirdPointLoad(),
                               n_samples::Int = 100,
                               E_s::Pressure = 200.0u"GPa",
-                              f_py::Pressure = (0.85 * 1900.0)u"MPa")
+                              f_py::Pressure = ASTM_A416_GR270_LR_FPY)
     L_mm = ustrip(u"mm", L)
     M_max_Nmm = ustrip(u"N*mm", max_moment)
 
@@ -831,13 +834,18 @@ Cracked moment of inertia Icr for a PixelFrame section [mm⁴].
 Uses the polygon-clipping + `OffsetSection` approach from the original
 Pixelframe.jl to accurately handle the non-rectangular Y/X2/X4 geometry.
 
+# Arguments
+- `E_s`: Tendon elastic modulus (default 200 GPa)
+- `f_py`: Tendon yield strength (default [`ASTM_A416_GR270_LR_FPY`](@ref) = 1674 MPa,
+  Grade 270 low-relaxation strand per ACI 318-11 R18.7.2)
+
 # Reference
 Original Pixelframe.jl `get_I_crack`:
   `OffsetSection(cracked_section, [cracked_section.centroid[1], cracked_section.ymin]).Ix`
 """
 function pf_cracked_moment_of_inertia(s::PixelFrameSection;
                                        E_s::Pressure = 200.0u"GPa",
-                                       f_py::Pressure = (0.85 * 1900.0)u"MPa")
+                                       f_py::Pressure = ASTM_A416_GR270_LR_FPY)
     cs = s.section
     fc′_MPa = ustrip(u"MPa", s.material.fc′)
     Ec_MPa = ustrip(u"MPa", s.material.E)
@@ -855,7 +863,8 @@ function pf_cracked_moment_of_inertia(s::PixelFrameSection;
     d_ps_mm = ustrip(u"mm", s.d_ps)
     dps_from_top = centroid_to_top + d_ps_mm
 
-    # Estimate tendon stress at cracking (ACI 318-19 Table 20.3.2.4.1)
+    # Estimate tendon stress at cracking — ACI 318-11 §18.7.2(b), Eq. (18-2)
+    # (corpus: aci-318-11, page 299; preserved as ACI 318-19 §20.3.2.4.1).
     if f_pe_MPa ≈ 0.0 || A_s_mm2 ≈ 0.0
         return cs.Ix
     end
@@ -986,7 +995,7 @@ Ng & Tan (2006) Part I — pseudo-section analysis for EPT beams
 function pf_deflection(s::PixelFrameSection, L, w_or_M;
                         method::PFDeflectionMethod = PFSimplified(),
                         E_s::Pressure = 200.0u"GPa",
-                        f_py::Pressure = (0.85 * 1900.0)u"MPa",
+                        f_py::Pressure = ASTM_A416_GR270_LR_FPY,
                         support::Symbol = :simply_supported)
     return _pf_deflection_dispatch(s, L, w_or_M, method; E_s, f_py, support)
 end
@@ -1076,7 +1085,7 @@ ACI 318-19 §24.2.3.5, Table 24.2.2
 function pf_check_deflection(s::PixelFrameSection, L, w_dead, w_live;
                               method::PFDeflectionMethod = PFSimplified(),
                               E_s::Pressure = 200.0u"GPa",
-                              f_py::Pressure = (0.85 * 1900.0)u"MPa",
+                              f_py::Pressure = ASTM_A416_GR270_LR_FPY,
                               support::Symbol = :simply_supported,
                               limit_ll::Real = 360,
                               limit_total::Real = 240,

@@ -244,7 +244,7 @@ function _serialize_summary(design::BuildingDesign, du::DisplayUnits)
         concrete_volume = _round_val(vol_display; digits=1),
         steel_weight = _round_val(steel_display; digits=0),
         rebar_weight = _round_val(rebar_display; digits=0),
-        embodied_carbon_kgCO2e = _round_val(s.embodied_carbon; digits=0),
+        embodied_carbon_kgCO2e = _round_val(ustrip(u"kgCO2e", s.embodied_carbon); digits=0),
         critical_ratio = _round_val(s.critical_ratio),
         critical_element = s.critical_element,
     )

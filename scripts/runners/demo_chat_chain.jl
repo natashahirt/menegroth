@@ -73,7 +73,7 @@ s1 = design1.summary
 println("  All pass:         $(s1.all_checks_pass)")
 println("  Critical element: $(s1.critical_element)")
 println("  Critical ratio:   $(round(s1.critical_ratio; digits=3))")
-println("  EC (kgCO2e):      $(round(s1.embodied_carbon; digits=0))")
+println("  EC (kgCO2e):      $(round(ustrip(u"kgCO2e", s1.embodied_carbon); digits=0))")
 
 record_design_history!(DesignHistoryEntry(;
     geometry_hash    = "demo_90x90",
@@ -81,7 +81,7 @@ record_design_history!(DesignHistoryEntry(;
     all_pass         = s1.all_checks_pass,
     critical_ratio   = s1.critical_ratio,
     critical_element = s1.critical_element,
-    embodied_carbon  = s1.embodied_carbon,
+    embodied_carbon  = ustrip(u"kgCO2e", s1.embodied_carbon),
     n_columns        = length(design1.columns),
     n_beams          = length(design1.beams),
     n_slabs          = length(design1.slabs),
@@ -275,7 +275,7 @@ n_fail2 = count(p -> !p.second.ok, design2.columns) +
 println("  All pass:         $(s2.all_checks_pass)")
 println("  Critical element: $(s2.critical_element)")
 println("  Critical ratio:   $(round(s2.critical_ratio; digits=3))")
-println("  EC (kgCO2e):      $(round(s2.embodied_carbon; digits=0))")
+println("  EC (kgCO2e):      $(round(ustrip(u"kgCO2e", s2.embodied_carbon); digits=0))")
 println("  n_failing:        $n_fail2")
 
 record_design_history!(DesignHistoryEntry(;
@@ -284,7 +284,7 @@ record_design_history!(DesignHistoryEntry(;
     all_pass         = s2.all_checks_pass,
     critical_ratio   = s2.critical_ratio,
     critical_element = s2.critical_element,
-    embodied_carbon  = s2.embodied_carbon,
+    embodied_carbon  = ustrip(u"kgCO2e", s2.embodied_carbon),
     n_columns        = length(design2.columns),
     n_beams          = length(design2.beams),
     n_slabs          = length(design2.slabs),
@@ -327,5 +327,7 @@ elseif n_fail2 < (s1.all_checks_pass ? 0 : 1)
 else
     println("△ Some failures remain — geometry changes may be needed.")
 end
-ec_delta = s2.embodied_carbon - s1.embodied_carbon
-println("EC delta: $(round(ec_delta; digits=0)) kgCO2e ($(round(ec_delta/max(s1.embodied_carbon,1)*100; digits=1))%)")
+ec1_kg = ustrip(u"kgCO2e", s1.embodied_carbon)
+ec2_kg = ustrip(u"kgCO2e", s2.embodied_carbon)
+ec_delta = ec2_kg - ec1_kg
+println("EC delta: $(round(ec_delta; digits=0)) kgCO2e ($(round(ec_delta/max(ec1_kg,1)*100; digits=1))%)")

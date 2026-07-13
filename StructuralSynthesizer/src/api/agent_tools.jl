@@ -525,11 +525,21 @@ function agent_situation_card(
         steel_wt  = round(ustrip(is_imp ? u"lb"   : u"kg",  s.steel_weight); digits=0)
         rebar_wt  = round(ustrip(is_imp ? u"lb"   : u"kg",  s.rebar_weight); digits=0)
 
+        # Strip typed `kgCO₂e` once at the JSON-build boundary so the
+        # downstream Dict / round / arithmetic stays numeric.
+        ec_total_kg        = ustrip(u"kgCO2e", s.embodied_carbon)
+        ec_slabs_kg        = ustrip(u"kgCO2e", s.embodied_carbon_slabs)
+        ec_columns_kg      = ustrip(u"kgCO2e", s.embodied_carbon_columns)
+        ec_beams_kg        = ustrip(u"kgCO2e", s.embodied_carbon_beams)
+        ec_struts_kg       = ustrip(u"kgCO2e", s.embodied_carbon_struts)
+        ec_foundations_kg  = ustrip(u"kgCO2e", s.embodied_carbon_foundations)
+        ec_fireproofing_kg = ustrip(u"kgCO2e", s.embodied_carbon_fireproofing)
+
         health = Dict{String, Any}(
             "all_pass"         => s.all_checks_pass,
             "critical_ratio"   => round(s.critical_ratio; digits=3),
             "critical_element" => s.critical_element,
-            "embodied_carbon_kgco2e" => round(s.embodied_carbon; digits=0),
+            "embodied_carbon_kgco2e" => round(ec_total_kg; digits=0),
             "n_elements"       => length(design.columns) + length(design.beams) +
                                   length(design.slabs) + length(design.foundations),
             "n_failing"        => n_fail,
@@ -549,16 +559,16 @@ function agent_situation_card(
                 "e.g. critical_element can be a slab while most failures are columns.",
         )
 
-        ec_parts = s.embodied_carbon_slabs + s.embodied_carbon_columns + s.embodied_carbon_beams +
-                   s.embodied_carbon_struts + s.embodied_carbon_foundations + s.embodied_carbon_fireproofing
-        if s.embodied_carbon > 0 || ec_parts > 1e-9
+        ec_parts_kg = ec_slabs_kg + ec_columns_kg + ec_beams_kg +
+                      ec_struts_kg + ec_foundations_kg + ec_fireproofing_kg
+        if ec_total_kg > 0 || ec_parts_kg > 1e-9
             health["embodied_carbon_by_system_kgco2e"] = Dict{String, Any}(
-                "slabs"        => round(s.embodied_carbon_slabs; digits=0),
-                "columns"      => round(s.embodied_carbon_columns; digits=0),
-                "beams"        => round(s.embodied_carbon_beams; digits=0),
-                "struts"       => round(s.embodied_carbon_struts; digits=0),
-                "foundations"  => round(s.embodied_carbon_foundations; digits=0),
-                "fireproofing" => round(s.embodied_carbon_fireproofing; digits=0),
+                "slabs"        => round(ec_slabs_kg; digits=0),
+                "columns"      => round(ec_columns_kg; digits=0),
+                "beams"        => round(ec_beams_kg; digits=0),
+                "struts"       => round(ec_struts_kg; digits=0),
+                "foundations"  => round(ec_foundations_kg; digits=0),
+                "fireproofing" => round(ec_fireproofing_kg; digits=0),
             )
         end
 
@@ -919,16 +929,24 @@ function agent_diagnose_summary(design::BuildingDesign)::Dict{String, Any}
     end
 
     s = design.summary
-    ec_parts = s.embodied_carbon_slabs + s.embodied_carbon_columns + s.embodied_carbon_beams +
-               s.embodied_carbon_struts + s.embodied_carbon_foundations + s.embodied_carbon_fireproofing
-    if s.embodied_carbon > 0 || ec_parts > 1e-9
+    # Strip typed `kgCO₂e` once at the JSON-build boundary.
+    ec_total_kg        = ustrip(u"kgCO2e", s.embodied_carbon)
+    ec_slabs_kg        = ustrip(u"kgCO2e", s.embodied_carbon_slabs)
+    ec_columns_kg      = ustrip(u"kgCO2e", s.embodied_carbon_columns)
+    ec_beams_kg        = ustrip(u"kgCO2e", s.embodied_carbon_beams)
+    ec_struts_kg       = ustrip(u"kgCO2e", s.embodied_carbon_struts)
+    ec_foundations_kg  = ustrip(u"kgCO2e", s.embodied_carbon_foundations)
+    ec_fireproofing_kg = ustrip(u"kgCO2e", s.embodied_carbon_fireproofing)
+    ec_parts_kg = ec_slabs_kg + ec_columns_kg + ec_beams_kg +
+                  ec_struts_kg + ec_foundations_kg + ec_fireproofing_kg
+    if ec_total_kg > 0 || ec_parts_kg > 1e-9
         result["embodied_carbon_by_system_kgco2e"] = Dict{String, Any}(
-            "slabs"         => round(s.embodied_carbon_slabs; digits=0),
-            "columns"       => round(s.embodied_carbon_columns; digits=0),
-            "beams"         => round(s.embodied_carbon_beams; digits=0),
-            "struts"        => round(s.embodied_carbon_struts; digits=0),
-            "foundations"   => round(s.embodied_carbon_foundations; digits=0),
-            "fireproofing"  => round(s.embodied_carbon_fireproofing; digits=0),
+            "slabs"         => round(ec_slabs_kg; digits=0),
+            "columns"       => round(ec_columns_kg; digits=0),
+            "beams"         => round(ec_beams_kg; digits=0),
+            "struts"        => round(ec_struts_kg; digits=0),
+            "foundations"   => round(ec_foundations_kg; digits=0),
+            "fireproofing"  => round(ec_fireproofing_kg; digits=0),
         )
     end
     result["embodied_carbon_note"] =

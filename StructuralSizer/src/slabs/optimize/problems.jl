@@ -486,11 +486,13 @@ function objective_value(::MinWeight, p::VaultNLPProblem, x::Vector{Float64})
     return vol * density
 end
 
-"""Carbon-based objective for vault: weight × embodied carbon factor."""
+"""Carbon-based objective for vault: weight × embodied carbon factor. Returns
+a bare Float64 in kgCO₂e for the NLP solver (typed `ecc` is stripped once at
+this boundary)."""
 function objective_value(::MinCarbon, p::VaultNLPProblem, x::Vector{Float64})
-    weight = objective_value(MinWeight(), p, x)
-    ecc = p.material.ecc
-    return weight * ecc
+    weight = objective_value(MinWeight(), p, x)               # Float64, kg
+    ecc = ustrip(u"kgCO2e/kg", p.material.ecc)                # Float64
+    return weight * ecc                                       # Float64, kgCO₂e
 end
 
 """Cost-based objective for vault: volume × density × unit cost."""

@@ -70,13 +70,13 @@ using Asap: kip, ksi, psf
     end
     
     @testset "EC calculation includes rebar contribution" begin
-        # Calculate EC for each material
+        # Calculate EC for each material — mass × ECC flows through Unitful and
+        # converts to kgCO₂e at the boundary so downstream code stays bare-float.
         ec_by_mat = Dict{String, Float64}()
         for (mat, vol) in slab.volumes
-            mass_kg = ustrip(u"kg", vol * mat.ρ)
-            ec_val = mass_kg * mat.ecc
+            ec_q = uconvert(u"kgCO2e", vol * mat.ρ * mat.ecc)
             mat_name = mat isa StructuralSizer.Concrete ? "concrete" : "steel"
-            ec_by_mat[mat_name] = ec_val
+            ec_by_mat[mat_name] = ustrip(u"kgCO2e", ec_q)
         end
         
         @test haskey(ec_by_mat, "concrete")

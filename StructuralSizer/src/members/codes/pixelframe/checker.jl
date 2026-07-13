@@ -2,7 +2,8 @@
 # PixelFrame Capacity Checker
 # ==============================================================================
 # Implements AbstractCapacityChecker for PixelFrame sections.
-# Uses ACI 318-19 for axial and flexural capacity, fib MC2010 for FRC shear.
+# Uses ACI 318-11 §18.7.2 / §10.2.7 for axial and flexural capacity (preserved
+# as ACI 318-19 §20.3.2.4 / §22.2), and fib MC2010 §7.7-5 for FRC shear.
 #
 # Unlike ACI/AISC checkers, the material is embedded in the section itself
 # (each PixelFrameSection carries its own FRC). The `material` argument in
@@ -30,12 +31,16 @@ using Unitful
 
 Capacity checker for PixelFrame sections.
 
-Uses ACI 318-19 §22.4 for axial and flexural capacity, and
-fib MC2010 §7.7-5 for FRC shear capacity.
+Uses ACI 318-11 §18.7.2 / §10.2.7 for axial and flexural capacity (preserved as
+ACI 318-19 §20.3.2.4 / §22.2), and fib MC2010 §7.7-5 for FRC shear capacity.
 
 # Fields
 - `E_s_MPa`: Tendon elastic modulus in MPa (default 200_000)
-- `f_py_MPa`: Tendon yield strength in MPa (default 1860)
+- `f_py_MPa`: Tendon yield strength in MPa. Default
+  `ustrip(u"MPa", ASTM_A416_GR270_LR_FPY) = 1674.0`, the minimum specified
+  yield for ASTM A416 / A416M Grade 270 low-relaxation seven-wire strand per
+  ACI 318-11 R18.7.2 commentary (`f_py / f_pu ≥ 0.90`). Override for
+  stress-relieved strand (`f_py / f_pu ≥ 0.85` → 1581 MPa) or other grades.
 - `γ_c`: fib partial safety factor for concrete (default 1.0)
 - `min_depth_mm`: Minimum section bounding-box depth [mm] (default 0 = no limit)
 - `min_width_mm`: Minimum section bounding-box width [mm] (default 0 = no limit)
@@ -68,13 +73,19 @@ struct PixelFrameChecker <: AbstractCapacityChecker
 end
 
 """
-    PixelFrameChecker(; E_s_MPa=200_000, f_py_MPa=1860, γ_c=1.0, min_depth_mm=0, min_width_mm=0)
+    PixelFrameChecker(; E_s_MPa=200_000, f_py_MPa=ustrip(u"MPa", ASTM_A416_GR270_LR_FPY),
+                       γ_c=1.0, min_depth_mm=0, min_width_mm=0)
 
 Keyword constructor for [`PixelFrameChecker`](@ref) with typical defaults.
+
+The default `f_py_MPa = 1674.0` is the ASTM A416 Grade 270 low-relaxation
+minimum specified yield (ACI 318-11 R18.7.2 commentary: `f_py / f_pu ≥ 0.90`).
+This matches the default used by [`pf_flexural_capacity`](@ref) so that the
+checker path and direct-call path agree on `Mu` for the same section.
 """
 function PixelFrameChecker(;
     E_s_MPa::Real = 200_000.0,
-    f_py_MPa::Real = 1860.0,
+    f_py_MPa::Real = ustrip(u"MPa", ASTM_A416_GR270_LR_FPY),
     γ_c::Real = 1.0,
     min_depth_mm::Real = 0.0,
     min_width_mm::Real = 0.0,
@@ -131,9 +142,9 @@ create_cache(::PixelFrameChecker, n_sections::Int) = PixelFrameCapacityCache(n_s
 """
     precompute_capacities!(checker, cache, catalog, material, objective)
 
-Populate `cache` with axial (ACI 318-19 §22.4), flexural (ACI 318-19 §22.4.1.2),
-shear (fib MC2010 §7.7-5), bounding-box, and objective values for every section
-in `catalog`. Runs multi-threaded.
+Populate `cache` with axial (ACI 318-11 §10.3.6), flexural (ACI 318-11
+§18.7.2), shear (fib MC2010 §7.7-5), bounding-box, and objective values for
+every section in `catalog`. Runs multi-threaded.
 """
 function precompute_capacities!(
     checker::PixelFrameChecker,
@@ -154,11 +165,11 @@ function precompute_capacities!(
     Threads.@threads for j in 1:n
         sec = catalog[j]
 
-        # Axial capacity (ACI 318-19 §22.4.2.3)
+        # Axial capacity (ACI 318-11 §10.3.6, preserved as ACI 318-19 §22.4.2.3)
         ax = pf_axial_capacity(sec; E_s=E_s)
         cache.Pu[j] = ustrip(u"N", ax.Pu)
 
-        # Flexural capacity (ACI 318-19 §22.4.1.2)
+        # Flexural capacity (ACI 318-11 §18.7.2, preserved as ACI 318-19 §22.4.1.2)
         fl = pf_flexural_capacity(sec; E_s=E_s, f_py=f_py)
         cache.Mu[j] = ustrip(u"N*m", fl.Mu)
 
@@ -305,7 +316,7 @@ function explain_feasibility(
         "",
     ))
 
-    # --- 2. Axial (ACI 318-19 §22.4.2.3) ---
+    # --- 2. Axial (ACI 318-11 §10.3.6, preserved as ACI 318-19 §22.4.2.3) ---
     Pu_dem = to_newtons(demand.Pu_c)
     Pu_cap = cache.Pu[j]
     Pu_ratio = Pu_cap > 0 ? Pu_dem / Pu_cap : (Pu_dem > 0 ? Inf : 0.0)
@@ -315,10 +326,10 @@ function explain_feasibility(
         Pu_ratio,
         Pu_dem,
         Pu_cap,
-        "ACI 318-19 22.4.2.3",
+        "ACI 318-11 10.3.6",
     ))
 
-    # --- 3. Flexure (ACI 318-19 §22.4.1.2) ---
+    # --- 3. Flexure (ACI 318-11 §18.7.2, preserved as ACI 318-19 §22.4.1.2) ---
     Mu_dem = to_newton_meters(demand.Mux)
     Mu_cap = cache.Mu[j]
     Mu_ratio = Mu_cap > 0 ? Mu_dem / Mu_cap : (Mu_dem > 0 ? Inf : 0.0)
@@ -328,7 +339,7 @@ function explain_feasibility(
         Mu_ratio,
         Mu_dem,
         Mu_cap,
-        "ACI 318-19 22.4.1.2",
+        "ACI 318-11 18.7.2",
     ))
 
     # --- 4. Shear (fib MC2010 §7.7-5) ---

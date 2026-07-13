@@ -246,7 +246,8 @@ function objective_value(
     uconvert(u"m^3", Ag * length)
 end
 
-"""Objective value: embodied carbon (kgCO₂e, web only) of the T-beam per unit length."""
+"""Objective value: embodied carbon of the T-beam (web only) per unit length,
+returned as a typed `kgCO₂e` quantity (Asap `𝐗` dimension)."""
 function objective_value(
     ::MinCarbon,
     section::RCTBeamSection,
@@ -255,6 +256,5 @@ function objective_value(
 )
     Ag = section.bw * section.h
     volume = uconvert(u"m^3", Ag * length)
-    mass_kg = ustrip(volume) * ustrip(u"kg/m^3", material.ρ)
-    mass_kg * material.ecc
+    return uconvert(u"kgCO2e", volume * material.ρ * material.ecc)
 end

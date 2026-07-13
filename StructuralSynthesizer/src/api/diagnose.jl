@@ -818,8 +818,10 @@ function _diagnose_agent_summary(
     end
     check_dist = sort(collect(check_counts); by=x -> -x[2])
 
-    # EC total
-    total_ec = _round_val(s.embodied_carbon; digits=0)
+    # EC total — strip the typed `kgCO₂e` field at the JSON boundary so
+    # the downstream Dict / Printf consumers stay numeric.
+    ec_total_kg = ustrip(u"kgCO2e", s.embodied_carbon)
+    total_ec    = _round_val(ec_total_kg; digits=0)
 
     # Floor area & EC intensity
     struc = design.structure
@@ -827,7 +829,7 @@ function _diagnose_agent_summary(
     is_imp = du.units[:length] == u"ft"
     floor_area_disp = is_imp ? floor_area_m2 * 10.7639 : floor_area_m2
     area_unit = is_imp ? "ft2" : "m2"
-    ec_intensity_m2 = floor_area_m2 > 0 ? s.embodied_carbon / floor_area_m2 : 0.0
+    ec_intensity_m2 = floor_area_m2 > 0 ? ec_total_kg / floor_area_m2 : 0.0
     ec_intensity_disp = is_imp ? ec_intensity_m2 / 10.7639 : ec_intensity_m2
     intensity_unit = is_imp ? "kgCO2e/ft2" : "kgCO2e/m2"
 

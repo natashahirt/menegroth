@@ -444,7 +444,12 @@ function _extract_results(struc;
     # by slab.cell_indices (matches compute_building_ec's floor_area logic).
     # MUI splits volume / mass by material class so EC = MUI × ECC can
     # be decoupled from material assumptions in Section 2 sensitivity.
-    slab_ec_kgco2e = isempty(slab.volumes) ? NaN : element_ec(slab.volumes)
+    #
+    # `element_ec` returns a typed `kgCO₂e` quantity since the kgCO2e
+    # refactor; this is the DataFrame / CSV boundary, so strip it once
+    # here and keep the derived `slab_ec_per_m2` numeric.
+    slab_ec_kgco2e = isempty(slab.volumes) ? NaN :
+        ustrip(u"kgCO2e", element_ec(slab.volumes))
     slab_area_m2   = ustrip(u"m^2",
         sum(struc.cells[ci].area for ci in slab.cell_indices; init = 0.0u"m^2"))
     slab_ec_per_m2 = (isnan(slab_ec_kgco2e) || slab_area_m2 ≤ 0.0) ?
@@ -1125,7 +1130,7 @@ variability.
 function sweep_ecc(df::DataFrame;
                    n_samples::Integer = 2000,
                    rng::AbstractRNG = MersenneTwister(0xECC_5EED),
-                   rebar_ecc::Float64 = SR.Rebar_60.ecc,
+                   rebar_ecc::Float64 = ustrip(u"kgCO2e/kg", SR.Rebar_60.ecc),
                    save::Bool = true,
                    keep_samples::Bool = false)
     n_samples > 0 || error("sweep_ecc: n_samples must be positive, got $n_samples")
@@ -1137,15 +1142,19 @@ function sweep_ecc(df::DataFrame;
 
     # Per-label cache of (samples vector, n_epd backing the bucket).
     # One realization is drawn per unique concrete label (see docstring).
+    # `sample_ecc_per_kg` now returns typed `Vector{CarbonPerMassQuantity}`;
+    # `sweep_ecc` lives at the DataFrame / CSV boundary, so we strip to
+    # `Vector{Float64}` once here and keep the per-row arithmetic numeric.
     cache = Dict{String, Tuple{Vector{Float64}, Int}}()
     function _ecc_for(label::AbstractString)
         key = String(label)
         haskey(cache, key) && return cache[key]
         fc_psi, ρ, dens = _ecc_lookup_args(label)
-        ecc_vec = SR.sample_ecc_per_kg(fc_psi, ρ;
-                                       density_class = dens,
-                                       n             = n_samples,
-                                       rng           = rng)
+        ecc_q = SR.sample_ecc_per_kg(fc_psi, ρ;
+                                     density_class = dens,
+                                     n             = n_samples,
+                                     rng           = rng)
+        ecc_vec = ustrip.(u"kgCO2e/kg", ecc_q)
         n_epd = length(SR.ecc_samples(fc_psi; density_class = dens))
         cache[key] = (ecc_vec, n_epd)
         return cache[key]

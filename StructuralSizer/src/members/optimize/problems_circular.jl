@@ -141,8 +141,9 @@ function objective_fn(p::RCCircularNLPProblem, x::Vector{Float64})
     elseif obj isa MinCarbon
         ρ_c_kgft3 = ustrip(u"kg/ft^3", p.opts.material.ρ)
         ρ_s_kgft3 = ustrip(u"kg/ft^3", p.opts.rebar_material.ρ)
-        ecc_concrete = p.opts.material.ecc * ρ_c_kgft3
-        ecc_steel = p.opts.rebar_material.ecc * ρ_s_kgft3
+        # Strip typed `ecc` once at the NLP boundary — JuMP needs bare Float64.
+        ecc_concrete = ustrip(u"kgCO2e/kg", p.opts.material.ecc)      * ρ_c_kgft3
+        ecc_steel    = ustrip(u"kgCO2e/kg", p.opts.rebar_material.ecc) * ρ_s_kgft3
         value = Ag * ((1 - ρ) * ecc_concrete + ρ * ecc_steel)
     else
         # Default: gross area with ρ penalty (same as MinVolume)

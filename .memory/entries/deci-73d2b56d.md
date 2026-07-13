@@ -12,9 +12,10 @@ success: 'null'
 files: .cursor/extraction-schemas.yaml@3fb6ce1, docs/angelo-knowledge-graph-plan.md@3fb6ce1
 session_id: sess-068c9b66
 created_at: '2026-07-12T22:57:30.223512+00:00'
-updated_at: '2026-07-12T22:57:30.223512+00:00'
+updated_at: '2026-07-13T02:22:42.177104+00:00'
 has_child_rationale: Locks the load-bearing, hard-to-change-post-extraction identity/granularity
   contract for the building-code extraction
+related_to: chec-884d14f0
 ---
 Two load-bearing decisions for the `building-code-extraction` run, locked into the schema description as a JOIN-KEY CONTRACT and documented in the plan (§4.2a, §4.3a). Expensive to change after extraction, so decided up front.
 

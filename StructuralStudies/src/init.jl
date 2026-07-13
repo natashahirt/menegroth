@@ -16,6 +16,10 @@ Pkg.activate(joinpath(@__DIR__, ".."))
 using StructuralSizer
 using StructuralSynthesizer
 using Unitful
+# `using Asap` (not just the StructuralSizer reexport) is required so the
+# `@u_str` macro can resolve the Asap-registered `kgCO2e` refunit — e.g.
+# `u"kgCO2e"`, `u"kgCO2e/kg"`, `u"kgCO2e/m^2"` used throughout the study code.
+using Asap
 
 # Analysis dependencies
 using DataFrames
@@ -79,15 +83,25 @@ end
 const TYPICAL_COLUMN_HEIGHT_M = 4.0   # meters
 const TYPICAL_STORY_HEIGHT_FT = 13.0  # feet
 
-# Embodied carbon factors (approximate, kg CO2e per unit)
-const CARBON_CONCRETE_KG_PER_M3 = 300.0   # Normal weight concrete
-const CARBON_REBAR_KG_PER_KG = 1.5        # Steel reinforcement
-const STEEL_DENSITY_KG_PER_M3 = 7850.0    # Steel density
+# Embodied carbon factors (approximate) — typed as `kgCO₂e` quantities per the
+# kgCO2e Unitful refactor (T3.3). Values unchanged; `kgCO2e` is the Asap refunit
+# reexported via `using StructuralSizer`. STEEL_DENSITY carries `kg/m^3` so the
+# steel-carbon product closes dimensionally (m³ · kg/m³ · kgCO₂e/kg).
+#
+# NOTE: these definitions live inside the `if !@isdefined(...)` guard block,
+# which Julia macro-expands as a whole *before* the block's own `using`
+# statements run — so the `u"…"` string macro is not yet in scope here. We
+# therefore build the units from plain identifiers (`kgCO2e`, `Unitful.m`,
+# `Unitful.kg`), which resolve at run time after `using` has executed.
+const CARBON_CONCRETE_KG_PER_M3 = 300.0  * kgCO2e / Unitful.m^3   # Normal weight concrete
+const CARBON_REBAR_KG_PER_KG    = 1.5    * kgCO2e / Unitful.kg    # Steel reinforcement
+const STEEL_DENSITY_KG_PER_M3   = 7850.0 * Unitful.kg / Unitful.m^3  # Steel density
 
-"""Calculate embodied carbon for a column."""
+"""Calculate embodied carbon for a column. Returns typed `kgCO₂e` quantities;
+strip with `ustrip(u"kgCO2e", …)` at DataFrame / CSV boundaries."""
 function calc_embodied_carbon(vol_concrete_m3::Float64, vol_steel_m3::Float64)
-    carbon_concrete = vol_concrete_m3 * CARBON_CONCRETE_KG_PER_M3
-    carbon_steel = vol_steel_m3 * STEEL_DENSITY_KG_PER_M3 * CARBON_REBAR_KG_PER_KG
+    carbon_concrete = vol_concrete_m3 * Unitful.m^3 * CARBON_CONCRETE_KG_PER_M3
+    carbon_steel    = vol_steel_m3 * Unitful.m^3 * STEEL_DENSITY_KG_PER_M3 * CARBON_REBAR_KG_PER_KG
     return (
         concrete = carbon_concrete,
         steel = carbon_steel,

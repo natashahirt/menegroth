@@ -162,8 +162,11 @@ function analyze_section(id, shape, b, h, D, ar, cover, arr, tie,
         # Volume & carbon
         volume_concrete_m3=vol_c, volume_steel_m3=vol_s,
         volume_total_m3=Ag_m2 * TYPICAL_COLUMN_HEIGHT_M,
-        carbon_concrete_kg=carbon.concrete, carbon_steel_kg=carbon.steel,
-        carbon_total_kg=carbon.total,
+        # DataFrame / CSV boundary: `calc_embodied_carbon` returns typed
+        # `kgCO₂e` quantities (T3.3), so strip to bare Float64 here.
+        carbon_concrete_kg=ustrip(u"kgCO2e", carbon.concrete),
+        carbon_steel_kg=ustrip(u"kgCO2e", carbon.steel),
+        carbon_total_kg=ustrip(u"kgCO2e", carbon.total),
         # Capacity (nominal)
         P0_kip=pm.P0, Pn_max_kip=pm.Pn_max, Pb_kip=pm.Pb, Mb_kipft=pm.Mb,
         Mn_max_kipft=pm.Mn_max, Pn_at_Mn_max_kip=pm.Pn_at_Mn_max,
@@ -177,7 +180,7 @@ function analyze_section(id, shape, b, h, D, ar, cover, arr, tie,
         P0_per_Ag_ksi=pm.P0 / Ag,
         Mn_max_per_Ag_kipft_in2=pm.Mn_max / Ag,
         steel_contribution_pct=cfg.As * fy / pm.P0 * 100,
-        phi_Pn_max_per_carbon_kip_per_kg=pm.φPn_max / max(carbon.total, 1e-6),
+        phi_Pn_max_per_carbon_kip_per_kg=pm.φPn_max / max(ustrip(u"kgCO2e", carbon.total), 1e-6),
         # Slenderness (βdns=0.6 baseline)
         kLu_r_30_delta_ns    = get(sl, 30, _SL_NAN).δns,
         kLu_r_30_penalty_pct = get(sl, 30, _SL_NAN).penalty,

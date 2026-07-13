@@ -9,6 +9,9 @@
 #                            lateral stiffness (ACI effective-stiffness based).
 #   checker.jl           S1  Demand-decoupled ACI 318-19 §11.5.4 in-plane shear
 #                            strength + minimum-reinforcement checks (CheckResult).
+#   flexure.jl           S1  Demand-decoupled ACI 318-19 §22.2 in-plane axial–
+#                            flexure (P–M): Cardenas closed form (conservative,
+#                            pass–fail) + strain-compatibility interaction diagram.
 #   lateral_evaluator.jl S2  AbstractLateralEvaluator interface + differentiable
 #                            ReducedDiaphragmEvaluator (3 DOF/story, rank-1/wall,
 #                            analytic sensitivities) — the cheap tier.
@@ -24,6 +27,7 @@
 
 include("wall_section.jl")
 include("checker.jl")
+include("flexure.jl")
 include("lateral_evaluator.jl")
 include("fem_evaluator.jl")
 include("layout_problem.jl")

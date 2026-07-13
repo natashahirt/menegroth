@@ -385,6 +385,11 @@ export WALL_ISTIFF_UNCRACKED, WALL_ISTIFF_CRACKED
 export wall_alpha_c, wall_shear_capacity_si
 export check_wall_inplane_shear, check_wall_min_reinforcement, WALL_PHI_SHEAR
 
+# --- Structural walls: ACI in-plane axial–flexure P–M (S1, demand-decoupled) ---
+export wall_phi_flexure, wall_axial_flexure_capacity_si, wall_pure_axial_capacity_si
+export wall_pm_at_c_si, wall_moment_capacity_at_axial_si
+export check_wall_inplane_flexure, wall_pm_diagram
+
 # --- Structural walls: lateral evaluators (S2 reduced, S3 FEM) ---
 export AbstractLateralEvaluator, evaluate_lateral
 export WallLine, StoryLoad, LateralResult

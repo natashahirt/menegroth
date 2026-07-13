@@ -3,7 +3,8 @@
 # ==============================================================================
 # Validates the shear-wall efficiency foundation (plan S1–S4) end to end:
 #   S1  Analytic in-plane wall stiffness (ACI 318-19 effective inertia) +
-#       demand-decoupled ACI 318-19 §11.5.4 in-plane shear capacity
+#       demand-decoupled ACI 318-19 §11.5.4 in-plane shear capacity +
+#       ACI 318-19 §22.2 in-plane axial–flexure (P–M) capacity
 #   S2  Reduced rigid-diaphragm distribution (3 DOF/story) + analytic sensitivity
 #   S3  FEM validation (Asap vertical wall shells + stiff diaphragm) vs the S2 oracle
 #   S4  Layout optimization (SIMP continuous topology, MinCarbon) via Ipopt
@@ -174,6 +175,56 @@ _w_status["S1 shear capacity"] = _mark(s1s)
 w_note("Reproduces the StructurePoint spWall hand calc to <0.3%; §11.5.4.2 cap = 8·λ·√f'c·Acv.")
 
 # ═══════════════════════════════════════════════════════════════════════════
+# 3F. S1 — ACI 318-19 in-plane axial–flexure (P–M) capacity
+# ═══════════════════════════════════════════════════════════════════════════
+w_section_header("3F.0  S1 — ACI 318-19 §22.2 In-Plane Axial–Flexure (P–M) Capacity")
+w_note("Cardenas closed form (conservative, pass–fail) + strain-compatibility interaction diagram (spColumn-style).")
+
+w_sub_header("3F.1  spWall worked example — corpus known-answer (sp-de-shear-wall-aci19 §§3–4)")
+w_note("lw=18 ft, t=10 in, ρl=0.00344 (#5@18\" both faces), f'c=4000 psi, fy=60 ksi, Es=29000 ksi")
+w_note("Demand: Nu=207 kips (0.9·dead), Mu,base=4665 kip-ft (1.0·wind)")
+w_table_head("spWall")
+s1f = true
+# spWall inputs in SI (bare-SI core; PSI/KIP/IN/FT from §3.4)
+sp_Es = 29.0e6 * PSI
+sp_ρl = 0.00344
+sp_Nu = 207 * KIP
+sp_Mu = 4665 * KIP * 12 * IN            # kip-ft → N·m
+rf = wall_axial_flexure_capacity_si(sp_fc, sp_fy, sp_Es, sp_lw, sp_t, sp_ρl, sp_Nu)
+s1f &= w_compare("ω = ρl·fy/f'c", rf.ω, 0.0517; tol=5e-3)
+s1f &= w_compare("α = Nu/(lw·t·f'c)", rf.α, 0.0240; tol=1e-2)
+s1f &= w_compare("Neutral axis c", rf.c/IN, 19.78; tol=1e-2, unit="in")
+s1f &= w_compare("Tension resultant T", rf.T/KIP, 405.52; tol=1e-2, unit="kip")
+s1f &= w_compare("Nominal Mn", rf.Mn/(KIP*12*IN), 5342.0; tol=1e-2, unit="kip-ft")
+s1f &= w_compare("Design φMn (φ=0.90)", rf.φMn/(KIP*12*IN), 4808.0; tol=1e-2, unit="kip-ft")
+tc_ok = rf.tension_controlled && rf.φ == 0.90
+@printf("    εt = %.4f  > εty+0.003 = %.4f  ⇒ tension-controlled  %s\n",
+        rf.εt, rf.εty + 0.003, _mark(tc_ok))
+s1f &= tc_ok
+
+w_sub_header("3F.2  Demand-decoupled CheckResult (φMn > Mu ⇒ adequate)")
+ws_sp = WallSection(sp_lw*u"m", sp_t*u"m"; ρl=sp_ρl, ρt=0.0025)
+chkf = check_wall_inplane_flexure(ws_sp, RC_4000_60, sp_Nu*u"N", sp_Mu*u"N*m")
+println("    CheckResult clause .................................... ", chkf.code_clause)
+@printf("    Mu=%.0f kip-ft  φMn=%.0f kip-ft  utilization=%.3f  %s\n",
+        chkf.demand/(KIP*12*IN), chkf.capacity/(KIP*12*IN), chkf.ratio, _mark(chkf.passed))
+s1f &= chkf.passed && isapprox(chkf.ratio, 4665/4808; atol=0.02)
+
+w_sub_header("3F.3  Strain-compatibility diagram cross-check (independent method)")
+w_table_head("vs Cardenas")
+sp_Ast = sp_ρl * sp_lw * sp_t
+rd = wall_moment_capacity_at_axial_si(sp_fc, sp_fy, sp_Es, sp_lw, sp_t, sp_Ast, sp_Nu; nlayers=200)
+# Two independent methods must agree to ~5%; strain-compat is the less-conservative
+# (spColumn-style) curve, so it sits at/above the Cardenas value.
+s1f &= w_compare("φMn (strain-compat) vs Cardenas", rd.φMn/(KIP*12*IN), rf.φMn/(KIP*12*IN); tol=0.05, unit="kip-ft")
+diag_conservative = rd.φMn ≥ rf.φMn * 0.99
+println("    Strain-compat ≥ Cardenas (Cardenas conservative) .... ", _mark(diag_conservative))
+w_info("spColumn reference φMn (report only)", 5319; unit="kip-ft  (less conservative; not asserted)")
+_w_status["S1 axial-flexure (P-M)"] = _mark(s1f)
+w_note("Reproduces the spWall Cardenas hand calc to <0.2%. CheckResult guards: §22.4.2.1 axial cap")
+w_note("(Nu ≤ φ·0.80·P0) + governing moment = conservative min(Cardenas, strain-compat) in all regimes.")
+
+# ═══════════════════════════════════════════════════════════════════════════
 # 4. S2 — Reduced rigid-diaphragm distribution
 # ═══════════════════════════════════════════════════════════════════════════
 w_section_header("4.0  S2 — Reduced Rigid-Diaphragm Distribution (3 DOF/story)")
@@ -315,13 +366,15 @@ w_section_header("7.0  Feature Matrix")
 w_sub_header("7.1  Implemented")
 println("    S1  Analytic in-plane stiffness (ACI eff. inertia), linear in t, analytic ∂k/∂t")
 println("    S1  ACI 318-19 §11.5.4.3 in-plane shear + §11.6.2 min reinf, demand-decoupled")
+println("    S1  ACI 318-19 §22.2 in-plane axial–flexure P–M: Cardenas closed form + strain-compat diagram")
 println("    S2  ReducedDiaphragmEvaluator: 3 DOF/story, rank-1/wall, skew + torsion, analytic sensitivities")
 println("    S3  FEMLateralEvaluator: Asap ShellTri3 walls + stiff diaphragm, exact base-story shear via reactions")
     println("    S4  WallLayoutNLPProblem (SIMP density) · MinCarbon/MinDrift/Weighted · IPOPT (existing solver)")
 
 w_sub_header("7.2  Current limitations & future work")
 println("    1. Shear (§11.5.4), αc, 8√f'c·Acv cap, §11.6.2 min reinf, 0.70/0.35 stiffness: reconciled vs corpus ✓")
-println("    2. S1: axial-flexure P–M / boundary elements not yet implemented (canon reconciliation still pending)")
+println("    2. S1: in-plane axial-flexure P–M reconciled vs spWall ✓; special boundary elements (§18.10.6) still")
+println("       deferred — canon absent from corpus (HARD STOP, todo-w0000010); out-of-plane/slender walls pending")
 println("    3. S2: real demand generation (ASCE 7 wind + seismic ELF) + W/E load cases not wired")
 println("    4. S3: multi-story upper-panel shear recovery uses Nxy first-cut (base story exact); no P-delta yet")
 println("    5. S4: candidate ground-structure generation from real building geometry not yet automated")

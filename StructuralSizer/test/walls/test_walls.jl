@@ -118,6 +118,109 @@ end
     @test all(c.passed for c in check_wall_min_reinforcement(ws))
 end
 
+@testset "spWall worked example — axial-flexure P-M (ACI 318-19 §22.2)" begin
+    # StructurePoint "Reinforced Concrete Shear Wall (ACI 318-19)", Sections 3-4
+    # (corpus: sp-de-shear-wall-aci19, lines 350-543). Cardenas closed form:
+    #   f'c=4000 psi, fy=60 ksi, Es=29000 ksi, t=10 in, lw=18 ft (=216 in),
+    #   ρl=0.00344 (#5@18" both faces, Ast=7.44 in²); Nu=207 kips, Mu=4665 kip-ft.
+    # Reported: ω=0.0517, α=0.0240, c=19.78 in, T=405.52 kips, Mn=5342 kip-ft,
+    #           φMn=4808 kip-ft (tension-controlled, φ=0.90).
+    fc = 4000 * _PSI; fy = 60_000 * _PSI; Es = 29e6 * _PSI
+    lw = 216 * _IN;   t  = 10 * _IN;      ρl = 0.00344
+    Nu = 207 * _KIP
+    KIPFT = _KIP * 12 * _IN                      # N·m per kip-ft
+
+    r = wall_axial_flexure_capacity_si(fc, fy, Es, lw, t, ρl, Nu)
+    @test isapprox(r.ω, 0.0517; rtol=5e-3)
+    @test isapprox(r.α, 0.0240; rtol=1e-2)
+    @test isapprox(r.β1, 0.85; atol=1e-9)                    # Table 22.2.2.4.3, f'c=4000
+    @test isapprox(r.c / _IN, 19.78; rtol=1e-2)              # neutral axis
+    @test isapprox(r.T / _KIP, 405.52; rtol=1e-2)            # tension resultant
+    @test isapprox(r.Mn / KIPFT, 5342.0; rtol=1e-2)          # nominal moment
+    @test isapprox(r.φMn / KIPFT, 4808.0; rtol=1e-2)         # design moment
+    @test r.tension_controlled && r.φ == 0.90               # εt ≫ εty+0.003
+    @test isapprox(r.εty, 0.00207; rtol=1e-2)               # Eq. 5.3.1f
+    @test r.εt > r.εty + 0.003
+
+    # Demand-decoupled CheckResult: φMn=4808 > Mu=4665 ⇒ adequate.
+    ws  = WallSection(lw * u"m", t * u"m"; ρl=ρl, ρt=0.0025)
+    Mu  = 4665 * KIPFT
+    chk = check_wall_inplane_flexure(ws, RC_4000_60, Nu * u"N", Mu * u"N*m")
+    @test chk.passed
+    @test isapprox(chk.ratio, 4665 / 4808; atol=0.02)       # utilization ≈ 0.971
+    @test chk.code_clause == "ACI 318-19 22.2 / Table 21.2.2"
+
+    # Independent method: strain-compatibility interaction diagram must agree to
+    # ~5% AND be no less conservative than the Cardenas closed form used for the
+    # check (the diagram is the spColumn-style, less-conservative curve).
+    Ast = ρl * lw * t
+    d = wall_moment_capacity_at_axial_si(fc, fy, Es, lw, t, Ast, Nu; nlayers=200)
+    @test isapprox(d.φMn / KIPFT, r.φMn / KIPFT; rtol=0.05)
+    @test d.φMn >= r.φMn * 0.99                              # Cardenas conservative
+    @test d.φ == 0.90
+end
+
+@testset "wall P-M physical behavior + edge cases" begin
+    fc = 4000 * _PSI; fy = 60_000 * _PSI; Es = 29e6 * _PSI
+    lw = 216 * _IN; t = 10 * _IN; ρl = 0.006
+    KIPFT = _KIP * 12 * _IN
+
+    # More axial (compression) ⇒ deeper neutral axis and higher moment capacity
+    # in the tension-controlled regime (axial closes cracks).
+    r0  = wall_axial_flexure_capacity_si(fc, fy, Es, lw, t, ρl, 0.0)
+    r1  = wall_axial_flexure_capacity_si(fc, fy, Es, lw, t, ρl, 300 * _KIP)
+    @test r1.c > r0.c
+    @test r1.Mn > r0.Mn
+    @test r0.Mn > 0
+
+    # More longitudinal steel ⇒ more moment capacity.
+    rmore = wall_axial_flexure_capacity_si(fc, fy, Es, lw, t, 0.010, 0.0)
+    @test rmore.Mn > r0.Mn
+
+    # β1 tracks f'c per Table 22.2.2.4.3 (0.85 at ≤4000, 0.65 at ≥8000 psi).
+    r8 = wall_axial_flexure_capacity_si(8000*_PSI, fy, Es, lw, t, ρl, 0.0)
+    @test isapprox(r8.β1, 0.65; atol=1e-9)
+    r6 = wall_axial_flexure_capacity_si(6000*_PSI, fy, Es, lw, t, ρl, 0.0)
+    @test isapprox(r6.β1, 0.75; atol=1e-9)
+
+    # Strain-compat interaction: pure-bending capacity (Nu=0) is positive and the
+    # solved axial matches the requested target (root-find sanity).
+    Ast = ρl * lw * t
+    dpb = wall_moment_capacity_at_axial_si(fc, fy, Es, lw, t, Ast, 0.0; nlayers=100)
+    @test dpb.Mn > 0
+    dhi = wall_moment_capacity_at_axial_si(fc, fy, Es, lw, t, Ast, 500 * _KIP; nlayers=100)
+    @test isapprox(wall_pm_at_c_si(fc, fy, Es, lw, t, Ast, dhi.c; nlayers=100).Pn,
+                   500 * _KIP; rtol=1e-2)
+
+    # A plain Concrete requires explicit fy/Es (guard against silent wrong steel).
+    ws = WallSection(lw*u"m", t*u"m"; ρl=ρl, ρt=0.0025)
+    conc = Concrete(25e9u"Pa", (fc)u"Pa", 2400u"kg/m^3", 0.2, 0.1)
+    @test_throws ErrorException check_wall_inplane_flexure(ws, conc, 0.0, 1.0e6)
+    # Safety: bare (unitless) fy/Es are REJECTED (ksi/Pa mismatch footgun).
+    @test_throws ErrorException check_wall_inplane_flexure(ws, conc, 0.0, 1.0e6; fy=60.0, Es=29000.0)
+    # Unitful fy/Es are the one accepted spelling.
+    chk = check_wall_inplane_flexure(ws, conc, 0.0, 1.0e6;
+                                     fy=(60_000*_PSI)u"Pa", Es=(29e6*_PSI)u"Pa")
+    @test chk.capacity > 0
+
+    # ACI 318-19 §22.4.2.1 axial cap: an over-compressed wall fails on AXIAL,
+    # not on the moment term. Nu just above φ·0.80·P0 must fail with that clause.
+    ax = wall_pure_axial_capacity_si(fc, fy, lw, t, ρl)
+    φPn_max = 0.65 * ax.Pn_max
+    chk_hi = check_wall_inplane_flexure(ws, RC_4000_60, (1.05*φPn_max)u"N", 1.0u"N*m")
+    @test !chk_hi.passed
+    @test chk_hi.code_clause == "ACI 318-19 22.4.2.1"
+    # Just below the cap with negligible moment passes.
+    chk_lo = check_wall_inplane_flexure(ws, RC_4000_60, (0.5*φPn_max)u"N", 1.0u"N*m")
+    @test chk_lo.code_clause == "ACI 318-19 22.2 / Table 21.2.2"
+
+    # Diagram solver fails safe (converged=false, φMn=0) above the squash load.
+    Ast2 = ρl * lw * t
+    over = wall_moment_capacity_at_axial_si(fc, fy, Es, lw, t, Ast2, 100*ax.P0; nlayers=60)
+    @test over.converged == false
+    @test over.φMn == 0.0
+end
+
 @testset "reduced diaphragm: symmetric core (S2)" begin
     k = 1e7
     walls = [WallLine(1, 0.0, -5.0, 0.0, k, 1), WallLine(2, 0.0, 5.0, 0.0, k, 1),

@@ -144,6 +144,53 @@ Diagonal member (lateral bracing system).
     brace_type::Symbol = :both
 end
 
+"""
+    Wall{T} <: AbstractMember{T}
+
+Planar vertical member (shear wall / structural wall) — part of the lateral-
+force-resisting system. Represented as a line segment in plan spanning one
+story height, so it fits alongside `Beam`/`Column`/`Strut` and skew orientations
+are expressed directly by the endpoints (the skeleton already supports
+arbitrary-angle edges).
+
+This type carries the analytic-stiffness fields required by the efficiency
+foundation (plan S1): the reduced diaphragm evaluator and the layout optimizer
+compute a wall's in-plane lateral stiffness from geometry + material with NO FE
+mesh (see `StructuralSizer/src/walls/`). Keeping these fields on the type from
+S1 means S2 (rigid-diaphragm distribution) and S4 (layout optimization) layer on
+without reworking `Wall`.
+
+# Fields
+- `base::MemberBase{T}`: shared member properties (`base.L` = story height)
+- `x1,y1,x2,y2::Float64`: plan endpoints of the wall line [m]
+- `thickness::T`: wall thickness (out of plane)
+- `story::Int`: story index (0 = ground level)
+- `ρl,ρt::Float64`: vertical / horizontal web reinforcement ratios
+  (ACI 318-19 §11.6, min 0.0025; corpus: sp-structural-wall-reinforcement-design; VERIFY)
+- `concrete`: wall concrete material (`nothing` → use a default at sizing)
+- `wall_above`: the stacked wall on the story above (populated like `column_above`)
+
+# Analytic stiffness
+Use [`wall_lateral_stiffness`](@ref) to get the in-plane lateral stiffness
+`[N/m]`. In-plane stiffness is linear in `thickness` (both flexural and shear
+flexibility scale as 1/t), which the layout optimizer's SIMP density relaxation
+relies on. Effective (cracked/uncracked) inertia per ACI 318-19
+Table 6.6.3.1.1(a) (corpus: sp-effective-flexural-stiffness-aci318-14; VERIFY).
+"""
+@kwdef mutable struct Wall{T} <: AbstractMember{T}
+    base::MemberBase{T}
+    x1::Float64 = 0.0
+    y1::Float64 = 0.0
+    x2::Float64 = 0.0
+    y2::Float64 = 0.0
+    thickness::T
+    story::Int = 0
+    ρl::Float64 = 0.0025
+    ρt::Float64 = 0.0025
+    concrete::Union{Nothing, StructuralSizer.Concrete} = nothing
+    wall_above::Union{Nothing, Wall{T}} = nothing
+end
+
 # -----------------------------------------------------------------------------
 # Convenience constructors
 # -----------------------------------------------------------------------------
@@ -205,6 +252,74 @@ end
 
 """Single-segment strut convenience: wraps the index in a vector."""
 Strut(seg_idx::Int, L::T; kwargs...) where T = Strut([seg_idx], L; kwargs...)
+
+"""
+    Wall(seg_indices, height; thickness, x1, y1, x2, y2, story, ρl, ρt, concrete, group_id) -> Wall
+
+Convenience constructor from segment indices and story height. `height` is the
+story (pier) height and becomes `base.L`; `thickness` is required.
+"""
+function Wall(seg_indices::Vector{Int}, height::T; thickness::T,
+              x1=0.0, y1=0.0, x2=0.0, y2=0.0, story=0,
+              ρl=0.0025, ρt=0.0025, concrete=nothing, group_id=nothing) where T
+    base = MemberBase{T}(
+        segment_indices=seg_indices, L=height, Lb=height,
+        group_id=group_id, section=nothing, volumes=MaterialVolumes()
+    )
+    Wall{T}(base=base, thickness=thickness,
+            x1=Float64(x1), y1=Float64(y1), x2=Float64(x2), y2=Float64(y2),
+            story=story, ρl=Float64(ρl), ρt=Float64(ρt), concrete=concrete)
+end
+
+"""Single-segment wall convenience: wraps the index in a vector."""
+Wall(seg_idx::Int, height::T; kwargs...) where T = Wall([seg_idx], height; kwargs...)
+
+# -----------------------------------------------------------------------------
+# Wall geometry accessors (plan line → center / length / orientation)
+# -----------------------------------------------------------------------------
+
+"""Plan-center `(x, y)` of a wall [m]."""
+wall_center(w::Wall) = ((w.x1 + w.x2) / 2, (w.y1 + w.y2) / 2)
+
+"""Wall length in plan [m] (Euclidean distance between endpoints)."""
+wall_length(w::Wall) = hypot(w.x2 - w.x1, w.y2 - w.y1)
+
+"""In-plane (strong) axis orientation [rad, CCW from +X]."""
+wall_orientation(w::Wall) = atan(w.y2 - w.y1, w.x2 - w.x1)
+
+"""
+    wall_lateral_stiffness(w::Wall, concrete; cracked=true, boundary=:cantilever) -> Quantity
+
+Analytic in-plane lateral stiffness `[N/m]` of this wall, delegating to the
+sizer's closed-form pier stiffness (`StructuralSizer.wall_stiffness_from_thickness_si`).
+Extends the sizer's `wall_lateral_stiffness` to the building `Wall` type.
+"""
+function StructuralSizer.wall_lateral_stiffness(w::Wall, concrete;
+                                                cracked::Bool=true,
+                                                boundary::Symbol=:cantilever)
+    lw = wall_length(w)
+    t  = ustrip(u"m", w.thickness)
+    H  = ustrip(u"m", w.base.L)
+    E  = ustrip(u"Pa", concrete.E)
+    ν  = concrete.ν
+    k  = StructuralSizer.wall_stiffness_from_thickness_si(t, lw, E, ν, H;
+                                                          cracked=cracked, boundary=boundary)
+    return k * u"N/m"
+end
+
+"""
+    to_wall_line(w::Wall, id, concrete; cracked=true, boundary=:cantilever) -> WallLine
+
+Bridge a building `Wall` to the sizer's bare-SI `WallLine` used by the lateral
+evaluators (plan S2/S4). Wall length/orientation come from the plan endpoints.
+"""
+function to_wall_line(w::Wall, id::Int, concrete;
+                      cracked::Bool=true, boundary::Symbol=:cantilever)
+    cx, cy = wall_center(w)
+    k = ustrip(u"N/m", StructuralSizer.wall_lateral_stiffness(w, concrete;
+                                                              cracked=cracked, boundary=boundary))
+    return StructuralSizer.WallLine(id, cx, cy, wall_orientation(w), k, w.story + 1)
+end
 
 # -----------------------------------------------------------------------------
 # Accessors (delegate to base)

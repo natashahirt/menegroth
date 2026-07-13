@@ -7,7 +7,12 @@
 # Usage: include(joinpath(@__DIR__, "..", "init.jl"))
 # ==============================================================================
 
-if !@isdefined(_STRUCTURAL_STUDIES_INIT)
+# Bump when init semantics change (e.g. typed kgCO₂e constants) so incremental
+# REPL sessions re-run this block instead of keeping stale Float64 constants.
+const _STRUCTURAL_STUDIES_INIT_VERSION = 2
+
+if !@isdefined(_STRUCTURAL_STUDIES_LOADED_VERSION) ||
+   _STRUCTURAL_STUDIES_LOADED_VERSION != _STRUCTURAL_STUDIES_INIT_VERSION
 
 using Pkg
 Pkg.activate(joinpath(@__DIR__, ".."))
@@ -16,10 +21,9 @@ Pkg.activate(joinpath(@__DIR__, ".."))
 using StructuralSizer
 using StructuralSynthesizer
 using Unitful
-# `using Asap` (not just the StructuralSizer reexport) is required so the
-# `@u_str` macro can resolve the Asap-registered `kgCO2e` refunit — e.g.
-# `u"kgCO2e"`, `u"kgCO2e/kg"`, `u"kgCO2e/m^2"` used throughout the study code.
-using Asap
+# `import Asap` loads the module (so `@u_str` can resolve `u"kgCO2e"`) without
+# pulling FEM exports into the study script namespace.
+import Asap
 
 # Analysis dependencies
 using DataFrames
@@ -84,32 +88,33 @@ const TYPICAL_COLUMN_HEIGHT_M = 4.0   # meters
 const TYPICAL_STORY_HEIGHT_FT = 13.0  # feet
 
 # Embodied carbon factors (approximate) — typed as `kgCO₂e` quantities per the
-# kgCO2e Unitful refactor (T3.3). Values unchanged; `kgCO2e` is the Asap refunit
-# reexported via `using StructuralSizer`. STEEL_DENSITY carries `kg/m^3` so the
-# steel-carbon product closes dimensionally (m³ · kg/m³ · kgCO₂e/kg).
+# kgCO2e Unitful refactor (T3.3). Values unchanged; `Asap.kgCO2e` is the refunit.
+# STEEL_DENSITY carries `kg/m^3` so the steel-carbon product closes dimensionally
+# (m³ · kg/m³ · kgCO₂e/kg).
 #
-# NOTE: these definitions live inside the `if !@isdefined(...)` guard block,
-# which Julia macro-expands as a whole *before* the block's own `using`
-# statements run — so the `u"…"` string macro is not yet in scope here. We
-# therefore build the units from plain identifiers (`kgCO2e`, `Unitful.m`,
-# `Unitful.kg`), which resolve at run time after `using` has executed.
-const CARBON_CONCRETE_KG_PER_M3 = 300.0  * kgCO2e / Unitful.m^3   # Normal weight concrete
-const CARBON_REBAR_KG_PER_KG    = 1.5    * kgCO2e / Unitful.kg    # Steel reinforcement
-const STEEL_DENSITY_KG_PER_M3   = 7850.0 * Unitful.kg / Unitful.m^3  # Steel density
+# NOTE: these definitions live inside the versioned guard block, which Julia
+# macro-expands as a whole *before* the block's own `import` runs — so the
+# `u"…"` string macro is not yet in scope here. Build units from `Asap.kgCO2e`,
+# `Unitful.m`, and `Unitful.kg`, which resolve at run time after `import Asap`.
+const CARBON_CONCRETE_KGCO2E_PER_M3 = 300.0  * Asap.kgCO2e / Unitful.m^3
+const CARBON_REBAR_KGCO2E_PER_KG    = 1.5    * Asap.kgCO2e / Unitful.kg
+const STEEL_DENSITY_KG_PER_M3       = 7850.0 * Unitful.kg / Unitful.m^3
+
+const _CARBON_MASS_DIMENSION = Unitful.dimension(1.0 * Asap.kgCO2e)
 
 """Calculate embodied carbon for a column. Returns typed `kgCO₂e` quantities;
 strip with `ustrip(u"kgCO2e", …)` at DataFrame / CSV boundaries."""
 function calc_embodied_carbon(vol_concrete_m3::Float64, vol_steel_m3::Float64)
-    carbon_concrete = vol_concrete_m3 * Unitful.m^3 * CARBON_CONCRETE_KG_PER_M3
-    carbon_steel    = vol_steel_m3 * Unitful.m^3 * STEEL_DENSITY_KG_PER_M3 * CARBON_REBAR_KG_PER_KG
-    return (
-        concrete = carbon_concrete,
-        steel = carbon_steel,
-        total = carbon_concrete + carbon_steel
-    )
+    carbon_concrete = vol_concrete_m3 * Unitful.m^3 * CARBON_CONCRETE_KGCO2E_PER_M3
+    carbon_steel    = vol_steel_m3 * Unitful.m^3 * STEEL_DENSITY_KG_PER_M3 * CARBON_REBAR_KGCO2E_PER_KG
+    total = carbon_concrete + carbon_steel
+    @assert Unitful.dimension(carbon_concrete) === _CARBON_MASS_DIMENSION
+    @assert Unitful.dimension(carbon_steel) === _CARBON_MASS_DIMENSION
+    @assert Unitful.dimension(total) === _CARBON_MASS_DIMENSION
+    return (concrete = carbon_concrete, steel = carbon_steel, total = total)
 end
 
-const _STRUCTURAL_STUDIES_INIT = true
-println("StructuralStudies initialized ✓")
+const _STRUCTURAL_STUDIES_LOADED_VERSION = _STRUCTURAL_STUDIES_INIT_VERSION
+println("StructuralStudies initialized ✓ (init v$_STRUCTURAL_STUDIES_INIT_VERSION)")
 
 end  # if !@isdefined

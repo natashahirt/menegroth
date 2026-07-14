@@ -71,7 +71,12 @@ function initialize_members!(struc::BuildingStructure{T};
     
     # Track which edges have been processed (to skip chain sub-segments)
     processed_edges = Set{Int}()
-    
+
+    # Deferred beam-role classification: (beam_index, endpoints, edge_indices).
+    # Roles are assigned after the full column set exists so the `:girder` test
+    # can reference every `Column.vertex_idx` (see `classify_beam_role`).
+    beam_class_info = Tuple{Int, NTuple{2, Int}, Vector{Int}}[]
+
     for (seg_idx, seg) in enumerate(struc.segments)
         edge_idx = seg.edge_idx
         edge_idx in processed_edges && continue
@@ -107,11 +112,13 @@ function initialize_members!(struc::BuildingStructure{T};
                              brace_type=:both)
                 push!(struc.struts, strut)
             else
-                role = classify_beam_role(skel, first_edge)
                 beam = Beam(chain_seg_indices, L_total;
-                           Lb=Lb_gov, Kx=default_Kx, Ky=default_Ky, Cb=Cb_gov,
-                           role=role)
+                           Lb=Lb_gov, Kx=default_Kx, Ky=default_Ky, Cb=Cb_gov)
                 push!(struc.beams, beam)
+                push!(beam_class_info,
+                      (length(struc.beams),
+                       _chain_endpoint_vertices(skel, chain_edge_indices),
+                       collect(chain_edge_indices)))
             end
         else
             # Standalone edge (no chain) — 1:1 mapping as before
@@ -138,15 +145,33 @@ function initialize_members!(struc::BuildingStructure{T};
                 push!(struc.struts, strut)
                 
             else
-                role = classify_beam_role(skel, edge_idx)
                 beam = Beam(seg_idx, seg.L;
-                           Lb=seg.Lb, Kx=default_Kx, Ky=default_Ky, Cb=seg.Cb,
-                           role=role)
+                           Lb=seg.Lb, Kx=default_Kx, Ky=default_Ky, Cb=seg.Cb)
                 push!(struc.beams, beam)
+                push!(beam_class_info,
+                      (length(struc.beams),
+                       _chain_endpoint_vertices(skel, (edge_idx,)),
+                       [edge_idx]))
             end
         end
     end
-    
+
+    # Classify beam roles now that all columns exist. `:girder` when both chain
+    # endpoints land on a column vertex; `:joist` when the beam supports a slab
+    # (any sub-edge lies on a slab-cell boundary) and is not a girder; `:beam`
+    # otherwise. Skeleton-input members keep the default `level = 0`.
+    column_vertices = Set(col.vertex_idx for col in struc.columns)
+    slab_support_edges = Set{Int}()
+    for slab in struc.slabs
+        for e_idx in slab_face_edge_ids(struc, slab)
+            push!(slab_support_edges, e_idx)
+        end
+    end
+    for (b_idx, endpoints, edge_indices) in beam_class_info
+        struc.beams[b_idx].role =
+            classify_beam_role(endpoints, edge_indices, column_vertices, slab_support_edges)
+    end
+
     n_total = length(struc.beams) + length(struc.columns) + length(struc.struts)
     n_chains = length(skel.edge_chains)
     @debug "Initialized members from $(length(struc.segments)) segments" beams=length(struc.beams) columns=length(struc.columns) struts=length(struc.struts) chains=n_chains
@@ -158,6 +183,329 @@ function initialize_members!(struc::BuildingStructure{T};
     compute_column_tributaries!(struc)
     
     return struc
+end
+
+# =============================================================================
+# Member (Beam) Tributary Profiles — Layer 1 of the tributary pipeline
+# =============================================================================
+#
+# Layer 0 (cells → cell edges) is `compute_cell_tributaries!`.
+# Layer 1 (cells/panels → Level-0 beams) is `compute_member_tributaries!` below:
+# it merges the per-cell edge tributaries that meet on each beam into a single
+# variable `TributaryProfile` stored on the beam. The load path
+# (`_create_cell_tributary_loads!`) still emits `Asap.TributaryLoad`s directly
+# from the cell cache; these member profiles feed the design layer (effective
+# flange width, and — in later phases — the level-to-level tributary cascade).
+
+"""
+    compute_member_tributaries!(struc; strategy::Symbol=:cell_merge) -> struc
+
+Populate each `Beam`'s `tributary_profile` (Layer 1 of the tributary pipeline).
+
+# Strategies
+- `:cell_merge` (default): merge the per-cell edge tributaries that meet on each
+  beam — the width contributions from the (up to two) adjacent cells are summed
+  along the beam. Mirrors the geometry already used by
+  `_create_cell_tributary_loads!`.
+- `:shell_panels`: delegate to `Asap._shell_panels_to_tributary_loads` when the
+  Asap model carries shell elements (multi-bay continuous-girder case). The
+  synthesizer's design model is frame-only today, so when no shells are present
+  this falls back to `:cell_merge` with a warning.
+
+Beams with no adjacent tributary keep `tributary_profile == nothing`.
+"""
+function compute_member_tributaries!(struc::BuildingStructure; strategy::Symbol=:cell_merge)
+    if strategy === :cell_merge
+        return _compute_member_tributaries_cell_merge!(struc)
+    elseif strategy === :shell_panels
+        return _compute_member_tributaries_shell_panels!(struc)
+    else
+        throw(ArgumentError(
+            "compute_member_tributaries!: unknown strategy $(strategy); use :cell_merge or :shell_panels"))
+    end
+end
+
+"""Convert a length in meters (Float64) to the structure's length type `T`."""
+_meters_to_T(::Type{T}, x_m::Float64) where {T} = convert(T, x_m)
+_meters_to_T(::Type{T}, x_m::Float64) where {T<:Unitful.Quantity} = convert(T, x_m * u"m")
+
+"""Frame elements of an Asap model (handles frame-only vs mixed models)."""
+function _frame_elements(model)
+    isnothing(model) && return []
+    hasproperty(model, :frame_elements) && return model.frame_elements
+    hasproperty(model, :elements) && return model.elements
+    return []
+end
+
+"""Shell elements of an Asap model, or an empty vector for a frame-only model."""
+function _asap_shell_elements(model)
+    isnothing(model) && return []
+    hasproperty(model, :shell_elements) && return model.shell_elements
+    return []
+end
+
+"""Clamped piecewise-linear interpolation of `w` sampled at `pos` evaluated at `s`."""
+function _interp_linear(pos::Vector{Float64}, w::Vector{Float64}, s::Float64)
+    s <= pos[1] && return w[1]
+    s >= pos[end] && return w[end]
+    idx = clamp(searchsortedlast(pos, s), 1, length(pos) - 1)
+    p0, p1 = pos[idx], pos[idx + 1]
+    p1 == p0 && return w[idx + 1]
+    return w[idx] + (w[idx + 1] - w[idx]) * (s - p0) / (p1 - p0)
+end
+
+"""
+Ordered vertex sequence `[v0, v1, ..., vn]` traversed by a chain of `edges`, so
+edge `k` connects `verts[k]` → `verts[k+1]`. For a single edge, returns the edge
+in its canonical (`edge_indices`) orientation.
+"""
+function _ordered_chain_vertices(skel, edges::Vector{Int})
+    n = length(edges)
+    verts = Vector{Int}(undef, n + 1)
+    if n == 1
+        a, b = skel.edge_indices[edges[1]]
+        verts[1] = a
+        verts[2] = b
+        return verts
+    end
+    e1 = skel.edge_indices[edges[1]]
+    e2 = skel.edge_indices[edges[2]]
+    # Start of edge 1 is its endpoint not shared with edge 2.
+    start_v = (e1[1] == e2[1] || e1[1] == e2[2]) ? e1[2] : e1[1]
+    verts[1] = start_v
+    cur = start_v
+    for (k, e) in enumerate(edges)
+        a, b = skel.edge_indices[e]
+        nxt = a == cur ? b : a
+        verts[k + 1] = nxt
+        cur = nxt
+    end
+    return verts
+end
+
+"""Extend a `[?, ?]`-spanning (positions, widths) profile to span `[0, 1]` by flat
+extension of the boundary widths."""
+function _span_unit_interval(pos::Vector{Float64}, w::Vector{Float64})
+    isempty(pos) && return ([0.0, 1.0], [0.0, 0.0])
+    p = copy(pos)
+    ww = copy(w)
+    if p[1] > 1e-9
+        pushfirst!(p, 0.0)
+        pushfirst!(ww, ww[1])
+    else
+        p[1] = 0.0
+    end
+    if p[end] < 1.0 - 1e-9
+        push!(p, 1.0)
+        push!(ww, ww[end])
+    else
+        p[end] = 1.0
+    end
+    return (p, ww)
+end
+
+"""
+Accumulate per-cell edge tributary width profiles, keyed by global edge index and
+stored in the canonical edge orientation (`edge_indices[e] = (v1, v2)`, i.e.
+`s = 0` at `v1`). Widths are in meters.
+"""
+function _accumulate_edge_width_profiles(struc::BuildingStructure)
+    skel = struc.skeleton
+    ProfT = Tuple{Vector{Float64}, Vector{Float64}}
+    edge_profiles = Dict{Int, Vector{ProfT}}()
+    for (cell_idx, cell) in enumerate(struc.cells)
+        tribs = cell_edge_tributaries(struc, cell_idx)
+        isnothing(tribs) && continue
+        face_edges = skel.face_edge_indices[cell.face_idx]
+        face_verts = skel.face_vertex_indices[cell.face_idx]
+        (isempty(face_edges) || isempty(face_verts)) && continue
+        n_verts = length(face_verts)
+        for trib in tribs
+            trib.area < 1e-12 && continue
+            length(trib.s) < 2 && continue
+            positions, widths_m = _extract_width_profile(trib)
+            length(positions) < 2 && continue
+            local_idx = trib.local_edge_idx
+            (local_idx < 1 || local_idx > length(face_edges)) && continue
+            global_edge = face_edges[local_idx]
+            expected_v1 = face_verts[local_idx]
+            expected_v2 = face_verts[mod1(local_idx + 1, n_verts)]
+            actual_v1, actual_v2 = skel.edge_indices[global_edge]
+            if actual_v1 == expected_v2 && actual_v2 == expected_v1
+                positions = reverse(1.0 .- positions)
+                widths_m = reverse(widths_m)
+            end
+            push!(get!(Vector{ProfT}, edge_profiles, global_edge), (positions, widths_m))
+        end
+    end
+    return edge_profiles
+end
+
+"""Sum the (≤ 2) cell width profiles that share an edge onto the union of their
+breakpoints. Widths in meters, canonical edge orientation."""
+function _merge_edge_profiles(profiles::Vector{Tuple{Vector{Float64}, Vector{Float64}}})
+    isempty(profiles) && return (Float64[], Float64[])
+    length(profiles) == 1 && return profiles[1]
+    all_pos = Float64[]
+    for (pos, _) in profiles
+        append!(all_pos, pos)
+    end
+    sort!(all_pos)
+    unique_pos = Float64[]
+    for p in all_pos
+        if isempty(unique_pos) || abs(p - unique_pos[end]) > 1e-9
+            push!(unique_pos, p)
+        end
+    end
+    merged_w = zeros(Float64, length(unique_pos))
+    for (pos, w) in profiles
+        for (i, s) in enumerate(unique_pos)
+            merged_w[i] += _interp_linear(pos, w, s)
+        end
+    end
+    return (unique_pos, merged_w)
+end
+
+"""
+Assign `beam.tributary_profile` from a dict of per-edge width profiles (canonical
+orientation, meters). Concatenates each beam's segments in chain order, mapping
+each segment's local `[0, 1]` onto the beam's global `[0, 1]` by physical length.
+Beams whose edges carry no tributary are left untouched.
+"""
+function _assign_beam_profiles_from_edges!(struc::BuildingStructure{T},
+        edge_merged::Dict{Int, Tuple{Vector{Float64}, Vector{Float64}}}) where {T}
+    skel = struc.skeleton
+    for beam in struc.beams
+        segs = segment_indices(beam)
+        isempty(segs) && continue
+        edges = [struc.segments[si].edge_idx for si in segs]
+        verts = _ordered_chain_vertices(skel, edges)
+
+        seg_len_m = Float64[]
+        for si in segs
+            L = struc.segments[si].L
+            push!(seg_len_m, L isa Unitful.Quantity ? ustrip(u"m", L) : Float64(L))
+        end
+        total = sum(seg_len_m)
+        total <= 0 && continue
+
+        positions_all = Float64[]
+        widths_all_m = Float64[]
+        offset = 0.0
+        any_trib = false
+        for k in eachindex(edges)
+            e = edges[k]
+            if haskey(edge_merged, e)
+                pos_c, w_c = edge_merged[e]
+                # Canonical orientation is edge_indices[e] = (a, b) with s = 0 at a.
+                # The beam traverses verts[k] → verts[k+1]; reverse if it disagrees.
+                a, _ = skel.edge_indices[e]
+                if verts[k] != a
+                    pos_c = reverse(1.0 .- pos_c)
+                    w_c = reverse(w_c)
+                end
+                pos_c, w_c = _span_unit_interval(pos_c, w_c)
+                maximum(w_c) > 0 && (any_trib = true)
+            else
+                pos_c = [0.0, 1.0]
+                w_c = [0.0, 0.0]
+            end
+            Lk = seg_len_m[k]
+            for j in eachindex(pos_c)
+                push!(positions_all, (offset + pos_c[j] * Lk) / total)
+                push!(widths_all_m, w_c[j])
+            end
+            offset += Lk
+        end
+
+        any_trib || continue
+
+        positions_all[1] = 0.0
+        positions_all[end] = 1.0
+        for i in 2:length(positions_all)
+            positions_all[i] < positions_all[i - 1] && (positions_all[i] = positions_all[i - 1])
+        end
+        widths_T = T[_meters_to_T(T, w) for w in widths_all_m]
+        beam.tributary_profile = TributaryProfile{T}(positions_all, widths_T, nothing)
+    end
+    return struc
+end
+
+"""`:cell_merge` strategy — merge per-cell edge tributaries onto each beam."""
+function _compute_member_tributaries_cell_merge!(struc::BuildingStructure)
+    edge_profiles = _accumulate_edge_width_profiles(struc)
+    edge_merged = Dict{Int, Tuple{Vector{Float64}, Vector{Float64}}}()
+    for (e, profs) in edge_profiles
+        edge_merged[e] = _merge_edge_profiles(profs)
+    end
+    return _assign_beam_profiles_from_edges!(struc, edge_merged)
+end
+
+"""`:shell_panels` strategy — delegate to `Asap._shell_panels_to_tributary_loads`
+when shells are present, else fall back to `:cell_merge`.
+
+Shells are grouped into per-bay panels by their `id` tag (Phase 7): shells built
+per slab (e.g. `:slab_1`, `:slab_2` from `build_analysis_model!`) form separate
+panels, so a girder shared by two bays receives its tributary from **both** and
+`Asap._shell_panels_to_tributary_loads` sums the depths across panels — the
+multi-bay continuous-girder case that function was written for. A single shared
+tag collapses to one panel (the earlier behavior). Only host members (non-joist
+beams) are handed to the Asap matcher, since it requires every beam to lie on a
+panel boundary; interior joists are served by `:cell_merge`. If the frame-only
+design model carries no shells, or the panel geometry does not match the beams,
+this falls back to `:cell_merge` with a warning."""
+function _compute_member_tributaries_shell_panels!(struc::BuildingStructure)
+    shells = _asap_shell_elements(struc.asap_model)
+    if isempty(shells)
+        @warn "compute_member_tributaries!(strategy=:shell_panels): no shell elements in the Asap model (design model is frame-only); falling back to :cell_merge."
+        return _compute_member_tributaries_cell_merge!(struc)
+    end
+
+    frame_els = _frame_elements(struc.asap_model)
+    isempty(frame_els) && return struc
+
+    # Map each HOST (non-joist) beam edge to its Asap frame element. The Asap
+    # multi-panel matcher requires every beam to sit on a panel boundary, so only
+    # boundary/host members are eligible; interior joists route via :cell_merge.
+    edge_to_el = Dict{Int, Asap.FrameElement}()
+    el_to_edge = Dict{Asap.FrameElement, Int}()
+    for beam in struc.beams
+        is_joist(beam) && continue
+        for si in segment_indices(beam)
+            e = struc.segments[si].edge_idx
+            (e >= 1 && e <= length(frame_els)) || continue
+            el = frame_els[e]
+            edge_to_el[e] = el
+            el_to_edge[el] = e
+        end
+    end
+    isempty(edge_to_el) && return struc
+
+    beam_elements = collect(Asap.FrameElement, values(edge_to_el))
+    # Per-bay panels keyed by shell id (see the docstring). Pressure is a unit
+    # dummy — only the geometric widths from the returned loads are consumed.
+    by_id = Dict{Symbol, Vector{Asap.ShellElement}}()
+    for sh in shells
+        push!(get!(() -> Asap.ShellElement[], by_id, sh.id), sh)
+    end
+    panels = collect(values(by_id))
+
+    local loads
+    try
+        loads = Asap._shell_panels_to_tributary_loads(panels, beam_elements, 1.0u"Pa")
+    catch err
+        @warn "compute_member_tributaries!(strategy=:shell_panels): shell panels did not match the host beams; falling back to :cell_merge." exception=(err, catch_backtrace())
+        return _compute_member_tributaries_cell_merge!(struc)
+    end
+
+    edge_merged = Dict{Int, Tuple{Vector{Float64}, Vector{Float64}}}()
+    for ld in loads
+        el = ld.element
+        haskey(el_to_edge, el) || continue
+        widths_m = [ustrip(u"m", w) for w in ld.widths]
+        edge_merged[el_to_edge[el]] = (copy(ld.positions), widths_m)
+    end
+    return _assign_beam_profiles_from_edges!(struc, edge_merged)
 end
 
 """
@@ -790,23 +1138,216 @@ function _grow_collinear_chain!(chain, visited, seed_idx, members, vertex_member
 end
 
 """
-    classify_beam_role(skel, edge_idx) -> Symbol
+    _chain_endpoint_vertices(skel, edge_indices) -> NTuple{2, Int}
 
-Classify beam role based on position in framing:
-- Perimeter beams → :girder (primary)
-- Interior beams on column lines → :girder
-- Other beams → :beam (secondary)
-
-Note: This is a simplified classification. For more accurate role assignment,
-consider using explicit framing layout or load path analysis.
+Return the two terminal skeleton vertices of a beam whose resolved chain spans
+`edge_indices` (a single-element collection for an unshattered edge). Terminals
+are the vertices that appear in exactly one of the chain's edges; interior
+shatter vertices appear in two. Falls back to the first edge's endpoints for a
+degenerate (closed-loop) chain.
 """
-function classify_beam_role(skel::BuildingSkeleton, edge_idx::Int)
-    # Simple heuristic: beams on the building perimeter are girders
-    # Check if edge is on any face boundary
-    
-    # For now, default to :beam - can be refined based on framing analysis
-    # A more sophisticated approach would check if this edge lies on a column line
+function _chain_endpoint_vertices(skel::BuildingSkeleton, edge_indices)
+    counts = Dict{Int, Int}()
+    for e in edge_indices
+        v1, v2 = skel.edge_indices[e]
+        counts[v1] = get(counts, v1, 0) + 1
+        counts[v2] = get(counts, v2, 0) + 1
+    end
+    terminals = sort!([v for (v, c) in counts if c == 1])
+    length(terminals) >= 2 && return (terminals[1], terminals[2])
+    v1, v2 = skel.edge_indices[first(edge_indices)]
+    return (v1, v2)
+end
+
+"""
+    classify_beam_role(endpoints, edge_indices, column_vertices, slab_support_edges) -> Symbol
+
+Classify a Level-0 (skeleton-input) beam's framing-hierarchy role:
+
+- `:girder` when **both** endpoints of the resolved chain coincide with a column
+  vertex (`Column.vertex_idx`, collected into `column_vertices`).
+- `:joist` when the beam supports a slab — any of its `edge_indices` lies on the
+  boundary of a slab cell (`slab_support_edges`, from `slab_face_edge_ids`) —
+  and it is not a girder.
+- `:beam` otherwise (catch-all secondary member).
+
+`endpoints` are the two terminal vertices from `_chain_endpoint_vertices`;
+`edge_indices` are the skeleton edges the beam spans (the whole chain).
+"""
+function classify_beam_role(endpoints::NTuple{2, Int}, edge_indices,
+                            column_vertices, slab_support_edges)
+    v1, v2 = endpoints
+    (v1 in column_vertices && v2 in column_vertices) && return :girder
+    any(e -> e in slab_support_edges, edge_indices) && return :joist
     return :beam
+end
+
+# =============================================================================
+# End-release resolution (Phase 2)
+# =============================================================================
+#
+# Segments own per-end fixity symbols (:default | :fixed | :pinned); the resolver
+# collapses a beam's chain of segments plus its whole-member torsion flag to one
+# of Asap's five element-release enums. `:default` symbols defer to the Phase 3
+# `(role, material, lateral_role)` dispatch — `StructuralSizer.default_release`
+# and `StructuralSizer.default_torsion_released` (declared in
+# `StructuralSizer/src/members/defaults.jl`, per-material specializations in the
+# material modules), imported here via `@reexport using StructuralSizer` in
+# `StructuralSynthesizer.jl`.
+
+# Allowed per-end segment release symbols.
+const _RELEASE_SEGMENT_SYMS = (:default, :fixed, :pinned)
+
+"""
+    _release_enum(start_sym, end_sym, torsion_released) -> Symbol
+
+Collapse a pair of resolved per-end fixity symbols (each `:fixed` or `:pinned`)
+plus a whole-member torsion flag to one of Asap's five element-release enums
+(`external/Asap/src/Elements/elements.jl`): `:fixedfixed`, `:freefixed`,
+`:fixedfree`, `:freefree`, `:joist`. `torsion_released` only selects between
+`:joist` and `:freefree` for the pinned–pinned case; it is irrelevant otherwise.
+
+!!! note "`torsion_released` naming — reconciled in Phase 3 via docstring"
+    Asap's `k_joist` kernel (`external/Asap/src/Elements/K.jl` line 293) is built
+    from `E, A, L, G, J` — it **retains** axial and torsion and releases only
+    bending, whereas `k_freefree` retains axial alone. Physically Asap's `:joist`
+    therefore keeps torsion **fixed**, so the field name `torsion_released` reads
+    as the inverse of the DOF state it selects. Phase 3 keeps the field name
+    (Option A) and documents the intended meaning on `Beam.torsion_released`:
+    `torsion_released == true` selects Asap's OWSJ-style `:joist` element (pinned
+    bending ends, retained torsional `GJ`), it does **not** mean literal torsion
+    release. The `(:pinned, :pinned) + torsion_released == true => :joist` mapping
+    encodes that intent (steel OWSJ => Asap `:joist`).
+"""
+function _release_enum(start_sym::Symbol, end_sym::Symbol, torsion_released::Bool)
+    start_sym === :fixed  && end_sym === :fixed  && return :fixedfixed
+    start_sym === :pinned && end_sym === :fixed  && return :freefixed
+    start_sym === :fixed  && end_sym === :pinned && return :fixedfree
+    start_sym === :pinned && end_sym === :pinned && return torsion_released ? :joist : :freefree
+    error("resolve_release: resolved end symbols must each be :fixed or :pinned, " *
+          "got (start = $(start_sym), end = $(end_sym))")
+end
+
+"""
+    _resolve_beam_end_symbols(beam, chain, material) -> (start_sym, end_sym, torsion_released)
+
+Resolve a beam's outer end fixity symbols (`:fixed`/`:pinned`) and its
+whole-member torsion flag, enforcing the chain-interior constraint.
+
+`chain` is the ordered `Vector{Segment}` spanned by `beam` (same order as
+`segment_indices(beam)`; the first segment's `release_start` is the member start
+node, the last segment's `release_end` is the member end node).
+
+Resolution rules:
+- `:default` outer symbols defer to `default_release(role, material, lateral_role)`.
+- Interior fixity symbols — every symbol other than the first segment's
+  `release_start` and the last segment's `release_end` — must be `:fixed` (or
+  `:default`, treated as `:fixed` for moment continuity across a shatter node).
+  An explicit interior `:pinned` is an accidental mid-member hinge and errors,
+  naming the offending segment.
+- `torsion_released === nothing` defers to `default_torsion_released(role, material)`.
+"""
+function _resolve_beam_end_symbols(beam::Beam, chain::AbstractVector{<:Segment}, material)
+    n = length(chain)
+    n == 0 && error("resolve_release: beam has an empty segment chain")
+    role = getfield(beam, :role)
+    lateral_role = getfield(beam, :lateral_role)
+
+    # Validate raw per-end symbols before interpreting them.
+    for (i, seg) in enumerate(chain)
+        seg.release_start in _RELEASE_SEGMENT_SYMS || error(
+            "resolve_release: segment $i (edge $(seg.edge_idx)) has invalid " *
+            "release_start = $(seg.release_start); expected one of $(_RELEASE_SEGMENT_SYMS)")
+        seg.release_end in _RELEASE_SEGMENT_SYMS || error(
+            "resolve_release: segment $i (edge $(seg.edge_idx)) has invalid " *
+            "release_end = $(seg.release_end); expected one of $(_RELEASE_SEGMENT_SYMS)")
+    end
+
+    # Interior ends must be moment-continuous (:fixed or :default).
+    _interior_ok(sym) = sym === :fixed || sym === :default
+    _check_interior(sym, seg, which) =
+        _interior_ok(sym) || error(
+            "resolve_release: interior end (`$(which)`) of segment (edge " *
+            "$(seg.edge_idx)) is `$(sym)`; chain-interior segments must be `:fixed` " *
+            "(an interior `:pinned` would be an accidental mid-member hinge)")
+
+    if n > 1
+        _check_interior(chain[1].release_end, chain[1], :release_end)
+        _check_interior(chain[n].release_start, chain[n], :release_start)
+        for i in 2:(n - 1)
+            _check_interior(chain[i].release_start, chain[i], :release_start)
+            _check_interior(chain[i].release_end, chain[i], :release_end)
+        end
+    end
+
+    raw_start = chain[1].release_start
+    raw_end = chain[n].release_end
+
+    # Resolve :default outer ends via the (role, material, lateral_role) dispatch.
+    def_start, def_end = default_release(role, material, lateral_role)
+    start_sym = raw_start === :default ? def_start : raw_start
+    end_sym = raw_end === :default ? def_end : raw_end
+
+    (start_sym in (:fixed, :pinned)) || error(
+        "resolve_release: resolved start symbol `$(start_sym)` is not :fixed/:pinned")
+    (end_sym in (:fixed, :pinned)) || error(
+        "resolve_release: resolved end symbol `$(end_sym)` is not :fixed/:pinned")
+
+    tors_raw = getfield(beam, :torsion_released)
+    torsion_released = tors_raw === nothing ? default_torsion_released(role, material) : tors_raw
+
+    return (start_sym, end_sym, torsion_released)
+end
+
+"""
+    resolve_release(beam, chain, material) -> Symbol
+
+Collapse a beam's per-segment `release_start`/`release_end` symbols and its
+`torsion_released` flag to a single Asap element-release enum
+(`:fixedfixed`, `:freefixed`, `:fixedfree`, `:freefree`, or `:joist`).
+
+`chain` is the ordered `Vector{Segment}` spanned by `beam` (same order as
+`segment_indices(beam)`; first segment's `release_start` is the member start, last
+segment's `release_end` is the member end). Interior segments must be
+moment-continuous, so an explicit interior `:pinned` errors. `:default` symbols
+defer to the `(role, material, lateral_role)` dispatch
+(`StructuralSizer.default_release` / `default_torsion_released`). A `nothing`
+`material` (no beam material specified) resolves to fully-fixed ends, preserving
+the prior all-`:fixedfixed` behavior.
+
+For a shattered (multi-segment) chain this single symbol is the member-level
+idealization; the per-element assignment used at Asap model construction is
+[`resolve_edge_releases`](@ref).
+"""
+function resolve_release(beam::Beam, chain::AbstractVector{<:Segment}, material)
+    start_sym, end_sym, torsion_released = _resolve_beam_end_symbols(beam, chain, material)
+    return _release_enum(start_sym, end_sym, torsion_released)
+end
+
+"""
+    resolve_edge_releases(beam, chain, material) -> Vector{Symbol}
+
+Per-element release symbols for a beam's chain, in `chain` order (one symbol per
+skeleton edge / Asap element). A single-segment chain yields
+`[resolve_release(...)]`. For a shattered (multi-segment) chain the member's
+resolved start fixity is applied to the first element, the resolved end fixity to
+the last element, and every interior element is `:fixedfixed` — so a released
+member end never turns an interior shatter node into an accidental mid-member
+hinge.
+
+Note: a member-level torsion release (`:joist`) cannot be represented on a
+shattered chain (torsion continuity spans shatter nodes); such a member collapses
+to `:freefixed`/`:fixedfree` outer elements. No producer currently emits
+multi-segment released members (Phase 3/5 concern).
+"""
+function resolve_edge_releases(beam::Beam, chain::AbstractVector{<:Segment}, material)
+    start_sym, end_sym, torsion_released = _resolve_beam_end_symbols(beam, chain, material)
+    n = length(chain)
+    n == 1 && return [_release_enum(start_sym, end_sym, torsion_released)]
+    releases = fill(:fixedfixed, n)
+    releases[1] = _release_enum(start_sym, :fixed, torsion_released)
+    releases[n] = _release_enum(:fixed, end_sym, torsion_released)
+    return releases
 end
 
 """
@@ -858,6 +1399,15 @@ Note: member_indices in MemberGroup refer to indices within the specific member 
 (e.g., struc.beams[idx] for beams).
 """
 function build_member_groups!(struc::BuildingStructure; member_type::Symbol=:beams)
+    # Preserve per-group catalog overrides (Phase 6) across the rebuild.
+    # build_member_groups! is re-run on every sizing pass (via
+    # member_group_demands), so a catalog_override set by materialize_level!
+    # (Phase 5) — keyed on the stable group_id — must survive the
+    # empty!/recreate cycle rather than being reset to `nothing`.
+    prev_overrides = Dict{UInt64, Any}()
+    for (gid, mg) in struc.member_groups
+        mg.catalog_override === nothing || (prev_overrides[gid] = mg.catalog_override)
+    end
     empty!(struc.member_groups)
     
     members = if member_type == :beams
@@ -878,7 +1428,7 @@ function build_member_groups!(struc::BuildingStructure; member_type::Symbol=:bea
         set_group_id!(m, gid)
 
         mg = get!(struc.member_groups, gid) do
-            MemberGroup(gid)
+            MemberGroup(gid; catalog_override = get(prev_overrides, gid, nothing))
         end
         push!(mg.member_indices, m_idx)
     end
@@ -1376,6 +1926,114 @@ function size_steel_members!(
     return struc
 end
 
+# =============================================================================
+# Single member-group sizing (Phase 6 catalog-override seam)
+# =============================================================================
+
+"""
+    size_member_group!(struc, gid; catalog=StructuralSizer.all_W(),
+                        material=StructuralSizer.A992_Steel,
+                        member_edge_group=:beams, max_depth=Inf*u"m",
+                        resolution=200, reanalyze=true, deflection_limit=nothing)
+
+Size a **single** steel `MemberGroup` (`struc.member_groups[gid]`), honouring its
+per-group `catalog_override`. This is the Phase 6 routing seam: the group's
+catalog is resolved as
+
+```julia
+resolved_catalog = something(group.catalog_override, catalog)
+```
+
+so a `nothing` override reproduces sizing against the material-default `catalog`
+(byte-for-byte the pre-Phase-6 selection), while a non-`nothing` override
+restricts *this group only* to the supplied catalog. The resolved catalog is
+passed to the per-group AISC selector (`StructuralSizer.optimize_binary_search`,
+which is optimal per independent group), and the winning section is written back
+to the group, its members, and the ASAP elements — mirroring
+[`size_steel_members!`](@ref) for one group.
+
+The model must already be analysed (solved) so `member_group_demands` can
+envelope internal forces; this function does not add loads.
+
+!!! note "Phase 5 seam"
+    `materialize_level!` (Phase 5, not yet implemented) is expected to set
+    `group.catalog_override = level.catalog_override` from the owning
+    [`FramingLevel`](@ref) before calling `size_member_group!`, so a joist level
+    with a restricted catalog (e.g. a specific set of W-shapes) sizes against
+    exactly that catalog. `build_member_groups!` preserves the override across
+    its rebuild so it survives the demand-extraction pass.
+
+Returns the sized `MemberGroup`.
+"""
+function size_member_group!(
+    struc::BuildingStructure,
+    gid::UInt64;
+    catalog = StructuralSizer.all_W(),
+    material = StructuralSizer.A992_Steel,
+    member_edge_group::Symbol = :beams,
+    max_depth = Inf * u"m",
+    resolution::Int = 200,
+    reanalyze::Bool = true,
+    deflection_limit::Union{Nothing, Real} = nothing,
+)
+    # member_group_demands rebuilds the groups (preserving catalog_override) and
+    # envelopes internal forces, so fetch the (possibly recreated) group after.
+    group_ids, demands, L_totals, Lb_govs, Cb_govs, Kx_govs, Ky_govs =
+        member_group_demands(struc; member_edge_group=member_edge_group, resolution=resolution)
+
+    haskey(struc.member_groups, gid) ||
+        throw(ArgumentError("no MemberGroup with id $gid in struc.member_groups"))
+    group = struc.member_groups[gid]
+
+    g_idx = findfirst(==(gid), group_ids)
+    g_idx === nothing && throw(ArgumentError(
+        "MemberGroup $gid has no demands in edge group :$member_edge_group"))
+
+    # Phase 6 catalog-override resolution: override wins over the material default.
+    resolved_catalog = something(group.catalog_override, catalog)
+
+    geometry = StructuralSizer.SteelMemberGeometry(
+        L_totals[g_idx]; Lb=Lb_govs[g_idx], Cb=Cb_govs[g_idx],
+        Kx=Kx_govs[g_idx], Ky=Ky_govs[g_idx])
+
+    checker = StructuralSizer.AISCChecker(;
+        max_depth=max_depth, deflection_limit=deflection_limit)
+
+    result = StructuralSizer.optimize_binary_search(
+        checker, [demands[g_idx]], [geometry], resolved_catalog, material)
+
+    # Catalog sections usually carry material=nothing; stamp the group's material.
+    chosen = copy(result.sections[1])
+    chosen.material = material
+    group.section = chosen
+
+    member_array = member_edge_group == :columns ? struc.columns :
+                   member_edge_group == :struts ? struc.struts : struc.beams
+    skel = struc.skeleton
+    edge_ids_in_group = Set(get(skel.groups_edges, member_edge_group, Int[]))
+    asap_sec = StructuralSizer.to_asap_section(chosen, material)
+
+    for m_idx in group.member_indices
+        m = member_array[m_idx]
+        L_raw = sum(struc.segments[i].L for i in segment_indices(m))
+        L_total = L_raw isa Unitful.Quantity ? L_raw : L_raw * u"m"
+        set_section!(m, chosen)
+        set_volumes!(m, MaterialVolumes(material => StructuralSizer.section_area(chosen) * L_total))
+        for seg_idx in segment_indices(m)
+            edge_idx = struc.segments[seg_idx].edge_idx
+            edge_idx in edge_ids_in_group || continue
+            struc.asap_model.elements[edge_idx].section = asap_sec
+        end
+    end
+
+    if reanalyze
+        Asap.process!(struc.asap_model)
+        Asap.solve!(struc.asap_model)
+    end
+
+    return group
+end
+
 
 # =============================================================================
 # T-Beam Flange Parameters (ACI 318-11 §8.12.2)
@@ -1392,7 +2050,7 @@ For each beam group:
 2. Extracts slab thickness (`hf`) as the minimum across adjacent slabs
 3. Determines beam position (`:interior` or `:edge`) from `edge_face_counts`
    — boundary edges (count=1) indicate edge beams
-4. Reads the beam's `tributary_width` as the clear spacing `sw`
+4. Reads the beam's max-envelope tributary width (`tributary_width_envelope`) as the clear spacing `sw`
 5. Computes effective flange width via `effective_flange_width`
 
 Groups without adjacent slabs get `bf = nothing`, `hf = nothing`.
@@ -1438,11 +2096,24 @@ function _compute_flange_params(
         for m_idx in mg.member_indices
             m = member_array[m_idx]
 
-            # Tributary width (beam spacing proxy)
-            if !isnothing(m.tributary_width)
-                tw = m.tributary_width isa Unitful.Quantity ?
-                    ustrip(u"m", m.tributary_width) : Float64(m.tributary_width)
-                trib_w_m = max(trib_w_m, tw)
+            # Tributary width (beam spacing proxy). Collapse the beam's variable
+            # tributary profile w(s) to a single representative clear spacing sw
+            # via the max envelope w_max = max_s w(s).
+            #
+            # ENGINEERING JUDGMENT: ACI 318-11 §8.12.2 (interior) / §8.12.3 (edge)
+            # (corpus: aci-318-11, PDF p.119) define the effective flange width
+            # from the clear web spacing sw but do not prescribe how to collapse a
+            # spatially varying tributary to a single sw. `effective_flange_width`
+            # caps each overhang at the least of {8·hf (edge 6·hf), sw/2,
+            # ln/8 (edge ln/12)}, so the sw term can only *reduce* bf; taking the
+            # max spacing is the least-reducing choice and reproduces the prior
+            # scalar behavior exactly when the profile is constant. This is NOT a
+            # literal code requirement — per-station bf(x) is preferred once the
+            # section checks accept a variable width.
+            tw = tributary_width_envelope(m)
+            if !isnothing(tw)
+                tw_m = tw isa Unitful.Quantity ? ustrip(u"m", tw) : Float64(tw)
+                trib_w_m = max(trib_w_m, tw_m)
             end
 
             for seg_idx in segment_indices(m)

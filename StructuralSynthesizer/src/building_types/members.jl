@@ -30,6 +30,115 @@ entry per physical pixel piece along the span. When `pixel_design` is set,
     volumes::MaterialVolumes = MaterialVolumes()
 end
 
+# =============================================================================
+# Variable Tributary Profile
+# =============================================================================
+
+"""
+    TributaryProfile{T}
+
+Piecewise-linear tributary width `w(s)` along a beam, where `s ∈ [0, 1]` is the
+normalized position measured from the start node (`s = 0`) to the end node
+(`s = 1`). Generalizes the former scalar `tributary_width` so variable flange
+widths, irregular joist fields, and shell-panel tributary merging can be
+represented end to end.
+
+# Fields
+- `positions::Vector{Float64}`: normalized breakpoints in `[0, 1]`, monotonically
+  nondecreasing, with `positions[1] == 0.0` and `positions[end] == 1.0`.
+- `widths::Vector{T}`: tributary width (length units) at each breakpoint; same
+  length as `positions`. Width varies linearly between adjacent breakpoints.
+- `axis::Union{Nothing, NTuple{2, Float64}}`: optional in-plane load axis for an
+  asymmetric tributary. `nothing` ⇒ symmetric about the beam.
+
+The validating constructor enforces the invariants above.
+"""
+struct TributaryProfile{T}
+    positions::Vector{Float64}
+    widths::Vector{T}
+    axis::Union{Nothing, NTuple{2, Float64}}
+
+    function TributaryProfile{T}(positions::Vector{Float64}, widths::Vector{T},
+                                 axis::Union{Nothing, NTuple{2, Float64}} = nothing) where {T}
+        n = length(positions)
+        n >= 2 || throw(ArgumentError(
+            "TributaryProfile requires >= 2 positions (got $n)"))
+        length(widths) == n || throw(ArgumentError(
+            "TributaryProfile positions ($n) and widths ($(length(widths))) must be equal length"))
+        isapprox(positions[1], 0.0; atol = 1e-9) || throw(ArgumentError(
+            "TributaryProfile positions must start at 0.0 (got $(positions[1]))"))
+        isapprox(positions[end], 1.0; atol = 1e-9) || throw(ArgumentError(
+            "TributaryProfile positions must end at 1.0 (got $(positions[end]))"))
+        issorted(positions) || throw(ArgumentError(
+            "TributaryProfile positions must be monotonically nondecreasing"))
+        all(w -> w >= zero(w), widths) || throw(ArgumentError(
+            "TributaryProfile widths must be non-negative"))
+        return new{T}(positions, widths, axis)
+    end
+end
+
+"""Infer the element type `T` from `widths` when constructing a `TributaryProfile`."""
+TributaryProfile(positions::Vector{Float64}, widths::Vector{T},
+                 axis::Union{Nothing, NTuple{2, Float64}} = nothing) where {T} =
+    TributaryProfile{T}(positions, widths, axis)
+
+"""
+    TributaryProfile(w; axis=nothing) -> TributaryProfile
+
+Constant-width profile: lifts a scalar tributary width `w` to a two-breakpoint
+profile spanning the whole beam (`w` at `s = 0` and `s = 1`).
+"""
+TributaryProfile(w::T; axis::Union{Nothing, NTuple{2, Float64}} = nothing) where {T} =
+    TributaryProfile{T}([0.0, 1.0], T[w, w], axis)
+
+"""Number of breakpoints in the profile."""
+Base.length(p::TributaryProfile) = length(p.positions)
+
+"""Breakpoint `i` as a `(position, width)` tuple."""
+Base.getindex(p::TributaryProfile, i::Int) = (p.positions[i], p.widths[i])
+Base.firstindex(::TributaryProfile) = 1
+Base.lastindex(p::TributaryProfile) = length(p.positions)
+
+"""
+    sample(profile::TributaryProfile, s::Real) -> width
+
+Interpolated tributary width at normalized position `s` (clamped to `[0, 1]`),
+linearly interpolating between adjacent breakpoints.
+"""
+function sample(p::TributaryProfile, s::Real)
+    sc = clamp(Float64(s), 0.0, 1.0)
+    pos = p.positions
+    w = p.widths
+    sc <= pos[1] && return w[1]
+    sc >= pos[end] && return w[end]
+    idx = clamp(searchsortedlast(pos, sc), 1, length(pos) - 1)
+    p0, p1 = pos[idx], pos[idx + 1]
+    w0, w1 = w[idx], w[idx + 1]
+    p1 == p0 && return w1
+    frac = (sc - p0) / (p1 - p0)
+    return w0 + (w1 - w0) * frac
+end
+
+"""
+    tributary_average(profile::TributaryProfile) -> width
+
+Area-average width `∫₀¹ w(s) ds` via trapezoidal integration over the
+breakpoints. Because `positions` spans the full `[0, 1]` domain, this integral
+equals the mean width — the representative scalar for legacy call sites.
+"""
+function tributary_average(p::TributaryProfile)
+    pos = p.positions
+    w = p.widths
+    total = zero(w[1])
+    @inbounds for i in 1:(length(pos) - 1)
+        total += (w[i] + w[i + 1]) * 0.5 * (pos[i + 1] - pos[i])
+    end
+    return total
+end
+
+"""Maximum tributary width over the beam (`max_s w(s)`)."""
+tributary_envelope(p::TributaryProfile) = maximum(p.widths)
+
 """
     Beam{T} <: AbstractMember{T}
 
@@ -37,14 +146,119 @@ Horizontal member (gravity framing system).
 
 # Fields
 - `base::MemberBase{T}`: Shared member properties
-- `tributary_width`: Width of tributary area for load calculations
-- `role::Symbol`: `:girder` (primary), `:beam` (secondary), `:joist` (repetitive), `:infill`
+- `tributary_profile`: Variable tributary width `w(s)` along the beam
+  ([`TributaryProfile`](@ref)), or `nothing`. Collapse to a scalar with
+  [`tributary_width_scalar`](@ref) (area-average) or
+  [`tributary_width_envelope`](@ref) (max).
+- `role::Symbol`: framing-hierarchy role, one of
+  - `:girder` — column-to-column beam (both ends land on a column vertex);
+  - `:joist` — beam that directly supports the slab (and is not a girder);
+  - `:beam` — catch-all secondary member (neither of the above).
+
+  Assigned for skeleton-input members by [`classify_beam_role`](@ref).
+- `level::Int`: framing-hierarchy level. Skeleton-input members are `0`
+  (the primary column-to-column frame); auto-generated members from higher
+  framing levels use `1, 2, …`.
+- `lateral_role::Symbol`: lateral-system participation. `:gravity` (default)
+  means gravity-only; `:moment_frame` means part of a moment frame. Other
+  values are reserved for later phases.
+- `torsion_released::Union{Nothing, Bool}`: whole-member torsion selector used by
+  the release resolver to pick between Asap's `:joist` and `:freefree` element
+  releases when both member ends resolve to `:pinned`. `nothing` (default) defers
+  to the `(role, material)` dispatch (`StructuralSizer.default_torsion_released`);
+  `true`/`false` is an explicit user override.
+
+  !!! warning "Field name reads inverse to the DOF state it selects"
+      Despite the name, `torsion_released = true` selects Asap's `:joist` element
+      release, which is the **open-web-steel-joist (OWSJ) idealization: pinned
+      bending ends with RETAINED torsional stiffness `GJ`** — torsion is *not*
+      released. Asap's `:joist` kernel `k_joist`
+      (`external/Asap/src/Elements/K.jl`) is built from `E, A, L, G, J` and
+      releases only bending; `k_freefree` retains axial alone. So:
+      - `torsion_released = true`  → `:joist`    (OWSJ-style: bending pinned, `GJ` kept);
+      - `torsion_released = false` → `:freefree` (all end rotations released).
+
+      Read the flag as "want OWSJ-style `:joist` behavior", not literal "torsion
+      released". The name is kept (rather than renamed to e.g. `retain_torsion_gj`)
+      to avoid churn against the tested Phase 2 mapping; this docstring is the
+      reconciliation.
+
+# Back-compat
+`beam.tributary_width` (property) returns the area-average scalar of the profile,
+so legacy call sites keep working.
 """
 @kwdef mutable struct Beam{T} <: AbstractMember{T}
     base::MemberBase{T}
-    tributary_width::Union{T, Nothing} = nothing
+    tributary_profile::Union{TributaryProfile{T}, Nothing} = nothing
     role::Symbol = :beam
+    level::Int = 0
+    lateral_role::Symbol = :gravity
+    torsion_released::Union{Nothing, Bool} = nothing
 end
+
+"""
+    tributary_profile(beam) -> Union{TributaryProfile, Nothing}
+
+The beam's variable tributary width profile (or `nothing`).
+"""
+tributary_profile(b::Beam) = getfield(b, :tributary_profile)
+
+"""
+    tributary_width_scalar(beam) -> Union{T, Nothing}
+
+Back-compat scalar tributary width: the area-average `∫₀¹ w(s) ds` of the beam's
+[`TributaryProfile`](@ref), giving legacy scalar call sites one representative
+value. Returns `nothing` when the beam has no tributary profile.
+"""
+function tributary_width_scalar(b::Beam)
+    prof = getfield(b, :tributary_profile)
+    isnothing(prof) && return nothing
+    return tributary_average(prof)
+end
+
+"""
+    tributary_width_envelope(beam) -> Union{T, Nothing}
+
+Max-envelope tributary width `max_s w(s)` of the beam's [`TributaryProfile`](@ref)
+— the value used where downstream section checks accept only a single width.
+Returns `nothing` when the beam has no tributary profile.
+"""
+function tributary_width_envelope(b::Beam)
+    prof = getfield(b, :tributary_profile)
+    isnothing(prof) && return nothing
+    return tributary_envelope(prof)
+end
+
+# Back-compat property shim: `beam.tributary_width` maps to the area-average
+# scalar of the profile so pre-existing call sites (e.g. api/diagnose.jl) keep
+# working after the field was promoted to `tributary_profile`.
+function Base.getproperty(b::Beam, name::Symbol)
+    name === :tributary_width && return tributary_width_scalar(b)
+    return getfield(b, name)
+end
+
+# -----------------------------------------------------------------------------
+# Framing-hierarchy role / level predicates (module-level free functions)
+# -----------------------------------------------------------------------------
+
+"""`true` if the beam is classified as a column-to-column `:girder`."""
+is_girder(b::Beam) = getfield(b, :role) === :girder
+
+"""`true` if the beam is classified as a slab-supporting `:joist`."""
+is_joist(b::Beam) = getfield(b, :role) === :joist
+
+"""
+    is_beam(b::Beam) -> Bool
+
+`true` only for the catch-all `:beam` role (neither girder nor joist).
+"""
+is_beam(b::Beam) = getfield(b, :role) === :beam
+
+"""Framing-hierarchy level (`0` for skeleton-input members)."""
+level_of(b::Beam) = getfield(b, :level)
+
+"""Lateral-system participation symbol (`:gravity`, `:moment_frame`, …)."""
+lateral_role_of(b::Beam) = getfield(b, :lateral_role)
 
 """
     Column{T} <: AbstractMember{T}
@@ -196,18 +410,52 @@ end
 # -----------------------------------------------------------------------------
 
 """
-    Beam(seg_indices, L; Lb, Kx, Ky, Cb, group_id, role, tributary_width) -> Beam
+    Beam(seg_indices, L; Lb, Kx, Ky, Cb, group_id, role, level, lateral_role,
+         torsion_released, tributary_width, tributary_profile) -> Beam
 
 Convenience constructor from segment indices and total length.
+
+`level` defaults to `0` (skeleton-input primary frame) and `lateral_role` to
+`:gravity`; `torsion_released` defaults to `nothing` (defers to the
+`(role, material)` dispatch). See [`Beam`](@ref) for the semantics.
+
+Accepts either a scalar `tributary_width` (auto-lifted to a constant-width
+[`TributaryProfile`](@ref)) or a `tributary_profile` directly. Passing both is an
+error.
 """
 function Beam(seg_indices::Vector{Int}, L::T; Lb=L, Kx=1.0, Ky=1.0, Cb=1.0, 
-              group_id=nothing, role=:beam, tributary_width=nothing) where T
+              group_id=nothing, role=:beam, level=0, lateral_role=:gravity,
+              torsion_released=nothing,
+              tributary_width=nothing, tributary_profile=nothing) where T
     base = MemberBase{T}(
         segment_indices=seg_indices, L=L, Lb=Lb,
         Kx=Float64(Kx), Ky=Float64(Ky), Cb=Float64(Cb),
         group_id=group_id, section=nothing, volumes=MaterialVolumes()
     )
-    Beam{T}(base=base, tributary_width=tributary_width, role=role)
+    prof = _resolve_tributary_profile(T, tributary_profile, tributary_width)
+    Beam{T}(base=base, tributary_profile=prof, role=role,
+            level=Int(level), lateral_role=lateral_role,
+            torsion_released=torsion_released)
+end
+
+"""
+Resolve the constructor's `tributary_profile` / `tributary_width` kwargs into a
+`Union{TributaryProfile{T}, Nothing}`. A scalar width is auto-lifted to a
+constant-width profile; an existing profile is retyped to `T` if needed.
+"""
+function _resolve_tributary_profile(::Type{T}, profile, width) where {T}
+    if !isnothing(profile) && !isnothing(width)
+        throw(ArgumentError("Beam: pass either tributary_width or tributary_profile, not both"))
+    end
+    if !isnothing(profile)
+        profile isa TributaryProfile{T} && return profile
+        profile isa TributaryProfile && return TributaryProfile{T}(
+            profile.positions, convert(Vector{T}, profile.widths), profile.axis)
+        throw(ArgumentError("tributary_profile must be a TributaryProfile, got $(typeof(profile))"))
+    end
+    isnothing(width) && return nothing
+    w = convert(T, width)
+    return TributaryProfile{T}([0.0, 1.0], T[w, w], nothing)
 end
 
 """Single-segment beam convenience: wraps the index in a vector."""
@@ -358,12 +606,56 @@ set_pixel_design!(m::AbstractMember, pd) = (m.base.pixel_design = pd)
 """Replace the material → volume mapping."""
 set_volumes!(m::AbstractMember, vols) = (m.base.volumes = vols)
 
-"""Optimization grouping for similar members (pure grouping logic + shared section for ASAP)."""
+"""
+    MemberGroup
+
+Optimization grouping for similar members (pure grouping logic + shared section
+for ASAP).
+
+# Fields
+- `hash::UInt64`: group key (shared `group_id` of the grouped members).
+- `member_indices::Vector{Int}`: indices into the owning member vector
+  (e.g. `struc.beams[idx]`).
+- `section::Union{AbstractSection, Nothing}`: shared section assigned by sizing;
+  `nothing` before the group is sized.
+- `catalog_override::Any`: per-group section catalog override, or `nothing`
+  (the default). When non-`nothing`, [`size_member_group!`](@ref) passes this to
+  the material selector as its `catalog` keyword, overriding the material's
+  default catalog for this group only. This is the entry point Phase 5's
+  `materialize_level!` uses to restrict a joist group to a specific catalog
+  (e.g. "only use these W-shapes for the joists") without forking the sizing
+  functions. A value of `nothing` reproduces the pre-Phase-6 behaviour exactly
+  (the material's standard catalog is used).
+
+!!! note "Phase 5 seam"
+    `FramingLevel.catalog_override` (added in Phase 4) is propagated onto the
+    per-level `MemberGroup.catalog_override` by `materialize_level!` in Phase 5
+    (`group.catalog_override = level.catalog_override` before sizing). This
+    struct only carries the override and hands it to the selector; it does not
+    itself generate members.
+"""
 mutable struct MemberGroup
     hash::UInt64
     member_indices::Vector{Int}
     section::Union{AbstractSection, Nothing}  # Shared section for ASAP element updates
+    catalog_override::Any                     # Per-group catalog override (nothing ⇒ material default)
 end
 
-"""Create an empty `MemberGroup` with the given hash key and no shared section."""
-MemberGroup(hash::UInt64) = MemberGroup(hash, Int[], nothing)
+"""
+Back-compat positional constructor: a group with no per-group catalog override
+(`catalog_override = nothing`). Keeps pre-Phase-6 three-argument call sites
+working unchanged.
+"""
+MemberGroup(hash::UInt64, member_indices::Vector{Int},
+            section::Union{AbstractSection, Nothing}) =
+    MemberGroup(hash, member_indices, section, nothing)
+
+"""
+    MemberGroup(hash; catalog_override=nothing) -> MemberGroup
+
+Create an empty `MemberGroup` with the given hash key, no shared section, and an
+optional per-group `catalog_override` (default `nothing` ⇒ use the material's
+standard catalog at sizing time).
+"""
+MemberGroup(hash::UInt64; catalog_override = nothing) =
+    MemberGroup(hash, Int[], nothing, catalog_override)

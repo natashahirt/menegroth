@@ -41,9 +41,13 @@
 
 default_release(::Val{:joist}, ::Timber, ::Val{:gravity}) = (:pinned, :pinned)
 default_release(::Val{:girder}, ::Timber, ::Val{:gravity}) = (:fixed, :fixed)
+# Timber `:beam` and `:girder` share the same engineered-timber frame defaults.
+default_release(::Val{:beam}, ::Timber, ::Val{:gravity}) = (:fixed, :fixed)
 
 default_torsion_released(::Val{:joist}, ::Timber) = false
 default_torsion_released(::Val{:girder}, ::Timber) = false
+default_torsion_released(::Val{:beam}, ::Timber) = false
 
 default_seat_eccentricity(::Val{:joist}, ::Timber, host_depth, member_depth) = (0.0, 0.0, 0.0, 0.0)
 default_seat_eccentricity(::Val{:girder}, ::Timber, host_depth, member_depth) = (0.0, 0.0, 0.0, 0.0)
+default_seat_eccentricity(::Val{:beam}, ::Timber, host_depth, member_depth) = (0.0, 0.0, 0.0, 0.0)

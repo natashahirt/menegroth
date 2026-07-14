@@ -276,13 +276,27 @@ end
 # =============================================================================
 
 """
-    prepare!(struc::BuildingStructure, params::DesignParameters) -> struc
+    prepare!(struc::BuildingStructure, params::DesignParameters;
+             framing_opts::NamedTuple = NamedTuple()) -> struc
 
 Initialize a structure for design: set up cells, slabs, members, estimate
 column sizes, build the Asap analysis model, and snapshot the pristine state.
 
 This is the geometry-only step — no member sizing. Call `design_building` or
 run pipeline stages individually after `prepare!`.
+
+# Framing options (`framing_opts`)
+Passed straight to [`populate_levels!`](@ref) to drive framing auto-generation
+above each slab (plan `joists-roles-materials`, Phase 5). Empty by default, which
+is a strict no-op for the standard flat-plate / flat-slab / beam-supported flows.
+Recognized keys (all optional):
+- `framing_opts.materials`: `NamedTuple` of member materials by key
+  (`:steel`, `:timber`, `:concrete`, `:beam`).
+- `framing_opts.spacing`: center-to-center joist spacing for the opts-schema slab
+  types.
+- `framing_opts.level_N`: `NamedTuple` schema for framing level `N ≥ 2`.
+
+See [`populate_levels!`](@ref) for the full contract.
 
 # Example
 ```julia
@@ -297,7 +311,8 @@ for col_opts in [ConcreteColumnOptions(), ConcreteColumnOptions(material = NWC_6
 end
 ```
 """
-function prepare!(struc::BuildingStructure, params::DesignParameters)
+function prepare!(struc::BuildingStructure, params::DesignParameters;
+                  framing_opts::NamedTuple = NamedTuple())
     floor_opts = resolve_floor_options(params)
     floor_type = _infer_floor_type(floor_opts)
     
@@ -305,7 +320,17 @@ function prepare!(struc::BuildingStructure, params::DesignParameters)
                 floor_opts=floor_opts,
                 scoped_floor_overrides=params.scoped_floor_overrides,
                 tributary_axis=params.tributary_axis)
-    
+
+    # Auto-generate the framing hierarchy above each slab (plan
+    # `joists-roles-materials`, Phase 5). Runs immediately after
+    # `initialize_members!` (invoked inside `initialize!`) and before
+    # `to_asap!`, so any generated joists/secondary members are already present
+    # when the analysis model is built. `framing_opts` is threaded from the
+    # caller (empty by default), so a caller can drive auto-generation through the
+    # public `prepare!` / `design_building` API; an empty `framing_opts` stays a
+    # strict no-op for flat-plate/flat-slab/beam-supported systems.
+    populate_levels!(struc; opts=framing_opts)
+
     fc = _get_design_fc(params)
     estimate_column_sizes!(struc; fc=fc, input_is_centerline=params.geometry_is_centerline)
 
@@ -409,14 +434,15 @@ compare_designs(d1, d2)
 4. Restore to pristine state
 """
 function design_building(struc::BuildingStructure, params::DesignParameters;
-                         tc::Union{Nothing, StructuralSizer.TraceCollector} = nothing)
+                         tc::Union{Nothing, StructuralSizer.TraceCollector} = nothing,
+                         framing_opts::NamedTuple = NamedTuple())
     t_start = time()
     
     StructuralSizer.emit!(tc, :pipeline, "design_building", "", :enter;
                           n_slabs=length(struc.slabs), n_columns=length(struc.columns))
 
     t0 = time()
-    prepare!(struc, params)
+    prepare!(struc, params; framing_opts=framing_opts)
     t_prepare = time() - t0
 
     # Pre-sizing validation: fail fast if DDM/EFM/FEA applicability checks fail
@@ -500,11 +526,11 @@ StructuralSizer.TRACE_REGISTRY[(:design_building_kwargs, :pipeline)] =
 
 Convenience method that creates DesignParameters from keyword arguments.
 """
-function design_building(struc::BuildingStructure; tc::Union{Nothing, StructuralSizer.TraceCollector} = nothing, kwargs...)
+function design_building(struc::BuildingStructure; tc::Union{Nothing, StructuralSizer.TraceCollector} = nothing, framing_opts::NamedTuple = NamedTuple(), kwargs...)
     StructuralSizer.emit!(tc, :pipeline, "design_building_kwargs", "", :enter;
                           n_kwargs=length(kwargs))
     params = DesignParameters(; kwargs...)
-    out = design_building(struc, params; tc=tc)
+    out = design_building(struc, params; tc=tc, framing_opts=framing_opts)
     StructuralSizer.emit!(tc, :pipeline, "design_building_kwargs", "", :exit)
     return out
 end

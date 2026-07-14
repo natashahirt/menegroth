@@ -83,10 +83,13 @@ default_release(::Val{:joist}, ::StructuralSteel, ::Val{:gravity}) = (:pinned, :
 # bending ends stay released. `true` here means "use the OWSJ-style `:joist`
 # element", NOT "torsion is released"; see the `Beam.torsion_released` docstring.
 default_torsion_released(::Val{:joist}, ::StructuralSteel) = true
-# Top-of-girder seating: joist centroid sits above the girder centroid by half
-# the sum of the two depths, modeled as a rigid transverse-y offset. The Asap
-# eccentricity tuple is (axial_start, axial_end, transverse_y, transverse_z) in
-# metres (external/Asap/src/Elements/K.jl §eccentricity_transformation!).
+# ENGINEERING JUDGMENT (SJI OWSJ practice; SJI Standard Specifications not in the
+# corpus): the top-of-girder centroid offset `+z = (host_depth + member_depth) / 2`
+# is a MODELING DEFAULT reflecting OWSJ seat-on-girder practice. AISC 360-16 does
+# not prescribe a joist seat offset; this is a modeling assumption, not a code
+# requirement. Designers using a different detail (for example, pocketed joists,
+# top-copes, or embedded plates) should override the FramingLevel seat
+# eccentricity for that group.
 default_seat_eccentricity(::Val{:joist}, ::StructuralSteel, host_depth, member_depth) =
     (0.0, 0.0, (to_meters(host_depth) + to_meters(member_depth)) / 2, 0.0)
 

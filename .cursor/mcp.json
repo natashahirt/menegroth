@@ -5,7 +5,8 @@
       "env": {
         "ANGELO_WORKSPACE": "${workspaceFolder}",
         "ZETTELKASTEN_PATH": "${workspaceFolder}/.zettelkasten",
-        "MEMORY_SKIP_EMBEDDINGS": "1"
+        "HF_HUB_OFFLINE": "1",
+        "ANGELO_EMBED_SOURCE": "hf"
       }
     },
     "coordinator": {
@@ -13,7 +14,8 @@
       "env": {
         "ANGELO_WORKSPACE": "${workspaceFolder}",
         "ANGELO_ZETTELKASTEN": "1",
-        "MEMORY_SKIP_EMBEDDINGS": "1"
+        "HF_HUB_OFFLINE": "1",
+        "ANGELO_EMBED_SOURCE": "hf"
       }
     },
     "memory": {
@@ -21,7 +23,8 @@
       "env": {
         "ANGELO_WORKSPACE": "${workspaceFolder}",
         "MEMORY_FILE_PATH": "${workspaceFolder}/.angelo/memory.kgl",
-        "MEMORY_SKIP_EMBEDDINGS": "1"
+        "HF_HUB_OFFLINE": "1",
+        "ANGELO_EMBED_SOURCE": "hf"
       }
     },
     "memory-artifacts": {

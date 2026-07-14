@@ -147,10 +147,11 @@ end
 # `_size_beams_columns!` are driven by the vault thrust rather than gravity alone
 # — making design_building's sized-vs-estimate thrust OBSERVABLE and the vault
 # sync-refresh path load-bearing on the result. `:individual` grouping ⇒ one slab
-# per bay (4 slabs) across 4 conflicting batches, i.e. a multi-LEVEL slab graph
-# (4 ordered levels, 4 barrier syncs) — the byte-identity claim (extra inter-batch
-# syncs don't change the model-independent vault slab results) is what this
-# fixture stresses end-to-end. No foundations, so the terminal node is :members.
+# per bay (4 slabs). After Finding 1 ALL slab nodes are edgeless roots, so the
+# graph places them in a SINGLE topological level with exactly ONE barrier sync
+# (regardless of `slab_parallel_batches`); the byte-identity claim (per-slab
+# decomposition == coarse `size_slabs!`) is what this fixture stresses end-to-end.
+# No foundations, so the terminal node is :members.
 function build_thrust_vault(; beams = nothing)
     skel  = gen_medium_office(40.0u"ft", 32.0u"ft", 12.0u"ft", 2, 2, 1)
     struc = BuildingStructure(skel)
@@ -388,8 +389,10 @@ slab_keys(g)  = NodeKey[k for k in SS.topological_order(g) if SS.is_slab_node_ke
 slab_set(g)   = Set(slab_keys(g))
 graph_of(session) = session.engine.graph
 # The number of topological LEVELS that contain a slab node == the number of
-# slab-stage barrier `sync_asap!` flushes. `slab_parallel_batches` → one level per
-# batch, so this is exactly the "barrier syncs once per completed slab level".
+# slab-stage barrier `sync_asap!` flushes. After Finding 1 every slab node is an
+# edgeless ROOT, so ALL slab nodes fall in ONE level ⇒ this is exactly 1 for every
+# slabbed building (one barrier sync per completed slab level, and there is only
+# one such level regardless of `slab_parallel_batches`).
 function slab_sync_count(g)
     count(lvl -> any(SS.is_slab_node_key, lvl), SS.topological_levels(g))
 end
@@ -676,10 +679,10 @@ function main()
     # `design_building` now executes the FINE per-slab graph; `run_coarse_reference`
     # runs the monolithic `size_slabs!` stage loop. Equal comprehensive signatures
     # ⇒ decomposing slab sizing into per-slab nodes reproduces the coarse result
-    # byte-for-byte (rtol=1e-8) — on BOTH a multi-node SINGLE-level building (3-story
-    # flat plate: 3 slabs, 1 batch, 1 barrier sync) and a multi-LEVEL building
-    # (vault: 4 slabs, 4 batches, 4 syncs — proving the extra inter-batch syncs do
-    # not perturb the model-independent vault slab results).
+    # byte-for-byte (rtol=1e-8) — on BOTH a 3-story flat plate (3 slabs) and a vault
+    # (4 slabs). After Finding 1 every slab node is a root, so each building has
+    # exactly ONE slab level and ONE barrier sync; the decomposition proof does not
+    # depend on `slab_parallel_batches` shaping the graph into multiple levels.
     println("\n[8] exact-first DECOMPOSITION: fine per-slab graph == coarse size_slabs!")
     struc_ms_fine, ms_params = build_multistory_flat_plate()
     fine_ms = design_building(struc_ms_fine, ms_params)
@@ -694,14 +697,14 @@ function main()
     fine_v = design_building(struc_v_fine, v_params)
     struc_v_coarse, _ = build_thrust_vault()
     coarse_v = run_coarse_reference(struc_v_coarse, v_params)
-    record!("thrust vault has ≥2 slabs (multi-level decomposition meaningful)",
+    record!("thrust vault has ≥2 slabs (per-slab decomposition meaningful)",
             length(fine_v.slabs) >= 2)
     ok_v, bad_v = same_signature(design_signature(coarse_v), design_signature(fine_v))
-    record!("multi-level vault: fine per-slab graph == coarse size_slabs! (mismatch: $bad_v)", ok_v)
+    record!("thrust vault: fine per-slab graph == coarse size_slabs! (mismatch: $bad_v)", ok_v)
 
     # ── [9] MULTI-NODE-LEVEL: global slab-param dirties ALL slab nodes, one sync ──
-    # 3-story flat plate → all 3 per-slab nodes share ONE topological level (single
-    # `slab_parallel_batches` batch). A global slab-affecting param (`:load_combinations`,
+    # 3-story flat plate → all 3 per-slab nodes are roots ⇒ ONE topological level
+    # (independent of `slab_parallel_batches`). A global slab-affecting param (`:load_combinations`,
     # non-prepare) dirties EVERY slab node; the scheduler recomputes them all in
     # that one level and flushes the level-barrier `sync_asap!` EXACTLY ONCE, then
     # the result is output-equivalent to a from-scratch design_building at the new
@@ -779,10 +782,57 @@ function main()
     # prepare-affecting classification and is DEFERRED to a follow-up run pending
     # user sign-off (per code-accuracy.mdc — do not guess new mechanics). The
     # partial-restore path (`restore_slab_node_writes!` / `_adopt_larger_column!`)
-    # that a mixed level would exercise is therefore UNREACHABLE end-to-end and is
-    # covered by DIRECT unit tests instead (StructuralSynthesizer/test/design_graph/
+    # that a mixed level would exercise is therefore UNREACHABLE end-to-end, now
+    # ENFORCED (not merely assumed) by the partial-slab-target guard in
+    # `run_target!` (section [11] below exercises the guard directly). It is covered
+    # by DIRECT unit tests otherwise (StructuralSynthesizer/test/design_graph/
     # test_design_graph_incremental.jl, "partial per-slab restore (Findings 3 + 4)");
     # it is deliberately NOT faked here with a prepare-affecting change.
+
+    # ── [11] EXACT-FIRST GUARD: a partial-slab target is REJECTED (critic P1) ─────
+    # Fine per-slab nodes are edgeless ROOTS, so `run_target!(engine, params;
+    # target = slab_node_key(k))` would memoize ONLY node k — and a later run to the
+    # terminal would then classify a MIXED clean/dirty slab level and take the
+    # divergent partial-restore overlay (node k having been sized in the WRONG
+    # monotonic column-growth context vs from-scratch). The guard makes that memo
+    # state unrepresentable: any target whose closure covers a STRICT SUBSET of the
+    # slab roots is rejected. We assert the clean rejection AND that a legitimate
+    # FULL run still reproduces from-scratch design_building. Pre-fix this DIVERGED
+    # silently; post-fix it cannot be expressed. `DesignSession(target=…)` /
+    # `redesign(…, target=…)` route their target through the same guard.
+    println("\n[11] EXACT-FIRST GUARD: partial-slab target rejected, full run still exact")
+    struc_g1, params_g1 = build_multistory_flat_plate()
+    engine_g = prepare_engine(struc_g1, params_g1)   # prepare! populates slabs + graph
+    roots_g = slab_set(engine_g.graph)
+    record!("guard fixture has ≥3 slab roots sharing columns (got $(length(roots_g)))",
+            length(roots_g) >= 3)
+    rejected_single = false
+    try
+        run_target!(engine_g, params_g1; target = SS.slab_node_key(2))
+    catch err
+        rejected_single = err isa ArgumentError
+    end
+    record!("bare single-slab target :$(SS.slab_node_key(2)) rejected (ArgumentError)", rejected_single)
+    # The throw leaves the engine usable (guard fires before any mutation): a full
+    # run recomputes every slab root and matches from-scratch byte-for-byte.
+    inc_g = redesign_incremental!(engine_g, params_g1)
+    record!("full run after rejection recomputes ALL slab roots (got $(last_recomputed(engine_g)))",
+            roots_g ⊆ Set(last_recomputed(engine_g)))
+    struc_g_ref, _ = build_multistory_flat_plate()
+    ref_g = design_building(struc_g_ref, params_g1)
+    ok_g, bad_g = same_signature(design_signature(ref_g), design_signature(inc_g))
+    record!("full run incremental == from-scratch (mismatch: $bad_g)", ok_g)
+    # A :members target depends on ALL slab roots → legitimate full coverage, NOT rejected.
+    struc_g2, params_g2 = build_multistory_flat_plate()
+    engine_g2 = prepare_engine(struc_g2, params_g2)
+    members_ok = false
+    try
+        run_target!(engine_g2, params_g2; target = NODE_MEMBERS)
+        members_ok = true
+    catch
+        members_ok = false
+    end
+    record!(":members target (covers all slab roots) is accepted", members_ok)
 
     # ── Summary ──────────────────────────────────────────────────────────────
     println("\n" * "="^70)

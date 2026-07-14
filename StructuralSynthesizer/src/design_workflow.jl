@@ -271,6 +271,37 @@ function build_pipeline(params::DesignParameters;
     return stages
 end
 
+"""
+    build_design_graph(params::DesignParameters; tc=nothing) -> DesignGraph
+
+Build the design pipeline as a [`DesignGraph`](@ref) of [`StageNode`](@ref)s.
+
+Run 1 wraps the existing coarse [`build_pipeline`](@ref) stages one-to-one:
+each `PipelineStage` becomes a `StageNode` (`:stage_1`, `:stage_2`, …) carrying
+the *same* closure and `needs_sync` flag, linked in a linear dependency chain
+(`:stage_2` depends on `:stage_1`, etc.). Executing the graph via
+[`execute_graph!`](@ref) therefore reproduces the pre-graph pipeline loop
+byte-for-byte: same stage order, same `sync_asap!` placement.
+
+Deriving nodes directly from `build_pipeline` (rather than re-deriving the stage
+logic) guarantees the graph and the legacy `build_pipeline` callers stay in
+lock-step. Later runs will replace this coarse mapping with finer per-group
+nodes and richer dependency edges without changing the executor.
+"""
+function build_design_graph(params::DesignParameters;
+                            tc::Union{Nothing, StructuralSizer.TraceCollector} = nothing)
+    stages = build_pipeline(params; tc=tc)
+    graph_nodes = DesignNode[]
+    prev_key = nothing
+    for (i, stage) in enumerate(stages)
+        key = Symbol("stage_", i)
+        deps = prev_key === nothing ? NodeKey[] : NodeKey[prev_key]
+        push!(graph_nodes, StageNode(key, deps, stage.fn, stage.needs_sync))
+        prev_key = key
+    end
+    return DesignGraph(graph_nodes)
+end
+
 # =============================================================================
 # Main Entry Point
 # =============================================================================
@@ -429,7 +460,10 @@ compare_designs(d1, d2)
 
 # Pipeline
 1. `prepare!` — initialize structure, estimate columns, build Asap model, snapshot
-2. Run stages from `build_pipeline(params)` with `sync_asap!` where needed
+2. Build the design graph (`build_design_graph`) and execute it
+   (`execute_graph!`) — runs the pipeline stages in dependency order with
+   `sync_asap!` where needed. Behaviorally identical to the legacy
+   `build_pipeline` stage loop.
 3. `capture_design` — populate BuildingDesign with all results
 4. Restore to pristine state
 """
@@ -457,10 +491,12 @@ function design_building(struc::BuildingStructure, params::DesignParameters;
     end
     
     t0 = time()
-    for stage in build_pipeline(params; tc=tc)
-        stage.fn(struc)
-        stage.needs_sync && sync_asap!(struc; params=params)
-    end
+    # Build and execute the design graph. The graph wraps the same
+    # `build_pipeline` stages as `StageNode`s in a linear dependency chain, so
+    # `execute_graph!` reproduces the legacy stage loop exactly (same order,
+    # same `sync_asap!` placement). See `build_design_graph`.
+    graph = build_design_graph(params; tc=tc)
+    execute_graph!(graph, struc, params)
 
     # Uniform column harmonization (after all sizing stages, before capture)
     if params.uniform_column_sizing !== :off

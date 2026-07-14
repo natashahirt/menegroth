@@ -72,6 +72,17 @@ include("design_types.jl")
 # Core functionality (includes tributary_accessors.jl)
 include("core/_core.jl")
 
+# Design graph scaffolding (node interface + container + executor). Included
+# before design_workflow.jl so `build_design_graph` / `execute_graph!` and the
+# node types are available to the workflow. Include order relative to
+# building_types.jl / design_types.jl IS load-critical: executor.jl's
+# `execute_graph!` method signature annotates `struc::BuildingStructure,
+# params::DesignParameters`, and those type annotations are resolved at load
+# time (method-definition time), not at call time — so `BuildingStructure` and
+# `DesignParameters` must already be defined. This include MUST therefore come
+# after building_types.jl and design_types.jl.
+include("design_graph/_design_graph.jl")
+
 # Design workflow (uses both building_types and design_types)
 include("design_workflow.jl")
 
@@ -81,6 +92,11 @@ include("geometry/_geometry.jl")
 # Other modules
 include("generate/_generate.jl")
 include("analyze/_analyze.jl")
+# Framing auto-generation (Phase 5): populate_levels! / derive_framing_level /
+# materialize_level!. Included after analyze/_analyze.jl so it can use
+# compute_member_tributaries! (analyze/members/utils.jl) and slab_face_edge_ids
+# (analyze/asap/utils.jl); it also builds on the Phase-4 building_types.
+include("analyze/framing/populate.jl")
 include("postprocess/_postprocess.jl")
 
 # API server (Oxygen routes, JSON serialization)
@@ -99,6 +115,12 @@ export SiteConditions, MaterialVolumes, VolumeType
 export Cell, Slab, SlabGroup, thickness
 export CellGroup
 export Segment, MemberGroup
+# Framing hierarchy (Phase 4). AbstractJoistPattern + joist_geometry come from
+# StructuralSizer via @reexport; the concrete patterns + FramingLevel are local.
+export LinearAxisPattern, IsoparametricPattern, RadialPattern, CustomPattern
+export FramingLevel, attach_framing_level!
+# Framing auto-generation (Phase 5)
+export populate_levels!, derive_framing_level, materialize_level!
 
 # --- Tributary cache types ---
 export TributaryCache, TributaryCacheKey
@@ -127,6 +149,11 @@ export has_analysis_model, build_analysis_model!
 # --- Design workflow ---
 export design_building, compare_designs, build_pipeline, PipelineStage, sync_asap!
 export prepare!, capture_design
+
+# --- Design graph (Run 1: node layer wrapping the pipeline) ---
+export DesignNode, StageNode, NodeKey, DesignGraph
+export build_design_graph, execute_graph!, topological_order
+export node_key, dependencies, needs_sync
 export PreSizingValidationError, run_pre_sizing_validation
 export snapshot!, restore!, has_snapshot, delete_snapshot!, snapshot_keys
 export DesignSnapshot, SlabSnapshot
@@ -184,7 +211,7 @@ export slab_conflict_coloring, compute_slab_parallel_batches!
 # --- Member sizing ---
 export build_member_groups!, member_group_demands
 export group_collinear_members!
-export size_steel_members!
+export size_steel_members!, size_member_group!
 export size_beams!, size_columns!, size_members!
 export estimate_column_sizes!
 export compute_story_properties!, p_delta_iterate!

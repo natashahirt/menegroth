@@ -272,58 +272,249 @@ function build_pipeline(params::DesignParameters;
 end
 
 """
-    build_design_graph(params::DesignParameters; tc=nothing) -> DesignGraph
+    build_design_graph(struc::BuildingStructure, params::DesignParameters; tc=nothing)
+        -> DesignGraph
 
 Build the design pipeline as a [`DesignGraph`](@ref) of [`StageNode`](@ref)s.
 
-Each coarse [`build_pipeline`](@ref) stage becomes one `StageNode` carrying the
-*same* closure and `needs_sync` flag, linked in a linear dependency chain, so
-executing the graph via [`execute_graph!`](@ref) reproduces the pre-graph
-pipeline loop byte-for-byte (same stage order, same `sync_asap!` placement).
+**Fine per-slab topology (Run 3).** The coarse `:slab_sizing` stage is decomposed
+into one node PER slab index — `slab_node_key(idx)` = `:slab_sizing_s{idx}`, each
+running `size_slab!(struc, idx)` + that slab's volume update. The nodes are emitted
+as ROOTS (no inter-slab edges) in ASCENDING `slab_idx` order, so
+[`topological_levels`](@ref) places them ALL in ONE level listed in insertion
+(== `eachindex`) order, and both [`execute_graph!`](@ref) and the incremental
+scheduler ([`run_target!`](@ref)) process them SEQUENTIALLY in that order. The
+level barrier then flushes `sync_asap!` exactly ONCE after the whole slab level.
 
-Run 2 gives the nodes **content-stable, semantic** keys derived from the stage's
-meaning rather than its position: `:slab_sizing` → `:members` → `:foundations`
-(see [`canonical_node_keys`](@ref)). The member-sizing stage is always
-`:members`, whether it takes the flat-plate (`_reconcile_columns!`) or the
-beam/column (`_size_beams_columns!`) branch, so the same key always denotes the
-same unit of work regardless of params or branch. Each node also carries the
-provenance declared in `PIPELINE_PROVENANCE` (param slice, struc reads/writes,
-code-version) that the incremental engine's fingerprint and dirty-frontier
-resolver consume.
+This is byte-identical to the single-threaded coarse `size_slabs!` reference
+(`StructuralSizer/src/slabs/sizing.jl` §`size_slabs!`, which iterates
+`eachindex(struc.slabs)` when `Threads.nthreads() == 1`) because (a) the fine
+nodes are processed in the SAME `eachindex` order — the decisive property, since
+flat-plate slab sizing reads LIVE shared supporting-column `c1`/`c2` (DDM clear
+span `ln = l1 - c1`, punching perimeter, deflection) and columns grow
+MONOTONICALLY across slabs, so per-slab output is ORDER-DEPENDENT (an earlier
+batch-coloring order broke this — Finding 1 P0); (b) the single post-level
+`sync_asap!` matches the coarse pipeline's single post-slab-stage sync
+(`size_slabs!` performs NO inter-slab sync — slab sizing never reads solved
+`el.forces`, so there is no intermediate sync to reproduce and the barrier fires
+once after the last slab node); (c) `_col_cache` is a pure, read-only memoization
+after `precompute_capacities!` — recomputing per slab (passing `nothing`) yields
+identical P-M capacities (see Finding 5 note in `slabs/sizing.jl`). The exact-first
+gate (`verify_design_graph.jl`) verifies this end-to-end.
 
-Deriving nodes directly from `build_pipeline` (rather than re-deriving the stage
-logic) guarantees the graph and the legacy `build_pipeline` callers stay in
-lock-step.
+ENGINEERING JUDGMENT / KNOWN ISSUE — this PINS `design_building`'s slab order to
+`eachindex` for determinism regardless of thread count, deliberately trading away
+intra-run slab parallelism (`struc.slab_parallel_batches` no longer shapes the
+graph). The pre-existing coarse thread-count non-determinism (single-thread
+`eachindex` vs multithread batch order inside `size_slabs!`) is a SEPARATE known
+issue not addressed here. The recommended proper future fix is an order-INDEPENDENT
+two-pass (pre-grow all shared columns to their final size, then size every slab
+against the final columns — deterministic AND parallelizable); it is NOT
+implemented now (see NOTES). This is not a code requirement — it is a
+byte-identity-preserving scope decision under `code-accuracy.mdc`.
+
+**Coarse global nodes (unchanged placement/sync).** Member sizing stays a single
+`:members` node (flat-plate `_reconcile_columns!` OR the ITERATIVE, beam↔column
+COUPLED `_size_beams_columns!` loop — see the deferral note below), depending on
+every per-slab node; foundations stays a single `:foundations` node after
+`:members`. `_reconcile_columns!` / `harmonize_uniform_column_sizes!` / foundations
+keep their exact current placement so `design_building` stays byte-identical.
+
+Each node carries the provenance from `PIPELINE_PROVENANCE` (per-slab nodes inherit
+`NODE_SLAB_SIZING`'s record via [`pipeline_provenance`](@ref)). `struc` is read for
+its (fixed, prepare-time) slab count only (slab nodes are ordered by `eachindex`,
+NOT by `slab_parallel_batches` — see the per-slab topology note above); the
+member/foundation closures still come from [`build_pipeline`](@ref) so the graph
+and the legacy stage loop stay in lock-step.
+
+ENGINEERING JUDGMENT — columns stay coarse. `size_columns!` is a single global MIP
+with no per-group API; splitting it would change the optimization semantics. And
+`size_beams!` is batched across all groups while `size_member_group!` sizes one
+steel group via a different solver path — plus for beam-based floors beams and
+columns are sized in an ITERATIVE CONVERGENCE loop (`_size_beams_columns!`) whose
+coupling cannot be reproduced by independent per-group nodes without breaking
+byte-identity. Per-beam-group / per-column-group splitting is therefore DEFERRED to
+a follow-up run (see NOTES). This is not a code requirement — it is a
+byte-identity-preserving scope decision under `code-accuracy.mdc`.
 """
-function build_design_graph(params::DesignParameters;
+function build_design_graph(struc::BuildingStructure, params::DesignParameters;
                             tc::Union{Nothing, StructuralSizer.TraceCollector} = nothing)
     stages = build_pipeline(params; tc=tc)
 
-    # Map each coarse pipeline stage to its content-stable semantic key. The
-    # stage order emitted by build_pipeline is fixed: slab sizing, then member
-    # sizing (either branch), then foundations (only when requested). We key off
-    # that meaning, NOT the positional index, so the identity is invariant across
-    # params and the flat-plate vs beam/column branch. The only structural
-    # variation is whether the foundations stage is present.
-    keys_in_order = NodeKey[NODE_SLAB_SIZING, NODE_MEMBERS]
-    if !isnothing(params.foundation_options)
-        push!(keys_in_order, NODE_FOUNDATIONS)
-    end
-    length(keys_in_order) == length(stages) || error(
-        "build_design_graph: stage/key count mismatch " *
-        "($(length(stages)) stages vs $(length(keys_in_order)) keys)")
+    has_foundations = !isnothing(params.foundation_options)
+    expected_stages = has_foundations ? 3 : 2
+    length(stages) == expected_stages || error(
+        "build_design_graph: stage count mismatch " *
+        "($(length(stages)) stages vs $expected_stages expected)")
+
+    slab_stage   = stages[1]
+    member_stage = stages[2]
+    fdn_stage    = has_foundations ? stages[3] : nothing
 
     graph_nodes = DesignNode[]
-    prev_key = nothing
-    for (stage, key) in zip(stages, keys_in_order)
-        deps = prev_key === nothing ? NodeKey[] : NodeKey[prev_key]
-        prov = pipeline_provenance(key)
-        push!(graph_nodes, StageNode(key, deps, stage.fn, stage.needs_sync,
-                                     prov.param_slice, prov.reads, prov.writes,
-                                     prov.code_version))
-        prev_key = key
+    slab_prov   = pipeline_provenance(NODE_SLAB_SIZING)
+
+    # ── Fine per-slab nodes, grouped into batch levels ──────────────────────
+    n_slabs = length(struc.slabs)
+    slab_keys_all = NodeKey[]
+    if n_slabs == 0
+        # No slabs: keep the coarse `:slab_sizing` node (its stage closure is a
+        # no-op loop) so `:members` still has a stable slab-stage dependency and
+        # the semantic identity is preserved.
+        push!(graph_nodes, StageNode(NODE_SLAB_SIZING, NodeKey[], slab_stage.fn,
+                                     slab_stage.needs_sync, slab_prov.param_slice,
+                                     slab_prov.reads, slab_prov.writes,
+                                     slab_prov.code_version))
+        push!(slab_keys_all, NODE_SLAB_SIZING)
+    else
+        floor_opts      = resolve_floor_options(params)
+        column_opts     = _get_column_opts(params)
+        slab_floor_type = _infer_floor_type(floor_opts)
+
+        # ── EXACT-FIRST slab ordering (Finding 1, P0) ──────────────────────────
+        # Emit the fine per-slab nodes as ROOTS (no inter-slab edges) in ascending
+        # `slab_idx` order. `topological_levels` groups them into ONE level in
+        # insertion (== `eachindex`) order, and both the direct executor and the
+        # incremental scheduler process a level SEQUENTIALLY in that order — so the
+        # fine path reproduces the single-threaded coarse `size_slabs!` reference
+        # (`StructuralSizer/src/slabs/sizing.jl` §size_slabs!, `eachindex` branch).
+        # Slab sizing reads LIVE shared column c1/c2 and columns grow monotonically,
+        # so this order is the byte-identity invariant; `slab_parallel_batches`
+        # (the earlier coloring order) is deliberately NOT used to shape the graph.
+        # The single post-level `sync_asap!` (all nodes carry the stage's
+        # `needs_sync`) matches the coarse pipeline's single post-slab-stage sync;
+        # slab sizing performs no inter-slab sync (it never reads solved
+        # `el.forces`), so there is no intermediate sync to reproduce.
+        for sidx in 1:n_slabs
+            key      = slab_node_key(sidx)
+            base_fn  = _make_slab_node_fn(sidx, floor_opts, column_opts, params, tc)
+            is_first = sidx == 1
+            is_last  = sidx == n_slabs
+            # Finding 2: reproduce the legacy `stage_1_slabs` + `size_slabs!` trace
+            # envelope around the per-slab `size_slab!` events (which `base_fn`
+            # emits nested) so a traced `design_building` is byte-identical to the
+            # pre-Run-3 sequence. The envelope is emitted at the slab-level
+            # boundary: open on the first node, close on the last.
+            fn = function (struc)
+                if is_first
+                    StructuralSizer.emit!(tc, :pipeline, "build_pipeline", "stage_1_slabs", :enter;
+                                          floor_type=string(slab_floor_type))
+                    StructuralSizer.emit!(tc, :slab, "size_slabs!", "", :enter;
+                                          n_slabs=length(struc.slabs),
+                                          options_type=string(typeof(floor_opts)),
+                                          has_column_opts=!isnothing(column_opts),
+                                          max_iterations=params.max_iterations)
+                    # Fine graph pins slab processing to `eachindex` order regardless
+                    # of thread count (Finding 1), so the coarse single-threaded
+                    # `parallel=false` decision is the invariant reference event.
+                    StructuralSizer.emit!(tc, :slab, "size_slabs!", "", :decision; parallel=false)
+                end
+                base_fn(struc)
+                if is_last
+                    StructuralSizer.emit!(tc, :slab, "size_slabs!", "", :exit)
+                    StructuralSizer.emit!(tc, :pipeline, "build_pipeline", "stage_1_slabs", :exit)
+                end
+                return nothing
+            end
+            push!(graph_nodes, StageNode(key, NodeKey[], fn,
+                                         slab_stage.needs_sync, slab_prov.param_slice,
+                                         slab_prov.reads, slab_prov.writes,
+                                         slab_prov.code_version))
+            push!(slab_keys_all, key)
+        end
     end
+
+    # ── Coarse member node depends on ALL slab nodes ────────────────────────
+    mem_prov = pipeline_provenance(NODE_MEMBERS)
+    push!(graph_nodes, StageNode(NODE_MEMBERS, copy(slab_keys_all), member_stage.fn,
+                                 member_stage.needs_sync, mem_prov.param_slice,
+                                 mem_prov.reads, mem_prov.writes, mem_prov.code_version))
+
+    # ── Coarse foundation node after members (when requested) ───────────────
+    if has_foundations
+        fdn_prov = pipeline_provenance(NODE_FOUNDATIONS)
+        push!(graph_nodes, StageNode(NODE_FOUNDATIONS, NodeKey[NODE_MEMBERS], fdn_stage.fn,
+                                     fdn_stage.needs_sync, fdn_prov.param_slice,
+                                     fdn_prov.reads, fdn_prov.writes, fdn_prov.code_version))
+    end
+
     return DesignGraph(graph_nodes)
+end
+
+"""
+    _make_slab_node_fn(slab_idx, floor_opts, column_opts, params, tc) -> Function
+
+Closure for a fine per-slab [`StageNode`](@ref): size exactly `slab_idx` and update
+its volume. Byte-identical to the coarse `size_slabs!` per-slab body — same
+`size_slab!` arguments (`max_iterations`, `fire_rating`, `column_opts`), except
+`_col_cache=nothing` — followed by [`_update_one_slab_volume!`](@ref) (the per-slab
+body of `update_slab_volumes!`).
+
+FINDING 5 — `_col_cache` purity. The coarse `size_slabs!` builds ONE
+`_col_cache` (an `ACIColumnCapacityCache`) and shares it across every slab;
+each fine node instead passes `_col_cache=nothing`, so every slab rebuilds its
+own. This is result-neutral because the cache is READ-ONLY after
+`precompute_capacities!`: source read confirms the cache's mutable fields
+(`diagrams`, `diagrams_y`, `depths`, `is_square`, `obj_coeffs`, `fc_ksi`, …) are
+written ONLY in `precompute_capacities!` / `_precompute_diagrams!`
+(`StructuralSizer/src/members/codes/aci/columns/checker.jl`), and the discrete
+MIP consumes a PROVIDED cache exclusively through read accessors —
+`is_feasible`, `check_capacity`, `get_objective_coeff`, `explain_feasibility`
+(`StructuralSizer/src/optimize/solvers/discrete_mip.jl`; the sole write path is
+its `cache === nothing` precompute branch). Rebuilding therefore yields identical
+P-M capacities. This is proved end-to-end by the exact-first gate
+(`verify_design_graph.jl`): `design_building`'s fine path (`_col_cache=nothing`)
+is byte-identical to the coarse shared-cache reference.
+"""
+function _make_slab_node_fn(slab_idx::Int, floor_opts, column_opts,
+                            params::DesignParameters,
+                            tc::Union{Nothing, StructuralSizer.TraceCollector})
+    return function (struc)
+        StructuralSizer.size_slab!(struc, slab_idx;
+            options=floor_opts, column_opts=column_opts,
+            max_iterations=params.max_iterations, verbose=false,
+            _col_cache=nothing, fire_rating=params.fire_rating, tc=tc)
+        _update_one_slab_volume!(struc, slab_idx, floor_opts)
+        return nothing
+    end
+end
+
+"""
+    _update_one_slab_volume!(struc, slab_idx, options; primary_material=nothing)
+
+Recompute `struc.slabs[slab_idx].volumes` from its current result — the single-slab
+body of [`update_slab_volumes!`](@ref) (same `_primary_material` / floor-area /
+`_compute_slab_volumes` derivation), so per-slab node execution reproduces the
+coarse volume update exactly. No-op for a non-converged (`nothing`-result) slab.
+"""
+function _update_one_slab_volume!(struc::BuildingStructure, slab_idx::Int, options;
+                                  primary_material=nothing)
+    slab = struc.slabs[slab_idx]
+    isnothing(slab.result) && return struc
+    mat = isnothing(primary_material) ? _primary_material(options) : primary_material
+    floor_area = sum(struc.cells[idx].area for idx in slab.cell_indices)
+    slab.volumes = _compute_slab_volumes(slab.result, floor_area, mat, options)
+    return struc
+end
+
+"""
+    _slab_supporting_columns(struc, slab_idx) -> Vector{Int}
+
+The 1-based `struc.columns` indices whose tributary overlaps slab `slab_idx`'s
+cells — the columns a per-slab node may grow. Mirrors the slab→column overlap in
+[`compute_slab_parallel_batches!`](@ref); used by the scheduler's partial
+per-slab restore ([`restore_slab_node_writes!`](@ref)).
+"""
+function _slab_supporting_columns(struc::BuildingStructure, slab_idx::Int)
+    slab_cells = Set(struc.slabs[slab_idx].cell_indices)
+    cols = Int[]
+    for (c_idx, col) in enumerate(struc.columns)
+        if !isempty(col.tributary_cell_indices) &&
+           !isempty(intersect(col.tributary_cell_indices, slab_cells))
+            push!(cols, c_idx)
+        end
+    end
+    return cols
 end
 
 # =============================================================================
@@ -515,11 +706,12 @@ function design_building(struc::BuildingStructure, params::DesignParameters;
     end
     
     t0 = time()
-    # Build and execute the design graph. The graph wraps the same
-    # `build_pipeline` stages as `StageNode`s in a linear dependency chain, so
-    # `execute_graph!` reproduces the legacy stage loop exactly (same order,
-    # same `sync_asap!` placement). See `build_design_graph`.
-    graph = build_design_graph(params; tc=tc)
+    # Build and execute the design graph. The graph decomposes slab sizing into
+    # fine per-slab nodes (batch levels) while keeping members/foundations coarse;
+    # `execute_graph!` runs them in dependency levels, flushing `sync_asap!` once
+    # per level — byte-identical to the legacy stage loop (same effective order,
+    # same post-slab / post-member model state). See `build_design_graph`.
+    graph = build_design_graph(struc, params; tc=tc)
     execute_graph!(graph, struc, params)
 
     # Uniform column harmonization (after all sizing stages, before capture)

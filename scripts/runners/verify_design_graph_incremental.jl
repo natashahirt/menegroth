@@ -118,6 +118,52 @@ function build_beam_column(; beams = nothing)
     return struc, params
 end
 
+# Multi-STORY flat plate → one slab PER story (`:by_floor` grouping), all on
+# distinct (story-local) columns, so `slab_parallel_batches` groups every slab
+# into a SINGLE batch = a single topological LEVEL holding MULTIPLE fine per-slab
+# nodes. This is the multi-node-per-level fixture (3 slabs, one barrier sync). A
+# global slab-affecting param dirties ALL of them at once (the achievable
+# multi-node behavior; per-slab INDEPENDENT dirtying is deferred — see NOTES).
+function build_multistory_flat_plate(; soil = SR.medium_sand, concrete = NWC_4000)
+    skel  = gen_medium_office(54.0u"ft", 42.0u"ft", 10.0u"ft", 2, 2, 3)   # 3 stories
+    struc = BuildingStructure(skel)
+    params = DesignParameters(
+        name               = "verify_design_graph_incremental_multistory",
+        floor              = FlatPlateOptions(method = DDM()),
+        materials          = MaterialOptions(concrete = concrete, rebar = Rebar_60),
+        max_iterations     = 5,
+        skip_visualization = true,
+        foundation_options = FoundationParameters(
+            soil    = soil,
+            options = SR.FoundationOptions(strategy = :all_spread),
+        ),
+    )
+    return struc, params
+end
+
+# LATERAL-THRUST-GOVERNED vault: a larger-span vault at the same span/rise ratio
+# raises the horizontal thrust `H = w·L·λ/8` that `to_asap!` bakes as edge
+# LateralThrust line-loads (VaultResult → thrust), so the steel members sized in
+# `_size_beams_columns!` are driven by the vault thrust rather than gravity alone
+# — making design_building's sized-vs-estimate thrust OBSERVABLE and the vault
+# sync-refresh path load-bearing on the result. `:individual` grouping ⇒ one slab
+# per bay (4 slabs) across 4 conflicting batches, i.e. a multi-LEVEL slab graph
+# (4 ordered levels, 4 barrier syncs) — the byte-identity claim (extra inter-batch
+# syncs don't change the model-independent vault slab results) is what this
+# fixture stresses end-to-end. No foundations, so the terminal node is :members.
+function build_thrust_vault(; beams = nothing)
+    skel  = gen_medium_office(40.0u"ft", 32.0u"ft", 12.0u"ft", 2, 2, 1)
+    struc = BuildingStructure(skel)
+    params = DesignParameters(
+        name               = "verify_design_graph_incremental_thrust_vault",
+        floor              = SR.VaultOptions(lambda = 10.0, material = SR.NWC_4000),
+        beams              = beams,
+        max_iterations     = 5,
+        skip_visualization = true,
+    )
+    return struc, params
+end
+
 # Prepared + synced flat-plate frame-element forces for a given `pattern_loading`.
 # Mirrors the proven fixture in test/analyze/test_pattern_loading.jl (60'×60' bays,
 # 50 psf live) — large spans + high L/D so checkerboard partitions produce a
@@ -331,6 +377,50 @@ function same_signature(a::Vector{Pair{String, Any}}, b::Vector{Pair{String, Any
 end
 
 # -----------------------------------------------------------------------------
+# Fine per-slab topology helpers.
+# -----------------------------------------------------------------------------
+# `:slab_sizing` is decomposed into one `:slab_sizing_s{idx}` node per slab
+# (`slab_node_key`). Enumerate the ACTUAL slab-node keys from a session's graph
+# in topological order so recompute/restore/frontier assertions are independent
+# of the slab count and never hard-code the (now-nonexistent for slabbed
+# buildings) coarse `NODE_SLAB_SIZING` key.
+slab_keys(g)  = NodeKey[k for k in SS.topological_order(g) if SS.is_slab_node_key(k)]
+slab_set(g)   = Set(slab_keys(g))
+graph_of(session) = session.engine.graph
+# The number of topological LEVELS that contain a slab node == the number of
+# slab-stage barrier `sync_asap!` flushes. `slab_parallel_batches` → one level per
+# batch, so this is exactly the "barrier syncs once per completed slab level".
+function slab_sync_count(g)
+    count(lvl -> any(SS.is_slab_node_key, lvl), SS.topological_levels(g))
+end
+
+# -----------------------------------------------------------------------------
+# Coarse independent oracle (for the exact-first DECOMPOSITION proof).
+# -----------------------------------------------------------------------------
+# Runs the PRE-GRAPH stage loop DIRECTLY — `build_pipeline`'s coarse stage 1 is
+# `size_slabs!(struc)` over ALL slabs at once (NOT `build_design_graph`'s per-slab
+# nodes) — so it is an independent oracle for the fine per-slab decomposition.
+# Mirrors verify_design_graph.jl:run_reference_path exactly (prepare → coarse
+# stage loop → harmonize → capture → restore), minus visualization. Comparing
+# `design_building` (which now executes the FINE per-slab graph) against this
+# proves the per-slab-node path reproduces the monolithic `size_slabs!` result.
+function run_coarse_reference(struc::BuildingStructure, params::DesignParameters)
+    t_start = time()
+    prepare!(struc, params)
+    for stage in build_pipeline(params)
+        stage.fn(struc)
+        stage.needs_sync && sync_asap!(struc; params = params)
+    end
+    if params.uniform_column_sizing !== :off
+        n_harmonized = SS.harmonize_uniform_column_sizes!(struc, params)
+        n_harmonized > 0 && sync_asap!(struc; params = params)
+    end
+    design = capture_design(struc, params; t_start = t_start)
+    restore!(struc; geometry_is_centerline = params.geometry_is_centerline)
+    return design
+end
+
+# -----------------------------------------------------------------------------
 const CHECKS = Tuple{String, Bool}[]
 record!(name, ok) = (push!(CHECKS, (name, ok)); @printf("  %s  %s\n", ok ? "✓" : "✗", name))
 
@@ -355,9 +445,11 @@ function main()
     ok0sig, bad0sig = same_signature(design_signature(ref_base),
                                      design_signature(base_design(session)))
     record!("base session comprehensive per-member signature matches (mismatch: $bad0sig)", ok0sig)
-    record!("base run recomputes all 3 nodes",
+    # Fine topology: the single flat-plate slab is node :slab_sizing_s1, so "all
+    # sizing nodes" = every per-slab node ∪ {:members, :foundations}.
+    record!("base run recomputes all sizing nodes",
             Set(last_recomputed(session)) ==
-                Set([NODE_SLAB_SIZING, NODE_MEMBERS, NODE_FOUNDATIONS]))
+                (slab_set(graph_of(session)) ∪ Set([NODE_MEMBERS, NODE_FOUNDATIONS])))
 
     # ── VARIATION 1: column-only (`:beams`) on a beam/column vault building ───
     # `:beams` is read by :members (not :slab_sizing) and is NOT prepare-
@@ -379,8 +471,10 @@ function main()
     rc_col = last_recomputed(session_bc)
     rs_col = last_restored(session_bc)
     record!("column-only recomputed == [:members] (got $rc_col)", rc_col == [NODE_MEMBERS])
-    record!("column-only did NOT recompute :slab_sizing", !(NODE_SLAB_SIZING in rc_col))
-    record!("column-only restored :slab_sizing (got $rs_col)", NODE_SLAB_SIZING in rs_col)
+    record!("column-only did NOT recompute any slab node", !any(SS.is_slab_node_key, rc_col))
+    # No foundations on the vault, so the restored set is EXACTLY the slab nodes.
+    record!("column-only restored all slab nodes (got $rs_col)",
+            Set(rs_col) == slab_set(graph_of(session_bc)))
 
     # Output-equivalent (rtol=1e-8) to a from-scratch design_building with the SAME override.
     struc_bc_ref, _ = build_beam_column(beams = beams_variant)
@@ -411,10 +505,10 @@ function main()
     rc_load = last_recomputed(session)
     rs_load = last_restored(session)
     record!("load-ish recomputed == [:foundations] (got $rc_load)", rc_load == [NODE_FOUNDATIONS])
-    record!("load-ish did NOT recompute :slab_sizing", !(NODE_SLAB_SIZING in rc_load))
+    record!("load-ish did NOT recompute any slab node", !any(SS.is_slab_node_key, rc_load))
     record!("load-ish did NOT recompute :members", !(NODE_MEMBERS in rc_load))
-    record!("load-ish restored :slab_sizing + :members (got $rs_load)",
-            Set(rs_load) == Set([NODE_SLAB_SIZING, NODE_MEMBERS]))
+    record!("load-ish restored all slab nodes + :members (got $rs_load)",
+            Set(rs_load) == (slab_set(graph_of(session)) ∪ Set([NODE_MEMBERS])))
 
     # Output-equivalent (rtol=1e-8) to a from-scratch design_building with the SAME soil.
     struc_load_ref, _ = build_flat_plate(soil = SR.soft_clay)
@@ -440,7 +534,7 @@ function main()
             requires_new_engine(session; floor = floor_variant))
     record!("slab-type swap frontier reaches whole chain (structural upper bound)",
             Set(dirty_frontier(session; floor = floor_variant)) ==
-                Set([NODE_SLAB_SIZING, NODE_MEMBERS, NODE_FOUNDATIONS]))
+                (slab_set(graph_of(session)) ∪ Set([NODE_MEMBERS, NODE_FOUNDATIONS])))
     guarded_floor = false
     try
         redesign(session; floor = floor_variant)
@@ -552,13 +646,16 @@ function main()
     record!("load_combinations (vault) not prepare-affecting",
             !requires_new_engine(session_lc; load_combinations = lc_variant))
     frontier_lc = dirty_frontier(session_lc; load_combinations = lc_variant)
-    record!("load_combinations (vault) frontier == [:slab_sizing,:members] (got $frontier_lc)",
-            frontier_lc == [NODE_SLAB_SIZING, NODE_MEMBERS])
+    # Fine topology: the frontier is every per-slab node (topological order) then
+    # :members — both read the load MAGNITUDE that sync refreshes.
+    expected_lc_frontier = vcat(slab_keys(graph_of(session_lc)), [NODE_MEMBERS])
+    record!("load_combinations (vault) frontier == [slab nodes…,:members] (got $frontier_lc)",
+            frontier_lc == expected_lc_frontier)
 
     inc_lc = redesign(session_lc; load_combinations = lc_variant)
     rc_lc = last_recomputed(session_lc)
-    record!("load_combinations (vault) recomputed == [:slab_sizing,:members] (got $rc_lc)",
-            Set(rc_lc) == Set([NODE_SLAB_SIZING, NODE_MEMBERS]))
+    record!("load_combinations (vault) recomputed == [slab nodes…,:members] (got $rc_lc)",
+            Set(rc_lc) == (slab_set(graph_of(session_lc)) ∪ Set([NODE_MEMBERS])))
 
     struc_lc_ref, base_lc_ref0 = build_beam_column()
     ref_lc = design_building(struc_lc_ref, SS.with(base_lc_ref0; load_combinations = lc_variant))
@@ -574,6 +671,118 @@ function main()
     ref_lc_base = design_building(struc_lc_base_ref, SS.with(base_lc_base_ref0; load_combinations = [SR.strength_1_4D]))
     diff_ok, _ = same_signature(design_signature(ref_lc_base), design_signature(ref_lc))
     record!("load_combinations variation is a REAL change (base vs varied differ)", !diff_ok)
+
+    # ── [8] EXACT-FIRST DECOMPOSITION: fine per-slab nodes == coarse size_slabs! ─
+    # `design_building` now executes the FINE per-slab graph; `run_coarse_reference`
+    # runs the monolithic `size_slabs!` stage loop. Equal comprehensive signatures
+    # ⇒ decomposing slab sizing into per-slab nodes reproduces the coarse result
+    # byte-for-byte (rtol=1e-8) — on BOTH a multi-node SINGLE-level building (3-story
+    # flat plate: 3 slabs, 1 batch, 1 barrier sync) and a multi-LEVEL building
+    # (vault: 4 slabs, 4 batches, 4 syncs — proving the extra inter-batch syncs do
+    # not perturb the model-independent vault slab results).
+    println("\n[8] exact-first DECOMPOSITION: fine per-slab graph == coarse size_slabs!")
+    struc_ms_fine, ms_params = build_multistory_flat_plate()
+    fine_ms = design_building(struc_ms_fine, ms_params)
+    struc_ms_coarse, _ = build_multistory_flat_plate()
+    coarse_ms = run_coarse_reference(struc_ms_coarse, ms_params)
+    record!("multi-story flat plate has ≥2 slabs (multi-node level meaningful)",
+            length(fine_ms.slabs) >= 2)
+    ok_ms, bad_ms = same_signature(design_signature(coarse_ms), design_signature(fine_ms))
+    record!("3-slab flat plate: fine per-slab graph == coarse size_slabs! (mismatch: $bad_ms)", ok_ms)
+
+    struc_v_fine, v_params = build_thrust_vault()
+    fine_v = design_building(struc_v_fine, v_params)
+    struc_v_coarse, _ = build_thrust_vault()
+    coarse_v = run_coarse_reference(struc_v_coarse, v_params)
+    record!("thrust vault has ≥2 slabs (multi-level decomposition meaningful)",
+            length(fine_v.slabs) >= 2)
+    ok_v, bad_v = same_signature(design_signature(coarse_v), design_signature(fine_v))
+    record!("multi-level vault: fine per-slab graph == coarse size_slabs! (mismatch: $bad_v)", ok_v)
+
+    # ── [9] MULTI-NODE-LEVEL: global slab-param dirties ALL slab nodes, one sync ──
+    # 3-story flat plate → all 3 per-slab nodes share ONE topological level (single
+    # `slab_parallel_batches` batch). A global slab-affecting param (`:load_combinations`,
+    # non-prepare) dirties EVERY slab node; the scheduler recomputes them all in
+    # that one level and flushes the level-barrier `sync_asap!` EXACTLY ONCE, then
+    # the result is output-equivalent to a from-scratch design_building at the new
+    # combos. (This is the ACHIEVABLE multi-node behavior — a global param moves all
+    # siblings together; dirtying exactly ONE sibling is DEFERRED, see NOTES below.)
+    println("\n[9] MULTI-NODE-LEVEL: global slab-param → all slab nodes recompute, ONE barrier sync")
+    struc_ml, base_ml = build_multistory_flat_plate()
+    session_ml = DesignSession(struc_ml, base_ml)
+    g_ml = graph_of(session_ml)
+    slabs_ml = slab_set(g_ml)
+    record!("multi-story flat plate → all slab nodes in ONE level (got $(slab_sync_count(g_ml)))",
+            length(slabs_ml) >= 2 && slab_sync_count(g_ml) == 1)
+
+    ml_variant = [SR.strength_1_2D_1_6L]
+    base_ml_combo = SS.with(base_ml; load_combinations = [SR.strength_1_4D])
+    # Rebuild the session pinned to a definite base combo so the variant is a real change.
+    struc_ml2, _ = build_multistory_flat_plate()
+    session_ml = DesignSession(struc_ml2, base_ml_combo)
+    g_ml = graph_of(session_ml)
+    slabs_ml = slab_set(g_ml)
+    record!("multi-node-level not prepare-affecting",
+            !requires_new_engine(session_ml; load_combinations = ml_variant))
+    inc_ml = redesign(session_ml; load_combinations = ml_variant)
+    rc_ml  = last_recomputed(session_ml)
+    record!("multi-node-level recomputed ALL slab nodes (got $rc_ml)",
+            slabs_ml ⊆ Set(rc_ml))
+    # From-scratch reference at the SAME varied combos.
+    struc_ml_ref, _ = build_multistory_flat_plate()
+    ref_ml = design_building(struc_ml_ref, SS.with(base_ml_combo; load_combinations = ml_variant))
+    ok_ml, bad_ml2 = same_invariants(extract_invariants(ref_ml), extract_invariants(inc_ml))
+    record!("multi-node-level incremental == from-scratch (mismatch: $bad_ml2)", ok_ml)
+    ok_mlsig, bad_mlsig = same_signature(design_signature(ref_ml), design_signature(inc_ml))
+    record!("multi-node-level comprehensive per-member signature matches (mismatch: $bad_mlsig)", ok_mlsig)
+
+    # ── [10] THRUST-GOVERNED VAULT: incremental/graph path == from-scratch ───────
+    # A larger-span vault whose baked LateralThrust edge loads drive the steel
+    # members. Assert the full incremental engine run (fine graph + level barriers)
+    # reproduces from-scratch design_building, AND that a `:load_combinations`
+    # variation (which changes the governing combo → the baked thrust) stays
+    # output-equivalent — i.e. the vault thrust is correctly REFRESHED on the
+    # incremental sync path, not frozen at the base combo.
+    println("\n[10] THRUST-GOVERNED VAULT: incremental == from-scratch (base + thrust-combo variation)")
+    struc_tv, base_tv0 = build_thrust_vault()
+    base_tv = SS.with(base_tv0; load_combinations = [SR.strength_1_4D])
+    session_tv = DesignSession(struc_tv, base_tv)
+    # Base session run == design_building on the thrust vault.
+    struc_tv_ref, _ = build_thrust_vault()
+    ref_tv_base = design_building(struc_tv_ref, base_tv)
+    ok_tvb, bad_tvb = same_signature(design_signature(ref_tv_base),
+                                     design_signature(base_design(session_tv)))
+    record!("thrust vault base session == design_building (mismatch: $bad_tvb)", ok_tvb)
+
+    tv_variant = [SR.strength_1_2D_1_6L]
+    inc_tv = redesign(session_tv; load_combinations = tv_variant)
+    rc_tv  = last_recomputed(session_tv)
+    record!("thrust vault variation recomputes all slab nodes + :members (got $rc_tv)",
+            Set(rc_tv) == (slab_set(graph_of(session_tv)) ∪ Set([NODE_MEMBERS])))
+    struc_tv_ref2, base_tv_ref20 = build_thrust_vault()
+    ref_tv = design_building(struc_tv_ref2, SS.with(base_tv_ref20; load_combinations = tv_variant))
+    ok_tv, bad_tv2 = same_signature(design_signature(ref_tv), design_signature(inc_tv))
+    record!("thrust vault variation incremental == from-scratch (mismatch: $bad_tv2)", ok_tv)
+    # Prove the thrust-combo variation is a REAL change (not a coincidental no-op).
+    diff_tv, _ = same_signature(design_signature(ref_tv_base), design_signature(ref_tv))
+    record!("thrust vault load_combinations is a REAL change (base vs varied differ)", !diff_tv)
+
+    # ── DEFERRAL NOTE (documented invariant of this gate) ───────────────────────
+    # True per-slab / per-beam-group INDEPENDENT variation — a change that dirties
+    # EXACTLY ONE sibling node while leaving the others clean — is NOT achievable
+    # under the current GLOBAL-parameter model: a slab-affecting field
+    # (:load_combinations, :floor, :materials, …) is read identically by every
+    # per-slab node, so it dirties them ALL at once (section [9]), and a non-slab
+    # field dirties NONE. Producing a mixed clean/dirty slab level requires per-group
+    # OVERRIDE parameters (Option A: e.g. per-slab load or thickness overrides),
+    # which introduces new safety-critical DesignParameters fields + a
+    # prepare-affecting classification and is DEFERRED to a follow-up run pending
+    # user sign-off (per code-accuracy.mdc — do not guess new mechanics). The
+    # partial-restore path (`restore_slab_node_writes!` / `_adopt_larger_column!`)
+    # that a mixed level would exercise is therefore UNREACHABLE end-to-end and is
+    # covered by DIRECT unit tests instead (StructuralSynthesizer/test/design_graph/
+    # test_design_graph_incremental.jl, "partial per-slab restore (Findings 3 + 4)");
+    # it is deliberately NOT faked here with a prepare-affecting change.
 
     # ── Summary ──────────────────────────────────────────────────────────────
     println("\n" * "="^70)

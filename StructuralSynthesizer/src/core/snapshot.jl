@@ -202,3 +202,133 @@ Return a fresh working structure restored from the per-node snapshot stored at
 `store[key]` (see [`restore_node_state`](@ref)). Throws `KeyError` if absent.
 """
 restore_node(store::AbstractDict, key::Symbol) = restore_node_state(store[key])
+
+# =============================================================================
+# Partial per-slab restore (Run 3 — fine per-slab nodes)
+# =============================================================================
+#
+# `restore_node_state` above replaces the WHOLE working structure — the correct,
+# clobber-free choice when every node in a topological level is clean (all the
+# level's whole-struc snapshots are byte-identical, taken after the same level
+# barrier `sync_asap!`, so restoring any one restores the shared post-level state
+# INCLUDING the global Asap analysis model). The incremental scheduler uses that
+# path for an all-clean slab level.
+#
+# `restore_slab_node_writes!` is the fine-grained counterpart used ONLY when a
+# level holds BOTH clean and dirty per-slab nodes: it overlays a single clean
+# slab node's DECLARED PER-GROUP OUTPUTS onto the live structure without touching
+# the dirty siblings' fresh work or the global model. The clobbering hazard is
+# solved by two invariants:
+#
+#   1. A fine per-slab node's owned outputs are DISJOINT per slab index —
+#      `slab[idx].result/design_details/volumes/drop_panel` and the supported
+#      cells' `self_weight`/`live_load`. Two different slab nodes never write the
+#      same slab or (within a `slab_parallel_batches` batch) the same cell.
+#   2. Supporting columns are shared across slabs, but column growth is MONOTONIC
+#      (`col.c1 = max(col.c1, c_new)`, never-shrink — analyze/.../column_growth.jl),
+#      so applying a clean slab's supporting-column sizes after the dirty siblings
+#      already grew them can only RAISE to the recorded max — order-independent —
+#      and we therefore take `max` here rather than blindly overwriting.
+#
+# GENUINELY-GLOBAL STATE THAT STAYS WHOLE-STRUC: the solved Asap model
+# (`struc.asap_model`: element sections/forces, `u`, reactions) is NOT restored
+# here — it cannot be isolated to one slab. The scheduler reconciles it once per
+# level with the single barrier `sync_asap!` (which rebuilds the model from ALL
+# current slab states, clean-restored + dirty-recomputed), exactly as the coarse
+# stage did. Structural offsets are likewise recomputed globally by that sync's
+# upstream (`update_structural_offsets!`), so they are not touched per slab here.
+#
+# ORDERING INVARIANT (documented + relied upon by the scheduler): in a mixed
+# level, dirty nodes are RUN FIRST on the live struc, THEN clean nodes overlay
+# their owned writes (max-merged for shared columns), THEN the single barrier
+# `sync_asap!` reconciles the global model from the combined slab state. This
+# yields the same final state regardless of intra-level node order.
+#
+# NOTE (reachability): under the CURRENT global-parameter model a level is never
+# mixed — a slab-affecting parameter dirties every slab node at once and a
+# non-slab parameter dirties none — so this partial path is UNREACHABLE end-to-end
+# and is covered instead by DIRECT unit tests
+# (`StructuralSynthesizer/test/design_graph/test_design_graph_incremental.jl`, the
+# "partial per-slab restore (Findings 3 + 4)" testset: overlay + monotonic
+# max-merge + no-aliasing/no-sibling-clobber, plus `_adopt_larger_column!`'s
+# dimensional-tie section adoption). True per-slab INDEPENDENT variation (dirtying
+# exactly one sibling) needs per-group override params (Option A) and is deferred
+# pending user sign-off; see NOTES. Option A will exercise this path end-to-end.
+
+"""
+    restore_slab_node_writes!(dst, src, slab_idx, supporting_columns) -> dst
+
+Overlay the fine per-slab node for `slab_idx`'s DECLARED per-group outputs from
+snapshot `src` onto the live structure `dst`, in place, without disturbing other
+slabs, other cells, or the global Asap model (see the module note above for the
+clobbering invariants and the whole-struc fallback for global state).
+
+Restores, for `slab_idx`: `slab.result`, `slab.design_details`, `slab.volumes`,
+`slab.drop_panel`; the supported cells' `self_weight`/`live_load`; and — max-merged
+to honor monotonic column growth — the `supporting_columns`' `c1`/`c2`/`shape`/
+section/volumes. `supporting_columns` are the 1-based `dst.columns` indices whose
+tributary overlaps this slab (see `_slab_supporting_columns`).
+"""
+function restore_slab_node_writes!(dst::BuildingStructure, src::BuildingStructure,
+                                   slab_idx::Int, supporting_columns)
+    d_slab = dst.slabs[slab_idx]
+    s_slab = src.slabs[slab_idx]
+
+    d_slab.result = s_slab.result
+    d_slab.volumes = s_slab.volumes
+    d_slab.drop_panel = s_slab.drop_panel
+    hasproperty(d_slab, :design_details) && (d_slab.design_details = s_slab.design_details)
+
+    # Supported cells: self_weight/live_load written during slab sizing + sync.
+    # These are slab-owned (a cell belongs to exactly one slab), so a plain copy
+    # cannot clobber a sibling.
+    for ci in s_slab.cell_indices
+        (ci >= 1 && ci <= length(dst.cells)) || continue
+        dst.cells[ci].self_weight = src.cells[ci].self_weight
+        dst.cells[ci].live_load   = src.cells[ci].live_load
+    end
+
+    # Supporting columns: shared across slabs, so MAX-MERGE (monotonic growth)
+    # rather than overwrite. Only enlarge; adopt the snapshot's larger section.
+    for ci in supporting_columns
+        (ci >= 1 && ci <= length(dst.columns)) || continue
+        dcol = dst.columns[ci]
+        scol = src.columns[ci]
+        _adopt_larger_column!(dcol, scol)
+    end
+    return dst
+end
+
+"""Adopt `scol`'s size onto `dcol` iff it is larger (monotonic-growth merge).
+
+Also adopts `scol`'s section/shape/volumes when the c1/c2 dimensions TIE but the
+snapshot's section differs (Finding 4): monotonic column growth is about capacity,
+not just footprint — a sibling slab can adopt a heavier section (more rebar /
+higher `rho_g`) at the SAME footprint, and leaving `dcol`'s stale (weaker) section
+would under-represent the shared column. Section identity (`!==`) is the trigger;
+adopting an equal section is a harmless no-op."""
+function _adopt_larger_column!(dcol, scol)
+    (isnothing(scol.c1) || isnothing(scol.c2)) && return dcol
+    # Record whether dims TIE before mutating (both equal and non-nothing on dst).
+    dims_tie = !isnothing(dcol.c1) && !isnothing(dcol.c2) &&
+               dcol.c1 == scol.c1 && dcol.c2 == scol.c2
+    grew = false
+    if isnothing(dcol.c1) || scol.c1 > dcol.c1
+        dcol.c1 = scol.c1; grew = true
+    end
+    if isnothing(dcol.c2) || scol.c2 > dcol.c2
+        dcol.c2 = scol.c2; grew = true
+    end
+    # Finding 4: adopt the snapshot's section on a dimensional TIE where the
+    # snapshot's section differs — not only on a dimensional increase — so a stale
+    # section is never left behind at an equal footprint. Restricted to a genuine
+    # tie: when `dcol` is STRICTLY larger (grew==false, dims differ) we must keep
+    # `dcol`'s own dims+section and NOT attach the snapshot's smaller section to
+    # them.
+    if grew || (dims_tie && dcol.base.section !== scol.base.section)
+        dcol.shape = scol.shape
+        dcol.base.section = scol.base.section
+        dcol.base.volumes = deepcopy(scol.base.volumes)
+    end
+    return dcol
+end

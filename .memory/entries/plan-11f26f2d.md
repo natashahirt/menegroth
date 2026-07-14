@@ -12,10 +12,10 @@ success: 'null'
 files: ''
 session_id: sess-5e674a61
 created_at: '2026-07-14T01:31:04.550221+00:00'
-updated_at: '2026-07-14T01:44:05.994133+00:00'
+updated_at: '2026-07-14T01:44:11.502416+00:00'
 has_child_rationale: Forward-looking roadmap of the analysis, system, material, and
   typology capabilities menegroth must build to simulate the major US building types
-related_to: plan-w0000001
+related_to: plan-w0000001,plan-a0000003
 ---
 # Capability roadmap — full building analysis & simulation
 

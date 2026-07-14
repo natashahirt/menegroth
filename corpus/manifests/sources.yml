@@ -60,6 +60,34 @@
   encrypted: false
   notes: "AISC Specification for Structural Steel Buildings."
 
+# ASCE/SEI 7 minimum design loads — the loads standard that feeds load
+# combinations, wind, seismic, snow, and rain for every downstream member/
+# system check. Files are dropped directly into corpus/sources/codes/asce/,
+# so `origin` points at the same path as `source_path` (the ingest copy is a
+# no-op; the sibling-.txt conversion + provenance steps still run). If the
+# purchased PDFs turn out to be password-protected, flip `encrypted: true`.
+- id: asce-7-16
+  origin: corpus/sources/codes/asce/ASCE-7-16.pdf
+  source_path: corpus/sources/codes/asce/ASCE-7-16.pdf
+  text_path:   corpus/text/codes/asce/ASCE-7-16.txt
+  family: asce
+  role: codes
+  edition: ASCE/SEI 7-16
+  tier: 1
+  encrypted: false
+  notes: "ASCE/SEI 7-16 Minimum Design Loads and Associated Criteria for Buildings and Other Structures."
+
+- id: asce-7-22
+  origin: corpus/sources/codes/asce/ASCE-7-22.pdf
+  source_path: corpus/sources/codes/asce/ASCE-7-22.pdf
+  text_path:   corpus/text/codes/asce/ASCE-7-22.txt
+  family: asce
+  role: codes
+  edition: ASCE/SEI 7-22
+  tier: 1
+  encrypted: false
+  notes: "ASCE/SEI 7-22 Minimum Design Loads and Associated Criteria for Buildings and Other Structures."
+
 # ── Tier 1 — official guides / committee reports ──────────────────────────
 - id: aci-421-3r-15
   origin: "StructuralSizer/src/slabs/codes/concrete/reference/ACI 421-3R-15.pdf"
@@ -496,3 +524,328 @@
   tier: 1
   text_only: true
   notes: "Curated AISC chapter excerpts (B4, E, E3E4, E7, F, F7F8, G, G45, exam) used as LangExtract few-shot seeds."
+
+# ══════════════════════════════════════════════════════════════════════════
+# High-value batch added 2026-07-13 — reference docs that were in the repo
+# but not previously in the manifest. Grouped: CSA A23.3 family (new), ACI
+# beam / column / slab StructurePoint design examples (test oracles), and the
+# pixelframe source thesis. origin points at the upstream reference/ location;
+# ingest copies into corpus/sources + extracts sibling .txt into corpus/text.
+# ══════════════════════════════════════════════════════════════════════════
+
+# ── CSA A23.3-14 — new code family (StructurePoint spBeam DEs) ─────────────
+- id: csa-de-cantilever-beam-a23-3-14
+  origin: "StructuralSizer/src/members/codes/csa/reference/DE-Cantilever-Beam-CSA-14-spBeam-v1000.pdf"
+  source_path: corpus/sources/examples/csa/CSA-DE-Cantilever-Beam-A23-3-14.pdf
+  text_path:   corpus/text/examples/csa/CSA-DE-Cantilever-Beam-A23-3-14.txt
+  family: csa
+  role: examples
+  edition: CSA A23.3-14 (StructurePoint DE, spBeam v1.00)
+  tier: 3
+  encrypted: false
+  notes: "StructurePoint worked design example: reinforced concrete cantilever beam per CSA A23.3-14."
+
+- id: csa-de-doubly-reinforced-beam-a23-3-14
+  origin: "StructuralSizer/src/members/codes/csa/reference/DE-Doubly-Reinforced-Beam-CSA-14-spBeam-v1000.pdf"
+  source_path: corpus/sources/examples/csa/CSA-DE-Doubly-Reinforced-Beam-A23-3-14.pdf
+  text_path:   corpus/text/examples/csa/CSA-DE-Doubly-Reinforced-Beam-A23-3-14.txt
+  family: csa
+  role: examples
+  edition: CSA A23.3-14 (StructurePoint DE, spBeam v1.00)
+  tier: 3
+  encrypted: false
+  notes: "StructurePoint worked design example: doubly reinforced concrete beam per CSA A23.3-14."
+
+- id: csa-de-moment-redistribution-a23-3-14
+  origin: "StructuralSizer/src/members/codes/csa/reference/DE-Moment-Redistribution-CSA-14-spBeam-v1000.pdf"
+  source_path: corpus/sources/examples/csa/CSA-DE-Moment-Redistribution-A23-3-14.pdf
+  text_path:   corpus/text/examples/csa/CSA-DE-Moment-Redistribution-A23-3-14.txt
+  family: csa
+  role: examples
+  edition: CSA A23.3-14 (StructurePoint DE, spBeam v1.00)
+  tier: 3
+  encrypted: false
+  notes: "StructurePoint worked design example: moment redistribution in a continuous beam per CSA A23.3-14."
+
+- id: csa-de-simply-supported-beam-a23-3-14
+  origin: "StructuralSizer/src/members/codes/csa/reference/DE-Simply-Supported-CSA-14-spBeam-v1000.pdf"
+  source_path: corpus/sources/examples/csa/CSA-DE-Simply-Supported-Beam-A23-3-14.pdf
+  text_path:   corpus/text/examples/csa/CSA-DE-Simply-Supported-Beam-A23-3-14.txt
+  family: csa
+  role: examples
+  edition: CSA A23.3-14 (StructurePoint DE, spBeam v1.00)
+  tier: 3
+  encrypted: false
+  notes: "StructurePoint worked design example: simply supported reinforced concrete beam per CSA A23.3-14."
+
+- id: csa-de-continuous-beam-a23-3-14
+  origin: "StructuralSizer/src/members/codes/csa/reference/Reinforced Concrete Continuous Beam Analysis and Design (CSA A23.3-14).pdf"
+  source_path: corpus/sources/examples/csa/CSA-DE-Continuous-Beam-A23-3-14.pdf
+  text_path:   corpus/text/examples/csa/CSA-DE-Continuous-Beam-A23-3-14.txt
+  family: csa
+  role: examples
+  edition: CSA A23.3-14 (StructurePoint DE)
+  tier: 3
+  encrypted: false
+  notes: "StructurePoint worked design example: reinforced concrete continuous beam per CSA A23.3-14."
+
+# ── ACI 318-14 beam design examples (StructurePoint spBeam DEs) ────────────
+- id: sp-de-doubly-reinforced-beam-aci318-14
+  origin: "StructuralSizer/src/members/codes/aci/reference/beams/DE-Doubly-Reinforced-Concrete-Beam-Design-ACI-318-14-spBeam-v1000.pdf"
+  source_path: corpus/sources/examples/aci/SP-DE-Doubly-Reinforced-Beam-ACI318-14.pdf
+  text_path:   corpus/text/examples/aci/SP-DE-Doubly-Reinforced-Beam-ACI318-14.txt
+  family: aci
+  role: examples
+  edition: ACI 318-14 (StructurePoint DE, spBeam v1.00)
+  tier: 3
+  encrypted: false
+  notes: "StructurePoint worked design example: doubly reinforced concrete beam per ACI 318-14."
+
+- id: sp-de-moment-redistribution-aci318-14
+  origin: "StructuralSizer/src/members/codes/aci/reference/beams/DE-Moment-Redistribution-ACI-14-spBeam-v1000.pdf"
+  source_path: corpus/sources/examples/aci/SP-DE-Moment-Redistribution-ACI318-14.pdf
+  text_path:   corpus/text/examples/aci/SP-DE-Moment-Redistribution-ACI318-14.txt
+  family: aci
+  role: examples
+  edition: ACI 318-14 (StructurePoint DE, spBeam v1.00)
+  tier: 3
+  encrypted: false
+  notes: "StructurePoint worked design example: moment redistribution in a continuous beam per ACI 318-14."
+
+- id: sp-de-cantilever-beam-aci318-14
+  origin: "StructuralSizer/src/members/codes/aci/reference/beams/DE-Reinforced-Concrete-Cantilever-Beam-Analysis-and-Design-ACI-318-14-spBeam-v1000.pdf"
+  source_path: corpus/sources/examples/aci/SP-DE-Cantilever-Beam-ACI318-14.pdf
+  text_path:   corpus/text/examples/aci/SP-DE-Cantilever-Beam-ACI318-14.txt
+  family: aci
+  role: examples
+  edition: ACI 318-14 (StructurePoint DE, spBeam v1.00)
+  tier: 3
+  encrypted: false
+  notes: "StructurePoint worked design example: reinforced concrete cantilever beam per ACI 318-14."
+
+- id: sp-de-simply-supported-beam-aci318-14
+  origin: "StructuralSizer/src/members/codes/aci/reference/beams/DE-Simply-Supported-Reinforced-Concrete-Beam-Analysis-and-Design-ACI-318-14-spBeam-v1000.pdf"
+  source_path: corpus/sources/examples/aci/SP-DE-Simply-Supported-Beam-ACI318-14.pdf
+  text_path:   corpus/text/examples/aci/SP-DE-Simply-Supported-Beam-ACI318-14.txt
+  family: aci
+  role: examples
+  edition: ACI 318-14 (StructurePoint DE, spBeam v1.00)
+  tier: 3
+  encrypted: false
+  notes: "StructurePoint worked design example: simply supported reinforced concrete beam per ACI 318-14."
+
+- id: sp-de-continuous-beam-aci318-14
+  origin: "StructuralSizer/src/members/codes/aci/reference/beams/Reinforced Concrete Continuous Beam Analysis and Design (ACI 318-14).pdf"
+  source_path: corpus/sources/examples/aci/SP-DE-Continuous-Beam-ACI318-14.pdf
+  text_path:   corpus/text/examples/aci/SP-DE-Continuous-Beam-ACI318-14.txt
+  family: aci
+  role: examples
+  edition: ACI 318-14 (StructurePoint DE)
+  tier: 3
+  encrypted: false
+  notes: "StructurePoint worked design example: reinforced concrete continuous beam per ACI 318-14."
+
+- id: aci-torsion-reference
+  origin: "StructuralSizer/src/members/codes/aci/reference/beams/ACI Torsion.pdf"
+  source_path: corpus/sources/code_guides/aci/ACI-Torsion-Reference.pdf
+  text_path:   corpus/text/code_guides/aci/ACI-Torsion-Reference.txt
+  family: aci
+  role: code_guides
+  edition: "ACI 318 (torsion reference — edition unverified, confirm before citing)"
+  tier: 2
+  encrypted: false
+  notes: "ACI torsion reference document filed under beams. Edition/publisher not confirmed from filename; verify before using in normative work."
+
+# ── ACI 318-19 column design examples (StructurePoint spColumn DEs) ────────
+# NOTE: many of these are interaction-DIAGRAM (chart-heavy) examples; the
+# governing equations may be embedded in figures rather than legible text.
+# Ingested for corpus search; ZK equation extraction is deferred to a
+# supervised (PDF-vision) pass per the equation-fabrication safety rule.
+- id: sp-de-biaxial-interaction-rect-aci318-19
+  origin: "StructuralSizer/src/members/codes/aci/reference/columns/Biaxial-Bending-Interaction-Diagrams-for-Rectangular-Reinforced-Concrete-Column-Design-ACI-318-19.pdf"
+  source_path: corpus/sources/examples/aci/SP-DE-Biaxial-Interaction-Rect-ACI318-19.pdf
+  text_path:   corpus/text/examples/aci/SP-DE-Biaxial-Interaction-Rect-ACI318-19.txt
+  family: aci
+  role: examples
+  edition: ACI 318-19 (StructurePoint DE)
+  tier: 3
+  encrypted: false
+  notes: "StructurePoint worked design example: biaxial-bending interaction diagrams for a rectangular RC column per ACI 318-19."
+
+- id: sp-de-biaxial-interaction-spiral-circular-aci318-19
+  origin: "StructuralSizer/src/members/codes/aci/reference/columns/Biaxial-Bending-Interaction-Diagrams-for-Spiral-Reinforced-Circular-Concrete-Column-Design-ACI-318-19.pdf"
+  source_path: corpus/sources/examples/aci/SP-DE-Biaxial-Interaction-Spiral-Circular-ACI318-19.pdf
+  text_path:   corpus/text/examples/aci/SP-DE-Biaxial-Interaction-Spiral-Circular-ACI318-19.txt
+  family: aci
+  role: examples
+  edition: ACI 318-19 (StructurePoint DE)
+  tier: 3
+  encrypted: false
+  notes: "StructurePoint worked design example: biaxial-bending interaction diagrams for a spiral-reinforced circular RC column per ACI 318-19."
+
+- id: sp-de-biaxial-interaction-square-aci318-19
+  origin: "StructuralSizer/src/members/codes/aci/reference/columns/Biaxial-Bending-Interaction-Diagrams-for-Square-Reinforced-Concrete-Column-Design-ACI-318-19.pdf"
+  source_path: corpus/sources/examples/aci/SP-DE-Biaxial-Interaction-Square-ACI318-19.pdf
+  text_path:   corpus/text/examples/aci/SP-DE-Biaxial-Interaction-Square-ACI318-19.txt
+  family: aci
+  role: examples
+  edition: ACI 318-19 (StructurePoint DE)
+  tier: 3
+  encrypted: false
+  notes: "StructurePoint worked design example: biaxial-bending interaction diagrams for a square RC column per ACI 318-19."
+
+- id: sp-de-interaction-circular-spiral-aci318-19
+  origin: "StructuralSizer/src/members/codes/aci/reference/columns/Interaction-Diagram-Circular-Spiral-Reinforced-Concrete-Column-ACI-318-19.pdf"
+  source_path: corpus/sources/examples/aci/SP-DE-Interaction-Circular-Spiral-ACI318-19.pdf
+  text_path:   corpus/text/examples/aci/SP-DE-Interaction-Circular-Spiral-ACI318-19.txt
+  family: aci
+  role: examples
+  edition: ACI 318-19 (StructurePoint DE)
+  tier: 3
+  encrypted: false
+  notes: "StructurePoint worked design example: interaction diagram for a circular spiral-reinforced RC column per ACI 318-19."
+
+- id: sp-de-interaction-tied-aci318-19
+  origin: "StructuralSizer/src/members/codes/aci/reference/columns/Interaction-Diagram-Tied-Reinforced-Concrete-Column-Design-Strength-ACI-318-19.pdf"
+  source_path: corpus/sources/examples/aci/SP-DE-Interaction-Tied-ACI318-19.pdf
+  text_path:   corpus/text/examples/aci/SP-DE-Interaction-Tied-ACI318-19.txt
+  family: aci
+  role: examples
+  edition: ACI 318-19 (StructurePoint DE)
+  tier: 3
+  encrypted: false
+  notes: "StructurePoint worked design example: interaction diagram / design strength for a tied RC column per ACI 318-19."
+
+- id: sp-de-interaction-tied-high-strength-aci318-19
+  origin: "StructuralSizer/src/members/codes/aci/reference/columns/Interaction-Diagram-Tied-Reinforced-Concrete-Column-with-High-Strength-Reinforcing-Bars-ACI-318-19.pdf"
+  source_path: corpus/sources/examples/aci/SP-DE-Interaction-Tied-High-Strength-ACI318-19.pdf
+  text_path:   corpus/text/examples/aci/SP-DE-Interaction-Tied-High-Strength-ACI318-19.txt
+  family: aci
+  role: examples
+  edition: ACI 318-19 (StructurePoint DE)
+  tier: 3
+  encrypted: false
+  notes: "StructurePoint worked design example: interaction diagram for a tied RC column with high-strength (Grade 80/100) bars per ACI 318-19."
+
+- id: sp-de-biaxial-manual-columns-walls-aci318
+  origin: "StructuralSizer/src/members/codes/aci/reference/columns/Manual-Design-Procedure-for-Columns-and-Walls-with-Biaxial-Bending-ACI-318-11-14-19.pdf"
+  source_path: corpus/sources/examples/aci/SP-DE-Biaxial-Manual-Columns-Walls-ACI318.pdf
+  text_path:   corpus/text/examples/aci/SP-DE-Biaxial-Manual-Columns-Walls-ACI318.txt
+  family: aci
+  role: examples
+  edition: "ACI 318-11/14/19 (StructurePoint DE — spans three editions; do NOT mix mechanics across editions without checking)"
+  tier: 3
+  encrypted: false
+  notes: "StructurePoint worked design example: manual design procedure for columns and walls with biaxial bending, referencing ACI 318-11/14/19. Multi-edition doc — confirm which edition applies before deriving code from it."
+
+- id: sp-de-slender-column-sway-aci318-19
+  origin: "StructuralSizer/src/members/codes/aci/reference/columns/Slender-Concrete-Column-Design-in-Sway-Frames-Moment-Magnification-Method-ACI-318-19.pdf"
+  source_path: corpus/sources/examples/aci/SP-DE-Slender-Column-Sway-ACI318-19.pdf
+  text_path:   corpus/text/examples/aci/SP-DE-Slender-Column-Sway-ACI318-19.txt
+  family: aci
+  role: examples
+  edition: ACI 318-19 (StructurePoint DE)
+  tier: 3
+  encrypted: false
+  notes: "StructurePoint worked design example: slender concrete column design in sway frames (moment magnification method) per ACI 318-19."
+
+- id: sp-de-slenderness-nonsway-aci318-19
+  origin: "StructuralSizer/src/members/codes/aci/reference/columns/Slenderness-Concrete-Columns-Non-Sway-Frame-Moment-Magnification-ACI-318-19-v10.pdf"
+  source_path: corpus/sources/examples/aci/SP-DE-Slenderness-NonSway-ACI318-19.pdf
+  text_path:   corpus/text/examples/aci/SP-DE-Slenderness-NonSway-ACI318-19.txt
+  family: aci
+  role: examples
+  edition: ACI 318-19 (StructurePoint DE)
+  tier: 3
+  encrypted: false
+  notes: "StructurePoint worked design example: slenderness effects for concrete columns in a non-sway frame (moment magnification) per ACI 318-19."
+
+- id: sp-de-slenderness-sway-aci318-19
+  origin: "StructuralSizer/src/members/codes/aci/reference/columns/Slenderness-Effects-for-Concrete-Columns-in-Sway-Frame-Moment-Magnification-Method-ACI-318-19.pdf"
+  source_path: corpus/sources/examples/aci/SP-DE-Slenderness-Sway-ACI318-19.pdf
+  text_path:   corpus/text/examples/aci/SP-DE-Slenderness-Sway-ACI318-19.txt
+  family: aci
+  role: examples
+  edition: ACI 318-19 (StructurePoint DE)
+  tier: 3
+  encrypted: false
+  notes: "StructurePoint worked design example: slenderness effects for concrete columns in a sway frame (moment magnification) per ACI 318-19."
+
+# ── ACI 318-14 slab design examples (StructurePoint spSlab/spBeam DEs) ─────
+- id: sp-de-one-way-slab-aci318-14
+  origin: "StructuralSizer/src/slabs/codes/concrete/reference/one_way/DE-One-Way-Slab-ACI-14-spBeam-v1000.pdf"
+  source_path: corpus/sources/examples/aci/SP-DE-One-Way-Slab-ACI318-14.pdf
+  text_path:   corpus/text/examples/aci/SP-DE-One-Way-Slab-ACI318-14.txt
+  family: aci
+  role: examples
+  edition: ACI 318-14 (StructurePoint DE, spBeam v1.00)
+  tier: 3
+  encrypted: false
+  notes: "StructurePoint worked design example: one-way slab per ACI 318-14."
+
+- id: sp-de-wide-module-skip-joist-aci318-14
+  origin: "StructuralSizer/src/slabs/codes/concrete/reference/one_way/DE-Wide-Module-Skip-Joist-ACI-14-spBeam-v1000.pdf"
+  source_path: corpus/sources/examples/aci/SP-DE-Wide-Module-Skip-Joist-ACI318-14.pdf
+  text_path:   corpus/text/examples/aci/SP-DE-Wide-Module-Skip-Joist-ACI318-14.txt
+  family: aci
+  role: examples
+  edition: ACI 318-14 (StructurePoint DE, spBeam v1.00)
+  tier: 3
+  encrypted: false
+  notes: "StructurePoint worked design example: wide-module (skip-joist) one-way system per ACI 318-14."
+
+- id: sp-de-two-way-slab-with-beams-aci318-14
+  origin: "StructuralSizer/src/slabs/codes/concrete/reference/two_way/DE-Two-Way-Concrete-Floor-Slab-with-Beams-System-Analysis-and-Design-ACI-318-14-spSlab-v1000.pdf"
+  source_path: corpus/sources/examples/aci/SP-DE-Two-Way-Slab-with-Beams-ACI318-14.pdf
+  text_path:   corpus/text/examples/aci/SP-DE-Two-Way-Slab-with-Beams-ACI318-14.txt
+  family: aci
+  role: examples
+  edition: ACI 318-14 (StructurePoint DE, spSlab v1.00)
+  tier: 3
+  encrypted: false
+  notes: "StructurePoint worked design example: two-way concrete floor slab with beams per ACI 318-14."
+
+- id: sp-de-two-way-flat-plate-aci318-14
+  origin: "StructuralSizer/src/slabs/codes/concrete/reference/two_way/DE-Two-Way-Flat-Plate-Concrete-Floor-System-Analysis-and-Design-ACI-318-14-spSlab-v1000.pdf"
+  source_path: corpus/sources/examples/aci/SP-DE-Two-Way-Flat-Plate-ACI318-14.pdf
+  text_path:   corpus/text/examples/aci/SP-DE-Two-Way-Flat-Plate-ACI318-14.txt
+  family: aci
+  role: examples
+  edition: ACI 318-14 (StructurePoint DE, spSlab v1.00)
+  tier: 3
+  encrypted: false
+  notes: "StructurePoint worked design example: two-way flat-plate concrete floor system per ACI 318-14 (directly relevant to the flat-plate slab work)."
+
+- id: sp-de-two-way-flat-slab-drop-panels-aci318-14
+  origin: "StructuralSizer/src/slabs/codes/concrete/reference/two_way/DE-Two-Way-Flat-Slab-Concrete-Floor-with-Drop-Panels-System-Analysis-and-Design-ACI-318-14-spSlab-v1000.pdf"
+  source_path: corpus/sources/examples/aci/SP-DE-Two-Way-Flat-Slab-Drop-Panels-ACI318-14.pdf
+  text_path:   corpus/text/examples/aci/SP-DE-Two-Way-Flat-Slab-Drop-Panels-ACI318-14.txt
+  family: aci
+  role: examples
+  edition: ACI 318-14 (StructurePoint DE, spSlab v1.00)
+  tier: 3
+  encrypted: false
+  notes: "StructurePoint worked design example: two-way flat-slab concrete floor with drop panels per ACI 318-14."
+
+- id: sp-de-two-way-waffle-slab-aci318-14
+  origin: "StructuralSizer/src/slabs/codes/concrete/reference/two_way/DE-Two-Way-Joist-Concrete-Slab-Floor-Waffle-Slab-System-Analysis-and-Design-ACI-318-14-spSlab-v1000.pdf"
+  source_path: corpus/sources/examples/aci/SP-DE-Two-Way-Waffle-Slab-ACI318-14.pdf
+  text_path:   corpus/text/examples/aci/SP-DE-Two-Way-Waffle-Slab-ACI318-14.txt
+  family: aci
+  role: examples
+  edition: ACI 318-14 (StructurePoint DE, spSlab v1.00)
+  tier: 3
+  encrypted: false
+  notes: "StructurePoint worked design example: two-way joist (waffle) slab floor system per ACI 318-14."
+
+# ── Pixelframe source thesis (Tier 2 research) ────────────────────────────
+- id: pixelframe-thesis-wongsittikan-2024
+  origin: "StructuralSizer/src/members/codes/pixelframe/reference/Wongsittikan-pitipatw-smbt-arch-2024-thesis (1).pdf"
+  source_path: corpus/sources/research/pixelframe/Pixelframe-Thesis-Wongsittikan-2024.pdf
+  text_path:   corpus/text/research/pixelframe/Pixelframe-Thesis-Wongsittikan-2024.txt
+  family: pixelframe
+  role: research
+  edition: "MIT SMArchS thesis, Wongsittikan, 2024"
+  tier: 2
+  encrypted: false
+  notes: "Source thesis behind the pixelframe carbon/flexure/deflection code (Wongsittikan, MIT SMArchS 2024). Novel methods, not a published code; extract as research, not normative."

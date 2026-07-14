@@ -354,7 +354,10 @@ function build_design_graph(struc::BuildingStructure, params::DesignParameters;
     graph_nodes = DesignNode[]
     slab_prov   = pipeline_provenance(NODE_SLAB_SIZING)
 
-    # ── Fine per-slab nodes, grouped into batch levels ──────────────────────
+    # ── Fine per-slab nodes, emitted as ROOTS in ONE topological level ───────
+    # (all slab nodes are edgeless roots ordered by `eachindex`, so
+    # `topological_levels` places them in a SINGLE level with ONE barrier sync —
+    # NOT one level per `slab_parallel_batches` batch; see the topology note above)
     n_slabs = length(struc.slabs)
     slab_keys_all = NodeKey[]
     if n_slabs == 0
@@ -503,7 +506,9 @@ end
 The 1-based `struc.columns` indices whose tributary overlaps slab `slab_idx`'s
 cells — the columns a per-slab node may grow. Mirrors the slab→column overlap in
 [`compute_slab_parallel_batches!`](@ref); used by the scheduler's partial
-per-slab restore ([`restore_slab_node_writes!`](@ref)).
+per-slab restore ([`restore_slab_node_writes!`](@ref)) — a path now made
+UNREACHABLE end-to-end by the partial-slab-target guard in `run_target!`
+(scheduler.jl) and exercised only by direct unit tests.
 """
 function _slab_supporting_columns(struc::BuildingStructure, slab_idx::Int)
     slab_cells = Set(struc.slabs[slab_idx].cell_indices)

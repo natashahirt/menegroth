@@ -244,16 +244,22 @@ restore_node(store::AbstractDict, key::Symbol) = restore_node_state(store[key])
 # `sync_asap!` reconciles the global model from the combined slab state. This
 # yields the same final state regardless of intra-level node order.
 #
-# NOTE (reachability): under the CURRENT global-parameter model a level is never
-# mixed — a slab-affecting parameter dirties every slab node at once and a
-# non-slab parameter dirties none — so this partial path is UNREACHABLE end-to-end
-# and is covered instead by DIRECT unit tests
+# NOTE (reachability): a slab level is never mixed clean/dirty, now ENFORCED (not
+# merely assumed) by TWO independent mechanisms: (1) under the global-parameter
+# model a slab-affecting parameter dirties every slab node at once and a non-slab
+# parameter dirties none (all-or-nothing by params); and (2) the partial-slab-
+# target guard in `run_target!` (scheduler.jl) REJECTS any run whose target
+# closure would memoize only a strict subset of the slab roots, so the memo can
+# never hold a partial slab level either. This partial path is therefore
+# UNREACHABLE end-to-end (a defensive check in `run_target!` fails loud if it ever
+# is), and the merge helpers are covered instead by DIRECT unit tests
 # (`StructuralSynthesizer/test/design_graph/test_design_graph_incremental.jl`, the
 # "partial per-slab restore (Findings 3 + 4)" testset: overlay + monotonic
 # max-merge + no-aliasing/no-sibling-clobber, plus `_adopt_larger_column!`'s
-# dimensional-tie section adoption). True per-slab INDEPENDENT variation (dirtying
-# exactly one sibling) needs per-group override params (Option A) and is deferred
-# pending user sign-off; see NOTES. Option A will exercise this path end-to-end.
+# dimensional-tie non-downgrade section adoption). True per-slab INDEPENDENT
+# variation (dirtying exactly one sibling) needs per-group override params
+# (Option A) and is deferred pending user sign-off; see NOTES. Option A will
+# exercise this path end-to-end.
 
 """
     restore_slab_node_writes!(dst, src, slab_idx, supporting_columns) -> dst
@@ -299,36 +305,81 @@ function restore_slab_node_writes!(dst::BuildingStructure, src::BuildingStructur
     return dst
 end
 
-"""Adopt `scol`'s size onto `dcol` iff it is larger (monotonic-growth merge).
+"""Longitudinal steel area of an RC column section (`RCColumnSection` /
+`RCCircularSection` both expose `As_total`), or `nothing` when the section does
+not report one. Used ONLY as a dimensional-TIE non-downgrade proxy — see
+[`_adopt_larger_column!`](@ref)."""
+_column_section_steel_area(sec) =
+    (sec !== nothing && hasproperty(sec, :As_total)) ? sec.As_total : nothing
 
-Also adopts `scol`'s section/shape/volumes when the c1/c2 dimensions TIE but the
-snapshot's section differs (Finding 4): monotonic column growth is about capacity,
-not just footprint — a sibling slab can adopt a heavier section (more rebar /
-higher `rho_g`) at the SAME footprint, and leaving `dcol`'s stale (weaker) section
-would under-represent the shared column. Section identity (`!==`) is the trigger;
-adopting an equal section is a harmless no-op."""
+"""Adopt `scol`'s size onto `dcol` under a NEVER-SHRINK, NEVER-DOWNGRADE,
+NEVER-MISMATCHED-SECTION merge (a monotonic-growth merge of two sizings of the
+SAME shared column). Sizes are always DEEP-COPIED, never aliased into `scol`.
+
+Cases (P2a):
+1. `dcol` uninitialized (`c1`/`c2` is `nothing`) → adopt `scol` wholesale.
+2. `scol` DOMINATES `dcol` (`scol.c1 ≥ dcol.c1` AND `scol.c2 ≥ dcol.c2`):
+     • strictly larger in ≥1 dim → adopt `scol`'s dims + section + shape +
+       volumes (the final dims equal `scol`'s, so `scol`'s section MATCHES them);
+     • exact TIE (both dims equal) → dims unchanged; adopt `scol`'s section ONLY
+       when it is a provable NON-DOWNGRADE, else KEEP `dcol` (Finding 4, corrected
+       — the pre-fix rule downgraded a stronger section to a weaker one on a tie).
+3. `dcol` dominates, OR the dims are INCOMPARABLE (e.g. `dst=(10,20)` vs
+   `src=(12,18)`, whose component-wise max `(12,20)` matches NEITHER section) →
+   keep `dcol`'s dims AND section unchanged. Growing one dim while shrinking the
+   other is forbidden (never-shrink), and manufacturing a `(12,20)` footprint that
+   no available section matches would create a dims/section MISMATCH, so we keep
+   `dcol`'s own consistent `(dims, section)` pair.
+
+Non-downgrade proxy (case 2 tie): at an EQUAL gross section (guaranteed by the
+`c1==c1 && c2==c2` tie) and equal concrete, ACI 318-11 §10.3.6.2
+`φPn,max = 0.80·φ·[0.85·f'c·(Ag − Ast) + fy·Ast]` is monotonically NON-DECREASING
+in the longitudinal steel area `Ast` (because `fy > 0.85·f'c`), and the P-M
+capacity is likewise non-decreasing in `Ast` — so the section's reported TOTAL
+longitudinal steel area is a valid non-downgrade proxy on a tie. We compare that
+reported area directly; NO capacity is recomputed here (the column checker /
+`ACIColumnCapacityCache` needs material + demand context not available at this
+merge site). When either section does not report a steel area, we conservatively
+KEEP `dcol` (cannot prove non-downgrade)."""
 function _adopt_larger_column!(dcol, scol)
     (isnothing(scol.c1) || isnothing(scol.c2)) && return dcol
-    # Record whether dims TIE before mutating (both equal and non-nothing on dst).
-    dims_tie = !isnothing(dcol.c1) && !isnothing(dcol.c2) &&
-               dcol.c1 == scol.c1 && dcol.c2 == scol.c2
-    grew = false
-    if isnothing(dcol.c1) || scol.c1 > dcol.c1
-        dcol.c1 = scol.c1; grew = true
-    end
-    if isnothing(dcol.c2) || scol.c2 > dcol.c2
-        dcol.c2 = scol.c2; grew = true
-    end
-    # Finding 4: adopt the snapshot's section on a dimensional TIE where the
-    # snapshot's section differs — not only on a dimensional increase — so a stale
-    # section is never left behind at an equal footprint. Restricted to a genuine
-    # tie: when `dcol` is STRICTLY larger (grew==false, dims differ) we must keep
-    # `dcol`'s own dims+section and NOT attach the snapshot's smaller section to
-    # them.
-    if grew || (dims_tie && dcol.base.section !== scol.base.section)
+
+    # Case 1: uninitialized dst → adopt scol wholesale.
+    if isnothing(dcol.c1) || isnothing(dcol.c2)
+        dcol.c1 = scol.c1
+        dcol.c2 = scol.c2
         dcol.shape = scol.shape
         dcol.base.section = scol.base.section
         dcol.base.volumes = deepcopy(scol.base.volumes)
+        return dcol
     end
+
+    scol_dominates = scol.c1 >= dcol.c1 && scol.c2 >= dcol.c2
+    dims_tie       = scol.c1 == dcol.c1 && scol.c2 == dcol.c2
+
+    if scol_dominates && !dims_tie
+        # Case 2 (strict dominance): final dims == scol's dims, so scol's section
+        # matches → adopt scol wholesale (footprint-monotonic growth).
+        dcol.c1 = scol.c1
+        dcol.c2 = scol.c2
+        dcol.shape = scol.shape
+        dcol.base.section = scol.base.section
+        dcol.base.volumes = deepcopy(scol.base.volumes)
+    elseif dims_tie
+        # Case 2 (tie): dims unchanged; adopt scol's section ONLY on a provable
+        # non-downgrade (≥ steel at equal footprint), else keep dcol. Adopting an
+        # identical section is a harmless no-op (skipped via the `!==` check).
+        if dcol.base.section !== scol.base.section
+            a_new = _column_section_steel_area(scol.base.section)
+            a_old = _column_section_steel_area(dcol.base.section)
+            if a_new !== nothing && a_old !== nothing && a_new >= a_old
+                dcol.shape = scol.shape
+                dcol.base.section = scol.base.section
+                dcol.base.volumes = deepcopy(scol.base.volumes)
+            end
+        end
+    end
+    # Case 3 (dcol dominates OR incomparable dims): keep dcol entirely — no shrink,
+    # no dims/section mismatch.
     return dcol
 end

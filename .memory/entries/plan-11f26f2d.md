@@ -7,14 +7,15 @@ title: 4. Capability roadmap — toward full building simulation (DOE typologies
 node_label: Capability roadmap (DOE typologies)
 tags: roadmap,capabilities,doe,building-types,analysis,simulation,gap-analysis
 status: active
-open_threads: 0
+open_threads: 6
 success: 'null'
 files: ''
 session_id: sess-5e674a61
 created_at: '2026-07-14T01:31:04.550221+00:00'
-updated_at: '2026-07-14T01:31:04.550221+00:00'
+updated_at: '2026-07-14T01:44:05.994133+00:00'
 has_child_rationale: Forward-looking roadmap of the analysis, system, material, and
   typology capabilities menegroth must build to simulate the major US building types
+related_to: plan-w0000001
 ---
 # Capability roadmap — full building analysis & simulation
 

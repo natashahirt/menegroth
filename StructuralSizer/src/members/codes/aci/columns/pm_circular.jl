@@ -252,7 +252,7 @@ PMInteractionDiagram{RCCircularSection} with:
 7. Pure bending (Pn ≈ 0)
 8. Pure tension
 """
-function generate_PM_diagram(section::RCCircularSection, mat; n_intermediate::Int=20)
+function generate_PM_diagram(section::RCCircularSection, mat; n_intermediate::Int=PM_DIAGRAM_N_INTERMEDIATE)
     # Material properties (using unified extractors)
     fc = fc_ksi(mat)
     fy = fy_ksi(mat)

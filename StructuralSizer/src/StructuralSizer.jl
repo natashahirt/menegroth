@@ -302,6 +302,7 @@ export PMDiagramPoint, PMInteractionDiagram, PMDiagramRect, PMDiagramCircular
 export generate_PM_diagram, get_nominal_curve, get_factored_curve
 export get_control_points, get_control_point
 export check_PM_capacity, capacity_at_axial, capacity_at_moment, utilization_ratio
+export PM_DIAGRAM_N_INTERMEDIATE, PM_INTERACTION_UTIL_TOL
 export BendingAxis, StrongAxis, WeakAxis
 export generate_PM_diagrams_biaxial
 # calculate_PM_at_c, calculate_phi_PM_at_c, generate_PM_diagram, effective_depth

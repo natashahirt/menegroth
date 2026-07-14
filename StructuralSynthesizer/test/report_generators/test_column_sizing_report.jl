@@ -137,7 +137,7 @@ end
 """Compute ACI P-M utilization for an RC column section."""
 function rc_column_utilization(section, grade, rebar_grade, Pu_kip, Mux_kipft)
     mat = to_material_tuple(grade, fy_ksi(rebar_grade), Es_ksi(rebar_grade))
-    diagram = generate_PM_diagram(section, mat; n_intermediate=20)
+    diagram = generate_PM_diagram(section, mat; n_intermediate=PM_DIAGRAM_N_INTERMEDIATE)
     check = check_PM_capacity(diagram, Pu_kip, Mux_kipft)
     return check
 end

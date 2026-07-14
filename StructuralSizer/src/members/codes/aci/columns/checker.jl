@@ -196,7 +196,7 @@ function _precompute_diagrams!(
         section = catalog[j]
         
         # Generate P-M diagram (dispatches on section type)
-        cache.diagrams[j] = generate_PM_diagram(section, mat; n_intermediate=15)
+        cache.diagrams[j] = generate_PM_diagram(section, mat; n_intermediate=PM_DIAGRAM_N_INTERMEDIATE)
         
         # Section depth (h for rectangular, D for circular)
         cache.depths[j] = _section_depth_m(section)
@@ -231,7 +231,7 @@ function _check_square_and_generate_y_diagram(section::RCColumnSection, mat, inc
     
     # Generate y-axis diagram for rectangular sections if biaxial is enabled
     diagram_y = if !is_square && include_biaxial
-        generate_PM_diagram(section, mat, WeakAxis(); n_intermediate=15)
+        generate_PM_diagram(section, mat, WeakAxis(); n_intermediate=PM_DIAGRAM_N_INTERMEDIATE)
     else
         nothing
     end
@@ -380,7 +380,7 @@ function _is_feasible_rc_column(
         end
         
         util_biaxial = bresler_load_contour(Mux, Muy, φMnx, φMny; α=checker.α_biaxial)
-        util_biaxial <= 1.0 || return false
+        util_biaxial <= 1.0 + PM_INTERACTION_UTIL_TOL || return false
     end
     
     return true

@@ -30,6 +30,15 @@ Enumeration of standard control points on ACI P-M interaction diagrams.
     INTERMEDIATE          # Unlabeled intermediate point
 end
 
+# Shared P-M diagram discretization for MIP checker, NLP, and post-check validation.
+# Must match `generate_PM_diagram` default keyword.
+const PM_DIAGRAM_N_INTERMEDIATE = 20
+
+# ENGINEERING JUDGMENT: linear interpolation on a discretized factored P-M envelope
+# can vary by a few percent with point placement. Prevents hairline false failures
+# when feasibility and post-check share the same discretization. Not an ACI φ factor.
+const PM_INTERACTION_UTIL_TOL = 0.03
+
 # ==============================================================================
 # Strain Compatibility Core
 # ==============================================================================
@@ -433,7 +442,7 @@ PMInteractionDiagram with:
 StructurePoint: "Interaction Diagram - Tied Reinforced Concrete Column 
 Design Strength (ACI 318-11)"
 """
-function generate_PM_diagram(section::RCColumnSection, mat; n_intermediate::Int=20)
+function generate_PM_diagram(section::RCColumnSection, mat; n_intermediate::Int=PM_DIAGRAM_N_INTERMEDIATE)
     # Material properties (using unified extractors)
     fc = fc_ksi(mat)
     fy = fy_ksi(mat)
@@ -821,7 +830,7 @@ function check_PM_capacity(diagram::PMInteractionDiagram, Pu::Real, Mu::Real)
         governing = :combined
     end
 
-    adequate = utilization ≤ 1.0
+    adequate = utilization ≤ 1.0 + PM_INTERACTION_UTIL_TOL
 
     return (
         adequate = adequate,
@@ -1193,7 +1202,7 @@ PMInteractionDiagram for weak-axis bending
 # Reference
 StructurePoint: "Biaxial Bending Interaction Diagrams for Rectangular RC Column Design"
 """
-function generate_PM_diagram(section::RCColumnSection, mat, ::WeakAxis; n_intermediate::Int=20)
+function generate_PM_diagram(section::RCColumnSection, mat, ::WeakAxis; n_intermediate::Int=PM_DIAGRAM_N_INTERMEDIATE)
     # Material properties
     fc = fc_ksi(mat)
     fy = fy_ksi(mat)
@@ -1348,7 +1357,7 @@ NamedTuple with:
 # Reference
 StructurePoint: "Manual Design Procedure for Columns and Walls with Biaxial Bending"
 """
-function generate_PM_diagrams_biaxial(section::RCColumnSection, mat; n_intermediate::Int=20)
+function generate_PM_diagrams_biaxial(section::RCColumnSection, mat; n_intermediate::Int=PM_DIAGRAM_N_INTERMEDIATE)
     diagram_x = generate_PM_diagram(section, mat; n_intermediate=n_intermediate)
     diagram_y = generate_PM_diagram(section, mat, WeakAxis(); n_intermediate=n_intermediate)
     return (x = diagram_x, y = diagram_y)

@@ -295,6 +295,51 @@ Base.@kwdef struct ScopedFloorOverride
 end
 
 """
+    MemberGroupSizingOverride(; catalog=nothing, deflection_limit=nothing, max_depth=nothing)
+
+Per-member-group sizing override carried on `DesignParameters.member_group_overrides`
+(keyed by the group's stable `UInt64` `group_id`). Each field is `nothing` by
+default, meaning "fall through to the next resolution level" — so an override with
+all fields unset is a no-op.
+
+These are ENGINEERING sizing KNOBS (not published-code factors): a per-group section
+`catalog`, an L/δ `deflection_limit` (e.g. `1/360`), and a `max_depth` cap. They are
+honored ONLY on the per-group [`size_member_group!`](@ref) path (isolated steel
+member groups), with precedence (highest first):
+
+1. this override's field (`member_group_overrides[gid]`),
+2. `MemberGroup.catalog_override` (for `catalog`),
+3. the caller's global default kwarg.
+
+!!! note "Scope (Run 4, Part 1)"
+    Only the fields the per-group binary-search sizer (`size_member_group!`) can
+    honor are represented: `catalog`, `deflection_limit`, `max_depth`. Objective /
+    total-deflection overrides have NO per-group honoring path in that sizer and are
+    deliberately omitted rather than carried as silently-ignored knobs. The coarse
+    `design_building` member stage (`_size_beams_columns!` / `_reconcile_columns!`)
+    does NOT route through `size_member_group!`, so it does NOT observe these
+    overrides — see the field docstring on `member_group_overrides`.
+"""
+Base.@kwdef struct MemberGroupSizingOverride
+    catalog::Any = nothing                                 # per-group section catalog, or nothing
+    deflection_limit::Union{Nothing, Real} = nothing       # L/δ ratio (e.g. 1/360), or nothing
+    max_depth::Union{Nothing, Unitful.Length} = nothing    # max section depth cap, or nothing
+end
+
+"""
+    _is_effective(o::MemberGroupSizingOverride) -> Bool
+
+Whether `o` sets ANY sizing knob (`catalog`, `deflection_limit`, or `max_depth`).
+An override with all fields `nothing` is a documented no-op (see the
+`MemberGroupSizingOverride` docstring), so `_is_effective` is `false` for it. Used
+by the fail-loud member-group-override guard to refuse ONLY overrides that would
+actually change a design (an all-unset entry must not throw — guard/docstring
+consistency).
+"""
+_is_effective(o::MemberGroupSizingOverride) =
+    o.catalog !== nothing || o.deflection_limit !== nothing || o.max_depth !== nothing
+
+"""
 Parameters that define a design configuration.
 
 Different `DesignParameters` on the same `BuildingStructure` produce
@@ -388,7 +433,26 @@ Base.@kwdef mutable struct DesignParameters
     # NOTE: This is orthogonal to `uniform_column_sizing` — collinear_grouping
     # operates on beam-line continuity in plan, not column uniformity per story.
     collinear_grouping::Bool = false
-    
+
+    # ─── Per-Member-Group Sizing Overrides (Run 4, Part 1) ───
+    # Optional per-group sizing knobs keyed by the group's stable UInt64 group_id.
+    # DEFAULTS to empty ⇒ byte-identical to today for every existing caller.
+    #
+    # NON-prepare-affecting (never in PREPARE_AFFECTING_FIELDS) and NOT part of any
+    # design-graph node param_slice, so setting/changing it does NOT alter the
+    # prepared model, does NOT dirty any node, and does NOT trigger the incremental
+    # engine's prepare-affecting guard.
+    #
+    # Honored ONLY on the isolated per-group `size_member_group!` path (steel member
+    # groups). The coarse `design_building` member stage (`_size_beams_columns!`
+    # batched `size_beams!` + global `size_columns!` MIP, or flat-plate
+    # `_reconcile_columns!`) does NOT route member sizing through
+    # `size_member_group!` and therefore does NOT observe these overrides — so an
+    # override set here has NO effect on a standard `design_building` result. See
+    # `MemberGroupSizingOverride`.
+    member_group_overrides::Dict{UInt64, MemberGroupSizingOverride} =
+        Dict{UInt64, MemberGroupSizingOverride}()
+
     # ─── Uniform Column Sizing ───
     # :off      — each column sized independently (default). Minimises material
     #             and embodied carbon by right-sizing each column to its own demand.
@@ -538,6 +602,19 @@ with(params::DesignParameters; kwargs...) = setproperties(params, (; kwargs...))
 
 """Primary (governing) strength combination from a DesignParameters."""
 governing_combo(p::DesignParameters) = first(p.load_combinations)
+
+"""
+    resolve_member_group_override(params::DesignParameters, gid::UInt64)
+        -> Union{MemberGroupSizingOverride, Nothing}
+
+The per-group sizing override for `gid` from `params.member_group_overrides`, or
+`nothing` when the group has no override. Pass the result as the `override` kwarg
+to [`size_member_group!`](@ref). Returns `nothing` (a no-op) for every group when
+`member_group_overrides` is empty (the default), keeping all existing callers
+byte-identical.
+"""
+resolve_member_group_override(params::DesignParameters, gid::UInt64) =
+    get(params.member_group_overrides, gid, nothing)
 
 """
     resolve_objective(sym::Symbol) -> AbstractObjective

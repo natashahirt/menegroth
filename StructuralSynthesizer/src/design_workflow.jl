@@ -62,6 +62,50 @@ struct PreSizingValidationError <: Exception
     errors::Vector{String}
 end
 
+"""
+    _assert_member_group_overrides_unsupported(params::DesignParameters)
+
+Fail-loud guard (Run 4, Part 1): refuse an EFFECTIVE `member_group_overrides`
+entry on any full-pipeline / variation design path, because NONE of them route
+member sizing through `size_member_group!` (the only path that honors the knob).
+
+The standard `design_building` pipeline sizes members via batched `size_beams!` /
+the global `size_columns!` MIP / flat-plate `_reconcile_columns!`, and the
+incremental variation API (`redesign` / `vary` / `redesign_incremental!`) applies
+the override as a param diff on an already-built engine whose graph likewise never
+calls `size_member_group!`. So a non-empty override on either path cannot be
+honored and would be SILENTLY IGNORED — a per-group catalog/deflection restriction
+dropped, a default-catalog design returned with no error. For a safety-critical
+sizer we REFUSE the knob rather than `@warn`-and-proceed (warnings are missed in
+batch/sweep runs).
+
+Consistency with the `MemberGroupSizingOverride` docstring: an override whose
+fields are ALL unset is a documented no-op, so a populated-but-vacuous dict does
+NOT throw (design proceeds byte-identical). Only an EFFECTIVE entry
+(`_is_effective`) is refused. (catalog/deflection_limit/max_depth are engineering
+sizing knobs — no code citation.)
+
+Shared by `run_pre_sizing_validation` (covers `design_building` both methods,
+`prepare_engine`, and `DesignSession` construction) and the design-producing
+variation entry points `redesign` / `vary` / `redesign_incremental!`.
+"""
+function _assert_member_group_overrides_unsupported(params::DesignParameters)
+    if !isempty(params.member_group_overrides) &&
+       any(_is_effective, values(params.member_group_overrides))
+        throw(ArgumentError(
+            "member_group_overrides is not yet honored: neither the standard " *
+            "design_building pipeline (which sizes members via batched size_beams! / " *
+            "global size_columns! MIP / flat-plate _reconcile_columns!) nor the " *
+            "incremental variation API (redesign / vary / redesign_incremental!) routes " *
+            "member sizing through size_member_group!, so a non-empty override cannot be " *
+            "honored and would be SILENTLY IGNORED; the only path that honors it today is " *
+            "a direct size_member_group! call with override = " *
+            "resolve_member_group_override(params, gid); full-pipeline support is deferred " *
+            "to a future run."))
+    end
+    return nothing
+end
+
 Base.showerror(io::IO, e::PreSizingValidationError) =
     print(io, "PreSizingValidationError: ", join(e.errors, "; "))
 
@@ -81,6 +125,12 @@ function run_pre_sizing_validation(
     params::DesignParameters;
     tc::Union{Nothing, StructuralSizer.TraceCollector} = nothing,
 )
+    # Fail-loud guard (Run 4, Part 1): refuse an EFFECTIVE member_group_overrides
+    # here (covers both design_building methods, prepare_engine, and DesignSession
+    # construction). Shared with the variation entry points so the sweep door has
+    # the identical posture. See `_assert_member_group_overrides_unsupported`.
+    _assert_member_group_overrides_unsupported(params)
+
     errors = String[]
     floor_opts = resolve_floor_options(params)
     fp_opts = floor_opts isa StructuralSizer.FlatSlabOptions ? floor_opts.base : floor_opts
@@ -622,6 +672,18 @@ design = capture_design(struc, params)
 function capture_design(struc::BuildingStructure, params::DesignParameters;
                         t_start=nothing,
                         tc::Union{Nothing, StructuralSizer.TraceCollector} = nothing)
+    # Fail-loud guard (Run 4, Part 1) — UNIVERSAL choke point. Every BuildingDesign
+    # is materialized here: the standard design_building tail, the primitive
+    # build_design_graph -> execute_graph! -> capture_design path, and
+    # capture_incremental_design (scheduler.jl) all route through this function.
+    # The upstream wrapper guards (run_pre_sizing_validation / redesign /
+    # redesign_incremental!) give earlier, clearer errors on ergonomic paths; this
+    # is the backstop that catches the two primitive paths which bypass them. An
+    # EFFECTIVE member_group_overrides entry cannot be honored (no path here routes
+    # member sizing through size_member_group!) and would be SILENTLY IGNORED, so we
+    # refuse it. Empty / all-unset (vacuous) overrides pass unchanged, so the
+    # happy-path design stays byte-identical. NOT prepare-affecting.
+    _assert_member_group_overrides_unsupported(params)
     design = BuildingDesign(struc, params)
     if tc !== nothing
         append!(design.solver_trace, tc.events)

@@ -1930,27 +1930,43 @@ end
 # Single member-group sizing (Phase 6 catalog-override seam)
 # =============================================================================
 
+# First non-`nothing` argument (left-to-right), or `nothing` when all are unset.
+# Unlike `something`, it may return `nothing` (so it works for the strength-only
+# `deflection_limit = nothing` default), and it short-circuits.
+_first_set() = nothing
+_first_set(x, rest...) = x === nothing ? _first_set(rest...) : x
+
 """
     size_member_group!(struc, gid; catalog=StructuralSizer.all_W(),
                         material=StructuralSizer.A992_Steel,
                         member_edge_group=:beams, max_depth=Inf*u"m",
-                        resolution=200, reanalyze=true, deflection_limit=nothing)
+                        resolution=200, reanalyze=true, deflection_limit=nothing,
+                        override=nothing)
 
-Size a **single** steel `MemberGroup` (`struc.member_groups[gid]`), honouring its
-per-group `catalog_override`. This is the Phase 6 routing seam: the group's
-catalog is resolved as
+Size a **single** steel `MemberGroup` (`struc.member_groups[gid]`), honouring both
+its per-group `catalog_override` (Phase 6 seam) and an optional per-design
+[`MemberGroupSizingOverride`](@ref) passed via `override` (Run 4, Part 1 — obtained
+from `params.member_group_overrides` through
+[`resolve_member_group_override`](@ref)).
+
+Each sizing input is resolved with `_first_set` (first non-`nothing`), which
+establishes a THREE-level precedence, highest first:
 
 ```julia
-resolved_catalog = something(group.catalog_override, catalog)
+resolved_catalog          = _first_set(override.catalog, group.catalog_override, catalog)
+resolved_deflection_limit = _first_set(override.deflection_limit, deflection_limit)
+resolved_max_depth        = _first_set(override.max_depth, max_depth)
 ```
 
-so a `nothing` override reproduces sizing against the material-default `catalog`
-(byte-for-byte the pre-Phase-6 selection), while a non-`nothing` override
-restricts *this group only* to the supplied catalog. The resolved catalog is
-passed to the per-group AISC selector (`StructuralSizer.optimize_binary_search`,
-which is optimal per independent group), and the winning section is written back
-to the group, its members, and the ASAP elements — mirroring
-[`size_steel_members!`](@ref) for one group.
+So an `override === nothing` (its default) collapses to exactly the pre-Run-4
+resolution — `catalog` falls to `something(group.catalog_override, catalog)`,
+`deflection_limit`/`max_depth` to the caller's kwargs — making this call
+byte-for-byte identical to before for every existing caller. A populated
+`override` field wins over the `MemberGroup` seam and the global default for
+*this group only*. The resolved catalog is passed to the per-group AISC selector
+(`StructuralSizer.optimize_binary_search`, which is optimal per independent
+group), and the winning section is written back to the group, its members, and
+the ASAP elements — mirroring [`size_steel_members!`](@ref) for one group.
 
 The model must already be analysed (solved) so `member_group_demands` can
 envelope internal forces; this function does not add loads.
@@ -1975,6 +1991,7 @@ function size_member_group!(
     resolution::Int = 200,
     reanalyze::Bool = true,
     deflection_limit::Union{Nothing, Real} = nothing,
+    override::Union{Nothing, MemberGroupSizingOverride} = nothing,
 )
     # member_group_demands rebuilds the groups (preserving catalog_override) and
     # envelopes internal forces, so fetch the (possibly recreated) group after.
@@ -1989,15 +2006,27 @@ function size_member_group!(
     g_idx === nothing && throw(ArgumentError(
         "MemberGroup $gid has no demands in edge group :$member_edge_group"))
 
-    # Phase 6 catalog-override resolution: override wins over the material default.
-    resolved_catalog = something(group.catalog_override, catalog)
+    # Override resolution (Run 4, Part 1). Precedence, highest first:
+    #   1. the per-design `member_group_overrides[gid]` entry (`override`),
+    #   2. `MemberGroup.catalog_override` (catalog only — Phase 6 seam),
+    #   3. the caller's global default kwarg.
+    # ENGINEERING KNOBS (not published-code factors): catalog / deflection limit /
+    # max depth are sizing inputs. A `nothing` override (the default) collapses each
+    # to the pre-Run-4 resolution, so this is byte-identical for every existing call.
+    ovr_catalog = override === nothing ? nothing : override.catalog
+    ovr_defl    = override === nothing ? nothing : override.deflection_limit
+    ovr_depth   = override === nothing ? nothing : override.max_depth
+
+    resolved_catalog          = _first_set(ovr_catalog, group.catalog_override, catalog)
+    resolved_deflection_limit = _first_set(ovr_defl, deflection_limit)
+    resolved_max_depth        = _first_set(ovr_depth, max_depth)
 
     geometry = StructuralSizer.SteelMemberGeometry(
         L_totals[g_idx]; Lb=Lb_govs[g_idx], Cb=Cb_govs[g_idx],
         Kx=Kx_govs[g_idx], Ky=Ky_govs[g_idx])
 
     checker = StructuralSizer.AISCChecker(;
-        max_depth=max_depth, deflection_limit=deflection_limit)
+        max_depth=resolved_max_depth, deflection_limit=resolved_deflection_limit)
 
     result = StructuralSizer.optimize_binary_search(
         checker, [demands[g_idx]], [geometry], resolved_catalog, material)

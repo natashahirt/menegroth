@@ -139,6 +139,7 @@ export clear_geometry_caches!
 
 # --- Design types ---
 export DesignParameters, MaterialOptions, FoundationParameters
+export MemberGroupSizingOverride, resolve_member_group_override
 export BuildingDesign, SlabDesignResult, ColumnDesignResult, BeamDesignResult, FoundationDesignResult
 export PunchingDesignResult, StripReinforcementDesign, DesignSummary
 export DisplayUnits, imperial, metric, fmt

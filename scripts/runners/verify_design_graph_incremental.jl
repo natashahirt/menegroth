@@ -165,6 +165,39 @@ function build_thrust_vault(; beams = nothing)
     return struc, params
 end
 
+# Simply-supported 20 ft steel beam, solved — the ISOLATED per-group
+# `size_member_group!` path (the ONLY path that honors `member_group_overrides`).
+# Mirrors run_phase6_catalog_smoke.jl `_build_beam_struc`. NOTE: `design_building`
+# does NOT reach this path (its member stage runs batched `size_beams!` / global
+# `size_columns!` MIP / flat-plate `_reconcile_columns!`), so overrides are
+# exercised against `size_member_group!` directly, not via design_building.
+function build_override_beam_struc()
+    L_m = ustrip(u"m", 20.0u"ft")
+    skel = BuildingSkeleton{Float64}()
+    id1 = add_vertex!(skel, [0.0, 0.0, 0.0])
+    id2 = add_vertex!(skel, [L_m, 0.0, 0.0])
+    e1  = add_element!(skel, id1, id2)
+    skel.groups_edges[:beams] = [e1]
+    skel.groups_vertices[:support] = [id1, id2]
+    rebuild_geometry_cache!(skel)
+
+    struc = BuildingStructure(skel)
+    initialize_segments!(struc)
+    for seg in struc.segments
+        seg.Lb = zero(seg.L)
+    end
+    initialize_members!(struc)
+    to_asap!(struc)
+    model = struc.asap_model
+    model.nodes[id1].dof = [false, false, false, false, false, false]
+    model.nodes[id2].dof = [true,  true,  false, true,  true,  true]
+    w_si = uconvert(u"N/m", 2.8u"kip/ft")
+    push!(model.loads, Asap.LineLoad(model.elements[e1], [0.0u"N/m", 0.0u"N/m", -w_si]))
+    Asap.process!(model)
+    Asap.solve!(model)
+    return struc
+end
+
 # Prepared + synced flat-plate frame-element forces for a given `pattern_loading`.
 # Mirrors the proven fixture in test/analyze/test_pattern_loading.jl (60'×60' bays,
 # 50 psf live) — large spans + high L/D so checkerboard partitions produce a
@@ -833,6 +866,160 @@ function main()
         members_ok = false
     end
     record!(":members target (covers all slab roots) is accepted", members_ok)
+
+    # ── [12] RUN 4, PART 1: member_group_overrides infrastructure ─────────────
+    # HONEST SCOPE: `member_group_overrides` is honored ONLY on the isolated
+    # per-group `size_member_group!` path. `design_building`'s member stage runs
+    # batched `size_beams!` / global `size_columns!` MIP / flat-plate
+    # `_reconcile_columns!`, none of which route through `size_member_group!`, so
+    # it CANNOT honor an override. Rather than silently ignore it, `design_building`
+    # now FAILS LOUD: a non-empty `member_group_overrides` raises an `ArgumentError`
+    # (guard in `run_pre_sizing_validation`, which every `design_building` and
+    # `DesignSession`/engine construction runs); the empty (default) case is
+    # byte-identical. Fine per-beam-group incremental nodes (Part 2) are therefore
+    # NOT shipped — they would only be verifiable if a group were sized independently,
+    # which this codebase's `design_building` never does. We prove the override
+    # MECHANISM directly on `size_member_group!` (non-vacuous), plus the fail-loud
+    # guard on `design_building` (the honest evidence of the Part-1 limitation).
+    println("\n[12] Run 4 Part 1: member_group_overrides on size_member_group! (non-vacuous)")
+    custom2 = [SR.W("W21X44"), SR.W("W24X68")]
+    custom_names = Set(s.name for s in custom2)
+
+    # default empty + resolve lookup
+    record!("DesignParameters default member_group_overrides empty",
+            isempty(DesignParameters().member_group_overrides))
+    ovr_probe = MemberGroupSizingOverride(catalog = custom2)
+    params_probe = DesignParameters(
+        member_group_overrides = Dict{UInt64, MemberGroupSizingOverride}(UInt64(7) => ovr_probe))
+    record!("resolve_member_group_override: present gid → entry, absent → nothing",
+            resolve_member_group_override(params_probe, UInt64(7)) === ovr_probe &&
+            resolve_member_group_override(params_probe, UInt64(999)) === nothing)
+
+    # non-vacuous: override picks a DIFFERENT section than no override
+    struc_ov0 = build_override_beam_struc()
+    build_member_groups!(struc_ov0; member_type = :beams)
+    gid_ov0 = first(keys(struc_ov0.member_groups))
+    size_member_group!(struc_ov0, gid_ov0; member_edge_group = :beams,
+                       material = A992_Steel, reanalyze = true)
+    free_name = struc_ov0.member_groups[gid_ov0].section.name
+
+    struc_ov1 = build_override_beam_struc()
+    build_member_groups!(struc_ov1; member_type = :beams)
+    gid_ov1 = first(keys(struc_ov1.member_groups))
+    params_ov = DesignParameters(
+        member_group_overrides = Dict{UInt64, MemberGroupSizingOverride}(
+            gid_ov1 => MemberGroupSizingOverride(catalog = custom2)))
+    size_member_group!(struc_ov1, gid_ov1; member_edge_group = :beams,
+                       material = A992_Steel, reanalyze = true,
+                       override = resolve_member_group_override(params_ov, gid_ov1))
+    ov_name = struc_ov1.member_groups[gid_ov1].section.name
+    record!("override changes sized section (got free=$free_name, override=$ov_name)",
+            free_name ∉ custom_names && ov_name ∈ custom_names && ov_name != free_name)
+
+    # precedence: override > MemberGroup.catalog_override > global default
+    struc_pr = build_override_beam_struc()
+    build_member_groups!(struc_pr; member_type = :beams)
+    gid_pr = first(keys(struc_pr.member_groups))
+    struc_pr.member_groups[gid_pr].catalog_override = [SR.W("W24X68")]  # would give W24X68
+    size_member_group!(struc_pr, gid_pr; member_edge_group = :beams,
+                       material = A992_Steel, reanalyze = true,
+                       override = MemberGroupSizingOverride(catalog = [SR.W("W21X44")]))
+    record!("precedence: override beats MemberGroup.catalog_override",
+            struc_pr.member_groups[gid_pr].section.name == "W21X44")
+
+    # (a) EMPTY (default): design_building runs; an explicit-empty dict is
+    #     byte-identical to the plain default (the field/guard changed nothing on
+    #     the happy path).
+    struc_e0, base_e0 = build_flat_plate()
+    des_default = design_building(struc_e0, base_e0)
+    struc_e1, base_e1 = build_flat_plate()
+    base_e1.member_group_overrides = Dict{UInt64, MemberGroupSizingOverride}()  # explicit empty
+    des_empty = design_building(struc_e1, base_e1)
+    ok_np, bad_np = same_signature(design_signature(des_default), design_signature(des_empty))
+    record!("design_building: explicit-empty member_group_overrides byte-identical to default (mismatch: $bad_np)", ok_np)
+
+    # Message-pinned guard check (P2b): the ArgumentError must be the
+    # member_group_overrides guard, not any unrelated ArgumentError.
+    guard_threw(f) = try
+        f(); false
+    catch err
+        err isa ArgumentError && occursin("member_group_overrides", sprint(showerror, err))
+    end
+
+    # (a2) POPULATED-but-VACUOUS (P2a): a dict whose only entry is all-unset is a
+    #      DOCUMENTED no-op (MemberGroupSizingOverride docstring). It must NOT throw
+    #      and design_building must be BYTE-IDENTICAL to the default (guard/docstring
+    #      consistency — only EFFECTIVE overrides are refused).
+    struc_vac, base_vac = build_flat_plate()
+    base_vac.member_group_overrides = Dict{UInt64, MemberGroupSizingOverride}(
+        UInt64(1) => MemberGroupSizingOverride())  # all fields nothing
+    des_vac = design_building(struc_vac, base_vac)  # must NOT throw
+    ok_vac, bad_vac = same_signature(design_signature(des_default), design_signature(des_vac))
+    record!("design_building: all-unset member_group_overrides is a no-op, byte-identical (mismatch: $bad_vac)",
+            !SS._is_effective(base_vac.member_group_overrides[UInt64(1)]) && ok_vac)
+
+    # (b) NON-EMPTY EFFECTIVE (real gid, real override): design_building REFUSES it
+    #     (fail-loud ArgumentError, message-pinned) rather than silently returning a
+    #     default-catalog design — the coarse pipeline cannot route the override
+    #     through size_member_group!.
+    struc_e2, base_e2 = build_flat_plate()
+    base_e2.member_group_overrides = Dict{UInt64, MemberGroupSizingOverride}(
+        UInt64(1) => MemberGroupSizingOverride(catalog = [SR.W("W21X44")],
+                                               deflection_limit = 1/480))
+    record!("design_building throws guard ArgumentError on effective member_group_overrides",
+            guard_threw(() -> design_building(struc_e2, base_e2)))
+
+    # (b2) PATH-COMPLETE (P1): the exported design-producing VARIATION entry points
+    #      (redesign / vary / redesign_incremental!) must ALSO refuse an effective
+    #      override injected as a variation kwarg — the sweep door never re-enters
+    #      run_pre_sizing_validation, and its graph never calls size_member_group!, so
+    #      an unguarded effective override yields an empty dirty frontier + a silently
+    #      UNCHANGED design. Each must throw the SAME guard (message-pinned).
+    eff_ovr = Dict{UInt64, MemberGroupSizingOverride}(
+        UInt64(1) => MemberGroupSizingOverride(catalog = [SR.W("W21X44")]))
+    struc_rd, base_rd = build_flat_plate()
+    session_rd = DesignSession(struc_rd, base_rd)  # clean base (no override)
+    record!("redesign throws guard ArgumentError on effective member_group_overrides",
+            guard_threw(() -> redesign(session_rd; member_group_overrides = eff_ovr)))
+    record!("vary throws guard ArgumentError on effective member_group_overrides",
+            guard_threw(() -> vary(session_rd, (; member_group_overrides = eff_ovr))))
+    struc_ri, base_ri = build_flat_plate()
+    engine_ri = prepare_engine(struc_ri, base_ri)
+    variant_ri = SS.with(base_ri; member_group_overrides = eff_ovr)
+    record!("redesign_incremental! throws guard ArgumentError on effective member_group_overrides",
+            guard_threw(() -> redesign_incremental!(engine_ri, variant_ri)))
+
+    # (b3) PRIMITIVE PATH 1 (Run 4, Part 1 backstop): the low-level chain
+    #      build_design_graph -> execute_graph! -> capture_design bypasses
+    #      run_pre_sizing_validation, but capture_design is the UNIVERSAL choke point
+    #      that materializes every BuildingDesign. Prepare/build/execute on a CLEAN
+    #      base, then hand an effective override to capture_design — it must throw.
+    struc_g, base_g = build_flat_plate()
+    prepare!(struc_g, base_g)
+    graph_g = build_design_graph(struc_g, base_g)
+    execute_graph!(graph_g, struc_g, base_g)
+    params_g = SS.with(base_g; member_group_overrides = eff_ovr)
+    record!("capture_design (primitive graph path) throws guard on effective member_group_overrides",
+            guard_threw(() -> capture_design(struc_g, params_g)))
+
+    # (b4) PRIMITIVE PATH 2: manual run_target! + capture_incremental_design routes
+    #      through capture_design. Run the engine to terminal on a CLEAN base, then
+    #      capture with the effective override — the choke point must throw.
+    struc_t, base_t = build_flat_plate()
+    engine_t = prepare_engine(struc_t, base_t)
+    run_target!(engine_t, base_t)
+    params_t = SS.with(base_t; member_group_overrides = eff_ovr)
+    record!("capture_incremental_design (primitive run_target! path) throws guard on effective member_group_overrides",
+            guard_threw(() -> capture_incremental_design(engine_t, params_t)))
+
+    # not prepare-affecting, not in any node slice → empty dirty frontier.
+    struc_fr, base_fr = build_flat_plate()
+    session_fr = DesignSession(struc_fr, base_fr)
+    fr_ovr = Dict{UInt64, MemberGroupSizingOverride}(
+        UInt64(1) => MemberGroupSizingOverride(catalog = [SR.W("W21X44")]))
+    record!("member_group_overrides change → empty dirty frontier, not prepare-affecting",
+            isempty(dirty_frontier(session_fr; member_group_overrides = fr_ovr)) &&
+            !requires_new_engine(session_fr; member_group_overrides = fr_ovr))
 
     # ── Summary ──────────────────────────────────────────────────────────────
     println("\n" * "="^70)

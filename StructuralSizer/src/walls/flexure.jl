@@ -265,9 +265,11 @@ scale steel strength by ~7×10⁶ and produce a dangerously unconservative
 capacity. There is exactly one accepted spelling, and it carries its unit.
 """
 function _wall_flexure_materials(material; fy=nothing, Es=nothing)
+    # Shared by the in-plane P–M and out-of-plane §11.8 checks, so the messages
+    # stay function-agnostic.
     function _to_pa(x, name)
         x isa Unitful.Pressure && return ustrip(u"Pa", x)
-        error("check_wall_inplane_flexure: `$name` must be a Unitful pressure " *
+        error("wall flexure materials: `$name` must be a Unitful pressure " *
               "(e.g. 60u\"ksi\"), not a bare number, to avoid a ksi/Pa unit mismatch.")
     end
     if material isa ReinforcedConcreteMaterial
@@ -277,8 +279,8 @@ function _wall_flexure_materials(material; fy=nothing, Es=nothing)
         return (fc, fyP, EsP)
     else
         fc = ustrip(u"Pa", material.fc′)
-        fy === nothing && error("check_wall_inplane_flexure: a plain Concrete needs `fy=` (vertical rebar yield, Unitful).")
-        Es === nothing && error("check_wall_inplane_flexure: a plain Concrete needs `Es=` (rebar modulus, Unitful).")
+        fy === nothing && error("wall flexure materials: a plain Concrete needs `fy=` (vertical rebar yield, Unitful).")
+        Es === nothing && error("wall flexure materials: a plain Concrete needs `Es=` (rebar modulus, Unitful).")
         return (fc, _to_pa(fy, "fy"), _to_pa(Es, "Es"))
     end
 end

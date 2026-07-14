@@ -270,8 +270,13 @@ s1o &= w_compare("Axial stress Pu/Ag", g.σ_axial/PSI, 38.66; tol=2e-2, unit="ps
 gates_ok = g.gate_b && g.gate_c && g.gate_d && g.gate_e && g.applicable
 println("    gates (b) TC · (c) φMn≥Mcr · (d) axial · (e) Δs ..... ", _mark(gates_ok))
 s1o &= gates_ok
+# Service loads supplied so the mandatory §11.8.1.1(e) Δs≤lc/150 gate is checked
+# end-to-end (ws reproduces the documented Msa=20.32 kip-ft; Pa=7.20 k roof DL).
+op_Pa = 7.20 * KIP
+op_ws = (op_Msa - op_Pa * op_e / 2) * 8 / op_lc^2
 chko = check_wall_out_of_plane_slender(RC_4000_60, op_b*u"m", op_h*u"m", op_d*u"m",
-           op_lc*u"m", op_e*u"m", op_As*u"m^2", op_Pua*u"N", op_Pum*u"N", op_wu*u"N/m")
+           op_lc*u"m", op_e*u"m", op_As*u"m^2", op_Pua*u"N", op_Pum*u"N", op_wu*u"N/m";
+           ws=op_ws*u"N/m", Pa=op_Pa*u"N", Ps=op_Ps*u"N")
 println("    CheckResult clause ................................... ", chko.code_clause)
 @printf("    Mu=%.1f kip-ft  φMn=%.1f kip-ft  utilization=%.3f  %s\n",
         chko.demand/KIPFT, chko.capacity/KIPFT, chko.ratio, _mark(chko.passed))

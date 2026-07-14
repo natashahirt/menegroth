@@ -228,8 +228,13 @@ applicability gates, and returns a `CheckResult`:
   `"ACI 318-19 11.8"`.
 
 Provide the service loads `ws` (service lateral line load), `Pa` (service axial
-at top) and `Ps` (service axial at mid-height) to enforce gate (e), the
-`Δs ≤ lc/150` serviceability limit; omit them to skip only that gate.
+at top) and `Ps` (service axial at mid-height) to enforce gate (e), the mandatory
+`Δs ≤ lc/150` serviceability limit (§11.8.1.1(e)/§11.8.4.1). If the service
+iteration does not converge the check FAILS (clause `"ACI 318-19 11.8.4.1"`)
+rather than trusting an unbounded `Δs`. If the service loads are omitted the
+limit CANNOT be checked: the check emits a `@warn` and the returned `name` flags
+that gate (e) was not verified (the result then covers strength + the other
+applicability gates only — never a silent full pass).
 (corpus: sp-de-tilt-up-wall-aci19)
 """
 function check_wall_out_of_plane_slender(material, b, h, d, lc, e, As,
@@ -253,7 +258,9 @@ function check_wall_out_of_plane_slender(material, b, h, d, lc, e, As,
                            Inf, Pum_N, 0.75 * str.Kb, "ACI 318-19 11.8.3.1")
     end
 
-    # Service deflection (gate e), only if service loads are supplied.
+    # Service out-of-plane deflection — §11.8.1.1(e) / §11.8.4.1 (Δs ≤ lc/150).
+    # This mandatory serviceability limit can only be evaluated from SERVICE-level
+    # loads, which are distinct from the factored Pua/Pum/wu driving strength.
     Δs = nothing
     if ws !== nothing && Pa !== nothing && Ps !== nothing
         ws_N = ws isa Unitful.Quantity ? ustrip(u"N/m", ws) : Float64(ws)
@@ -261,7 +268,19 @@ function check_wall_out_of_plane_slender(material, b, h, d, lc, e, As,
         Msa  = ws_N * lcm^2 / 8 + Pa_N * em / 2
         svc  = oop_service_deflection_si(Msa, Ps_N, str.Mcr, str.Mn,
                                          str.Ec, str.Ig, str.Icr, lcm)
+        # A non-converged bilinear / P-Δ service iteration cannot be trusted to
+        # bound Δs — refuse rather than pass on a possibly-too-small deflection.
+        if !svc.converged
+            return CheckResult("out-of-plane slender wall: service deflection did not converge",
+                               false, Inf, svc.Δs, lcm / 150, "ACI 318-19 11.8.4.1")
+        end
         Δs = svc.Δs
+    else
+        # Without service loads the §11.8.1.1(e) limit cannot be checked. Never
+        # pass silently: warn loudly and flag it in the result name below.
+        @warn "check_wall_out_of_plane_slender: service loads (ws, Pa, Ps) not supplied — " *
+              "ACI 318-19 §11.8.1.1(e) service deflection (Δs ≤ lc/150) NOT verified; result " *
+              "reflects strength + the remaining applicability gates only."
     end
 
     gates = oop_slender_wall_gates(str, fc, bm, hm, lcm, Pum_N; Δs=Δs)
@@ -284,10 +303,13 @@ function check_wall_out_of_plane_slender(material, b, h, d, lc, e, As,
                            Δs / (lcm / 150), Δs, lcm / 150, "ACI 318-19 11.8.1.1(e)")
     end
 
-    # Strength check: φMn ≥ Mu (second-order).
+    # Strength check: φMn ≥ Mu (second-order). The name flags the case where the
+    # §11.8.1.1(e) service-deflection limit was not verified (no service loads).
     ratio = str.Mu / max(str.φMn, 1e-9)
-    return CheckResult("out-of-plane slender wall (P-Δ)", ratio ≤ 1.0, ratio,
-                       str.Mu, str.φMn, "ACI 318-19 11.8")
+    name  = Δs === nothing ?
+        "out-of-plane slender wall (P-Δ; §11.8.1.1(e) service Δs NOT verified)" :
+        "out-of-plane slender wall (P-Δ)"
+    return CheckResult(name, ratio ≤ 1.0, ratio, str.Mu, str.φMn, "ACI 318-19 11.8")
 end
 
 # Length/force coercion helpers (Unitful quantity or bare SI number → SI Float).

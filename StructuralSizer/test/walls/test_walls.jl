@@ -261,12 +261,29 @@ end
     @test isapprox(g.σ_limit / _PSI, 240.0; rtol=1e-9)
     @test g.gate_b && g.gate_c && g.gate_d && g.gate_e && g.applicable
 
-    # Demand-coupled CheckResult (Unitful public API): φMn=95.89 > Mu=61.00 ⇒ pass.
+    # Demand-coupled CheckResult (Unitful public API) WITH service loads, so the
+    # mandatory §11.8.1.1(e) Δs≤lc/150 gate is exercised end-to-end: φMn=95.89 >
+    # Mu=61.00 and Δs=0.247 ≤ 2.36 in ⇒ pass. The service wind ws is set to
+    # reproduce the documented Msa=20.32 kip-ft from ws·lc²/8 + Pa·e/2 with the
+    # documented Pa=7.20 kip (roof service dead load).
+    op_Pa = 7.20 * _KIP                                    # service axial at top
+    op_ws = ((20.32 * KIPFT) - op_Pa * e / 2) * 8 / lc^2   # ⇒ Msa = 20.32 kip-ft
     chk = check_wall_out_of_plane_slender(RC_4000_60, b*u"m", h*u"m", d*u"m",
-              lc*u"m", e*u"m", As*u"m^2", Pua*u"N", Pum*u"N", wu*u"N/m")
+              lc*u"m", e*u"m", As*u"m^2", Pua*u"N", Pum*u"N", wu*u"N/m";
+              ws=op_ws*u"N/m", Pa=op_Pa*u"N", Ps=Ps*u"N")
     @test chk.passed
     @test isapprox(chk.ratio, 61.00 / 95.89; atol=0.03)
     @test chk.code_clause == "ACI 318-19 11.8"
+    @test chk.name == "out-of-plane slender wall (P-Δ)"    # gate (e) verified
+
+    # Fail-safe: omitting service loads must NOT silently pass gate (e). The check
+    # warns and the result name flags §11.8.1.1(e) as unverified (strength still
+    # governs; never a silent full pass).
+    chk_ns = @test_logs (:warn,) match_mode=:any check_wall_out_of_plane_slender(
+                 RC_4000_60, b*u"m", h*u"m", d*u"m", lc*u"m", e*u"m", As*u"m^2",
+                 Pua*u"N", Pum*u"N", wu*u"N/m")
+    @test occursin("NOT verified", chk_ns.name)
+    @test chk_ns.code_clause == "ACI 318-19 11.8"
 end
 
 @testset "out-of-plane slender wall — applicability gates as a safety boundary" begin

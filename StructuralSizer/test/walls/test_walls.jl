@@ -221,6 +221,95 @@ end
     @test over.φMn == 0.0
 end
 
+@testset "spWall worked example — out-of-plane slender wall (ACI 318-19 §11.8)" begin
+    # StructurePoint "Reinforced Concrete Tilt-Up Wall Panel (ACI 318-19)"
+    # (corpus: sp-de-tilt-up-wall-aci19). §11.8 alternative method, per 15-ft
+    # design strip: f'c=4000 psi, fy=60 ksi, h=6.25 in, lc=29.5 ft, e=3.0 in,
+    # As=7.04 in² (16 #6, single central layer), d=3.13 in.
+    # Reported: Ase=7.76 in², c=0.896 in, Icr=353.56 in⁴, Kb=97.64 kip,
+    #   Mua=24.77, Mu=61.00, Mcr=46.32, φMn=95.89 kip-ft, Δu=9.995 in, Δs=0.247 in.
+    fc = 4000 * _PSI; fy = 60_000 * _PSI; Es = 29e6 * _PSI
+    b  = 180 * _IN;   h = 6.25 * _IN;  d = 3.13 * _IN
+    lc = 29.5 * _FT;  e = 3.0 * _IN;   As = 7.04 * _IN^2
+    Pua = 20.64 * _KIP; Pum = 43.49 * _KIP; wu = 0.204 * _KIP / _FT
+    KIPFT = _KIP * 12 * _IN
+
+    s = oop_slender_wall_strength_si(fc, fy, Es, b, h, d, lc, e, As, Pua, Pum, wu)
+    @test isapprox(s.Ase / _IN^2, 7.76;   rtol=1e-2)          # §R11.8.3.1 effective steel
+    @test isapprox(s.c   / _IN,   0.896;  rtol=2e-2)          # neutral axis
+    @test isapprox(s.Icr / _IN^4, 353.56; rtol=2e-2)          # §11.8.3.1(c)
+    @test isapprox(s.Kb  / _KIP,  97.64;  rtol=2e-2)          # 48·Ec·Icr/(5·lc²)
+    @test isapprox(s.Mua / KIPFT, 24.77;  rtol=1e-2)          # first-order (§11.8.3.1)
+    @test isapprox(s.Mu  / KIPFT, 61.00;  rtol=2e-2)          # magnified (Eq. 11.8.3.1(d))
+    @test isapprox(s.Mcr / KIPFT, 46.32;  rtol=1e-2)          # §24.2.3.5
+    @test isapprox(s.φMn / KIPFT, 95.89;  rtol=1e-2)          # tension-controlled
+    @test isapprox(s.Δu  / _IN,   9.995;  rtol=2e-2)          # §11.8.3.1(b)
+    @test s.tension_controlled && s.φ == 0.90 && s.stable
+    @test s.φMn > s.Mu && s.φMn > s.Mcr                       # gates (b)+(c) satisfied
+
+    # Service mid-height deflection (bilinear, Table 11.8.4.1): Msa=20.32 ft-kip,
+    # Ps=26.24 kip ⇒ Δcr=0.550 in, Δs=0.247 in (≤ lc/150 = 2.36 in).
+    Msa = 20.32 * KIPFT; Ps = 26.24 * _KIP
+    svc = oop_service_deflection_si(Msa, Ps, s.Mcr, s.Mn, s.Ec, s.Ig, s.Icr, lc)
+    @test isapprox(svc.Δcr / _IN, 0.550; rtol=2e-2)
+    @test isapprox(svc.Δs  / _IN, 0.247; rtol=5e-2)
+    @test svc.converged && svc.Δs ≤ lc / 150
+
+    # Applicability gates: §11.8.1.1(d) Pu ≤ 0.06 f'c Ag (38.66 ≤ 240 psi) → all hold.
+    g = oop_slender_wall_gates(s, fc, b, h, lc, Pum; Δs=svc.Δs)
+    @test isapprox(g.σ_axial / _PSI, 38.66; rtol=2e-2)
+    @test isapprox(g.σ_limit / _PSI, 240.0; rtol=1e-9)
+    @test g.gate_b && g.gate_c && g.gate_d && g.gate_e && g.applicable
+
+    # Demand-coupled CheckResult (Unitful public API): φMn=95.89 > Mu=61.00 ⇒ pass.
+    chk = check_wall_out_of_plane_slender(RC_4000_60, b*u"m", h*u"m", d*u"m",
+              lc*u"m", e*u"m", As*u"m^2", Pua*u"N", Pum*u"N", wu*u"N/m")
+    @test chk.passed
+    @test isapprox(chk.ratio, 61.00 / 95.89; atol=0.03)
+    @test chk.code_clause == "ACI 318-19 11.8"
+end
+
+@testset "out-of-plane slender wall — applicability gates as a safety boundary" begin
+    fc = 4000 * _PSI; fy = 60_000 * _PSI; Es = 29e6 * _PSI
+    b  = 180 * _IN;   h = 6.25 * _IN;  d = 3.13 * _IN
+    lc = 29.5 * _FT;  e = 3.0 * _IN
+    Pua = 20.64 * _KIP; Pum = 43.49 * _KIP; wu = 0.204 * _KIP / _FT
+
+    # A SHORT panel (lc = 10 ft) keeps Kb high enough that the P-Δ magnifier is
+    # stable, so the softer applicability gates below govern in isolation (on a
+    # tall panel these same demands trip the more fundamental instability gate
+    # first — see the P-Δ case).
+    lc_short = 10 * _FT
+
+    # (c) φMn < Mcr: too little steel ⇒ design strength below cracking ⇒ FAIL,
+    # never a silent pass. As = 1.0 in² (≪ 7.04) drops φMn under Mcr.
+    chk_c = check_wall_out_of_plane_slender(RC_4000_60, b*u"m", h*u"m", d*u"m",
+                lc_short*u"m", e*u"m", (1.0*_IN^2)u"m^2", Pua*u"N", Pum*u"N", wu*u"N/m")
+    @test !chk_c.passed
+    @test chk_c.code_clause == "ACI 318-19 11.8.1.1(c)"
+
+    # (b) not tension-controlled: high axial deepens the neutral axis so εt drops
+    # below εty+0.003 ⇒ the §11.8 method is inapplicable ⇒ FAIL.
+    chk_b = check_wall_out_of_plane_slender(RC_4000_60, b*u"m", h*u"m", d*u"m",
+                lc_short*u"m", e*u"m", (7.04*_IN^2)u"m^2", Pua*u"N", (300*_KIP)u"N", wu*u"N/m")
+    @test !chk_b.passed
+    @test chk_b.code_clause == "ACI 318-19 11.8.1.1(b)"
+
+    # P-Δ instability: a very tall panel drives Pum → 0.75·Kb, the magnifier
+    # denominator ≤ 0 ⇒ runaway second-order moment ⇒ FAIL (not Inf masquerading
+    # as capacity).
+    chk_pd = check_wall_out_of_plane_slender(RC_4000_60, b*u"m", h*u"m", d*u"m",
+                (100.0*_FT)u"m", e*u"m", (7.04*_IN^2)u"m^2", Pua*u"N", Pum*u"N", wu*u"N/m")
+    @test !chk_pd.passed
+    @test chk_pd.code_clause == "ACI 318-19 11.8.3.1"
+
+    # Unit-safety guard (shared with the P–M check): a plain Concrete needs
+    # Unitful fy/Es; bare numbers are rejected.
+    conc = Concrete(25e9u"Pa", (fc)u"Pa", 2400u"kg/m^3", 0.2, 0.1)
+    @test_throws ErrorException check_wall_out_of_plane_slender(conc, b*u"m", h*u"m",
+                d*u"m", lc*u"m", e*u"m", (7.04*_IN^2)u"m^2", Pua*u"N", Pum*u"N", wu*u"N/m")
+end
+
 @testset "reduced diaphragm: symmetric core (S2)" begin
     k = 1e7
     walls = [WallLine(1, 0.0, -5.0, 0.0, k, 1), WallLine(2, 0.0, 5.0, 0.0, k, 1),

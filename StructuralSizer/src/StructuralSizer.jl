@@ -391,6 +391,10 @@ export wall_phi_flexure, wall_axial_flexure_capacity_si, wall_pure_axial_capacit
 export wall_pm_at_c_si, wall_moment_capacity_at_axial_si
 export check_wall_inplane_flexure, wall_pm_diagram
 
+# --- Structural walls: ACI out-of-plane / slender wall §11.8 (S1) ---
+export oop_slender_wall_strength_si, oop_service_deflection_si
+export oop_slender_wall_gates, check_wall_out_of_plane_slender
+
 # --- Structural walls: lateral evaluators (S2 reduced, S3 FEM) ---
 export AbstractLateralEvaluator, evaluate_lateral
 export WallLine, StoryLoad, LateralResult

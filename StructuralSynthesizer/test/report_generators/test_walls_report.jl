@@ -225,6 +225,62 @@ w_note("Reproduces the spWall Cardenas hand calc to <0.2%. CheckResult guards: �
 w_note("(Nu ≤ φ·0.80·P0) + governing moment = conservative min(Cardenas, strain-compat) in all regimes.")
 
 # ═══════════════════════════════════════════════════════════════════════════
+# 3P. S1 — ACI 318-19 §11.8 out-of-plane slender wall (alternative method)
+# ═══════════════════════════════════════════════════════════════════════════
+w_section_header("3P.0  S1 — ACI 318-19 §11.8 Out-of-Plane Slender Wall (P-Δ)")
+w_note("Second-order (P-Δ) moment magnification, Mcr, φMn, bilinear service deflection + §11.8.1.1 gates.")
+
+w_sub_header("3P.1  spWall tilt-up worked example — corpus known-answer (sp-de-tilt-up-wall-aci19)")
+w_note("15-ft strip: h=6.25 in, lc=29.5 ft, e=3.0 in, As=7.04 in² (#6@11¼\"), f'c=4000 psi, fy=60 ksi")
+w_note("Demand: Pua=20.64 k, Pum=43.49 k, wu=0.204 k/ft ⇒ magnified Mu (Eq. 11.8.3.1(d))")
+w_table_head("spWall tilt-up")
+s1o = true
+op_b  = 180 * IN;    op_h  = 6.25 * IN;   op_d  = 3.13 * IN
+op_lc = 29.5 * FT;   op_e  = 3.0 * IN;    op_As = 7.04 * IN^2
+op_Pua = 20.64 * KIP; op_Pum = 43.49 * KIP; op_wu = 0.204 * KIP / FT
+KIPFT = KIP * 12 * IN
+so = oop_slender_wall_strength_si(sp_fc, sp_fy, 29.0e6*PSI, op_b, op_h, op_d,
+                                  op_lc, op_e, op_As, op_Pua, op_Pum, op_wu)
+s1o &= w_compare("Effective steel Ase", so.Ase/IN^2, 7.76; tol=1e-2, unit="in²")
+s1o &= w_compare("Neutral axis c", so.c/IN, 0.896; tol=2e-2, unit="in")
+s1o &= w_compare("Cracked inertia Icr", so.Icr/IN^4, 353.56; tol=2e-2, unit="in⁴")
+s1o &= w_compare("Stiffness Kb=48EcIcr/5lc²", so.Kb/KIP, 97.64; tol=2e-2, unit="kip")
+s1o &= w_compare("First-order Mua", so.Mua/KIPFT, 24.77; tol=1e-2, unit="kip-ft")
+s1o &= w_compare("Magnified Mu (P-Δ)", so.Mu/KIPFT, 61.00; tol=2e-2, unit="kip-ft")
+s1o &= w_compare("Cracking moment Mcr", so.Mcr/KIPFT, 46.32; tol=1e-2, unit="kip-ft")
+s1o &= w_compare("Design φMn (φ=0.90)", so.φMn/KIPFT, 95.89; tol=1e-2, unit="kip-ft")
+s1o &= w_compare("Mid-height Δu", so.Δu/IN, 9.995; tol=2e-2, unit="in")
+tco = so.tension_controlled && so.φ == 0.90 && so.stable
+println("    tension-controlled & φ=0.90 & P-Δ stable ........... ", _mark(tco))
+s1o &= tco
+
+w_sub_header("3P.2  Service out-of-plane deflection (bilinear, Table 11.8.4.1)")
+op_Msa = 20.32 * KIPFT; op_Ps = 26.24 * KIP
+svc = oop_service_deflection_si(op_Msa, op_Ps, so.Mcr, so.Mn, so.Ec, so.Ig, so.Icr, op_lc)
+s1o &= w_compare("Cracking deflection Δcr", svc.Δcr/IN, 0.550; tol=2e-2, unit="in")
+s1o &= w_compare("Service deflection Δs", svc.Δs/IN, 0.247; tol=5e-2, unit="in")
+serv_ok = svc.converged && svc.Δs ≤ op_lc / 150
+@printf("    Δs = %.3f in  ≤  lc/150 = %.2f in  (§11.8.4.1)  %s\n",
+        svc.Δs/IN, (op_lc/150)/IN, _mark(serv_ok))
+s1o &= serv_ok
+
+w_sub_header("3P.3  §11.8.1.1 applicability gates + demand-coupled CheckResult")
+g = oop_slender_wall_gates(so, sp_fc, op_b, op_h, op_lc, op_Pum; Δs=svc.Δs)
+s1o &= w_compare("Axial stress Pu/Ag", g.σ_axial/PSI, 38.66; tol=2e-2, unit="psi (≤ 0.06f'c=240)")
+gates_ok = g.gate_b && g.gate_c && g.gate_d && g.gate_e && g.applicable
+println("    gates (b) TC · (c) φMn≥Mcr · (d) axial · (e) Δs ..... ", _mark(gates_ok))
+s1o &= gates_ok
+chko = check_wall_out_of_plane_slender(RC_4000_60, op_b*u"m", op_h*u"m", op_d*u"m",
+           op_lc*u"m", op_e*u"m", op_As*u"m^2", op_Pua*u"N", op_Pum*u"N", op_wu*u"N/m")
+println("    CheckResult clause ................................... ", chko.code_clause)
+@printf("    Mu=%.1f kip-ft  φMn=%.1f kip-ft  utilization=%.3f  %s\n",
+        chko.demand/KIPFT, chko.capacity/KIPFT, chko.ratio, _mark(chko.passed))
+s1o &= chko.passed && chko.code_clause == "ACI 318-19 11.8"
+_w_status["S1 out-of-plane slender (§11.8)"] = _mark(s1o)
+w_note("Reproduces the spWall tilt-up P-Δ hand calc to <2%. Applicability gates are a HARD safety")
+w_note("boundary: non-TC, φMn<Mcr, Pu>0.06f'cAg, Δs>lc/150, or P-Δ instability ⇒ method refused (fail-safe).")
+
+# ═══════════════════════════════════════════════════════════════════════════
 # 4. S2 — Reduced rigid-diaphragm distribution
 # ═══════════════════════════════════════════════════════════════════════════
 w_section_header("4.0  S2 — Reduced Rigid-Diaphragm Distribution (3 DOF/story)")
@@ -367,14 +423,15 @@ w_sub_header("7.1  Implemented")
 println("    S1  Analytic in-plane stiffness (ACI eff. inertia), linear in t, analytic ∂k/∂t")
 println("    S1  ACI 318-19 §11.5.4.3 in-plane shear + §11.6.2 min reinf, demand-decoupled")
 println("    S1  ACI 318-19 §22.2 in-plane axial–flexure P–M: Cardenas closed form + strain-compat diagram")
+println("    S1  ACI 318-19 §11.8 out-of-plane slender wall: second-order P-Δ, Mcr, bilinear Δs, §11.8.1.1 gates")
 println("    S2  ReducedDiaphragmEvaluator: 3 DOF/story, rank-1/wall, skew + torsion, analytic sensitivities")
 println("    S3  FEMLateralEvaluator: Asap ShellTri3 walls + stiff diaphragm, exact base-story shear via reactions")
     println("    S4  WallLayoutNLPProblem (SIMP density) · MinCarbon/MinDrift/Weighted · IPOPT (existing solver)")
 
 w_sub_header("7.2  Current limitations & future work")
 println("    1. Shear (§11.5.4), αc, 8√f'c·Acv cap, §11.6.2 min reinf, 0.70/0.35 stiffness: reconciled vs corpus ✓")
-println("    2. S1: in-plane axial-flexure P–M reconciled vs spWall ✓; special boundary elements (§18.10.6) still")
-println("       deferred — canon absent from corpus (HARD STOP, todo-w0000010); out-of-plane/slender walls pending")
+println("    2. S1: in-plane P–M + out-of-plane §11.8 slender wall reconciled vs spWall ✓; special boundary")
+println("       elements (§18.10.6) deferred — canon absent from corpus (HARD STOP, todo-w0000010)")
 println("    3. S2: real demand generation (ASCE 7 wind + seismic ELF) + W/E load cases not wired")
 println("    4. S3: multi-story upper-panel shear recovery uses Nxy first-cut (base story exact); no P-delta yet")
 println("    5. S4: candidate ground-structure generation from real building geometry not yet automated")

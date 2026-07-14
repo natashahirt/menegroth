@@ -38,29 +38,47 @@ equations OCR-garble), so the equation-fabrication safety rule applies.
 Also **staged** (awaiting the PDFs you're downloading): `asce-7-16`, `asce-7-22`
 under a new `asce` family.
 
-## 2. Extraction run (in progress)
+## 2. Extraction run — extractors DONE, commit BLOCKED on ZK MCP
 
 `create_extraction_graph` → **run-d3306fbe**: 11 ACI beam+slab worked examples,
 synthesis_label `aci-318` → **reused the existing `aci-318-canon` spine**
 (`missing_dims: []`, `partial: false` — no re-scaffold, so these examples join
 the same canon as the footings). 35 tasks; extractors fan out 4 at a time.
 
-**Reliability note (scribe path):** the coordinator assigns scribe tasks
-`composer-2.5-fast` — the model that stalled on the AISC mega-slice — and a
-conservative whole-workspace write lease. A **live foreign engineer run**
-(`run-94212eb2`, editing flat-plate FEA) holds a workspace lease, so the scribe
-`claim_task` is blocked (same friction as the footings). Resolution: commit
-directly through the zettelkasten MCP (per-graph locking, no workspace lease, no
-real disk conflict since scribes only touch `.zettelkasten/`), spawning scribe
-subagents on **`claude-sonnet-5-thinking-high`** instead of composer. The
-`create_extraction_graph` prep already registered the `(menegroth, aci-318-canon)`
-context + hubs, so direct `note add`/`attach` resolves onto the spine.
+**First extractor wave (4/4) completed cleanly.** doubly-reinforced,
+moment-redistribution, cantilever, and simply-supported beams each produced a
+grounded candidate set. **Safety rule held:** OCR-garbled equations (e.g. E_c
+§19.2.2.1.a, R_n/ε_t from PCA Notes §8.4, A_s,min §9.6.1.2) were flagged as
+`question` candidates rather than fabricated as LaTeX, while numeric test oracles
+(adjustment %, Table 2/4/5 A_s reductions, hand-vs-spBeam agreement) were
+captured. Full candidate lists live in the run-d3306fbe agent transcripts.
 
-**Safety rule holding:** the first extractor (moment-redistribution) flagged the
-OCR-garbled equations (E_c §19.2.2.1.a, R_n/ε_t from PCA Notes §8.4, A_s,min
-§9.6.1.2, max-positive-moment) as `question` candidates rather than fabricating
-LaTeX, while still capturing the numeric test oracles (adjustment %, Table 2/4/5
-A_s reductions, hand-vs-spBeam agreement). Exactly the intended behavior.
+### ⛔ BLOCKER — zettelkasten MCP server not connected
+
+The **`project-0-menegroth-zettelkasten` MCP server is not registered in this
+Cursor session.** `GetMcpTools` shows only `coordinator`, `memory`,
+`memory-artifacts`, and `corpus` — there is **no `note`/`attach` tool**. So **no
+zettelkasten note can be committed** — not by scribe subagents, and not directly
+by the parent. The first scribe subagent failed for exactly this reason (not a
+content/quality failure).
+
+- `create_extraction_graph` still seeded per-source hubs (`20260713-2137-*`)
+  because the *coordinator* server reaches the ZK store internally; only the ZK's
+  own MCP **tool surface** (writes) is missing.
+- Config is correct: `.cursor/mcp.json` declares `zettelkasten` →
+  `/Users/tashahirt/.venvs/angelo/bin/angelo-zettelkasten` (binary present). It
+  needs an **MCP reload** to register.
+- **Not attempted:** hand-authoring note `.md` files directly. That would bypass
+  grounding validation + spine-edge resolution on safety-critical structural
+  content — declined per the code-accuracy rule.
+
+**Remediation (needs user, ~1 min):**
+1. Cursor → Command Palette → **"Reload MCP Servers"** (or restart Cursor).
+2. Confirm `zettelkasten` shows connected in Settings → MCP.
+3. Re-run the scribe wave / resume run-d3306fbe — extractor candidates are
+   preserved, no re-extraction needed.
+
+Memory breadcrumb: `anno-49cde79d` under phase `plan-9fee23b6`.
 
 ## 3. Deferred (documented — NOT fabricated)
 

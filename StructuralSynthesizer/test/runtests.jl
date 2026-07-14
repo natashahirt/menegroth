@@ -28,6 +28,12 @@ using Asap  # ensures `u"kip"`, `u"ksi"`, etc resolve via Asap unit module
         include("geometry/test_slab_coloring.jl")
     end
 
+    # ─── Design Graph (Incremental Design DAG — Run 1 gate) ──────────────
+    @testset "Design Graph" begin
+        include("design_graph/test_design_graph_topology.jl")
+        include("design_graph/test_design_graph_equivalence.jl")
+    end
+
     # ─── Analysis ────────────────────────────────────────────────────────
     @testset "Analysis" begin
         include("analyze/test_drape.jl")

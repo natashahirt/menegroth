@@ -276,27 +276,51 @@ end
 
 Build the design pipeline as a [`DesignGraph`](@ref) of [`StageNode`](@ref)s.
 
-Run 1 wraps the existing coarse [`build_pipeline`](@ref) stages one-to-one:
-each `PipelineStage` becomes a `StageNode` (`:stage_1`, `:stage_2`, …) carrying
-the *same* closure and `needs_sync` flag, linked in a linear dependency chain
-(`:stage_2` depends on `:stage_1`, etc.). Executing the graph via
-[`execute_graph!`](@ref) therefore reproduces the pre-graph pipeline loop
-byte-for-byte: same stage order, same `sync_asap!` placement.
+Each coarse [`build_pipeline`](@ref) stage becomes one `StageNode` carrying the
+*same* closure and `needs_sync` flag, linked in a linear dependency chain, so
+executing the graph via [`execute_graph!`](@ref) reproduces the pre-graph
+pipeline loop byte-for-byte (same stage order, same `sync_asap!` placement).
+
+Run 2 gives the nodes **content-stable, semantic** keys derived from the stage's
+meaning rather than its position: `:slab_sizing` → `:members` → `:foundations`
+(see [`canonical_node_keys`](@ref)). The member-sizing stage is always
+`:members`, whether it takes the flat-plate (`_reconcile_columns!`) or the
+beam/column (`_size_beams_columns!`) branch, so the same key always denotes the
+same unit of work regardless of params or branch. Each node also carries the
+provenance declared in `PIPELINE_PROVENANCE` (param slice, struc reads/writes,
+code-version) that the incremental engine's fingerprint and dirty-frontier
+resolver consume.
 
 Deriving nodes directly from `build_pipeline` (rather than re-deriving the stage
 logic) guarantees the graph and the legacy `build_pipeline` callers stay in
-lock-step. Later runs will replace this coarse mapping with finer per-group
-nodes and richer dependency edges without changing the executor.
+lock-step.
 """
 function build_design_graph(params::DesignParameters;
                             tc::Union{Nothing, StructuralSizer.TraceCollector} = nothing)
     stages = build_pipeline(params; tc=tc)
+
+    # Map each coarse pipeline stage to its content-stable semantic key. The
+    # stage order emitted by build_pipeline is fixed: slab sizing, then member
+    # sizing (either branch), then foundations (only when requested). We key off
+    # that meaning, NOT the positional index, so the identity is invariant across
+    # params and the flat-plate vs beam/column branch. The only structural
+    # variation is whether the foundations stage is present.
+    keys_in_order = NodeKey[NODE_SLAB_SIZING, NODE_MEMBERS]
+    if !isnothing(params.foundation_options)
+        push!(keys_in_order, NODE_FOUNDATIONS)
+    end
+    length(keys_in_order) == length(stages) || error(
+        "build_design_graph: stage/key count mismatch " *
+        "($(length(stages)) stages vs $(length(keys_in_order)) keys)")
+
     graph_nodes = DesignNode[]
     prev_key = nothing
-    for (i, stage) in enumerate(stages)
-        key = Symbol("stage_", i)
+    for (stage, key) in zip(stages, keys_in_order)
         deps = prev_key === nothing ? NodeKey[] : NodeKey[prev_key]
-        push!(graph_nodes, StageNode(key, deps, stage.fn, stage.needs_sync))
+        prov = pipeline_provenance(key)
+        push!(graph_nodes, StageNode(key, deps, stage.fn, stage.needs_sync,
+                                     prov.param_slice, prov.reads, prov.writes,
+                                     prov.code_version))
         prev_key = key
     end
     return DesignGraph(graph_nodes)

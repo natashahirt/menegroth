@@ -37,6 +37,19 @@ Uses TributaryLoads for accurate load distribution based on tributary polygons.
   - `E`: Young's modulus (overrides `params.diaphragm_E`)
   - `ν`: Poisson's ratio (overrides `params.diaphragm_ν`)
   - `t_factor`: Thickness multiplier (default: 1.0)
+- `load_routing::Symbol=:auto`: how slab gravity pressure reaches the frame
+  (plan `joists-roles-materials`, Phase 7).
+  - `:auto` (default) — route via `Asap.AreaLoad(shells; distribute_to=beams)`
+    when diaphragm shells are present (`diaphragms=:shell`/`:rigid` and
+    non-empty slabs), otherwise fall through to the per-cell tributary path.
+    This preserves the historical frame-only behavior exactly: with the default
+    `diaphragms=:none`, no shells exist so `:auto` resolves to `:cell_tributary`.
+  - `:cell_tributary` — always use the per-cell tributary loads
+    (`_create_cell_tributary_loads!`), the pre-Phase-7 behavior.
+  - `:shell_area` — always route through the shell mesh via `Asap.AreaLoad`,
+    with auto-generated `:joist` beams passed as `interior_beams` and the slab's
+    `spans.axis` as the one-way `axis`. Falls back to `:cell_tributary` (with a
+    warning) when no diaphragm shells were built.
 
 # Examples
 ```julia
@@ -60,11 +73,14 @@ to_asap!(struc; diaphragms=:shell, shell_props=(E=25e9u"Pa", ν=0.15))
 function to_asap!(struc::BuildingStructure{T, A, P}; 
                   params::DesignParameters=DesignParameters(),
                   diaphragms::Union{Symbol, Nothing}=nothing,
-                  shell_props::Union{Nothing, NamedTuple}=nothing) where {T, A, P}
+                  shell_props::Union{Nothing, NamedTuple}=nothing,
+                  load_routing::Symbol=:auto) where {T, A, P}
     
     # Determine diaphragm mode: explicit argument overrides params
     diaphragm_mode = isnothing(diaphragms) ? params.diaphragm_mode : diaphragms
     diaphragm_mode in (:none, :rigid, :shell) || error("diaphragms must be :none, :rigid, or :shell")
+    load_routing in (:auto, :cell_tributary, :shell_area) ||
+        error("load_routing must be :auto, :cell_tributary, or :shell_area")
     
     skel = struc.skeleton
     
@@ -102,8 +118,22 @@ function to_asap!(struc::BuildingStructure{T, A, P};
         0.5e-6u"m^4",     # J
         frame_ρ
     )
-    frame_elements = map(skel.edge_indices) do (v1, v2)
-        return Asap.Element(nodes[v1], nodes[v2], default_section, release=:fixedfixed)
+    # Per-beam end releases resolved from segment fields + (role, material) dispatch.
+    # Non-beam edges (columns/struts/walls) and unmodeled edges default to
+    # :fixedfixed, preserving prior behavior. `beam` material override falls back
+    # to the building-level structural steel.
+    beam_material = isnothing(params.materials.beam) ? params.materials.steel : params.materials.beam
+    edge_release = _build_edge_release_map(struc, beam_material)
+    # Phase 7 seat-offset dispatch (see StructuralSizer/src/materials/steel.jl
+    # :joist ENGINEERING JUDGMENT marker; StructuralSizer/src/members/defaults.jl).
+    # On this initial `to_asap!` (pre-sizing) member sections are unknown, so the
+    # map is empty/zero. `sync_asap!` repopulates it once member depths exist —
+    # that is where the steel-joist-on-girder seat offset is actually applied.
+    edge_eccentricity = _build_edge_eccentricity_map(struc, params)
+    frame_elements = map(enumerate(skel.edge_indices)) do (edge_idx, (v1, v2))
+        release = get(edge_release, edge_idx, :fixedfixed)
+        ecc = get(edge_eccentricity, edge_idx, (0.0, 0.0, 0.0, 0.0))
+        return Asap.Element(nodes[v1], nodes[v2], default_section; release=release, eccentricity=ecc)
     end
     
     # 3. Shell Diaphragm elements (for both :rigid and :shell)
@@ -129,29 +159,38 @@ function to_asap!(struc::BuildingStructure{T, A, P};
     
     use_patterns = params.pattern_loading != :none
     combo = governing_combo(params)
-    
-    for (cell_idx, cell) in enumerate(struc.cells)
-        if cell.floor_type == :grade
-            struc.cell_tributary_loads[cell_idx] = Asap.TributaryLoad[]
-            struc.cell_dead_loads[cell_idx] = Asap.TributaryLoad[]
-            struc.cell_live_loads[cell_idx] = Asap.TributaryLoad[]
-            continue
-        end
-        
-        if use_patterns
-            dead, live = _create_cell_tributary_loads!(
-                loads, frame_elements, skel, struc, cell, cell_idx, params;
-                split_dead_live=true, combo=combo)
-            struc.cell_dead_loads[cell_idx] = dead
-            struc.cell_live_loads[cell_idx] = live
-            struc.cell_tributary_loads[cell_idx] = vcat(dead, live)
-        else
-            combined = _create_cell_tributary_loads!(
-                loads, frame_elements, skel, struc, cell, cell_idx, params;
-                split_dead_live=false, combo=combo)
-            struc.cell_dead_loads[cell_idx] = Asap.TributaryLoad[]
-            struc.cell_live_loads[cell_idx] = Asap.TributaryLoad[]
-            struc.cell_tributary_loads[cell_idx] = combined
+
+    # Phase 7 — pick the slab-pressure routing (shell AreaLoad vs per-cell
+    # tributary). `:auto` uses shells when a diaphragm built them, else the
+    # historical per-cell path (so the default frame-only flow is unchanged).
+    routing = _resolve_load_routing(load_routing, shell_elements)
+
+    if routing === :shell_area
+        _create_shell_area_loads!(loads, frame_elements, struc, nodes, params)
+    else
+        for (cell_idx, cell) in enumerate(struc.cells)
+            if cell.floor_type == :grade
+                struc.cell_tributary_loads[cell_idx] = Asap.TributaryLoad[]
+                struc.cell_dead_loads[cell_idx] = Asap.TributaryLoad[]
+                struc.cell_live_loads[cell_idx] = Asap.TributaryLoad[]
+                continue
+            end
+
+            if use_patterns
+                dead, live = _create_cell_tributary_loads!(
+                    loads, frame_elements, skel, struc, cell, cell_idx, params;
+                    split_dead_live=true, combo=combo)
+                struc.cell_dead_loads[cell_idx] = dead
+                struc.cell_live_loads[cell_idx] = live
+                struc.cell_tributary_loads[cell_idx] = vcat(dead, live)
+            else
+                combined = _create_cell_tributary_loads!(
+                    loads, frame_elements, skel, struc, cell, cell_idx, params;
+                    split_dead_live=false, combo=combo)
+                struc.cell_dead_loads[cell_idx] = Asap.TributaryLoad[]
+                struc.cell_live_loads[cell_idx] = Asap.TributaryLoad[]
+                struc.cell_tributary_loads[cell_idx] = combined
+            end
         end
     end
     
@@ -377,7 +416,9 @@ end
 Lightweight sync of the Asap model between pipeline stages.
 
 Updates cell self-weights from current slab results, recomputes tributary load
-pressures, and re-solves. Does **not** rebuild topology — only loads change.
+pressures, refreshes the vault-thrust edge line-load magnitudes from the current
+`governing_combo(params)`, and re-solves. Does **not** rebuild topology — only
+loads change.
 
 When `params.pattern_loading != :none`, performs multi-case solve with
 checkerboard live load patterns and writes enveloped element forces back to the
@@ -424,6 +465,16 @@ function sync_asap!(struc::BuildingStructure;
         end
     end
     
+    # Phase 7 — the sizing pass has run, so member depths are now known. Refresh
+    # the joist-on-girder seat eccentricity (this is the pass where the steel
+    # joist offset is actually applied) and any shell-area AreaLoad pressures.
+    # Mutating the element eccentricity in place is sufficient: the reprocess
+    # below recomputes each element's global stiffness, which folds in
+    # `Element.eccentricity` (external/Asap/src/Elements/K.jl §global_K!).
+    _sync_edge_eccentricity!(struc, params)
+    _sync_shell_area_pressures!(struc, params)
+    _sync_vault_thrust_line_loads!(struc, params)
+
     # 3. Re-process stiffness and loads (topology unchanged)
     if struc.asap_model.processed
         Asap.update!(struc.asap_model)
@@ -439,6 +490,108 @@ function sync_asap!(struc::BuildingStructure;
     end
     
     return struc
+end
+
+"""
+Refresh the seat eccentricity of the Asap frame elements from the current member
+depths (Phase 7 rebuild parity for [`sync_asap!`](@ref)). Recomputes the same
+[`_build_edge_eccentricity_map`](@ref) used by `to_asap!` and writes each joist
+edge's `Element.eccentricity` in place; the subsequent reprocess applies it.
+Elements not owned by a non-zero-offset joist are left untouched.
+"""
+function _sync_edge_eccentricity!(struc::BuildingStructure, params::DesignParameters)
+    model = struc.asap_model
+    isnothing(model) && return
+    els = model.elements
+    for (edge_idx, ecc) in _build_edge_eccentricity_map(struc, params)
+        (edge_idx >= 1 && edge_idx <= length(els)) || continue
+        els[edge_idx].eccentricity = ecc
+    end
+    return
+end
+
+"""
+Refresh shell-area `Asap.AreaLoad` pressures from current cell self-weights
+(Phase 7 rebuild parity for [`sync_asap!`](@ref)), mirroring the per-cell
+tributary pressure refresh. `_create_shell_area_loads!` pushes exactly one
+`AreaLoad` per non-grade slab in slab order, so the refresh is applied only when
+that 1:1 correspondence holds (equal counts); otherwise it is skipped to avoid
+assigning a pressure to the wrong slab. When shell-area routing was not used
+there are no `AreaLoad`s and this is a no-op.
+"""
+function _sync_shell_area_pressures!(struc::BuildingStructure, params::DesignParameters)
+    model = struc.asap_model
+    isnothing(model) && return
+    area_loads = Asap.AreaLoad[ld for ld in model.loads if ld isa Asap.AreaLoad]
+    isempty(area_loads) && return
+
+    eligible = [slab for slab in struc.slabs
+                if !isempty(slab.cell_indices) &&
+                   struc.cells[first(slab.cell_indices)].floor_type != :grade]
+    if length(eligible) != length(area_loads)
+        @debug "sync_asap!: AreaLoad/slab count mismatch; skipping shell-area pressure refresh" n_loads=length(area_loads) n_slabs=length(eligible)
+        return
+    end
+
+    combos = params.load_combinations
+    for (slab, al) in zip(eligible, area_loads)
+        cell0 = struc.cells[first(slab.cell_indices)]
+        al.pressure = uconvert(u"Pa", envelope_pressure(combos,
+                        cell0.sdl + cell0.self_weight, cell0.live_load))
+    end
+    return
+end
+
+"""
+Refresh the vault-thrust `Asap.LineLoad` magnitudes from the current
+`governing_combo(params)` (Run-2 `:load_combinations` parity for [`sync_asap!`](@ref)),
+mirroring the per-cell tributary and shell-area pressure refresh. `to_asap!` step 6
+BAKES these loads with a magnitude that depends on `governing_combo(params)`
+(`vault_thrust_line_loads` → `eff.dead*combo.D + eff.live*combo.L`); a
+`load_combinations` variation over a fixed prepared baseline changes
+`governing_combo`, so without this refresh the frozen base-combo thrust would
+diverge (unconservatively when the new combo has larger D/L).
+
+This RELOCATES the existing, already-grounded derivation into the sync path — it
+re-derives the edge line-load specs with the SAME [`slab_edge_line_loads`](@ref)
+helper `to_asap!` uses (no thrust mechanics or load factors are re-derived here)
+and writes each matching load's `value` in place. `to_asap!` tags every such load
+`:vault_thrust`; the refresh matches those loads positionally in creation order
+(equal-count guard, mirroring the shell-area refresh) and updates them. When no
+vault thrust was built there are no `:vault_thrust` loads and this is a no-op.
+
+Note on `design_building` byte-identity: on a `design_building` run this refresh is
+NOT strictly a value no-op. `to_asap!` bakes the thrust from the ESTIMATE slab result
+(from `initialize_slabs!`), while this sync — running after Stage-1 `size_slabs!` —
+re-derives it from the SIZED slab result, so the thrust magnitude can change
+(estimate → sized) even at constant `governing_combo`. `design_building` outputs stay
+byte-identical on the current fixtures only because the vault thrust is not
+member-governing there (it does not propagate into captured member sizing). A vault
+whose members ARE lateral-thrust-governed would make `design_building` sensitive to
+this refresh; the exact-first gate should add such a fixture before that case ships.
+"""
+function _sync_vault_thrust_line_loads!(struc::BuildingStructure, params::DesignParameters)
+    model = struc.asap_model
+    isnothing(model) && return
+    thrust_loads = Asap.LineLoad[ld for ld in model.loads
+                                 if ld isa Asap.LineLoad && ld.id === :vault_thrust]
+    isempty(thrust_loads) && return
+
+    # Re-derive the specs in the SAME (slab, spec) order `to_asap!` step 6 emits.
+    specs = EdgeLineLoadSpec[]
+    for slab in struc.slabs
+        append!(specs, slab_edge_line_loads(struc, slab, params))
+    end
+
+    if length(specs) != length(thrust_loads)
+        @debug "sync_asap!: vault-thrust load/spec count mismatch; skipping refresh" n_loads=length(thrust_loads) n_specs=length(specs)
+        return
+    end
+
+    for (spec, ld) in zip(specs, thrust_loads)
+        ld.value = [spec.w[1] * u"N/m", spec.w[2] * u"N/m", spec.w[3] * u"N/m"]
+    end
+    return
 end
 
 """
@@ -644,9 +797,13 @@ function push_asap_loads!(loads::Vector{Asap.AbstractLoad}, el::Asap.Element, sp
 end
 
 function push_asap_loads!(loads::Vector{Asap.AbstractLoad}, el::Asap.Element, spec::EdgeLineLoadSpec)
-    # Convert Float64 line load (assumed SI N/m) to Unitful — no intermediate collect
+    # Convert Float64 line load (assumed SI N/m) to Unitful — no intermediate collect.
+    # Tag `:vault_thrust` so `sync_asap!` (`_sync_vault_thrust_line_loads!`) can find
+    # exactly these structural-effect edge loads and refresh their magnitude from the
+    # current `governing_combo(params)` — the id is metadata only and does not affect
+    # the solve.
     w_unitful = [spec.w[1] * u"N/m", spec.w[2] * u"N/m", spec.w[3] * u"N/m"]
-    push!(loads, Asap.LineLoad(el, w_unitful))
+    push!(loads, Asap.LineLoad(el, w_unitful, :vault_thrust))
     return loads
 end
 
@@ -805,6 +962,257 @@ function _get_release_symbol(el::Asap.Element{R}) where R
     R === Asap.FreeFree && return :freefree
     R === Asap.Joist && return :joist
     return :fixedfixed  # fallback
+end
+
+"""
+    _build_edge_release_map(struc, material) -> Dict{Int, Symbol}
+
+Map each skeleton edge index owned by a `Beam` to the Asap element-release symbol
+resolved by [`resolve_edge_releases`](@ref) from the beam's per-segment release
+fields, `torsion_released`, and the `(role, material, lateral_role)` dispatch.
+
+Edges not owned by a beam (columns, struts, walls, unmodeled edges) are absent
+from the map; callers default those to `:fixedfixed`, so — together with the
+Phase 2 placeholder defaults — this reproduces the prior all-`:fixedfixed`
+behavior until real releases are assigned.
+"""
+function _build_edge_release_map(struc::BuildingStructure, material)
+    edge_release = Dict{Int, Symbol}()
+    n_seg = length(struc.segments)
+    for beam in struc.beams
+        seg_idxs = segment_indices(beam)
+        isempty(seg_idxs) && continue
+        all(si -> 1 <= si <= n_seg, seg_idxs) || continue
+        chain = [struc.segments[si] for si in seg_idxs]
+        releases = resolve_edge_releases(beam, chain, material)
+        for (seg, rel) in zip(chain, releases)
+            edge_release[seg.edge_idx] = rel
+        end
+    end
+    return edge_release
+end
+
+# =============================================================================
+# Phase 7 — joist-on-girder seat eccentricity (Element.eccentricity)
+# =============================================================================
+# The seat-offset tuple itself is NOT derived here: it comes verbatim from
+# `StructuralSizer.default_seat_eccentricity(role, material, host_depth,
+# member_depth)` (Phase 3 dispatch). For a steel joist that resolves to
+# `(0, 0, (host_depth + member_depth)/2, 0)` — the top-of-girder seat modeled as
+# a rigid transverse centroid offset (see StructuralSizer/src/materials/steel.jl
+# :joist ENGINEERING JUDGMENT marker; StructuralSizer/src/members/defaults.jl,
+# and the transform in external/Asap/src/Elements/K.jl §eccentricity_transformation!).
+# All other (role, material) combinations return zeros. Depths come from the
+# already-sized member sections; when a section is not yet assigned the depth is
+# 0, so the eccentricity is naturally zero on the pre-sizing pass.
+
+"""Member material recorded on a `Beam` (Phase 5 stamps the framing-level
+material as a zero-volume `MaterialVolumes` entry), else the building beam/steel
+material from `params`. Returns `nothing` when neither is available."""
+function _beam_member_material(beam::Beam, params::DesignParameters)
+    vols = volumes(beam)
+    for mat in keys(vols)
+        return mat
+    end
+    return isnothing(params.materials.beam) ? params.materials.steel : params.materials.beam
+end
+
+"""Overall depth of a member's assigned section as a length in metres, or
+`0.0u"m"` when the member has not been sized yet."""
+function _member_section_depth_m(beam::Beam)
+    sec = section(beam)
+    sec === nothing && return 0.0u"m"
+    return uconvert(u"m", StructuralSizer.section_depth(sec))
+end
+
+"""
+Map each skeleton vertex to the indices of the non-joist `Beam`s (candidate
+hosts) that touch it. A joist seats on the members it lands on; after Phase 5's
+`edge_chains` subdivision the host girder owns a sub-edge incident to the joist's
+landing vertex, so incidence at the joist endpoints identifies the host.
+"""
+function _host_beams_by_vertex(struc::BuildingStructure)
+    skel = struc.skeleton
+    m = Dict{Int, Vector{Int}}()
+    n_edges = length(skel.edge_indices)
+    for (bi, beam) in enumerate(struc.beams)
+        is_joist(beam) && continue          # hosts are the members joists land on
+        for si in segment_indices(beam)
+            si <= length(struc.segments) || continue
+            e = struc.segments[si].edge_idx
+            (e >= 1 && e <= n_edges) || continue
+            v1, v2 = skel.edge_indices[e]
+            push!(get!(Vector{Int}, m, v1), bi)
+            push!(get!(Vector{Int}, m, v2), bi)
+        end
+    end
+    return m
+end
+
+"""
+Representative host depth (metres) for `joist`: the maximum sized-section depth
+among the lower-level members incident to the joist's endpoints. Returns
+`0.0u"m"` when no sized host is found (e.g. before girder sizing). The maximum is
+used so that when the two seating girders differ, the seat height that clears the
+deeper girder governs — a deterministic choice for the single seat-offset value
+the element carries.
+"""
+function _joist_host_depth_m(struc::BuildingStructure, joist::Beam, joist_idx::Int,
+                             host_by_vertex::Dict{Int, Vector{Int}})
+    skel = struc.skeleton
+    n_edges = length(skel.edge_indices)
+    jlvl = level_of(joist)
+    best = 0.0u"m"
+    for si in segment_indices(joist)
+        si <= length(struc.segments) || continue
+        e = struc.segments[si].edge_idx
+        (e >= 1 && e <= n_edges) || continue
+        v1, v2 = skel.edge_indices[e]
+        for v in (v1, v2)
+            for bi in get(host_by_vertex, v, Int[])
+                bi == joist_idx && continue
+                host = struc.beams[bi]
+                level_of(host) < jlvl || continue   # host must sit below the joist
+                d = _member_section_depth_m(host)
+                d > best && (best = d)
+            end
+        end
+    end
+    return best
+end
+
+"""
+    _build_edge_eccentricity_map(struc, params) -> Dict{Int, NTuple{4, Float64}}
+
+Skeleton edge → Asap `Element.eccentricity` (metres) for auto-generated joists
+whose `(role, material)` seat offset is non-zero. The offset is taken verbatim
+from `StructuralSizer.default_seat_eccentricity` (Phase 3); this function only
+supplies the current host/member depths and tags the joist's edges. Edges absent
+from the map default to zero eccentricity at the construction site.
+"""
+function _build_edge_eccentricity_map(struc::BuildingStructure, params::DesignParameters)
+    edge_ecc = Dict{Int, NTuple{4, Float64}}()
+    isempty(struc.beams) && return edge_ecc
+    host_by_vertex = _host_beams_by_vertex(struc)
+    for (bi, beam) in enumerate(struc.beams)
+        is_joist(beam) || continue
+        mat = _beam_member_material(beam, params)
+        mat === nothing && continue
+        member_d = _member_section_depth_m(beam)
+        host_d = _joist_host_depth_m(struc, beam, bi, host_by_vertex)
+        # Phase 3 dispatch — do NOT re-derive the seat-offset formula here.
+        ecc = StructuralSizer.default_seat_eccentricity(getfield(beam, :role), mat,
+                                                        host_d, member_d)
+        all(iszero, ecc) && continue
+        for si in segment_indices(beam)
+            si <= length(struc.segments) || continue
+            edge_ecc[struc.segments[si].edge_idx] = ecc
+        end
+    end
+    return edge_ecc
+end
+
+# =============================================================================
+# Phase 7 — slab-pressure routing (shell AreaLoad vs per-cell tributary)
+# =============================================================================
+
+"""
+Resolve the effective `load_routing` mode given the requested symbol and the
+diaphragm shells built for this model. `:auto` picks `:shell_area` only when
+shells exist; `:shell_area` falls back to `:cell_tributary` (with a warning) when
+no shells were built; `:cell_tributary` is always honored.
+"""
+function _resolve_load_routing(load_routing::Symbol, shell_elements)
+    if load_routing === :cell_tributary
+        return :cell_tributary
+    elseif load_routing === :shell_area
+        if isempty(shell_elements)
+            @warn "to_asap!(load_routing=:shell_area): no diaphragm shells built " *
+                  "(need diaphragms=:shell/:rigid and non-empty slabs); " *
+                  "falling back to :cell_tributary."
+            return :cell_tributary
+        end
+        return :shell_area
+    else  # :auto
+        return isempty(shell_elements) ? :cell_tributary : :shell_area
+    end
+end
+
+"""
+    _create_shell_area_loads!(loads, frame_elements, struc, nodes, params) -> loads
+
+Route each slab's gravity pressure through the slab mesh via
+`Asap.AreaLoad(shells, pressure; distribute_to=beams, interior_beams=joists,
+axis=spans.axis)` (Phase 7). The diaphragm shells are built per slab purely as
+tributary geometry — they are not added to the frame-only design model; the
+`AreaLoad` splits the panel along the interior joist lines (`interior_beams`) and
+distributes the enveloped SDL+LL+self-weight pressure to the boundary girders and
+interior joists as `TributaryLoad`s.
+
+!!! note "Envelope pressure (no live-pattern split)"
+    This path applies the enveloped (SDL+LL) pressure per slab. Checkerboard live
+    patterning (`params.pattern_loading`) remains served by the per-cell
+    tributary path; a shell-mesh pattern split is a later-phase refinement.
+"""
+function _create_shell_area_loads!(loads::Vector{Asap.AbstractLoad},
+                                   frame_elements::Vector{<:Asap.Element},
+                                   struc::BuildingStructure,
+                                   nodes::Vector{Asap.Node},
+                                   params::DesignParameters)
+    combos = params.load_combinations
+    n_el = length(frame_elements)
+    for slab in struc.slabs
+        isempty(slab.cell_indices) && continue
+        cell0 = struc.cells[first(slab.cell_indices)]
+        cell0.floor_type == :grade && continue
+
+        slab_shells = create_slab_diaphragm_shells(struc, slab, nodes)
+        isempty(slab_shells) && continue
+
+        # Boundary girders = the slab's face edges; framing members = the beams
+        # of this slab's materialized framing levels (Phase 5).
+        boundary_edges = slab_face_edge_ids(struc, slab)
+        framing_edges = Int[]
+        # Phase 7 v2: AreaLoad.interior_beams idealizes pinned-end joist strips only.
+        # Framing levels may legally create role=:beam members (secondary girders,
+        # transfer beams); those are structural members that carry moment, not
+        # one-way strips distributing shell area load. Filter interior_beams to :joist.
+        joist_edges = Int[]
+        for fl in slab.framing_levels
+            fl.group_id === nothing && continue
+            grp = get(struc.member_groups, fl.group_id, nothing)
+            grp === nothing && continue
+            for mi in grp.member_indices
+                (mi >= 1 && mi <= length(struc.beams)) || continue
+                beam = struc.beams[mi]
+                for si in segment_indices(beam)
+                    si <= length(struc.segments) || continue
+                    edge = struc.segments[si].edge_idx
+                    push!(framing_edges, edge)
+                    beam.role === :joist && push!(joist_edges, edge)
+                end
+            end
+        end
+
+        boundary_els = Asap.FrameElement[frame_elements[e] for e in boundary_edges
+                                         if 1 <= e <= n_el]
+        framing_els = Asap.FrameElement[frame_elements[e] for e in unique(framing_edges)
+                                        if 1 <= e <= n_el]
+        interior_els = Asap.FrameElement[frame_elements[e] for e in unique(joist_edges)
+                                         if 1 <= e <= n_el]
+        distribute = vcat(boundary_els, framing_els)
+        isempty(distribute) && continue
+
+        pressure = uconvert(u"Pa", envelope_pressure(combos,
+                    cell0.sdl + cell0.self_weight, cell0.live_load))
+
+        push!(loads, Asap.AreaLoad(slab_shells, pressure;
+                                   distribute_to = distribute,
+                                   interior_beams = interior_els,
+                                   axis = slab.spans.axis,
+                                   direction = (0.0, 0.0, -1.0)))
+    end
+    return loads
 end
 
 """
@@ -1014,7 +1422,18 @@ function build_analysis_model!(design::BuildingDesign;
     src_model = struc.asap_model
     frame_elements = Asap.FrameElement[]
     frame_edge_indices = Int[]
-    
+
+    # Resolve releases from the beam release fields (same source as to_asap!), not
+    # by reading them back off the source Asap element, so the rebuild honors any
+    # per-segment / (role, material) release the design layer assigned.
+    beam_material = isnothing(design.params.materials.beam) ?
+        design.params.materials.steel : design.params.materials.beam
+    edge_release = _build_edge_release_map(struc, beam_material)
+    # Phase 7 seat-offset dispatch — sections are known here (copied from the
+    # sized source model), so joist-on-girder seat eccentricities are populated
+    # (see StructuralSizer/src/materials/steel.jl :joist ENGINEERING JUDGMENT marker).
+    edge_eccentricity = _build_edge_eccentricity_map(struc, design.params)
+
     for (edge_idx, (v1, v2)) in enumerate(skel.edge_indices)
         # Only include edges from selected groups
         edge_idx in included_edges || continue
@@ -1023,10 +1442,11 @@ function build_analysis_model!(design::BuildingDesign;
         src_el = src_model.elements[edge_idx]
         section = src_el.section
         
-        # Extract release symbol from type parameter
-        release_sym = _get_release_symbol(src_el)
+        # Per-beam release (non-beam edges default to :fixedfixed)
+        release_sym = get(edge_release, edge_idx, :fixedfixed)
+        ecc = get(edge_eccentricity, edge_idx, (0.0, 0.0, 0.0, 0.0))
         
-        el = Asap.Element(nodes[v1], nodes[v2], section; release=release_sym)
+        el = Asap.Element(nodes[v1], nodes[v2], section; release=release_sym, eccentricity=ecc)
         push!(frame_elements, el)
         push!(frame_edge_indices, edge_idx)
     end

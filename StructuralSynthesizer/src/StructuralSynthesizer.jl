@@ -158,6 +158,27 @@ export PreSizingValidationError, run_pre_sizing_validation
 export snapshot!, restore!, has_snapshot, delete_snapshot!, snapshot_keys
 export DesignSnapshot, SlabSnapshot
 
+# --- Design graph (Run 2: incremental engine) ---
+# Node provenance + canonical identities
+export param_slice, struc_reads, struc_writes, code_version, node_provenance
+export canonical_node_keys, pipeline_provenance
+export NODE_INITIALIZE, NODE_POPULATE_FRAMING, NODE_ESTIMATE_COLUMNS, NODE_BUILD_ASAP
+export NODE_SLAB_SIZING, NODE_MEMBERS, NODE_FOUNDATIONS, NODE_CAPTURE
+# Graph queries
+export transitive_dependencies, descendants
+# Fingerprinting
+export content_hash, hash_param_slice, input_hash, output_hash
+# Per-node snapshots
+export capture_node_state, restore_node_state, snapshot_node!, restore_node
+# Scheduler / engine
+export IncrementalEngine, NodeMemo, prepare_engine, run_target!
+export capture_incremental_design, redesign_incremental!
+export last_recomputed, last_restored, terminal_node
+export changed_param_fields, dirty_frontier
+# Stateful variation API (session) — dirty_frontier already exported above
+export DesignSession, redesign, vary, base_design, base_params
+export requires_new_engine, prepare_affecting_changes
+
 # --- Design parameter helpers ---
 export with, resolve_concrete, resolve_rebar, resolve_rc_material, resolve_floor_options
 

@@ -12,9 +12,10 @@ success: 'null'
 files: ''
 session_id: sess-312c228d
 created_at: '2026-07-15T01:41:32.432077+00:00'
-updated_at: '2026-07-15T01:41:32.432077+00:00'
+updated_at: '2026-07-15T01:43:06.935907+00:00'
 has_child_rationale: One-way ribbed pan-joist construction is a distinct system with
   no type or todo today (only solid OneWay and two-way Waffle exist)
+related_to: todo-8f5ba09e
 ---
 # B7 — One-way joist / pan-joist (ribbed) slab
 

@@ -12,9 +12,10 @@ success: 'null'
 files: ''
 session_id: sess-0b14e919
 created_at: '2026-07-14T01:36:07.057748+00:00'
-updated_at: '2026-07-14T01:36:07.057748+00:00'
+updated_at: '2026-07-15T01:43:06.935907+00:00'
 has_child_rationale: Waffle geometry exists but analysis/design/pipeline are explicitly
   not built
+related_to: todo-8da49024,todo-4691abda
 ---
 # B3 — Waffle slab pipeline
 

@@ -7,14 +7,15 @@ title: Phase G — Foundations & geotechnical
 node_label: 'Phase G: Foundations'
 tags: roadmap,foundations,deep-foundations,piles,geotechnical,slab-on-grade,phase-g
 status: active
-open_threads: 0
+open_threads: 4
 success: 'null'
 files: ''
 session_id: sess-92359b08
 created_at: '2026-07-15T02:23:45.571776+00:00'
-updated_at: '2026-07-15T02:23:45.571776+00:00'
+updated_at: '2026-07-15T02:29:06.474043+00:00'
 has_child_rationale: Foundations were entirely absent from the roadmap; shallow foundations
   exist in code but deep/geotech/grade are gaps
+related_to: plan-w0000001
 ---
 # Phase G — Foundations & geotechnical
 

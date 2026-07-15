@@ -327,6 +327,175 @@ end
                 d*u"m", lc*u"m", e*u"m", (7.04*_IN^2)u"m^2", Pua*u"N", Pum*u"N", wu*u"N/m")
 end
 
+@testset "§11.5.3 empirical bearing wall — hand calc + applicability gates" begin
+    # Independent hand calculation of Eq. (11.5.3.1) as the known-answer oracle
+    # (no corpus worked example — the corpus "bearing wall" is a §11.8 case):
+    #   f'c = 4000 psi, 8 in wall, 12 in strip, clear height lc = 15 ft, braced
+    #   pinned–pinned (k = 1.0), φ = 0.65.
+    #     k·lc/(32·h) = 180/256 = 0.703125
+    #     R  = 1 − 0.703125² = 0.505615
+    #     Pn = 0.55·4000·96·R = 106.79 kip ;  φPn = 0.65·Pn = 69.41 kip
+    fc = 4000 * _PSI
+    lc = 15 * _FT; h = 8 * _IN; b = 12 * _IN; Ag = b * h
+    cap = wall_empirical_axial_capacity_si(fc, lc, h, Ag; k=1.0, φ=0.65)
+    @test isapprox(cap.slender, 180 / 256; rtol=1e-9)
+    @test isapprox(cap.R, 1 - (180 / 256)^2; rtol=1e-9)
+    @test isapprox(cap.Pn / _KIP, 106.79; atol=0.05)
+    @test isapprox(cap.φPn / _KIP, 69.41; atol=0.05)
+
+    # Effective length factor table (Table 11.5.3.2).
+    @test wall_empirical_k(:restrained) == 0.8
+    @test wall_empirical_k(:pinned)     == 1.0
+    @test wall_empirical_k(:cantilever) == 2.0
+    @test_throws ErrorException wall_empirical_k(:bogus)
+
+    conc = Concrete(24.855e9u"Pa", (fc)u"Pa", 2400u"kg/m^3", 0.2, 0.1)
+    ws   = WallSection(b*u"m", h*u"m")
+
+    # Passing strength check: Pu = 60 kip < φPn = 69.41 kip.
+    chk = check_wall_bearing_empirical(ws, conc, (60*_KIP)u"N"; e=0.0u"m",
+                                       lc=lc*u"m", boundary=:pinned)
+    @test chk.passed
+    @test isapprox(chk.capacity / _KIP, 69.41; atol=0.05)
+    @test isapprox(chk.ratio, 60 / 69.41; atol=1e-3)
+    @test chk.code_clause == "ACI 318-19 11.5.3.1"
+
+    # Failing strength check: Pu = 80 kip > φPn.
+    chk_hi = check_wall_bearing_empirical(ws, conc, (80*_KIP)u"N"; e=0.0u"m",
+                                          lc=lc*u"m", boundary=:pinned)
+    @test !chk_hi.passed && chk_hi.code_clause == "ACI 318-19 11.5.3.1"
+
+    # Gate (§11.5.3.1) middle-third: e > h/6 ⇒ method inapplicable ⇒ FAIL.
+    chk_e = check_wall_bearing_empirical(ws, conc, (60*_KIP)u"N"; e=(h/5)*u"m",
+                                         lc=lc*u"m", boundary=:pinned)
+    @test !chk_e.passed && chk_e.code_clause == "ACI 318-19 11.5.3.1"
+
+    # Slenderness gate: k·lc/(32·h) ≥ 1 (lc = 32·h) ⇒ no usable capacity ⇒ FAIL.
+    chk_s = check_wall_bearing_empirical(ws, conc, (60*_KIP)u"N"; e=0.0u"m",
+                                         lc=(32*h)*u"m", boundary=:pinned)
+    @test !chk_s.passed && chk_s.ratio ≥ 1.0
+
+    # Minimum-thickness gate (Table 11.3.1.1): 3 in wall < max(4in, min(lw,lc)/25).
+    ws_thin = WallSection(b*u"m", (3*_IN)*u"m")
+    chk_t = check_wall_bearing_empirical(ws_thin, conc, (60*_KIP)u"N"; e=0.0u"m",
+                                         lc=lc*u"m", boundary=:pinned)
+    @test !chk_t.passed && chk_t.code_clause == "ACI 318-19 11.3.1.1"
+    # 7.5 in foundation floor: an 8 in wall clears the 4 in floor but not with a
+    # short unsupported dimension; confirm the foundation floor is applied.
+    @test isapprox(wall_min_thickness_si(10*_FT, lc; foundation=true), 0.1905; rtol=1e-9)
+    @test isapprox(wall_min_thickness_si(1.0, 1.0; foundation=false), 0.1016; rtol=1e-9)
+
+    # Tension guard: the bearing method is compression-only. Net tension (Pu<0)
+    # must FAIL as inapplicable, never pass on a negative utilization ratio.
+    chk_ten = check_wall_bearing_empirical(ws, conc, (-10*_KIP)u"N"; e=0.0u"m",
+                                           lc=lc*u"m", boundary=:pinned)
+    @test !chk_ten.passed && chk_ten.code_clause == "ACI 318-19 11.5.3"
+
+    # Middle-third gate is sign-agnostic: a NEGATIVE eccentricity with |e| > h/6
+    # must also FAIL (guards against an unsigned-`e` fail-open).
+    chk_en = check_wall_bearing_empirical(ws, conc, (60*_KIP)u"N"; e=(-h/5)*u"m",
+                                          lc=lc*u"m", boundary=:pinned)
+    @test !chk_en.passed && chk_en.code_clause == "ACI 318-19 11.5.3.1"
+
+    # `lu` (unsupported horizontal length) governs the min-thickness rule. For a
+    # tall wall the default (lw = 12 in strip) lets thickness pass so slenderness
+    # governs; supplying the TRUE unsupported length (lu = 30 ft) trips the
+    # Table 11.3.1.1 thickness gate instead — the kwarg is a real safety lever.
+    chk_lu_def = check_wall_bearing_empirical(ws, conc, (60*_KIP)u"N"; e=0.0u"m",
+                                              lc=(30*_FT)*u"m", boundary=:pinned)
+    @test !chk_lu_def.passed && chk_lu_def.code_clause == "ACI 318-19 11.5.3.1"
+    chk_lu = check_wall_bearing_empirical(ws, conc, (60*_KIP)u"N"; e=0.0u"m",
+                                          lc=(30*_FT)*u"m", lu=(30*_FT)*u"m", boundary=:pinned)
+    @test !chk_lu.passed && chk_lu.code_clause == "ACI 318-19 11.3.1.1"
+end
+
+@testset "§11.5.3 empirical bearing wall — Asap FEA cross-check" begin
+    # No corpus oracle exists, so cross-check the two physical ingredients of
+    # Eq. (11.5.3.1) with an Asap FEA of the same panel:
+    #   (1) a shell (membrane) model reproduces the axial stiffness E·Ag — the
+    #       material/area basis of the 0.55·f'c·Ag squash term;
+    #   (2) a beam-column (frame) model reproduces the elastic (Euler) buckling
+    #       load, the ACI φPn sits safely below it, and both the ACI knock-down
+    #       and the FE buckling load fall off together with wall height.
+    fc = 4000 * _PSI
+    E  = 57000 * sqrt(4000) * _PSI          # ACI §19.2.2.1(b)
+    ν  = 0.2; G = E / (2 * (1 + ν))
+    b  = 12 * _IN; h = 8 * _IN
+    Ag = b * h; Iweak = b * h^3 / 12; Istrong = h * b^3 / 12
+
+    # Shell membrane axial stiffness (mixed Model solve — 1.12-safe RHS).
+    function shell_axial_EA(b, lc, h, E, ν, P; nx=3, ny=18)
+        nodes = Asap.Node[]
+        for j in 0:ny, i in 0:nx
+            push!(nodes, Asap.Node([i*b/nx*u"m", j*lc/ny*u"m", 0.0u"m"], :free))
+        end
+        for (idx, nd) in enumerate(nodes)
+            nd.nodeID = idx; nd.globalID = collect((idx-1)*6+1 : idx*6)
+            nd.dof .= [true, true, false, false, false, false]      # membrane only
+        end
+        node(i, j) = nodes[j*(nx+1) + i + 1]
+        for i in 0:nx; node(i, 0).dof[2] = false; end               # base v = 0
+        node(0, 0).dof[1] = false                                   # remove x rigid body
+        els = Asap.ShellTri3[]
+        for j in 0:ny-1, i in 0:nx-1
+            n1 = node(i,j); n2 = node(i+1,j); n3 = node(i,j+1); n4 = node(i+1,j+1)
+            push!(els, Asap.ShellTri3((n1, n2, n4), h*u"m", E*u"Pa", ν))
+            push!(els, Asap.ShellTri3((n1, n4, n3), h*u"m", E*u"Pa", ν))
+        end
+        for el in els
+            Asap.process!(el); el.globalID = vcat([n.globalID for n in el.nodes]...)
+        end
+        ntop = nx + 1
+        loads = Asap.AbstractLoad[Asap.NodeForce(node(i, ny), [0.0, -P/ntop, 0.0]u"N") for i in 0:nx]
+        model = Asap.Model(nodes, els, loads)
+        Asap.process!(model); Asap.solve!(model)
+        δ = sum(model.u[node(i, ny).globalID[2]] for i in 0:nx) / ntop
+        return P * lc / abs(δ)
+    end
+
+    # Frame beam-column elastic buckling (pinned-pinned, weak axis).
+    function frame_buckling_Pcr(lc, A, Ix, Iy, E, G, P_applied; n_elem=12)
+        sec = Asap.Section(A*u"m^2", E*u"Pa", G*u"Pa", Ix*u"m^4", Iy*u"m^4", 1e-4*u"m^4")
+        nodes = Asap.Node[]
+        for i in 0:n_elem
+            z  = i * lc / n_elem
+            fx = i == 0      ? :pinned :
+                 i == n_elem ? [false, false, true, true, true, true] : :free
+            push!(nodes, Asap.Node([0.0u"m", 0.0u"m", z*u"m"], fx))
+        end
+        els = [Asap.Element(nodes[i], nodes[i+1], sec, :col) for i in 1:n_elem]
+        loads = Asap.AbstractLoad[Asap.NodeForce(nodes[end], [0.0, 0.0, -P_applied]u"N")]
+        res = Asap.solve_buckling!(Asap.Model(nodes, els, loads); n=4)
+        res.n_modes < 1 && error("no frame buckling mode")
+        return res.load_factors[1] * P_applied
+    end
+
+    lc = 15 * _FT
+    EA_fea = shell_axial_EA(b, lc, h, E, ν, 1.0e6)
+    @test isapprox(EA_fea, E * Ag; rtol=0.05)                       # (1) material basis
+
+    Pcr_fea   = frame_buckling_Pcr(lc, Ag, Istrong, Iweak, E, G, 1.0e6)
+    Pcr_euler = π^2 * E * Iweak / lc^2
+    @test isapprox(Pcr_fea, Pcr_euler; rtol=0.05)                   # (2) FE ≈ Euler
+
+    cap = wall_empirical_axial_capacity_si(fc, lc, h, Ag; k=1.0, φ=0.65)
+    @test cap.φPn < Pcr_fea                                         # strength below buckling
+    @test cap.Pn  < Pcr_fea
+    # Conservative fraction ≈ 0.12; a tight band around it would catch a dropped
+    # 0.55 or φ (the hand-calc atol=0.05 kip is the primary regression guard).
+    @test 0.08 < cap.φPn / Pcr_fea < 0.20
+
+    # Knock-down and FE buckling both fall monotonically with slenderness.
+    Rs = Float64[]; Pcrs = Float64[]
+    for lc_ft in (10.0, 15.0, 20.0)
+        lci = lc_ft * _FT
+        push!(Rs, wall_empirical_axial_capacity_si(fc, lci, h, Ag; k=1.0).R)
+        push!(Pcrs, frame_buckling_Pcr(lci, Ag, Istrong, Iweak, E, G, 1.0e6))
+    end
+    @test issorted(Rs; rev=true)
+    @test issorted(Pcrs; rev=true)
+end
+
 @testset "reduced diaphragm: symmetric core (S2)" begin
     k = 1e7
     walls = [WallLine(1, 0.0, -5.0, 0.0, k, 1), WallLine(2, 0.0, 5.0, 0.0, k, 1),

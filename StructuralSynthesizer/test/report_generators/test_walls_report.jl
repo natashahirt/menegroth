@@ -286,6 +286,109 @@ w_note("Reproduces the spWall tilt-up P-Δ hand calc to <2%. Applicability gates
 w_note("boundary: non-TC, φMn<Mcr, Pu>0.06f'cAg, Δs>lc/150, or P-Δ instability ⇒ method refused (fail-safe).")
 
 # ═══════════════════════════════════════════════════════════════════════════
+# 3B. S1 — ACI 318-19 §11.5.3 simplified / empirical bearing wall
+# ═══════════════════════════════════════════════════════════════════════════
+# No independent worked example exists in the corpus (the corpus "bearing wall"
+# is a §11.8 case), so this method is validated against an independent hand calc
+# of Eq. (11.5.3.1) AND an Asap FEA of the same panel (a textbook oracle —
+# McCormac/Wight — is being sourced to add later).
+w_section_header("3B.0  S1 — ACI 318-19 §11.5.3 Simplified / Empirical Bearing Wall")
+w_note("Closed-form axial capacity φPn = 0.55·φ·f'c·Ag·[1−(k·lc/32h)²] with middle-third + min-thickness gates.")
+
+b_fc = 4000 * PSI; b_E = 57000 * sqrt(4000) * PSI; b_nu = 0.20
+b_G  = b_E / (2 * (1 + b_nu))
+b_b  = 12 * IN; b_h = 8 * IN; b_lc = 15 * FT
+b_Ag = b_b * b_h; b_Iweak = b_b * b_h^3 / 12; b_Istrong = b_h * b_b^3 / 12
+
+w_sub_header("3B.1  Independent hand calc — Eq. (11.5.3.1) known-answer")
+w_note("12-in strip: h=8 in, lc=15 ft, braced pinned–pinned (k=1.0), f'c=4000 psi, φ=0.65")
+w_note("k·lc/32h = 180/256 = 0.70313 ⇒ R = 1−R² = 0.50562 ⇒ Pn = 0.55·4000·96·R")
+w_table_head("hand calc")
+s1b = true
+bcap = wall_empirical_axial_capacity_si(b_fc, b_lc, b_h, b_Ag; k=1.0, φ=0.65)
+s1b &= w_compare("Slenderness k·lc/32h", bcap.slender, 180/256; tol=1e-4)
+s1b &= w_compare("Knock-down R", bcap.R, 1-(180/256)^2; tol=1e-4)
+s1b &= w_compare("Nominal Pn", bcap.Pn/KIP, 106.79; tol=1e-3, unit="kip")
+s1b &= w_compare("Design φPn (φ=0.65)", bcap.φPn/KIP, 69.41; tol=1e-3, unit="kip")
+
+w_sub_header("3B.2  Asap FEA cross-check (no corpus oracle)")
+w_note("(1) shell membrane model reproduces E·Ag (material/area basis of 0.55·f'c·Ag);")
+w_note("(2) frame beam-column model reproduces Euler buckling; φPn sits safely below it.")
+
+function b_shell_axial_EA(b, lc, h, E, ν, P; nx=3, ny=18)
+    nodes = Asap.Node[]
+    for j in 0:ny, i in 0:nx
+        push!(nodes, Asap.Node([i*b/nx*u"m", j*lc/ny*u"m", 0.0u"m"], :free))
+    end
+    for (idx, nd) in enumerate(nodes)
+        nd.nodeID = idx; nd.globalID = collect((idx-1)*6+1 : idx*6)
+        nd.dof .= [true, true, false, false, false, false]
+    end
+    node(i, j) = nodes[j*(nx+1) + i + 1]
+    for i in 0:nx; node(i, 0).dof[2] = false; end
+    node(0, 0).dof[1] = false
+    els = Asap.ShellTri3[]
+    for j in 0:ny-1, i in 0:nx-1
+        n1 = node(i,j); n2 = node(i+1,j); n3 = node(i,j+1); n4 = node(i+1,j+1)
+        push!(els, Asap.ShellTri3((n1, n2, n4), h*u"m", E*u"Pa", ν))
+        push!(els, Asap.ShellTri3((n1, n4, n3), h*u"m", E*u"Pa", ν))
+    end
+    for el in els
+        Asap.process!(el); el.globalID = vcat([n.globalID for n in el.nodes]...)
+    end
+    ntop = nx + 1
+    loads = Asap.AbstractLoad[Asap.NodeForce(node(i, ny), [0.0, -P/ntop, 0.0]u"N") for i in 0:nx]
+    model = Asap.Model(nodes, els, loads); Asap.process!(model); Asap.solve!(model)
+    δ = sum(model.u[node(i, ny).globalID[2]] for i in 0:nx) / ntop
+    return P * lc / abs(δ)
+end
+
+function b_frame_buckling_Pcr(lc, A, Ix, Iy, E, G, Pa; n_elem=12)
+    sec = Asap.Section(A*u"m^2", E*u"Pa", G*u"Pa", Ix*u"m^4", Iy*u"m^4", 1e-4*u"m^4")
+    nodes = Asap.Node[]
+    for i in 0:n_elem
+        z  = i * lc / n_elem
+        fx = i == 0 ? :pinned : i == n_elem ? [false,false,true,true,true,true] : :free
+        push!(nodes, Asap.Node([0.0u"m", 0.0u"m", z*u"m"], fx))
+    end
+    els = [Asap.Element(nodes[i], nodes[i+1], sec, :col) for i in 1:n_elem]
+    loads = Asap.AbstractLoad[Asap.NodeForce(nodes[end], [0.0, 0.0, -Pa]u"N")]
+    res = Asap.solve_buckling!(Asap.Model(nodes, els, loads); n=4)
+    return res.load_factors[1] * Pa
+end
+
+w_table_head("analytic")
+b_EA_fea = b_shell_axial_EA(b_b, b_lc, b_h, b_E, b_nu, 1.0e6)
+s1b &= w_compare("Shell axial stiffness E·Ag", b_EA_fea, b_E*b_Ag; tol=5e-2, unit="N")
+b_Pcr_fea = b_frame_buckling_Pcr(b_lc, b_Ag, b_Istrong, b_Iweak, b_E, b_G, 1.0e6)
+b_Pcr_eul = π^2 * b_E * b_Iweak / b_lc^2
+s1b &= w_compare("Frame buckling vs Euler", b_Pcr_fea/KIP, b_Pcr_eul/KIP; tol=5e-2, unit="kip")
+w_info("φPn / Pcr_fea (conservative < 1)", bcap.φPn/b_Pcr_fea)
+buck_ok = bcap.φPn < b_Pcr_fea && bcap.Pn < b_Pcr_fea
+@printf("    φPn=%.1f kip < Pcr=%.1f kip (strength below elastic buckling)  %s\n",
+        bcap.φPn/KIP, b_Pcr_fea/KIP, _mark(buck_ok))
+s1b &= buck_ok
+
+w_sub_header("3B.3  Applicability gates + demand-coupled CheckResult")
+b_conc = Concrete(b_E*u"Pa", b_fc*u"Pa", RHOC*u"kg/m^3", b_nu, 0.1)
+b_ws   = WallSection(b_b*u"m", b_h*u"m")
+chkb = check_wall_bearing_empirical(b_ws, b_conc, (60*KIP)*u"N"; e=0.0u"m",
+                                    lc=b_lc*u"m", boundary=:pinned)
+@printf("    Pu=60 kip  φPn=%.1f kip  utilization=%.3f  clause=%s  %s\n",
+        chkb.capacity/KIP, chkb.ratio, chkb.code_clause, _mark(chkb.passed))
+# Each gate must FAIL as inapplicable (never a silent pass).
+ge = check_wall_bearing_empirical(b_ws, b_conc, (60*KIP)*u"N"; e=(b_h/5)*u"m", lc=b_lc*u"m", boundary=:pinned)
+gs = check_wall_bearing_empirical(b_ws, b_conc, (60*KIP)*u"N"; e=0.0u"m", lc=(32*b_h)*u"m", boundary=:pinned)
+gt = check_wall_bearing_empirical(WallSection(b_b*u"m", (3*IN)*u"m"), b_conc, (60*KIP)*u"N"; e=0.0u"m", lc=b_lc*u"m", boundary=:pinned)
+gates_b_ok = chkb.passed && !ge.passed && !gs.passed && !gt.passed &&
+             ge.code_clause == "ACI 318-19 11.5.3.1" && gt.code_clause == "ACI 318-19 11.3.1.1"
+println("    gates: middle-third (e≤h/6) · slenderness (klc/32h<1) · min-thickness  ", _mark(gates_b_ok))
+s1b &= chkb.passed && chkb.code_clause == "ACI 318-19 11.5.3.1" && gates_b_ok
+_w_status["S1 bearing wall (§11.5.3)"] = _mark(s1b)
+w_note("Hand calc + FEA agree: shell reproduces E·Ag (<0.2%), frame reproduces Euler (<1%), φPn≈0.12·Pcr.")
+w_note("Gates are a HARD boundary: e>h/6, klc/32h≥1, or h<Table 11.3.1.1 min ⇒ method refused (use general/§11.8).")
+
+# ═══════════════════════════════════════════════════════════════════════════
 # 4. S2 — Reduced rigid-diaphragm distribution
 # ═══════════════════════════════════════════════════════════════════════════
 w_section_header("4.0  S2 — Reduced Rigid-Diaphragm Distribution (3 DOF/story)")
@@ -429,7 +532,8 @@ println("    S1  Analytic in-plane stiffness (ACI eff. inertia), linear in t, an
 println("    S1  ACI 318-19 §11.5.4.3 in-plane shear + §11.6.2 min reinf, demand-decoupled")
 println("    S1  ACI 318-19 §22.2 in-plane axial–flexure P–M: Cardenas closed form + strain-compat diagram")
 println("    S1  ACI 318-19 §11.8 out-of-plane slender wall: second-order P-Δ, Mcr, bilinear Δs, §11.8.1.1 gates")
-println("    S2  ReducedDiaphragmEvaluator: 3 DOF/story, rank-1/wall, skew + torsion, analytic sensitivities")
+println("    S1  ACI 318-19 §11.5.3 simplified bearing wall: closed-form φPn + middle-third/min-thickness gates")
+    println("    S2  ReducedDiaphragmEvaluator: 3 DOF/story, rank-1/wall, skew + torsion, analytic sensitivities")
 println("    S3  FEMLateralEvaluator: Asap ShellTri3 walls + stiff diaphragm, exact base-story shear via reactions")
     println("    S4  WallLayoutNLPProblem (SIMP density) · MinCarbon/MinDrift/Weighted · IPOPT (existing solver)")
 

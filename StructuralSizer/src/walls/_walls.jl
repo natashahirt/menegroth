@@ -16,6 +16,9 @@
 #                            slender walls (tilt-up / precast): second-order P-Δ
 #                            moment magnification, Mcr, φMn, bilinear service
 #                            deflection, and §11.8.1.1 applicability gates.
+#   bearing.jl           S1  ACI 318-19 §11.5.3 simplified / empirical bearing-wall
+#                            method: closed-form axial capacity with slenderness
+#                            knock-down + middle-third / min-thickness gates.
 #   lateral_evaluator.jl S2  AbstractLateralEvaluator interface + differentiable
 #                            ReducedDiaphragmEvaluator (3 DOF/story, rank-1/wall,
 #                            analytic sensitivities) — the cheap tier.
@@ -33,6 +36,7 @@ include("wall_section.jl")
 include("checker.jl")
 include("flexure.jl")
 include("out_of_plane.jl")
+include("bearing.jl")
 include("lateral_evaluator.jl")
 include("fem_evaluator.jl")
 include("layout_problem.jl")

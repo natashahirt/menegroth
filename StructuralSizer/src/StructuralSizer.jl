@@ -395,6 +395,10 @@ export check_wall_inplane_flexure, wall_pm_diagram
 export oop_slender_wall_strength_si, oop_service_deflection_si
 export oop_slender_wall_gates, check_wall_out_of_plane_slender
 
+# --- Structural walls: ACI simplified / empirical bearing wall §11.5.3 (S1) ---
+export wall_empirical_k, wall_empirical_axial_capacity_si, wall_min_thickness_si
+export check_wall_bearing_empirical, WALL_PHI_BEARING
+
 # --- Structural walls: lateral evaluators (S2 reduced, S3 FEM) ---
 export AbstractLateralEvaluator, evaluate_lateral
 export WallLine, StoryLoad, LateralResult

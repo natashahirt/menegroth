@@ -328,8 +328,9 @@ end
 end
 
 @testset "§11.5.3 empirical bearing wall — hand calc + applicability gates" begin
-    # Independent hand calculation of Eq. (11.5.3.1) as the known-answer oracle
-    # (no corpus worked example — the corpus "bearing wall" is a §11.8 case):
+    # Self-consistency hand calc of Eq. (11.5.3.1) + full gate coverage. (The
+    # primary independent numeric oracle is McCormac Ex. 18.1 — see the textbook
+    # oracle testset below; this case exercises k = 1.0 and every gate.)
     #   f'c = 4000 psi, 8 in wall, 12 in strip, clear height lc = 15 ft, braced
     #   pinned–pinned (k = 1.0), φ = 0.65.
     #     k·lc/(32·h) = 180/256 = 0.703125
@@ -409,9 +410,47 @@ end
     @test !chk_lu.passed && chk_lu.code_clause == "ACI 318-19 11.3.1.1"
 end
 
+@testset "§11.5.3 empirical bearing wall — McCormac Ex. 18.1 textbook oracle" begin
+    # Independent numeric oracle: McCormac & Brown, Design of Reinforced Concrete
+    # 9th ed., Example 18.1 (ACI 318 §14.5.2 Eq. 14-1 = ACI 318-19 §11.5.3.1).
+    # ZK extraction: mccormac-de-bearing-wall-empirical-aci318-11.
+    #   Precast roof beams @ 7 ft o.c., bearing 10 in; wall braced top/bottom +
+    #   rotation-restrained at footing ⇒ k = 0.8; lc = 16 ft; f'c = 3000 psi;
+    #   beam reaction D = 30 k, L = 18 k. Textbook results: h_min = 7.68 in,
+    #   effective length = 42 in, Ag = 8×42 = 336 in², φPnw = 230.6 k > Pu = 64.8 k.
+    fc = 3000 * _PSI; lc = 16 * _FT; h = 8 * _IN
+
+    # Minimum thickness (§14.5.3.1 / Table 11.3.1.1): (1/25)·16 ft = 7.68 in.
+    @test isapprox(wall_min_thickness_si(20*_FT, lc), 7.68*_IN; rtol=1e-4)
+
+    # Effective horizontal length per concentrated load (§14.2.4):
+    # min(84 in c/c, 10 + 4·8 = 42 in) = 42 in ⇒ Ag = 8 × 42 = 336 in².
+    l_eff = min(84*_IN, (10 + 4*8)*_IN)
+    @test isapprox(l_eff, 42*_IN; rtol=1e-12)
+    Ag = h * l_eff
+
+    # Design axial strength — the oracle. k = 0.8 (Table 18.1, restrained).
+    cap = wall_empirical_axial_capacity_si(fc, lc, h, Ag; k=0.8, φ=0.65)
+    @test isapprox(cap.slender, 0.60; atol=1e-3)      # k·lc/32h = 153.6/256
+    @test isapprox(cap.R, 0.64; atol=1e-3)            # 1 − 0.60²
+    @test isapprox(cap.φPn / _KIP, 230.6; atol=0.15)  # McCormac: 230.6 k
+
+    # Factored beam reaction and the full demand-coupled check.
+    Pu = (1.2*30 + 1.6*18) * _KIP
+    @test isapprox(Pu / _KIP, 64.8; rtol=1e-12)
+    conc_mc = Concrete(24.855e9u"Pa", fc*u"Pa", 2400u"kg/m^3", 0.2, 0.1)
+    ws_mc   = WallSection((l_eff)*u"m", h*u"m")
+    chk = check_wall_bearing_empirical(ws_mc, conc_mc, Pu*u"N"; e=0.0u"m",
+                                       lc=lc*u"m", lu=(20*_FT)*u"m", boundary=:restrained)
+    @test chk.passed
+    @test isapprox(chk.capacity / _KIP, 230.6; atol=0.15)
+    @test isapprox(chk.ratio, 64.8 / 230.6; atol=2e-3)
+    @test chk.code_clause == "ACI 318-19 11.5.3.1"
+end
+
 @testset "§11.5.3 empirical bearing wall — Asap FEA cross-check" begin
-    # No corpus oracle exists, so cross-check the two physical ingredients of
-    # Eq. (11.5.3.1) with an Asap FEA of the same panel:
+    # Beyond the McCormac Ex. 18.1 numeric oracle above, independently cross-check
+    # the two physical ingredients of Eq. (11.5.3.1) with an Asap FEA of the panel:
     #   (1) a shell (membrane) model reproduces the axial stiffness E·Ag — the
     #       material/area basis of the 0.55·f'c·Ag squash term;
     #   (2) a beam-column (frame) model reproduces the elastic (Euler) buckling

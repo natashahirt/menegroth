@@ -288,10 +288,11 @@ w_note("boundary: non-TC, φMn<Mcr, Pu>0.06f'cAg, Δs>lc/150, or P-Δ instabilit
 # ═══════════════════════════════════════════════════════════════════════════
 # 3B. S1 — ACI 318-19 §11.5.3 simplified / empirical bearing wall
 # ═══════════════════════════════════════════════════════════════════════════
-# No independent worked example exists in the corpus (the corpus "bearing wall"
-# is a §11.8 case), so this method is validated against an independent hand calc
-# of Eq. (11.5.3.1) AND an Asap FEA of the same panel (a textbook oracle —
-# McCormac/Wight — is being sourced to add later).
+# Validated against an independent textbook numeric oracle — McCormac & Brown,
+# Design of Reinforced Concrete 9th ed., Example 18.1 (ACI 318 §14.5.2 Eq. 14-1
+# = ACI 318-19 §11.5.3.1; corpus: mccormac-9e / ZK
+# mccormac-de-bearing-wall-empirical-aci318-11) — plus a self-consistency hand
+# calc and an Asap FEA of the two physical ingredients.
 w_section_header("3B.0  S1 — ACI 318-19 §11.5.3 Simplified / Empirical Bearing Wall")
 w_note("Closed-form axial capacity φPn = 0.55·φ·f'c·Ag·[1−(k·lc/32h)²] with middle-third + min-thickness gates.")
 
@@ -300,18 +301,41 @@ b_G  = b_E / (2 * (1 + b_nu))
 b_b  = 12 * IN; b_h = 8 * IN; b_lc = 15 * FT
 b_Ag = b_b * b_h; b_Iweak = b_b * b_h^3 / 12; b_Istrong = b_h * b_b^3 / 12
 
-w_sub_header("3B.1  Independent hand calc — Eq. (11.5.3.1) known-answer")
-w_note("12-in strip: h=8 in, lc=15 ft, braced pinned–pinned (k=1.0), f'c=4000 psi, φ=0.65")
-w_note("k·lc/32h = 180/256 = 0.70313 ⇒ R = 1−R² = 0.50562 ⇒ Pn = 0.55·4000·96·R")
-w_table_head("hand calc")
+w_sub_header("3B.1  McCormac Ex. 18.1 textbook oracle (ACI §14.5.2 Eq. 14-1)")
+w_note("Precast roof beams @7 ft o.c., bearing 10 in; braced + rotation-restrained (k=0.8);")
+w_note("lc=16 ft, f'c=3000 psi, D=30 k, L=18 k. Effective length min(84, 10+4·8)=42 in ⇒ Ag=336 in².")
+w_table_head("McCormac Ex.18.1")
 s1b = true
+mc_fc = 3000 * PSI; mc_lc = 16 * FT; mc_h = 8 * IN
+mc_leff = min(84 * IN, (10 + 4*8) * IN); mc_Ag = mc_h * mc_leff
+mccap = wall_empirical_axial_capacity_si(mc_fc, mc_lc, mc_h, mc_Ag; k=0.8, φ=0.65)
+s1b &= w_compare("Min thickness (1/25·16 ft)", wall_min_thickness_si(20*FT, mc_lc)/IN, 7.68; tol=1e-3, unit="in")
+s1b &= w_compare("Effective length min(84,42)", mc_leff/IN, 42.0; tol=1e-9, unit="in")
+s1b &= w_compare("Slenderness k·lc/32h", mccap.slender, 0.60; tol=2e-3)
+s1b &= w_compare("Knock-down R = 1−0.6²", mccap.R, 0.64; tol=2e-3)
+s1b &= w_compare("Design φPnw (oracle)", mccap.φPn/KIP, 230.6; tol=2e-3, unit="kip")
+mc_Pu = (1.2*30 + 1.6*18) * KIP
+s1b &= w_compare("Factored reaction Pu", mc_Pu/KIP, 64.8; tol=1e-9, unit="kip")
+# Pin the oracle through the REAL code path: boundary=:restrained exercises the
+# Table 11.5.3.2 k-factor lookup (k=0.8) and the default φ (WALL_PHI_BEARING),
+# so this row alone catches a broken k-table or φ default.
+mc_conc = Concrete(24.855e9u"Pa", mc_fc*u"Pa", RHOC*u"kg/m^3", 0.20, 0.1)
+mc_chk  = check_wall_bearing_empirical(WallSection(mc_leff*u"m", mc_h*u"m"), mc_conc,
+                                       mc_Pu*u"N"; e=0.0u"m", lc=mc_lc*u"m",
+                                       lu=(20*FT)*u"m", boundary=:restrained)
+s1b &= w_compare("φPnw via :restrained + default φ", mc_chk.capacity/KIP, 230.6; tol=2e-3, unit="kip")
+@printf("    φPnw = %.1f kip > Pu = %.1f kip, util = %.3f, clause %s (McCormac: 230.6 > 64.8)  %s\n",
+        mc_chk.capacity/KIP, mc_Pu/KIP, mc_chk.ratio, mc_chk.code_clause, _mark(mc_chk.passed))
+s1b &= mc_chk.passed && mc_chk.code_clause == "ACI 318-19 11.5.3.1"
+
+w_sub_header("3B.2  Self-consistency hand calc + Asap FEA cross-check")
+w_note("Hand calc (k=1.0): 12-in strip, h=8 in, lc=15 ft ⇒ k·lc/32h=0.70313, R=0.50562, φPn=69.41 kip.")
 bcap = wall_empirical_axial_capacity_si(b_fc, b_lc, b_h, b_Ag; k=1.0, φ=0.65)
+w_table_head("hand calc")
 s1b &= w_compare("Slenderness k·lc/32h", bcap.slender, 180/256; tol=1e-4)
 s1b &= w_compare("Knock-down R", bcap.R, 1-(180/256)^2; tol=1e-4)
-s1b &= w_compare("Nominal Pn", bcap.Pn/KIP, 106.79; tol=1e-3, unit="kip")
 s1b &= w_compare("Design φPn (φ=0.65)", bcap.φPn/KIP, 69.41; tol=1e-3, unit="kip")
-
-w_sub_header("3B.2  Asap FEA cross-check (no corpus oracle)")
+w_note("FEA of the two physical ingredients:")
 w_note("(1) shell membrane model reproduces E·Ag (material/area basis of 0.55·f'c·Ag);")
 w_note("(2) frame beam-column model reproduces Euler buckling; φPn sits safely below it.")
 
@@ -385,7 +409,7 @@ gates_b_ok = chkb.passed && !ge.passed && !gs.passed && !gt.passed &&
 println("    gates: middle-third (e≤h/6) · slenderness (klc/32h<1) · min-thickness  ", _mark(gates_b_ok))
 s1b &= chkb.passed && chkb.code_clause == "ACI 318-19 11.5.3.1" && gates_b_ok
 _w_status["S1 bearing wall (§11.5.3)"] = _mark(s1b)
-w_note("Hand calc + FEA agree: shell reproduces E·Ag (<0.2%), frame reproduces Euler (<1%), φPn≈0.12·Pcr.")
+w_note("Reproduces McCormac Ex. 18.1 (φPnw=230.6 k) exactly; FEA confirms E·Ag (<0.2%), Euler (<1%), φPn≈0.12·Pcr.")
 w_note("Gates are a HARD boundary: e>h/6, klc/32h≥1, or h<Table 11.3.1.1 min ⇒ method refused (use general/§11.8).")
 
 # ═══════════════════════════════════════════════════════════════════════════

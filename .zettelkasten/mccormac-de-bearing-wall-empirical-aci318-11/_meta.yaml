@@ -1,0 +1,60 @@
+abstract: 'Worked design example (McCormac & Brown, Design of Reinforced Concrete,
+  9th ed., Example 18.1) of a load-bearing concrete wall by the ACI empirical
+  method (ACI 318 §14.5.2, Eq. 14-1 — the direct predecessor of ACI 318-19
+  §11.5.3.1). Supplies an independent numeric known-answer oracle for the
+  simplified/empirical bearing-wall axial capacity implemented in
+  StructuralSizer/src/walls/bearing.jl.'
+authors:
+- McCormac, Jack C.
+- Brown, Russell H.
+content_hash: 58dff2114260ca9eed9d0ed367827d0ecdc5a253d8656d7de3c0b7d4bcd39e2d
+coverage:
+  agent: extracted
+  human: none
+doc_type: example
+doi: ''
+name: mccormac-de-bearing-wall-empirical-aci318-11
+source_path: /Users/tashahirt/MIT Dropbox/Natasha Hirt/_MIT/DS Research/Synthetic_Buildings/menegroth/corpus/text/textbooks/concrete/mccormac-9e.txt
+title: Load-Bearing Concrete Wall — Empirical Design Method (McCormac 9e, Example 18.1; ACI 318 §14.5.2 Eq. 14-1)
+venue: 'McCormac & Brown, Design of Reinforced Concrete, 9th ed. (Wiley, 2014)'
+year: 2014
+extraction:
+  schema: building-code-extraction
+  strict: true
+  grounded: true
+  tags:
+  - scope
+  - provision
+  - equation
+  - parameters
+  - applicability
+  - example
+  - commentary
+  contexts:
+  - project: menegroth
+    synthesis_graph: aci-318-canon
+    schema: building-code-extraction
+    strict: true
+    grounded: true
+    tags:
+    - scope
+    - provision
+    - equation
+    - parameters
+    - applicability
+    - example
+    - commentary
+    structure: &id001
+      synthesis_graph: aci-318-canon
+      apex_id: 20260713-0610-aci-318-canon
+      attach_relation: input-to
+      apex_relation: component-of
+      dimension_nodes:
+        applicability: 20260713-0610-aci-318-applicability
+        commentary: 20260713-0610-aci-318-commentary
+        equation: 20260713-0610-aci-318-equation
+        example: 20260713-0610-aci-318-example
+        parameters: 20260713-0610-aci-318-parameters
+        provision: 20260713-0610-aci-318-provision
+        scope: 20260713-0610-aci-318-scope
+  structure: *id001

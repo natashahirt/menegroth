@@ -32,14 +32,19 @@
 # pass) — the wall must then be designed by the general §11.5.2/§10 sectional
 # method or the §11.8 alternative method (outside this checker's scope).
 #
-# VALIDATION (no independent worked-example oracle in the corpus — the corpus
-# "bearing wall" example is actually a §11.8 case). Cross-checked instead by:
-#   (1) an independent hand calculation of Eq. (11.5.3.1), and
-#   (2) an Asap shell FEA of the same panel (test/walls): the FEA reproduces the
-#       axial material/geometry basis (σ = P/Ag) and its effective-stiffness
-#       Euler load confirms φPn is a conservative fraction of elastic buckling
-#       and that the §11.5.3 slenderness knock-down tracks the FEA reduction.
-# (canon note w0000016; a textbook oracle — McCormac/Wight — is being sourced.)
+# VALIDATION. The primary known-answer is an author-independent textbook worked
+# example — McCormac & Brown, Design of Reinforced Concrete 9th ed., Example 18.1
+# (ACI 318 §14.5.2 Eq. 14-1, the formula-identical predecessor of §11.5.3.1):
+# k=0.8, f'c=3000 psi, lc=16 ft, Ag=8×42=336 in² ⇒ φPnw = 230.6 k, reproduced to
+# <0.1 kip (test/walls; corpus mccormac-9e; ZK
+# mccormac-de-bearing-wall-empirical-aci318-11). Because that example uses the
+# same closed form, it validates the IMPLEMENTATION (coefficient, φ, k-table,
+# slenderness), not the equation choice — which is separately grounded in the
+# ACI 318-11 §14.5.2 corpus text. Supplemented by an independent hand calc and an
+# Asap FEA of the two physical ingredients: a shell model reproduces the axial
+# material/geometry basis (E·Ag) and a frame model reproduces the Euler buckling
+# load, confirming φPn is a conservative fraction of it and that the slenderness
+# knock-down tracks the FEA reduction. (canon note w0000016.)
 #
 # Bare-SI cores (Pa, m, N) mirror flexure.jl / out_of_plane.jl; a Unitful wrapper
 # resolves the section + material and returns a CheckResult.
@@ -157,10 +162,10 @@ method does not apply; use a general method), never a silent pass:
  4. strength                Eq. (11.5.3.1)   (`Pu ≤ φPn`)
 
 The passing result carries clause `"ACI 318-19 11.5.3.1"` and ratio `Pu/φPn`.
-(canon note w0000016; equation = ACI 318-11 §14.5.2 Eq. 14-1 from the corpus;
-validated by an independent hand calc of the closed form + an Asap FEA
-cross-check of its two ingredients — see test/walls. A fully independent
-textbook numeric oracle (McCormac / Wight) is still pending.)
+(canon note w0000016; equation = ACI 318-11 §14.5.2 Eq. 14-1 from the corpus.
+Known-answer oracle: McCormac 9e Example 18.1, φPnw = 230.6 k — an
+author-independent hand-worked instance of the same closed form; the equation
+form itself is corpus-grounded and the physical ingredients are FEA-checked.)
 """
 function check_wall_bearing_empirical(ws::WallSection, concrete, Pu;
                                       e=0.0u"m", lc, lu=nothing,

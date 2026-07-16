@@ -1,0 +1,197 @@
+{
+  "id": "ported-sdpws-canon",
+  "owner": {
+    "type": "project",
+    "name": "menegroth"
+  },
+  "title": "sdpws: Canon",
+  "state": "spine",
+  "row_axis": {
+    "kind": "group",
+    "ref": "",
+    "include": [],
+    "strategy": "link",
+    "relation": "input-to",
+    "direction": "incoming",
+    "apex": "",
+    "instruction": "",
+    "graph": "sdpws-canon"
+  },
+  "columns": [
+    {
+      "key": "applicability",
+      "label": "sdpws - applicability",
+      "type": "extractive",
+      "backing": "schema_tag",
+      "ref": "applicability",
+      "prompt": "",
+      "relation": "input-to",
+      "apex": "20260716-0600-sdpws-applicability",
+      "graph": "sdpws-canon"
+    },
+    {
+      "key": "commentary",
+      "label": "sdpws - commentary",
+      "type": "extractive",
+      "backing": "schema_tag",
+      "ref": "commentary",
+      "prompt": "",
+      "relation": "input-to",
+      "apex": "20260716-0600-sdpws-commentary",
+      "graph": "sdpws-canon"
+    },
+    {
+      "key": "equation",
+      "label": "sdpws - equation",
+      "type": "extractive",
+      "backing": "schema_tag",
+      "ref": "equation",
+      "prompt": "",
+      "relation": "input-to",
+      "apex": "20260716-0600-sdpws-equation",
+      "graph": "sdpws-canon"
+    },
+    {
+      "key": "example",
+      "label": "sdpws - example",
+      "type": "extractive",
+      "backing": "schema_tag",
+      "ref": "example",
+      "prompt": "",
+      "relation": "input-to",
+      "apex": "20260716-0600-sdpws-example",
+      "graph": "sdpws-canon"
+    },
+    {
+      "key": "parameters",
+      "label": "sdpws - parameters",
+      "type": "extractive",
+      "backing": "schema_tag",
+      "ref": "parameters",
+      "prompt": "",
+      "relation": "input-to",
+      "apex": "20260716-0600-sdpws-parameters",
+      "graph": "sdpws-canon"
+    },
+    {
+      "key": "provision",
+      "label": "sdpws - provision",
+      "type": "extractive",
+      "backing": "schema_tag",
+      "ref": "provision",
+      "prompt": "",
+      "relation": "input-to",
+      "apex": "20260716-0600-sdpws-provision",
+      "graph": "sdpws-canon"
+    },
+    {
+      "key": "scope",
+      "label": "sdpws - scope",
+      "type": "extractive",
+      "backing": "schema_tag",
+      "ref": "scope",
+      "prompt": "",
+      "relation": "input-to",
+      "apex": "20260716-0600-sdpws-scope",
+      "graph": "sdpws-canon"
+    }
+  ],
+  "matrix_view": {
+    "cols_level": null,
+    "rollup": true
+  },
+  "overlay": {
+    "member_adds": [],
+    "member_removes": [],
+    "cell_overrides": [],
+    "attributions": []
+  },
+  "spine_ref": "sdpws-canon",
+  "last_spine_ref": "",
+  "lens_definition": null,
+  "schema": {
+    "name": "sdpws-canon",
+    "description": "Schema reverse-engineered from ported spine 'sdpws: Canon'.",
+    "grounded": true,
+    "strict": true,
+    "link_relation": "related",
+    "hub": null,
+    "dimensions": [
+      {
+        "tag": "applicability",
+        "desc": "sdpws - applicability",
+        "note_type": "concept",
+        "materialize": true
+      },
+      {
+        "tag": "commentary",
+        "desc": "sdpws - commentary",
+        "note_type": "concept",
+        "materialize": true
+      },
+      {
+        "tag": "equation",
+        "desc": "sdpws - equation",
+        "note_type": "concept",
+        "materialize": true
+      },
+      {
+        "tag": "example",
+        "desc": "sdpws - example",
+        "note_type": "concept",
+        "materialize": true
+      },
+      {
+        "tag": "parameters",
+        "desc": "sdpws - parameters",
+        "note_type": "concept",
+        "materialize": true
+      },
+      {
+        "tag": "provision",
+        "desc": "sdpws - provision",
+        "note_type": "concept",
+        "materialize": true
+      },
+      {
+        "tag": "scope",
+        "desc": "sdpws - scope",
+        "note_type": "concept",
+        "materialize": true
+      }
+    ],
+    "tags": [
+      "applicability",
+      "commentary",
+      "equation",
+      "example",
+      "parameters",
+      "provision",
+      "scope"
+    ],
+    "relations": [],
+    "synthesis": {
+      "graph": "sdpws-canon",
+      "node": {
+        "type": "synthesis",
+        "title_template": "sdpws: Canon",
+        "link_relation": "related"
+      },
+      "dimension_node": {
+        "type": "concept",
+        "title_template": "{label} - {dimension}",
+        "attach_relation": "input-to",
+        "relation": "component-of"
+      },
+      "spec": null
+    }
+  },
+  "review": "",
+  "table_id": "",
+  "migrated": false,
+  "signature": "",
+  "synced_sig": "",
+  "generated_at": "",
+  "created_at": "2026-07-16T22:04:38Z",
+  "updated_at": "2026-07-16T22:04:38Z"
+}

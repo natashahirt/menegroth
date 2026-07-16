@@ -5,6 +5,32 @@
   },
   "organizations": [
     {
+      "id": "ported-sdpws-canon",
+      "title": "sdpws: Canon",
+      "state": "spine",
+      "spine_ref": "sdpws-canon",
+      "column_count": 7,
+      "row_axis_kind": "group",
+      "review": "",
+      "table_id": "",
+      "has_schema": true,
+      "generated_at": "",
+      "updated_at": "2026-07-16T22:04:38Z"
+    },
+    {
+      "id": "ported-apa-prg-320-canon",
+      "title": "apa-prg-320: Canon",
+      "state": "spine",
+      "spine_ref": "apa-prg-320-canon",
+      "column_count": 7,
+      "row_axis_kind": "group",
+      "review": "",
+      "table_id": "",
+      "has_schema": true,
+      "generated_at": "",
+      "updated_at": "2026-07-16T22:04:38Z"
+    },
+    {
       "id": "ported-csa-a23-3-canon",
       "title": "csa-a23-3: Canon",
       "state": "spine",

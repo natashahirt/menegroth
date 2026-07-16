@@ -25,7 +25,5 @@ sources:
 - csa-de-cantilever-beam-a23-3-14
 - csa-de-moment-redistribution-a23-3-14
 - csa-de-continuous-beam-a23-3-14
-- csa-a23-3-canon
 - mccormac-de-bearing-wall-empirical-aci318-11
 - asce-7-22
-- asce-7-canon

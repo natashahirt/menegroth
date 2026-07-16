@@ -1,0 +1,197 @@
+{
+  "id": "ported-csa-a23-3-canon",
+  "owner": {
+    "type": "project",
+    "name": "menegroth"
+  },
+  "title": "csa-a23-3: Canon",
+  "state": "spine",
+  "row_axis": {
+    "kind": "group",
+    "ref": "",
+    "include": [],
+    "strategy": "link",
+    "relation": "input-to",
+    "direction": "incoming",
+    "apex": "",
+    "instruction": "",
+    "graph": "csa-a23-3-canon"
+  },
+  "columns": [
+    {
+      "key": "applicability",
+      "label": "csa-a23-3 - applicability",
+      "type": "extractive",
+      "backing": "schema_tag",
+      "ref": "applicability",
+      "prompt": "",
+      "relation": "input-to",
+      "apex": "20260714-2204-csa-a23-3-applicability",
+      "graph": "csa-a23-3-canon"
+    },
+    {
+      "key": "commentary",
+      "label": "csa-a23-3 - commentary",
+      "type": "extractive",
+      "backing": "schema_tag",
+      "ref": "commentary",
+      "prompt": "",
+      "relation": "input-to",
+      "apex": "20260714-2204-csa-a23-3-commentary",
+      "graph": "csa-a23-3-canon"
+    },
+    {
+      "key": "equation",
+      "label": "csa-a23-3 - equation",
+      "type": "extractive",
+      "backing": "schema_tag",
+      "ref": "equation",
+      "prompt": "",
+      "relation": "input-to",
+      "apex": "20260714-2204-csa-a23-3-equation",
+      "graph": "csa-a23-3-canon"
+    },
+    {
+      "key": "example",
+      "label": "csa-a23-3 - example",
+      "type": "extractive",
+      "backing": "schema_tag",
+      "ref": "example",
+      "prompt": "",
+      "relation": "input-to",
+      "apex": "20260714-2204-csa-a23-3-example",
+      "graph": "csa-a23-3-canon"
+    },
+    {
+      "key": "parameters",
+      "label": "csa-a23-3 - parameters",
+      "type": "extractive",
+      "backing": "schema_tag",
+      "ref": "parameters",
+      "prompt": "",
+      "relation": "input-to",
+      "apex": "20260714-2204-csa-a23-3-parameters",
+      "graph": "csa-a23-3-canon"
+    },
+    {
+      "key": "provision",
+      "label": "csa-a23-3 - provision",
+      "type": "extractive",
+      "backing": "schema_tag",
+      "ref": "provision",
+      "prompt": "",
+      "relation": "input-to",
+      "apex": "20260714-2204-csa-a23-3-provision",
+      "graph": "csa-a23-3-canon"
+    },
+    {
+      "key": "scope",
+      "label": "csa-a23-3 - scope",
+      "type": "extractive",
+      "backing": "schema_tag",
+      "ref": "scope",
+      "prompt": "",
+      "relation": "input-to",
+      "apex": "20260714-2204-csa-a23-3-scope",
+      "graph": "csa-a23-3-canon"
+    }
+  ],
+  "matrix_view": {
+    "cols_level": null,
+    "rollup": true
+  },
+  "overlay": {
+    "member_adds": [],
+    "member_removes": [],
+    "cell_overrides": [],
+    "attributions": []
+  },
+  "spine_ref": "csa-a23-3-canon",
+  "last_spine_ref": "",
+  "lens_definition": null,
+  "schema": {
+    "name": "csa-a23-3-canon",
+    "description": "Schema reverse-engineered from ported spine 'csa-a23-3: Canon'.",
+    "grounded": true,
+    "strict": true,
+    "link_relation": "related",
+    "hub": null,
+    "dimensions": [
+      {
+        "tag": "applicability",
+        "desc": "csa-a23-3 - applicability",
+        "note_type": "concept",
+        "materialize": true
+      },
+      {
+        "tag": "commentary",
+        "desc": "csa-a23-3 - commentary",
+        "note_type": "concept",
+        "materialize": true
+      },
+      {
+        "tag": "equation",
+        "desc": "csa-a23-3 - equation",
+        "note_type": "concept",
+        "materialize": true
+      },
+      {
+        "tag": "example",
+        "desc": "csa-a23-3 - example",
+        "note_type": "concept",
+        "materialize": true
+      },
+      {
+        "tag": "parameters",
+        "desc": "csa-a23-3 - parameters",
+        "note_type": "concept",
+        "materialize": true
+      },
+      {
+        "tag": "provision",
+        "desc": "csa-a23-3 - provision",
+        "note_type": "concept",
+        "materialize": true
+      },
+      {
+        "tag": "scope",
+        "desc": "csa-a23-3 - scope",
+        "note_type": "concept",
+        "materialize": true
+      }
+    ],
+    "tags": [
+      "applicability",
+      "commentary",
+      "equation",
+      "example",
+      "parameters",
+      "provision",
+      "scope"
+    ],
+    "relations": [],
+    "synthesis": {
+      "graph": "csa-a23-3-canon",
+      "node": {
+        "type": "synthesis",
+        "title_template": "csa-a23-3: Canon",
+        "link_relation": "related"
+      },
+      "dimension_node": {
+        "type": "concept",
+        "title_template": "{label} - {dimension}",
+        "attach_relation": "input-to",
+        "relation": "component-of"
+      },
+      "spec": null
+    }
+  },
+  "review": "",
+  "table_id": "",
+  "migrated": false,
+  "signature": "",
+  "synced_sig": "",
+  "generated_at": "",
+  "created_at": "2026-07-16T02:27:58Z",
+  "updated_at": "2026-07-16T02:27:58Z"
+}

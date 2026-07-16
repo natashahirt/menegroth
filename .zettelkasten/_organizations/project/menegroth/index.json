@@ -5,6 +5,32 @@
   },
   "organizations": [
     {
+      "id": "ported-csa-a23-3-canon",
+      "title": "csa-a23-3: Canon",
+      "state": "spine",
+      "spine_ref": "csa-a23-3-canon",
+      "column_count": 7,
+      "row_axis_kind": "group",
+      "review": "",
+      "table_id": "",
+      "has_schema": true,
+      "generated_at": "",
+      "updated_at": "2026-07-16T02:27:58Z"
+    },
+    {
+      "id": "ported-asce-7-canon",
+      "title": "asce-7: Canon",
+      "state": "spine",
+      "spine_ref": "asce-7-canon",
+      "column_count": 7,
+      "row_axis_kind": "group",
+      "review": "",
+      "table_id": "",
+      "has_schema": true,
+      "generated_at": "",
+      "updated_at": "2026-07-16T02:27:58Z"
+    },
+    {
       "id": "ported-aisc-360-canon",
       "title": "aisc-360: Canon",
       "state": "spine",

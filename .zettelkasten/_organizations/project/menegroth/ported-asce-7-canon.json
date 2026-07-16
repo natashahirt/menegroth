@@ -1,0 +1,197 @@
+{
+  "id": "ported-asce-7-canon",
+  "owner": {
+    "type": "project",
+    "name": "menegroth"
+  },
+  "title": "asce-7: Canon",
+  "state": "spine",
+  "row_axis": {
+    "kind": "group",
+    "ref": "",
+    "include": [],
+    "strategy": "link",
+    "relation": "input-to",
+    "direction": "incoming",
+    "apex": "",
+    "instruction": "",
+    "graph": "asce-7-canon"
+  },
+  "columns": [
+    {
+      "key": "applicability",
+      "label": "asce-7 - applicability",
+      "type": "extractive",
+      "backing": "schema_tag",
+      "ref": "applicability",
+      "prompt": "",
+      "relation": "input-to",
+      "apex": "20260715-2120-asce-7-applicability",
+      "graph": "asce-7-canon"
+    },
+    {
+      "key": "commentary",
+      "label": "asce-7 - commentary",
+      "type": "extractive",
+      "backing": "schema_tag",
+      "ref": "commentary",
+      "prompt": "",
+      "relation": "input-to",
+      "apex": "20260715-2120-asce-7-commentary",
+      "graph": "asce-7-canon"
+    },
+    {
+      "key": "equation",
+      "label": "asce-7 - equation",
+      "type": "extractive",
+      "backing": "schema_tag",
+      "ref": "equation",
+      "prompt": "",
+      "relation": "input-to",
+      "apex": "20260715-2120-asce-7-equation",
+      "graph": "asce-7-canon"
+    },
+    {
+      "key": "example",
+      "label": "asce-7 - example",
+      "type": "extractive",
+      "backing": "schema_tag",
+      "ref": "example",
+      "prompt": "",
+      "relation": "input-to",
+      "apex": "20260715-2120-asce-7-example",
+      "graph": "asce-7-canon"
+    },
+    {
+      "key": "parameters",
+      "label": "asce-7 - parameters",
+      "type": "extractive",
+      "backing": "schema_tag",
+      "ref": "parameters",
+      "prompt": "",
+      "relation": "input-to",
+      "apex": "20260715-2120-asce-7-parameters",
+      "graph": "asce-7-canon"
+    },
+    {
+      "key": "provision",
+      "label": "asce-7 - provision",
+      "type": "extractive",
+      "backing": "schema_tag",
+      "ref": "provision",
+      "prompt": "",
+      "relation": "input-to",
+      "apex": "20260715-2120-asce-7-provision",
+      "graph": "asce-7-canon"
+    },
+    {
+      "key": "scope",
+      "label": "asce-7 - scope",
+      "type": "extractive",
+      "backing": "schema_tag",
+      "ref": "scope",
+      "prompt": "",
+      "relation": "input-to",
+      "apex": "20260715-2120-asce-7-scope",
+      "graph": "asce-7-canon"
+    }
+  ],
+  "matrix_view": {
+    "cols_level": null,
+    "rollup": true
+  },
+  "overlay": {
+    "member_adds": [],
+    "member_removes": [],
+    "cell_overrides": [],
+    "attributions": []
+  },
+  "spine_ref": "asce-7-canon",
+  "last_spine_ref": "",
+  "lens_definition": null,
+  "schema": {
+    "name": "asce-7-canon",
+    "description": "Schema reverse-engineered from ported spine 'asce-7: Canon'.",
+    "grounded": true,
+    "strict": true,
+    "link_relation": "related",
+    "hub": null,
+    "dimensions": [
+      {
+        "tag": "applicability",
+        "desc": "asce-7 - applicability",
+        "note_type": "concept",
+        "materialize": true
+      },
+      {
+        "tag": "commentary",
+        "desc": "asce-7 - commentary",
+        "note_type": "concept",
+        "materialize": true
+      },
+      {
+        "tag": "equation",
+        "desc": "asce-7 - equation",
+        "note_type": "concept",
+        "materialize": true
+      },
+      {
+        "tag": "example",
+        "desc": "asce-7 - example",
+        "note_type": "concept",
+        "materialize": true
+      },
+      {
+        "tag": "parameters",
+        "desc": "asce-7 - parameters",
+        "note_type": "concept",
+        "materialize": true
+      },
+      {
+        "tag": "provision",
+        "desc": "asce-7 - provision",
+        "note_type": "concept",
+        "materialize": true
+      },
+      {
+        "tag": "scope",
+        "desc": "asce-7 - scope",
+        "note_type": "concept",
+        "materialize": true
+      }
+    ],
+    "tags": [
+      "applicability",
+      "commentary",
+      "equation",
+      "example",
+      "parameters",
+      "provision",
+      "scope"
+    ],
+    "relations": [],
+    "synthesis": {
+      "graph": "asce-7-canon",
+      "node": {
+        "type": "synthesis",
+        "title_template": "asce-7: Canon",
+        "link_relation": "related"
+      },
+      "dimension_node": {
+        "type": "concept",
+        "title_template": "{label} - {dimension}",
+        "attach_relation": "input-to",
+        "relation": "component-of"
+      },
+      "spec": null
+    }
+  },
+  "review": "",
+  "table_id": "",
+  "migrated": false,
+  "signature": "",
+  "synced_sig": "",
+  "generated_at": "",
+  "created_at": "2026-07-16T02:27:58Z",
+  "updated_at": "2026-07-16T02:27:58Z"
+}

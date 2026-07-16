@@ -1,6 +1,8 @@
 {
   "spines": [
     "aci-318-canon",
-    "aisc-360-canon"
+    "aisc-360-canon",
+    "asce-7-canon",
+    "csa-a23-3-canon"
   ]
 }

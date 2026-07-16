@@ -27,6 +27,23 @@
   encrypted: false
   notes: "Cross-cutting authoritative ACI 318 standard."
 
+# ACI 318-19 code + commentary (ACI 318R-19). File was dropped directly into
+# corpus/sources/codes/aci/, so `origin` points at the same path as
+# `source_path` (the ingest copy is a no-op; the sibling-.txt conversion +
+# provenance steps still run). This is the current-edition primary concrete
+# code — grounds all `corpus: aci-318-19` clause citations (previously only
+# 318-11 was in the corpus).
+- id: aci-318-19
+  origin: "corpus/sources/codes/aci/ACI 318R 2019.pdf"
+  source_path: "corpus/sources/codes/aci/ACI 318R 2019.pdf"
+  text_path:   corpus/text/codes/aci/ACI-318-19.txt
+  family: aci
+  role: codes
+  edition: ACI 318-19 (with commentary, ACI 318R-19)
+  tier: 1
+  encrypted: false
+  notes: "Building Code Requirements for Structural Concrete (ACI 318-19) and Commentary (ACI 318R-19)."
+
 - id: aci-216-1-fire
   origin: StructuralSizer/src/codes/reference/ACI216_1_Fire.pdf
   source_path: corpus/sources/codes/aci/ACI216_1_Fire.pdf
@@ -67,8 +84,8 @@
 # no-op; the sibling-.txt conversion + provenance steps still run). If the
 # purchased PDFs turn out to be password-protected, flip `encrypted: true`.
 - id: asce-7-16
-  origin: corpus/sources/codes/asce/ASCE-7-16.pdf
-  source_path: corpus/sources/codes/asce/ASCE-7-16.pdf
+  origin: "corpus/sources/codes/asce/ASCE 7-16 - Minimum Building Design Loads.pdf"
+  source_path: "corpus/sources/codes/asce/ASCE 7-16 - Minimum Building Design Loads.pdf"
   text_path:   corpus/text/codes/asce/ASCE-7-16.txt
   family: asce
   role: codes
@@ -171,6 +188,17 @@
   tier: 2
   encrypted: false
   notes: "282-page scanned PDF on Winkler / elastic-foundation beam theory; PDF metadata shows tiff2pdf 2015 with no embedded text layer. Title and page count match Hetényi, M., 'Beams on Elastic Foundation' (Univ. of Michigan Press, 1946) — verify before citing. The ``corpus/text/`` artifact is a stub (OCR pending: ``brew install tesseract`` then ``python3 scripts/util/convert_pdfs_to_text.py --force --ocr <pdf>``); search_text will not return useful hits until OCR is rerun."
+
+- id: textbook-mccormac-reinforced-concrete-9e
+  origin: "corpus/sources/textbooks/concrete/Reinforced Concrete 9th Edition McCormac.pdf"
+  source_path: "corpus/sources/textbooks/concrete/Reinforced Concrete 9th Edition McCormac.pdf"
+  text_path:   corpus/text/textbooks/concrete/mccormac-9e.txt
+  family: aci
+  role: textbooks
+  edition: "McCormac & Brown, Design of Reinforced Concrete, 9th ed. (Wiley, 2014)"
+  tier: 2
+  encrypted: false
+  notes: "742-page textbook with an embedded text layer (pdftotext -layout succeeded; a few flate-stream syntax errors on image XObjects are benign). Ch. 18 'Walls' §18.3 + Example 18.1 is the empirical/simplified load-bearing wall method (ACI 318 §14.5.2 Eq. 14-1 = ACI 318-19 §11.5.3.1) — the independent numeric oracle (φPnw = 230.6 k) for StructuralSizer/src/walls/bearing.jl. ZK extraction: mccormac-de-bearing-wall-empirical-aci318-11."
 
 # ── Tier 2 — research papers ──────────────────────────────────────────────
 # Peer-reviewed academic papers with grounded citations. Tier 2 because the
@@ -849,3 +877,254 @@
   tier: 2
   encrypted: false
   notes: "Source thesis behind the pixelframe carbon/flexure/deflection code (Wongsittikan, MIT SMArchS 2024). Novel methods, not a published code; extract as research, not normative."
+
+# ══════════════════════════════════════════════════════════════════════════
+# Batch added 2026-07-15 — new material-system / LFRS / loads standards dropped
+# directly into corpus/sources/codes/ (and code_guides). For every entry the
+# file already lives at its destination, so `origin` == `source_path` and the
+# ingest copy is a no-op; only the sibling-.txt conversion + provenance run.
+# Editions verified from each PDF's title page on 2026-07-15 unless a note says
+# otherwise. None are ZK-extracted yet — see the extraction plan.
+# ══════════════════════════════════════════════════════════════════════════
+
+# ── Tier 1 — timber codes (AWC / APA) ─────────────────────────────────────
+- id: awc-nds-2018
+  origin: "corpus/sources/codes/awc/National Design Specification NDS Wood Construction 2018.pdf"
+  source_path: "corpus/sources/codes/awc/National Design Specification NDS Wood Construction 2018.pdf"
+  text_path:   corpus/text/codes/awc/AWC-NDS-2018.txt
+  family: awc
+  role: codes
+  edition: ANSI/AWC NDS-2018
+  tier: 1
+  encrypted: false
+  notes: "National Design Specification (NDS) for Wood Construction, 2018 Edition (ANSI/AWC NDS-2018, approved 2017-11-16). Design provisions + adjustment factors. Requires the NDS Supplement (awc-nds-2018-supplement) for reference design values."
+
+- id: awc-nds-2018-supplement
+  origin: "corpus/sources/codes/awc/AWC NDS 2018 Supplement.pdf"
+  source_path: "corpus/sources/codes/awc/AWC NDS 2018 Supplement.pdf"
+  text_path:   corpus/text/codes/awc/AWC-NDS-2018-Supplement.txt
+  family: awc
+  role: codes
+  edition: NDS Supplement 2018 (Design Values for Wood Construction)
+  tier: 1
+  encrypted: false
+  notes: "NDS Supplement: Design Values for Wood Construction, 2018 Edition (ISBN 978-1-940383-43-9). Tabulated reference design values (Fb, Ft, Fv, Fc_perp, Fc, E, Emin) for sawn lumber, glulam, round timber piles/poles. Companion to awc-nds-2018."
+
+- id: awc-sdpws-2021
+  origin: "corpus/sources/codes/awc/SDPWS 2021.pdf"
+  source_path: "corpus/sources/codes/awc/SDPWS 2021.pdf"
+  text_path:   corpus/text/codes/awc/AWC-SDPWS-2021.txt
+  family: awc
+  role: codes
+  edition: AWC SDPWS-2021
+  tier: 1
+  encrypted: false
+  notes: "Special Design Provisions for Wind and Seismic (SDPWS), 2021 Edition — wood shear walls and diaphragms (timber lateral-force-resisting systems)."
+
+- id: apa-prg-320-2018
+  origin: "corpus/sources/codes/apa/PRG 320 2018.pdf"
+  source_path: "corpus/sources/codes/apa/PRG 320 2018.pdf"
+  text_path:   corpus/text/codes/apa/APA-PRG-320-2018.txt
+  family: apa
+  role: codes
+  edition: ANSI/APA PRG 320-2018
+  tier: 1
+  encrypted: false
+  notes: "ANSI/APA PRG 320-2018, Standard for Performance-Rated Cross-Laminated Timber (CLT) — grade layups and reference design capacities for CLT panels."
+
+# ── Tier 1 — cold-formed steel codes (AISI) ───────────────────────────────
+- id: aisi-s100-16
+  origin: "corpus/sources/codes/aisi/AISI S100-16.pdf"
+  source_path: "corpus/sources/codes/aisi/AISI S100-16.pdf"
+  text_path:   corpus/text/codes/aisi/AISI-S100-16.txt
+  family: aisi
+  role: codes
+  edition: AISI S100-16 (2016 Edition)
+  tier: 1
+  encrypted: false
+  notes: "North American Specification for the Design of Cold-Formed Steel Structural Members, 2016 Edition (AISI S100-16). Core CFS member design spec."
+
+- id: aisi-s240-20
+  origin: "corpus/sources/codes/aisi/AISI S240 20 Standard.pdf"
+  source_path: "corpus/sources/codes/aisi/AISI S240 20 Standard.pdf"
+  text_path:   corpus/text/codes/aisi/AISI-S240-20.txt
+  family: aisi
+  role: codes
+  edition: AISI S240-20 (2020 Edition)
+  tier: 1
+  encrypted: false
+  notes: "North American Standard for Cold-Formed Steel Structural Framing, 2020 Edition (AISI S240-20). Light-frame CFS wall/floor/roof framing (gravity)."
+
+- id: aisi-s400-15
+  origin: "corpus/sources/codes/aisi/AISI S400 15 ISI S400 15.pdf"
+  source_path: "corpus/sources/codes/aisi/AISI S400 15 ISI S400 15.pdf"
+  text_path:   corpus/text/codes/aisi/AISI-S400-15.txt
+  family: aisi
+  role: codes
+  edition: AISI S400-15 w/S1-16 (2015 Edition w/ Supplement 1)
+  tier: 1
+  encrypted: false
+  notes: "North American Standard for Seismic Design of Cold-Formed Steel Structural Systems, 2015 Edition with Supplement 1 (AISI S400-15 w/S1-16). CFS lateral-force-resisting systems."
+
+# ── Tier 1 — steel seismic / prequalified connections (AISC) ──────────────
+- id: aisc-341-16
+  origin: "corpus/sources/codes/aisc/Seismic Provisions for Structural Steel Buildings AISC 341-16.pdf"
+  source_path: "corpus/sources/codes/aisc/Seismic Provisions for Structural Steel Buildings AISC 341-16.pdf"
+  text_path:   corpus/text/codes/aisc/AISC-341-16.txt
+  family: aisc
+  role: codes
+  edition: ANSI/AISC 341-16
+  tier: 1
+  encrypted: false
+  notes: "Seismic Provisions for Structural Steel Buildings (ANSI/AISC 341-16). Steel seismic-force-resisting systems (SMF/IMF/OMF, SCBF/OCBF, EBF, etc.)."
+
+- id: aisc-358-22
+  origin: "corpus/sources/codes/aisc/A358 22W RHL.pdf"
+  source_path: "corpus/sources/codes/aisc/A358 22W RHL.pdf"
+  text_path:   corpus/text/codes/aisc/AISC-358-22.txt
+  family: aisc
+  role: codes
+  edition: ANSI/AISC 358-22 (2022-08-18)
+  tier: 1
+  encrypted: false
+  notes: "Prequalified Connections for Special and Intermediate Steel Moment Frames for Seismic Applications (ANSI/AISC 358-22, 2022-08-18). Supersedes 358-16 incl. Supplements 1 (2018) and 2 (2020)."
+
+# ── Tier 1 — steel joists (SJI) ───────────────────────────────────────────
+- id: sji-100-2020
+  origin: "corpus/sources/codes/sji/SJI 45 Edition 120221.pdf"
+  source_path: "corpus/sources/codes/sji/SJI 45 Edition 120221.pdf"
+  text_path:   corpus/text/codes/sji/SJI-100-2020.txt
+  family: sji
+  role: codes
+  edition: SJI 100-2020 (45th Edition catalog)
+  tier: 1
+  encrypted: false
+  notes: "Steel Joist Institute 45th Edition: Standard Specifications (SJI 100-2020, ANSI standard) plus Load Tables and Weight Tables for K/LH/DLH-series joists and Joist Girders. Directly supports the joist-as-beam analysis work (Phase A)."
+
+# ── Tier 1 — masonry code (TMS) ───────────────────────────────────────────
+- id: tms-402-602-16
+  origin: "corpus/sources/codes/tms/TMS 402 602 16 6.pdf"
+  source_path: "corpus/sources/codes/tms/TMS 402 602 16 6.pdf"
+  text_path:   corpus/text/codes/tms/TMS-402-602-16.txt
+  family: tms
+  role: codes
+  edition: TMS 402-16 / TMS 602-16
+  tier: 1
+  encrypted: false
+  notes: "Building Code Requirements (TMS 402-16) and Specification (TMS 602-16) for Masonry Structures. NOTE: cover/front-matter pages appear image-only — verify the .txt has a usable body text layer after ingest; OCR may be required (convert_pdfs_to_text.py --force --ocr)."
+
+# ── Tier 1 — governing model building code (ICC) ──────────────────────────
+- id: ibc-2021
+  origin: "corpus/sources/codes/ibc/2021 International Building Code.pdf"
+  source_path: "corpus/sources/codes/ibc/2021 International Building Code.pdf"
+  text_path:   corpus/text/codes/ibc/IBC-2021.txt
+  family: ibc
+  role: codes
+  edition: 2021 IBC (ICC, ISBN 978-1-60983-955-0)
+  tier: 1
+  encrypted: false
+  notes: "2021 International Building Code (ICC). Governing code that adopts/points to the material standards and ASCE 7 load provisions. Licensed single-user PDF (watermarked)."
+
+# ── Tier 2 — steel design guides (AISC) ───────────────────────────────────
+- id: aisc-dg1-base-plates-anchor-rods
+  origin: "corpus/sources/codes/aisc/AISC DG1 Design Guide Base Plate and Anchor Rod Design.pdf"
+  source_path: "corpus/sources/codes/aisc/AISC DG1 Design Guide Base Plate and Anchor Rod Design.pdf"
+  text_path:   corpus/text/codes/aisc/AISC-DG1-Base-Plates-Anchor-Rods.txt
+  family: aisc
+  role: code_guides
+  edition: "AISC Design Guide 1 (Base Plate and Anchor Rod Design; edition unverified — front matter image-only, confirm before citing)"
+  tier: 2
+  encrypted: false
+  notes: "AISC Design Guide 1: Base Plate and Anchor Rod Design. Cover/front-matter pages appear image-only — verify body text layer after ingest; OCR may be required. Confirm edition (1st 1990 / 2nd 2006) before citing."
+
+- id: aisc-dg3-serviceability
+  origin: "corpus/sources/codes/aisc/AISC DG3 Servicability.pdf"
+  source_path: "corpus/sources/codes/aisc/AISC DG3 Servicability.pdf"
+  text_path:   corpus/text/codes/aisc/AISC-DG3-Serviceability.txt
+  family: aisc
+  role: code_guides
+  edition: AISC Design Guide 3, Second Edition (West & Fisher)
+  tier: 2
+  encrypted: false
+  notes: "AISC Design Guide 3: Serviceability Design Considerations for Steel Buildings, Second Edition (West & Fisher). Floor vibration / drift / deflection serviceability limits."
+
+- id: aisc-dg25-web-tapered
+  origin: "corpus/sources/codes/aisc/AISC DG25 Web-tapered members.pdf"
+  source_path: "corpus/sources/codes/aisc/AISC DG25 Web-tapered members.pdf"
+  text_path:   corpus/text/codes/aisc/AISC-DG25-Web-Tapered.txt
+  family: aisc
+  role: code_guides
+  edition: AISC Design Guide 25 (2011; Kaehler, White, Kim)
+  tier: 2
+  encrypted: false
+  notes: "AISC Design Guide 25: Frame Design Using Web-Tapered Members (AISC © 2011). Metal-building tapered-member frames."
+
+# ── Tier 2 — steel deck manuals (SDI) ─────────────────────────────────────
+- id: sdi-design-manual-1987
+  origin: "corpus/sources/codes/sdi manuals/Steel Deck Design Manual.pdf"
+  source_path: "corpus/sources/codes/sdi manuals/Steel Deck Design Manual.pdf"
+  text_path:   corpus/text/codes/sdi/SDI-Design-Manual-1987.txt
+  family: sdi
+  role: code_guides
+  edition: "SDI Design Manual for Composite Decks, Form Decks, and Roof Decks (1987, Scholars' Mine scan)"
+  tier: 2
+  encrypted: false
+  notes: "Steel Deck Institute Design Manual for Composite Decks, Form Decks, and Roof Decks (1987 scanned reproduction via Scholars' Mine). Older edition — verify against current SDI standards before normative use; scan may need OCR."
+
+- id: sdi-roof-deck-manual-2e
+  origin: "corpus/sources/codes/sdi manuals/SDI Roof Deck Design Manual.pdf"
+  source_path: "corpus/sources/codes/sdi manuals/SDI Roof Deck Design Manual.pdf"
+  text_path:   corpus/text/codes/sdi/SDI-Roof-Deck-Manual-2e.txt
+  family: sdi
+  role: code_guides
+  edition: "SDI Roof Deck Design Manual, Second Edition (year unverified — confirm before citing)"
+  tier: 2
+  encrypted: false
+  notes: "Steel Deck Institute Roof Deck Design Manual, Second Edition (engineering manual). Publication year not on title page; confirm before citing."
+
+# ── Tier 2 — concrete guides (ACI / CRSI) ─────────────────────────────────
+- id: aci-360r-10
+  origin: "corpus/sources/codes/aci/360R 10 Web.pdf"
+  source_path: "corpus/sources/codes/aci/360R 10 Web.pdf"
+  text_path:   corpus/text/codes/aci/ACI-360R-10.txt
+  family: aci
+  role: code_guides
+  edition: ACI 360R-10 (April 2010, ISBN 978-0-87031-371-4)
+  tier: 2
+  encrypted: false
+  notes: "ACI 360R-10, Guide to Design of Slabs-on-Ground (ACI Committee 360). Complements the StructurePoint slab-on-grade technical notes already in the corpus."
+
+- id: crsi-economical-rc-2016
+  origin: "corpus/sources/codes/crsi/Design Guide for Economical Reinforced Concrete Structures.pdf"
+  source_path: "corpus/sources/codes/crsi/Design Guide for Economical Reinforced Concrete Structures.pdf"
+  text_path:   corpus/text/codes/crsi/CRSI-Economical-RC-2016.txt
+  family: crsi
+  role: code_guides
+  edition: CRSI Design Guide for Economical Reinforced Concrete Structures, First Edition (2016, Pub 10-DG-STRUCTURES)
+  tier: 2
+  encrypted: false
+  notes: "CRSI Design Guide for Economical Reinforced Concrete Structures, 1st Ed. 2016 (ISBN 978-1-943961-20-7). Economy/detailing guidance for RC framing; not normative."
+
+# ── Tier 3 — masonry draft (NOT normative) ────────────────────────────────
+- id: tms-msjc-2012-proposed
+  origin: "corpus/sources/codes/tms/MSJC Proposed Revisions Nov 28 2012.pdf"
+  source_path: "corpus/sources/codes/tms/MSJC Proposed Revisions Nov 28 2012.pdf"
+  text_path:   corpus/text/codes/tms/MSJC-Proposed-Revisions-2012.txt
+  family: tms
+  role: code_guides
+  edition: "MSJC Public Comment Review Version of Proposed Changes — November 28, 2012 (DRAFT)"
+  tier: 3
+  encrypted: false
+  notes: "DRAFT — Public Comment Review Version of Proposed Changes to the MSJC (TMS 402/ACI 530/ASCE 5). NOT a published/normative standard; do NOT cite as code. Superseded by TMS 402-16/602-16 (tms-402-602-16). Kept for background only."
+
+# ── Tier 2 — steel research report (AISC) ─────────────────────────────────
+- id: aisc-rr-asymmetric-i-beams-2024
+  origin: "corpus/sources/codes/aisc/Asymmetric Steel I Beams.pdf"
+  source_path: "corpus/sources/codes/aisc/Asymmetric Steel I Beams.pdf"
+  text_path:   corpus/text/research/aisc/AISC-RR-Asymmetric-I-Beams-2024.txt
+  family: aisc
+  role: research
+  edition: "AISC Research Report AISC-MILEK-2025-01 (December 2024, Yarnold / Auburn Univ.)"
+  tier: 2
+  encrypted: false
+  notes: "AISC-funded research report: Behavior of Hot-Rolled Asymmetric Steel I-Beams (Yarnold, Auburn University, Dec 2024). Research, not normative; extract as research."

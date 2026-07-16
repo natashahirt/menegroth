@@ -133,6 +133,7 @@ function _build_or_update_fea!(
     eb_topology_changed = cache.initialized && (eb_active_now != eb_active_cache)
 
     if !cache.initialized || eb_topology_changed
+        @debug "FEAModelCache" event=:rebuild reason=(!cache.initialized ? "uninitialized" : "edge_beam_topology_changed")
         if eb_topology_changed
             cache.initialized = false
             empty!(cache.element_data)
@@ -171,6 +172,7 @@ function _build_or_update_fea!(
         # Mesh topology depends on drop_panel (flat plate vs flat slab). If it changed,
         # we must rebuild; the update path cannot add/remove drop panel patches.
         if drop_panel != cache.drop_panel
+            @debug "FEAModelCache" event=:rebuild reason="drop_panel_changed"
             cache.initialized = false
             empty!(cache.element_data)
             empty!(cache.cell_tri_indices)
@@ -182,6 +184,7 @@ function _build_or_update_fea!(
                 edge_beam_l2=edge_beam_l2,
                 edge_beam_c1_avg=edge_beam_c1_avg)
         end
+        @debug "FEAModelCache" event=:update
         cache.drop_panel  = drop_panel  # may have changed between iterations (same topology)
         cache.edge_beam_βt = edge_beam_βt  # refresh the stored target for this iteration
         if split_dl

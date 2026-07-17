@@ -1,0 +1,53 @@
+abstract: ''
+authors: []
+content_hash: e597ba1032b01eb4e21ca3262a0b3ff8f5356facc949e799a6fea1cba7bcddff
+coverage:
+  agent: skimmed
+  human: none
+doc_type: code
+doi: ''
+name: aisc-360-16
+source_path: /Users/tashahirt/MIT Dropbox/Natasha Hirt/_MIT/DS Research/Synthetic_Buildings/menegroth/corpus/text/codes/aisc/AISC-360-16.txt
+title: AISC 360-16 — Specification for Structural Steel Buildings (full text)
+venue: ''
+year: null
+extraction:
+  schema: building-code-extraction
+  strict: true
+  grounded: true
+  tags:
+  - scope
+  - provision
+  - equation
+  - parameters
+  - applicability
+  - example
+  - commentary
+  contexts:
+  - project: menegroth
+    synthesis_graph: aisc-360-canon
+    schema: building-code-extraction
+    strict: true
+    grounded: true
+    tags:
+    - scope
+    - provision
+    - equation
+    - parameters
+    - applicability
+    - example
+    - commentary
+    structure: &id001
+      synthesis_graph: aisc-360-canon
+      apex_id: 20260712-1906-aisc-360-canon
+      attach_relation: input-to
+      apex_relation: component-of
+      dimension_nodes:
+        scope: 20260712-1906-aisc-360-scope
+        provision: 20260712-1906-aisc-360-provision
+        equation: 20260712-1906-aisc-360-equation
+        parameters: 20260712-1906-aisc-360-parameters
+        applicability: 20260712-1906-aisc-360-applicability
+        example: 20260712-1906-aisc-360-example
+        commentary: 20260712-1906-aisc-360-commentary
+  structure: *id001

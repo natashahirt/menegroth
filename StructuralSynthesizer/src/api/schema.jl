@@ -83,6 +83,7 @@ function api_input_schema()
                 "skip_visualization" => "When true, skip shell mesh build and visualization serialization (faster response, frame-only). Default: false.",
                 "visualization_detail" => "minimal | full. minimal = frame elements + slab boundaries only (no deflected meshes, no per-face analytical). full = full visualization. Default: full.",
                 "scoped_overrides" => "Optional list of scoped floor overrides. Each override provides face polygons and floor-specific options applied only to matching cells.",
+                "framing_levels" => "Optional array requesting auto-generated multi-level framing above each slab (Phase 5). Ordered from the slab outward (index 1 = joists, 2+ = secondary beams / girders). Each entry: material (\"steel\" | \"concrete\" | \"timber\"), spacing_in (optional c-to-c joist spacing, inches), role (\"joist\" | \"beam\", levels >= 2 only), axis ([x, y] joist run-direction; levels >= 2 default to mutually-perpendicular alternation), count (optional member count), end_fixity (optional 2-element per-end releases, e.g. [\"pinned\",\"pinned\"]), catalog_override (optional steel catalog name: \"all_W\" | \"preferred_W\" | \"all_HSS\" | \"all_HSSRound\"). Empty (default) = no auto-generated framing.",
                 "materials" => Dict(
                     "concrete" => "Slab/floor concrete (e.g. NWC_4000, Earthen_500, Earthen_2000). Default: NWC_4000.",
                     "column_concrete" => "Column concrete (e.g. NWC_6000). Default: NWC_6000.",
@@ -699,6 +700,11 @@ Base.@kwdef mutable struct APIMaterials
     column_concrete::String = "NWC_6000"   # Column concrete (default 6 ksi)
     rebar::String = "Rebar_60"
     steel::String = "A992"
+    # Optional named timber preset for framing_levels material "timber". No
+    # NDS-grounded presets ship yet (see TIMBER_MAP in deserialize.jl), so this
+    # is nothing by default and a "timber" framing request errors until a
+    # verified preset is registered.
+    timber::Union{String, Nothing} = nothing
 end
 
 # ─── Foundation options (optional overrides when size_foundations is true) ───
@@ -760,6 +766,44 @@ Base.@kwdef mutable struct APIFoundationOptions
     mat_params::Union{APIMatParams, Nothing} = nothing
 end
 
+"""
+One requested framing level for auto-generation (Phase 5, plan
+`joists-roles-materials`). The `framing_levels` array is ordered from the level
+directly on the slab (index 1 — joists) outward/downward to secondary beams and
+girders (index 2, 3, …).
+
+- `material`: member material family — `"steel"`, `"concrete"`, or `"timber"`.
+  Resolved from the top-level `materials` block (`steel` → structural steel;
+  `concrete` → reinforced concrete = `materials.concrete` + `materials.rebar`;
+  `timber` → the registered `materials.timber` preset).
+- `spacing_in`: optional center-to-center joist spacing, in inches. When omitted,
+  `populate_levels!` uses the sized joist spacing (mass-timber / OWSJ slabs) or an
+  ENGINEERING-JUDGMENT default (opts-schema slabs).
+- `role`: optional member role — `"joist"` or `"beam"`. Honored only for levels
+  ≥ 2; level 1's role is fixed by the slab type. Default for levels ≥ 2 is
+  `"beam"`.
+- `axis`: optional in-plane joist run-direction `[x, y]`. For levels ≥ 2 the
+  default alternates so consecutive levels are mutually perpendicular; for level 1
+  it overrides the schema-convention direction on the opts-schema slab types
+  (ignored by the joist-sizing slab types, whose geometry comes from the sizer).
+- `count`: optional explicit number of members for the level.
+- `end_fixity`: optional 2-element per-end release override, e.g.
+  `["pinned", "pinned"]`. Accepted values: `"default"`, `"pinned"`, `"fixed"`,
+  `"free"`. `"default"` defers to the `(role, material, lateral_role)` dispatch.
+- `catalog_override`: optional per-level steel section catalog name — one of
+  `"all_W"`, `"preferred_W"`, `"all_HSS"`, `"all_HSSRound"`. Restricts the group's
+  sizing catalog (steel members only).
+"""
+Base.@kwdef mutable struct APIFramingLevel
+    material::String = "steel"
+    spacing_in::Union{Float64, Nothing} = nothing
+    role::Union{String, Nothing} = nothing
+    axis::Union{Vector{Float64}, Nothing} = nothing
+    count::Union{Int, Nothing} = nothing
+    end_fixity::Union{Vector{String}, Nothing} = nothing
+    catalog_override::Union{String, Nothing} = nothing
+end
+
 """Design parameters block from JSON."""
 Base.@kwdef mutable struct APIParams
     unit_system::String = "imperial"
@@ -789,6 +833,9 @@ Base.@kwdef mutable struct APIParams
     foundation_concrete::String = "NWC_3000"
     foundation_options::Union{APIFoundationOptions, Nothing} = nothing
     scoped_overrides::Vector{APIScopedOverride} = APIScopedOverride[]
+    # Optional multi-level framing auto-generation (Phase 5). Ordered from the
+    # slab outward (index 1 = joists). Empty (default) is a strict no-op.
+    framing_levels::Vector{APIFramingLevel} = APIFramingLevel[]
     uniform_column_sizing::String = "off"  # off | per_story | building. Force uniform column sizes.
     geometry_is_centerline::Bool = false
     visualization_target_edge_m::Union{Float64, Nothing} = nothing  # Viz shell mesh target edge (m). Default: FEA or adaptive.
@@ -822,6 +869,7 @@ StructTypes.StructType(::Type{APIMatParams}) = StructTypes.Mutable()
 StructTypes.StructType(::Type{APIFoundationOptions}) = StructTypes.Mutable()
 StructTypes.StructType(::Type{APIBeamCatalogBounds}) = StructTypes.Mutable()
 StructTypes.StructType(::Type{APIPixelFrameOptions}) = StructTypes.Mutable()
+StructTypes.StructType(::Type{APIFramingLevel}) = StructTypes.Mutable()
 StructTypes.StructType(::Type{APIParams}) = StructTypes.Mutable()
 StructTypes.StructType(::Type{APIInput}) = StructTypes.Mutable()
 

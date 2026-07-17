@@ -375,6 +375,26 @@ Beams whose edges carry no tributary are left untouched.
 function _assign_beam_profiles_from_edges!(struc::BuildingStructure{T},
         edge_merged::Dict{Int, Tuple{Vector{Float64}, Vector{Float64}}}) where {T}
     skel = struc.skeleton
+
+    # (Phase 10) Sub-edge → chain-head lookup. When a Level-0 host has been
+    # subdivided by `_split_host_edge!` (Phase 5 landings on the boundary, or
+    # Phase 10 higher-level landings on lower-level joists), the cell tributary
+    # profile is still stored under the ORIGINAL (chain-head) edge index in
+    # `edge_merged`, parameterized in `[0, 1]` over the FULL original edge —
+    # not over the shorter head sub-edge alone. The per-sub-edge loop below
+    # naively treats that profile as local to the head sub-edge, compressing an
+    # 8 m trapezoid into 2 m and losing 3/4 of the tributary area. Detect the
+    # chain here and treat the head-stored profile as the WHOLE-BEAM profile
+    # instead (head's `[0, 1]` is already the beam's `[0, 1]` because a
+    # host-chain beam covers exactly the original edge end-to-end).
+    edge_to_chain = Dict{Int, Vector{Int}}()
+    for (_, sub_edges) in skel.edge_chains
+        length(sub_edges) < 2 && continue
+        for e in sub_edges
+            edge_to_chain[e] = sub_edges
+        end
+    end
+
     for beam in struc.beams
         segs = segment_indices(beam)
         isempty(segs) && continue
@@ -388,6 +408,36 @@ function _assign_beam_profiles_from_edges!(struc::BuildingStructure{T},
         end
         total = sum(seg_len_m)
         total <= 0 && continue
+
+        # (Phase 10) Whole-beam fast path for host-chain beams. The beam's
+        # edges must exactly equal a single chain in `skel.edge_chains` for
+        # this to apply — otherwise fall through to the per-sub-edge loop.
+        head_chain = get(edge_to_chain, edges[1], nothing)
+        if head_chain !== nothing && head_chain == edges &&
+           haskey(edge_merged, head_chain[1])
+            head = head_chain[1]
+            pos_c, w_c = edge_merged[head]
+            a, _ = skel.edge_indices[head]
+            # Head sub-edge orientation: canonical edge_indices[head] = (a, _),
+            # but after `_split_host_edge!` the head IS the first sub-edge
+            # `(chain_vs[1], chain_vs[2])`. The beam is ordered `verts[1] →
+            # verts[end]`; the head profile is [0, 1] over `v_a → v_b` of the
+            # ORIGINAL edge (see `_accumulate_edge_width_profiles`). Since
+            # `_split_host_edge!` preserves the original v1→v2 orientation as
+            # the beam's chain direction (v1 == verts[1], v2 == verts[end]),
+            # the head profile is naturally in the beam's forward direction if
+            # `verts[1] == a`; reverse otherwise.
+            if verts[1] != a
+                pos_c = reverse(1.0 .- pos_c)
+                w_c = reverse(w_c)
+            end
+            positions_all, widths_all_m = _span_unit_interval(pos_c, w_c)
+            if maximum(widths_all_m) > 0
+                widths_T = T[_meters_to_T(T, w) for w in widths_all_m]
+                beam.tributary_profile = TributaryProfile{T}(positions_all, widths_T, nothing)
+            end
+            continue
+        end
 
         positions_all = Float64[]
         widths_all_m = Float64[]
@@ -1562,15 +1612,25 @@ is the longest individual sub-segment (the actual deflection span between suppor
 Returns `(group_ids, demands, L_totals, Lb_govs, Cb_govs, Kx_govs, Ky_govs)`.
 """
 function member_group_demands(struc::BuildingStructure;
-    member_edge_group::Symbol=:beams, resolution::Int=200,
+    member_edge_group::Union{Symbol, AbstractVector{Symbol}, Tuple{Vararg{Symbol}}}=:beams,
+    resolution::Int=200,
     params::DesignParameters=DesignParameters())
     isempty(struc.asap_model.elements) && throw(ArgumentError("ASAP model is empty. Call `to_asap!(struc)` before sizing."))
 
     skel = struc.skeleton
-    beam_edge_ids = Set(get(skel.groups_edges, member_edge_group, Int[]))
+    groups = member_edge_group isa Symbol ? (member_edge_group,) : member_edge_group
+    beam_edge_ids = Set{Int}()
+    for g in groups
+        union!(beam_edge_ids, get(skel.groups_edges, g, Int[]))
+    end
 
-    member_type = member_edge_group == :columns ? :columns :
-                  member_edge_group == :struts ? :struts : :beams
+    member_type = if member_edge_group === :columns || (member_edge_group isa Union{AbstractVector{Symbol}, Tuple} && :columns in member_edge_group)
+        :columns
+    elseif member_edge_group === :struts || (member_edge_group isa Union{AbstractVector{Symbol}, Tuple} && :struts in member_edge_group)
+        :struts
+    else
+        :beams
+    end
     member_array = member_type == :columns ? struc.columns :
                    member_type == :struts ? struc.struts : struc.beams
 
@@ -1853,8 +1913,13 @@ function size_steel_members!(
         member_group_demands(struc; member_edge_group=member_edge_group, resolution=resolution)
 
     # Determine member array from edge group name (must match member_group_demands logic)
-    member_array = member_edge_group == :columns ? struc.columns :
-                   member_edge_group == :struts ? struc.struts : struc.beams
+    member_array = if member_edge_group === :columns || (member_edge_group isa Union{AbstractVector{Symbol}, Tuple} && :columns in member_edge_group)
+        struc.columns
+    elseif member_edge_group === :struts || (member_edge_group isa Union{AbstractVector{Symbol}, Tuple} && :struts in member_edge_group)
+        struc.struts
+    else
+        struc.beams
+    end
 
     # Convert to SteelMemberGeometry objects for new API
     geometries = [StructuralSizer.SteelMemberGeometry(L; Lb=Lb, Cb=Cb, Kx=Kx, Ky=Ky)
@@ -1905,7 +1970,14 @@ function size_steel_members!(
             L_raw = sum(struc.segments[i].L for i in segment_indices(m))
             L_total = L_raw isa Unitful.Quantity ? L_raw : L_raw * u"m"
             set_section!(m, chosen)
-            set_volumes!(m, MaterialVolumes(material => StructuralSizer.section_area(chosen) * L_total))
+            
+            # Use the concrete component for volumes to avoid ρ field errors during early EC passes.
+            mat_vols = if material isa StructuralSizer.ReinforcedConcreteMaterial
+                MaterialVolumes(material.concrete => StructuralSizer.section_area(chosen) * L_total)
+            else
+                MaterialVolumes(material => StructuralSizer.section_area(chosen) * L_total)
+            end
+            set_volumes!(m, mat_vols)
             
             # Update ASAP elements
             for seg_idx in segment_indices(m)
@@ -2036,8 +2108,13 @@ function size_member_group!(
     chosen.material = material
     group.section = chosen
 
-    member_array = member_edge_group == :columns ? struc.columns :
-                   member_edge_group == :struts ? struc.struts : struc.beams
+    member_array = if member_edge_group === :columns || (member_edge_group isa Union{AbstractVector{Symbol}, Tuple} && :columns in member_edge_group)
+        struc.columns
+    elseif member_edge_group === :struts || (member_edge_group isa Union{AbstractVector{Symbol}, Tuple} && :struts in member_edge_group)
+        struc.struts
+    else
+        struc.beams
+    end
     skel = struc.skeleton
     edge_ids_in_group = Set(get(skel.groups_edges, member_edge_group, Int[]))
     asap_sec = StructuralSizer.to_asap_section(chosen, material)
@@ -2047,7 +2124,13 @@ function size_member_group!(
         L_raw = sum(struc.segments[i].L for i in segment_indices(m))
         L_total = L_raw isa Unitful.Quantity ? L_raw : L_raw * u"m"
         set_section!(m, chosen)
-        set_volumes!(m, MaterialVolumes(material => StructuralSizer.section_area(chosen) * L_total))
+        # Use the concrete component for volumes to avoid ρ field errors during early EC passes.
+        mat_vols = if material isa StructuralSizer.ReinforcedConcreteMaterial
+            MaterialVolumes(material.concrete => StructuralSizer.section_area(chosen) * L_total)
+        else
+            MaterialVolumes(material => StructuralSizer.section_area(chosen) * L_total)
+        end
+        set_volumes!(m, mat_vols)
         for seg_idx in segment_indices(m)
             edge_idx = struc.segments[seg_idx].edge_idx
             edge_idx in edge_ids_in_group || continue
@@ -2223,10 +2306,31 @@ function size_beams!(
     resolution::Int = 200,
     reanalyze::Bool = true,
     gravity_factor::Quantity = GRAVITY,
+    member_group_overrides::Union{Nothing, Dict{UInt64, MemberGroupSizingOverride}} = nothing,
     tc::Union{Nothing, StructuralSizer.TraceCollector} = nothing,
 )
     dp = (hasproperty(struc, :design_parameters) && !isnothing(struc.design_parameters)) ?
          struc.design_parameters : nothing
+
+    # Universal size-time gate backstop (Phase B fix cycle 4): when NO explicit
+    # `member_group_overrides` kwarg is threaded, default it from the structure's
+    # design parameters so any struc-only caller (`size_members!`, or a bare
+    # `size_beams!(struc, ...)`) still reaches the honor-or-throw gid gate in
+    # `_size_beams_impl!` rather than silently dropping an effective override. An
+    # explicit non-`nothing` kwarg ALWAYS wins, so the `design_building` /
+    # `redesign_incremental!` path (which threads `params.member_group_overrides`
+    # explicitly) is UNCHANGED and byte-identical. `dp === nothing` / a missing /
+    # `nothing` / empty field stays `nothing` → strict no-op. NOTE: as of this writing
+    # `BuildingStructure` has NO `design_parameters` field (see
+    # building_types/structure.jl) and it is never assigned in the SS source, so `dp`
+    # is `nothing` here and this default is an inert backstop; the authoritative
+    # universal coverage is the explicit thread at core/size.jl's `size!`.
+    # (Engineering sizing knobs — no code citation.)
+    if member_group_overrides === nothing && dp !== nothing &&
+       hasproperty(dp, :member_group_overrides) &&
+       !isnothing(dp.member_group_overrides) && !isempty(dp.member_group_overrides)
+        member_group_overrides = dp.member_group_overrides
+    end
 
     effective_opts = if !isnothing(opts)
         opts
@@ -2255,7 +2359,8 @@ function size_beams!(
     end
 
     result = _size_beams_impl!(struc, effective_opts, Val(strategy);
-                               resolution, reanalyze, gravity_factor)
+                               resolution, reanalyze, gravity_factor,
+                               member_group_overrides)
     StructuralSizer.emit!(tc, :sizing, "size_beams!", "", :exit)
     return result
 end
@@ -2268,13 +2373,63 @@ function _size_beams_impl!(
     resolution::Int,
     reanalyze::Bool,
     gravity_factor::Quantity,
+    member_group_overrides::Union{Nothing, Dict{UInt64, MemberGroupSizingOverride}} = nothing,
 )
     skel = struc.skeleton
-    edge_ids_in_group = Set(get(skel.groups_edges, :beams, Int[]))
+    edge_ids_in_group = Set{Int}()
+    for g in BEAM_GROUP_SYMBOLS
+        union!(edge_ids_in_group, get(skel.groups_edges, g, Int[]))
+    end
     _add_gravity_loads!(struc, edge_ids_in_group, gravity_factor)
 
     group_ids, demands, L_totals, Lb_govs, Cb_govs, Kx_govs, Ky_govs =
-        member_group_demands(struc; member_edge_group=:beams, resolution=resolution)
+        member_group_demands(struc; member_edge_group=BEAM_GROUP_SYMBOLS, resolution=resolution)
+
+    # DEFINITIVE size-time gid gate (Run 4 / Phase B, [P1-2] + [P2-3]). `group_ids`
+    # here is the REAL steel-beam group set the sizer actually emits: collinear-MERGED
+    # (`group_collinear_members!` ran in `size_beams!` before this call) AND
+    # par_has-FILTERED (`member_group_demands` drops groups with no segment on a
+    # :beams edge). Every EFFECTIVE `member_group_overrides` entry MUST target one of
+    # these gids — anything else can never be honored on this path and would be
+    # SILENTLY DROPPED, so we refuse fail-loud (pinned `member_group_overrides`
+    # ArgumentError) BEFORE any BuildingDesign is produced. Runs BEFORE the empty-group
+    # early return so an override under a floor that emits NO steel beam group (every
+    # beam par_has-absent) is refused too, never silently dropped. This single gate:
+    #   [P1-2] a collinear beam gid IS in `group_ids` → HONORED (no unreliable
+    #          door-side reproduction of collinear grouping is needed);
+    #   [P2-3] a par_has-absent beam gid is NOT in `group_ids` → REFUSED (no silent drop);
+    #   a column / strut gid, or any unknown / garbage gid, is NOT in `group_ids` → REFUSED.
+    # Fires on ALL BuildingDesign-producing paths that size beams (from-scratch
+    # `design_building` and incremental `redesign_incremental!` both route
+    # `_size_beams_columns!` → `size_beams!` → here). (Engineering-scope guard —
+    # catalog / deflection_limit / max_depth are sizing knobs, no code citation.)
+    if member_group_overrides !== nothing
+        honorable_beam_gids = Set(group_ids)
+        for (gid, ovr) in member_group_overrides
+            _is_effective(ovr) || continue
+            gid in honorable_beam_gids || throw(ArgumentError(_mgo_refusal_message(
+                "override targets member group $(gid), which is NOT among the " *
+                "$(length(honorable_beam_gids)) steel beam groups the batched " *
+                "size_beams! path emits at size time (collinear-merged and " *
+                "par_has-filtered); a column / strut group, an unknown gid, or a beam " *
+                "group with no segment on a :beams edge is not sized per-group here and " *
+                "would be silently dropped")))
+        end
+
+        # Phase B is STEEL-beam-only: a bare-steel Ix mask must never be applied to a
+        # COMPOSITE beam demand (whose code check uses I_LB, AISC 360-16 Commentary
+        # I3.2). Refuse fail-loud rather than over-restrict.
+        #
+        # [composite cleanup, fix cycle 3] DEFENSE-IN-DEPTH ONLY: the composite-refusal
+        # branch inside `_assert_no_composite_override` is CURRENTLY UNREACHABLE on this
+        # batched path — `member_group_demands` builds `MemberDemand{Float64, Nothing}`,
+        # so every `demands[i].composite` is `nothing` by construction and the assertion
+        # never throws here. It is retained (not deleted) as an explicit backstop against
+        # a future batched demand-builder that surfaces composite demands, and is covered
+        # by a DIRECT unit test on synthetic composite stubs (test (ix)) rather than
+        # through this call site. Do NOT read this as live coverage of a composite path.
+        _assert_no_composite_override(group_ids, demands, member_group_overrides)
+    end
 
     isempty(group_ids) && return struc
 
@@ -2287,12 +2442,41 @@ function _size_beams_impl!(
     δ_total_vec = [d.δ_max_total for d in demands]
     I_ref_v  = [d.I_ref for d in demands]
 
-    result = StructuralSizer.size_beams(
-        Mu_vec, Vu_vec, geometries, opts;
-        δ_max_vec = any(>(0), δ_LL_vec)   ? δ_LL_vec   : nothing,
-        δ_max_total_vec = any(>(0), δ_total_vec) ? δ_total_vec : nothing,
-        I_ref_vec = any(>(0), I_ref_v)    ? I_ref_v    : nothing,
-    )
+    # Run 4 / Phase B ([A-revert]): honor per-group restrictions on STEEL beam
+    # groups sourced ONLY from an EFFECTIVE per-design `member_group_overrides`
+    # entry. The single batched size_beams call is routed through a UNION catalog +
+    # per-group `feasible` index mask (see `_beam_override_union_and_feasible`).
+    # `MemberGroup.catalog_override` (the Phase 6 seam) is a documented NO-OP on this
+    # batched design_building / incremental path — it is honored only by the isolated
+    # `size_member_group!` path (it was never honored here pre-Phase-B, and honoring
+    # it opened a regression). Every group with no effective override keeps the full
+    # default catalog and the identical internal AISCChecker screening, so its result
+    # is byte-identical. With no effective override on any group we take the
+    # pre-Phase-B path verbatim (feasible === nothing).
+    has_eff_override =
+        member_group_overrides !== nothing &&
+        any(gid -> (o = get(member_group_overrides, gid, nothing)) !== nothing &&
+                   _is_effective(o), group_ids)
+
+    result = if has_eff_override
+        union_cat, feasible = _beam_override_union_and_feasible(
+            struc, opts, group_ids, L_totals, δ_LL_vec, I_ref_v, member_group_overrides)
+        StructuralSizer.size_beams(
+            Mu_vec, Vu_vec, geometries, opts;
+            δ_max_vec = any(>(0), δ_LL_vec)   ? δ_LL_vec   : nothing,
+            δ_max_total_vec = any(>(0), δ_total_vec) ? δ_total_vec : nothing,
+            I_ref_vec = any(>(0), I_ref_v)    ? I_ref_v    : nothing,
+            catalog = union_cat,
+            feasible = feasible,
+        )
+    else
+        StructuralSizer.size_beams(
+            Mu_vec, Vu_vec, geometries, opts;
+            δ_max_vec = any(>(0), δ_LL_vec)   ? δ_LL_vec   : nothing,
+            δ_max_total_vec = any(>(0), δ_total_vec) ? δ_total_vec : nothing,
+            I_ref_vec = any(>(0), I_ref_v)    ? I_ref_v    : nothing,
+        )
+    end
 
     member_array = struc.beams
     mat = opts.material
@@ -2305,6 +2489,222 @@ function _size_beams_impl!(
 
     @info "Sized $(length(group_ids)) steel beam groups via size_beams API"
     return struc
+end
+
+# --- Per-group override narrowing for the batched steel-beam path (Run 4 / Phase B) ---
+#
+# Stable identity key for a catalog section (W-shapes carry a unique `name`).
+_beam_sec_key(s) = (nameof(typeof(s)),
+                    (hasproperty(s, :name) && getfield(s, :name) !== nothing) ?
+                        getfield(s, :name) : objectid(s))
+
+# [P2 section-identity, fix cycle 4] Structural (value-level) equality of two catalog
+# section FIELDS. `_beam_sec_key` keys identity on `(typename, name)` only, so two
+# sections that share a name but differ in PROPERTIES (e.g. a hand-modified
+# ISymmSection named "W14X22" with a reduced Ix) collide. Section types (e.g.
+# `ISymmSection`) are MUTABLE structs, so Julia's default `==`/`===` is identity-based,
+# not value-based — hence a recursive field-by-field comparison. A field is identical
+# when it is the SAME object (`===`), value-equal under `isequal` (so a `missing` field
+# matches `missing`, and unit-aware Unitful quantities match — cycle-3's bare `==`
+# wrongly refused a `missing` field because `missing == missing === missing`, not
+# `true`), OR — for a distinct-but-value-equal composite field that defines no `==`
+# (e.g. a freshly built `material` object rather than the shared singleton) — equal by
+# recursing into its own fields. This keeps genuinely value-equal sections deduping
+# byte-identically while a genuinely DIFFERING field (e.g. a reduced Ix, or a differing
+# material property) still resolves to "not identical" so the caller refuses rather than
+# silently substitutes. (Engineering-scope guard — no code citation.)
+function _field_identical(x, y)
+    x === y && return true
+    isequal(x, y) === true && return true
+    # Distinct objects with no value `==`/`isequal`: fall back to structural equality
+    # (same concrete type, matching field-by-field). A leaf value that is neither `===`,
+    # `isequal`, nor a comparable struct is treated as differing.
+    typeof(x) === typeof(y) || return false
+    (isstructtype(typeof(x)) && !isempty(fieldnames(typeof(x)))) || return false
+    for f in fieldnames(typeof(x))
+        _field_identical(getfield(x, f), getfield(y, f)) || return false
+    end
+    return true
+end
+
+function _sections_identical(a, b)
+    a === b && return true
+    typeof(a) === typeof(b) || return false
+    for f in fieldnames(typeof(a))
+        _field_identical(getfield(a, f), getfield(b, f)) || return false
+    end
+    return true
+end
+
+"""
+    _assert_no_composite_override(group_ids, demands, member_group_overrides)
+
+Refuse fail-loud (pinned `member_group_overrides` `ArgumentError`) if any group
+carrying an EFFECTIVE per-design override has a COMPOSITE beam demand
+(`demand.composite !== nothing`).
+
+Phase B is STEEL-beam-only. The batched feasible mask
+([`_beam_override_union_and_feasible`](@ref)) gates deflection on the bare-steel
+`Ix`, whereas the composite code check uses the lower-bound composite inertia
+`I_LB` (AISC 360-16 Commentary I3.2; `is_feasible` composite overload in
+`members/codes/aisc/checker.jl`, `I_LB > Ix`). Applying the bare-`Ix` mask to a
+composite group would OVER-restrict it, so we refuse rather than size it against
+the wrong stiffness. In the batched path `member_group_demands` builds
+`MemberDemand{Float64, Nothing}` (composite always `nothing`), so this is a
+defense-in-depth assertion for that path; it is testable directly on synthetic
+composite demands. (Engineering-scope guard — the cited mechanics is only that
+`I_LB > Ix` for composite sections.)
+"""
+function _assert_no_composite_override(
+    group_ids::Vector{UInt64},
+    demands,
+    member_group_overrides::Dict{UInt64, MemberGroupSizingOverride},
+)
+    for (i, gid) in enumerate(group_ids)
+        ovr = get(member_group_overrides, gid, nothing)
+        (ovr !== nothing && _is_effective(ovr)) || continue
+        demands[i].composite === nothing || throw(ArgumentError(_mgo_refusal_message(
+            "override on beam group $(gid) targets a COMPOSITE beam demand; the " *
+            "batched size_beams! mask gates deflection on bare-steel Ix while the " *
+            "composite code check uses I_LB (AISC 360-16 Commentary I3.2), so Phase B " *
+            "refuses composite-beam overrides rather than over-restrict the group")))
+    end
+    return nothing
+end
+
+"""
+    _beam_override_union_and_feasible(struc, opts, group_ids, L_totals,
+                                      δ_LL_vec, I_ref_v, member_group_overrides)
+        -> (union_cat, feasible)
+
+Build a UNION catalog (default ∪ every group's override catalog) and a per-group
+`feasible` index mask (indices into `union_cat`) so that ONE batched
+`StructuralSizer.size_beams` call can honor per-group `member_group_overrides` on
+steel beam groups while leaving every other group byte-identical.
+
+The mask is INTERSECTED with `size_beams -> optimize_discrete`'s internal capacity
+screening (which always still runs `AISCChecker` on the global `opts`), so it can
+only ever NARROW a group's candidate set — never admit an unchecked section. An
+override therefore *tightens* a group relative to the global default; a knob set
+LOOSER than the global default is clamped by the global screening (conservative /
+safe by construction).
+
+Per-knob precedence on this batched path ([A-revert] — the `MemberGroup.catalog_override`
+seam is NOT consulted here; it is honored only by `size_member_group!`):
+- `catalog`         : `override.catalog` > default
+- `max_depth`       : `override.max_depth` > `opts.max_depth`
+- `deflection_limit`: `override.deflection_limit` > `opts.deflection_limit`
+
+Groups with NO effective override get the full default catalog and NO external
+depth/deflection filter — the internal global `AISCChecker` governs them exactly
+as before (byte-identical). `total_deflection_limit` is not an override field, so
+the global `opts.total_deflection_limit` continues to apply to every group.
+"""
+function _beam_override_union_and_feasible(
+    struc::BuildingStructure,
+    opts::StructuralSizer.SteelBeamOptions,
+    group_ids::Vector{UInt64},
+    L_totals::Vector,
+    δ_LL_vec::Vector,
+    I_ref_v::Vector,
+    member_group_overrides::Dict{UInt64, MemberGroupSizingOverride},
+)
+    # Default catalog — mirror the exact precedence used inside
+    # StructuralSizer.size_columns (custom_catalog > material-default).
+    default_cat = opts.custom_catalog === nothing ?
+        StructuralSizer.steel_column_catalog(opts.section_type, opts.catalog) :
+        opts.custom_catalog
+
+    # Union catalog: default sections FIRST (original order preserved so non-override
+    # groups' feasible index order is unchanged), override-only extras appended.
+    union_cat = collect(default_cat)
+    key2idx = Dict{Any, Int}()
+    for (j, s) in enumerate(union_cat)
+        get!(key2idx, _beam_sec_key(s), j)
+    end
+    n_default = length(union_cat)
+
+    resolved_cats = Vector{Any}(undef, length(group_ids))
+    for (i, gid) in enumerate(group_ids)
+        ovr = get(member_group_overrides, gid, nothing)
+        eff = ovr !== nothing && _is_effective(ovr)
+        # [A-revert]: the batched path honors ONLY the per-design override.
+        # `MemberGroup.catalog_override` is a documented no-op here (honored solely
+        # by `size_member_group!`), so a group with no EFFECTIVE override keeps the
+        # full default catalog → byte-identical to pre-Phase-B.
+        if !eff
+            resolved_cats[i] = nothing          # no effective override → default catalog membership
+            continue
+        end
+        # Catalog precedence on this batched path: override.catalog > default.
+        rc = _first_set(ovr.catalog, default_cat)
+        resolved_cats[i] = rc
+        for s in rc
+            k = _beam_sec_key(s)
+            existing = get(key2idx, k, nothing)
+            if existing === nothing
+                push!(union_cat, s)
+                key2idx[k] = length(union_cat)
+            elseif !_sections_identical(s, union_cat[existing])
+                # [P2 section-identity, fix cycle 3] An override-catalog section whose
+                # `(typename, name)` key COLLIDES an existing union section (a default or
+                # a previously-added override) but whose PROPERTIES DIFFER would be
+                # silently mapped onto the existing section's index by the `key2idx`
+                # dedup below — substituting a DIFFERENT section (e.g. a hand-modified
+                # "W14X22" with a reduced Ix) for the one the user supplied, then sizing
+                # / reporting against the wrong stiffness. Refuse fail-loud (pinned
+                # `member_group_overrides` ArgumentError) rather than size against the
+                # wrong section. Genuinely IDENTICAL sections still dedup byte-identically
+                # (the `steel_column_catalog` sections and `W(name)` share the cached
+                # `W_CATALOG` singletons, so `_sections_identical` short-circuits `===`).
+                # (Engineering-scope guard — no code citation.)
+                nm = (hasproperty(s, :name) && getfield(s, :name) !== nothing) ?
+                        getfield(s, :name) : "<unnamed>"
+                throw(ArgumentError(_mgo_refusal_message(
+                    "override on beam group $(gid) supplies a $(nameof(typeof(s))) named " *
+                    "\"$(nm)\" whose (type, name) identity collides a DIFFERENT section " *
+                    "already in the batched catalog but with differing properties; the " *
+                    "section-identity dedup keys on (type, name) only and would silently " *
+                    "substitute the existing section, so Phase B refuses the ambiguous " *
+                    "override rather than size against the wrong section")))
+            end
+        end
+    end
+
+    default_idxs = collect(1:n_default)
+    feasible = Vector{Vector{Int}}(undef, length(group_ids))
+    for (i, gid) in enumerate(group_ids)
+        rc = resolved_cats[i]
+        if rc === nothing
+            feasible[i] = copy(default_idxs)    # internal global checker governs → byte-identical
+            continue
+        end
+        # rc !== nothing ⇒ this group carried an EFFECTIVE override (first loop), so
+        # its entry is present; depth/deflection knobs fall through to the global
+        # `opts` when the override leaves them unset ([A-revert]).
+        ovr = member_group_overrides[gid]
+        resolved_depth = _first_set(ovr.max_depth, opts.max_depth)
+        resolved_defl  = _first_set(ovr.deflection_limit, opts.deflection_limit)
+        δ_LL  = δ_LL_vec[i]
+        I_ref = I_ref_v[i]
+        L_m   = L_totals[i] isa Unitful.Quantity ? ustrip(u"m", L_totals[i]) : Float64(L_totals[i])
+        idxs = Int[]
+        for s in rc
+            # Depth narrowing — identical `section_depth(s) <= max_depth` gate the
+            # AISCChecker applies (StructuralSizer src/members/codes/aisc/checker.jl).
+            StructuralSizer.section_depth(s) <= resolved_depth || continue
+            # LL-deflection narrowing — identical formula to AISCChecker.is_feasible
+            # (aisc/checker.jl): δ_scaled = δ_max_LL * I_ref / Ix; ratio = δ_scaled / L.
+            if resolved_defl !== nothing && I_ref > 0 && δ_LL > 0
+                Ix_m4 = ustrip(u"m^4", StructuralSizer.Ix(s))
+                (δ_LL * I_ref / Ix_m4) / L_m <= resolved_defl || continue
+            end
+            push!(idxs, key2idx[_beam_sec_key(s)])
+        end
+        feasible[i] = sort!(unique!(idxs))
+    end
+
+    return union_cat, feasible
 end
 
 # --- Shared helper: apply MIP/NLP beam results to the BuildingStructure ---
@@ -2330,6 +2730,13 @@ function _apply_beam_results!(
     for (g_idx, gid) in enumerate(group_ids)
         chosen = result.sections[g_idx]
         group_mat = has_multi_mat ? result.materials_chosen[g_idx] : mat
+        
+        # Use the concrete component for volumes to avoid ρ field errors during early EC passes.
+        mat_vols_base = if group_mat isa StructuralSizer.ReinforcedConcreteMaterial
+            MaterialVolumes(group_mat.concrete => zero(VolumeType))
+        else
+            MaterialVolumes(group_mat => zero(VolumeType))
+        end
 
         mg = struc.member_groups[gid]
         mg.section = chosen
@@ -2342,7 +2749,14 @@ function _apply_beam_results!(
             L_raw = sum(struc.segments[i].L for i in segment_indices(m))
             L_total = L_raw isa Unitful.Quantity ? L_raw : L_raw * u"m"
             set_section!(m, chosen)
-            set_volumes!(m, MaterialVolumes(group_mat => StructuralSizer.section_area(chosen) * L_total))
+            
+            # Use the concrete component for volumes to avoid ρ field errors during early EC passes.
+            mat_vols = if group_mat isa StructuralSizer.ReinforcedConcreteMaterial
+                MaterialVolumes(group_mat.concrete => StructuralSizer.section_area(chosen) * L_total)
+            else
+                MaterialVolumes(group_mat => StructuralSizer.section_area(chosen) * L_total)
+            end
+            set_volumes!(m, mat_vols)
 
             for seg_idx in segment_indices(m)
                 edge_idx = struc.segments[seg_idx].edge_idx
@@ -2361,15 +2775,23 @@ function _size_beams_impl!(
     resolution::Int,
     reanalyze::Bool,
     gravity_factor::Quantity,
+    # Accepted for a uniform `size_beams!` dispatch but NOT honored here: per-group
+    # member_group_overrides are only threaded into the STEEL discrete path this
+    # increment. `_assert_member_group_overrides_unsupported` refuses any EFFECTIVE
+    # override that would reach non-steel-beam sizing, so this is always nothing/vacuous.
+    member_group_overrides::Union{Nothing, Dict{UInt64, MemberGroupSizingOverride}} = nothing,
 )
     skel = struc.skeleton
-    edge_ids_in_group = Set(get(skel.groups_edges, :beams, Int[]))
+    edge_ids_in_group = Set{Int}()
+    for g in BEAM_GROUP_SYMBOLS
+        union!(edge_ids_in_group, get(skel.groups_edges, g, Int[]))
+    end
 
     _add_gravity_loads!(struc, edge_ids_in_group, gravity_factor)
 
     # Extract demands from analysis (MemberDemand in SI: N, N·m, m)
     group_ids, demands, L_totals, Lb_govs, Cb_govs, Kx_govs, Ky_govs =
-        member_group_demands(struc; member_edge_group=:beams, resolution=resolution)
+        member_group_demands(struc; member_edge_group=BEAM_GROUP_SYMBOLS, resolution=resolution)
 
     isempty(group_ids) && return struc
 
@@ -2449,15 +2871,21 @@ function _size_beams_impl!(
     resolution::Int,
     reanalyze::Bool,
     gravity_factor::Quantity,
+    # Accepted for uniform `size_beams!` dispatch, NOT honored here (non-steel path;
+    # the guard refuses effective overrides that would reach it — always nothing/vacuous).
+    member_group_overrides::Union{Nothing, Dict{UInt64, MemberGroupSizingOverride}} = nothing,
 )
     skel = struc.skeleton
-    edge_ids_in_group = Set(get(skel.groups_edges, :beams, Int[]))
+    edge_ids_in_group = Set{Int}()
+    for g in BEAM_GROUP_SYMBOLS
+        union!(edge_ids_in_group, get(skel.groups_edges, g, Int[]))
+    end
 
     _add_gravity_loads!(struc, edge_ids_in_group, gravity_factor)
 
     # Extract demands from analysis (MemberDemand in SI: N, N·m, m)
     group_ids, demands, L_totals, Lb_govs, Cb_govs, Kx_govs, Ky_govs =
-        member_group_demands(struc; member_edge_group=:beams, resolution=resolution)
+        member_group_demands(struc; member_edge_group=BEAM_GROUP_SYMBOLS, resolution=resolution)
 
     isempty(group_ids) && return struc
 
@@ -2626,15 +3054,21 @@ function _size_beams_impl!(
     resolution::Int,
     reanalyze::Bool,
     gravity_factor::Quantity,
+    # Accepted for uniform `size_beams!` dispatch, NOT honored here (non-steel path;
+    # the guard refuses effective overrides that would reach it — always nothing/vacuous).
+    member_group_overrides::Union{Nothing, Dict{UInt64, MemberGroupSizingOverride}} = nothing,
 )
     skel = struc.skeleton
-    edge_ids_in_group = Set(get(skel.groups_edges, :beams, Int[]))
+    edge_ids_in_group = Set{Int}()
+    for g in BEAM_GROUP_SYMBOLS
+        union!(edge_ids_in_group, get(skel.groups_edges, g, Int[]))
+    end
 
     _add_gravity_loads!(struc, edge_ids_in_group, gravity_factor)
 
     # Extract demands from analysis (MemberDemand in SI: N, N·m, m)
     group_ids, demands, L_totals, Lb_govs, Cb_govs, Kx_govs, Ky_govs =
-        member_group_demands(struc; member_edge_group=:beams, resolution=resolution)
+        member_group_demands(struc; member_edge_group=BEAM_GROUP_SYMBOLS, resolution=resolution)
 
     isempty(group_ids) && return struc
 
@@ -3111,7 +3545,14 @@ function _apply_column_results!(struc, result, group_ids, material, material_typ
             L_total = L_raw isa Unitful.Quantity ? L_raw : L_raw * u"m"
             
             set_section!(m, chosen)
-            set_volumes!(m, MaterialVolumes(group_mat => StructuralSizer.section_area(chosen) * L_total))
+            # Re-calculate volumes with concrete only for EC calculation if material is RC
+    v_total = StructuralSizer.section_area(chosen) * L_total
+    mat_vols = if group_mat isa StructuralSizer.ReinforcedConcreteMaterial
+        MaterialVolumes(group_mat.concrete => v_total)
+    else
+        MaterialVolumes(group_mat => v_total)
+    end
+    set_volumes!(m, mat_vols)
             
             # Update ASAP elements
             for seg_idx in segment_indices(m)

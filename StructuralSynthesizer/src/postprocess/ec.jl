@@ -230,6 +230,9 @@ function _compute_fireproofing_ec(struc::BuildingStructure, params::Union{Design
                 if mm isa StructuralSizer.StructuralSteel
                     mat = mm
                     break
+                elseif mm isa StructuralSizer.ReinforcedConcreteMaterial
+                    # No fireproofing for RC members
+                    break
                 end
             end
             isnothing(mat) && continue
@@ -257,7 +260,21 @@ function compute_element_ec_member(m::AbstractMember, element_type::Symbol, idx:
     ec = element_ec(vols)
     pairs = _sorted_volume_pairs(vols)
     vol_total = sum((v for (_, v) in pairs); init=0.0u"m^3")
-    mass_total = sum(vol * mat.ρ for (mat, vol) in pairs; init=0.0u"kg")
+    
+    # [BUG fix] ReinforcedConcreteMaterial has no field ρ. Extract concrete density.
+    mass_total = 0.0u"kg"
+    for (mat, vol) in pairs
+        ρ = if hasproperty(mat, :ρ)
+            mat.ρ
+        elseif mat isa StructuralSizer.ReinforcedConcreteMaterial
+            mat.concrete.ρ
+        else
+            @warn "Unknown material type in EC calculation: $(typeof(mat))"
+            0.0u"kg/m^3"
+        end
+        mass_total += vol * ρ
+    end
+
     ElementECResult(element_type, idx, ec, vol_total, mass_total)
 end
 

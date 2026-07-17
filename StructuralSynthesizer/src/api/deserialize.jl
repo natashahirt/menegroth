@@ -397,10 +397,13 @@ function json_to_params(api_params::APIParams, coord_unit_str::String="meters")
 
     ucs = Symbol(lowercase(strip(api_params.uniform_column_sizing)))
 
+    framing_opts = _resolve_framing_opts(api_params)
+
     return DesignParameters(
         loads = loads,
         materials = materials,
         floor = floor,
+        framing_opts = framing_opts,
         columns = columns,
         beams = beams,
         fire_rating = validate_fire_rating(api_params.fire_rating),
@@ -594,6 +597,175 @@ function _resolve_materials(api_params::APIParams)
         _resolve_rebar_name(api_params.materials.rebar),
         _resolve_steel_name(api_params.materials.steel),
     )
+end
+
+# ─── Framing auto-generation (Phase 5, plan `joists-roles-materials`) ─────────
+
+# Named timber presets available to the framing-material resolver. INTENTIONALLY
+# EMPTY: no verified NDS Supplement (Table 4A/4B/…) reference design values for a
+# timber species/grade are grounded in the corpus (the NDS is not a corpus
+# source — see `.cursor/rules/corpus.mdc`). Structural material properties are
+# safety-critical and MUST NOT be fabricated, so a JSON caller cannot select a
+# timber preset until a grounded one is registered here. The direct
+# `framing_opts.materials.timber = <Timber>` Julia path (a caller-supplied
+# `StructuralSizer.Timber`) is unaffected and remains the supported way to drive
+# mass-timber framing today.
+const TIMBER_MAP = Dict{String, StructuralSizer.Timber}()
+
+"""
+Resolve a framing-level member material family name to a StructuralSizer
+`AbstractMaterial`, drawing on the top-level `materials` block. `"steel"` →
+structural steel (`materials.steel`); `"concrete"` → reinforced concrete
+(`materials.concrete` + `materials.rebar`); `"timber"` → the named preset in
+`materials.timber` (resolved via [`TIMBER_MAP`](@ref)). Errors on any other
+value.
+
+Timber is a recognized family (mass-timber joists are supported by the member
+sizer via the NDS glulam path), but no NDS-grounded timber preset ships in the
+material library yet, so a `"timber"` request errors unless `materials.timber`
+names a registered preset. Structural material values are safety-critical and
+are never fabricated here (`.cursor/rules/code-accuracy.mdc`).
+"""
+function _resolve_framing_material(name::AbstractString, api_params::APIParams)
+    key = lowercase(strip(name))
+    if key == "steel"
+        return _resolve_steel_name(api_params.materials.steel)
+    elseif key == "concrete"
+        conc = _resolve_concrete_name(api_params.materials.concrete)
+        reb  = _resolve_rebar_name(api_params.materials.rebar)
+        return StructuralSizer.ReinforcedConcreteMaterial(conc, reb)
+    elseif key == "timber"
+        preset = api_params.materials.timber
+        preset === nothing && error(
+            "framing_levels material \"timber\" requires a registered timber " *
+            "preset named in materials.timber, but none was provided and no " *
+            "NDS-grounded timber preset ships yet. Supply a Timber material via " *
+            "the framing_opts Julia API, or register a verified preset in TIMBER_MAP.")
+        return _resolve_from_map(preset, TIMBER_MAP, "timber preset")
+    end
+    error("Unknown framing_levels material \"$name\". Options: steel, concrete, timber.")
+end
+
+"""
+Build the level-1 `opts.materials` NamedTuple for `populate_levels!`. `:beam` is
+the universal fallback key resolved by every slab-type path in
+`derive_framing_level`; the family key (`:steel`/`:concrete`) is added so a
+slab type that prefers a specific family (e.g. OWSJ → `:steel`) picks it up.
+"""
+function _framing_materials_nt(name::AbstractString, mat)
+    fam = Symbol(lowercase(strip(name)))
+    return fam in (:steel, :concrete, :timber) ?
+        NamedTuple{(fam, :beam)}((mat, mat)) : (; beam = mat)
+end
+
+"""
+    _resolve_framing_opts(api_params::APIParams) -> NamedTuple
+
+Translate `api_params.framing_levels` into the `opts` NamedTuple consumed by
+`populate_levels!`. Returns an empty NamedTuple (a strict no-op) when no framing
+levels are requested. Level 1 (framing directly on the slab — joists) sets
+`:materials` plus optional `:spacing`/`:axis`/`:count`/`:end_fixity`/
+`:catalog_override` (its role is fixed by the slab type; `:axis`/`:count` apply
+only to the opts-schema slab types). Levels 2+ each contribute a `:level_N`
+schema NamedTuple (`:material`, and optional
+`:spacing`/`:role`/`:count`/`:axis`/`:end_fixity`/`:catalog_override`). Spacing is
+given in inches on the wire and passed as a `u"inch"` quantity; `populate_levels!`
+converts it to the structure's length unit. `end_fixity` is a 2-element release
+vector parsed to an `NTuple{2, Symbol}`; `catalog_override` is a steel-catalog
+name resolved to the concrete section collection.
+"""
+function _resolve_framing_opts(api_params::APIParams)
+    levels = api_params.framing_levels
+    isempty(levels) && return NamedTuple()
+
+    # Level 1 (framing directly on the slab — joists). Geometry/role are fixed by
+    # the slab type; the opts-schema slab types additionally honor axis/count.
+    lvl1 = levels[1]
+    mat1 = _resolve_framing_material(lvl1.material, api_params)
+    opts = (; materials = _framing_materials_nt(lvl1.material, mat1))
+    if lvl1.spacing_in !== nothing
+        opts = merge(opts, (; spacing = lvl1.spacing_in * u"inch"))
+    end
+    if lvl1.axis !== nothing && length(lvl1.axis) >= 2
+        opts = merge(opts, (; axis = (Float64(lvl1.axis[1]), Float64(lvl1.axis[2]))))
+    end
+    lvl1.count !== nothing && (opts = merge(opts, (; count = lvl1.count)))
+    let ef = _resolve_framing_end_fixity(lvl1.end_fixity)
+        ef !== nothing && (opts = merge(opts, (; end_fixity = ef)))
+    end
+    let co = _resolve_framing_catalog_override(lvl1.catalog_override)
+        co !== nothing && (opts = merge(opts, (; catalog_override = co)))
+    end
+
+    for k in 2:length(levels)
+        lvl = levels[k]
+        schema = (; material = _resolve_framing_material(lvl.material, api_params))
+        lvl.spacing_in !== nothing &&
+            (schema = merge(schema, (; spacing = lvl.spacing_in * u"inch")))
+        lvl.role !== nothing &&
+            (schema = merge(schema, (; role = Symbol(lowercase(strip(lvl.role))))))
+        lvl.count !== nothing &&
+            (schema = merge(schema, (; count = lvl.count)))
+        if lvl.axis !== nothing && length(lvl.axis) >= 2
+            schema = merge(schema, (; axis = (Float64(lvl.axis[1]), Float64(lvl.axis[2]))))
+        end
+        let ef = _resolve_framing_end_fixity(lvl.end_fixity)
+            ef !== nothing && (schema = merge(schema, (; end_fixity = ef)))
+        end
+        let co = _resolve_framing_catalog_override(lvl.catalog_override)
+            co !== nothing && (schema = merge(schema, (; catalog_override = co)))
+        end
+        opts = merge(opts, NamedTuple{(Symbol("level_$k"),)}((schema,)))
+    end
+    return opts
+end
+
+# Accepted per-end release symbols for a framing level's `end_fixity`. `:default`
+# defers to the (role, material, lateral_role) release dispatch; the others are
+# the explicit member-end releases the runtime `resolve_release` accepts.
+const _FRAMING_END_FIXITY_VALUES = (:default, :pinned, :fixed, :free)
+
+"""
+Parse an API `end_fixity` (a 2-element `[start, end]` release-name vector) into an
+`NTuple{2, Symbol}` for `FramingLevel.end_fixity`. Returns `nothing` when unset.
+Errors on a wrong length or an unrecognized release name.
+"""
+function _resolve_framing_end_fixity(ef::Union{Vector{String}, Nothing})
+    ef === nothing && return nothing
+    length(ef) == 2 || error(
+        "framing_levels end_fixity must have exactly 2 entries [start, end]; got $(length(ef)).")
+    syms = ntuple(i -> Symbol(lowercase(strip(ef[i]))), 2)
+    for s in syms
+        s in _FRAMING_END_FIXITY_VALUES || error(
+            "Unknown framing_levels end_fixity release \"$s\". " *
+            "Options: $(join(_FRAMING_END_FIXITY_VALUES, ", ")).")
+    end
+    return syms
+end
+
+# Named steel section catalogs selectable per framing level via
+# `catalog_override`. Resolves to the concrete section collection consumed by
+# `size_member_group!` (whose default is `StructuralSizer.all_W()`). ENGINEERING
+# KNOB, not a published-code factor — restricts which sections the sizer may pick.
+const _FRAMING_CATALOG_MAP = Dict{String, Function}(
+    "all_w"        => StructuralSizer.all_W,
+    "preferred_w"  => StructuralSizer.preferred_W,
+    "all_hss"      => StructuralSizer.all_HSS,
+    "all_hssround" => StructuralSizer.all_HSSRound,
+)
+
+"""
+Resolve an API `catalog_override` steel-catalog name to the concrete section
+catalog collection consumed by `size_member_group!`. Returns `nothing` when
+unset. Errors on an unrecognized name.
+"""
+function _resolve_framing_catalog_override(name::Union{String, Nothing})
+    name === nothing && return nothing
+    key = lowercase(strip(name))
+    haskey(_FRAMING_CATALOG_MAP, key) || error(
+        "Unknown framing_levels catalog_override \"$name\". " *
+        "Options: all_W, preferred_W, all_HSS, all_HSSRound.")
+    return _FRAMING_CATALOG_MAP[key]()
 end
 
 """Build fc_values [MPa] from PixelFrame options. 1 ksi ≈ 6.895 MPa."""

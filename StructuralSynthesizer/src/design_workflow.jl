@@ -62,50 +62,6 @@ struct PreSizingValidationError <: Exception
     errors::Vector{String}
 end
 
-"""
-    _assert_member_group_overrides_unsupported(params::DesignParameters)
-
-Fail-loud guard (Run 4, Part 1): refuse an EFFECTIVE `member_group_overrides`
-entry on any full-pipeline / variation design path, because NONE of them route
-member sizing through `size_member_group!` (the only path that honors the knob).
-
-The standard `design_building` pipeline sizes members via batched `size_beams!` /
-the global `size_columns!` MIP / flat-plate `_reconcile_columns!`, and the
-incremental variation API (`redesign` / `vary` / `redesign_incremental!`) applies
-the override as a param diff on an already-built engine whose graph likewise never
-calls `size_member_group!`. So a non-empty override on either path cannot be
-honored and would be SILENTLY IGNORED — a per-group catalog/deflection restriction
-dropped, a default-catalog design returned with no error. For a safety-critical
-sizer we REFUSE the knob rather than `@warn`-and-proceed (warnings are missed in
-batch/sweep runs).
-
-Consistency with the `MemberGroupSizingOverride` docstring: an override whose
-fields are ALL unset is a documented no-op, so a populated-but-vacuous dict does
-NOT throw (design proceeds byte-identical). Only an EFFECTIVE entry
-(`_is_effective`) is refused. (catalog/deflection_limit/max_depth are engineering
-sizing knobs — no code citation.)
-
-Shared by `run_pre_sizing_validation` (covers `design_building` both methods,
-`prepare_engine`, and `DesignSession` construction) and the design-producing
-variation entry points `redesign` / `vary` / `redesign_incremental!`.
-"""
-function _assert_member_group_overrides_unsupported(params::DesignParameters)
-    if !isempty(params.member_group_overrides) &&
-       any(_is_effective, values(params.member_group_overrides))
-        throw(ArgumentError(
-            "member_group_overrides is not yet honored: neither the standard " *
-            "design_building pipeline (which sizes members via batched size_beams! / " *
-            "global size_columns! MIP / flat-plate _reconcile_columns!) nor the " *
-            "incremental variation API (redesign / vary / redesign_incremental!) routes " *
-            "member sizing through size_member_group!, so a non-empty override cannot be " *
-            "honored and would be SILENTLY IGNORED; the only path that honors it today is " *
-            "a direct size_member_group! call with override = " *
-            "resolve_member_group_override(params, gid); full-pipeline support is deferred " *
-            "to a future run."))
-    end
-    return nothing
-end
-
 Base.showerror(io::IO, e::PreSizingValidationError) =
     print(io, "PreSizingValidationError: ", join(e.errors, "; "))
 
@@ -125,11 +81,13 @@ function run_pre_sizing_validation(
     params::DesignParameters;
     tc::Union{Nothing, StructuralSizer.TraceCollector} = nothing,
 )
-    # Fail-loud guard (Run 4, Part 1): refuse an EFFECTIVE member_group_overrides
-    # here (covers both design_building methods, prepare_engine, and DesignSession
-    # construction). Shared with the variation entry points so the sweep door has
-    # the identical posture. See `_assert_member_group_overrides_unsupported`.
-    _assert_member_group_overrides_unsupported(params)
+    # Fail-loud guard (Run 4): refuse only UN-HONORABLE effective
+    # member_group_overrides (covers both design_building methods, prepare_engine,
+    # and DesignSession construction). `struc` is prepared here, so the struc-aware
+    # overload also refuses column/strut-group targets — the earliest choke point
+    # that can. Honorable steel-beam-group overrides pass and are threaded into
+    # sizing. See `_assert_member_group_overrides_unsupported`.
+    _assert_member_group_overrides_unsupported(params, struc)
 
     errors = String[]
     floor_opts = resolve_floor_options(params)
@@ -587,10 +545,12 @@ This is the geometry-only step — no member sizing. Call `design_building` or
 run pipeline stages individually after `prepare!`.
 
 # Framing options (`framing_opts`)
-Passed straight to [`populate_levels!`](@ref) to drive framing auto-generation
-above each slab (plan `joists-roles-materials`, Phase 5). Empty by default, which
-is a strict no-op for the standard flat-plate / flat-slab / beam-supported flows.
-Recognized keys (all optional):
+Drives framing auto-generation above each slab via [`populate_levels!`](@ref)
+(plan `joists-roles-materials`, Phase 5). The explicit `framing_opts` kwarg wins
+when non-empty; otherwise the value falls back to `params.framing_opts` (so the
+REST API / `DesignParameters` can carry framing through a single design call).
+Empty by default, which is a strict no-op for the standard flat-plate /
+flat-slab / beam-supported flows. Recognized keys (all optional):
 - `framing_opts.materials`: `NamedTuple` of member materials by key
   (`:steel`, `:timber`, `:concrete`, `:beam`).
 - `framing_opts.spacing`: center-to-center joist spacing for the opts-schema slab
@@ -626,11 +586,16 @@ function prepare!(struc::BuildingStructure, params::DesignParameters;
     # `joists-roles-materials`, Phase 5). Runs immediately after
     # `initialize_members!` (invoked inside `initialize!`) and before
     # `to_asap!`, so any generated joists/secondary members are already present
-    # when the analysis model is built. `framing_opts` is threaded from the
-    # caller (empty by default), so a caller can drive auto-generation through the
-    # public `prepare!` / `design_building` API; an empty `framing_opts` stays a
-    # strict no-op for flat-plate/flat-slab/beam-supported systems.
-    populate_levels!(struc; opts=framing_opts)
+    # when the analysis model is built.
+    #
+    # Options resolve with the explicit `framing_opts` kwarg taking precedence
+    # (when non-empty) over `params.framing_opts`. The kwarg preserves every
+    # existing caller; the `params` field lets the REST API / `DesignParameters`
+    # carry framing through a single `design_building(struc, params)` call
+    # (`routes.jl` passes no kwarg). An empty result stays a strict no-op for
+    # flat-plate/flat-slab/beam-supported systems.
+    opts = isempty(framing_opts) ? params.framing_opts : framing_opts
+    populate_levels!(struc; opts=opts)
 
     fc = _get_design_fc(params)
     estimate_column_sizes!(struc; fc=fc, input_is_centerline=params.geometry_is_centerline)
@@ -672,18 +637,16 @@ design = capture_design(struc, params)
 function capture_design(struc::BuildingStructure, params::DesignParameters;
                         t_start=nothing,
                         tc::Union{Nothing, StructuralSizer.TraceCollector} = nothing)
-    # Fail-loud guard (Run 4, Part 1) — UNIVERSAL choke point. Every BuildingDesign
-    # is materialized here: the standard design_building tail, the primitive
+    # Fail-loud guard (Run 4) — UNIVERSAL choke point. Every BuildingDesign is
+    # materialized here: the standard design_building tail, the primitive
     # build_design_graph -> execute_graph! -> capture_design path, and
     # capture_incremental_design (scheduler.jl) all route through this function.
-    # The upstream wrapper guards (run_pre_sizing_validation / redesign /
-    # redesign_incremental!) give earlier, clearer errors on ergonomic paths; this
-    # is the backstop that catches the two primitive paths which bypass them. An
-    # EFFECTIVE member_group_overrides entry cannot be honored (no path here routes
-    # member sizing through size_member_group!) and would be SILENTLY IGNORED, so we
-    # refuse it. Empty / all-unset (vacuous) overrides pass unchanged, so the
-    # happy-path design stays byte-identical. NOT prepare-affecting.
-    _assert_member_group_overrides_unsupported(params)
+    # Phase B HONORS effective steel-beam-group overrides; the struc-aware guard is
+    # the backstop that refuses the un-honorable targets (flat-plate/flat-slab
+    # floors, non-steel/coupled beam sizing, column/strut groups) so no primitive
+    # path silently drops one. Empty / all-unset (vacuous) overrides pass unchanged
+    # (byte-identical happy path). NOT prepare-affecting.
+    _assert_member_group_overrides_unsupported(params, struc)
     design = BuildingDesign(struc, params)
     if tc !== nothing
         append!(design.solver_trace, tc.events)
@@ -1263,6 +1226,25 @@ function _size_beams_columns!(struc::BuildingStructure, params::DesignParameters
     if !isempty(struc.slabs)
         floor_types = Set(s.floor_type for s in struc.slabs)
         if all(ft -> ft in (:flat_plate, :flat_slab, :grade, :roof), floor_types)
+            # [P1 fix cycle 3] Honor-or-throw invariant on the SLAB-ONLY skip branch.
+            # Beam sizing is about to be skipped, so no steel beam group will be sized
+            # and an EFFECTIVE per-group `member_group_overrides` entry can never be
+            # honored on this path — materializing a BuildingDesign anyway would
+            # SILENTLY DROP it (the exact safety hazard the feature exists to prevent).
+            # The floor-type door (`_assert_member_group_overrides_unsupported`) already
+            # refuses flat_plate/flat_slab effective overrides, so the residual exposure
+            # closed here is a slab-only :grade/:roof geometry. Empty / all-unset
+            # (vacuous) overrides stay a strict no-op (byte-identical). Uses the SAME
+            # effectiveness test as the rest of the feature (`_is_effective`).
+            # (catalog / deflection_limit / max_depth are engineering sizing knobs — no
+            # code citation.)
+            if any(_is_effective, values(params.member_group_overrides))
+                throw(ArgumentError(_mgo_refusal_message(
+                    "beam sizing is skipped for a slab-only floor system " *
+                    "(floor_types=$(collect(floor_types))) in the beam+column stage, so " *
+                    "no steel beam group is sized and the per-group override cannot be " *
+                    "honored")))
+            end
             @warn "Skipping beam sizing for slab-only floor system in beam+column stage" floor_types=collect(floor_types)
             StructuralSizer.emit!(tc, :workflow, "_size_beams_columns!", "", :decision;
                                   outcome="skipped", reason="slab_only_system",
@@ -1278,10 +1260,27 @@ function _size_beams_columns!(struc::BuildingStructure, params::DesignParameters
     beam_opts   = something(params.beams,   StructuralSizer.SteelBeamOptions())
     column_opts = something(params.columns, StructuralSizer.SteelColumnOptions())
     skel = struc.skeleton
-    beam_edge_ids = Set(get(skel.groups_edges, :beams, Int[]))
+    beam_edge_ids = Set{Int}()
+    for g in BEAM_GROUP_SYMBOLS
+        union!(beam_edge_ids, get(skel.groups_edges, g, Int[]))
+    end
 
     # Skip beam sizing when no beam edges (e.g. beam-based floor type but geometry has no beams)
     if isempty(beam_edge_ids)
+        # [P1 fix cycle 3] Honor-or-throw invariant on the NO-BEAM-EDGES skip branch.
+        # Beam sizing is skipped (columns only), so an EFFECTIVE per-group
+        # `member_group_overrides` entry targets a steel beam group that will never be
+        # sized on this path; producing a BuildingDesign would SILENTLY DROP it. This
+        # fires on a NON-flat steel floor that has columns but no :beams edge group,
+        # on BOTH `design_building` and `redesign_incremental!` (both route through
+        # `_size_beams_columns!`). Empty / all-unset (vacuous) overrides stay a strict
+        # no-op (byte-identical). (Engineering sizing knobs — no code citation.)
+        if any(_is_effective, values(params.member_group_overrides))
+            throw(ArgumentError(_mgo_refusal_message(
+                "beam sizing is skipped because the geometry has no :beams edges " *
+                "(sizing columns only), so no steel beam group is sized and the " *
+                "per-group override cannot be honored")))
+        end
         @warn "Skipping beam sizing: no beam edges in geometry. Sizing columns only."
         StructuralSizer.emit!(tc, :workflow, "_size_beams_columns!", "", :decision;
                               outcome="skipped_beams", reason="no_beam_edges")
@@ -1321,9 +1320,16 @@ function _size_beams_columns!(struc::BuildingStructure, params::DesignParameters
                           beam_type=string(typeof(beam_opts)),
                           column_type=string(typeof(column_opts)))
 
+    # Run 4 / Phase B: forward per-group member_group_overrides into the batched
+    # beam sizing. `nothing`/vacuous overrides route the pre-Phase-B path verbatim
+    # (byte-identical); an effective steel-beam-group override narrows only that
+    # group. Un-honorable targets are already refused upstream by the guard.
+    mgo = isempty(params.member_group_overrides) ? nothing : params.member_group_overrides
+
     for iter in 1:max_iter
         iters_used = iter
-        size_beams!(struc, beam_opts; reanalyze=false, tc=tc)
+        size_beams!(struc, beam_opts; reanalyze=false, tc=tc,
+                    member_group_overrides=mgo)
         
         if struc.asap_model.processed
             Asap.update!(struc.asap_model)
@@ -1362,6 +1368,10 @@ function _size_beams_columns!(struc::BuildingStructure, params::DesignParameters
     # After sizing, add SFRM/intumescent self-weight and re-solve.
     if has_fire_rating(params)
         n_beam = add_coating_loads!(struc, params; member_edge_group=:beams, resolve=false)
+    # Also add for other beam-like groups if present
+    for g in (:joists, :secondary, :girder)
+        n_beam += add_coating_loads!(struc, params; member_edge_group=g, resolve=false)
+    end
         n_col  = add_coating_loads!(struc, params; member_edge_group=:columns, resolve=false)
         if (n_beam + n_col) > 0
             Asap.process!(struc.asap_model)
@@ -2193,6 +2203,9 @@ function _compute_design_summary!(design::BuildingDesign, struc::BuildingStructu
             v = uconvert(u"m^3", vol)
             if mat isa StructuralSizer.Concrete
                 total_conc_vol += v
+            elseif mat isa StructuralSizer.ReinforcedConcreteMaterial
+                total_conc_vol += v
+                total_rebar_wt += uconvert(u"kg", v * mat.rebar.ρ * 0.015) # Assume 1.5% rebar if only RC material vol is known
             elseif mat isa StructuralSizer.RebarSteel
                 total_rebar_wt += uconvert(u"kg", v * mat.ρ)
             elseif mat isa StructuralSizer.StructuralSteel

@@ -131,6 +131,23 @@ Conventions:
 const MaterialVolumes = Dict{AbstractMaterial, VolumeType}
 
 """
+    _volume_key(material) -> AbstractMaterial
+
+Canonical `MaterialVolumes` key for a sized member's material. For a
+`ReinforcedConcreteMaterial`, returns its `Concrete` component; otherwise
+returns `material` unchanged.
+
+The unwrap is required because downstream embodied-carbon and mass
+computations (`postprocess/ec.jl`) read `mat.ρ` directly, and
+`ReinforcedConcreteMaterial` has no `ρ` field. Every site that constructs
+`MaterialVolumes(...)` from a sized member's material MUST route it through
+this helper — mismatched keys cause `element_ec` to raise `type
+ReinforcedConcreteMaterial has no field ρ`.
+"""
+_volume_key(mat::StructuralSizer.ReinforcedConcreteMaterial) = mat.concrete
+_volume_key(mat::AbstractMaterial) = mat
+
+"""
     Slab{T}
 
 Physical slab (one or more connected cells).
@@ -148,6 +165,10 @@ reassignment during sizing (e.g., CIPSlabResult → FlatPlatePanelResult).
 - `volumes`: Material → volume mapping (m³)
 - `drop_panel`: `DropPanelGeometry` for flat slabs, `nothing` otherwise.
   Set by `_size_slab!(::FlatSlab, ...)` after the design pipeline returns.
+- `framing_levels`: Generated framing hierarchy above this slab
+  ([`FramingLevel`](@ref)); levels `1, 2, …` (level 0 is the primary skeleton).
+  Empty by default; populated by `attach_framing_level!` (manual) or Phase 5's
+  auto-generation.
 """
 mutable struct Slab{T}
     cell_indices::Vector{Int}
@@ -162,20 +183,27 @@ mutable struct Slab{T}
     # transfer reinforcement, ρ_prime).  Stored so downstream consumers (capture_design,
     # study scripts) don't lose the rich detail that slab.result alone can't carry.
     design_details::Union{Nothing, NamedTuple}  # NamedTuple from size_flat_plate!, or nothing
+    # Framing hierarchy (Phase 4): generated levels above this slab. Empty until
+    # attached manually (attach_framing_level!) or by Phase 5 auto-generation.
+    framing_levels::Vector{FramingLevel{T}}
 end
 
 """
-    Slab(cell_indices, result, spans; floor_type, position, group_id, volumes, drop_panel, design_details) -> Slab
+    Slab(cell_indices, result, spans; floor_type, position, group_id, volumes, drop_panel, design_details, framing_levels) -> Slab
 
 Construct a `Slab` from cell indices, a floor sizing result, and governing spans.
+`framing_levels` defaults to an empty `Vector{FramingLevel{T}}`.
 """
 function Slab(cell_indices::Vector{Int}, result::AbstractFloorResult, spans::SpanInfo; 
               floor_type=:one_way, position::Symbol=:interior, group_id=nothing,
               volumes::MaterialVolumes=MaterialVolumes(),
-              drop_panel=nothing, design_details=nothing)
+              drop_panel=nothing, design_details=nothing,
+              framing_levels=nothing)
     T = typeof(StructuralSizer.total_depth(result))
     spans_T = SpanInfo{T}(T(spans.primary), T(spans.secondary), spans.axis, T(spans.isotropic))
-    Slab{T}(cell_indices, result, floor_type, spans_T, position, group_id, volumes, drop_panel, design_details)
+    levels = isnothing(framing_levels) ? FramingLevel{T}[] : framing_levels
+    Slab{T}(cell_indices, result, floor_type, spans_T, position, group_id, volumes,
+            drop_panel, design_details, levels)
 end
 
 """Single-cell slab convenience: wraps the cell index in a vector."""
@@ -214,19 +242,40 @@ end
 """Create an empty `SlabGroup` with the given hash key."""
 SlabGroup(hash::UInt64) = SlabGroup(hash, Int[])
 
-"""Per-edge analysis data (one per skeleton edge / ASAP element)."""
+"""
+Per-edge analysis data (one per skeleton edge / ASAP element).
+
+# End releases
+`release_start` / `release_end` are per-end fixity symbols owned by the segment
+(decoupled from the Asap element's release type parameter), one of:
+- `:default` — sentinel; the resolver defers to the `(role, material, lateral_role)`
+  dispatch (`default_release`) to pick the per-end symbol;
+- `:fixed` — moment-continuous at that end;
+- `:pinned` — moment released at that end.
+
+`release_start` is the fixity at the segment's start node (skeleton
+`edge_indices[edge_idx] = (v_start, v_end)`, i.e. at `v_start`); `release_end` at
+`v_end`. [`resolve_release`](@ref) collapses a chain of segments plus the member's
+`torsion_released` flag to one of Asap's five element release enums.
+"""
 mutable struct Segment{T}
     edge_idx::Int
     L::T
     Lb::T
     Cb::Float64
+    release_start::Symbol  # :default | :fixed | :pinned
+    release_end::Symbol    # :default | :fixed | :pinned
 end
 
 """
-    Segment(edge_idx, L; Lb=L, Cb=1.0) -> Segment
+    Segment(edge_idx, L; Lb=L, Cb=1.0, release_start=:default, release_end=:default) -> Segment
 
-Construct a `Segment` for a skeleton edge with optional unbraced length and moment gradient factor.
+Construct a `Segment` for a skeleton edge with optional unbraced length, moment
+gradient factor, and per-end release symbols. Release symbols default to
+`:default` (resolver defers to `(role, material, lateral_role)` dispatch), which
+preserves the prior all-`:fixedfixed` behavior until overridden.
 """
-function Segment(edge_idx::Int, L::T; Lb=L, Cb=1.0) where T
-    Segment{T}(edge_idx, L, Lb, Float64(Cb))
+function Segment(edge_idx::Int, L::T; Lb=L, Cb=1.0,
+                 release_start::Symbol=:default, release_end::Symbol=:default) where T
+    Segment{T}(edge_idx, L, Lb, Float64(Cb), release_start, release_end)
 end

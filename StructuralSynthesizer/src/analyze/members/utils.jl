@@ -898,10 +898,20 @@ direction as it appears in the face's vertex list, and return its 90° CCW
 rotation (left-hand normal).
 
 Robust to concave polygons — does not rely on centroid position.
+
+## Split-edge fallback
+
+If the face's CCW vertex list does not contain `(vertex_idx, neighbor_idx)` as
+a consecutive pair, the edge has been subdivided by a framing joist landing
+(`_split_host_edge!`) — `neighbor_idx` is a mid-edge landing that was inserted
+onto the graph but not into `face_vertex_indices`. Since a landing lies
+COLINEARLY on the original edge, its direction is unchanged, so we recover
+the CCW direction by finding whichever consecutive face-vertex pair contains
+`vertex_idx` on the line the edge belongs to (the face's original grid corner
+adjacent to `vertex_idx` in the CCW list).
 """
 function _compute_inward_normal(skel::BuildingSkeleton, vertex_idx::Int,
                                 neighbor_idx::Int, edge_idx::Int)
-    # Find the single face that owns this boundary edge
     face_idx = 0
     for (fi, face_edges) in enumerate(skel.face_edge_indices)
         if edge_idx in face_edges
@@ -911,24 +921,56 @@ function _compute_inward_normal(skel::BuildingSkeleton, vertex_idx::Int,
     end
     face_idx == 0 && error("Boundary edge $edge_idx not found in any face")
 
-    # Walk the face's CCW vertex list to find edge direction as seen by the face
     vis = skel.face_vertex_indices[face_idx]
     vc = skel.geometry.vertex_coords
     n_v = length(vis)
+
+    ccw_direction(v_a, v_b) = begin
+        dx = vc[v_b, 1] - vc[v_a, 1]
+        dy = vc[v_b, 2] - vc[v_a, 2]
+        len = hypot(dx, dy)
+        len < 1e-12 && error("Zero-length edge in face $face_idx")
+        return (-dy / len, dx / len)              # left-hand normal (inward for CCW)
+    end
+
+    # Fast path: (vertex_idx, neighbor_idx) is a consecutive CCW pair.
     for i in 1:n_v
         v_a = vis[i]
         v_b = vis[mod1(i + 1, n_v)]
         if (v_a == vertex_idx && v_b == neighbor_idx) ||
            (v_a == neighbor_idx && v_b == vertex_idx)
-            # Directed edge as it appears in CCW face: v_a → v_b
-            dx = vc[v_b, 1] - vc[v_a, 1]
-            dy = vc[v_b, 2] - vc[v_a, 2]
-            len = hypot(dx, dy)
-            len < 1e-12 && error("Zero-length edge in face $face_idx")
-            # Left-hand normal of CCW edge = inward: rotate (dx,dy) by +90°
-            return (-dy / len, dx / len)
+            return ccw_direction(v_a, v_b)
         end
     end
+
+    # Split-edge fallback: `neighbor_idx` is a joist landing on the original
+    # boundary edge. Find the CCW neighbor of `vertex_idx` in the face vertex
+    # list that lies on the same line as `edge_idx` (colinearity within a
+    # tight tolerance covers any float noise from `_landing_vertex!`).
+    vx, vy = vc[vertex_idx, 1], vc[vertex_idx, 2]
+    nx, ny = vc[neighbor_idx, 1], vc[neighbor_idx, 2]
+    edx = nx - vx
+    edy = ny - vy
+    edge_len = hypot(edx, edy)
+    edge_len < 1e-12 && error("Zero-length split edge $edge_idx at vertex $vertex_idx")
+    ux, uy = edx / edge_len, edy / edge_len
+
+    for i in 1:n_v
+        v_a = vis[i]
+        v_b = vis[mod1(i + 1, n_v)]
+        v_a == vertex_idx || v_b == vertex_idx || continue
+        v_other = v_a == vertex_idx ? v_b : v_a
+        ox = vc[v_other, 1] - vx
+        oy = vc[v_other, 2] - vy
+        o_len = hypot(ox, oy)
+        o_len < 1e-12 && continue
+        # Same direction (u · o_hat) ≈ 1 means `v_other` is the ORIGINAL grid
+        # corner colinear with `vertex_idx → neighbor_idx`. Use its CCW pair.
+        if (ux * ox + uy * oy) / o_len > 1 - 1e-6
+            return ccw_direction(v_a, v_b)
+        end
+    end
+
     error("Edge ($vertex_idx, $neighbor_idx) not found in face $face_idx vertex list")
 end
 
@@ -1970,15 +2012,9 @@ function size_steel_members!(
             L_raw = sum(struc.segments[i].L for i in segment_indices(m))
             L_total = L_raw isa Unitful.Quantity ? L_raw : L_raw * u"m"
             set_section!(m, chosen)
-            
-            # Use the concrete component for volumes to avoid ρ field errors during early EC passes.
-            mat_vols = if material isa StructuralSizer.ReinforcedConcreteMaterial
-                MaterialVolumes(material.concrete => StructuralSizer.section_area(chosen) * L_total)
-            else
-                MaterialVolumes(material => StructuralSizer.section_area(chosen) * L_total)
-            end
-            set_volumes!(m, mat_vols)
-            
+            set_volumes!(m, MaterialVolumes(
+                _volume_key(material) => StructuralSizer.section_area(chosen) * L_total))
+
             # Update ASAP elements
             for seg_idx in segment_indices(m)
                 edge_idx = struc.segments[seg_idx].edge_idx
@@ -2124,13 +2160,8 @@ function size_member_group!(
         L_raw = sum(struc.segments[i].L for i in segment_indices(m))
         L_total = L_raw isa Unitful.Quantity ? L_raw : L_raw * u"m"
         set_section!(m, chosen)
-        # Use the concrete component for volumes to avoid ρ field errors during early EC passes.
-        mat_vols = if material isa StructuralSizer.ReinforcedConcreteMaterial
-            MaterialVolumes(material.concrete => StructuralSizer.section_area(chosen) * L_total)
-        else
-            MaterialVolumes(material => StructuralSizer.section_area(chosen) * L_total)
-        end
-        set_volumes!(m, mat_vols)
+        set_volumes!(m, MaterialVolumes(
+            _volume_key(material) => StructuralSizer.section_area(chosen) * L_total))
         for seg_idx in segment_indices(m)
             edge_idx = struc.segments[seg_idx].edge_idx
             edge_idx in edge_ids_in_group || continue
@@ -2730,13 +2761,7 @@ function _apply_beam_results!(
     for (g_idx, gid) in enumerate(group_ids)
         chosen = result.sections[g_idx]
         group_mat = has_multi_mat ? result.materials_chosen[g_idx] : mat
-        
-        # Use the concrete component for volumes to avoid ρ field errors during early EC passes.
-        mat_vols_base = if group_mat isa StructuralSizer.ReinforcedConcreteMaterial
-            MaterialVolumes(group_mat.concrete => zero(VolumeType))
-        else
-            MaterialVolumes(group_mat => zero(VolumeType))
-        end
+        vol_key = _volume_key(group_mat)
 
         mg = struc.member_groups[gid]
         mg.section = chosen
@@ -2749,14 +2774,8 @@ function _apply_beam_results!(
             L_raw = sum(struc.segments[i].L for i in segment_indices(m))
             L_total = L_raw isa Unitful.Quantity ? L_raw : L_raw * u"m"
             set_section!(m, chosen)
-            
-            # Use the concrete component for volumes to avoid ρ field errors during early EC passes.
-            mat_vols = if group_mat isa StructuralSizer.ReinforcedConcreteMaterial
-                MaterialVolumes(group_mat.concrete => StructuralSizer.section_area(chosen) * L_total)
-            else
-                MaterialVolumes(group_mat => StructuralSizer.section_area(chosen) * L_total)
-            end
-            set_volumes!(m, mat_vols)
+            set_volumes!(m, MaterialVolumes(
+                vol_key => StructuralSizer.section_area(chosen) * L_total))
 
             for seg_idx in segment_indices(m)
                 edge_idx = struc.segments[seg_idx].edge_idx
@@ -2946,7 +2965,7 @@ function _size_beams_impl!(
                     L_raw = sum(struc.segments[i].L for i in segment_indices(m))
                     L_total = L_raw isa Unitful.Quantity ? L_raw : L_raw * u"m"
                     set_section!(m, chosen)
-                    set_volumes!(m, MaterialVolumes(mat => StructuralSizer.section_area(chosen) * L_total))
+                    set_volumes!(m, MaterialVolumes(_volume_key(mat) => StructuralSizer.section_area(chosen) * L_total))
                     for seg_idx in segment_indices(m)
                         edge_idx = struc.segments[seg_idx].edge_idx
                         edge_idx in edge_ids_in_group || continue
@@ -2978,7 +2997,7 @@ function _size_beams_impl!(
                     L_raw = sum(struc.segments[i].L for i in segment_indices(m))
                     L_total = L_raw isa Unitful.Quantity ? L_raw : L_raw * u"m"
                     set_section!(m, chosen)
-                    set_volumes!(m, MaterialVolumes(mat => StructuralSizer.section_area(chosen) * L_total))
+                    set_volumes!(m, MaterialVolumes(_volume_key(mat) => StructuralSizer.section_area(chosen) * L_total))
                     for seg_idx in segment_indices(m)
                         edge_idx = struc.segments[seg_idx].edge_idx
                         edge_idx in edge_ids_in_group || continue
@@ -3024,7 +3043,7 @@ function _size_beams_impl!(
             L_raw = sum(struc.segments[i].L for i in segment_indices(m))
             L_total = L_raw isa Unitful.Quantity ? L_raw : L_raw * u"m"
             set_section!(m, chosen)
-            set_volumes!(m, MaterialVolumes(mat => StructuralSizer.section_area(chosen) * L_total))
+            set_volumes!(m, MaterialVolumes(_volume_key(mat) => StructuralSizer.section_area(chosen) * L_total))
 
             for seg_idx in segment_indices(m)
                 edge_idx = struc.segments[seg_idx].edge_idx
@@ -3545,14 +3564,8 @@ function _apply_column_results!(struc, result, group_ids, material, material_typ
             L_total = L_raw isa Unitful.Quantity ? L_raw : L_raw * u"m"
             
             set_section!(m, chosen)
-            # Re-calculate volumes with concrete only for EC calculation if material is RC
-    v_total = StructuralSizer.section_area(chosen) * L_total
-    mat_vols = if group_mat isa StructuralSizer.ReinforcedConcreteMaterial
-        MaterialVolumes(group_mat.concrete => v_total)
-    else
-        MaterialVolumes(group_mat => v_total)
-    end
-    set_volumes!(m, mat_vols)
+            set_volumes!(m, MaterialVolumes(
+                _volume_key(group_mat) => StructuralSizer.section_area(chosen) * L_total))
             
             # Update ASAP elements
             for seg_idx in segment_indices(m)

@@ -50,6 +50,16 @@ function size!(
     beam_opts   = something(params.beams,   StructuralSizer.SteelBeamOptions())
     column_opts = something(params.columns, StructuralSizer.SteelColumnOptions())
 
+    # Universal size-time gate (Phase B): thread the per-design member_group_overrides
+    # into every beam-sizing pass so the honor-or-throw gid gate inside
+    # `_size_beams_impl!` fires on the exported `size!` path too — it is otherwise
+    # SKIPPED (`size_beams!`'s kwarg defaults to `nothing`), silently dropping an
+    # effective override. Empty overrides collapse to `nothing`, a strict
+    # byte-identical no-op, mirroring `_size_beams_columns!` in design_workflow.jl.
+    # `design.params` is authoritative here (a `BuildingStructure` has no
+    # `design_parameters` field). (Engineering sizing knobs — no code citation.)
+    mgo = isempty(params.member_group_overrides) ? nothing : params.member_group_overrides
+
     n_cols_sz = length(struc.columns)
     prev_demands = Vector{Float64}(undef, n_cols_sz)
     curr_demands = Vector{Float64}(undef, n_cols_sz)
@@ -63,7 +73,7 @@ function size!(
         verbose && @info "Sizing iteration $iter/$max_iterations"
 
         # --- Size beams ---
-        size_beams!(struc, beam_opts; reanalyze = false)
+        size_beams!(struc, beam_opts; reanalyze = false, member_group_overrides = mgo)
 
         # --- Re-analyze with updated beam self-weight ---
         # Topology unchanged; only sections/loads differ → lightweight reprocess

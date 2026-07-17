@@ -59,7 +59,12 @@ mutable struct BuildingStructure{T, A, P} <: AbstractBuildingStructure
     cell_tributary_loads::Dict{Int, Vector{Asap.TributaryLoad}}
     cell_dead_loads::Dict{Int, Vector{Asap.TributaryLoad}}   # Pattern loading: dead-only
     cell_live_loads::Dict{Int, Vector{Asap.TributaryLoad}}   # Pattern loading: live-only
-    
+    # Phase 9b — rigid diaphragm master/slave constraints. Populated by
+    # `to_asap!` when `diaphragms == :rigid`; consumed by `sync_asap!` /
+    # `Asap.solve!(model, links)` (Bathe §4.4 master/slave DOF reduction, see
+    # external/Asap/src/Elements/rigidlink.jl). Empty for :none / :shell.
+    asap_rigid_links::Vector{Asap.RigidLink}
+
     # ─── Design Snapshots (for parametric studies) ───
     _snapshots::Dict{Symbol, DesignSnapshot{T, P}}
 end
@@ -88,6 +93,7 @@ function BuildingStructure(skel::BuildingSkeleton{T}) where T
         Dict{Int, Vector{Asap.TributaryLoad}}(),
         Dict{Int, Vector{Asap.TributaryLoad}}(),
         Dict{Int, Vector{Asap.TributaryLoad}}(),
+        Asap.RigidLink[],
         Dict{Symbol, DesignSnapshot{T, P}}(),
     )
 end
@@ -110,6 +116,7 @@ function BuildingStructure{T, A, P}(skel::BuildingSkeleton{T}) where {T, A, P}
         Dict{Int, Vector{Asap.TributaryLoad}}(),
         Dict{Int, Vector{Asap.TributaryLoad}}(),
         Dict{Int, Vector{Asap.TributaryLoad}}(),
+        Asap.RigidLink[],
         Dict{Symbol, DesignSnapshot{T, P}}(),
     )
 end

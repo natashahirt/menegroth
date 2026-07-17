@@ -163,9 +163,15 @@ const PIPELINE_PROVENANCE = Dict{NodeKey, @NamedTuple{
         # docstring at members/utils.jl §size_columns! instructs wiring that field,
         # at which point these become live member-slice inputs. Listing them now is
         # superset-safe (only ever an unnecessary recompute, never a stale reuse).
+        # `:member_group_overrides` (Run 4 / Phase B) is a member-slice input: the
+        # batched steel-beam stage (`_size_beams_impl!` → `_beam_override_union_and_feasible`)
+        # narrows a beam group's feasible set from `params.member_group_overrides`, so a
+        # change to that dict must invalidate this node for the incremental engine to
+        # honor it (from-scratch == incremental oracle).
         param_slice  = Symbol[:columns, :beams, :materials, :max_iterations,
                               :fire_rating, :fire_protection, :geometry_is_centerline,
-                              :load_combinations, :optimize_for, :collinear_grouping],
+                              :load_combinations, :optimize_for, :collinear_grouping,
+                              :member_group_overrides],
         reads        = Symbol[:columns, :beams, :slabs, :asap_model],
         writes       = Symbol[:columns, :beams, :asap_model],
         code_version = :members_v1,

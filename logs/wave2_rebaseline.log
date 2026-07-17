@@ -1,0 +1,28 @@
+Set parameter Username
+Set parameter LicenseID to value 2808494
+Academic license - for non-commercial use only - expires 2027-04-16
+[32m[1m  Activating[22m[39m project at `~/MIT Dropbox/Natasha Hirt/_MIT/DS Research/Synthetic_Buildings/menegroth/StructuralSynthesizer`
+[36m[1m┌ [22m[39m[36m[1mInfo: [22m[39mEstimated initial column sizes
+[36m[1m│ [22m[39m  method = :tributary
+[36m[1m│ [22m[39m  columns = 16
+[36m[1m└ [22m[39m  fc = 4000.0 psi
+============================================================
+Flat-Plate Speed-up Validation Smoke
+============================================================
+
+  Spans:       [28.0] ft
+  Live load:   50.0 psf
+  Concrete:    NWC_4000
+  Methods:     2
+  Total runs:  2
+
+Latest results → /Users/tashahirt/MIT Dropbox/Natasha Hirt/_MIT/DS Research/Synthetic_Buildings/menegroth/scripts/runners/../../StructuralStudies/src/flat_plate_methods/results/speedup_baseline/latest.csv  (2 rows)
+Baseline regenerated → /Users/tashahirt/MIT Dropbox/Natasha Hirt/_MIT/DS Research/Synthetic_Buildings/menegroth/scripts/runners/../../StructuralStudies/src/flat_plate_methods/results/speedup_baseline/baseline.csv
+
+============================================================
+Validation Complete
+============================================================
+Rows:        2
+Mismatches:  0
+Output file: /Users/tashahirt/MIT Dropbox/Natasha Hirt/_MIT/DS Research/Synthetic_Buildings/menegroth/scripts/runners/../../StructuralStudies/src/flat_plate_methods/results/speedup_baseline/baseline.csv
+

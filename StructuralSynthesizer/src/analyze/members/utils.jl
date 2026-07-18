@@ -2308,6 +2308,10 @@ Size beams, dispatching on material (steel vs concrete) and method (:discrete / 
 If no options are provided, falls back to `struc.design_parameters.beams`,
 then to `SteelBeamOptions()`.
 
+Note: `BuildingStructure` has no `design_parameters` field as of this writing
+(see `building_types/structure.jl`), so the `struc.design_parameters` fallback is
+an inert backstop kept for a future harness-gated addition of the field.
+
 The concrete beam path extracts Mu, Vu, and Nu from the Asap analysis
 results and passes them through to the ACI 318 beam checker. When Nu > 0
 (axial compression from frame action), Vc is increased per ACI §22.5.6.1.
@@ -2385,8 +2389,65 @@ function size_beams!(
                           opts_type=string(typeof(effective_opts)),
                           strategy=string(strategy))
 
+    # NOTE: as of this writing `BuildingStructure` has NO `design_parameters` field
+    # (see building_types/structure.jl), so `hasproperty(...)` is always false and this
+    # collinear-grouping branch is an INERT backstop kept for a future harness-gated
+    # addition of the field.
     if hasproperty(struc, :design_parameters) && !isnothing(struc.design_parameters) && struc.design_parameters.collinear_grouping
         group_collinear_members!(struc; member_type=:beams)
+    end
+
+    # [P1 symmetric honor-path allowlist, fix cycle 8] The honor-or-throw contract
+    # requires every EFFECTIVE member_group_overrides entry to be honored exactly OR
+    # refused with a pinned `member_group_overrides` ArgumentError — never a silent drop
+    # and never a bare MethodError. This allowlist is a NECESSARY-NOT-SUFFICIENT prefilter,
+    # NOT "the single honoring path": it establishes only the three dispatch preconditions
+    # that route to the size-time gid gate — steel opts + resolved `strategy == :discrete` +
+    # `opts.sizing_strategy == :discrete`, which reaches
+    # `_size_beams_impl!(::SteelBeamOptions, ::Val{:discrete})`. HONORABILITY ADDITIONALLY
+    # requires `opts.n_max_sections == 0`, a single-material catalog, a non-composite demand,
+    # and the target gid to be a REAL emitted beam group — all enforced downstream in the
+    # size-time gid gate (see the MIRROR-PARITY INVARIANT there), not here. Every other
+    # dispatch combination cannot honor an override: a non-:discrete
+    # resolved `strategy` dispatches to a `Val` overload that either does not exist for
+    # steel (`Val{:nlp}` → bare MethodError) or discards the mask; a non-:discrete
+    # `opts.sizing_strategy` makes StructuralSizer branch its NLP path
+    # (members/optimize/api.jl:123) INDEPENDENTLY of the Val dispatch and drop the mask;
+    # and a non-steel opts type dispatches to a concrete / PixelFrame overload that
+    # accepts-and-IGNORES the kwarg (a silent drop). The prior cycle-7 guard keyed on only
+    # ONE input (`opts.sizing_strategy`), so a forced `method=:nlp` with the default
+    # `opts.sizing_strategy=:discrete` slipped past it into the missing steel `Val{:nlp}`
+    # overload (bare MethodError — a contract violation). Inverting that enumerated refusal
+    # into a POSITIVE allowlist on the single real honoring path closes ALL THREE
+    # nondeterministic dimensions — both `method` directions, pure :nlp, and non-steel opts
+    # — in one condition, with no asymmetry left. Guarded by an effective-override check
+    # (`has_eff`) so a no-override / vacuous (all-unset) dict stays byte-identical: the
+    # allowlist is not triggered and control reaches the unchanged pre-fix dispatch (a pure
+    # :nlp no-override call still raises the same MethodError as before; the normal
+    # :discrete path is untouched). SteelBeamOptions always has `sizing_strategy`; the
+    # `hasproperty` ternary is defensive. The message reports the actual opts type, resolved
+    # strategy, and (if present) opts.sizing_strategy so a concrete / nlp / forced-method
+    # call gets an accurate, material-correct diagnostic (fixes the cycle-7 steel-worded
+    # misfire on a concrete-nlp direct call). (Engineering-scope guard — no code citation.)
+    has_eff = member_group_overrides !== nothing &&
+              any(o -> _is_effective(o), values(member_group_overrides))
+    on_honor_path = (effective_opts isa StructuralSizer.SteelBeamOptions) &&
+                    (strategy == :discrete) &&
+                    (hasproperty(effective_opts, :sizing_strategy) ?
+                        effective_opts.sizing_strategy == :discrete : false)
+    if has_eff && !on_honor_path
+        throw(ArgumentError(_mgo_refusal_message(
+            "per-group overrides are honored only on the steel-discrete batched size_beams! " *
+            "path (SteelBeamOptions with resolved strategy :discrete AND opts.sizing_strategy " *
+            ":discrete), whose size-time gid gate carries the honor-or-throw contract; this " *
+            "call has opts type $(typeof(effective_opts)) and resolved strategy :$(strategy)" *
+            (hasproperty(effective_opts, :sizing_strategy) ?
+                " with opts.sizing_strategy :$(effective_opts.sizing_strategy)" : "") *
+            ". Any other opts type, resolved strategy, or opts.sizing_strategy routes to a " *
+            "path that cannot honor the override — a missing steel Val{:nlp} overload " *
+            "(MethodError), the StructuralSizer NLP branch (members/optimize/api.jl:123) that " *
+            "ignores the catalog/feasible mask, or a non-steel overload that accepts and " *
+            "drops the kwarg — so it is refused fail-loud")))
     end
 
     result = _size_beams_impl!(struc, effective_opts, Val(strategy);
@@ -2435,6 +2496,102 @@ function _size_beams_impl!(
     # `_size_beams_columns!` → `size_beams!` → here). (Engineering-scope guard —
     # catalog / deflection_limit / max_depth are sizing knobs, no code citation.)
     if member_group_overrides !== nothing
+        # MIRROR-PARITY INVARIANT (Phase B). Every front-door refusal in
+        # `_assert_member_group_overrides_unsupported` (design_types.jl) that guards an
+        # EFFECTIVE per-group override has a size-time backstop so a DIRECT caller who
+        # bypasses the params front door (e.g. a bare `size_beams!` / `_size_beams_impl!`)
+        # is still refused fail-loud — never silently dropped, never mis-honored. Front-door
+        # check → size-time backstop:
+        #   (1)  floor-type never sizes beams per-group → refused pre-sizing at the
+        #        floor-type-determinable doors (design_building / size! / redesign / vary).
+        #   (2)  non-steel beam opts → the `size_beams!` cycle-8 honor-path allowlist.
+        #   (3)  n_max_sections > 0 (couples member groups) → THIS gate (cycle 9, below).
+        #   (4)  multi-material catalog → THIS gate (the multi-material mirror below).
+        #   (4b) sizing_strategy != :discrete → the `size_beams!` allowlist AND THIS gate
+        #        (the 4b mirror below).
+        #   (5)  looser deflection_limit / max_depth → THIS gate (per-gid loop below).
+        #   composite demand → THIS gate (`_assert_no_composite_override`); gid membership
+        #        → THIS gate (the `honorable_beam_gids` check). These two have no front-door
+        #        analog — both need the real size-time `group_ids` / demands in scope here.
+        # INVARIANT: no front-door refusal may exist without a size-time backstop here, so a
+        # direct caller can never bypass the honor-or-throw contract.
+        # (Engineering-scope guard — no code citation.)
+        #
+        # [P1 coupling mirror, fix cycle 9] Mirror front-door check (3)
+        # (`_assert_member_group_overrides_unsupported`, design_types.jl:644): steel beam
+        # options that set `n_max_sections > 0` COUPLE member groups — the shared-section MIP
+        # constrains all groups to at most n_max distinct sections, so per-group feasible
+        # narrowing is NOT exact-first-safe. `_beam_override_union_and_feasible` builds a
+        # per-group mask that assumes each group is sized INDEPENDENTLY, but with a
+        # section-count cap the coupled MIP could force a masked group's choice onto a
+        # coupled group and mis-honor the per-group override (the SZ layer itself refuses this
+        # combination with a bare ArgumentError, discrete_mip.jl:224 — but that message is not
+        # pinned to `member_group_overrides`). Refuse fail-loud (pinned
+        # `member_group_overrides` ArgumentError) so this path is unreachable even if a caller
+        # skips the front-door guard, exactly as the multi-material mirror (#4) below
+        # backstops a caller that skips the front door. Placed BEFORE
+        # `_beam_override_union_and_feasible` is called / the mask is built, so the coupled MIP
+        # is never reached with an effective override. `n_max_sections == 0` (the default) is
+        # untouched → byte-identical. Guarded by an effective-override check so an
+        # empty/vacuous dict stays a strict no-op. (Engineering-scope guard — no code
+        # citation.)
+        if opts.n_max_sections > 0 &&
+                any(o -> _is_effective(o), values(member_group_overrides))
+            throw(ArgumentError(_mgo_refusal_message(
+                "steel beam options set n_max_sections=$(opts.n_max_sections) > 0, which " *
+                "couples member groups so per-group feasible narrowing is not " *
+                "exact-first-safe; the batched size_beams! mask assumes independent " *
+                "per-group sizing, but the coupled shared-section MIP would mis-honor the " *
+                "per-group override, so Phase B refuses rather than mis-honor")))
+        end
+        # [P1/P2 defense-in-depth, fix cycle 5] Mirror front-door check 4
+        # (`_assert_member_group_overrides_unsupported`, design_types.jl:648): a
+        # MULTI-material steel catalog (`opts.materials !== nothing`) routes
+        # `size_beams` → `size_columns` through the MULTI-material `optimize_discrete`,
+        # whose `feasible` mask is EXPANDED-index space (k = (m-1)*n_sec + j). But
+        # `_beam_override_union_and_feasible` builds a SINGLE-material-space mask
+        # (indices 1..length(union_cat)); the multi-material solver would silently
+        # reinterpret it as material-1-only (every index ≤ n_sec passes the hard range
+        # check), collapsing the whole optimization to material 1. Refuse fail-loud
+        # (pinned `member_group_overrides` ArgumentError) so this path is unreachable
+        # even if a caller skips the front-door guard. Single-material
+        # (`opts.materials === nothing`) is untouched → byte-identical. Guarded by an
+        # effective-override check so an empty/vacuous dict stays a strict no-op.
+        # (Engineering-scope guard — no code citation.)
+        if opts.materials !== nothing &&
+                any(o -> _is_effective(o), values(member_group_overrides))
+            throw(ArgumentError(_mgo_refusal_message(
+                "steel beam options set a multi-material catalog (opts.materials); the " *
+                "batched per-group feasible mask is single-material-space (1..n_sec) " *
+                "while the multi-material optimize_discrete expects expanded indices " *
+                "k = (m-1)*n_sec + j, so an override mask would be silently reinterpreted " *
+                "as material-1-only and collapse the optimization; Phase B refuses " *
+                "multi-material overrides on this batched path")))
+        end
+        # [P1/P2 silent-drop mirror, fix cycle 7] Mirror front-door check (4b)
+        # (`_assert_member_group_overrides_unsupported`, design_types.jl:657) and the
+        # `size_beams!` pre-dispatch guard, keyed on `opts.sizing_strategy != :discrete`.
+        # This IS the :discrete `_size_beams_impl!` overload, so the `Val` dispatch that
+        # reached here is `:discrete` — but a caller can force `method=:discrete` while
+        # leaving `opts.sizing_strategy=:nlp`, and `StructuralSizer.size_beams` branches the
+        # NLP path on `opts.sizing_strategy` INDEPENDENTLY of this dispatch
+        # (members/optimize/api.jl:123), ignoring the catalog/feasible mask → silent drop.
+        # Belt-and-suspenders: the PRIMARY refusal is the `size_beams!` guard above, but
+        # this backstops a DIRECT `_size_beams_impl!(..., ::Val{:discrete})` call that skips
+        # it, exactly as the multi-material mirror (#4) above backstops a caller that skips
+        # the front door, and it also protects a future accept-and-drop steel `Val{:nlp}`
+        # overload. Guarded by an effective-override check so a vacuous dict stays a strict
+        # no-op. (Engineering-scope guard — no code citation.)
+        if opts.sizing_strategy != :discrete &&
+                any(o -> _is_effective(o), values(member_group_overrides))
+            throw(ArgumentError(_mgo_refusal_message(
+                "steel beam options set sizing_strategy=:$(opts.sizing_strategy); per-group " *
+                "overrides are honored only on the steel-discrete batched size_beams! path. " *
+                "A non-:discrete strategy routes through the StructuralSizer NLP path " *
+                "(members/optimize/api.jl:123), which branches on opts.sizing_strategy " *
+                "independently of the Val dispatch and ignores the catalog/feasible mask, so " *
+                "the per-group override would be silently dropped")))
+        end
         honorable_beam_gids = Set(group_ids)
         for (gid, ovr) in member_group_overrides
             _is_effective(ovr) || continue
@@ -2445,6 +2602,36 @@ function _size_beams_impl!(
                 "par_has-filtered); a column / strut group, an unknown gid, or a beam " *
                 "group with no segment on a :beams edge is not sized per-group here and " *
                 "would be silently dropped")))
+            # [P2 looser-knob, fix cycle 6] Mirror front-door check 5
+            # (`_assert_member_group_overrides_unsupported`, design_types.jl): a per-group
+            # knob set LOOSER than the global steel-beam knob is a SILENT NO-OP on this
+            # batched path — `_beam_override_union_and_feasible` always INTERSECTS the
+            # per-group feasible mask with the GLOBAL AISCChecker screening, so a per-group
+            # knob can only ever TIGHTEN a group; a looser knob is silently clamped by the
+            # global screening (structurally conservative, but violates honor-or-throw). A
+            # DIRECT `size_beams!(struc, opts; member_group_overrides=...)` — or a
+            # `run_target!` that bypasses the `redesign_incremental!` wrapper guard — skips
+            # the front door, so this size-time gate must re-check looseness itself. Units
+            # match the front door EXACTLY: `deflection_limit` is a dimensionless L/δ RATIO,
+            # so LOOSER means a numerically LARGER ratio (a `nothing` global limit is the
+            # loosest possible, so any finite per-group ratio is then a honored tightening);
+            # `max_depth` is a Unitful length cap, LOOSER means LARGER. A tightening or equal
+            # knob stays HONORED (byte-identical). (Engineering-scope guard — no code citation.)
+            if ovr.deflection_limit !== nothing && opts.deflection_limit !== nothing &&
+                    ovr.deflection_limit > opts.deflection_limit
+                throw(ArgumentError(_mgo_refusal_message(
+                    "override on beam group $(gid) sets deflection_limit=$(ovr.deflection_limit), " *
+                    "LOOSER than the global deflection_limit=$(opts.deflection_limit) (larger " *
+                    "L/δ ratio); the batched size_beams! mask can only tighten, so a looser " *
+                    "per-group limit would be silently ignored")))
+            end
+            if ovr.max_depth !== nothing && ovr.max_depth > opts.max_depth
+                throw(ArgumentError(_mgo_refusal_message(
+                    "override on beam group $(gid) sets max_depth=$(ovr.max_depth), LOOSER " *
+                    "than the global max_depth=$(opts.max_depth); the batched size_beams! " *
+                    "mask can only tighten, so a looser per-group cap would be silently " *
+                    "ignored")))
+            end
         end
 
         # Phase B is STEEL-beam-only: a bare-steel Ix mask must never be applied to a
@@ -2535,27 +2722,79 @@ _beam_sec_key(s) = (nameof(typeof(s)),
 # ISymmSection named "W14X22" with a reduced Ix) collide. Section types (e.g.
 # `ISymmSection`) are MUTABLE structs, so Julia's default `==`/`===` is identity-based,
 # not value-based — hence a recursive field-by-field comparison. A field is identical
-# when it is the SAME object (`===`), value-equal under `isequal` (so a `missing` field
+# when it is the SAME MUTABLE object (`===` = genuine identity), or — for any composite
+# (mutable or immutable) — when it matches field-by-field by recursion, bottoming out at
+# leaves that are the same object or value-equal under `isequal` (so a `missing` field
 # matches `missing`, and unit-aware Unitful quantities match — cycle-3's bare `==`
 # wrongly refused a `missing` field because `missing == missing === missing`, not
-# `true`), OR — for a distinct-but-value-equal composite field that defines no `==`
-# (e.g. a freshly built `material` object rather than the shared singleton) — equal by
-# recursing into its own fields. This keeps genuinely value-equal sections deduping
-# byte-identically while a genuinely DIFFERING field (e.g. a reduced Ix, or a differing
-# material property) still resolves to "not identical" so the caller refuses rather than
-# silently substitutes. (Engineering-scope guard — no code citation.)
-function _field_identical(x, y)
+# `true`). Immutable composites (e.g. a `Metal` material) are still recursed field-by-
+# field rather than trusted to `===`, so that distinct-but-value-equal sub-objects
+# (e.g. a freshly-built `Metal`) compare by VALUE, not identity, and the recursion is
+# depth-capped against a self-referential field graph — see the leaf checks below.
+# Leaf comparison is `isequal`-based (fix cycle 6, reverting the cycle-5 NaN-poison
+# rule): `isequal(NaN, NaN) === true`, so two sections both carrying the SAME unset
+# sentinel field (e.g. `Metal.cost::Float64` defaults to NaN — StructuralSizer
+# materials/types.jl:79) are value-equal and dedup byte-identically, while a genuinely
+# DIFFERING field (e.g. a reduced Ix, or `cost = 5.0` vs unset — `isequal(NaN, 5.0)
+# === false`) still resolves to "not identical" so the caller refuses rather than
+# silently substitutes.
+# (Engineering-scope guard — no code citation.)
+# [P2 section-identity, fix cycle 5] Recursion depth cap for `_field_identical`. A
+# self-referential (a field pointing back to its own struct) or pathologically deep
+# section-field graph would otherwise recurse unboundedly and StackOverflow. Genuine
+# catalog sections are shallow (ISymmSection → material → scalar leaves, depth ~3), so
+# this generous cap never trips on a real section; on overflow `_field_identical`
+# returns `false` (NOT identical) — the conservative choice, so the caller refuses a
+# name collision rather than silently substituting. (Engineering-scope guard — no
+# code citation.)
+const _FIELD_IDENTICAL_MAX_DEPTH = 64
+
+function _field_identical(x, y, depth::Int = 0)
+    # [P2 section-identity, fix cycle 6] The cycle-5 NaN-poison rule (a NaN leaf on
+    # either side ⇒ NOT identical) was an OVER-correction: `Metal.cost::Float64`
+    # defaults to NaN as an "unspecified" sentinel (StructuralSizer materials/types.jl:79),
+    # so two GENUINELY value-equal sections both carrying the same material (cost == NaN)
+    # wrongly compared "not identical" and triggered a spurious pinned refusal on a
+    # LEGITIMATE honorable override. The correct semantics are `isequal`:
+    # `isequal(NaN, NaN) === true` (two unset sentinels do NOT differ) while
+    # `isequal(NaN, 5.0) === false` (genuinely different). A REAL differing field is
+    # still caught by the field-by-field recursion below, so a name-colliding section
+    # with DIFFERING properties is still refused (cycle-4 concern stays closed).
+    depth >= _FIELD_IDENTICAL_MAX_DEPTH && return false
+    # Genuine object identity (the SAME MUTABLE object) is always identical — an object
+    # is itself, so there is no substitution risk. Restricted to MUTABLE `x` so that
+    # immutable composites (e.g. a `Metal`) fall through to the field-by-field recursion
+    # below and are compared by VALUE, keeping two distinct-but-value-equal immutables
+    # (freshly built vs cached) on the same footing.
+    (x === y && ismutable(x)) && return true
+    # Composite (a struct with fields, mutable or immutable): recurse field-by-field so
+    # distinct-but-value-equal sub-objects are compared by value, not identity.
+    # `typeof` must match so units / type params agree.
+    if typeof(x) === typeof(y) && isstructtype(typeof(x)) && !isempty(fieldnames(typeof(x)))
+        for f in fieldnames(typeof(x))
+            _field_identical(getfield(x, f), getfield(y, f), depth + 1) || return false
+        end
+        return true
+    end
+    # Leaf / heterogeneous values: the SAME object, or value-equal under `isequal` (so a
+    # `missing` field matches `missing`, `isequal(NaN, NaN) === true` matches two unset
+    # sentinels, equal Strings match, and equal same-unit Unitful quantities match).
+    # Anything else (including `isequal(NaN, 5.0) === false`) differs.
     x === y && return true
     isequal(x, y) === true && return true
-    # Distinct objects with no value `==`/`isequal`: fall back to structural equality
-    # (same concrete type, matching field-by-field). A leaf value that is neither `===`,
-    # `isequal`, nor a comparable struct is treated as differing.
-    typeof(x) === typeof(y) || return false
-    (isstructtype(typeof(x)) && !isempty(fieldnames(typeof(x)))) || return false
-    for f in fieldnames(typeof(x))
-        _field_identical(getfield(x, f), getfield(y, f)) || return false
-    end
-    return true
+    # [P2 signed-zero, fix cycle 7] Additionally dedup a same-typed numeric leaf that is
+    # value-equal but NOT `isequal`. The only such case is `0.0 == -0.0 === true` while
+    # `isequal(0.0, -0.0) === false`, so a hand-built override section carrying a signed
+    # zero on a numeric field that collides (by type + name) with a `+0.0` catalog field is
+    # treated as identical instead of SPURIOUSLY refused. The `typeof(x) === typeof(y)`
+    # guard blocks a Unitful `DimensionError` from a cross-type `==` (dimensioned vs
+    # dimensionless), and `(x == y) === true` keeps `NaN == NaN === false` — so a NaN leaf
+    # is only ever matched via the `isequal` clause above, never here (the cycle-5
+    # NaN-substitution hazard is NOT reintroduced). A genuinely differing numeric leaf (the
+    # cycle-4 reduced-Ix regression) fails both clauses and still refuses.
+    # (Engineering-scope guard — no code citation.)
+    typeof(x) === typeof(y) && x isa Number && (x == y) === true && return true
+    return false
 end
 
 function _sections_identical(a, b)
@@ -2800,6 +3039,25 @@ function _size_beams_impl!(
     # override that would reach non-steel-beam sizing, so this is always nothing/vacuous.
     member_group_overrides::Union{Nothing, Dict{UInt64, MemberGroupSizingOverride}} = nothing,
 )
+    # DEFENSE-IN-DEPTH layer-symmetric guard (Phase B). This non-steel overload
+    # ACCEPTS `member_group_overrides` for uniform `size_beams!` dispatch but does NOT
+    # honor it (Phase B honors per-group overrides only on the steel-discrete beam
+    # path). Public callers never reach here with an EFFECTIVE override — front-door
+    # check (2) (`_assert_member_group_overrides_unsupported`, design_types.jl) and the
+    # `size_beams!` honor-path allowlist both refuse a non-steel effective override
+    # upstream — so this guard is a backstop for a DIRECT call to this private helper,
+    # making the mirror-parity layer symmetric with the steel `Val{:discrete}` overload's
+    # size-time gid gate. Gated by an effective-override check so a no/vacuous override is
+    # byte-identical (this overload otherwise ignores the kwarg). (Engineering-scope guard
+    # — no code citation.)
+    if member_group_overrides !== nothing &&
+            any(o -> _is_effective(o), values(member_group_overrides))
+        throw(ArgumentError(_mgo_refusal_message(
+            "non-steel beam sizing ($(typeof(opts))) does not honor per-group " *
+            "member_group_overrides this increment (Phase B is steel-discrete-beam-only); " *
+            "refuse fail-loud rather than silently drop")))
+    end
+
     skel = struc.skeleton
     edge_ids_in_group = Set{Int}()
     for g in BEAM_GROUP_SYMBOLS
@@ -2894,6 +3152,25 @@ function _size_beams_impl!(
     # the guard refuses effective overrides that would reach it — always nothing/vacuous).
     member_group_overrides::Union{Nothing, Dict{UInt64, MemberGroupSizingOverride}} = nothing,
 )
+    # DEFENSE-IN-DEPTH layer-symmetric guard (Phase B). This non-steel overload
+    # ACCEPTS `member_group_overrides` for uniform `size_beams!` dispatch but does NOT
+    # honor it (Phase B honors per-group overrides only on the steel-discrete beam
+    # path). Public callers never reach here with an EFFECTIVE override — front-door
+    # check (2) (`_assert_member_group_overrides_unsupported`, design_types.jl) and the
+    # `size_beams!` honor-path allowlist both refuse a non-steel effective override
+    # upstream — so this guard is a backstop for a DIRECT call to this private helper,
+    # making the mirror-parity layer symmetric with the steel `Val{:discrete}` overload's
+    # size-time gid gate. Gated by an effective-override check so a no/vacuous override is
+    # byte-identical (this overload otherwise ignores the kwarg). (Engineering-scope guard
+    # — no code citation.)
+    if member_group_overrides !== nothing &&
+            any(o -> _is_effective(o), values(member_group_overrides))
+        throw(ArgumentError(_mgo_refusal_message(
+            "non-steel beam sizing ($(typeof(opts))) does not honor per-group " *
+            "member_group_overrides this increment (Phase B is steel-discrete-beam-only); " *
+            "refuse fail-loud rather than silently drop")))
+    end
+
     skel = struc.skeleton
     edge_ids_in_group = Set{Int}()
     for g in BEAM_GROUP_SYMBOLS
@@ -3077,6 +3354,25 @@ function _size_beams_impl!(
     # the guard refuses effective overrides that would reach it — always nothing/vacuous).
     member_group_overrides::Union{Nothing, Dict{UInt64, MemberGroupSizingOverride}} = nothing,
 )
+    # DEFENSE-IN-DEPTH layer-symmetric guard (Phase B). This non-steel overload
+    # ACCEPTS `member_group_overrides` for uniform `size_beams!` dispatch but does NOT
+    # honor it (Phase B honors per-group overrides only on the steel-discrete beam
+    # path). Public callers never reach here with an EFFECTIVE override — front-door
+    # check (2) (`_assert_member_group_overrides_unsupported`, design_types.jl) and the
+    # `size_beams!` honor-path allowlist both refuse a non-steel effective override
+    # upstream — so this guard is a backstop for a DIRECT call to this private helper,
+    # making the mirror-parity layer symmetric with the steel `Val{:discrete}` overload's
+    # size-time gid gate. Gated by an effective-override check so a no/vacuous override is
+    # byte-identical (this overload otherwise ignores the kwarg). (Engineering-scope guard
+    # — no code citation.)
+    if member_group_overrides !== nothing &&
+            any(o -> _is_effective(o), values(member_group_overrides))
+        throw(ArgumentError(_mgo_refusal_message(
+            "non-steel beam sizing ($(typeof(opts))) does not honor per-group " *
+            "member_group_overrides this increment (Phase B is steel-discrete-beam-only); " *
+            "refuse fail-loud rather than silently drop")))
+    end
+
     skel = struc.skeleton
     edge_ids_in_group = Set{Int}()
     for g in BEAM_GROUP_SYMBOLS
@@ -3195,6 +3491,10 @@ Dispatches automatically to `size_beams!` and `size_columns!` based on
 the options types.  Options fall back to `struc.design_parameters` if not
 provided explicitly.
 
+Note: `BuildingStructure` has no `design_parameters` field as of this writing
+(see `building_types/structure.jl`), so the `struc.design_parameters` fallback is
+an inert backstop kept for a future harness-gated addition of the field.
+
 # Example
 ```julia
 size_members!(struc;
@@ -3245,6 +3545,11 @@ Size columns using discrete MIP optimization.
 If no options are provided, uses `struc.design_parameters.columns` if set,
 otherwise defaults to `SteelColumnOptions()`.
 
+Note: `BuildingStructure` has no `design_parameters` field as of this writing
+(see `building_types/structure.jl`), so the `struc.design_parameters` fallback (and
+the assignment shown in the example below) is an inert backstop kept for a future
+harness-gated addition of the field.
+
 # Example
 ```julia
 # Use design parameters (recommended)
@@ -3266,6 +3571,10 @@ function size_columns!(
     gravity_factor::Quantity = GRAVITY,
     tc::Union{Nothing, StructuralSizer.TraceCollector} = nothing,
 )
+    # NOTE: as of this writing `BuildingStructure` has NO `design_parameters` field
+    # (see building_types/structure.jl), so `hasproperty(...)` is always false and `dp`
+    # is `nothing` here; the `dp`-based fallbacks below are an INERT backstop kept for a
+    # future harness-gated addition of the field.
     dp = (hasproperty(struc, :design_parameters) && !isnothing(struc.design_parameters)) ?
          struc.design_parameters : nothing
 

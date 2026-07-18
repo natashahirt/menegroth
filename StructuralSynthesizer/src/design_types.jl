@@ -304,27 +304,60 @@ all fields unset is a no-op.
 
 These are ENGINEERING sizing KNOBS (not published-code factors): a per-group section
 `catalog`, an L/δ `deflection_limit` (e.g. `1/360`), and a `max_depth` cap. They are
-honored ONLY on the per-group [`size_member_group!`](@ref) path (isolated steel
-member groups), with precedence (highest first):
+honored on the per-group [`size_member_group!`](@ref) path AND (Phase B) on the
+batched steel-beam stage ([`size_beams!`](@ref) → `_size_beams_impl!` →
+`_beam_override_union_and_feasible`) used by `design_building`.
 
-1. this override's field (`member_group_overrides[gid]`),
-2. `MemberGroup.catalog_override` (for `catalog`),
-3. the caller's global default kwarg.
+Per-knob precedence DIFFERS by path ([A-revert]):
 
-!!! note "Scope (Run 4, Part 1)"
-    Only the fields the per-group binary-search sizer (`size_member_group!`) can
-    honor are represented: `catalog`, `deflection_limit`, `max_depth`. Objective /
-    total-deflection overrides have NO per-group honoring path in that sizer and are
-    deliberately omitted rather than carried as silently-ignored knobs. The coarse
-    `design_building` member stage (`_size_beams_columns!` / `_reconcile_columns!`)
-    does NOT route through `size_member_group!`, so it does NOT observe these
-    overrides — see the field docstring on `member_group_overrides`.
+- `size_member_group!` (highest first): this override's field
+  (`member_group_overrides[gid]`) > `MemberGroup.catalog_override` (for `catalog`) >
+  the caller's global default kwarg.
+- batched `size_beams!` (Phase B): this override's field > the caller's global
+  default kwarg. `MemberGroup.catalog_override` is a documented NO-OP on the batched
+  `design_building` / incremental path — it is honored ONLY by `size_member_group!`.
+
+Field types are validated at construction: `deflection_limit` must be a
+dimensionless `Real` L/δ ratio and `max_depth` a Unitful length, else the
+constructor throws a `member_group_overrides` `ArgumentError` (so an ill-typed /
+unit-mismatched value fails loud at the API boundary rather than surfacing as a
+Unitful `DimensionError` deep inside the batched sizing mask).
+
+!!! note "Scope (Run 4 / Phase B)"
+    Only the fields a per-group sizer can honor are represented: `catalog`,
+    `deflection_limit`, `max_depth`. Objective / total-deflection overrides have no
+    per-group honoring path and are deliberately omitted rather than carried as
+    silently-ignored knobs. Phase B threads these overrides into the batched STEEL
+    beam stage as a per-group *narrowing* mask (see
+    `_beam_override_union_and_feasible`): each knob can only tighten a group's
+    candidate set relative to the global default. Effective overrides on
+    column/strut groups, on flat-plate/flat-slab floors, on non-steel-beam sizing,
+    or combined with `n_max_sections > 0` are still refused fail-loud by
+    [`_assert_member_group_overrides_unsupported`](@ref).
 """
-Base.@kwdef struct MemberGroupSizingOverride
-    catalog::Any = nothing                                 # per-group section catalog, or nothing
-    deflection_limit::Union{Nothing, Real} = nothing       # L/δ ratio (e.g. 1/360), or nothing
-    max_depth::Union{Nothing, Unitful.Length} = nothing    # max section depth cap, or nothing
+struct MemberGroupSizingOverride
+    catalog::Any                                 # per-group section catalog, or nothing
+    deflection_limit::Union{Nothing, Real}       # L/δ ratio (e.g. 1/360), or nothing
+    max_depth::Union{Nothing, Unitful.Length}    # max section depth cap, or nothing
+
+    # [P2-4] Validating constructor: reject an ill-typed / unit-mismatched knob with
+    # a `member_group_overrides` ArgumentError at the API boundary, rather than
+    # letting a bare-number `max_depth` (or a dimensioned `deflection_limit`) surface
+    # as a Unitful DimensionError deep in the batched mask (`ovr.max_depth >
+    # global_depth`, `section_depth(s) <= resolved_depth`). `catalog` is untouched.
+    function MemberGroupSizingOverride(catalog, deflection_limit, max_depth)
+        (deflection_limit === nothing || deflection_limit isa Real) ||
+            throw(ArgumentError("member_group_overrides: deflection_limit must be a " *
+                "dimensionless Real L/δ ratio (e.g. 1/360), got a " *
+                "$(typeof(deflection_limit))"))
+        (max_depth === nothing || max_depth isa Unitful.Length) ||
+            throw(ArgumentError("member_group_overrides: max_depth must be a Unitful " *
+                "length (e.g. 18.0u\"inch\"), got a $(typeof(max_depth))"))
+        return new(catalog, deflection_limit, max_depth)
+    end
 end
+MemberGroupSizingOverride(; catalog=nothing, deflection_limit=nothing, max_depth=nothing) =
+    MemberGroupSizingOverride(catalog, deflection_limit, max_depth)
 
 """
     _is_effective(o::MemberGroupSizingOverride) -> Bool
@@ -339,46 +372,6 @@ consistency).
 _is_effective(o::MemberGroupSizingOverride) =
     o.catalog !== nothing || o.deflection_limit !== nothing || o.max_depth !== nothing
 
-"""
-Parameters that define a design configuration.
-
-Different `DesignParameters` on the same `BuildingStructure` produce
-different `BuildingDesign` results, enabling parametric studies.
-
-# Materials
-Use `MaterialOptions` for cascading material specification:
-```julia
-params = DesignParameters(materials = MaterialOptions(concrete = NWC_5000))
-```
-
-# Floor System
-Pass a typed `AbstractFloorOptions` via `floor`:
-```julia
-params = DesignParameters(floor = FlatPlateOptions(method = EFM(solver=:asap)))
-```
-
-# Example
-```julia
-# Full control: materials, loads, sizing, and analysis
-params = DesignParameters(
-    name = "High-Rise Office",
-    loads = office_loads,
-    load_combinations = [strength_1_2D_1_6L, service],
-    materials = MaterialOptions(concrete = NWC_5000, rebar = Rebar_75),
-    columns = ConcreteColumnOptions(material = NWC_5000),
-    beams = SteelBeamOptions(deflection_limit = 1/480),
-    floor = FlatPlateOptions(method = EFM(), shear_studs = :if_needed),
-    diaphragm_mode = :rigid,
-    optimize_for = :carbon,
-)
-
-# Parametric sweep
-base = DesignParameters(floor = FlatPlateOptions(), max_iterations = 3)
-for m in [DDM(), EFM(), FEA()]
-    d = design_building(struc, with(base; floor = FlatPlateOptions(method = m)))
-end
-```
-"""
 Base.@kwdef mutable struct DesignParameters
     # Identifiers
     name::String = "default"
@@ -434,24 +427,53 @@ Base.@kwdef mutable struct DesignParameters
     # operates on beam-line continuity in plan, not column uniformity per story.
     collinear_grouping::Bool = false
 
-    # ─── Per-Member-Group Sizing Overrides (Run 4, Part 1) ───
+    # ─── Per-Member-Group Sizing Overrides (Run 4 / Phase B) ───
     # Optional per-group sizing knobs keyed by the group's stable UInt64 group_id.
     # DEFAULTS to empty ⇒ byte-identical to today for every existing caller.
     #
-    # NON-prepare-affecting (never in PREPARE_AFFECTING_FIELDS) and NOT part of any
-    # design-graph node param_slice, so setting/changing it does NOT alter the
-    # prepared model, does NOT dirty any node, and does NOT trigger the incremental
-    # engine's prepare-affecting guard.
+    # Phase B: `member_group_overrides` is a LIVE `:members` node-slice input. It is
+    # honored for ELIGIBLE STEEL BEAM groups by the BATCHED `design_building` /
+    # incremental member stage (`_size_beams_columns!` → batched `size_beams!` →
+    # `_size_beams_impl!` → `_beam_override_union_and_feasible`), threaded as a
+    # per-group feasible-narrowing mask, AND on the isolated per-group
+    # `size_member_group!` path. Because it feeds the `:members` param slice, a
+    # change DIRTIES the member frontier — but it is NOT prepare-affecting (it never
+    # alters the prepared model), so the incremental engine is reused, not rebuilt.
     #
-    # Honored ONLY on the isolated per-group `size_member_group!` path (steel member
-    # groups). The coarse `design_building` member stage (`_size_beams_columns!`
-    # batched `size_beams!` + global `size_columns!` MIP, or flat-plate
-    # `_reconcile_columns!`) does NOT route member sizing through
-    # `size_member_group!` and therefore does NOT observe these overrides — so an
-    # override set here has NO effect on a standard `design_building` result. See
+    # `MemberGroup.catalog_override` (the Phase 6 seam) is honored ONLY by the
+    # `size_member_group!` path, NOT by the batched path ([A-revert]). Un-honorable
+    # effective targets (column/strut groups, flat-plate/flat-slab floors, non-steel
+    # beam sizing, `n_max_sections > 0`, or a LOOSER-than-global knob) are refused
+    # fail-loud by [`_assert_member_group_overrides_unsupported`](@ref). See
     # `MemberGroupSizingOverride`.
     member_group_overrides::Dict{UInt64, MemberGroupSizingOverride} =
         Dict{UInt64, MemberGroupSizingOverride}()
+
+    # ─── Framing Auto-Generation (Phase 5, plan `joists-roles-materials`) ───
+    # Options driving `populate_levels!`, which auto-generates the framing
+    # hierarchy (girders, secondary beams, joists) above each slab during
+    # `prepare!` (the `:populate_framing` prepare sub-step, before `to_asap!`).
+    #
+    # An empty NamedTuple (the default) is a STRICT no-op — flat-plate /
+    # flat-slab / beam-supported flows are byte-identical unless a caller opts
+    # in. Recognized keys (all optional): `:materials` (NamedTuple of member
+    # materials by key `:steel`/`:timber`/`:concrete`/`:beam`), `:spacing`
+    # (center-to-center joist spacing), and `:level_N` (NamedTuple schema for
+    # framing level N ≥ 2). See `populate_levels!` for the full contract.
+    #
+    # `prepare!`/`design_building` honor this field when no explicit
+    # `framing_opts` kwarg is supplied, so the REST API (`json_to_params`) can
+    # drive framing auto-generation through a single design call.
+    #
+    # NOTE (incremental engine): this field is PREPARE-affecting and IS listed in
+    # `PREPARE_AFFECTING_FIELDS` (scheduler.jl). Because `populate_levels!` mutates
+    # the skeleton (appends joist edges, subdivides host edges), the stateful
+    # `IncrementalEngine` cannot safely re-`prepare!` a reused baseline to change
+    # framing — so `run_target!` rejects a `framing_opts` change on a reused engine
+    # and a fresh `prepare_engine` (which prepares on an independent copy) is
+    # required. The per-call `design_building` path (used by the REST API) re-runs
+    # `prepare!` from a pristine structure every call and is unaffected.
+    framing_opts::NamedTuple = NamedTuple()
 
     # ─── Uniform Column Sizing ───
     # :off      — each column sized independently (default). Minimises material
@@ -505,7 +527,7 @@ Base.@kwdef mutable struct DesignParameters
     
     # ─── Display Preferences ───
     display_units::DisplayUnits = imperial
-
+    
     # ─── Visualization ───
     # Target edge length for the visualization shell mesh (meters, plain Float64).
     # nothing → inherit from FEA target_edge or use adaptive default.
@@ -515,6 +537,197 @@ Base.@kwdef mutable struct DesignParameters
     # "minimal" → frame + slab boundaries only; "full" → deflected meshes, analytical.
     visualization_detail::String = "full"
 end
+
+"""
+    _mgo_refusal_message(reason::AbstractString) -> String
+
+Compose the fail-loud refusal message for an un-honorable `member_group_overrides`
+target. The substring `'member_group_overrides'` is always present so callers /
+tests can message-pin on it.
+"""
+_mgo_refusal_message(reason::AbstractString) =
+    "member_group_overrides cannot be honored here: " * reason * ". " *
+    "Refusing rather than silently ignoring the per-group override — a dropped " *
+    "catalog / deflection / depth restriction is a silent safety hazard. Phase B " *
+    "honors EFFECTIVE overrides only for STEEL BEAM member groups on beam/column " *
+    "floors sized via the batched size_beams! path with n_max_sections == 0 and a " *
+    "single material."
+
+# ─── [P1-2] redirect: per-gid beam/column classification REMOVED ─────────────
+# The former `_honorable_member_gids` / `_member_group_kinds` / `_member_group_kind`
+# helpers reproduced the sizer's collinear + par_has grouping at the PRE-SIZING door
+# so the guard could classify each override target as :beams / :columns / :struts.
+# That reproduction is UNRELIABLE: collinear grouping runs at SIZE time on the
+# analysis structure (`group_collinear_members!` inside `size_beams!` / `size_columns!`,
+# utils.jl), NOT in `prepare!`, so a door-side reproduction disagreed with the real
+# size-time gids (e.g. 12 groups at the door vs 24 at size time) and false-refused
+# honorable collinear beam overrides ([P1-2]). The DEFINITIVE per-gid honor/refuse
+# decision now lives at the size-time choke point inside `_size_beams_impl!`
+# (utils.jl), where the REAL par_has-filtered, collinear-merged beam `group_ids` are
+# in scope: a column / strut / unknown / par_has-absent gid is refused fail-loud there
+# ([P2-3]) BEFORE any BuildingDesign is produced. The door below refuses only what is
+# decidable WITHOUT per-gid classification (floor type / non-steel / coupling /
+# material, plus the looseness check).
+
+"""
+    _assert_member_group_overrides_unsupported(params::DesignParameters)
+    _assert_member_group_overrides_unsupported(params::DesignParameters, struc::BuildingStructure)
+
+Fail-loud guard (Run 4). Phase B makes `member_group_overrides` LIVE for the
+HONORABLE case — an EFFECTIVE override targeting a STEEL BEAM member group on a
+beam/column floor, sized via the batched `size_beams!` → `optimize_discrete` path
+with `n_max_sections == 0` and a single material (see `_size_beams_impl!`). Such
+overrides are threaded into that group's feasible set and DO change its result.
+
+This guard refuses only the UN-HONORABLE effective targets that no threaded path
+can honor and that would therefore be SILENTLY IGNORED:
+
+  1. the floor system is flat-plate / flat-slab (members are sized via
+     `size_flat_plate!` / `_reconcile_columns!`, never per beam group);
+  2. beam sizing is NOT steel (`params.beams` is a concrete / PixelFrame / T-beam
+     option) — those `_size_beams_impl!` variants are not threaded this increment;
+  3. `n_max_sections > 0` on the steel beam options — that couples groups, so
+     per-group narrowing is no longer exact-first-safe;
+  4. the steel beam options carry a multi-material catalog (`opts.materials`) —
+     per-group narrowing over the expanded catalog is out of scope this increment;
+  4b. the steel beam options set `sizing_strategy != :discrete` (e.g. `:nlp`) — the
+     honor-or-throw gid gate lives only in the steel-`Val{:discrete}`
+     `_size_beams_impl!`, so a non-:discrete strategy has no honoring path;
+  5. the override's resolved `deflection_limit` is LOOSER (numerically larger L/δ
+     ratio) than the global, or its `max_depth` EXCEEDS the global `max_depth` —
+     such a loosening is a silent no-op in the batched path (the global AISCChecker
+     screening always intersects the per-group mask, so a per-group knob can only
+     tighten), and is refused fail-loud. Tightening stays honored via the mask.
+
+Checks 1–4b are decidable from `params` alone and run in BOTH overloads. Check 5
+(looseness) compares the override knobs to the global steel-beam knobs — it needs no
+per-gid geometry, so it also runs in the `struc`-aware overload (called from the
+`BuildingDesign(struc, params)` constructor, `capture_design`,
+`run_pre_sizing_validation`, and the incremental variation doors).
+
+NOTE ([P1-2] redirect): this guard NO LONGER classifies each target as
+:beams / :columns / :struts. Reproducing the sizer's collinear + par_has grouping
+BEFORE sizing is UNRELIABLE — collinear grouping runs at SIZE time on the analysis
+structure (`group_collinear_members!` inside `size_beams!` / `size_columns!`), not in
+`prepare!` — so a column / strut / unknown / par_has-absent gid is now refused
+fail-loud at the DEFINITIVE size-time choke point inside `_size_beams_impl!`
+(utils.jl), where the REAL beam `group_ids` are in scope, NOT here. An honorable
+beam-floor override therefore PASSES this door and is honored (or definitively
+refused) at size time. An override whose fields are ALL unset (`_is_effective ==
+false`) is a documented no-op and never throws, so the happy path stays
+byte-identical. (catalog / deflection_limit / max_depth are engineering sizing
+knobs — no code citation.)
+"""
+function _assert_member_group_overrides_unsupported(params::DesignParameters)
+    (isempty(params.member_group_overrides) ||
+        !any(_is_effective, values(params.member_group_overrides))) && return nothing
+
+    # (1) Floor system that never sizes beams per-group.
+    floor_type = _infer_floor_type(resolve_floor_options(params))
+    if floor_type in (:flat_plate, :flat_slab)
+        throw(ArgumentError(_mgo_refusal_message(
+            "the floor system is :$(floor_type), which sizes members via " *
+            "size_flat_plate! / _reconcile_columns! and never sizes beam groups " *
+            "per-group")))
+    end
+
+    beam_opts = params.beams
+    if beam_opts !== nothing
+        # (2) Non-steel beam sizing (concrete / PixelFrame / T-beam paths are not
+        #     threaded in this increment).
+        if !(beam_opts isa StructuralSizer.SteelBeamOptions)
+            throw(ArgumentError(_mgo_refusal_message(
+                "beam sizing uses $(typeof(beam_opts)); per-group overrides are only " *
+                "threaded for steel beam groups (SteelBeamOptions) this increment")))
+        end
+        # (3) n_max_sections coupling hazard. Size-time mirror (for direct callers that
+        #     bypass this front door) lives beside the multi-material mirror in
+        #     `_size_beams_impl!(::SteelBeamOptions, ::Val{:discrete})` (analyze/members/utils.jl,
+        #     cycle-9 coupling mirror); see the MIRROR-PARITY INVARIANT there.
+        if beam_opts.n_max_sections > 0
+            throw(ArgumentError(_mgo_refusal_message(
+                "steel beam options set n_max_sections=$(beam_opts.n_max_sections) > 0, " *
+                "which couples member groups so per-group feasible narrowing is not " *
+                "exact-first-safe")))
+        end
+        # (4) Multi-material catalog.
+        if beam_opts.materials !== nothing
+            throw(ArgumentError(_mgo_refusal_message(
+                "steel beam options set a multi-material catalog (opts.materials); " *
+                "per-group narrowing over the expanded catalog is out of scope this " *
+                "increment")))
+        end
+        # (4b) Non-discrete sizing strategy. The honor-or-throw size-time gid gate
+        #      lives ONLY in the steel-`Val{:discrete}` `_size_beams_impl!`
+        #      (utils.jl); there is no steel-`:nlp` overload. `SteelBeamOptions`
+        #      exposes `sizing_strategy::Symbol` (StructuralSizer options.jl:106,
+        #      default `:discrete`, may be `:nlp`). A `:nlp` steel beam option with an
+        #      effective override would bypass the gid gate and dispatch to
+        #      `_size_beams_impl!(..., ::SteelBeamOptions, ::Val{:nlp})` — a MethodError
+        #      today, and a SILENT DROP the instant an accept-and-drop `:nlp` overload
+        #      is added. Refuse fail-loud so only the steel-discrete batched path (the
+        #      one that carries the honor-or-throw gate this increment) accepts an
+        #      effective override. Runs in BOTH overloads (params-only), so it fires on
+        #      design_building AND size! AND the direct / variation doors.
+        if beam_opts.sizing_strategy != :discrete
+            throw(ArgumentError(_mgo_refusal_message(
+                "steel beam options set sizing_strategy=:$(beam_opts.sizing_strategy); " *
+                "per-group overrides are honored only on the steel-discrete batched " *
+                "size_beams! path (the honor-or-throw gate lives solely in the " *
+                ":discrete _size_beams_impl!), so a non-:discrete strategy would bypass " *
+                "it")))
+        end
+    end
+    return nothing
+end
+
+function _assert_member_group_overrides_unsupported(params::DesignParameters,
+                                                    struc::BuildingStructure)
+    # Params-only refusals first (floor type / non-steel / coupling / material).
+    _assert_member_group_overrides_unsupported(params)
+    isempty(params.member_group_overrides) && return nothing
+    # Global steel-beam knobs actually used by the batched size_beams! path
+    # (`something(params.beams, SteelBeamOptions())` mirrors `_size_beams_columns!`).
+    # By the time we get here the params-only guard has already refused any non-steel
+    # beam options, so a non-nothing `params.beams` is a SteelBeamOptions.
+    global_opts = params.beams isa StructuralSizer.SteelBeamOptions ?
+        params.beams : StructuralSizer.SteelBeamOptions()
+    global_defl  = global_opts.deflection_limit    # Union{Nothing, Float64}, L/δ ratio
+    global_depth = global_opts.max_depth            # Length depth cap
+    # NOTE ([P1-2] redirect): per-gid classification was REMOVED from this door — a
+    # column / strut / unknown / par_has-absent target is refused fail-loud at the
+    # size-time gate inside `_size_beams_impl!` (utils.jl), where the real collinear-
+    # merged, par_has-filtered beam `group_ids` are in scope. This door still refuses a
+    # LOOSER knob (a silent no-op hazard, decidable from params alone).
+    for (gid, ovr) in params.member_group_overrides
+        _is_effective(ovr) || continue
+        # (5) LOOSER deflection_limit / max_depth is a SILENT NO-OP hazard. The
+        # batched size_beams! path always intersects the per-group feasible mask with
+        # the GLOBAL AISCChecker screening, so a per-group knob can only ever TIGHTEN
+        # a group relative to the global default; a knob set LOOSER than the global is
+        # clamped by the global screening and silently ignored. Refuse it fail-loud
+        # rather than let a per-group loosening quietly have no effect. TIGHTENING
+        # stays honored via the mask. `deflection_limit` is an L/δ RATIO, so LOOSER
+        # means a numerically LARGER ratio; a `nothing` global limit is the loosest
+        # possible, so any finite per-group ratio is a (honored) tightening.
+        if ovr.deflection_limit !== nothing && global_defl !== nothing &&
+                ovr.deflection_limit > global_defl
+            throw(ArgumentError(_mgo_refusal_message(
+                "override on beam group $(gid) sets deflection_limit=$(ovr.deflection_limit), " *
+                "LOOSER than the global deflection_limit=$(global_defl) (larger L/δ ratio); " *
+                "the batched size_beams! mask can only tighten, so a looser per-group limit " *
+                "would be silently ignored")))
+        end
+        if ovr.max_depth !== nothing && ovr.max_depth > global_depth
+            throw(ArgumentError(_mgo_refusal_message(
+                "override on beam group $(gid) sets max_depth=$(ovr.max_depth), LOOSER than " *
+                "the global max_depth=$(global_depth); the batched size_beams! mask can only " *
+                "tighten, so a looser per-group cap would be silently ignored")))
+        end
+    end
+    return nothing
+end
+
 
 # =============================================================================
 # Material Resolution (convenience accessors from DesignParameters)
@@ -1074,6 +1287,18 @@ end
 Construct an empty `BuildingDesign` with empty result dictionaries and a fresh timestamp.
 """
 function BuildingDesign(struc::BuildingStructure{T, A, P}, params::DesignParameters=DesignParameters()) where {T, A, P}
+    # Fail-loud guard (Run 4) — STRUCTURAL choke point. This constructor is the
+    # single universal path through which every BuildingDesign is materialized
+    # (design_building, redesign, vary, redesign_incremental!, and the primitive
+    # build_design_graph -> execute_graph! -> capture_design and run_target! +
+    # capture_incremental_design paths all route here). Phase B HONORS effective
+    # steel-beam-group overrides; this struc-aware guard is the backstop that
+    # refuses the un-honorable targets (flat-plate/flat-slab floors, non-steel or
+    # coupled beam sizing, and column/strut groups — the last decidable only with
+    # prepared members) so no materialization path silently drops one. Empty /
+    # all-unset (vacuous) overrides pass unchanged (byte-identical happy path).
+    # See _assert_member_group_overrides_unsupported.
+    _assert_member_group_overrides_unsupported(params, struc)
     BuildingDesign{T, A, P}(
         struc,
         params,

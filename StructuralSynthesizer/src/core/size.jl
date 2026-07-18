@@ -46,6 +46,23 @@ function size!(
     struc = design.structure
     params = design.params
 
+    # Front-door member_group_overrides guard (Phase B, PARITY with design_building /
+    # capture_design / run_pre_sizing_validation). The struc-aware guard refuses every
+    # EFFECTIVE override that no beam-sizing path can honor: a flat-plate/flat-slab
+    # floor, NON-STEEL beam options (concrete / NLP / PixelFrame `_size_beams_impl!`
+    # overloads accept `member_group_overrides` but neither honor nor throw — a silent
+    # drop), n_max_sections>0 coupling, a MULTI-MATERIAL steel catalog (opts.materials —
+    # the batched feasible mask is single-material-space and the multi-material solver
+    # would silently collapse to material 1), and a LOOSER per-group
+    # deflection_limit/max_depth. It MUST re-run here, not only in the constructor:
+    # `design.params.member_group_overrides` is a live, mutable dict, so an override
+    # added AFTER construction (when the dict was still empty and the constructor guard
+    # short-circuited) would otherwise be silently dropped by `size!`. Honorable
+    # single-material steel-beam overrides PASS this door and are honored (or refused
+    # for a bad gid) at the size-time gate inside `_size_beams_impl!`. Same struc-aware
+    # overload as design_types.jl:658. (Engineering-scope guard — no code citation.)
+    _assert_member_group_overrides_unsupported(params, struc)
+
     # Resolve options from params (or use defaults)
     beam_opts   = something(params.beams,   StructuralSizer.SteelBeamOptions())
     column_opts = something(params.columns, StructuralSizer.SteelColumnOptions())

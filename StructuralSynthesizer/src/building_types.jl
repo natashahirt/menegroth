@@ -44,9 +44,15 @@ using Dates
 
 # Include order matters: types before types that depend on them
 include("building_types/tributary_cache.jl")
+# Framing hierarchy types (Phase 4): defines FramingLevel{T} + joist patterns,
+# referenced by Slab{T}.framing_levels — must precede cells.jl.
+include("building_types/framing.jl")
 include("building_types/cells.jl")
 include("building_types/members.jl")
 include("building_types/foundations.jl")
 include("building_types/snapshot.jl")
 include("building_types/skeleton.jl")
 include("building_types/structure.jl")
+# Framing hierarchy public API (attach_framing_level!): needs BuildingStructure
+# + Slab, so it loads after structure.jl.
+include("building_types/framing_api.jl")

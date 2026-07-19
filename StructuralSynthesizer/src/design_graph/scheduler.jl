@@ -86,7 +86,7 @@ const PREPARE_AFFECTING_FIELDS = Symbol[
     :loads, :floor, :materials, :columns, :tributary_axis, :scoped_floor_overrides,
     :geometry_is_centerline, :diaphragm_mode, :diaphragm_E, :diaphragm_ν,
     :default_frame_E, :default_frame_G, :default_frame_ρ,
-    :pattern_loading,
+    :pattern_loading, :framing_opts,
 ]
 
 """
@@ -160,13 +160,25 @@ captures the pristine, pre-sizing state as the engine's fixed baseline and build
 the design graph. Does not run any sizing — call [`run_target!`](@ref) or
 [`redesign_incremental!`](@ref).
 
-`struc` is mutated by `prepare!` exactly as `design_building` would; the engine
-works on independent snapshots thereafter, so the caller's `struc` is not
-mutated by subsequent scheduler runs.
+The engine prepares an **independent copy** of `struc` (via [`capture_node_state`](@ref))
+and works on that copy for its whole lifetime, so the caller's `struc` is left
+untouched. This is a deliberate guard against framing state-leak: framing
+auto-generation (`populate_levels!`) mutates the skeleton (appends joist edges and
+subdivides host edges), and re-`prepare!`ing an already-prepared structure would
+accumulate those artifacts. Because a framing change is prepare-affecting (see
+`PREPARE_AFFECTING_FIELDS`), reducing the requested framing levels requires a
+fresh engine; preparing on a copy lets a caller safely reuse the same pristine
+`struc` handle across successive `prepare_engine` calls (e.g. three levels, then
+one) without the earlier run's joists/segments leaking into the later baseline.
 """
 function prepare_engine(struc::BuildingStructure, params::DesignParameters;
                         framing_opts::NamedTuple = NamedTuple(),
                         tc::Union{Nothing, StructuralSizer.TraceCollector} = nothing)
+    # Prepare on an independent copy so repeated prepares of the caller's `struc`
+    # never accumulate auto-generated framing (skeleton joist edges / host-edge
+    # subdivisions). `capture_node_state` deepcopies while safely skipping the
+    # Asap model's non-copyable CHOLMOD factorization cache.
+    struc = capture_node_state(struc)
     prepare!(struc, params; framing_opts = framing_opts)
 
     ok, val_errors = run_pre_sizing_validation(struc, params; tc = tc)
@@ -510,12 +522,16 @@ function redesign_incremental!(engine::IncrementalEngine, params::DesignParamete
                                harmonize::Bool = true,
                                framing_opts::NamedTuple = NamedTuple(),
                                tc::Union{Nothing, StructuralSizer.TraceCollector} = nothing)
-    # Fail-loud (Run 4, Part 1): refuse an EFFECTIVE member_group_overrides on the
-    # variation door. `params` here are the effective params for this run; the
-    # engine graph never routes member sizing through size_member_group!, so an
-    # effective override would be silently dropped (empty dirty frontier → an
-    # UNCHANGED design). Same posture as design_building; NOT prepare-affecting.
-    _assert_member_group_overrides_unsupported(params)
+    # Fail-loud (Run 4 / Phase B): refuse UN-honorable member_group_overrides at the
+    # variation door. `params` here are the effective params for this run.
+    # `member_group_overrides` IS a live :members-slice input now (honored for steel
+    # beam groups via the batched size_beams! path), so use the STRUC-AWARE overload
+    # on the prepared baseline: honorable beam overrides pass and are threaded into
+    # sizing, while UN-honorable effective targets (column/strut group, looser
+    # deflection/max_depth, unsupported floor/beam config) are refused HERE rather
+    # than only at the later capture_design backstop. Same posture as design_building;
+    # NOT prepare-affecting.
+    _assert_member_group_overrides_unsupported(params, engine.baseline)
     run_target!(engine, params; target = target, framing_opts = framing_opts, tc = tc)
     return capture_incremental_design(engine, params; harmonize = harmonize, tc = tc)
 end

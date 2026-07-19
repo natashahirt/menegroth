@@ -94,6 +94,20 @@ function _content_hash!(ctx::SHA.SHA256_CTX, x::Union{Tuple, AbstractArray})
     return ctx
 end
 
+# Dictionaries (e.g. `member_group_overrides::Dict{UInt64, MemberGroupSizingOverride}`
+# in the :members param slice). Entries are hashed in SORTED-KEY order so two
+# equal-content dicts built with different insertion orders hash identically —
+# `repr` on a Dict is NOT order-stable, so the generic fallback would be fragile.
+function _content_hash!(ctx::SHA.SHA256_CTX, x::AbstractDict)
+    _hash_tag!(ctx, 'D')
+    SHA.update!(ctx, reinterpret(UInt8, [Int64(length(x))]))
+    for k in sort!(collect(keys(x)))
+        _content_hash!(ctx, k)
+        _content_hash!(ctx, x[k])
+    end
+    return ctx
+end
+
 # Fallback: deterministic `repr` for value-like structs (sections, sizer
 # results, material/floor option structs, etc.). NOT used for `BuildingStructure`
 # members (which can hold back-references, e.g. `Column.column_above`) — those go

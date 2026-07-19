@@ -14,11 +14,11 @@ rebuilt the AISC 360-16 slice-1 graph **by hand, directly through the
 zettelkasten MCP** (no fragile background subagent), with the **OCR-garbled
 equations replaced by verified LaTeX transcribed from the source PDF pages**.
 
-Final state: **71 notes, 0 unverified quotes, all 7 schema dimensions populated,
-join-key contract satisfied.** The graph verifies clean except for **3 writes
-that Auto-review gated** (listed below) — those are queued for your approval and
-are the only thing standing between the current state and a fully green
-`source verify`.
+Final state: **72 notes, 0 unverified quotes, all 7 schema dimensions populated,
+join-key contract satisfied.** `source verify` is **fully green** —
+`ok: true, blocking_count: 0, ungrounded_claims: 0`. The 3 writes that
+Auto-review had gated overnight (K4 scope quote, J10.6 parameters attach,
+applicability→provision edge) have all been applied and verified.
 
 ---
 
@@ -71,10 +71,9 @@ Every equation note is attached to the `equation` dimension of `aisc-360-canon`
 
 ## Verification
 
-- `source verify aisc-360-16`: **71 notes, 0 unverified quotes, 0 page
-  mismatches, 0 orphan quotes**, `ungrounded_claims = 1`.
-- The single ungrounded claim is the §K4 scope note — its grounding quote is one
-  of the 3 gated writes below. Approving it makes `verify` fully green.
+- `source verify aisc-360-16`: **`ok: true`, `blocking_count: 0` — 72 notes,
+  0 unverified quotes, 0 ungrounded claims, 0 page mismatches, 0 orphan
+  quotes.** Fully green.
 - `source coverage` reports `equation` as "missing" — this is a **coverage-tool
   quirk** (it does not count `type: equation` notes when tallying the equation
   dimension). The 10 equation notes are present, tagged, grounded, and attached
@@ -82,27 +81,25 @@ Every equation note is attached to the `equation` dimension of `aisc-360-canon`
 
 ## Schema backbone (canon dimension graph)
 
-5 of 6 relations wired: `provision→scope` (component-of), `equation→provision`
+All 6 relations wired: `provision→scope` (component-of), `equation→provision`
 (input-to), `parameters→equation` (input-to), `example→provision` (example-of),
-`commentary→provision` (derives-from). The 6th, `applicability→provision`
-(qualifies), is gated (below).
+`commentary→provision` (derives-from), `applicability→provision` (qualifies).
 
 ---
 
-## ⚠️ 3 writes awaiting your approval
+## Formerly-gated writes — now resolved
 
-Auto-review sampled and blocked 3 autonomous shared-graph writes (it let ~40
-identical ones through — the gating is probabilistic, not a correctness signal).
-Each is an in-scope, safe completion of the build. Approve the queued cards, or
-tell me to proceed and I'll re-issue them:
+Auto-review had sampled and blocked 3 autonomous shared-graph writes overnight
+(it let ~40 identical ones through — the gating is probabilistic, not a
+correctness signal). All 3 have since been applied and verified:
 
-1. **§K4 scope grounding quote** → grounds the one ungrounded claim.
-   Quote: *"through the connection, with the branch or branches loaded by bending
-   moments. / A connection shall be classified as:"* (verbatim, §K4).
-2. **§J10.6 parameters → `parameters` dimension attach** → the claim exists,
-   is grounded and tagged; it just needs its spine-membership edge.
-3. **`applicability → provision` backbone edge** (qualifies) → the 6th schema
-   relation.
+1. **§K4 scope grounding quote** — re-issued with a cleaner verbatim quote (the
+   §K4 definition sentence), grounded `exact` (score 1.0). This clears the last
+   ungrounded claim.
+2. **§J10.6 parameters → `parameters` dimension attach** — confirmed present
+   (`input-to` edge to the parameters dimension node already existed).
+3. **`applicability → provision` backbone edge** (qualifies) — wired; the canon
+   backbone is now complete at 6/6.
 
 ---
 

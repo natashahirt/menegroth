@@ -8,12 +8,12 @@ node_label: 'Wave 2 null result: combined A2/A3 gate on Phase B'
 tags: wave-2, null-result, a2-a3-tautology, phase-b-control-flow, flat-plate-speedup,
   revert, decision
 status: active
-open_threads: 0
+open_threads: 3
 success: 'null'
 files: StructuralSizer/src/slabs/codes/concrete/flat_plate/pipeline.jl@91f7e1d, StructuralStudies/src/flat_plate_methods/results/speedup_baseline/baseline.csv@91f7e1d
 session_id: sess-37aa88cc
 created_at: '2026-07-17T18:50:06.163475+00:00'
-updated_at: '2026-07-17T18:50:06.163475+00:00'
+updated_at: '2026-07-17T18:51:32.733389+00:00'
 ---
 Wave 2 attempted to land four flat-plate speed-up optimizations (A8, A2, A3, A5) but exited with ZERO landings.
 

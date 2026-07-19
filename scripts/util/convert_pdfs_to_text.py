@@ -128,25 +128,42 @@ def _detect_column_split(page) -> float | None:
     return gap_centre
 
 
-def _extract_page_text(page, *, detect_columns: bool = True) -> tuple[str, str]:
+def _extract_page_text(page, *, detect_columns: bool = True,
+                       x_tolerance: float | None = None,
+                       y_tolerance: float | None = None) -> tuple[str, str]:
     """
     Extract text from a single pdfplumber *page*.
 
     If *detect_columns* is True and a two-column layout is detected, the
     page is cropped into left and right halves and each column's text is
     extracted in reading order.  Tables are appended after the body text.
+
+    *x_tolerance* / *y_tolerance* are forwarded to pdfplumber's
+    ``extract_text``.  A tighter ``x_tolerance`` (e.g. ``1``) recovers
+    inter-word spaces on PDFs whose glyph spacing is narrower than
+    pdfplumber's default gap threshold of 3 pts (some ASCE 7-22 pages emit
+    "wordswithoutspaces" at the default).  ``None`` keeps pdfplumber's
+    defaults, so existing corpus texts are unaffected unless re-run with an
+    explicit tolerance.
     """
+    # Only pass tolerances when set, so None preserves pdfplumber defaults.
+    text_kw: dict[str, float] = {}
+    if x_tolerance is not None:
+        text_kw["x_tolerance"] = x_tolerance
+    if y_tolerance is not None:
+        text_kw["y_tolerance"] = y_tolerance
+
     split_x = _detect_column_split(page) if detect_columns else None
 
     if split_x is not None:
         left  = page.crop((0, 0, split_x, page.height))
         right = page.crop((split_x, 0, page.width, page.height))
-        left_text  = left.extract_text()  or ""
-        right_text = right.extract_text() or ""
+        left_text  = left.extract_text(**text_kw)  or ""
+        right_text = right.extract_text(**text_kw) or ""
         page_text = left_text.rstrip() + "\n" + right_text.lstrip()
         col_tag = "  (two-column)"
     else:
-        page_text = page.extract_text() or ""
+        page_text = page.extract_text(**text_kw) or ""
         col_tag = ""
 
     # Tables (extracted from the full page to avoid splitting a table)
@@ -167,7 +184,9 @@ def _extract_page_text(page, *, detect_columns: bool = True) -> tuple[str, str]:
 
 def _extract_text_layer(pdf_path: Path, *,
                         detect_columns: bool = True,
-                        password: str | None = None) -> tuple[str, int]:
+                        password: str | None = None,
+                        x_tolerance: float | None = None,
+                        y_tolerance: float | None = None) -> tuple[str, int]:
     """Return (full_text, n_empty_pages) using pdfplumber."""
     parts: list[str] = []
     empty = 0
@@ -176,6 +195,7 @@ def _extract_text_layer(pdf_path: Path, *,
         for i, page in enumerate(pdf.pages, 1):
             combined, col_tag = _extract_page_text(
                 page, detect_columns=detect_columns,
+                x_tolerance=x_tolerance, y_tolerance=y_tolerance,
             )
             if len(combined) < MIN_CHARS_PER_PAGE:
                 empty += 1
@@ -203,7 +223,9 @@ def _extract_via_ocr(pdf_path: Path) -> str:
 # ── main conversion logic ─────────────────────────────────────────
 def convert_pdf_to_text(pdf_path: Path, *, force_ocr: bool = False,
                         detect_columns: bool = True,
-                        password: str | None = None) -> str:
+                        password: str | None = None,
+                        x_tolerance: float | None = None,
+                        y_tolerance: float | None = None) -> str:
     """Extract text from a PDF, falling back to OCR when needed.
 
     If *detect_columns* is True (the default), each page is checked for
@@ -224,6 +246,7 @@ def convert_pdf_to_text(pdf_path: Path, *, force_ocr: bool = False,
 
     text, empty_pages = _extract_text_layer(
         pdf_path, detect_columns=detect_columns, password=password,
+        x_tolerance=x_tolerance, y_tolerance=y_tolerance,
     )
 
     # count total pages for the ratio check
@@ -303,22 +326,38 @@ def convert_pdf_pages_to_images(pdf_path: Path, output_folder: Path,
     if password is None:
         password = _lookup_password(pdf_path)
 
+    first = min(pages) if pages else None
     images = convert_from_path(
         str(pdf_path), dpi=dpi, fmt=image_format,
-        first_page=min(pages) if pages else None,
+        first_page=first,
         last_page=max(pages) if pages else None,
         userpw=password,
     )
 
     generated_files: list[Path] = []
     base_name = pdf_path.stem.replace(" ", "_")
-    for idx, img in enumerate(images, start=1):
-        page_num = pages[idx - 1] if pages else idx
-        img_filename = f"{base_name}_Page_{page_num}.{image_format.lower()}"
-        img_path = output_folder / img_filename
-        img.save(img_path, image_format.upper())
-        generated_files.append(img_path)
-        print(f"    saved {img_path.name}")
+    if pages:
+        # convert_from_path returns the CONTIGUOUS range [first .. max(pages)];
+        # index into it so a sparse/non-contiguous ``pages`` list saves only the
+        # requested pages with correct page-number filenames.
+        for page_num in pages:
+            offset = page_num - first
+            if offset < 0 or offset >= len(images):
+                print(f"    WARNING: page {page_num} out of range — skipped")
+                continue
+            img = images[offset]
+            img_filename = f"{base_name}_Page_{page_num}.{image_format.lower()}"
+            img_path = output_folder / img_filename
+            img.save(img_path, image_format.upper())
+            generated_files.append(img_path)
+            print(f"    saved {img_path.name}")
+    else:
+        for idx, img in enumerate(images, start=1):
+            img_filename = f"{base_name}_Page_{idx}.{image_format.lower()}"
+            img_path = output_folder / img_filename
+            img.save(img_path, image_format.upper())
+            generated_files.append(img_path)
+            print(f"    saved {img_path.name}")
     return generated_files
 
 if __name__ == "__main__":

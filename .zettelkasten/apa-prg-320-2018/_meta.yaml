@@ -1,0 +1,54 @@
+abstract: ''
+authors: []
+content_hash: 557b8453c7aab6181e7831381da11cf6c126bc6485c1c33c444c8803dd5a8062
+coverage:
+  agent: none
+  human: none
+doc_type: code
+doi: ''
+name: apa-prg-320-2018
+source_path: /Users/tashahirt/MIT Dropbox/Natasha Hirt/_MIT/DS Research/Synthetic_Buildings/menegroth/corpus/sources/codes/apa/PRG
+  320 2018.pdf
+title: APA PRG 320-2018 — Standard for Performance-Rated Cross-Laminated Timber
+venue: ''
+year: '2018'
+extraction:
+  schema: building-code-extraction
+  strict: true
+  grounded: true
+  tags:
+  - scope
+  - provision
+  - equation
+  - parameters
+  - applicability
+  - example
+  - commentary
+  contexts:
+  - project: menegroth
+    synthesis_graph: apa-prg-320-canon
+    schema: building-code-extraction
+    strict: true
+    grounded: true
+    tags:
+    - scope
+    - provision
+    - equation
+    - parameters
+    - applicability
+    - example
+    - commentary
+    structure: &id001
+      synthesis_graph: apa-prg-320-canon
+      apex_id: 20260716-0609-apa-prg-320-canon
+      attach_relation: input-to
+      apex_relation: component-of
+      dimension_nodes:
+        scope: 20260716-0609-apa-prg-320-scope
+        provision: 20260716-0609-apa-prg-320-provision
+        equation: 20260716-0609-apa-prg-320-equation
+        parameters: 20260716-0609-apa-prg-320-parameters
+        applicability: 20260716-0609-apa-prg-320-applicability
+        example: 20260716-0609-apa-prg-320-example
+        commentary: 20260716-0609-apa-prg-320-commentary
+  structure: *id001

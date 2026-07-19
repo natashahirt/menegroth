@@ -7,12 +7,12 @@ title: Flat-plate sizing speed-up plan (journal-paper solver time)
 node_label: Flat-plate sizing speed-up plan (journal-paper sol
 tags: flat-plate,size_flat_plate,performance,cache-reuse,speedup,plan
 status: active
-open_threads: 0
+open_threads: 5
 success: 'null'
 files: ''
 session_id: sess-233d5ffc
 created_at: '2026-07-12T23:19:37.397365+00:00'
-updated_at: '2026-07-12T23:19:52.345137+00:00'
+updated_at: '2026-07-17T18:50:06.163475+00:00'
 ---
 # Goal
 

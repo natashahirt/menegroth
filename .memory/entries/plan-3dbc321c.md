@@ -7,12 +7,12 @@ title: Phase C — Roof & truss systems
 node_label: 'Phase C: Roofs & trusses'
 tags: roadmap,roof,truss,joist-girder,sji,metal-deck,rafter,pemb,phase-c
 status: active
-open_threads: 0
+open_threads: 5
 success: 'null'
 files: ''
 session_id: sess-c424b3b3
 created_at: '2026-07-14T01:33:04.901387+00:00'
-updated_at: '2026-07-14T01:33:04.901387+00:00'
+updated_at: '2026-07-14T01:37:05.933812+00:00'
 has_child_rationale: Close the roof gap — there is no roof building type, truss model,
   or joist-girder sizing today
 ---

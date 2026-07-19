@@ -68,8 +68,15 @@ AbstractMember
 ### Beam
 
 `Beam{T}` extends `MemberBase` with:
-- `tributary_width` — tributary width for load collection from slabs
-- `role` — `:girder`, `:beam`, `:joist`, or `:infill` (classified by `classify_beam_role`)
+- `tributary_profile` — variable tributary width `w(s)` along the beam (a `TributaryProfile`, or `nothing`). The `beam.tributary_width` property remains as a back-compat accessor returning the area-average scalar; `tributary_width_scalar` (area-average) and `tributary_width_envelope` (max) are the explicit collapses.
+- `role` — framing-hierarchy role assigned by `classify_beam_role`:
+  - `:girder` — column-to-column beam (both endpoints land on a column vertex);
+  - `:joist` — beam that directly supports the slab (and is not a girder);
+  - `:beam` — catch-all secondary member (neither of the above).
+- `level` — framing-hierarchy level (`Int`). Skeleton-input members are `0` (the primary column-to-column frame); auto-generated members from higher framing levels use `1, 2, …`.
+- `lateral_role` — lateral-system participation (`Symbol`). `:gravity` (default) means gravity-only; `:moment_frame` means part of a moment frame.
+
+Role/level predicates are available as module-level helpers: `is_girder`, `is_joist`, `is_beam`, `level_of`, and `lateral_role_of`.
 
 ### Column
 

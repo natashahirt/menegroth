@@ -17,6 +17,11 @@ secrets/
 # Ignore crash dump files
 *.stackdump
 
+# Transient run artifacts (test/smoke logs, scratch files, Python caches)
+logs/
+.tmp_*
+**/__pycache__/
+
 # Documenter.jl build output
 docs/build/
 

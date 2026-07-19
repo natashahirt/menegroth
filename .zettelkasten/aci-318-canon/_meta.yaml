@@ -1,0 +1,6 @@
+coverage:
+  agent: skimmed
+  human: none
+description: Synthesis spine for 'aci-318' (project 'menegroth').
+name: aci-318-canon
+source: ''

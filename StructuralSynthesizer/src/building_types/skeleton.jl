@@ -52,7 +52,26 @@ struct GeometryCache{L, A}
     edge_stories::Dict{Int, Int}
 end
 
-"""Geometric and topological representation of a building."""
+"""
+Geometric and topological representation of a building.
+
+# Edge groups (`groups_edges`)
+`groups_edges::Dict{Symbol, Vector{Int}}` maps a group name to the edge indices
+in that group (used for member grouping, e.g. `:beams`, `:columns`). Symbol keys
+are arbitrary, but two names are **reserved** for the framing hierarchy
+(plan `joists-roles-materials`):
+
+- `:joists` — auto-generated **level-1** members (joists that directly support
+  the slab), produced from a slab's [`FramingLevel`](@ref)s.
+- `:secondary` — auto-generated **level-2+** members (secondary beams and
+  deeper framing levels).
+
+These two groups are **populated only by Phase 5's `materialize_level!`** (which
+also inserts the joist landings as skeleton vertices via `edge_chains`). Nothing
+in Phase 4 writes to them — the names are reserved here so downstream code can
+rely on the convention. Do not repurpose `:joists` / `:secondary` for manually
+defined members.
+"""
 mutable struct BuildingSkeleton{T} <: AbstractBuildingSkeleton
     vertices::Vector{Meshes.Point}
     edges::Vector{Meshes.Segment}

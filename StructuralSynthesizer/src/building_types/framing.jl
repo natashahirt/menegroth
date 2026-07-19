@@ -28,6 +28,15 @@
 # Joist patterns
 # -----------------------------------------------------------------------------
 
+# ...
+# box-section connections.
+# =============================================================================
+
+# Reserved edge group symbols for beam-like members (Phase 5 integration).
+# Used by sizing, demand extraction, and load paths to ensure generated
+# framing (joists, secondary beams) is treated as part of the beam set.
+const BEAM_GROUP_SYMBOLS = (:beams, :joists, :secondary, :girder)
+
 """
     LinearAxisPattern{T} <: AbstractJoistPattern
 

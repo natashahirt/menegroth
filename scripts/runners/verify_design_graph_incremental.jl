@@ -867,20 +867,19 @@ function main()
     end
     record!(":members target (covers all slab roots) is accepted", members_ok)
 
-    # ── [12] RUN 4, PART 1: member_group_overrides infrastructure ─────────────
-    # HONEST SCOPE: `member_group_overrides` is honored ONLY on the isolated
-    # per-group `size_member_group!` path. `design_building`'s member stage runs
-    # batched `size_beams!` / global `size_columns!` MIP / flat-plate
-    # `_reconcile_columns!`, none of which route through `size_member_group!`, so
-    # it CANNOT honor an override. Rather than silently ignore it, `design_building`
-    # now FAILS LOUD: a non-empty `member_group_overrides` raises an `ArgumentError`
-    # (guard in `run_pre_sizing_validation`, which every `design_building` and
-    # `DesignSession`/engine construction runs); the empty (default) case is
-    # byte-identical. Fine per-beam-group incremental nodes (Part 2) are therefore
-    # NOT shipped — they would only be verifiable if a group were sized independently,
-    # which this codebase's `design_building` never does. We prove the override
-    # MECHANISM directly on `size_member_group!` (non-vacuous), plus the fail-loud
-    # guard on `design_building` (the honest evidence of the Part-1 limitation).
+    # ── [12] RUN 4 / PHASE B: member_group_overrides ─────────────────────────
+    # SCOPE: Phase B makes `member_group_overrides` LIVE for the HONORABLE case —
+    # an EFFECTIVE override on a STEEL BEAM member group on a beam/column floor,
+    # sized via the batched `size_beams!` → `optimize_discrete` path (see
+    # `_size_beams_impl!` / `_beam_override_union_and_feasible`). The override
+    # narrows only that group's feasible set and DOES change its result ([12b]).
+    # UN-HONORABLE effective targets are still refused fail-loud (ArgumentError,
+    # message-pinned on 'member_group_overrides'): flat-plate/flat-slab floors,
+    # non-steel-beam sizing, `n_max_sections > 0`, and column/strut groups. The
+    # blocks below prove: the isolated `size_member_group!` mechanism, the
+    # byte-identical happy path (empty / vacuous), and the fail-loud guard on the
+    # un-honorable targets (all exercised here on a flat-plate fixture, which is an
+    # un-honorable FLOOR — so every effective override on it must throw).
     println("\n[12] Run 4 Part 1: member_group_overrides on size_member_group! (non-vacuous)")
     custom2 = [SR.W("W21X44"), SR.W("W24X68")]
     custom_names = Set(s.name for s in custom2)
@@ -1012,14 +1011,695 @@ function main()
     record!("capture_incremental_design (primitive run_target! path) throws guard on effective member_group_overrides",
             guard_threw(() -> capture_incremental_design(engine_t, params_t)))
 
-    # not prepare-affecting, not in any node slice → empty dirty frontier.
+    # (b5) STRUCTURAL enforcement (Run 4, Part 1 hardening): the guard now lives in
+    #      the BuildingDesign(struc, params) constructor — the SINGLE universal choke
+    #      point through which every BuildingDesign is materialized. A direct
+    #      constructor call with an EFFECTIVE override MUST throw the same guard, so no
+    #      present-or-future caller can bypass it. Empty and populated-but-vacuous
+    #      (all-unset) overrides MUST construct without throwing.
+    struc_x, base_x = build_flat_plate()
+    record!("BuildingDesign constructor: default (empty) override constructs",
+            BuildingDesign(struc_x, base_x) isa BuildingDesign)
+    base_x_empty = SS.with(base_x;
+        member_group_overrides = Dict{UInt64, MemberGroupSizingOverride}())
+    record!("BuildingDesign constructor: explicit-empty override constructs",
+            BuildingDesign(struc_x, base_x_empty) isa BuildingDesign)
+    vac_ovr = Dict{UInt64, MemberGroupSizingOverride}(
+        UInt64(1) => MemberGroupSizingOverride())  # all fields nothing
+    base_x_vac = SS.with(base_x; member_group_overrides = vac_ovr)
+    record!("BuildingDesign constructor: vacuous (all-unset) override constructs",
+            !SS._is_effective(vac_ovr[UInt64(1)]) &&
+            BuildingDesign(struc_x, base_x_vac) isa BuildingDesign)
+    base_x_eff = SS.with(base_x; member_group_overrides = eff_ovr)
+    record!("BuildingDesign constructor throws guard on effective member_group_overrides",
+            guard_threw(() -> BuildingDesign(struc_x, base_x_eff)))
+
+    # ── [12b] PHASE B: effective steel-beam-group overrides are LIVE ──────────
+    # The honorable case: a beam/column floor (:vault) with multiple steel beam
+    # groups. An effective per-group catalog override narrows THAT group's feasible
+    # set in the batched `size_beams!` path and changes only its result; from-scratch
+    # and the incremental engine route the identical threading.
+    println("\n[12b] Phase B: member_group_overrides LIVE on steel beam groups (beam/column floor)")
+
+    # Canonical section name assigned to steel-beam group `gid`, read from the
+    # CAPTURED `design_building` return (a `BuildingDesign`). It cannot be read back
+    # off the designed structure: after a :vault design the individual beam members
+    # drop their `.section` (it lives on the shared MemberGroup, so `section(b)` is
+    # `nothing`), and `struc.member_groups` is `empty!`-rebuilt per member_type on
+    # every sizing pass — after beams THEN columns it holds only the column groups.
+    # `BuildingDesign.beams` is keyed by beam INDEX (position in `struc.beams`), and
+    # each `BeamDesignResult.section_obj` survives capture (see report_summary.jl),
+    # so map gid → beam index via `group_id` and read the section object's name.
+    # (`section_size` is `string(sec)`, the full struct repr, not the W-shape name.)
+    beam_secname(s, des, gid) = begin
+        for (k, b) in enumerate(s.beams)
+            if group_id(b) == gid
+                r = get(des.beams, k, nothing)
+                r === nothing && return nothing
+                return r.section_obj === nothing ? nothing : r.section_obj.name
+            end
+        end
+        nothing
+    end
+
+    # Free (no-override) design first — raw skeleton structs have no materialized
+    # members, so beam member groups (and their deterministic singleton gids) only
+    # exist AFTER a sizing pass. Enumerate the real steel-beam gids from the DESIGNED
+    # structure's members.
+    struc_free, base_free = build_beam_column()
+    des_free = design_building(struc_free, base_free)
+    beam_gids = sort(unique(group_id(b) for b in struc_free.beams))
+    record!("beam/column (:vault) fixture exposes >= 2 steel beam groups (got $(length(beam_gids)))",
+            length(beam_gids) >= 2)
+    target_gid = first(beam_gids)
+    free_sec = beam_secname(struc_free, des_free, target_gid)
+
+    # Heaviest W (max area ⇒ max Zx/Ix/Aw ⇒ adequate for any office beam; default
+    # max_depth = Inf), distinct from the light free optimum.
+    all_w = SR.all_W()
+    heavy = all_w[argmax([SR.section_area(s) for s in all_w])]
+
+    # (i) single-section catalog override ⇒ the group is sized to EXACTLY that section.
+    struc_ov, base_ov0 = build_beam_column()
+    base_ov = SS.with(base_ov0; member_group_overrides =
+        Dict{UInt64, MemberGroupSizingOverride}(
+            target_gid => MemberGroupSizingOverride(catalog = [heavy])))
+    des_ov = design_building(struc_ov, base_ov)
+    forced = beam_secname(struc_ov, des_ov, target_gid)
+    record!("single-section catalog override sizes target beam group to that section (got $forced, want $(heavy.name))",
+            forced == heavy.name)
+    record!("effective override CHANGES the design vs free (free=$free_sec, forced=$forced)",
+            forced != free_sec)
+
+    # (ii) exact-first isolation: every OTHER beam group is byte-identical to free.
+    other_ok = all(g -> g == target_gid ||
+                        beam_secname(struc_ov, des_ov, g) ==
+                        beam_secname(struc_free, des_free, g), beam_gids)
+    record!("override narrows ONLY its group; all other beam groups byte-identical", other_ok)
+
+    # (iii) ORACLE: from-scratch WITH override == incremental engine WITH override,
+    #       both routing the batched size_beams! threading (per-member signature).
+    struc_inc, base_inc = build_beam_column()
+    engine_inc = prepare_engine(struc_inc, base_inc)
+    run_target!(engine_inc, base_inc)                          # clean base first
+    variant_inc = SS.with(base_inc; member_group_overrides =
+        Dict{UInt64, MemberGroupSizingOverride}(
+            target_gid => MemberGroupSizingOverride(catalog = [heavy])))
+    rc_inc, _ = run_target!(engine_inc, variant_inc)
+    inc_ov = capture_incremental_design(engine_inc, variant_inc)
+    record!("effective override marks :members dirty in the incremental engine (got $rc_inc)",
+            NODE_MEMBERS in rc_inc)
+    ok_ovsig, bad_ovsig = same_signature(design_signature(des_ov), design_signature(inc_ov))
+    record!("from-scratch WITH override == incremental WITH override (per-member signature, mismatch: $bad_ovsig)",
+            ok_ovsig)
+
+    # (iv) UN-HONORABLE targets on the SAME beam/column floor still throw
+    #      (message-pinned): a COLUMN-group override. Enumerate a real column gid
+    #      from a DESIGNED structure — `build_member_groups!` on a raw skeleton
+    #      yields an empty map (member groups only exist after a sizing pass), so
+    #      read `group_id` off the designed columns instead.
+    struc_cg, base_cg = build_beam_column()
+    design_building(struc_cg, base_cg)
+    col_gid = first(sort(unique(group_id(c) for c in struc_cg.columns)))
+    struc_cg2, base_cg2 = build_beam_column()
+    base_cg_ov = SS.with(base_cg2; member_group_overrides =
+        Dict{UInt64, MemberGroupSizingOverride}(
+            col_gid => MemberGroupSizingOverride(catalog = [heavy])))
+    record!("column-group override on beam/column floor throws guard (message-pinned)",
+            guard_threw(() -> design_building(struc_cg2, base_cg_ov)))
+    #      and a beam-group override under a FLAT-PLATE floor (un-honorable floor).
+    struc_fpo, base_fpo = build_flat_plate()
+    base_fpo_ov = SS.with(base_fpo; member_group_overrides =
+        Dict{UInt64, MemberGroupSizingOverride}(
+            target_gid => MemberGroupSizingOverride(catalog = [heavy])))
+    record!("beam override under flat-plate floor throws guard (message-pinned)",
+            guard_threw(() -> design_building(struc_fpo, base_fpo_ov)))
+
+    # Run 4 / Phase B: `member_group_overrides` is now a `:members` param-slice input
+    # (the batched steel-beam stage honors it — see provenance.jl NODE_MEMBERS), so a
+    # change DIRTIES the member frontier. It is still NOT prepare-affecting (no
+    # geometry/load re-prepare), so the incremental engine is reused, not rebuilt.
     struc_fr, base_fr = build_flat_plate()
     session_fr = DesignSession(struc_fr, base_fr)
     fr_ovr = Dict{UInt64, MemberGroupSizingOverride}(
         UInt64(1) => MemberGroupSizingOverride(catalog = [SR.W("W21X44")]))
-    record!("member_group_overrides change → empty dirty frontier, not prepare-affecting",
-            isempty(dirty_frontier(session_fr; member_group_overrides = fr_ovr)) &&
+    record!("member_group_overrides change → dirties :members frontier, not prepare-affecting",
+            (NODE_MEMBERS in dirty_frontier(session_fr; member_group_overrides = fr_ovr)) &&
             !requires_new_engine(session_fr; member_group_overrides = fr_ovr))
+
+    # ── [12c] Finding A-revert: MemberGroup.catalog_override is a NO-OP in the batched path ──
+    # A beam group carrying ONLY a MemberGroup.catalog_override (Phase 6 seam) and
+    # EMPTY member_group_overrides must be a NO-OP in the batched size_beams! path —
+    # catalog_override is honored solely by the isolated size_member_group! path
+    # (never here: it was never honored pre-Phase-B, and honoring it opened a
+    # regression). So the sized section is BYTE-IDENTICAL to the no-override free
+    # optimum, NOT narrowed to the seam catalog.
+    println("\n[12c] Finding A-revert: MemberGroup.catalog_override is a no-op in batched size_beams!")
+    heavy_co = SR.all_W()[argmax([SR.section_area(s) for s in SR.all_W()])]
+    struc_cofree = build_override_beam_struc()
+    build_member_groups!(struc_cofree; member_type = :beams)
+    size_beams!(struc_cofree, SR.SteelBeamOptions(); reanalyze = false)
+    gid_cof = first(keys(struc_cofree.member_groups))
+    free_co = struc_cofree.member_groups[gid_cof].section.name
+    struc_co = build_override_beam_struc()
+    build_member_groups!(struc_co; member_type = :beams)
+    gid_co = first(keys(struc_co.member_groups))
+    struc_co.member_groups[gid_co].catalog_override = [heavy_co]   # ONLY the seam
+    size_beams!(struc_co, SR.SteelBeamOptions(); reanalyze = false)  # no per-design override
+    co_sized = struc_co.member_groups[gid_co].section.name
+    record!("MemberGroup.catalog_override is a no-op in batched size_beams!, byte-identical to free (got $co_sized, free=$free_co; seam=$(heavy_co.name))",
+            co_sized == free_co && co_sized != heavy_co.name)
+
+    # ── [12d] Finding B: LOOSER deflection_limit/max_depth override refused fail-loud ──
+    # The batched path always intersects the per-group mask with the global
+    # AISCChecker screening, so a per-group knob can only TIGHTEN; a LOOSER knob would
+    # be a silent no-op. The struc-aware guard refuses it fail-loud; TIGHTENING honored.
+    println("\n[12d] Finding B: looser deflection_limit/max_depth refused; tightening honored")
+    struc_bl, base_bl = build_beam_column()
+    base_bl_loose = SS.with(base_bl; member_group_overrides =
+        Dict{UInt64, MemberGroupSizingOverride}(
+            target_gid => MemberGroupSizingOverride(deflection_limit = 1/240)))  # looser than 1/360
+    record!("looser deflection_limit override on beam group throws guard (message-pinned)",
+            guard_threw(() -> design_building(struc_bl, base_bl_loose)))
+    struc_bd, base_bd0 = build_beam_column()
+    base_bd = SS.with(base_bd0; beams = SR.SteelBeamOptions(max_depth = 12.0u"inch"),
+        member_group_overrides = Dict{UInt64, MemberGroupSizingOverride}(
+            target_gid => MemberGroupSizingOverride(max_depth = 24.0u"inch")))  # looser than 12"
+    record!("looser max_depth override on beam group throws guard (message-pinned)",
+            guard_threw(() -> design_building(struc_bd, base_bd)))
+    struc_bt, base_bt = build_beam_column()
+    base_bt_tight = SS.with(base_bt; member_group_overrides =
+        Dict{UInt64, MemberGroupSizingOverride}(
+            target_gid => MemberGroupSizingOverride(deflection_limit = 1/480)))  # tighter than 1/360
+    tight_ok = try
+        design_building(struc_bt, base_bt_tight) isa BuildingDesign
+    catch
+        false
+    end
+    record!("tightening deflection_limit override is honored (design succeeds)", tight_ok)
+
+    # ── [12e] Finding C: SZ-layer guard — feasible!==nothing requires n_max_sections==0 ──
+    println("\n[12e] Finding C: optimize_discrete rejects feasible + n_max_sections>0 (SZ layer)")
+    checker_c = SR.AISCChecker()
+    demands_c = [SR.MemberDemand(1; Mux = 100e3)]
+    geoms_c   = [SR.SteelMemberGeometry(6.0)]
+    cat_c     = SR.all_W()
+    sz_threw = try
+        SR.optimize_discrete(checker_c, demands_c, geoms_c, cat_c, SR.A992_Steel;
+                             feasible = [collect(1:min(3, length(cat_c)))], n_max_sections = 1)
+        false
+    catch err
+        err isa ArgumentError &&
+            occursin("feasible", sprint(showerror, err)) &&
+            occursin("n_max_sections", sprint(showerror, err))
+    end
+    record!("optimize_discrete throws on feasible!==nothing with n_max_sections>0 (SZ layer)", sz_threw)
+
+    # ── [12f] Finding D: variation door uses the STRUC-AWARE guard ──────────────
+    # A column-group override injected via redesign/vary is refused AT THE DOOR
+    # (struc-aware), not only at the capture_design backstop; an honorable beam-group
+    # override is NOT over-refused.
+    println("\n[12f] Finding D: column override refused at variation door; beam override honored")
+    struc_dd, base_dd = build_beam_column()
+    design_building(struc_dd, base_dd)                        # discover a real column gid
+    col_gid_d = first(sort(unique(group_id(c) for c in struc_dd.columns)))
+    struc_ds, base_ds = build_beam_column()
+    session_d = DesignSession(struc_ds, base_ds)
+    col_ovr_d = Dict{UInt64, MemberGroupSizingOverride}(
+        col_gid_d => MemberGroupSizingOverride(catalog = [heavy_co]))
+    record!("redesign refuses column-group override at the door (message-pinned)",
+            guard_threw(() -> redesign(session_d; member_group_overrides = col_ovr_d)))
+    record!("vary refuses column-group override at the door (message-pinned)",
+            guard_threw(() -> vary(session_d, (; member_group_overrides = col_ovr_d))))
+    struc_ds2, base_ds2 = build_beam_column()
+    session_d2 = DesignSession(struc_ds2, base_ds2)
+    beam_ovr_d = Dict{UInt64, MemberGroupSizingOverride}(
+        target_gid => MemberGroupSizingOverride(catalog = [heavy_co]))
+    beam_door_ok = try
+        redesign(session_d2; member_group_overrides = beam_ovr_d) isa BuildingDesign
+    catch
+        false
+    end
+    record!("honorable beam-group override passes the variation door (not over-refused)", beam_door_ok)
+
+    # ── [12g] FIX CYCLE 2: P1-2 / P2-3 / P2-4 / composite ──────────────────────
+    # Re-critic findings on the fix-cycle-1 guard.
+    println("\n[12g] Fix cycle 2: P1-2 collinear / P2-3 par_has / P2-4 units / composite")
+
+    # [P2-4] ill-typed override fields → PINNED ArgumentError at CONSTRUCTION, never
+    # a bare Unitful DimensionError deep in the batched mask.
+    p24_bare = try; MemberGroupSizingOverride(max_depth = 0.4); false
+               catch e; e isa ArgumentError && occursin("member_group_overrides", sprint(showerror, e)); end
+    record!("P2-4: bare-number max_depth refused at construction (pinned)", p24_bare)
+    p24_dim = try; MemberGroupSizingOverride(deflection_limit = 1.0u"inch"); false
+              catch e; e isa ArgumentError && occursin("member_group_overrides", sprint(showerror, e)); end
+    record!("P2-4: dimensioned deflection_limit refused at construction (pinned)", p24_dim)
+    record!("P2-4: well-typed override still constructs",
+            MemberGroupSizingOverride(deflection_limit = 1/360, max_depth = 18.0u"inch") isa
+                MemberGroupSizingOverride)
+
+    # [composite] an EFFECTIVE override on a COMPOSITE-beam demand is refused fail-loud
+    # (pinned). The batched mask gates deflection on bare-steel Ix while the composite
+    # code check uses I_LB (AISC 360-16 Commentary I3.2). Exercised on the guard helper
+    # with a lightweight non-nothing composite stand-in (batched demands are
+    # composite===nothing by construction).
+    gids_comp = UInt64[UInt64(11), UInt64(22)]
+    demands_comp = [SR.MemberDemand(1; Mux = 100e3),
+                    SR.MemberDemand(2; Mux = 100e3, composite = :composite_stub)]
+    ovr_comp = Dict{UInt64, MemberGroupSizingOverride}(
+        UInt64(22) => MemberGroupSizingOverride(catalog = [SR.W("W21X44")]))
+    record!("composite: effective override on composite-beam demand refused (pinned)",
+            guard_threw(() -> SS._assert_no_composite_override(gids_comp, demands_comp, ovr_comp)))
+    ovr_comp_ok = Dict{UInt64, MemberGroupSizingOverride}(
+        UInt64(11) => MemberGroupSizingOverride(catalog = [SR.W("W21X44")]))
+    record!("composite: non-composite target with same override is fine",
+            SS._assert_no_composite_override(gids_comp, demands_comp, ovr_comp_ok) === nothing)
+
+    # [P2-3] a beam with NO segment on a :beams edge is never emitted by the sizer
+    # (par_has == false); its override MUST be refused fail-loud, not silently dropped.
+    # The DEFINITIVE check now lives at the SIZE-TIME gid gate inside _size_beams_impl!
+    # (the pre-sizing classifier was REMOVED — its collinear reproduction disagreed with
+    # the real size-time gids). Strip the :beams edge set so member_group_demands emits
+    # NO group, then an override on that now-absent gid is refused fail-loud at size time
+    # — even with an empty emitted set (the gate runs BEFORE the empty-group early return).
+    struc_p3 = build_override_beam_struc()
+    build_member_groups!(struc_p3; member_type = :beams)
+    beam_gid_p3 = first(keys(struc_p3.member_groups))
+    struc_p3.skeleton.groups_edges[:beams] = Int[]      # par_has false for every beam
+    record!("P2-3: par_has-absent beam override refused fail-loud at size time (not silently dropped)",
+            guard_threw(() -> size_beams!(struc_p3, SR.SteelBeamOptions(); reanalyze = false,
+                member_group_overrides = Dict{UInt64, MemberGroupSizingOverride}(
+                    beam_gid_p3 => MemberGroupSizingOverride(catalog = [heavy])))))
+
+    # [P1-2] with collinear_grouping = true the sizer decides beam grouping at SIZE
+    # time on the analysis structure (group_collinear_members! inside size_beams!), NOT
+    # in prepare!. A pre-sizing reproduction of that grouping is UNRELIABLE (it disagreed
+    # with the real size-time gids — e.g. 12 door-side chains vs 24 groups at size time),
+    # so the definitive honor/refuse decision is the SIZE-TIME gid gate. Key an override
+    # on the sizer's REAL size-time gid — read back from a DESIGNED struc
+    # (group_id(struc.beams[k]) post-size, the verified data model) — and it is HONORED
+    # through design_building AND redesign_incremental!, while a column-group gid throws.
+    stiff = all_w[argmax([ustrip(u"m^4", SR.Ix(s)) for s in all_w])]
+    secname_idx(des, k) = begin
+        r = get(des.beams, k, nothing)
+        r === nothing && return nothing
+        r.section_obj === nothing ? nothing : r.section_obj.name
+    end
+    struc_a, base_a0 = build_beam_column()
+    base_a = SS.with(base_a0; collinear_grouping = true)
+    design_building(struc_a, base_a)
+    beam_gids_a = unique(group_id(b) for b in struc_a.beams)
+    record!("P1-2: real size-time beam gids readable from designed struc (collinear_grouping)",
+            !isempty(beam_gids_a))
+    target_cl = first(beam_gids_a)
+    chain_idx = first(i for (i, b) in enumerate(struc_a.beams) if group_id(b) == target_cl)
+
+    struc_clo, base_clo0 = build_beam_column()
+    base_clo = SS.with(base_clo0; collinear_grouping = true,
+        member_group_overrides = Dict{UInt64, MemberGroupSizingOverride}(
+            target_cl => MemberGroupSizingOverride(catalog = [stiff])))
+    clo_ok = try
+        des_clo = design_building(struc_clo, base_clo)
+        des_clo isa BuildingDesign && secname_idx(des_clo, chain_idx) == stiff.name
+    catch
+        false
+    end
+    record!("P1-2: override on real size-time gid HONORED through design_building (collinear_grouping)", clo_ok)
+
+    struc_cli, base_cli0 = build_beam_column()
+    base_cli = SS.with(base_cli0; collinear_grouping = true)
+    engine_cli = prepare_engine(struc_cli, base_cli)
+    run_target!(engine_cli, base_cli)                       # clean base first
+    variant_cli = SS.with(base_cli; member_group_overrides =
+        Dict{UInt64, MemberGroupSizingOverride}(
+            target_cl => MemberGroupSizingOverride(catalog = [stiff])))
+    cli_ok = try
+        rc_cli, _ = run_target!(engine_cli, variant_cli)
+        inc_clo = capture_incremental_design(engine_cli, variant_cli)
+        (NODE_MEMBERS in rc_cli) && secname_idx(inc_clo, chain_idx) == stiff.name
+    catch
+        false
+    end
+    record!("P1-2: override on real size-time gid HONORED through redesign_incremental!", cli_ok)
+
+    struc_col, base_col0 = build_beam_column()
+    design_building(struc_col, base_col0)
+    col_gid_cl = first(sort(unique(group_id(c) for c in struc_col.columns)))
+    struc_clc, base_clc0 = build_beam_column()
+    base_clc_ov = SS.with(base_clc0; collinear_grouping = true,
+        member_group_overrides = Dict{UInt64, MemberGroupSizingOverride}(
+            col_gid_cl => MemberGroupSizingOverride(catalog = [heavy])))
+    record!("P1-2: column-group gid under collinear_grouping refused at size time (pinned)",
+            guard_threw(() -> design_building(struc_clc, base_clc_ov)))
+
+    # ── [12h] FIX CYCLE 3: P1 silent-drop / P2 section-identity / P2 SZ feasible ──
+    println("\n[12h] Fix cycle 3: P1 skip-branch silent-drop / P2 section / P2 SZ")
+
+    # [P1] `_size_beams_columns!` has TWO early-returns that skip size_beams! (and the
+    # size-time gid gate): the slab-only branch and the no-beam-edges branch. On a
+    # NON-flat steel floor with columns but NO :beams edges, an EFFECTIVE override
+    # passed every existing door and was SILENTLY DROPPED while capture_design still
+    # produced a BuildingDesign. Strip the vault's :beams edge set (initialize! reads
+    # groups_edges, never repopulates it) → the no-beam-edges skip branch fires → the
+    # honor-or-throw invariant now refuses the effective override fail-loud, on BOTH
+    # design_building AND redesign_incremental!. An empty override stays a strict no-op.
+    eff_ovr_p1 = Dict{UInt64, MemberGroupSizingOverride}(
+        UInt64(1) => MemberGroupSizingOverride(catalog = [heavy]))
+    struc_p1, base_p1 = build_beam_column()
+    struc_p1.skeleton.groups_edges[:beams] = Int[]
+    record!("P1: no-beam-edges skip branch refuses effective override via design_building (pinned)",
+            guard_threw(() -> design_building(struc_p1,
+                SS.with(base_p1; member_group_overrides = eff_ovr_p1))))
+
+    struc_p1e, base_p1e = build_beam_column()
+    struc_p1e.skeleton.groups_edges[:beams] = Int[]
+    p1_empty_ok = try
+        design_building(struc_p1e, base_p1e) isa BuildingDesign
+    catch
+        false
+    end
+    record!("P1: empty override on stripped-beams fixture is a strict no-op (byte-identical)", p1_empty_ok)
+
+    struc_p1i, base_p1i = build_beam_column()
+    struc_p1i.skeleton.groups_edges[:beams] = Int[]
+    engine_p1 = prepare_engine(struc_p1i, base_p1i)
+    run_target!(engine_p1, base_p1i)     # clean base: columns-only, no throw
+    variant_p1 = SS.with(base_p1i; member_group_overrides = eff_ovr_p1)
+    record!("P1: no-beam-edges skip branch refuses effective override via redesign_incremental! (pinned)",
+            guard_threw(() -> redesign_incremental!(engine_p1, variant_p1)))
+
+    # [P2 section-identity] an override-catalog section colliding a DEFAULT name but with
+    # DIFFERING properties (a deep-copied default W with a halved Ix, same name) ⇒ pinned
+    # throw. A genuinely IDENTICAL section (the cached default singleton) still dedups
+    # byte-identically (no throw, real design).
+    struc_free_p2, base_free_p2 = build_beam_column()
+    design_building(struc_free_p2, base_free_p2)
+    target_gid_p2 = first(sort(unique(group_id(b) for b in struc_free_p2.beams)))
+    dflt_opts_p2 = SR.SteelBeamOptions()
+    dflt_cat_p2 = dflt_opts_p2.custom_catalog === nothing ?
+        SR.steel_column_catalog(dflt_opts_p2.section_type, dflt_opts_p2.catalog) :
+        dflt_opts_p2.custom_catalog
+    base_sec_p2 = first(dflt_cat_p2)
+    modified_p2 = deepcopy(base_sec_p2)
+    modified_p2.Ix = base_sec_p2.Ix * 0.5   # SAME name, DIFFERENT property (Ix)
+    record!("P2 section: _sections_identical distinguishes differing props",
+            !SS._sections_identical(base_sec_p2, modified_p2) &&
+            SS._sections_identical(base_sec_p2, base_sec_p2))
+
+    struc_c_p2, base_c_p2 = build_beam_column()
+    record!("P2 section: name-colliding override with differing props refused (pinned)",
+            guard_threw(() -> design_building(struc_c_p2, SS.with(base_c_p2;
+                member_group_overrides = Dict{UInt64, MemberGroupSizingOverride}(
+                    target_gid_p2 => MemberGroupSizingOverride(catalog = [modified_p2]))))))
+
+    struc_id_p2, base_id_p2 = build_beam_column()
+    p2_identical_ok = try
+        design_building(struc_id_p2, SS.with(base_id_p2;
+            member_group_overrides = Dict{UInt64, MemberGroupSizingOverride}(
+                target_gid_p2 => MemberGroupSizingOverride(catalog = [base_sec_p2])))) isa BuildingDesign
+    catch
+        false
+    end
+    record!("P2 section: identical-name collision (cached singleton) dedups byte-identically", p2_identical_ok)
+
+    # [P2 SZ, RECONCILED fix cycle 4] the MULTI-MATERIAL optimize_discrete keeps the
+    # HARD in-range check (out-of-range index > n_sec*n_mat refused fail-loud) but NO
+    # LONGER throws on a "single-material-space" heuristic: a material-1-only mask
+    # (indices k = (1-1)*n_sec + j = j, all <= n_sec) is a LEGITIMATE in-range
+    # restriction, indistinguishable from a mis-spaced mask, so cycle-3's heuristic
+    # FALSE-POSITIVED it. It must now run and return a feasible result confined to
+    # material 1. Solver-input guard — ArgumentError only on the out-of-range case; the
+    # single-material overload is unchanged.
+    checker_mm = SR.AISCChecker()
+    demands_mm = [SR.MemberDemand(1; Mux = 100e3)]
+    geoms_mm   = [SR.SteelMemberGeometry(6.0)]
+    cat_mm     = SR.all_W()
+    mats_mm    = [SR.A992_Steel, SR.A992_Steel]   # n_mat = 2
+    n_sec_mm   = length(cat_mm)
+    sz_m1_ok = try
+        res_m1 = SR.optimize_discrete(checker_mm, demands_mm, geoms_mm, cat_mm, mats_mm;
+                                      feasible = [collect(1:n_sec_mm)], n_max_sections = 0)
+        res_m1.material_indices[1] == 1 && res_m1.section_indices[1] in 1:n_sec_mm
+    catch
+        false
+    end
+    record!("P2 SZ: multi-material material-1-only in-range mask honored (no throw, picks material 1)", sz_m1_ok)
+    sz_oor_threw = try
+        SR.optimize_discrete(checker_mm, demands_mm, geoms_mm, cat_mm, mats_mm;
+                             feasible = [[n_sec_mm * 2 + 5]], n_max_sections = 0)
+        false
+    catch e
+        e isa ArgumentError
+    end
+    record!("P2 SZ: multi-material out-of-range feasible index refused (ArgumentError)", sz_oor_threw)
+
+    # ── [12i] FIX CYCLE 4: universal size! gate / struc-only backstop / P2 sections ──
+    println("\n[12i] Fix cycle 4: universal size! gate / struc-only backstop / P2 section dedup")
+
+    # Deterministic gids from a designed reference fixture (stable across identical
+    # build_beam_column() fixtures).
+    struc_c4ref, base_c4ref = build_beam_column()
+    des_c4ref = design_building(struc_c4ref, base_c4ref)
+    beam_gids_c4 = sort(unique(group_id(b) for b in struc_c4ref.beams))
+    target_gid_c4 = first(beam_gids_c4)
+    col_gid_c4 = first(sort(unique(group_id(c) for c in struc_c4ref.columns)))
+    free_sec_c4 = beam_secname(struc_c4ref, des_c4ref, target_gid_c4)
+
+    # [P0] HONORABLE steel-beam override via the exported size!(design) path ⇒ the
+    # returned design HONORS the restriction (target group sized to heavy), NOT a
+    # silently-dropped default-catalog design.
+    struc_h4, base_h40 = build_beam_column()
+    base_h4 = SS.with(base_h40; member_group_overrides =
+        Dict{UInt64, MemberGroupSizingOverride}(
+            target_gid_c4 => MemberGroupSizingOverride(catalog = [heavy])))
+    prepare!(struc_h4, base_h4)
+    design_h4 = BuildingDesign(struc_h4, base_h4)
+    size!(design_h4; verbose = false)
+    forced_h4 = beam_secname(struc_h4, design_h4, target_gid_c4)
+    record!("P0: size! honors an effective steel-beam override (not silently dropped)",
+            forced_h4 == heavy.name && forced_h4 != free_sec_c4)
+
+    # [P0] UN-HONORABLE override (a COLUMN-group gid) via size! ⇒ pinned throw at the
+    # size-time gate (never a silently-dropped design).
+    struc_u4, base_u40 = build_beam_column()
+    base_u4 = SS.with(base_u40; member_group_overrides =
+        Dict{UInt64, MemberGroupSizingOverride}(
+            col_gid_c4 => MemberGroupSizingOverride(catalog = [heavy])))
+    prepare!(struc_u4, base_u4)
+    design_u4 = BuildingDesign(struc_u4, base_u4)
+    record!("P0: size! refuses an un-honorable override (pinned member_group_overrides)",
+            guard_threw(() -> size!(design_u4; verbose = false)))
+
+    # [P1] struc.design_parameters is NOT a field of BuildingStructure and is never
+    # assigned, so the size_beams! dp-default is an inert backstop (stays nothing) and
+    # the size! thread is authoritative. Assert the backstop is inert: bare
+    # size_beams! / size_members! with no override channel size normally, never
+    # throwing the pinned guard.
+    struc_b4, base_b4 = build_beam_column()
+    prepare!(struc_b4, base_b4)
+    p1_backstop_ok = try
+        (size_beams!(struc_b4, SR.SteelBeamOptions(); reanalyze = false) === struc_b4)
+    catch
+        false
+    end
+    record!("P1: bare size_beams! with no override channel is a strict no-op (backstop inert)", p1_backstop_ok)
+    struc_mm4, base_mm4 = build_beam_column()
+    prepare!(struc_mm4, base_mm4)
+    p1_members_ok = try
+        (size_members!(struc_mm4) === struc_mm4)
+    catch
+        false
+    end
+    record!("P1: bare size_members! with no override channel is a strict no-op (never silent drop)", p1_members_ok)
+
+    # [P2 sections] _sections_identical dedups genuinely value-equal but DISTINCT-object
+    # sections (deepcopy) while still refusing a genuinely-differing collision.
+    dflt_opts_c4 = SR.SteelBeamOptions()
+    dflt_cat_c4 = dflt_opts_c4.custom_catalog === nothing ?
+        SR.steel_column_catalog(dflt_opts_c4.section_type, dflt_opts_c4.catalog) :
+        dflt_opts_c4.custom_catalog
+    base_sec_c4 = first(dflt_cat_c4)
+    record!("P2 section: value-equal distinct-object section dedups (no over-refusal)",
+            SS._sections_identical(base_sec_c4, deepcopy(base_sec_c4)) &&
+            SS._sections_identical(base_sec_c4, base_sec_c4))
+    heavy_dflt_c4 = dflt_cat_c4[argmax([SR.section_area(s) for s in dflt_cat_c4])]
+    struc_dd4, base_dd40 = build_beam_column()
+    base_dd4 = SS.with(base_dd40; member_group_overrides =
+        Dict{UInt64, MemberGroupSizingOverride}(
+            target_gid_c4 => MemberGroupSizingOverride(catalog = [deepcopy(heavy_dflt_c4)])))
+    p2_dedup_ok = try
+        design_building(struc_dd4, base_dd4) isa BuildingDesign
+    catch
+        false
+    end
+    record!("P2 section: value-equal deepcopy override colliding a default name dedups (no throw)", p2_dedup_ok)
+
+    # ── [12j] FIX CYCLE 5: size! front-door parity / multi-material backstop / NaN id ──
+    println("\n[12j] Fix cycle 5: size! front-door guard parity / multi-material backstop / NaN identity")
+
+    # [P0] non-steel (concrete) beam opts + an override MUTATED into the live dict AFTER
+    # an empty-dict construction ⇒ size! refuses pinned. The constructor guard short-
+    # circuited on the then-empty dict; the size! front-door guard re-runs and fires
+    # check 2 (non-steel). prepare! never inspects params.beams, so size! reaches it.
+    struc_c5, base_c5 = build_beam_column(beams = SR.ConcreteBeamOptions())
+    prepare!(struc_c5, base_c5)
+    design_c5 = BuildingDesign(struc_c5, base_c5)
+    design_c5.params.member_group_overrides[target_gid_c4] =
+        MemberGroupSizingOverride(catalog = [heavy])
+    record!("P0: size! refuses a non-steel-beam effective override mutated post-construct (pinned)",
+            guard_threw(() -> size!(design_c5; verbose = false)))
+
+    # [P1] multi-material steel beam opts + effective override mutated in after
+    # construction ⇒ size! refuses pinned (front-door check 4), never a silent collapse
+    # to material 1.
+    struc_mm5, base_mm5 = build_beam_column(
+        beams = SR.SteelBeamOptions(materials = [SR.A992_Steel, SR.S355_Steel]))
+    prepare!(struc_mm5, base_mm5)
+    design_mm5 = BuildingDesign(struc_mm5, base_mm5)
+    design_mm5.params.member_group_overrides[target_gid_c4] =
+        MemberGroupSizingOverride(catalog = [heavy])
+    record!("P1: size! refuses a multi-material steel effective override (pinned, check 4)",
+            guard_threw(() -> size!(design_mm5; verbose = false)))
+
+    # [P1/P2 backstop] bypass the front door: the batched steel size-time gate itself
+    # refuses a multi-material effective override (opts.materials !== nothing), so the
+    # single-material-space feasible mask never reaches the multi-material solver.
+    struc_bs5, base_bs5 = build_beam_column()
+    prepare!(struc_bs5, base_bs5)
+    record!("P1/P2 backstop: batched steel gate refuses multi-material override directly (pinned)",
+            guard_threw(() -> size_beams!(struc_bs5,
+                SR.SteelBeamOptions(materials = [SR.A992_Steel, SR.S355_Steel]);
+                reanalyze = false,
+                member_group_overrides = Dict{UInt64, MemberGroupSizingOverride}(
+                    target_gid_c4 => MemberGroupSizingOverride(catalog = [heavy])))))
+
+    # regression: an HONORABLE single-material steel override via size! is still HONORED.
+    struc_hh5, base_hh50 = build_beam_column()
+    base_hh5 = SS.with(base_hh50; member_group_overrides =
+        Dict{UInt64, MemberGroupSizingOverride}(
+            target_gid_c4 => MemberGroupSizingOverride(catalog = [heavy])))
+    prepare!(struc_hh5, base_hh5)
+    design_hh5 = BuildingDesign(struc_hh5, base_hh5)
+    size!(design_hh5; verbose = false)
+    forced_hh5 = beam_secname(struc_hh5, design_hh5, target_gid_c4)
+    record!("regression: size! still HONORS an honorable single-material steel override",
+            forced_hh5 == heavy.name && forced_hh5 != free_sec_c4)
+
+    # [P2 sections, fix cycle 6] Leaf comparison is `isequal`-based — the cycle-5
+    # NaN-poison rule was REVERTED. `isequal(NaN, NaN) === true` (two unset sentinels do
+    # NOT differ) while `isequal(1.0, NaN) === false`. Metal.cost defaults to NaN, so
+    # A992_Steel.cost is the NaN sentinel; a `missing` field still dedups too.
+    record!("P2 NaN: _field_identical treats a both-NaN sentinel leaf as identical (isequal)",
+            SS._field_identical(1.0, 1.0) && SS._field_identical(missing, missing) &&
+            SS._field_identical(NaN, NaN) && !SS._field_identical(1.0, NaN))
+
+    dflt_opts_c5 = SR.SteelBeamOptions()
+    dflt_cat_c5 = dflt_opts_c5.custom_catalog === nothing ?
+        SR.steel_column_catalog(dflt_opts_c5.section_type, dflt_opts_c5.catalog) :
+        dflt_opts_c5.custom_catalog
+    base_sec_c5 = first(dflt_cat_c5)
+    sec_nan_a5 = deepcopy(base_sec_c5); sec_nan_a5.material = deepcopy(SR.A992_Steel)
+    sec_nan_b5 = deepcopy(base_sec_c5); sec_nan_b5.material = deepcopy(SR.A992_Steel)
+    record!("P2 NaN: two value-equal sections both carrying a cost=NaN sentinel field dedup",
+            isnan(sec_nan_a5.material.cost) &&
+            SS._sections_identical(sec_nan_a5, sec_nan_b5) &&
+            SS._sections_identical(deepcopy(base_sec_c5), deepcopy(base_sec_c5)))
+
+    # [P2 recursion bound] a cyclic field graph terminates (returns false), never
+    # StackOverflows — the depth cap backstops a self-referential section-field graph.
+    ref_a5 = Ref{Any}(nothing); ref_a5[] = ref_a5
+    ref_b5 = Ref{Any}(nothing); ref_b5[] = ref_b5
+    record!("P2 recursion: _field_identical is depth-bounded on a cyclic graph (no StackOverflow)",
+            SS._field_identical(ref_a5, ref_b5) == false)
+
+    # ── [12k] FIX CYCLE 6: :nlp guard / NaN dedup / size-time looseness ──────────
+    println("\n[12k] Fix cycle 6: :nlp override guard / NaN-material dedup / size-time looseness")
+
+    # [P1-a] a steel-beam option with sizing_strategy != :discrete (e.g. :nlp) has NO
+    # honoring path (the size-time gid gate lives only in the :discrete _size_beams_impl!),
+    # so an effective override on it is refused with the PINNED guard (front-door check
+    # 4b) — NOT a raw MethodError, and never a silent drop. Assert via design_building
+    # AND via size!.
+    struc_nlp6, base_nlp60 = build_beam_column(beams = SR.SteelBeamOptions(sizing_strategy = :nlp))
+    base_nlp6 = SS.with(base_nlp60; member_group_overrides =
+        Dict{UInt64, MemberGroupSizingOverride}(
+            target_gid_c4 => MemberGroupSizingOverride(catalog = [heavy])))
+    record!("P1-a: design_building refuses a :nlp steel-beam effective override (pinned, not MethodError)",
+            guard_threw(() -> design_building(struc_nlp6, base_nlp6)))
+
+    struc_nlp62, base_nlp62 = build_beam_column(beams = SR.SteelBeamOptions(sizing_strategy = :nlp))
+    prepare!(struc_nlp62, base_nlp62)
+    design_nlp62 = BuildingDesign(struc_nlp62, base_nlp62)   # empty dict ⇒ constructor guard passes
+    design_nlp62.params.member_group_overrides[target_gid_c4] =
+        MemberGroupSizingOverride(catalog = [heavy])
+    record!("P1-a: size! refuses a :nlp steel-beam effective override (pinned, not MethodError)",
+            guard_threw(() -> size!(design_nlp62; verbose = false)))
+
+    # [P1-b] two genuinely value-equal override sections both carrying a cost=NaN material
+    # and colliding a (typename,name) key DEDUP byte-identically (honor path); a
+    # name-colliding section with a DIFFERING property is STILL refused pinned.
+    dflt_opts_c6 = SR.SteelBeamOptions()
+    dflt_cat_c6 = dflt_opts_c6.custom_catalog === nothing ?
+        SR.steel_column_catalog(dflt_opts_c6.section_type, dflt_opts_c6.catalog) :
+        dflt_opts_c6.custom_catalog
+    base_sec_c6 = first(dflt_cat_c6)
+    a6 = deepcopy(base_sec_c6); a6.material = deepcopy(SR.A992_Steel)
+    b6 = deepcopy(base_sec_c6); b6.material = deepcopy(SR.A992_Steel)
+    c6 = deepcopy(base_sec_c6); c6.Ix = base_sec_c6.Ix * 0.5
+    record!("P1-b: value-equal cost=NaN sections dedup; differing property still distinct",
+            isnan(a6.material.cost) && SS._sections_identical(a6, b6) &&
+            SS._field_identical(NaN, NaN) && !SS._field_identical(1.0, NaN) &&
+            !SS._sections_identical(base_sec_c6, c6))
+
+    heavy_dflt_c6 = dflt_cat_c6[argmax([SR.section_area(s) for s in dflt_cat_c6])]
+    struc_dd6, base_dd60 = build_beam_column()
+    base_dd6 = SS.with(base_dd60; member_group_overrides =
+        Dict{UInt64, MemberGroupSizingOverride}(
+            target_gid_c4 => MemberGroupSizingOverride(catalog = [deepcopy(heavy_dflt_c6)])))
+    p1b_dedup_ok = try
+        design_building(struc_dd6, base_dd6) isa BuildingDesign
+    catch
+        false
+    end
+    record!("P1-b: value-equal deepcopy override colliding a default name dedups (no throw)", p1b_dedup_ok)
+
+    diff_sec_c6 = deepcopy(heavy_dflt_c6); diff_sec_c6.Ix = heavy_dflt_c6.Ix * 0.5
+    struc_df6, base_df60 = build_beam_column()
+    base_df6 = SS.with(base_df60; member_group_overrides =
+        Dict{UInt64, MemberGroupSizingOverride}(
+            target_gid_c4 => MemberGroupSizingOverride(catalog = [diff_sec_c6])))
+    record!("P1-b: name-colliding override with a DIFFERING property still refused (pinned)",
+            guard_threw(() -> design_building(struc_df6, base_df6)))
+
+    # [P2] the DIRECT size_beams! path bypasses the front door, so the size-time gid gate
+    # must itself refuse a LOOSER per-group knob (mirrors front-door check 5). A tightening
+    # knob via the same direct path stays HONORED. deflection_limit is an L/δ ratio, so
+    # LOOSER = numerically LARGER (1/180 > default 1/360); max_depth LOOSER = LARGER.
+    struc_lo6, base_lo6 = build_beam_column()
+    prepare!(struc_lo6, base_lo6)
+    record!("P2: direct size_beams! refuses a looser deflection_limit override (pinned)",
+            guard_threw(() -> size_beams!(struc_lo6, SR.SteelBeamOptions(); reanalyze = false,
+                member_group_overrides = Dict{UInt64, MemberGroupSizingOverride}(
+                    target_gid_c4 => MemberGroupSizingOverride(deflection_limit = 1/180)))))
+
+    struc_ld6, base_ld6 = build_beam_column()
+    prepare!(struc_ld6, base_ld6)
+    record!("P2: direct size_beams! refuses a looser max_depth override (pinned)",
+            guard_threw(() -> size_beams!(struc_ld6, SR.SteelBeamOptions(max_depth = 12.0u"inch");
+                reanalyze = false,
+                member_group_overrides = Dict{UInt64, MemberGroupSizingOverride}(
+                    target_gid_c4 => MemberGroupSizingOverride(max_depth = 24.0u"inch")))))
+
+    struc_ti6, base_ti6 = build_beam_column()
+    prepare!(struc_ti6, base_ti6)
+    p2_tighten_ok = try
+        (size_beams!(struc_ti6, SR.SteelBeamOptions(); reanalyze = false,
+            member_group_overrides = Dict{UInt64, MemberGroupSizingOverride}(
+                target_gid_c4 => MemberGroupSizingOverride(max_depth = 30.0u"inch"))) === struc_ti6)
+    catch
+        false
+    end
+    record!("P2: direct size_beams! HONORS a tightening override via the same path (no throw)", p2_tighten_ok)
 
     # ── Summary ──────────────────────────────────────────────────────────────
     println("\n" * "="^70)

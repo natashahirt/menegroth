@@ -1,0 +1,6 @@
+coverage:
+  agent: skimmed
+  human: none
+description: Synthesis spine for 'aisc-360' (project 'menegroth').
+name: aisc-360-canon
+source: ''

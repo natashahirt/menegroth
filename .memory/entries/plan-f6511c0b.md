@@ -8,12 +8,12 @@ title: 'Run 5 / Phase B: activate per-group overrides in the real pipeline (de-r
 node_label: 'Run 5 / Phase B: activate per-group overrides in t'
 tags: ''
 status: active
-open_threads: 0
+open_threads: 6
 success: 'null'
 files: ''
 session_id: sess-71f1208d
 created_at: '2026-07-15T01:38:19.369475+00:00'
-updated_at: '2026-07-15T01:38:19.369475+00:00'
+updated_at: '2026-07-15T10:26:53.349771+00:00'
 ---
 Follows Run 4 (parameter infrastructure only; member_group_overrides currently guarded fail-loud at capture_design). Phase B makes overrides actually fork a real design_building, under the same exact-first posture. Three architectural forks must be resolved by a recon explore before building:
 

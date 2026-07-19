@@ -287,9 +287,11 @@ exact clause" report loop land.
 1. ~~Fix kglite~~ **DONE (Section 3):** reload Cursor and confirm `angelo-memory`,
    `angelo-coordinator`, `angelo-zettelkasten` show green with their tools in
    Settings → MCP (they run from `~/.venvs/angelo/bin`).
-2. Finish caching the embedding model (background `snapshot_download` with HF `xet`
-   disabled), then delete the three `MEMORY_SKIP_EMBEDDINGS` lines from `mcp.json`
-   and reload to restore semantic search.
+2. ~~Cache the embedding model, then re-enable embeddings.~~ **DONE:** the model
+   (`minishlab/potion-retrieval-32M`) is cached (HF hub cache; mirror URL 404s). The
+   `*_SKIP_EMBEDDINGS` flags were removed from all three servers and replaced with
+   `HF_HUB_OFFLINE=1` + `ANGELO_EMBED_SOURCE=hf` so model load is deterministic
+   cache-only (verified: offline load in ~2.5 s, 512-dim). Reload once to pick this up.
 3. Call `sync()` then `health()` — confirm the cache rebuilt from the committed
    `.memory/` tree (25 entries) and `format_version: "1.0"`.
 4. Deepen the code memory tree: per-package `decision`/`note` entries under the

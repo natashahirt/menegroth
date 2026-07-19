@@ -1,0 +1,54 @@
+abstract: ''
+authors: []
+content_hash: 400b7522377b0a6903c13e69183b591558e3cacbed9c04ca6fe243ab1e37dbe8
+coverage:
+  agent: skimmed
+  human: none
+doc_type: code
+doi: ''
+name: asce-7-22
+source_path: /Users/tashahirt/MIT Dropbox/Natasha Hirt/_MIT/DS Research/Synthetic_Buildings/menegroth/corpus/text/codes/asce/ASCE-7-22.txt
+title: ASCE/SEI 7-22 — Minimum Design Loads and Associated Criteria for Buildings
+  and Other Structures
+venue: ''
+year: null
+extraction:
+  schema: building-code-extraction
+  strict: true
+  grounded: true
+  tags:
+  - scope
+  - provision
+  - equation
+  - parameters
+  - applicability
+  - example
+  - commentary
+  contexts:
+  - project: menegroth
+    synthesis_graph: asce-7-canon
+    schema: building-code-extraction
+    strict: true
+    grounded: true
+    tags:
+    - scope
+    - provision
+    - equation
+    - parameters
+    - applicability
+    - example
+    - commentary
+    structure: &id001
+      synthesis_graph: asce-7-canon
+      apex_id: 20260715-2120-asce-7-canon
+      attach_relation: input-to
+      apex_relation: component-of
+      dimension_nodes:
+        scope: 20260715-2120-asce-7-scope
+        provision: 20260715-2120-asce-7-provision
+        equation: 20260715-2120-asce-7-equation
+        parameters: 20260715-2120-asce-7-parameters
+        applicability: 20260715-2120-asce-7-applicability
+        example: 20260715-2120-asce-7-example
+        commentary: 20260715-2120-asce-7-commentary
+  structure: *id001

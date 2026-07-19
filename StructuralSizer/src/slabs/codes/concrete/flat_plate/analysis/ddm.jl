@@ -732,7 +732,7 @@ function check_ddm_applicability(struc, slab, columns; throw_on_failure::Bool = 
     # Two-way slab analysis assumes slenderness; spans < 4 ft behave more like
     # thick plates where shear governs over flexure
     if !isempty(columns)
-        c1_avg = sum(col.c1 for col in columns) / length(columns)
+        c1_avg = sum(isnothing(col.c1) ? 0.0u"inch" : col.c1 for col in columns) / length(columns)
         ln = clear_span(l1, c1_avg)
         
         ln_min = 4.0u"ft"

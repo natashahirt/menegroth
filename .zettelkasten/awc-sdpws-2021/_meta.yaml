@@ -1,0 +1,54 @@
+abstract: ''
+authors: []
+content_hash: f72deccaaa4613b2a7f7477739c9426b2c72469b02eaad77dfe4539cb9b7b0e8
+coverage:
+  agent: none
+  human: none
+doc_type: code
+doi: ''
+name: awc-sdpws-2021
+source_path: /Users/tashahirt/MIT Dropbox/Natasha Hirt/_MIT/DS Research/Synthetic_Buildings/menegroth/corpus/sources/codes/awc/SDPWS
+  2021.pdf
+title: AWC SDPWS 2021 — Special Design Provisions for Wind and Seismic
+venue: ''
+year: '2021'
+extraction:
+  schema: building-code-extraction
+  strict: true
+  grounded: true
+  tags:
+  - scope
+  - provision
+  - equation
+  - parameters
+  - applicability
+  - example
+  - commentary
+  contexts:
+  - project: menegroth
+    synthesis_graph: sdpws-canon
+    schema: building-code-extraction
+    strict: true
+    grounded: true
+    tags:
+    - scope
+    - provision
+    - equation
+    - parameters
+    - applicability
+    - example
+    - commentary
+    structure: &id001
+      synthesis_graph: sdpws-canon
+      apex_id: 20260716-0600-sdpws-canon
+      attach_relation: input-to
+      apex_relation: component-of
+      dimension_nodes:
+        scope: 20260716-0600-sdpws-scope
+        provision: 20260716-0600-sdpws-provision
+        equation: 20260716-0600-sdpws-equation
+        parameters: 20260716-0600-sdpws-parameters
+        applicability: 20260716-0600-sdpws-applicability
+        example: 20260716-0600-sdpws-example
+        commentary: 20260716-0600-sdpws-commentary
+  structure: *id001

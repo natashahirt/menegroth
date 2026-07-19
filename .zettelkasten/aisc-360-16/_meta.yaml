@@ -37,17 +37,92 @@ extraction:
     - applicability
     - example
     - commentary
-    structure: &id001
+    structure:
       synthesis_graph: aisc-360-canon
       apex_id: 20260712-1906-aisc-360-canon
       attach_relation: input-to
       apex_relation: component-of
       dimension_nodes:
-        scope: 20260712-1906-aisc-360-scope
-        provision: 20260712-1906-aisc-360-provision
-        equation: 20260712-1906-aisc-360-equation
-        parameters: 20260712-1906-aisc-360-parameters
         applicability: 20260712-1906-aisc-360-applicability
-        example: 20260712-1906-aisc-360-example
         commentary: 20260712-1906-aisc-360-commentary
+        equation: 20260712-1906-aisc-360-equation
+        example: 20260712-1906-aisc-360-example
+        parameters: 20260712-1906-aisc-360-parameters
+        provision: 20260712-1906-aisc-360-provision
+        scope: 20260712-1906-aisc-360-scope
+  - project: menegroth
+    synthesis_graph: sdpws-canon
+    structure:
+      synthesis_graph: sdpws-canon
+      apex_id: 20260716-0600-sdpws-canon
+      attach_relation: input-to
+      apex_relation: component-of
+      dimension_nodes:
+        applicability: 20260716-0600-sdpws-applicability
+        commentary: 20260716-0600-sdpws-commentary
+        equation: 20260716-0600-sdpws-equation
+        example: 20260716-0600-sdpws-example
+        parameters: 20260716-0600-sdpws-parameters
+        provision: 20260716-0600-sdpws-provision
+        scope: 20260716-0600-sdpws-scope
+  - project: menegroth
+    synthesis_graph: apa-prg-320-canon
+    structure:
+      synthesis_graph: apa-prg-320-canon
+      apex_id: 20260716-0609-apa-prg-320-canon
+      attach_relation: input-to
+      apex_relation: component-of
+      dimension_nodes:
+        applicability: 20260716-0609-apa-prg-320-applicability
+        commentary: 20260716-0609-apa-prg-320-commentary
+        equation: 20260716-0609-apa-prg-320-equation
+        example: 20260716-0609-apa-prg-320-example
+        parameters: 20260716-0609-apa-prg-320-parameters
+        provision: 20260716-0609-apa-prg-320-provision
+        scope: 20260716-0609-apa-prg-320-scope
+  - project: menegroth
+    synthesis_graph: csa-a23-3-canon
+    structure:
+      synthesis_graph: csa-a23-3-canon
+      apex_id: 20260714-2204-csa-a23-3-canon
+      attach_relation: input-to
+      apex_relation: component-of
+      dimension_nodes:
+        applicability: 20260714-2204-csa-a23-3-applicability
+        commentary: 20260714-2204-csa-a23-3-commentary
+        equation: 20260714-2204-csa-a23-3-equation
+        example: 20260714-2204-csa-a23-3-example
+        parameters: 20260714-2204-csa-a23-3-parameters
+        provision: 20260714-2204-csa-a23-3-provision
+        scope: 20260714-2204-csa-a23-3-scope
+  - project: menegroth
+    synthesis_graph: asce-7-canon
+    structure:
+      synthesis_graph: asce-7-canon
+      apex_id: 20260715-2120-asce-7-canon
+      attach_relation: input-to
+      apex_relation: component-of
+      dimension_nodes:
+        applicability: 20260715-2120-asce-7-applicability
+        commentary: 20260715-2120-asce-7-commentary
+        equation: 20260715-2120-asce-7-equation
+        example: 20260715-2120-asce-7-example
+        parameters: 20260715-2120-asce-7-parameters
+        provision: 20260715-2120-asce-7-provision
+        scope: 20260715-2120-asce-7-scope
+  - project: menegroth
+    synthesis_graph: aci-318-canon
+    structure: &id001
+      synthesis_graph: aci-318-canon
+      apex_id: 20260713-0610-aci-318-canon
+      attach_relation: input-to
+      apex_relation: component-of
+      dimension_nodes:
+        applicability: 20260713-0610-aci-318-applicability
+        commentary: 20260713-0610-aci-318-commentary
+        equation: 20260713-0610-aci-318-equation
+        example: 20260713-0610-aci-318-example
+        parameters: 20260713-0610-aci-318-parameters
+        provision: 20260713-0610-aci-318-provision
+        scope: 20260713-0610-aci-318-scope
   structure: *id001

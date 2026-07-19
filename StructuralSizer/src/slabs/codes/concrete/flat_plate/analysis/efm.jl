@@ -1690,7 +1690,7 @@ function check_efm_applicability(struc, slab, columns; throw_on_failure::Bool = 
     # Two-way slab analysis assumes slenderness; spans < 4 ft behave more like
     # thick plates where shear governs over flexure
     if !isempty(columns)
-        c1_avg = sum(col.c1 for col in columns) / length(columns)
+        c1_avg = sum(isnothing(col.c1) ? 0.0u"inch" : col.c1 for col in columns) / length(columns)
         ln = clear_span(l1, c1_avg)
         
         ln_min = 4.0u"ft"
@@ -1734,7 +1734,7 @@ function check_efm_applicability(struc, slab, columns; throw_on_failure::Bool = 
     # c2/l2 should not be too large (approaches infinity in Kt formula)
     if l2_val > 0
         for (i, col) in enumerate(columns)
-            c2 = col.c2
+            c2 = isnothing(col.c2) ? 0.0u"inch" : col.c2
             c2_l2_ratio = ustrip(c2) / l2_val
             if c2_l2_ratio > 0.5
                 push!(violations, "§8.11.5: Column $i dimension c₂ = $(c2) exceeds 50% of panel width l₂ = $(l2); torsional stiffness formula invalid")

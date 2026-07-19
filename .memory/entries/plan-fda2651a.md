@@ -7,12 +7,12 @@ title: Phase F — DOE building-typology generators
 node_label: 'Phase F: DOE typologies'
 tags: roadmap,doe,typologies,generators,synthesizer,building-types,phase-f
 status: active
-open_threads: 0
+open_threads: 6
 success: 'null'
 files: ''
 session_id: sess-2595ad50
 created_at: '2026-07-14T01:33:14.211300+00:00'
-updated_at: '2026-07-14T01:33:14.211300+00:00'
+updated_at: '2026-07-15T02:27:53.123113+00:00'
 has_child_rationale: Assemble the analysis/system/material capabilities into runnable
   DOE reference-building generators
 ---

@@ -1,0 +1,6 @@
+coverage:
+  agent: skimmed
+  human: none
+description: Synthesis spine for 'asce-7' (project 'menegroth').
+name: asce-7-canon
+source: ''

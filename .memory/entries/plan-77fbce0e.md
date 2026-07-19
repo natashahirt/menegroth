@@ -7,12 +7,12 @@ title: Phase D — Members, walls, light framing & new material systems
 node_label: 'Phase D: Light framing & materials'
 tags: roadmap,timber,nds,cfs,aisi,masonry,tms,tilt-up,precast,pci,connections,phase-d
 status: active
-open_threads: 0
+open_threads: 8
 success: 'null'
 files: ''
 session_id: sess-2595ad50
 created_at: '2026-07-14T01:33:15.051035+00:00'
-updated_at: '2026-07-14T01:33:15.051035+00:00'
+updated_at: '2026-07-15T02:27:49.332297+00:00'
 has_child_rationale: New structural material systems and element types beyond steel/RC
   — timber, CFS, masonry, precast, connections
 ---

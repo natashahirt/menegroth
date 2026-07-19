@@ -545,7 +545,7 @@ println("Testing chat API…")
     @testset "System prompt — design mode with geometry gets opening analysis" begin
         prompt = _build_system_prompt("design", nothing, "", "", Dict{String, Any}("vertices" => []))
         @test occursin("OPENING ANALYSIS", prompt)
-        @test occursin("GEOMETRY READ", prompt)
+        @test occursin("BUILDING GEOMETRY", prompt)
     end
 
     @testset "System prompt — unknown mode returns fallback" begin

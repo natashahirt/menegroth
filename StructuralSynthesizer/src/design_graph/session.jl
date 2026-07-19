@@ -66,9 +66,9 @@ Prepare `struc` for incremental design and run the BASE design once.
 Mirrors [`prepare_engine`](@ref) + a full [`run_target!`](@ref) +
 [`capture_incremental_design`](@ref): it prepares the fixed baseline, seeds the
 memo by recomputing every node for `base_params`, and captures the resulting
-`BuildingDesign` (available as [`base_design`](@ref)). `struc` is mutated by
-`prepare!` exactly as `design_building` would; the engine works on independent
-snapshots thereafter.
+`BuildingDesign` (available as [`base_design`](@ref)). The caller's `struc` is
+left untouched — [`prepare_engine`](@ref) prepares an independent copy — so the
+same `struc` handle can be reused to build another session/engine cleanly.
 
 `target` defaults to the graph's [`terminal_node`](@ref) (a full design).
 `harmonize` mirrors the `design_building` post-pipeline uniform-column pass.
@@ -184,12 +184,14 @@ Throws `ArgumentError` if `overrides` change any prepare-affecting param
 fixed prepared baseline and requires a fresh `DesignSession` (see the scope note
 in scheduler.jl). Use [`requires_new_engine`](@ref) to check first.
 
-Also throws `ArgumentError` if the effective (merged) params carry an EFFECTIVE
-`member_group_overrides` entry: the variation graph never routes member sizing
-through `size_member_group!`, so the knob cannot be honored here and is refused
-rather than silently dropped (see
-[`_assert_member_group_overrides_unsupported`](@ref)). An all-unset override is a
-documented no-op and does not throw.
+Also runs the struc-aware [`_assert_member_group_overrides_unsupported`](@ref) on
+the effective (merged) params: `member_group_overrides` is a live `:members`-slice
+input (Phase B) that IS honored for steel beam groups sized via the batched
+`size_beams!` path, so an honorable steel-beam override passes and is threaded into
+sizing. UN-honorable effective targets — a column/strut group, a looser
+`deflection_limit`/`max_depth`, or an unsupported floor/beam configuration — are
+refused fail-loud AT THIS DOOR (using the prepared baseline `struc`) rather than
+silently dropped. An all-unset override is a documented no-op and does not throw.
 """
 function redesign(session::DesignSession;
                   harmonize::Bool = true,
@@ -204,14 +206,17 @@ function redesign(session::DesignSession;
         "for this variation."))
 
     variant = _variant_params(session; overrides...)
-    # Fail-loud (Run 4, Part 1): path-complete the member_group_overrides refusal
+    # Fail-loud (Run 4 / Phase B): path-complete the member_group_overrides refusal
     # to the variation door. The override can be injected here as a VARIATION kwarg
-    # on an already-built engine, which never re-enters run_pre_sizing_validation;
-    # the engine graph never routes member sizing through size_member_group!, so an
-    # effective override would yield an empty dirty frontier and a silently-UNCHANGED
-    # design. Refuse it on the EFFECTIVE (merged) params — identical posture to
-    # design_building. This does NOT reclassify the field as prepare-affecting.
-    _assert_member_group_overrides_unsupported(variant)
+    # on an already-built engine, which never re-enters run_pre_sizing_validation.
+    # `member_group_overrides` IS a live :members-slice input now (honored for steel
+    # beam groups via the batched size_beams! path), so use the STRUC-AWARE overload
+    # on the prepared baseline: honorable beam overrides pass and are threaded into
+    # sizing, while UN-honorable effective targets (column/strut group, looser
+    # deflection/max_depth, unsupported floor/beam config) are refused HERE rather
+    # than only at the later capture_design backstop. This does NOT reclassify the
+    # field as prepare-affecting.
+    _assert_member_group_overrides_unsupported(variant, session.engine.baseline)
     tgt = target === nothing ? terminal_node(session.engine.graph) : target
     run_target!(session.engine, variant; target = tgt,
                 framing_opts = session.framing_opts, tc = tc)

@@ -8,12 +8,12 @@ title: 'Cycle-7 critic FAIL: symmetric method=:nlp gap → cycle 8 inverts guard
 node_label: 'Cycle-7 critic FAIL: symmetric method=:nlp gap → c'
 tags: ''
 status: active
-open_threads: 0
+open_threads: 1
 success: 'null'
 files: ''
 session_id: sess-06cfb857
 created_at: '2026-07-18T01:43:48.165061+00:00'
-updated_at: '2026-07-18T01:43:48.165061+00:00'
+updated_at: '2026-07-18T02:14:59.022178+00:00'
 ---
 Cycle-7 re-review: reviewer PASS (351/351, all guard paths + numeric identity verified), critic FAIL.
 

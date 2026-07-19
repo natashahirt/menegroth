@@ -7,12 +7,12 @@ title: 'Phase: Corpus → Zettelkasten grounded extraction (pilots)'
 node_label: 'Phase: Corpus → ZK extraction'
 tags: zettelkasten,corpus,extraction,pilot,aci,aisc
 status: active
-open_threads: 0
+open_threads: 4
 success: 'null'
 files: ''
 session_id: sess-2a3b3eba
 created_at: '2026-07-13T12:15:15.689497+00:00'
-updated_at: '2026-07-13T12:15:15.689497+00:00'
+updated_at: '2026-07-14T10:04:32.232409+00:00'
 has_child_rationale: Distinct workstream materializing corpus sources into grounded
   ZK graphs on the canon spines
 ---

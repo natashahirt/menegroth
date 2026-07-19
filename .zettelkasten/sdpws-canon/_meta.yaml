@@ -1,0 +1,6 @@
+coverage:
+  agent: skimmed
+  human: none
+description: Synthesis spine for 'sdpws' (project 'menegroth').
+name: sdpws-canon
+source: ''

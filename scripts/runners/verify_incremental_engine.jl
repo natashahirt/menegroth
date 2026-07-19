@@ -200,6 +200,12 @@ end
 const CHECKS = Tuple{String, Bool}[]
 record!(name, ok) = (push!(CHECKS, (name, ok)); @printf("  %s  %s\n", ok ? "✓" : "✗", name))
 
+# Fine per-slab topology: `:slab_sizing` is decomposed into one `:slab_sizing_s{idx}`
+# node per slab. Enumerate the actual slab-node keys from the graph so the
+# recomputed/restored/frontier assertions are independent of the slab count.
+slab_node_keys(g) = NodeKey[k for k in SS.topological_order(g) if SS.is_slab_node_key(k)]
+slab_stage_set(g) = Set(slab_node_keys(g))
+
 function main()
     println("="^70)
     println("Incremental Engine verify — engine vs design_building")
@@ -221,8 +227,9 @@ function main()
     record!("full run matches design_building (mismatch: $badk)", ok_eq)
     ok_sig, badsig = same_signature(design_signature(ref), design_signature(inc))
     record!("full run comprehensive per-member signature matches (mismatch: $badsig)", ok_sig)
-    record!("first run recomputes all 3 nodes (got $(recomputed))",
-            Set(recomputed) == Set([NODE_SLAB_SIZING, NODE_MEMBERS, NODE_FOUNDATIONS]))
+    expected_all = Set(slab_node_keys(engine.graph)) ∪ Set([NODE_MEMBERS, NODE_FOUNDATIONS])
+    record!("first run recomputes all sizing nodes (got $(recomputed))",
+            Set(recomputed) == expected_all)
     record!("first run restores nothing", isempty(restored))
 
     # ── 2. Idempotent reuse ────────────────────────────────────────────────
@@ -231,8 +238,8 @@ function main()
     inc2 = capture_incremental_design(engine, params)
     ok2, badk2 = same_invariants(ref_inv, invariants(inc2))
     record!("idempotent re-run recomputes nothing (got $(rc2))", isempty(rc2))
-    record!("idempotent re-run restores all 3 nodes",
-            Set(rs2) == Set([NODE_SLAB_SIZING, NODE_MEMBERS, NODE_FOUNDATIONS]))
+    record!("idempotent re-run restores all sizing nodes",
+            Set(rs2) == expected_all)
     record!("idempotent re-run design unchanged (mismatch: $badk2)", ok2)
 
     # ── 3. Selective recompute + early cutoff (foundation-only change) ──────
@@ -244,8 +251,8 @@ function main()
     rc3, rs3 = run_target!(engine, params_soft)
     inc3 = capture_incremental_design(engine, params_soft)
     record!("only :foundations recomputed (got $(rc3))", rc3 == [NODE_FOUNDATIONS])
-    record!(":slab_sizing + :members restored (early cutoff, got $(rs3))",
-            Set(rs3) == Set([NODE_SLAB_SIZING, NODE_MEMBERS]))
+    record!("slab nodes + :members restored (early cutoff, got $(rs3))",
+            Set(rs3) == (Set(slab_node_keys(engine.graph)) ∪ Set([NODE_MEMBERS])))
 
     # Redesigned result must match a fresh design_building on the same params.
     struc_ref3, _ = build_building(soil = SR.soft_clay)
@@ -268,7 +275,7 @@ function main()
             fr_fdn == [NODE_FOUNDATIONS])
     fr_load = dirty_frontier(engine.graph, [:load_combinations])
     record!("load_combinations → frontier reaches whole chain (got $(fr_load))",
-            Set(fr_load) == Set([NODE_SLAB_SIZING, NODE_MEMBERS, NODE_FOUNDATIONS]))
+            Set(fr_load) == (Set(slab_node_keys(engine.graph)) ∪ Set([NODE_MEMBERS, NODE_FOUNDATIONS])))
     fr_none = dirty_frontier(engine.graph, [:name, :description, :display_units])
     record!("cosmetic params → empty frontier (got $(fr_none))", isempty(fr_none))
 

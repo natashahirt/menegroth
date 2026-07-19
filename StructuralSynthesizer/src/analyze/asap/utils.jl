@@ -30,8 +30,14 @@ Uses TributaryLoads for accurate load distribution based on tributary polygons.
 - `params::DesignParameters`: Design parameters (load combinations, frame defaults, etc.)
 - `diaphragms::Union{Symbol, Nothing}=nothing`: Override diaphragm mode from params
   - `:none` — No diaphragm modeling
-  - `:rigid` — Rigid diaphragm (very stiff shell elements)
-  - `:shell` — Semi-rigid shell elements from slab geometry
+  - `:rigid` — Truly rigid diaphragm via master/slave DOF reduction (Phase 9b).
+    A single master node is elected per story and every other frame node on
+    that story is `Asap.RigidLink`-ed to it, tying `(u_x, u_y, θ_z)` and
+    leaving `(u_z, θ_x, θ_y)` free. Kinematic constraint is exact (Bathe §4.4;
+    see `external/Asap/src/Elements/rigidlink.jl`) and keeps `K` SPD, unlike
+    the earlier stiff-shell workaround with a 1e15 Pa modulus.
+  - `:shell` — Semi-rigid shell elements from slab geometry (Phase 9a: shells
+    now join the assembled `K` via the 4-argument `Asap.Model` constructor).
   - `nothing` — Use `params.diaphragm_mode` (default)
 - `shell_props::Union{Nothing, NamedTuple}=nothing`: Custom shell properties
   - `E`: Young's modulus (overrides `params.diaphragm_E`)
@@ -136,16 +142,31 @@ function to_asap!(struc::BuildingStructure{T, A, P};
         return Asap.Element(nodes[v1], nodes[v2], default_section; release=release, eccentricity=ecc)
     end
     
-    # 3. Shell Diaphragm elements (for both :rigid and :shell)
+    # 3. Diaphragm construction (Phase 9).
+    #  :shell → semi-rigid: real slab shells contribute to K (Phase 9a).
+    #  :rigid → truly rigid: RigidLink master/slave constraints tie every
+    #           frame node on a story to a master node (Bathe §4.4 / Cook §6.3
+    #           kinematic reduction, see external/Asap/src/Elements/rigidlink.jl).
+    #           This supersedes the earlier stiff-shell hack for :rigid; the
+    #           kinematic tie is exact and keeps K SPD without a 1e15 Pa
+    #           ill-conditioning risk. Gravity load is unaffected (u_z, θ_x,
+    #           θ_y remain free on tied slaves), so `load_routing=:auto`
+    #           correctly falls back to per-cell TributaryLoads here.
+    #  :none  → neither shells nor links.
     shell_elements = Asap.ShellElement[]
-    
-    if diaphragm_mode in (:rigid, :shell) && !isempty(struc.slabs)
-        # Build shell_props from params if not provided
-        effective_props = _build_shell_props(params, diaphragm_mode, shell_props)
-        shell_elements = _create_shell_diaphragms(struc, nodes; 
-                                                   mode=diaphragm_mode, props=effective_props)
-        @debug "Created diaphragm shells" mode=diaphragm_mode n_shells=length(shell_elements)
+    rigid_links = Asap.RigidLink[]
+
+    if diaphragm_mode == :shell && !isempty(struc.slabs)
+        effective_props = _build_shell_props(params, :shell, shell_props)
+        shell_elements = _create_shell_diaphragms(struc, nodes;
+                                                   mode=:shell, props=effective_props)
+        @debug "Created shell diaphragm" n_shells=length(shell_elements)
+    elseif diaphragm_mode == :rigid && !isempty(struc.slabs)
+        rigid_links = _build_rigid_diaphragm_links(struc, nodes)
+        @debug "Created rigid diaphragm links" n_links=length(rigid_links)
     end
+
+    struc.asap_rigid_links = rigid_links
     
     # 4. Compute tributaries if not done
     isempty(struc.cell_groups) && build_cell_groups!(struc)
@@ -202,13 +223,29 @@ function to_asap!(struc::BuildingStructure{T, A, P};
         end
     end
 
-    # 7. Build model (frame elements only for now - shells contribute to K separately)
-    struc.asap_model = Asap.Model(nodes, frame_elements, loads)
-    
-    @debug "Converted to Asap.Model" nodes=length(nodes) frame_elements=length(frame_elements) shell_elements=length(shell_elements) loads=length(loads)
+    # 7. Build unified Asap.Model (Phase 9a — diaphragm shells now contribute
+    # to the assembled stiffness). The 4-argument constructor merges shell
+    # mesh nodes into the node list via _merge_shell_nodes (which reuses the
+    # Phase 8 interior_nodes by objectid, so joist landings and shell mesh
+    # DOFs are already shared). Empty shell_elements ⇒ Model dispatches to the
+    # frame-only path (see external/Asap/src/Model/model.jl:296-303,
+    # Model(nodes, frame_elements, loads) = Model(nodes, frame_elements,
+    # ShellTri3[], loads)), so the diaphragms=:none default stays byte-
+    # identical. This mirrors `build_analysis_model!` in this same file.
+    struc.asap_model = Asap.Model(nodes, frame_elements, shell_elements, loads)
+
+    @debug "Converted to Asap.Model" nodes=length(nodes) frame_elements=length(frame_elements) shell_elements=length(shell_elements) loads=length(loads) rigid_links=length(rigid_links)
 
     Asap.process!(struc.asap_model)
-    Asap.solve!(struc.asap_model)
+    # Phase 9b — rigid diaphragms are applied via master/slave DOF reduction
+    # (Bathe §4.4; see external/Asap/src/Elements/rigidlink.jl §solve!). Empty
+    # links dispatch through the standard solve path, so the frame-only /
+    # shell-only defaults are byte-identical.
+    if isempty(struc.asap_rigid_links)
+        Asap.solve!(struc.asap_model)
+    else
+        Asap.solve!(struc.asap_model, struc.asap_rigid_links; reprocess=false)
+    end
 
     return struc.asap_model
 end
@@ -281,6 +318,79 @@ function _create_shell_diaphragms(struc::BuildingStructure, nodes::Vector{Asap.N
     end
     
     return shells
+end
+
+"""
+    _build_rigid_diaphragm_links(struc, nodes) -> Vector{Asap.RigidLink}
+
+Build the master/slave `Asap.RigidLink` set that enforces a truly rigid
+diaphragm at every story (Phase 9b). One master node is elected per story
+(lowest skeleton-vertex index for determinism); every other frame node on
+that story is rigid-linked to the master.
+
+The tie is applied only to the in-plane rigid-body DOFs of the diaphragm:
+`(u_x, u_y, θ_z)`. Out-of-plane DOFs `(u_z, θ_x, θ_y)` remain free so gravity
+bending behavior at each node is untouched — this is the standard rigid-
+diaphragm kinematic constraint (Bathe *Finite Element Procedures* §4.4; Cook
+*Concepts and Applications of Finite Element Analysis* §6.3). `Asap.RigidLink`
+release order is `(u_x, u_y, u_z, θ_x, θ_y, θ_z)` with `true = released`.
+
+Story membership is read from `struc.skeleton.stories[k].vertices`
+(rebuilt by `rebuild_stories!`). Stories with fewer than two frame nodes
+produce no links — a single-node story has no rigid tie to enforce.
+
+Slave DOFs that are already fixed at their `Asap.Node` (i.e. a support at
+that story) are silently skipped by `_build_rigidlink_reduction` with a
+warning; this is by design (`external/Asap/src/Elements/rigidlink.jl:132`).
+Callers who want the tie to have observable effect must ensure at least
+some story vertices are not supports (typical for stories at column tops
+above a supported ground level).
+"""
+function _build_rigid_diaphragm_links(struc::BuildingStructure,
+                                      nodes::Vector{Asap.Node})
+    links = Asap.RigidLink[]
+    skel = struc.skeleton
+    # In-plane rigid-body DOFs targeted by the diaphragm tie (Bathe §4.4;
+    # Cook §6.3). Order in `Asap.RigidLink.release`:
+    # (u_x, u_y, u_z, θ_x, θ_y, θ_z). `release[i] = true` = DOF stays free.
+    # The diaphragm-plane DOFs are indices 1 (u_x), 2 (u_y), 6 (θ_z);
+    # gravity-plane DOFs 3, 4, 5 always stay free so out-of-plane bending
+    # at each node is untouched.
+    tied_indices = (1, 2, 6)
+    is_free_inplane(v_idx) =
+        (1 <= v_idx <= length(nodes)) &&
+        length(nodes[v_idx].dof) >= 2 &&
+        nodes[v_idx].dof[1] && nodes[v_idx].dof[2]
+
+    for (_, story) in skel.stories
+        # A tie is only meaningful between vertices whose in-plane
+        # translation DOFs are actually free. Filtering out supports here
+        # also suppresses the noisy "slave DOF is a support" warnings from
+        # `_build_rigidlink_reduction` (external/Asap/src/Elements/rigidlink.jl:132).
+        free_verts = sort([v for v in story.vertices if is_free_inplane(v)])
+        length(free_verts) >= 2 || continue
+        master_idx = first(free_verts)
+        master = nodes[master_idx]
+        for slave_idx in Iterators.drop(free_verts, 1)
+            slave = nodes[slave_idx]
+            slave === master && continue    # defensive; never true after filter
+            # Per-link release: tie a target DOF only when it is free on BOTH
+            # master AND slave. If either side has that DOF fixed at the
+            # node level (e.g. the current `_create_offset_nodes` convention
+            # pins rotational DOFs on non-support nodes), release the tie
+            # rather than provoking a skip-warning. u_z / θ_x / θ_y are
+            # always released — they carry gravity/bending.
+            release = ntuple(6) do i
+                (i in tied_indices) || return true       # gravity/bending
+                # Tie only if both endpoints have this DOF free.
+                (master.dof[i] && slave.dof[i]) ? false : true
+            end
+            push!(links, Asap.RigidLink(master, slave;
+                                        release = release,
+                                        id = :rigid_diaphragm))
+        end
+    end
+    return links
 end
 
 """
@@ -482,9 +592,15 @@ function sync_asap!(struc::BuildingStructure;
         Asap.process!(struc.asap_model)
     end
     
-    # 4. Solve — single or multi-case
+    # 4. Solve — single or multi-case (Phase 9b: rigid diaphragm links, if any,
+    # were built by `to_asap!` and are retained on `struc.asap_rigid_links`;
+    # the reprocess above already refreshed K, so `reprocess=false` here.
+    # Pattern loading + rigid diaphragm co-existence is out of Phase 9b scope
+    # and will be revisited in Phase 11).
     if use_patterns && _should_run_patterns(struc, params)
         _solve_with_patterns!(struc, params)
+    elseif !isempty(struc.asap_rigid_links)
+        Asap.solve!(struc.asap_model, struc.asap_rigid_links; reprocess=false)
     else
         Asap.solve!(struc.asap_model)
     end
@@ -890,11 +1006,184 @@ end
 # Diaphragm Shell Creation (uses Asap.Shell meshing)
 # =============================================================================
 
+# Phase 8 (plan joists-roles-materials) — the slab FEA mesh must respect the
+# interior framing (joist) lines. Each auto-generated `role===:joist` Beam is
+# projected to an interior polyline that Asap's constrained-Delaunay mesher
+# (`Asap.Shell(...; interior_constrained_lines=...)`, external/Asap Phase A3)
+# turns into aligned triangle edges, and the joist's landing `Node` objects are
+# handed back as `interior_nodes` so the shell mesh and the frame `Element`s
+# share the exact same `Node` (true DOF sharing after `process!`).
+
+"""One joist projected into a slab's plane for the diaphragm mesher.
+
+- `polyline`  : ordered `(x, y)` vertices (metres) → `interior_constrained_lines`.
+- `node_objs` : the actual frame `Asap.Node`s at the joist's landing/interior
+  vertices → `interior_nodes` (same objects, reused, for DOF sharing).
+- `refine_nodes` : throwaway sample `Node`s along the span → `refinement_targets`.
+- `midpoint`  : `(x, y)` at half arclength, used to assign the joist to a face.
+"""
+struct _DiaphragmJoistLine
+    polyline::Vector{NTuple{2, Float64}}
+    node_objs::Vector{Asap.Node}
+    refine_nodes::Vector{Asap.Node}
+    midpoint::NTuple{2, Float64}
+end
+
+"""Ordered skeleton-vertex chain of a (possibly multi-segment) joist `beam`.
+
+Walks the beam's `segment_indices` → `edge_idx` → `skel.edge_indices` pairs into
+a single path. Single-segment joists (the common case after Phase 5's host
+`edge_chains` subdivision) return `[v1, v2]` directly."""
+function _joist_vertex_chain(struc::BuildingStructure, beam::Beam)
+    skel = struc.skeleton
+    n_edges = length(skel.edge_indices)
+    pairs = Tuple{Int, Int}[]
+    for si in segment_indices(beam)
+        (1 <= si <= length(struc.segments)) || continue
+        e = struc.segments[si].edge_idx
+        (1 <= e <= n_edges) || continue
+        push!(pairs, skel.edge_indices[e])
+    end
+    isempty(pairs) && return Int[]
+    length(pairs) == 1 && return Int[pairs[1][1], pairs[1][2]]
+
+    adj = Dict{Int, Vector{Int}}()
+    for (a, b) in pairs
+        push!(get!(Vector{Int}, adj, a), b)
+        push!(get!(Vector{Int}, adj, b), a)
+    end
+    endpoints = sort!(Int[v for (v, ns) in adj if length(ns) == 1])
+    start = isempty(endpoints) ? minimum(keys(adj)) : first(endpoints)
+    ordered = Int[start]
+    prev = 0
+    cur = start
+    for _ in 1:length(pairs)
+        nxt = 0
+        for cand in adj[cur]
+            if cand != prev && !(cand in ordered)
+                nxt = cand
+                break
+            end
+        end
+        nxt == 0 && break
+        push!(ordered, nxt)
+        prev = cur
+        cur = nxt
+    end
+    return ordered
+end
+
+"""`(x, y)` at fractional arclength `f ∈ [0, 1]` along `polyline` (metres)."""
+function _point_on_polyline(polyline::Vector{NTuple{2, Float64}}, f::Float64)
+    n = length(polyline)
+    n == 1 && return polyline[1]
+    seglens = Float64[hypot(polyline[i + 1][1] - polyline[i][1],
+                            polyline[i + 1][2] - polyline[i][2]) for i in 1:(n - 1)]
+    total = sum(seglens)
+    total <= 0 && return polyline[1]
+    s = clamp(f, 0.0, 1.0) * total
+    acc = 0.0
+    for i in 1:(n - 1)
+        if acc + seglens[i] >= s || i == n - 1
+            r = seglens[i] > 0 ? clamp((s - acc) / seglens[i], 0.0, 1.0) : 0.0
+            return (polyline[i][1] + r * (polyline[i + 1][1] - polyline[i][1]),
+                    polyline[i][2] + r * (polyline[i + 1][2] - polyline[i][2]))
+        end
+        acc += seglens[i]
+    end
+    return polyline[end]
+end
+
+"""Standard even–odd ray-cast: is `(px, py)` strictly inside polygon `poly`?
+
+Used only on a joist's span midpoint (guaranteed interior to its cell), so the
+on-edge degeneracy of the ray-cast test never bites here."""
+function _point_in_polygon_xy(px::Float64, py::Float64, poly::Vector{NTuple{2, Float64}})
+    inside = false
+    n = length(poly)
+    j = n
+    for i in 1:n
+        xi, yi = poly[i]
+        xj, yj = poly[j]
+        if ((yi > py) != (yj > py)) &&
+           (px < (xj - xi) * (py - yi) / (yj - yi) + xi)
+            inside = !inside
+        end
+        j = i
+    end
+    return inside
+end
+
+"""De-duplicate `Node`s by object identity (joists share landing `Node`s)."""
+function _unique_nodes(ns::Vector{Asap.Node})
+    seen = Base.IdSet{Asap.Node}()
+    out = Asap.Node[]
+    for nd in ns
+        if !(nd in seen)
+            push!(seen, nd)
+            push!(out, nd)
+        end
+    end
+    return out
+end
+
+"""Collect this slab's joist framing lines as [`_DiaphragmJoistLine`](@ref)s.
+
+Mirrors the Phase 7 `framing_levels → member_groups → role===:joist` traversal
+in [`_create_shell_area_loads!`](@ref) (kept byte-for-byte consistent so the
+mesh's interior lines and the `AreaLoad.interior_beams` describe the *same*
+joists). Polyline vertices use the offset `Asap.Node` positions (not raw
+skeleton coords) so the constrained edges coincide exactly with the embedded
+`interior_nodes`."""
+function _collect_slab_joist_lines(struc::BuildingStructure, slab::Slab,
+                                   nodes::Vector{Asap.Node})
+    lines = _DiaphragmJoistLine[]
+    for fl in slab.framing_levels
+        fl.group_id === nothing && continue
+        grp = get(struc.member_groups, fl.group_id, nothing)
+        grp === nothing && continue
+        for mi in grp.member_indices
+            (mi >= 1 && mi <= length(struc.beams)) || continue
+            beam = struc.beams[mi]
+            beam.role === :joist || continue
+            vchain = _joist_vertex_chain(struc, beam)
+            length(vchain) >= 2 || continue
+            all(v -> 1 <= v <= length(nodes), vchain) || continue
+
+            pts = NTuple{2, Float64}[(ustrip(u"m", nodes[v].position[1]),
+                                      ustrip(u"m", nodes[v].position[2])) for v in vchain]
+            node_objs = Asap.Node[nodes[v] for v in vchain]
+            z = ustrip(u"m", nodes[first(vchain)].position[3])
+
+            # ENGINEERING JUDGMENT (FEA discretisation, not a code provision):
+            # 3 interior samples per joist span (fractional arclength 1/4, 1/2,
+            # 3/4) anchor the mesh grading along the constrained edge without
+            # over-refining. Any point in [3, 5] is defensible; 3 is the low end
+            # of the requested range because the diaphragm shells are tributary
+            # geometry, not a stress-recovery mesh.
+            refine_nodes = Asap.Node[
+                Asap.Node([_point_on_polyline(pts, k / 4)[1] * u"m",
+                           _point_on_polyline(pts, k / 4)[2] * u"m",
+                           z * u"m"], :free) for k in 1:3]
+
+            push!(lines, _DiaphragmJoistLine(pts, node_objs, refine_nodes,
+                                             _point_on_polyline(pts, 0.5)))
+        end
+    end
+    return lines
+end
+
 """
     create_slab_diaphragm_shells(struc, slab, nodes; E, ν, t_factor) -> Vector{<:Asap.ShellElement}
 
 Create shell elements for a slab's diaphragm action from its cell faces.
 Uses Asap.Shell() for automatic triangulation.
+
+Phase 8: when the slab carries auto-generated `role===:joist` framing (Phase 5),
+each joist is projected into the slab plane and passed to the mesher as an
+`interior_constrained_lines` polyline (so the triangulation has aligned edges
+along every joist) plus `interior_nodes` (the actual frame `Node`s reused at the
+landings, giving true DOF sharing). Faces with no joists mesh exactly as before.
 
 # Arguments
 - `struc`: BuildingStructure containing the slab
@@ -931,7 +1220,11 @@ function create_slab_diaphragm_shells(struc::BuildingStructure, slab::Slab, node
     
     # Collect face indices for this slab
     face_indices = [struc.cells[ci].face_idx for ci in slab.cell_indices]
-    
+
+    # Phase 8: joist framing lines this slab's diaphragm mesh must respect.
+    # Empty ⇒ every face meshes exactly as before (no behavior change).
+    joist_lines = _collect_slab_joist_lines(struc, slab, nodes)
+
     # Create shells from face meshes using Asap.Shell
     shells = Asap.ShellElement[]
     section = Asap.ShellSection(t, E_pa, ν; ρ=0.0u"kg/m^3")  # zero mass for diaphragm
@@ -939,10 +1232,50 @@ function create_slab_diaphragm_shells(struc::BuildingStructure, slab::Slab, node
     for face_idx in face_indices
         vert_indices = skel.face_vertex_indices[face_idx]
         corners = tuple([nodes[vi] for vi in vert_indices]...)
-        
-        # Use Asap's Shell() for automatic triangulation (n=2 for coarse mesh)
-        face_shells = Asap.Shell(corners, section; n=2, id=:diaphragm,
-                                 edge_support_type=:free, interior_support_type=:free)
+
+        # Assign each joist to the face whose polygon contains its span midpoint
+        # (a joist spans a single cell, so its midpoint is strictly interior).
+        face_poly = NTuple{2, Float64}[(ustrip(u"m", nodes[vi].position[1]),
+                                        ustrip(u"m", nodes[vi].position[2]))
+                                       for vi in vert_indices]
+        face_lines = _DiaphragmJoistLine[jl for jl in joist_lines
+                       if _point_in_polygon_xy(jl.midpoint[1], jl.midpoint[2], face_poly)]
+
+        if isempty(face_lines)
+            # Use Asap's Shell() for automatic triangulation (n=2 for coarse mesh)
+            face_shells = Asap.Shell(corners, section; n=2, id=:diaphragm,
+                                     edge_support_type=:free, interior_support_type=:free)
+        else
+            # Joist lines present → constrained-Delaunay mesh that respects them.
+            constrained = Vector{NTuple{2, Float64}}[jl.polyline for jl in face_lines]
+            # Reuse the exact frame Node objects at the joist landings (DOF share);
+            # dedup because adjacent joists share a landing Node.
+            interior_nodes = _unique_nodes(reduce(vcat, (jl.node_objs for jl in face_lines);
+                                                  init = Asap.Node[]))
+            refine_targets = reduce(vcat, (jl.refine_nodes for jl in face_lines);
+                                    init = Asap.Node[])
+
+            # ENGINEERING JUDGMENT (FEA discretisation, not a code provision):
+            # refine near the joist lines so triangle quality along the
+            # constrained edges stays acceptable. Coarse baseline is kept at the
+            # historical n=2; near-joist target edge length = (short face side)/6
+            # (~6 elements across the short span near a joist). Grading, not a
+            # structural factor — no code clause applies.
+            xs = Float64[p[1] for p in face_poly]
+            ys = Float64[p[2] for p in face_poly]
+            h_near = min(maximum(xs) - minimum(xs), maximum(ys) - minimum(ys)) / 6
+
+            # interior_support_type=:free — the constrained lines impose NO
+            # boundary condition; the joist Element itself carries the stiffness,
+            # the shell just shares its DOFs (Asap Shell docstring, Phase A3).
+            face_shells = Asap.Shell(corners, section; n=2, id=:diaphragm,
+                                     edge_support_type=:free,
+                                     interior_support_type=:free,
+                                     interior_nodes=interior_nodes,
+                                     interior_constrained_lines=constrained,
+                                     refinement_edge_length=h_near * u"m",
+                                     refinement_targets=refine_targets)
+        end
         append!(shells, face_shells)
     end
     
@@ -1960,9 +2293,8 @@ function add_coating_loads!(struc::BuildingStructure, params::DesignParameters;
         isnothing(sec) && continue
         !(sec isa StructuralSizer.ISymmSection) && continue
 
-        # W/D calculation: choose perimeter based on exposure
         # Beams: 3-sided (PA), columns/struts: 4-sided (PB)
-        perimeter = member_edge_group == :beams ? sec.PA : sec.PB
+        perimeter = (member_edge_group === :beams || member_edge_group in BEAM_GROUP_SYMBOLS) ? sec.PA : sec.PB
         perimeter_in = ustrip(u"inch", perimeter)
 
         mat = sec.material

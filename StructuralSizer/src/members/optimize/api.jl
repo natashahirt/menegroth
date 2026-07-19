@@ -47,6 +47,13 @@ Size columns using the specified options. Accepts any consistent Unitful quantit
 
 # Keyword Arguments
 - `Muy`: Factored moments about y-axis (default: zeros with same unit as Mux)
+- `catalog`: Optional per-call section catalog override (default `nothing`).
+  When supplied, it takes precedence over `opts.custom_catalog` and the
+  material's standard catalog for this call only; omitting it reproduces the
+  prior behaviour exactly. This is the hook `MemberGroup.catalog_override`
+  (Phase 6) routes through so a single member group can be restricted to a
+  specific catalog without forking the sizing functions. Ignored on the NLP
+  (`sizing_strategy = :nlp`) path, which has no discrete catalog.
 
 # Returns
 Named tuple with:
@@ -93,6 +100,8 @@ function size_columns(
     δ_max_vec::Union{Nothing, Vector} = nothing,
     δ_max_total_vec::Union{Nothing, Vector} = nothing,
     I_ref_vec::Union{Nothing, Vector} = nothing,
+    catalog::Union{Nothing, AbstractVector} = nothing,
+    feasible::Union{Nothing, Vector{Vector{Int}}} = nothing,
     mip_gap::Real = 1e-4,
     output_flag::Integer = 0,
     tc::Union{Nothing, TraceCollector} = nothing,
@@ -116,10 +125,15 @@ function size_columns(
         return _size_steel_columns_nlp(Pu, Mux, steel_geoms, opts; Muy=Muy)
     end
     emit!(tc, :sizing, "size_columns", "", :decision; path="discrete_mip")
-    
-    cat = isnothing(opts.custom_catalog) ? 
-        steel_column_catalog(opts.section_type, opts.catalog) : 
-        opts.custom_catalog
+
+    # Catalog precedence (Phase 6): explicit `catalog` kwarg (per-group override
+    # routed from `MemberGroup.catalog_override`) > `opts.custom_catalog` >
+    # material-default `steel_column_catalog`. Passing `catalog` silently
+    # reproduces prior behaviour when omitted (`nothing`).
+    cat = !isnothing(catalog) ? catalog :
+        (isnothing(opts.custom_catalog) ?
+            steel_column_catalog(opts.section_type, opts.catalog) :
+            opts.custom_catalog)
     
     Pu_N = [to_newtons(p) for p in Pu]
     Mux_Nm = [to_newton_meters(m) for m in Mux]
@@ -139,7 +153,10 @@ function size_columns(
                             deflection_limit = _deflection_limit(opts),
                             total_deflection_limit = _total_deflection_limit(opts))
     
-    # Optimize — multi-material if materials vector is provided
+    # Optimize — multi-material if materials vector is provided.
+    # `feasible` (per-group candidate restriction) is forwarded unchanged; it is
+    # `nothing` for every existing caller (byte-identical) and only set by the
+    # batched StructuralSynthesizer member_group_overrides path.
     if !isnothing(opts.materials)
         result = optimize_discrete(
             checker, demands, steel_geoms, cat, opts.materials;
@@ -149,6 +166,7 @@ function size_columns(
             mip_gap = mip_gap,
             output_flag = output_flag,
             time_limit_sec = opts.time_limit_sec,
+            feasible = feasible,
             tc = tc,
         )
     else
@@ -160,6 +178,7 @@ function size_columns(
             mip_gap = mip_gap,
             output_flag = output_flag,
             time_limit_sec = opts.time_limit_sec,
+            feasible = feasible,
             tc = tc,
         )
     end
@@ -187,6 +206,7 @@ function size_columns(
     geometries::Vector,
     opts::ConcreteColumnOptions;
     Muy::Vector = zeros_like(Mux),
+    catalog::Union{Nothing, AbstractVector} = nothing,
     mip_gap::Real = 1e-4,
     output_flag::Integer = 0,
     cache::Union{Nothing, AbstractCapacityCache} = nothing,
@@ -207,6 +227,7 @@ function size_columns(
                    βdns = opts.βdns) for i in 1:n]
 
     return size_columns(demands, geometries, opts;
+                        catalog=catalog,
                         mip_gap=mip_gap, output_flag=output_flag,
                         cache=cache, tc=tc)
 end
@@ -226,6 +247,7 @@ function size_columns(
     demands::Vector{<:RCColumnDemand},
     geometries::Vector,
     opts::ConcreteColumnOptions;
+    catalog::Union{Nothing, AbstractVector} = nothing,
     mip_gap::Real = 1e-4,
     output_flag::Integer = 0,
     cache::Union{Nothing, AbstractCapacityCache} = nothing,
@@ -261,9 +283,12 @@ function size_columns(
 
     conc_geoms = [to_concrete_geometry(g) for g in geometries]
 
-    cat = isnothing(opts.custom_catalog) ?
-        rc_column_catalog(opts.section_shape, opts.catalog) :
-        opts.custom_catalog
+    # Catalog precedence (Phase 6): explicit `catalog` kwarg (per-group
+    # override) > `opts.custom_catalog` > material-default `rc_column_catalog`.
+    cat = !isnothing(catalog) ? catalog :
+        (isnothing(opts.custom_catalog) ?
+            rc_column_catalog(opts.section_shape, opts.catalog) :
+            opts.custom_catalog)
 
     checker = ACIColumnChecker(;
         include_slenderness = opts.include_slenderness,
@@ -500,6 +525,9 @@ ACI 318-11 flexure and shear requirements.
 - `Tu`: Vector of factored torsional moments (default: zeros, kip·in or Unitful).
   When > threshold torsion, the MIP checker checks cross-section adequacy
   per ACI 318-11 §11.5.3.1.
+- `catalog`: Optional per-call catalog override (default `nothing`); takes
+  precedence over `opts.custom_catalog` and the standard `rc_beam_catalog`.
+  This is the hook `MemberGroup.catalog_override` (Phase 6) routes through.
 - `mip_gap`: MIP optimality gap (default 1e-4)
 - `output_flag`: Solver verbosity (default 0)
 
@@ -535,6 +563,7 @@ function size_beams(
     opts::ConcreteBeamOptions;
     Nu::Vector = zeros_like(Vu),
     Tu::Vector = Float64[],
+    catalog::Union{Nothing, AbstractVector} = nothing,
     mip_gap::Real = 1e-4,
     output_flag::Integer = 0,
     tc::Union{Nothing, TraceCollector} = nothing,
@@ -552,10 +581,12 @@ function size_beams(
     # Convert geometries
     conc_geoms = [to_concrete_geometry(g) for g in geometries]
 
-    # Build catalog
-    cat = isnothing(opts.custom_catalog) ?
-        rc_beam_catalog(opts.catalog) :
-        opts.custom_catalog
+    # Build catalog — Phase 6 precedence: explicit `catalog` kwarg (per-group
+    # override) > `opts.custom_catalog` > material-default `rc_beam_catalog`.
+    cat = !isnothing(catalog) ? catalog :
+        (isnothing(opts.custom_catalog) ?
+            rc_beam_catalog(opts.catalog) :
+            opts.custom_catalog)
 
     # Convert forces / moments to kip / kip·ft
     Mu_kipft = [to_kipft(m) for m in Mu]
@@ -645,6 +676,12 @@ the checker requiring δ_max_LL > 0 / δ_max_total > 0).
 - `δ_max_vec`: Max LL deflection from analysis for each beam (length unit, e.g. m or inch).
 - `δ_max_total_vec`: Max DL+LL service deflection for each beam (length unit).
 - `I_ref_vec`: Reference Ix used in the analysis for each beam (length⁴ unit).
+- `catalog`: Optional per-call catalog override (default `nothing`), forwarded to
+  `size_columns`; the hook `MemberGroup.catalog_override` (Phase 6) routes through.
+- `feasible`: Optional per-group vector of ALLOWED catalog indices, forwarded to
+  `optimize_discrete` and INTERSECTED with the internal capacity screening. Used
+  by the batched StructuralSynthesizer `member_group_overrides` path to narrow a
+  single beam group's candidates; `nothing` (default) is byte-identical.
 - `mip_gap`: MIP optimality gap (default 1e-4)
 - `output_flag`: Solver verbosity (default 0)
 
@@ -679,6 +716,8 @@ function size_beams(
     δ_max_vec::Union{Nothing, Vector} = nothing,
     δ_max_total_vec::Union{Nothing, Vector} = nothing,
     I_ref_vec::Union{Nothing, Vector} = nothing,
+    catalog::Union{Nothing, AbstractVector} = nothing,
+    feasible::Union{Nothing, Vector{Vector{Int}}} = nothing,
     mip_gap::Real = 1e-4,
     output_flag::Integer = 0,
     tc::Union{Nothing, TraceCollector} = nothing,
@@ -689,6 +728,8 @@ function size_beams(
                         δ_max_vec=δ_max_vec,
                         δ_max_total_vec=δ_max_total_vec,
                         I_ref_vec=I_ref_vec,
+                        catalog=catalog,
+                        feasible=feasible,
                         mip_gap=mip_gap, output_flag=output_flag,
                         tc=tc)
 end
@@ -717,6 +758,9 @@ Raises `ArgumentError` if any span is not divisible.
 
 # Keyword Arguments
 - `Pu`: Vector of factored axial compressions (default: zeros)
+- `catalog`: Optional per-call catalog override (default `nothing`); takes
+  precedence over `opts.custom_catalog` and the generated PixelFrame catalog.
+  This is the hook `MemberGroup.catalog_override` (Phase 6) routes through.
 - `mip_gap`: MIP optimality gap (default 1e-4)
 - `output_flag`: Solver verbosity (default 0)
 
@@ -742,6 +786,7 @@ function size_beams(
     geometries::Vector,
     opts::PixelFrameBeamOptions;
     Pu::Vector = zeros_like(Vu),
+    catalog::Union{Nothing, AbstractVector} = nothing,
     mip_gap::Real = 1e-4,
     output_flag::Integer = 0,
     tc::Union{Nothing, TraceCollector} = nothing,
@@ -769,8 +814,11 @@ function size_beams(
         n_pixels_vec[i] = validate_pixel_divisibility(L_mm, px_mm; label="Beam $i")
     end
 
-    # Build catalog — strip Unitful at the boundary via _pf_catalog_kwargs
-    cat = if !isnothing(opts.custom_catalog)
+    # Build catalog — Phase 6 precedence: explicit `catalog` kwarg (per-group
+    # override) > `opts.custom_catalog` > generated PixelFrame catalog.
+    cat = if !isnothing(catalog)
+        catalog
+    elseif !isnothing(opts.custom_catalog)
         opts.custom_catalog
     else
         generate_pixelframe_catalog(; _pf_catalog_kwargs(opts)...)
@@ -830,6 +878,9 @@ Raises `ArgumentError` if any height is not divisible.
 
 # Keyword Arguments
 - `Muy`: Vector of factored moments about y-axis (default: zeros)
+- `catalog`: Optional per-call catalog override (default `nothing`); takes
+  precedence over `opts.custom_catalog` and the generated PixelFrame catalog.
+  This is the hook `MemberGroup.catalog_override` (Phase 6) routes through.
 - `mip_gap`: MIP optimality gap (default 1e-4)
 - `output_flag`: Solver verbosity (default 0)
 
@@ -855,6 +906,7 @@ function size_columns(
     geometries::Vector,
     opts::PixelFrameColumnOptions;
     Muy::Vector = zeros_like(Mux),
+    catalog::Union{Nothing, AbstractVector} = nothing,
     mip_gap::Real = 1e-4,
     output_flag::Integer = 0,
     tc::Union{Nothing, TraceCollector} = nothing,
@@ -882,8 +934,11 @@ function size_columns(
         n_pixels_vec[i] = validate_pixel_divisibility(L_mm, px_mm; label="Column $i")
     end
 
-    # Build catalog — strip Unitful at the boundary via _pf_catalog_kwargs
-    cat = if !isnothing(opts.custom_catalog)
+    # Build catalog — Phase 6 precedence: explicit `catalog` kwarg (per-group
+    # override) > `opts.custom_catalog` > generated PixelFrame catalog.
+    cat = if !isnothing(catalog)
+        catalog
+    elseif !isnothing(opts.custom_catalog)
         opts.custom_catalog
     else
         generate_pixelframe_catalog(; _pf_catalog_kwargs(opts)...)
@@ -1823,6 +1878,9 @@ section satisfying ACI 318-11 requirements.
 - `flange_thickness`: Slab thickness (hf) — Length unit
 - `Nu`: Vector of factored axial compressions (default: zeros). When > 0,
   the shear checker increases Vc per ACI §22.5.6.1.
+- `catalog`: Optional per-call catalog override (default `nothing`); takes
+  precedence over `opts.custom_catalog` and the `catalog_size`-selected family.
+  This is the hook `MemberGroup.catalog_override` (Phase 6) routes through.
 - `catalog_size`: `:standard`, `:small`, `:large` (default `:standard`)
 - `mip_gap`: MIP optimality gap (default 1e-4)
 - `output_flag`: Solver verbosity (default 0)
@@ -1848,6 +1906,7 @@ function size_tbeams(
     flange_thickness::Length,
     Nu::Vector = zeros_like(Vu),
     Tu::Vector = Float64[],
+    catalog::Union{Nothing, AbstractVector} = nothing,
     catalog_size::Symbol = :standard,
     mip_gap::Real = 1e-4,
     output_flag::Integer = 0,
@@ -1863,8 +1922,12 @@ function size_tbeams(
     # Convert geometries
     conc_geoms = [to_concrete_geometry(g) for g in geometries]
 
-    # Build T-beam catalog
-    cat = if !isnothing(opts.custom_catalog)
+    # Build T-beam catalog — Phase 6 precedence: explicit `catalog` kwarg
+    # (per-group override) > `opts.custom_catalog` > `catalog_size`-selected
+    # standard T-beam family.
+    cat = if !isnothing(catalog)
+        catalog
+    elseif !isnothing(opts.custom_catalog)
         opts.custom_catalog
     elseif catalog_size === :standard
         standard_rc_tbeams(flange_width=flange_width, flange_thickness=flange_thickness)

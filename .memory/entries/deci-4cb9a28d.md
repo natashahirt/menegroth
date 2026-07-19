@@ -8,12 +8,12 @@ title: Launch Phase B build (beam overrides live via batched size_beams!); defer
 node_label: Launch Phase B build (beam overrides live via batc
 tags: ''
 status: active
-open_threads: 0
+open_threads: 2
 success: 'null'
 files: ''
 session_id: sess-86aa5f77
 created_at: '2026-07-15T10:16:31.932972+00:00'
-updated_at: '2026-07-15T10:16:31.932972+00:00'
+updated_at: '2026-07-18T03:13:10.393523+00:00'
 ---
 User left recommendations standing (skipped the decision prompt). Decisions:
 1. Guard placement (critic P1): DEFER to Phase B. Phase B removes the fail-loud guard for the now-honored beam path, so re-decide placement there; leave the constructor guard as-is in the interim (no live in-repo break).

@@ -1382,6 +1382,47 @@ required_materials(::AbstractTimberFloor) = (:timber,)
 required_materials(::ShapedSlab) = ()  # user-defined
 
 # =============================================================================
+# Joist Pattern Abstraction + Trait (Phase 4)
+# =============================================================================
+#
+# `AbstractJoistPattern` is declared HERE (in the Sizer) rather than in the
+# Synthesizer so the `joist_geometry` trait below — which is dispatched on the
+# Sizer-owned `AbstractFloorSystem` types — can name it in its return type.
+# StructuralSynthesizer depends on StructuralSizer (not the reverse), so the
+# concrete pattern subtypes (`LinearAxisPattern`, `IsoparametricPattern`, …) and
+# the floor-type overrides of `joist_geometry` that construct them live in the
+# Synthesizer (`StructuralSynthesizer/src/building_types/framing.jl`), where
+# auto-generation (Phase 5) happens. The Sizer only owns the abstract type and
+# the `nothing` default.
+
+"""
+    AbstractJoistPattern
+
+Abstract base for the joist-layout patterns used by the framing-hierarchy
+levels (`FramingLevel`). Concrete subtypes (`LinearAxisPattern`,
+`IsoparametricPattern`, `RadialPattern`, `CustomPattern`) are defined in
+`StructuralSynthesizer`; the abstract type lives here so the [`joist_geometry`](@ref)
+trait — dispatched on `AbstractFloorSystem` — can reference it.
+"""
+abstract type AbstractJoistPattern end
+
+"""
+    joist_geometry(slab::AbstractFloorSystem, level_idx::Int) -> Union{Nothing, AbstractJoistPattern}
+
+Framing-hierarchy trait: the joist pattern that floor type `slab` intrinsically
+generates at framing level `level_idx` (`1` = first generated level above the
+skeleton). Returns `nothing` when the floor type does not own a pattern at that
+level, decoupling Phase 5's `derive_framing_level` from slab internals.
+
+The default returns `nothing` for every floor type and level; slab-owned joist
+systems (`Waffle`, `MassTimberJoist`, `JoistRoofDeck`) override it in
+`StructuralSynthesizer` (where the concrete pattern types are defined). The
+overrides return a pattern whose numeric geometry is a placeholder — the real
+divisions/spacing are resolved from slab geometry during Phase 5.
+"""
+joist_geometry(::AbstractFloorSystem, ::Int) = nothing
+
+# =============================================================================
 # Symbol ↔ Type Mapping
 # =============================================================================
 

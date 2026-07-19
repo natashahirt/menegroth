@@ -8,13 +8,13 @@ title: 'Run 4 (Option A): per-MemberGroup override parameters for independent pe
 node_label: 'Run 4 (Option A): per-MemberGroup override paramet'
 tags: ''
 status: active
-open_threads: 0
+open_threads: 3
 success: 'null'
 files: StructuralSynthesizer/src/design_workflow.jl@8e34430, StructuralSynthesizer/src/design_graph/provenance.jl@2f7c9fd,
   StructuralSynthesizer/src/design_graph/fingerprint.jl@2f7c9fd
 session_id: sess-a0606b76
 created_at: '2026-07-14T17:17:59.426491+00:00'
-updated_at: '2026-07-14T17:17:59.426491+00:00'
+updated_at: '2026-07-14T20:44:17.583357+00:00'
 ---
 User-approved Option A, building on Run 3's fine-node + barrier-sync + exact-first-guard foundation. GOAL: add NON-prepare-affecting per-MemberGroup override parameters — primary dimension per user = per-MemberGroup catalog / objective / utilization overrides (e.g. member_catalog_objective) — and split the coarse :members node into FINE per-MemberGroup nodes so changing ONE member group's catalog/objective/utilization recomputes ONLY that group's node (+ genuinely dependent downstream) and is output-equivalent to from-scratch.
 

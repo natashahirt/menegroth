@@ -168,6 +168,11 @@ implements the `is_feasible` interface for the specific design code.
 - `mip_gap`: MIP optimality gap tolerance
 - `output_flag`: Solver verbosity (0 = silent)
 - `time_limit_sec`: Maximum solver wall-clock time in seconds (default 30)
+- `feasible`: Optional per-group vector of ALLOWED catalog indices. When supplied
+  it is INTERSECTED with the internal per-group capacity screening (never a
+  substitute for it), so a caller can narrow one group's candidate set (e.g. a
+  per-group catalog / depth / deflection restriction) without touching any other
+  group. `nothing` (default) reproduces the prior behavior byte-for-byte.
 
 # Returns
 Named tuple: `(; section_indices, sections, status, objective_value)`
@@ -193,12 +198,35 @@ function optimize_discrete(
     output_flag::Integer = 0,
     time_limit_sec::Real = 30.0,
     cache::Union{Nothing, AbstractCapacityCache} = nothing,
+    feasible::Union{Nothing, Vector{Vector{Int}}} = nothing,
     tc::Union{Nothing, TraceCollector} = nothing,
 )
     n_groups = length(demands)
     n_groups == length(geometries) || throw(ArgumentError("demands and geometries must have the same length"))
     n_sections = length(catalog)
-    
+
+    # Optional externally-supplied per-group candidate restriction (e.g.
+    # StructuralSynthesizer member_group_overrides: a per-group catalog / max_depth /
+    # deflection narrowing). It is INTERSECTED with the internal capacity screening
+    # below, so it can only ever REMOVE candidates, never admit an
+    # unchecked one — capacity feasibility always still runs through `checker`.
+    # `feasible === nothing` (the default) reproduces the prior behavior exactly.
+    feasible_restrict = feasible
+    if feasible_restrict !== nothing
+        length(feasible_restrict) == n_groups || throw(ArgumentError(
+            "feasible restriction must have one entry per group (got " *
+            "$(length(feasible_restrict)) for $n_groups groups)"))
+        # Defense-in-depth: a per-group `feasible` mask is exact-first-safe ONLY when
+        # n_max_sections == 0. With a section-count cap the MIP couples groups, so an
+        # externally-narrowed group could force a coupled group onto an unchecked /
+        # unconservative section. Refuse the combination at the SZ layer (the SS layer
+        # already enforces this invariant, but this backstops any direct caller).
+        n_max_sections == 0 || throw(ArgumentError(
+            "feasible restriction is only supported with n_max_sections == 0 " *
+            "(got n_max_sections=$n_max_sections); combining a per-group feasible " *
+            "mask with a section-count cap couples groups and is not exact-first-safe"))
+    end
+
     emit!(tc, :optimizer, "optimize_discrete", "", :enter;
           n_groups=n_groups, n_sections=n_sections,
           checker_type=string(typeof(checker)),
@@ -221,8 +249,10 @@ function optimize_discrete(
 
     if Threads.nthreads() > 1
         Threads.@threads for i in 1:n_groups
+            allow = feasible_restrict === nothing ? nothing : Set(feasible_restrict[i])
             idxs = Int[]
             for j in 1:n_sections
+                (allow === nothing || j in allow) || continue
                 if is_feasible(checker, cache, j, catalog[j], material, demands[i], geometries[i])
                     push!(idxs, j)
                 end
@@ -234,8 +264,10 @@ function optimize_discrete(
         end
     else
         for i in 1:n_groups
+            allow = feasible_restrict === nothing ? nothing : Set(feasible_restrict[i])
             idxs = Int[]
             for j in 1:n_sections
+                (allow === nothing || j in allow) || continue
                 if is_feasible(checker, cache, j, catalog[j], material, demands[i], geometries[i])
                     push!(idxs, j)
                 end
@@ -443,12 +475,58 @@ function optimize_discrete(
     mip_gap::Real = 1e-4,
     output_flag::Integer = 0,
     time_limit_sec::Real = 30.0,
+    feasible::Union{Nothing, Vector{Vector{Int}}} = nothing,
     tc::Union{Nothing, TraceCollector} = nothing,
 )
     n_groups = length(demands)
     n_groups == length(geometries) || throw(ArgumentError("demands and geometries must have the same length"))
     n_sec = length(catalog)
     n_mat = length(materials)
+
+    # Optional externally-supplied per-group candidate restriction (expanded-index
+    # space, k = (m-1)*n_sec + j). Intersected with the internal capacity screening
+    # below; `feasible === nothing` (default) reproduces prior behavior exactly.
+    feasible_restrict = feasible
+    if feasible_restrict !== nothing
+        length(feasible_restrict) == n_groups || throw(ArgumentError(
+            "feasible restriction must have one entry per group (got " *
+            "$(length(feasible_restrict)) for $n_groups groups)"))
+        # Defense-in-depth: a per-group `feasible` mask is exact-first-safe ONLY when
+        # n_max_sections == 0. With a section-count cap the MIP couples groups, so an
+        # externally-narrowed group could force a coupled group onto an unchecked /
+        # unconservative section. Refuse the combination at the SZ layer (the SS layer
+        # already enforces this invariant, but this backstops any direct caller).
+        n_max_sections == 0 || throw(ArgumentError(
+            "feasible restriction is only supported with n_max_sections == 0 " *
+            "(got n_max_sections=$n_max_sections); combining a per-group feasible " *
+            "mask with a section-count cap couples groups and is not exact-first-safe"))
+        # [P2 SZ feasible validation, fix cycle 4] The multi-material overload expects
+        # EXPANDED-index-space masks over the full (n_sec * n_mat) candidate set,
+        # k = (m-1)*n_sec + j. HARD RANGE CHECK ONLY: every index must be in-range for
+        # the ACTUAL expanded space [1, n_sec*n_mat], else refuse fail-loud (always
+        # correct — an out-of-range index can never map to a real candidate).
+        #
+        # We intentionally do NOT try to detect a "single-material-space" mask (all
+        # indices <= n_sec). Cycle 3 threw on that heuristic, but it FALSE-POSITIVES a
+        # legitimate material-1-only restriction: the material-1 block IS exactly the
+        # indices k = (1-1)*n_sec + j = j, all <= n_sec, so a valid in-range mask
+        # confined to material 1 is INDISTINGUISHABLE from a mis-spaced single-material
+        # mask and must not be rejected. Consequently a caller that mistakenly passes a
+        # single-material-space mask on this multi-material overload cannot be caught
+        # here — callers must build expanded indices (k = (m-1)*n_sec + j). (Solver-input
+        # guard — no code provision, and NOT applicable to the single-material overload,
+        # which already matches its own 1..n_sec space.)
+        n_expanded = n_sec * n_mat
+        for (i, idxs) in enumerate(feasible_restrict)
+            for k in idxs
+                (1 <= k <= n_expanded) || throw(ArgumentError(
+                    "feasible restriction index $k for group $i is out of range for the " *
+                    "expanded (n_sec * n_mat) = ($n_sec * $n_mat) = $n_expanded candidate " *
+                    "space; the multi-material optimize_discrete expects EXPANDED indices " *
+                    "k = (m-1)*n_sec + j, not a single-material-space (1..$n_sec) mask"))
+            end
+        end
+    end
 
     emit!(tc, :optimizer, "optimize_discrete_multi", "", :enter;
           n_groups=n_groups, n_sections=n_sec, n_materials=n_mat,
@@ -475,8 +553,10 @@ function optimize_discrete(
     errors = Vector{Union{Nothing, String}}(nothing, n_groups)
 
     for i in 1:n_groups
+        allow = feasible_restrict === nothing ? nothing : Set(feasible_restrict[i])
         idxs = Int[]
         for k in 1:n_total
+            (allow === nothing || k in allow) || continue
             j = sec_idx_map[k]
             mi = mat_idx_map[k]
             if is_feasible(checker, caches[mi], j, catalog[j], materials[mi], demands[i], geometries[i])

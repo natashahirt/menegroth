@@ -1,0 +1,53 @@
+abstract: ''
+authors: []
+content_hash: fc45bb0409e3d0067c4f07ed8c436b52e1033d75965bb734de96d940eb1b7e66
+coverage:
+  agent: skimmed
+  human: none
+doc_type: code_example
+doi: ''
+name: csa-de-moment-redistribution-a23-3-14
+source_path: /Users/tashahirt/MIT Dropbox/Natasha Hirt/_MIT/DS Research/Synthetic_Buildings/menegroth/corpus/sources/examples/csa/CSA-DE-Moment-Redistribution-A23-3-14.pdf
+title: CSA A23.3-14 Moment Redistribution (StructurePoint spBeam DE)
+venue: ''
+year: null
+extraction:
+  schema: building-code-extraction
+  strict: true
+  grounded: true
+  tags:
+  - scope
+  - provision
+  - equation
+  - parameters
+  - applicability
+  - example
+  - commentary
+  contexts:
+  - project: menegroth
+    synthesis_graph: csa-a23-3-canon
+    schema: building-code-extraction
+    strict: true
+    grounded: true
+    tags:
+    - scope
+    - provision
+    - equation
+    - parameters
+    - applicability
+    - example
+    - commentary
+    structure: &id001
+      synthesis_graph: csa-a23-3-canon
+      apex_id: 20260714-2204-csa-a23-3-canon
+      attach_relation: input-to
+      apex_relation: component-of
+      dimension_nodes:
+        scope: 20260714-2204-csa-a23-3-scope
+        provision: 20260714-2204-csa-a23-3-provision
+        equation: 20260714-2204-csa-a23-3-equation
+        parameters: 20260714-2204-csa-a23-3-parameters
+        applicability: 20260714-2204-csa-a23-3-applicability
+        example: 20260714-2204-csa-a23-3-example
+        commentary: 20260714-2204-csa-a23-3-commentary
+  structure: *id001

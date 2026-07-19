@@ -1,0 +1,68 @@
+abstract: ''
+authors: []
+content_hash: d925cfef7374fee8daf185ee20f831eca85ee5e665a52d029352c29f8bcb1bb1
+coverage:
+  agent: skimmed
+  human: none
+doc_type: example
+doi: ''
+name: sp-de-doubly-reinforced-beam-aci318-14
+source_path: /Users/tashahirt/MIT Dropbox/Natasha Hirt/_MIT/DS Research/Synthetic_Buildings/menegroth/corpus/text/examples/aci/SP-DE-Doubly-Reinforced-Beam-ACI318-14.txt
+title: Doubly Reinforced Concrete Beam Design (ACI 318-14)
+venue: ''
+year: null
+extraction:
+  schema: building-code-extraction
+  strict: true
+  grounded: true
+  tags:
+  - scope
+  - provision
+  - equation
+  - parameters
+  - applicability
+  - example
+  - commentary
+  contexts:
+  - project: menegroth
+    synthesis_graph: aci-318-canon
+    schema: building-code-extraction
+    strict: true
+    grounded: true
+    tags:
+    - scope
+    - provision
+    - equation
+    - parameters
+    - applicability
+    - example
+    - commentary
+    structure: &id001
+      synthesis_graph: aci-318-canon
+      apex_id: 20260713-0610-aci-318-canon
+      attach_relation: input-to
+      apex_relation: component-of
+      dimension_nodes:
+        applicability: 20260713-0610-aci-318-applicability
+        commentary: 20260713-0610-aci-318-commentary
+        equation: 20260713-0610-aci-318-equation
+        example: 20260713-0610-aci-318-example
+        parameters: 20260713-0610-aci-318-parameters
+        provision: 20260713-0610-aci-318-provision
+        scope: 20260713-0610-aci-318-scope
+  - project: menegroth
+    synthesis_graph: aisc-360-canon
+    structure:
+      synthesis_graph: aisc-360-canon
+      apex_id: 20260712-1906-aisc-360-canon
+      attach_relation: input-to
+      apex_relation: component-of
+      dimension_nodes:
+        applicability: 20260712-1906-aisc-360-applicability
+        commentary: 20260712-1906-aisc-360-commentary
+        equation: 20260712-1906-aisc-360-equation
+        example: 20260712-1906-aisc-360-example
+        parameters: 20260712-1906-aisc-360-parameters
+        provision: 20260712-1906-aisc-360-provision
+        scope: 20260712-1906-aisc-360-scope
+  structure: *id001

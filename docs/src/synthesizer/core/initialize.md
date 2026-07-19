@@ -36,7 +36,7 @@ initialize_members!
 3. **`initialize_segments!`** — Creates a `Segment` for each beam/brace edge in the skeleton. Computes span length `L`, unbraced length `Lb`, and moment gradient factor `Cb`.
 
 4. **`initialize_members!`** — Creates `Beam`, `Column`, and `Strut` objects from the skeleton edge groups:
-   - Beams are created from `:beams` edges, with `classify_beam_role` assigning `:girder`, `:beam`, `:joist`, or `:infill` roles
+   - Beams are created from `:beams` edges. Roles are assigned by `classify_beam_role` **after** the full column set exists (so the girder test can reference every `Column.vertex_idx`): `:girder` when both endpoints of the resolved chain land on a column vertex; `:joist` when the beam supports a slab (any sub-edge lies on a slab-cell boundary, cross-referenced via `slab_face_edge_ids`) and is not a girder; `:beam` otherwise. Skeleton-input beams keep `level = 0`.
    - Columns are created from `:columns` edges, with `classify_column_position` determining `:interior`, `:edge`, or `:corner`
    - Struts are created from `:braces` edges
    - `link_column_stack!` connects columns vertically for load accumulation

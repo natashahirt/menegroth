@@ -126,6 +126,33 @@ function _choose_mip_optimizer(optimizer::Symbol)
 end
 
 # =============================================================================
+# MIP Warm Start
+# =============================================================================
+
+"""
+    _apply_mip_start!(x, feasible, mip_start)
+
+Seed the branch-and-bound incumbent for the per-group assignment binaries `x`
+from a prior per-group choice `mip_start` (one catalog/expanded index per group).
+For each group `i`, sets `x[i,j]` start values to `1.0` on `j == mip_start[i]` and
+`0.0` on the other feasible candidates, but ONLY when the prior index is still in
+`feasible[i]` — a stale (now-infeasible) prior choice is skipped, leaving that
+group without a start (a partial warm start is valid). This is a solver hint only;
+it never adds a constraint and cannot change the optimum. Assumes `n_max_sections
+== 0` (no coupling `z` variables to seed).
+"""
+function _apply_mip_start!(x, feasible::Vector{Vector{Int}}, mip_start::Vector{Int})
+    for i in eachindex(feasible)
+        prior = mip_start[i]
+        prior in feasible[i] || continue
+        for j in feasible[i]
+            JuMP.set_start_value(x[i, j], j == prior ? 1.0 : 0.0)
+        end
+    end
+    return nothing
+end
+
+# =============================================================================
 # Generic Discrete Optimization (Checker-Based)
 # =============================================================================
 
@@ -173,6 +200,15 @@ implements the `is_feasible` interface for the specific design code.
   substitute for it), so a caller can narrow one group's candidate set (e.g. a
   per-group catalog / depth / deflection restriction) without touching any other
   group. `nothing` (default) reproduces the prior behavior byte-for-byte.
+- `mip_start`: Optional per-group vector of prior catalog indices used purely as a
+  MIP warm start (`JuMP.set_start_value` on the binaries). This is a solver HINT
+  only — it seeds the branch-and-bound incumbent to shorten solve time; it adds no
+  constraint and cannot change the feasible region. When the solver returns
+  `OPTIMAL` and the optimum is unique (or resolved by the deterministic `argmax`
+  tie-break used below), the chosen sections are identical to a cold solve. A prior
+  index that is no longer feasible for its group is silently skipped (a partial
+  warm start is valid). `nothing` (default) reproduces prior behavior byte-for-byte.
+  NOT applied when `n_max_sections > 0` (the coupling `z` variables are not seeded).
 
 # Returns
 Named tuple: `(; section_indices, sections, status, objective_value)`
@@ -199,6 +235,7 @@ function optimize_discrete(
     time_limit_sec::Real = 30.0,
     cache::Union{Nothing, AbstractCapacityCache} = nothing,
     feasible::Union{Nothing, Vector{Vector{Int}}} = nothing,
+    mip_start::Union{Nothing, Vector{Int}} = nothing,
     tc::Union{Nothing, TraceCollector} = nothing,
 )
     n_groups = length(demands)
@@ -225,6 +262,12 @@ function optimize_discrete(
             "feasible restriction is only supported with n_max_sections == 0 " *
             "(got n_max_sections=$n_max_sections); combining a per-group feasible " *
             "mask with a section-count cap couples groups and is not exact-first-safe"))
+    end
+
+    if mip_start !== nothing
+        length(mip_start) == n_groups || throw(ArgumentError(
+            "mip_start must have one entry per group (got $(length(mip_start)) for " *
+            "$n_groups groups)"))
     end
 
     emit!(tc, :optimizer, "optimize_discrete", "", :enter;
@@ -338,7 +381,14 @@ function optimize_discrete(
         sum(sum(x[i,j] * get_objective_coeff(checker, cache, j) * lengths[i] 
                 for j in feasible[i]) 
             for i in 1:n_groups))
-    
+
+    # Optional MIP warm start (hint only — no constraint, cannot alter the feasible
+    # region or the optimum). Skipped when n_max_sections > 0 (the `z` coupling
+    # variables are not seeded, so a partial `x` start could be inconsistent).
+    if mip_start !== nothing && n_max_sections == 0
+        _apply_mip_start!(x, feasible, mip_start)
+    end
+
     JuMP.optimize!(m)
     
     status = JuMP.termination_status(m)
@@ -476,6 +526,7 @@ function optimize_discrete(
     output_flag::Integer = 0,
     time_limit_sec::Real = 30.0,
     feasible::Union{Nothing, Vector{Vector{Int}}} = nothing,
+    mip_start::Union{Nothing, Vector{Int}} = nothing,
     tc::Union{Nothing, TraceCollector} = nothing,
 )
     n_groups = length(demands)
@@ -526,6 +577,12 @@ function optimize_discrete(
                     "k = (m-1)*n_sec + j, not a single-material-space (1..$n_sec) mask"))
             end
         end
+    end
+
+    if mip_start !== nothing
+        length(mip_start) == n_groups || throw(ArgumentError(
+            "mip_start must have one entry per group (got $(length(mip_start)) for " *
+            "$n_groups groups); multi-material expects EXPANDED indices k = (m-1)*n_sec + j"))
     end
 
     emit!(tc, :optimizer, "optimize_discrete_multi", "", :enter;
@@ -622,6 +679,12 @@ function optimize_discrete(
         sum(sum(x[i,k] * get_objective_coeff(checker, caches[mat_idx_map[k]], sec_idx_map[k]) * lengths[i]
                 for k in feasible[i])
             for i in 1:n_groups))
+
+    # Optional MIP warm start (hint only; expanded-index space). Skipped when
+    # n_max_sections > 0 (unseeded coupling `z` variables).
+    if mip_start !== nothing && n_max_sections == 0
+        _apply_mip_start!(x, feasible, mip_start)
+    end
 
     JuMP.optimize!(m)
 

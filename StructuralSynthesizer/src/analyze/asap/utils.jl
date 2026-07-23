@@ -535,10 +535,27 @@ checkerboard live load patterns and writes enveloped element forces back to the
 model so downstream consumers (`_column_asap_Pu`, beam sizers, etc.) see the
 governing demands.
 
+# Factorization-aware reuse (`loads_only`)
+`loads_only=false` (default) reproduces the exact prior behavior byte-for-byte: a
+full `Asap.update!` rebuilds the element stiffness matrices and the global `S`
+from scratch (which nulls the cached CHOLMOD factorization), then the solve
+refactorizes. Pass `loads_only=true` ONLY when the caller can guarantee the
+global stiffness `K` is UNCHANGED since the model was last assembled — i.e. no
+section, geometry, or element-eccentricity change, only load magnitudes/combos or
+self-weight moved. It then calls `Asap.update!(model; loads_only=true)`, which
+rebuilds only the load vector `P` and PRESERVES the factorization (`external/Asap`
+public API), so the subsequent `solve!(; reprocess=false)` reuses the cached
+factor. Because CHOLMOD factorization of an identical `S` is deterministic, the
+reused-factor solve is bit-identical to a cold refactorization — this is a pure
+speed optimization, never a result change. Misusing it with a changed `K` yields
+a STALE-factor wrong answer, so it is opt-in and defaults off; the incremental
+engine sets it only on provably loads-only variations.
+
 See also: [`to_asap!`](@ref), [`snapshot!`](@ref), [`restore!`](@ref)
 """
 function sync_asap!(struc::BuildingStructure;
-                    params::DesignParameters=DesignParameters())
+                    params::DesignParameters=DesignParameters(),
+                    loads_only::Bool=false)
     # 1. Push current slab self-weights into cells
     for slab in struc.slabs
         sw = StructuralSizer.self_weight(slab.result)
@@ -585,9 +602,13 @@ function sync_asap!(struc::BuildingStructure;
     _sync_shell_area_pressures!(struc, params)
     _sync_vault_thrust_line_loads!(struc, params)
 
-    # 3. Re-process stiffness and loads (topology unchanged)
+    # 3. Re-process stiffness and loads (topology unchanged). When the caller
+    #    guarantees K is unchanged (loads_only), rebuild only P and keep the cached
+    #    factorization; otherwise do the full (factorization-nulling) update. A
+    #    loads_only reuse requires an already-assembled model — fall back to the
+    #    full path if the model has not been processed yet.
     if struc.asap_model.processed
-        Asap.update!(struc.asap_model)
+        Asap.update!(struc.asap_model; loads_only = loads_only)
     else
         Asap.process!(struc.asap_model)
     end

@@ -102,6 +102,7 @@ function size_columns(
     I_ref_vec::Union{Nothing, Vector} = nothing,
     catalog::Union{Nothing, AbstractVector} = nothing,
     feasible::Union{Nothing, Vector{Vector{Int}}} = nothing,
+    mip_start::Union{Nothing, Vector{Int}} = nothing,
     mip_gap::Real = 1e-4,
     output_flag::Integer = 0,
     tc::Union{Nothing, TraceCollector} = nothing,
@@ -167,6 +168,7 @@ function size_columns(
             output_flag = output_flag,
             time_limit_sec = opts.time_limit_sec,
             feasible = feasible,
+            mip_start = mip_start,
             tc = tc,
         )
     else
@@ -179,6 +181,7 @@ function size_columns(
             output_flag = output_flag,
             time_limit_sec = opts.time_limit_sec,
             feasible = feasible,
+            mip_start = mip_start,
             tc = tc,
         )
     end
@@ -682,6 +685,9 @@ the checker requiring δ_max_LL > 0 / δ_max_total > 0).
   `optimize_discrete` and INTERSECTED with the internal capacity screening. Used
   by the batched StructuralSynthesizer `member_group_overrides` path to narrow a
   single beam group's candidates; `nothing` (default) is byte-identical.
+- `mip_start`: Optional per-group vector of prior catalog indices forwarded to
+  `optimize_discrete` as a MIP warm start (solver hint only; does not change the
+  optimum). `nothing` (default) is byte-identical.
 - `mip_gap`: MIP optimality gap (default 1e-4)
 - `output_flag`: Solver verbosity (default 0)
 
@@ -718,6 +724,7 @@ function size_beams(
     I_ref_vec::Union{Nothing, Vector} = nothing,
     catalog::Union{Nothing, AbstractVector} = nothing,
     feasible::Union{Nothing, Vector{Vector{Int}}} = nothing,
+    mip_start::Union{Nothing, Vector{Int}} = nothing,
     mip_gap::Real = 1e-4,
     output_flag::Integer = 0,
     tc::Union{Nothing, TraceCollector} = nothing,
@@ -730,6 +737,7 @@ function size_beams(
                         I_ref_vec=I_ref_vec,
                         catalog=catalog,
                         feasible=feasible,
+                        mip_start=mip_start,
                         mip_gap=mip_gap, output_flag=output_flag,
                         tc=tc)
 end

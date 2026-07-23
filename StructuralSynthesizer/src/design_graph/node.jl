@@ -192,11 +192,24 @@ struct StageNode <: DesignNode
     reads::Vector{Symbol}
     writes::Vector{Symbol}
     code_version::Symbol
+    # Optional ctx-aware work closure `(struc, ctx) -> …` (Run 6 warm-state). When
+    # set AND a non-`nothing` `ctx` is threaded to [`run!`](@ref), it runs INSTEAD
+    # of `fn` so the node can consume read-only warm caches from the context. It
+    # MUST be a byte-identical alternative to `fn` (same design outputs), differing
+    # only in reused-vs-rebuilt internal caches — so the default (`ctx === nothing`)
+    # path stays exactly `fn`. `nothing` (the default) means "no warm variant".
+    fn_ctx::Union{Nothing, Function}
 end
 
 """Back-compat constructor: a `StageNode` with empty provenance (`code_version = :v1`)."""
 StageNode(key::NodeKey, deps::Vector{NodeKey}, fn, sync::Bool) =
-    StageNode(key, deps, fn, sync, Symbol[], Symbol[], Symbol[], :v1)
+    StageNode(key, deps, fn, sync, Symbol[], Symbol[], Symbol[], :v1, nothing)
+
+"""Full-provenance constructor with no warm (`fn_ctx`) variant."""
+StageNode(key::NodeKey, deps::Vector{NodeKey}, fn, sync::Bool,
+          param_slice::Vector{Symbol}, reads::Vector{Symbol},
+          writes::Vector{Symbol}, code_version::Symbol) =
+    StageNode(key, deps, fn, sync, param_slice, reads, writes, code_version, nothing)
 
 node_key(node::StageNode) = node.key
 dependencies(node::StageNode) = node.deps
@@ -207,5 +220,65 @@ struc_writes(node::StageNode) = node.writes
 code_version(node::StageNode) = node.code_version
 
 # Run 1: the closure already captures `params`/`tc`, so `run!` just invokes it.
-# `params`/`ctx` are accepted for interface uniformity and future node types.
-run!(node::StageNode, struc, params, ctx) = node.fn(struc)
+# `params` is accepted for interface uniformity. `ctx` is the warm-state hook
+# (Run 6): when a `WarmContext` is threaded AND the node declares a byte-identical
+# `fn_ctx` warm variant, run that so it can reuse read-only caches; otherwise run
+# the plain `fn` (the exact, default, `ctx === nothing` behavior).
+function run!(node::StageNode, struc, params, ctx)
+    if ctx !== nothing && node.fn_ctx !== nothing
+        return node.fn_ctx(struc, ctx)
+    end
+    return node.fn(struc)
+end
+
+# =============================================================================
+# Warm-state context (Run 6)
+# =============================================================================
+#
+# `WarmContext` is the per-run object threaded as `ctx` to `run!` when a caller
+# opts into warm reuse (`run_target!(engine, params; warm=true)`). It carries
+# ONLY read-only, result-neutral artifacts that a dirty node can reuse instead of
+# rebuilding — today the shared flat-plate column P-M capacity cache
+# (`ACIColumnCapacityCache`), which is written once by `precompute_capacities!`
+# and thereafter read-only (proven result-neutral by the coarse-vs-fine
+# exact-first gate; see design_workflow.jl `_make_slab_node_fn` FINDING 5). It is
+# NEVER threaded on the default path (`ctx === nothing`), so it cannot perturb
+# byte-identity.
+
+"""
+    WarmContext
+
+Per-run warm-state context (Run 6), threaded as `ctx` to [`run!`](@ref) when a
+caller opts into warm reuse. Holds read-only, result-neutral caches a dirty node
+may reuse. `col_cache` is a shared `ACIColumnCapacityCache` for flat-plate slab
+nodes, or `nothing` when unavailable (non-flat-plate / NLP column strategy).
+"""
+mutable struct WarmContext
+    col_cache::Any
+end
+
+WarmContext() = WarmContext(nothing)
+
+"""
+    NodeWarmState
+
+Cross-run warm artifacts memoized per node by the incremental engine
+(`engine.warm_memo`), so successive warm reruns reuse them rather than
+rebuilding. Currently the shared read-only `col_cache` (an
+`ACIColumnCapacityCache`) associated with the slab-sizing level. Kept separate
+from [`NodeMemo`](@ref) (whose snapshot is a pure design-state `deepcopy`) so the
+byte-identity snapshot/restore path is untouched.
+"""
+struct NodeWarmState
+    col_cache::Any
+end
+
+"""
+    warm_col_cache(ctx) -> cache | nothing
+
+Read the shared read-only column P-M cache from a warm `ctx`, or `nothing` when
+there is no warm context (default path) or no cache is available. Used by
+ctx-aware slab nodes to reuse the cache instead of rebuilding it per slab.
+"""
+warm_col_cache(::Nothing) = nothing
+warm_col_cache(ctx::WarmContext) = ctx.col_cache

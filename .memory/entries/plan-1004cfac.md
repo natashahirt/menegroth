@@ -7,12 +7,12 @@ title: 'Run 6: warm-state & factorization-aware reuse (the speed payoff)'
 node_label: 'Run 6: warm-state & factorization-aware reuse (the'
 tags: ''
 status: active
-open_threads: 0
+open_threads: 1
 success: 'null'
 files: ''
 session_id: sess-8394b7bd
 created_at: '2026-07-19T18:43:33.887645+00:00'
-updated_at: '2026-07-19T18:43:33.887645+00:00'
+updated_at: '2026-07-23T15:21:13.685159+00:00'
 ---
 Goal: make DIRTY nodes cheap, not just skip clean ones. Today every dirty node replays its solver cold and the CHOLMOD factorization is nulled on every snapshot.
 

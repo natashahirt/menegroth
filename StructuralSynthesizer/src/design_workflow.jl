@@ -398,15 +398,17 @@ function build_design_graph(struc::BuildingStructure, params::DesignParameters;
         # `el.forces`), so there is no intermediate sync to reproduce.
         for sidx in 1:n_slabs
             key      = slab_node_key(sidx)
-            base_fn  = _make_slab_node_fn(sidx, floor_opts, column_opts, params, tc)
+            base_fn     = _make_slab_node_fn(sidx, floor_opts, column_opts, params, tc)
+            base_fn_ctx = _make_slab_node_fn_ctx(sidx, floor_opts, column_opts, params, tc)
             is_first = sidx == 1
             is_last  = sidx == n_slabs
             # Finding 2: reproduce the legacy `stage_1_slabs` + `size_slabs!` trace
             # envelope around the per-slab `size_slab!` events (which `base_fn`
             # emits nested) so a traced `design_building` is byte-identical to the
             # pre-Run-3 sequence. The envelope is emitted at the slab-level
-            # boundary: open on the first node, close on the last.
-            fn = function (struc)
+            # boundary: open on the first node, close on the last. `_emit_envelope`
+            # keeps the cold (`fn`) and warm (`fn_ctx`) variants trace-identical.
+            _emit_slab_envelope_open(struc) = begin
                 if is_first
                     StructuralSizer.emit!(tc, :pipeline, "build_pipeline", "stage_1_slabs", :enter;
                                           floor_type=string(slab_floor_type))
@@ -420,17 +422,31 @@ function build_design_graph(struc::BuildingStructure, params::DesignParameters;
                     # `parallel=false` decision is the invariant reference event.
                     StructuralSizer.emit!(tc, :slab, "size_slabs!", "", :decision; parallel=false)
                 end
-                base_fn(struc)
+            end
+            _emit_slab_envelope_close() = begin
                 if is_last
                     StructuralSizer.emit!(tc, :slab, "size_slabs!", "", :exit)
                     StructuralSizer.emit!(tc, :pipeline, "build_pipeline", "stage_1_slabs", :exit)
                 end
+            end
+            fn = function (struc)
+                _emit_slab_envelope_open(struc)
+                base_fn(struc)
+                _emit_slab_envelope_close()
+                return nothing
+            end
+            # Warm variant: identical trace envelope + `_update_one_slab_volume!`,
+            # only the internal `_col_cache` is reused from `ctx` (result-neutral).
+            fn_ctx = function (struc, ctx)
+                _emit_slab_envelope_open(struc)
+                base_fn_ctx(struc, ctx)
+                _emit_slab_envelope_close()
                 return nothing
             end
             push!(graph_nodes, StageNode(key, NodeKey[], fn,
                                          slab_stage.needs_sync, slab_prov.param_slice,
                                          slab_prov.reads, slab_prov.writes,
-                                         slab_prov.code_version))
+                                         slab_prov.code_version, fn_ctx))
             push!(slab_keys_all, key)
         end
     end
@@ -485,6 +501,32 @@ function _make_slab_node_fn(slab_idx::Int, floor_opts, column_opts,
             options=floor_opts, column_opts=column_opts,
             max_iterations=params.max_iterations, verbose=false,
             _col_cache=nothing, fire_rating=params.fire_rating, tc=tc)
+        _update_one_slab_volume!(struc, slab_idx, floor_opts)
+        return nothing
+    end
+end
+
+"""
+    _make_slab_node_fn_ctx(slab_idx, floor_opts, column_opts, params, tc) -> Function
+
+Warm-state (Run 6) counterpart to [`_make_slab_node_fn`](@ref): a `(struc, ctx)`
+closure that passes the shared read-only column P-M cache from the warm context
+([`warm_col_cache`](@ref)) as `_col_cache` instead of `nothing`, so a warm rerun
+reuses one precomputed cache across all slab nodes rather than rebuilding it per
+slab. This is byte-identical to the cold `_col_cache=nothing` path: the cache is
+written only by `precompute_capacities!` and read-only thereafter (FINDING 5
+above), the same result-neutrality the coarse `size_slabs!` shared-cache path
+already relies on. When the context carries no cache (`nothing`), this degrades
+to exactly the cold per-slab rebuild.
+"""
+function _make_slab_node_fn_ctx(slab_idx::Int, floor_opts, column_opts,
+                                params::DesignParameters,
+                                tc::Union{Nothing, StructuralSizer.TraceCollector})
+    return function (struc, ctx)
+        StructuralSizer.size_slab!(struc, slab_idx;
+            options=floor_opts, column_opts=column_opts,
+            max_iterations=params.max_iterations, verbose=false,
+            _col_cache=warm_col_cache(ctx), fire_rating=params.fire_rating, tc=tc)
         _update_one_slab_volume!(struc, slab_idx, floor_opts)
         return nothing
     end

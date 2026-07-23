@@ -110,6 +110,13 @@ mutable struct IncrementalEngine
     struc::BuildingStructure
     _recomputed::Vector{NodeKey}
     _restored::Vector{NodeKey}
+    # Run 6 warm-state: per-node cross-run reuse of READ-ONLY, result-neutral
+    # artifacts (today the shared flat-plate column P-M cache). Populated only on
+    # a `warm=true` run of `run_target!`; empty and untouched on the default path,
+    # so byte-identity is unaffected. See core/snapshot.jl + design_graph/node.jl
+    # (`NodeWarmState` / `WarmContext`) for why the CHOLMOD factorization stays out
+    # of these snapshots (it lives only on the live `struc.asap_model`).
+    warm_memo::Dict{NodeKey, NodeWarmState}
 end
 
 """
@@ -191,7 +198,8 @@ function prepare_engine(struc::BuildingStructure, params::DesignParameters;
 
     return IncrementalEngine(graph, params, baseline, base_hash,
                              Dict{NodeKey, NodeMemo}(), working,
-                             NodeKey[], NodeKey[])
+                             NodeKey[], NodeKey[],
+                             Dict{NodeKey, NodeWarmState}())
 end
 
 """
@@ -268,6 +276,31 @@ dirty_frontier(engine::IncrementalEngine, new_params::DesignParameters) =
     dirty_frontier(engine.graph, changed_param_fields(engine.params, new_params))
 
 # -----------------------------------------------------------------------------
+# Warm-state (Run 6): build/reuse the shared read-only column P-M cache.
+# -----------------------------------------------------------------------------
+
+"""
+    _warm_shared_col_cache!(engine, params) -> cache | nothing
+
+Get-or-build the shared read-only flat-plate column P-M capacity cache used by
+warm slab-node reruns. Reuses a cache already stored in `engine.warm_memo` when
+present (column catalog/material/objective are prepare-affecting and therefore
+FIXED for an engine's lifetime — a change to them is refused by the baseline
+guard — so a once-built cache stays valid across warm reruns). Otherwise builds
+one via `StructuralSizer._precompute_flat_plate_col_cache` when the baseline has
+flat-plate/flat-slab slabs, else returns `nothing`. Identical in content to the
+cache the cold per-slab path rebuilds internally (see design_workflow.jl FINDING
+5), so reusing it is result-neutral.
+"""
+function _warm_shared_col_cache!(engine::IncrementalEngine, params::DesignParameters)
+    for (_, ws) in engine.warm_memo
+        ws.col_cache === nothing || return ws.col_cache
+    end
+    any(s -> s.floor_type in (:flat_plate, :flat_slab), engine.baseline.slabs) || return nothing
+    return StructuralSizer._precompute_flat_plate_col_cache(_get_column_opts(params))
+end
+
+# -----------------------------------------------------------------------------
 # The scheduler.
 # -----------------------------------------------------------------------------
 
@@ -297,6 +330,7 @@ the fixed baseline and requires a new engine (see module scope note).
 function run_target!(engine::IncrementalEngine, params::DesignParameters;
                      target::NodeKey = terminal_node(engine.graph),
                      framing_opts::NamedTuple = NamedTuple(),
+                     warm::Bool = false,
                      tc::Union{Nothing, StructuralSizer.TraceCollector} = nothing)
     # Guard: the fixed baseline is only valid for params sharing the same
     # prepared state. Refuse (rather than silently reuse a stale baseline) if a
@@ -360,6 +394,12 @@ function run_target!(engine::IncrementalEngine, params::DesignParameters;
     # (already-processed) predecessor's post-state, and a root dirty node runs
     # against the baseline. (Linear sizing chain — DAG fan-in is Run 3.)
     engine.struc = restore_node_state(engine.baseline)
+
+    # Warm-state context (Run 6). Built only when the caller opts in; `nothing` on
+    # the default path so `run!` runs each node's plain `fn` and behavior is
+    # byte-identical. The shared read-only column P-M cache lets warm slab-node
+    # reruns reuse one precompute across all slabs (result-neutral).
+    ctx = warm ? WarmContext(_warm_shared_col_cache!(engine, params)) : nothing
 
     recomputed = NodeKey[]
     restored   = NodeKey[]
@@ -448,9 +488,11 @@ function run_target!(engine::IncrementalEngine, params::DesignParameters;
                 "partial-slab-target guard should make this unrepresentable; this " *
                 "indicates a memoization-coverage bug, not a legitimate incremental run.")
         end
-        # 3a. Run dirty nodes in place against the predecessor post-state.
+        # 3a. Run dirty nodes in place against the predecessor post-state. `ctx` is
+        #     `nothing` on the default path (exact `fn`), or a `WarmContext` when
+        #     the caller opted into warm reuse (ctx-aware `fn_ctx`, result-neutral).
         for key in dirty_keys
-            run!(get_node(engine.graph, key), engine.struc, params, nothing)
+            run!(get_node(engine.graph, key), engine.struc, params, ctx)
         end
         # 3b. Overlay clean nodes' per-group writes (fine slab nodes → partial
         #     restore; a clean non-slab node can only appear in a singleton level,
@@ -469,11 +511,16 @@ function run_target!(engine::IncrementalEngine, params::DesignParameters;
         # 3c. Barrier sync once, only when a recomputed node needs it.
         level_needs_sync(engine.graph, dirty_keys) &&
             sync_asap!(engine.struc; params = params)
-        # 3d. Snapshot + memoize recomputed nodes AFTER the sync.
+        # 3d. Snapshot + memoize recomputed nodes AFTER the sync. On a warm run,
+        #     also memoize each slab node's shared read-only cache so a later warm
+        #     rerun reuses it (never enters the byte-identity `NodeMemo` snapshot).
         for key in dirty_keys
             node = get_node(engine.graph, key)
             oh = output_hash(node, engine.struc)
             engine.memo[key] = NodeMemo(node_ih[key], oh, capture_node_state(engine.struc))
+            if warm && is_slab_node_key(key)
+                engine.warm_memo[key] = NodeWarmState(ctx === nothing ? nothing : ctx.col_cache)
+            end
             pass_output[key] = oh
             push!(recomputed, key)
         end
@@ -521,6 +568,7 @@ function redesign_incremental!(engine::IncrementalEngine, params::DesignParamete
                                target::NodeKey = terminal_node(engine.graph),
                                harmonize::Bool = true,
                                framing_opts::NamedTuple = NamedTuple(),
+                               warm::Bool = false,
                                tc::Union{Nothing, StructuralSizer.TraceCollector} = nothing)
     # Fail-loud (Run 4 / Phase B): refuse UN-honorable member_group_overrides at the
     # variation door. `params` here are the effective params for this run.
@@ -532,6 +580,7 @@ function redesign_incremental!(engine::IncrementalEngine, params::DesignParamete
     # than only at the later capture_design backstop. Same posture as design_building;
     # NOT prepare-affecting.
     _assert_member_group_overrides_unsupported(params, engine.baseline)
-    run_target!(engine, params; target = target, framing_opts = framing_opts, tc = tc)
+    run_target!(engine, params; target = target, framing_opts = framing_opts,
+                warm = warm, tc = tc)
     return capture_incremental_design(engine, params; harmonize = harmonize, tc = tc)
 end

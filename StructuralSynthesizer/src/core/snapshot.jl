@@ -143,6 +143,15 @@ snapshot_keys(struc::BuildingStructure) = collect(keys(struc._snapshots))
 # incremental engine's memo) rather than on `struc`, so the machinery is
 # callable/observable from outside without growing the `BuildingStructure`
 # struct.
+#
+# RUN 6 (warm-state) INVARIANT: the CHOLMOD factorization deliberately nulled
+# here must NEVER re-enter these snapshots — it holds a non-copyable C pointer and
+# is a recomputable cache. The live factor lives ONLY on the working
+# `engine.struc.asap_model`, where `sync_asap!(...; loads_only=true)` may reuse it
+# for a provably-K-unchanged loads-only re-solve. Any cross-run warm artifacts the
+# engine reuses (e.g. the shared read-only column P-M cache) are held in the
+# SEPARATE `engine.warm_memo` (`NodeWarmState`), not in this design-state snapshot,
+# so this byte-identity capture/restore path is unchanged.
 
 """
     capture_node_state(struc::BuildingStructure) -> BuildingStructure

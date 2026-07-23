@@ -18,6 +18,7 @@ using Asap  # ensures `u"kip"`, `u"ksi"`, etc resolve via Asap unit module
         include("core/test_api_scoped_overrides_payload.jl")
         include("core/test_chat_api.jl")
         include("core/test_diagnose_api.jl")
+        include("core/test_design_state.jl")
         include("core/test_micro_experiments.jl")
         include("core/test_postprocess_ec.jl")
     end

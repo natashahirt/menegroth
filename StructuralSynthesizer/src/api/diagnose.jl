@@ -37,7 +37,8 @@ const LEVER_MAP = Dict{String, Vector{String}}(
 
 """
 Plain-English descriptions of each limit state for non-technical users.
-Code clause annotations cite ACI 318-19 and AISC 360-22.
+Code clause annotations cite ACI 318-19 and AISC 360-16 (the steel edition
+actually implemented by `StructuralSizer.AISCChecker`).
 """
 const LIMIT_STATE_DESCRIPTIONS = Dict{String, String}(
     "axial_compression" =>
@@ -60,12 +61,12 @@ const LIMIT_STATE_DESCRIPTIONS = Dict{String, String}(
 
     "flexure" =>
         "The beam cannot resist the bending moment at this demand level. " *
-        "AISC 360-22 Chapter F (steel) or ACI 318-19 §9.5 (RC). " *
+        "AISC 360-16 Chapter F (steel) or ACI 318-19 §9.5 (RC). " *
         "A deeper or heavier section is needed.",
 
     "shear" =>
         "The beam is failing to transfer transverse (vertical) load. " *
-        "AISC 360-22 Chapter G (steel) or ACI 318-19 §22.5 (RC). " *
+        "AISC 360-16 Chapter G (steel) or ACI 318-19 §22.5 (RC). " *
         "Typically paired with high flexure in heavily loaded spans.",
 
     "deflection" =>
@@ -299,6 +300,51 @@ end
 # ─── Per-element serializers ──────────────────────────────────────────────────
 
 """
+    _column_code_clauses(cr::ColumnDesignResult) -> (axial::String, pm::String)
+
+Select the governing design-code provisions for a column's axial-compression and
+P-M interaction checks by the member's MATERIAL (from the designed `section_obj`),
+never by string position — the exact P0-A safety fix already applied to beams via
+[`_beam_code_clauses`](@ref). A steel column must never be cited to a concrete
+(ACI) clause and vice versa.
+
+The capacity ratios these clauses annotate are computed in `design_workflow.jl`:
+steel columns use AISC 360-16 §E1 (axial, φPn = 0.9·Fy·Ag as a conservative
+Chapter-E general-provisions estimate) and §H1 (P-M interaction, H1-1a/b);
+RC columns use ACI 318-19 §22.4.2 (axial) / §22.4 (combined flexure-axial).
+So the emitted clauses match the code that produced each ratio.
+
+Section tokens follow the AISC 360-16 / ACI 318-19 chapter organization
+(corpus: aisc-360-16 — E1 p.33, H1 p.77 confirmed via corpus.get_clause;
+aci-318-19 — §22.4 p.400 confirmed):
+- ISymm / rectangular HSS / round HSS (steel): axial §E1, P-M §H1. Chapter E
+  (general compression) and Chapter H1 (combined forces) are not shape-specific,
+  so all steel column shapes share these tokens. §E1 grounds to a confirmed page;
+  if it were not in the corpus `ground_check` would leave it explicitly UNRESOLVED
+  rather than mis-cite (never a concrete clause).
+- RC (rectangular / circular): axial §22.4.2, P-M §22.4.
+- PixelFrame / unsized / unsupported: empty strings so `ground_check` leaves the
+  citation UNRESOLVED rather than mis-attributing it to the wrong code family.
+
+Punching (`§22.6`) is intentionally NOT selected here: two-way (punching) shear
+is a concrete slab phenomenon at the column and stays ACI even for a steel column
+supporting a concrete slab (handled inline in `_diagnose_column`).
+"""
+function _column_code_clauses(cr::ColumnDesignResult)::Tuple{String, String}
+    so = cr.section_obj
+    if so isa StructuralSizer.ISymmSection ||
+       so isa StructuralSizer.HSSRectSection ||
+       so isa StructuralSizer.HSSRoundSection
+        return ("AISC 360-16 E1", "AISC 360-16 H1")
+    elseif so isa StructuralSizer.RCColumnSection || so isa StructuralSizer.RCCircularSection
+        return ("ACI 318-19 §22.4.2", "ACI 318-19 §22.4")
+    else
+        # PixelFrame / unsized / unsupported: no single confirmed code family.
+        return ("", "")
+    end
+end
+
+"""
 Build a Dict representing one column's full diagnostic data.
 """
 function _diagnose_column(
@@ -339,10 +385,17 @@ function _diagnose_column(
     end
     trib_area_disp = _to_display(du, :area, trib_area_m2 * u"m^2")
 
+    # Material-correct governing provisions (steel → AISC 360-16, RC → ACI 318-19),
+    # selected from the designed section object — NOT by string position. This is
+    # the P0-A safety fix for columns: a steel column must never be cited to a
+    # concrete (ACI) clause and vice versa (see `_column_code_clauses` /
+    # `ground_check`). Punching stays ACI §22.6 below (concrete slab phenomenon).
+    axial_clause, pm_clause = _column_code_clauses(cr)
+
     checks = Dict{String, Any}[
         Dict{String, Any}(
             "name"         => "axial_compression",
-            "code_clause"  => "ACI 318-19 §22.4.2",
+            "code_clause"  => axial_clause,
             "demand"       => _round_val(pu_disp),
             "demand_unit"  => funit,
             "ratio"        => _round_val(cr.axial_ratio),
@@ -351,7 +404,7 @@ function _diagnose_column(
         ),
         Dict{String, Any}(
             "name"         => "pm_interaction",
-            "code_clause"  => "ACI 318-19 §22.4",
+            "code_clause"  => pm_clause,
             "demand_Mu_x"  => _round_val(mux_disp),
             "demand_Mu_y"  => _round_val(muy_disp),
             "demand_unit"  => munit,
@@ -361,7 +414,10 @@ function _diagnose_column(
         ),
     ]
 
-    # Add punching check only if the column supports a slab with punching data
+    # Add punching check only if the column supports a slab with punching data.
+    # AUDIT (P0-B): punching is two-way shear in the CONCRETE SLAB around the
+    # column (ACI 318-19 §22.6, computed by the ACI punching check), so it stays
+    # ACI even for a steel column — the code family matches the ratio's origin.
     if !isnothing(cr.punching)
         p = cr.punching
         vu_disp  = _to_display(du, :force, p.Vu)
@@ -377,6 +433,9 @@ function _diagnose_column(
             "governing"     => governing == "punching_shear_col",
         ))
     end
+
+    # Attach live corpus citations (explanation-layer only; ratios untouched).
+    _ground_checks!(checks)
 
     return Dict{String, Any}(
         "id"             => idx,
@@ -411,6 +470,42 @@ function _diagnose_column(
 end
 
 """
+    _beam_code_clauses(br::BeamDesignResult) -> (flexure::String, shear::String)
+
+Select the governing design-code provisions for a beam's flexure and shear
+checks by the member's MATERIAL (from the designed `section_obj`), never by
+string position. Steel shapes cite AISC 360-16 — the edition actually
+implemented by `StructuralSizer.AISCChecker` — with the section token that
+matches the shape's checker path; RC shapes cite ACI 318-19. Unsized or
+unsupported sections return empty strings so `ground_check` leaves the citation
+explicitly UNRESOLVED rather than mis-attributing it to the wrong code family.
+
+Section tokens follow the AISC 360-16 chapter organization implemented by the
+checkers (corpus: aisc-360-16 — F2 p.47, G2 p.70 confirmed via corpus.get_clause;
+HSS provisions F7/F8/G4/G5 are correct per the shape checkers but are left
+ungrounded here) and ACI 318-19 (corpus: aci-318-19 — §9.5 flexure, §22.5 shear):
+- ISymm (doubly-symmetric I): flexure §F2, shear §G2.
+- Rectangular/square HSS:     flexure §F7, shear §G4.
+- Round HSS / pipe:           flexure §F8, shear §G5.
+- RC (rectangular / T-beam):  flexure §9.5, shear §22.5.
+"""
+function _beam_code_clauses(br::BeamDesignResult)::Tuple{String, String}
+    so = br.section_obj
+    if so isa StructuralSizer.ISymmSection
+        return ("AISC 360-16 F2", "AISC 360-16 G2")
+    elseif so isa StructuralSizer.HSSRectSection
+        return ("AISC 360-16 F7", "AISC 360-16 G4")
+    elseif so isa StructuralSizer.HSSRoundSection
+        return ("AISC 360-16 F8", "AISC 360-16 G5")
+    elseif so isa StructuralSizer.RCTBeamSection || so isa StructuralSizer.RCBeamSection
+        return ("ACI 318-19 §9.5", "ACI 318-19 §22.5")
+    else
+        # PixelFrame / unsized / unsupported: no single confirmed code family.
+        return ("", "")
+    end
+end
+
+"""
 Build a Dict representing one beam's full diagnostic data.
 """
 function _diagnose_beam(
@@ -440,10 +535,19 @@ function _diagnose_beam(
         0.0
     end
 
+    # Material-correct governing provisions (steel → AISC 360-16, RC → ACI 318-19),
+    # selected from the designed section object — NOT by string position. This is
+    # the P0-A safety fix: a steel beam must never be cited to a concrete (ACI)
+    # clause and vice versa (see `_beam_code_clauses` / `ground_check`).
+    # AUDIT (P0-B): verified — `_beam_code_clauses` keys on `br.section_obj`, so
+    # the emitted flexure/shear clauses are always the same code family that
+    # computed `br.flexure_ratio` / `br.shear_ratio`.
+    flexure_clause, shear_clause = _beam_code_clauses(br)
+
     checks = Dict{String, Any}[
         Dict{String, Any}(
             "name"        => "flexure",
-            "code_clause" => "AISC 360-22 Chapter F / ACI 318-19 §9.5",
+            "code_clause" => flexure_clause,
             "demand"      => _round_val(mu_disp),
             "demand_unit" => munit,
             "ratio"       => _round_val(br.flexure_ratio),
@@ -452,7 +556,7 @@ function _diagnose_beam(
         ),
         Dict{String, Any}(
             "name"        => "shear",
-            "code_clause" => "AISC 360-22 Chapter G / ACI 318-19 §22.5",
+            "code_clause" => shear_clause,
             "demand"      => _round_val(vu_disp),
             "demand_unit" => funit,
             "ratio"       => _round_val(br.shear_ratio),
@@ -460,6 +564,9 @@ function _diagnose_beam(
             "governing"   => governing == "shear",
         ),
     ]
+
+    # Attach live corpus citations (explanation-layer only; ratios untouched).
+    _ground_checks!(checks)
 
     return Dict{String, Any}(
         "id"              => idx,
@@ -526,6 +633,10 @@ function _diagnose_slab(
     gov_defl = governing == "deflection"
     gov_punch = governing == "punching_shear_slab"
 
+    # AUDIT (P0-B): slabs are reinforced-concrete two-way members sized entirely
+    # by the ACI two-way pipeline, so both checks are computed under ACI 318-19 —
+    # deflection (§24.2) and two-way punching (§22.6). The emitted clauses are the
+    # same code family (concrete) as the ratios; no material branch is needed.
     checks = Dict{String, Any}[
         Dict{String, Any}(
             "name"          => "deflection",
@@ -548,6 +659,9 @@ function _diagnose_slab(
             "has_studs"     => sr.has_studs,
         ),
     ]
+
+    # Attach live corpus citations (explanation-layer only; ratios untouched).
+    _ground_checks!(checks)
 
     # Reinforcement summary — expose bar sizes, spacings, and provided/required ratios
     rebar_summary = _slab_rebar_summary(sr, du)
@@ -632,6 +746,12 @@ function _diagnose_foundation(
     D_disp     = _to_display(du, :thickness, fr.depth)
     react_disp = _to_display(du, :force, fr.reaction)
 
+    # AUDIT (P0-B): spread footings are reinforced concrete. Soil bearing is a
+    # geotechnical/allowable-stress check governed by IBC 2021 Table 1806.2 (NOT a
+    # concrete member strength — and IBC is absent from the corpus, so it grounds
+    # UNRESOLVED rather than mis-cited). The two structural footing checks are
+    # concrete: two-way punching (ACI 318-19 §22.6.5) and flexure (§15.4). Every
+    # emitted clause is the same code family that produced its ratio.
     checks = Dict{String, Any}[
         Dict{String, Any}(
             "name"        => "bearing",
@@ -657,6 +777,9 @@ function _diagnose_foundation(
             "governing"   => governing == "flexure_fdn",
         ),
     ]
+
+    # Attach live corpus citations (explanation-layer only; ratios untouched).
+    _ground_checks!(checks)
 
     return Dict{String, Any}(
         "id"             => idx,
@@ -1508,6 +1631,8 @@ function design_to_diagnose(design::BuildingDesign; report_units=nothing)
     du = report_units === nothing ? params.display_units : DisplayUnits(report_units)
     struc = design.structure
 
+    # Per-element serializers attach live corpus citations to each check dict
+    # (explanation-layer only, via `_ground_checks!` in corpus_grounding.jl).
     col_dicts  = _diagnose_columns(design, struc, du)
     beam_dicts = _diagnose_beams(design, struc, du)
     slab_dicts = _diagnose_slabs(design, struc, du)

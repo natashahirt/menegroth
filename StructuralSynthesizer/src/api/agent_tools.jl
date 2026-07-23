@@ -754,6 +754,9 @@ function agent_explain_trace_lookup(
                 "demand" => c.demand,
                 "capacity" => c.capacity,
                 "code_clause" => c.code_clause,
+                # Explanation-layer corpus grounding (Harness Phase 1, P1):
+                # live {source_id, clause, page} locator; no numeric effect.
+                "citation" => ground_check(c.name, c.code_clause),
             ) for c in expl.checks],
         )
     else
@@ -824,6 +827,9 @@ function agent_explain_trace_lookup(
                 "demand" => c.demand,
                 "capacity" => c.capacity,
                 "code_clause" => c.code_clause,
+                # Explanation-layer corpus grounding (Harness Phase 1, P1):
+                # live {source_id, clause, page} locator; no numeric effect.
+                "citation" => ground_check(c.name, c.code_clause),
             ) for c in expl.checks],
         )
     end

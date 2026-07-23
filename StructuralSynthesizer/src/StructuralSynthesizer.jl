@@ -255,6 +255,8 @@ export engineering_report
 # --- API server ---
 export register_routes!, json_to_skeleton, json_to_params, design_to_json, design_to_diagnose
 export validate_input, compute_geometry_hash
+# --- Harness Phase 1: unified design-state projection + corpus grounding ---
+export design_to_design_state, ground_check, citation_id
 export APIInput, APIOutput, APIError, APIParams
 export status_string, SERVER_STATUS  # for lightweight bootstrap /status delegation
 export DESIGN_CACHE

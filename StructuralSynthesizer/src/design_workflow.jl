@@ -1719,6 +1719,64 @@ function _populate_slab_results!(design::BuildingDesign, struc::BuildingStructur
     end
 end
 
+"""
+    _steel_column_ϕPnc(sec, L; Kx=1.0, Ky=1.0) -> Union{Float64, Nothing}
+
+Screening-diagnostic design axial compressive strength `ϕPnc` [N] for a steel
+column, governed by FLEXURAL BUCKLING (AISC 360-16 §E3), not gross yield.
+
+This reuses the SAME vetted routine the feasibility checker uses
+(`StructuralSizer.get_ϕPn`, `AISCChecker.is_feasible`): it takes
+`ϕPnc = min(ϕPn_x, ϕPn_y, ϕPn_z)` over strong-axis flexural (§E3, Eq. E3-2/E3-3),
+weak-axis flexural (§E3), and torsional (§E4) buckling, with the resistance
+factor `φc = 0.90` (§E1). NO limit-state equation is defined or recomputed here —
+this is read/reuse of the Chapter E code.
+
+`L` is the column's real (unbraced) length; effective lengths are
+`Lc_x = Kx·L` and `Lc_y = Ky·L`, and the torsional check is evaluated at `Lc_y`,
+mirroring `AISCChecker.is_feasible` exactly (which passes `Lc_y` to the
+`:torsional` axis). All three steel section types (`ISymmSection`,
+`HSSRectSection`, `HSSRoundSection`) have a `get_ϕPn` method; the HSS methods map
+`:torsional` onto `:weak`.
+
+Returns `nothing` ONLY when the section type/axis is genuinely unsupported by
+`get_ϕPn` — a `MethodError` (e.g. a non-`Metal` material, or arithmetic on an
+unpopulated `Cw`/`J` field of a built-up `ISymmSection`) or a missing-field
+access. Any OTHER exception is re-thrown so real bugs surface rather than being
+silently swallowed. The caller treats `nothing` as UNVERIFIED (a NaN sentinel),
+NOT as a safe capacity — it must never fall back to an unconservative estimate.
+
+# Citations
+- AISC 360-16 §E3 (Eq. E3-2/E3-3) flexural buckling, §E4 torsional buckling,
+  §E7 effective area, §E1 `φc = 0.90` (corpus: aisc-360-16, §E3 p.35, §E1 p.33).
+  Implemented in `StructuralSizer.get_ϕPn` — reused here, not re-derived.
+"""
+function _steel_column_ϕPnc(sec, L; Kx::Float64 = 1.0, Ky::Float64 = 1.0)::Union{Float64, Nothing}
+    (hasproperty(sec, :material) && !isnothing(sec.material)) || return nothing
+    try
+        mat = sec.material
+        Lc_x = Kx * L
+        Lc_y = Ky * L
+        # Mirror AISCChecker.is_feasible: min over strong/weak flexural (§E3) and
+        # torsional (§E4). Torsional axis uses Lc_y, exactly as the checker does.
+        ϕPn_x = ustrip(u"N", StructuralSizer.get_ϕPn(sec, mat, Lc_x; axis = :strong))
+        ϕPn_y = ustrip(u"N", StructuralSizer.get_ϕPn(sec, mat, Lc_y; axis = :weak))
+        ϕPn_z = ustrip(u"N", StructuralSizer.get_ϕPn(sec, mat, Lc_y; axis = :torsional))
+        return min(ϕPn_x, ϕPn_y, ϕPn_z)
+    catch e
+        # Narrow catch: only the genuinely-unsupported cases degrade to `nothing`.
+        # A `MethodError` covers a non-`Metal` material and arithmetic on an
+        # unpopulated `Cw`/`J` (`nothing`) field; a `FieldError` (Julia ≥ 1.11)
+        # covers a section type that lacks a field `get_ϕPn` needs. Anything else
+        # is a genuine bug and is re-thrown so it is not silently swallowed.
+        if e isa MethodError || (isdefined(Base, :FieldError) && e isa Base.FieldError)
+            @debug "Steel column ϕPn diagnostic unsupported for this section/axis" exception = (e, catch_backtrace())
+            return nothing
+        end
+        rethrow()
+    end
+end
+
 """Populate column design results from struc.columns.
 
 Extracts axial and moment demands from the Asap model, merges punching shear
@@ -1832,32 +1890,107 @@ function _populate_column_results!(design::BuildingDesign, struc::BuildingStruct
                    col_sec isa StructuralSizer.HSSRoundSection
 
         Pu_N_val = ustrip(u"N", result.Pu)
-        Mu_Nm_val = ustrip(u"N*m", result.Mu_x)
+        Mu_Nm_val = ustrip(u"N*m", result.Mu_x)     # strong-axis moment demand
+        Mu_y_Nm_val = ustrip(u"N*m", result.Mu_y)   # weak-axis moment demand
 
         if is_steel && hasproperty(col_sec, :A) && hasproperty(col_sec, :material) &&
            !isnothing(col_sec.material)
-            # AISC 360-16 §E1 — φPn = 0.9 × Fcr × Ag  (using Fy as upper bound)
+            # ─── Steel column axial capacity — AISC 360-16 Chapter E ───
+            # The governing limit state is FLEXURAL BUCKLING (§E3, Eq. E3-2/E3-3),
+            # NOT gross yield. Columns do not retain the engine's sized capacity
+            # (neither `Column` nor `ColumnDesignResult` stores a sizer_result or a
+            # cached ϕPn/utilization), so the screening ratio is recomputed here
+            # with the SAME vetted routine the feasibility check uses —
+            # `StructuralSizer.get_ϕPn` (φc = 0.90), taking the minimum over
+            # strong/weak flexural (§E3) and torsional (§E4) buckling
+            # (see `_steel_column_ϕPnc` and `AISCChecker.is_feasible`). This is
+            # read/reuse of the Chapter E limit-state code, not a new equation.
+            # (corpus: aisc-360-16 — §E3 p.35, §E1 φc=0.90 p.33.)
             Fy_Pa = ustrip(u"Pa", col_sec.material.Fy)
-            A_m2 = ustrip(u"m^2", col_sec.A)
-            φPn = 0.9 * Fy_Pa * A_m2  # N (conservative: ignores buckling reduction)
-            result.axial_ratio = φPn > 0 ? Pu_N_val / φPn : 0.0
 
-            # AISC 360-16 §F2-1 — φMn = 0.9 × Fy × Zx
-            if hasproperty(col_sec, :Zx)
-                Zx_m3 = ustrip(u"m^3", col_sec.Zx)
-                φMn = 0.9 * Fy_Pa * Zx_m3  # N·m
+            # Prefer the engine's real effective-length factors. `MemberBase`
+            # defaults Kx = Ky = 1.0 (braced frame); the real feasibility check
+            # uses these SAME Kx/Ky, so this screening ratio tracks it.
+            Kx = col.base.Kx
+            Ky = col.base.Ky
+            ϕPnc = _steel_column_ϕPnc(col_sec, result.height; Kx = Kx, Ky = Ky)
+
+            if isnothing(ϕPnc)
+                # SAFETY — no silent unconservative fallback. The §E3/§E4 buckling
+                # capacity could not be evaluated for this section (e.g. an
+                # unsupported/built-up `ISymmSection` with unpopulated `Cw`/`J`, or
+                # a non-`Metal` material — see `_steel_column_ϕPnc`). We DELIBERATELY
+                # do NOT substitute the gross-yield upper bound φPn = 0.9·Fy·Ag:
+                # that ignores buckling, so it would silently reinstate an
+                # unconservative capacity and could render an unsafe column "OK".
+                # Instead the axial capacity and P-M interaction are marked
+                # UNVERIFIED with a NaN sentinel. Because `NaN ≤ 1.0` is `false`,
+                # `result.ok` (below) cannot become `true`, and the governing-check
+                # / global-ratio paths treat NaN as not-verified rather than
+                # passing. (corpus: aisc-360-16 — §E3 p.35, §E4/§E7.)
+                @warn "Steel column ϕPn (AISC §E3/§E4) unavailable — axial capacity marked UNVERIFIED (NaN), not gross-yield fallback" col_idx section=result.section_size maxlog=8
+                result.axial_ratio = NaN
+                result.interaction_ratio = NaN
             else
-                φMn = 0.0
+                φPn = ϕPnc  # N — §E3 flexural-buckling design strength (φc = 0.90)
+                result.axial_ratio = φPn > 0 ? Pu_N_val / φPn : 0.0
+
+                # Column moment capacities — plastic-moment UPPER BOUNDS (φb = 0.90
+                # per §F1). These IGNORE lateral-torsional buckling (§F2.2) and
+                # flange/web local buckling, so they overstate flexural capacity;
+                # they exist only to feed the coarse interaction screen below. The
+                # engine's real ϕMn is not retained on the column result to reuse.
+                #   Strong axis: Mp,x = Fy·Zx (§F2.1 Eq. F2-1). (aisc-360-16 §F2 p.47.)
+                φMnx = hasproperty(col_sec, :Zx) ?
+                       0.9 * Fy_Pa * ustrip(u"m^3", col_sec.Zx) : 0.0
+                #   Weak axis: Mp,y = Fy·Zy ≤ 1.6·Fy·Sy (§F6.1 Eq. F6-1); the
+                #   1.6·Fy·Sy cap is an I-shape/channel limit, so it is applied only
+                #   to `ISymmSection`. (aisc-360-16 §F6 p.56.)
+                φMny = if hasproperty(col_sec, :Zy)
+                    Mpy = Fy_Pa * ustrip(u"m^3", col_sec.Zy)
+                    if col_sec isa StructuralSizer.ISymmSection && hasproperty(col_sec, :Sy)
+                        Mpy = min(Mpy, 1.6 * Fy_Pa * ustrip(u"m^3", col_sec.Sy))  # §F6-1 cap
+                    end
+                    0.9 * Mpy
+                else
+                    0.0
+                end
+
+                # COARSE SCREEN ONLY — AISC 360-16 §H1 biaxial P-M interaction
+                # (Eq. H1-1a / H1-1b), mirroring `check_PMxMy_interaction`. It now
+                # includes BOTH strong- and weak-axis moments (dropping `Mu_y` was
+                # unconservative), using the §E3-based ϕPnc for the axial term.
+                # It still OMITS B1 P-δ moment amplification (App. 8) and LTB
+                # (§F2.2) and uses plastic-moment upper-bound capacities, so it is
+                # NOT the authoritative feasibility verdict — that is
+                # `AISCChecker.is_feasible`. Because every term is non-negative,
+                # adding `Mu_y` can only RAISE this ratio, keeping the screen
+                # conservative relative to the prior strong-axis-only form.
+                # (corpus: aisc-360-16 — §H1 p.77.)
+                Pr_Pc  = φPn  > 0 ? Pu_N_val    / φPn  : 0.0
+                Mrx_Mc = φMnx > 0 ? Mu_Nm_val   / φMnx : 0.0
+                Mry_Mc = φMny > 0 ? Mu_y_Nm_val / φMny : 0.0
+                if Pr_Pc >= 0.2
+                    result.interaction_ratio = Pr_Pc + (8.0 / 9.0) * (Mrx_Mc + Mry_Mc)  # Eq. H1-1a
+                else
+                    result.interaction_ratio = Pr_Pc / 2.0 + Mrx_Mc + Mry_Mc            # Eq. H1-1b
+                end
             end
 
-            # AISC H1-1a/b P-M interaction
-            Pr_Pc = φPn > 0 ? Pu_N_val / φPn : 0.0
-            Mr_Mc = φMn > 0 ? Mu_Nm_val / φMn : 0.0
-            if Pr_Pc >= 0.2
-                result.interaction_ratio = Pr_Pc + (8.0 / 9.0) * Mr_Mc  # H1-1a
-            else
-                result.interaction_ratio = Pr_Pc / 2.0 + Mr_Mc          # H1-1b
-            end
+        elseif is_steel
+            # SAFETY — steel section that FAILS the capacity-input guard above (missing `:A`,
+            # missing `:material`, or `material === nothing`). Such a section is NOT RC either,
+            # so without this branch NEITHER path would run and `axial_ratio`/`interaction_ratio`
+            # would keep their struct default `0.0` → `result.ok = true` → a steel column would
+            # SILENTLY PASS at ratio 0 with NO capacity check. Route it to the SAME UNVERIFIED
+            # sentinel as the `isnothing(ϕPnc)` case: mark axial/P-M as NaN so `result.ok` cannot
+            # become `true` (NaN ≤ 1.0 is `false`) and the diagnose/summary paths label it
+            # `axial_compression_unverified`. We deliberately do NOT substitute the gross-yield
+            # bound φPn = 0.9·Fy·Ag (it ignores buckling and could render an unsafe column "OK").
+            # (corpus: aisc-360-16 — §E3 p.35, §E4/§E7; same rationale as the ϕPnc-unavailable case.)
+            @warn "Steel column capacity inputs unavailable (missing area/material) — axial capacity marked UNVERIFIED (NaN), not gross-yield fallback" col_idx section=result.section_size maxlog=8
+            result.axial_ratio = NaN
+            result.interaction_ratio = NaN
 
         elseif !is_steel && !isnothing(col.c1) && !isnothing(col.c2)
             # ACI 318-19 §22.4.2 — RC columns (rectangular or circular)
@@ -2149,8 +2282,17 @@ function _compute_design_summary!(design::BuildingDesign, struc::BuildingStructu
         r_ax = col_result.axial_ratio
         r_int = col_result.interaction_ratio
         r_punch = (!isnothing(col_result.punching) ? col_result.punching.ratio : 0.0)
-        r_glob = max(r_ax, r_int, r_punch)
-        g_glob = if r_ax >= r_int && r_ax >= r_punch
+        # An UNVERIFIED axial/interaction ratio (NaN sentinel — the §E3/§E4 buckling
+        # capacity was unavailable; see `_populate_column_results!`) must NOT be
+        # treated as a low/passing ratio. Exclude NaN terms from the numeric
+        # aggregate (so they can never poison `glob_ratio`/`fail_ratio` with NaN)
+        # and force the column to register as a definite failure below.
+        axial_unverified = isnan(r_ax) || isnan(r_int)
+        finite_ratios = filter(!isnan, (r_ax, r_int, r_punch))
+        r_glob = isempty(finite_ratios) ? 0.0 : maximum(finite_ratios)
+        g_glob = if axial_unverified
+            "axial_compression_unverified"
+        elseif r_ax >= r_int && r_ax >= r_punch
             "axial_compression"
         elseif r_int >= r_punch
             "pm_interaction"
@@ -2164,11 +2306,11 @@ function _compute_design_summary!(design::BuildingDesign, struc::BuildingStructu
         end
         if !col_result.ok
             all_ok = false
-            r_fail = max(r_ax, r_int, r_punch)
-            if r_fail < 1.0
-                r_fail = 1.0
-            end
-            lab_fail = "Column $idx ($(column_diagnostic_governing_check(col_result)))"
+            # Failed (or unverified) column reports a ratio ≥ 1.0, never NaN.
+            r_fail = max(r_glob, 1.0)
+            gcheck = axial_unverified ? "axial_compression_unverified" :
+                     column_diagnostic_governing_check(col_result)
+            lab_fail = "Column $idx ($gcheck)"
             if r_fail > fail_ratio || isempty(fail_elem)
                 fail_ratio = max(fail_ratio, r_fail)
                 fail_elem = lab_fail

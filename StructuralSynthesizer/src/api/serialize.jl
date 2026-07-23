@@ -430,7 +430,19 @@ function _serialize_visualization_frame_elements(design::BuildingDesign, model, 
     for (col_idx, result) in design.columns
         col_idx > length(struc.columns) && continue
         col = struc.columns[col_idx]
-        ratio = max(result.axial_ratio, result.interaction_ratio)
+        # An UNVERIFIED column (steel §E3/§E4 buckling capacity unavailable — see
+        # `_populate_column_results!`) carries a `NaN` axial/interaction sentinel. A raw
+        # `max(NaN, …) == NaN` would flow through `_round_val` → `nothing` (line ~612) and
+        # then into the strict `utilization_ratio` field, throwing `convert(Float64, nothing)`
+        # and crashing GET /result on the DEFAULT (`skip_visualization=false`) path. Exclude
+        # NaN from the aggregate so it can never poison the max, then force a failing sentinel
+        # (≥ 1.0) for a not-ok element so the element renders as failing/attention — never as
+        # `0.0` (which would read as safe). Mirrors `_compute_design_summary!` / `_diagnose_column`.
+        finite_ratios = filter(!isnan, (result.axial_ratio, result.interaction_ratio))
+        ratio = isempty(finite_ratios) ? 0.0 : maximum(finite_ratios)
+        if !result.ok && ratio < 1.0
+            ratio = 1.0
+        end
         sec_obj = result.section_obj
         mat_obj = !isnothing(col.concrete) ? col.concrete :
                   (!isnothing(sec_obj) && hasproperty(sec_obj, :material) ? getproperty(sec_obj, :material) : nothing)

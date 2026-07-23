@@ -20,6 +20,7 @@ address it. Used by `_diagnose_column`, etc. to populate per-element `levers`.
 """
 const LEVER_MAP = Dict{String, Vector{String}}(
     "axial_compression"   => ["column_catalog", "fc_column"],
+    "axial_compression_unverified" => ["column_catalog"],
     "pm_interaction"      => ["column_catalog", "fc_column"],
     "punching_shear_col"  => ["punching_strategy", "column_catalog"],
     "flexure"             => ["beam_catalog", "fc_beam"],
@@ -45,6 +46,14 @@ const LIMIT_STATE_DESCRIPTIONS = Dict{String, String}(
         "The column is carrying load near its maximum axial capacity. " *
         "ACI 318-19 §22.4.2: Pn = 0.85·f'c·(Ag – As) + fy·As. " *
         "A larger section or higher-strength concrete raises this ceiling.",
+
+    "axial_compression_unverified" =>
+        "The column's axial-compression capacity could NOT be verified. For a steel column " *
+        "the AISC 360-16 §E3/§E4 flexural/torsional-buckling strength was unavailable for this " *
+        "section (e.g. an unsupported/built-up shape or a section with no material assigned), so " *
+        "the axial and P-M interaction ratios are reported as null rather than substituting the " *
+        "unconservative gross-yield bound. This column is treated as FAILING until a section with " *
+        "an evaluable buckling capacity is chosen; it is not a passing result.",
 
     "pm_interaction" =>
         "The column is under simultaneous axial compression and bending — " *
@@ -149,6 +158,30 @@ _area_unit_str(du)     = _is_imperial(du) ? "ft2" : "m2"
 
 """Round numeric value, preserving `nothing` as `nothing`."""
 _round_or_nothing(x; digits=3) = isnothing(x) ? nothing : _round_val(x; digits=digits)
+
+"""
+    _serialized_ratio(d, key; missing_default=0.0, unverified=1.0) -> Float64
+
+Read a demand/capacity ratio from an already-serialized element `Dict` for arithmetic or
+comparison, mapping an UNVERIFIED value to an ATTENTION/failing sentinel instead of `0.0`.
+
+`_round_val` serializes a non-finite ratio (`NaN`/`Inf`) as `nothing` (JSON `null`), and a
+steel column whose §E3/§E4 buckling capacity was unavailable carries `NaN` axial/interaction
+ratios (see `_populate_column_results!`). A present-but-`nothing` value therefore means
+"unverified", NOT "zero utilization". Plain `get(d, key, 0.0)` is unsafe on two counts:
+(1) the `0.0` default applies only to a MISSING key, so a present `nothing` slips through and
+then throws under `max`/comparison (`max(nothing, …)` is a `MethodError`); and (2) treating an
+unverified column as ratio `0.0` reads as maximum headroom (safe) in any "worst element" /
+lever selection — the opposite of the truth. This maps `nothing`/non-finite to `unverified`
+(default `1.0`, a failing ratio consistent with the summary path) and a genuinely MISSING key to
+`missing_default`.
+"""
+function _serialized_ratio(d, key; missing_default::Float64 = 0.0, unverified::Float64 = 1.0)::Float64
+    haskey(d, key) || return missing_default
+    v = d[key]
+    (v === nothing || (v isa Real && !isfinite(v))) && return unverified
+    return Float64(v)
+end
 
 # ─── Governing check helpers ──────────────────────────────────────────────────
 
@@ -309,17 +342,25 @@ never by string position — the exact P0-A safety fix already applied to beams 
 (ACI) clause and vice versa.
 
 The capacity ratios these clauses annotate are computed in `design_workflow.jl`:
-steel columns use AISC 360-16 §E1 (axial, φPn = 0.9·Fy·Ag as a conservative
-Chapter-E general-provisions estimate) and §H1 (P-M interaction, H1-1a/b);
-RC columns use ACI 318-19 §22.4.2 (axial) / §22.4 (combined flexure-axial).
-So the emitted clauses match the code that produced each ratio.
+steel columns use AISC 360-16 §E3 (axial — the GOVERNING flexural-buckling limit
+state, computed via `StructuralSizer.get_ϕPn`, φc = 0.90) and §H1 (P-M
+interaction, H1-1a/b); RC columns use ACI 318-19 §22.4.2 (axial) / §22.4
+(combined flexure-axial). So the emitted clauses match the code that produced
+each ratio — the axial clause is §E3, not §E1, because the ratio reflects
+flexural buckling, not §E1's general provisions / gross-yield.
+
+Note: `StructuralSizer.get_ϕPn` returns Pn = Fcr·Ae, i.e. it also applies the
+§E7 effective-area reduction on top of the §E3/§E4 buckling stress. §E3 is cited
+as the PRIMARY (flexural-buckling) limit state because it governs the common
+non-slender case (Ae = Ag); §E7 governs only slender-element / thin-HSS-wall
+cases and is not separately wired (see `corpus_grounding.jl`).
 
 Section tokens follow the AISC 360-16 / ACI 318-19 chapter organization
-(corpus: aisc-360-16 — E1 p.33, H1 p.77 confirmed via corpus.get_clause;
+(corpus: aisc-360-16 — E3 p.35, H1 p.77 confirmed via corpus.get_clause;
 aci-318-19 — §22.4 p.400 confirmed):
-- ISymm / rectangular HSS / round HSS (steel): axial §E1, P-M §H1. Chapter E
-  (general compression) and Chapter H1 (combined forces) are not shape-specific,
-  so all steel column shapes share these tokens. §E1 grounds to a confirmed page;
+- ISymm / rectangular HSS / round HSS (steel): axial §E3, P-M §H1. Chapter E3
+  (flexural buckling) and Chapter H1 (combined forces) are not shape-specific,
+  so all steel column shapes share these tokens. §E3 grounds to a confirmed page;
   if it were not in the corpus `ground_check` would leave it explicitly UNRESOLVED
   rather than mis-cite (never a concrete clause).
 - RC (rectangular / circular): axial §22.4.2, P-M §22.4.
@@ -335,7 +376,7 @@ function _column_code_clauses(cr::ColumnDesignResult)::Tuple{String, String}
     if so isa StructuralSizer.ISymmSection ||
        so isa StructuralSizer.HSSRectSection ||
        so isa StructuralSizer.HSSRoundSection
-        return ("AISC 360-16 E1", "AISC 360-16 H1")
+        return ("AISC 360-16 E3", "AISC 360-16 H1")
     elseif so isa StructuralSizer.RCColumnSection || so isa StructuralSizer.RCCircularSection
         return ("ACI 318-19 §22.4.2", "ACI 318-19 §22.4")
     else
@@ -360,7 +401,24 @@ function _diagnose_column(
 
     governing = _column_governing_check(cr)
     punch_ratio = isnothing(cr.punching) ? 0.0 : cr.punching.ratio
-    max_ratio   = max(cr.axial_ratio, cr.interaction_ratio, punch_ratio)
+    # An UNVERIFIED column carries the NaN axial/interaction sentinel (§E3/§E4 buckling
+    # capacity unavailable — see `_populate_column_results!`). Exclude NaN terms from the
+    # numeric aggregate so `governing_ratio` never serializes to `nothing` (which would poison
+    # every downstream max/argmax that reads it), then force a failing ratio ≥ 1.0, mirroring
+    # `_compute_design_summary!`. The per-check `ratio`/`headroom` fields stay null (honest:
+    # the ratio truly is unverified), but the element-level `governing_ratio` is always finite.
+    #
+    # LABEL/LEVER PRIORITY (intentional, not a bug): when a column is BOTH unverified-axial
+    # AND punching-failing, `column_diagnostic_governing_check` returns
+    # `"axial_compression_unverified"`, so `governing` (and hence the `LEVER_MAP` levers below)
+    # prioritizes resize-and-re-verify over `"punching_strategy"`. That ordering is defensible —
+    # you cannot trust a punching design around a column whose own axial capacity is unverified;
+    # fix the section first, then re-check punching. Crucially, `punch_ratio` is kept in
+    # `finite_ratios`, so `governing_ratio` below still carries the REAL punching failure
+    # magnitude (finite, ≥ 1.0) even though the label points at the unverified axial state — the
+    # failure severity is never understated.
+    finite_ratios = filter(!isnan, (cr.axial_ratio, cr.interaction_ratio, punch_ratio))
+    max_ratio   = isempty(finite_ratios) ? 0.0 : maximum(finite_ratios)
     if !cr.ok && max_ratio < 1.0
         max_ratio = 1.0
     end
@@ -1049,9 +1107,12 @@ function _build_goal_recommendations(
         if gc == "punching_shear_col"
             ps = _punching_strategy_code(params)
             if !isnothing(ps) && ps != "reinforce_first"
+                # `axial_ratio`/`interaction_ratio` serialize to `nothing` for an unverified
+                # column; `_serialized_ratio` maps that to a failing sentinel (≥ 1.0) so the
+                # `max` never runs arithmetic on `nothing` and never reads unverified as safe.
                 pm_ratio = max(
-                    get(worst_col, "axial_ratio",       0.0),
-                    get(worst_col, "interaction_ratio", 0.0),
+                    _serialized_ratio(worst_col, "axial_ratio"),
+                    _serialized_ratio(worst_col, "interaction_ratio"),
                 )
                 push!(recs, Dict{String, Any}(
                     "goal"             => "reduce_column_size",
@@ -1238,8 +1299,11 @@ function _diagnose_lever_impacts(
     if !isnothing(ps) && ps != "reinforce_first" && !isempty(col_dicts)
         punching_cols = filter(d -> get(d, "governing_check", "") == "punching_shear_col", col_dicts)
         if !isempty(punching_cols)
+            # Use `_serialized_ratio` so a column whose axial/interaction ratio serialized to
+            # `nothing` (unverified §E3/§E4 buckling capacity) contributes a failing sentinel
+            # (≥ 1.0) rather than throwing under `max` or being read as zero utilization.
             pm_ratios = [
-                max(get(d, "axial_ratio", 0.0), get(d, "interaction_ratio", 0.0))
+                max(_serialized_ratio(d, "axial_ratio"), _serialized_ratio(d, "interaction_ratio"))
                 for d in punching_cols
             ]
             push!(impacts, Dict{String, Any}(

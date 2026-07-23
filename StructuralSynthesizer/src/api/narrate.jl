@@ -146,8 +146,16 @@ function _deterministic_narration(
     section     = get(elem, "section", "")
     scale_ref   = !isempty(string(section)) ? "the section is $section" : ""
 
+    # A per-check `ratio` serializes to `nothing` for an UNVERIFIED element (e.g. a steel
+    # column whose §E3/§E4 buckling capacity was unavailable — `_round_val(NaN)` → `nothing`).
+    # `Float64(nothing)` would throw, so coerce a non-`Real` (or missing) ratio to a readable
+    # "n/a" token instead of crashing the deterministic narration.
+    _fmt_check_ratio(c) = begin
+        r = get(c, "ratio", get(c, "governing_ratio", nothing))
+        r isa Real ? string(round(Float64(r); digits=2)) : "n/a"
+    end
     checks_summary = if !isempty(checks)
-        join([string(get(c, "name", "?"), ":", round(Float64(get(c, "ratio", get(c, "governing_ratio", 0.0))); digits=2)) for c in checks[1:min(end, 5)]], ", ")
+        join([string(get(c, "name", "?"), ":", _fmt_check_ratio(c)) for c in checks[1:min(end, 5)]], ", ")
     else
         "no detailed checks available"
     end

@@ -284,7 +284,24 @@ function _summary_columns(design::BuildingDesign, du::DisplayUnits)
     interaction = [cr.interaction_ratio for (_, cr) in col_vec]
     axial = [cr.axial_ratio for (_, cr) in col_vec]
     sections = unique([cr.section_size for (_, cr) in col_vec if !isempty(cr.section_size)])
-    worst_idx = argmax(interaction)
+
+    # An UNVERIFIED column (steel §E3/§E4 buckling capacity unavailable — see
+    # `_populate_column_results!`) carries a `NaN` axial/interaction sentinel. Two hazards
+    # here, both mirroring the guard in `_compute_design_summary!`:
+    #   (1) `minimum`/`maximum` PROPAGATE NaN — a single unverified column would collapse the
+    #       entire reported range to `null`, hiding the verified columns' real ratios;
+    #   (2) `argmax` treats NaN as the maximum, so it would silently pick the unverified column
+    #       as the numeric "worst" and then report its ratio as `null`.
+    # Fix: compute the numeric range and worst over FINITE values only, while STILL counting
+    # the unverified column as failing (`cr.ok == false` ⇒ it is in `failing_details` and the
+    # `passing`/`failing` tallies) and surfacing it via `n_unverified`.
+    n_unverified = count(((_, cr),) -> isnan(cr.axial_ratio) || isnan(cr.interaction_ratio), col_vec)
+    finite_axial = filter(!isnan, axial)
+    finite_interaction = filter(!isnan, interaction)
+    # Index of the largest FINITE interaction ratio (NaN → -Inf so an unverified column never
+    # wins). Falls back to the first column when every column is unverified.
+    worst_idx = isempty(finite_interaction) ? 1 :
+        argmax([isnan(r) ? -Inf : r for r in interaction])
 
     failing_details = [
         Dict{String, Any}(
@@ -302,11 +319,15 @@ function _summary_columns(design::BuildingDesign, du::DisplayUnits)
         "count"   => n,
         "passing" => passing,
         "failing" => n - passing,
+        "n_unverified" => n_unverified,
         "sections_used" => sections,
+        # `interaction[worst_idx]` is finite unless every column is unverified (then null).
         "worst_interaction" => Dict("id" => col_vec[worst_idx][1], "ratio" => _round_val(interaction[worst_idx])),
         "ratio_range" => Dict(
-            "axial"       => Dict("min" => _round_val(minimum(axial)),       "max" => _round_val(maximum(axial))),
-            "interaction" => Dict("min" => _round_val(minimum(interaction)), "max" => _round_val(maximum(interaction))),
+            "axial"       => Dict("min" => isempty(finite_axial) ? nothing : _round_val(minimum(finite_axial)),
+                                  "max" => isempty(finite_axial) ? nothing : _round_val(maximum(finite_axial))),
+            "interaction" => Dict("min" => isempty(finite_interaction) ? nothing : _round_val(minimum(finite_interaction)),
+                                  "max" => isempty(finite_interaction) ? nothing : _round_val(maximum(finite_interaction))),
         ),
         "failing_details" => failing_details,
     )

@@ -1001,8 +1001,14 @@ Base.@kwdef struct APIColumnResult
     c1::Float64 = 0.0
     c2::Float64 = 0.0
     shape::String = "rectangular"
-    axial_ratio::Float64 = 0.0
-    interaction_ratio::Float64 = 0.0
+    # Nullable: an UNVERIFIED column (steel §E3/§E4 buckling capacity unavailable) carries a
+    # NaN axial/interaction sentinel, which `_round_val` serializes as `nothing` (JSON null).
+    # These MUST be `Union{Float64, Nothing}` — a strict `Float64` field would throw a
+    # `MethodError` (`convert(Float64, nothing)`) in `_serialize_columns`, crashing GET /result
+    # for that column. A `null` ratio with `ok = false` reports it honestly as unverified/failing
+    # and can never be read as a passing `0.0` utilization.
+    axial_ratio::Union{Float64, Nothing} = 0.0
+    interaction_ratio::Union{Float64, Nothing} = 0.0
     ok::Bool = true
 end
 
@@ -1066,7 +1072,14 @@ Base.@kwdef struct APIVisualizationFrameElement
     node_start::Int = 0            # 1-based start node index
     node_end::Int = 0              # 1-based end node index
     element_type::String = ""     # "beam", "column", "strut", or "other"
-    utilization_ratio::Float64 = 0.0
+    # Nullable (mirrors `APIColumnResult`): an UNVERIFIED column (steel §E3/§E4 buckling
+    # capacity unavailable) carries a NaN axial/interaction sentinel that `_round_val`
+    # serializes to `nothing`. `_serialize_visualization_frame_elements` already guards the
+    # aggregate to a finite failing sentinel (≥ 1.0), so this never receives `nothing` in
+    # practice — but a strict `Float64` here would throw `convert(Float64, nothing)` and crash
+    # GET /result if any future path let a non-finite ratio through. `null` + `ok = false`
+    # renders as failing/attention and can never be read as a passing `0.0` utilization.
+    utilization_ratio::Union{Float64, Nothing} = 0.0
     ok::Bool = true
     section_name::String = ""      # e.g., "W14x90", "16x16"
     material_color_hex::String = "" # Optional material display color (e.g. "#6E6E6E")

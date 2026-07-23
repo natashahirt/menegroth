@@ -62,15 +62,26 @@ const CORPUS_CITATIONS = Dict{Tuple{String, String}, NamedTuple{(:source_id, :pa
     # Reachable emitters (see StructuralSizer AISCChecker.explain_feasibility,
     # StructuralSynthesizer _diagnose_beam / _diagnose_column): beam flexure →
     # "AISC 360-16 F2", beam shear → "AISC 360-16 G2", steel-column axial
-    # compression → "AISC 360-16 E1" (Chapter E general provisions, the section the
-    # column capacity estimate in design_workflow.jl cites), and P-M interaction →
-    # "AISC 360-16 H1". Pages verified against the corpus TOC via corpus.get_clause
-    # (E1 p.33, F2 p.47, G2 p.70, H1 p.77).
+    # compression → "AISC 360-16 E3" (flexural buckling — the GOVERNING limit state
+    # of the column axial ratio computed in design_workflow.jl via
+    # `StructuralSizer.get_ϕPn`; §E1 is the Chapter E general provision that fixes
+    # φc = 0.90), and P-M interaction → "AISC 360-16 H1". Pages verified against the
+    # corpus TOC via corpus.get_clause (E1 p.33, E3 p.35, F2 p.47, G2 p.70, H1 p.77;
+    # the TOC lists "E3. Flexural Buckling … 35").
+    # NOTE (§E7): `StructuralSizer.get_ϕPn` computes Pn = Fcr·Ae (§E7 Eq. E7-1),
+    # i.e. it applies the §E7 EFFECTIVE-AREA reduction on top of the §E3/§E4
+    # buckling stress. §E3 is deliberately cited as the PRIMARY (flexural-buckling)
+    # limit state for the column axial ratio because that governs the common
+    # non-slender rolled-W case (where Ae = Ag). §E7 is the governing provision
+    # only for slender-element sections and thin HSS walls; it is not separately
+    # wired as its own citation, so the §E3 reference stands in for the whole
+    # Chapter E axial-compression computation. (corpus: aisc-360-16 — §E7 p.42.)
     # Shape-specific steel flexure/shear provisions the checker also implements
     # (HSS: F7/F8, G4/G5) are intentionally NOT wired here: their pages are
     # unconfirmed, so `ground_check` leaves them explicitly unresolved rather than
     # citing the wrong page — never mis-attributing them to a confirmed section.
-    ("AISC 360-16", "E1") => (source_id = "aisc-360-16", page = 33),   # Compression — General Provisions (axial)
+    ("AISC 360-16", "E1") => (source_id = "aisc-360-16", page = 33),   # Compression — General Provisions (φc = 0.90)
+    ("AISC 360-16", "E3") => (source_id = "aisc-360-16", page = 35),   # Flexural buckling — governing column axial limit state
     ("AISC 360-16", "F2") => (source_id = "aisc-360-16", page = 47),   # Flexure — compact I-shapes / LTB
     ("AISC 360-16", "G2") => (source_id = "aisc-360-16", page = 70),   # Shear — I-shaped members
     ("AISC 360-16", "H1") => (source_id = "aisc-360-16", page = 77),   # Combined flexure + axial (P-M)

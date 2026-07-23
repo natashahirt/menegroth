@@ -1058,8 +1058,20 @@ end
 When `cr.ok`, returns the limit state with the highest demand/capacity ratio. When the column
 fails, returns the check that actually drives failure: ratios above 1.0, or punching with
 `punching.ok == false`, rather than whichever ratio is largest among still-passing checks.
+
+An UNVERIFIED column — one whose §E3/§E4 steel-buckling axial capacity could not be evaluated,
+carrying the `NaN` axial/interaction sentinel set in `_populate_column_results!` — is detected
+FIRST and labeled `"axial_compression_unverified"`. Without this guard every `NaN` comparison
+below is `false`, so the function would fall through to the else and MISLABEL the column
+`"punching_shear_col"`. The returned label matches the summary path in `_compute_design_summary!`
+exactly, so `/diagnose` and the summary agree on the unverified state.
 """
 function column_diagnostic_governing_check(cr::ColumnDesignResult)::String
+    # UNVERIFIED sentinel takes priority over every ratio comparison: NaN ≥/≤ anything is
+    # `false`, so a fall-through would silently mis-attribute the failure to punching.
+    if isnan(cr.axial_ratio) || isnan(cr.interaction_ratio)
+        return "axial_compression_unverified"
+    end
     punch_r = isnothing(cr.punching) ? 0.0 : cr.punching.ratio
     if cr.ok
         if cr.axial_ratio >= cr.interaction_ratio && cr.axial_ratio >= punch_r

@@ -22,6 +22,27 @@ using Unitful
 _json_safe(x::Float64) = isfinite(x) ? x : (isnan(x) ? nothing : (x > 0 ? 1.0e308 : -1.0e308))
 _json_safe(x) = x
 
+"""
+    _column_orig_ratio(col) -> (orig_ratio::Float64, unverified::Bool)
+
+Baseline governing ratio for a column used by the P-M / catalog experiments.
+
+An UNVERIFIED column (steel §E3/§E4 buckling capacity unavailable — see
+`_populate_column_results!`) carries a `NaN` axial/interaction sentinel. A plain
+`max(col.axial_ratio, col.interaction_ratio)` would then be `NaN`, and EVERY downstream
+`new_ratio < orig_ratio` comparison would be `false` — so the experiment would report
+"not improved" for the very column that most needs resizing, and `round(NaN)` could leak an
+invalid `NaN` JSON token. Map an unverified column to a failing baseline (`1.0`) so a
+verifiable candidate registers as an improvement; callers surface the `unverified` flag (and
+keep the DISPLAYED original ratio null) so the fabricated baseline is never mistaken for a
+real, verified utilization.
+"""
+function _column_orig_ratio(col)
+    unverified = isnan(col.axial_ratio) || isnan(col.interaction_ratio)
+    r = unverified ? 1.0 : max(col.axial_ratio, col.interaction_ratio)
+    return (r, unverified)
+end
+
 # ─── Experimental Setup Reporter ─────────────────────────────────────────────
 
 """
@@ -452,7 +473,11 @@ function experiment_pm_column(
     Pu = col.Pu
     Mux = col.Mu_x
     Muy = col.Mu_y
-    orig_ratio = max(col.axial_ratio, col.interaction_ratio)
+    # Comparison-safe baseline: unverified columns map to a failing `1.0` so the sub-functions'
+    # `new_ratio < orig_ratio` logic still detects a verifiable improvement (see
+    # `_column_orig_ratio`). The sub-functions re-derive `unverified` from `col` to keep the
+    # DISPLAYED original ratio honest (null when unverified).
+    orig_ratio, _ = _column_orig_ratio(col)
 
     mats = design.params.materials
     params = design.params
@@ -558,12 +583,16 @@ function _experiment_pm_rc(
         note = "Rebar count/size scaled heuristically to section dimension. Actual optimizer may choose differently.",
     )
 
+    # `orig_ratio` is a comparison-safe baseline (unverified → `1.0`); keep the DISPLAYED
+    # original ratio null when unverified so a fabricated baseline is never read as real.
+    orig_unverified = isnan(col.axial_ratio) || isnan(col.interaction_ratio)
+    _orig_label = orig_unverified ? "unverified" : string(round(orig_ratio; digits=3))
     _dir = new_ratio < orig_ratio ? "decreased" : (new_ratio == orig_ratio ? "unchanged" : "increased")
     _ok  = expl.passed ? "PASS" : "FAIL"
 
     return Dict{String, Any}(
         "experiment" => "pm_column",
-        "result_summary" => "Ratio $_dir from $(round(orig_ratio; digits=3)) to " *
+        "result_summary" => "Ratio $_dir from $_orig_label to " *
             "$(isfinite(new_ratio) ? string(round(new_ratio; digits=3)) : "∞ (capacity zero)") ($_ok). " *
             "Delta = $(isfinite(new_ratio) ? string(round(new_ratio - orig_ratio; digits=3)) : "N/A").",
         "experimental_setup" => setup,
@@ -578,7 +607,8 @@ function _experiment_pm_rc(
         ),
         "original" => Dict{String, Any}(
             "section" => col.section_size,
-            "ratio" => _json_safe(round(orig_ratio; digits=3)),
+            "ratio" => orig_unverified ? nothing : _json_safe(round(orig_ratio; digits=3)),
+            "unverified" => orig_unverified,
             "ok" => col.ok,
             "governing_check" => column_diagnostic_governing_check(col),
         ),
@@ -595,7 +625,7 @@ function _experiment_pm_rc(
             ) for c in expl.checks],
         ),
         "delta_ratio" => _json_safe(round(new_ratio - orig_ratio; digits=3)),
-        "improved" => new_ratio < orig_ratio,
+        "improved" => isfinite(new_ratio) && new_ratio < orig_ratio,
         "cross_check_caveat" =>
             "SCOPE: P-M interaction only. Punching shear (b₀ depends on column dimensions) " *
             "and foundation sizing are NOT re-checked. Use the punching experiment to test " *
@@ -683,12 +713,16 @@ function _experiment_pm_steel(
         source = "Cached design — column $col_idx",
     )
 
+    # `orig_ratio` is a comparison-safe baseline (unverified → `1.0`); keep the DISPLAYED
+    # original ratio null when unverified so a fabricated baseline is never read as real.
+    orig_unverified = isnan(col.axial_ratio) || isnan(col.interaction_ratio)
+    _orig_label = orig_unverified ? "unverified" : string(round(orig_ratio; digits=3))
     _dir_s = new_ratio < orig_ratio ? "decreased" : (new_ratio == orig_ratio ? "unchanged" : "increased")
     _ok_s  = expl.passed ? "PASS" : "FAIL"
 
     result = Dict{String, Any}(
         "experiment" => "pm_column",
-        "result_summary" => "Ratio $_dir_s from $(round(orig_ratio; digits=3)) to " *
+        "result_summary" => "Ratio $_dir_s from $_orig_label to " *
             "$(isfinite(new_ratio) ? string(round(new_ratio; digits=3)) : "∞ (capacity zero)") ($_ok_s). " *
             "Delta = $(isfinite(new_ratio) ? string(round(new_ratio - orig_ratio; digits=3)) : "N/A").",
         "experimental_setup" => setup,
@@ -704,7 +738,8 @@ function _experiment_pm_steel(
         ),
         "original" => Dict{String, Any}(
             "section" => col.section_size,
-            "ratio" => _json_safe(round(orig_ratio; digits=3)),
+            "ratio" => orig_unverified ? nothing : _json_safe(round(orig_ratio; digits=3)),
+            "unverified" => orig_unverified,
             "ok" => col.ok,
             "governing_check" => column_diagnostic_governing_check(col),
         ),
@@ -1545,7 +1580,11 @@ function experiment_catalog_screen(
         "message" => "Provide at least one candidate section size via `candidates`.",
     )
 
-    orig_ratio = max(col.axial_ratio, col.interaction_ratio)
+    # Comparison-safe baseline; keep the displayed original ratio null when unverified
+    # (a raw `round(NaN)` would otherwise leak an invalid `NaN` JSON token). See
+    # `_column_orig_ratio`. Per-candidate `improved` flags come from `experiment_pm_column`,
+    # which applies the same guard.
+    orig_ratio, orig_unverified = _column_orig_ratio(col)
     is_rc = col.shape in (:rectangular, :circular, :rc_rect, :rc_circular)
 
     results = Dict{String, Any}[]
@@ -1572,7 +1611,17 @@ function experiment_catalog_screen(
         end
     end
 
-    sort!(results; by=r -> get(r, "interaction_ratio", Inf))
+    # An UNVERIFIABLE candidate (its own AISC 360-16 §E3/§E4 buckling capacity unavailable —
+    # `experiment_pm_column` sets `new_ratio = expl.governing_ratio = NaN`, which
+    # `_json_safe(round(NaN)) → nothing`) carries `interaction_ratio == nothing`; an ERRORED
+    # candidate has no `interaction_ratio` key at all. This is exactly reachable when screening
+    # replacement sections for an unverified steel column whose alternates also cannot be
+    # verified. A bare `get(r, "interaction_ratio", Inf)` returns that `nothing`, and
+    # `sort!` would then call `isless(::Nothing, ::Float64)` → `MethodError`, crashing the
+    # catalog screen. Coerce any non-`Real` ratio to `Inf` so unverifiable/errored candidates
+    # sort to the BOTTOM (worst) and are never ranked "best feasible".
+    _cand_sort_key(r) = (v = get(r, "interaction_ratio", Inf); v isa Real ? Float64(v) : Inf)
+    sort!(results; by=_cand_sort_key)
 
     feasible = filter(r -> get(r, "ok", false), results)
 
@@ -1615,7 +1664,8 @@ function experiment_catalog_screen(
         ),
         "original" => Dict{String, Any}(
             "section" => col.section_size,
-            "ratio" => round(orig_ratio; digits=3),
+            "ratio" => orig_unverified ? nothing : round(orig_ratio; digits=3),
+            "unverified" => orig_unverified,
             "ok" => col.ok,
             "governing_check" => column_diagnostic_governing_check(col),
         ),

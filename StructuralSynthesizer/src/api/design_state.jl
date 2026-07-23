@@ -29,6 +29,11 @@ using OrderedCollections: OrderedDict
 
 const DESIGN_STATE_SCHEMA = "design-state/v1"
 
+# Top-level key holding the NON-HASHED envelope (wall-clock `generated_at`). It is
+# excluded from the hashable content bytes so two structurally identical designs
+# built at different times hash identically (P2c). See `design_state_content_bytes`.
+const DESIGN_STATE_ENVELOPE_KEY = "envelope"
+
 """
     _json_scalar(v)
 
@@ -139,12 +144,48 @@ function _params_snapshot(params::DesignParameters, du::DisplayUnits)
 end
 
 """
+    _register_citation!(citations, cit) -> String
+
+Register a grounded citation dict `cit` into the shared `citations` registry,
+keyed by its stable `"id"`, and return that id.
+
+Dedups by id. Because `citation_id` embeds `source_id:section:clause:check_name`
+(see [`citation_id`](@ref)) — but NOT the verbatim `"code_clause"` string — two
+DISTINCT provisions can never collide onto one id: any difference in source,
+section, clause, or check produces a different id. A same-id collision is
+therefore NOT a clash between different clauses; the only field that can differ
+between two dicts sharing an id is the cosmetic verbatim `"code_clause"` spelling
+(e.g. `"AISC 360-16 §E3"` vs `"AISC 360-16 E3"`), which parses to the same
+`(edition, section)` and hence the same id, `page`, and `section`.
+
+The guard is deliberately NARROW: on a same-id collision it KEEPS THE FIRST
+registration rather than overwriting, so the stored verbatim `"code_clause"` (and
+any other metadata) is stable and does not flip based on which element happened to
+register last. This is ORDER-DEPENDENT by construction — the first spelling seen
+wins — but since the differing field is purely cosmetic, the choice does not
+affect the grounded `source_id` / `section` / `page` that any
+`governing_citation_id` dereferences. Genuinely identical citations (same
+`ground_check` output) dedup with no collision at all.
+"""
+function _register_citation!(citations::AbstractDict, cit::AbstractDict)::String
+    cid = string(cit["id"])
+    existing = get(citations, cid, nothing)
+    if existing === nothing
+        citations[cid] = cit
+    elseif !isequal(existing, cit)
+        @debug "Citation id collision with differing metadata; keeping first registration" cid existing cit
+    end
+    return cid
+end
+
+"""
     _collect_state_elements!(elements, citations, etype, results, diags)
 
 Pair compact sizing `results` (from `_serialize_*`, each carrying an integer
 `id`) with the `_diagnose_*` per-element dicts (governing check + grounded
 per-check citations) into stable-id element entries. Registers every referenced
-citation into the shared `citations` registry (deduped by citation id).
+citation into the shared `citations` registry via [`_register_citation!`](@ref)
+(deduped by citation id, keep-first on a colliding-but-distinct metadata clash).
 """
 function _collect_state_elements!(
     elements::Vector{Dict{String, Any}},
@@ -172,8 +213,9 @@ function _collect_state_elements!(
                 cit isa AbstractDict || continue
                 cid = get(cit, "id", nothing)
                 cid === nothing && continue
-                cid = string(cid)
-                citations[cid] = cit
+                # Keep-first on a colliding-but-distinct citation (see
+                # `_register_citation!`); never last-writer-wins overwrite.
+                cid = _register_citation!(citations, cit)
                 push!(citation_ids, cid)
                 if governing !== nothing && string(get(chk, "name", "")) == string(governing)
                     governing_citation_id = cid
@@ -283,13 +325,27 @@ function design_to_design_state(
     _collect_state_elements!(elements, citations, "slab",       slab_results, slab_diag)
     _collect_state_elements!(elements, citations, "foundation", fdn_results,  fdn_diag)
 
-    # Canonicalize the whole payload (sorted keys, stringified symbols) so the
-    # exported byte stream is deterministic and stable across Julia versions —
-    # a hard requirement for the external content-hashing linker (P2).
-    return _canonicalize(Dict{String, Any}(
+    # Canonicalize the design BODY (sorted keys, stringified symbols) so the
+    # hashed byte stream is deterministic and stable across Julia versions — a
+    # hard requirement for the external content-hashing linker (P2).
+    #
+    # P2c byte-stability fix: `generated_at` is DELIBERATELY EXCLUDED from this
+    # canonical body. It is a wall-clock timestamp, so baking it into the hashed
+    # bytes made two STRUCTURALLY IDENTICAL designs built at different times
+    # serialize to different bytes — directly defeating a content hash keyed on
+    # the export. The timestamp instead lives in the separate, NON-HASHED
+    # `"envelope"` field below and is recovered via [`design_state_generated_at`](@ref);
+    # the hashable portion is [`design_state_content_bytes`](@ref) (envelope stripped).
+    # Top-level status must reflect the design's OVERALL verdict, not a hardcoded "ok".
+    # `summary.all_checks_pass` is `false` whenever any element fails OR is unverified (a
+    # steel column whose §E3/§E4 buckling capacity was unavailable is set `ok = false` and
+    # counted as a failure in `_compute_design_summary!`). A linker reading this export must
+    # see `"fail"` in that case — reporting `"ok"` over an unverified/failing element would be
+    # a misleading (and unsafe) export.
+    overall_status = design.summary.all_checks_pass ? "ok" : "fail"
+    body = _canonicalize(Dict{String, Any}(
         "schema"       => DESIGN_STATE_SCHEMA,
-        "generated_at" => string(design.created),
-        "status"       => "ok",
+        "status"       => overall_status,
         "units" => Dict{String, Any}(
             "unit_system"    => _is_imperial(du) ? "imperial" : "metric",
             "length_unit"    => _length_unit_string(du),
@@ -303,4 +359,103 @@ function design_to_design_state(
         "citations" => citations,
         "trace"     => _trace_projection(design, trace_tier),
     ))
+
+    # Splice the canonical body back to the top level (preserving its sorted-key
+    # order for the hashable portion) and prepend the non-hashed envelope. Using
+    # an OrderedDict keeps the top-level key order deterministic.
+    out = OrderedDict{String, Any}()
+    out[DESIGN_STATE_ENVELOPE_KEY] = OrderedDict{String, Any}(
+        "generated_at" => string(design.created),
+    )
+    for (k, v) in body
+        out[k] = v
+    end
+    return out
+end
+
+# Run-varying wall-clock fields carried by the trace projection. `serialize_trace_event`
+# emits `"t"` (seconds since trace start) and `build_stage_timeline` emits `"duration_s"`
+# (a stage wall-clock duration); both are rounded but still vary run-to-run for a
+# structurally identical solve. The extra names are defensive against other clock-derived
+# fields (elapsed times, absolute timestamps) that a future trace projection might add.
+# See `StructuralSizer/src/trace/trace.jl`.
+#
+# ADVISORY: this exclusion is NAME-KEYED, not value-derived — only event `data` keys whose NAME
+# appears in this set are stripped from the content hash. A FUTURE trace emitter that logs a
+# clock-derived value into event `data` under a NON-listed key (e.g. `"solve_ms"`, `"started_at"`)
+# would LEAK that run-varying timing into the hashed bytes and break content-hash stability for a
+# structurally identical solve. If that happens, extend this set with the new key name.
+const DESIGN_STATE_RUN_VARYING_KEYS = Set([
+    "t", "duration_s", "elapsed", "elapsed_s", "time_s", "timestamp", "wall_clock",
+])
+
+"""
+    _hash_canonicalize(x; strip_timing=false) -> value
+
+Recursively normalize a JSON-safe payload for the HASHED byte stream: every
+`AbstractDict` is rewritten as an `OrderedDict` with lexicographically sorted keys
+(guaranteeing a deterministic key order everywhere in the hashed path, regardless
+of whether `ds` came straight from [`design_to_design_state`](@ref) or was
+re-read from JSON), and vectors are recursed element-wise.
+
+When `strip_timing` is `true`, keys in [`DESIGN_STATE_RUN_VARYING_KEYS`] are
+DROPPED. This is enabled ONLY while descending the `"trace"` subtree, so
+run-varying wall-clock timings (`"t"`, `"duration_s"`, …) never enter the hash,
+while identically-named structural fields elsewhere (e.g. an HSS wall thickness
+`"t"`) are preserved. Once inside the trace subtree the flag stays set for all
+descendants (events, stage_timeline), since no legitimate structural field lives
+there.
+"""
+function _hash_canonicalize(x; strip_timing::Bool = false)
+    if x isa AbstractDict
+        od = OrderedDict{String, Any}()
+        for k in sort!(string.(collect(keys(x))))
+            strip_timing && k in DESIGN_STATE_RUN_VARYING_KEYS && continue
+            od[k] = _hash_canonicalize(x[k]; strip_timing = strip_timing)
+        end
+        return od
+    elseif x isa AbstractVector && !(x isa AbstractString)
+        return Any[_hash_canonicalize(v; strip_timing = strip_timing) for v in x]
+    else
+        return x
+    end
+end
+
+"""
+    design_state_content_bytes(ds) -> String
+
+Deterministic, TIMESTAMP-INDEPENDENT byte stream of a DesignState export — the
+portion an external content-hashing linker should hash. It is the canonical body
+with (1) the non-hashed `"envelope"` (wall-clock `generated_at`) stripped, and
+(2) all run-varying wall-clock TIMING fields removed from the `"trace"` subtree
+(the trace still carries `"t"` per event and `"duration_s"` per stage in the FULL
+export, but those are clock-derived and must not perturb the hash). Every dict in
+the hashed path is re-emitted with lexicographically sorted keys.
+
+Two STRUCTURALLY IDENTICAL designs built at different times — even with different
+per-stage timings in their traces — therefore produce identical content bytes
+(and thus the same content hash), which is the whole point of the export (see the
+P2c note in [`design_to_design_state`](@ref)).
+"""
+function design_state_content_bytes(ds::AbstractDict)::String
+    hashable = OrderedDict{String, Any}()
+    for k in sort!(string.(collect(keys(ds))))
+        k == DESIGN_STATE_ENVELOPE_KEY && continue
+        # Strip run-varying wall-clock timings only within the trace subtree.
+        hashable[k] = _hash_canonicalize(ds[k]; strip_timing = (k == "trace"))
+    end
+    return JSON3.write(hashable)
+end
+
+"""
+    design_state_generated_at(ds) -> Union{String, Nothing}
+
+Recover the wall-clock `generated_at` timestamp from a DesignState export's
+non-hashed `"envelope"` (see [`design_to_design_state`](@ref)). Returns `nothing`
+when the envelope or field is absent.
+"""
+function design_state_generated_at(ds::AbstractDict)
+    env = get(ds, DESIGN_STATE_ENVELOPE_KEY, nothing)
+    env isa AbstractDict || return nothing
+    return get(env, "generated_at", nothing)
 end

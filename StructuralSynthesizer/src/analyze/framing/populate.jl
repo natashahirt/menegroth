@@ -168,8 +168,9 @@ For every materialized [`FramingLevel`](@ref), processed top-down
    hands its load to the level-`N-1` hosts it lands on. The transferred quantity
    is the member's tributary AREA `(∫₀¹ w(s) ds)·L` — which already includes any
    load a higher level deposited onto it, so the cascade composes. It is split
-   evenly between the member's two end hosts (ENGINEERING JUDGMENT, below) and
-   added to each host's profile as an equivalent tributary width `ΔA / L_host`.
+   EQUALLY among the member's chain-vertex supports (an AREA-PRESERVING bookkeeping
+   proxy — see the note below) and added to each host's profile as an equivalent
+   tributary width `ΔA / L_host`.
 
 The transfer is area-conservative and dimensionally consistent: a member's
 tributary AREA (m²) becomes a host tributary WIDTH (m) via division by the host
@@ -181,22 +182,34 @@ plus the accumulated Level-1, Level-2, … contributions — the "Level-N loads 
 to Level-N-1 supports" contract. This is the seam Phase 10 generalizes (level
 `k+1 → k`): the same top-down add works for any depth.
 
-!!! note "ENGINEERING JUDGMENT — equal share to all supports, uniform host placement"
-    No building code prescribes how an auto-generated joist's reactions load its
-    supports, so each member's total tributary area is split EQUALLY among all
-    of its chain-vertex supports (endpoints and interior landings), and the
-    resulting host contribution is smeared uniformly along the host rather than
-    placed as discrete point loads at the landing stations. For a
-    single-segment joist (level 1, 2 endpoint hosts) this reduces to the
-    classic "half-reactions to the two ends" rule (byte-identical to Phase 5
-    behavior). For a Phase 10 multi-segment joist with K+2 supports
-    (2 endpoints + K interior), each support receives `A / (K+2)`. Both are
-    judgment simplifications for early sizing, not code requirements; the
-    uniform smear is area-equivalent to the sum of the discrete reactions, and
-    a caller needing station-resolved loads rebuilds the load model with an
-    explicit layout. See Kassimali *Structural Analysis*, 6th ed., §17
-    (continuous beam reactions) for the true elastic-reaction distribution
-    that departs from equal split when spans differ.
+!!! note "Reaction split — EQUAL share (ENGINEERING JUDGMENT, not a code citation)"
+    A member's total tributary area is split EQUALLY among its chain-vertex
+    supports (endpoints and interior landings): each of the `n_sup` supports
+    receives `area / n_sup`. This is an exactly AREA-PRESERVING bookkeeping proxy
+    used ONLY for the T-beam flange (effective-width `sw`) and carbon accounting —
+    it is deliberately NOT a code-based continuous-beam reaction distribution, and
+    is NOT claimed to be conservative: the equal split OVER-CREDITS exterior-support
+    flange width relative to a true continuous-beam reaction (whose exterior
+    reactions are smaller). Reaction fidelity for defects #1/#2 is delivered by the
+    elastic FEM solve (the joist-aware `to_asap!` routing), not by this width
+    cascade. For a single-segment joist (level 1, 2 endpoint hosts) the equal
+    split is the classic 50/50 "half-reactions to the two ends" rule
+    (byte-identical to Phase 5); for a Phase-10 multi-segment joist every support
+    receives an equal `A/n_sup` share.
+
+    An ACI 318-19 §6.5.4 approximate-reaction split was intentionally NOT used
+    here: §6.5.1(c) (L ≤ 3D) is unverifiable in this pressure-free area-only pass,
+    and re-normalizing its coefficients to sum to the member area is not
+    meaningfully better for a pure bookkeeping proxy — so the equal split is used
+    for its exact area preservation and consistency with the Phase-10 A_L1
+    contract, with real reaction fidelity left to the FEM solve.
+
+    The host contribution is smeared UNIFORMLY along the host, not placed as a
+    discrete point load at the landing station: `TributaryProfile` stores a
+    piecewise-linear WIDTH profile only, so a zero-width reaction spike is not
+    representable and the deposit is kept area-equivalent (a caller needing
+    station-resolved point loads rebuilds the FEM load model, which is exactly
+    what the joist-aware `to_asap!` routing does for member sizing).
 
 Idempotence (`reset_baseline::Bool = true`, defect P2(e), p5_eng_v3): the pass
 first restores every beam to its **pre-cascade slab-face-only** state, so a re-run
@@ -286,13 +299,14 @@ function _cascade_one_level!(struc::BuildingStructure, fl::FramingLevel, ::Type{
     end
 
     # 2. Hand each member's tributary area down to its hosts (Phase 10).
-    #    Distribute the beam's total tributary AREA EQUALLY among all its
-    #    chain-vertex supports (endpoints AND interior landings). For a
-    #    single-segment level-1 joist with 2 endpoint hosts this reduces to the
-    #    classic 50/50 rule (Phase 5 semantics preserved byte-identically). For
-    #    a level-N joist chain with K interior supports, all K+2 supports each
-    #    get `area / (K+2)` — the "equal reactions at all supports" beam
-    #    approximation, area-conservative and simple (ENGINEERING JUDGMENT).
+    #    Distribute the beam's total tributary AREA EQUALLY among its chain-vertex
+    #    supports (endpoints AND interior landings). This is an AREA-PRESERVING
+    #    bookkeeping proxy for the flange/carbon accounting — NOT a code-based
+    #    reaction distribution and NOT claimed conservative (see the ENGINEERING
+    #    JUDGMENT note below). For a single-segment level-1 joist with 2 endpoint
+    #    hosts this is the classic 50/50 rule (Phase 5 semantics preserved
+    #    byte-identically); for a level-N joist chain each support gets an equal
+    #    1/n_sup share.
     #
     #    Interior chain vertices that are NOT in `supports` (e.g. a level-(N-1)
     #    joist landing on a level-N beam that was subdivided by an even higher
@@ -312,20 +326,46 @@ function _cascade_one_level!(struc::BuildingStructure, fl::FramingLevel, ::Type{
         edges = [struc.segments[si].edge_idx for si in segment_indices(beam)]
         verts = _ordered_chain_vertices(skel, edges)
 
-        # Chain vertices that resolve to a host in this level's `supports`.
-        # `_host_for_vertex` returns the same host for interior landings on a
-        # multi-segment host, so we track unique (vertex → host) pairs.
+        # Chain vertices that resolve to a host in this level's `supports`, in
+        # chain order. `_host_for_vertex` returns the same host for interior
+        # landings on a multi-segment host, so we track (vertex → host) pairs.
         supports_on_chain = Tuple{Int, Int}[]     # (vertex_idx, host_beam_idx)
         for v in verts
             h = _host_for_vertex(v, supports, host_vertex_sets)
             h === nothing && continue
             push!(supports_on_chain, (v, h))
         end
-        isempty(supports_on_chain) && continue
+        if isempty(supports_on_chain)
+            # AREA PRESERVATION: this chain resolved to ZERO level-(N-1) supports,
+            # so its tributary area cannot be handed down. Dropping it here (the old
+            # behavior) silently vanished the area from the flange/carbon
+            # bookkeeping — not area-preserving. Instead we RETAIN the area on the
+            # chain itself: the member keeps its own `tributary_profile` (populated
+            # in step 1 / by higher levels), so no area is lost from the total; it
+            # simply is not additionally credited to a host below. Reaction fidelity
+            # is unaffected (delivered by the FEM solve, not this width cascade).
+            @warn "Framing cascade: joist chain has no resolved host support on the \
+                   level below; retaining its tributary area on the chain (not \
+                   handed down) to preserve total area." level = fl.level member_index = mi area_m2 = area_m2 maxlog = 8
+            continue
+        end
 
-        share = area_m2 / length(supports_on_chain)
+        # ENGINEERING JUDGMENT (NOT a code citation, NOT a proven safety bound):
+        # split the member's tributary AREA EQUALLY among its chain-vertex supports
+        # (endpoints and interior landings). This is an AREA-PRESERVING bookkeeping
+        # proxy used ONLY for the T-beam flange (effective-width sw) and carbon
+        # accounting; it deliberately does NOT model the true continuous-beam
+        # reaction split and is NOT conservative — equal split OVER-CREDITS
+        # exterior-support flange width versus a real continuous-beam reaction.
+        # Reaction fidelity for defects #1/#2 is delivered by the elastic FEM solve
+        # (the joist-aware `to_asap!` routing), not by this width cascade. Equal
+        # split keeps the pass EXACTLY area-preserving — a single-span joist reduces
+        # to the classic 50/50 rule — and matches the Phase-10 A_L1 equal-split
+        # contract.
+        n_sup = length(supports_on_chain)
+        share_m2 = area_m2 / n_sup
         for (_, h) in supports_on_chain
-            host_accum_m2[h] = get(host_accum_m2, h, 0.0) + share
+            host_accum_m2[h] = get(host_accum_m2, h, 0.0) + share_m2
         end
     end
 
@@ -764,6 +804,19 @@ function materialize_level!(struc::BuildingStructure, slab::Slab{T},
     #    laid out over the SLAB extent (independent of the level's host set).
     lines = _pattern_joist_lines(struc, slab, extent_edges, level.pattern)
 
+    # Concave-safe clipping guard (#5). `_pattern_joist_lines` lays joists across
+    # the perpendicular bounding-extent of the slab and `_boundary_intersections`
+    # casts an INFINITE line, so on a re-entrant (non-convex) slab a joist chain
+    # built from ALL crossings would span a re-entrant notch (through the
+    # exterior) or land outside the plate. When the slab's TRUE outer boundary is
+    # non-convex we clip each joist line to its interior sub-span(s) (see
+    # `_interior_subchains`). On a convex/rectangular boundary the whole span
+    # between the two crossings is interior, so the clip is a strict no-op and the
+    # layout is byte-identical to the pre-clip behavior — this guard skips the
+    # clip path entirely for convex slabs. Pure geometry (no code provision).
+    interior_poly = _slab_interior_polygon_m(struc, slab)
+    clip_interior = interior_poly !== nothing && !Asap.is_convex_polygon(interior_poly)
+
     # 2. Resolve landings for each joist line.
     #    joist_chains :: Vector{Vector{Int}}  — ordered chain vertices per joist.
     #    edge_mids    :: Dict{host_edge => Vector{(param_u, vertex_idx)}}
@@ -779,19 +832,35 @@ function materialize_level!(struc::BuildingStructure, slab::Slab{T},
         # just the two extremes. Each host edge crossing becomes an interior
         # support on the joist chain; consecutive-duplicate vertices (from
         # sharing an edge endpoint between adjacent hits) are dropped so the
-        # chain is topologically clean.
+        # chain is topologically clean. `chain_xy`/`chain_hosts` run parallel to
+        # `chain_vs` for the concave clip (midpoint interiority) and host
+        # bookkeeping.
         chain_vs = Int[]
-        hosts_on_line = Int[]
+        chain_xy = NTuple{2, Float64}[]
+        chain_hosts = Int[]                       # host beam idx per vertex (0 ⇒ none)
         for (e, u, xy) in hits
             v = _landing_vertex!(skel, e, u, xy, z_m, edge_mids)
             (!isempty(chain_vs) && last(chain_vs) == v) && continue
             push!(chain_vs, v)
-            haskey(edge_to_beam, e) && push!(hosts_on_line, edge_to_beam[e])
+            push!(chain_xy, xy)
+            push!(chain_hosts, get(edge_to_beam, e, 0))
         end
         length(chain_vs) < 2 && continue
-        push!(joist_chains, chain_vs)
-        for h in hosts_on_line
-            push!(landed_hosts, h)
+
+        # Convex slab (or unresolved boundary): keep the full chain — the entire
+        # span between the two boundary crossings is interior (no-op clip,
+        # byte-identical to prior behavior). Non-convex slab: split into
+        # interior-only sub-chains so no segment crosses a re-entrant notch.
+        subchains = clip_interior ?
+            _interior_subchains(chain_xy, interior_poly) :
+            Vector{Int}[collect(1:length(chain_vs))]
+
+        for idxs in subchains
+            length(idxs) < 2 && continue
+            push!(joist_chains, chain_vs[idxs])
+            for i in idxs
+                chain_hosts[i] != 0 && push!(landed_hosts, chain_hosts[i])
+            end
         end
     end
 
@@ -1002,8 +1071,10 @@ end
     _pattern_joist_lines(struc, slab, host_edges, pattern) -> Vector{Tuple{NTuple{2,Float64}, NTuple{2,Float64}}}
 
 Resolve `pattern` to joist center-lines in slab-local 2D meters, each a
-`(point, unit-direction)` pair. Lines are extended infinitely; the two boundary
-crossings become the joist ends in `materialize_level!`.
+`(point, unit-direction)` pair. Lines are extended infinitely; the boundary
+crossings become the joist ends in `materialize_level!`, which additionally clips
+each line to the slab interior on non-convex boundaries (see the concave-safe
+guard there) so no joist crosses a re-entrant notch.
 """
 function _pattern_joist_lines(struc::BuildingStructure, slab::Slab,
                               host_edges::Vector{Int},
@@ -1131,6 +1202,126 @@ function _boundary_intersections(struc::BuildingStructure, host_edges::Vector{In
     end
     sort!(hits; by = first)
     return [(e, u, xy) for (_, e, u, xy) in hits]
+end
+
+"""
+    _slab_interior_polygon_m(struc, slab) -> Union{Nothing, Vector{NTuple{2, Float64}}}
+
+The slab's TRUE outer boundary as an ordered XY polygon in meters (Float64),
+reusing the concave-safe [`_get_slab_boundary_vertices`](@ref) loop (CCW, and
+explicitly NOT a convex hull — it handles L/T/U re-entrant shapes). Returns
+`nothing` when the boundary cannot be resolved or has fewer than three vertices,
+so callers fall back to the un-clipped (convex) joist path. Used only to clip
+joist center-lines to the slab interior (#5) — a geometry helper, not a
+structural-mechanics decision, so no code clause applies.
+"""
+function _slab_interior_polygon_m(struc::BuildingStructure, slab::Slab)
+    boundary_vis =
+        try
+            first(_get_slab_boundary_vertices(struc, slab))
+        catch
+            return nothing
+        end
+    length(boundary_vis) < 3 && return nothing
+    return NTuple{2, Float64}[_vertex_xy_m(struc.skeleton, v) for v in boundary_vis]
+end
+
+"""
+    _point_on_polygon_boundary(px, py, poly; tol) -> Bool
+
+`true` when `(px, py)` lies within `tol` of any edge of the simple polygon `poly`
+(i.e. ON the boundary). Used to make span interiority deterministic: an on-edge
+sample point makes the even–odd ray cast [`_point_in_polygon_xy`](@ref) undefined
+(a joist line collinear with a boundary edge), so such samples are rejected rather
+than classified. Pure geometry — no mechanics.
+"""
+function _point_on_polygon_boundary(px::Float64, py::Float64,
+                                    poly::Vector{NTuple{2, Float64}}; tol::Float64 = 1e-9)
+    n = length(poly)
+    tol2 = tol * tol
+    for i in 1:n
+        ax, ay = poly[i]
+        bx, by = poly[mod1(i + 1, n)]
+        ex = bx - ax; ey = by - ay
+        L2 = ex * ex + ey * ey
+        if L2 <= tol2                       # degenerate (zero-length) edge
+            (px - ax)^2 + (py - ay)^2 <= tol2 && return true
+            continue
+        end
+        # Closest point on segment AB to P, via the clamped projection parameter.
+        t = clamp(((px - ax) * ex + (py - ay) * ey) / L2, 0.0, 1.0)
+        cx = ax + t * ex; cy = ay + t * ey
+        (px - cx)^2 + (py - cy)^2 <= tol2 && return true
+    end
+    return false
+end
+
+"""
+    _interior_subchains(chain_xy, poly) -> Vector{Vector{Int}}
+
+Split an ordered joist-line landing chain into maximal runs of consecutive
+landings whose connecting span lies INSIDE the concave-safe slab polygon `poly`.
+Interiority is decided per span by sampling SEVERAL interior points (not just the
+midpoint) and requiring every sample to be strictly inside `poly` — via the
+even–odd ray cast [`_point_in_polygon_xy`](@ref) — AND off the boundary (via
+[`_point_on_polygon_boundary`](@ref)). Multi-point sampling plus the explicit
+on-boundary rejection make the classification deterministic when a joist line is
+collinear with a boundary edge (a single midpoint could land exactly on-edge,
+where the ray cast is undefined) and robust for angled / non-rectilinear spans. A
+span with any exterior or on-boundary sample (a re-entrant notch, or beyond the
+plate) breaks the chain and that segment is dropped. Returns index runs into
+`chain_xy`; single-vertex runs are discarded by the caller. Pure geometry — no
+mechanics. (Only invoked for non-convex bays; convex/rectilinear layouts skip the
+clip entirely in the caller, so their behavior is unchanged.)
+"""
+function _interior_subchains(chain_xy::Vector{NTuple{2, Float64}},
+                             poly::Vector{NTuple{2, Float64}})
+    n = length(chain_xy)
+    runs = Vector{Int}[]
+    n < 2 && return runs
+    # On-boundary tolerance, RELATIVE to the slab extent. An absolute 1e-9 m is
+    # wrong at scale: on a large plate coordinates carry more floating-point noise,
+    # while on a tiny plate 1e-9 m could swallow a real feature. Scale the base
+    # 1e-9 by a characteristic length (the polygon's bounding-box diagonal) so the
+    # test is dimensionally sensible for any slab size. Pure geometry — no clause.
+    xs = (p[1] for p in poly); ys = (p[2] for p in poly)
+    char_len = hypot(maximum(xs) - minimum(xs), maximum(ys) - minimum(ys))
+    bnd_tol = 1e-9 * max(char_len, 1.0)
+    # Interior sample parameters along each span — deliberately NOT including the
+    # endpoints (which sit on host edges) nor forcing a single midpoint.
+    sample_ts = (0.15, 0.35, 0.5, 0.65, 0.85)
+    current = Int[]
+    for i in 1:(n - 1)
+        ax, ay = chain_xy[i]
+        bx, by = chain_xy[i + 1]
+        span_interior = true
+        # A span COLLINEAR with a boundary edge is dropped INTENTIONALLY: its
+        # interior samples land on the boundary (rejected by `_point_on_polygon_
+        # boundary`), so the whole span breaks the chain and no joist is laid there.
+        # This is correct — that perimeter line is already carried by a level-0
+        # girder, so a joist duplicating it would double the support and (via the
+        # cascade) the tributary. Interior spans that merely graze a re-entrant
+        # notch corner are likewise excluded, deferring that area to the per-cell
+        # path. No mechanics — geometric span selection only.
+        for t in sample_ts
+            sx = ax + t * (bx - ax)
+            sy = ay + t * (by - ay)
+            if _point_on_polygon_boundary(sx, sy, poly; tol = bnd_tol) ||
+               !_point_in_polygon_xy(sx, sy, poly)
+                span_interior = false
+                break
+            end
+        end
+        if span_interior
+            isempty(current) && push!(current, i)
+            push!(current, i + 1)
+        else
+            length(current) >= 2 && push!(runs, current)
+            current = Int[]
+        end
+    end
+    length(current) >= 2 && push!(runs, current)
+    return runs
 end
 
 """

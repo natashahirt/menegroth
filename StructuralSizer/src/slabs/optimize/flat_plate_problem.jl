@@ -251,6 +251,14 @@ function evaluate(p::FlatPlateNLPProblem, x::Vector{Float64})
     M_neg_int = p.c_neg_int * M0
     M_pos     = p.c_pos * M0
 
+    # Secondary-axis static moment: ACI 318-11 §13.6.2.2 Eq. (13-4)
+    # (corpus: aci-318-11, page 253) with ℓ1 ↔ ℓ2 swapped.
+    ln2 = clear_span(l2, c_ft)
+    if ustrip(u"ft", ln2) <= 0
+        return (false, Inf, nothing)
+    end
+    M0_y = total_static_moment(qu, l1, ln2)
+
     # ── Column-level demands (preallocated) ──
     n_col = length(p.column_positions)
     T_M = typeof(uconvert(kip * u"ft", M0))
@@ -259,11 +267,20 @@ function evaluate(p::FlatPlateNLPProblem, x::Vector{Float64})
     col_moments = Vector{T_M}(undef, n_col)
     col_shears  = Vector{T_F}(undef, n_col)
     unbal_mom   = Vector{T_M}(undef, n_col)
+    unbal_mom_y = Vector{T_M}(undef, n_col)
 
     for i in 1:n_col
         is_ext = (p.column_positions[i] != :interior)
         M   = is_ext ? M_neg_ext : M_neg_int
-        Mub = is_ext ? M : zero(M)
+        # Exterior transfer moment = 0.3 M0 (ACI 318-11 §13.6.3.6,
+        # corpus: aci-318-11, page 255) — not the §13.6.3.3 flexural
+        # assignment (0.26 M0 without edge beam).  Interior Mub stays 0
+        # here: this NLP path has no adjacent-span data for Eq. (13-7).
+        Mub = is_ext ? 0.3 * M0 : zero(M)
+        # Perpendicular-axis transfer: same 0.3 M0 rule on the swapped
+        # frame (ACI 318-11 §13.6.3.6 / §11.11.7.1, corpus: aci-318-11,
+        # pages 255 / 209).  Interior stays 0 (no Eq. 13-7 data here).
+        Muy = is_ext ? 0.3 * M0_y : zero(M)
 
         A_trib_ft2 = p.column_trib_ft2[i]
         Vu = if A_trib_ft2 > 0
@@ -275,6 +292,7 @@ function evaluate(p::FlatPlateNLPProblem, x::Vector{Float64})
         col_moments[i] = uconvert(kip * u"ft", M)
         col_shears[i]  = Vu
         unbal_mom[i]   = uconvert(kip * u"ft", Mub)
+        unbal_mom_y[i] = uconvert(kip * u"ft", Muy)
     end
     Vu_max = uconvert(kip, qu * l2 * ln / 2)
 
@@ -293,7 +311,7 @@ function evaluate(p::FlatPlateNLPProblem, x::Vector{Float64})
         col_proxy = (c1=c, c2=c, position=p.column_positions[i])
         punch = check_punching_for_column(
             col_proxy, col_shears[i], unbal_mom[i], d, h, p.fc;
-            λ=p.λ, φ_shear=p.φ_shear,
+            λ=p.λ, φ_shear=p.φ_shear, Muy=unbal_mom_y[i],
         )
         if !punch.ok
             return (false, Inf, nothing)

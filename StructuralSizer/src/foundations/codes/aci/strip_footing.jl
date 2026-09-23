@@ -270,12 +270,15 @@ function design_footing(::StripFooting,
             ϕVc = ϕv * one_way_shear_capacity(fc, B, d; λ = λ)
             ϕVc_kip = to_kip(ϕVc)
             d_ft = ustrip(u"ft", d)
-            # Per-column c1 half-widths for critical section offset
-            col_c1_ft = [ustrip(u"ft", demands[j].c1) for j in 1:N]
+            # ACI 318-11 §11.1.3.1 (corpus: aci-318-11, page 166): Vu at a
+            # distance d from the column face. Along-strip face is named c2
+            # on a Y-layout (production c1 ∥ X); named c1 on an X-layout.
+            col_face_ft = [ustrip(u"ft", (strip_axis === :y ? demands[j].c2 :
+                                          demands[j].c1) / 2) for j in 1:N]
             diag_t = _strip_VM_diagram(L, B, qu, col_pos_local, Pu_vec)
             Vu_max_kip = 0.0
             for (i, x) in enumerate(diag_t.x_ft)
-                min_dist = minimum(abs(x - ustrip(u"ft", col_pos_local[j])) - col_c1_ft[j] / 2
+                min_dist = minimum(abs(x - ustrip(u"ft", col_pos_local[j])) - col_face_ft[j]
                                    for j in 1:N)
                 if min_dist ≥ d_ft - 0.01
                     Vu_max_kip = max(Vu_max_kip, abs(diag_t.V_kip[i]))

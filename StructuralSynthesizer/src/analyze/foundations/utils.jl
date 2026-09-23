@@ -449,8 +449,10 @@ function _size_fnd_aci!(struc, f_idx, fnd, n_supp, demands, soil, opts;
     elseif fnd.foundation_type in (:combined, :strip) || n_supp > 1
         strip_demands = [demands[i] for i in fnd.support_indices]
         positions = _support_positions_along_axis(struc, fnd.support_indices)
-        result = StructuralSizer.design_footing(StructuralSizer.StripFooting(), 
-            strip_demands, positions, soil; opts=opts.strip_params, tc=tc)
+        strip_axis = _support_strip_axis(struc, fnd.support_indices)
+        result = StructuralSizer.design_footing(StructuralSizer.StripFooting(),
+            strip_demands, positions, soil; opts=opts.strip_params, tc=tc,
+            strip_axis=strip_axis)
         _assign_foundation!(struc, f_idx, fnd, result, :strip, mat)
     else
         @warn "Foundation type $(fnd.foundation_type) not wired for ACI, skipping"
@@ -513,6 +515,23 @@ function _assign_foundation!(struc, f_idx, fnd, result, ftype::Symbol, mat)
         foundation_type=ftype, group_id=fnd.group_id, volumes=volumes)
 end
 
+"""Return `:x` or `:y` with the same Δx/Δy rule as `_support_positions_along_axis`.
+
+`Δx >= Δy` → `:x` (tie → X). `:y` only when Δy > Δx. Used as `strip_axis`
+for `design_footing(StripFooting, ...)` so punching / one-way shear see the
+same layout the positions were projected on.
+"""
+function _support_strip_axis(struc, supp_indices::Vector{Int})
+    skel = struc.skeleton
+    pts = [skel.vertices[struc.supports[i].vertex_idx] for i in supp_indices]
+    length(pts) <= 1 && return :x
+    xs = [ustrip(u"m", Meshes.coords(p).x) for p in pts]
+    ys = [ustrip(u"m", Meshes.coords(p).y) for p in pts]
+    Δx = maximum(xs) - minimum(xs)
+    Δy = maximum(ys) - minimum(ys)
+    return Δx >= Δy ? :x : :y
+end
+
 """Extract support positions along the longest axis (for strip footing layout)."""
 function _support_positions_along_axis(struc, supp_indices::Vector{Int})
     skel = struc.skeleton
@@ -526,10 +545,7 @@ function _support_positions_along_axis(struc, supp_indices::Vector{Int})
     # Use X or Y depending on which has larger range
     xs = [ustrip(u"m", Meshes.coords(p).x) for p in pts]
     ys = [ustrip(u"m", Meshes.coords(p).y) for p in pts]
-    Δx = maximum(xs) - minimum(xs)
-    Δy = maximum(ys) - minimum(ys)
-
-    coords = Δx >= Δy ? xs : ys
+    coords = _support_strip_axis(struc, supp_indices) === :x ? xs : ys
     origin = minimum(coords)
     return [(c - origin) * u"m" for c in coords]
 end

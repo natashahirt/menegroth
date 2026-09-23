@@ -221,11 +221,18 @@ function design_footing(::StripFooting,
     x_left = x_bar - L / 2
     col_pos_local = positions .- x_left
 
+    # Across-strip face is named c1 on a Y-layout (B ∥ X); named c2 on an X-layout.
+    c_across_max = maximum(first(_strip_c_across_along(dem.c1, dem.c2, strip_axis))
+                           for dem in demands)
+
     # Minimum width from bearing (service loads); will be widened if h becomes
     # unreasonable — an engineer would never draw a footing deeper than wide.
+    # Floor at c_across_max so cant_trans = (B − c_across_max)/2 is never
+    # negative (phantom cantilever Mu ∝ cant²).
     B_min = Ps_total / (soil.qa * L)
     B_min = ceil(ustrip(u"inch", B_min) / ustrip(u"inch", w_incr)) * w_incr
     B_min = max(B_min, 2.0u"ft")
+    B_min = max(B_min, c_across_max)
     B = B_min
 
     # =====================================================================
@@ -350,8 +357,7 @@ function design_footing(::StripFooting,
     # ACI 318-11 §15.4.1 / §15.4.2(a) (corpus: aci-318-11, pages 272–273):
     # Mu at the column face. Across-strip face is named c1 on a Y-layout
     # (B ∥ X); named c2 on an X-layout. Band width is along-strip face + d.
-    c_across_max = maximum(first(_strip_c_across_along(dem.c1, dem.c2, strip_axis))
-                           for dem in demands)
+    # c_across_max was computed at plan sizing so B ≥ that face.
     c_along_max  = maximum(last(_strip_c_across_along(dem.c1, dem.c2, strip_axis))
                            for dem in demands)
     cant_trans = (B - c_across_max) / 2
@@ -405,8 +411,12 @@ function design_footing(::StripFooting,
                 @info "Strip col #$j: tensile interface (ACI 318-11 §15.8.1.2(b)), As_dowels = $As_tensile"
                 continue
             end
+            # ACI 318-11 §10.14.1 / §15.8.1.1 (corpus: aci-318-11, pages 162,
+            # 274): A2 frustum pairs along-strip face with L and across-strip
+            # face with B. Helper is named-axis (c1∥Lf, c2∥B) for spread.
+            c_across, c_along = _strip_c_across_along(dem.c1, dem.c2, strip_axis)
             bearing = _bearing_check_footing(
-                dem.Pu, dem.c1, dem.c2, B, L, h,
+                dem.Pu, c_along, c_across, B, L, h,
                 fc, fc_col_val, fy, ϕb, dem.shape)
             if bearing.need_dowels && opts.check_dowels
                 @info "Strip col #$j: dowels required, As_dowels = $(bearing.As_dowels)"

@@ -102,52 +102,195 @@ function initialize_supports!(struc::BuildingStructure{T}) where T
 end
 
 """
+    _pf_from_loads(model, loads) → Vector{Float64}
+
+Fixed-end force vector `Pf` for `loads` without writing `model.Pf` or `model.u`.
+"""
+function _pf_from_loads(model, loads)
+    Pf = zeros(Float64, model.nDOFs)
+    for load in loads
+        load isa Asap.ElementLoad || continue
+        Asap.populate_load!(Pf, load)
+    end
+    return Pf
+end
+
+"""
+    _unfactored_DL_loads(struc) → Vector{<:Asap.AbstractLoad}
+
+Unfactored D+L tributary loads for a service solve. Does not mutate `model.loads`.
+
+ASCE 7-16 §2.4.1 combo 2 is D+L (corpus: asce-7-16, pages 63–64). Strength
+combos in §2.3.1 (1.4D, 1.2D+1.6L; page 62) must not be back-solved as Ps=Pu/1.4.
+"""
+function _unfactored_DL_loads(struc::BuildingStructure)
+    loads = Asap.AbstractLoad[]
+    model = struc.asap_model
+    (isnothing(model) || isempty(model.frame_elements)) && return loads
+    els = model.frame_elements
+    for (cell_idx, cell) in enumerate(struc.cells)
+        cell.floor_type == :grade && continue
+        _create_cell_tributary_loads!(
+            loads, els, struc.skeleton, struc, cell, cell_idx;
+            split_dead_live=true, combo=StructuralSizer.service)
+    end
+    # Unfactored member self-weight (ρ A g) is not in the cell tributary
+    # dicts. Include it so service D+L matches ASCE 7-16 §2.4.1 combo 2
+    # (dead includes self-weight). GravityLoad.q reads the current section.
+    for ld in model.loads
+        ld isa Asap.GravityLoad && push!(loads, ld)
+    end
+    return loads
+end
+
+"""
+    _service_reactions(struc) → Vector{Float64}
+
+Global reaction vector (N, N·m) for unfactored D+L, reusing the cached
+stiffness factorization via `Asap.solve`. Does not write `model.u`.
+"""
+function _service_reactions(struc::BuildingStructure)
+    model = struc.asap_model
+    R = zeros(Float64, model.nDOFs)
+    loads = _unfactored_DL_loads(struc)
+    isempty(loads) && return R
+    u_s = Asap.solve(model, loads)
+    Pf_s = _pf_from_loads(model, loads)
+    R[model.fixedDOFs] = model.S[model.fixedDOFs, :] * u_s + Pf_s[model.fixedDOFs]
+    return R
+end
+
+"""
+    _foundation_demand_from_signed(i, Fz, Fz_s, Fx, Fy, Mx, My; c1, c2, shape)
+
+Map signed ASAP reactions onto a `FoundationDemand`.
+
+ASAP reaction is force FROM support TO structure: gravity Fz>0 is compression,
+Fz<0 is uplift. Keep signed `Pu`/`Ps` (negative = tension) so grouped
+footings retain the tension-compression couple. Isolated all-uplift still
+skips a compression footing (ACI 318-11 §15.8.1.2, corpus: aci-318-11,
+page 275). `Ps` is unfactored D+L (ASCE 7-16 §2.4.1 combo 2), not `Pu/1.4`.
+"""
+function _foundation_demand_from_signed(i::Int, Fz, Fz_s, Fx, Fy, Mx, My;
+                                       c1, c2, shape)
+    uplift = Fz < zero(Fz)
+    return StructuralSizer.FoundationDemand(i;
+        Pu=Fz, Mux=Mx, Muy=My, Vux=Fx, Vuy=Fy, Ps=Fz_s,
+        c1=c1, c2=c2, shape=shape, uplift=uplift)
+end
+
+"""True when every support in `idxs` has factored uplift."""
+_all_uplift(demands, idxs) = all(demands[i].uplift for i in idxs)
+
+"""True when `idxs` contains both compressive and tensile factored `Pu`."""
+function _mixed_sign_Pu(demands, idxs)
+    isempty(idxs) && return false
+    z = zero(demands[first(idxs)].Pu)
+    has_pos = false
+    has_neg = false
+    for i in idxs
+        P = demands[i].Pu
+        P > z && (has_pos = true)
+        P < z && (has_neg = true)
+        has_pos && has_neg && return true
+    end
+    return false
+end
+
+"""True when any foundation already spans more than one support."""
+_explicit_support_groupings(struc) =
+    any(f -> length(f.support_indices) > 1, struc.foundations)
+
+"""`:strip` if supports are colinear; `:mat` if both plan axes have span.
+
+ACI 318-11 §15.10.1 — footings supporting more than one column are combined
+footings or mats (corpus: aci-318-11, page 277).
+"""
+function _combined_foundation_type(struc, supp_indices)
+    length(supp_indices) < 2 && return :spread
+    positions = _support_positions_xy(struc, supp_indices)
+    xs = [p[1] for p in positions]
+    ys = [p[2] for p in positions]
+    Δx = maximum(xs) - minimum(xs)
+    Δy = maximum(ys) - minimum(ys)
+    # A true line has ~0 span on the perpendicular axis.
+    if Δx > 1.0u"ft" && Δy > 1.0u"ft"
+        return :mat
+    end
+    return :strip
+end
+
+"""Merge isolated mixed-sign foundations in one reaction group into a strip/mat.
+
+ACI 318-11 §15.10.1 / §15.8.1.2 — do not net a tension-compression couple
+into one isolated spread (corpus: aci-318-11, pages 277 / 275).
+"""
+function _promote_mixed_sign_isolated_groups!(struc, demands)
+    isempty(struc.foundation_groups) && return struc
+    to_merge = Vector{Vector{Int}}()
+    for (_, fg) in struc.foundation_groups
+        f_indices = fg.foundation_indices
+        length(f_indices) < 2 && continue
+        all(i -> length(struc.foundations[i].support_indices) == 1, f_indices) || continue
+        supports = [struc.foundations[i].support_indices[1] for i in f_indices]
+        _mixed_sign_Pu(demands, supports) || continue
+        push!(to_merge, copy(f_indices))
+    end
+    isempty(to_merge) && return struc
+
+    merged = Set{Int}()
+    for f_indices in to_merge
+        union!(merged, f_indices)
+    end
+    placeholder = _placeholder_foundation_result(typeof(struc).parameters[1])
+    new_foundations = Foundation[]
+    for (fi, fnd) in enumerate(struc.foundations)
+        fi in merged && continue
+        push!(new_foundations, fnd)
+    end
+    for f_indices in to_merge
+        supports = [struc.foundations[i].support_indices[1] for i in f_indices]
+        ftype = _combined_foundation_type(struc, supports)
+        push!(new_foundations, Foundation(supports, placeholder; foundation_type=ftype))
+    end
+    empty!(struc.foundations)
+    append!(struc.foundations, new_foundations)
+    build_foundation_groups!(struc)
+    return struc
+end
+
+"""
     support_demands(struc::BuildingStructure; load_factor=1.0)
 
 Convert support reactions to FoundationDemand objects.
 
-# Arguments
-- `load_factor`: Factor to apply (use 1.0 if reactions are already factored)
-
-# Returns
-Vector of FoundationDemand, one per support.
+Factored `Pu` is the signed vertical reaction (compression positive). Service
+`Ps` is read from an extra unfactored D+L solve that reuses the stiffness
+factorization. `load_factor` scales both (use 1.0 when reactions are already
+factored).
 """
 function support_demands(struc::BuildingStructure; load_factor::Real=1.0)
     isempty(struc.supports) && throw(ArgumentError("No supports. Call initialize_supports!() first."))
-    
+
+    model = struc.asap_model
+    R_s = _service_reactions(struc)
     demands = StructuralSizer.FoundationDemand[]
-    
+
     for (i, supp) in enumerate(struc.supports)
-        # Extract forces and moments
         Fx = supp.forces[1] * load_factor
         Fy = supp.forces[2] * load_factor
         Fz = supp.forces[3] * load_factor
         Mx = supp.moments[1] * load_factor
         My = supp.moments[2] * load_factor
-        Mz = supp.moments[3] * load_factor
-        
-        # Convention: ASAP reaction is force FROM support TO structure
-        # For gravity loads: structure pushes down, support pushes up → Fz is positive
-        # For footing: Pu (compression) = magnitude of vertical reaction
-        Pu = abs(Fz)  # Compression is always positive for footing design
-        
-        # Horizontal shears
-        Vux = Fx
-        Vuy = Fy
-        
-        # Moments about horizontal axes
-        Mux = Mx
-        Muy = My
-        
-        # Service load (unfactored) - approximate as factored/1.4
-        Ps = Pu / 1.4
-        
-        demand = StructuralSizer.FoundationDemand(i; 
-            Pu=Pu, Mux=Mux, Muy=Muy, Vux=Vux, Vuy=Vuy, Ps=Ps,
-            c1=supp.c1, c2=supp.c2, shape=supp.shape)
-        push!(demands, demand)
+
+        node = model.nodes[supp.node_idx]
+        gid = node.globalID
+        Fz_s = uconvert(unit(Fz), (R_s[gid[3]] * u"N") * load_factor)
+
+        push!(demands, _foundation_demand_from_signed(i, Fz, Fz_s, Fx, Fy, Mx, My;
+            c1=supp.c1, c2=supp.c2, shape=supp.shape))
     end
-    
+
     return demands
 end
 
@@ -281,6 +424,15 @@ function _size_fnd_aci!(struc, f_idx, fnd, n_supp, demands, soil, opts;
                           foundation_type=string(fnd.foundation_type),
                           n_supports=n_supp)
 
+    # ACI 318-11 §15.8.1.2 — tensile force across the interface is not a
+    # compression footing demand (corpus: aci-318-11, page 275).
+    if _all_uplift(demands, fnd.support_indices)
+        StructuralSizer.emit!(tc, :workflow, "_size_fnd_aci!", "foundation_$f_idx", :decision;
+                              skipped_uplift=true)
+        @warn "Foundation $f_idx in factored uplift — skipping compression footing (ACI 318-11 §15.8.1.2)"
+        return
+    end
+
     if fnd.foundation_type == :mat
         # Mat foundation — all supports in one slab
         mat_demands = [demands[i] for i in fnd.support_indices]
@@ -312,6 +464,11 @@ end
 """Dispatch a single foundation through the IS 456 legacy sizing path."""
 function _size_fnd_is!(struc, f_idx, fnd, n_supp, demands, soil,
                        concrete, rebar, pier_width; tc::Union{Nothing, StructuralSizer.TraceCollector} = nothing, kwargs...)
+    if _all_uplift(demands, fnd.support_indices)
+        @warn "Foundation $f_idx in factored uplift — skipping compression footing (ACI 318-11 §15.8.1.2)"
+        return
+    end
+
     if fnd.foundation_type == :spread && n_supp == 1
         demand = demands[fnd.support_indices[1]]
         result = StructuralSizer.design_footing(StructuralSizer.SpreadFooting(), 
@@ -323,8 +480,13 @@ function _size_fnd_is!(struc, f_idx, fnd, n_supp, demands, soil,
 
     elseif fnd.foundation_type == :combined || n_supp > 1
         total_Pu = sum(demands[i].Pu for i in fnd.support_indices)
+        total_Ps = sum(demands[i].Ps for i in fnd.support_indices)
+        # Propagate envelope Mux/Muy — dropping them understated eccentric
+        # bearing (ACI 336.2R §3.2.1 / §4.1).
+        gov_Mux = maximum(abs(demands[i].Mux) for i in fnd.support_indices)
+        gov_Muy = maximum(abs(demands[i].Muy) for i in fnd.support_indices)
         combined_demand = StructuralSizer.FoundationDemand(f_idx;
-            Pu=total_Pu, Ps=total_Pu / 1.4)
+            Pu=total_Pu, Ps=total_Ps, Mux=gov_Mux, Muy=gov_Muy)
         result = StructuralSizer.design_footing(StructuralSizer.SpreadFooting(), 
             combined_demand, soil, concrete, rebar; pier_width=pier_width, kwargs...)
         volumes = _compute_foundation_volumes(result, concrete, rebar)
@@ -603,6 +765,7 @@ function size_foundations_grouped!(
 
     isempty(struc.foundation_groups) && build_foundation_groups!(struc)
     demands = isnothing(demands) ? support_demands(struc) : demands
+    _promote_mixed_sign_isolated_groups!(struc, demands)
 
     gids = collect(keys(struc.foundation_groups))
     n_fnd_groups = length(gids)
@@ -620,28 +783,75 @@ function size_foundations_grouped!(
         isempty(f_indices) && return
 
         gov_Pu  = 0.0u"kN"
+        gov_Ps  = 0.0u"kN"
         gov_Mux = 0.0u"kN*m"
         gov_Muy = 0.0u"kN*m"
         gov_Vux = 0.0u"kN"
         gov_Vuy = 0.0u"kN"
 
         try
+            group_supports = Int[]
             for f_idx in f_indices
-                fnd = struc.foundations[f_idx]
-                if length(fnd.support_indices) == 1
-                    d = demands[fnd.support_indices[1]]
-                    gov_Pu  = max(gov_Pu,  d.Pu)
-                    gov_Mux = max(gov_Mux, abs(d.Mux))
-                    gov_Muy = max(gov_Muy, abs(d.Muy))
-                    gov_Vux = max(gov_Vux, abs(d.Vux))
-                    gov_Vuy = max(gov_Vuy, abs(d.Vuy))
-                else
-                    total_Pu = sum(demands[i].Pu for i in fnd.support_indices)
-                    gov_Pu = max(gov_Pu, total_Pu)
-                end
+                append!(group_supports, struc.foundations[f_idx].support_indices)
+            end
+            unique!(group_supports)
+
+            if _all_uplift(demands, group_supports)
+                @warn "Foundation group $gid in factored uplift — skipping compression footing (ACI 318-11 §15.8.1.2)"
+                return
             end
 
-            gov_Ps = gov_Pu / 1.4
+            # ACI 318-11 §15.10.1 — combined footings/mats resist the factored
+            # loads (corpus: aci-318-11, page 277). Mixed-sign or multi-support
+            # groups keep per-support signed Pu/Ps so x_bar uses the couple
+            # (§15.8.1.2, page 275). Do not net into one SpreadFooting.
+            needs_signed_combined = _mixed_sign_Pu(demands, group_supports) ||
+                any(i -> length(struc.foundations[i].support_indices) > 1 ||
+                         struc.foundations[i].foundation_type in (:combined, :strip, :mat),
+                    f_indices)
+
+            if needs_signed_combined
+                for f_idx in f_indices
+                    fnd = struc.foundations[f_idx]
+                    n_supp = length(fnd.support_indices)
+                    if opts.code == :aci
+                        _size_fnd_aci!(struc, f_idx, fnd, n_supp, demands, soil, opts; tc=tc)
+                    else
+                        _size_fnd_is!(struc, f_idx, fnd, n_supp, demands, soil,
+                                      concrete, rebar, pier_width; tc=tc, kwargs...)
+                    end
+                end
+                r = struc.foundations[f_indices[1]].result
+                StructuralSizer.emit!(tc, :workflow, "size_foundations_grouped!", "foundation_group_$(gid)", :decision;
+                                      n_foundations=length(f_indices),
+                                      n_supports=length(group_supports),
+                                      mixed_sign=_mixed_sign_Pu(demands, group_supports),
+                                      routed="signed_combined",
+                                      B_m=Float64(ustrip(u"m", StructuralSizer.footing_width(r))),
+                                      L_m=Float64(ustrip(u"m", StructuralSizer.footing_length(r))),
+                                      D_m=Float64(ustrip(u"m", StructuralSizer.footing_depth(r))),
+                                      utilization=Float64(StructuralSizer.utilization(r)))
+                return
+            end
+
+            any_compression = false
+            for f_idx in f_indices
+                fnd = struc.foundations[f_idx]
+                _all_uplift(demands, fnd.support_indices) && continue
+                any_compression = true
+                d = demands[fnd.support_indices[1]]
+                gov_Pu  = max(gov_Pu,  d.Pu)
+                gov_Ps  = max(gov_Ps,  d.Ps)
+                gov_Mux = max(gov_Mux, abs(d.Mux))
+                gov_Muy = max(gov_Muy, abs(d.Muy))
+                gov_Vux = max(gov_Vux, abs(d.Vux))
+                gov_Vuy = max(gov_Vuy, abs(d.Vuy))
+            end
+
+            if !any_compression
+                @warn "Foundation group $gid in factored uplift — skipping compression footing (ACI 318-11 §15.8.1.2)"
+                return
+            end
             # Use the largest column dimensions in the group (conservative for punching)
             gov_c1 = 18.0u"inch"
             gov_c2 = 18.0u"inch"
@@ -718,6 +928,7 @@ function size_foundations_grouped!(
     for (f_idx, fnd) in enumerate(struc.foundations)
         gid = fnd.group_id
         gid === nothing && continue
+        haskey(group_results, gid) || continue
         result = group_results[gid]
         volumes = _compute_foundation_volumes(result, c_mat, r_mat)
         struc.foundations[f_idx] = Foundation(
@@ -836,6 +1047,8 @@ function _resolve_strategy(struc, demands, soil, opts;
         qa = soil.qa
         total_req = 0.0u"m^2"
         for d in demands
+            # Signed Ps: skip tension when estimating compression-footing coverage.
+            d.Ps <= zero(d.Ps) && continue
             A_req = d.Ps / qa
             total_req += A_req
         end
@@ -978,7 +1191,13 @@ function _auto_merge_to_strips!(struc, demands, soil, opts;
         length(fnd.support_indices) != 1 && continue
         si = fnd.support_indices[1]
         d = demands[si]
-        B = sqrt(ustrip(u"m^2", d.Ps / qa))
+        # Include tension supports so a mixed-sign neighbor can merge into a
+        # strip (ACI 318-11 §15.10.1 / §15.8.1.2, corpus: aci-318-11,
+        # pages 277 / 275). Tentative B uses compression Ps; tension columns
+        # get a minimum width so they still participate in adjacency.
+        Ps_compr = max(d.Ps, zero(d.Ps))
+        A_m2 = ustrip(u"m^2", Ps_compr / qa)
+        B = max(sqrt(max(A_m2, 0.0)), 0.3)
         D = max(B * 0.15, 0.3)   # rough depth ≈ 15% of B, min 0.3 m
         v = skel.vertices[struc.supports[si].vertex_idx]
         c = Meshes.coords(v)
@@ -1087,6 +1306,23 @@ function size_foundations!(
                               n_foundations=length(struc.foundations),
                               opts_strategy=string(opts.strategy),
                               code=string(opts.code))
+
+        # Keep user groupings (e.g. [[1, 2]]) — initialize_foundations!() would
+        # wipe them. ACI 318-11 §15.10.1 (corpus: aci-318-11, page 277).
+        if _explicit_support_groupings(struc)
+            StructuralSizer.emit!(tc, :workflow, "size_foundations!", "", :decision;
+                                  preserved_groupings=true,
+                                  n_foundations=length(struc.foundations))
+            verbose && @info "Preserving explicit foundation groupings" n_foundations=length(struc.foundations)
+            isempty(struc.foundation_groups) && build_foundation_groups!(struc)
+            size_foundations_grouped!(struc; soil=soil, opts=opts, demands=demands,
+                                      tc=tc,
+                                      concrete=concrete, rebar=rebar, pier_width=pier_width, kwargs...)
+            StructuralSizer.emit!(tc, :workflow, "size_foundations!", "", :exit;
+                                  n_foundations=length(struc.foundations),
+                                  n_groups=length(struc.foundation_groups))
+            return struc
+        end
 
         strategy = _resolve_strategy(struc, demands, soil, opts; tc=tc)
         verbose && @info "Foundation strategy: $strategy" opts_strategy=opts.strategy

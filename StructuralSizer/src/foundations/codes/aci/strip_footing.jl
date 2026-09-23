@@ -67,6 +67,46 @@ function _strip_VM_diagram(L::Length, B::Length, qu::Pressure,
     return (x_ft = xs, V_kip = Vv, M_kipft = Mv)
 end
 
+"""
+    _strip_free_edge_parallel(strip_axis) → Symbol
+
+Map strip layout axis to `free_edge_parallel` for the free END.
+
+Production `FoundationDemand.c1` is `column.c1` (∥ global X at θ = 0;
+`StructuralSynthesizer` members.jl). `_support_positions_along_axis`
+lays the strip on Y when Δy > Δx. The free end is the short edge,
+perpendicular to the strip axis:
+
+- `:y` (Y-layout): free end along X = named c1 → `:c1` (ACI c1 = named c2)
+- `:x` (X-layout): free end along Y = named c2 → `:c2` (named c1 already perp)
+
+ACI 318-11 R11.11.7.2 (corpus: aci-318-11, pages 209–211). Do not invent
+a swap on X-layout.
+"""
+function _strip_free_edge_parallel(strip_axis::Symbol)
+    strip_axis === :y && return :c1
+    strip_axis === :x && return :c2
+    throw(ArgumentError("strip_axis must be :x or :y; got :$strip_axis"))
+end
+
+"""
+    _strip_edge_Ac(c1, c2, d, is_edge, edge_par)
+
+Plan area inside the punching critical section for `Vu = Pu − qu·Ac`.
+
+ACI 318-11 §11.11.1.2 (corpus: aci-318-11, page 200): critical section at
+d/2 from each column face. Interior: `(c1 + d)×(c2 + d)`. Edge, on ACI
+axes (c1 perp to the free end, R11.11.7.2 pages 209–211):
+`(c1 + d/2)×(c2 + d)`. When `edge_par === :c1` the named axes swap so
+`Ac = (named_c2 + d/2)×(named_c1 + d)`.
+"""
+function _strip_edge_Ac(c1, c2, d, is_edge::Bool, edge_par::Symbol)
+    is_edge || return (c1 + d) * (c2 + d)
+    return edge_par === :c1 ?
+        (c2 + d / 2) * (c1 + d) :
+        (c1 + d / 2) * (c2 + d)
+end
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Public API
 # ─────────────────────────────────────────────────────────────────────────────
@@ -98,6 +138,9 @@ bearing check with dowel design (ACI 22.8) at each column.
 
 # Keyword Arguments
 - `opts::StripParams`
+- `strip_axis`: `:x` (default) or `:y`. Production `FoundationDemand.c1` is
+  `column.c1` (∥ global X). Y-layout (`Δy > Δx`) must pass `:y` so the
+  free end is treated as parallel to named c1.
 
 # Returns
 `StripFootingResult` with SI output quantities.
@@ -108,11 +151,14 @@ function design_footing(::StripFooting,
     soil::Soil;
     opts::StripParams = StripParams(),
     tc::Union{Nothing, TraceCollector} = nothing,
+    strip_axis::Symbol = :x,
 )
     N = length(demands)
     N ≥ 2 || throw(ArgumentError("Strip footing requires ≥ 2 columns (got $N)"))
     length(positions) == N ||
         throw(DimensionMismatch("positions length must match demands"))
+
+    strip_edge_par = _strip_free_edge_parallel(strip_axis)
 
     StructuralSizer.emit!(tc, :checker, "design_footing_strip_aci", "", :enter;
                           n_columns=N,
@@ -205,20 +251,10 @@ function design_footing(::StripFooting,
                           (j == N && ustrip(u"ft", L - xc) < d_ft)
                 pos_sym = is_edge ? :edge : :interior
 
-                Ac = (cj1 + d) * (cj2 + d)
-                if is_edge
-                    Ac = (cj1 + d / 2) * (cj2 + d)
-                end
+                Ac = _strip_edge_Ac(cj1, cj2, d, is_edge, strip_edge_par)
                 Vu_p = uconvert(u"lbf", demands[j].Pu - qu * Ac)
                 Vu_p = max(Vu_p, 0.0u"lbf")
 
-                # FoundationDemand.c1 is parallel to footing length (types.jl).
-                # The free END is the short edge, so it runs along named c2;
-                # named c1 is already perp to that end. Default :c2 — do not
-                # invent a swap. Pass :c1 only if a caller stored c1 across
-                # the width (free end // named c1). ACI 318-11 R11.11.7.2
-                # (corpus: aci-318-11, pages 209–211).
-                strip_edge_par = :c2
                 pch = punching_check(Vu_p, demands[j].Mux, demands[j].Muy,
                                       d, fc, cj1, cj2;
                                       position = pos_sym, shape = demands[j].shape,
@@ -370,13 +406,8 @@ function design_footing(::StripFooting,
         is_edge = (j == 1 && ustrip(u"ft", xc) < d_ft) ||
                   (j == N && ustrip(u"ft", L - xc) < d_ft)
         pos_sym = is_edge ? :edge : :interior
-        Ac = is_edge ? (cj1 + d / 2) * (cj2 + d) :
-                       (cj1 + d) * (cj2 + d)
+        Ac = _strip_edge_Ac(cj1, cj2, d, is_edge, strip_edge_par)
         Vu_p = max(uconvert(u"lbf", demands[j].Pu - qu * Ac), 0.0u"lbf")
-        # Named c1 along the strip (perp to the free end) — default :c2.
-        # Do not invent a :c1 swap. ACI 318-11 R11.11.7.2 (corpus:
-        # aci-318-11, pages 209–211).
-        strip_edge_par = :c2
         pch = punching_check(Vu_p, demands[j].Mux, demands[j].Muy,
                               d, fc, cj1, cj2;
                               position = pos_sym, shape = demands[j].shape,

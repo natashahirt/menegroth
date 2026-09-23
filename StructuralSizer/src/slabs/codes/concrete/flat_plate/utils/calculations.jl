@@ -1373,26 +1373,47 @@ end
 # =============================================================================
 
 """
+    governing_transfer_reinforcement(Mux, Muy, c1, c2, h, d, fc, fy; position)
+
+ACI 318-11 §13.5.3.1 (corpus: aci-318-11, page 250): a fraction of the
+unbalanced moment at the slab-column connection is transferred by flexure
+in each direction.  γf from Eq. (13-1) / §13.5.3.2 uses `b1`, `b2` in the
+direction of that moment; effective width is `c_face + 3h` (or `+ 1.5h`
+at a free edge).  Returns the governing `As` and the moment/γf that sized it.
+"""
+function governing_transfer_reinforcement(
+    Mux::Moment, Muy::Moment,
+    c1::Length, c2::Length, h::Length, d::Length,
+    fc::Pressure, fy::Pressure;
+    position::Symbol = :interior,
+)
+    function _as_for(Mu, b1, b2, bb)
+        abs(ustrip(kip * u"ft", Mu)) < 1e-6 && return 0.0 * u"inch^2"
+        γf = gamma_f(b1, b2)
+        transfer_reinforcement(abs(Mu), γf, bb, d, fc, fy)
+    end
+    edge = position != :interior
+    b1_x = edge ? c1 + d / 2 : c1 + d
+    b2_x = edge ? c2 + d     : c2 + d
+    b1_y = edge ? c2 + d / 2 : c2 + d
+    b2_y = edge ? c1 + d     : c1 + d
+    bb_x = edge ? c2 + 1.5h : c2 + 3h
+    bb_y = edge ? c1 + 1.5h : c1 + 3h
+    As_x = _as_for(Mux, b1_x, b2_x, bb_x)
+    As_y = _as_for(Muy, b1_y, b2_y, bb_y)
+    if isinf(As_x) || isinf(As_y)
+        return (As = Inf * u"inch^2", Mu = Mux, γf = gamma_f(b1_x, b2_x), bb = bb_x)
+    end
+    if ustrip(u"inch^2", As_y) > ustrip(u"inch^2", As_x)
+        return (As = As_y, Mu = Muy, γf = gamma_f(b1_y, b2_y), bb = bb_y)
+    end
+    return (As = As_x, Mu = Mux, γf = gamma_f(b1_x, b2_x), bb = bb_x)
+end
+
+"""
     transfer_reinforcement(Mu, γf, bb, d, fc, fy)
 
-Required reinforcement for moment transfer by flexure.
-
-The fraction γf×Mu must be transferred within effective width bb.
-
-# Arguments
-- `Mu`: Total unbalanced moment at column
-- `γf`: Fraction transferred by flexure
-- `bb`: Effective slab width = c2 + 3h
-- `d`: Effective depth
-- `fc`: Concrete strength
-- `fy`: Steel yield strength
-
-# Returns
-Required As within effective width bb
-
-# Reference
-- ACI 318-11 §13.5.3
-- StructurePoint Table 8
+Required reinforcement for moment transfer by flexure (ACI 318-11 §13.5.3).
 """
 function transfer_reinforcement(
     Mu::Moment,

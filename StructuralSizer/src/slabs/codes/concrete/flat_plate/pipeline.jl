@@ -535,12 +535,17 @@ function _run_final_design(method, struc, slab, columns, moment_results, seconda
     transfer_results = Union{Nothing, NamedTuple}[nothing for _ in 1:n_cols]
     for (i, col) in enumerate(columns)
         Mub_i = moment_results.unbalanced_moments[i]
-        abs(ustrip(kip * u"ft", Mub_i)) < 1e-6 && continue
+        Muy_i = isnothing(secondary_results) ? zero(Mub_i) :
+                secondary_results.unbalanced_moments[i]
+        abs(ustrip(kip * u"ft", Mub_i)) < 1e-6 &&
+            abs(ustrip(kip * u"ft", Muy_i)) < 1e-6 && continue
 
-        bb = col.c2 + 3 * h
-        b1 = col.c1 + d; b2 = col.c2 + d
-        γf_val = gamma_f(b1, b2)
-        As_transfer = transfer_reinforcement(abs(Mub_i), γf_val, bb, d, fc, fy)
+        gov = governing_transfer_reinforcement(
+            Mub_i, Muy_i, col.c1, col.c2, h, d, fc, fy; position = col.position)
+        As_transfer = gov.As
+        γf_val = gov.γf
+        bb = gov.bb
+        Mub_i = gov.Mu
 
         # Check for inadequate section in transfer reinforcement
         if isinf(As_transfer)
@@ -1420,21 +1425,28 @@ function size_flat_plate!(
                 d_total = effective_depth(h_total; cover=cover, bar_diameter=bar_dia)
                 
                 for i in 1:n_cols_ps
+                    # ACI 318-11 §11.11.7.1 (corpus: aci-318-11, page 209) +
+                    # PCA EB712 Fig. 16-13 Case D (corpus: pca-eb712, page 486):
+                    # corner connections take γv Mux c/Jc + γv Muy c/Jc.
+                    Muy_i = isnothing(secondary_results) ? nothing :
+                        secondary_results.unbalanced_moments[i]
                     punching_local[i] = check_punching(
                         columns[i], moment_results.column_shears[i],
                         moment_results.unbalanced_moments[i],
                         h, d, h_total, d_total, fc, drop_panel;
-                        qu=moment_results.qu,
+                        qu=moment_results.qu, Muy=Muy_i,
                         verbose=false, col_idx=i, λ=λ, φ_shear=φ_shear
                     )
                 end
             else
                 for i in 1:n_cols_ps
+                    Muy_i = isnothing(secondary_results) ? nothing :
+                        secondary_results.unbalanced_moments[i]
                     punching_local[i] = check_punching_for_column(
                         columns[i], moment_results.column_shears[i],
                         moment_results.unbalanced_moments[i], d, h, fc;
                         verbose=false, col_idx=i, λ=λ, φ_shear=φ_shear,
-                        _geom_cache=_punch_geom_cache
+                        Muy=Muy_i, _geom_cache=_punch_geom_cache
                     )
                 end
             end

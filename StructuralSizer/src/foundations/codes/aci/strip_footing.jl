@@ -139,7 +139,10 @@ function design_footing(::StripFooting,
     Pu_total = sum(Pu_vec)
     Ps_total = sum(Ps_vec)
 
-    # Load resultant position
+    # Load resultant of signed service loads (negative = tension). Do not zero
+    # tension columns: that drops the couple and parks x_bar on the
+    # compression column (ACI 318-11 §15.8.1.2, corpus: aci-318-11, page 275).
+    # Existing strip layout — no new eccentricity formula.
     x_bar = sum(Ps_vec .* positions) / Ps_total
 
     x_min = minimum(positions)
@@ -191,6 +194,10 @@ function design_footing(::StripFooting,
             # --- Two-way (punching) at each column ---
             all_punch_ok = true
             for (j, xc) in enumerate(col_pos_local)
+                # ACI 318-11 §15.8.1.2 — tensile force across the interface
+                # is not a punching (compression) demand (corpus: aci-318-11,
+                # page 275).
+                demands[j].Pu <= zero(demands[j].Pu) && continue
                 cj1 = demands[j].c1
                 cj2 = demands[j].c2
                 d_ft = ustrip(u"ft", d)
@@ -205,10 +212,18 @@ function design_footing(::StripFooting,
                 Vu_p = uconvert(u"lbf", demands[j].Pu - qu * Ac)
                 Vu_p = max(Vu_p, 0.0u"lbf")
 
+                # FoundationDemand.c1 is parallel to footing length (types.jl).
+                # The free END is the short edge, so it runs along named c2;
+                # named c1 is already perp to that end. Default :c2 — do not
+                # invent a swap. Pass :c1 only if a caller stored c1 across
+                # the width (free end // named c1). ACI 318-11 R11.11.7.2
+                # (corpus: aci-318-11, pages 209–211).
+                strip_edge_par = :c2
                 pch = punching_check(Vu_p, demands[j].Mux, demands[j].Muy,
                                       d, fc, cj1, cj2;
                                       position = pos_sym, shape = demands[j].shape,
-                                      λ = λ, ϕ = ϕv)
+                                      λ = λ, ϕ = ϕv,
+                                      free_edge_parallel = strip_edge_par)
                 if !pch.ok
                     all_punch_ok = false
                     break
@@ -313,10 +328,21 @@ function design_footing(::StripFooting,
     # =====================================================================
     # Step 7: Bearing & Dowels at Each Column (ACI 22.8)
     # =====================================================================
+    As_tensile_tot = 0.0u"inch^2"
     if opts.check_bearing
         fc_col_val = something(opts.fc_col, fc)
         ϕb = opts.ϕ_bearing
         for (j, dem) in enumerate(demands)
+            if dem.Pu < zero(dem.Pu)
+                # ACI 318-11 §15.8.1.2(b) — any computed tensile force across
+                # the interface shall be transferred by reinforcement, dowels,
+                # or mechanical connectors (corpus: aci-318-11, page 275).
+                # Not a concrete bearing (compression) demand.
+                As_tensile = abs(dem.Pu) / (ϕb * fy)
+                As_tensile_tot += As_tensile
+                @info "Strip col #$j: tensile interface (ACI 318-11 §15.8.1.2(b)), As_dowels = $As_tensile"
+                continue
+            end
             bearing = _bearing_check_footing(
                 dem.Pu, dem.c1, dem.c2, B, L, h,
                 fc, fc_col_val, fy, ϕb, dem.shape)
@@ -338,6 +364,7 @@ function design_footing(::StripFooting,
 
     util_punch = 0.0
     for (j, xc) in enumerate(col_pos_local)
+        demands[j].Pu <= zero(demands[j].Pu) && continue
         cj1, cj2 = demands[j].c1, demands[j].c2
         d_ft = ustrip(u"ft", d)
         is_edge = (j == 1 && ustrip(u"ft", xc) < d_ft) ||
@@ -346,10 +373,15 @@ function design_footing(::StripFooting,
         Ac = is_edge ? (cj1 + d / 2) * (cj2 + d) :
                        (cj1 + d) * (cj2 + d)
         Vu_p = max(uconvert(u"lbf", demands[j].Pu - qu * Ac), 0.0u"lbf")
+        # Named c1 along the strip (perp to the free end) — default :c2.
+        # Do not invent a :c1 swap. ACI 318-11 R11.11.7.2 (corpus:
+        # aci-318-11, pages 209–211).
+        strip_edge_par = :c2
         pch = punching_check(Vu_p, demands[j].Mux, demands[j].Muy,
                               d, fc, cj1, cj2;
                               position = pos_sym, shape = demands[j].shape,
-                              λ = λ, ϕ = ϕv)
+                              λ = λ, ϕ = ϕv,
+                              free_edge_parallel = strip_edge_par)
         util_punch = max(util_punch, pch.utilization)
     end
 
@@ -413,6 +445,7 @@ function design_footing(::StripFooting,
         N,
         V_conc, V_steel,
         utilization,
+        uconvert(u"m^2", As_tensile_tot),
     )
     StructuralSizer.emit!(tc, :checker, "design_footing_strip_aci", "", :exit;
                           B_m=Float64(ustrip(u"m", result.B)),

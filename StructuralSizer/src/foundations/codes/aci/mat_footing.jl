@@ -195,11 +195,18 @@ function _mat_punching_util(demands, plan, qu, d_eff, fc, λ, ϕv)
                         (c1j + d_eff) * (c2j + d_eff)
         end
         pos_sym = is_corner ? :corner : pos_sym
+        # Bottom/top: free edge along local x (named c1) → :c1 (swap so
+        # ACI c1 = named c2). Left/right: free edge along local y → :c2
+        # (named c1 already perp to the edge). Corners use :corner and
+        # skip edge orient. ACI 318-11 R11.11.7.2 (corpus: aci-318-11,
+        # pages 209–211).
+        edge_par = (edge_bottom || edge_top) ? :c1 : :c2
         Vu_p = max(uconvert(u"lbf", demands[j].Pu - qu * Ac), 0.0u"lbf")
         pch = punching_check(Vu_p, demands[j].Mux, demands[j].Muy,
                               d_eff, fc, c1j, c2j;
                               position = pos_sym, shape = demands[j].shape,
-                              λ = λ, ϕ = ϕv)
+                              λ = λ, ϕ = ϕv,
+                              free_edge_parallel = edge_par)
         util = max(util, pch.utilization)
     end
     return util

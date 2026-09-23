@@ -107,6 +107,20 @@ function _strip_edge_Ac(c1, c2, d, is_edge::Bool, edge_par::Symbol)
         (c1 + d / 2) * (c2 + d)
 end
 
+"""
+    _strip_c_across_along(c1, c2, strip_axis) → (c_across, c_along)
+
+Across-strip face (transverse cantilever / transverse ld) is named c1
+on a Y-layout (B is in X) and named c2 on an X-layout. Along-strip face
+(band width / longitudinal ld) is the other. Same mapping as the one-way
+face offset (ACI 318-11 §11.1.3.1, corpus: aci-318-11, page 166).
+"""
+function _strip_c_across_along(c1, c2, strip_axis::Symbol)
+    strip_axis === :y && return (c1, c2)
+    strip_axis === :x && return (c2, c1)
+    throw(ArgumentError("strip_axis must be :x or :y; got :$strip_axis"))
+end
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Public API
 # ─────────────────────────────────────────────────────────────────────────────
@@ -333,33 +347,42 @@ function design_footing(::StripFooting,
     # =====================================================================
     # Step 5: Transverse Reinforcement (under column bands)
     # =====================================================================
-    # Use max c2 across all columns for governing transverse cantilever.
-    c2_max = maximum(dem.c2 for dem in demands)
-    c1_max = maximum(dem.c1 for dem in demands)
-    cant_trans = (B - c2_max) / 2
+    # ACI 318-11 §15.4.1 / §15.4.2(a) (corpus: aci-318-11, pages 272–273):
+    # Mu at the column face. Across-strip face is named c1 on a Y-layout
+    # (B ∥ X); named c2 on an X-layout. Band width is along-strip face + d.
+    c_across_max = maximum(first(_strip_c_across_along(dem.c1, dem.c2, strip_axis))
+                           for dem in demands)
+    c_along_max  = maximum(last(_strip_c_across_along(dem.c1, dem.c2, strip_axis))
+                           for dem in demands)
+    cant_trans = (B - c_across_max) / 2
     Mu_trans_per_ft = qu * cant_trans^2 / 2     # moment per unit length
-    band_w = c1_max + d
+    band_w = c_along_max + d
     Mu_band = Mu_trans_per_ft * band_w
     As_trans = max(_flexural_steel_footing(Mu_band, band_w, d, fc, fy, ϕf),
                    _min_steel_footing(band_w, h, fy))
 
     # =====================================================================
-    # Step 6: Development Length (ACI 25.4.2)
+    # Step 6: Development Length (ACI 25.4.2 / ACI 318-11 §15.6.3)
     # =====================================================================
+    # ACI 318-11 §15.6.3 (corpus: aci-318-11, page 274): critical sections
+    # for development are the same faces as §15.4.2. Along-strip face for
+    # longitudinal ld; across-strip face for transverse ld.
     if opts.check_development
         ld_long = _development_length_footing(opts.bar_size_long, fc, fy, λ, db_l)
         ld_trans = _development_length_footing(opts.bar_size_trans, fc, fy, λ, db_t)
 
         # Longitudinal bars: available = distance from column face to nearer footing end
         for (j, xc) in enumerate(col_pos_local)
-            avail_long = min(xc, L - xc) - demands[j].c1 / 2 - cover
+            _, c_along = _strip_c_across_along(demands[j].c1, demands[j].c2, strip_axis)
+            avail_long = min(xc, L - xc) - c_along / 2 - cover
             ld_long > avail_long && @warn(
                 "Strip col #$j: longitudinal ld=$ld_long > available=$avail_long")
         end
 
         # Transverse bars: available = cantilever beyond smallest column (most critical)
-        c2_min = minimum(dem.c2 for dem in demands)
-        avail_trans = (B - c2_min) / 2 - cover
+        c_across_min = minimum(first(_strip_c_across_along(dem.c1, dem.c2, strip_axis))
+                               for dem in demands)
+        avail_trans = (B - c_across_min) / 2 - cover
         ld_trans > avail_trans && @warn(
             "Strip transverse: ld=$ld_trans > available=$avail_trans")
     end

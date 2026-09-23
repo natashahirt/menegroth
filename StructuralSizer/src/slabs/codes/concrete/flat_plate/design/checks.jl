@@ -46,7 +46,9 @@ where e_centroid is the distance from column centerline to critical section cent
   page 209) transfers γv Mu by eccentric shear at every slab-column
   connection.  Applied to match `punching_check`: `:corner` adds both
   axes (PCA Case D); `:edge` uses the moment about the axis parallel to
-  the free edge on the 3-sided Jc (R11.11.7.2, pages 209–211);
+  the free edge on the 3-sided Jc (R11.11.7.2, pages 209–211), taking
+  `max(|Mux|, |Muy|)` on default `:c2` when both are present so the
+  uniaxial check cannot drop the governing transfer moment;
   `:interior` superposes both axes.
 - `free_edge_parallel`: `:c1` or `:c2`.  Default inferred from
   `col.boundary_edge_dirs` when present, otherwise `:c2`.

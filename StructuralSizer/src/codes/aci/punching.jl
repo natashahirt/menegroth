@@ -415,11 +415,14 @@ the dimension **perpendicular to the free edge**. The unbalanced moment used
 on the 3-sided critical section is the moment about the axis **parallel to
 the free edge**.
 
-- `free_edge_parallel = :c2` (default): caller already stored `c1` perp to
-  the edge. Transfer moment is `Muy` when supplied, otherwise `Mux`
-  (single-moment callers pass the edge transfer as `Mux`).
 - `free_edge_parallel = :c1`: free edge runs along the named `c1` face;
   swap so ACI `c1` = named `c2`, and use `Mux` (about the axis // named c1).
+- `free_edge_parallel = :c2` (default): caller already stored `c1` perp to
+  the edge. Single-moment callers pass the edge transfer as `Mux` (or as
+  `Muy` with `Mux = 0`). When **both** `Mux` and `Muy` are present and the
+  free edge is not identified beyond this default, the subsequent uniaxial
+  edge check must not drop the larger |M| — `M_edge =` the governing of
+  `|Mux|` and `|Muy|`.
 """
 function _orient_edge_column(c1::Length, c2::Length, Mux::Torque, Muy::Torque;
                              free_edge_parallel::Symbol = :c2)
@@ -428,8 +431,18 @@ function _orient_edge_column(c1::Length, c2::Length, Mux::Torque, Muy::Torque;
     if free_edge_parallel === :c1
         return (c1 = c2, c2 = c1, M_edge = Mux)
     end
+    Mux_zero = abs(to_kipft(Mux)) < 1e-10
     Muy_zero = abs(to_kipft(Muy)) < 1e-10
-    return (c1 = c1, c2 = c2, M_edge = Muy_zero ? Mux : Muy)
+    if Mux_zero
+        M_edge = Muy
+    elseif Muy_zero
+        M_edge = Mux
+    else
+        # Default / :c2 with both axes present: keep the governing |M| so
+        # punching_check's subsequent Muy = 0 cannot check only a leftover.
+        M_edge = abs(to_kipft(Mux)) ≥ abs(to_kipft(Muy)) ? Mux : Muy
+    end
+    return (c1 = c1, c2 = c2, M_edge = M_edge)
 end
 
 """
@@ -478,8 +491,10 @@ from biaxial unbalanced moments.
 - `ϕ`: Shear strength reduction factor (0.75)
 - `free_edge_parallel`: For `:edge` only. `:c2` (default) means `c1` is
   already perp to the free edge; `:c1` means the free edge runs along the
-  named `c1` face (swap so ACI `c1` = named `c2`). ACI 318-11 R11.11.7.2
-  (corpus: aci-318-11, pages 209–211).
+  named `c1` face (swap so ACI `c1` = named `c2`). On default `:c2` with
+  both `Mux` and `Muy` present, the uniaxial transfer moment is
+  `max(|Mux|, |Muy|)`. ACI 318-11 R11.11.7.2 (corpus: aci-318-11,
+  pages 209–211).
 
 # Returns
 `(ok, utilization, vu, ϕvc, b0, geom)`

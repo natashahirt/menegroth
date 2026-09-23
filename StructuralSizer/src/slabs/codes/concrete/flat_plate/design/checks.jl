@@ -41,13 +41,25 @@ where e_centroid is the distance from column centerline to critical section cent
 - `col_idx`: Column index for logging
 - `λ`: Lightweight concrete factor (default: 1.0)
 - `φ_shear`: Strength reduction factor (default: 0.75)
+- `Muy`: Optional perpendicular-axis unbalanced moment
+  (default `nothing` → 0).  ACI 318-11 §11.11.7.1 (corpus: aci-318-11,
+  page 209) transfers γv Mu by eccentric shear at every slab-column
+  connection.  Applied to match `punching_check`: `:corner` adds both
+  axes (PCA Case D); `:edge` uses the moment about the axis parallel to
+  the free edge on the 3-sided Jc (R11.11.7.2, pages 209–211);
+  `:interior` superposes both axes.
+- `free_edge_parallel`: `:c1` or `:c2`.  Default inferred from
+  `col.boundary_edge_dirs` when present, otherwise `:c2`.
 
 # Returns
 Named tuple with `(ok, ratio, vu, φvc, b0, Jc, Mub)`
 """
 function check_punching_for_column(col, Vu, Mub, d, h, fc;
                                    verbose=false, col_idx=1, λ=1.0, φ_shear=0.75,
+                                   Muy=nothing,
+                                   free_edge_parallel::Union{Nothing, Symbol} = nothing,
                                    _geom_cache::Union{Nothing, Dict} = nothing)
+    edge_par = something(free_edge_parallel, _infer_free_edge_parallel(col))
     c1 = col.c1
     c2 = col.c2
     col_shape_val = col_shape(col)
@@ -63,10 +75,20 @@ function check_punching_for_column(col, Vu, Mub, d, h, fc;
         c1 = c_eq
         c2 = c_eq
     end
-    
+
+    Muy_val = isnothing(Muy) ? zero(Mub) : Muy
+    if col.position == :edge
+        ori = _orient_edge_column(c1, c2, Mub, Muy_val; free_edge_parallel = edge_par)
+        c1 = ori.c1
+        c2 = ori.c2
+        Mub = ori.M_edge
+        Muy_val = zero(Muy_val)
+        Muy = nothing
+    end
+
     # ── Geometry (cached: depends only on c1, c2, d, position, shape) ──
     cache_key = !isnothing(_geom_cache) ?
-        (ustrip(u"m", c1), ustrip(u"m", c2), ustrip(u"m", d), col.position, geom_shape) :
+        (ustrip(u"m", c1), ustrip(u"m", c2), ustrip(u"m", d), col.position, geom_shape, edge_par) :
         nothing
 
     cached = !isnothing(cache_key) ? get(_geom_cache, cache_key, nothing) : nothing
@@ -90,9 +112,11 @@ function check_punching_for_column(col, Vu, Mub, d, h, fc;
             γv_val = gamma_v(geom.b1, geom.b2)
             cAB = geom.cAB
         else  # :corner
+            # Two-sided Jc from PCA EB712 Fig. 16-13 Case D (page 486),
+            # same formulas as punching_check(; position=:corner).
             geom = punching_geometry_corner(c1, c2, d)
-            cAB = max(geom.cAB_x, geom.cAB_y)
-            Jc = polar_moment_Jc_edge(geom.b1, geom.b2, d, cAB) / 2
+            cAB = geom.cAB_x
+            Jc = polar_moment_Jc_corner(geom.b1, geom.b2, d, geom.cAB_x)
             γv_val = gamma_v(geom.b1, geom.b2)
         end
 
@@ -107,20 +131,47 @@ function check_punching_for_column(col, Vu, Mub, d, h, fc;
     end
 
     # ── Eccentricity correction (load-dependent — not cached) ──
+    # ACI 318-11 §11.11.7.1 (corpus: aci-318-11, page 209) — remainder γv Mu
+    # transferred by eccentricity of shear about the §11.11.1.2 centroid.
+    muy_present = !isnothing(Muy) && abs(ustrip(kip * u"ft", Muy_val)) > 1e-10
+
     if col.position == :interior
         Mub_adjusted = Mub
+        e_centroid = zero(c1)
     elseif col.position == :edge
+        # ACI 318-11 R11.11.7.2 (pages 209–211): moment about the axis
+        # parallel to the free edge, after `_orient_edge_column`.
         e_centroid = c1 / 2 - cAB
-        Mub_adjusted = max(0.0kip*u"ft", Mub - Vu * e_centroid)
-    else  # :corner
-        e_x = c1 / 2 - geom.cAB_x
-        e_y = c2 / 2 - geom.cAB_y
-        e_centroid = max(e_x, e_y)
-        Mub_adjusted = max(0.0kip*u"ft", Mub - Vu * e_centroid)
+        Mub_adjusted = max(0.0kip*u"ft", abs(Mub) - Vu * e_centroid)
+    else  # :corner — same centroid shift as punching_check (R11.11.7.2)
+        e_centroid = c1 / 2 - geom.cAB_x
+        Mub_adjusted = max(0.0kip*u"ft", abs(Mub) - Vu * e_centroid)
     end
-    
+
     b0 = geom.b0
-    vu = combined_punching_stress(Vu, Mub_adjusted, b0, d, γv_val, Jc, cAB)
+    if col.position == :corner
+        # Parity with punching_check: γv Mu c / Jc on each axis.
+        # `Mub` is the span-direction (b1) transfer moment; optional `Muy`
+        # is the perpendicular-axis moment when the caller has it.
+        e_y = c2 / 2 - geom.cAB_y
+        Muy_adj = max(0.0kip*u"ft", abs(Muy_val) - Vu * e_y)
+        γv_y = gamma_v(geom.b2, geom.b1)
+        Jc_y = polar_moment_Jc_corner(geom.b2, geom.b1, d, geom.cAB_y)
+        vu = uconvert(u"psi", Vu / (b0 * d)) +
+             uconvert(u"psi", γv_val * Mub_adjusted * geom.cAB_x / Jc) +
+             uconvert(u"psi", γv_y * Muy_adj * geom.cAB_y / Jc_y)
+    elseif col.position == :interior && muy_present
+        # Superpose both axes to match punching_check(; position=:interior).
+        # Jc_x / γv_x from the cached 4-sided section; Jc_y / γv_y swap b1, b2.
+        γv_y = gamma_v(geom.b2, geom.b1)
+        Jc_y = polar_moment_Jc_interior(geom.b2, geom.b1, d)
+        cAB_y = geom.b2 / 2
+        vu = uconvert(u"psi", Vu / (b0 * d)) +
+             uconvert(u"psi", γv_val * abs(Mub) * cAB / Jc) +
+             uconvert(u"psi", γv_y * abs(Muy_val) * cAB_y / Jc_y)
+    else
+        vu = combined_punching_stress(Vu, Mub_adjusted, b0, d, γv_val, Jc, cAB)
+    end
     
     vc = punching_capacity_stress(fc, β, αs, b0, d; λ=λ)
     φvc = φ_shear * vc
@@ -255,6 +306,11 @@ Per ACI 318-11 §11.11.1.2, flat slabs with drop panels require TWO checks:
 
 The governing (worst) result is returned.
 
+# Keyword Arguments
+- `Muy`: Optional perpendicular-axis unbalanced moment, forwarded to
+  `check_punching_for_column` at the column-face section (edge / interior /
+  corner).  Drop-edge remains direct-shear only.
+
 # Returns
 Named tuple `(ok, ratio, vu, φvc, b0, Jc, Mub, governing_section)` where
 `governing_section` is `:column` or `:drop_edge`.
@@ -266,10 +322,17 @@ Named tuple `(ok, ratio, vu, φvc, b0, Jc, Mub, governing_section)` where
 function check_punching(col, Vu, Mub, h_slab, d_slab, h_total, d_total,
                                    fc, drop::DropPanelGeometry;
                                    qu = nothing,
+                                   Muy = nothing,
                                    verbose=false, col_idx=1, λ=1.0, φ_shear=0.75)
-    # Check 1: At column face with total depth
+    # Check 1: At column face with total depth.
+    # ACI 318-11 §11.11.7.1 (corpus: aci-318-11, page 209) — γv Mu by
+    # eccentric shear at every slab-column connection (interior / edge /
+    # corner).  Perpendicular-axis Muy is the secondary-frame transfer
+    # moment (PCA EB712 Fig. 16-13 Case D on :corner, corpus: pca-eb712,
+    # page 486; punching_check max/superposition on :edge / :interior).
     check_col = check_punching_for_column(col, Vu, Mub, d_total, h_total, fc;
-                                          verbose=verbose, col_idx=col_idx, λ=λ, φ_shear=φ_shear)
+                                          verbose=verbose, col_idx=col_idx, λ=λ, φ_shear=φ_shear,
+                                          Muy=Muy)
     
     # Check 2: At drop panel edge with slab depth (direct shear only, Vu reduced)
     check_drop = check_punching_at_drop_edge(col, Vu, Mub, h_slab, d_slab, fc, drop;
@@ -407,7 +470,8 @@ function check_two_way_deflection(
     Ie_sup_D  = _Ie(Mcr, Ma_D_sup,  Ig_frame, Icr_sup)
     Ie_sup_DL = _Ie(Mcr, Ma_DL_sup, Ig_frame, Icr_sup)
 
-    # ── ACI 435R-95 weighted average (accounts for support cracking) ──
+    # ── ACI 435R-95 Eq. 4-1a/b weighted average (NOT ACI 318-11 §9.5.2.4,
+    # which permits a simple average of Eq. 9-8; corpus: aci-318-11, page 132) ──
     Ie_D  = weighted_effective_Ie(Ie_mid_D,  Ie_sup_D,  Ie_sup_D;  position=position)
     Ie_DL = weighted_effective_Ie(Ie_mid_DL, Ie_sup_DL, Ie_sup_DL; position=position)
 
@@ -549,7 +613,12 @@ is thin) and less to the supports (where drop panels increase I).
 - `position`: `:interior` or `:exterior` (end span)
 
 # Reference
-- ACI 435R-95 Eq. 4-1a and 4-1b
+- ACI 435R-95 Eq. 4-1a and 4-1b (not in the curated corpus; coefficients
+  are the existing project citation for this weighted form).
+- ACI 318-11 §9.5.2.4 (corpus: aci-318-11, page 132) permits a *simple
+  average* of Eq. (9-8) at the critical positive and negative sections as
+  an alternative. It does **not** prescribe the 0.70 / 0.15 / 0.15
+  weights; those are ACI 435R-95, not §9.5.2.4.
 - StructurePoint DE-Two-Way-Flat-Slab:
     Interior: Ie_avg = 0.70 × Ie_m + 0.15 × (Ie_1 + Ie_2)
 """

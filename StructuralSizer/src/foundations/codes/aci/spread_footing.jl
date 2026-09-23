@@ -29,6 +29,37 @@ TRACE_REGISTRY[(:design_footing, :checker)] =
 # ─────────────────────────────────────────────────────────────────────────────
 
 """
+    _eccentric_soil_pressure(P, Mux, Muy, B, L) → (q_max, q_min, qu, ex, ey)
+
+ACI 336.2R §3.2.1 Eq. (3-1) (corpus: aci-336-combined-footings-mats, page 6)
+and §4.1 (page 7) linear rigid-body contact pressure:
+
+    q_max,min = P/(B L) (1 ± 6 ex/L ± 6 ey/B)
+
+with `ex = Mux/P`, `ey = Muy/P`, `L` along x (Mux), `B` along y (Muy).
+Applies while the resultant stays in the kern (`q_min ≥ 0`).  `qu = P/(B L)`
+is the concentric average.
+"""
+function _eccentric_soil_pressure(P::Force, Mux::Torque, Muy::Torque,
+                                  B::Length, L::Length)
+    A = B * L
+    qu = P / A
+    P_abs = abs(P)
+    if P_abs ≤ zero(P_abs)
+        z = zero(qu)
+        return (q_max = z, q_min = z, qu = z, ex = zero(L), ey = zero(B))
+    end
+    ex = Mux / P
+    ey = Muy / P
+    # 6e/dim is dimensionless.  Promote through the pressure unit.
+    kern = 1 + 6 * ustrip(u"m", ex) / ustrip(u"m", L) +
+               6 * ustrip(u"m", ey) / ustrip(u"m", B)
+    kern_min = 1 - 6 * ustrip(u"m", ex) / ustrip(u"m", L) -
+                   6 * ustrip(u"m", ey) / ustrip(u"m", B)
+    return (q_max = qu * kern, q_min = qu * kern_min, qu = qu, ex = ex, ey = ey)
+end
+
+"""
 Compute required flexural reinforcement for a rectangular section.
 
 Iterates on lever arm jd until convergence. Returns total As for width `b`.
@@ -176,6 +207,8 @@ function design_footing(::SpreadFooting,
     opts::SpreadParams = SpreadParams(),
     tc::Union{Nothing, TraceCollector} = nothing,
 )
+    demand.Pu isa Unitful.Quantity ||
+        throw(ArgumentError("ACI spread footing Pu must be Unitful; bare Real is rejected"))
     StructuralSizer.emit!(tc, :checker, "design_footing_spread_aci", "foundation_group_$(demand.group_idx)", :enter;
                           qa_kPa=Float64(ustrip(u"kPa", soil.qa)),
                           Pu_kN=Float64(ustrip(u"kN", demand.Pu)),
@@ -208,6 +241,13 @@ function design_footing(::SpreadFooting,
     # =====================================================================
     # Step 1: Preliminary Sizing
     # =====================================================================
+    # ACI 336.2R §3.2.1 Eq. (3-1) (corpus: aci-336-combined-footings-mats,
+    # page 6): for a rectangular rigid footing with the resultant along a
+    # principal axis, q_max,min = (P/A)(1 ± 6e/Z).  §4.1 (page 7) applies
+    # the same linear rigid-body distribution when the resultant is
+    # eccentric about the centroid.  Superposition on both principal axes:
+    #   q_max,min = P/(B L) (1 ± 6 ex/L ± 6 ey/B)
+    # with ex = Mux/P, ey = Muy/P.  Size the plan from q_max ≤ qa (service).
     A_req = Ps / qa
     B = sqrt(A_req)
 
@@ -220,8 +260,23 @@ function design_footing(::SpreadFooting,
     B = max(B, min_B)
     Lf = B   # square footing
 
-    # Factored net soil pressure
-    qu = Pu / (B * Lf)
+    # Grow the square plan until service q_max ≤ qa.  Eccentricity is
+    # Mux/Pu (load factors cancel when Ms/Ps = Mux/Pu).
+    P_abs = abs(Pu)
+    if P_abs > zero(P_abs)
+        for _ in 1:40
+            qe = _eccentric_soil_pressure(Pu, demand.Mux, demand.Muy, B, Lf)
+            q_max_s = (Ps / (B * Lf)) * (qe.q_max / qe.qu)
+            q_max_s ≤ qa && break
+            B += si
+            Lf = B
+        end
+    end
+
+    # Factored net soil pressure — size structural checks from q_max
+    # (ACI 336.2R §3.2.1 / §4.1).  Mux/Muy also go to punching_check.
+    q_u = _eccentric_soil_pressure(Pu, demand.Mux, demand.Muy, B, Lf)
+    qu = q_u.q_max
 
     # =====================================================================
     # Step 2 & 3: Thickness Iteration (Punching + One-Way Shear)

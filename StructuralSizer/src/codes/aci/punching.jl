@@ -72,7 +72,15 @@ end
 
 Returns `(b1, b2, b0, cAB_x, cAB_y)`.
 
-Reference: ACI 318-11 §11.11.1.2
+`b1 = c1 + d/2`, `b2 = c2 + d/2` (two-sided section at d/2 from each
+interior column face).  Centroid distances from the inner (slab-side)
+face of each leg:
+
+    cAB_x = b1² / [2(b1 + b2)]     (PCA Fig. 16-13 Case D, `c`)
+    cAB_y = b2² / [2(b1 + b2)]
+
+Reference: ACI 318-11 §11.11.1.2 (corpus: aci-318-11, page 209);
+PCA EB712 Fig. 16-13 Case D (corpus: pca-eb712, page 486).
 """
 function punching_geometry_corner(c1::Length, c2::Length, d::Length)
     b1 = c1 + d / 2
@@ -217,6 +225,53 @@ function polar_moment_Jc_edge(b1::Length, b2::Length, d::Length, cAB::Length)
            b2 * d * cAB^2
 end
 
+"""
+    polar_modulus_Jc_over_c_corner(b1, b2, d)
+
+Section modulus J/c of a two-sided (corner) critical section about the
+axis associated with `b1`, per PCA Notes on ACI 318 Fig. 16-13 Case D:
+
+    J/c = [b1² d (b1 + 4 b2) + d³ (b1 + b2)] / (6 b1)
+
+`b1 = c1 + d/2` is the critical-section dimension in the direction of the
+moment; `b2 = c2 + d/2` is the perpendicular leg.
+
+ACI 318-11 R11.11.7.2 (page 211) gives Jc for an interior column and
+states "Similar equations may be developed for Ac and Jc for columns
+located at the edge or corner of a slab."  The closed-form corner
+expression is taken from PCA EB712 Fig. 16-13 Case D (page 486), which
+is the corpus source that writes the two-sided formula explicitly.
+
+Reference: PCA EB712 Fig. 16-13 Case D (corpus: pca-eb712, page 486);
+ACI 318-11 R11.11.7.2 (corpus: aci-318-11, page 211).
+"""
+function polar_modulus_Jc_over_c_corner(b1::Length, b2::Length, d::Length)
+    return (b1^2 * d * (b1 + 4 * b2) + d^3 * (b1 + b2)) / (6 * b1)
+end
+
+"""
+    polar_moment_Jc_corner(b1, b2, d, cAB)
+
+Jc for a corner column (2-sided critical section).
+
+    Jc = (J/c) · cAB
+
+with J/c from `polar_modulus_Jc_over_c_corner` and
+`cAB = b1² / [2(b1 + b2)]` (PCA Case D `c`).
+
+Equivalent expanded form (matches the tabulated J/c × c; omits the
+closing-leg out-of-plane `b2 d³/12` term, same PCA convention as
+`polar_moment_Jc_edge`):
+
+    Jc = b1 d³/12 + d b1³/12 + b1 d (b1/2 − cAB)² + b2 d cAB²
+
+Reference: PCA EB712 Fig. 16-13 Case D (corpus: pca-eb712, page 486);
+ACI 318-11 R11.11.7.2 (corpus: aci-318-11, page 211).
+"""
+function polar_moment_Jc_corner(b1::Length, b2::Length, d::Length, cAB::Length)
+    return polar_modulus_Jc_over_c_corner(b1, b2, d) * cAB
+end
+
 # ─────────────────────────────────────────────────────────────────────────────
 # §11.11.2.1 — Punching Shear Capacity
 # ─────────────────────────────────────────────────────────────────────────────
@@ -348,6 +403,58 @@ function check_one_way_shear(Vu, Vc; φ::Float64 = 0.75)
 end
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Edge-column orientation (ACI 318-11 §11.11.7 / R11.11.7.2)
+# ─────────────────────────────────────────────────────────────────────────────
+
+"""
+    _orient_edge_column(c1, c2, Mux, Muy; free_edge_parallel=:c2)
+
+ACI 318-11 R11.11.7.2 (corpus: aci-318-11, pages 209–211): `c1` is the column
+dimension in the direction of the span for which moments are determined —
+the dimension **perpendicular to the free edge**. The unbalanced moment used
+on the 3-sided critical section is the moment about the axis **parallel to
+the free edge**.
+
+- `free_edge_parallel = :c2` (default): caller already stored `c1` perp to
+  the edge. Transfer moment is `Muy` when supplied, otherwise `Mux`
+  (single-moment callers pass the edge transfer as `Mux`).
+- `free_edge_parallel = :c1`: free edge runs along the named `c1` face;
+  swap so ACI `c1` = named `c2`, and use `Mux` (about the axis // named c1).
+"""
+function _orient_edge_column(c1::Length, c2::Length, Mux::Torque, Muy::Torque;
+                             free_edge_parallel::Symbol = :c2)
+    free_edge_parallel in (:c1, :c2) ||
+        throw(ArgumentError("free_edge_parallel must be :c1 or :c2; got :$free_edge_parallel"))
+    if free_edge_parallel === :c1
+        return (c1 = c2, c2 = c1, M_edge = Mux)
+    end
+    Muy_zero = abs(to_kipft(Muy)) < 1e-10
+    return (c1 = c1, c2 = c2, M_edge = Muy_zero ? Mux : Muy)
+end
+
+"""
+    _infer_free_edge_parallel(col) -> Symbol
+
+Infer `free_edge_parallel` from a column's `boundary_edge_dirs` (unit vector
+along the slab free edge). Aligns the edge with local x (`:c1`) or local y
+(`:c2`). Defaults to `:c2` when no boundary direction is stored (c1 already
+perp to the edge — the historical convention).
+"""
+function _infer_free_edge_parallel(col)
+    if hasproperty(col, :boundary_edge_dirs)
+        dirs = getfield(col, :boundary_edge_dirs)
+        if !isempty(dirs)
+            θ = hasproperty(col, :θ) ? Float64(getfield(col, :θ)) : 0.0
+            ex, ey = dirs[1]
+            lx = abs(ex * cos(θ) + ey * sin(θ))
+            ly = abs(-ex * sin(θ) + ey * cos(θ))
+            return lx ≥ ly ? :c1 : :c2
+        end
+    end
+    return :c2
+end
+
+# ─────────────────────────────────────────────────────────────────────────────
 # High-Level: Punching Check with Biaxial Unbalanced Moment
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -369,6 +476,10 @@ from biaxial unbalanced moments.
 - `shape`: `:rectangular` (default), `:circular`
 - `λ`: Lightweight factor (1.0)
 - `ϕ`: Shear strength reduction factor (0.75)
+- `free_edge_parallel`: For `:edge` only. `:c2` (default) means `c1` is
+  already perp to the free edge; `:c1` means the free edge runs along the
+  named `c1` face (swap so ACI `c1` = named `c2`). ACI 318-11 R11.11.7.2
+  (corpus: aci-318-11, pages 209–211).
 
 # Returns
 `(ok, utilization, vu, ϕvc, b0, geom)`
@@ -387,8 +498,16 @@ function punching_check(
     position::Symbol = :interior,
     shape::Symbol = :rectangular,
     λ::Float64 = 1.0,
-    ϕ::Float64 = 0.75
+    ϕ::Float64 = 0.75,
+    free_edge_parallel::Symbol = :c2,
 )
+    if position == :edge
+        ori = _orient_edge_column(c1, c2, Mux, Muy; free_edge_parallel = free_edge_parallel)
+        c1 = ori.c1
+        c2 = ori.c2
+        Mux = ori.M_edge
+        Muy = zero(Muy)
+    end
     # Geometry
     geom = punching_geometry(c1, c2, d; position = position, shape = shape)
     b0 = geom.b0
@@ -430,8 +549,11 @@ function punching_check(
         vu = v_direct + v_Mux + v_Muy
 
     elseif position == :edge
-        # Edge — primary moment perpendicular to free edge
-        Mub = max(abs(Mux), abs(Muy))
+        # Edge — ACI 318-11 §11.11.7 / R11.11.7.2 (corpus: aci-318-11,
+        # pages 209–211): c1 is perp to the free edge (applied above);
+        # transfer moment is about the axis parallel to the edge (`Mux`
+        # after `_orient_edge_column`).
+        Mub = abs(Mux)
         γv_val = gamma_v(geom.b1, geom.b2)
         Jc = polar_moment_Jc_edge(geom.b1, geom.b2, d, geom.cAB)
         e = c1 / 2 - geom.cAB
@@ -439,9 +561,34 @@ function punching_check(
         v_moment = uconvert(u"psi", γv_val * Mub_adj * geom.cAB / Jc)
         vu = v_direct + v_moment
 
-    else  # :corner — ACI 318-11 §11.11.7.1 applies moment transfer to all columns,
-          # but direct shear only is used here (conservative for gravity loading).
-        vu = v_direct
+    else
+        # :corner — two-sided critical section.  ACI 318-11 §11.11.7.1
+        # (corpus: aci-318-11, page 209) transfers γv Mu by eccentricity of
+        # shear at every slab-column connection, including corners.
+        # γv from Eq. (11-37) / Eq. (13-1) with the 2-sided b1, b2
+        # (§13.5.3.2, page 250).  Jc and cAB from PCA EB712 Fig. 16-13
+        # Case D (page 486).  Each axis contributes (biaxial superposition,
+        # same as the interior path).
+        b1 = geom.b1
+        b2 = geom.b2
+        cAB_x = geom.cAB_x
+        cAB_y = geom.cAB_y
+
+        γv_x = gamma_v(b1, b2)
+        γv_y = gamma_v(b2, b1)
+        Jc_x = polar_moment_Jc_corner(b1, b2, d, cAB_x)
+        Jc_y = polar_moment_Jc_corner(b2, b1, d, cAB_y)
+
+        # Mu at the critical-section centroid (R11.11.7.2, page 210):
+        # shift the column-centerline moment by Vu × e.
+        e_x = c1 / 2 - cAB_x
+        e_y = c2 / 2 - cAB_y
+        Mux_adj = max(abs(Mux) - Vu * e_x, zero(Mux))
+        Muy_adj = max(abs(Muy) - Vu * e_y, zero(Muy))
+
+        v_Mux = uconvert(u"psi", γv_x * Mux_adj * cAB_x / Jc_x)
+        v_Muy = uconvert(u"psi", γv_y * Muy_adj * cAB_y / Jc_y)
+        vu = v_direct + v_Mux + v_Muy
     end
 
     ok = vu ≤ ϕvc

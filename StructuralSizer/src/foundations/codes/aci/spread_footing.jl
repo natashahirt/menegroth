@@ -34,11 +34,13 @@ TRACE_REGISTRY[(:design_footing, :checker)] =
 ACI 336.2R §3.2.1 Eq. (3-1) (corpus: aci-336-combined-footings-mats, page 6)
 and §4.1 (page 7) linear rigid-body contact pressure:
 
-    q_max,min = P/(B L) (1 ± 6 ex/L ± 6 ey/B)
+    q_max,min = P/(B L) (1 ± 6 |ex|/L ± 6 |ey|/B)
 
-with `ex = Mux/P`, `ey = Muy/P`, `L` along x (Mux), `B` along y (Muy).
-Applies while the resultant stays in the kern (`q_min ≥ 0`).  `qu = P/(B L)`
-is the concentric average.
+The ± in Eq. (3-1) (`q_max,min = (P/A)(1 ± 6e/Z)`) means the peak uses the
+sum of absolute eccentricities: `q_max` is always the pressed-edge corner
+and `q_min` the opposite.  `ex = Mux/P`, `ey = Muy/P` are returned signed;
+`L` along x (Mux), `B` along y (Muy).  Applies while the resultant stays
+in the kern (`q_min ≥ 0`).  `qu = P/(B L)` is the concentric average.
 """
 function _eccentric_soil_pressure(P::Force, Mux::Torque, Muy::Torque,
                                   B::Length, L::Length)
@@ -51,11 +53,15 @@ function _eccentric_soil_pressure(P::Force, Mux::Torque, Muy::Torque,
     end
     ex = Mux / P
     ey = Muy / P
-    # 6e/dim is dimensionless.  Promote through the pressure unit.
-    kern = 1 + 6 * ustrip(u"m", ex) / ustrip(u"m", L) +
-               6 * ustrip(u"m", ey) / ustrip(u"m", B)
-    kern_min = 1 - 6 * ustrip(u"m", ex) / ustrip(u"m", L) -
-                   6 * ustrip(u"m", ey) / ustrip(u"m", B)
+    # ACI 336.2R §3.2.1 Eq. (3-1) (corpus: aci-336-combined-footings-mats,
+    # page 6): q_max,min = (P/A)(1 ± 6e/Z).  Peak uses |e| so a negative
+    # Mux cannot label the unloaded edge as q_max.
+    ex_abs = abs(ex)
+    ey_abs = abs(ey)
+    kern = 1 + 6 * ustrip(u"m", ex_abs) / ustrip(u"m", L) +
+               6 * ustrip(u"m", ey_abs) / ustrip(u"m", B)
+    kern_min = 1 - 6 * ustrip(u"m", ex_abs) / ustrip(u"m", L) -
+                   6 * ustrip(u"m", ey_abs) / ustrip(u"m", B)
     return (q_max = qu * kern, q_min = qu * kern_min, qu = qu, ex = ex, ey = ey)
 end
 
@@ -245,8 +251,9 @@ function design_footing(::SpreadFooting,
     # page 6): for a rectangular rigid footing with the resultant along a
     # principal axis, q_max,min = (P/A)(1 ± 6e/Z).  §4.1 (page 7) applies
     # the same linear rigid-body distribution when the resultant is
-    # eccentric about the centroid.  Superposition on both principal axes:
-    #   q_max,min = P/(B L) (1 ± 6 ex/L ± 6 ey/B)
+    # eccentric about the centroid.  Superposition on both principal axes
+    # uses |e| so q_max is the peak corner:
+    #   q_max,min = P/(B L) (1 ± 6 |ex|/L ± 6 |ey|/B)
     # with ex = Mux/P, ey = Muy/P.  Size the plan from q_max ≤ qa (service).
     A_req = Ps / qa
     B = sqrt(A_req)

@@ -210,6 +210,15 @@ Design result for a strip (combined) footing supporting N ≥ 2 columns.
 - `concrete_volume`: Total concrete volume
 - `steel_volume`: Total rebar volume
 - `utilization`: Governing utilization ratio
+- `As_tensile`: Interface tensile steel across mixed-sign column-footing
+  joints (ACI 318-11 §15.8.1.2(b), corpus: aci-318-11, page 275).  Zero
+  when every column is in compression.
+- `Bn`: Design bearing strength φBn of the footing concrete at the
+  governing (minimum-sqA) column interface (ACI 318-11 §10.14.1 /
+  §15.8.1.1, corpus: aci-318-11, pages 162, 274). Zero when no
+  compression column is checked.
+- `sqA`: √(A2/A1) ≤ 2 used for that Bn (1 when the support is not
+  wider on all sides than the loaded area).
 """
 struct StripFootingResult{L, A, V, F} <: AbstractFoundationResult
     B::L
@@ -223,6 +232,9 @@ struct StripFootingResult{L, A, V, F} <: AbstractFoundationResult
     concrete_volume::V
     steel_volume::V
     utilization::Float64
+    As_tensile::A    # §15.8.1.2(b) tensile interface steel
+    Bn::F            # φBn_footing at governing (min sqA) column
+    sqA::Float64     # √(A2/A1) ≤ 2 at that column
 end
 
 """
@@ -315,6 +327,53 @@ footing_depth(r::PileCapResult) = r.cap_D
 utilization(r::AbstractFoundationResult) = r.utilization
 
 # =============================================================================
+# Imperial length canonicalize (bearing / strip stations)
+# =============================================================================
+
+# SI m↔inch of 1 ft is 0.3048/0.0254 = 12 + ~1.78e-15, not Unitful's exact
+# ×12. That ulp is conversion noise, not a construction leftover (0.01 in
+# is ~1e10× larger) and not an ε-not-wider rule. Do not grid-round the
+# station onto a 1e-12 leftover: `round(x/1e-12)*1e-12` sends 12+6e-13 to
+# 12+1e-12 (`left` ≈ 1.00009e-12, still `left > 0`). Snap the four
+# overhangs after face subtraction (`_snap_si_overhang`). Production
+# leftover is inch-tagged after SI round-trip (`uconvert(inch,
+# uconvert(m, 1ft))` ≈ 12 + 1.78e-15); a tag bypass lets `left > 0` open
+# ACI 318-11 §10.14.1 (corpus: aci-318-11, page 162).
+const _SI_INCH_ULP = 1e-12
+
+"""
+    _canonical_inch(L) → Quantity in inches
+
+Convert a length to inches before mixed-unit arithmetic.
+
+Every unit, including already-tagged inch/ft: an inch-tagged SI leftover
+is still 0.3048/0.0254, not ×12. Do not grid-round onto leftover (6e-13
+must not become 1e-12). SI residuals are snapped on the four overhangs
+after face subtraction (`_snap_si_overhang`). A true leftover (e.g.
+0.01 in) is unchanged. Not a construction tolerance and not an
+ε-not-wider rule (ACI 318-11 §10.14.1, corpus: aci-318-11, page 162).
+"""
+function _canonical_inch(L::Length)
+    return ustrip(u"inch", L) * u"inch"
+end
+
+"""Same as `_canonical_inch`, then exact ÷12 to feet."""
+_canonical_ft(L::Length) = uconvert(u"ft", _canonical_inch(L))
+
+"""
+    _snap_si_overhang(oh) → Length
+
+After face subtraction, treat `|overhang| < `_SI_INCH_ULP` (1e-12 in) as
+zero. That ulp is SI m↔inch conversion noise only — not a construction
+tolerance. Used for the ACI 318-11 §10.14.1 wider-on-all-sides gate and
+that face's A2 clip (corpus: aci-318-11, page 162).
+"""
+function _snap_si_overhang(oh::Length)
+    x = ustrip(u"inch", oh)
+    return abs(x) < _SI_INCH_ULP ? zero(oh) : oh
+end
+
+# =============================================================================
 # Foundation Demand
 # =============================================================================
 
@@ -325,15 +384,19 @@ Reaction forces from structural analysis at a support node, with per-column
 dimensions for punching shear, bearing, and development checks.
 
 # Fields
-- `Pu`: Factored axial load (compression positive)
+- `Pu`: Factored axial load (compression positive, tension negative). Isolated
+  all-uplift footings may skip design; grouped footings keep the signed couple.
 - `Mux`: Factored moment about x-axis
 - `Muy`: Factored moment about y-axis
 - `Vux`: Factored shear in x
 - `Vuy`: Factored shear in y
-- `Ps`: Service axial load (for settlement)
+- `Ps`: Service axial load (signed D+L, not Pu/1.4; tension negative)
 - `c1`: Column dimension parallel to footing length (or diameter for circular)
 - `c2`: Column dimension perpendicular (= c1 for square/circular)
 - `shape`: `:rectangular` or `:circular`
+- `uplift`: `true` when the factored vertical reaction is tension (support
+  pulling down). A compression footing must not be designed for this demand
+  (ACI 318-11 §15.8.1.2, corpus: aci-318-11, page 275).
 """
 struct FoundationDemand{F, M, L}
     group_idx::Int
@@ -346,20 +409,22 @@ struct FoundationDemand{F, M, L}
     c1::L       # Column dim 1 (or diameter)
     c2::L       # Column dim 2 (= c1 for circular)
     shape::Symbol   # :rectangular or :circular
+    uplift::Bool    # factored vertical reaction is tension
 end
 
 """
-    FoundationDemand(idx; Pu, Mux, Muy, Vux, Vuy, Ps, c1, c2, shape) → FoundationDemand
+    FoundationDemand(idx; Pu, Mux, Muy, Vux, Vuy, Ps, c1, c2, shape, uplift) → FoundationDemand
 
 Keyword constructor with SI defaults. Column dimensions default to
-18 in × 18 in rectangular.
+18 in × 18 in rectangular. `uplift` defaults to `false`.
 """
 function FoundationDemand(idx::Int;
                           Pu=0.0u"kN", Mux=0.0u"kN*m", Muy=0.0u"kN*m",
                           Vux=0.0u"kN", Vuy=0.0u"kN", Ps=0.0u"kN",
-                          c1=18.0u"inch", c2=18.0u"inch", shape=:rectangular)
+                          c1=18.0u"inch", c2=18.0u"inch", shape=:rectangular,
+                          uplift::Bool=false)
     FoundationDemand{typeof(Pu), typeof(Mux), typeof(c1)}(
-        idx, Pu, Mux, Muy, Vux, Vuy, Ps, c1, c2, shape)
+        idx, Pu, Mux, Muy, Vux, Vuy, Ps, c1, c2, shape, uplift)
 end
 
 # =============================================================================

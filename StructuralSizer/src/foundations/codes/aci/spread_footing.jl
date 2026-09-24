@@ -138,21 +138,82 @@ function _development_length_footing(bar_size::Int, fc::Pressure, fy::Pressure,
     return max(ld_in, 12.0) * u"inch"
 end
 
-"""ACI 22.8 — bearing check at column-footing interface."""
+"""ACI 318-11 §10.14.1 — bearing check at column-footing interface (corpus: aci-318-11, page 162). Circular diameter is named `c1`. `col_along` / `col_across` are column-center stations on `Lf` and `B` (default: centered on the canonical `Lf` / `B`)."""
 function _bearing_check_footing(Pu::Force, c1::Length, c2::Length,
                                  B::Length, Lf::Length, h::Length,
                                  fc::Pressure, fc_col::Pressure,
                                  fy::Pressure, ϕb::Float64,
-                                 pier_shape::Symbol)
+                                 pier_shape::Symbol;
+                                 col_along::Union{Length, Nothing} = nothing,
+                                 col_across::Union{Length, Nothing} = nothing)
+    # Inch *before* mixed arithmetic. Convert every unit after ustrip(inch),
+    # including already-tagged inch/ft: production leftover is inch-tagged
+    # after SI round-trip (`uconvert(inch, uconvert(m, 1ft))` ≈ 12 +
+    # 1.78e-15), so a tag bypass lets `left > 0` open ACI 318-11 §10.14.1
+    # (corpus: aci-318-11, page 162) and doubles Bn. Do not grid-round the
+    # station onto leftover (`round(x/1e-12)*1e-12` sends 12+6e-13 to
+    # 12+1e-12). Re-canonicalize Lf/2 and B/2 defaults so a column that
+    # fills Lf is re-snapped. SI residuals are snapped on the four
+    # overhangs after face subtraction. Not an ε-not-wider rule: 0.01 in
+    # leftover stays leftover and still clips A2 per face.
+    c1 = _canonical_inch(c1)
+    c2 = _canonical_inch(c2)
+    B  = _canonical_inch(B)
+    Lf = _canonical_inch(Lf)
+    h  = _canonical_inch(h)
+    col_along  = _canonical_inch(col_along === nothing ? Lf / 2 : col_along)
+    col_across = _canonical_inch(col_across === nothing ? B / 2 : col_across)
+
     A1 = pier_shape == :circular ? π * (c1 / 2)^2 : c1 * c2
 
+    # Face overhangs from the loaded area to the support edges. ACI 318-11
+    # §10.14.1 (corpus: aci-318-11, page 162) permits √(A2/A1) ≤ 2 only when
+    # the supporting surface is wider on all sides than the loaded area
+    # (R10.14.1: surrounding concrete confines the bearing area). Overall
+    # L > c_along is not sufficient (end-flush strip). |overhang| < 1e-12 in
+    # is SI-conversion ulp only — treat as 0 for the gate and that face's
+    # A2 clip. Do not invent a construction tolerance.
+    half_along  = c1 / 2
+    half_across = (pier_shape == :circular ? c1 : c2) / 2
+    left         = _snap_si_overhang(col_along - half_along)
+    right        = _snap_si_overhang(Lf - col_along - half_along)
+    across_minus = _snap_si_overhang(col_across - half_across)
+    across_plus  = _snap_si_overhang(B - col_across - half_across)
+    z = zero(left)
+    wider_all_sides =
+        left > z && right > z && across_minus > z && across_plus > z
+
+    # ACI 318-11 notation A2 (corpus: aci-318-11, page 24): area of the lower
+    # base of the largest frustum of a pyramid, cone, or tapered wedge
+    # contained wholly within the support, upper base = loaded area, side
+    # slopes 1 vertical to 2 horizontal. R10.14.1 / Fig. R10.14 (pages 162–
+    # 163) apply the frustum to find A2. 1V:2H over thickness h ⇒ 2h
+    # horizontal per unobstructed face (c+4h when both sides have ≥2h).
+    # Clip each face independently — do not substitute the centered box
+    # min(c+4h, Lf)×min(c+4h, B), which overstates A2 near an edge.
+    two_h = 2 * h
+    left_p  = max(left, z)
+    right_p = max(right, z)
+    am_p    = max(across_minus, z)
+    ap_p    = max(across_plus, z)
     if pier_shape == :circular
-        A2 = π * (min(c1 + 4h, min(B, Lf)) / 2)^2
+        # Largest cone wholly in the support. The source gives no closed
+        # form for a circle clipped by a rectangular edge, so the lower-base
+        # radius is min(c1/2 + 2h, distance from center to nearest edge).
+        # Edge distances use snapped overhangs so a SI-ulp face clips to
+        # half-width (named c1), not a 1e-12 leftover radius.
+        r_A2 = min(half_along + two_h,
+                   half_along + left, half_along + right,
+                   half_across + across_minus, half_across + across_plus)
+        A2 = π * r_A2^2
     else
-        A2 = min(c1 + 4h, Lf) * min(c2 + 4h, B)
+        A2 = (c1 + min(two_h, left_p) + min(two_h, right_p)) *
+             (c2 + min(two_h, am_p) + min(two_h, ap_p))
     end
 
-    sqA = min(sqrt(A2 / A1), 2.0)
+    # ustrip before min(..., 2): A2/A1 can be a NoDims Quantity when B, Lf, h
+    # are SI metres and c1 is inches; min(Quantity, 2.0) is not a Float64.
+    sqA = wider_all_sides ? min(ustrip(Unitful.NoUnits, sqrt(A2 / A1)), 2.0) : 1.0
     Bn_footing = ϕb * min(0.85 * fc * A1 * sqA, 2 * 0.85 * fc * A1)
     Bn_column  = ϕb * 0.85 * fc_col * A1
 
@@ -164,7 +225,7 @@ function _bearing_check_footing(Pu::Force, c1::Length, c2::Length,
 
     return (Bn_footing = Bn_footing, Bn_column = Bn_column,
             need_dowels = need_dowels, As_dowels = As_dowels,
-            footing_ok = Pu ≤ Bn_footing)
+            footing_ok = Pu ≤ Bn_footing, sqA = sqA)
 end
 
 # ─────────────────────────────────────────────────────────────────────────────

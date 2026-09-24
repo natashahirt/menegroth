@@ -214,12 +214,18 @@ function design_footing(::StripFooting,
     half_L = max(half_L_left, half_L_right)
     L = 2 * half_L
 
-    # Round up to increment
-    L = ceil(ustrip(u"inch", L) / ustrip(u"inch", w_incr)) * w_incr
+    # Round up to increment, then stay in ft. Mixing the ceil result (inch)
+    # with x_bar (ft) promotes through SI; converting that Quantity back
+    # to inch is 0.3048/0.0254, not ×12 — including when the leftover is
+    # already inch-tagged. Convert after ustrip(inch) for every unit; the
+    # helper snaps |overhang| < 1e-12 in after face subtraction so a
+    # flush 1 ft / 24 in face stays exact zero (ACI 318-11 §10.14.1,
+    # corpus: aci-318-11, page 162).
+    L = _canonical_ft(ceil(ustrip(u"inch", L) / ustrip(u"inch", w_incr)) * w_incr)
 
     # Column positions relative to left edge of footing
-    x_left = x_bar - L / 2
-    col_pos_local = positions .- x_left
+    x_left = _canonical_ft(x_bar) - L / 2
+    col_pos_local = [_canonical_ft(p) - x_left for p in positions]
 
     # Across-strip face is named c1 on a Y-layout (B ∥ X); named c2 on an X-layout.
     c_across_max = maximum(first(_strip_c_across_along(dem.c1, dem.c2, strip_axis))
@@ -231,9 +237,8 @@ function design_footing(::StripFooting,
     # negative (phantom cantilever Mu ∝ cant²).
     B_min = Ps_total / (soil.qa * L)
     B_min = ceil(ustrip(u"inch", B_min) / ustrip(u"inch", w_incr)) * w_incr
-    B_min = max(B_min, 2.0u"ft")
-    B_min = max(B_min, c_across_max)
-    B = B_min
+    # max(inch, 2 ft, c_across) would promote through SI; keep B imperial.
+    B = _canonical_inch(max(B_min, 2.0u"ft", c_across_max))
 
     # =====================================================================
     # Steps 2–3: Iterate (B, h) — widen B when h exceeds practical limits
@@ -397,6 +402,9 @@ function design_footing(::StripFooting,
     # Step 7: Bearing & Dowels at Each Column (ACI 22.8)
     # =====================================================================
     As_tensile_tot = 0.0u"inch^2"
+    sqA_gov = 1.0
+    Bn_gov = 0.0u"N"
+    have_brg = false
     if opts.check_bearing
         fc_col_val = something(opts.fc_col, fc)
         ϕb = opts.ϕ_bearing
@@ -414,10 +422,29 @@ function design_footing(::StripFooting,
             # ACI 318-11 §10.14.1 / §15.8.1.1 (corpus: aci-318-11, pages 162,
             # 274): A2 frustum pairs along-strip face with L and across-strip
             # face with B. Helper is named-axis (c1∥Lf, c2∥B) for spread.
+            # Circular diameter is named c1 — do not feed remapped c_along
+            # into the cone branch (unequal c1≠c2 would inflate A1).
             c_across, c_along = _strip_c_across_along(dem.c1, dem.c2, strip_axis)
+            c_brg1, c_brg2 = dem.shape == :circular ?
+                (dem.c1, dem.c2) : (c_along, c_across)
+            # Per-face §10.14.1 gate + clipped 1V:2H A2: station along L
+            # (named Lf in the helper) and mid-width. End overhang =
+            # min(xc, L−xc) − c_along/2 (circular: named c1/2). Do not use
+            # overall L vs c_along, and do not unlock centered min(c+4h, L).
+            # col_pos_local is canonical ft; helper converts to inch (every
+            # unit, including leftover-inch after SI round-trip) and snaps
+            # |overhang| < 1e-12 in after face subtraction so a flush
+            # station is exact zero. Re-canonicalize B/2 (not a raw half).
             bearing = _bearing_check_footing(
-                dem.Pu, c_along, c_across, B, L, h,
-                fc, fc_col_val, fy, ϕb, dem.shape)
+                dem.Pu, c_brg1, c_brg2, B, L, h,
+                fc, fc_col_val, fy, ϕb, dem.shape;
+                col_along = col_pos_local[j], col_across = _canonical_inch(B / 2))
+            Bn_j = uconvert(u"N", bearing.Bn_footing)
+            if !have_brg || bearing.sqA < sqA_gov
+                sqA_gov = bearing.sqA
+                Bn_gov = Bn_j
+                have_brg = true
+            end
             if bearing.need_dowels && opts.check_dowels
                 @info "Strip col #$j: dowels required, As_dowels = $(bearing.As_dowels)"
             end
@@ -503,7 +530,7 @@ function design_footing(::StripFooting,
     result = StripFootingResult{typeof(uconvert(u"m", B)),
                               typeof(As_bot_m2),
                               typeof(V_conc),
-                              typeof(demands[1].Pu)}(
+                              typeof(Bn_gov)}(
         uconvert(u"m", B),
         uconvert(u"m", L),
         uconvert(u"m", h),
@@ -513,6 +540,8 @@ function design_footing(::StripFooting,
         V_conc, V_steel,
         utilization,
         uconvert(u"m^2", As_tensile_tot),
+        Bn_gov,
+        sqA_gov,
     )
     StructuralSizer.emit!(tc, :checker, "design_footing_strip_aci", "", :exit;
                           B_m=Float64(ustrip(u"m", result.B)),

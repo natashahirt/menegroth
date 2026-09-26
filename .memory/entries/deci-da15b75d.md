@@ -13,8 +13,9 @@ files: StructuralSizer/src/foundations/codes/aci/spread_footing.jl@82ec946, Stru
   StructuralSizer/src/foundations/types.jl@82ec946, StructuralSizer/test/foundations/test_foundation_safety_9_15.jl@82ec946
 session_id: sess-92e8afa1
 created_at: '2026-09-24T02:21:13.243426+00:00'
-updated_at: '2026-09-24T02:21:13.243426+00:00'
+updated_at: '2026-09-26T23:47:06.261325+00:00'
 has_child_rationale: Landing mechanics for flush-bearing Bn under this plan
+related_to: deci-97c535b0
 ---
 ACI 318-11 §10.14.1 (aci-318-11 p.162) and A2 notation (p.24) require the largest 1:2 frustum wholly inside the support — not a boolean “wider on all sides” that unlocks a centered min(c+4h, L) frustum.
 

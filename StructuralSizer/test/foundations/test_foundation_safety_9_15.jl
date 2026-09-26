@@ -746,13 +746,32 @@ const SS = StructuralSizer
         end
 
         # True 0.01 in leftover is still wider on all sides (clipped A2
-        # then √ capped at 2). Not a construction-tolerance flush.
+        # then √ capped at 2 on B=40 in / L=22 ft). Not a construction-
+        # tolerance flush. The cap of 2 does not lock that face's A2 clip
+        # — see (8b).
         @testset "(8) true leftover 0.01 in still wider" begin
             br_leftover = SS._bearing_check_footing(
                 Pu, c1, c2, B, L, h, fc, fc, fy, ϕb, :rectangular;
                 col_along = 1.0u"ft" + 0.01u"inch")
             @test br_leftover.sqA != 1.0
             @test br_leftover.sqA == 2.0
+        end
+
+        # Tight leftover: 24.02 × 12.02 in footing, 24 × 12 in column,
+        # default center. All four faces 0.01 in leftover — wider, but
+        # A2 clips to the leftover (not 2h), so √(A2/A1) is the frustum
+        # ratio, not the cap of 2. ACI 318-11 notation A2 (corpus:
+        # aci-318-11, page 24); §10.14.1 (page 162).
+        @testset "(8b) 24.02×12.02 leftover clips A2, not the √ cap of 2" begin
+            Lf_tight = 24.02u"inch"
+            B_tight  = 12.02u"inch"
+            br = SS._bearing_check_footing(
+                Pu, c1, c2, B_tight, Lf_tight, h, fc, fc, fy, ϕb,
+                :rectangular)
+            sqA_clip = sqrt(24.02 * 12.02 / 288.0)
+            @test br.sqA ≈ sqA_clip rtol=1e-10
+            @test br.sqA != 2.0
+            @test br.sqA > 1.0
         end
 
         # P0: 6e-13 in is inside the residual < 1e-12 contract but
@@ -763,6 +782,20 @@ const SS = StructuralSizer
             br = SS._bearing_check_footing(
                 Pu, c1, c2, B, L, h, fc, fc, fy, ϕb, :rectangular;
                 col_along = (12.0 + 6e-13) * u"inch")
+            @test br.sqA == 1.0
+            @test br.sqA != 2.0
+            @test br.Bn_footing ≈ Bn_sqA1 rtol=1e-10
+            @test br.Bn_footing ≉ 2 * Bn_sqA1
+        end
+
+        # Inclusive floor: exclusive `< 1e-12` leaves (12+1e-12)inch
+        # wider because Unitful inflates the leftover to ~1.00009e-12.
+        # Still SI ulp, not leftover. ACI 318-11 §10.14.1 (corpus:
+        # aci-318-11, page 162).
+        @testset "P2: col_along = (12+1e-12)inch is sqA=1" begin
+            br = SS._bearing_check_footing(
+                Pu, c1, c2, B, L, h, fc, fc, fy, ϕb, :rectangular;
+                col_along = (12.0 + 1e-12) * u"inch")
             @test br.sqA == 1.0
             @test br.sqA != 2.0
             @test br.Bn_footing ≈ Bn_sqA1 rtol=1e-10

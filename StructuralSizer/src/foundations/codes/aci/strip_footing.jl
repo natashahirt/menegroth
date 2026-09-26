@@ -218,7 +218,7 @@ function design_footing(::StripFooting,
     # with x_bar (ft) promotes through SI; converting that Quantity back
     # to inch is 0.3048/0.0254, not ×12 — including when the leftover is
     # already inch-tagged. Convert after ustrip(inch) for every unit; the
-    # helper snaps |overhang| < 1e-12 in after face subtraction so a
+    # helper snaps |overhang| ≤ 1e-12 in after face subtraction so a
     # flush 1 ft / 24 in face stays exact zero (ACI 318-11 §10.14.1,
     # corpus: aci-318-11, page 162).
     L = _canonical_ft(ceil(ustrip(u"inch", L) / ustrip(u"inch", w_incr)) * w_incr)
@@ -433,7 +433,7 @@ function design_footing(::StripFooting,
             # overall L vs c_along, and do not unlock centered min(c+4h, L).
             # col_pos_local is canonical ft; helper converts to inch (every
             # unit, including leftover-inch after SI round-trip) and snaps
-            # |overhang| < 1e-12 in after face subtraction so a flush
+            # |overhang| ≤ 1e-12 in after face subtraction so a flush
             # station is exact zero. Re-canonicalize B/2 (not a raw half).
             bearing = _bearing_check_footing(
                 dem.Pu, c_brg1, c_brg2, B, L, h,

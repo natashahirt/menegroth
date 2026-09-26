@@ -170,9 +170,10 @@ function _bearing_check_footing(Pu::Force, c1::Length, c2::Length,
     # §10.14.1 (corpus: aci-318-11, page 162) permits √(A2/A1) ≤ 2 only when
     # the supporting surface is wider on all sides than the loaded area
     # (R10.14.1: surrounding concrete confines the bearing area). Overall
-    # L > c_along is not sufficient (end-flush strip). |overhang| < 1e-12 in
-    # is SI-conversion ulp only — treat as 0 for the gate and that face's
-    # A2 clip. Do not invent a construction tolerance.
+    # L > c_along is not sufficient (end-flush strip). |overhang| ≤ 1e-12 in
+    # is SI-conversion ulp only (inclusive: (12+1e-12)inch is flush) — treat
+    # as 0 for the gate and that face's A2 clip. Do not invent a
+    # construction tolerance.
     half_along  = c1 / 2
     half_across = (pier_shape == :circular ? c1 : c2) / 2
     left         = _snap_si_overhang(col_along - half_along)

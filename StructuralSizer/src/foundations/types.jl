@@ -363,14 +363,21 @@ _canonical_ft(L::Length) = uconvert(u"ft", _canonical_inch(L))
 """
     _snap_si_overhang(oh) → Length
 
-After face subtraction, treat `|overhang| < `_SI_INCH_ULP` (1e-12 in) as
-zero. That ulp is SI m↔inch conversion noise only — not a construction
-tolerance. Used for the ACI 318-11 §10.14.1 wider-on-all-sides gate and
+After face subtraction, treat `|overhang| ≤ `_SI_INCH_ULP` (1e-12 in) as
+zero (inclusive). Exclusive `<` leaves `col_along = (12+1e-12)inch`
+wider: Unitful inflates that bound to ~1.00009e-12 in after subtract.
+That residual is still SI-conversion noise — not a construction
+tolerance (0.01 in leftover is ~1e10× larger) and not an ε-not-wider
+rule. Used for the ACI 318-11 §10.14.1 wider-on-all-sides gate and
 that face's A2 clip (corpus: aci-318-11, page 162).
 """
 function _snap_si_overhang(oh::Length)
     x = ustrip(u"inch", oh)
-    return abs(x) < _SI_INCH_ULP ? zero(oh) : oh
+    # Inclusive 1e-12 in floor. 1.001× absorbs Unitful inflation of
+    # (12+1e-12)inch − 12inch → ~1.00009e-12. ENGINEERING JUDGMENT: the
+    # relative slack is not a code tolerance; 0.01 in leftover is ~1e10×
+    # larger and stays leftover.
+    return abs(x) <= _SI_INCH_ULP * 1.001 ? zero(oh) : oh
 end
 
 # =============================================================================

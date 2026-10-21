@@ -23,11 +23,68 @@ mutable struct DesignCache
     last_api_params_json::Dict{String, Any}
     """Monotonically increasing counter incremented on every successful design completion (POST /design or chat run_design). Lets chat detect that results were refreshed between turns."""
     design_version::Int
+    """
+    Cached incremental-design handle for the current geometry/structure. When a
+    param-only change arrives (no prepare-affecting field differs from
+    `session_base_params`), the server reuses this session via
+    `redesign_incremental!` instead of a cold `design_building` rebuild. Nil'd
+    (via `clear_session!`) whenever the geometry hash changes, so a stale
+    baseline is never redesigned over. `DesignSession`/`DesignParameters` are
+    defined in `design_graph`/`design_types`, both included before `api/`.
+    """
+    session::Union{DesignSession, Nothing}
+    """BASE `DesignParameters` the cached `session` was prepared from. All param diffs for the incremental decision are measured against these, never the previous variant."""
+    session_base_params::Union{DesignParameters, Nothing}
     lock::ReentrantLock
 end
 
 """Create an empty `DesignCache` with no stored geometry or results."""
-DesignCache() = DesignCache("", nothing, nothing, nothing, nothing, nothing, UInt64(0), Dict{String, Any}(), 0, ReentrantLock())
+DesignCache() = DesignCache("", nothing, nothing, nothing, nothing, nothing, UInt64(0), Dict{String, Any}(), 0, nothing, nothing, ReentrantLock())
+
+"""
+    clear_session!(cache::DesignCache)
+
+Drop the cached incremental [`DesignSession`](@ref) and its BASE params. Call
+whenever the geometry hash changes (new building model) so a subsequent
+param-only change does not redesign incrementally over a stale baseline.
+
+Caller is responsible for holding `cache.lock` when mutating session state in a
+concurrent context; `reset_session_state!` calls this as part of the geometry
+reset.
+"""
+function clear_session!(cache::DesignCache)
+    cache.session = nothing
+    cache.session_base_params = nothing
+    return nothing
+end
+
+"""
+    _api_incremental_enabled() -> Bool
+
+Kill switch for the param-only incremental design path (POST /design and chat
+`run_design`). When `false`, both endpoints behave byte-identically to the
+historical cold-only behavior (always `design_building`). Defaults ON — the
+incremental engine's equivalence to the cold path is proven by the design_graph
+gates. Set `SS_API_INCREMENTAL=false` to force every request cold.
+"""
+_api_incremental_enabled() = get(ENV, "SS_API_INCREMENTAL", "true") == "true"
+
+"""
+    _param_only_change(session::DesignSession, new_params::DesignParameters) -> Bool
+
+Whether `new_params` differs from the session's BASE params only in
+NON-prepare-affecting fields — i.e. the change can be redesigned incrementally
+over the fixed prepared baseline. A prepare-affecting difference (geometry /
+framing / loads / materials / floor / columns / analysis baseline) requires a
+fresh session, so this returns `false` and the caller must run cold.
+
+Diffs are always measured against `base_params(session)` (never the previous
+variant), matching the session's order-independent contract.
+"""
+function _param_only_change(session::DesignSession, new_params::DesignParameters)
+    changed = changed_param_fields(base_params(session), new_params)
+    return isempty(intersect(Set(changed), Set(StructuralSynthesizer.PREPARE_AFFECTING_FIELDS)))
+end
 
 """Thread-safe read from the design cache."""
 function with_cache_read(f, cache::DesignCache)
@@ -317,6 +374,12 @@ function reset_session_state!(cache::DesignCache; reason::String="")
     clear_design_history!()
     clear_session_insights!()
     invalidate_diagnose_cache!(cache)
+    # Drop the cached incremental session so a param-only change after the new
+    # geometry loads does not redesign over a stale baseline. Mutate under the
+    # cache lock (session reads/writes must always be lock-guarded).
+    lock(cache.lock) do
+        clear_session!(cache)
+    end
     if !isempty(reason)
         @info "Session state reset" reason
     end

@@ -4540,7 +4540,13 @@ function _dispatch_chat_tool(tool::String, args::Dict{String, Any})::Dict{String
                     DESIGN_CACHE.last_api_params_json = copy(merged)
                 end
                 tc = TraceCollector()
-                d = design_building(cached_struc, fast_params; tc=tc)
+                # Param-only changes reuse the cached incremental DesignSession
+                # (same decision as POST /design); prepare-affecting / uncertain
+                # changes run cold. The returned BuildingDesign is consumed
+                # identically regardless of which path produced it. Session
+                # reads/writes + engine mutation happen under DESIGN_CACHE.lock
+                # inside the helper; this task is serialized by SERVER_STATUS.
+                d = _design_with_incremental!(cached_struc, fast_params; tc=tc)
                 lock(DESIGN_CACHE.lock) do
                     DESIGN_CACHE.last_design = d
                     DESIGN_CACHE.last_result = design_to_json(d; geometry_hash=cached_geo_hash)

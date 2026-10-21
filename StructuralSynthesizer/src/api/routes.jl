@@ -571,6 +571,107 @@ function _run_design_loop(input::APIInput)
 end
 
 """
+    _design_with_incremental!(struc, params; tc=nothing) -> BuildingDesign
+
+Produce the `BuildingDesign` for `(struc, params)` on the current geometry,
+reusing the cached incremental [`DesignSession`](@ref) via
+[`redesign_incremental!`](@ref) when the change is **param-only**, otherwise
+running a cold [`design_building`](@ref). Shared by POST /design
+([`_execute_design`](@ref)) and chat `run_design` so both endpoints take the
+exact same decision.
+
+Routing (Phase 2 P0-1 plumbing — never changes a numeric result):
+
+- Kill switch OFF (`SS_API_INCREMENTAL=false`): byte-identical to the historical
+  cold-only behavior — a plain `design_building`, no session work at all.
+- A cached `session` exists AND no prepare-affecting field differs from the
+  session BASE params ([`_param_only_change`](@ref)): reuse it via
+  `redesign_incremental!`. On ANY exception the broken session is dropped and we
+  fall through to cold — the cold path is the equivalence reference, so when in
+  doubt we always return the cold result.
+- Otherwise (no session, prepare-affecting change, or incremental failure): run
+  cold, then eagerly (re)build a fresh `DesignSession(struc, params)` so the
+  NEXT param-only change can reuse it. If session construction throws, the
+  session is nil'd and the (already-computed) cold result is still returned.
+
+`DESIGN_CACHE.session` reads/writes and the fresh-session store happen under
+`DESIGN_CACHE.lock` (the engine is NOT concurrency-safe). To keep status polling
+responsive, the (seconds-to-minutes) `redesign_incremental!` / `design_building`
+sizing runs OUTSIDE the lock: the lock is held ONLY to (a) read the session
+handle and evaluate [`_param_only_change`](@ref), then released; and (b) store
+results / construct the fresh session afterward. This is safe only because
+`SERVER_STATUS` serializes designs (`try_start!`/`finish!` spanning the helper at
+both call sites — POST /design via `_run_design_loop`, chat `run_design` via its
+`@async` task), so no second design can mutate the engine while the lock is
+released.
+"""
+function _design_with_incremental!(struc::BuildingStructure, params::DesignParameters;
+                                   tc::Union{Nothing, StructuralSizer.TraceCollector}=nothing)
+    # Kill switch OFF → byte-identical historical cold-only path (no session).
+    if !_api_incremental_enabled()
+        design = design_building(struc, params; tc=tc)
+        _append_design_log!("Design sizing completed.")
+        return design
+    end
+
+    # ── Decide the path under a SHORT lock, then release it (Fix #2). ──
+    # Only the session read and the param-only predicate run under the lock;
+    # the slow sizing below runs lock-free so GET /status, /result, etc. are not
+    # blocked. `lock(...) do ... end` always releases the lock even if the
+    # predicate throws, and the surrounding try routes any predicate throw to
+    # cold (Fix #3): a throw in changed_param_fields/content_hash must never
+    # escape as HTTP 500 — cold is always the fallback.
+    session = nothing
+    use_incremental = false
+    try
+        session, use_incremental = lock(DESIGN_CACHE.lock) do
+            s = DESIGN_CACHE.session
+            (isnothing(s) || !_param_only_change(s, params)) && return (nothing, false)
+            return (s, true)
+        end
+    catch e
+        @warn "Incremental predicate evaluation failed — falling back to cold design_building" exception=(e, catch_backtrace())
+        _append_design_log!("Incremental predicate failed: $(sprint(showerror, e)). Falling back to cold.")
+        lock(DESIGN_CACHE.lock) do
+            clear_session!(DESIGN_CACHE)  # drop the suspect session; cold path rebuilds it
+        end
+        session = nothing
+        use_incremental = false
+    end
+
+    # ── Incremental reuse: engine mutation runs OUTSIDE the lock. ──
+    if use_incremental
+        try
+            d = redesign_incremental!(session.engine, params; tc=tc)
+            _append_design_log!("Design sizing completed (incremental reuse).")
+            return d
+        catch e
+            @warn "Incremental redesign failed — falling back to cold design_building" exception=(e, catch_backtrace())
+            _append_design_log!("Incremental redesign failed: $(sprint(showerror, e)). Falling back to cold.")
+            lock(DESIGN_CACHE.lock) do
+                clear_session!(DESIGN_CACHE)  # drop the broken session; cold path rebuilds it
+            end
+        end
+    end
+
+    # ── Cold path (equivalence reference) + eager (re)build of the session so
+    # the next param-only change can reuse it. design_building runs OUTSIDE the
+    # lock; only the session construction/store is lock-guarded. ──
+    design = design_building(struc, params; tc=tc)
+    _append_design_log!("Design sizing completed.")
+    lock(DESIGN_CACHE.lock) do
+        try
+            DESIGN_CACHE.session = DesignSession(struc, params)
+            DESIGN_CACHE.session_base_params = params
+        catch e
+            @warn "DesignSession construction failed — incremental reuse disabled until next cold run" exception=(e, catch_backtrace())
+            clear_session!(DESIGN_CACHE)
+        end
+    end
+    return design
+end
+
+"""
     _execute_design(input::APIInput) -> HTTP.Response
 
 Run a single design iteration. Uses the geometry cache when possible.
@@ -645,8 +746,10 @@ function _execute_design(input::APIInput)
         # Thread TraceCollector so solver_trace is populated for GET /diagnose, chat tools
         # (get_solver_trace), and JSON serialization — same as interactive Julia runs.
         tc = TraceCollector()
-        design = design_building(struc, params; tc=tc)
-        _append_design_log!("Design sizing completed.")
+        # Param-only changes reuse the cached incremental DesignSession; anything
+        # prepare-affecting / uncertain runs cold. Returns the SAME BuildingDesign
+        # the cold path would, which the entire downstream tail consumes unchanged.
+        design = _design_with_incremental!(struc, params; tc=tc)
         
         # Build analysis model for visualization (if not already built).
         # This is a fallback — normally built inside design_building before restore.

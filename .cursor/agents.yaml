@@ -1,6 +1,50 @@
+# ---------------------------------------------------------------------------
+# Model preferences for the built-in coordinator roster.
+#
+# Policy: prefer Anthropic (Claude) and xAI (Grok) models; avoid defaulting to
+# the most expensive tier (no Opus as a blanket default — Sonnet is the
+# Anthropic workhorse here). These are model-only partial overrides, so each
+# built-in agent keeps its stock persona, role, and passes; only the model
+# changes (see .cursor/rules/coordinator.mdc > "Custom Agents").
+#
+# Slugs are the known-good Cursor model slugs already exercised in this repo's
+# prior coordinator runs. Resolution order (per coordinator.mdc):
+#   task-level model > agents.yaml model (below) > parent agent's model.
+#
+# NOTE: bugbot and security-review are intentionally omitted. In Cursor they
+# resolve to host-native subagents that run on Cursor's own model and ignore
+# the `model` field, so pinning one here would be misleading.
+# ---------------------------------------------------------------------------
+
+engineer:
+  # xAI Grok — fast implementation.
+  model: grok-4.7-high-fast
+
+tester:
+  # xAI Grok — fast test authoring / runs.
+  model: grok-4.7-high-fast
+
+reviewer:
+  # Anthropic Sonnet — careful, mid-tier reasoning for verification.
+  model: claude-sonnet-5-thinking-high
+
+critic:
+  # Anthropic Sonnet — adversarial reasoning (not Opus, to avoid the top tier).
+  model: claude-sonnet-5-thinking-high
+
+explore:
+  # Anthropic Sonnet — read-only planning / codebase scoping.
+  model: claude-sonnet-5-thinking-high
+
+memory:
+  # Anthropic Sonnet — session recording / bookkeeping.
+  model: claude-sonnet-5-thinking-high
+
 zettelkasten-extractor:
   description: "Summarizes sources into structured zettelkasten notes with cross-linking and Zotero integration"
   role: meta
+  # Anthropic Sonnet — grounded extraction (matches prior scribe runs).
+  model: claude-sonnet-5-thinking-high
   persona: |
     You are a zettelkasten extraction agent. Your job is to take a source (a paper
     in Zotero, a local PDF, or pasted text) and decompose it into structured

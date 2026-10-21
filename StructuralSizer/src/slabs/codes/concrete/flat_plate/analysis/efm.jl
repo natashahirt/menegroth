@@ -217,6 +217,7 @@ function run_moment_analysis(
     has_edge_beam::Bool = false,    # API parity (EFM uses Kt directly)
     edge_beam_βt::Float64 = 0.0,    # API parity (EFM uses Kt directly)
     col_I_factor::Float64 = 0.70,  # ignored — determined by method.cracked_columns
+    tc = nothing,  # API parity with DDM (EFM does not emit Eq. 13-7 fallbacks)
 )
     # Derive col_I_factor from method fields:
     #   - ASAP stubs: gross Ig (1.0) unless cracked_columns=true (0.70)

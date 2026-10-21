@@ -48,6 +48,13 @@ using Printf
 const SR = StructuralSizer
 const SS = StructuralSynthesizer
 
+# Shared verify helpers (design_signature, same_signature; also INVARIANT_COLS,
+# unused here) — single canonical copy. Included AFTER the `using` preamble above
+# so BuildingDesign + the u"kgCO2e" unit (registered by Asap) resolve at include
+# time. See the file header for the `_close` contract (left local to each runner).
+include(joinpath(@__DIR__, "..", "..", "StructuralSynthesizer",
+                 "test", "design_graph", "_verify_shared.jl"))
+
 # -----------------------------------------------------------------------------
 # Fixture: 2×2-bay flat-plate DDM building with spread foundations (matches the
 # Run-1 verify harness so both gates exercise the same structure).
@@ -104,97 +111,13 @@ function same_invariants(a, b)
 end
 
 # -----------------------------------------------------------------------------
-# Comprehensive per-member design signature (P2 hardening).
+# design_signature / same_signature — the comprehensive per-member output
+# signature and its comparator — now live in the shared canonical copy included
+# above (test/design_graph/_verify_shared.jl). The `invariants` tuple above is an
+# AGGREGATE summary (global maxima); `design_signature` is the bit-identical
+# per-member signature that aggregate scalars cannot catch. `same_signature`
+# late-binds this file's local `_close` (defined above).
 # -----------------------------------------------------------------------------
-# The `invariants` tuple above is an AGGREGATE summary (global maxima); it is NOT
-# bit-identical — it omits per-member beam sizes, column/beam
-# capacity/interaction/axial ratios, ok/feasibility flags, punching stud counts,
-# and per-strip rebar, so a provenance omission (e.g. an unpatterned member) can
-# slip past it. `design_signature` flattens EVERY such output field into a
-# deterministic (label => value) list; equal signatures ⇒ output-equivalent
-# across all compared fields (values reduced to plain Float64/Bool/String/Symbol).
-function design_signature(design::BuildingDesign)
-    sig = Pair{String, Any}[]
-
-    for k in sort(collect(keys(design.columns)))
-        c = design.columns[k]
-        push!(sig, "col$k.c1_in"             => ustrip(u"inch", c.c1))
-        push!(sig, "col$k.c2_in"             => ustrip(u"inch", c.c2))
-        push!(sig, "col$k.shape"             => c.shape)
-        push!(sig, "col$k.section"           => c.section_size)
-        push!(sig, "col$k.axial_ratio"       => c.axial_ratio)
-        push!(sig, "col$k.interaction_ratio" => c.interaction_ratio)
-        push!(sig, "col$k.ok"                => c.ok)
-        if c.punching !== nothing
-            push!(sig, "col$k.punch_ratio" => c.punching.ratio)
-            push!(sig, "col$k.punch_ok"    => c.punching.ok)
-        end
-    end
-
-    for k in sort(collect(keys(design.beams)))
-        b = design.beams[k]
-        push!(sig, "beam$k.section"       => b.section_size)
-        push!(sig, "beam$k.flexure_ratio" => b.flexure_ratio)
-        push!(sig, "beam$k.shear_ratio"   => b.shear_ratio)
-        push!(sig, "beam$k.ok"            => b.ok)
-        push!(sig, "beam$k.len_m"         => ustrip(u"m",  b.member_length))
-        push!(sig, "beam$k.weight_kg"     => ustrip(u"kg", b.weight))
-    end
-
-    for k in sort(collect(keys(design.slabs)))
-        s = design.slabs[k]
-        push!(sig, "slab$k.thk_m"             => ustrip(u"m", s.thickness))
-        push!(sig, "slab$k.M0_kNm"            => isnothing(s.M0) ? NaN : ustrip(u"kN*m", s.M0))
-        push!(sig, "slab$k.defl_ratio"        => s.deflection_ratio)
-        push!(sig, "slab$k.defl_ok"           => s.deflection_ok)
-        push!(sig, "slab$k.punch_ratio"       => s.punching_max_ratio)
-        push!(sig, "slab$k.punch_ok"          => s.punching_ok)
-        push!(sig, "slab$k.converged"         => s.converged)
-        push!(sig, "slab$k.integrity_ok"      => s.integrity_ok)
-        push!(sig, "slab$k.has_studs"         => s.has_studs)
-        push!(sig, "slab$k.n_stud_cols"       => s.n_stud_cols)
-        push!(sig, "slab$k.stud_rails_max"    => s.stud_rails_max)
-        push!(sig, "slab$k.stud_per_rail_max" => s.stud_per_rail_max)
-        r = s.sizer_result
-        if !isnothing(r)
-            for fld in (:column_strip_reinf, :middle_strip_reinf,
-                        :secondary_column_strip_reinf, :secondary_middle_strip_reinf)
-                hasproperty(r, fld) || continue
-                for (i, sr) in enumerate(getproperty(r, fld))
-                    push!(sig, "slab$k.$fld[$i].As_in2" => ustrip(u"inch^2", sr.As_provided))
-                end
-            end
-        end
-    end
-
-    for k in sort(collect(keys(design.foundations)))
-        f = design.foundations[k]
-        push!(sig, "fdn$k.L_ft"           => ustrip(u"ft",   f.length))
-        push!(sig, "fdn$k.W_ft"           => ustrip(u"ft",   f.width))
-        push!(sig, "fdn$k.D_in"           => ustrip(u"inch", f.depth))
-        push!(sig, "fdn$k.bearing_ratio"  => f.bearing_ratio)
-        push!(sig, "fdn$k.punching_ratio" => f.punching_ratio)
-        push!(sig, "fdn$k.flexure_ratio"  => f.flexure_ratio)
-        push!(sig, "fdn$k.ok"             => f.ok)
-        push!(sig, "fdn$k.group_id"       => f.group_id)
-    end
-
-    push!(sig, "sum.all_checks_pass"  => design.summary.all_checks_pass)
-    push!(sig, "sum.critical_ratio"   => design.summary.critical_ratio)
-    push!(sig, "sum.critical_element" => design.summary.critical_element)
-    push!(sig, "sum.ec_kgco2e"        => ustrip(u"kgCO2e", design.summary.embodied_carbon))
-    return sig
-end
-
-"Compare two design signatures; returns (ok, first_mismatch_label)."
-function same_signature(a::Vector{Pair{String, Any}}, b::Vector{Pair{String, Any}})
-    da = Dict(a); db = Dict(b)
-    Set(keys(da)) == Set(keys(db)) || return (false, "field set differs")
-    for (k, va) in da
-        _close(va, db[k]) || return (false, k)
-    end
-    return (true, "none")
-end
 
 # -----------------------------------------------------------------------------
 const CHECKS = Tuple{String, Bool}[]

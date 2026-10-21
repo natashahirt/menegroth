@@ -25,6 +25,10 @@ logs/
 # Documenter.jl build output
 docs/build/
 
+# Grasshopper (.NET) build artifacts
+grasshopper/Menegroth.GH/obj/
+grasshopper/Menegroth.GH/bin/
+
 # >>> angelo >>>
 # Runtime state and derived caches (source of truth is .memory/ and
 # .zettelkasten/, which should be committed)

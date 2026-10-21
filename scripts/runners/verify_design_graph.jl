@@ -69,20 +69,18 @@ const SR = StructuralSizer
 const SS = StructuralSynthesizer
 
 # -----------------------------------------------------------------------------
-# Invariant set — mirrored from run_flat_plate_speedup_validation.jl:118-127.
+# Shared verify helpers — single canonical copy. Provides INVARIANT_COLS (used
+# below) plus design_signature / same_signature (unused in this runner). Included
+# AFTER the `using` preamble so BuildingDesign + the u"kgCO2e" unit (registered by
+# Asap) resolve at include time. See the file header for the `_close` contract.
+#
+# INVARIANT_COLS is mirrored from run_flat_plate_speedup_validation.jl:118-127 and
+# MUST match between the graph path and the legacy reference path: stored in
+# coherent units (SI where natural, imperial where the speedup harness used it) so
+# the tolerance test is unit-consistent on both sides.
 # -----------------------------------------------------------------------------
-# These MUST match between the graph path and the legacy reference path.  Stored
-# in coherent units (SI where natural, imperial where the speedup harness used
-# it) so the diff is provenance-comparable to that harness.  Units are fixed and
-# identical on both sides, so the tolerance test is unit-consistent.
-const INVARIANT_COLS = (
-    :h_m, :M0_kNm,
-    :punch_ratio, :defl_ratio,
-    :As_cs_in2, :As_ms_in2, :As_total_in2,
-    :col_min_in, :col_max_in,
-    :ec_total_kgco2e, :ec_per_area_kgco2e_m2,
-    :fdn_max_B_ft, :fdn_max_L_ft, :fdn_max_D_in, :fdn_max_util,
-)
+include(joinpath(@__DIR__, "..", "..", "StructuralSynthesizer",
+                 "test", "design_graph", "_verify_shared.jl"))
 
 # -----------------------------------------------------------------------------
 # Building + parameters — one small flat-plate building.

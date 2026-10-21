@@ -1,14 +1,14 @@
 # ---------------------------------------------------------------------------
 # Model preferences for the built-in coordinator roster.
 #
-# Policy: prefer Anthropic (Claude) and xAI (Grok) models; avoid defaulting to
-# the most expensive tier (no Opus as a blanket default — Sonnet is the
-# Anthropic workhorse here). These are model-only partial overrides, so each
-# built-in agent keeps its stock persona, role, and passes; only the model
-# changes (see .cursor/rules/coordinator.mdc > "Custom Agents").
+# Policy: prefer Anthropic (Claude) and xAI (Grok) models. The reasoning-heavy
+# checkers (reviewer, critic) run on Anthropic Opus; lighter planning/meta work
+# runs on Sonnet; the hands-on implementers (engineer, tester) run on xAI Grok.
+# These are model-only partial overrides, so each built-in agent keeps its
+# stock persona, role, and passes; only the model changes (see
+# .cursor/rules/coordinator.mdc > "Custom Agents").
 #
-# Slugs are the known-good Cursor model slugs already exercised in this repo's
-# prior coordinator runs. Resolution order (per coordinator.mdc):
+# Resolution order (per coordinator.mdc):
 #   task-level model > agents.yaml model (below) > parent agent's model.
 #
 # NOTE: bugbot and security-review are intentionally omitted. In Cursor they
@@ -17,20 +17,20 @@
 # ---------------------------------------------------------------------------
 
 engineer:
-  # xAI Grok — fast implementation.
-  model: grok-4.7-high-fast
+  # xAI Grok 4.7 high — implementation.
+  model: grok-4.7-high
 
 tester:
-  # xAI Grok — fast test authoring / runs.
-  model: grok-4.7-high-fast
+  # xAI Grok 4.7 high — test authoring / runs.
+  model: grok-4.7-high
 
 reviewer:
-  # Anthropic Sonnet — careful, mid-tier reasoning for verification.
-  model: claude-sonnet-5-thinking-high
+  # Anthropic Opus 4.8 — thorough verification.
+  model: claude-opus-4-8-thinking-high
 
 critic:
-  # Anthropic Sonnet — adversarial reasoning (not Opus, to avoid the top tier).
-  model: claude-sonnet-5-thinking-high
+  # Anthropic Opus 5.5 — strongest adversarial reasoning.
+  model: claude-opus-5-5-thinking-high
 
 explore:
   # Anthropic Sonnet — read-only planning / codebase scoping.

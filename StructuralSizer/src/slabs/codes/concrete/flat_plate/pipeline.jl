@@ -532,47 +532,20 @@ function _run_final_design(method, struc, slab, columns, moment_results, seconda
     end
 
     # ─── Moment Transfer Reinforcement (ACI 8.4.2.3) ───
-    transfer_results = Union{Nothing, NamedTuple}[nothing for _ in 1:n_cols]
-    for (i, col) in enumerate(columns)
-        Mub_i = moment_results.unbalanced_moments[i]
-        Muy_i = isnothing(secondary_results) ? zero(Mub_i) :
-                secondary_results.unbalanced_moments[i]
-        abs(ustrip(kip * u"ft", Mub_i)) < 1e-6 &&
-            abs(ustrip(kip * u"ft", Muy_i)) < 1e-6 && continue
-
-        gov = governing_transfer_reinforcement(
-            Mub_i, Muy_i, col.c1, col.c2, h, d, fc, fy; position = col.position)
-        As_transfer = gov.As
-        γf_val = gov.γf
-        bb = gov.bb
-        Mub_i = gov.Mu
-
-        # Check for inadequate section in transfer reinforcement
-        if isinf(As_transfer)
-            verbose && @warn "Transfer reinforcement failed: section inadequate at column $i"
-            return (
-                converged        = false,
-                failure_reason   = "section_inadequate",
-                failing_check    = "transfer_reinforcement",
-                h_current        = h,
-                needs_more_depth = true,
-            )
-        end
-
-        cs_neg_idx = col.position == :interior ? 3 : 1
-        As_provided_cs = rebar_design.column_strip_reinf[cs_neg_idx].As_provided
-        # ACI 318-11 §13.3.2 + §7.6.5 — slab-thickness-dependent s_max
-        selected = select_bars(As_provided_cs, rebar_design.column_strip_width;
-                               max_spacing=max_bar_spacing(h))
-        Ab = bar_area(selected.bar_size)
-
-        transfer = additional_transfer_bars(As_transfer, As_provided_cs, bb,
-                                            rebar_design.column_strip_width, Ab)
-        transfer_results[i] = transfer
-        if verbose && transfer.n_bars_additional > 0
-            @debug "MOMENT TRANSFER (ACI 8.4.2.3) — Column $i ($(col.position))" Mub=Mub_i γf=round(γf_val, digits=3) bb=bb As_transfer=As_transfer As_within_bb=transfer.As_within_bb n_additional=transfer.n_bars_additional
-        end
+    transfer = _pipeline_transfer_reinforcement(
+        columns, moment_results, secondary_results, rebar_design, h, d, fc, fy;
+        verbose = verbose)
+    if !transfer.ok
+        verbose && @warn "Transfer reinforcement failed: section inadequate at column $(transfer.column)"
+        return (
+            converged        = false,
+            failure_reason   = "section_inadequate",
+            failing_check    = "transfer_reinforcement",
+            h_current        = h,
+            needs_more_depth = true,
+        )
     end
+    transfer_results = transfer.results
 
     # ─── Structural Integrity Reinforcement (ACI 8.7.4.2) ───
     cell = struc.cells[first(slab.cell_indices)]
@@ -642,6 +615,74 @@ function _run_final_design(method, struc, slab, columns, moment_results, seconda
         secondary_element_rebar_field=_secondary_element_rebar_field,
     )
 end
+
+"""
+    _pipeline_transfer_reinforcement(columns, moment_results, secondary_results,
+                                     rebar_design, h, d, fc, fy; verbose)
+        -> (ok, results, column)
+
+Moment-transfer reinforcement (ACI 318-11 §13.5.3, corpus: aci-318-11,
+page 250) at every column for the iterative pipeline.  A non-finite
+transfer moment is rejected first; only then is a column whose transfer
+moments are both below 1e-6 kip·ft skipped as needing none.
+
+Stops at the first column whose transfer steel is not finite
+(`transfer_section_inadequate`, which includes a non-finite transfer
+moment) and returns `ok = false` with that column's index; the caller
+reports `transfer_reinforcement` and asks for more depth.
+"""
+function _pipeline_transfer_reinforcement(columns, moment_results, secondary_results,
+                                          rebar_design, h, d, fc, fy;
+                                          verbose::Bool = false)
+    results = Union{Nothing, NamedTuple}[nothing for _ in columns]
+    for (i, col) in enumerate(columns)
+        Mub_i = moment_results.unbalanced_moments[i]
+        Muy_i = isnothing(secondary_results) ? zero(Mub_i) :
+                secondary_results.unbalanced_moments[i]
+        (isfinite(Mub_i) && isfinite(Muy_i)) ||
+            return (ok = false, results = results, column = i)
+        abs(ustrip(kip * u"ft", Mub_i)) < 1e-6 &&
+            abs(ustrip(kip * u"ft", Muy_i)) < 1e-6 && continue
+
+        gov = governing_transfer_reinforcement(
+            Mub_i, Muy_i, col.c1, col.c2, h, d, fc, fy;
+            position = col.position,
+            free_edge_parallel = _infer_free_edge_parallel(col))
+        transfer_section_inadequate(gov.As) &&
+            return (ok = false, results = results, column = i)
+
+        cs_neg_idx = col.position == :interior ? 3 : 1
+        As_provided_cs = rebar_design.column_strip_reinf[cs_neg_idx].As_provided
+        # ACI 318-11 §13.3.2 + §7.6.5 — slab-thickness-dependent s_max
+        selected = select_bars(As_provided_cs, rebar_design.column_strip_width;
+                               max_spacing=max_bar_spacing(h))
+        Ab = bar_area(selected.bar_size)
+
+        transfer = additional_transfer_bars(gov.As, As_provided_cs, gov.bb,
+                                            rebar_design.column_strip_width, Ab)
+        results[i] = transfer
+        if verbose && transfer.n_bars_additional > 0
+            @debug "MOMENT TRANSFER (ACI 8.4.2.3) — Column $i ($(col.position))" Mub=gov.Mu γf=round(gov.γf, digits=3) bb=gov.bb As_transfer=gov.As As_within_bb=transfer.As_within_bb n_additional=transfer.n_bars_additional
+        end
+    end
+    return (ok = true, results = results, column = 0)
+end
+
+"""
+    _edge_beam_analysis_kwargs(opts) -> NamedTuple
+
+Edge-beam keywords passed to every `run_moment_analysis` /
+`run_secondary_moment_analysis` call alongside `βt`, so the iterative
+pipeline (both phases) and the rule-of-thumb pass give the analysis the
+same input.  `edge_beam_βt` is the user's explicit value only (0.0 when
+`nothing`).  FEA sizes its edge-beam elements from `edge_beam_βt`, else
+`βt`, and uses its own default only when both are 0 and `has_edge_beam` is
+set; DDM/EFM accept both for API parity and use `βt`.
+"""
+_edge_beam_analysis_kwargs(opts) = (
+    has_edge_beam = opts.has_edge_beam,
+    edge_beam_βt  = opts.edge_beam_βt isa Number ? Float64(opts.edge_beam_βt) : 0.0,
+)
 
 # =============================================================================
 # Main Pipeline Function
@@ -736,7 +777,7 @@ function size_flat_plate!(
     if method isa RuleOfThumb
         return check_flat_plate_at_thickness!(struc, slab, column_opts;
             method=method, opts=opts, verbose=verbose,
-            _col_cache=_col_cache, slab_idx=slab_idx, drop_panel=drop_panel)
+            _col_cache=_col_cache, slab_idx=slab_idx, drop_panel=drop_panel, tc=tc)
     end
 
     # =========================================================================
@@ -952,9 +993,10 @@ function size_flat_plate!(
     column_result = nothing
     # Use local Vector for punching results (convert to Dict at output boundary)
     punching_local = Vector{NamedTuple}(undef, n_cols)
-    # Punching geometry cache: keyed on (c1_m, c2_m, d_m, position, shape)
+    # Punching geometry cache: keyed on (c1_m, c2_m, d_m, position, shape, edge_par)
+    # edge_par is required so :c1 vs :c2 3-sided geometry cannot collide.
     # Cleared when h changes (d changes) — column size changes auto-miss
-    _punch_geom_cache = Dict{Tuple{Float64,Float64,Float64,Symbol,Symbol}, NamedTuple}()
+    _punch_geom_cache = Dict{Tuple{Float64,Float64,Float64,Symbol,Symbol,Symbol}, NamedTuple}()
     
     # Preallocate column geometries (only column height matters; updated if it changes).
     # Slab pipeline assumes pinned-pinned about both axes, so kx = ky = 1.0
@@ -1074,8 +1116,8 @@ function size_flat_plate!(
             # value, this falls back to the slab-strip torsional constant (a
             # small number ≈ 0.1–0.2 for a typical flat plate with no real
             # perimeter beam).  FEA receives the user's *intent* separately
-            # via `_eb_βt_explicit` so it can distinguish "no real edge beam"
-            # from "edge beam present" and avoid double-counting.
+            # via `_edge_beam_analysis_kwargs` so it can distinguish "no real
+            # edge beam" from "edge beam present" and avoid double-counting.
             _βt = 0.0
             if !isnothing(opts.edge_beam_βt)
                 _βt = opts.edge_beam_βt
@@ -1085,13 +1127,6 @@ function size_flat_plate!(
                 _βt = edge_beam_βt(h, _c1_avg, _c2_avg, slab.spans.secondary)
             end
 
-            # FEA-specific edge-beam input: only the user's explicitly provided
-            # `edge_beam_βt` triggers explicit edge-beam frame elements.  When
-            # only `has_edge_beam=true` was set, we let FEA apply its own
-            # ACI 318-11 §13.6.4.2 default (Table 13.6.4.2 cap of βt = 2.5).
-            _eb_βt_explicit = (opts.edge_beam_βt isa Number) ?
-                Float64(opts.edge_beam_βt) : 0.0
-            
             moment_results = run_moment_analysis(
                 method, struc, slab, columns, h, fc, Ecs, γ_concrete;
                 ν_concrete = material.concrete.ν,
@@ -1100,9 +1135,9 @@ function size_flat_plate!(
                 cache     = analysis_cache isa FEAModelCache ? analysis_cache : nothing,
                 drop_panel = drop_panel,
                 βt = _βt,
-                has_edge_beam = opts.has_edge_beam,
-                edge_beam_βt  = _eb_βt_explicit,
+                _edge_beam_analysis_kwargs(opts)...,
                 col_I_factor = opts.col_I_factor,
+                tc = tc,
             )
             
             secondary_results = if method isa FEA && !isnothing(moment_results.secondary)
@@ -1111,8 +1146,8 @@ function size_flat_plate!(
                 run_secondary_moment_analysis(
                     method, struc, slab, columns, h, fc, Ecs, γ_concrete;
                     verbose=verbose, drop_panel=drop_panel, βt=_βt,
-                    has_edge_beam = opts.has_edge_beam,
-                    edge_beam_βt  = _eb_βt_explicit,
+                    _edge_beam_analysis_kwargs(opts)...,
+                    tc = tc,
                 )
             end
             
@@ -1363,7 +1398,9 @@ function size_flat_plate!(
                 cache     = analysis_cache isa FEAModelCache ? analysis_cache : nothing,
                 drop_panel = drop_panel,
                 βt = _βt,
+                _edge_beam_analysis_kwargs(opts)...,
                 col_I_factor = opts.col_I_factor,
+                tc = tc,
             )
             
             secondary_results = if method isa FEA && !isnothing(moment_results.secondary)
@@ -1372,6 +1409,8 @@ function size_flat_plate!(
                 run_secondary_moment_analysis(
                     method, struc, slab, columns, h, fc, Ecs, γ_concrete;
                     verbose=verbose, drop_panel=drop_panel, βt=_βt,
+                    _edge_beam_analysis_kwargs(opts)...,
+                    tc = tc,
                 )
             end
             

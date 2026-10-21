@@ -184,6 +184,67 @@ function _build_asap_wall_model(ev::FEMLateralEvaluator,
 end
 
 # ------------------------------------------------------------------------------
+# Fail-closed guard for the assembled FEM stiffness
+# ------------------------------------------------------------------------------
+
+"""
+    _assert_fem_nonsingular(model)
+
+Fail-closed guard for the processed FEM global stiffness. Asap's own solver only
+`@warn`/`@error`-logs and then silently falls back from Cholesky → LDLᵀ → LU when
+the free-DOF stiffness is not positive-definite, returning a plausible-but-
+meaningless displacement for an under-constrained / unstable wall model — a
+fail-OPEN hazard of the same class as the reduced tier's old `pinv` fallback.
+
+Here we reject such a model up front: the free-DOF stiffness must be
+positive-definite, otherwise we raise [`SingularStiffnessError`](@ref) so the
+caller surfaces a FAIL instead of a fabricated demand. Must be called after
+`Asap.process!` (so `model.S` and `model.freeDOFs` are populated) and before
+`Asap.solve!`.
+
+Scope of this gate — be precise about what it does and does NOT catch:
+
+  - CATCHES (exact, definite): a free-DOF stiffness that is not positive-definite,
+    i.e. a genuine rigid-body / mechanism mode — an unsupported or unbraced DOF, a
+    disconnected diaphragm master, a zero-stiffness panel. These are true
+    singularities (a zero or negative eigenvalue), so an exact Cholesky-success
+    test flags them definitively without any tolerance to tune.
+  - DELIBERATELY DOES NOT CATCH: penalty-diaphragm-driven *near*-singularity. The
+    diaphragm shells use a penalty modulus (`diaphragm_E` ≈ 1e12 Pa) ~40× the wall
+    modulus (~2.5e10 Pa) to approximate an in-plane-rigid floor, so the assembled
+    model is ill-conditioned BY CONSTRUCTION. A model can therefore be numerically
+    PD (passes here) yet have a large condition number that is INHERENT to the
+    penalty formulation, not a sign of instability. No single rcond threshold
+    separates "ill-conditioned because rigid-diaphragm penalty" from "ill-
+    conditioned because unstable", so we intentionally assert NO numeric condition
+    bound here rather than guess one that would either false-reject valid models or
+    false-pass unstable ones. (See `SINGULAR_STIFFNESS_RCOND` in the reduced tier,
+    which is well-defined only because that 3×3 K is penalty-free once
+    scale-normalized.)
+
+Residual risk (flagged, not silenced): a model that is PD but pathologically
+ill-conditioned for a reason OTHER than the diaphragm penalty (e.g. extreme
+wall-stiffness ratios) would pass this gate. Such a case is not currently
+reachable from the validated single-/multi-story fixtures; revisit with a
+justified, penalty-aware conditioning metric if the FEM tier is extended to
+heterogeneous stiffness regimes.
+"""
+function _assert_fem_nonsingular(model::Asap.Model)
+    idx = model.freeDOFs
+    isempty(idx) && throw(SingularStiffnessError(
+        "FEM wall model has no free DOFs (fully constrained or empty)."))
+    # SPD ⇔ a laterally stable, properly supported model. `check=false` lets us
+    # test success without CHOLMOD throwing its own (less specific) exception.
+    # Exact PD test only — see the docstring for why no numeric rcond bound is
+    # asserted on this (by-construction penalty-ill-conditioned) model.
+    fac = cholesky(Symmetric(model.S[idx, idx]); check=false)
+    issuccess(fac) || throw(SingularStiffnessError(
+        "FEM global stiffness is not positive-definite — the wall model is " *
+        "singular / under-constrained (check supports and lateral bracing)."))
+    return nothing
+end
+
+# ------------------------------------------------------------------------------
 # evaluate_lateral
 # ------------------------------------------------------------------------------
 
@@ -192,6 +253,7 @@ function evaluate_lateral(ev::FEMLateralEvaluator,
                           loads::Vector{StoryLoad})
     model, floor_master, panel_shells, nodes_by_key, z_base =
         _build_asap_wall_model(ev, panels, loads)
+    _assert_fem_nonsingular(model)   # fail closed on singular / under-constrained K
     Asap.solve!(model)
     nx = max(ev.mesh_div, 1)
 
@@ -200,6 +262,7 @@ function evaluate_lateral(ev::FEMLateralEvaluator,
     drift = zeros(nstory)
     torsion = ones(nstory)
     wall_forces = Dict{Int,Float64}(p.id => 0.0 for p in panels)
+    wall_forces_withheld = Set{Int}()   # upper-story ids with no validated demand
 
     # master-node in-plane displacement per floor: u = [ux, uy, θz]
     master_u = zeros(nstory, 3)
@@ -222,10 +285,13 @@ function evaluate_lateral(ev::FEMLateralEvaluator,
 
     # Per-wall in-plane shear demand.
     #   Base-story panels: recovered EXACTLY from nodal base reactions (horizontal
-    #     equilibrium), projected onto the wall's in-plane axis.
-    #   Upper-story panels: approximated by integrating the local membrane shear
-    #     flow Nxy over the panel width (cross-checked against the reduced model;
-    #     centroid recovery is a first-cut and undercounts squat piers).
+    #     equilibrium), projected onto the wall's in-plane axis. Oracle-validated
+    #     (single-story base-shear test) — these are surfaced as real demands.
+    #   Upper-story panels: WITHHELD. The only available recovery is a first-cut
+    #     membrane-shear-flow (Nxy) integration with no multistory oracle, and the
+    #     code's own notes say it undercounts squat piers — so it must NOT be
+    #     surfaced as a validated demand (fail closed: a wrong-but-plausible force
+    #     is worse than an explicit "unknown"). See withholding below.
     for p in panels
         lw = _panel_edge_length(p)
         ux = (p.x2 - p.x1) / lw; uy = (p.y2 - p.y1) / lw   # wall axis unit vector
@@ -240,15 +306,19 @@ function evaluate_lateral(ev::FEMLateralEvaluator,
             end
             wall_forces[p.id] = abs(Rx * ux + Ry * uy)
         else
-            shells_p = get(panel_shells, p.id, Asap.ShellTri3[])
-            isempty(shells_p) && continue
-            colw = lw / nx
-            Nxy_sum = sum(Asap.ShellInternalForces(el, model.u).Nxy for el in shells_p)
-            wall_forces[p.id] = abs(Nxy_sum / 2 * colw)
+            # Not-yet-validated upper-story shear: mark the panel withheld and store
+            # NaN as a fail-closed sentinel so no consumer can read it as a passing
+            # (e.g. zero) demand. The Nxy membrane-shear-flow integration is left
+            # unimplemented here on purpose until a multistory oracle validates it.
+            # Consumers MUST gate on `is_withheld` / `wall_shear_demand` (which
+            # returns `nothing` for a withheld id) — not on `NaN ≤ 1` being false —
+            # to treat a withheld panel as unknown / infeasible.
+            push!(wall_forces_withheld, p.id)
+            wall_forces[p.id] = NaN
         end
     end
 
-    return LateralResult(story_disp, drift, wall_forces, torsion)
+    return LateralResult(story_disp, drift, wall_forces, torsion, wall_forces_withheld)
 end
 
 # ------------------------------------------------------------------------------

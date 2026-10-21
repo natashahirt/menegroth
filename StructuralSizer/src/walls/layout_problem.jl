@@ -162,6 +162,54 @@ function _walls_from_density(p::WallLayoutNLPProblem, x::Vector{Float64})
 end
 
 # ------------------------------------------------------------------------------
+# Optimizer-boundary fail-closed-to-penalty bridge
+# ------------------------------------------------------------------------------
+# The reduced evaluator FAILS CLOSED on a singular / under-braced story by raising
+# `SingularStiffnessError` (lateral_evaluator.jl) — the correct default for the
+# one-shot CHECK path and the FEM-validation tier, which must refuse an unstable
+# layout outright. But the SIMP relaxation drives "removed" walls to a density
+# floor (ρ_min), so on a common uni-directional lateral case the optimizer thins
+# the unloaded direction's walls until the 3×3 story K is (near-)singular. If that
+# throw propagated into the differentiable Ipopt loop (`objective_fn` /
+# `constraint_fns`, including their finite-difference gradient probes), a single
+# normal iterate would abort the ENTIRE solve.
+#
+# ENGINEERING JUDGMENT (optimizer numerical safeguard, NOT a code clause): at the
+# optimizer boundary ONLY, we catch `SingularStiffnessError` and map it to a large
+# FINITE objective penalty and a deeply INFEASIBLE constraint value, so Ipopt is
+# steered AWAY from (never toward) a singular layout instead of crashing. These
+# are sentinels, not physical quantities:
+#   * objective penalty 1e12 ≫ any realistic carbon (~1e3–1e5 kgCO₂e), drift
+#     (~1e-3–1e0), or weighted objective (~O(1)), so a singular iterate can never
+#     look like a minimum;
+#   * constraint value 1e6 ≫ the feasibility bound of 1.0 (utilization ≤ 1), so a
+#     singular iterate is deeply infeasible and the line search / restoration
+#     rejects it.
+# The evaluator itself STILL THROWS by default — only these optimizer call sites
+# swallow-and-penalize. The finally-selected layout is re-validated by a THROWING
+# check (the FEM tier / one-shot checker call `evaluate_lateral` directly), so a
+# singular layout can never be returned as a solution.
+const OPTIMIZER_SINGULAR_OBJECTIVE_PENALTY = 1.0e12
+const OPTIMIZER_INFEASIBLE_CONSTRAINT      = 1.0e6
+
+"""
+    _evaluate_lateral_or_singular(p, walls) -> Union{LateralResult,Nothing}
+
+Run the reduced evaluator for the differentiable optimizer loop, catching the
+fail-closed [`SingularStiffnessError`](@ref) and signaling it with `nothing` so
+the caller can substitute a penalty / infeasible sentinel (see the constants
+above). Non-`SingularStiffnessError` exceptions are re-thrown unchanged.
+"""
+function _evaluate_lateral_or_singular(p::WallLayoutNLPProblem, walls::Vector{WallLine})
+    try
+        return evaluate_lateral(p.evaluator, walls, p.loads)
+    catch e
+        e isa SingularStiffnessError || rethrow()
+        return nothing
+    end
+end
+
+# ------------------------------------------------------------------------------
 # Objective
 # ------------------------------------------------------------------------------
 
@@ -179,12 +227,14 @@ function objective_fn(p::WallLayoutNLPProblem, x::Vector{Float64})
         return sum(clamp(x[i], p.ρ_min, 1.0) * _candidate_volume_full(c)
                    for (i, c) in enumerate(p.candidates))
     elseif obj isa MinDrift
-        res = evaluate_lateral(p.evaluator, _walls_from_density(p, x), p.loads)
+        res = _evaluate_lateral_or_singular(p, _walls_from_density(p, x))
+        res === nothing && return OPTIMIZER_SINGULAR_OBJECTIVE_PENALTY  # singular ⇒ steer away
         return maximum(res.drift; init=0.0)
     elseif obj isa WeightedLayoutObjective
         carbon = sum(clamp(x[i], p.ρ_min, 1.0) * _candidate_carbon_full(c)
                      for (i, c) in enumerate(p.candidates))
-        res = evaluate_lateral(p.evaluator, _walls_from_density(p, x), p.loads)
+        res = _evaluate_lateral_or_singular(p, _walls_from_density(p, x))
+        res === nothing && return OPTIMIZER_SINGULAR_OBJECTIVE_PENALTY  # singular ⇒ steer away
         drift = maximum(res.drift; init=0.0)
         return obj.w_carbon * (carbon / obj.carbon_ref) + obj.w_drift * (drift / obj.drift_ref)
     else
@@ -230,7 +280,13 @@ in `x` via the reduced evaluator.
 function constraint_fns(p::WallLayoutNLPProblem, x::Vector{Float64})
     ns = _nstory(p)
     walls = _walls_from_density(p, x)
-    res = evaluate_lateral(p.evaluator, walls, p.loads)
+    res = _evaluate_lateral_or_singular(p, walls)
+    # Singular / under-braced iterate: return an all-INFEASIBLE constraint vector
+    # so Ipopt treats this layout as badly infeasible (steer away) instead of the
+    # evaluator's fail-closed throw aborting the whole solve. A direct check on a
+    # singular layout (via `evaluate_lateral`) STILL throws — only this optimizer
+    # call site penalizes.
+    res === nothing && return fill(OPTIMIZER_INFEASIBLE_CONSTRAINT, n_constraints(p))
 
     g = Float64[]
     for s in 1:ns
@@ -248,8 +304,17 @@ function constraint_fns(p::WallLayoutNLPProblem, x::Vector{Float64})
         t = ρ * c.t_max
         hw = c.height  # single-story pier height; multi-story hw handled upstream
         cap = wall_shear_capacity_si(c.fc, c.fy, c.lw, t, c.ρt, hw)
-        Vu = abs(get(res.wall_forces, c.id, 0.0))
-        push!(g, Vu / max(cap.ϕVn, 1e-6))
+        # Explicit withheld handling: `wall_shear_demand` returns `nothing` for a
+        # withheld / unvalidated id (FEM upper-story shear). The reduced inner-loop
+        # evaluator withholds nothing, so this only guards a (non-default) FEM-tier
+        # evaluator — a withheld demand is treated as INFEASIBLE, never a passing
+        # zero.
+        demand = wall_shear_demand(res, c.id)
+        if demand === nothing
+            push!(g, OPTIMIZER_INFEASIBLE_CONSTRAINT)
+        else
+            push!(g, abs(demand) / max(cap.ϕVn, 1e-6))
+        end
     end
     return g
 end

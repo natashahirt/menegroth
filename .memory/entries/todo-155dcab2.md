@@ -7,13 +7,13 @@ title: 'Coordinated: honor params.beam_I_factor / column_I_factor (thread cracki
   factors, no-op at defaults + gate)'
 node_label: 'Coordinated: honor params.beam_I_factor / column_I'
 tags: ''
-status: active
-open_threads: 0
+status: discarded
+open_threads: 1
 success: 'null'
 files: ''
 session_id: sess-39b9bfe7
 created_at: '2026-10-21T15:39:49.565982+00:00'
-updated_at: '2026-10-21T15:39:49.565982+00:00'
+updated_at: '2026-10-21T23:04:39.315824+00:00'
 ---
 Thread the ACI 318-11 §10.10.4.1 cracking factors from DesignParameters down to the Asap section builders so the declared knobs are actually honored (currently inert; applied values come from hardcoded defaults that happen to equal the param defaults 0.35/0.70).
 

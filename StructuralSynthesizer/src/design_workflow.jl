@@ -906,7 +906,7 @@ function _reconcile_columns!(
     ν_c = conc.ν
     G_Pa = E_Pa / (2.0 * (1.0 + ν_c))
     ρ_kg = ustrip(u"kg/m^3", conc.ρ)
-    I_factor = 0.70  # ACI 318-11 §10.10.4.1
+    I_factor = params.column_I_factor  # ACI 318-11 §10.10.4.1
     grew = 0
 
     _shape_con = !isnothing(_col_opts) ? _col_opts.shape_constraint : :square
@@ -1008,6 +1008,7 @@ function _reconcile_columns!(
     if grew > 0 && struc.asap_model.processed
         Asap.update!(struc.asap_model; values_only=true)
         Asap.solve!(struc.asap_model)
+        _refresh_pattern_solve_cache!(struc)
         synced = true
     end
 
@@ -1081,6 +1082,7 @@ function harmonize_uniform_column_sizes!(struc::BuildingStructure, params::Desig
         if struc.asap_model.processed
             Asap.update!(struc.asap_model; values_only=true)
             Asap.solve!(struc.asap_model)
+            _refresh_pattern_solve_cache!(struc)
         end
         @info "Uniform column harmonization: $changed columns enlarged" mode=string(mode)
     end
@@ -1237,7 +1239,11 @@ function _ensure_beam_sections_for_visualization!(struc::BuildingStructure, para
     end
 end
 
-"""Extract max axial force (N) for a column from the Asap model."""
+"""Extract compressive axial force (N) for a column from the Asap model.
+
+Asap local `P` is negative in compression (same convention as
+`member_group_demands`). Tension is not folded into compression via `abs`.
+"""
 function _column_asap_Pu(struc::BuildingStructure, col)
     Pu = 0.0
     for seg_idx in segment_indices(col)
@@ -1247,11 +1253,23 @@ function _column_asap_Pu(struc::BuildingStructure, col)
         el = struc.asap_model.elements[edge_idx]
         isempty(el.forces) && continue
         n_dof = length(el.forces)
-        Pu_start = abs(el.forces[1])
-        Pu_end = n_dof >= 7 ? abs(el.forces[7]) : Pu_start
-        Pu = max(Pu, Pu_start, Pu_end)
+        P_start = el.forces[1]
+        P_end = n_dof >= 7 ? el.forces[7] : P_start
+        Pu = max(Pu, max(0.0, -P_start), max(0.0, -P_end))
     end
     return Pu
+end
+
+"""Rebuild K, re-solve, and refresh pattern `(u, loads)` after a section change."""
+function _reanalyze_after_section_change!(struc::BuildingStructure)
+    if struc.asap_model.processed
+        Asap.update!(struc.asap_model)
+    else
+        Asap.process!(struc.asap_model)
+    end
+    Asap.solve!(struc.asap_model)
+    _refresh_pattern_solve_cache!(struc)
+    return struc
 end
 
 """
@@ -1326,19 +1344,17 @@ function _size_beams_columns!(struc::BuildingStructure, params::DesignParameters
         @warn "Skipping beam sizing: no beam edges in geometry. Sizing columns only."
         StructuralSizer.emit!(tc, :workflow, "_size_beams_columns!", "", :decision;
                               outcome="skipped_beams", reason="no_beam_edges")
-        size_columns!(struc, column_opts; reanalyze=false, tc=tc)
-        if struc.asap_model.processed
-            Asap.update!(struc.asap_model)
-        else
-            Asap.process!(struc.asap_model)
-        end
-        Asap.solve!(struc.asap_model)
-        _run_p_delta_if_needed!(struc, column_opts; verbose=false, tc=tc)
+        size_columns!(struc, column_opts; reanalyze=false, tc=tc,
+                      I_factor=params.column_I_factor)  # ACI 318-11 §10.10.4.1
+        _reanalyze_after_section_change!(struc)
+        _run_p_delta_if_needed!(struc, column_opts; verbose=false, tc=tc,
+                                I_factor=params.column_I_factor)  # ACI 318-11 §10.10.4.1
         if has_fire_rating(params)
             n_col = add_coating_loads!(struc, params; member_edge_group=:columns, resolve=false)
             if n_col > 0
                 Asap.process!(struc.asap_model)
                 Asap.solve!(struc.asap_model)
+                _refresh_pattern_solve_cache!(struc)
             end
         end
         StructuralSizer.emit!(tc, :workflow, "_size_beams_columns!", "", :exit;
@@ -1371,23 +1387,14 @@ function _size_beams_columns!(struc::BuildingStructure, params::DesignParameters
     for iter in 1:max_iter
         iters_used = iter
         size_beams!(struc, beam_opts; reanalyze=false, tc=tc,
-                    member_group_overrides=mgo)
+                    member_group_overrides=mgo, I_factor=params.beam_I_factor)
         
-        if struc.asap_model.processed
-            Asap.update!(struc.asap_model)
-        else
-            Asap.process!(struc.asap_model)
-        end
-        Asap.solve!(struc.asap_model)
+        _reanalyze_after_section_change!(struc)
         
-        size_columns!(struc, column_opts; reanalyze=false, tc=tc)
+        size_columns!(struc, column_opts; reanalyze=false, tc=tc,
+                      I_factor=params.column_I_factor)
         
-        if struc.asap_model.processed
-            Asap.update!(struc.asap_model)
-        else
-            Asap.process!(struc.asap_model)
-        end
-        Asap.solve!(struc.asap_model)
+        _reanalyze_after_section_change!(struc)
         
         _extract_column_demands!(curr_demands, struc)
         if !first_iter && _max_demand_change(prev_demands, curr_demands) < tol
@@ -1404,7 +1411,8 @@ function _size_beams_columns!(struc::BuildingStructure, params::DesignParameters
     # After first-order sizing converges, check if any story has δs > 1.5.
     # If so, run iterative P-Δ to capture second-order effects, then re-size
     # columns with the updated forces.
-    _run_p_delta_if_needed!(struc, column_opts; verbose=verbose, tc=tc)
+    _run_p_delta_if_needed!(struc, column_opts; verbose=verbose, tc=tc,
+                            I_factor=params.column_I_factor)  # ACI 318-11 §10.10.4.1
     
     # ─── Fire protection coating loads (steel members only) ───
     # After sizing, add SFRM/intumescent self-weight and re-solve.
@@ -1418,6 +1426,7 @@ function _size_beams_columns!(struc::BuildingStructure, params::DesignParameters
         if (n_beam + n_col) > 0
             Asap.process!(struc.asap_model)
             Asap.solve!(struc.asap_model)
+            _refresh_pattern_solve_cache!(struc)
         end
     end
     
@@ -1448,6 +1457,10 @@ function _run_p_delta_if_needed!(
     column_opts;
     verbose::Bool = false,
     tc::Union{Nothing, StructuralSizer.TraceCollector} = nothing,
+    # ACI 318-11 §10.10.4.1 — cracked-stiffness reduction for concrete column sections,
+    # threaded from params.column_I_factor. Default 0.70 keeps any caller that does not
+    # pass it byte-identical (matches to_asap_section's concrete-column default).
+    I_factor::Real = 0.70,
 )
     StructuralSizer.emit!(tc, :workflow, "_run_p_delta_if_needed!", "", :enter;
                           n_columns=length(struc.columns))
@@ -1490,7 +1503,8 @@ function _run_p_delta_if_needed!(
     end
     
     # Re-size columns with updated second-order forces
-    size_columns!(struc, column_opts; reanalyze=false, tc=tc)
+    size_columns!(struc, column_opts; reanalyze=false, tc=tc,
+                  I_factor=I_factor)  # ACI 318-11 §10.10.4.1
     StructuralSizer.emit!(tc, :workflow, "_run_p_delta_if_needed!", "", :decision;
                           outcome="ran",
                           n_stories_attention=length(result.stories_needing_attention),
@@ -1720,6 +1734,27 @@ function _populate_slab_results!(design::BuildingDesign, struc::BuildingStructur
 end
 
 """
+    _steel_column_φMnx(sec, Lb; Cb=1.0) -> Union{Float64, Nothing}
+
+Chapter F strong-axis `φMn` [N·m] at the member unbraced length — the same
+`get_ϕMn(; Lb, Cb, axis=:strong)` the sizer uses (AISC 360-16 §F2.2,
+corpus: aisc-360-16, page 103).  Returns `nothing` if material is missing
+or `get_ϕMn` is unsupported.
+"""
+function _steel_column_φMnx(sec, Lb; Cb::Float64 = 1.0)::Union{Float64, Nothing}
+    (hasproperty(sec, :material) && !isnothing(sec.material)) || return nothing
+    try
+        return ustrip(u"N*m", StructuralSizer.get_ϕMn(sec, sec.material;
+                                                       Lb = Lb, Cb = Cb, axis = :strong))
+    catch e
+        if e isa MethodError || (isdefined(Base, :FieldError) && e isa Base.FieldError)
+            return nothing
+        end
+        rethrow()
+    end
+end
+
+"""
     _steel_column_ϕPnc(sec, L; Kx=1.0, Ky=1.0) -> Union{Float64, Nothing}
 
 Screening-diagnostic design axial compressive strength `ϕPnc` [N] for a steel
@@ -1935,38 +1970,38 @@ function _populate_column_results!(design::BuildingDesign, struc::BuildingStruct
                 φPn = ϕPnc  # N — §E3 flexural-buckling design strength (φc = 0.90)
                 result.axial_ratio = φPn > 0 ? Pu_N_val / φPn : 0.0
 
-                # Column moment capacities — plastic-moment UPPER BOUNDS (φb = 0.90
-                # per §F1). These IGNORE lateral-torsional buckling (§F2.2) and
-                # flange/web local buckling, so they overstate flexural capacity;
-                # they exist only to feed the coarse interaction screen below. The
-                # engine's real ϕMn is not retained on the column result to reuse.
-                #   Strong axis: Mp,x = Fy·Zx (§F2.1 Eq. F2-1). (aisc-360-16 §F2 p.47.)
-                φMnx = hasproperty(col_sec, :Zx) ?
-                       0.9 * Fy_Pa * ustrip(u"m^3", col_sec.Zx) : 0.0
-                #   Weak axis: Mp,y = Fy·Zy ≤ 1.6·Fy·Sy (§F6.1 Eq. F6-1); the
-                #   1.6·Fy·Sy cap is an I-shape/channel limit, so it is applied only
-                #   to `ISymmSection`. (aisc-360-16 §F6 p.56.)
-                φMny = if hasproperty(col_sec, :Zy)
-                    Mpy = Fy_Pa * ustrip(u"m^3", col_sec.Zy)
-                    if col_sec isa StructuralSizer.ISymmSection && hasproperty(col_sec, :Sy)
-                        Mpy = min(Mpy, 1.6 * Fy_Pa * ustrip(u"m^3", col_sec.Sy))  # §F6-1 cap
+                # Authoritative φMn — same Chapter F routine the sizer uses
+                # (`get_ϕMn` with the member `Lb` / `Cb`).  A plastic-Mp
+                # screen ignored LTB (§F2.2) and could report ok=true for a
+                # long-Lb W-shape the sizer rejects.
+                # AISC 360-16 §F2.2 (corpus: aisc-360-16, page 103); φb = 0.90
+                # per §F1.
+                Lb = col.base.Lb
+                Cb = col.base.Cb
+                φMnx_sizer = _steel_column_φMnx(col_sec, Lb; Cb = Float64(Cb))
+                φMnx = isnothing(φMnx_sizer) ?
+                    (hasproperty(col_sec, :Zx) ?
+                        0.9 * Fy_Pa * ustrip(u"m^3", col_sec.Zx) : 0.0) :
+                    φMnx_sizer
+                φMny = try
+                    ustrip(u"N*m", StructuralSizer.get_ϕMn(col_sec, col_sec.material;
+                                                            axis = :weak))
+                catch
+                    if hasproperty(col_sec, :Zy)
+                        Mpy = Fy_Pa * ustrip(u"m^3", col_sec.Zy)
+                        if col_sec isa StructuralSizer.ISymmSection && hasproperty(col_sec, :Sy)
+                            Mpy = min(Mpy, 1.6 * Fy_Pa * ustrip(u"m^3", col_sec.Sy))
+                        end
+                        0.9 * Mpy
+                    else
+                        0.0
                     end
-                    0.9 * Mpy
-                else
-                    0.0
                 end
 
-                # COARSE SCREEN ONLY — AISC 360-16 §H1 biaxial P-M interaction
-                # (Eq. H1-1a / H1-1b), mirroring `check_PMxMy_interaction`. It now
-                # includes BOTH strong- and weak-axis moments (dropping `Mu_y` was
-                # unconservative), using the §E3-based ϕPnc for the axial term.
-                # It still OMITS B1 P-δ moment amplification (App. 8) and LTB
-                # (§F2.2) and uses plastic-moment upper-bound capacities, so it is
-                # NOT the authoritative feasibility verdict — that is
-                # `AISCChecker.is_feasible`. Because every term is non-negative,
-                # adding `Mu_y` can only RAISE this ratio, keeping the screen
-                # conservative relative to the prior strong-axis-only form.
-                # (corpus: aisc-360-16 — §H1 p.77.)
+                # Diagnostic P–M screen — AISC 360-16 §H1.1 Eqs. H1-1a/H1-1b
+                # (corpus: aisc-360-16, page 133), same `get_ϕMn(Lb,Cb)` Chapter F
+                # φMn the sizer uses.  It still OMITS B1 P-δ (App. 8).  Authoritative
+                # `result.ok` is this ratio (and punching), not a plastic-Mp screen.
                 Pr_Pc  = φPn  > 0 ? Pu_N_val    / φPn  : 0.0
                 Mrx_Mc = φMnx > 0 ? Mu_Nm_val   / φMnx : 0.0
                 Mry_Mc = φMny > 0 ? Mu_y_Nm_val / φMny : 0.0

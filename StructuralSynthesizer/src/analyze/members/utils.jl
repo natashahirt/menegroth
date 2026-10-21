@@ -1624,6 +1624,110 @@ function _fem_to_aci_endmoments(M_start::Real, M_end::Real)
 end
 
 """
+    _asap_signed_My_envelopes(el, My) -> (sag, hog)
+
+Asap My sign convention (scripts/runners/check_asap_moment_sign.jl, default
+Ψ = π/2). Horizontal beams under downward gravity:
+  +x / +y / −y: local y = +global Z, midspan My > 0 (sagging), support My < 0
+  −x:           local y = −global Z, midspan My < 0 (sagging), support My > 0
+Sagging tensions the underside (bottom fiber = −global Z) and equals
+sign(My) × sign(local_y · ê_Z). Hogging is the opposite. When |ly·ê_Z| ≈ 0
+the face cannot be classified and both envelopes take |My| (conservative).
+"""
+function _asap_signed_My_envelopes(el, My)
+    ly_z = el.LCS[2][3]
+    if abs(ly_z) < 1e-8
+        mag = mapreduce(abs, max, My)
+        return mag, mag
+    end
+    s = ly_z > 0 ? 1.0 : -1.0
+    sag = 0.0
+    hog = 0.0
+    for M in My
+        sag = max(sag, M * s)
+        hog = max(hog, -M * s)
+    end
+    return sag, hog
+end
+
+"""
+Station forces for `el` from a caller-supplied global displacement vector.
+
+Mirrors `Asap.ElementForceAndDisplacement`'s force path (`R * K * u_e` then
+`accumulate_force!` for the case loads) without reading `node.displacement`.
+Used so pattern-case `u` from `Asap.solve(model, cases)` can be evaluated
+without mutating `model.u` (full-load deflections stay on `model.u`).
+"""
+function _element_forces_from_u(el, u_global::AbstractVector{<:Real}, loads; resolution::Int=200)
+    dofs = Asap.etype2DOF[typeof(el)]
+    ep = Asap.ElementProps(el)
+    L = ep.L
+    rng = range(0, L, resolution)
+    u_e = u_global[el.globalID]
+    Ku = el.K * u_e
+    Flocal = el.R * Ku
+    @inbounds for i in 1:12
+        Flocal[i] *= dofs[i]
+    end
+    Pstart  = -Flocal[1]
+    Vystart =  Flocal[2]
+    Mystart =  Flocal[6]
+    Vzstart =  Flocal[3]
+    Mzstart = -Flocal[5]
+    P  = fill(Pstart, resolution)
+    My = Vector{Float64}(undef, resolution)
+    Vy = fill(Vystart, resolution)
+    Mz = Vector{Float64}(undef, resolution)
+    Vz = fill(Vzstart, resolution)
+    @inbounds for i in 1:resolution
+        My[i] = Vystart * rng[i] - Mystart
+        Mz[i] = Vzstart * rng[i] - Mzstart
+    end
+    for load in loads
+        Asap.accumulate_force!(load, rng, P, My, Vy, Mz, Vz, ep)
+    end
+    return (P=P, My=My, Vy=Vy, Mz=Mz, Vz=Vz)
+end
+
+"""
+Pattern-case (loads, u) pairs for member sizing, or `nothing` if only the
+full-load solve applies.
+
+Prefers the cache written by `_solve_with_patterns!`. If that is missing but
+dead/live splits exist and `params` still requests patterns, re-solves with
+the cached K factorization (ACI 318-11 §13.7.6, corpus: aci-318-11, page 261).
+"""
+function _pattern_demand_cases(struc::BuildingStructure, params::DesignParameters)
+    cached = _get_pattern_solve_cache(struc)
+    if cached !== nothing
+        # Prefer the cache so callers that omit `params` still envelope
+        # patterns — but never reuse a pre-K / pre-GravityLoad `pattern_u`
+        # (ACI 318-11 §13.7.6.3–13.7.6.4, corpus: aci-318-11, page 261).
+        if !_pattern_cache_is_current(struc)
+            _refresh_pattern_solve_cache!(struc)
+            cached = _get_pattern_solve_cache(struc)
+        end
+        if cached !== nothing
+            cases, u_cases = cached
+            n_el = length(struc.asap_model.frame_elements)
+            n_el == 0 && return nothing
+            return [(u, Asap.get_elemental_loads(loads, n_el)) for (u, loads) in zip(u_cases, cases)]
+        end
+    end
+    use = params.pattern_loading != :none &&
+          !isempty(struc.cell_dead_loads) &&
+          any(!isempty, values(struc.cell_dead_loads)) &&
+          _should_run_patterns(struc, params)
+    (use && struc.asap_model.processed) || return nothing
+    cases = _generate_pattern_cases(struc)
+    length(cases) <= 1 && return nothing
+    u_cases = Asap.solve(struc.asap_model, cases)
+    n_el = length(struc.asap_model.frame_elements)
+    n_el == 0 && return nothing
+    return [(u, Asap.get_elemental_loads(loads, n_el)) for (u, loads) in zip(u_cases, cases)]
+end
+
+"""
     member_group_demands(struc; member_edge_group=:beams, resolution=200, params=DesignParameters())
 
 Compute governing demands and geometry for each `MemberGroup` by enveloping ASAP internal
@@ -1646,6 +1750,11 @@ instead of falling back on the conservative `M1 = 0` stand-in.
 When `params` is provided and cell dead/live loads are available, a service-load
 multi-RHS solve separates LL-only and total (DL+LL) deflections. Otherwise
 the factored-solve deflection is used for both (conservative).
+
+Pattern cases (ACI 318-11 §13.7.6.3–13.7.6.4, corpus: aci-318-11, page 261)
+envelope STRENGTH from per-case station forces (signed M+/M− and shears).
+Deflection stays on the full-load solve (`model.u`). The per-DOF abs envelope
+on `el.forces` is not used as a sizing source.
 
 For multi-segment members (shattered edges), the `δ_max` in the returned demand
 is pre-scaled so that `δ_max / L_total == δ_original / L_defl`, where `L_defl`
@@ -1686,6 +1795,12 @@ function member_group_demands(struc::BuildingStructure;
     # Use lazy-cached element-to-loads map (avoids O(n_loads) rebuild per call)
     element_loads = Asap.get_elemental_loads(struc.asap_model)
 
+    # Pattern cases (ACI 318-11 §13.7.6.3–13.7.6.4, corpus: aci-318-11,
+    # page 261): per-case station forces, not the per-DOF abs envelope on
+    # el.forces. `nothing` ⇒ full-load only.
+    pattern_cases = _pattern_demand_cases(struc, params)
+    n_pat = pattern_cases === nothing ? 1 : length(pattern_cases)
+
     # Whether to extract signed end moments for ACI 318-19 slenderness Cm.
     # Only meaningful for columns; beams/struts use the conservative M1=0 default.
     extract_end_moments = member_type === :columns
@@ -1695,6 +1810,8 @@ function member_group_demands(struc::BuildingStructure;
     par_Pu_c = Vector{Float64}(undef, n_groups)
     par_Pu_t = Vector{Float64}(undef, n_groups)
     par_Mux  = Vector{Float64}(undef, n_groups)
+    par_Mux_pos = Vector{Float64}(undef, n_groups)
+    par_Mux_neg = Vector{Float64}(undef, n_groups)
     par_Muy  = Vector{Float64}(undef, n_groups)
     par_Vus  = Vector{Float64}(undef, n_groups)
     par_Vuw  = Vector{Float64}(undef, n_groups)
@@ -1716,8 +1833,12 @@ function member_group_demands(struc::BuildingStructure;
         gid = all_group_ids[g]
         mg = struc.member_groups[gid]
 
+        # Group envelope: max |P| paired with max |M| (not a concurrent case).
+        # CONSERVATIVE under gravity-only.  Pu_t is collected (below) but
+        # `size_columns` raw-vector API does not forward it — SCOPE until
+        # lateral/uplift (AISC 360-16 §H1.2).
         Pu_comp = 0.0; Pu_tens = 0.0
-        Mux = 0.0; Muy = 0.0
+        Mux = 0.0; Mux_pos = 0.0; Mux_neg = 0.0; Muy = 0.0
         Vu_strong = 0.0; Vu_weak = 0.0
         L_total = 0.0; Lb_gov = 0.0; Cb_gov = Inf
         L_defl = 0.0  # longest individual segment (deflection span)
@@ -1725,9 +1846,10 @@ function member_group_demands(struc::BuildingStructure;
         has_any = false
         δ_max = 0.0; I_ref = 0.0
 
-        # End-moment selection (column groups only). We pick the (M1, M2) from
-        # whichever member in the group has the largest |M2| in that axis —
-        # the worst-case Cm dominates the slenderness amplification.
+        # End-moment selection (column groups only). M1 and M2 come from the
+        # same pattern case — the case with the largest |M2| on that axis —
+        # so Cm is not mixed across non-concurrent load patterns
+        # (ACI 318-11 §13.7.6.3–13.7.6.4, corpus: aci-318-11, page 261).
         best_M2x = 0.0; best_M1x = 0.0
         best_M2y = 0.0; best_M1y = 0.0
 
@@ -1739,12 +1861,11 @@ function member_group_demands(struc::BuildingStructure;
             seg_list = segment_indices(m)
             n_segs = length(seg_list)
 
-            # Per-member end-moment scratch (FEM internal-moment convention).
+            # Per-case end-moment scratch (FEM internal-moment convention).
             # Walked in segment order: start = f.M[1] of first segment, end =
-            # f.M[end] of last segment. Multi-segment columns walk through
-            # interior splice points; only the outermost values matter for Cm.
-            local_My_start = 0.0; local_My_end = 0.0
-            local_Mz_start = 0.0; local_Mz_end = 0.0
+            # f.M[end] of last segment, both from the same pattern case.
+            case_My_s = zeros(Float64, n_pat); case_My_e = zeros(Float64, n_pat)
+            case_Mz_s = zeros(Float64, n_pat); case_Mz_e = zeros(Float64, n_pat)
             saw_first_seg = false; saw_last_seg = false
 
             for (seg_pos, seg_idx) in enumerate(seg_list)
@@ -1763,48 +1884,66 @@ function member_group_demands(struc::BuildingStructure;
                 el = struc.asap_model.elements[edge_idx]
                 el_loads = element_loads[el.elementID]
 
-                # Combined forces + displacements in one pass (shared L, xinc, load iteration)
+                # Displacements from the full-load solve (`model.u` / node.displacement).
+                # Pattern cases envelope STRENGTH only; deflection stays full-load.
                 fd = Asap.ElementForceAndDisplacement(el, el_loads; resolution=resolution)
-                f = fd.forces
                 edisp = fd.displacements
 
-                min_P = minimum(f.P); max_P = maximum(f.P)
-                if min_P < 0; Pu_comp = max(Pu_comp, abs(min_P)); end
-                if max_P > 0; Pu_tens = max(Pu_tens, max_P); end
+                force_sets = if pattern_cases === nothing
+                    (fd.forces,)
+                else
+                    ntuple(i -> begin
+                        u_case, case_map = pattern_cases[i]
+                        _element_forces_from_u(el, u_case, case_map[el.elementID]; resolution=resolution)
+                    end, length(pattern_cases))
+                end
 
-                Mux = max(Mux, mapreduce(abs, max, f.My))
-                Vu_strong = max(Vu_strong, mapreduce(abs, max, f.Vz))
-                Muy = max(Muy, mapreduce(abs, max, f.Mz))
-                Vu_weak = max(Vu_weak, mapreduce(abs, max, f.Vy))
+                for (ci, f) in enumerate(force_sets)
+                    min_P = minimum(f.P); max_P = maximum(f.P)
+                    if min_P < 0; Pu_comp = max(Pu_comp, abs(min_P)); end
+                    if max_P > 0; Pu_tens = max(Pu_tens, max_P); end
+
+                    Mux = max(Mux, mapreduce(abs, max, f.My))
+                    sag, hog = _asap_signed_My_envelopes(el, f.My)
+                    if member_type === :beams
+                        Mux_pos = max(Mux_pos, sag)
+                        Mux_neg = max(Mux_neg, hog)
+                    end
+                    Vu_strong = max(Vu_strong, mapreduce(abs, max, f.Vz))
+                    Muy = max(Muy, mapreduce(abs, max, f.Mz))
+                    Vu_weak = max(Vu_weak, mapreduce(abs, max, f.Vy))
+
+                    if extract_end_moments
+                        if seg_pos == 1
+                            case_My_s[ci] = Float64(f.My[1])
+                            case_Mz_s[ci] = Float64(f.Mz[1])
+                            saw_first_seg = true
+                        end
+                        if seg_pos == n_segs
+                            case_My_e[ci] = Float64(f.My[end])
+                            case_Mz_e[ci] = Float64(f.Mz[end])
+                            saw_last_seg = true
+                        end
+                    end
+                end
 
                 δ_local = mapreduce(j -> abs(edisp.ulocal[3, j]), max, 1:size(edisp.ulocal, 2))
                 δ_max = max(δ_max, δ_local)
 
                 I_current = ustrip(u"m^4", el.section.Ix)
                 I_ref = max(I_ref, I_current)
-
-                if extract_end_moments
-                    if seg_pos == 1
-                        local_My_start = Float64(f.My[1])
-                        local_Mz_start = Float64(f.Mz[1])
-                        saw_first_seg = true
-                    end
-                    if seg_pos == n_segs
-                        local_My_end = Float64(f.My[end])
-                        local_Mz_end = Float64(f.Mz[end])
-                        saw_last_seg = true
-                    end
-                end
             end
 
             if extract_end_moments && saw_first_seg && saw_last_seg
-                M1x_m, M2x_m = _fem_to_aci_endmoments(local_My_start, local_My_end)
-                M1y_m, M2y_m = _fem_to_aci_endmoments(local_Mz_start, local_Mz_end)
-                if M2x_m > best_M2x
-                    best_M2x = M2x_m; best_M1x = M1x_m
-                end
-                if M2y_m > best_M2y
-                    best_M2y = M2y_m; best_M1y = M1y_m
+                for ci in 1:n_pat
+                    M1x_m, M2x_m = _fem_to_aci_endmoments(case_My_s[ci], case_My_e[ci])
+                    M1y_m, M2y_m = _fem_to_aci_endmoments(case_Mz_s[ci], case_Mz_e[ci])
+                    if M2x_m > best_M2x
+                        best_M2x = M2x_m; best_M1x = M1x_m
+                    end
+                    if M2y_m > best_M2y
+                        best_M2y = M2y_m; best_M1y = M1y_m
+                    end
                 end
             end
         end
@@ -1812,6 +1951,8 @@ function member_group_demands(struc::BuildingStructure;
         par_has[g]  = has_any
         par_Pu_c[g] = Pu_comp; par_Pu_t[g] = Pu_tens
         par_Mux[g]  = Mux;     par_Muy[g]  = Muy
+        par_Mux_pos[g] = member_type === :beams ? Mux_pos : Mux
+        par_Mux_neg[g] = member_type === :beams ? Mux_neg : Mux
         par_Vus[g]  = Vu_strong; par_Vuw[g] = Vu_weak
         par_δ[g]    = δ_max;   par_Ir[g]   = I_ref
         par_L[g]    = L_total; par_Lb[g]   = Lb_gov
@@ -1897,7 +2038,9 @@ function member_group_demands(struc::BuildingStructure;
         else
             d = StructuralSizer.MemberDemand(g_idx;
                 Pu_c=par_Pu_c[g], Pu_t=par_Pu_t[g],
-                Mux=par_Mux[g], Muy=par_Muy[g],
+                Mux=par_Mux[g],
+                Mux_pos=par_Mux_pos[g], Mux_neg=par_Mux_neg[g],
+                Muy=par_Muy[g],
                 Vu_strong=par_Vus[g], Vu_weak=par_Vuw[g],
                 δ_max_LL=δ_ll_adj, δ_max_total=δ_total_adj,
                 I_ref=par_Ir[g])
@@ -2342,6 +2485,10 @@ function size_beams!(
     reanalyze::Bool = true,
     gravity_factor::Quantity = GRAVITY,
     member_group_overrides::Union{Nothing, Dict{UInt64, MemberGroupSizingOverride}} = nothing,
+    # ACI 318-11 §10.10.4.1 — cracked-stiffness reduction factor applied to concrete
+    # beam sections only (threaded from params.beam_I_factor by the design workflow).
+    # Default 0.35 keeps callers that do not pass it byte-identical.
+    I_factor::Real = 0.35,
     tc::Union{Nothing, StructuralSizer.TraceCollector} = nothing,
 )
     dp = (hasproperty(struc, :design_parameters) && !isnothing(struc.design_parameters)) ?
@@ -2452,7 +2599,7 @@ function size_beams!(
 
     result = _size_beams_impl!(struc, effective_opts, Val(strategy);
                                resolution, reanalyze, gravity_factor,
-                               member_group_overrides)
+                               member_group_overrides, I_factor)
     StructuralSizer.emit!(tc, :sizing, "size_beams!", "", :exit)
     return result
 end
@@ -2466,6 +2613,11 @@ function _size_beams_impl!(
     reanalyze::Bool,
     gravity_factor::Quantity,
     member_group_overrides::Union{Nothing, Dict{UInt64, MemberGroupSizingOverride}} = nothing,
+    # Accepted for the uniform `size_beams!` dispatch but inert here: the cracked-stiffness
+    # I_factor (ACI 318-11 §10.10.4.1) applies to concrete sections only, and this is the
+    # steel path. `_apply_beam_results!` branches per group material, so steel groups never
+    # pass I_factor to to_asap_section regardless of this value.
+    I_factor::Real = 0.35,
 )
     skel = struc.skeleton
     edge_ids_in_group = Set{Int}()
@@ -2636,17 +2788,11 @@ function _size_beams_impl!(
 
         # Phase B is STEEL-beam-only: a bare-steel Ix mask must never be applied to a
         # COMPOSITE beam demand (whose code check uses I_LB, AISC 360-16 Commentary
-        # I3.2). Refuse fail-loud rather than over-restrict.
-        #
-        # [composite cleanup, fix cycle 3] DEFENSE-IN-DEPTH ONLY: the composite-refusal
-        # branch inside `_assert_no_composite_override` is CURRENTLY UNREACHABLE on this
-        # batched path — `member_group_demands` builds `MemberDemand{Float64, Nothing}`,
-        # so every `demands[i].composite` is `nothing` by construction and the assertion
-        # never throws here. It is retained (not deleted) as an explicit backstop against
-        # a future batched demand-builder that surfaces composite demands, and is covered
-        # by a DIRECT unit test on synthetic composite stubs (test (ix)) rather than
-        # through this call site. Do NOT read this as live coverage of a composite path.
-        _assert_no_composite_override(group_ids, demands, member_group_overrides)
+        # I3.2). Refuse fail-loud rather than over-restrict. Also fires when
+        # `opts.composite` enables the Chapter I sentinel on the size_beams call
+        # below (demands from `member_group_demands` still carry composite=nothing).
+        _assert_no_composite_override(group_ids, demands, member_group_overrides;
+                                      opts_composite=opts.composite)
     end
 
     isempty(group_ids) && return struc
@@ -2655,10 +2801,22 @@ function _size_beams_impl!(
                   for (L, Lb, Cb, Kx, Ky) in zip(L_totals, Lb_govs, Cb_govs, Kx_govs, Ky_govs)]
 
     Mu_vec = [d.Mux for d in demands]
+    Mux_pos_vec = [d.Mux_pos for d in demands]
+    Mux_neg_vec = [d.Mux_neg for d in demands]
     Vu_vec = [d.Vu_strong for d in demands]
+    # Analysis Pu_c (compression magnitude, SI N) → size_beams `Pu=` for H1 when > 0.
+    Pu_vec = [d.Pu_c * u"N" for d in demands]
     δ_LL_vec   = [d.δ_max_LL for d in demands]
     δ_total_vec = [d.δ_max_total for d in demands]
     I_ref_v  = [d.I_ref for d in demands]
+
+    # Forward composite onto size_beams: `member_group_demands` builds
+    # `MemberDemand{Float64,Nothing}` (composite always nothing), so without this
+    # kwarg design_building never hits Chapter I / the composite sentinel even when
+    # `SteelBeamOptions.composite=true`. Prefer a real `CompositeContext` when the
+    # caller supplies one via opts later; the Bool sentinel is what the Sizer API
+    # accepts today (full Chapter I Mn needs CompositeContext on the Sizer checker).
+    composite_kw = opts.composite ? true : nothing
 
     # Run 4 / Phase B ([A-revert]): honor per-group restrictions on STEEL beam
     # groups sourced ONLY from an EFFECTIVE per-design `member_group_overrides`
@@ -2681,18 +2839,24 @@ function _size_beams_impl!(
             struc, opts, group_ids, L_totals, δ_LL_vec, I_ref_v, member_group_overrides)
         StructuralSizer.size_beams(
             Mu_vec, Vu_vec, geometries, opts;
+            Pu = Pu_vec,
+            Mux_pos = Mux_pos_vec, Mux_neg = Mux_neg_vec,
             δ_max_vec = any(>(0), δ_LL_vec)   ? δ_LL_vec   : nothing,
             δ_max_total_vec = any(>(0), δ_total_vec) ? δ_total_vec : nothing,
             I_ref_vec = any(>(0), I_ref_v)    ? I_ref_v    : nothing,
             catalog = union_cat,
             feasible = feasible,
+            composite = composite_kw,
         )
     else
         StructuralSizer.size_beams(
             Mu_vec, Vu_vec, geometries, opts;
+            Pu = Pu_vec,
+            Mux_pos = Mux_pos_vec, Mux_neg = Mux_neg_vec,
             δ_max_vec = any(>(0), δ_LL_vec)   ? δ_LL_vec   : nothing,
             δ_max_total_vec = any(>(0), δ_total_vec) ? δ_total_vec : nothing,
             I_ref_vec = any(>(0), I_ref_v)    ? I_ref_v    : nothing,
+            composite = composite_kw,
         )
     end
 
@@ -2807,11 +2971,13 @@ function _sections_identical(a, b)
 end
 
 """
-    _assert_no_composite_override(group_ids, demands, member_group_overrides)
+    _assert_no_composite_override(group_ids, demands, member_group_overrides;
+                                  opts_composite=false)
 
 Refuse fail-loud (pinned `member_group_overrides` `ArgumentError`) if any group
-carrying an EFFECTIVE per-design override has a COMPOSITE beam demand
-(`demand.composite !== nothing`).
+carrying an EFFECTIVE per-design override is sized as COMPOSITE — either via
+`demand.composite !== nothing` or via `SteelBeamOptions.composite` / the
+`composite=` kwarg forwarded into batched `size_beams`.
 
 Phase B is STEEL-beam-only. The batched feasible mask
 ([`_beam_override_union_and_feasible`](@ref)) gates deflection on the bare-steel
@@ -2819,21 +2985,22 @@ Phase B is STEEL-beam-only. The batched feasible mask
 `I_LB` (AISC 360-16 Commentary I3.2; `is_feasible` composite overload in
 `members/codes/aisc/checker.jl`, `I_LB > Ix`). Applying the bare-`Ix` mask to a
 composite group would OVER-restrict it, so we refuse rather than size it against
-the wrong stiffness. In the batched path `member_group_demands` builds
-`MemberDemand{Float64, Nothing}` (composite always `nothing`), so this is a
-defense-in-depth assertion for that path; it is testable directly on synthetic
-composite demands. (Engineering-scope guard — the cited mechanics is only that
-`I_LB > Ix` for composite sections.)
+the wrong stiffness. `member_group_demands` still builds
+`MemberDemand{Float64, Nothing}`; production composite is enabled by
+`composite=` on `size_beams`, so `opts_composite` must be checked here too.
+(Engineering-scope guard — the cited mechanics is only that `I_LB > Ix` for
+composite sections.)
 """
 function _assert_no_composite_override(
     group_ids::Vector{UInt64},
     demands,
-    member_group_overrides::Dict{UInt64, MemberGroupSizingOverride},
+    member_group_overrides::Dict{UInt64, MemberGroupSizingOverride};
+    opts_composite::Bool = false,
 )
     for (i, gid) in enumerate(group_ids)
         ovr = get(member_group_overrides, gid, nothing)
         (ovr !== nothing && _is_effective(ovr)) || continue
-        demands[i].composite === nothing || throw(ArgumentError(_mgo_refusal_message(
+        (demands[i].composite === nothing && !opts_composite) || throw(ArgumentError(_mgo_refusal_message(
             "override on beam group $(gid) targets a COMPOSITE beam demand; the " *
             "batched size_beams! mask gates deflection on bare-steel Ix while the " *
             "composite code check uses I_LB (AISC 360-16 Commentary I3.2), so Phase B " *
@@ -2993,7 +3160,10 @@ function _apply_beam_results!(
     group_ids::Vector{UInt64},
     member_array,
     edge_ids_in_group::Set{Int},
-    mat::StructuralSizer.AbstractMaterial,
+    mat::StructuralSizer.AbstractMaterial;
+    # ACI 318-11 §10.10.4.1 — cracked-stiffness reduction for concrete beam sections.
+    # Default 0.35 matches to_asap_section's concrete-beam default (byte-identical no-op).
+    I_factor::Real = 0.35,
 )
     has_multi_mat = hasproperty(result, :materials_chosen)
 
@@ -3005,7 +3175,13 @@ function _apply_beam_results!(
         mg = struc.member_groups[gid]
         mg.section = chosen
 
-        asap_sec = StructuralSizer.to_asap_section(chosen, group_mat)
+        # I_factor applies to concrete sections only (ACI 318-11 §10.10.4.1); the Metal
+        # to_asap_section overloads take no such kwarg, so branch per group material.
+        asap_sec = if group_mat isa StructuralSizer.Concrete
+            StructuralSizer.to_asap_section(chosen, group_mat; I_factor=I_factor)
+        else
+            StructuralSizer.to_asap_section(chosen, group_mat)
+        end
 
         for m_idx in mg.member_indices
             m = member_array[m_idx]
@@ -3038,6 +3214,9 @@ function _size_beams_impl!(
     # increment. `_assert_member_group_overrides_unsupported` refuses any EFFECTIVE
     # override that would reach non-steel-beam sizing, so this is always nothing/vacuous.
     member_group_overrides::Union{Nothing, Dict{UInt64, MemberGroupSizingOverride}} = nothing,
+    # ACI 318-11 §10.10.4.1 — cracked-stiffness reduction for concrete beam sections,
+    # threaded from params.beam_I_factor (default 0.35).
+    I_factor::Real = 0.35,
 )
     # DEFENSE-IN-DEPTH layer-symmetric guard (Phase B). This non-steel overload
     # ACCEPTS `member_group_overrides` for uniform `size_beams!` dispatch but does NOT
@@ -3074,10 +3253,16 @@ function _size_beams_impl!(
 
     member_array = struc.beams
 
-    # Build demand vectors with Unitful SI units
-    Mu = [d.Mux * u"N*m"      for d in demands]
+    # Build demand vectors with Unitful SI units.
+    # Mu = sagging (Mux_pos); Mu_neg = hogging. Nu is signed: tension
+    # (Pu_t > 0) is negative so ACI 318-11 §11.2.2.3 Eq. (11-8) reduces Vc;
+    # otherwise compression Pu_c uses §11.2.1.2 Eq. (11-4).
+    # ENGINEERING JUDGMENT: compression/shear concurrency is not tracked —
+    # the group envelope Pu is applied to the group envelope Vu.
+    Mu = [d.Mux_pos * u"N*m"  for d in demands]
+    Mu_neg = [d.Mux_neg * u"N*m" for d in demands]
     Vu = [d.Vu_strong * u"N"   for d in demands]
-    Nu = [d.Pu_c * u"N"        for d in demands]
+    Nu = [d.Pu_t > 0 ? -d.Pu_t * u"N" : d.Pu_c * u"N" for d in demands]
 
     # Build geometries (L_totals are Float64 in meters)
     geoms = [StructuralSizer.ConcreteMemberGeometry(L) for L in L_totals]
@@ -3102,12 +3287,13 @@ function _size_beams_impl!(
                 Mu, Vu, geoms, opts;
                 flange_width     = bf_env,
                 flange_thickness = hf_env,
+                Mu_neg           = Mu_neg,
                 Nu               = Nu,
                 catalog_size     = opts.catalog_size_tbeam,
             )
 
             _apply_beam_results!(struc, result, group_ids, member_array,
-                                 edge_ids_in_group, opts.material)
+                                 edge_ids_in_group, opts.material; I_factor=I_factor)
 
             if reanalyze
                 Asap.process!(struc.asap_model)
@@ -3124,10 +3310,10 @@ function _size_beams_impl!(
     end
 
     # ── Rectangular beam path (default) ──
-    result = StructuralSizer.size_beams(Mu, Vu, geoms, opts; Nu=Nu)
+    result = StructuralSizer.size_beams(Mu, Vu, geoms, opts; Mu_neg=Mu_neg, Nu=Nu)
 
     _apply_beam_results!(struc, result, group_ids, member_array,
-                         edge_ids_in_group, opts.material)
+                         edge_ids_in_group, opts.material; I_factor=I_factor)
 
     if reanalyze
         Asap.process!(struc.asap_model)
@@ -3151,6 +3337,10 @@ function _size_beams_impl!(
     # Accepted for uniform `size_beams!` dispatch, NOT honored here (non-steel path;
     # the guard refuses effective overrides that would reach it — always nothing/vacuous).
     member_group_overrides::Union{Nothing, Dict{UInt64, MemberGroupSizingOverride}} = nothing,
+    # ACI 318-11 §10.10.4.1 — cracked-stiffness reduction for concrete beam sections,
+    # threaded from params.beam_I_factor (default 0.35). All sections here are concrete
+    # (ConcreteBeamOptions.material), so it is passed to every to_asap_section call below.
+    I_factor::Real = 0.35,
 )
     # DEFENSE-IN-DEPTH layer-symmetric guard (Phase B). This non-steel overload
     # ACCEPTS `member_group_overrides` for uniform `size_beams!` dispatch but does NOT
@@ -3187,9 +3377,14 @@ function _size_beams_impl!(
 
     member_array = struc.beams
 
-    # Build demand vectors with Unitful SI units
-    Mu = [d.Mux * u"N*m"    for d in demands]
+    # Sagging / hogging faces. NLP post-checks Mu_neg (top steel is not a DV)
+    # and may return :infeasible instead of deepening. Nu is signed: tension
+    # (Pu_t > 0) is negative so ACI 318-11 §11.2.2.3 Eq. (11-8) reduces Vc;
+    # otherwise compression Pu_c uses §11.2.1.2 Eq. (11-4).
+    Mu = [d.Mux_pos * u"N*m"  for d in demands]
+    Mu_neg = [d.Mux_neg * u"N*m" for d in demands]
     Vu = [d.Vu_strong * u"N" for d in demands]
+    Nu = [d.Pu_t > 0 ? -d.Pu_t * u"N" : d.Pu_c * u"N" for d in demands]
 
     # Map ConcreteBeamOptions → NLPBeamOptions (shared material fields)
     stirrup_int = parse(Int, replace(string(opts.transverse_bar_size), "no" => ""))
@@ -3224,7 +3419,9 @@ function _size_beams_impl!(
             bf_t  = [bf_vec[i] for i in tbeam_idx]
             hf_t  = [hf_vec[i] for i in tbeam_idx]
 
-            t_results = StructuralSizer.size_rc_tbeams_nlp(Mu_t, Vu_t, bf_t, hf_t, nlp_opts)
+            t_results = StructuralSizer.size_rc_tbeams_nlp(Mu_t, Vu_t, bf_t, hf_t, nlp_opts;
+                                                          Mu_neg=Mu_neg[tbeam_idx],
+                                                          Nu=Nu[tbeam_idx])
 
             for (k, g_idx) in enumerate(tbeam_idx)
                 r = t_results[k]
@@ -3235,7 +3432,7 @@ function _size_beams_impl!(
                 chosen = r.section
                 mg = struc.member_groups[gid]
                 mg.section = chosen
-                asap_sec = StructuralSizer.to_asap_section(chosen, mat)
+                asap_sec = StructuralSizer.to_asap_section(chosen, mat; I_factor=I_factor)  # ACI 318-11 §10.10.4.1
 
                 for m_idx in mg.member_indices
                     m = member_array[m_idx]
@@ -3256,7 +3453,9 @@ function _size_beams_impl!(
         if !isempty(rect_idx)
             Mu_r = Mu[rect_idx]
             Vu_r = Vu[rect_idx]
-            r_results = StructuralSizer.size_rc_beams_nlp(Mu_r, Vu_r, nlp_opts)
+            r_results = StructuralSizer.size_rc_beams_nlp(Mu_r, Vu_r, nlp_opts;
+                                                         Mu_neg=Mu_neg[rect_idx],
+                                                         Nu=Nu[rect_idx])
 
             for (k, g_idx) in enumerate(rect_idx)
                 r = r_results[k]
@@ -3267,7 +3466,7 @@ function _size_beams_impl!(
                 chosen = r.section
                 mg = struc.member_groups[gid]
                 mg.section = chosen
-                asap_sec = StructuralSizer.to_asap_section(chosen, mat)
+                asap_sec = StructuralSizer.to_asap_section(chosen, mat; I_factor=I_factor)  # ACI 318-11 §10.10.4.1
 
                 for m_idx in mg.member_indices
                     m = member_array[m_idx]
@@ -3298,7 +3497,7 @@ function _size_beams_impl!(
     end
 
     # ── Rectangular NLP path (default) ──
-    results = StructuralSizer.size_rc_beams_nlp(Mu, Vu, nlp_opts)
+    results = StructuralSizer.size_rc_beams_nlp(Mu, Vu, nlp_opts; Mu_neg=Mu_neg, Nu=Nu)
 
     mat = opts.material
     n_feasible = 0
@@ -3312,7 +3511,7 @@ function _size_beams_impl!(
         mg = struc.member_groups[gid]
         mg.section = chosen
 
-        asap_sec = StructuralSizer.to_asap_section(chosen, mat)
+        asap_sec = StructuralSizer.to_asap_section(chosen, mat; I_factor=I_factor)  # ACI 318-11 §10.10.4.1
 
         for m_idx in mg.member_indices
             m = member_array[m_idx]
@@ -3353,6 +3552,10 @@ function _size_beams_impl!(
     # Accepted for uniform `size_beams!` dispatch, NOT honored here (non-steel path;
     # the guard refuses effective overrides that would reach it — always nothing/vacuous).
     member_group_overrides::Union{Nothing, Dict{UInt64, MemberGroupSizingOverride}} = nothing,
+    # Accepted for the uniform `size_beams!` dispatch but inert here: this PixelFrame path
+    # builds its own ASAP sections (ACI 318-11 §10.10.4.1 cracked-stiffness factor is
+    # applied internally by its own to_asap_section call), so the beam I_factor is unused.
+    I_factor::Real = 0.35,
 )
     # DEFENSE-IN-DEPTH layer-symmetric guard (Phase B). This non-steel overload
     # ACCEPTS `member_group_overrides` for uniform `size_beams!` dispatch but does NOT
@@ -3569,6 +3772,10 @@ function size_columns!(
     resolution::Int = 200,
     reanalyze::Bool = true,
     gravity_factor::Quantity = GRAVITY,
+    # ACI 318-11 §10.10.4.1 — cracked-stiffness reduction factor applied to concrete
+    # column sections only (threaded from params.column_I_factor by the design workflow).
+    # Default 0.70 keeps callers that do not pass it byte-identical.
+    I_factor::Real = 0.70,
     tc::Union{Nothing, StructuralSizer.TraceCollector} = nothing,
 )
     # NOTE: as of this writing `BuildingStructure` has NO `design_parameters` field
@@ -3594,7 +3801,7 @@ function size_columns!(
         group_collinear_members!(struc; member_type=:columns)
     end
     
-    result = _size_columns_impl!(struc, effective_opts; resolution, reanalyze, gravity_factor)
+    result = _size_columns_impl!(struc, effective_opts; resolution, reanalyze, gravity_factor, I_factor)
     StructuralSizer.emit!(tc, :sizing, "size_columns!", "", :exit)
     return result
 end
@@ -3606,6 +3813,11 @@ function _size_columns_impl!(
     resolution::Int,
     reanalyze::Bool,
     gravity_factor::Quantity,
+    # Accepted for the uniform `size_columns!` dispatch but inert here: the cracked-stiffness
+    # I_factor (ACI 318-11 §10.10.4.1) applies to concrete sections only, and this is the
+    # steel path (_apply_column_results! is called with material_type=:steel, which never
+    # passes I_factor to to_asap_section).
+    I_factor::Real = 0.70,
 )
     skel = struc.skeleton
     member_edge_group = :columns
@@ -3649,6 +3861,9 @@ function _size_columns_impl!(
     resolution::Int,
     reanalyze::Bool,
     gravity_factor::Quantity,
+    # ACI 318-11 §10.10.4.1 — cracked-stiffness reduction for concrete column sections,
+    # threaded from params.column_I_factor (default 0.70).
+    I_factor::Real = 0.70,
 )
     skel = struc.skeleton
     member_edge_group = :columns
@@ -3695,7 +3910,7 @@ function _size_columns_impl!(
 
     result = StructuralSizer.size_columns(rc_demands, geometries, opts)
 
-    _apply_column_results!(struc, result, group_ids, opts.material, :concrete, edge_ids_in_group)
+    _apply_column_results!(struc, result, group_ids, opts.material, :concrete, edge_ids_in_group; I_factor=I_factor)
 
     if reanalyze
         Asap.process!(struc.asap_model)
@@ -3713,6 +3928,10 @@ function _size_columns_impl!(
     resolution::Int,
     reanalyze::Bool,
     gravity_factor::Quantity,
+    # Accepted for the uniform `size_columns!` dispatch but inert here: this PixelFrame path
+    # builds its own ASAP sections (ACI 318-11 §10.10.4.1 cracked-stiffness factor is applied
+    # internally by its own to_asap_section call), so the column I_factor is unused.
+    I_factor::Real = 0.70,
 )
     skel = struc.skeleton
     member_edge_group = :columns
@@ -3858,8 +4077,13 @@ function _apply_column_results!(struc, result, group_ids, material, material_typ
         mg = struc.member_groups[gid]
         mg.section = chosen
         
-        # Build ASAP section (I_factor only applies to concrete per ACI 318-11 §10.10.4.1)
-        asap_sec = if material_type === :concrete
+        # I_factor applies to concrete sections only (ACI 318-11 §10.10.4.1); the Metal
+        # to_asap_section overloads take no such kwarg, so branch PER GROUP on the chosen
+        # material. In a multi-material result `group_mat` can vary per group, so a
+        # function-level `material_type` test would misroute a steel group under a
+        # concrete result (MethodError) or skip the factor on a concrete group under a
+        # steel result — mirror `_apply_beam_results!` and decide per group instead.
+        asap_sec = if group_mat isa StructuralSizer.Concrete
             StructuralSizer.to_asap_section(chosen, group_mat; I_factor=I_factor)
         else
             StructuralSizer.to_asap_section(chosen, group_mat)

@@ -90,7 +90,8 @@ function size!(
         verbose && @info "Sizing iteration $iter/$max_iterations"
 
         # --- Size beams ---
-        size_beams!(struc, beam_opts; reanalyze = false, member_group_overrides = mgo)
+        size_beams!(struc, beam_opts; reanalyze = false, member_group_overrides = mgo,
+                    I_factor = params.beam_I_factor)  # ACI 318-11 §10.10.4.1
 
         # --- Re-analyze with updated beam self-weight ---
         # Topology unchanged; only sections/loads differ → lightweight reprocess
@@ -102,7 +103,8 @@ function size!(
         Asap.solve!(struc.asap_model)
 
         # --- Size columns with updated demands ---
-        size_columns!(struc, column_opts; reanalyze = false)
+        size_columns!(struc, column_opts; reanalyze = false,
+                      I_factor = params.column_I_factor)  # ACI 318-11 §10.10.4.1
 
         # --- Re-analyze with updated column sections ---
         if struc.asap_model.processed

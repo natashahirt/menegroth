@@ -828,16 +828,23 @@ function main()
     record!("override changes sized section (got free=$free_name, override=$ov_name)",
             free_name ∉ custom_names && ov_name ∈ custom_names && ov_name != free_name)
 
-    # precedence: override > MemberGroup.catalog_override > global default
+    # precedence: override > MemberGroup.catalog_override > global default.
+    # BOTH candidate sections must be FEASIBLE for this fixture so the test isolates
+    # PRECEDENCE, not catalog adequacy. The 20 ft fixed-pinned beam's governing
+    # moment is the HOGGING moment at the fixed end, and the hogging Chapter-F LTB
+    # check (ϕMn_neg ≥ Mux_neg at Lb=L, Cb=1.0 — checker.jl `_hogging_ltb_inputs`)
+    # rejects deep, LTB-weak shapes such as W21X44 (ϕMn_neg ≈ 103 kip·ft < 140).
+    # W24X68 (0.39) and W24X103 (0.20) both pass; the override-supplied W24X68 must
+    # win over the lower-precedence MemberGroup.catalog_override.
     struc_pr = build_override_beam_struc()
     build_member_groups!(struc_pr; member_type = :beams)
     gid_pr = first(keys(struc_pr.member_groups))
-    struc_pr.member_groups[gid_pr].catalog_override = [SR.W("W24X68")]  # would give W24X68
+    struc_pr.member_groups[gid_pr].catalog_override = [SR.W("W24X103")]  # loses to the override
     size_member_group!(struc_pr, gid_pr; member_edge_group = :beams,
                        material = A992_Steel, reanalyze = true,
-                       override = MemberGroupSizingOverride(catalog = [SR.W("W21X44")]))
+                       override = MemberGroupSizingOverride(catalog = [SR.W("W24X68")]))
     record!("precedence: override beats MemberGroup.catalog_override",
-            struc_pr.member_groups[gid_pr].section.name == "W21X44")
+            struc_pr.member_groups[gid_pr].section.name == "W24X68")
 
     # (a) EMPTY (default): design_building runs; an explicit-empty dict is
     #     byte-identical to the plain default (the field/guard changed nothing on

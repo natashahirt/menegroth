@@ -50,38 +50,60 @@ end
 
 Base.showerror(io::IO, e::SingularStiffnessError) = print(io, "SingularStiffnessError: ", e.msg)
 
-# ENGINEERING JUDGMENT (numerical safety, not a code clause): a story stiffness is
-# treated as singular / near-singular when the reciprocal condition number of its
-# SCALE-NORMALIZED stiffness (λ_min/λ_max after non-dimensionalizing the rotational
-# DOF — see `_assert_nonsingular_K`) falls to or below this tolerance. The raw 3×3
-# story K mixes units — translational DOFs carry N/m, the rotational DOF N·m, the
-# coupling terms N — so λ_min/λ_max of the UNSCALED matrix is NOT dimensionless and
-# scales like L_ref² with plan size/origin; the normalization below makes this a
-# genuine, scale-invariant conditioning metric. A well-braced story then has all
-# three modes (two translational + torsional) of comparable (normalized) stiffness,
-# so rcond ≫ 1e-8; a value this small means at least one lateral or torsional mode
-# is effectively unrestrained. Chosen well above assembly round-off so a genuinely
-# stable layout — of ANY footprint — is never rejected, yet far above the point
-# where a Float64 solve loses all significance.
+# ENGINEERING JUDGMENT (numerical safety, not a code clause): this is a PURE NUMERICAL /
+# UNDER-BRACE BACKSTOP, NOT the definition of lateral stability. Lateral stability for the
+# reduced tier is now DEFINED, directly from the stiffness EIGENSTRUCTURE, by the
+# `eigenstructure_stability` gate: per story it reads the softest translational eigenvalue
+# `λmin(K_tt)` and the condensed torsional stiffness about the center of rigidity
+# `K_theta_cr` and compares each against a PHYSICAL anti-mechanism floor derived from the
+# drift limit. That gate catches translation + diagonal + torsion in one physically-grounded
+# check (the `direction_complete_interstory_drift` sweep remains as the translational
+# demand / serviceability realization, but it does NOT define stability — being the
+# center-of-rigidity translation, it is mathematically blind to the twist DOF). The Phase 10
+# unified-FEM survivor cross-check is the FINAL stability authority; this reduced-tier
+# eigenstructure gate is the fast proxy. This `rcond` guard remains ONLY as a fail-closed
+# backstop so the Cholesky in `_solve_spd` never factorizes a (near-)singular K: a story
+# stiffness is treated as numerically singular / under-braced when the reciprocal condition
+# number of its SCALE-NORMALIZED stiffness (λ_min/λ_max after non-dimensionalizing the
+# rotational DOF — see `_assert_nonsingular_K`) falls to or below this tolerance. The
+# raw 3×3 story K mixes units — translational DOFs carry N/m, the rotational DOF N·m,
+# the coupling terms N — so λ_min/λ_max of the UNSCALED matrix is NOT dimensionless and
+# scales like L_ref² with plan size; the L_ref normalization below removes that plan-
+# scale dependence so the BACKSTOP does not falsely reject a large-footprint but well-
+# braced layout. What this backstop reliably catches — genuine rank deficiency (an
+# unrestrained translational or torsional mode, λ_min → 0) — is origin-invariant
+# (rank is preserved under the origin-shift congruence), which is all it must catch
+# now that the eigenstructure gate owns the stability decision; the exact normalized
+# rcond value is NOT claimed to be an origin-invariant stability margin. The value is
+# kept at 1e-8 (not lowered to machine-ε): a near-dead mode this ill-conditioned is
+# both numerically untrustworthy to factorize AND, physically, flagged independently
+# by the eigenstructure floors, so the two layers agree.
 const SINGULAR_STIFFNESS_RCOND = 1e-8
 
 """
     _assert_nonsingular_K(Ksym, L_ref)
 
-Fail-closed guard for a 3×3 story stiffness: throws [`SingularStiffnessError`](@ref)
-if `Ksym` is not positive-definite or is near-singular (reciprocal condition number
-at or below [`SINGULAR_STIFFNESS_RCOND`](@ref)).
+NUMERICAL / under-brace BACKSTOP (not the stability definition — see
+[`SINGULAR_STIFFNESS_RCOND`](@ref) and [`eigenstructure_stability`](@ref)): throws
+[`SingularStiffnessError`](@ref) if `Ksym` is not positive-definite or is so ill-
+conditioned that its Cholesky factorization cannot be trusted (reciprocal condition
+number at or below [`SINGULAR_STIFFNESS_RCOND`](@ref)).
 
-The raw story `K` is mixed-unit (translational N/m, rotational N·m, coupling N), so
-its spectrum is scale/origin-dependent and a bare λ_min/λ_max is NOT a condition
-number. We first non-dimensionalize the rotational DOF by the plan reference length
-`L_ref` via `S = diag(1, 1, 1/L_ref)`, forming `K_scaled = S·K·S` whose three
-entries are all ~N/m, then test the reciprocal condition number of `K_scaled`. This
-makes the test scale-invariant: a well-braced large-footprint layout is no longer
-falsely rejected, and a genuine singularity (an unrestrained translational or
-torsional mode) is still caught. The SOLVE itself (`_solve_spd`) uses the UNSCALED
-`K`; the scaling only informs the singular/non-singular decision. Uses the exact
-3×3 symmetric spectrum (cheap) rather than a perturbed factorization.
+The raw story `K` is mixed-unit (translational N/m, rotational N·m, coupling N), so a
+bare λ_min/λ_max is NOT a condition number and would scale like `L_ref²` with plan
+size. We first non-dimensionalize the rotational DOF by the plan reference length
+`L_ref` via `S = diag(1, 1, 1/L_ref)`, forming `K_scaled = S·K·S` whose three entries
+are all ~N/m, then test the reciprocal condition number of `K_scaled`. This removes
+the plan-SCALE dependence so the backstop does not falsely reject a well-braced large-
+footprint layout. It does NOT claim to produce an origin-invariant stability margin:
+the exact `rcond` value still depends on the origin, but the only thing this backstop
+must catch — genuine rank deficiency (λ_min → 0, an unrestrained translational or
+torsional mode) — is origin-invariant, because rank is preserved under the origin-
+shift congruence. The actual stability verdict is made elsewhere by the origin-
+invariant [`eigenstructure_stability`](@ref) gate (softest translational eigenvalue +
+condensed torsional stiffness about the CR). The SOLVE itself (`_solve_spd`) uses
+the UNSCALED `K`; the scaling only informs the singular/non-singular decision. Uses
+the exact 3×3 symmetric spectrum (cheap) rather than a perturbed factorization.
 """
 function _assert_nonsingular_K(Ksym::Symmetric{Float64,Matrix{Float64}}, L_ref::Float64)
     Lr = L_ref > 0 ? L_ref : 1.0
@@ -281,6 +303,119 @@ function _assemble_story_K(walls::Vector{WallLine})
 end
 
 """
+    _center_of_rigidity(K) -> (xr, yr)
+
+Plan coordinates of the story CENTER OF RIGIDITY (CR) — the point at which a pure
+diaphragm translation induces no twist — from the 3×3 story stiffness `K = Σ k_i
+b_i b_iᵀ` assembled about the plan origin (see [`_assemble_story_K`](@ref)). The CR is
+where the translation–rotation coupling vanishes: measuring the torsional arms about
+`(xr, yr)` zeros the `K[1,3]`/`K[2,3]` coupling terms. Setting those shifted coupling
+terms to zero gives the 2×2 system
+
+    [ K12  −K11 ] [xr]   [K13]
+    [ K22  −K12 ] [yr] = [K23]      (det = K11·K22 − K12² = |translational block| > 0).
+
+The determinant is the translational-block determinant, which is strictly positive for
+any story braced in two independent directions (and hence whenever `_solve_spd` has not
+already failed closed on a singular `K`). Using the CR as the drift/torsion reference
+makes the reported response ORIGIN-INVARIANT: for a symmetric core `K13 = K23 = 0`, so
+`CR = (0,0)` and the arithmetic is identical to the origin-referenced form (existing
+known-answer tests are unchanged).
+"""
+@inline function _center_of_rigidity(K::AbstractMatrix{Float64})
+    K11 = K[1, 1]; K12 = K[1, 2]; K22 = K[2, 2]
+    K13 = K[1, 3]; K23 = K[2, 3]
+    det = K11 * K22 - K12 * K12          # translational-block determinant (> 0 if 2-way braced)
+    # CR GUARD: a non-SPD translational block (det ≤ 0) means the two translational modes
+    # are not independent — the layout is a translational MECHANISM — and the CR is
+    # undefined. Fail closed here rather than dividing by a zero/negative determinant and
+    # propagating NaN CR coordinates into drift/torsion. `_solve_spd` normally catches this
+    # first; this guard makes the helper robust regardless of call ordering.
+    det > 0 || throw(SingularStiffnessError(
+        "translational block is singular (det(K_tt)=$(det) ≤ 0): the two translational " *
+        "modes are not independent (a translational mechanism); center of rigidity undefined."))
+    xr = (K11 * K23 - K12 * K13) / det
+    yr = (K12 * K23 - K22 * K13) / det
+    return (xr, yr)
+end
+
+"""
+    _translational_block_spectrum(K) -> (; λmin, λmax, det, vmin)
+
+Closed-form spectrum of the 2×2 TRANSLATIONAL block `K_tt = K[1:2, 1:2]` of a 3-DOF story
+stiffness. `K_tt` is ORIGIN-INVARIANT (the translation–translation coupling does not involve
+the moment arm) and BOTH of its entries carry units N/m, so its eigenvalues are directly
+comparable without the rotational-DOF scaling the full 3×3 needs.
+
+For the symmetric block `[K11 K12; K12 K22]` the eigenvalues are closed form,
+`λ = (tr ± √(tr² − 4·det))/2`, with `tr = K11 + K22` and `det = K11·K22 − K12²`. The
+discriminant equals `(K11 − K22)² + 4·K12² ≥ 0` exactly, so it is CLAMPED at 0 to absorb
+tiny-negative round-off before the square root. `λmin` is the SOFTEST translational mode
+(its interstory stiffness in the worst translational direction) and `vmin` is that mode's
+unit eigenvector — the TRUE worst translational direction, which subsumes a discrete +X/+Y
+drift sweep and closes the √2 diagonal-weak-mode gap. `det` (the translational-block
+determinant) is returned for the CR / mechanism guards.
+"""
+@inline function _translational_block_spectrum(K::AbstractMatrix{Float64})
+    K11 = K[1, 1]; K12 = K[1, 2]; K22 = K[2, 2]
+    tr  = K11 + K22
+    det = K11 * K22 - K12 * K12
+    disc = tr * tr - 4 * det
+    disc < 0 && (disc = 0.0)                 # clamp tiny-negative-from-roundoff
+    s = sqrt(disc)
+    λmax = 0.5 * (tr + s)
+    λmin = 0.5 * (tr - s)
+    # Eigenvector for λmin of the symmetric block ((K_tt − λmin·I)·v = 0). Choose the
+    # larger-norm of the two row-orthogonal candidates for numerical robustness.
+    v1 = (K12, λmin - K11)
+    v2 = (λmin - K22, K12)
+    v  = (abs(v1[1]) + abs(v1[2])) >= (abs(v2[1]) + abs(v2[2])) ? v1 : v2
+    nrm = hypot(v[1], v[2])
+    vmin = nrm > 0 ? (v[1] / nrm, v[2] / nrm) : (1.0, 0.0)
+    return (λmin = λmin, λmax = λmax, det = det, vmin = vmin)
+end
+
+"""
+    _torsional_stiffness_cr(K) -> K_theta_cr
+
+Condensed TORSIONAL stiffness about the center of rigidity, via the SCHUR COMPLEMENT of the
+translational block of the 3-DOF story stiffness:
+
+    K_theta_cr = K33 − [K13 K23]·inv(K_tt)·[K13; K23]
+               = K33 − (K22·K13² − 2·K12·K13·K23 + K11·K23²)/det(K_tt).
+
+This is the rotational stiffness that remains once the diaphragm is free to translate to its
+CR (the two translation DOFs statically condensed out). It is ORIGIN-INVARIANT and DIRECTLY
+observes twist stiffness — the quantity the center-of-rigidity-translation drift metric is
+mathematically blind to (the CR translation is independent of φ by the CR's defining
+property). For a positive-definite `K` the Schur complement is strictly positive; it → 0
+exactly when the diaphragm can twist about the CR as a mechanism. Requires `det(K_tt) > 0`
+(the translational block invertible); callers guard that first.
+"""
+@inline function _torsional_stiffness_cr(K::AbstractMatrix{Float64})
+    K11 = K[1, 1]; K12 = K[1, 2]; K22 = K[2, 2]
+    K13 = K[1, 3]; K23 = K[2, 3]; K33 = K[3, 3]
+    det = K11 * K22 - K12 * K12
+    quad = (K22 * K13 * K13 - 2 * K12 * K13 * K23 + K11 * K23 * K23) / det
+    return K33 - quad
+end
+
+"""
+    _cr_translation(u, cr) -> (tx, ty)
+
+Rigid-body translation of the CENTER OF RIGIDITY `cr = (xr, yr)` given the origin-
+referenced story displacement `u = [δx, δy, φ]`. A rigid diaphragm displaces the
+physical point `(x, y)` by `(δx − φ·y, δy + φ·x)`, so the CR translation is
+`(δx − φ·yr, δy + φ·xr)`. This is the ORIGIN-INVARIANT translation component used for
+interstory drift and torsional-amplification `δ_avg`: it is the physical displacement
+of a physical point, independent of the arbitrary input origin.
+"""
+@inline function _cr_translation(u::AbstractVector{Float64}, cr::NTuple{2,Float64})
+    xr, yr = cr
+    return (u[1] - yr * u[3], u[2] + xr * u[3])
+end
+
+"""
     _reference_length(ev, walls_s) -> Float64
 
 Plan reference length `L_ref` [m] used to non-dimensionalize the rotational DOF of
@@ -336,6 +471,11 @@ function evaluate_lateral(ev::ReducedDiaphragmEvaluator,
         u = _solve_spd(K, f, _reference_length(ev, walls_s))
         story_disp[s, :] .= u
 
+        # Center of rigidity for this story (origin-invariant drift/torsion reference).
+        # Safe: `_solve_spd` above has already confirmed `K` is positive-definite, so
+        # the translational block is PD ⇒ `_center_of_rigidity`'s determinant is > 0.
+        cr = _center_of_rigidity(K)
+
         # Interstory drift ratio for this story. This is a TRUE per-story
         # relative (interstory) displacement, NOT an absolute/cumulative-from-
         # base quantity: story `s` is modeled as an isolated 3-DOF spring whose
@@ -354,12 +494,22 @@ function evaluate_lateral(ev::ReducedDiaphragmEvaluator,
         # drift is delegated to the unified-FEM tier (`FEMLateralEvaluator`); this
         # reduced value is a fast, differentiable inner-loop proxy, not a
         # substitute for it.
+        #
+        # ORIGIN INVARIANCE: the interstory drift is the magnitude of the rigid-body
+        # translation of the diaphragm CENTER OF RIGIDITY (`_cr_translation`), not of
+        # the arbitrary input origin. Both are identical when there is no twist (φ = 0)
+        # or when the layout is symmetric (CR = origin), so this is backward-compatible
+        # with the known-answer tests; it differs only for a torsionally-responding
+        # asymmetric layout, where the CR translation is the physically meaningful,
+        # origin-independent drift.
         h = ev.story_heights[s]
-        drift[s] = h > 0 ? sqrt(u[1]^2 + u[2]^2) / h : 0.0
+        tx, ty = _cr_translation(u, cr)
+        drift[s] = h > 0 ? sqrt(tx^2 + ty^2) / h : 0.0
 
         # Torsional amplification δ_max/δ_avg at plan corners (ASCE 7 §12.8.4.3
-        # torsional-irregularity metric; VERIFY).
-        torsion[s] = _torsion_amplification(u, ev.plan_halfwidth)
+        # torsional-irregularity metric; VERIFY). δ_avg is taken at the CR so the
+        # ratio is origin-invariant (the corner displacements are physical points).
+        torsion[s] = _torsion_amplification(u, ev.plan_halfwidth, cr)
 
         # Recover per-wall in-plane shear force: V_i = k_i (b_i · u).
         for w in walls_s
@@ -391,18 +541,265 @@ function _solve_spd(K::Matrix{Float64}, f::Vector{Float64}, L_ref::Float64)
     return cholesky(Ksym) \ f
 end
 
-"""Corner drift amplification `δ_max/δ_avg` from rigid-body displacement `u`."""
-function _torsion_amplification(u::Vector{Float64}, halfwidth::NTuple{2,Float64})
-    δavg = sqrt(u[1]^2 + u[2]^2)
+"""
+    _torsion_amplification(u, halfwidth, cr) -> δ_max/δ_avg
+
+Corner drift amplification `δ_max/δ_avg` from the rigid-body displacement `u = [δx,
+δy, φ]`, referenced to the diaphragm CENTER OF RIGIDITY `cr = (xr, yr)`. `δ_avg` is the
+translation magnitude at the CR (the origin-invariant rigid-body translation); `δ_max`
+is the largest translation over the four plan extremities, taken at `CR ± (hx, hy)`.
+The displacement of extremity `CR + (sx·hx, sy·hy)` is `translation_CR + φ × offset`,
+i.e. `(tx − φ·sy·hy, ty + φ·sx·hx)`. Because `tx, ty` (CR translation), `φ`, and the
+plan half-extent `(hx, hy)` are all origin-invariant, the whole ratio is ORIGIN-
+INVARIANT.
+
+ENGINEERING JUDGMENT: the reduced model carries only the plan HALF-EXTENT
+(`plan_halfwidth`), not an absolute plan center, so for the amplification lever we take
+the plan extremities as `halfwidth` from the CR (the center of twist). This is the only
+origin-invariant choice available in this data model and is physically the natural
+torsion lever (twist-induced corner drift scales with distance from the CR). For a
+symmetric core `cr = (0,0)` and this reduces EXACTLY to the prior origin-referenced form,
+so the existing known-answer torsion tests are unchanged.
+"""
+function _torsion_amplification(u::Vector{Float64}, halfwidth::NTuple{2,Float64},
+                                cr::NTuple{2,Float64})
+    tx, ty = _cr_translation(u, cr)
+    δavg = sqrt(tx^2 + ty^2)
     δavg < 1e-12 && return 1.0
     hx, hy = halfwidth
+    φ = u[3]
     δmax = δavg
     for sx in (-1.0, 1.0), sy in (-1.0, 1.0)
-        dx = u[1] - u[3] * (sy * hy)
-        dy = u[2] + u[3] * (sx * hx)
+        dx = tx - φ * (sy * hy)
+        dy = ty + φ * (sx * hx)
         δmax = max(δmax, sqrt(dx^2 + dy^2))
     end
     return δmax / δavg
+end
+
+# Backward-compatible 2-arg form (CR at the origin): preserves the prior behavior for
+# callers that reference displacements to the plan origin — e.g. the FEM tier's
+# master-node displacements in `fem_evaluator.jl`, which are already measured at the
+# diaphragm master and NOT part of this origin-invariance change.
+_torsion_amplification(u::Vector{Float64}, halfwidth::NTuple{2,Float64}) =
+    _torsion_amplification(u, halfwidth, (0.0, 0.0))
+
+# Principal plan directions swept by the direction-complete stability check:
+# +X = (1,0) and +Y = (0,1). ENGINEERING JUDGMENT: sweeping BOTH principal
+# directions (not only the design load's direction) is a mechanism-prevention
+# safeguard — a layout braced only along the design load leaves the orthogonal
+# diaphragm-translation mode a near-zero-stiffness mechanism that a direction-aligned
+# drift check cannot see. Motivated by (but NOT a verbatim magnitude from) ASCE 7-22
+# §12.5 "Direction of Loading"; we deliberately do NOT invent the ASCE orthogonal-load
+# combination magnitudes (that is Phase 6's job) — we reuse the SUPPLIED design
+# resultant magnitude, swept into each axis.
+const _DIRECTION_COMPLETE_DIRS = ((:X, 1.0, 0.0), (:Y, 0.0, 1.0))
+
+"""
+    direction_complete_interstory_drift(ev, walls, loads) -> (; directions, drift)
+
+DIRECTION-COMPLETE, origin-invariant per-story interstory drift. This is the TRANSLATIONAL
+DEMAND / SERVICEABILITY realization of the reduced tier — NOT the stability definition.
+Stability is now defined by [`eigenstructure_stability`](@ref) (softest translational
+eigenvalue + condensed torsional stiffness about the CR), which also observes the twist DOF
+this metric is blind to (being the CR translation, it is mathematically independent of φ).
+This sweep remains the direction-complete serviceability drift the optimizer minimizes and
+the survivor re-validation re-checks.
+
+For each story `s` it forms the cumulative applied lateral-load RESULTANT MAGNITUDE
+`F_s = hypot(ΣFx, ΣFy)` over all loads at/above `s` (exactly the story-shear resultant
+the primal `evaluate_lateral` already forms), then evaluates the interstory drift under
+a CANONICAL load set that does NOT depend on the design load's direction: the full
+resultant swept into `+X = (F_s, 0)` and `+Y = (0, F_s)` (see `_DIRECTION_COMPLETE_DIRS`).
+Each canonical case carries the SAME accidental-eccentricity torsion companion used by
+`evaluate_lateral` — identical `eax`/`eay`, `sign_nonzero`, and `ev.accidental_ecc`
+(ASCE 7-22 §12.8.4.2.2) — applied at the force-weighted participation centroid of the
+loads at/above `s`. Drift is the magnitude of the CENTER-OF-RIGIDITY translation
+(`_cr_translation`), so it is origin-invariant.
+
+Returns `directions::Vector{Symbol}` (the swept case labels) and `drift::Matrix`
+(`nstory × ndir`): `drift[s, d]` is story `s`'s interstory drift in principal case `d`.
+A near-dead principal direction produces a large FINITE `drift[s, d]` there (good Ipopt
+gradient, no throw) — so the per-story MAX over directions smoothly becomes infeasible
+when any principal mode is unbraced. Fails closed (`SingularStiffnessError`) only on a
+genuinely singular `K` via `_solve_spd`.
+"""
+function direction_complete_interstory_drift(ev::ReducedDiaphragmEvaluator,
+                                             walls::Vector{WallLine},
+                                             loads::Vector{StoryLoad})
+    nstory = length(ev.story_heights)
+    ndir = length(_DIRECTION_COMPLETE_DIRS)
+    D = zeros(nstory, ndir)
+    Lx = 2 * ev.plan_halfwidth[1]; Ly = 2 * ev.plan_halfwidth[2]
+    for s in 1:nstory
+        walls_s = [w for w in walls if w.story == s]
+        isempty(walls_s) && continue
+        K = _assemble_story_K(walls_s)
+        Lref = _reference_length(ev, walls_s)
+        h = ev.story_heights[s]
+
+        # Cumulative story-shear resultant magnitude F_s = hypot(ΣFx, ΣFy) and the
+        # force-weighted participation centroid (ex_c, ey_c) of the loads at/above s,
+        # where the equivalent resultant is applied for the torsion companion.
+        Fx = 0.0; Fy = 0.0; wsum = 0.0; exc = 0.0; eyc = 0.0
+        for ld in loads
+            ld.story < s && continue
+            Fx += ld.Fx; Fy += ld.Fy
+            wl = hypot(ld.Fx, ld.Fy)
+            wsum += wl; exc += wl * ld.ex; eyc += wl * ld.ey
+        end
+        F_s = hypot(Fx, Fy)
+        if wsum > 0
+            exc /= wsum; eyc /= wsum
+        end
+        eax = ev.accidental_ecc * Lx
+        eay = ev.accidental_ecc * Ly
+
+        # CR is reference for the (origin-invariant) drift. Safe when the canonical
+        # solve below does not throw — i.e. K is PD, so the translational block is PD.
+        cr = _center_of_rigidity(K)
+
+        for (di, (_, dx, dy)) in enumerate(_DIRECTION_COMPLETE_DIRS)
+            Fxc = F_s * dx; Fyc = F_s * dy
+            # Accidental-eccentricity torsion companion, term-for-term as in
+            # `evaluate_lateral` (ASCE 7-22 §12.8.4.2.2), for the equivalent resultant
+            # acting at (exc, eyc): Mz = Fy·(ex + sign·eax) − Fx·(ey + sign·eay).
+            Mz = Fyc * (exc + sign_nonzero(Fyc) * eax) -
+                 Fxc * (eyc + sign_nonzero(Fxc) * eay)
+            u = _solve_spd(K, [Fxc, Fyc, Mz], Lref)   # fail-closed on singular K
+            tx, ty = _cr_translation(u, cr)
+            D[s, di] = h > 0 ? sqrt(tx^2 + ty^2) / h : 0.0
+        end
+    end
+    return (directions = Symbol[d[1] for d in _DIRECTION_COMPLETE_DIRS], drift = D)
+end
+
+"""
+    eigenstructure_stability(ev, walls, loads, drift_limit) -> NamedTuple
+
+EIGENSTRUCTURE STABILITY GATE (reduced tier) — the stability authority for the cheap tier.
+It reads the story stiffness EIGENSTRUCTURE directly (translational spectrum + condensed
+torsional stiffness about the center of rigidity) and compares each against a PHYSICAL
+anti-mechanism floor derived from the SAME drift limit `DL = drift_limit`. One check catches
+translation + diagonal + torsion; the Phase 10 unified-FEM survivor cross-check is the FINAL
+authority, and this is its fast proxy.
+
+Per story `s`, from the assembled 3-DOF `K` over `[ux, uy, θ]`:
+
+  * TRANSLATIONAL floor — require `λmin(K_tt) ≥ k_req_trans = F_s/(h·DL)`.
+    Derivation: a resultant-equivalent edge load `F_s` acting on a translational mode of
+    stiffness `k` produces interstory drift `δ/h = F_s/(k·h)`; requiring `δ/h ≤ DL` gives
+    `k ≥ F_s/(h·DL)`. `λmin(K_tt)` is the softest translational mode (its eigenvector is the
+    true worst direction), so this subsumes the discrete +X/+Y drift sweep and closes the √2
+    diagonal-weak-mode gap. Utilization `util_trans = k_req_trans/λmin(K_tt)`.
+
+  * TORSIONAL floor — require `K_theta_cr ≥ k_req_tors = F_s·e_acc·r_ref/(h·DL)`.
+    Derivation: the accidental-torsion moment `M_acc = F_s·e_acc` twists the diaphragm by
+    `φ = M_acc/K_theta_cr`; the extreme plan corner at radius `r_ref` from the CR then drifts
+    `φ·r_ref`, and `φ·r_ref/h ≤ DL` gives `K_theta_cr ≥ M_acc·r_ref/(h·DL)`. `K_theta_cr`
+    (the Schur complement of `K_tt`) DIRECTLY observes the twist stiffness the CR-translation
+    drift cannot. Utilization `util_tors = k_req_tors/K_theta_cr`.
+
+`F_s = hypot(ΣFx, ΣFy)` is the per-story cumulative design-shear resultant magnitude —
+EXACTLY the resultant `evaluate_lateral` / `direction_complete_interstory_drift` form. `e_acc`
+and the plan dimensions are taken identically to `evaluate_lateral` so the two stay
+consistent (see the ENGINEERING JUDGMENT comments below for `r_ref` and `e_acc`).
+
+The demand floors SCALE with `F_s`: a story with ~zero cumulative resultant has ~zero floor
+and so cannot be the authority for a mechanism in an UNLOADED story. That case is handled by
+the LOAD-INDEPENDENT mechanism guards here — a translational block at/below the numeric
+singular threshold, or a condensed torsional stiffness at/below the numeric singular scale,
+throws [`SingularStiffnessError`](@ref) regardless of load — plus the fail-closed `rcond`
+backstop in `_solve_spd`. So a zero-shear story can NEVER silently waive the stability gate
+for a genuine mechanism.
+
+Returns per-story vectors `λmin_tt`, `λmax_tt`, `K_theta_cr`, `k_req_trans`, `k_req_tors`,
+`util_trans`, `util_tors` (NaN/0 entries for stories with no walls). Throws
+[`SingularStiffnessError`](@ref) on a genuine (load-independent) translational or torsional
+mechanism; callers in the differentiable optimizer loop wrap it to a penalty sentinel.
+"""
+function eigenstructure_stability(ev::ReducedDiaphragmEvaluator,
+                                  walls::Vector{WallLine},
+                                  loads::Vector{StoryLoad},
+                                  drift_limit::Real)
+    nstory = length(ev.story_heights)
+    λmin_tt = fill(NaN, nstory); λmax_tt = fill(NaN, nstory)
+    K_theta = fill(NaN, nstory)
+    k_req_trans = zeros(nstory); k_req_tors = zeros(nstory)
+    util_trans = zeros(nstory); util_tors = zeros(nstory)
+
+    Lx = 2 * ev.plan_halfwidth[1]; Ly = 2 * ev.plan_halfwidth[2]
+    hx, hy = ev.plan_halfwidth
+    # ENGINEERING JUDGMENT (edge-radius assumption, not a code clause): the reduced model
+    # stores only plan HALF-WIDTHS, not an absolute plan center, so the CR-to-extreme-corner
+    # radius is taken as the plan half-diagonal `hypot(hx, hy)` — the SAME CR-centered plan
+    # extremity used by `_torsion_amplification`. For a CR-centered symmetric plan this is
+    # exact (r_ref = hypot(hx, hy)); for an off-center CR it is the natural origin-invariant
+    # torsion lever available in this data model.
+    r_ref = hypot(hx, hy)
+    # ENGINEERING JUDGMENT (direction-complete accidental eccentricity, not a code clause):
+    # `evaluate_lateral` applies accidental eccentricity `accidental_ecc·L` about each plan
+    # axis (eax = accidental_ecc·Lx, eay = accidental_ecc·Ly; accidental torsion per
+    # ASCE 7-22 §12.8.4.2.2, as cited in `evaluate_lateral`). For the direction-complete
+    # torsional floor we use the LARGER plan dimension, `e_acc = accidental_ecc·max(Lx, Ly)`,
+    # so the floor bounds the accidental twist for a resultant in the worst direction
+    # (conservative, consistent with sweeping both principal directions per §12.5). Reuses
+    # the SAME `ev.accidental_ecc` as the primal — no invented ASCE magnitude.
+    e_acc = ev.accidental_ecc * max(Lx, Ly)
+
+    for s in 1:nstory
+        walls_s = [w for w in walls if w.story == s]
+        isempty(walls_s) && continue
+        K = _assemble_story_K(walls_s)
+        Lref = _reference_length(ev, walls_s)
+        h = ev.story_heights[s]
+
+        spec = _translational_block_spectrum(K)
+        # LOAD-INDEPENDENT translational-mechanism guard (also the CR guard): K_tt is
+        # unit-homogeneous (N/m), so λmin/λmax is a true reciprocal condition number. At or
+        # below the numeric singular threshold the translational modes are a mechanism.
+        if spec.λmax <= 0 || spec.λmin <= SINGULAR_STIFFNESS_RCOND * spec.λmax
+            throw(SingularStiffnessError(
+                "story $s translational block is singular / a mechanism " *
+                "(λmin_tt=$(spec.λmin), λmax_tt=$(spec.λmax), rcond ≤ $(SINGULAR_STIFFNESS_RCOND)): " *
+                "under-braced in a principal translational direction."))
+        end
+
+        Kθ = _torsional_stiffness_cr(K)
+        # LOAD-INDEPENDENT torsional-mechanism guard. `K_theta_cr` carries units N·m; its
+        # natural scale is λmax(K_tt)·L_ref² (translational stiffness × plan length²). A
+        # condensed torsional stiffness at/below the numeric singular scale is a twist
+        # mechanism — caught here REGARDLESS of applied shear, so a zero-shear story with a
+        # torsional mechanism is not silently waived by the demand-scaled floor below.
+        tors_scale = spec.λmax * Lref * Lref
+        if Kθ <= SINGULAR_STIFFNESS_RCOND * tors_scale
+            throw(SingularStiffnessError(
+                "story $s condensed torsional stiffness about the CR is singular / a mechanism " *
+                "(K_theta_cr=$(Kθ) ≤ rcond·λmax·L_ref² = $(SINGULAR_STIFFNESS_RCOND * tors_scale)): " *
+                "the diaphragm can twist freely about the center of rigidity."))
+        end
+
+        # Cumulative design-shear resultant magnitude F_s (same resultant as the primal).
+        Fx = 0.0; Fy = 0.0
+        for ld in loads
+            ld.story < s && continue
+            Fx += ld.Fx; Fy += ld.Fy
+        end
+        F_s = hypot(Fx, Fy)
+
+        # Physical anti-mechanism floors from the SAME drift limit DL (derivations above).
+        kqt = (h > 0 && drift_limit > 0) ? F_s / (h * drift_limit) : 0.0
+        kqr = (h > 0 && drift_limit > 0) ? F_s * e_acc * r_ref / (h * drift_limit) : 0.0
+
+        λmin_tt[s] = spec.λmin; λmax_tt[s] = spec.λmax; K_theta[s] = Kθ
+        k_req_trans[s] = kqt; k_req_tors[s] = kqr
+        util_trans[s] = kqt / spec.λmin
+        util_tors[s]  = kqr / Kθ
+    end
+
+    return (λmin_tt = λmin_tt, λmax_tt = λmax_tt, K_theta_cr = K_theta,
+            k_req_trans = k_req_trans, k_req_tors = k_req_tors,
+            util_trans = util_trans, util_tors = util_tors)
 end
 
 # ------------------------------------------------------------------------------
@@ -458,6 +855,13 @@ function story_drift_sensitivity(ev::ReducedDiaphragmEvaluator,
     δ = sqrt(u[1]^2 + u[2]^2)
     (h <= 0 || δ < 1e-12) && return sens
 
+    # NOTE: this analytic sensitivity differentiates the ORIGIN-referenced translation
+    # drift `sqrt(u₁²+u₂²)/h`, which equals the CENTER-OF-RIGIDITY drift that
+    # `evaluate_lateral` now reports whenever there is no twist (φ = 0) or the layout
+    # is symmetric (CR = origin) — the regime of the known-answer FD test. It is a
+    # verified standalone utility, NOT the optimizer's gradient source: Ipopt uses
+    # numerical gradients of the direction-complete `constraint_fns`, so the layout
+    # solve is differentiating the actual (origin-invariant, direction-complete) drift.
     # d(drift)/dk_i = (1/h) * (u_xy · du_xy/dk_i)/δ, with du/dk_i = −K⁻¹(b b')u
     for w in walls_s
         b = collect(_wall_geometry_vector(w))

@@ -1,7 +1,7 @@
 ---
-description: Drives the multi-agent coordination pipeline via MCP task graph tools.
+description: Full multi-agent coordinator protocol (task graphs, roster, rigor, prompt assembly, failure handling). Read ONLY when the user says "coordinate", "use the coordinator", "run the pipeline", or describes an agent pipeline — and read coordinator-local.mdc first for this repo's cost guidelines.
 globs:
-alwaysApply: true
+alwaysApply: false
 ---
 
 # Coordinator Protocol

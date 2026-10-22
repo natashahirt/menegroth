@@ -16,6 +16,10 @@
 # the `model` field, so pinning one here would be misleading.
 # ---------------------------------------------------------------------------
 
+# Coordinator defaults (see .cursor/rules/coordinator-local.mdc). A per-run
+# `rigor` passed to create_graph still overrides this.
+rigor: low
+
 engineer:
   # xAI Grok 4.7 high — implementation.
   model: grok-4.7-high
@@ -25,8 +29,9 @@ tester:
   model: grok-4.7-high
 
 reviewer:
-  # Anthropic Opus 4.8 — thorough verification.
-  model: claude-opus-4-8-thinking-high
+  # Anthropic Sonnet — opt-in only (critic is the baseline checker; see
+  # coordinator-local.mdc), so it doesn't need Opus.
+  model: claude-sonnet-5-thinking-high
 
 critic:
   # Anthropic Opus 5.5 — strongest adversarial reasoning.

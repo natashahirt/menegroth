@@ -1,5 +1,6 @@
 ---
-alwaysApply: true
+description: Full Memory MCP protocol — tree hierarchy, placement, entry types, git-pinning, notes/annotations, sessions, skills. Read before calling record/recall/search/session/skill/relate, before any git commit (a memory record must precede it), or when the user says remember/note/log/todo.
+alwaysApply: false
 ---
 
 # Memory Protocol

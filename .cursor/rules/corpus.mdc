@@ -1,6 +1,6 @@
 ---
-description: Use the curated building-code corpus via MCP tools instead of grepping raw files
-alwaysApply: true
+description: Building-code corpus decision tree, forbidden actions, and citation contract. Read before answering any question derived from ACI/AISC/CSA/fib or other published codes, and before writing or changing any Julia that adds/modifies a code-derived factor, equation, table value, limit, or check.
+alwaysApply: false
 ---
 
 # Building-code corpus & MCP tools

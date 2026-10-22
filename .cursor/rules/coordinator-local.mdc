@@ -1,0 +1,55 @@
+---
+description: This repo's cost-aware guidelines for the coordinator pipeline. Read BEFORE coordinator.mdc whenever a coordinator run is requested; these override its defaults where they conflict.
+alwaysApply: false
+---
+
+# Coordinator — local cost guidelines
+
+Dev budget is limited and every subagent re-pays its full context. A medium-rigor run with fix cycles easily costs 5–20× a single agent doing the same work. Default to the cheapest setup that is safe.
+
+## 1. Should this be a coordinator run at all?
+
+Use a **single agent (no graph)** unless one of these holds:
+
+- The change adds/modifies **code-derived engineering math** (capacities, load factors, code checks) — safety-critical, worth an independent checker.
+- It is a **cross-cutting refactor** of a core abstraction (`BuildingStructure`, design graph, incremental engine, API schema).
+- The user explicitly asks for the pipeline.
+
+Plumbing, docs, runner scripts, plotting, test fixes, and localized bug fixes → single agent, even if the user says "coordinate"; propose that and let them overrule.
+
+## 2. Default panel and rigor
+
+| Situation | Rigor | Graph |
+|---|---|---|
+| Default | `low` (1 extension, 1 pass each) | engineer → critic |
+| Code-derived engineering math | `medium` | engineer → critic (scoped to the math, units, and citations) |
+| `high` | **only when the user explicitly asks** | — |
+
+- **The critic is the baseline checker here, not the reviewer** (this overrides coordinator.mdc's "reviewer is the baseline"). Skip the reviewer by default; add it only when the user asks or the diff is large enough that a completeness trace is worth a second spawn.
+
+- Do **not** add tester unless behavior changed and an existing test file covers it; prefer the engineer running the relevant tests itself.
+- bugbot / security-review: only for large scattered diffs or API input-parsing changes respectively.
+- Skip `explore` unless parallel engineers genuinely need disjoint scopes.
+- Keep `passes: 1` unless the user asks otherwise.
+
+## 3. Scope and context hygiene
+
+- **Split big work into separate small runs** (one concern per graph) instead of one mega-graph. Never queue unattended/overnight runs without a user-stated scope and stopping point.
+- Subagent prompts carry **file paths + a short scoping summary**, not pasted file contents or prior transcripts. The reviewer/critic get the FILES line only (blind review, per coordinator.mdc).
+- Serialize Julia-heavy subagents (Pkg/precompile contention SIGKILLs concurrent runs).
+- Tell the engineer to run **only the targeted test file(s)** via `julia scripts/runners/test_quiet.jl <Pkg> <files...>`, not the full suite (~20 min) or raw `Pkg.test()`.
+
+## 4. Fix cycles
+
+- Trigger a fix cycle only for a critic **P0** (or a reviewer FAIL, if a reviewer was included). P1/P2 → report to the user, don't auto-fix.
+- After a fix, re-run only the critic — don't add a reviewer as a "cheap confirmation".
+- At the soft cap, **stop and ask the user**. Do not `force=true` without explicit approval.
+
+## 5. Bookkeeping
+
+- No per-subagent memory entries. The coordinator writes **one** checkpoint itself at the end of the run.
+- For graphs of ≤ 3 tasks: also skip per-task todo entries and the memory subagent.
+
+## 6. Before `create_graph`
+
+State in the proposal: the number of subagent spawns expected (including worst-case fix cycles) and which models they use, so the user can see the cost before approving.

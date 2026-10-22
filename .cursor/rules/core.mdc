@@ -1,0 +1,14 @@
+---
+description: Minimal always-on triggers for the memory, corpus, and coordinator protocols (full detail lives in agent-requestable rules).
+alwaysApply: true
+---
+
+# Core triggers
+
+The full protocols are agent-requestable to keep per-request context small. Read the named rule **before** acting when its trigger fires:
+
+- **Git commit** → a memory `record()` must precede every substantive commit. Read `memory.mdc` first if you haven't this session.
+- **Remember / note / log / todo / decision** from the user, or a non-trivial task touching prior work → `search` memory before grepping code; read `memory.mdc` for placement rules.
+- **Anything derived from a published code** (ACI, AISC, CSA, fib, …) or any Julia change to a code-derived factor/equation/limit → read `corpus.mdc`; `corpus.*` MCP tools first; cite `source_id` + clause + page.
+- **"Coordinate" / "run the pipeline" / agent pipeline** → read `coordinator-local.mdc` (cost guidelines), then `coordinator.mdc`. Never start a coordinator run unprompted.
+- **memory / coordinator MCP tools missing** → tell the user; see `operations.mdc`.

@@ -48,8 +48,10 @@ function _solve_load_case!(cache::FEAModelCache, q::Pressure; verbose::Bool = fa
         end
     end
 
-    # Re-assemble load vector and solve (stiffness unchanged)
-    Asap.update!(model; values_only=true)
+    # Stiffness is unchanged — only AreaLoad pressure moved. `loads_only` keeps
+    # the CHOLMOD factor. Exact match to `values_only` is locked by
+    # scripts/runners/verify_fea_loads_only_oracle.jl (u, reactions, Mxx/Myy/Mxy).
+    Asap.update!(model; loads_only=true)
     Asap.solve!(model)
 
     # Extract per-element moments
@@ -118,11 +120,12 @@ function _solve_dl_cases!(cache::FEAModelCache, qD::Pressure, qL::Pressure;
         # The stiffness matrix hasn't changed, so the factored displacement
         # from the initial build is still valid.
         copy!(cache.model.u, U_qu)
-        Asap.update!(cache.model; values_only=true)
+        Asap.update!(cache.model; loads_only=true)
         Asap.post_process!(cache.model)
     else
-        # No cached displacement — full re-solve required.
-        Asap.update!(cache.model; values_only=true)
+        # No cached displacement — full re-solve required. K is still the
+        # factored-state stiffness; only the restored pressure changed.
+        Asap.update!(cache.model; loads_only=true)
         Asap.solve!(cache.model)
     end
 

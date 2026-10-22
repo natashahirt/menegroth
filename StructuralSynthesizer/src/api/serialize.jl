@@ -1513,6 +1513,27 @@ function _signed_principal_stress(σxx, σyy, τxy)
     return _signed_extremum(σ1, σ2)
 end
 
+"""
+    _visualization_strip_along_x(struc, supp_indices) -> Bool
+
+Whether a strip footing’s long axis runs along global X for viz/API.
+
+Uses the same `_support_strip_axes` contract as design (deci-311bd2d0): SI-ulp
+tie on Δx/Δy (not a construction tolerance) sizes both axes; unique longer
+span maps to `:x` or `:y`. Named `c1` remains ∥ global X.
+
+- `[:x]` → `true`
+- `[:y]` → `false`
+- `[:x, :y]` (tie) → `false` — do **not** silently prefer X via `Δx >= Δy`.
+  Design keeps `_governing_strip_result`; governing `strip_axis` is not stored
+  on `StripFootingResult`, so a :x-governing tie cannot be recovered here
+  without re-sizing.
+"""
+function _visualization_strip_along_x(struc, supp_indices::Vector{Int})
+    axes = _support_strip_axes(struc, supp_indices)
+    return length(axes) == 1 && axes[1] === :x
+end
+
 """Serialize foundation blocks for visualization in sized/original modes."""
 function _serialize_visualization_foundations(design::BuildingDesign, struc::BuildingStructure, du::DisplayUnits)
     skel = struc.skeleton
@@ -1555,13 +1576,9 @@ function _serialize_visualization_foundations(design::BuildingDesign, struc::Bui
         cy = sum(ys) / length(ys)
         z_top = minimum(zs)
 
-        # Strip footings: determine orientation from support spread
-        strip_along_x = false
-        if fdn.foundation_type == :strip && length(xs) >= 2
-            Δx = maximum(xs) - minimum(xs)
-            Δy = maximum(ys) - minimum(ys)
-            strip_along_x = Δx >= Δy
-        end
+        # Strip orientation: same `_support_strip_axes` rule as design (not display Δx >= Δy).
+        strip_along_x = fdn.foundation_type == :strip && length(fdn.support_indices) >= 2 &&
+            _visualization_strip_along_x(struc, collect(Int, fdn.support_indices))
 
         @debug "Foundation $fdn_idx center" type=fdn.foundation_type support_count=length(fdn.support_indices) cx cy z_top strip_along_x xs ys
 

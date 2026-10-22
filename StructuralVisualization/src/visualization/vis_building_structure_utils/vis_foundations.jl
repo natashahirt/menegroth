@@ -143,13 +143,11 @@ function draw_strip_footing!(ax, fdn::Foundation, struc::BuildingStructure;
     pts = _support_positions_m(fdn, struc)
     cx, cy, _ = _centroid_xyz(pts)
 
-    # Determine strip orientation from support spread
+    # Same `_support_strip_axes` contract as design / API serialize (deci-311bd2d0).
+    # Do not use Δx >= Δy (silent X on SI-ulp ties; can disagree with governing :y).
     if length(pts) >= 2
-        xs = [p[1] for p in pts]
-        ys = [p[2] for p in pts]
-        Δx = maximum(xs) - minimum(xs)
-        Δy = maximum(ys) - minimum(ys)
-        along_x = Δx >= Δy
+        along_x = StructuralSynthesizer._visualization_strip_along_x(
+            struc, collect(Int, fdn.support_indices))
     else
         along_x = true
     end

@@ -633,8 +633,10 @@ function sync_asap!(struc::BuildingStructure;
     if use_patterns && _should_run_patterns(struc, params)
         _solve_with_patterns!(struc, params)
     elseif !isempty(struc.asap_rigid_links)
+        _clear_pattern_solve_cache!(struc)
         Asap.solve!(struc.asap_model, struc.asap_rigid_links; reprocess=false)
     else
+        _clear_pattern_solve_cache!(struc)
         Asap.solve!(struc.asap_model)
     end
     
@@ -743,18 +745,105 @@ function _sync_vault_thrust_line_loads!(struc::BuildingStructure, params::Design
     return
 end
 
+# Reserved `_analysis_caches` key for the last pattern-case solve. Not a slab
+# index — `clear_geometry_caches!` drops it with the rest of the cache.
+const _PATTERN_SOLVE_CACHE_KEY = 0
+
+"""Fingerprint of frame-section K and GravityLoad occupancy.
+
+Used to detect a stale `pattern_u` after `Asap.update!` / section change /
+member self-weight (ACI 318-11 §13.7.6.3–13.7.6.4, corpus: aci-318-11, page 261).
 """
-Solve the Asap model with multiple pattern loading cases and write the
-enveloped element forces back to `element.forces`.
+function _pattern_cache_token(struc::BuildingStructure)
+    model = struc.asap_model
+    (isnothing(model) || isempty(model.frame_elements)) && return UInt(0)
+    h = zero(UInt)
+    for el in model.frame_elements
+        s = el.section
+        h = hash((ustrip(u"m^4", s.Ix), ustrip(u"m^4", s.Iy), ustrip(u"m^2", s.A)), h)
+    end
+    n_g = count(ld -> ld isa Asap.GravityLoad, model.loads)
+    return hash((h, n_g, length(model.loads)))
+end
+
+function _store_pattern_solve_cache!(struc::BuildingStructure, cases, u_cases)
+    inner = get!(Dict{Symbol, Any}, struc._analysis_caches, _PATTERN_SOLVE_CACHE_KEY)
+    inner[:pattern_cases] = cases
+    inner[:pattern_u] = u_cases
+    inner[:pattern_token] = _pattern_cache_token(struc)
+    return
+end
+
+function _get_pattern_solve_cache(struc::BuildingStructure)
+    inner = get(struc._analysis_caches, _PATTERN_SOLVE_CACHE_KEY, nothing)
+    inner === nothing && return nothing
+    cases = get(inner, :pattern_cases, nothing)
+    u_cases = get(inner, :pattern_u, nothing)
+    (cases === nothing || u_cases === nothing) && return nothing
+    return (cases, u_cases)
+end
+
+function _pattern_cache_is_current(struc::BuildingStructure)
+    inner = get(struc._analysis_caches, _PATTERN_SOLVE_CACHE_KEY, nothing)
+    inner === nothing && return false
+    token = get(inner, :pattern_token, nothing)
+    token === nothing && return false
+    return token === _pattern_cache_token(struc)
+end
+
+function _clear_pattern_solve_cache!(struc::BuildingStructure)
+    inner = get(struc._analysis_caches, _PATTERN_SOLVE_CACHE_KEY, nothing)
+    inner === nothing && return
+    delete!(inner, :pattern_cases)
+    delete!(inner, :pattern_u)
+    delete!(inner, :pattern_token)
+    return
+end
+
+"""
+Rebuild pattern `(u, loads)` from the current K and GravityLoad set.
+
+No-op when no pattern cache has been written. Call after `Asap.update!` /
+`Asap.solve!` that changes stiffness or member self-weight so
+`member_group_demands` (which prefers this cache) does not size from the
+pre-change `pattern_u` (ACI 318-11 §13.7.6.3–13.7.6.4, corpus: aci-318-11,
+page 261).
+"""
+function _refresh_pattern_solve_cache!(struc::BuildingStructure)
+    inner = get(struc._analysis_caches, _PATTERN_SOLVE_CACHE_KEY, nothing)
+    inner === nothing && return
+    (haskey(inner, :pattern_cases) || haskey(inner, :pattern_u)) || return
+    model = struc.asap_model
+    (isnothing(model) || !model.processed) && return
+    cases = _generate_pattern_cases(struc)
+    if length(cases) <= 1
+        _clear_pattern_solve_cache!(struc)
+        return
+    end
+    u_cases = Asap.solve(model, cases)
+    _store_pattern_solve_cache!(struc, cases, u_cases)
+    return
+end
+
+"""
+Solve the Asap model with multiple pattern loading cases.
 
 The full-loading displacement vector is kept in `model.u` for downstream
-deflection checks and `node.displacement` queries.
+deflection checks and `node.displacement` queries (this function does not
+overwrite `model.u` after the initial `solve!`).
+
+Per-case displacements and loads are stored on `struc` so
+`member_group_demands` can envelope signed M+/M− and shears at stations
+(ACI 318-11 §13.7.6.3–13.7.6.4, corpus: aci-318-11, page 261). Sizing
+must not read the per-DOF `element.forces` abs-envelope — that envelope is
+non-concurrent and is retained only for existing `el.forces` consumers.
 """
 function _solve_with_patterns!(struc::BuildingStructure, params::DesignParameters)
     model = struc.asap_model
     cases = _generate_pattern_cases(struc)
     
     if length(cases) <= 1
+        _clear_pattern_solve_cache!(struc)
         Asap.solve!(model)
         return
     end
@@ -764,8 +853,10 @@ function _solve_with_patterns!(struc::BuildingStructure, params::DesignParameter
     
     # Multi-case solve (non-mutating) — reuses cached K factorization
     u_cases = Asap.solve(model, cases)
+    _store_pattern_solve_cache!(struc, cases, u_cases)
     
-    # Envelope element forces across all pattern cases
+    # Per-DOF abs envelope on el.forces (NOT used for member sizing; see
+    # member_group_demands). Kept so existing el.forces readers stay valid.
     n_el = length(model.frame_elements)
     n_el == 0 && return
     
@@ -821,6 +912,19 @@ function _should_run_patterns(struc::BuildingStructure, params::DesignParameters
     return false
 end
 
+"""Dead-load factor already baked into `cell_dead_loads` (ACI 318-11 §9.2.1)."""
+function _pattern_dead_factor(struc::BuildingStructure)
+    for (ci, cell) in enumerate(struc.cells)
+        dls = get(struc.cell_dead_loads, ci, nothing)
+        (dls === nothing || isempty(dls)) && continue
+        unfact = cell.sdl + cell.self_weight
+        iszero(ustrip(unfact)) && continue
+        p = first(dls).pressure
+        return Float64(ustrip(uconvert(unit(unfact), p) / unfact))
+    end
+    return 1.0
+end
+
 """
 Generate pattern loading cases from the dead/live tributary load dicts.
 
@@ -867,6 +971,27 @@ function _generate_pattern_cases(struc::BuildingStructure)
     
     case_a = Asap.AbstractLoad[dead_all; live_a]
     case_b = Asap.AbstractLoad[dead_all; live_b]
+
+    # Member self-weight is not in the cell tributary dicts. Include every
+    # Asap.GravityLoad on the model so a section change that updates ρA
+    # (and K) is visible in pattern u (ACI 318-11 §13.7.6.3–13.7.6.4,
+    # corpus: aci-318-11, page 261).
+    # cell_dead_loads are already factored (combo.D, ACI 318-11 §9.2.1,
+    # corpus: aci-318-11, page 123). GravityLoad.factor is g (unfactored ρAg).
+    # Scale copies so pattern cases do not mix unfactored self-weight with
+    # factored cell dead loads.
+    model = struc.asap_model
+    if !isnothing(model)
+        gloads_raw = [ld for ld in model.loads if ld isa Asap.GravityLoad]
+        if !isempty(gloads_raw)
+            Df = _pattern_dead_factor(struc)
+            gloads = Asap.AbstractLoad[Asap.GravityLoad(ld.element, Df * ld.factor)
+                                      for ld in gloads_raw]
+            case_full = Asap.AbstractLoad[case_full; gloads]
+            case_a = Asap.AbstractLoad[case_a; gloads]
+            case_b = Asap.AbstractLoad[case_b; gloads]
+        end
+    end
     
     return [case_full, case_a, case_b]
 end

@@ -141,12 +141,26 @@ to still sit inside the shrunken plate — is NOT closable at this construction
 site. It relies on `story.faces` being the COMPLETE story floor (the skeleton's
 definition) and is delegated to the Phase 10 unified-FEM survivor check (true
 geometry, the final authority).
+
+Quantitatively, the assertion only fires once a wall center crosses the box edge,
+so it tolerates any frame/geometry error that keeps every wall inside: a wall at
+distance `d` from the plate center along an axis can absorb a silent offset of up
+to `(h − d)` on that axis (half-extent `h`) before the check trips — up to the
+FULL half-extent `h` for a wall sitting at the plate center, and ~0 for a wall on
+the boundary. A uniform whole-system shift that moves walls and plate together is
+undetectable by construction (origin-invariant). These bounds are the measure of
+the residual above; closing them requires the true occupant outline (Phase 10 FEM).
 """
 function assert_walls_enclosed(plate_center::NTuple{2,Float64},
                                plan_halfwidth::NTuple{2,Float64},
                                walls::AbstractVector)
     cx, cy = plate_center
     hx, hy = plan_halfwidth
+    # Degenerate/invalid plate: a negative half-extent cannot bound anything.
+    # Fail closed (mirrors `_plate_encloses_walls`, which rejects a negative plate).
+    (hx < 0 || hy < 0) && throw(ArgumentError(
+        "assert_walls_enclosed: negative plan_halfwidth $(plan_halfwidth) — a plate " *
+        "half-extent must be ≥ 0 m. Fail closed (degenerate/invalid plate)."))
     tol = 1e-9 + 1e-9 * hypot(hx, hy)   # absolute + plate-scaled boundary tolerance
     for w in walls
         wx, wy = _wall_plan_center(w)

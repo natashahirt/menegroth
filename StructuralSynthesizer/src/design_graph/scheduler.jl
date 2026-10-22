@@ -589,6 +589,10 @@ function run_target!(engine::IncrementalEngine, params::DesignParameters;
         # 3a. Run dirty nodes in place against the predecessor post-state. `ctx` is
         #     `nothing` on the default path (exact `fn`), or a `WarmContext` when
         #     the caller opted into warm reuse (ctx-aware `fn_ctx`, result-neutral).
+        #     Token is taken after any deferred restore and before the level mutates
+        #     sections, so the barrier sync below can skip the refactorization when
+        #     K is unchanged (P1-3).
+        k_before = _stiffness_token(engine.struc, params)
         for key in dirty_keys
             run!(get_node(engine.graph, key), engine.struc, params, ctx)
         end
@@ -609,9 +613,12 @@ function run_target!(engine::IncrementalEngine, params::DesignParameters;
             pass_output[key] = engine.memo[key].output_hash
             push!(restored, key)
         end
-        # 3c. Barrier sync once, only when a recomputed node needs it.
+        # 3c. Barrier sync once, only when a recomputed node needs it. `loads_only`
+        #     when the level's stiffness token is unchanged (P1-3); a section,
+        #     coordinate, or joist-eccentricity change takes the full update.
         level_needs_sync(engine.graph, dirty_keys) &&
-            sync_asap!(engine.struc; params = params)
+            sync_asap!(engine.struc; params = params,
+                       loads_only = _loads_only_sync(engine.struc, params, k_before))
         # 3d. Snapshot + memoize recomputed nodes AFTER the sync. On a warm run,
         #     also memoize each slab node's shared read-only cache so a later warm
         #     rerun reuses it (never enters the byte-identity `NodeMemo` snapshot).

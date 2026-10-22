@@ -39,10 +39,15 @@ fingerprinting) and is unused in Run 1. Returns the mutated `struc`.
 function execute_graph!(g::DesignGraph, struc::BuildingStructure,
                         params::DesignParameters; ctx=nothing)
     for level in topological_levels(g)
+        # P1-3: reuse the factorization only when this level did not change K.
+        # The legacy stage loop (loads_only=false) is the bit-identity oracle.
+        k_before = _stiffness_token(struc, params)
         for key in level
             run!(get_node(g, key), struc, params, ctx)
         end
-        level_needs_sync(g, level) && sync_asap!(struc; params=params)
+        level_needs_sync(g, level) &&
+            sync_asap!(struc; params=params,
+                       loads_only=_loads_only_sync(struc, params, k_before))
     end
     return struc
 end

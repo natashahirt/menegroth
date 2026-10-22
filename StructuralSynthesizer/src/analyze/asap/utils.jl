@@ -533,6 +533,62 @@ function _extract_width_profile(trib::TributaryPolygon)
 end
 
 """
+    _stiffness_token(struc, params) -> UInt
+
+Bit-stable fingerprint of everything [`sync_asap!`](@ref) would otherwise rebuild
+into the global stiffness: frame-section properties that enter `K` (A, E, G, Ix,
+Iy, J, Ay, Az), element release type, end coordinates, current eccentricity, shell
+thickness/E/ν, and the joist-seat eccentricity map the sync is about to write.
+Load magnitudes are intentionally absent — they change `P`, not `K`.
+"""
+function _stiffness_token(struc::BuildingStructure, params::DesignParameters)
+    model = struc.asap_model
+    isnothing(model) && return UInt(0)
+    h = UInt(0)
+    frames = hasproperty(model, :frame_elements) ? model.frame_elements : Asap.Element[]
+    for el in frames
+        s = el.section
+        props = s isa Asap.Section ?
+            (ustrip(u"m^2", s.A), ustrip(u"Pa", s.E), ustrip(u"Pa", s.G),
+             ustrip(u"m^4", s.Ix), ustrip(u"m^4", s.Iy), ustrip(u"m^4", s.J),
+             ustrip(u"m^2", s.Ay), ustrip(u"m^2", s.Az)) :
+            repr(s)
+        p1 = el.nodeStart.position
+        p2 = el.nodeEnd.position
+        h = hash((
+            typeof(el), props, el.eccentricity,
+            ustrip(u"m", p1[1]), ustrip(u"m", p1[2]), ustrip(u"m", p1[3]),
+            ustrip(u"m", p2[1]), ustrip(u"m", p2[2]), ustrip(u"m", p2[3]),
+        ), h)
+    end
+    if hasproperty(model, :shell_elements)
+        for sh in model.shell_elements
+            s = sh.section
+            s isa Asap.ShellSection || continue
+            h = hash((:shell, s.thickness, s.E, s.ν), h)
+        end
+    end
+    eccs = sort!(collect(pairs(_build_edge_eccentricity_map(struc, params))))
+    return hash(eccs, h)
+end
+
+"""
+    _loads_only_sync(struc, params, token_before) -> Bool
+
+True when a post-level [`sync_asap!`](@ref) may pass `loads_only=true`: the
+stiffness token is unchanged across the level, so `K` was not touched and the
+cached CHOLMOD factor (or a fresh factorization of the same `S`) is valid.
+
+`SS_SYNC_LOADS_ONLY=off` forces the full refactorizing update. Any other value,
+including an unset variable, selects this predicate. A changed section, node
+coordinate, release, shell thickness, or joist eccentricity yields `false`.
+"""
+function _loads_only_sync(struc::BuildingStructure, params::DesignParameters, token_before)
+    get(ENV, "SS_SYNC_LOADS_ONLY", "auto") == "off" && return false
+    return _stiffness_token(struc, params) == token_before
+end
+
+"""
     sync_asap!(struc; params=DesignParameters())
 
 Lightweight sync of the Asap model between pipeline stages.
@@ -560,8 +616,10 @@ public API), so the subsequent `solve!(; reprocess=false)` reuses the cached
 factor. Because CHOLMOD factorization of an identical `S` is deterministic, the
 reused-factor solve is bit-identical to a cold refactorization — this is a pure
 speed optimization, never a result change. Misusing it with a changed `K` yields
-a STALE-factor wrong answer, so it is opt-in and defaults off; the incremental
-engine sets it only on provably loads-only variations.
+a STALE-factor wrong answer. The cold executor and the incremental scheduler set
+it only when [`_loads_only_sync`](@ref) reports the stiffness token unchanged
+(`SS_SYNC_LOADS_ONLY=off` forces a full update). The kwarg itself still defaults
+to `false`.
 
 See also: [`to_asap!`](@ref), [`snapshot!`](@ref), [`restore!`](@ref)
 """

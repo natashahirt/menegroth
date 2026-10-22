@@ -276,6 +276,17 @@ end
         @test assert_walls_enclosed(base[1], base[2], StructuralSizer.WallLine[]) === nothing
     end
 
+    # ── (9b) DEGENERATE PLATE: a negative plan_halfwidth is an invalid plate and
+    # must FAIL CLOSED on a direct assert_walls_enclosed call. story_plate_geometry
+    # never produces one (halfwidth = (max-min)/2 ≥ 0), but the exported assertion
+    # can be called with arbitrary inputs, so it guards explicitly (mirrors the
+    # evaluator's _plate_encloses_walls negative-plate rejection).
+    @testset "Negative plan_halfwidth fails closed" begin
+        good = StructuralSizer.WallLine(1, 5.0, 5.0, 0.0, 1.0e9, 1)
+        @test_throws ArgumentError assert_walls_enclosed((5.0, 5.0), (-1.0, 5.0), [good])
+        @test_throws ArgumentError assert_walls_enclosed((5.0, 5.0), (5.0, -1.0), [good])
+    end
+
     # ── (10) DUPLICATE face_idx: Cell.face_idx is contractually unique per cell
     # (initialize_cells! dedups faces). A duplicate signals a CORRUPTED cell vector
     # that would silently drop floor mass from the mass-weighted centroid, so

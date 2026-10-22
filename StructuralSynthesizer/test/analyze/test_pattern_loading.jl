@@ -23,9 +23,9 @@ using StructuralSizer
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 
-"""Build a 2×2 bay, 1-story flat plate structure ready for to_asap!."""
-function _make_flat_plate(; sdl=20.0u"psf", ll=50.0u"psf")
-    skel = gen_medium_office(60.0u"ft", 60.0u"ft", 12.0u"ft", 2, 2, 1)
+"""Build a 1-story flat plate ready for `to_asap!`."""
+function _make_flat_plate_bays(xb, yb, Lx, Ly; sdl=20.0u"psf", ll=50.0u"psf")
+    skel = gen_medium_office(Lx, Ly, 12.0u"ft", xb, yb, 1)
     struc = BuildingStructure(skel)
 
     opts = FlatPlateOptions(
@@ -47,6 +47,10 @@ function _make_flat_plate(; sdl=20.0u"psf", ll=50.0u"psf")
 
     return struc
 end
+
+"""Build a 2×2 bay, 1-story flat plate structure ready for to_asap!."""
+_make_flat_plate(; sdl=20.0u"psf", ll=50.0u"psf") =
+    _make_flat_plate_bays(2, 2, 60.0u"ft", 60.0u"ft"; sdl=sdl, ll=ll)
 
 
 @testset "Pattern Loading" begin
@@ -290,6 +294,162 @@ end
         # Full-loading case (index 1) should have the largest displacement norm
         norms = [norm(u) for u in u_cases]
         @test norms[1] >= maximum(norms[2:end]) - 1e-6
+    end
+
+    # =====================================================================
+    # 11. Pattern cases reach member_group_demands (not el.forces envelope)
+    # =====================================================================
+    @testset "Pattern cases reach member_group_demands" begin
+        struc = _make_flat_plate(sdl=20.0u"psf", ll=250.0u"psf")
+        params = DesignParameters(pattern_loading = :checkerboard)
+        to_asap!(struc; params)
+        sync_asap!(struc; params)
+
+        u_full = copy(struc.asap_model.u)
+        @test StructuralSynthesizer._get_pattern_solve_cache(struc) !== nothing
+
+        cases = StructuralSynthesizer._pattern_demand_cases(struc, params)
+        @test cases !== nothing
+        @test length(cases) == 3
+
+        max_dMy = 0.0
+        for el in struc.asap_model.frame_elements
+            eid = el.elementID
+            (1 <= eid <= length(cases[1][2])) || continue
+            f_full = StructuralSynthesizer._element_forces_from_u(
+                el, cases[1][1], cases[1][2][eid]; resolution=40)
+            f_pat  = StructuralSynthesizer._element_forces_from_u(
+                el, cases[2][1], cases[2][2][eid]; resolution=40)
+            max_dMy = max(max_dMy, maximum(abs, f_full.My .- f_pat.My))
+        end
+        @test max_dMy > 1e-8
+
+        _, dem_pat, = member_group_demands(struc; member_edge_group=:beams, params=params)
+        @test struc.asap_model.u == u_full
+        @test !isempty(dem_pat)
+        @test any(d -> d.Mux_pos > 0 || d.Mux_neg > 0, dem_pat)
+
+        struc_full = _make_flat_plate(sdl=20.0u"psf", ll=250.0u"psf")
+        params_none = DesignParameters(pattern_loading = :none)
+        to_asap!(struc_full; params=params_none)
+        sync_asap!(struc_full; params=params_none)
+        _, dem_full, = member_group_demands(struc_full; member_edge_group=:beams, params=params_none)
+
+        # ACI 318-11 §13.7.6.4: envelope includes full live load on all panels.
+        @test maximum(d.Mux for d in dem_pat) + 1e-8 >= maximum(d.Mux for d in dem_full)
+    end
+
+    # =====================================================================
+    # 12. Continuous-beam oracle: checkerboard hogging exceeds full-load
+    #     hogging at some stations (signed per-station envelope).
+    # =====================================================================
+    @testset "Continuous beam: checkerboard hogging exceeds full-load hogging" begin
+        # 3-span continuous beam line (3×1 bays). Group-peak Mux_neg can still
+        # equal the full-load support moment because case 1 is in the envelope
+        # (ACI 318-11 §13.7.6.4). The oracle is the signed per-station envelope:
+        # some stations have larger hogging under a checkerboard case than
+        # under full live load. If pattern cases never reach member_group_demands,
+        # those stations are silently dropped.
+        struc = _make_flat_plate_bays(3, 1, 90.0u"ft", 20.0u"ft";
+                                     sdl=20.0u"psf", ll=250.0u"psf")
+        params = DesignParameters(pattern_loading = :checkerboard)
+        to_asap!(struc; params)
+        sync_asap!(struc; params)
+
+        u_full = copy(struc.asap_model.u)
+        cases = StructuralSynthesizer._pattern_demand_cases(struc, params)
+        @test cases !== nothing
+        @test length(cases) == 3
+
+        n_exceed = 0
+        max_hog_env = 0.0
+        beam_edges = Set(get(struc.skeleton.groups_edges, :beams, Int[]))
+        for (edge_idx, el) in enumerate(struc.asap_model.elements)
+            edge_idx in beam_edges || continue
+            eid = el.elementID
+            (1 <= eid <= length(cases[1][2])) || continue
+            f_full = StructuralSynthesizer._element_forces_from_u(
+                el, cases[1][1], cases[1][2][eid]; resolution=40)
+            _, hog_full = StructuralSynthesizer._asap_signed_My_envelopes(el, f_full.My)
+            max_hog_env = max(max_hog_env, hog_full)
+            for i in 2:length(cases)
+                f_pat = StructuralSynthesizer._element_forces_from_u(
+                    el, cases[i][1], cases[i][2][eid]; resolution=40)
+                _, hog_pat = StructuralSynthesizer._asap_signed_My_envelopes(el, f_pat.My)
+                max_hog_env = max(max_hog_env, hog_pat)
+                ly_z = el.LCS[2][3]
+                abs(ly_z) < 1e-8 && continue
+                s = ly_z > 0 ? 1.0 : -1.0
+                for k in eachindex(f_full.My)
+                    hog_k_full = max(0.0, -f_full.My[k] * s)
+                    hog_k_pat  = max(0.0, -f_pat.My[k] * s)
+                    hog_k_pat > hog_k_full + 1e-6 && (n_exceed += 1)
+                end
+            end
+        end
+        @test n_exceed > 0
+
+        _, dem_pat, = member_group_demands(struc; member_edge_group=:beams, params=params)
+        @test struc.asap_model.u == u_full
+        @test !isempty(dem_pat)
+        hog_demand = maximum(d.Mux_neg for d in dem_pat)
+        @test hog_demand > 0
+        # member_group_demands signed envelope matches the per-station max
+        # (resolution 200 vs 40, so allow a small interpolation gap).
+        @test hog_demand + 1.0 >= max_hog_env
+        @test hog_demand ≈ max_hog_env atol=0.05 * max(max_hog_env, 1.0)
+    end
+
+    # =====================================================================
+    # 13. Pattern (u, loads) cache is not the pre-size vector after K change
+    # =====================================================================
+    @testset "Pattern cache refreshes after section / K change" begin
+        # Stale-path oracle: after Ix change the cache still holds pre-size
+        # pattern_u. member_group_demands (no params) — the size_columns!
+        # call shape — must not envelope that vector
+        # (ACI 318-11 §13.7.6.3–13.7.6.4, corpus: aci-318-11, page 261).
+        struc = _make_flat_plate(sdl=20.0u"psf", ll=250.0u"psf")
+        params = DesignParameters(pattern_loading = :checkerboard)
+        to_asap!(struc; params)
+        sync_asap!(struc; params)
+
+        cached0 = StructuralSynthesizer._get_pattern_solve_cache(struc)
+        @test cached0 !== nothing
+        u_before = [copy(u) for u in cached0[2]]
+        @test StructuralSynthesizer._pattern_cache_is_current(struc)
+
+        for el in struc.asap_model.frame_elements
+            s = el.section
+            el.section = Asap.Section(s.A, s.E, s.G, 10 * s.Ix, 10 * s.Iy, s.J, s.ρ;
+                                     Ay=s.Ay, Az=s.Az)
+        end
+        # Cache is not auto-cleared by the section assignment — this is the
+        # stale-path that used to reach member_group_demands.
+        @test !StructuralSynthesizer._pattern_cache_is_current(struc)
+        cached_stale = StructuralSynthesizer._get_pattern_solve_cache(struc)
+        @test cached_stale !== nothing
+        @test all(cached_stale[2][i] == u_before[i] for i in eachindex(u_before))
+
+        Asap.update!(struc.asap_model)
+        Asap.solve!(struc.asap_model)
+        # update!/solve! of the full-load case must not silently validate the
+        # pre-size pattern_u (token still fingerprints section K).
+        @test !StructuralSynthesizer._pattern_cache_is_current(struc)
+        cached_after_solve = StructuralSynthesizer._get_pattern_solve_cache(struc)
+        @test all(cached_after_solve[2][i] == u_before[i] for i in eachindex(u_before))
+
+        # No-params path (size_columns!) must refresh, not reuse pre-size u.
+        member_group_demands(struc; member_edge_group=:columns)
+        cached1 = StructuralSynthesizer._get_pattern_solve_cache(struc)
+        @test cached1 !== nothing
+        @test StructuralSynthesizer._pattern_cache_is_current(struc)
+        @test any(i -> cached1[2][i] != u_before[i], eachindex(u_before))
+
+        # Demand-case u that sizing actually envelopes (default DesignParameters
+        # is the size_columns! / no-params shape) must not be the pre-size vector.
+        cases_used = StructuralSynthesizer._pattern_demand_cases(struc, DesignParameters())
+        @test cases_used !== nothing
+        @test any(i -> cases_used[i][1] != u_before[i], eachindex(u_before))
     end
 
     println("\n✓ All pattern loading tests passed!")

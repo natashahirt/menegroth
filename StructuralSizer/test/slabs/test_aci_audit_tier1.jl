@@ -155,11 +155,10 @@ end
     #
     #   Mu = 0.07 · [(qD,u + 0.5·qL,u)·ℓ2·ℓn² − qD,u·ℓ2'·(ℓn')²]
     #
-    # `_compute_column_demands_ddm` (ddm.jl) hard-codes
-    # `Mub = is_ext ? M : 0.0 * M` for interior columns — i.e. interior
-    # unbalanced moment = 0 regardless of the live-load pattern.  This is
-    # only valid when adjacent spans and live load are perfectly symmetric;
-    # ACI requires Eq. (13-7) for punching-shear moment-transfer design.
+    # `_compute_column_demands_ddm` applies ACI 318-11 §13.6.9.2 Eq. (13-7)
+    # at interior columns from the panels that share each support.
+    # Equal adjoining spans collapse to 0.07·0.5·q_Lu·ℓ2·ℓn² under the
+    # governing §9.2.1 gravity combination.  This test pins that moment.
     @testset "3. DDM Eq. (13-7) interior unbalanced moment  (ACI 318-11 §13.6.9.2)" begin
         if !HAS_STRUCTURAL_SYNTHESIZER
             @info "Skipping Tier 1 / item 3 — StructuralSynthesizer not available."
@@ -195,19 +194,21 @@ end
 
             Mub_int = [m_res.unbalanced_moments[i] for i in int_idx]
 
-            # Hand-calc Eq. (13-7) for the centre interior column with
-            # symmetric adjacent spans (ℓ2' = ℓ2, ℓn' = ℓn) and live load
-            # applied to the checkerboard pattern (full DL+½LL on the
-            # longer panel, DL only on the shorter): Mu collapses to
-            # 0.07·0.5·qL·ℓ2·ℓn².
+            # Equal adjoining spans: dead-load terms cancel.  The live
+            # term is factored.  §9.2.1 Eq. (9-2) (page 123) gives
+            # Mu = 0.07·0.5·(1.6 qL)·ℓ2·ℓn² when 1.2D+1.6L governs;
+            # Eq. (9-1) 1.4D gives 0 on equal spans.  The helper takes
+            # the larger.
+            qD  = m_res.qD
             qL  = m_res.qL
             ℓ2  = m_res.l2
             ℓn  = m_res.ln
-            Mub_eq_13_7 = uconvert(SS.kip*u"ft", 0.07 * 0.5 * qL * ℓ2 * ℓn^2)
+            Mub_eq_13_7 = SS.governing_interior_unbalanced_moment(
+                qD, qL, ℓ2, ℓn, qD, qL, ℓ2, ℓn)
 
-            # Correct ACI behaviour: every interior column's Mub equals the
-            # symmetric Eq. (13-7) value within tolerance (the simplified
-            # single-panel DDM path always uses the symmetric collapse).
+            # Equal-bay office: geometry-derived adjoining spans collapse to
+            # the symmetric Eq. (13-7) value.  atol covers a per-column ℓn
+            # that differs slightly from this slab's c1-averaged ℓn.
             atol_M = 1.0 * SS.kip * u"ft"
             @test all(isapprox(abs(m), Mub_eq_13_7; atol=atol_M)
                        for m in Mub_int)

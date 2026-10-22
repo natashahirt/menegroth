@@ -151,7 +151,12 @@ s1s &= w_compare("αc @ hw/lw=1.75 (linear)", wall_shear_capacity_si(FC,FY,lw,t,
 s1s &= w_compare("αc @ hw/lw=2.0 (plateau)", wall_shear_capacity_si(FC,FY,lw,t,ρt,2.0*lw).αc, 2.0; tol=1e-9)
 
 w_sub_header("3.3  Demand-decoupled check + minimum reinforcement")
-chk = check_wall_inplane_shear(ws, cmat, 800e3*u"N", hw*u"m")
+# Phase 1 contract (ACI 318-19 §11.5.4.3): the transverse yield strength fyt is a
+# required MATERIAL input — a plain `Concrete` carries no reinforcement, so fyt must
+# be supplied explicitly (no silent Grade-60 default). Pass the Grade-60 fyt this
+# known-answer assumes (FY, in Pa, from the shared inputs) so `chk` reproduces `cap`
+# exactly. Mirrors the migrated test_walls.jl:54,87 pattern.
+chk = check_wall_inplane_shear(ws, cmat, 800e3*u"N", hw*u"m"; fyt=FY*u"Pa")
 util_ok = isapprox(chk.ratio, 800e3/cap.ϕVn; rtol=1e-3)
 println("    CheckResult clause .................................... ", chk.code_clause)
 @printf("    Vu=800 kN  φVn=%.0f kN  utilization=%.3f  %s\n", cap.ϕVn/1e3, chk.ratio, _mark(chk.passed))

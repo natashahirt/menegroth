@@ -170,7 +170,7 @@ using StructuralSizer: kip, ksi, psf, ksf, pcf
         
         # Test error construction
         err = DDMApplicabilityError(
-            ["§8.10.2.2: Aspect ratio violation"],
+            ["§13.6.1.2: Aspect ratio violation"],
             ["EFM", "FEA"]
         )
         @test length(err.violations) == 1

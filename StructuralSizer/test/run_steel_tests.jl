@@ -16,6 +16,7 @@ using StructuralSizer
     include("steel_member/test_qa_slender_web.jl")
     include("steel_member/test_hss_e7.jl")
     include("steel_member/test_hss_round_shear.jl")
+    include("steel_member/test_phi_v_provision.jl")
     
     # Torsion (AISC H3)
     include("steel_member/test_hss_torsion.jl")

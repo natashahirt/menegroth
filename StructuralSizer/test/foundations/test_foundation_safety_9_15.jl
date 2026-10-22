@@ -265,6 +265,50 @@ const SS = StructuralSizer
         As_oracle = abs(d2.Pu) / (opts.ϕ_bearing * opts.material.rebar.Fy)
         @test result.As_tensile ≈ uconvert(u"m^2", As_oracle) rtol=1e-8
         @test ustrip(u"inch^2", result.As_tensile) > 0
+
+        # Tensile interface steel is in the bar schedule / V_steel, not log-only.
+        fy = opts.material.rebar.Fy
+        Ab_l = bar_area(opts.bar_size_long)
+        Ab_t = bar_area(opts.bar_size_trans)
+        h = result.D
+        B = result.B
+        L = result.L_ftg
+        d = result.d
+        cover = opts.cover
+        N = result.n_columns
+        c_along = last(SS._strip_c_across_along(d1.c1, d1.c2, :x))
+        band_w = c_along + d
+        max_s_flex = min(3 * h, 18.0u"inch")
+        max_s_TS   = min(5 * h, 18.0u"inch")
+        n_top  = max(ceil(Int, result.As_long_top / Ab_l), ceil(Int, B / max_s_flex))
+        n_bot  = max(ceil(Int, result.As_long_bot / Ab_l), ceil(Int, B / max_s_flex))
+        n_tran = max(ceil(Int, result.As_trans / Ab_t), ceil(Int, band_w / max_s_flex))
+        inter_band = max(L - N * band_w, zero(L))
+        As_min_inter = SS._min_steel_footing(inter_band, h, fy)
+        n_tran_inter = max(ceil(Int, As_min_inter / Ab_t),
+                           ceil(Int, inter_band / max_s_TS))
+        n_tensile = max(ceil(Int, result.As_tensile / Ab_l), 1)
+        bar_len_long  = L - 2 * cover
+        bar_len_trans = B - 2 * cover
+        V_tensile = n_tensile * Ab_l * max(h - cover, zero(h))
+        V_with = (n_top + n_bot) * Ab_l * bar_len_long +
+                 (N * n_tran + n_tran_inter) * Ab_t * bar_len_trans +
+                 V_tensile
+        V_without = V_with - V_tensile
+        @test n_tensile ≥ 1
+        @test result.steel_volume ≈ uconvert(u"m^3", V_with) rtol=1e-6
+        @test result.steel_volume > uconvert(u"m^3", V_without)
+
+        # Edge: all-compression strip stores As_tensile = 0.
+        d2c = FoundationDemand(2; Pu=200.0u"kN", Ps=200.0u"kN",
+                               c1=18.0u"inch", c2=18.0u"inch")
+        result_c = design_footing(StripFooting(), [d1, d2c],
+                                 [0.0u"ft", 20.0u"ft"], soil; opts)
+        @test ustrip(u"inch^2", result_c.As_tensile) == 0
+
+        # Edge: empty demand list is zero tensile steel (not a design case).
+        @test SS._strip_tensile_As(FoundationDemand[], opts.ϕ_bearing,
+                                   opts.material.rebar.Fy) == 0.0u"inch^2"
     end
 
     @testset "leftover: γf transfer uses governing of Mux and Muy" begin
@@ -1048,5 +1092,211 @@ const SS = StructuralSizer
         @test_throws ArgumentError design_footing(SpreadFooting(), demand, soil)
         @test_throws MethodError SS._eccentric_soil_pressure(
             100.0, 0.0, 0.0, 10.0, 10.0)
+    end
+
+    @testset "leftover: spread grows until q_min≥0 and q_max≤qa" begin
+        # ACI 336.2R §3.2.1 Eq. (3-1) (corpus: aci-336-combined-footings-mats, page 6)
+        # applies only in the kern. Do not size from Eq. (3-1) as full contact
+        # when q_min<0.
+        Pu = 912.0kip
+        Ps = 670.0kip
+        Mux = Pu * 3.0u"ft"   # ex = 3 ft → kern square B ≥ 18 ft
+        demand = FoundationDemand(1; Pu=Pu, Ps=Ps, Mux=Mux,
+            c1=18.0u"inch", c2=18.0u"inch", shape=:rectangular)
+        soil = Soil(5.37ksf, 18.0u"kN/m^3", 30.0, 0.0u"kPa", 25.0u"MPa")
+        opts = SpreadParams(material=RC_3000_60, size_increment=1.0u"inch")
+
+        A_req = Ps / soil.qa
+        B_conc = sqrt(A_req)
+        q_conc = SS._eccentric_soil_pressure(Pu, Mux, 0.0kip * u"ft", B_conc, B_conc)
+        @test q_conc.q_min < zero(q_conc.q_min)   # concentric plan is out of kern
+
+        B_kern = SS._kern_min_square_side(Pu, Mux, 0.0kip * u"ft")
+        @test B_kern ≈ 18.0u"ft" rtol=1e-12
+
+        result = design_footing(SpreadFooting(), demand, soil; opts)
+        q_final = SS._eccentric_soil_pressure(Pu, Mux, 0.0kip * u"ft",
+                                             result.B, result.L_ftg)
+        @test SS._eccentric_in_kern(q_final)
+        @test q_final.q_min ≥ zero(q_final.q_min) ||
+              ustrip(Unitful.NoUnits, q_final.q_min / q_final.qu) ≥ -1e-12
+        @test ustrip(u"inch", result.B) ≥ ustrip(u"inch", B_kern) - 1e-6
+        q_max_s = (Ps / (result.B * result.L_ftg)) * (q_final.q_max / q_final.qu)
+        @test q_max_s ≤ soil.qa
+
+        # Edge: concentric Mux=0 stays near A_req (not grown to 18 ft).
+        d0 = FoundationDemand(1; Pu=Pu, Ps=Ps,
+            c1=18.0u"inch", c2=18.0u"inch", shape=:rectangular)
+        r0 = design_footing(SpreadFooting(), d0, soil; opts)
+        @test ustrip(u"inch", r0.B) < ustrip(u"inch", B_kern)
+        q0 = SS._eccentric_soil_pressure(Pu, 0.0kip * u"ft", 0.0kip * u"ft",
+                                        r0.B, r0.L_ftg)
+        @test SS._eccentric_in_kern(q0)
+        q_max_s0 = (Ps / (r0.B * r0.L_ftg)) * (q0.q_max / q0.qu)
+        @test q_max_s0 ≤ soil.qa
+    end
+
+    @testset "leftover: IS spread refuses lift-off and does not grow" begin
+        # No IS 456 source in the corpus for eccentric (lift-off) spread
+        # footings. Concentric plan stays A = Pu·SF/qa. Linear edge pressure
+        # detects q_min < 0 only; the plan is not resized from q_max.
+        Pu = 500.0u"kN"
+        pier = 0.3u"m"
+        d0 = FoundationDemand(1; Pu=Pu)
+        r0 = design_footing(SpreadFooting(), d0, medium_sand, NWC_4000, Rebar_60;
+                            pier_width=pier)
+        B_conc = max(sqrt(uconvert(u"m^2", Pu * 1.5 / medium_sand.qa)), pier + 0.3u"m")
+        @test r0.B ≈ B_conc rtol=1e-8
+        @test r0.L_ftg ≈ r0.B rtol=1e-12
+        @test 0.5 < r0.utilization < 0.75
+        @test r0.concrete_volume > 0.0u"m^3"
+
+        # In kern (ex = B/12): same plan and utilization as concentric.
+        Mux_in = Pu * (r0.B / 12)
+        d_in = FoundationDemand(1; Pu=Pu, Mux=Mux_in)
+        r_in = design_footing(SpreadFooting(), d_in, medium_sand, NWC_4000, Rebar_60;
+                              pier_width=pier)
+        @test r_in.B ≈ r0.B rtol=1e-8
+        @test r_in.utilization ≈ r0.utilization rtol=1e-8
+        q_in = SS._eccentric_soil_pressure(Pu, Mux_in, 0.0u"kN*m", r_in.B, r_in.L_ftg)
+        @test q_in.q_min > zero(q_in.q_min)
+
+        # Kern edge e = B/6: q_min ≈ 0, still the concentric plan.
+        Mux_edge = Pu * (r0.B / 6)
+        d_edge = FoundationDemand(1; Pu=Pu, Mux=Mux_edge)
+        r_edge = design_footing(SpreadFooting(), d_edge, medium_sand, NWC_4000, Rebar_60;
+                                pier_width=pier)
+        @test r_edge.B ≈ r0.B rtol=1e-8
+        q_edge = SS._eccentric_soil_pressure(Pu, Mux_edge, 0.0u"kN*m",
+                                            r_edge.B, r_edge.L_ftg)
+        @test SS._eccentric_in_kern(q_edge)
+
+        # Lift-off: ex = 1 m > B/6. Refuse; do not grow. Muy-only too.
+        Mux_out = Pu * 1.0u"m"
+        d_out = FoundationDemand(1; Pu=Pu, Mux=Mux_out)
+        q_out = SS._eccentric_soil_pressure(Pu, Mux_out, 0.0u"kN*m", r0.B, r0.B)
+        @test q_out.q_min < zero(q_out.q_min)
+        @test_throws "no corpus-grounded method for eccentric (lift-off) spread footings" begin
+            design_footing(SpreadFooting(), d_out, medium_sand, NWC_4000, Rebar_60;
+                           pier_width=pier)
+        end
+        @test_throws "Use the ACI path or a combined footing" begin
+            design_footing(SpreadFooting(), d_out, medium_sand, NWC_4000, Rebar_60;
+                           pier_width=pier)
+        end
+        d_muy = FoundationDemand(1; Pu=Pu, Muy=Mux_out)
+        @test_throws "no corpus-grounded method for eccentric (lift-off) spread footings" begin
+            design_footing(SpreadFooting(), d_muy, medium_sand, NWC_4000, Rebar_60;
+                           pier_width=pier)
+        end
+
+        # Edge: zero factored load has no compressive resultant, so a moment
+        # does not trip lift-off detection. Minimum projection still applies.
+        d_zero = FoundationDemand(1; Pu=0.0u"kN", Mux=50.0u"kN*m")
+        r_zero = design_footing(SpreadFooting(), d_zero, medium_sand, NWC_4000, Rebar_60;
+                                pier_width=pier)
+        @test r_zero.B >= pier + 0.3u"m"
+        @test r_zero.concrete_volume > 0.0u"m^3"
+    end
+
+    @testset "leftover: Inf transfer steel is transfer_reinforcement failure" begin
+        # Rule-of-thumb must fail like pipeline (`transfer_reinforcement`),
+        # not skip-and-continue. ACI 318-11 §13.5.3.1 (corpus: aci-318-11, page 250).
+        Mux_huge = 2000.0kip * u"ft"
+        c1 = 16.0u"inch"
+        c2 = 16.0u"inch"
+        h  = 8.0u"inch"
+        d  = 6.5u"inch"
+        fc = 4000.0u"psi"
+        fy = 60.0ksi
+        gov_inf = SS.governing_transfer_reinforcement(
+            Mux_huge, zero(Mux_huge), c1, c2, h, d, fc, fy;
+            position=:edge, free_edge_parallel=:c2)
+        @test isinf(ustrip(u"inch^2", gov_inf.As))
+        @test SS.transfer_section_inadequate(gov_inf.As)
+
+        gov_ok = SS.governing_transfer_reinforcement(
+            5.0kip * u"ft", zero(Mux_huge), c1, c2, h, d, fc, fy;
+            position=:edge, free_edge_parallel=:c2)
+        @test !SS.transfer_section_inadequate(gov_ok.As)
+        @test isfinite(ustrip(u"inch^2", gov_ok.As))
+
+        # Skip-and-continue would feed Inf into additional_transfer_bars
+        # (`ceil(Int, Inf)`). Rule-of-thumb must fail first.
+        strip_w = 8.0u"ft"
+        Ab = bar_area(5)
+        @test_throws InexactError SS.additional_transfer_bars(
+            gov_inf.As, 2.0u"inch^2", gov_inf.bb, strip_w, Ab)
+    end
+
+    @testset "leftover: interior NLP Mub uses Eq. (13-7) not 0 or 0.3 Mo" begin
+        # ACI 318-11 §13.6.9.2 Eq. (13-7) (corpus: aci-318-11, page 258).
+        # Equal-span collapse: Mub ≈ 0.07·0.5·qL·ℓ2·ℓn².
+        mat = RC_4000_60
+        fc  = mat.concrete.fc′
+        fy  = mat.rebar.Fy
+        Es  = mat.rebar.E
+        γ_c = mat.concrete.ρ
+        λ   = mat.concrete.λ
+        wc_pcf = ustrip(pcf, γ_c)
+        Ecs = Ec(fc, wc_pcf)
+        p = FlatPlateNLPProblem(
+            mat, fc, fy, Es, Ecs, γ_c, λ,
+            18.0u"ft", 14.0u"ft", 20.0psf, 40.0psf,
+            [:edge, :interior], [126.0, 126.0],
+            2 * ustrip(u"m", 10.0u"ft"),
+            0.26, 0.70, 0.52,
+            0.75u"inch", bar_diameter(5),
+            0.90, 0.75, :L_360,
+            (6.0, 12.0), (10.0, 24.0),
+            [5],
+            MinVolume(),
+        )
+        feasible, obj, result = evaluate(p, [8.0, 16.0])
+        @test feasible
+        @test obj < Inf
+        mr = result.moment_results
+        int_i = findfirst(==(:interior), p.column_positions)
+        ext_i = findfirst(==(:edge), p.column_positions)
+        @test int_i !== nothing && ext_i !== nothing
+
+        # ACI 318-11 §13.6.9.2 Eq. (13-7), page 258.  This NLP fixture has
+        # no stored adjoining geometry, so the panel is its own neighbour:
+        # ℓ′2 = ℓ2, ℓ′n = ℓn, q′D = qD, q′L = qL.  The qDu·ℓ2·ℓn² terms
+        # cancel and Mu = 0.07·0.5·qLu·ℓ2·ℓn².  qL here is service live
+        # (mr.qL); do not leave it unfactored.
+        # ACI 318-11 §9.2.1, page 123: take the larger of Eq. (9-1) and
+        # Eq. (9-2).  Lr = S = R = 0 on this floor pattern.
+        qD = mr.qD
+        qL = mr.qL
+        ℓ2 = mr.l2
+        ℓn = mr.ln
+        # Eq. (9-2): U = 1.2D + 1.6L.  Longer span carries qLu = 1.6 qL;
+        # the shorter span is dead only (live does not enter).
+        qDu_12 = 1.2 * qD
+        qLu_12 = 1.6 * qL
+        Mub_1216 = abs(0.07 * (
+            (qDu_12 + 0.5 * qLu_12) * ℓ2 * ℓn^2 - qDu_12 * ℓ2 * ℓn^2))
+        # Eq. (9-1): U = 1.4D, so qLu = 0.  Equal spans → Mu = 0.
+        qDu_14 = 1.4 * qD
+        qLu_14 = zero(qL)
+        Mub_14D = abs(0.07 * (
+            (qDu_14 + 0.5 * qLu_14) * ℓ2 * ℓn^2 - qDu_14 * ℓ2 * ℓn^2))
+        Mub_137 = max(Mub_1216, Mub_14D)
+        @test ustrip(kip * u"ft", Mub_14D) ≈ 0.0 atol=1e-9
+        @test ustrip(kip * u"ft", Mub_137) ≈ ustrip(kip * u"ft", Mub_1216) rtol=1e-12
+        # 1.6× the unfactored live term.  On this fixture that is about
+        # 8.71 kip-ft, not the service-load 5.44 kip-ft.
+        Mub_service = 0.07 * 0.5 * qL * ℓ2 * ℓn^2
+        @test ustrip(kip * u"ft", Mub_137) / ustrip(kip * u"ft", Mub_service) ≈ 1.6 rtol=1e-8
+        @test ustrip(kip * u"ft", mr.unbalanced_moments[int_i]) ≈
+              ustrip(kip * u"ft", Mub_137) rtol=1e-8
+        @test ustrip(kip * u"ft", mr.unbalanced_moments[int_i]) != 0
+        Mub_03Mo = 0.3 * mr.M0
+        @test !isapprox(ustrip(kip * u"ft", mr.unbalanced_moments[int_i]),
+                        ustrip(kip * u"ft", Mub_03Mo); rtol=0.05)
+        # Exterior stays §13.6.3.6 (0.3 Mo), not Eq. (13-7).
+        @test ustrip(kip * u"ft", mr.unbalanced_moments[ext_i]) ≈
+              ustrip(kip * u"ft", Mub_03Mo) rtol=1e-8
     end
 end

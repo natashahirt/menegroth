@@ -646,6 +646,7 @@ end
         Mu_moderate = 300.0kip*u"ft"
         demand = MemberDemand(1;
             Mux   = ustrip(u"N*m", uconvert(u"N*m", Mu_moderate)),
+            Mux_neg = 0.0,  # sagging-only example
             Vu_strong = ustrip(u"N", uconvert(u"N", 50.0kip)),
         )
         geom = SteelMemberGeometry(fix.L_beam; Lb=fix.L_beam)
@@ -683,6 +684,7 @@ end
         ctx_shored = CompositeContext(fix.slab, fix.anchor, fix.L_beam; shored=true)
         demand = MemberDemand(1;
             Mux = ustrip(u"N*m", uconvert(u"N*m", 300.0kip*u"ft")),
+            Mux_neg = 0.0,  # sagging-only example
             Vu_strong = ustrip(u"N", uconvert(u"N", 50.0kip)),
         )
         geom = SteelMemberGeometry(fix.L_beam; Lb=fix.L_beam)

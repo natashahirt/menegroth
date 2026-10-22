@@ -30,6 +30,7 @@ using Asap  # custom units (kip, ksi, ksf, psf, etc.)
         # W-section beams
         include("steel_member/test_aisc_beam_examples.jl")
         include("steel_member/test_handcalc_beam.jl")
+        include("steel_member/test_phi_v_provision.jl")
         # HSS sections
         include("steel_member/test_hss_sections.jl")
         include("steel_member/test_hss_e7.jl")
@@ -72,6 +73,7 @@ using Asap  # custom units (kip, ksi, ksf, psf, etc.)
         include("concrete_beam/test_tbeam.jl")
         include("concrete_beam/test_tbeam_optimization.jl")
         include("concrete_beam/test_tbeam_tributary_flange.jl")
+        include("concrete_beam/test_signed_demands.jl")
     end
 
     # ─── Concrete Columns ────────────────────────────────────────────────
@@ -109,6 +111,10 @@ using Asap  # custom units (kip, ksi, ksf, psf, etc.)
         # ACI 318-11 audit — Tier 1 correctness gaps (encodes correct behaviour;
         # currently fails / @test_broken on main until fixes land)
         include("slabs/test_aci_audit_tier1.jl")
+        include("slabs/test_ddm_edge_mub.jl")
+        include("slabs/test_eq_13_7_adjoining.jl")
+        include("slabs/test_corner_punching.jl")
+        include("slabs/test_fea_combo_envelope.jl")
         # Punching / shear
         include("slabs/test_shear_transfer.jl")
         include("slabs/test_shear_studs.jl")
@@ -137,9 +143,11 @@ using Asap  # custom units (kip, ksi, ksf, psf, etc.)
         include("foundations/test_spread_aci.jl")
         include("foundations/test_strip_aci.jl")
         include("foundations/test_mat_aci.jl")
+        include("foundations/test_corner_punching.jl")
         include("foundations/test_rebar_quantity.jl")
         include("foundations/test_no_tension_springs.jl")
         include("foundations/test_types_load.jl")
+        include("foundations/test_foundation_safety_9_15.jl")
     end
 
     # ─── Optimization ────────────────────────────────────────────────────

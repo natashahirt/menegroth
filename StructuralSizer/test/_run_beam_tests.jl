@@ -7,4 +7,5 @@ using Test
     include("concrete_beam/test_cantilever_beam.jl")
     include("concrete_beam/test_doubly_reinforced.jl")
     include("concrete_beam/test_beam_deflection.jl")
+    include("concrete_beam/test_signed_demands.jl")
 end

@@ -273,12 +273,15 @@ import JuMP
         w_live = 0.8kip/u"ft"
         opts = NLPBeamOptions(min_depth=16.0u"inch", max_depth=30.0u"inch")
 
+        # Sagging-only (simply supported): default Mu_neg=Mu would reject a
+        # flange-in-compression T-beam on the web hogging face.
         # ── Without deflection constraint ──
-        r_no = size_rc_tbeam_nlp(Mu, Vu, bf, hf, opts)
+        r_no = size_rc_tbeam_nlp(Mu, Vu, bf, hf, opts; Mu_neg=0.0)
         @test r_no.status in (:converged, :optimal)
 
         # ── With deflection constraint ──
         r_defl = size_rc_tbeam_nlp(Mu, Vu, bf, hf, opts;
+            Mu_neg=0.0,
             w_dead=w_dead, w_live=w_live, L_span=L,
             defl_support=:simply_supported,
         )
@@ -309,8 +312,9 @@ import JuMP
         w_live = 1.5kip/u"ft"   # heavy live load
         opts = NLPBeamOptions(min_depth=14.0u"inch", max_depth=36.0u"inch")
 
-        r_str = size_rc_tbeam_nlp(Mu, Vu, bf, hf, opts)
+        r_str = size_rc_tbeam_nlp(Mu, Vu, bf, hf, opts; Mu_neg=0.0)
         r_def = size_rc_tbeam_nlp(Mu, Vu, bf, hf, opts;
+            Mu_neg=0.0,
             w_dead=w_dead, w_live=w_live, L_span=L,
         )
         @test r_str.status in (:converged, :optimal)

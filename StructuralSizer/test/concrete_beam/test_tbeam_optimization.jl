@@ -131,7 +131,9 @@ using Asap: kip, ksi, psf
             min_depth=14.0u"inch", max_depth=30.0u"inch",
         )
 
-        result = size_rc_tbeam_nlp(Mu, Vu, bf, hf, opts)
+        # Sagging-only example: hogging demand is zero (default Mu_neg=Mu
+        # would reject a flange-in-compression T-beam on the web face).
+        result = size_rc_tbeam_nlp(Mu, Vu, bf, hf, opts; Mu_neg=0.0)
 
         @test result isa RCTBeamNLPResult
         @test result.section isa RCTBeamSection
@@ -293,7 +295,8 @@ using Asap: kip, ksi, psf
 
         result = size_tbeams(Mu, Vu, geoms, opts;
                              flange_width=60.0u"inch",
-                             flange_thickness=6.0u"inch")
+                             flange_thickness=6.0u"inch",
+                             Mu_neg=[0.0])
 
         sec = result.sections[1]
 
@@ -306,11 +309,12 @@ using Asap: kip, ksi, psf
         cache.fy_ksi = 60.0
         cache.Es_ksi = 29000.0
         cache.φMn[1] = StructuralSizer._compute_φMn(sec, fc_psi, fy_psi)
+        cache.φMn_neg[1] = StructuralSizer._compute_φMn_neg(sec, fc_psi, fy_psi)
         cache.φVn_max[1] = StructuralSizer._compute_φVn_max(sec, fc_psi, 1.0)
         cache.εt[1] = StructuralSizer._compute_εt(sec, fc_psi, fy_psi)
         cache.depths[1] = ustrip(u"m", sec.h)
 
-        demand = RCBeamDemand(1; Mu=300.0, Vu=60.0)
+        demand = RCBeamDemand(1; Mu=300.0, Mu_neg=0.0, Vu=60.0)
         geom = ConcreteMemberGeometry(9.0u"m")
 
         feas = StructuralSizer.is_feasible(checker, cache, 1, sec, NWC_4000, demand, geom)
@@ -365,7 +369,8 @@ using Asap: kip, ksi, psf
         result = size_rc_tbeam_nlp(
             500.0kip * u"ft", 80.0kip,
             36.0u"inch", 4.0u"inch",
-            opts,
+            opts;
+            Mu_neg=0.0,
         )
 
         @test result isa RCTBeamNLPResult

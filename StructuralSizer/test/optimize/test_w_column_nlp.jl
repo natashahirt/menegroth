@@ -6,6 +6,7 @@
 using Test
 using StructuralSizer
 using Unitful
+using Asap: kip, to_inches, to_kipft
 
 @testset "W Section Column NLP Optimization" begin
     
@@ -233,6 +234,49 @@ using Unitful
         
         @test isfinite(grad_Ix_d)
         @test grad_Ix_d > 0  # Ix increases with depth
+    end
+
+    @testset "size_w_nlp threads Mux_neg hogging Chapter F" begin
+        # Leftover: NLP used deck-braced sagging Lb/Cb when Mux_neg>0.
+        # AISC 360-16 §F2.2 (corpus: aisc-360-16, page 103).
+        # ENGINEERING JUDGMENT: hogging Cb=1.0 (no bottom-flange Cb field).
+        L = 10.0u"ft"
+        geom = SteelMemberGeometry(L; Lb=3.0u"ft", Cb=1.67)
+        opts = NLPWOptions(require_compact=true, min_depth=20.0u"inch",
+                           max_depth=22.0u"inch", min_web_thickness=0.4u"inch",
+                           verbose=false)
+        Mux = 390.0kip * u"ft"
+        Pu = 50.0u"kN"
+        demand_hog = MemberDemand(1; Pu_c=Pu, Mux=Mux, Mux_neg=Mux)
+        p_hog = WColumnNLPProblem(demand_hog, geom, opts)
+        @test to_inches(p_hog.geometry.Lb) ≈ to_inches(L)
+        @test p_hog.geometry.Cb == 1.0
+        @test p_hog.Mux_kipft ≈ to_kipft(Mux) atol=1e-6
+
+        # Mux_neg=0 is sagging-only — keep deck-braced Lb/Cb.
+        demand_sag = MemberDemand(1; Pu_c=Pu, Mux=Mux, Mux_neg=0.0kip * u"ft")
+        p_sag = WColumnNLPProblem(demand_sag, geom, opts)
+        @test to_inches(p_sag.geometry.Lb) ≈ to_inches(3.0u"ft")
+        @test p_sag.geometry.Cb == 1.67
+        @test p_sag.Mux_kipft ≈ to_kipft(Mux) atol=1e-6
+
+        # Edge: Mux_neg > Mux sizes against the hogging face.
+        Mux_small = 100.0kip * u"ft"
+        demand_edge = MemberDemand(1; Pu_c=Pu, Mux=Mux_small, Mux_neg=Mux)
+        p_edge = WColumnNLPProblem(demand_edge, geom, opts)
+        @test p_edge.Mux_kipft ≈ to_kipft(Mux) atol=1e-6
+        @test to_inches(p_edge.geometry.Lb) ≈ to_inches(L)
+        @test p_edge.geometry.Cb == 1.0
+
+        # Production kwarg: size_w_nlp threads Mux_neg into the problem.
+        section = W("W21X55")
+        x = [ustrip(u"inch", section.d), ustrip(u"inch", section.bf),
+             ustrip(u"inch", section.tf), ustrip(u"inch", section.tw)]
+        g_hog = constraint_fns(p_hog, x)
+        g_sag = constraint_fns(p_sag, x)
+        @test g_hog[1] > g_sag[1]   # hogging LTB tightens H1 vs deck Lb
+        result = size_w_nlp(Pu, Mux_small, geom, opts; Mux_neg=Mux_small)
+        @test result.status in (:optimal, :feasible, :infeasible, :failed)
     end
     
 end

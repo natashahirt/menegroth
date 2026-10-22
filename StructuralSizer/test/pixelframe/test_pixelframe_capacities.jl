@@ -16,6 +16,7 @@
 using Test
 using StructuralSizer
 using Unitful
+using Asap  # kgCO2e for standalone runs
 using Asap: CompoundSection
 
 # ==============================================================================

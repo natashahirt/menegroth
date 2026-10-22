@@ -13,6 +13,7 @@
 using Test
 using StructuralSizer
 using Unitful
+using Asap  # kgCO2e and other custom units for standalone runs
 using Asap: CompoundSection
 import JuMP
 const MOI = JuMP.MOI
@@ -207,6 +208,32 @@ end
         )
         geom = ConcreteMemberGeometry(6.0u"m")
         @test is_feasible(checker, cache, j_best_Mu, catalog[j_best_Mu], mat, moderate_demand, geom)
+
+        # Item 9c — independent P and M at 0.6 φ each must fail H1-1a.
+        # AISC 360-16 §H1.1 Eq. H1-1a (corpus: aisc-360-16, page 133):
+        #   0.6 + (8/9)*0.6 = 1.133 > 1.0
+        h1_demand = MemberDemand(1;
+            Pu_c = cache.Pu[j_best_Mu] * 0.6 * u"N",
+            Mux  = cache.Mu[j_best_Mu] * 0.6 * u"N*m",
+            Vu_strong = 0.0u"N",
+        )
+        @test !is_feasible(checker, cache, j_best_Mu, catalog[j_best_Mu], mat, h1_demand, geom)
+        ur_h1 = StructuralSizer._pixelframe_h1_interaction(
+            0.6, 0.6, 0.0, 1.0, 1.0, 1.0)
+        @test ur_h1 ≈ (0.6 + (8 / 9) * 0.6) rtol=1e-12
+        @test ur_h1 > 1.0
+        # Old path: independent P and M at 0.6 φ each would each pass.
+        independent_ur = max(0.6, 0.6)
+        @test independent_ur ≤ 1.0
+        @test ur_h1 > independent_ur
+
+        expl = StructuralSizer.explain_feasibility(
+            checker, cache, j_best_Mu, catalog[j_best_Mu], mat, h1_demand, geom)
+        @test !expl.passed
+        pm = only(filter(c -> c.name == "pm_interaction", expl.checks))
+        @test !pm.passed
+        @test pm.ratio ≈ ur_h1 rtol=1e-12
+        @test expl.governing_check == "pm_interaction"
     end
 
     @testset "Infeasible demand — exceeds all section capacities" begin

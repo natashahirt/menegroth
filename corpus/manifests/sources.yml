@@ -117,6 +117,25 @@
   encrypted: false
   notes: "Guide to design of reinforced two-way slab systems for punching."
 
+# ACI 421.1R-99 — Shear Reinforcement for Slabs (Joint ACI-ASCE Committee 421).
+# Dropped directly into corpus/sources/code_guides/aci/, so `origin` == `source_path`
+# (the ingest copy is a no-op; sibling-.txt conversion + provenance still run).
+# Grounds the GENERAL-SHAPE critical-section method: Appendix B (Ac = d·Σl, and the
+# polar-moment analogs Jx≈Ix, Jy≈Iy by summation over straight segments B-1..B-3),
+# the eccentric-shear stress Eq. (3.2), and the γvx/γvy moment-transfer fractions
+# Eq. (3.3). This is the source ACI 421.3R-15 §4.7 points to for "shear critical
+# sections of any shape". Used for non-orthogonal and re-entrant corner punching.
+- id: aci-421-1r-99
+  origin: "corpus/sources/code_guides/aci/ACI-421.1R-99.pdf"
+  source_path: "corpus/sources/code_guides/aci/ACI-421.1R-99.pdf"
+  text_path:   corpus/text/code_guides/aci/ACI-421.1R-99.txt
+  family: aci
+  role: code_guides
+  edition: ACI 421.1R-99
+  tier: 1
+  encrypted: false
+  notes: "Shear Reinforcement for Slabs. Appendix B gives properties of critical sections of general shape (segment summation for Ac, Ix/Jx, Iy/Jy); Eq. 3.2/3.3 give eccentric-shear stress and γv. Grounds general-shape (non-orthogonal / re-entrant corner) punching."
+
 - id: aci-216r-89
   origin: "StructuralSizer/src/members/codes/aisc/reference/fire/216R-89 Guide for Determining the Fire Endurance of Concrete Elements.pdf"
   source_path: corpus/sources/code_guides/aci/ACI-216R-89.pdf

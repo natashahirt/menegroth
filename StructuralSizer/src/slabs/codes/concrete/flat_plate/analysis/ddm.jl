@@ -1660,18 +1660,22 @@ function _eq137_side_width(struc, partway, vi::Int, frame, dir, perp, end_m::Flo
         # but still covers the centerline.  §13.6.2.4 (page 253): with no next
         # column line the overhang branch stays run-based (run / 2).
         #
-        # A panel whose slab terminates BEFORE the panel centerline
-        # (run < line / 2) is not bounded by the centerline of panel required
-        # by §13.6.2.1, so its ℓ2 is not the §13.6.2.3 center-to-center
-        # transverse span: the geometry is ambiguous for Eq. (13-7).  Fail
-        # closed — throw the same §13.6.9.2 ArgumentError the other
-        # ambiguous-geometry branches use rather than returning the reduced,
-        # unconservative covered run.  `_eq137_transfer_moment` /
+        # A panel whose slab is PRESENT but terminates BEFORE the panel
+        # centerline (0 < run < line / 2) is not bounded by the centerline of
+        # panel required by §13.6.2.1, so its ℓ2 is not the §13.6.2.3
+        # center-to-center transverse span: the geometry is ambiguous for
+        # Eq. (13-7).  Fail closed — throw the same §13.6.9.2 ArgumentError the
+        # other ambiguous-geometry branches use rather than returning the
+        # reduced, unconservative covered run.  `_eq137_transfer_moment` /
         # `_frameline_end_transfer` catch it and turn it into NaN with an
         # `adjoining_spans_unresolved` :failure trace, so the panel is handed
-        # to the upstream fallback instead of sized on a shrunken ℓ2.
+        # to the upstream fallback instead of sized on a shrunken ℓ2.  A side
+        # with NO slab (run ≈ 0) is a different geometry — a free edge or
+        # re-entrant corner with no panel, and so no tributary to transfer
+        # (§13.6.2.4, page 253) — and keeps width 0, as before; the edge/corner
+        # classification and the §13.6.3.6 0.3 M0 floor (page 255) govern it.
         if isfinite(line)
-            if run < line / 2 - _EQ137_COINCIDE_M
+            if _EQ137_COINCIDE_M < run < line / 2 - _EQ137_COINCIDE_M
                 throw(ArgumentError(
                     "ACI 318-11 §13.6.9.2 Eq. (13-7) (corpus: aci-318-11, page 258): " *
                     "on side $σ the slab covers only $(round(run; digits = 3)) m of " *
@@ -1682,7 +1686,9 @@ function _eq137_side_width(struc, partway, vi::Int, frame, dir, perp, end_m::Flo
                     "for Eq. (13-7)."
                 ))
             end
-            width[σ] = line / 2
+            # run ≈ 0: no slab on this side -> width 0 (edge/re-entrant).
+            # run >= line / 2: slab covers the centerline -> half-strip line / 2.
+            width[σ] = run <= _EQ137_COINCIDE_M ? 0.0 : line / 2
         else
             width[σ] = run / 2
         end

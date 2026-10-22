@@ -395,6 +395,68 @@ function check_pattern_loading_requirement(moment_results; verbose::Bool=false, 
     end
 end
 
+TRACE_REGISTRY[(:resolve_analysis_method, :slab)] =
+    TracedFunctionMeta(:resolve_analysis_method, :slab,
+                       [:fallback, :failure], nothing, @__FILE__, @__LINE__)
+
+"""
+    resolve_analysis_method(method, struc, slab, columns, on_inapplicable;
+                            ρ_concrete, verbose=false, tc=nothing, slab_id="",
+                            caller="size_flat_plate!")
+        -> (method_used, reasons::Vector{String})
+
+Analysis method actually used for `slab`, and why it differs from `method`.
+
+Runs `enforce_method_applicability(method, ...)`.  When DDM (ACI 318-11
+§13.6.1) or EFM (§13.7) is not permitted for the layout (corpus: aci-318-11,
+page 252):
+
+- `on_inapplicable = :fallback` — returns `FEA()` with the applicability
+  violations as `reasons`, keeps the `@warn`, and emits a `:fallback` trace
+  event (`reason = "method_not_applicable"`) carrying the requested and used
+  methods and every violation.  ACI 318-11 §13.5.1 permits any procedure
+  satisfying equilibrium and geometric compatibility; the FEA shell model is
+  that general analysis.
+- `on_inapplicable = :error` — emits a `:failure` trace event with the same
+  data and rethrows the `DDMApplicabilityError` / `EFMApplicabilityError`.
+
+A permitted method is returned unchanged with empty `reasons`.  `caller`
+names the entry point in the trace data.
+"""
+function resolve_analysis_method(method, struc, slab, columns, on_inapplicable::Symbol;
+                                 ρ_concrete::Density = NWC_4000.ρ,
+                                 verbose::Bool = false,
+                                 tc = nothing,
+                                 slab_id::AbstractString = "",
+                                 caller::AbstractString = "size_flat_plate!")
+    _validate_on_inapplicable(on_inapplicable)
+    try
+        enforce_method_applicability(method, struc, slab, columns;
+                                     verbose = verbose, ρ_concrete = ρ_concrete)
+    catch e
+        (e isa DDMApplicabilityError || e isa EFMApplicabilityError) || rethrow()
+        requested = method_name(method)
+        reasons = copy(e.violations)
+        if on_inapplicable === :error
+            emit!(tc, :slab, "resolve_analysis_method", slab_id, :failure;
+                  reason = "method_not_applicable", caller = caller,
+                  method_requested = requested, on_inapplicable = "error",
+                  violations = reasons, n_violations = length(reasons))
+            rethrow()
+        end
+        fallback = FEA()
+        @warn "$(requested) not applicable — falling back to FEA" violations = join(reasons, "; ")
+        emit!(tc, :slab, "resolve_analysis_method", slab_id, :fallback;
+              reason = "method_not_applicable", caller = caller,
+              method_requested = requested, method_used = method_name(fallback),
+              violations = reasons, n_violations = length(reasons))
+        enforce_method_applicability(fallback, struc, slab, columns;
+                                     verbose = verbose, ρ_concrete = ρ_concrete)
+        return fallback, reasons
+    end
+    return method, String[]
+end
+
 """
     enforce_method_applicability(method::DDM, struc, slab, columns; verbose=false)
 
@@ -475,7 +537,7 @@ these are advisory, not blocking.
 
 ## `:frame` — Frame-Level + ACI Fractions (§8.10.5)
 Uses DDM-like ACI fractions to split total moments into CS/MS.  The fraction
-tables assume the same geometric regularity as DDM (§8.10.2):
+tables assume the same geometric regularity as DDM (ACI 318-11 §13.6.1):
 - Rectangular panels
 - Aspect ratio l₂/l₁ ≤ 2.0
 - Successive span ratio within 1/3
@@ -532,12 +594,10 @@ function _check_fea_approach_applicability(
         end
     end
 
-    # ── :area — projection/no_torsion without Wood-Armer is unconservative ──
+    # ── :area — projection/no_torsion is refused (constructor coerces to Wood–Armer)
     if da == :area && method.moment_transform in (:projection, :no_torsion)
-        @warn "FEA design_approach=:area with moment_transform=:$(method.moment_transform) does " *
-              "not envelope twisting moments (Mxy) in the design.  This can be " *
-              "unconservative for elements with significant torsion.  Consider " *
-              "using moment_transform=:wood_armer for area-based design."
+        error("FEA design_approach=:area with moment_transform=:$(method.moment_transform) " *
+              "is refused — unconservative for twisting. Use :wood_armer.")
     end
 
     return nothing

@@ -434,6 +434,10 @@ function _size_fnd_aci!(struc, f_idx, fnd, n_supp, demands, soil, opts;
     end
 
     if fnd.foundation_type == :mat
+        _mixed_sign_Pu(demands, fnd.support_indices) && error(
+            "Foundation $f_idx mixed-sign Pu on a mat cannot design tensile " *
+            "interface steel; form a strip or refuse (ACI 318-11 §15.8.1.2(b), " *
+            "corpus: aci-318-11, page 275).")
         # Mat foundation — all supports in one slab
         mat_demands = [demands[i] for i in fnd.support_indices]
         positions = _support_positions_xy(struc, fnd.support_indices)
@@ -447,12 +451,24 @@ function _size_fnd_aci!(struc, f_idx, fnd, n_supp, demands, soil, opts;
         _assign_foundation!(struc, f_idx, fnd, result, :spread, mat)
 
     elseif fnd.foundation_type in (:combined, :strip) || n_supp > 1
+        # ACI 318-11 §15.8.1.2(b) (corpus: aci-318-11, page 275): a mixed-sign
+        # couple must be a strip so tensile interface steel is designed, not
+        # omitted by an isolated spread.
         strip_demands = [demands[i] for i in fnd.support_indices]
-        positions = _support_positions_along_axis(struc, fnd.support_indices)
-        strip_axis = _support_strip_axis(struc, fnd.support_indices)
-        result = StructuralSizer.design_footing(StructuralSizer.StripFooting(),
-            strip_demands, positions, soil; opts=opts.strip_params, tc=tc,
-            strip_axis=strip_axis)
+        axes = _support_strip_axes(struc, fnd.support_indices)
+        results = map(axes) do axis
+            positions = _support_positions_along_axis(struc, fnd.support_indices, axis)
+            StructuralSizer.design_footing(StructuralSizer.StripFooting(),
+                strip_demands, positions, soil; opts=opts.strip_params, tc=tc,
+                strip_axis=axis)
+        end
+        result = _governing_strip_result(results)
+        if _mixed_sign_Pu(demands, fnd.support_indices)
+            (result isa StructuralSizer.StripFootingResult &&
+             ustrip(u"m^2", result.As_tensile) > 0) || error(
+                "Foundation $f_idx mixed-sign strip omitted As_tensile " *
+                "(ACI 318-11 §15.8.1.2(b), corpus: aci-318-11, page 275).")
+        end
         _assign_foundation!(struc, f_idx, fnd, result, :strip, mat)
     else
         @warn "Foundation type $(fnd.foundation_type) not wired for ACI, skipping"
@@ -515,39 +531,92 @@ function _assign_foundation!(struc, f_idx, fnd, result, ftype::Symbol, mat)
         foundation_type=ftype, group_id=fnd.group_id, volumes=volumes)
 end
 
-"""Return `:x` or `:y` with the same Δx/Δy rule as `_support_positions_along_axis`.
+"""Return `:x` or `:y` for a unique longer plan span.
 
-`Δx >= Δy` → `:x` (tie → X). `:y` only when Δy > Δx. Used as `strip_axis`
-for `design_footing(StripFooting, ...)` so punching / one-way shear see the
-same layout the positions were projected on.
+When Δx and Δy are equal within SI ulp (`1e-12` m, not a construction
+tolerance) this throws — callers must size both axes via
+`_support_strip_axes`. Named `c1` is ∥ global X (deci-311bd2d0).
 """
 function _support_strip_axis(struc, supp_indices::Vector{Int})
-    skel = struc.skeleton
-    pts = [skel.vertices[struc.supports[i].vertex_idx] for i in supp_indices]
-    length(pts) <= 1 && return :x
-    xs = [ustrip(u"m", Meshes.coords(p).x) for p in pts]
-    ys = [ustrip(u"m", Meshes.coords(p).y) for p in pts]
-    Δx = maximum(xs) - minimum(xs)
-    Δy = maximum(ys) - minimum(ys)
-    return Δx >= Δy ? :x : :y
+    axes = _support_strip_axes(struc, supp_indices)
+    length(axes) == 1 && return axes[1]
+    throw(ArgumentError(
+        "support Δx=Δy within SI ulp; size both axes via _support_strip_axes " *
+        "(do not default to :x)"))
 end
 
-"""Extract support positions along the longest axis (for strip footing layout)."""
-function _support_positions_along_axis(struc, supp_indices::Vector{Int})
+"""Plan spans Δx, Δy in metres from support vertices."""
+function _support_span_xy_m(struc, supp_indices::Vector{Int})
     skel = struc.skeleton
     pts = [skel.vertices[struc.supports[i].vertex_idx] for i in supp_indices]
+    length(pts) <= 1 && return (0.0, 0.0)
+    xs = [ustrip(u"m", Meshes.coords(p).x) for p in pts]
+    ys = [ustrip(u"m", Meshes.coords(p).y) for p in pts]
+    return (maximum(xs) - minimum(xs), maximum(ys) - minimum(ys))
+end
 
-    # Project onto principal axis (longest span)
+"""True when Δx and Δy match within a tight SI/ulp length, not construction.
+
+`1e-12` m is on the order of Float64 metre round-trip residue, not a
+1-inch / 1-ft layout tolerance.
+"""
+_strip_spans_tied(Δx::Float64, Δy::Float64) =
+    abs(Δx - Δy) <= max(1e-12, 4 * max(eps(Δx), eps(Δy), eps(1.0)))
+
+"""Axes to size for a strip: `[:x]`, `[:y]`, or `[:x, :y]` when Δx=Δy.
+
+Named `c1` remains ∥ global X; `:y` remaps across/along (deci-311bd2d0).
+Coincident supports (both spans ~0) stay `[:x]`.
+"""
+function _support_strip_axes(struc, supp_indices::Vector{Int})
+    Δx, Δy = _support_span_xy_m(struc, supp_indices)
+    if _strip_spans_tied(Δx, Δy)
+        abs(Δx) <= 1e-12 && abs(Δy) <= 1e-12 && return Symbol[:x]
+        return Symbol[:x, :y]
+    end
+    return Δx > Δy ? Symbol[:x] : Symbol[:y]
+end
+
+"""Keep the worse of two (or more) strip designs: higher utilization, then D, then volume."""
+function _governing_strip_result(results)
+    length(results) == 1 && return results[1]
+    foldl(results) do a, b
+        ua = StructuralSizer.utilization(a)
+        ub = StructuralSizer.utilization(b)
+        ua > ub + 1e-12 && return a
+        ub > ua + 1e-12 && return b
+        da = ustrip(u"m", StructuralSizer.footing_depth(a))
+        db = ustrip(u"m", StructuralSizer.footing_depth(b))
+        da > db + 1e-12 && return a
+        db > da + 1e-12 && return b
+        va = ustrip(u"m^3", StructuralSizer.concrete_volume(a))
+        vb = ustrip(u"m^3", StructuralSizer.concrete_volume(b))
+        return va ≥ vb ? a : b
+    end
+end
+
+"""Extract support positions along `axis` (`:x` or `:y`) for strip layout."""
+function _support_positions_along_axis(struc, supp_indices::Vector{Int}, axis::Symbol)
+    skel = struc.skeleton
+    pts = [skel.vertices[struc.supports[i].vertex_idx] for i in supp_indices]
     if length(pts) <= 1
         return [0.0u"m"]
     end
-
-    # Use X or Y depending on which has larger range
     xs = [ustrip(u"m", Meshes.coords(p).x) for p in pts]
     ys = [ustrip(u"m", Meshes.coords(p).y) for p in pts]
-    coords = _support_strip_axis(struc, supp_indices) === :x ? xs : ys
+    axis === :x || axis === :y ||
+        throw(ArgumentError("strip axis must be :x or :y; got :$axis"))
+    coords = axis === :x ? xs : ys
     origin = minimum(coords)
     return [(c - origin) * u"m" for c in coords]
+end
+
+"""Extract support positions along the unique longer axis (errors if Δx=Δy)."""
+function _support_positions_along_axis(struc, supp_indices::Vector{Int})
+    axes = _support_strip_axes(struc, supp_indices)
+    length(axes) == 1 || throw(ArgumentError(
+        "support Δx=Δy within SI ulp; pass strip_axis explicitly (do not default to :x)"))
+    return _support_positions_along_axis(struc, supp_indices, axes[1])
 end
 
 """Extract support positions as (x, y) tuples (for mat footing layout)."""
@@ -574,6 +643,9 @@ end
 """Print rebar schedule line for a strip footing (longitudinal + transverse areas)."""
 function _print_rebar_line(r::StructuralSizer.StripFootingResult, du)
     println("  Rebar: As_long=$(fmt(du, :rebar_area, r.As_long_bot)), As_trans=$(fmt(du, :rebar_area, r.As_trans))")
+    if ustrip(u"m^2", r.As_tensile) > 0
+        println("  As_tensile=$(fmt(du, :rebar_area, r.As_tensile)) (ACI 318-11 §15.8.1.2(b))")
+    end
 end
 """Print rebar schedule line for a mat footing (x- and y-direction areas)."""
 function _print_rebar_line(r::StructuralSizer.MatFootingResult, du)
@@ -836,6 +908,17 @@ function size_foundations_grouped!(
                         _size_fnd_is!(struc, f_idx, fnd, n_supp, demands, soil,
                                       concrete, rebar, pier_width; tc=tc, kwargs...)
                     end
+                end
+                if _mixed_sign_Pu(demands, group_supports)
+                    has_tensile = any(f_indices) do fi
+                        r = struc.foundations[fi].result
+                        r isa StructuralSizer.StripFootingResult &&
+                            ustrip(u"m^2", r.As_tensile) > 0
+                    end
+                    has_tensile || error(
+                        "Foundation group $gid mixed-sign couple did not form a strip " *
+                        "with designed As_tensile (ACI 318-11 §15.8.1.2(b), " *
+                        "corpus: aci-318-11, page 275); refuse rather than omit the steel.")
                 end
                 r = struc.foundations[f_indices[1]].result
                 StructuralSizer.emit!(tc, :workflow, "size_foundations_grouped!", "foundation_group_$(gid)", :decision;

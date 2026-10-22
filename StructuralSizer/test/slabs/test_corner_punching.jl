@@ -449,6 +449,17 @@ const HAS_STRUCTURAL_SYNTHESIZER = let ok = true
     ok
 end
 
+# Geometry must satisfy ACI 318-11 §13.6.1.1 (aci-318-11, p. 252): at least
+# three continuous spans each way. A one-span grid is outside that limit, so
+# both size_flat_plate!(method=RuleOfThumb()) and size_flat_plate!(method=DDM())
+# fall back to FEA. RuleOfThumb() wraps DDM(:simplified) and is not exempt.
+# The oracles must use the analysis variant production actually ran; a
+# forced-DDM result is not comparable to FEA vu. gen_medium_office divides the
+# 20×30 ft plan by the bay counts, so 3×3 keeps the panel aspect.
+# `classify_column_position` tags a column `:corner` only when two free edges
+# are not collinear. A straight perimeter is two collinear graph edges and
+# must stay `:edge` (ACI 318-11 §11.11.1.2 three-sided section). On this 3×3
+# grid that is 4 corners, 8 edge columns, and 4 interior columns.
 @testset "Corner punching — pipeline / RuleOfThumb pass Muy" begin
     if !HAS_STRUCTURAL_SYNTHESIZER
         # LOUD SKIP (safety-critical oracle).  This testset is the only coverage
@@ -465,7 +476,7 @@ end
               "in this run — do not read the skip as a pass."
         @test_broken false
     else
-        skel = gen_medium_office(20.0u"ft", 30.0u"ft", 10.0u"ft", 1, 1, 1)
+        skel = gen_medium_office(20.0u"ft", 30.0u"ft", 10.0u"ft", 3, 3, 1)
         struc = BuildingStructure(skel)
         opts = FlatPlateOptions(min_h = 7.0u"inch")
         initialize!(struc; floor_type = :flat_plate, floor_opts = opts)
@@ -475,10 +486,17 @@ end
         end
         slab = first(struc.slabs)
         col_opts = ConcreteColumnOptions()
+        # Straight-edge columns must be :edge. A regression that counts
+        # collinear perimeter segments as a corner shows up here, before
+        # the punching oracle filters them out.
+        @test count(c -> c.position == :corner, struc.columns) == 4
+        @test count(c -> c.position == :edge, struc.columns) == 8
+        @test count(c -> c.position == :interior, struc.columns) == 4
 
         rot = SS.size_flat_plate!(struc, slab, col_opts;
                                   method = RuleOfThumb(), opts = opts, verbose = false)
         @test !isnothing(rot.slab_result)
+        @test rot.method_used isa RuleOfThumb && rot.method_used.analysis isa DDM
         details = rot.slab_result.punching_check.details
         @test !isempty(details)
 
@@ -489,8 +507,8 @@ end
         ρc = mat.concrete.ρ
         Ecs = Ec(fc, ustrip(pcf, ρc))
         cols = SS.find_supporting_columns(struc, Set(slab.cell_indices))
-        primary = SS.run_moment_analysis(DDM(), struc, slab, cols, h, fc, Ecs, ρc)
-        secondary = SS.run_secondary_moment_analysis(DDM(), struc, slab, cols, h, fc, Ecs, ρc)
+        primary = SS.run_moment_analysis(DDM(:simplified), struc, slab, cols, h, fc, Ecs, ρc)
+        secondary = SS.run_secondary_moment_analysis(DDM(:simplified), struc, slab, cols, h, fc, Ecs, ρc)
 
         n_corners = 0
         for (i, col) in enumerate(cols)
@@ -515,7 +533,7 @@ end
         @test n_corners == 4
 
         # Iterative DDM pipeline on a fresh 20×30: same corner oracle.
-        skel2 = gen_medium_office(20.0u"ft", 30.0u"ft", 10.0u"ft", 1, 1, 1)
+        skel2 = gen_medium_office(20.0u"ft", 30.0u"ft", 10.0u"ft", 3, 3, 1)
         struc2 = BuildingStructure(skel2)
         opts2 = FlatPlateOptions(min_h = 7.0u"inch")
         initialize!(struc2; floor_type = :flat_plate, floor_opts = opts2)
@@ -527,6 +545,7 @@ end
         pipe = SS.size_flat_plate!(struc2, slab2, ConcreteColumnOptions();
                                    method = DDM(), opts = opts2, verbose = false)
         @test !isnothing(pipe.slab_result)
+        @test pipe.method_used isa DDM
         h2 = pipe.h_final
         d2 = effective_depth(h2; cover = opts2.cover,
                              bar_diameter = bar_diameter(opts2.bar_size))
@@ -535,6 +554,7 @@ end
         sec2  = SS.run_secondary_moment_analysis(DDM(), struc2, slab2, cols2, h2, fc, Ecs, ρc)
         details2 = pipe.slab_result.punching_check.details
         n_c2 = 0
+        @test count(c -> c.position == :corner, struc2.columns) == 4
         for (i, col) in enumerate(cols2)
             col.position == :corner || continue
             n_c2 += 1

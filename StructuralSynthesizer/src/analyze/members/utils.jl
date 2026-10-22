@@ -22,25 +22,57 @@ function initialize_segments!(struc::BuildingStructure{T}; default_Cb=1.0) where
 end
 
 """
-    initialize_members!(struc; default_Kx=1.0, default_Ky=1.0)
+    initialize_members!(struc; default_Kx=1.0, default_Ky=1.0, wall_thickness=nothing)
 
-Initialize typed members (Beam, Column, Strut) from skeleton edge groups.
+Initialize typed members (Beam, Column, Strut, Wall) from skeleton edge groups.
 
 Uses skeleton `groups_edges` to determine member type:
 - `:beams` → `Beam` (with role classification)
 - `:columns` → `Column` (with position classification)
 - `:braces` → `Strut`
+- `:walls` → `Wall`
 
-Each segment becomes one member by default (1:1 mapping).
+A `:walls` edge never becomes a `Beam`. An edge index that is in `:walls`
+and also in `:beams`, `:columns`, or `:braces` throws `ArgumentError`
+naming that edge index. The beam, column, or brace is not dropped. Each
+wall edge, or each shattered chain of `:walls` edges, becomes one `Wall`.
+`segment_indices` point at `struc.segments`, same as beams. `Wall.story`
+is the 0-based story whose elevation is nearest the plan-line Z. Both
+ends of a `:walls` edge already share that Z. The nearest distance must
+be at most 1e-4 m; a larger gap throws `ArgumentError`. This does not
+use [`edge_story`](@ref) or its 0.1 m window (columns still do). Every
+edge in a chain must resolve to the same story.
+`base.L` is the pier height from [`_wall_pier_height`](@ref): the next
+higher story whose `Story.faces` is non-empty, minus this story's floor
+elevation. Stories that contain only vertices are skipped. The plan edge
+length is not used. Plan endpoints `x1,y1,x2,y2` are the chain-end
+`vertex_coords` in metres (the `story_plate_geometry` datum). `concrete`
+stays `nothing`.
+
+`wall_thickness` is required, and must already have the structure length
+type `T`, when `groups_edges[:walls]` is non-empty. [`DesignParameters`](@ref)
+has no wall thickness. `wall_thickness = nothing` with a non-empty `:walls`
+group throws `ArgumentError` on purpose. There is no default thickness.
+An empty `:walls` group leaves `struc.walls` empty and does not read
+`wall_thickness`.
+
+[`to_wall_line`](@ref) maps `WallLine.story = Wall.story + 1` because
+`WallLine.story` is 1-based. This function stores the 0-based index and
+does not apply that shift.
+
+Other segments stay 1:1 with a member, with shattered chains merged the
+same way as beams.
 """
-function initialize_members!(struc::BuildingStructure{T}; 
-                             default_Kx=1.0, default_Ky=1.0) where T
+function initialize_members!(struc::BuildingStructure{T};
+                             default_Kx=1.0, default_Ky=1.0,
+                             wall_thickness=nothing) where T
     skel = struc.skeleton
     
     # Clear existing members
     empty!(struc.beams)
     empty!(struc.columns)
     empty!(struc.struts)
+    empty!(struc.walls)
     
     # Ensure geometry cache is available (always succeeds, even for faceless
     # beam-only skeletons — rebuild produces well-typed empty fields).
@@ -54,6 +86,23 @@ function initialize_members!(struc::BuildingStructure{T};
     beam_edges = Set(get(skel.groups_edges, :beams, Int[]))
     column_edges = Set(get(skel.groups_edges, :columns, Int[]))
     brace_edges = Set(get(skel.groups_edges, :braces, Int[]))
+    wall_edges = Set(get(skel.groups_edges, :walls, Int[]))
+    # One edge index in two groups would become only a Wall and the beam,
+    # column, or brace would disappear. Name the edge and refuse.
+    for eidx in sort!(collect(wall_edges))
+        others = String[]
+        eidx in beam_edges && push!(others, ":beams")
+        eidx in column_edges && push!(others, ":columns")
+        eidx in brace_edges && push!(others, ":braces")
+        isempty(others) && continue
+        throw(ArgumentError(
+            "initialize_members!: edge index $eidx is in :walls and also in " *
+            join(others, ", ") * "."))
+    end
+    # Nothing when :walls is empty. Throws if the group is non-empty and
+    # wall_thickness is nothing — no default thickness. DesignParameters
+    # has no wall-thickness field; the throw is on purpose.
+    thickness = _require_wall_thickness(T, wall_edges, wall_thickness)
     
     # Build reverse lookup: edge_idx → chain_id (for shattered edges)
     edge_to_chain = Dict{Int, UInt64}()
@@ -93,38 +142,50 @@ function initialize_members!(struc::BuildingStructure{T};
             
             # Collect segment indices for the chain (ordered)
             chain_seg_indices = [edge_to_seg[eidx] for eidx in chain_edge_indices]
-            chain_segs = [struc.segments[si] for si in chain_seg_indices]
-            
-            # Compute total length and governing unbraced length
-            L_total = sum(s.L for s in chain_segs)
-            Lb_gov = maximum(s.Lb for s in chain_segs)
-            Cb_gov = minimum(s.Cb for s in chain_segs)
-            
-            # Determine group from the first edge in the chain
-            first_edge = chain_edge_indices[1]
-            
-            if first_edge in column_edges
-                _create_chain_column!(struc, skel, chain_seg_indices, chain_edge_indices,
-                                      L_total, Lb_gov, Cb_gov, default_Kx, default_Ky, vc, efc)
-            elseif first_edge in brace_edges
-                strut = Strut(chain_seg_indices, L_total;
-                             Lb=Lb_gov, Kx=default_Kx, Ky=default_Ky, Cb=Cb_gov,
-                             brace_type=:both)
-                push!(struc.struts, strut)
+
+            # :walls is checked before the beam fall-through. A mixed chain
+            # throws inside _chain_is_all_walls rather than becoming a Beam.
+            # Pier height is story-to-story, so the plan length is not computed
+            # on this path.
+            if _chain_is_all_walls(chain_edge_indices, wall_edges)
+                _push_wall!(struc, skel, chain_seg_indices, chain_edge_indices,
+                            thickness, vc)
             else
-                beam = Beam(chain_seg_indices, L_total;
-                           Lb=Lb_gov, Kx=default_Kx, Ky=default_Ky, Cb=Cb_gov)
-                push!(struc.beams, beam)
-                push!(beam_class_info,
-                      (length(struc.beams),
-                       _chain_endpoint_vertices(skel, chain_edge_indices),
-                       collect(chain_edge_indices)))
+                chain_segs = [struc.segments[si] for si in chain_seg_indices]
+
+                # Compute total length and governing unbraced length
+                L_total = sum(s.L for s in chain_segs)
+                Lb_gov = maximum(s.Lb for s in chain_segs)
+                Cb_gov = minimum(s.Cb for s in chain_segs)
+
+                # Determine group from the first edge in the chain
+                first_edge = chain_edge_indices[1]
+
+                if first_edge in column_edges
+                    _create_chain_column!(struc, skel, chain_seg_indices, chain_edge_indices,
+                                          L_total, Lb_gov, Cb_gov, default_Kx, default_Ky, vc, efc)
+                elseif first_edge in brace_edges
+                    strut = Strut(chain_seg_indices, L_total;
+                                 Lb=Lb_gov, Kx=default_Kx, Ky=default_Ky, Cb=Cb_gov,
+                                 brace_type=:both)
+                    push!(struc.struts, strut)
+                else
+                    beam = Beam(chain_seg_indices, L_total;
+                               Lb=Lb_gov, Kx=default_Kx, Ky=default_Ky, Cb=Cb_gov)
+                    push!(struc.beams, beam)
+                    push!(beam_class_info,
+                          (length(struc.beams),
+                           _chain_endpoint_vertices(skel, chain_edge_indices),
+                           collect(chain_edge_indices)))
+                end
             end
         else
             # Standalone edge (no chain) — 1:1 mapping as before
             push!(processed_edges, edge_idx)
             
-            if edge_idx in column_edges
+            if edge_idx in wall_edges
+                _push_wall!(struc, skel, [seg_idx], [edge_idx], thickness, vc)
+            elseif edge_idx in column_edges
                 v1, v2 = skel.edge_indices[edge_idx]
                 z1 = vc[v1, 3]
                 z2 = vc[v2, 3]
@@ -174,15 +235,329 @@ function initialize_members!(struc::BuildingStructure{T};
 
     n_total = length(struc.beams) + length(struc.columns) + length(struc.struts)
     n_chains = length(skel.edge_chains)
-    @debug "Initialized members from $(length(struc.segments)) segments" beams=length(struc.beams) columns=length(struc.columns) struts=length(struc.struts) chains=n_chains
+    @debug "Initialized members from $(length(struc.segments)) segments" beams=length(struc.beams) columns=length(struc.columns) struts=length(struc.struts) walls=length(struc.walls) chains=n_chains
     
     # Link columns across stories (col.column_above)
     link_column_stack!(struc)
     
     # Compute Voronoi tributary areas for columns
     compute_column_tributaries!(struc)
+
+    # Link walls across stories (wall.wall_above). Last, so every Wall exists.
+    link_wall_stack!(struc)
     
     return struc
+end
+
+# Exact-match tolerance [m] on plan-line Z (bare metres). Copied from the
+# elevation exact-match tolerance in `_find_level_idx` (1e-4). A vertical pier
+# is metres tall and fails the per-edge |z2-z1| check; float noise on a
+# horizontal edge does not. The same tolerance is the maximum distance from a
+# wall's plan-line Z to the nearest story elevation. `edge_story` uses a 0.1 m
+# window and the first hit in the story dict; walls do not.
+const _WALL_PLAN_DZ_TOL_M = 1e-4
+
+"""
+    _chain_is_all_walls(edge_indices, wall_edges) -> Bool
+
+`true` when every edge is in the `:walls` group. `false` when none are.
+A mix throws `ArgumentError` so a `:walls` edge cannot become a `Beam`.
+"""
+function _chain_is_all_walls(edge_indices, wall_edges)::Bool
+    n_wall = count(e -> e in wall_edges, edge_indices)
+    n_wall == 0 && return false
+    n_wall == length(edge_indices) && return true
+    throw(ArgumentError(
+        "initialize_members!: chain mixes :walls edges with other groups " *
+        "($n_wall of $(length(edge_indices)) edges are :walls). " *
+        "A :walls edge must not become a Beam."))
+end
+
+"""
+    _require_wall_thickness(::Type{T}, wall_edges, wall_thickness) -> Union{T,Nothing}
+
+`nothing` when `wall_edges` is empty (the thickness is not read). When the
+`:walls` group is non-empty, `wall_thickness` must already be a positive `T`.
+`nothing` throws `ArgumentError`. There is no default thickness and no unit
+conversion.
+"""
+function _require_wall_thickness(::Type{T}, wall_edges, wall_thickness) where T
+    isempty(wall_edges) && return nothing
+    if isnothing(wall_thickness)
+        throw(ArgumentError(
+            "initialize_members!: groups_edges[:walls] is non-empty but " *
+            "wall_thickness is nothing. Pass a wall thickness; there is no default."))
+    end
+    wall_thickness isa T || throw(ArgumentError(
+        "initialize_members!: wall_thickness must be a $T, got " *
+        "$(typeof(wall_thickness)) ($(repr(wall_thickness)))."))
+    _length_positive(wall_thickness) || throw(ArgumentError(
+        "initialize_members!: wall_thickness must be positive, got $wall_thickness"))
+    return wall_thickness
+end
+
+"""True when `x` is a strictly positive length (bare number or Unitful length)."""
+function _length_positive(x)
+    x isa Unitful.Quantity && return ustrip(u"m", x) > 0
+    x isa Real && return x > zero(x)
+    return false
+end
+
+"""
+True when two elevations of the same type agree within 1e-4 m
+(the `_find_level_idx` exact-match tolerance).
+"""
+function _elevations_agree(a::T, b::T) where T
+    d = abs(a - b)
+    d_m = d isa Unitful.Quantity ? abs(ustrip(u"m", d)) : Float64(abs(d))
+    return d_m <= 1e-4
+end
+
+"""
+    _wall_pier_height(skel, story::Int) -> T
+
+Pier height of a wall on 0-based `story`: elevation of the next higher story
+whose `Story.faces` is non-empty, minus this story's elevation. Not the plan
+edge length.
+
+`rebuild_stories!` inserts a story for every unique vertex Z rounded to 1 cm,
+including a vertex that belongs to no face. Starting at `story + 1`, skip
+those stories. The story above is the next story index with a non-empty
+`faces` vector.
+
+Index rule, copied from `rebuild_stories!` and `_find_level_idx`:
+`stories_z` is ascending and `stories_z[i]` is the floor of 0-based story
+`i - 1` (`z_to_idx = i - 1`; `_find_level_idx` returns `i - 1`).
+`skeleton.stories` uses that same key, and `stories[k].elevation` is that
+floor. The cross-check uses the two story keys whose elevations are
+subtracted — this story and the story above — not the next key:
+
+- this floor = `stories[story].elevation` = `stories_z[story + 1]`
+- the story above = `stories[above].elevation` = `stories_z[above + 1]`
+
+If no higher story has faces, either elevation is missing, the two stores
+disagree on an elevation that is used, or the height is not positive, throws
+`ArgumentError`.
+"""
+function _wall_pier_height(skel::BuildingSkeleton{T}, story::Int) where T
+    story >= 0 || throw(ArgumentError(
+        "initialize_members!: wall story $story is negative"))
+    haskey(skel.stories, story) || throw(ArgumentError(
+        "initialize_members!: no skeleton Story at 0-based index $story"))
+    # Next story index at or above story+1 whose faces are non-empty.
+    # A vertex-only story is not a floor; pier stiffness scales as 1/H^3.
+    above_key = nothing
+    for k in sort!(collect(keys(skel.stories)))
+        k <= story && continue
+        if !isempty(skel.stories[k].faces)
+            above_key = k
+            break
+        end
+    end
+    if isnothing(above_key)
+        throw(ArgumentError(
+            "initialize_members!: wall on 0-based story $story has no higher " *
+            "story with faces. Pier height is this story's elevation to the " *
+            "next story whose Story.faces is non-empty. Stories that contain " *
+            "only vertices are skipped. The plan edge length is not used."))
+    end
+    floor_i = story + 1       # 1-based stories_z index of this floor
+    above_i = above_key + 1   # 1-based stories_z index of the story above
+    n = length(skel.stories_z)
+    if floor_i < 1 || floor_i > n || above_i < 1 || above_i > n
+        throw(ArgumentError(
+            "initialize_members!: wall on 0-based story $story has no story-above " *
+            "elevation (need stories_z[$floor_i] and stories_z[$above_i] for " *
+            "stories $story and $above_key; stories_z has length $n). " *
+            "Pier height is the vertical distance from this story's floor to " *
+            "the next story with faces. The plan edge length is not used."))
+    end
+    z_floor = skel.stories[story].elevation
+    z_above = skel.stories[above_key].elevation
+    z_floor_vec = skel.stories_z[floor_i]
+    z_above_vec = skel.stories_z[above_i]
+    if !_elevations_agree(z_floor, z_floor_vec) || !_elevations_agree(z_above, z_above_vec)
+        throw(ArgumentError(
+            "initialize_members!: story elevations disagree between stories and " *
+            "stories_z for the elevations used (0-based story $story → $above_key; " *
+            "stories $z_floor → $z_above, stories_z[$floor_i]=$z_floor_vec, " *
+            "stories_z[$above_i]=$z_above_vec). Refusing to guess the pier height."))
+    end
+    height = z_above - z_floor
+    _length_positive(height) || throw(ArgumentError(
+        "initialize_members!: non-positive pier height $height from story " *
+        "$story to story $above_key"))
+    return height
+end
+
+"""
+Absolute difference [m] between a story elevation (`T`, possibly Unitful)
+and a bare metre coordinate from `vertex_coords` column 3.
+"""
+function _abs_elev_diff_m(elev, z_m::Float64)
+    elev_m = elev isa Unitful.Quantity ? Float64(ustrip(u"m", elev)) : Float64(elev)
+    return abs(elev_m - z_m)
+end
+
+"""
+    _wall_plan_z_m(skel, eidx, vc) -> Float64
+
+Plan-line Z [m] of one `:walls` edge. Both ends already share Z within
+`_WALL_PLAN_DZ_TOL_M`; the value used is their average.
+"""
+function _wall_plan_z_m(skel, eidx::Int, vc::Matrix{Float64})
+    v1, v2 = skel.edge_indices[eidx]
+    return (vc[v1, 3] + vc[v2, 3]) / 2
+end
+
+"""
+    _story_nearest_plan_z(skel, z_m) -> Int
+
+0-based story whose elevation is nearest `z_m` [m].
+
+The story dict is not ordered by elevation, so this searches every story
+and keeps the minimum distance. A nearest distance greater than
+`_WALL_PLAN_DZ_TOL_M` (1e-4 m) throws `ArgumentError`. Two stories at that
+same minimum also throw: dict order must not choose. The 0.1 m
+[`edge_story`](@ref) window is not used.
+"""
+function _story_nearest_plan_z(skel::BuildingSkeleton, z_m::Float64)::Int
+    isempty(skel.stories) && throw(ArgumentError(
+        "initialize_members!: cannot assign Wall.story; the skeleton has no stories."))
+    best_d = Inf
+    for (_, story) in skel.stories
+        d = _abs_elev_diff_m(story.elevation, z_m)
+        d < best_d && (best_d = d)
+    end
+    if best_d > _WALL_PLAN_DZ_TOL_M
+        throw(ArgumentError(
+            "initialize_members!: wall plan-line Z $(z_m) m is $(best_d) m from " *
+            "the nearest story elevation. Wall.story is the story whose elevation " *
+            "is nearest that Z, and the distance must be ≤ $(_WALL_PLAN_DZ_TOL_M) m. " *
+            "The 0.1 m edge_story window is not used."))
+    end
+    keys = Int[]
+    for (k, story) in skel.stories
+        _abs_elev_diff_m(story.elevation, z_m) == best_d && push!(keys, k)
+    end
+    if length(keys) != 1
+        throw(ArgumentError(
+            "initialize_members!: wall plan-line Z $(z_m) m is equally near " *
+            "$(length(keys)) story elevations (0-based stories $(join(sort(keys), ", "))). " *
+            "Refusing to pick one by story-dict order."))
+    end
+    return keys[1]
+end
+
+"""
+    _push_wall!(struc, skel, seg_indices, edge_indices, thickness, vc)
+
+Append one `Wall` for a plan edge or a shattered `:walls` chain.
+
+`Wall.story` is the 0-based story whose elevation is nearest the plan-line
+Z ([`_story_nearest_plan_z`](@ref)). Both ends already share that Z.
+[`edge_story`](@ref) is not consulted. `base.L` is
+[`_wall_pier_height`](@ref). Endpoints are the chain-end `vertex_coords`
+columns 1–2 (metres), via [`_chain_endpoint_vertices`](@ref). `concrete`
+stays `nothing`. A vertical edge (`|z2-z1|` above `_WALL_PLAN_DZ_TOL_M`)
+throws `ArgumentError`.
+"""
+function _push_wall!(struc::BuildingStructure{T}, skel::BuildingSkeleton{T},
+                     seg_indices::Vector{Int}, edge_indices, thickness,
+                     vc::Matrix{Float64}) where T
+    thickness isa T || throw(ArgumentError(
+        "initialize_members!: wall thickness is missing or not a $T " *
+        "(got $(repr(thickness)))"))
+    for eidx in edge_indices
+        v1, v2 = skel.edge_indices[eidx]
+        dz = abs(vc[v1, 3] - vc[v2, 3])
+        dz <= _WALL_PLAN_DZ_TOL_M || throw(ArgumentError(
+            "initialize_members!: :walls edge $eidx is not a plan line " *
+            "(|z2-z1| = $(dz) m). A vertical :walls edge is rejected; pier " *
+            "height comes from story elevations, not the edge length."))
+    end
+    # Nearest plan-line elevation. edge_story's first hit inside 0.1 m can
+    # assign a floor 5 cm away; pier stiffness then scales as 1/H^3.
+    # Columns still use edge_story.
+    story = nothing
+    for eidx in edge_indices
+        s = _story_nearest_plan_z(skel, _wall_plan_z_m(skel, eidx, vc))
+        if story === nothing
+            story = s
+        elseif s != story
+            throw(ArgumentError(
+                "initialize_members!: wall chain edges do not share a story " *
+                "(edge $(first(edge_indices)) is 0-based story $story, " *
+                "edge $eidx is story $s). Wall.story is the story whose " *
+                "elevation is nearest the plan-line Z."))
+        end
+    end
+    story isa Int || throw(ArgumentError(
+        "initialize_members!: wall has no edges, so Wall.story cannot be assigned."))
+    height = _wall_pier_height(skel, story)
+    va, vb = _chain_endpoint_vertices(skel, edge_indices)
+    x1, y1 = vc[va, 1], vc[va, 2]
+    x2, y2 = vc[vb, 1], vc[vb, 2]
+    # Same numerical-degeneracy floor as `_WALLS_BRIDGE_DEGEN_TOL` (1e-9 m).
+    hypot(x2 - x1, y2 - y1) > _WALLS_BRIDGE_DEGEN_TOL || throw(ArgumentError(
+        "initialize_members!: wall plan line has zero length " *
+        "($(x1), $(y1))–($(x2), $(y2)) m"))
+    wall = Wall(seg_indices, height;
+                thickness=thickness,
+                x1=x1, y1=y1, x2=x2, y2=y2,
+                story=story,
+                concrete=nothing)
+    push!(struc.walls, wall)
+    return wall
+end
+
+"""
+    link_wall_stack!(struc::BuildingStructure)
+
+Populate `wall.wall_above` by matching the rounded plan center
+([`wall_center`](@ref), [`COORD_DIGITS`](@ref)) and the next story.
+
+`Wall.story` is the 0-based story index from the plan-line Z (nearest
+elevation, not [`edge_story`](@ref)). The wall on story `s` links to the
+wall with the same rounded center on story `s + 1`. This is not
+`WallLine.story`: [`to_wall_line`](@ref) sets
+`WallLine.story = Wall.story + 1` because `WallLine` is 1-based. Do not add
+a further +1 here.
+
+Two walls on the same story with the same rounded center throw
+`ArgumentError` instead of overwriting the lookup. A wall with nothing
+above keeps `wall_above = nothing`.
+
+Called at the end of [`initialize_members!`](@ref).
+"""
+function link_wall_stack!(struc::BuildingStructure)
+    WallT = eltype(struc.walls)
+    lookup = Dict{Tuple{Float64, Float64, Int}, WallT}()
+    for w in struc.walls
+        cx, cy = wall_center(w)
+        key = (round(cx; digits=COORD_DIGITS),
+               round(cy; digits=COORD_DIGITS),
+               w.story)
+        if haskey(lookup, key)
+            throw(ArgumentError(
+                "link_wall_stack!: two walls on 0-based story $(w.story) share " *
+                "plan center ($(key[1]), $(key[2])) m (rounded to $(COORD_DIGITS) " *
+                "digits). Refusing to overwrite wall_above."))
+        end
+        lookup[key] = w
+    end
+
+    n_linked = 0
+    for w in struc.walls
+        cx, cy = wall_center(w)
+        above_key = (round(cx; digits=COORD_DIGITS),
+                     round(cy; digits=COORD_DIGITS),
+                     w.story + 1)
+        w.wall_above = get(lookup, above_key, nothing)
+        !isnothing(w.wall_above) && (n_linked += 1)
+    end
+
+    @debug "Linked wall stack" total=length(struc.walls) linked=n_linked roof=(length(struc.walls) - n_linked)
 end
 
 # =============================================================================
@@ -744,8 +1119,17 @@ This is more robust than counting neighbors, and provides directional informatio
 needed for DDM/EFM analysis.
 
 # Returns
-- `position`: :interior (no boundary edges), :edge (1 boundary edge), :corner (2+ boundary edges)
+- `position`: `:interior` (no free edge), `:edge` (one free edge), `:corner`
+  (two free edges that are not collinear)
 - `boundary_edge_dirs`: Unit vectors along each boundary edge (for DDM exterior support detection)
+
+A boundary edge is one graph edge in exactly one face. On a straight perimeter
+that one free edge is stored as two collinear segments meeting at the column,
+so a count of graph edges is not the count of free edges. ACI 318-11
+§11.11.1.2 / R11.11.7.2 (corpus: aci-318-11, pages 209–211) uses the
+three-sided critical section at one free edge and the two-sided section where
+two free edges meet. A re-entrant corner has two non-parallel free edges and
+stays `:corner`.
 
 The 4-argument overload uses precomputed `vertex_coords` (N×3 Float64 matrix) and
 `edge_face_counts` (Dict{Int,Int}) for O(1) lookups instead of O(n_faces) scans.
@@ -779,9 +1163,33 @@ function classify_column_position(skel::BuildingSkeleton, vertex_idx::Int,
         end
     end
     
-    n_boundary = length(boundary_edge_dirs)
-    position = n_boundary == 0 ? :interior : n_boundary >= 2 ? :corner : :edge
+    position = _column_position_from_boundary_dirs(boundary_edge_dirs)
     return (position, boundary_edge_dirs)
+end
+
+"""
+    _column_position_from_boundary_dirs(dirs) -> Symbol
+
+`:interior` with no directions, `:edge` when every boundary direction lies on
+one straight line (including opposite segments of the same free edge), and
+`:corner` when any pair is not collinear.
+
+`abs(dot) < 0.99` is about 8° off parallel. Opposite unit vectors on one
+straight edge have `abs(dot) = 1` and stay `:edge`. A kink of more than that
+is a corner, including a re-entrant corner.
+"""
+function _column_position_from_boundary_dirs(dirs::Vector{NTuple{2,Float64}})
+    n = length(dirs)
+    n == 0 && return :interior
+    n == 1 && return :edge
+    for i in 1:(n - 1)
+        d1 = dirs[i]
+        for j in (i + 1):n
+            d2 = dirs[j]
+            abs(d1[1] * d2[1] + d1[2] * d2[2]) < 0.99 && return :corner
+        end
+    end
+    return :edge
 end
 
 
@@ -1834,9 +2242,9 @@ function member_group_demands(struc::BuildingStructure;
         mg = struc.member_groups[gid]
 
         # Group envelope: max |P| paired with max |M| (not a concurrent case).
-        # CONSERVATIVE under gravity-only.  Pu_t is collected (below) but
-        # `size_columns` raw-vector API does not forward it — SCOPE until
-        # lateral/uplift (AISC 360-16 §H1.2).
+        # CONSERVATIVE under gravity-only. Pu_t and Mux_neg are stored on the
+        # demand and forwarded by the steel sizers into the existing H1 check
+        # (AISC 360-16 §H1.1 page 133, §H1.2 page 134 — corpus: aisc-360-16).
         Pu_comp = 0.0; Pu_tens = 0.0
         Mux = 0.0; Mux_pos = 0.0; Mux_neg = 0.0; Muy = 0.0
         Vu_strong = 0.0; Vu_weak = 0.0
@@ -2805,7 +3213,11 @@ function _size_beams_impl!(
     Mux_neg_vec = [d.Mux_neg for d in demands]
     Vu_vec = [d.Vu_strong for d in demands]
     # Analysis Pu_c (compression magnitude, SI N) → size_beams `Pu=` for H1 when > 0.
+    # Pu_t is the tension magnitude. AISC 360-16 §H1.1 (compression + flexure,
+    # corpus: aisc-360-16, page 133) and §H1.2 (flexure + tension, same equations,
+    # Pc = φt·Pn, page 134).
     Pu_vec = [d.Pu_c * u"N" for d in demands]
+    Pu_t_vec = [d.Pu_t * u"N" for d in demands]
     δ_LL_vec   = [d.δ_max_LL for d in demands]
     δ_total_vec = [d.δ_max_total for d in demands]
     I_ref_v  = [d.I_ref for d in demands]
@@ -2839,7 +3251,7 @@ function _size_beams_impl!(
             struc, opts, group_ids, L_totals, δ_LL_vec, I_ref_v, member_group_overrides)
         StructuralSizer.size_beams(
             Mu_vec, Vu_vec, geometries, opts;
-            Pu = Pu_vec,
+            Pu = Pu_vec, Pu_t = Pu_t_vec,
             Mux_pos = Mux_pos_vec, Mux_neg = Mux_neg_vec,
             δ_max_vec = any(>(0), δ_LL_vec)   ? δ_LL_vec   : nothing,
             δ_max_total_vec = any(>(0), δ_total_vec) ? δ_total_vec : nothing,
@@ -2851,7 +3263,7 @@ function _size_beams_impl!(
     else
         StructuralSizer.size_beams(
             Mu_vec, Vu_vec, geometries, opts;
-            Pu = Pu_vec,
+            Pu = Pu_vec, Pu_t = Pu_t_vec,
             Mux_pos = Mux_pos_vec, Mux_neg = Mux_neg_vec,
             δ_max_vec = any(>(0), δ_LL_vec)   ? δ_LL_vec   : nothing,
             δ_max_total_vec = any(>(0), δ_total_vec) ? δ_total_vec : nothing,
@@ -3834,13 +4246,15 @@ function _size_columns_impl!(
     geometries = [StructuralSizer.SteelMemberGeometry(L; Lb=Lb, Cb=Cb, Kx=Kx, Ky=Ky)
                   for (L, Lb, Cb, Kx, Ky) in zip(L_totals, Lb_govs, Cb_govs, Kx_govs, Ky_govs)]
     
-    # Extract demands (N, N*m for steel)
+    # Extract demands (N, N*m for steel).
+    # AISC 360-16 §H1.1 compression (corpus: aisc-360-16, page 133) uses Pu_c.
+    # §H1.2 tension (page 134) uses Pu_t. Mux_neg on column groups equals Mux.
     Pu = [d.Pu_c for d in demands]
+    Pu_t = [d.Pu_t for d in demands]
     Mux = [d.Mux for d in demands]
     Muy = [d.Muy for d in demands]
-    
-    # Run optimization
-    result = StructuralSizer.size_columns(Pu, Mux, geometries, opts; Muy=Muy)
+
+    result = StructuralSizer.size_columns(Pu, Mux, geometries, opts; Muy=Muy, Pu_t=Pu_t)
     
     # Apply results
     _apply_column_results!(struc, result, group_ids, opts.material, :steel, edge_ids_in_group)

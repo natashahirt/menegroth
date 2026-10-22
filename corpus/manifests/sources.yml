@@ -1128,3 +1128,274 @@
   tier: 2
   encrypted: false
   notes: "AISC-funded research report: Behavior of Hot-Rolled Asymmetric Steel I-Beams (Yarnold, Auburn University, Dec 2024). Research, not normative; extract as research."
+
+# ── Steel tower reference set (added 2026-10-21 from corpus/sources/unsorted)
+# Citation basis recorded in memory deci-ca9fa6c1.
+# Current steel specification is AISC 360-22. Seismic steel systems cite
+# AISC 341-16 (already in this manifest) plus the 3rd edition Seismic Design
+# Manual below. Tier 3 entries are kept for background and are not current code.
+
+- id: aisc-360-22
+  origin: corpus/sources/codes/aisc/AISC-360-22.pdf
+  source_path: corpus/sources/codes/aisc/AISC-360-22.pdf
+  text_path: corpus/text/codes/aisc/AISC-360-22.txt
+  family: aisc
+  role: codes
+  edition: ANSI/AISC 360-22 (August 1, 2022)
+  tier: 1
+  encrypted: false
+  notes: "Specification for Structural Steel Buildings, August 1, 2022. Current steel specification for new work (members, stability Chapter C, composite Chapter I, connections Chapter J). Supersedes aisc-360-16 for new steel design; 360-16 stays in the corpus for existing member checks."
+
+- id: sdi-c-2017
+  origin: corpus/sources/codes/sdi/ANSI-SDI-C-2017.pdf
+  source_path: corpus/sources/codes/sdi/ANSI-SDI-C-2017.pdf
+  text_path: corpus/text/codes/sdi/ANSI-SDI-C-2017.txt
+  family: sdi
+  role: codes
+  edition: ANSI/SDI C-2017
+  tier: 1
+  encrypted: false
+  notes: "Standard for Composite Steel Floor Deck-Slabs. Design method for composite deck. Check numbers against vulcraft-deck-solutions-2020 ASD tables."
+
+- id: sdi-nc-2017
+  origin: corpus/sources/codes/sdi/ANSI-SDI-NC-2017.pdf
+  source_path: corpus/sources/codes/sdi/ANSI-SDI-NC-2017.pdf
+  text_path: corpus/text/codes/sdi/ANSI-SDI-NC-2017.txt
+  family: sdi
+  role: codes
+  edition: ANSI/SDI NC-2017
+  tier: 1
+  encrypted: false
+  notes: "Standard for Non-Composite Steel Floor Deck. Design method for non-composite floor deck."
+
+- id: aisc-dg11-vibrations
+  origin: corpus/sources/code_guides/aisc/AISC-DG11-Floor-Vibrations-2e.pdf
+  source_path: corpus/sources/code_guides/aisc/AISC-DG11-Floor-Vibrations-2e.pdf
+  text_path: corpus/text/code_guides/aisc/AISC-DG11-Floor-Vibrations-2e.txt
+  family: aisc
+  role: code_guides
+  edition: AISC Design Guide 11, 2nd Edition
+  tier: 2
+  encrypted: false
+  notes: "Floor Vibrations Due to Human Activity, 2nd edition. Floor-vibration serviceability for steel framing."
+
+- id: aisc-dg19-fire
+  origin: corpus/sources/code_guides/aisc/AISC-DG19-Fire-Resistance.pdf
+  source_path: corpus/sources/code_guides/aisc/AISC-DG19-Fire-Resistance.pdf
+  text_path: corpus/text/code_guides/aisc/AISC-DG19-Fire-Resistance.txt
+  family: aisc
+  role: code_guides
+  edition: AISC Design Guide 19
+  tier: 2
+  encrypted: false
+  notes: "Fire Resistance of Structural Steel Framing. Guide, not a substitute for AISC 360 Appendix 4."
+
+- id: aisc-dg28-stability
+  origin: corpus/sources/code_guides/aisc/AISC-DG28-Stability.pdf
+  source_path: corpus/sources/code_guides/aisc/AISC-DG28-Stability.pdf
+  text_path: corpus/text/code_guides/aisc/AISC-DG28-Stability.txt
+  family: aisc
+  role: code_guides
+  edition: AISC Design Guide 28
+  tier: 2
+  encrypted: false
+  notes: "Stability Design of Steel Buildings (Griffis and White). Worked guidance for AISC Chapter C / second-order analysis. Pair with aisc-360-22. Text was extracted with pdftotext; pdfplumber wrote an empty file for this PDF."
+
+- id: aisc-dg29-vertical-bracing
+  origin: corpus/sources/code_guides/aisc/AISC-DG29-Vertical-Bracing-Connections.pdf
+  source_path: corpus/sources/code_guides/aisc/AISC-DG29-Vertical-Bracing-Connections.pdf
+  text_path: corpus/text/code_guides/aisc/AISC-DG29-Vertical-Bracing-Connections.txt
+  family: aisc
+  role: code_guides
+  edition: AISC Design Guide 29
+  tier: 2
+  encrypted: false
+  notes: "Vertical Bracing Connections — Analysis and Design. Bracing-connection guide."
+
+- id: aisc-seismic-manual-3e
+  origin: corpus/sources/examples/aisc/AISC-Seismic-Design-Manual-3e-2018.pdf
+  source_path: corpus/sources/examples/aisc/AISC-Seismic-Design-Manual-3e-2018.pdf
+  text_path: corpus/text/examples/aisc/AISC-Seismic-Design-Manual-3e-2018.txt
+  family: aisc
+  role: examples
+  edition: AISC Seismic Design Manual, 3rd Edition (2018)
+  tier: 2
+  encrypted: false
+  notes: "Worked examples for ANSI/AISC 341-16 and AISC 360-16. This is the example set for seismic steel. It is not written to AISC 341-22."
+
+- id: vulcraft-deck-solutions-2020
+  origin: corpus/sources/code_guides/sdi/Vulcraft-Deck-Solutions-2020-09.pdf
+  source_path: corpus/sources/code_guides/sdi/Vulcraft-Deck-Solutions-2020-09.pdf
+  text_path: corpus/text/code_guides/sdi/Vulcraft-Deck-Solutions-2020-09.txt
+  family: sdi
+  role: code_guides
+  edition: Vulcraft Deck Solutions catalog (September 2020)
+  tier: 2
+  encrypted: false
+  notes: "Manufacturer catalog. Contains ASD section properties and superimposed-load tables for Vulcraft profiles (1.5VL, 2VLI, 3VLI, roof deck, non-composite, cellular). Diaphragm strength and unshored-span selection are web tools and are not in this PDF. Use as check values; the design method is sdi-c-2017 / sdi-nc-2017."
+
+- id: sdi-ddm-3e-2004
+  origin: corpus/sources/code_guides/sdi/SDI-DDM-3e-2004.pdf
+  source_path: corpus/sources/code_guides/sdi/SDI-DDM-3e-2004.pdf
+  text_path: corpus/text/code_guides/sdi/SDI-DDM-3e-2004.txt
+  family: sdi
+  role: code_guides
+  edition: SDI Diaphragm Design Manual, 3rd Edition (2004, Luttrell)
+  tier: 2
+  encrypted: false
+  notes: "Steel Deck Institute Diaphragm Design Manual, 3rd edition (2004), Scholars' Mine scan. Diaphragm method and load tables. The current edition is the 4th (DDM04, 2015), which is not in the corpus. Confirm a provision against DDM04 before treating a 3rd-edition table as current."
+
+- id: nist-gcr-11-917-10
+  origin: corpus/sources/code_guides/nist/NIST-GCR-11-917-10-Composite-Diaphragms.pdf
+  source_path: corpus/sources/code_guides/nist/NIST-GCR-11-917-10-Composite-Diaphragms.pdf
+  text_path: corpus/text/code_guides/nist/NIST-GCR-11-917-10-Composite-Diaphragms.txt
+  family: nist
+  role: code_guides
+  edition: NIST GCR 11-917-10 (NEHRP Tech Brief No. 5)
+  tier: 2
+  encrypted: false
+  notes: "Seismic Design of Composite Steel Deck and Concrete-filled Diaphragms (Sabelli, Sabol, Easterling). Guide for composite floor diaphragms."
+
+- id: nist-gcr-16-917-40
+  origin: corpus/sources/code_guides/nist/NIST-GCR-16-917-40-RC-SMF.pdf
+  source_path: corpus/sources/code_guides/nist/NIST-GCR-16-917-40-RC-SMF.pdf
+  text_path: corpus/text/code_guides/nist/NIST-GCR-16-917-40-RC-SMF.txt
+  family: nist
+  role: code_guides
+  edition: NIST GCR 16-917-40, 2nd Edition (NEHRP Tech Brief No. 1)
+  tier: 2
+  encrypted: false
+  notes: "Seismic Design of Reinforced Concrete Special Moment Frames, 2nd edition (Moehle, Hooper). Concrete special moment frames, not steel."
+
+- id: nist-gcr-16-917-41
+  origin: corpus/sources/code_guides/nist/NIST-GCR-16-917-41-Steel-SMF.pdf
+  source_path: corpus/sources/code_guides/nist/NIST-GCR-16-917-41-Steel-SMF.pdf
+  text_path: corpus/text/code_guides/nist/NIST-GCR-16-917-41-Steel-SMF.txt
+  family: nist
+  role: code_guides
+  edition: NIST GCR 16-917-41, 2nd Edition (NEHRP Tech Brief No. 2)
+  tier: 2
+  encrypted: false
+  notes: "Seismic Design of Steel Special Moment Frames, 2nd edition (Hamburger, Malley). Written to the AISC 341 generation before 341-22. Guide, paired with aisc-341-16."
+
+- id: nist-gcr-16-917-42
+  origin: corpus/sources/code_guides/nist/NIST-GCR-16-917-42-Concrete-Diaphragms.pdf
+  source_path: corpus/sources/code_guides/nist/NIST-GCR-16-917-42-Concrete-Diaphragms.pdf
+  text_path: corpus/text/code_guides/nist/NIST-GCR-16-917-42-Concrete-Diaphragms.txt
+  family: nist
+  role: code_guides
+  edition: NIST GCR 16-917-42, 2nd Edition (NEHRP Tech Brief No. 3)
+  tier: 2
+  encrypted: false
+  notes: "Seismic Design of Cast-in-Place Concrete Diaphragms, Chords, and Collectors, 2nd edition (Moehle, Hooper, Meyer). Concrete diaphragms, chords, and collectors."
+
+- id: nehrp-2020-design-examples-v1
+  origin: corpus/sources/examples/nehrp/NEHRP-2020-Design-Examples-Vol-1.pdf
+  source_path: corpus/sources/examples/nehrp/NEHRP-2020-Design-Examples-Vol-1.pdf
+  text_path: corpus/text/examples/nehrp/NEHRP-2020-Design-Examples-Vol-1.txt
+  family: nehrp
+  role: examples
+  edition: 2020 NEHRP Recommended Seismic Provisions Design Examples, Volume 1
+  tier: 2
+  encrypted: false
+  notes: "2020 NEHRP Recommended Seismic Provisions: Design Examples, Training Materials, and Design Flow Charts, Volume 1 (FEMA P-2192-V1). Seismic-loading examples for the ASCE 7-22 generation. Volume 1 only."
+
+- id: fhwa-gec-10
+  origin: corpus/sources/code_guides/fhwa/FHWA-GEC-10-Drilled-Shafts.pdf
+  source_path: corpus/sources/code_guides/fhwa/FHWA-GEC-10-Drilled-Shafts.pdf
+  text_path: corpus/text/code_guides/fhwa/FHWA-GEC-10-Drilled-Shafts.txt
+  family: fhwa
+  role: code_guides
+  edition: FHWA GEC 10 (October 2018)
+  tier: 2
+  encrypted: false
+  notes: "Drilled Shafts: Construction Procedures and Design Methods (FHWA Geotechnical Engineering Circular No. 10, NHI). Drilled piers / caissons."
+
+- id: nhi-16009-v1
+  origin: corpus/sources/code_guides/fhwa/NHI-16009-Driven-Piles-Vol-I.pdf
+  source_path: corpus/sources/code_guides/fhwa/NHI-16009-Driven-Piles-Vol-I.pdf
+  text_path: corpus/text/code_guides/fhwa/NHI-16009-Driven-Piles-Vol-I.txt
+  family: fhwa
+  role: code_guides
+  edition: FHWA/NHI 16009, Volume I
+  tier: 2
+  encrypted: false
+  notes: "Design and Construction of Driven Pile Foundations, Volume I. Driven-pile design reference."
+
+- id: nhi-16009-v2
+  origin: corpus/sources/code_guides/fhwa/NHI-16009-Driven-Piles-Vol-II.pdf
+  source_path: corpus/sources/code_guides/fhwa/NHI-16009-Driven-Piles-Vol-II.pdf
+  text_path: corpus/text/code_guides/fhwa/NHI-16009-Driven-Piles-Vol-II.txt
+  family: fhwa
+  role: code_guides
+  edition: FHWA/NHI 16009, Volume II
+  tier: 2
+  encrypted: false
+  notes: "Design and Construction of Driven Pile Foundations, Volume II. Continuation of nhi-16009-v1."
+
+- id: crsi-pile-caps
+  origin: corpus/sources/code_guides/crsi/CRSI-Pile-Caps-Design-Guide.pdf
+  source_path: corpus/sources/code_guides/crsi/CRSI-Pile-Caps-Design-Guide.pdf
+  text_path: corpus/text/code_guides/crsi/CRSI-Pile-Caps-Design-Guide.txt
+  family: crsi
+  role: code_guides
+  edition: CRSI Pile Caps Design Guide
+  tier: 2
+  encrypted: false
+  notes: "CRSI pile-cap design guide. Worked pile-cap examples. Structural design of the cap still follows ACI 318-19 Chapter 13."
+
+- id: ctbuh-outriggers
+  origin: corpus/sources/code_guides/ctbuh/CTBUH-Outrigger-Design-for-High-Rise-Buildings.pdf
+  source_path: corpus/sources/code_guides/ctbuh/CTBUH-Outrigger-Design-for-High-Rise-Buildings.pdf
+  text_path: corpus/text/code_guides/ctbuh/CTBUH-Outrigger-Design-for-High-Rise-Buildings.txt
+  family: ctbuh
+  role: code_guides
+  edition: CTBUH Outrigger Design for High-Rise Buildings (2012, Choi / Ho / Joseph / Mathias)
+  tier: 2
+  encrypted: false
+  notes: "CTBUH technical guide (2012) on outrigger and belt-truss systems. Not a design code. The PDF body is image-only: the text extract is front matter, and search_text will not see the chapters until the file is OCR'd (tesseract is not installed)."
+
+- id: latbsdc-alternative-procedure
+  origin: corpus/sources/code_guides/latbsdc/LATBSDC-Alternative-Procedure.pdf
+  source_path: corpus/sources/code_guides/latbsdc/LATBSDC-Alternative-Procedure.pdf
+  text_path: corpus/text/code_guides/latbsdc/LATBSDC-Alternative-Procedure.txt
+  family: latbsdc
+  role: code_guides
+  edition: LATBSDC alternative procedure for tall buildings
+  tier: 2
+  encrypted: false
+  notes: "Los Angeles Tall Buildings Structural Design Council alternative analysis and design procedure for tall buildings. Performance-based seismic procedure. Confirm the edition year from the cover before citing a clause."
+
+# ── Tier 3 — on hand, but not current code. Do not cite as the governing edition.
+- id: aisc-341-22-draft
+  origin: corpus/sources/code_guides/aisc/AISC-341-22-DRAFT-2022-01-05.pdf
+  source_path: corpus/sources/code_guides/aisc/AISC-341-22-DRAFT-2022-01-05.pdf
+  text_path: corpus/text/code_guides/aisc/AISC-341-22-DRAFT-2022-01-05.txt
+  family: aisc
+  role: code_guides
+  edition: "AISC 341-22 DRAFT dated January 5, 2022 (review draft, not published)"
+  tier: 3
+  encrypted: false
+  notes: "DRAFT — watermarked review draft of the Seismic Provisions dated January 5, 2022. Not the published ANSI/AISC 341-22. Do not cite as code. Seismic steel cites aisc-341-16."
+
+- id: aisc-scm-14th
+  origin: corpus/sources/code_guides/aisc/AISC-Steel-Construction-Manual-14th-2011.pdf
+  source_path: corpus/sources/code_guides/aisc/AISC-Steel-Construction-Manual-14th-2011.pdf
+  text_path: corpus/text/code_guides/aisc/AISC-Steel-Construction-Manual-14th-2011.txt
+  family: aisc
+  role: code_guides
+  edition: AISC Steel Construction Manual, 14th Edition (2011)
+  tier: 3
+  encrypted: false
+  notes: "14th edition Manual, written to AISC 360-10. Do not cite its tabulated values for AISC 360-22 work. Connection equations come from aisc-360-22 Chapter J and aisc-358-22. The matching manual for 360-22 is the 16th edition, which is not in the corpus."
+
+- id: asce-7-10-wind-guide
+  origin: corpus/sources/code_guides/asce/Wind-Loads-Guide-ASCE-7-10.pdf
+  source_path: corpus/sources/code_guides/asce/Wind-Loads-Guide-ASCE-7-10.pdf
+  text_path: corpus/text/code_guides/asce/Wind-Loads-Guide-ASCE-7-10.txt
+  family: asce
+  role: code_guides
+  edition: Guide to the Wind Load Provisions of ASCE 7-10
+  tier: 3
+  encrypted: false
+  notes: "Worked wind examples for ASCE 7-10 (Mehta and Coulbourne, ISBN 9780784412756). Do not use its numbers as ASCE 7-22 values. Wind demand cites asce-7-22. Text was extracted with pdftotext; pdfplumber aborts on a bad page box in this file."

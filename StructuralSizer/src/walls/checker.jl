@@ -80,21 +80,72 @@ function wall_shear_capacity_si(fc::Real, fy::Real, lw::Real, t::Real, ρt::Real
             αc = αc)
 end
 
+# ------------------------------------------------------------------------------
+# Material resolution for the in-plane shear check
+# ------------------------------------------------------------------------------
+# fyt is the specified yield strength of the TRANSVERSE (horizontal) web
+# reinforcement in ACI 318-19 Eq. (11.5.4.3):  Vn = (αc·λ·√f'c + ρt·fyt)·Acv
+# (corpus: aci-318-19 §11.5.4.3, page 172). It is a MATERIAL input, not a
+# design default — resolve it from the wall material and fail closed if missing.
+
 """
-    check_wall_inplane_shear(ws, concrete, Vu, hw) -> CheckResult
+    _wall_shear_materials(material; fyt=nothing) -> (fc, fyt, λ) [Pa, Pa, -]
+
+Resolve `(f'c, fyt, λ)` for the in-plane shear check. `fyt` is the yield strength
+of the TRANSVERSE (horizontal) web reinforcement per ACI 318-19 §11.5.4.3, which
+is distinct from the vertical/longitudinal grade used by the flexure checks.
+
+A `ReinforcedConcreteMaterial` supplies all three: `f'c`/`λ` from its concrete,
+`fyt` from its dedicated `transverse` rebar grade (the tie/horizontal-bar steel).
+A plain `Concrete` carries no reinforcement, so `fyt=` (a Unitful pressure, e.g.
+`60u"ksi"`) MUST be supplied explicitly.
+
+Safety (mirrors `_wall_flexure_materials`): there is NO Grade-60 default — a
+missing transverse grade is an error, not a silent assumption. A supplied `fyt`
+must be Unitful; bare numbers are rejected to avoid a ksi/Pa unit mismatch that
+would scale steel strength by ~7×10⁶ and produce an unconservative capacity.
+"""
+function _wall_shear_materials(material; fyt=nothing)
+    function _to_pa(x, name)
+        x isa Unitful.Pressure && return ustrip(u"Pa", x)
+        error("wall shear materials: `$name` must be a Unitful pressure " *
+              "(e.g. 60u\"ksi\"), not a bare number, to avoid a ksi/Pa unit mismatch.")
+    end
+    if material isa ReinforcedConcreteMaterial
+        fc  = ustrip(u"Pa", material.concrete.fc′)
+        λ   = material.concrete.λ
+        # Transverse/tie grade drives fyt in ACI 318-19 Eq. (11.5.4.3).
+        fytP = fyt === nothing ? ustrip(u"Pa", material.transverse.Fy) : _to_pa(fyt, "fyt")
+        return (fc, fytP, λ)
+    else
+        fc = ustrip(u"Pa", material.fc′)
+        λ  = material.λ
+        fyt === nothing && error(
+            "wall in-plane shear requires a transverse reinforcement yield strength " *
+            "fyt (ACI 318-19 §11.5.4.3). Pass a ReinforcedConcreteMaterial (preferred " *
+            "— uses its `transverse` grade) or supply `fyt=` (Unitful, e.g. 60u\"ksi\"). " *
+            "Refusing to silently default to Grade 60.")
+        return (fc, _to_pa(fyt, "fyt"), λ)
+    end
+end
+
+"""
+    check_wall_inplane_shear(ws, material, Vu, hw; fyt=nothing) -> CheckResult
 
 Demand-decoupled in-plane shear check. `Vu` is the factored in-plane shear
-demand [N or Unitful force], `hw` the total wall height. Returns a `CheckResult`
+demand [N or Unitful force], `hw` the total wall height. `material` is a
+`ReinforcedConcreteMaterial` (its `transverse`/tie grade drives `fyt`) or a plain
+`Concrete` with `fyt=` supplied explicitly (Unitful). Returns a `CheckResult`
 carrying the governing clause so it flows into the report-feedback contract.
 """
-function check_wall_inplane_shear(ws::WallSection, concrete, Vu, hw::Unitful.Length)
-    fc = ustrip(u"Pa", concrete.fc′)
-    fy_psi = 60_000.0  # ENGINEERING JUDGMENT: default Grade-60 transverse steel; TODO wire rebar material
-    fy = fy_psi * 6894.757
+function check_wall_inplane_shear(ws::WallSection, material, Vu, hw::Unitful.Length; fyt=nothing)
+    # fy = fyt, the transverse reinforcement yield strength resolved from the
+    # material — never a hardcoded default (ACI 318-19 §11.5.4.3; corpus:
+    # aci-318-19 p.172).
+    fc, fy, λ = _wall_shear_materials(material; fyt=fyt)
     lw = ustrip(u"m", ws.lw)
     t  = ustrip(u"m", ws.t)
     hw_m = ustrip(u"m", hw)
-    λ = concrete.λ
 
     cap = wall_shear_capacity_si(fc, fy, lw, t, ws.ρt, hw_m; λ=λ)
     Vu_N = Vu isa Unitful.Quantity ? ustrip(u"N", Vu) : Float64(Vu)

@@ -617,6 +617,74 @@ function _run_final_design(method, struc, slab, columns, moment_results, seconda
 end
 
 """
+    _transfer_reinforcement_pass(columns, moment_results, secondary_results,
+                                 rebar_design, h, d, fc, fy;
+                                 results, on_inadequate, on_result) -> (results, column)
+
+Shared moment-transfer reinforcement assembly (ACI 318-11 §13.5.3, corpus:
+aci-318-11, page 250) at every column.  Factors the per-column loop common to
+the rule-of-thumb pass and the iterative pipeline; the site-specific handling of
+an inadequate/failing transfer check is injected via `on_inadequate`.
+
+For each column the governing transfer steel is computed from the biaxial
+unbalanced moments; a column whose two transfer moments are both below
+1e-6 kip·ft needs none and is skipped.  A non-finite transfer moment, or
+transfer steel the section cannot develop (`transfer_section_inadequate`, which
+includes a non-finite transfer moment), invokes `on_inadequate(i, reason)`:
+
+- when it returns `true` the scan continues to the remaining columns (the
+  rule-of-thumb pass records every failing column);
+- when it returns `false` the pass stops immediately and reports that column's
+  index in `column` (the iterative pipeline asks for more depth).
+
+`results[i]` is filled with the `additional_transfer_bars` result for every
+adequate column, and `on_result(i, col, gov, transfer)` runs afterwards for any
+site-specific reporting.  Returns `(results, column)` where `column` is the
+index that triggered an early stop, or `0` when every column was scanned.
+"""
+function _transfer_reinforcement_pass(columns, moment_results, secondary_results,
+                                      rebar_design, h, d, fc, fy;
+                                      results = Union{Nothing, NamedTuple}[nothing for _ in columns],
+                                      on_inadequate,
+                                      on_result = (i, col, gov, transfer) -> nothing)
+    for (i, col) in enumerate(columns)
+        Mub_i = moment_results.unbalanced_moments[i]
+        Muy_i = isnothing(secondary_results) ? zero(Mub_i) :
+                secondary_results.unbalanced_moments[i]
+        if !(isfinite(Mub_i) && isfinite(Muy_i))
+            on_inadequate(i, "transfer_moment_non_finite") ||
+                return (results = results, column = i)
+            continue
+        end
+        abs(ustrip(kip * u"ft", Mub_i)) < 1e-6 &&
+            abs(ustrip(kip * u"ft", Muy_i)) < 1e-6 && continue
+
+        gov = governing_transfer_reinforcement(
+            Mub_i, Muy_i, col.c1, col.c2, h, d, fc, fy;
+            position = col.position,
+            free_edge_parallel = _infer_free_edge_parallel(col))
+        if transfer_section_inadequate(gov.As)
+            on_inadequate(i, "transfer_section_inadequate") ||
+                return (results = results, column = i)
+            continue
+        end
+
+        cs_neg_idx = col.position == :interior ? 3 : 1
+        As_provided_cs = rebar_design.column_strip_reinf[cs_neg_idx].As_provided
+        # ACI 318-11 §13.3.2 + §7.6.5 — slab-thickness-dependent s_max
+        selected = select_bars(As_provided_cs, rebar_design.column_strip_width;
+                               max_spacing=max_bar_spacing(h))
+        Ab = bar_area(selected.bar_size)
+
+        transfer = additional_transfer_bars(gov.As, As_provided_cs, gov.bb,
+                                            rebar_design.column_strip_width, Ab)
+        results[i] = transfer
+        on_result(i, col, gov, transfer)
+    end
+    return (results = results, column = 0)
+end
+
+"""
     _pipeline_transfer_reinforcement(columns, moment_results, secondary_results,
                                      rebar_design, h, d, fc, fy; verbose)
         -> (ok, results, column)
@@ -629,43 +697,23 @@ moments are both below 1e-6 kip·ft skipped as needing none.
 Stops at the first column whose transfer steel is not finite
 (`transfer_section_inadequate`, which includes a non-finite transfer
 moment) and returns `ok = false` with that column's index; the caller
-reports `transfer_reinforcement` and asks for more depth.
+reports `transfer_reinforcement` and asks for more depth.  Delegates the
+shared §13.5.3 assembly to `_transfer_reinforcement_pass`, injecting the
+early-stop inadequacy policy and the verbose per-column debug.
 """
 function _pipeline_transfer_reinforcement(columns, moment_results, secondary_results,
                                           rebar_design, h, d, fc, fy;
                                           verbose::Bool = false)
-    results = Union{Nothing, NamedTuple}[nothing for _ in columns]
-    for (i, col) in enumerate(columns)
-        Mub_i = moment_results.unbalanced_moments[i]
-        Muy_i = isnothing(secondary_results) ? zero(Mub_i) :
-                secondary_results.unbalanced_moments[i]
-        (isfinite(Mub_i) && isfinite(Muy_i)) ||
-            return (ok = false, results = results, column = i)
-        abs(ustrip(kip * u"ft", Mub_i)) < 1e-6 &&
-            abs(ustrip(kip * u"ft", Muy_i)) < 1e-6 && continue
-
-        gov = governing_transfer_reinforcement(
-            Mub_i, Muy_i, col.c1, col.c2, h, d, fc, fy;
-            position = col.position,
-            free_edge_parallel = _infer_free_edge_parallel(col))
-        transfer_section_inadequate(gov.As) &&
-            return (ok = false, results = results, column = i)
-
-        cs_neg_idx = col.position == :interior ? 3 : 1
-        As_provided_cs = rebar_design.column_strip_reinf[cs_neg_idx].As_provided
-        # ACI 318-11 §13.3.2 + §7.6.5 — slab-thickness-dependent s_max
-        selected = select_bars(As_provided_cs, rebar_design.column_strip_width;
-                               max_spacing=max_bar_spacing(h))
-        Ab = bar_area(selected.bar_size)
-
-        transfer = additional_transfer_bars(gov.As, As_provided_cs, gov.bb,
-                                            rebar_design.column_strip_width, Ab)
-        results[i] = transfer
-        if verbose && transfer.n_bars_additional > 0
-            @debug "MOMENT TRANSFER (ACI 8.4.2.3) — Column $i ($(col.position))" Mub=gov.Mu γf=round(gov.γf, digits=3) bb=gov.bb As_transfer=gov.As As_within_bb=transfer.As_within_bb n_additional=transfer.n_bars_additional
-        end
-    end
-    return (ok = true, results = results, column = 0)
+    pass = _transfer_reinforcement_pass(
+        columns, moment_results, secondary_results, rebar_design, h, d, fc, fy;
+        on_inadequate = (i, reason) -> false,
+        on_result = (i, col, gov, transfer) -> begin
+            if verbose && transfer.n_bars_additional > 0
+                @debug "MOMENT TRANSFER (ACI 8.4.2.3) — Column $i ($(col.position))" Mub=gov.Mu γf=round(gov.γf, digits=3) bb=gov.bb As_transfer=gov.As As_within_bb=transfer.As_within_bb n_additional=transfer.n_bars_additional
+            end
+        end,
+    )
+    return (ok = pass.column == 0, results = pass.results, column = pass.column)
 end
 
 """

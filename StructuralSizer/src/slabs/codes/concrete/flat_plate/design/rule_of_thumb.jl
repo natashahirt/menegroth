@@ -514,40 +514,17 @@ function _rot_transfer_reinforcement!(transfer_results, failures, columns,
                                       rebar_design, h, d, fc, fy;
                                       tc = nothing, slab_id::String = "")
     ok = true
+    # Retry policy: record every failing column (push once, emit a per-column
+    # trace) and keep scanning, so the pass reports all inadequate columns.
     function fail!(i, reason)
         "transfer_reinforcement" in failures || push!(failures, "transfer_reinforcement")
         emit!(tc, :slab, "check_flat_plate_at_thickness!", slab_id, :failure;
               reason = reason, failing_check = "transfer_reinforcement", column = i)
         ok = false
+        return true  # continue scanning the remaining columns
     end
-    for (i, col) in enumerate(columns)
-        Mub_i = moment_results.unbalanced_moments[i]
-        Muy_i = isnothing(secondary_results) ? zero(Mub_i) :
-                secondary_results.unbalanced_moments[i]
-        if !isfinite(Mub_i) || !isfinite(Muy_i)
-            fail!(i, "transfer_moment_non_finite")
-            continue
-        end
-        abs(ustrip(kip * u"ft", Mub_i)) < 1e-6 &&
-            abs(ustrip(kip * u"ft", Muy_i)) < 1e-6 && continue
-        gov = governing_transfer_reinforcement(
-            Mub_i, Muy_i, col.c1, col.c2, h, d, fc, fy;
-            position = col.position,
-            free_edge_parallel = _infer_free_edge_parallel(col))
-        if transfer_section_inadequate(gov.As)
-            fail!(i, "transfer_section_inadequate")
-            continue
-        end
-        cs_neg_idx = col.position == :interior ? 3 : 1
-        As_provided_cs = rebar_design.column_strip_reinf[cs_neg_idx].As_provided
-        # ACI 318-11 §13.3.2 + §7.6.5 — slab-thickness-dependent s_max
-        selected = select_bars(As_provided_cs, rebar_design.column_strip_width;
-                               max_spacing=max_bar_spacing(h))
-        Ab = bar_area(selected.bar_size)
-        transfer_results[i] = additional_transfer_bars(
-            gov.As, As_provided_cs, gov.bb,
-            rebar_design.column_strip_width, Ab
-        )
-    end
+    _transfer_reinforcement_pass(columns, moment_results, secondary_results,
+                                 rebar_design, h, d, fc, fy;
+                                 results = transfer_results, on_inadequate = fail!)
     return ok
 end

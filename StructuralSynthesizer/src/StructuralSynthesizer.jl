@@ -66,6 +66,14 @@ end
 # Building types (includes TributaryCache, BuildingStructure, etc.)
 include("building_types.jl")
 
+# Wall-bridge geometry derivation (true plate geometry + per-story centre of mass
+# for the reduced lateral evaluator). Included after building_types.jl so it can
+# fully annotate BuildingSkeleton / Story / Cell / GeometryCache, which members.jl
+# (loaded before skeleton.jl) cannot. The plate/CoM are derived from the skeleton
+# vertex_coords datum; wall plan coords are NOT guaranteed to share it, so the
+# helper VERIFIES walls ⊆ plate (assert_walls_enclosed) rather than assuming it.
+include("walls_bridge.jl")
+
 # Design types (BuildingDesign, DesignParameters, result structs)
 include("design_types.jl")
 
@@ -192,6 +200,10 @@ export add_coating_loads!
 # --- Member type hierarchy ---
 export AbstractMember, MemberBase, Beam, Column, Strut, Wall
 export wall_center, wall_length, wall_orientation, to_wall_line  # Shear-wall geometry + lateral-system bridge
+# True plate geometry + per-story centre of mass for the reduced lateral evaluator
+# (derived from the skeleton vertex_coords datum; assert_walls_enclosed VERIFIES
+# walls ⊆ plate rather than assuming a shared frame; seismic weight per ASCE 7-22 §12.7.2)
+export story_plate_geometry, story_center_of_mass, effective_seismic_weight, assert_walls_enclosed, walls_bridge_selfcheck
 export all_members, segment_indices, member_length, unbraced_length
 export group_id, section, volumes, set_group_id!, set_section!, set_volumes!
 # Framing-hierarchy role / level helpers (Phase 1)

@@ -192,6 +192,15 @@ end
 const OPTIMIZER_SINGULAR_OBJECTIVE_PENALTY = 1.0e12
 const OPTIMIZER_INFEASIBLE_CONSTRAINT      = 1.0e6
 
+# ENGINEERING JUDGMENT (survivor re-validation acceptance tolerance, not a code clause):
+# `optimize_continuous` satisfies constraints only to its convergence tolerance (Ipopt
+# `tol`, default 1e-6), so a legitimately-converged layout can sit a hair OVER a utilization
+# of 1.0 (e.g. drift exactly at `drift_limit`). The survivor re-validation must not reject
+# such a boundary-converged layout as "unstable" over pure numerical noise — yet it MUST
+# still reject a genuine mechanism, which overshoots by orders of magnitude (the dead-
+# direction drift is ~1e4–1e6× the limit). This relative slack cleanly separates the two.
+const SURVIVOR_DRIFT_UTIL_TOL = 1.0e-6
+
 """
     _evaluate_lateral_or_singular(p, walls) -> Union{LateralResult,Nothing}
 
@@ -208,6 +217,36 @@ function _evaluate_lateral_or_singular(p::WallLayoutNLPProblem, walls::Vector{Wa
         return nothing
     end
 end
+
+"""
+    _eigenstructure_or_singular(p, walls) -> Union{NamedTuple,Nothing}
+
+Run the reduced-tier [`eigenstructure_stability`](@ref) gate for the differentiable optimizer
+loop, catching the fail-closed [`SingularStiffnessError`](@ref) (a load-independent
+translational or torsional mechanism) and signaling it with `nothing` so the caller can
+substitute an all-infeasible sentinel. Non-`SingularStiffnessError` exceptions are re-thrown.
+"""
+function _eigenstructure_or_singular(p::WallLayoutNLPProblem, walls::Vector{WallLine})
+    try
+        return eigenstructure_stability(p.evaluator, walls, p.loads, p.drift_limit)
+    catch e
+        e isa SingularStiffnessError || rethrow()
+        return nothing
+    end
+end
+
+"""
+    _plate_center_missing(ev) -> Bool
+
+`true` when the evaluator is the reduced tier AND its `plate_center` is absent, so the twist-
+sensitive corner-drift / torsion metrics cannot locate the true plan corners and the layout
+must FAIL CLOSED. In that case [`constraint_fns`](@ref) drives the per-story drift/torsion
+slots infeasible (so the NLP still returns) and [`solve_wall_layout`](@ref) stamps
+`status = :geometry_required`. Any other evaluator (e.g. the FEM tier, which carries true
+geometry) returns `false`.
+"""
+_plate_center_missing(ev::ReducedDiaphragmEvaluator) = ev.plate_center === nothing
+_plate_center_missing(::AbstractLateralEvaluator) = false
 
 # ------------------------------------------------------------------------------
 # Objective
@@ -272,10 +311,37 @@ end
 """
     constraint_fns(p, x) -> Vector{Float64}
 
-Utilization ratios (feasible when ≤ 1): per-story drift/`drift_limit`, per-story
-torsion/`torsion_limit`, and per-wall in-plane shear `Vu/ϕVn` (ACI 318-19
-§11.5.4.3 proxy, corpus: sp-wall-shear-strength-flowchart; VERIFY). All smooth
-in `x` via the reduced evaluator.
+Utilization ratios (feasible when ≤ 1): per-story drift, per-story torsion, and per-wall
+in-plane shear `Vu/ϕVn` (ACI 318-19 §11.5.4.3 proxy, corpus: sp-wall-shear-strength-flowchart;
+VERIFY). All smooth in `x` via the reduced evaluator.
+
+The DRIFT slot bounds the physical ASCE 7-22 §12.12.1 quantity — the EXACT max-corner
+interstory drift (`direction_complete_interstory_drift`'s `corner_drift`, the max over the four
+TRUE occupant corners `plate_center ± (hx, hy)` of `hypot(disp(corner))/h`, the design story
+drift at the building edges including diaphragm rotation, §12.8.6.5), NOT the twist-blind CR
+translation. Torsion enters drift feasibility DIRECTLY and UNCAPPED through the corner φ term.
+When `plate_center` is absent the drift/torsion slots are driven INFEASIBLE (fail closed, see
+[`_plate_center_missing`](@ref)).
+
+STABILITY is defined by the reduced-tier EIGENSTRUCTURE gate (`eigenstructure_stability`):
+the softest translational eigenvalue `λmin(K_tt)` and the condensed torsional stiffness about
+the CR `K_theta_cr`, each held above a physical anti-mechanism floor derived from the drift
+limit. To keep the constraint vector length unchanged (`2·nstory + nWalls`), those two
+per-story floors are FOLDED into the existing per-story drift/torsion slots via `max`:
+
+  * drift slot `s`  = max( EXACT max-corner drift util , translational floor `util_trans` ),
+  * torsion slot `s` = max( `res.torsion/torsion_limit` , torsional floor `util_tors` ) — the
+    amplification ratio folded with the eccentric-CR condensed-torsional anti-mechanism floor
+    (load-independent, so it still catches an F_s≈0-story twist mechanism).
+
+The translational floor is the direction-complete drift in EIGEN form (so it subsumes the
++X/+Y sweep and closes the √2 diagonal-weak-mode gap, giving Ipopt a clean monotone gradient
+on `λmin(K_tt)`); the torsional floor adds the strong `1/K_theta_cr` gradient. The torsional-
+amplification ratio `res.torsion/torsion_limit` — with `δ_max` now EXACT over the four TRUE
+corners anchored at `plate_center` — is a feasibility GATE (crit5 showed it is the check that
+catches an eccentric service core); it is folded into the torsion slot via `max`, alongside the
+exact max-corner drift carrying torsion in the drift slot. `hypot`/`abs`/`max` are
+subdifferentiable, so the folded slots keep the same smoothness class.
 """
 function constraint_fns(p::WallLayoutNLPProblem, x::Vector{Float64})
     ns = _nstory(p)
@@ -288,12 +354,59 @@ function constraint_fns(p::WallLayoutNLPProblem, x::Vector{Float64})
     # call site penalizes.
     res === nothing && return fill(OPTIMIZER_INFEASIBLE_CONSTRAINT, n_constraints(p))
 
-    g = Float64[]
-    for s in 1:ns
-        push!(g, res.drift[s] / p.drift_limit)
+    # GEOMETRY-REQUIRED / -INCONSISTENT fail-closed (reduced tier, option (b)): the corner-
+    # drift / torsion certification cannot be trusted when (a) the true plate center is absent
+    # (cannot locate the plan corners) OR (b) the plate UNDER-COVERS the walls (the exact
+    # four-corner metric is exact only over a plate that encloses the drift-relevant points —
+    # crit7). In either case drive EVERY per-story drift and torsion slot INFEASIBLE (large
+    # positive). The NLP still returns a finite vector (no throw — good Ipopt behavior), the
+    # per-wall shear slots stay real, and `solve_wall_layout` stamps `status = :geometry_required`
+    # (missing) or `:geometry_inconsistent` (under-covering) on the selected layout. Never a
+    # silent wall-centroid / origin / plate-span proxy (crit5/rev6/crit6/crit7). FEM tier is
+    # unaffected: both predicates return the FEM-safe default for a non-reduced evaluator.
+    geom_missing = _plate_center_missing(p.evaluator) || !_plate_encloses_walls(p.evaluator, walls)
+
+    # Eigenstructure stability floors + direction-complete drift are only computed when the
+    # geometry is present. Wrapped in the same singular-catch: a load-independent mechanism
+    # (that `evaluate_lateral` did not already trip) maps to the all-INFEASIBLE sentinel.
+    local eig, dc
+    if !geom_missing
+        eig = _eigenstructure_or_singular(p, walls)
+        eig === nothing && return fill(OPTIMIZER_INFEASIBLE_CONSTRAINT, n_constraints(p))
+        # Direction-complete drift (origin-invariant, both principal directions). Safe to
+        # call without a singular-catch: `res` above is non-`nothing`, so every story's K
+        # passed the `_solve_spd` conditioning backstop — the same K and L_ref are reused
+        # here, so none of its canonical solves can throw.
+        dc = direction_complete_interstory_drift(p.evaluator, walls, p.loads)
     end
+
+    g = Float64[]
+    # Per-story drift slot: the EXACT MAX-CORNER interstory drift over the four TRUE occupant
+    # corners (ASCE 7-22 §12.12.1, edges incl. diaphragm rotation per §12.8.6.5) AND the
+    # translational eigenstructure floor (the softest-mode drift), whichever governs. Torsional
+    # amplification is captured DIRECTLY and UNCAPPED by the corner drift (the hypot over the
+    # four true corners). INFEASIBLE sentinel when plate_center is absent (fail closed).
     for s in 1:ns
-        push!(g, res.torsion[s] / p.torsion_limit)
+        if geom_missing
+            push!(g, OPTIMIZER_INFEASIBLE_CONSTRAINT)
+        else
+            drift_u = maximum(@view dc.corner_drift[s, :]) / p.drift_limit
+            push!(g, max(drift_u, eig.util_trans[s]))
+        end
+    end
+    # Per-story torsion slot: the torsional-amplification ratio `res.torsion/torsion_limit`
+    # (δ_max/δ_avg ≤ torsion_limit) FOLDED with the condensed-torsional eigenstructure floor
+    # `util_tors` (the load-independent twist anti-mechanism backstop), whichever governs.
+    # `res.torsion`'s δ_max is now EXACT over the four TRUE corners anchored at `plate_center`
+    # (`_torsion_amplification` 4-arg). crit5 showed this ratio is the check that catches an
+    # eccentric service core (ratio ≫ torsion_limit); it is a feasibility GATE. INFEASIBLE
+    # sentinel when plate_center is absent (fail closed).
+    for s in 1:ns
+        if geom_missing
+            push!(g, OPTIMIZER_INFEASIBLE_CONSTRAINT)
+        else
+            push!(g, max(res.torsion[s] / p.torsion_limit, eig.util_tors[s]))
+        end
     end
     # Per-wall shear strength proxy: demand from the evaluator, capacity from the
     # ACI in-plane shear formula at the current (density-scaled) thickness.
@@ -326,10 +439,162 @@ end
 """
     solve_wall_layout(p; solver=:ipopt, kwargs...) -> NamedTuple
 
-Solve the layout problem via the existing continuous optimizer. Returns the
-optimizer result (see `optimize_continuous`); densities near `ρ_min` indicate
-walls the optimizer removed. Cross-check survivors with the FEM tier.
+Solve the layout problem via the existing continuous optimizer, then RE-VALIDATE the
+selected layout before returning it. The optimizer result (see `optimize_continuous`)
+is augmented with a `feasible::Bool`, a `revalidation` record, and — when it fails —
+`status = :infeasible`; densities near `ρ_min` indicate walls the optimizer removed.
+
+SURVIVOR RE-VALIDATION (safety cross-check): `optimize_continuous` returns its best iterate,
+but an optimizer can hand back a layout that is only marginally feasible, laterally dead in a
+principal direction, or torsionally soft. We re-check the SELECTED layout against the FULL
+constraint set:
+
+  * a GEOMETRY gate: if the reduced evaluator has no `plate_center`, the twist certification
+    is unavailable and the layout is REFUSED with `status = :geometry_required` BEFORE any
+    other check (fail closed; see [`_plate_center_missing`](@ref));
+  * the throwing direct path (`evaluate_lateral`, fail-closed on a singular K);
+  * the EXACT max-corner interstory drift (`direction_complete_interstory_drift`'s
+    `corner_drift`, the max over the four TRUE occupant corners `plate_center ± (hx, hy)` of
+    `hypot(disp(corner))/h`): the ASCE 7-22 §12.12.1 design story drift at the building edges
+    including diaphragm rotation (§12.8.6.5), swept +X/+Y. Exact (no slack) and correct even
+    when the CR lies outside the plate (crit5/rev6);
+  * the EIGENSTRUCTURE stability gate (`eigenstructure_stability`): translational floor
+    `util_trans` and the condensed-torsional floor `util_tors` (exact CR-to-corner lever);
+  * the torsional-amplification ratio `res.torsion/torsion_limit` (δ_max/δ_avg, with δ_max
+    EXACT over the four TRUE corners anchored at `plate_center`) — crit5 showed this ratio
+    independently rejects an eccentric service core (ratio ≫ torsion_limit), so it GATES
+    feasibility;
+  * per-wall in-plane shear `Vu/ϕVn`.
+
+If ANY of these exceeds its limit (beyond `SURVIVOR_DRIFT_UTIL_TOL`), or the direct check
+throws, the result is REFUSED as a success (`feasible = false`, `status = :infeasible`) with
+the failing story / mode / direction recorded. `worst_util` is the worst utilization across
+ALL modes; `failing` is resolved in PRIORITY ORDER (drift → eigen floors → torsion → shear) so
+a genuine drift-direction mechanism still reports its direction. The full-fidelity unified-FEM
+survivor cross-check (Phase 10) is the FINAL stability authority (true geometry).
 """
 function solve_wall_layout(p::WallLayoutNLPProblem; solver::Symbol=:ipopt, kwargs...)
-    return optimize_continuous(p; objective=p.objective, solver=solver, kwargs...)
+    result = optimize_continuous(p; objective=p.objective, solver=solver, kwargs...)
+
+    # GEOMETRY-REQUIRED fail-closed: the reduced tier CANNOT certify corner drift / torsion
+    # without the true plate center (the four occupant corners `plate_center ± (hx, hy)` cannot
+    # be located). A feasible verdict is NOT permitted on the frame-independent checks alone —
+    # refuse with `status = :geometry_required` (never a silent pass, never a wall-centroid /
+    # origin / plate-span proxy; crit5/rev6/crit6). The Phase 10 unified-FEM survivor check
+    # (true geometry) is the accuracy authority.
+    if _plate_center_missing(p.evaluator)
+        reval = (ok = false, worst_util = Inf,
+                 failing = (story = 0, direction = :none, mode = :geometry_required,
+                            drift = Inf, util = Inf))
+        return merge(result, (status = :geometry_required, feasible = false,
+                              revalidation = reval))
+    end
+
+    walls_opt = _walls_from_density(p, result.minimizer)
+
+    # ENCLOSURE GATE (crit7, fail-closed): plate_center is present (handled above), but the
+    # exact four-corner drift / torsion metrics are exact ONLY if the plate encloses the drift-
+    # relevant points. The two FREE caller fields `plate_center`/`plan_halfwidth` are not
+    # otherwise cross-checked against the wall positions, so an UNDER-COVERING plate would flip
+    # the verdict to feasible=true for an over-limit building (the plate-anchored gates under-
+    # state the twist; the plate-independent `util_trans` is twist-blind). Enforce the checkable
+    # proxy WALLS ⊆ plate (see `_plate_encloses_walls`) and REFUSE with a DISTINCT, more-
+    # debuggable `status = :geometry_inconsistent` (vs `:geometry_required` for a missing plate).
+    # Wall positions are density-independent, so `walls_opt` carries the true geometry here.
+    # FEM tier returns `true` (unaffected); the Phase 10 unified-FEM survivor check (true
+    # geometry) remains the final authority, incl. the residual walls ⊆ plate ⊂ occupants.
+    if !_plate_encloses_walls(p.evaluator, walls_opt)
+        reval = (ok = false, worst_util = Inf,
+                 failing = (story = 0, direction = :none, mode = :geometry_inconsistent,
+                            drift = Inf, util = Inf))
+        return merge(result, (status = :geometry_inconsistent, feasible = false,
+                              revalidation = reval))
+    end
+    tol = 1.0 + SURVIVOR_DRIFT_UTIL_TOL
+    revalidation = try
+        # Throwing direct path on the actual design load: a genuinely singular selected
+        # layout fails closed here (not just via the sweeps below).
+        res = evaluate_lateral(p.evaluator, walls_opt, p.loads)
+        dc  = direction_complete_interstory_drift(p.evaluator, walls_opt, p.loads)
+        eig = eigenstructure_stability(p.evaluator, walls_opt, p.loads, p.drift_limit)
+
+        # (1) EXACT MAX-CORNER interstory drift over the four TRUE occupant corners (ASCE
+        # 7-22 §12.12.1, edges incl. diaphragm rotation per §12.8.6.5): the physical drift
+        # bound, carrying the failing principal DIRECTION. Torsion enters directly and uncapped.
+        drift_worst = 0.0
+        drift_rec = (story = 0, direction = :none, mode = :drift, drift = 0.0, util = 0.0)
+        for s in axes(dc.corner_drift, 1), d in axes(dc.corner_drift, 2)
+            u = dc.corner_drift[s, d] / p.drift_limit
+            if u > drift_worst
+                drift_worst = u
+                drift_rec = (story = s, direction = dc.directions[d], mode = :drift,
+                             drift = dc.corner_drift[s, d], util = u)
+            end
+        end
+        # (2) Eigenstructure stability floors (translational + condensed torsional).
+        eig_worst = 0.0
+        eig_rec = (story = 0, direction = :none, mode = :eigen, drift = 0.0, util = 0.0)
+        for s in eachindex(eig.util_trans)
+            if eig.util_trans[s] > eig_worst
+                eig_worst = eig.util_trans[s]
+                eig_rec = (story = s, direction = :none, mode = :eig_translational,
+                           drift = 0.0, util = eig.util_trans[s])
+            end
+            if eig.util_tors[s] > eig_worst
+                eig_worst = eig.util_tors[s]
+                eig_rec = (story = s, direction = :none, mode = :eig_torsional,
+                           drift = 0.0, util = eig.util_tors[s])
+            end
+        end
+        # (3) Torsional-amplification ratio gate: δ_max/δ_avg ≤ torsion_limit, with δ_max now
+        # EXACT over the four TRUE corners anchored at `plate_center` (`_torsion_amplification`
+        # 4-arg). crit5 showed this ratio is the check that independently rejects an eccentric
+        # service core (ratio ≫ torsion_limit).
+        tors_worst = 0.0
+        tors_rec = (story = 0, direction = :none, mode = :torsion, drift = 0.0, util = 0.0)
+        for s in eachindex(res.torsion)
+            u = res.torsion[s] / p.torsion_limit
+            if u > tors_worst
+                tors_worst = u
+                tors_rec = (story = s, direction = :none, mode = :torsion,
+                            drift = res.torsion[s], util = u)
+            end
+        end
+        # (4) Per-wall in-plane shear (demand from the evaluator, capacity from the ACI proxy).
+        shear_worst = 0.0
+        shear_rec = (story = 0, direction = :none, mode = :shear, drift = 0.0, util = 0.0)
+        for (i, c) in enumerate(p.candidates)
+            ρ = clamp(result.minimizer[i], p.ρ_min, 1.0)
+            t = ρ * c.t_max
+            cap = wall_shear_capacity_si(c.fc, c.fy, c.lw, t, c.ρt, c.height)
+            demand = wall_shear_demand(res, c.id)   # `nothing` ⇒ withheld / unvalidated
+            u = demand === nothing ? Inf : abs(demand) / max(cap.ϕVn, 1e-6)
+            if u > shear_worst
+                shear_worst = u
+                shear_rec = (story = c.story, direction = :none,
+                             mode = (demand === nothing ? :shear_withheld : :shear),
+                             drift = 0.0, util = u)
+            end
+        end
+
+        worst_util = max(drift_worst, eig_worst, tors_worst, shear_worst)
+        # Priority-ordered failing record (only consulted when !ok): drift first so a
+        # drift-direction mechanism reports its DIRECTION (preserving the near-dead-Y
+        # contract where the translational floor and the +Y corner drift tie exactly), then
+        # the eigen floors, then the restored torsion ratio, then shear.
+        failing = drift_worst > tol ? drift_rec :
+                  eig_worst   > tol ? eig_rec   :
+                  tors_worst  > tol ? tors_rec  :
+                  shear_worst > tol ? shear_rec :
+                  drift_rec
+        (ok = worst_util <= tol, worst_util = worst_util, failing = failing)
+    catch e
+        e isa SingularStiffnessError || rethrow()
+        (ok = false, worst_util = Inf,
+         failing = (story = 0, direction = :singular, mode = :singular, drift = Inf, util = Inf))
+    end
+
+    revalidation.ok || return merge(result,
+        (status = :infeasible, feasible = false, revalidation = revalidation))
+    return merge(result, (feasible = true, revalidation = revalidation))
 end

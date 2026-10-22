@@ -257,18 +257,52 @@ function evaluate_lateral end
 
 Cheap 3-DOF-per-story rigid-diaphragm lateral evaluator (plan S2).
 
+EXACT CORNER-DRIFT / TORSION CERTIFICATION (requires geometry): the twist-sensitive metrics
+(max-corner interstory drift, torsional amplification, torsional stability floor) are
+evaluated at the FOUR TRUE occupant corners `plate_center ± (hx, hy)`. They therefore need
+the true floor-plate geometric CENTER `plate_center` in addition to the plate HALF-extents
+`plan_halfwidth = (hx, hy)`. The corner displacement is then EXACT — correct even when the
+center of rigidity lies OUTSIDE the plate (the non-orthogonal rev6 case) — with no slack.
+
+FAILS CLOSED without geometry: when `plate_center === nothing` (the default) the reduced tier
+CANNOT locate the corners, so corner-drift / torsion CERTIFICATION is UNAVAILABLE. It must
+NEVER fall back to the wall centroid, the DOF origin `(0, 0)`, or a plate-span lever bound —
+each of those proxies was proven to UNDER-state eccentric / non-orthogonal interstory corner
+drift and return an over-limit layout as feasible (crit5 eccentric core; rev6 non-orthogonal
+CR-outside-plate; crit6 origin / undersized-plate). Instead corner drift and torsion report
+`Inf`, and `solve_wall_layout` returns `feasible = false`, `status = :geometry_required`. The
+FRAME-INDEPENDENT checks (translational eigenstructure floor, per-wall shear, singular fail-
+closed solve) still run without `plate_center`; only the twist certification is withheld. The
+Phase 10 unified-FEM survivor check (true geometry) remains the accuracy AUTHORITY.
+
+ENCLOSURE CONTRACT (fail-closed, crit7): the exact four-corner metrics are exact ONLY when the
+plate `plate_center ± plan_halfwidth` ENCLOSES the drift-relevant points. The reduced model
+has NO independent occupant outline, so `plate_center`/`plan_halfwidth` is CONTRACTUALLY the
+TRUE occupant diaphragm expressed in the `WallLine` frame. As a checkable proxy for the
+(uncheckable here) requirement occupants ⊆ plate, the tier enforces WALLS ⊆ plate at runtime
+via [`_plate_encloses_walls`](@ref): when any story's walls fall OUTSIDE the plate, the
+twist-sensitive metrics FAIL CLOSED to `Inf` exactly as for a missing `plate_center`, and
+`solve_wall_layout` refuses the layout with `status = :geometry_inconsistent`. RESIDUAL NOT
+caught here: a plate that encloses the walls but is declared SMALLER than the true occupant
+diaphragm (walls ⊆ plate ⊂ occupants) — delegated to the caller contract and the FEM survivor
+check (true geometry, the final authority).
+
 # Fields
 - `story_heights::Vector{Float64}`: story heights [m], index = story
-- `plan_halfwidth::NTuple{2,Float64}`: half plan extent `(Lx/2, Ly/2)` [m] used
-  to evaluate corner drift for the torsional amplification metric
+- `plan_halfwidth::NTuple{2,Float64}`: plate HALF-extent `(hx, hy) = (Lx/2, Ly/2)` [m]; the
+  four occupant corners are `plate_center ± (hx, hy)`
+- `plate_center::Union{Nothing,NTuple{2,Float64}}`: TRUE floor-plate geometric center
+  `(cx, cy)` [m], expressed in the SAME frame as `WallLine.x, y`. `nothing` (default) disables
+  corner-drift / torsion certification and fails the tier closed (see above)
 - `accidental_ecc::Float64`: ASCE 7 accidental eccentricity fraction (default 0.05)
-- `boundary::Symbol`: shear-building idealization; stories treated as independent
-  (interstory) springs. Cantilever flexural coupling across stories is the FEM
-  tier's job.
+
+Stories are treated as independent (interstory) shear-building springs; cantilever flexural
+coupling across stories is the FEM tier's job.
 """
 Base.@kwdef struct ReducedDiaphragmEvaluator <: AbstractLateralEvaluator
     story_heights::Vector{Float64}
     plan_halfwidth::NTuple{2,Float64} = (0.0, 0.0)
+    plate_center::Union{Nothing,NTuple{2,Float64}} = nothing
     accidental_ecc::Float64 = 0.05
 end
 
@@ -416,6 +450,35 @@ of a physical point, independent of the arbitrary input origin.
 end
 
 """
+    _wall_centroid(walls_s) -> (cx, cy)
+
+Per-story geometric centroid (arithmetic mean) of the wall plan positions.
+
+SUPERSEDED AS A PLAN-CENTER ANCHOR (crit5): this was formerly used as an origin-covariant
+PROXY for the plan center — the anchor the TRUE plan corners `plan_center ± (hx, hy)` and the
+CR-to-corner lever were measured from. `crit5` proved that proxy UNSAFE: for an eccentric
+service core (walls clustered at one end) the wall centroid coincides with the center of
+rigidity, so corners anchored to it miss the true far plate corner and the corner-drift /
+torsional-lever metrics UNDER-state the twist. The corner-drift and torsional-floor metrics
+now anchor the corners to the TRUE floor-plate center `ReducedDiaphragmEvaluator.plate_center`
+(the four occupant corners `plate_center ± (hx, hy)`) and FAIL CLOSED when it is absent —
+they never use this wall centroid.
+
+This helper is RETAINED only as a plain geometric utility (and for tests that reference it);
+it must NOT be reintroduced as the corner-drift plan-center anchor. Returns `(0.0, 0.0)` for
+an empty wall list.
+"""
+@inline function _wall_centroid(walls_s::Vector{WallLine})
+    isempty(walls_s) && return (0.0, 0.0)
+    sx = 0.0; sy = 0.0
+    for w in walls_s
+        sx += w.x; sy += w.y
+    end
+    n = length(walls_s)
+    return (sx / n, sy / n)
+end
+
+"""
     _reference_length(ev, walls_s) -> Float64
 
 Plan reference length `L_ref` [m] used to non-dimensionalize the rotational DOF of
@@ -433,6 +496,71 @@ function _reference_length(ev::ReducedDiaphragmEvaluator, walls_s::Vector{WallLi
     Lgeom = maximum((hypot(w.x, w.y) for w in walls_s); init = 0.0)
     return Lgeom > 0 ? Lgeom : 1.0
 end
+
+"""
+    _plate_encloses_walls(ev::ReducedDiaphragmEvaluator, walls_s) -> Bool
+
+ENCLOSURE GUARD (fail-closed) for the reduced-tier corner-drift / torsion certification.
+Returns `true` iff `plate_center` is present AND every `WallLine` `w` in `walls_s` lies inside
+(or exactly on) the plate rectangle `plate_center ± plan_halfwidth`:
+
+    cx − hx − tol ≤ w.x ≤ cx + hx + tol    AND    cy − hy − tol ≤ w.y ≤ cy + hy + tol
+
+with `(cx, cy) = plate_center`, `(hx, hy) = plan_halfwidth`.
+
+WHY (crit7): the four-corner max-drift / torsion metrics are EXACT only over the rectangle
+`plate_center ± plan_halfwidth` (convexity of `|disp(p)|²` in the plan point `p`), and are
+exact for the TRUE occupant diaphragm ONLY when that rectangle ENCLOSES every drift-relevant
+point. `plate_center` and `plan_halfwidth` are two FREE, caller-supplied fields and nothing
+else cross-checks them against the wall positions, so an UNDER-COVERING plate (e.g. the core
+half-extent mistaken for the full floor) makes BOTH plate-anchored gates (corner drift AND the
+`res.torsion` amplification ratio) silently UNDER-state the real edge drift while the only
+plate-independent gate (`util_trans`) is twist-blind — the exact formula then fails OPEN.
+
+This predicate enforces the CHECKABLE proxy WALLS ⊆ plate for the real (uncheckable here)
+requirement occupants ⊆ plate: the reduced model carries no independent occupant outline, so
+the caller's `plate_center`/`plan_halfwidth` is CONTRACTUALLY the true occupant diaphragm in
+the `WallLine` frame. The Phase 10 unified-FEM survivor check (true geometry) is the FINAL
+authority. RESIDUAL NOT CAUGHT: a plate that encloses the walls but is declared SMALLER than
+the true occupant diaphragm (walls ⊆ plate ⊂ occupants) is uncatchable here — it is delegated
+to the caller contract + the FEM survivor check.
+
+ENGINEERING JUDGMENT (tolerance, not a code clause): `tol = 1e-9 + 1e-9·hypot(hx, hy)` — an
+absolute floor plus a plate-SCALED relative term — so a wall EXACTLY on the plate boundary
+(`|w.x − cx| == hx`) PASSES despite floating-point assembly noise, while a genuine over-hang
+(even a few mm beyond a plan-scale plate) FAILS closed. The test is ORIGIN-INVARIANT: walls
+and plate translate together, so a joint origin shift leaves every inequality unchanged.
+
+ENGINEERING JUDGMENT (degenerate plate, not a code clause): a NEGATIVE half-extent (`hx < 0`
+or `hy < 0`) is a nonsensical / inverted plate and is treated as NON-enclosing (fail closed). A
+ZERO half-extent (a thin, axis-aligned plate) is NOT force-failed: it is left to the per-wall
+bounds below, which ENCLOSE walls lying ON that axis (within `tol`) and FAIL-CLOSE any wall OFF
+it. This keeps legitimately degenerate plans certifiable (e.g. a line of walls all at `x = cx`
+declared with `plan_halfwidth = (0, hy)`) while a genuinely SPREAD layout declared under a
+zero-extent plate still fails closed through the per-wall bounds. An empty `walls_s` is
+vacuously enclosed.
+"""
+function _plate_encloses_walls(ev::ReducedDiaphragmEvaluator, walls_s::Vector{WallLine})
+    ev.plate_center === nothing && return false
+    isempty(walls_s) && return true                 # vacuously true: nothing to enclose
+    cx, cy = ev.plate_center
+    hx, hy = ev.plan_halfwidth
+    # NEGATIVE (inverted) half-extent with real walls present ⇒ cannot enclose (fail closed). A
+    # ZERO half-extent is intentionally left to the per-wall bounds (encloses on-axis walls,
+    # fails closed on off-axis walls) so a valid thin/axis-aligned plan is not force-rejected.
+    (hx < 0 || hy < 0) && return false
+    tol = 1e-9 + 1e-9 * hypot(hx, hy)               # absolute + plate-scaled boundary tolerance
+    for w in walls_s
+        (cx - hx - tol <= w.x <= cx + hx + tol) || return false
+        (cy - hy - tol <= w.y <= cy + hy + tol) || return false
+    end
+    return true
+end
+
+# FEM tier (and any non-reduced evaluator) carries TRUE geometry and is NOT subject to the
+# reduced-tier enclosure proxy, so it always "encloses" — mirrors
+# `_plate_center_missing(::AbstractLateralEvaluator) = false`. Keeps FEM unaffected.
+_plate_encloses_walls(::AbstractLateralEvaluator, ::Vector{WallLine}) = true
 
 function evaluate_lateral(ev::ReducedDiaphragmEvaluator,
                           walls::Vector{WallLine},
@@ -506,10 +634,26 @@ function evaluate_lateral(ev::ReducedDiaphragmEvaluator,
         tx, ty = _cr_translation(u, cr)
         drift[s] = h > 0 ? sqrt(tx^2 + ty^2) / h : 0.0
 
-        # Torsional amplification δ_max/δ_avg at plan corners (ASCE 7 §12.8.4.3
-        # torsional-irregularity metric; VERIFY). δ_avg is taken at the CR so the
-        # ratio is origin-invariant (the corner displacements are physical points).
-        torsion[s] = _torsion_amplification(u, ev.plan_halfwidth, cr)
+        # Torsional amplification δ_max/δ_avg (ASCE 7 §12.8.4.3 torsional-irregularity
+        # metric; VERIFY) — EXACT realization at the four TRUE occupant corners. δ_avg is
+        # taken at the CR so the ratio is origin-invariant; δ_max is evaluated EXACTLY over
+        # the corners `plate_center ± (hx, hy)` (`_torsion_amplification` 4-arg; exact lever
+        # `hypot(hx + |xr − cx|, hy + |yr − cy|)`), correct even when the CR lies outside the
+        # plate. This GATES feasibility (the `res.torsion/torsion_limit` slot in
+        # `constraint_fns` / `solve_wall_layout`). When `plate_center === nothing` the corners
+        # cannot be located, so torsion certification is UNAVAILABLE and we FAIL CLOSED with
+        # `Inf` — never a wall-centroid / origin / plate-span proxy (crit5/rev6/crit6); the
+        # callers then refuse the layout (status=:geometry_required).
+        #
+        # ENCLOSURE GUARD (crit7, fail-closed): the four-corner metric is EXACT only if the
+        # plate `plate_center ± plan_halfwidth` ENCLOSES the drift-relevant points. The two
+        # FREE fields `plate_center`/`plan_halfwidth` are not otherwise cross-checked against
+        # the wall positions, so an UNDER-COVERING plate would make this gate silently under-
+        # state the twist (exact formula fails OPEN). When this story's walls are not ⊆ plate
+        # we therefore also FAIL CLOSED to `Inf` (see `_plate_encloses_walls`); callers refuse
+        # with `status = :geometry_inconsistent`.
+        torsion[s] = (ev.plate_center === nothing || !_plate_encloses_walls(ev, walls_s)) ? Inf :
+                     _torsion_amplification(u, ev.plan_halfwidth, cr, ev.plate_center)
 
         # Recover per-wall in-plane shear force: V_i = k_i (b_i · u).
         for w in walls_s
@@ -542,47 +686,52 @@ function _solve_spd(K::Matrix{Float64}, f::Vector{Float64}, L_ref::Float64)
 end
 
 """
-    _torsion_amplification(u, halfwidth, cr) -> δ_max/δ_avg
+    _torsion_amplification(u, halfwidth, cr, plan_center) -> δ_max/δ_avg
 
-Corner drift amplification `δ_max/δ_avg` from the rigid-body displacement `u = [δx,
-δy, φ]`, referenced to the diaphragm CENTER OF RIGIDITY `cr = (xr, yr)`. `δ_avg` is the
-translation magnitude at the CR (the origin-invariant rigid-body translation); `δ_max`
-is the largest translation over the four plan extremities, taken at `CR ± (hx, hy)`.
-The displacement of extremity `CR + (sx·hx, sy·hy)` is `translation_CR + φ × offset`,
-i.e. `(tx − φ·sy·hy, ty + φ·sx·hx)`. Because `tx, ty` (CR translation), `φ`, and the
-plan half-extent `(hx, hy)` are all origin-invariant, the whole ratio is ORIGIN-
-INVARIANT.
+Corner drift amplification `δ_max/δ_avg` from the rigid-body displacement `u = [δx, δy,
+φ]`, evaluating `δ_max` over the four corners `plan_center ± (hx, hy)`. `δ_avg` is the
+translation magnitude at the diaphragm CENTER OF RIGIDITY `cr = (xr, yr)` (`_cr_translation`,
+origin-invariant); each corner displacement is the rigid-diaphragm field
+`disp(p) = (δx − φ·p_y, δy + φ·p_x) = δ_avg(CR) + φ × (p − CR)`.
 
-ENGINEERING JUDGMENT: the reduced model carries only the plan HALF-EXTENT
-(`plan_halfwidth`), not an absolute plan center, so for the amplification lever we take
-the plan extremities as `halfwidth` from the CR (the center of twist). This is the only
-origin-invariant choice available in this data model and is physically the natural
-torsion lever (twist-induced corner drift scales with distance from the CR). For a
-symmetric core `cr = (0,0)` and this reduces EXACTLY to the prior origin-referenced form,
-so the existing known-answer torsion tests are unchanged.
+USED BY the reduced evaluator (4-arg) once `ReducedDiaphragmEvaluator.plate_center` is known:
+the corners are anchored to that TRUE plate center `(cx, cy)`, so the amplification is EXACT
+regardless of where the CR sits (crit5/rev6 showed the earlier wall-centroid and plate-span-
+bound proxies UNDER-stated an eccentric / non-orthogonal core, and both are removed). The FEM
+tier (`fem_evaluator.jl`) uses the 2-arg form, whose master-node displacements are already
+referenced to the diaphragm master at the DOF origin.
 """
 function _torsion_amplification(u::Vector{Float64}, halfwidth::NTuple{2,Float64},
-                                cr::NTuple{2,Float64})
+                                cr::NTuple{2,Float64}, plan_center::NTuple{2,Float64})
     tx, ty = _cr_translation(u, cr)
     δavg = sqrt(tx^2 + ty^2)
     δavg < 1e-12 && return 1.0
     hx, hy = halfwidth
+    cx, cy = plan_center
     φ = u[3]
     δmax = δavg
     for sx in (-1.0, 1.0), sy in (-1.0, 1.0)
-        dx = tx - φ * (sy * hy)
-        dy = ty + φ * (sx * hx)
+        px = cx + sx * hx; py = cy + sy * hy     # TRUE corner anchored to the plan center
+        dx = u[1] - φ * py                       # rigid-diaphragm displacement about the
+        dy = u[2] + φ * px                       # DOF origin: (δx − φ·p_y, δy + φ·p_x)
         δmax = max(δmax, sqrt(dx^2 + dy^2))
     end
     return δmax / δavg
 end
 
-# Backward-compatible 2-arg form (CR at the origin): preserves the prior behavior for
-# callers that reference displacements to the plan origin — e.g. the FEM tier's
-# master-node displacements in `fem_evaluator.jl`, which are already measured at the
-# diaphragm master and NOT part of this origin-invariance change.
+# 3-arg form: plan center defaults to the DOF origin (the model's natural frame, in which
+# the plan is centered at the origin). Reduces exactly to evaluating the corners at
+# `(±hx, ±hy)`.
+_torsion_amplification(u::Vector{Float64}, halfwidth::NTuple{2,Float64},
+                       cr::NTuple{2,Float64}) =
+    _torsion_amplification(u, halfwidth, cr, (0.0, 0.0))
+
+# Backward-compatible 2-arg form (CR AND plan center at the origin): preserves the prior
+# behavior EXACTLY for callers that reference displacements to the plan origin — e.g. the
+# FEM tier's master-node displacements in `fem_evaluator.jl`, which are already measured at
+# the diaphragm master and NOT part of this origin-invariance change.
 _torsion_amplification(u::Vector{Float64}, halfwidth::NTuple{2,Float64}) =
-    _torsion_amplification(u, halfwidth, (0.0, 0.0))
+    _torsion_amplification(u, halfwidth, (0.0, 0.0), (0.0, 0.0))
 
 # Principal plan directions swept by the direction-complete stability check:
 # +X = (1,0) and +Y = (0,1). ENGINEERING JUDGMENT: sweeping BOTH principal
@@ -596,33 +745,49 @@ _torsion_amplification(u::Vector{Float64}, halfwidth::NTuple{2,Float64}) =
 const _DIRECTION_COMPLETE_DIRS = ((:X, 1.0, 0.0), (:Y, 0.0, 1.0))
 
 """
-    direction_complete_interstory_drift(ev, walls, loads) -> (; directions, drift)
+    direction_complete_interstory_drift(ev, walls, loads) -> (; directions, drift, corner_drift)
 
-DIRECTION-COMPLETE, origin-invariant per-story interstory drift. This is the TRANSLATIONAL
-DEMAND / SERVICEABILITY realization of the reduced tier — NOT the stability definition.
-Stability is now defined by [`eigenstructure_stability`](@ref) (softest translational
-eigenvalue + condensed torsional stiffness about the CR), which also observes the twist DOF
-this metric is blind to (being the CR translation, it is mathematically independent of φ).
-This sweep remains the direction-complete serviceability drift the optimizer minimizes and
-the survivor re-validation re-checks.
+DIRECTION-COMPLETE, origin-invariant per-story interstory drift sweep. Returns BOTH a
+serviceability realization (`drift`, the CR translation) AND the physical drift SAFETY
+quantity (`corner_drift`, the EXACT max-corner interstory drift):
+
+  * `drift[s, d]` — magnitude of the CENTER-OF-RIGIDITY translation (`_cr_translation`),
+    the translational demand / serviceability realization. It is mathematically blind to
+    the twist DOF φ (the CR translation is independent of φ by the CR's defining property),
+    so it is NOT the stability/drift-limit authority; it is retained for serviceability and
+    for the existing origin-invariant known-answer tests.
+  * `corner_drift[s, d]` — the EXACT max-corner interstory drift over the FOUR TRUE occupant
+    corners `plate_center ± (hx, hy)`. The rigid-diaphragm displacement of corner `p` is
+    `disp(p) = (δx − φ·p_y, δy + φ·p_x)` (= `CR translation + φ × (p − CR)`), and
+    `corner_drift = max_p hypot(disp(p)) / h` — EXACT, with NO slack, and CORRECT even when
+    the CR lies outside the plate (the non-orthogonal rev6 case). This is the quantity ASCE
+    7-22 §12.12.1 limits: the design story drift Δ ≤ allowable Δ_a from Table 12.12-1, with Δ
+    taken AT THE BUILDING EDGES including diaphragm rotation (ASCE 7-22 §12.8.6.5); torsion
+    enters it DIRECTLY and UNCAPPED through φ, and it is what `constraint_fns` /
+    `solve_wall_layout` use for the drift feasibility check (corpus: asce-7-22; §12.12.1 PDF
+    p. 194; §12.8.6.5 PDF p. 188). When `ev.plate_center === nothing` the corners cannot be
+    located, so `corner_drift` FAILS CLOSED to `Inf` (certification unavailable) — it NEVER
+    falls back to the wall centroid, the DOF origin, or a plate-span lever bound (crit5/rev6/
+    crit6). The Phase 10 unified-FEM survivor check (true geometry) is the accuracy authority.
 
 For each story `s` it forms the cumulative applied lateral-load RESULTANT MAGNITUDE
 `F_s = hypot(ΣFx, ΣFy)` over all loads at/above `s` (exactly the story-shear resultant
-the primal `evaluate_lateral` already forms), then evaluates the interstory drift under
-a CANONICAL load set that does NOT depend on the design load's direction: the full
-resultant swept into `+X = (F_s, 0)` and `+Y = (0, F_s)` (see `_DIRECTION_COMPLETE_DIRS`).
-Each canonical case carries the SAME accidental-eccentricity torsion companion used by
-`evaluate_lateral` — identical `eax`/`eay`, `sign_nonzero`, and `ev.accidental_ecc`
-(ASCE 7-22 §12.8.4.2.2) — applied at the force-weighted participation centroid of the
-loads at/above `s`. Drift is the magnitude of the CENTER-OF-RIGIDITY translation
-(`_cr_translation`), so it is origin-invariant.
+the primal `evaluate_lateral` already forms), then evaluates the drift under a CANONICAL
+load set that does NOT depend on the design load's direction: the full resultant swept
+into `+X = (F_s, 0)` and `+Y = (0, F_s)` (see `_DIRECTION_COMPLETE_DIRS`). Each canonical
+case carries the SAME accidental-eccentricity torsion companion used by `evaluate_lateral`
+— identical `eax`/`eay`, `sign_nonzero`, and `ev.accidental_ecc` (ASCE 7-22 §12.8.4.2.2) —
+applied at the force-weighted participation centroid of the loads at/above `s`.
 
-Returns `directions::Vector{Symbol}` (the swept case labels) and `drift::Matrix`
-(`nstory × ndir`): `drift[s, d]` is story `s`'s interstory drift in principal case `d`.
-A near-dead principal direction produces a large FINITE `drift[s, d]` there (good Ipopt
-gradient, no throw) — so the per-story MAX over directions smoothly becomes infeasible
-when any principal mode is unbraced. Fails closed (`SingularStiffnessError`) only on a
-genuinely singular `K` via `_solve_spd`.
+Both metrics are origin-invariant: the CR translation (`_cr_translation`) is the physical
+displacement of a physical point, and the corners `plate_center ± (hx, hy)` translate WITH
+the walls+loads (the `plate_center` is in the same frame as `WallLine.x, y`), so translating
+walls+loads+plate_center jointly leaves `corner_drift` and `drift` unchanged.
+
+A near-dead principal direction produces a large FINITE value there (good Ipopt gradient,
+no throw), so the per-story MAX over directions smoothly becomes infeasible when any
+principal mode is unbraced. Fails closed (`SingularStiffnessError`) only on a genuinely
+singular `K` via `_solve_spd`.
 """
 function direction_complete_interstory_drift(ev::ReducedDiaphragmEvaluator,
                                              walls::Vector{WallLine},
@@ -630,6 +795,7 @@ function direction_complete_interstory_drift(ev::ReducedDiaphragmEvaluator,
     nstory = length(ev.story_heights)
     ndir = length(_DIRECTION_COMPLETE_DIRS)
     D = zeros(nstory, ndir)
+    C = zeros(nstory, ndir)
     Lx = 2 * ev.plan_halfwidth[1]; Ly = 2 * ev.plan_halfwidth[2]
     for s in 1:nstory
         walls_s = [w for w in walls if w.story == s]
@@ -655,9 +821,20 @@ function direction_complete_interstory_drift(ev::ReducedDiaphragmEvaluator,
         eax = ev.accidental_ecc * Lx
         eay = ev.accidental_ecc * Ly
 
-        # CR is reference for the (origin-invariant) drift. Safe when the canonical
-        # solve below does not throw — i.e. K is PD, so the translational block is PD.
+        # CR is the reference for the (origin-invariant) serviceability drift; the EXACT
+        # corner metric anchors the four occupant corners to the TRUE plate center. Both are
+        # safe when the canonical solve below does not throw — i.e. K is PD, so the
+        # translational block is PD and the CR is well-defined.
         cr = _center_of_rigidity(K)
+        center = ev.plate_center
+        hx, hy = ev.plan_halfwidth
+        # ENCLOSURE GUARD (crit7, fail-closed): the EXACT four-corner drift below is exact only
+        # when the plate `plate_center ± plan_halfwidth` ENCLOSES the drift-relevant points. An
+        # UNDER-COVERING plate (the two FREE fields are not otherwise cross-checked against the
+        # walls) would make this metric under-state the real edge drift — the exact formula
+        # fails OPEN. Fail closed to `Inf` when this story's walls are not ⊆ plate (see
+        # `_plate_encloses_walls`); computed ONCE per story (direction-independent).
+        encloses = _plate_encloses_walls(ev, walls_s)
 
         for (di, (_, dx, dy)) in enumerate(_DIRECTION_COMPLETE_DIRS)
             Fxc = F_s * dx; Fyc = F_s * dy
@@ -667,11 +844,33 @@ function direction_complete_interstory_drift(ev::ReducedDiaphragmEvaluator,
             Mz = Fyc * (exc + sign_nonzero(Fyc) * eax) -
                  Fxc * (eyc + sign_nonzero(Fxc) * eay)
             u = _solve_spd(K, [Fxc, Fyc, Mz], Lref)   # fail-closed on singular K
+            # (1) CR-translation drift (serviceability realization, φ-blind). PRESERVED.
             tx, ty = _cr_translation(u, cr)
             D[s, di] = h > 0 ? sqrt(tx^2 + ty^2) / h : 0.0
+            # (2) EXACT max-corner interstory drift over the four TRUE occupant corners
+            # `plate_center ± (hx, hy)` (ASCE 7-22 §12.12.1, Δ at the building edges incl.
+            # diaphragm rotation per §12.8.6.5). The rigid-diaphragm displacement of corner
+            # `p` is `(δx − φ·p_y, δy + φ·p_x)`; `corner_drift = max_p hypot(disp(p))/h`,
+            # EXACT (no slack) and correct even when the CR lies outside the plate (rev6).
+            # FAIL CLOSED to `Inf` when `plate_center === nothing` — no wall-centroid / origin
+            # / plate-span proxy (crit5/rev6/crit6; corpus: asce-7-22, §12.12.1 PDF p. 194;
+            # §12.8.6.5 PDF p. 188). Also fail closed when the plate UNDER-COVERS this story's
+            # walls (`!encloses`, crit7) — same reason the exact metric would otherwise fail OPEN.
+            if center === nothing || !encloses
+                C[s, di] = Inf
+            else
+                cx, cy = center
+                cdrift = 0.0
+                for sx in (-1.0, 1.0), sy in (-1.0, 1.0)
+                    px = cx + sx * hx; py = cy + sy * hy
+                    cdrift = max(cdrift, hypot(u[1] - u[3] * py, u[2] + u[3] * px))
+                end
+                C[s, di] = h > 0 ? cdrift / h : 0.0
+            end
         end
     end
-    return (directions = Symbol[d[1] for d in _DIRECTION_COMPLETE_DIRS], drift = D)
+    return (directions = Symbol[d[1] for d in _DIRECTION_COMPLETE_DIRS],
+            drift = D, corner_drift = C)
 end
 
 """
@@ -695,15 +894,20 @@ Per story `s`, from the assembled 3-DOF `K` over `[ux, uy, θ]`:
 
   * TORSIONAL floor — require `K_theta_cr ≥ k_req_tors = F_s·e_acc·r_ref/(h·DL)`.
     Derivation: the accidental-torsion moment `M_acc = F_s·e_acc` twists the diaphragm by
-    `φ = M_acc/K_theta_cr`; the extreme plan corner at radius `r_ref` from the CR then drifts
-    `φ·r_ref`, and `φ·r_ref/h ≤ DL` gives `K_theta_cr ≥ M_acc·r_ref/(h·DL)`. `K_theta_cr`
-    (the Schur complement of `K_tt`) DIRECTLY observes the twist stiffness the CR-translation
-    drift cannot. Utilization `util_tors = k_req_tors/K_theta_cr`.
+    `φ = M_acc/K_theta_cr`; a plan corner at radius `r` from the CR then drifts `φ·r`, and
+    `φ·r/h ≤ DL` gives `K_theta_cr ≥ M_acc·r/(h·DL)`. `r_ref` is the EXACT max CR-to-corner
+    lever `max_corner hypot(corner − CR) = hypot(hx + |xr − cx|, hy + |yr − cy|)` over the four
+    TRUE occupant corners `plate_center ± (hx, hy)` — correct even when the CR lies outside the
+    plate. `K_theta_cr` (the Schur complement of `K_tt`) DIRECTLY observes the twist stiffness
+    the CR-translation drift cannot. Utilization `util_tors = k_req_tors/K_theta_cr`. When
+    `plate_center === nothing` the lever cannot be located: the torsional floor is UNAVAILABLE
+    and FAILS CLOSED (`k_req_tors = util_tors = Inf`); the TRANSLATIONAL floor and the load-
+    independent mechanism guards need no `plate_center` and still run.
 
 `F_s = hypot(ΣFx, ΣFy)` is the per-story cumulative design-shear resultant magnitude —
 EXACTLY the resultant `evaluate_lateral` / `direction_complete_interstory_drift` form. `e_acc`
 and the plan dimensions are taken identically to `evaluate_lateral` so the two stay
-consistent (see the ENGINEERING JUDGMENT comments below for `r_ref` and `e_acc`).
+consistent (see the ENGINEERING JUDGMENT comment below for `e_acc`).
 
 The demand floors SCALE with `F_s`: a story with ~zero cumulative resultant has ~zero floor
 and so cannot be the authority for a mechanism in an UNLOADED story. That case is handled by
@@ -729,14 +933,13 @@ function eigenstructure_stability(ev::ReducedDiaphragmEvaluator,
     util_trans = zeros(nstory); util_tors = zeros(nstory)
 
     Lx = 2 * ev.plan_halfwidth[1]; Ly = 2 * ev.plan_halfwidth[2]
-    hx, hy = ev.plan_halfwidth
-    # ENGINEERING JUDGMENT (edge-radius assumption, not a code clause): the reduced model
-    # stores only plan HALF-WIDTHS, not an absolute plan center, so the CR-to-extreme-corner
-    # radius is taken as the plan half-diagonal `hypot(hx, hy)` — the SAME CR-centered plan
-    # extremity used by `_torsion_amplification`. For a CR-centered symmetric plan this is
-    # exact (r_ref = hypot(hx, hy)); for an off-center CR it is the natural origin-invariant
-    # torsion lever available in this data model.
-    r_ref = hypot(hx, hy)
+    # `r_ref` (the EXACT max CR-to-corner lever) is computed PER STORY in the loop below as
+    # `max_corner hypot(corner − CR)` over the four TRUE occupant corners `plate_center ±
+    # (hx, hy)` = `hypot(hx + |xr − cx|, hy + |yr − cy|)`. This is correct even when the CR
+    # lies outside the plate (the non-orthogonal rev6 case). It REPLACES the removed plate-span
+    # bound `hypot(2·hx, 2·hy)` and the earlier wall-centroid-eccentric estimate, both of which
+    # could MIS-state the lever (crit5/rev6/crit6). When `plate_center === nothing` the corners
+    # cannot be located and the torsional floor FAILS CLOSED (`util_tors = Inf`).
     # ENGINEERING JUDGMENT (direction-complete accidental eccentricity, not a code clause):
     # `evaluate_lateral` applies accidental eccentricity `accidental_ecc·L` about each plan
     # axis (eax = accidental_ecc·Lx, eay = accidental_ecc·Ly; accidental torsion per
@@ -787,14 +990,38 @@ function eigenstructure_stability(ev::ReducedDiaphragmEvaluator,
         end
         F_s = hypot(Fx, Fy)
 
-        # Physical anti-mechanism floors from the SAME drift limit DL (derivations above).
+        # TRANSLATIONAL anti-mechanism floor from the SAME drift limit DL (derivation above).
+        # Frame-independent — needs no plate_center — so it always runs.
         kqt = (h > 0 && drift_limit > 0) ? F_s / (h * drift_limit) : 0.0
-        kqr = (h > 0 && drift_limit > 0) ? F_s * e_acc * r_ref / (h * drift_limit) : 0.0
-
         λmin_tt[s] = spec.λmin; λmax_tt[s] = spec.λmax; K_theta[s] = Kθ
-        k_req_trans[s] = kqt; k_req_tors[s] = kqr
+        k_req_trans[s] = kqt
         util_trans[s] = kqt / spec.λmin
-        util_tors[s]  = kqr / Kθ
+
+        # TORSIONAL floor. Both guards above have passed, so the translational block is PD and
+        # the CR is well-defined. When plate_center is known, use the EXACT max CR-to-corner
+        # lever `r_ref = max_corner hypot(corner − CR)` over the four TRUE occupant corners
+        # `plate_center ± (hx, hy)`. When plate_center === nothing the lever cannot be located:
+        # FAIL CLOSED (util_tors = Inf) — never a plate-span / origin proxy (crit5/rev6/crit6).
+        # ENCLOSURE GUARD (crit7): also fail closed when the plate UNDER-COVERS this story's
+        # walls (`!_plate_encloses_walls`) — the exact CR-to-corner lever is a valid torsional
+        # floor only over a plate that encloses the drift-relevant points; an under-covering
+        # plate would under-state `r_ref` and let the floor fail OPEN. The TRANSLATIONAL floor
+        # and the load-independent mechanism guards above do NOT consult the guard and still run.
+        if ev.plate_center === nothing || !_plate_encloses_walls(ev, walls_s)
+            k_req_tors[s] = Inf
+            util_tors[s]  = Inf
+        else
+            cr = _center_of_rigidity(K)
+            cx, cy = ev.plate_center
+            hx, hy = ev.plan_halfwidth
+            r_ref = 0.0
+            for sx in (-1.0, 1.0), sy in (-1.0, 1.0)
+                r_ref = max(r_ref, hypot(cx + sx * hx - cr[1], cy + sy * hy - cr[2]))
+            end
+            kqr = (h > 0 && drift_limit > 0) ? F_s * e_acc * r_ref / (h * drift_limit) : 0.0
+            k_req_tors[s] = kqr
+            util_tors[s]  = kqr / Kθ
+        end
     end
 
     return (λmin_tt = λmin_tt, λmax_tt = λmax_tt, K_theta_cr = K_theta,

@@ -13,6 +13,7 @@ using Asap  # ensures `u"kip"`, `u"ksi"`, etc resolve via Asap unit module
         include("core/test_core_structs.jl")
         include("core/test_design_architecture.jl")
         include("core/test_member_hierarchy.jl")
+        include("core/test_walls_bridge.jl")
         include("core/test_design_api.jl")
         include("core/test_api_units_faces.jl")
         include("core/test_api_scoped_overrides_payload.jl")
@@ -43,6 +44,8 @@ using Asap  # ensures `u"kip"`, `u"ksi"`, etc resolve via Asap unit module
         include("analyze/test_structural_offset.jl")
         include("analyze/test_mesh_refinement.jl")
         include("analyze/test_member_group_demands.jl")
+        include("analyze/test_foundation_demands.jl")
+        include("analyze/test_column_populate_ltb.jl")
     end
 
     # ─── Visualization ───────────────────────────────────────────────────

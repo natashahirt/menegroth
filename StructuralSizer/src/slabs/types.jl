@@ -539,10 +539,13 @@ struct FEA <: FlatPlateAnalysisMethod
         0.0 ≤ iso_alpha ≤ 1.0 ||
             error("FEA iso_alpha must be in [0, 1]; got $iso_alpha")
 
-        # Warn if projection/no_torsion is used with area-based (can be unconservative)
+        # :area + :projection / :no_torsion ignores the Mxy envelope and is
+        # unconservative.  Default :frame + :projection is documented (strip
+        # integration).  Refuse the area combination by coercing to Wood–Armer.
         if design_approach == :area && moment_transform in (:projection, :no_torsion)
-            @warn "FEA: :$(moment_transform) with :area design can be unconservative — " *
-                  "consider :wood_armer for area-based design"
+            @error "FEA :area with moment_transform=:$(moment_transform) is refused " *
+                   "(unconservative for twisting). Coercing to :wood_armer."
+            moment_transform = :wood_armer
         end
         if moment_transform == :no_torsion
             @warn "FEA: :no_torsion ignores Mxy — intentionally unconservative baseline"

@@ -8,6 +8,10 @@
 
 using Asap: kip, ksi, to_ksi
 
+# ACI checkers reject bare Real at the demand boundary (to_kip(Real) is
+# SCOPE in the main Asap pipeline).  A number with no unit is treated as
+# already-kip by Asap and can silently understate N-valued demands.
+
 """
     ACIColumnChecker <: AbstractCapacityChecker
 

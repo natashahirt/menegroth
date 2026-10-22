@@ -11,7 +11,8 @@ AISC 360-16 capacity checker for steel members.
 # Options
 - `ϕ_b`: Resistance factor for flexure (default 0.9)
 - `ϕ_c`: Resistance factor for compression (default 0.9)
-- `ϕ_v`: Resistance factor for shear (default 1.0 for rolled shapes)
+- `ϕ_v`: Resistance factor for shear (`nothing` = per-provision: 1.00 only
+  for AISC 360-16 §G2.1(a) rolled I-webs, else 0.90). An explicit value overrides.
 - `ϕ_t`: Resistance factor for tension (default 0.9)
 - `deflection_limit`: Optional L/δ LL-only limit (e.g., 1/360)
 - `total_deflection_limit`: Optional L/δ DL+LL limit (e.g., 1/240)
@@ -27,7 +28,7 @@ feasible = is_feasible(checker, W("W14x22"), A992_Steel, demand, geometry)
 struct AISCChecker <: AbstractCapacityChecker
     ϕ_b::Float64
     ϕ_c::Float64
-    ϕ_v::Float64
+    ϕ_v::Union{Nothing, Float64}
     ϕ_t::Float64
     deflection_limit::Union{Nothing, Float64}
     total_deflection_limit::Union{Nothing, Float64}
@@ -38,7 +39,7 @@ end
 function AISCChecker(;
     ϕ_b = 0.9,
     ϕ_c = 0.9,
-    ϕ_v = 1.0,
+    ϕ_v = nothing,
     ϕ_t = 0.9,
     deflection_limit = nothing,
     total_deflection_limit = nothing,
@@ -243,7 +244,10 @@ function is_feasible(
     geometry::SteelMemberGeometry
 )::Bool
     # --- Composite branch: delegate to composite overload ---
-    if !isnothing(demand.composite) && section isa ISymmSection
+    # Only a real CompositeContext has slab/anchor data for Chapter I.
+    # `true` is the SteelBeamOptions.composite sentinel (no slab data);
+    # hogging Chapter F is applied below from Mux_neg, not from this flag.
+    if demand.composite isa CompositeContext && section isa ISymmSection
         return is_feasible(checker, cache, j, section, material, demand, geometry,
                            demand.composite)
     end
@@ -266,6 +270,10 @@ function is_feasible(
     L_m = to_meters(geometry.L)
     Lb_m = to_meters(geometry.Lb)
     
+    # AISC 360-16 Appendix 8 B2 (P-Δ) is DOCUMENTED/SCOPE: functions exist
+    # (`compute_B2`) but are not applied here.  `SteelMemberGeometry.braced`
+    # defaults to `true` (no sidesway); B2 must be applied externally when
+    # `braced=false`.
     if !geometry.braced
         @warn "Sway frame (braced=false) specified but B2 amplification not implemented. " *
               "Only B1 (P-δ) effects are applied. Results may be unconservative for sway frames." maxlog=1
@@ -290,8 +298,12 @@ function is_feasible(
     ϕPnc = min(ϕPn_x, ϕPn_y, ϕPn_z)
     
     # --- B1 Moment Amplification (P-δ effects, AISC Appendix 8) ---
+    # AISC 360-16 Appendix 8 Eqs. A-8-1 / A-8-3 — corpus: aisc-360-16, pages 305–306.
+    # Amplify sagging and hogging required moments the same way before H1.
+    Mux_neg = to_newton_meters(demand.Mux_neg)
     Mux_amp = Mux
     Muy_amp = Muy
+    Mux_neg_amp = Mux_neg
     
     if Pu_c > 0.0
         E = to_pascals(material.E)
@@ -309,7 +321,7 @@ function is_feasible(
         Cm_x = compute_Cm(M1x, M2x; transverse_loading=demand.transverse_load)
         Cm_y = compute_Cm(M1y, M2y; transverse_loading=demand.transverse_load)
         
-        # AISC A-8-3, α=1.0 for LRFD
+        # AISC A-8-3, α=1.0 for LRFD — corpus: aisc-360-16, page 306
         B1_x = compute_B1(Pu_c, Pe1_x, Cm_x; α=1.0)
         B1_y = compute_B1(Pu_c, Pe1_y, Cm_y; α=1.0)
         
@@ -319,15 +331,38 @@ function is_feasible(
         
         Mux_amp = B1_x * Mux
         Muy_amp = B1_y * Muy
+        Mux_neg_amp = B1_x * Mux_neg
     end
     
-    # --- Interaction Check: Compression (with amplified moments) ---
-    ur_c = check_PMxMy_interaction(Pu_c, Mux_amp, Muy_amp, ϕPnc, ϕMnx, cache.ϕMn_weak[j])
-    ur_c <= 1.0 || return false
-    
-    # --- Interaction Check: Tension ---
-    ur_t = check_PMxMy_interaction(Pu_t, Mux, Muy, cache.ϕPn_tension[j], ϕMnx, cache.ϕMn_weak[j])
-    ur_t <= 1.0 || return false
+    # --- Hogging Chapter F (bottom-flange LTB: Lb=L, Cb=1.0) ---
+    # AISC 360-16 §F2.2 — corpus: aisc-360-16, page 103.
+    # Mux_neg is always set (defaults to Mux). Do not gate on composite:
+    # a CompositeContext takes the 8-arg path above; bare steel and the
+    # `composite=true` sentinel both use Chapter F steel-alone here.
+    # When a CompositeContext is present, §I3.2b (page 151) also refers
+    # hogging to Chapter F; adequately braced = Lb ≤ Lp (Eq. F2-5, page 104).
+    # ENGINEERING JUDGMENT: Cb_neg=1.0 — SteelMemberGeometry has only sagging Cb.
+    ϕMn_neg = ϕMnx
+    if section isa ISymmSection
+        hog = _hogging_ltb_inputs(section, material, geometry)
+        ϕMn_neg = _get_ϕMnx_cached!(cache, j, hog.Lb_neg_m, hog.Cb_neg,
+                                    section, material, checker.ϕ_b)
+        ϕMn_neg >= Mux_neg || return false
+    end
+
+    # --- H1 interaction: sagging, tension, hogging ---
+    # Hogging Mcx is Chapter F at Lb=L, Cb=1.0; do not credit deck-braced ϕMnx.
+    # Hogging Mr uses B1·Mux_neg / B1·Muy (same App. 8 amplification as sagging).
+    # AISC 360-16 §H1.1 Eqs. H1-1a/H1-1b — corpus: aisc-360-16, page 133.
+    urs = _h1_pm_utilizations(Pu_c, Pu_t, Mux, Mux_neg, Muy,
+                              ϕPnc, cache.ϕPn_tension[j], ϕMnx, ϕMn_neg,
+                              cache.ϕMn_weak[j]; Mux_amp=Mux_amp, Muy_amp=Muy_amp,
+                              Mux_neg_amp=Mux_neg_amp)
+    urs.ur_c <= 1.0 || return false
+    urs.ur_t <= 1.0 || return false
+    if section isa ISymmSection
+        urs.ur_c_neg <= 1.0 || return false
+    end
     
     # --- LL Deflection Check (e.g. L/360) ---
     if !isnothing(checker.deflection_limit) && I_ref > 0 && δ_max_LL > 0
@@ -379,6 +414,135 @@ function get_feasibility_error_msg(
 end
 
 # ==============================================================================
+# Hogging Chapter F inputs (bare steel + I3.2b steel-alone)
+# ==============================================================================
+
+"""
+Hogging Chapter F LTB inputs (AISC 360-16 §F2.2, corpus: aisc-360-16, page 103).
+
+Used for bare-steel 6-arg checks and for §I3.2b steel-alone strength
+(corpus: aisc-360-16, page 151). Chapter F LTB is governed by the
+compression flange. In hogging that flange is the bottom flange.
+`geometry.Lb` is the top-flange (deck) brace spacing;
+`SteelMemberGeometry` has no dedicated bottom-flange `Lb`, so `Lb_neg` is the
+span `L`.
+
+# ENGINEERING JUDGMENT
+Hogging uses `Cb_neg = 1.0` unless a dedicated bottom-flange `Cb` already
+exists. Do not invent a new geometry field — sagging `geometry.Cb` is not
+the bottom-flange moment-gradient factor.
+
+Adequately braced per §I3.2b(a) is `Lb ≤ Lp` (AISC 360-16 §F2.2 Eq. F2-5,
+corpus: aisc-360-16, page 104), not Cb-inflated `Mn` reaching `Mp`.
+"""
+function _hogging_ltb_inputs(section::ISymmSection, material, geometry::SteelMemberGeometry)
+    Lb_neg_m = to_meters(geometry.L)
+    # ENGINEERING JUDGMENT: no dedicated bottom-flange Cb on SteelMemberGeometry.
+    Cb_neg = 1.0
+    # AISC 360-16 §F2.2, Eq. F2-5 — corpus: aisc-360-16, page 104
+    Lp_m = ustrip(u"m", get_Lp_Lr(section, material).Lp)
+    # AISC 360-16 §I3.2b(a) — corpus: aisc-360-16, page 151
+    adequately_braced = Lb_neg_m <= Lp_m
+    return (Lb_neg_m=Lb_neg_m, Cb_neg=Cb_neg, adequately_braced=adequately_braced)
+end
+
+"""
+    _hogging_is_stricter(geometry::SteelMemberGeometry) -> Bool
+
+`true` when hogging Chapter F is stricter than the sagging geometry:
+deck-braced `Lb < L` or sagging `Cb > 1`.
+
+Lengths compare in the geometry's own unit (stored metres) with the
+existing `1e-9` float guard. Both inequalities are strict.
+
+AISC 360-16 §F2.2 — corpus: aisc-360-16, page 103.
+# ENGINEERING JUDGMENT
+`SteelMemberGeometry` has only sagging `Cb`. Hogging uses `Cb = 1.0`
+when this is true (see [`_hogging_chapter_f_geometry`](@ref)).
+"""
+function _hogging_is_stricter(geometry::SteelMemberGeometry)
+    tol = 1e-9 * oneunit(geometry.Lb)
+    return geometry.Lb + tol < geometry.L || geometry.Cb > 1.0 + 1e-9
+end
+
+"""Hogging Chapter F geometry: `Lb=L`, `Cb=1.0`.
+
+AISC 360-16 §F2.2 — corpus: aisc-360-16, page 103.
+# ENGINEERING JUDGMENT
+`SteelMemberGeometry` has only sagging `Cb`. Hogging uses `Cb=1.0`.
+"""
+function _hogging_chapter_f_geometry(g::SteelMemberGeometry)
+    SteelMemberGeometry(g.L; Lb=g.L, Cb=1.0, Kx=g.Kx, Ky=g.Ky, braced=g.braced)
+end
+
+"""I3.2b hogging design strength: Chapter F steel-alone, plus plastic
+composite alternative only when §I3.2b(a–c) all hold."""
+function _composite_ϕMn_neg(
+    checker::AISCChecker,
+    cache::AISCCapacityCache,
+    j::Int,
+    section::ISymmSection,
+    material,
+    geometry::SteelMemberGeometry,
+    ctx::CompositeContext
+)
+    hog = _hogging_ltb_inputs(section, material, geometry)
+    ϕMnx_steel_neg = _get_ϕMnx_cached!(cache, j, hog.Lb_neg_m, hog.Cb_neg,
+                                        section, material, checker.ϕ_b)
+    ϕMn_neg = ϕMnx_steel_neg
+    Asr_m2 = ustrip(u"m^2", ctx.Asr)
+    Fysr_Pa = ustrip(u"Pa", ctx.Fysr)
+    # I3.2b alternative plastic hogging (φb = 0.90) only when:
+    #   (a) compact and adequately braced per Chapter F: Lb ≤ Lp (Eq. F2-5),
+    #   (b) headed studs/channels in the negative-moment region (`neg_moment`),
+    #   (c) developed slab rebar Asr with Fysr.
+    # Asr > 0 alone is not I3.2b(b). Adequately braced is Lb≤Lp, not
+    # Cb-inflated Mn reaching Mp (AISC 360-16 §F2.2 Eq. F2-5, page 104).
+    # AISC 360-16 §I3.2b(a–c) — corpus: aisc-360-16, page 151
+    if ctx.neg_moment && is_compact(section, material) && Asr_m2 > 0 && Fysr_Pa > 0 &&
+            hog.adequately_braced
+        Mn_comp_neg = get_Mn_negative(section, material, ctx.Asr, ctx.Fysr)
+        ϕMn_neg = max(ϕMn_neg, checker.ϕ_b * ustrip(u"N*m", Mn_comp_neg))
+    end
+    return ϕMn_neg
+end
+
+"""
+AISC 360-16 §H1.1 compression, tension, and hogging P–M utilizations
+(Eqs. H1-1a / H1-1b — corpus: aisc-360-16, page 133).
+
+Required flexural strengths `Mr` for compression+flexure are second-order
+moments: App. 8 B1 (P-δ) amplifies both the sagging and hogging faces
+before H1 (AISC 360-16 Appendix 8 Eq. A-8-1 / A-8-3 — corpus: aisc-360-16,
+pages 305–306; §C2.1 requires second-order required strengths — page 79).
+
+`ϕMnx_sag` is sagging Mcx (Chapter F, or max(I3.2a composite, Chapter F) on
+the CompositeContext path). `ϕMn_neg` is hogging Mcx (Chapter F at Lb=L,
+Cb=1.0, or I3.2b). Axial Pc is Chapter E φPn — I2 is for encased/filled
+columns, not slab-on-beam composite beams.
+
+`Mux_amp` / `Mux_neg_amp` / `Muy_amp` are B1-amplified required moments
+(default = first-order when B1 = 1). Tension+flexure uses first-order Mr
+(App. 8 B1 applies to members subject to compression).
+
+Returns `(ur_c, ur_t, ur_c_neg)`. Adequate iff each ≤ 1.0.
+"""
+function _h1_pm_utilizations(
+    Pu_c, Pu_t, Mux_sag, Mux_neg, Muy,
+    ϕPnc, ϕPnt, ϕMnx_sag, ϕMn_neg, ϕMny;
+    Mux_amp = Mux_sag,
+    Muy_amp = Muy,
+    Mux_neg_amp = Mux_neg,
+)
+    # AISC 360-16 §H1.1 Eqs. H1-1a/H1-1b — corpus: aisc-360-16, page 133
+    # Mr from App. 8 B1 — corpus: aisc-360-16, pages 305–306 (Eqs. A-8-1, A-8-3)
+    ur_c = check_PMxMy_interaction(Pu_c, Mux_amp, Muy_amp, ϕPnc, ϕMnx_sag, ϕMny)
+    ur_t = check_PMxMy_interaction(Pu_t, Mux_sag, Muy, ϕPnt, ϕMnx_sag, ϕMny)
+    ur_c_neg = check_PMxMy_interaction(Pu_c, Mux_neg_amp, Muy_amp, ϕPnc, ϕMn_neg, ϕMny)
+    return (ur_c = ur_c, ur_t = ur_t, ur_c_neg = ur_c_neg)
+end
+
+# ==============================================================================
 # Composite Beam Feasibility (AISC 360-16 Chapter I)
 # ==============================================================================
 
@@ -394,9 +558,9 @@ Composite-aware feasibility check. When `CompositeContext` is provided:
 3. **Deflection** (Commentary I3.2): uses `I_LB` (partial composite) for live-load
    deflection instead of bare-steel `Ix`.
 4. **Shear and weak-axis** checks remain the same as bare steel.
-
-The compression/interaction checks (H1) use the **larger** of composite ϕMn and
-bare-steel ϕMn, since composite action only helps flexure.
+5. **H1 interaction**: compression uses the larger of composite ϕMn and
+   bare-steel ϕMn for sagging; hogging uses I3.2b ϕMn_neg with Pu via H1.
+   Do not skip Pu because a CompositeContext is present.
 """
 function is_feasible(
     checker::AISCChecker,
@@ -409,6 +573,15 @@ function is_feasible(
     ctx::CompositeContext
 )::Bool
     Mux = to_newton_meters(demand.Mux)
+    Mux_pos = to_newton_meters(demand.Mux_pos)
+    Mux_neg = to_newton_meters(demand.Mux_neg)
+    Pu_c = to_newtons(demand.Pu_c)
+    Pu_t = to_newtons(demand.Pu_t)
+    Muy = to_newton_meters(demand.Muy)
+    M1x = to_newton_meters(demand.M1x)
+    M2x = to_newton_meters(demand.M2x)
+    M1y = to_newton_meters(demand.M1y)
+    M2y = to_newton_meters(demand.M2y)
     Vus = to_newtons(demand.Vu_strong)
     Vuw = to_newtons(demand.Vu_weak)
     L_m = to_meters(geometry.L)
@@ -420,14 +593,20 @@ function is_feasible(
     cache.ϕVn_strong[j] >= Vus || return false
     cache.ϕVn_weak[j] >= Vuw || return false
 
-    # --- Construction Stage (I3.1b) — unshored only ---
+    # --- Construction Stage (I3.1b) — unshored; all pre-composite loads ---
+    # AISC 360-16 §I3.1b — corpus: aisc-360-16, page 151
+    # Steel section alone must support all loads applied before concrete
+    # attains 75% of f'c, including hogging. Envelope demand is used as a
+    # proxy for those construction-stage moments (same convention as sagging).
+    # Do not weaken vs unsigned Mux: if |Mux| exceeds both signed faces,
+    # still check the larger value.
     if !ctx.shored
         Lb_const_m = ustrip(u"m", ctx.Lb_const)
         ϕMn_const = _get_ϕMnx_cached!(cache, j, Lb_const_m, 1.0, section, material, checker.ϕ_b)
-        ϕMn_const >= Mux || return false
+        ϕMn_const >= max(abs(Mux), Mux_pos, Mux_neg) || return false
     end
 
-    # --- Composite Flexural Capacity (I3.2a) ---
+    # --- Positive composite flexural capacity (I3.2a) ---
     b_eff = get_b_eff(ctx.slab, ctx.L_beam)
     Qn = get_Qn(ctx.anchor, ctx.slab)
 
@@ -445,13 +624,62 @@ function is_feasible(
         return false
     end
 
-    # Use the greater of composite and bare-steel capacity
+    # Use the greater of composite and bare-steel capacity (sagging)
     ϕMnx_steel = _get_ϕMnx_cached!(cache, j, to_meters(geometry.Lb), geometry.Cb,
                                      section, material, checker.ϕ_b)
     ϕMnx = max(ϕMn_comp, ϕMnx_steel)
 
-    # Pure flexure check (beams typically have Pu ≈ 0)
-    ϕMnx >= Mux || return false
+    ϕMnx >= Mux_pos || return false
+
+    # --- Negative flexural strength (I3.2b, corpus: aisc-360-16, page 151) ---
+    ϕMn_neg = _composite_ϕMn_neg(checker, cache, j, section, material, geometry, ctx)
+    ϕMn_neg >= Mux_neg || return false
+
+    # --- H1 combined forces (do not skip Pu because CompositeContext is present) ---
+    # Sagging Mcx: larger of I3.2a composite φMn and Chapter F φMn.
+    # Hogging Mcx: I3.2b φMn_neg. Axial Pc: Chapter E φPn (I2 is encased/filled).
+    # AISC 360-16 §H1.1 Eqs. H1-1a/H1-1b — corpus: aisc-360-16, page 133.
+    # AISC 360-16 §I3.2a / §I3.2b — corpus: aisc-360-16, page 151.
+    Lc_x = geometry.Kx * L_m
+    Lc_y = geometry.Ky * L_m
+    ϕPn_x = _get_ϕPn_cached!(cache, :strong, j, Lc_x, section, material)
+    ϕPn_y = _get_ϕPn_cached!(cache, :weak, j, Lc_y, section, material)
+    ϕPn_z = _get_ϕPn_cached!(cache, :torsional, j, Lc_y, section, material)
+    ϕPnc = min(ϕPn_x, ϕPn_y, ϕPn_z)
+    ϕMny = cache.ϕMn_weak[j]
+
+    Mux_amp = Mux_pos
+    Muy_amp = Muy
+    Mux_neg_amp = Mux_neg
+    if Pu_c > 0.0
+        E = to_pascals(material.E)
+        Ix = cache.Ix[j]
+        Iy = to_meters_fourth(StructuralSizer.Iy(section))
+        Lc1_x = geometry.Kx * L_m
+        Lc1_y = geometry.Ky * L_m
+        (Lc1_x > 0 && Lc1_y > 0) || return false
+        Pe1_x = π^2 * E * Ix / Lc1_x^2
+        Pe1_y = π^2 * E * Iy / Lc1_y^2
+        Cm_x = compute_Cm(M1x, M2x; transverse_loading=demand.transverse_load)
+        Cm_y = compute_Cm(M1y, M2y; transverse_loading=demand.transverse_load)
+        # AISC 360-16 Appendix 8 Eq. A-8-3, α=1.0 for LRFD — corpus: aisc-360-16, page 306
+        B1_x = compute_B1(Pu_c, Pe1_x, Cm_x; α=1.0)
+        B1_y = compute_B1(Pu_c, Pe1_y, Cm_y; α=1.0)
+        if isinf(B1_x) || isinf(B1_y)
+            return false
+        end
+        Mux_amp = B1_x * Mux_pos
+        Muy_amp = B1_y * Muy
+        Mux_neg_amp = B1_x * Mux_neg
+    end
+
+    urs = _h1_pm_utilizations(Pu_c, Pu_t, Mux_pos, Mux_neg, Muy,
+                              ϕPnc, cache.ϕPn_tension[j], ϕMnx, ϕMn_neg, ϕMny;
+                              Mux_amp=Mux_amp, Muy_amp=Muy_amp,
+                              Mux_neg_amp=Mux_neg_amp)
+    urs.ur_c <= 1.0 || return false
+    urs.ur_t <= 1.0 || return false
+    urs.ur_c_neg <= 1.0 || return false
 
     # --- Deflection Checks (Commentary I3.2) ---
     I_LB_m4 = ustrip(u"m^4", get_I_LB(section, material, ctx.slab, b_eff, ΣQn_full))
@@ -548,6 +776,11 @@ function explain_feasibility(
     demand::MemberDemand,
     geometry::SteelMemberGeometry
 )::FeasibilityExplanation
+    if demand.composite isa CompositeContext && section isa ISymmSection
+        return explain_feasibility(checker, cache, j, section, material, demand, geometry,
+                                   demand.composite)
+    end
+
     checks = CheckResult[]
 
     # --- Extract demands (SI) ---
@@ -598,8 +831,11 @@ function explain_feasibility(
     ϕPnc = min(ϕPn_x, ϕPn_y, ϕPn_z)
 
     # --- B1 Moment Amplification — AISC Appendix 8 ---
+    # AISC 360-16 Appendix 8 Eqs. A-8-1 / A-8-3 — corpus: aisc-360-16, pages 305–306.
+    Mux_neg = to_newton_meters(demand.Mux_neg)
     Mux_amp = Mux
     Muy_amp = Muy
+    Mux_neg_amp = Mux_neg
     b1_feasible = true
 
     if Pu_c > 0.0
@@ -620,6 +856,7 @@ function explain_feasibility(
             if b1_feasible
                 Mux_amp = B1_x * Mux
                 Muy_amp = B1_y * Muy
+                Mux_neg_amp = B1_x * Mux_neg
             end
         else
             b1_feasible = false
@@ -633,16 +870,48 @@ function explain_feasibility(
               b1_feasible ? Pe1_approx : Inf, Pu_c, ϕPnc, "AISC 360-16 App. 8"))
     end
 
-    # --- Interaction: Compression — AISC 360-16 H1 ---
-    ur_c = b1_feasible ? check_PMxMy_interaction(Pu_c, Mux_amp, Muy_amp, ϕPnc, ϕMnx, ϕMny) : Inf
+    # --- Hogging Chapter F (bottom-flange LTB: Lb=L, Cb=1.0) ---
+    # AISC 360-16 §F2.2 — corpus: aisc-360-16, page 103.
+    # Always reported for I-sections so explain does not tell only the
+    # unsigned H1 story. Clause is §I3.2b when the hogging-only sentinel
+    # is set; otherwise Chapter F (bare steel) / H1 when Pu > 0.
+    # ENGINEERING JUDGMENT: Cb_neg=1.0 — SteelMemberGeometry has only sagging Cb.
+    hog_stricter = false
+    ϕMn_neg = ϕMnx
+    if section isa ISymmSection
+        hog = _hogging_ltb_inputs(section, material, geometry)
+        ϕMn_neg = _get_ϕMnx_cached!(cache, j, hog.Lb_neg_m, hog.Cb_neg,
+                                    section, material, checker.ϕ_b)
+        hog_stricter = _hogging_is_stricter(geometry)
+    end
+
+    # --- H1 interaction: sagging, tension, hogging ---
+    # AISC 360-16 §H1.1 Eqs. H1-1a/H1-1b — corpus: aisc-360-16, page 133.
+    # Hogging Mr = B1·Mux_neg (App. 8) — corpus: aisc-360-16, pages 305–306.
+    ϕPn_t = cache.ϕPn_tension[j]
+    urs = _h1_pm_utilizations(Pu_c, Pu_t, Mux, Mux_neg, Muy,
+                              ϕPnc, ϕPn_t, ϕMnx, ϕMn_neg, ϕMny;
+                              Mux_amp=Mux_amp, Muy_amp=Muy_amp,
+                              Mux_neg_amp=Mux_neg_amp)
+    ur_c = b1_feasible ? urs.ur_c : Inf
     push!(checks, CheckResult("pm_interaction_compression", ur_c <= 1.0,
           ur_c, max(Pu_c, Mux_amp, Muy_amp), 1.0, "AISC 360-16 H1"))
-
-    # --- Interaction: Tension — AISC 360-16 H1 ---
-    ϕPn_t = cache.ϕPn_tension[j]
-    ur_t = check_PMxMy_interaction(Pu_t, Mux, Muy, ϕPn_t, ϕMnx, ϕMny)
-    push!(checks, CheckResult("pm_interaction_tension", ur_t <= 1.0,
-          ur_t, max(Pu_t, Mux, Muy), 1.0, "AISC 360-16 H1"))
+    push!(checks, CheckResult("pm_interaction_tension", urs.ur_t <= 1.0,
+          urs.ur_t, max(Pu_t, Mux, Muy), 1.0, "AISC 360-16 H1"))
+    if section isa ISymmSection
+        flex_ratio = ϕMn_neg > 0 ? Mux_neg / ϕMn_neg : (Mux_neg > 0 ? Inf : 0.0)
+        neg_ratio = max(flex_ratio, urs.ur_c_neg)
+        neg_ok = ϕMn_neg >= Mux_neg && urs.ur_c_neg <= 1.0
+        clause = if demand.composite === true
+            "AISC 360-16 I3.2b"
+        elseif Pu_c > 0
+            "AISC 360-16 H1"
+        else
+            "AISC 360-16 F2"
+        end
+        push!(checks, CheckResult("flexure_neg", neg_ok,
+              neg_ratio, Mux_neg, ϕMn_neg, clause))
+    end
 
     # --- LL Deflection Check ---
     if !isnothing(checker.deflection_limit) && I_ref > 0 && δ_max_LL > 0
@@ -665,7 +934,209 @@ function explain_feasibility(
     # --- Aggregate ---
     # Exclude informational checks (b1_amplification is a stability indicator,
     # not a demand/capacity utilization ratio) from governing determination.
+    # When hogging Chapter F is stricter, unsigned H1 used sagging ϕMnx —
+    # do not advertise it as the flexure story (flexure_neg / hogging H1 is).
     capacity_checks = filter(c -> c.name != "b1_amplification", checks)
+    if hog_stricter && Mux_neg > 0
+        capacity_checks = filter(c -> c.name != "pm_interaction_compression" &&
+                                      c.name != "pm_interaction_tension",
+                                 capacity_checks)
+    end
+    all_pass = all(c -> c.passed, checks)
+    if isempty(capacity_checks)
+        gov = CheckResult("none", true, 0.0, 0.0, 0.0, "")
+    else
+        gov_idx = argmax([c.ratio for c in capacity_checks])
+        gov = capacity_checks[gov_idx]
+    end
+
+    FeasibilityExplanation(all_pass, checks, gov.name, gov.ratio)
+end
+
+"""
+    explain_feasibility(checker, cache, j, section, material, demand, geometry, ctx)
+
+Composite-aware diagnostic sibling of the `CompositeContext` `is_feasible`
+overload. Evaluates construction both-face (I3.1b), hogging (I3.2b), and
+H1 interaction so `explain.passed` matches `is_feasible`.
+"""
+function explain_feasibility(
+    checker::AISCChecker,
+    cache::AISCCapacityCache,
+    j::Int,
+    section::ISymmSection,
+    material::StructuralSteel,
+    demand::MemberDemand,
+    geometry::SteelMemberGeometry,
+    ctx::CompositeContext
+)::FeasibilityExplanation
+    checks = CheckResult[]
+
+    Mux = to_newton_meters(demand.Mux)
+    Mux_pos = to_newton_meters(demand.Mux_pos)
+    Mux_neg = to_newton_meters(demand.Mux_neg)
+    Pu_c = to_newtons(demand.Pu_c)
+    Pu_t = to_newtons(demand.Pu_t)
+    Muy = to_newton_meters(demand.Muy)
+    M1x = to_newton_meters(demand.M1x)
+    M2x = to_newton_meters(demand.M2x)
+    M1y = to_newton_meters(demand.M1y)
+    M2y = to_newton_meters(demand.M2y)
+    Vus = to_newtons(demand.Vu_strong)
+    Vuw = to_newtons(demand.Vu_weak)
+    L_m = to_meters(geometry.L)
+    δ_max_LL = to_meters(demand.δ_max_LL)
+    δ_max_total = to_meters(demand.δ_max_total)
+    I_ref = to_meters_fourth(demand.I_ref)
+
+    # --- Depth ---
+    d_section = cache.depths[j]
+    d_limit = checker.max_depth
+    d_ratio = d_limit > 0 ? d_section / d_limit : 0.0
+    push!(checks, CheckResult("depth", d_section <= d_limit,
+          d_ratio, d_section, d_limit, ""))
+
+    # --- Shear (steel section alone — AISC G) ---
+    ϕVn_s = cache.ϕVn_strong[j]
+    s_ratio_s = ϕVn_s > 0 ? Vus / ϕVn_s : (Vus > 0 ? Inf : 0.0)
+    push!(checks, CheckResult("shear_strong", ϕVn_s >= Vus,
+          s_ratio_s, Vus, ϕVn_s, "AISC 360-16 G2"))
+
+    ϕVn_w = cache.ϕVn_weak[j]
+    s_ratio_w = ϕVn_w > 0 ? Vuw / ϕVn_w : (Vuw > 0 ? Inf : 0.0)
+    push!(checks, CheckResult("shear_weak", ϕVn_w >= Vuw,
+          s_ratio_w, Vuw, ϕVn_w, "AISC 360-16 G2"))
+
+    # --- Construction Stage (I3.1b) — both faces ---
+    # AISC 360-16 §I3.1b — corpus: aisc-360-16, page 151
+    # Do not weaken vs unsigned Mux: if |Mux| exceeds both signed faces,
+    # still check the larger value.
+    if !ctx.shored
+        Lb_const_m = ustrip(u"m", ctx.Lb_const)
+        ϕMn_const = _get_ϕMnx_cached!(cache, j, Lb_const_m, 1.0, section, material, checker.ϕ_b)
+        Mu_const = max(abs(Mux), Mux_pos, Mux_neg)
+        c_ratio = ϕMn_const > 0 ? Mu_const / ϕMn_const : (Mu_const > 0 ? Inf : 0.0)
+        push!(checks, CheckResult("construction_flexure", ϕMn_const >= Mu_const,
+              c_ratio, Mu_const, ϕMn_const, "AISC 360-16 I3.1b"))
+    end
+
+    # --- Positive composite flexural capacity (I3.2a) ---
+    b_eff = get_b_eff(ctx.slab, ctx.L_beam)
+    Cf_max = ustrip(u"N", _Cf_max(section, material, ctx.slab, b_eff))
+    ΣQn_full = Cf_max * u"N"
+
+    ϕMn_comp = 0.0
+    flexure_pos_ok = false
+    try
+        result = get_ϕMn_composite(section, material, ctx.slab, b_eff, ΣQn_full;
+                                    ϕ=checker.ϕ_b)
+        ϕMn_comp = ustrip(u"N*m", result.ϕMn)
+        flexure_pos_ok = true
+    catch e
+        @debug "Composite flexure check failed — section infeasible" exception=(e, catch_backtrace())
+    end
+
+    ϕMnx_steel = _get_ϕMnx_cached!(cache, j, to_meters(geometry.Lb), geometry.Cb,
+                                     section, material, checker.ϕ_b)
+    ϕMnx = flexure_pos_ok ? max(ϕMn_comp, ϕMnx_steel) : 0.0
+    pos_ratio = ϕMnx > 0 ? Mux_pos / ϕMnx : (Mux_pos > 0 ? Inf : 0.0)
+    push!(checks, CheckResult("flexure_pos", flexure_pos_ok && ϕMnx >= Mux_pos,
+          pos_ratio, Mux_pos, ϕMnx, "AISC 360-16 I3.2a"))
+
+    # --- Negative flexural strength (I3.2b) + hogging H1 ---
+    # AISC 360-16 §I3.2b — corpus: aisc-360-16, page 151
+    # AISC 360-16 §F2.2 Eq. F2-5 — corpus: aisc-360-16, page 104
+    # AISC 360-16 §H1.1 Eqs. H1-1a/H1-1b — corpus: aisc-360-16, page 133
+    ϕMn_neg = _composite_ϕMn_neg(checker, cache, j, section, material, geometry, ctx)
+    hog_stricter = _hogging_is_stricter(geometry)
+
+    Lc_x = geometry.Kx * L_m
+    Lc_y = geometry.Ky * L_m
+    ϕPn_x = _get_ϕPn_cached!(cache, :strong, j, Lc_x, section, material)
+    ϕPn_y = _get_ϕPn_cached!(cache, :weak, j, Lc_y, section, material)
+    ϕPn_z = _get_ϕPn_cached!(cache, :torsional, j, Lc_y, section, material)
+    ϕPnc = min(ϕPn_x, ϕPn_y, ϕPn_z)
+    ϕMny = cache.ϕMn_weak[j]
+    ϕPn_t = cache.ϕPn_tension[j]
+
+    Mux_amp = Mux_pos
+    Muy_amp = Muy
+    Mux_neg_amp = Mux_neg
+    b1_feasible = true
+    if Pu_c > 0.0
+        E = to_pascals(material.E)
+        Ix_j = cache.Ix[j]
+        Iy_j = to_meters_fourth(StructuralSizer.Iy(section))
+        Lc1_x = geometry.Kx * L_m
+        Lc1_y = geometry.Ky * L_m
+        if Lc1_x > 0 && Lc1_y > 0
+            Pe1_x = π^2 * E * Ix_j / Lc1_x^2
+            Pe1_y = π^2 * E * Iy_j / Lc1_y^2
+            Cm_x = compute_Cm(M1x, M2x; transverse_loading=demand.transverse_load)
+            Cm_y = compute_Cm(M1y, M2y; transverse_loading=demand.transverse_load)
+            B1_x = compute_B1(Pu_c, Pe1_x, Cm_x; α=1.0)
+            B1_y = compute_B1(Pu_c, Pe1_y, Cm_y; α=1.0)
+            b1_feasible = !isinf(B1_x) && !isinf(B1_y)
+            if b1_feasible
+                Mux_amp = B1_x * Mux_pos
+                Muy_amp = B1_y * Muy
+                Mux_neg_amp = B1_x * Mux_neg
+            end
+        else
+            b1_feasible = false
+        end
+    end
+
+    if Pu_c > 0.0 && Lc_x > 0
+        Pe1_approx = ϕPnc > 0 ? Pu_c / ϕPnc : Inf
+        push!(checks, CheckResult("b1_amplification", b1_feasible,
+              b1_feasible ? Pe1_approx : Inf, Pu_c, ϕPnc, "AISC 360-16 App. 8"))
+    end
+
+    urs = _h1_pm_utilizations(Pu_c, Pu_t, Mux_pos, Mux_neg, Muy,
+                              ϕPnc, ϕPn_t, ϕMnx, ϕMn_neg, ϕMny;
+                              Mux_amp=Mux_amp, Muy_amp=Muy_amp,
+                              Mux_neg_amp=Mux_neg_amp)
+    ur_c = b1_feasible ? urs.ur_c : Inf
+    push!(checks, CheckResult("pm_interaction_compression", ur_c <= 1.0,
+          ur_c, max(Pu_c, Mux_amp, Muy_amp), 1.0, "AISC 360-16 H1"))
+    push!(checks, CheckResult("pm_interaction_tension", urs.ur_t <= 1.0,
+          urs.ur_t, max(Pu_t, Mux_pos, Muy), 1.0, "AISC 360-16 H1"))
+
+    flex_ratio = ϕMn_neg > 0 ? Mux_neg / ϕMn_neg : (Mux_neg > 0 ? Inf : 0.0)
+    neg_ratio = max(flex_ratio, urs.ur_c_neg)
+    neg_ok = ϕMn_neg >= Mux_neg && urs.ur_c_neg <= 1.0
+    clause = Pu_c > 0 ? "AISC 360-16 H1" : "AISC 360-16 I3.2b"
+    push!(checks, CheckResult("flexure_neg", neg_ok,
+          neg_ratio, Mux_neg, ϕMn_neg, clause))
+
+    # --- Deflection (Commentary I3.2) ---
+    I_LB_m4 = ustrip(u"m^4", get_I_LB(section, material, ctx.slab, b_eff, ΣQn_full))
+    I_steel_m4 = cache.Ix[j]
+
+    if !isnothing(checker.deflection_limit) && I_ref > 0 && δ_max_LL > 0
+        δ_scaled = δ_max_LL * I_ref / I_LB_m4
+        δ_ratio = δ_scaled / L_m
+        limit_val = checker.deflection_limit
+        push!(checks, CheckResult("deflection_ll", δ_ratio <= limit_val,
+              δ_ratio / limit_val, δ_ratio, limit_val, "AISC 360-16 I3.2"))
+    end
+
+    if !isnothing(checker.total_deflection_limit) && I_ref > 0 && δ_max_total > 0
+        I_total_eff = ctx.shored ? I_LB_m4 : I_steel_m4
+        δ_scaled = δ_max_total * I_ref / I_total_eff
+        δ_ratio = δ_scaled / L_m
+        limit_val = checker.total_deflection_limit
+        push!(checks, CheckResult("deflection_total", δ_ratio <= limit_val,
+              δ_ratio / limit_val, δ_ratio, limit_val, "AISC 360-16 I3.2"))
+    end
+
+    capacity_checks = filter(c -> c.name != "b1_amplification", checks)
+    if hog_stricter && Mux_neg > 0
+        capacity_checks = filter(c -> c.name != "pm_interaction_compression" &&
+                                      c.name != "pm_interaction_tension",
+                                 capacity_checks)
+    end
     all_pass = all(c -> c.passed, checks)
     if isempty(capacity_checks)
         gov = CheckResult("none", true, 0.0, 0.0, 0.0, "")

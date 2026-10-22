@@ -29,6 +29,48 @@ function zeros_like(v::Vector)
     end
 end
 
+"""Resolve the `MemberDemand.composite` payload for steel beam sizing.
+
+A `CompositeContext` or `true` on `composite_kw` (scalar or per-member
+vector) wins. A vector entry of `nothing` does **not** override
+`SteelBeamOptions.composite == true` — that would drop Chapter I / the
+sentinel when the caller meant to enable composite.
+
+Hogging Chapter F (`Cb=1.0`, `Lb=L`) is applied by 6-arg `is_feasible`
+whenever `Mux_neg` is set (including the `Mux_neg=Mux` default); it is
+not gated on this payload.
+"""
+function _resolve_demand_composite(opts, composite_kw, i::Int)
+    opts_composite = opts isa SteelBeamOptions && opts.composite
+    if composite_kw isa AbstractVector
+        i <= length(composite_kw) || throw(ArgumentError(
+            "composite vector must have one entry per member (got " *
+            "$(length(composite_kw)) for index $i)"))
+        entry = composite_kw[i]
+        if entry isa CompositeContext || entry === true
+            return entry
+        elseif isnothing(entry) && opts_composite
+            return true
+        else
+            return entry
+        end
+    elseif composite_kw isa CompositeContext || composite_kw === true
+        return composite_kw
+    elseif opts_composite
+        return true
+    else
+        return nothing
+    end
+end
+
+"""True if any member resolves to a real `CompositeContext` (Chapter I path)."""
+function _has_composite_context(opts, composite_kw, n::Int)
+    for i in 1:n
+        _resolve_demand_composite(opts, composite_kw, i) isa CompositeContext && return true
+    end
+    return false
+end
+
 # ==============================================================================
 # Main API: size_columns
 # ==============================================================================
@@ -96,6 +138,8 @@ function size_columns(
     geometries::Vector,
     opts::SteelMemberOptions;
     Muy::Vector = zeros_like(Mux),
+    Mux_pos::Vector = Mux,
+    Mux_neg::Vector = Mux,
     Vu_strong::Vector = zeros_like(Pu),
     δ_max_vec::Union{Nothing, Vector} = nothing,
     δ_max_total_vec::Union{Nothing, Vector} = nothing,
@@ -103,6 +147,7 @@ function size_columns(
     catalog::Union{Nothing, AbstractVector} = nothing,
     feasible::Union{Nothing, Vector{Vector{Int}}} = nothing,
     mip_start::Union{Nothing, Vector{Int}} = nothing,
+    composite::Union{Nothing, Bool, CompositeContext, AbstractVector} = nothing,
     mip_gap::Real = 1e-4,
     output_flag::Integer = 0,
     tc::Union{Nothing, TraceCollector} = nothing,
@@ -121,9 +166,13 @@ function size_columns(
     steel_geoms = [to_steel_geometry(g) for g in geometries]
 
     # ─── Steel NLP path (W and HSS only) ───
-    if opts.sizing_strategy == :nlp && opts.section_type in (:w, :hss)
+    # CompositeContext needs 8-arg is_feasible (Chapter I + H1 with Pu).
+    # Continuous NLP has no Chapter I plastic capacity — use discrete MIP.
+    if opts.sizing_strategy == :nlp && opts.section_type in (:w, :hss) &&
+            !_has_composite_context(opts, composite, n)
         emit!(tc, :sizing, "size_columns", "", :decision; path="nlp")
-        return _size_steel_columns_nlp(Pu, Mux, steel_geoms, opts; Muy=Muy)
+        return _size_steel_columns_nlp(Pu, Mux, steel_geoms, opts;
+                                       Muy=Muy, Mux_neg=Mux_neg, composite=composite)
     end
     emit!(tc, :sizing, "size_columns", "", :decision; path="discrete_mip")
 
@@ -138,6 +187,8 @@ function size_columns(
     
     Pu_N = [to_newtons(p) for p in Pu]
     Mux_Nm = [to_newton_meters(m) for m in Mux]
+    Mux_pos_Nm = [to_newton_meters(m) for m in Mux_pos]
+    Mux_neg_Nm = [to_newton_meters(m) for m in Mux_neg]
     Muy_Nm = [to_newton_meters(m) for m in Muy]
     Vus_N  = [to_newtons(v) for v in Vu_strong]
 
@@ -145,10 +196,18 @@ function size_columns(
     δ_tot  = isnothing(δ_max_total_vec) ? zeros(n) : [to_meters(d) for d in δ_max_total_vec]
     Ir_m4  = isnothing(I_ref_vec)       ? ones(n)  : [to_meters_fourth(r) for r in I_ref_vec]
     
-    demands = [MemberDemand(i; Pu_c=Pu_N[i], Mux=Mux_Nm[i], Muy=Muy_Nm[i],
+    # Envelope pairing: each group's max |P| with its max |M|.
+    # CONSERVATIVE under gravity-only (same-sign D+L cannot unload a
+    # coincident peak).  `Pu_t` is not forwarded here — SCOPE until
+    # lateral/uplift (AISC 360-16 §H1.2 tension+flexure).
+    demands = [MemberDemand(i; Pu_c=Pu_N[i], Mux=Mux_Nm[i],
+                               Mux_pos=Mux_pos_Nm[i], Mux_neg=Mux_neg_Nm[i],
+                               Muy=Muy_Nm[i],
                                Vu_strong=Vus_N[i],
                                δ_max_LL=δ_m[i], δ_max_total=δ_tot[i],
-                               I_ref=Ir_m4[i]) for i in 1:n]
+                               I_ref=Ir_m4[i],
+                               composite=_resolve_demand_composite(opts, composite, i))
+               for i in 1:n]
     
     checker = AISCChecker(; max_depth = opts.max_depth,
                             deflection_limit = _deflection_limit(opts),
@@ -389,26 +448,68 @@ function _size_columns_nlp(
     )
 end
 
+"""NLP Mux / geometry that also covers hogging Chapter F (`Lb=L`, `Cb=1.0`)."""
+function _nlp_hogging_demands(Mux::Vector, Mux_neg::Vector, geometries::Vector{<:SteelMemberGeometry})
+    n = length(Mux)
+    n == length(Mux_neg) || throw(ArgumentError("Mux and Mux_neg must have same length"))
+    n == length(geometries) || throw(ArgumentError("Mux and geometries must have same length"))
+    Mux_use = Vector{typeof(0.0u"N*m")}(undef, n)
+    geoms_use = Vector{SteelMemberGeometry}(undef, n)
+    for i in 1:n
+        mx = to_newton_meters(Mux[i])
+        mn = to_newton_meters(Mux_neg[i])
+        Mux_use[i] = max(mx, mn) * u"N*m"
+        g = geometries[i]
+        # Deck-braced Lb < L or sagging Cb > 1 makes hogging LTB stricter.
+        # AISC 360-16 §F2.2 — corpus: aisc-360-16, page 103.
+        hog_stricter = _hogging_is_stricter(g)
+        geoms_use[i] = hog_stricter ? _hogging_chapter_f_geometry(g) : g
+    end
+    return Mux_use, geoms_use
+end
+
 """
-    _size_steel_columns_nlp(Pu, Mux, geometries, opts; Muy) -> NamedTuple
+    _size_steel_columns_nlp(Pu, Mux, geometries, opts; Muy, Mux_neg, composite) -> NamedTuple
 
 Steel column NLP adapter. Maps SteelColumnOptions to NLPWOptions or NLPHSSOptions,
 calls size_w_columns_nlp or size_hss_columns_nlp, and returns MIP-compatible result shape.
+
+`Mux_neg` is threaded so hogging Chapter F (`Lb=L`, `Cb=1.0`) governs the
+continuous W/HSS solve when deck-braced sagging `Lb`/`Cb` would otherwise
+drop the signed face (AISC 360-16 §F2.2, page 103).
+
+`composite` is forwarded onto each `MemberDemand` (Chapter I `CompositeContext`
+callers are routed to MIP by `size_columns` before this adapter runs).
 """
 function _size_steel_columns_nlp(
     Pu::Vector, Mux::Vector, geometries::Vector{<:SteelMemberGeometry},
     opts::SteelMemberOptions;
     Muy::Vector = zeros_like(Mux),
+    Mux_neg::Vector = Mux,
+    composite::Union{Nothing, Bool, CompositeContext, AbstractVector} = nothing,
 )
     max_d = isfinite(ustrip(u"mm", opts.max_depth)) ? opts.max_depth : 36.0u"inch"
     Muy_vec = length(Muy) >= length(Pu) ? Muy : [i <= length(Muy) ? Muy[i] : 0.0 for i in 1:length(Pu)]
+    Mux_use, geoms_use = _nlp_hogging_demands(Mux, Mux_neg, geometries)
+    n = length(Pu)
+    composite_vec = [_resolve_demand_composite(opts, composite, i) for i in 1:n]
 
     if opts.section_type === :w
         nlp_opts = NLPWOptions(material=opts.material, max_depth=max_d, objective=opts.objective)
-        nlp_results = size_w_columns_nlp(Pu, Mux, geometries, nlp_opts; Muy=Muy_vec)
+        # WColumnNLPProblem reapplies hogging geometry when Mux_neg > 0.
+        # Pass the original member then, so the rule runs once. When
+        # Mux_neg is not positive that constructor leaves Lb/Cb unchanged,
+        # and the geometry from _nlp_hogging_demands is the only application.
+        geoms_w = [
+            to_kipft(Mux_neg[i]) > 0 ? geometries[i] : geoms_use[i]
+            for i in 1:n
+        ]
+        nlp_results = size_w_columns_nlp(Pu, Mux_use, geoms_w, nlp_opts;
+                                         Muy=Muy_vec, Mux_neg=Mux_neg,
+                                         composite=composite_vec)
     elseif opts.section_type === :hss
         nlp_opts = NLPHSSOptions(material=opts.material, max_outer=max_d, objective=opts.objective)
-        nlp_results = size_hss_columns_nlp(Pu, Mux, geometries, nlp_opts; Muy=Muy_vec)
+        nlp_results = size_hss_columns_nlp(Pu, Mux_use, geoms_use, nlp_opts; Muy=Muy_vec)
     else
         throw(ArgumentError("Steel NLP only supports section_type :w or :hss (got :$(opts.section_type))"))
     end
@@ -564,6 +665,7 @@ function size_beams(
     Vu::Vector,
     geometries::Vector,
     opts::ConcreteBeamOptions;
+    Mu_neg::Vector = Mu,
     Nu::Vector = zeros_like(Vu),
     Tu::Vector = Float64[],
     catalog::Union{Nothing, AbstractVector} = nothing,
@@ -593,6 +695,7 @@ function size_beams(
 
     # Convert forces / moments to kip / kip·ft
     Mu_kipft = [to_kipft(m) for m in Mu]
+    Mu_neg_kipft = [to_kipft(m) for m in Mu_neg]
     Vu_kip   = [to_kip(v)   for v in Vu]
     Nu_kip   = [to_kip(n)   for n in Nu]
 
@@ -603,8 +706,9 @@ function size_beams(
         [t isa Unitful.Quantity ? abs(ustrip(kip*u"inch", t)) : abs(Float64(t)) for t in Tu]
     end
 
-    # Build demands (Nu, Tu flow to checker via RCBeamDemand fields)
-    demands = [RCBeamDemand(i; Mu=Mu_kipft[i], Vu=Vu_kip[i], Nu=Nu_kip[i], Tu=Tu_kipin[i]) for i in 1:n]
+    # Build demands (Nu, Tu, Mu_neg flow to checker via RCBeamDemand fields)
+    demands = [RCBeamDemand(i; Mu=Mu_kipft[i], Mu_neg=Mu_neg_kipft[i],
+                            Vu=Vu_kip[i], Nu=Nu_kip[i], Tu=Tu_kipin[i]) for i in 1:n]
 
     # Create checker
     checker = ACIBeamChecker(;
@@ -644,17 +748,20 @@ function size_beams(
 end
 
 # ==============================================================================
-# Steel Beam Sizing (via AISC Checker with Pu=0)
+# Steel Beam Sizing (via AISC Checker; axial optional)
 # ==============================================================================
 
 """
-    size_beams(Mu, Vu, geometries, opts::SteelBeamOptions; δ_max_vec, δ_max_total_vec, I_ref_vec, ...)
+    size_beams(Mu, Vu, geometries, opts::SteelBeamOptions; Pu, δ_max_vec, ...)
 
 Size steel beams using discrete catalog optimization.
 
-Uses the AISC 360 checker with zero axial load (pure flexure). The same
-checker handles both beams and columns, so this is a thin wrapper around
-`size_columns` with `Pu = 0`.
+Uses the AISC 360 checker. Default `Pu = 0` (pure flexure). When axial
+compression is present — including composite beams with nonzero `Pu_c` —
+pass `Pu` explicitly; do **not** zero it. Required flexural strengths then
+include App. 8 B1 amplification into §H1 (AISC 360-16 Appendix 8 Eqs. A-8-1 /
+A-8-3 — corpus: aisc-360-16, pages 305–306; §H1.1 — page 133).
+`CompositeContext` + `Pu` reach 8-arg `is_feasible` via `size_columns`.
 
 # Deflection constraints
 
@@ -676,6 +783,8 @@ the checker requiring δ_max_LL > 0 / δ_max_total > 0).
 - `opts`: `SteelBeamOptions`
 
 # Keyword Arguments
+- `Pu`: Factored axial compressions (default: zeros). Forwarded to `size_columns`
+  as `Pu_c` for §H1 / App. 8 B1. Do not zero for composite beam-columns.
 - `δ_max_vec`: Max LL deflection from analysis for each beam (length unit, e.g. m or inch).
 - `δ_max_total_vec`: Max DL+LL service deflection for each beam (length unit).
 - `I_ref_vec`: Reference Ix used in the analysis for each beam (length⁴ unit).
@@ -688,6 +797,10 @@ the checker requiring δ_max_LL > 0 / δ_max_total > 0).
 - `mip_start`: Optional per-group vector of prior catalog indices forwarded to
   `optimize_discrete` as a MIP warm start (solver hint only; does not change the
   optimum). `nothing` (default) is byte-identical.
+- `composite`: Optional `CompositeContext` (or per-member vector) forwarded onto
+  each `MemberDemand`. A vector entry of `nothing` does not override
+  `opts.composite == true`. Hogging Chapter F (`Cb=1.0`, `Lb=L`) is applied
+  by 6-arg `is_feasible` whenever `Mux_neg` is set (default `Mux_neg=Mu`).
 - `mip_gap`: MIP optimality gap (default 1e-4)
 - `output_flag`: Solver verbosity (default 0)
 
@@ -719,18 +832,23 @@ function size_beams(
     Vu::Vector,
     geometries::Vector,
     opts::SteelBeamOptions;
+    Pu::Vector = zeros_like(Vu),
+    Mux_pos::Vector = Mu,
+    Mux_neg::Vector = Mu,
     δ_max_vec::Union{Nothing, Vector} = nothing,
     δ_max_total_vec::Union{Nothing, Vector} = nothing,
     I_ref_vec::Union{Nothing, Vector} = nothing,
     catalog::Union{Nothing, AbstractVector} = nothing,
     feasible::Union{Nothing, Vector{Vector{Int}}} = nothing,
     mip_start::Union{Nothing, Vector{Int}} = nothing,
+    composite::Union{Nothing, Bool, CompositeContext, AbstractVector} = nothing,
     mip_gap::Real = 1e-4,
     output_flag::Integer = 0,
     tc::Union{Nothing, TraceCollector} = nothing,
 )
-    Pu_zero = [zero(Vu[1]) for _ in Mu]
-    return size_columns(Pu_zero, Mu, geometries, opts;
+    length(Pu) == length(Mu) || throw(ArgumentError("Pu and Mu must have same length"))
+    return size_columns(Pu, Mu, geometries, opts;
+                        Mux_pos=Mux_pos, Mux_neg=Mux_neg,
                         Vu_strong=Vu,
                         δ_max_vec=δ_max_vec,
                         δ_max_total_vec=δ_max_total_vec,
@@ -738,6 +856,7 @@ function size_beams(
                         catalog=catalog,
                         feasible=feasible,
                         mip_start=mip_start,
+                        composite=composite,
                         mip_gap=mip_gap, output_flag=output_flag,
                         tc=tc)
 end
@@ -1373,8 +1492,10 @@ println("Section: \$(result.section.name), Area: \$(result.area) in²")
 """
 function size_rc_beam_nlp(Mu, Vu, opts::NLPBeamOptions;
                           Tu = 0.0,
+                          Nu = 0.0,
+                          Mu_neg = nothing,
                           x0::Union{Nothing,Vector{Float64}} = nothing)
-    problem = RCBeamNLPProblem(Mu, Vu, opts; Tu=Tu)
+    problem = RCBeamNLPProblem(Mu, Vu, opts; Tu=Tu, Nu=Nu)
 
     opt_result = optimize_continuous(
         problem;
@@ -1386,7 +1507,17 @@ function size_rc_beam_nlp(Mu, Vu, opts::NLPBeamOptions;
         x0 = x0,
     )
 
-    return build_rc_beam_nlp_result(problem, opt_result)
+    result = build_rc_beam_nlp_result(problem, opt_result)
+    # Post-NLP hogging adequacy (top steel is not an NLP design variable).
+    # The NLP therefore cannot deepen for Mu_neg; it may return :infeasible.
+    # Public default Mu_neg = Mu (unsigned envelope) is unchanged.
+    Mu_neg_kipft = to_kipft(isnothing(Mu_neg) ? Mu : Mu_neg)
+    if !_neg_moment_adequate(result.section, Mu_neg_kipft, problem.fc_psi, problem.fy_psi)
+        return RCBeamNLPResult(result.section, result.b_opt, result.h_opt, result.ρ_opt,
+                               result.b_final, result.h_final, result.area,
+                               :infeasible, result.iterations)
+    end
+    return result
 end
 
 """
@@ -1394,13 +1525,17 @@ end
 
 Size multiple RC beams using continuous (NLP) optimization.
 """
-function size_rc_beams_nlp(Mu::Vector, Vu::Vector, opts::NLPBeamOptions)
+function size_rc_beams_nlp(Mu::Vector, Vu::Vector, opts::NLPBeamOptions;
+                           Mu_neg::Vector = Mu,
+                           Nu::Vector = zeros_like(Vu))
     n = length(Mu)
     n == length(Vu) || throw(ArgumentError("Mu and Vu must have same length"))
+    n == length(Mu_neg) || throw(ArgumentError("Mu_neg must have same length as Mu"))
+    n == length(Nu) || throw(ArgumentError("Nu must have same length as Vu"))
 
     results = Vector{RCBeamNLPResult}(undef, n)
     for i in 1:n
-        results[i] = size_rc_beam_nlp(Mu[i], Vu[i], opts)
+        results[i] = size_rc_beam_nlp(Mu[i], Vu[i], opts; Mu_neg=Mu_neg[i], Nu=Nu[i])
     end
     return results
 end
@@ -1557,7 +1692,7 @@ end
 # ==============================================================================
 
 """
-    size_w_nlp(Pu, Mux, geometry, opts::NLPWOptions; Muy=0) -> WColumnNLPResult
+    size_w_nlp(Pu, Mux, geometry, opts::NLPWOptions; Muy=0, Mux_neg=Mux, composite=nothing) -> WColumnNLPResult
 
 Size a W section column using continuous (NLP) optimization.
 
@@ -1576,6 +1711,15 @@ match standard rolled W shapes. Use the MIP solver for catalog selection.
 
 # Keyword Arguments
 - `Muy`: Factored moment about y-axis (default: 0)
+- `Mux_neg`: Hogging strong-axis moment (default: `Mux`). When `Mux_neg > 0`,
+  sizes against `max(Mux, Mux_neg)` with hogging Chapter F (`Lb = L`,
+  `Cb = 1.0`) if deck-braced sagging `Lb`/`Cb` would otherwise inflate φMn.
+  AISC 360-16 §F2.2 — corpus: aisc-360-16, page 103.
+  # ENGINEERING JUDGMENT: hogging `Cb = 1.0` (no bottom-flange `Cb` field).
+- `composite`: Optional `CompositeContext` / `true` / `nothing` stored on
+  `MemberDemand`. Chapter I plastic capacity is evaluated by 8-arg
+  `is_feasible` on the discrete MIP path (`size_columns` diverts NLP→MIP
+  when a `CompositeContext` is present).
 
 # Returns
 `WColumnNLPResult` with:
@@ -1609,12 +1753,16 @@ function size_w_nlp(
     geometry::SteelMemberGeometry,
     opts::NLPWOptions;
     Muy = 0.0,
+    Mux_neg = Mux,
+    composite = nothing,
     x0::Union{Nothing,Vector{Float64}} = nothing,
 )
     demand = MemberDemand(1; 
         Pu_c = to_newtons(Pu) * u"N",
         Mux = to_newton_meters(Mux) * u"N*m",
-        Muy = to_newton_meters(Muy) * u"N*m"
+        Mux_neg = to_newton_meters(Mux_neg) * u"N*m",
+        Muy = to_newton_meters(Muy) * u"N*m",
+        composite = composite,
     )
     
     problem = WColumnNLPProblem(demand, geometry, opts)
@@ -1635,7 +1783,7 @@ function size_w_nlp(
 end
 
 """
-    size_w_columns_nlp(Pu, Mux, geometries, opts::NLPWOptions; Muy=...) -> Vector{WColumnNLPResult}
+    size_w_columns_nlp(Pu, Mux, geometries, opts::NLPWOptions; Muy, Mux_neg, composite) -> Vector{WColumnNLPResult}
 
 Size multiple W section columns using continuous (NLP) optimization.
 
@@ -1649,6 +1797,11 @@ Applies `size_w_nlp` to each column independently.
 
 # Keyword Arguments
 - `Muy`: Vector of factored moments about y-axis (default: zeros)
+- `Mux_neg`: Vector of hogging strong-axis moments (default: `Mux`). Threaded
+  into `size_w_nlp` so hogging Chapter F (`Lb=L`, `Cb=1.0`) can govern.
+  AISC 360-16 §F2.2 — corpus: aisc-360-16, page 103.
+- `composite`: Per-member or scalar composite payload forwarded onto each
+  `MemberDemand` (see `size_w_nlp`).
 
 # Returns
 Vector of `WColumnNLPResult`, one per column.
@@ -1671,17 +1824,28 @@ function size_w_columns_nlp(
     Mux::Vector,
     geometries::Vector{<:SteelMemberGeometry},
     opts::NLPWOptions;
-    Muy::Vector = zeros(length(Pu))
+    Muy::Vector = zeros(length(Pu)),
+    Mux_neg::Vector = Mux,
+    composite::Union{Nothing, Bool, CompositeContext, AbstractVector} = nothing,
 )
     n = length(Pu)
     n == length(Mux) || throw(ArgumentError("Pu and Mux must have same length"))
     n == length(geometries) || throw(ArgumentError("Pu and geometries must have same length"))
+    n == length(Mux_neg) || throw(ArgumentError("Pu and Mux_neg must have same length"))
     
     results = Vector{WColumnNLPResult}(undef, n)
     
     for i in 1:n
         Muy_i = i <= length(Muy) ? Muy[i] : 0.0
-        results[i] = size_w_nlp(Pu[i], Mux[i], geometries[i], opts; Muy=Muy_i)
+        comp_i = if composite isa AbstractVector
+            i <= length(composite) || throw(ArgumentError(
+                "composite vector must have one entry per member"))
+            composite[i]
+        else
+            composite
+        end
+        results[i] = size_w_nlp(Pu[i], Mux[i], geometries[i], opts;
+                                Muy=Muy_i, Mux_neg=Mux_neg[i], composite=comp_i)
     end
     
     return results
@@ -1692,7 +1856,7 @@ end
 # ==============================================================================
 
 """
-    size_steel_w_beam_nlp(Mu, Vu, geometry, opts::NLPWOptions; Ix_min, x0) -> WColumnNLPResult
+    size_steel_w_beam_nlp(Mu, Vu, geometry, opts::NLPWOptions; Mux_neg, Ix_min, x0) -> WColumnNLPResult
 
 Size a W-shape beam using continuous (NLP) optimization with dedicated
 AISC F2 flexure (including smooth LTB) and G2 shear constraints.
@@ -1701,6 +1865,14 @@ Unlike `size_w_nlp` (which uses H1-1 interaction with Pu=0), this
 formulation directly optimizes for flexure and shear, producing beams
 with wider flanges to resist lateral-torsional buckling.
 
+When `Mux_neg > 0` (default `Mux_neg = Mu`), sizes against
+`max(Mu, Mux_neg)` with hogging Chapter F (`Lb = L`, `Cb = 1.0`) if
+deck-braced sagging `Lb`/`Cb` would otherwise inflate φMn.
+
+AISC 360-16 §F2.2 — corpus: aisc-360-16, page 103.
+# ENGINEERING JUDGMENT
+Hogging uses `Cb = 1.0` (`SteelMemberGeometry` has only sagging `Cb`).
+
 # Arguments
 - `Mu`: Factored moment — any moment unit
 - `Vu`: Factored shear — any force unit
@@ -1708,6 +1880,8 @@ with wider flanges to resist lateral-torsional buckling.
 - `opts`: `NLPWOptions` with material, dimension bounds, solver settings
 
 # Keyword Arguments
+- `Mux_neg`: Hogging (top-flange compression) moment. Default: `Mu`
+  (unsigned envelope includes hogging).
 - `Ix_min`: Minimum required Ix for deflection (Length⁴ or bare in⁴). Use
   `required_Ix_for_deflection` to compute from service loads. Default: `nothing`.
 - `x0`: Initial guess vector (default: automatic)
@@ -1732,13 +1906,14 @@ function size_steel_w_beam_nlp(
     Vu,
     geometry::SteelMemberGeometry,
     opts::NLPWOptions;
+    Mux_neg = Mu,
     Ix_min = nothing,
     Ix_min_total = nothing,
     Tu = 0.0,
     L_span = nothing,
     x0::Union{Nothing,Vector{Float64}} = nothing,
 )
-    problem = SteelWBeamNLPProblem(Mu, Vu, geometry, opts; Ix_min=Ix_min, Ix_min_total=Ix_min_total, Tu=Tu, L_span=L_span)
+    problem = SteelWBeamNLPProblem(Mu, Vu, geometry, opts; Mux_neg=Mux_neg, Ix_min=Ix_min, Ix_min_total=Ix_min_total, Tu=Tu, L_span=L_span)
     
     opt_result = optimize_continuous(
         problem;
@@ -1765,6 +1940,7 @@ function size_steel_w_beams_nlp(
     Vu::Vector,
     geometries::Vector{<:SteelMemberGeometry},
     opts::NLPWOptions;
+    Mux_neg = Mu,
     Ix_min = nothing,
 )
     n = length(Mu)
@@ -1775,7 +1951,9 @@ function size_steel_w_beams_nlp(
     for i in 1:n
         Ix_i = isnothing(Ix_min) ? nothing :
                (Ix_min isa AbstractVector ? Ix_min[i] : Ix_min)
-        results[i] = size_steel_w_beam_nlp(Mu[i], Vu[i], geometries[i], opts; Ix_min=Ix_i)
+        Mux_neg_i = Mux_neg isa AbstractVector ? Mux_neg[i] : Mux_neg
+        results[i] = size_steel_w_beam_nlp(Mu[i], Vu[i], geometries[i], opts;
+                                          Mux_neg=Mux_neg_i, Ix_min=Ix_i)
     end
     return results
 end
@@ -1912,6 +2090,7 @@ function size_tbeams(
     opts::ConcreteBeamOptions;
     flange_width::Length,
     flange_thickness::Length,
+    Mu_neg::Vector = Mu,
     Nu::Vector = zeros_like(Vu),
     Tu::Vector = Float64[],
     catalog::Union{Nothing, AbstractVector} = nothing,
@@ -1951,6 +2130,7 @@ function size_tbeams(
 
     # Convert forces / moments
     Mu_kipft = [to_kipft(m) for m in Mu]
+    Mu_neg_kipft = [to_kipft(m) for m in Mu_neg]
     Vu_kip   = [to_kip(v)   for v in Vu]
     Nu_kip   = [to_kip(n)   for n in Nu]
 
@@ -1961,8 +2141,9 @@ function size_tbeams(
         [t isa Unitful.Quantity ? abs(ustrip(kip*u"inch", t)) : abs(Float64(t)) for t in Tu]
     end
 
-    # Build demands (Nu, Tu flow to checker via RCBeamDemand fields)
-    demands = [RCBeamDemand(i; Mu=Mu_kipft[i], Vu=Vu_kip[i], Nu=Nu_kip[i], Tu=Tu_kipin[i]) for i in 1:n]
+    # Build demands (Nu, Tu, Mu_neg flow to checker via RCBeamDemand fields)
+    demands = [RCBeamDemand(i; Mu=Mu_kipft[i], Mu_neg=Mu_neg_kipft[i],
+                            Vu=Vu_kip[i], Nu=Nu_kip[i], Tu=Tu_kipin[i]) for i in 1:n]
 
     # Convert service loads for deflection check (if provided)
     wd_kplf = if isnothing(w_dead)
@@ -2049,6 +2230,8 @@ function size_rc_tbeam_nlp(
     bf::Length, hf::Length,
     opts::NLPBeamOptions;
     Tu = 0.0,
+    Nu = 0.0,
+    Mu_neg = nothing,
     x0::Union{Nothing,Vector{Float64}} = nothing,
     w_dead = nothing,
     w_live = nothing,
@@ -2058,7 +2241,7 @@ function size_rc_tbeam_nlp(
 )
     problem = RCTBeamNLPProblem(Mu, Vu, bf, hf, opts;
                                 w_dead=w_dead, w_live=w_live, L_span=L_span,
-                                support=defl_support, ξ=defl_ξ, Tu=Tu)
+                                support=defl_support, ξ=defl_ξ, Tu=Tu, Nu=Nu)
 
     opt_result = optimize_continuous(
         problem;
@@ -2070,7 +2253,17 @@ function size_rc_tbeam_nlp(
         x0 = x0,
     )
 
-    return build_rc_tbeam_nlp_result(problem, opt_result)
+    result = build_rc_tbeam_nlp_result(problem, opt_result)
+    # Post-NLP hogging adequacy (top steel is not an NLP design variable).
+    # The NLP therefore cannot deepen for Mu_neg; it may return :infeasible.
+    # Public default Mu_neg = Mu is unchanged.
+    Mu_neg_kipft = to_kipft(isnothing(Mu_neg) ? Mu : Mu_neg)
+    if !_neg_moment_adequate(result.section, Mu_neg_kipft, problem.fc_psi, problem.fy_psi)
+        return RCTBeamNLPResult(result.section, result.bw_opt, result.h_opt, result.ρ_opt,
+                                result.bw_final, result.h_final, result.bf, result.hf,
+                                result.area_web, :infeasible, result.iterations)
+    end
+    return result
 end
 
 """
@@ -2093,6 +2286,8 @@ function size_rc_tbeams_nlp(
     Mu::Vector, Vu::Vector,
     bf, hf,
     opts::NLPBeamOptions;
+    Mu_neg::Vector = Mu,
+    Nu::Vector = zeros_like(Vu),
     w_dead = nothing,
     w_live = nothing,
     L_span = nothing,
@@ -2101,6 +2296,8 @@ function size_rc_tbeams_nlp(
 )
     n = length(Mu)
     n == length(Vu) || throw(ArgumentError("Mu and Vu must have same length"))
+    n == length(Mu_neg) || throw(ArgumentError("Mu_neg must have same length as Mu"))
+    n == length(Nu) || throw(ArgumentError("Nu must have same length as Vu"))
 
     # Allow scalar or vector bf/hf
     bf_vec = bf isa AbstractVector ? bf : fill(bf, n)
@@ -2116,6 +2313,7 @@ function size_rc_tbeams_nlp(
     results = Vector{RCTBeamNLPResult}(undef, n)
     for i in 1:n
         results[i] = size_rc_tbeam_nlp(Mu[i], Vu[i], bf_vec[i], hf_vec[i], opts;
+                                        Mu_neg=Mu_neg[i], Nu=Nu[i],
                                         w_dead=wd_vec[i], w_live=wl_vec[i],
                                         L_span=Ls_vec[i],
                                         defl_support=defl_support, defl_ξ=defl_ξ)

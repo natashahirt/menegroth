@@ -189,6 +189,31 @@ function precompute_capacities!(
 end
 
 # ==============================================================================
+# Combined compression + flexure (AISC 360-16 §H1.1 analog)
+# ==============================================================================
+
+"""
+    _pixelframe_h1_interaction(Pr, Mrx, Mry, Pc, Mcx, Mcy) -> Float64
+
+AISC 360-16 §H1.1 Eqs. H1-1a / H1-1b (corpus: aisc-360-16, page 133):
+
+- When `Pr/Pc ≥ 0.2`: `Pr/Pc + (8/9)(Mrx/Mcx + Mry/Mcy) ≤ 1.0`  (H1-1a)
+- When `Pr/Pc < 0.2`: `Pr/(2 Pc) + (Mrx/Mcx + Mry/Mcy) ≤ 1.0`   (H1-1b)
+
+ENGINEERING JUDGMENT: PixelFrame has no published P–M interaction surface in
+this checker. The H1 bilinear interaction is applied as an analogous
+combined-force limit so independent P and M checks cannot accept
+`Pu = 0.6 φPn` with `Mux = 0.6 φMn` (H1-1a = 1.133 > 1). Not an ACI 318-11
+requirement for PixelFrame. Shear remains an independent limit state
+(AISC Chapter G is likewise separate from §H1).
+"""
+function _pixelframe_h1_interaction(Pr, Mrx, Mry, Pc, Mcx, Mcy)
+    (Pc ≤ 0 || Mcx ≤ 0) && return Inf
+    mcy = Mcy > 0 ? Mcy : Inf
+    return check_PMxMy_interaction(Pr, Mrx, Mry, Pc, Mcx, mcy)
+end
+
+# ==============================================================================
 # Interface: is_feasible
 # ==============================================================================
 
@@ -197,9 +222,9 @@ end
 
 Check if a PixelFrame section satisfies all requirements:
 1. Bounding box: depth ≥ min_depth_mm, width ≥ min_width_mm
-2. Axial: Pu_capacity ≥ Pu_demand
-3. Flexure: Mu_capacity ≥ Mu_demand
-4. Shear: Vu_capacity ≥ Vu_demand
+2. Combined compression + flexure: AISC 360-16 §H1.1 analog (see
+   `_pixelframe_h1_interaction`)
+3. Shear: Vu_capacity ≥ Vu_demand (independent of §H1)
 
 The bounding-box check (1) is evaluated first as a cheap geometric filter.
 This supports punching-shear-driven column growth: set `min_depth_mm` /
@@ -221,13 +246,14 @@ function is_feasible(
     cache.depth_mm[j] ≥ checker.min_depth_mm || return false
     cache.width_mm[j] ≥ checker.min_width_mm || return false
 
-    # Capacity checks
     Pu_dem = to_newtons(demand.Pu_c)
-    Mu_dem = to_newton_meters(demand.Mux)
+    Mux_dem = to_newton_meters(demand.Mux)
+    Muy_dem = to_newton_meters(demand.Muy)
     Vu_dem = to_newtons(demand.Vu_strong)
 
-    cache.Pu[j] ≥ Pu_dem || return false
-    cache.Mu[j] ≥ Mu_dem || return false
+    ur = _pixelframe_h1_interaction(
+        Pu_dem, Mux_dem, Muy_dem, cache.Pu[j], cache.Mu[j], cache.Mu[j])
+    ur ≤ 1.0 || return false
     cache.Vu[j] ≥ Vu_dem || return false
     return true
 end
@@ -316,30 +342,20 @@ function explain_feasibility(
         "",
     ))
 
-    # --- 2. Axial (ACI 318-11 §10.3.6, preserved as ACI 318-19 §22.4.2.3) ---
+    # --- 2. Combined P–M (AISC 360-16 §H1.1 analog; see `_pixelframe_h1_interaction`) ---
     Pu_dem = to_newtons(demand.Pu_c)
+    Mux_dem = to_newton_meters(demand.Mux)
+    Muy_dem = to_newton_meters(demand.Muy)
     Pu_cap = cache.Pu[j]
-    Pu_ratio = Pu_cap > 0 ? Pu_dem / Pu_cap : (Pu_dem > 0 ? Inf : 0.0)
-    push!(checks, CheckResult(
-        "axial",
-        Pu_cap ≥ Pu_dem,
-        Pu_ratio,
-        Pu_dem,
-        Pu_cap,
-        "ACI 318-11 10.3.6",
-    ))
-
-    # --- 3. Flexure (ACI 318-11 §18.7.2, preserved as ACI 318-19 §22.4.1.2) ---
-    Mu_dem = to_newton_meters(demand.Mux)
     Mu_cap = cache.Mu[j]
-    Mu_ratio = Mu_cap > 0 ? Mu_dem / Mu_cap : (Mu_dem > 0 ? Inf : 0.0)
+    ur = _pixelframe_h1_interaction(Pu_dem, Mux_dem, Muy_dem, Pu_cap, Mu_cap, Mu_cap)
     push!(checks, CheckResult(
-        "flexure",
-        Mu_cap ≥ Mu_dem,
-        Mu_ratio,
-        Mu_dem,
-        Mu_cap,
-        "ACI 318-11 18.7.2",
+        "pm_interaction",
+        ur ≤ 1.0,
+        ur,
+        ur,
+        1.0,
+        "AISC 360-16 H1.1 analog",
     ))
 
     # --- 4. Shear (fib MC2010 §7.7-5) ---

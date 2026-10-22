@@ -36,8 +36,9 @@ function _extract_cell_strip_moments(
         px, py = _column_xy_m(skel, col)
         off = _column_face_offset_m(col, span_axis)
         face = (px + off * span_axis[1], py + off * span_axis[2])
-        Mn = max(0.0, _integrate_at(cache.element_data, tri_idx, face, span_axis, δ;
-            include_torsion=include_torsion))
+        faces = _integrate_design_faces(cache, tri_idx, face, span_axis, δ;
+            include_torsion=include_torsion)
+        Mn = faces.hogging
         col_Mneg[col_i] = Mn
 
         verbose && @debug "  Col $(col.vertex_idx) ($(col.position)): " *
@@ -45,8 +46,8 @@ function _extract_cell_strip_moments(
     end
 
     # Cell positive moment (M⁺) at centroid
-    M_pos = max(0.0, -_integrate_at(cache.element_data, tri_idx, cell_centroid, span_axis, δ;
-        include_torsion=include_torsion))
+    M_pos = _integrate_design_faces(cache, tri_idx, cell_centroid, span_axis, δ;
+        include_torsion=include_torsion).sagging
 
     if verbose
         @debug "  Cell $ci: δ=$(round(δ*1000,digits=0))mm  " *

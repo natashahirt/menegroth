@@ -132,27 +132,35 @@ function is_feasible(
     geometry::ConcreteMemberGeometry,
 )::Bool
     Mu = to_kipft(demand.Mu)
+    Mu_neg = to_kipft(demand.Mu_neg)
     Vu = to_kip(demand.Vu)
 
     # 1. Depth check
     cache.depths[j] ≤ checker.max_depth || return false
 
-    # 2. Flexural check — φMn ≥ Mu
+    # 2. Sagging flexural check — φMn ≥ Mu (flange in compression)
     cache.φMn[j] ≥ Mu || return false
 
-    # 3. Shear adequacy — with axial modifier when Nu > 0 (ACI §22.5.6.1)
+    # 3. Hogging section adequacy — φMn_neg ≥ Mu_neg
+    #    ACI 318-11 §10.6.6 (corpus: aci-318-11, page 146) requires part of the
+    #    flange-tension steel to be distributed over the effective flange width
+    #    or ℓn/10; that detailing rule is not modeled in this capacity check.
+    cache.φMn_neg[j] ≥ Mu_neg || return false
+
+    # 4. Shear adequacy with signed Nu.
+    #    ENGINEERING JUDGMENT: use the larger gross area (section_area =
+    #    bf·hf + bw·(h−hf)) for the compression modifier so the boost is not
+    #    overstated, and bw·h for the tension reduction (smaller Ag → larger
+    #    |Nu/Ag| reduction). Each is the conservative choice for that sign.
     Nu_kip = _get_Nu_kip(demand)
-    if Nu_kip > 0
+    if Nu_kip != 0
         fc_psi_s = cache.fc_ksi * 1000.0
         bw_in_s  = ustrip(u"inch", section.bw)
         d_in_s   = ustrip(u"inch", section.d)
         h_in_s   = ustrip(u"inch", section.h)
-        Ag_in2   = bw_in_s * h_in_s  # conservative: web area only
-        axial_factor = 1 + (Nu_kip * 1000) / (2000 * Ag_in2)
-        sqrt_fc  = sqrt(fc_psi_s)
-        Vc_lb     = 2 * checker.λ * axial_factor * sqrt_fc * bw_in_s * d_in_s
-        Vs_max_lb = 8 * sqrt_fc * bw_in_s * d_in_s
-        φVn_kip   = 0.75 * (Vc_lb + Vs_max_lb) / 1000.0
+        Ag_comp  = ustrip(u"inch^2", section_area(section))
+        Ag_tens  = bw_in_s * h_in_s
+        φVn_kip = _φVn_with_axial(bw_in_s, d_in_s, Ag_comp, Ag_tens, fc_psi_s, checker.λ, Nu_kip)
         φVn_kip ≥ Vu || return false
     else
         cache.φVn_max[j] ≥ Vu || return false
@@ -257,4 +265,95 @@ function objective_value(
     Ag = section.bw * section.h
     volume = uconvert(u"m^3", Ag * length)
     return uconvert(u"kgCO2e", volume * material.ρ * material.ecc)
+end
+
+function diagnose_infeasibility(
+    checker::ACIBeamChecker,
+    cache::ACIBeamCapacityCache,
+    catalog::AbstractVector{<:RCTBeamSection},
+    material::Concrete,
+    demand::RCBeamDemand,
+    geometry::ConcreteMemberGeometry,
+)::String
+    n = length(catalog)
+    n == 0 && return "Catalog is empty"
+    best_j = argmax(cache.φMn)
+    sec = catalog[best_j]
+    Mu = to_kipft(demand.Mu)
+    Mu_neg = to_kipft(demand.Mu_neg)
+    Vu = to_kip(demand.Vu)
+    Nu_kip = _get_Nu_kip(demand)
+    if cache.depths[best_j] > checker.max_depth
+        return "Depth: h=$(cache.depths[best_j])m > max_depth=$(checker.max_depth)m"
+    end
+    if cache.φMn[best_j] < Mu
+        return "Flexure: φMn=$(round(cache.φMn[best_j], digits=1)) < Mu=$(round(Mu, digits=1)) kip·ft"
+    end
+    if cache.φMn_neg[best_j] < Mu_neg
+        return "Neg. flexure: φMn_neg=$(round(cache.φMn_neg[best_j], digits=1)) < Mu_neg=$(round(Mu_neg, digits=1)) kip·ft"
+    end
+    if Nu_kip != 0
+        fc_psi = cache.fc_ksi * 1000.0
+        bw_in = ustrip(u"inch", sec.bw)
+        d_in = ustrip(u"inch", sec.d)
+        Ag_comp = ustrip(u"inch^2", section_area(sec))
+        Ag_tens = bw_in * ustrip(u"inch", sec.h)
+        φVn_kip = _φVn_with_axial(bw_in, d_in, Ag_comp, Ag_tens, fc_psi, checker.λ, Nu_kip)
+        if φVn_kip < Vu
+            tag = Nu_kip < 0 ? "Nu<0" : "Nu>0"
+            return "Shear ($tag): φVn=$(round(φVn_kip, digits=1)) < Vu=$(round(Vu, digits=1)) kip"
+        end
+    elseif cache.φVn_max[best_j] < Vu
+        return "Shear: φVn_max=$(round(cache.φVn_max[best_j], digits=1)) < Vu=$(round(Vu, digits=1)) kip"
+    end
+    return "All checks passed for best T-beam section — possible threading/cache inconsistency"
+end
+
+function explain_feasibility(
+    checker::ACIBeamChecker,
+    cache::ACIBeamCapacityCache,
+    j::Int,
+    section::RCTBeamSection,
+    material::Concrete,
+    demand::RCBeamDemand,
+    geometry::ConcreteMemberGeometry,
+)::FeasibilityExplanation
+    checks = CheckResult[]
+    Mu = to_kipft(demand.Mu)
+    Mu_neg = to_kipft(demand.Mu_neg)
+    Vu = to_kip(demand.Vu)
+
+    d_section = cache.depths[j]
+    d_limit = checker.max_depth
+    push!(checks, CheckResult("depth", d_section <= d_limit,
+          d_limit > 0 ? d_section / d_limit : 0.0, d_section, d_limit, ""))
+
+    φMn = cache.φMn[j]
+    push!(checks, CheckResult("flexure", φMn >= Mu,
+          φMn > 0 ? Mu / φMn : (Mu > 0 ? Inf : 0.0), Mu, φMn, "ACI 318-11 10.2"))
+
+    φMn_neg = cache.φMn_neg[j]
+    push!(checks, CheckResult("flexure_neg", φMn_neg >= Mu_neg,
+          φMn_neg > 0 ? Mu_neg / φMn_neg : (Mu_neg > 0 ? Inf : 0.0),
+          Mu_neg, φMn_neg, "ACI 318-11 10.2"))
+
+    Nu_kip = _get_Nu_kip(demand)
+    if Nu_kip != 0
+        fc_psi_s = cache.fc_ksi * 1000.0
+        bw_in = ustrip(u"inch", section.bw)
+        d_in = ustrip(u"inch", section.d)
+        Ag_comp = ustrip(u"inch^2", section_area(section))
+        Ag_tens = bw_in * ustrip(u"inch", section.h)
+        φVn_kip = _φVn_with_axial(bw_in, d_in, Ag_comp, Ag_tens, fc_psi_s, checker.λ, Nu_kip)
+    else
+        φVn_kip = cache.φVn_max[j]
+    end
+    shear_clause = Nu_kip < 0 ? "ACI 318-11 11.2.2.3" : (Nu_kip > 0 ? "ACI 318-11 11.2.1.2" : "ACI 318-11 11.2.1.1")
+    push!(checks, CheckResult("shear", φVn_kip >= Vu,
+          φVn_kip > 0 ? Vu / φVn_kip : (Vu > 0 ? Inf : 0.0), Vu, φVn_kip, shear_clause))
+
+    all_pass = all(c -> c.passed, checks)
+    gov_idx = argmax([c.ratio for c in checks])
+    gov = checks[gov_idx]
+    FeasibilityExplanation(all_pass, checks, gov.name, gov.ratio)
 end

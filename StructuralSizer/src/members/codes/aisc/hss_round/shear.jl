@@ -70,7 +70,7 @@ end
     get_ϕVn(s::HSSRoundSection, mat::Metal; Lv, axis=:strong, ϕ=nothing) -> Force
 
 Design shear strength ϕVn for round HSS per AISC 360-16 Section G5 (LRFD).
-Default `ϕ_v = 0.9` per G1.
+Default `ϕ_v = 0.90` per §G1(a) (corpus: aisc-360-16, page 126).
 """
 get_ϕVn(s::HSSRoundSection, mat::Metal; Lv=nothing, axis=:strong, kv=5.0, rolled=false, ϕ=nothing) =
     (isnothing(ϕ) ? 0.9 : ϕ) * get_Vn(s, mat; Lv=Lv, axis=axis, kv=kv, rolled=rolled)

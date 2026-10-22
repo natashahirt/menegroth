@@ -210,9 +210,10 @@ Design result for a strip (combined) footing supporting N ≥ 2 columns.
 - `concrete_volume`: Total concrete volume
 - `steel_volume`: Total rebar volume
 - `utilization`: Governing utilization ratio
-- `As_tensile`: Interface tensile steel across mixed-sign column-footing
-  joints (ACI 318-11 §15.8.1.2(b), corpus: aci-318-11, page 275).  Zero
-  when every column is in compression.
+- `As_tensile`: Designed interface tensile steel across mixed-sign
+  column-footing joints (ACI 318-11 §15.8.1.2(b), corpus: aci-318-11,
+  page 275) — included in the bar schedule, tension ld, and
+  `steel_volume`.  Zero when every column is in compression.
 - `Bn`: Design bearing strength φBn of the footing concrete at the
   governing (minimum-sqA) column interface (ACI 318-11 §10.14.1 /
   §15.8.1.1, corpus: aci-318-11, pages 162, 274). Zero when no

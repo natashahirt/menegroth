@@ -86,12 +86,10 @@ function _extract_fea_strip_moments(
             off = _column_face_offset_m(col, span_axis)
             face = (px + off * span_axis[1], py + off * span_axis[2])
 
-            Mn_cs = max(0.0, _integrate_at_subset(
-                cache.element_data, neg_cs_tri, face, span_axis, δ;
-                include_torsion=include_torsion))
-            Mn_ms = max(0.0, _integrate_at_subset(
-                cache.element_data, neg_ms_tri, face, span_axis, δ;
-                include_torsion=include_torsion))
+            Mn_cs = _integrate_design_faces(cache, neg_cs_tri, face, span_axis, δ;
+                include_torsion=include_torsion, subset=true).hogging
+            Mn_ms = _integrate_design_faces(cache, neg_ms_tri, face, span_axis, δ;
+                include_torsion=include_torsion, subset=true).hogging
 
             idx = get(col_by_vertex, col.vertex_idx, nothing)
             idx === nothing && continue
@@ -100,12 +98,10 @@ function _extract_fea_strip_moments(
         end
 
         # Column-strip and middle-strip M⁺ at centroid.
-        Mpos_cs = max(0.0, -_integrate_at_subset(
-            cache.element_data, pos_cs_tri, geom.centroid, span_axis, δ;
-            include_torsion=include_torsion))
-        Mpos_ms = max(0.0, -_integrate_at_subset(
-            cache.element_data, pos_ms_tri, geom.centroid, span_axis, δ;
-            include_torsion=include_torsion))
+        Mpos_cs = _integrate_design_faces(cache, pos_cs_tri, geom.centroid, span_axis, δ;
+            include_torsion=include_torsion, subset=true).sagging
+        Mpos_ms = _integrate_design_faces(cache, pos_ms_tri, geom.centroid, span_axis, δ;
+            include_torsion=include_torsion, subset=true).sagging
         env_Mpos_cs = max(env_Mpos_cs, Mpos_cs)
         env_Mpos_ms = max(env_Mpos_ms, Mpos_ms)
     end

@@ -209,32 +209,33 @@ function _extract_wood_armer_strip_moments(
             ex1, ex2 = ed.ex
             ey1, ey2 = ed.ey
 
-            # Rotate element-local moments to global frame:
-            # M_global = R · M_local · Rᵀ  where R = [ex ey] (columns = local axes)
-            Mxx_g = ed.Mxx * ex1^2 + ed.Myy * ey1^2 + 2 * ed.Mxy * ex1 * ey1
-            Myy_g = ed.Mxx * ex2^2 + ed.Myy * ey2^2 + 2 * ed.Mxy * ex2 * ey2
-            Mxy_g = ed.Mxx * ex1 * ex2 + ed.Myy * ey1 * ey2 + ed.Mxy * (ex1 * ey2 + ex2 * ey1)
+            # Envelope Wood–Armer faces over every factored combo.  A single
+            # combo is byte-identical to evaluating WA on ed.Mxx/Myy/Mxy.
+            mx_bot = 0.0
+            mx_top = 0.0
+            for (Mxx, Myy, Mxy) in _factored_moment_combos(cache, k)
+                Mxx_g = Mxx * ex1^2 + Myy * ey1^2 + 2 * Mxy * ex1 * ey1
+                Myy_g = Mxx * ex2^2 + Myy * ey2^2 + 2 * Mxy * ex2 * ey2
+                Mxy_g = Mxx * ex1 * ex2 + Myy * ey1 * ey2 + Mxy * (ex1 * ey2 + ex2 * ey1)
 
-            # Rotate global → rebar frame
-            Mxx_r, Myy_r, Mxy_r = _rotate_moments_to_rebar(
-                Mxx_g, Myy_g, Mxy_g, rebar_ax_prime, rebar_ay_prime)
+                Mxx_r, Myy_r, Mxy_r = _rotate_moments_to_rebar(
+                    Mxx_g, Myy_g, Mxy_g, rebar_ax_prime, rebar_ay_prime)
 
-            # Apply concrete torsion discount (reduce |Mxy| by concrete capacity)
-            if !isnothing(torsion_discount)
-                Mxy_c = _aci_concrete_torsion_capacity(
-                    ed.Qxz, ed.Qyz,
-                    torsion_discount.h_m, torsion_discount.d_m,
-                    torsion_discount.fc_Pa, torsion_discount.λ)
-                Mxy_r = _apply_torsion_discount(Mxy_r, Mxy_c)
+                if !isnothing(torsion_discount)
+                    Mxy_c = _aci_concrete_torsion_capacity(
+                        ed.Qxz, ed.Qyz,
+                        torsion_discount.h_m, torsion_discount.d_m,
+                        torsion_discount.fc_Pa, torsion_discount.λ)
+                    Mxy_r = _apply_torsion_discount(Mxy_r, Mxy_c)
+                end
+
+                wa = wood_armer(-Mxx_r, -Myy_r, -Mxy_r)
+                mx_bot = max(mx_bot, wa.Mx_bot)
+                mx_top = min(mx_top, wa.Mx_top)  # hogging ≤ 0
             end
 
-            # Negate to convert Asap convention (pos=hogging) → WA convention (pos=sagging)
-            # Apply Wood–Armer in the rebar frame
-            wa = wood_armer(-Mxx_r, -Myy_r, -Mxy_r)
-
-            # Mx_bot/Mx_top are the primary-rebar design moments (no projection needed)
-            Mn_bot[j] = wa.Mx_bot
-            Mn_top[j] = wa.Mx_top
+            Mn_bot[j] = mx_bot
+            Mn_top[j] = mx_top
             areas[j]  = ed.area
         end
 

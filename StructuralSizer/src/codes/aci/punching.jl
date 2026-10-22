@@ -407,6 +407,27 @@ end
 # ─────────────────────────────────────────────────────────────────────────────
 
 """
+    _governing_edge_moment(Mux, Muy) → Torque
+
+Uniaxial 3-sided edge check can apply one transfer moment. When both
+components are present, keep the larger |M| so `punching_check`'s
+subsequent `Muy = 0` cannot drop the governing transfer. Single-axis
+callers pass the other component as zero and keep that axis unchanged.
+
+ENGINEERING JUDGMENT: ACI 318-11 §11.11.7.1 / R11.11.7.2 (corpus:
+aci-318-11, pages 209–211) transfer γv Mu about the centroid of the
+§11.11.1.2 critical section; they do not rank Mux vs Muy. The uniaxial
+edge path takes `max(|Mux|, |Muy|)` so a leftover axis cannot govern.
+"""
+function _governing_edge_moment(Mux::Torque, Muy::Torque)
+    Mux_zero = abs(to_kipft(Mux)) < 1e-10
+    Muy_zero = abs(to_kipft(Muy)) < 1e-10
+    Mux_zero && return Muy
+    Muy_zero && return Mux
+    return abs(to_kipft(Mux)) ≥ abs(to_kipft(Muy)) ? Mux : Muy
+end
+
+"""
     _orient_edge_column(c1, c2, Mux, Muy; free_edge_parallel=:c2)
 
 ACI 318-11 R11.11.7.2 (corpus: aci-318-11, pages 209–211): `c1` is the column
@@ -416,31 +437,22 @@ on the 3-sided critical section is the moment about the axis **parallel to
 the free edge**.
 
 - `free_edge_parallel = :c1`: free edge runs along the named `c1` face;
-  swap so ACI `c1` = named `c2`, and use `Mux` (about the axis // named c1).
+  swap so ACI `c1` = named `c2`. Do **not** skip this swap.
 - `free_edge_parallel = :c2` (default): caller already stored `c1` perp to
-  the edge. Single-moment callers pass the edge transfer as `Mux` (or as
-  `Muy` with `Mux = 0`). When **both** `Mux` and `Muy` are present and the
-  free edge is not identified beyond this default, the subsequent uniaxial
-  edge check must not drop the larger |M| — `M_edge =` the governing of
-  `|Mux|` and `|Muy|`.
+  the edge.
+
+On **both** `:c1` and `:c2`, after any geometry swap, `M_edge` is the
+governing `|M|` when both components are present (`_governing_edge_moment`).
+Single-moment callers pass the edge transfer as `Mux` (or as `Muy` with
+`Mux = 0`).
 """
 function _orient_edge_column(c1::Length, c2::Length, Mux::Torque, Muy::Torque;
                              free_edge_parallel::Symbol = :c2)
     free_edge_parallel in (:c1, :c2) ||
         throw(ArgumentError("free_edge_parallel must be :c1 or :c2; got :$free_edge_parallel"))
+    M_edge = _governing_edge_moment(Mux, Muy)
     if free_edge_parallel === :c1
-        return (c1 = c2, c2 = c1, M_edge = Mux)
-    end
-    Mux_zero = abs(to_kipft(Mux)) < 1e-10
-    Muy_zero = abs(to_kipft(Muy)) < 1e-10
-    if Mux_zero
-        M_edge = Muy
-    elseif Muy_zero
-        M_edge = Mux
-    else
-        # Default / :c2 with both axes present: keep the governing |M| so
-        # punching_check's subsequent Muy = 0 cannot check only a leftover.
-        M_edge = abs(to_kipft(Mux)) ≥ abs(to_kipft(Muy)) ? Mux : Muy
+        return (c1 = c2, c2 = c1, M_edge = M_edge)
     end
     return (c1 = c1, c2 = c2, M_edge = M_edge)
 end
@@ -491,10 +503,10 @@ from biaxial unbalanced moments.
 - `ϕ`: Shear strength reduction factor (0.75)
 - `free_edge_parallel`: For `:edge` only. `:c2` (default) means `c1` is
   already perp to the free edge; `:c1` means the free edge runs along the
-  named `c1` face (swap so ACI `c1` = named `c2`). On default `:c2` with
-  both `Mux` and `Muy` present, the uniaxial transfer moment is
-  `max(|Mux|, |Muy|)`. ACI 318-11 R11.11.7.2 (corpus: aci-318-11,
-  pages 209–211).
+  named `c1` face (swap so ACI `c1` = named `c2` — the swap is not
+  skipped). On both `:c1` and `:c2`, after any geometry swap, the uniaxial
+  transfer moment is `max(|Mux|, |Muy|)` when both are present.
+  ACI 318-11 R11.11.7.2 (corpus: aci-318-11, pages 209–211).
 
 # Returns
 `(ok, utilization, vu, ϕvc, b0, geom)`

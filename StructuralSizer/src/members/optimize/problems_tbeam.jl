@@ -16,6 +16,10 @@
 #   6. Geometric: hf < h (slab thickness < total depth)
 #   7. (optional) LL deflection: Δ_LL ≤ L/360  (ACI §24.2)
 #   8. (optional) Total deflection: Δ_total ≤ L/240  (ACI §24.2)
+#
+# Hogging (Mu_neg) section adequacy is enforced as a post-NLP check in
+# `size_rc_tbeam_nlp` (top steel is not an NLP design variable). The NLP
+# may therefore return `:infeasible` instead of deepening the section.
 
 using Unitful
 using Asap: kip, ksi, to_kip, to_kipft, to_inches, to_sqinches
@@ -92,18 +96,23 @@ struct RCTBeamNLPProblem <: AbstractNLPProblem
     # ── Torsion constraint (ACI §11.5.3.1) ──
     Tu_kipin::Float64              # Torsion demand (kip·in). 0.0 = no torsion.
     cover_to_stirrup_ctr_in::Float64  # face → stirrup centerline (inches)
+    # Signed axial (kip). Positive = compression (Eq. 11-4); negative = tension
+    # (Eq. 11-8, Vc ≥ 0). 0.0 = shear and flexure only (Eq. 11-3).
+    Nu_kip::Float64
 end
 
 """
-    RCTBeamNLPProblem(Mu, Vu, bf, hf, opts; w_dead, w_live, L_span, support, ξ, Tu)
+    RCTBeamNLPProblem(Mu, Vu, bf, hf, opts; w_dead, w_live, L_span, support, ξ, Tu, Nu)
 
 Construct an RC T-beam NLP problem from demand, flange geometry, and options.
 Converts all Unitful inputs to bare ACI units (kip, kip-ft, inches, psi).
+`Nu` is signed: compression positive (ACI 318-11 Eq. 11-4), tension
+negative (Eq. 11-8). Public default is `Nu = 0`.
 """
 function RCTBeamNLPProblem(Mu, Vu, bf, hf, opts::NLPBeamOptions;
                            w_dead=nothing, w_live=nothing, L_span=nothing,
                            support::Symbol=:simply_supported, ξ::Float64=2.0,
-                           Tu=0.0)
+                           Tu=0.0, Nu=0.0)
     fc = fc_ksi(opts.material)
     fy = fy_ksi(opts.rebar_material)
     Es = Es_ksi(opts.rebar_material)
@@ -155,6 +164,9 @@ function RCTBeamNLPProblem(Mu, Vu, bf, hf, opts::NLPBeamOptions;
         abs(Float64(Tu))
     end
 
+    # Signed axial: preserve sign (tension is negative).
+    Nu_kip_val = Nu isa Unitful.Quantity ? to_kip(Nu) : Float64(Nu)
+
     RCTBeamNLPProblem(
         Mu_kipft, Vu_kip, opts,
         bf_in, hf_in,
@@ -165,6 +177,7 @@ function RCTBeamNLPProblem(Mu, Vu, bf, hf, opts::NLPBeamOptions;
         wd_kiplf, wl_kiplf, L_span_in, Ec_psi_val, fr_psi_val,
         support, ξ,
         Tu_kipin_val, c_ctr,
+        Nu_kip_val,
     )
 end
 
@@ -310,11 +323,18 @@ function constraint_fns(p::RCTBeamNLPProblem, x::Vector{Float64})
     φMn_kipft = φ * Mn_lbin / 12_000.0
     util_flexure = p.Mu_kipft / max(φMn_kipft, 1e-6)
 
-    # --- Shear adequacy (uses bw, not bf) ---
+    # --- Shear adequacy (uses bw, not bf; signed Nu via Eq. 11-4 / 11-8) ---
+    # ACI 318-11 §11.2.1.2 Eq. (11-4) / §11.2.2.3 Eq. (11-8) —
+    # corpus: aci-318-11, pages 168 / 170. Vc ≥ 0.
+    # ENGINEERING JUDGMENT: same conservative Ag split as the discrete
+    # T-beam checker — larger Ag (flange+web) for the Eq. 11-4 boost,
+    # smaller Ag (bw·h) for the Eq. 11-8 reduction.
     sqrt_fc = sqrt(p.fc_psi)
-    Vc_lb     = 2 * p.λ * sqrt_fc * bw * d
-    Vs_max_lb = 8 * sqrt_fc * bw * d
-    φVn_max_kip = 0.75 * (Vc_lb + Vs_max_lb) / 1000.0
+    Af = bf * hf
+    hw = max(h - hf, 0.0)
+    Ag_comp = Af + bw * hw
+    Ag_tens = bw * h
+    φVn_max_kip = _φVn_with_axial(bw, d, Ag_comp, Ag_tens, p.fc_psi, p.λ, p.Nu_kip)
     util_shear = p.Vu_kip / max(φVn_max_kip, 1e-6)
 
     # --- Net tensile strain ---

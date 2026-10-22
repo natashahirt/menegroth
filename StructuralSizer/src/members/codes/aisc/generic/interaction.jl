@@ -3,11 +3,16 @@
 """
     check_PM_interaction(Pu, Mu, ϕPn, ϕMn) -> Float64
 
-Uniaxial P-M interaction check per AISC 360-16 Eq. H1-1a/H1-1b.
+Uniaxial P-M interaction check per AISC 360-16 §H1.1 Eqs. H1-1a/H1-1b
+(corpus: aisc-360-16, page 133).
 Returns the utilization ratio (≤ 1.0 means adequate).
+
+H1-1a when Pr/Pc ≥ 0.2: Pr/Pc + (8/9)(Mr/Mc) ≤ 1.0
+H1-1b when Pr/Pc < 0.2: Pr/(2 Pc) + Mr/Mc ≤ 1.0
 """
 function check_PM_interaction(Pu, Mu, ϕPn, ϕMn; Pr=Pu, Mr=Mu)
     (iszero(ϕPn) || iszero(ϕMn)) && return Inf
+    # AISC 360-16 §H1.1 Eqs. H1-1a/H1-1b — corpus: aisc-360-16, page 133
     if Pr / ϕPn >= 0.2
         return Pr / ϕPn + 8/9 * (Mr / ϕMn)
     else
@@ -33,11 +38,16 @@ end
 """
     check_PMxMy_interaction(Pu, Mux, Muy, ϕPn, ϕMnx, ϕMny) -> Float64
 
-Biaxial P-Mx-My interaction check per AISC 360-16 Eq. H1-1a/H1-1b.
+Biaxial P-Mx-My interaction check per AISC 360-16 §H1.1 Eqs. H1-1a/H1-1b
+(corpus: aisc-360-16, page 133).
 Returns the utilization ratio (≤ 1.0 means adequate).
+
+H1-1a when Pr/Pc ≥ 0.2: Pr/Pc + (8/9)(Mrx/Mcx + Mry/Mcy) ≤ 1.0
+H1-1b when Pr/Pc < 0.2: Pr/(2 Pc) + Mrx/Mcx + Mry/Mcy ≤ 1.0
 """
 function check_PMxMy_interaction(Pu, Mux, Muy, ϕPn, ϕMnx, ϕMny; Pr=Pu, Mrx=Mux, Mry=Muy)
     (iszero(ϕPn) || iszero(ϕMnx) || iszero(ϕMny)) && return Inf
+    # AISC 360-16 §H1.1 Eqs. H1-1a/H1-1b — corpus: aisc-360-16, page 133
     if Pr / ϕPn >= 0.2
         return Pr / ϕPn + 8/9 * (Mrx / ϕMnx + Mry / ϕMny)
     else

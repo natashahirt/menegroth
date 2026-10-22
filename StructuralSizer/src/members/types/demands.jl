@@ -13,7 +13,9 @@ Unified demand for framing members (beams, columns, beam-columns).
 - `member_idx`: Index of the member group
 - `Pu_c`: Compression magnitude (always positive) [N]
 - `Pu_t`: Tension magnitude (always positive) [N]
-- `Mux`: Strong-axis moment (envelope/max) [N*m]
+- `Mux`: Strong-axis moment envelope magnitude [N*m] (`max(Mux_pos, Mux_neg)`)
+- `Mux_pos`: Sagging (bottom-flange compression / top-flange tension) strong-axis moment magnitude [N*m]
+- `Mux_neg`: Hogging (top-flange compression / bottom-flange tension) strong-axis moment magnitude [N*m]
 - `Muy`: Weak-axis moment (envelope/max) [N*m]
 - `M1x`: Smaller end moment about strong axis (for B1 Cm factor)
 - `M2x`: Larger end moment about strong axis (for B1 Cm factor)
@@ -25,7 +27,10 @@ Unified demand for framing members (beams, columns, beam-columns).
 - `δ_max_LL`: Maximum LL deflection from analysis [m] (0.0 = skip L/360 check)
 - `δ_max_total`: Maximum DL+LL service deflection from analysis [m] (0.0 = skip L/240 check)
 - `I_ref`: Reference moment of inertia used in analysis [m⁴] (for deflection scaling)
-- `composite`: Composite beam context (`nothing` = bare steel)
+- `composite`: Composite beam context (`nothing` = bare steel,
+  `CompositeContext` = full AISC 360-16 Chapter I, `true` = Chapter I
+  sentinel without slab data). Hogging Chapter F (`Lb=L`, `Cb=1.0`) is
+  always applied from `Mux_neg` (default `Mux`); it is not gated on this field.
 - `transverse_load`: Whether transverse loading exists between supports (for Cm)
 
 # End Moment Convention (ACI 318-19 / AISC 360-16 Appendix 8)
@@ -42,7 +47,9 @@ struct MemberDemand{T, C} <: AbstractDemand
     member_idx::Int
     Pu_c::T      # Compression magnitude (always positive)
     Pu_t::T      # Tension magnitude (always positive)
-    Mux::T       # Strong-axis moment (envelope)
+    Mux::T       # Strong-axis moment envelope magnitude
+    Mux_pos::T   # Sagging strong-axis moment magnitude (>= 0)
+    Mux_neg::T   # Hogging strong-axis moment magnitude (>= 0)
     Muy::T       # Weak-axis moment (envelope)
     M1x::T       # Smaller end moment, strong axis (for B1)
     M2x::T       # Larger end moment, strong axis (for B1)
@@ -59,8 +66,8 @@ struct MemberDemand{T, C} <: AbstractDemand
 end
 
 """
-    MemberDemand(idx; Pu_c=0.0, Pu_t=0.0, Mux=0.0, Muy=0.0,
-                 M1x=nothing, M2x=nothing, M1y=nothing, M2y=nothing,
+    MemberDemand(idx; Pu_c=0.0, Pu_t=0.0, Mux=0.0, Mux_pos=nothing, Mux_neg=nothing,
+                 Muy=0.0, M1x=nothing, M2x=nothing, M1y=nothing, M2y=nothing,
                  Vu_strong=0.0, Vu_weak=0.0, Tu=0.0,
                  δ_max_LL=0.0, δ_max_total=0.0, I_ref=1.0,
                  composite=nothing, transverse_load=false) -> MemberDemand
@@ -69,11 +76,15 @@ Keyword constructor with defaults for [`MemberDemand`](@ref).
 
 When `M1x`/`M2x` (or `M1y`/`M2y`) are `nothing`, defaults to `M1=0`, `M2=Mux`
 (conservative single-curvature assumption, Cm = 0.6 per AISC 360-16 Appendix 8).
+When `Mux_pos` / `Mux_neg` are omitted, both default to `Mux` so a caller that
+only has an unsigned envelope still checks both faces at full magnitude
+(hogging Chapter F at `Lb=L`, `Cb=1.0` — AISC 360-16 §F2.2, page 103).
 The type parameter `T` is inferred via `promote_type` over all numeric arguments.
-`composite` is not included in type promotion (it is `Nothing` or a `CompositeContext`).
+`composite` is not included in type promotion (it is `Nothing`, a
+`CompositeContext`, or the `true` Chapter I sentinel).
 """
 function MemberDemand(idx::Int; 
-    Pu_c=0.0, Pu_t=0.0, Mux=0.0, Muy=0.0,
+    Pu_c=0.0, Pu_t=0.0, Mux=0.0, Mux_pos=nothing, Mux_neg=nothing, Muy=0.0,
     M1x=nothing, M2x=nothing, M1y=nothing, M2y=nothing,
     Vu_strong=0.0, Vu_weak=0.0,
     Tu=0.0,
@@ -81,23 +92,26 @@ function MemberDemand(idx::Int;
     composite=nothing,
     transverse_load=false
 )
+    Mux_pos_val = isnothing(Mux_pos) ? Mux : Mux_pos
+    Mux_neg_val = isnothing(Mux_neg) ? Mux : Mux_neg
     M1x_val = isnothing(M1x) ? zero(Mux) : M1x
     M2x_val = isnothing(M2x) ? Mux : M2x
     M1y_val = isnothing(M1y) ? zero(Muy) : M1y
     M2y_val = isnothing(M2y) ? Muy : M2y
     
-    all_vals = (Pu_c, Pu_t, Mux, Muy, M1x_val, M2x_val, M1y_val, M2y_val,
+    all_vals = (Pu_c, Pu_t, Mux, Mux_pos_val, Mux_neg_val, Muy,
+                M1x_val, M2x_val, M1y_val, M2y_val,
                 Vu_strong, Vu_weak, Tu, δ_max_LL, δ_max_total, I_ref)
     T = promote_type(typeof.(all_vals)...)
     C = typeof(composite)
     if T <: Real
-        MemberDemand{T, C}(idx, T(Pu_c), T(Pu_t), T(Mux), T(Muy),
+        MemberDemand{T, C}(idx, T(Pu_c), T(Pu_t), T(Mux), T(Mux_pos_val), T(Mux_neg_val), T(Muy),
                            T(M1x_val), T(M2x_val), T(M1y_val), T(M2y_val),
                            T(Vu_strong), T(Vu_weak), T(Tu),
                            T(δ_max_LL), T(δ_max_total), T(I_ref),
                            composite, transverse_load)
     else
-        MemberDemand{Any, C}(idx, Pu_c, Pu_t, Mux, Muy,
+        MemberDemand{Any, C}(idx, Pu_c, Pu_t, Mux, Mux_pos_val, Mux_neg_val, Muy,
                              M1x_val, M2x_val, M1y_val, M2y_val,
                              Vu_strong, Vu_weak, Tu,
                              δ_max_LL, δ_max_total, I_ref,
@@ -231,19 +245,27 @@ converted internally to kip/kip·ft for ACI calculations.
 
 # Fields
 - `member_idx`: Index of the member group
-- `Mu`: Factored moment (positive)
+- `Mu`: Positive (sagging, bottom-tension) factored moment magnitude (>= 0)
+- `Mu_neg`: Negative (hogging, top-tension) factored moment magnitude (>= 0)
 - `Vu`: Factored shear (positive)
-- `Nu`: Factored axial compression (positive = compression, 0 for pure beams)
+- `Nu`: Factored axial force, **signed**: positive = compression, negative = tension
 - `Tu`: Factored torsion (positive, 0.0 = no torsion demand)
 
-When `Nu > 0`, the ACI 318 shear capacity `Vc` is increased via the
-axial compression modifier (ACI 318-11 §11.2.2.1, Eq. 11-4):
-`Vc = 2λ(1 + Nu/(2000 Ag)) √f'c bw d`.
+When `Mu_neg` is omitted it defaults to `Mu` so an unsigned envelope is
+checked on both faces (conservative).
+
+When `Nu > 0`, `Vc` uses the compression modifier (ACI 318-11 §11.2.1.2,
+Eq. 11-4): `Vc = 2(1 + Nu/(2000 Ag)) λ √f'c bw d` with `Nu/Ag` in psi.
+When `Nu < 0`, `Vc` uses the tension reduction (ACI 318-11 §11.2.2.3,
+Eq. 11-8): `Vc = 2(1 + Nu/(500 Ag)) λ √f'c bw d`, not less than zero.
 
 # Examples
 ```julia
-# Pure beam (no axial, no torsion)
+# Pure beam (no axial, no torsion); both faces checked at Mu
 demand = RCBeamDemand(1; Mu=150.0, Vu=30.0)
+
+# Distinct sagging / hogging faces
+demand = RCBeamDemand(1; Mu=150.0, Mu_neg=80.0, Vu=30.0)
 
 # With torsion
 demand = RCBeamDemand(1; Mu=150.0, Vu=30.0, Tu=20.0)
@@ -251,33 +273,39 @@ demand = RCBeamDemand(1; Mu=150.0, Vu=30.0, Tu=20.0)
 # With axial compression (column-like member under shear)
 demand = RCBeamDemand(1; Mu=150.0, Vu=30.0, Nu=10.0)
 
+# With axial tension (reduces Vc)
+demand = RCBeamDemand(1; Mu=150.0, Vu=30.0, Nu=-10.0)
+
 # Unitful — converted automatically
 demand = RCBeamDemand(1; Mu=200.0u"kN*m", Vu=80.0u"kN", Tu=15.0u"kN*m")
 ```
 """
 struct RCBeamDemand{T} <: AbstractDemand
     member_idx::Int
-    Mu::T           # Factored moment
+    Mu::T           # Sagging (bottom-tension) moment magnitude
+    Mu_neg::T       # Hogging (top-tension) moment magnitude
     Vu::T           # Factored shear
-    Nu::T           # Factored axial compression (0 for pure beams)
+    Nu::T           # Signed axial (positive = compression, negative = tension)
     Tu::T           # Factored torsion (0 = no torsion)
 end
 
 """
-    RCBeamDemand(idx; Mu=0.0, Vu=0.0, Nu=0.0, Tu=0.0) -> RCBeamDemand
+    RCBeamDemand(idx; Mu=0.0, Mu_neg=nothing, Vu=0.0, Nu=0.0, Tu=0.0) -> RCBeamDemand
 
 Keyword constructor with defaults for [`RCBeamDemand`](@ref).
 
-The type parameter `T` is inferred via `promote_type`. Mixed `Unitful` dimensions
-fall back to `Any` (the checker handles unit conversions internally).
+`Mu_neg` defaults to `Mu` when omitted. The type parameter `T` is inferred
+via `promote_type`. Mixed `Unitful` dimensions fall back to `Any` (the
+checker handles unit conversions internally).
 """
-function RCBeamDemand(idx::Int; Mu=0.0, Vu=0.0, Nu=0.0, Tu=0.0)
-    all_vals = (Mu, Vu, Nu, Tu)
+function RCBeamDemand(idx::Int; Mu=0.0, Mu_neg=nothing, Vu=0.0, Nu=0.0, Tu=0.0)
+    Mu_neg_val = isnothing(Mu_neg) ? Mu : Mu_neg
+    all_vals = (Mu, Mu_neg_val, Vu, Nu, Tu)
     T = promote_type(typeof.(all_vals)...)
     if T <: Real
-        RCBeamDemand{T}(idx, T(Mu), T(Vu), T(Nu), T(Tu))
+        RCBeamDemand{T}(idx, T(Mu), T(Mu_neg_val), T(Vu), T(Nu), T(Tu))
     else
         # Mixed Unitful dimensions — fall back to Any (checker handles conversions)
-        RCBeamDemand{Any}(idx, Mu, Vu, Nu, Tu)
+        RCBeamDemand{Any}(idx, Mu, Mu_neg_val, Vu, Nu, Tu)
     end
 end

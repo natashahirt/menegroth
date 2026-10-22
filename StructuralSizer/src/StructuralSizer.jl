@@ -231,6 +231,7 @@ export explain_feasibility, FeasibilityExplanation, CheckResult
 export SteelMemberGeometry, TimberMemberGeometry, ConcreteMemberGeometry
 export AISCChecker, AISCCapacityCache
 export ACIBeamChecker, ACIBeamCapacityCache
+export required_top_steel
 export ACIColumnChecker, ACIColumnCapacityCache
 export PixelFrameChecker, PixelFrameCapacityCache
 export PixelFrameBeamOptions, PixelFrameColumnOptions

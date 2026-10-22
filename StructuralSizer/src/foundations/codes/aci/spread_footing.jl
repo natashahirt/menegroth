@@ -39,8 +39,15 @@ and §4.1 (page 7) linear rigid-body contact pressure:
 The ± in Eq. (3-1) (`q_max,min = (P/A)(1 ± 6e/Z)`) means the peak uses the
 sum of absolute eccentricities: `q_max` is always the pressed-edge corner
 and `q_min` the opposite.  `ex = Mux/P`, `ey = Muy/P` are returned signed;
-`L` along x (Mux), `B` along y (Muy).  Applies while the resultant stays
-in the kern (`q_min ≥ 0`).  `qu = P/(B L)` is the concentric average.
+`L` along x (Mux), `B` along y (Muy).  `qu = P/(B L)` is the concentric
+average.
+
+§3.2.1 states Eq. (3-1) applies only when "all portions of the foundation
+contact area are in compression" (`q_min ≥ 0`, resultant in the kern).
+A negative `q_min` means Eq. (3-1) is outside its stated range — do not
+size from `q_max` as if the base were in full contact.  Callers grow the
+plan until `q_min ≥ 0` (and `q_max ≤ qa`) or refuse.  §3.2.2 triangular
+partial-contact formulas are not implemented (stay in the kern).
 """
 function _eccentric_soil_pressure(P::Force, Mux::Torque, Muy::Torque,
                                   B::Length, L::Length)
@@ -63,6 +70,30 @@ function _eccentric_soil_pressure(P::Force, Mux::Torque, Muy::Torque,
     kern_min = 1 - 6 * ustrip(u"m", ex_abs) / ustrip(u"m", L) -
                    6 * ustrip(u"m", ey_abs) / ustrip(u"m", B)
     return (q_max = qu * kern, q_min = qu * kern_min, qu = qu, ex = ex, ey = ey)
+end
+
+"""True when Eq. (3-1) is inside its §3.2.1 range (`q_min ≥ 0`).
+
+A relative floor of `1e-12` on `q_min/qu` absorbs Float64 residue at the
+kern edge `e = L/6` (not a construction tolerance).
+"""
+function _eccentric_in_kern(qe)
+    qe.q_min ≥ zero(qe.q_min) && return true
+    qe.qu == zero(qe.qu) && return true
+    return ustrip(Unitful.NoUnits, qe.q_min / qe.qu) ≥ -1e-12
+end
+
+"""
+Minimum square side so a rigid rectangular footing stays in the kern.
+
+ACI 336.2R §3.2.1 (corpus: aci-336-combined-footings-mats, page 6): Eq. (3-1)
+requires the resultant in the middle third on each principal axis.  For a
+square `B = L`, `6|ex|/B + 6|ey|/B ≤ 1` ⇒ `B ≥ 6(|ex| + |ey|)`.
+"""
+function _kern_min_square_side(P::Force, Mux::Torque, Muy::Torque)
+    P_abs = abs(P)
+    P_abs ≤ zero(P_abs) && return 0.0u"m"
+    return 6 * (abs(Mux / P) + abs(Muy / P))
 end
 
 """
@@ -329,22 +360,52 @@ function design_footing(::SpreadFooting,
     B = max(B, min_B)
     Lf = B   # square footing
 
-    # Grow the square plan until service q_max ≤ qa.  Eccentricity is
-    # Mux/Pu (load factors cancel when Ms/Ps = Mux/Pu).
+    # Grow the square plan until service q_max ≤ qa AND q_min ≥ 0
+    # (resultant in the kern).  ACI 336.2R §3.2.1 Eq. (3-1) (corpus:
+    # aci-336-combined-footings-mats, page 6) applies only while all of
+    # the contact area is in compression; do not size from q_max while
+    # q_min < 0.  Eccentricity is Mux/Pu (load factors cancel when
+    # Ms/Ps = Mux/Pu).  §4.1 (page 7): establish B, L so the maximum
+    # contact pressure does not exceed qa.
     P_abs = abs(Pu)
+    plan_ok = true
     if P_abs > zero(P_abs)
-        for _ in 1:40
+        B = max(B, _kern_min_square_side(Pu, demand.Mux, demand.Muy))
+        B = ceil(ustrip(u"inch", B) / ustrip(u"inch", si)) * si
+        B = max(B, min_B)
+        Lf = B
+        plan_ok = false
+        for _ in 1:80
             qe = _eccentric_soil_pressure(Pu, demand.Mux, demand.Muy, B, Lf)
             q_max_s = (Ps / (B * Lf)) * (qe.q_max / qe.qu)
-            q_max_s ≤ qa && break
+            if _eccentric_in_kern(qe) && q_max_s ≤ qa
+                plan_ok = true
+                break
+            end
             B += si
             Lf = B
+        end
+        if !plan_ok
+            StructuralSizer.emit!(tc, :checker, "design_footing_spread_aci", "foundation_group_$(demand.group_idx)", :failure;
+                                  reason="kern_or_bearing_plan_nonconvergence",
+                                  B_in=Float64(ustrip(u"inch", B)))
+            error("Spread footing plan did not stay in the ACI 336.2R §3.2.1 kern " *
+                  "(q_min ≥ 0) with q_max ≤ qa after 80 size increments (B=$B). " *
+                  "Increase size_increment budget or reduce eccentricity; Eq. (3-1) " *
+                  "is not applied as full contact when q_min < 0 (corpus: " *
+                  "aci-336-combined-footings-mats, page 6).")
         end
     end
 
     # Factored net soil pressure — size structural checks from q_max
-    # (ACI 336.2R §3.2.1 / §4.1).  Mux/Muy also go to punching_check.
+    # only after the plan is in the kern (ACI 336.2R §3.2.1 / §4.1).
+    # Mux/Muy also go to punching_check.
     q_u = _eccentric_soil_pressure(Pu, demand.Mux, demand.Muy, B, Lf)
+    if P_abs > zero(P_abs) && !_eccentric_in_kern(q_u)
+        error("Spread footing Eq. (3-1) q_min < 0 at B=$B (ACI 336.2R §3.2.1, " *
+              "corpus: aci-336-combined-footings-mats, page 6); refuse rather than " *
+              "treat partial uplift as full-contact pressure.")
+    end
     qu = q_u.q_max
 
     # =====================================================================

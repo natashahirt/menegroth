@@ -108,19 +108,26 @@ end
 
 Design shear strength `ϕVn` per AISC 360-16 (LRFD).
 
-# Resistance factor defaults (`ϕ`)
-- Strong axis, rolled I-shape with `h/tw ≤ 2.24 √(E/Fy)` (§G2.1(a)): `ϕ = 1.00`.
-- All other Chapter G provisions, including weak-axis §G6 (which inherits from
-  §G1): `ϕ = 0.90` (corpus aisc-360-16, p. 126).
+# Resistance factor defaults (`ϕ === nothing`)
+- Strong axis, rolled I-shape with `h/tw ≤ 2.24 √(E/Fy)` (§G2.1(a),
+  corpus aisc-360-16, p. 127): `ϕ = 1.00`.
+- All other Chapter G provisions, including weak-axis §G6 and slender /
+  built-up webs (§G1(a), corpus aisc-360-16, p. 126): `ϕ = 0.90`.
+An explicit `ϕ` overrides the per-provision selection.
 """
 function get_ϕVn(s::ISymmSection, mat::Metal; axis=:strong, kv=5.34, rolled=true, ϕ=nothing)
-    if axis == :strong
-        # §G2.1(a): ϕ = 1.0 when the rolled-shape limit is met. Caller may
-        # override via `ϕ` if §G2.1(b) governs (in which case ϕ = 0.90).
-        ϕ_use = isnothing(ϕ) ? 1.0 : ϕ
+    if !isnothing(ϕ)
+        ϕ_use = ϕ
+    elseif axis == :strong && rolled && s.λ_w <= 2.24 * sqrt(mat.E / mat.Fy)
+        # AISC 360-16 §G2.1(a) — corpus: aisc-360-16, page 127
+        # φv = 1.00 only for webs of rolled I-shaped members with
+        # h/tw ≤ 2.24 √(E/Fy).
+        ϕ_use = 1.00
     else
-        # §G1 default for §G6: ϕ = 0.90.
-        ϕ_use = isnothing(ϕ) ? 0.9 : ϕ
+        # AISC 360-16 §G1(a) — corpus: aisc-360-16, page 126
+        # φv = 0.90 for all Chapter G provisions except §G2.1(a)
+        # (weak-axis §G6, built-up / slender webs, HSS via their own get_ϕVn).
+        ϕ_use = 0.90
     end
     return ϕ_use * get_Vn(s, mat; axis=axis, kv=kv, rolled=rolled)
 end

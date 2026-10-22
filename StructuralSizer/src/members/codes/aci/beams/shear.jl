@@ -33,10 +33,13 @@ simplified formula (ACI 318-11 §11.2.1.1, Eq. (11-3)):
 
     Vc = 2 λ √f'c bw d
 
-When `Nu > 0` and `Ag > 0` (members under axial compression), uses
-the simplified axial-compression formula (ACI 318-11 §11.2.1.2, Eq. (11-4)):
+When `Nu` and `Ag` are provided, `Nu` is **signed** (positive = compression,
+negative = tension):
 
-    Vc = 2 λ (1 + Nu / (2000 Ag)) √f'c bw d
+- `Nu > 0`: ACI 318-11 §11.2.1.2 Eq. (11-4) (corpus: aci-318-11, page 168)
+  `Vc = 2 λ (1 + Nu/(2000 Ag)) √f'c bw d` with `Nu/Ag` in psi.
+- `Nu < 0`: ACI 318-11 §11.2.2.3 Eq. (11-8) (corpus: aci-318-11, page 170)
+  `Vc = 2 λ (1 + Nu/(500 Ag)) √f'c bw d`, not less than zero.
 
 (The more detailed Vc per ACI 318-11 §11.2.2.1, Eq. (11-5) — which uses
 ρw and Vu·d/Mu — is not implemented here.)
@@ -48,8 +51,9 @@ where `Nu` is in lbf and `Ag` is in in² (or Unitful equivalents).
 - `d`: Effective depth
 - `fc`: Concrete compressive strength
 - `λ`: Lightweight concrete factor (1.0 for normal weight)
-- `Nu`: Factored axial compression (positive). Unitful `Force` or raw lbf.
-- `Ag`: Gross cross-section area (`bw × h`). Unitful `Area` or raw in².
+- `Nu`: Factored axial force, signed (positive = compression, negative =
+  tension). Unitful `Force` or raw lbf.
+- `Ag`: Gross cross-section area. Unitful `Area` or raw in².
 
 # Reference
 - Simplified: StructurePoint Example Vc = 2×1×√4350×12×17.56/1000 = 27.80 kips
@@ -61,17 +65,23 @@ function Vc_beam(bw::Length, d::Length, fc::Pressure;
     bw_in  = ustrip(u"inch", bw)
     d_in   = ustrip(u"inch", d)
 
-    # Axial compression modifier (ACI 318-11 §11.2.1.2, Eq. (11-4))
     axial_factor = 1.0
+    Nu_lb = 0.0
     if !isnothing(Nu) && !isnothing(Ag)
         Nu_lb  = Nu isa Unitful.Quantity ? ustrip(u"lbf", Nu) : Float64(Nu)
         Ag_in2 = Ag isa Unitful.Quantity ? ustrip(u"inch^2", Ag) : Float64(Ag)
-        if Nu_lb > 0 && Ag_in2 > 0
+        if Ag_in2 > 0 && Nu_lb > 0
+            # ACI 318-11 §11.2.1.2 Eq. (11-4) — corpus: aci-318-11, page 168
             axial_factor = 1 + Nu_lb / (2000 * Ag_in2)
+        elseif Ag_in2 > 0 && Nu_lb < 0
+            # ACI 318-11 §11.2.2.3 Eq. (11-8) — corpus: aci-318-11, page 170
+            axial_factor = 1 + Nu_lb / (500 * Ag_in2)
         end
     end
 
     Vc_lb = 2 * λ * axial_factor * sqrt(fc_psi) * bw_in * d_in
+    # ACI 318-11 §11.2.2.3: Vc shall not be taken less than zero.
+    Nu_lb < 0 && (Vc_lb = max(0.0, Vc_lb))
     return Vc_lb * u"lbf"
 end
 

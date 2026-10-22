@@ -39,6 +39,7 @@ function run_moment_analysis(
     has_edge_beam::Bool = false,
     edge_beam_βt::Float64 = 0.0,
     col_I_factor::Float64 = 0.70,  # ACI 318-11 §10.10.4.1
+    tc = nothing,  # API parity with DDM (FEA does not emit Eq. 13-7 fallbacks)
 )
     setup = _moment_analysis_setup(struc, slab, supporting_columns, h, γ_concrete)
     (; l1, l2, ln, span_axis, c1_avg, qD, qL, qu, M0) = setup

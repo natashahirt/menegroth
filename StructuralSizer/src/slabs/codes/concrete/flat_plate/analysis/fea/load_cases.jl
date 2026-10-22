@@ -135,17 +135,131 @@ end
 # Post-Solve Combination
 # =============================================================================
 
+# =============================================================================
+# Per-combo factored tensors (design-envelope infrastructure)
+# =============================================================================
+#
+# Design extractors (Wood–Armer, projection, no_torsion, strip / area / frame)
+# envelope *design moments* over every factored tensor, not a single
+# |Mxx|-picked triplet.  `_combine_element_moments!` still writes a
+# representative tensor into `element_data` for visualization and for the
+# legacy single-solve path.
+#
+# Single-combo identity: when `length(_LOAD_COMBOS) == 1` and no pattern
+# live-load decomposition is present, `_factored_moment_combos` yields
+# exactly that combo's tensor — the same triplet `_combine_element_moments!`
+# writes — so every downstream path is byte-identical to evaluating the
+# transform on `ed.Mxx/Myy/Mxy`.
+# =============================================================================
+
+"""
+    _pattern_cell_order(cache) -> Vector{Int}
+
+Stable cell-index order for pattern × combo enumeration.  Matches the
+insertion order of `cell_tri_indices` (populated from `slab.cell_indices`
+on the first mesh pass).
+"""
+function _pattern_cell_order(cache::FEAModelCache)
+    return collect(keys(cache.cell_tri_indices))
+end
+
+"""
+    _n_design_combos(cache) -> Int
+
+Number of factored (Mxx, Myy, Mxy) tensors that design extractors must
+envelope for each element.
+"""
+function _n_design_combos(cache::FEAModelCache)
+    if isempty(cache.element_data_D) || isempty(cache.element_data_L)
+        return 1
+    end
+    n_lc = length(_LOAD_COMBOS)
+    if isempty(cache.cell_live_moments)
+        return n_lc
+    end
+    # Same cell list as `_combo_tensor` / `_fea_pattern_envelope!`
+    # (cell_tri_indices insertion order = slab.cell_indices).
+    n_cells = length(_pattern_cell_order(cache))
+    return n_lc + length(generate_load_patterns(n_cells)) * n_lc
+end
+
+"""
+    _combo_tensor(cache, k, i) -> (Mxx, Myy, Mxy)
+
+Factored element-local moment triplet for element `k`, combo index `i`
+(1-based, `i ∈ 1:_n_design_combos(cache)`).
+
+Index layout when D/L split data exist:
+1. First `length(_LOAD_COMBOS)` entries: full-area live load
+   (`element_data_L`) × each ASCE 7 §2.3.1 combination.
+2. Remaining entries (only when `cell_live_moments` is populated):
+   each ACI 318-11 §13.7.6 pattern × each load combination.
+"""
+function _combo_tensor(cache::FEAModelCache, k::Int, i::Int)
+    if isempty(cache.element_data_D) || isempty(cache.element_data_L)
+        ed = cache.element_data[k]
+        return (ed.Mxx, ed.Myy, ed.Mxy)
+    end
+    md = cache.element_data_D[k]
+    n_lc = length(_LOAD_COMBOS)
+    if i <= n_lc
+        αD, αL = _LOAD_COMBOS[i]
+        ml = cache.element_data_L[k]
+        return (αD * md.Mxx + αL * ml.Mxx,
+                αD * md.Myy + αL * ml.Myy,
+                αD * md.Mxy + αL * ml.Mxy)
+    end
+    # Pattern × combo
+    cis = _pattern_cell_order(cache)
+    n_cells = length(cis)
+    pat_i = i - n_lc
+    pat_idx, lc_idx = divrem(pat_i - 1, n_lc)
+    αD, αL = _LOAD_COMBOS[lc_idx + 1]
+    patterns = generate_load_patterns(n_cells)
+    pat = patterns[pat_idx + 1]
+    Mxx = αD * md.Mxx
+    Myy = αD * md.Myy
+    Mxy = αD * md.Mxy
+    for (j, load_type) in enumerate(pat)
+        load_type === :dead_plus_live || continue
+        cell_moms = get(cache.cell_live_moments, cis[j], nothing)
+        cell_moms === nothing && continue
+        ml = cell_moms[k]
+        Mxx += αL * ml.Mxx
+        Myy += αL * ml.Myy
+        Mxy += αL * ml.Mxy
+    end
+    return (Mxx, Myy, Mxy)
+end
+
+"""
+    _factored_moment_combos(cache, k) -> Vector{NTuple{3,Float64}}
+
+All factored tensors for element `k`.  Convenience wrapper around
+`_combo_tensor` for extractors that envelope per element.
+"""
+function _factored_moment_combos(cache::FEAModelCache, k::Int)
+    n = _n_design_combos(cache)
+    return NTuple{3,Float64}[_combo_tensor(cache, k, i) for i in 1:n]
+end
+
 """
     _combine_element_moments!(cache; verbose=false)
 
 Apply ASCE 7 §2.3.1 load combinations to the D/L element moments and write
-the governing (envelope) factored moments into `cache.element_data.Mxx/Myy/Mxy`.
+a representative factored triplet into `cache.element_data.Mxx/Myy/Mxy`.
 
-For each element, the governing combination is the one that produces the
-largest absolute Mxx (the primary bending moment).  The full moment triplet
-(Mxx, Myy, Mxy) from that combination is used — we do NOT mix combinations
-across moment components, as they must remain consistent for tensor operations
-(Wood–Armer, projection).
+The representative combo is the one with the largest absolute Mxx (kept
+for visualization and for any reader that has not been switched onto
+`_combo_tensor`).  Design extractors must **not** treat this triplet as
+the design envelope when more than one combo exists — they iterate
+`_combo_tensor` / `_factored_moment_combos` and envelope the transform
+outputs (Wood–Armer or projected face moments) separately for top and
+bottom in each direction.
+
+When only one combo exists the representative triplet *is* that combo,
+so design results stay byte-identical to evaluating the transform on
+`ed.Mxx/Myy/Mxy`.
 """
 function _combine_element_moments!(cache::FEAModelCache; verbose::Bool = false)
     n = length(cache.element_data)
@@ -157,7 +271,7 @@ function _combine_element_moments!(cache::FEAModelCache; verbose::Bool = false)
         md = cache.element_data_D[k]
         ml = cache.element_data_L[k]
 
-        # Evaluate all combos, pick the one with max |Mxx|
+        # Representative tensor: combo with max |Mxx| (visualization / fallback).
         best_abs = -1.0
         best_Mxx = 0.0
         best_Myy = 0.0
@@ -298,7 +412,10 @@ moment is:
 
     M[k] = α_D × M_D[k] + α_L × Σ(M_L_cell[ci][k])  for loaded ci
 
-The element-wise envelope (max |Mxx|) across all patterns × combos governs.
+The element-wise envelope (max |Mxx|) across all patterns × combos is
+written as the representative tensor (visualization / fallback).  Design
+extractors re-iterate the same patterns × combos via `_combo_tensor` and
+envelope the *design* moments (Wood–Armer / projected faces).
 
 Requires `_solve_dl_cases!` and `_solve_per_cell_live!` to have been called.
 """

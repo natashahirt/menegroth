@@ -183,24 +183,33 @@ function _mat_punching_util(demands, plan, qu, d_eff, fc, λ, ϕv)
         n_close_edges = edge_left + edge_right + edge_bottom + edge_top
         is_edge = n_close_edges >= 1
         is_corner = n_close_edges >= 2
-        pos_sym = is_edge ? :edge : :interior
-        Ac = if demands[j].shape == :circular
-            A_full = π * (c1j + d_eff)^2 / 4
-            is_corner ? A_full / 2 :       # 2-sided critical perimeter
-            is_edge   ? A_full * 3 / 4 :   # 3-sided critical perimeter
-                        A_full              # interior — full perimeter
-        else
-            is_corner ? (c1j + d_eff / 2) * (c2j + d_eff / 2) :
-            is_edge   ? (c1j + d_eff / 2) * (c2j + d_eff) :
-                        (c1j + d_eff) * (c2j + d_eff)
-        end
-        pos_sym = is_corner ? :corner : pos_sym
+        pos_sym = is_corner ? :corner : (is_edge ? :edge : :interior)
         # Bottom/top: free edge along local x (named c1) → :c1 (swap so
         # ACI c1 = named c2). Left/right: free edge along local y → :c2
         # (named c1 already perp to the edge). Corners use :corner and
         # skip edge orient. ACI 318-11 R11.11.7.2 (corpus: aci-318-11,
         # pages 209–211).
         edge_par = (edge_bottom || edge_top) ? :c1 : :c2
+        Ac = if demands[j].shape == :circular
+            A_full = π * (c1j + d_eff)^2 / 4
+            is_corner ? A_full / 2 :       # 2-sided critical perimeter
+            is_edge   ? A_full * 3 / 4 :   # 3-sided critical perimeter
+                        A_full              # interior — full perimeter
+        elseif is_corner
+            (c1j + d_eff / 2) * (c2j + d_eff / 2)
+        elseif is_edge
+            # ACI 318-11 §11.11.1.2 (corpus: aci-318-11, page 200): 3-sided
+            # plan area inside the d/2 critical section. On ACI axes
+            # (c1 perp to the free edge, R11.11.7.2 pages 209–211)
+            # Ac = (c1 + d/2)×(c2 + d). :c1 swaps named axes so
+            # Ac = (named_c2 + d/2)×(named_c1 + d). Left/right :c2
+            # already matches named axes.
+            edge_par === :c1 ?
+                (c2j + d_eff / 2) * (c1j + d_eff) :
+                (c1j + d_eff / 2) * (c2j + d_eff)
+        else
+            (c1j + d_eff) * (c2j + d_eff)
+        end
         Vu_p = max(uconvert(u"lbf", demands[j].Pu - qu * Ac), 0.0u"lbf")
         pch = punching_check(Vu_p, demands[j].Mux, demands[j].Muy,
                               d_eff, fc, c1j, c2j;

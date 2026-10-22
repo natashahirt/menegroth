@@ -11,6 +11,10 @@
 #   2. Shear section adequacy: Vu / φVn_max ≤ 1.0
 #   3. Net tensile strain:  εt ≥ 0.004  (ACI 318-11 §10.3.5)
 #   4. Minimum reinforcement: As ≥ As,min (ACI 318-11 §10.5.1)
+#
+# Hogging (Mu_neg) section adequacy is enforced as a post-NLP check in
+# `size_rc_beam_nlp` (top steel is not an NLP design variable). The NLP
+# may therefore return `:infeasible` instead of deepening the section.
 
 using Unitful
 using Asap: kip, ksi, to_kip, to_kipft, to_inches, to_sqinches
@@ -68,15 +72,20 @@ struct RCBeamNLPProblem <: AbstractNLPProblem
 
     # Torsion demand (kip·in). 0.0 = no torsion constraint.
     Tu_kipin::Float64
+    # Signed axial (kip). Positive = compression (Eq. 11-4); negative = tension
+    # (Eq. 11-8, Vc ≥ 0). 0.0 = shear and flexure only (Eq. 11-3).
+    Nu_kip::Float64
 end
 
 """
-    RCBeamNLPProblem(Mu, Vu, opts; Tu=0.0)
+    RCBeamNLPProblem(Mu, Vu, opts; Tu=0.0, Nu=0.0)
 
 Construct an RC beam NLP problem from factored demands and options.
 Converts Unitful inputs to bare ACI units (kip, kip-ft, inches, psi).
+`Nu` is signed: compression positive (ACI 318-11 Eq. 11-4), tension
+negative (Eq. 11-8). Public default is `Nu = 0` (no axial modifier).
 """
-function RCBeamNLPProblem(Mu, Vu, opts::NLPBeamOptions; Tu=0.0)
+function RCBeamNLPProblem(Mu, Vu, opts::NLPBeamOptions; Tu=0.0, Nu=0.0)
     fc = fc_ksi(opts.material)
     fy = fy_ksi(opts.rebar_material)
     Es = Es_ksi(opts.rebar_material)
@@ -111,6 +120,9 @@ function RCBeamNLPProblem(Mu, Vu, opts::NLPBeamOptions; Tu=0.0)
         abs(Float64(Tu))
     end
 
+    # Signed axial: preserve sign (tension is negative).
+    Nu_kip_val = Nu isa Unitful.Quantity ? to_kip(Nu) : Float64(Nu)
+
     RCBeamNLPProblem(
         Mu_kipft, Vu_kip, opts,
         fc_psi, fy_psi, fyt_psi, Es, λ_val,
@@ -118,6 +130,7 @@ function RCBeamNLPProblem(Mu, Vu, opts::NLPBeamOptions; Tu=0.0)
         ρ_min_aci,
         b_min, b_max, h_min, h_max,
         Tu_kipin_val,
+        Nu_kip_val,
     )
 end
 
@@ -229,11 +242,12 @@ function constraint_fns(p::RCBeamNLPProblem, x::Vector{Float64})
 
     util_flexure = p.Mu_kipft / max(φMn_kipft, 1e-6)
 
-    # --- Shear adequacy ---
+    # --- Shear adequacy (signed Nu via Eq. 11-4 / 11-8) ---
+    # ACI 318-11 §11.2.1.2 Eq. (11-4) / §11.2.2.3 Eq. (11-8) —
+    # corpus: aci-318-11, pages 168 / 170. Vc ≥ 0.
     sqrt_fc = sqrt(p.fc_psi)
-    Vc_lb     = 2 * p.λ * sqrt_fc * b * d
-    Vs_max_lb = 8 * sqrt_fc * b * d
-    φVn_max_kip = 0.75 * (Vc_lb + Vs_max_lb) / 1000.0
+    Ag_in2 = b * h
+    φVn_max_kip = _φVn_with_axial(b, d, Ag_in2, Ag_in2, p.fc_psi, p.λ, p.Nu_kip)
 
     util_shear = p.Vu_kip / max(φVn_max_kip, 1e-6)
 
@@ -458,15 +472,24 @@ struct SteelWBeamNLPProblem <: AbstractNLPProblem
 end
 
 """
-    SteelWBeamNLPProblem(Mu, Vu, geometry, opts; Ix_min, Tu, L_span)
+    SteelWBeamNLPProblem(Mu, Vu, geometry, opts; Mux_neg, Ix_min, Tu, L_span)
 
 Construct a steel W-beam NLP problem from factored demands and options.
 Converts Unitful inputs to bare AISC units (kip, kip-ft, inches, ksi).
+
+When `Mux_neg > 0`, sizes against `max(Mu, Mux_neg)` with hogging Chapter F
+geometry (`Lb = L`, `Cb = 1.0`) whenever deck-braced sagging `Lb`/`Cb` would
+otherwise inflate φMn. Mirrors `_nlp_hogging_demands`.
+
+AISC 360-16 §F2.2 — corpus: aisc-360-16, page 103.
+# ENGINEERING JUDGMENT
+`SteelMemberGeometry` has only sagging `Cb`. Hogging uses `Cb = 1.0`.
 """
 function SteelWBeamNLPProblem(
     Mu, Vu,
     geometry::SteelMemberGeometry,
     opts::NLPWOptions;
+    Mux_neg = Mu,
     Ix_min = nothing,
     Ix_min_total = nothing,
     Tu = 0.0,
@@ -476,11 +499,19 @@ function SteelWBeamNLPProblem(
     G_ksi = to_ksi(opts.material.G)
     Fy_ksi = to_ksi(opts.material.Fy)
     
-    Mu_kipft = to_kipft(Mu)
+    Mu_kipft = max(to_kipft(Mu), to_kipft(Mux_neg))
     Vu_kip = to_kip(Vu)
     
     Lb_in = to_inches(geometry.Lb)
     Cb = geometry.Cb
+    # When Mux_neg > 0, size against hogging Chapter F (Lb=L, Cb=1.0).
+    # AISC 360-16 §F2.2 — corpus: aisc-360-16, page 103.
+    # ENGINEERING JUDGMENT: hogging Cb=1.0 — no bottom-flange Cb field.
+    if to_kipft(Mux_neg) > 0 && _hogging_is_stricter(geometry)
+        hog_g = _hogging_chapter_f_geometry(geometry)
+        Lb_in = to_inches(hog_g.Lb)
+        Cb = hog_g.Cb
+    end
     
     Ix_min_in4 = if isnothing(Ix_min)
         0.0

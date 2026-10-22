@@ -69,7 +69,23 @@ function design_footing(::SpreadFooting,
     A_req = uconvert(u"m^2", Pu * SF / qa_kPa)
     B = sqrt(A_req)  # Square footing
     B = max(B, pier_m + 0.3u"m")  # Minimum projection
-    
+
+    # ENGINEERING JUDGMENT: statics-only lift-off detection. Linear edge
+    # pressure q = (P/A)(1 ± 6|e|/B) is computed only to see whether the
+    # resultant lies outside the kern (q_min < 0). There is no IS 456 source
+    # in the corpus for eccentric (lift-off) spread footings, so this path
+    # does not grow the plan and does not size shear or flexure from q_max.
+    # A 1e-12 relative floor on q_min/qu (via `_eccentric_in_kern`) absorbs
+    # Float64 residue at e = B/6; it is not a construction tolerance.
+    if Pu > zero(Pu)
+        q_edge = _eccentric_soil_pressure(Pu, demand.Mux, demand.Muy, B, B)
+        if !_eccentric_in_kern(q_edge)
+            error("IS spread footing path has no corpus-grounded method for " *
+                  "eccentric (lift-off) spread footings (q_min < 0; resultant " *
+                  "outside the kern at B=$B). Use the ACI path or a combined footing.")
+        end
+    end
+
     # Factored bearing pressure (for shear/flexure design)
     q_u = Pu / B^2
     # Bearing utilization: actual factored pressure / (qa, adjusted for SF)

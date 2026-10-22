@@ -10,7 +10,7 @@ AISC 360-16 capacity checks for steel members. Covers compression, flexure, shea
 
 | Feature | AISC Reference | Notes |
 |---------|----------------|-------|
-| **Sway Frame Amplification (B2)** | Appendix 8 | B2 functions exist but are not integrated into `AISCChecker`. Set `geometry.braced=false` to flag sway frames, but amplification must be applied externally. |
+| **Sway Frame Amplification (B2)** | Appendix 8 | DOCUMENTED/SCOPE. B2 functions exist (`compute_B2`) but are not applied in `AISCChecker`. `SteelMemberGeometry.braced` defaults to `true` (no sidesway). When `braced=false`, B2 must be applied externally. |
 | **Connection Design** | Chapter J | No bolt/weld capacity, block shear, prying action, or connection detailing. This package sizes members only. |
 | **Web Crippling / Local Bearing** | J10 | Concentrated load checks at supports and load points not implemented. |
 | **Built-up Sections** | E6 | Modified slenderness for built-up columns not implemented. |

@@ -973,12 +973,23 @@ function WColumnNLPProblem(
     # Convert demands to kip, kip-ft
     Pu_kip = to_kip(demand.Pu_c)
     Mux_kipft = to_kipft(demand.Mux)
+    Mux_neg_kipft = to_kipft(demand.Mux_neg)
     Muy_kipft = to_kipft(demand.Muy)
+
+    # Hogging Chapter F (Lb=L, Cb=1.0) when Mux_neg can govern.
+    # Do not use deck-braced Lb for the hogging face.
+    # AISC 360-16 §F2.2 — corpus: aisc-360-16, page 103.
+    # ENGINEERING JUDGMENT: hogging Cb=1.0 — SteelMemberGeometry has only sagging Cb.
+    geometry_use = geometry
+    if Mux_neg_kipft > 0 && _hogging_is_stricter(geometry)
+        geometry_use = _hogging_chapter_f_geometry(geometry)
+    end
+    Mux_kipft = max(Mux_kipft, Mux_neg_kipft)
     
     # Effective lengths: KL = K*L for each axis
-    L_in = to_inches(geometry.L)
-    KLx_in = geometry.Kx * L_in
-    KLy_in = geometry.Ky * L_in
+    L_in = to_inches(geometry_use.L)
+    KLx_in = geometry_use.Kx * L_in
+    KLy_in = geometry_use.Ky * L_in
     
     # Convert dimension bounds to inches
     d_min = to_inches(opts.min_depth)
@@ -991,7 +1002,7 @@ function WColumnNLPProblem(
     tw_max = to_inches(opts.max_web_thickness)
     
     WColumnNLPProblem(
-        demand, geometry, opts,
+        demand, geometry_use, opts,
         E_ksi, Fy_ksi,
         Pu_kip, Mux_kipft, Muy_kipft,
         KLx_in, KLy_in,

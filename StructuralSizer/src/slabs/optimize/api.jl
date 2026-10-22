@@ -387,6 +387,24 @@ minimizes the chosen objective (volume, weight, cost, or carbon).
 - `n_grid::Int = 20`: Grid points per dimension (total evals ≈ n_grid²)
 - `n_refine::Int = 2`: Refinement passes around best point
 - `verbose::Bool = false`: Print progress
+- `column_opts = nothing`: Column options for the FEA fallback design
+  (`nothing` → `ConcreteColumnOptions()`); unused by the grid search itself
+- `max_iterations::Int = 10`: `size_flat_plate!` iteration limit for the FEA
+  fallback design (same default as the pipeline); unused by the grid search
+
+# DDM Applicability (ACI 318-11 §13.6.1, corpus: aci-318-11, page 252)
+The grid search evaluates DDM moments, so it is run only when DDM is
+permitted for the layout (`check_ddm_applicability`).  Otherwise
+`opts.on_inapplicable` decides:
+- `:fallback` (default) — no grid search; the slab is designed by the
+  `size_flat_plate!` pipeline with `FEA()` (ACI 318-11 §13.5.1 general
+  analysis), a `:fallback` trace event is emitted by
+  `resolve_analysis_method`, and the result carries `status = :fea_fallback`
+  (`:infeasible` if that design did not converge), `fea_design` (the full
+  pipeline tuple) and the fallback record below.  `h` is the pipeline's final
+  thickness and `c` the largest supporting-column dimension it designed;
+  `bar_size`, `eval_result` and `objective_value` (`NaN`) do not apply.
+- `:error` — the `DDMApplicabilityError` is thrown.
 
 # Returns
 Named tuple with:
@@ -394,9 +412,12 @@ Named tuple with:
 - `c::Length`: Optimal column dimension
 - `bar_size::Int`: Best bar designation (#4–#8)
 - `objective_value::Float64`: Final objective score
-- `status::Symbol`: `:success` or `:infeasible`
+- `status::Symbol`: `:success`, `:infeasible` or `:fea_fallback`
 - `eval_result`: Full evaluation NamedTuple (moments, deflection, rebar)
 - `n_evals::Int`: Total grid evaluations performed
+- `fea_design`: The FEA pipeline result on fallback, else `nothing`
+- `method_requested`, `method_used`, `method_fallback_reasons`: as for
+  `size_flat_plate!` (`method_requested` is always `DDM()`, the NLP's model)
 
 # Example
 ```julia
@@ -416,6 +437,8 @@ function size_flat_plate_optimized(
     n_grid::Int                    = 20,
     n_refine::Int                  = 2,
     verbose::Bool                  = false,
+    column_opts                    = nothing,
+    max_iterations::Int            = 10,
     tc::Union{Nothing, TraceCollector} = nothing,
 )
     StructuralSizer.emit!(tc, :slab, "size_flat_plate_optimized", "", :enter;
@@ -432,6 +455,20 @@ function size_flat_plate_optimized(
         error("No supporting columns found for slab.")
     end
 
+    # ── DDM applicability (ACI 318-11 §13.6.1): the grid search is DDM ──
+    requested = DDM()
+    method_used, fallback_reasons = resolve_analysis_method(
+        requested, struc, slab, columns, opts.on_inapplicable;
+        ρ_concrete=opts.material.concrete.ρ, verbose=verbose, tc=tc,
+        caller="size_flat_plate_optimized")
+    record = (method_requested = requested, method_used = method_used,
+              method_fallback_reasons = fallback_reasons)
+    if method_used !== requested
+        return _optimized_fea_fallback(struc, slab, opts, record;
+                                       column_opts=column_opts, max_iterations=max_iterations,
+                                       verbose=verbose, tc=tc)
+    end
+
     # ── Build NLP problem ──
     problem = FlatPlateNLPProblem(
         struc, slab, columns, opts;
@@ -439,6 +476,7 @@ function size_flat_plate_optimized(
         c_min     = c_min,
         c_max     = c_max,
         bar_sizes = bar_sizes,
+        tc        = tc,
     )
 
     if verbose
@@ -447,14 +485,18 @@ function size_flat_plate_optimized(
     end
 
     # ── Run grid search ──
-    opt = optimize_continuous(
-        problem;
-        objective = opts.objective,
-        solver    = :grid,
-        n_grid    = n_grid,
-        n_refine  = n_refine,
-        verbose   = verbose,
-    )
+    # Eq. (13-7) maps are checked once for the whole sweep; `struc` must not
+    # be mutated while it runs (`_nlp_frozen_sweep`).
+    opt = _nlp_frozen_sweep(problem) do
+        optimize_continuous(
+            problem;
+            objective = opts.objective,
+            solver    = :grid,
+            n_grid    = n_grid,
+            n_refine  = n_refine,
+            verbose   = verbose,
+        )
+    end
 
     # ── Interpret result ──
     if opt.status == :infeasible || isnothing(opt.eval_result)
@@ -463,7 +505,7 @@ function size_flat_plate_optimized(
         end
         StructuralSizer.emit!(tc, :slab, "size_flat_plate_optimized", "", :failure;
                               status=string(opt.status),
-                              n_evals=Int(opt.n_evals))
+                              n_evals=Int(opt.iterations))
         return (
             h              = nothing,
             c              = nothing,
@@ -471,7 +513,9 @@ function size_flat_plate_optimized(
             objective_value = Inf,
             status         = :infeasible,
             eval_result    = nothing,
-            n_evals        = opt.n_evals,
+            n_evals        = opt.iterations,
+            fea_design     = nothing,
+            record...,
         )
     end
 
@@ -484,7 +528,7 @@ function size_flat_plate_optimized(
 
     StructuralSizer.emit!(tc, :slab, "size_flat_plate_optimized", "", :exit;
                           status=string(opt.status),
-                          n_evals=Int(opt.n_evals),
+                          n_evals=Int(opt.iterations),
                           objective_value=Float64(opt.objective_value),
                           h_in=Float64(ustrip(u"inch", h_opt)),
                           c_in=Float64(ustrip(u"inch", c_opt)),
@@ -497,6 +541,61 @@ function size_flat_plate_optimized(
         objective_value = opt.objective_value,
         status         = opt.status,
         eval_result    = opt.eval_result,
-        n_evals        = opt.n_evals,
+        n_evals        = opt.iterations,
+        fea_design     = nothing,
+        record...,
+    )
+end
+
+"""
+    _optimized_fea_fallback(struc, slab, opts, record; column_opts, max_iterations, verbose, tc) -> NamedTuple
+
+FEA hand-off of `size_flat_plate_optimized` when DDM is not permitted for
+the layout and `opts.on_inapplicable == :fallback`.  Runs the
+`size_flat_plate!` pipeline with `method = FEA()` (and the caller's
+`max_iterations`) and wraps its result in the
+optimizer's return shape: `h` = final thickness, `c` = largest designed
+supporting-column dimension, `status = :fea_fallback` (`:infeasible` when the
+pipeline did not converge), `fea_design` = the pipeline tuple, and `record`
+(`method_requested`, `method_used`, `method_fallback_reasons`) from the
+applicability check.  Emits a `:decision` (`outcome = "fea_fallback"`) and,
+on convergence, an `:exit` event; a non-converged design emits `:failure`.
+"""
+function _optimized_fea_fallback(struc, slab, opts::FlatPlateOptions, record;
+                                 column_opts = nothing, max_iterations::Int = 10,
+                                 verbose::Bool = false,
+                                 tc::Union{Nothing, TraceCollector} = nothing)
+    StructuralSizer.emit!(tc, :slab, "size_flat_plate_optimized", "", :decision;
+                          outcome="fea_fallback",
+                          method_requested=method_name(record.method_requested),
+                          method_used=method_name(record.method_used),
+                          n_violations=length(record.method_fallback_reasons))
+    col_opts = isnothing(column_opts) ? ConcreteColumnOptions() : column_opts
+    design = size_flat_plate!(struc, slab, col_opts;
+                              method=record.method_used, opts=opts,
+                              max_iterations=max_iterations, verbose=verbose, tc=tc)
+    converged = design.converged && !isnothing(design.slab_result)
+    columns = find_supporting_columns(struc, Set(slab.cell_indices))
+    c_max = converged ? maximum(max(col.c1, col.c2) for col in columns) : nothing
+    if converged
+        StructuralSizer.emit!(tc, :slab, "size_flat_plate_optimized", "", :exit;
+                              status="fea_fallback",
+                              h_in=Float64(ustrip(u"inch", design.h_final)),
+                              c_in=Float64(ustrip(u"inch", c_max)))
+    else
+        StructuralSizer.emit!(tc, :slab, "size_flat_plate_optimized", "", :failure;
+                              reason="fea_fallback_not_converged",
+                              failing_check=string(design.failing_check))
+    end
+    return (
+        h               = converged ? design.h_final : nothing,
+        c               = c_max,
+        bar_size        = nothing,
+        objective_value = NaN,
+        status          = converged ? :fea_fallback : :infeasible,
+        eval_result     = nothing,
+        n_evals         = 0,
+        fea_design      = design,
+        record...,
     )
 end

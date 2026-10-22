@@ -121,6 +121,28 @@ function _strip_c_across_along(c1, c2, strip_axis::Symbol)
     throw(ArgumentError("strip_axis must be :x or :y; got :$strip_axis"))
 end
 
+"""
+    _strip_tensile_As(demands, ϕb, fy) → As
+
+Total tensile interface steel for columns with `Pu < 0`:
+
+    As = Σ |Pu| / (ϕb · fy)
+
+ACI 318-11 §15.8.1.2(b) (corpus: aci-318-11, page 275). An empty demand
+list returns zero area. Compression-only demands also return zero.
+"""
+function _strip_tensile_As(demands, ϕb, fy)
+    As = 0.0u"inch^2"
+    isempty(demands) && return As
+    zP = zero(first(demands).Pu)
+    for dem in demands
+        if dem.Pu < zP
+            As += abs(dem.Pu) / (ϕb * fy)
+        end
+    end
+    return As
+end
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Public API
 # ─────────────────────────────────────────────────────────────────────────────
@@ -187,6 +209,7 @@ function design_footing(::StripFooting,
     db_t   = bar_diameter(opts.bar_size_trans)
     ϕf     = opts.ϕ_flexure
     ϕv     = opts.ϕ_shear
+    ϕb     = opts.ϕ_bearing
     w_incr = opts.width_increment
 
     # Per-column dimensions from demands (c1, c2, shape).
@@ -198,6 +221,16 @@ function design_footing(::StripFooting,
     Ps_vec = [d.Ps for d in demands]
     Pu_total = sum(Pu_vec)
     Ps_total = sum(Ps_vec)
+
+    # ACI 318-11 §15.8.1.2(b) (corpus: aci-318-11, page 275): reinforcement,
+    # dowels, or mechanical connectors shall transfer any computed tensile
+    # force across the interface.  Size As = |Pu|/(ϕ_bearing·fy) the same
+    # way compression dowels use ϕBn and fy; design it into the bar
+    # schedule / ld / V_steel — do not leave it as a log-only field.
+    As_tensile_tot = _strip_tensile_As(demands, ϕb, fy)
+    ld_tensile = As_tensile_tot > zero(As_tensile_tot) ?
+        _development_length_footing(opts.bar_size_long, fc, fy, λ, db_l) :
+        0.0u"inch"
 
     # Load resultant of signed service loads (negative = tension). Do not zero
     # tension columns: that drops the couple and parks x_bar on the
@@ -262,6 +295,13 @@ function design_footing(::StripFooting,
             # (corpus: aci-318-11, page 37).  Single layer ⇒ d = h − cover − db/2.
             d = h - cover - db_l / 2
             d < 4.0u"inch" && (h += h_incr; continue)
+
+            # ACI 318-11 §12.2.1 (corpus: aci-318-11, page 214): ld ≥ 12 in.
+            # Tensile interface dowels (15.8.1.2(b), page 275) embed into the
+            # footing; require h − cover ≥ ld before accepting this thickness.
+            if As_tensile_tot > zero(As_tensile_tot) && opts.check_development
+                h - cover < ld_tensile && (h += h_incr; continue)
+            end
 
             # --- Two-way (punching) at each column ---
             all_punch_ok = true
@@ -401,22 +441,30 @@ function design_footing(::StripFooting,
     # =====================================================================
     # Step 7: Bearing & Dowels at Each Column (ACI 22.8)
     # =====================================================================
-    As_tensile_tot = 0.0u"inch^2"
+    # As_tensile_tot was computed once in Step 1 (`_strip_tensile_As`).
+    n_tensile = 0
     sqA_gov = 1.0
     Bn_gov = 0.0u"N"
     have_brg = false
+    if As_tensile_tot > zero(As_tensile_tot)
+        Ab_l_sched = bar_area(opts.bar_size_long)
+        n_tensile = max(ceil(Int, As_tensile_tot / Ab_l_sched), 1)
+        if opts.check_development
+            avail_dowel = h - cover
+            ld_tensile > avail_dowel && error(
+                "Strip tensile interface steel (ACI 318-11 §15.8.1.2(b), " *
+                "corpus: aci-318-11, page 275) ld=$ld_tensile > embedment " *
+                "h−cover=$avail_dowel (ACI 318-11 §12.2.1, page 214).")
+        end
+    end
     if opts.check_bearing
         fc_col_val = something(opts.fc_col, fc)
-        ϕb = opts.ϕ_bearing
+        zP = zero(eltype(Pu_vec))
         for (j, dem) in enumerate(demands)
-            if dem.Pu < zero(dem.Pu)
-                # ACI 318-11 §15.8.1.2(b) — any computed tensile force across
-                # the interface shall be transferred by reinforcement, dowels,
-                # or mechanical connectors (corpus: aci-318-11, page 275).
-                # Not a concrete bearing (compression) demand.
-                As_tensile = abs(dem.Pu) / (ϕb * fy)
-                As_tensile_tot += As_tensile
-                @info "Strip col #$j: tensile interface (ACI 318-11 §15.8.1.2(b)), As_dowels = $As_tensile"
+            if dem.Pu < zP
+                # Tensile Pu is not a concrete bearing (compression) demand;
+                # As_tensile is already in the bar schedule above.
+                @info "Strip col #$j: tensile interface (ACI 318-11 §15.8.1.2(b)), As_dowels = $(abs(dem.Pu) / (ϕb * fy))"
                 continue
             end
             # ACI 318-11 §10.14.1 / §15.8.1.1 (corpus: aci-318-11, pages 162,
@@ -525,7 +573,8 @@ function design_footing(::StripFooting,
 
     V_steel = uconvert(u"m^3",
         (n_top + n_bot) * Ab_l * bar_len_long +
-        (N * n_tran + n_tran_inter) * Ab_t * bar_len_trans)
+        (N * n_tran + n_tran_inter) * Ab_t * bar_len_trans +
+        n_tensile * Ab_l * max(h - cover, zero(h)))
 
     result = StripFootingResult{typeof(uconvert(u"m", B)),
                               typeof(As_bot_m2),

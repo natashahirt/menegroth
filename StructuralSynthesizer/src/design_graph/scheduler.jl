@@ -45,7 +45,10 @@ node's post-state when it stays clean.
 struct NodeMemo
     input_hash::String
     output_hash::String
-    state::BuildingStructure
+    # `:whole` / `:shared` store a whole-struc snapshot. `:composable` stores a
+    # `SlabNodeSnapshot` for fine per-slab nodes (compact declared outputs) and a
+    # whole-struc snapshot for every other node.
+    state::Union{BuildingStructure, SlabNodeSnapshot}
 end
 
 # DesignParameters fields consumed by `prepare!` (initialize! / estimate columns
@@ -120,11 +123,14 @@ mutable struct IncrementalEngine
     # of these snapshots (it lives only on the live `struc.asap_model`).
     warm_memo::Dict{NodeKey, NodeWarmState}
     # P0-2 Step B memo-shrink mode. `:whole` (default) captures an independent
-    # whole-struc snapshot per node — byte-identical across a slab level but
-    # stored once per node. `:shared` captures ONE post-level snapshot and shares
-    # it by reference across the level's co-recomputed nodes (safe: the snapshot
-    # is immutable and only ever `deepcopy`ed on restore), collapsing an N-slab
-    # level's memo from N whole-struc copies to 1 with byte-identical results.
+    # whole-struc snapshot per node. `:shared` captures ONE post-level snapshot
+    # and shares it by reference across the level's co-recomputed nodes (the
+    # snapshot is immutable and only ever `deepcopy`ed on restore), collapsing an
+    # N-slab level's memo from N whole-struc copies to 1 with byte-identical
+    # results. `:composable` stores a `SlabNodeSnapshot` per fine slab node and
+    # rebuilds a clean slab level from the baseline + overlay + one `sync_asap!`
+    # (drops the solved Asap model from the slab memo; exact-first gated, not
+    # the default).
     snapshot_mode::Symbol
 end
 
@@ -168,7 +174,7 @@ function engine_base_hash(struc::BuildingStructure, params::DesignParameters)
 end
 
 """Valid [`IncrementalEngine`](@ref) memo-shrink modes (P0-2 Step B)."""
-const SNAPSHOT_MODES = (:whole, :shared)
+const SNAPSHOT_MODES = (:whole, :shared, :composable)
 
 """
     _default_snapshot_mode() -> Symbol
@@ -331,6 +337,30 @@ function _warm_shared_col_cache!(engine::IncrementalEngine, params::DesignParame
     return StructuralSizer._precompute_flat_plate_col_cache(_get_column_opts(params))
 end
 
+"""
+    _realize_pending(engine, pending_rep, pending_keys, params) -> BuildingStructure
+
+Materialize a deferred all-clean post-state as an independent working structure.
+
+`pending_rep isa BuildingStructure` (the `:whole` / `:shared` representative, or
+any non-slab node) is `deepcopy`ed via [`restore_node_state`](@ref). The
+`:composable` sentinel `:slab_snapshots` instead copies the prepared baseline,
+overlays every key in `pending_keys` ([`apply_slab_node_snapshot!`](@ref)), and
+flushes one `sync_asap!`. Slab nodes are edgeless roots, so the baseline is
+their predecessor — there is no earlier level to preserve.
+"""
+function _realize_pending(engine::IncrementalEngine, pending_rep, pending_keys, params::DesignParameters)
+    if pending_rep === :slab_snapshots
+        dst = restore_node_state(engine.baseline)
+        for key in pending_keys
+            apply_slab_node_snapshot!(dst, engine.memo[key].state)
+        end
+        sync_asap!(dst; params = params)
+        return dst
+    end
+    return restore_node_state(pending_rep)
+end
+
 # -----------------------------------------------------------------------------
 # The scheduler.
 # -----------------------------------------------------------------------------
@@ -445,6 +475,7 @@ function run_target!(engine::IncrementalEngine, params::DesignParameters;
     # N whole-`BuildingStructure` deepcopies to a single copy, with no change to
     # the final struc, memo, or `pass_output`.
     pending_rep = nothing
+    pending_keys = NodeKey[]
 
     # Walk the graph in dependency LEVELS (Kahn waves), restricted to `target`'s
     # transitive-dependency closure. A level may now hold MULTIPLE fine per-slab
@@ -512,7 +543,16 @@ function run_target!(engine::IncrementalEngine, params::DesignParameters;
             #    this branch populates `pass_output` from the memo, never from the
             #    struc. So we record the pending representative WITHOUT a deepcopy and
             #    materialize it lazily, once, when a consumer actually needs it.
-            pending_rep = engine.memo[first(level_keys)].state
+            # `:composable` slab levels have no single whole-struc representative.
+            # Record the keys; `_realize_pending` rebuilds from the baseline.
+            if engine.snapshot_mode === :composable &&
+               all(k -> engine.memo[k].state isa SlabNodeSnapshot, level_keys)
+                pending_rep = :slab_snapshots
+                pending_keys = copy(level_keys)
+            else
+                pending_rep = engine.memo[first(level_keys)].state
+                empty!(pending_keys)
+            end
             for key in level_keys
                 pass_output[key] = engine.memo[key].output_hash
                 push!(restored, key)
@@ -526,8 +566,9 @@ function run_target!(engine::IncrementalEngine, params::DesignParameters;
         # mutations below (and the tail) can never write through into the memo
         # snapshot `pending_rep` references. [P0-2 Step A]
         if pending_rep !== nothing
-            engine.struc = restore_node_state(pending_rep)
+            engine.struc = _realize_pending(engine, pending_rep, pending_keys, params)
             pending_rep  = nothing
+            empty!(pending_keys)
         end
 
         # 3. MIXED / ALL-DIRTY.
@@ -555,11 +596,14 @@ function run_target!(engine::IncrementalEngine, params::DesignParameters;
         #     restore; a clean non-slab node can only appear in a singleton level,
         #     handled by the all-clean branch above, so this loop sees slab nodes).
         for key in clean_keys
+            st = engine.memo[key].state
             sidx = slab_node_index(key)
-            if sidx === nothing
-                engine.struc = restore_node_state(engine.memo[key].state)
+            if st isa SlabNodeSnapshot
+                apply_slab_node_snapshot!(engine.struc, st)
+            elseif sidx === nothing
+                engine.struc = restore_node_state(st)
             else
-                restore_slab_node_writes!(engine.struc, engine.memo[key].state, sidx,
+                restore_slab_node_writes!(engine.struc, st, sidx,
                                           _slab_supporting_columns(engine.struc, sidx))
             end
             pass_output[key] = engine.memo[key].output_hash
@@ -586,7 +630,17 @@ function run_target!(engine::IncrementalEngine, params::DesignParameters;
         for key in dirty_keys
             node = get_node(engine.graph, key)
             oh = output_hash(node, engine.struc)
-            state = shared_state === nothing ? capture_node_state(engine.struc) : shared_state
+            # `:composable` keeps only the declared per-slab outputs for fine slab
+            # nodes (captured post-sync, so column sizes are the level finals).
+            # Every other node — and `:whole` / `:shared` — keeps a whole-struc
+            # snapshot. `:shared` reuses one object across the level.
+            state = if engine.snapshot_mode === :composable && is_slab_node_key(key)
+                capture_slab_node_snapshot(engine.struc, slab_node_index(key))
+            elseif shared_state !== nothing
+                shared_state
+            else
+                capture_node_state(engine.struc)
+            end
             engine.memo[key] = NodeMemo(node_ih[key], oh, state)
             if warm && is_slab_node_key(key)
                 engine.warm_memo[key] = NodeWarmState(ctx === nothing ? nothing : ctx.col_cache)
@@ -602,8 +656,9 @@ function run_target!(engine::IncrementalEngine, params::DesignParameters;
     # mutates `engine.struc`, so materialize the pending post-state once here, as a
     # true independent copy (never an alias into the memo). [P0-2 Step A]
     if pending_rep !== nothing
-        engine.struc = restore_node_state(pending_rep)
+        engine.struc = _realize_pending(engine, pending_rep, pending_keys, params)
         pending_rep  = nothing
+        empty!(pending_keys)
     end
 
     engine._recomputed = recomputed

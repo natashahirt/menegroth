@@ -320,6 +320,123 @@ function restore_slab_node_writes!(dst::BuildingStructure, src::BuildingStructur
     return dst
 end
 
+# =============================================================================
+# Compact per-slab memo (P0-2 Step B, `:composable`)
+# =============================================================================
+#
+# A fine per-slab node's DECLARED outputs are exactly the fields
+# `restore_slab_node_writes!` overlays (slab result/details/volumes/drop panel,
+# supported-cell loads, max-merged supporting columns). `:composable` stores
+# those — deep-copied, so the memo is never aliased by later in-place sizing —
+# instead of a whole-`BuildingStructure` (and its solved Asap model) per slab
+# node. The scheduler rebuilds a clean slab level by overlaying every node's
+# snapshot onto a copy of the prepared baseline and flushing ONE `sync_asap!`,
+# which is the same barrier the level ran after sizing (slab nodes never read
+# `el.forces`; see `build_design_graph`). Byte-identity of that re-solve is NOT
+# guaranteed here — it is gated by the exact-first incremental runner, and a
+# divergent mode must not become the default.
+
+"""Column-shaped carrier so [`_adopt_larger_column!`](@ref) can max-merge a
+compact snapshot onto a live column. Fields mirror the ones that helper reads."""
+struct _SnapColumnBase
+    section
+    volumes
+end
+
+struct _SnapColumn
+    c1
+    c2
+    shape
+    base::_SnapColumnBase
+end
+
+"""
+    SlabNodeSnapshot
+
+Deep-copied declared outputs of one fine per-slab node, captured AFTER the
+level's barrier `sync_asap!` (so supporting-column sizes are the post-level
+finals, not an intermediate growth step).
+"""
+struct SlabNodeSnapshot
+    slab_idx::Int
+    result
+    design_details
+    volumes
+    drop_panel
+    has_design_details::Bool
+    cell_indices::Vector{Int}
+    cell_self_weights::Vector
+    cell_live_loads::Vector
+    columns::Vector{Tuple{Int, _SnapColumn}}
+end
+
+"""
+    capture_slab_node_snapshot(struc, slab_idx) -> SlabNodeSnapshot
+
+Capture slab `slab_idx`'s declared outputs from a post-sync `struc`. Every
+stored value is a `deepcopy` (sections included) so later mutation of the live
+structure cannot write through into the memo.
+"""
+function capture_slab_node_snapshot(struc::BuildingStructure, slab_idx::Int)
+    slab = struc.slabs[slab_idx]
+    has_dd = hasproperty(slab, :design_details)
+    cells = Int[]
+    self_w = Any[]
+    live = Any[]
+    for ci in slab.cell_indices
+        (ci >= 1 && ci <= length(struc.cells)) || continue
+        push!(cells, ci)
+        push!(self_w, deepcopy(struc.cells[ci].self_weight))
+        push!(live, deepcopy(struc.cells[ci].live_load))
+    end
+    cols = Tuple{Int, _SnapColumn}[]
+    for ci in _slab_supporting_columns(struc, slab_idx)
+        (ci >= 1 && ci <= length(struc.columns)) || continue
+        col = struc.columns[ci]
+        push!(cols, (ci, _SnapColumn(
+            deepcopy(col.c1), deepcopy(col.c2), deepcopy(col.shape),
+            _SnapColumnBase(deepcopy(col.base.section), deepcopy(col.base.volumes)),
+        )))
+    end
+    return SlabNodeSnapshot(
+        slab_idx,
+        deepcopy(slab.result),
+        has_dd ? deepcopy(slab.design_details) : nothing,
+        deepcopy(slab.volumes),
+        deepcopy(slab.drop_panel),
+        has_dd,
+        cells, self_w, live, cols,
+    )
+end
+
+"""
+    apply_slab_node_snapshot!(dst, snap) -> dst
+
+Overlay [`SlabNodeSnapshot`](@ref) onto `dst` using the same rules as
+[`restore_slab_node_writes!`](@ref): plain copy for slab-owned fields, max-merge
+for shared columns. Does NOT touch `dst.asap_model` — the caller reconciles
+that with one barrier `sync_asap!` after every clean slab snapshot in the level
+has been applied.
+"""
+function apply_slab_node_snapshot!(dst::BuildingStructure, snap::SlabNodeSnapshot)
+    d_slab = dst.slabs[snap.slab_idx]
+    d_slab.result = deepcopy(snap.result)
+    d_slab.volumes = deepcopy(snap.volumes)
+    d_slab.drop_panel = deepcopy(snap.drop_panel)
+    snap.has_design_details && hasproperty(d_slab, :design_details) &&
+        (d_slab.design_details = deepcopy(snap.design_details))
+    for (k, ci) in enumerate(snap.cell_indices)
+        (ci >= 1 && ci <= length(dst.cells)) || continue
+        dst.cells[ci].self_weight = deepcopy(snap.cell_self_weights[k])
+        dst.cells[ci].live_load   = deepcopy(snap.cell_live_loads[k])
+    end
+    for (ci, scol) in snap.columns
+        (ci >= 1 && ci <= length(dst.columns)) || continue
+        _adopt_larger_column!(dst.columns[ci], scol)
+    end
+    return dst
+end
+
 """Longitudinal steel area of an RC column section (`RCColumnSection` /
 `RCCircularSection` both expose `As_total`), or `nothing` when the section does
 not report one. Used ONLY as a dimensional-TIE non-downgrade proxy — see

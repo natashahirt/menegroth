@@ -451,8 +451,19 @@ end
 
 @testset "Corner punching — pipeline / RuleOfThumb pass Muy" begin
     if !HAS_STRUCTURAL_SYNTHESIZER
-        @info "Skipping production pipeline oracle — StructuralSynthesizer not available."
-        @test true
+        # LOUD SKIP (safety-critical oracle).  This testset is the only coverage
+        # of the *live production* flat-plate pipeline for biaxial corner
+        # punching (ACI 318-11 §11.11.7.1).  A Sizer-only CI run cannot build
+        # the test structure (it needs StructuralSynthesizer), but the skip must
+        # never be mistaken for a pass — a silently-skipped safety oracle is
+        # exactly how the ~40 % corner-punching understatement stayed hidden.
+        # Emit a visible @warn (not @info) and record the oracle as
+        # @test_broken so the suite summary shows a non-passing result.
+        @warn "SKIPPED SAFETY ORACLE: 'Corner punching — pipeline / RuleOfThumb " *
+              "pass Muy' requires StructuralSynthesizer, which is unavailable. " *
+              "Biaxial corner punching (ACI 318-11 §11.11.7.1) is NOT verified " *
+              "in this run — do not read the skip as a pass."
+        @test_broken false
     else
         skel = gen_medium_office(20.0u"ft", 30.0u"ft", 10.0u"ft", 1, 1, 1)
         struc = BuildingStructure(skel)

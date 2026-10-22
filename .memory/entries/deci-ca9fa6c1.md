@@ -7,12 +7,12 @@ title: 'Steel tower reference set: use the documents on hand'
 node_label: Tower reference basis
 tags: aisc-360-22,aisc-341-16,sdi,asce-7-22,corpus,skyscraper
 status: active
-open_threads: 0
+open_threads: 2
 success: 'null'
 files: ''
 session_id: sess-78933dbd
 created_at: '2026-10-22T00:28:19.413792+00:00'
-updated_at: '2026-10-22T00:28:19.413792+00:00'
+updated_at: '2026-10-22T01:23:32.785799+00:00'
 has_child_rationale: 'User constraint: the PDFs in corpus/sources/unsorted are the
   best available set.'
 ---

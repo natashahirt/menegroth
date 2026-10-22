@@ -1,0 +1,225 @@
+---
+description: How to build an experience substrate over a simulator or parametric study — wire the save path into the run ledger (`angelo ledger record` / `dataset(action="register_run")`), declare param/metric column roles, query accumulated runs with the `study` verbs, and run consolidation sessions that distill findings into scoped patterns. Consult when the project has a simulator, sweep, or optimization loop whose results should accumulate into agent-navigable experience, when the user mentions registering runs or a run ledger, or when the memory inbox surfaces an `unconsolidated_findings` or `contradicted_pattern` item.
+alwaysApply: false
+---
+
+# Experience Substrate: run ledger, study verbs, consolidation
+
+This rule tells agents how to turn a project's simulator into accumulated,
+queryable experience. The problem it solves: a parametric design space is far
+too large to brute-force, but every run you register teaches the substrate a
+little more about the marginal impact of each toggle — *if* the runs land in a
+shared vocabulary, stay machine-checkably pinned, and get periodically distilled
+into scoped patterns. The knowledge ladder has three graded rungs:
+
+1. **finding** — one registered run (a `run-ledger` dataset note + a git-pinned
+   memory entry). Cheap, recorded inline at execution time.
+2. **pattern** — a data-grounded ZK claim distilled from many runs, with an
+   explicit applicability scope. NEVER written inline; written in dedicated
+   consolidation sessions.
+3. **principle** — a pattern promoted to a `requirement`/spine note with an
+   `applies_when` predicate, once it holds across studies with a stable
+   mechanism.
+
+Provenance is never optional: every rung must be traceable to the pinned rows
+and code SHA it came from.
+
+## Wiring a simulator into the run ledger (one-time, per project)
+
+Add ONE call to the simulator's save path, at the point where a sweep's result
+file (CSV/JSON/parquet) has just been written:
+
+- **Non-Python simulators** (Julia, Fortran, shell pipelines) shell out to the
+  CLI:
+
+  ```bash
+  angelo ledger record results/sweep_240811.csv \
+      --graph runs --study flat_plate_methods \
+      --params span_m,depth_m,method --metrics peak_stress_mpa,mass_kg \
+      --context load_case --code-files studies/flat_plate/sweep.jl \
+      --command "julia studies/flat_plate/sweep.jl"
+  ```
+
+- **From chat / Python**, call the MCP verb instead:
+  `dataset(action="register_run", graph="runs", path="results/sweep.csv",
+  study="flat_plate_methods", schema=[{name: "span_m", role: "param"}, ...],
+  code_files="studies/flat_plate/sweep.jl")`.
+
+One call does everything: creates the dataset note (tagged `run-ledger` +
+`study:<name>`), pins a content-hash snapshot of the file's CURRENT bytes (so
+the frame stays reproducible even when the next sweep overwrites the file),
+stamps `run_context` (study, command, code SHA), and records a git-pinned
+memory entry. The result file stays where the simulator wrote it.
+
+Create a dedicated box for runs first if none exists
+(`graph(action="create", name="runs", description="run ledger")`). Keep ONE
+box per project for runs unless studies are huge.
+
+### Write result files with LF line endings
+
+That content-hash is a sha256 of the file's RAW BYTES, so the simulator must
+write bytes that survive the trip into git. Python's `csv` module terminates
+rows with `\r\n` by DEFAULT on every platform; git then normalizes committed
+text to LF. The pin ends up describing the pre-commit working copy, which no
+one else ever has:
+
+```python
+csv.writer(fh, lineterminator="\n")   # NOT the default
+```
+
+This fails in the worst possible direction if you skip it. Resolution consults
+the content-addressed cache at `.angelo/zettel/datasets/<hash>.csv` before the
+live file, so the stale bytes keep resolving and verification keeps PASSING on
+the machine that wrote them — while `.angelo/` is gitignored, so every claim
+grounded on those rows hard-fails on a fresh clone. A guarantee that only holds
+where it was authored is worse than none, because it reports success. If you
+inherit such a file, rewrite it with LF, re-run `dataset(action="snapshot")` on
+each note, and re-verify the claims.
+
+Relatedly, when pinning a claim's `dataset_hash`, prefer the canonical
+`table_content_hash` over the raw bytes hash. It is computed from the PARSED
+table, so it ignores byte-level churn (line terminators, trailing newlines)
+while still catching real data drift. It sorts rows and columns before hashing,
+so it is only valid for ORDER-INVARIANT derivations (`mean`, `sum`, `quantile`);
+an order-dependent derivation such as a time series must pin the bytes hash.
+
+### Declaring the role schema (do this carefully — it is the vocabulary)
+
+Every column that matters gets a role:
+
+- `param` — a swept input (the design toggles: span, depth, method, mesh size).
+- `metric` — a measured output (peak stress, mass, CO2, runtime, convergence).
+- `context` — a fixed condition distinguishing regimes (load case, design code,
+  boundary condition).
+
+Roles are what make runs queryable and cross-dataset joins possible: the `study`
+verbs union every `run-ledger` dataset that shares the vocabulary. Keep column
+names STABLE across sweeps of the same study — renaming `span_m` to `span`
+silently splits the ledger. Prefer explicit units in names (`span_m`,
+`peak_stress_mpa`).
+
+### Findings discipline
+
+- One registered run per sweep output — don't batch unrelated sweeps into one
+  file, and don't re-register an unchanged file.
+- When a run motivates a memory entry beyond the automatic one (a surprising
+  result, a failed sweep), record it with `results_json` carrying the headline
+  numbers and their conditions, and `files` pinning the study script — a number
+  without its split/window/criterion reads as unconditional after summarization.
+- Deprecated/superseded runs: discard the memory entry with a reason and leave
+  the dataset note (history is evidence); a WRONG run (bug in the simulator)
+  gets its dataset note deleted so no pattern ever cites it.
+
+## Querying accumulated experience (the `study` verbs)
+
+Before proposing parameters, running new sweeps, or answering "what happens if
+we increase X" — query the ledger first; every answer is recomputed from pinned
+rows and carries the datasets, row counts, and simulator commits it rests on.
+
+**Start with `study(action="studies")`** unless you already know the study name
+and its exact column spellings. A guessed column name returns an empty answer,
+not a correction. The inventory gives you each study's param/metric/context
+vocabulary, run and row counts, the code SHAs behind it, and how much is still
+unconsolidated.
+
+**Then prefer `study(action="advise", context={...})`** for the usual question
+("what should I use here?"). It returns the whole portfolio in one call —
+in-scope patterns, nearest runs, per-param sensitivities with their support
+grades and extrapolation checks, coverage, the gaps worth filling, and a blunt
+`verdict`. Assembling this yourself from four separate calls is where the
+qualifiers get dropped in the retelling.
+
+The individual verbs, when you want one piece:
+
+- `study(action="similar", context={span_m: 30, method: "post_tensioned"})` —
+  nearest registered runs. **Claims come first, and that ordering is the
+  point** (see the guardrail below).
+- `study(action="effect", param="depth_m", metric="peak_stress_mpa",
+  where="method == box_girder", at=2.5)` — local sensitivity from matched
+  pairs. Read `support.grade` before quoting the slope: `weak` means two
+  points or a sign disagreement, not a law. Pass `at` to learn whether the
+  value you intend to act on is inside the swept range at all.
+- `study(action="regimes", by="governing_constraint")` — how the swept space
+  partitions into regimes, with per-regime parameter envelopes.
+- `study(action="coverage")` / `study(action="suggest_runs")` — where the
+  ledger is dense vs empty, and which points to run next.
+
+**Heed the `warnings` block.** Pooling rows across several simulator commits or
+several studies produces a number that may describe neither; the qualifier says
+so. Scope with `study=` or `where=` and compare like with like.
+
+## The recipe-replication guardrail
+
+The classic failure (observed empirically in QMatSuite): an agent asked for a
+new design finds the best prior run and copies its parameters verbatim — even
+when that run is deprecated, out of scope, or from a different regime. The
+substrate now enforces most of this for you, but you must still read what it
+tells you:
+
+- **Prefer scoped patterns over prior winning configs.** `similar`/`advise`
+  return claims FIRST for this reason: a pattern says *why* and *where*
+  something works; a raw neighbor is evidence, not instructions. Only claims
+  citing the runs your query actually reached are returned.
+- **Apply `in_scope` claims; do not borrow from the others.** Every claim comes
+  back labelled `in_scope` / `out_of_scope` / `unknown`, evaluated against your
+  context via its `applies_when` predicate. `unknown` is not a pass — it means
+  the claim declares no machine predicate, or your context omits a parameter it
+  needs, so you must read it before applying it. A pattern applied outside its
+  envelope is a guess wearing a citation.
+- **Deprecated claims are already gone, and that is deliberate.** A superseded
+  or discarded claim never appears in any payload — it is wrong, not a weaker
+  signal to be averaged in. Deprecate the same way: supersede it, don't
+  caveat it.
+- **Give the scope a machine predicate when you write a claim.** An
+  `applies_when` with only a prose `condition` can never be checked for anyone;
+  add `predicate: {span_m: "<= 25"}` so the substrate can answer applicability
+  instead of hoping the next reader eyeballs it.
+
+## Consolidation sessions (never synthesize inline)
+
+Findings get recorded inline; patterns never do — distillation needs its own
+session (the execution/reflection split). The memory inbox surfaces the cue: an
+`unconsolidated_findings` item names a study whose registered runs no claim
+cites yet. When you see one (via `inbox()` or the `session(action="pickup")`
+digest):
+
+1. Do NOT interleave synthesis with task execution. Propose a consolidation
+   session (or, when asked to coordinate, a `consolidator` → `insight-reviewer`
+   graph — both are in the coordinator roster when zettelkasten is enabled).
+2. The consolidator surveys the swept space (`study(action="coverage")`),
+   derives candidate regularities with `effect`/`regimes`, and drafts
+   pattern-grade claims: data-grounded (`grounding.method='data'` with the
+   pinned dataset hash), explicitly scoped, attached to their supporting run
+   datasets via `dataset(action="attach", ..., relation="supports")`.
+3. The insight-reviewer recomputes every drafted claim and rules
+   confirmed / deprecated / promoted. The hard rule: **a finding is either
+   completely correct or it is not** — right trend with an overstated scope is
+   deprecated, not caveated. Deprecations are executed as superseding claims
+   (+ memory `invalidates=`), never as softening edits.
+4. Promotion: a pattern that holds across studies with a stable mechanism
+   becomes a principle — a `requirement` note with an `applies_when` predicate,
+   placed on the project's spine.
+
+A null result is a valid session outcome: a study whose rows support no
+regularity gets no claim, and saying so is information.
+
+## When the ledger falsifies a pattern
+
+A pattern written six months ago is still served to every agent that asks,
+regardless of what has been registered since. The inbox watches for that: a
+`contradicted_pattern` item means a consolidated claim's grounded value no
+longer reproduces on later runs **inside its own declared scope** (only claims
+with a data grounding and a machine predicate can be checked this way — another
+reason to write both).
+
+It outranks everything else in the inbox because it is not pending work; it is
+a wrong answer currently in circulation. Handle it directly:
+
+1. Read the claim and the contradicting runs named in the item.
+2. Decide which is wrong. A simulator bug means the offending run's dataset note
+   goes (see Findings discipline); a genuine change in behavior means the claim
+   does.
+3. If the claim is wrong, **supersede or narrow it** — a new claim with a
+   `supersedes` link, or a tightened `applies_when` predicate that excludes the
+   regime it fails in. Do NOT append a caveat to the body: caveats do not stop
+   a claim being applied, and the substrate cannot read them.

@@ -8,7 +8,7 @@ title: 'Reduced wall lateral: plate-enclosure guard + skeleton-derived plate geo
 node_label: 'Reduced wall lateral: plate-enclosure guard + skel'
 tags: ''
 status: active
-open_threads: 0
+open_threads: 2
 success: 'null'
 files: StructuralSizer/src/walls/lateral_evaluator.jl@2a0b2c4, StructuralSizer/src/walls/layout_problem.jl@2a0b2c4,
   StructuralSynthesizer/src/walls_bridge.jl@2a0b2c4, StructuralSynthesizer/src/StructuralSynthesizer.jl@2a0b2c4,
@@ -16,7 +16,7 @@ files: StructuralSizer/src/walls/lateral_evaluator.jl@2a0b2c4, StructuralSizer/s
   StructuralSynthesizer/test/runtests.jl@2a0b2c4
 session_id: sess-33aeeb2f
 created_at: '2026-10-22T03:16:55.750318+00:00'
-updated_at: '2026-10-22T03:16:55.750318+00:00'
+updated_at: '2026-10-22T13:27:42.010392+00:00'
 ---
 CONTEXT: the reduced wall tier (ReducedDiaphragmEvaluator) computes exact 4-corner interstory drift + torsion over plate_center ± plan_halfwidth — exact ONLY if that rectangle encloses the drift-relevant points. plate_center/plan_halfwidth were free, independent fields with no cross-check against the walls. crit7 (reproducer scripts/runners/crit7_plate_enclosure_attack.jl) showed an under-covering/mis-framed plate could certify an over-limit layout (true edge drift 1.19*DL, 19% over ASCE 7-22 §12.12.1) as feasible=true. User asked 'aren't WE the ones building the evaluator?' — correct: today only test fixtures construct it (to_wall_line has no production callers); the production bridge is unwritten. User chose geometry_helper_now: fix at construction, not just guard.
 

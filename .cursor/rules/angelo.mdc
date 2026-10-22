@@ -1,0 +1,46 @@
+---
+description: Start here — how to organically use the angelo MCP servers (memory, coordinator, zettelkasten, artifacts) in this repo.
+alwaysApply: true
+---
+
+# Angelo — start here
+
+This repo has the **angelo** framework installed: a set of MCP servers that give
+you persistent memory, multi-agent coordination, and (optionally) a grounded
+zettelkasten. Reach for them deliberately — they are how work persists and
+compounds across sessions.
+
+## The servers
+
+- **memory** — a persistent research tree (`.memory/`) of decisions, checkpoints,
+  experiments, notes, and plans for THIS repo. Search it *before* exploring code;
+  record to it *before* every git commit.
+- **coordinator** — runs multi-agent tasks as a wave-based task graph. Use it when
+  the user asks you to "coordinate", "run the pipeline", or describes an agent pipeline.
+- **zettelkasten** (optional) — a grounded literature/knowledge graph: sources ->
+  notes + claims -> spines, with citations and cross-project synthesis.
+- **memory-artifacts** (optional) — large/regenerable files via DVC + experiment provenance.
+
+**If the memory or coordinator tools are absent from your tool list, treat that as
+a fault, not a configuration choice.** This rule is loaded from the repo, so it
+reaches you whether or not the servers are running — their absence is a symptom
+you are uniquely placed to notice, and the user usually cannot see it at all. Say
+so, and read the `operations` rule ("Servers don't appear in Customize → MCPs")
+before continuing. Never quietly proceed without memory: the session's decisions
+go unrecorded and the next agent inherits nothing.
+
+## First moves in a session
+
+1. Call `session(action="pickup")`, then `recall`, to load prior context.
+2. Before grepping the codebase for a question, `search` memory first.
+3. When unsure how a server works, call its **`overview()`** tool — every server
+   exposes one — for a compact orientation map (purpose + common workflows +
+   tool/action index).
+4. Before any git commit, `record` what happened.
+
+## Where the detail lives
+
+Each server's tools are self-describing: action-dispatch tools advertise their
+valid actions as a schema enum, and every description opens with "Use this when …".
+The always-applied `memory` and `coordinator` protocol rules carry the full
+procedures; consult `operations` for CLI/setup issues.

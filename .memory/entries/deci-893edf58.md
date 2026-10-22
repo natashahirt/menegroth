@@ -7,12 +7,12 @@ title: Launch Phase 1 wall-audit coordinator run (one-graph-per-phase model)
 node_label: launch P1 coordinator
 tags: walls,coordinator,phase1,audit,launch,decision
 status: active
-open_threads: 0
+open_threads: 1
 success: 'null'
 files: ''
 session_id: sess-f764d548
 created_at: '2026-10-21T02:15:30.070961+00:00'
-updated_at: '2026-10-21T02:15:30.070961+00:00'
+updated_at: '2026-10-21T10:30:27.875261+00:00'
 ---
 Approved execution model: the complete-wall-system plan (plan-a2a6128f) runs as ONE coordinator graph PER PHASE (12 runs), never a single mega-graph — safety-critical code with HARD-STOP corpus gates and mandatory equivalence/non-regression gates. Phase boundaries are human/corpus checkpoints, not auto-advanced edges. Full per-phase template + Phase 1 graph recorded in .cursor/plans/complete-wall-system_76ac3f3b.plan.md under 'Coordinator execution model'.
 

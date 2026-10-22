@@ -8,13 +8,13 @@ title: Threaded ACI 318-11 §10.10.4.1 cracking factors (beam_I_factor/column_I_
 node_label: 'I_factor threading: knobs honored'
 tags: aci-318-11,cracking-stiffness,I_factor,concrete,sizing,design-workflow,no-op-parity
 status: active
-open_threads: 0
+open_threads: 3
 success: 'null'
 files: StructuralSynthesizer/src/core/size.jl@2a76281, StructuralSynthesizer/src/design_workflow.jl@2a76281,
   StructuralSynthesizer/src/analyze/members/utils.jl@2a76281, scripts/runners/verify_i_factor_threading.jl@2a76281
 session_id: sess-1de607c4
 created_at: '2026-10-21T23:03:04.529524+00:00'
-updated_at: '2026-10-21T23:03:04.529524+00:00'
+updated_at: '2026-10-21T23:20:01.992730+00:00'
 has_child_rationale: Records the resolved design/implementation outcome of the coordinated
   I_factor threading work
 ---

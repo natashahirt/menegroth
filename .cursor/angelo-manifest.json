@@ -1,11 +1,17 @@
 {
   ".cursor/hooks.json": "6f62e5fe239c777a098cabd520bf9710bcf14981ad6de96630ff8f7fbc21b50f",
+  ".cursor/rules/angelo.mdc": "b80fd96976bba5221a9b4e1fa14c09f937efa6e79aad3c9b4aa895b93f9ede0e",
   ".cursor/rules/coordinator.mdc": "77ea39d3f891377f7e735721a67321baa1a66e6cb4ce2681acfe58bd3e331106",
+  ".cursor/rules/experience.mdc": "546769d170008480aa2155ea38eae1c916fa2ea9d6096b49f58ce534379727ab",
   ".cursor/rules/grounded-extraction.mdc": "48ec63c05ca759d559fcb6285864e15d4fc7478db4b583986c74031213dfc3d0",
   ".cursor/rules/memory.mdc": "43ac9f534b063a69a5d9b193d784f1edb2ce16b15a8c834035e756ad90cee407",
   ".cursor/rules/operations.mdc": "b2c7990e924a2d6f8da04b090573d1a2607f071a3f1e90196bac07bf6cfb6f36",
+  ".cursor/rules/spines.mdc": "0bb33d93fe8e5fa30f86d22722b2bff5271120d355b14a78ef7b0d9da55a73f4",
   ".cursor/rules/stream.mdc": "cb5af9b3c1e24a56e3842faafae53b30ae6dd4fd538865ee136f94dc4cc680b0",
   ".cursor/rules/zettelkasten.mdc": "9af4017e33b1f18985de5d91093289dcda70e1e9298af0a457ba4f80c14a8187",
+  ".cursor/skills-cursor/answering-from-recorded-results/SKILL.md": "8f223b3de408bcb30bd46d54c161aa9cfd27c4d3d03ac9fdbf4a226f9bc504ae",
   ".cursor/skills-cursor/close-branch/SKILL.md": "71233d0d7ea1d1126231badb80dbaffca3513b9fd9438268657b7eb49bcac958",
+  ".cursor/skills-cursor/code-aware-editing/SKILL.md": "1a3e4c116176d9fe756db86d610fb1900af39474ff247d39d389df895ac8dcc7",
+  ".cursor/skills-cursor/onboard-existing-codebase/SKILL.md": "1bac0b54f25ce17a32949631c87c40e03db1966f808b975ba788299b526297c5",
   ".cursor/skills-cursor/onboard-project/SKILL.md": "a53d9f6224d890ba9e7aec45ec2c45b1a077b97351b57f61e21184ff6567abb8"
 }

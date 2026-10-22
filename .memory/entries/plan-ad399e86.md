@@ -7,12 +7,12 @@ title: Framing load-path fidelity + waffle via integrated ribs
 node_label: Framing load-path + waffle ribs
 tags: framing,load-path,fem,tributary,waffle,t-beam,aci-318,non-convex,coordinator
 status: active
-open_threads: 3
+open_threads: 5
 success: 'null'
 files: ''
 session_id: sess-529375ba
 created_at: '2026-07-19T17:17:43.559115+00:00'
-updated_at: '2026-07-19T17:19:18.858697+00:00'
+updated_at: '2026-07-24T06:29:20.089061+00:00'
 ---
 Coordinator run scoping four workstreams that harden the framing load path and then deliver waffle sizing via integrated concrete ribs.
 

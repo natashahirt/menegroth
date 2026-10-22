@@ -7,12 +7,12 @@ title: Direction-complete drift as the layout-stability guarantee (reduced tier)
 node_label: direction-complete stability
 tags: walls,phase1,stability,layout,optimizer,drift,safety,decision
 status: active
-open_threads: 0
+open_threads: 1
 success: 'null'
 files: ''
 session_id: sess-2a77de09
 created_at: '2026-10-21T10:30:27.875261+00:00'
-updated_at: '2026-10-21T10:30:27.875261+00:00'
+updated_at: '2026-10-21T14:27:42.128899+00:00'
 ---
 Critic (crit2) proved a latent SAFETY P0 in the layout optimizer: singular detection is a threshold CLIFF (throws only at scaled rcond<=1e-8), and the drift constraint only catches a weak lateral mode if the applied LOAD excites it. Under a single-direction (X-only) load the orthogonal (Y) translation mode is unexcited, so a near-singular layout (rcond in (1e-8,~1e-7]) is accepted as a feasible optimum (drift 1.7e-4) yet collapses under an equal Y load (drift 3.3e3, ~167000x limit). solve_wall_layout returns optimize_continuous(p) with NO survivor re-validation (layout_problem.jl:333); FEM guard is exact-PD only. Largely PRE-EXISTING (not a Phase 1 regression) and not wired to production, but a real gap. Confirmed the critic's probe drives the real evaluate_lateral WITH accidental_ecc=0.05, so accidental torsion does NOT save it (X-walls' lever arm resists the torsion; nothing excites Y).
 

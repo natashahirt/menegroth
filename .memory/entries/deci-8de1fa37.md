@@ -7,12 +7,12 @@ title: Bound true max-corner interstory drift (ASCE 7-22 12.12.1), actual-CR lev
 node_label: true-corner drift bound
 tags: walls,phase1,stability,drift,torsion,eccentric-cr,asce,safety,decision
 status: active
-open_threads: 0
+open_threads: 1
 success: 'null'
 files: ''
 session_id: sess-5d44ebd3
 created_at: '2026-10-21T15:21:59.303843+00:00'
-updated_at: '2026-10-21T15:21:59.303843+00:00'
+updated_at: '2026-10-21T23:17:12.916842+00:00'
 ---
 crit4 proved a P1 (2 findings, one root cause; reproducer scripts/runners/attack_wall_eigenstructure_gate.jl): the eigenstructure gate certifies STIFFNESS exactly (reviewer confirmed Schur block-diagonal at CR), but the bridge from stiffness floor to the DRIFT LIMIT assumes the center of rigidity sits at the plan center — r_ref=hypot(hx,hy) and _torsion_amplification corners at CR+/-(hx,hy). For a stiffness-ECCENTRIC layout the true CR-to-corner lever is hypot(hx+|xr|,hy+|yr|), up to ~2x larger. Consequences: (P1a) solve_wall_layout returns feasible=TRUE for a layout whose true corner interstory drift is 1.11xDL — because the serviceability bound is placed on CR-TRANSLATION drift (blind to twist) plus a SATURATING torsion ratio capped at 1.5, which by construction permits corner drift up to ~1.5xDL; (P1b) the anti-mechanism torsional floor itself is understated up to 2x for eccentric CR. ASCE 7-22 §12.12.1 bounds the amplified design story drift AT THE LOCATION (the corner, incl torsion) to Delta_a — the code was bounding the WRONG quantity. Fails UNCONSERVATIVELY on exactly the eccentric layouts a torsional gate exists to police. All collapse MECHANISMS are caught (3 prior P0s fixed); this is a drift-limit/serviceability accuracy bug, not a returned mechanism.
 

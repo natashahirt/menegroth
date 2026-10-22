@@ -7,12 +7,12 @@ title: Conservative fail-safe corner-drift lever bound (reduced tier, no plate c
 node_label: fail-safe lever bound
 tags: walls,phase1,stability,drift,torsion,eccentric-cr,fail-safe,conservative,safety,decision
 status: active
-open_threads: 0
+open_threads: 1
 success: 'null'
 files: ''
 session_id: sess-05340f1b
 created_at: '2026-10-21T23:17:12.916842+00:00'
-updated_at: '2026-10-21T23:17:12.916842+00:00'
+updated_at: '2026-10-22T00:08:47.453461+00:00'
 ---
 crit5 proved a P0 (reproducer scripts/runners/crit5_eccentric_core_corner_drift.jl): the max-corner drift anchors the 4 corners to the WALL CENTROID, not the true plate center. ReducedDiaphragmEvaluator (lateral_evaluator.jl:269-273) stores plan_halfwidth (plate SIZE) but NO plate center and NO center of mass — so for an eccentric service core (core clustered at x=-15 on a 40x20 plate, pc=CR=(-15,0), +Y load at CoM) the checked corner box shifts off the plate and the true far corner (20,-10) at 1.51xDL is never evaluated; constraint_fns/solve_wall_layout return feasible=TRUE. Root cause is a DATA-MODEL gap (Phase 3 territory): the reduced tier cannot locate the true occupant corners or the natural CoM->CR eccentricity.
 

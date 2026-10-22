@@ -8,12 +8,12 @@ title: 'Eq. (13-7): evaluate the unbalanced pattern both ways; re-entrant corner
 node_label: 'Eq. (13-7): evaluate the unbalanced pattern both w'
 tags: eq-13-7,ddm,engineering-judgment
 status: active
-open_threads: 0
+open_threads: 1
 success: 'null'
 files: ''
 session_id: sess-fd0b7b43
 created_at: '2026-10-14T19:25:02.380422+00:00'
-updated_at: '2026-10-14T19:25:02.380422+00:00'
+updated_at: '2026-10-14T20:41:59.287166+00:00'
 ---
 ACI 318-11 R13.6.9 (page 258) describes only one pattern: full D + 0.5L on the longer span, D only on the shorter. It does not cover a negative bracket (a heavier or wider shorter span), and ACI does not address re-entrant corners explicitly.
 User decisions:

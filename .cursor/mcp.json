@@ -1,34 +1,28 @@
 {
   "mcpServers": {
     "zettelkasten": {
-      "command": "/Users/tashahirt/.venvs/angelo/bin/angelo-zettelkasten",
+      "command": "/opt/miniconda3/bin/angelo-zettelkasten",
       "env": {
         "ANGELO_WORKSPACE": "${workspaceFolder}",
-        "ZETTELKASTEN_PATH": "${workspaceFolder}/.zettelkasten",
-        "HF_HUB_OFFLINE": "1",
-        "ANGELO_EMBED_SOURCE": "hf"
+        "ZETTELKASTEN_PATH": "${workspaceFolder}/.zettelkasten"
       }
     },
     "coordinator": {
-      "command": "/Users/tashahirt/.venvs/angelo/bin/angelo-coordinator",
+      "command": "/opt/miniconda3/bin/angelo-coordinator",
       "env": {
         "ANGELO_WORKSPACE": "${workspaceFolder}",
-        "ANGELO_ZETTELKASTEN": "1",
-        "HF_HUB_OFFLINE": "1",
-        "ANGELO_EMBED_SOURCE": "hf"
+        "ANGELO_ZETTELKASTEN": "1"
       }
     },
     "memory": {
-      "command": "/Users/tashahirt/.venvs/angelo/bin/angelo-memory",
+      "command": "/opt/miniconda3/bin/angelo-memory",
       "env": {
         "ANGELO_WORKSPACE": "${workspaceFolder}",
-        "MEMORY_FILE_PATH": "${workspaceFolder}/.angelo/memory.kgl",
-        "HF_HUB_OFFLINE": "1",
-        "ANGELO_EMBED_SOURCE": "hf"
+        "MEMORY_FILE_PATH": "${workspaceFolder}/.angelo/memory.kgl"
       }
     },
     "memory-artifacts": {
-      "command": "/Users/tashahirt/.venvs/angelo/bin/angelo-memory-artifacts",
+      "command": "/opt/miniconda3/bin/angelo-memory-artifacts",
       "env": {
         "ANGELO_WORKSPACE": "${workspaceFolder}"
       }

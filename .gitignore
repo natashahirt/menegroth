@@ -57,4 +57,7 @@ grasshopper/Menegroth.GH/bin/
 
 # Claude Code local settings (not shared)
 .claude/settings.local.json
+
+# Local backups written by `angelo update`
+*.angelo-bak
 # <<< angelo <<<

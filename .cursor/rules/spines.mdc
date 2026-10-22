@@ -1,0 +1,420 @@
+---
+description: The spine / lens / matrix data model — how to arrange a zettelkasten corpus as a grid (row axis x typed columns), scout the axes with `spine(action="columns"/"row_values"/"describe")`, author it with `define`, check the routing with `preview` (whose `diagnostics` block explains an empty grid), fill the cells with `material`/`fill`, fix routing with `correct`, materialize it with `promote`, then compare several spines with `schemas`/`matrix` or read their nesting with `nested`. Consult whenever the user wants to organize, arrange, compare, or cross-tabulate a corpus; asks for a matrix, grid, table, spine, lens, or "organize by"; wants rows/columns over notes or tags; wants a cell's prose written or a miscategorized note moved; wants several spines compared side by side or asks why comparable spines didn't group; asks why a cell, column, or row came back empty or why nothing routed; or when you need to know how a note ends up in a particular cell.
+alwaysApply: false
+---
+
+# Spines, Lenses & Matrices — the grid data model
+
+This rule tells agents how to **arrange** a zettelkasten corpus. Creating notes is
+the `zettelkasten` rule's job; reading sources into notes against a rubric is
+`grounded-extraction`'s. This rule covers what happens after: laying a chosen
+structure over notes that already exist, and comparing several such structures.
+
+The whole model is one idea. A corpus has exactly **one semantic base** — the
+notes and their authored links. An arrangement is an **additive re-projection** of
+that base: it never copies notes, never mutates them, and can be switched off or
+swapped. So arranging is cheap and reversible, and you should reach for it freely.
+
+## The three words
+
+They name three points on one lifecycle and are easy to conflate:
+
+| Word | What it is |
+|---|---|
+| **spine definition** | The *intention*: a named, owner-scoped grid — one `row_axis` against ordered typed `columns`. Stored as a JSON file. |
+| **spine** | That intention *materialized*: a real synthesis tree (apex → dimensions → row hubs → member notes) in its own graph. |
+| **matrix** | The *comparison surface*: the grid a definition projects, or the grid several sibling spines fold into. |
+
+## The two states
+
+A definition is always in one of two states, and the difference is the heart of
+the model:
+
+- **`lens`** (a *proposed spine*) — a live, read-only projection. Its grid is
+  derived on demand from the row axis + columns. **Nothing is written to the
+  corpus.** Cheap, disposable, always current: change a note and the next build
+  reflects it.
+- **`spine`** (materialized) — `promote` built a real synthesis graph. Dimension
+  nodes carry synthesized bodies, `spine-member` edges pin membership spine-side,
+  and the tree can be projected as a graph, a draft, or a matrix.
+
+Membership lives on the **spine side** (`dimension --spine-member--> note`), which
+is why the base note stays pristine, two spines can never bleed into each other,
+and teardown is just deleting the spine's graph folder.
+
+## The grid: rows x columns, routed by tags
+
+**Routing is deterministic.** A `schema_tag` column collects every scoped note
+carrying its `ref` as an exact tag. So *tagging the corpus is how you shape the
+grid* — decide which tag family becomes the rows and which becomes the columns,
+tag the notes accordingly, and the cells fill themselves.
+
+### Row axes
+
+`row_axis.kind` picks how the corpus partitions into rows. `include: [...]`
+restricts which row values appear (empty = all).
+
+| `kind` | One row per… | Key fields |
+|---|---|---|
+| `source` | corpus source (the default) | — |
+| `note` | single note | — |
+| `tag` | tag value | `include` |
+| `note_type` | note type | `include` |
+| `group` | emergent entity, per a `strategy` | see below |
+
+`group` strategies:
+
+| `strategy` | Rows come from | Key fields |
+|---|---|---|
+| `field` | a frontmatter value — the general form of `tag`/`note_type` | `ref` names the field: `tag`/`tags`, `type`, `status`, `aliases`, or any scalar/list attribute |
+| `link` | the apex a note connects to (a structural spine) | `relation`, `direction` (`outgoing` default / `incoming`), `apex`, `graph` |
+| `semantic` | an agent partitioning the corpus per an instruction | `instruction` |
+| `spine` | the member spines of a spine-group | `ref` = the schema group id |
+
+`tag` and `group`/`field` with `ref: "tag"` are near-equivalent; prefer plain
+`kind: "tag"` when you just want one row per tag value.
+
+### Columns
+
+A column is `{key, label, type, backing, ref, prompt}`. **`backing` decides how a
+cell fills:**
+
+| `backing` | A cell collects | Materializes a dimension node? |
+|---|---|---|
+| `schema_tag` | every scoped note whose tags contain `ref` (exact match) | yes — the workhorse |
+| `note_type` | every note whose type is `ref` | yes |
+| `ccc_slot` | every note whose type grounds the CCC slot `ref` | yes |
+| `identity` | row metadata (title, type, source) | no |
+| `prompt` | agent-extracted free text from `prompt` | no |
+
+`type` is `identity` / `extractive` / `categorical` / `numeric` / `synthesis` and
+defaults sensibly from `backing`.
+
+**`key` is identity; `ref` is routing.** The dimension node a column materializes
+is keyed on its durable `key`, so relabeling a column re-titles the *same* node
+and keeps its `spine-member` edges. Its dimension **tag** is `ref or key`. A
+`schema_tag` column with no `ref` therefore routes *nothing* while still minting a
+node — `define` rejects that rather than letting it look configured.
+
+## Authoring a grid
+
+`define` writes only the definition (never the corpus), `preview` is read-only,
+and only `promote` materializes.
+
+1. **Tag the corpus.** Every note that should appear needs its row tag and its
+   column tag. Use `note(action="add"/"update")`, or `spine(action="promote",
+   tag_stamp=true)` / `remine(action="apply", tag_stamp=true)` to stamp tags from
+   an already-routed grid.
+2. **Scout the axes before you commit to them** (all read-only, all optional —
+   but they replace guessing at tag names, which is the main way a grid comes back
+   empty):
+   - **`spine(action="columns", doc_type=…)`** — the catalog of column
+     definitions this corpus can support: identity columns, registered extraction
+     schemas, note-type columns, CCC slots. Each candidate is a ready-to-paste
+     column dict. Deterministic, needs no owner. Start here when you don't know
+     what a column can be backed by.
+   - **`spine(action="row_values", project=…, row_axis=…)`** — the row values an
+     axis actually yields, each with its note `count`. Takes the same `row_axis`
+     you would pass to `define`, so a satisfactory result pastes straight across.
+     A `group`+`semantic` axis is the one it cannot answer (partitioning by an
+     instruction is your judgement call, not a lookup) — it says so and asks you
+     to enumerate the groups.
+   - **`spine(action="describe", description="…")`** — drafts a whole definition
+     (`row_axis` + `columns` + candidate themes) from one sentence. A starting
+     point to edit, not an answer: check it with `row_values`/`preview` before
+     `define`. The only action here that needs a model, so the only one that can
+     report itself unavailable — fall back to `columns` + `row_values`.
+3. **`spine(action="define", project=…, title=…, row_axis=…, columns=[…])`** —
+   authors the definition and returns its **`org_id`**, the handle every later
+   action takes. Redefining is safe: it overwrites the authored grid but preserves
+   `state`, `spine_ref`, and the author's `overlay` corrections, so it can never
+   silently demote a materialized spine.
+4. **`spine(action="preview", org_id=…)`** — the grid this definition projects
+   right now, every cell with its routed members, **no LLM and no writes**. This
+   is the step that catches a mismatched tag: an empty cell means no note carries
+   both tags. `prompt` columns read `[GAP]` here by design. When something routed
+   nothing, the payload also carries a **`diagnostics`** block — read it before
+   assuming the corpus is thin (see below).
+5. **`spine(action="promote", org_id=…)`** — materialize. Builds the apex, one
+   dimension node per materializable column, one hub per row, and bulk-attaches
+   members. Then `spine(action="verify")` to audit, and
+   `project(action="set_default_spine")` to make it the project's "Organize by".
+6. **Fill the cells** — routing puts *notes* in a cell; the sentence that makes it
+   read as a comparison is yours to write. See below.
+
+A worked context x slot grid — rows are one tag family, columns another:
+
+```
+spine(action="columns", doc_type="paper")          # what can a column be backed by?
+spine(action="row_values", project="my-project",   # which rows does this axis yield?
+      row_axis={"kind": "tag", "include": ["world", "clock", "book"]})
+spine(action="define", project="my-project", title="Context x slot",
+      row_axis={"kind": "tag", "include": ["world", "clock", "book"]},
+      columns=[{"key": "size", "label": "Size", "backing": "schema_tag", "ref": "size"},
+               {"key": "exit", "label": "Exit", "backing": "schema_tag", "ref": "exit"}])
+spine(action="preview", project="my-project", org_id="my-project-matrix")
+spine(action="promote", project="my-project", org_id="my-project-matrix")
+```
+
+A note tagged `world` + `size` lands in the `(world, size)` cell. Note what a
+cell aggregation *costs*: cells pool evidence across every note that matches, so a
+distinction carried only by a third attribute (which persona, which source) is not
+visible in the cell — it survives only in the members' own graph. If that
+distinction is what you are comparing, it belongs on an axis, or on separate
+spines that fold into a comparison matrix (below).
+
+### When a grid comes back empty: the `diagnostics` block
+
+Routing is an **exact, case-sensitive tag match**, and nothing normalizes tags. So
+a `ref` of `size` over a corpus tagged `sizing` collects nothing and renders as an
+ordinary empty column — identical to a corpus that genuinely has nothing to say.
+Guessing between those two is the main way authoring a grid wastes an hour.
+
+`preview` and `grid` therefore carry a **`diagnostics`** key *only when something
+routed nothing*. Its absence means the grid routed fine, so treat its presence as
+the signal itself:
+
+| Field | Means |
+|---|---|
+| `scope_empty` | no notes are in scope at all — fix the owner or row axis, and ignore the refs |
+| `unrouted_columns[]` | a tag/type column collected zero members, with `near_misses` (the values that DO exist, each with its note count and a `why` tier) and a `hint` |
+| `empty_row_values[]` | a value in `row_axis.include` yielded no row, so a whole case is silently missing from the comparison |
+| `over_broad_columns[]` | notes are repeatedly hand-removed from this column — its `ref` collects more than the column means |
+
+A `near_misses` entry's `why` says how much to trust it: `case` and `separator`
+are the same word differently written (effectively certain), `transposed` is a
+letter-order typo, and `stem`/`similar` are hints worth a look.
+
+Two things it deliberately does NOT accuse. A `prompt` or `identity` column holds
+no members by design, and a **promoted** column routes through materialized edges
+rather than its tag — so neither is ever blamed on tags.
+
+When a column reports `hand_added`, it routed nothing yet has pinned members: the
+`ref` is wrong and `correct` has been papering over it one note at a time. Fixing
+the ref makes those corrections unnecessary.
+
+### Owner scope and the org id
+
+A definition is owned by exactly one **project** OR one **graph** — pass one, never
+both. That owner is what makes it findable: a project's catalog is precisely the
+ways you can organize that project. `define` keys the id as
+`<owner>-<table_id>` (`table_id` defaults to `matrix`).
+
+## Filling the grid: `material` → `fill`
+
+Deterministic routing fills a cell with member **notes**. It does not write the
+prose — the one-sentence synthesis of what a cell's members collectively say, or
+the answer a `prompt` column asks for. **That prose is yours to write, and the loop
+is inverted on purpose: the server hands you material, you answer, the server
+stores it.** There is no model call inside these actions.
+
+1. **`spine(action="grid", org_id=…)`** — build and persist the deterministic
+   skeleton. `prompt` columns persist as `[GAP]`; that is the design, not a
+   shortfall.
+2. **`spine(action="material", org_id=…)`** — the **work order**: the cells still
+   awaiting prose, each with the evidence it is owed over. Two kinds:
+   - `synthesis` — a cell with **2+ members**, listed with their titles/types/
+     quotes. Single-member cells are never offered (the cell already reads as its
+     one member).
+   - `extract` — a `prompt` column's `instruction`, grounded in that row's text
+     under the top-level `material` map (keyed by `row_id`, hoisted so it isn't
+     repeated per cell).
+   Narrow with `row_id`/`col_key`; `limit` batches a big grid, and
+   `total_pending`/`truncated` say what is left.
+3. **`spine(action="fill", org_id=…, cells=[{row_id, col_key, summary}, …])`** —
+   store your answers. Copy `row_id`/`col_key` verbatim from the work order.
+
+Fills are stored **locked**, so a later `grid`/`resync` never overwrites them and
+`material` never re-offers them. Re-filling the same cell replaces its summary.
+Nothing here touches a note — corrections live on the definition.
+
+## Correcting the routing: `correct`
+
+When a note *belongs* in a cell the tags missed, or landed in one it doesn't
+belong in:
+
+```
+spine(action="correct", project=…, org_id=…,
+      add=[{"row_id": "world", "col_key": "size", "note_id": "n-12"}],
+      remove=[{"row_id": "clock", "col_key": "exit", "note_id": "n-7"}])
+```
+
+A `remove` always beats an `add` for the same cell+note, so an ejected note is
+never resurrected by a later resync. On a **materialized** spine these are
+edge-affecting: the correction is outstanding until you `resync`, which turns it
+into a real `spine-member` edge. A `fill` is not edge-affecting and needs no
+resync — the two families are deliberately different in this one respect.
+
+`spine(action="attribute", …)` resolves the related case of a *ported* spine's
+ambiguous member, which `grid` reports under `needs_attribution`:
+`decision="own"` claims it (it rejoins the grid), `"foreign"` keeps it excluded but
+resolved.
+
+If many notes are mis-routed, don't hand-correct them one at a time — that is what
+`remine` is for (below).
+
+## Lifecycle actions
+
+All take `org_id` + `project` | `graph`, except the three scouting actions —
+`columns` needs no owner at all, and `row_values`/`describe` take the owner but no
+`org_id` (there is no definition yet):
+
+| Action | Effect |
+|---|---|
+| `columns` | the column candidates this corpus supports. Read-only, no owner, no model |
+| `row_values` | the row values a candidate `row_axis` yields, with counts. Read-only |
+| `describe` | draft a definition from one sentence. Read-only; needs a model, so can be unavailable |
+| `define` | author / overwrite the definition. WRITE (definition only) |
+| `get` | read the definition back — state, columns, row axis, `spine_ref`, stashed `lens_definition` |
+| `preview` | the deterministic grid it projects, no LLM, no writes |
+| `list` | the project's spines and lenses (same catalog as `schema(action="spines")`) |
+| `grid` | build + PERSIST the deterministic grid (`prompt` columns stay `[GAP]`), corrections re-applied. `force=true` rebuilds a valid cache. WRITE (grid cache) |
+| `material` | the work order of cells awaiting prose, with their evidence. Read-only, no model |
+| `fill` | store cell summaries as LOCKED overrides — survive rebuild/resync. WRITE (corrections) |
+| `correct` | pin (`add`) or eject (`remove`) a note in a cell. Edge-affecting: `resync` to materialize. WRITE (corrections) |
+| `attribute` | resolve a ported spine's ambiguous member (`own` / `foreign`). WRITE (corrections) |
+| `promote` | `lens → spine`: build the graph, attach members, stash `lens_definition`, rewrite columns to link-form. `tag_stamp=true` also stamps dimension tags onto base notes |
+| `demote` | `spine → lens`, **keeping** the graph/nodes/edges — non-destructive |
+| `resync` | incrementally route new/unrouted in-scope notes into an existing spine (idempotent; honors corrections) |
+| `verify` | read-only synthesis audit — cells whose members are missing or ungrounded. `semantic=true` adds a per-cell model call |
+| `delete` | revert to a lens and delete the synthesis graph folder |
+| `connect` / `disconnect` | nest one materialized spine under another |
+| `schemas` | the spine-schema groups this owner's spines fall into, plus `ungrouped` (each loner with its own key set). Read-only |
+| `matrix` | read one group back as a single comparison grid. Needs `fingerprint`, not `org_id`. Read-only, nothing persisted |
+| `nested` | the `component-of` composition forest, with an integrity check. Read-only |
+
+Promotion rewrites the live columns to **link-form** (routing through the
+materialized `spine-member` edges instead of tags) and stashes the pre-promotion
+form in `lens_definition`. That is why `preview`, `remine`, and a re-promote all
+read the *stashed* definition — it is the agent-facing form.
+
+## Comparison matrices: the spine-schema fingerprint
+
+Several spines fold into one comparison grid — rows are the spine apexes (the
+topics), columns the shared dimensions — but **only when they share a
+spine-schema**: the identical sorted set of column **`key`s**. Two or more spines
+must share it (a singleton stays an individual spine).
+
+**Give comparable spines identical column keys.** This is the single most common
+way a comparison silently fails to appear: matching `ref`s with different `key`s
+do not group, and nothing announces it. The resulting grid is ephemeral —
+materialized at view time, never persisted.
+
+Two actions read this surface:
+
+```python
+spine(action="schemas", project="my-project")   # which spines grouped, and which didn't
+spine(action="matrix",  project="my-project", fingerprint="schema:ab12cd…")
+```
+
+`schemas` is the diagnostic for the failure above: any spine matching no other
+comes back under `ungrouped` **with its own key set**, so a one-key mismatch is
+visible instead of silent. `matrix` then reads one group back as a single grid —
+rows the member spines' topics, columns the shared dimensions, cells each topic's
+dimension content with its rolled-up evidence.
+
+Each `matrix` row carries `synced`. Read it as *"resync this spine before trusting
+the row"*, **not** *"this row's evidence changed"* — the stamp is owner-scoped, so
+one note landing anywhere in the owner's corpus unsyncs every one of its spines at
+once. Fix a row with `spine(action="resync", org_id=…)`.
+
+`spine(action="nested", project=…)` is the *other* cross-spine view: composition
+(the `component-of` chains `connect` writes) rather than comparison. It returns the
+`roots` forest, an `unassigned` bucket for a spine whose parent is missing or
+cyclic, and an `integrity` block whose `seeds_accounted_for` tells you whether
+every spine found a home.
+
+> **Two things named "schema" — keep them apart.** The **spine-schema** is the
+> shared column-key fingerprint that *groups* sibling spines. The
+> grounded-extraction **schema** is the extraction *rubric* a run reads sources
+> against (`create_extraction_graph`, `extraction-schemas.yaml`). A materialized
+> spine embeds the latter inline; the former is derived from its dimension tags
+> but names a different job. The extraction layer keeps the plain word *schema*;
+> the grouping layer is always *spine-schema*.
+
+## Nesting spines into tiers
+
+`spine(action="connect", org_id=<child>, parent_org_id=<parent>)` gives the child's
+apex ONE primary `component-of` edge to the parent's apex. Both must be
+materialized. A child has exactly one primary parent, so connecting a child that
+already hangs elsewhere **moves** it. Pass `parent_project`/`parent_graph` to nest
+across owners. An explicit `connect` always wins over a build-time seed
+(grounded-extraction's `parent_label`), never the reverse.
+
+## When tags aren't enough: remine
+
+Deterministic routing only sees exact-tag matches and spine-side membership, so a
+note that *belongs* in a dimension but was never tagged for it is invisible.
+`remine` is the agent-semantic tier that closes that gap:
+
+- `remine(action="propose", owner_type=…, owner_name=…, org_id=…)` — classify the
+  in-scope corpus into the definition's dimensions. Read-only.
+- With an `intent` ("make a matrix for X") the columns are **induced** from the
+  corpus instead of read from the definition — use this when you don't yet know
+  what the dimensions should be. Induced grids are preview-only.
+- `remine(action="apply", …, tag_stamp=true)` — materialize the approved grid
+  through the same promotion path, optionally stamping the tags so future builds
+  route deterministically without the classifier.
+
+**Re-mining a whole comparison group.** Pass `fingerprint=` (a `schemas` id)
+instead of `org_id` and the same propose → apply pair runs across every member
+spine, classifying into the schema's *shared* dimensions — which is what keeps the
+members comparable, and why `intent`/`depth` are single-spine only. Rows come back
+stamped with their `org_id`, and `apply` routes each row back onto its own spine.
+
+This classifies, so it calls a model **once per row**: a twenty-spine group costs
+twenty single re-mines, serially, in one blocking call. Pass
+`members=["<org_id>", …]` to do it in batches. Each partial grid is a complete,
+apply-able group grid, so batching needs no merging on your side.
+
+## Two routes to a spine — pick the right one
+
+- **Arranging a corpus you already have** → this rule. `define` → `preview` →
+  `promote`.
+- **Reading sources into a corpus against a rubric** → the `grounded-extraction`
+  rule. A schema's `synthesis` block pre-creates the spine as part of the
+  extraction run, and each distinct `synthesis_label` mints its own spine — which
+  is how N comparable instances become a comparison matrix. If you are ingesting
+  sources, use that route; don't hand-build the grid first.
+
+## What is still dashboard-only
+
+The MCP surface covers authoring, the full lifecycle, filling, and corrections.
+These remain dashboard (`launch_dashboard()`) features — offer the dashboard rather
+than improvising:
+
+- **Streaming / background** grid builds with live per-row progress. `grid` is
+  synchronous and deterministic; the dashboard additionally fills `prompt` columns
+  and cell prose with its own in-process agent as the build streams.
+
+## Commands
+
+| Say this | What runs |
+|---|---|
+| "what could the columns be", "what can I compare on" | `spine(action="columns")` |
+| "what rows would that give me", "how many notes per row" | `spine(action="row_values", row_axis=…)` |
+| "suggest a grid for …", "I want to compare X across Y" | `spine(action="describe", description=…)` |
+| "organize this by X", "make a matrix of X vs Y", "arrange the corpus" | `spine(action="define", …)` then `preview` |
+| "show me the grid", "did the tags route", "what's in each cell" | `spine(action="preview", org_id=…)` |
+| "why is this cell/column empty", "nothing routed", "why is a row missing" | `spine(action="preview", org_id=…)` and read its `diagnostics` block |
+| "build the grid", "save the matrix" | `spine(action="grid", org_id=…)` |
+| "fill in the cells", "write the cell summaries", "what still needs writing" | `spine(action="material", org_id=…)` then `fill` |
+| "this note belongs in that cell", "that one's miscategorized" | `spine(action="correct", org_id=…, add=…/remove=…)` |
+| "whose member is this", "claim this member" | `spine(action="attribute", org_id=…, decision="own")` |
+| "what spines exist", "show unfinished spines" | `spine(action="list")` / `schema(action="spines")` |
+| "compare these spines", "why didn't they group" | `spine(action="schemas")` then `matrix` |
+| "show the comparison matrix", "one grid across all of them" | `spine(action="matrix", fingerprint=…)` |
+| "how do the spines nest", "is anything unparented" | `spine(action="nested")` |
+| "reclassify the whole group", "re-mine all of them" | `remine(action="propose", fingerprint=…, members=…)` |
+| "materialize it", "build the spine graph" | `spine(action="promote", org_id=…)` |
+| "unmaterialize", "back to a lens" | `spine(action="demote", org_id=…)` |
+| "route the new notes in", "update membership" | `spine(action="resync", org_id=…)` |
+| "audit the synthesis", "check for overreach" | `spine(action="verify", org_id=…, semantic=true)` |
+| "organize by this by default" | `project(action="set_default_spine", org_id=…)` |
+| "classify these into the dimensions", "fill the grid semantically" | `remine(action="propose"/"apply", …)` |
+| "nest this spine under that one" | `spine(action="connect", org_id=…, parent_org_id=…)` |
+| "attach this claim to the right dimension" | `note(action="attach", …)` |
+| "write this dimension's portrait" | `note(action="update", replace_body=…, synthesis_status="materialized")` |
+
+Full background: [Spines](https://angelodocs.nkhirt.com/explanation/spines/) and
+[Matrices](https://angelodocs.nkhirt.com/explanation/matrices/).

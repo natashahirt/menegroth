@@ -8,12 +8,12 @@ title: 'Foundation safety corrections: fix demand-information-loss defects befor
 node_label: Foundation safety corrections
 tags: safety,audit,signed-moments,pattern-loading,punching,ddm,fea,aisc,aci,foundations
 status: active
-open_threads: 0
+open_threads: 14
 success: 'null'
 files: ''
 session_id: sess-bff66da0
 created_at: '2026-09-23T01:51:38.762000+00:00'
-updated_at: '2026-09-23T01:51:38.762000+00:00'
+updated_at: '2026-09-28T17:26:20.578548+00:00'
 ---
 Audit (2026-09-22) of existing demand extraction and checkers for the bug class found with T-beams: information (sign, concurrency, load pattern, boundary condition) is lost before a check whose answer depends on it.
 

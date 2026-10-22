@@ -8,12 +8,12 @@ title: 'Change 1 COMPLETE (GREEN): flat-plate col_I_factor is now a Single Sourc
 node_label: 'Change 1 COMPLETE (GREEN): flat-plate col_I_factor'
 tags: flat-plate,col-i-factor,aci-318-11,ssot,incremental,julia-dispatch,change-1
 status: active
-open_threads: 0
+open_threads: 2
 success: 'null'
 files: ''
 session_id: sess-44f9458b
 created_at: '2026-10-22T05:16:21.870611+00:00'
-updated_at: '2026-10-22T05:16:21.870611+00:00'
+updated_at: '2026-10-22T05:16:47.957715+00:00'
 ---
 WHAT
 ----

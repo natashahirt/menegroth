@@ -8,12 +8,12 @@ title: 'PIVOT: reduced tier cannot certify eccentric drift without plate geometr
 node_label: 'pivot: data-model fix'
 tags: walls,phase1,phase3,stability,drift,torsion,data-model,reduced-evaluator,plate-geometry,decision,pivot,safety
 status: active
-open_threads: 0
+open_threads: 1
 success: 'null'
 files: ''
 session_id: sess-80f08b9f
 created_at: '2026-10-22T00:08:47.453461+00:00'
-updated_at: '2026-10-22T00:08:47.453461+00:00'
+updated_at: '2026-10-22T02:07:53.561282+00:00'
 ---
 After 6 adversarial rounds, PROVEN from multiple independent angles: the reduced tier (ReducedDiaphragmEvaluator) CANNOT rigorously certify eccentric/non-orthogonal corner drift or torsion, because it stores plan_halfwidth (plate SIZE) but NOT the plate POSITION relative to the walls, and NO center of mass. Without the plate position in the wall frame, the true occupant corners cannot be located or bounded.
 

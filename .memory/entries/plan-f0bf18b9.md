@@ -8,12 +8,12 @@ title: 'Phase: Institutional knowledge — from heuristic ontology to evidence-b
 node_label: Institutional knowledge
 tags: institutional-knowledge,ontology,function-network,bayesian,scenario-discovery,trust-tiers,lit-review,harness
 status: active
-open_threads: 0
+open_threads: 4
 success: 'null'
 files: ''
 session_id: sess-af5f41f4
 created_at: '2026-10-14T19:34:44.944291+00:00'
-updated_at: '2026-10-14T19:34:44.944291+00:00'
+updated_at: '2026-10-14T19:35:23.940971+00:00'
 has_child_rationale: 'Design Harness memory layer: what the agent learns from its
   own experiments'
 ---

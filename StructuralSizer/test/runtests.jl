@@ -114,6 +114,9 @@ using Asap  # custom units (kip, ksi, ksf, psf, etc.)
         include("slabs/test_ddm_edge_mub.jl")
         include("slabs/test_eq_13_7_adjoining.jl")
         include("slabs/test_corner_punching.jl")
+        # General-shape critical sections (ACI 421.1R-99 App. B): non-orthogonal,
+        # re-entrant, circular, I-/odd supports via true principal axes
+        include("slabs/test_general_critical_section.jl")
         include("slabs/test_fea_combo_envelope.jl")
         # Punching / shear
         include("slabs/test_shear_transfer.jl")
@@ -142,6 +145,7 @@ using Asap  # custom units (kip, ksi, ksf, psf, etc.)
         include("foundations/test_spread_footing.jl")
         include("foundations/test_spread_aci.jl")
         include("foundations/test_strip_aci.jl")
+        include("foundations/test_strip_unequal_c_across.jl")
         include("foundations/test_mat_aci.jl")
         include("foundations/test_corner_punching.jl")
         include("foundations/test_rebar_quantity.jl")

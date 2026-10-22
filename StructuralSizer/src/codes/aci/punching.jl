@@ -106,6 +106,31 @@ function punching_geometry(c1::Length, c2::Length, d::Length;
 end
 
 """
+    eccentricity_to_critical_centroid(b_section, c_col, cAB) -> Length
+
+Distance from the column centerline to the centroid of an edge or corner
+critical section, positive toward the interior of the slab.
+
+`cAB` is the distance from the inner face of the critical section back to
+the centroid (PCA EB712 Fig. 16-13 `c`; corpus: pca-eb712, page 484, where
+`c` and `c′` are the distances from the centroidal axis to the perimeter).
+That face lies `d/2` outside the column face, and `b_section = c_col + d/2`
+(ACI 318-11 §11.11.1.2). R11.11.7.2 takes `Vu` and `Mu` at the centroidal
+axis c-c (corpus: aci-318-11, page 210), so
+
+    e = (b_section − cAB) − c_col/2
+
+Worked check, exterior column: `b1 = 18.88 in`, `cAB = 5.99 in`, `c1 = 16 in`
+gives `e = 4.89 in`, and `M_unb = 46.65 − 21.70 × e/12 = 37.81 kip·ft`
+(corpus: sp-de-two-way-flat-plate-aci318-14, page 42). That example is
+ACI 318-14; the `d/2` section and the centroidal-axis moment are the same
+statements in ACI 318-11 §11.11.1.2 and R11.11.7.2.
+"""
+function eccentricity_to_critical_centroid(b_section::Length, c_col::Length, cAB::Length)
+    return (b_section - cAB) - c_col / 2
+end
+
+"""
     punching_perimeter(c1, c2, d; shape=:rectangular)
 
 Critical perimeter b₀ for an interior column.
@@ -270,6 +295,274 @@ ACI 318-11 R11.11.7.2 (corpus: aci-318-11, page 211).
 """
 function polar_moment_Jc_corner(b1::Length, b2::Length, d::Length, cAB::Length)
     return polar_modulus_Jc_over_c_corner(b1, b2, d) * cAB
+end
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ACI 421.1R-99 Appendix B — Properties of critical sections of GENERAL shape
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# The closed-form rectangular Jc expressions above apply only to right-angle
+# interior/edge/corner columns. For non-orthogonal (e.g. 60°) and re-entrant
+# (L-shape inside) corners, ACI 421.1R-99 Appendix B (corpus: aci-421-1r-99,
+# p. 421.1R-11..13) gives the properties of a critical section whose perimeter
+# is a chain of straight segments, by summation:
+#
+#   Ac = d · Σ l                                            (B-1)
+#   Ix = Σ (d·l/3)(y_i² + y_i·y_j + y_j²)                   (B-2)
+#   Iy = Σ (d·l/3)(x_i² + x_i·x_j + x_j²)                   (B-3)
+#
+# where (x_i,y_i),(x_j,y_j) are a segment's endpoints in CENTROIDAL coordinates
+# and l is its length. The polar-moment analogs are approximated by the in-plane
+# second moments: Jx ≈ Ix, Jy ≈ Iy (App. B, stated explicitly). This drops the
+# out-of-plane self term that the exact rectangular Eq. (3.4) keeps (e.g. the
+# b1·d³/6 of an interior column), so the general method is slightly CONSERVATIVE
+# (smaller J → higher stress) relative to `polar_moment_Jc_interior/edge/corner`
+# — the behavior the code sanctions for "sections of general shape".
+#
+# TRUE PRINCIPAL AXES: Eq. (3.2) assumes `x,y` are the section's principal axes
+# (no product-of-inertia coupling). Rather than require a symmetric section, we
+# also sum the product of inertia Ixy and rotate to the frame where Ixy→0, then
+# apply Eq. (3.2) there. This keeps the method exact (within `J≈I`) for
+# asymmetric sections (e.g. an L-notch) — the standard-mechanics generalization
+# of what 421.1R writes for the aligned case. A rotated rectangle therefore
+# gives the same vu as the unrotated one (invariance), which the tests assert.
+#
+# This one polygon path covers every support shape: rectangular/edge/corner,
+# non-orthogonal wedges, re-entrant L-notches, circular (ring discretized by
+# `circular_critical_section`), and I-/odd shapes (pass the effective loaded-area
+# polygon per ACI 421.3R-15 §4.8).
+#
+# CONVENTION (ACI 421.1R-99 Eq. 3.2, corpus p. 421.1R-4): `Mux` is the moment
+# ABOUT the centroidal x-axis; its shear stress varies with the y-coordinate.
+# `Muy` is about the y-axis. This is the OPPOSITE labeling to the rectangular
+# `punching_check` path above (which treats `Mux` as the moment whose stress
+# varies in x); callers must map into this convention explicitly.
+
+"""
+    critical_section_segments(points; closed=true) -> Vector{Tuple{Int,Int}}
+
+Index pairs of the straight segments of a critical-section perimeter defined by
+ordered `points`. `closed=true` (interior column, full loop) appends the closing
+segment `(n, 1)`; `closed=false` leaves the perimeter open (edge/corner, where
+the critical section stops at free slab edges).
+"""
+function critical_section_segments(points::AbstractVector; closed::Bool = true)
+    n = length(points)
+    n ≥ 2 || throw(ArgumentError("need ≥ 2 points for a critical section; got $n"))
+    seg = [(i, i + 1) for i in 1:(n - 1)]
+    closed && n ≥ 3 && push!(seg, (n, 1))
+    return seg
+end
+
+"""
+    critical_section_properties(points, d; closed=true) -> NamedTuple
+
+ACI 421.1R-99 Appendix B properties of the critical section whose perimeter is
+the polyline/polygon through `points` (each a `(x, y)` `Tuple` of `Length` in
+the slab plane, in any consistent frame — typically centered on the column).
+`closed=true` adds the closing segment (4-sided interior / full ring);
+`closed=false` keeps the perimeter open (edge/corner with free edges).
+
+Second moments are evaluated by the Appendix B segment summation, extended to
+the product of inertia so the section's **true principal axes** can be found —
+ACI 421.1R-99 Eq. (3.2) is the special case in which `x,y` are already
+principal. For a straight segment with centroidal endpoints `(xi,yi),(xj,yj)`
+and length `l`:
+
+    Ix = Σ (d·l/3)(yi² + yi·yj + yj²)                       (B-2)
+    Iy = Σ (d·l/3)(xi² + xi·xj + xj²)                       (B-3)
+    Ixy = Σ (d·l/6)(2·xi·yi + xi·yj + xj·yi + 2·xj·yj)      (standard line ∫xy ds)
+
+The principal angle is `θp = ½·atan2(−2·Ixy, Ix−Iy)` (where `Ixy'→0`), with
+principal second moments `J1 ≈ Ix'`, `J2 ≈ Iy'` re-summed in the rotated frame
+(so `Jx≈Ix`, `Jy≈Iy` per App. B, but now on the principal axes).
+
+Returns `(Ac, b0, xc, yc, Ix, Iy, Ixy, θp, J1, J2, l1, l2, e1, e2)`:
+- `Ac = d·Σl`, `b0 = Σl`                                   (Eq. B-1)
+- `(xc, yc)`: length-weighted centroid in the INPUT frame
+- `Ix, Iy, Ixy`: centroidal second moments in the INPUT frame
+- `θp`: principal-axis rotation (rad); `e1, e2`: principal unit vectors
+- `J1, J2`: principal second moments (≈ polar-moment analogs)
+- `l1, l2`: section projections on the principal axes (Fig. B2), for γv.
+
+All dimensional quantities are Unitful.
+
+Reference: ACI 421.1R-99 Appendix B, Eq. (B-1)–(B-3) (corpus: aci-421-1r-99,
+p. 421.1R-11); principal-axis rotation is standard mechanics.
+"""
+function critical_section_properties(points::AbstractVector, d::Length;
+                                     closed::Bool = true)
+    xs = [ustrip(u"inch", p[1]) for p in points]
+    ys = [ustrip(u"inch", p[2]) for p in points]
+    dd = ustrip(u"inch", d)
+    seg = critical_section_segments(points; closed = closed)
+
+    # (B-1): perimeter b0 and the length-weighted (uniform-strip) centroid.
+    b0 = 0.0
+    sx = 0.0
+    sy = 0.0
+    for (i, j) in seg
+        l = hypot(xs[j] - xs[i], ys[j] - ys[i])
+        b0 += l
+        sx += l * (xs[i] + xs[j]) / 2
+        sy += l * (ys[i] + ys[j]) / 2
+    end
+    b0 > 0 || throw(ArgumentError("degenerate critical section (zero perimeter)"))
+    xc = sx / b0
+    yc = sy / b0
+
+    # Second moments about the centroidal axes of the INPUT frame (per unit d),
+    # including the product of inertia Ixy needed for the principal axes.
+    Ix = 0.0
+    Iy = 0.0
+    Ixy = 0.0
+    for (i, j) in seg
+        xi = xs[i] - xc
+        yi = ys[i] - yc
+        xj = xs[j] - xc
+        yj = ys[j] - yc
+        l = hypot(xj - xi, yj - yi)
+        Ix += dd * l / 3 * (yi^2 + yi * yj + yj^2)
+        Iy += dd * l / 3 * (xi^2 + xi * xj + xj^2)
+        Ixy += dd * l / 6 * (2xi * yi + xi * yj + xj * yi + 2xj * yj)
+    end
+
+    # Principal axes: rotate to the frame where the product of inertia vanishes.
+    # Both θp and θp±90° are valid principal choices; normalize to (−45°, 45°] so
+    # axis 1 stays aligned with the input x-axis for (near-)axis-aligned sections.
+    # This only fixes which principal axis is labeled "1" vs "2" — the stress
+    # result is invariant to the choice (the moment vector and vertex coordinates
+    # are resolved with the same θp).
+    θp = 0.5 * atan(-2 * Ixy, Ix - Iy)
+    if θp > π / 4
+        θp -= π / 2
+    elseif θp ≤ -π / 4
+        θp += π / 2
+    end
+    c = cos(θp)
+    s = sin(θp)
+
+    # Re-sum J1≈Ix', J2≈Iy' and the projections in the principal frame, reusing
+    # the App. B summation on the rotated vertices (x' = x·c + y·s, y' = −x·s + y·c).
+    J1 = 0.0
+    J2 = 0.0
+    for (i, j) in seg
+        xi = xs[i] - xc; yi = ys[i] - yc
+        xj = xs[j] - xc; yj = ys[j] - yc
+        xi1 = xi * c + yi * s; yi1 = -xi * s + yi * c
+        xj1 = xj * c + yj * s; yj1 = -xj * s + yj * c
+        l = hypot(xj1 - xi1, yj1 - yi1)
+        J1 += dd * l / 3 * (yi1^2 + yi1 * yj1 + yj1^2)
+        J2 += dd * l / 3 * (xi1^2 + xi1 * xj1 + xj1^2)
+    end
+    x1 = [(xs[k] - xc) * c + (ys[k] - yc) * s for k in eachindex(xs)]
+    y1 = [-(xs[k] - xc) * s + (ys[k] - yc) * c for k in eachindex(xs)]
+    l1 = maximum(x1) - minimum(x1)
+    l2 = maximum(y1) - minimum(y1)
+
+    return (Ac = dd * b0 * u"inch^2", b0 = b0 * u"inch",
+            xc = xc * u"inch", yc = yc * u"inch",
+            Ix = Ix * u"inch^4", Iy = Iy * u"inch^4", Ixy = Ixy * u"inch^4",
+            θp = θp, J1 = J1 * u"inch^4", J2 = J2 * u"inch^4",
+            l1 = l1 * u"inch", l2 = l2 * u"inch",
+            e1 = (c, s), e2 = (-s, c))
+end
+
+"""
+    gamma_v_general(l1, l2) -> (γv1, γv2)
+
+Moment-transfer fractions by eccentricity of shear for a general-shape critical
+section, ACI 421.1R-99 Eq. (3.3) / Fig. B2 (corpus: aci-421-1r-99, p. 421.1R-4):
+
+    γv1 = 1 − 1/(1 + (2/3)√(l2/l1))
+    γv2 = 1 − 1/(1 + (2/3)√(l1/l2))
+
+`l1`, `l2` are the section's projections on its principal axes. `γv1` pairs with
+the moment about principal axis 1 (stress ∝ the axis-2 coordinate); `γv2` with
+the moment about principal axis 2.
+"""
+function gamma_v_general(l1::Length, l2::Length)
+    r1 = ustrip(u"inch", l2) / ustrip(u"inch", l1)
+    r2 = ustrip(u"inch", l1) / ustrip(u"inch", l2)
+    γv1 = 1.0 - 1.0 / (1.0 + (2.0 / 3.0) * sqrt(r1))
+    γv2 = 1.0 - 1.0 / (1.0 + (2.0 / 3.0) * sqrt(r2))
+    return (γv1, γv2)
+end
+
+"""
+    punching_stress_general(Vu, Mux, Muy, points, d; closed=true) -> NamedTuple
+
+Maximum factored punching shear stress on a critical section of general shape,
+ACI 421.1R-99 Eq. (3.2) with γv from Eq. (3.3), evaluated on the section's
+**true principal axes** so it is exact (within the App. B `J≈I` approximation)
+for asymmetric sections too. `Mux`/`Muy` are the unbalanced moments about the
+centroidal x/y axes of the INPUT frame (`Mux` about x, `Muy` about y); they are
+resolved into principal components `(M1, M2)` internally:
+
+    vu = Vu/Ac + γv1·M1·s2/J1 + γv2·M2·s1/J2
+
+where `(s1, s2)` are a vertex's coordinates on the principal axes. The stress is
+evaluated at every vertex and the governing value returned; the moment term is
+taken in absolute value before adding the always-additive `Vu/Ac`, matching the
+closed-form practice of evaluating at the farthest fiber.
+
+Returns `(vu, Ac, b0, J1, J2, θp, γv1, γv2, props)`.
+
+Reference: ACI 421.1R-99 Eq. (3.2)–(3.3), Appendix B (corpus: aci-421-1r-99,
+p. 421.1R-4, 11).
+"""
+function punching_stress_general(Vu::Force, Mux::Torque, Muy::Torque,
+                                 points::AbstractVector, d::Length;
+                                 closed::Bool = true)
+    p = critical_section_properties(points, d; closed = closed)
+    c = cos(p.θp)
+    s = sin(p.θp)
+
+    # Resolve the applied moment vector (Mux about x, Muy about y) onto the
+    # principal axes with the same rotation used for the geometry.
+    M1 = Mux * c + Muy * s
+    M2 = -Mux * s + Muy * c
+    γv1, γv2 = gamma_v_general(p.l1, p.l2)
+
+    v_direct = uconvert(u"psi", Vu / p.Ac)
+
+    v_moment = 0.0u"psi"
+    for pt in points
+        x = pt[1] - p.xc
+        y = pt[2] - p.yc
+        s1 = x * c + y * s        # coordinate on principal axis 1
+        s2 = -x * s + y * c       # coordinate on principal axis 2
+        term = uconvert(u"psi", γv1 * M1 * s2 / p.J1 + γv2 * M2 * s1 / p.J2)
+        v_moment = max(v_moment, abs(term))
+    end
+
+    return (vu = v_direct + v_moment, Ac = p.Ac, b0 = p.b0,
+            J1 = p.J1, J2 = p.J2, θp = p.θp, γv1 = γv1, γv2 = γv2, props = p)
+end
+
+"""
+    circular_critical_section(D, d; n=64, center=(0u"inch", 0u"inch")) -> Vector
+
+Vertices of the punching critical section for a **circular** column/loaded area
+of diameter `D`: the ring at `d/2` from the column face, i.e. a circle of
+diameter `D + d`, discretized into `n` straight segments for the general-shape
+method. Pass to `punching_stress_general`/`critical_section_properties` with
+`closed=true`. Converges to the analytic ring (`b0 = π(D+d)`, `J1 = J2 =
+d·π·r³`, `r = (D+d)/2`) as `n` grows; `n=64` is well within ~0.1%.
+
+For an **I-shaped or other odd support**, pass the effective loaded-area polygon
+(ACI 421.3R-15 §4.8: the minimum-perimeter area enclosing the actual shape)
+directly as `points` instead — no special case is needed.
+
+Reference: ACI 318-11 §11.11.1.2 critical section at d/2 (corpus: aci-318-11);
+general-shape treatment ACI 421.1R-99 Appendix B (corpus: aci-421-1r-99).
+"""
+function circular_critical_section(D::Length, d::Length; n::Int = 64,
+                                   center = (0.0u"inch", 0.0u"inch"))
+    n ≥ 8 || throw(ArgumentError("need n ≥ 8 segments to approximate a circle; got $n"))
+    r = (D + d) / 2
+    return [(center[1] + r * cos(2π * k / n), center[2] + r * sin(2π * k / n))
+            for k in 0:(n - 1)]
 end
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -583,7 +876,9 @@ function punching_check(
         Mub = abs(Mux)
         γv_val = gamma_v(geom.b1, geom.b2)
         Jc = polar_moment_Jc_edge(geom.b1, geom.b2, d, geom.cAB)
-        e = c1 / 2 - geom.cAB
+        # R11.11.7.2 (corpus: aci-318-11, page 210): Mu at centroidal axis c-c.
+        # e = (b1 − cAB) − c1/2. See eccentricity_to_critical_centroid.
+        e = eccentricity_to_critical_centroid(geom.b1, c1, geom.cAB)
         Mub_adj = max(Mub - Vu * e, zero(Mub))
         v_moment = uconvert(u"psi", γv_val * Mub_adj * geom.cAB / Jc)
         vu = v_direct + v_moment
@@ -607,9 +902,10 @@ function punching_check(
         Jc_y = polar_moment_Jc_corner(b2, b1, d, cAB_y)
 
         # Mu at the critical-section centroid (R11.11.7.2, page 210):
-        # shift the column-centerline moment by Vu × e.
-        e_x = c1 / 2 - cAB_x
-        e_y = c2 / 2 - cAB_y
+        # e = (b − cAB) − c/2 on each free-edge axis.
+        # See eccentricity_to_critical_centroid.
+        e_x = eccentricity_to_critical_centroid(b1, c1, cAB_x)
+        e_y = eccentricity_to_critical_centroid(b2, c2, cAB_y)
         Mux_adj = max(abs(Mux) - Vu * e_x, zero(Mux))
         Muy_adj = max(abs(Muy) - Vu * e_y, zero(Muy))
 

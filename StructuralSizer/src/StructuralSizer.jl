@@ -523,6 +523,10 @@ export punching_geometry_interior, punching_geometry_edge, punching_geometry_cor
 export punching_geometry, punching_αs, punching_β
 export gamma_f, gamma_v, effective_slab_width
 export polar_moment_Jc_interior, polar_moment_Jc_edge
+# General-shape critical sections (ACI 421.1R-99 App. B; non-orthogonal,
+# re-entrant, circular, I-/odd supports via true principal axes)
+export critical_section_segments, critical_section_properties
+export gamma_v_general, punching_stress_general, circular_critical_section
 export punching_capacity_stress, punching_capacity_interior
 export combined_punching_stress, punching_perimeter, punching_demand
 export check_punching_shear, check_combined_punching

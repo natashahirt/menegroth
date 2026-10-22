@@ -498,11 +498,11 @@ function _reference_length(ev::ReducedDiaphragmEvaluator, walls_s::Vector{WallLi
 end
 
 """
-    _plate_encloses_walls(ev::ReducedDiaphragmEvaluator, walls_s) -> Bool
+    _plate_encloses_walls(ev::ReducedDiaphragmEvaluator, walls_s, active_ids=nothing) -> Bool
 
 ENCLOSURE GUARD (fail-closed) for the reduced-tier corner-drift / torsion certification.
-Returns `true` iff `plate_center` is present AND every `WallLine` `w` in `walls_s` lies inside
-(or exactly on) the plate rectangle `plate_center ± plan_halfwidth`:
+Returns `true` iff `plate_center` is present AND every ACTIVE `WallLine` `w` in `walls_s` lies
+inside (or exactly on) the plate rectangle `plate_center ± plan_halfwidth`:
 
     cx − hx − tol ≤ w.x ≤ cx + hx + tol    AND    cy − hy − tol ≤ w.y ≤ cy + hy + tol
 
@@ -539,32 +539,88 @@ it. This keeps legitimately degenerate plans certifiable (e.g. a line of walls a
 declared with `plan_halfwidth = (0, hy)`) while a genuinely SPREAD layout declared under a
 zero-extent plate still fails closed through the per-wall bounds. An empty `walls_s` is
 vacuously enclosed.
+
+ACTIVE-ID MASK (`active_ids`, ENGINEERING JUDGMENT — not a code clause): the SIMP optimizer
+drives REMOVED candidates to the void floor `ρ_min` but keeps them in `walls_s` (their stiffness
+is floored to prevent an exactly-singular `K`, never deleted). A removed candidate parked
+OUTSIDE the plate must NOT flip this gate — it is physically absent. The OPTIMIZER (which alone
+holds the densities `x`, `ρ_min`, and `penal`) computes the Set of ACTIVE candidate ids and
+passes it in; when `active_ids !== nothing` any wall with `w.id ∉ active_ids` is SKIPPED before
+the bounds test. `active_ids === nothing` (the default) treats EVERY wall as active, so the
+one-shot CHECK path and the FEM tier are byte-for-byte unchanged.
+
+HOW ACTIVITY IS DEFINED (and why `ρ_min`'s magnitude is IRRELEVANT): a candidate is ACTIVE iff
+its PENALIZED stiffness fraction `ρ^penal > ε_abs` — the fraction of `k_max` actually assembled
+into `K` (`_active_candidate_ids`; `k = ρ^penal·k_max`). This is a PER-WALL ABSOLUTE test against
+a fixed constant, so it degrades to "ALL active" (guard fully armed) as `ρ_min → 1` and NEVER to
+"all removed": at `ρ_min=1.0` every `ρ^penal = 1 > ε_abs`, so no wall is masked and this gate
+cannot silently disable itself. The earlier LINEAR test (`ρ` vs `ρ_min·(1+ε)`) FAILED OPEN at a
+legal `ρ_min=1.0`, where every density is pinned at the floor yet still carries full stiffness —
+the whole active set went empty and the gate became vacuously true for all layouts. The absolute
+`ρ^penal` test removes that dependence on `ρ_min`'s magnitude entirely.
+
+An all-removed / empty-after-mask set is vacuously enclosed (same rule as an empty `walls_s`).
+This is a BACKSTOP, not a hole: with the absolute `ρ^penal` threshold an empty active set occurs
+ONLY when every wall is truly void (`ρ^penal ≤ ε_abs` everywhere) = a global mechanism, which the
+load-independent singular-stiffness / translational / eigenstructure floors fail closed on
+INDEPENDENTLY of this gate. The negative-half-extent (inverted plate) branch, by contrast, fires
+BEFORE the mask (crit-P2): a NON-EMPTY `walls_s` with an inverted plate fails closed regardless of
+which walls are active.
+
+WHY RELATIVE STIFFNESS IS NEVER USED TO INFER REMOVAL: a relative-stiffness threshold (comparing
+one wall's `k` to OTHERS') would be UNSAFE — one very stiff inside wall could push a genuinely
+REAL outside wall below the threshold and silently skip it, under-stating the certified drift (the
+exact-formula-fails-OPEN failure mode this guard exists to prevent). "Removed" is therefore the
+optimizer's PER-WALL ABSOLUTE `ρ^penal` density fact, never a quantity this predicate reconstructs
+by comparing `w.k` across walls.
 """
-function _plate_encloses_walls(ev::ReducedDiaphragmEvaluator, walls_s::Vector{WallLine})
+function _plate_encloses_walls(ev::ReducedDiaphragmEvaluator, walls_s::Vector{WallLine},
+                               active_ids::Union{Nothing,AbstractSet}=nothing)
     ev.plate_center === nothing && return false
     isempty(walls_s) && return true                 # vacuously true: nothing to enclose
     cx, cy = ev.plate_center
     hx, hy = ev.plan_halfwidth
-    # NEGATIVE (inverted) half-extent with real walls present ⇒ cannot enclose (fail closed). A
-    # ZERO half-extent is intentionally left to the per-wall bounds (encloses on-axis walls,
-    # fails closed on off-axis walls) so a valid thin/axis-aligned plan is not force-rejected.
+    # NEGATIVE (inverted) half-extent on a NON-EMPTY wall set ⇒ cannot enclose (fail closed),
+    # INDEPENDENT of the active-ID mask (crit-P2). An inverted / garbage `plan_halfwidth` must
+    # never report "enclosed", so this fires BEFORE the per-wall loop and mask skip: a non-empty
+    # `walls_s` with an inverted plate fails closed regardless of WHICH walls are active (the
+    # empty-`walls_s` case already returned vacuously-true above). A ZERO half-extent is NOT
+    # force-failed — it is left to the per-wall bounds below (encloses on-axis walls within
+    # `tol`, fails closed on off-axis walls) so a valid thin/axis-aligned plan is not rejected.
     (hx < 0 || hy < 0) && return false
     tol = 1e-9 + 1e-9 * hypot(hx, hy)               # absolute + plate-scaled boundary tolerance
     for w in walls_s
+        # ACTIVE-ID MASK (ENGINEERING JUDGMENT, not a code clause): when `active_ids` is
+        # supplied, SKIP any wall the optimizer has driven to negligible penalized stiffness
+        # (`w.id ∉ active_ids`). A density-REMOVED candidate is physically absent, so it can
+        # neither be enclosed nor fail-close the gate — it is simply not examined. Activity is
+        # the optimizer's PER-WALL ABSOLUTE `ρ^penal > ε_abs` fact (`_active_candidate_ids`),
+        # never a RELATIVE comparison to other walls, so a genuinely real outside wall can never
+        # be silently skipped (see docstring). `active_ids === nothing` ⇒ every wall is examined,
+        # byte-for-byte identical to the one-shot CHECK / FEM tiers.
+        active_ids === nothing || w.id in active_ids || continue
         (cx - hx - tol <= w.x <= cx + hx + tol) || return false
         (cy - hy - tol <= w.y <= cy + hy + tol) || return false
     end
+    # EMPTY-AFTER-MASK BACKSTOP: if the mask skipped every wall (empty active set) this returns
+    # vacuously true — SAFE, not a hole: an empty active set means every wall is truly void
+    # (ρ^penal ≤ ε_abs everywhere) = a global mechanism, which the load-independent singular-
+    # stiffness / translational / eigenstructure floors fail closed on independently of this gate.
     return true
 end
 
 # FEM tier (and any non-reduced evaluator) carries TRUE geometry and is NOT subject to the
 # reduced-tier enclosure proxy, so it always "encloses" — mirrors
-# `_plate_center_missing(::AbstractLateralEvaluator) = false`. Keeps FEM unaffected.
-_plate_encloses_walls(::AbstractLateralEvaluator, ::Vector{WallLine}) = true
+# `_plate_center_missing(::AbstractLateralEvaluator) = false`. Keeps FEM unaffected. The
+# optional `active_ids` arg is accepted (and ignored) so the two arities match the reduced
+# method and the mask threads transparently through evaluator-agnostic call sites.
+_plate_encloses_walls(::AbstractLateralEvaluator, ::Vector{WallLine},
+                      ::Union{Nothing,AbstractSet}=nothing) = true
 
 function evaluate_lateral(ev::ReducedDiaphragmEvaluator,
                           walls::Vector{WallLine},
-                          loads::Vector{StoryLoad})
+                          loads::Vector{StoryLoad};
+                          active_ids::Union{Nothing,AbstractSet}=nothing)
     nstory = length(ev.story_heights)
     story_disp = zeros(nstory, 3)
     drift = zeros(nstory)
@@ -652,7 +708,10 @@ function evaluate_lateral(ev::ReducedDiaphragmEvaluator,
         # state the twist (exact formula fails OPEN). When this story's walls are not ⊆ plate
         # we therefore also FAIL CLOSED to `Inf` (see `_plate_encloses_walls`); callers refuse
         # with `status = :geometry_inconsistent`.
-        torsion[s] = (ev.plate_center === nothing || !_plate_encloses_walls(ev, walls_s)) ? Inf :
+        # `active_ids` masks density-removed candidates out of the enclosure proxy so a removed
+        # wall parked outside the plate cannot fail-close this gate (nothing ⇒ all walls, as the
+        # one-shot CHECK path and FEM tier require).
+        torsion[s] = (ev.plate_center === nothing || !_plate_encloses_walls(ev, walls_s, active_ids)) ? Inf :
                      _torsion_amplification(u, ev.plan_halfwidth, cr, ev.plate_center)
 
         # Recover per-wall in-plane shear force: V_i = k_i (b_i · u).
@@ -745,7 +804,11 @@ _torsion_amplification(u::Vector{Float64}, halfwidth::NTuple{2,Float64}) =
 const _DIRECTION_COMPLETE_DIRS = ((:X, 1.0, 0.0), (:Y, 0.0, 1.0))
 
 """
-    direction_complete_interstory_drift(ev, walls, loads) -> (; directions, drift, corner_drift)
+    direction_complete_interstory_drift(ev, walls, loads; active_ids=nothing) -> (; directions, drift, corner_drift)
+
+`active_ids` (optional) is the SIMP optimizer's Set of ACTIVE candidate ids; when supplied it
+masks density-removed walls out of the per-story enclosure proxy (see [`_plate_encloses_walls`]).
+`nothing` (default) examines every wall, leaving the one-shot CHECK / FEM paths unchanged.
 
 DIRECTION-COMPLETE, origin-invariant per-story interstory drift sweep. Returns BOTH a
 serviceability realization (`drift`, the CR translation) AND the physical drift SAFETY
@@ -791,7 +854,8 @@ singular `K` via `_solve_spd`.
 """
 function direction_complete_interstory_drift(ev::ReducedDiaphragmEvaluator,
                                              walls::Vector{WallLine},
-                                             loads::Vector{StoryLoad})
+                                             loads::Vector{StoryLoad};
+                                             active_ids::Union{Nothing,AbstractSet}=nothing)
     nstory = length(ev.story_heights)
     ndir = length(_DIRECTION_COMPLETE_DIRS)
     D = zeros(nstory, ndir)
@@ -833,8 +897,9 @@ function direction_complete_interstory_drift(ev::ReducedDiaphragmEvaluator,
         # UNDER-COVERING plate (the two FREE fields are not otherwise cross-checked against the
         # walls) would make this metric under-state the real edge drift — the exact formula
         # fails OPEN. Fail closed to `Inf` when this story's walls are not ⊆ plate (see
-        # `_plate_encloses_walls`); computed ONCE per story (direction-independent).
-        encloses = _plate_encloses_walls(ev, walls_s)
+        # `_plate_encloses_walls`); computed ONCE per story (direction-independent). `active_ids`
+        # masks density-removed candidates (nothing ⇒ all walls, as the CHECK/FEM paths require).
+        encloses = _plate_encloses_walls(ev, walls_s, active_ids)
 
         for (di, (_, dx, dy)) in enumerate(_DIRECTION_COMPLETE_DIRS)
             Fxc = F_s * dx; Fyc = F_s * dy
@@ -874,7 +939,12 @@ function direction_complete_interstory_drift(ev::ReducedDiaphragmEvaluator,
 end
 
 """
-    eigenstructure_stability(ev, walls, loads, drift_limit) -> NamedTuple
+    eigenstructure_stability(ev, walls, loads, drift_limit; active_ids=nothing) -> NamedTuple
+
+`active_ids` (optional) is the SIMP optimizer's Set of ACTIVE candidate ids; when supplied it
+masks density-removed walls out of the torsional-floor enclosure proxy (see
+[`_plate_encloses_walls`]). `nothing` (default) examines every wall, leaving the one-shot CHECK /
+FEM paths unchanged.
 
 EIGENSTRUCTURE STABILITY GATE (reduced tier) — the stability authority for the cheap tier.
 It reads the story stiffness EIGENSTRUCTURE directly (translational spectrum + condensed
@@ -925,7 +995,8 @@ mechanism; callers in the differentiable optimizer loop wrap it to a penalty sen
 function eigenstructure_stability(ev::ReducedDiaphragmEvaluator,
                                   walls::Vector{WallLine},
                                   loads::Vector{StoryLoad},
-                                  drift_limit::Real)
+                                  drift_limit::Real;
+                                  active_ids::Union{Nothing,AbstractSet}=nothing)
     nstory = length(ev.story_heights)
     λmin_tt = fill(NaN, nstory); λmax_tt = fill(NaN, nstory)
     K_theta = fill(NaN, nstory)
@@ -1007,7 +1078,9 @@ function eigenstructure_stability(ev::ReducedDiaphragmEvaluator,
         # floor only over a plate that encloses the drift-relevant points; an under-covering
         # plate would under-state `r_ref` and let the floor fail OPEN. The TRANSLATIONAL floor
         # and the load-independent mechanism guards above do NOT consult the guard and still run.
-        if ev.plate_center === nothing || !_plate_encloses_walls(ev, walls_s)
+        # `active_ids` masks density-removed candidates out of the enclosure proxy (nothing ⇒
+        # all walls, as the one-shot CHECK path and FEM tier require).
+        if ev.plate_center === nothing || !_plate_encloses_walls(ev, walls_s, active_ids)
             k_req_tors[s] = Inf
             util_tors[s]  = Inf
         else

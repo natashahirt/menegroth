@@ -2368,3 +2368,271 @@ end
     @test corner_util > 1.0                                     # rejected on drift, because over-limit
     @test isapprox(corner_util, 1.160; atol=0.02)              # EXACT far-corner drift (metric path)
 end
+
+# ==============================================================================
+# Guard F2 fix — ACTIVE-WALL-ID MASK on the reduced-tier enclosure proxy
+# ==============================================================================
+# crit7's fail-closed `_plate_encloses_walls(ev, walls_s)` refuses a reduced-tier layout
+# whenever ANY WallLine pokes outside the plate `plate_center ± plan_halfwidth`. But the SIMP
+# optimizer never DELETES a removed candidate — it drives it to the void-floor density ρ_min
+# (its stiffness floored to prevent an exactly-singular K) while KEEPING it in `walls_s`. A
+# density-REMOVED candidate parked OUTSIDE the plate is physically absent, yet the one-shot
+# enclosure proxy still saw it and over-rejected an otherwise-sound layout as
+# `:geometry_inconsistent` (Guard F2).
+#
+# THE FIX: `_plate_encloses_walls(ev, walls_s, active_ids)` takes an OPTIONAL active-id Set.
+# When supplied, any wall whose `.id ∉ active_ids` is SKIPPED before the bounds test (the
+# optimizer — the only holder of the densities `x` and ρ_min — computes the active set via
+# `_active_candidate_ids(p, x)`, threshold ρ > ρ_min·(1 + 1e-6)). `active_ids === nothing` (the
+# default) treats EVERY wall as active, so the one-shot CHECK path and the FEM tier are
+# byte-for-byte unchanged. Removal is an EXPLICIT density fact from the optimizer, NEVER inferred
+# from stiffness (an unsafe relative threshold could silently skip a genuinely real outside wall
+# — the exact-formula-fails-OPEN mode this guard exists to prevent).
+#
+# These testsets reuse the crit7 shared fixtures (`_crit7_cands`, `_crit7_walls`, `_CRIT7_XC`):
+# a well-braced core centered at XC = −15 with Y-walls (ids 1, 2) at x = {−18, −12}. Under the
+# UNDER-COVERING plate (plan_halfwidth = (2, 9) ⇒ x-range [−17, −13]) BOTH Y-walls poke out,
+# while the X-walls (ids 3, 4) at x = −15 stay inside — the exact geometry that lets an ACTIVE
+# set decide whether the guard fires.
+
+@testset "Guard F2 (A): guard STILL FIRES when a GENUINELY ACTIVE wall is outside the plate" begin
+    encl  = StructuralSizer._plate_encloses_walls
+    DL    = 0.02
+    XC    = _CRIT7_XC
+    walls = _crit7_walls()                              # Y-walls at x = −18 / −12 (ids 1, 2)
+    loads = [StoryLoad(1, 5e4, 5e4, XC, 0.0)]
+
+    # UNDER-COVERING plate: plate x-range [−17, −13]; the Y-walls (ids 1, 2) poke out.
+    evU = ReducedDiaphragmEvaluator(story_heights=[3.0], plan_halfwidth=(2.0, 9.0),
+                                    plate_center=(XC, 0.0), accidental_ecc=0.05)
+
+    # An OUTSIDE wall whose id IS in the active set must fail the gate (fail-closed preserved):
+    @test encl(evU, walls, Set([1, 2, 3, 4])) == false  # all active ⇒ walls 1 & 2 still poke out
+    @test encl(evU, walls, Set([1, 3, 4]))    == false  # only outside wall 1 active ⇒ still false
+    @test encl(evU, walls, Set([2, 3, 4]))    == false  # only outside wall 2 active ⇒ still false
+
+    # END-TO-END: with MinDrift the stiff core stays dense (every candidate active), so the two
+    # genuinely-active Y-walls poke out and solve_wall_layout STAMPS :geometry_inconsistent.
+    prob = WallLayoutNLPProblem(_crit7_cands(), evU, loads;
+                                objective=MinDrift(), drift_limit=DL)
+    sol = solve_wall_layout(prob; maxiter=200)
+    @test sol.feasible == false
+    @test sol.status == :geometry_inconsistent           # the active outside walls fail closed
+    @test sol.revalidation.failing.mode == :geometry_inconsistent
+end
+
+@testset "Guard F2 (B): REGRESSION — density-removed outside walls are SKIPPED (no spurious reject)" begin
+    # The bug (fails WITHOUT the active-id mask): the SAME under-covering geometry, but the two
+    # outside Y-walls are density-REMOVED (parked at ρ_min). Judged on the ACTIVE walls only
+    # (ids 3, 4, both inside) the layout IS enclosed — the old 2-arg proxy over-rejected it.
+    encl  = StructuralSizer._plate_encloses_walls
+    DL    = 0.02
+    XC    = _CRIT7_XC
+    loads = [StoryLoad(1, 5e4, 5e4, XC, 0.0)]
+    evU = ReducedDiaphragmEvaluator(story_heights=[3.0], plan_halfwidth=(2.0, 9.0),
+                                    plate_center=(XC, 0.0), accidental_ecc=0.05)
+
+    prob = WallLayoutNLPProblem(_crit7_cands(), evU, loads;
+                                objective=MinDrift(), drift_limit=DL)
+
+    # Density vector that DRIVES the two outside Y-walls (ids 1, 2) to the void floor and keeps
+    # the inside X-walls (ids 3, 4) fully dense — exactly what the optimizer hands to the proxy.
+    x_removed = [prob.ρ_min, prob.ρ_min, 1.0, 1.0]
+    active    = StructuralSizer._active_candidate_ids(prob, x_removed)
+    @test active == Set([3, 4])                          # the ρ_min-floored outside walls are REMOVED
+
+    # Positions are density-independent, so `walls_x` STILL carries the outside walls geometrically
+    # (their stiffness is floored, not deleted) — the exact Guard-F2 trap.
+    walls_x = StructuralSizer._walls_from_density(prob, x_removed)
+
+    # WITHOUT the fix (legacy 2-arg / no mask): the removed outside walls over-reject the layout.
+    @test encl(evU, walls_x)         == false            # the BUG this fix repairs
+    # WITH the fix (active mask): judged on the active walls 3 & 4 only ⇒ enclosed, no spurious reject.
+    @test encl(evU, walls_x, active) == true
+end
+
+@testset "Guard F2 (C): LEGACY / one-shot path with NO active set (nothing) is UNCHANGED" begin
+    encl = StructuralSizer._plate_encloses_walls
+    XC   = _CRIT7_XC
+    walls = _crit7_walls()
+
+    # ENCLOSING plate (plan_halfwidth = (3, 9) ⇒ Y-walls exactly on the x = {−18, −12} edges):
+    # inside-only ⇒ true, for BOTH the implicit default and an explicit `nothing`.
+    evE = ReducedDiaphragmEvaluator(story_heights=[3.0], plan_halfwidth=(3.0, 9.0),
+                                    plate_center=(XC, 0.0), accidental_ecc=0.05)
+    @test encl(evE, walls)          == true              # default active_ids === nothing
+    @test encl(evE, walls, nothing) == true              # explicit nothing ⇒ byte-for-byte legacy
+
+    # UNDER-COVERING plate: any-outside ⇒ false, identically for default and explicit nothing.
+    evU = ReducedDiaphragmEvaluator(story_heights=[3.0], plan_halfwidth=(2.0, 9.0),
+                                    plate_center=(XC, 0.0), accidental_ecc=0.05)
+    @test encl(evU, walls)          == false
+    @test encl(evU, walls, nothing) == false
+end
+
+@testset "Guard F2 (D): EDGE — empty active set vacuous on a POSITIVE plate; inverted plate fails closed BEFORE the mask" begin
+    encl  = StructuralSizer._plate_encloses_walls
+    XC    = _CRIT7_XC
+    walls = _crit7_walls()                               # Y-walls poke out of the (2, 9) plate
+
+    # EMPTY active set (all candidates removed) on a well-formed (NON-negative) plate ⇒ vacuously
+    # enclosed, even with outside walls geometrically present — same rule as an empty `walls_s`.
+    evU = ReducedDiaphragmEvaluator(story_heights=[3.0], plan_halfwidth=(2.0, 9.0),
+                                    plate_center=(XC, 0.0), accidental_ecc=0.05)
+    @test encl(evU, walls, Set{Int}()) == true
+
+    # NEGATIVE (inverted) half-extent: the fail-closed branch fires BEFORE the active mask
+    # (crit-P2), so a NON-EMPTY `walls_s` with an inverted plate fails closed REGARDLESS of which
+    # walls are active — including an empty active set. An inverted / garbage `plan_halfwidth`
+    # must never report "enclosed".
+    evneg = ReducedDiaphragmEvaluator(story_heights=[3.0], plan_halfwidth=(-1.0, 5.0),
+                                      plate_center=(0.0, 0.0), accidental_ecc=0.05)
+    @test encl(evneg, walls, Set([1]))    == false       # an ACTIVE wall ⇒ inverted plate fails closed
+    @test encl(evneg, walls, Set{Int}())  == false       # empty active set ⇒ STILL fails closed (before mask)
+    @test encl(evneg, walls)              == false       # legacy (all active) ⇒ fails closed as before
+end
+
+# ==============================================================================
+# Guard F2 fix — P0 FAIL-OPEN REGRESSION (absolute ρ^penal activity threshold)
+# ==============================================================================
+# The ORIGINAL Guard-F2 patch defined "active" in LINEAR density relative to ρ_min
+# (`ρ > ρ_min·(1 + 1e-6)`). At a legal `ρ_min = 1.0` every density is pinned at the floor, so the
+# relative test is NEVER satisfied — the active set goes EMPTY and `_plate_encloses_walls` becomes
+# vacuously true for EVERY layout, silently DISABLING the enclosure guard (a P0 fail-open: an
+# over-limit layout certifies as feasible). The SAME trap bites any large `ρ_min`.
+#
+# THE FIX: a candidate is ACTIVE iff its PENALIZED stiffness fraction exceeds a fixed ABSOLUTE
+# floor — `(clamp(x[i], ρ_min, 1.0))^penal > ACTIVE_STIFFNESS_FRACTION_FLOOR` (= 1e-6). `ρ^penal`
+# is exactly the fraction of `k_max` assembled into `K`, so removal is judged on what the stiffness
+# matrix actually sees. Because the test is per-wall and absolute, the magnitude of `ρ_min` is
+# IRRELEVANT: it degrades to "all active" (guard fully armed) as `ρ_min → 1`, and only marks a wall
+# removed when its OWN `ρ^penal` is genuinely negligible. The constructor also now validates
+# `0 < ρ_min ≤ 1`, `penal ≥ 1`, and candidate-id uniqueness.
+#
+# Each @test below FAILS on the pre-fix LINEAR threshold (noted inline) and PASSES on the absolute
+# `ρ^penal` fix. Fixtures reused from the crit7 block: `_crit7_cands`, `_crit7_walls`, `_CRIT7_XC`,
+# and the under-covering plate `evU` (plan_halfwidth = (2, 9) ⇒ Y-walls 1 & 2 poke out).
+
+@testset "Guard F2 (P0-a): ρ_min=1.0, penal=1 ⇒ ALL walls active, guard STAYS ARMED (fail-open repaired)" begin
+    encl   = StructuralSizer._plate_encloses_walls
+    active = StructuralSizer._active_candidate_ids
+    DL     = 0.02
+    XC     = _CRIT7_XC
+    walls  = _crit7_walls()
+    loads  = [StoryLoad(1, 5e4, 5e4, XC, 0.0)]
+    evU    = ReducedDiaphragmEvaluator(story_heights=[3.0], plan_halfwidth=(2.0, 9.0),
+                                       plate_center=(XC, 0.0), accidental_ecc=0.05)
+
+    # `ρ_min=1.0, penal=1`: every density is pinned at the floor 1.0 (lb == ub). The LINEAR test
+    # `ρ > ρ_min·(1+1e-6)` = `1.0 > 1.000001` is FALSE for all → PRE-FIX active set is EMPTY.
+    prob = WallLayoutNLPProblem(_crit7_cands(), evU, loads;
+                                objective=MinDrift(), drift_limit=DL, ρ_min=1.0, penal=1)
+    n   = length(_crit7_cands())
+    ids = active(prob, fill(1.0, n))
+    @test !isempty(ids)                  # PRE-FIX: EMPTY (fail-open). FIX: 1.0^1 = 1 > 1e-6 for all.
+    @test ids == Set([1, 2, 3, 4])       # ALL candidate ids are active at the ρ_min=1.0 floor.
+
+    # Guard ARMED: the fully-dense outside Y-walls (ids 1, 2) make the enclosure proxy fail closed.
+    @test encl(evU, walls, ids) == false # PRE-FIX: vacuously TRUE (empty mask) ⇒ guard disabled.
+
+    # END-TO-END: with every variable pinned dense, solve_wall_layout stamps :geometry_inconsistent.
+    sol = solve_wall_layout(prob; maxiter=200)
+    @test sol.feasible == false
+    @test sol.status == :geometry_inconsistent
+    @test sol.revalidation.failing.mode == :geometry_inconsistent
+end
+
+@testset "Guard F2 (P0-b): ρ_min=0.5, penal=1 ⇒ a floored wall is ACTIVE (0.5 > 1e-6), gate fires" begin
+    encl   = StructuralSizer._plate_encloses_walls
+    active = StructuralSizer._active_candidate_ids
+    DL     = 0.02
+    XC     = _CRIT7_XC
+    walls  = _crit7_walls()
+    loads  = [StoryLoad(1, 5e4, 5e4, XC, 0.0)]
+    evU    = ReducedDiaphragmEvaluator(story_heights=[3.0], plan_halfwidth=(2.0, 9.0),
+                                       plate_center=(XC, 0.0), accidental_ecc=0.05)
+
+    prob = WallLayoutNLPProblem(_crit7_cands(), evU, loads;
+                                objective=MinDrift(), drift_limit=DL, ρ_min=0.5, penal=1)
+    # All candidates parked at the ρ_min=0.5 floor. LINEAR test `0.5 > 0.5·(1+1e-6)` is FALSE
+    # (PRE-FIX ⇒ removed). FIX: `ρ^penal = 0.5^1 = 0.5 > 1e-6` ⇒ ACTIVE.
+    ids = active(prob, fill(prob.ρ_min, length(_crit7_cands())))
+    @test ids == Set([1, 2, 3, 4])       # floored-but-stiff candidates are active (PRE-FIX: empty).
+
+    # An OUTSIDE wall that is merely floored (not removed) still carries stiffness ⇒ the gate
+    # must fail closed on it. (PRE-FIX: empty mask ⇒ vacuously true.)
+    @test encl(evU, walls, ids) == false
+end
+
+@testset "Guard F2 (P0-c): default ρ_min=1e-3, penal=3 ⇒ a floored wall (ρ^penal=1e-9) is REMOVED (F2 preserved)" begin
+    encl   = StructuralSizer._plate_encloses_walls
+    active = StructuralSizer._active_candidate_ids
+    wfd    = StructuralSizer._walls_from_density
+    DL     = 0.02
+    XC     = _CRIT7_XC
+    walls  = _crit7_walls()
+    loads  = [StoryLoad(1, 5e4, 5e4, XC, 0.0)]
+    evU    = ReducedDiaphragmEvaluator(story_heights=[3.0], plan_halfwidth=(2.0, 9.0),
+                                       plate_center=(XC, 0.0), accidental_ecc=0.05)
+
+    # Default floor/exponent. Drive the two OUTSIDE Y-walls (ids 1, 2) to the void floor and keep
+    # the inside X-walls (ids 3, 4) dense — exactly what the optimizer hands the proxy.
+    prob = WallLayoutNLPProblem(_crit7_cands(), evU, loads;
+                                objective=MinDrift(), drift_limit=DL)   # ρ_min=1e-3, penal=3
+    x   = [prob.ρ_min, prob.ρ_min, 1.0, 1.0]
+    ids = active(prob, x)
+    # `ρ^penal = (1e-3)^3 = 1e-9 ≤ 1e-6` ⇒ the floored outside walls are correctly ABSENT. The
+    # F2 fix is PRESERVED (removed-outside walls must not over-reject) — passes pre- and post-fix.
+    @test ids == Set([3, 4])
+    @test !(1 in ids) && !(2 in ids)
+
+    # Positions are density-independent, so `walls_x` still carries the removed walls geometrically;
+    # judged on the ACTIVE walls (3, 4, both inside) only, the layout IS enclosed ⇒ no spurious reject.
+    walls_x = wfd(prob, x)
+    @test encl(evU, walls_x, ids) == true
+end
+
+@testset "Guard F2 (P0-d): WallLayoutNLPProblem constructor guards (ρ_min, penal, unique ids)" begin
+    XC    = _CRIT7_XC
+    loads = [StoryLoad(1, 5e4, 5e4, XC, 0.0)]
+    evU   = ReducedDiaphragmEvaluator(story_heights=[3.0], plan_halfwidth=(2.0, 9.0),
+                                      plate_center=(XC, 0.0), accidental_ecc=0.05)
+
+    # PRE-FIX: the constructor performed NO validation ⇒ none of these threw (the @test_throws
+    # below all FAILED). FIX: ArgumentError on each nonsensical input.
+    @test_throws ArgumentError WallLayoutNLPProblem(_crit7_cands(), evU, loads; ρ_min=1.5)   # ρ_min > 1
+    @test_throws ArgumentError WallLayoutNLPProblem(_crit7_cands(), evU, loads; ρ_min=0.0)   # ρ_min ≤ 0
+    @test_throws ArgumentError WallLayoutNLPProblem(_crit7_cands(), evU, loads; ρ_min=-0.1)  # ρ_min ≤ 0
+    @test_throws ArgumentError WallLayoutNLPProblem(_crit7_cands(), evU, loads; penal=0.5)   # penal < 1
+
+    # Duplicate candidate ids (two candidates both id = 1) ⇒ the id-keyed activity mask / force
+    # indexing would alias ⇒ rejected.
+    dup = [_crit7_cand(1, _CRIT7_XC - 3.0, 0.0, pi/2),
+           _crit7_cand(1, _CRIT7_XC + 3.0, 0.0, pi/2)]
+    @test_throws ArgumentError WallLayoutNLPProblem(dup, evU, loads)
+
+    # The legal boundary `ρ_min = 1.0`, `penal = 1` with UNIQUE ids must NOT throw (P0-a relies
+    # on it being constructible).
+    @test WallLayoutNLPProblem(_crit7_cands(), evU, loads; ρ_min=1.0, penal=1) isa
+          WallLayoutNLPProblem
+end
+
+@testset "Guard F2 (P0-e): inverted plate (negative half-extent) fails closed on a NON-EMPTY wall set" begin
+    encl  = StructuralSizer._plate_encloses_walls
+    walls = _crit7_walls()                                # non-empty
+
+    # A negative X half-extent with real walls present ⇒ fail closed, INDEPENDENT of the mask
+    # (the inverted-plate branch fires BEFORE the active-id skip, crit-P2).
+    evnegx = ReducedDiaphragmEvaluator(story_heights=[3.0], plan_halfwidth=(-1.0, 5.0),
+                                       plate_center=(0.0, 0.0), accidental_ecc=0.05)
+    @test encl(evnegx, walls, Set([1, 2, 3, 4])) == false  # active present ⇒ fails closed
+    @test encl(evnegx, walls, Set{Int}())        == false  # empty active set ⇒ STILL fails closed
+    @test encl(evnegx, walls, nothing)           == false  # legacy path ⇒ fails closed
+    @test encl(evnegx, walls)                     == false  # default (all active) ⇒ fails closed
+
+    # Symmetric check on a negative Y half-extent.
+    evnegy = ReducedDiaphragmEvaluator(story_heights=[3.0], plan_halfwidth=(5.0, -1.0),
+                                       plate_center=(0.0, 0.0), accidental_ecc=0.05)
+    @test encl(evnegy, walls, Set{Int}()) == false
+    @test encl(evnegy, walls)             == false
+end

@@ -168,10 +168,11 @@ const PIPELINE_PROVENANCE = Dict{NodeKey, @NamedTuple{
         # narrows a beam group's feasible set from `params.member_group_overrides`, so a
         # change to that dict must invalidate this node for the incremental engine to
         # honor it (from-scratch == incremental oracle).
+        # :beam_I_factor — consumed only at member sizing (size_beams! reads params.beam_I_factor); a change must dirty the members node (from-scratch == incremental oracle). ACI 318-11 §10.10.4.1.
         param_slice  = Symbol[:columns, :beams, :materials, :max_iterations,
                               :fire_rating, :fire_protection, :geometry_is_centerline,
                               :load_combinations, :optimize_for, :collinear_grouping,
-                              :member_group_overrides],
+                              :member_group_overrides, :beam_I_factor],
         reads        = Symbol[:columns, :beams, :slabs, :asap_model],
         writes       = Symbol[:columns, :beams, :asap_model],
         code_version = :members_v1,

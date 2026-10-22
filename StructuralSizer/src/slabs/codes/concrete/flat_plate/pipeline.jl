@@ -743,18 +743,53 @@ Named tuple with fields:
 - `integrity_check`: Pass/fail for integrity reinforcement vs provided bottom steel
 - `transfer_results::Vector{Union{Nothing, NamedTuple}}`: Moment transfer reinforcement at each column (ACI 8.4.2.3)
 - `ρ_prime::Float64`: Estimated compression reinforcement ratio for long-term deflection
+- `method_requested`: The `method` passed in
+- `method_used`: The analysis method the design was actually run with (`FEA()` when
+  the requested DDM/EFM is not permitted and `opts.on_inapplicable == :fallback`)
+- `method_fallback_reasons::Vector{String}`: The ACI 318-11 §13.6.1 / §13.7
+  applicability violations that caused the fallback (empty when none)
+
+These three fields are present on every returned tuple, converged or not.
+
+# Method Applicability
+When DDM/EFM is not permitted for the layout, `opts.on_inapplicable` decides:
+`:fallback` (default) designs with FEA, keeps a `@warn`, emits a `:fallback`
+trace event (`resolve_analysis_method`, `reason = "method_not_applicable"`) and
+records the switch in the fields above; `:error` rethrows the
+`DDMApplicabilityError` / `EFMApplicabilityError`.  A `RuleOfThumb` wrapping
+DDM/EFM follows the same rule for its inner method.
 
 # Example
 ```julia
 result = size_flat_plate!(struc, slab, ConcreteColumnOptions())
 result = size_flat_plate!(struc, slab, col_opts; method=EFM(), verbose=true)
+result.method_used isa FEA && @info "DDM/EFM not permitted" result.method_fallback_reasons
 ```
 """
-function size_flat_plate!(
+function size_flat_plate!(struc, slab, column_opts;
+                          method::FlatPlateAnalysisMethod = DDM(), kwargs...)
+    record = Ref{NamedTuple}((method_requested = method, method_used = method,
+                              method_fallback_reasons = String[]))
+    result = _size_flat_plate!(struc, slab, column_opts;
+                               method = method, _method_record = record, kwargs...)
+    return merge(result, record[])
+end
+
+"""
+    _size_flat_plate!(struc, slab, column_opts; method, _method_record, kwargs...)
+
+Body of `size_flat_plate!`.  When the requested method is replaced by its
+fallback (`resolve_analysis_method`), `_method_record[]` is set to the
+`(method_requested, method_used, method_fallback_reasons)` record that
+`size_flat_plate!` merges into the returned tuple.
+"""
+function _size_flat_plate!(
     struc,
     slab,
     column_opts;
     method::FlatPlateAnalysisMethod = DDM(),
+    _method_record::Base.RefValue{NamedTuple} = Ref{NamedTuple}(
+        (method_requested = method, method_used = method, method_fallback_reasons = String[])),
     opts::FlatPlateOptions = FlatPlateOptions(),
     max_iterations::Int = 10,
     column_tol::Float64 = 0.05,
@@ -777,7 +812,8 @@ function size_flat_plate!(
     if method isa RuleOfThumb
         return check_flat_plate_at_thickness!(struc, slab, column_opts;
             method=method, opts=opts, verbose=verbose,
-            _col_cache=_col_cache, slab_idx=slab_idx, drop_panel=drop_panel, tc=tc)
+            _col_cache=_col_cache, slab_idx=slab_idx, drop_panel=drop_panel, tc=tc,
+            _method_record=_method_record)
     end
 
     # =========================================================================
@@ -832,19 +868,14 @@ function size_flat_plate!(
         end
     end
     
-    # Check method applicability — auto-fallback to FEA if DDM/EFM not permitted
-    try
-        enforce_method_applicability(method, struc, slab, columns; verbose=verbose, ρ_concrete=γ_concrete)
-    catch e
-        if e isa DDMApplicabilityError || e isa EFMApplicabilityError
-            old_name = method_name(method)
-            viol_str = join(e.violations, "; ")
-            @warn "$(old_name) not applicable — falling back to FEA" violations=viol_str
-            method = FEA()
-            enforce_method_applicability(method, struc, slab, columns; verbose=verbose, ρ_concrete=γ_concrete)
-        else
-            rethrow()
-        end
+    # Check method applicability — FEA fallback or rethrow per opts.on_inapplicable
+    requested_method = method
+    method, fallback_reasons = resolve_analysis_method(
+        method, struc, slab, columns, opts.on_inapplicable;
+        ρ_concrete=γ_concrete, verbose=verbose, tc=tc, slab_id="slab_$(slab_idx)")
+    if method !== requested_method
+        _method_record[] = (method_requested = requested_method, method_used = method,
+                            method_fallback_reasons = fallback_reasons)
     end
     
     # =========================================================================
@@ -1033,6 +1064,7 @@ function size_flat_plate!(
     _slab_id = "slab_$(slab_idx)"
     emit!(tc, :slab, "size_flat_plate!", _slab_id, :enter;
           method=method_name(method),
+          method_requested=method_name(requested_method),
           n_columns=n_cols,
           h_initial=string(h_initial),
           primary_span=string(slab.spans.primary),
@@ -1147,6 +1179,8 @@ function size_flat_plate!(
                     method, struc, slab, columns, h, fc, Ecs, γ_concrete;
                     verbose=verbose, drop_panel=drop_panel, βt=_βt,
                     _edge_beam_analysis_kwargs(opts)...,
+                    # ACI 318-11 §10.10.4.1 — cracked column-stub stiffness from caller (default 0.70)
+                    col_I_factor = opts.col_I_factor,
                     tc = tc,
                 )
             end
@@ -1410,6 +1444,8 @@ function size_flat_plate!(
                     method, struc, slab, columns, h, fc, Ecs, γ_concrete;
                     verbose=verbose, drop_panel=drop_panel, βt=_βt,
                     _edge_beam_analysis_kwargs(opts)...,
+                    # ACI 318-11 §10.10.4.1 — cracked column-stub stiffness from caller (default 0.70)
+                    col_I_factor = opts.col_I_factor,
                     tc = tc,
                 )
             end

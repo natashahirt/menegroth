@@ -85,6 +85,10 @@ function restore!(struc::BuildingStructure, key::Symbol = :prepare;
         slab.result = ss.result
         slab.volumes = ss.volumes
         slab.drop_panel = ss.drop_panel
+        # The whole `size_flat_plate!` NamedTuple, including
+        # method_requested, method_used, and method_fallback_reasons.
+        # `_populate_slab_results!` copies those onto SlabDesignResult;
+        # restoring the tuple keeps the FEA-fallback notice on the slab.
         hasproperty(slab, :design_details) && (slab.design_details = ss.design_details)
     end
 
@@ -292,6 +296,8 @@ function restore_slab_node_writes!(dst::BuildingStructure, src::BuildingStructur
     d_slab.result = s_slab.result
     d_slab.volumes = s_slab.volumes
     d_slab.drop_panel = s_slab.drop_panel
+    # Whole NamedTuple, so method_requested / method_used /
+    # method_fallback_reasons survive a per-slab restore.
     hasproperty(d_slab, :design_details) && (d_slab.design_details = s_slab.design_details)
 
     # Supported cells: self_weight/live_load written during slab sizing + sync.

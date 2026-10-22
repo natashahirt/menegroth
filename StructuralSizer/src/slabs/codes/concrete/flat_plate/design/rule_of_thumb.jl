@@ -11,9 +11,13 @@
 # `method = RuleOfThumb()`.
 # =============================================================================
 
+TRACE_REGISTRY[(:check_flat_plate_at_thickness!, :slab)] =
+    TracedFunctionMeta(:check_flat_plate_at_thickness!, :slab,
+                       [:failure], nothing, @__FILE__, @__LINE__)
+
 """
     check_flat_plate_at_thickness!(struc, slab, column_opts; method, opts, verbose,
-                                   _col_cache, slab_idx, drop_panel)
+                                   _col_cache, slab_idx, drop_panel, tc)
 
 Single-pass flat-plate evaluation at the ACI minimum slab thickness.
 
@@ -21,6 +25,16 @@ Mirrors the iterative pipeline in `size_flat_plate!` but does **not** bump
 `h` on failure.  Instead, every check is run and its result recorded; the
 returned NamedTuple includes a `failures` field listing the names of any
 checks that did not pass.
+
+`tc` is passed to the moment analyses, so Eq. (13-7) and §13.6.3.3
+fallbacks are traced as on the iterative path.  A non-finite transfer
+moment or transfer reinforcement (`_rot_transfer_reinforcement!`) records
+`transfer_reinforcement`, emits `:failure`, and returns no `slab_result`,
+as the iterative pipeline returns none for that case.
+
+When the wrapped DDM/EFM is not permitted for the layout,
+`resolve_analysis_method` applies `opts.on_inapplicable` (`:fallback` runs
+the pass with `FEA()` and records it in `_method_record`; `:error` rethrows).
 
 Called automatically when `method isa RuleOfThumb`.
 """
@@ -34,6 +48,9 @@ function check_flat_plate_at_thickness!(
     _col_cache = nothing,
     slab_idx::Int = 0,
     drop_panel::Union{Nothing, DropPanelGeometry} = nothing,
+    tc::Union{Nothing, TraceCollector} = nothing,
+    _method_record::Base.RefValue{NamedTuple} = Ref{NamedTuple}(
+        (method_requested = method, method_used = method, method_fallback_reasons = String[])),
 )
     # =====================================================================
     # 1. SETUP  (identical to pipeline Phase 1)
@@ -145,8 +162,18 @@ function check_flat_plate_at_thickness!(
         [_id_to_idx[objectid(col)] for col in columns]
     end
 
+    # Applicability of the inner method — FEA fallback or rethrow per
+    # opts.on_inapplicable, exactly as the iterative pipeline does.
+    inner, fallback_reasons = resolve_analysis_method(
+        method.analysis, struc, slab, columns, opts.on_inapplicable;
+        ρ_concrete=γ_concrete, verbose=verbose, tc=tc, slab_id="slab_$(slab_idx)",
+        caller="check_flat_plate_at_thickness!")
+    if inner !== method.analysis
+        _method_record[] = (method_requested = method, method_used = RuleOfThumb(inner),
+                            method_fallback_reasons = fallback_reasons)
+    end
+
     # Analysis cache
-    inner = method.analysis
     analysis_cache = if slab_idx > 0 && hasproperty(struc, :_analysis_caches)
         slab_caches = get!(struc._analysis_caches, slab_idx, Dict{Symbol, Any}())
         if inner isa EFM && inner.solver == :asap
@@ -181,34 +208,6 @@ function check_flat_plate_at_thickness!(
         _βt = edge_beam_βt(h, _c1_avg, _c2_avg, slab.spans.secondary)
     end
 
-    # Check applicability — if DDM isn't valid, return early with failure reason
-    try
-        enforce_method_applicability(inner, struc, slab, columns;
-                                     verbose=verbose, ρ_concrete=γ_concrete)
-    catch e
-        if e isa DDMApplicabilityError || e isa EFMApplicabilityError
-            reason = join(e.violations, "; ")
-            return (
-                converged        = false,
-                failure_reason   = reason,
-                failing_check    = "applicability",
-                failures         = ["applicability"],
-                iterations       = 0,
-                h_final          = h,
-                pattern_loading  = false,
-                slab_result      = nothing,
-                column_results   = nothing,
-                drop_panel       = drop_panel,
-                integrity        = nothing,
-                integrity_check  = nothing,
-                transfer_results = nothing,
-                ρ_prime          = 0.0,
-            )
-        else
-            rethrow()
-        end
-    end
-
     moment_results = run_moment_analysis(
         inner, struc, slab, columns, h, fc, Ecs, γ_concrete;
         ν_concrete = material.concrete.ν,
@@ -217,8 +216,22 @@ function check_flat_plate_at_thickness!(
         cache      = analysis_cache isa FEAModelCache ? analysis_cache : nothing,
         drop_panel = drop_panel,
         βt = _βt,
+        _edge_beam_analysis_kwargs(opts)...,
         col_I_factor = opts.col_I_factor,
+        tc = tc,
     )
+
+    secondary_results = if inner isa FEA && !isnothing(moment_results.secondary)
+        moment_results.secondary
+    else
+        run_secondary_moment_analysis(
+            inner, struc, slab, columns, h, fc, Ecs, γ_concrete;
+            verbose=verbose, drop_panel=drop_panel, βt=_βt,
+            _edge_beam_analysis_kwargs(opts)...,
+            # ACI 318-11 §10.10.4.1 — cracked column-stub stiffness from caller (default 0.70)
+            col_I_factor = opts.col_I_factor, tc=tc,
+        )
+    end
 
     check_pattern_loading_requirement(moment_results; verbose=verbose)
 
@@ -255,19 +268,27 @@ function check_flat_plate_at_thickness!(
         h_total = total_depth_at_drop(h, drop_panel)
         d_total = effective_depth(h_total; cover=cover, bar_diameter=bar_dia)
         for i in 1:n_cols
+            # ACI 318-11 §11.11.7.1 (corpus: aci-318-11, page 209) +
+            # PCA EB712 Fig. 16-13 Case D (corpus: pca-eb712, page 486).
+            Muy_i = isnothing(secondary_results) ? nothing :
+                secondary_results.unbalanced_moments[i]
             punching_local[i] = check_punching(
                 columns[i], moment_results.column_shears[i],
                 moment_results.unbalanced_moments[i],
                 h, d, h_total, d_total, fc, drop_panel;
-                qu=moment_results.qu, verbose=false, col_idx=i, λ=λ, φ_shear=φ_shear
+                qu=moment_results.qu, Muy=Muy_i,
+                verbose=false, col_idx=i, λ=λ, φ_shear=φ_shear
             )
         end
     else
         for i in 1:n_cols
+            Muy_i = isnothing(secondary_results) ? nothing :
+                secondary_results.unbalanced_moments[i]
             punching_local[i] = check_punching_for_column(
                 columns[i], moment_results.column_shears[i],
                 moment_results.unbalanced_moments[i], d, h, fc;
                 verbose=false, col_idx=i, λ=λ, φ_shear=φ_shear,
+                Muy=Muy_i,
             )
         end
     end
@@ -395,32 +416,9 @@ function check_flat_plate_at_thickness!(
 
     # Moment transfer
     transfer_results = Union{Nothing, NamedTuple}[nothing for _ in 1:n_cols]
-    if !isnothing(rebar_design)
-        for (i, col) in enumerate(columns)
-            Mub_i = moment_results.unbalanced_moments[i]
-            abs(ustrip(kip * u"ft", Mub_i)) < 1e-6 && continue
-            c2_i = col.c2
-            bb   = c2_i + 3 * h
-            b1   = col.c1 + d
-            b2   = col.c2 + d
-            γf_val = gamma_f(b1, b2)
-            As_transfer = transfer_reinforcement(abs(Mub_i), γf_val, bb, d, fc, fy)
-            # Skip if section inadequate (Inf returned)
-            if isinf(As_transfer)
-                continue
-            end
-            cs_neg_idx = col.position == :interior ? 3 : 1
-            As_provided_cs = rebar_design.column_strip_reinf[cs_neg_idx].As_provided
-            # ACI 318-11 §13.3.2 + §7.6.5 — slab-thickness-dependent s_max
-            selected = select_bars(As_provided_cs, rebar_design.column_strip_width;
-                                   max_spacing=max_bar_spacing(h))
-            Ab = bar_area(selected.bar_size)
-            transfer_results[i] = additional_transfer_bars(
-                As_transfer, As_provided_cs, bb,
-                rebar_design.column_strip_width, Ab
-            )
-        end
-    end
+    transfer_ok = isnothing(rebar_design) || _rot_transfer_reinforcement!(
+        transfer_results, failures, columns, moment_results, secondary_results,
+        rebar_design, h, d, fc, fy; tc = tc, slab_id = "slab_$(slab_idx)")
 
     # Integrity reinforcement
     cell = struc.cells[first(slab.cell_indices)]
@@ -462,7 +460,7 @@ function check_flat_plate_at_thickness!(
 
     converged = isempty(failures)
 
-    slab_result = if !isnothing(rebar_design) && !isnothing(deflection_result)
+    slab_result = if transfer_ok && !isnothing(rebar_design) && !isnothing(deflection_result)
         build_slab_result(
             h, sw_final, moment_results, rebar_design,
             deflection_result, punching_results;
@@ -492,4 +490,64 @@ function check_flat_plate_at_thickness!(
         transfer_results = transfer_results,
         ρ_prime          = ρ_prime_est,
     )
+end
+
+"""
+    _rot_transfer_reinforcement!(transfer_results, failures, columns, moment_results,
+                                 secondary_results, rebar_design, h, d, fc, fy;
+                                 tc, slab_id) -> Bool
+
+Moment-transfer reinforcement (ACI 318-11 §13.5.3, corpus: aci-318-11,
+page 250) at every column for the rule-of-thumb pass.  Fills
+`transfer_results[i]` and returns `true` when every column has a finite
+transfer demand and finite transfer steel.
+
+A non-finite transfer moment, or transfer steel the section cannot develop
+(`transfer_section_inadequate`), records `transfer_reinforcement` in
+`failures`, emits a `:failure` trace event naming the column, and returns
+`false`.  The column is not skipped as if no transfer were required; the
+caller must not build a design from it (the iterative pipeline returns
+`converged = false` with no result in the same case).
+"""
+function _rot_transfer_reinforcement!(transfer_results, failures, columns,
+                                      moment_results, secondary_results,
+                                      rebar_design, h, d, fc, fy;
+                                      tc = nothing, slab_id::String = "")
+    ok = true
+    function fail!(i, reason)
+        "transfer_reinforcement" in failures || push!(failures, "transfer_reinforcement")
+        emit!(tc, :slab, "check_flat_plate_at_thickness!", slab_id, :failure;
+              reason = reason, failing_check = "transfer_reinforcement", column = i)
+        ok = false
+    end
+    for (i, col) in enumerate(columns)
+        Mub_i = moment_results.unbalanced_moments[i]
+        Muy_i = isnothing(secondary_results) ? zero(Mub_i) :
+                secondary_results.unbalanced_moments[i]
+        if !isfinite(Mub_i) || !isfinite(Muy_i)
+            fail!(i, "transfer_moment_non_finite")
+            continue
+        end
+        abs(ustrip(kip * u"ft", Mub_i)) < 1e-6 &&
+            abs(ustrip(kip * u"ft", Muy_i)) < 1e-6 && continue
+        gov = governing_transfer_reinforcement(
+            Mub_i, Muy_i, col.c1, col.c2, h, d, fc, fy;
+            position = col.position,
+            free_edge_parallel = _infer_free_edge_parallel(col))
+        if transfer_section_inadequate(gov.As)
+            fail!(i, "transfer_section_inadequate")
+            continue
+        end
+        cs_neg_idx = col.position == :interior ? 3 : 1
+        As_provided_cs = rebar_design.column_strip_reinf[cs_neg_idx].As_provided
+        # ACI 318-11 §13.3.2 + §7.6.5 — slab-thickness-dependent s_max
+        selected = select_bars(As_provided_cs, rebar_design.column_strip_width;
+                               max_spacing=max_bar_spacing(h))
+        Ab = bar_area(selected.bar_size)
+        transfer_results[i] = additional_transfer_bars(
+            gov.As, As_provided_cs, gov.bb,
+            rebar_design.column_strip_width, Ab
+        )
+    end
+    return ok
 end

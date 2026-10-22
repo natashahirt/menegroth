@@ -757,7 +757,13 @@ material cascade from `params.materials` into the floor options.
 function resolve_floor_options(params::DesignParameters)
     floor = something(params.floor, StructuralSizer.FlatPlateOptions())
     check_material_compatibility(params.materials, floor)
-    return _apply_material_cascade(params.materials, floor)
+    cascaded = _apply_material_cascade(params.materials, floor)
+    # ACI 318-11 §10.10.4.1 — `params.column_I_factor` is the single source of truth
+    # for flat-plate COLUMN cracked stiffness. Thread it into the floor options so the
+    # FEA path (which reads `opts.col_I_factor`) uses the param rather than the field
+    # default. At the default `column_I_factor = 0.70` this matches the field default
+    # → byte-exact no-op.
+    return _apply_col_I_factor(cascaded, params.column_I_factor)
 end
 
 # --- Material cascade into floor options (using Accessors @set) ---
@@ -794,6 +800,26 @@ _apply_material_cascade(::MaterialOptions, opts::StructuralSizer.AbstractFloorOp
 """True if any material is set on `mat`."""
 _has_material(m::MaterialOptions) =
     !isnothing(m.slab) || !isnothing(m.column) || !isnothing(m.concrete) || !isnothing(m.rebar)
+
+# --- Column cracking factor into floor options (using Accessors @set) ---
+# ACI 318-11 §10.10.4.1 — reduced (cracked) column moment of inertia (0.70·Ig).
+# `params.column_I_factor` is the single source of truth; mirror the
+# `_apply_material_cascade` multiple-dispatch pattern so option types that have no
+# column cracking factor fall through unchanged (must not crash).
+
+"""Set the FEA column cracking factor on `FlatPlateOptions` (ACI 318-11 §10.10.4.1)."""
+function _apply_col_I_factor(opts::StructuralSizer.FlatPlateOptions, column_I_factor::Real)
+    @set opts.col_I_factor = Float64(column_I_factor)  # ACI 318-11 §10.10.4.1
+end
+
+"""Set the FEA column cracking factor on `FlatSlabOptions` (delegates to the wrapped `base`)."""
+function _apply_col_I_factor(opts::StructuralSizer.FlatSlabOptions, column_I_factor::Real)
+    @set opts.base.col_I_factor = Float64(column_I_factor)  # ACI 318-11 §10.10.4.1
+end
+
+# Fallback: option types without a column cracking factor (OneWayOptions, VaultOptions, …)
+"""Fallback: floor options with no column cracking factor; return options unchanged."""
+_apply_col_I_factor(opts::StructuralSizer.AbstractFloorOptions, ::Real) = opts
 
 # =============================================================================
 # `with` helper (Accessors-based, replaces _with)
@@ -946,6 +972,16 @@ Base.@kwdef mutable struct SlabDesignResult
     # Full StructuralSizer result captured before restore! wipes slab.result.
     # Used by engineering_report and any downstream that needs the rich sizing detail.
     sizer_result::Union{Nothing, StructuralSizer.AbstractFloorResult} = nothing
+
+    # USER DECISION: when the requested DDM or EFM is not permitted, the
+    # design falls back to FEA and the caller must be able to see that.
+    # Copied from the `size_flat_plate!` NamedTuple (`slab.design_details`)
+    # by `_populate_slab_results!`.  `restore!` writes that NamedTuple back
+    # onto the slab, so the same three fields survive a snapshot round-trip.
+    # `method_fallback_reasons` is empty when the requested method was used.
+    method_requested::Union{Nothing, StructuralSizer.FlatPlateAnalysisMethod} = nothing
+    method_used::Union{Nothing, StructuralSizer.FlatPlateAnalysisMethod} = nothing
+    method_fallback_reasons::Vector{String} = String[]
 end
 
 """

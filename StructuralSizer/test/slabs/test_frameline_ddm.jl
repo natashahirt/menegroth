@@ -218,8 +218,10 @@ end
         
         struc = (tributaries = (vertex = Dict{Int, Dict{Int, Any}}(),), skeleton = (vertices = [],))
         
-        # Run MDDM (simplified)
-        result = StructuralSizer.run_moment_analysis(DDM(:simplified), fl, struc, qu, qD, qL)
+        # Run MDDM (simplified).  Two spans violate §13.6.1.1, so the
+        # FrameLine applicability gate must be told to proceed.
+        result = StructuralSizer.run_moment_analysis(DDM(:simplified), fl, struc, qu, qD, qL;
+                                                     on_inapplicable = :proceed)
         
         # MDDM uses 0.65/0.35 for all spans
         M0_kipft = ustrip(kip*u"ft", result.M0)
@@ -297,7 +299,12 @@ end
         qu = 1.2 * qD + 1.6 * qL
         
         struc = (tributaries = (vertex = Dict{Int, Dict{Int, Any}}(),), skeleton = (vertices = [],))
-        result = StructuralSizer.run_moment_analysis(DDM(), fl, struc, qu, qD, qL)
+        # One span violates §13.6.1.1: the gate raises by default ...
+        @test_throws StructuralSizer.DDMApplicabilityError StructuralSizer.run_moment_analysis(
+            DDM(), fl, struc, qu, qD, qL)
+        # ... and proceeds only when explicitly overridden.
+        result = StructuralSizer.run_moment_analysis(DDM(), fl, struc, qu, qD, qL;
+                                                     on_inapplicable = :proceed)
         
         @test length(result.column_moments) == 2
     end

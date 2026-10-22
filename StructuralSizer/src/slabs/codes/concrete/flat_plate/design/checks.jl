@@ -88,7 +88,7 @@ function check_punching_for_column(col, Vu, Mub, d, h, fc;
         Muy = nothing
     end
 
-    # ── Geometry (cached: depends only on c1, c2, d, position, shape) ──
+    # ── Geometry (cached: c1, c2, d, position, shape, edge_par) ──
     cache_key = !isnothing(_geom_cache) ?
         (ustrip(u"m", c1), ustrip(u"m", c2), ustrip(u"m", d), col.position, geom_shape, edge_par) :
         nothing

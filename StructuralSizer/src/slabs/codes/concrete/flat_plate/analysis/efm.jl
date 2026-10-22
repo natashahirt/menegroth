@@ -216,13 +216,16 @@ function run_moment_analysis(
     βt::Float64 = 0.0,  # API parity (unused by EFM — torsion captured in Kt)
     has_edge_beam::Bool = false,    # API parity (EFM uses Kt directly)
     edge_beam_βt::Float64 = 0.0,    # API parity (EFM uses Kt directly)
-    col_I_factor::Float64 = 0.70,  # ignored — determined by method.cracked_columns
+    col_I_factor::Float64 = 0.70,  # ACI 318-11 §10.10.4.1 — cracked-column magnitude (from caller)
     tc = nothing,  # API parity with DDM (EFM does not emit Eq. 13-7 fallbacks)
 )
-    # Derive col_I_factor from method fields:
-    #   - ASAP stubs: gross Ig (1.0) unless cracked_columns=true (0.70)
-    #   - Hardy Cross: always gross Ig (PCA convention, stiffness in Kec)
-    col_I_factor = (method.solver == :asap && method.cracked_columns) ? 0.70 : 1.0
+    # Capture the incoming col_I_factor before the reassignment below clobbers it.
+    incoming_col_I = col_I_factor
+    # Effective column cracking factor for ASAP stubs:
+    #   - ASAP cracked stubs: caller's col_I_factor (default 0.70 per ACI 318-11 §10.10.4.1)
+    #   - ASAP uncracked: gross Ig (1.0)
+    #   - Hardy Cross: always gross Ig (1.0, PCA convention — stiffness carried in Kec)
+    col_I_factor = (method.solver == :asap && method.cracked_columns) ? incoming_col_I : 1.0  # ACI 318-11 §10.10.4.1
     use_kc_only = method.column_stiffness == :Kc
 
     # Shared setup: l1, l2, ln, span_axis, c1_avg, qD, qL, qu, M0
@@ -463,11 +466,14 @@ function run_secondary_moment_analysis(
     ν_concrete::Float64 = 0.20,
     verbose::Bool = false,
     drop_panel = nothing,
+    col_I_factor::Float64 = 0.70,  # ACI 318-11 §10.10.4.1 — cracked-column magnitude (from caller)
     kwargs...
 )
-    # ASAP stubs: gross Ig (1.0) unless cracked_columns=true (0.70).
-    # Hardy Cross: always gross Ig (PCA convention).
-    col_I_factor = (method.solver == :asap && method.cracked_columns) ? 0.70 : 1.0
+    # Capture the incoming col_I_factor before the reassignment below clobbers it.
+    incoming_col_I = col_I_factor
+    # ASAP cracked stubs: caller's col_I_factor (default 0.70 per ACI 318-11 §10.10.4.1);
+    # ASAP uncracked and Hardy Cross: always gross Ig (1.0, PCA convention).
+    col_I_factor = (method.solver == :asap && method.cracked_columns) ? incoming_col_I : 1.0  # ACI 318-11 §10.10.4.1
     use_kc_only  = method.column_stiffness == :Kc
 
     setup = _secondary_moment_analysis_setup(struc, slab, supporting_columns, h, γ_concrete)
@@ -1813,6 +1819,7 @@ function run_moment_analysis(
     verbose::Bool = false,
     efm_cache::Union{Nothing, EFMModelCache} = nothing,
     cache = nothing,  # API parity (unused by EFM)
+    col_I_factor::Float64 = 0.70,  # ACI 318-11 §10.10.4.1 — cracked-column magnitude (from caller)
 )
     # Extract from FrameLine
     sorted_columns = frame_line.columns
@@ -1877,8 +1884,11 @@ function run_moment_analysis(
     # Detect column shape from first column
     col_shape_val = col_shape(sorted_columns[1])
     
-    # Derive col_I_factor from method fields
-    col_I_factor = (method.solver == :asap && method.cracked_columns) ? 0.70 : 1.0
+    # Capture the incoming col_I_factor before the reassignment below clobbers it.
+    incoming_col_I = col_I_factor
+    # ASAP cracked stubs: caller's col_I_factor (default 0.70 per ACI 318-11 §10.10.4.1);
+    # ASAP uncracked and Hardy Cross: always gross Ig (1.0, PCA convention).
+    col_I_factor = (method.solver == :asap && method.cracked_columns) ? incoming_col_I : 1.0  # ACI 318-11 §10.10.4.1
     use_kc_only = method.column_stiffness == :Kc
     
     # Precompute solver inputs once: jKec for Hardy Cross, Kec reduction

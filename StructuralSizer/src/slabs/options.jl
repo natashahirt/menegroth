@@ -100,6 +100,14 @@ Options for flat plate / flat slab / waffle / PT slab sizing per ACI 318 Chapter
   - `EFM(column_stiffness=:Kc)` — EFM with raw column stiffness (no torsion)
   - `EFM(cracked_columns=true)` — EFM with 0.70 Ig column stubs
   - `FEA()` — Finite Element Analysis (shell model, no geometry restrictions)
+- `on_inapplicable`: What to do when the requested DDM / EFM is not permitted for the
+  layout (ACI 318-11 §13.6.1 / §13.7, corpus: aci-318-11, page 252)
+  - `:fallback` (default) — design with `FEA()` instead (ACI 318-11 §13.5.1 permits
+    any procedure satisfying equilibrium and geometric compatibility) and record the
+    switch: a `:fallback` trace event from `resolve_analysis_method` and the
+    `method_requested`, `method_used` and `method_fallback_reasons` fields of the
+    returned design (`size_flat_plate!`, `size_flat_plate_optimized`)
+  - `:error` — rethrow the `DDMApplicabilityError` / `EFMApplicabilityError`
 
 # Edge Conditions
 - `has_edge_beam`: Spandrel beam at exterior (affects DDM moment distribution)
@@ -203,6 +211,18 @@ struct FlatPlateOptions <: AbstractFloorOptions
     objective::AbstractObjective
     # Column cracking factor for FEA stub stiffness (ACI 318-11 §10.10.4.1)
     col_I_factor::Float64
+    # DDM/EFM not permitted for the layout: :fallback (to FEA) or :error
+    on_inapplicable::Symbol
+end
+
+"""Valid values of `FlatPlateOptions.on_inapplicable`."""
+const ON_INAPPLICABLE_VALUES = (:fallback, :error)
+
+"""Throw an `ArgumentError` unless `s` is a valid `on_inapplicable` value."""
+function _validate_on_inapplicable(s::Symbol)
+    s in ON_INAPPLICABLE_VALUES || throw(ArgumentError(
+        "on_inapplicable must be one of $(join(repr.(ON_INAPPLICABLE_VALUES), ", ")); got :$s"))
+    return s
 end
 
 """Return the canonical floor system symbol for `FlatPlateOptions`."""
@@ -248,13 +268,15 @@ function _build_flat_plate_options(;
     min_h::Union{Length, Nothing} = nothing,
     objective::AbstractObjective = MinVolume(),
     col_I_factor::Float64 = 0.70,
+    on_inapplicable::Symbol = :fallback,
 )
+    _validate_on_inapplicable(on_inapplicable)
     # Call the positional (inner) constructor — field order must match struct definition
     FlatPlateOptions(material, cover, bar_size, has_edge_beam, edge_beam_βt,
                      method, grouping, φ_flexure, φ_shear, λ, deflection_limit,
                      punching_strategy, punching_reinforcement, max_column_size,
                      stud_material, stud_diameter, stirrup_bar_size,
-                     min_h, objective, col_I_factor)
+                     min_h, objective, col_I_factor, on_inapplicable)
 end
 
 """

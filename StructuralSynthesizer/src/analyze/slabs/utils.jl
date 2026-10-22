@@ -139,7 +139,8 @@ function initialize_slabs!(struc::BuildingStructure{T};
                            tributary_axis=nothing,
                            cell_groupings::Union{Symbol, Vector{Vector{Int}}}=:auto,
                            slab_group_ids::Union{Nothing, AbstractVector}=nothing,
-                           scoped_floor_overrides::Vector{ScopedFloorOverride}=ScopedFloorOverride[]) where T
+                           scoped_floor_overrides::Vector{ScopedFloorOverride}=ScopedFloorOverride[],
+                           col_I_factor::Real = 0.70) where T  # ACI 318-11 §10.10.4.1
     empty!(struc.slabs)
     empty!(struc.slab_parallel_batches)
     
@@ -172,7 +173,7 @@ function initialize_slabs!(struc::BuildingStructure{T};
     groups = _group_slab_specs(slab_specs)
 
     # 4. Size once per slab group
-    group_results, group_sw, group_spans, group_material = _size_slab_groups(groups, slab_specs, struc, material, floor_opts)
+    group_results, group_sw, group_spans, group_material = _size_slab_groups(groups, slab_specs, struc, material, floor_opts; col_I_factor=col_I_factor)
 
     # 5. Fan out results to cells and create Slab objects (with volumes)
     _apply_slab_results!(struc, slab_specs, group_results, group_sw, group_spans, group_material, material, floor_opts)
@@ -614,7 +615,7 @@ function _group_slab_specs(slab_specs)
 end
 
 """Size all slab groups in parallel and return result/self-weight/span dictionaries."""
-function _size_slab_groups(groups, slab_specs, struc, material, floor_opts::StructuralSizer.AbstractFloorOptions)
+function _size_slab_groups(groups, slab_specs, struc, material, floor_opts::StructuralSizer.AbstractFloorOptions; col_I_factor::Real = 0.70)  # ACI 318-11 §10.10.4.1
     gids = collect(keys(groups))
     n = length(gids)
     
@@ -627,7 +628,7 @@ function _size_slab_groups(groups, slab_specs, struc, material, floor_opts::Stru
         gid = gids[k]
         spec_idxs = groups[gid]
         specs = slab_specs[spec_idxs]
-        result, sw_service, spans_gov, mat_eff = _process_single_slab_group(gid, specs, struc, material, floor_opts)
+        result, sw_service, spans_gov, mat_eff = _process_single_slab_group(gid, specs, struc, material, floor_opts; col_I_factor=col_I_factor)
         
         results_vec[k] = result
         sw_vec[k]      = sw_service
@@ -644,7 +645,7 @@ function _size_slab_groups(groups, slab_specs, struc, material, floor_opts::Stru
 end
 
 """Size a single slab group: resolve governing demands, call the backend, return `(result, self_weight, spans)`."""
-function _process_single_slab_group(gid, specs, struc, material, floor_opts::StructuralSizer.AbstractFloorOptions)
+function _process_single_slab_group(gid, specs, struc, material, floor_opts::StructuralSizer.AbstractFloorOptions; col_I_factor::Real = 0.70)  # ACI 318-11 §10.10.4.1
     ft_syms = unique(getfield.(specs, :floor_type))
     length(ft_syms) == 1 || throw(ArgumentError("Slab group $gid has mixed floor types: $(ft_syms)."))
 
@@ -676,6 +677,8 @@ function _process_single_slab_group(gid, specs, struc, material, floor_opts::Str
     effective_material = isempty(scoped_mats) ? material : only(scoped_mats)
 
     effective_floor_opts = _with_concrete_material(effective_floor_opts, effective_material)
+    # ACI 318-11 §10.10.4.1 — scoped-override cells inherit the global column cracking factor
+    effective_floor_opts = _apply_col_I_factor(effective_floor_opts, col_I_factor)
 
     extra_kwargs = if ft isa Vault && !(effective_floor_opts isa StructuralSizer.VaultOptions)
         (lambda=10.0,)
@@ -1443,7 +1446,9 @@ function flat_plate_moment_comparison(
         try
             r = StructuralSizer.run_moment_analysis(
                 method, struc, slab, columns, h, fc, Ecs, γ_concrete;
-                ν_concrete=ν_concrete, verbose=verbose
+                ν_concrete=ν_concrete, verbose=verbose,
+                # ACI 318-11 §10.10.4.1 — cracked column-stub stiffness from caller (default 0.70)
+                col_I_factor = opts.col_I_factor
             )
             results[name] = r
         catch e

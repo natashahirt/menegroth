@@ -250,7 +250,8 @@ const SS = StructuralSizer
         )
         result_oblong = SS.check_ddm_applicability(mock_struc, oblong_slab, [mock_col, mock_col];
                                                      throw_on_failure=false)
-        aspect_fails = filter(v -> occursin("8.10.2.2", v), result_oblong.violations)
+        # ACI 318-11 §13.6.1.2 (corpus: aci-318-11, page 252).
+        aspect_fails = filter(v -> occursin("13.6.1.2", v), result_oblong.violations)
         @test !isempty(aspect_fails)
     end
 

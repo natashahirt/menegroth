@@ -87,6 +87,8 @@ const PREPARE_AFFECTING_FIELDS = Symbol[
     :geometry_is_centerline, :diaphragm_mode, :diaphragm_E, :diaphragm_ν,
     :default_frame_E, :default_frame_G, :default_frame_ρ,
     :pattern_loading, :framing_opts,
+    # ACI 318-11 §10.10.4.1 — flat-plate slab column stubs are baked at prepare! (via _apply_col_I_factor in _process_single_slab_group); only a fresh prepare picks up a changed factor. The fresh prepare also re-runs the members node, so frame columns (size_columns!) are covered too.
+    :column_I_factor,
 ]
 
 """

@@ -26,7 +26,11 @@ function _moment_analysis_setup(struc, slab, columns, h, γ_concrete)
     span_axis = _get_span_axis(slab)
 
     n_cols = length(columns)
-    c1_avg = sum(isnothing(c.c1) ? 0.0u"inch" : c.c1 for c in columns) / n_cols
+    # Face-to-face width along the span, including rectangular rotation
+    # (ACI 318-11 §13.6.2.5, corpus: aci-318-11, page 253).  The same
+    # projection is used for Eq. (13-7).  Axis-aligned columns reproduce
+    # the previous mean of `c1`.
+    c1_avg = _mean_support_width(columns, span_axis)
     ln = clear_span(l1, c1_avg)
 
     cell = struc.cells[first(slab.cell_indices)]
@@ -68,8 +72,9 @@ function _secondary_moment_analysis_setup(struc, slab, columns, h, γ_concrete)
     span_axis_sec = (-ax[2], ax[1])
 
     n_cols = length(columns)
-    # Use c2 for clear span in secondary direction
-    c2_avg = sum(isnothing(c.c2) ? 0.0u"inch" : c.c2 for c in columns) / n_cols
+    # Same face projection as the primary setup, along the swapped axis
+    # (ACI 318-11 §13.6.2.5, corpus: aci-318-11, page 253).
+    c2_avg = _mean_support_width(columns, span_axis_sec)
     ln_sec = clear_span(l1_sec, c2_avg)
 
     # Loads are direction-independent

@@ -622,6 +622,8 @@ function prepare!(struc::BuildingStructure, params::DesignParameters;
     initialize!(struc; loads=params.loads, floor_type=floor_type,
                 floor_opts=floor_opts,
                 scoped_floor_overrides=params.scoped_floor_overrides,
+                # ACI 318-11 §10.10.4.1 — scoped-override cells inherit the global column cracking factor
+                col_I_factor = params.column_I_factor,
                 tributary_axis=params.tributary_axis)
 
     # Auto-generate the framing hierarchy above each slab (plan
@@ -1589,11 +1591,37 @@ end
 # Result Population Functions
 # =============================================================================
 
-"""Populate slab design results from struc.slabs (all values normalized to SI).
+"""
+Copy `method_requested`, `method_used`, and `method_fallback_reasons` from
+the `size_flat_plate!` NamedTuple `dd` onto `result`.
+
+USER DECISION: the default is to fall back to FEA and notify.  The notice
+is on `SlabDesignResult` because that is what `design_building` returns.
+"""
+function _copy_method_notice!(result::SlabDesignResult, dd)
+    isnothing(dd) && return result
+    if hasproperty(dd, :method_requested) &&
+       dd.method_requested isa StructuralSizer.FlatPlateAnalysisMethod
+        result.method_requested = dd.method_requested
+    end
+    if hasproperty(dd, :method_used) &&
+       dd.method_used isa StructuralSizer.FlatPlateAnalysisMethod
+        result.method_used = dd.method_used
+    end
+    if hasproperty(dd, :method_fallback_reasons) && !isnothing(dd.method_fallback_reasons)
+        result.method_fallback_reasons = String[string(r) for r in dd.method_fallback_reasons]
+    end
+    return result
+end
+
+"""
+Populate slab design results from struc.slabs (all values normalized to SI).
 
 Uses `slab.design_details` (the full `size_flat_plate!` NamedTuple) when
 available to capture column P-M, integrity, transfer, and punching detail
-that `slab.result` (FlatPlatePanelResult) alone doesn't carry.
+that `slab.result` (FlatPlatePanelResult) alone doesn't carry.  Also copies
+`method_requested`, `method_used`, and `method_fallback_reasons` onto the
+`SlabDesignResult` so a `design_building` caller sees a FEA fallback.
 """
 function _populate_slab_results!(design::BuildingDesign, struc::BuildingStructure)
     # Handle case where slabs haven't been initialized yet
@@ -1614,7 +1642,7 @@ function _populate_slab_results!(design::BuildingDesign, struc::BuildingStructur
             catch
                 0.2u"m"  # 200mm default
             end
-            design.slabs[slab_idx] = SlabDesignResult(
+            fallback = SlabDesignResult(
                 thickness   = fallback_h,
                 self_weight = 0.0u"kPa",
                 converged       = did_converge,
@@ -1623,6 +1651,7 @@ function _populate_slab_results!(design::BuildingDesign, struc::BuildingStructur
                 iterations      = !isnothing(dd) && hasproperty(dd, :iterations)     ? dd.iterations      : 0,
                 pattern_loading = !isnothing(dd) && hasproperty(dd, :pattern_loading) ? dd.pattern_loading : false,
             )
+            design.slabs[slab_idx] = _copy_method_notice!(fallback, dd)
             continue
         end
         r_raw = slab.result   # FlatPlatePanelResult (or other AbstractFloorResult)
@@ -1723,6 +1752,7 @@ function _populate_slab_results!(design::BuildingDesign, struc::BuildingStructur
         # read these from the SlabDesignResult rather than from slab.* on the
         # live structure.
         result.drop_panel = slab.drop_panel
+        _copy_method_notice!(result, dd)
         result.is_vault = r isa StructuralSizer.VaultResult
         if result.is_vault
             result.vault_rise = uconvert(u"m", r.rise)

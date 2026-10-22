@@ -22,6 +22,17 @@ logs/
 .tmp_*
 **/__pycache__/
 
+# Scratch / one-off runner artifacts (underscore-prefixed scratch + adversarial
+# red-team / probe / critic debug scripts that are not reusable tooling)
+scripts/runners/_*
+scripts/runners/redteam_*
+scripts/runners/probe_*
+scripts/runners/attack_*
+scripts/runners/critic_*
+scripts/runners/crit5_*
+scripts/runners/crit7_*
+scripts/runners/review_verify_*
+
 # Documenter.jl build output
 docs/build/
 

@@ -119,6 +119,13 @@ mutable struct IncrementalEngine
     # (`NodeWarmState` / `WarmContext`) for why the CHOLMOD factorization stays out
     # of these snapshots (it lives only on the live `struc.asap_model`).
     warm_memo::Dict{NodeKey, NodeWarmState}
+    # P0-2 Step B memo-shrink mode. `:whole` (default) captures an independent
+    # whole-struc snapshot per node — byte-identical across a slab level but
+    # stored once per node. `:shared` captures ONE post-level snapshot and shares
+    # it by reference across the level's co-recomputed nodes (safe: the snapshot
+    # is immutable and only ever `deepcopy`ed on restore), collapsing an N-slab
+    # level's memo from N whole-struc copies to 1 with byte-identical results.
+    snapshot_mode::Symbol
 end
 
 """
@@ -160,8 +167,27 @@ function engine_base_hash(struc::BuildingStructure, params::DesignParameters)
     ))
 end
 
+"""Valid [`IncrementalEngine`](@ref) memo-shrink modes (P0-2 Step B)."""
+const SNAPSHOT_MODES = (:whole, :shared)
+
 """
-    prepare_engine(struc, params; framing_opts=NamedTuple(), tc=nothing) -> IncrementalEngine
+    _default_snapshot_mode() -> Symbol
+
+The default `snapshot_mode` for new engines. `:whole` (today's byte-identical
+per-node capture) unless the `SS_SNAPSHOT_MODE` environment variable opts into an
+alternative — the single switch the exact-first gates flip to A/B a shrink mode
+over the WHOLE invalidation matrix without touching any call site. Production
+never sets the var, so the default is always `:whole`.
+"""
+function _default_snapshot_mode()
+    mode = Symbol(get(ENV, "SS_SNAPSHOT_MODE", "whole"))
+    mode in SNAPSHOT_MODES || throw(ArgumentError(
+        "SS_SNAPSHOT_MODE=$(mode) is not a valid snapshot mode; expected one of $(SNAPSHOT_MODES)."))
+    return mode
+end
+
+"""
+    prepare_engine(struc, params; framing_opts=NamedTuple(), snapshot_mode=…, tc=nothing) -> IncrementalEngine
 
 Prepare `struc` for incremental design and build the engine. Mirrors the
 `prepare!` + pre-sizing-validation prefix of [`design_building`](@ref), then
@@ -182,7 +208,10 @@ one) without the earlier run's joists/segments leaking into the later baseline.
 """
 function prepare_engine(struc::BuildingStructure, params::DesignParameters;
                         framing_opts::NamedTuple = NamedTuple(),
+                        snapshot_mode::Symbol = _default_snapshot_mode(),
                         tc::Union{Nothing, StructuralSizer.TraceCollector} = nothing)
+    snapshot_mode in SNAPSHOT_MODES || throw(ArgumentError(
+        "prepare_engine: snapshot_mode=$(snapshot_mode) invalid; expected one of $(SNAPSHOT_MODES)."))
     # Prepare on an independent copy so repeated prepares of the caller's `struc`
     # never accumulate auto-generated framing (skeleton joist edges / host-edge
     # subdivisions). `capture_node_state` deepcopies while safely skipping the
@@ -201,7 +230,7 @@ function prepare_engine(struc::BuildingStructure, params::DesignParameters;
     return IncrementalEngine(graph, params, baseline, base_hash,
                              Dict{NodeKey, NodeMemo}(), working,
                              NodeKey[], NodeKey[],
-                             Dict{NodeKey, NodeWarmState}())
+                             Dict{NodeKey, NodeWarmState}(), snapshot_mode)
 end
 
 """
@@ -542,10 +571,23 @@ function run_target!(engine::IncrementalEngine, params::DesignParameters;
         # 3d. Snapshot + memoize recomputed nodes AFTER the sync. On a warm run,
         #     also memoize each slab node's shared read-only cache so a later warm
         #     rerun reuses it (never enters the byte-identity `NodeMemo` snapshot).
+        #
+        #     [P0-2 Step B] Every node in this level is snapshotted from the SAME
+        #     post-sync `engine.struc` (step 3b/3c leave it fixed; `output_hash`
+        #     below is read-only), so all these whole-struc snapshots are
+        #     byte-identical. In `:shared` mode capture it ONCE and share the
+        #     object by reference across the level's co-recomputed nodes — the
+        #     snapshot is immutable and only ever `deepcopy`ed on restore
+        #     (`restore_node_state`) or read field-wise (`restore_slab_node_writes!`),
+        #     so sharing can never let one node's restore corrupt another. In
+        #     `:whole` mode (default) each node captures its own copy, exactly as
+        #     before. Either way the RESTORED state is identical.
+        shared_state = engine.snapshot_mode === :shared ? capture_node_state(engine.struc) : nothing
         for key in dirty_keys
             node = get_node(engine.graph, key)
             oh = output_hash(node, engine.struc)
-            engine.memo[key] = NodeMemo(node_ih[key], oh, capture_node_state(engine.struc))
+            state = shared_state === nothing ? capture_node_state(engine.struc) : shared_state
+            engine.memo[key] = NodeMemo(node_ih[key], oh, state)
             if warm && is_slab_node_key(key)
                 engine.warm_memo[key] = NodeWarmState(ctx === nothing ? nothing : ctx.col_cache)
             end

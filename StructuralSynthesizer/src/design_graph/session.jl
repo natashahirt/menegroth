@@ -72,13 +72,18 @@ same `struc` handle can be reused to build another session/engine cleanly.
 
 `target` defaults to the graph's [`terminal_node`](@ref) (a full design).
 `harmonize` mirrors the `design_building` post-pipeline uniform-column pass.
+`snapshot_mode` selects the engine's memo-shrink mode (see [`prepare_engine`](@ref));
+it defaults to [`_default_snapshot_mode`](@ref) (`:whole` unless `SS_SNAPSHOT_MODE`
+opts in), so production is byte-identical and the gates can A/B a shrink mode.
 """
 function DesignSession(struc::BuildingStructure, base_params::DesignParameters;
                        framing_opts::NamedTuple = NamedTuple(),
                        harmonize::Bool = true,
                        target::Union{Nothing, NodeKey} = nothing,
+                       snapshot_mode::Symbol = _default_snapshot_mode(),
                        tc::Union{Nothing, StructuralSizer.TraceCollector} = nothing)
-    engine = prepare_engine(struc, base_params; framing_opts = framing_opts, tc = tc)
+    engine = prepare_engine(struc, base_params;
+                            framing_opts = framing_opts, snapshot_mode = snapshot_mode, tc = tc)
     tgt = target === nothing ? terminal_node(engine.graph) : target
     run_target!(engine, base_params; target = tgt, framing_opts = framing_opts, tc = tc)
     base_design = capture_incremental_design(engine, base_params; harmonize = harmonize, tc = tc)

@@ -56,11 +56,12 @@ include(joinpath(@__DIR__, "..", "..", "StructuralSynthesizer",
                  "test", "design_graph", "_verify_shared.jl"))
 
 # -----------------------------------------------------------------------------
-# Fixture: 2×2-bay flat-plate DDM building with spread foundations (matches the
-# Run-1 verify harness so both gates exercise the same structure).
+# Fixture: 3×3-bay flat-plate DDM building with spread foundations (matches the
+# Run-1 verify harness so both gates exercise the same structure). 3×3 bays: DDM
+# (ACI 318-11 §13.6.1.1) requires ≥3 continuous spans each direction.
 # -----------------------------------------------------------------------------
 function build_building(; soil = SR.medium_sand)
-    skel  = gen_medium_office(54.0u"ft", 42.0u"ft", 10.0u"ft", 2, 2, 1)
+    skel  = gen_medium_office(54.0u"ft", 42.0u"ft", 10.0u"ft", 3, 3, 1)
     struc = BuildingStructure(skel)
     params = DesignParameters(
         name               = "verify_incremental_engine",

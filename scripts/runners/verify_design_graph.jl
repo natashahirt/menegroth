@@ -85,11 +85,12 @@ include(joinpath(@__DIR__, "..", "..", "StructuralSynthesizer",
 # -----------------------------------------------------------------------------
 # Building + parameters — one small flat-plate building.
 # -----------------------------------------------------------------------------
-# 2×2 bays, single story: 54'×42' footprint → 27'×21' bays (aspect 1.29 < 2, so
-# DDM applicable), 9 columns.  Kept small to stay fast after load.  Foundations
-# enabled so the foundation invariants are exercised.
+# 3×3 bays, single story: 54'×42' footprint → 18'×14' bays (aspect 1.29 < 2, so
+# DDM applicable), 16 columns.  DDM (ACI 318-11 §13.6.1.1) requires ≥3 continuous
+# spans each direction, so a 2×2 grid is now rejected presize.  Kept small to stay
+# fast after load.  Foundations enabled so the foundation invariants are exercised.
 function build_verify_building()
-    skel  = gen_medium_office(54.0u"ft", 42.0u"ft", 10.0u"ft", 2, 2, 1)
+    skel  = gen_medium_office(54.0u"ft", 42.0u"ft", 10.0u"ft", 3, 3, 1)
     struc = BuildingStructure(skel)
     params = DesignParameters(
         name               = "verify_design_graph",
@@ -123,11 +124,12 @@ function build_beam_column_building()
 end
 
 # Case 3 — a flat-plate building with `uniform_column_sizing=:per_story`, so
-# `harmonize_uniform_column_sizes!` runs and mutates columns (the 9 columns of a
-# 2×2×1 building carry different demands, so at least one is enlarged to the
+# `harmonize_uniform_column_sizes!` runs and mutates columns (the 16 columns of a
+# 3×3×1 building carry different demands, so at least one is enlarged to the
 # governing size). Verifies graph==legacy including the post-pipeline harmonize.
+# 3×3 bays: DDM (ACI 318-11 §13.6.1.1) requires ≥3 continuous spans each direction.
 function build_per_story_building()
-    skel  = gen_medium_office(54.0u"ft", 42.0u"ft", 10.0u"ft", 2, 2, 1)
+    skel  = gen_medium_office(54.0u"ft", 42.0u"ft", 10.0u"ft", 3, 3, 1)
     struc = BuildingStructure(skel)
     params = DesignParameters(
         name                  = "verify_design_graph_per_story",

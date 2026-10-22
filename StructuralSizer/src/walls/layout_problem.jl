@@ -212,15 +212,41 @@ what the story stiffness `K` assembles — judging removal on the linear density
 the floor yet still carries full `ρ^penal` stiffness). Because this is a PER-WALL ABSOLUTE test
 against a fixed constant, the magnitude of `ρ_min` is IRRELEVANT to correctness: it degrades to
 "all active" (guard fully armed) as `ρ_min → 1`, and only marks a wall removed when its own
-`ρ^penal` is genuinely negligible. An empty active set therefore occurs ONLY when every wall is
-truly void (a global mechanism) — caught independently by the load-independent singular /
-translational / eigenstructure floors, so the resulting vacuously-enclosed gate is a backstop,
-not a hole (see [`_plate_encloses_walls`](@ref)).
+`ρ^penal` is genuinely negligible.
+
+SCOPE OF THE ACTIVITY TEST (k_max assumption, ENGINEERING JUDGMENT — not a code clause): activity
+is judged purely on the DIMENSIONLESS penalized fraction `ρ^penal`, which ASSUMES the per-candidate
+`k_max` is non-pathological (a physically reasonable fully-dense stiffness). The absolute-stiffness
+and occupancy questions — "is this active wall's real stiffness large enough?" and "does the floor
+plate actually enclose the occupants?" — are deliberately NOT answered here; they are delegated to
+the Phase-10 unified-FEM survivor check (true geometry, real units), the final authority. We
+DELIBERATELY do NOT gate on a per-story RELATIVE threshold such as `k_i < 1e-6·Σ_j k_j`: that is
+the relative-stiffness trap — one very stiff INSIDE wall would inflate `Σ k` and push a genuinely
+REAL OUTSIDE wall below the threshold, masking it out of the enclosure proxy and re-introducing a
+FAIL-OPEN (the outside wall's over-hang would no longer be examined). Activity is therefore the
+optimizer's PER-WALL ABSOLUTE `ρ^penal` density fact, never a comparison of `k` across walls.
+
+An empty active set therefore occurs ONLY when every wall is floored (`ρ^penal ≤ ε_abs` everywhere);
+for a LOADED such story the load-dependent eigenstructure TRANSLATIONAL floor `util_trans` is the
+governing backstop (it blows up as `λmin(K_tt) → ~0`), so the resulting vacuously-enclosed gate is a
+backstop, not a hole (see [`_plate_encloses_walls`](@ref)).
 """
 function _active_candidate_ids(p::WallLayoutNLPProblem, x::Vector{Float64})
     return Set(c.id for (i, c) in enumerate(p.candidates)
                if (clamp(x[i], p.ρ_min, 1.0))^p.penal > ACTIVE_STIFFNESS_FRACTION_FLOOR)
 end
+
+"""
+    _candidate_half_lengths(p) -> Dict{Int,Float64}
+
+Per-candidate half-length map (candidate id → `lw/2` [m]) passed alongside the active set to the
+enclosure proxy ([`_plate_encloses_walls`](@ref)) so it can run the ENDPOINT-AWARE body test (a
+wall whose centroid is inside the plate but whose body over-hangs the edge fails closed). Candidate
+geometry (`lw`) is DENSITY-INDEPENDENT, so this map is constant across the optimizer's iterates and
+is rebuilt cheaply at each call site that already builds the active set. Keyed on `c.id` to match
+the active-set membership mask (P1 guarantees `c.id` is globally unique).
+"""
+_candidate_half_lengths(p::WallLayoutNLPProblem) = Dict(c.id => c.lw / 2 for c in p.candidates)
 
 # ------------------------------------------------------------------------------
 # Optimizer-boundary fail-closed-to-penalty bridge
@@ -271,13 +297,17 @@ the caller can substitute a penalty / infeasible sentinel (see the constants
 above). Non-`SingularStiffnessError` exceptions are re-thrown unchanged.
 """
 function _evaluate_lateral_or_singular(p::WallLayoutNLPProblem, walls::Vector{WallLine};
-                                       active_ids::Union{Nothing,AbstractSet}=nothing)
+                                       active_ids::Union{Nothing,AbstractSet}=nothing,
+                                       wall_half_lengths::Union{Nothing,AbstractDict{Int,Float64}}=nothing)
     try
         # `active_ids === nothing` ⇒ positional call (byte-for-byte the FEM / one-shot CHECK
         # path, incl. the non-reduced `evaluate_lateral` that takes no `active_ids` keyword).
+        # `wall_half_lengths` is threaded together with `active_ids` (both set only on the reduced
+        # optimizer path), so it rides the keyword branch only.
         return active_ids === nothing ?
                evaluate_lateral(p.evaluator, walls, p.loads) :
-               evaluate_lateral(p.evaluator, walls, p.loads; active_ids=active_ids)
+               evaluate_lateral(p.evaluator, walls, p.loads; active_ids=active_ids,
+                                wall_half_lengths=wall_half_lengths)
     catch e
         e isa SingularStiffnessError || rethrow()
         return nothing
@@ -293,11 +323,13 @@ translational or torsional mechanism) and signaling it with `nothing` so the cal
 substitute an all-infeasible sentinel. Non-`SingularStiffnessError` exceptions are re-thrown.
 """
 function _eigenstructure_or_singular(p::WallLayoutNLPProblem, walls::Vector{WallLine};
-                                     active_ids::Union{Nothing,AbstractSet}=nothing)
+                                     active_ids::Union{Nothing,AbstractSet}=nothing,
+                                     wall_half_lengths::Union{Nothing,AbstractDict{Int,Float64}}=nothing)
     try
         return active_ids === nothing ?
                eigenstructure_stability(p.evaluator, walls, p.loads, p.drift_limit) :
-               eigenstructure_stability(p.evaluator, walls, p.loads, p.drift_limit; active_ids=active_ids)
+               eigenstructure_stability(p.evaluator, walls, p.loads, p.drift_limit;
+                                        active_ids=active_ids, wall_half_lengths=wall_half_lengths)
     catch e
         e isa SingularStiffnessError || rethrow()
         return nothing
@@ -336,16 +368,19 @@ function objective_fn(p::WallLayoutNLPProblem, x::Vector{Float64})
                    for (i, c) in enumerate(p.candidates))
     elseif obj isa MinDrift
         # Mask density-removed candidates (Guard F2): a removed wall outside the plate must not
-        # fail-close the enclosure proxy. The active set is derived from the SAME `x`.
+        # fail-close the enclosure proxy. The active set and half-length map (endpoint-aware body
+        # test) are passed TOGETHER; both derived from the SAME `x` / candidate geometry.
         res = _evaluate_lateral_or_singular(p, _walls_from_density(p, x);
-                                            active_ids=_active_candidate_ids(p, x))
+                                            active_ids=_active_candidate_ids(p, x),
+                                            wall_half_lengths=_candidate_half_lengths(p))
         res === nothing && return OPTIMIZER_SINGULAR_OBJECTIVE_PENALTY  # singular ⇒ steer away
         return maximum(res.drift; init=0.0)
     elseif obj isa WeightedLayoutObjective
         carbon = sum(clamp(x[i], p.ρ_min, 1.0) * _candidate_carbon_full(c)
                      for (i, c) in enumerate(p.candidates))
         res = _evaluate_lateral_or_singular(p, _walls_from_density(p, x);
-                                            active_ids=_active_candidate_ids(p, x))
+                                            active_ids=_active_candidate_ids(p, x),
+                                            wall_half_lengths=_candidate_half_lengths(p))
         res === nothing && return OPTIMIZER_SINGULAR_OBJECTIVE_PENALTY  # singular ⇒ steer away
         drift = maximum(res.drift; init=0.0)
         return obj.w_carbon * (carbon / obj.carbon_ref) + obj.w_drift * (drift / obj.drift_ref)
@@ -425,7 +460,10 @@ function constraint_fns(p::WallLayoutNLPProblem, x::Vector{Float64})
     # active set ONCE from `x` and reuse it for the geometry gate AND every reduced-evaluator
     # call below, so the gate and the metrics can never disagree within this iterate.
     active = _active_candidate_ids(p, x)
-    res = _evaluate_lateral_or_singular(p, walls; active_ids=active)
+    # Per-candidate half-length map (density-independent) threaded TOGETHER with `active` so the
+    # enclosure proxy runs the endpoint-aware body test consistently with the mask at every site.
+    half_lengths = _candidate_half_lengths(p)
+    res = _evaluate_lateral_or_singular(p, walls; active_ids=active, wall_half_lengths=half_lengths)
     # Singular / under-braced iterate: return an all-INFEASIBLE constraint vector
     # so Ipopt treats this layout as badly infeasible (steer away) instead of the
     # evaluator's fail-closed throw aborting the whole solve. A direct check on a
@@ -443,20 +481,22 @@ function constraint_fns(p::WallLayoutNLPProblem, x::Vector{Float64})
     # (missing) or `:geometry_inconsistent` (under-covering) on the selected layout. Never a
     # silent wall-centroid / origin / plate-span proxy (crit5/rev6/crit6/crit7). FEM tier is
     # unaffected: both predicates return the FEM-safe default for a non-reduced evaluator.
-    geom_missing = _plate_center_missing(p.evaluator) || !_plate_encloses_walls(p.evaluator, walls, active)
+    geom_missing = _plate_center_missing(p.evaluator) ||
+                   !_plate_encloses_walls(p.evaluator, walls, active, half_lengths)
 
     # Eigenstructure stability floors + direction-complete drift are only computed when the
     # geometry is present. Wrapped in the same singular-catch: a load-independent mechanism
     # (that `evaluate_lateral` did not already trip) maps to the all-INFEASIBLE sentinel.
     local eig, dc
     if !geom_missing
-        eig = _eigenstructure_or_singular(p, walls; active_ids=active)
+        eig = _eigenstructure_or_singular(p, walls; active_ids=active, wall_half_lengths=half_lengths)
         eig === nothing && return fill(OPTIMIZER_INFEASIBLE_CONSTRAINT, n_constraints(p))
         # Direction-complete drift (origin-invariant, both principal directions). Safe to
         # call without a singular-catch: `res` above is non-`nothing`, so every story's K
         # passed the `_solve_spd` conditioning backstop — the same K and L_ref are reused
         # here, so none of its canonical solves can throw.
-        dc = direction_complete_interstory_drift(p.evaluator, walls, p.loads; active_ids=active)
+        dc = direction_complete_interstory_drift(p.evaluator, walls, p.loads;
+                                                 active_ids=active, wall_half_lengths=half_lengths)
     end
 
     g = Float64[]
@@ -576,6 +616,9 @@ function solve_wall_layout(p::WallLayoutNLPProblem; solver::Symbol=:ipopt, kwarg
     # validation, so a removed wall parked outside the plate cannot spuriously flip the layout
     # to :geometry_inconsistent / :infeasible.
     active_opt = _active_candidate_ids(p, result.minimizer)
+    # Per-candidate half-length map (density-independent) threaded TOGETHER with `active_opt` so the
+    # enclosure gate and the survivor re-validation both run the endpoint-aware body test.
+    half_lengths_opt = _candidate_half_lengths(p)
 
     # ENCLOSURE GATE (crit7, fail-closed): plate_center is present (handled above), but the
     # exact four-corner drift / torsion metrics are exact ONLY if the plate encloses the drift-
@@ -588,7 +631,7 @@ function solve_wall_layout(p::WallLayoutNLPProblem; solver::Symbol=:ipopt, kwarg
     # Wall positions are density-independent, so `walls_opt` carries the true geometry here.
     # FEM tier returns `true` (unaffected); the Phase 10 unified-FEM survivor check (true
     # geometry) remains the final authority, incl. the residual walls ⊆ plate ⊂ occupants.
-    if !_plate_encloses_walls(p.evaluator, walls_opt, active_opt)
+    if !_plate_encloses_walls(p.evaluator, walls_opt, active_opt, half_lengths_opt)
         reval = (ok = false, worst_util = Inf,
                  failing = (story = 0, direction = :none, mode = :geometry_inconsistent,
                             drift = Inf, util = Inf))
@@ -603,9 +646,12 @@ function solve_wall_layout(p::WallLayoutNLPProblem; solver::Symbol=:ipopt, kwarg
         # runs on the optimizer's selected layout (density-removed candidates included), so it
         # must skip the SAME removed walls — otherwise a removed outside wall would re-introduce
         # the spurious enclosure fail here.
-        res = evaluate_lateral(p.evaluator, walls_opt, p.loads; active_ids=active_opt)
-        dc  = direction_complete_interstory_drift(p.evaluator, walls_opt, p.loads; active_ids=active_opt)
-        eig = eigenstructure_stability(p.evaluator, walls_opt, p.loads, p.drift_limit; active_ids=active_opt)
+        res = evaluate_lateral(p.evaluator, walls_opt, p.loads;
+                               active_ids=active_opt, wall_half_lengths=half_lengths_opt)
+        dc  = direction_complete_interstory_drift(p.evaluator, walls_opt, p.loads;
+                                                  active_ids=active_opt, wall_half_lengths=half_lengths_opt)
+        eig = eigenstructure_stability(p.evaluator, walls_opt, p.loads, p.drift_limit;
+                                       active_ids=active_opt, wall_half_lengths=half_lengths_opt)
 
         # (1) EXACT MAX-CORNER interstory drift over the four TRUE occupant corners (ASCE
         # 7-22 §12.12.1, edges incl. diaphragm rotation per §12.8.6.5): the physical drift

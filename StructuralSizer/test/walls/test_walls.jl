@@ -2636,3 +2636,219 @@ end
     @test encl(evnegy, walls, Set{Int}()) == false
     @test encl(evnegy, walls)             == false
 end
+
+# ==============================================================================
+# crit8 fix — ENDPOINT-AWARE (wall-body) enclosure test
+# ==============================================================================
+# A `WallLine` carries no length, so crit7's CENTROID-only `_plate_encloses_walls`
+# passes a long wall whose centroid is inside the plate but whose BODY over-hangs the
+# plate edge (crit8 residual). THE FIX adds an OPTIONAL 4th argument
+# `wall_half_lengths::AbstractDict{Int,Float64}` (candidate id → `lw/2`). When supplied,
+# an ACTIVE wall `w` with `hl = get(map, w.id, 0.0) > 0` is tested by BOTH of its endpoints
+# `(w.x ± hl·cos θ, w.y ± hl·sin θ)` against the SAME `tol`-padded plate bounds, requiring
+# BOTH inside (the plate is axis-aligned convex ⇒ both endpoints in ⇒ the whole pier in).
+# A missing map / absent id / non-positive half-length falls back to the CENTROID test
+# byte-for-byte, so the one-shot CHECK path and the FEM tier (both pass `nothing`) are
+# UNCHANGED. In the optimizer the map is built by `_candidate_half_lengths(p)` and passed
+# alongside the active set at every `_plate_encloses_walls` call site (layout_problem.jl).
+#
+# Each endpoint testset constructs a small explicit plate ev (center (0,0), half (10,10) ⇒
+# plate x,y ∈ [−10, 10]) so the geometry is self-evident; every case asserts BOTH the
+# tightened (map-supplied) verdict AND the unchanged centroid-only verdict on the SAME wall,
+# so the tightening — and that it would NOT fire WITHOUT the map — is visible in one run.
+
+@testset "crit8 (E1): wall whose CENTROID is inside but BODY over-hangs ⇒ caught ONLY with the half-length map" begin
+    encl = StructuralSizer._plate_encloses_walls
+    # Plate x,y ∈ [−10, 10]. X-wall (θ = 0) centered at x = 8 (INSIDE), half-length hl = 4 ⇒
+    # endpoints at x = 8 ± 4 = {4, 12}. The +X endpoint x = 12 > 10 pokes OUT by lw/2.
+    ev   = ReducedDiaphragmEvaluator(story_heights=[3.0], plan_halfwidth=(10.0, 10.0),
+                                     plate_center=(0.0, 0.0), accidental_ecc=0.05)
+    wall = [WallLine(1, 8.0, 0.0, 0.0, 1e9, 1)]       # centroid (8, 0) is strictly inside
+    hl   = Dict(1 => 4.0)                              # lw/2 = 4 ⇒ endpoint at x = 12 (over)
+    active = Set([1])
+
+    # WITH the body test (map supplied): the over-hanging +X endpoint FAILS CLOSED.
+    @test encl(ev, wall, active, hl) == false         # NOW caught (crit8 fix)
+
+    # WITHOUT the map the centroid (x = 8) is inside ⇒ the gate passes, exactly as before the
+    # fix. This is the SAME wall: the only difference is whether the half-length map is present,
+    # so these two lines ARE the pass/fail boundary the fix introduces.
+    @test encl(ev, wall, active)          == true     # 3-arg (centroid-only) ⇒ old TRUE
+    @test encl(ev, wall, active, nothing) == true     # explicit nothing ⇒ old TRUE
+    @test encl(ev, wall)                  == true     # legacy default ⇒ old TRUE
+
+    # A Y-wall (θ = π/2) centered at y = 8 with hl = 4 ⇒ endpoints y = {4, 12}: body over-hangs
+    # in Y (orientation is honored through cos θ / sin θ), while its centroid y = 8 is inside.
+    wally = [WallLine(1, 0.0, 8.0, pi/2, 1e9, 1)]
+    @test encl(ev, wally, active, hl) == false        # over-hang caught along the wall axis
+    @test encl(ev, wally, active)     == true         # centroid-only ⇒ passes (old behavior)
+end
+
+@testset "crit8 (E2): a wall fully INSIDE the plate ⇒ endpoint test still passes (no over-rejection)" begin
+    encl = StructuralSizer._plate_encloses_walls
+    ev   = ReducedDiaphragmEvaluator(story_heights=[3.0], plan_halfwidth=(10.0, 10.0),
+                                     plate_center=(0.0, 0.0), accidental_ecc=0.05)
+    active = Set([1]); hl = Dict(1 => 4.0)
+
+    # Axis-aligned, centered: endpoints x = ±4, well inside [−10, 10].
+    @test encl(ev, [WallLine(1, 0.0, 0.0, 0.0,  1e9, 1)], active, hl) == true
+    # A DIAGONAL wall (θ = π/4), hl = 4 ⇒ endpoints (±2.83, ±2.83), both inside.
+    @test encl(ev, [WallLine(1, 0.0, 0.0, pi/4, 1e9, 1)], active, hl) == true
+    # Off-center but the whole body stays inside: centroid (5, 5), hl = 4, θ = 0 ⇒ endpoints
+    # x = {1, 9} ⊂ [−10, 10], y = 5 inside.
+    @test encl(ev, [WallLine(1, 5.0, 5.0, 0.0,  1e9, 1)], active, hl) == true
+end
+
+@testset "crit8 (E3): endpoints EXACTLY on the plate boundary (within tol) ⇒ enclosed (NOT over-rejected)" begin
+    encl = StructuralSizer._plate_encloses_walls
+    ev   = ReducedDiaphragmEvaluator(story_heights=[3.0], plan_halfwidth=(10.0, 10.0),
+                                     plate_center=(0.0, 0.0), accidental_ecc=0.05)
+    active = Set([1])
+
+    # A wall centered so ONE endpoint lands EXACTLY on the edge x = +10: centroid x = 6, hl = 4
+    # ⇒ endpoints x = {2, 10}. The +X endpoint sits ON the boundary (|e − cx| == hx), which the
+    # tol = 1e-9 + 1e-9·hypot(hx, hy) band must ENCLOSE, not over-reject.
+    @test encl(ev, [WallLine(1, 6.0, 0.0, 0.0, 1e9, 1)], active, Dict(1 => 4.0)) == true
+
+    # A PERIMETER wall running ALONG the top edge y = +10 (θ = 0, hl = 5) ⇒ BOTH endpoints
+    # (±5, 10) lie ON the boundary ⇒ still enclosed (the documented edge-aligned case).
+    @test encl(ev, [WallLine(1, 0.0, 10.0, 0.0, 1e9, 1)], active, Dict(1 => 5.0)) == true
+
+    # Boundary contrast: nudging the SAME wall's endpoint a hair (1 mm, ≫ tol) past the edge
+    # DOES fail closed — the tol band absorbs float noise but NOT a genuine over-hang.
+    @test encl(ev, [WallLine(1, 6.0 + 1e-3, 0.0, 0.0, 1e9, 1)], active, Dict(1 => 4.0)) == false
+end
+
+@testset "crit8 (E4): `nothing` half-length map ⇒ centroid-only behavior byte-for-byte UNCHANGED" begin
+    encl = StructuralSizer._plate_encloses_walls
+    ev   = ReducedDiaphragmEvaluator(story_heights=[3.0], plan_halfwidth=(10.0, 10.0),
+                                     plate_center=(0.0, 0.0), accidental_ecc=0.05)
+
+    # Walls spanning the three centroid outcomes: inside-but-body-over-hangs (id 1), fully
+    # inside (id 2), centroid genuinely OUTSIDE (id 3, x = 12).
+    walls  = [WallLine(1, 8.0,  0.0, 0.0, 1e9, 1),
+              WallLine(2, 0.0,  0.0, 0.0, 1e9, 1),
+              WallLine(3, 12.0, 0.0, 0.0, 1e9, 1)]
+    active = Set([1, 2, 3])
+
+    # For EVERY centroid-only call form the result is identical — the 4th arg being `nothing`
+    # (explicit OR via the shorter arities) must change nothing. Here id 3's centroid is OUTSIDE
+    # ⇒ all forms agree on FALSE, and the over-hang of id 1 is (correctly) INVISIBLE without a map.
+    @test encl(ev, walls, active, nothing) == encl(ev, walls, active)
+    @test encl(ev, walls, active)          == encl(ev, walls, nothing)
+    @test encl(ev, walls, nothing)         == encl(ev, walls)
+    @test encl(ev, walls)                  == false            # id 3 centroid x = 12 pokes out
+
+    # Drop the outside id 3: the remaining centroids are inside ⇒ centroid-only passes, and the
+    # id-1 body over-hang is STILL invisible to every `nothing`/short-arity form (unchanged).
+    inside_centroids = [walls[1], walls[2]]
+    act2 = Set([1, 2])
+    @test encl(ev, inside_centroids, act2)          == true    # centroid-only ⇒ TRUE
+    @test encl(ev, inside_centroids, act2, nothing) == true    # explicit nothing ⇒ TRUE (unchanged)
+    @test encl(ev, inside_centroids)                == true    # legacy default ⇒ TRUE
+
+    # A map PRESENT but with a non-positive / absent half-length ALSO falls back to the centroid
+    # test (the `get(..., 0.0)` + `hl > 0` guard): id 1 is NOT caught here.
+    @test encl(ev, inside_centroids, act2, Dict(1 => 0.0))   == true   # hl ≤ 0 ⇒ centroid fallback
+    @test encl(ev, inside_centroids, act2, Dict(1 => -4.0))  == true   # negative hl ⇒ centroid fallback
+    @test encl(ev, inside_centroids, act2, Dict(99 => 4.0))  == true   # id absent ⇒ centroid fallback
+    # …but supplying id 1's real half-length DOES catch its body over-hang (contrast line above).
+    @test encl(ev, inside_centroids, act2, Dict(1 => 4.0))   == false
+end
+
+@testset "crit8 (E5): end-to-end — an ACTIVE wall body over-hanging the plate stamps :geometry_inconsistent" begin
+    # A deterministic end-to-end exercise: a well-braced symmetric core whose every CENTROID is
+    # inside the plate, but whose two Y-walls (the ONLY Y-bracing — removing either leaves a
+    # single-wall torsional mechanism, so the MinDrift optimizer keeps BOTH dense/active, exactly
+    # as Guard F2 (A)) have lw/2 = 12 bodies that poke OUT of the y ∈ [−10, 10] plate. With the
+    # endpoint-aware body test threaded through `solve_wall_layout`, the active over-hang FAILS
+    # CLOSED to the DISTINCT `:geometry_inconsistent` status; the centroid-only proxy would have
+    # (wrongly) accepted it.
+    DL = 0.02
+    # crit7 material block, parametrized by position / orientation / length.
+    cand(id, x, y, θ, lw) = WallCandidate(id, x, y, θ, lw, 3.0, 1, 25e9, 0.2, 28e6,
+                                          60e6 * 6.895, 2400.0, 0.1, 0.4, 0.0025)
+    cands = [cand(1, 0.0, -8.0, 0.0,   8.0),    # X-wall, body x = ±4 (inside), on y = −8
+             cand(2, 0.0,  8.0, 0.0,   8.0),    # X-wall, body x = ±4 (inside), on y = +8
+             cand(3, -8.0, 0.0, pi/2, 24.0),    # Y-wall @ x = −8, body y = ±12 ⇒ OVER-HANGS
+             cand(4,  8.0, 0.0, pi/2, 24.0)]    # Y-wall @ x = +8, body y = ±12 ⇒ OVER-HANGS
+    # Plate center (0,0), half (10,10): every CENTROID ∈ [−10,10]²; only the Y-wall BODIES poke out.
+    ev    = ReducedDiaphragmEvaluator(story_heights=[3.0], plan_halfwidth=(10.0, 10.0),
+                                      plate_center=(0.0, 0.0), accidental_ecc=0.05)
+    loads = [StoryLoad(1, 5e4, 5e4, 0.0, 0.0)]
+    prob  = WallLayoutNLPProblem(cands, ev, loads; objective=MinDrift(), drift_limit=DL)
+
+    # Predicate-level pass/fail boundary on the optimizer-built walls (all-dense selection):
+    # centroid-only ENCLOSES (old behavior), body test FAILS (the new tightening) — this is the
+    # exact difference the end-to-end stamp below is driven by.
+    walls_dense = StructuralSizer._walls_from_density(prob, ones(4))
+    active_all  = StructuralSizer._active_candidate_ids(prob, ones(4))
+    hl_map      = StructuralSizer._candidate_half_lengths(prob)
+    @test active_all == Set([1, 2, 3, 4])                                    # all candidates active
+    @test hl_map[3] == 12.0 && hl_map[4] == 12.0                             # lw/2 = 12 over-hang
+    @test StructuralSizer._plate_encloses_walls(ev, walls_dense, active_all)          == true   # centroid-only ⇒ TRUE (old)
+    @test StructuralSizer._plate_encloses_walls(ev, walls_dense, active_all, hl_map)  == false  # body test ⇒ FALSE (fix)
+
+    # END-TO-END: the MinDrift solve keeps the stiff core dense, so the active Y-wall bodies poke
+    # out and `solve_wall_layout` REFUSES with the distinct :geometry_inconsistent status.
+    sol = solve_wall_layout(prob; maxiter=200)
+    @test sol.feasible == false
+    @test sol.status == :geometry_inconsistent
+    @test sol.status != :geometry_required
+    @test sol.revalidation.failing.mode == :geometry_inconsistent
+end
+
+@testset "crit8 (E6): endpoint body test is gated PER-AXIS — a ZERO-half-extent axis reverts to the centroid (crit7 restored), a POSITIVE-extent axis stays endpoint-checked" begin
+    # REGRESSION GUARD for the P0 that an endpoint-aware body test introduced: extending BOTH
+    # endpoints on EVERY axis wrongly rejected a legitimate thin-plate layout (crit7) — a line of
+    # X-walls declared with plan_halfwidth = (0, hy) has bodies that reach x = cx ± lw/2 ALONG the
+    # zero-width axis, which the blanket endpoint test flagged as over-hanging. THE FIX arms the
+    # endpoint extension on an axis ONLY where that axis has a POSITIVE half-extent; a zero-extent
+    # axis reverts to the CENTROID coordinate (on-axis within tol ⇒ enclosed, off-axis ⇒ fail
+    # closed), while the OTHER positive-extent axis stays endpoint-checked. These assertions pin
+    # that per-axis contract DIRECTLY at the predicate (solver-free), so a future regression that
+    # re-arms both axes unconditionally fails HERE, not three solver layers up.
+    encl = StructuralSizer._plate_encloses_walls
+
+    # --- DEGENERATE thin-X plate: hx == 0, hy > 0 (a line of X-walls on the x = cx axis) ---------
+    # Plate center (0, 0), plan_halfwidth (0, 5): x-extent is a thin line x = 0, y ∈ [−5, 5].
+    evX    = ReducedDiaphragmEvaluator(story_heights=[3.0], plan_halfwidth=(0.0, 5.0),
+                                       plate_center=(0.0, 0.0), accidental_ecc=0.05)
+    # θ = 0 X-wall centered ON the x = 0 line, lw = 8 ⇒ hl = 4: its BODY runs to x = ±4 ALONG the
+    # degenerate axis. Because hx == 0 the X-check reverts to the centroid (w.x = 0, on the line),
+    # and the Y body-extent dy = hl·sin 0 = 0 sits at y = 0 ∈ [−5, 5] ⇒ ENCLOSED (crit7 preserved).
+    wXon   = [WallLine(1, 0.0, 0.0, 0.0, 1e9, 1)]
+    @test encl(evX, wXon, Set([1]), Dict(1 => 4.0)) == true     # body along the zero-width axis ⇒ still TRUE
+    @test encl(evX, wXon, Set([1]))                 == true     # centroid-only agrees (the map did NOT change it)
+    # Move the centroid OFF the x = 0 line (w.x = 0.5 ≫ tol): the degenerate X-axis centroid check
+    # now fails closed, regardless of the body ⇒ NOT enclosed.
+    wXoff  = [WallLine(1, 0.5, 0.0, 0.0, 1e9, 1)]
+    @test encl(evX, wXoff, Set([1]), Dict(1 => 4.0)) == false   # off-axis centroid ⇒ FALSE
+    @test encl(evX, wXoff, Set([1]))                 == false   # centroid-only agrees
+
+    # --- COMPLEMENTARY thin-Y plate: hx > 0, hy == 0 (a line of Y-walls on the y = cy axis) -------
+    # Plate center (0, 0), plan_halfwidth (5, 0): y-extent is a thin line y = 0, x ∈ [−5, 5].
+    evY    = ReducedDiaphragmEvaluator(story_heights=[3.0], plan_halfwidth=(5.0, 0.0),
+                                       plate_center=(0.0, 0.0), accidental_ecc=0.05)
+    # θ = π/2 Y-wall centered ON the y = 0 line, lw = 8 ⇒ hl = 4: its BODY runs to y = ±4 ALONG the
+    # degenerate Y-axis. hy == 0 ⇒ Y reverts to the centroid (w.y = 0, on the line); the X
+    # body-extent dx = hl·cos(π/2) = 0 at x = 0 ∈ [−5, 5] ⇒ ENCLOSED (complementary crit7 case).
+    wYon   = [WallLine(1, 0.0, 0.0, pi/2, 1e9, 1)]
+    @test encl(evY, wYon, Set([1]), Dict(1 => 4.0)) == true     # body along the zero-height axis ⇒ still TRUE
+    @test encl(evY, wYon, Set([1]))                 == true     # centroid-only agrees
+    # Centroid OFF the y = 0 line (w.y = 0.5 ≫ tol) ⇒ degenerate Y-axis centroid check fails closed.
+    wYoff  = [WallLine(1, 0.0, 0.5, pi/2, 1e9, 1)]
+    @test encl(evY, wYoff, Set([1]), Dict(1 => 4.0)) == false   # off-axis centroid ⇒ FALSE
+    @test encl(evY, wYoff, Set([1]))                 == false   # centroid-only agrees
+
+    # --- CONTRAST on a NORMAL plate: hx > 0 AND hy > 0 — the SAME body overhang is STILL caught ---
+    # The degenerate-axis relaxation is NOT a blanket disable of the body test. On a plate with a
+    # POSITIVE but small x-half-extent (hx = 3), the SAME θ = 0 wall centered at x = 0 with hl = 4
+    # has endpoints x = ±4 that poke OUT of x ∈ [−3, 3] ⇒ the armed X-axis endpoint test FAILS
+    # CLOSED, exactly the crit8 tightening. (Contrast evX above where hx == 0 accepted it.)
+    evN    = ReducedDiaphragmEvaluator(story_heights=[3.0], plan_halfwidth=(3.0, 5.0),
+                                       plate_center=(0.0, 0.0), accidental_ecc=0.05)
+    @test encl(evN, wXon, Set([1]), Dict(1 => 4.0)) == false    # normal plate ⇒ body overhang CAUGHT
+    @test encl(evN, wXon, Set([1]))                 == true     # centroid-only (no map) still passes ⇒ the
+                                                                # FALSE above is the body test, not the centroid
+end

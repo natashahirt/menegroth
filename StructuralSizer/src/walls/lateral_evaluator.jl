@@ -498,7 +498,8 @@ function _reference_length(ev::ReducedDiaphragmEvaluator, walls_s::Vector{WallLi
 end
 
 """
-    _plate_encloses_walls(ev::ReducedDiaphragmEvaluator, walls_s, active_ids=nothing) -> Bool
+    _plate_encloses_walls(ev::ReducedDiaphragmEvaluator, walls_s, active_ids=nothing,
+                          wall_half_lengths=nothing) -> Bool
 
 ENCLOSURE GUARD (fail-closed) for the reduced-tier corner-drift / torsion certification.
 Returns `true` iff `plate_center` is present AND every ACTIVE `WallLine` `w` in `walls_s` lies
@@ -507,6 +508,42 @@ inside (or exactly on) the plate rectangle `plate_center ± plan_halfwidth`:
     cx − hx − tol ≤ w.x ≤ cx + hx + tol    AND    cy − hy − tol ≤ w.y ≤ cy + hy + tol
 
 with `(cx, cy) = plate_center`, `(hx, hy) = plan_halfwidth`.
+
+ENDPOINT-AWARE BODY TEST (`wall_half_lengths`, ENGINEERING JUDGMENT — not a code clause):
+a `WallLine` carries no length, so the CENTROID-only test above passes a long wall whose
+centroid is inside the plate but whose BODY over-hangs the plate edge (crit8 residual). When
+the caller supplies `wall_half_lengths` (candidate id → `lw/2`) and an active wall has `hl > 0`,
+the guard extends the enclosure test from the centroid to the wall's TWO endpoints
+`(w.x ± hl·cos θ, w.y ± hl·sin θ)` against the SAME `tol` bounds. The test is applied PER AXIS
+and the endpoint extension on an axis is ARMED ONLY where that axis has a POSITIVE half-extent:
+
+  • X: test `{w.x ± hl·cos θ}` within `[cx − hx − tol, cx + hx + tol]` IF `hx > 0` (and the body
+    test is active); otherwise (`hx == 0`, or body test inactive) test just the centroid `w.x`.
+  • Y: symmetric with `hy` and `{w.y ± hl·sin θ}`.
+
+On a NORMAL plate (`hx > 0` AND `hy > 0`) this is mathematically IDENTICAL to requiring both
+endpoints inside: the endpoints are symmetric about the centroid, so their X-extent is exactly
+`{w.x ± hl·cos θ}` and their Y-extent `{w.y ± hl·sin θ}`, and the plate is an axis-aligned CONVEX
+rectangle — requiring each axis's extent within that axis's bounds ⇔ both endpoints inside. On a
+DEGENERATE (zero-half-extent) axis the endpoint extension would wrongly flag a legitimate wall
+whose body runs ALONG the thin axis (crit7: a line of X-walls at `x = cx` declared with
+`plan_halfwidth = (0, hy)`, bodies reaching `x = cx ± lw/2`), so that axis instead REVERTS to the
+CENTROID coordinate (`w.x`) — the exact pre-endpoint crit7 behavior: on-axis walls within `tol`
+are enclosed, off-axis walls fail closed — while the OTHER, positive-extent axis stays endpoint-
+checked. The body test is strictly MORE conservative on the armed axes: a fully-inside wall still
+passes, a perimeter wall running ALONG a positive-extent plate edge has both endpoints ON the
+edge (within `tol`) and still passes, and only a genuinely over-hanging body now FAILS CLOSED.
+Falls back to the CENTROID test (byte-for-byte as before) when `wall_half_lengths === nothing`,
+the id is absent from the map, or its half-length is `≤ 0`, so the one-shot CHECK path and the
+FEM tier (both pass `nothing`) are unchanged.
+
+ARMING PATH (where the body test actually fires): because a `WallLine` carries no length, the
+id → half-length map is injected ONLY on the OPTIMIZER path — `solve_wall_layout` and the
+`constraint_fns` / `objective_fn` / survivor re-validation it drives (layout_problem.jl), which
+hold the `WallCandidate` lengths. The DIRECT one-shot `evaluate_lateral` / reduced-tier check
+path passes `wall_half_lengths === nothing` and stays CENTROID-only; it defers the crit8 body-
+overhang case to the Phase-10 unified-FEM survivor (true geometry). That one-shot residual is an
+UNCHANGED pre-existing gap, not a new hole, and is NOT closed by adding `lw` to `WallLine`.
 
 WHY (crit7): the four-corner max-drift / torsion metrics are EXACT only over the rectangle
 `plate_center ± plan_halfwidth` (convexity of `|disp(p)|²` in the plan point `p`), and are
@@ -528,8 +565,14 @@ to the caller contract + the FEM survivor check.
 ENGINEERING JUDGMENT (tolerance, not a code clause): `tol = 1e-9 + 1e-9·hypot(hx, hy)` — an
 absolute floor plus a plate-SCALED relative term — so a wall EXACTLY on the plate boundary
 (`|w.x − cx| == hx`) PASSES despite floating-point assembly noise, while a genuine over-hang
-(even a few mm beyond a plan-scale plate) FAILS closed. The test is ORIGIN-INVARIANT: walls
-and plate translate together, so a joint origin shift leaves every inequality unchanged.
+(even a few mm beyond a plan-scale plate) FAILS closed. The CENTROID test is EXACTLY ORIGIN-
+INVARIANT: walls and plate translate together, so a joint origin shift leaves every inequality
+unchanged. The ENDPOINT/body test is NOT exactly origin-invariant: the `w.x + hl·cos θ` endpoint
+evaluation rounds at a magnitude that scales with `|w.x|` (and `w.y + hl·sin θ` with `|w.y|`), so
+a plate declared very far from the `WallLine`-frame origin could read a legitimately on-edge wall
+a hair outside `tol`. This is negligible for physical coordinates — biting only near
+`|coord| / plate ≈ 4e6` (double-precision ε against the plate-scaled `tol` term) — but the exact
+invariance claim holds for the centroid test ONLY, not the body test.
 
 ENGINEERING JUDGMENT (degenerate plate, not a code clause): a NEGATIVE half-extent (`hx < 0`
 or `hy < 0`) is a nonsensical / inverted plate and is treated as NON-enclosing (fail closed). A
@@ -560,10 +603,16 @@ the whole active set went empty and the gate became vacuously true for all layou
 `ρ^penal` test removes that dependence on `ρ_min`'s magnitude entirely.
 
 An all-removed / empty-after-mask set is vacuously enclosed (same rule as an empty `walls_s`).
-This is a BACKSTOP, not a hole: with the absolute `ρ^penal` threshold an empty active set occurs
-ONLY when every wall is truly void (`ρ^penal ≤ ε_abs` everywhere) = a global mechanism, which the
-load-independent singular-stiffness / translational / eigenstructure floors fail closed on
-INDEPENDENTLY of this gate. The negative-half-extent (inverted plate) branch, by contrast, fires
+This is a BACKSTOP, not a hole — but the GOVERNING backstop for a LOADED all-masked story is the
+LOAD-DEPENDENT eigenstructure TRANSLATIONAL floor `util_trans`, NOT the scale-invariant singular
+guard. An empty active set means every wall is floored to `ρ^penal ≤ ε_abs`, so the story `K` is
+UNIFORMLY softened; with cumulative shear `F_s > 0` the softest translational mode `λmin(K_tt)`
+→ ~0 drives `util_trans = F_s/(h·DL·λmin(K_tt)) → ∞`, so the story fails closed through the drift
+slot (`eigenstructure_stability`). The SCALE-INVARIANT singular / `rcond` guard — whose ratio
+`λmin/λmax` stays healthy under a UNIFORM softening — would NOT catch a uniformly-softened-but-
+well-conditioned story on its own; it is the SECONDARY catch for genuinely ill-conditioned cases.
+(An UNLOADED all-masked story has `F_s ≈ 0`, so there is no drift demand to under-state.) The
+negative-half-extent (inverted plate) branch, by contrast, fires
 BEFORE the mask (crit-P2): a NON-EMPTY `walls_s` with an inverted plate fails closed regardless of
 which walls are active.
 
@@ -575,7 +624,8 @@ optimizer's PER-WALL ABSOLUTE `ρ^penal` density fact, never a quantity this pre
 by comparing `w.k` across walls.
 """
 function _plate_encloses_walls(ev::ReducedDiaphragmEvaluator, walls_s::Vector{WallLine},
-                               active_ids::Union{Nothing,AbstractSet}=nothing)
+                               active_ids::Union{Nothing,AbstractSet}=nothing,
+                               wall_half_lengths::Union{Nothing,AbstractDict{Int,Float64}}=nothing)
     ev.plate_center === nothing && return false
     isempty(walls_s) && return true                 # vacuously true: nothing to enclose
     cx, cy = ev.plate_center
@@ -599,28 +649,75 @@ function _plate_encloses_walls(ev::ReducedDiaphragmEvaluator, walls_s::Vector{Wa
         # be silently skipped (see docstring). `active_ids === nothing` ⇒ every wall is examined,
         # byte-for-byte identical to the one-shot CHECK / FEM tiers.
         active_ids === nothing || w.id in active_ids || continue
-        (cx - hx - tol <= w.x <= cx + hx + tol) || return false
-        (cy - hy - tol <= w.y <= cy + hy + tol) || return false
+        # ENDPOINT-AWARE BODY TEST (ENGINEERING JUDGMENT, not a code clause): when the optimizer
+        # supplies a per-candidate half-length `hl = lw/2 > 0`, extend the enclosure test from
+        # the centroid to the wall's TWO endpoints `(w.x ± hl·cos θ, w.y ± hl·sin θ)`, catching a
+        # wall whose centroid is inside but whose BODY over-hangs the plate edge (crit8). The
+        # plate is an axis-aligned CONVEX rectangle, so both endpoints inside ⇒ the whole pier
+        # inside. Strictly MORE conservative (a fully-inside wall and an edge-aligned perimeter
+        # wall both still pass; only a genuine over-hang fails closed).
+        #
+        # ENGINEERING JUDGMENT (lw ≤ 0 ⇒ degenerate point wall, not a code clause): `get(…, 0.0)`
+        # ⇒ a missing map / id / NON-POSITIVE half-length gives `hl ≤ 0` and reverts to the
+        # CENTROID test exactly as before. A zero-length wall IS its own centroid (no body to
+        # over-hang), so this is INTENDED degenerate-point-wall behavior, NOT a silent disarm.
+        hl = wall_half_lengths === nothing ? 0.0 : get(wall_half_lengths, w.id, 0.0)
+        body = hl > 0                                # body test ARMED for this wall?
+        dx = body ? hl * cos(w.θ) : 0.0              # half-body X-extent (0 when disarmed)
+        dy = body ? hl * sin(w.θ) : 0.0              # half-body Y-extent (0 when disarmed)
+        # PER-AXIS half-extent gating (ENGINEERING JUDGMENT, not a code clause): extend to the
+        # endpoints on an axis ONLY where the plate declares a POSITIVE half-extent; on a ZERO-
+        # extent (thin / degenerate) axis REVERT that axis to the CENTROID coordinate (crit7).
+        # The endpoints are symmetric about the centroid, so their X-extent is exactly
+        # {w.x ± hl·cos θ} and their Y-extent {w.y ± hl·sin θ}; requiring the former within the X
+        # bounds AND the latter within the Y bounds is EQUIVALENT to requiring both endpoints
+        # inside the convex rectangle — so on a NORMAL plate (hx > 0 AND hy > 0) this is
+        # mathematically IDENTICAL to the both-endpoints test. On a degenerate axis (e.g. hx == 0,
+        # a thin plate of X-walls declared with `plan_halfwidth = (0, hy)`) the X-check reverts to
+        # the centroid `w.x` (on-axis walls within `tol` enclosed, off-axis walls fail closed —
+        # the pre-endpoint crit7 contract) while the positive-hy axis is still endpoint-checked.
+        if body && hx > 0
+            (cx - hx - tol <= w.x + dx <= cx + hx + tol) || return false
+            (cx - hx - tol <= w.x - dx <= cx + hx + tol) || return false
+        else
+            (cx - hx - tol <= w.x <= cx + hx + tol) || return false
+        end
+        if body && hy > 0
+            (cy - hy - tol <= w.y + dy <= cy + hy + tol) || return false
+            (cy - hy - tol <= w.y - dy <= cy + hy + tol) || return false
+        else
+            (cy - hy - tol <= w.y <= cy + hy + tol) || return false
+        end
     end
     # EMPTY-AFTER-MASK BACKSTOP: if the mask skipped every wall (empty active set) this returns
-    # vacuously true — SAFE, not a hole: an empty active set means every wall is truly void
-    # (ρ^penal ≤ ε_abs everywhere) = a global mechanism, which the load-independent singular-
-    # stiffness / translational / eigenstructure floors fail closed on independently of this gate.
+    # vacuously true. This is SAFE, not a hole — but the GOVERNING backstop for a LOADED all-
+    # masked story is the LOAD-DEPENDENT eigenstructure TRANSLATIONAL floor `util_trans`, NOT the
+    # scale-invariant singular guard. An empty active set floors every wall to ρ^penal ≤ ε_abs, so
+    # the story K is UNIFORMLY softened; with cumulative shear F_s > 0 the softest translational
+    # mode λmin(K_tt) → ~0 drives `util_trans = F_s/(h·DL·λmin) → ∞`, failing closed through the
+    # drift slot (`eigenstructure_stability`). The scale-invariant singular / rcond guard — whose
+    # λmin/λmax ratio stays healthy under a uniform softening — would NOT catch a uniformly-
+    # softened-but-well-conditioned story on its own; it is the SECONDARY catch for genuinely ill-
+    # conditioned cases. (An UNLOADED all-masked story has F_s ≈ 0, so there is no drift to under-
+    # state.)
     return true
 end
 
 # FEM tier (and any non-reduced evaluator) carries TRUE geometry and is NOT subject to the
 # reduced-tier enclosure proxy, so it always "encloses" — mirrors
 # `_plate_center_missing(::AbstractLateralEvaluator) = false`. Keeps FEM unaffected. The
-# optional `active_ids` arg is accepted (and ignored) so the two arities match the reduced
-# method and the mask threads transparently through evaluator-agnostic call sites.
+# optional `active_ids` and `wall_half_lengths` args are accepted (and ignored) so the two arities
+# match the reduced method and both the mask and the endpoint map thread transparently through
+# evaluator-agnostic call sites.
 _plate_encloses_walls(::AbstractLateralEvaluator, ::Vector{WallLine},
-                      ::Union{Nothing,AbstractSet}=nothing) = true
+                      ::Union{Nothing,AbstractSet}=nothing,
+                      ::Union{Nothing,AbstractDict{Int,Float64}}=nothing) = true
 
 function evaluate_lateral(ev::ReducedDiaphragmEvaluator,
                           walls::Vector{WallLine},
                           loads::Vector{StoryLoad};
-                          active_ids::Union{Nothing,AbstractSet}=nothing)
+                          active_ids::Union{Nothing,AbstractSet}=nothing,
+                          wall_half_lengths::Union{Nothing,AbstractDict{Int,Float64}}=nothing)
     nstory = length(ev.story_heights)
     story_disp = zeros(nstory, 3)
     drift = zeros(nstory)
@@ -710,8 +807,11 @@ function evaluate_lateral(ev::ReducedDiaphragmEvaluator,
         # with `status = :geometry_inconsistent`.
         # `active_ids` masks density-removed candidates out of the enclosure proxy so a removed
         # wall parked outside the plate cannot fail-close this gate (nothing ⇒ all walls, as the
-        # one-shot CHECK path and FEM tier require).
-        torsion[s] = (ev.plate_center === nothing || !_plate_encloses_walls(ev, walls_s, active_ids)) ? Inf :
+        # one-shot CHECK path and FEM tier require). `wall_half_lengths` (when supplied with the
+        # mask) upgrades the proxy to the endpoint-aware body test so an over-hanging wall fails
+        # closed (nothing ⇒ centroid-only, unchanged).
+        torsion[s] = (ev.plate_center === nothing ||
+                      !_plate_encloses_walls(ev, walls_s, active_ids, wall_half_lengths)) ? Inf :
                      _torsion_amplification(u, ev.plan_halfwidth, cr, ev.plate_center)
 
         # Recover per-wall in-plane shear force: V_i = k_i (b_i · u).
@@ -804,11 +904,13 @@ _torsion_amplification(u::Vector{Float64}, halfwidth::NTuple{2,Float64}) =
 const _DIRECTION_COMPLETE_DIRS = ((:X, 1.0, 0.0), (:Y, 0.0, 1.0))
 
 """
-    direction_complete_interstory_drift(ev, walls, loads; active_ids=nothing) -> (; directions, drift, corner_drift)
+    direction_complete_interstory_drift(ev, walls, loads; active_ids=nothing, wall_half_lengths=nothing) -> (; directions, drift, corner_drift)
 
 `active_ids` (optional) is the SIMP optimizer's Set of ACTIVE candidate ids; when supplied it
 masks density-removed walls out of the per-story enclosure proxy (see [`_plate_encloses_walls`]).
-`nothing` (default) examines every wall, leaving the one-shot CHECK / FEM paths unchanged.
+`wall_half_lengths` (optional, candidate id → `lw/2`) upgrades that proxy to the endpoint-aware
+body test (see [`_plate_encloses_walls`]); passed together with `active_ids`. Both `nothing`
+(default) examines every wall by its centroid, leaving the one-shot CHECK / FEM paths unchanged.
 
 DIRECTION-COMPLETE, origin-invariant per-story interstory drift sweep. Returns BOTH a
 serviceability realization (`drift`, the CR translation) AND the physical drift SAFETY
@@ -855,7 +957,8 @@ singular `K` via `_solve_spd`.
 function direction_complete_interstory_drift(ev::ReducedDiaphragmEvaluator,
                                              walls::Vector{WallLine},
                                              loads::Vector{StoryLoad};
-                                             active_ids::Union{Nothing,AbstractSet}=nothing)
+                                             active_ids::Union{Nothing,AbstractSet}=nothing,
+                                             wall_half_lengths::Union{Nothing,AbstractDict{Int,Float64}}=nothing)
     nstory = length(ev.story_heights)
     ndir = length(_DIRECTION_COMPLETE_DIRS)
     D = zeros(nstory, ndir)
@@ -898,8 +1001,9 @@ function direction_complete_interstory_drift(ev::ReducedDiaphragmEvaluator,
         # walls) would make this metric under-state the real edge drift — the exact formula
         # fails OPEN. Fail closed to `Inf` when this story's walls are not ⊆ plate (see
         # `_plate_encloses_walls`); computed ONCE per story (direction-independent). `active_ids`
-        # masks density-removed candidates (nothing ⇒ all walls, as the CHECK/FEM paths require).
-        encloses = _plate_encloses_walls(ev, walls_s, active_ids)
+        # masks density-removed candidates and `wall_half_lengths` upgrades the proxy to the
+        # endpoint-aware body test (both nothing ⇒ all walls, centroid-only, as CHECK/FEM require).
+        encloses = _plate_encloses_walls(ev, walls_s, active_ids, wall_half_lengths)
 
         for (di, (_, dx, dy)) in enumerate(_DIRECTION_COMPLETE_DIRS)
             Fxc = F_s * dx; Fyc = F_s * dy
@@ -939,12 +1043,14 @@ function direction_complete_interstory_drift(ev::ReducedDiaphragmEvaluator,
 end
 
 """
-    eigenstructure_stability(ev, walls, loads, drift_limit; active_ids=nothing) -> NamedTuple
+    eigenstructure_stability(ev, walls, loads, drift_limit; active_ids=nothing, wall_half_lengths=nothing) -> NamedTuple
 
 `active_ids` (optional) is the SIMP optimizer's Set of ACTIVE candidate ids; when supplied it
 masks density-removed walls out of the torsional-floor enclosure proxy (see
-[`_plate_encloses_walls`]). `nothing` (default) examines every wall, leaving the one-shot CHECK /
-FEM paths unchanged.
+[`_plate_encloses_walls`]). `wall_half_lengths` (optional, candidate id → `lw/2`) upgrades that
+proxy to the endpoint-aware body test (see [`_plate_encloses_walls`]); passed together with
+`active_ids`. Both `nothing` (default) examines every wall by its centroid, leaving the one-shot
+CHECK / FEM paths unchanged.
 
 EIGENSTRUCTURE STABILITY GATE (reduced tier) — the stability authority for the cheap tier.
 It reads the story stiffness EIGENSTRUCTURE directly (translational spectrum + condensed
@@ -996,7 +1102,8 @@ function eigenstructure_stability(ev::ReducedDiaphragmEvaluator,
                                   walls::Vector{WallLine},
                                   loads::Vector{StoryLoad},
                                   drift_limit::Real;
-                                  active_ids::Union{Nothing,AbstractSet}=nothing)
+                                  active_ids::Union{Nothing,AbstractSet}=nothing,
+                                  wall_half_lengths::Union{Nothing,AbstractDict{Int,Float64}}=nothing)
     nstory = length(ev.story_heights)
     λmin_tt = fill(NaN, nstory); λmax_tt = fill(NaN, nstory)
     K_theta = fill(NaN, nstory)
@@ -1078,9 +1185,10 @@ function eigenstructure_stability(ev::ReducedDiaphragmEvaluator,
         # floor only over a plate that encloses the drift-relevant points; an under-covering
         # plate would under-state `r_ref` and let the floor fail OPEN. The TRANSLATIONAL floor
         # and the load-independent mechanism guards above do NOT consult the guard and still run.
-        # `active_ids` masks density-removed candidates out of the enclosure proxy (nothing ⇒
-        # all walls, as the one-shot CHECK path and FEM tier require).
-        if ev.plate_center === nothing || !_plate_encloses_walls(ev, walls_s, active_ids)
+        # `active_ids` masks density-removed candidates out of the enclosure proxy and
+        # `wall_half_lengths` upgrades it to the endpoint-aware body test (both nothing ⇒ all
+        # walls, centroid-only, as the one-shot CHECK path and FEM tier require).
+        if ev.plate_center === nothing || !_plate_encloses_walls(ev, walls_s, active_ids, wall_half_lengths)
             k_req_tors[s] = Inf
             util_tors[s]  = Inf
         else

@@ -407,6 +407,16 @@ function run_target!(engine::IncrementalEngine, params::DesignParameters;
     restored   = NodeKey[]
     pass_output = Dict{NodeKey, String}()   # this pass's output hash per processed node
 
+    # P0-2 Step A (interim memo-shrink): a DEFERRED all-clean restore. When
+    # `pending_rep !== nothing`, `engine.struc` is STALE and the correct current
+    # post-state is `restore_node_state(pending_rep)`. It is set by the all-clean
+    # branch (which never reads/mutates `engine.struc` — see the R7 note there) and
+    # materialized EXACTLY ONCE, as a true deepcopy, before the next dirty level or
+    # at the post-walk tail. This collapses a clean prefix/suffix of N levels from
+    # N whole-`BuildingStructure` deepcopies to a single copy, with no change to
+    # the final struc, memo, or `pass_output`.
+    pending_rep = nothing
+
     # Walk the graph in dependency LEVELS (Kahn waves), restricted to `target`'s
     # transitive-dependency closure. A level may now hold MULTIPLE fine per-slab
     # nodes, so the per-level protocol is (see core/snapshot.jl for the invariants):
@@ -464,15 +474,31 @@ function run_target!(engine::IncrementalEngine, params::DesignParameters;
         end
 
         if isempty(dirty_keys)
-            # 2. ALL-CLEAN — whole-struc restore from a representative snapshot
-            #    (identical across the level); this also restores the global model.
-            rep = engine.memo[first(level_keys)]
-            engine.struc = restore_node_state(rep.state)
+            # 2. ALL-CLEAN — DEFER the whole-struc restore (P0-2 Step A). Every
+            #    clean snapshot in the level is byte-identical (taken after the same
+            #    level barrier sync), so the post-level state is
+            #    `engine.memo[first(level_keys)].state`. R7 INVARIANT: `engine.struc`
+            #    is NOT read or mutated before the next DIRTY level or the tail —
+            #    classification (step 1) reads `pass_output`/`engine.memo` only, and
+            #    this branch populates `pass_output` from the memo, never from the
+            #    struc. So we record the pending representative WITHOUT a deepcopy and
+            #    materialize it lazily, once, when a consumer actually needs it.
+            pending_rep = engine.memo[first(level_keys)].state
             for key in level_keys
                 pass_output[key] = engine.memo[key].output_hash
                 push!(restored, key)
             end
             continue
+        end
+
+        # Materialize any deferred all-clean post-state ONCE, before any node below
+        # reads or mutates `engine.struc` (3a run / 3b overlay / 3c sync / 3d
+        # capture). This is a true deepcopy, never an alias, so the in-place
+        # mutations below (and the tail) can never write through into the memo
+        # snapshot `pending_rep` references. [P0-2 Step A]
+        if pending_rep !== nothing
+            engine.struc = restore_node_state(pending_rep)
+            pending_rep  = nothing
         end
 
         # 3. MIXED / ALL-DIRTY.
@@ -526,6 +552,16 @@ function run_target!(engine::IncrementalEngine, params::DesignParameters;
             pass_output[key] = oh
             push!(recomputed, key)
         end
+    end
+
+    # If the walk ended on an all-clean suffix, the deferred restore was never
+    # materialized. The tail consumer (`capture_incremental_design` →
+    # `harmonize_uniform_column_sizes!` / `sync_asap!` / `capture_design`) reads and
+    # mutates `engine.struc`, so materialize the pending post-state once here, as a
+    # true independent copy (never an alias into the memo). [P0-2 Step A]
+    if pending_rep !== nothing
+        engine.struc = restore_node_state(pending_rep)
+        pending_rep  = nothing
     end
 
     engine._recomputed = recomputed

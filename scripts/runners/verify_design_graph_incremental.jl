@@ -90,7 +90,10 @@ include(joinpath(@__DIR__, "..", "..", "StructuralSynthesizer",
 function build_flat_plate(; soil = SR.medium_sand,
                             concrete = NWC_4000,
                             geometry_is_centerline::Bool = false)
-    skel  = gen_medium_office(54.0u"ft", 42.0u"ft", 10.0u"ft", 2, 2, 1)
+    # 3×3 bays: DDM (ACI 318-11 §13.6.1.1) requires ≥3 continuous spans each
+    # direction. Total plan dims unchanged (18′×14′ uniform bays) so loads and
+    # sizing stay representative; a 2×2 grid is now (correctly) rejected presize.
+    skel  = gen_medium_office(54.0u"ft", 42.0u"ft", 10.0u"ft", 3, 3, 1)
     struc = BuildingStructure(skel)
     params = DesignParameters(
         name                   = "verify_design_graph_incremental",
@@ -132,7 +135,7 @@ end
 # global slab-affecting param dirties ALL of them at once (the achievable
 # multi-node behavior; per-slab INDEPENDENT dirtying is deferred — see NOTES).
 function build_multistory_flat_plate(; soil = SR.medium_sand, concrete = NWC_4000)
-    skel  = gen_medium_office(54.0u"ft", 42.0u"ft", 10.0u"ft", 2, 2, 3)   # 3 stories
+    skel  = gen_medium_office(54.0u"ft", 42.0u"ft", 10.0u"ft", 3, 3, 3)   # 3 stories, 3×3 bays (DDM §13.6.1.1)
     struc = BuildingStructure(skel)
     params = DesignParameters(
         name               = "verify_design_graph_incremental_multistory",

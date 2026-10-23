@@ -212,6 +212,7 @@ export is_girder, is_joist, is_beam, level_of, lateral_role_of
 export TributaryProfile, tributary_profile, tributary_width_scalar, tributary_width_envelope
 export compute_member_tributaries!
 export classify_column_position, is_exterior_support  # Column position classification for DDM/EFM
+export slab_material_angle, classify_corner_kind       # Corner refinement (convex vs re-entrant)
 export update_structural_offsets!, structural_center_xy_m  # Architectural → structural centerline
 export Support, Foundation, FoundationGroup, FoundationDemand
 

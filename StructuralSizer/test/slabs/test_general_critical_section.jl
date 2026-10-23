@@ -111,4 +111,63 @@ const SS = StructuralSizer
         @test ustrip(u"inch^4", p.Ixy) ≈ 0 atol = 1e-3
     end
 
+    @testset "Rectangular builders reproduce closed-form perimeters" begin
+        c1 = 16.0u"inch"; c2 = 12.0u"inch"; d = 6.0u"inch"
+        intr, cl = SS.rectangular_critical_section(c1, c2, d; position = :interior)
+        @test cl
+        @test ustrip(u"inch", SS.critical_section_properties(intr, d; closed = true).b0) ≈
+              ustrip(u"inch", 2 * (c1 + d) + 2 * (c2 + d)) rtol = 1e-10
+
+        edg, cle = SS.rectangular_critical_section(c1, c2, d; position = :edge)
+        @test !cle
+        @test ustrip(u"inch", SS.critical_section_properties(edg, d; closed = false).b0) ≈
+              ustrip(u"inch", 2 * (c1 + d / 2) + (c2 + d)) rtol = 1e-10
+
+        cor, clc = SS.rectangular_critical_section(c1, c2, d; position = :corner)
+        @test !clc
+        @test ustrip(u"inch", SS.critical_section_properties(cor, d; closed = false).b0) ≈
+              ustrip(u"inch", (c1 + d / 2) + (c2 + d / 2)) rtol = 1e-10
+    end
+
+    @testset "Re-entrant corner carries (nearly) the full interior perimeter" begin
+        # Square re-entrant: symmetric about the notch diagonal ⇒ not flagged.
+        c = 14.0u"inch"; d = 7.0u"inch"
+        pts, cl = SS.reentrant_critical_section(c, c, d; notch = (1, 1))
+        @test cl
+        p = SS.critical_section_properties(pts, d; closed = true)
+        @test ustrip(u"inch", p.b0) ≈ ustrip(u"inch", 2 * (c + d) + 2 * (c + d)) rtol = 1e-10
+        @test SS.punching_check_general(40.0kip, 20.0kip * u"ft", 20.0kip * u"ft",
+                                        d, 4000.0u"psi", pts; closed = true).asymmetric == false
+
+        # Unequal legs: no principal axis of symmetry ⇒ asymmetric flag set.
+        pts2, _ = SS.reentrant_critical_section(16.0u"inch", 10.0u"inch", d; notch = (1, 1))
+        res2 = SS.punching_check_general(40.0kip, 20.0kip * u"ft", 20.0kip * u"ft",
+                                         d, 4000.0u"psi", pts2; closed = true)
+        @test res2.asymmetric == true
+        # Full 4-sided-ish perimeter, not the legacy 2-sided under-count.
+        @test ustrip(u"inch", res2.b0) ≈
+              ustrip(u"inch", 2 * (16.0u"inch" + d) + 2 * (10.0u"inch" + d)) rtol = 1e-10
+    end
+
+    @testset "Symmetry detection and punching_check_general result" begin
+        c1 = 16.0u"inch"; c2 = 12.0u"inch"; d = 6.0u"inch"
+        rect, _ = SS.rectangular_critical_section(c1, c2, d; position = :interior)
+        pr = SS.critical_section_properties(rect, d; closed = true)
+        s1, s2 = SS.section_symmetry(rect, pr)
+        @test s1 && s2
+
+        # Scalene triangle — no axis of symmetry.
+        tri = [(0.0u"inch", 0.0u"inch"), (13.0u"inch", 1.0u"inch"), (3.0u"inch", 9.0u"inch")]
+        pt = SS.critical_section_properties(tri, d; closed = true)
+        ts1, ts2 = SS.section_symmetry(tri, pt)
+        @test !(ts1 || ts2)
+
+        res = SS.punching_check_general(45.0kip, 25.0kip * u"ft", 15.0kip * u"ft",
+                                        d, 4000.0u"psi", rect; closed = true, β = 16 / 12, αs = 40)
+        @test res.ok isa Bool
+        @test res.utilization > 0
+        @test ustrip(u"psi", res.vu) > 0
+        @test ustrip(u"psi", res.ϕvc) > 0
+    end
+
 end

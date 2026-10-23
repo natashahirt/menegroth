@@ -320,6 +320,13 @@ populate the `story_properties` field with:
     concrete::Union{Nothing, StructuralSizer.Concrete} = nothing
     story::Int = 0
     position::Symbol = :interior
+    # Refinement of a :corner column by the slab-material angle at the vertex:
+    #   :convex    — outside corner, slab fills < 180° (legacy 2-sided section)
+    #   :reentrant — inside corner (L-notch), slab fills > 180°; the critical
+    #                section carries (nearly) the full 4-sided perimeter and is
+    #                routed through the general-shape engine (ACI 421.1R-99 App. B)
+    #   :none      — not a corner (interior/edge)
+    corner_kind::Symbol = :none
     # Unit vectors pointing along boundary edges (edges that belong to only one face).
     # Empty for interior columns; 1 direction for edge columns; 2+ for corners.
     # Used for DDM/EFM to determine if column is an exterior support for a given span direction.

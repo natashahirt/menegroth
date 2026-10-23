@@ -565,6 +565,144 @@ function circular_critical_section(D::Length, d::Length; n::Int = 64,
             for k in 0:(n - 1)]
 end
 
+"""
+    rectangular_critical_section(c1, c2, d; position=:interior) -> (points, closed)
+
+Vertices (and open/closed flag) of the orthogonal rectangular critical section at
+`d/2` from the faces of a `c1×c2` column, for the general-shape engine. The
+column is centered at the origin with faces aligned to x/y.
+
+- `:interior` — the full `(c1+d)×(c2+d)` loop (4 sides, `closed=true`).
+- `:edge` — free edge along `x = +c1/2` (slab on `x ≤ c1/2`); open 3-sided U.
+- `:corner` — convex outside corner, free edges at `x=+c1/2` and `y=+c2/2`
+  (slab in the `−x,−y` quadrant); open 2-sided L.
+
+These reproduce the closed-form `b0`/`cAB` geometry while routing through the
+Appendix B engine (used to test the general path against the closed forms).
+
+Reference: ACI 318-11 §11.11.1.2, critical section at d/2 where slab exists
+(corpus: aci-318-11, pages 200, 209).
+"""
+function rectangular_critical_section(c1::Length, c2::Length, d::Length;
+                                      position::Symbol = :interior)
+    ax = c1 / 2 + d / 2   # offset half-width (x)
+    ay = c2 / 2 + d / 2   # offset half-width (y)
+    fx = c1 / 2           # free-edge location (x) when present
+    fy = c2 / 2           # free-edge location (y) when present
+    if position === :interior
+        return ([(ax, ay), (-ax, ay), (-ax, -ay), (ax, -ay)], true)
+    elseif position === :edge
+        # Open U: free edge at x = +c1/2, slab on x ≤ c1/2.
+        return ([(fx, ay), (-ax, ay), (-ax, -ay), (fx, -ay)], false)
+    elseif position === :corner
+        # Open L: free edges at x=+c1/2 and y=+c2/2, slab in −x,−y quadrant.
+        return ([(fx, -ay), (-ax, -ay), (-ax, fy)], false)
+    else
+        throw(ArgumentError("position must be :interior, :edge, or :corner; got :$position"))
+    end
+end
+
+"""
+    reentrant_critical_section(c1, c2, d; notch=(1, 1)) -> (points, closed)
+
+Vertices of the critical section at a **re-entrant** (L-shape inside) corner: a
+`c1×c2` column seated in the inside corner of an L, with one empty quadrant
+(`notch`, a sign pair like `(+1,+1)`). Per ACI 318-11 §11.11.1.2 the critical
+section follows the `d/2` offset everywhere slab exists; only the `d/2×d/2`
+corner of the `(c1+d)×(c2+d)` offset that lies in the empty quadrant is removed.
+The result is a closed 6-vertex loop whose perimeter equals the full interior
+`2(c1+d)+2(c2+d)` — i.e. a re-entrant corner carries essentially the entire
+4-sided perimeter, which the legacy 2-sided `:corner` section severely
+under-counts.
+
+Reference: ACI 318-11 §11.11.1.2 (corpus: aci-318-11, page 200); free-edge
+effective-perimeter treatment ACI 421.3R-15 §4.6.2 (corpus: aci-421-3r-15).
+"""
+function reentrant_critical_section(c1::Length, c2::Length, d::Length;
+                                    notch::Tuple{Int,Int} = (1, 1))
+    sx, sy = sign(notch[1]), sign(notch[2])
+    (sx != 0 && sy != 0) ||
+        throw(ArgumentError("notch must be a nonzero sign pair, e.g. (1,1); got $notch"))
+    ax = c1 / 2 + d / 2
+    ay = c2 / 2 + d / 2
+    nx = sx * (c1 / 2)    # notch apex (column corner) x
+    ny = sy * (c2 / 2)    # notch apex y
+    cx = sx * ax          # offset outer corner x on the notch side
+    cy = sy * ay          # offset outer corner y on the notch side
+    # Full offset rectangle with the single notch-side d/2×d/2 corner clipped:
+    # replace the outer corner (cx, cy) by the two notch edges
+    # (cx, ny) → (nx, ny) → (nx, cy).
+    z = zero(c1)
+    # Build CCW-ish loop. Start from the clipped corner and walk the rectangle.
+    return ([(cx, ny), (nx, ny), (nx, cy),
+             (-cx, cy), (-cx, -cy), (cx, -cy)], true)
+end
+
+"""
+    section_symmetry(points, props; rtol=1e-6) -> (sym1, sym2)
+
+Whether the critical section's vertex set is symmetric about principal axis 1
+and/or axis 2 (reflection invariance in the principal frame from `props`). Used
+to flag sections with no axis of symmetry, where the γv (Fig. B2) and
+farthest-fiber evaluation of Eq. (3.2) are approximate.
+"""
+function section_symmetry(points::AbstractVector, props; rtol::Float64 = 1e-6)
+    c = cos(props.θp); s = sin(props.θp)
+    xc = props.xc; yc = props.yc
+    s1 = Float64[]; s2 = Float64[]
+    for pt in points
+        x = ustrip(u"inch", pt[1] - xc)
+        y = ustrip(u"inch", pt[2] - yc)
+        push!(s1, x * c + y * s)
+        push!(s2, -x * s + y * c)
+    end
+    scale = max(maximum(abs, s1; init = 0.0), maximum(abs, s2; init = 0.0), 1.0)
+    tol = rtol * scale
+    _has(set1, set2, a, b) = any(i -> abs(set1[i] - a) ≤ tol && abs(set2[i] - b) ≤ tol,
+                                 eachindex(set1))
+    # Symmetry about axis 1 (s1-axis): (s1, s2) → (s1, −s2).
+    sym1 = all(k -> _has(s1, s2, s1[k], -s2[k]), eachindex(s1))
+    # Symmetry about axis 2 (s2-axis): (s1, s2) → (−s1, s2).
+    sym2 = all(k -> _has(s1, s2, -s1[k], s2[k]), eachindex(s1))
+    return (sym1, sym2)
+end
+
+"""
+    punching_check_general(Vu, Mux, Muy, d, fc, points; ...) -> NamedTuple
+
+Full punching check for a critical section of **general shape** (non-orthogonal,
+re-entrant, circular, I-/odd supports), combining the ACI 421.1R-99 Appendix B
+demand stress (`punching_stress_general`) with the §11.11.2.1 capacity stress.
+
+`Mux`/`Muy` follow the 421.1R convention (`Mux` about x, `Muy` about y). Pass the
+critical-section `points` (e.g. from `rectangular_critical_section`,
+`reentrant_critical_section`, `circular_critical_section`, or a building-derived
+polygon) and `closed`. `β` and `αs` feed the capacity (ACI 318-11 §11.11.2.1);
+supply them from the column / section side-count (defaults: `β=1`, `αs=40`).
+
+Returns `(ok, utilization, vu, ϕvc, b0, J1, J2, θp, asymmetric, sym1, sym2,
+props)`. `asymmetric=true` (no principal axis of symmetry) flags that γv and the
+peak-stress point are approximate and an FEA cross-check is advised.
+
+Reference: ACI 421.1R-99 Eq. (3.2)/(3.3), Appendix B (corpus: aci-421-1r-99);
+capacity ACI 318-11 §11.11.2.1 (corpus: aci-318-11).
+"""
+function punching_check_general(Vu::Force, Mux::Torque, Muy::Torque,
+                                d::Length, fc::Pressure, points::AbstractVector;
+                                closed::Bool = true, β::Float64 = 1.0, αs::Int = 40,
+                                λ::Float64 = 1.0, ϕ::Float64 = 0.75)
+    res = punching_stress_general(Vu, Mux, Muy, points, d; closed = closed)
+    vc = punching_capacity_stress(fc, β, αs, res.b0, d; λ = λ)
+    ϕvc = ϕ * vc
+    sym1, sym2 = section_symmetry(points, res.props)
+    ok = res.vu ≤ ϕvc
+    utilization = ustrip(u"psi", res.vu) / max(ustrip(u"psi", ϕvc), 1e-10)
+    return (ok = ok, utilization = utilization, vu = res.vu, ϕvc = ϕvc,
+            b0 = res.b0, J1 = res.J1, J2 = res.J2, θp = res.θp,
+            asymmetric = !(sym1 || sym2), sym1 = sym1, sym2 = sym2,
+            props = res.props)
+end
+
 # ─────────────────────────────────────────────────────────────────────────────
 # §11.11.2.1 — Punching Shear Capacity
 # ─────────────────────────────────────────────────────────────────────────────

@@ -41,7 +41,9 @@ using Asap  # ensures `u"kip"`, `u"ksi"`, etc resolve via Asap unit module
     @testset "Analysis" begin
         include("analyze/test_drape.jl")
         include("analyze/test_pattern_loading.jl")
+        include("analyze/test_pattern_live_three_quarter.jl")
         include("analyze/test_structural_offset.jl")
+        include("analyze/test_corner_kind.jl")
         include("analyze/test_mesh_refinement.jl")
         include("analyze/test_member_group_demands.jl")
         include("analyze/test_foundation_demands.jl")

@@ -527,6 +527,8 @@ export polar_moment_Jc_interior, polar_moment_Jc_edge
 # re-entrant, circular, I-/odd supports via true principal axes)
 export critical_section_segments, critical_section_properties
 export gamma_v_general, punching_stress_general, circular_critical_section
+export rectangular_critical_section, reentrant_critical_section
+export section_symmetry, punching_check_general
 export punching_capacity_stress, punching_capacity_interior
 export combined_punching_stress, punching_perimeter, punching_demand
 export check_punching_shear, check_combined_punching

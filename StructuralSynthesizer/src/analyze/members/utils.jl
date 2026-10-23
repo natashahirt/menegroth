@@ -192,10 +192,12 @@ function initialize_members!(struc::BuildingStructure{T};
                 vertex_idx = z1 > z2 ? v1 : v2
                 story = edge_story(skel, edge_idx)
                 position, boundary_edge_dirs = classify_column_position(skel, vertex_idx, vc, efc)
+                corner_kind = classify_corner_kind(skel, vertex_idx, vc, position)
                 
                 col = Column(seg_idx, seg.L; 
                             Lb=seg.Lb, Kx=default_Kx, Ky=default_Ky, Cb=seg.Cb,
                             vertex_idx=vertex_idx, story=story, position=position,
+                            corner_kind=corner_kind,
                             boundary_edge_dirs=boundary_edge_dirs)
                 push!(struc.columns, col)
                 
@@ -950,10 +952,12 @@ function _create_chain_column!(struc, skel, chain_seg_indices, chain_edge_indice
     
     story = edge_story(skel, last_edge)
     position, boundary_edge_dirs = classify_column_position(skel, vertex_idx, vc, efc)
+    corner_kind = classify_corner_kind(skel, vertex_idx, vc, position)
     
     col = Column(chain_seg_indices, L_total;
                 Lb=Lb_gov, Kx=default_Kx, Ky=default_Ky, Cb=Cb_gov,
                 vertex_idx=vertex_idx, story=story, position=position,
+                corner_kind=corner_kind,
                 boundary_edge_dirs=boundary_edge_dirs)
     push!(struc.columns, col)
 end
@@ -1190,6 +1194,61 @@ function _column_position_from_boundary_dirs(dirs::Vector{NTuple{2,Float64}})
         end
     end
     return :edge
+end
+
+
+"""
+    slab_material_angle(skel, vertex_idx, vertex_coords) -> Float64
+
+Total angle (radians) of slab material around a column vertex: the sum of the
+interior angles that every horizontal face incident to the vertex subtends there.
+This is the geometric discriminator between corner kinds — ≈ 2π interior, ≈ π at
+a straight free edge, `< π` at a convex (outside) corner, and `> π` at a
+re-entrant (inside / L-notch) corner. It also recovers the wedge angle of
+non-orthogonal corners.
+"""
+function slab_material_angle(skel::BuildingSkeleton, vertex_idx::Int,
+                             vertex_coords::Matrix{Float64})
+    v_x = vertex_coords[vertex_idx, 1]
+    v_y = vertex_coords[vertex_idx, 2]
+    v_z = vertex_coords[vertex_idx, 3]
+    total = 0.0
+    for fvi in skel.face_vertex_indices
+        k = findfirst(==(vertex_idx), fvi)
+        isnothing(k) && continue
+        n = length(fvi)
+        prev = fvi[mod1(k - 1, n)]
+        nxt  = fvi[mod1(k + 1, n)]
+        # Only horizontal (floor) faces: both face-neighbors share the vertex's z.
+        (abs(vertex_coords[prev, 3] - v_z) > 0.01 ||
+         abs(vertex_coords[nxt, 3] - v_z) > 0.01) && continue
+        ax = vertex_coords[prev, 1] - v_x; ay = vertex_coords[prev, 2] - v_y
+        bx = vertex_coords[nxt, 1]  - v_x; by = vertex_coords[nxt, 2]  - v_y
+        la = hypot(ax, ay); lb = hypot(bx, by)
+        (la < 1e-9 || lb < 1e-9) && continue
+        total += acos(clamp((ax * bx + ay * by) / (la * lb), -1.0, 1.0))
+    end
+    return total
+end
+
+"""
+    classify_corner_kind(skel, vertex_idx, vertex_coords, position; tol=0.1) -> Symbol
+
+Refine a `:corner` column into `:convex` (outside corner, slab angle `< π`) or
+`:reentrant` (inside / L-notch corner, slab angle `> π`), using
+[`slab_material_angle`](@ref). Returns `:none` for non-corner positions.
+
+A re-entrant corner's critical section carries (nearly) the full 4-sided
+perimeter rather than the legacy 2-sided section, so it is routed through the
+general-shape engine (ACI 421.1R-99 Appendix B). `tol` (radians) guards the
+π boundary against meshing noise.
+"""
+function classify_corner_kind(skel::BuildingSkeleton, vertex_idx::Int,
+                              vertex_coords::Matrix{Float64}, position::Symbol;
+                              tol::Float64 = 0.1)
+    position === :corner || return :none
+    return slab_material_angle(skel, vertex_idx, vertex_coords) > π + tol ?
+           :reentrant : :convex
 end
 
 

@@ -565,7 +565,7 @@ function check_two_way_deflection(
     # ── Long-term factor: λ_Δ = ξ / (1 + 50ρ') ──
     λ_Δ = long_term_deflection_factor(ξ, ρ_prime)
 
-    # ── Load distribution factors (ACI 8.10.5 weighted averages) ──
+    # ── Load distribution factors (ACI 318-11 §13.6.4/.6 weighted averages) ──
     LDF_c = load_distribution_factor(:column, position)
     LDF_m = load_distribution_factor(:middle, position)
 
@@ -968,7 +968,7 @@ Computes the resistance coefficient Rn = Mu / (φ·b·d²) for each strip and
 compares against the tension-controlled limit Rn_max = 0.319·β₁·f'c.  If any
 strip exceeds the limit the section needs more depth.
 
-Uses the same ACI 8.10.5 transverse distribution as `design_strip_reinforcement`:
+Uses the same ACI 318-11 §13.6.4/.6 transverse distribution as `design_strip_reinforcement`:
 exterior negative → 100 % column strip; interior negative → 75 / 25 %;
 positive → 60 / 40 %.
 

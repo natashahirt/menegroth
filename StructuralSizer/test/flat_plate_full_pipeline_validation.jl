@@ -97,7 +97,7 @@ println("""
   ┌─────────────────────────────────────────────────────────────────────────┐
   │  Method              │  Description                                    │
   ├─────────────────────────────────────────────────────────────────────────┤
-  │  DDM (Full)          │  ACI 318 Table 8.10 coefficients (0.26/0.52/0.70│
+  │  DDM (Full)          │  ACI 318-11 §13.6 coefficients (0.26/0.52/0.70  │
   │                      │  for end spans, 0.65/0.35 for interior)         │
   │  DDM (Simplified)    │  MDDM: Uniform 0.65/0.35 for all spans          │
   │  EFM (ASAP)          │  FEM stiffness analysis via ASAP library        │
@@ -351,7 +351,7 @@ println()
 # ═══════════════════════════════════════════════════════════════════════════
 # STEP 3: TOTAL STATIC MOMENT M₀
 # ═══════════════════════════════════════════════════════════════════════════
-println("  ▸ STEP 3: TOTAL STATIC MOMENT M₀ (ACI 318-19 Eq. 8.10.3.2)")
+    println("  ▸ STEP 3: TOTAL STATIC MOMENT M₀ (ACI 318-11 §13.6.2.2)")
 println()
 
 # Hand calculation using actual geometry

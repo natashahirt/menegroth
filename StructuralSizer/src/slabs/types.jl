@@ -265,7 +265,7 @@ abstract type FlatPlateAnalysisMethod end
 Direct Design Method - ACI 318 coefficient-based moment distribution.
 
 # Variants
-- `:full` - Full ACI 318 Table 8.10.4.2 coefficients with l₂/l₁ interpolation
+- `:full` - Full ACI 318-11 §13.6.3.3 coefficients with l₂/l₁ interpolation
 - `:simplified` - Modified DDM (0.65/0.35 simplified coefficients)
 
 # Reference
@@ -371,7 +371,7 @@ Dead and live loads are solved separately for proper post-solve combination
 # Design Approach  (`design_approach`)
 Controls how FEA element moments become design moments:
 - `:frame` — integrate moments across the full frame width at critical sections,
-  then distribute to column-strip / middle-strip using ACI 8.10.5 tabulated
+  then distribute to column-strip / middle-strip using ACI 318-11 §13.6.4/.6 tabulated
   fractions (same logic as DDM/EFM).
 - `:strip` — integrate moments directly over the column-strip and middle-strip
   widths.  Sub-knobs control how the integration is performed.

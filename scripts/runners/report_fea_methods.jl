@@ -274,7 +274,7 @@ for (lbl, meth, desc) in method_variants
         cl_pos = ustrip(u"kip*ft", res.M_pos)
         cl_int = ustrip(u"kip*ft", res.M_neg_int)
 
-        # ACI 8.10.5 fractions (no edge beam, αf=0)
+        # ACI 318-11 §13.6.4/.6 fractions (no edge beam, αf=0)
         cs_frac = (ext=1.00, pos=0.60, int=0.75)
         ms_frac = (ext=0.00, pos=0.40, int=0.25)
 
@@ -422,7 +422,7 @@ _println()
 # 6. Print the comparison matrix — Column Strip (CS) moments
 # ─────────────────────────────────────────────────────────────────────────────
 sub("Column Strip (CS) Moments (kip·ft)")
-note("Frame method uses ACI 8.10.5 fractions (100%/60%/75% for no-edge-beam).")
+note("Frame method uses ACI 318-11 §13.6.4/.6 fractions (100%/60%/75% for no-edge-beam).")
 note("Strip/area methods extract directly from FEA field.")
 _println()
 
@@ -447,7 +447,7 @@ _println()
 # 7. Print the comparison matrix — Middle Strip (MS) moments
 # ─────────────────────────────────────────────────────────────────────────────
 sub("Middle Strip (MS) Moments (kip·ft)")
-note("Frame method uses ACI 8.10.5 fractions (0%/40%/25% for no-edge-beam).")
+note("Frame method uses ACI 318-11 §13.6.4/.6 fractions (0%/40%/25% for no-edge-beam).")
 _println()
 
 _printf("    %-14s", "Location")
@@ -531,7 +531,7 @@ _println()
 # 10. CS/MS split ratios
 # ─────────────────────────────────────────────────────────────────────────────
 sub("CS/MS Split Ratios (CS fraction of CL)")
-note("ACI 8.10.5 fractions: ext=100%, pos=60%, int=75% (no edge beam).")
+note("ACI 318-11 §13.6.4/.6 fractions: ext=100%, pos=60%, int=75% (no edge beam).")
 note("Values far from ACI fractions may indicate problems in strip classification.")
 _println()
 

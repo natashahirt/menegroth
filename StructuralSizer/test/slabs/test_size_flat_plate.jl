@@ -218,7 +218,7 @@ end
 @testset "Flat Plate Pipeline - Method Selection" begin
     
     @testset "DDM Coefficients" begin
-        # DDM uses ACI Table 8.10.4.2
+        # DDM uses ACI 318-11 §13.6.3.3
         # For end span, no edge beam:
         # Exterior neg: 0.26, Pos: 0.52, Interior neg: 0.70
         

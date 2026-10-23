@@ -35,7 +35,7 @@ of column negative moments.  All methods populate it:
 The scalar fields `M_neg_ext` and `M_neg_int` are **derived envelopes** —
 the maximum of `column_moments` across exterior and interior columns,
 respectively.  The design pipeline reads `column_moments` directly via
-ACI 8.10.5 transverse distribution.
+ACI 318-11 §13.6.4/.6 transverse distribution.
 
 ## Fields
 - `M0::Moment`: Total static moment (qu × l₂ × ln² / 8)

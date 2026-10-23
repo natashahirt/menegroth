@@ -12,7 +12,7 @@
 #
 #   design/
 #     checks.jl           - Design checks (punching, deflection, one-way shear)
-#     reinforcement.jl    - Strip reinforcement design (ACI 8.10.5)
+#     reinforcement.jl    - Strip reinforcement design (ACI 318-11 §13.6.4/.6)
 #     results.jl          - Result struct builders
 #
 #   analysis/

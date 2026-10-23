@@ -9,7 +9,7 @@
 > opts_efm = FlatPlateOptions(method = EFM())
 > opts_fea = FlatPlateOptions(method = FEA())
 >
-> method_name(opts_ddm.method)                 # "DDM (ACI 8.10)"
+> method_name(opts_ddm.method)                 # "DDM (ACI 318-11 §13.6)"
 > h_min = min_thickness(FlatPlate(), 20.0u"ft")  # ACI minimum thickness
 > ```
 
@@ -33,7 +33,7 @@ flexural adequacy are simultaneously satisfied.
 | `FEA()` | `:fea` | Shell Finite Element Analysis | Irregular layouts, large grids, shell-level accuracy |
 | `RuleOfThumb()` | — | Single-pass at ACI minimum thickness | Fast screening (checks may fail; no iteration) |
 
-**DDM** uses ACI 318 Table 8.10 coefficients — fast but requires regular geometry (aspect ratio, load limits). **EFM** builds an Asap frame model and distributes moments by stiffness — handles irregular geometry with more accurate results. **FEA** uses a 2D shell mesh with column stubs and supports pattern loading; see [FEA — Shell Finite Element Analysis](#fea--shell-finite-element-analysis) below for options.
+**DDM** uses ACI 318-11 §13.6 coefficients — fast but requires regular geometry (aspect ratio, load limits). **EFM** builds an Asap frame model and distributes moments by stiffness — handles irregular geometry with more accurate results. **FEA** uses a 2D shell mesh with column stubs and supports pattern loading; see [FEA — Shell Finite Element Analysis](#fea--shell-finite-element-analysis) below for options.
 
 ### Design Workflow
 
@@ -152,25 +152,25 @@ M_0 = \frac{q_u \, l_2 \, l_n^2}{8}
 ```
 
 where ``q_u`` is the factored uniform load, ``l_2`` is the transverse span, and
-``l_n`` is the clear span (ACI §8.10.3.2).
+``l_n`` is the clear span (ACI 318-11 §13.6.2.2).
 
-Longitudinal distribution uses the ACI Table 8.10.4.2 coefficients:
+Longitudinal distribution uses the ACI 318-11 §13.6.3.3 coefficients:
 
 | Location       | End span (exterior neg) | End span (positive) | End span (interior neg) | Interior neg | Interior pos |
 |:---------------|:-----------------------:|:-------------------:|:-----------------------:|:------------:|:------------:|
 | **Full DDM**   | 0.26                    | 0.52                | 0.70                    | 0.65         | 0.35         |
 | **Simplified** | 0.65                    | 0.35                | 0.65                    | 0.65         | 0.35         |
 
-Transverse distribution to column and middle strips follows ACI §8.10.5, with
+Transverse distribution to column and middle strips follows ACI 318-11 §13.6.4/.6, with
 edge-beam torsional stiffness ratio ``β_t`` interpolating the exterior negative
 moment fraction between 0.26 and 0.30.
 
-**Applicability** is checked per ACI §8.10.2: ≥ 3 spans each direction, span
+**Applicability** is checked per ACI 318-11 §13.6.1: ≥ 3 spans each direction, span
 ratio ≤ 2, successive span lengths within 1/3, column offsets ≤ 10%, and
 gravity-only loading.
 
 Two variants are supported:
-- `:full` — Full ACI 318 Table 8.10.4.2 coefficients with ``l_2/l_1``
+- `:full` — Full ACI 318-11 §13.6.3.3 coefficients with ``l_2/l_1``
   interpolation and per-span exterior/interior classification.
 - `:simplified` — Modified DDM with 0.65/0.35 fixed split (conservative for
   preliminary design).
@@ -210,7 +210,7 @@ A 2D shell mesh with column stubs is solved for dead and live loads separately
 
 | Approach  | Description |
 |:----------|:------------|
-| `:frame`  | Integrate moments across full frame width, then distribute to column/middle strips using ACI 8.10.5 tabulated fractions |
+| `:frame`  | Integrate moments across full frame width, then distribute to column/middle strips using ACI 318-11 §13.6.4/.6 tabulated fractions |
 | `:strip`  | Integrate moments directly over column-strip and middle-strip widths via section cuts |
 | `:area`   | Per-element design with Wood–Armer moment transformation |
 
@@ -324,7 +324,7 @@ The pipeline (`size_flat_plate!`) runs in three phases:
 
 **Phase C — Final design:**
 1. Face-of-support moment reduction (EFM only, ACI §8.11.6.1)
-2. Strip reinforcement design (ACI §8.10.5 transverse distribution)
+2. Strip reinforcement design (ACI 318-11 §13.6.4/.6 transverse distribution)
 3. Moment transfer reinforcement (ACI §8.4.2.3)
 4. Structural integrity bars (ACI §8.7.4.2)
 5. Build `FlatPlatePanelResult`
@@ -453,7 +453,7 @@ Key `FEA` options:
 
 ## Limitations & Future Work
 
-- **DDM** is restricted to regular grids satisfying ACI §8.10.2; irregular
+- **DDM** is restricted to regular grids satisfying ACI 318-11 §13.6.1; irregular
   layouts require EFM or FEA.
 - **EFM pattern loading** generates all ``2^n`` load combinations for ``n``
   spans, which grows exponentially.  Large grids should use FEA with

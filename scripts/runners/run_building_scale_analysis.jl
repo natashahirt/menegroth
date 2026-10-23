@@ -9,8 +9,8 @@
 #   embodied-carbon breakdown from `BuildingDesign.summary`. Compare:
 #
 #       1. ACI Min  (RuleOfThumb — ACI 8.3.1.1 minimum thickness)
-#       2. DDM Full (Direct Design Method — ACI 8.10 coefficients)
-#       3. FEA frame (2D shell + ACI 8.10.5 strip fractions)
+#       2. DDM Full (Direct Design Method — ACI 318-11 §13.6 coefficients)
+#       3. FEA frame (2D shell + ACI 318-11 §13.6.4/.6 strip fractions)
 #
 #   Slab thickness drops from method 1 → 3 as the analysis sophistication
 #   removes prescriptive conservatism; the cascade plots quantify the

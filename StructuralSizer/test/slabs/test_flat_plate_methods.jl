@@ -210,7 +210,7 @@ using StructuralSizer: kip, ksi, psf, ksf, pcf
     # Test DDM moment coefficients
     # =========================================================================
     @testset "DDM Moment Coefficients" begin
-        # End span coefficients (ACI Table 8.10.4.2)
+        # End span coefficients (ACI 318-11 §13.6.3.3)
         @test ACI_DDM_LONGITUDINAL.end_span.ext_neg ≈ 0.26 atol=0.01
         @test ACI_DDM_LONGITUDINAL.end_span.pos ≈ 0.52 atol=0.01
         @test ACI_DDM_LONGITUDINAL.end_span.int_neg ≈ 0.70 atol=0.01

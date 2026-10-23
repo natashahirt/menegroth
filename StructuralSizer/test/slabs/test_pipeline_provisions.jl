@@ -22,7 +22,7 @@ const SS = StructuralSizer
     # =========================================================================
     # 1. Edge Beam β_t Computation
     # =========================================================================
-    @testset "Edge Beam β_t (ACI 8.10.5.2)" begin
+    @testset "Edge Beam β_t (ACI 318-11 §13.6.4.2)" begin
         h  = 7.0u"inch"
         c1 = 16.0u"inch"
         c2 = 16.0u"inch"
@@ -51,7 +51,7 @@ const SS = StructuralSizer
     # =========================================================================
     # 2. DDM Longitudinal Distribution with Edge Beam
     # =========================================================================
-    @testset "DDM Coefficients with Edge Beam (Table 8.10.4.2)" begin
+    @testset "DDM Coefficients with Edge Beam (ACI 318-11 §13.6.3.3)" begin
         # No edge beam: standard coefficients
         coeffs_0 = aci_ddm_longitudinal_with_edge_beam(0.0)
         @test coeffs_0.ext_neg ≈ 0.26
@@ -76,9 +76,9 @@ const SS = StructuralSizer
     end
 
     # =========================================================================
-    # 3. Column Strip Exterior Negative Fraction (Table 8.10.5.2)
+    # 3. Column Strip Exterior Negative Fraction (ACI 318-11 §13.6.4.2)
     # =========================================================================
-    @testset "Column Strip Ext Neg Fraction with β_t (Table 8.10.5.2)" begin
+    @testset "Column Strip Ext Neg Fraction with β_t (ACI 318-11 §13.6.4.2)" begin
         # β_t = 0: 100% to column strip
         @test aci_col_strip_ext_neg_fraction(0.0) ≈ 1.00
 

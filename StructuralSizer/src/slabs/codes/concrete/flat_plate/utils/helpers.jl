@@ -38,7 +38,7 @@ col_orientation(col)::Float64 = hasproperty(col, :θ) ? Float64(col.θ) : 0.0
 # =============================================================================
 
 """Display name for DDM analysis method."""
-method_name(method::DDM) = method.variant == :simplified ? "MDDM (Simplified)" : "DDM (ACI 8.10)"
+method_name(method::DDM) = method.variant == :simplified ? "MDDM (Simplified)" : "DDM (ACI 318-11 §13.6)"
 
 """Display name for EFM analysis method."""
 function method_name(method::EFM)
@@ -138,7 +138,7 @@ function find_supporting_columns(struc, slab_cell_indices::Set{Int})
 end
 
 # =============================================================================
-# Column Moment Distribution (ACI 318-11 §8.10.4)
+# Column Moment Distribution (ACI 318-11 §13.6.9.2)
 # =============================================================================
 
 """
@@ -185,7 +185,7 @@ end
     column_moment_distribution_factors(struc, columns, column_opts) -> Vector{Float64}
 
 Compute the fraction of joint unbalanced moment resisted by each supporting
-column (below the slab), per ACI 318-11 §8.10.4.
+column (below the slab), per ACI 318-11 §13.6.9.2.
 
 The unbalanced moment at a slab–column joint is distributed to the columns
 above and below in proportion to their flexural stiffnesses:
@@ -535,7 +535,7 @@ these are advisory, not blocking.
 
 # Checks by `design_approach`
 
-## `:frame` — Frame-Level + ACI Fractions (§8.10.5)
+## `:frame` — Frame-Level + ACI Fractions (§13.6.4/.6)
 Uses DDM-like ACI fractions to split total moments into CS/MS.  The fraction
 tables assume the same geometric regularity as DDM (ACI 318-11 §13.6.1):
 - Rectangular panels
@@ -563,7 +563,7 @@ function _check_fea_approach_applicability(
         result = check_ddm_applicability(struc, slab, columns; throw_on_failure=false)
         if !result.ok
             violated = join(result.violations, "\n    • ")
-            @warn "FEA design_approach=:frame uses ACI §8.10.5 fractions for the " *
+            @warn "FEA design_approach=:frame uses ACI §13.6.4/.6 fractions for the " *
                   "CS/MS moment split.  These fractions assume the same geometric " *
                   "regularity as DDM.  The following DDM checks failed:\n    • " *
                   violated *

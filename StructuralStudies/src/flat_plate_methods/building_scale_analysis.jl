@@ -51,7 +51,7 @@ const SECTION3_SPANS = [16.0, 22.0, 28.0]
 
 """Three analysis methods spanning the ladder from prescriptive thickness
 (`RuleOfThumb` ≡ ACI 8.3.1.1) through prescriptive moments (`DDM(:full)`
-≡ ACI 8.10) to explicit analysis (`FEA(:frame)` — 2D shell + ACI 8.10.5
+≡ ACI 318-11 §13.6) to explicit analysis (`FEA(:frame)` — 2D shell + ACI 318-11 §13.6.4/.6
 strip fractions)."""
 const SECTION3_METHODS = [
     (key=:rot, name="ACI Min",     method=SR.RuleOfThumb()),

@@ -235,7 +235,7 @@ function check_flat_plate_at_thickness!(
 
     check_pattern_loading_requirement(moment_results; verbose=verbose)
 
-    # Column design moments = unbalanced × distribution (§13.5.3.2 + §8.10.4)
+    # Column design moments = unbalanced × distribution (§13.5.3.2 + §13.6.9.2)
     _dist_factors = column_moment_distribution_factors(struc, columns, column_opts)
     Mu = [ustrip(kip * u"ft", moment_results.unbalanced_moments[i]) * _dist_factors[i] for i in 1:n_cols]
 

@@ -114,7 +114,7 @@ using StructuralSizer
         @test ustrip(psf, qu) ≈ 193.0 rtol=0.01
     end
     
-    @testset "Static Moment M₀ (ACI 8.10.3.2)" begin
+    @testset "Static Moment M₀ (ACI 318-11 §13.6.2.2)" begin
         # M₀ = qu × l₂ × ln² / 8
         # From StructurePoint: qu = 0.193 ksf
         qu = 0.193ksf
@@ -125,7 +125,7 @@ using StructuralSizer
         @test ustrip(kip*u"ft", M0) ≈ 93.82 rtol=0.02
     end
     
-    @testset "ACI DDM Longitudinal Distribution (Table 8.10.4.2)" begin
+    @testset "ACI DDM Longitudinal Distribution (ACI 318-11 §13.6.3.3)" begin
         # Verify ACI longitudinal distribution coefficients
         # End span: ext_neg = 26%, pos = 52%, int_neg = 70%
         # Interior span: neg = 65%, pos = 35%

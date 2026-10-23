@@ -85,7 +85,7 @@ end
 """
     design_strip_reinforcement(moment_results, columns, h, d, fc, fy, cover; verbose=false)
 
-Design strip reinforcement using ACI 8.10.5 transverse distribution.
+Design strip reinforcement using ACI 318-11 §13.6.4/.6 transverse distribution.
 
 Design moments are derived from `moment_results.column_moments` — the
 per-column moment vector populated by DDM, EFM, or FEA.  ACI transverse
@@ -155,7 +155,7 @@ end
 
 Design strip reinforcement using FEA-derived strip moments (direct integration).
 
-Instead of applying ACI 8.10.5 tabulated fractions to frame-level moments,
+Instead of applying ACI 318-11 §13.6.4/.6 tabulated fractions to frame-level moments,
 this function uses column-strip and middle-strip moments extracted directly
 from the shell model via `_extract_fea_strip_moments`.
 

@@ -324,7 +324,7 @@ function _run_final_design(method, struc, slab, columns, moment_results, seconda
         # (M_neg_left, M_pos, M_neg_right) that satisfy equilibrium based on centerline
         # geometry. When we reduce support moments to face-of-support, we should NOT
         # recalculate M_pos from M0 because:
-        #   1. M0 in MomentAnalysisResult uses clear span (ln) per ACI 8.10.3.2
+        #   1. M0 in MomentAnalysisResult uses clear span (ln) per ACI 318-11 §13.6.2.2
         #   2. The frame analysis uses centerline span (l1) internally
         #   3. Re-deriving M_pos from clear-span M0 breaks the frame's equilibrium
         # The original M_pos from the frame analysis remains valid and conservative.
@@ -1090,12 +1090,12 @@ function _size_flat_plate!(
     Mu = Vector{Float64}(undef, n_cols)
     Mu_secondary = Vector{Float64}(undef, n_cols)
     
-    # ACI 318-11 §8.10.4: distribute unbalanced moment between columns above
+    # ACI 318-11 §13.6.9.2 (Eq. 13-7): distribute unbalanced moment between columns above
     # and below the slab in proportion to their flexural stiffnesses.
     # Factor = K_below / (K_below + K_above); 1.0 when no column above (roof/single-story).
     _dist_factors = column_moment_distribution_factors(struc, columns, column_opts)
     if verbose && any(f -> f < 1.0, _dist_factors)
-        @debug "Column moment distribution factors (§8.10.4)" factors=_dist_factors
+        @debug "Column moment distribution factors (§13.6.9.2)" factors=_dist_factors
     end
     
     # Track which check is currently failing (for structured failure diagnostics)
@@ -1236,7 +1236,7 @@ function _size_flat_plate!(
             check_pattern_loading_requirement(moment_results; verbose=verbose)
             
             # Column design moments = unbalanced moments × distribution factor
-            # (ACI 318-11 §13.5.3.2 + §8.10.4)
+            # (ACI 318-11 §13.5.3.2 + §13.6.9.2)
             @inbounds for i in eachindex(Mu)
                 Mu[i] = ustrip(kip*u"ft", moment_results.unbalanced_moments[i]) * _dist_factors[i]
             end
@@ -1498,7 +1498,7 @@ function _size_flat_plate!(
                 )
             end
             
-            # Update Mu buffers — unbalanced × distribution (§13.5.3.2 + §8.10.4)
+            # Update Mu buffers — unbalanced × distribution (§13.5.3.2 + §13.6.9.2)
             @inbounds for i in eachindex(Mu)
                 Mu[i] = ustrip(kip*u"ft", moment_results.unbalanced_moments[i]) * _dist_factors[i]
             end

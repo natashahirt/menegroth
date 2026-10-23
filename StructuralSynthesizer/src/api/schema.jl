@@ -194,7 +194,7 @@ function api_params_schema_structured()
             "fields" => Dict{String, Any}(
                 "method" => Dict("type" => "enum", "default" => "DDM",
                     "allowed" => collect(API_FLOOR_ANALYSIS_METHODS),
-                    "guidance" => "DDM/DDM_SIMPLIFIED (ACI 318-11 §13.6 / §8.10 checks as implemented): requires rectangular panel geometry, aspect ratio 0.5<=l2/l1<=2.0 (§8.10.2.2), L/D<=2.0 using estimated self-weight (§8.10.2.6), and adequate continuous spans/column lines (>=3 spans target; warning/violation when insufficient, §8.10.2.1). Additional implemented checks include adjacent-span variation <=1/3 when adjacency data exists (§8.10.2.3), column offset <=10% of span from column lines (§8.10.2.4), and practical clear-span minimum ln>=4 ft. EFM/EFM_HARDY_CROSS (ACI 318-11 §13.7 / §8.11 checks as implemented): still requires rectangular/orthogonal panel geometry for frame idealization (§8.11.2), gravity-load framing assumptions (§8.11.1.1), at least two supporting columns, and column-size limits for torsional-stiffness formulation (§8.11.5, c2/l2<=0.5 check). FEA: shell analysis is the most general and allowed for irregular geometry; however, if design_approach=:frame, post-processing uses ACI §8.10.5-style fractions and emits warnings when DDM regularity checks fail. Use FEA for non-rectangular panels, setbacks, or free-form column layouts.",
+                    "guidance" => "DDM/DDM_SIMPLIFIED (ACI 318-11 §13.6; = 318-19 §8.10 — checks as implemented): requires rectangular panel geometry, aspect ratio 0.5<=l2/l1<=2.0 (§13.6.1.2), L/D<=2.0 using estimated self-weight (§13.6.1.5), and adequate continuous spans/column lines (>=3 spans target; warning/violation when insufficient, §13.6.1.1). Additional implemented checks include adjacent-span variation <=1/3 when adjacency data exists (§13.6.1.3), column offset <=10% of span from column lines (§13.6.1.4), and practical clear-span minimum ln>=4 ft. EFM/EFM_HARDY_CROSS (ACI 318-11 §13.7 / §8.11 checks as implemented): still requires rectangular/orthogonal panel geometry for frame idealization (§8.11.2), gravity-load framing assumptions (§8.11.1.1), at least two supporting columns, and column-size limits for torsional-stiffness formulation (§8.11.5, c2/l2<=0.5 check). FEA: shell analysis is the most general and allowed for irregular geometry; however, if design_approach=:frame, post-processing uses ACI §13.6.4/.6-style column-/middle-strip fractions and emits warnings when DDM regularity checks fail. Use FEA for non-rectangular panels, setbacks, or free-form column layouts.",
                     "applicability_checks" => Dict{String, Any}(
                         "implemented_in" => Dict(
                             "DDM" => "StructuralSizer/src/slabs/codes/concrete/flat_plate/analysis/ddm.jl",
@@ -202,19 +202,19 @@ function api_params_schema_structured()
                             "FEA" => "StructuralSizer/src/slabs/codes/concrete/flat_plate/utils/helpers.jl",
                         ),
                         "DDM" => Dict{String, Any}(
-                            "code_basis" => "ACI 318-11 §13.6 / §8.10 (implemented checks)",
+                            "code_basis" => "ACI 318-11 §13.6 (= 318-19 §8.10) (implemented checks)",
                             "hard_checks" => Any[
-                                Dict("id" => "ddm_rectangular_geometry", "clause" => "§8.10.2.2", "check" => "panel geometry rectangular/orthogonal"),
-                                Dict("id" => "ddm_aspect_ratio", "clause" => "§8.10.2.2", "check" => "0.5 <= l2/l1 <= 2.0"),
-                                Dict("id" => "ddm_live_dead_ratio", "clause" => "§8.10.2.6", "check" => "L/D <= 2.0 using estimated self-weight"),
+                                Dict("id" => "ddm_rectangular_geometry", "clause" => "§13.6.1.2", "check" => "panel geometry rectangular/orthogonal"),
+                                Dict("id" => "ddm_aspect_ratio", "clause" => "§13.6.1.2", "check" => "0.5 <= l2/l1 <= 2.0"),
+                                Dict("id" => "ddm_live_dead_ratio", "clause" => "§13.6.1.5", "check" => "L/D <= 2.0 using estimated self-weight"),
                                 Dict("id" => "ddm_min_clear_span", "clause" => "implementation guardrail", "check" => "clear span ln >= 4 ft"),
                             ],
                             "context_checks" => Any[
-                                Dict("id" => "ddm_min_span_continuity", "clause" => "§8.10.2.1", "check" => ">=3 continuous spans target (column-line adequacy check)"),
-                                Dict("id" => "ddm_successive_span_variation", "clause" => "§8.10.2.3", "check" => "adjacent span difference <= longer span / 3", "applies_when" => "adjacent slab metadata available"),
-                                Dict("id" => "ddm_column_offset", "clause" => "§8.10.2.4", "check" => "column offset <= 10% of span from column lines", "applies_when" => "column coordinates resolvable"),
+                                Dict("id" => "ddm_min_span_continuity", "clause" => "§13.6.1.1", "check" => ">=3 continuous spans target (column-line adequacy check)"),
+                                Dict("id" => "ddm_successive_span_variation", "clause" => "§13.6.1.3", "check" => "adjacent span difference <= longer span / 3", "applies_when" => "adjacent slab metadata available"),
+                                Dict("id" => "ddm_column_offset", "clause" => "§13.6.1.4", "check" => "column offset <= 10% of span from column lines", "applies_when" => "column coordinates resolvable"),
                             ],
-                            "loads_assumption" => Dict("clause" => "§8.10.2.5", "assumption" => "gravity/uniform slab loading model in current workflow"),
+                            "loads_assumption" => Dict("clause" => "§13.6.1.5", "assumption" => "gravity/uniform slab loading model in current workflow"),
                         ),
                         "DDM_SIMPLIFIED" => Dict{String, Any}(
                             "inherits" => "DDM",
@@ -242,7 +242,7 @@ function api_params_schema_structured()
                             "advisory_checks" => Any[
                                 Dict(
                                     "id" => "fea_frame_design_approach_guardrail",
-                                    "clause" => "ACI §8.10.5 style CS/MS fraction use in implementation",
+                                    "clause" => "ACI §13.6.4/.6 style CS/MS fraction use in implementation",
                                     "check" => "if design_approach=:frame and DDM regularity checks fail, emit warning (results may be approximate)",
                                 ),
                                 Dict(

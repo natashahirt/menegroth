@@ -1200,7 +1200,7 @@ end
 
 Use DDM-style column-line detection to group supports into strips.
 Uses governing spans from cells (primary/secondary axis) and clusters supports
-by projection onto the perpendicular axis within 10% of primary span (ACI §8.10.2.4).
+by projection onto the perpendicular axis within 10% of primary span (ACI 318-11 §13.6.1.4).
 Returns empty if no cells or geometry, or if the structure is not orthogonal.
 
 Strips run along the primary (short) span direction — each column line = one strip.
@@ -1225,7 +1225,7 @@ function _strip_groupings_from_orthogonal_grid(struc::BuildingStructure)
     perp_axis = (-span_axis[2], span_axis[1])  # 90° CCW
 
     l1_m = ustrip(u"m", l1)
-    cluster_tol = 0.10 * l1_m  # ACI §8.10.2.4: columns within 10% of span = same column line
+    cluster_tol = 0.10 * l1_m  # ACI 318-11 §13.6.1.4: columns within 10% of span = same column line
 
     # Project each support onto the perpendicular axis (DDM column-line logic)
     perp_projs = [let vi = struc.supports[i].vertex_idx

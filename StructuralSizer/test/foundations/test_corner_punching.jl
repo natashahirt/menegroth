@@ -49,8 +49,9 @@ const SS = StructuralSizer
     γv_x = 1.0 - 1.0 / (1.0 + (2.0 / 3.0) * sqrt(b1 / b2))
     γv_y = 1.0 - 1.0 / (1.0 + (2.0 / 3.0) * sqrt(b2 / b1))
 
-    e_x = c1 / 2 - cAB_x
-    e_y = c2 / 2 - cAB_y
+    # e = (b − cAB) − c/2. See eccentricity_to_critical_centroid.
+    e_x = (b1 - cAB_x) - c1 / 2
+    e_y = (b2 - cAB_y) - c2 / 2
     Mux_adj = max(abs(Mux) - Vu * e_x, zero(Mux))
     Muy_adj = max(abs(Muy) - Vu * e_y, zero(Muy))
 

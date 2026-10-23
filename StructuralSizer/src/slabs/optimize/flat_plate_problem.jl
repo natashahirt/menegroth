@@ -904,7 +904,7 @@ function _evaluate_rebar_for_size(p::FlatPlateNLPProblem, moment_results, h, d, 
     cs_w = l2 / 2   # column strip width
     ms_w = l2 / 2   # middle strip width
 
-    # ACI 8.10.5 transverse distribution
+    # ACI 318-11 §13.6.4/.6 transverse distribution
     strip_designs = [
         # (Mu,                                    width,  label)
         (1.00 * moment_results.M_neg_ext, cs_w, :cs_ext_neg),

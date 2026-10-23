@@ -1446,11 +1446,11 @@ end
 """
     distribute_moments_to_strips(span_moments, joint_positions)
 
-Distribute frame-level moments to column and middle strips per ACI 8.10.5.
+Distribute frame-level moments to column and middle strips per ACI 318-11 §13.6.4/.6.
 
 This is the transverse distribution step - identical for DDM and EFM.
 
-# ACI 8.10.5 Distribution Factors (flat plate, αf = 0)
+# ACI 318-11 §13.6.4/.6 Distribution Factors (flat plate, αf = 0)
 - Interior negative: 75% to column strip, 25% to middle strip
 - Exterior negative: 100% to column strip (no edge beam)
 - Positive: 60% to column strip, 40% to middle strip
@@ -1461,11 +1461,11 @@ function distribute_moments_to_strips(span_moments, joint_positions)
     for sm in span_moments
         # Left support distribution
         if joint_positions[sm.span_idx] in [:corner, :edge]
-            # Exterior: 100% to column strip (ACI Table 8.10.5.2, no edge beam)
+            # Exterior: 100% to column strip (ACI 318-11 §13.6.4.2, no edge beam)
             M_neg_left_cs = sm.M_neg_left
             M_neg_left_ms = 0.0kip*u"ft"
         else
-            # Interior: 75% / 25% (ACI Table 8.10.5.1)
+            # Interior: 75% / 25% (ACI 318-11 §13.6.4.1)
             M_neg_left_cs = ACI_COL_STRIP_INT_NEG * sm.M_neg_left
             M_neg_left_ms = (1 - ACI_COL_STRIP_INT_NEG) * sm.M_neg_left
         end

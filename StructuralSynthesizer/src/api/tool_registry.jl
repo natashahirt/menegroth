@@ -52,7 +52,6 @@ const IMPLEMENTED_PROVISIONS = Dict{String, Any}(
         Dict("section" => "8.6.1",     "provision" => "One-way slab minimum thickness"),
         Dict("section" => "8.7.4",     "provision" => "Structural integrity reinforcement"),
         Dict("section" => "8.7.4.2",   "provision" => "Integrity rebar at columns"),
-        Dict("section" => "8.10.4",    "provision" => "T-beam flange width"),
         Dict("section" => "8.12.2",    "provision" => "Effective flange width for T-beams"),
         Dict("section" => "9.3.2",     "provision" => "Strength reduction factors"),
         Dict("section" => "9.5",       "provision" => "Beam flexure — required strength"),

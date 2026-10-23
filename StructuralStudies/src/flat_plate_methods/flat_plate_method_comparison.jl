@@ -4,7 +4,7 @@
 #
 # Compares all five flat plate sizing methods on square & rectangular bays:
 #   1. MDDM        — Modified DDM (simplified 0.65/0.35 coefficients)
-#   2. DDM          — Full ACI 318 Table 8.10 coefficients
+#   2. DDM          — Full ACI 318-11 §13.6 coefficients
 #   3. EFM (HC)     — Equivalent Frame, Hardy Cross moment distribution
 #   4. EFM (ASAP)   — Equivalent Frame, ASAP FEM stiffness solver
 #   5. FEA          — 2D shell model with adaptive mesh
@@ -806,7 +806,7 @@ end
 Check DDM/EFM applicability and return detailed reason if inapplicable.
 
 The check returns `(ok=Bool, violations=Vector{String})` where violations
-contain ACI code references like "§8.10.2.2: Aspect ratio l₂/l₁ = 2.5 > 2.0".
+contain ACI code references like "§13.6.1.2: Panel aspect ratio l₂/l₁ = 2.5 > 2.0".
 """
 function _check_applicability_detailed(struc, method)
     method isa SR.FEA && return (true, "")

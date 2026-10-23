@@ -337,7 +337,7 @@ transverse distribution to column/middle strips.
 - Supplementary Document Table S-1 (uses same values: 0.26, 0.52, 0.70)
 
 # Note
-Transverse distribution to column/middle strips uses ACI Tables 8.10.5.1-5.7
+Transverse distribution to column/middle strips uses ACI 318-11 §13.6.4.1–.4
 and varies with l₂/l₁ and αf. For flat plates (αf = 0), see distribute_moments_aci().
 
 # Reference
@@ -345,7 +345,7 @@ and varies with l₂/l₁ and αf. For flat plates (αf = 0), see distribute_mom
 - StructurePoint DE-Two-Way-Flat-Plate Table 6
 """
 const ACI_DDM_LONGITUDINAL = (
-    # Table 8.10.4.2: Distribution of M₀ to negative and positive sections
+    # ACI 318-11 §13.6.3.3: Distribution of M₀ to negative and positive sections
     # (Same for all slab types)
     end_span = (
         ext_neg = 0.26,   # Exterior negative
@@ -530,7 +530,7 @@ function distribute_moments_aci(M0, span_type::Symbol, l2_l1::Float64;
     end
     
     if span_type == :end_span
-        # Step 1: Longitudinal distribution (Table 8.10.4.2)
+        # Step 1: Longitudinal distribution (ACI 318-11 §13.6.3.3)
         # With edge beam: interpolate coefficients based on βt
         if βt > 0.0
             long_coeffs = aci_ddm_longitudinal_with_edge_beam(βt)
@@ -544,14 +544,14 @@ function distribute_moments_aci(M0, span_type::Symbol, l2_l1::Float64;
         end
         
         # Step 2: Transverse distribution to column strip
-        # Interior negative: Table 8.10.5.1 (75% for αf=0)
+        # Interior negative: ACI 318-11 §13.6.4.1 (75% for αf=0)
         cs_int_neg = ACI_COL_STRIP_INT_NEG * M_int_neg
         
-        # Exterior negative: Table 8.10.5.2 — interpolated with βt
+        # Exterior negative: ACI 318-11 §13.6.4.2 — interpolated with βt
         cs_ext_neg_frac = aci_col_strip_ext_neg_fraction(βt)
         cs_ext_neg = cs_ext_neg_frac * M_ext_neg
         
-        # Positive: Table 8.10.5.5
+        # Positive: ACI 318-11 §13.6.4.4
         cs_pos = aci_col_strip_positive(l2_l1) * M_pos
         
         # Middle strip gets remainder

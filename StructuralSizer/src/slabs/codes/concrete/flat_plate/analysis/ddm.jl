@@ -204,7 +204,7 @@ function _compute_ddm_span_moments(variant::Symbol, qu, l2,
             M_pos = 0.35 * M0
         else  # :full
             if is_end_span
-                # End span coefficients (ACI Table 8.10.4.2, edge beam via βt)
+                # End span coefficients (ACI 318-11 §13.6.3.3, edge beam via βt)
                 M_neg_left = left_is_ext ? 
                     end_coeffs.ext_neg * M0 :
                     end_coeffs.int_neg * M0
@@ -243,7 +243,7 @@ end
 Run moment analysis using Direct Design Method (DDM).
 
 DDM distributes the total static moment M₀ using code-prescribed coefficients:
-- Longitudinal distribution (ACI Table 8.10.4.2)
+- Longitudinal distribution (ACI 318-11 §13.6.3.3)
 - Transverse distribution is handled separately in the shared pipeline
 
 # DDM Coefficients (ACI 318-11 §13.6.3)
@@ -294,7 +294,7 @@ function run_moment_analysis(
     efm_cache = nothing,    # API parity (unused by DDM)
     cache = nothing,        # API parity (unused by DDM)
     drop_panel = nothing,   # For flat slab: adjusts M0 with equivalent uniform load
-    βt::Float64 = 0.0,     # Edge beam torsional stiffness ratio (ACI 8.10.5.2)
+    βt::Float64 = 0.0,     # Edge beam torsional stiffness ratio (ACI 318-11 §13.6.4.2)
     has_edge_beam::Bool = false,    # API parity (DDM uses βt directly)
     edge_beam_βt::Float64 = 0.0,    # API parity (DDM uses βt directly)
     col_I_factor::Float64 = 0.70,  # API parity (unused by DDM)
@@ -307,7 +307,7 @@ function run_moment_analysis(
     # For flat slabs with drop panels, the DDM static moment M0 must account
     # for the additional dead load from the drop panel projection.
     # Convert the localized drop panel weight to an equivalent uniform load
-    # spread over the full panel area (ACI 8.10.3.2 uses qu × l2 × ln²/8).
+    # spread over the full panel area (ACI 318-11 §13.6.2.2 uses qu × l2 × ln²/8).
     q_drop = isnothing(drop_panel) ? 0.0psf : _eq137_drop_service(drop_panel, l1 * l2, γ_concrete)
     if !isnothing(drop_panel)
         # Drop-panel projection as an equivalent uniform dead load on the

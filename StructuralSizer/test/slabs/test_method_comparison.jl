@@ -308,7 +308,7 @@ end
         @test ddm_result.M0 ≈ mddm_result.M0 rtol=0.01
         @test ddm_result.M0 ≈ efm_result.M0  rtol=0.01
 
-        # DDM coefficients should match ACI Table 8.10.4.2
+        # DDM coefficients should match ACI 318-11 §13.6.3.3
         @test c_ext_ddm ≈ 26.0 rtol=0.05
         @test c_pos_ddm ≈ 52.0 rtol=0.05
         @test c_int_ddm ≈ 70.0 rtol=0.05

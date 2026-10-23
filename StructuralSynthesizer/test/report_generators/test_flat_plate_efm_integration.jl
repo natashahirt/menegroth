@@ -19,7 +19,7 @@
 #
 # SP Reference Values:
 #   - Stiffnesses:  SP Table 2 (section properties and EFM stiffnesses)
-#   - M₀:          ACI 8.10.3.2 (qu × l₂ × ln² / 8 = 93.82 k-ft)
+#   - M₀:          ACI 318-11 §13.6.2.2 (qu × l₂ × ln² / 8 = 93.82 k-ft)
 #   - EFM moments:  SP Table 5 (centerline), Table 6 (face-of-support)
 #   - Reinforcement: SP Table 7 (face-of-support column-strip, b=84 in, d=5.75 in)
 # =============================================================================
@@ -136,7 +136,7 @@ println()
 
 # ── SP reference values ──
 # Section properties & stiffnesses: SP Table 2 (exact formulas)
-# M₀: ACI 8.10.3.2 formula (qu × l₂ × ln² / 8)
+# M₀: ACI 318-11 §13.6.2.2 formula (qu × l₂ × ln² / 8)
 # EFM moments: SP Table 5 (centerline) → Table 6 (face-of-support)
 # Column-strip moments & As: SP Table 7 (face-of-support, b=84 in, d=5.75 in)
 sp = (
@@ -146,7 +146,7 @@ sp = (
     # Table 2 — EFM stiffnesses
     Ksb = 351.77e6u"lbf*inch",     Kc  = 1125.59e6u"lbf*inch",
     Kt  = 367.48e6u"lbf*inch",     Kec = 554.07e6u"lbf*inch",
-    # ACI 8.10.3.2
+    # ACI 318-11 §13.6.2.2
     M0  = 93.82u"kip*ft",
     # Table 5 — EFM centerline moments (end span, full frame width)
     M_neg_ext = 46.65u"kip*ft",    M_pos = 44.94u"kip*ft",
@@ -258,7 +258,7 @@ _step_status["Load Baseline"] = "✓"
 # ═════════════════════════════════════════════════════════════════════════════
 
 _rpt.section("STEP 1 — SECTION PROPERTIES  (SP Table 2)")
-println("  Is = l₂·h³/12,  Ic = c₁·c₂³/12,  C = Σ(1−0.63x/y)x³y/3 (ACI 8.10.5.2)")
+println("  Is = l₂·h³/12,  Ic = c₁·c₂³/12,  C = Σ(1−0.63x/y)x³y/3 (ACI 318-11 §13.6.4.2)")
 
 Is = StructuralSizer.slab_moment_of_inertia(l2, h)
 Ic = StructuralSizer.column_moment_of_inertia(c_col, c_col)
@@ -302,10 +302,10 @@ _step_status["EFM Stiffnesses"] = all((ok1, ok2, ok3, ok4)) ? "✓" : "✗"
 _rpt.note("αec < 1 → 'soft' column; slab attracts more moment at support.")
 
 # ═════════════════════════════════════════════════════════════════════════════
-# STEP 3  Total Static Moment (ACI 8.10.3.2)
+# STEP 3  Total Static Moment (ACI 318-11 §13.6.2.2)
 # ═════════════════════════════════════════════════════════════════════════════
 
-_rpt.section("STEP 3 — TOTAL STATIC MOMENT  (ACI 8.10.3.2)")
+_rpt.section("STEP 3 — TOTAL STATIC MOMENT  (ACI 318-11 §13.6.2.2)")
 println("  M₀ = qᵤ·l₂·lₙ²/8")
 
 M0 = StructuralSizer.total_static_moment(qu, l2, ln)
@@ -325,8 +325,8 @@ l2_l1 = round(ustrip(u"ft", l2) / ustrip(u"ft", l1), digits=2)
 println("  l₂/l₁ = $l2_l1   (αf = 0, no beams, no edge beam)")
 println()
 
-# ── 4A: DDM hand-calc (ACI Table 8.10.4.2 coefficients × M₀) ──
-_rpt.sub("4A — DDM Hand-Calc (ACI Table 8.10.4.2)")
+# ── 4A: DDM hand-calc (ACI 318-11 §13.6.3.3 coefficients × M₀) ──
+_rpt.sub("4A — DDM Hand-Calc (ACI 318-11 §13.6.3.3)")
 println("  Longitudinal coefficients × M₀ (end span, no edge beam):")
 
 M_neg_ext_ddm = 0.26 * M0
@@ -340,7 +340,7 @@ M_neg_int_ddm = 0.70 * M0
 @printf("    %-24s %6.2f %12.2f\n", "Int. negative",  0.70, ustrip(u"kip*ft", M_neg_int_ddm))
 println()
 
-# Transverse to column strip: ACI 8.10.5 (100% / 60% / 75%)
+# Transverse to column strip: ACI 318-11 §13.6.4 (100% / 60% / 75%)
 cs_frac_ext = 1.00;  cs_frac_pos = 0.60;  cs_frac_int = 0.75
 cs_ext_ddm = cs_frac_ext * M_neg_ext_ddm
 cs_pos_ddm = cs_frac_pos * M_pos_ddm
@@ -713,7 +713,7 @@ _asap_kc_cr   = _efm_fact_results[6]  # ASAP Kc cracked
 _rpt.sub("4F — Method Comparison Matrix (Same Building, Each Method's Own qᵤ)")
 println("  All methods run on fea_struc (3×3 bay, 54×42 ft, H=9 ft, 16\" cols, h=7\").")
 println("  Each method computes its own qᵤ via _moment_analysis_setup (same material/loads).")
-println("  CS fractions (ACI 8.10.5): 100%/60%/75%.  FEA_cut = δ-band section-cut integration.")
+println("  CS fractions (ACI 318-11 §13.6.4): 100%/60%/75%.  FEA_cut = δ-band section-cut integration.")
 println("  HC = Hardy Cross, AS = ASAP solver.  Kec = torsional, Kc = raw, cr = cracked.")
 println()
 
@@ -807,7 +807,7 @@ fea_wa_cs, fea_wa_ms = _fea_wa.cs, _fea_wa.ms
 _col_labels = ("DDM", "MDDM", "HC_Kec", "HC_Kc", "AS_gr", "AS_cr", "FEA_frm", "FEA_cut", "FEA_nod", "FEA_iso", "FEA_WA")
 _nc = length(_col_labels)
 
-# ── Column-strip fractions (ACI 8.10.5) ──
+# ── Column-strip fractions (ACI 318-11 §13.6.4) ──
 _cs = (ext=cs_frac_ext, pos=cs_frac_pos, int=cs_frac_int)
 _ms_frac = (ext=0.00, pos=0.40, int=0.25)
 
@@ -906,7 +906,7 @@ println()
 println()
 
 _rpt.note("All methods run on same building → same qᵤ (self-weight from NWC_4000 density).")
-_rpt.note("DDM/MDDM/EFM use ACI 8.10.5 fractions for CS/MS split.")
+_rpt.note("DDM/MDDM/EFM use ACI 318-11 §13.6.4/.6 fractions for CS/MS split.")
 _rpt.note("FEA_frm = frame-level CL × ACI fractions (default).  FEA_cut = strip δ-band integration.")
 _rpt.note("FEA_nod = nodal-smoothed isoparametric straight cuts (α=1.0).  FEA_iso = blended (α=0.5).")
 _rpt.note("FEA_WA = Wood–Armer per-element transformation → strip average.")
@@ -2008,7 +2008,7 @@ _rpt.note("Drop extends l/6 from column center in each direction.")
 @test all(StructuralSizer.auto_size_drop_depth(h_t) >= h_t / 4 for h_t in h_trials_dp)
 
 # ── 13C: Edge Beam βt Effect on DDM Moments ──
-_rpt.sub("13C — Edge Beam βt Effect on DDM Moments (ACI 8.10.4.2 / 8.10.5.2)")
+_rpt.sub("13C — Edge Beam βt Effect on DDM Moments (ACI 318-11 §13.6.3.3 / §13.6.4.2)")
 println("  βt = edge beam torsional stiffness ratio. Higher → more moment to exterior.")
 
 M0_βt = sp.M0  # use SP baseline M₀ = 93.82 kip-ft
@@ -2500,12 +2500,12 @@ println("    Feature                          DDM       EFM       FEA")
 println("    ────────────────────────────── ──────── ──────── ────────")
 println("    Total static moment M₀              ✓        ✓        ✓")
 println("    Longitudinal distribution            ✓        —        —")
-println("      (ACI Table 8.10.4.2 coeffs)")
+println("      (ACI 318-11 §13.6.3.3 coeffs)")
 println("    Frame analysis (stiffness)           —        ✓        —")
 println("      (Kec, Ks, COF, FEM)")
 println("    2D shell FEA (Tri3 mesh)             —        —        ✓")
 println("    Transverse distribution               ✓        ✓        ✓")
-println("      (ACI 8.10.5 col/mid strip)")
+println("      (ACI 318-11 §13.6.4/.6 col/mid strip)")
 println("    Multi-span frame analysis            ✓        ✓        ✓")
 println("    Irregular grid support               —        —        ✓")
 println("    Punching shear (§22.6)               ✓        ✓        ✓")

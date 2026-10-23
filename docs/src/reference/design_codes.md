@@ -55,7 +55,6 @@ AbstractDesignCode
 |:--------|:----------|:-------|:------------|
 | §7.12.2.1 | Minimum shrinkage and temperature reinforcement | ✅ Implemented | `slabs/codes/` |
 | §8.6.1 | One-way slab minimum thickness | ✅ Implemented | `slabs/codes/` |
-| §8.10.4 | T-beam flange width | ✅ Implemented | `analyze/members/utils.jl` |
 | §8.12.2 | Effective flange width for T-beams | ✅ Implemented | `analyze/members/utils.jl` |
 | §9.3.2 | Strength reduction factors | ✅ Implemented | `codes/aci/` |
 | §9.5 | Beam flexure — required strength | ✅ Implemented | `members/codes/aci/beams/flexure.jl` |

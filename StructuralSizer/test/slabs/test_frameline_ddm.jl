@@ -181,7 +181,7 @@ end
         M0_kipft = ustrip(kip*u"ft", result.M0)
         @test M0_kipft ≈ 93.8 rtol=0.05
         
-        # End span moments (ACI Table 8.10.4.2)
+        # End span moments (ACI 318-11 §13.6.3.3)
         # Exterior negative: 0.26 × M0 ≈ 24.4 kip-ft
         # Interior negative: 0.70 × M0 ≈ 65.7 kip-ft
         # Positive: 0.52 × M0 ≈ 48.8 kip-ft

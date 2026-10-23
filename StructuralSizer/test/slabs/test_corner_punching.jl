@@ -48,8 +48,11 @@ const SS = StructuralSizer
     Jc_y = J_over_c_y * cAB_y
     γv_x = 1.0 - 1.0 / (1.0 + (2.0 / 3.0) * sqrt(b1 / b2))
     γv_y = 1.0 - 1.0 / (1.0 + (2.0 / 3.0) * sqrt(b2 / b1))
-    Mux_adj = max(abs(Mux) - Vu * (c1 / 2 - cAB_x), zero(Mux))
-    Muy_adj = max(abs(Muy) - Vu * (c2 / 2 - cAB_y), zero(Muy))
+    # e = (b − cAB) − c/2. cAB is from the inner critical-section face,
+    # which sits d/2 outside the column face (b = c + d/2).
+    # ACI 318-11 R11.11.7.2 (page 210); spSlab exterior column page 42.
+    Mux_adj = max(abs(Mux) - Vu * ((b1 - cAB_x) - c1 / 2), zero(Mux))
+    Muy_adj = max(abs(Muy) - Vu * ((b2 - cAB_y) - c2 / 2), zero(Muy))
     vu_oracle = uconvert(u"psi", Vu / (b0 * d)) +
                 uconvert(u"psi", γv_x * Mux_adj * cAB_x / Jc_x) +
                 uconvert(u"psi", γv_y * Muy_adj * cAB_y / Jc_y)
@@ -70,6 +73,37 @@ const SS = StructuralSizer
     r_slab_x = SS.check_punching_for_column(col, Vu, Mux, d, h, fc)
     r_api_x  = SS.punching_check(Vu, Mux, zero(Muy), d, fc, c1, c2; position = :corner)
     @test ustrip(u"psi", r_slab_x.vu) ≈ ustrip(u"psi", r_api_x.vu) rtol=1e-9
+end
+
+@testset "Edge centroid shift matches the spSlab exterior column" begin
+    # corpus: sp-de-two-way-flat-plate-aci318-14, page 42.
+    # b1 = 16 + 5.75/2 = 18.88 in, cAB = 5.99 in, c1 = 16 in.
+    # M_unb = 46.65 − 21.70 × (18.88 − 5.99 − 16/2)/12 = 37.81 kip·ft
+    # vu = 137.20 psi. The old arm c1/2 − cAB = 2.01 in leaves vu ≈ 147 psi.
+    c1 = 16.0u"inch"
+    c2 = 16.0u"inch"
+    d = 5.75u"inch"
+    fc = 4000.0u"psi"
+    b1 = c1 + d / 2
+    b2 = c2 + d
+    cAB = b1^2 / (2 * b1 + b2)
+    e = SS.eccentricity_to_critical_centroid(b1, c1, cAB)
+    @test ustrip(u"inch", e) ≈ 4.89 atol=0.02
+    @test ustrip(u"inch", e) > ustrip(u"inch", c1 / 2 - cAB)
+
+    Vu = 21.70kip
+    M_cl = 46.65kip * u"ft"
+    M_unb = M_cl - Vu * e
+    @test ustrip(kip * u"ft", M_unb) ≈ 37.81 atol=0.05
+
+    γv = 1.0 - 1.0 / (1.0 + (2.0 / 3.0) * sqrt(b1 / b2))
+    Jc = SS.polar_moment_Jc_edge(b1, b2, d, cAB)
+    b0 = 2 * b1 + b2
+    vu_oracle = uconvert(u"psi", Vu / (b0 * d)) +
+                uconvert(u"psi", γv * M_unb * cAB / Jc)
+    r = SS.punching_check(Vu, M_cl, zero(M_cl), d, fc, c1, c2; position = :edge)
+    @test ustrip(u"psi", r.vu) ≈ ustrip(u"psi", vu_oracle) rtol=1e-9
+    @test ustrip(u"psi", r.vu) ≈ 137.20 atol=0.5
 end
 
 @testset "Corner punching — production Muy (20×30 panel, governing 130 axis)" begin

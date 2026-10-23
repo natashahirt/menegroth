@@ -1867,7 +1867,7 @@ function _chat_geo_flags_and_warnings(
                 if max_ar > 3.0
                     push!(warnings,
                         "Panel aspect ratio up to $(round(max_ar; digits=1)):1. " *
-                        "ACI 318 §8.10.2.3 limits DDM to panels with long/short ≤ 2 " *
+                        "ACI 318-11 §13.6.1.2 limits DDM to panels with long/short ≤ 2 " *
                         "(EFM is less restrictive but still assumes roughly rectangular bays). " *
                         "Consider using FEA, or adjusting column spacing to reduce aspect ratio.")
                 end

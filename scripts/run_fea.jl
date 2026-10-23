@@ -212,7 +212,7 @@ function _extract_cs_ms(method, cache, result, struc, slab, columns, span_axis)
     kf(m) = round(ustrip(u"kip*ft", m), digits=1)
 
     if da == :frame
-        # ACI 8.10.5 fractions (no edge beam, αf = 0)
+        # ACI 318-11 §13.6.4/.6 fractions (no edge beam, αf = 0)
         cl_ext = kf(result.M_neg_ext)
         cl_int = kf(result.M_neg_int)
         cl_pos = kf(result.M_pos)

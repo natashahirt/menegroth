@@ -23,10 +23,12 @@
 
 Check punching shear for a single column with combined stress method.
 
-For exterior columns, adjusts Mub for reaction eccentricity per StructurePoint:
-    Mub_adjusted = Mub - Vu × e_centroid
+For exterior columns, adjusts Mub for reaction eccentricity:
+    Mub_adjusted = |Mub| − Vu × e_centroid
 
-where e_centroid is the distance from column centerline to critical section centroid.
+where e_centroid is the distance from the column centerline to the critical
+section centroid, `e = (b_section − cAB) − c_col/2`
+(`eccentricity_to_critical_centroid`; ACI 318-11 R11.11.7.2, page 210).
 
 # Arguments
 - `col`: Column with position (:interior, :edge, :corner) and dimensions (c1, c2)
@@ -88,6 +90,46 @@ function check_punching_for_column(col, Vu, Mub, d, h, fc;
         Muy = nothing
     end
 
+    # ── Re-entrant (inside / L-notch) corner → general-shape engine ──
+    # A re-entrant corner's critical section wraps (nearly) the full 4-sided
+    # perimeter, not the legacy 2-sided corner section, so it is evaluated with
+    # the ACI 421.1R-99 Appendix B segment-summation engine on the section's
+    # true principal axes rather than the closed-form corner Jc. Only columns
+    # explicitly classified `:reentrant` take this path; convex corners
+    # (`corner_kind != :reentrant` / absent) keep the conservative 2-sided check.
+    col_corner_kind = hasproperty(col, :corner_kind) ? getfield(col, :corner_kind) : :none
+    if col.position == :corner && col_corner_kind == :reentrant
+        pts, _ = reentrant_critical_section(c1, c2, d)
+        props = critical_section_properties(pts, d; closed = true)
+
+        # Transfer the applied unbalanced moments (taken about the column center)
+        # to the critical-section centroid, mirroring the validated §11.11.7.2
+        # reduction used for orthogonal edge/corner columns (deci-8ec247a3):
+        #   M_about_centroid = |M| − Vu·e   (floored at 0),
+        # with e the TRUE section-centroid offset (props.xc / props.yc), which
+        # already embeds the d/2 geometry. Axis-convention reconciliation:
+        # the Sizer `Mub` drives stress in x (pairs with cAB_x) ⇒ it is the
+        # 421.1R moment about y (`Muy`); `Muy_val` drives stress in y ⇒ 421.1R
+        # moment about x (`Mux`).
+        Mux_g = max(0.0kip * u"ft", abs(Muy_val) - Vu * abs(props.yc))
+        Muy_g = max(0.0kip * u"ft", abs(Mub)     - Vu * abs(props.xc))
+
+        β_re = punching_β(c1, c2; shape = geom_shape)
+        # The re-entrant section is 4-sided (full perimeter) ⇒ interior αs per
+        # the side-count rule, ACI 421.3R-15 §4.8.
+        g = punching_check_general(Vu, Mux_g, Muy_g, d, fc, pts;
+                                   closed = true, β = β_re,
+                                   αs = punching_αs(:interior), λ = λ, ϕ = φ_shear)
+        if verbose
+            status = g.ok ? "✓ PASS" : "✗ FAIL"
+            @debug "Column $col_idx (re-entrant corner → general App. B)" c1=c1 c2=c2 b0=g.b0 β=round(β_re, digits=2)
+            @debug "  Demand" Vu=Vu Mux_g=Mux_g Muy_g=Muy_g asymmetric=g.asymmetric θp=round(g.θp, digits=3)
+            @debug "  Stress" vu=round(ustrip(u"psi", g.vu), digits=1) φvc=round(ustrip(u"psi", g.ϕvc), digits=1) ratio=round(g.utilization, digits=2) status=status
+        end
+        return (ok = g.ok, ratio = g.utilization, vu = g.vu, φvc = g.ϕvc,
+                b0 = g.b0, Jc = g.J1, Mub = Mub)
+    end
+
     # ── Geometry (cached: c1, c2, d, position, shape, edge_par) ──
     cache_key = !isnothing(_geom_cache) ?
         (ustrip(u"m", c1), ustrip(u"m", c2), ustrip(u"m", d), col.position, geom_shape, edge_par) :
@@ -143,10 +185,11 @@ function check_punching_for_column(col, Vu, Mub, d, h, fc;
     elseif col.position == :edge
         # ACI 318-11 R11.11.7.2 (pages 209–211): moment about the axis
         # parallel to the free edge, after `_orient_edge_column`.
-        e_centroid = c1 / 2 - cAB
+        # e = (b1 − cAB) − c1/2. See eccentricity_to_critical_centroid.
+        e_centroid = eccentricity_to_critical_centroid(geom.b1, c1, cAB)
         Mub_adjusted = max(0.0kip*u"ft", abs(Mub) - Vu * e_centroid)
     else  # :corner — same centroid shift as punching_check (R11.11.7.2)
-        e_centroid = c1 / 2 - geom.cAB_x
+        e_centroid = eccentricity_to_critical_centroid(geom.b1, c1, geom.cAB_x)
         Mub_adjusted = max(0.0kip*u"ft", abs(Mub) - Vu * e_centroid)
     end
 
@@ -155,7 +198,7 @@ function check_punching_for_column(col, Vu, Mub, d, h, fc;
         # Parity with punching_check: γv Mu c / Jc on each axis.
         # `Mub` is the span-direction (b1) transfer moment; optional `Muy`
         # is the perpendicular-axis moment when the caller has it.
-        e_y = c2 / 2 - geom.cAB_y
+        e_y = eccentricity_to_critical_centroid(geom.b2, c2, geom.cAB_y)
         Muy_adj = max(0.0kip*u"ft", abs(Muy_val) - Vu * e_y)
         γv_y = gamma_v(geom.b2, geom.b1)
         Jc_y = polar_moment_Jc_corner(geom.b2, geom.b1, d, geom.cAB_y)

@@ -149,6 +149,28 @@ const SS = StructuralSizer
               ustrip(u"inch", 2 * (16.0u"inch" + d) + 2 * (10.0u"inch" + d)) rtol = 1e-10
     end
 
+    @testset "check_punching_for_column routes re-entrant corners to App. B" begin
+        c1 = 16.0u"inch"; c2 = 16.0u"inch"; d = 6.0u"inch"; h = 8.0u"inch"
+        fc = 4000.0u"psi"
+        Vu = 40.0kip; Mub = 25.0kip * u"ft"; Muy = 15.0kip * u"ft"
+
+        re_col = (position = :corner, corner_kind = :reentrant,
+                  c1 = c1, c2 = c2, shape = :rectangular)
+        cx_col = (position = :corner, corner_kind = :convex,
+                  c1 = c1, c2 = c2, shape = :rectangular)
+
+        r_re = SS.check_punching_for_column(re_col, Vu, Mub, d, h, fc; Muy = Muy)
+        r_cx = SS.check_punching_for_column(cx_col, Vu, Mub, d, h, fc; Muy = Muy)
+
+        # Re-entrant carries the full 4-sided perimeter; convex keeps 2-sided.
+        @test ustrip(u"inch", r_re.b0) ≈ ustrip(u"inch", 2 * (c1 + d) + 2 * (c2 + d)) rtol = 1e-9
+        @test ustrip(u"inch", r_cx.b0) ≈ ustrip(u"inch", (c1 + d / 2) + (c2 + d / 2)) rtol = 1e-9
+        # Larger perimeter ⇒ the re-entrant demand is well below the 2-sided result.
+        @test r_re.vu < r_cx.vu
+        @test r_re.ok isa Bool
+        @test r_re.ratio > 0
+    end
+
     @testset "Symmetry detection and punching_check_general result" begin
         c1 = 16.0u"inch"; c2 = 12.0u"inch"; d = 6.0u"inch"
         rect, _ = SS.rectangular_critical_section(c1, c2, d; position = :interior)

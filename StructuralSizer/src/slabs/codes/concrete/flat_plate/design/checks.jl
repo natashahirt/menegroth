@@ -90,37 +90,46 @@ function check_punching_for_column(col, Vu, Mub, d, h, fc;
         Muy = nothing
     end
 
-    # ── Re-entrant (inside / L-notch) corner → general-shape engine ──
-    # A re-entrant corner's critical section wraps (nearly) the full 4-sided
-    # perimeter, not the legacy 2-sided corner section, so it is evaluated with
-    # the ACI 421.1R-99 Appendix B segment-summation engine on the section's
-    # true principal axes rather than the closed-form corner Jc.
+    # ── Non-orthogonal / re-entrant corners → general-shape engine ──
+    # These corners' critical sections are built by `corner_critical_section`,
+    # which offsets the column by d/2 and clips the perimeter to the real slab
+    # region defined by the two free edges (ACI 318-11 §11.11.1.2 — section at
+    # d/2 wherever slab exists). The resisting (open) polyline is then evaluated
+    # with the ACI 421.1R-99 Appendix B segment engine on its true principal
+    # axes. This handles ANY free-edge angle, so both orthogonal AND skewed
+    # re-entrant corners route here (the clipper reduces exactly to the
+    # orthogonal section), and non-orthogonal convex (wedge) corners too.
     #
-    # ⚠ GATING — `reentrant_critical_section` builds a strictly ORTHOGONAL
-    # (90°) d/2×d/2 notch, so only ORTHOGONAL re-entrant corners may use it. An
-    # orthogonal re-entrant corner has two perpendicular free edges ⇒ slab-
-    # material angle ≈ 3π/2 (`corner_angle`). A *skewed* re-entrant corner
-    # (angle ≠ 3π/2) would need an angled notch (future feature); it falls
-    # through to the conservative 2-sided corner check (which over-predicts
-    # stress — safe) rather than silently using the wrong geometry. Columns
-    # lacking `corner_angle` (e.g. bare test stubs) likewise do not route.
+    # Orthogonal CONVEX corners keep the validated closed-form `punching_check`
+    # path (below) — their eccentric-shear Jc is calibrated against spSlab — so
+    # only *non-orthogonal* convex corners are diverted here.
+    #
+    # Routing requires the two free-edge inward normals (from the Synthesizer's
+    # structural-offset pass). Columns lacking them (e.g. bare test stubs) fall
+    # through to the conservative closed-form corner check.
     col_corner_kind  = hasproperty(col, :corner_kind)  ? getfield(col, :corner_kind)          : :none
     col_corner_angle = hasproperty(col, :corner_angle) ? Float64(getfield(col, :corner_angle)) : NaN
-    is_ortho_reentrant = col_corner_kind == :reentrant &&
-                         isapprox(col_corner_angle, 3π / 2; atol = 0.12)
-    if verbose && col.position == :corner && col_corner_kind == :reentrant && !is_ortho_reentrant
-        @debug "Column $col_idx: skewed re-entrant corner (angle=$(round(col_corner_angle, digits=3)) ≉ 3π/2) → conservative 2-sided fallback"
+    inward_normals   = (hasproperty(col, :boundary_inward_normals) &&
+                        length(getfield(col, :boundary_inward_normals)) == 2) ?
+                       getfield(col, :boundary_inward_normals) : nothing
+    is_reentrant     = col_corner_kind == :reentrant
+    is_nonortho_cvx  = col_corner_kind == :convex && !isnan(col_corner_angle) &&
+                       !isapprox(col_corner_angle, π / 2; atol = 0.12)
+    route_general    = col.position == :corner && inward_normals !== nothing &&
+                       (is_reentrant || is_nonortho_cvx)
+    if verbose && col.position == :corner && (is_reentrant || is_nonortho_cvx) &&
+       inward_normals === nothing
+        @debug "Column $col_idx: $(col_corner_kind) corner lacks inward normals → conservative closed-form fallback"
     end
-    if col.position == :corner && is_ortho_reentrant
-        pts, _ = reentrant_critical_section(c1, c2, d)
-        props = critical_section_properties(pts, d; closed = true)
+    if route_general
+        kind = is_reentrant ? :reentrant : :convex
+        pts, closed = corner_critical_section(c1, c2, d, kind, inward_normals)
+        props = critical_section_properties(pts, d; closed = closed)
 
         # Transfer the applied unbalanced moments (taken about the column center)
-        # to the critical-section centroid, mirroring the validated §11.11.7.2
-        # reduction used for orthogonal edge/corner columns (deci-8ec247a3):
-        #   M_about_centroid = |M| − Vu·e   (floored at 0),
-        # with e the TRUE section-centroid offset (props.xc / props.yc), which
-        # already embeds the d/2 geometry.
+        # to the critical-section centroid with eccentricity e = (props.xc,
+        # props.yc) — the TRUE section-centroid offset, which already embeds the
+        # d/2 geometry.
         #
         # ⚠ AXIS CONVENTION — the two engines name moments OPPOSITELY, so the
         # mapping is made explicit here with physical names rather than a silent
@@ -129,19 +138,28 @@ function check_punching_for_column(col, Vu, Mub, d, h, fc;
         #     `Muy_val` pairs with cAB_y ⇒ drives stress in y.
         #   • 421.1R `punching_check_general`: 1st moment arg is about x (stress
         #     in y), 2nd is about y (stress in x).
-        # Therefore, in physical terms:
-        M_about_x = max(0.0kip * u"ft", abs(Muy_val) - Vu * abs(props.yc))  # stress in y, y-ecc.
-        M_about_y = max(0.0kip * u"ft", abs(Mub)     - Vu * abs(props.xc))  # stress in x, x-ecc.
+        #
+        # ⚠ TRANSFER SIGN — the net moment at the section centroid is
+        # |M ± Vu·e|; its sign depends on the relative sense of M and the
+        # reaction eccentricity and is NOT disambiguated for these general
+        # sections (unlike the spSlab-calibrated orthogonal convex corner). To
+        # stay safety-conservative we take the UPPER BOUND |M| + Vu·|e|, which
+        # never under-predicts the transfer stress. For re-entrant corners the
+        # centroid sits near the column center, so this upper bound is within a
+        # few percent of the unsigned value anyway (bracketed by test).
+        M_about_x = abs(Muy_val) + Vu * abs(props.yc)                          # stress in y
+        M_about_y = abs(Mub)     + Vu * abs(props.xc)                          # stress in x
 
-        β_re = punching_β(c1, c2; shape = geom_shape)
-        # The re-entrant section is 4-sided (full perimeter) ⇒ interior αs per
-        # the side-count rule, ACI 421.3R-15 §4.8.
+        β_g = punching_β(c1, c2; shape = geom_shape)
+        # αs by resisting side count (ACI 421.3R-15 §4.8): the re-entrant section
+        # is ~4-sided (interior αs); the convex wedge is 2-sided (corner αs).
+        αs_g = is_reentrant ? punching_αs(:interior) : punching_αs(:corner)
         g = punching_check_general(Vu, M_about_x, M_about_y, d, fc, pts;
-                                   closed = true, β = β_re,
-                                   αs = punching_αs(:interior), λ = λ, ϕ = φ_shear)
+                                   closed = closed, β = β_g,
+                                   αs = αs_g, λ = λ, ϕ = φ_shear)
         if verbose
             status = g.ok ? "✓ PASS" : "✗ FAIL"
-            @debug "Column $col_idx (re-entrant corner → general App. B)" c1=c1 c2=c2 b0=g.b0 β=round(β_re, digits=2)
+            @debug "Column $col_idx ($(kind) corner → general App. B)" c1=c1 c2=c2 b0=g.b0 β=round(β_g, digits=2) angle=round(col_corner_angle, digits=3)
             @debug "  Demand" Vu=Vu M_about_x=M_about_x M_about_y=M_about_y asymmetric=g.asymmetric θp=round(g.θp, digits=3)
             @debug "  Stress" vu=round(ustrip(u"psi", g.vu), digits=1) φvc=round(ustrip(u"psi", g.ϕvc), digits=1) ratio=round(g.utilization, digits=2) status=status
         end

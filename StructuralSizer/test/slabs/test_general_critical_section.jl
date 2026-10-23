@@ -129,24 +129,62 @@ const SS = StructuralSizer
               ustrip(u"inch", (c1 + d / 2) + (c2 + d / 2)) rtol = 1e-10
     end
 
-    @testset "Re-entrant corner carries (nearly) the full interior perimeter" begin
+    @testset "corner_critical_section clipper: exact orthogonal reductions + skew" begin
+        c1 = 16.0u"inch"; c2 = 16.0u"inch"; d = 6.0u"inch"
+        n_ortho = [(-1.0, 0.0), (0.0, -1.0)]       # slab in −x,−y quadrant
+
+        # Convex orthogonal ⇒ identical to the closed-form 2-sided corner L.
+        cvx, clc = SS.corner_critical_section(c1, c2, d, :convex, n_ortho)
+        @test !clc
+        pc = SS.critical_section_properties(cvx, d; closed = false)
+        ref, _ = SS.rectangular_critical_section(c1, c2, d; position = :corner)
+        pr = SS.critical_section_properties(ref, d; closed = false)
+        @test ustrip(u"inch", pc.b0) ≈ ustrip(u"inch", pr.b0) rtol = 1e-10
+        @test ustrip(u"inch", pc.b0) ≈ ustrip(u"inch", (c1 + d / 2) + (c2 + d / 2)) rtol = 1e-10
+
+        # Re-entrant orthogonal ⇒ open loop, b0 = 2(c1+c2)+3d (notch edges dropped).
+        rez, clr = SS.corner_critical_section(c1, c2, d, :reentrant, n_ortho)
+        @test !clr
+        pre = SS.critical_section_properties(rez, d; closed = false)
+        @test ustrip(u"inch", pre.b0) ≈ ustrip(u"inch", 2 * (c1 + c2) + 3 * d) rtol = 1e-10
+        # … exactly d less than the full 4-sided interior loop.
+        @test ustrip(u"inch", pre.b0) ≈
+              ustrip(u"inch", 2 * (c1 + d) + 2 * (c2 + d) - d) rtol = 1e-10
+
+        # Non-orthogonal convex wedge (60°): open, rotated principal axis, legs
+        # longer than the orthogonal idealization.
+        n_wedge = [(-sin(deg2rad(30)), -cos(deg2rad(30))),
+                   ( sin(deg2rad(30)), -cos(deg2rad(30)))]
+        wdg, clw = SS.corner_critical_section(c1, c2, d, :convex, n_wedge)
+        @test !clw
+        pw = SS.critical_section_properties(wdg, d; closed = false)
+        @test ustrip(u"inch", pw.b0) > ustrip(u"inch", (c1 + d / 2) + (c2 + d / 2))
+        @test abs(pw.θp) > 1e-3                      # principal axes rotate off x/y
+
+        # Bad inputs are rejected.
+        @test_throws ArgumentError SS.corner_critical_section(c1, c2, d, :convex, n_ortho[1:1])
+        @test_throws ArgumentError SS.corner_critical_section(c1, c2, d, :weird, n_ortho)
+    end
+
+    @testset "Re-entrant corner resists the offset loop minus the notch edges" begin
         # Square re-entrant: symmetric about the notch diagonal ⇒ not flagged.
         c = 14.0u"inch"; d = 7.0u"inch"
         pts, cl = SS.reentrant_critical_section(c, c, d; notch = (1, 1))
-        @test cl
-        p = SS.critical_section_properties(pts, d; closed = true)
-        @test ustrip(u"inch", p.b0) ≈ ustrip(u"inch", 2 * (c + d) + 2 * (c + d)) rtol = 1e-10
+        @test !cl                                    # open: terminates at free edges
+        p = SS.critical_section_properties(pts, d; closed = false)
+        # b0 = 2(c1+c2)+3d — full offset loop minus the two non-resisting d/2
+        # notch edges (which lie along the free edges).
+        @test ustrip(u"inch", p.b0) ≈ ustrip(u"inch", 2 * (c + c) + 3 * d) rtol = 1e-10
         @test SS.punching_check_general(40.0kip, 20.0kip * u"ft", 20.0kip * u"ft",
-                                        d, 4000.0u"psi", pts; closed = true).asymmetric == false
+                                        d, 4000.0u"psi", pts; closed = false).asymmetric == false
 
         # Unequal legs: no principal axis of symmetry ⇒ asymmetric flag set.
         pts2, _ = SS.reentrant_critical_section(16.0u"inch", 10.0u"inch", d; notch = (1, 1))
         res2 = SS.punching_check_general(40.0kip, 20.0kip * u"ft", 20.0kip * u"ft",
-                                         d, 4000.0u"psi", pts2; closed = true)
+                                         d, 4000.0u"psi", pts2; closed = false)
         @test res2.asymmetric == true
-        # Full 4-sided-ish perimeter, not the legacy 2-sided under-count.
         @test ustrip(u"inch", res2.b0) ≈
-              ustrip(u"inch", 2 * (16.0u"inch" + d) + 2 * (10.0u"inch" + d)) rtol = 1e-10
+              ustrip(u"inch", 2 * (16.0u"inch" + 10.0u"inch") + 3 * d) rtol = 1e-10
     end
 
     @testset "Moment convention locked against closed-form punching_check" begin
@@ -191,11 +229,11 @@ const SS = StructuralSizer
         pts_re,  _ = SS.reentrant_critical_section(c1, c2, d)
 
         g_int = SS.punching_check_general(Vu, Mx, My, d, fc, pts_int; closed = true)
-        g_re  = SS.punching_check_general(Vu, Mx, My, d, fc, pts_re;  closed = true)
-        # Same perimeter, but the notch removes material ⇒ less J + offset centroid
-        # ⇒ stress can only rise relative to the full interior section.
+        g_re  = SS.punching_check_general(Vu, Mx, My, d, fc, pts_re;  closed = false)
+        # The notch drops the two d/2 free-edge segments (b0 smaller by exactly d)
+        # and offsets the centroid ⇒ stress can only rise vs the full interior loop.
         @test g_re.vu ≥ g_int.vu
-        @test ustrip(u"inch", g_re.b0) ≈ ustrip(u"inch", g_int.b0) rtol = 1e-9
+        @test ustrip(u"inch", g_re.b0) ≈ ustrip(u"inch", g_int.b0 - d) rtol = 1e-9
 
         # … yet far below the legacy 2-sided corner idealization (half the b0).
         cx = (position = :corner, corner_kind = :convex, c1 = c1, c2 = c2, shape = :rectangular)
@@ -203,25 +241,27 @@ const SS = StructuralSizer
         @test g_re.vu < r_cx.vu
     end
 
-    @testset "Invariant: centroid-transfer sign is a minor (bracketed) correction" begin
-        # The |M| − Vu·e transfer direction is inherited from the orthogonal
-        # corner validation. For re-entrant sections the centroid offset is tiny,
-        # so subtract / zero / add bracket a narrow band — the sign choice is
-        # second-order (well inside the App. B J≈I conservatism).
+    @testset "Invariant: centroid-transfer uses the conservative upper bound" begin
+        # The net moment at the section centroid is |M ± Vu·e|; the sign is not
+        # disambiguated for these general sections, so production takes the UPPER
+        # bound |M|+Vu·e (never under-predicts). For re-entrant sections the
+        # centroid offset is tiny, so add / zero / subtract span a narrow band —
+        # the conservatism penalty over the unsigned value is only a few percent.
         c1 = 16.0u"inch"; c2 = 16.0u"inch"; d = 6.0u"inch"; fc = 4000.0u"psi"
         Vu = 40.0kip; Mub = 20.0kip * u"ft"; Muy_val = 12.0kip * u"ft"
         pts, _ = SS.reentrant_critical_section(c1, c2, d)
-        p = SS.critical_section_properties(pts, d; closed = true)
+        p = SS.critical_section_properties(pts, d; closed = false)
 
         vu_of(sgn) = ustrip(u"psi", SS.punching_check_general(
             Vu,
-            max(0.0kip * u"ft", abs(Muy_val) - sgn * Vu * abs(p.yc)),
-            max(0.0kip * u"ft", abs(Mub)     - sgn * Vu * abs(p.xc)),
-            d, fc, pts; closed = true).vu)
+            abs(Muy_val) + sgn * Vu * abs(p.yc),
+            abs(Mub)     + sgn * Vu * abs(p.xc),
+            d, fc, pts; closed = false).vu)
 
-        v_sub = vu_of(+1.0); v_zero = vu_of(0.0); v_add = vu_of(-1.0)
+        v_sub = vu_of(-1.0); v_zero = vu_of(0.0); v_add = vu_of(+1.0)  # +1 ≡ production
         @test v_sub ≤ v_zero ≤ v_add                 # monotone in the transfer sign
-        @test (v_add - v_sub) / v_zero < 0.1         # full ± swing < 10% of the stress
+        @test (v_add - v_sub) / v_zero < 0.12        # full ± swing bounded (~10%)
+        @test (v_add - v_zero) / v_zero < 0.06       # conservative penalty is small
     end
 
     @testset "check_punching_for_column routes re-entrant corners to App. B" begin
@@ -230,16 +270,21 @@ const SS = StructuralSizer
         Vu = 40.0kip; Mub = 25.0kip * u"ft"; Muy = 15.0kip * u"ft"
 
         # Orthogonal re-entrant (slab angle 3π/2) routes to the general engine.
+        # Routing requires the two free-edge inward normals (void in +x,+y ⇒
+        # inward normals −x and −y).
         re_col = (position = :corner, corner_kind = :reentrant, corner_angle = 3π / 2,
-                  c1 = c1, c2 = c2, shape = :rectangular)
+                  c1 = c1, c2 = c2, shape = :rectangular,
+                  boundary_inward_normals = [(-1.0, 0.0), (0.0, -1.0)])
         cx_col = (position = :corner, corner_kind = :convex, corner_angle = π / 2,
-                  c1 = c1, c2 = c2, shape = :rectangular)
+                  c1 = c1, c2 = c2, shape = :rectangular,
+                  boundary_inward_normals = [(-1.0, 0.0), (0.0, -1.0)])
 
         r_re = SS.check_punching_for_column(re_col, Vu, Mub, d, h, fc; Muy = Muy)
         r_cx = SS.check_punching_for_column(cx_col, Vu, Mub, d, h, fc; Muy = Muy)
 
-        # Re-entrant carries the full 4-sided perimeter; convex keeps 2-sided.
-        @test ustrip(u"inch", r_re.b0) ≈ ustrip(u"inch", 2 * (c1 + d) + 2 * (c2 + d)) rtol = 1e-9
+        # Re-entrant resists the offset loop minus the notch edges (2(c1+c2)+3d);
+        # orthogonal convex keeps the validated closed-form 2-sided section.
+        @test ustrip(u"inch", r_re.b0) ≈ ustrip(u"inch", 2 * (c1 + c2) + 3 * d) rtol = 1e-9
         @test ustrip(u"inch", r_cx.b0) ≈ ustrip(u"inch", (c1 + d / 2) + (c2 + d / 2)) rtol = 1e-9
         # Larger perimeter ⇒ the re-entrant demand is well below the 2-sided result.
         @test r_re.vu < r_cx.vu
@@ -247,23 +292,36 @@ const SS = StructuralSizer
         @test r_re.ratio > 0
     end
 
-    @testset "Skewed re-entrant corner falls back to conservative 2-sided check" begin
-        # A non-orthogonal re-entrant corner (slab angle ≠ 3π/2) must NOT use the
-        # orthogonal 90°-notch geometry; it falls through to the 2-sided corner
-        # section (over-predicts stress — safe) until an angled notch exists.
+    @testset "Routing needs inward normals; skewed corners use the clipper" begin
         c1 = 16.0u"inch"; c2 = 16.0u"inch"; d = 6.0u"inch"; h = 8.0u"inch"
         fc = 4000.0u"psi"; Vu = 40.0kip; Mub = 25.0kip * u"ft"; Muy = 15.0kip * u"ft"
-
-        skew = (position = :corner, corner_kind = :reentrant, corner_angle = deg2rad(225),
-                c1 = c1, c2 = c2, shape = :rectangular)
-        bare = (position = :corner, corner_kind = :reentrant,   # no corner_angle field
-                c1 = c1, c2 = c2, shape = :rectangular)
         two_sided = (c1 + d / 2) + (c2 + d / 2)
 
-        for col in (skew, bare)
-            r = SS.check_punching_for_column(col, Vu, Mub, d, h, fc; Muy = Muy)
-            @test ustrip(u"inch", r.b0) ≈ ustrip(u"inch", two_sided) rtol = 1e-9
-        end
+        # (1) A corner lacking inward normals (e.g. a bare stub) cannot be clipped
+        #     ⇒ conservative 2-sided closed-form fallback (over-predicts — safe).
+        bare = (position = :corner, corner_kind = :reentrant,
+                c1 = c1, c2 = c2, shape = :rectangular)
+        r_bare = SS.check_punching_for_column(bare, Vu, Mub, d, h, fc; Muy = Muy)
+        @test ustrip(u"inch", r_bare.b0) ≈ ustrip(u"inch", two_sided) rtol = 1e-9
+
+        # (2) A SKEWED re-entrant corner (slab angle ≠ 3π/2) now routes through the
+        #     general clipper — no orthogonality restriction — and resists far more
+        #     perimeter than the 2-sided fallback.
+        n_skew = [(-1.0, 0.0), (sin(deg2rad(30)), -cos(deg2rad(30)))]
+        skew = (position = :corner, corner_kind = :reentrant, corner_angle = deg2rad(225),
+                c1 = c1, c2 = c2, shape = :rectangular, boundary_inward_normals = n_skew)
+        r_skew = SS.check_punching_for_column(skew, Vu, Mub, d, h, fc; Muy = Muy)
+        @test ustrip(u"inch", r_skew.b0) > ustrip(u"inch", two_sided)
+
+        # (3) A non-orthogonal CONVEX wedge (60°) also routes; its clipped 2-sided
+        #     legs exceed the orthogonal idealization.
+        n_wedge = [(-sin(deg2rad(30)), -cos(deg2rad(30))),
+                   ( sin(deg2rad(30)), -cos(deg2rad(30)))]
+        wedge = (position = :corner, corner_kind = :convex, corner_angle = deg2rad(60),
+                 c1 = c1, c2 = c2, shape = :rectangular, boundary_inward_normals = n_wedge)
+        r_wedge = SS.check_punching_for_column(wedge, Vu, Mub, d, h, fc; Muy = Muy)
+        @test ustrip(u"inch", r_wedge.b0) > ustrip(u"inch", two_sided)
+        @test r_wedge.ok isa Bool
     end
 
     @testset "Symmetry detection and punching_check_general result" begin

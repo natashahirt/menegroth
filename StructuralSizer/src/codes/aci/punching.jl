@@ -619,12 +619,20 @@ end
 Vertices of the critical section at a **re-entrant** (L-shape inside) corner: a
 `c1×c2` column seated in the inside corner of an L, with one empty quadrant
 (`notch`, a sign pair like `(+1,+1)`). Per ACI 318-11 §11.11.1.2 the critical
-section follows the `d/2` offset everywhere slab exists; only the `d/2×d/2`
-corner of the `(c1+d)×(c2+d)` offset that lies in the empty quadrant is removed.
-The result is a closed 6-vertex loop whose perimeter equals the full interior
-`2(c1+d)+2(c2+d)` — i.e. a re-entrant corner carries essentially the entire
-4-sided perimeter, which the legacy 2-sided `:corner` section severely
-under-counts.
+section follows the `d/2` offset wherever slab exists and terminates at the two
+free edges bounding the notch. The resisting section is therefore the full
+offset loop **minus** the two `d/2` notch edges (which lie along the free edges
+and carry no shear): an **open** polyline with
+
+    b0 = 2(c1 + c2) + 3d.
+
+This is `d` less than the full 4-sided `2(c1+d)+2(c2+d)` — only the resisting
+perimeter is counted — and far more than the legacy 2-sided `:corner` section,
+which severely under-counts a re-entrant corner.
+
+Thin wrapper over [`corner_critical_section`](@ref) with `kind=:reentrant` and
+the orthogonal inward normals implied by `notch` (single source of truth for the
+clipped geometry).
 
 Reference: ACI 318-11 §11.11.1.2 (corpus: aci-318-11, page 200); free-edge
 effective-perimeter treatment ACI 421.3R-15 §4.6.2 (corpus: aci-421-3r-15).
@@ -634,19 +642,138 @@ function reentrant_critical_section(c1::Length, c2::Length, d::Length;
     sx, sy = sign(notch[1]), sign(notch[2])
     (sx != 0 && sy != 0) ||
         throw(ArgumentError("notch must be a nonzero sign pair, e.g. (1,1); got $notch"))
-    ax = c1 / 2 + d / 2
-    ay = c2 / 2 + d / 2
-    nx = sx * (c1 / 2)    # notch apex (column corner) x
-    ny = sy * (c2 / 2)    # notch apex y
-    cx = sx * ax          # offset outer corner x on the notch side
-    cy = sy * ay          # offset outer corner y on the notch side
-    # Full offset rectangle with the single notch-side d/2×d/2 corner clipped:
-    # replace the outer corner (cx, cy) by the two notch edges
-    # (cx, ny) → (nx, ny) → (nx, cy).
-    z = zero(c1)
-    # Build CCW-ish loop. Start from the clipped corner and walk the rectangle.
-    return ([(cx, ny), (nx, ny), (nx, cy),
-             (-cx, cy), (-cx, -cy), (cx, -cy)], true)
+    # Inward normals point from each free edge toward the slab, i.e. away from
+    # the empty notch quadrant: −sign(notch) on each axis.
+    normals = [(-float(sx), 0.0), (0.0, -float(sy))]
+    return corner_critical_section(c1, c2, d, :reentrant, normals)
+end
+
+"""
+    corner_critical_section(c1, c2, d, kind, inward_normals; θ=0.0) -> (points, closed)
+
+Effective punching critical section for a corner column of **any free-edge
+angle**, built by offsetting the `c1×c2` column rectangle by `d/2` and clipping
+the offset perimeter to the slab region defined by the two free edges. Returns an
+**open** polyline (`closed=false`) of the resisting, slab-facing perimeter; the
+free-edge cuts carry no shear and are excluded.
+
+- `kind=:convex` — outside corner. Slab is the wedge = intersection of the two
+  inward half-planes; the offset perimeter is kept only where it faces slab on
+  *both* edges.
+- `kind=:reentrant` — inside (L) corner. Slab is the complement of the notch =
+  union of the two inward half-planes; the perimeter is kept everywhere except
+  the notch corner (both edges' void side).
+
+`inward_normals` are the two unit normals pointing from each free edge **into**
+the slab (need not be unit; they are normalized). The free-edge lines pass
+through the column's void-side corner along the edge directions (the column is
+seated in the corner with its faces tangent to the edges). `θ` rotates the
+column. All lengths internally reduced to inches.
+
+Exact reductions (orthogonal edges `[(-1,0),(0,-1)]`):
+- `:convex`    → 2-sided L, `b0 = (c1+d/2)+(c2+d/2)` (matches
+  `rectangular_critical_section(:corner)`).
+- `:reentrant` → `b0 = 2(c1+c2)+3d` — the full offset loop **minus** the two
+  `d/2` notch edges, which lie along the free edges and do not resist. (This is
+  `d` less than the closed 6-vertex `reentrant_critical_section`, correcting an
+  unconservative over-count of the resisting perimeter.)
+
+Reference: ACI 318-11 §11.11.1.2 — critical section at `d/2` wherever slab
+exists (corpus: aci-318-11, page 200); general-shape App. B engine
+(corpus: aci-421-1r-99); free-edge effective-perimeter ACI 421.3R-15 §4.6.2.
+"""
+function corner_critical_section(c1::Length, c2::Length, d::Length, kind::Symbol,
+                                 inward_normals::AbstractVector; θ::Float64 = 0.0)
+    length(inward_normals) == 2 ||
+        throw(ArgumentError("a corner has exactly 2 free edges; got $(length(inward_normals))"))
+    kind in (:convex, :reentrant) ||
+        throw(ArgumentError("kind must be :convex or :reentrant; got :$kind"))
+    ax = ustrip(u"inch", c1) / 2 + ustrip(u"inch", d) / 2   # offset half-width x
+    ay = ustrip(u"inch", c2) / 2 + ustrip(u"inch", d) / 2   # offset half-width y
+    hx = ustrip(u"inch", c1) / 2                            # column half-width x
+    hy = ustrip(u"inch", c2) / 2                            # column half-width y
+    cθ = cos(θ); sθ = sin(θ)
+    rot(x, y) = (x * cθ - y * sθ, x * sθ + y * cθ)
+    # Offset rectangle corners, CCW, in the (rotated) global frame.
+    V = [rot(ax, -ay), rot(ax, ay), rot(-ax, ay), rot(-ax, -ay)]
+    # Normalize the inward normals.
+    N = map(inward_normals) do n
+        m = hypot(float(n[1]), float(n[2]))
+        m == 0 && throw(ArgumentError("inward normal must be nonzero; got $n"))
+        (n[1] / m, n[2] / m)
+    end
+    # Void direction ≈ −(sum of inward normals); the void-side column corner is
+    # the column-rectangle corner farthest along it. Both free edges pass through
+    # this corner.
+    svx = -(N[1][1] + N[2][1]); svy = -(N[1][2] + N[2][2])
+    colV = [rot(hx, -hy), rot(hx, hy), rot(-hx, hy), rot(-hx, -hy)]
+    vc = colV[argmax([cc[1] * svx + cc[2] * svy for cc in colV])]
+    # Signed slab-side distance of point p from free edge k (≥ 0 ⇒ slab side).
+    g(p, k) = (p[1] - vc[1]) * N[k][1] + (p[2] - vc[2]) * N[k][2]
+    tol = 1e-9 * max(ax, ay)
+    keep(p) = kind === :reentrant ? (g(p, 1) ≥ -tol || g(p, 2) ≥ -tol) :
+                                    (g(p, 1) ≥ -tol && g(p, 2) ≥ -tol)
+    # Walk the closed offset perimeter, inserting the constraint-line crossings
+    # so every resulting segment is wholly kept or wholly dropped.
+    nV = length(V)
+    aug = Tuple{Float64,Float64}[]
+    for i in 1:nV
+        A = V[i]; B = V[mod1(i + 1, nV)]
+        push!(aug, A)
+        ts = Float64[]
+        for k in 1:2
+            gA = g(A, k); gB = g(B, k)
+            if (gA < 0) != (gB < 0) && gA != gB
+                t = gA / (gA - gB)
+                (0 < t < 1) && push!(ts, t)
+            end
+        end
+        sort!(ts)
+        for t in ts
+            push!(aug, (A[1] + t * (B[1] - A[1]), A[2] + t * (B[2] - A[2])))
+        end
+    end
+    m = length(aug)
+    # Classify each segment aug[i]→aug[i+1] by its midpoint.
+    kept = [keep(((aug[i][1] + aug[mod1(i + 1, m)][1]) / 2,
+                  (aug[i][2] + aug[mod1(i + 1, m)][2]) / 2)) for i in 1:m]
+    any(kept) || throw(ArgumentError("corner clip produced an empty critical section"))
+    d0 = findfirst(!, kept)           # a dropped (free-edge) segment
+    if d0 === nothing
+        # Fully enclosed (no free edge cuts the offset) — return the closed loop.
+        pts = [(v[1] * u"inch", v[2] * u"inch") for v in V]
+        return (pts, true)
+    end
+    # Advance to the first kept segment after the drop, then collect one run so the
+    # open ends sit at the free-edge terminations.
+    i = d0
+    while !kept[mod1(i, m)]; i += 1; end
+    j = mod1(i, m)
+    chain = [aug[j]]
+    cnt = 0
+    while kept[j] && cnt < m
+        push!(chain, aug[mod1(j + 1, m)])
+        j = mod1(j + 1, m); cnt += 1
+    end
+    # Drop consecutive duplicates, then collinear interior points.
+    uniq = Tuple{Float64,Float64}[]
+    for p in chain
+        if isempty(uniq) ||
+           hypot(p[1] - uniq[end][1], p[2] - uniq[end][2]) > tol
+            push!(uniq, p)
+        end
+    end
+    simp = Tuple{Float64,Float64}[]
+    for (idx, p) in enumerate(uniq)
+        if 1 < idx < length(uniq)
+            a = simp[end]; b = p; cc = uniq[idx + 1]
+            cross = (b[1] - a[1]) * (cc[2] - a[2]) - (b[2] - a[2]) * (cc[1] - a[1])
+            abs(cross) ≤ tol * max(ax, ay) && continue   # b is collinear with a–c
+        end
+        push!(simp, p)
+    end
+    out = [(p[1] * u"inch", p[2] * u"inch") for p in simp]
+    return (out, false)
 end
 
 """

@@ -350,9 +350,10 @@ function is_feasible(
         ϕMn_neg >= Mux_neg || return false
     end
 
-    # --- H1 interaction: sagging, tension, hogging ---
+    # --- H1 interaction: compression and tension, each with sagging and hogging ---
     # Hogging Mcx is Chapter F at Lb=L, Cb=1.0; do not credit deck-braced ϕMnx.
-    # Hogging Mr uses B1·Mux_neg / B1·Muy (same App. 8 amplification as sagging).
+    # Compression Mr uses B1·Mux / B1·Muy (App. 8). Tension Mr is first-order
+    # (§H1.2, page 134); hogging tension uses ϕMn_neg, not sagging ϕMnx.
     # AISC 360-16 §H1.1 Eqs. H1-1a/H1-1b — corpus: aisc-360-16, page 133.
     urs = _h1_pm_utilizations(Pu_c, Pu_t, Mux, Mux_neg, Muy,
                               ϕPnc, cache.ϕPn_tension[j], ϕMnx, ϕMn_neg,
@@ -360,6 +361,7 @@ function is_feasible(
                               Mux_neg_amp=Mux_neg_amp)
     urs.ur_c <= 1.0 || return false
     urs.ur_t <= 1.0 || return false
+    urs.ur_t_neg <= 1.0 || return false
     if section isa ISymmSection
         urs.ur_c_neg <= 1.0 || return false
     end
@@ -525,7 +527,11 @@ columns, not slab-on-beam composite beams.
 (default = first-order when B1 = 1). Tension+flexure uses first-order Mr
 (App. 8 B1 applies to members subject to compression).
 
-Returns `(ur_c, ur_t, ur_c_neg)`. Adequate iff each ≤ 1.0.
+§H1.2 (page 134) limits flexure + tension by the same Eqs. H1-1a/H1-1b,
+with Pc = φt·Pn from Section D2 and Mc from Chapter F. `ur_t` pairs tension
+with the sagging face; `ur_t_neg` pairs it with the hogging face (`ϕMn_neg`).
+
+Returns `(ur_c, ur_t, ur_c_neg, ur_t_neg)`. Adequate iff each ≤ 1.0.
 """
 function _h1_pm_utilizations(
     Pu_c, Pu_t, Mux_sag, Mux_neg, Muy,
@@ -535,11 +541,14 @@ function _h1_pm_utilizations(
     Mux_neg_amp = Mux_neg,
 )
     # AISC 360-16 §H1.1 Eqs. H1-1a/H1-1b — corpus: aisc-360-16, page 133
-    # Mr from App. 8 B1 — corpus: aisc-360-16, pages 305–306 (Eqs. A-8-1, A-8-3)
+    # §H1.2 — same equations for flexure + tension, Pc = φt Pn (D2) — page 134
+    # Compression Mr from App. 8 B1 — pages 305–306 (Eqs. A-8-1, A-8-3).
+    # Tension Mr is first-order on each flexural face.
     ur_c = check_PMxMy_interaction(Pu_c, Mux_amp, Muy_amp, ϕPnc, ϕMnx_sag, ϕMny)
     ur_t = check_PMxMy_interaction(Pu_t, Mux_sag, Muy, ϕPnt, ϕMnx_sag, ϕMny)
     ur_c_neg = check_PMxMy_interaction(Pu_c, Mux_neg_amp, Muy_amp, ϕPnc, ϕMn_neg, ϕMny)
-    return (ur_c = ur_c, ur_t = ur_t, ur_c_neg = ur_c_neg)
+    ur_t_neg = check_PMxMy_interaction(Pu_t, Mux_neg, Muy, ϕPnt, ϕMn_neg, ϕMny)
+    return (ur_c = ur_c, ur_t = ur_t, ur_c_neg = ur_c_neg, ur_t_neg = ur_t_neg)
 end
 
 # ==============================================================================
@@ -679,6 +688,7 @@ function is_feasible(
                               Mux_neg_amp=Mux_neg_amp)
     urs.ur_c <= 1.0 || return false
     urs.ur_t <= 1.0 || return false
+    urs.ur_t_neg <= 1.0 || return false
     urs.ur_c_neg <= 1.0 || return false
 
     # --- Deflection Checks (Commentary I3.2) ---
@@ -898,6 +908,9 @@ function explain_feasibility(
           ur_c, max(Pu_c, Mux_amp, Muy_amp), 1.0, "AISC 360-16 H1"))
     push!(checks, CheckResult("pm_interaction_tension", urs.ur_t <= 1.0,
           urs.ur_t, max(Pu_t, Mux, Muy), 1.0, "AISC 360-16 H1"))
+    # §H1.2 (page 134): tension with the hogging face. First-order Mr, Mcx = ϕMn_neg.
+    push!(checks, CheckResult("pm_interaction_tension_hogging", urs.ur_t_neg <= 1.0,
+          urs.ur_t_neg, max(Pu_t, Mux_neg, Muy), 1.0, "AISC 360-16 H1.2"))
     if section isa ISymmSection
         flex_ratio = ϕMn_neg > 0 ? Mux_neg / ϕMn_neg : (Mux_neg > 0 ? Inf : 0.0)
         neg_ratio = max(flex_ratio, urs.ur_c_neg)
@@ -1102,6 +1115,9 @@ function explain_feasibility(
           ur_c, max(Pu_c, Mux_amp, Muy_amp), 1.0, "AISC 360-16 H1"))
     push!(checks, CheckResult("pm_interaction_tension", urs.ur_t <= 1.0,
           urs.ur_t, max(Pu_t, Mux_pos, Muy), 1.0, "AISC 360-16 H1"))
+    # §H1.2 (page 134): tension with the hogging face. First-order Mr, Mcx = ϕMn_neg.
+    push!(checks, CheckResult("pm_interaction_tension_hogging", urs.ur_t_neg <= 1.0,
+          urs.ur_t_neg, max(Pu_t, Mux_neg, Muy), 1.0, "AISC 360-16 H1.2"))
 
     flex_ratio = ϕMn_neg > 0 ? Mux_neg / ϕMn_neg : (Mux_neg > 0 ? Inf : 0.0)
     neg_ratio = max(flex_ratio, urs.ur_c_neg)

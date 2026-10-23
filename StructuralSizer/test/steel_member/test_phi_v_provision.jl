@@ -627,3 +627,18 @@ end
                          Vu_strong=Vu, composite=ctx)
     @test is_feasible(checker, cache, 1, section, material, d_sag, geom)
 end
+
+@testset "H1.2 tension with hogging" begin
+    # AISC 360-16 §H1.2 (corpus: aisc-360-16, page 134): Eqs. H1-1a/H1-1b
+    # with Pc = φt Pn. Pr/Pc = 0.60 and Mrx/Mcx = 0.60 on the hogging face:
+    # 0.60 + (8/9)*0.60 = 1.133. Sagging Mr = 0, so the sagging tension
+    # check stays at 0.60. Compression is zero, so both compression checks
+    # stay at 0.60 (H1-1b).
+    urs = StructuralSizer._h1_pm_utilizations(
+        0.0, 0.60, 0.0, 0.60, 0.0,
+        1.0, 1.0, 1.0, 1.0, 1.0)
+    @test urs.ur_t ≈ 0.60 atol=1e-12
+    @test urs.ur_c_neg ≈ 0.60 atol=1e-12
+    @test urs.ur_t_neg ≈ 0.60 + (8 / 9) * 0.60 atol=1e-12
+    @test urs.ur_t_neg > 1.0
+end

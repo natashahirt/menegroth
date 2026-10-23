@@ -807,14 +807,31 @@ _has_material(m::MaterialOptions) =
 # `_apply_material_cascade` multiple-dispatch pattern so option types that have no
 # column cracking factor fall through unchanged (must not crash).
 
+"""Warn when a floor-option column factor disagrees with the param, then return the param.
+
+`params.column_I_factor` stays the value that runs. The warning records both
+numbers and which one ran. Equal values stay silent (default 0.70 is a no-op).
+"""
+function _warn_col_I_conflict(options_value::Real, column_I_factor::Real, options_label::AbstractString)
+    ran = Float64(column_I_factor)
+    opts_val = Float64(options_value)
+    if opts_val != ran
+        @warn string(options_label, ".col_I_factor differs from params.column_I_factor; ",
+                     "params.column_I_factor ran") options_col_I_factor=opts_val params_column_I_factor=ran
+    end
+    return ran
+end
+
 """Set the FEA column cracking factor on `FlatPlateOptions` (ACI 318-11 §10.10.4.1)."""
 function _apply_col_I_factor(opts::StructuralSizer.FlatPlateOptions, column_I_factor::Real)
-    @set opts.col_I_factor = Float64(column_I_factor)  # ACI 318-11 §10.10.4.1
+    ran = _warn_col_I_conflict(opts.col_I_factor, column_I_factor, "FlatPlateOptions")
+    @set opts.col_I_factor = ran  # ACI 318-11 §10.10.4.1
 end
 
 """Set the FEA column cracking factor on `FlatSlabOptions` (delegates to the wrapped `base`)."""
 function _apply_col_I_factor(opts::StructuralSizer.FlatSlabOptions, column_I_factor::Real)
-    @set opts.base.col_I_factor = Float64(column_I_factor)  # ACI 318-11 §10.10.4.1
+    ran = _warn_col_I_conflict(opts.base.col_I_factor, column_I_factor, "FlatSlabOptions.base")
+    @set opts.base.col_I_factor = ran  # ACI 318-11 §10.10.4.1
 end
 
 # Fallback: option types without a column cracking factor (OneWayOptions, VaultOptions, …)

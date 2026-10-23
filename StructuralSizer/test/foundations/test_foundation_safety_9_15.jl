@@ -262,7 +262,9 @@ const SS = StructuralSizer
         opts = StripParams(min_depth=12.0u"inch")
         result = design_footing(StripFooting(), [d1, d2], [0.0u"ft", 20.0u"ft"], soil; opts)
         @test hasproperty(result, :As_tensile)
-        As_oracle = abs(d2.Pu) / (opts.ϕ_bearing * opts.material.rebar.Fy)
+        # Tension tie is tension-controlled: ϕ = 0.90 (ACI 318-11 §9.3.2.1,
+        # corpus: aci-318-11, page 126), not the bearing ϕ.
+        As_oracle = abs(d2.Pu) / (opts.ϕ_flexure * opts.material.rebar.Fy)
         @test result.As_tensile ≈ uconvert(u"m^2", As_oracle) rtol=1e-8
         @test ustrip(u"inch^2", result.As_tensile) > 0
 
@@ -307,7 +309,7 @@ const SS = StructuralSizer
         @test ustrip(u"inch^2", result_c.As_tensile) == 0
 
         # Edge: empty demand list is zero tensile steel (not a design case).
-        @test SS._strip_tensile_As(FoundationDemand[], opts.ϕ_bearing,
+        @test SS._strip_tensile_As(FoundationDemand[], opts.ϕ_flexure,
                                    opts.material.rebar.Fy) == 0.0u"inch^2"
     end
 

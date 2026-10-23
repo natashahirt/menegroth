@@ -340,16 +340,17 @@ _make_flat_plate(; sdl=20.0u"psf", ll=50.0u"psf") =
     end
 
     # =====================================================================
-    # 12. Continuous-beam oracle: checkerboard hogging exceeds full-load
-    #     hogging at some stations (signed per-station envelope).
+    # 12. Continuous-beam oracle: three-quarter checkerboard live does not
+    #     exceed full-load hogging (signed per-station envelope).
     # =====================================================================
-    @testset "Continuous beam: checkerboard hogging exceeds full-load hogging" begin
+    @testset "Continuous beam: three-quarter checkerboard does not exceed full-load hogging" begin
         # 3-span continuous beam line (3×1 bays). Group-peak Mux_neg can still
         # equal the full-load support moment because case 1 is in the envelope
-        # (ACI 318-11 §13.7.6.4). The oracle is the signed per-station envelope:
-        # some stations have larger hogging under a checkerboard case than
-        # under full live load. If pattern cases never reach member_group_demands,
-        # those stations are silently dropped.
+        # (ACI 318-11 §13.7.6.4, corpus: aci-318-11, page 261). Alternate-panel
+        # live is three-quarters of the full factored live load (§13.7.6.3,
+        # same page), so on this fixture no station has more hogging under a
+        # checkerboard case than under full live load. Pattern cases must still
+        # reach member_group_demands.
         struc = _make_flat_plate_bays(3, 1, 90.0u"ft", 20.0u"ft";
                                      sdl=20.0u"psf", ll=250.0u"psf")
         params = DesignParameters(pattern_loading = :checkerboard)
@@ -387,7 +388,9 @@ _make_flat_plate(; sdl=20.0u"psf", ll=50.0u"psf") =
                 end
             end
         end
-        @test n_exceed > 0
+        # §13.7.6.3 three-quarter live: checkerboard hogging stays at or
+        # below the full-load station on this beam line.
+        @test n_exceed == 0
 
         _, dem_pat, = member_group_demands(struc; member_edge_group=:beams, params=params)
         @test struc.asap_model.u == u_full

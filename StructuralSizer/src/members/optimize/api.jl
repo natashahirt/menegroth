@@ -141,6 +141,10 @@ function size_columns(
     Mux_pos::Vector = Mux,
     Mux_neg::Vector = Mux,
     Vu_strong::Vector = zeros_like(Pu),
+    # AISC 360-16 §H1.2 — flexure + tension uses Eqs. H1-1a/H1-1b with
+    # Pc = φt·Pn (Section D2). corpus: aisc-360-16, page 134.
+    # Default zeros keeps compression-only callers byte-identical.
+    Pu_t::Vector = zeros_like(Pu),
     δ_max_vec::Union{Nothing, Vector} = nothing,
     δ_max_total_vec::Union{Nothing, Vector} = nothing,
     I_ref_vec::Union{Nothing, Vector} = nothing,
@@ -155,7 +159,8 @@ function size_columns(
     n = length(Pu)
     n == length(Mux) || throw(ArgumentError("Pu and Mux must have same length"))
     n == length(geometries) || throw(ArgumentError("demands and geometries must have same length"))
-    
+    n == length(Pu_t) || throw(ArgumentError("Pu and Pu_t must have same length"))
+
     emit!(tc, :sizing, "size_columns", "", :enter;
           material="steel",
           n_members=n,
@@ -168,8 +173,12 @@ function size_columns(
     # ─── Steel NLP path (W and HSS only) ───
     # CompositeContext needs 8-arg is_feasible (Chapter I + H1 with Pu).
     # Continuous NLP has no Chapter I plastic capacity — use discrete MIP.
+    # Nonzero Pu_t also stays on discrete MIP: the NLP H1 constraint is
+    # compression-only, and §H1.2 tension is the checker that already exists.
+    # AISC 360-16 §H1.2 — corpus: aisc-360-16, page 134.
     if opts.sizing_strategy == :nlp && opts.section_type in (:w, :hss) &&
-            !_has_composite_context(opts, composite, n)
+            !_has_composite_context(opts, composite, n) &&
+            all(iszero, Pu_t)
         emit!(tc, :sizing, "size_columns", "", :decision; path="nlp")
         return _size_steel_columns_nlp(Pu, Mux, steel_geoms, opts;
                                        Muy=Muy, Mux_neg=Mux_neg, composite=composite)
@@ -198,9 +207,13 @@ function size_columns(
     
     # Envelope pairing: each group's max |P| with its max |M|.
     # CONSERVATIVE under gravity-only (same-sign D+L cannot unload a
-    # coincident peak).  `Pu_t` is not forwarded here — SCOPE until
-    # lateral/uplift (AISC 360-16 §H1.2 tension+flexure).
-    demands = [MemberDemand(i; Pu_c=Pu_N[i], Mux=Mux_Nm[i],
+    # coincident peak). Pu_t is the tension magnitude (always ≥ 0).
+    # AISC 360-16 §H1.1 Eqs. H1-1a/H1-1b — compression + flexure
+    # (corpus: aisc-360-16, page 133). §H1.2 — the same equations for
+    # flexure + tension, with Pc = φt·Pn per Section D2 (page 134),
+    # on the sagging face and on the hogging face. Tension Mr is first-order.
+    Pu_t_N = [to_newtons(p) for p in Pu_t]
+    demands = [MemberDemand(i; Pu_c=Pu_N[i], Pu_t=Pu_t_N[i], Mux=Mux_Nm[i],
                                Mux_pos=Mux_pos_Nm[i], Mux_neg=Mux_neg_Nm[i],
                                Muy=Muy_Nm[i],
                                Vu_strong=Vus_N[i],
@@ -785,6 +798,9 @@ the checker requiring δ_max_LL > 0 / δ_max_total > 0).
 # Keyword Arguments
 - `Pu`: Factored axial compressions (default: zeros). Forwarded to `size_columns`
   as `Pu_c` for §H1 / App. 8 B1. Do not zero for composite beam-columns.
+- `Pu_t`: Factored axial tension magnitudes (default: zeros). Forwarded onto
+  `MemberDemand.Pu_t` for AISC 360-16 §H1.2 (Eqs. H1-1a/H1-1b with Pc = φt·Pn;
+  corpus: aisc-360-16, page 134). Compression stays on `Pu` (§H1.1, page 133).
 - `δ_max_vec`: Max LL deflection from analysis for each beam (length unit, e.g. m or inch).
 - `δ_max_total_vec`: Max DL+LL service deflection for each beam (length unit).
 - `I_ref_vec`: Reference Ix used in the analysis for each beam (length⁴ unit).
@@ -833,6 +849,7 @@ function size_beams(
     geometries::Vector,
     opts::SteelBeamOptions;
     Pu::Vector = zeros_like(Vu),
+    Pu_t::Vector = zeros_like(Vu),
     Mux_pos::Vector = Mu,
     Mux_neg::Vector = Mu,
     δ_max_vec::Union{Nothing, Vector} = nothing,
@@ -847,7 +864,11 @@ function size_beams(
     tc::Union{Nothing, TraceCollector} = nothing,
 )
     length(Pu) == length(Mu) || throw(ArgumentError("Pu and Mu must have same length"))
+    length(Pu_t) == length(Mu) || throw(ArgumentError("Pu_t and Mu must have same length"))
+    # AISC 360-16 §H1.1 (compression, page 133) and §H1.2 (tension, page 134)
+    # — corpus: aisc-360-16. `Pu` is Pu_c; `Pu_t` is the tension magnitude.
     return size_columns(Pu, Mu, geometries, opts;
+                        Pu_t=Pu_t,
                         Mux_pos=Mux_pos, Mux_neg=Mux_neg,
                         Vu_strong=Vu,
                         δ_max_vec=δ_max_vec,

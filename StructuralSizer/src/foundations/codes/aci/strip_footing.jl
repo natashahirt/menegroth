@@ -122,22 +122,26 @@ function _strip_c_across_along(c1, c2, strip_axis::Symbol)
 end
 
 """
-    _strip_tensile_As(demands, ϕb, fy) → As
+    _strip_tensile_As(demands, ϕ_tension, fy) → As
 
 Total tensile interface steel for columns with `Pu < 0`:
 
-    As = Σ |Pu| / (ϕb · fy)
+    As = Σ |Pu| / (ϕ_tension · fy)
 
-ACI 318-11 §15.8.1.2(b) (corpus: aci-318-11, page 275). An empty demand
-list returns zero area. Compression-only demands also return zero.
+The interface reinforcement that transfers the net tensile force is a
+tension tie, so it is tension-controlled: `ϕ_tension = 0.90` per
+ACI 318-11 §9.3.2.1 (corpus: aci-318-11, page 126) — not the bearing
+`ϕ = 0.65`. The tie requirement itself is ACI 318-11 §15.8.1.2(b)
+(corpus: aci-318-11, page 275). An empty demand list returns zero area.
+Compression-only demands also return zero.
 """
-function _strip_tensile_As(demands, ϕb, fy)
+function _strip_tensile_As(demands, ϕ_tension, fy)
     As = 0.0u"inch^2"
     isempty(demands) && return As
     zP = zero(first(demands).Pu)
     for dem in demands
         if dem.Pu < zP
-            As += abs(dem.Pu) / (ϕb * fy)
+            As += abs(dem.Pu) / (ϕ_tension * fy)
         end
     end
     return As
@@ -224,10 +228,11 @@ function design_footing(::StripFooting,
 
     # ACI 318-11 §15.8.1.2(b) (corpus: aci-318-11, page 275): reinforcement,
     # dowels, or mechanical connectors shall transfer any computed tensile
-    # force across the interface.  Size As = |Pu|/(ϕ_bearing·fy) the same
-    # way compression dowels use ϕBn and fy; design it into the bar
-    # schedule / ld / V_steel — do not leave it as a log-only field.
-    As_tensile_tot = _strip_tensile_As(demands, ϕb, fy)
+    # force across the interface.  The tie is tension-controlled, so size it
+    # with ϕ_flexure = 0.90 (ACI 318-11 §9.3.2.1, corpus: aci-318-11, page
+    # 126) — not the bearing ϕ (0.65). Design it into the bar schedule /
+    # ld / V_steel — do not leave it as a log-only field.
+    As_tensile_tot = _strip_tensile_As(demands, ϕf, fy)
     ld_tensile = As_tensile_tot > zero(As_tensile_tot) ?
         _development_length_footing(opts.bar_size_long, fc, fy, λ, db_l) :
         0.0u"inch"
@@ -266,8 +271,9 @@ function design_footing(::StripFooting,
 
     # Minimum width from bearing (service loads); will be widened if h becomes
     # unreasonable — an engineer would never draw a footing deeper than wide.
-    # Floor at c_across_max so cant_trans = (B − c_across_max)/2 is never
-    # negative (phantom cantilever Mu ∝ cant²).
+    # Floor B at the largest across-strip face so every column face fits.
+    # Mu later uses each column's own c_across. A face wider than B would
+    # make (B − c_across)/2 negative, and cant² would still invent a moment.
     B_min = Ps_total / (soil.qa * L)
     B_min = ceil(ustrip(u"inch", B_min) / ustrip(u"inch", w_incr)) * w_incr
     # max(inch, 2 ft, c_across) would promote through SI; keep B imperial.
@@ -400,17 +406,33 @@ function design_footing(::StripFooting,
     # Step 5: Transverse Reinforcement (under column bands)
     # =====================================================================
     # ACI 318-11 §15.4.1 / §15.4.2(a) (corpus: aci-318-11, pages 272–273):
-    # Mu at the column face. Across-strip face is named c1 on a Y-layout
-    # (B ∥ X); named c2 on an X-layout. Band width is along-strip face + d.
-    # c_across_max was computed at plan sizing so B ≥ that face.
-    c_along_max  = maximum(last(_strip_c_across_along(dem.c1, dem.c2, strip_axis))
-                           for dem in demands)
-    cant_trans = (B - c_across_max) / 2
-    Mu_trans_per_ft = qu * cant_trans^2 / 2     # moment per unit length
-    band_w = c_along_max + d
-    Mu_band = Mu_trans_per_ft * band_w
-    As_trans = max(_flexural_steel_footing(Mu_band, band_w, d, fc, fy, ϕf),
-                   _min_steel_footing(band_w, h, fy))
+    # Mu at the face of each column. Across-strip face is named c1 on a
+    # Y-layout (B ∥ X); named c2 on an X-layout. Band width is that
+    # column's along-strip face + d.
+    # Strip width B is still floored at c_across_max (largest column) so
+    # the footing covers every face. Each band's cantilever is
+    # (B − that column's c_across) / 2. Using c_across_max for every band
+    # shortens the cantilever and under-sizes Mu at a smaller column.
+    c_across_1, c_along_1 = _strip_c_across_along(demands[1].c1, demands[1].c2, strip_axis)
+    bw_1 = c_along_1 + d
+    band_ws = Vector{typeof(bw_1)}(undef, N)
+    band_ws[1] = bw_1
+    Mu_1 = (qu * ((B - c_across_1) / 2)^2 / 2) * band_ws[1]
+    As_trans = max(_flexural_steel_footing(Mu_1, band_ws[1], d, fc, fy, ϕf),
+                   _min_steel_footing(band_ws[1], h, fy))
+    for j in 2:N
+        c_across, c_along = _strip_c_across_along(demands[j].c1, demands[j].c2, strip_axis)
+        cant_j = (B - c_across) / 2
+        bw = c_along + d
+        band_ws[j] = bw
+        Mu_j = (qu * cant_j^2 / 2) * bw
+        As_j = max(_flexural_steel_footing(Mu_j, bw, d, fc, fy, ϕf),
+                   _min_steel_footing(bw, h, fy))
+        As_trans = max(As_trans, As_j)
+    end
+    # Widest band governs the shared bar count's spacing check. Equal
+    # columns keep the previous single band width.
+    band_w = maximum(band_ws)
 
     # =====================================================================
     # Step 6: Development Length (ACI 25.4.2 / ACI 318-11 §15.6.3)
@@ -464,7 +486,7 @@ function design_footing(::StripFooting,
             if dem.Pu < zP
                 # Tensile Pu is not a concrete bearing (compression) demand;
                 # As_tensile is already in the bar schedule above.
-                @info "Strip col #$j: tensile interface (ACI 318-11 §15.8.1.2(b)), As_dowels = $(abs(dem.Pu) / (ϕb * fy))"
+                @info "Strip col #$j: tensile interface (ACI 318-11 §15.8.1.2(b)), As_dowels = $(abs(dem.Pu) / (ϕf * fy))"
                 continue
             end
             # ACI 318-11 §10.14.1 / §15.8.1.1 (corpus: aci-318-11, pages 162,
@@ -560,13 +582,13 @@ function design_footing(::StripFooting,
     bar_len_trans = B - 2cover
 
     # Inter-band transverse temperature/shrinkage steel — ACI 318-11
-    # §7.12.2.1 (corpus: aci-318-11, page 106). The N concentrated
-    # bands of width band_w each carry the localized cantilever moment
-    # under their column; the remaining footing length still requires
-    # minimum T&S steel transverse to the strip's long axis.  The bar
-    # count is the larger of (As_min / A_bar) and (inter-band length /
-    # max_s_TS) so the §7.12.2.2 spacing limit is satisfied.
-    inter_band_length = max(L - N * band_w, zero(L))
+    # §7.12.2.1 (corpus: aci-318-11, page 106). Each column band is that
+    # column's along-strip face + d. Equal columns: sum(band_ws) = N·band_w.
+    # The remaining footing length still requires minimum T&S steel
+    # transverse to the strip's long axis. The bar count is the larger of
+    # (As_min / A_bar) and (inter-band length / max_s_TS) so the §7.12.2.2
+    # spacing limit is satisfied.
+    inter_band_length = max(L - sum(band_ws), zero(L))
     As_min_inter = _min_steel_footing(inter_band_length, h, fy)
     n_tran_inter = max(ceil(Int, As_min_inter / Ab_t),
                        ceil(Int, inter_band_length / max_s_TS))

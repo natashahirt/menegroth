@@ -10,12 +10,13 @@
 # - The plate and per-story CoM here are derived SOLELY from the skeleton floor
 #   polygon (`GeometryCache.vertex_coords`), so they are frame-consistent with the
 #   skeleton by construction.
-# - The walls' plan coordinates are NOT. A `Wall`'s plan position comes from
-#   `Wall.x1,y1,x2,y2` via `wall_center` (and a `WallLine`'s from `.x,.y`), which
-#   are INDEPENDENT mutable fields defaulting to `0.0`. No production site
-#   populates them from `vertex_coords`, and `to_wall_line` has no production
-#   callers yet, so there is NO "by construction" guarantee that the walls share
-#   the skeleton datum.
+# - A building `Wall`'s plan center is `wall_center` (`x1,y1,x2,y2`); a
+#   `WallLine`'s is `.x,.y`. `initialize_members!` writes the building-wall
+#   endpoints from the chain-end `vertex_coords`, so those walls share this
+#   datum. `Wall.story` is 0-based (`edge_story`). `to_wall_line` sets
+#   `WallLine.story = Wall.story + 1` (1-based). Hand-built walls can still
+#   disagree with the datum, so this helper VERIFIES enclosure rather than
+#   assuming it.
 # - CONTRACT: the caller MUST express the walls' plan coordinates in the SAME
 #   skeleton `vertex_coords` datum the plate is derived from. This helper does NOT
 #   assume that — it VERIFIES it, failing closed. Pass the story's walls to
@@ -23,6 +24,8 @@
 #   `assert_walls_enclosed` directly) to assert WALLS ⊆ derived plate before the
 #   plate is handed to the reduced lateral evaluator; a frame mismatch (or an
 #   incomplete `story.faces`) then throws instead of silently mis-locating drift.
+#   `initialize!` does this for every story that has walls via
+#   `assert_story_walls_enclosed!`.
 #
 # Units: `vertex_coords` is a bare-Float64 N×3 matrix in METERS (the single source
 # of truth; see GeometryCache docstring). All plan outputs here are therefore bare
@@ -377,6 +380,41 @@ function story_center_of_mass(skeleton::BuildingSkeleton, story::Story,
         "story_center_of_mass: non-positive total effective seismic weight ($(sumW) kN)"))
 
     return (sumWx / sumW, sumWy / sumW)
+end
+
+"""
+    assert_story_walls_enclosed!(struc) -> Nothing
+
+Run the plate-enclosure check for every skeleton story that has at least
+one building [`Wall`](@ref).
+
+`Wall.story` is 0-based (the same key as `edge_story` / `skeleton.stories`).
+[`to_wall_line`](@ref) sets `WallLine.story = Wall.story + 1` because
+`WallLine.story` is 1-based; this check does not add 1. Stories with no
+walls are skipped. For each story that has walls, calls
+[`story_plate_geometry`](@ref) with those walls, which runs
+[`assert_walls_enclosed`](@ref) on [`wall_center`](@ref). A wall center
+outside the story's floor faces throws `ArgumentError`. A `Wall.story`
+that is not a skeleton story key also throws.
+
+Called at the end of [`initialize!`](@ref), after [`initialize_members!`](@ref).
+"""
+function assert_story_walls_enclosed!(struc::BuildingStructure)
+    skel = struc.skeleton
+    walls_by_story = Dict{Int, Vector{eltype(struc.walls)}}()
+    for w in struc.walls
+        haskey(skel.stories, w.story) || throw(ArgumentError(
+            "assert_story_walls_enclosed!: Wall.story $(w.story) is not a skeleton " *
+            "story key. Wall.story is 0-based; WallLine.story is Wall.story + 1 " *
+            "via to_wall_line, and that +1 is not applied here."))
+        push!(get!(walls_by_story, w.story, eltype(struc.walls)[]), w)
+    end
+    for (story_idx, story) in skel.stories
+        walls = get(walls_by_story, story_idx, nothing)
+        (walls === nothing || isempty(walls)) && continue
+        story_plate_geometry(skel, story; walls=walls)
+    end
+    return nothing
 end
 
 """

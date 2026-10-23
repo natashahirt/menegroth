@@ -142,15 +142,22 @@ function _add_vertices!(skel::BuildingSkeleton, input::APIInput, _to_m)
     end
 end
 
-"""Add beam, column, and brace edges with bounds checks and shatter."""
+"""
+Add beam, column, brace, and wall edges with bounds checks and shatter.
+
+`input.edges.walls` is shattered into the `:walls` group. An empty wall list
+is a no-op: `_shatter_edges!` iterates nothing and adds no edges.
+"""
 function _add_edges!(skel::BuildingSkeleton, input::APIInput)
     n_verts = length(skel.vertices)
     _validate_edge_bounds(input.edges.beams, n_verts, "Beam")
     _validate_edge_bounds(input.edges.columns, n_verts, "Column")
     _validate_edge_bounds(input.edges.braces, n_verts, "Brace")
+    _validate_edge_bounds(input.edges.walls, n_verts, "Wall")
     _shatter_edges!(skel, input.edges.beams, :beams)
     _shatter_edges!(skel, input.edges.columns, :columns)
     _shatter_edges!(skel, input.edges.braces, :braces)
+    _shatter_edges!(skel, input.edges.walls, :walls)
 end
 
 """Add support vertices; throws if any support index is out of [1, n_vertices]."""

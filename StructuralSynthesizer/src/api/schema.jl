@@ -34,11 +34,12 @@ function api_input_schema()
         ),
         "edges" => Dict(
             "type" => "object",
-            "description" => "Beam, column, and brace connectivity.",
+            "description" => "Beam, column, brace, and wall connectivity.",
             "fields" => Dict(
                 "beams" => "Array of [v1, v2] vertex index pairs (1-based).",
                 "columns" => "Array of [v1, v2] vertex index pairs (1-based).",
                 "braces" => "Array of [v1, v2] vertex index pairs (1-based).",
+                "walls" => "Array of [v1, v2] vertex index pairs (1-based). Optional; omitted means no walls.",
             ),
         ),
         "supports" => Dict(
@@ -647,11 +648,19 @@ end
 # via the no-arg constructor and then set only the fields present in JSON.
 # This lets missing JSON keys fall back to @kwdef defaults.
 
-"""Raw edge groups from JSON: `{"beams": [[1,2],...], "columns": [[3,4],...], "braces": [...]}`."""
+"""
+    APIEdgeGroups
+
+Raw edge groups from JSON: `{"beams": [[1,2],...], "columns": [[3,4],...], "braces": [...], "walls": [...]}`.
+
+Each group is an array of `[v1, v2]` vertex index pairs (1-based). `walls` defaults
+to an empty vector, so payloads that omit the key stay valid.
+"""
 Base.@kwdef mutable struct APIEdgeGroups
     beams::Vector{Vector{Int}} = Vector{Int}[]
     columns::Vector{Vector{Int}} = Vector{Int}[]
     braces::Vector{Vector{Int}} = Vector{Int}[]
+    walls::Vector{Vector{Int}} = Vector{Int}[]
 end
 
 """Raw face groups from JSON (optional). Keys are category names, values are

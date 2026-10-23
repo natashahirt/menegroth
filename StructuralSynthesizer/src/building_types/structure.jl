@@ -8,7 +8,7 @@ Analytical layer wrapping a BuildingSkeleton.
 # Architecture
 - `skeleton`: Geometric representation (vertices, edges, faces)
 - `cells/slabs`: Floor system definitions and sizing
-- `segments/beams/columns/struts`: Member definitions
+- `segments/beams/columns/struts/walls`: Member definitions
 - `supports/foundations`: Boundary conditions and foundations
 - `asap_model`: Analysis model (ASAP backend)
 
@@ -40,6 +40,7 @@ mutable struct BuildingStructure{T, A, P} <: AbstractBuildingStructure
     beams::Vector{Beam{T}}
     columns::Vector{Column{T}}
     struts::Vector{Strut{T}}
+    walls::Vector{Wall{T}}
     member_groups::Dict{UInt64, MemberGroup}
     
     # ─── Foundations ───
@@ -84,7 +85,7 @@ function BuildingStructure(skel::BuildingSkeleton{T}) where T
         skel,
         Cell{T, A, P}[], Dict{UInt64, CellGroup}(),
         Slab{T}[], Dict{UInt64, SlabGroup}(), Vector{Int}[],
-        Segment{T}[], Beam{T}[], Column{T}[], Strut{T}[], Dict{UInt64, MemberGroup}(),
+        Segment{T}[], Beam{T}[], Column{T}[], Strut{T}[], Wall{T}[], Dict{UInt64, MemberGroup}(),
         Support{T, F, M, Lc}[], Foundation{T, AbstractFoundationResult}[], Dict{UInt64, FoundationGroup}(),
         SiteConditions(),
         TributaryCache(),
@@ -107,7 +108,7 @@ function BuildingStructure{T, A, P}(skel::BuildingSkeleton{T}) where {T, A, P}
         skel,
         Cell{T, A, P}[], Dict{UInt64, CellGroup}(),
         Slab{T}[], Dict{UInt64, SlabGroup}(), Vector{Int}[],
-        Segment{T}[], Beam{T}[], Column{T}[], Strut{T}[], Dict{UInt64, MemberGroup}(),
+        Segment{T}[], Beam{T}[], Column{T}[], Strut{T}[], Wall{T}[], Dict{UInt64, MemberGroup}(),
         Support{T, F, M, Lc}[], Foundation{T, AbstractFoundationResult}[], Dict{UInt64, FoundationGroup}(),
         SiteConditions(),
         TributaryCache(),
@@ -121,5 +122,5 @@ function BuildingStructure{T, A, P}(skel::BuildingSkeleton{T}) where {T, A, P}
     )
 end
 
-"""Iterator over all members (beams, columns, struts)."""
-all_members(struc::BuildingStructure) = Iterators.flatten((struc.beams, struc.columns, struc.struts))
+"""Iterator over all members (beams, columns, struts, walls)."""
+all_members(struc::BuildingStructure) = Iterators.flatten((struc.beams, struc.columns, struc.struts, struc.walls))

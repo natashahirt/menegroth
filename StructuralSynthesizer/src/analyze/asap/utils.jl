@@ -20,6 +20,31 @@ function _create_offset_nodes(skel::BuildingSkeleton, col_offset_by_vertex, supp
 end
 
 """
+    _zero_wall_frame_section(E, G) -> Asap.Section
+
+Frame section for a skeleton `:walls` edge.
+
+The edge keeps its `model.elements` slot so callers can still index that
+vector by skeleton edge. Area, `Ix`, `Iy`, `J`, and density are zero, so
+the frame adds neither stiffness nor mass (`EA`, `EI`, and `GJ` are zero;
+translational mass is `ρ·A·L`). `E` and `G` are stored only because
+`Asap.Section` requires them. Shear areas stay at the Bernoulli–Euler
+default (infinite): a zero shear area would select the Timoshenko kernel
+and make the shear factor `0/0`.
+"""
+function _zero_wall_frame_section(E, G)
+    return Asap.Section(
+        0.0u"m^2",
+        E,
+        G,
+        0.0u"m^4",    # Ix
+        0.0u"m^4",    # Iy
+        0.0u"m^4",    # J
+        0.0u"kg/m^3",
+    )
+end
+
+"""
     to_asap!(struc; params=DesignParameters(), diaphragms=nothing, shell_props=nothing)
 
 Converts a BuildingStructure into an Asap.Model.
@@ -56,6 +81,29 @@ Uses TributaryLoads for accurate load distribution based on tributary polygons.
     with auto-generated `:joist` beams passed as `interior_beams` and the slab's
     `spans.axis` as the one-way `axis`. Falls back to `:cell_tributary` (with a
     warning) when no diaphragm shells were built.
+
+A `:walls` edge keeps `model.elements[edge_idx]` aligned with skeleton edge
+`edge_idx`, with the same release and eccentricity as any other edge. Its
+section is [`_zero_wall_frame_section`](@ref) (zero area, `Ix`, `Iy`, `J`,
+and density) so the placeholder frame is not counted again once wall shells
+exist. An empty or missing `:walls` group leaves every edge on the
+placeholder section.
+
+Each entry in `struc.walls` is meshed into the same model as `ShellTri3`
+elements (two columns along the wall, two triangles per quad). A wall node
+reuses a frame, slab-mesh, or earlier wall node when the 3D distance is at
+most 1 mm. Two existing nodes equally near within that tolerance throw
+`ArgumentError`. The pier runs from `skeleton.stories[wall.story].elevation`
+up by `base.L`. A missing story or a non-positive `base.L` throws
+`ArgumentError`. Material is `Wall.concrete`, or `params.materials.concrete`
+when that is unset; if neither is set, throws `ArgumentError`. The shell
+carries that concrete's modulus, Poisson's ratio, and density. No wall line
+load is added. A wall node the mesh creates is fixed when it is within 1 mm
+of the lowest wall-base elevation, and free otherwise. A reused node keeps
+its dof vector. `:rigid` adds those wall nodes that lie on a story elevation to the
+rigid-link set already built for the frame. `:shell` adds no links (the
+1 mm tolerance shares the slab mesh). `:none` adds no diaphragm. An empty
+`walls` vector adds no shells.
 
 # Examples
 ```julia
@@ -110,7 +158,11 @@ function to_asap!(struc::BuildingStructure{T, A, P};
     support_set = Set(get(skel.groups_vertices, :support, Int[]))
     nodes = _create_offset_nodes(skel, col_offset_by_vertex, support_set)
 
-    # 2. Frame Elements — placeholder section (replaced during sizing)
+    # 2. Frame Elements — placeholder section (replaced during sizing).
+    # A :walls edge keeps its slot (model.elements[edge_idx] is still that
+    # skeleton edge) but gets a zero section so the frame does not double-count
+    # wall stiffness or mass once shells are meshed. Empty or missing :walls
+    # leaves every edge on the placeholder.
     # Use steel from materials cascade if available, else defaults
     _mat_steel = params.materials.steel
     frame_E = isnothing(_mat_steel) ? params.default_frame_E : uconvert(u"Pa", _mat_steel.E)
@@ -124,6 +176,9 @@ function to_asap!(struc::BuildingStructure{T, A, P};
         0.5e-6u"m^4",     # J
         frame_ρ
     )
+    wall_ids = get(skel.groups_edges, :walls, Int[])
+    wall_edges = isempty(wall_ids) ? nothing : Set(wall_ids)
+    wall_section = isnothing(wall_edges) ? nothing : _zero_wall_frame_section(frame_E, frame_G)
     # Per-beam end releases resolved from segment fields + (role, material) dispatch.
     # Non-beam edges (columns/struts/walls) and unmodeled edges default to
     # :fixedfixed, preserving prior behavior. `beam` material override falls back
@@ -139,7 +194,8 @@ function to_asap!(struc::BuildingStructure{T, A, P};
     frame_elements = map(enumerate(skel.edge_indices)) do (edge_idx, (v1, v2))
         release = get(edge_release, edge_idx, :fixedfixed)
         ecc = get(edge_eccentricity, edge_idx, (0.0, 0.0, 0.0, 0.0))
-        return Asap.Element(nodes[v1], nodes[v2], default_section; release=release, eccentricity=ecc)
+        section = (!isnothing(wall_edges) && edge_idx in wall_edges) ? wall_section : default_section
+        return Asap.Element(nodes[v1], nodes[v2], section; release=release, eccentricity=ecc)
     end
     
     # 3. Diaphragm construction (Phase 9).
@@ -153,6 +209,10 @@ function to_asap!(struc::BuildingStructure{T, A, P};
     #           θ_y remain free on tied slaves), so `load_routing=:auto`
     #           correctly falls back to per-cell TributaryLoads here.
     #  :none  → neither shells nor links.
+    # Wall shells are meshed before the rigid-link pass so a wall base node
+    # is already fixed when the link set is built. They are appended to
+    # `shell_elements` only after load routing is resolved, so a wall mesh
+    # cannot flip `:auto` onto `:shell_area`.
     shell_elements = Asap.ShellElement[]
     rigid_links = Asap.RigidLink[]
 
@@ -161,8 +221,13 @@ function to_asap!(struc::BuildingStructure{T, A, P};
         shell_elements = _create_shell_diaphragms(struc, nodes;
                                                    mode=:shell, props=effective_props)
         @debug "Created shell diaphragm" n_shells=length(shell_elements)
-    elseif diaphragm_mode == :rigid && !isempty(struc.slabs)
+    end
+
+    wall_shells, wall_nodes = _mesh_wall_shells(struc, params, nodes, shell_elements)
+
+    if diaphragm_mode == :rigid && !isempty(struc.slabs)
         rigid_links = _build_rigid_diaphragm_links(struc, nodes)
+        _join_wall_nodes_to_rigid_diaphragm!(rigid_links, skel, wall_nodes)
         @debug "Created rigid diaphragm links" n_links=length(rigid_links)
     end
 
@@ -185,6 +250,9 @@ function to_asap!(struc::BuildingStructure{T, A, P};
     # tributary). `:auto` uses shells when a diaphragm built them, else the
     # historical per-cell path (so the default frame-only flow is unchanged).
     routing = _resolve_load_routing(load_routing, shell_elements)
+    # Diaphragm shells only were visible to routing. Wall shells join the
+    # model here; they are not a second diaphragm and they are not a line load.
+    append!(shell_elements, wall_shells)
 
     if routing === :shell_area
         _create_shell_area_loads!(loads, frame_elements, struc, nodes, params)
@@ -405,6 +473,236 @@ function _build_rigid_diaphragm_links(struc::BuildingStructure,
     return links
 end
 
+"""Length in metres. Does not assume a unit when `x` is a bare number."""
+function _length_metres(x, label::AbstractString)
+    x isa Unitful.Quantity || throw(ArgumentError(
+        "to_asap!: wall $label must be a length, got $(typeof(x))"))
+    return ustrip(u"m", x)
+end
+
+"""
+Concrete for one wall shell.
+
+`Wall.concrete` when it is set, otherwise `params.materials.concrete`.
+Neither field falls through to a preset grade.
+"""
+function _wall_shell_concrete(wall::Wall, params::DesignParameters)
+    conc = wall.concrete
+    conc === nothing && (conc = params.materials.concrete)
+    conc === nothing && throw(ArgumentError(
+        "to_asap!: wall concrete is unset and DesignParameters.materials.concrete " *
+        "is unset. No modulus, Poisson's ratio, or density is assumed."))
+    return conc
+end
+
+"""
+Plan and elevation of one wall pier, in metres.
+
+Bottom z is `skeleton.stories[wall.story].elevation`. Top z is that elevation
+plus `base.L`. A missing story or a non-positive `base.L` throws. Thickness
+and plan length must already be positive; they are not replaced.
+"""
+function _wall_pier_geometry(wall::Wall, skel::BuildingSkeleton)
+    haskey(skel.stories, wall.story) || throw(ArgumentError(
+        "to_asap!: wall story $(wall.story) is not in skeleton.stories. " *
+        "The pier bottom is that story's elevation; no height is assumed."))
+    L_m = _length_metres(wall.base.L, "base.L")
+    L_m > 0 || throw(ArgumentError(
+        "to_asap!: wall pier height base.L must be positive, got $(wall.base.L). " *
+        "No height is assumed."))
+    z_bot = _length_metres(skel.stories[wall.story].elevation, "story elevation")
+    t_m = _length_metres(wall.thickness, "thickness")
+    t_m > 0 || throw(ArgumentError(
+        "to_asap!: wall thickness must be positive, got $(wall.thickness). " *
+        "No thickness is assumed."))
+    hypot(wall.x2 - wall.x1, wall.y2 - wall.y1) > 0 || throw(ArgumentError(
+        "to_asap!: wall plan length must be positive " *
+        "(($(wall.x1), $(wall.y1))–($(wall.x2), $(wall.y2)) m)."))
+    return (x1=wall.x1, y1=wall.y1, x2=wall.x2, y2=wall.y2,
+            z_bot=z_bot, z_top=z_bot + L_m, t_m=t_m)
+end
+
+"""
+    _mesh_wall_shells(struc, params, frame_nodes, existing_shells)
+      -> (shells, wall_nodes)
+
+Mesh `struc.walls` into `ShellTri3` elements on `frame_nodes`.
+
+Same panel split as `StructuralSizer` `_build_asap_wall_model`: `mesh_div = 2`
+(two quads along the wall, two triangles each). A placed wall node reuses an
+existing frame, slab-mesh, or wall node when the 3D distance is at most 1 mm.
+A node farther than 1 mm stays separate. Two existing nodes at the same
+nearest distance within that tolerance throw `ArgumentError`.
+
+This mesh adds NO supports. Every node it creates is `:free` (all dof true),
+and a reused frame, slab-mesh, or wall node keeps the dof vector it already
+had — a fixed foundation vertex stays fixed because the frame marked it a
+support, not because this mesh touched it. A wall is therefore held only
+through the frame/slab nodes it shares, or the story rigid diaphragm it joins
+via `_join_wall_nodes_to_rigid_diaphragm!`. A wall that meets no support, no
+frame joint, and no diaphragm is intentionally left unattached; the resulting
+model is singular, which is the correct signal that the wall is not connected.
+
+An empty `walls` vector returns empty collections and does not read materials.
+"""
+function _mesh_wall_shells(struc::BuildingStructure,
+                           params::DesignParameters,
+                           frame_nodes::Vector{Asap.Node},
+                           existing_shells)
+    isempty(struc.walls) && return Asap.ShellTri3[], Asap.Node[]
+
+    # Geometry and material are checked before any node is created, so a throw
+    # does not leave a half-mutated frame node.
+    spans = map(w -> _wall_pier_geometry(w, struc.skeleton), struc.walls)
+    concretes = map(w -> _wall_shell_concrete(w, params), struc.walls)
+
+    # Node-share tolerance.
+    tol = 1e-3
+    existing = Asap.Node[]
+    known = Set{UInt64}()
+    # One object is one candidate. A frame corner reused by the slab mesh
+    # must not look like two nodes at the same point.
+    function _keep!(nd::Asap.Node)
+        id = objectid(nd)
+        id in known && return nothing
+        push!(known, id)
+        push!(existing, nd)
+        return nothing
+    end
+    for nd in frame_nodes
+        _keep!(nd)
+    end
+    for shell in existing_shells
+        for nd in shell.nodes
+            _keep!(nd)
+        end
+    end
+
+    shells = Asap.ShellTri3[]
+    wall_nodes = Asap.Node[]
+    seen = Set{UInt64}()
+    nx = 2    # columns along the wall; FEMLateralEvaluator mesh_div default
+
+    """Nearest existing node within `tol`, or `nothing` when all are farther."""
+    function _nearest_existing(x, y, z)
+        tol2 = tol * tol
+        best = nothing
+        best_d2 = tol2
+        tied = false
+        for nd in existing
+            p = nd.position
+            dx = ustrip(u"m", p[1]) - x
+            dy = ustrip(u"m", p[2]) - y
+            dz = ustrip(u"m", p[3]) - z
+            d2 = dx * dx + dy * dy + dz * dz
+            d2 > tol2 && continue
+            if best === nothing || d2 < best_d2
+                best = nd
+                best_d2 = d2
+                tied = false
+            elseif d2 == best_d2
+                tied = true
+            end
+        end
+        tied && throw(ArgumentError(
+            "to_asap!: wall node at ($x, $y, $z) m is equally near two or " *
+            "more existing nodes within $(tol) m"))
+        return best
+    end
+
+    function wall_node!(x, y, z)
+        nd = _nearest_existing(x, y, z)
+        # This mesh adds no supports: a node it creates is always :free. A
+        # reused frame, slab, or wall node keeps the dof vector it already has.
+        if nd === nothing
+            nd = Asap.Node([x, y, z] .* u"m", :free, :wall)
+            _keep!(nd)
+        end
+        if !(objectid(nd) in seen)
+            push!(seen, objectid(nd))
+            push!(wall_nodes, nd)
+        end
+        return nd
+    end
+
+    for (span, conc) in zip(spans, concretes)
+        sec_t = span.t_m * u"m"
+        sec_E = uconvert(u"Pa", conc.E)
+        ν = conc.ν
+        ρ = ustrip(u"kg/m^3", conc.ρ)
+        for c in 0:(nx - 1)
+            s0 = c / nx
+            s1 = (c + 1) / nx
+            x0 = span.x1 + (span.x2 - span.x1) * s0
+            y0 = span.y1 + (span.y2 - span.y1) * s0
+            x1 = span.x1 + (span.x2 - span.x1) * s1
+            y1 = span.y1 + (span.y2 - span.y1) * s1
+            nb0 = wall_node!(x0, y0, span.z_bot)
+            nb1 = wall_node!(x1, y1, span.z_bot)
+            nt1 = wall_node!(x1, y1, span.z_top)
+            nt0 = wall_node!(x0, y0, span.z_top)
+            push!(shells, Asap.ShellTri3((nb0, nb1, nt1), sec_t, sec_E, ν; id=:wall, ρ=ρ))
+            push!(shells, Asap.ShellTri3((nb0, nt1, nt0), sec_t, sec_E, ν; id=:wall, ρ=ρ))
+        end
+    end
+    return shells, wall_nodes
+end
+
+"""Story elevations present on the skeleton, as 1 mm keys."""
+function _story_elevation_keys(skel::BuildingSkeleton)
+    keys = Set{Int}()
+    for (_, story) in skel.stories
+        z_m = _length_metres(story.elevation, "story elevation")
+        push!(keys, round(Int, z_m * 1000))
+    end
+    return keys
+end
+
+"""
+Add wall nodes that sit on a story elevation to an existing rigid-link set.
+
+Does nothing when `links` is empty (no diaphragm was built) or `wall_nodes`
+is empty. The master is the one already elected for that elevation. The
+release rule matches [`_build_rigid_diaphragm_links`](@ref): tie `(u_x, u_y,
+θ_z)` only when that DOF is free on both nodes. A fixed base node is skipped.
+"""
+function _join_wall_nodes_to_rigid_diaphragm!(links::Vector{Asap.RigidLink},
+                                              skel::BuildingSkeleton,
+                                              wall_nodes::Vector{Asap.Node})
+    isempty(links) && return links
+    isempty(wall_nodes) && return links
+
+    story_z = _story_elevation_keys(skel)
+    master_at = Dict{Int, Asap.Node}()
+    linked = Set{UInt64}()
+    for link in links
+        push!(linked, objectid(link.nodeA))
+        push!(linked, objectid(link.nodeB))
+        zk = round(Int, ustrip(u"m", link.nodeA.position[3]) * 1000)
+        zk in story_z || continue
+        master_at[zk] = link.nodeA
+    end
+
+    tied_indices = (1, 2, 6)
+    for nd in wall_nodes
+        objectid(nd) in linked && continue
+        zk = round(Int, ustrip(u"m", nd.position[3]) * 1000)
+        haskey(master_at, zk) || continue
+        master = master_at[zk]
+        nd === master && continue
+        (length(nd.dof) >= 2 && nd.dof[1] && nd.dof[2]) || continue
+        release = ntuple(6) do i
+            (i in tied_indices) || return true
+            (master.dof[i] && nd.dof[i]) ? false : true
+        end
+        push!(links, Asap.RigidLink(master, nd;
+                                    release=release,
+                                    id=:rigid_diaphragm))
+        push!(linked, objectid(nd))
+    end
+    return links
+end
+
 """
 Create TributaryLoads for a single cell from its tributary polygons.
 
@@ -538,8 +836,16 @@ end
 Bit-stable fingerprint of everything [`sync_asap!`](@ref) would otherwise rebuild
 into the global stiffness: frame-section properties that enter `K` (A, E, G, Ix,
 Iy, J, Ay, Az), element release type, end coordinates, current eccentricity, shell
-thickness/E/ν, and the joist-seat eccentricity map the sync is about to write.
-Load magnitudes are intentionally absent — they change `P`, not `K`.
+thickness/E/ν and, for `ShellTri3`, the shear correction `κ`, shear stabilization
+`shear_stab`, and drilling stabilization `drilling_scale` (each enters the element
+stiffness), **and shell node positions** (in each shell's own node order), and
+the joist-seat eccentricity map the sync is about to write. Shell node positions
+are included so that moving a wall in plan, or re-attaching its shells to
+different nodes — which both change `K` for the `ShellTri3` wall mesh in
+`model.shell_elements` — invalidate the `loads_only` cached-factor reuse in
+[`_loads_only_sync`](@ref). Load magnitudes are intentionally absent — they
+change `P`, not `K`. Shell density `ρ` is intentionally absent — it enters mass,
+not `K`.
 """
 function _stiffness_token(struc::BuildingStructure, params::DesignParameters)
     model = struc.asap_model
@@ -563,9 +869,28 @@ function _stiffness_token(struc::BuildingStructure, params::DesignParameters)
     end
     if hasproperty(model, :shell_elements)
         for sh in model.shell_elements
-            s = sh.section
-            s isa Asap.ShellSection || continue
-            h = hash((:shell, s.thickness, s.E, s.ν), h)
+            # Shell stiffness properties that enter K. `ShellTri3` (the wall and
+            # slab mesher output — `_mesh_wall_shells`, `to_asap!`) stores
+            # thickness [m], E [Pa], ν, shear correction κ, shear stabilization
+            # `shear_stab`, and drilling stabilization `drilling_scale` directly
+            # as fields (it has no `.section` field). Density ρ enters mass, not
+            # K, and is not hashed. For any other `ShellElement` subtype, fold
+            # its concrete type so a type change is never missed.
+            props = sh isa Asap.ShellTri3 ?
+                (:shell, sh.thickness, sh.E, sh.ν,
+                 sh.κ, sh.shear_stab, sh.drilling_scale) :
+                (:shell, typeof(sh))
+            h = hash(props, h)
+            # Shell node positions (stripped to m) also enter K, so fold them in
+            # the shell's OWN node order (that order defines its connectivity and
+            # orientation — do not sort): moving a wall in plan, or reattaching
+            # its shells to different nodes, changes K and must invalidate the
+            # loads_only cached-factor reuse in `_loads_only_sync`.
+            for n in sh.nodes
+                p = n.position
+                h = hash((ustrip(u"m", p[1]), ustrip(u"m", p[2]),
+                          ustrip(u"m", p[3])), h)
+            end
         end
     end
     eccs = sort!(collect(pairs(_build_edge_eccentricity_map(struc, params))))
@@ -983,17 +1308,36 @@ function _pattern_dead_factor(struc::BuildingStructure)
     return 1.0
 end
 
+# Module-level cache for checkerboard partition (geometry-only, computed once per model)
+const _CHECKERBOARD_CACHE = Ref{Tuple{UInt, Tuple{Vector{Int}, Vector{Int}}}}((UInt(0), (Int[], Int[])))
+
+"""
+Copy one factored tributary live load at three-quarters pressure.
+
+ACI 318-11 §13.7.6.3 permits three-quarters of the full factored live load
+on the existing alternate-span cases (corpus: aci-318-11, page 261). Stored
+`cell_live_loads` are already full factored live (`combo.L * live`). This
+copy multiplies that pressure by 3/4 and does not mutate the stored load.
+§13.7.6.4 (same page) keeps the full-load case unscaled.
+"""
+function _pattern_alternate_live(ld::Asap.TributaryLoad)
+    # ACI 318-11 §13.7.6.3 — three-quarters of the full factored live load
+    # (corpus: aci-318-11, page 261).
+    Asap.TributaryLoad(ld.element, copy(ld.positions), ld.widths,
+                       0.75 * ld.pressure, ld.direction, ld.id)
+end
+
 """
 Generate pattern loading cases from the dead/live tributary load dicts.
 
 Returns a vector of load vectors:
-1. Full loading (dead + all live)
-2. Checkerboard A (dead + live on "even" cells)
-3. Checkerboard B (dead + live on "odd" cells)
-"""
-# Module-level cache for checkerboard partition (geometry-only, computed once per model)
-const _CHECKERBOARD_CACHE = Ref{Tuple{UInt, Tuple{Vector{Int}, Vector{Int}}}}((UInt(0), (Int[], Int[])))
+1. Full loading (dead + all live) — unscaled, ACI 318-11 §13.7.6.4
+2. Checkerboard A (dead + 3/4 live on "even" cells) — ACI 318-11 §13.7.6.3
+3. Checkerboard B (dead + 3/4 live on "odd" cells) — ACI 318-11 §13.7.6.3
 
+Alternate-span layout is unchanged. Only the patterned live pressure is
+reduced. Dead load and member self-weight are not scaled.
+"""
 function _generate_pattern_cases(struc::BuildingStructure)
     dead_all = Asap.AbstractLoad[]
     sizehint!(dead_all, sum(length(v) for (_, v) in struc.cell_dead_loads; init=0))
@@ -1018,17 +1362,23 @@ function _generate_pattern_cases(struc::BuildingStructure)
         _CHECKERBOARD_CACHE[] = (skel_id, (set_a, set_b))
     end
     
-    live_a = Asap.AbstractLoad[]
-    live_b = Asap.AbstractLoad[]
+    live_a = Asap.TributaryLoad[]
+    live_b = Asap.TributaryLoad[]
     for ci in set_a
         append!(live_a, get(struc.cell_live_loads, ci, Asap.TributaryLoad[]))
     end
     for ci in set_b
         append!(live_b, get(struc.cell_live_loads, ci, Asap.TributaryLoad[]))
     end
-    
-    case_a = Asap.AbstractLoad[dead_all; live_a]
-    case_b = Asap.AbstractLoad[dead_all; live_b]
+
+    # ACI 318-11 §13.7.6.3 — three-quarters of the full factored live load on
+    # the existing alternate-span cases (corpus: aci-318-11, page 261).
+    # case_full above stays at full factored live (§13.7.6.4, same page).
+    live_a_pat = Asap.AbstractLoad[_pattern_alternate_live(ld) for ld in live_a]
+    live_b_pat = Asap.AbstractLoad[_pattern_alternate_live(ld) for ld in live_b]
+
+    case_a = Asap.AbstractLoad[dead_all; live_a_pat]
+    case_b = Asap.AbstractLoad[dead_all; live_b_pat]
 
     # Member self-weight is not in the cell tributary dicts. Include every
     # Asap.GravityLoad on the model so a section change that updates ρA
@@ -2634,6 +2984,9 @@ visualize(design, mode=:deflected)
 - Self-weight is included via shell density (ρ = concrete density)
 - SDL + LL applied as AreaLoad to shell surfaces
 - Frame TributaryLoads are NOT included (loads go through shells)
+- A `:walls` edge that this filter still copies (the edge is also in an
+  included group, or `frame_groups` lists `:walls`) gets the same zero frame
+  section as `to_asap!`. Which groups are included does not change.
 """
 function build_analysis_model!(design::BuildingDesign;
                                load_combination::LoadCombination=service,
@@ -2683,10 +3036,15 @@ function build_analysis_model!(design::BuildingDesign;
     nodes = _create_offset_nodes(skel, design.structural_offsets, support_set)
     
     # ─── 4. Copy frame elements from selected groups ───
-    # Use existing elements from struc.asap_model (preserves sized sections)
+    # Use existing elements from struc.asap_model (preserves sized sections).
+    # A :walls edge that the group filter still includes is copied with a zero
+    # section, matching to_asap!, even if sizing later replaced that source
+    # section. The filter itself is unchanged.
     src_model = struc.asap_model
     frame_elements = Asap.FrameElement[]
     frame_edge_indices = Int[]
+    wall_ids = get(skel.groups_edges, :walls, Int[])
+    wall_edges = isempty(wall_ids) ? nothing : Set(wall_ids)
 
     # Resolve releases from the beam release fields (same source as to_asap!), not
     # by reading them back off the source Asap element, so the rebuild honors any
@@ -2703,9 +3061,15 @@ function build_analysis_model!(design::BuildingDesign;
         # Only include edges from selected groups
         edge_idx in included_edges || continue
         
-        # Get section from source model if available
+        # Get section from source model if available.
+        # Zero a copied :walls edge so its frame stiffness and mass stay out
+        # of this model. Non-wall edges keep the sized source section.
         src_el = src_model.elements[edge_idx]
-        section = src_el.section
+        section = if !isnothing(wall_edges) && edge_idx in wall_edges
+            _zero_wall_frame_section(src_el.section.E, src_el.section.G)
+        else
+            src_el.section
+        end
         
         # Per-beam release (non-beam edges default to :fixedfixed)
         release_sym = get(edge_release, edge_idx, :fixedfixed)

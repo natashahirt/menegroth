@@ -1262,6 +1262,25 @@ Base.@kwdef mutable struct DesignSummary
 end
 
 """
+    WallCheckRecord
+
+Identity of one wall check. Later phases store one record per wall, story,
+direction, and load combination. This is intentionally not a utilization,
+capacity, or demand.
+
+# Fields
+- `story::Int`: 0-based story index, matching `Wall.story` (ground = 0).
+  `WallLine.story` is 1-based and is not this field.
+- `direction::Symbol`: plan direction, `:X` or `:Y`.
+- `combination::Symbol`: load combination this record belongs to.
+"""
+struct WallCheckRecord
+    story::Int          # 0-based, matching Wall.story
+    direction::Symbol   # :X or :Y
+    combination::Symbol
+end
+
+"""
 A complete design solution for a BuildingStructure.
 
 Holds a reference to the source `BuildingStructure` for geometry access,
@@ -1269,6 +1288,10 @@ enabling a clean API: `visualize(design)` works without passing structure separa
 
 Multiple BuildingDesign instances can reference the same BuildingStructure,
 enabling comparison of different material choices or optimization targets.
+
+`walls` is keyed by index into `structure.walls`. The dict exists so later
+phases can store one [`WallCheckRecord`](@ref) per wall, story, direction, and
+combination. It is intentionally not a single utilization.
 
 # Example
 ```julia
@@ -1300,6 +1323,9 @@ mutable struct BuildingDesign{T, A, P}
     slabs::Dict{Int, SlabDesignResult}
     columns::Dict{Int, ColumnDesignResult}
     beams::Dict{Int, BeamDesignResult}
+    # Sidecar keyed by index into `structure.walls`. One record per
+    # wall / story / direction / combination — not a single utilization.
+    walls::Dict{Int, Vector{WallCheckRecord}}
     foundations::Dict{Int, FoundationDesignResult}
     
     # Summary
@@ -1353,6 +1379,7 @@ function BuildingDesign(struc::BuildingStructure{T, A, P}, params::DesignParamet
         Dict{Int, SlabDesignResult}(),
         Dict{Int, ColumnDesignResult}(),
         Dict{Int, BeamDesignResult}(),
+        Dict{Int, Vector{WallCheckRecord}}(),
         Dict{Int, FoundationDesignResult}(),
         DesignSummary(),
         nothing,  # asap_model (built via build_analysis_model!)

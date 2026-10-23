@@ -149,6 +149,81 @@ const SS = StructuralSizer
               ustrip(u"inch", 2 * (16.0u"inch" + d) + 2 * (10.0u"inch" + d)) rtol = 1e-10
     end
 
+    @testset "Moment convention locked against closed-form punching_check" begin
+        # punching_check names moments by stress-direction (`Mux` ⇒ stress in x);
+        # the general engine follows 421.1R (`Mux` about x ⇒ stress in y). The
+        # bridge is therefore a swap. Lock it: with an aspect ratio ≠ 1 the two
+        # orientations give clearly different vu, so a wrong mapping cannot pass.
+        # Aspect ratio 4:1 maximizes the x-vs-y separation (~8%), which exceeds the
+        # small App. B J≈I gap (~2–3%) so the mapping is observable. (The direct
+        # Vu/Ac term is identical across all four quantities, so it cancels in every
+        # difference below — the lock is load-independent.)
+        c1 = 32.0u"inch"; c2 = 8.0u"inch"; d = 8.0u"inch"; fc = 4000.0u"psi"
+        Vu = 8.0kip; M = 180.0kip * u"ft"
+        pts, _ = SS.rectangular_critical_section(c1, c2, d; position = :interior)
+
+        # Two closed-form oracles: moment driving stress in x vs in y.
+        cf_x = SS.punching_check(Vu, M, 0.0kip * u"ft", d, fc, c1, c2; position = :interior)
+        cf_y = SS.punching_check(Vu, 0.0kip * u"ft", M, d, fc, c1, c2; position = :interior)
+        vx = ustrip(u"psi", cf_x.vu); vy = ustrip(u"psi", cf_y.vu)
+
+        # The general engine (421.1R convention): Muy ⇒ stress in x, Mux ⇒ stress in y.
+        g_as_Muy = SS.punching_stress_general(Vu, 0.0kip * u"ft", M, pts, d; closed = true)  # ≡ cf_x
+        g_as_Mux = SS.punching_stress_general(Vu, M, 0.0kip * u"ft", pts, d; closed = true)  # ≡ cf_y
+
+        # The two orientations genuinely differ (so "nearer-oracle" discriminates).
+        @test abs(vx - vy) / vx > 0.05
+        gy = ustrip(u"psi", g_as_Muy.vu)   # Muy ⇒ stress in x ⇒ should track cf_x
+        gx = ustrip(u"psi", g_as_Mux.vu)   # Mux ⇒ stress in y ⇒ should track cf_y
+        # App. B is slightly conservative vs the closed form (J≈I gap, same sign on both axes).
+        @test 0.98 ≤ gy / vx ≤ 1.08
+        @test 0.98 ≤ gx / vy ≤ 1.08
+        # Convention lock: each mapping is nearer its MATCHING oracle than the other.
+        # A swapped mapping would flip both of these, so it cannot pass.
+        @test abs(gy - vx) < abs(gy - vy)
+        @test abs(gx - vy) < abs(gx - vx)
+    end
+
+    @testset "Invariant: notching a corner can only raise stress; far below 2-sided" begin
+        c1 = 16.0u"inch"; c2 = 16.0u"inch"; d = 6.0u"inch"; fc = 4000.0u"psi"
+        Vu = 40.0kip; Mx = 20.0kip * u"ft"; My = 12.0kip * u"ft"
+        pts_int, _ = SS.rectangular_critical_section(c1, c2, d; position = :interior)
+        pts_re,  _ = SS.reentrant_critical_section(c1, c2, d)
+
+        g_int = SS.punching_check_general(Vu, Mx, My, d, fc, pts_int; closed = true)
+        g_re  = SS.punching_check_general(Vu, Mx, My, d, fc, pts_re;  closed = true)
+        # Same perimeter, but the notch removes material ⇒ less J + offset centroid
+        # ⇒ stress can only rise relative to the full interior section.
+        @test g_re.vu ≥ g_int.vu
+        @test ustrip(u"inch", g_re.b0) ≈ ustrip(u"inch", g_int.b0) rtol = 1e-9
+
+        # … yet far below the legacy 2-sided corner idealization (half the b0).
+        cx = (position = :corner, corner_kind = :convex, c1 = c1, c2 = c2, shape = :rectangular)
+        r_cx = SS.check_punching_for_column(cx, Vu, Mx, d, 8.0u"inch", fc; Muy = My)
+        @test g_re.vu < r_cx.vu
+    end
+
+    @testset "Invariant: centroid-transfer sign is a minor (bracketed) correction" begin
+        # The |M| − Vu·e transfer direction is inherited from the orthogonal
+        # corner validation. For re-entrant sections the centroid offset is tiny,
+        # so subtract / zero / add bracket a narrow band — the sign choice is
+        # second-order (well inside the App. B J≈I conservatism).
+        c1 = 16.0u"inch"; c2 = 16.0u"inch"; d = 6.0u"inch"; fc = 4000.0u"psi"
+        Vu = 40.0kip; Mub = 20.0kip * u"ft"; Muy_val = 12.0kip * u"ft"
+        pts, _ = SS.reentrant_critical_section(c1, c2, d)
+        p = SS.critical_section_properties(pts, d; closed = true)
+
+        vu_of(sgn) = ustrip(u"psi", SS.punching_check_general(
+            Vu,
+            max(0.0kip * u"ft", abs(Muy_val) - sgn * Vu * abs(p.yc)),
+            max(0.0kip * u"ft", abs(Mub)     - sgn * Vu * abs(p.xc)),
+            d, fc, pts; closed = true).vu)
+
+        v_sub = vu_of(+1.0); v_zero = vu_of(0.0); v_add = vu_of(-1.0)
+        @test v_sub ≤ v_zero ≤ v_add                 # monotone in the transfer sign
+        @test (v_add - v_sub) / v_zero < 0.1         # full ± swing < 10% of the stress
+    end
+
     @testset "check_punching_for_column routes re-entrant corners to App. B" begin
         c1 = 16.0u"inch"; c2 = 16.0u"inch"; d = 6.0u"inch"; h = 8.0u"inch"
         fc = 4000.0u"psi"

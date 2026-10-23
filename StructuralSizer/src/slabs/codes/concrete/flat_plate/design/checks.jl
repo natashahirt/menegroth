@@ -107,23 +107,29 @@ function check_punching_for_column(col, Vu, Mub, d, h, fc;
         # reduction used for orthogonal edge/corner columns (deci-8ec247a3):
         #   M_about_centroid = |M| − Vu·e   (floored at 0),
         # with e the TRUE section-centroid offset (props.xc / props.yc), which
-        # already embeds the d/2 geometry. Axis-convention reconciliation:
-        # the Sizer `Mub` drives stress in x (pairs with cAB_x) ⇒ it is the
-        # 421.1R moment about y (`Muy`); `Muy_val` drives stress in y ⇒ 421.1R
-        # moment about x (`Mux`).
-        Mux_g = max(0.0kip * u"ft", abs(Muy_val) - Vu * abs(props.yc))
-        Muy_g = max(0.0kip * u"ft", abs(Mub)     - Vu * abs(props.xc))
+        # already embeds the d/2 geometry.
+        #
+        # ⚠ AXIS CONVENTION — the two engines name moments OPPOSITELY, so the
+        # mapping is made explicit here with physical names rather than a silent
+        # Mux/Muy swap (see deci-6bee9104 / the convention-lock test):
+        #   • Sizer corner branch: `Mub` pairs with cAB_x ⇒ drives stress in x;
+        #     `Muy_val` pairs with cAB_y ⇒ drives stress in y.
+        #   • 421.1R `punching_check_general`: 1st moment arg is about x (stress
+        #     in y), 2nd is about y (stress in x).
+        # Therefore, in physical terms:
+        M_about_x = max(0.0kip * u"ft", abs(Muy_val) - Vu * abs(props.yc))  # stress in y, y-ecc.
+        M_about_y = max(0.0kip * u"ft", abs(Mub)     - Vu * abs(props.xc))  # stress in x, x-ecc.
 
         β_re = punching_β(c1, c2; shape = geom_shape)
         # The re-entrant section is 4-sided (full perimeter) ⇒ interior αs per
         # the side-count rule, ACI 421.3R-15 §4.8.
-        g = punching_check_general(Vu, Mux_g, Muy_g, d, fc, pts;
+        g = punching_check_general(Vu, M_about_x, M_about_y, d, fc, pts;
                                    closed = true, β = β_re,
                                    αs = punching_αs(:interior), λ = λ, ϕ = φ_shear)
         if verbose
             status = g.ok ? "✓ PASS" : "✗ FAIL"
             @debug "Column $col_idx (re-entrant corner → general App. B)" c1=c1 c2=c2 b0=g.b0 β=round(β_re, digits=2)
-            @debug "  Demand" Vu=Vu Mux_g=Mux_g Muy_g=Muy_g asymmetric=g.asymmetric θp=round(g.θp, digits=3)
+            @debug "  Demand" Vu=Vu M_about_x=M_about_x M_about_y=M_about_y asymmetric=g.asymmetric θp=round(g.θp, digits=3)
             @debug "  Stress" vu=round(ustrip(u"psi", g.vu), digits=1) φvc=round(ustrip(u"psi", g.ϕvc), digits=1) ratio=round(g.utilization, digits=2) status=status
         end
         return (ok = g.ok, ratio = g.utilization, vu = g.vu, φvc = g.ϕvc,

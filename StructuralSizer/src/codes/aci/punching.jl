@@ -499,6 +499,17 @@ for asymmetric sections too. `Mux`/`Muy` are the unbalanced moments about the
 centroidal x/y axes of the INPUT frame (`Mux` about x, `Muy` about y); they are
 resolved into principal components `(M1, M2)` internally:
 
+!!! warning "Moment convention differs from `punching_check`"
+    This engine follows the standard-mechanics / ACI 421.1R convention: `Mux`
+    is the moment **about the x-axis**, so it drives stress variation in **y**
+    (at `θp=0`, the term is `γv1·Mux·y/J1`); `Muy` (about y) drives stress in
+    **x**. The closed-form [`punching_check`](@ref) names its arguments by the
+    *direction of stress variation* instead — its `Mux` drives stress in **x**.
+    So mapping a moment between the two is a swap: `punching_check` `Mux`
+    (stress in x) ≡ this engine's `Muy`, and vice-versa. Callers bridging the
+    two (e.g. the re-entrant corner path in `check_punching_for_column`) must
+    map explicitly; a convention-lock test pins this against the closed form.
+
     vu = Vu/Ac + γv1·M1·s2/J1 + γv2·M2·s1/J2
 
 where `(s1, s2)` are a vertex's coordinates on the principal axes. The stress is

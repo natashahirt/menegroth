@@ -64,6 +64,14 @@ const SSy = StructuralSynthesizer
         @test slab_material_angle(skel, 1, vc) ≈ 2π rtol = 1e-9
     end
 
+    @testset "classify_corner_kind from a precomputed angle" begin
+        @test classify_corner_kind(π / 2, :corner) == :convex
+        @test classify_corner_kind(3π / 2, :corner) == :reentrant
+        @test classify_corner_kind(deg2rad(225), :corner) == :reentrant
+        @test classify_corner_kind(3π / 2, :edge) == :none
+        @test classify_corner_kind(3π / 2, :interior) == :none
+    end
+
     @testset "Non-orthogonal convex wedge recovers its angle" begin
         skel = BuildingSkeleton{Float64}()
         skel.face_vertex_indices = [[1, 2, 3]]

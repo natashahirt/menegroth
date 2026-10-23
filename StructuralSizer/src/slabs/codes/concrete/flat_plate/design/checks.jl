@@ -94,11 +94,24 @@ function check_punching_for_column(col, Vu, Mub, d, h, fc;
     # A re-entrant corner's critical section wraps (nearly) the full 4-sided
     # perimeter, not the legacy 2-sided corner section, so it is evaluated with
     # the ACI 421.1R-99 Appendix B segment-summation engine on the section's
-    # true principal axes rather than the closed-form corner Jc. Only columns
-    # explicitly classified `:reentrant` take this path; convex corners
-    # (`corner_kind != :reentrant` / absent) keep the conservative 2-sided check.
-    col_corner_kind = hasproperty(col, :corner_kind) ? getfield(col, :corner_kind) : :none
-    if col.position == :corner && col_corner_kind == :reentrant
+    # true principal axes rather than the closed-form corner Jc.
+    #
+    # ⚠ GATING — `reentrant_critical_section` builds a strictly ORTHOGONAL
+    # (90°) d/2×d/2 notch, so only ORTHOGONAL re-entrant corners may use it. An
+    # orthogonal re-entrant corner has two perpendicular free edges ⇒ slab-
+    # material angle ≈ 3π/2 (`corner_angle`). A *skewed* re-entrant corner
+    # (angle ≠ 3π/2) would need an angled notch (future feature); it falls
+    # through to the conservative 2-sided corner check (which over-predicts
+    # stress — safe) rather than silently using the wrong geometry. Columns
+    # lacking `corner_angle` (e.g. bare test stubs) likewise do not route.
+    col_corner_kind  = hasproperty(col, :corner_kind)  ? getfield(col, :corner_kind)          : :none
+    col_corner_angle = hasproperty(col, :corner_angle) ? Float64(getfield(col, :corner_angle)) : NaN
+    is_ortho_reentrant = col_corner_kind == :reentrant &&
+                         isapprox(col_corner_angle, 3π / 2; atol = 0.12)
+    if verbose && col.position == :corner && col_corner_kind == :reentrant && !is_ortho_reentrant
+        @debug "Column $col_idx: skewed re-entrant corner (angle=$(round(col_corner_angle, digits=3)) ≉ 3π/2) → conservative 2-sided fallback"
+    end
+    if col.position == :corner && is_ortho_reentrant
         pts, _ = reentrant_critical_section(c1, c2, d)
         props = critical_section_properties(pts, d; closed = true)
 

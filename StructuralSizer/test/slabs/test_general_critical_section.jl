@@ -229,9 +229,10 @@ const SS = StructuralSizer
         fc = 4000.0u"psi"
         Vu = 40.0kip; Mub = 25.0kip * u"ft"; Muy = 15.0kip * u"ft"
 
-        re_col = (position = :corner, corner_kind = :reentrant,
+        # Orthogonal re-entrant (slab angle 3π/2) routes to the general engine.
+        re_col = (position = :corner, corner_kind = :reentrant, corner_angle = 3π / 2,
                   c1 = c1, c2 = c2, shape = :rectangular)
-        cx_col = (position = :corner, corner_kind = :convex,
+        cx_col = (position = :corner, corner_kind = :convex, corner_angle = π / 2,
                   c1 = c1, c2 = c2, shape = :rectangular)
 
         r_re = SS.check_punching_for_column(re_col, Vu, Mub, d, h, fc; Muy = Muy)
@@ -244,6 +245,25 @@ const SS = StructuralSizer
         @test r_re.vu < r_cx.vu
         @test r_re.ok isa Bool
         @test r_re.ratio > 0
+    end
+
+    @testset "Skewed re-entrant corner falls back to conservative 2-sided check" begin
+        # A non-orthogonal re-entrant corner (slab angle ≠ 3π/2) must NOT use the
+        # orthogonal 90°-notch geometry; it falls through to the 2-sided corner
+        # section (over-predicts stress — safe) until an angled notch exists.
+        c1 = 16.0u"inch"; c2 = 16.0u"inch"; d = 6.0u"inch"; h = 8.0u"inch"
+        fc = 4000.0u"psi"; Vu = 40.0kip; Mub = 25.0kip * u"ft"; Muy = 15.0kip * u"ft"
+
+        skew = (position = :corner, corner_kind = :reentrant, corner_angle = deg2rad(225),
+                c1 = c1, c2 = c2, shape = :rectangular)
+        bare = (position = :corner, corner_kind = :reentrant,   # no corner_angle field
+                c1 = c1, c2 = c2, shape = :rectangular)
+        two_sided = (c1 + d / 2) + (c2 + d / 2)
+
+        for col in (skew, bare)
+            r = SS.check_punching_for_column(col, Vu, Mub, d, h, fc; Muy = Muy)
+            @test ustrip(u"inch", r.b0) ≈ ustrip(u"inch", two_sided) rtol = 1e-9
+        end
     end
 
     @testset "Symmetry detection and punching_check_general result" begin

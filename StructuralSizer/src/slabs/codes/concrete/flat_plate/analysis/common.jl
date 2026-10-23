@@ -123,15 +123,21 @@ function _compute_column_shear(struc, col, qu, l2, ln)
         return uconvert(kip, qu * Atrib)
     else
         # Fallback: position-aware tributary approximation
-        # Interior: full tributary on both sides → l2 × ln/2
-        # Edge:     tributary on one side only   → l2/2 × ln/2
-        # Corner:   quarter tributary            → l2/2 × ln/2 (from each direction)
+        # Interior:         full tributary on both sides → l2 × ln/2
+        # Edge:             tributary on one side only    → l2/2 × ln/2
+        # Convex corner:    one quadrant                  → l2/2 × ln/2 / 2
+        # Re-entrant corner: THREE quadrants (inside corner of an L) ⇒ ~3× a
+        #   convex corner. A flat quarter-tributary would understate Vu ~3×,
+        #   which is unsafe for punching; scale by corner kind. The primary
+        #   per-incident-cell Voronoi path already captures this exactly — this
+        #   only guards the degenerate no-cache fallback.
         pos = hasproperty(col, :position) ? col.position : :interior
         A_base = l2 * ln / 2   # interior tributary
         if pos == :edge
             A_trib = A_base / 2
         elseif pos == :corner
-            A_trib = A_base / 4
+            ckind = hasproperty(col, :corner_kind) ? getfield(col, :corner_kind) : :convex
+            A_trib = ckind == :reentrant ? 3 * A_base / 4 : A_base / 4
         else
             A_trib = A_base
         end

@@ -327,6 +327,12 @@ populate the `story_properties` field with:
     #                routed through the general-shape engine (ACI 421.1R-99 App. B)
     #   :none      — not a corner (interior/edge)
     corner_kind::Symbol = :none
+    # Slab-material angle at the vertex (radians), from `slab_material_angle`.
+    # ≈3π/2 at an orthogonal re-entrant corner, ≈π/2 at an orthogonal convex
+    # corner; other values flag non-orthogonal (skewed) corners. 0.0 for
+    # non-corner columns. Used by the punching check to gate which corners may
+    # use the orthogonal general-shape critical section vs a conservative fallback.
+    corner_angle::Float64 = 0.0
     # Unit vectors pointing along boundary edges (edges that belong to only one face).
     # Empty for interior columns; 1 direction for edge columns; 2+ for corners.
     # Used for DDM/EFM to determine if column is an exterior support for a given span direction.

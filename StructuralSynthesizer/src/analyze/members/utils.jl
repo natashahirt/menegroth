@@ -192,12 +192,13 @@ function initialize_members!(struc::BuildingStructure{T};
                 vertex_idx = z1 > z2 ? v1 : v2
                 story = edge_story(skel, edge_idx)
                 position, boundary_edge_dirs = classify_column_position(skel, vertex_idx, vc, efc)
-                corner_kind = classify_corner_kind(skel, vertex_idx, vc, position)
+                corner_angle = position == :corner ? slab_material_angle(skel, vertex_idx, vc) : 0.0
+                corner_kind = classify_corner_kind(corner_angle, position)
                 
                 col = Column(seg_idx, seg.L; 
                             Lb=seg.Lb, Kx=default_Kx, Ky=default_Ky, Cb=seg.Cb,
                             vertex_idx=vertex_idx, story=story, position=position,
-                            corner_kind=corner_kind,
+                            corner_kind=corner_kind, corner_angle=corner_angle,
                             boundary_edge_dirs=boundary_edge_dirs)
                 push!(struc.columns, col)
                 
@@ -952,12 +953,13 @@ function _create_chain_column!(struc, skel, chain_seg_indices, chain_edge_indice
     
     story = edge_story(skel, last_edge)
     position, boundary_edge_dirs = classify_column_position(skel, vertex_idx, vc, efc)
-    corner_kind = classify_corner_kind(skel, vertex_idx, vc, position)
+    corner_angle = position == :corner ? slab_material_angle(skel, vertex_idx, vc) : 0.0
+    corner_kind = classify_corner_kind(corner_angle, position)
     
     col = Column(chain_seg_indices, L_total;
                 Lb=Lb_gov, Kx=default_Kx, Ky=default_Ky, Cb=Cb_gov,
                 vertex_idx=vertex_idx, story=story, position=position,
-                corner_kind=corner_kind,
+                corner_kind=corner_kind, corner_angle=corner_angle,
                 boundary_edge_dirs=boundary_edge_dirs)
     push!(struc.columns, col)
 end
@@ -1242,13 +1244,21 @@ A re-entrant corner's critical section carries (nearly) the full 4-sided
 perimeter rather than the legacy 2-sided section, so it is routed through the
 general-shape engine (ACI 421.1R-99 Appendix B). `tol` (radians) guards the
 π boundary against meshing noise.
+
+The two-argument method classifies from a precomputed `angle` (radians); the
+four-argument method computes it via [`slab_material_angle`](@ref).
 """
+function classify_corner_kind(angle::Float64, position::Symbol; tol::Float64 = 0.1)
+    position === :corner || return :none
+    return angle > π + tol ? :reentrant : :convex
+end
+
 function classify_corner_kind(skel::BuildingSkeleton, vertex_idx::Int,
                               vertex_coords::Matrix{Float64}, position::Symbol;
                               tol::Float64 = 0.1)
     position === :corner || return :none
-    return slab_material_angle(skel, vertex_idx, vertex_coords) > π + tol ?
-           :reentrant : :convex
+    return classify_corner_kind(slab_material_angle(skel, vertex_idx, vertex_coords),
+                                position; tol = tol)
 end
 
 

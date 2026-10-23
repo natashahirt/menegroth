@@ -49,6 +49,7 @@ using Asap  # custom units (kip, ksi, ksf, psf, etc.)
         include("steel_member/test_b1_checker_integration.jl")
         # Composite beams
         include("steel_member/composite/test_composite_beam.jl")
+        include("steel_member/composite/test_composite_per_station.jl")
     end
 
     # ─── Members: connection defaults ────────────────────────────────────

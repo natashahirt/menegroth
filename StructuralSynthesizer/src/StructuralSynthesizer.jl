@@ -211,6 +211,10 @@ export is_girder, is_joist, is_beam, level_of, lateral_role_of
 # Variable tributary profile (Phase 0)
 export TributaryProfile, tributary_profile, tributary_width_scalar, tributary_width_envelope
 export compute_member_tributaries!
+# Building → composite check (AISC Ch. I): per-side §I3.1a profiles, scalar
+# context, exact FEM demand field, and the per-station governing check.
+export beam_side_profiles, composite_context_from_beam
+export beam_signed_moment_field, check_composite_beam, composite_deflection_scale
 export classify_column_position, is_exterior_support  # Column position classification for DDM/EFM
 export slab_material_angle, classify_corner_kind       # Corner refinement (convex vs re-entrant)
 export update_structural_offsets!, structural_center_xy_m  # Architectural → structural centerline

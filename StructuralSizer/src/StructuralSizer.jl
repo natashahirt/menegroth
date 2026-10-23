@@ -269,6 +269,9 @@ export check_construction
 export get_I_transformed, get_I_LB, check_composite_deflection
 export extract_parallel_Asr, beam_direction_from_vectors
 export composite_stud_contribution
+# Per-station composite check (AISC I3.1a/I3.2a/I3.2b): irregular/continuous beams
+export SideExtentProfile, b_eff_at_station, beff_breakpoints, phiMn_at_station
+export governing_station, composite_dcr_at_station, governing_composite_station
 
 # --- ACI 318: material utilities ---
 export beta1, Ec, Ec_ksi, fr, fc_ksi, fy_ksi, Es_ksi, εcu, β1

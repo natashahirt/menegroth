@@ -241,12 +241,11 @@ const SS = StructuralSizer
         @test g_re.vu < r_cx.vu
     end
 
-    @testset "Invariant: centroid-transfer uses the conservative upper bound" begin
-        # The net moment at the section centroid is |M ± Vu·e|; the sign is not
-        # disambiguated for these general sections, so production takes the UPPER
-        # bound |M|+Vu·e (never under-predicts). For re-entrant sections the
-        # centroid offset is tiny, so add / zero / subtract span a narrow band —
-        # the conservatism penalty over the unsigned value is only a few percent.
+    @testset "Invariant: centroid-transfer is the pinned R11.11.7.2 reduction" begin
+        # Production references Mu to the section centroidal axis per ACI 318-11
+        # R11.11.7.2: M_cc = |M| − Vu·e (reduction), the same convention worked in
+        # the PCA/ACI example and validated against spSlab for orthogonal
+        # edge/corner columns — inherited here via the true offset (xc, yc).
         c1 = 16.0u"inch"; c2 = 16.0u"inch"; d = 6.0u"inch"; fc = 4000.0u"psi"
         Vu = 40.0kip; Mub = 20.0kip * u"ft"; Muy_val = 12.0kip * u"ft"
         pts, _ = SS.reentrant_critical_section(c1, c2, d)
@@ -254,14 +253,20 @@ const SS = StructuralSizer
 
         vu_of(sgn) = ustrip(u"psi", SS.punching_check_general(
             Vu,
-            abs(Muy_val) + sgn * Vu * abs(p.yc),
-            abs(Mub)     + sgn * Vu * abs(p.xc),
+            max(0.0kip * u"ft", abs(Muy_val) + sgn * Vu * abs(p.yc)),
+            max(0.0kip * u"ft", abs(Mub)     + sgn * Vu * abs(p.xc)),
             d, fc, pts; closed = false).vu)
 
-        v_sub = vu_of(-1.0); v_zero = vu_of(0.0); v_add = vu_of(+1.0)  # +1 ≡ production
+        v_sub = vu_of(-1.0); v_zero = vu_of(0.0); v_add = vu_of(+1.0)  # −1 ≡ production
         @test v_sub ≤ v_zero ≤ v_add                 # monotone in the transfer sign
         @test (v_add - v_sub) / v_zero < 0.12        # full ± swing bounded (~10%)
-        @test (v_add - v_zero) / v_zero < 0.06       # conservative penalty is small
+
+        # The routed corner uses the reduction branch ⇒ its demand matches v_sub.
+        re_col = (position = :corner, corner_kind = :reentrant, corner_angle = 3π / 2,
+                  c1 = c1, c2 = c2, shape = :rectangular,
+                  boundary_inward_normals = [(-1.0, 0.0), (0.0, -1.0)])
+        r = SS.check_punching_for_column(re_col, Vu, Mub, d, 8.0u"inch", fc; Muy = Muy_val)
+        @test ustrip(u"psi", r.vu) ≈ v_sub rtol = 1e-9
     end
 
     @testset "check_punching_for_column routes re-entrant corners to App. B" begin

@@ -127,28 +127,33 @@ function check_punching_for_column(col, Vu, Mub, d, h, fc;
         props = critical_section_properties(pts, d; closed = closed)
 
         # Transfer the applied unbalanced moments (taken about the column center)
-        # to the critical-section centroid with eccentricity e = (props.xc,
-        # props.yc) — the TRUE section-centroid offset, which already embeds the
-        # d/2 geometry.
+        # to the critical-section centroidal axis, per ACI 318-11 R11.11.7.2
+        # (corpus: aci-318-11, page 210): Vu and Mu are referenced to the
+        # section centroid c-c, so the moment reduces by Vu·e where e is the
+        # offset from the column centerline to the section centroid. Here e is
+        # the TRUE general-section offset (props.xc, props.yc) — the exact
+        # generalization of the closed-form `eccentricity_to_critical_centroid`
+        # used on the validated orthogonal edge/corner path (which subtracts the
+        # same Vu·e per axis, floored at 0; deci-8ec247a3).
+        #
+        # ⚠ TRANSFER SIGN (pinned) — the sign is a REDUCTION, not a guess: for an
+        # exterior column the gravity-reaction eccentricity opposes the
+        # unbalanced moment, so the centroidal-axis moment is |M| − Vu·e. This is
+        # the convention worked in the PCA/ACI example (46.65 → 37.81 kip·ft, a
+        # reduction; corpus: sp-de-two-way-flat-plate-aci318-14, page 42) and
+        # already validated against spSlab for orthogonal edge/corner columns. A
+        # re-entrant or skewed corner is the same class (section centroid shifts
+        # toward the slab interior), so it inherits the identical reduction.
         #
         # ⚠ AXIS CONVENTION — the two engines name moments OPPOSITELY, so the
-        # mapping is made explicit here with physical names rather than a silent
-        # Mux/Muy swap (see deci-6bee9104 / the convention-lock test):
-        #   • Sizer corner branch: `Mub` pairs with cAB_x ⇒ drives stress in x;
-        #     `Muy_val` pairs with cAB_y ⇒ drives stress in y.
+        # mapping is made explicit with physical names (see deci-6bee9104 / the
+        # convention-lock test):
+        #   • Sizer corner branch: `Mub` drives stress in x (pairs with x-ecc
+        #     props.xc); `Muy_val` drives stress in y (pairs with y-ecc props.yc).
         #   • 421.1R `punching_check_general`: 1st moment arg is about x (stress
         #     in y), 2nd is about y (stress in x).
-        #
-        # ⚠ TRANSFER SIGN — the net moment at the section centroid is
-        # |M ± Vu·e|; its sign depends on the relative sense of M and the
-        # reaction eccentricity and is NOT disambiguated for these general
-        # sections (unlike the spSlab-calibrated orthogonal convex corner). To
-        # stay safety-conservative we take the UPPER BOUND |M| + Vu·|e|, which
-        # never under-predicts the transfer stress. For re-entrant corners the
-        # centroid sits near the column center, so this upper bound is within a
-        # few percent of the unsigned value anyway (bracketed by test).
-        M_about_x = abs(Muy_val) + Vu * abs(props.yc)                          # stress in y
-        M_about_y = abs(Mub)     + Vu * abs(props.xc)                          # stress in x
+        M_about_x = max(0.0kip * u"ft", abs(Muy_val) - Vu * abs(props.yc))     # stress in y
+        M_about_y = max(0.0kip * u"ft", abs(Mub)     - Vu * abs(props.xc))     # stress in x
 
         β_g = punching_β(c1, c2; shape = geom_shape)
         # αs by resisting side count (ACI 421.3R-15 §4.8): the re-entrant section

@@ -482,7 +482,8 @@ Convenience constructor from segment indices and total length.
 function Column(seg_indices::Vector{Int}, L::T; Lb=L, Kx=1.0, Ky=1.0, Cb=1.0,
                 group_id=nothing, vertex_idx=0, c1=nothing, c2=nothing,
                 story=0, position=:interior, boundary_edge_dirs=NTuple{2, Float64}[],
-                braced=true, story_properties=nothing) where T
+                braced=true, story_properties=nothing,
+                corner_kind=:none, corner_angle=0.0) where T
     base = MemberBase{T}(
         segment_indices=seg_indices, L=L, Lb=Lb,
         Kx=Float64(Kx), Ky=Float64(Ky), Cb=Float64(Cb),
@@ -490,7 +491,8 @@ function Column(seg_indices::Vector{Int}, L::T; Lb=L, Kx=1.0, Ky=1.0, Cb=1.0,
     )
     Column{T}(base=base, vertex_idx=vertex_idx, c1=c1, c2=c2,
               story=story, position=position, boundary_edge_dirs=boundary_edge_dirs,
-              braced=braced, story_properties=story_properties)
+              braced=braced, story_properties=story_properties,
+              corner_kind=corner_kind, corner_angle=Float64(corner_angle))
 end
 
 """Single-segment column convenience: wraps the index in a vector."""

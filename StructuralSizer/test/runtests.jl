@@ -20,6 +20,11 @@ using Asap  # custom units (kip, ksi, ksf, psf, etc.)
 
 @testset "StructuralSizer Tests" begin
 
+    # ─── Loads ───────────────────────────────────────────────────────────
+    @testset "Loads" begin
+        include("loads/test_seismic_elf.jl")
+    end
+
     # ─── Vault ───────────────────────────────────────────────────────────
     @testset "Vault" begin
         include("haile_vault/test_vault.jl")
@@ -74,6 +79,7 @@ using Asap  # custom units (kip, ksi, ksf, psf, etc.)
         include("concrete_beam/test_tbeam.jl")
         include("concrete_beam/test_tbeam_optimization.jl")
         include("concrete_beam/test_tbeam_tributary_flange.jl")
+        include("concrete_beam/test_tbeam_per_station.jl")
         include("concrete_beam/test_signed_demands.jl")
     end
 

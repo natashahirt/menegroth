@@ -2813,8 +2813,9 @@ For each beam group:
 2. Extracts slab thickness (`hf`) as the minimum across adjacent slabs
 3. Determines beam position (`:interior` or `:edge`) from `edge_face_counts`
    — boundary edges (count=1) indicate edge beams
-4. Reads the beam's max-envelope tributary width (`tributary_width_envelope`) as the clear spacing `sw`
-5. Computes effective flange width via `effective_flange_width`
+4. Reads each beam's per-side tributary profiles (`beam_side_profiles`)
+5. Computes the effective flange width at the governing sagging station via
+   `governing_flange_width` (ACI 318-11 §8.12.2 / §8.12.3 applied per station)
 
 Groups without adjacent slabs get `bf = nothing`, `hf = nothing`.
 
@@ -2828,7 +2829,6 @@ function _compute_flange_params(
     bw_default::Unitful.Length = 12.0u"inch",
 )
     skel = struc.skeleton
-    efc = skel.geometry.edge_face_counts
 
     # Build edge → slab thickness mapping
     edge_slab_hf = Dict{Int, Vector{typeof(1.0u"m")}}()
@@ -2853,37 +2853,15 @@ function _compute_flange_params(
 
         slab_hfs = typeof(1.0u"m")[]
         sizehint!(slab_hfs, 4)  # typical: 1-4 edges per member group
-        max_face_count = 0
-        trib_w_m = 0.0  # meters
+        beam_idxs = Int[]
 
         for m_idx in mg.member_indices
             m = member_array[m_idx]
-
-            # Tributary width (beam spacing proxy). Collapse the beam's variable
-            # tributary profile w(s) to a single representative clear spacing sw
-            # via the max envelope w_max = max_s w(s).
-            #
-            # ENGINEERING JUDGMENT: ACI 318-11 §8.12.2 (interior) / §8.12.3 (edge)
-            # (corpus: aci-318-11, PDF p.119) define the effective flange width
-            # from the clear web spacing sw but do not prescribe how to collapse a
-            # spatially varying tributary to a single sw. `effective_flange_width`
-            # caps each overhang at the least of {8·hf (edge 6·hf), sw/2,
-            # ln/8 (edge ln/12)}, so the sw term can only *reduce* bf; taking the
-            # max spacing is the least-reducing choice and reproduces the prior
-            # scalar behavior exactly when the profile is constant. This is NOT a
-            # literal code requirement — per-station bf(x) is preferred once the
-            # section checks accept a variable width.
-            tw = tributary_width_envelope(m)
-            if !isnothing(tw)
-                tw_m = tw isa Unitful.Quantity ? ustrip(u"m", tw) : Float64(tw)
-                trib_w_m = max(trib_w_m, tw_m)
-            end
-
+            push!(beam_idxs, m_idx)
             for seg_idx in segment_indices(m)
                 edge_idx = struc.segments[seg_idx].edge_idx
                 if haskey(edge_slab_hf, edge_idx)
                     append!(slab_hfs, edge_slab_hf[edge_idx])
-                    max_face_count = max(max_face_count, get(efc, edge_idx, 0))
                 end
             end
         end
@@ -2894,16 +2872,27 @@ function _compute_flange_params(
         hf = minimum(slab_hfs)
         hf_vec[g_idx] = hf
 
-        # Position: boundary edge (count=1) → :edge, interior (count≥2) → :interior
-        pos = max_face_count >= 2 ? :interior : :edge
-
-        # Span and spacing
+        # Span used for the §8.12.2 / §8.12.3 length caps. Same center-to-center
+        # group length the previous scalar path passed as `ln`.
         ln = L_totals[g_idx] * u"m"
-        sw = trib_w_m > 0 ? trib_w_m * u"m" : ln / 4  # fallback
 
-        bf = StructuralSizer.effective_flange_width(
-            bw=bw_default, hf=hf, sw=sw, ln=ln, position=pos)
-        bf_vec[g_idx] = bf
+        # Per beam: bf at the sagging station that maximizes M⁺/bf, from the
+        # per-side tributary profiles (ACI 318-11 §8.12.2 / §8.12.3, corpus:
+        # aci-318-11, PDF p. 119). A group shares one section, so the group
+        # width is the narrowest of those governing widths.
+        bf_group = nothing
+        for m_idx in beam_idxs
+            m = member_array[m_idx]
+            left, right = beam_side_profiles(struc, m)
+            (left === nothing && right === nothing) && continue
+            M_of_s, demand_bps = beam_signed_moment_field(struc, m)
+            bf_m = StructuralSizer.governing_flange_width(
+                bw_default, hf, ln, M_of_s;
+                left = left, right = right, extra_breakpoints = demand_bps)
+            bf_group = bf_group === nothing ? bf_m : min(bf_group, bf_m)
+        end
+        bf_group === nothing && continue
+        bf_vec[g_idx] = bf_group
     end
 
     return bf_vec, hf_vec
@@ -2938,8 +2927,8 @@ results and passes them through to the ACI 318 beam checker. When Nu > 0
 
 When `ConcreteBeamOptions.include_flange = true`, the dispatcher automatically:
 - Reads slab thicknesses from `struc.slabs` (slabs must be sized first)
-- Computes effective flange widths per ACI 318-11 §8.12.2 using beam
-  tributary widths and edge/interior classification
+- Computes effective flange widths per ACI 318-11 §8.12.2 / §8.12.3 at the
+  governing sagging station of each beam's per-side tributary profile
 - Routes to `size_tbeams` (discrete) or `size_rc_tbeams_nlp` (NLP)
 
 # Example

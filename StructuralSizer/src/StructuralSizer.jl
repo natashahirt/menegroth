@@ -157,6 +157,16 @@ export PatternLoadCase, FULL_LOAD, CHECKERBOARD_ODD, CHECKERBOARD_EVEN, ADJACENT
 export requires_pattern_loading, generate_load_patterns, apply_load_pattern
 export factored_pattern_loads, pattern_case_name
 
+# --- Seismic ELF demand (ASCE 7-22 §12.8) ---
+export seismic_response_coefficient, seismic_base_shear
+export vertical_distribution_exponent, vertical_distribution
+export accidental_eccentricity, torsional_amplification
+export design_earthquake_displacement, maximum_considered_displacement
+export design_story_drift, edge_design_story_drift
+export allowable_story_drift, drift_live_load_factor
+export stability_coefficient, stability_coefficient_limit
+export pdelta_displacement_multiplier
+
 # --- Materials ---
 export Metal, StructuralSteel, RebarSteel, Concrete, ReinforcedConcreteMaterial
 export Timber, NDSChecker
@@ -284,7 +294,8 @@ export is_tension_controlled, flexure_phi
 export beam_max_bar_spacing, select_beam_bars
 export max_singly_reinforced, compression_steel_stress
 export design_beam_flexure_doubly, design_beam_flexure
-export effective_flange_width, design_tbeam_flexure
+export effective_flange_width, flange_width_at_station, governing_flange_width
+export design_tbeam_flexure
 export moment_weighted_avg_depth, effective_flange_width_from_tributary
 export Vc_beam, Vs_max_beam, Vs_required
 export min_shear_reinforcement, max_stirrup_spacing

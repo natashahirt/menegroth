@@ -83,6 +83,91 @@ function effective_flange_width(;
     end
 end
 
+"""
+    flange_width_at_station(bw, hf, ln, s; left=nothing, right=nothing) -> Length
+
+Effective T-beam flange width at normalized station `s ∈ [0, 1]`.
+
+Each side's overhang is the least of the ACI 318-11 limits (corpus: aci-318-11,
+PDF p. 119), using that side's tributary extent `d(s)`:
+
+  • Slab both sides (§8.12.2): overhang ≤ `8·hf`, ≤ `ln/8`, and ≤ `d(s)`.
+  • Slab one side only (§8.12.3): the present overhang ≤ `6·hf`, ≤ `ln/12`,
+    and ≤ `d(s)`; the missing side contributes no overhang.
+
+`bf = bw + overhang_left + overhang_right`.
+
+# Span cap
+§8.12.2 limits the *total* flange width to one-quarter of the span. The per-side
+`ln/8` (and the edge `ln/12`, which §8.12.3 states directly) is the same
+per-side form as [`effective_flange_width`](@ref). A constant `d = sw/2` therefore
+returns that function's result exactly.
+
+# Clear distance
+§8.12.2(b) / §8.12.3(c) limit the overhang to one-half the clear distance to the
+next web. `d(s)` is the per-side tributary extent perpendicular to the beam, the
+same stand-in for that half-distance already used by
+[`effective_flange_width_from_tributary`](@ref) and by the steel §I3.1a path.
+A missing side (`nothing`) is a slab edge, not a zero-width bay.
+"""
+function flange_width_at_station(bw::Length, hf::Length, ln::Length, s::Real;
+                                 left::Union{SideExtentProfile, Nothing} = nothing,
+                                 right::Union{SideExtentProfile, Nothing} = nothing)
+    one_side = isnothing(left) || isnothing(right)
+    overhang(p) = _aci_side_overhang(p, s, hf, ln, one_side)
+    return bw + overhang(left) + overhang(right)
+end
+
+"""ACI 318-11 §8.12.2 / §8.12.3 overhang on one side (corpus: aci-318-11, PDF p. 119)."""
+function _aci_side_overhang(p::Union{SideExtentProfile, Nothing}, s::Real,
+                            hf::Length, ln::Length, one_side::Bool)
+    p === nothing && return zero(hf)
+    d = _sample_extent(p, s) * u"m"
+    # §8.12.3 when the slab exists on one side only; §8.12.2 otherwise.
+    # `ln/8` is the per-side form of the §8.12.2 total cap `bf ≤ span/4`
+    # (see `effective_flange_width`). `ln/12` is §8.12.3(a) verbatim.
+    capped = one_side ? min(6 * hf, ln / 12, d) : min(8 * hf, ln / 8, d)
+    return capped
+end
+
+"""
+    governing_flange_width(bw, hf, ln, demand_of_s; left=nothing, right=nothing,
+                           extra_breakpoints=Float64[]) -> Length
+
+Flange width at the station that governs a prismatic T-beam, given the exact
+signed demand `demand_of_s(s) -> Moment` (sagging positive).
+
+The station maximizes `M⁺(s) / bf(s)` over the sagging region. Where the Whitney
+block stays in the flange, flexural strength scales with `bf`, so this is the
+demand/capacity peak. Where `bf(s)` is constant the ratio peaks at maximum
+sagging moment and `bf` is that constant width, matching
+[`effective_flange_width`](@ref). Hogging stations are skipped: the flange is in
+tension there and §8.12 does not add it. If the demand never sags, the width at
+midspan is returned.
+"""
+function governing_flange_width(bw::Length, hf::Length, ln::Length, demand_of_s;
+                                left::Union{SideExtentProfile, Nothing} = nothing,
+                                right::Union{SideExtentProfile, Nothing} = nothing,
+                                extra_breakpoints::AbstractVector{Float64} = Float64[])
+    bf_of = s -> flange_width_at_station(bw, hf, ln, s; left = left, right = right)
+    (left === nothing && right === nothing) && return bf_of(0.5)
+
+    score = function(s)
+        raw = demand_of_s(s)
+        Mv = raw isa Unitful.Quantity ? ustrip(u"N*m", uconvert(u"N*m", raw)) : Float64(raw)
+        Mv <= 0 && return 0.0
+        b = ustrip(u"m", uconvert(u"m", bf_of(s)))
+        return b > 1e-12 ? Mv / b : Inf
+    end
+
+    bp = beff_breakpoints(left, right)
+    isempty(extra_breakpoints) ||
+        (bp = _unique_sorted(vcat(bp, collect(Float64, extra_breakpoints))))
+    s_star, peak = governing_station(score, bp)
+    peak == 0.0 && (s_star = 0.5)
+    return bf_of(s_star)
+end
+
 # ==============================================================================
 # T-Beam Flexural Design
 # ==============================================================================

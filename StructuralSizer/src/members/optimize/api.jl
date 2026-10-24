@@ -47,14 +47,15 @@ function _resolve_demand_composite(opts, composite_kw, i::Int)
             "composite vector must have one entry per member (got " *
             "$(length(composite_kw)) for index $i)"))
         entry = composite_kw[i]
-        if entry isa CompositeContext || entry === true
+        if entry isa CompositeContext || entry isa PerStationComposite || entry === true
             return entry
         elseif isnothing(entry) && opts_composite
             return true
         else
             return entry
         end
-    elseif composite_kw isa CompositeContext || composite_kw === true
+    elseif composite_kw isa CompositeContext || composite_kw isa PerStationComposite ||
+            composite_kw === true
         return composite_kw
     elseif opts_composite
         return true
@@ -66,7 +67,8 @@ end
 """True if any member resolves to a real `CompositeContext` (Chapter I path)."""
 function _has_composite_context(opts, composite_kw, n::Int)
     for i in 1:n
-        _resolve_demand_composite(opts, composite_kw, i) isa CompositeContext && return true
+        c = _resolve_demand_composite(opts, composite_kw, i)
+        (c isa CompositeContext || c isa PerStationComposite) && return true
     end
     return false
 end
@@ -151,7 +153,7 @@ function size_columns(
     catalog::Union{Nothing, AbstractVector} = nothing,
     feasible::Union{Nothing, Vector{Vector{Int}}} = nothing,
     mip_start::Union{Nothing, Vector{Int}} = nothing,
-    composite::Union{Nothing, Bool, CompositeContext, AbstractVector} = nothing,
+    composite::Union{Nothing, Bool, CompositeContext, PerStationComposite, AbstractVector} = nothing,
     mip_gap::Real = 1e-4,
     output_flag::Integer = 0,
     tc::Union{Nothing, TraceCollector} = nothing,
@@ -499,7 +501,7 @@ function _size_steel_columns_nlp(
     opts::SteelMemberOptions;
     Muy::Vector = zeros_like(Mux),
     Mux_neg::Vector = Mux,
-    composite::Union{Nothing, Bool, CompositeContext, AbstractVector} = nothing,
+    composite::Union{Nothing, Bool, CompositeContext, PerStationComposite, AbstractVector} = nothing,
 )
     max_d = isfinite(ustrip(u"mm", opts.max_depth)) ? opts.max_depth : 36.0u"inch"
     Muy_vec = length(Muy) >= length(Pu) ? Muy : [i <= length(Muy) ? Muy[i] : 0.0 for i in 1:length(Pu)]
@@ -858,7 +860,7 @@ function size_beams(
     catalog::Union{Nothing, AbstractVector} = nothing,
     feasible::Union{Nothing, Vector{Vector{Int}}} = nothing,
     mip_start::Union{Nothing, Vector{Int}} = nothing,
-    composite::Union{Nothing, Bool, CompositeContext, AbstractVector} = nothing,
+    composite::Union{Nothing, Bool, CompositeContext, PerStationComposite, AbstractVector} = nothing,
     mip_gap::Real = 1e-4,
     output_flag::Integer = 0,
     tc::Union{Nothing, TraceCollector} = nothing,
@@ -1847,7 +1849,7 @@ function size_w_columns_nlp(
     opts::NLPWOptions;
     Muy::Vector = zeros(length(Pu)),
     Mux_neg::Vector = Mux,
-    composite::Union{Nothing, Bool, CompositeContext, AbstractVector} = nothing,
+    composite::Union{Nothing, Bool, CompositeContext, PerStationComposite, AbstractVector} = nothing,
 )
     n = length(Pu)
     n == length(Mux) || throw(ArgumentError("Pu and Mux must have same length"))

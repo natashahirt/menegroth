@@ -282,6 +282,8 @@ export composite_stud_contribution
 # Per-station composite check (AISC I3.1a/I3.2a/I3.2b): irregular/continuous beams
 export SideExtentProfile, b_eff_at_station, beff_breakpoints, phiMn_at_station
 export governing_station, composite_dcr_at_station, governing_composite_station
+export BeamSaggingField, CompositeSaggingStation, PerStationComposite
+export governing_sagging_station, context_at_sagging_station
 
 # --- ACI 318: material utilities ---
 export beta1, Ec, Ec_ksi, fr, fc_ksi, fy_ksi, Es_ksi, εcu, β1

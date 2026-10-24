@@ -428,3 +428,112 @@ region is short. This replaces the simply-supported `5wL⁴/384EI` form, which i
 invalid under continuity.
 """
 composite_deflection_scale(section, I_LB) = ustrip(section.Ix / I_LB)
+
+# -----------------------------------------------------------------------------
+# Production payload for size_beams! (one PerStationComposite per group)
+# -----------------------------------------------------------------------------
+
+"""
+Nominal headed stud stored on the sizing context.
+
+Full-composite sizing sets `ΣQn = Cf(b_eff)` (AISC 360-16 §I3.2a, corpus:
+aisc-360-16, PDF p. 151), so stud shear strength does not enter `ϕMn`. The
+anchor only fills `CompositeContext`. Dimensions match the Chapter I test
+fixture and `Stud_51`: 3/4 in × 5 in, Fu = 65 ksi, Fy = 51 ksi.
+"""
+function _nominal_full_composite_anchor()
+    HeadedStudAnchor(0.75u"inch", 5.0u"inch", 65.0u"ksi", 51.0u"ksi", 490.0u"lb/ft^3")
+end
+
+"""Slab thickness (m) adjacent to `beams`, or `nothing` when no slab is sized."""
+function _group_slab_thickness(struc::BuildingStructure, beams)
+    skel = struc.skeleton
+    depths = typeof(1.0u"m")[]
+    edge_set = Set{Int}()
+    for beam in beams
+        for si in segment_indices(beam)
+            push!(edge_set, struc.segments[si].edge_idx)
+        end
+    end
+    for slab in struc.slabs
+        hits = false
+        for cell_idx in slab.cell_indices
+            face_idx = struc.cells[cell_idx].face_idx
+            if any(e -> e in edge_set, skel.face_edge_indices[face_idx])
+                hits = true
+                break
+            end
+        end
+        hits || continue
+        h = StructuralSizer.total_depth(slab.result)
+        push!(depths, h isa Unitful.Quantity ? uconvert(u"m", h) : h * u"m")
+    end
+    return isempty(depths) ? nothing : minimum(depths)
+end
+
+"""
+    composite_group_payload(struc, beams, L_beam, concrete, t_slab, Es;
+        anchor=nothing, shored=false, Lb_const=nothing,
+        Asr=0.0u"mm^2", Fysr=0.0u"MPa", neg_moment=false) -> PerStationComposite
+
+One [`PerStationComposite`](@ref) for a beam group. Slab concrete and thickness
+come from the caller (the building cascade / sized slabs). Each beam keeps its
+per-side tributary profiles and exact moment field so the checker can re-solve
+the sagging station per candidate section.
+
+`Asr` stays caller-supplied. `neg_moment` defaults to false, so hogging uses
+Chapter F until developed slab reinforcement is provided (§I3.2b(b)–(c) are
+not invented here).
+"""
+function composite_group_payload(
+    struc::BuildingStructure, beams, L_beam, concrete, t_slab, Es;
+    anchor = nothing,
+    shored::Bool = false,
+    Lb_const = nothing,
+    Asr = 0.0u"mm^2",
+    Fysr = 0.0u"MPa",
+    neg_moment::Bool = false,
+)
+    L = L_beam isa Unitful.Quantity ? L_beam : L_beam * u"m"
+    anc = anchor === nothing ? _nominal_full_composite_anchor() : anchor
+    # Zero spacing: a side with no profile contributes no width. Real sides
+    # come from the profiles, and the checker restuffs spacing at the station.
+    slab = SolidSlabOnBeam(t_slab, concrete.fc′, concrete.E, concrete.ρ, Es,
+                           0.0u"m", 0.0u"m")
+    fields = map(beams) do beam
+        left, right = beam_side_profiles(struc, beam)
+        M_of_s, bps = beam_signed_moment_field(struc, beam)
+        BeamSaggingField(left, right, M_of_s, collect(Float64, bps))
+    end
+    lbc = Lb_const === nothing ? L : Lb_const
+    ctx = CompositeContext(slab, anc, L; shored = shored, Lb_const = lbc,
+                           Asr = Asr, Fysr = Fysr, neg_moment = neg_moment)
+    return PerStationComposite(ctx, fields)
+end
+
+"""
+    composite_payloads_for_groups(struc, group_ids, L_totals, concrete, Es;
+        t_slab=nothing, anchor=nothing) -> Vector{PerStationComposite}
+
+One payload per steel beam group. `t_slab`, when given, is used for every
+group; otherwise the thickness is the minimum sized slab on the group's edges.
+"""
+function composite_payloads_for_groups(
+    struc::BuildingStructure, group_ids, L_totals, concrete, Es;
+    t_slab = nothing, anchor = nothing,
+)
+    concrete === nothing && throw(ArgumentError(
+        "SteelBeamOptions.composite=true needs the slab concrete (fc′, E, density). " *
+        "Pass composite_concrete= to size_beams!."))
+    map(enumerate(group_ids)) do (g_idx, gid)
+        mg = struc.member_groups[gid]
+        beams = [struc.beams[i] for i in mg.member_indices]
+        t = t_slab === nothing ? _group_slab_thickness(struc, beams) : t_slab
+        t === nothing && throw(ArgumentError(
+            "SteelBeamOptions.composite=true needs a slab thickness for beam group $(gid). " *
+            "Pass composite_t_slab= or size the slabs first."))
+        tq = t isa Unitful.Quantity ? t : t * u"m"
+        composite_group_payload(struc, beams, L_totals[g_idx] * u"m",
+                                concrete, tq, Es; anchor = anchor)
+    end
+end

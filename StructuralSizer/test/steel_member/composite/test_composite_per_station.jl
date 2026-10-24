@@ -284,3 +284,59 @@ end
                        2 * (Lshort / 8); rtol = 1e-9)
     end
 end
+
+# ==============================================================================
+# Sizing payload — governing sagging station reduces to the scalar checker
+# ==============================================================================
+
+@testset "Per-station sizing payload reduces to scalar Chapter I" begin
+    fix = _per_station_fixture()
+    L = 30.0u"ft"
+    # Per-side extent = half the fixture spacing, so §I3.1a matches get_b_eff.
+    d_m = ustrip(u"m", fix.slab.beam_spacing_left / 2)
+    left = SideExtentProfile(d_m)
+    right = SideExtentProfile(d_m)
+    M_peak = 200.0u"kip*ft"
+    demand = _parabolic_M(M_peak)
+
+    anchor = HeadedStudAnchor(0.75u"inch", 5.0u"inch", 65.0u"ksi", 51.0u"ksi",
+                              490.0u"lb/ft^3")
+    ctx = CompositeContext(fix.slab, anchor, L; shored = false, Lb_const = 10.0u"ft")
+
+    checker = AISCChecker(; deflection_limit = nothing, total_deflection_limit = nothing,
+                          max_depth = Inf)
+    cache = StructuralSizer.create_cache(checker, 1)
+    StructuralSizer.precompute_capacities!(checker, cache, [fix.section], fix.material, MinWeight())
+    ϕMnx_steel = StructuralSizer._get_ϕMnx_cached!(cache, 1, ustrip(u"m", L), 1.0,
+                                                   fix.section, fix.material, checker.ϕ_b)
+
+    g = governing_sagging_station(fix.section, fix.material, fix.slab, L, demand, ϕMnx_steel;
+                                  left = left, right = right, ϕ = checker.ϕ_b)
+    @test isapprox(g.s_star, 0.5; atol = 1e-3)
+    @test isapprox(g.b_eff, get_b_eff(fix.slab, L); rtol = 1e-9)
+    @test isapprox(g.M_pos, ustrip(u"N*m", uconvert(u"N*m", M_peak)); rtol = 1e-8)
+
+    # Restuffed spacings reproduce the same total width through scalar get_b_eff.
+    st = CompositeSaggingStation(g.b_eff, g.M_pos * u"N*m", g.spacing_left, g.spacing_right)
+    ctx_st = context_at_sagging_station(ctx, st)
+    @test isapprox(get_b_eff(ctx_st.slab, ctx_st.L_beam), g.b_eff; rtol = 1e-9)
+
+    M_Nm = ustrip(u"N*m", uconvert(u"N*m", M_peak))
+    geom = SteelMemberGeometry(L; Lb = L)
+    demand_env = MemberDemand(1; Mux = M_Nm, Mux_pos = M_Nm, Mux_neg = 0.0,
+                              Vu_strong = ustrip(u"N", uconvert(u"N", 20.0u"kip")))
+    field = BeamSaggingField(left, right, demand, Float64[0.0, 1.0])
+    psc = PerStationComposite(ctx, [field])
+
+    ok_scalar = StructuralSizer.is_feasible(checker, cache, 1, fix.section, fix.material,
+                                            demand_env, geom, ctx)
+    ok_station = StructuralSizer.is_feasible(checker, cache, 1, fix.section, fix.material,
+                                             demand_env, geom, psc)
+    @test ok_scalar == ok_station
+
+    # A larger envelope must still fail construction. The station moment stays moderate.
+    huge = ustrip(u"N*m", uconvert(u"N*m", 8000.0u"kip*ft"))
+    demand_huge = MemberDemand(1; Mux = huge, Mux_pos = huge, Mux_neg = 0.0, Vu_strong = 0.0)
+    @test StructuralSizer.is_feasible(checker, cache, 1, fix.section, fix.material,
+                                      demand_huge, geom, psc) == false
+end

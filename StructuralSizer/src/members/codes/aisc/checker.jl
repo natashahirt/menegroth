@@ -247,9 +247,14 @@ function is_feasible(
     # Only a real CompositeContext has slab/anchor data for Chapter I.
     # `true` is the SteelBeamOptions.composite sentinel (no slab data);
     # hogging Chapter F is applied below from Mux_neg, not from this flag.
-    if demand.composite isa CompositeContext && section isa ISymmSection
-        return is_feasible(checker, cache, j, section, material, demand, geometry,
-                           demand.composite)
+    if section isa ISymmSection
+        if demand.composite isa PerStationComposite
+            return is_feasible(checker, cache, j, section, material, demand, geometry,
+                               demand.composite)
+        elseif demand.composite isa CompositeContext
+            return is_feasible(checker, cache, j, section, material, demand, geometry,
+                               demand.composite)
+        end
     end
 
     # Extract demand values (SI: N, N·m)
@@ -579,10 +584,15 @@ function is_feasible(
     material::StructuralSteel,
     demand::MemberDemand,
     geometry::SteelMemberGeometry,
-    ctx::CompositeContext
+    ctx::CompositeContext;
+    strength_Mux_pos::Union{Nothing, Float64} = nothing,
 )::Bool
     Mux = to_newton_meters(demand.Mux)
-    Mux_pos = to_newton_meters(demand.Mux_pos)
+    # Envelope stays on construction (§I3.1b). `strength_Mux_pos` is the
+    # sagging moment at the governing station when the caller has a
+    # per-station width; omitting it keeps the envelope (scalar path).
+    Mux_pos_env = to_newton_meters(demand.Mux_pos)
+    Mux_pos = strength_Mux_pos === nothing ? Mux_pos_env : strength_Mux_pos
     Mux_neg = to_newton_meters(demand.Mux_neg)
     Pu_c = to_newtons(demand.Pu_c)
     Pu_t = to_newtons(demand.Pu_t)
@@ -612,7 +622,7 @@ function is_feasible(
     if !ctx.shored
         Lb_const_m = ustrip(u"m", ctx.Lb_const)
         ϕMn_const = _get_ϕMnx_cached!(cache, j, Lb_const_m, 1.0, section, material, checker.ϕ_b)
-        ϕMn_const >= max(abs(Mux), Mux_pos, Mux_neg) || return false
+        ϕMn_const >= max(abs(Mux), Mux_pos_env, Mux_neg) || return false
     end
 
     # --- Positive composite flexural capacity (I3.2a) ---
@@ -716,6 +726,46 @@ function is_feasible(
     return true
 end
 
+"""
+Per-station composite feasibility.
+
+Each beam in the group is checked at the sagging station that maximizes
+`M⁺(s) / ϕMn(b_eff(s))` for this section (AISC 360-16 §I3.1a / §I3.2a,
+corpus: aisc-360-16, PDF pp. 150–151). The scalar composite check then runs
+at that station's width and moment. Construction (§I3.1b) and hogging
+(§I3.2b) keep the demand envelopes.
+"""
+function is_feasible(
+    checker::AISCChecker,
+    cache::AISCCapacityCache,
+    j::Int,
+    section::ISymmSection,
+    material::StructuralSteel,
+    demand::MemberDemand,
+    geometry::SteelMemberGeometry,
+    psc::PerStationComposite,
+)::Bool
+    isempty(psc.fields) &&
+        return is_feasible(checker, cache, j, section, material, demand, geometry, psc.ctx)
+
+    ϕMnx_steel = _get_ϕMnx_cached!(cache, j, to_meters(geometry.Lb), geometry.Cb,
+                                   section, material, checker.ϕ_b)
+    for field in psc.fields
+        g = governing_sagging_station(section, material, psc.ctx.slab, psc.ctx.L_beam,
+                                      field.demand_of_s, ϕMnx_steel;
+                                      left = field.left, right = field.right,
+                                      extra_breakpoints = field.breakpoints,
+                                      ϕ = checker.ϕ_b)
+        g.dcr <= 1.0 || return false
+        st = CompositeSaggingStation(g.b_eff, g.M_pos * u"N*m",
+                                     g.spacing_left, g.spacing_right)
+        ctx_i = context_at_sagging_station(psc.ctx, st)
+        is_feasible(checker, cache, j, section, material, demand, geometry, ctx_i;
+                    strength_Mux_pos = g.M_pos) || return false
+    end
+    return true
+end
+
 # ==============================================================================
 # Composite Objective: Add Stud Cost
 # ==============================================================================
@@ -786,9 +836,14 @@ function explain_feasibility(
     demand::MemberDemand,
     geometry::SteelMemberGeometry
 )::FeasibilityExplanation
-    if demand.composite isa CompositeContext && section isa ISymmSection
-        return explain_feasibility(checker, cache, j, section, material, demand, geometry,
-                                   demand.composite)
+    if section isa ISymmSection
+        if demand.composite isa PerStationComposite
+            return explain_feasibility(checker, cache, j, section, material, demand, geometry,
+                                       demand.composite)
+        elseif demand.composite isa CompositeContext
+            return explain_feasibility(checker, cache, j, section, material, demand, geometry,
+                                       demand.composite)
+        end
     end
 
     checks = CheckResult[]
@@ -981,12 +1036,14 @@ function explain_feasibility(
     material::StructuralSteel,
     demand::MemberDemand,
     geometry::SteelMemberGeometry,
-    ctx::CompositeContext
+    ctx::CompositeContext;
+    strength_Mux_pos::Union{Nothing, Float64} = nothing,
 )::FeasibilityExplanation
     checks = CheckResult[]
 
     Mux = to_newton_meters(demand.Mux)
-    Mux_pos = to_newton_meters(demand.Mux_pos)
+    Mux_pos_env = to_newton_meters(demand.Mux_pos)
+    Mux_pos = strength_Mux_pos === nothing ? Mux_pos_env : strength_Mux_pos
     Mux_neg = to_newton_meters(demand.Mux_neg)
     Pu_c = to_newtons(demand.Pu_c)
     Pu_t = to_newtons(demand.Pu_t)
@@ -1027,7 +1084,7 @@ function explain_feasibility(
     if !ctx.shored
         Lb_const_m = ustrip(u"m", ctx.Lb_const)
         ϕMn_const = _get_ϕMnx_cached!(cache, j, Lb_const_m, 1.0, section, material, checker.ϕ_b)
-        Mu_const = max(abs(Mux), Mux_pos, Mux_neg)
+        Mu_const = max(abs(Mux), Mux_pos_env, Mux_neg)
         c_ratio = ϕMn_const > 0 ? Mu_const / ϕMn_const : (Mu_const > 0 ? Inf : 0.0)
         push!(checks, CheckResult("construction_flexure", ϕMn_const >= Mu_const,
               c_ratio, Mu_const, ϕMn_const, "AISC 360-16 I3.1b"))
@@ -1162,4 +1219,40 @@ function explain_feasibility(
     end
 
     FeasibilityExplanation(all_pass, checks, gov.name, gov.ratio)
+end
+
+"""Explain the beam in the group whose governing sagging station is the strictest."""
+function explain_feasibility(
+    checker::AISCChecker,
+    cache::AISCCapacityCache,
+    j::Int,
+    section::ISymmSection,
+    material::StructuralSteel,
+    demand::MemberDemand,
+    geometry::SteelMemberGeometry,
+    psc::PerStationComposite,
+)::FeasibilityExplanation
+    isempty(psc.fields) &&
+        return explain_feasibility(checker, cache, j, section, material, demand, geometry, psc.ctx)
+
+    ϕMnx_steel = _get_ϕMnx_cached!(cache, j, to_meters(geometry.Lb), geometry.Cb,
+                                   section, material, checker.ϕ_b)
+    best = nothing
+    for field in psc.fields
+        g = governing_sagging_station(section, material, psc.ctx.slab, psc.ctx.L_beam,
+                                      field.demand_of_s, ϕMnx_steel;
+                                      left = field.left, right = field.right,
+                                      extra_breakpoints = field.breakpoints,
+                                      ϕ = checker.ϕ_b)
+        st = CompositeSaggingStation(g.b_eff, g.M_pos * u"N*m",
+                                     g.spacing_left, g.spacing_right)
+        ctx_i = context_at_sagging_station(psc.ctx, st)
+        ex = explain_feasibility(checker, cache, j, section, material, demand, geometry, ctx_i;
+                                 strength_Mux_pos = g.M_pos)
+        if best === nothing || (!ex.passed && best.passed) ||
+                (ex.passed == best.passed && ex.governing_ratio > best.governing_ratio)
+            best = ex
+        end
+    end
+    return best
 end

@@ -571,3 +571,48 @@ end
         @test res.I_LB > section.Ix                           # composite stiffer than bare steel
     end
 end
+
+@testset "size_beams! wires per-station composite" begin
+    struc, ibeam, _ebeam = _build_two_bay()
+    _solve_two_bay_frame!(struc)
+    conc = Concrete(_EC, _FC, _WC, 0.20, 0.1)
+
+    payload = composite_group_payload(struc, [ibeam], member_length(ibeam),
+                                      conc, _T_SLAB, _ES)
+    @test payload isa PerStationComposite
+    field = only(payload.fields)
+    section = W("W21X55")
+    g = governing_sagging_station(section, A992_Steel, payload.ctx.slab, payload.ctx.L_beam,
+                                  field.demand_of_s, 1.0e12;
+                                  left = field.left, right = field.right,
+                                  extra_breakpoints = field.breakpoints)
+    b_direct = b_eff_at_station(payload.ctx.slab, payload.ctx.L_beam, g.s_star;
+                                left = field.left, right = field.right)
+    @test isapprox(g.b_eff, b_direct; rtol = 1e-9)
+    @test g.M_pos > 0
+    st = CompositeSaggingStation(g.b_eff, g.M_pos * u"N*m", g.spacing_left, g.spacing_right)
+    ctx_st = context_at_sagging_station(payload.ctx, st)
+    @test isapprox(get_b_eff(ctx_st.slab, ctx_st.L_beam), g.b_eff; rtol = 1e-9)
+
+    # The fixture stores only TributaryLoad, so size_beams! can add self-weight.
+    widen = Asap.AbstractLoad[]
+    append!(widen, struc.asap_model.loads)
+    struc.asap_model.loads = widen
+
+    opts = SteelBeamOptions(composite = true,
+                             custom_catalog = [W("W21X55"), W("W27X84")],
+                             deflection_limit = nothing,
+                             total_deflection_limit = nothing)
+    size_beams!(struc, opts; reanalyze = false,
+                composite_concrete = conc, composite_t_slab = _T_SLAB)
+    @test !isempty(struc.member_groups)
+    @test all(g -> g.section !== nothing, values(struc.member_groups))
+
+    struc_bare, _, _ = _build_two_bay()
+    _solve_two_bay_frame!(struc_bare)
+    bare_loads = Asap.AbstractLoad[]
+    append!(bare_loads, struc_bare.asap_model.loads)
+    struc_bare.asap_model.loads = bare_loads
+    @test_throws ArgumentError size_beams!(struc_bare, SteelBeamOptions(composite = true);
+                                           reanalyze = false)
+end

@@ -215,6 +215,7 @@ export compute_member_tributaries!
 # context, exact FEM demand field, and the per-station governing check.
 export beam_side_profiles, composite_context_from_beam
 export beam_signed_moment_field, check_composite_beam, composite_deflection_scale
+export composite_group_payload, composite_payloads_for_groups
 export classify_column_position, is_exterior_support  # Column position classification for DDM/EFM
 export slab_material_angle, classify_corner_kind       # Corner refinement (convex vs re-entrant)
 export update_structural_offsets!, structural_center_xy_m  # Architectural → structural centerline

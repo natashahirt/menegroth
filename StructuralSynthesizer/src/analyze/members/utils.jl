@@ -2931,6 +2931,13 @@ When `ConcreteBeamOptions.include_flange = true`, the dispatcher automatically:
   governing sagging station of each beam's per-side tributary profile
 - Routes to `size_tbeams` (discrete) or `size_rc_tbeams_nlp` (NLP)
 
+When `SteelBeamOptions.composite = true`, each beam group is sized with a
+`PerStationComposite`: per-side tributary profiles and the exact moment field,
+re-solved at the sagging station of each candidate section (AISC 360-16
+§I3.1a / §I3.2a). Pass `composite_concrete` (and `composite_t_slab` when slabs
+are not yet sized). Hogging stays on the envelope with §I3.2b; `Asr` is not
+invented. Stud shear strength is not designed — full composite uses `ΣQn = Cf`.
+
 # Example
 ```julia
 # Steel beams with L/360 deflection check
@@ -2956,6 +2963,11 @@ function size_beams!(
     # Default 0.35 keeps callers that do not pass it byte-identical.
     I_factor::Real = 0.35,
     tc::Union{Nothing, StructuralSizer.TraceCollector} = nothing,
+    # Slab concrete for AISC Chapter I when `SteelBeamOptions.composite` is set.
+    # Ignored for concrete and PixelFrame beams, and when composite is false.
+    composite_concrete = nothing,
+    composite_t_slab = nothing,
+    composite_anchor = nothing,
 )
     dp = (hasproperty(struc, :design_parameters) && !isnothing(struc.design_parameters)) ?
          struc.design_parameters : nothing
@@ -3063,9 +3075,16 @@ function size_beams!(
             "drops the kwarg — so it is refused fail-loud")))
     end
 
-    result = _size_beams_impl!(struc, effective_opts, Val(strategy);
-                               resolution, reanalyze, gravity_factor,
-                               member_group_overrides, I_factor)
+    result = if effective_opts isa StructuralSizer.SteelBeamOptions
+        _size_beams_impl!(struc, effective_opts, Val(strategy);
+                          resolution, reanalyze, gravity_factor,
+                          member_group_overrides, I_factor,
+                          composite_concrete, composite_t_slab, composite_anchor)
+    else
+        _size_beams_impl!(struc, effective_opts, Val(strategy);
+                          resolution, reanalyze, gravity_factor,
+                          member_group_overrides, I_factor)
+    end
     StructuralSizer.emit!(tc, :sizing, "size_beams!", "", :exit)
     return result
 end
@@ -3084,6 +3103,9 @@ function _size_beams_impl!(
     # steel path. `_apply_beam_results!` branches per group material, so steel groups never
     # pass I_factor to to_asap_section regardless of this value.
     I_factor::Real = 0.35,
+    composite_concrete = nothing,
+    composite_t_slab = nothing,
+    composite_anchor = nothing,
 )
     skel = struc.skeleton
     edge_ids_in_group = Set{Int}()
@@ -3280,13 +3302,17 @@ function _size_beams_impl!(
     δ_total_vec = [d.δ_max_total for d in demands]
     I_ref_v  = [d.I_ref for d in demands]
 
-    # Forward composite onto size_beams: `member_group_demands` builds
-    # `MemberDemand{Float64,Nothing}` (composite always nothing), so without this
-    # kwarg design_building never hits Chapter I / the composite sentinel even when
-    # `SteelBeamOptions.composite=true`. Prefer a real `CompositeContext` when the
-    # caller supplies one via opts later; the Bool sentinel is what the Sizer API
-    # accepts today (full Chapter I Mn needs CompositeContext on the Sizer checker).
-    composite_kw = opts.composite ? true : nothing
+    # `SteelBeamOptions.composite` builds one PerStationComposite per group from
+    # the per-side tributary profiles and the exact moment field. The checker
+    # re-solves the sagging station for each candidate section. The Bool
+    # sentinel is only the fallback when composite is off.
+    composite_kw = if opts.composite
+        composite_payloads_for_groups(
+            struc, group_ids, L_totals, composite_concrete, opts.material.E;
+            t_slab = composite_t_slab, anchor = composite_anchor)
+    else
+        nothing
+    end
 
     # Run 4 / Phase B ([A-revert]): honor per-group restrictions on STEEL beam
     # groups sourced ONLY from an EFFECTIVE per-design `member_group_overrides`

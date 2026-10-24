@@ -358,3 +358,134 @@ function governing_composite_station(section::ISymmSection, material,
                                    d_rebar = d_rebar, ϕ = ϕ)
     return (; s_star = s_star, dcr_max = dcr_max, rec...)
 end
+
+# ------------------------------------------------------------------------------
+# Sizing payload: re-solve the sagging station for each candidate section
+# ------------------------------------------------------------------------------
+
+"""
+One beam's exact sagging demand field and per-side tributary profiles.
+
+`demand_of_s(s)` returns the signed moment (sagging positive). `breakpoints`
+are the demand-field segment boundaries merged into the governing-station search.
+"""
+struct BeamSaggingField{F}
+    left::Union{SideExtentProfile, Nothing}
+    right::Union{SideExtentProfile, Nothing}
+    demand_of_s::F
+    breakpoints::Vector{Float64}
+end
+
+"""
+Sagging station used to restuff a scalar `CompositeContext`.
+
+`spacing_left` / `spacing_right` are `2 ×` the already-capped per-side
+half-widths, so [`get_b_eff`](@ref) reproduces `b_eff` and does not apply a
+second, tighter `L/8` cap. `M_pos` is the sagging moment at that station.
+"""
+struct CompositeSaggingStation
+    b_eff::typeof(1.0u"m")
+    M_pos::typeof(1.0u"N*m")
+    spacing_left::typeof(1.0u"m")
+    spacing_right::typeof(1.0u"m")
+end
+
+"""
+Per-group composite payload for beam sizing.
+
+`ctx` carries slab material, anchor, span, and the §I3.2b hogging inputs.
+`fields` is one [`BeamSaggingField`](@ref) per beam in the group. The checker
+re-solves the sagging governing station for each candidate section, because
+`ϕMn(b_eff)` is nonlinear in the section. Hogging stays on the demand envelope
+and the §I3.2b gates. Construction (§I3.1b) stays on the demand envelope.
+"""
+struct PerStationComposite{S<:AbstractSlabOnBeam, A<:AbstractSteelAnchor, TA, TP, BF}
+    ctx::CompositeContext{S, A, TA, TP}
+    fields::Vector{BF}
+end
+
+"""Copy `slab` with new center-to-center spacings and no slab-edge distances."""
+function _slab_at_spacings(slab::SolidSlabOnBeam, bsl, bsr)
+    SolidSlabOnBeam(slab.t_slab, slab.fc′, slab.Ec, slab.wc, slab.n,
+                    uconvert(u"m", bsl), uconvert(u"m", bsr), nothing, nothing)
+end
+
+function _slab_at_spacings(slab::DeckSlabOnBeam, bsl, bsr)
+    DeckSlabOnBeam(slab.t_slab, slab.fc′, slab.Ec, slab.wc, slab.n,
+                   slab.hr, slab.wr, slab.deck_orientation,
+                   uconvert(u"m", bsl), uconvert(u"m", bsr), nothing, nothing)
+end
+
+"""`ctx` with slab spacings set so `get_b_eff` equals the station width."""
+function context_at_sagging_station(ctx::CompositeContext, st::CompositeSaggingStation)
+    slab = _slab_at_spacings(ctx.slab, st.spacing_left, st.spacing_right)
+    CompositeContext(slab, ctx.anchor, ctx.L_beam;
+                     shored = ctx.shored, Lb_const = ctx.Lb_const,
+                     Asr = ctx.Asr, Fysr = ctx.Fysr, neg_moment = ctx.neg_moment)
+end
+
+"""
+    governing_sagging_station(section, material, slab, L_beam, demand_of_s,
+        ϕMnx_steel; left, right, extra_breakpoints, ϕ=0.9)
+        -> NamedTuple
+
+Station that maximizes the sagging DCR `M⁺(s) / max(ϕMn(b_eff(s)), ϕMnx_steel)`.
+
+Full composite at each station: `ΣQn = Cf(b_eff(s))` (AISC 360-16 §I3.2a,
+corpus: aisc-360-16, PDF p. 151). Hogging stations score 0 — §I3.2b stays on
+the envelope check. No sagging demand returns midspan. A constant per-side
+extent and a parabolic moment peak at midspan, and `b_eff` matches `get_b_eff`.
+"""
+function governing_sagging_station(section::ISymmSection, material,
+                                   slab::AbstractSlabOnBeam, L_beam, demand_of_s,
+                                   ϕMnx_steel::Float64;
+                                   left::Union{SideExtentProfile, Nothing} = nothing,
+                                   right::Union{SideExtentProfile, Nothing} = nothing,
+                                   extra_breakpoints::AbstractVector{Float64} = Float64[],
+                                   ϕ::Real = 0.9)
+    L = uconvert(u"m", L_beam)
+
+    function _moment_Nm(s)
+        raw = demand_of_s(s)
+        return raw isa Unitful.Quantity ?
+            ustrip(u"N*m", uconvert(u"N*m", raw)) : Float64(raw)
+    end
+
+    function dcr_of_s(s)
+        Mv = _moment_Nm(s)
+        Mv <= 0 && return 0.0
+        b = b_eff_at_station(slab, L, s; left = left, right = right)
+        ϕMn = ϕMnx_steel
+        if ustrip(u"m", b) > 1e-6
+            try
+                ΣQn = _Cf_max(section, material, slab, b)
+                r = get_ϕMn_composite(section, material, slab, b, ΣQn; ϕ = ϕ)
+                ϕMn = max(ϕMn, ustrip(u"N*m", uconvert(u"N*m", r.ϕMn)))
+            catch
+            end
+        end
+        return ϕMn > 0 ? Mv / ϕMn : Inf
+    end
+
+    bp = beff_breakpoints(left, right)
+    isempty(extra_breakpoints) ||
+        (bp = _unique_sorted(vcat(bp, collect(Float64, extra_breakpoints))))
+    s_star, dcr = governing_station(dcr_of_s, bp)
+    dcr == 0.0 && (s_star = 0.5)
+
+    bl = left === nothing ?
+        _effective_half_width(L, slab.beam_spacing_left, slab.edge_dist_left) :
+        _effective_half_width(L, 2 * _sample_extent(left, s_star) * u"m", nothing)
+    br = right === nothing ?
+        _effective_half_width(L, slab.beam_spacing_right, slab.edge_dist_right) :
+        _effective_half_width(L, 2 * _sample_extent(right, s_star) * u"m", nothing)
+
+    return (;
+        s_star = s_star,
+        dcr = dcr,
+        b_eff = uconvert(u"m", bl + br),
+        M_pos = max(_moment_Nm(s_star), 0.0),
+        spacing_left = uconvert(u"m", 2 * bl),
+        spacing_right = uconvert(u"m", 2 * br),
+    )
+end

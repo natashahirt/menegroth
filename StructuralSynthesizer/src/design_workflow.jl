@@ -1389,7 +1389,8 @@ function _size_beams_columns!(struc::BuildingStructure, params::DesignParameters
     for iter in 1:max_iter
         iters_used = iter
         size_beams!(struc, beam_opts; reanalyze=false, tc=tc,
-                    member_group_overrides=mgo, I_factor=params.beam_I_factor)
+                    member_group_overrides=mgo, I_factor=params.beam_I_factor,
+                    composite_concrete=resolve_slab_concrete(params.materials))
         
         _reanalyze_after_section_change!(struc)
         

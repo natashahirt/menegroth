@@ -61,7 +61,7 @@ struct MemberDemand{T, C} <: AbstractDemand
     δ_max_LL::T  # LL deflection from FEM (0.0 = skip L/360 check)
     δ_max_total::T # DL+LL service deflection from FEM (0.0 = skip L/240 check)
     I_ref::T     # Reference I used in analysis (for scaling)
-    composite::C # Nothing = bare steel, CompositeContext = composite beam
+    composite::C # Nothing, CompositeContext, PerStationComposite, or true
     transverse_load::Bool  # Whether transverse loading between supports
 end
 
@@ -81,7 +81,7 @@ only has an unsigned envelope still checks both faces at full magnitude
 (hogging Chapter F at `Lb=L`, `Cb=1.0` — AISC 360-16 §F2.2, page 103).
 The type parameter `T` is inferred via `promote_type` over all numeric arguments.
 `composite` is not included in type promotion (it is `Nothing`, a
-`CompositeContext`, or the `true` Chapter I sentinel).
+`CompositeContext`, a `PerStationComposite`, or the `true` Chapter I sentinel).
 """
 function MemberDemand(idx::Int; 
     Pu_c=0.0, Pu_t=0.0, Mux=0.0, Mux_pos=nothing, Mux_neg=nothing, Muy=0.0,

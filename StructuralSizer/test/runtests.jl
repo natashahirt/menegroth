@@ -175,6 +175,7 @@ using Asap  # custom units (kip, ksi, ksf, psf, etc.)
     # ─── Structural Walls (lateral system) ───────────────────────────────
     @testset "Walls" begin
         include("walls/test_walls.jl")
+        include("walls/test_fem_rigid_diaphragm.jl")
     end
 
     # ─── PixelFrame ──────────────────────────────────────────────────────

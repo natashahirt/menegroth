@@ -12,8 +12,11 @@
 #     SHARED `Asap.Node` objects (nodes are reused between stacked stories and
 #     across panels by plan/elevation identity, so walls are continuous).
 #   - Base nodes are fully fixed (cantilever wall base).
-#   - Each floor gets a stiff, (near-)massless diaphragm shell (fan-triangulated
-#     over that floor's wall nodes + a centroid master node) → in-plane rigid.
+#   - Each floor diaphragm is either:
+#       `:penalty_shell` (default) — a stiff, (near-)massless fan shell over that
+#         floor's wall nodes plus a centroid master, modulus `diaphragm_E`; or
+#       `:rigid` — in-plane `Asap.RigidLink`s tying `(u_x, u_y, θ_z)` only.
+#         The penalty shell is not built in `:rigid`.
 #   - Story lateral loads are `Asap.NodeForce`s at the floor master nodes.
 #   - `Asap.solve!` (linear static), then drift from master-node displacements
 #     and per-wall shear from `Asap.ShellInternalForces(...).Nxy`.
@@ -37,8 +40,11 @@ High-fidelity Asap-shell lateral evaluator (plan S3). Same interface as
 - `story_elevations::Vector{Float64}`: floor elevations [m], `length = nstory+1`,
   `[0, h1, h1+h2, …]`. Derived from `story_heights` if left empty.
 - `mesh_div::Int`: shell columns per wall panel along its length (≥1)
-- `diaphragm_E::Float64`: in-plane modulus of the stiff diaphragm shells [Pa]
-- `diaphragm_t::Float64`: diaphragm shell thickness [m]
+- `diaphragm_E::Float64`: in-plane modulus of the penalty diaphragm shells [Pa].
+  Used only when `diaphragm_mode == :penalty_shell`.
+- `diaphragm_t::Float64`: diaphragm shell thickness [m]. Same scope as `diaphragm_E`.
+- `diaphragm_mode::Symbol`: `:penalty_shell` (default; existing fan of shells at
+  `diaphragm_E`) or `:rigid` (in-plane rigid links, no penalty shell).
 - `plan_halfwidth::NTuple{2,Float64}`: half plan extent for the torsion metric
 """
 Base.@kwdef struct FEMLateralEvaluator <: AbstractLateralEvaluator
@@ -47,7 +53,23 @@ Base.@kwdef struct FEMLateralEvaluator <: AbstractLateralEvaluator
     mesh_div::Int = 2
     diaphragm_E::Float64 = 1.0e12
     diaphragm_t::Float64 = 0.05
+    diaphragm_mode::Symbol = :penalty_shell
     plan_halfwidth::NTuple{2,Float64} = (0.0, 0.0)
+end
+
+"""
+In-plane rigid-diaphragm release.
+
+Same DOF tie as production `_build_rigid_diaphragm_links`: tie `(u_x, u_y, θ_z)`
+when that DOF is free on both nodes, and release `(u_z, θ_x, θ_y)`. `Asap.RigidLink`
+release order is `(u_x, u_y, u_z, θ_x, θ_y, θ_z)` with `true` = released.
+"""
+function _inplane_rigid_release(master::Asap.Node, slave::Asap.Node)
+    tied = (1, 2, 6)
+    return ntuple(6) do i
+        (i in tied) || return true
+        (master.dof[i] && slave.dof[i]) ? false : true
+    end
 end
 
 """
@@ -90,15 +112,20 @@ end
 
 """
     _build_asap_wall_model(ev, panels, loads)
-      -> (model, floor_master, panel_shells)
+      -> (model, floor_master, panel_shells, nodes_by_key, z_base, rigid_links)
 
-Assemble the mixed shell model. Returns the solved-ready `Asap.Model`, a
-`Dict{Int,Node}` mapping story → floor master node (load/drift point), and a
-`Dict{Int,Vector{ShellTri3}}` mapping panel id → its wall shell elements.
+Assemble the wall-shell model. Returns the processed `Asap.Model`, a
+`Dict{Int,Node}` mapping story → floor master node (load/drift point), a
+`Dict{Int,Vector{ShellTri3}}` mapping panel id → its wall shell elements,
+the node-identity map, the base elevation, and the in-plane rigid links
+(empty unless `diaphragm_mode == :rigid`).
 """
 function _build_asap_wall_model(ev::FEMLateralEvaluator,
                                 panels::Vector{WallPanel},
                                 loads::Vector{StoryLoad})
+    ev.diaphragm_mode in (:penalty_shell, :rigid) || throw(ArgumentError(
+        "FEMLateralEvaluator diaphragm_mode must be :penalty_shell or :rigid, " *
+        "got :$(ev.diaphragm_mode)"))
     isempty(panels) && error("FEMLateralEvaluator: no wall panels supplied")
     nx = max(ev.mesh_div, 1)
     z_base = minimum(p.z_bot for p in panels)
@@ -138,33 +165,52 @@ function _build_asap_wall_model(ev::FEMLateralEvaluator,
         panel_shells[p.id] = shells_p
     end
 
-    # --- per-floor stiff diaphragm (fan triangulation) + master node ---
+    # --- per-floor diaphragm ---
+    # :penalty_shell keeps the existing fan at `diaphragm_E` (default 1e12 Pa).
+    # :rigid ties the same in-plane DOFs as production and builds no fan.
     elevs = _elevations(ev)
     floor_master = Dict{Int,Asap.Node}()
     diaphragm_shells = Asap.ShellTri3[]
-    dia_t = ev.diaphragm_t * u"m"; dia_E = ev.diaphragm_E * u"Pa"
+    rigid_links = Asap.RigidLink[]
     nstory = length(ev.story_heights)
     for s in 1:nstory
         zf = elevs[s+1]
         # wall nodes at this floor elevation
         fnodes = [nd for nd in all_nodes if isapprox(ustrip(u"m", nd.position[3]), zf; atol=1e-6)]
         length(fnodes) < 1 && continue
-        cx = sum(ustrip(u"m", nd.position[1]) for nd in fnodes) / length(fnodes)
-        cy = sum(ustrip(u"m", nd.position[2]) for nd in fnodes) / length(fnodes)
-        master = get_node!(cx, cy, zf)
-        floor_master[s] = master
-        # fan triangles centroid→consecutive nodes sorted by plan angle
-        others = [nd for nd in fnodes if nd !== master]
-        if length(others) >= 2
-            sort!(others; by = nd -> atan(ustrip(u"m", nd.position[2]) - cy,
-                                          ustrip(u"m", nd.position[1]) - cx))
-            for i in eachindex(others)
-                a = others[i]; b = others[mod1(i + 1, length(others))]
-                # skip near-degenerate (collinear) triangles
-                ax = ustrip(u"m", a.position[1]) - cx; ay = ustrip(u"m", a.position[2]) - cy
-                bx = ustrip(u"m", b.position[1]) - cx; by = ustrip(u"m", b.position[2]) - cy
-                abs(ax * by - ay * bx) < 1e-6 && continue
-                push!(diaphragm_shells, Asap.ShellTri3((master, a, b), dia_t, dia_E, 0.2; id=:diaphragm))
+        if ev.diaphragm_mode == :rigid
+            # Elect one existing floor node as master (lowest plan position).
+            # A new centroid node would be disconnected in the unreduced stiffness.
+            sort!(fnodes; by = nd -> (ustrip(u"m", nd.position[1]),
+                                      ustrip(u"m", nd.position[2])))
+            master = fnodes[1]
+            floor_master[s] = master
+            for slave in Iterators.drop(fnodes, 1)
+                slave === master && continue
+                push!(rigid_links, Asap.RigidLink(master, slave;
+                    release=_inplane_rigid_release(master, slave),
+                    id=:rigid_diaphragm))
+            end
+        else
+            cx = sum(ustrip(u"m", nd.position[1]) for nd in fnodes) / length(fnodes)
+            cy = sum(ustrip(u"m", nd.position[2]) for nd in fnodes) / length(fnodes)
+            master = get_node!(cx, cy, zf)
+            floor_master[s] = master
+            dia_t = ev.diaphragm_t * u"m"
+            dia_E = ev.diaphragm_E * u"Pa"
+            # fan triangles centroid→consecutive nodes sorted by plan angle
+            others = [nd for nd in fnodes if nd !== master]
+            if length(others) >= 2
+                sort!(others; by = nd -> atan(ustrip(u"m", nd.position[2]) - cy,
+                                              ustrip(u"m", nd.position[1]) - cx))
+                for i in eachindex(others)
+                    a = others[i]; b = others[mod1(i + 1, length(others))]
+                    # skip near-degenerate (collinear) triangles
+                    ax = ustrip(u"m", a.position[1]) - cx; ay = ustrip(u"m", a.position[2]) - cy
+                    bx = ustrip(u"m", b.position[1]) - cx; by = ustrip(u"m", b.position[2]) - cy
+                    abs(ax * by - ay * bx) < 1e-6 && continue
+                    push!(diaphragm_shells, Asap.ShellTri3((master, a, b), dia_t, dia_E, 0.2; id=:diaphragm))
+                end
             end
         end
     end
@@ -180,7 +226,7 @@ function _build_asap_wall_model(ev::FEMLateralEvaluator,
     shells = vcat(wall_shells, diaphragm_shells)
     model = Asap.Model(all_nodes, shells, asap_loads)
     Asap.process!(model)
-    return model, floor_master, panel_shells, nodes_by_key, z_base
+    return model, floor_master, panel_shells, nodes_by_key, z_base, rigid_links
 end
 
 # ------------------------------------------------------------------------------
@@ -210,7 +256,7 @@ Scope of this gate — be precise about what it does and does NOT catch:
     singularities (a zero or negative eigenvalue), so an exact Cholesky-success
     test flags them definitively without any tolerance to tune.
   - DELIBERATELY DOES NOT CATCH: penalty-diaphragm-driven *near*-singularity. The
-    diaphragm shells use a penalty modulus (`diaphragm_E` ≈ 1e12 Pa) ~40× the wall
+    `:penalty_shell` diaphragm uses a penalty modulus (`diaphragm_E` ≈ 1e12 Pa) ~40× the wall
     modulus (~2.5e10 Pa) to approximate an in-plane-rigid floor, so the assembled
     model is ill-conditioned BY CONSTRUCTION. A model can therefore be numerically
     PD (passes here) yet have a large condition number that is INHERENT to the
@@ -220,7 +266,8 @@ Scope of this gate — be precise about what it does and does NOT catch:
     bound here rather than guess one that would either false-reject valid models or
     false-pass unstable ones. (See `SINGULAR_STIFFNESS_RCOND` in the reduced tier,
     which is well-defined only because that 3×3 K is penalty-free once
-    scale-normalized.)
+    scale-normalized.) The `:rigid` mode does not build that penalty shell;
+    this positive-definite test is the same either way.
 
 Residual risk (flagged, not silenced): a model that is PD but pathologically
 ill-conditioned for a reason OTHER than the diaphragm penalty (e.g. extreme
@@ -251,10 +298,15 @@ end
 function evaluate_lateral(ev::FEMLateralEvaluator,
                           panels::Vector{WallPanel},
                           loads::Vector{StoryLoad})
-    model, floor_master, panel_shells, nodes_by_key, z_base =
+    model, floor_master, panel_shells, nodes_by_key, z_base, rigid_links =
         _build_asap_wall_model(ev, panels, loads)
     _assert_fem_nonsingular(model)   # fail closed on singular / under-constrained K
-    Asap.solve!(model)
+    if isempty(rigid_links)
+        Asap.solve!(model)
+    else
+        # In-plane rigid diaphragm. reprocess=false keeps the processed wall K.
+        Asap.solve!(model, rigid_links; reprocess=false)
+    end
     nx = max(ev.mesh_div, 1)
 
     nstory = length(ev.story_heights)

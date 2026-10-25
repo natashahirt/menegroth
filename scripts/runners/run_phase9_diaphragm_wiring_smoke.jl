@@ -3,8 +3,8 @@
 # Exercises the Phase 9a change to `StructuralSynthesizer/src/analyze/asap/utils.jl:206`:
 # `to_asap!` now builds `Asap.Model(nodes, frame_elements, shell_elements, loads)`
 # instead of the 3-argument frame-only constructor, so the diaphragm shells
-# produced by `_create_shell_diaphragms` (used by both `:shell` and `:rigid`
-# diaphragm modes) actually join the assembled global stiffness `K`.
+# produced by `_create_shell_diaphragms` (`:shell` only; `:rigid` is an
+# in-plane rigid link, not these shells) actually join the assembled `K`.
 #
 # Assertions (holding all else equal — identical loads via
 # `load_routing=:cell_tributary` in every fixture, only `diaphragms` differs):

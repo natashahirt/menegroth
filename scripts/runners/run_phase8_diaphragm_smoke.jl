@@ -314,8 +314,8 @@ build_nodes(struc) = SS._create_offset_nodes(struc.skeleton,
     end
 
     # ── (5) internal call path: _create_shell_diaphragms → constrained mesh ─
-    # `to_asap!` invokes `_create_shell_diaphragms` for both `:shell` and
-    # `:rigid` diaphragm modes. Confirm THAT call path (not just the public
+    # `to_asap!` invokes `_create_shell_diaphragms` for `:shell`. `:rigid` does
+    # not. Confirm THAT call path (not just the public
     # `create_slab_diaphragm_shells`) still produces a joist-respecting mesh
     # — the AreaLoad geometry in test (4) depends on it.
     @testset "(5) _create_shell_diaphragms exercises Phase 8's mesher" begin

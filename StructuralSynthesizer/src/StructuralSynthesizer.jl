@@ -223,6 +223,7 @@ export Support, Foundation, FoundationGroup, FoundationDemand
 
 # --- Building operations ---
 export add_vertex!, add_element!, find_faces!, rebuild_stories!, to_asap!
+export classify_diaphragm_idealization, distribute_flexible_diaphragm_story_force
 export initialize!, size!
 export create_slab_diaphragm_shells
 

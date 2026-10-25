@@ -54,15 +54,20 @@ Uses TributaryLoads for accurate load distribution based on tributary polygons.
 - `struc`: BuildingStructure to convert
 - `params::DesignParameters`: Design parameters (load combinations, frame defaults, etc.)
 - `diaphragms::Union{Symbol, Nothing}=nothing`: Override diaphragm mode from params
-  - `:none` — No diaphragm modeling
-  - `:rigid` — Truly rigid diaphragm via master/slave DOF reduction (Phase 9b).
+  - `:none` — No diaphragm modeling. Not an ASCE 7 category.
+  - `:rigid` — In-plane rigid diaphragm via master/slave DOF reduction (Phase 9b).
     A single master node is elected per story and every other frame node on
     that story is `Asap.RigidLink`-ed to it, tying `(u_x, u_y, θ_z)` and
     leaving `(u_z, θ_x, θ_y)` free. Kinematic constraint is exact (Bathe §4.4;
-    see `external/Asap/src/Elements/rigidlink.jl`) and keeps `K` SPD, unlike
-    the earlier stiff-shell workaround with a 1e15 Pa modulus.
-  - `:shell` — Semi-rigid shell elements from slab geometry (Phase 9a: shells
-    now join the assembled `K` via the 4-argument `Asap.Model` constructor).
+    see `external/Asap/src/Elements/rigidlink.jl`) and keeps `K` SPD. This
+    link is the drift authority. A penalty shell is not.
+  - `:shell` — Semirigid shell elements from slab geometry, at the slab's real
+    modulus (Phase 9a: shells join the assembled `K` via the 4-argument
+    `Asap.Model` constructor). The modulus is not a penalty value.
+  - `:flexible` — No rigid link and no diaphragm shell. Story force is split
+    by tributary area ([`distribute_flexible_diaphragm_story_force`](@ref));
+    `to_asap!` calls the existing column-tributary path and does not apply a
+    story force to the building. Missing tributary geometry throws.
   - `nothing` — Use `params.diaphragm_mode` (default)
 - `shell_props::Union{Nothing, NamedTuple}=nothing`: Custom shell properties
   - `E`: Young's modulus (overrides `params.diaphragm_E`)
@@ -71,8 +76,8 @@ Uses TributaryLoads for accurate load distribution based on tributary polygons.
 - `load_routing::Symbol=:auto`: how slab gravity pressure reaches the frame
   (plan `joists-roles-materials`, Phase 7).
   - `:auto` (default) — route via `Asap.AreaLoad(shells; distribute_to=beams)`
-    when diaphragm shells are present (`diaphragms=:shell`/`:rigid` and
-    non-empty slabs), otherwise fall through to the per-cell tributary path.
+    when diaphragm shells are present (`diaphragms=:shell` and non-empty
+    slabs), otherwise fall through to the per-cell tributary path.
     This preserves the historical frame-only behavior exactly: with the default
     `diaphragms=:none`, no shells exist so `:auto` resolves to `:cell_tributary`.
   - `:cell_tributary` — always use the per-cell tributary loads
@@ -132,7 +137,13 @@ function to_asap!(struc::BuildingStructure{T, A, P};
     
     # Determine diaphragm mode: explicit argument overrides params
     diaphragm_mode = isnothing(diaphragms) ? params.diaphragm_mode : diaphragms
-    diaphragm_mode in (:none, :rigid, :shell) || error("diaphragms must be :none, :rigid, or :shell")
+    diaphragm_mode in (:none, :rigid, :shell, :flexible) ||
+        error("diaphragms must be :none, :rigid, :shell, or :flexible")
+    # :flexible has no diaphragm constraint. The column tributary areas are
+    # required here; a story force is not applied to the building.
+    if diaphragm_mode == :flexible
+        _require_flexible_diaphragm_tributaries!(struc)
+    end
     load_routing in (:auto, :cell_tributary, :shell_area) ||
         error("load_routing must be :auto, :cell_tributary, or :shell_area")
     
@@ -199,16 +210,16 @@ function to_asap!(struc::BuildingStructure{T, A, P};
     end
     
     # 3. Diaphragm construction (Phase 9).
-    #  :shell → semi-rigid: real slab shells contribute to K (Phase 9a).
-    #  :rigid → truly rigid: RigidLink master/slave constraints tie every
-    #           frame node on a story to a master node (Bathe §4.4 / Cook §6.3
-    #           kinematic reduction, see external/Asap/src/Elements/rigidlink.jl).
-    #           This supersedes the earlier stiff-shell hack for :rigid; the
-    #           kinematic tie is exact and keeps K SPD without a 1e15 Pa
-    #           ill-conditioning risk. Gravity load is unaffected (u_z, θ_x,
-    #           θ_y remain free on tied slaves), so `load_routing=:auto`
-    #           correctly falls back to per-cell TributaryLoads here.
-    #  :none  → neither shells nor links.
+    #  :shell    → semirigid: real slab shells contribute to K (Phase 9a).
+    #  :rigid    → in-plane RigidLink master/slave constraints tie every
+    #              frame node on a story to a master node (Bathe §4.4 / Cook
+    #              §6.3 kinematic reduction, see
+    #              external/Asap/src/Elements/rigidlink.jl). The tie is
+    #              (u_x, u_y, θ_z) only. Gravity DOFs (u_z, θ_x, θ_y) stay
+    #              free, so `load_routing=:auto` falls back to per-cell
+    #              TributaryLoads. This link is the drift authority.
+    #  :flexible → no shells and no links. Tributary areas were required above.
+    #  :none     → neither shells nor links.
     # Wall shells are meshed before the rigid-link pass so a wall base node
     # is already fixed when the link set is built. They are appended to
     # `shell_elements` only after load routing is resolved, so a wall mesh
@@ -330,19 +341,26 @@ function to_asap!(struc::BuildingStructure{T, A, P};
     return struc.asap_model
 end
 
-"""Build effective shell_props from DesignParameters and explicit overrides."""
+"""
+    _build_shell_props(params, mode, explicit_props) -> NamedTuple
+
+Real modulus, Poisson's ratio, and thickness factor for a `:shell` diaphragm.
+
+`E` is `explicit_props.E` when that is set, otherwise `params.diaphragm_E`,
+otherwise the concrete modulus from [`resolve_concrete`](@ref). `:rigid` is
+not a shell. The in-plane rigid link is the rigid diaphragm, and this
+function does not substitute a penalty modulus.
+"""
 function _build_shell_props(params::DesignParameters, mode::Symbol, explicit_props::Union{Nothing, NamedTuple})
+    mode == :shell || throw(ArgumentError(
+        "_build_shell_props: mode :$mode is not a semirigid shell. " *
+        "A :rigid diaphragm is an in-plane rigid link, not a shell modulus."))
     # Resolve concrete E from materials cascade (user's material choice)
     _mat_conc = resolve_concrete(params)
     concrete_E = uconvert(u"Pa", _mat_conc.E)
-    
-    # Start with params values
-    E_default = if mode == :rigid
-        1e15u"Pa"  # Effectively rigid
-    else
-        isnothing(params.diaphragm_E) ? concrete_E : params.diaphragm_E
-    end
-    
+
+    E_default = isnothing(params.diaphragm_E) ? concrete_E : params.diaphragm_E
+
     ν_default = params.diaphragm_ν
     t_factor = 1.0
     
@@ -361,28 +379,24 @@ end
 # =============================================================================
 
 """
-Create shell diaphragms for all slabs.
+Create semirigid shell diaphragms for all slabs.
 
-For `:rigid` mode: uses very high E (1e15 Pa) for effectively infinite in-plane stiffness.
-For `:shell` mode: uses actual slab properties or custom overrides.
+`mode` must be `:shell`. Properties are the real slab modulus (or `props`
+from [`_build_shell_props`](@ref)). `:rigid` is rejected: that diaphragm is
+an in-plane rigid link, not a shell.
 """
 function _create_shell_diaphragms(struc::BuildingStructure, nodes::Vector{Asap.Node};
                                    mode::Symbol=:shell,
                                    props::Union{Nothing, NamedTuple}=nothing)
+    mode == :shell || throw(ArgumentError(
+        "_create_shell_diaphragms: mode :$mode is not a semirigid shell. " *
+        "A :rigid diaphragm is an in-plane rigid link, not a shell."))
     shells = Asap.ShellElement[]
-    
-    # Default properties based on mode (uses props from _build_shell_props)
-    if mode == :rigid
-        # Rigid diaphragm: very high stiffness (effectively infinite)
-        E_default = 1e15u"Pa"
-        ν_default = 0.0  # No Poisson effect for rigid
-        t_factor = 1.0
-    else  # :shell
-        # Semi-rigid: use whatever _build_shell_props resolved from params.concrete
-        E_default = uconvert(u"Pa", NWC_4000.E)  # fallback; overridden by props below
-        ν_default = NWC_4000.ν
-        t_factor = 1.0
-    end
+
+    # Real slab properties. Overridden by `props` when the caller resolved them.
+    E_default = uconvert(u"Pa", NWC_4000.E)
+    ν_default = NWC_4000.ν
+    t_factor = 1.0
     
     # Override with custom properties if provided
     if props !== nothing
@@ -2027,7 +2041,7 @@ function _resolve_load_routing(load_routing::Symbol, shell_elements)
     elseif load_routing === :shell_area
         if isempty(shell_elements)
             @warn "to_asap!(load_routing=:shell_area): no diaphragm shells built " *
-                  "(need diaphragms=:shell/:rigid and non-empty slabs); " *
+                  "(need diaphragms=:shell and non-empty slabs); " *
                   "falling back to :cell_tributary."
             return :cell_tributary
         end

@@ -499,7 +499,11 @@ Base.@kwdef mutable struct DesignParameters
     # ─── Pattern Loading (ACI 318-11 §13.7.6) ───
     pattern_loading::Symbol = :none
     
-    # Diaphragm modeling for lateral analysis
+    # Diaphragm model. `:none` is off; it is not an ASCE 7 category.
+    # `:rigid` is the in-plane rigid link (u_x, u_y, θ_z). `:shell` is a
+    # semirigid slab at its real modulus. `:flexible` distributes story force
+    # by tributary area and adds no link and no shell. The choice among
+    # `:rigid`, `:flexible`, and `:shell` is `classify_diaphragm_idealization`.
     diaphragm_mode::Symbol = :none
     diaphragm_E::Union{typeof(1.0u"Pa"), Nothing} = nothing
     diaphragm_ν::Float64 = 0.2

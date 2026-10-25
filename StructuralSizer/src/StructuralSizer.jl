@@ -159,11 +159,11 @@ export factored_pattern_loads, pattern_case_name
 
 # --- Seismic ELF demand (ASCE 7-22 §12.8) ---
 export seismic_response_coefficient, seismic_base_shear
-export vertical_distribution_exponent, vertical_distribution
+export vertical_distribution_exponent, vertical_distribution, seismic_story_shear
 export accidental_eccentricity, torsional_amplification
 export design_earthquake_displacement, maximum_considered_displacement
 export design_story_drift, edge_design_story_drift
-export allowable_story_drift, drift_live_load_factor
+export allowable_story_drift, drift_live_load_factor, drift_expected_gravity_load
 export stability_coefficient, stability_coefficient_limit
 export pdelta_displacement_multiplier
 

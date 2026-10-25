@@ -18,7 +18,7 @@
 # =============================================================================
 
 """
-    seismic_response_coefficient(; method, SDS, S1, R, Ie, Sa, SD1, T, TL)
+    seismic_response_coefficient(; method, SDS, S1, R, Ie, Sa, SD1, T, TL, for_drift=false)
 
 Seismic response coefficient `Cs` (dimensionless).
 
@@ -31,11 +31,23 @@ selection is the caller's job. `SD1`, `T`, and `TL` are required only for
 12.8-7 are lower bounds for both methods, so `SDS` and `S1` are required
 for both.
 
+Method 1 (`:sa`) shall not be used where Exception 2 of §11.4.5 applies.
+This function does not check that; the caller does.
+
+`for_drift = true` returns the coefficient for computing displacement and
+drift: Eq. 12.8-6 (including its 0.01 floor) is not applied, Eq. 12.8-7 is
+still applied where `S1 >= 0.6`, and everything else is unchanged. The
+default `false` gives the strength coefficient. §12.8.6.2 also permits
+drift forces based on the computed fundamental period without the `CuTa`
+upper limit. `T` is a caller input, so that choice belongs to the caller.
+
 Spectral parameters `SDS`, `SD1`, `S1`, and `Sa` are dimensionless. `T` and
 `TL` are in seconds. `R` and `Ie` are dimensionless.
 
 # Citation
-ASCE 7-22 §12.8.1.1, Eqs. 12.8-2 through 12.8-7 (corpus: asce-7-22, PDF page 185).
+ASCE 7-22 §12.8.1.1, Eqs. 12.8-2 through 12.8-7 (corpus: asce-7-22, PDF page 185);
+§12.8.6.1 Exception and §12.8.6.2 (corpus: asce-7-22, PDF page 187);
+Commentary C12.8.6.1 (corpus: asce-7-22, PDF page 731).
 """
 function seismic_response_coefficient(;
     method=nothing,
@@ -47,6 +59,7 @@ function seismic_response_coefficient(;
     R=nothing,
     Ie=nothing,
     Sa=nothing,
+    for_drift::Bool=false,
 )
     method = _seismic_method(method)
     # SDS and S1 feed the lower bounds, Eqs. 12.8-6 and 12.8-7, which apply
@@ -96,7 +109,13 @@ function seismic_response_coefficient(;
     # Cs shall not be less than 0.044*SDS*Ie, and that value shall not be
     # less than 0.01. Item 3 of §12.8.1.1 applies this lower bound to both
     # Method 1 and Method 2.
-    cs = max(cs, max(0.044 * SDS * Ie, 0.01))
+    # ASCE 7-22 §12.8.6.1 EXCEPTION (corpus: asce-7-22, PDF page 187):
+    # Eq. 12.8-6 need not be considered for computing drift. Commentary
+    # C12.8.6.1 (corpus: asce-7-22, PDF page 731): Eq. 12.8-7 still needs to
+    # be considered, when triggered.
+    if !for_drift
+        cs = max(cs, max(0.044 * SDS * Ie, 0.01))
+    end
 
     # ASCE 7-22 §12.8.1.1, Eq. 12.8-7 (corpus: asce-7-22, PDF page 185),
     # only where S1 is equal to or greater than 0.6. The lower bound applies
@@ -207,6 +226,53 @@ function vertical_distribution(weights, heights, V, k)
     Cvx = whk ./ den
     Fx = Cvx .* V
     return (Fx=Fx, Cvx=Cvx)
+end
+
+"""
+    seismic_story_shear(Fx, heights) -> Vector{Float64}
+
+Seismic design story shear `Vx = sum_{i=x}^{n} Fi` at every level.
+
+`Vx` at level x is the sum of `Fi` over every level i with `hi >= hx`, that
+level and all levels above it. Results are returned in the input order, so
+`Fx` and `heights` need not be sorted. Heights are measured from the base,
+in one length unit, and must be finite, `> 0`, and distinct; duplicate
+heights make "at and above" ambiguous and throw. `Fx` may be any finite
+real in the caller's force unit, and `Vx` is in the same unit.
+
+# Citation
+ASCE 7-22 §12.8.4, Eq. 12.8-14 (corpus: asce-7-22, PDF page 186).
+"""
+function seismic_story_shear(Fx, heights)
+    Fx isa AbstractVector || throw(ArgumentError("Fx must be a vector"))
+    heights isa AbstractVector || throw(ArgumentError("heights must be a vector"))
+    length(Fx) == length(heights) || throw(ArgumentError(
+        "Fx and heights must have the same length; got $(length(Fx)) and $(length(heights))"))
+    n = length(Fx)
+    n > 0 || throw(ArgumentError("Fx and heights must be non-empty"))
+
+    F = Vector{Float64}(undef, n)
+    h = Vector{Float64}(undef, n)
+    for i in 1:n
+        F[i] = _as_finite("Fx[$i]", Fx[i])
+        h[i] = _as_finite("heights[$i]", heights[i])
+        h[i] > 0 || throw(ArgumentError(
+            "height from the base must be > 0; heights[$i] = $(h[i])"))
+    end
+    allunique(h) || throw(ArgumentError(
+        "heights must be distinct; duplicate heights make the levels at and above level x ambiguous"))
+
+    # ASCE 7-22 §12.8.4, Eq. 12.8-14 (corpus: asce-7-22, PDF page 186):
+    # Vx is the sum of Fi from level x up to the top level n. Accumulate
+    # from the highest level down, then return in the input order.
+    order = sortperm(h; rev=true)
+    Vx = Vector{Float64}(undef, n)
+    acc = 0.0
+    for j in order
+        acc += F[j]
+        Vx[j] = acc
+    end
+    return Vx
 end
 
 """
@@ -407,11 +473,17 @@ end
 """
     drift_live_load_factor(unreduced_live_load_psf) -> Float64
 
-Factor on the unreduced design live load `L0` used with drift displacements.
+Ratio `L/L0` of the live load `L` to the unreduced design live load `L0`
+for the expected gravity loads used in computing displacement and drift.
 
 Returns `0.8` where the unreduced design live load exceeds 100 lb/ft², and
 `0.4` otherwise. Exactly 100 lb/ft² returns `0.4`. The argument is `L0` in
-lb/ft². The factor is dimensionless; the caller multiplies it by `L0`.
+lb/ft². The ratio is dimensionless.
+
+This is not the whole live-load term. The expected gravity load is still
+`1.0D + 0.5L`, so the total live term is `0.5 * 0.8 * L0 = 0.4 * L0` above
+100 lb/ft² and `0.5 * 0.4 * L0 = 0.2 * L0` otherwise. See
+`drift_expected_gravity_load`.
 
 # Citation
 ASCE 7-22 §12.8.6.1 (corpus: asce-7-22, PDF page 187).
@@ -423,6 +495,42 @@ function drift_live_load_factor(unreduced_live_load_psf)
     # ASCE 7-22 §12.8.6.1 (corpus: asce-7-22, PDF page 187): 0.8*L0 where the
     # unreduced design live load exceeds 100 lb/ft², and 0.4*L0 otherwise.
     return L0 > 100.0 ? 0.8 : 0.4
+end
+
+"""
+    drift_expected_gravity_load(D, L0, unreduced_live_load_psf) -> Float64
+
+Expected gravity load for computing displacement and drift,
+`1.0*D + 0.5*L` with `L = drift_live_load_factor(unreduced_live_load_psf) * L0`.
+
+The total is `1.0D + 0.4L0` where the unreduced design live load exceeds
+100 lb/ft², and `1.0D + 0.2L0` otherwise (exactly 100 lb/ft² is the latter).
+This is the minimum: the code says expected gravity loads shall be taken as
+no less than this. The same loads enter `Px` in Eq. 12.8-18
+(`stability_coefficient`), where no individual load factor need exceed 1.0.
+
+`D` and `L0` share the caller's force (or force-per-area) unit, and the
+result is in that unit. `unreduced_live_load_psf` is only the live-load
+intensity in lb/ft² used for the 100 lb/ft² threshold. Negative `D` or `L0`
+throws.
+
+# Citation
+ASCE 7-22 §12.8.6.1 (corpus: asce-7-22, PDF page 187);
+§12.8.7, definition of Px (corpus: asce-7-22, PDF page 188).
+"""
+function drift_expected_gravity_load(D, L0, unreduced_live_load_psf)
+    D = _as_finite("D", D)
+    L0 = _as_finite("L0", L0)
+    D >= 0 || throw(ArgumentError("D must be >= 0; got $D"))
+    L0 >= 0 || throw(ArgumentError("L0 must be >= 0; got $L0"))
+    # USER DECISION 2026-10-25: literal reading of §12.8.6.1. L is the
+    # factored L0 below, and the 0.5 of 1.0D + 0.5L is applied on top of it.
+    # ASCE 7-22 §12.8.6.1 (corpus: asce-7-22, PDF page 187): L shall be taken
+    # as 0.8L0 for live loads that exceed 100 lb/ft² and 0.4L0 otherwise.
+    L = drift_live_load_factor(unreduced_live_load_psf) * L0
+    # ASCE 7-22 §12.8.6.1 (corpus: asce-7-22, PDF page 187): expected gravity
+    # loads shall be taken as no less than 1.0D + 0.5L.
+    return 1.0 * D + 0.5 * L
 end
 
 """

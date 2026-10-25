@@ -23,6 +23,7 @@ using Asap  # custom units (kip, ksi, ksf, psf, etc.)
     # ─── Loads ───────────────────────────────────────────────────────────
     @testset "Loads" begin
         include("loads/test_seismic_elf.jl")
+        include("loads/test_seismic_nehrp_examples.jl")
     end
 
     # ─── Vault ───────────────────────────────────────────────────────────

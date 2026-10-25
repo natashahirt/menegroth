@@ -246,19 +246,24 @@ function check_flat_plate_at_thickness!(
     ]
     column_result = size_columns(Pu, Mu, geometries, column_opts; cache=_col_cache)
 
-    for (i, col) in enumerate(columns)
-        section = column_result.sections[i]
-        bb = bounding_box(section)
-        c1_pm = bb.width
-        c2_pm = bb.depth
-        col.c1 = max(c_span_min, c1_pm, col.c1)
-        col.c2 = max(c_span_min, c2_pm, col.c2)
-        if col.c1 ≈ c1_pm && col.c2 ≈ c2_pm
-            col.base.section = section
-        else
-            col.base.section = resize_column_with_reinforcement(
-                section, col.c1, col.c2, Pu[i], Mu[i], material
-            )
+    if !_rc_nlp_result_installable(column_result)
+        @warn "Column NLP result is not a completed design; leaving column sizes unchanged" status=column_result.status
+        push!(failures, "column_pm")
+    else
+        for (i, col) in enumerate(columns)
+            section = column_result.sections[i]
+            bb = bounding_box(section)
+            c1_pm = bb.width
+            c2_pm = bb.depth
+            col.c1 = max(c_span_min, c1_pm, col.c1)
+            col.c2 = max(c_span_min, c2_pm, col.c2)
+            if col.c1 ≈ c1_pm && col.c2 ≈ c2_pm
+                col.base.section = section
+            else
+                col.base.section = resize_column_with_reinforcement(
+                    section, col.c1, col.c2, Pu[i], Mu[i], material
+                )
+            end
         end
     end
 
@@ -452,7 +457,11 @@ function check_flat_plate_at_thickness!(
     for cell_idx in slab.cell_indices
         struc.cells[cell_idx].self_weight = sw_final
     end
-    update_asap_column_sections!(struc, columns, column_opts.material)
+    # A rejected NLP column is already in `failures`. Do not write its
+    # preliminary section into the analysis model as a completed design.
+    if _rc_nlp_result_installable(column_result)
+        update_asap_column_sections!(struc, columns, column_opts.material)
+    end
 
     punching_results = Dict{Int, NamedTuple}(
         local_to_global[i] => punching_local[i] for i in 1:n_cols

@@ -36,6 +36,10 @@ column size changed by more than `column_tol`.
 """
 function _update_column_sizes!(columns, column_result, Pu, Mu, c_span_min, material, column_tol;
                                 verbose::Bool = false)
+    if !_rc_nlp_result_installable(column_result)
+        @warn "Column NLP result is not a completed design; leaving column sizes unchanged" status=column_result.status
+        return false
+    end
     columns_changed = false
     for (i, col) in enumerate(columns)
         section = column_result.sections[i]
@@ -67,6 +71,36 @@ function _update_column_sizes!(columns, column_result, Pu, Mu, c_span_min, mater
         end
     end
     return columns_changed
+end
+
+"""
+    _flat_plate_column_pm_failure(column_result, h, iterations, drop_panel)
+
+`column_pm_infeasible` result when an NLP column solve cannot be installed,
+or `nothing` when the result may be written (including a discrete-MIP status).
+
+`false` from [`_update_column_sizes!`](@ref) means the column size did not
+change. A rejected NLP result is not that case. Callers must return this
+tuple instead of continuing the flat-plate loop.
+"""
+function _flat_plate_column_pm_failure(column_result, h, iterations, drop_panel)
+    _rc_nlp_result_installable(column_result) && return nothing
+    @warn "Column NLP result is not a completed design" status=column_result.status h=h
+    return (
+        converged        = false,
+        failure_reason   = "column_pm_infeasible",
+        failing_check    = "column_pm",
+        iterations       = iterations,
+        h_final          = h,
+        pattern_loading  = false,
+        slab_result      = nothing,
+        column_results   = nothing,
+        drop_panel       = drop_panel,
+        integrity        = nothing,
+        integrity_check  = nothing,
+        transfer_results = nothing,
+        ρ_prime          = nothing,
+    )
 end
 
 """
@@ -291,6 +325,11 @@ function _run_final_design(method, struc, slab, columns, moment_results, seconda
                             material;
                             verbose::Bool = false,
                             analysis_cache = nothing)
+    # A rejected NLP column is not a finished design. Stop before ASAP is
+    # updated and before this function can return converged=true.
+    rejected = _flat_plate_column_pm_failure(column_result, h, iter, drop_panel)
+    isnothing(rejected) || return rejected
+
     # ─── Face-of-Support Moment Reduction (ACI 8.11.6.1) ───
     if method isa EFM
         _c1_ext_min = typemax(typeof(columns[1].c1))
@@ -1275,7 +1314,12 @@ function _size_flat_plate!(
                     ρ_prime          = nothing,
                 )
             end
-            
+
+            # Rejected NLP columns return false from _update_column_sizes!
+            # (nothing was written). That is not "sizes are stable."
+            rejected = _flat_plate_column_pm_failure(column_result, h, total_iters, drop_panel)
+            isnothing(rejected) || return rejected
+
             columns_changed = _update_column_sizes!(
                 columns, column_result, Pu, Mu, c_span_min, material, column_tol;
                 verbose=verbose
@@ -1534,6 +1578,8 @@ function _size_flat_plate!(
                     ρ_prime          = nothing,
                 )
             end
+            rejected = _flat_plate_column_pm_failure(column_result, h, total_iters, drop_panel)
+            isnothing(rejected) || return rejected
             _update_column_sizes!(
                 columns, column_result, Pu, Mu, c_span_min, material, column_tol;
                 verbose=verbose

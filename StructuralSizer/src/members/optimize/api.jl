@@ -341,10 +341,10 @@ function size_columns(
               options_type=string(typeof(opts)),
               sizing_strategy=string(opts.sizing_strategy),
               path="nlp")
-        Pu_v  = [d.Pu  for d in demands]
-        Mux_v = [d.Mux for d in demands]
-        Muy_v = [d.Muy for d in demands]
-        return _size_columns_nlp(Pu_v, Mux_v, geometries, opts; Muy=Muy_v)
+        # Pass the caller demands through. Rebuilding from Pu/Mux/Muy alone
+        # drops M1/M2 and transverse_load, so the as-built check would use
+        # Cm from M1 = 0 instead of the demand the caller supplied.
+        return _size_columns_nlp(demands, geometries, opts)
     end
 
     # ─── MIP catalog path ───
@@ -404,20 +404,25 @@ function size_columns(
 end
 
 """
-    _size_columns_nlp(Pu, Mux, geometries, opts; Muy) -> NamedTuple
+    _size_columns_nlp(demands, geometries, opts) -> NamedTuple
 
-NLP column sizing adapter.  Constructs `NLPColumnOptions` from the shared
-`ConcreteColumnOptions` fields, calls `size_rc_columns_nlp`, and wraps
-the results into the same `(; section_indices, sections, status, objective_value)`
-NamedTuple that the MIP catalog path returns.
+NLP column sizing adapter. Constructs `NLPColumnOptions` from the shared
+`ConcreteColumnOptions` fields, calls `size_rc_columns_nlp` with the caller
+[`RCColumnDemand`](@ref)s (so `M1`/`M2` and `transverse_load` reach the
+as-built check), and wraps the results into the same
+`(; section_indices, sections, status, objective_value)` NamedTuple that the
+MIP catalog path returns.
 
-This allows the slab-column iteration loop in `size_flat_plate!` to use
-NLP column sizing without any changes to the pipeline code.
+`status` is `:nlp_complete` only when every column is `:optimal`, `:feasible`,
+or `:converged` after the as-built check. Otherwise `status` is `:infeasible`
+and every entry of `sections` is `nothing`, so a rejected section cannot be
+installed as a completed design. [`_rc_nlp_result_installable`](@ref) is the
+predicate installers use.
 """
 function _size_columns_nlp(
-    Pu::Vector, Mux::Vector, geometries::Vector,
-    opts::ConcreteColumnOptions;
-    Muy::Vector = zeros_like(Mux),
+    demands::Vector{<:RCColumnDemand},
+    geometries::Vector,
+    opts::ConcreteColumnOptions,
 )
     max_dim = isfinite(opts.max_depth) ? opts.max_depth : 48.0u"inch"
 
@@ -443,22 +448,64 @@ function _size_columns_nlp(
     )
 
     conc_geoms = [to_concrete_geometry(g) for g in geometries]
-    nlp_results = size_rc_columns_nlp(Pu, Mux, conc_geoms, nlp_opts; Muy=Muy)
+    nlp_results = size_rc_columns_nlp(demands, conc_geoms, nlp_opts)
+    return _rc_nlp_export_result(nlp_results, opts, conc_geoms)
+end
 
-    # Wrap into MIP-compatible result shape so the slab pipeline can read
-    # column_result.sections[i] without knowing which strategy was used.
-    sections = [r.section for r in nlp_results]
-    # Match MIP path: objective_value = total volume (m³) or weight (kg) per opts.objective
-    concrete = opts.material isa ReinforcedConcreteMaterial ? opts.material.concrete : opts.material
-    obj_val  = ustrip(sum(
-        objective_value(opts.objective, r.section, concrete, conc_geoms[i].L)
-        for (i, r) in enumerate(nlp_results)
-    ))
+"""
+    _rc_nlp_result_installable(result) -> Bool
 
+True when `result` may be written onto a building as a completed column design.
+
+The RC NLP adapter uses the Symbol `:nlp_complete` only when every column
+passed the as-built check, and then only if `sections` contains no `nothing`.
+Any other Symbol status (`:infeasible`, `:failed`, ...) is not installable.
+A non-Symbol status is a discrete-MIP `MathOptInterface` termination code and
+is left to that path.
+"""
+function _rc_nlp_result_installable(result)
+    hasproperty(result, :status) || return true
+    st = result.status
+    st isa Symbol || return true
+    st === :nlp_complete || return false
+    hasproperty(result, :sections) || return false
+    return all(s -> !isnothing(s), result.sections)
+end
+
+"""
+    _rc_nlp_export_result(nlp_results, opts, conc_geoms) -> NamedTuple
+
+MIP-shaped export of rectangular NLP column results.
+
+`:nlp_complete` requires every per-column status to be acceptable
+([`_rc_column_nlp_acceptable`](@ref)). If any column is not, the aggregate
+status is `:infeasible` and `sections` is all `nothing`.
+"""
+function _rc_nlp_export_result(
+    nlp_results::Vector{RCColumnNLPResult},
+    opts::ConcreteColumnOptions,
+    conc_geoms::Vector,
+)
+    n = length(nlp_results)
+    ok = all(_rc_column_nlp_acceptable(r.status) for r in nlp_results)
+    sections = if ok
+        RCColumnSection[r.section for r in nlp_results]
+    else
+        Union{RCColumnSection,Nothing}[nothing for _ in 1:n]
+    end
+    obj_val = if ok && n > 0
+        concrete = opts.material isa ReinforcedConcreteMaterial ? opts.material.concrete : opts.material
+        ustrip(sum(
+            objective_value(opts.objective, r.section, concrete, conc_geoms[i].L)
+            for (i, r) in enumerate(nlp_results)
+        ))
+    else
+        0.0
+    end
     return (;
-        section_indices = collect(1:length(sections)),
+        section_indices = collect(1:n),
         sections        = sections,
-        status          = :nlp_complete,
+        status          = ok ? :nlp_complete : :infeasible,
         objective_value = obj_val,
     )
 end
@@ -1225,6 +1272,26 @@ end
 # NLP Column Sizing (Continuous Optimization)
 # ==============================================================================
 
+"""Demand stored on the NLP problem and passed to the as-built checker.
+
+A caller [`RCColumnDemand`](@ref) is kept as the same object, so `M1`/`M2`
+and `transverse_load` are not replaced by the `M1 = 0` stand-in. `nothing`
+builds that stand-in from the envelope `Pu`/`Mux`/`Muy`.
+"""
+function _rc_column_nlp_use_demand(
+    Pu, Mux, Muy,
+    opts::NLPColumnOptions,
+    demand::Union{Nothing,RCColumnDemand},
+)
+    isnothing(demand) || return demand
+    return RCColumnDemand(1;
+        Pu = to_kip(Pu),
+        Mux = to_kipft(Mux),
+        Muy = to_kipft(Muy),
+        βdns = opts.βdns,
+    )
+end
+
 """
     size_rc_column_nlp(Pu, Mux, geometry, opts::NLPColumnOptions; Muy=0) -> RCColumnNLPResult
 
@@ -1243,10 +1310,14 @@ Uses the interior point solver (Ipopt) by default via `optimize_continuous`.
 - `opts`: `NLPColumnOptions` with material, bounds, solver settings
 
 # Keyword Arguments
-- `Muy`: Factored moment about y-axis (default: 0)
+- `Muy`: Factored moment about y-axis (default: 0). Ignored when `demand` is set.
 - `x0`: Optional start `[b, h, ρg]` in inches and ratio. Solved together
   with the axial-only start, unless it already matches that start.
   `nothing` (default) uses the moment-informed [`initial_guess`](@ref).
+- `demand`: Caller [`RCColumnDemand`](@ref). When set, this object — including
+  `M1`/`M2` and `transverse_load` — is the demand on the NLP problem and on
+  the as-built `ACIColumnChecker` gate. `nothing` (default) builds an envelope
+  stand-in with `M1 = 0` and `transverse_load = false`.
 
 # Returns
 `RCColumnNLPResult` with:
@@ -1286,13 +1357,13 @@ result = size_rc_column_nlp(Pu, Mux, geom, opts)
 2. For Ipopt, solves from the axial-only start and from the moment-informed
    start (or an explicit `x0`). Random `n_multistart` samples do not replace
    that axial start.
-3. Keeps the acceptable solve with the better objective. `:converged`
-   (iteration limit or slow progress) stays acceptable only when the
-   returned section satisfies the NLP constraints; otherwise that start
-   is `:infeasible` before the comparison. `:infeasible` and `:failed`
-   do not replace `:optimal`, `:feasible`, or a constraint-satisfying
+3. Rounds each start's solution to a practical `RCColumnSection` and checks
+   that built section with the real `ACIColumnChecker`, whatever the solver
+   status. A failing section is repaired (more bars, then larger b and h
+   within the bounds); if nothing passes, that start is `:infeasible`.
+4. Keeps the acceptable as-built section with the better objective.
+   `:infeasible` and `:failed` do not replace `:optimal`, `:feasible`, or
    `:converged`.
-4. Rounds the chosen solution to practical dimensions
 
 See also: [`size_columns`](@ref), [`NLPColumnOptions`](@ref), [`RCColumnNLPProblem`](@ref)
 """
@@ -1302,21 +1373,10 @@ function size_rc_column_nlp(
     geometry::ConcreteMemberGeometry,
     opts::NLPColumnOptions;
     Muy = 0.0,
-    x0::Union{Nothing,Vector{Float64}} = nothing
+    x0::Union{Nothing,Vector{Float64}} = nothing,
+    demand::Union{Nothing,RCColumnDemand} = nothing,
 )
-    # Convert demands to RCColumnDemand format
-    Pu_kip = to_kip(Pu)
-    Mux_kipft = to_kipft(Mux)
-    Muy_kipft = to_kipft(Muy)
-    
-    demand = RCColumnDemand(1; 
-        Pu = Pu_kip, 
-        Mux = Mux_kipft, 
-        Muy = Muy_kipft, 
-        βdns = opts.βdns
-    )
-    
-    # Create NLP problem
+    demand = _rc_column_nlp_use_demand(Pu, Mux, Muy, opts, demand)
     problem = RCColumnNLPProblem(demand, geometry, opts)
 
     # Grid / NLopt / NonConvex do not consume x0. One solve matches the
@@ -1332,7 +1392,7 @@ function size_rc_column_nlp(
             x0 = x0,
             n_multistart = opts.n_multistart,
         )
-        return _rc_column_nlp_screen_converged(
+        return _rc_column_nlp_verify_as_built(
             problem, build_rc_column_nlp_result(problem, opt_result))
     end
 
@@ -1351,9 +1411,10 @@ end
 """Statuses that may win the two-start comparison.
 
 `:optimal` and `:feasible` meet the KKT tolerance (or the relaxed one).
-`:converged` is an iteration-limit or slow-progress stop. It reaches this
-predicate only after [`_rc_column_nlp_screen_converged`](@ref) has kept it,
-which requires the returned section to satisfy the NLP constraints.
+`:converged` is an iteration-limit or slow-progress stop. In
+`size_rc_column_nlp` every status reaches the comparison only after
+[`_rc_column_nlp_verify_as_built`](@ref), which turns a section that fails
+the real ACI checker into `:infeasible`.
 `:infeasible` and `:failed` are not candidates while another start is acceptable.
 """
 function _rc_column_nlp_acceptable(status::Symbol)
@@ -1379,14 +1440,15 @@ end
 """Objective of the section `size_rc_column_nlp` would return. Lower is better.
 
 `MinVolume` with no square penalty ranks by final gross area. Every other
-objective, including `prefer_square`, uses `objective_fn` at the snapped
-section so a squarer section can win when that penalty asks for it.
+objective, including `prefer_square`, uses `objective_fn` at the built
+section (`b_final`, `h_final`, and the section's as-built `ρg`) so a squarer
+section can win when that penalty asks for it.
 """
 function _rc_column_returned_cost(problem::RCColumnNLPProblem, built::RCColumnNLPResult)
     if problem.opts.objective isa MinVolume && problem.opts.prefer_square <= 0
         return built.area
     end
-    return objective_fn(problem, [built.b_final, built.h_final, built.ρ_opt])
+    return objective_fn(problem, [built.b_final, built.h_final, built.section.ρg])
 end
 
 """
@@ -1394,8 +1456,8 @@ end
 
 `candidate` replaces the axial-only `incumbent` only when it is acceptable
 and better. An `:infeasible` or `:failed` solve never replaces an acceptable
-one. A `:converged` solve that misses the returned-section constraints is
-already `:infeasible` before this comparison. When `prefer_square` is off,
+one. A start whose built section fails the real ACI checker (and cannot be
+repaired) is already `:infeasible` before this comparison. When `prefer_square` is off,
 a larger final area does not count as better.
 """
 function _rc_column_nlp_candidate_wins(
@@ -1426,61 +1488,197 @@ function _rc_column_nlp_candidate_wins(
 end
 
 """
-    _rc_column_returned_section_feasible(problem, built) -> Bool
+    _rc_column_nlp_checker(opts) -> ACIColumnChecker
 
-True when `constraint_fns` at `(b_final, h_final, ρ_opt)` is at or below
-every upper bound from `constraint_bounds`. The slack is 1e-4, the same
-absolute tolerance Ipopt's multistart feasibility check uses. A looser
-tolerance would accept a biaxial utilization of about 1.05.
+The real ACI column checker set up to enforce what `RCColumnNLPProblem` does:
+
+- `include_slenderness = opts.include_slenderness` (the NLP magnifies Mux
+  only when this is on).
+- `include_biaxial = true` with `α_biaxial = 1.5`, the NLP's Bresler
+  exponent. Both the checker and the NLP skip the biaxial check unless
+  Muy > 0.
+- `fy_ksi`, `Es_ksi` from `opts.rebar_material`, the same values the NLP
+  material tuple uses.
+- `max_depth = opts.max_dim`. The checker limits `h` only; `b` is checked
+  against the bounds in [`_rc_column_as_built_ok`](@ref).
 """
-function _rc_column_returned_section_feasible(
-    problem::RCColumnNLPProblem,
-    built::RCColumnNLPResult,
-)
-    g = constraint_fns(problem, [built.b_final, built.h_final, built.ρ_opt])
-    _, ub = constraint_bounds(problem)
-    length(g) == length(ub) || return false
-    for i in eachindex(g)
-        # `<=` rejects NaN and +Inf. Only the upper bound is a capacity limit.
-        g[i] <= ub[i] + 1e-4 || return false
-    end
-    return true
+function _rc_column_nlp_checker(opts::NLPColumnOptions)
+    return ACIColumnChecker(;
+        include_slenderness = opts.include_slenderness,
+        include_biaxial = true,
+        α_biaxial = 1.5,
+        fy_ksi = fy_ksi(opts.rebar_material),
+        Es_ksi = Es_ksi(opts.rebar_material),
+        max_depth = opts.max_dim,
+    )
+end
+
+"""Dimension slack (in) for the `min_dim`/`max_dim` bounds on a built section."""
+const _RC_NLP_DIM_TOL_IN = 1e-6
+
+"""
+    _rc_column_rho_within_cap(ρg, ρ_max) -> Bool
+
+True when `ρg` does not exceed `ρ_max`.
+
+A section whose ratio is the cap can land one binary ulp above it. That single
+ulp is accepted. A larger overshoot, including the `1e-8` band previously
+allowed here, is not. This is not a relaxation of ACI 318-19 §10.6.1.1.
+"""
+function _rc_column_rho_within_cap(ρg::Real, ρ_max::Real)
+    ρ = Float64(ρg)
+    cap = Float64(ρ_max)
+    ρ <= cap && return true
+    return ρ <= nextfloat(cap)
 end
 
 """
-    _rc_column_nlp_screen_converged(problem, built) -> RCColumnNLPResult
+    _rc_column_as_built_ok(problem, checker, section) -> Bool
 
-`:converged` means Ipopt stopped on `ITERATION_LIMIT` or `SLOW_PROGRESS`,
-not that the KKT tolerance was met. Keep that status when the section that
-will be returned satisfies the NLP constraints. Otherwise the status becomes
-`:infeasible` before the two-start comparison, so the start cannot replace
-an acceptable one and callers do not treat it as usable. `:optimal` and
-`:feasible` are unchanged.
+True when the built `section` can be returned:
+
+1. `min_dim ≤ b, h ≤ max_dim` (the NLP variable bounds).
+2. At most `RC_COLUMN_NLP_MAX_BARS` bars.
+3. `0.01 ≤ ρg ≤ 0.08` — ACI 318-19 §10.6.1.1 (aci-318-19, p. 158) — and
+   `ρg ≤ opts.ρ_max`. The practical cap does not replace the ACI limits.
+   The checker does not test either ratio; this gate does.
+4. `is_feasible` of the real `ACIColumnChecker` with `problem.demand`
+   (the caller demand when one was supplied, including `M1`/`M2` and
+   `transverse_load`) and `problem.geometry`, on a one-section capacity cache.
 """
-function _rc_column_nlp_screen_converged(
+function _rc_column_as_built_ok(
+    problem::RCColumnNLPProblem,
+    checker::ACIColumnChecker,
+    section::RCColumnSection,
+)
+    opts = problem.opts
+    b = ustrip(u"inch", section.b)
+    h = ustrip(u"inch", section.h)
+    lo = problem.b_min - _RC_NLP_DIM_TOL_IN
+    hi = problem.b_max + _RC_NLP_DIM_TOL_IN
+    (lo <= b <= hi && lo <= h <= hi) || return false
+    length(section.bars) <= RC_COLUMN_NLP_MAX_BARS || return false
+    # ACI 318-19 §10.6.1.1 (aci-318-19, p. 158). opts.ρ_max is a tighter
+    # practical cap and does not raise the ACI minimum or maximum.
+    0.01 <= section.ρg <= 0.08 || return false
+    _rc_column_rho_within_cap(section.ρg, opts.ρ_max) || return false
+
+    cache = create_cache(checker, 1)
+    # Objective coefficients are not used here; MinVolume needs no material data.
+    precompute_capacities!(checker, cache, [section], opts.material, MinVolume())
+    return is_feasible(checker, cache, 1, section, opts.material,
+                       problem.demand, problem.geometry)
+end
+
+"""Copy of `built` with a different status."""
+function _rc_column_nlp_with_status(built::RCColumnNLPResult, status::Symbol)
+    return RCColumnNLPResult(
+        built.section, built.b_opt, built.h_opt, built.ρ_opt,
+        built.b_final, built.h_final, built.area, status, built.iterations)
+end
+
+"""
+    _rc_column_nlp_repair(problem, checker, built) -> Union{RCColumnNLPResult, Nothing}
+
+Smallest-first search for a section that passes [`_rc_column_as_built_ok`](@ref),
+starting from the failed `built` section.
+
+At each `b × h` (start: `b_final × h_final`, held to `max_dim`), try the bar
+count `_build_nlp_trial_section` would use for `ρ_opt`, then add 2 bars at a
+time while the count stays ≤ `RC_COLUMN_NLP_MAX_BARS` and the added steel
+keeps `ρg ≤ opts.ρ_max`. A starting count that already exceeds `opts.ρ_max`
+is not tried. If none passes, grow both `b` and `h` by `dim_increment`, each
+held to `max_dim`, and retry.
+
+Terminates when the proposed step does not increase `b` or `h` (including a
+`dim_increment` so small that `b + incr == b` in Float64), once both sit at
+`max_dim`, or when `dim_increment ≤ 0` or `max_dim` is not finite. Each inner
+pass tries at most `RC_COLUMN_NLP_MAX_BARS / 2` counts. Returns `nothing`
+when no section in that range passes. ACI 318-19 §10.6.1.1 (0.01 and 0.08)
+still applies inside [`_rc_column_as_built_ok`](@ref); this search does not
+raise `ρ_max` to make the minimum bar count legal.
+"""
+function _rc_column_nlp_repair(
+    problem::RCColumnNLPProblem,
+    checker::ACIColumnChecker,
+    built::RCColumnNLPResult,
+)
+    opts = problem.opts
+    A_bar = ustrip(u"inch^2", rebar(opts.bar_size).A)
+    incr = ustrip(u"inch", opts.dim_increment)
+    b_cap = problem.b_max
+    b = min(built.b_final, b_cap)
+    h = min(built.h_final, b_cap)
+    n_failed = length(built.section.bars)
+    b_failed = ustrip(u"inch", built.section.b)
+    h_failed = ustrip(u"inch", built.section.h)
+
+    while true
+        n = _nlp_trial_bar_count(b, h, built.ρ_opt, opts)
+        n_top = min(RC_COLUMN_NLP_MAX_BARS, floor(Int, opts.ρ_max * b * h / A_bar))
+        # A starting count already over opts.ρ_max is not a candidate.
+        # Adding bars would only raise ρg. Do not raise ρ_max to admit it.
+        ρ_start = (b > 0 && h > 0) ? n * A_bar / (b * h) : Inf
+        if n <= n_top && _rc_column_rho_within_cap(ρ_start, opts.ρ_max)
+            while true
+                # `built.section` already failed; do not check it twice.
+                same_as_failed = n == n_failed && b == b_failed && h == h_failed
+                if !same_as_failed
+                    section = _build_nlp_column_section(b, h, n, opts)
+                    if !isnothing(section) && _rc_column_as_built_ok(problem, checker, section)
+                        return RCColumnNLPResult(
+                            section, built.b_opt, built.h_opt, section.ρg,
+                            b, h, b * h, built.status, built.iterations)
+                    end
+                end
+                n + 2 <= n_top || break
+                n += 2
+            end
+        end
+
+        (incr > 0 && isfinite(b_cap)) || return nothing
+        (b < b_cap || h < b_cap) || return nothing
+        b_next = min(b + incr, b_cap)
+        h_next = min(h + incr, b_cap)
+        # Float64: an increment below spacing leaves b and h unchanged and
+        # would otherwise spin while `b < b_cap` stays true.
+        (b_next > b || h_next > h) || return nothing
+        b = b_next
+        h = h_next
+    end
+end
+
+"""
+    _rc_column_nlp_verify_as_built(problem, built) -> RCColumnNLPResult
+
+Check the section `size_rc_column_nlp` would return with the real ACI
+checker ([`_rc_column_as_built_ok`](@ref)), whatever the solver status.
+
+- Acceptable status (`:optimal`, `:feasible`, `:converged`) and the built
+  section passes: `built` is returned unchanged.
+- It fails: [`_rc_column_nlp_repair`](@ref) adds bars, then grows the
+  section. A repaired result keeps the solver status and reports the
+  repaired section's `b_final`, `h_final`, `area`, and `ρ_opt = ρg`.
+- No section passes: status becomes `:infeasible`, so the start cannot win
+  the two-start comparison and callers do not treat it as usable.
+
+`:infeasible` and `:failed` solves are returned unchanged.
+"""
+function _rc_column_nlp_verify_as_built(
     problem::RCColumnNLPProblem,
     built::RCColumnNLPResult,
 )
-    if built.status !== :converged || _rc_column_returned_section_feasible(problem, built)
-        return built
-    end
-    return RCColumnNLPResult(
-        built.section,
-        built.b_opt,
-        built.h_opt,
-        built.ρ_opt,
-        built.b_final,
-        built.h_final,
-        built.area,
-        :infeasible,
-        built.iterations,
-    )
+    _rc_column_nlp_acceptable(built.status) || return built
+    checker = _rc_column_nlp_checker(problem.opts)
+    _rc_column_as_built_ok(problem, checker, built.section) && return built
+    repaired = _rc_column_nlp_repair(problem, checker, built)
+    return isnothing(repaired) ? _rc_column_nlp_with_status(built, :infeasible) : repaired
 end
 
 """One Ipopt solve from `x_start`, returned as a snapped column result.
 
-A `:converged` stop is screened against the returned section before the
-caller compares the two starts.
+The returned section is verified (and repaired if needed) with the real ACI
+checker before the caller compares the two starts.
 """
 function _solve_rc_column_nlp_from(
     problem::RCColumnNLPProblem,
@@ -1497,7 +1695,7 @@ function _solve_rc_column_nlp_from(
         x0 = x_start,
         n_multistart = opts.n_multistart,
     )
-    return _rc_column_nlp_screen_converged(
+    return _rc_column_nlp_verify_as_built(
         problem, build_rc_column_nlp_result(problem, opt_result))
 end
 
@@ -1550,6 +1748,28 @@ function size_rc_columns_nlp(
         results[i] = size_rc_column_nlp(Pu[i], Mux[i], geometries[i], opts; Muy=Muy_i)
     end
     
+    return results
+end
+
+"""
+    size_rc_columns_nlp(demands, geometries, opts) -> Vector{RCColumnNLPResult}
+
+Size each column from its [`RCColumnDemand`](@ref), keeping `M1`/`M2` and
+`transverse_load` on the NLP problem and the as-built check.
+"""
+function size_rc_columns_nlp(
+    demands::Vector{<:RCColumnDemand},
+    geometries::Vector{<:ConcreteMemberGeometry},
+    opts::NLPColumnOptions,
+)
+    n = length(demands)
+    n == length(geometries) || throw(ArgumentError("demands and geometries must have same length"))
+    results = Vector{RCColumnNLPResult}(undef, n)
+    for i in 1:n
+        d = demands[i]
+        results[i] = size_rc_column_nlp(
+            d.Pu, d.Mux, geometries[i], opts; Muy=d.Muy, demand=d)
+    end
     return results
 end
 

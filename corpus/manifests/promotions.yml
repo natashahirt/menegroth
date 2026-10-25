@@ -1,0 +1,351 @@
+# Reviewer record for Phase 6 run 6a.
+# scripts/runners/corpus_promote.jl does not apply these entries to Julia.
+# status: accepted — the requirement below is readable in the extract and may
+# be encoded later. status: held — located, not cleared for encoding.
+# source_id: asce-7-22. Edition: ASCE/SEI 7-22.
+# Pages are the corpus PAGE markers. No values were inferred.
+# char_start was remeasured on 2026-10-23 after the text was re-extracted.
+# Fraction bars are inline, subscripts stay on their line, and the rotated
+# watermark is dropped. Equations below are quoted from that extract.
+
+- id: asce-7-22-12.3.1
+  clause: "ASCE 7-22 §12.3.1"
+  page: 179
+  char_start: 741048
+  status: accepted
+  requirement: >
+    The analysis shall consider the relative stiffnesses of diaphragms and
+    the vertical elements of the seismic force-resisting system. Unless a
+    diaphragm can be idealized as flexible or rigid per §12.3.1.1, §12.3.1.2,
+    or §12.3.1.3, the analysis shall include the diaphragm stiffness
+    (semirigid).
+
+- id: asce-7-22-12.3.1.1
+  clause: "ASCE 7-22 §12.3.1.1"
+  page: 179
+  char_start: 741597
+  status: accepted
+  requirement: >
+    Untopped steel decking or wood structural panels are permitted to be
+    idealized as flexible where (1) the vertical elements are steel braced
+    frames, steel and concrete composite braced frames, or concrete, masonry,
+    steel, or composite shear walls; or (2) the building is a one- or
+    two-family dwelling; or (3) light-frame construction with no concrete
+    topping over wood panels except nonstructural topping not greater than
+    1.5 in. (38 mm), and each line of vertical elements complies with
+    Table 12.12-1.
+
+- id: asce-7-22-12.3.1.2
+  clause: "ASCE 7-22 §12.3.1.2"
+  page: 179
+  char_start: 742420
+  status: accepted
+  requirement: >
+    Diaphragms of concrete slabs or concrete-filled metal deck with
+    span-to-depth ratios of 3 or less, in structures that do not have a
+    Type 2, 3, 4, or 5 horizontal structural irregularity, are permitted
+    to be idealized as rigid.
+
+- id: asce-7-22-12.3.1.3
+  clause: "ASCE 7-22 §12.3.1.3 Eq. 12.3-1"
+  page: 179
+  char_start: 742680
+  status: accepted
+  requirement: >
+    A diaphragm that meets neither §12.3.1.1 nor §12.3.1.2 is permitted to
+    be idealized as flexible where δ_MDD / Δ_ADVE > 2. δ_MDD and Δ_ADVE are
+    as shown in Figure 12.3-1. The loading shall be that prescribed in §12.8.
+
+- id: asce-7-22-12.3.2
+  clause: "ASCE 7-22 §12.3.2.1 and Table 12.3-1"
+  page: 180
+  char_start: 744899
+  status: accepted
+  requirement: >
+    Horizontal irregularity exists where any Table 12.3-1 type is present.
+    Type 1 torsional: more than 75% of any story's lateral strength below
+    the diaphragm is on one side of the center of mass, or TIR = Δmax/Δavg
+    exceeds 1.2 (Eq. 12.3-2). TIR uses ELF forces per §12.8 with accidental
+    torsion per §12.8.4 and Ax = 1.0. Type 2 reentrant corner: both plan
+    projections beyond the corner are greater than 20% of the plan dimension
+    in that direction. Type 3 diaphragm discontinuity: a cutout or open area
+    greater than 25% of the gross enclosed diaphragm area, or a change in
+    effective diaphragm stiffness of more than 50% from one story to the
+    next. Type 4 out-of-plane offset: a discontinuity in a lateral
+    force-resistance path, such as an out-of-plane offset of at least one
+    vertical element. Type 5 nonparallel system: vertical lateral
+    force-resisting elements are not parallel to the major orthogonal axes.
+
+- id: asce-7-22-26.2-diaphragm
+  clause: "ASCE 7-22 §26.2 DIAPHRAGM (wind)"
+  page: 324
+  char_start: 1394451
+  status: accepted
+  requirement: >
+    For analysis under wind loads, diaphragms of untopped steel decks,
+    concrete-filled steel decks, and concrete slabs, each with a
+    span-to-depth ratio of 2 or less, shall be permitted to be idealized
+    as rigid. Diaphragms of wood structural panels are permitted to be
+    idealized as flexible.
+
+- id: asce-7-22-12.7.2
+  clause: "ASCE 7-22 §12.7.2"
+  page: 184
+  char_start: 769295
+  status: accepted
+  requirement: >
+    W includes the dead load above the base, plus: (1) in storage areas, a
+    minimum of 25% of the floor live load; (2) the actual partition weight
+    or 10 lb/ft2 (0.48 kN/m2), whichever is greater, where partitions are
+    provided or required by §4.3.2; (3) total operating weight of permanent
+    equipment; (4) where the flat roof snow load Pf exceeds 45 lb/ft2
+    (2.16 kN/m2), 15% of the uniform design snow load, regardless of roof
+    slope; (5) landscaping and similar roof-garden materials per §3.1.4;
+    (6) fluids and bulk material expected during normal use. Exceptions:
+    items 1, 3, 5, and 6 need not be included where they add no more than
+    5% to the effective seismic weight at that level; floor live load in
+    public garages and open parking structures need not be included; fluid
+    weight may be reduced by a rational fluid-structure interaction analysis.
+
+- id: asce-7-22-12.8.1
+  clause: "ASCE 7-22 §12.8.1 Eq. 12.8-1"
+  page: 185
+  char_start: 773577
+  status: accepted
+  requirement: >
+    The extract reads V = CsW (12.8-1). Cs is determined
+    per §12.8.1.1. W is the effective seismic weight per §12.7.2.
+    SDS, SD1, S1, R, Ie, and Cd are required inputs from §11.4, §11.5.1,
+    and Table 12.2-1. They are not promoted here and shall not be inferred.
+
+- id: asce-7-22-12.8.1.1
+  clause: "ASCE 7-22 §12.8.1.1 Eqs. 12.8-2 through 12.8-7"
+  page: 185
+  char_start: 774330
+  status: accepted
+  requirement: >
+    The extract reads Cs = (Sa/(R/Ie)) for Eq. 12.8-2 and
+    Cs = (SDS/(R/Ie)) for Eq. 12.8-3. Eq. 12.8-6 reads
+    Cs = 0.044SDSIe ≥ 0.01. Eq. 12.8-7 reads Cs = 0.5S1∕ðR∕IeÞ,
+    where ð and Þ are the parentheses. Eqs. 12.8-4 and 12.8-5 were
+    read from the page (PDF page 185). For T ≤ TL, Cs = SD1 / (T (R/Ie)).
+    For T > TL, Cs = SD1 TL / (T^2 (R/Ie)). The text extract still jams
+    those two fractions; the page is the source for the factor order.
+
+- id: asce-7-22-12.8.3
+  clause: "ASCE 7-22 §12.8.3 Eqs. 12.8-12 and 12.8-13"
+  page: 186
+  char_start: 780449
+  status: accepted
+  requirement: >
+    Eq. 12.8-12 reads Fx = CvxV. On PDF page 186 the numerator of
+    Eq. 12.8-13 is wx hx^k and the denominator is a summation of
+    wi hi^k. The printed limits have i=1 above the summation sign and n
+    below it. That order is confirmed by the glyph positions, a crop of
+    the sign alone, and the page image. Figure C12.8-3 prints the usual
+    sum, with n above the sign and i=1 below it. ASCE 7-16 Eq. 12.8-12
+    (source_id asce-7-16, PDF page 157) prints the same equation with n
+    above and i=1 below, confirmed from the glyph positions. User decision,
+    2026-10-23: encode the sum over every level, i = 1 to n. Code that
+    uses it must quote the printed 7-22 form and mark this reading as
+    engineering judgment. The exponent
+    k is readable:
+    k = 1 when T <= 0.5 s; k = 2 when T >= 2.5 s; between those periods,
+    k shall be 2 or shall be linear interpolation between 1 and 2.
+    wi and wx are the portions of W assigned to levels i and x. hi and hx
+    are the heights from the base to those levels.
+
+- id: asce-7-22-12.8.4.2
+  clause: "ASCE 7-22 §12.8.4.2"
+  page: 187
+  char_start: 782453
+  status: accepted
+  requirement: >
+    Where diaphragms are not flexible, accidental torsion is applied to
+    determine whether a horizontal irregularity exists. It is included in
+    analysis and design for: Seismic Design Category B with Type 1
+    irregularity and TIR > 1.4; and Seismic Design Category C, D, E, or F
+    with Type 1 irregularity. Where required, Mta is combined with the
+    inherent torsional moment Mt, and is determined by displacing the
+    center of mass each way by 5% of the dimension perpendicular to the
+    applied forces. Concurrent orthogonal earthquake forces do not require
+    the 5% displacement in both directions at once; apply it in the
+    direction that produces the greater effect for each element.
+    For flexible diaphragms, §12.8.4.1 distributes forces by the position
+    of the masses supported, not by this accidental torsion.
+
+- id: asce-7-22-12.8.4.3
+  clause: "ASCE 7-22 §12.8.4.3 Eq. 12.8-15"
+  page: 187
+  char_start: 784323
+  status: accepted
+  requirement: >
+    Applies to Seismic Design Category C, D, E, or F with Type 1
+    irregularity. Ax shall not be less than 1 and is not required to exceed
+    3.0. δmax and δavg may be computed assuming the diaphragm is rigid and
+    assuming Ax = 1. Read from PDF page 187, Eq. 12.8-15 is
+    Ax = (δmax / (1.2 δavg))^2. The text extract leaves the exponent on
+    the line above the fraction; the page places the 2 to the right of
+    the closing fence.
+
+- id: asce-7-22-12.8.6
+  clause: "ASCE 7-22 §12.8.6"
+  page: 187
+  char_start: 785043
+  status: accepted
+  requirement: >
+    Displacements and drifts use the §12.8 seismic design forces with a
+    load factor of 1.0 on Eh, together with expected gravity not less than
+    1.0D + 0.5L. L is 0.8*L0 where the unreduced design live load exceeds
+    100 lb/ft2 (4.79 kN/m2), and 0.4*L0 otherwise. Eq. 12.8-6 need not be
+    considered when computing drift. The period used for displacements may
+    omit the Cu*Ta upper limit of §12.8.2. Design story drift Δ (§12.8.6.5,
+    page 188) is the difference of the Design Earthquake Displacements at
+    the centers of mass at the top and bottom of the story. Where those
+    centers do not align, the bottom deflection may be taken at the vertical
+    projection of the upper center of mass. Diaphragm deformation may be
+    neglected. For Seismic Design Category C, D, E, or F with Type 1
+    irregularity, Δ is the largest difference of vertically aligned
+    displacements along any edge, including diaphragm rotation.
+    Eq. 12.8-16 now reads δDE = Cdδe/Ie þ δdi. The þ is the plus sign in
+    this font's mapping. Eq. 12.8-17 reads δMCE = 1.5 Rδe/Ie þ δdi.
+
+- id: asce-7-22-12.12.1
+  clause: "ASCE 7-22 §12.12.1 and Table 12.12-1"
+  page: 194
+  char_start: 825377
+  status: accepted
+  requirement: >
+    Design story drift Δ from §12.8.6, §12.9.1, or §12.9.2 shall not exceed
+    Δa from Table 12.12-1 (page 195). Recovered row order, hsx = story
+    height below level x. Four stories or less, not masonry shear walls,
+    with interior walls, partitions, and ceilings designed to accommodate
+    the Design Earthquake Displacements: 0.025 hsx, 0.020 hsx, 0.015 hsx
+    for Risk Category I or II, III, IV. Masonry cantilever shear walls:
+    0.010 hsx for I-IV. Other masonry shear walls: 0.007 hsx for I-IV.
+    All other structures: 0.020 hsx, 0.015 hsx, 0.010 hsx for I or II, III,
+    IV. For seismic force-resisting systems solely comprising moment frames
+    in Seismic Design Category D, E, or F, Δ shall not exceed Δa/ρ
+    (§12.12.1.1).
+
+- id: asce-7-22-12.8.7
+  clause: "ASCE 7-22 §12.8.7 Eqs. 12.8-18 and 12.8-19"
+  page: 188
+  char_start: 789216
+  status: accepted
+  requirement: >
+    P-delta on story shears, moments, member forces, and story drifts is
+    not required where the stability coefficient θ is less than or equal
+    to 0.10. Eq. 12.8-18 reads θ = (Px∕hsx)/(Vx∕Δxe). Eq. 12.8-19 reads
+    θmax = 0.5/βCd ≤ 0.25. θ shall not exceed θmax, and θmax from
+    Eq. 12.8-19 need not be taken less than 0.1.
+    β may be taken as 1.0 and shall not be taken less than 1.25/Ω0.
+    Where 0.10 < θ <= θmax, displacements and member forces may be
+    multiplied by 1/(1 − θ). Where θ > θmax, the structure shall be
+    redesigned. Px uses the §12.8.6.1 gravity with no individual load
+    factor exceeding 1.0. Story stiffness is Vx/Δxe at the §12.8.6.5
+    location and may neglect diaphragm deformation.
+
+- id: asce-7-22-ch27-mwfrs
+  clause: "ASCE 7-22 Chapter 27"
+  page: 342
+  char_start: 1448373
+  status: held
+  requirement: >
+    Chapter 27 begins at PDF page 342 (printed 281). Eq. 27.3-1, read from
+    the glyphs, is p = q Kd G Cp − qi Kd (GCpi), in lb/ft2 (N/m2).
+    q = qz for windward walls at height z above the ground, and q = qh for
+    leeward walls, sidewalls, and roofs at height h. qi = qh for windward
+    walls, sidewalls, leeward walls, and roofs of enclosed and partially
+    open buildings, and for negative internal pressure in partially
+    enclosed buildings. qi = qz for positive internal pressure in partially
+    enclosed buildings, with z at the highest opening that could affect
+    that pressure. Eq. 27.3-2, PDF page 347, is p = qh Kd G CN for open
+    buildings with monoslope, pitched, or troughed free roofs. Table 27.2-1
+    steps 1 through 8 name the inputs (Chapter 26) and say step 7 uses
+    Eq. 27.3-1 or Eq. 27.3-2. §27.1.5 minimums: enclosed or partially
+    enclosed, not less than 16 lb/ft2 (0.77 kN/m2) times the wall area and
+    8 lb/ft2 (0.38 kN/m2) times the roof area projected on a vertical plane
+    normal to the wind; open buildings, not less than 16 lb/ft2
+    (0.77 kN/m2) times Af. Wall and roof loads are applied simultaneously.
+    Eq. 26.10-1 (PDF page 338), read from the glyphs: qz = 0.00256 Kz Kzt Ke V^2
+    with V in mi/h and qz in lb/ft2, and qz = 0.613 Kz Kzt Ke V^2 with V in m/s
+    and qz in N/m2. Kd is not in this equation. qh is the same equation at
+    mean roof height. Gust factor for a rigid building may be 0.85 (§26.11.1).
+    Table 26.13-1 (PDF page 341): enclosed, (GCpi) = +0.18 and −0.18;
+    partially enclosed, +0.55 and −0.55; partially open, +0.18 and −0.18;
+    open, 0.00. Plus acts toward the internal surface and minus away.
+    For a large unpartitioned volume, (GCpi) is multiplied by Ri from
+    Eq. 26.13-1: Ri = 1.0, or Ri = 0.5 (1 + 1/sqrt(1 + Vi/(22800 Aog)))
+    when that value is less than 1.0. Aog is the total area of openings
+    in the envelope and Vi is the unpartitioned internal volume.
+    Both signs are applied, each to all internal surfaces. The page image
+    of Table 26.13-1 matches these values. Figure 27.3-1 wall Cp,
+    glyph-checked on PDF page 345: windward 0.8 with qz for every L/B;
+    leeward with qh is −0.5, −0.3, and −0.2 for L/B of 0–1, 2, and ≥4;
+    sidewall −0.7 with qh. The Figure 27.3-1 roof Cp grid (PDF page 345)
+    was read from the page images; the digits are not in the text layer.
+    Three readings agree. For wind normal to the ridge and θ ≥ 10°, each
+    h/L has two Cp rows. Windward angles are 10°, 15°, 20°, 25°, 30°, 35°,
+    45°, 60°, 60° < θ ≤ 80°, and >80°. Leeward angles are 10°, 15°, and
+    ≥20°. A superscript a marks a value given only for interpolation.
+    A superscript b may be reduced by the area factors below.
+    h/L ≤ 0.25: −0.7, −0.5, −0.3, −0.2, −0.2, 0.0a; and −0.18, 0.0a, 0.2,
+    0.3, 0.3, 0.4, 0.4, 0.6, 0.01θ, 0.8, with leeward −0.3, −0.5, −0.6.
+    h/L = 0.5: −0.9, −0.7, −0.4, −0.3, −0.2, −0.2, 0.0a; and −0.18, −0.18,
+    0.0a, 0.2, 0.2, 0.3, 0.4, 0.6, 0.01θ, 0.8, with leeward −0.5, −0.5, −0.6.
+    h/L ≥ 1.0: −1.3b, −1.0, −0.7, −0.5, −0.3, −0.2, 0.0a; and −0.18, −0.18,
+    −0.18, 0.0a, 0.2, 0.2, 0.3, 0.6, 0.01θ, 0.8, with leeward −0.7, −0.6, −0.6.
+    For wind normal to the ridge with θ < 10°, and for wind parallel to the
+    ridge at any θ, h/L ≤ 0.5 gives Cp pairs −0.9 and −0.18 from 0 to h/2,
+    −0.9 and −0.18 from h/2 to h, −0.5 and −0.18 from h to 2h, and −0.3 and
+    −0.18 beyond 2h. For h/L ≥ 1.0 the pairs are −1.3b and −0.18 from 0 to
+    h/2, and −0.7 and −0.18 beyond h/2. The b reduction factors are 1.0 for
+    area ≤ 100 ft2 (9.3 m2), 0.9 at 250 ft2 (23.2 m2), and 0.8 at
+    ≥ 1,000 ft2 (92.9 m2). Notes 1 through 6 are on this page. There is no
+    note 7 or 8 on Figure 27.3-1.
+    Figure 27.3-2 (PDF page 346) is a graph of Cp against f/D. The curves
+    are not digitized. Note 8: for f/D less than 0.05, use Figure 27.3-1.
+    Figure 27.3-3 (PDF page 347), read from the page image. Roof on an
+    elevated structure, windward quarter, center half, leeward quarter:
+    0 < r < 0.2 gives −0.9, −0.7−r, −0.5; 0.2 ≤ r < 0.3 gives 1.5r−0.3,
+    −0.7−r, −0.5; 0.3 ≤ r ≤ 0.6 gives both 6r−2.1 and 2.75r−0.7, then
+    −0.7−r, −0.5. Roof springing from ground level, 0 < r ≤ 0.6, gives
+    1.4r, −0.7−r, −0.5. Where two values are listed, design for both.
+    Figure 27.3-4 (PDF page 348) is glyph-checked and matches the page
+    image. Each row is case A or B, then eight CN values: γ = 0° clear
+    CNW, CNL, obstructed CNW, CNL, then the same four at γ = 180°.
+    <7.5° A: 1.2, 0.3, −0.5, −1.2, 1.2, 0.3, −0.5, −1.2.
+    <7.5° B: −1.1, −0.1, −1.1, −0.6, −1.1, −0.1, −1.1, −0.6.
+    7.5° A: −0.6, −1.0, −1.0, −1.5, 0.9, 1.5, −0.2, −1.2.
+    7.5° B: −1.4, 0.0, −1.7, −0.8, 1.6, 0.3, 0.8, −0.3.
+    15° A: −0.9, −1.3, −1.1, −1.5, 1.3, 1.6, 0.4, −1.1.
+    15° B: −1.9, 0.0, −2.1, −0.6, 1.8, 0.6, 1.2, −0.3.
+    22.5° A: −1.5, −1.6, −1.5, −1.7, 1.7, 1.8, 0.5, −1.0.
+    22.5° B: −2.4, −0.3, −2.3, −0.9, 2.2, 0.7, 1.3, 0.0.
+    30° A: −1.8, −1.8, −1.5, −1.8, 2.1, 2.1, 0.6, −1.0.
+    30° B: −2.5, −0.5, −2.3, −1.1, 2.6, 1.0, 1.6, 0.1.
+    37.5° A: −1.8, −1.8, −1.5, −1.8, 2.1, 2.2, 0.7, −0.9.
+    37.5° B: −2.4, −0.6, −2.2, −1.1, 2.7, 1.1, 1.9, 0.3.
+    45° A: −1.6, −1.8, −1.3, −1.8, 2.2, 2.5, 0.8, −0.9.
+    45° B: −2.3, −0.7, −1.9, −1.2, 2.6, 1.4, 2.1, 0.4.
+    Figures 27.3-5, 27.3-6, and 27.3-7 were read from two page images
+    that agree. Their digits are not in the text layer. Column order for
+    27.3-5 and 27.3-6 is clear CNW, clear CNL, obstructed CNW, obstructed
+    CNL, with γ = 0° and 180° sharing the columns.
+    Figure 27.3-5: 7.5° A 1.1, −0.3, −1.6, −1.0; B 0.2, −1.2, −0.9, −1.7.
+    15° A 1.1, −0.4, −1.2, −1.0; B 0.1, −1.1, −0.6, −1.6.
+    22.5° A 1.1, 0.1, −1.2, −1.2; B −0.1, −0.8, −0.8, −1.7.
+    30° A 1.3, 0.3, −0.7, −0.8; B −0.1, −0.9, −0.2, −1.1.
+    37.5° A 1.3, 0.6, −0.6, −0.6; B −0.2, −0.6, −0.3, −0.9.
+    45° A 1.1, 0.9, −0.5, −0.5; B −0.3, −0.5, −0.3, −0.7.
+    Figure 27.3-6: 7.5° A −1.1, 0.3, −1.6, −0.5; B −0.2, 1.2, −0.9, −0.8.
+    15° A −1.1, 0.4, −1.2, −0.5; B 0.1, 1.1, −0.6, −0.8.
+    22.5° A −1.1, −0.1, −1.2, −0.6; B −0.1, 0.8, −0.8, −0.8.
+    30° A −1.3, −0.3, −1.4, −0.4; B 0.1, 0.9, −0.2, −0.5.
+    37.5° A −1.3, −0.6, −1.4, −0.3; B 0.2, 0.6, −0.3, −0.4.
+    45° A −1.1, −0.9, −1.2, −0.3; B 0.3, 0.5, −0.3, −0.4.
+    Figure 27.3-7, clear then obstructed: distance ≤ h, all shapes, case A
+    −0.8, −1.2; θ ≤ 45°, case B 0.8, 0.5. Distance > h and ≤ 2h, all
+    shapes, case A −0.6, −0.9; θ ≤ 45°, case B 0.5, 0.5. Distance > 2h,
+    all shapes, case A −0.3, −0.6; θ ≤ 45°, case B 0.3, 0.3.

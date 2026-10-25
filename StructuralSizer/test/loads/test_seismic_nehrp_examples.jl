@@ -27,16 +27,19 @@ using StructuralSizer
         T = 1.4 * 0.02 * 234.25^0.75
         tol = 1e-12
 
-        # HAND CHECK FROM EXAMPLE INPUTS. Published mistake (PDF page 149):
-        # "0.044SDSIe = 0.044 × 0.65 × 1.0 = 0.029". The 0.65 is SD1 and S1,
-        # not SDS; SDS on PDF page 146 is 1.10. Corrected Eq. 12.8-6 floor:
+        # HAND CHECK FROM EXAMPLE INPUTS. ASCE 7-22 Eq. 12.8-6 (corpus: asce-7-22,
+        # PDF page 185). Published mistake (nehrp-2020-design-examples-v1,
+        # PDF page 149): "0.044SDSIe = 0.044 × 0.65 × 1.0 = 0.029". The 0.65 is
+        # SD1 and S1, not SDS; SDS on PDF page 146 is 1.10. Corrected floor:
         # 0.044 * 1.10 * 1.0 = 0.0484.
         floor_eq6 = 0.044 * SDS * Ie
         @test floor_eq6 ≈ 0.0484 atol=tol rtol=tol
 
-        # HAND CHECK FROM EXAMPLE INPUTS. Eq. 12.8-4 cap = 0.65/(T*8) = 0.048462.
-        # It exceeds the corrected floor 0.0484 and Eq. 12.8-7 = 0.5*0.65/8 =
-        # 0.040625, and is below Eq. 12.8-3 = 1.10/8 = 0.1375, so it governs.
+        # HAND CHECK FROM EXAMPLE INPUTS. ASCE 7-22 Eqs. 12.8-3, 12.8-4, and
+        # 12.8-7 (corpus: asce-7-22, PDF page 185). Eq. 12.8-4 cap =
+        # 0.65/(T*8) = 0.048462. It exceeds the corrected floor 0.0484 and
+        # Eq. 12.8-7 = 0.5*0.65/8 = 0.040625, and is below Eq. 12.8-3 =
+        # 1.10/8 = 0.1375, so it governs.
         # The publication labels these with ASCE 7-16 numbers (12.8-2, -3, -5, -6).
         cap_eq4 = SD1 / (T * R / Ie)
         @test cap_eq4 ≈ 0.04846248042991762 atol=1e-15 rtol=1e-12
@@ -62,7 +65,8 @@ using StructuralSizer
 
     @testset "Example 4 Table 4-7 Cd*δxe/Ie arithmetic (nehrp-2020-design-examples-v1, §4.5.1.8, PDF page 151)" begin
         # PUBLISHED EXAMPLE, Table 4-7 X-direction (PDF page 151; an MRSA result).
-        # Checks the Cd*δxe/Ie arithmetic of Eq. 12.8-16 only, with Cd = 8,
+        # Checks the Cd*δxe/Ie arithmetic of ASCE 7-22 Eq. 12.8-16 only
+        # (corpus: asce-7-22, PDF page 187), with Cd = 8,
         # Ie = 1.0 (PDF page 146), δdi = 0. δxe is printed to 0.01 in., so the
         # tolerance is Cd * 0.005 = 0.04 in.
         Cd, Ie = 8.0, 1.0
@@ -94,8 +98,9 @@ using StructuralSizer
         # Published equation-number mistakes (PDF page 192), comment only: the
         # publication labels SDS/(R/Ie) as Eq. 12.8-2, SD1/(T(R/Ie)) as
         # Eq. 12.8-3, the floor as Eq. 12.8-5, and 0.5*S1/(R/Ie) as Eq. 12.8-6.
-        # Those are ASCE 7-16 numbers; in ASCE 7-22 they are Eqs. 12.8-3,
-        # 12.8-4, 12.8-6, and 12.8-7. It also prints "Cs,Min = 0.44 SDS Ie =
+        # Those are ASCE 7-16 numbers. In ASCE 7-22 they are Eqs. 12.8-3, 12.8-4,
+        # 12.8-6, and 12.8-7 (corpus: asce-7-22, PDF page 185). It also prints
+        # "Cs,Min = 0.44 SDS Ie =
         # (0.44)(1.101)(1) = 0.048". 0.44*1.101 = 0.484; the printed 0.048 is
         # 0.044*1.101. The coefficient in Eq. 12.8-6 is 0.044.
         #
@@ -111,7 +116,8 @@ using StructuralSizer
         @test floor_eq6 > cap_eq4
         @test floor_eq6 > 0.5 * S1 / (R / Ie)
 
-        # HAND CHECK FROM EXAMPLE INPUTS. Cs = 0.044 * 1.101 = 0.048444.
+        # HAND CHECK FROM EXAMPLE INPUTS. ASCE 7-22 Eq. 12.8-6 (corpus: asce-7-22,
+        # PDF page 185). Cs = 0.044 * 1.101 = 0.048444.
         Cs = seismic_response_coefficient(;
             method=:sds, SDS=SDS, SD1=SD1, S1=S1, T=T, TL=TL, R=R, Ie=Ie)
         @test Cs ≈ 0.044 * 1.101 atol=tol rtol=tol
@@ -126,7 +132,8 @@ using StructuralSizer
         tol = 1e-12
 
         # HAND CHECK FROM EXAMPLE INPUTS. k = 1 + (T - 0.5)/2 = 1.59832 by linear
-        # interpolation (ASCE 7-22 §12.8.3). The publication prints k = 1.6
+        # interpolation (ASCE 7-22 §12.8.3, corpus: asce-7-22, PDF page 186).
+        # The publication prints k = 1.6
         # (PDF page 193), which is its rounding of this value.
         k = vertical_distribution_exponent(T; between=:interpolate)
         @test k ≈ 1 + (T - 0.5) / 2 atol=tol rtol=tol
@@ -168,7 +175,8 @@ using StructuralSizer
         @test dist.Fx ≈ dist.Cvx .* V atol=1e-9 rtol=tol
         @test sum(dist.Fx) ≈ V atol=1e-9 rtol=tol
 
-        # HAND CHECK FROM EXAMPLE INPUTS. ASCE 7-22 Eq. 12.8-14: Vx is the sum
+        # HAND CHECK FROM EXAMPLE INPUTS. ASCE 7-22 Eq. 12.8-14 (corpus: asce-7-22,
+        # PDF page 186): Vx is the sum
         # of Fx at and above each level. Levels are listed top down, so Vx is
         # the running sum, and the lowest story carries the full base shear.
         Vx = seismic_story_shear(dist.Fx, h)

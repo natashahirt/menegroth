@@ -111,8 +111,10 @@ const _RTOL = 1e-12
     end
 
     @testset "drift seismic response coefficient" begin
-        # HAND CHECK, computed from ASCE 7-22 Eqs. 12.8-5 and 12.8-6 and the
-        # §12.8.6.1 Exception. Not a published example. Method 2, T = 10 > TL = 8:
+        # HAND CHECK, computed from ASCE 7-22 Eqs. 12.8-5 and 12.8-6
+        # (corpus: asce-7-22, PDF page 185) and the §12.8.6.1 Exception
+        # (corpus: asce-7-22, PDF page 187). Not a published example.
+        # Method 2, T = 10 > TL = 8:
         # cap 0.6*8/(10^2*8) = 0.006. For strength Eq. 12.8-6 governs at 0.044.
         # For drift Eq. 12.8-6 is not applied, and S1 = 0.2 < 0.6, so Cs = 0.006.
         sds_6 = (method=:sds, SDS=1.0, SD1=0.6, S1=0.2, T=10.0, TL=8.0, R=8.0, Ie=1.0)
@@ -120,14 +122,17 @@ const _RTOL = 1e-12
         @test seismic_response_coefficient(; sds_6..., for_drift=false) ≈ 0.044 atol=_ATOL rtol=_RTOL
         @test seismic_response_coefficient(; sds_6..., for_drift=true) ≈ 0.006 atol=_ATOL rtol=_RTOL
 
-        # HAND CHECK, computed from ASCE 7-22 Eqs. 12.8-2 and 12.8-6 and the
-        # §12.8.6.1 Exception. Not a published example. Method 1: Sa/(R/Ie) =
+        # HAND CHECK, computed from ASCE 7-22 Eqs. 12.8-2 and 12.8-6
+        # (corpus: asce-7-22, PDF page 185) and the §12.8.6.1 Exception
+        # (corpus: asce-7-22, PDF page 187). Not a published example.
+        # Method 1: Sa/(R/Ie) =
         # 0.2/8 = 0.025. Strength: Eq. 12.8-6 floor 0.044 governs. Drift: 0.025.
         sa_6 = (method=:sa, Sa=0.2, SDS=1.0, S1=0.2, R=8.0, Ie=1.0)
         @test seismic_response_coefficient(; sa_6...) ≈ 0.044 atol=_ATOL rtol=_RTOL
         @test seismic_response_coefficient(; sa_6..., for_drift=true) ≈ 0.025 atol=_ATOL rtol=_RTOL
 
-        # HAND CHECK, computed from ASCE 7-22 Eq. 12.8-7 and Commentary C12.8.6.1.
+        # HAND CHECK, computed from ASCE 7-22 Eq. 12.8-7 (corpus: asce-7-22,
+        # PDF page 185) and Commentary C12.8.6.1 (corpus: asce-7-22, PDF page 731).
         # Not a published example. Same Method 2 case with S1 = 0.7 >= 0.6.
         # Strength: max(0.006, 0.044, 0.5*0.7/8 = 0.04375) = 0.044 (Eq. 12.8-6).
         # Drift: Eq. 12.8-6 is skipped but Eq. 12.8-7 still applies, so 0.04375.
@@ -135,14 +140,16 @@ const _RTOL = 1e-12
         @test seismic_response_coefficient(; sds_7...) ≈ 0.044 atol=_ATOL rtol=_RTOL
         @test seismic_response_coefficient(; sds_7..., for_drift=true) ≈ 0.04375 atol=_ATOL rtol=_RTOL
 
-        # HAND CHECK, computed from ASCE 7-22 Eq. 12.8-7 and Commentary C12.8.6.1.
+        # HAND CHECK, computed from ASCE 7-22 Eq. 12.8-7 (corpus: asce-7-22,
+        # PDF page 185) and Commentary C12.8.6.1 (corpus: asce-7-22, PDF page 731).
         # Not a published example. Method 1, Sa/(R/Ie) = 0.025, S1 = 0.7.
         # Strength 0.044 (Eq. 12.8-6). Drift 0.5*0.7/8 = 0.04375 (Eq. 12.8-7).
         sa_7 = (method=:sa, Sa=0.2, SDS=1.0, S1=0.7, R=8.0, Ie=1.0)
         @test seismic_response_coefficient(; sa_7...) ≈ 0.044 atol=_ATOL rtol=_RTOL
         @test seismic_response_coefficient(; sa_7..., for_drift=true) ≈ 0.04375 atol=_ATOL rtol=_RTOL
 
-        # HAND CHECK, computed from ASCE 7-22 Eq. 12.8-3. Not a published example.
+        # HAND CHECK, computed from ASCE 7-22 Eq. 12.8-3 (corpus: asce-7-22,
+        # PDF page 185). Not a published example.
         # Where neither lower bound governs, the drift value equals the strength
         # value: the first case of the previous testset, 0.125.
         @test seismic_response_coefficient(;
@@ -176,21 +183,25 @@ const _RTOL = 1e-12
     end
 
     @testset "story shear" begin
-        # HAND CHECK, computed from ASCE 7-22 Eq. 12.8-14. Not a published example.
+        # HAND CHECK, computed from ASCE 7-22 Eq. 12.8-14 (corpus: asce-7-22,
+        # PDF page 186). Not a published example.
         # Fx = [10, 20, 30] at heights [30, 20, 10]: the top level carries 10,
         # the middle 10 + 20 = 30, the bottom 10 + 20 + 30 = 60.
         @test seismic_story_shear([10.0, 20.0, 30.0], [30.0, 20.0, 10.0]) ≈
               [10.0, 30.0, 60.0] atol=_ATOL rtol=_RTOL
-        # HAND CHECK, computed from ASCE 7-22 Eq. 12.8-14. Not a published example.
+        # HAND CHECK, computed from ASCE 7-22 Eq. 12.8-14 (corpus: asce-7-22,
+        # PDF page 186). Not a published example.
         # The same levels in a shuffled order return the matching shuffled result.
         @test seismic_story_shear([30.0, 10.0, 20.0], [10.0, 30.0, 20.0]) ≈
               [60.0, 10.0, 30.0] atol=_ATOL rtol=_RTOL
-        # HAND CHECK, computed from ASCE 7-22 Eq. 12.8-14. Not a published example.
+        # HAND CHECK, computed from ASCE 7-22 Eq. 12.8-14 (corpus: asce-7-22,
+        # PDF page 186). Not a published example.
         # A single level carries its own force. A negative Fx is a finite real
         # and is accepted: [5, -2] at heights [20, 10] gives [5, 3].
         @test seismic_story_shear([7.0], [12.0]) ≈ [7.0] atol=_ATOL rtol=_RTOL
         @test seismic_story_shear([5.0, -2.0], [20.0, 10.0]) ≈ [5.0, 3.0] atol=_ATOL rtol=_RTOL
-        # HAND CHECK, computed from ASCE 7-22 Eq. 12.8-14. Not a published example.
+        # HAND CHECK, computed from ASCE 7-22 Eq. 12.8-14 (corpus: asce-7-22,
+        # PDF page 186). Not a published example.
         # Duplicate heights make "at and above" ambiguous; empty, unequal-length,
         # non-positive, and non-finite inputs are rejected.
         @test_throws ArgumentError seismic_story_shear([1.0, 2.0], [10.0, 10.0])
@@ -261,14 +272,16 @@ const _RTOL = 1e-12
         @test drift_live_load_factor(100.0) ≈ 0.4 atol=_ATOL rtol=_RTOL
         @test drift_live_load_factor(100.1) ≈ 0.8 atol=_ATOL rtol=_RTOL
 
-        # HAND CHECK, computed from ASCE 7-22 §12.8.6.1. Not a published example.
+        # HAND CHECK, computed from ASCE 7-22 §12.8.6.1 (corpus: asce-7-22,
+        # PDF page 187). Not a published example.
         # 1.0D + 0.5L with L = 0.4L0 at 80 lb/ft²: 100 + 0.5*0.4*50 = 110.
         # L = 0.8L0 at 150 lb/ft²: 100 + 0.5*0.8*50 = 120.
         # Exactly 100 lb/ft² does not exceed 100: 100 + 0.5*0.4*50 = 110.
         @test drift_expected_gravity_load(100.0, 50.0, 80.0) ≈ 110.0 atol=_ATOL rtol=_RTOL
         @test drift_expected_gravity_load(100.0, 50.0, 150.0) ≈ 120.0 atol=_ATOL rtol=_RTOL
         @test drift_expected_gravity_load(100.0, 50.0, 100.0) ≈ 110.0 atol=_ATOL rtol=_RTOL
-        # HAND CHECK, computed from ASCE 7-22 §12.8.6.1. Not a published example.
+        # HAND CHECK, computed from ASCE 7-22 §12.8.6.1 (corpus: asce-7-22,
+        # PDF page 187). Not a published example.
         # Zero loads are allowed; negative D or L0 is rejected.
         @test drift_expected_gravity_load(0.0, 0.0, 40.0) ≈ 0.0 atol=_ATOL rtol=_RTOL
         @test_throws ArgumentError drift_expected_gravity_load(-1.0, 50.0, 80.0)

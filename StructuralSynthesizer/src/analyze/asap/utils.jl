@@ -237,6 +237,13 @@ function to_asap!(struc::BuildingStructure{T, A, P};
     wall_shells, wall_nodes = _mesh_wall_shells(struc, params, nodes, shell_elements)
 
     if diaphragm_mode == :rigid && !isempty(struc.slabs)
+        # Frame nodes are built with θz fixed. The rigid-link release then
+        # drops the θz tie, and the diaphragm is a pure translation. Free
+        # plan rotation on nodes that can already translate in plan so the
+        # (u_x, u_y, θ_z) tie this path documents is actually enforced.
+        # θx and θy stay fixed. Supports stay fixed.
+        _free_plan_rotation_for_rigid_diaphragm!(nodes)
+        _free_plan_rotation_for_rigid_diaphragm!(wall_nodes)
         rigid_links = _build_rigid_diaphragm_links(struc, nodes)
         _join_wall_nodes_to_rigid_diaphragm!(rigid_links, skel, wall_nodes)
         @debug "Created rigid diaphragm links" n_links=length(rigid_links)
@@ -415,6 +422,27 @@ function _create_shell_diaphragms(struc::BuildingStructure, nodes::Vector{Asap.N
 end
 
 """
+Free `θz` on nodes that already translate in plan.
+
+The rigid diaphragm ties `(u_x, u_y, θ_z)` only when that DOF is free on
+both ends. Frame nodes are created with every rotation fixed, which made
+the link release `θz` and left the floor unable to rotate in plan. A story
+torsion applied to that master never entered the free system.
+
+Supports (any fixed translation) are left alone. `θx` and `θy` stay fixed.
+"""
+function _free_plan_rotation_for_rigid_diaphragm!(nodes)
+    for node in nodes
+        dof = node.dof
+        length(dof) >= 6 || continue
+        if dof[1] && dof[2]
+            dof[6] = true
+        end
+    end
+    return nodes
+end
+
+"""
     _build_rigid_diaphragm_links(struc, nodes) -> Vector{Asap.RigidLink}
 
 Build the master/slave `Asap.RigidLink` set that enforces a truly rigid
@@ -469,11 +497,10 @@ function _build_rigid_diaphragm_links(struc::BuildingStructure,
             slave = nodes[slave_idx]
             slave === master && continue    # defensive; never true after filter
             # Per-link release: tie a target DOF only when it is free on BOTH
-            # master AND slave. If either side has that DOF fixed at the
-            # node level (e.g. the current `_create_offset_nodes` convention
-            # pins rotational DOFs on non-support nodes), release the tie
-            # rather than provoking a skip-warning. u_z / θ_x / θ_y are
-            # always released — they carry gravity/bending.
+            # master AND slave. The rigid path frees θz first
+            # (`_free_plan_rotation_for_rigid_diaphragm!`); a DOF that is
+            # still fixed is released here rather than tied into a support.
+            # u_z / θ_x / θ_y are always released — they carry gravity/bending.
             release = ntuple(6) do i
                 (i in tied_indices) || return true       # gravity/bending
                 # Tie only if both endpoints have this DOF free.

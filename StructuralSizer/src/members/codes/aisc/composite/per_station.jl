@@ -27,13 +27,14 @@
 #
 # Sign dispatch (continuity):
 #   • M(s) ≥ 0 (sagging) → §I3.2a plastic positive composite, `get_ϕMn_composite`.
-#   • M(s) < 0 (hogging) → §I3.2b: bare steel OR composite-with-slab-rebar,
-#     `get_Mn_negative`, using the developed slab reinforcement `Asr` within
-#     b_eff(s).
+#   • M(s) < 0 (hogging) → §I3.2b through [`available_negative_flexure`](@ref).
+#     Chapter F steel alone unless the beam is compact, braced (`Lb ≤ Lp`),
+#     anchored in the negative region, and the parallel reinforcement is
+#     developed. `Asr > 0` by itself does not open the plastic alternative.
 #
-# Citations: AISC 360-16 §I3.1a (corpus: aisc-360-16, PDF p. 150), §I3.2a and
-# §I3.2b (corpus: aisc-360-16, PDF p. 151). Verbatim text in effective_width.jl
-# and flexure.jl.
+# Citations: AISC 360-22 §I3.1 (effective width, corpus: aisc-360-22, PDF p. 168),
+# §I3.2a and §I3.2b (PDF p. 170). The 360-16 text of these clauses is the same
+# wording; new work cites 360-22.
 # ==============================================================================
 
 # ------------------------------------------------------------------------------
@@ -159,35 +160,39 @@ end
 
 """
     phiMn_at_station(section, material, slab, b_eff, ΣQn, sagging;
-                     Asr=0.0u"mm^2", Fysr=0.0u"MPa", d_rebar=0.0u"m", ϕ=0.9)
+                     Asr=0.0u"mm^2", Fysr=0.0u"MPa", d_rebar=0.0u"m", ϕ=0.9,
+                     Lb=nothing, neg_moment=false)
         -> NamedTuple(:ϕMn, :Mn, :sense)
 
 Design flexural strength at a station, dispatched by the sign of the demand:
 
-  • `sagging == true`  → AISC 360-16 §I3.2a (corpus: aisc-360-16, PDF p. 151):
-    plastic positive composite strength `ϕ·Mn` from [`get_ϕMn_composite`] with
-    this station's `b_eff` and shear transfer `ΣQn`.
-  • `sagging == false` → AISC 360-16 §I3.2b (corpus: aisc-360-16, PDF p. 151):
-    the available NEGATIVE flexural strength — bare steel `Mp` (Chapter F) when
-    `Asr ≈ 0`, else the plastic composite-with-slab-reinforcement strength from
-    [`get_Mn_negative`], using the developed slab reinforcement `Asr` within
-    `b_eff` and its yield `Fysr`. `d_rebar` is the rebar centroid above the top
-    of steel. The resistance factor `ϕb = 0.90` is per §I3.2b.
+  • `sagging == true` → AISC 360-22 §I3.2a (corpus: aisc-360-22, PDF p. 170):
+    plastic positive composite strength from [`get_ϕMn_composite`] with this
+    station's `b_eff` and shear transfer `ΣQn`.
+  • `sagging == false` → AISC 360-22 §I3.2b (PDF p. 170), the same gates as
+    the sizing checker: [`available_negative_flexure`](@ref). `Lb` is the
+    bottom-flange unbraced length (the member span). `neg_moment` is §I3.2b(b).
+    `Asr` without those gates stays on Chapter F. It does not return `φMp`.
 
 `sense` is `:positive` or `:negative`.
 """
 function phiMn_at_station(section::ISymmSection, material, slab::AbstractSlabOnBeam,
                           b_eff, ΣQn, sagging::Bool;
                           Asr = 0.0u"mm^2", Fysr = 0.0u"MPa",
-                          d_rebar = 0.0u"m", ϕ = 0.9)
+                          d_rebar = 0.0u"m", ϕ = 0.9,
+                          Lb = nothing, neg_moment::Bool = false)
     if sagging
         r = get_ϕMn_composite(section, material, slab, b_eff, ΣQn; ϕ = ϕ)
         return (; ϕMn = r.ϕMn, Mn = r.Mn, sense = :positive)
     else
-        # §I3.2b — negative flexural strength (plastic composite w/ slab rebar,
-        # or bare-steel Mp when no developed parallel reinforcement is present).
-        Mn = get_Mn_negative(section, material, Asr, Fysr; d_rebar = d_rebar)
-        return (; ϕMn = ϕ * Mn, Mn = Mn, sense = :negative)
+        Lb === nothing && throw(ArgumentError(
+            "phiMn_at_station hogging requires Lb, the member span used as the " *
+            "bottom-flange unbraced length (AISC 360-22 §I3.2b)."))
+        ϕMn = available_negative_flexure(section, material; Lb = Lb, Asr = Asr,
+                                         Fysr = Fysr, neg_moment = neg_moment,
+                                         d_rebar = d_rebar, ϕ = ϕ)
+        Mn = ϕMn / ϕ
+        return (; ϕMn = ϕMn, Mn = Mn, sense = :negative)
     end
 end
 
@@ -302,11 +307,14 @@ function composite_dcr_at_station(section::ISymmSection, material,
                                   left::Union{SideExtentProfile, Nothing} = nothing,
                                   right::Union{SideExtentProfile, Nothing} = nothing,
                                   Asr = 0.0u"mm^2", Fysr = 0.0u"MPa",
-                                  d_rebar = 0.0u"m", ϕ = 0.9)
+                                  d_rebar = 0.0u"m", ϕ = 0.9,
+                                  neg_moment::Bool = false)
     b_eff = b_eff_at_station(slab, L_beam, s; left = left, right = right)
     sagging = ustrip(u"N*m", uconvert(u"N*m", M_s)) >= 0.0
+    # Hogging Lb is this member's span, not a group sum of spans.
     cap = phiMn_at_station(section, material, slab, b_eff, ΣQn, sagging;
-                           Asr = Asr, Fysr = Fysr, d_rebar = d_rebar, ϕ = ϕ)
+                           Asr = Asr, Fysr = Fysr, d_rebar = d_rebar, ϕ = ϕ,
+                           Lb = L_beam, neg_moment = neg_moment)
     ϕMn_Nm = ustrip(u"N*m", uconvert(u"N*m", cap.ϕMn))
     M_Nm = abs(ustrip(u"N*m", uconvert(u"N*m", M_s)))
     dcr = ϕMn_Nm > 0.0 ? M_Nm / ϕMn_Nm : Inf
@@ -340,13 +348,15 @@ function governing_composite_station(section::ISymmSection, material,
                                      right::Union{SideExtentProfile, Nothing} = nothing,
                                      Asr = 0.0u"mm^2", Fysr = 0.0u"MPa",
                                      d_rebar = 0.0u"m", ϕ = 0.9,
+                                     neg_moment::Bool = false,
                                      extra_breakpoints::AbstractVector{Float64} = Float64[],
                                      n_bracket::Int = 9)
     dcr_of_s = s -> composite_dcr_at_station(section, material, slab, L_beam, s,
                                              demand_of_s(s), ΣQn;
                                              left = left, right = right,
                                              Asr = Asr, Fysr = Fysr,
-                                             d_rebar = d_rebar, ϕ = ϕ).dcr
+                                             d_rebar = d_rebar, ϕ = ϕ,
+                                             neg_moment = neg_moment).dcr
 
     bp = beff_breakpoints(left, right)
     isempty(extra_breakpoints) || (bp = _unique_sorted(vcat(bp, collect(Float64, extra_breakpoints))))
@@ -355,7 +365,7 @@ function governing_composite_station(section::ISymmSection, material,
     rec = composite_dcr_at_station(section, material, slab, L_beam, s_star,
                                    demand_of_s(s_star), ΣQn;
                                    left = left, right = right, Asr = Asr, Fysr = Fysr,
-                                   d_rebar = d_rebar, ϕ = ϕ)
+                                   d_rebar = d_rebar, ϕ = ϕ, neg_moment = neg_moment)
     return (; s_star = s_star, dcr_max = dcr_max, rec...)
 end
 
@@ -368,12 +378,48 @@ One beam's exact sagging demand field and per-side tributary profiles.
 
 `demand_of_s(s)` returns the signed moment (sagging positive). `breakpoints`
 are the demand-field segment boundaries merged into the governing-station search.
+
+`L_beam` is this member's center-to-center span. It is the §I3.1a `L/8` length
+and the default construction unbraced length. `nothing` falls back to the
+group context span. `slab` is this beam's solid slab; `nothing` falls back to
+the group context slab. A design group must not share one summed length or one
+minimum thickness across members that differ.
 """
 struct BeamSaggingField{F}
     left::Union{SideExtentProfile, Nothing}
     right::Union{SideExtentProfile, Nothing}
     demand_of_s::F
     breakpoints::Vector{Float64}
+    L_beam::Union{Nothing, typeof(1.0u"m")}
+    slab::Union{Nothing, AbstractSlabOnBeam}
+end
+
+"""Field with no per-beam span or slab. The checker uses the group context."""
+function BeamSaggingField(left, right, demand_of_s, breakpoints)
+    BeamSaggingField(left, right, demand_of_s, collect(Float64, breakpoints),
+                     nothing, nothing)
+end
+
+"""Accept a span in any length unit and store it in meters."""
+function BeamSaggingField(left, right, demand_of_s::F, breakpoints::Vector{Float64},
+                          L_beam, slab) where {F}
+    L = L_beam === nothing ? nothing : uconvert(u"m", L_beam)
+    return BeamSaggingField{F}(left, right, demand_of_s, breakpoints, L, slab)
+end
+
+"""Member span used for §I3.1a `L/8`. A missing field span uses the context."""
+_station_span(ctx::CompositeContext, field::BeamSaggingField) =
+    field.L_beam === nothing ? ctx.L_beam : field.L_beam
+
+"""Slab used at this beam. A missing field slab uses the context."""
+_station_slab(ctx::CompositeContext, field::BeamSaggingField) =
+    field.slab === nothing ? ctx.slab : field.slab
+
+_length_m(x) = x isa Unitful.Quantity ? ustrip(u"m", uconvert(u"m", x)) : Float64(x)
+
+"""True when two lengths are the same span, within a millimeter."""
+function _same_span(a, b)
+    return isapprox(_length_m(a), _length_m(b); rtol = 0.0, atol = 1e-3)
 end
 
 """
@@ -416,12 +462,28 @@ function _slab_at_spacings(slab::DeckSlabOnBeam, bsl, bsr)
                    uconvert(u"m", bsl), uconvert(u"m", bsr), nothing, nothing)
 end
 
-"""`ctx` with slab spacings set so `get_b_eff` equals the station width."""
-function context_at_sagging_station(ctx::CompositeContext, st::CompositeSaggingStation)
-    slab = _slab_at_spacings(ctx.slab, st.spacing_left, st.spacing_right)
-    CompositeContext(slab, ctx.anchor, ctx.L_beam;
-                     shored = ctx.shored, Lb_const = ctx.Lb_const,
-                     Asr = ctx.Asr, Fysr = ctx.Fysr, neg_moment = ctx.neg_moment)
+"""
+`ctx` with slab spacings set so `get_b_eff` equals the station width.
+
+`L_beam`, when given, replaces the context span. The construction unbraced
+length follows that span when it was left at the context span (the default).
+A caller-set `Lb_const` that already differs from the context span is kept.
+`slab`, when given, supplies this beam's thickness and concrete; the station
+spacings are written onto it.
+"""
+function context_at_sagging_station(ctx::CompositeContext, st::CompositeSaggingStation;
+                                    L_beam = nothing, slab = nothing)
+    base = slab === nothing ? ctx.slab : slab
+    slab_i = _slab_at_spacings(base, st.spacing_left, st.spacing_right)
+    L = L_beam === nothing ? ctx.L_beam :
+        (L_beam isa Unitful.Quantity ? uconvert(u"m", L_beam) : L_beam * u"m")
+    # §I3.1b construction Lb defaults to this member's span. The group sum of
+    # spans is not an unbraced length.
+    lb = _same_span(ctx.Lb_const, ctx.L_beam) ? L : ctx.Lb_const
+    return CompositeContext(slab_i, ctx.anchor, L;
+                            shored = ctx.shored, Lb_const = lb,
+                            Asr = ctx.Asr, Fysr = ctx.Fysr,
+                            neg_moment = ctx.neg_moment)
 end
 
 """

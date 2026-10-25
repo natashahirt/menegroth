@@ -404,6 +404,7 @@ function check_composite_beam(struc::BuildingStructure, beam::Beam, section, mat
     g = governing_composite_station(section, material, ctx.slab, ctx.L_beam,
                                     M_of_s, ΣQn; left = left, right = right,
                                     Asr = Asr, Fysr = Fysr, d_rebar = d_rebar, ϕ = ϕ,
+                                    neg_moment = ctx.neg_moment,
                                     extra_breakpoints = demand_bps)
 
     I_LB = get_I_LB(section, material, ctx.slab, g.b_eff, ΣQn)
@@ -445,16 +446,14 @@ function _nominal_full_composite_anchor()
     HeadedStudAnchor(0.75u"inch", 5.0u"inch", 65.0u"ksi", 51.0u"ksi", 490.0u"lb/ft^3")
 end
 
-"""Slab thickness (m) adjacent to `beams`, or `nothing` when no slab is sized."""
-function _group_slab_thickness(struc::BuildingStructure, beams)
+"""Slabs whose cells share an edge with `beam`."""
+function _slabs_on_beam(struc::BuildingStructure, beam)
     skel = struc.skeleton
-    depths = typeof(1.0u"m")[]
     edge_set = Set{Int}()
-    for beam in beams
-        for si in segment_indices(beam)
-            push!(edge_set, struc.segments[si].edge_idx)
-        end
+    for si in segment_indices(beam)
+        push!(edge_set, struc.segments[si].edge_idx)
     end
+    out = Any[]
     for slab in struc.slabs
         hits = false
         for cell_idx in slab.cell_indices
@@ -464,26 +463,110 @@ function _group_slab_thickness(struc::BuildingStructure, beams)
                 break
             end
         end
-        hits || continue
-        h = StructuralSizer.total_depth(slab.result)
-        push!(depths, h isa Unitful.Quantity ? uconvert(u"m", h) : h * u"m")
+        hits && push!(out, slab)
     end
-    return isempty(depths) ? nothing : minimum(depths)
+    return out
 end
+
+"""
+Solid thickness of a sized slab, in meters.
+
+A vault's total depth is shell thickness plus rise. A shaped slab stores
+volume per area. Neither is the solid thickness `t` in `Ac = b_eff · t`.
+"""
+function _solid_slab_thickness(result)
+    if result isa StructuralSizer.VaultResult
+        throw(ArgumentError(
+            "A vault is not a solid slab thickness for a composite beam. " *
+            "Its total depth is the shell thickness plus the rise."))
+    end
+    if result isa StructuralSizer.ShapedSlabResult
+        throw(ArgumentError(
+            "A shaped slab has no single solid thickness for a composite beam. " *
+            "Volume per area is not a thickness."))
+    end
+    hasproperty(result, :thickness) || throw(ArgumentError(
+        "Slab result $(typeof(result)) has no solid thickness for a composite beam."))
+    t = result.thickness
+    return t isa Unitful.Quantity ? uconvert(u"m", t) : t * u"m"
+end
+
+"""The `Concrete` stored on a slab's volume map, or `nothing`."""
+function _concrete_of_slab(slab)
+    found = nothing
+    for mat in keys(slab.volumes)
+        mat isa StructuralSizer.Concrete || continue
+        if found !== nothing
+            throw(ArgumentError(
+                "A slab's volume map lists more than one concrete. " *
+                "Composite beam design needs the one concrete the beam bears on."))
+        end
+        found = mat
+    end
+    return found
+end
+
+"""
+Thickness and concrete for one beam.
+
+Each adjacent solid slab contributes its own thickness and, when the volume
+map records one, its own concrete. Several slabs on one beam: the thinnest
+governs, and equal thicknesses take the lower `f′c`. That pairing is
+engineering judgment. It keeps one beam from being designed for a neighbor's
+thinner slab, which is what a group-wide minimum did.
+
+`fallback_t` and `fallback_concrete` apply only when this beam has no adjacent
+sized slab, or when a slab's volume map does not name a concrete.
+"""
+function _beam_slab_inputs(struc::BuildingStructure, beam, fallback_t, fallback_concrete)
+    slabs = _slabs_on_beam(struc, beam)
+    best = nothing
+    for slab in slabs
+        t = _solid_slab_thickness(slab.result)
+        conc = _concrete_of_slab(slab)
+        conc === nothing && (conc = fallback_concrete)
+        conc === nothing && throw(ArgumentError(
+            "Composite beam design needs the concrete of the slab this beam bears on."))
+        fc = ustrip(u"Pa", conc.fc′)
+        tm = ustrip(u"m", t)
+        if best === nothing || tm < best.tm - 1e-9 ||
+                (abs(tm - best.tm) <= 1e-9 && fc < best.fc)
+            best = (t = t, conc = conc, tm = tm, fc = fc)
+        end
+    end
+    if best === nothing
+        fallback_t === nothing && throw(ArgumentError(
+            "Composite beam design needs a slab thickness. Size the slab this " *
+            "beam bears on, or pass composite_t_slab=."))
+        fallback_concrete === nothing && throw(ArgumentError(
+            "Composite beam design needs the slab concrete (fc′, E, density)."))
+        t = fallback_t isa Unitful.Quantity ? uconvert(u"m", fallback_t) : fallback_t * u"m"
+        return (t, fallback_concrete)
+    end
+    return (best.t, best.conc)
+end
+
+_as_length(L) = L isa Unitful.Quantity ? uconvert(u"m", L) : L * u"m"
 
 """
     composite_group_payload(struc, beams, L_beam, concrete, t_slab, Es;
         anchor=nothing, shored=false, Lb_const=nothing,
         Asr=0.0u"mm^2", Fysr=0.0u"MPa", neg_moment=false) -> PerStationComposite
 
-One [`PerStationComposite`](@ref) for a beam group. Slab concrete and thickness
-come from the caller (the building cascade / sized slabs). Each beam keeps its
-per-side tributary profiles and exact moment field so the checker can re-solve
-the sagging station per candidate section.
+One [`PerStationComposite`](@ref) for a beam group. Each beam keeps its own
+center-to-center span (AISC 360-22 §I3.1, the `L/8` cap; corpus: aisc-360-22,
+PDF p. 168) and the solid slab it bears on. `L_beam` is only the context span
+used when a field has no length of its own. Passing the sum of the group is
+safe: the checker reads each field's span, and the default construction
+unbraced length follows that span.
+
+`t_slab`, when given, is the thickness for every beam. When it is `nothing`,
+each beam uses its own adjacent solid slab. Concrete comes from that slab's
+volume map when the map names one concrete; otherwise from `concrete`.
 
 `Asr` stays caller-supplied. `neg_moment` defaults to false, so hogging uses
-Chapter F until developed slab reinforcement is provided (§I3.2b(b)–(c) are
-not invented here).
+Chapter F until developed slab reinforcement and negative-region anchors are
+provided (AISC 360-22 §I3.2b).
 """
 function composite_group_payload(
     struc::BuildingStructure, beams, L_beam, concrete, t_slab, Es;
@@ -494,19 +577,29 @@ function composite_group_payload(
     Fysr = 0.0u"MPa",
     neg_moment::Bool = false,
 )
-    L = L_beam isa Unitful.Quantity ? L_beam : L_beam * u"m"
+    L = _as_length(L_beam)
     anc = anchor === nothing ? _nominal_full_composite_anchor() : anchor
-    # Zero spacing: a side with no profile contributes no width. Real sides
-    # come from the profiles, and the checker restuffs spacing at the station.
-    slab = SolidSlabOnBeam(t_slab, concrete.fc′, concrete.E, concrete.ρ, Es,
-                           0.0u"m", 0.0u"m")
     fields = map(beams) do beam
+        t_i, conc_i = _beam_slab_inputs(struc, beam,
+                                        t_slab === nothing ? nothing : t_slab,
+                                        concrete)
+        # An explicit thickness overrides the sized slab. The concrete still
+        # comes from the slab the beam bears on.
+        if t_slab !== nothing
+            t_i = _as_length(t_slab)
+        end
+        # Zero spacing: a side with no profile contributes no width. Real sides
+        # come from the profiles, and the checker restuffs spacing at the station.
+        slab_i = SolidSlabOnBeam(t_i, conc_i.fc′, conc_i.E, conc_i.ρ, Es,
+                                 0.0u"m", 0.0u"m")
         left, right = beam_side_profiles(struc, beam)
         M_of_s, bps = beam_signed_moment_field(struc, beam)
-        BeamSaggingField(left, right, M_of_s, collect(Float64, bps))
+        L_i = _as_length(member_length(beam))
+        BeamSaggingField(left, right, M_of_s, collect(Float64, bps), L_i, slab_i)
     end
+    isempty(fields) && throw(ArgumentError("composite_group_payload needs at least one beam"))
     lbc = Lb_const === nothing ? L : Lb_const
-    ctx = CompositeContext(slab, anc, L; shored = shored, Lb_const = lbc,
+    ctx = CompositeContext(first(fields).slab, anc, L; shored = shored, Lb_const = lbc,
                            Asr = Asr, Fysr = Fysr, neg_moment = neg_moment)
     return PerStationComposite(ctx, fields)
 end
@@ -515,25 +608,21 @@ end
     composite_payloads_for_groups(struc, group_ids, L_totals, concrete, Es;
         t_slab=nothing, anchor=nothing) -> Vector{PerStationComposite}
 
-One payload per steel beam group. `t_slab`, when given, is used for every
-group; otherwise the thickness is the minimum sized slab on the group's edges.
+One payload per steel beam group. `L_totals[i]` may be the sum of the beams
+in the group; each beam is still checked at its own span. `t_slab`, when
+given, overrides every beam. Otherwise each beam uses the solid thickness of
+the slab it bears on. `concrete` is the fallback when that slab's volume map
+does not name a concrete. It is not used in place of a concrete the slab
+already records.
 """
 function composite_payloads_for_groups(
     struc::BuildingStructure, group_ids, L_totals, concrete, Es;
     t_slab = nothing, anchor = nothing,
 )
-    concrete === nothing && throw(ArgumentError(
-        "SteelBeamOptions.composite=true needs the slab concrete (fc′, E, density). " *
-        "Pass composite_concrete= to size_beams!."))
     map(enumerate(group_ids)) do (g_idx, gid)
         mg = struc.member_groups[gid]
         beams = [struc.beams[i] for i in mg.member_indices]
-        t = t_slab === nothing ? _group_slab_thickness(struc, beams) : t_slab
-        t === nothing && throw(ArgumentError(
-            "SteelBeamOptions.composite=true needs a slab thickness for beam group $(gid). " *
-            "Pass composite_t_slab= or size the slabs first."))
-        tq = t isa Unitful.Quantity ? t : t * u"m"
         composite_group_payload(struc, beams, L_totals[g_idx] * u"m",
-                                concrete, tq, Es; anchor = anchor)
+                                concrete, t_slab, Es; anchor = anchor)
     end
 end

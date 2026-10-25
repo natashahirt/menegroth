@@ -503,8 +503,10 @@ end
 # =============================================================================
 # T3. END-TO-END on a solved column-supported two-bay building. Tributaries +
 #     solve + `composite_context_from_beam` + `check_composite_beam` on an
-#     INTERIOR beam (tributary both sides) and an EDGE beam (one-sided). Each
-#     beam is a pin-released simple span ⇒ sagging ⇒ `sense == :positive`.
+#     INTERIOR beam (tributary both sides) and an EDGE beam (one-sided).
+#     `:freefixed` leaves a negative moment at the fixed end. AISC 360-22
+#     §I3.2b (corpus: aisc-360-22, PDF p. 170) keeps that station on Chapter F
+#     when the negative-region gates are closed, and that end governs.
 # =============================================================================
 
 """
@@ -533,8 +535,9 @@ function _solve_two_bay_frame!(struc; w::Float64 = 10_000.0)
     col_sec  = Asap.Section(0.05u"m^2", 200e9u"Pa", 77e9u"Pa",
                             1e-3u"m^4", 1e-3u"m^4", 1e-3u"m^4", 7850.0u"kg/m^3")
 
-    # Beam elements FIRST ⇒ element index == skeleton edge index; pin-released
-    # (`:freefixed`) ⇒ each beam is a true simple span carried by the columns.
+    # Beam elements FIRST ⇒ element index == skeleton edge index. `:freefixed`
+    # releases the start and fixes the end into the column, so the end moment
+    # is real. It is not a simple span.
     beam_els = [Asap.Element(floor_nodes[v1], floor_nodes[v2], beam_sec; release = :freefixed)
                 for (v1, v2) in skel.edge_indices]
     col_els  = [Asap.Element(ground_nodes[v], floor_nodes[v], col_sec) for v in 1:nv]
@@ -564,11 +567,31 @@ end
 
         ctx = _mkctx(struc, beam)
         res = check_composite_beam(struc, beam, section, material, ctx; ΣQn = 292.0u"kip")
+        M_of_s, _ = beam_signed_moment_field(struc, beam)
 
-        @test ustrip(u"m", res.b_eff) > 0                     # positive effective width
-        @test isfinite(res.dcr_max) && res.dcr_max > 0        # finite, positive DCR
-        @test res.sense == :positive                          # simple sagging span
-        @test res.I_LB > section.Ix                           # composite stiffer than bare steel
+        @test isfinite(res.dcr_max) && res.dcr_max > 0
+        M_gov = ustrip(u"N*m", uconvert(u"N*m", res.M))
+        M_mid = ustrip(u"N*m", M_of_s(0.5))
+        # The fixed-end moment is the same order as midspan, not solver noise.
+        @test abs(M_gov) > 0.1 * abs(M_mid)
+        if res.sense == :negative
+            @test M_gov < 0
+            # No negative-region anchors and no slab reinforcement, so §I3.2b
+            # stays on Chapter F at Lb = this member's span. That is below φMp.
+            ϕF = StructuralSizer.available_negative_flexure(
+                section, material; Lb = ctx.L_beam,
+                Asr = 0.0u"mm^2", Fysr = 0.0u"MPa", neg_moment = false)
+            @test isapprox(uconvert(u"N*m", res.ϕMn), uconvert(u"N*m", ϕF); rtol = 1e-6)
+            @test uconvert(u"N*m", res.ϕMn) < uconvert(u"N*m", 0.9 * section.Zx * material.Fy)
+        else
+            @test M_gov >= 0
+            @test ustrip(u"m", res.b_eff) > 0
+            @test res.I_LB > section.Ix
+        end
+        # The sagging region still has slab. A corner station can have none.
+        b_mid = b_eff_at_station(ctx.slab, ctx.L_beam, 0.5; left = left, right = right)
+        @test ustrip(u"m", b_mid) > 0
+        @test get_I_LB(section, material, ctx.slab, b_mid, 292.0u"kip") > section.Ix
     end
 end
 
@@ -615,4 +638,60 @@ end
     struc_bare.asap_model.loads = bare_loads
     @test_throws ArgumentError size_beams!(struc_bare, SteelBeamOptions(composite = true);
                                            reanalyze = false)
+end
+
+# =============================================================================
+# Each beam keeps its own span, thickness, and concrete.
+# =============================================================================
+
+@testset "Per-beam span, thickness, and concrete" begin
+    struc, _, _ = _build_two_bay()
+    _solve_two_bay_frame!(struc)
+
+    bay1 = beam_on_edge(struc, 6, 1)   # long edge of the first bay only
+    bay2 = beam_on_edge(struc, 3, 4)   # long edge of the second bay only
+    L1 = member_length(bay1)
+    L2 = member_length(bay2)
+    Lsum = (L1 isa Unitful.Quantity ? L1 : L1 * u"m") +
+           (L2 isa Unitful.Quantity ? L2 : L2 * u"m")
+
+    c5 = Concrete(3600.0u"ksi", 5.0u"ksi", 145.0u"lb/ft^3", 0.20, 0.1)
+    c3 = Concrete(3200.0u"ksi", 3.0u"ksi", 145.0u"lb/ft^3", 0.20, 0.1)
+    cascade = Concrete(_EC, _FC, _WC, 0.20, 0.1)   # 4 ksi, not either slab
+    struc.slabs[1].result = CIPSlabResult(0.15u"m", 0.15u"m", 3.6u"kN/m^2")
+    struc.slabs[2].result = CIPSlabResult(0.25u"m", 0.25u"m", 6.0u"kN/m^2")
+    struc.slabs[1].volumes[c5] = 1.0u"m^3"
+    struc.slabs[2].volumes[c3] = 1.0u"m^3"
+
+    payload = composite_group_payload(struc, [bay1, bay2], Lsum, cascade, nothing, _ES)
+    @test length(payload.fields) == 2
+    f1, f2 = payload.fields
+    @test isapprox(f1.L_beam, L1 isa Unitful.Quantity ? uconvert(u"m", L1) : L1 * u"m"; rtol = 1e-9)
+    @test isapprox(f2.L_beam, L2 isa Unitful.Quantity ? uconvert(u"m", L2) : L2 * u"m"; rtol = 1e-9)
+    @test !isapprox(f1.L_beam, Lsum; rtol = 1e-3)
+    # First bay is 6 in of 5 ksi concrete, not the 4 ksi cascade and not the
+    # other bay's 10 in slab.
+    @test isapprox(f1.slab.t_slab, 0.15u"m"; rtol = 1e-9)
+    @test isapprox(f1.slab.fc′, 5.0u"ksi"; rtol = 1e-6)
+    @test isapprox(f2.slab.t_slab, 0.25u"m"; rtol = 1e-9)
+    @test isapprox(f2.slab.fc′, 3.0u"ksi"; rtol = 1e-6)
+
+    # The summed length would be the context span. Each field is shorter, so
+    # its L/8 cap is tighter wherever the tributary exceeds that cap.
+    b_own = b_eff_at_station(f1.slab, f1.L_beam, 0.5; left = f1.left, right = f1.right)
+    b_sum = b_eff_at_station(f1.slab, Lsum, 0.5; left = f1.left, right = f1.right)
+    @test b_own <= b_sum + 1e-9u"m"
+
+    struc.slabs[1].result = StructuralSizer.ShapedSlabResult(0.2u"m", 5.0u"kN/m^2")
+    @test_throws ArgumentError composite_group_payload(struc, [bay1], L1, cascade, nothing, _ES)
+
+    struc.slabs[1].result = StructuralSizer.VaultResult(
+        0.10u"m", 0.40u"m", 1.0u"m",
+        1.0u"kN/m", 1.0u"kN/m",
+        0.10u"m", 5.0u"kN/m^2",
+        1.0, :symmetric,
+        (σ = 1.0, σ_allow = 2.0, ratio = 0.5, ok = true),
+        (δ = 0.01, limit = 0.02, ratio = 0.5, ok = true),
+        (converged = true, iterations = 1))
+    @test_throws ArgumentError composite_group_payload(struc, [bay1], L1, cascade, nothing, _ES)
 end

@@ -2,12 +2,14 @@
 # Composite Deflection — Transformed Moment of Inertia & I_LB
 # ==============================================================================
 # References:
-#   - AISC 360-16 Commentary on §I3.2 (corpus aisc-360-16, p. 167+).
-#   - AISC *Steel Construction Manual*, **15th Edition** (2017), Part 3
-#     "Design of Composite Beams", Tables 3-19 and 3-20 (lower-bound moment
-#     of inertia, I_LB) and the accompanying Y2 stress-block formulation.
-#   - AISC Design Guide 11 "Vibrations of Steel-Framed Structural Systems
-#     Due to Human Activity" (2nd Ed.) for serviceability ratios.
+#   - AISC 360-22 Commentary §I3, Eqs. C-I3-1 and C-I3-2 (corpus: aisc-360-22,
+#     PDF pp. 501–502). I_LB is the lower-bound inertia at every degree of
+#     composite action, including full composite action.
+#   - Eq. C-I3-9 (PDF p. 505) for the compression-block depth `a`, and
+#     Eqs. C-I3-6 through C-I3-8 (PDF p. 505) for the compression force that
+#     `d_1` locates. The force is the smallest of Fy·As, 0.85·f′c·Ac, and ΣQn.
+#   - `get_I_transformed` is the uncracked transformed inertia I_tr used by
+#     Commentary Eq. C-I3-3. It is not I_LB.
 
 # ==============================================================================
 # Transformed Moment of Inertia (Full Composite)
@@ -58,32 +60,34 @@ end
     get_I_LB(section::ISymmSection, material, slab::AbstractSlabOnBeam,
              b_eff, ΣQn) -> SecondMomentOfArea
 
-Lower-bound moment of inertia `I_LB` for partially composite beams, per
-AISC 360-16 Commentary on §I3.2 (Eq. C-I3-1) and the AISC *Steel
-Construction Manual*, 15th Ed. (2017), Part 3, Tables 3-19 / 3-20.
+Lower-bound moment of inertia `I_LB` from AISC 360-22 Commentary Eqs. C-I3-1
+and C-I3-2 (corpus: aisc-360-22, PDF pp. 501–502):
 
-Uses the stress-block centroid ("Y2" method) consistent with the Manual:
+    I_LB  = I_s + A_s (Y_ENA − d_3)² + (ΣQ_n / F_y) (2d_3 + d_1 − Y_ENA)²
+    Y_ENA = [A_s d_3 + (ΣQ_n / F_y) (2d_3 + d_1)] / [A_s + ΣQ_n / F_y]
 
-    a    = Cf / (0.85 · fc′ · b_eff)         (concrete stress-block depth)
-    Y2   = (gap + ts) − a/2                  (top of steel to concrete resultant)
-    Aₑ   = Cf / Fy                           (effective area, transformed to steel)
-    YENA = (As · d/2 + Aₑ · (d + Y2)) / (As + Aₑ)
-    I_LB = Is + As · (YENA − d/2)² + Aₑ · (d + Y2 − YENA)²
+`d_3` is the distance from the top of the steel to the resultant of full-section
+tension yield. On an `ISymmSection` that resultant is the centroid, so
+`d_3 = d/2`. `d_1` is the distance from the top of the steel up to the concrete
+compression force. The block depth is Eq. C-I3-9, `a = C / (0.85 f′c b)`, so
+the block centroid gives `d_1 = gap + t_slab − a/2`.
 
-For full composite (`ΣQn ≥ Cf_max`), delegates to `get_I_transformed`.
-For zero composite, returns `section.Ix`.
+The compression force `C` is the smallest of `F_y A_s`, `0.85 f′c A_c`, and
+`ΣQ_n` (Eqs. C-I3-6, C-I3-7, C-I3-8, PDF p. 505). `ΣQ_n` above that smallest
+value is not a larger concrete force. `C = 0` returns the steel `I_s`, which is
+Eq. C-I3-1 with `ΣQ_n = 0`.
+
+This is not the uncracked transformed inertia. `I_tr` from
+[`get_I_transformed`](@ref) is the upper end of Eq. C-I3-3 and is larger.
 """
 function get_I_LB(section::ISymmSection, material, slab::AbstractSlabOnBeam,
                   b_eff, ΣQn)
+    # C = min(Fy As, 0.85 f′c Ac, ΣQn). Eqs. C-I3-6, C-I3-7, C-I3-8.
     Cf_max = _Cf_max(section, material, slab, b_eff)
     Cf = min(uconvert(u"N", ΣQn), uconvert(u"N", Cf_max))
 
     if ustrip(u"N", Cf) ≤ 0.0
         return section.Ix
-    end
-
-    if Cf >= uconvert(u"N", Cf_max)
-        return get_I_transformed(section, slab, b_eff)
     end
 
     Is  = section.Ix
@@ -93,24 +97,18 @@ function get_I_LB(section::ISymmSection, material, slab::AbstractSlabOnBeam,
     ts  = slab.t_slab
     gap = _gap_above_steel(slab)
 
-    # Stress block depth: a = Cf / (0.85 fc′ b_eff)
+    # Eq. C-I3-9. d_1 is the block centroid above the top of steel.
     a = Cf / (0.85 * slab.fc′ * b_eff)
-
+    d_1 = gap + ts - a / 2
+    d_3 = d / 2
     Ae = Cf / Fy
 
-    # Y2 = distance from top of steel to concrete resultant (AISC notation)
-    Y2 = gap + ts - a / 2
+    # Eq. C-I3-2, measured from the bottom of the steel: the steel resultant
+    # sits at d_3 and the concrete resultant at 2d_3 + d_1.
+    Y_ENA = (As * d_3 + Ae * (2 * d_3 + d_1)) / (As + Ae)
 
-    # Centroids from bottom of steel section
-    ȳ_steel = d / 2
-    ȳ_conc  = d + Y2
-
-    A_total = As + Ae
-    ȳ_ENA = (As * ȳ_steel + Ae * ȳ_conc) / A_total
-
-    I_LB = Is + As * (ȳ_ENA - ȳ_steel)^2 + Ae * (ȳ_conc - ȳ_ENA)^2
-
-    return I_LB
+    # Eq. C-I3-1.
+    return Is + As * (Y_ENA - d_3)^2 + Ae * (2 * d_3 + d_1 - Y_ENA)^2
 end
 
 # ==============================================================================

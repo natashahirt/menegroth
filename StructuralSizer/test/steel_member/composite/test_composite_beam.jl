@@ -431,11 +431,42 @@ end
         @test ratio > 2.0  # composite I is typically 2-4× steel alone
     end
     
-    @testset "I_LB at full composite = I_transformed" begin
+    @testset "I_LB at full composite is Eq. C-I3-1 and is below I_tr" begin
+        # AISC 360-22 Commentary Eqs. C-I3-1 and C-I3-2 (corpus: aisc-360-22,
+        # PDF pp. 501–502). Full composite action does not switch to I_tr.
         Cf_max = StructuralSizer._Cf_max(fix.section, fix.material, fix.slab, b_eff)
         I_LB = get_I_LB(fix.section, fix.material, fix.slab, b_eff, Cf_max)
         I_tr = get_I_transformed(fix.section, fix.slab, b_eff)
-        @test isapprox(I_LB, I_tr; rtol=0.001)
+        @test I_LB > fix.section.Ix
+        @test I_LB < I_tr
+
+        sec = fix.section
+        a = Cf_max / (0.85 * fix.slab.fc′ * b_eff)
+        d_3 = sec.d / 2
+        d_1 = fix.slab.t_slab - a / 2
+        Ae = Cf_max / fix.material.Fy
+        Y = (sec.A * d_3 + Ae * (2 * d_3 + d_1)) / (sec.A + Ae)
+        I_hand = sec.Ix + sec.A * (Y - d_3)^2 + Ae * (2 * d_3 + d_1 - Y)^2
+        @test isapprox(I_LB, I_hand; rtol = 1e-9)
+    end
+
+    @testset "Live load that passes on I_tr fails on I_LB" begin
+        Cf_max = StructuralSizer._Cf_max(fix.section, fix.material, fix.slab, b_eff)
+        I_LB = get_I_LB(fix.section, fix.material, fix.slab, b_eff, Cf_max)
+        I_tr = get_I_transformed(fix.section, fix.slab, b_eff)
+        L = fix.L_beam
+        E = fix.material.E
+        limit = L / 360
+        # δ = 5 w L^4 / (384 E I). A weight between the two limit weights
+        # passes on I_tr and fails on I_LB.
+        w_tr = limit * 384 * E * I_tr / (5 * L^4)
+        w_lb = limit * 384 * E * I_LB / (5 * L^4)
+        w = (w_tr + w_lb) / 2
+        r = check_composite_deflection(fix.section, fix.material, fix.slab, b_eff,
+                                       Cf_max, L, 0.0u"kip/ft", w; shored = true)
+        @test r.ok_LL == false
+        δ_tr = 5 * w * L^4 / (384 * E * I_tr)
+        @test δ_tr <= limit
     end
     
     @testset "I_LB at zero composite = I_steel" begin

@@ -431,3 +431,48 @@ function get_Mn_negative(section::ISymmSection, material, Asr, Fysr;
 
     return uconvert(u"N*m", Mn)
 end
+
+"""
+    available_negative_flexure(section, material; Lb, Asr, Fysr,
+        neg_moment=false, d_rebar=0.0u"m", Cb=1.0, ϕ=0.9) -> Moment
+
+Available negative flexural strength, AISC 360-22 §I3.2b (corpus: aisc-360-22,
+PDF p. 170). The steel section alone is designed with Chapter F. The plastic
+composite section is used only when all three limits hold:
+
+  (a) the steel beam is compact and braced in accordance with Chapter F
+      (`Lb ≤ Lp`);
+  (b) steel anchors connect the slab to the beam in the negative-moment
+      region (`neg_moment`);
+  (c) the slab reinforcement parallel to the beam is developed (`Asr > 0`
+      and `Fysr > 0`).
+
+`φb = 0.90`. When (a)–(c) hold, the available strength is the larger of the
+Chapter F strength and `φb` times [`get_Mn_negative`](@ref).
+
+Chapter F `φMn` is the existing AISC 360-16 implementation ([`get_ϕMn`](@ref)).
+360-22 §I3.2b(a) points at Chapter F of the same specification. Chapter F has
+not been re-derived from 360-22 in this function.
+
+`Cb = 1.0` is the hogging default: `SteelMemberGeometry` has no bottom-flange
+moment gradient. That choice is engineering judgment, not a code factor.
+"""
+function available_negative_flexure(section::ISymmSection, material;
+                                    Lb, Asr, Fysr,
+                                    neg_moment::Bool = false,
+                                    d_rebar = 0.0u"m",
+                                    Cb::Real = 1.0, ϕ::Real = 0.9)
+    ϕMn_steel = uconvert(u"N*m", get_ϕMn(section, material; Lb = Lb, Cb = Cb,
+                                         axis = :strong, ϕ = ϕ))
+    # §I3.2b(a): braced in accordance with Chapter F means Lb ≤ Lp
+    # (AISC 360-16 §F2.2 Eq. F2-5 — corpus: aisc-360-16, PDF p. 104).
+    Lp = get_Lp_Lr(section, material).Lp
+    braced = ustrip(u"m", uconvert(u"m", Lb)) <= ustrip(u"m", uconvert(u"m", Lp))
+    asr_ok = ustrip(u"m^2", uconvert(u"m^2", Asr)) > 0
+    fysr_ok = ustrip(u"Pa", uconvert(u"Pa", Fysr)) > 0
+    if neg_moment && is_compact(section, material) && braced && asr_ok && fysr_ok
+        Mn_comp = get_Mn_negative(section, material, Asr, Fysr; d_rebar = d_rebar)
+        return max(ϕMn_steel, uconvert(u"N*m", ϕ * Mn_comp))
+    end
+    return ϕMn_steel
+end

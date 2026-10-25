@@ -482,8 +482,11 @@ function _hogging_chapter_f_geometry(g::SteelMemberGeometry)
     SteelMemberGeometry(g.L; Lb=g.L, Cb=1.0, Kx=g.Kx, Ky=g.Ky, braced=g.braced)
 end
 
-"""I3.2b hogging design strength: Chapter F steel-alone, plus plastic
-composite alternative only when §I3.2b(a–c) all hold."""
+"""I3.2b hogging design strength. Same gates as [`available_negative_flexure`](@ref).
+
+AISC 360-22 §I3.2b(a–c) — corpus: aisc-360-22, PDF p. 170.
+Chapter F φMn is the existing 360-16 implementation; see that function.
+"""
 function _composite_ϕMn_neg(
     checker::AISCChecker,
     cache::AISCCapacityCache,
@@ -494,24 +497,17 @@ function _composite_ϕMn_neg(
     ctx::CompositeContext
 )
     hog = _hogging_ltb_inputs(section, material, geometry)
-    ϕMnx_steel_neg = _get_ϕMnx_cached!(cache, j, hog.Lb_neg_m, hog.Cb_neg,
-                                        section, material, checker.ϕ_b)
-    ϕMn_neg = ϕMnx_steel_neg
-    Asr_m2 = ustrip(u"m^2", ctx.Asr)
-    Fysr_Pa = ustrip(u"Pa", ctx.Fysr)
-    # I3.2b alternative plastic hogging (φb = 0.90) only when:
-    #   (a) compact and adequately braced per Chapter F: Lb ≤ Lp (Eq. F2-5),
-    #   (b) headed studs/channels in the negative-moment region (`neg_moment`),
-    #   (c) developed slab rebar Asr with Fysr.
-    # Asr > 0 alone is not I3.2b(b). Adequately braced is Lb≤Lp, not
-    # Cb-inflated Mn reaching Mp (AISC 360-16 §F2.2 Eq. F2-5, page 104).
-    # AISC 360-16 §I3.2b(a–c) — corpus: aisc-360-16, page 151
-    if ctx.neg_moment && is_compact(section, material) && Asr_m2 > 0 && Fysr_Pa > 0 &&
-            hog.adequately_braced
-        Mn_comp_neg = get_Mn_negative(section, material, ctx.Asr, ctx.Fysr)
-        ϕMn_neg = max(ϕMn_neg, checker.ϕ_b * ustrip(u"N*m", Mn_comp_neg))
-    end
-    return ϕMn_neg
+    # Touch the cache so a later sagging lookup at this Lb is warm. The value
+    # used below is `available_negative_flexure`, which calls `get_ϕMn` with
+    # the same Lb and Cb.
+    _get_ϕMnx_cached!(cache, j, hog.Lb_neg_m, hog.Cb_neg,
+                      section, material, checker.ϕ_b)
+    ϕMn = available_negative_flexure(section, material;
+                                     Lb = hog.Lb_neg_m * u"m",
+                                     Asr = ctx.Asr, Fysr = ctx.Fysr,
+                                     neg_moment = ctx.neg_moment,
+                                     ϕ = checker.ϕ_b, Cb = hog.Cb_neg)
+    return ustrip(u"N*m", ϕMn)
 end
 
 """
@@ -751,7 +747,11 @@ function is_feasible(
     ϕMnx_steel = _get_ϕMnx_cached!(cache, j, to_meters(geometry.Lb), geometry.Cb,
                                    section, material, checker.ϕ_b)
     for field in psc.fields
-        g = governing_sagging_station(section, material, psc.ctx.slab, psc.ctx.L_beam,
+        # Each member's own span (§I3.1a L/8) and its own slab. The context
+        # span may be a group total; that total is not this beam's L.
+        slab_i = _station_slab(psc.ctx, field)
+        L_i = _station_span(psc.ctx, field)
+        g = governing_sagging_station(section, material, slab_i, L_i,
                                       field.demand_of_s, ϕMnx_steel;
                                       left = field.left, right = field.right,
                                       extra_breakpoints = field.breakpoints,
@@ -759,7 +759,7 @@ function is_feasible(
         g.dcr <= 1.0 || return false
         st = CompositeSaggingStation(g.b_eff, g.M_pos * u"N*m",
                                      g.spacing_left, g.spacing_right)
-        ctx_i = context_at_sagging_station(psc.ctx, st)
+        ctx_i = context_at_sagging_station(psc.ctx, st; L_beam = L_i, slab = slab_i)
         is_feasible(checker, cache, j, section, material, demand, geometry, ctx_i;
                     strength_Mux_pos = g.M_pos) || return false
     end
@@ -1239,14 +1239,16 @@ function explain_feasibility(
                                    section, material, checker.ϕ_b)
     best = nothing
     for field in psc.fields
-        g = governing_sagging_station(section, material, psc.ctx.slab, psc.ctx.L_beam,
+        slab_i = _station_slab(psc.ctx, field)
+        L_i = _station_span(psc.ctx, field)
+        g = governing_sagging_station(section, material, slab_i, L_i,
                                       field.demand_of_s, ϕMnx_steel;
                                       left = field.left, right = field.right,
                                       extra_breakpoints = field.breakpoints,
                                       ϕ = checker.ϕ_b)
         st = CompositeSaggingStation(g.b_eff, g.M_pos * u"N*m",
                                      g.spacing_left, g.spacing_right)
-        ctx_i = context_at_sagging_station(psc.ctx, st)
+        ctx_i = context_at_sagging_station(psc.ctx, st; L_beam = L_i, slab = slab_i)
         ex = explain_feasibility(checker, cache, j, section, material, demand, geometry, ctx_i;
                                  strength_Mux_pos = g.M_pos)
         if best === nothing || (!ex.passed && best.passed) ||

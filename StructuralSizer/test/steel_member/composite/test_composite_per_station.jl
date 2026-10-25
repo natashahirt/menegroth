@@ -231,16 +231,19 @@ end
         @test r0.sense  == :negative            # hogging ⇒ §I3.2b
         @test r06.sense == :positive            # sagging ⇒ §I3.2a
 
-        # Bare-steel negative capacity (Asr = 0) equals Chapter F Mp = Fy·Zx.
+        # Hogging with no developed reinforcement is Chapter F at this span,
+        # not φMp. L = 30 ft exceeds Lp for W21×55.
+        ϕMn_F = get_ϕMn(fix.section, fix.material; Lb = L, Cb = 1.0, axis = :strong)
         Mp = fix.material.Fy * fix.section.Zx
-        @test isapprox(r0.ϕMn, 0.9 * Mp; rtol = 1e-9)
+        @test isapprox(r0.ϕMn, ϕMn_F; rtol = 1e-9)
+        @test r0.ϕMn < 0.9 * Mp
 
-        # D11: developed slab rebar within b_eff raises the negative capacity.
+        # Asr without negative-region anchors does not open §I3.2b.
         r0_rebar = composite_dcr_at_station(fix.section, fix.material, fix.slab, L, 0.0,
                                             demand(0.0), ΣQn; left = left, right = right,
                                             Asr = 2.0u"inch^2", Fysr = 60.0ksi,
-                                            d_rebar = 3.0u"inch")
-        @test r0_rebar.ϕMn > r0.ϕMn             # rebar-limited composite > bare steel
+                                            d_rebar = 3.0u"inch", neg_moment = false)
+        @test isapprox(r0_rebar.ϕMn, r0.ϕMn; rtol = 1e-9)
         @test r0_rebar.sense == :negative
 
         # With weak negative capacity (no rebar) and comparable |M|, the governing
@@ -339,4 +342,99 @@ end
     demand_huge = MemberDemand(1; Mux = huge, Mux_pos = huge, Mux_neg = 0.0, Vu_strong = 0.0)
     @test StructuralSizer.is_feasible(checker, cache, 1, fix.section, fix.material,
                                       demand_huge, geom, psc) == false
+end
+
+# =============================================================================
+# §I3.2b — the station check and the sizing checker use one hogging strength
+# =============================================================================
+
+@testset "Station hogging strength matches the sizing checker" begin
+    fix = _per_station_fixture()
+    anchor = HeadedStudAnchor(0.75u"inch", 5.0u"inch", 65.0u"ksi", 51.0u"ksi",
+                              490.0u"lb/ft^3")
+    Asr = 2.0u"inch^2"
+    Fysr = 60.0ksi
+    ΣQn = 292.0kip
+    Lp = get_Lp_Lr(fix.section, fix.material).Lp
+    M = -100.0kip * u"ft"
+
+    function both(L, neg_moment)
+        ctx = CompositeContext(fix.slab, anchor, L; shored = true,
+                               Asr = Asr, Fysr = Fysr, neg_moment = neg_moment)
+        station = composite_dcr_at_station(fix.section, fix.material, fix.slab, L, 0.0,
+                                           M, ΣQn; Asr = Asr, Fysr = Fysr,
+                                           neg_moment = neg_moment)
+        checker = AISCChecker(; deflection_limit = nothing,
+                              total_deflection_limit = nothing, max_depth = Inf)
+        cache = StructuralSizer.create_cache(checker, 1)
+        StructuralSizer.precompute_capacities!(checker, cache, [fix.section],
+                                               fix.material, MinWeight())
+        geom = SteelMemberGeometry(L; Lb = L)
+        ϕ_check = StructuralSizer._composite_ϕMn_neg(checker, cache, 1, fix.section,
+                                                     fix.material, geom, ctx)
+        return station.ϕMn, ϕ_check * u"N*m"
+    end
+
+    # Span longer than Lp: anchors and rebar do not open the plastic alternative.
+    ϕs, ϕc = both(4 * Lp, true)
+    ϕF = get_ϕMn(fix.section, fix.material; Lb = 4 * Lp, Cb = 1.0, axis = :strong)
+    @test isapprox(ϕs, ϕc; rtol = 1e-9)
+    @test isapprox(ϕs, ϕF; rtol = 1e-9)
+
+    # Rebar without negative-region anchors stays on Chapter F.
+    ϕs2, ϕc2 = both(Lp / 2, false)
+    ϕF2 = get_ϕMn(fix.section, fix.material; Lb = Lp / 2, Cb = 1.0, axis = :strong)
+    @test isapprox(ϕs2, ϕc2; rtol = 1e-9)
+    @test isapprox(ϕs2, ϕF2; rtol = 1e-9)
+
+    # Compact, braced, anchored, and developed: both paths take the composite value.
+    ϕs3, ϕc3 = both(Lp / 2, true)
+    @test isapprox(ϕs3, ϕc3; rtol = 1e-9)
+    @test ϕs3 > ϕF2
+end
+
+# =============================================================================
+# §I3.1a — a group's summed length must not widen L/8
+# =============================================================================
+
+@testset "Own-span L/8 rejects a section the summed length would accept" begin
+    fix = _per_station_fixture(; bsl = 20.0u"ft", bsr = 20.0u"ft")
+    L_own = 16.0u"ft"
+    L_sum = 80.0u"ft"
+    # 10 ft of tributary on each side. Own-span L/8 is 2 ft; the sum's L/8 is 10 ft.
+    side = SideExtentProfile(ustrip(u"m", 10.0u"ft"))
+    b_own = b_eff_at_station(fix.slab, L_own, 0.5; left = side, right = side)
+    b_sum = b_eff_at_station(fix.slab, L_sum, 0.5; left = side, right = side)
+    @test isapprox(b_own, 4.0u"ft"; rtol = 1e-6)
+    @test isapprox(b_sum, 20.0u"ft"; rtol = 1e-6)
+
+    Σ_own = StructuralSizer._Cf_max(fix.section, fix.material, fix.slab, b_own)
+    Σ_sum = StructuralSizer._Cf_max(fix.section, fix.material, fix.slab, b_sum)
+    ϕ_own = get_ϕMn_composite(fix.section, fix.material, fix.slab, b_own, Σ_own).ϕMn
+    ϕ_sum = get_ϕMn_composite(fix.section, fix.material, fix.slab, b_sum, Σ_sum).ϕMn
+    @test ϕ_own < ϕ_sum
+    Mu = (ϕ_own + ϕ_sum) / 2
+    demand = _ -> Mu
+
+    anchor = HeadedStudAnchor(0.75u"inch", 5.0u"inch", 65.0u"ksi", 51.0u"ksi",
+                              490.0u"lb/ft^3")
+    # The context carries the summed length, as a framing-level group does.
+    ctx = CompositeContext(fix.slab, anchor, L_sum; shored = true)
+    checker = AISCChecker(; deflection_limit = nothing,
+                          total_deflection_limit = nothing, max_depth = Inf)
+    cache = StructuralSizer.create_cache(checker, 1)
+    StructuralSizer.precompute_capacities!(checker, cache, [fix.section],
+                                           fix.material, MinWeight())
+    geom = SteelMemberGeometry(L_own; Lb = L_own)
+    env = MemberDemand(1; Mux = 0.0, Mux_pos = 0.0, Mux_neg = 0.0,
+                       Vu_strong = ustrip(u"N", 1.0u"N"))
+
+    field_own = BeamSaggingField(side, side, demand, Float64[0.0, 1.0], L_own, nothing)
+    field_sum = BeamSaggingField(side, side, demand, Float64[0.0, 1.0], L_sum, nothing)
+    ok_own = StructuralSizer.is_feasible(checker, cache, 1, fix.section, fix.material,
+                                         env, geom, PerStationComposite(ctx, [field_own]))
+    ok_sum = StructuralSizer.is_feasible(checker, cache, 1, fix.section, fix.material,
+                                         env, geom, PerStationComposite(ctx, [field_sum]))
+    @test ok_own == false
+    @test ok_sum == true
 end

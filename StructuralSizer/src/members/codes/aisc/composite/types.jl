@@ -177,6 +177,29 @@ function stud_mass(a::HeadedStudAnchor)
 end
 
 # ==============================================================================
+# Pre-cure loads (filled by construction.jl)
+# ==============================================================================
+
+"""
+Vertical construction loads for one beam, before the candidate's own weight.
+
+`p_Cp` is SEI/ASCE 37-02 Table 2 for `cp_class`. `p_concrete` is C_VML.
+`b_trib` turns those pressures into line loads. `p_L` is the nominal live load
+present during construction (the `0.5L` term). `w_D_extra` is D other than the
+steel beam. `w_Cd` and `w_Cfml` are line loads.
+"""
+struct ConstructionStage
+    cp_class::Symbol
+    p_Cp::typeof(1.0u"Pa")
+    p_concrete::typeof(1.0u"Pa")
+    b_trib::typeof(1.0u"m")
+    p_L::typeof(1.0u"Pa")
+    w_D_extra::typeof(1.0u"N/m")
+    w_Cd::typeof(1.0u"N/m")
+    w_Cfml::typeof(1.0u"N/m")
+end
+
+# ==============================================================================
 # Composite Context (passed alongside ISymmSection in the checker)
 # ==============================================================================
 
@@ -195,6 +218,7 @@ This struct is built once per beam group and passed to the composite `is_feasibl
 - `Asr`:        Area of developed longitudinal reinforcement within `b_eff` for negative moment
 - `Fysr`:       Yield strength of slab reinforcement
 - `neg_moment`: `true` if negative moment composite check is requested
+- `construction`: Pre-cure loads (SEI/ASCE 37-02). Built from the slab when omitted.
 
 # Notes
 - The `AISCChecker` uses this to decide between bare-steel and composite capacity paths.
@@ -211,14 +235,19 @@ struct CompositeContext{S<:AbstractSlabOnBeam, A<:AbstractSteelAnchor,
     Asr::T_A
     Fysr::T_P
     neg_moment::Bool
+    construction::ConstructionStage
 end
 
 function CompositeContext(slab, anchor, L_beam;
                           shored=false, Lb_const=L_beam,
                           Asr=0.0u"mm^2", Fysr=0.0u"MPa",
-                          neg_moment=false)
+                          neg_moment=false,
+                          cp_class::Union{Symbol, Nothing}=:medium,
+                          construction=nothing)
+    stage = construction === nothing ?
+        construction_stage(slab; cp_class = cp_class) : construction
     CompositeContext(slab, anchor, uconvert(u"m", L_beam), shored,
-                     uconvert(u"m", Lb_const), Asr, Fysr, neg_moment)
+                     uconvert(u"m", Lb_const), Asr, Fysr, neg_moment, stage)
 end
 
 # ==============================================================================

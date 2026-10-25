@@ -83,6 +83,32 @@ end
 """Constant per-side extent `d_m` (meters) spanning the whole beam."""
 SideExtentProfile(d_m::Real) = SideExtentProfile([0.0, 1.0], Float64[d_m, d_m])
 
+"""Mean per-side extent, in meters. Trapezoid along the normalized span."""
+function _profile_mean_m(p::SideExtentProfile)
+    pos, ext = p.positions, p.extents_m
+    total = 0.0
+    @inbounds for i in 1:(length(pos) - 1)
+        total += (ext[i] + ext[i + 1]) * 0.5 * (pos[i + 1] - pos[i])
+    end
+    return total
+end
+
+"""
+Construction tributary width. A profile replaces that side of the slab spacing.
+
+The L/8 cap is not applied. Profiles are the production geometry: a group
+payload stores zero spacing on the slab and the real width on the profiles.
+"""
+function tributary_width(slab::AbstractSlabOnBeam; left = nothing, right = nothing)
+    bl = left === nothing ?
+        _tributary_half(slab.beam_spacing_left, slab.edge_dist_left) :
+        _profile_mean_m(left) * u"m"
+    br = right === nothing ?
+        _tributary_half(slab.beam_spacing_right, slab.edge_dist_right) :
+        _profile_mean_m(right) * u"m"
+    return uconvert(u"m", bl + br)
+end
+
 """Per-side extent `d(s)` (meters) at normalized station `s`, clamped to `[0, 1]`
 and linearly interpolated between breakpoints."""
 function _sample_extent(p::SideExtentProfile, s::Real)
@@ -443,7 +469,7 @@ Per-group composite payload for beam sizing.
 `fields` is one [`BeamSaggingField`](@ref) per beam in the group. The checker
 re-solves the sagging governing station for each candidate section, because
 `ϕMn(b_eff)` is nonlinear in the section. Hogging stays on the demand envelope
-and the §I3.2b gates. Construction (§I3.1b) stays on the demand envelope.
+and the §I3.2b gates. Construction (§I3.1b) uses the pre-cure load on this span.
 """
 struct PerStationComposite{S<:AbstractSlabOnBeam, A<:AbstractSteelAnchor, TA, TP, BF}
     ctx::CompositeContext{S, A, TA, TP}
@@ -480,10 +506,24 @@ function context_at_sagging_station(ctx::CompositeContext, st::CompositeSaggingS
     # §I3.1b construction Lb defaults to this member's span. The group sum of
     # spans is not an unbraced length.
     lb = _same_span(ctx.Lb_const, ctx.L_beam) ? L : ctx.Lb_const
+    # Keep the pre-cure tributary. The spacings written above are 2× the
+    # already-capped half-widths, which are not the loaded width.
     return CompositeContext(slab_i, ctx.anchor, L;
                             shored = ctx.shored, Lb_const = lb,
                             Asr = ctx.Asr, Fysr = ctx.Fysr,
-                            neg_moment = ctx.neg_moment)
+                            neg_moment = ctx.neg_moment,
+                            construction = ctx.construction)
+end
+
+"""Context whose construction width is this beam's tributary, not L/8."""
+function _context_for_construction(ctx::CompositeContext, slab, left, right)
+    b = tributary_width(slab; left = left, right = right)
+    stage = construction_with_width(ctx.construction, b)
+    return CompositeContext(ctx.slab, ctx.anchor, ctx.L_beam;
+                            shored = ctx.shored, Lb_const = ctx.Lb_const,
+                            Asr = ctx.Asr, Fysr = ctx.Fysr,
+                            neg_moment = ctx.neg_moment,
+                            construction = stage)
 end
 
 """

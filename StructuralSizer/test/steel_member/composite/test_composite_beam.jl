@@ -670,10 +670,12 @@ end
 
     @testset "Feasible under moderate moment" begin
         # Use a moderate moment well within composite capacity.
-        # Lb_const is set to 10 ft (deck braces the beam during construction),
-        # so the construction-stage ϕMn is not overly penalized by LTB.
+        # Lb_const is 10 ft. The pre-cure pour is omitted here (no tributary);
+        # the 37-02 load is tested on its own. Beam self-weight remains D.
+        light = construction_stage(fix.slab; b_trib = 0.0u"ft", p_concrete = 0.0u"psf")
         ctx_braced = CompositeContext(fix.slab, fix.anchor, fix.L_beam;
-                                      shored=false, Lb_const=10.0u"ft")
+                                      shored=false, Lb_const=10.0u"ft",
+                                      construction = light)
         Mu_moderate = 300.0kip*u"ft"
         demand = MemberDemand(1;
             Mux   = ustrip(u"N*m", uconvert(u"N*m", Mu_moderate)),
@@ -785,6 +787,32 @@ end
     @testset "Zero vector returns false" begin
         @test beam_direction_from_vectors((0.0, 0.0), (1.0, 0.0)) == false
     end
+end
+
+# ==============================================================================
+# 17b. Pre-cure load — SEI/ASCE 37-02 Eqs. 2-2 and 2-3
+# ==============================================================================
+
+@testset "Pre-cure load is SEI/ASCE 37-02, flagged older than 37-14" begin
+    fix = _example_I1_setup()
+    stage = construction_stage(fix.slab; cp_class = :medium, b_trib = 10.0u"ft",
+                               p_concrete = 100.0u"psf", p_L = 0.0u"Pa")
+    dem = construction_span_demand(fix.section, fix.material, stage, 30.0u"ft")
+    w_steel = fix.section.A * fix.material.ρ * GRAVITY
+    w_c = 100.0u"psf" * 10.0u"ft"
+    w_p = 50.0u"psf" * 10.0u"ft"
+    # SEI/ASCE 37-02 §2.2.3 (corpus: sei-asce-37-02, PDF p. 16).
+    w22 = 1.4 * w_steel + 1.4 * w_c
+    w23 = 1.2 * w_steel + 1.4 * w_c + 1.6 * w_p
+    @test dem.equation == "2-3"
+    @test isapprox(dem.w, max(w22, w23); rtol = 1e-6)
+    @test isapprox(dem.Mu, dem.w * (30.0u"ft")^2 / 8; rtol = 1e-9)
+    @test isapprox(dem.Vu, dem.w * 30.0u"ft" / 2; rtol = 1e-9)
+    @test occursin("37-02", dem.edition)
+    @test occursin("37-14", dem.edition)
+    @test dem.cp_class == :medium
+    @test_throws ArgumentError construction_personnel_pressure(nothing)
+    @test_throws ArgumentError construction_personnel_pressure(:bulk)
 end
 
 # ==============================================================================

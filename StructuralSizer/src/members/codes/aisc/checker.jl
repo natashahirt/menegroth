@@ -562,7 +562,7 @@ end
 
 Composite-aware feasibility check. When `CompositeContext` is provided:
 
-1. **Construction stage** (I3.1b): bare steel check with `Lb_const` (skipped if shored).
+1. **Construction stage** (I3.1b): bare steel under the SEI/ASCE 37-02 pre-cure load at `Lb_const` (skipped if shored). Not the final envelope.
 2. **Composite ϕMn** (I3.2a): replaces the bare-steel strong-axis flexural capacity
    using the plastic stress distribution PNA solver with full stud strength.
 3. **Deflection** (Commentary I3.2): uses `I_LB` (partial composite) for live-load
@@ -608,17 +608,19 @@ function is_feasible(
     cache.ϕVn_strong[j] >= Vus || return false
     cache.ϕVn_weak[j] >= Vuw || return false
 
-    # --- Construction Stage (I3.1b) — unshored; all pre-composite loads ---
-    # AISC 360-16 §I3.1b — corpus: aisc-360-16, page 151
-    # Steel section alone must support all loads applied before concrete
-    # attains 75% of f'c, including hogging. Envelope demand is used as a
-    # proxy for those construction-stage moments (same convention as sagging).
-    # Do not weaken vs unsigned Mux: if |Mux| exceeds both signed faces,
-    # still check the larger value.
+    # --- Construction Stage (I3.1b) — unshored; pre-cure loads on bare steel ---
+    # AISC 360-22 Commentary §I3.1b (corpus: aisc-360-22, PDF p. 500): loads
+    # applied before the concrete has cured are resisted by the steel section
+    # alone. The demand is SEI/ASCE 37-02 Eqs. 2-2 and 2-3 on this member's
+    # span, not the final factored envelope. 37-02 is older than the 37-14
+    # that commentary cites; construction_edition() carries that flag.
+    # Chapter F here is still the 360-16 implementation.
     if !ctx.shored
+        pre = construction_span_demand(section, material, ctx.construction, ctx.L_beam)
         Lb_const_m = ustrip(u"m", ctx.Lb_const)
         ϕMn_const = _get_ϕMnx_cached!(cache, j, Lb_const_m, 1.0, section, material, checker.ϕ_b)
-        ϕMn_const >= max(abs(Mux), Mux_pos_env, Mux_neg) || return false
+        ϕMn_const >= ustrip(u"N*m", pre.Mu) || return false
+        cache.ϕVn_strong[j] >= ustrip(u"N", pre.Vu) || return false
     end
 
     # --- Positive composite flexural capacity (I3.2a) ---
@@ -728,8 +730,8 @@ Per-station composite feasibility.
 Each beam in the group is checked at the sagging station that maximizes
 `M⁺(s) / ϕMn(b_eff(s))` for this section (AISC 360-16 §I3.1a / §I3.2a,
 corpus: aisc-360-16, PDF pp. 150–151). The scalar composite check then runs
-at that station's width and moment. Construction (§I3.1b) and hogging
-(§I3.2b) keep the demand envelopes.
+at that station's width and moment. Construction (§I3.1b) uses this member's
+pre-cure load. Hogging (§I3.2b) keeps the demand envelope.
 """
 function is_feasible(
     checker::AISCChecker,
@@ -759,7 +761,8 @@ function is_feasible(
         g.dcr <= 1.0 || return false
         st = CompositeSaggingStation(g.b_eff, g.M_pos * u"N*m",
                                      g.spacing_left, g.spacing_right)
-        ctx_i = context_at_sagging_station(psc.ctx, st; L_beam = L_i, slab = slab_i)
+        ctx_src = _context_for_construction(psc.ctx, slab_i, field.left, field.right)
+        ctx_i = context_at_sagging_station(ctx_src, st; L_beam = L_i, slab = slab_i)
         is_feasible(checker, cache, j, section, material, demand, geometry, ctx_i;
                     strength_Mux_pos = g.M_pos) || return false
     end
@@ -1077,17 +1080,24 @@ function explain_feasibility(
     push!(checks, CheckResult("shear_weak", ϕVn_w >= Vuw,
           s_ratio_w, Vuw, ϕVn_w, "AISC 360-16 G2"))
 
-    # --- Construction Stage (I3.1b) — both faces ---
-    # AISC 360-16 §I3.1b — corpus: aisc-360-16, page 151
-    # Do not weaken vs unsigned Mux: if |Mux| exceeds both signed faces,
-    # still check the larger value.
+    # --- Construction Stage (I3.1b) — pre-cure load, not the final envelope ---
+    # AISC 360-22 Commentary §I3.1b (corpus: aisc-360-22, PDF p. 500).
+    # Demand: SEI/ASCE 37-02 §2.2.3 Eqs. 2-2 and 2-3 (corpus: sei-asce-37-02,
+    # PDF p. 16), an older edition than ASCE/SEI 37-14. Chapter F is 360-16.
     if !ctx.shored
+        pre = construction_span_demand(section, material, ctx.construction, ctx.L_beam)
         Lb_const_m = ustrip(u"m", ctx.Lb_const)
         ϕMn_const = _get_ϕMnx_cached!(cache, j, Lb_const_m, 1.0, section, material, checker.ϕ_b)
-        Mu_const = max(abs(Mux), Mux_pos_env, Mux_neg)
+        Mu_const = ustrip(u"N*m", pre.Mu)
+        Vu_const = ustrip(u"N", pre.Vu)
         c_ratio = ϕMn_const > 0 ? Mu_const / ϕMn_const : (Mu_const > 0 ? Inf : 0.0)
+        clause = "AISC 360-22 I3.1b; $(pre.edition); Eq. $(pre.equation); C_P $(pre.cp_class)"
         push!(checks, CheckResult("construction_flexure", ϕMn_const >= Mu_const,
-              c_ratio, Mu_const, ϕMn_const, "AISC 360-16 I3.1b"))
+              c_ratio, Mu_const, ϕMn_const, clause))
+        ϕVn_c = cache.ϕVn_strong[j]
+        v_ratio = ϕVn_c > 0 ? Vu_const / ϕVn_c : (Vu_const > 0 ? Inf : 0.0)
+        push!(checks, CheckResult("construction_shear", ϕVn_c >= Vu_const,
+              v_ratio, Vu_const, ϕVn_c, clause))
     end
 
     # --- Positive composite flexural capacity (I3.2a) ---
@@ -1248,7 +1258,8 @@ function explain_feasibility(
                                       ϕ = checker.ϕ_b)
         st = CompositeSaggingStation(g.b_eff, g.M_pos * u"N*m",
                                      g.spacing_left, g.spacing_right)
-        ctx_i = context_at_sagging_station(psc.ctx, st; L_beam = L_i, slab = slab_i)
+        ctx_src = _context_for_construction(psc.ctx, slab_i, field.left, field.right)
+        ctx_i = context_at_sagging_station(ctx_src, st; L_beam = L_i, slab = slab_i)
         ex = explain_feasibility(checker, cache, j, section, material, demand, geometry, ctx_i;
                                  strength_Mux_pos = g.M_pos)
         if best === nothing || (!ex.passed && best.passed) ||

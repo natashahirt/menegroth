@@ -337,11 +337,15 @@ end
                                              demand_env, geom, psc)
     @test ok_scalar == ok_station
 
-    # A larger envelope must still fail construction. The station moment stays moderate.
+    # A huge final envelope is not the pre-cure demand. Sagging on the station
+    # path uses the station moment, so the group stays feasible. The scalar
+    # path still rejects that envelope as positive flexure.
     huge = ustrip(u"N*m", uconvert(u"N*m", 8000.0u"kip*ft"))
     demand_huge = MemberDemand(1; Mux = huge, Mux_pos = huge, Mux_neg = 0.0, Vu_strong = 0.0)
     @test StructuralSizer.is_feasible(checker, cache, 1, fix.section, fix.material,
-                                      demand_huge, geom, psc) == false
+                                      demand_huge, geom, psc) == true
+    @test StructuralSizer.is_feasible(checker, cache, 1, fix.section, fix.material,
+                                      demand_huge, geom, ctx) == false
 end
 
 # =============================================================================

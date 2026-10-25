@@ -63,10 +63,9 @@ end
     @test !is_feasible(checker, cache, 1, section, material, d_hog, geom, ctx)
 end
 
-@testset "Unshored I3.1b construction checks hogging envelope" begin
-    # AISC 360-16 §I3.1b — corpus: aisc-360-16, page 151
-    # Steel alone must support all pre-composite loads, including hogging.
-    # Mux_pos = 100 kip-ft < φMn_const ≈ 300 < Mux_neg = 400 must FAIL.
+@testset "Unshored I3.1b uses the pre-cure load, not the final envelope" begin
+    # AISC 360-22 Commentary §I3.1b (corpus: aisc-360-22, PDF p. 500).
+    # Demand is SEI/ASCE 37-02 Eqs. 2-2 and 2-3, not Mux_neg.
     section = W("W21X55")
     material = A992_Steel
     slab = SolidSlabOnBeam(
@@ -76,7 +75,6 @@ end
     anchor = HeadedStudAnchor(0.75u"inch", 5.0u"inch", 65.0ksi, 50.0ksi,
                               7850.0u"kg/m^3")
     L_beam = 45.0u"ft"
-    # Lb_const chosen so Chapter F φMn sits between 100 and 400 kip-ft.
     Lb_const = 20.0u"ft"
     ϕMn_const = ustrip(u"N*m", get_ϕMn(section, material; Lb=Lb_const, Cb=1.0,
                                        axis=:strong, ϕ=0.9))
@@ -84,23 +82,35 @@ end
     Mux_neg = ustrip(u"N*m", uconvert(u"N*m", 400.0kip * u"ft"))
     @test Mux_pos < ϕMn_const < Mux_neg
 
-    ctx = CompositeContext(slab, anchor, L_beam; shored=false, Lb_const=Lb_const)
     checker = AISCChecker()
     cache = create_cache(checker, 1)
     precompute_capacities!(checker, cache, [section], material, MinWeight())
-    # Short span so hogging Chapter F (Lb_neg = L) reaches φMp and does not
-    # mask the construction-stage failure.
+    # Short span so hogging Chapter F (Lb_neg = L) reaches φMp. The 400 kip-ft
+    # face is then a final-envelope moment, not a construction failure.
     geom = SteelMemberGeometry(3.0u"ft"; Lb=3.0u"ft")
     Vu = ustrip(u"N", uconvert(u"N", 40.0kip))
     demand = MemberDemand(1; Mux=Mux_neg, Mux_pos=Mux_pos, Mux_neg=Mux_neg,
                           Vu_strong=Vu)
-    @test !is_feasible(checker, cache, 1, section, material, demand, geom, ctx)
+    light = construction_stage(slab; cp_class=:medium, b_trib=0.0u"ft",
+                               p_concrete=0.0u"psf")
+    ctx = CompositeContext(slab, anchor, L_beam; shored=false, Lb_const=Lb_const,
+                           construction=light)
+    @test is_feasible(checker, cache, 1, section, material, demand, geom, ctx)
 
-    # Same sagging with hogging below φMn_const still passes construction.
-    Mux_neg_ok = ustrip(u"N*m", uconvert(u"N*m", 200.0kip * u"ft"))
-    d_ok = MemberDemand(1; Mux=Mux_neg_ok, Mux_pos=Mux_pos, Mux_neg=Mux_neg_ok,
-                        Vu_strong=Vu)
-    @test is_feasible(checker, cache, 1, section, material, d_ok, geom, ctx)
+    heavy = construction_stage(slab; cp_class=:medium, b_trib=80.0u"ft")
+    small = MemberDemand(1; Mux=Mux_pos, Mux_pos=Mux_pos, Mux_neg=Mux_pos,
+                         Vu_strong=Vu)
+    ctx_heavy = CompositeContext(slab, anchor, L_beam; shored=false,
+                                 Lb_const=Lb_const, construction=heavy)
+    @test !is_feasible(checker, cache, 1, section, material, small, geom, ctx_heavy)
+    ctx_shored = CompositeContext(slab, anchor, L_beam; shored=true,
+                                  Lb_const=Lb_const, construction=heavy)
+    @test is_feasible(checker, cache, 1, section, material, small, geom, ctx_shored)
+
+    @test_throws ArgumentError CompositeContext(slab, anchor, L_beam; cp_class=nothing)
+    ctx_default = CompositeContext(slab, anchor, L_beam)
+    @test ctx_default.construction.cp_class == :medium
+    @test isapprox(ctx_default.construction.p_Cp, 50.0u"psf"; rtol=1e-6)
 end
 
 @testset "Composite I3.2b hogging: steel-only vs plastic rebar" begin
@@ -247,29 +257,31 @@ end
     precompute_capacities!(checker, cache, [section], material, MinWeight())
     Vu = ustrip(u"N", uconvert(u"N", 40.0kip))
 
-    # Construction P0: unshored hogging envelope fails I3.1b both-face.
+    # Construction: a heavy pre-cure tributary fails Chapter F. The final
+    # faces stay small so the failure is the construction check.
     Lb_const = 20.0u"ft"
-    ϕMn_const = ustrip(u"N*m", get_ϕMn(section, material; Lb=Lb_const, Cb=1.0,
-                                       axis=:strong, ϕ=0.9))
     Mux_pos_c = ustrip(u"N*m", uconvert(u"N*m", 100.0kip * u"ft"))
-    Mux_neg_c = ustrip(u"N*m", uconvert(u"N*m", 400.0kip * u"ft"))
-    @test Mux_pos_c < ϕMn_const < Mux_neg_c
-    ctx_c = CompositeContext(slab, anchor, 45.0u"ft"; shored=false, Lb_const=Lb_const)
+    heavy = construction_stage(slab; cp_class=:medium, b_trib=80.0u"ft")
+    ctx_c = CompositeContext(slab, anchor, 45.0u"ft"; shored=false, Lb_const=Lb_const,
+                             construction=heavy)
     geom_c = SteelMemberGeometry(3.0u"ft"; Lb=3.0u"ft")
-    d_c = MemberDemand(1; Mux=Mux_neg_c, Mux_pos=Mux_pos_c, Mux_neg=Mux_neg_c,
+    d_c = MemberDemand(1; Mux=Mux_pos_c, Mux_pos=Mux_pos_c, Mux_neg=Mux_pos_c,
                        Vu_strong=Vu)
     feas_c = is_feasible(checker, cache, 1, section, material, d_c, geom_c, ctx_c)
     expl_c = explain_feasibility(checker, cache, 1, section, material, d_c, geom_c, ctx_c)
     @test feas_c == false
     @test expl_c.passed == feas_c
-    @test any(c -> c.name == "construction_flexure" && !c.passed, expl_c.checks)
+    @test any(c -> c.name == "construction_flexure" && !c.passed &&
+                   occursin("37-02", c.code_clause) && occursin("medium", c.code_clause),
+              expl_c.checks)
 
-    # Same construction case with hogging below φMn_const still passes.
-    Mux_neg_ok = ustrip(u"N*m", uconvert(u"N*m", 200.0kip * u"ft"))
-    d_ok = MemberDemand(1; Mux=Mux_neg_ok, Mux_pos=Mux_pos_c, Mux_neg=Mux_neg_ok,
-                        Vu_strong=Vu)
-    feas_ok = is_feasible(checker, cache, 1, section, material, d_ok, geom_c, ctx_c)
-    expl_ok = explain_feasibility(checker, cache, 1, section, material, d_ok, geom_c, ctx_c)
+    # Beam weight alone, no tributary, stays under Chapter F at Lb_const.
+    light = construction_stage(slab; cp_class=:medium, b_trib=0.0u"ft",
+                               p_concrete=0.0u"psf")
+    ctx_ok = CompositeContext(slab, anchor, 45.0u"ft"; shored=false, Lb_const=Lb_const,
+                              construction=light)
+    feas_ok = is_feasible(checker, cache, 1, section, material, d_c, geom_c, ctx_ok)
+    expl_ok = explain_feasibility(checker, cache, 1, section, material, d_c, geom_c, ctx_ok)
     @test feas_ok
     @test expl_ok.passed == feas_ok
 
@@ -333,9 +345,8 @@ end
     @test any(c -> c.name == "flexure_neg" && !c.passed, expl_s.checks)
 end
 
-@testset "I3.1b construction does not weaken vs unsigned Mux" begin
-    # If |Mux| exceeds max(Mux_pos, Mux_neg), still check the larger value.
-    # AISC 360-16 §I3.1b — corpus: aisc-360-16, page 151
+@testset "I3.1b construction does not use unsigned Mux" begin
+    # The final unsigned envelope is not the pre-cure demand.
     section = W("W21X55")
     material = A992_Steel
     slab = SolidSlabOnBeam(
@@ -345,13 +356,12 @@ end
     anchor = HeadedStudAnchor(0.75u"inch", 5.0u"inch", 65.0ksi, 50.0ksi,
                               7850.0u"kg/m^3")
     Lb_const = 20.0u"ft"
-    ϕMn_const = ustrip(u"N*m", get_ϕMn(section, material; Lb=Lb_const, Cb=1.0,
-                                       axis=:strong, ϕ=0.9))
     Mux_face = ustrip(u"N*m", uconvert(u"N*m", 100.0kip * u"ft"))
     Mux_env = ustrip(u"N*m", uconvert(u"N*m", 400.0kip * u"ft"))
-    @test Mux_face < ϕMn_const < Mux_env
-
-    ctx = CompositeContext(slab, anchor, 45.0u"ft"; shored=false, Lb_const=Lb_const)
+    light = construction_stage(slab; cp_class=:medium, b_trib=0.0u"ft",
+                               p_concrete=0.0u"psf")
+    ctx = CompositeContext(slab, anchor, 45.0u"ft"; shored=false, Lb_const=Lb_const,
+                           construction=light)
     checker = AISCChecker()
     cache = create_cache(checker, 1)
     precompute_capacities!(checker, cache, [section], material, MinWeight())
@@ -359,10 +369,10 @@ end
     Vu = ustrip(u"N", uconvert(u"N", 40.0kip))
     demand = MemberDemand(1; Mux=Mux_env, Mux_pos=Mux_face, Mux_neg=Mux_face,
                           Vu_strong=Vu)
-    @test !is_feasible(checker, cache, 1, section, material, demand, geom, ctx)
+    @test is_feasible(checker, cache, 1, section, material, demand, geom, ctx)
     expl = explain_feasibility(checker, cache, 1, section, material, demand, geom, ctx)
-    @test expl.passed == false
-    @test any(c -> c.name == "construction_flexure" && !c.passed, expl.checks)
+    @test expl.passed == true
+    @test any(c -> c.name == "construction_flexure" && c.passed, expl.checks)
 end
 
 @testset "size_beams MIP wires composite hogging (6-arg path)" begin

@@ -1244,6 +1244,9 @@ Uses the interior point solver (Ipopt) by default via `optimize_continuous`.
 
 # Keyword Arguments
 - `Muy`: Factored moment about y-axis (default: 0)
+- `x0`: Optional start `[b, h, ρg]` in inches and ratio. Solved together
+  with the axial-only start, unless it already matches that start.
+  `nothing` (default) uses the moment-informed [`initial_guess`](@ref).
 
 # Returns
 `RCColumnNLPResult` with:
@@ -1251,7 +1254,7 @@ Uses the interior point solver (Ipopt) by default via `optimize_continuous`.
 - `b_opt`, `h_opt`, `ρ_opt`: Continuous optimal values
 - `b_final`, `h_final`: Final dimensions after rounding
 - `area`: Final cross-sectional area (sq in)
-- `status`: `:optimal`, `:feasible`, `:infeasible`, `:failed`
+- `status`: `:optimal`, `:feasible`, `:converged`, `:infeasible`, `:failed`
 
 # Example
 ```julia
@@ -1280,9 +1283,16 @@ result = size_rc_column_nlp(Pu, Mux, geom, opts)
 
 # Algorithm
 1. Formulates the problem as `RCColumnNLPProblem <: AbstractNLPProblem`
-2. Calls `optimize_continuous(problem; solver=opts.solver)`
-3. Rounds continuous solution to practical dimensions
-4. Returns `RCColumnNLPResult` with final section
+2. For Ipopt, solves from the axial-only start and from the moment-informed
+   start (or an explicit `x0`). Random `n_multistart` samples do not replace
+   that axial start.
+3. Keeps the acceptable solve with the better objective. `:converged`
+   (iteration limit or slow progress) stays acceptable only when the
+   returned section satisfies the NLP constraints; otherwise that start
+   is `:infeasible` before the comparison. `:infeasible` and `:failed`
+   do not replace `:optimal`, `:feasible`, or a constraint-satisfying
+   `:converged`.
+4. Rounds the chosen solution to practical dimensions
 
 See also: [`size_columns`](@ref), [`NLPColumnOptions`](@ref), [`RCColumnNLPProblem`](@ref)
 """
@@ -1308,8 +1318,175 @@ function size_rc_column_nlp(
     
     # Create NLP problem
     problem = RCColumnNLPProblem(demand, geometry, opts)
-    
-    # Solve using the generic continuous optimizer
+
+    # Grid / NLopt / NonConvex do not consume x0. One solve matches the
+    # previous path. Ipopt is local, so try the axial-only basin too.
+    if opts.solver !== :ipopt
+        opt_result = optimize_continuous(
+            problem;
+            objective = opts.objective,
+            solver = opts.solver,
+            maxiter = opts.maxiter,
+            tol = opts.tol,
+            verbose = opts.verbose,
+            x0 = x0,
+            n_multistart = opts.n_multistart,
+        )
+        return _rc_column_nlp_screen_converged(
+            problem, build_rc_column_nlp_result(problem, opt_result))
+    end
+
+    x_axial = axial_only_initial_guess(problem)
+    x_other = isnothing(x0) ? initial_guess(problem) : copy(x0)
+    built = _solve_rc_column_nlp_from(problem, opts, x_axial)
+    if !_rc_column_starts_match(problem, x_other, x_axial)
+        other = _solve_rc_column_nlp_from(problem, opts, x_other)
+        if _rc_column_nlp_candidate_wins(problem, built, other)
+            built = other
+        end
+    end
+    return built
+end
+
+"""Statuses that may win the two-start comparison.
+
+`:optimal` and `:feasible` meet the KKT tolerance (or the relaxed one).
+`:converged` is an iteration-limit or slow-progress stop. It reaches this
+predicate only after [`_rc_column_nlp_screen_converged`](@ref) has kept it,
+which requires the returned section to satisfy the NLP constraints.
+`:infeasible` and `:failed` are not candidates while another start is acceptable.
+"""
+function _rc_column_nlp_acceptable(status::Symbol)
+    return status === :optimal || status === :feasible || status === :converged
+end
+
+"""True when two column starts are the same point inside the bounds."""
+function _rc_column_starts_match(
+    problem::RCColumnNLPProblem,
+    a::Vector{Float64},
+    b::Vector{Float64},
+)
+    length(a) == length(b) == n_variables(problem) || return false
+    lb, ub = variable_bounds(problem)
+    for i in eachindex(a)
+        ai = clamp(a[i], lb[i], ub[i])
+        bi = clamp(b[i], lb[i], ub[i])
+        isapprox(ai, bi; atol=1e-8, rtol=1e-8) || return false
+    end
+    return true
+end
+
+"""Objective of the section `size_rc_column_nlp` would return. Lower is better.
+
+`MinVolume` with no square penalty ranks by final gross area. Every other
+objective, including `prefer_square`, uses `objective_fn` at the snapped
+section so a squarer section can win when that penalty asks for it.
+"""
+function _rc_column_returned_cost(problem::RCColumnNLPProblem, built::RCColumnNLPResult)
+    if problem.opts.objective isa MinVolume && problem.opts.prefer_square <= 0
+        return built.area
+    end
+    return objective_fn(problem, [built.b_final, built.h_final, built.ρ_opt])
+end
+
+"""
+    _rc_column_nlp_candidate_wins(problem, incumbent, candidate) -> Bool
+
+`candidate` replaces the axial-only `incumbent` only when it is acceptable
+and better. An `:infeasible` or `:failed` solve never replaces an acceptable
+one. A `:converged` solve that misses the returned-section constraints is
+already `:infeasible` before this comparison. When `prefer_square` is off,
+a larger final area does not count as better.
+"""
+function _rc_column_nlp_candidate_wins(
+    problem::RCColumnNLPProblem,
+    incumbent::RCColumnNLPResult,
+    candidate::RCColumnNLPResult,
+)
+    cand_ok = _rc_column_nlp_acceptable(candidate.status)
+    inc_ok = _rc_column_nlp_acceptable(incumbent.status)
+    cand_ok || return false
+    inc_ok || return true
+
+    area_smaller = candidate.area < incumbent.area - 1e-6
+    area_larger = candidate.area > incumbent.area + 1e-6
+    if problem.opts.prefer_square <= 0 && area_larger
+        return false
+    end
+
+    c_cand = _rc_column_returned_cost(problem, candidate)
+    c_inc = _rc_column_returned_cost(problem, incumbent)
+    isfinite(c_cand) || return false
+    isfinite(c_inc) || return true
+    if c_cand < c_inc - 1e-8
+        return true
+    end
+    # Equal objective: keep the smaller snapped section.
+    return problem.opts.prefer_square <= 0 && area_smaller && c_cand <= c_inc + 1e-8
+end
+
+"""
+    _rc_column_returned_section_feasible(problem, built) -> Bool
+
+True when `constraint_fns` at `(b_final, h_final, ρ_opt)` is at or below
+every upper bound from `constraint_bounds`. The slack is 1e-4, the same
+absolute tolerance Ipopt's multistart feasibility check uses. A looser
+tolerance would accept a biaxial utilization of about 1.05.
+"""
+function _rc_column_returned_section_feasible(
+    problem::RCColumnNLPProblem,
+    built::RCColumnNLPResult,
+)
+    g = constraint_fns(problem, [built.b_final, built.h_final, built.ρ_opt])
+    _, ub = constraint_bounds(problem)
+    length(g) == length(ub) || return false
+    for i in eachindex(g)
+        # `<=` rejects NaN and +Inf. Only the upper bound is a capacity limit.
+        g[i] <= ub[i] + 1e-4 || return false
+    end
+    return true
+end
+
+"""
+    _rc_column_nlp_screen_converged(problem, built) -> RCColumnNLPResult
+
+`:converged` means Ipopt stopped on `ITERATION_LIMIT` or `SLOW_PROGRESS`,
+not that the KKT tolerance was met. Keep that status when the section that
+will be returned satisfies the NLP constraints. Otherwise the status becomes
+`:infeasible` before the two-start comparison, so the start cannot replace
+an acceptable one and callers do not treat it as usable. `:optimal` and
+`:feasible` are unchanged.
+"""
+function _rc_column_nlp_screen_converged(
+    problem::RCColumnNLPProblem,
+    built::RCColumnNLPResult,
+)
+    if built.status !== :converged || _rc_column_returned_section_feasible(problem, built)
+        return built
+    end
+    return RCColumnNLPResult(
+        built.section,
+        built.b_opt,
+        built.h_opt,
+        built.ρ_opt,
+        built.b_final,
+        built.h_final,
+        built.area,
+        :infeasible,
+        built.iterations,
+    )
+end
+
+"""One Ipopt solve from `x_start`, returned as a snapped column result.
+
+A `:converged` stop is screened against the returned section before the
+caller compares the two starts.
+"""
+function _solve_rc_column_nlp_from(
+    problem::RCColumnNLPProblem,
+    opts::NLPColumnOptions,
+    x_start::Vector{Float64},
+)
     opt_result = optimize_continuous(
         problem;
         objective = opts.objective,
@@ -1317,12 +1494,11 @@ function size_rc_column_nlp(
         maxiter = opts.maxiter,
         tol = opts.tol,
         verbose = opts.verbose,
-        x0 = x0,
+        x0 = x_start,
         n_multistart = opts.n_multistart,
     )
-    
-    # Convert to user-friendly result
-    return build_rc_column_nlp_result(problem, opt_result)
+    return _rc_column_nlp_screen_converged(
+        problem, build_rc_column_nlp_result(problem, opt_result))
 end
 
 """

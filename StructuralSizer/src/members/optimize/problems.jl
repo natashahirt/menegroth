@@ -107,13 +107,52 @@ function variable_bounds(p::RCColumnNLPProblem)
     return (lb, ub)
 end
 
-"""Initial guess from simplified axial capacity: start square at midrange ρ."""
+"""Clamp a square side to the column bounds and pair it with ρg = 0.04."""
+function _square_column_start(c_unclamped::Float64, p::RCColumnNLPProblem)
+    c0 = clamp(c_unclamped, p.b_min, p.b_max)
+    return [c0, c0, 0.04]
+end
+
+"""
+    axial_only_initial_guess(p::RCColumnNLPProblem) -> Vector{Float64}
+
+Square start from axial load only: `Ag ≈ Pu / (0.40 · f'c)`, `ρg = 0.04`.
+
+This is a solver start, not an ACI capacity. `Pu_kip` is kip and `mat.fc`
+is ksi, so `Pu / f'c` is in². Zero or negative axial load falls back to
+`b_min`. `size_rc_column_nlp` solves from this start as well as from
+[`initial_guess`](@ref).
+"""
+function axial_only_initial_guess(p::RCColumnNLPProblem)
+    # Same 0.40 axial start as before the moment term. Not a code equation.
+    Ag_axial = p.Pu_kip / (0.40 * p.mat.fc)
+    c0 = sqrt(max(Ag_axial, p.b_min^2))
+    return _square_column_start(c0, p)
+end
+
+"""Initial guess from a square axial-plus-moment start at midrange ρ.
+
+The guess is not a design strength. `Pu_kip` is kip and `mat.fc` is ksi,
+so `Pu / f'c` is in². `Mux_kipft` and `Muy_kipft` are kip-ft and are
+converted to kip-in before dividing by ksi and inches. Ipopt is local, so
+[`size_rc_column_nlp`](@ref) also starts from [`axial_only_initial_guess`](@ref)
+and keeps the better acceptable section.
+"""
 function initial_guess(p::RCColumnNLPProblem)
-    # Estimate from simplified axial capacity: Ag ≈ Pu / (0.40 × f'c)
-    Ag_est = p.Pu_kip / (0.40 * p.mat.fc)
+    # Starting guess only — not an ACI capacity. 0.40 is the existing
+    # axial start, not a code equation. The moment term is the same kind
+    # of start: it is not a design strength.
+    # Ag ≈ Pu / (0.40 · f'c) + 6 · Mu / (f'c · h_est)
+    # Mu = max(|Mux|, |Muy|), in kip-in; h_est is the axial-only side, in.
+    Ag_axial = p.Pu_kip / (0.40 * p.mat.fc)
+    h_est = sqrt(max(Ag_axial, p.b_min^2))
+    Ag_est = Ag_axial
+    if h_est > 0 && p.mat.fc > 0
+        Mu_kipin = 12.0 * max(abs(p.Mux_kipft), abs(p.Muy_kipft))
+        Ag_est += 6.0 * Mu_kipin / (p.mat.fc * h_est)
+    end
     c0 = sqrt(max(Ag_est, p.b_min^2))
-    c0 = clamp(c0, p.b_min, p.b_max)
-    return [c0, c0, 0.04]  # Start square at midrange reinforcement
+    return _square_column_start(c0, p)
 end
 
 """Human-readable variable names for solver output."""

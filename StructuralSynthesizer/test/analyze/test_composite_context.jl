@@ -19,6 +19,7 @@ using Unitful
 using StructuralSynthesizer
 using StructuralSizer
 using Asap
+import JSON3
 import Meshes   # qualified only: `using Meshes` would shadow `Segment`
 
 # --- Slab material / anchor inputs (shared by every context build) -----------
@@ -601,7 +602,7 @@ end
     conc = Concrete(_EC, _FC, _WC, 0.20, 0.1)
 
     payload = composite_group_payload(struc, [ibeam], member_length(ibeam),
-                                      conc, _T_SLAB, _ES)
+                                      conc, _T_SLAB, _ES; anchor = _ANCHOR)
     @test payload isa PerStationComposite
     field = only(payload.fields)
     section = W("W21X55")
@@ -622,14 +623,28 @@ end
     append!(widen, struc.asap_model.loads)
     struc.asap_model.loads = widen
 
+    # Unshored pre-cure, SEI/ASCE 37-02 Eq. 2-3 on a simple span (corpus:
+    # sei-asce-37-02, PDF p. 16), with the medium personnel load. On these
+    # 12 m beams the wet 8 in slab over about 1–2 m of tributary exceeds
+    # Chapter F at Lb = the span for W21×55 (φMn ≈ 112 kN·m) and W27×84
+    # (φMn ≈ 273 kN·m). W14×90 (φMn ≈ 532 kN·m) clears it. The 2 m beams
+    # still take the lighter shape. wL²/8 is the engineering-judgment span.
     opts = SteelBeamOptions(composite = true,
-                             custom_catalog = [W("W21X55"), W("W27X84")],
+                             composite_anchor_d = 0.75u"inch",
+                             composite_anchor_length = 5.0u"inch",
+                             composite_anchor_Fu = 65.0u"ksi",
+                             custom_catalog = [W("W21X55"), W("W14X90")],
                              deflection_limit = nothing,
                              total_deflection_limit = nothing)
     size_beams!(struc, opts; reanalyze = false,
                 composite_concrete = conc, composite_t_slab = _T_SLAB)
     @test !isempty(struc.member_groups)
     @test all(g -> g.section !== nothing, values(struc.member_groups))
+    for g in values(struc.member_groups)
+        lengths = (member_length(struc.beams[i]) for i in g.member_indices)
+        Lmax = maximum(L isa Unitful.Quantity ? ustrip(u"m", L) : Float64(L) for L in lengths)
+        @test g.section.name == (Lmax > 10 ? "W14X90" : "W21X55")
+    end
 
     struc_bare, _, _ = _build_two_bay()
     _solve_two_bay_frame!(struc_bare)
@@ -663,7 +678,8 @@ end
     struc.slabs[1].volumes[c5] = 1.0u"m^3"
     struc.slabs[2].volumes[c3] = 1.0u"m^3"
 
-    payload = composite_group_payload(struc, [bay1, bay2], Lsum, cascade, nothing, _ES)
+    payload = composite_group_payload(struc, [bay1, bay2], Lsum, cascade, nothing, _ES;
+                                      anchor = _ANCHOR)
     @test length(payload.fields) == 2
     f1, f2 = payload.fields
     @test isapprox(f1.L_beam, L1 isa Unitful.Quantity ? uconvert(u"m", L1) : L1 * u"m"; rtol = 1e-9)
@@ -683,7 +699,8 @@ end
     @test b_own <= b_sum + 1e-9u"m"
 
     struc.slabs[1].result = StructuralSizer.ShapedSlabResult(0.2u"m", 5.0u"kN/m^2")
-    @test_throws ArgumentError composite_group_payload(struc, [bay1], L1, cascade, nothing, _ES)
+    @test_throws ArgumentError composite_group_payload(struc, [bay1], L1, cascade, nothing, _ES;
+                                                       anchor = _ANCHOR)
 
     struc.slabs[1].result = StructuralSizer.VaultResult(
         0.10u"m", 0.40u"m", 1.0u"m",
@@ -693,5 +710,142 @@ end
         (σ = 1.0, σ_allow = 2.0, ratio = 0.5, ok = true),
         (δ = 0.01, limit = 0.02, ratio = 0.5, ok = true),
         (converged = true, iterations = 1))
-    @test_throws ArgumentError composite_group_payload(struc, [bay1], L1, cascade, nothing, _ES)
+    @test_throws ArgumentError composite_group_payload(struc, [bay1], L1, cascade, nothing, _ES;
+                                                       anchor = _ANCHOR)
+end
+
+# ==============================================================================
+# Explicit slab, anchor, and shoring inputs. No nominal stud.
+# ==============================================================================
+
+@testset "Composite inputs are explicit" begin
+    struc, beam, _ = _build_two_bay()
+    empty!(struc.slabs)
+    L = member_length(beam)
+    conc = Concrete(_EC, _FC, _WC, 0.20, 0.1)
+
+    err_t = try
+        composite_group_payload(struc, [beam], L, conc, nothing, _ES; anchor = _ANCHOR)
+        nothing
+    catch e
+        e
+    end
+    @test err_t isa ArgumentError
+    @test occursin("slab thickness", err_t.msg)
+
+    err_c = try
+        composite_group_payload(struc, [beam], L, nothing, _T_SLAB, _ES; anchor = _ANCHOR)
+        nothing
+    catch e
+        e
+    end
+    @test err_c isa ArgumentError
+    @test occursin("slab concrete", err_c.msg)
+    @test !occursin("slab thickness", err_c.msg)
+
+    err_d = try
+        composite_anchor_from_options(SteelBeamOptions(composite = true,
+            composite_anchor_length = 5.0u"inch", composite_anchor_Fu = 65.0u"ksi"))
+        nothing
+    catch e
+        e
+    end
+    @test err_d isa ArgumentError
+    @test occursin("composite_anchor_d", err_d.msg)
+
+    bare = _build_two_bay()[1]
+    err_nlp = try
+        size_beams!(bare, SteelBeamOptions(composite = true, sizing_strategy = :nlp);
+                    reanalyze = false)
+        nothing
+    catch e
+        e
+    end
+    @test err_nlp isa ArgumentError
+    @test occursin("composite_anchor_d", err_nlp.msg)
+
+    err_members = try
+        size_members!(bare; beam_opts = SteelBeamOptions(composite = true))
+        nothing
+    catch e
+        e
+    end
+    @test err_members isa ArgumentError
+    @test occursin("composite_anchor_d", err_members.msg)
+
+    opts_ok = SteelBeamOptions(composite = true, sizing_strategy = :nlp,
+                               composite_anchor_d = 0.75u"inch",
+                               composite_anchor_length = 5.0u"inch",
+                               composite_anchor_Fu = 65.0u"ksi")
+    err_path = try
+        size_beams!(bare, opts_ok; reanalyze = false)
+        nothing
+    catch e
+        e
+    end
+    @test err_path isa ArgumentError
+    @test occursin("discrete", err_path.msg)
+    @test_throws MethodError size_beams!(bare, SteelBeamOptions(sizing_strategy = :nlp);
+                                         reanalyze = false)
+end
+
+@testset "Pre-cure moment follows a uniform dead-load field" begin
+    struc, ibeam, _ = _build_two_bay()
+    _solve_two_bay_frame!(struc; w = 10_000.0)
+    # The fixture load is the dead case: 10 kPa over a constant 1 m width.
+    struc.cell_dead_loads[1] = Asap.TributaryLoad[]
+    for load in struc.asap_model.loads
+        load isa Asap.TributaryLoad && push!(struc.cell_dead_loads[1], load)
+    end
+    u = StructuralSynthesizer._dead_load_displacement(struc)
+    by = StructuralSynthesizer._dead_loads_by_element(struc)
+    shape = StructuralSynthesizer.beam_pre_cure_shape(struc, ibeam, u, by)
+    @test shape !== nothing
+    @test isapprox(ustrip(u"N/m", shape.w_ref), 10_000.0; rtol=1e-8)
+    L = member_length(ibeam)
+    Lm = L isa Unitful.Quantity ? ustrip(u"m", L) : Float64(L)
+    simple_M = 10_000.0 * Lm^2 / 8
+    simple_V = 10_000.0 * Lm / 2
+    # A uniform load on a prismatic span cannot exceed the simple-span moment.
+    # The larger end shear is at least wL/2 and at most the propped 5wL/8.
+    @test 0.5 * simple_M < ustrip(u"N*m", shape.M_ref) <= simple_M * 1.001
+    @test simple_V * 0.99 <= ustrip(u"N", shape.V_ref) <= (5 / 8) * 10_000.0 * Lm * 1.01
+
+    el = struc.asap_model.elements[struc.segments[only(segment_indices(ibeam))].edge_idx]
+    varied = Asap.TributaryLoad(el, [0.0, 1.0], [1.0u"m", 2.0u"m"], 10_000.0u"Pa")
+    struc.cell_dead_loads[1] = [varied]
+    @test StructuralSynthesizer.beam_pre_cure_shape(
+        struc, ibeam, u, StructuralSynthesizer._dead_loads_by_element(struc)) === nothing
+end
+
+@testset "API round-trips composite beam inputs" begin
+    raw = StructuralSynthesizer.APIParams(
+        beam_type = "steel_w",
+        composite = true,
+        composite_slab_type = "deck",
+        composite_t_slab_in = 4.5,
+        composite_anchor_d_in = 0.75,
+        composite_anchor_length_in = 5.0,
+        composite_anchor_Fu_ksi = 65.0,
+        composite_shored = true,
+        composite_cp_class = "light",
+        composite_deck_hr_in = 3.0,
+        composite_deck_wr_in = 6.0,
+        composite_deck_orientation = "parallel",
+    )
+    again = JSON3.read(JSON3.write(raw), StructuralSynthesizer.APIParams)
+    opts = StructuralSynthesizer._resolve_beam_options(again)
+    @test opts.composite
+    @test opts.composite_slab_type === :deck
+    @test opts.composite_shored
+    @test opts.composite_cp_class === :light
+    @test opts.composite_deck_orientation === :parallel
+    @test isapprox(opts.composite_t_slab, 4.5u"inch"; rtol = 1e-6)
+    @test isapprox(opts.composite_anchor_d, 0.75u"inch"; rtol = 1e-6)
+    @test isapprox(opts.composite_anchor_length, 5.0u"inch"; rtol = 1e-6)
+    @test isapprox(opts.composite_anchor_Fu, 65.0u"ksi"; rtol = 1e-6)
+    @test isapprox(opts.composite_deck_hr, 3.0u"inch"; rtol = 1e-6)
+    @test isapprox(opts.composite_deck_wr, 6.0u"inch"; rtol = 1e-6)
+    schema = StructuralSynthesizer.api_input_schema()
+    @test haskey(schema["params"]["fields"], "composite_anchor_d_in")
 end

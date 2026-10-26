@@ -364,10 +364,11 @@ end
 
     function both(L, neg_moment)
         ctx = CompositeContext(fix.slab, anchor, L; shored = true,
-                               Asr = Asr, Fysr = Fysr, neg_moment = neg_moment)
+                               Asr = Asr, Fysr = Fysr, neg_moment = neg_moment,
+                               ΣQn_neg = ΣQn)
         station = composite_dcr_at_station(fix.section, fix.material, fix.slab, L, 0.0,
                                            M, ΣQn; Asr = Asr, Fysr = Fysr,
-                                           neg_moment = neg_moment)
+                                           neg_moment = neg_moment, ΣQn_neg = ΣQn)
         checker = AISCChecker(; deflection_limit = nothing,
                               total_deflection_limit = nothing, max_depth = Inf)
         cache = StructuralSizer.create_cache(checker, 1)

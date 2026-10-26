@@ -405,6 +405,29 @@ end
         @test ustrip(kip*u"ft", Mn) > ustrip(kip*u"ft", Mp)
     end
     
+    @testset "Chapter F when the I3.2b gates are open" begin
+        Lb = 3.0u"ft"
+        Asr = 2.0u"inch^2"
+        Fysr = 60.0ksi
+        ϕF = get_ϕMn(fix.section, fix.material; Lb = Lb, Cb = 1.0, axis = :strong)
+        none = StructuralSizer.available_negative_flexure(fix.section, fix.material; Lb = Lb,
+                                           Asr = 0.0u"inch^2", Fysr = Fysr,
+                                           neg_moment = true, ΣQn = 200.0u"kip")
+        no_anchors = StructuralSizer.available_negative_flexure(fix.section, fix.material; Lb = Lb,
+                                                Asr = Asr, Fysr = Fysr,
+                                                neg_moment = false, ΣQn = 200.0u"kip")
+        no_sum = StructuralSizer.available_negative_flexure(fix.section, fix.material; Lb = Lb,
+                                            Asr = Asr, Fysr = Fysr,
+                                            neg_moment = true)
+        @test isapprox(none, ϕF; rtol = 1e-8)
+        @test isapprox(no_anchors, ϕF; rtol = 1e-8)
+        @test isapprox(no_sum, ϕF; rtol = 1e-8)
+        developed = StructuralSizer.available_negative_flexure(fix.section, fix.material; Lb = Lb,
+                                               Asr = Asr, Fysr = Fysr,
+                                               neg_moment = true, ΣQn = 200.0u"kip")
+        @test developed > ϕF
+    end
+
     @testset "Negative Mn equilibrium check" begin
         Asr = 1.5u"inch^2"
         Fysr = 60.0ksi
@@ -734,29 +757,53 @@ end
 
 @testset "Composite Stud Contribution" begin
     fix = _example_I1_setup()
-    ctx = CompositeContext(fix.slab, fix.anchor, fix.L_beam)
+    # 12 ft: full composite does not fit, a moment between steel and full does.
+    L = 12.0u"ft"
+    ctx = CompositeContext(fix.slab, fix.anchor, L; shored=true)
+    b_eff = get_b_eff(fix.slab, L)
+    Cf = StructuralSizer._Cf_max(fix.section, fix.material, fix.slab, b_eff)
+    Qn = get_Qn(fix.anchor, fix.slab)
+    n_full = ceil(Int, ustrip(u"N", Cf) / ustrip(u"N", Qn))
+    ϕ_steel = get_ϕMn(fix.section, fix.material; Lb=L, Cb=1.0, axis=:strong)
+    ϕ_full = get_ϕMn_composite(fix.section, fix.material, fix.slab, b_eff, Cf).ϕMn
+    Mu_mid = 0.5 * (ϕ_steel + ϕ_full)
 
-    @testset "Weight contribution" begin
-        w = composite_stud_contribution(ctx, fix.section, fix.material, MinWeight())
-        @test w > 0.0u"kg"
+    @testset "Weight is the designed count, not full composite" begin
+        w = composite_stud_contribution(ctx, fix.section, fix.material, MinWeight();
+                                        Mu=Mu_mid, Lb=L)
         m_one = stud_mass(fix.anchor)
         @test m_one > 0.0u"kg"
-        # Weight = n_studs_total × m_one — number of studs falls out cleanly.
-        n_studs_est = w / m_one
-        @test n_studs_est > 10  # reasonable for a 45 ft beam
+        layout = design_shear_anchors(fix.section, fix.material, fix.slab, fix.anchor,
+                                      b_eff, L, Mu_mid; ϕMn_steel=ϕ_steel)
+        @test layout.ok
+        @test isapprox(ustrip(w / m_one), layout.n_half * 2; atol=1e-6)
+        @test 0 < layout.n_half < n_full
+    end
+
+    @testset "Steel alone places no studs" begin
+        w = composite_stud_contribution(ctx, fix.section, fix.material, MinWeight();
+                                        Mu=0.5 * ϕ_steel, Lb=L)
+        @test w == 0.0u"kg"
     end
 
     @testset "Carbon contribution" begin
-        c = composite_stud_contribution(ctx, fix.section, fix.material, MinCarbon())
+        c = composite_stud_contribution(ctx, fix.section, fix.material, MinCarbon();
+                                        Mu=Mu_mid, Lb=L)
+        w = composite_stud_contribution(ctx, fix.section, fix.material, MinWeight();
+                                        Mu=Mu_mid, Lb=L)
         @test c > 0.0u"kgCO2e"
-        # Carbon = weight × ecc — typed quantity arithmetic does the unit math.
-        w = composite_stud_contribution(ctx, fix.section, fix.material, MinWeight())
         @test isapprox(c, w * fix.anchor.ecc; rtol=1e-10)
     end
 
     @testset "Volume objective returns zero (no stud volume)" begin
-        v = composite_stud_contribution(ctx, fix.section, fix.material, MinVolume())
+        v = composite_stud_contribution(ctx, fix.section, fix.material, MinVolume();
+                                        Mu=Mu_mid, Lb=L)
         @test v ≈ 0.0u"m^3"
+    end
+
+    @testset "A moment the studs cannot develop throws" begin
+        @test_throws ArgumentError composite_stud_contribution(
+            ctx, fix.section, fix.material, MinWeight(); Mu=ϕ_full, Lb=L)
     end
 end
 
@@ -787,6 +834,34 @@ end
     @testset "Zero vector returns false" begin
         @test beam_direction_from_vectors((0.0, 0.0), (1.0, 0.0)) == false
     end
+end
+
+@testset "Asr at one section" begin
+    # §I3.2b(c): one section, inside the effective width. PDF p. 170.
+    function _reinf(loc, As)
+        z = 0.0u"kip*ft"
+        return StripReinforcement(loc, z, As, As, As, 5, 6.0u"inch", 4, true)
+    end
+    col = [_reinf(:ext_neg, 4.0u"inch^2"), _reinf(:int_neg, 6.0u"inch^2")]
+    mid = [_reinf(:ext_neg, 2.0u"inch^2"), _reinf(:int_neg, 3.0u"inch^2")]
+    # Column strip 8 ft wide, centered on the beam. Middle strip on the right only.
+    bands = [
+        (y0 = -4.0u"ft", y1 = 4.0u"ft", strip_width = 8.0u"ft", reinf = col),
+        (y0 = 4.0u"ft", y1 = 12.0u"ft", strip_width = 8.0u"ft", reinf = mid),
+    ]
+    Fysr = 75.0u"ksi"
+    # b_eff stays inside the column strip: 2 ft each side. Middle steel is out.
+    # Exterior section only: 4 in² * (4 ft / 8 ft) = 2 in². Interior 6 in² is not added.
+    inside = asr_at_section(bands, :ext_neg, 2.0u"ft", 2.0u"ft"; Fysr = Fysr)
+    @test isapprox(uconvert(u"inch^2", inside.Asr), 2.0u"inch^2"; rtol = 1e-8)
+    @test inside.Fysr === Fysr
+    # Right side reaches 2 ft into the middle strip.
+    # Column overlap is 6 ft: 4 in² * 6/8 = 3 in². Middle overlap is 2 ft: 2 in² * 2/8 = 0.5 in².
+    wider = asr_at_section(bands, :ext_neg, 2.0u"ft", 6.0u"ft"; Fysr = Fysr)
+    @test isapprox(uconvert(u"inch^2", wider.Asr), 3.5u"inch^2"; rtol = 1e-8)
+    interior = asr_at_section(bands, :int_neg, 2.0u"ft", 2.0u"ft"; Fysr = Fysr)
+    @test isapprox(uconvert(u"inch^2", interior.Asr), 3.0u"inch^2"; rtol = 1e-8)
+    @test_throws ArgumentError asr_at_section(bands, :pos, 2.0u"ft", 2.0u"ft"; Fysr = Fysr)
 end
 
 # ==============================================================================
@@ -825,6 +900,72 @@ end
     @testset "Lb_const defaults to L_beam" begin
         ctx = CompositeContext(fix.slab, fix.anchor, fix.L_beam)
         @test isapprox(ctx.Lb_const, uconvert(u"m", fix.L_beam); rtol=1e-10)
+    end
+
+    @testset "Deck defaults to a braced top flange" begin
+        # Commentary §I3.1b, PDF p. 501: forms not attached to the top flange
+        # may leave the unbraced length in control. Deck fastened to the flange
+        # is the reverse, so Lb = 0 on the sagging face. An explicit length wins.
+        deck = DeckSlabOnBeam(4.5u"inch", 4.0u"ksi", 3644.0u"ksi", 145.0u"lb/ft^3",
+                              29000.0u"ksi", 3.0u"inch", 6.0u"inch", :perpendicular,
+                              10.0u"ft", 10.0u"ft")
+        ctx = CompositeContext(deck, fix.anchor, fix.L_beam)
+        @test ctx.Lb_const == 0.0u"m"
+        pinned = CompositeContext(deck, fix.anchor, fix.L_beam; Lb_const=fix.L_beam)
+        @test isapprox(pinned.Lb_const, uconvert(u"m", fix.L_beam); rtol=1e-10)
+
+        stage = construction_stage(deck; cp_class=:medium, b_trib=2.0u"m")
+        pre = construction_span_demand(fix.section, fix.material, stage, fix.L_beam)
+        # Appendix 6.3.1a Eq. A-6-5, Cd = 1, PDF p. 342.
+        expect = 0.01 * pre.Mu / fix.section.ho
+        @test isapprox(uconvert(u"N", pre.Vbr), uconvert(u"N", expect); rtol=1e-10)
+    end
+
+    @testset "Analysis dead-load shape scales the pre-cure moment" begin
+        # ENGINEERING JUDGMENT: M and V from a uniform analysis dead load scale
+        # by w_construction / w_ref. A pinned beam recovers wL²/8 and wL/2.
+        # Fixed ends give wL²/12. A propped cantilever's fixed-end shear is 5wL/8.
+        stage = construction_stage(fix.slab; cp_class=:medium, b_trib=2.0u"m")
+        L = uconvert(u"m", fix.L_beam)
+        simple = construction_span_demand(fix.section, fix.material, stage, L)
+        @test simple.moment_model == :simple_span
+
+        w_ref = 1000.0u"N/m"
+        pinned = construction_with_shape(stage, w_ref * L^2 / 8, w_ref * L / 2, w_ref)
+        pre = construction_span_demand(fix.section, fix.material, pinned, L)
+        @test pre.moment_model == :analysis_dead_load
+        @test isapprox(uconvert(u"N*m", pre.Mu), uconvert(u"N*m", simple.Mu); rtol=1e-10)
+        @test isapprox(uconvert(u"N", pre.Vu), uconvert(u"N", simple.Vu); rtol=1e-10)
+
+        fixed = construction_with_shape(stage, w_ref * L^2 / 12, w_ref * L / 2, w_ref)
+        pre_f = construction_span_demand(fix.section, fix.material, fixed, L)
+        @test isapprox(uconvert(u"N*m", pre_f.Mu), uconvert(u"N*m", simple.Mu) * (2 / 3); rtol=1e-10)
+
+        propped = construction_with_shape(stage, w_ref * L^2 / 8, (5 / 8) * w_ref * L, w_ref)
+        pre_p = construction_span_demand(fix.section, fix.material, propped, L)
+        @test isapprox(uconvert(u"N", pre_p.Vu), uconvert(u"N", simple.Vu) * 1.25; rtol=1e-10)
+    end
+
+    @testset "Commentary Eq. C-F1-5" begin
+        # Worked example, PDF p. 443: Mo = −100, M1 = +200, MCL = +50, Cb = 5.67.
+        Cb = cb_gravity_top_flange_restrained(-100u"kip*inch", 200u"kip*inch", 50u"kip*inch")
+        @test isapprox(Cb, 5.67; atol=0.005)
+        sag(s) = 4 * s * (1 - s) * u"N*m"
+        @test cb_neg_from_moment_field(sag) === nothing
+        rev(s) = s <= 0 ? -100u"N*m" : (s >= 1 ? 200u"N*m" : 50u"N*m")
+        @test isapprox(cb_neg_from_moment_field(rev), 5.67; atol=0.005)
+    end
+
+    @testset "Negative reinforcement is capped by the anchors" begin
+        # §I3.2d.2 Eqs. I3-2a and I3-2b, PDF p. 171.
+        Asr = 2.0u"inch^2"
+        Fysr = 60.0u"ksi"
+        full = get_Mn_negative(fix.section, fix.material, Asr, Fysr)
+        capped = get_Mn_negative(fix.section, fix.material, Asr, Fysr; ΣQn = 10.0u"kip")
+        bare = get_Mn_negative(fix.section, fix.material, Asr, Fysr; ΣQn = 0.0u"kip")
+        @test ustrip(u"N*m", capped) < ustrip(u"N*m", full)
+        @test isapprox(uconvert(u"N*m", bare),
+                       uconvert(u"N*m", fix.material.Fy * fix.section.Zx); rtol=1e-8)
     end
 
     @testset "Custom Lb_const affects construction check" begin
@@ -999,5 +1140,185 @@ end
         Vu = 61.2kip
         ϕVn = get_ϕVn(fix.section, fix.material; axis=:strong)
         @test ϕVn > Vu
+    end
+end
+
+# ==============================================================================
+# 19. Shear anchors — AISC 360-22 §I8 and Commentary §I3.2d
+# ==============================================================================
+
+@testset "Shear anchors per candidate" begin
+    fix = _example_I1_setup()
+
+    @testset "I8.1 allows 1 in. studs only in a solid slab" begin
+        one_inch = HeadedStudAnchor(1.0u"inch", 5.0u"inch", 65.0ksi, 50.0ksi,
+                                    7850.0u"kg/m^3")
+        @test validate_stud_diameter(one_inch, fix.section.tf; slab=fix.slab) === nothing
+        @test_throws ArgumentError validate_stud_diameter(one_inch, fix.section.tf)
+        deck = DeckSlabOnBeam(
+            uconvert(u"m", 4.5u"inch"), 4.0ksi, 3644.0ksi, 145.0u"lb/ft^3",
+            29000.0 / 3644.0,
+            uconvert(u"m", 3.0u"inch"), uconvert(u"m", 6.0u"inch"), :perpendicular,
+            uconvert(u"m", 10.0u"ft"), uconvert(u"m", 10.0u"ft"), nothing, nothing)
+        @test_throws ArgumentError validate_stud_diameter(one_inch, fix.section.tf; slab=deck)
+    end
+
+    @testset "Commentary ductility harbors" begin
+        # AISC 360-22 Commentary §I3.2d (corpus: aisc-360-22, PDF p. 511).
+        @test shear_connection_ductile(40.0u"ft", 0.40, 10.0u"kip"/u"ft") == false
+        @test shear_connection_ductile(40.0u"ft", 0.40, 10.0u"kip"/u"ft"; slip_checked=true)
+        @test shear_connection_ductile(30.0u"ft", 0.10, 1.0u"kip"/u"ft")
+        @test shear_connection_ductile(40.0u"ft", 0.50, 1.0u"kip"/u"ft")
+        @test shear_connection_ductile(40.0u"ft", 0.20, 16.0u"kip"/u"ft")
+    end
+
+    @testset "Simple-span zeros are at the ends" begin
+        L = 30.0u"ft"
+        spans = StructuralSizer.adjacent_shear_spans(s -> s * (1 - s) * 1.0u"kip*ft", 0.5, L)
+        @test isapprox(spans[1], L / 2; rtol=1e-6)
+        @test isapprox(spans[2], L / 2; rtol=1e-6)
+    end
+
+    @testset "Studs that cannot develop the moment are rejected" begin
+        # 12 ft beam: the full-composite stud count does not meet §I8.2d(d).
+        L = 12.0u"ft"
+        b_eff = get_b_eff(fix.slab, L)
+        Cf = StructuralSizer._Cf_max(fix.section, fix.material, fix.slab, b_eff)
+        Qn = get_Qn(fix.anchor, fix.slab)
+        n_full = ceil(Int, ustrip(u"N", Cf) / ustrip(u"N", Qn))
+        n_max = floor(Int, ustrip(u"inch", L / 2) / ustrip(u"inch", 6 * fix.anchor.d_sa))
+        @test n_full > n_max
+        ϕ_full = ustrip(u"N*m", get_ϕMn_composite(fix.section, fix.material, fix.slab,
+                                                 b_eff, Cf).ϕMn)
+        ϕ_steel = ustrip(u"N*m", get_ϕMn(fix.section, fix.material; Lb=L, Cb=1.0, axis=:strong))
+        ctx = CompositeContext(fix.slab, fix.anchor, L; shored=true)
+        checker = AISCChecker(; max_depth=Inf)
+        cache = StructuralSizer.create_cache(checker, 1)
+        StructuralSizer.precompute_capacities!(checker, cache, [fix.section], fix.material, MinWeight())
+        geom = SteelMemberGeometry(L; Lb=L)
+        demand_full = MemberDemand(1; Mux=0.99 * ϕ_full, Mux_neg=0.0, Vu_strong=0.0)
+        @test StructuralSizer.is_feasible(checker, cache, 1, fix.section, fix.material,
+                                          demand_full, geom, ctx) == false
+        # A moment between bare steel and what the fitting studs can develop passes.
+        Mu_mid = 0.5 * (ϕ_steel + ϕ_full)
+        demand_mid = MemberDemand(1; Mux=Mu_mid, Mux_neg=0.0, Vu_strong=0.0)
+        @test ϕ_steel < Mu_mid < ϕ_full
+        @test StructuralSizer.is_feasible(checker, cache, 1, fix.section, fix.material,
+                                          demand_mid, geom, ctx) == true
+    end
+
+    @testset "40 ft below both ductility harbors fails unless slip is checked" begin
+        # Fu is low enough that the studs which fit stay under 50% and under 16 kip/ft.
+        weak = HeadedStudAnchor(0.75u"inch", 5.0u"inch", 1.0ksi, 50.0ksi, 7850.0u"kg/m^3")
+        L = 40.0u"ft"
+        ctx = CompositeContext(fix.slab, weak, L; shored=true)
+        ctx_slip = CompositeContext(fix.slab, weak, L; shored=true, slip_checked=true)
+        checker = AISCChecker(; max_depth=Inf)
+        cache = StructuralSizer.create_cache(checker, 1)
+        StructuralSizer.precompute_capacities!(checker, cache, [fix.section], fix.material, MinWeight())
+        geom = SteelMemberGeometry(L; Lb=L)
+        ϕ_steel = ustrip(u"N*m", get_ϕMn(fix.section, fix.material; Lb=L, Cb=1.0, axis=:strong))
+        b_eff = get_b_eff(fix.slab, L)
+        Qn = get_Qn(weak, fix.slab)
+        n_max = floor(Int, ustrip(u"inch", L / 2) / ustrip(u"inch", 6 * weak.d_sa))
+        Σ_max = n_max * Qn
+        ϕ_partial = ustrip(u"N*m", get_ϕMn_composite(fix.section, fix.material, fix.slab,
+                                                     b_eff, Σ_max).ϕMn)
+        @test ϕ_partial > ϕ_steel
+        Mu = 0.5 * (ϕ_steel + ϕ_partial)
+        demand = MemberDemand(1; Mux=Mu, Mux_neg=0.0, Vu_strong=0.0)
+        @test StructuralSizer.is_feasible(checker, cache, 1, fix.section, fix.material,
+                                          demand, geom, ctx) == false
+        @test StructuralSizer.is_feasible(checker, cache, 1, fix.section, fix.material,
+                                          demand, geom, ctx_slip) == true
+        ex = StructuralSizer.explain_feasibility(checker, cache, 1, fix.section, fix.material,
+                                                 demand, geom, ctx)
+        studs = only(filter(c -> c.name == "shear_anchors", ex.checks))
+        @test studs.passed == false
+        @test occursin("ductility", studs.code_clause)
+    end
+
+    @testset "Partial composite accepts a lighter section than bare steel" begin
+        light = W("W16X26")
+        heavy = W("W21X55")
+        @test light.A < heavy.A
+        # Short enough that the full-composite stud count violates §I8.2d(d).
+        L = 12.0u"ft"
+        Lb = 40.0u"ft"
+        b_eff = get_b_eff(fix.slab, L)
+        Cf = StructuralSizer._Cf_max(light, fix.material, fix.slab, b_eff)
+        Qn = get_Qn(fix.anchor, fix.slab)
+        n_full = ceil(Int, ustrip(u"N", Cf) / ustrip(u"N", Qn))
+        n_max = floor(Int, ustrip(u"inch", L / 2) / ustrip(u"inch", 6 * fix.anchor.d_sa))
+        @test n_full > n_max
+        n_fit = n_max
+        Σ_fit = min(n_fit * Qn, Cf)
+        ϕ_light_steel = ustrip(u"N*m", get_ϕMn(light, fix.material; Lb=Lb, Cb=1.0, axis=:strong))
+        ϕ_light_partial = ustrip(u"N*m", get_ϕMn_composite(light, fix.material, fix.slab,
+                                                           b_eff, Σ_fit).ϕMn)
+        ϕ_heavy_steel = ustrip(u"N*m", get_ϕMn(heavy, fix.material; Lb=Lb, Cb=1.0, axis=:strong))
+        @test ϕ_light_steel < ϕ_light_partial
+        Mu = 0.5 * (ϕ_light_steel + min(ϕ_light_partial, ϕ_heavy_steel))
+        @test ϕ_light_steel < Mu <= ϕ_light_partial
+        @test Mu <= ϕ_heavy_steel
+        checker = AISCChecker(; max_depth=Inf)
+        cache = StructuralSizer.create_cache(checker, 2)
+        StructuralSizer.precompute_capacities!(checker, cache, [light, heavy], fix.material, MinWeight())
+        geom = SteelMemberGeometry(L; Lb=Lb)
+        demand = MemberDemand(1; Mux=Mu, Mux_neg=0.0, Vu_strong=0.0)
+        ctx = CompositeContext(fix.slab, fix.anchor, L; shored=true)
+        @test StructuralSizer.is_feasible(checker, cache, 1, light, fix.material,
+                                          demand, geom, ctx) == true
+        @test StructuralSizer.is_feasible(checker, cache, 2, heavy, fix.material,
+                                          demand, geom) == true
+        bare = AISCChecker(; max_depth=Inf)
+        bare_cache = StructuralSizer.create_cache(bare, 1)
+        StructuralSizer.precompute_capacities!(bare, bare_cache, [light], fix.material, MinWeight())
+        @test StructuralSizer.is_feasible(bare, bare_cache, 1, light, fix.material,
+                                          demand, geom) == false
+    end
+
+    @testset "Lateral cover is the transverse edge, not the 8 in. shear-edge rule" begin
+        # §I8.2d(b): 1 in. clear cover, stud placed on the flange.
+        # §I8.2d(c) is the free edge in the shear direction and is not this check.
+        function slab_with(; edges...)
+            SolidSlabOnBeam(7.5u"inch", 4.0ksi, 3644.0ksi, 145.0u"lb/ft^3",
+                            29000.0ksi, 10.0u"ft", 10.0u"ft"; edges...)
+        end
+        tight = slab_with(; edge_dist_left=0.5u"inch", edge_dist_right=0.5u"inch")
+        one_side = slab_with(; edge_dist_left=3.0u"inch", edge_dist_right=nothing)
+        @test check_stud_edge_distance(fix.section, fix.anchor, tight) == false
+        @test check_stud_edge_distance(fix.section, fix.anchor, one_side) == true
+        @test check_stud_edge_distance(fix.section, fix.anchor, fix.slab) == true
+        pair = HeadedStudAnchor(0.75u"inch", 5.0u"inch", 65.0ksi, 50.0ksi,
+                                7850.0u"kg/m^3"; n_per_row=2)
+        narrow = slab_with(; edge_dist_left=2.0u"inch", edge_dist_right=2.0u"inch")
+        wide = slab_with(; edge_dist_left=6.0u"inch", edge_dist_right=6.0u"inch")
+        @test check_stud_edge_distance(fix.section, pair, narrow) == false
+        @test check_stud_edge_distance(fix.section, pair, wide) == true
+        deck = DeckSlabOnBeam(4.5u"inch", 4.0ksi, 3644.0ksi, 145.0u"lb/ft^3",
+                              29000.0ksi, 3.0u"inch", 6.0u"inch", :perpendicular,
+                              10.0u"ft", 10.0u"ft";
+                              edge_dist_left=0.5u"inch", edge_dist_right=0.5u"inch")
+        @test check_stud_edge_distance(fix.section, fix.anchor, deck) == true
+
+        L = 12.0u"ft"
+        ϕ_steel = ustrip(u"N*m", get_ϕMn(fix.section, fix.material; Lb=L, Cb=1.0, axis=:strong))
+        checker = AISCChecker(; max_depth=Inf)
+        cache = StructuralSizer.create_cache(checker, 1)
+        StructuralSizer.precompute_capacities!(checker, cache, [fix.section], fix.material, MinWeight())
+        geom = SteelMemberGeometry(L; Lb=L)
+        ctx_tight = CompositeContext(tight, fix.anchor, L; shored=true)
+        below = MemberDemand(1; Mux=0.5 * ϕ_steel, Mux_neg=0.0, Vu_strong=0.0)
+        @test StructuralSizer.is_feasible(checker, cache, 1, fix.section, fix.material,
+                                          below, geom, ctx_tight) == true
+        above = MemberDemand(1; Mux=1.05 * ϕ_steel, Mux_neg=0.0, Vu_strong=0.0)
+        @test StructuralSizer.is_feasible(checker, cache, 1, fix.section, fix.material,
+                                          above, geom, ctx_tight) == false
+        ex = StructuralSizer.explain_feasibility(checker, cache, 1, fix.section, fix.material,
+                                                 above, geom, ctx_tight)
+        studs = only(filter(c -> c.name == "shear_anchors", ex.checks))
+        @test studs.passed == false
+        @test occursin("transverse", studs.code_clause)
     end
 end

@@ -442,10 +442,11 @@ the bottom-flange moment-gradient factor.
 Adequately braced per §I3.2b(a) is `Lb ≤ Lp` (AISC 360-16 §F2.2 Eq. F2-5,
 corpus: aisc-360-16, page 104), not Cb-inflated `Mn` reaching `Mp`.
 """
-function _hogging_ltb_inputs(section::ISymmSection, material, geometry::SteelMemberGeometry)
+function _hogging_ltb_inputs(section::ISymmSection, material, geometry::SteelMemberGeometry;
+                             Cb_neg::Real=1.0)
     Lb_neg_m = to_meters(geometry.L)
-    # ENGINEERING JUDGMENT: no dedicated bottom-flange Cb on SteelMemberGeometry.
-    Cb_neg = 1.0
+    # Cb_neg defaults to 1. A moment field in reverse curvature passes
+    # Commentary Eq. C-F1-5 (corpus: aisc-360-22, PDF pp. 442–443).
     # AISC 360-16 §F2.2, Eq. F2-5 — corpus: aisc-360-16, page 104
     Lp_m = ustrip(u"m", get_Lp_Lr(section, material).Lp)
     # AISC 360-16 §I3.2b(a) — corpus: aisc-360-16, page 151
@@ -494,9 +495,11 @@ function _composite_ϕMn_neg(
     section::ISymmSection,
     material,
     geometry::SteelMemberGeometry,
-    ctx::CompositeContext
+    ctx::CompositeContext;
+    Cb_neg=nothing,
 )
-    hog = _hogging_ltb_inputs(section, material, geometry)
+    hog = _hogging_ltb_inputs(section, material, geometry;
+                              Cb_neg = something(Cb_neg, 1.0))
     # Touch the cache so a later sagging lookup at this Lb is warm. The value
     # used below is `available_negative_flexure`, which calls `get_ϕMn` with
     # the same Lb and Cb.
@@ -506,6 +509,7 @@ function _composite_ϕMn_neg(
                                      Lb = hog.Lb_neg_m * u"m",
                                      Asr = ctx.Asr, Fysr = ctx.Fysr,
                                      neg_moment = ctx.neg_moment,
+                                     ΣQn = ctx.ΣQn_neg,
                                      ϕ = checker.ϕ_b, Cb = hog.Cb_neg)
     return ustrip(u"N*m", ϕMn)
 end
@@ -553,8 +557,24 @@ function _h1_pm_utilizations(
 end
 
 # ==============================================================================
-# Composite Beam Feasibility (AISC 360-16 Chapter I)
+# Composite Beam Feasibility (AISC 360-22 Chapter I, with 360-16 Chapter F/H)
 # ==============================================================================
+
+"""Inertia the composite deflection check needs. `nothing` when that check is off.
+Unshored total deflection uses bare `Ix` and is not part of this inertia."""
+function _I_required_for_composite(checker, shored::Bool, L_m, I_ref, δ_LL, δ_total)
+    need = 0.0
+    if !isnothing(checker.deflection_limit) && I_ref > 0 && δ_LL > 0 && checker.deflection_limit > 0
+        need = max(need, δ_LL * I_ref / (checker.deflection_limit * L_m))
+    end
+    if shored && !isnothing(checker.total_deflection_limit) && I_ref > 0 && δ_total > 0 &&
+            checker.total_deflection_limit > 0
+        need = max(need, δ_total * I_ref / (checker.total_deflection_limit * L_m))
+    end
+    return need > 0 ? need * u"m^4" : nothing
+end
+
+
 
 """
     is_feasible(checker, cache, j, section::ISymmSection, material, demand, geometry,
@@ -563,8 +583,8 @@ end
 Composite-aware feasibility check. When `CompositeContext` is provided:
 
 1. **Construction stage** (I3.1b): bare steel under the SEI/ASCE 37-02 pre-cure load at `Lb_const` (skipped if shored). Not the final envelope.
-2. **Composite ϕMn** (I3.2a): replaces the bare-steel strong-axis flexural capacity
-   using the plastic stress distribution PNA solver with full stud strength.
+2. **Composite ϕMn** (I3.2a / I8.2c): plastic stress distribution at the stud
+   strength that fits on the shear span. Full composite is not assumed.
 3. **Deflection** (Commentary I3.2): uses `I_LB` (partial composite) for live-load
    deflection instead of bare-steel `Ix`.
 4. **Shear and weak-axis** checks remain the same as bare steel.
@@ -582,6 +602,8 @@ function is_feasible(
     geometry::SteelMemberGeometry,
     ctx::CompositeContext;
     strength_Mux_pos::Union{Nothing, Float64} = nothing,
+    shear_spans=nothing,
+    Cb_neg=nothing,
 )::Bool
     Mux = to_newton_meters(demand.Mux)
     # Envelope stays on construction (§I3.1b). `strength_Mux_pos` is the
@@ -623,40 +645,17 @@ function is_feasible(
         cache.ϕVn_strong[j] >= ustrip(u"N", pre.Vu) || return false
     end
 
-    # --- Positive composite flexural capacity (I3.2a) ---
-    b_eff = get_b_eff(ctx.slab, ctx.L_beam)
-    Qn = get_Qn(ctx.anchor, ctx.slab)
-
-    # Full composite: ΣQn = n_studs × Qn per half-span (use Cf_max as upper bound)
-    Cf_max = ustrip(u"N", _Cf_max(section, material, ctx.slab, b_eff))
-    ΣQn_full = Cf_max * u"N"
-
-    local ϕMn_comp::Float64
-    try
-        result = get_ϕMn_composite(section, material, ctx.slab, b_eff, ΣQn_full;
-                                    ϕ=checker.ϕ_b)
-        ϕMn_comp = ustrip(u"N*m", result.ϕMn)
-    catch e
-        @debug "Composite flexure check failed — section infeasible" exception=(e, catch_backtrace())
-        return false
-    end
-
-    # Use the greater of composite and bare-steel capacity (sagging)
-    ϕMnx_steel = _get_ϕMnx_cached!(cache, j, to_meters(geometry.Lb), geometry.Cb,
-                                     section, material, checker.ϕ_b)
-    ϕMnx = max(ϕMn_comp, ϕMnx_steel)
-
-    ϕMnx >= Mux_pos || return false
-
-    # --- Negative flexural strength (I3.2b, corpus: aisc-360-16, page 151) ---
-    ϕMn_neg = _composite_ϕMn_neg(checker, cache, j, section, material, geometry, ctx)
+    # --- Negative flexural strength (I3.2b) does not use the positive studs ---
+    ϕMn_neg = _composite_ϕMn_neg(checker, cache, j, section, material, geometry, ctx;
+                                 Cb_neg = Cb_neg)
     ϕMn_neg >= Mux_neg || return false
 
-    # --- H1 combined forces (do not skip Pu because CompositeContext is present) ---
-    # Sagging Mcx: larger of I3.2a composite φMn and Chapter F φMn.
-    # Hogging Mcx: I3.2b φMn_neg. Axial Pc: Chapter E φPn (I2 is encased/filled).
+    # Chapter F sagging strength, axial capacity, and Appendix 8 amplification.
+    # The stud search has to see the amplified moment, so these come first.
     # AISC 360-16 §H1.1 Eqs. H1-1a/H1-1b — corpus: aisc-360-16, page 133.
-    # AISC 360-16 §I3.2a / §I3.2b — corpus: aisc-360-16, page 151.
+    # AISC 360-16 Appendix 8 Eq. A-8-3, α=1.0 for LRFD — corpus: aisc-360-16, page 306.
+    ϕMnx_steel = _get_ϕMnx_cached!(cache, j, to_meters(geometry.Lb), geometry.Cb,
+                                     section, material, checker.ϕ_b)
     Lc_x = geometry.Kx * L_m
     Lc_y = geometry.Ky * L_m
     ϕPn_x = _get_ϕPn_cached!(cache, :strong, j, Lc_x, section, material)
@@ -664,6 +663,7 @@ function is_feasible(
     ϕPn_z = _get_ϕPn_cached!(cache, :torsional, j, Lc_y, section, material)
     ϕPnc = min(ϕPn_x, ϕPn_y, ϕPn_z)
     ϕMny = cache.ϕMn_weak[j]
+    ϕPn_t = cache.ϕPn_tension[j]
 
     Mux_amp = Mux_pos
     Muy_amp = Muy
@@ -679,7 +679,6 @@ function is_feasible(
         Pe1_y = π^2 * E * Iy / Lc1_y^2
         Cm_x = compute_Cm(M1x, M2x; transverse_loading=demand.transverse_load)
         Cm_y = compute_Cm(M1y, M2y; transverse_loading=demand.transverse_load)
-        # AISC 360-16 Appendix 8 Eq. A-8-3, α=1.0 for LRFD — corpus: aisc-360-16, page 306
         B1_x = compute_B1(Pu_c, Pe1_x, Cm_x; α=1.0)
         B1_y = compute_B1(Pu_c, Pe1_y, Cm_y; α=1.0)
         if isinf(B1_x) || isinf(B1_y)
@@ -690,21 +689,38 @@ function is_feasible(
         Mux_neg_amp = B1_x * Mux_neg
     end
 
-    urs = _h1_pm_utilizations(Pu_c, Pu_t, Mux_pos, Mux_neg, Muy,
-                              ϕPnc, cache.ϕPn_tension[j], ϕMnx, ϕMn_neg, ϕMny;
-                              Mux_amp=Mux_amp, Muy_amp=Muy_amp,
-                              Mux_neg_amp=Mux_neg_amp)
-    urs.ur_c <= 1.0 || return false
-    urs.ur_t <= 1.0 || return false
-    urs.ur_t_neg <= 1.0 || return false
-    urs.ur_c_neg <= 1.0 || return false
-
-    # --- Deflection Checks (Commentary I3.2) ---
-    I_LB_m4 = ustrip(u"m^4", get_I_LB(section, material, ctx.slab, b_eff, ΣQn_full))
-    I_steel_m4 = cache.Ix[j]
+    # Studs between the maximum moment and each adjacent zero (§I8.2c).
+    # Without a moment diagram both sides are half the beam span.
+    b_eff = get_b_eff(ctx.slab, ctx.L_beam)
     δ_max_LL = to_meters(demand.δ_max_LL)
     δ_max_total = to_meters(demand.δ_max_total)
     I_ref = to_meters_fourth(demand.I_ref)
+    I_need = _I_required_for_composite(checker, ctx.shored, L_m, I_ref, δ_max_LL, δ_max_total)
+    function h1_ok(lay)
+        ϕMnx = max(ustrip(u"N*m", lay.ϕMn), ϕMnx_steel)
+        urs = _h1_pm_utilizations(Pu_c, Pu_t, Mux_pos, Mux_neg, Muy,
+                                  ϕPnc, ϕPn_t, ϕMnx, ϕMn_neg, ϕMny;
+                                  Mux_amp=Mux_amp, Muy_amp=Muy_amp,
+                                  Mux_neg_amp=Mux_neg_amp)
+        return urs.ur_c <= 1.0 && urs.ur_t <= 1.0 &&
+               urs.ur_t_neg <= 1.0 && urs.ur_c_neg <= 1.0
+    end
+    # The search target is the amplified sagging moment. H1 can still ask for
+    # more capacity when axial force is present; `h1_ok` raises the stud count.
+    layout = design_shear_anchors(section, material, ctx.slab, ctx.anchor, b_eff,
+                                  ctx.L_beam, Mux_amp * u"N*m";
+                                  ϕMn_steel = ϕMnx_steel * u"N*m",
+                                  shear_spans = shear_spans,
+                                  slip_checked = ctx.slip_checked,
+                                  I_need = I_need,
+                                  extra_ok = h1_ok,
+                                  ϕ = checker.ϕ_b)
+    layout.ok || return false
+    ϕMnx = max(ustrip(u"N*m", layout.ϕMn), ϕMnx_steel)
+
+    # --- Deflection Checks (Commentary I3.2) ---
+    I_LB_m4 = ustrip(u"m^4", layout.I_LB)
+    I_steel_m4 = cache.Ix[j]
 
     # LL deflection check (e.g. L/360) — uses I_LB for composite
     if !isnothing(checker.deflection_limit) && I_ref > 0 && δ_max_LL > 0
@@ -761,10 +777,11 @@ function is_feasible(
         g.dcr <= 1.0 || return false
         st = CompositeSaggingStation(g.b_eff, g.M_pos * u"N*m",
                                      g.spacing_left, g.spacing_right)
-        ctx_src = _context_for_construction(psc.ctx, slab_i, field.left, field.right)
-        ctx_i = context_at_sagging_station(ctx_src, st; L_beam = L_i, slab = slab_i)
+        ctx_i = construction_context(psc.ctx, field, st, L_i, slab_i)
+        spans = adjacent_shear_spans(field.demand_of_s, g.s_star, L_i)
         is_feasible(checker, cache, j, section, material, demand, geometry, ctx_i;
-                    strength_Mux_pos = g.M_pos) || return false
+                    strength_Mux_pos = g.M_pos, shear_spans = spans,
+                    Cb_neg = cb_neg_from_moment_field(field.demand_of_s)) || return false
     end
     return true
 end
@@ -774,43 +791,54 @@ end
 # ==============================================================================
 
 """
-    composite_stud_contribution(ctx::CompositeContext, section::ISymmSection,
-                                 material::StructuralSteel, objective) -> Unitful.Quantity
+    composite_stud_contribution(ctx, section, material, objective; Mu, Lb=ctx.L_beam,
+                                Cb=1.0, shear_spans=nothing, I_need=nothing,
+                                extra_ok=nothing, ϕ=0.9) -> Unitful.Quantity
 
-Compute the stud contribution to the objective function for a composite beam.
-Returns the additional objective value as a typed quantity (`kg` for
-[`MinWeight`](@ref), `kgCO2e` for [`MinCarbon`](@ref), `m^3` for
-[`MinVolume`](@ref)) so it composes cleanly with `objective_value` at the
-cache-build site.
+Stud contribution of the layout [`design_shear_anchors`](@ref) selects for `Mu`.
+The count is the studs on each side of the maximum moment, not the studs that
+would develop `Cf`. Returns `kg` for [`MinWeight`](@ref), `kgCO2e` for
+[`MinCarbon`](@ref), and `0 m^3` for [`MinVolume`](@ref).
 
-Assumes full composite (conservative for stud count).
+Throws when no layout meets `Mu`. A moment the steel section carries alone
+contributes nothing, because no studs are placed.
 """
 function composite_stud_contribution(
     ctx::CompositeContext,
     section::ISymmSection,
     material::StructuralSteel,
-    objective::AbstractObjective
+    objective::AbstractObjective;
+    Mu,
+    Lb=ctx.L_beam,
+    Cb::Real=1.0,
+    shear_spans=nothing,
+    I_need=nothing,
+    extra_ok=nothing,
+    ϕ::Real=0.9,
 )
     b_eff = get_b_eff(ctx.slab, ctx.L_beam)
-    Qn = get_Qn(ctx.anchor, ctx.slab)
-    ustrip(u"N", Qn) > 0 || error("Stud shear strength Qn is zero — check anchor/slab inputs")
-    Cf_max = _Cf_max(section, material, ctx.slab, b_eff)
-
-    n_studs_half = ceil(Int, ustrip(u"N", Cf_max) / ustrip(u"N", Qn))
-    n_studs_total = 2 * n_studs_half  # both sides of max moment
+    ϕMn_steel = get_ϕMn(section, material; Lb=Lb, Cb=Cb, axis=:strong)
+    layout = design_shear_anchors(section, material, ctx.slab, ctx.anchor, b_eff,
+                                  ctx.L_beam, Mu;
+                                  ϕMn_steel=ϕMn_steel,
+                                  shear_spans=shear_spans,
+                                  slip_checked=ctx.slip_checked,
+                                  I_need=I_need,
+                                  extra_ok=extra_ok,
+                                  ϕ=ϕ)
+    layout.ok || throw(ArgumentError(
+        "No shear-anchor layout meets this moment ($(layout.reason))."))
+    # One `n_half` is the studs on one side. The search uses that count on
+    # every shear span. With no diagram, both sides are half the span.
+    n_sides = shear_spans === nothing ? 2 : length(shear_spans)
+    n_total = layout.n_half * n_sides
     m_one = stud_mass(ctx.anchor)
 
-    # Returns a typed Unitful quantity that matches the objective dimension —
-    # the cache-build site (`precompute_capacities!`) reads `ref_unit` from
-    # `objective_value` and applies `ustrip(ref_unit, ...)` at the JuMP boundary.
     if objective isa MinWeight
-        return m_one * n_studs_total                           # kg
+        return m_one * n_total
     elseif objective isa MinCarbon
-        return m_one * n_studs_total * ctx.anchor.ecc          # kgCO₂e
+        return m_one * n_total * ctx.anchor.ecc
     elseif objective isa MinVolume
-        # Stud volume is small compared to beam steel; treat as zero per the
-        # historical convention. Returning typed zero keeps caller arithmetic
-        # type-stable.
         return 0.0u"m^3"
     else
         return 0.0
@@ -1041,6 +1069,8 @@ function explain_feasibility(
     geometry::SteelMemberGeometry,
     ctx::CompositeContext;
     strength_Mux_pos::Union{Nothing, Float64} = nothing,
+    shear_spans=nothing,
+    Cb_neg=nothing,
 )::FeasibilityExplanation
     checks = CheckResult[]
 
@@ -1100,34 +1130,19 @@ function explain_feasibility(
               v_ratio, Vu_const, ϕVn_c, clause))
     end
 
-    # --- Positive composite flexural capacity (I3.2a) ---
+    # Positive studs are chosen after amplification, so Chapter F is all that
+    # is known here. `flexure_pos` is recorded with the layout below.
     b_eff = get_b_eff(ctx.slab, ctx.L_beam)
-    Cf_max = ustrip(u"N", _Cf_max(section, material, ctx.slab, b_eff))
-    ΣQn_full = Cf_max * u"N"
-
-    ϕMn_comp = 0.0
-    flexure_pos_ok = false
-    try
-        result = get_ϕMn_composite(section, material, ctx.slab, b_eff, ΣQn_full;
-                                    ϕ=checker.ϕ_b)
-        ϕMn_comp = ustrip(u"N*m", result.ϕMn)
-        flexure_pos_ok = true
-    catch e
-        @debug "Composite flexure check failed — section infeasible" exception=(e, catch_backtrace())
-    end
-
     ϕMnx_steel = _get_ϕMnx_cached!(cache, j, to_meters(geometry.Lb), geometry.Cb,
                                      section, material, checker.ϕ_b)
-    ϕMnx = flexure_pos_ok ? max(ϕMn_comp, ϕMnx_steel) : 0.0
-    pos_ratio = ϕMnx > 0 ? Mux_pos / ϕMnx : (Mux_pos > 0 ? Inf : 0.0)
-    push!(checks, CheckResult("flexure_pos", flexure_pos_ok && ϕMnx >= Mux_pos,
-          pos_ratio, Mux_pos, ϕMnx, "AISC 360-16 I3.2a"))
+    ϕMnx = ϕMnx_steel
 
     # --- Negative flexural strength (I3.2b) + hogging H1 ---
     # AISC 360-16 §I3.2b — corpus: aisc-360-16, page 151
     # AISC 360-16 §F2.2 Eq. F2-5 — corpus: aisc-360-16, page 104
     # AISC 360-16 §H1.1 Eqs. H1-1a/H1-1b — corpus: aisc-360-16, page 133
-    ϕMn_neg = _composite_ϕMn_neg(checker, cache, j, section, material, geometry, ctx)
+    ϕMn_neg = _composite_ϕMn_neg(checker, cache, j, section, material, geometry, ctx;
+                                 Cb_neg = Cb_neg)
     hog_stricter = _hogging_is_stricter(geometry)
 
     Lc_x = geometry.Kx * L_m
@@ -1173,6 +1188,34 @@ function explain_feasibility(
               b1_feasible ? Pe1_approx : Inf, Pu_c, ϕPnc, "AISC 360-16 App. 8"))
     end
 
+    I_need = _I_required_for_composite(checker, ctx.shored, L_m, I_ref, δ_max_LL, δ_max_total)
+    function h1_ok(lay)
+        mcx = max(ustrip(u"N*m", lay.ϕMn), ϕMnx_steel)
+        trial = _h1_pm_utilizations(Pu_c, Pu_t, Mux_pos, Mux_neg, Muy,
+                                    ϕPnc, ϕPn_t, mcx, ϕMn_neg, ϕMny;
+                                    Mux_amp=Mux_amp, Muy_amp=Muy_amp,
+                                    Mux_neg_amp=Mux_neg_amp)
+        b1_feasible || return false
+        return trial.ur_c <= 1.0 && trial.ur_t <= 1.0 &&
+               trial.ur_t_neg <= 1.0 && trial.ur_c_neg <= 1.0
+    end
+    layout = design_shear_anchors(section, material, ctx.slab, ctx.anchor, b_eff,
+                                  ctx.L_beam, Mux_amp * u"N*m";
+                                  ϕMn_steel = ϕMnx_steel * u"N*m",
+                                  shear_spans = shear_spans,
+                                  slip_checked = ctx.slip_checked,
+                                  I_need = I_need,
+                                  extra_ok = h1_ok,
+                                  ϕ = checker.ϕ_b)
+    ϕMnx = max(ustrip(u"N*m", layout.ϕMn), ϕMnx_steel)
+    pos_ratio = ϕMnx > 0 ? Mux_pos / ϕMnx : (Mux_pos > 0 ? Inf : 0.0)
+    push!(checks, CheckResult("flexure_pos", ϕMnx >= Mux_pos,
+          pos_ratio, Mux_pos, ϕMnx, "AISC 360-22 I3.2a"))
+    stud_clause = "AISC 360-22 I8.2c; I8.2d; $(layout.n_half) studs/side; $(layout.reason)"
+    push!(checks, CheckResult("shear_anchors", layout.ok,
+          layout.ok ? pos_ratio : Inf, Float64(layout.n_half),
+          Float64(layout.n_rows_max * ctx.anchor.n_per_row), stud_clause))
+
     urs = _h1_pm_utilizations(Pu_c, Pu_t, Mux_pos, Mux_neg, Muy,
                               ϕPnc, ϕPn_t, ϕMnx, ϕMn_neg, ϕMny;
                               Mux_amp=Mux_amp, Muy_amp=Muy_amp,
@@ -1194,7 +1237,7 @@ function explain_feasibility(
           neg_ratio, Mux_neg, ϕMn_neg, clause))
 
     # --- Deflection (Commentary I3.2) ---
-    I_LB_m4 = ustrip(u"m^4", get_I_LB(section, material, ctx.slab, b_eff, ΣQn_full))
+    I_LB_m4 = ustrip(u"m^4", layout.I_LB)
     I_steel_m4 = cache.Ix[j]
 
     if !isnothing(checker.deflection_limit) && I_ref > 0 && δ_max_LL > 0
@@ -1258,10 +1301,11 @@ function explain_feasibility(
                                       ϕ = checker.ϕ_b)
         st = CompositeSaggingStation(g.b_eff, g.M_pos * u"N*m",
                                      g.spacing_left, g.spacing_right)
-        ctx_src = _context_for_construction(psc.ctx, slab_i, field.left, field.right)
-        ctx_i = context_at_sagging_station(ctx_src, st; L_beam = L_i, slab = slab_i)
+        ctx_i = construction_context(psc.ctx, field, st, L_i, slab_i)
+        spans = adjacent_shear_spans(field.demand_of_s, g.s_star, L_i)
         ex = explain_feasibility(checker, cache, j, section, material, demand, geometry, ctx_i;
-                                 strength_Mux_pos = g.M_pos)
+                                 strength_Mux_pos = g.M_pos, shear_spans = spans,
+                                 Cb_neg = cb_neg_from_moment_field(field.demand_of_s))
         if best === nothing || (!ex.passed && best.passed) ||
                 (ex.passed == best.passed && ex.governing_ratio > best.governing_ratio)
             best = ex

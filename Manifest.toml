@@ -132,7 +132,7 @@ uuid = "56f22d72-fd6d-98f1-02f0-08ddc0907c33"
 version = "1.11.0"
 
 [[deps.Asap]]
-deps = ["DelaunayTriangulation", "LinearAlgebra", "Meshes", "Printf", "SparseArrays", "Unitful"]
+deps = ["DelaunayTriangulation", "LinearAlgebra", "Meshes", "Printf", "Random", "SparseArrays", "Unitful"]
 path = "external/Asap"
 uuid = "763a8c06-ba23-41fc-b385-b3b57b52403a"
 version = "0.2.2"

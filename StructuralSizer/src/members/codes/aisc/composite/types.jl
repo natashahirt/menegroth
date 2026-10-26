@@ -197,6 +197,11 @@ struct ConstructionStage
     w_D_extra::typeof(1.0u"N/m")
     w_Cd::typeof(1.0u"N/m")
     w_Cfml::typeof(1.0u"N/m")
+    # Extrema of the analysis dead-load field, and the uniform line load that
+    # produced them. All `nothing` keeps the simple-span statics.
+    M_ref::Union{Nothing, typeof(1.0u"N*m")}
+    V_ref::Union{Nothing, typeof(1.0u"N")}
+    w_ref::Union{Nothing, typeof(1.0u"N/m")}
 end
 
 # ==============================================================================
@@ -214,15 +219,17 @@ This struct is built once per beam group and passed to the composite `is_feasibl
 - `anchor`:     Steel anchor type
 - `L_beam`:     Beam span (center-to-center of supports)
 - `shored`:     `true` if temporary shoring used during construction
-- `Lb_const`:   Unbraced length during construction (before composite, for Chapter F check)
-- `Asr`:        Area of developed longitudinal reinforcement within `b_eff` for negative moment
-- `Fysr`:       Yield strength of slab reinforcement
-- `neg_moment`: `true` if negative moment composite check is requested
+- `Lb_const`:   Unbraced length of the sagging face during construction. Deck defaults to 0 (top flange braced); a solid slab on unattached forms defaults to the span. An explicit length overrides either.
+- `Asr`:        Longitudinal reinforcement within `b_eff` at the section of maximum negative moment. A positive area asserts those bars are developed (§I3.2b(c)). Strip totals do not carry bar lengths, so development length is not computed. Place the area with `asr_at_section`. The hogging check uses this one section.
+- `Fysr`:       Yield strength of that reinforcement
+- `neg_moment`: `true` when steel anchors connect the slab to the beam in the negative-moment region
+- `ΣQn_neg`:    Nominal strength of those anchors between the maximum negative moment and the adjacent zero (§I3.2d.2). `nothing` leaves the rebar uncounted.
+- `slip_checked`: `true` when the caller has already run the commentary slip model
 - `construction`: Pre-cure loads (SEI/ASCE 37-02). Built from the slab when omitted.
 
 # Notes
 - The `AISCChecker` uses this to decide between bare-steel and composite capacity paths.
-- `Asr` and `Fysr` are only needed when `neg_moment = true`.
+- `Asr`, `Fysr`, and `ΣQn_neg` are only used when `neg_moment = true`. A missing `ΣQn_neg` keeps hogging on Chapter F.
 - When `shored = false`, construction-stage deflection uses steel Ix alone.
 """
 struct CompositeContext{S<:AbstractSlabOnBeam, A<:AbstractSteelAnchor,
@@ -235,19 +242,42 @@ struct CompositeContext{S<:AbstractSlabOnBeam, A<:AbstractSteelAnchor,
     Asr::T_A
     Fysr::T_P
     neg_moment::Bool
+    slip_checked::Bool
     construction::ConstructionStage
+    ΣQn_neg::Union{Nothing, Unitful.Quantity}
 end
 
+"""
+Unbraced length for the pre-cure Chapter F check on the sagging face.
+
+Deck fastened to the top flange is taken as continuous bracing of that flange,
+so lateral-torsional buckling does not reduce φMn (`Lb = 0`). A solid slab on
+forms that are not attached keeps the member span.
+
+AISC 360-22 Commentary §I3.1b (corpus: aisc-360-22, PDF p. 501): when forms are
+not attached to the top flange, bracing during construction may not be
+continuous and the unbraced length may control. The deck default is the reverse
+of that sentence. It is not a check that the deck can supply the Appendix 6
+brace, and it does not brace a hogging region, where the bottom flange is in
+compression.
+"""
+default_construction_Lb(::DeckSlabOnBeam, L_beam) = 0.0u"m"
+default_construction_Lb(::SolidSlabOnBeam, L_beam) = uconvert(u"m", L_beam)
+
 function CompositeContext(slab, anchor, L_beam;
-                          shored=false, Lb_const=L_beam,
+                          shored=false, Lb_const=nothing,
                           Asr=0.0u"mm^2", Fysr=0.0u"MPa",
                           neg_moment=false,
+                          ΣQn_neg=nothing,
+                          slip_checked::Bool=false,
                           cp_class::Union{Symbol, Nothing}=:medium,
                           construction=nothing)
     stage = construction === nothing ?
         construction_stage(slab; cp_class = cp_class) : construction
+    lb = Lb_const === nothing ? default_construction_Lb(slab, L_beam) : Lb_const
     CompositeContext(slab, anchor, uconvert(u"m", L_beam), shored,
-                     uconvert(u"m", Lb_const), Asr, Fysr, neg_moment, stage)
+                     uconvert(u"m", lb), Asr, Fysr, neg_moment,
+                     slip_checked, stage, ΣQn_neg)
 end
 
 # ==============================================================================

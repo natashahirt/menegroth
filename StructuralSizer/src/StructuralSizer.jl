@@ -292,7 +292,7 @@ export cb_gravity_top_flange_restrained, cb_neg_from_moment_field,
        construction_with_shape, default_construction_Lb, beam_panel_brace_shear
 export construction_personnel_pressure, construction_edition
 export get_I_transformed, get_I_LB, check_composite_deflection
-export extract_parallel_Asr, beam_direction_from_vectors
+export extract_parallel_Asr, asr_at_section, beam_direction_from_vectors
 export composite_stud_contribution
 # Per-station composite check (AISC I3.1a/I3.2a/I3.2b): irregular/continuous beams
 export SideExtentProfile, b_eff_at_station, beff_breakpoints, phiMn_at_station

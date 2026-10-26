@@ -1,6 +1,10 @@
 # ==============================================================================
-# Steel Headed Stud Anchor Strength — AISC 360-16 §I8 (corpus aisc-360-16, pp. 160–164)
+# Steel Headed Stud Anchor Strength — AISC 360-22 §I8
 # ==============================================================================
+# Eq. I8-1 and the §I8.2a Rg/Rp table were compared with AISC 360-16 and match.
+# Cite 360-22 (corpus: aisc-360-22, PDF pp. 181–183). The same numbers are in
+# 360-16 §I8 (corpus: aisc-360-16, PDF pp. 160–163). Channel anchors (§I8.2b)
+# and composite components (§I8.3) are not implemented.
 # Note: This module covers steel anchors in **composite beams** (§I8.2). Steel
 # anchors in composite **components** (encased/filled columns, walls, coupling
 # beams) follow §I8.3, which has *different* length and edge-distance rules and
@@ -101,12 +105,22 @@ stud is welded, **unless welded to a flange directly over a web**. Throws
 `ArgumentError` if `d_sa > 2.5·tf` and the over-the-web exception is not
 asserted.
 """
-function validate_stud_diameter(anchor::HeadedStudAnchor, tf)
+function validate_stud_diameter(anchor::HeadedStudAnchor, tf; slab=nothing)
+    # AISC 360-22 §I8.1 (corpus: aisc-360-22, PDF p. 181). Same limit in
+    # AISC 360-16 §I8.1 (corpus: aisc-360-16, PDF p. 160).
+    d_in = ustrip(u"inch", uconvert(u"inch", anchor.d_sa))
+    if d_in > 0.75 + 1e-6
+        solid = slab isa SolidSlabOnBeam
+        allowed = solid && (abs(d_in - 0.875) < 1e-3 || abs(d_in - 1.0) < 1e-3)
+        allowed || throw(ArgumentError(
+            "Stud diameter $(anchor.d_sa) exceeds 3/4 in. AISC 360-22 §I8.1 " *
+            "permits 7/8 in. and 1 in. only for shear transfer in a solid slab."))
+    end
     d_max = 2.5 * tf
     if anchor.d_sa > d_max
         throw(ArgumentError(
             "Stud diameter $(anchor.d_sa) exceeds 2.5·tf = $(d_max) " *
-            "(AISC 360-16 §I8.1). Use a smaller stud or verify the stud is welded directly over the web."))
+            "(AISC 360-22 §I8.1). Use a smaller stud or verify the stud is welded directly over the web."))
     end
     return nothing
 end
@@ -168,12 +182,10 @@ for symmetric loading).
 """
 function check_stud_spacing(anchor::HeadedStudAnchor, slab::AbstractSlabOnBeam,
                             n_studs::Int, L_half)
-    if n_studs <= 1
-        return nothing
-    end
-
-    n_rows = ceil(Int, n_studs / anchor.n_per_row)
-    spacing = L_half / n_rows
+    n_rows = n_studs <= 0 ? 0 : ceil(Int, n_studs / anchor.n_per_row)
+    # One anchor has no neighbor. The shear span is then the center-to-center
+    # gap that §I8.2d(e) limits, so a single stud on a long span does not pass.
+    spacing = n_rows <= 0 ? L_half : L_half / n_rows
 
     # §I8.2d(d): minimum spacing.
     # Long-axis 6·d_sa applies when there's no perpendicular deck. Without
@@ -183,53 +195,35 @@ function check_stud_spacing(anchor::HeadedStudAnchor, slab::AbstractSlabOnBeam,
     s_min = s_min_long_axis
     if spacing < s_min
         @warn "Stud longitudinal spacing $(spacing) < minimum $(s_min) " *
-              "(AISC 360-16 §I8.2d(d)). Consider fewer studs or multi-row layout."
+              "(AISC 360-22 §I8.2d(d)). Consider fewer studs or multi-row layout."
     end
 
     # §I8.2d(e): maximum spacing — uses TOTAL slab thickness, hr + t_slab for deck.
     s_max = min(8 * _total_slab_depth(slab), 36.0u"inch")
     if spacing > s_max
         @warn "Stud longitudinal spacing $(spacing) > maximum $(s_max) " *
-              "(AISC 360-16 §I8.2d(e), 8·(total slab thickness) ≤ 36 in.). Add more studs."
+              "(AISC 360-22 §I8.2d(e), 8·(total slab thickness) ≤ 36 in.). Add more studs."
     end
 
     return nothing
 end
 
 """
-    check_stud_edge_distance(anchor::HeadedStudAnchor, slab::AbstractSlabOnBeam, lightweight=false) -> nothing
+    check_stud_edge_distance(section, anchor, slab) -> Bool
 
-Edge-of-slab detailing checks for composite **beams** per AISC 360-16 §I8.2d
-(corpus aisc-360-16, p. 163):
+`true` when `anchor.n_per_row` studs can sit on the flange and meet AISC 360-22
+§I8.2d(b) (corpus: aisc-360-22, PDF p. 183): at least 1 in. (25 mm) of lateral
+concrete cover perpendicular to the shear force, except anchors installed in
+the ribs of a formed steel deck.
 
-- (b) Steel anchors shall have at least **1 in. (25 mm)** of lateral concrete
-      cover in the direction perpendicular to the shear force, except for
-      anchors installed in the ribs of formed steel decks. (Lateral cover is
-      project-geometry-dependent and is reported as a `@warn` only when the
-      slab `edge_dist` indicates a clear violation.)
-- (c) The minimum distance from the center of a steel anchor to a free edge
-      in the direction of the shear force shall be **8 in. (200 mm)** for
-      normal-weight concrete and **10 in. (250 mm)** for lightweight concrete.
-      ACI 318 Chapter 17 may be used in lieu.
-
-This function emits `@warn` rather than throwing, because the slab `edge_dist`
-fields measure to the slab edge, not to the stud centerline, and the actual
-stud transverse offset is not modeled. Edge-distance compliance must
-ultimately be enforced at the connection-detailing stage.
+`edge_dist_left` and `edge_dist_right` are distances from the beam centerline
+to a transverse slab edge. §I8.2d(c) — 8 in. normal weight, 10 in. lightweight,
+from the stud center to a free edge in the direction of the shear force — is a
+longitudinal edge. This model has no such edge, so (c) is not applied here.
 """
-function check_stud_edge_distance(anchor::HeadedStudAnchor, slab::AbstractSlabOnBeam;
-                                  lightweight::Bool=false)
-    # §I8.2d(c): free-edge distance in the direction of the shear force.
-    free_edge_min = lightweight ? 10.0u"inch" : 8.0u"inch"
-    for (side, ed) in (("left", slab.edge_dist_left), ("right", slab.edge_dist_right))
-        ed === nothing && continue   # interior beam on this side
-        if ed < free_edge_min
-            @warn "Slab edge distance ($side) $(ed) is less than the §I8.2d(c) minimum " *
-                  "$(free_edge_min) for $(lightweight ? "lightweight" : "normal-weight") concrete; " *
-                  "stud free-edge compliance must be confirmed against the actual stud transverse offset."
-        end
-    end
-    return nothing
+function check_stud_edge_distance(section::ISymmSection, anchor::HeadedStudAnchor,
+                                  slab::AbstractSlabOnBeam)
+    return _transverse_studs_fit(section, anchor, slab)
 end
 
 """
@@ -252,3 +246,253 @@ end
 
 # Solid slabs are not subject to the deck-projection rule.
 check_stud_deck_projection(::HeadedStudAnchor, ::SolidSlabOnBeam) = nothing
+
+# ==============================================================================
+# Anchor schedule — §I8.2c count, §I8.2d spacing, Commentary ductility
+# ==============================================================================
+
+"""Center-to-center limits, AISC 360-22 §I8.2d(d) and (e) (corpus: aisc-360-22,
+PDF p. 183). The longitudinal minimum is 6 diameters unless the anchors sit in
+deck ribs oriented perpendicular to the beam, in which case it is 4 diameters."""
+function _stud_spacing_limits(anchor::HeadedStudAnchor, slab::AbstractSlabOnBeam)
+    perpendicular = slab isa DeckSlabOnBeam && slab.deck_orientation === :perpendicular
+    s_min = perpendicular ? 4 * anchor.d_sa : 6 * anchor.d_sa
+    s_max = min(8 * _total_slab_depth(slab), 36.0u"inch")
+    return (uconvert(u"m", s_min), uconvert(u"m", s_max))
+end
+
+"""Row bounds so center-to-center spacing `L / n` lies between `s_min` and `s_max`.
+
+Uniform distribution over the shear span uses `n` equal spaces (§I8.2d(a),
+PDF p. 183). That is the average spacing the commentary uses for the
+16 kip/ft harbor. A single anchor is allowed only when the shear span itself
+does not exceed `s_max`.
+"""
+function _row_bounds(L, s_min, s_max)
+    Ls = ustrip(u"m", uconvert(u"m", L))
+    smin = ustrip(u"m", uconvert(u"m", s_min))
+    smax = ustrip(u"m", uconvert(u"m", s_max))
+    n_max = smin > 0 ? floor(Int, Ls / smin) : typemax(Int) ÷ 4
+    if n_max < 1
+        n_max = Ls <= smax + 1e-9 ? 1 : 0
+    end
+    n_min = smax > 0 ? max(ceil(Int, Ls / smax), 1) : 1
+    n_max == 1 && n_min > 1 && (n_max = 0)
+    return (n_min, n_max)
+end
+
+function _combined_row_bounds(spans, s_min, s_max)
+    n_min, n_max = 1, typemax(Int) ÷ 4
+    for L in spans
+        lo, hi = _row_bounds(L, s_min, s_max)
+        n_min = max(n_min, lo)
+        n_max = min(n_max, hi)
+    end
+    return (n_min, n_max)
+end
+
+"""
+    shear_connection_ductile(L_beam, degree, q_avg; slip_checked=false) -> Bool
+
+AISC 360-22 §I3.2d.1 requires the ductility (slip capacity) of the shear
+connection to be considered (corpus: aisc-360-22, PDF p. 171). Commentary
+§I3.2d (PDF p. 511) says a beam loaded uniformly, or by equally spaced
+concentrated loads, need not be checked further when any one of these holds:
+
+  (a) span not exceeding 30 ft (9.1 m);
+  (b) degree of composite action at least 50%;
+  (c) average nominal shear-connector capacity at least 16 kip/ft (230 kN/m)
+      along the shear span.
+
+`slip_checked` stands in for the commentary's direct nonlinear model. This
+function does not run that model.
+"""
+function shear_connection_ductile(L_beam, degree::Real, q_avg; slip_checked::Bool=false)
+    slip_checked && return true
+    uconvert(u"m", L_beam) <= uconvert(u"m", 30.0u"ft") && return true
+    degree >= 0.50 && return true
+    return uconvert(u"N/m", q_avg) >= uconvert(u"N/m", 16.0u"kip" / u"ft")
+end
+
+"""Allowable transverse coordinates of a stud center, in meters, beam centerline
+at zero, left negative.
+
+AISC 360-22 §I8.2d(b) (corpus: aisc-360-22, PDF p. 183): 1 in. clear lateral
+concrete cover perpendicular to the shear force, except anchors in the ribs of
+formed steel deck. §I8.2d(d): centers at least four diameters apart. The cover
+is clear distance to the concrete edge, not to the flange tip.
+
+ENGINEERING JUDGMENT: the shank is welded to the flange, so a center lies at
+least `d_sa/2` inside each flange tip. §I8.2d does not state that inset.
+"""
+function _stud_center_limits(section::ISymmSection, anchor::HeadedStudAnchor,
+                             slab::AbstractSlabOnBeam)
+    d = ustrip(u"m", anchor.d_sa)
+    bf = ustrip(u"m", section.bf)
+    y_lo = -bf / 2 + d / 2
+    y_hi =  bf / 2 - d / 2
+    if !(slab isa DeckSlabOnBeam)
+        cover = ustrip(u"m", 1.0u"inch")
+        if slab.edge_dist_left !== nothing
+            ed = ustrip(u"m", slab.edge_dist_left)
+            y_lo = max(y_lo, -ed + cover + d / 2)
+        end
+        if slab.edge_dist_right !== nothing
+            ed = ustrip(u"m", slab.edge_dist_right)
+            y_hi = min(y_hi, ed - cover - d / 2)
+        end
+    end
+    return (y_lo, y_hi)
+end
+
+"""`n_per_row` studs fit on the flange at four diameters and, on a solid slab,
+keep 1 in. clear cover to each transverse slab edge."""
+function _transverse_studs_fit(section::ISymmSection, anchor::HeadedStudAnchor,
+                               slab::AbstractSlabOnBeam)
+    y_lo, y_hi = _stud_center_limits(section, anchor, slab)
+    y_hi + 1e-9 >= y_lo || return false
+    n = anchor.n_per_row
+    n <= 1 && return true
+    need = (n - 1) * 4 * ustrip(u"m", anchor.d_sa)
+    return (y_hi - y_lo) + 1e-9 >= need
+end
+
+function _lowest_passing(lo::Int, hi::Int, pred)
+    hi < lo && return nothing
+    pred(lo) && return lo
+    pred(hi) || return nothing
+    while lo + 1 < hi
+        mid = (lo + hi) ÷ 2
+        if pred(mid)
+            hi = mid
+        else
+            lo = mid
+        end
+    end
+    return hi
+end
+
+"""
+    design_shear_anchors(section, material, slab, anchor, b_eff, L_beam, Mu;
+                         ϕMn_steel, shear_spans=nothing, slip_checked=false,
+                         I_need=nothing, extra_ok=nothing, ϕ=0.9)
+        -> NamedTuple
+
+Smallest stud layout on one side of the maximum moment whose composite
+strength meets `Mu`, whose center-to-center spacing meets §I8.2d, and whose
+shear connection meets the commentary ductility harbors when the steel
+section alone does not.
+
+`shear_spans` is the distance from the maximum moment to the zero moment on
+each side (§I8.2c, PDF p. 183). When it is omitted, both sides are `L_beam/2`.
+That is the simple-span diagram. It is engineering judgment for any other
+moment diagram.
+
+The horizontal shear used in the strength is `min(n Qn, Cf)` (§I3.2d.1,
+Eqs. I3-1a through I3-1c, PDF p. 171). The 16 kip/ft average uses `n Qn`
+without that cap, because the commentary is counting connector capacity.
+"""
+function design_shear_anchors(section::ISymmSection, material, slab::AbstractSlabOnBeam,
+                              anchor::HeadedStudAnchor, b_eff, L_beam, Mu;
+                              ϕMn_steel, shear_spans=nothing, slip_checked::Bool=false,
+                              I_need=nothing, extra_ok=nothing, ϕ::Real=0.9)
+    spans = shear_spans === nothing ?
+        (uconvert(u"m", L_beam) / 2, uconvert(u"m", L_beam) / 2) :
+        Tuple(uconvert(u"m", L) for L in shear_spans)
+    Mu_N = uconvert(u"N*m", Mu)
+    ϕMn_steel_N = uconvert(u"N*m", ϕMn_steel)
+    blank = (; ok=false, reason=:strength, n_half=0, n_rows=0, spacing=0.0u"m",
+             ΣQn=0.0u"N", Qn=0.0u"N", degree=0.0, ϕMn=0.0u"N*m",
+             I_LB=section.Ix, ductile=false, n_rows_max=0)
+
+    try
+        validate_stud_diameter(anchor, section.tf; slab=slab)
+    catch
+        return (; blank..., reason=:diameter)
+    end
+    try
+        validate_stud_length(anchor, slab)
+    catch
+        return (; blank..., reason=:length)
+    end
+
+    Qn = uconvert(u"N", get_Qn(anchor, slab))
+    ustrip(u"N", Qn) > 0 || return (; blank..., reason=:strength, Qn=Qn)
+    Cf = uconvert(u"N", _Cf_max(section, material, slab, b_eff))
+    s_min, s_max = _stud_spacing_limits(anchor, slab)
+    n_min, n_max = _combined_row_bounds(spans, s_min, s_max)
+    L_long = maximum(spans)
+    per = anchor.n_per_row
+
+    function at(n_rows::Int)
+        n_studs = n_rows * per
+        Σ_nom = n_studs * Qn
+        ΣQn = n_rows == 0 ? 0.0u"N" : min(Σ_nom, Cf)
+        degree = ustrip(u"N", Cf) > 0 ? ustrip(u"N", ΣQn) / ustrip(u"N", Cf) : 0.0
+        q_avg = ustrip(u"m", L_long) > 0 ? Σ_nom / L_long : 0.0u"N/m"
+        ϕMn = 0.0u"N*m"
+        if n_rows > 0 && ustrip(u"N", ΣQn) > 0 && ustrip(u"m", b_eff) > 1e-9
+            try
+                ϕMn = uconvert(u"N*m", get_ϕMn_composite(section, material, slab, b_eff, ΣQn; ϕ=ϕ).ϕMn)
+            catch
+                ϕMn = 0.0u"N*m"
+            end
+        end
+        I_LB = ustrip(u"m", uconvert(u"m", b_eff)) > 1e-9 ?
+            get_I_LB(section, material, slab, b_eff, ΣQn) : section.Ix
+        spacing = n_rows <= 0 ? 0.0u"m" : maximum(L / n_rows for L in spans)
+        uses_composite = ϕMn_steel_N < Mu_N
+        ductile = !uses_composite || shear_connection_ductile(L_beam, degree, q_avg;
+                                                              slip_checked=slip_checked)
+        strength = max(ϕMn, ϕMn_steel_N) >= Mu_N
+        return (; n_half=n_studs, n_rows=n_rows, spacing=uconvert(u"m", spacing),
+                ΣQn=ΣQn, Qn=Qn, degree=degree, ϕMn=ϕMn, I_LB=I_LB, ductile=ductile,
+                strength=strength, n_rows_max=n_max)
+    end
+
+    function passes(n_rows::Int)
+        # No studs are placed when the steel section alone is enough, so the
+        # transverse cover applies only to a layout that uses the anchor.
+        if n_rows > 0 && !_transverse_studs_fit(section, anchor, slab)
+            return false
+        end
+        n_rows == 0 || (n_min <= n_rows <= n_max) || return false
+        lay = at(n_rows)
+        lay.strength || return false
+        lay.ductile || return false
+        if I_need !== nothing && uconvert(u"m^4", lay.I_LB) < uconvert(u"m^4", I_need)
+            return false
+        end
+        extra_ok === nothing || extra_ok(lay) || return false
+        return true
+    end
+
+    if passes(0)
+        lay = at(0)
+        return (; lay..., ok=true, reason=:ok)
+    end
+    chosen = n_max >= max(n_min, 1) ? _lowest_passing(max(n_min, 1), n_max, passes) : nothing
+    if chosen !== nothing
+        lay = at(chosen)
+        return (; lay..., ok=true, reason=:ok)
+    end
+
+    probe = n_max >= 1 ? at(min(max(n_max, 1), max(n_min, 1))) : at(0)
+    reason = if !_transverse_studs_fit(section, anchor, slab)
+        :transverse
+    elseif n_max < max(n_min, 1) && n_max < 1
+        :spacing
+    elseif n_max >= 1 && !at(n_max).strength
+        :strength
+    elseif n_max >= max(n_min, 1) && !at(max(n_min, 1)).ductile && !at(n_max).ductile
+        :ductility
+    elseif I_need !== nothing && n_max >= 1 &&
+           uconvert(u"m^4", at(n_max).I_LB) < uconvert(u"m^4", I_need)
+        :deflection
+    elseif n_min > n_max
+        :spacing
+    else
+        :interaction
+    end
+    return (; probe..., ok=false, reason=reason)
+end

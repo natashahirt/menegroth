@@ -3501,6 +3501,10 @@ const _API_PARAM_KEYS = Set([
     "foundation_strategy", "mat_coverage_threshold", "unit_system",
     "visualization_detail", "visualization_target_edge_m",
     "uniform_column_sizing",
+    "composite", "composite_slab_type", "composite_t_slab_in",
+    "composite_anchor_d_in", "composite_anchor_length_in", "composite_anchor_Fu_ksi",
+    "composite_shored", "composite_cp_class",
+    "composite_deck_hr_in", "composite_deck_wr_in", "composite_deck_orientation",
 ])
 
 # Keys that belong inside nested APIParams sub-structs when provided at the top level.

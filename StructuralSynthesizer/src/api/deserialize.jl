@@ -1004,6 +1004,26 @@ function _resolve_foundation_options(api_params::APIParams, fdn_conc::Structural
     )
 end
 
+"""Composite fields for a steel beam option. Empty when composite is off."""
+function _composite_beam_fields(api_params::APIParams)
+    api_params.composite || return (;)
+    inch(x) = x === nothing ? nothing : x * u"inch"
+    ksi(x) = x === nothing ? nothing : x * u"ksi"
+    return (;
+        composite = true,
+        composite_slab_type = Symbol(strip(api_params.composite_slab_type)),
+        composite_t_slab = inch(api_params.composite_t_slab_in),
+        composite_anchor_d = inch(api_params.composite_anchor_d_in),
+        composite_anchor_length = inch(api_params.composite_anchor_length_in),
+        composite_anchor_Fu = ksi(api_params.composite_anchor_Fu_ksi),
+        composite_shored = api_params.composite_shored,
+        composite_cp_class = Symbol(strip(api_params.composite_cp_class)),
+        composite_deck_hr = inch(api_params.composite_deck_hr_in),
+        composite_deck_wr = inch(api_params.composite_deck_wr_in),
+        composite_deck_orientation = Symbol(strip(api_params.composite_deck_orientation)),
+    )
+end
+
 """Resolve beam type string to BeamOptions."""
 function _resolve_beam_options(api_params::APIParams)
     bt = lowercase(strip(api_params.beam_type))
@@ -1034,11 +1054,12 @@ function _resolve_beam_options(api_params::APIParams)
             :w  # default
         end
         strat = _resolve_sizing_strategy(api_params.beam_sizing_strategy)
-        return StructuralSizer.SteelBeamOptions(
+        return StructuralSizer.SteelBeamOptions(;
             material = steel,
             section_type = section_type,
             sizing_strategy = strat,
             time_limit_sec = tlim,
+            _composite_beam_fields(api_params)...,
         )
     elseif bt == "rc_rect"
         strat = _resolve_sizing_strategy(api_params.beam_sizing_strategy)
@@ -1069,9 +1090,10 @@ function _resolve_beam_options(api_params::APIParams)
         )
     else
         # Default to steel W-shape
-        return StructuralSizer.SteelBeamOptions(
+        return StructuralSizer.SteelBeamOptions(;
             material = steel,
-            section_type = :w
+            section_type = :w,
+            _composite_beam_fields(api_params)...,
         )
     end
 end

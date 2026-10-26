@@ -279,7 +279,7 @@ end
 
 """
     find_required_ΣQn(section::ISymmSection, material, slab::AbstractSlabOnBeam,
-                      b_eff, Mu_required, Qn; ϕ=0.9, partial_composite_min=0.25)
+                      b_eff, Mu_required, Qn; ϕ=0.9, partial_composite_min=0.0)
         -> (ΣQn, n_studs_half, sufficient)
 
 Find the minimum number of studs per half-span such that `ϕ Mn ≥ Mu_required`.
@@ -293,29 +293,22 @@ matches the AISC partial-composite design procedure: determine the required
 applies `ϕ` internally: it searches for the smallest `ΣQn` where
 `ϕ · Mn(ΣQn) ≥ Mu_required`.
 
-# Partial-composite lower bound
-
-ENGINEERING JUDGMENT: AISC 360-16 §I3.2d itself does **not** prescribe a
-hard lower bound on `ΣQn / Cf_max`. The default `partial_composite_min =
-0.25` reflects the strength-based research lower limit discussed in the
-Commentary on §I3.2 (AISC 360-16 Commentary on Chapter I; AISC *Steel
-Construction Manual*, 15th Ed., Part 3, "Composite Design"). The Manual
-notes that values below ~0.50 introduce serviceability and stud-fatigue
-concerns; users producing production designs should typically pass
-`partial_composite_min = 0.5` (or higher). The 0.25 default is retained
-here because early sizing iterations can otherwise force unnecessary
-full-composite layouts. **Not an AISC 360-16 code requirement.**
+There is no strength floor on `ΣQn / Cf`. Commentary Eqs. C-I3-3 and C-I3-4
+should not be used below 0.25 (AISC 360-22 Commentary §I3, corpus:
+aisc-360-22, PDF p. 502). That limit is not applied here: this search is the
+plastic stress distribution of §I3.2a, not those effective-section equations.
+`partial_composite_min` defaults to 0.
 
 # Arguments
 - `Mu_required`: Required flexural strength (factored moment).
 - `Qn`: Nominal shear strength of a single stud (from `get_Qn`).
-- `ϕ`: Resistance factor (default `0.90`, AISC 360-16 §I3.2 — corpus
-       aisc-360-16, p. 165).
-- `partial_composite_min`: Lower bound on `ΣQn / Cf_max` for the binary
-       search (default `0.25`; see engineering-judgment note above).
+- `ϕ`: Resistance factor (default `0.90`, AISC 360-22 §I3.2a — corpus
+       aisc-360-22, PDF p. 169).
+- `partial_composite_min`: Optional lower bound on `ΣQn / Cf_max` for the
+       binary search (default `0`).
 """
 function find_required_ΣQn(section::ISymmSection, material, slab::AbstractSlabOnBeam,
-                           b_eff, Mu_required, Qn; ϕ=0.9, partial_composite_min::Real=0.25)
+                           b_eff, Mu_required, Qn; ϕ=0.9, partial_composite_min::Real=0.0)
     Cf_max = _Cf_max(section, material, slab, b_eff)
 
     # Bail out if even full composite is insufficient.
@@ -325,9 +318,7 @@ function find_required_ΣQn(section::ISymmSection, material, slab::AbstractSlabO
                  sufficient=false)
     end
 
-    # Binary search for the continuous ΣQn threshold. The lower bound is the
-    # engineering-judgment partial-composite minimum (see docstring), not an
-    # AISC 360-16 code requirement.
+    # No code floor. C-I3-3 and C-I3-4's 0.25 limit is not a strength limit.
     ΣQn_lo = partial_composite_min * Cf_max
     ΣQn_hi = Cf_max
 
@@ -376,8 +367,17 @@ For composite negative moment, the slab reinforcement is in tension:
   measured downward. Then `d_rebar = t_slab - cover - d_b/2` above the steel top.
 """
 function get_Mn_negative(section::ISymmSection, material, Asr, Fysr;
-                          d_rebar=0.0u"m")
-    if ustrip(u"m^2", Asr) ≈ 0.0
+                          d_rebar=0.0u"m", ΣQn=nothing)
+    # AISC 360-22 §I3.2d.2 Eqs. I3-2a and I3-2b (corpus: aisc-360-22, PDF p. 171):
+    # the horizontal shear from the negative-moment region is the lesser of
+    # tensile yielding of the developed reinforcement and the anchors in that
+    # region. `ΣQn === nothing` leaves the reinforcement force uncapped; the
+    # caller has not supplied the negative-region anchors.
+    T_cap = Fysr * Asr
+    if ΣQn !== nothing
+        T_cap = min(uconvert(u"N", T_cap), uconvert(u"N", ΣQn))
+    end
+    if ustrip(u"N", uconvert(u"N", T_cap)) ≈ 0.0
         return material.Fy * section.Zx
     end
 
@@ -389,7 +389,7 @@ function get_Mn_negative(section::ISymmSection, material, Asr, Fysr;
     tf  = section.tf
     h_w = section.h
 
-    T_rebar = Fysr * Asr
+    T_rebar = T_cap
     d_r = uconvert(u"m", d_rebar)
 
     # PNA shifts downward (toward bottom flange) because rebar adds tension at top.
@@ -443,9 +443,14 @@ composite section is used only when all three limits hold:
   (a) the steel beam is compact and braced in accordance with Chapter F
       (`Lb ≤ Lp`);
   (b) steel anchors connect the slab to the beam in the negative-moment
-      region (`neg_moment`);
-  (c) the slab reinforcement parallel to the beam is developed (`Asr > 0`
-      and `Fysr > 0`).
+      region (`neg_moment`), and `ΣQn` is their nominal strength between
+      the maximum negative moment and the adjacent zero (§I3.2d.2 Eqs.
+      I3-2a and I3-2b, PDF p. 171). A missing `ΣQn` is not the full rebar
+      force;
+  (c) the slab reinforcement parallel to the beam, within the effective
+      width, is developed (`Asr > 0` and `Fysr > 0`). Passing that area
+      asserts development. Bar lengths are not on the strip result, so
+      development length is not computed.
 
 `φb = 0.90`. When (a)–(c) hold, the available strength is the larger of the
 Chapter F strength and `φb` times [`get_Mn_negative`](@ref).
@@ -454,13 +459,15 @@ Chapter F `φMn` is the existing AISC 360-16 implementation ([`get_ϕMn`](@ref))
 360-22 §I3.2b(a) points at Chapter F of the same specification. Chapter F has
 not been re-derived from 360-22 in this function.
 
-`Cb = 1.0` is the hogging default: `SteelMemberGeometry` has no bottom-flange
-moment gradient. That choice is engineering judgment, not a code factor.
+`Cb = 1.0` is the hogging default when the caller does not pass `Cb`. A
+gravity-loaded rolled beam whose top flange is restrained uses Commentary
+Eq. C-F1-5 when [`cb_gravity_top_flange_restrained`](@ref) is supplied.
 """
 function available_negative_flexure(section::ISymmSection, material;
                                     Lb, Asr, Fysr,
                                     neg_moment::Bool = false,
                                     d_rebar = 0.0u"m",
+                                    ΣQn = nothing,
                                     Cb::Real = 1.0, ϕ::Real = 0.9)
     ϕMn_steel = uconvert(u"N*m", get_ϕMn(section, material; Lb = Lb, Cb = Cb,
                                          axis = :strong, ϕ = ϕ))
@@ -470,9 +477,71 @@ function available_negative_flexure(section::ISymmSection, material;
     braced = ustrip(u"m", uconvert(u"m", Lb)) <= ustrip(u"m", uconvert(u"m", Lp))
     asr_ok = ustrip(u"m^2", uconvert(u"m^2", Asr)) > 0
     fysr_ok = ustrip(u"Pa", uconvert(u"Pa", Fysr)) > 0
-    if neg_moment && is_compact(section, material) && braced && asr_ok && fysr_ok
-        Mn_comp = get_Mn_negative(section, material, Asr, Fysr; d_rebar = d_rebar)
+    if neg_moment && ΣQn !== nothing && is_compact(section, material) &&
+            braced && asr_ok && fysr_ok
+        Mn_comp = get_Mn_negative(section, material, Asr, Fysr;
+                                  d_rebar = d_rebar, ΣQn = ΣQn)
         return max(ϕMn_steel, uconvert(u"N*m", ϕ * Mn_comp))
     end
     return ϕMn_steel
 end
+
+"""
+    cb_gravity_top_flange_restrained(Mo, M1, MCL) -> Float64
+
+Moment-gradient factor for a gravity-loaded rolled I-beam whose top flange is
+laterally restrained and which bends in reverse curvature.
+
+AISC 360-22 Commentary Eq. C-F1-5 (corpus: aisc-360-22, PDF pp. 442–443).
+This is commentary, not a specification equation. Figure C-F1.5, the uplift
+cases, is a different set of expressions and is not evaluated here.
+
+Sign convention, Figure C-F1.3: positive moment compresses the top flange,
+negative moment compresses the bottom flange. `Mo` is the end moment with the
+largest bottom-flange compression. `M1` is the other end. `MCL` is the moment
+at mid-length. The unbraced length is the distance between points that restrain
+twist.
+
+    Cb = 3 − (2/3)(M1/Mo) − (8/3)(MCL / (Mo + M1)*)
+
+`(Mo + M1)*` equals `Mo` when `M1` is positive. The worked example on PDF
+p. 443 is `Mo = −100`, `M1 = +200`, `MCL = +50`, `Cb = 5.67`.
+"""
+function cb_gravity_top_flange_restrained(Mo, M1, MCL)
+    mo = ustrip(u"N*m", uconvert(u"N*m", Mo))
+    m1 = ustrip(u"N*m", uconvert(u"N*m", M1))
+    mcl = ustrip(u"N*m", uconvert(u"N*m", MCL))
+    mo == 0 && throw(ArgumentError(
+        "Commentary Eq. C-F1-5 needs a nonzero end moment Mo."))
+    # M1 is taken as zero in the last term when it is positive (PDF p. 443).
+    denom = m1 > 0 ? mo : mo + m1
+    denom == 0 && throw(ArgumentError(
+        "Commentary Eq. C-F1-5 has a zero denominator for these end moments."))
+    return 3.0 - (2 / 3) * (m1 / mo) - (8 / 3) * (mcl / denom)
+end
+
+"""
+Cb from a sagging-positive moment field on one span, or `nothing`.
+
+The field's sign matches Commentary Figure C-F1.3: sagging compresses the top
+flange. `Mo` is the more negative end. The equation applies when that end
+compresses the bottom flange. The unbraced length is taken as the member span.
+
+ENGINEERING JUDGMENT: that span is the distance between twist restraints only
+when the supports restrain twist. The moment field does not record twist braces.
+"""
+function cb_neg_from_moment_field(M_of_s)
+    ms = _moment_newton(M_of_s(0.0))
+    me = _moment_newton(M_of_s(1.0))
+    mm = _moment_newton(M_of_s(0.5))
+    if ms <= me
+        mo, m1 = ms, me
+    else
+        mo, m1 = me, ms
+    end
+    mo < 0 || return nothing
+    return cb_gravity_top_flange_restrained(mo * u"N*m", m1 * u"N*m", mm * u"N*m")
+end
+
+_moment_newton(M::Unitful.Quantity) = ustrip(u"N*m", uconvert(u"N*m", M))
+_moment_newton(M::Real) = Float64(M)

@@ -182,8 +182,12 @@ end
     ctx_noflag = CompositeContext(slab, anchor, L_short; shored=true,
                                   Asr=Asr, Fysr=Fysr)
     ctx_flag = CompositeContext(slab, anchor, L_short; shored=true,
-                                Asr=Asr, Fysr=Fysr, neg_moment=true)
+                                Asr=Asr, Fysr=Fysr, neg_moment=true,
+                                ΣQn_neg=200.0u"kip")
+    ctx_nosum = CompositeContext(slab, anchor, L_short; shored=true,
+                                 Asr=Asr, Fysr=Fysr, neg_moment=true)
     @test !is_feasible(checker, cache, 1, section, material, demand, geom_s, ctx_noflag)
+    @test !is_feasible(checker, cache, 1, section, material, demand, geom_s, ctx_nosum)
     @test is_feasible(checker, cache, 1, section, material, demand, geom_s, ctx_flag)
 
     # Edge: demand above both capacities still fails with the I3.2b flag.

@@ -92,7 +92,8 @@ function size!(
         # --- Size beams ---
         size_beams!(struc, beam_opts; reanalyze = false, member_group_overrides = mgo,
                     I_factor = params.beam_I_factor,
-                    composite_concrete = resolve_slab_concrete(params.materials))
+                    composite_concrete = resolve_slab_concrete(params.materials),
+                    composite_option_kwargs(beam_opts)...)
 
         # --- Re-analyze with updated beam self-weight ---
         # Topology unchanged; only sections/loads differ → lightweight reprocess

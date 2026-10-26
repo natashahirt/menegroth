@@ -198,7 +198,9 @@ Design flexural strength at a station, dispatched by the sign of the demand:
   • `sagging == false` → AISC 360-22 §I3.2b (PDF p. 170), the same gates as
     the sizing checker: [`available_negative_flexure`](@ref). `Lb` is the
     bottom-flange unbraced length (the member span). `neg_moment` is §I3.2b(b).
-    `Asr` without those gates stays on Chapter F. It does not return `φMp`.
+    `ΣQn_neg` is the anchor strength in that region (§I3.2d.2). It is not the
+    sagging `ΣQn`. A missing value stays on Chapter F. `Asr` without those
+    gates stays on Chapter F. It does not return `φMp`.
 
 `sense` is `:positive` or `:negative`.
 """
@@ -206,7 +208,8 @@ function phiMn_at_station(section::ISymmSection, material, slab::AbstractSlabOnB
                           b_eff, ΣQn, sagging::Bool;
                           Asr = 0.0u"mm^2", Fysr = 0.0u"MPa",
                           d_rebar = 0.0u"m", ϕ = 0.9,
-                          Lb = nothing, neg_moment::Bool = false)
+                          Lb = nothing, neg_moment::Bool = false,
+                          ΣQn_neg = nothing)
     if sagging
         r = get_ϕMn_composite(section, material, slab, b_eff, ΣQn; ϕ = ϕ)
         return (; ϕMn = r.ϕMn, Mn = r.Mn, sense = :positive)
@@ -216,6 +219,7 @@ function phiMn_at_station(section::ISymmSection, material, slab::AbstractSlabOnB
             "bottom-flange unbraced length (AISC 360-22 §I3.2b)."))
         ϕMn = available_negative_flexure(section, material; Lb = Lb, Asr = Asr,
                                          Fysr = Fysr, neg_moment = neg_moment,
+                                         ΣQn = ΣQn_neg,
                                          d_rebar = d_rebar, ϕ = ϕ)
         Mn = ϕMn / ϕ
         return (; ϕMn = ϕMn, Mn = Mn, sense = :negative)
@@ -334,13 +338,15 @@ function composite_dcr_at_station(section::ISymmSection, material,
                                   right::Union{SideExtentProfile, Nothing} = nothing,
                                   Asr = 0.0u"mm^2", Fysr = 0.0u"MPa",
                                   d_rebar = 0.0u"m", ϕ = 0.9,
-                                  neg_moment::Bool = false)
+                                  neg_moment::Bool = false,
+                                  ΣQn_neg = nothing)
     b_eff = b_eff_at_station(slab, L_beam, s; left = left, right = right)
     sagging = ustrip(u"N*m", uconvert(u"N*m", M_s)) >= 0.0
     # Hogging Lb is this member's span, not a group sum of spans.
     cap = phiMn_at_station(section, material, slab, b_eff, ΣQn, sagging;
                            Asr = Asr, Fysr = Fysr, d_rebar = d_rebar, ϕ = ϕ,
-                           Lb = L_beam, neg_moment = neg_moment)
+                           Lb = L_beam, neg_moment = neg_moment,
+                           ΣQn_neg = ΣQn_neg)
     ϕMn_Nm = ustrip(u"N*m", uconvert(u"N*m", cap.ϕMn))
     M_Nm = abs(ustrip(u"N*m", uconvert(u"N*m", M_s)))
     dcr = ϕMn_Nm > 0.0 ? M_Nm / ϕMn_Nm : Inf
@@ -375,6 +381,7 @@ function governing_composite_station(section::ISymmSection, material,
                                      Asr = 0.0u"mm^2", Fysr = 0.0u"MPa",
                                      d_rebar = 0.0u"m", ϕ = 0.9,
                                      neg_moment::Bool = false,
+                                     ΣQn_neg = nothing,
                                      extra_breakpoints::AbstractVector{Float64} = Float64[],
                                      n_bracket::Int = 9)
     dcr_of_s = s -> composite_dcr_at_station(section, material, slab, L_beam, s,
@@ -382,7 +389,8 @@ function governing_composite_station(section::ISymmSection, material,
                                              left = left, right = right,
                                              Asr = Asr, Fysr = Fysr,
                                              d_rebar = d_rebar, ϕ = ϕ,
-                                             neg_moment = neg_moment).dcr
+                                             neg_moment = neg_moment,
+                                             ΣQn_neg = ΣQn_neg).dcr
 
     bp = beff_breakpoints(left, right)
     isempty(extra_breakpoints) || (bp = _unique_sorted(vcat(bp, collect(Float64, extra_breakpoints))))
@@ -391,13 +399,18 @@ function governing_composite_station(section::ISymmSection, material,
     rec = composite_dcr_at_station(section, material, slab, L_beam, s_star,
                                    demand_of_s(s_star), ΣQn;
                                    left = left, right = right, Asr = Asr, Fysr = Fysr,
-                                   d_rebar = d_rebar, ϕ = ϕ, neg_moment = neg_moment)
+                                   d_rebar = d_rebar, ϕ = ϕ, neg_moment = neg_moment,
+                                   ΣQn_neg = ΣQn_neg)
     return (; s_star = s_star, dcr_max = dcr_max, rec...)
 end
 
 # ------------------------------------------------------------------------------
 # Sizing payload: re-solve the sagging station for each candidate section
 # ------------------------------------------------------------------------------
+
+"""Analysis dead-load extrema and the uniform line load that produced them."""
+const PreCureShape = NamedTuple{(:M_ref, :V_ref, :w_ref),
+    Tuple{typeof(1.0u"N*m"), typeof(1.0u"N"), typeof(1.0u"N/m")}}
 
 """
 One beam's exact sagging demand field and per-side tributary profiles.
@@ -418,19 +431,20 @@ struct BeamSaggingField{F}
     breakpoints::Vector{Float64}
     L_beam::Union{Nothing, typeof(1.0u"m")}
     slab::Union{Nothing, AbstractSlabOnBeam}
+    pre_cure::Union{Nothing, PreCureShape}
 end
 
 """Field with no per-beam span or slab. The checker uses the group context."""
-function BeamSaggingField(left, right, demand_of_s, breakpoints)
+function BeamSaggingField(left, right, demand_of_s, breakpoints; pre_cure=nothing)
     BeamSaggingField(left, right, demand_of_s, collect(Float64, breakpoints),
-                     nothing, nothing)
+                     nothing, nothing; pre_cure = pre_cure)
 end
 
 """Accept a span in any length unit and store it in meters."""
 function BeamSaggingField(left, right, demand_of_s::F, breakpoints::Vector{Float64},
-                          L_beam, slab) where {F}
+                          L_beam, slab; pre_cure=nothing) where {F}
     L = L_beam === nothing ? nothing : uconvert(u"m", L_beam)
-    return BeamSaggingField{F}(left, right, demand_of_s, breakpoints, L, slab)
+    return BeamSaggingField{F}(left, right, demand_of_s, breakpoints, L, slab, pre_cure)
 end
 
 """Member span used for §I3.1a `L/8`. A missing field span uses the context."""
@@ -512,7 +526,30 @@ function context_at_sagging_station(ctx::CompositeContext, st::CompositeSaggingS
                             shored = ctx.shored, Lb_const = lb,
                             Asr = ctx.Asr, Fysr = ctx.Fysr,
                             neg_moment = ctx.neg_moment,
+                            ΣQn_neg = ctx.ΣQn_neg,
+                            slip_checked = ctx.slip_checked,
                             construction = ctx.construction)
+end
+
+"""Copy `ctx` with this beam's analysis dead-load shape on the pre-cure stage."""
+function _context_with_pre_cure(ctx::CompositeContext, shape)
+    shape === nothing && return ctx
+    stage = construction_with_shape(ctx.construction, shape.M_ref, shape.V_ref, shape.w_ref)
+    return CompositeContext(ctx.slab, ctx.anchor, ctx.L_beam;
+                            shored = ctx.shored, Lb_const = ctx.Lb_const,
+                            Asr = ctx.Asr, Fysr = ctx.Fysr,
+                            neg_moment = ctx.neg_moment,
+                            ΣQn_neg = ctx.ΣQn_neg,
+                            slip_checked = ctx.slip_checked,
+                            construction = stage)
+end
+
+"""Tributary width, then this beam's dead-load shape, then the station span."""
+function construction_context(ctx::CompositeContext, field, st::CompositeSaggingStation,
+                              L_beam, slab)
+    src = _context_for_construction(ctx, slab, field.left, field.right)
+    src = _context_with_pre_cure(src, field.pre_cure)
+    return context_at_sagging_station(src, st; L_beam = L_beam, slab = slab)
 end
 
 """Context whose construction width is this beam's tributary, not L/8."""
@@ -523,7 +560,47 @@ function _context_for_construction(ctx::CompositeContext, slab, left, right)
                             shored = ctx.shored, Lb_const = ctx.Lb_const,
                             Asr = ctx.Asr, Fysr = ctx.Fysr,
                             neg_moment = ctx.neg_moment,
+                            ΣQn_neg = ctx.ΣQn_neg,
+                            slip_checked = ctx.slip_checked,
                             construction = stage)
+end
+
+"""
+Distance from a sagging station to the adjacent zero moment on each side.
+
+AISC 360-22 §I8.2c (corpus: aisc-360-22, PDF p. 183). `demand_of_s` returns
+the signed moment, sagging positive. A sign change is bisected. If the moment
+is still positive at the end of this member, that end is as far as this
+diagram goes.
+"""
+function adjacent_shear_spans(demand_of_s, s_star::Real, L)
+    L_m = uconvert(u"m", L isa Unitful.Quantity ? L : L * u"m")
+    function moment(s)
+        raw = demand_of_s(clamp(float(s), 0.0, 1.0))
+        return raw isa Unitful.Quantity ?
+            ustrip(u"N*m", uconvert(u"N*m", raw)) : Float64(raw)
+    end
+    function zero_toward(s_end)
+        moment(s_end) <= 0 && return float(s_end)
+        lo, hi = float(s_star), float(s_end)
+        moment(lo) <= 0 && return lo
+        for _ in 1:40
+            mid = (lo + hi) / 2
+            if moment(mid) > 0
+                lo = mid
+            else
+                hi = mid
+            end
+        end
+        return hi
+    end
+    s_left = zero_toward(0.0)
+    s_right = zero_toward(1.0)
+    spans = (abs(float(s_star) - s_left) * L_m, abs(s_right - float(s_star)) * L_m)
+    # A station at a member end has only one side. A zero-length side is not
+    # a shear span and must not cap the stud count.
+    kept = filter(s -> ustrip(u"m", s) > 1e-4, spans)
+    return isempty(kept) ? (L_m,) : Tuple(kept)
 end
 
 """

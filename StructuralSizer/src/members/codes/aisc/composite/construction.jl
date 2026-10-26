@@ -116,13 +116,33 @@ function construction_stage(slab::AbstractSlabOnBeam;
                              uconvert(u"Pa", p_L),
                              uconvert(u"N/m", w_D_extra),
                              uconvert(u"N/m", w_Cd),
-                             uconvert(u"N/m", w_Cfml))
+                             uconvert(u"N/m", w_Cfml),
+                             nothing, nothing, nothing)
 end
 
 construction_with_width(stage::ConstructionStage, b_trib) =
     ConstructionStage(stage.cp_class, stage.p_Cp, stage.p_concrete,
                       uconvert(u"m", b_trib), stage.p_L,
-                      stage.w_D_extra, stage.w_Cd, stage.w_Cfml)
+                      stage.w_D_extra, stage.w_Cd, stage.w_Cfml,
+                      stage.M_ref, stage.V_ref, stage.w_ref)
+
+"""
+Attach an analysis dead-load shape to a construction stage.
+
+`M_ref` and `V_ref` are the extrema of absolute moment and shear from a
+uniform dead load `w_ref` on this beam. The pre-cure check scales them by
+the SEI/ASCE 37-02 line load. A non-positive `w_ref` throws.
+"""
+function construction_with_shape(stage::ConstructionStage, M_ref, V_ref, w_ref)
+    w = uconvert(u"N/m", w_ref)
+    ustrip(w) > 0 || throw(ArgumentError(
+        "A pre-cure moment shape needs a positive analysis line load."))
+    ConstructionStage(stage.cp_class, stage.p_Cp, stage.p_concrete, stage.b_trib,
+                      stage.p_L, stage.w_D_extra, stage.w_Cd, stage.w_Cfml,
+                      abs(uconvert(u"N*m", M_ref)),
+                      abs(uconvert(u"N", V_ref)),
+                      w)
+end
 
 """
 Factored uniform line load and the simple-span moment and shear it produces.
@@ -130,13 +150,16 @@ Factored uniform line load and the simple-span moment and shear it produces.
 The steel beam's weight is D. C_H is not a vertical load on this beam; a
 horizontal construction load is not added here.
 
-STATICS, not a code formula: a uniform line load on a simple span gives
-`M = w L^2 / 8` and `V = w L / 2`.
+STATICS, not a code formula. With no analysis shape, a uniform line load on
+a simple span gives `M = w L^2 / 8` and `V = w L / 2`.
 
-ENGINEERING JUDGMENT: the pre-cure beam is checked as that simple span.
-`CompositeContext` does not carry a steel moment connection. `w L^2 / 8` is
-the largest uniform-load moment among simple, propped, and fixed ends, so
-flexure is conservative when the steel is already continuous. End shear
+ENGINEERING JUDGMENT: when the stage carries `M_ref`, `V_ref`, and `w_ref`
+from a uniform analysis dead load, both are scaled by `w / w_ref`. A pinned
+beam recovers `w L^2 / 8`. A moment connection supplies its own end moment
+and end shear. The scale is valid only when the construction load has the
+same layout as that dead load. Personnel placed in a different pattern is
+not represented. Without a shape, the simple span remains: `w L^2 / 8` is
+the largest uniform-load moment among simple, propped, and fixed ends, and
 `w L / 2` is below the 5wL/8 fixed-end shear of a propped cantilever.
 
 ENGINEERING JUDGMENT: `p_L` defaults to zero. Eq. 2-3's `0.5L` is the
@@ -158,9 +181,51 @@ function construction_span_demand(section, material, stage::ConstructionStage, L
            1.6 * w_Cp + 0.5 * w_L
     w = max(w_22, w_23)
     equation = w_23 >= w_22 ? "2-3" : "2-2"
-    Mu = w * L_m^2 / 8
-    Vu = w * L_m / 2
+    refs = (stage.M_ref, stage.V_ref, stage.w_ref)
+    if any(!isnothing, refs) && any(isnothing, refs)
+        throw(ArgumentError(
+            "Pre-cure moment shape needs the analysis moment, shear, and line load together."))
+    end
+    if stage.M_ref === nothing
+        Mu = w * L_m^2 / 8
+        Vu = w * L_m / 2
+        moment_model = :simple_span
+    else
+        # ENGINEERING JUDGMENT: same layout as the uniform analysis dead load.
+        Mu = uconvert(u"N*m", stage.M_ref) * (w / stage.w_ref)
+        Vu = uconvert(u"N", stage.V_ref) * (w / stage.w_ref)
+        moment_model = :analysis_dead_load
+    end
+    # Cd = 1. The shape stores extrema, not the station of an inflection, so
+    # the double-curvature Cd = 2 of Eq. A-6-5 is not applied here.
+    # AISC 360-22 Appendix 6.3.1a Eq. A-6-5 (corpus: aisc-360-22, PDF p. 342).
+    Vbr = beam_panel_brace_shear(section, Mu)
     return (; w = w, Mu = Mu, Vu = Vu, equation = equation,
             cp_class = stage.cp_class, p_Cp = stage.p_Cp,
-            edition = construction_edition())
+            edition = construction_edition(), Vbr = Vbr,
+            moment_model = moment_model)
+end
+
+"""
+    beam_panel_brace_shear(section, Mr; Cd=1.0) -> Force
+
+Required shear strength of a panel brace for a flexural member.
+
+AISC 360-22 Appendix 6.3.1a Eq. A-6-5 (corpus: aisc-360-22, PDF p. 342):
+
+    Vbr = 0.01 · Mr · Cd / ho
+
+`Cd` is 1.0, or 2.0 for the brace closest to the inflection point in double
+curvature. `ho` is the distance between flange centroids.
+
+Eq. A-6-6a, the required stiffness, is not evaluated. Appendix 6 defines `Lbr`
+as the unbraced length within a panel and does not say what that length is for
+deck that braces the flange continuously.
+"""
+function beam_panel_brace_shear(section::ISymmSection, Mr; Cd::Real=1.0)
+    ho = uconvert(u"m", section.ho)
+    ustrip(ho) > 0 || throw(ArgumentError(
+        "Panel brace shear needs a positive distance between flange centroids."))
+    Cd > 0 || throw(ArgumentError("Cd must be positive, got $Cd."))
+    return uconvert(u"N", 0.01 * uconvert(u"N*m", Mr) * Cd / ho)
 end

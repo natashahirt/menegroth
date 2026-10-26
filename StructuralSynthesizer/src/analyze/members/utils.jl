@@ -2933,10 +2933,11 @@ When `ConcreteBeamOptions.include_flange = true`, the dispatcher automatically:
 
 When `SteelBeamOptions.composite = true`, each beam group is sized with a
 `PerStationComposite`: per-side tributary profiles and the exact moment field,
-re-solved at the sagging station of each candidate section (AISC 360-16
-§I3.1a / §I3.2a). Pass `composite_concrete` (and `composite_t_slab` when slabs
-are not yet sized). Hogging stays on the envelope with §I3.2b; `Asr` is not
-invented. Stud shear strength is not designed — full composite uses `ΣQn = Cf`.
+re-solved at the sagging station of each candidate section (AISC 360-22
+§I3.1a / §I8). The stud diameter, length, and Fu come from the options.
+Thickness and concrete come from the sized slab unless the options override
+the thickness. There is no nominal stud. Hogging stays on Chapter F until
+`Asr` and negative-region anchors are provided.
 
 # Example
 ```julia
@@ -2965,9 +2966,16 @@ function size_beams!(
     tc::Union{Nothing, StructuralSizer.TraceCollector} = nothing,
     # Slab concrete for AISC Chapter I when `SteelBeamOptions.composite` is set.
     # Ignored for concrete and PixelFrame beams, and when composite is false.
+    # A `nothing` composite kwarg means "read it from the beam options".
     composite_concrete = nothing,
     composite_t_slab = nothing,
     composite_anchor = nothing,
+    composite_shored = nothing,
+    composite_cp_class = nothing,
+    composite_slab_type = nothing,
+    composite_deck_hr = nothing,
+    composite_deck_wr = nothing,
+    composite_deck_orientation = nothing,
 )
     dp = (hasproperty(struc, :design_parameters) && !isnothing(struc.design_parameters)) ?
          struc.design_parameters : nothing
@@ -3079,7 +3087,9 @@ function size_beams!(
         _size_beams_impl!(struc, effective_opts, Val(strategy);
                           resolution, reanalyze, gravity_factor,
                           member_group_overrides, I_factor,
-                          composite_concrete, composite_t_slab, composite_anchor)
+                          composite_concrete, composite_t_slab, composite_anchor,
+                          composite_shored, composite_cp_class, composite_slab_type,
+                          composite_deck_hr, composite_deck_wr, composite_deck_orientation)
     else
         _size_beams_impl!(struc, effective_opts, Val(strategy);
                           resolution, reanalyze, gravity_factor,
@@ -3106,7 +3116,16 @@ function _size_beams_impl!(
     composite_concrete = nothing,
     composite_t_slab = nothing,
     composite_anchor = nothing,
+    composite_shored = nothing,
+    composite_cp_class = nothing,
+    composite_slab_type = nothing,
+    composite_deck_hr = nothing,
+    composite_deck_wr = nothing,
+    composite_deck_orientation = nothing,
 )
+    if opts.composite && composite_anchor === nothing
+        composite_anchor_from_options(opts)
+    end
     skel = struc.skeleton
     edge_ids_in_group = Set{Int}()
     for g in BEAM_GROUP_SYMBOLS
@@ -3307,9 +3326,21 @@ function _size_beams_impl!(
     # re-solves the sagging station for each candidate section. The Bool
     # sentinel is only the fallback when composite is off.
     composite_kw = if opts.composite
+        anchor = composite_anchor === nothing ?
+            composite_anchor_from_options(opts) : composite_anchor
+        t_slab = composite_t_slab === nothing ? opts.composite_t_slab : composite_t_slab
+        shored = composite_shored === nothing ? opts.composite_shored : composite_shored
+        cp = composite_cp_class === nothing ? opts.composite_cp_class : composite_cp_class
+        slab_type = composite_slab_type === nothing ? opts.composite_slab_type : composite_slab_type
+        hr = composite_deck_hr === nothing ? opts.composite_deck_hr : composite_deck_hr
+        wr = composite_deck_wr === nothing ? opts.composite_deck_wr : composite_deck_wr
+        orient = composite_deck_orientation === nothing ?
+            opts.composite_deck_orientation : composite_deck_orientation
         composite_payloads_for_groups(
             struc, group_ids, L_totals, composite_concrete, opts.material.E;
-            t_slab = composite_t_slab, anchor = composite_anchor)
+            t_slab = t_slab, anchor = anchor, shored = shored, cp_class = cp,
+            slab_type = slab_type, deck_hr = hr, deck_wr = wr,
+            deck_orientation = orient)
     else
         nothing
     end
@@ -3367,6 +3398,22 @@ function _size_beams_impl!(
 
     @info "Sized $(length(group_ids)) steel beam groups via size_beams API"
     return struc
+end
+
+"""Steel NLP has no Chapter I path. A missing stud field is reported before that."""
+function _size_beams_impl!(
+    struc::BuildingStructure,
+    opts::StructuralSizer.SteelBeamOptions,
+    ::Val{:nlp};
+    kwargs...,
+)
+    if opts.composite
+        composite_anchor_from_options(opts)
+        throw(ArgumentError(
+            "Composite steel beam sizing runs on sizing_strategy=:discrete. " *
+            "The NLP path does not run the Chapter I check."))
+    end
+    throw(MethodError(_size_beams_impl!, (struc, opts, Val(:nlp))))
 end
 
 # --- Per-group override narrowing for the batched steel-beam path (Run 4 / Phase B) ---

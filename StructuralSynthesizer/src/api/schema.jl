@@ -98,6 +98,17 @@ function api_input_schema()
                 "beam_type" => "$(join(API_BEAM_TYPES, " | ")). Default: steel_w.",
                 "beam_catalog" => "RC beam catalog when beam_type is rc_rect or rc_tbeam: $(join(API_BEAM_CATALOGS, " | ")). Default: large. Use xlarge for vaults with high thrust. Use custom with beam_catalog_bounds for bounds-based catalog. Ignored for pixelframe.",
                 "beam_sizing_strategy" => "discrete (catalog / MIP) or nlp (continuous Ipopt). Default: discrete. Applies to RC and steel beams.",
+                "composite" => "Boolean. Composite steel beam design (AISC 360 Chapter I). Default: false. Requires composite_anchor_d_in, composite_anchor_length_in, and composite_anchor_Fu_ksi. Thickness and concrete are read from the sized slab unless composite_t_slab_in is set.",
+                "composite_slab_type" => "solid or deck. Default: solid. deck also requires composite_deck_hr_in and composite_deck_wr_in.",
+                "composite_t_slab_in" => "Optional slab thickness override, inches. Omit to use the sized slab.",
+                "composite_anchor_d_in" => "Stud shank diameter, inches. Required when composite is true.",
+                "composite_anchor_length_in" => "Stud length after installation, inches. Required when composite is true.",
+                "composite_anchor_Fu_ksi" => "Stud tensile strength Fu, ksi. Required when composite is true.",
+                "composite_shored" => "Boolean. true skips the pre-cure steel check. Default: false (unshored).",
+                "composite_cp_class" => "SEI/ASCE 37-02 personnel class: very_light, light, medium, or heavy. Default: medium.",
+                "composite_deck_hr_in" => "Deck rib height, inches. Required when composite_slab_type is deck.",
+                "composite_deck_wr_in" => "Average deck rib width, inches. Required when composite_slab_type is deck.",
+                "composite_deck_orientation" => "perpendicular or parallel. Default: perpendicular.",
                 "beam_catalog_bounds" => "Required when beam_catalog is custom. Object: min_width_in, max_width_in, min_depth_in, max_depth_in, resolution_in (all in inches).",
                 "pixelframe_options" => "When column_type or beam_type is pixelframe. Object: fc_preset (standard | low | high | extended | custom) or fc_min_ksi, fc_max_ksi, fc_resolution_ksi when custom. Default: standard.",
                 "fire_rating" => "Fire rating (hours): 0, 1, 1.5, 2, 3, or 4. Default: 0.",
@@ -318,6 +329,53 @@ function api_params_schema_structured()
             "type" => "enum", "default" => "discrete",
             "allowed" => collect(API_SIZING_STRATEGIES),
             "guidance" => "Same as column_sizing_strategy but for beams.",
+        ),
+        "composite" => Dict(
+            "type" => "boolean", "default" => false,
+            "guidance" => "Composite steel beams (AISC 360 Chapter I). Requires the stud diameter, length, and Fu. Thickness and concrete come from the sized slab unless overridden.",
+        ),
+        "composite_slab_type" => Dict(
+            "type" => "enum", "default" => "solid",
+            "allowed" => ["solid", "deck"],
+            "guidance" => "solid, or deck. Deck also requires rib height and rib width.",
+        ),
+        "composite_t_slab_in" => Dict(
+            "type" => "number_or_null", "default" => "null", "unit" => "in",
+            "guidance" => "Slab thickness override. Omit to use the sized slab.",
+        ),
+        "composite_anchor_d_in" => Dict(
+            "type" => "number_or_null", "default" => "null", "unit" => "in",
+            "guidance" => "Stud shank diameter. Required when composite is true.",
+        ),
+        "composite_anchor_length_in" => Dict(
+            "type" => "number_or_null", "default" => "null", "unit" => "in",
+            "guidance" => "Stud length after installation. Required when composite is true.",
+        ),
+        "composite_anchor_Fu_ksi" => Dict(
+            "type" => "number_or_null", "default" => "null", "unit" => "ksi",
+            "guidance" => "Stud tensile strength Fu. Required when composite is true.",
+        ),
+        "composite_shored" => Dict(
+            "type" => "boolean", "default" => false,
+            "guidance" => "true skips the pre-cure steel check. Default is unshored.",
+        ),
+        "composite_cp_class" => Dict(
+            "type" => "enum", "default" => "medium",
+            "allowed" => ["very_light", "light", "medium", "heavy"],
+            "guidance" => "SEI/ASCE 37-02 personnel and equipment class for the pre-cure load.",
+        ),
+        "composite_deck_hr_in" => Dict(
+            "type" => "number_or_null", "default" => "null", "unit" => "in",
+            "guidance" => "Deck rib height. Required when composite_slab_type is deck.",
+        ),
+        "composite_deck_wr_in" => Dict(
+            "type" => "number_or_null", "default" => "null", "unit" => "in",
+            "guidance" => "Average deck rib width. Required when composite_slab_type is deck.",
+        ),
+        "composite_deck_orientation" => Dict(
+            "type" => "enum", "default" => "perpendicular",
+            "allowed" => ["perpendicular", "parallel"],
+            "guidance" => "Deck ribs relative to the beam.",
         ),
         "beam_catalog_bounds" => Dict(
             "type" => "object_or_null", "default" => "null",
@@ -833,6 +891,17 @@ Base.@kwdef mutable struct APIParams
     beam_catalog::String = "large"   # RC beam catalog: standard | small | large | xlarge | all | custom. Ignored for steel.
     beam_sizing_strategy::String = "discrete"  # RC beams only: discrete | nlp
     beam_catalog_bounds::Union{APIBeamCatalogBounds, Nothing} = nothing  # Required when beam_catalog is "custom".
+    composite::Bool = false
+    composite_slab_type::String = "solid"
+    composite_t_slab_in::Union{Float64, Nothing} = nothing
+    composite_anchor_d_in::Union{Float64, Nothing} = nothing
+    composite_anchor_length_in::Union{Float64, Nothing} = nothing
+    composite_anchor_Fu_ksi::Union{Float64, Nothing} = nothing
+    composite_shored::Bool = false
+    composite_cp_class::String = "medium"
+    composite_deck_hr_in::Union{Float64, Nothing} = nothing
+    composite_deck_wr_in::Union{Float64, Nothing} = nothing
+    composite_deck_orientation::String = "perpendicular"
     pixelframe_options::Union{APIPixelFrameOptions, Nothing} = nothing  # When column_type or beam_type is pixelframe.
     fire_rating::Float64 = 0.0
     optimize_for::String = "weight"

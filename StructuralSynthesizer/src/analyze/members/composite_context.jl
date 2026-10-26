@@ -234,6 +234,7 @@ function composite_context_from_beam(
     slab = nothing,
     shored::Bool = false, Lb_const = nothing,
     Asr = 0.0u"mm^2", Fysr = 0.0u"MPa", neg_moment::Bool = false,
+    ΣQn_neg = nothing,
 )
     # --- Span (c-to-c); building default = member length ---------------------
     L = isnothing(L_beam) ? member_length(beam) : L_beam
@@ -241,9 +242,9 @@ function composite_context_from_beam(
 
     # --- Full-slab override: skip all slab-field derivation ------------------
     if !isnothing(slab)
-        lbc = isnothing(Lb_const) ? L : Lb_const
-        return CompositeContext(slab, anchor, L; shored = shored, Lb_const = lbc,
-                                Asr = Asr, Fysr = Fysr, neg_moment = neg_moment)
+        return CompositeContext(slab, anchor, L; shored = shored, Lb_const = Lb_const,
+                                Asr = Asr, Fysr = Fysr, neg_moment = neg_moment,
+                                ΣQn_neg = ΣQn_neg)
     end
 
     # --- Per-side representative extents (building default) -------------------
@@ -273,9 +274,9 @@ function composite_context_from_beam(
                        bsl, bsr; edge_dist_left = edl, edge_dist_right = edr)
     end
 
-    lbc = isnothing(Lb_const) ? L : Lb_const
-    return CompositeContext(slab_built, anchor, L; shored = shored, Lb_const = lbc,
-                            Asr = Asr, Fysr = Fysr, neg_moment = neg_moment)
+    return CompositeContext(slab_built, anchor, L; shored = shored, Lb_const = Lb_const,
+                            Asr = Asr, Fysr = Fysr, neg_moment = neg_moment,
+                            ΣQn_neg = ΣQn_neg)
 end
 
 # -----------------------------------------------------------------------------
@@ -435,15 +436,34 @@ composite_deflection_scale(section, I_LB) = ustrip(section.Ix / I_LB)
 # -----------------------------------------------------------------------------
 
 """
-Nominal headed stud stored on the sizing context.
-
-Full-composite sizing sets `ΣQn = Cf(b_eff)` (AISC 360-16 §I3.2a, corpus:
-aisc-360-16, PDF p. 151), so stud shear strength does not enter `ϕMn`. The
-anchor only fills `CompositeContext`. Dimensions match the Chapter I test
-fixture and `Stud_51`: 3/4 in × 5 in, Fu = 65 ksi, Fy = 51 ksi.
+Stud from the beam options. AISC 360-22 Eq. I8-1 uses `Fu`, not the stud yield
+strength (corpus: aisc-360-22, PDF p. 181). `Fy` is stored as zero so it is
+not a stand-in grade. Density is the stud steel density used only for weight.
 """
-function _nominal_full_composite_anchor()
-    HeadedStudAnchor(0.75u"inch", 5.0u"inch", 65.0u"ksi", 51.0u"ksi", 490.0u"lb/ft^3")
+function composite_anchor_from_options(opts)
+    opts.composite_anchor_d === nothing && throw(ArgumentError(
+        "Composite beam design needs the stud diameter (composite_anchor_d)."))
+    opts.composite_anchor_length === nothing && throw(ArgumentError(
+        "Composite beam design needs the stud length (composite_anchor_length)."))
+    opts.composite_anchor_Fu === nothing && throw(ArgumentError(
+        "Composite beam design needs the stud tensile strength (composite_anchor_Fu)."))
+    HeadedStudAnchor(opts.composite_anchor_d, opts.composite_anchor_length,
+                     opts.composite_anchor_Fu, 0.0u"ksi", 490.0u"lb/ft^3")
+end
+
+"""Keyword bundle `size!` and `design_building` pass into `size_beams!`."""
+function composite_option_kwargs(opts)
+    opts isa StructuralSizer.SteelBeamOptions && opts.composite || return (;)
+    return (;
+        composite_anchor = composite_anchor_from_options(opts),
+        composite_t_slab = opts.composite_t_slab,
+        composite_shored = opts.composite_shored,
+        composite_cp_class = opts.composite_cp_class,
+        composite_slab_type = opts.composite_slab_type,
+        composite_deck_hr = opts.composite_deck_hr,
+        composite_deck_wr = opts.composite_deck_wr,
+        composite_deck_orientation = opts.composite_deck_orientation,
+    )
 end
 
 """Slabs whose cells share an edge with `beam`."""
@@ -549,9 +569,90 @@ end
 _as_length(L) = L isa Unitful.Quantity ? uconvert(u"m", L) : L * u"m"
 
 """
+Uniform line load of tributary loads, or `nothing` when the width varies.
+
+A varying width is not the layout of the construction line load, so the
+pre-cure moment must not be scaled from it.
+"""
+function _uniform_tributary_line_load(loads)
+    isempty(loads) && return nothing
+    w = 0.0
+    for load in loads
+        load isa Asap.TributaryLoad || return nothing
+        widths = load._widths_m
+        w0 = widths[1]
+        for wi in widths
+            isapprox(wi, w0; rtol=1e-5, atol=1e-8) || return nothing
+        end
+        w += load._pressure_Pa * w0
+    end
+    w > 0 || return nothing
+    return w
+end
+
+"""Dead-load displacement vector, or `nothing` when the model has no dead case."""
+function _dead_load_displacement(struc::BuildingStructure)
+    loads = Asap.AbstractLoad[]
+    for v in values(struc.cell_dead_loads)
+        append!(loads, v)
+    end
+    isempty(loads) && return nothing
+    model = struc.asap_model
+    isempty(model.elements) && return nothing
+    return Asap.solve(model, [loads])[1]
+end
+
+function _dead_loads_by_element(struc::BuildingStructure)
+    by = Dict{Int, Vector{Asap.AbstractLoad}}()
+    for loads in values(struc.cell_dead_loads)
+        for load in loads
+            id = load.element.elementID
+            push!(get!(() -> Asap.AbstractLoad[], by, id), load)
+        end
+    end
+    return by
+end
+
+"""
+    beam_pre_cure_shape(struc, beam, u_dead, by_element) -> PreCureShape or nothing
+
+Extrema of absolute strong-axis moment and shear on `beam` from the dead-load
+displacement `u_dead`, plus the uniform line load that produced them.
+
+Returns `nothing` when any segment is unloaded or the line load changes along
+the beam. The construction check then keeps the simple-span statics.
+"""
+function beam_pre_cure_shape(struc::BuildingStructure, beam::Beam, u_dead, by_element)
+    w_beam = nothing
+    M = 0.0
+    V = 0.0
+    n = 0
+    for si in segment_indices(beam)
+        seg = struc.segments[si]
+        el = struc.asap_model.elements[seg.edge_idx]
+        loads = get(by_element, el.elementID, Asap.AbstractLoad[])
+        w_el = _uniform_tributary_line_load(loads)
+        w_el === nothing && return nothing
+        if w_beam === nothing
+            w_beam = w_el
+        elseif !isapprox(w_beam, w_el; rtol=1e-5, atol=1e-6)
+            return nothing
+        end
+        f = _element_forces_from_u(el, u_dead, loads; resolution=40)
+        M = max(M, mapreduce(abs, max, f.My))
+        V = max(V, mapreduce(abs, max, f.Vy))
+        n += 1
+    end
+    n == 0 && return nothing
+    return (M_ref = M * u"N*m", V_ref = V * u"N", w_ref = w_beam * u"N/m")
+end
+
+"""
     composite_group_payload(struc, beams, L_beam, concrete, t_slab, Es;
-        anchor=nothing, shored=false, Lb_const=nothing,
-        Asr=0.0u"mm^2", Fysr=0.0u"MPa", neg_moment=false) -> PerStationComposite
+        anchor, shored=false, Lb_const=nothing,
+        Asr=0.0u"mm^2", Fysr=0.0u"MPa", neg_moment=false,
+        cp_class=:medium, slab_type=:solid,
+        deck_hr=nothing, deck_wr=nothing, deck_orientation=:perpendicular) -> PerStationComposite
 
 One [`PerStationComposite`](@ref) for a beam group. Each beam keeps its own
 center-to-center span (AISC 360-22 §I3.1, the `L/8` cap; corpus: aisc-360-22,
@@ -560,9 +661,14 @@ used when a field has no length of its own. Passing the sum of the group is
 safe: the checker reads each field's span, and the default construction
 unbraced length follows that span.
 
+`anchor` is required. There is no nominal stud.
+
 `t_slab`, when given, is the thickness for every beam. When it is `nothing`,
 each beam uses its own adjacent solid slab. Concrete comes from that slab's
 volume map when the map names one concrete; otherwise from `concrete`.
+
+`slab_type = :deck` builds a `DeckSlabOnBeam` and requires `deck_hr` and
+`deck_wr`. Deck acceptance limits are not applied here.
 
 `Asr` stays caller-supplied. `neg_moment` defaults to false, so hogging uses
 Chapter F until developed slab reinforcement and negative-region anchors are
@@ -576,9 +682,31 @@ function composite_group_payload(
     Asr = 0.0u"mm^2",
     Fysr = 0.0u"MPa",
     neg_moment::Bool = false,
+    ΣQn_neg = nothing,
+    cp_class::Symbol = :medium,
+    slab_type::Symbol = :solid,
+    deck_hr = nothing,
+    deck_wr = nothing,
+    deck_orientation::Symbol = :perpendicular,
 )
+    anchor === nothing && throw(ArgumentError(
+        "Composite beam design needs the stud anchor diameter (composite_anchor_d), " *
+        "length (composite_anchor_length), and Fu (composite_anchor_Fu)."))
+    slab_type in (:solid, :deck) || throw(ArgumentError(
+        "composite_slab_type must be :solid or :deck, got :$slab_type."))
+    if slab_type === :deck
+        deck_hr === nothing && throw(ArgumentError(
+            "Composite beam design needs the deck rib height (composite_deck_hr)."))
+        deck_wr === nothing && throw(ArgumentError(
+            "Composite beam design needs the deck rib width (composite_deck_wr)."))
+        deck_orientation in (:perpendicular, :parallel) || throw(ArgumentError(
+            "composite_deck_orientation must be :perpendicular or :parallel, got :$deck_orientation."))
+    end
     L = _as_length(L_beam)
-    anc = anchor === nothing ? _nominal_full_composite_anchor() : anchor
+    # One dead-load solve for the group. A beam whose dead load is not a
+    # uniform line load keeps `pre_cure = nothing` and the simple-span check.
+    u_dead = _dead_load_displacement(struc)
+    by_element = u_dead === nothing ? nothing : _dead_loads_by_element(struc)
     fields = map(beams) do beam
         t_i, conc_i = _beam_slab_inputs(struc, beam,
                                         t_slab === nothing ? nothing : t_slab,
@@ -590,17 +718,26 @@ function composite_group_payload(
         end
         # Zero spacing: a side with no profile contributes no width. Real sides
         # come from the profiles, and the checker restuffs spacing at the station.
-        slab_i = SolidSlabOnBeam(t_i, conc_i.fc′, conc_i.E, conc_i.ρ, Es,
-                                 0.0u"m", 0.0u"m")
+        slab_i = if slab_type === :deck
+            DeckSlabOnBeam(t_i, conc_i.fc′, conc_i.E, conc_i.ρ, Es,
+                           deck_hr, deck_wr, deck_orientation, 0.0u"m", 0.0u"m")
+        else
+            SolidSlabOnBeam(t_i, conc_i.fc′, conc_i.E, conc_i.ρ, Es,
+                            0.0u"m", 0.0u"m")
+        end
         left, right = beam_side_profiles(struc, beam)
         M_of_s, bps = beam_signed_moment_field(struc, beam)
         L_i = _as_length(member_length(beam))
-        BeamSaggingField(left, right, M_of_s, collect(Float64, bps), L_i, slab_i)
+        pre = u_dead === nothing ? nothing :
+            beam_pre_cure_shape(struc, beam, u_dead, by_element)
+        BeamSaggingField(left, right, M_of_s, collect(Float64, bps), L_i, slab_i;
+                         pre_cure = pre)
     end
     isempty(fields) && throw(ArgumentError("composite_group_payload needs at least one beam"))
-    lbc = Lb_const === nothing ? L : Lb_const
-    ctx = CompositeContext(first(fields).slab, anc, L; shored = shored, Lb_const = lbc,
-                           Asr = Asr, Fysr = Fysr, neg_moment = neg_moment)
+    ctx = CompositeContext(first(fields).slab, anchor, L; shored = shored, Lb_const = Lb_const,
+                           Asr = Asr, Fysr = Fysr, neg_moment = neg_moment,
+                           ΣQn_neg = ΣQn_neg,
+                           cp_class = cp_class)
     return PerStationComposite(ctx, fields)
 end
 
@@ -618,11 +755,18 @@ already records.
 function composite_payloads_for_groups(
     struc::BuildingStructure, group_ids, L_totals, concrete, Es;
     t_slab = nothing, anchor = nothing,
+    shored::Bool = false, cp_class::Symbol = :medium,
+    slab_type::Symbol = :solid,
+    deck_hr = nothing, deck_wr = nothing,
+    deck_orientation::Symbol = :perpendicular,
 )
     map(enumerate(group_ids)) do (g_idx, gid)
         mg = struc.member_groups[gid]
         beams = [struc.beams[i] for i in mg.member_indices]
         composite_group_payload(struc, beams, L_totals[g_idx] * u"m",
-                                concrete, t_slab, Es; anchor = anchor)
+                                concrete, t_slab, Es; anchor = anchor,
+                                shored = shored, cp_class = cp_class,
+                                slab_type = slab_type, deck_hr = deck_hr,
+                                deck_wr = deck_wr, deck_orientation = deck_orientation)
     end
 end

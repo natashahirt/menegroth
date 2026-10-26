@@ -74,8 +74,16 @@ to `nothing` to opt out.
 opts = SteelBeamOptions()                                # L/360 LL, L/240 total
 opts = SteelBeamOptions(deflection_limit = nothing,      # strength only
                         total_deflection_limit = nothing)
-opts = SteelBeamOptions(composite = true)                # composite beam sizing
+opts = SteelBeamOptions(composite = true,
+                        composite_anchor_d = 0.75u"inch",
+                        composite_anchor_length = 5.0u"inch",
+                        composite_anchor_Fu = 65.0u"ksi")
 ```
+
+`composite = false` does not read the composite fields. With `composite = true`,
+the stud diameter, length, and Fu are required. Thickness and concrete come
+from the sized slab when those fields are left unset. Shoring defaults to
+unshored, so the pre-cure check runs.
 
 # Fields
 - `material`: Steel grade (default: A992_Steel)
@@ -86,7 +94,13 @@ opts = SteelBeamOptions(composite = true)                # composite beam sizing
 - `max_depth`: Maximum depth (default: Inf mm)
 - `deflection_limit`: LL L/δ ratio (default: `1/360`). `nothing` to disable.
 - `total_deflection_limit`: DL+LL L/δ ratio (default: `1/240`). `nothing` to disable.
-- `composite`: Enable composite beam sizing via AISC 360-16 Ch. I (default: false)
+- `composite`: Enable composite beam sizing via AISC 360 Chapter I (default: false)
+- `composite_slab_type`: `:solid` or `:deck` (default: `:solid`)
+- `composite_t_slab`: Slab thickness override. `nothing` reads the sized slab.
+- `composite_deck_hr`, `composite_deck_wr`, `composite_deck_orientation`: required for `:deck`
+- `composite_anchor_d`, `composite_anchor_length`, `composite_anchor_Fu`: the stud. Required when composite.
+- `composite_shored`: `true` skips the pre-cure steel check (default: false)
+- `composite_cp_class`: SEI/ASCE 37-02 personnel class (default: `:medium`)
 - `sizing_strategy`: `:discrete` (MIP catalog) or `:nlp` (continuous) (default: `:discrete`)
 - `n_max_sections`: Limit unique sections, 0 = no limit (default: 0)
 - `objective`: MinWeight(), MinVolume(), MinCost(), MinCarbon() (default: MinWeight())
@@ -102,6 +116,16 @@ Base.@kwdef struct SteelBeamOptions
     deflection_limit::Union{Nothing, Float64} = 1/360
     total_deflection_limit::Union{Nothing, Float64} = 1/240
     composite::Bool = false
+    composite_slab_type::Symbol = :solid
+    composite_t_slab::Union{Nothing, Length} = nothing
+    composite_deck_hr::Union{Nothing, Length} = nothing
+    composite_deck_wr::Union{Nothing, Length} = nothing
+    composite_deck_orientation::Symbol = :perpendicular
+    composite_anchor_d::Union{Nothing, Length} = nothing
+    composite_anchor_length::Union{Nothing, Length} = nothing
+    composite_anchor_Fu::Union{Nothing, Pressure} = nothing
+    composite_shored::Bool = false
+    composite_cp_class::Symbol = :medium
     n_max_sections::Int = 0
     sizing_strategy::Symbol = :discrete
     objective::AbstractObjective = MinWeight()

@@ -25,6 +25,56 @@
 # ==============================================================================
 # Note: _smooth_max, _smooth_min, _smooth_step are imported from aisc/utils.jl
 
+"""
+    _smooth_phi_Pn_max(Ag, ρg, fc, fy; tie_type) -> Float64
+
+Design axial strength φPn,max (kip) for a nonprestressed column.
+
+ACI 318-11 §10.3.6 Eq. (10-1) spiral and Eq. (10-2) tied
+(corpus: aci-318-11, p. 143):
+
+    φPn,max = αφ [0.85 f'c (Ag − Ast) + fy Ast]
+
+with α = 0.85 (spiral) or 0.80 (tied). φ is the compression-controlled
+factor from §9.3.2.2 (corpus: aci-318-11, p. 127): 0.75 spiral, 0.65 tied.
+
+`Ag` in in², `fc` and `fy` in ksi, `ρg` = Ast/Ag.
+"""
+function _smooth_phi_Pn_max(Ag::Float64, ρg::Float64, fc::Float64, fy::Float64;
+                            tie_type::Symbol=:tied)
+    Ast = ρg * Ag
+    P0 = 0.85 * fc * (Ag - Ast) + fy * Ast
+    α = tie_type == :spiral ? 0.85 : 0.80
+    φ = tie_type == :spiral ? 0.75 : 0.65
+    return max(φ * α * P0, 1e-6)
+end
+
+"""Pu / φPn,max. Above 1.0 the section is past the ACI axial cap."""
+function _smooth_axial_cap_util(Ag::Float64, ρg::Float64, Pu_kip::Float64,
+                                fc::Float64, fy::Float64; tie_type::Symbol=:tied)
+    return Pu_kip / _smooth_phi_Pn_max(Ag, ρg, fc, fy; tie_type)
+end
+
+"""
+Moment utilization, combined with the ACI 318-11 §10.3.6 axial cap.
+
+A collapsed φMn used to be replaced by a constant, or by the axial ratio
+alone. Either one hides a real moment: the constant has no gradient, and
+the axial ratio is often near 1, so Ipopt treats a crushed section as
+almost feasible. With moment demand, the moment ratio stays in the result
+and grows as φMn falls. With no moment, an axial overload is Pu/φPn,max,
+which falls as Ag or ρg grows.
+"""
+function _smooth_pm_or_axial_util(φMn_kipft::Float64, Mu_kipft::Float64, axial::Float64)
+    if abs(Mu_kipft) <= 0.01
+        return axial > 1.0 ? axial : 0.0
+    end
+    # Floor only avoids division by zero. Above it, utilization still
+    # moves with φMn. Below it, utilization still moves with Mu.
+    moment_util = abs(Mu_kipft) / max(φMn_kipft, 1e-4)
+    return _smooth_max(moment_util, axial; k=80.0)
+end
+
 """Smooth |x| ≈ softmax(x, -x). Avoids kink at x=0."""
 @inline _pm_sabs(x; k::Real=200.0) = _smooth_max(x, -x; k=k)
 
@@ -247,12 +297,9 @@ function _smooth_rc_pm_util(b::Float64, h::Float64, ρg::Float64,
     # and utilization metric gap between smooth Mu/φMn and analytical P-M radial)
     φMn_kipft = r.φ * r.Mn / 12.0 * 0.90  # kip·in → kip·ft, with conservatism
 
-    # Guard: negligible capacity → high utilization
-    if φMn_kipft < 0.01
-        return abs(Mu_kipft) > 0.01 ? 100.0 : 0.0
-    end
-
-    return abs(Mu_kipft) / φMn_kipft
+    # ACI 318-11 §10.3.6. corpus: aci-318-11, p. 143.
+    axial = _smooth_axial_cap_util(b * h, ρg, Pu_kip, fc, fy; tie_type)
+    return _smooth_pm_or_axial_util(φMn_kipft, Mu_kipft, axial)
 end
 
 
@@ -417,11 +464,10 @@ function _smooth_rc_pm_util(D::Float64, ρg::Float64,
     # 10% conservatism (matches rectangular — accounts for smooth approx errors)
     φMn_kipft = r.φ * r.Mn / 12.0 * 0.90
 
-    if φMn_kipft < 0.01
-        return abs(Mu_kipft) > 0.01 ? 100.0 : 0.0
-    end
-
-    return abs(Mu_kipft) / φMn_kipft
+    # ACI 318-11 §10.3.6. corpus: aci-318-11, p. 143.
+    Ag = π * (D / 2.0)^2
+    axial = _smooth_axial_cap_util(Ag, ρg, Pu_kip, fc, fy; tie_type)
+    return _smooth_pm_or_axial_util(φMn_kipft, Mu_kipft, axial)
 end
 
 

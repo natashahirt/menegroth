@@ -21,6 +21,32 @@ than the built section can carry.
 """
 const RC_COLUMN_NLP_MAX_BARS = 32
 
+"""
+    _rc_nlp_delta_ns(Cm, stab) -> Float64
+
+Nonsway moment magnifier for the column NLP.
+
+ACI 318-11 §10.10.6 Eq. (10-12) (corpus: aci-318-11, p. 155):
+
+    δns = Cm / (1 − Pu/(0.75 Pc)) ≥ 1
+
+`stab` is Pu/(0.75 Pc). The equation is undefined at and beyond
+`stab = 1`. Past a magnifier of 15 the hyperbola is replaced by its
+tangent, so δns keeps rising as the section gets more slender,
+including through that pole. A constant stand-in has no gradient.
+"""
+function _rc_nlp_delta_ns(Cm::Float64, stab::Float64)
+    Cm_use = max(Cm, 1e-6)
+    δ_switch = 15.0
+    gap_switch = Cm_use / δ_switch
+    gap = 1.0 - stab
+    if gap >= gap_switch
+        return max(Cm_use / gap, 1.0)
+    end
+    slope = δ_switch^2 / Cm_use
+    return δ_switch + slope * (gap_switch - gap)
+end
+
 # ==============================================================================
 # Problem Type
 # ==============================================================================
@@ -287,6 +313,7 @@ function constraint_fns(p::RCColumnNLPProblem, x::Vector{Float64})
 
     # Slenderness magnification (smooth analytical version)
     Mux_design = p.Mux_kipft
+    stab = 0.0
     if p.opts.include_slenderness
         Ig = b * h^3 / 12.0   # in⁴
         Ec_ksi = 57.0 * sqrt(p.mat.fc * 1000.0)
@@ -303,19 +330,20 @@ function constraint_fns(p::RCColumnNLPProblem, x::Vector{Float64})
         M2x = to_kipft(p.demand.M2x)
         Cm = abs(M2x) > 1e-6 ? max(0.6 - 0.4 * M1x / M2x, 0.4) : 1.0
 
-        denom = max(1.0 - p.Pu_kip / (0.75 * Pc), 0.001)
-        δns = max(Cm / denom, 1.0)
-
-        if δns > 50.0
-            # Buckling failure on the strength rows; steel row is unaffected.
-            return [fill(100.0, n_constraints(p) - 1); steel_util]
-        end
+        # ACI 318-11 §10.10.6 Eq. (10-12). See `_rc_nlp_delta_ns`.
+        stab = p.Pu_kip / (0.75 * max(Pc, 1e-6))
+        δns = _rc_nlp_delta_ns(Cm, stab)
         Mux_design = δns * p.Mux_kipft
     end
 
     # Smooth analytical P-M utilization (replaces piecewise-linear P-M diagram)
     util_x = _smooth_rc_pm_util(b, h, ρ, p.Pu_kip, Mux_design, p.mat;
                                       cover, n_layers=10, tie_type=p.opts.tie_type)
+    # Eq. (10-12) is undefined for Pu ≥ 0.75 Pc. Keep that ratio in the
+    # strength row so an unstable section cannot look nearly feasible.
+    if stab >= 1.0
+        util_x = _smooth_max(util_x, stab; k=80.0)
+    end
 
     if p.Muy_kipft > 1e-6
         # Biaxial: Bresler load contour
@@ -324,6 +352,9 @@ function constraint_fns(p::RCColumnNLPProblem, x::Vector{Float64})
         φMnx = max(cap.φMn_kipft, 1e-6)
         φMny = φMnx   # Symmetric assumption (conservative for b < h)
         util_biax = (abs(Mux_design) / φMnx)^1.5 + (abs(p.Muy_kipft) / φMny)^1.5
+        if stab >= 1.0
+            util_biax = _smooth_max(util_biax, stab; k=80.0)
+        end
         return [util_x, util_biax, steel_util]
     else
         return [util_x, steel_util]

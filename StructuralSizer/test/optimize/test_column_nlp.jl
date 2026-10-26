@@ -54,6 +54,25 @@ end
 
 @testset "RC Column NLP Optimization" begin
     
+    @testset "Crushed section reports the axial cap, not a flat 100" begin
+        # ACI 318-11 §10.3.6 Eq. (10-2), φ = 0.65. corpus: aci-318-11, p. 143 and p. 127.
+        # 10×10 in at ρg = 0.02 cannot carry 1000 kip. 12×36 in at the same
+        # ratio is under the cap, and the utilization falls as Ag grows.
+        small = StructuralSizer._smooth_axial_cap_util(100.0, 0.02, 1000.0, 4.0, 60.0)
+        larger = StructuralSizer._smooth_axial_cap_util(12.0 * 36.0, 0.02, 1000.0, 4.0, 60.0)
+        @test small > 1.0
+        @test larger < small
+        # No moment: the row is the axial cap, and it is not the old flat 100.
+        @test StructuralSizer._smooth_pm_or_axial_util(0.0, 0.0, small) ≈ small
+        @test StructuralSizer._smooth_pm_or_axial_util(0.0, 0.0, small) < 50.0
+        # A real moment on a collapsed φMn stays a moment failure. Dropping
+        # it down to the axial ratio made that section look almost feasible.
+        crushed = StructuralSizer._smooth_pm_or_axial_util(0.0, 500.0, small)
+        healthy = StructuralSizer._smooth_pm_or_axial_util(500.0, 500.0, small)
+        @test crushed > small
+        @test crushed > healthy
+    end
+
     @testset "NLPColumnOptions construction" begin
         # Default options
         opts = NLPColumnOptions()
@@ -439,6 +458,13 @@ end
             @test check_acceptable_as_built(combined, Pu, Mux, Muy, geometry, opts)
             @test check_acceptable_as_built(axial, Pu, Mux, Muy, geometry, opts)
         end
+
+        # 1000 kip / 500 kip-ft used to come back :infeasible. The smooth
+        # P-M row went flat at 100 once the trial section was axially
+        # crushed, so Ipopt had no gradient toward a section that passes.
+        heavy = saved["Pu=1000 Mux=500 Muy=0"]
+        @test acceptable(heavy.combined.status)
+        @test passes_aci_as_built(heavy.combined.section, 1000.0, 500.0, 0.0, geometry, opts)
 
         # 500 kip / 50 kip-ft / 200 kip-ft: moment start alone was infeasible.
         biax = saved["Pu=500 Mux=50 Muy=200"]

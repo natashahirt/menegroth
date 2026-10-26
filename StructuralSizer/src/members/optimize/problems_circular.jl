@@ -186,6 +186,7 @@ function constraint_fns(p::RCCircularNLPProblem, x::Vector{Float64})
 
     # Slenderness magnification (smooth analytical version)
     Mux_design = p.Mux_kipft
+    stab = 0.0
     if p.opts.include_slenderness
         R = D / 2.0
         Ig = π * R^4 / 4.0   # in⁴
@@ -202,18 +203,19 @@ function constraint_fns(p::RCCircularNLPProblem, x::Vector{Float64})
         M2x = to_kipft(p.demand.M2x)
         Cm = abs(M2x) > 1e-6 ? max(0.6 - 0.4 * M1x / M2x, 0.4) : 1.0
 
-        denom = max(1.0 - p.Pu_kip / (0.75 * Pc), 0.001)
-        δns = max(Cm / denom, 1.0)
-
-        if δns > 50.0
-            return [100.0]
-        end
+        # ACI 318-11 §10.10.6 Eq. (10-12). See `_rc_nlp_delta_ns`.
+        stab = p.Pu_kip / (0.75 * max(Pc, 1e-6))
+        δns = _rc_nlp_delta_ns(Cm, stab)
         Mux_design = δns * p.Mux_kipft
     end
 
     # Smooth analytical P-M utilization (replaces piecewise-linear P-M diagram)
     util = _smooth_rc_pm_util(D, ρ, p.Pu_kip, Mux_design, p.mat;
                                     cover, n_bars, tie_type=p.opts.tie_type)
+    # Eq. (10-12) is undefined for Pu ≥ 0.75 Pc.
+    if stab >= 1.0
+        util = _smooth_max(util, stab; k=80.0)
+    end
     return [util]
 end
 

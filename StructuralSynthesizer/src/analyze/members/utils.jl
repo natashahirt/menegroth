@@ -4565,6 +4565,13 @@ each group uses its own material from `result.materials_chosen[g_idx]`. Otherwis
 """
 function _apply_column_results!(struc, result, group_ids, material, material_type, edge_ids_in_group;
                                  I_factor::Real = 0.70)
+    # NLP success is :nlp_complete only, and only when every column passed
+    # the as-built check. Any other Symbol status is not a completed design.
+    # Discrete MIP results use a MathOptInterface status and still apply.
+    if !StructuralSizer._rc_nlp_result_installable(result)
+        @warn "Column sizing result is not a completed design; leaving the building unchanged" status=result.status
+        return
+    end
     member_array = struc.columns
     has_multi_mat = hasproperty(result, :materials_chosen)
     

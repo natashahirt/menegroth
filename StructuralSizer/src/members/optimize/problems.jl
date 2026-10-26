@@ -11,6 +11,16 @@
 using Unitful
 using Asap: kip, ksi, to_kip, to_kipft, to_inches, to_sqinches
 
+"""
+Largest longitudinal bar count a rectangular NLP column may be built with.
+
+Practical layout cap, not an ACI limit. Shared by the placeable-steel
+constraint in [`constraint_fns`](@ref) and by
+[`_build_nlp_trial_section`](@ref), so the solver cannot ask for more steel
+than the built section can carry.
+"""
+const RC_COLUMN_NLP_MAX_BARS = 32
+
 # ==============================================================================
 # Problem Type
 # ==============================================================================
@@ -32,6 +42,7 @@ design variables, finding the minimum-area section that satisfies ACI 318.
 # Constraints
 - P-M interaction: utilization ≤ 1.0
 - Biaxial interaction (if Muy > 0): Bresler load contour ≤ 1.0
+- Placeable steel: ρg·b·h / (`RC_COLUMN_NLP_MAX_BARS`·A_bar) ≤ 1.0
 
 # Usage
 ```julia
@@ -221,19 +232,33 @@ end
 # AbstractNLPProblem Interface: Constraints
 # ==============================================================================
 
-"""Number of constraints: 1 (P-Mx) or 2 (+ biaxial Bresler) if Muy > 0."""
+"""Number of constraints: P-Mx, biaxial Bresler if Muy > 0, then placeable steel."""
 function n_constraints(p::RCColumnNLPProblem)
-    # 1 constraint for P-Mx, +1 for biaxial if Muy > 0
-    return p.Muy_kipft > 1e-6 ? 2 : 1
+    # P-Mx, +1 for biaxial if Muy > 0, +1 placeable steel (always last)
+    return p.Muy_kipft > 1e-6 ? 3 : 2
 end
 
 """Human-readable constraint names for solver diagnostics."""
 function constraint_names(p::RCColumnNLPProblem)
     if p.Muy_kipft > 1e-6
-        return ["P-Mx utilization", "biaxial utilization"]
+        return ["P-Mx utilization", "biaxial utilization", "placeable steel"]
     else
-        return ["P-M utilization"]
+        return ["P-M utilization", "placeable steel"]
     end
+end
+
+"""
+    _rc_column_placeable_steel_util(b, h, ρ, bar_size) -> Float64
+
+Required steel over the most steel the built section can carry:
+`ρ·b·h / (RC_COLUMN_NLP_MAX_BARS · A_bar)`. `b`, `h` in inches, `ρ`
+dimensionless, `A_bar` in in², so the ratio is dimensionless. Values above
+1.0 mean [`_build_nlp_trial_section`](@ref) would cap the bar count and
+place less steel than `ρ` asks for.
+"""
+function _rc_column_placeable_steel_util(b, h, ρ, bar_size::Int)
+    A_bar = ustrip(u"inch^2", rebar(bar_size).A)
+    return ρ * b * h / (RC_COLUMN_NLP_MAX_BARS * A_bar)
 end
 
 """Constraint bounds: all utilizations ≤ 1.0, no lower bound."""
@@ -249,9 +274,12 @@ end
 
 Evaluate smooth ACI 318 P-M constraint utilizations for RC column.
 Includes optional slenderness magnification and Bresler biaxial interaction.
+The last entry is the placeable-steel ratio
+([`_rc_column_placeable_steel_util`](@ref)).
 """
 function constraint_fns(p::RCColumnNLPProblem, x::Vector{Float64})
     b, h, ρ = x
+    steel_util = _rc_column_placeable_steel_util(b, h, ρ, p.opts.bar_size)
 
     # Effective cover to bar centroid (inches)
     db = ustrip(u"inch", rebar(p.opts.bar_size).diameter)
@@ -279,7 +307,8 @@ function constraint_fns(p::RCColumnNLPProblem, x::Vector{Float64})
         δns = max(Cm / denom, 1.0)
 
         if δns > 50.0
-            return fill(100.0, n_constraints(p))   # Buckling failure
+            # Buckling failure on the strength rows; steel row is unaffected.
+            return [fill(100.0, n_constraints(p) - 1); steel_util]
         end
         Mux_design = δns * p.Mux_kipft
     end
@@ -295,9 +324,9 @@ function constraint_fns(p::RCColumnNLPProblem, x::Vector{Float64})
         φMnx = max(cap.φMn_kipft, 1e-6)
         φMny = φMnx   # Symmetric assumption (conservative for b < h)
         util_biax = (abs(Mux_design) / φMnx)^1.5 + (abs(p.Muy_kipft) / φMny)^1.5
-        return [util_x, util_biax]
+        return [util_x, util_biax, steel_util]
     else
-        return [util_x]
+        return [util_x, steel_util]
     end
 end
 
@@ -311,33 +340,48 @@ end
 Build an `RCColumnSection` from continuous design variables (b, h, ρg).
 
 Determines the number of bars to achieve the target ρg and constructs the section.
+The count is rounded up to even and capped at `RC_COLUMN_NLP_MAX_BARS`, so the
+built section can carry less steel than `ρg` when the cap binds.
 Returns `nothing` if the configuration is invalid (e.g., too many bars for dimensions).
 """
 function _build_nlp_trial_section(
     b_in::Real, h_in::Real, ρg::Real,
     opts::NLPColumnOptions
 )
+    return _build_nlp_column_section(
+        b_in, h_in, _nlp_trial_bar_count(b_in, h_in, ρg, opts), opts)
+end
+
+"""
+    _nlp_trial_bar_count(b_in, h_in, ρg, opts) -> Int
+
+Bar count [`_build_nlp_trial_section`](@ref) uses for `ρg` at `b_in × h_in`
+(inches): `ceil(ρg·b·h / A_bar)`, at least the tie-type minimum, rounded up
+to even, then capped at `RC_COLUMN_NLP_MAX_BARS`.
+"""
+function _nlp_trial_bar_count(b_in::Real, h_in::Real, ρg::Real, opts::NLPColumnOptions)
+    As_bar = ustrip(u"inch^2", rebar(opts.bar_size).A)
+    n_bars = max(_nlp_min_bars(opts), ceil(Int, ρg * b_in * h_in / As_bar))
+    # Even count for a symmetric perimeter arrangement
+    n_bars = iseven(n_bars) ? n_bars : n_bars + 1
+    return min(n_bars, RC_COLUMN_NLP_MAX_BARS)
+end
+
+"""Minimum bar count for the tie type (4 tied, 6 spiral), as in `_validate_column_section`."""
+_nlp_min_bars(opts::NLPColumnOptions) = opts.tie_type == :spiral ? 6 : 4
+
+"""
+    _build_nlp_column_section(b_in, h_in, n_bars, opts) -> Union{RCColumnSection, Nothing}
+
+Build a `b_in × h_in` (inches) section with `n_bars` of `opts.bar_size`.
+Returns `nothing` when the constructor rejects the layout.
+"""
+function _build_nlp_column_section(
+    b_in::Real, h_in::Real, n_bars::Int,
+    opts::NLPColumnOptions
+)
+    n_bars <= RC_COLUMN_NLP_MAX_BARS || return nothing
     try
-        # Calculate required steel area
-        Ag = b_in * h_in
-        As_required = ρg * Ag
-        
-        # Get bar properties
-        bar = rebar(opts.bar_size)
-        As_bar = ustrip(u"inch^2", bar.A)
-        
-        # Calculate number of bars
-        min_bars = opts.tie_type == :spiral ? 6 : 4
-        n_bars_raw = As_required / As_bar
-        n_bars = max(min_bars, ceil(Int, n_bars_raw))
-        
-        # Make even for symmetric perimeter arrangement
-        n_bars = iseven(n_bars) ? n_bars : n_bars + 1
-        
-        # Cap at reasonable maximum
-        n_bars = min(n_bars, 32)
-        
-        # Build section
         return RCColumnSection(
             b = b_in * u"inch",
             h = h_in * u"inch",
@@ -365,10 +409,11 @@ Result from RC column NLP optimization.
 - `section`: Optimized `RCColumnSection` (rounded to practical dimensions)
 - `b_opt`: Optimal width from solver (inches, continuous)
 - `h_opt`: Optimal depth from solver (inches, continuous)
-- `ρ_opt`: Optimal reinforcement ratio (continuous)
-- `b_final`: Final width after rounding (inches)
-- `h_final`: Final depth after rounding (inches)
-- `area`: Final cross-sectional area (sq in)
+- `ρ_opt`: Optimal reinforcement ratio (continuous). If `size_rc_column_nlp`
+  had to repair the built section, this is the returned section's `ρg`.
+- `b_final`: Final width of `section` (inches)
+- `h_final`: Final depth of `section` (inches)
+- `area`: Final cross-sectional area of `section` (sq in)
 - `status`: Solver termination status
 - `iterations`: Number of solver iterations/evaluations
 """
@@ -388,15 +433,20 @@ end
     build_rc_column_nlp_result(problem, opt_result) -> RCColumnNLPResult
 
 Convert optimization result to `RCColumnNLPResult` with practical section.
+
+With `snap`, each dimension rounds up to `dim_increment`, held to `max_dim`.
+Solver noise of up to 1e-6 in above a grid value (e.g. `b_opt = 20 + 1e-7`
+with `max_dim = 20`) does not push the dimension up a full increment.
 """
 function build_rc_column_nlp_result(p::RCColumnNLPProblem, opt_result)
     b_opt, h_opt, ρ_opt = opt_result.minimizer
-    
+    incr = ustrip(u"inch", p.opts.dim_increment)
+
     if p.opts.snap
         # Round to practical dimensions
-        incr = ustrip(u"inch", p.opts.dim_increment)
-        b_final = ceil(b_opt / incr) * incr
-        h_final = ceil(h_opt / incr) * incr
+        snap_tol = 1e-6
+        b_final = min(ceil((b_opt - snap_tol) / incr) * incr, p.b_max)
+        h_final = min(ceil((h_opt - snap_tol) / incr) * incr, p.b_max)
     else
         b_final = b_opt
         h_final = h_opt

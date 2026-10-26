@@ -43,6 +43,8 @@ using Asap: kip, ksi
         end
 
         @test result.objective_value > 0
+        @test result.status === :nlp_complete
+        @test StructuralSizer._rc_nlp_result_installable(result)
     end
 
     @testset "MIP and NLP produce comparable results" begin
@@ -109,8 +111,9 @@ using Asap: kip, ksi
     end
 
     @testset "NLP with high demand (edge case)" begin
-        # Near-capacity demand — NLP should still produce a feasible section
-        # or hit the max dimension bound gracefully.
+        # Near-capacity demand. A section that passes the as-built check is a
+        # completed design. If none does, the adapter reports :infeasible and
+        # does not return a section that can be installed.
         Pu_high  = [1200.0kip]
         Mux_high = [500.0kip * u"ft"]
         geom_high = [ConcreteMemberGeometry(4.0; k=1.0, braced=true)]
@@ -123,10 +126,17 @@ using Asap: kip, ksi
         result = StructuralSizer.size_columns(Pu_high, Mux_high, geom_high, opts)
 
         @test length(result.sections) == 1
-        sec = result.sections[1]
-        @test sec isa RCColumnSection
-        bb = bounding_box(sec)
-        @test ustrip(u"inch", bb.width) >= 8.0  # At least min dim
+        if result.status === :nlp_complete
+            sec = result.sections[1]
+            @test sec isa RCColumnSection
+            bb = bounding_box(sec)
+            @test ustrip(u"inch", bb.width) >= 8.0  # At least min dim
+            @test StructuralSizer._rc_nlp_result_installable(result)
+        else
+            @test result.status === :infeasible
+            @test isnothing(result.sections[1])
+            @test !StructuralSizer._rc_nlp_result_installable(result)
+        end
     end
 
     @testset "NLP NLPColumnOptions field forwarding" begin
@@ -142,6 +152,64 @@ using Asap: kip, ksi
         # by the fact that the NLP solver uses these settings.
         result = StructuralSizer.size_columns(Pu[1:1], Mux[1:1], geoms[1:1], opts)
         @test length(result.sections) == 1
+        @test result.status === :nlp_complete
+    end
+
+    @testset "Infeasible NLP column is not a completed design" begin
+        # Same demand the repair test cannot carry at 12 in with the 32-bar cap.
+        opts = ConcreteColumnOptions(
+            sizing_strategy = :nlp,
+            max_depth = 12u"inch",
+        )
+        result = StructuralSizer.size_columns(
+            [3000.0kip],
+            [100.0kip * u"ft"],
+            [ConcreteMemberGeometry(4.0; k=1.0, braced=true)],
+            opts,
+        )
+        @test result.status === :infeasible
+        @test result.status !== :nlp_complete
+        @test !StructuralSizer._rc_nlp_result_installable(result)
+        @test length(result.sections) == 1
+        @test isnothing(result.sections[1])
+    end
+
+    @testset "NLP adapter keeps the caller RCColumnDemand" begin
+        opts = ConcreteColumnOptions(
+            sizing_strategy = :nlp,
+            include_slenderness = true,
+        )
+        geom = ConcreteMemberGeometry(4.0; k=1.0, braced=true)
+        demand = RCColumnDemand(1;
+            Pu=300.0, Mux=100.0, Muy=0.0,
+            M1x=-40.0, M2x=100.0,
+            βdns=opts.βdns,
+            transverse_load=true)
+        result = StructuralSizer.size_columns([demand], [geom], opts)
+        @test result.status === :nlp_complete
+        sec = result.sections[1]
+        @test sec isa RCColumnSection
+        nlp_opts = NLPColumnOptions(
+            material = opts.material,
+            rebar_material = opts.rebar_material,
+            cover = opts.cover,
+            include_slenderness = true,
+            βdns = opts.βdns,
+            ρ_max = opts.nlp_ρ_max,
+            max_dim = 48.0u"inch",
+        )
+        problem = RCColumnNLPProblem(demand, geom, nlp_opts)
+        @test problem.demand === demand
+        @test problem.demand.transverse_load
+        @test problem.demand.M1x == -40.0
+        @test StructuralSizer._rc_column_as_built_ok(
+            problem, StructuralSizer._rc_column_nlp_checker(nlp_opts), sec)
+        # A stripped stand-in is a different demand. The returned section was
+        # accepted on the caller demand, which sets transverse_load.
+        stripped = RCColumnDemand(1; Pu=300.0, Mux=100.0, Muy=0.0, βdns=opts.βdns)
+        @test stripped.transverse_load == false
+        @test stripped.M1x == 0
+        @test !(stripped.transverse_load == demand.transverse_load && stripped.M1x == demand.M1x)
     end
 
 end

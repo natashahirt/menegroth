@@ -82,7 +82,11 @@ Build column design results dict from design outputs.
 """
 function build_column_results(struc, columns, column_result, Pu, Mu, punching_results)
     results = Dict{Int, NamedTuple}()
-    
+    if !_rc_nlp_result_installable(column_result)
+        @warn "Column NLP result is not a completed design; omitting column results" status=column_result.status
+        return results
+    end
+
     for (i, col) in enumerate(columns)
         col_idx = findfirst(==(col), struc.columns)
         section = column_result.sections[i]

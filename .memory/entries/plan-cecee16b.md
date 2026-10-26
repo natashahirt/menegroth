@@ -12,10 +12,10 @@ success: 'null'
 files: ''
 session_id: sess-92359b08
 created_at: '2026-07-15T02:23:47.825710+00:00'
-updated_at: '2026-07-15T02:28:59.495725+00:00'
+updated_at: '2026-10-26T17:23:43.260549+00:00'
 has_child_rationale: The concrete shear-wall program has no steel counterpart; steel
   braced/moment frames are the LFRS for most steel DOE buildings
-related_to: plan-w0000001,todo-310559df
+related_to: plan-w0000001,todo-310559df,note-8072f72a
 ---
 # Phase H — Steel lateral-force-resisting systems
 

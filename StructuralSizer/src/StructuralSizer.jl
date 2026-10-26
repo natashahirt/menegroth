@@ -141,6 +141,7 @@ export Constants
 
 # --- Load combinations ---
 export LoadCombination, factored_pressure, factored_load, envelope_pressure
+export lateral_strength_combinations, factored_lateral_components
 export strength_1_4D, strength_1_2D_1_6L, strength_1_2D_1_6Lr
 export strength_1_2D_1_0W, strength_1_2D_1_0E
 export strength_0_9D_1_0W, strength_0_9D_1_0E
@@ -163,9 +164,19 @@ export vertical_distribution_exponent, vertical_distribution, seismic_story_shea
 export accidental_eccentricity, torsional_amplification
 export design_earthquake_displacement, maximum_considered_displacement
 export design_story_drift, edge_design_story_drift
-export allowable_story_drift, drift_live_load_factor, drift_expected_gravity_load
+export allowable_story_drift, story_drift_is_allowed
+export drift_live_load_factor, drift_expected_gravity_load
 export stability_coefficient, stability_coefficient_limit
 export pdelta_displacement_multiplier
+
+# --- Directional-procedure MWFRS wind (ASCE 7-22 Chapter 27) ---
+export wind_figure_2731_roof, wind_wall_cp, wind_design_pressure, wind_surface
+export wind_rigid_eccentricity, wind_wall_resultant, wind_facade_edges
+export wind_forces_from_pressures, wind_unit_direction, wind_principal_directions
+export wind_direction_cases
+export wind_cases_from_resultants
+export wind_mwfrs_cases, wind_minimum_horizontal_force, wind_minimum_resultant
+export WindFacadeEdge, WindWallResultant, WindMWFRSCase
 
 # --- Materials ---
 export Metal, StructuralSteel, RebarSteel, Concrete, ReinforcedConcreteMaterial
@@ -273,9 +284,12 @@ export CompositeContext
 export get_b_eff
 export get_Qn, validate_stud_diameter, validate_stud_length, check_stud_spacing,
        check_stud_edge_distance, check_stud_deck_projection
+export design_shear_anchors, shear_connection_ductile
 export get_Cf, get_Mn_composite, get_ϕMn_composite
 export find_required_ΣQn, get_Mn_negative
-export check_construction, construction_stage, construction_span_demand
+export cb_gravity_top_flange_restrained, cb_neg_from_moment_field,
+       check_construction, construction_stage, construction_span_demand,
+       construction_with_shape, default_construction_Lb, beam_panel_brace_shear
 export construction_personnel_pressure, construction_edition
 export get_I_transformed, get_I_LB, check_composite_deflection
 export extract_parallel_Asr, beam_direction_from_vectors

@@ -131,4 +131,22 @@ end
     for c in result.cases
         @test all(a -> a === nothing || a >= 1, c.Ax)
     end
+
+    # Table 12.12-1 on the drift cases only. Risk category and system are
+    # required. A tiny allowable fails the same drifts that the real limit passes.
+    checks = check_seismic_story_drift(result; risk_category=:II, system=:other)
+    @test length(checks) == 2 * 3 * length(result.levels)
+    @test all(c -> c.passes, checks)
+    @test all(c -> c.allowable_m ≈ 0.020 * 4.0, checks)
+    masonry = check_seismic_story_drift(result; risk_category=:II, system=:masonry_other)
+    @test all(c -> c.allowable_m ≈ 0.007 * 4.0, masonry)
+    @test all(c -> c.passes == (c.drift_m <= c.allowable_m), masonry)
+    seismic = factored_seismic_cases(result, strength_1_2D_1_0E)
+    @test length(seismic) == 6
+    xnone = only(c for c in seismic if result.cases[c.case_index].direction === :x &&
+                 result.cases[c.case_index].torsion === :none &&
+                 result.cases[c.case_index].purpose === :strength)
+    @test xnone.Fx_kN ≈ strength.Fx_kN
+    @test all(==(0.0), xnone.Fy_kN)
+    @test isempty(factored_seismic_cases(result, strength_1_2D_1_0W))
 end

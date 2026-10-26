@@ -203,7 +203,7 @@ export wall_center, wall_length, wall_orientation, to_wall_line  # Shear-wall ge
 # True plate geometry + per-story centre of mass for the reduced lateral evaluator
 # (derived from the skeleton vertex_coords datum; assert_walls_enclosed VERIFIES
 # walls ⊆ plate rather than assuming a shared frame; seismic weight per ASCE 7-22 §12.7.2)
-export story_plate_geometry, story_center_of_mass, effective_seismic_weight, assert_walls_enclosed, walls_bridge_selfcheck
+export story_plate_geometry, story_floor_outline, projected_plan_width, story_center_of_mass, effective_seismic_weight, assert_walls_enclosed, walls_bridge_selfcheck
 export all_members, segment_indices, member_length, unbraced_length
 export group_id, section, volumes, set_group_id!, set_section!, set_volumes!
 # Framing-hierarchy role / level helpers (Phase 1)
@@ -215,7 +215,7 @@ export compute_member_tributaries!
 # context, exact FEM demand field, and the per-station governing check.
 export beam_side_profiles, composite_context_from_beam
 export beam_signed_moment_field, check_composite_beam, composite_deflection_scale
-export composite_group_payload, composite_payloads_for_groups
+export composite_group_payload, composite_payloads_for_groups, composite_anchor_from_options
 export classify_column_position, is_exterior_support  # Column position classification for DDM/EFM
 export slab_material_angle, classify_corner_kind       # Corner refinement (convex vs re-entrant)
 export update_structural_offsets!, structural_center_xy_m  # Architectural → structural centerline
@@ -225,6 +225,10 @@ export Support, Foundation, FoundationGroup, FoundationDemand
 export add_vertex!, add_element!, find_faces!, rebuild_stories!, to_asap!
 export classify_diaphragm_idealization, distribute_flexible_diaphragm_story_force
 export elf_story_analysis
+export wind_story_analysis
+export check_seismic_story_drift, wind_story_drift_report
+export factored_wind_cases, factored_seismic_cases
+export SeismicStoryDriftCheck, WindStoryDriftReport, FactoredLateralCase
 export initialize!, size!
 export create_slab_diaphragm_shells
 

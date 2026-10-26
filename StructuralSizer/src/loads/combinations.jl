@@ -250,3 +250,60 @@ const gravity_combinations = [
     strength_1_2D_1_6L,
     service
 ]
+
+"""
+    lateral_strength_combinations() -> NTuple{4, LoadCombination}
+
+The four existing strength constants whose lateral factor is 1.0:
+[`strength_1_2D_1_0W`](@ref), [`strength_0_9D_1_0W`](@ref),
+[`strength_1_2D_1_0E`](@ref), and [`strength_0_9D_1_0E`](@ref).
+
+Wind is §2.3.1 combinations 4a and 5a: `1.2D + 1.0W + L + (0.5Lr or 0.3S
+or 0.5R)` and `0.9D + 1.0W`. Earthquake is §2.3.6 combinations 6 and 7:
+`1.2D + Ev + Eh + L + 0.15S` and `0.9D − Ev + Eh`. Wind and earthquake
+need not act together.
+
+The `W` and `E` fields on these constants are 1.0. That is the horizontal
+factor applied to a story force. The constants do not split `E` into `Ev`
+and `Eh`, and their snow companion is 0.2 rather than the §2.3.6 value
+0.15. Gravity factors, `Ev`, and the snow companion are not applied here.
+
+# Citation
+ASCE 7-22 §2.3.1 (corpus: asce-7-22, PDF page 68) and §2.3.6
+(corpus: asce-7-22, PDF page 69).
+"""
+function lateral_strength_combinations()
+    return (
+        strength_1_2D_1_0W,
+        strength_0_9D_1_0W,
+        strength_1_2D_1_0E,
+        strength_0_9D_1_0E,
+    )
+end
+
+"""
+    factored_lateral_components(combo, Fx, Fy, Mz; load) -> (Fx, Fy, Mz)
+
+Scale a lateral force and its torsion by `combo.W` or `combo.E`.
+`load` is `:W` or `:E`. Gravity factors are not applied.
+
+The three inputs share one length and come back in that order, as `Float64`
+vectors. A zero factor returns three empty vectors: that combination does
+not include this load.
+"""
+function factored_lateral_components(combo::LoadCombination, Fx, Fy, Mz; load::Symbol)
+    nFx = length(Fx)
+    nFy = length(Fy)
+    nMz = length(Mz)
+    nFx == nFy == nMz || throw(ArgumentError(
+        "lateral components must have the same length; got $nFx, $nFy, $nMz"))
+    if load === :W
+        factor = combo.W
+    elseif load === :E
+        factor = combo.E
+    else
+        throw(ArgumentError("load must be :W or :E; got $(repr(load))"))
+    end
+    factor == 0 && return (Float64[], Float64[], Float64[])
+    return (factor .* Float64.(Fx), factor .* Float64.(Fy), factor .* Float64.(Mz))
+end

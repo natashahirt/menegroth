@@ -265,6 +265,23 @@ const _RTOL = 1e-12
         # HAND CHECK, computed from ASCE 7-22 §12.12.1.1. Not a published example.
         # The same all-other, risk II case divided by rho = 1.3 is 2.4/1.3.
         @test allowable_story_drift(120.0, :II, :other; rho=1.3) ≈ 2.4 / 1.3 atol=_ATOL rtol=_RTOL
+        # HAND CHECK, computed from ASCE 7-22 §12.12.1. Not a published example.
+        # Δa = 2.4 in. A signed drift of -2.4 is at the limit. 2.41 exceeds it.
+        @test story_drift_is_allowed(2.4, 120.0, :II, :other)
+        @test story_drift_is_allowed(-2.4, 120.0, :II, :other)
+        @test !story_drift_is_allowed(2.41, 120.0, :II, :other)
+        @test !story_drift_is_allowed(-2.41, 120.0, :II, :other)
+
+        # §2.3.1: 1.0W scales the wind; 1.0E is not in that combination.
+        wind_combo, _, seismic_combo, _ = lateral_strength_combinations()
+        Fx, Fy, Mz = factored_lateral_components(wind_combo, [10.0, 20.0], [1.0, 2.0], [3.0, 4.0]; load=:W)
+        @test Fx == [10.0, 20.0] && Fy == [1.0, 2.0] && Mz == [3.0, 4.0]
+        @test factored_lateral_components(wind_combo, [10.0], [0.0], [0.0]; load=:E) == (Float64[], Float64[], Float64[])
+        eFx, eFy, eMz = factored_lateral_components(seismic_combo, [10.0], [0.0], [5.0]; load=:E)
+        @test eFx == [10.0] && eFy == [0.0] && eMz == [5.0]
+        half = LoadCombination(name=:half_wind, D=1.2, L=1.0, W=0.5)
+        hFx, _, _ = factored_lateral_components(half, [10.0], [0.0], [0.0]; load=:W)
+        @test hFx == [5.0]
 
         # HAND CHECK, computed from ASCE 7-22 §12.8.6.1. Not a published example.
         # Exactly 100 lb/ft² does not exceed 100, so the factor is 0.4.

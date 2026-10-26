@@ -471,6 +471,26 @@ function allowable_story_drift(hsx, risk_category, system; rho=nothing)
 end
 
 """
+    story_drift_is_allowed(Δ, hsx, risk_category, system; rho=nothing) -> Bool
+
+`true` when the design story drift does not exceed the Table 12.12-1
+allowable. `Δ` is the signed center-of-mass difference from
+[`design_story_drift`](@ref). `Δa` is positive, so the comparison uses
+`abs(Δ)`.
+
+# Citation
+ASCE 7-22 §12.12.1 (corpus: asce-7-22, PDF page 194): the design story
+drift shall not exceed `Δa` from Table 12.12-1 (PDF page 195). When `rho`
+is passed, the limit is `Δa/ρ` from §12.12.1.1 (PDF page 194).
+"""
+function story_drift_is_allowed(Δ, hsx, risk_category, system; rho=nothing)
+    Δ = _as_finite("Δ", Δ)
+    Δa = allowable_story_drift(hsx, risk_category, system; rho)
+    # ASCE 7-22 §12.12.1 (corpus: asce-7-22, PDF page 194).
+    return abs(Δ) <= Δa
+end
+
+"""
     drift_live_load_factor(unreduced_live_load_psf) -> Float64
 
 Ratio `L/L0` of the live load `L` to the unreduced design live load `L0`

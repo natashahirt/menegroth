@@ -26,36 +26,36 @@ function _extract_cell_strip_moments(
     verbose::Bool = false
 )
     cx, cy = cell_centroid
-    δ = _section_cut_bandwidth(cache, cell_cols)
+    δ_pos = _section_cut_bandwidth(cache, cell_cols)
 
     tri_idx = get(cache.cell_tri_indices, ci, Int[])
 
-    # Column negative moments (M⁻) at column face
+    # Column negative moments (M⁻) on the span side of each column face.
     col_Mneg = Vector{Float64}(undef, length(cell_cols))
     for (col_i, col) in enumerate(cell_cols)
-        px, py = _column_xy_m(skel, col)
-        off = _column_face_offset_m(col, span_axis)
-        face = (px + off * span_axis[1], py + off * span_axis[2])
-        faces = _integrate_design_faces(cache, tri_idx, face, span_axis, δ;
+        sample, δ = _span_side_cut(col, span_axis, _column_xy_m(skel, col), cell_centroid)
+        n_band = _count_band_elements(cache.element_data, tri_idx, sample, span_axis, δ)
+        _require_band_elements(n_band, δ, "column $(col.vertex_idx) (cell $ci)")
+        faces = _integrate_design_faces(cache, tri_idx, sample, span_axis, δ;
             include_torsion=include_torsion)
         Mn = faces.hogging
         col_Mneg[col_i] = Mn
 
         verbose && @debug "  Col $(col.vertex_idx) ($(col.position)): " *
-                          "M⁻=$(round(Mn, digits=0)) N·m  (δ=$(round(δ*1000, digits=0))mm)"
+                          "M⁻=$(round(Mn, digits=0)) N·m  (δ=$(round(δ*1000, digits=0))mm, n=$n_band)"
     end
 
     # Cell positive moment (M⁺) at centroid
-    M_pos = _integrate_design_faces(cache, tri_idx, cell_centroid, span_axis, δ;
+    M_pos = _integrate_design_faces(cache, tri_idx, cell_centroid, span_axis, δ_pos;
         include_torsion=include_torsion).sagging
 
     if verbose
-        @debug "  Cell $ci: δ=$(round(δ*1000,digits=0))mm  " *
+        @debug "  Cell $ci: δ⁺=$(round(δ_pos*1000,digits=0))mm  " *
                "centroid=($(round(cx,digits=3)), $(round(cy,digits=3)))  " *
                "M⁺=$(round(M_pos,digits=1)) N·m  n_tris=$(length(tri_idx))"
     end
 
-    return (col_Mneg=col_Mneg, M_pos=M_pos, δ=δ)
+    return (col_Mneg=col_Mneg, M_pos=M_pos, δ=δ_pos)
 end
 
 """

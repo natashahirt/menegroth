@@ -3,40 +3,84 @@
 # =============================================================================
 
 """
-    _section_cut_bandwidth(cache, cell_cols) -> Float64
+    _section_cut_bandwidth(_cache, cell_cols) -> Float64
 
-Compute the initial δ-band width (meters) for section-cut moment integration.
+Width (meters) of the δ-band used to average a section-cut moment.
 
-The band must be wide enough to capture several element rows (for a smooth
-integral) but narrow enough that the moment field doesn't vary significantly
-across it.  The formula uses the **mesh edge length** as the primary scale:
+The width is the average column dimension, `max(c1, c2)`, and does not
+depend on the mesh.  A mesh-scaled band (`max(3 h_mesh, c)`) smears the
+column-face peak on coarse meshes and under-predicts M⁻; see the mesh
+study in `scripts/runners/study_fea_mesh_convergence.jl`.
 
-    δ = max(3 × h_mesh, c_avg)
+ACI 318 does not prescribe this width.  Column dimension is the scale of
+the support the cut is sampling.  Callers that sample a column face should
+use [`_span_side_cut`](@ref) so the band lies on the span side of that
+face rather than centered on it.
 
-where:
-- `h_mesh` is the characteristic mesh edge length (median of √(2A) over all
-  triangles, stored in `cache.mesh_edge_length`).  The factor of 3 ensures
-  the band always spans ≥ 3 element rows, giving a well-sampled integral.
-- `c_avg` is the average column dimension — the band should not be narrower
-  than the column face it's sampling at.
-
-Fallback: if `mesh_edge_length` is not yet computed (cache not initialized),
-uses `c_avg` with a 0.25 m floor (legacy behavior).
-
-This is used as the **initial guess** for the adaptive bandwidth refinement
-(see `_adaptive_bandwidth`).  When adaptive mode is disabled, this value is
-used directly.
+`_cache` is accepted so existing call sites keep working; the mesh length
+it stores is intentionally unused.
 """
-function _section_cut_bandwidth(cache::FEAModelCache, cell_cols)::Float64
-    c_avg_m = isempty(cell_cols) ? 0.3 :
-        sum(max(ustrip(u"m", c.c1), ustrip(u"m", c.c2)) for c in cell_cols) / length(cell_cols)
+function _section_cut_bandwidth(_cache::FEAModelCache, cell_cols)::Float64
+    isempty(cell_cols) && return 0.30
+    return sum(max(ustrip(u"m", c.c1), ustrip(u"m", c.c2)) for c in cell_cols) / length(cell_cols)
+end
 
-    h_mesh = cache.mesh_edge_length
-    if h_mesh > 0
-        return max(3 * h_mesh, c_avg_m)
+# Fewest elements a face cut may average.  Below this the integral is one
+# triangle and is not a section cut.
+const _MIN_BAND_ELEMENTS = 2
+
+"""
+    _span_side_cut(col, span_axis, column_xy, toward) -> (sample, δ)
+
+Section cut for the face of `col` that bounds the bay containing `toward`
+(the cell centroid).
+
+`δ` is the column dimension along `span_axis`.  `sample` is the center of a
+band of that width lying entirely on the span side of the face, so a
+centered integrator does not include shell elements inside the column
+footprint.  Those elements are the rigid (or nearly rigid) patch and do
+not carry a slab design moment.
+"""
+function _span_side_cut(
+    col,
+    span_axis::NTuple{2,Float64},
+    column_xy::NTuple{2,Float64},
+    toward::NTuple{2,Float64},
+)
+    ax1, ax2 = span_axis
+    px, py = column_xy
+    s_col = ax1 * px + ax2 * py
+    s_to = ax1 * toward[1] + ax2 * toward[2]
+    dir = s_to >= s_col ? 1.0 : -1.0
+    off = _column_face_offset_m(col, span_axis)
+    δ = max(2 * off, 1e-4)
+    shift = dir * (off + 0.5 * δ)
+    return (px + shift * ax1, py + shift * ax2), δ
+end
+
+"""Number of element centroids inside the δ-band centered at `pos`."""
+function _count_band_elements(
+    element_data::Vector{FEAElementData},
+    tri_indices::Vector{Int},
+    pos::NTuple{2,Float64},
+    ax::NTuple{2,Float64},
+    δ::Float64,
+)::Int
+    s_eval = ax[1] * pos[1] + ax[2] * pos[2]
+    half_δ = δ / 2
+    n = 0
+    @inbounds for k in tri_indices
+        ed = element_data[k]
+        abs(ax[1] * ed.cx + ax[2] * ed.cy - s_eval) <= half_δ && (n += 1)
     end
-    # Fallback (cache not yet initialized)
-    return max(c_avg_m, 0.25)
+    return n
+end
+
+"""Error when a face cut does not contain enough elements to average."""
+function _require_band_elements(n::Int, δ::Float64, where::AbstractString)
+    n >= _MIN_BAND_ELEMENTS && return nothing
+    error("FEA section cut at $where contains $n element(s) in a $(round(δ; digits=3)) m band " *
+          "(minimum $(_MIN_BAND_ELEMENTS)). Refine the mesh; a design moment from this cut would be unreliable.")
 end
 
 # =============================================================================
@@ -165,12 +209,10 @@ function _check_bandwidth_convergence(
         δ = _section_cut_bandwidth(cache, cell_cols)
 
         col = first(cell_cols)
-        px, py = _column_xy_m(skel, col)
-        off = _column_face_offset_m(col, span_axis)
-        face = (px + off * span_axis[1], py + off * span_axis[2])
+        sample, δ_face = _span_side_cut(col, span_axis, _column_xy_m(skel, col), geom.centroid)
 
-        Mn_δ  = _integrate_at(cache.element_data, tri_idx, face, span_axis, δ)
-        Mn_2δ = _integrate_at(cache.element_data, tri_idx, face, span_axis, 2δ)
+        Mn_δ  = _integrate_at(cache.element_data, tri_idx, sample, span_axis, δ_face)
+        Mn_2δ = _integrate_at(cache.element_data, tri_idx, sample, span_axis, 2δ_face)
 
         Mp_δ  = -_integrate_at(cache.element_data, tri_idx, geom.centroid, span_axis, δ)
         Mp_2δ = -_integrate_at(cache.element_data, tri_idx, geom.centroid, span_axis, 2δ)

@@ -143,7 +143,11 @@ function build_slab_shell_mesh(
     if target_edge === nothing
         min_span_m = minimum(ustrip(u"m", struc.cells[ci].spans.primary)
                              for ci in slab.cell_indices)
-        target_edge = clamp(min_span_m / 20.0, 0.15, 0.75) * u"m"
+        # Upper bound 0.30 m: with the column-width section cut, face moments
+        # and a rigid column patch stay within a few percent of a 0.10 m mesh
+        # down to this size and diverge by 0.50 m
+        # (scripts/runners/diagnose_fea_unbalanced_mesh.jl).
+        target_edge = clamp(min_span_m / 20.0, 0.15, 0.30) * u"m"
     end
 
     # ─── 2. Slab-level nodes (z = 0) ───

@@ -830,6 +830,13 @@ function _report_takeoff(io::IO, design::BuildingDesign; du::DisplayUnits=design
             end
             Printf.@printf(io, "  %-20s %12s\n", "─"^18, "─"^12)
             Printf.@printf(io, "  %-20s %12.0f\n", "TOTAL", ec_total)
+            println(io, "  By material (kgCO₂e)")
+            Printf.@printf(io, "  %-20s %12.0f\n", "Concrete", ustrip(u"kgCO2e", s.embodied_carbon_concrete))
+            Printf.@printf(io, "  %-20s %12.0f\n", "Rebar", ustrip(u"kgCO2e", s.embodied_carbon_rebar))
+            Printf.@printf(io, "  %-20s %12.0f\n", "Structural steel", ustrip(u"kgCO2e", s.embodied_carbon_structural_steel))
+            if ustrip(u"kgCO2e", s.embodied_carbon_timber) > 0.0
+                Printf.@printf(io, "  %-20s %12.0f\n", "Timber", ustrip(u"kgCO2e", s.embodied_carbon_timber))
+            end
         end
         area_m2 = ustrip(u"m^2", total_slab_area)
         if area_m2 > 0

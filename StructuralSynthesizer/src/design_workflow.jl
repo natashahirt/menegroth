@@ -963,7 +963,17 @@ function _reconcile_columns!(
             )
         end
         set_section!(col, rc_section)
-        
+        # Flat-plate sizing records Ag and As on the section but used to leave
+        # `volumes` empty unless harmonization enlarged the column. EC skips a
+        # member with empty volumes, so column carbon was 0 while the quantity
+        # summary still counted the concrete. Store concrete (Ag − As) and
+        # rebar (As) as separate keys so the two carbons stay separable.
+        _set_rc_column_volumes!(
+            col,
+            something(col.concrete, resolve_column_concrete(params.materials)),
+            resolve_column_rebar(params.materials),
+        )
+
         # Update Asap model elements if column grew
         if needs_growth
             if col_shape == :circular
@@ -1115,30 +1125,36 @@ function _harmonize_rc_group!(struc::BuildingStructure, params::DesignParameters
     for i in indices
         col = columns[i]
         (isnothing(col.c1) || isnothing(col.c2)) && continue
-        col.c1 == gov_c1 && col.c2 == gov_c2 && continue
+        already = col.c1 == gov_c1 && col.c2 == gov_c2
+        if already && !isempty(volumes(col))
+            continue
+        end
 
         col.c1 = gov_c1
         col.c2 = gov_c2
-        changed += 1
+        already || (changed += 1)
 
-        # Rebuild nominal RC section for visualization
-        if col.shape == :circular
-            set_section!(col, StructuralSizer.RCCircularSection(
-                D = col.c1, bar_size = 8, n_bars = 6))
-        else
-            set_section!(col, StructuralSizer.RCColumnSection(
-                b = col.c1, h = col.c2, bar_size = 8, n_bars = 4))
+        # Rebuild nominal RC section for visualization when the size changes.
+        # A column that already matches still needs volumes if reconcile never
+        # wrote them (older path, or a caller that harmonizes first).
+        if !already || isnothing(section(col))
+            if col.shape == :circular
+                set_section!(col, StructuralSizer.RCCircularSection(
+                    D = col.c1, bar_size = 8, n_bars = 6))
+            else
+                set_section!(col, StructuralSizer.RCColumnSection(
+                    b = col.c1, h = col.c2, bar_size = 8, n_bars = 4))
+            end
         end
 
-        # Embodied carbon uses `volumes(column)` in compute_building_ec — refresh after enlarging
-        # so EC matches harmonized geometry (same pattern as _apply_column_results! in analyze/members/utils.jl).
-        col_sec = section(col)
-        if !isnothing(col_sec)
-            L_raw = sum(struc.segments[seg_idx].L for seg_idx in segment_indices(col))
-            L_total = L_raw isa Unitful.Quantity ? uconvert(u"m", L_raw) : L_raw * u"m"
-            col_mat = something(col.concrete, resolve_column_concrete(params.materials))
-            set_volumes!(col, MaterialVolumes(col_mat => StructuralSizer.section_area(col_sec) * L_total))
-        end
+        # Gross section area as a single concrete volume counted the rebar
+        # volume at the concrete coefficient and left rebar carbon at zero.
+        _set_rc_column_volumes!(
+            col,
+            something(col.concrete, resolve_column_concrete(params.materials)),
+            resolve_column_rebar(params.materials),
+        )
+        already && continue
 
         # Rebuild ASAP element section
         b_m = ustrip(u"m", col.c1)
@@ -2560,6 +2576,12 @@ function _compute_design_summary!(design::BuildingDesign, struc::BuildingStructu
             sum(r.ec for r in ec.members if r.element_type == :strut;  init=0.0u"kgCO2e")
         summary.embodied_carbon_foundations = ec.foundation_ec
         summary.embodied_carbon_fireproofing= ec.fireproofing_ec
+        parts = material_ec_total(struc)
+        summary.embodied_carbon_concrete         = parts.concrete
+        summary.embodied_carbon_rebar            = parts.rebar
+        summary.embodied_carbon_structural_steel = parts.structural_steel
+        summary.embodied_carbon_timber           = parts.timber
+        summary.embodied_carbon_other            = parts.other
     catch e
         @warn "Embodied carbon computation failed — defaulting to 0.0" exception=(e, catch_backtrace())
         summary.embodied_carbon              = 0.0u"kgCO2e"
@@ -2569,7 +2591,27 @@ function _compute_design_summary!(design::BuildingDesign, struc::BuildingStructu
         summary.embodied_carbon_struts       = 0.0u"kgCO2e"
         summary.embodied_carbon_foundations  = 0.0u"kgCO2e"
         summary.embodied_carbon_fireproofing = 0.0u"kgCO2e"
+        summary.embodied_carbon_concrete         = 0.0u"kgCO2e"
+        summary.embodied_carbon_rebar            = 0.0u"kgCO2e"
+        summary.embodied_carbon_structural_steel = 0.0u"kgCO2e"
+        summary.embodied_carbon_timber           = 0.0u"kgCO2e"
+        summary.embodied_carbon_other            = 0.0u"kgCO2e"
     end
+end
+
+"""
+    _set_rc_column_volumes!(col, concrete, rebar)
+
+Write concrete and rebar volumes for one RC column via [`member_material_volumes`](@ref).
+
+`L` is [`member_length`](@ref). Concrete is `(Ag − As) · L` and rebar is `As · L`,
+so each material keeps its own density and carbon coefficient.
+"""
+function _set_rc_column_volumes!(col, concrete::StructuralSizer.Concrete, rebar::StructuralSizer.RebarSteel)
+    sec = section(col)
+    isnothing(sec) && return col
+    set_volumes!(col, member_material_volumes(sec, member_length(col), concrete; rebar=rebar))
+    return col
 end
 
 # =============================================================================

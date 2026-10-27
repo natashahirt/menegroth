@@ -137,15 +137,58 @@ Canonical `MaterialVolumes` key for a sized member's material. For a
 `ReinforcedConcreteMaterial`, returns its `Concrete` component; otherwise
 returns `material` unchanged.
 
-The unwrap is required because downstream embodied-carbon and mass
-computations (`postprocess/ec.jl`) read `mat.ρ` directly, and
-`ReinforcedConcreteMaterial` has no `ρ` field. Every site that constructs
-`MaterialVolumes(...)` from a sized member's material MUST route it through
-this helper — mismatched keys cause `element_ec` to raise `type
-ReinforcedConcreteMaterial has no field ρ`.
+The unwrap is required because a `ReinforcedConcreteMaterial` lump has no `ρ`
+and no separate rebar volume, so its carbon cannot be split. A single-material
+write (steel section area, or a concrete-only volume) MUST route the key
+through this helper. Reinforced-concrete members that know `Ag` and `As`
+must instead store `Concrete` and `RebarSteel` as two keys
+(`_set_rc_column_volumes!`); `material_ec` then keeps the two carbons apart.
 """
 _volume_key(mat::StructuralSizer.ReinforcedConcreteMaterial) = mat.concrete
 _volume_key(mat::AbstractMaterial) = mat
+
+"""Longitudinal rebar area. Steel and timber sections return zero."""
+function _longitudinal_rebar_area(sec)
+    if hasproperty(sec, :As_total) && !isnothing(sec.As_total)
+        return uconvert(u"m^2", sec.As_total)
+    end
+    As = 0.0u"m^2"
+    if hasproperty(sec, :As) && !isnothing(sec.As)
+        As += uconvert(u"m^2", sec.As)
+    end
+    if hasproperty(sec, :As_prime) && !isnothing(sec.As_prime)
+        As += uconvert(u"m^2", sec.As_prime)
+    end
+    return As
+end
+
+"""
+    member_material_volumes(sec, L, mat; rebar=nothing) -> MaterialVolumes
+
+Volume of one member, split so concrete, rebar, and structural steel are
+different keys.
+
+Structural steel (and rebar used as the whole section) is `section_area · L`
+under that metal. Reinforced concrete is `(Ag − As) · L` of concrete plus
+`As · L` of rebar. `As` is `As_total` on a column section, or `As + As_prime`
+on a beam section. `rebar` supplies the rebar material when `mat` is a plain
+`Concrete` (beam and column options keep the grade on `rebar_material`).
+"""
+function member_material_volumes(sec, L, mat; rebar=nothing)
+    Lq = L isa Unitful.Quantity ? uconvert(u"m", L) : L * u"m"
+    Ag = uconvert(u"m^2", StructuralSizer.section_area(sec))
+    if mat isa StructuralSizer.StructuralSteel || mat isa StructuralSizer.RebarSteel
+        return MaterialVolumes(_volume_key(mat) => Ag * Lq)
+    end
+    concrete = mat isa StructuralSizer.ReinforcedConcreteMaterial ? mat.concrete : mat
+    reb = mat isa StructuralSizer.ReinforcedConcreteMaterial ? mat.rebar : rebar
+    As = min(max(_longitudinal_rebar_area(sec), 0.0u"m^2"), Ag)
+    vols = MaterialVolumes(concrete => (Ag - As) * Lq)
+    if As > 0.0u"m^2" && !isnothing(reb)
+        vols[reb] = As * Lq
+    end
+    return vols
+end
 
 """
     Slab{T}

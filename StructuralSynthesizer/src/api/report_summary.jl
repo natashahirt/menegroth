@@ -172,6 +172,11 @@ function report_summary_json(design::BuildingDesign; report_units=nothing)
     ec_struts_kg       = ustrip(u"kgCO2e", s.embodied_carbon_struts)
     ec_foundations_kg  = ustrip(u"kgCO2e", s.embodied_carbon_foundations)
     ec_fireproofing_kg = ustrip(u"kgCO2e", s.embodied_carbon_fireproofing)
+    ec_concrete_kg     = ustrip(u"kgCO2e", s.embodied_carbon_concrete)
+    ec_rebar_kg        = ustrip(u"kgCO2e", s.embodied_carbon_rebar)
+    ec_steel_kg        = ustrip(u"kgCO2e", s.embodied_carbon_structural_steel)
+    ec_timber_kg       = ustrip(u"kgCO2e", s.embodied_carbon_timber)
+    ec_other_kg        = ustrip(u"kgCO2e", s.embodied_carbon_other)
 
     materials = Dict{String, Any}(
         "concrete_volume" => Dict("value" => _round_val(_to_display(du, :volume, s.concrete_volume); digits=1), "unit" => vol_label),
@@ -189,6 +194,14 @@ function report_summary_json(design::BuildingDesign; report_units=nothing)
             "struts"       => _round_val(ec_struts_kg; digits=0),
             "foundations"  => _round_val(ec_foundations_kg; digits=0),
             "fireproofing" => _round_val(ec_fireproofing_kg; digits=0),
+        )
+        materials["embodied_carbon_by_material_kgco2e"] = Dict{String, Any}(
+            "concrete"         => _round_val(ec_concrete_kg; digits=0),
+            "rebar"            => _round_val(ec_rebar_kg; digits=0),
+            "structural_steel" => _round_val(ec_steel_kg; digits=0),
+            "timber"           => _round_val(ec_timber_kg; digits=0),
+            "other"            => _round_val(ec_other_kg; digits=0),
+            "fireproofing"     => _round_val(ec_fireproofing_kg; digits=0),
         )
     end
     result["materials"] = materials

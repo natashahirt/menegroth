@@ -3332,8 +3332,8 @@ function _size_beams_impl!(
         shored = composite_shored === nothing ? opts.composite_shored : composite_shored
         cp = composite_cp_class === nothing ? opts.composite_cp_class : composite_cp_class
         slab_type = composite_slab_type === nothing ? opts.composite_slab_type : composite_slab_type
-        hr = composite_deck_hr === nothing ? opts.composite_deck_hr : composite_deck_hr
-        wr = composite_deck_wr === nothing ? opts.composite_deck_wr : composite_deck_wr
+        hr = composite_deck_hr === nothing ? composite_deck_hr_wr(opts).hr : composite_deck_hr
+        wr = composite_deck_wr === nothing ? composite_deck_hr_wr(opts).wr : composite_deck_wr
         orient = composite_deck_orientation === nothing ?
             opts.composite_deck_orientation : composite_deck_orientation
         composite_payloads_for_groups(
@@ -3710,13 +3710,14 @@ function _apply_beam_results!(
     # ACI 318-11 §10.10.4.1 — cracked-stiffness reduction for concrete beam sections.
     # Default 0.35 matches to_asap_section's concrete-beam default (byte-identical no-op).
     I_factor::Real = 0.35,
+    # Longitudinal rebar grade when `mat` is plain concrete. Steel beams leave this nothing.
+    rebar=nothing,
 )
     has_multi_mat = hasproperty(result, :materials_chosen)
 
     for (g_idx, gid) in enumerate(group_ids)
         chosen = result.sections[g_idx]
         group_mat = has_multi_mat ? result.materials_chosen[g_idx] : mat
-        vol_key = _volume_key(group_mat)
 
         mg = struc.member_groups[gid]
         mg.section = chosen
@@ -3735,8 +3736,9 @@ function _apply_beam_results!(
             L_raw = sum(struc.segments[i].L for i in segment_indices(m))
             L_total = L_raw isa Unitful.Quantity ? L_raw : L_raw * u"m"
             set_section!(m, chosen)
-            set_volumes!(m, MaterialVolumes(
-                vol_key => StructuralSizer.section_area(chosen) * L_total))
+            # Concrete and rebar are separate keys. `vol_key` alone stored gross
+            # area as concrete and dropped the longitudinal steel.
+            set_volumes!(m, member_material_volumes(chosen, L_total, group_mat; rebar=rebar))
 
             for seg_idx in segment_indices(m)
                 edge_idx = struc.segments[seg_idx].edge_idx
@@ -3839,7 +3841,8 @@ function _size_beams_impl!(
             )
 
             _apply_beam_results!(struc, result, group_ids, member_array,
-                                 edge_ids_in_group, opts.material; I_factor=I_factor)
+                                 edge_ids_in_group, opts.material; I_factor=I_factor,
+                                 rebar=opts.rebar_material)
 
             if reanalyze
                 Asap.process!(struc.asap_model)
@@ -3859,7 +3862,8 @@ function _size_beams_impl!(
     result = StructuralSizer.size_beams(Mu, Vu, geoms, opts; Mu_neg=Mu_neg, Nu=Nu)
 
     _apply_beam_results!(struc, result, group_ids, member_array,
-                         edge_ids_in_group, opts.material; I_factor=I_factor)
+                         edge_ids_in_group, opts.material; I_factor=I_factor,
+                         rebar=opts.rebar_material)
 
     if reanalyze
         Asap.process!(struc.asap_model)
@@ -4458,7 +4462,8 @@ function _size_columns_impl!(
 
     result = StructuralSizer.size_columns(rc_demands, geometries, opts)
 
-    _apply_column_results!(struc, result, group_ids, opts.material, :concrete, edge_ids_in_group; I_factor=I_factor)
+    _apply_column_results!(struc, result, group_ids, opts.material, :concrete, edge_ids_in_group;
+                           I_factor=I_factor, rebar=opts.rebar_material)
 
     if reanalyze
         Asap.process!(struc.asap_model)
@@ -4614,7 +4619,7 @@ each group uses its own material from `result.materials_chosen[g_idx]`. Otherwis
 `material` argument is used for all groups.
 """
 function _apply_column_results!(struc, result, group_ids, material, material_type, edge_ids_in_group;
-                                 I_factor::Real = 0.70)
+                                 I_factor::Real = 0.70, rebar=nothing)
     # NLP success is :nlp_complete only, and only when every column passed
     # the as-built check. Any other Symbol status is not a completed design.
     # Discrete MIP results use a MathOptInterface status and still apply.
@@ -4652,8 +4657,7 @@ function _apply_column_results!(struc, result, group_ids, material, material_typ
             L_total = L_raw isa Unitful.Quantity ? L_raw : L_raw * u"m"
             
             set_section!(m, chosen)
-            set_volumes!(m, MaterialVolumes(
-                _volume_key(group_mat) => StructuralSizer.section_area(chosen) * L_total))
+            set_volumes!(m, member_material_volumes(chosen, L_total, group_mat; rebar=rebar))
             
             # Update ASAP elements
             for seg_idx in segment_indices(m)

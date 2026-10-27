@@ -1272,6 +1272,14 @@ Base.@kwdef mutable struct DesignSummary
     embodied_carbon_struts::CarbonMassQuantity       = 0.0u"kgCO2e"
     embodied_carbon_foundations::CarbonMassQuantity  = 0.0u"kgCO2e"
     embodied_carbon_fireproofing::CarbonMassQuantity = 0.0u"kgCO2e"
+    # Material partition of the same total. Concrete, rebar, structural steel,
+    # timber, and other come from element volumes; fireproofing is a coating
+    # and is not in those five. The five plus fireproofing equal `embodied_carbon`.
+    embodied_carbon_concrete::CarbonMassQuantity          = 0.0u"kgCO2e"
+    embodied_carbon_rebar::CarbonMassQuantity             = 0.0u"kgCO2e"
+    embodied_carbon_structural_steel::CarbonMassQuantity  = 0.0u"kgCO2e"
+    embodied_carbon_timber::CarbonMassQuantity            = 0.0u"kgCO2e"
+    embodied_carbon_other::CarbonMassQuantity             = 0.0u"kgCO2e"
     cost_estimate::Float64 = 0.0      # $
 
     # Status

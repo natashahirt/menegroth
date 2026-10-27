@@ -76,9 +76,73 @@ slab_ec = element_ec(slab.volumes)  # → 12 345.6 kgCO₂e
 function element_ec(volumes::MaterialVolumes)
     s = 0.0u"kgCO2e"
     for (mat, vol) in _sorted_volume_pairs(volumes)
-        s += uconvert(u"kgCO2e", vol * mat.ρ * mat.ecc)
+        s += _material_carbon(mat, vol)
     end
     return s
+end
+
+"""Carbon of one material volume. A reinforced-concrete lump has no `ρ`; use its concrete constituent."""
+_material_carbon(mat::StructuralSizer.ReinforcedConcreteMaterial, vol) =
+    uconvert(u"kgCO2e", vol * mat.concrete.ρ * mat.concrete.ecc)
+_material_carbon(mat, vol) = uconvert(u"kgCO2e", vol * mat.ρ * mat.ecc)
+
+"""
+    material_ec(volumes::MaterialVolumes)
+
+Partition embodied carbon into concrete, rebar, structural steel, timber, and other.
+
+The five parts sum to [`element_ec`](@ref). Concrete and rebar are separable only
+when sizing stored them as distinct volume keys (flat-plate slabs already do;
+RC columns do after `_set_rc_column_volumes!`). A `ReinforcedConcreteMaterial`
+lump has no rebar volume, so its carbon is attributed entirely to concrete.
+"""
+function material_ec(volumes::MaterialVolumes)
+    concrete = rebar = steel = timber = other = 0.0u"kgCO2e"
+    for (mat, vol) in _sorted_volume_pairs(volumes)
+        part = _material_carbon(mat, vol)
+        if mat isa StructuralSizer.Concrete || mat isa StructuralSizer.FiberReinforcedConcrete
+            concrete += part
+        elseif mat isa StructuralSizer.RebarSteel
+            rebar += part
+        elseif mat isa StructuralSizer.StructuralSteel
+            steel += part
+        elseif mat isa StructuralSizer.Timber
+            timber += part
+        elseif mat isa StructuralSizer.ReinforcedConcreteMaterial
+            concrete += part
+        else
+            other += part
+        end
+    end
+    return (concrete = concrete, rebar = rebar, structural_steel = steel,
+            timber = timber, other = other)
+end
+
+"""Sum [`material_ec`](@ref) over every slab, member, and foundation volume."""
+function material_ec_total(struc::BuildingStructure)
+    concrete = rebar = steel = timber = other = 0.0u"kgCO2e"
+    sources = Any[]
+    for slab in struc.slabs
+        push!(sources, slab.volumes)
+    end
+    for m in (struc.beams, struc.columns, struc.struts)
+        for member in m
+            push!(sources, volumes(member))
+        end
+    end
+    for f in struc.foundations
+        push!(sources, f.volumes)
+    end
+    for vols in sources
+        p = material_ec(vols)
+        concrete += p.concrete
+        rebar += p.rebar
+        steel += p.structural_steel
+        timber += p.timber
+        other += p.other
+    end
+    return (concrete = concrete, rebar = rebar, structural_steel = steel,
+            timber = timber, other = other)
 end
 
 """
@@ -88,11 +152,23 @@ Breakdown of EC for a single element. `ec` is a typed `kgCO₂e` quantity; strip
 to a numeric scalar via `ustrip(u"kgCO2e", r.ec)` at presentation boundaries.
 """
 struct ElementECResult
-    element_type::Symbol       # :slab, :member, :foundation
+    element_type::Symbol       # :slab, :beam, :column, :strut, :foundation
     element_id::Int
     ec::CarbonMassQuantity     # Total embodied carbon (kgCO₂e)
+    concrete_ec::CarbonMassQuantity
+    rebar_ec::CarbonMassQuantity
+    structural_steel_ec::CarbonMassQuantity
     volume_total::VolumeType   # Total material volume (m³)
     mass_total::typeof(1.0u"kg")
+end
+
+"""Build an element record. The three material carbons come from [`material_ec`](@ref)."""
+function ElementECResult(element_type::Symbol, idx::Int, vols::MaterialVolumes,
+                         ec::CarbonMassQuantity, volume_total, mass_total)
+    parts = material_ec(vols)
+    ElementECResult(element_type, idx, ec,
+                    parts.concrete, parts.rebar, parts.structural_steel,
+                    volume_total, mass_total)
 end
 
 """
@@ -106,7 +182,7 @@ function compute_element_ec(elem, element_type::Symbol, idx::Int)
     pairs = _sorted_volume_pairs(vols)
     vol_total = sum((v for (_, v) in pairs); init=0.0u"m^3")
     mass_total = sum(vol * mat.ρ for (mat, vol) in pairs; init=0.0u"kg")
-    ElementECResult(element_type, idx, ec, vol_total, mass_total)
+    ElementECResult(element_type, idx, vols, ec, vol_total, mass_total)
 end
 
 """
@@ -275,7 +351,7 @@ function compute_element_ec_member(m::AbstractMember, element_type::Symbol, idx:
         mass_total += vol * ρ
     end
 
-    ElementECResult(element_type, idx, ec, vol_total, mass_total)
+    ElementECResult(element_type, idx, vols, ec, vol_total, mass_total)
 end
 
 # =============================================================================
@@ -306,6 +382,9 @@ function to_dict(r::ElementECResult)
         "element_type" => string(r.element_type),
         "element_id"   => r.element_id,
         "kgco2e"       => ustrip(u"kgCO2e", r.ec),
+        "concrete_kgco2e" => ustrip(u"kgCO2e", r.concrete_ec),
+        "rebar_kgco2e" => ustrip(u"kgCO2e", r.rebar_ec),
+        "structural_steel_kgco2e" => ustrip(u"kgCO2e", r.structural_steel_ec),
         "volume_m3"    => ustrip(u"m^3", r.volume_total),
         "mass_kg"      => ustrip(u"kg", r.mass_total),
     )

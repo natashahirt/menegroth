@@ -534,6 +534,9 @@ function agent_situation_card(
         ec_struts_kg       = ustrip(u"kgCO2e", s.embodied_carbon_struts)
         ec_foundations_kg  = ustrip(u"kgCO2e", s.embodied_carbon_foundations)
         ec_fireproofing_kg = ustrip(u"kgCO2e", s.embodied_carbon_fireproofing)
+        ec_concrete_kg     = ustrip(u"kgCO2e", s.embodied_carbon_concrete)
+        ec_rebar_kg        = ustrip(u"kgCO2e", s.embodied_carbon_rebar)
+        ec_steel_kg        = ustrip(u"kgCO2e", s.embodied_carbon_structural_steel)
 
         health = Dict{String, Any}(
             "all_pass"         => s.all_checks_pass,
@@ -569,6 +572,12 @@ function agent_situation_card(
                 "struts"       => round(ec_struts_kg; digits=0),
                 "foundations"  => round(ec_foundations_kg; digits=0),
                 "fireproofing" => round(ec_fireproofing_kg; digits=0),
+            )
+            health["embodied_carbon_by_material_kgco2e"] = Dict{String, Any}(
+                "concrete"         => round(ec_concrete_kg; digits=0),
+                "rebar"            => round(ec_rebar_kg; digits=0),
+                "structural_steel" => round(ec_steel_kg; digits=0),
+                "fireproofing"     => round(ec_fireproofing_kg; digits=0),
             )
         end
 
@@ -943,6 +952,9 @@ function agent_diagnose_summary(design::BuildingDesign)::Dict{String, Any}
     ec_struts_kg       = ustrip(u"kgCO2e", s.embodied_carbon_struts)
     ec_foundations_kg  = ustrip(u"kgCO2e", s.embodied_carbon_foundations)
     ec_fireproofing_kg = ustrip(u"kgCO2e", s.embodied_carbon_fireproofing)
+    ec_concrete_kg     = ustrip(u"kgCO2e", s.embodied_carbon_concrete)
+    ec_rebar_kg        = ustrip(u"kgCO2e", s.embodied_carbon_rebar)
+    ec_steel_kg        = ustrip(u"kgCO2e", s.embodied_carbon_structural_steel)
     ec_parts_kg = ec_slabs_kg + ec_columns_kg + ec_beams_kg +
                   ec_struts_kg + ec_foundations_kg + ec_fireproofing_kg
     if ec_total_kg > 0 || ec_parts_kg > 1e-9
@@ -953,6 +965,12 @@ function agent_diagnose_summary(design::BuildingDesign)::Dict{String, Any}
             "struts"        => round(ec_struts_kg; digits=0),
             "foundations"   => round(ec_foundations_kg; digits=0),
             "fireproofing"  => round(ec_fireproofing_kg; digits=0),
+        )
+        result["embodied_carbon_by_material_kgco2e"] = Dict{String, Any}(
+            "concrete"         => round(ec_concrete_kg; digits=0),
+            "rebar"            => round(ec_rebar_kg; digits=0),
+            "structural_steel" => round(ec_steel_kg; digits=0),
+            "fireproofing"     => round(ec_fireproofing_kg; digits=0),
         )
     end
     result["embodied_carbon_note"] =

@@ -104,6 +104,16 @@ mutable struct FEAModelCache
     # the user changes βt or h between iterations).  0.0 when no edge beam.
     edge_beam_βt::Float64
 
+    # Geometry this mesh was acquired for. `nothing` until
+    # [`acquire_fea_cache!`](@ref) stamps it. A different key replaces the
+    # cache instead of updating a mesh built for another slab.
+    mesh_key::Any
+
+    # Column-face transverse averaging width ÷ column dimension across the
+    # span. `nothing` integrates the whole strip. Copied from
+    # `FEA.averaging_width_factor` before moment extraction.
+    averaging_width_factor::Union{Nothing, Float64}
+
     FEAModelCache() = new(
         false, nothing, Dict{Int,ColStubData}(), nothing,
         FEAElementData[], Dict{Int,Vector{Int}}(),
@@ -116,5 +126,59 @@ mutable struct FEAModelCache
         nothing,
         Any[],
         0.0,
+        nothing,
+        nothing,
     )
+end
+
+"""
+    fea_mesh_key(struc, slab, columns; target_edge=nothing, drop_panel=nothing) -> Tuple
+
+Topology inputs of the shell mesh: slab vertices, column centers and sizes,
+target edge, and drop-panel plan. Thickness and modulus are not included;
+those take the update path. Column sizes are the sizes at the start of a
+design. Later iterations of that same design keep this key, so a column that
+grows does not remesh mid-loop. The next design acquires a new key.
+"""
+function fea_mesh_key(struc, slab, columns;
+                      target_edge::Union{Nothing, Length} = nothing,
+                      drop_panel::Union{Nothing, DropPanelGeometry} = nothing)
+    boundary, all_vis, interior_edges = _get_slab_face_boundary(struc, slab)
+    skel = struc.skeleton
+    _m(x) = Float64(ustrip(u"m", x))
+    bxy = Tuple(_vertex_xy_m(skel, vi) for vi in boundary)
+    verts = Tuple(sort!(collect(Int, all_vis)))
+    edges = Tuple(sort!(collect(interior_edges)))
+    cols = Tuple(
+        let xy = _column_xy_m(skel, col)
+            (xy[1], xy[2], _m(col.c1), _m(col.c2))
+        end
+        for col in columns
+    )
+    spans = Tuple(
+        (_m(struc.cells[ci].spans.primary), _m(struc.cells[ci].spans.secondary))
+        for ci in slab.cell_indices
+    )
+    te = target_edge === nothing ? nothing : _m(target_edge)
+    dp = drop_panel === nothing ? nothing :
+        (_m(drop_panel.h_drop), _m(drop_panel.a_drop_1), _m(drop_panel.a_drop_2))
+    return (bxy, verts, edges, cols, spans, te, dp)
+end
+
+"""
+    acquire_fea_cache!(slab_caches, key) -> FEAModelCache
+
+Return the slab's FEA cache when `key` is the one it was built for.
+Any other key, including a cache that was never keyed, is replaced with a
+fresh cache. The replacement is what stops a mesh from a previous geometry
+being updated in place.
+"""
+function acquire_fea_cache!(slab_caches::AbstractDict, key)
+    cache = get(slab_caches, :fea, nothing)
+    if !(cache isa FEAModelCache) || cache.mesh_key != key
+        cache = FEAModelCache()
+        slab_caches[:fea] = cache
+    end
+    cache.mesh_key = key
+    return cache
 end

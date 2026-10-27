@@ -80,16 +80,15 @@ function _extract_fea_strip_moments(
                    "δ=$(round(δ*1000, digits=0))mm"
         end
 
-        # Column-strip and middle-strip M⁻ at each column face.
+        # Column-strip and middle-strip M⁻ on the span side of each column face.
         for (_, col) in enumerate(cell_cols)
-            px, py = _column_xy_m(skel, col)
-            off = _column_face_offset_m(col, span_axis)
-            face = (px + off * span_axis[1], py + off * span_axis[2])
+            sample, δ_face = _span_side_cut(col, span_axis, _column_xy_m(skel, col), geom.centroid)
+            half_w = _averaging_half_width(col, span_axis, cache.averaging_width_factor)
 
-            Mn_cs = _integrate_design_faces(cache, neg_cs_tri, face, span_axis, δ;
-                include_torsion=include_torsion, subset=true).hogging
-            Mn_ms = _integrate_design_faces(cache, neg_ms_tri, face, span_axis, δ;
-                include_torsion=include_torsion, subset=true).hogging
+            Mn_cs = _integrate_design_faces(cache, neg_cs_tri, sample, span_axis, δ_face;
+                include_torsion=include_torsion, subset=true, transverse_half_width=half_w).hogging
+            Mn_ms = _integrate_design_faces(cache, neg_ms_tri, sample, span_axis, δ_face;
+                include_torsion=include_torsion, subset=true, transverse_half_width=half_w).hogging
 
             idx = get(col_by_vertex, col.vertex_idx, nothing)
             idx === nothing && continue

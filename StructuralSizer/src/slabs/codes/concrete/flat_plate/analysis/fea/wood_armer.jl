@@ -251,33 +251,46 @@ function _extract_wood_armer_strip_moments(
         δ = _section_cut_bandwidth(cache, cell_cols)
         half_δ = δ / 2   # half-width of the band (matches _integrate_at_subset)
 
-        # ── Column-face M⁻ (hogging, from Mn_top) ──
+        # ── Column-face M⁻ (hogging, from Mn_top), span side of the face ──
         for (_, col) in enumerate(cell_cols)
-            px, py = _column_xy_m(skel, col)
-            off = _column_face_offset_m(col, cut_ax)
-            face_s = ax * (px + off * ax) + ay * (py + off * ay)
+            sample, δ_face = _span_side_cut(col, cut_ax, _column_xy_m(skel, col), geom.centroid)
+            half_face = δ_face / 2
+            face_s = ax * sample[1] + ay * sample[2]
+            half_w = _averaging_half_width(col, cut_ax, cache.averaging_width_factor)
 
-            Mneg_cs_sum = 0.0
-            Mneg_ms_sum = 0.0
+            cs_mA = 0.0; cs_A = 0.0; cs_win_mA = 0.0; cs_win_A = 0.0
+            ms_mA = 0.0; ms_A = 0.0; ms_win_mA = 0.0; ms_win_A = 0.0
 
             for (j, k) in enumerate(tri_idx)
                 ed = cache.element_data[k]
                 elem_s = ax * ed.cx + ay * ed.cy
-                abs(elem_s - face_s) > half_δ && continue
+                abs(elem_s - face_s) > half_face && continue
 
                 # Hogging: Mn_top is ≤ 0; design moment magnitude is |Mn_top|
                 M_hog = -Mn_top[j]  # ≥ 0
+                contrib = M_hog * areas[j]
+                in_win = _in_transverse_window(ed.cx, ed.cy, sample, cut_ax, half_w)
                 if neg_cs_mask[j]
-                    Mneg_cs_sum += M_hog * areas[j]
+                    cs_mA += contrib
+                    cs_A += areas[j]
+                    if in_win
+                        cs_win_mA += contrib
+                        cs_win_A += areas[j]
+                    end
                 else
-                    Mneg_ms_sum += M_hog * areas[j]
+                    ms_mA += contrib
+                    ms_A += areas[j]
+                    if in_win
+                        ms_win_mA += contrib
+                        ms_win_A += areas[j]
+                    end
                 end
             end
 
             # Σ(Mₙ·A) has units (N·m/m)·m² = N·m·m.  Dividing by δ (m) → N·m.
             # This matches _integrate_at_subset exactly.
-            Mneg_cs = Mneg_cs_sum / δ
-            Mneg_ms = Mneg_ms_sum / δ
+            Mneg_cs = _apply_averaging_width(cs_mA, cs_A, cs_win_mA, cs_win_A, δ_face, half_w)
+            Mneg_ms = _apply_averaging_width(ms_mA, ms_A, ms_win_mA, ms_win_A, δ_face, half_w)
 
             idx = get(col_by_vertex, col.vertex_idx, nothing)
             idx === nothing && continue

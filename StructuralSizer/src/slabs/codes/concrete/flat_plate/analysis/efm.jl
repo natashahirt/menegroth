@@ -4,9 +4,9 @@
 #
 # Stiffness-based frame analysis for flat plate moment distribution.
 #
-# The equivalent frame models:
-# 1. Slab-beam strips (horizontal members with enhanced stiffness at columns)
-# 2. Equivalent columns (K_ec = combined column + torsional stiffness)
+# The floor is one equivalent frame per column line, longitudinally and
+# transversely (ACI 318-11 §13.7.2). Each line is solved on its own and
+# the column demands are written back to the supporting-column index.
 #
 # Reference:
 # - ACI 318-11 §13.7
@@ -188,7 +188,7 @@ end
 
 Run moment analysis using Equivalent Frame Method (EFM).
 
-EFM models the slab strip as a continuous beam supported on equivalent columns.
+EFM models the floor as one equivalent frame per column line, longitudinally and transversely (ACI 318-11 §13.7.2.1, corpus: aci-318-11, page 259).
 Behavior is controlled by `method.solver`, `method.column_stiffness`, and
 `method.cracked_columns` — see [`EFM`](@ref) for the full option matrix.
 
@@ -219,220 +219,13 @@ function run_moment_analysis(
     col_I_factor::Float64 = 0.70,  # ACI 318-11 §10.10.4.1 — cracked-column magnitude (from caller)
     tc = nothing,  # API parity with DDM (EFM does not emit Eq. 13-7 fallbacks)
 )
-    # Capture the incoming col_I_factor before the reassignment below clobbers it.
-    incoming_col_I = col_I_factor
-    # Effective column cracking factor for ASAP stubs:
-    #   - ASAP cracked stubs: caller's col_I_factor (default 0.70 per ACI 318-11 §10.10.4.1)
-    #   - ASAP uncracked: gross Ig (1.0)
-    #   - Hardy Cross: always gross Ig (1.0, PCA convention — stiffness carried in Kec)
-    col_I_factor = (method.solver == :asap && method.cracked_columns) ? incoming_col_I : 1.0  # ACI 318-11 §10.10.4.1
-    use_kc_only = method.column_stiffness == :Kc
-
-    # Shared setup: l1, l2, ln, span_axis, c1_avg, qD, qL, qu, M0
     setup = _moment_analysis_setup(struc, slab, supporting_columns, h, γ_concrete)
-    (; l1, l2, ln, c1_avg, qD, qL, qu, M0) = setup
-    n_cols = length(supporting_columns)
-    
-    # Detect column shape (use first column's shape, default :rectangular)
-    col_shape_val = col_shape(first(supporting_columns))
-    
-    if verbose
-        @debug "═══════════════════════════════════════════════════════════════════"
-        @debug "MOMENT ANALYSIS - EFM (Equivalent Frame Method)"
-        @debug "═══════════════════════════════════════════════════════════════════"
-        @debug "Solver" solver=method.solver column_stiffness=method.column_stiffness cracked=method.cracked_columns
-        @debug "Geometry" l1=l1 l2=l2 ln=ln c_avg=c1_avg h=h
-        @debug "Loads" qD=qD qL=qL qu=qu
-        @debug "Reference M₀" M0=uconvert(kip*u"ft", M0)
-    end
-    
-    # Get column concrete strength (may differ from slab)
-    fc_col = _get_column_fc(supporting_columns, fc)
-    wc_pcf = ustrip(pcf, γ_concrete)                 # mass density → pcf
-    Ecc = Ec(fc_col, wc_pcf)                          # ACI 19.2.2.1.a: 33 × wc^1.5 × √f'c
-    
-    # Get column height
-    H = _get_column_height(supporting_columns)
-    
-    # Build EFM span properties (with drop panel geometry if flat slab)
-    # Cache spans: only column sizes and h matter for span stiffness properties.
-    # If neither changed, reuse previous spans (avoids redundant Ksb computation).
-    _span_key = hash((
-        h, Ecs,
-        ntuple(i -> (supporting_columns[i].c1, supporting_columns[i].c2), n_cols)...,
-    ))
-    if !isnothing(efm_cache) && efm_cache.initialized &&
-       hasproperty(efm_cache, :_last_span_key) && efm_cache._last_span_key == _span_key
-        spans = efm_cache._last_spans
-    else
-        spans = _build_efm_spans(supporting_columns, l1, l2, ln, h, Ecs; drop_panel=drop_panel)
-        if !isnothing(efm_cache)
-            efm_cache._last_span_key = _span_key
-            efm_cache._last_spans = spans
-        end
-    end
-    
-    # Determine joint positions
-    joint_positions = [col.position for col in supporting_columns]
-    
-    # ─── Pattern loading check (ACI 318-11 §13.7.6) ───
-    n_spans = length(spans)
-    use_pattern = method.pattern_loading && requires_pattern_loading(qD, qL) && n_spans >= 2
-    
-    # Precompute joint Kec for Hardy Cross (invariant across pattern cases)
-    _cached_jKec = method.solver == :hardy_cross ?
-        _compute_joint_Kec(spans, joint_positions, H, Ecs, Ecc; 
-                           column_shape=col_shape_val, use_kc_only=use_kc_only,
-                           columns=supporting_columns) :
-        nothing
-    
-    # Kec reduction factors for ASAP column stubs (ACI 318-11 §13.7.4)
-    # When column_stiffness=:Kec, soften stubs by Kec/ΣKc to match the
-    # torsional flexibility that Hardy Cross captures via Kec.
-    _kec_factors = method.solver == :asap ?
-        _compute_kec_reduction_factors(spans, joint_positions, H, Ecs, Ecc;
-                                       column_shape=col_shape_val, use_kc_only=use_kc_only,
-                                       columns=supporting_columns) :
-        nothing
-    
-    # ─── Helper: run solver once for a given (scalar or per-span) load ───
-    function _solve_once(qu_arg)
-        if method.solver == :asap
-            if !isnothing(efm_cache) && efm_cache.initialized
-                _update_efm_sections_and_loads!(
-                    efm_cache, spans, qu, Ecs, Ecc,
-                    ν_concrete, γ_concrete, supporting_columns;
-                    col_I_factor = col_I_factor,
-                    kec_factors = _kec_factors,
-                )
-                # Override per-span loads for pattern loading
-                _is_pattern = qu_arg isa Vector
-                if _is_pattern
-                    n_loads = length(efm_cache.model.loads)
-                    n_per_span = n_loads ÷ n_spans
-                    for (i, load) in enumerate(efm_cache.model.loads)
-                        span_idx = (i - 1) ÷ n_per_span + 1
-                        span_idx > n_spans && break
-                        w_N_m = uconvert(u"N/m", qu_arg[span_idx] * l2)
-                        load.value = [0.0u"N/m", 0.0u"N/m", -w_N_m]
-                    end
-                end
-                solve_efm_frame!(efm_cache.model; full_process=false, loads_only=_is_pattern)
-                return extract_span_moments(
-                    efm_cache.model, efm_cache.span_elements, spans; qu=qu
-                )
-            else
-                model, span_elements, col_stubs = build_efm_asap_model(
-                    spans, joint_positions, qu;
-                    Ecs = Ecs, Ecc = Ecc,
-                    ν_concrete = ν_concrete,
-                    ρ_concrete = γ_concrete,
-                    columns = supporting_columns,
-                    verbose = verbose,
-                    col_I_factor = col_I_factor,
-                    kec_factors = _kec_factors,
-                )
-                # Override per-span loads for pattern loading
-                if qu_arg isa Vector
-                    n_loads = length(model.loads)
-                    n_per_span = n_loads ÷ n_spans
-                    for (i, load) in enumerate(model.loads)
-                        span_idx = (i - 1) ÷ n_per_span + 1
-                        span_idx > n_spans && break
-                        w_N_m = uconvert(u"N/m", qu_arg[span_idx] * l2)
-                        load.value = [0.0u"N/m", 0.0u"N/m", -w_N_m]
-                    end
-                end
-                solve_efm_frame!(model)
-                sm = extract_span_moments(model, span_elements, spans; qu=qu)
-
-                !isnothing(efm_cache) && _populate_efm_cache!(efm_cache, model, span_elements, col_stubs, spans)
-                return sm
-            end
-
-        elseif method.solver == :hardy_cross
-            return solve_moment_distribution(spans, _cached_jKec, joint_positions, qu_arg; verbose=false)
-        else
-            error("Unknown EFM solver: $(method.solver)")
-        end
-    end
-    
-    # ─── Run full-load case (always needed as baseline) ───
-    span_moments = _solve_once(qu)
-    
-    if verbose
-        solver_name = method.solver == :asap ? "EFM FRAME" : "MOMENT DISTRIBUTION"
-        @debug "───────────────────────────────────────────────────────────────────"
-        @debug "$(solver_name) RESULTS$(use_pattern ? " (full-load baseline)" : "")"
-        @debug "───────────────────────────────────────────────────────────────────"
-        for (i, sm) in enumerate(span_moments)
-            @debug "Span $i" M_neg_left=uconvert(kip*u"ft", sm.M_neg_left) M_pos=uconvert(kip*u"ft", sm.M_pos) M_neg_right=uconvert(kip*u"ft", sm.M_neg_right)
-        end
-    end
-    
-    M_neg_ext = span_moments[1].M_neg_left
-    M_neg_int = span_moments[1].M_neg_right
-    M_pos = span_moments[1].M_pos
-    
-    # ─── Pattern loading envelope (ACI 318-11 §13.7.6) ───
-    # When L/D > 0.75, run checkerboard and adjacent patterns to capture
-    # the maximum moments at each location.  The envelope governs design.
-    if use_pattern
-        patterns = generate_load_patterns(n_spans)
-        
-        for (ip, pattern) in enumerate(patterns)
-            # Skip full-load case (already run above)
-            all(==(:dead_plus_live), pattern) && continue
-            
-            qu_per_span = factored_pattern_loads(pattern, qD, qL)
-            sm_pat = _solve_once(qu_per_span)
-            
-            # Envelope: take maximum absolute moment at each location
-            pat_neg_ext = sm_pat[1].M_neg_left
-            pat_neg_int = sm_pat[1].M_neg_right
-            pat_pos     = sm_pat[1].M_pos
-            
-            abs(pat_neg_ext) > abs(M_neg_ext) && (M_neg_ext = pat_neg_ext)
-            abs(pat_neg_int) > abs(M_neg_int) && (M_neg_int = pat_neg_int)
-            abs(pat_pos)     > abs(M_pos)     && (M_pos     = pat_pos)
-        end
-        
-        if verbose
-            @debug "PATTERN LOADING ENVELOPE (ACI 13.7.6, L/D > 0.75)" M_neg_ext=uconvert(kip*u"ft", M_neg_ext) M_neg_int=uconvert(kip*u"ft", M_neg_int) M_pos=uconvert(kip*u"ft", M_pos)
-        end
-    end
-    
-    # Build column-level results (from full-load span_moments — conservative
-    # for column shears and unbalanced moments)
-    column_moments, column_shears, unbalanced_moments = _compute_efm_column_demands(
-        struc, supporting_columns, span_moments, qu, l2, ln
-    )
-    
-    # Convert all outputs to consistent US units for MomentAnalysisResult
-    M0_conv = uconvert(kip * u"ft", M0)
-    M_neg_ext_conv = uconvert(kip * u"ft", M_neg_ext)
-    M_neg_int_conv = uconvert(kip * u"ft", M_neg_int)
-    M_pos_conv = uconvert(kip * u"ft", M_pos)
-    Vu_max = uconvert(kip, qu * l2 * ln / 2)
-    
-    return MomentAnalysisResult(
-        M0_conv,
-        M_neg_ext_conv,
-        M_neg_int_conv,
-        M_pos_conv,
-        qu, qD, qL,
-        uconvert(u"ft", l1),
-        uconvert(u"ft", l2),
-        uconvert(u"ft", ln),
-        uconvert(u"ft", c1_avg),
-        column_moments,
-        column_shears,
-        unbalanced_moments,
-        Vu_max;
-        pattern_loading = use_pattern,
+    verbose && @debug "MOMENT ANALYSIS - EFM" solver=method.solver column_stiffness=method.column_stiffness n_columns=length(supporting_columns)
+    return _analyze_equivalent_frames(
+        method, struc, supporting_columns, h, fc, Ecs, γ_concrete, setup;
+        ν_concrete, verbose, efm_cache, drop_panel, col_I_factor,
     )
 end
-
 
 # =============================================================================
 # Secondary (Perpendicular) Direction — EFM
@@ -443,12 +236,9 @@ end
 
 Run EFM in the perpendicular direction (swapped l1↔l2).
 
-Builds a fresh equivalent frame for the perpendicular direction using
-`_secondary_moment_analysis_setup`.  The EFM span properties, joint Kec
-(or `Kec`-reduced ASAP stubs), and frame solve are recomputed for the
-swapped geometry — the frame model cannot be reused because stiffnesses
-change when l1↔l2 swap and the column dimension facing the span switches
-from c1 to c2.
+Groups the columns into frame lines along the perpendicular axis and
+solves each line. The span-parallel column face is the face along that
+axis. The primary direction's Asap model is not reused.
 
 Honors `method.solver` (`:asap` or `:hardy_cross`), `method.column_stiffness`,
 `method.cracked_columns`, and `method.pattern_loading` — same option matrix
@@ -469,126 +259,10 @@ function run_secondary_moment_analysis(
     col_I_factor::Float64 = 0.70,  # ACI 318-11 §10.10.4.1 — cracked-column magnitude (from caller)
     kwargs...
 )
-    # Capture the incoming col_I_factor before the reassignment below clobbers it.
-    incoming_col_I = col_I_factor
-    # ASAP cracked stubs: caller's col_I_factor (default 0.70 per ACI 318-11 §10.10.4.1);
-    # ASAP uncracked and Hardy Cross: always gross Ig (1.0, PCA convention).
-    col_I_factor = (method.solver == :asap && method.cracked_columns) ? incoming_col_I : 1.0  # ACI 318-11 §10.10.4.1
-    use_kc_only  = method.column_stiffness == :Kc
-
     setup = _secondary_moment_analysis_setup(struc, slab, supporting_columns, h, γ_concrete)
-    (; l1, l2, ln, span_axis, c1_avg, qD, qL, qu, M0) = setup
-    n_cols = length(supporting_columns)
-
-    col_shape_val = col_shape(first(supporting_columns))
-    fc_col = _get_column_fc(supporting_columns, fc)
-    wc_pcf = ustrip(pcf, γ_concrete)
-    Ecc = Ec(fc_col, wc_pcf)
-    H = _get_column_height(supporting_columns)
-
-    # Build EFM spans for perpendicular direction (fresh — no cache reuse).
-    # Unlike the primary direction, we cannot reuse the frame model because
-    # spans, stiffnesses, and column orientation all change under l1↔l2 swap.
-    spans = _build_efm_spans(supporting_columns, l1, l2, ln, h, Ecs; drop_panel=drop_panel)
-    joint_positions = [col.position for col in supporting_columns]
-
-    n_spans = length(spans)
-    use_pattern = method.pattern_loading && requires_pattern_loading(qD, qL) && n_spans >= 2
-
-    # Precompute solver inputs once: jKec for Hardy Cross, Kec reduction
-    # factors for ASAP column stubs (ACI 318-11 §13.7.4).
-    _cached_jKec = method.solver == :hardy_cross ?
-        _compute_joint_Kec(spans, joint_positions, H, Ecs, Ecc;
-                           column_shape=col_shape_val, use_kc_only=use_kc_only,
-                           columns=supporting_columns) :
-        nothing
-
-    _kec_factors = method.solver == :asap ?
-        _compute_kec_reduction_factors(spans, joint_positions, H, Ecs, Ecc;
-                                       column_shape=col_shape_val, use_kc_only=use_kc_only,
-                                       columns=supporting_columns) :
-        nothing
-
-    # ─── Helper: run the chosen solver for a given (scalar or per-span) load ───
-    # Mirrors the primary direction's `_solve_once`, minus the cache reuse
-    # (secondary frame is built fresh each call — see comment above).
-    function _solve_once(qu_arg)
-        if method.solver == :asap
-            model, span_elements, _col_stubs = build_efm_asap_model(
-                spans, joint_positions, qu;
-                Ecs = Ecs, Ecc = Ecc,
-                ν_concrete = ν_concrete,
-                ρ_concrete = γ_concrete,
-                columns = supporting_columns,
-                verbose = false,
-                col_I_factor = col_I_factor,
-                kec_factors = _kec_factors,
-            )
-            if qu_arg isa Vector
-                n_loads = length(model.loads)
-                n_per_span = n_loads ÷ n_spans
-                for (i, load) in enumerate(model.loads)
-                    span_idx = (i - 1) ÷ n_per_span + 1
-                    span_idx > n_spans && break
-                    w_N_m = uconvert(u"N/m", qu_arg[span_idx] * l2)
-                    load.value = [0.0u"N/m", 0.0u"N/m", -w_N_m]
-                end
-            end
-            solve_efm_frame!(model)
-            return extract_span_moments(model, span_elements, spans; qu=qu)
-
-        elseif method.solver == :hardy_cross
-            return solve_moment_distribution(spans, _cached_jKec, joint_positions,
-                                             qu_arg; verbose=false)
-        else
-            error("Unknown EFM solver: $(method.solver)")
-        end
-    end
-
-    # Baseline (full-load) solve
-    span_moments = _solve_once(qu)
-
-    M_neg_ext = span_moments[1].M_neg_left
-    M_neg_int = span_moments[1].M_neg_right
-    M_pos     = span_moments[1].M_pos
-
-    # Pattern-loading envelope (ACI 318-11 §13.7.6)
-    if use_pattern
-        for pat in generate_load_patterns(n_spans)
-            all(==(:dead_plus_live), pat) && continue
-            qu_ps = factored_pattern_loads(pat, qD, qL)
-            sm_pat = _solve_once(qu_ps)
-            abs(sm_pat[1].M_neg_left)  > abs(M_neg_ext) && (M_neg_ext = sm_pat[1].M_neg_left)
-            abs(sm_pat[1].M_neg_right) > abs(M_neg_int) && (M_neg_int = sm_pat[1].M_neg_right)
-            abs(sm_pat[1].M_pos)       > abs(M_pos)     && (M_pos     = sm_pat[1].M_pos)
-        end
-    end
-
-    column_moments, column_shears, unbalanced_moments = _compute_efm_column_demands(
-        struc, supporting_columns, span_moments, qu, l2, ln
-    )
-
-    if verbose
-        solver_name = method.solver == :asap ? "EFM FRAME" : "MOMENT DISTRIBUTION"
-        @debug "EFM SECONDARY DIRECTION ($(solver_name))" l1=l1 l2=l2 ln=ln M0=uconvert(kip*u"ft", M0)
-    end
-
-    Vu_max = uconvert(kip, qu * l2 * ln / 2)
-    return MomentAnalysisResult(
-        uconvert(kip * u"ft", M0),
-        uconvert(kip * u"ft", M_neg_ext),
-        uconvert(kip * u"ft", M_neg_int),
-        uconvert(kip * u"ft", M_pos),
-        qu, qD, qL,
-        uconvert(u"ft", l1),
-        uconvert(u"ft", l2),
-        uconvert(u"ft", ln),
-        uconvert(u"ft", c1_avg),
-        column_moments,
-        column_shears,
-        unbalanced_moments,
-        Vu_max;
-        pattern_loading = use_pattern,
+    return _analyze_equivalent_frames(
+        method, struc, supporting_columns, h, fc, Ecs, γ_concrete, setup;
+        ν_concrete, verbose, efm_cache = nothing, drop_panel, col_I_factor,
     )
 end
 
@@ -1507,63 +1181,381 @@ end
 # =============================================================================
 
 """
-    _build_efm_spans(columns, l1, l2, ln, h, Ecs; drop_panel=nothing)
+    _efm_span(span_idx, l1, l2, ln, h, Ecs, c_par_l, c_tr_l, c_par_r, c_tr_r; drop_panel=nothing)
 
-Build EFM span properties from column/slab data.
+One slab-beam span. `c_par` is the column face parallel to the span and
+`c_tr` is the face transverse to it, which is what PCA Table A1 calls c1 and c2.
 
-Slab-beam stiffness factors (k, COF, m) are interpolated from PCA Table A1
-based on actual c₁/l₁ and c₂/l₂ ratios — replacing the old hardcoded
-PCA_K_SLAB, PCA_COF, PCA_M_FACTOR constants.
-
-For **flat slabs** (drop_panel ≠ nothing), the same prismatic PCA factors are
-used.  Non-prismatic section behaviour is handled by the ASAP elastic solver
-which models the actual varying I along the span.
-
-Is_drop (composite I at the drop section) is still computed so the ASAP solver
-can assign a stiffer section to the drop-panel zone.
+For a flat slab the prismatic PCA factors are unchanged. The ASAP solver
+sees the drop through `Is_drop`.
 """
-function _build_efm_spans(columns, l1, l2, ln, h, Ecs;
-                           drop_panel::Union{Nothing, DropPanelGeometry} = nothing)
-    n_cols = length(columns)
-    n_spans = n_cols - 1
-    
-    spans = Vector{EFMSpanProperties}(undef, n_spans)
-    
-    for i in 1:n_spans
-        col_left = columns[i]
-        col_right = columns[i + 1]
+function _efm_span(span_idx, l1, l2, ln, h, Ecs, c_par_l, c_tr_l, c_par_r, c_tr_r;
+                   drop_panel::Union{Nothing, DropPanelGeometry} = nothing)
+    slab_factors = pca_slab_beam_factors(c_par_l, l1, c_tr_l, l2)
+    Is = slab_moment_of_inertia(l2, h)
+    Ksb = slab_beam_stiffness_Ksb(Ecs, Is, l1, c_par_l, c_tr_l; k_factor=slab_factors.k)
+    Is_drop = isnothing(drop_panel) ? nothing :
+        slab_moment_of_inertia(l2, total_depth_at_drop(h, drop_panel))
+    return EFMSpanProperties{typeof(Is), typeof(Ksb)}(
+        span_idx, span_idx, span_idx + 1,
+        l1, l2, ln, h,
+        c_par_l, c_tr_l, c_par_r, c_tr_r,
+        Is, Ksb,
+        slab_factors.m, slab_factors.COF, slab_factors.k,
+        drop_panel, Is_drop,
+    )
+end
 
-        # Geometry-dependent PCA Table A1 lookup
-        slab_factors = pca_slab_beam_factors(col_left.c1, l1, col_left.c2, l2)
-        k_slab   = slab_factors.k
-        m_factor = slab_factors.m
-        COF      = slab_factors.COF
-        
-        Is = slab_moment_of_inertia(l2, h)
-        Ksb = slab_beam_stiffness_Ksb(Ecs, Is, l1, col_left.c1, col_left.c2; k_factor=k_slab)
-        
-        # Compute Is_drop for ASAP section assignment in the drop zone
-        Is_drop = if !isnothing(drop_panel)
-            h_total = total_depth_at_drop(h, drop_panel)
-            slab_moment_of_inertia(l2, h_total)
-        else
-            nothing
-        end
-        
-        spans[i] = EFMSpanProperties{typeof(Is), typeof(Ksb)}(
-            i, i, i + 1,
-            l1, l2, ln,
-            h,
-            col_left.c1, col_left.c2,
-            col_right.c1, col_right.c2,
-            Is, Ksb,
-            m_factor, COF, k_slab,
-            drop_panel, Is_drop,
+"""
+Spans of one column line. `proj_m` is the station of each column in meters
+along `axis`, already sorted. The clear span is center-to-center minus the
+two face projections.
+"""
+function _spans_from_projections(columns, proj_m::Vector{Float64}, axis, l2::Length, h, Ecs;
+                                drop_panel::Union{Nothing, DropPanelGeometry} = nothing)
+    n = length(columns)
+    n >= 2 || error("EFM frame line needs at least two columns")
+    length(proj_m) == n || error("EFM frame line projections do not match its columns")
+    perp = (-axis[2], axis[1])
+    spans = Vector{EFMSpanProperties}(undef, n - 1)
+    for i in 1:(n - 1)
+        l1 = (proj_m[i + 1] - proj_m[i]) * u"m"
+        half_l = _eq137_face_half(columns[i], axis)
+        half_r = _eq137_face_half(columns[i + 1], axis)
+        ln = l1 - half_l - half_r
+        ln > 0u"m" || error(
+            "EFM clear span is non-positive between columns $i and $(i + 1) " *
+            "(center-to-center $l1, faces $(2 * half_l) and $(2 * half_r)). " *
+            "Column projections are meters along the frame.")
+        spans[i] = _efm_span(
+            i, l1, l2, ln, h, Ecs,
+            2 * half_l, 2 * _eq137_face_half(columns[i], perp),
+            2 * half_r, 2 * _eq137_face_half(columns[i + 1], perp);
+            drop_panel,
         )
     end
-    
     return spans
 end
+
+"""
+Split column indices into column lines.
+
+Stations are the coordinate transverse to the span. A gap larger than half
+the median bay starts a new line, so a millimeter vertex mismatch stays on
+its line and the next panel does not.
+"""
+function _cluster_transverse(t::Vector{Float64})
+    order = sortperm(t)
+    groups = Vector{Int}[]
+    isempty(order) && return groups
+    gaps = [t[order[i + 1]] - t[order[i]] for i in 1:(length(order) - 1)]
+    positive = filter(>(0.05), gaps)
+    bay = isempty(positive) ? Inf : 0.5 * sort(positive)[(end + 1) ÷ 2]
+    current = Int[order[1]]
+    for i in eachindex(gaps)
+        if gaps[i] > bay
+            push!(groups, current)
+            current = Int[order[i + 1]]
+        else
+            push!(current, order[i + 1])
+        end
+    end
+    push!(groups, current)
+    return groups
+end
+
+"""
+Tributary width of column line `k` of `n`.
+
+ACI 318-11 §13.7.2.2 (corpus: aci-318-11, page 259): an interior frame is
+bounded by the panel centerline on each side of the column line.
+§13.7.2.4: a frame on an edge is bounded by that edge and the centerline of
+the adjacent panel. These slabs end on the column line, so the edge frame's
+outer bound is the line itself and its width is half the bay.
+
+A single line is the panel strip the caller already measured.
+"""
+function _line_tributary_width(k::Int, n::Int, stations::Vector{Float64}, panel_l2::Length)
+    n == 1 && return panel_l2
+    left = k == 1 ? 0.0 : (stations[k] - stations[k - 1]) / 2
+    right = k == n ? 0.0 : (stations[k + 1] - stations[k]) / 2
+    width = (left + right) * u"m"
+    width > 0u"m" || error("EFM frame line $k has a non-positive tributary width")
+    return width
+end
+
+"""Column lines along `axis`, each sorted in the span direction."""
+function _column_line_groups(columns, xy, axis, panel_l2::Length)
+    axes = _eq137_unit_axes(axis)
+    axes === nothing && error("EFM span axis has zero length")
+    ax, perp = axes
+    s = [xy[i][1] * ax[1] + xy[i][2] * ax[2] for i in eachindex(columns)]
+    t = [xy[i][1] * perp[1] + xy[i][2] * perp[2] for i in eachindex(columns)]
+    groups = _cluster_transverse(t)
+    stations = [sum(t[i] for i in g) / length(g) for g in groups]
+    lines = map(enumerate(groups)) do (k, g)
+        idx = g[sortperm(s[g])]
+        cols = [columns[i] for i in idx]
+        length(cols) >= 2 || error(
+            "EFM column line has a single column. ACI 318-11 §13.7.2.2 " *
+            "(corpus: aci-318-11, page 259) requires a row of columns and slab-beam strips.")
+        (
+            columns = cols,
+            projections = [s[i] for i in idx],
+            width = _line_tributary_width(k, length(groups), stations, panel_l2),
+            axis = ax,
+        )
+    end
+    return lines
+end
+
+"""Meters, structural centerline. Without skeleton geometry the list is already one line at spacing `l1`."""
+function _efm_xy(struc, columns, l1::Length, axis)
+    if _eq137_geometry_available(struc) && all(c -> col_vertex_idx(c) > 0, columns)
+        return [_eq137_structural_xy(struc, col) for col in columns]
+    end
+    axes = _eq137_unit_axes(axis)
+    ax = axes === nothing ? (1.0, 0.0) : axes[1]
+    step = ustrip(u"m", l1)
+    return [((i - 1) * step * ax[1], (i - 1) * step * ax[2]) for i in eachindex(columns)]
+end
+
+"""
+One entry per column line, in the shape `run_moment_analysis(::EFM, line, ...)` reads.
+
+`column_projections` are meters along the span.
+"""
+function _equivalent_frames(struc, columns, setup)
+    grouped = _column_line_groups(
+        columns,
+        _efm_xy(struc, columns, setup.l1, setup.span_axis),
+        setup.span_axis,
+        setup.l2,
+    )
+    return map(grouped) do g
+        (
+            columns = g.columns,
+            column_projections = g.projections,
+            tributary_width = g.width,
+            direction = g.axis,
+        )
+    end
+end
+
+"""
+Drop the cached Asap model when this line is not the line that built it.
+Section and load updates stay valid across a thickness change: span lengths
+do not depend on `h`.
+"""
+function _reuse_line_model!(efm_cache, spans)
+    isnothing(efm_cache) && return
+    if efm_cache.initialized && !isnothing(efm_cache._last_spans)
+        old = efm_cache._last_spans
+        same = length(old) == length(spans) && all(eachindex(spans)) do i
+            old[i].l1 == spans[i].l1 && old[i].ln == spans[i].ln && old[i].l2 == spans[i].l2
+        end
+        same || (efm_cache.initialized = false)
+    end
+    if efm_cache.initialized && efm_cache.n_spans != length(spans)
+        efm_cache.initialized = false
+    end
+    efm_cache._last_spans = spans
+    return
+end
+
+"""
+Solve one frame line. Hardy Cross and ASAP share this path, including the
+pattern envelope. Returns the demand named tuple and whether a pattern was applied.
+"""
+function _solve_efm_line(method::EFM, spans, columns, joint_positions, struc,
+                         Ecs, Ecc, qu, qD, qL;
+                         ν_concrete::Float64 = 0.20,
+                         ρ_concrete = 2380.0u"kg/m^3",
+                         verbose::Bool = false,
+                         efm_cache::Union{Nothing, EFMModelCache} = nothing,
+                         col_I_factor::Float64 = 0.70)
+    l2 = spans[1].l2
+    n_spans = length(spans)
+    ln_avg = sum(sp.ln for sp in spans) / n_spans
+    H = _get_column_height(columns)
+    col_shape_val = col_shape(columns[1])
+    # ASAP cracked stubs take the caller's factor. Hardy Cross uses gross Ig;
+    # its column stiffness is Kec. ACI 318-11 §10.10.4.1.
+    incoming_col_I = col_I_factor
+    col_I_factor = (method.solver == :asap && method.cracked_columns) ? incoming_col_I : 1.0
+    use_kc_only = method.column_stiffness == :Kc
+
+    jKec = method.solver == :hardy_cross ?
+        _compute_joint_Kec(spans, joint_positions, H, Ecs, Ecc;
+                           column_shape=col_shape_val, use_kc_only=use_kc_only,
+                           columns=columns) :
+        nothing
+    kec_factors = method.solver == :asap ?
+        _compute_kec_reduction_factors(spans, joint_positions, H, Ecs, Ecc;
+                                       column_shape=col_shape_val, use_kc_only=use_kc_only,
+                                       columns=columns) :
+        nothing
+
+    function _solve_once(qu_arg)
+        if method.solver == :asap
+            if !isnothing(efm_cache) && efm_cache.initialized
+                _update_efm_sections_and_loads!(
+                    efm_cache, spans, qu, Ecs, Ecc,
+                    ν_concrete, ρ_concrete, columns;
+                    col_I_factor = col_I_factor,
+                    kec_factors = kec_factors,
+                )
+                is_pattern = qu_arg isa Vector
+                if is_pattern
+                    n_loads = length(efm_cache.model.loads)
+                    n_per_span = n_loads ÷ n_spans
+                    for (i, load) in enumerate(efm_cache.model.loads)
+                        span_idx = (i - 1) ÷ n_per_span + 1
+                        span_idx > n_spans && break
+                        w_N_m = uconvert(u"N/m", qu_arg[span_idx] * l2)
+                        load.value = [0.0u"N/m", 0.0u"N/m", -w_N_m]
+                    end
+                end
+                solve_efm_frame!(efm_cache.model; full_process=false, loads_only=is_pattern)
+                return extract_span_moments(
+                    efm_cache.model, efm_cache.span_elements, spans; qu=qu)
+            else
+                model, span_elements, col_stubs = build_efm_asap_model(
+                    spans, joint_positions, qu;
+                    Ecs = Ecs, Ecc = Ecc,
+                    ν_concrete = ν_concrete,
+                    ρ_concrete = ρ_concrete,
+                    columns = columns,
+                    verbose = verbose,
+                    col_I_factor = col_I_factor,
+                    kec_factors = kec_factors,
+                )
+                if qu_arg isa Vector
+                    n_loads = length(model.loads)
+                    n_per_span = n_loads ÷ n_spans
+                    for (i, load) in enumerate(model.loads)
+                        span_idx = (i - 1) ÷ n_per_span + 1
+                        span_idx > n_spans && break
+                        w_N_m = uconvert(u"N/m", qu_arg[span_idx] * l2)
+                        load.value = [0.0u"N/m", 0.0u"N/m", -w_N_m]
+                    end
+                end
+                solve_efm_frame!(model)
+                sm = extract_span_moments(model, span_elements, spans; qu=qu)
+                !isnothing(efm_cache) && _populate_efm_cache!(
+                    efm_cache, model, span_elements, col_stubs, spans)
+                return sm
+            end
+        elseif method.solver == :hardy_cross
+            return solve_moment_distribution(
+                spans, jKec, joint_positions, qu_arg;
+                verbose = verbose && !(qu_arg isa Vector),
+            )
+        else
+            error("Unknown EFM solver: $(method.solver)")
+        end
+    end
+
+    span_moments = _solve_once(qu)
+    use_pattern = method.pattern_loading && requires_pattern_loading(qD, qL) && n_spans >= 2
+    env = _efm_demands_with_pattern(
+        span_moments, struc, columns, qu, qD, qL, l2, ln_avg;
+        use_pattern, solve_once=_solve_once,
+    )
+    return env, use_pattern
+end
+
+"""
+Solve every column line and write each column's demands back to its index
+in `columns`. Strip moments are the largest absolute value among the lines.
+`setup.M0`, `l1`, `l2`, and `ln` stay the panel design strip.
+
+One `EFMModelCache` is one Asap model. It is used only when the floor is a
+single line. Several lines would overwrite each other's topology.
+"""
+function _analyze_equivalent_frames(method::EFM, struc, columns, h, fc, Ecs, γ_concrete, setup;
+                                   ν_concrete::Float64 = 0.20,
+                                   verbose::Bool = false,
+                                   efm_cache::Union{Nothing, EFMModelCache} = nothing,
+                                   drop_panel = nothing,
+                                   col_I_factor::Float64 = 0.70)
+    lines = _equivalent_frames(struc, columns, setup)
+    isempty(lines) && error("EFM found no frame lines")
+    fc_col = _get_column_fc(columns, fc)
+    Ecc = Ec(fc_col, ustrip(pcf, γ_concrete))
+    n = length(columns)
+    MomentT = typeof(1.0kip * u"ft")
+    ForceT = typeof(1.0kip)
+    column_moments = Vector{MomentT}(undef, n)
+    column_shears = Vector{ForceT}(undef, n)
+    unbalanced_moments = Vector{MomentT}(undef, n)
+    covered = falses(n)
+    index_of = Dict{UInt, Int}(objectid(col) => i for (i, col) in enumerate(columns))
+    M_neg_ext = M_neg_int = M_pos = nothing
+    use_pattern = false
+    one_line = length(lines) == 1
+    for (k, line) in enumerate(lines)
+        res = run_moment_analysis(
+            method, line, struc, h, fc, Ecs, Ecc, setup.qu, setup.qD, setup.qL;
+            ν_concrete, ρ_concrete = γ_concrete,
+            verbose = verbose && k == 1,
+            efm_cache = one_line ? efm_cache : nothing,
+            drop_panel, col_I_factor,
+        )
+        use_pattern |= res.pattern_loading
+        M_neg_ext = isnothing(M_neg_ext) ? res.M_neg_ext : _raise_abs(M_neg_ext, res.M_neg_ext)
+        M_neg_int = isnothing(M_neg_int) ? res.M_neg_int : _raise_abs(M_neg_int, res.M_neg_int)
+        M_pos = isnothing(M_pos) ? res.M_pos : _raise_abs(M_pos, res.M_pos)
+        for (j, col) in enumerate(line.columns)
+            i = index_of[objectid(col)]
+            covered[i] && error("A column lies on two EFM frame lines")
+            column_moments[i] = uconvert(kip * u"ft", res.column_moments[j])
+            column_shears[i] = uconvert(kip, res.column_shears[j])
+            unbalanced_moments[i] = uconvert(kip * u"ft", res.unbalanced_moments[j])
+            covered[i] = true
+        end
+    end
+    n_missed = n - count(covered)
+    n_missed == 0 || error("EFM left $n_missed column(s) off every frame line")
+    verbose && @debug "EFM frame lines" n_lines=length(lines) pattern=use_pattern
+    return MomentAnalysisResult(
+        uconvert(kip * u"ft", setup.M0),
+        uconvert(kip * u"ft", M_neg_ext),
+        uconvert(kip * u"ft", M_neg_int),
+        uconvert(kip * u"ft", M_pos),
+        setup.qu, setup.qD, setup.qL,
+        uconvert(u"ft", setup.l1),
+        uconvert(u"ft", setup.l2),
+        uconvert(u"ft", setup.ln),
+        uconvert(u"ft", setup.c1_avg),
+        column_moments,
+        column_shears,
+        unbalanced_moments,
+        uconvert(kip, setup.qu * setup.l2 * setup.ln / 2);
+        pattern_loading = use_pattern,
+    )
+end
+
+"""
+Pattern-on and pattern-off equivalent frames, both directions, with column
+demands at the supporting-column index. FEA `:efm_amp` scales each shell
+demand by the frame that owns that column.
+"""
+function _efm_pattern_baselines(struc, slab, columns, h, fc, Ecs, γ_concrete;
+                               drop_panel = nothing,
+                               col_I_factor::Float64 = 0.70,
+                               ν_concrete::Float64 = 0.20)
+    on = EFM(solver=:hardy_cross, column_stiffness=:Kec, pattern_loading=true, cracked_columns=false)
+    off = EFM(solver=:hardy_cross, column_stiffness=:Kec, pattern_loading=false, cracked_columns=false)
+    kw = (; drop_panel, col_I_factor, ν_concrete, verbose=false)
+    return (
+        primary_on = run_moment_analysis(on, struc, slab, columns, h, fc, Ecs, γ_concrete; kw...),
+        primary_off = run_moment_analysis(off, struc, slab, columns, h, fc, Ecs, γ_concrete; kw...),
+        secondary_on = run_secondary_moment_analysis(on, struc, slab, columns, h, fc, Ecs, γ_concrete; kw...),
+        secondary_off = run_secondary_moment_analysis(off, struc, slab, columns, h, fc, Ecs, γ_concrete; kw...),
+    )
+end
+
 
 """Get column concrete strength from first column's material, or fall back to slab fc."""
 function _get_column_fc(columns, default_fc)
@@ -1583,20 +1575,47 @@ function _get_column_height(columns)
 end
 
 """
+Equivalent uniform pressure for one column under a per-span pattern.
+
+ENGINEERING JUDGMENT: the column tributary is split equally between the
+adjacent spans. ACI 318-11 §13.7.6.4 (corpus: aci-318-11, page 261) keeps
+the all-panels full-load shear as a lower bound; the envelope applies that
+bound, this split does not.
+"""
+function _pattern_shear_pressure(qu, qu_per_span, i::Int, n_cols::Int)
+    qu_per_span === nothing && return qu
+    i == 1 && return qu_per_span[1]
+    i == n_cols && return qu_per_span[end]
+    return (qu_per_span[i - 1] + qu_per_span[i]) / 2
+end
+
+function _raise_abs(current, candidate)
+    return abs(candidate) > abs(current) ? candidate : current
+end
+
+function _raise_abs_vector!(dest, src)
+    for i in eachindex(dest)
+        abs(src[i]) > abs(dest[i]) && (dest[i] = src[i])
+    end
+    return dest
+end
+
+"""
     _compute_efm_column_demands(struc, columns, span_moments, qu, l2, ln)
 
 Compute column-level demands from EFM span moments.
 
 Uses tributary area for shear where available.
 """
-function _compute_efm_column_demands(struc, columns, span_moments, qu, l2, ln)
+function _compute_efm_column_demands(struc, columns, span_moments, qu, l2, ln;
+                                     qu_per_span=nothing)
     n_cols = length(columns)
     MomentT = typeof(1.0kip*u"ft")
     ForceT  = typeof(1.0kip)
     column_moments     = Vector{MomentT}(undef, n_cols)
     column_shears      = Vector{ForceT}(undef, n_cols)
     unbalanced_moments = Vector{MomentT}(undef, n_cols)
-    
+
     for (i, col) in enumerate(columns)
         if i == 1
             M = span_moments[1].M_neg_left
@@ -1610,13 +1629,61 @@ function _compute_efm_column_demands(struc, columns, span_moments, qu, l2, ln)
             M = max(M_left, M_right)
             Mub = abs(M_left - M_right)
         end
-        
+
         column_moments[i] = M
         unbalanced_moments[i] = Mub
-        column_shears[i] = _compute_column_shear(struc, col, qu, l2, ln)
+        q_i = _pattern_shear_pressure(qu, qu_per_span, i, n_cols)
+        column_shears[i] = _compute_column_shear(struc, col, q_i, l2, ln)
     end
-    
+
     return column_moments, column_shears, unbalanced_moments
+end
+
+"""
+    _efm_demands_with_pattern(...) -> NamedTuple
+
+Slab moments from the end span of this frame line, plus column moments, shears, and
+unbalanced moments. When `use_pattern` is true, each station is the larger
+absolute value of the full-load case and the §13.7.6.3 patterns.
+
+ACI 318-11 §13.7.6.4 (corpus: aci-318-11, page 261): a pattern cannot
+reduce a full-load demand. Unbalanced moments are enveloped as a derived
+quantity. Enveloping the two end moments first and then subtracting them
+would hide the checkerboard transfer.
+"""
+function _efm_demands_with_pattern(span_moments, struc, columns, qu, qD, qL, l2, ln;
+                                   use_pattern::Bool, solve_once)
+    M_neg_ext = span_moments[1].M_neg_left
+    M_neg_int = span_moments[1].M_neg_right
+    M_pos = span_moments[1].M_pos
+    column_moments, column_shears, unbalanced_moments = _compute_efm_column_demands(
+        struc, columns, span_moments, qu, l2, ln,
+    )
+    if use_pattern
+        n_spans = length(span_moments)
+        for pattern in generate_load_patterns(n_spans)
+            all(==(:dead_plus_live), pattern) && continue
+            qu_ps = factored_pattern_loads(pattern, qD, qL)
+            sm_pat = solve_once(qu_ps)
+            M_neg_ext = _raise_abs(M_neg_ext, sm_pat[1].M_neg_left)
+            M_neg_int = _raise_abs(M_neg_int, sm_pat[1].M_neg_right)
+            M_pos = _raise_abs(M_pos, sm_pat[1].M_pos)
+            cm_p, cs_p, ub_p = _compute_efm_column_demands(
+                struc, columns, sm_pat, qu, l2, ln; qu_per_span=qu_ps,
+            )
+            _raise_abs_vector!(column_moments, cm_p)
+            _raise_abs_vector!(column_shears, cs_p)
+            _raise_abs_vector!(unbalanced_moments, ub_p)
+        end
+    end
+    return (
+        M_neg_ext = M_neg_ext,
+        M_neg_int = M_neg_int,
+        M_pos = M_pos,
+        column_moments = column_moments,
+        column_shears = column_shears,
+        unbalanced_moments = unbalanced_moments,
+    )
 end
 
 # _compute_column_shear is defined in common.jl (shared between DDM and EFM)
@@ -1773,42 +1840,28 @@ end
 # =============================================================================
 
 """
-    run_moment_analysis(method::EFM, frame_line::FrameLine, struc, h, fc, Ecs, Ecc, qu, qD, qL; verbose=false)
+    run_moment_analysis(method::EFM, frame_line, struc, h, fc, Ecs, Ecc, qu, qD, qL; kwargs...)
 
-Run EFM moment analysis using a FrameLine (multi-span frame strip).
+Solve one equivalent frame.
 
-This overload accepts a pre-built FrameLine which already has:
-- Columns sorted along the frame direction
-- Clear span lengths computed
-- Joint positions (exterior/interior) determined
-
-# Arguments
-- `method::EFM`: EFM method with solver selection (:asap or :hardy_cross)
-- `frame_line::FrameLine`: Pre-built frame strip with columns and spans
-- `struc`: BuildingStructure (for tributary area lookup)
-- `h::Length`: Slab thickness
-- `fc::Pressure`: Concrete compressive strength
-- `Ecs::Pressure`: Slab concrete modulus
-- `Ecc::Pressure`: Column concrete modulus
-- `qu::Pressure`: Factored uniform load
-- `qD::Pressure`: Service dead load
-- `qL::Pressure`: Service live load
+`frame_line` supplies `columns`, `column_projections` (meters along the
+span), `tributary_width`, and `direction`. Clear spans are recomputed from
+those projections and the column faces. Joint stiffness uses each column's
+own `position`: an interior column has a torsion member on both sides, and
+an edge or corner column has one (ACI 318-11 §13.7.2.3, corpus: aci-318-11,
+page 259). The frame line's end/middle tags are not used, because the middle
+of an edge line is still an edge column.
 
 # Returns
-`MomentAnalysisResult` with all moments and geometry data.
-
-# Example
-```julia
-fl = FrameLine(:x, columns, l2, get_pos, get_width)
-result = run_moment_analysis(EFM(solver=:asap), fl, struc, h, fc, Ecs, Ecc, qu, qD, qL)
-```
+`MomentAnalysisResult` for this line. Column vectors follow the line's
+span order, not the order of a floor-wide column list.
 """
 function run_moment_analysis(
     method::EFM,
-    frame_line,  # FrameLine{T, C}
+    frame_line,
     struc,
     h::Length,
-    fc::Pressure,
+    fc::Pressure,  # historical argument; the column modulus used here is Ecc
     Ecs::Pressure,
     Ecc::Pressure,
     qu::Pressure,
@@ -1820,218 +1873,49 @@ function run_moment_analysis(
     efm_cache::Union{Nothing, EFMModelCache} = nothing,
     cache = nothing,  # API parity (unused by EFM)
     col_I_factor::Float64 = 0.70,  # ACI 318-11 §10.10.4.1 — cracked-column magnitude (from caller)
+    drop_panel::Union{Nothing, DropPanelGeometry} = nothing,
 )
-    # Extract from FrameLine
-    sorted_columns = frame_line.columns
-    l2 = frame_line.tributary_width
-    n_spans = length(frame_line.span_lengths)
-    n_cols = n_spans + 1
-    
-    # Build joint positions from FrameLine
-    joint_positions = frame_line.joint_positions
-    
-    # Get column height (assume uniform)
-    H = _get_column_height(sorted_columns)
-    
-    # Build EFM span properties from FrameLine
-    spans = EFMSpanProperties[]
-    for span_idx in 1:n_spans
-        col_left = sorted_columns[span_idx]
-        col_right = sorted_columns[span_idx + 1]
-        ln = frame_line.span_lengths[span_idx]
-        
-        # Center-to-center span (approximate from clear span + column widths)
-        l1 = ln + (col_left.c1 + col_right.c1) / 2
-        
-        # Column dimensions
-        c1_left = col_left.c1
-        c2_left = col_left.c2
-        c1_right = col_right.c1
-        c2_right = col_right.c2
-        
-        # Compute span properties with geometry-dependent PCA Table A1 lookup
-        Is = slab_moment_of_inertia(l2, h)
-        c1_avg = (c1_left + c1_right) / 2
-        c2_avg = (c2_left + c2_right) / 2
-
-        slab_factors = pca_slab_beam_factors(c1_avg, l1, c2_avg, l2)
-        k_slab   = slab_factors.k
-        m_factor = slab_factors.m
-        COF      = slab_factors.COF
-        Ksb = slab_beam_stiffness_Ksb(Ecs, Is, l1, c1_avg, c2_avg; k_factor=k_slab)
-        
-        push!(spans, EFMSpanProperties(
-            span_idx, span_idx, span_idx + 1,
-            l1, l2, ln, h,
-            c1_left, c2_left, c1_right, c2_right,
-            Is, Ksb, m_factor, COF, k_slab
-        ))
-    end
-    
-    # Total static moment for reference
-    ln_avg = sum(sp.ln for sp in spans) / n_spans
-    M0 = total_static_moment(qu, l2, ln_avg)
-    
-    if verbose
-        @debug "═══════════════════════════════════════════════════════════════════"
-        @debug "MOMENT ANALYSIS - EFM (FrameLine)"
-        @debug "═══════════════════════════════════════════════════════════════════"
-        @debug "Frame direction" dir=frame_line.direction n_spans=n_spans l2=l2
-        @debug "Solver" solver=method.solver
-        @debug "Loads" qD=qD qL=qL qu=qu
-    end
-    
-    # Detect column shape from first column
-    col_shape_val = col_shape(sorted_columns[1])
-    
-    # Capture the incoming col_I_factor before the reassignment below clobbers it.
-    incoming_col_I = col_I_factor
-    # ASAP cracked stubs: caller's col_I_factor (default 0.70 per ACI 318-11 §10.10.4.1);
-    # ASAP uncracked and Hardy Cross: always gross Ig (1.0, PCA convention).
-    col_I_factor = (method.solver == :asap && method.cracked_columns) ? incoming_col_I : 1.0  # ACI 318-11 §10.10.4.1
-    use_kc_only = method.column_stiffness == :Kc
-    
-    # Precompute solver inputs once: jKec for Hardy Cross, Kec reduction
-    # factors for ASAP column stubs (ACI 318-11 §13.7.4).
-    _cached_jKec = method.solver == :hardy_cross ?
-        _compute_joint_Kec(spans, joint_positions, H, Ecs, Ecc;
-                           column_shape=col_shape_val, use_kc_only=use_kc_only,
-                           columns=sorted_columns) :
-        nothing
-
-    _kec_factors = method.solver == :asap ?
-        _compute_kec_reduction_factors(spans, joint_positions, H, Ecs, Ecc;
-                                       column_shape=col_shape_val, use_kc_only=use_kc_only,
-                                       columns=sorted_columns) :
-        nothing
-
-    # Helper: run the chosen solver for a given (scalar or per-span) load.
-    # Hoisting this fixes a latent crash where the previous pattern loop
-    # referenced `joint_Kec` even under :asap (joint_Kec was scoped to the
-    # :hardy_cross branch only).
-    function _solve_once(qu_arg)
-        if method.solver == :asap
-            if !isnothing(efm_cache) && efm_cache.initialized
-                _update_efm_sections_and_loads!(
-                    efm_cache, spans, qu, Ecs, Ecc,
-                    ν_concrete, ρ_concrete, sorted_columns;
-                    col_I_factor = col_I_factor,
-                    kec_factors = _kec_factors,
-                )
-                _is_pattern = qu_arg isa Vector
-                if _is_pattern
-                    n_loads = length(efm_cache.model.loads)
-                    n_per_span = n_loads ÷ n_spans
-                    for (i, load) in enumerate(efm_cache.model.loads)
-                        span_idx = (i - 1) ÷ n_per_span + 1
-                        span_idx > n_spans && break
-                        w_N_m = uconvert(u"N/m", qu_arg[span_idx] * l2)
-                        load.value = [0.0u"N/m", 0.0u"N/m", -w_N_m]
-                    end
-                end
-                solve_efm_frame!(efm_cache.model; full_process=false, loads_only=_is_pattern)
-                return extract_span_moments(
-                    efm_cache.model, efm_cache.span_elements, spans; qu=qu
-                )
-            else
-                model, span_elements, col_stubs = build_efm_asap_model(
-                    spans, joint_positions, qu;
-                    Ecs = Ecs, Ecc = Ecc,
-                    ν_concrete = ν_concrete,
-                    ρ_concrete = ρ_concrete,
-                    columns = sorted_columns,
-                    verbose = verbose,
-                    col_I_factor = col_I_factor,
-                    kec_factors = _kec_factors,
-                )
-                if qu_arg isa Vector
-                    n_loads = length(model.loads)
-                    n_per_span = n_loads ÷ n_spans
-                    for (i, load) in enumerate(model.loads)
-                        span_idx = (i - 1) ÷ n_per_span + 1
-                        span_idx > n_spans && break
-                        w_N_m = uconvert(u"N/m", qu_arg[span_idx] * l2)
-                        load.value = [0.0u"N/m", 0.0u"N/m", -w_N_m]
-                    end
-                end
-                solve_efm_frame!(model)
-                sm = extract_span_moments(model, span_elements, spans; qu=qu)
-                !isnothing(efm_cache) && _populate_efm_cache!(efm_cache, model, span_elements, col_stubs, spans)
-                return sm
-            end
-
-        elseif method.solver == :hardy_cross
-            return solve_moment_distribution(spans, _cached_jKec, joint_positions,
-                                             qu_arg; verbose=verbose && !(qu_arg isa Vector))
-        else
-            error("Unknown EFM solver: $(method.solver)")
-        end
-    end
-
-    # Baseline (full-load) solve
-    span_moments = _solve_once(qu)
-
-    if verbose
-        solver_name = method.solver == :asap ? "EFM FRAME" : "MOMENT DISTRIBUTION"
-        @debug "───────────────────────────────────────────────────────────────────"
-        @debug "EFM RESULTS ($(solver_name))"
-        @debug "───────────────────────────────────────────────────────────────────"
-        for (i, sm) in enumerate(span_moments)
-            @debug "Span $i" M_neg_left=uconvert(kip*u"ft", sm.M_neg_left) M_pos=uconvert(kip*u"ft", sm.M_pos) M_neg_right=uconvert(kip*u"ft", sm.M_neg_right)
-        end
-    end
-
-    M_neg_ext = span_moments[1].M_neg_left
-    M_neg_int = span_moments[1].M_neg_right
-    M_pos = span_moments[1].M_pos
-
-    # ─── Pattern loading envelope (ACI 318-11 §13.7.6) ───
-    use_pattern = method.pattern_loading && requires_pattern_loading(qD, qL) && n_spans >= 2
-    if use_pattern
-        for pat in generate_load_patterns(n_spans)
-            all(==(:dead_plus_live), pat) && continue
-            qu_ps = factored_pattern_loads(pat, qD, qL)
-            sm_p  = _solve_once(qu_ps)
-            abs(sm_p[1].M_neg_left)  > abs(M_neg_ext) && (M_neg_ext = sm_p[1].M_neg_left)
-            abs(sm_p[1].M_neg_right) > abs(M_neg_int) && (M_neg_int = sm_p[1].M_neg_right)
-            abs(sm_p[1].M_pos)       > abs(M_pos)     && (M_pos     = sm_p[1].M_pos)
-        end
-        verbose && @debug "PATTERN LOADING ENVELOPE (FrameLine)" M_neg_ext=uconvert(kip*u"ft", M_neg_ext) M_neg_int=uconvert(kip*u"ft", M_neg_int) M_pos=uconvert(kip*u"ft", M_pos)
-    end
-    
-    # Build column-level results
-    column_moments, column_shears, unbalanced_moments = _compute_efm_column_demands(
-        struc, sorted_columns, span_moments, qu, l2, ln_avg
+    length(frame_line.column_projections) == length(frame_line.columns) ||
+        error("EFM frame line projections do not match its columns")
+    axes = _eq137_unit_axes(Tuple{Float64, Float64}(frame_line.direction))
+    axes === nothing && error("EFM frame line direction is zero")
+    axis = axes[1]
+    proj = Float64.(frame_line.column_projections)
+    perm = sortperm(proj)
+    columns = [frame_line.columns[i] for i in perm]
+    proj = proj[perm]
+    l2 = frame_line.tributary_width isa Length ? frame_line.tributary_width :
+        frame_line.tributary_width * u"m"
+    spans = _spans_from_projections(columns, proj, axis, l2, h, Ecs; drop_panel)
+    _reuse_line_model!(efm_cache, spans)
+    # col.position, not the line's end/middle tag: the middle of an edge
+    # frame is an edge column and has one torsion member.
+    joint_positions = [col.position for col in columns]
+    env, use_pattern = _solve_efm_line(
+        method, spans, columns, joint_positions, struc, Ecs, Ecc, qu, qD, qL;
+        ν_concrete, ρ_concrete, verbose, efm_cache, col_I_factor,
     )
-    
+    n_spans = length(spans)
+    ln_avg = sum(sp.ln for sp in spans) / n_spans
     l1_avg = sum(sp.l1 for sp in spans) / n_spans
-    c1_avg = sum(c.c1 for c in sorted_columns) / n_cols
-    
-    # Convert all outputs to consistent US units for MomentAnalysisResult
-    M0_conv = uconvert(kip * u"ft", M0)
-    M_neg_ext_conv = uconvert(kip * u"ft", M_neg_ext)
-    M_neg_int_conv = uconvert(kip * u"ft", M_neg_int)
-    M_pos_conv = uconvert(kip * u"ft", M_pos)
-    
-    qu_psf = uconvert(psf, qu)
-    qD_psf = uconvert(psf, qD)
-    qL_psf = uconvert(psf, qL)
-    Vu_max = uconvert(kip, qu_psf * l2 * ln_avg / 2)
-    
+    c_avg = sum(sp.c1_left + sp.c1_right for sp in spans) / (2 * n_spans)
+    M0 = total_static_moment(qu, l2, ln_avg)
     return MomentAnalysisResult(
-        M0_conv,
-        M_neg_ext_conv,
-        M_neg_int_conv,
-        M_pos_conv,
-        qu_psf, qD_psf, qL_psf,
+        uconvert(kip * u"ft", M0),
+        uconvert(kip * u"ft", env.M_neg_ext),
+        uconvert(kip * u"ft", env.M_neg_int),
+        uconvert(kip * u"ft", env.M_pos),
+        uconvert(psf, qu),
+        uconvert(psf, qD),
+        uconvert(psf, qL),
         uconvert(u"ft", l1_avg),
         uconvert(u"ft", l2),
         uconvert(u"ft", ln_avg),
-        uconvert(u"ft", c1_avg),
-        column_moments,
-        column_shears,
-        unbalanced_moments,
-        Vu_max;
+        uconvert(u"ft", c_avg),
+        [uconvert(kip * u"ft", m) for m in env.column_moments],
+        [uconvert(kip, v) for v in env.column_shears],
+        [uconvert(kip * u"ft", m) for m in env.unbalanced_moments],
+        uconvert(kip, qu * l2 * ln_avg / 2);
         pattern_loading = use_pattern,
     )
 end

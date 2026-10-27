@@ -65,6 +65,10 @@ using StructuralSizer: kip, ksi, psf, ksf, pcf
         @test fea.iso_alpha == 1.0
         @test fea.rebar_direction === nothing
         @test fea.strip_design == :aci_fractions  # backward compat
+        @test fea.patch_stiffness_factor == 100.0
+        @test fea.averaging_width_factor === nothing
+        @test FEA(averaging_width_factor=2).averaging_width_factor == 2.0
+        @test_throws ErrorException FEA(averaging_width_factor=0.0)
 
         # FEA strip with element/delta_band/projection
         fea_strip = FEA(design_approach=:strip)
@@ -294,6 +298,34 @@ using StructuralSizer: kip, ksi, psf, ksf, pcf
         Kec = equivalent_column_stiffness_Kec(2*Kc, 2*Kt)
         @test ustrip(u"lbf*inch", Kec) > 0
         @test Kec < 2*Kc  # Series combination reduces stiffness
+    end
+
+    @testset "Column-face averaging width" begin
+        # 0.40 m square column. The along-span band stays one column deep,
+        # starting at the face. The factor is the transverse width.
+        col = (c1=0.40u"m", c2=0.40u"m")
+        axis = (1.0, 0.0)
+        xy = (0.0, 0.0)
+        toward = (1.0, 0.0)
+        sample, δ = StructuralSizer._span_side_cut(col, axis, xy, toward)
+        @test δ ≈ 0.40
+        @test sample[1] ≈ 0.40
+        @test StructuralSizer._averaging_half_width(col, axis, nothing) === nothing
+        @test StructuralSizer._averaging_half_width(col, axis, 1) ≈ 0.20
+        @test StructuralSizer._averaging_half_width(col, axis, 2) ≈ 0.40
+        @test StructuralSizer.FEAModelCache().averaging_width_factor === nothing
+
+        # Two elements in one along-span band. The window covers only the
+        # peak; that intensity is then applied across both elements.
+        ex = (1.0, 0.0)
+        ey = (0.0, 1.0)
+        peak = StructuralSizer.FEAElementData(0.0, 0.0, 1.0, 10.0, 0.0, 0.0, 0.0, 0.0, ex, ey)
+        tail = StructuralSizer.FEAElementData(0.0, 1.0, 1.0, 2.0, 0.0, 0.0, 0.0, 0.0, ex, ey)
+        full = StructuralSizer._integrate_at([peak, tail], [1, 2], (0.0, 0.0), axis, 2.0)
+        narrow = StructuralSizer._integrate_at([peak, tail], [1, 2], (0.0, 0.0), axis, 2.0;
+            transverse_half_width=0.5)
+        @test full ≈ 6.0
+        @test narrow ≈ 10.0
     end
 end
 

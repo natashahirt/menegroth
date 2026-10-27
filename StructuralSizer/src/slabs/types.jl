@@ -359,10 +359,11 @@ Dead and live loads are solved separately for proper post-solve combination
 # Loading
 - `pattern_loading::Bool`: Enable ACI 318-11 §13.7.6 pattern loading (default: `true`).
 - `pattern_mode::Symbol`: How pattern loading is applied when `pattern_loading=true`:
-  - `:efm_amp` (default) — Build an EFM frame, run checkerboard patterns through it,
-    compute amplification factors, and scale the FEA moments.  Fast (one FEA solve +
-    many cheap EFM solves) but approximate: the amplification factors come from a 1-D
-    frame model, not the 2-D shell.
+  - `:efm_amp` (default) — Equivalent-frame pattern envelope, one frame per
+    column line in each direction. Those ratios scale the shell moments and
+    the column at the same index. Fast, and not a shell re-solve.
+    `:fea_resolve` is the shell pattern path. Ratios are floored at 1
+    (ACI 318-11 §13.7.6.4).
   - `:fea_resolve` — Re-solve the FEA model for each load pattern (D on all spans,
     L on selected spans) and take the per-element moment envelope.  More accurate
     (captures 2-D redistribution) but slower (one FEA solve per pattern).
@@ -453,9 +454,19 @@ struct FEA <: FlatPlateAnalysisMethod
     sign_treatment::Symbol        # :signed, :separate_faces
     concrete_torsion_discount::Bool  # subtract concrete Mxy capacity before Wood–Armer
 
-    # Column patch stiffness multiplier on E (1.0 = no stiffening, >1 = rigid zone).
-    # Default 1.0.  Future use: model rigid column–slab junction zones.
+    # Column-patch modulus multiplier. 100 stiffens the footprint to a rigid
+    # zone; 1 leaves it as ordinary slab. ENGINEERING JUDGMENT: the rigid
+    # patch is the default because a point-node stub on ordinary slab
+    # understates the edge-column transfer.
     patch_stiffness_factor::Float64
+
+    # Transverse averaging width at the column face, as a multiple of the
+    # column dimension across the span. `nothing` integrates the whole
+    # strip. A number averages the intensity inside that width and applies
+    # it across the strip. The band depth along the span stays one column,
+    # starting at the face. ENGINEERING JUDGMENT: ACI 318 does not
+    # prescribe this width.
+    averaging_width_factor::Union{Nothing, Float64}
 
     # Effective moment of inertia method for deflection:
     #   :branson  — ACI 318-11 Eq. (9-10), cubic interpolation (default)
@@ -478,7 +489,8 @@ struct FEA <: FlatPlateAnalysisMethod
         rebar_direction::Union{Nothing, Float64} = nothing,
         sign_treatment::Symbol = :signed,
         concrete_torsion_discount::Bool = false,
-        patch_stiffness_factor::Float64 = 1.0,
+        patch_stiffness_factor::Float64 = 100.0,
+        averaging_width_factor::Union{Nothing, Real} = nothing,
         deflection_Ie_method::Symbol = :branson,
         # Legacy keyword — maps to new knobs when provided alone
         strip_design::Union{Nothing, Symbol} = nothing,
@@ -560,6 +572,9 @@ struct FEA <: FlatPlateAnalysisMethod
         end
         patch_stiffness_factor > 0 ||
             error("FEA patch_stiffness_factor must be > 0; got $patch_stiffness_factor")
+        width_factor = averaging_width_factor === nothing ? nothing : Float64(averaging_width_factor)
+        width_factor === nothing || width_factor > 0 ||
+            error("FEA averaging_width_factor must be > 0; got $width_factor")
         deflection_Ie_method in (:branson, :bischoff) ||
             error("FEA deflection_Ie_method must be :branson or :bischoff; got :$deflection_Ie_method")
 
@@ -572,7 +587,8 @@ struct FEA <: FlatPlateAnalysisMethod
 
         new(te, pattern_loading, pattern_mode, design_approach, moment_transform,
             field_smoothing, cut_method, iso_alpha, rebar_direction, sign_treatment,
-            concrete_torsion_discount, patch_stiffness_factor, deflection_Ie_method,
+            concrete_torsion_discount, patch_stiffness_factor, width_factor,
+            deflection_Ie_method,
             _strip_design)
     end
 end

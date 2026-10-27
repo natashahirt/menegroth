@@ -22,10 +22,14 @@ function _integrate_at(
     δ::Float64;
     include_torsion::Bool = true,
     tensor_at = nothing,
+    transverse_half_width::Union{Nothing,Float64} = nothing,
 )
     s_eval = ax[1] * pos[1] + ax[2] * pos[2]
     half_δ = δ / 2
     Mn_A = 0.0   # N·m·m accumulator
+    A = 0.0
+    win_Mn_A = 0.0
+    win_A = 0.0
     @inbounds for k in tri_indices
         ed = element_data[k]
         abs(ax[1] * ed.cx + ax[2] * ed.cy - s_eval) > half_δ && continue
@@ -39,9 +43,32 @@ function _integrate_at(
         if include_torsion
             Mn += 2*Mxy*axl[1]*axl[2]
         end
-        Mn_A += Mn * ed.area
+        contrib = Mn * ed.area
+        Mn_A += contrib
+        A += ed.area
+        if _in_transverse_window(ed.cx, ed.cy, pos, ax, transverse_half_width)
+            win_Mn_A += contrib
+            win_A += ed.area
+        end
     end
-    return Mn_A / δ
+    return _apply_averaging_width(Mn_A, A, win_Mn_A, win_A, δ, transverse_half_width)
+end
+
+"""
+Total moment (N·m) in a δ-band.
+
+With no transverse window this is `Σ(m · area) / δ`, the integral across
+every element the cut includes.  With a window, that same full width is
+given the average intensity inside the window, so a narrower window raises
+the design moment toward the peak and a window that covers the band leaves
+the integral unchanged.
+"""
+function _apply_averaging_width(full_mA::Float64, full_A::Float64,
+                                win_mA::Float64, win_A::Float64, δ::Float64,
+                                half_width)::Float64
+    half_width === nothing && return full_mA / δ
+    (win_A <= 0 || full_A <= 0) && return full_mA / δ
+    return (win_mA / win_A) * full_A / δ
 end
 
 # =============================================================================
@@ -64,10 +91,14 @@ function _integrate_at_subset(
     δ::Float64;
     include_torsion::Bool = true,
     tensor_at = nothing,
+    transverse_half_width::Union{Nothing,Float64} = nothing,
 )
     s_eval = span_axis[1] * pos[1] + span_axis[2] * pos[2]
     half_δ = δ / 2
     Mn_A = 0.0
+    A = 0.0
+    win_Mn_A = 0.0
+    win_A = 0.0
     @inbounds for k in tri_subset
         ed = element_data[k]
         abs(span_axis[1] * ed.cx + span_axis[2] * ed.cy - s_eval) > half_δ && continue
@@ -82,9 +113,15 @@ function _integrate_at_subset(
         if include_torsion
             Mn += 2*Mxy*axl[1]*axl[2]
         end
-        Mn_A += Mn * ed.area
+        contrib = Mn * ed.area
+        Mn_A += contrib
+        A += ed.area
+        if _in_transverse_window(ed.cx, ed.cy, pos, span_axis, transverse_half_width)
+            win_Mn_A += contrib
+            win_A += ed.area
+        end
     end
-    return Mn_A / δ
+    return _apply_averaging_width(Mn_A, A, win_Mn_A, win_A, δ, transverse_half_width)
 end
 
 """
@@ -110,6 +147,7 @@ function _integrate_design_faces(
     δ::Float64;
     include_torsion::Bool = true,
     subset::Bool = false,
+    transverse_half_width::Union{Nothing,Float64} = nothing,
 )
     n_combo = _n_design_combos(cache)
     hog = 0.0
@@ -118,6 +156,7 @@ function _integrate_design_faces(
     for i in 1:n_combo
         I = integrate(cache.element_data, tri_indices, pos, ax, δ;
                       include_torsion=include_torsion,
+                      transverse_half_width=transverse_half_width,
                       tensor_at = k -> _combo_tensor(cache, k, i))
         hog = max(hog, max(I, 0.0))
         sag = max(sag, max(-I, 0.0))

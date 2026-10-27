@@ -21,7 +21,7 @@
 
 """
     build_slab_shell_patches(struc, columns, section;
-        drop_panel=nothing, patch_stiffness_factor=1.0,
+        drop_panel=nothing, patch_stiffness_factor=100.0,
         vertex_set=nothing) -> Vector{Asap.ShellPatch}
 
 Build ShellPatch objects for columns (and optionally drop panels) to enforce mesh
@@ -37,7 +37,7 @@ mesh vertices respect patch boundaries and refinement happens around them.
 
 # Keyword Arguments
 - `drop_panel`: DropPanelGeometry for flat slabs; `nothing` for flat plate
-- `patch_stiffness_factor`: Multiplier for patch E (default 1.0)
+- `patch_stiffness_factor`: Multiplier for patch E (default 100, a rigid footprint)
 - `vertex_set`: Optional `Set{Int}` of slab vertex indices; columns with
   `vertex_idx ∉ vertex_set` are skipped. Pass `nothing` to include all columns.
 
@@ -47,7 +47,7 @@ mesh vertices respect patch boundaries and refinement happens around them.
 function build_slab_shell_patches(
     struc, columns, section::Asap.ShellSection;
     drop_panel::Union{Nothing, DropPanelGeometry} = nothing,
-    patch_stiffness_factor::Float64 = 1.0,
+    patch_stiffness_factor::Float64 = 100.0,
     vertex_set::Union{Nothing, Set{Int}} = nothing,
 )
     skel = struc.skeleton
@@ -115,7 +115,7 @@ end
 """
     build_slab_shell_mesh(struc, slab, columns, section;
         target_edge=nothing, drop_panel=nothing,
-        patch_stiffness_factor=1.0, id=:slab,
+        patch_stiffness_factor=100.0, id=:slab,
         edge_support_type=:free, node_map=nothing) -> (shells, patches, node_map, target_edge)
 
 Build triangulated shell elements for a slab with ShellPatch mesh conformity at
@@ -129,7 +129,7 @@ function build_slab_shell_mesh(
     struc, slab, columns, section::Asap.ShellSection;
     target_edge::Union{Nothing, Length} = nothing,
     drop_panel::Union{Nothing, DropPanelGeometry} = nothing,
-    patch_stiffness_factor::Float64 = 1.0,
+    patch_stiffness_factor::Float64 = 100.0,
     id::Symbol = :slab,
     edge_support_type = :free,
     node_map::Union{Nothing, Dict{Int, Asap.Node}} = nothing,
@@ -245,7 +245,7 @@ function _build_fea_slab_model(
     verbose::Bool = false,
     drop_panel::Union{Nothing, DropPanelGeometry} = nothing,
     col_I_factor::Float64 = 0.70,
-    patch_stiffness_factor::Float64 = 1.0,
+    patch_stiffness_factor::Float64 = 100.0,
     edge_beam_βt::Float64 = 0.0,
     edge_beam_l2::Union{Nothing, Length} = nothing,
     edge_beam_c1_avg::Union{Nothing, Length} = nothing,
@@ -391,7 +391,7 @@ function _update_and_resolve!(
     Ecc::Pressure = Ecs,
     verbose::Bool = false,
     col_I_factor::Float64 = 0.70,
-    patch_stiffness_factor::Float64 = 1.0,
+    patch_stiffness_factor::Float64 = 100.0,
     edge_beam_l2::Union{Nothing, Length} = nothing,
     edge_beam_c1_avg::Union{Nothing, Length} = nothing,
 )

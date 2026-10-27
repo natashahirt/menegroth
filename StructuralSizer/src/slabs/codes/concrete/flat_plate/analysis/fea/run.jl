@@ -3,6 +3,43 @@
 # =============================================================================
 
 """
+    _fea_pattern_demand(shell, pattern, full) -> quantity
+
+`:efm_amp` transfer from the equivalent frame onto one shell demand.
+
+The frame ratio is used when the full-load frame demand is at least half
+the pattern demand, and the ratio is floored at 1 so a pattern cannot
+reduce the shell value (ACI 318-11 §13.7.6.4, corpus: aci-318-11, page 261).
+A smaller full-load value is the checkerboard case, where transfer is near
+zero under uniform load. Dividing by it is not a demand. The pattern value
+is then a lower bound on the shell value.
+
+ENGINEERING JUDGMENT: the half-demand cutoff, and applying a 1-D frame
+number to a shell result. `:fea_resolve` re-solves the shell instead.
+"""
+function _fea_pattern_ratio(pattern, full)
+    full_abs = abs(full)
+    pattern_abs = abs(pattern)
+    comparable = full_abs > 1e-6 * oneunit(full_abs) && full_abs >= 0.5 * pattern_abs
+    return comparable ? max(1.0, ustrip(pattern_abs) / ustrip(full_abs)) : 1.0
+end
+
+function _fea_pattern_demand(shell, pattern, full)
+    shell_abs = abs(shell)
+    full_abs = abs(full)
+    pattern_abs = abs(pattern)
+    comparable = full_abs > 1e-6 * oneunit(full_abs) && full_abs >= 0.5 * pattern_abs
+    scaled = if comparable
+        shell_abs * _fea_pattern_ratio(pattern, full)
+    else
+        max(shell_abs, pattern_abs)
+    end
+    sign_source = shell_abs > 1e-9 * oneunit(shell_abs) ? shell : pattern
+    sgn = ustrip(sign_source) < 0 ? -1 : 1
+    return sgn * scaled
+end
+
+"""
     run_moment_analysis(method::FEA, struc, slab, columns, h, fc, Ecs, γ_concrete;
                         ν_concrete, verbose, cache, has_edge_beam, edge_beam_βt)
 
@@ -83,6 +120,7 @@ function run_moment_analysis(
     if isnothing(cache)
         cache = FEAModelCache()
     end
+    cache.averaging_width_factor = method.averaging_width_factor
     _build_or_update_fea!(
         cache, struc, slab, supporting_columns, h, Ecs, ν_concrete, qu, Lc;
         Ecc=Ecc, target_edge=method.target_edge, verbose=verbose, drop_panel=drop_panel,
@@ -188,6 +226,8 @@ function run_moment_analysis(
 
     # ─── Pattern loading (ACI 318-11 §13.7.6) ───
     use_pattern = method.pattern_loading && requires_pattern_loading(qD, qL) && n_cols >= 3
+    # Populated by :efm_amp. The secondary strip is scaled after sec_Mub exists.
+    sec_pattern = nothing
     if use_pattern
         if method.pattern_mode === :fea_resolve
             # ── FEA-native pattern loading ──
@@ -225,43 +265,30 @@ function run_moment_analysis(
 
             verbose && @debug "FEA PATTERN LOADING (:fea_resolve)" n_cells=length(slab.cell_indices) Δ_pattern=uconvert(u"inch", fea_Δ_panel)
         else
-            # ── EFM amplification (default: :efm_amp) ──
-            fc_col_pat = _get_column_fc(supporting_columns, fc)
-            wc_pcf_val = ustrip(pcf, γ_concrete)
-            Ecc_pat = Ec(fc_col_pat, wc_pcf_val)
-
-            efm_spans = _build_efm_spans(supporting_columns, l1, l2, ln, h, Ecs;
-                                         drop_panel=drop_panel)
-            joint_pos = [col.position for col in supporting_columns]
-            cshape   = col_shape(first(supporting_columns))
-            jKec     = _compute_joint_Kec(efm_spans, joint_pos, Lc, Ecs, Ecc_pat;
-                                          column_shape=cshape, columns=supporting_columns)
-            n_efm_spans = length(efm_spans)
-
-            efm_full = solve_moment_distribution(efm_spans, jKec, joint_pos, qu)
-            env_neg_ext = abs(efm_full[1].M_neg_left)
-            env_neg_int = abs(efm_full[1].M_neg_right)
-            env_pos     = abs(efm_full[1].M_pos)
-
-            for pat in generate_load_patterns(n_efm_spans)
-                all(==(:dead_plus_live), pat) && continue
-                qu_ps = factored_pattern_loads(pat, qD, qL)
-                efm_p = solve_moment_distribution(efm_spans, jKec, joint_pos, qu_ps)
-                abs(efm_p[1].M_neg_left)  > env_neg_ext && (env_neg_ext = abs(efm_p[1].M_neg_left))
-                abs(efm_p[1].M_neg_right) > env_neg_int && (env_neg_int = abs(efm_p[1].M_neg_right))
-                abs(efm_p[1].M_pos)       > env_pos     && (env_pos     = abs(efm_p[1].M_pos))
+            # :efm_amp scales the shell by the equivalent frame that owns each
+            # column. It does not re-solve the shell. :fea_resolve does.
+            # Primary demands use the primary frames. The secondary transfer
+            # is scaled below from the transverse frames, at the same column
+            # index. Ratios are floored at 1 (ACI 318-11 §13.7.6.4,
+            # corpus: aci-318-11, page 261). A full-load frame demand below
+            # half the pattern demand is not used as a divisor.
+            sec_pattern = _efm_pattern_baselines(
+                struc, slab, supporting_columns, h, fc, Ecs, γ_concrete;
+                drop_panel, col_I_factor, ν_concrete,
+            )
+            pon, poff = sec_pattern.primary_on, sec_pattern.primary_off
+            M_neg_ext = _fea_pattern_demand(M_neg_ext, pon.M_neg_ext, poff.M_neg_ext)
+            M_neg_int = _fea_pattern_demand(M_neg_int, pon.M_neg_int, poff.M_neg_int)
+            M_pos     = _fea_pattern_demand(M_pos, pon.M_pos, poff.M_pos)
+            for i in eachindex(column_moments)
+                column_moments[i] = _fea_pattern_demand(
+                    column_moments[i], pon.column_moments[i], poff.column_moments[i])
+                forces.Mub[i] = _fea_pattern_demand(
+                    forces.Mub[i], pon.unbalanced_moments[i], poff.unbalanced_moments[i])
+                forces.Vu[i] = _fea_pattern_demand(
+                    forces.Vu[i], pon.column_shears[i], poff.column_shears[i])
             end
-
-            _safe_amp(env, base) = ustrip(base) > 1e-6 ? max(1.0, ustrip(env) / ustrip(base)) : 1.0
-            amp_ext = _safe_amp(env_neg_ext, abs(efm_full[1].M_neg_left))
-            amp_int = _safe_amp(env_neg_int, abs(efm_full[1].M_neg_right))
-            amp_pos = _safe_amp(env_pos,     abs(efm_full[1].M_pos))
-
-            M_neg_ext *= amp_ext
-            M_neg_int *= amp_int
-            M_pos     *= amp_pos
-
-            verbose && @debug "FEA PATTERN LOADING (:efm_amp)" amp_ext=round(amp_ext, digits=3) amp_int=round(amp_int, digits=3) amp_pos=round(amp_pos, digits=3)
+            verbose && @debug "FEA PATTERN LOADING (:efm_amp, per frame line)" M_neg_ext=M_neg_ext M_neg_int=M_neg_int M_pos=M_pos
         end
     end
 
@@ -297,6 +324,9 @@ function run_moment_analysis(
     )
     sec_column_moments = [uconvert(kip * u"ft", m * u"N*m") for m in sec_envelope.col_Mneg]
     sec_neg_env = _envelope_from_columns(sec_column_moments, supporting_columns)
+    sec_M_neg_ext = sec_neg_env.M_neg_ext
+    sec_M_neg_int = sec_neg_env.M_neg_int
+    sec_M_pos = uconvert(kip * u"ft", sec_envelope.M_pos)
 
     sec_ax_len = hypot(sec_span_axis...)
     sec_ax = sec_ax_len > 1e-9 ? (sec_span_axis[1]/sec_ax_len, sec_span_axis[2]/sec_ax_len) : (0.0, 1.0)
@@ -305,12 +335,24 @@ function run_moment_analysis(
     for i in 1:n_cols
         sec_Mub[i] = uconvert(kip * u"ft", abs(sec_ax[1] * forces.My[i] - sec_ax[2] * forces.Mx[i]))
     end
+    if !isnothing(sec_pattern)
+        son, soff = sec_pattern.secondary_on, sec_pattern.secondary_off
+        sec_M_neg_ext = _fea_pattern_demand(sec_M_neg_ext, son.M_neg_ext, soff.M_neg_ext)
+        sec_M_neg_int = _fea_pattern_demand(sec_M_neg_int, son.M_neg_int, soff.M_neg_int)
+        sec_M_pos = _fea_pattern_demand(sec_M_pos, son.M_pos, soff.M_pos)
+        for i in eachindex(sec_Mub)
+            sec_Mub[i] = _fea_pattern_demand(
+                sec_Mub[i], son.unbalanced_moments[i], soff.unbalanced_moments[i])
+            sec_column_moments[i] = _fea_pattern_demand(
+                sec_column_moments[i], son.column_moments[i], soff.column_moments[i])
+        end
+    end
 
     secondary_data = (
         M0 = uconvert(kip * u"ft", sec_setup.M0),
-        M_neg_ext = sec_neg_env.M_neg_ext,
-        M_neg_int = sec_neg_env.M_neg_int,
-        M_pos = uconvert(kip * u"ft", sec_envelope.M_pos),
+        M_neg_ext = sec_M_neg_ext,
+        M_neg_int = sec_M_neg_int,
+        M_pos = sec_M_pos,
         l1 = sec_setup.l1,
         l2 = sec_setup.l2,
         ln = sec_setup.ln,

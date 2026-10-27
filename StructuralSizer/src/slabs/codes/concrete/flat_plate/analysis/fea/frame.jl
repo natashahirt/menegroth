@@ -34,10 +34,11 @@ function _extract_cell_strip_moments(
     col_Mneg = Vector{Float64}(undef, length(cell_cols))
     for (col_i, col) in enumerate(cell_cols)
         sample, δ = _span_side_cut(col, span_axis, _column_xy_m(skel, col), cell_centroid)
+        half_w = _averaging_half_width(col, span_axis, cache.averaging_width_factor)
         n_band = _count_band_elements(cache.element_data, tri_idx, sample, span_axis, δ)
         _require_band_elements(n_band, δ, "column $(col.vertex_idx) (cell $ci)")
         faces = _integrate_design_faces(cache, tri_idx, sample, span_axis, δ;
-            include_torsion=include_torsion)
+            include_torsion=include_torsion, transverse_half_width=half_w)
         Mn = faces.hogging
         col_Mneg[col_i] = Mn
 

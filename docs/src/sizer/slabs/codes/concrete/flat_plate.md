@@ -442,7 +442,8 @@ Key `FEA` options:
 | `rebar_direction` | `nothing` | Reinforcement axis angle (radians); `nothing` = span direction |
 | `sign_treatment` | `:signed` | `:signed` or `:separate_faces` (prevents cross-sign cancellation at inflection points) |
 | `concrete_torsion_discount` | `false` | Subtract concrete Mxy capacity before Wood–Armer |
-| `patch_stiffness_factor` | `1.0` | Column patch stiffness multiplier |
+| `patch_stiffness_factor` | `100.0` | Column patch modulus multiplier (100 = rigid footprint; 1 = ordinary slab) |
+| `averaging_width_factor` | `nothing` | Transverse width at the column face, as a multiple of the column dimension across the span. `nothing` integrates the whole strip. A number averages the intensity inside that width and applies it across the strip. The band depth along the span stays one column, starting at the face. |
 | `deflection_Ie_method` | `:branson` | `:branson` or `:bischoff` |
 
 !!! note "Drop Panel Strip Widening"

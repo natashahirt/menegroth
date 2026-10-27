@@ -36,10 +36,12 @@ Section cut for the face of `col` that bounds the bay containing `toward`
 (the cell centroid).
 
 `δ` is the column dimension along `span_axis`.  `sample` is the center of a
-band of that width lying entirely on the span side of the face, so a
+band of that depth lying entirely on the span side of the face, so a
 centered integrator does not include shell elements inside the column
 footprint.  Those elements are the rigid (or nearly rigid) patch and do
-not carry a slab design moment.
+not carry a slab design moment.  This depth is not a sweep parameter:
+ACI 318 takes the critical section at the face, and a deeper band would
+average moment that has already fallen away from that section.
 """
 function _span_side_cut(
     col,
@@ -56,6 +58,28 @@ function _span_side_cut(
     δ = max(2 * off, 1e-4)
     shift = dir * (off + 0.5 * δ)
     return (px + shift * ax1, py + shift * ax2), δ
+end
+
+"""
+    _averaging_half_width(col, span_axis, factor) -> Union{Nothing,Float64}
+
+Half of the transverse averaging width (meters), perpendicular to `span_axis`.
+
+`nothing` keeps every element the cut already includes (the whole strip).
+A factor of 1 is one column dimension across the span, centered on the
+column.  ENGINEERING JUDGMENT: ACI 318 does not prescribe this width.
+"""
+function _averaging_half_width(col, span_axis::NTuple{2,Float64}, factor)::Union{Nothing,Float64}
+    factor === nothing && return nothing
+    perp = (-span_axis[2], span_axis[1])
+    return factor * _column_face_offset_m(col, perp)
+end
+
+"""True when `(x, y)` lies within `half_w` of the span line through `pos`."""
+function _in_transverse_window(x::Float64, y::Float64, pos::NTuple{2,Float64},
+                               ax::NTuple{2,Float64}, half_w)::Bool
+    half_w === nothing && return true
+    return abs(-ax[2] * (x - pos[1]) + ax[1] * (y - pos[2])) <= half_w
 end
 
 """Number of element centroids inside the δ-band centered at `pos`."""

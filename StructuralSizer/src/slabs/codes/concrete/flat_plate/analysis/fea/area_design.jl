@@ -225,37 +225,52 @@ function _area_to_strip_envelope(
         δ = _section_cut_bandwidth(cache, cell_cols)
         half_δ = δ / 2
 
-        # ── Column-face M⁻ (hogging) ──
+        # ── Column-face M⁻ (hogging), span side of the face only ──
         for (_, col) in enumerate(cell_cols)
-            px, py = _column_xy_m(skel, col)
-            off = _column_face_offset_m(col, cut_ax)
-            face_s = ax * (px + off * ax) + ay * (py + off * ay)
+            sample, δ_face = _span_side_cut(col, cut_ax, _column_xy_m(skel, col), geom.centroid)
+            half_face = δ_face / 2
+            face_s = ax * sample[1] + ay * sample[2]
+            half_w = _averaging_half_width(col, cut_ax, cache.averaging_width_factor)
 
-            Mneg_cs_sum = 0.0
-            Mneg_ms_sum = 0.0
+            cs_mA = 0.0; cs_A = 0.0; cs_win_mA = 0.0; cs_win_A = 0.0
+            ms_mA = 0.0; ms_A = 0.0; ms_win_mA = 0.0; ms_win_A = 0.0
 
             for k in tri_idx
                 k > length(area_moments) && continue
                 am = area_moments[k]
                 ed = cache.element_data[k]
                 elem_s = ax * ed.cx + ay * ed.cy
-                abs(elem_s - face_s) > half_δ && continue
+                abs(elem_s - face_s) > half_face && continue
 
                 # Rebar-axis hogging: Mx_top is the moment about the primary
                 # rebar axis (= span axis when rebar_direction is nothing).
                 M_hog = -am.Mx_top  # Mx_top ≤ 0, so M_hog ≥ 0
+                contrib = M_hog * ed.area
+                in_win = _in_transverse_window(ed.cx, ed.cy, sample, cut_ax, half_w)
 
                 if _is_in_column_strip(ed.cx, ed.cy, neg_cs_polys)
-                    Mneg_cs_sum += M_hog * ed.area
+                    cs_mA += contrib
+                    cs_A += ed.area
+                    if in_win
+                        cs_win_mA += contrib
+                        cs_win_A += ed.area
+                    end
                 else
-                    Mneg_ms_sum += M_hog * ed.area
+                    ms_mA += contrib
+                    ms_A += ed.area
+                    if in_win
+                        ms_win_mA += contrib
+                        ms_win_A += ed.area
+                    end
                 end
             end
 
             idx = get(col_by_vertex, col.vertex_idx, nothing)
             idx === nothing && continue
-            col_Mneg_cs[idx] = max(col_Mneg_cs[idx], Mneg_cs_sum / δ)
-            col_Mneg_ms[idx] = max(col_Mneg_ms[idx], Mneg_ms_sum / δ)
+            col_Mneg_cs[idx] = max(col_Mneg_cs[idx],
+                _apply_averaging_width(cs_mA, cs_A, cs_win_mA, cs_win_A, δ_face, half_w))
+            col_Mneg_ms[idx] = max(col_Mneg_ms[idx],
+                _apply_averaging_width(ms_mA, ms_A, ms_win_mA, ms_win_A, δ_face, half_w))
         end
 
         # ── Midspan M⁺ (sagging) ──

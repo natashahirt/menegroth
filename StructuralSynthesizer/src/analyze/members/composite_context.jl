@@ -450,7 +450,7 @@ AISC Manual 14th ed. and the edition gap. A partly named stud throws.
 function composite_anchor_from_options(opts)
     if opts.composite_anchor_d === nothing && opts.composite_anchor_length === nothing &&
             opts.composite_anchor_Fu === nothing
-        hr = opts.composite_slab_type === :deck ? opts.composite_deck_hr : nothing
+        hr = opts.composite_slab_type === :deck ? composite_deck_hr_wr(opts).hr : nothing
         return StructuralSizer.default_headed_stud(; hr = hr)
     end
     opts.composite_anchor_d === nothing && throw(ArgumentError(
@@ -463,6 +463,47 @@ function composite_anchor_from_options(opts)
                      opts.composite_anchor_Fu, 0.0u"ksi", 490.0u"lb/ft^3")
 end
 
+"""
+    composite_deck_hr_wr(opts) -> (hr, wr)
+
+Rib height and average rib width for composite deck. With
+`composite_deck_profile` set they come from the Vulcraft catalog
+([`StructuralSizer.composite_deck_profile`](@ref)); an explicit
+`composite_deck_hr` or `composite_deck_wr` that differs from the profile by
+more than 1/32 in. throws. Without a profile the explicit values are returned
+as given (possibly `nothing`).
+"""
+function composite_deck_hr_wr(opts)
+    name = opts.composite_deck_profile
+    name === nothing && return (hr = opts.composite_deck_hr, wr = opts.composite_deck_wr)
+    prof = StructuralSizer.composite_deck_profile(name)
+    hr, wr = prof.hr, StructuralSizer.deck_wr(prof)
+    tol = (1 / 32) * u"inch"
+    for (lbl, given, cat) in (("composite_deck_hr", opts.composite_deck_hr, hr),
+                              ("composite_deck_wr", opts.composite_deck_wr, wr))
+        given === nothing && continue
+        abs(uconvert(u"m", given) - cat) <= tol || throw(ArgumentError(
+            "$lbl = $given does not match deck profile $(prof.name) " *
+            "($(round(u"inch", cat; digits=3)), $(prof.source))."))
+    end
+    return (hr = hr, wr = wr)
+end
+
+"""
+Deck fastening recorded on a deck beam, or `:auto` for a solid slab.
+
+A deck with no pattern given gets the 36/4 default. `Sn` has no default.
+"""
+function deck_attachment_from_options(opts)
+    opts.composite_slab_type === :deck || return :auto
+    pattern = opts.composite_deck_support_pattern
+    StructuralSizer.DeckAttachment(;
+        support_pattern = pattern === nothing ?
+            StructuralSizer.DEFAULT_DECK_SUPPORT_PATTERN : pattern,
+        sidelap_per_span = opts.composite_deck_sidelap_per_span,
+        Sn = opts.composite_diaphragm_Sn)
+end
+
 """Keyword bundle `size!` and `design_building` pass into `size_beams!`."""
 function composite_option_kwargs(opts)
     opts isa StructuralSizer.SteelBeamOptions && opts.composite || return (;)
@@ -472,8 +513,8 @@ function composite_option_kwargs(opts)
         composite_shored = opts.composite_shored,
         composite_cp_class = opts.composite_cp_class,
         composite_slab_type = opts.composite_slab_type,
-        composite_deck_hr = opts.composite_deck_hr,
-        composite_deck_wr = opts.composite_deck_wr,
+        composite_deck_hr = composite_deck_hr_wr(opts).hr,
+        composite_deck_wr = composite_deck_hr_wr(opts).wr,
         composite_deck_orientation = opts.composite_deck_orientation,
     )
 end
@@ -706,6 +747,7 @@ function composite_group_payload(
     deck_e_mid_ht = nothing,
     deck_anchorage_spacing = nothing,
     L_twist = nothing,
+    deck_attachment = :auto,
 )
     anchor === nothing && throw(ArgumentError(
         "Composite beam design needs the stud anchor diameter (composite_anchor_d), " *
@@ -757,6 +799,7 @@ function composite_group_payload(
     ctx = CompositeContext(first(fields).slab, anchor, L; shored = shored, Lb_const = Lb_const,
                            Asr = Asr, Fysr = Fysr, neg_moment = neg_moment,
                            ΣQn_neg = ΣQn_neg, L_twist = L_twist,
+                           deck_attachment = deck_attachment,
                            cp_class = cp_class)
     return PerStationComposite(ctx, fields)
 end
@@ -781,6 +824,7 @@ function composite_payloads_for_groups(
     deck_orientation::Symbol = :perpendicular,
     deck_e_mid_ht = nothing, deck_anchorage_spacing = nothing,
     L_twist = nothing,
+    deck_attachment = :auto,
 )
     map(enumerate(group_ids)) do (g_idx, gid)
         mg = struc.member_groups[gid]
@@ -792,6 +836,7 @@ function composite_payloads_for_groups(
                                 deck_wr = deck_wr, deck_orientation = deck_orientation,
                                 deck_e_mid_ht = deck_e_mid_ht,
                                 deck_anchorage_spacing = deck_anchorage_spacing,
-                                L_twist = L_twist)
+                                L_twist = L_twist,
+                                deck_attachment = deck_attachment)
     end
 end

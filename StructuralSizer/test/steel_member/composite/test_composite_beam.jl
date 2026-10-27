@@ -1418,3 +1418,47 @@ end
         @test_throws ArgumentError CompositeContext(fix.slab, fix.anchor, L; L_twist=0.0u"m")
     end
 end
+
+@testset "Vulcraft composite deck geometry" begin
+    p3 = composite_deck_profile("3VLI")
+    @test isapprox(p3.hr, 3.0u"inch"; rtol=1e-12)
+    # Example I-1 uses wr = 6 in. for 3 in. deck.
+    @test isapprox(deck_wr(p3), 6.0u"inch"; rtol=1e-12)
+    @test isapprox(p3.pitch, 12.0u"inch"; rtol=1e-12)
+    @test isapprox(p3.gages[20].t, 0.0358u"inch"; rtol=1e-12)
+    p2 = composite_deck_profile("2plvli-36")
+    @test p2.name == "2VLI"
+    @test isapprox(deck_wr(p2), 6.0u"inch"; rtol=1e-12)
+    p15 = composite_deck_profile("1.5VLI")
+    @test isapprox(deck_wr(p15), 2.125u"inch"; rtol=1e-12)
+    @test occursin("vulcraft-deck-solutions-2020", p15.source)
+    @test_throws ArgumentError composite_deck_profile("1.5VLR")
+    # All three profiles meet §I3.2c(a) on their own.
+    for p in values(VULCRAFT_COMPOSITE_DECKS)
+        @test p.hr <= 3.0u"inch" + 1e-9u"m"
+        @test deck_wr(p) >= 2.0u"inch" - 1e-9u"m"
+    end
+end
+
+@testset "Deck attachment is reported and not checked" begin
+    deck = _aisc_example_I1_deck_setup()
+    ctx = CompositeContext(deck.slab, deck.anchor, deck.L_beam)
+    @test ctx.deck_attachment isa DeckAttachment
+    @test ctx.deck_attachment.support_pattern == DEFAULT_DECK_SUPPORT_PATTERN
+    @test occursin("sdi-ddm-3e-2004", ctx.deck_attachment.pattern_source)
+    @test ctx.deck_attachment.Sn === nothing
+    solid = _example_I1_setup()
+    @test CompositeContext(solid.slab, solid.anchor, solid.L_beam).deck_attachment === nothing
+    custom = DeckAttachment(support_pattern = "36/7", sidelap_per_span = 3, Sn = 500.0u"lbf/ft")
+    @test custom.pattern_source == "Caller-supplied deck support fastener pattern."
+    @test isapprox(custom.Sn, 500.0u"lbf/ft"; rtol = 1e-9)
+    note = deck_brace_note(ctx.deck_attachment, 1.0u"kip")
+    @test occursin("36/4", note)
+    @test occursin("Not a check", note)
+    @test occursin("not supplied", note)
+    @test occursin("not compared", deck_brace_note(custom, 1.0u"kip"))
+    @test deck_brace_note(nothing, 1.0u"kip") == ""
+    @test_throws ArgumentError DeckAttachment(sidelap_per_span = -1)
+    kept = CompositeContext(deck.slab, deck.anchor, deck.L_beam; deck_attachment = custom)
+    @test kept.deck_attachment.support_pattern == "36/7"
+end

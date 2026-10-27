@@ -3343,7 +3343,8 @@ function _size_beams_impl!(
             deck_orientation = orient,
             deck_e_mid_ht = opts.composite_deck_e_mid_ht,
             deck_anchorage_spacing = opts.composite_deck_anchorage_spacing,
-            L_twist = opts.composite_twist_spacing)
+            L_twist = opts.composite_twist_spacing,
+            deck_attachment = deck_attachment_from_options(opts))
     else
         nothing
     end

@@ -246,6 +246,73 @@ struct ConstructionStage
 end
 
 # ==============================================================================
+# Deck attachment (reported; not a strength check)
+# ==============================================================================
+
+"""Support fastener pattern of the DDM03 standard composite deck tables."""
+const DEFAULT_DECK_SUPPORT_PATTERN = "36/4"
+
+const DEFAULT_DECK_PATTERN_SOURCE =
+    "SDI Diaphragm Design Manual, 3rd ed. (2004), standard composite deck " *
+    "support fastener pattern (corpus: sdi-ddm-3e-2004, PDF pp. 11–12). " *
+    "Those tables are filled deck at Fy = 33 ksi, one edition behind DDM04, " *
+    "so no diaphragm strength is taken from them."
+
+"""
+    DeckAttachment
+
+How the deck is fastened, and an optional diaphragm shear strength.
+
+`support_pattern` defaults to [`DEFAULT_DECK_SUPPORT_PATTERN`](@ref).
+`sidelap_per_span` is the number of side-lap connectors between supports;
+`nothing` means not supplied. `Sn` is a caller-supplied nominal diaphragm
+shear strength per unit length. No default exists for it: SDI C-2017 (corpus:
+sdi-c-2017, PDF p. 10) sends diaphragm strength to AISI S310, which is not in
+the corpus, and the Vulcraft catalog leaves it to a web tool.
+
+Nothing here compares `Sn` with the Appendix 6 brace force. Appendix 6 gives
+that force per brace and has no per-length form for deck that braces a flange
+continuously.
+"""
+struct DeckAttachment
+    support_pattern::String
+    pattern_source::String
+    sidelap_per_span::Union{Nothing, Int}
+    Sn::Union{Nothing, typeof(1.0u"N/m")}
+end
+
+function DeckAttachment(; support_pattern::AbstractString = DEFAULT_DECK_SUPPORT_PATTERN,
+                        pattern_source::Union{Nothing, AbstractString} = nothing,
+                        sidelap_per_span::Union{Nothing, Int} = nothing,
+                        Sn = nothing)
+    isempty(strip(support_pattern)) &&
+        throw(ArgumentError("Deck support pattern must not be empty."))
+    if sidelap_per_span !== nothing && sidelap_per_span < 0
+        throw(ArgumentError("sidelap_per_span must be ≥ 0, got $sidelap_per_span."))
+    end
+    src = pattern_source !== nothing ? String(pattern_source) :
+          support_pattern == DEFAULT_DECK_SUPPORT_PATTERN ? DEFAULT_DECK_PATTERN_SOURCE :
+          "Caller-supplied deck support fastener pattern."
+    DeckAttachment(String(support_pattern), src, sidelap_per_span,
+                   Sn === nothing ? nothing : uconvert(u"N/m", Sn))
+end
+
+"""Note appended to the construction check. Empty for a solid slab."""
+function deck_brace_note(::Nothing, Vbr)
+    return ""
+end
+
+function deck_brace_note(att::DeckAttachment, Vbr)
+    sn = att.Sn === nothing ? "diaphragm strength not supplied" :
+         "caller Sn = $(att.Sn), not compared"
+    side = att.sidelap_per_span === nothing ? "" :
+           "; side-lap $(att.sidelap_per_span) per span"
+    return "; deck support pattern $(att.support_pattern); Vbr = $(Vbr); $sn$side. " *
+           "Not a check: Appendix 6 gives Vbr per brace, and SDI C-2017 sends " *
+           "diaphragm strength to AISI S310, which is not in the corpus."
+end
+
+# ==============================================================================
 # Composite Context (passed alongside ISymmSection in the checker)
 # ==============================================================================
 
@@ -268,6 +335,7 @@ This struct is built once per beam group and passed to the composite `is_feasibl
 - `slip_checked`: `true` when the caller has already run the commentary slip model
 - `construction`: Pre-cure loads (SEI/ASCE 37-02). Built from the slab when omitted.
 - `L_twist`:    Spacing of points that restrain twist, for the hogging Chapter F check and Commentary Eq. C-F1-5. `nothing` uses the member span.
+- `deck_attachment`: Fastener pattern and optional diaphragm strength for a deck slab. `nothing` on a solid slab. A deck defaults to the 36/4 pattern.
 
 # Notes
 - The `AISCChecker` uses this to decide between bare-steel and composite capacity paths.
@@ -288,6 +356,7 @@ struct CompositeContext{S<:AbstractSlabOnBeam, A<:AbstractSteelAnchor,
     construction::ConstructionStage
     ΣQn_neg::Union{Nothing, Unitful.Quantity}
     L_twist::Union{Nothing, typeof(1.0u"m")}
+    deck_attachment::Union{Nothing, DeckAttachment}
 end
 
 """
@@ -315,16 +384,20 @@ function CompositeContext(slab, anchor, L_beam;
                           slip_checked::Bool=false,
                           cp_class::Union{Symbol, Nothing}=:medium,
                           construction=nothing,
-                          L_twist=nothing)
+                          L_twist=nothing,
+                          deck_attachment=:auto)
     stage = construction === nothing ?
         construction_stage(slab; cp_class = cp_class) : construction
     lb = Lb_const === nothing ? default_construction_Lb(slab, L_beam) : Lb_const
     if L_twist !== nothing && !(ustrip(u"m", uconvert(u"m", L_twist)) > 0)
         throw(ArgumentError("L_twist must be a positive length, got $L_twist."))
     end
+    # :auto puts the named 36/4 pattern on a deck and nothing on a solid slab.
+    att = deck_attachment === :auto ?
+        (slab isa DeckSlabOnBeam ? DeckAttachment() : nothing) : deck_attachment
     CompositeContext(slab, anchor, uconvert(u"m", L_beam), shored,
                      uconvert(u"m", lb), Asr, Fysr, neg_moment,
-                     slip_checked, stage, ΣQn_neg, _opt_m(L_twist))
+                     slip_checked, stage, ΣQn_neg, _opt_m(L_twist), att)
 end
 
 # ==============================================================================

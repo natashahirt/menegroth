@@ -99,11 +99,15 @@ unshored, so the pre-cure check runs.
 - `composite`: Enable composite beam sizing via AISC 360 Chapter I (default: false)
 - `composite_slab_type`: `:solid` or `:deck` (default: `:solid`)
 - `composite_t_slab`: Slab thickness override. `nothing` reads the sized slab.
-- `composite_deck_hr`, `composite_deck_wr`, `composite_deck_orientation`: required for `:deck`
+- `composite_deck_hr`, `composite_deck_wr`, `composite_deck_orientation`: required for `:deck` unless `composite_deck_profile` is set
+- `composite_deck_profile`: Vulcraft profile name (`"1.5VL"`, `"2VLI"`, `"3VLI"`, or a side-lap variant). Supplies `hr` and `wr`; an explicit `hr`/`wr` must agree with it.
 - `composite_deck_e_mid_ht`: AISC 360-22 §I8.2a `e_mid-ht` for perpendicular deck. `nothing` keeps `Rp = 0.6`.
 - `composite_deck_anchorage_spacing`: deck attachment spacing, §I3.2c(d) (≤ 18 in). `nothing` reports it unchecked.
 - `composite_anchor_d`, `composite_anchor_length`, `composite_anchor_Fu`: the stud. All unset uses the named default stud.
 - `composite_twist_spacing`: spacing of twist restraints for the hogging check and Commentary Eq. C-F1-5. `nothing` uses the member span.
+- `composite_deck_support_pattern`: deck support fastener pattern. `nothing` uses `"36/4"`, the DDM03 standard composite pattern. Reported only; no diaphragm strength is taken from those tables.
+- `composite_deck_sidelap_per_span`: side-lap connectors between supports. `nothing` reports them as not supplied.
+- `composite_diaphragm_Sn`: caller-supplied nominal diaphragm shear strength per unit length. `nothing` is the only default. It is reported beside the brace force and not compared with it.
 - `composite_shored`: `true` skips the pre-cure steel check (default: false)
 - `composite_cp_class`: SEI/ASCE 37-02 personnel class (default: `:medium`)
 - `sizing_strategy`: `:discrete` (MIP catalog) or `:nlp` (continuous) (default: `:discrete`)
@@ -126,12 +130,16 @@ Base.@kwdef struct SteelBeamOptions
     composite_deck_hr::Union{Nothing, Length} = nothing
     composite_deck_wr::Union{Nothing, Length} = nothing
     composite_deck_orientation::Symbol = :perpendicular
+    composite_deck_profile::Union{Nothing, String} = nothing
     composite_deck_e_mid_ht::Union{Nothing, Length} = nothing
     composite_deck_anchorage_spacing::Union{Nothing, Length} = nothing
     composite_anchor_d::Union{Nothing, Length} = nothing
     composite_anchor_length::Union{Nothing, Length} = nothing
     composite_anchor_Fu::Union{Nothing, Pressure} = nothing
     composite_twist_spacing::Union{Nothing, Length} = nothing
+    composite_deck_support_pattern::Union{Nothing, String} = nothing
+    composite_deck_sidelap_per_span::Union{Nothing, Int} = nothing
+    composite_diaphragm_Sn::Union{Nothing, Unitful.Quantity} = nothing
     composite_shored::Bool = false
     composite_cp_class::Symbol = :medium
     n_max_sections::Int = 0

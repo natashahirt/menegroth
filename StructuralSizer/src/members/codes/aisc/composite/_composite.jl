@@ -4,6 +4,7 @@
 # Organized by topic, mirroring the spec structure.
 
 include("types.jl")            # AbstractSlabOnBeam, AbstractSteelAnchor, CompositeContext
+include("deck_catalog.jl")     # Vulcraft composite deck geometry (hr, wr)
 include("effective_width.jl")  # I3.1a — b_eff
 include("stud_strength.jl")   # I8.2a — Qn, Rg/Rp, validations
 include("flexure.jl")         # I3.2  — Cf, PNA solver, Mn, partial composite, neg moment

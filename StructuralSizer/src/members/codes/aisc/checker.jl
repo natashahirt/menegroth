@@ -1126,7 +1126,8 @@ function explain_feasibility(
         Mu_const = ustrip(u"N*m", pre.Mu)
         Vu_const = ustrip(u"N", pre.Vu)
         c_ratio = ϕMn_const > 0 ? Mu_const / ϕMn_const : (Mu_const > 0 ? Inf : 0.0)
-        clause = "AISC 360-22 I3.1b; $(pre.edition); Eq. $(pre.equation); C_P $(pre.cp_class)"
+        clause = "AISC 360-22 I3.1b; $(pre.edition); Eq. $(pre.equation); C_P $(pre.cp_class)" *
+                 deck_brace_note(ctx.deck_attachment, pre.Vbr)
         push!(checks, CheckResult("construction_flexure", ϕMn_const >= Mu_const,
               c_ratio, Mu_const, ϕMn_const, clause))
         ϕVn_c = cache.ϕVn_strong[j]

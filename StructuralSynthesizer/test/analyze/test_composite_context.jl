@@ -776,6 +776,16 @@ end
         composite_deck_wr = 6.0u"inch"))
     @test isapprox(dflt_deck.l_sa, 4.5u"inch"; rtol = 1e-9)
 
+    prof = SteelBeamOptions(composite = true, composite_slab_type = :deck,
+                            composite_deck_profile = "3VLI")
+    g = StructuralSynthesizer.composite_deck_hr_wr(prof)
+    @test isapprox(g.hr, 3.0u"inch"; rtol = 1e-9)
+    @test isapprox(g.wr, 6.0u"inch"; rtol = 1e-9)
+    @test isapprox(composite_anchor_from_options(prof).l_sa, 4.5u"inch"; rtol = 1e-9)
+    @test_throws ArgumentError StructuralSynthesizer.composite_deck_hr_wr(
+        SteelBeamOptions(composite = true, composite_slab_type = :deck,
+                         composite_deck_profile = "3VLI", composite_deck_wr = 5.0u"inch"))
+
     opts_ok = SteelBeamOptions(composite = true, sizing_strategy = :nlp,
                                composite_anchor_d = 0.75u"inch",
                                composite_anchor_length = 5.0u"inch",

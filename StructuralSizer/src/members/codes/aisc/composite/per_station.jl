@@ -529,6 +529,7 @@ function context_at_sagging_station(ctx::CompositeContext, st::CompositeSaggingS
                             neg_moment = ctx.neg_moment,
                             ΣQn_neg = ctx.ΣQn_neg,
                             L_twist = ctx.L_twist,
+                            deck_attachment = ctx.deck_attachment,
                             slip_checked = ctx.slip_checked,
                             construction = ctx.construction)
 end
@@ -543,6 +544,7 @@ function _context_with_pre_cure(ctx::CompositeContext, shape)
                             neg_moment = ctx.neg_moment,
                             ΣQn_neg = ctx.ΣQn_neg,
                             L_twist = ctx.L_twist,
+                            deck_attachment = ctx.deck_attachment,
                             slip_checked = ctx.slip_checked,
                             construction = stage)
 end
@@ -565,6 +567,7 @@ function _context_for_construction(ctx::CompositeContext, slab, left, right)
                             neg_moment = ctx.neg_moment,
                             ΣQn_neg = ctx.ΣQn_neg,
                             L_twist = ctx.L_twist,
+                            deck_attachment = ctx.deck_attachment,
                             slip_checked = ctx.slip_checked,
                             construction = stage)
 end

@@ -3004,6 +3004,10 @@ The original `struc.asap_model` (frame-only) is preserved for design calculation
     - `:flat_plate` → `[:columns]` (beamless)
     - `:one_way`, `:two_way` → `[:columns, :beams]`
   - `Vector{Symbol}`: Explicit list, e.g. `[:columns]` or `[:columns, :beams]`
+- `patch_stiffness_factor::Union{Real, Nothing}`: Column/drop-panel patch
+  modulus multiplier. `nothing` (default) follows the floor `FEA` method
+  (100). A number overrides that; `1` is an ordinary-slab patch. Ignored
+  when the slab has no drop-panel patches.
 
 # Example
 ```julia
@@ -3036,7 +3040,8 @@ function build_analysis_model!(design::BuildingDesign;
                                target_edge_length=nothing,
                                refinement_edge_length=nothing,
                                refinement_radius=nothing,
-                               refinement_targets=nothing)
+                               refinement_targets=nothing,
+                               patch_stiffness_factor::Union{Real, Nothing}=nothing)
     struc = design.structure
     skel = struc.skeleton
     
@@ -3069,6 +3074,7 @@ function build_analysis_model!(design::BuildingDesign;
         refinement_edge_length=refinement_edge_length,
         refinement_radius=refinement_radius,
         refinement_targets=refinement_targets,
+        patch_stiffness_factor=patch_stiffness_factor,
     )
 
     # ─── 3. Create nodes with structural offsets ───
@@ -3205,7 +3211,7 @@ function build_analysis_model!(design::BuildingDesign;
                 StructuralSizer.build_slab_shell_patches(
                     struc, slab_columns, section;
                     drop_panel=slab.drop_panel,
-                    patch_stiffness_factor=1.0,
+                    patch_stiffness_factor=mesh_controls.patch_stiffness_factor,
                     vertex_set=slab_vertex_set) :
                 Asap.ShellPatch[]
             effective_target_edge_length = _resolve_slab_target_edge_length(
@@ -3258,7 +3264,7 @@ function build_analysis_model!(design::BuildingDesign;
                 StructuralSizer.build_slab_shell_patches(
                     struc, slab_columns, section;
                     drop_panel=slab.drop_panel,
-                    patch_stiffness_factor=1.0,
+                    patch_stiffness_factor=mesh_controls.patch_stiffness_factor,
                     vertex_set=slab_vertex_set) :
                 Asap.ShellPatch[]
             effective_target_edge_length = _resolve_slab_target_edge_length(
@@ -3344,7 +3350,8 @@ function _resolve_visualization_shell_mesh_controls(design::BuildingDesign;
     target_edge_length=nothing,
     refinement_edge_length=nothing,
     refinement_radius=nothing,
-    refinement_targets=nothing)
+    refinement_targets=nothing,
+    patch_stiffness_factor::Union{Real, Nothing}=nothing)
 
     floor_opts = resolve_floor_options(design.params)
     method = if floor_opts isa StructuralSizer.FlatSlabOptions
@@ -3356,6 +3363,12 @@ function _resolve_visualization_shell_mesh_controls(design::BuildingDesign;
     end
 
     fea_target_edge = (method isa StructuralSizer.FEA) ? method.target_edge : nothing
+    # Drop-panel patches copy the floor FEA factor. An explicit argument wins.
+    # A non-FEA floor has no factor; those patches stay ordinary slab (1×).
+    method_factor = (method isa StructuralSizer.FEA) ? method.patch_stiffness_factor : 1.0
+    resolved_factor = isnothing(patch_stiffness_factor) ? method_factor : Float64(patch_stiffness_factor)
+    resolved_factor > 0 ||
+        error("patch_stiffness_factor must be > 0; got $resolved_factor")
 
     resolved_target = isnothing(target_edge_length) ? fea_target_edge : target_edge_length
 
@@ -3364,6 +3377,7 @@ function _resolve_visualization_shell_mesh_controls(design::BuildingDesign;
         refinement_edge_length = refinement_edge_length,
         refinement_radius = refinement_radius,
         refinement_targets = refinement_targets,
+        patch_stiffness_factor = resolved_factor,
     )
 end
 

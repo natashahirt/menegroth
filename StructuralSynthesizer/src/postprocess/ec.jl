@@ -118,6 +118,54 @@ function material_ec(volumes::MaterialVolumes)
             timber = timber, other = other)
 end
 
+"""
+    material_takeoff(volumes::MaterialVolumes) -> MaterialTakeoff
+
+Concrete volume (m³), rebar mass (kg), and structural-steel mass (kg), plus
+the embodied carbon of each. Mass is volume × that material's density.
+"""
+function material_takeoff(volumes::MaterialVolumes)
+    concrete = 0.0u"m^3"
+    rebar = 0.0u"kg"
+    steel = 0.0u"kg"
+    for (mat, vol) in _sorted_volume_pairs(volumes)
+        v = uconvert(u"m^3", vol)
+        if mat isa StructuralSizer.Concrete || mat isa StructuralSizer.FiberReinforcedConcrete
+            concrete += v
+        elseif mat isa StructuralSizer.RebarSteel
+            rebar += uconvert(u"kg", v * mat.ρ)
+        elseif mat isa StructuralSizer.StructuralSteel
+            steel += uconvert(u"kg", v * mat.ρ)
+        elseif mat isa StructuralSizer.ReinforcedConcreteMaterial
+            concrete += v
+        end
+    end
+    p = material_ec(volumes)
+    return MaterialTakeoff(concrete, rebar, steel, p.concrete, p.rebar, p.structural_steel)
+end
+
+"""Sum [`material_takeoff`](@ref) separately for slabs, columns, beams, struts, and foundations."""
+function takeoff_by_element(struc::BuildingStructure)
+    slabs = columns = beams = struts = foundations = MaterialTakeoff()
+    for slab in struc.slabs
+        slabs += material_takeoff(slab.volumes)
+    end
+    for column in struc.columns
+        columns += material_takeoff(volumes(column))
+    end
+    for beam in struc.beams
+        beams += material_takeoff(volumes(beam))
+    end
+    for strut in struc.struts
+        struts += material_takeoff(volumes(strut))
+    end
+    for foundation in struc.foundations
+        foundations += material_takeoff(foundation.volumes)
+    end
+    return (slabs = slabs, columns = columns, beams = beams,
+            struts = struts, foundations = foundations)
+end
+
 """Sum [`material_ec`](@ref) over every slab, member, and foundation volume."""
 function material_ec_total(struc::BuildingStructure)
     concrete = rebar = steel = timber = other = 0.0u"kgCO2e"

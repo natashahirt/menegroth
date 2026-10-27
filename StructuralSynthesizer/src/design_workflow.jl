@@ -873,6 +873,132 @@ function _get_column_opts(params::DesignParameters)
     (opts isa ConcreteColumnOptions || opts isa StructuralSizer.PixelFrameColumnOptions) ? opts : nothing
 end
 
+# Half a sizing increment. Used only to recognize an unchanged cross-section.
+_column_size_match(a, b) = abs(uconvert(u"inch", a) - uconvert(u"inch", b)) <= 0.05u"inch"
+
+function _section_matches_column_size(sec, col)
+    if sec isa StructuralSizer.RCColumnSection
+        return (_column_size_match(sec.b, col.c1) && _column_size_match(sec.h, col.c2)) ||
+               (_column_size_match(sec.b, col.c2) && _column_size_match(sec.h, col.c1))
+    elseif sec isa StructuralSizer.RCCircularSection
+        return _column_size_match(sec.D, col.c1) && _column_size_match(sec.D, col.c2)
+    end
+    return false
+end
+
+"""Bar size and count when every longitudinal bar has the same area, else `nothing`."""
+function _uniform_bar_layout(sec)
+    bars = sec.bars
+    isempty(bars) && return nothing
+    As0 = uconvert(u"inch^2", bars[1].As)
+    all(b -> uconvert(u"inch^2", b.As) ≈ As0, bars) || return nothing
+    for size in (3, 4, 5, 6, 7, 8, 9, 10, 11, 14, 18)
+        bar = StructuralSizer.rebar(size)
+        if uconvert(u"inch^2", bar.A) ≈ As0
+            return (bar_size = size, n_bars = length(bars))
+        end
+    end
+    return nothing
+end
+
+"""Place `existing`'s bar size and count on `col`'s current dimensions."""
+function _same_bars_on_new_size(existing, col)
+    layout = _uniform_bar_layout(existing)
+    layout === nothing && return nothing
+    if existing isa StructuralSizer.RCCircularSection
+        return StructuralSizer.RCCircularSection(
+            D = col.c1, bar_size = layout.bar_size, n_bars = layout.n_bars,
+            cover = existing.cover, tie_type = existing.tie_type)
+    end
+    return StructuralSizer.RCColumnSection(
+        b = col.c1, h = col.c2, bar_size = layout.bar_size, n_bars = layout.n_bars,
+        cover = existing.cover, tie_type = existing.tie_type)
+end
+
+"""
+Least standard bar layout with 0.01Ag ≤ As ≤ 0.08Ag.
+
+ACI 318-11 §10.9.1 (corpus: aci-318-11, page 148). Used when a column has no
+section, or its previous bars fall outside that window on a grown cross-section.
+The axial grow check already set Ag from ϕPn = 0.65·0.80·f′c·Ag, so this only
+restores the reinforcement limits. Bar counts are even, matching the column
+reinforcement designer, and at least 4 for tied columns or 6 for spiral.
+"""
+function _minimum_longitudinal_section(col, existing)
+    Ag = col.shape == :circular ?
+        (π / 4) * uconvert(u"inch", col.c1)^2 :
+        uconvert(u"inch", col.c1) * uconvert(u"inch", col.c2)
+    As_min = 0.01 * Ag
+    As_max = 0.08 * Ag
+    has_sec = existing isa StructuralSizer.RCColumnSection || existing isa StructuralSizer.RCCircularSection
+    tie = has_sec ? existing.tie_type : (col.shape == :circular ? :spiral : :tied)
+    cover = has_sec ? existing.cover : 1.5u"inch"
+    min_bars = tie == :spiral ? 6 : 4
+    layout = has_sec ? _uniform_bar_layout(existing) : nothing
+    sizes = layout === nothing ? (8, 6, 7, 9, 10, 11) : (layout.bar_size, 8, 6, 7, 9, 10, 11)
+
+    best = nothing
+    best_As = As_max + 1.0u"inch^2"
+    for size in unique(sizes)
+        Ab = uconvert(u"inch^2", StructuralSizer.rebar(size).A)
+        n = max(min_bars, ceil(Int, ustrip(As_min / Ab)))
+        iseven(n) || (n += 1)
+        while n <= 40
+            As = n * Ab
+            As > As_max && break
+            if As >= As_min && As < best_As
+                best = (bar_size = size, n_bars = n, cover = cover, tie_type = tie)
+                best_As = As
+            end
+            n += 2
+        end
+    end
+    best === nothing && error("No longitudinal layout satisfies ACI 318-11 §10.9.1 for this column size")
+    if col.shape == :circular
+        return StructuralSizer.RCCircularSection(
+            D = col.c1, bar_size = best.bar_size, n_bars = best.n_bars,
+            cover = best.cover, tie_type = best.tie_type)
+    end
+    return StructuralSizer.RCColumnSection(
+        b = col.c1, h = col.c2, bar_size = best.bar_size, n_bars = best.n_bars,
+        cover = best.cover, tie_type = best.tie_type)
+end
+
+"""
+    _assign_flat_plate_column_section!(col) -> section
+
+Keep the longitudinal bars already stored on `col` when that section still
+matches `c1` × `c2`. Flat-plate sizing writes the P-M section onto the column;
+replacing it with four #8 bars made the recorded rebar mass independent of
+the design.
+
+When the cross-section has grown, keep those bars if they still satisfy
+ACI 318-11 §10.9.1 (0.01Ag ≤ As ≤ 0.08Ag; corpus: aci-318-11, page 148).
+Otherwise install the least standard layout inside that window.
+"""
+function _assign_flat_plate_column_section!(col)
+    existing = section(col)
+    if _section_matches_column_size(existing, col)
+        return existing
+    end
+    chosen = if existing isa StructuralSizer.RCColumnSection || existing isa StructuralSizer.RCCircularSection
+        preserved = try
+            _same_bars_on_new_size(existing, col)
+        catch
+            nothing
+        end
+        if preserved !== nothing && 0.01 <= preserved.ρg <= 0.08
+            preserved
+        else
+            _minimum_longitudinal_section(col, existing)
+        end
+    else
+        _minimum_longitudinal_section(col, existing)
+    end
+    set_section!(col, chosen)
+    return chosen
+end
+
 StructuralSizer.TRACE_REGISTRY[(:_reconcile_columns!, :workflow)] =
     StructuralSizer.TracedFunctionMeta(
         :_reconcile_columns!,
@@ -939,35 +1065,14 @@ function _reconcile_columns!(
             end
         end
 
-        # Always create an RC section for visualization (and update Asap section if grew)
         b_m = ustrip(u"m", col.c1)
         h_m = ustrip(u"m", col.c2)
-        
-        # Create RC section with minimum reinforcement for visualization serialization.
-        # Branch on shape: rectangular → RCColumnSection, circular → RCCircularSection.
-        # This ensures section_polygon is populated correctly in the API output.
         col_shape = hasproperty(col, :shape) ? col.shape : :rectangular
-        if col_shape == :circular
-            # For circular: c1 = c2 = D (diameter). RCCircularSection needs min 6 bars.
-            rc_section = StructuralSizer.RCCircularSection(
-                D = col.c1,
-                bar_size = 8,
-                n_bars = 6,  # Minimum for spiral per ACI
-            )
-        else
-            rc_section = StructuralSizer.RCColumnSection(
-                b = col.c1,
-                h = col.c2,
-                bar_size = 8,
-                n_bars = 4,  # Minimum bars per ACI 10.7.3.1
-            )
-        end
-        set_section!(col, rc_section)
-        # Flat-plate sizing records Ag and As on the section but used to leave
-        # `volumes` empty unless harmonization enlarged the column. EC skips a
-        # member with empty volumes, so column carbon was 0 while the quantity
-        # summary still counted the concrete. Store concrete (Ag − As) and
-        # rebar (As) as separate keys so the two carbons stay separable.
+
+        # The slab loop already stored the P-M section. Keep its bars, or
+        # redesign only when this column grew, and record concrete and rebar
+        # volumes from that section.
+        _assign_flat_plate_column_section!(col)
         _set_rc_column_volumes!(
             col,
             something(col.concrete, resolve_column_concrete(params.materials)),
@@ -1134,17 +1239,11 @@ function _harmonize_rc_group!(struc::BuildingStructure, params::DesignParameters
         col.c2 = gov_c2
         already || (changed += 1)
 
-        # Rebuild nominal RC section for visualization when the size changes.
-        # A column that already matches still needs volumes if reconcile never
-        # wrote them (older path, or a caller that harmonizes first).
+        # A column that already matches keeps its section. One that grew, or
+        # that never received a section, gets the same bar assignment as
+        # reconciliation. Volumes are written either way when they were empty.
         if !already || isnothing(section(col))
-            if col.shape == :circular
-                set_section!(col, StructuralSizer.RCCircularSection(
-                    D = col.c1, bar_size = 8, n_bars = 6))
-            else
-                set_section!(col, StructuralSizer.RCColumnSection(
-                    b = col.c1, h = col.c2, bar_size = 8, n_bars = 4))
-            end
+            _assign_flat_plate_column_section!(col)
         end
 
         # Gross section area as a single concrete volume counted the rebar
@@ -2582,6 +2681,12 @@ function _compute_design_summary!(design::BuildingDesign, struc::BuildingStructu
         summary.embodied_carbon_structural_steel = parts.structural_steel
         summary.embodied_carbon_timber           = parts.timber
         summary.embodied_carbon_other            = parts.other
+        by_element = takeoff_by_element(struc)
+        summary.takeoff_slabs       = by_element.slabs
+        summary.takeoff_columns     = by_element.columns
+        summary.takeoff_beams       = by_element.beams
+        summary.takeoff_struts      = by_element.struts
+        summary.takeoff_foundations = by_element.foundations
     catch e
         @warn "Embodied carbon computation failed — defaulting to 0.0" exception=(e, catch_backtrace())
         summary.embodied_carbon              = 0.0u"kgCO2e"
@@ -2596,6 +2701,11 @@ function _compute_design_summary!(design::BuildingDesign, struc::BuildingStructu
         summary.embodied_carbon_structural_steel = 0.0u"kgCO2e"
         summary.embodied_carbon_timber           = 0.0u"kgCO2e"
         summary.embodied_carbon_other            = 0.0u"kgCO2e"
+        summary.takeoff_slabs       = MaterialTakeoff()
+        summary.takeoff_columns     = MaterialTakeoff()
+        summary.takeoff_beams       = MaterialTakeoff()
+        summary.takeoff_struts      = MaterialTakeoff()
+        summary.takeoff_foundations = MaterialTakeoff()
     end
 end
 

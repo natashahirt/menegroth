@@ -271,8 +271,8 @@ export support_demands, foundation_summary, build_foundation_groups!
 export group_foundations_by_reaction!, size_foundations_grouped!, foundation_group_summary
 
 # --- Postprocessing (Embodied Carbon + Engineering Report) ---
-export element_ec, material_ec, material_ec_total, compute_building_ec, ec_summary
-export ElementECResult, BuildingECResult
+export element_ec, material_ec, material_ec_total, material_takeoff, takeoff_by_element, compute_building_ec, ec_summary
+export ElementECResult, BuildingECResult, MaterialTakeoff
 export to_dict
 export engineering_report
 

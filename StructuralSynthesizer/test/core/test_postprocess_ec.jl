@@ -99,6 +99,13 @@ end
         stl  => 0.05u"m^3",
     )
     parts = material_ec(vols)
+    toff = material_takeoff(vols)
+    @test toff.concrete_volume ≈ 2.0u"m^3"
+    @test toff.rebar_mass ≈ uconvert(u"kg", 0.02u"m^3" * reb.ρ)
+    @test toff.structural_steel_mass ≈ uconvert(u"kg", 0.05u"m^3" * stl.ρ)
+    @test toff.concrete_ec ≈ parts.concrete
+    @test toff.rebar_ec ≈ parts.rebar
+    @test toff.structural_steel_ec ≈ parts.structural_steel
     @test parts.concrete ≈ element_ec(MaterialVolumes(conc => 2.0u"m^3"))
     @test parts.rebar ≈ element_ec(MaterialVolumes(reb => 0.02u"m^3"))
     @test parts.structural_steel ≈ element_ec(MaterialVolumes(stl => 0.05u"m^3"))
@@ -149,4 +156,34 @@ end
     tot = material_ec_total(struc)
     @test tot.concrete + tot.rebar + tot.structural_steel + tot.timber + tot.other ≈
           filled.total_ec - filled.fireproofing_ec
+    by_el = takeoff_by_element(struc)
+    @test by_el.columns.concrete_volume > 0.0u"m^3"
+    @test by_el.columns.rebar_mass > 0.0u"kg"
+    @test by_el.columns.structural_steel_mass == 0.0u"kg"
+    @test by_el.columns.concrete_ec + by_el.columns.rebar_ec ≈ col_rows[1].ec
+    @test by_el.slabs.concrete_volume == 0.0u"m^3"
+
+    # Reconciliation used to replace the P-M section with four #8 bars.
+    # An unchanged cross-section keeps its bars. A modest growth keeps them
+    # while ACI 318-11 §10.9.1 still holds. A growth that drops those bars
+    # below 0.01Ag is redesigned, so the stored area increases.
+    kept_col = Column(1, 3.0u"m"; c1 = 0.4u"m", c2 = 0.4u"m")
+    designed = StructuralSizer.RCColumnSection(b = kept_col.c1, h = kept_col.c2, bar_size = 8, n_bars = 8)
+    set_section!(kept_col, designed)
+    kept = StructuralSynthesizer._assign_flat_plate_column_section!(kept_col)
+    @test length(kept.bars) == 8
+    @test kept.As_total ≈ designed.As_total
+
+    kept_col.c1 = 0.5u"m"
+    kept_col.c2 = 0.5u"m"
+    still = StructuralSynthesizer._assign_flat_plate_column_section!(kept_col)
+    @test length(still.bars) == 8
+    @test still.As_total ≈ designed.As_total
+    @test 0.01 <= still.ρg <= 0.08
+
+    kept_col.c1 = 0.8u"m"
+    kept_col.c2 = 0.8u"m"
+    grown = StructuralSynthesizer._assign_flat_plate_column_section!(kept_col)
+    @test 0.01 <= grown.ρg <= 0.08
+    @test grown.As_total > designed.As_total
 end

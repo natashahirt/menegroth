@@ -1250,6 +1250,38 @@ function foundation_diagnostic_governing_check(fr::FoundationDesignResult)::Stri
 end
 
 """
+    MaterialTakeoff
+
+Concrete volume, rebar mass, and structural-steel mass for one group of
+elements, with the embodied carbon of each. Built from the volumes stored on
+those elements, which is the same source as the carbon split.
+"""
+struct MaterialTakeoff
+    concrete_volume::typeof(1.0u"m^3")
+    rebar_mass::typeof(1.0u"kg")
+    structural_steel_mass::typeof(1.0u"kg")
+    concrete_ec::CarbonMassQuantity
+    rebar_ec::CarbonMassQuantity
+    structural_steel_ec::CarbonMassQuantity
+end
+
+MaterialTakeoff() = MaterialTakeoff(
+    0.0u"m^3", 0.0u"kg", 0.0u"kg",
+    0.0u"kgCO2e", 0.0u"kgCO2e", 0.0u"kgCO2e",
+)
+
+function Base.:+(a::MaterialTakeoff, b::MaterialTakeoff)
+    MaterialTakeoff(
+        a.concrete_volume + b.concrete_volume,
+        a.rebar_mass + b.rebar_mass,
+        a.structural_steel_mass + b.structural_steel_mass,
+        a.concrete_ec + b.concrete_ec,
+        a.rebar_ec + b.rebar_ec,
+        a.structural_steel_ec + b.structural_steel_ec,
+    )
+end
+
+"""
 Design summary with aggregate metrics.
 """
 Base.@kwdef mutable struct DesignSummary
@@ -1280,6 +1312,14 @@ Base.@kwdef mutable struct DesignSummary
     embodied_carbon_structural_steel::CarbonMassQuantity  = 0.0u"kgCO2e"
     embodied_carbon_timber::CarbonMassQuantity            = 0.0u"kgCO2e"
     embodied_carbon_other::CarbonMassQuantity             = 0.0u"kgCO2e"
+    # Element × material. Summing a field across these five equals the
+    # matching building-level material total above. Drop panels, shear caps,
+    # and studs added only to `concrete_volume` / `rebar_weight` are not here.
+    takeoff_slabs::MaterialTakeoff        = MaterialTakeoff()
+    takeoff_columns::MaterialTakeoff      = MaterialTakeoff()
+    takeoff_beams::MaterialTakeoff        = MaterialTakeoff()
+    takeoff_struts::MaterialTakeoff       = MaterialTakeoff()
+    takeoff_foundations::MaterialTakeoff  = MaterialTakeoff()
     cost_estimate::Float64 = 0.0      # $
 
     # Status

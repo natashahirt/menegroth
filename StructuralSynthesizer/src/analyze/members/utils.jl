@@ -3340,7 +3340,10 @@ function _size_beams_impl!(
             struc, group_ids, L_totals, composite_concrete, opts.material.E;
             t_slab = t_slab, anchor = anchor, shored = shored, cp_class = cp,
             slab_type = slab_type, deck_hr = hr, deck_wr = wr,
-            deck_orientation = orient)
+            deck_orientation = orient,
+            deck_e_mid_ht = opts.composite_deck_e_mid_ht,
+            deck_anchorage_spacing = opts.composite_deck_anchorage_spacing,
+            L_twist = opts.composite_twist_spacing)
     else
         nothing
     end

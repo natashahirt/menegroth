@@ -499,7 +499,8 @@ end
 function _slab_at_spacings(slab::DeckSlabOnBeam, bsl, bsr)
     DeckSlabOnBeam(slab.t_slab, slab.fc′, slab.Ec, slab.wc, slab.n,
                    slab.hr, slab.wr, slab.deck_orientation,
-                   uconvert(u"m", bsl), uconvert(u"m", bsr), nothing, nothing)
+                   uconvert(u"m", bsl), uconvert(u"m", bsr), nothing, nothing,
+                   slab.e_mid_ht, slab.anchorage_spacing)
 end
 
 """
@@ -527,6 +528,7 @@ function context_at_sagging_station(ctx::CompositeContext, st::CompositeSaggingS
                             Asr = ctx.Asr, Fysr = ctx.Fysr,
                             neg_moment = ctx.neg_moment,
                             ΣQn_neg = ctx.ΣQn_neg,
+                            L_twist = ctx.L_twist,
                             slip_checked = ctx.slip_checked,
                             construction = ctx.construction)
 end
@@ -540,6 +542,7 @@ function _context_with_pre_cure(ctx::CompositeContext, shape)
                             Asr = ctx.Asr, Fysr = ctx.Fysr,
                             neg_moment = ctx.neg_moment,
                             ΣQn_neg = ctx.ΣQn_neg,
+                            L_twist = ctx.L_twist,
                             slip_checked = ctx.slip_checked,
                             construction = stage)
 end
@@ -561,6 +564,7 @@ function _context_for_construction(ctx::CompositeContext, slab, left, right)
                             Asr = ctx.Asr, Fysr = ctx.Fysr,
                             neg_moment = ctx.neg_moment,
                             ΣQn_neg = ctx.ΣQn_neg,
+                            L_twist = ctx.L_twist,
                             slip_checked = ctx.slip_checked,
                             construction = stage)
 end

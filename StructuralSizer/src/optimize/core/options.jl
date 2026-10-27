@@ -81,7 +81,9 @@ opts = SteelBeamOptions(composite = true,
 ```
 
 `composite = false` does not read the composite fields. With `composite = true`,
-the stud diameter, length, and Fu are required. Thickness and concrete come
+a stud with all three fields unset is the named default
+(`default_headed_stud`: 3/4 in, Fu = 65 ksi, AISC Manual 14th ed.); setting
+only some of them throws. Thickness and concrete come
 from the sized slab when those fields are left unset. Shoring defaults to
 unshored, so the pre-cure check runs.
 
@@ -98,7 +100,10 @@ unshored, so the pre-cure check runs.
 - `composite_slab_type`: `:solid` or `:deck` (default: `:solid`)
 - `composite_t_slab`: Slab thickness override. `nothing` reads the sized slab.
 - `composite_deck_hr`, `composite_deck_wr`, `composite_deck_orientation`: required for `:deck`
-- `composite_anchor_d`, `composite_anchor_length`, `composite_anchor_Fu`: the stud. Required when composite.
+- `composite_deck_e_mid_ht`: AISC 360-22 §I8.2a `e_mid-ht` for perpendicular deck. `nothing` keeps `Rp = 0.6`.
+- `composite_deck_anchorage_spacing`: deck attachment spacing, §I3.2c(d) (≤ 18 in). `nothing` reports it unchecked.
+- `composite_anchor_d`, `composite_anchor_length`, `composite_anchor_Fu`: the stud. All unset uses the named default stud.
+- `composite_twist_spacing`: spacing of twist restraints for the hogging check and Commentary Eq. C-F1-5. `nothing` uses the member span.
 - `composite_shored`: `true` skips the pre-cure steel check (default: false)
 - `composite_cp_class`: SEI/ASCE 37-02 personnel class (default: `:medium`)
 - `sizing_strategy`: `:discrete` (MIP catalog) or `:nlp` (continuous) (default: `:discrete`)
@@ -121,9 +126,12 @@ Base.@kwdef struct SteelBeamOptions
     composite_deck_hr::Union{Nothing, Length} = nothing
     composite_deck_wr::Union{Nothing, Length} = nothing
     composite_deck_orientation::Symbol = :perpendicular
+    composite_deck_e_mid_ht::Union{Nothing, Length} = nothing
+    composite_deck_anchorage_spacing::Union{Nothing, Length} = nothing
     composite_anchor_d::Union{Nothing, Length} = nothing
     composite_anchor_length::Union{Nothing, Length} = nothing
     composite_anchor_Fu::Union{Nothing, Pressure} = nothing
+    composite_twist_spacing::Union{Nothing, Length} = nothing
     composite_shored::Bool = false
     composite_cp_class::Symbol = :medium
     n_max_sections::Int = 0

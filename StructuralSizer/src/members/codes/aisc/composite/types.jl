@@ -96,6 +96,13 @@ the composite section's elastic neutral axis and `I_transformed`).
 - `wr`:     Average rib width
 - `deck_orientation`: `:perpendicular` or `:parallel` to beam
 - `beam_spacing_left`, `beam_spacing_right`, `edge_dist_left`, `edge_dist_right`: as `SolidSlabOnBeam`
+- `e_mid_ht`: distance from the stud shank edge to the deck web, at mid-height
+  of the rib, in the load-bearing direction of the stud (AISC 360-22 §I8.2a,
+  corpus: aisc-360-22, PDF p. 182). `nothing` means unknown and keeps
+  `Rp = 0.6` for perpendicular deck.
+- `anchorage_spacing`: spacing of the deck attachments to the supporting
+  member (§I3.2c(d), PDF p. 170). `nothing` means not supplied; the limit is
+  then reported as unchecked, not as passing.
 """
 struct DeckSlabOnBeam{T_P<:Pressure, T_D<:Density} <: AbstractSlabOnBeam
     t_slab::typeof(1.0u"m")
@@ -110,22 +117,26 @@ struct DeckSlabOnBeam{T_P<:Pressure, T_D<:Density} <: AbstractSlabOnBeam
     beam_spacing_right::typeof(1.0u"m")
     edge_dist_left::Union{typeof(1.0u"m"), Nothing}
     edge_dist_right::Union{typeof(1.0u"m"), Nothing}
+    e_mid_ht::Union{typeof(1.0u"m"), Nothing}
+    anchorage_spacing::Union{typeof(1.0u"m"), Nothing}
 end
+
+_opt_m(x) = x === nothing ? nothing : uconvert(u"m", x)
 
 function DeckSlabOnBeam(t_slab, fc′, Ec, wc, Es,
                         hr, wr, deck_orientation,
                         beam_spacing_left, beam_spacing_right;
-                        edge_dist_left=nothing, edge_dist_right=nothing)
+                        edge_dist_left=nothing, edge_dist_right=nothing,
+                        e_mid_ht=nothing, anchorage_spacing=nothing)
     deck_orientation in (:perpendicular, :parallel) ||
         throw(ArgumentError("deck_orientation must be :perpendicular or :parallel, got :$deck_orientation"))
     n = ustrip(u"Pa", Es) / ustrip(u"Pa", Ec)
-    edl = edge_dist_left  === nothing ? nothing : uconvert(u"m", edge_dist_left)
-    edr = edge_dist_right === nothing ? nothing : uconvert(u"m", edge_dist_right)
     DeckSlabOnBeam(uconvert(u"m", t_slab), fc′, Ec, wc, n,
                    uconvert(u"m", hr), uconvert(u"m", wr), deck_orientation,
                    uconvert(u"m", beam_spacing_left),
                    uconvert(u"m", beam_spacing_right),
-                   edl, edr)
+                   _opt_m(edge_dist_left), _opt_m(edge_dist_right),
+                   _opt_m(e_mid_ht), _opt_m(anchorage_spacing))
 end
 
 # ==============================================================================
@@ -145,6 +156,8 @@ Steel headed stud anchor per AISC 360-16 Section I8.
 - `ρ`:     Steel density (for weight/ECC calculations)
 - `ecc`:   Embodied carbon coefficient [kgCO₂e/kg]
 - `n_per_row`: Number of studs per transverse row (≥1)
+- `source`: Where the stud properties came from. Empty for a caller-named
+  stud; [`default_headed_stud`](@ref) fills it so results can report it.
 
 # Notes
 - Single-stud mass is computed as `π/4 × d_sa² × l_sa × ρ` (shank only, head negligible).
@@ -158,12 +171,40 @@ struct HeadedStudAnchor{T_P<:Pressure, T_D<:Density} <: AbstractSteelAnchor
     ρ::T_D
     ecc::CarbonPerMassQuantity  # Embodied carbon [kgCO₂e/kg], typed via Asap `𝐗` dimension
     n_per_row::Int
+    source::String
 end
 
-function HeadedStudAnchor(d_sa, l_sa, Fu, Fy, ρ; ecc=1.72u"kgCO2e/kg", n_per_row=1)
+function HeadedStudAnchor(d_sa, l_sa, Fu, Fy, ρ; ecc=1.72u"kgCO2e/kg", n_per_row=1,
+                          source::AbstractString="")
     n_per_row >= 1 || throw(ArgumentError("n_per_row must be ≥ 1"))
     HeadedStudAnchor(uconvert(u"m", d_sa), uconvert(u"m", l_sa),
-                     Fu, Fy, ρ, _normalize_ecc(ecc), n_per_row)
+                     Fu, Fy, ρ, _normalize_ecc(ecc), n_per_row, String(source))
+end
+
+const DEFAULT_STUD_SOURCE =
+    "Default stud: 3/4 in ASTM A108 Type B, Fu = 65 ksi " *
+    "(AISC Steel Construction Manual 14th ed., PDF p. 165; corpus: aisc-scm-14th). " *
+    "That Manual edition predates AISC 360-22."
+
+"""
+    default_headed_stud(; hr=nothing, ρ=490 lb/ft³) -> HeadedStudAnchor
+
+Stud used when composite design is requested and no stud is named.
+
+- `d_sa = 3/4 in`, the largest diameter AISC 360-22 §I8.1 allows through deck
+  (corpus: aisc-360-22, PDF p. 181).
+- `Fu = 65 ksi` for ASTM A108 Type B studs, AISC Manual 14th ed., PDF p. 165
+  (corpus: aisc-scm-14th). Eq. I8-1 uses `Fu`; `Fy` is stored as zero.
+- `l_sa = max(4 d_sa, hr + 1.5 in)`: §I8.2 minimum length (PDF p. 181) and,
+  on deck, §I3.2c(b) projection above the deck (PDF p. 170). Whether that
+  length also leaves 1/2 in of cover is checked against the slab later.
+
+The flange limit `d_sa ≤ 2.5 tf` (§I8.1) rejects sections with `tf < 0.30 in`.
+"""
+function default_headed_stud(; hr=nothing, ρ=490.0u"lb/ft^3")
+    d = 0.75u"inch"
+    l = hr === nothing ? 4d : max(4d, uconvert(u"inch", hr) + 1.5u"inch")
+    HeadedStudAnchor(d, l, 65.0u"ksi", 0.0u"ksi", ρ; source=DEFAULT_STUD_SOURCE)
 end
 
 """
@@ -226,6 +267,7 @@ This struct is built once per beam group and passed to the composite `is_feasibl
 - `ΣQn_neg`:    Nominal strength of those anchors between the maximum negative moment and the adjacent zero (§I3.2d.2). `nothing` leaves the rebar uncounted.
 - `slip_checked`: `true` when the caller has already run the commentary slip model
 - `construction`: Pre-cure loads (SEI/ASCE 37-02). Built from the slab when omitted.
+- `L_twist`:    Spacing of points that restrain twist, for the hogging Chapter F check and Commentary Eq. C-F1-5. `nothing` uses the member span.
 
 # Notes
 - The `AISCChecker` uses this to decide between bare-steel and composite capacity paths.
@@ -245,6 +287,7 @@ struct CompositeContext{S<:AbstractSlabOnBeam, A<:AbstractSteelAnchor,
     slip_checked::Bool
     construction::ConstructionStage
     ΣQn_neg::Union{Nothing, Unitful.Quantity}
+    L_twist::Union{Nothing, typeof(1.0u"m")}
 end
 
 """
@@ -271,13 +314,17 @@ function CompositeContext(slab, anchor, L_beam;
                           ΣQn_neg=nothing,
                           slip_checked::Bool=false,
                           cp_class::Union{Symbol, Nothing}=:medium,
-                          construction=nothing)
+                          construction=nothing,
+                          L_twist=nothing)
     stage = construction === nothing ?
         construction_stage(slab; cp_class = cp_class) : construction
     lb = Lb_const === nothing ? default_construction_Lb(slab, L_beam) : Lb_const
+    if L_twist !== nothing && !(ustrip(u"m", uconvert(u"m", L_twist)) > 0)
+        throw(ArgumentError("L_twist must be a positive length, got $L_twist."))
+    end
     CompositeContext(slab, anchor, uconvert(u"m", L_beam), shored,
                      uconvert(u"m", lb), Asr, Fysr, neg_moment,
-                     slip_checked, stage, ΣQn_neg)
+                     slip_checked, stage, ΣQn_neg, _opt_m(L_twist))
 end
 
 # ==============================================================================

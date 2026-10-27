@@ -762,16 +762,19 @@ end
         e
     end
     @test err_nlp isa ArgumentError
-    @test occursin("composite_anchor_d", err_nlp.msg)
+    @test occursin("discrete", err_nlp.msg)
 
-    err_members = try
-        size_members!(bare; beam_opts = SteelBeamOptions(composite = true))
-        nothing
-    catch e
-        e
-    end
-    @test err_members isa ArgumentError
-    @test occursin("composite_anchor_d", err_members.msg)
+    # All three stud fields unset: the named default stud, not an error.
+    dflt = composite_anchor_from_options(SteelBeamOptions(composite = true))
+    @test isapprox(dflt.d_sa, 0.75u"inch"; rtol = 1e-9)
+    @test isapprox(dflt.l_sa, 3.0u"inch"; rtol = 1e-9)
+    @test isapprox(dflt.Fu, 65.0u"ksi"; rtol = 1e-9)
+    @test occursin("aisc-scm-14th", dflt.source)
+    @test occursin("predates AISC 360-22", dflt.source)
+    dflt_deck = composite_anchor_from_options(SteelBeamOptions(composite = true,
+        composite_slab_type = :deck, composite_deck_hr = 3.0u"inch",
+        composite_deck_wr = 6.0u"inch"))
+    @test isapprox(dflt_deck.l_sa, 4.5u"inch"; rtol = 1e-9)
 
     opts_ok = SteelBeamOptions(composite = true, sizing_strategy = :nlp,
                                composite_anchor_d = 0.75u"inch",

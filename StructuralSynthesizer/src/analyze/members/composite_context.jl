@@ -235,6 +235,7 @@ function composite_context_from_beam(
     shored::Bool = false, Lb_const = nothing,
     Asr = 0.0u"mm^2", Fysr = 0.0u"MPa", neg_moment::Bool = false,
     ΣQn_neg = nothing,
+    L_twist = nothing,
 )
     # --- Span (c-to-c); building default = member length ---------------------
     L = isnothing(L_beam) ? member_length(beam) : L_beam
@@ -244,7 +245,7 @@ function composite_context_from_beam(
     if !isnothing(slab)
         return CompositeContext(slab, anchor, L; shored = shored, Lb_const = Lb_const,
                                 Asr = Asr, Fysr = Fysr, neg_moment = neg_moment,
-                                ΣQn_neg = ΣQn_neg)
+                                ΣQn_neg = ΣQn_neg, L_twist = L_twist)
     end
 
     # --- Per-side representative extents (building default) -------------------
@@ -271,12 +272,14 @@ function composite_context_from_beam(
                         edge_dist_left = edl, edge_dist_right = edr)
     else
         DeckSlabOnBeam(t_slab, fc′, Ec, wc, Es, deck.hr, deck.wr, deck.orientation,
-                       bsl, bsr; edge_dist_left = edl, edge_dist_right = edr)
+                       bsl, bsr; edge_dist_left = edl, edge_dist_right = edr,
+                       e_mid_ht = get(deck, :e_mid_ht, nothing),
+                       anchorage_spacing = get(deck, :anchorage_spacing, nothing))
     end
 
     return CompositeContext(slab_built, anchor, L; shored = shored, Lb_const = Lb_const,
                             Asr = Asr, Fysr = Fysr, neg_moment = neg_moment,
-                            ΣQn_neg = ΣQn_neg)
+                            ΣQn_neg = ΣQn_neg, L_twist = L_twist)
 end
 
 # -----------------------------------------------------------------------------
@@ -439,8 +442,17 @@ composite_deflection_scale(section, I_LB) = ustrip(section.Ix / I_LB)
 Stud from the beam options. AISC 360-22 Eq. I8-1 uses `Fu`, not the stud yield
 strength (corpus: aisc-360-22, PDF p. 181). `Fy` is stored as zero so it is
 not a stand-in grade. Density is the stud steel density used only for weight.
+
+With all three stud fields unset, the stud is
+[`StructuralSizer.default_headed_stud`](@ref), whose `source` names the
+AISC Manual 14th ed. and the edition gap. A partly named stud throws.
 """
 function composite_anchor_from_options(opts)
+    if opts.composite_anchor_d === nothing && opts.composite_anchor_length === nothing &&
+            opts.composite_anchor_Fu === nothing
+        hr = opts.composite_slab_type === :deck ? opts.composite_deck_hr : nothing
+        return StructuralSizer.default_headed_stud(; hr = hr)
+    end
     opts.composite_anchor_d === nothing && throw(ArgumentError(
         "Composite beam design needs the stud diameter (composite_anchor_d)."))
     opts.composite_anchor_length === nothing && throw(ArgumentError(
@@ -661,14 +673,17 @@ used when a field has no length of its own. Passing the sum of the group is
 safe: the checker reads each field's span, and the default construction
 unbraced length follows that span.
 
-`anchor` is required. There is no nominal stud.
+`anchor` is required here. `composite_anchor_from_options` supplies the
+named default stud when the options leave every stud field unset.
 
 `t_slab`, when given, is the thickness for every beam. When it is `nothing`,
 each beam uses its own adjacent solid slab. Concrete comes from that slab's
 volume map when the map names one concrete; otherwise from `concrete`.
 
 `slab_type = :deck` builds a `DeckSlabOnBeam` and requires `deck_hr` and
-`deck_wr`. Deck acceptance limits are not applied here.
+`deck_wr`. `deck_e_mid_ht` and `deck_anchorage_spacing` are optional. The
+§I3.2c deck limits are applied by the stud design in the checker.
+`L_twist` is the optional twist-restraint spacing for the hogging check.
 
 `Asr` stays caller-supplied. `neg_moment` defaults to false, so hogging uses
 Chapter F until developed slab reinforcement and negative-region anchors are
@@ -688,6 +703,9 @@ function composite_group_payload(
     deck_hr = nothing,
     deck_wr = nothing,
     deck_orientation::Symbol = :perpendicular,
+    deck_e_mid_ht = nothing,
+    deck_anchorage_spacing = nothing,
+    L_twist = nothing,
 )
     anchor === nothing && throw(ArgumentError(
         "Composite beam design needs the stud anchor diameter (composite_anchor_d), " *
@@ -720,7 +738,9 @@ function composite_group_payload(
         # come from the profiles, and the checker restuffs spacing at the station.
         slab_i = if slab_type === :deck
             DeckSlabOnBeam(t_i, conc_i.fc′, conc_i.E, conc_i.ρ, Es,
-                           deck_hr, deck_wr, deck_orientation, 0.0u"m", 0.0u"m")
+                           deck_hr, deck_wr, deck_orientation, 0.0u"m", 0.0u"m";
+                           e_mid_ht = deck_e_mid_ht,
+                           anchorage_spacing = deck_anchorage_spacing)
         else
             SolidSlabOnBeam(t_i, conc_i.fc′, conc_i.E, conc_i.ρ, Es,
                             0.0u"m", 0.0u"m")
@@ -736,7 +756,7 @@ function composite_group_payload(
     isempty(fields) && throw(ArgumentError("composite_group_payload needs at least one beam"))
     ctx = CompositeContext(first(fields).slab, anchor, L; shored = shored, Lb_const = Lb_const,
                            Asr = Asr, Fysr = Fysr, neg_moment = neg_moment,
-                           ΣQn_neg = ΣQn_neg,
+                           ΣQn_neg = ΣQn_neg, L_twist = L_twist,
                            cp_class = cp_class)
     return PerStationComposite(ctx, fields)
 end
@@ -759,6 +779,8 @@ function composite_payloads_for_groups(
     slab_type::Symbol = :solid,
     deck_hr = nothing, deck_wr = nothing,
     deck_orientation::Symbol = :perpendicular,
+    deck_e_mid_ht = nothing, deck_anchorage_spacing = nothing,
+    L_twist = nothing,
 )
     map(enumerate(group_ids)) do (g_idx, gid)
         mg = struc.member_groups[gid]
@@ -767,6 +789,9 @@ function composite_payloads_for_groups(
                                 concrete, t_slab, Es; anchor = anchor,
                                 shored = shored, cp_class = cp_class,
                                 slab_type = slab_type, deck_hr = deck_hr,
-                                deck_wr = deck_wr, deck_orientation = deck_orientation)
+                                deck_wr = deck_wr, deck_orientation = deck_orientation,
+                                deck_e_mid_ht = deck_e_mid_ht,
+                                deck_anchorage_spacing = deck_anchorage_spacing,
+                                L_twist = L_twist)
     end
 end

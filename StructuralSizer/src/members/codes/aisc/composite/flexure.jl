@@ -521,26 +521,54 @@ function cb_gravity_top_flange_restrained(Mo, M1, MCL)
 end
 
 """
+    cb_neg_from_moment_field(M_of_s; L=nothing, L_twist=nothing) -> Float64 or nothing
+
 Cb from a sagging-positive moment field on one span, or `nothing`.
 
-The field's sign matches Commentary Figure C-F1.3: sagging compresses the top
-flange. `Mo` is the more negative end. The equation applies when that end
-compresses the bottom flange. The unbraced length is taken as the member span.
+`M_of_s` takes the normalized position `s ∈ [0, 1]`. The field's sign matches
+Commentary Figure C-F1.3: sagging compresses the top flange. `Mo` is the more
+negative end of an unbraced segment. The equation applies when that end
+compresses the bottom flange.
 
-ENGINEERING JUDGMENT: that span is the distance between twist restraints only
-when the supports restrain twist. The moment field does not record twist braces.
+Without `L_twist` the segment is the whole member, and the supports are taken
+as the twist restraints. That is ENGINEERING JUDGMENT: the moment field does
+not record twist braces.
+
+With `L_twist` (and the member length `L`), twist restraints are taken at both
+supports and every `L_twist` from the start of the member; the last segment
+may be shorter. Each segment that puts the bottom flange in compression is
+evaluated, and the smallest Cb is returned, because the checker compares one
+hogging envelope against one Cb. A segment whose mid-length is in hogging but
+whose ends are not cannot use Eq. C-F1-5, and `nothing` (Cb = 1) is returned.
 """
-function cb_neg_from_moment_field(M_of_s)
-    ms = _moment_newton(M_of_s(0.0))
-    me = _moment_newton(M_of_s(1.0))
-    mm = _moment_newton(M_of_s(0.5))
-    if ms <= me
-        mo, m1 = ms, me
-    else
-        mo, m1 = me, ms
+function cb_neg_from_moment_field(M_of_s; L=nothing, L_twist=nothing)
+    bounds = _twist_segments(L, L_twist)
+    cb_min = nothing
+    for k in 1:length(bounds) - 1
+        a, b = bounds[k], bounds[k + 1]
+        ms = _moment_newton(M_of_s(a))
+        me = _moment_newton(M_of_s(b))
+        mm = _moment_newton(M_of_s((a + b) / 2))
+        mo, m1 = ms <= me ? (ms, me) : (me, ms)
+        if mo < 0
+            cb = cb_gravity_top_flange_restrained(mo * u"N*m", m1 * u"N*m", mm * u"N*m")
+            cb_min = cb_min === nothing ? cb : min(cb_min, cb)
+        elseif mm < 0
+            return nothing
+        end
     end
-    mo < 0 || return nothing
-    return cb_gravity_top_flange_restrained(mo * u"N*m", m1 * u"N*m", mm * u"N*m")
+    return cb_min
+end
+
+"""Normalized twist-restraint positions on `[0, 1]`."""
+function _twist_segments(L, L_twist)
+    (L === nothing || L_twist === nothing) && return [0.0, 1.0]
+    Lm = ustrip(u"m", uconvert(u"m", L))
+    Lt = ustrip(u"m", uconvert(u"m", L_twist))
+    (Lm > 0 && Lt > 0 && Lt < Lm) || return [0.0, 1.0]
+    pts = collect(0.0:(Lt / Lm):1.0)
+    1.0 - pts[end] > 1e-9 ? push!(pts, 1.0) : (pts[end] = 1.0)
+    return pts
 end
 
 _moment_newton(M::Unitful.Quantity) = ustrip(u"N*m", uconvert(u"N*m", M))

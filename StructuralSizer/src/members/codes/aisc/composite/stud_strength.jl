@@ -71,9 +71,9 @@ AISC 360-16 §I8.2a User Note table (corpus aisc-360-16, p. 163):
     1 stud  → `Rg = 1.00`
     2 studs → `Rg = 0.85`
     ≥3 studs→ `Rg = 0.70`
-    `Rp = 0.6` is used as the default (per User Note footnote [b], may be
-    0.75 when `e_mid_ht ≥ 2 in.`); `e_mid_ht` is not currently modeled, so
-    the conservative 0.6 is taken.
+    `Rp = 0.75` when `slab.e_mid_ht ≥ 2 in. (50 mm)`, else `0.6`. An unknown
+    `e_mid_ht` (`nothing`) takes 0.6 (AISC 360-22 §I8.2a, corpus:
+    aisc-360-22, PDF pp. 181–182).
 """
 function _Rg_Rp(anchor::HeadedStudAnchor, slab::DeckSlabOnBeam)
     if slab.deck_orientation === :parallel
@@ -81,10 +81,8 @@ function _Rg_Rp(anchor::HeadedStudAnchor, slab::DeckSlabOnBeam)
         return ratio >= 1.5 ? (1.0, 0.75) : (0.85, 0.75)
     else  # :perpendicular
         n = anchor.n_per_row
-        # ENGINEERING JUDGMENT: Rp = 0.6 (perpendicular default). Footnote [b]
-        # in the §I8.2a User Note allows 0.75 when e_mid_ht ≥ 2 in.; we don't
-        # model e_mid_ht here, so we conservatively keep 0.6.
-        Rp = 0.6
+        e = slab.e_mid_ht
+        Rp = (e !== nothing && e >= 2.0u"inch") ? 0.75 : 0.6
         Rg = n == 1 ? 1.0 :
              n == 2 ? 0.85 :
              0.7
@@ -146,9 +144,9 @@ function validate_stud_length(anchor::HeadedStudAnchor, slab::AbstractSlabOnBeam
         throw(ArgumentError(
             "Stud length $(anchor.l_sa) < 4·d_sa = $(min_length) (AISC 360-16 §I8.2)."))
     end
-    # ENGINEERING JUDGMENT: ½-in. clear cover above stud head. Not an explicit
-    # AISC 360-16 number for composite beams; matches common practice and is
-    # consistent with ACI/AISC deck-cover guidance.
+    # ½ in. (13 mm) of specified cover above the stud: AISC 360-22 §I3.2c(b)
+    # (corpus: aisc-360-22, PDF p. 170) for deck. Applied to solid slabs too
+    # as engineering judgment; §I8.2 states no cover for a solid slab.
     min_cover = 0.5u"inch"
     available_depth = _available_embed_depth(slab)
     if anchor.l_sa + min_cover > available_depth
@@ -246,6 +244,59 @@ end
 
 # Solid slabs are not subject to the deck-projection rule.
 check_stud_deck_projection(::HeadedStudAnchor, ::SolidSlabOnBeam) = nothing
+
+"""
+    deck_limit_failures(slab, anchor) -> (failures::Vector{String}, unchecked::Vector{String})
+
+Formed-deck limits of AISC 360-22 §I3.2c(1) (corpus: aisc-360-22, PDF p. 170):
+
+- (a) `hr ≤ 3 in. (75 mm)`; `wr ≥ 2 in. (50 mm)`.
+- (b) stud extends `≥ 1½ in. (38 mm)` above the deck after installation, with
+  `≥ ½ in. (13 mm)` of cover above the stud.
+- (c) slab above the deck `≥ 2 in. (50 mm)`.
+- (d) deck anchored to the supporting member at `≤ 18 in. (450 mm)`.
+
+§I3.2c(3): parallel deck with nominal depth `≥ 1½ in.` needs
+`wr ≥ 2 in. + 4 d_sa` for each stud after the first in a transverse row.
+
+`wr` is taken as given. §I3.2c(a) caps `wr` in calculations at the minimum
+clear width near the top of the deck; that width is the caller's input.
+(d) needs `slab.anchorage_spacing`. When it is `nothing`, (d) is listed in
+`unchecked`, not in `failures`. A solid slab returns two empty lists.
+"""
+function deck_limit_failures(slab::DeckSlabOnBeam, anchor::HeadedStudAnchor)
+    fails = String[]
+    unchecked = String[]
+    tol = 1e-9u"m"
+    slab.hr <= 3.0u"inch" + tol ||
+        push!(fails, "I3.2c(a): hr = $(round(u"inch", slab.hr; digits=3)) > 3 in.")
+    slab.wr >= 2.0u"inch" - tol ||
+        push!(fails, "I3.2c(a): wr = $(round(u"inch", slab.wr; digits=3)) < 2 in.")
+    proj = anchor.l_sa - slab.hr
+    proj >= 1.5u"inch" - tol ||
+        push!(fails, "I3.2c(b): stud extends $(round(u"inch", proj; digits=3)) above deck < 1.5 in.")
+    cover = slab.hr + slab.t_slab - anchor.l_sa
+    cover >= 0.5u"inch" - tol ||
+        push!(fails, "I3.2c(b): cover above stud $(round(u"inch", cover; digits=3)) < 0.5 in.")
+    slab.t_slab >= 2.0u"inch" - tol ||
+        push!(fails, "I3.2c(c): slab above deck $(round(u"inch", slab.t_slab; digits=3)) < 2 in.")
+    if slab.anchorage_spacing === nothing
+        push!(unchecked, "I3.2c(d): deck anchorage spacing not supplied")
+    elseif slab.anchorage_spacing > 18.0u"inch" + tol
+        push!(fails, "I3.2c(d): deck anchorage spacing " *
+                     "$(round(u"inch", slab.anchorage_spacing; digits=3)) > 18 in.")
+    end
+    if slab.deck_orientation === :parallel && slab.hr >= 1.5u"inch" - tol
+        wr_min = 2.0u"inch" + 4 * (anchor.n_per_row - 1) * anchor.d_sa
+        slab.wr >= wr_min - tol ||
+            push!(fails, "I3.2c(3): wr = $(round(u"inch", slab.wr; digits=3)) < " *
+                         "$(round(u"inch", wr_min; digits=3)) for $(anchor.n_per_row) studs per row")
+    end
+    return (failures = fails, unchecked = unchecked)
+end
+
+deck_limit_failures(::SolidSlabOnBeam, ::HeadedStudAnchor) =
+    (failures = String[], unchecked = String[])
 
 # ==============================================================================
 # Anchor schedule — §I8.2c count, §I8.2d spacing, Commentary ductility
@@ -415,6 +466,7 @@ function design_shear_anchors(section::ISymmSection, material, slab::AbstractSla
     catch
         return (; blank..., reason=:length)
     end
+    deck_ok = isempty(deck_limit_failures(slab, anchor).failures)
 
     Qn = uconvert(u"N", get_Qn(anchor, slab))
     ustrip(u"N", Qn) > 0 || return (; blank..., reason=:strength, Qn=Qn)
@@ -471,6 +523,9 @@ function design_shear_anchors(section::ISymmSection, material, slab::AbstractSla
         lay = at(0)
         return (; lay..., ok=true, reason=:ok)
     end
+    # §I3.2c applies to composite construction on deck. When it fails, only
+    # the steel section alone (no studs counted) can be used.
+    deck_ok || return (; at(0)..., ok=false, reason=:deck_limits)
     chosen = n_max >= max(n_min, 1) ? _lowest_passing(max(n_min, 1), n_max, passes) : nothing
     if chosen !== nothing
         lay = at(chosen)

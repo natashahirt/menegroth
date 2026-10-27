@@ -443,8 +443,11 @@ Adequately braced per §I3.2b(a) is `Lb ≤ Lp` (AISC 360-16 §F2.2 Eq. F2-5,
 corpus: aisc-360-16, page 104), not Cb-inflated `Mn` reaching `Mp`.
 """
 function _hogging_ltb_inputs(section::ISymmSection, material, geometry::SteelMemberGeometry;
-                             Cb_neg::Real=1.0)
-    Lb_neg_m = to_meters(geometry.L)
+                             Cb_neg::Real=1.0, L_twist=nothing)
+    # A caller-supplied twist-restraint spacing replaces the span; it never
+    # lengthens the unbraced length past the member.
+    Lb_neg_m = L_twist === nothing ? to_meters(geometry.L) :
+        min(ustrip(u"m", uconvert(u"m", L_twist)), to_meters(geometry.L))
     # Cb_neg defaults to 1. A moment field in reverse curvature passes
     # Commentary Eq. C-F1-5 (corpus: aisc-360-22, PDF pp. 442–443).
     # AISC 360-16 §F2.2, Eq. F2-5 — corpus: aisc-360-16, page 104
@@ -499,7 +502,8 @@ function _composite_ϕMn_neg(
     Cb_neg=nothing,
 )
     hog = _hogging_ltb_inputs(section, material, geometry;
-                              Cb_neg = something(Cb_neg, 1.0))
+                              Cb_neg = something(Cb_neg, 1.0),
+                              L_twist = ctx.L_twist)
     # Touch the cache so a later sagging lookup at this Lb is warm. The value
     # used below is `available_negative_flexure`, which calls `get_ϕMn` with
     # the same Lb and Cb.
@@ -781,7 +785,8 @@ function is_feasible(
         spans = adjacent_shear_spans(field.demand_of_s, g.s_star, L_i)
         is_feasible(checker, cache, j, section, material, demand, geometry, ctx_i;
                     strength_Mux_pos = g.M_pos, shear_spans = spans,
-                    Cb_neg = cb_neg_from_moment_field(field.demand_of_s)) || return false
+                    Cb_neg = cb_neg_from_moment_field(field.demand_of_s;
+                                                                   L = L_i, L_twist = psc.ctx.L_twist)) || return false
     end
     return true
 end
@@ -1212,6 +1217,11 @@ function explain_feasibility(
     push!(checks, CheckResult("flexure_pos", ϕMnx >= Mux_pos,
           pos_ratio, Mux_pos, ϕMnx, "AISC 360-22 I3.2a"))
     stud_clause = "AISC 360-22 I8.2c; I8.2d; $(layout.n_half) studs/side; $(layout.reason)"
+    isempty(ctx.anchor.source) || (stud_clause *= "; " * ctx.anchor.source)
+    deck = deck_limit_failures(ctx.slab, ctx.anchor)
+    for msg in vcat(deck.failures, deck.unchecked)
+        stud_clause *= "; " * msg
+    end
     push!(checks, CheckResult("shear_anchors", layout.ok,
           layout.ok ? pos_ratio : Inf, Float64(layout.n_half),
           Float64(layout.n_rows_max * ctx.anchor.n_per_row), stud_clause))
@@ -1305,7 +1315,8 @@ function explain_feasibility(
         spans = adjacent_shear_spans(field.demand_of_s, g.s_star, L_i)
         ex = explain_feasibility(checker, cache, j, section, material, demand, geometry, ctx_i;
                                  strength_Mux_pos = g.M_pos, shear_spans = spans,
-                                 Cb_neg = cb_neg_from_moment_field(field.demand_of_s))
+                                 Cb_neg = cb_neg_from_moment_field(field.demand_of_s;
+                                                                   L = L_i, L_twist = psc.ctx.L_twist))
         if best === nothing || (!ex.passed && best.passed) ||
                 (ex.passed == best.passed && ex.governing_ratio > best.governing_ratio)
             best = ex

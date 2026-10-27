@@ -191,7 +191,8 @@ end
             uconvert(u"m", 4.5u"inch"), 4.0ksi, 3644.0ksi, 145.0u"lb/ft^3",
             29000.0 / 3644.0,
             uconvert(u"m", 3.0u"inch"), uconvert(u"m", 6.0u"inch"), :perpendicular,
-            uconvert(u"m", 10.0u"ft"), uconvert(u"m", 10.0u"ft"), nothing, nothing
+            uconvert(u"m", 10.0u"ft"), uconvert(u"m", 10.0u"ft"), nothing, nothing,
+            nothing, nothing
         )
         anchor = HeadedStudAnchor(0.75u"inch", 5.0u"inch", 65.0ksi, 50.0ksi,
                                   7850.0u"kg/m^3"; n_per_row=1)
@@ -1159,7 +1160,8 @@ end
             uconvert(u"m", 4.5u"inch"), 4.0ksi, 3644.0ksi, 145.0u"lb/ft^3",
             29000.0 / 3644.0,
             uconvert(u"m", 3.0u"inch"), uconvert(u"m", 6.0u"inch"), :perpendicular,
-            uconvert(u"m", 10.0u"ft"), uconvert(u"m", 10.0u"ft"), nothing, nothing)
+            uconvert(u"m", 10.0u"ft"), uconvert(u"m", 10.0u"ft"), nothing, nothing,
+            nothing, nothing)
         @test_throws ArgumentError validate_stud_diameter(one_inch, fix.section.tf; slab=deck)
     end
 
@@ -1320,5 +1322,99 @@ end
         studs = only(filter(c -> c.name == "shear_anchors", ex.checks))
         @test studs.passed == false
         @test occursin("transverse", studs.code_clause)
+    end
+end
+
+# ==============================================================================
+# Deck limits (§I3.2c), e_mid-ht (§I8.2a), default stud, twist-restraint spacing
+# ==============================================================================
+
+@testset "Deck limits, e_mid-ht, default stud, twist spacing" begin
+    fix = _aisc_example_I1_deck_setup()
+    deck(; hr=3.0u"inch", wr=6.0u"inch", t=4.5u"inch", orient=:perpendicular, kw...) =
+        DeckSlabOnBeam(t, 4.0ksi, 3644.0ksi, 145.0u"lb/ft^3", 29000.0ksi,
+                       hr, wr, orient, 10.0u"ft", 10.0u"ft"; kw...)
+
+    @testset "Rp from e_mid-ht (§I8.2a, PDF p. 182)" begin
+        @test StructuralSizer._Rg_Rp(fix.anchor, deck())[2] == 0.6
+        @test StructuralSizer._Rg_Rp(fix.anchor, deck(e_mid_ht=1.5u"inch"))[2] == 0.6
+        @test StructuralSizer._Rg_Rp(fix.anchor, deck(e_mid_ht=2.0u"inch"))[2] == 0.75
+        @test get_Qn(fix.anchor, deck(e_mid_ht=2.5u"inch")) >= get_Qn(fix.anchor, deck())
+    end
+
+    @testset "§I3.2c limits (PDF p. 170)" begin
+        ok = deck_limit_failures(fix.slab, fix.anchor)
+        @test isempty(ok.failures)
+        @test length(ok.unchecked) == 1
+        @test isempty(deck_limit_failures(deck(anchorage_spacing=12.0u"inch"), fix.anchor).unchecked)
+        has(r, tag) = any(m -> occursin(tag, m), r.failures)
+        @test has(deck_limit_failures(deck(hr=3.5u"inch"), fix.anchor), "I3.2c(a): hr")
+        @test has(deck_limit_failures(deck(wr=1.75u"inch"), fix.anchor), "I3.2c(a): wr")
+        @test has(deck_limit_failures(deck(t=1.5u"inch"), fix.anchor), "I3.2c(c)")
+        @test has(deck_limit_failures(deck(anchorage_spacing=24.0u"inch"), fix.anchor), "I3.2c(d)")
+        short = HeadedStudAnchor(0.75u"inch", 4.0u"inch", 65.0ksi, 0.0ksi, 7850.0u"kg/m^3")
+        @test has(deck_limit_failures(deck(), short), "extends")
+        tall = HeadedStudAnchor(0.75u"inch", 7.25u"inch", 65.0ksi, 0.0ksi, 7850.0u"kg/m^3")
+        @test has(deck_limit_failures(deck(), tall), "cover")
+        pair = HeadedStudAnchor(0.75u"inch", 5.0u"inch", 65.0ksi, 0.0ksi, 7850.0u"kg/m^3";
+                                n_per_row=2)
+        par = deck(hr=2.0u"inch", wr=4.5u"inch", orient=:parallel)
+        @test has(deck_limit_failures(par, pair), "I3.2c(3)")
+        @test isempty(deck_limit_failures(deck(hr=2.0u"inch", wr=5.0u"inch", orient=:parallel),
+                                          pair).failures)
+        solid = SolidSlabOnBeam(6.0u"inch", 4.0ksi, 3644.0ksi, 145.0u"lb/ft^3",
+                                29000.0ksi, 10.0u"ft", 10.0u"ft")
+        @test isempty(deck_limit_failures(solid, fix.anchor).unchecked)
+    end
+
+    @testset "Failed deck limits leave only the steel section" begin
+        bad = deck(hr=3.5u"inch")
+        b = get_b_eff(bad, fix.L_beam)
+        ϕ_s = get_ϕMn(fix.section, fix.material; Lb=0.0u"m", Cb=1.0, axis=:strong)
+        above = design_shear_anchors(fix.section, fix.material, bad, fix.anchor, b,
+                                     fix.L_beam, 1.2 * ϕ_s; ϕMn_steel=ϕ_s)
+        @test above.ok == false
+        @test above.reason == :deck_limits
+        below = design_shear_anchors(fix.section, fix.material, bad, fix.anchor, b,
+                                     fix.L_beam, 0.8 * ϕ_s; ϕMn_steel=ϕ_s)
+        @test below.ok == true
+        @test below.n_half == 0
+        good = design_shear_anchors(fix.section, fix.material, fix.slab, fix.anchor,
+                                    get_b_eff(fix.slab, fix.L_beam), fix.L_beam, 1.2 * ϕ_s;
+                                    ϕMn_steel=ϕ_s)
+        @test good.ok == true
+    end
+
+    @testset "Default stud (AISC Manual 14th ed., PDF p. 165)" begin
+        s = default_headed_stud()
+        @test isapprox(s.d_sa, 0.75u"inch"; rtol=1e-12)
+        @test isapprox(s.l_sa, 3.0u"inch"; rtol=1e-12)
+        @test isapprox(s.Fu, 65.0ksi; rtol=1e-12)
+        @test s.source == DEFAULT_STUD_SOURCE
+        @test isapprox(default_headed_stud(; hr=3.0u"inch").l_sa, 4.5u"inch"; rtol=1e-12)
+        @test isapprox(default_headed_stud(; hr=1.0u"inch").l_sa, 3.0u"inch"; rtol=1e-12)
+        @test validate_stud_diameter(s, 0.30u"inch") === nothing
+        @test_throws ArgumentError validate_stud_diameter(s, 0.29u"inch")
+        @test fix.anchor.source == ""
+    end
+
+    @testset "Twist-restraint spacing for C-F1-5" begin
+        # Fixed-fixed uniform load, sagging positive: ends −1, mid +1/2.
+        ff(s) = (-1 + 6 * s * (1 - s)) * u"N*m"
+        @test isapprox(cb_neg_from_moment_field(ff), 3.0; atol=1e-9)
+        L = 10.0u"m"
+        # Segments of L/2: Mo = −1, M1 = +1/2, MCL = +1/8 ⇒ Cb = 3 + 1/3 + 1/3.
+        @test isapprox(cb_neg_from_moment_field(ff; L=L, L_twist=5.0u"m"), 11 / 3; atol=1e-9)
+        @test cb_neg_from_moment_field(ff; L=L, L_twist=20.0u"m") ==
+              cb_neg_from_moment_field(ff)
+        @test StructuralSizer._twist_segments(L, 4.0u"m") ≈ [0.0, 0.4, 0.8, 1.0]
+        geom = SteelMemberGeometry(L)
+        hog = StructuralSizer._hogging_ltb_inputs(fix.section, fix.material, geom;
+                                                  L_twist=2.0u"m")
+        @test hog.Lb_neg_m ≈ 2.0
+        @test StructuralSizer._hogging_ltb_inputs(fix.section, fix.material, geom).Lb_neg_m ≈ 10.0
+        ctx = CompositeContext(fix.slab, fix.anchor, L; L_twist=2.0u"m")
+        @test ctx.L_twist ≈ 2.0u"m"
+        @test_throws ArgumentError CompositeContext(fix.slab, fix.anchor, L; L_twist=0.0u"m")
     end
 end

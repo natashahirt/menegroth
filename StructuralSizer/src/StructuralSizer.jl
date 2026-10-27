@@ -279,7 +279,7 @@ export torsional_stresses_ksi, check_torsion_yielding, design_w_torsion
 # --- AISC 360-16 Chapter I: Composite Members ---
 export AbstractSlabOnBeam, AbstractSteelAnchor
 export SolidSlabOnBeam, DeckSlabOnBeam
-export HeadedStudAnchor, stud_mass, default_headed_stud, DEFAULT_STUD_SOURCE
+export HeadedStudAnchor, stud_mass, default_headed_stud, DEFAULT_STUD_SOURCE
 export CompositeDeckProfile, composite_deck_profile, deck_wr, VULCRAFT_COMPOSITE_DECKS
 export DeckAttachment, deck_brace_note, DEFAULT_DECK_SUPPORT_PATTERN
 export CompositeContext

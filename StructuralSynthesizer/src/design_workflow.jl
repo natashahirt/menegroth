@@ -532,13 +532,100 @@ function _make_slab_node_fn_ctx(slab_idx::Int, floor_opts, column_opts,
     end
 end
 
+_accessory_stud_material(opts::StructuralSizer.FlatPlateOptions) = opts.stud_material
+_accessory_stud_material(opts::StructuralSizer.FlatSlabOptions) = opts.base.stud_material
+_accessory_stud_material(::StructuralSizer.AbstractFloorOptions) = StructuralSizer.Stud_51
+
+"""Add `dv` onto the existing `mat` entry of a volume dict."""
+function _bump_volume!(vols::MaterialVolumes, mat, dv)
+    v = uconvert(u"m^3", dv)
+    v > 0.0u"m^3" || return vols
+    vols[mat] = get(vols, mat, 0.0u"m^3") + v
+    return vols
+end
+
+function _concrete_volume_key(vols, fallback)
+    for k in keys(vols)
+        if k isa StructuralSizer.Concrete || k isa StructuralSizer.FiberReinforcedConcrete
+            return k
+        end
+    end
+    return fallback
+end
+
+"""
+    _add_slab_accessory_volumes!(struc, slab, options)
+
+Add drop-panel, shear-cap, and capital concrete, and shear-stud steel, to
+`slab.volumes`. These are the same volume functions the summary used to add
+beside the element volumes, so the takeoff and the carbon split see them.
+Stud steel uses the floor options' stud material, not a generic density.
+"""
+function _add_slab_accessory_volumes!(struc, slab, options)
+    concrete = _concrete_volume_key(slab.volumes, _primary_material(options))
+    stud = _accessory_stud_material(options)
+    r = slab.result
+    if r isa StructuralSizer.FlatPlatePanelResult && hasproperty(r, :punching_check)
+        pc = r.punching_check
+        if hasproperty(pc, :details)
+            for (col_idx, detail) in pc.details
+                if hasproperty(detail, :studs) && !isnothing(detail.studs)
+                    _bump_volume!(slab.volumes, stud, StructuralSizer.stud_steel_volume(detail.studs))
+                end
+                if hasproperty(detail, :shear_cap) && !isnothing(detail.shear_cap) &&
+                        col_idx isa Integer && 1 <= col_idx <= length(struc.columns)
+                    col = struc.columns[col_idx]
+                    if !isnothing(col.c1) && !isnothing(col.c2)
+                        _bump_volume!(slab.volumes, concrete, StructuralSizer.shear_cap_concrete_volume(
+                            detail.shear_cap, col.c1, col.c2))
+                    end
+                end
+                if hasproperty(detail, :capital) && !isnothing(detail.capital)
+                    _bump_volume!(slab.volumes, concrete,
+                        StructuralSizer.capital_concrete_volume(detail.capital))
+                end
+            end
+        end
+    end
+    if !isnothing(slab.drop_panel)
+        dp = slab.drop_panel
+        slab_cells = Set(slab.cell_indices)
+        bbox = _slab_bbox_m(struc, slab)
+        for col in struc.columns
+            isempty(intersect(col.tributary_cell_indices, slab_cells)) && continue
+            v_idx = col.vertex_idx
+            (v_idx < 1 || v_idx > length(struc.skeleton.vertices)) && continue
+            c = Meshes.coords(struc.skeleton.vertices[v_idx])
+            a1, a2 = _trimmed_drop_extents_m(dp, ustrip(u"m", c.x), ustrip(u"m", c.y), bbox)
+            _bump_volume!(slab.volumes, concrete, StructuralSizer.drop_panel_concrete_volume(dp, a1, a2))
+        end
+    end
+    return slab
+end
+
+"""Concrete, rebar, structural steel, and timber in one volume dict.
+
+Rebar and structural steel use that material's density. A reinforced-concrete
+lump with no separate rebar volume stays concrete: no reinforcement ratio is assumed.
+"""
+function _quantity_increments(vols)
+    t = material_takeoff(vols)
+    timber = 0.0u"m^3"
+    for (mat, vol) in vols
+        mat isa StructuralSizer.Timber || continue
+        timber += uconvert(u"m^3", vol)
+    end
+    return (concrete = t.concrete_volume, rebar = t.rebar_mass,
+            steel = t.structural_steel_mass, timber = timber)
+end
+
 """
     _update_one_slab_volume!(struc, slab_idx, options; primary_material=nothing)
 
 Recompute `struc.slabs[slab_idx].volumes` from its current result — the single-slab
 body of [`update_slab_volumes!`](@ref) (same `_primary_material` / floor-area /
-`_compute_slab_volumes` derivation), so per-slab node execution reproduces the
-coarse volume update exactly. No-op for a non-converged (`nothing`-result) slab.
+`_compute_slab_volumes` derivation), then add drop panels, shear caps, capitals,
+and shear studs. No-op for a non-converged (`nothing`-result) slab.
 """
 function _update_one_slab_volume!(struc::BuildingStructure, slab_idx::Int, options;
                                   primary_material=nothing)
@@ -547,6 +634,7 @@ function _update_one_slab_volume!(struc::BuildingStructure, slab_idx::Int, optio
     mat = isnothing(primary_material) ? _primary_material(options) : primary_material
     floor_area = sum(struc.cells[idx].area for idx in slab.cell_indices)
     slab.volumes = _compute_slab_volumes(slab.result, floor_area, mat, options)
+    _add_slab_accessory_volumes!(struc, slab, options)
     return struc
 end
 
@@ -1336,26 +1424,6 @@ function _harmonize_steel_group!(struc::BuildingStructure, indices::Vector{Int})
     return changed
 end
 
-"""
-    _ensure_beam_sections_for_visualization!(struc, params)
-
-Assign nominal RC beam sections to beams that have no section (e.g. when beam sizing
-was skipped for flat plate/flat slab). Ensures section_polygon is populated in API output.
-"""
-function _ensure_beam_sections_for_visualization!(struc::BuildingStructure, params::DesignParameters)
-    for beam in struc.beams
-        !isnothing(section(beam)) && continue
-        # Nominal rectangular section for visualization (12×18 in typical for spandrel)
-        sec = StructuralSizer.RCBeamSection(
-            b = 12.0u"inch",
-            h = 18.0u"inch",
-            bar_size = 8,
-            n_bars = 4,
-        )
-        set_section!(beam, sec)
-    end
-end
-
 """Extract compressive axial force (N) for a column from the Asap model.
 
 Asap local `P` is negative in compression (same convention as
@@ -1427,7 +1495,6 @@ function _size_beams_columns!(struc::BuildingStructure, params::DesignParameters
                                   outcome="skipped", reason="slab_only_system",
                                   floor_types=collect(string.(collect(floor_types))))
             _reconcile_columns!(struc, params; tc=tc)
-            _ensure_beam_sections_for_visualization!(struc, params)
             StructuralSizer.emit!(tc, :workflow, "_size_beams_columns!", "", :exit;
                                   outcome="skipped")
             return struc
@@ -2554,100 +2621,57 @@ function _compute_design_summary!(design::BuildingDesign, struc::BuildingStructu
     summary.all_checks_pass = all_ok
 
     # ── Material quantity aggregation ────────────────────────────────────
+    # Same volumes as the element takeoff. Mass is volume × that material's
+    # density. An unsplit reinforced-concrete lump is concrete only: rebar is
+    # not inferred. Drop panels, shear caps, capitals, and studs are already
+    # on the slab volumes.
     total_conc_vol = 0.0u"m^3"
     total_steel_wt = 0.0u"kg"
     total_rebar_wt = 0.0u"kg"
     total_timber_vol = 0.0u"m^3"
+    addq! = function (part)
+        total_conc_vol += part.concrete
+        total_rebar_wt += part.rebar
+        total_steel_wt += part.steel
+        total_timber_vol += part.timber
+    end
 
-    ρ_conc = 2400.0u"kg/m^3"   # typical normal-weight concrete
-    ρ_rebar = 7850.0u"kg/m^3"  # steel density
-
-    # ── Slabs: aggregate from struc.slabs[].volumes (MaterialVolumes dict) ──
     for slab in struc.slabs
-        for (mat, vol) in slab.volumes
-            v = uconvert(u"m^3", vol)
-            if mat isa StructuralSizer.Concrete
-                total_conc_vol += v
-            elseif mat isa StructuralSizer.ReinforcedConcreteMaterial
-                total_conc_vol += v
-                total_rebar_wt += uconvert(u"kg", v * mat.rebar.ρ * 0.015) # Assume 1.5% rebar if only RC material vol is known
-            elseif mat isa StructuralSizer.RebarSteel
-                total_rebar_wt += uconvert(u"kg", v * mat.ρ)
-            elseif mat isa StructuralSizer.StructuralSteel
-                total_steel_wt += uconvert(u"kg", v * mat.ρ)
-            elseif mat isa StructuralSizer.Timber
-                total_timber_vol += v
-            end
-        end
-        # Punching reinforcement: studs, shear caps, capitals from slab result
-        r = slab.result
-        if r isa StructuralSizer.FlatPlatePanelResult && hasproperty(r, :punching_check)
-            pc = r.punching_check
-            if hasproperty(pc, :details)
-                for (col_idx, detail) in pc.details
-                    # Stud steel volume
-                    if hasproperty(detail, :studs) && !isnothing(detail.studs)
-                        sv = StructuralSizer.stud_steel_volume(detail.studs)
-                        total_rebar_wt += uconvert(u"kg", sv * ρ_rebar)
-                    end
-                    # Shear cap concrete (needs column dims from struc.columns)
-                    if hasproperty(detail, :shear_cap) && !isnothing(detail.shear_cap)
-                        sc = detail.shear_cap
-                        if col_idx >= 1 && col_idx <= length(struc.columns)
-                            col = struc.columns[col_idx]
-                            if !isnothing(col.c1) && !isnothing(col.c2)
-                                cv = StructuralSizer.shear_cap_concrete_volume(sc, col.c1, col.c2)
-                                total_conc_vol += uconvert(u"m^3", cv)
-                            end
-                        end
-                    end
-                    # Column capital concrete
-                    if hasproperty(detail, :capital) && !isnothing(detail.capital)
-                        cv = StructuralSizer.capital_concrete_volume(detail.capital)
-                        total_conc_vol += uconvert(u"m^3", cv)
-                    end
-                end
-            end
-        end
-        # Drop panel concrete — one panel per supporting column, trimmed to slab boundary
-        if !isnothing(slab.drop_panel)
-            dp = slab.drop_panel
-            slab_cells = Set(slab.cell_indices)
-            slab_bbox = _slab_bbox_m(struc, slab)
-            for (col_idx, col) in enumerate(struc.columns)
-                isempty(intersect(col.tributary_cell_indices, slab_cells)) && continue
-                v_idx = col.vertex_idx
-                (v_idx < 1 || v_idx > length(struc.skeleton.vertices)) && continue
-                c = Meshes.coords(struc.skeleton.vertices[v_idx])
-                cx = ustrip(u"m", c.x)
-                cy = ustrip(u"m", c.y)
-                a1_eff, a2_eff = _trimmed_drop_extents_m(dp, cx, cy, slab_bbox)
-                dv = StructuralSizer.drop_panel_concrete_volume(dp, a1_eff, a2_eff)
-                total_conc_vol += uconvert(u"m^3", dv)
+        addq!(_quantity_increments(slab.volumes))
+    end
+    ρ_col_rebar = resolve_column_rebar(params.materials).ρ
+    for (idx, column) in enumerate(struc.columns)
+        vols = volumes(column)
+        if !isempty(vols)
+            addq!(_quantity_increments(vols))
+        else
+            col_result = get(design.columns, idx, nothing)
+            if !isnothing(col_result) && col_result.Ag > 0.0u"m^2" && col_result.height > 0.0u"m"
+                total_conc_vol += (col_result.Ag - col_result.As_total) * col_result.height
+                total_rebar_wt += uconvert(u"kg", col_result.As_total * col_result.height * ρ_col_rebar)
             end
         end
     end
-
-    # ── Columns: concrete + rebar from geometry ──
-    for (_, col_result) in design.columns
-        Ag = col_result.Ag
-        As = col_result.As_total
-        h = col_result.height
-        if Ag > 0.0u"m^2" && h > 0.0u"m"
-            total_conc_vol += (Ag - As) * h
-            total_rebar_wt += uconvert(u"kg", As * h * ρ_rebar)
-        end
+    for beam in struc.beams
+        addq!(_quantity_increments(volumes(beam)))
     end
-
-    # ── Beams: steel weight from beam results ──
-    for (_, beam_result) in design.beams
+    for (beam_idx, beam_result) in design.beams
+        beam_idx isa Integer && beam_idx in eachindex(struc.beams) &&
+            !isempty(volumes(struc.beams[beam_idx])) && continue
         total_steel_wt += beam_result.weight
     end
-
-    # ── Foundations: from Sizer-level volumes ──
-    for (_, fdn_result) in design.foundations
+    for strut in struc.struts
+        addq!(_quantity_increments(volumes(strut)))
+    end
+    for foundation in struc.foundations
+        addq!(_quantity_increments(foundation.volumes))
+    end
+    ρ_fdn_rebar = something(params.materials.rebar, StructuralSizer.Rebar_60).ρ
+    for (f_idx, fdn_result) in design.foundations
+        f_idx isa Integer && f_idx in eachindex(struc.foundations) &&
+            !isempty(struc.foundations[f_idx].volumes) && continue
         total_conc_vol += fdn_result.concrete_volume
-        total_rebar_wt += uconvert(u"kg", fdn_result.steel_volume * ρ_rebar)
+        total_rebar_wt += uconvert(u"kg", fdn_result.steel_volume * ρ_fdn_rebar)
     end
 
     summary.concrete_volume = total_conc_vol

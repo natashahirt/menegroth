@@ -187,3 +187,24 @@ end
     @test 0.01 <= grown.ρg <= 0.08
     @test grown.As_total > designed.As_total
 end
+
+@testset "quantity increments follow the stored material" begin
+    lump = StructuralSizer.RC_4000_60
+    part = StructuralSynthesizer._quantity_increments(
+        StructuralSynthesizer.MaterialVolumes(lump => 2.0u"m^3"))
+    @test part.concrete ≈ 2.0u"m^3"
+    @test part.rebar == 0.0u"kg"
+    @test part.steel == 0.0u"kg"
+
+    reb = StructuralSizer.Rebar_60
+    v = 0.02u"m^3"
+    steel = StructuralSynthesizer._quantity_increments(
+        StructuralSynthesizer.MaterialVolumes(reb => v))
+    @test steel.rebar ≈ uconvert(u"kg", v * reb.ρ)
+    @test steel.concrete == 0.0u"m^3"
+
+    stud = StructuralSizer.Stud_51
+    studs = StructuralSynthesizer._quantity_increments(
+        StructuralSynthesizer.MaterialVolumes(stud => v))
+    @test studs.rebar ≈ uconvert(u"kg", v * stud.ρ)
+end

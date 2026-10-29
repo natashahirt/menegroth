@@ -111,6 +111,90 @@ function get_I_LB(section::ISymmSection, material, slab::AbstractSlabOnBeam,
     return Is + As * (Y_ENA - d_3)^2 + Ae * (2 * d_3 + d_1 - Y_ENA)^2
 end
 
+"""
+    get_I_cracked_negative(section::ISymmSection, Asr; d_rebar=0.0u"m") -> SecondMomentOfArea
+
+Cracked negative-moment inertia of the steel section plus the developed
+longitudinal slab reinforcement `Asr`, about their combined centroid:
+
+    ȳ    = [A_s (d/2) + A_sr (d + d_rebar)] / (A_s + A_sr)
+    I_cr = I_s + A_s (ȳ − d/2)² + A_sr (d + d_rebar − ȳ)²
+
+`d_rebar` is the height of the bar centroid above the top of the steel, the
+convention of [`get_Mn_negative`](@ref). The default 0 places the bars at the
+top of the steel, which gives the smallest `I_cr`. `Asr = 0` returns `I_s`.
+
+# ENGINEERING JUDGMENT
+AISC 360-22 Commentary Eq. C-I3-5 (corpus: aisc-360-22, PDF p. 502) names
+`I_neg` as the effective inertia for negative moment and gives no equation.
+This is the cracked transformed section: concrete in tension carries nothing,
+and the bars have the steel modulus, so they enter at their own area. Only the
+developed bars over the support count; temperature and shrinkage steel does
+not. The bar's own inertia about its centroid is omitted.
+"""
+function get_I_cracked_negative(section::ISymmSection, Asr; d_rebar=0.0u"m")
+    Is  = section.Ix
+    As  = section.A
+    d   = section.d
+    Asr = uconvert(unit(As), Asr)
+    ustrip(Asr) > 0 || return Is
+    y_s = d / 2
+    y_r = d + uconvert(unit(d), d_rebar)
+    ȳ = (As * y_s + Asr * y_r) / (As + Asr)
+    return Is + As * (ȳ - y_s)^2 + Asr * (y_r - ȳ)^2
+end
+
+"""
+    composite_negative_inertia(section, ctx::CompositeContext; d_rebar=0.0u"m")
+
+`I_neg` for Eq. C-I3-5 from the context: [`get_I_cracked_negative`](@ref) when
+`ctx.neg_moment` is set and `ctx.Asr > 0` (anchors in the negative region and
+developed bars, §I3.2b), otherwise the steel `I_s`.
+"""
+function composite_negative_inertia(section::ISymmSection, ctx::CompositeContext;
+                                    d_rebar=0.0u"m")
+    ctx.neg_moment || return section.Ix
+    return get_I_cracked_negative(section, ctx.Asr; d_rebar=d_rebar)
+end
+
+"""
+    composite_service_inertia(I_pos, I_neg; continuous=false, for_drift=false)
+
+Member stiffness for an elastic analysis of a composite beam.
+
+AISC 360-22 Commentary Eq. C-I3-5 (corpus: aisc-360-22, PDF p. 502):
+
+    I = a I_pos + b I_neg
+
+`I_pos` is the positive-moment inertia. Callers pass `I_LB` from Eq. C-I3-1.
+A beam with no negative-moment region keeps `I_pos`. A continuous beam under
+gravity uses `a = 0.6` and `b = 0.4`. Drift of a composite moment frame uses
+`a = b = 0.5`.
+
+`I_neg` comes from [`composite_negative_inertia`](@ref): the cracked section
+with developed bars when the context declares them, otherwise `I_s`.
+"""
+function composite_service_inertia(I_pos, I_neg; continuous::Bool=false, for_drift::Bool=false)
+    continuous || return I_pos
+    a, b = for_drift ? (0.5, 0.5) : (0.6, 0.4)
+    return a * I_pos + b * I_neg
+end
+
+"""
+    positive_inertia_for_service(I_service, I_neg; continuous=false, for_drift=false)
+
+Positive-moment inertia that makes Eq. C-I3-5 equal `I_service`.
+
+The stud layout is chosen on `I_LB`. A continuous beam is checked on the
+weighted inertia, so the layout has to reach the `I_pos` that produces the
+required service inertia. A beam that is not continuous returns `I_service`.
+"""
+function positive_inertia_for_service(I_service, I_neg; continuous::Bool=false, for_drift::Bool=false)
+    continuous || return I_service
+    a, b = for_drift ? (0.5, 0.5) : (0.6, 0.4)
+    return max((I_service - b * I_neg) / a, zero(I_service))
+end
+
 # ==============================================================================
 # Composite Deflection Check
 # ==============================================================================
@@ -128,8 +212,8 @@ Check deflections for a composite beam under uniform load.
 
 # Shored vs Unshored (AISC I3.1b / Commentary):
 - **Unshored**: Dead load deflection uses steel-alone Ix (wet concrete applied before composite).
-  Live load deflection uses I_LB (composite section).
-- **Shored**: All load deflection uses I_LB (entire load applied after composite).
+  Live load deflection uses I_LB, or Eq. C-I3-5 when `continuous` is set.
+- **Shored**: All load deflection uses that same service inertia.
 
 # Arguments
 - `w_DL`: Distributed dead load (weight per length)
@@ -137,6 +221,8 @@ Check deflections for a composite beam under uniform load.
 - `δ_limit_ratio`: Maximum LL deflection ratio (default L/360)
 - `δ_total_limit_ratio`: Maximum DL+LL deflection ratio (default L/240). `nothing` to skip.
 - `δ_const_limit`: Optional absolute limit for construction deflection (e.g., 2.5 in.)
+- `I_neg`: Negative-moment inertia for Eq. C-I3-5 when `continuous`; default `I_s`.
+  Pass [`get_I_cracked_negative`](@ref) for developed slab bars.
 
 # Returns
 - `δ_DL`, `δ_LL`, `δ_total`: Computed deflections
@@ -150,19 +236,25 @@ function check_composite_deflection(section::ISymmSection, material,
                                      shored::Bool=false,
                                      δ_limit_ratio=1/360,
                                      δ_total_limit_ratio=1/240,
-                                     δ_const_limit=nothing)
+                                     δ_const_limit=nothing,
+                                     continuous::Bool=false,
+                                     for_drift::Bool=false,
+                                     I_neg=section.Ix)
     Es = material.E
     I_steel = section.Ix
     I_LB = get_I_LB(section, material, slab, b_eff, ΣQn)
+    # Eq. C-I3-5. A beam with no negative region keeps I_LB.
+    I_service = composite_service_inertia(I_LB, I_neg;
+                                          continuous=continuous, for_drift=for_drift)
 
     coeff = 5 * L^4 / (384 * Es)
 
     if shored
-        δ_DL = coeff * w_DL / I_LB
-        δ_LL = coeff * w_LL / I_LB
+        δ_DL = coeff * w_DL / I_service
+        δ_LL = coeff * w_LL / I_service
     else
         δ_DL = coeff * w_DL / I_steel
-        δ_LL = coeff * w_LL / I_LB
+        δ_LL = coeff * w_LL / I_service
     end
 
     δ_total = δ_DL + δ_LL
@@ -193,5 +285,5 @@ function check_composite_deflection(section::ISymmSection, material,
               δ_total=uconvert(u"mm", δ_total),
               δ_LL_limit=uconvert(u"mm", δ_LL_limit),
               δ_total_limit=isnothing(δ_total_limit) ? nothing : uconvert(u"mm", δ_total_limit),
-              ok_LL, ok_total, ok_const, I_LB)
+              ok_LL, ok_total, ok_const, I_LB, I_service)
 end

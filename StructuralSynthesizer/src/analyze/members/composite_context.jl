@@ -402,7 +402,7 @@ Per-station composite flexural check for `beam` per AISC 360-16 §I3.1a / §I3.2
 `ΣQn` is the available shear transfer at the governing section (v1: one scalar
 value with a continuity-ready interface — full per-station stud/shear-flow
 accumulation is DEFERRED). Returns the governing record (`s_star`, `dcr_max`,
-`b_eff`, `ϕMn`, `Mn`, `sense`, `M`) plus `I_LB` and `I_service`.
+`b_eff`, `ϕMn`, `Mn`, `sense`, `M`) plus `I_LB`, `I_neg`, and `I_service`.
 
 `I_LB` is the positive-moment lower-bound inertia at the peak sagging station.
 `I_service` is the constant stiffness used to scale the steel-model deflection
@@ -432,12 +432,15 @@ function check_composite_beam(struc::BuildingStructure, beam::Beam, section, mat
         get_I_LB(section, material, ctx.slab, sag.b_eff, ΣQn) : section.Ix
     # AISC 360-22 Commentary Eq. C-I3-5 (corpus: aisc-360-22, PDF p. 502):
     # I = 0.6 I_pos + 0.4 I_neg for a continuous beam under gravity.
-    # A beam with no negative moment keeps I_pos. I_neg is the steel Ix:
-    # the commentary names it and does not give its equation
-    # (see composite_service_inertia).
+    # A beam with no negative moment keeps I_pos. I_neg is the cracked steel +
+    # developed-bar section when the negative region is composite, else Ix
+    # (ENGINEERING JUDGMENT, see get_I_cracked_negative).
     continuous = StructuralSizer.moment_field_has_negative(M_of_s)
-    I_service = composite_service_inertia(I_pos, section.Ix; continuous = continuous)
-    return (; g..., I_LB = I_pos, I_service = I_service, left = left, right = right)
+    I_neg = ctx.neg_moment ?
+        get_I_cracked_negative(section, Asr; d_rebar = d_rebar) : section.Ix
+    I_service = composite_service_inertia(I_pos, I_neg; continuous = continuous)
+    return (; g..., I_LB = I_pos, I_neg = I_neg, I_service = I_service,
+              left = left, right = right)
 end
 
 """

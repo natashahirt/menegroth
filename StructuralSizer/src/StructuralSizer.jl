@@ -30,6 +30,8 @@ using Asap
 @reexport using Asap: kip, ksi, psf, ksf, pcf
 @reexport using Asap: kgCO2e, CarbonEquivalent
 @reexport using Asap: GRAVITY
+@reexport using Asap: IN_TO_M, IN2_TO_M2, IN3_TO_M3, IN4_TO_M4, IN6_TO_M6
+@reexport using Asap: FT_TO_M, LBF_TO_N, KIP_TO_N, PSI_TO_PA, KSI_TO_PA, PSF_TO_PA
 
 # Re-export type aliases (dimension-based, for function signatures)
 @reexport using Asap: Length, Area, Volume, SectionModulus
@@ -164,7 +166,7 @@ export vertical_distribution_exponent, vertical_distribution, seismic_story_shea
 export accidental_eccentricity, torsional_amplification
 export design_earthquake_displacement, maximum_considered_displacement
 export design_story_drift, edge_design_story_drift
-export allowable_story_drift, story_drift_is_allowed
+export allowable_story_drift, story_drift_is_allowed, vertical_seismic_load_effect
 export drift_live_load_factor, drift_expected_gravity_load
 export stability_coefficient, stability_coefficient_limit
 export pdelta_displacement_multiplier
@@ -281,19 +283,30 @@ export AbstractSlabOnBeam, AbstractSteelAnchor
 export SolidSlabOnBeam, DeckSlabOnBeam
 export HeadedStudAnchor, stud_mass, default_headed_stud, DEFAULT_STUD_SOURCE
 export CompositeDeckProfile, composite_deck_profile, deck_wr, VULCRAFT_COMPOSITE_DECKS
+export deck_shear_lambda, deck_shear_concrete_area, deck_one_way_shear
+export aisi_web_shear, deck_gage_section, deck_pitch_nominal_web_shear,
+       select_unshored_deck_gage, deck_web_crippling, composite_slab_catalog,
+       deck_slab_shear_report
+export deck_coefficient_moment, deck_coefficient_shear, deck_cantilever_moment,
+       deck_negative_reinforcement
+export deck_concrete_volume_per_area, deck_slab_candidate, size_composite_deck_slab
 export DeckAttachment, deck_brace_note, DEFAULT_DECK_SUPPORT_PATTERN
 export CompositeContext
 export get_b_eff
 export get_Qn, validate_stud_diameter, validate_stud_length, check_stud_spacing,
        check_stud_edge_distance, check_stud_deck_projection, deck_limit_failures
 export design_shear_anchors, shear_connection_ductile
+export RIB_ANGLE_TOL, rib_orientation, rib_angle_between, rib_crossing_spacing,
+       rib_row_bounds, deck_rib_note
 export get_Cf, get_Mn_composite, get_ϕMn_composite
 export find_required_ΣQn, get_Mn_negative
 export cb_gravity_top_flange_restrained, cb_neg_from_moment_field,
        check_construction, construction_stage, construction_span_demand,
        construction_with_shape, default_construction_Lb, beam_panel_brace_shear
 export construction_personnel_pressure, construction_edition
-export get_I_transformed, get_I_LB, check_composite_deflection
+export get_I_transformed, get_I_LB, check_composite_deflection,
+       composite_service_inertia, positive_inertia_for_service,
+       get_I_cracked_negative, composite_negative_inertia
 export extract_parallel_Asr, asr_at_section, beam_direction_from_vectors
 export composite_stud_contribution
 # Per-station composite check (AISC I3.1a/I3.2a/I3.2b): irregular/continuous beams

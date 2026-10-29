@@ -40,8 +40,7 @@
 
 using Unitful
 
-# psi → Pa (= _KSI_TO_PA/1000, with _KSI_TO_PA defined in flexure.jl).
-const _PSI_TO_PA = _KSI_TO_PA / 1000.0
+const _PSI_TO_PA = Asap.PSI_TO_PA
 
 # ------------------------------------------------------------------------------
 # Bare-SI strength + second-order analysis core

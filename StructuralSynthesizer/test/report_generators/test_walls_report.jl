@@ -71,7 +71,7 @@ _mark(pass) = pass ? "✓" : "✗"
 const E   = 25.0e9      # concrete modulus [Pa] (~ f'c 28 MPa NWC)
 const NU  = 0.20        # Poisson ratio
 const FC  = 28.0e6      # f'c [Pa]
-const FY  = 60_000.0 * 6894.757   # rebar fy [Pa] (Grade 60, psi→Pa)
+const FY  = 60_000.0 * PSI_TO_PA   # rebar fy [Pa] (Grade 60)
 const RHOC = 2400.0     # concrete density [kg/m³]
 const ECC  = 0.135      # embodied carbon [kgCO₂e/kg] (illustrative)
 
@@ -133,12 +133,12 @@ w_sub_header("3.1  Capacity vs independent hand calc (psi/in)")
 w_table_head("Hand calc")
 s1s = true
 # independent hand calculation in ACI customary units
-fc_psi = FC/6894.757; fy_psi = FY/6894.757
-lw_in = lw/0.0254; t_in = t/0.0254; Acv_in2 = lw_in*t_in
+fc_psi = FC/PSI_TO_PA; fy_psi = FY/PSI_TO_PA
+lw_in = lw/IN_TO_M; t_in = t/IN_TO_M; Acv_in2 = lw_in*t_in
 hw = 6.0  # 2-story pier, hw/lw = 1.5 → αc plateau at 3.0
 αc_hand = 3.0
 Vn_hand_lb = (αc_hand*1.0*sqrt(fc_psi) + ρt*fy_psi)*Acv_in2
-Vn_hand = Vn_hand_lb*4.4482216
+Vn_hand = Vn_hand_lb*LBF_TO_N
 cap = wall_shear_capacity_si(FC, FY, lw, t, ρt, hw)
 s1s &= w_compare("αc (hw/lw=1.5)", cap.αc, αc_hand; tol=1e-9)
 s1s &= w_compare("Vn nominal", cap.Vn/1e3, Vn_hand/1e3; tol=1e-3, unit="kN")
@@ -168,7 +168,7 @@ s1s &= util_ok && minr_ok
 w_sub_header("3.4  spWall worked example — corpus known-answer (sp-de-shear-wall-aci19)")
 w_note("f'c=4000 psi, fyt=60 ksi, t=10 in, lw=18 ft, ρt=0.0025, hw/lw=3.0 (αc=2.0)")
 w_table_head("spWall")
-PSI=6894.757; KIP=4448.2216; IN=0.0254; FT=0.3048
+PSI=PSI_TO_PA; KIP=KIP_TO_N; IN=IN_TO_M; FT=FT_TO_M
 sp_fc=4000*PSI; sp_fy=60_000*PSI; sp_lw=216*IN; sp_t=10*IN; sp_hw=54*FT
 spc  = wall_shear_capacity_si(sp_fc, sp_fy, sp_lw, sp_t, 0.0025, sp_hw)
 spc0 = wall_shear_capacity_si(sp_fc, sp_fy, sp_lw, sp_t, 0.0, sp_hw)

@@ -238,7 +238,7 @@ function _report_flat_plate_panel(io::IO, design::BuildingDesign,
     # Self-weight from sizer result (includes drop panel contribution for flat slabs)
     w_sw = hasproperty(r, :self_weight) ?
            _to_report(du, :pressure, r.self_weight; digits=1) :
-           _to_report(du, :pressure, conc.ρ * 9.80665u"m/s^2" * r.thickness; digits=1)
+           _to_report(du, :pressure, conc.ρ * GRAVITY * r.thickness; digits=1)
     w_sdl = _to_report(du, :pressure, loads.floor_SDL; digits=1)
     w_ll  = _to_report(du, :pressure, loads.floor_LL; digits=1)
     qu    = _to_report(du, :pressure, r.qu; digits=1)

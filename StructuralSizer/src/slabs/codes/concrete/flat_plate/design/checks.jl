@@ -901,58 +901,86 @@ end
 """
     check_one_way_shear(moment_results, d, fc; kwargs...) -> NamedTuple
 
-Check one-way (beam) shear at the critical section (distance `d` from column
-face) per ACI 318-11 §22.5.
+Check one-way (beam) shear at the critical section (distance `d` from the
+column face).
 
-## Shear demand source — auto-selected
+The governing demand is always the analytical frame-strip formula
+`Vu = qu × l₂ × (ℓn/2 − d)`, so DDM, EFM, and FEA are sized on the same
+check. A FEA section cut, when supplied as `fea_diag`, is reported and
+does not change `ok` or `ratio`.
 
-- **FEA**: When `fea_Vu` is provided, it is used directly as the factored shear
-  demand.  This should be the output of `_extract_fea_one_way_shear`, which
-  integrates the FEA transverse shear field (Qxz, Qyz) across section cuts at
-  distance `d` from each column face.  More accurate than the analytical formula
-  for irregular layouts.
+# Reference
+ACI 318-11 §11.1.3.1 and §11.2.1.1 (Eq. 11-3), via `one_way_shear_demand`
+and `one_way_shear_capacity`.
 
-- **DDM / EFM**: Falls back to the analytical formula
-  `Vu = qu × l₂ × (ln/2 − d)` per ACI 318-11 §22.5.1.2.
-
-## Keyword Arguments
-- `verbose`: Enable debug logging (default `false`)
-- `λ`: Lightweight concrete factor (default `1.0`)
-- `φ_shear`: Strength reduction factor (default `0.75`)
-- `fea_Vu`: Pre-computed FEA shear demand (Force).  When provided and positive,
-  used instead of the analytical formula.
-
-# Returns
-Named tuple with `(ok, ratio, Vu, Vc, message, source)` where `source` is
-`:fea` or `:analytical`.
+# Keyword arguments
+- `fea_diag`: named tuple from `_extract_fea_one_way_shear` (`Vu`,
+  `cut_length`, `band_width`, `n_elements`). Diagnostic only.
+- `fea_Vu`: accepted and ignored for governing. Kept so older callers
+  cannot silently switch the demand back to the shell cut.
 """
 function check_one_way_shear(moment_results, d, fc;
                              verbose=false, λ=1.0, φ_shear=0.75,
-                             fea_Vu=nothing)
+                             fea_Vu=nothing, fea_diag=nothing)
     l2 = moment_results.l2
-
-    # ── Shear demand: FEA or analytical ──
+    ln = moment_results.ln
+    qu = moment_results.qu
+    # Governing demand. Same formula for every analysis method.
+    Vu = one_way_shear_demand(qu, l2, ln, d)
     source = :analytical
-    if !isnothing(fea_Vu) && ustrip(u"N", fea_Vu) > 0
-        Vu = fea_Vu
-        source = :fea
-    else
-        ln = moment_results.ln
-        qu = moment_results.qu
-        # Shear at critical section d from face of support (ACI 22.5.1.2)
-        Vu = one_way_shear_demand(qu, l2, ln, d)
+
+    Vu_fea = nothing
+    fea_cut_length = nothing
+    fea_band_width = nothing
+    fea_n_elements = 0
+    if !isnothing(fea_diag) && hasproperty(fea_diag, :Vu)
+        Vu_fea = fea_diag.Vu
+        fea_cut_length = fea_diag.cut_length
+        fea_band_width = fea_diag.band_width
+        fea_n_elements = fea_diag.n_elements
+    elseif !isnothing(fea_Vu)
+        Vu_fea = fea_Vu
     end
 
     Vc = one_way_shear_capacity(fc, l2, d; λ=λ)
     result = StructuralSizer.check_one_way_shear(Vu, Vc; φ=φ_shear)
-    
+    φVc = φ_shear * Vc
+    fea_ratio = if isnothing(Vu_fea)
+        NaN
+    else
+        ustrip(u"lbf", Vu_fea) / ustrip(u"lbf", φVc)
+    end
+
     if verbose
         status = result.ok ? "✓ PASS" : "✗ FAIL"
-        φVc = φ_shear * Vc
-        @debug "One-way shear ($source)" Vu=Vu Vc=Vc φVc=φVc ratio=round(result.ratio, digits=2) status=status
+        @debug "One-way shear ($source)" Vu=Vu Vc=Vc φVc=φVc ratio=round(result.ratio, digits=2) Vu_fea=Vu_fea fea_ratio=fea_ratio status=status
     end
-    
-    return (ok=result.ok, ratio=result.ratio, Vu=Vu, Vc=Vc, message=result.message, source=source)
+
+    return (
+        ok = result.ok,
+        ratio = result.ratio,
+        Vu = Vu,
+        Vc = Vc,
+        message = result.message,
+        source = source,
+        Vu_fea = Vu_fea,
+        fea_ratio = fea_ratio,
+        fea_cut_length = fea_cut_length,
+        fea_band_width = fea_band_width,
+        fea_n_elements = fea_n_elements,
+    )
+end
+
+"""
+    _governing_check_label(last_failing_check, min_h) -> String
+
+`table_minimum` when the ACI Table 9.5(c) start thickness passed on the
+first pass. `search_floor` when a caller-supplied thickness floor passed
+on the first pass. Otherwise the check that last forced a thickness increase.
+"""
+function _governing_check_label(last_failing_check, min_h)
+    !isempty(last_failing_check) && return last_failing_check
+    return isnothing(min_h) ? "table_minimum" : "search_floor"
 end
 
 # =============================================================================

@@ -1379,7 +1379,7 @@ function _check_footing_proximity!(
 
     length(fdata) < 2 && return
 
-    min_clearance_m = 0.3048   # 12 inches
+    min_clearance_m = Asap.FT_TO_M   # 1 ft
 
     for i in eachindex(fdata)
         for j in (i+1):length(fdata)

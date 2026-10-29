@@ -29,6 +29,17 @@ using Logging
 # =============================================================================
 
 """
+    _column_span_minimum(ln_max, opts) -> Length
+
+Smallest column the slab loop allows: span/15 clamped to `opts.max_column_size`,
+or zero when `opts.column_span_minimum` is false.
+"""
+function _column_span_minimum(ln_max, opts)
+    opts.column_span_minimum || return 0.0u"inch"
+    return min(estimate_column_size_from_span(ln_max), opts.max_column_size)
+end
+
+"""
     _update_column_sizes!(columns, column_result, Pu, Mu, c_span_min, material, column_tol; verbose)
 
 Update column dimensions from P-M design results. Returns `true` if any
@@ -324,7 +335,8 @@ function _run_final_design(method, struc, slab, columns, moment_results, seconda
                             deflection_result, ρ_prime_est, drop_panel, slab_sw, γ_concrete,
                             material;
                             verbose::Bool = false,
-                            analysis_cache = nothing)
+                            analysis_cache = nothing,
+                            defer_asap_process::Bool = false)
     # A rejected NLP column is not a finished design. Stop before ASAP is
     # updated and before this function can return converged=true.
     rejected = _flat_plate_column_pm_failure(column_result, h, iter, drop_panel)
@@ -615,7 +627,13 @@ function _run_final_design(method, struc, slab, columns, moment_results, seconda
     end
 
     # ─── Update Asap Model ───
-    update_asap_column_sections!(struc, columns, column_opts.material)
+    # Sections are written onto the building model here. The design graph
+    # defers the stiffness rebuild to the single post-slab sync, because slab
+    # sizing does not read frame stiffness between slabs. Every other caller
+    # rebuilds K before returning, so a standalone `size_slab!` does not leave
+    # a processed model whose stiffness still belongs to the previous sections.
+    update_asap_column_sections!(struc, columns, column_opts.material;
+                                 reprocess=!defer_asap_process)
 
     if verbose
         @debug "═══════════════════════════════════════════════════════════════════"
@@ -625,6 +643,16 @@ function _run_final_design(method, struc, slab, columns, moment_results, seconda
         @debug "Final columns" sizes=["$(c.c1)×$(c.c2)" for c in columns]
         @debug "Iterations" n=iter
     end
+
+    # Report-only. The thickness loop already accepted `deflection_result`.
+    # For FEA that value comes from the nodal displacement; this second
+    # value is the PCA crossing-beam number DDM and EFM report, so a
+    # comparison can show both. It is not read by any later check.
+    crossing_beam_deflection = method isa FEA ?
+        _crossing_beam_deflection(
+            moment_results, h, d, fc, fy, material, slab, γ_concrete, columns,
+            drop_panel, opts, ρ_prime_est,
+        ) : nothing
 
     punching_results = Dict{Int, NamedTuple}(
         local_to_global[i] => punching_local[i] for i in 1:n_cols
@@ -652,7 +680,60 @@ function _run_final_design(method, struc, slab, columns, moment_results, seconda
         ρ_prime=ρ_prime_est,
         element_rebar_field=_element_rebar_field,
         secondary_element_rebar_field=_secondary_element_rebar_field,
+        deflection_check_crossing_beam=crossing_beam_deflection,
+        # Moment analyses at the converged thickness (both directions), for reporting
+        moment_results=moment_results,
+        secondary_results=secondary_results,
     )
+end
+
+"""
+    _crossing_beam_deflection(moment_results, h, d, fc, fy, material, slab,
+                              γ_concrete, columns, drop_panel, opts, ρ_prime)
+
+Crossing-beam deflection at the converged thickness, for reporting next to
+the FEA nodal check. `fea_Δ_panel` is cleared so `check_two_way_deflection`
+takes the PCA frame → strip → panel path with Branson `Ie` (the path DDM
+and EFM use). ACI 318-11 §9.5.2.6 (corpus: aci-318-11, page 132).
+
+Returns `nothing` if the check cannot be evaluated. The caller does not
+use the result to change thickness.
+"""
+function _crossing_beam_deflection(moment_results, h, d, fc, fy, material, slab,
+                                   γ_concrete, columns, drop_panel, opts, ρ_prime)
+    Es = material.rebar.E
+    Ecs = Ec(fc, ustrip(pcf, γ_concrete))   # ACI 318-11 §8.5.1
+    # `fea_Δ_panel = nothing` selects the crossing-beam branch.
+    proxy = (
+        M_pos       = moment_results.M_pos,
+        M_neg_ext   = moment_results.M_neg_ext,
+        M_neg_int   = moment_results.M_neg_int,
+        qu          = moment_results.qu,
+        qD          = moment_results.qD,
+        qL          = moment_results.qL,
+        fea_Δ_panel = nothing,
+    )
+    try
+        kwargs = (
+            limit_type = opts.deflection_limit,
+            ρ_prime = ρ_prime,
+            deflection_Ie_method = :branson,
+        )
+        if !isnothing(drop_panel)
+            return check_two_way_deflection(
+                proxy, h, d, fc, fy, Es, Ecs, slab.spans, γ_concrete, columns,
+                drop_panel; kwargs...,
+            )
+        else
+            return check_two_way_deflection(
+                proxy, h, d, fc, fy, Es, Ecs, slab.spans, γ_concrete, columns;
+                kwargs...,
+            )
+        end
+    catch e
+        @debug "Crossing-beam deflection (report only) failed" exception=(e, catch_backtrace())
+        return nothing
+    end
 end
 
 """
@@ -886,6 +967,7 @@ function _size_flat_plate!(
     slab_idx::Int = 0,
     drop_panel::Union{Nothing, DropPanelGeometry} = nothing,
     fire_rating::Real = 0.0,
+    defer_asap_process::Bool = false,
     tc::Union{Nothing, TraceCollector} = nothing,
 )
     # ─── PixelFrame: rejected same as steel (validation + design_workflow should catch first) ───
@@ -1027,13 +1109,14 @@ function _size_flat_plate!(
     end
     
     bar_dia = bar_diameter(bar_size)
-    c_span_min = estimate_column_size_from_span(ln_max)
+    c_span_min = _column_span_minimum(ln_max, opts)
     
-    # Initialize column sizes
+    # Initialize column sizes (only when nothing set them before the slab loop)
+    c_init = min(estimate_column_size_from_span(ln_max), opts.max_column_size)
     for col in columns
         if isnothing(col.c1) || col.c1 <= 0u"inch"
-            col.c1 = c_span_min
-            col.c2 = c_span_min
+            col.c1 = c_init
+            col.c2 = c_init
         end
     end
     
@@ -1058,8 +1141,13 @@ function _size_flat_plate!(
     # PHASE 4b: PRE-BUILD P-M CACHE (hoisted outside iteration loop)
     # =========================================================================
     
-    # Reuse shared cache from size_slabs! when available (avoids duplicate P-M diagrams).
-    if isnothing(_col_cache)
+    # Reuse the shared cache from size_slabs! / the design graph when one was
+    # passed (avoids duplicate P-M diagrams). The NLP path never reads this
+    # catalog cache — size_columns returns before the discrete solver — so
+    # building it there only spends the diagram precompute.
+    if hasproperty(column_opts, :sizing_strategy) && column_opts.sizing_strategy === :nlp
+        _col_cache = nothing
+    elseif isnothing(_col_cache)
         _col_cat = isnothing(column_opts.custom_catalog) ?
             rc_column_catalog(column_opts.section_shape, column_opts.catalog) :
             column_opts.custom_catalog
@@ -1092,7 +1180,9 @@ function _size_flat_plate!(
         if method isa EFM && method.solver == :asap
             get!(slab_caches, :efm, EFMModelCache())
         elseif method isa FEA
-            get!(slab_caches, :fea, FEAModelCache())
+            acquire_fea_cache!(slab_caches, fea_mesh_key(
+                struc, slab, columns;
+                target_edge=method.target_edge, drop_panel=drop_panel))
         else
             nothing
         end
@@ -1139,6 +1229,7 @@ function _size_flat_plate!(
     
     # Track which check is currently failing (for structured failure diagnostics)
     last_failing_check = ""
+    one_way_shear_report = nothing
     total_iters = 0   # accumulate across all phases for the result tuple
     
     d = effective_depth(h; cover=cover, bar_diameter=bar_dia)
@@ -1423,17 +1514,22 @@ function _size_flat_plate!(
             end
             
             # ─── A4: One-Way Shear Check ───
-            verbose && @debug "ONE-WAY SHEAR CHECK (ACI 22.5)"
-            
-            # Extract FEA-based one-way shear demand when available
-            _fea_Vu = if analysis_cache isa FEAModelCache && analysis_cache.initialized
+            verbose && @debug "ONE-WAY SHEAR CHECK (ACI 11.2)"
+
+            # The shell cut is a diagnostic. Thickness is governed by the
+            # analytical frame-strip demand shared with DDM and EFM.
+            _fea_diag = if analysis_cache isa FEAModelCache && analysis_cache.initialized
                 _span_ax = _get_span_axis(slab)
-                _extract_fea_one_way_shear(analysis_cache, columns, _span_ax, d; verbose=verbose)
+                _extract_fea_one_way_shear(
+                    analysis_cache, columns, _span_ax, d, moment_results.l2;
+                    verbose=verbose,
+                )
             else
                 nothing
             end
             shear_result = check_one_way_shear(moment_results, d, fc;
-                verbose=verbose, λ=λ, φ_shear=φ_shear, fea_Vu=_fea_Vu)
+                verbose=verbose, λ=λ, φ_shear=φ_shear, fea_diag=_fea_diag)
+            one_way_shear_report = shear_result
             
             if !shear_result.ok
                 h = round_up_thickness(h + h_increment, h_increment)
@@ -1663,6 +1759,28 @@ function _size_flat_plate!(
                 λ=λ, φ_shear=φ_shear, verbose=verbose
             )
             
+            # Punching levers exhausted and thickening not allowed: stop as a failure
+            if h != h_before_punch && !opts.punching_thickening
+                emit!(tc, :slab, "size_flat_plate!", _slab_id, :failure;
+                      reason="punching_levers_exhausted", failing_check="punching_shear",
+                      h_final=string(h_before_punch), iterations=total_iters)
+                return (
+                    converged       = false,
+                    failure_reason  = "punching_levers_exhausted",
+                    failing_check   = "punching_shear",
+                    iterations      = total_iters,
+                    h_final         = h_before_punch,
+                    pattern_loading = false,
+                    slab_result     = nothing,
+                    column_results  = nothing,
+                    drop_panel      = drop_panel,
+                    integrity       = nothing,
+                    integrity_check = nothing,
+                    transfer_results = nothing,
+                    ρ_prime         = nothing,
+                )
+            end
+
             # If h was bumped (last resort), break to outer loop → restart Phase A
             if h != h_before_punch
                 last_failing_check = "punching_shear"
@@ -1724,14 +1842,21 @@ function _size_flat_plate!(
             h, d, fc, fy, cover, sw_estimate, n_cols, punching_local,
             local_to_global, column_opts, column_result, Pu, opts, total_iters,
             deflection_result, ρ_prime_est, drop_panel, slab_sw, γ_concrete,
-            material; verbose=verbose, analysis_cache=analysis_cache
+            material; verbose=verbose, analysis_cache=analysis_cache,
+            defer_asap_process=defer_asap_process,
         )
         
         # If rebar design failed, bump h and restart from Phase A
         if hasproperty(result, :converged) && result.converged
+            governing = _governing_check_label(last_failing_check, opts.min_h)
+            result = merge(result, (
+                governing_check = governing,
+                one_way_shear = one_way_shear_report,
+            ))
             emit!(tc, :slab, "size_flat_plate!", _slab_id, :exit;
                   converged=true, h_final=string(h), h_initial=string(h_initial),
                   iterations=total_iters,
+                  governing_check=governing,
                   column_sizes=[string(col.c1) * "×" * string(col.c2) for col in columns])
         end
         if hasproperty(result, :needs_more_depth) && result.needs_more_depth

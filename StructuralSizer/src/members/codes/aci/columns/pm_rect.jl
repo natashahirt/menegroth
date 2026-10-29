@@ -1529,6 +1529,13 @@ to design new reinforcement appropriate for the larger section.
 # Returns
 New RCColumnSection with properly designed reinforcement
 
+The search covers the same bar sizes as the column catalogs (#6–#18). If no
+arrangement passes, the original section's bars (same count and size) are
+placed in the new outline and kept when they pass P-M at the new size. A
+column at least as large in both directions with the same bars is no weaker,
+so a section the catalog found adequate is not rejected only because it was
+enlarged for punching. The error is raised only when both attempts fail.
+
 # Example
 ```julia
 # Original 16" column from P-M design
@@ -1545,11 +1552,39 @@ function resize_column_with_reinforcement(
     mat;
     kwargs...
 )
-    # Use original section's cover and tie_type
-    design_column_reinforcement(
-        new_b, new_c, Pu, Mu, mat;
-        cover = section.cover,
-        tie_type = section.tie_type,
-        kwargs...
-    )
+    kw = merge((bar_sizes = [6, 7, 8, 9, 10, 11, 14, 18],), kwargs)
+    try
+        # Use original section's cover and tie_type
+        return design_column_reinforcement(
+            new_b, new_c, Pu, Mu, mat;
+            cover = section.cover,
+            tie_type = section.tie_type,
+            kw...
+        )
+    catch e
+        e isa ErrorException || rethrow()
+        kept = _same_bars_in_outline(section, new_b, new_c)
+        if !isnothing(kept)
+            diagram = generate_PM_diagram(kept, mat; n_intermediate = 10)
+            check_PM_capacity(diagram, Pu, Mu).adequate && return kept
+        end
+        rethrow()
+    end
+end
+
+"""
+`section`'s bar count and size laid out in a `b × h` outline, or `nothing`
+when that section is not valid (e.g. ρg below the ACI minimum).
+"""
+function _same_bars_in_outline(section::RCColumnSection, b::Length, h::Length)
+    isempty(section.bars) && return nothing
+    As_in2 = ustrip(u"inch^2", section.bars[1].As)
+    sizes = (3, 4, 5, 6, 7, 8, 9, 10, 11, 14, 18)
+    bar_size = sizes[argmin([abs(ustrip(u"inch^2", rebar(s).A) - As_in2) for s in sizes])]
+    try
+        return RCColumnSection(; b = b, h = h, bar_size = bar_size, n_bars = length(section.bars),
+                               cover = section.cover, tie_type = section.tie_type)
+    catch
+        return nothing
+    end
 end

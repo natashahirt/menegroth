@@ -13,6 +13,64 @@ end
 """Thread-local Gurobi environment pool (one `Env` per thread)."""
 const _GUROBI_ENV_POOL = Dict{Int, Any}()
 
+"""
+Identical `optimize_discrete` inputs return the stored assignment.
+
+The key is a value token, so a catalog rebuilt with the same section
+properties hits. The stored result is the same sections and indices the
+solver returned. Tracing (`tc !== nothing`) skips the memo so explanations
+still run. Capped so a long session does not keep every problem.
+"""
+const _DISCRETE_SOLVE_MEMO = Dict{Any, NamedTuple}()
+const _DISCRETE_SOLVE_MEMO_LOCK = ReentrantLock()
+const _DISCRETE_SOLVE_MEMO_MAX = 64
+const _DISCRETE_MEMO_HITS = Ref(0)
+
+function _memo_token(x)
+    x isa Quantity && return (Float64(ustrip(x)), string(unit(x)))
+    x isa Real && return Float64(x)
+    x isa Symbol && return x
+    x isa Bool && return x
+    x isa AbstractString && return String(x)
+    x isa Nothing && return nothing
+    x isa AbstractSection && return _section_memo_token(x)
+    x isa AbstractArray && return Tuple(_memo_token(v) for v in x)
+    if isstructtype(typeof(x)) && isimmutable(x)
+        nfields(x) == 0 && return typeof(x)
+        return Tuple(_memo_token(getfield(x, i)) for i in 1:nfields(x))
+    end
+    return objectid(x)
+end
+
+function _section_memo_token(s)
+    name = hasproperty(s, :name) ? getproperty(s, :name) : nothing
+    nums = Float64[]
+    for fld in (:A, :d, :Ix, :Iy, :b, :h, :ρg, :bf, :tw, :tf)
+        hasproperty(s, fld) || continue
+        v = getproperty(s, fld)
+        push!(nums, v isa Quantity ? Float64(ustrip(v)) : v isa Real ? Float64(v) : 0.0)
+    end
+    return (name, Tuple(nums))
+end
+
+function _discrete_memo_get(key)
+    lock(_DISCRETE_SOLVE_MEMO_LOCK) do
+        hit = get(_DISCRETE_SOLVE_MEMO, key, nothing)
+        hit === nothing || (_DISCRETE_MEMO_HITS[] += 1)
+        return hit
+    end
+end
+
+function _discrete_memo_put!(key, result)
+    lock(_DISCRETE_SOLVE_MEMO_LOCK) do
+        if length(_DISCRETE_SOLVE_MEMO) >= _DISCRETE_SOLVE_MEMO_MAX
+            empty!(_DISCRETE_SOLVE_MEMO)
+        end
+        _DISCRETE_SOLVE_MEMO[key] = result
+    end
+    return result
+end
+
 """Lock guarding `_GUROBI_ENV_POOL` access."""
 const _GUROBI_ENV_LOCK = ReentrantLock()
 
@@ -270,6 +328,34 @@ function optimize_discrete(
             "$n_groups groups)"))
     end
 
+    memo_key = nothing
+    if tc === nothing
+        try
+            # The catalog is the object itself. A rebuilt catalog, even one
+            # with the same section names and areas, is a miss. Editing a
+            # section inside a cached catalog is not detected.
+            memo_key = (
+                _memo_token((
+                    checker, demands, geometries, material, objective,
+                    Int(n_max_sections), optimizer, Float64(mip_gap),
+                    Float64(time_limit_sec), feasible, mip_start,
+                )),
+                objectid(catalog),
+            )
+            hit = _discrete_memo_get(memo_key)
+            if hit !== nothing
+                return (;
+                    section_indices = copy(hit.section_indices),
+                    sections = copy(hit.sections),
+                    status = hit.status,
+                    objective_value = hit.objective_value,
+                )
+            end
+        catch
+            memo_key = nothing
+        end
+    end
+
     emit!(tc, :optimizer, "optimize_discrete", "", :enter;
           n_groups=n_groups, n_sections=n_sections,
           checker_type=string(typeof(checker)),
@@ -436,7 +522,9 @@ function optimize_discrete(
           status=string(status), objective_value=obj_val,
           n_unique_sections=length(unique(section_indices)))
 
-    return (; section_indices, sections, status, objective_value=obj_val)
+    result = (; section_indices, sections, status, objective_value=obj_val)
+    memo_key === nothing || _discrete_memo_put!(memo_key, result)
+    return result
 end
 
 # =============================================================================

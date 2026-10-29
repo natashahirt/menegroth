@@ -28,19 +28,22 @@ LoadCombination
 | `S` | `Float64` | 0.0 | Snow load factor |
 | `R` | `Float64` | 0.0 | Rain load factor |
 | `W` | `Float64` | 0.0 | Wind load factor |
-| `E` | `Float64` | 0.0 | Earthquake load factor |
+| `E` | `Float64` | 0.0 | Factor on Eh, the horizontal seismic effect |
+| `Ev` | `Float64` | 0.0 | Factor on Ev, the vertical seismic effect (+1 or −1) |
 
-## Standard Combinations (ASCE 7-22 §2.3.1)
+## Standard Combinations (ASCE 7-22 §2.3.1 and §2.3.6)
 
 | Preset | Expression | D | L | Lr/S/R | W | E |
 |:-------|:-----------|:--|:--|:-------|:--|:--|
 | `strength_1_4D` | 1.4D | 1.4 | 0 | 0 | 0 | 0 |
-| `strength_1_2D_1_6L` | 1.2D + 1.6L + 0.5(Lr/S/R) | 1.2 | 1.6 | 0.5 | 0 | 0 |
-| `strength_1_2D_1_6Lr` | 1.2D + 1.6(Lr/S/R) + L | 1.2 | 1.0 | 1.6 | 0.5 | 0 |
-| `strength_1_2D_1_0W` | 1.2D + 1.0W + L + 0.5(Lr/S/R) | 1.2 | 1.0 | 0.5 | 1.0 | 0 |
-| `strength_1_2D_1_0E` | 1.2D + 1.0E + L + 0.2S | 1.2 | 1.0 | 0/0.2/0 | 0 | 1.0 |
+| `strength_1_2D_1_6L` | 1.2D + 1.6L + (0.5Lr or 0.3S or 0.5R) | 1.2 | 1.6 | 0.5 / 0.3 / 0.5 | 0 | 0 |
+| `strength_1_2D_1_6Lr` | 1.2D + (1.6Lr or 1.0S or 1.6R) + (L or 0.5W) | 1.2 | 1.0 | 1.6 / 1.0 / 1.6 | 0.5 | 0 |
+| `strength_1_2D_1_0W` | 1.2D + 1.0W + L + (0.5Lr or 0.3S or 0.5R) | 1.2 | 1.0 | 0.5 / 0.3 / 0.5 | 1.0 | 0 |
+| `strength_1_2D_1_0E` | 1.2D + Ev + Eh + L + 0.15S | 1.2 | 1.0 | 0 / 0.15 / 0 | 0 | 1.0 |
 | `strength_0_9D_1_0W` | 0.9D + 1.0W | 0.9 | 0 | 0 | 1.0 | 0 |
-| `strength_0_9D_1_0E` | 0.9D + 1.0E | 0.9 | 0 | 0 | 0 | 1.0 |
+| `strength_0_9D_1_0E` | 0.9D − Ev + Eh | 0.9 | 0 | 0 | 0 | 1.0 |
+
+`Lr`, `S`, and `R` in one row are alternatives. `factored_pressure` adds every load that is passed, so pass one companion from each group. On the two seismic rows, `E` multiplies Eh and `Ev` is +1 or −1 on the vertical effect `0.2·SDS·D`. The factor on `L` stays 1.0; the occupancy permission to use 0.5 is not the default.
 
 | Preset | Expression | D | L | Notes |
 |:-------|:-----------|:--|:--|:------|
@@ -96,7 +99,7 @@ p_max = envelope_pressure(gravity_combinations, 100.0psf, 50.0psf)
 
 ## Implementation Details
 
-- **ASCE 7-22 §2.3.1**: All strength combinations follow the 2022 edition. The combination numbering (1–7) matches the standard. Combination 2 (`strength_1_2D_1_6L`) includes `Lr = S = R = 0.5` as companion loads, matching the standard's `0.5(Lr or S or R)` notation.
+- **ASCE 7-22 §2.3.1 and §2.3.6**: Strength combinations follow the 2022 edition. Combination 2 uses `0.5Lr`, `0.3S`, or `0.5R`. The seismic presets are §2.3.6 combinations 6 and 7: `1.2D + Ev + Eh + L + 0.15S` and `0.9D − Ev + Eh`. Eh is the `E` field. Ev is a separate effect, `0.2·SDS·D`.
 - **Gravity envelope**: `envelope_pressure` computes the scalar maximum across all combinations. This is correct for gravity-only analysis where all loads act downward. For lateral combinations (wind/seismic), directional analysis with separate positive/negative envelopes is needed.
 - **Type stability**: `factored_pressure` preserves Unitful types through multiplication. The result has the same dimension as the input loads.
 - **Custom combinations**: Non-US codes can be expressed directly:

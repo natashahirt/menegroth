@@ -56,7 +56,7 @@ df = if mode == "quick"
         spans     = SECTION3_SPANS_QUICK,
         methods   = [
             (key=:rot, name="ACI Min",     method=SR.RuleOfThumb()),
-            (key=:fea, name="FEA (frame)", method=SR.FEA(; pattern_loading=false, design_approach=:frame)),
+            (key=:fea, name="FEA (frame)", method=SR.FEA(; pattern_loading=true, pattern_mode=:efm_amp, design_approach=:frame)),
         ],
         concretes = SECTION3_CONCRETES_QUICK,
         stories   = SECTION3_STORIES_QUICK,

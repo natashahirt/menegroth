@@ -1740,15 +1740,14 @@ function size_rc_columns_nlp(
     n = length(Pu)
     n == length(Mux) || throw(ArgumentError("Pu and Mux must have same length"))
     n == length(geometries) || throw(ArgumentError("Pu and geometries must have same length"))
-    
-    results = Vector{RCColumnNLPResult}(undef, n)
-    
-    for i in 1:n
+
+    return _rc_nlp_batch(n, i -> begin
         Muy_i = i <= length(Muy) ? Muy[i] : 0.0
-        results[i] = size_rc_column_nlp(Pu[i], Mux[i], geometries[i], opts; Muy=Muy_i)
+        return _rc_column_nlp_key(Pu[i], Mux[i], Muy_i, geometries[i], opts)
+    end) do i
+        Muy_i = i <= length(Muy) ? Muy[i] : 0.0
+        return size_rc_column_nlp(Pu[i], Mux[i], geometries[i], opts; Muy=Muy_i)
     end
-    
-    return results
 end
 
 """
@@ -1764,11 +1763,61 @@ function size_rc_columns_nlp(
 )
     n = length(demands)
     n == length(geometries) || throw(ArgumentError("demands and geometries must have same length"))
-    results = Vector{RCColumnNLPResult}(undef, n)
-    for i in 1:n
+    return _rc_nlp_batch(n, i -> _rc_column_nlp_key(demands[i], geometries[i], opts)) do i
         d = demands[i]
-        results[i] = size_rc_column_nlp(
+        return size_rc_column_nlp(
             d.Pu, d.Mux, geometries[i], opts; Muy=d.Muy, demand=d)
+    end
+end
+
+const _RC_NLP_MEMO_HITS = Ref(0)
+
+"""Key for one rectangular NLP column. `member_idx` is not part of the key."""
+function _rc_column_nlp_key(Pu, Mux, Muy, g::ConcreteMemberGeometry, opts::NLPColumnOptions)
+    return (
+        Float64(to_kip(Pu)), Float64(to_kipft(Mux)), Float64(to_kipft(Muy)),
+        Float64(ustrip(u"m", g.L)), Float64(ustrip(u"m", g.Lu)),
+        g.kx, g.ky, g.braced, opts,
+    )
+end
+
+function _rc_column_nlp_key(d::RCColumnDemand, g::ConcreteMemberGeometry, opts::NLPColumnOptions)
+    return (
+        Float64(to_kip(d.Pu)), Float64(to_kipft(d.Mux)), Float64(to_kipft(d.Muy)),
+        Float64(to_kipft(d.M1x)), Float64(to_kipft(d.M2x)),
+        Float64(to_kipft(d.M1y)), Float64(to_kipft(d.M2y)),
+        d.βdns, d.transverse_load,
+        Float64(ustrip(u"m", g.L)), Float64(ustrip(u"m", g.Lu)),
+        g.kx, g.ky, g.braced, opts,
+    )
+end
+
+"""
+Solve columns `1:n`, reusing a result when the load, geometry, and options match.
+
+Each hit is a copy, so later per-column edits do not alias the stored section.
+A key that cannot be built falls through to a fresh solve.
+"""
+function _rc_nlp_batch(compute::Function, n::Int, keyfn)
+    results = Vector{RCColumnNLPResult}(undef, n)
+    memo = Dict{Any, RCColumnNLPResult}()
+    for i in 1:n
+        key = try
+            keyfn(i)
+        catch
+            nothing
+        end
+        if key !== nothing && haskey(memo, key)
+            _RC_NLP_MEMO_HITS[] += 1
+            results[i] = try
+                deepcopy(memo[key])
+            catch
+                memo[key]
+            end
+            continue
+        end
+        results[i] = compute(i)
+        key === nothing || (memo[key] = results[i])
     end
     return results
 end

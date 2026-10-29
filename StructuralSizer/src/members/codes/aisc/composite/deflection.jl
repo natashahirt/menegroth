@@ -111,6 +111,47 @@ function get_I_LB(section::ISymmSection, material, slab::AbstractSlabOnBeam,
     return Is + As * (Y_ENA - d_3)^2 + Ae * (2 * d_3 + d_1 - Y_ENA)^2
 end
 
+"""
+    composite_service_inertia(I_pos, I_neg; continuous=false, for_drift=false)
+
+Member stiffness for an elastic analysis of a composite beam.
+
+AISC 360-22 Commentary Eq. C-I3-5 (corpus: aisc-360-22, PDF p. 502):
+
+    I = a I_pos + b I_neg
+
+`I_pos` is the positive-moment inertia. Callers pass `I_LB` from Eq. C-I3-1.
+A beam with no negative-moment region keeps `I_pos`. A continuous beam under
+gravity uses `a = 0.6` and `b = 0.4`. Drift of a composite moment frame uses
+`a = b = 0.5`.
+
+# ENGINEERING JUDGMENT
+The commentary names `I_neg` and does not give its equation. Pass the steel
+section's `I_s`. Concrete in tension is omitted, and slab reinforcement is
+not added: the commentary does not locate those bars for this inertia.
+Omitting them lowers `I` and increases the computed deflection.
+"""
+function composite_service_inertia(I_pos, I_neg; continuous::Bool=false, for_drift::Bool=false)
+    continuous || return I_pos
+    a, b = for_drift ? (0.5, 0.5) : (0.6, 0.4)
+    return a * I_pos + b * I_neg
+end
+
+"""
+    positive_inertia_for_service(I_service, I_neg; continuous=false, for_drift=false)
+
+Positive-moment inertia that makes Eq. C-I3-5 equal `I_service`.
+
+The stud layout is chosen on `I_LB`. A continuous beam is checked on the
+weighted inertia, so the layout has to reach the `I_pos` that produces the
+required service inertia. A beam that is not continuous returns `I_service`.
+"""
+function positive_inertia_for_service(I_service, I_neg; continuous::Bool=false, for_drift::Bool=false)
+    continuous || return I_service
+    a, b = for_drift ? (0.5, 0.5) : (0.6, 0.4)
+    return max((I_service - b * I_neg) / a, zero(I_service))
+end
+
 # ==============================================================================
 # Composite Deflection Check
 # ==============================================================================
@@ -128,8 +169,8 @@ Check deflections for a composite beam under uniform load.
 
 # Shored vs Unshored (AISC I3.1b / Commentary):
 - **Unshored**: Dead load deflection uses steel-alone Ix (wet concrete applied before composite).
-  Live load deflection uses I_LB (composite section).
-- **Shored**: All load deflection uses I_LB (entire load applied after composite).
+  Live load deflection uses I_LB, or Eq. C-I3-5 when `continuous` is set.
+- **Shored**: All load deflection uses that same service inertia.
 
 # Arguments
 - `w_DL`: Distributed dead load (weight per length)
@@ -150,19 +191,24 @@ function check_composite_deflection(section::ISymmSection, material,
                                      shored::Bool=false,
                                      δ_limit_ratio=1/360,
                                      δ_total_limit_ratio=1/240,
-                                     δ_const_limit=nothing)
+                                     δ_const_limit=nothing,
+                                     continuous::Bool=false,
+                                     for_drift::Bool=false)
     Es = material.E
     I_steel = section.Ix
     I_LB = get_I_LB(section, material, slab, b_eff, ΣQn)
+    # Eq. C-I3-5. A beam with no negative region keeps I_LB.
+    I_service = composite_service_inertia(I_LB, I_steel;
+                                          continuous=continuous, for_drift=for_drift)
 
     coeff = 5 * L^4 / (384 * Es)
 
     if shored
-        δ_DL = coeff * w_DL / I_LB
-        δ_LL = coeff * w_LL / I_LB
+        δ_DL = coeff * w_DL / I_service
+        δ_LL = coeff * w_LL / I_service
     else
         δ_DL = coeff * w_DL / I_steel
-        δ_LL = coeff * w_LL / I_LB
+        δ_LL = coeff * w_LL / I_service
     end
 
     δ_total = δ_DL + δ_LL
@@ -193,5 +239,5 @@ function check_composite_deflection(section::ISymmSection, material,
               δ_total=uconvert(u"mm", δ_total),
               δ_LL_limit=uconvert(u"mm", δ_LL_limit),
               δ_total_limit=isnothing(δ_total_limit) ? nothing : uconvert(u"mm", δ_total_limit),
-              ok_LL, ok_total, ok_const, I_LB)
+              ok_LL, ok_total, ok_const, I_LB, I_service)
 end

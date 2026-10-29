@@ -500,7 +500,7 @@ function _slab_at_spacings(slab::DeckSlabOnBeam, bsl, bsr)
     DeckSlabOnBeam(slab.t_slab, slab.fc′, slab.Ec, slab.wc, slab.n,
                    slab.hr, slab.wr, slab.deck_orientation,
                    uconvert(u"m", bsl), uconvert(u"m", bsr), nothing, nothing,
-                   slab.e_mid_ht, slab.anchorage_spacing)
+                   slab.e_mid_ht, slab.anchorage_spacing, slab.rib_angle, slab.rib_pitch)
 end
 
 """
@@ -570,6 +570,24 @@ function _context_for_construction(ctx::CompositeContext, slab, left, right)
                             deck_attachment = ctx.deck_attachment,
                             slip_checked = ctx.slip_checked,
                             construction = stage)
+end
+
+"""
+    moment_field_has_negative(demand_of_s) -> Bool
+
+True when the signed moment, sagging positive, is negative anywhere on the
+member. `demand_of_s` takes the position as a fraction of the span, in
+`[0, 1]`, the same convention as [`adjacent_shear_spans`](@ref). A moment
+smaller than 1 N·m is treated as zero.
+"""
+function moment_field_has_negative(demand_of_s)
+    for s in 0.0:0.05:1.0
+        raw = demand_of_s(float(s))
+        M = raw isa Unitful.Quantity ?
+            ustrip(u"N*m", uconvert(u"N*m", raw)) : Float64(raw)
+        M < -1.0 && return true
+    end
+    return false
 end
 
 """

@@ -74,12 +74,15 @@ AISC 360-16 §I8.2a User Note table (corpus aisc-360-16, p. 163):
     `Rp = 0.75` when `slab.e_mid_ht ≥ 2 in. (50 mm)`, else `0.6`. An unknown
     `e_mid_ht` (`nothing`) takes 0.6 (AISC 360-22 §I8.2a, corpus:
     aisc-360-22, PDF pp. 181–182).
+- **Skewed deck** takes the perpendicular values, with `n_per_row` the studs
+  in one rib crossing. AISC gives no skewed-rib values; see
+  [`DeckSlabOnBeam`](@ref) for the basis.
 """
 function _Rg_Rp(anchor::HeadedStudAnchor, slab::DeckSlabOnBeam)
     if slab.deck_orientation === :parallel
         ratio = ustrip(slab.wr / slab.hr)
         return ratio >= 1.5 ? (1.0, 0.75) : (0.85, 0.75)
-    else  # :perpendicular
+    else  # :perpendicular or :skewed
         n = anchor.n_per_row
         e = slab.e_mid_ht
         Rp = (e !== nothing && e >= 2.0u"inch") ? 0.75 : 0.6
@@ -397,7 +400,12 @@ function _stud_center_limits(section::ISymmSection, anchor::HeadedStudAnchor,
 end
 
 """`n_per_row` studs fit on the flange at four diameters and, on a solid slab,
-keep 1 in. clear cover to each transverse slab edge."""
+keep 1 in. clear cover to each transverse slab edge.
+
+On perpendicular or skewed deck the studs of one row share a rib crossing, so
+they are placed along the rib centerline. The length of that line over the
+usable flange width is `(y_hi - y_lo) / sin θ`. At `θ = π/2` it is the flange
+width, as for a transverse row."""
 function _transverse_studs_fit(section::ISymmSection, anchor::HeadedStudAnchor,
                                slab::AbstractSlabOnBeam)
     y_lo, y_hi = _stud_center_limits(section, anchor, slab)
@@ -405,7 +413,79 @@ function _transverse_studs_fit(section::ISymmSection, anchor::HeadedStudAnchor,
     n = anchor.n_per_row
     n <= 1 && return true
     need = (n - 1) * 4 * ustrip(u"m", anchor.d_sa)
-    return (y_hi - y_lo) + 1e-9 >= need
+    avail = y_hi - y_lo
+    if slab isa DeckSlabOnBeam && slab.deck_orientation !== :parallel
+        avail /= sin(slab.rib_angle)
+    end
+    return avail + 1e-9 >= need
+end
+
+"""
+    rib_crossing_spacing(slab) -> Union{Length, Nothing, Symbol}
+
+Distance along the beam between successive low-flute crossings of the flange,
+`rib_pitch / sin θ`, for perpendicular or skewed deck. `nothing` for a solid
+slab or parallel deck, where studs are not tied to rib crossings. `:unknown`
+when the deck is not parallel and `rib_pitch` was not given.
+"""
+rib_crossing_spacing(::SolidSlabOnBeam) = nothing
+function rib_crossing_spacing(slab::DeckSlabOnBeam)
+    slab.deck_orientation === :parallel && return nothing
+    slab.rib_pitch === nothing && return :unknown
+    return uconvert(u"m", slab.rib_pitch / sin(slab.rib_angle))
+end
+
+"""
+    rib_row_bounds(L, p_cross, s_min, s_max) -> (n_min, n_max)
+
+Row bounds over a shear span `L` when rows can only sit at rib crossings
+`p_cross` apart. The span holds at least `N = ⌊L / p_cross⌋` crossings
+whatever their phase, so `n_max = N` (also capped by the §I8.2d(d) minimum
+`s_min`). Using every `k`-th crossing, with `k = ⌊s_max / p_cross⌋`, keeps the
+center-to-center spacing within the §I8.2d(e) maximum `s_max` (corpus:
+aisc-360-22, PDF p. 183), so `n_min = ⌈N / k⌉`. `k = 0`, crossings farther
+apart than `s_max`, returns `(1, 0)`: no layout exists.
+"""
+function rib_row_bounds(L, p_cross, s_min, s_max)
+    Ls = ustrip(u"m", uconvert(u"m", L))
+    p = ustrip(u"m", uconvert(u"m", p_cross))
+    k = floor(Int, ustrip(u"m", uconvert(u"m", s_max)) / p + 1e-9)
+    k == 0 && return (1, 0)
+    N = floor(Int, Ls / p + 1e-9)
+    smin = ustrip(u"m", uconvert(u"m", s_min))
+    smin > 0 && (N = min(N, floor(Int, Ls / smin + 1e-9)))
+    N == 0 && return (1, 0)
+    return (cld(N, k), N)
+end
+
+"""Rib-crossing row bounds that hold on every shear span."""
+function _combined_rib_row_bounds(spans, p_cross, s_min, s_max)
+    n_min, n_max = 1, typemax(Int) ÷ 4
+    for L in spans
+        lo, hi = rib_row_bounds(L, p_cross, s_min, s_max)
+        n_min = max(n_min, lo)
+        n_max = min(n_max, hi)
+    end
+    return (n_min, n_max)
+end
+
+"""
+    deck_rib_note(slab) -> String
+
+One line for the anchor check clause on perpendicular or skewed deck: the rib
+angle, the rib crossing spacing, and, when skewed, that the perpendicular
+`Rg`/`Rp` were used. Empty for a solid slab or parallel deck.
+"""
+deck_rib_note(::SolidSlabOnBeam) = ""
+function deck_rib_note(slab::DeckSlabOnBeam)
+    slab.deck_orientation === :parallel && return ""
+    θ = round(rad2deg(slab.rib_angle); digits=1)
+    p = rib_crossing_spacing(slab)
+    cross = p === :unknown ? "rib pitch not supplied, crossings unchecked" :
+        "rib crossings every $(round(u"inch", p; digits=2)) along beam"
+    slab.deck_orientation === :perpendicular && return "deck ribs at $(θ)°; $cross"
+    return "deck ribs skewed $(θ)° to beam; $cross; perpendicular Rg/Rp and " *
+           "no rib concrete used (AISC 360-22 I3.2c/I8.2a cover 0° and 90° only)"
 end
 
 function _lowest_passing(lo::Int, hi::Int, pred)
@@ -472,7 +552,18 @@ function design_shear_anchors(section::ISymmSection, material, slab::AbstractSla
     ustrip(u"N", Qn) > 0 || return (; blank..., reason=:strength, Qn=Qn)
     Cf = uconvert(u"N", _Cf_max(section, material, slab, b_eff))
     s_min, s_max = _stud_spacing_limits(anchor, slab)
-    n_min, n_max = _combined_row_bounds(spans, s_min, s_max)
+    p_cross = rib_crossing_spacing(slab)
+    rib_reason = nothing
+    if p_cross isa Unitful.Length
+        n_min, n_max = _combined_rib_row_bounds(spans, p_cross, s_min, s_max)
+        n_max < max(n_min, 1) && (rib_reason = :rib_spacing)
+    else
+        # A skewed rib with no pitch has no known crossing positions. A
+        # perpendicular rib without pitch keeps the plain §I8.2d limits.
+        p_cross === :unknown && slab.deck_orientation === :skewed &&
+            (rib_reason = :rib_pitch_unknown)
+        n_min, n_max = _combined_row_bounds(spans, s_min, s_max)
+    end
     L_long = maximum(spans)
     per = anchor.n_per_row
 
@@ -526,6 +617,9 @@ function design_shear_anchors(section::ISymmSection, material, slab::AbstractSla
     # §I3.2c applies to composite construction on deck. When it fails, only
     # the steel section alone (no studs counted) can be used.
     deck_ok || return (; at(0)..., ok=false, reason=:deck_limits)
+    # Rib crossings farther apart than the §I8.2d(e) maximum, or unknown on a
+    # skewed rib: no compliant stud layout exists, so the steel acts alone.
+    rib_reason === nothing || return (; at(0)..., ok=false, reason=rib_reason)
     chosen = n_max >= max(n_min, 1) ? _lowest_passing(max(n_min, 1), n_max, passes) : nothing
     if chosen !== nothing
         lay = at(chosen)

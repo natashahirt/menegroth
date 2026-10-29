@@ -65,6 +65,10 @@ mutable struct BuildingStructure{T, A, P} <: AbstractBuildingStructure
     # `Asap.solve!(model, links)` (Bathe §4.4 master/slave DOF reduction, see
     # external/Asap/src/Elements/rigidlink.jl). Empty for :none / :shell.
     asap_rigid_links::Vector{Asap.RigidLink}
+    # Pier triangles and story assemblies from the last `to_asap!`. Empty before
+    # that call. Not a design group: forces stay on the pier, the section group
+    # is a later step.
+    wall_mesh::WallMesh
 
     # ─── Design Snapshots (for parametric studies) ───
     _snapshots::Dict{Symbol, DesignSnapshot{T, P}}
@@ -95,6 +99,7 @@ function BuildingStructure(skel::BuildingSkeleton{T}) where T
         Dict{Int, Vector{Asap.TributaryLoad}}(),
         Dict{Int, Vector{Asap.TributaryLoad}}(),
         Asap.RigidLink[],
+        WallMesh(),
         Dict{Symbol, DesignSnapshot{T, P}}(),
     )
 end
@@ -118,6 +123,7 @@ function BuildingStructure{T, A, P}(skel::BuildingSkeleton{T}) where {T, A, P}
         Dict{Int, Vector{Asap.TributaryLoad}}(),
         Dict{Int, Vector{Asap.TributaryLoad}}(),
         Asap.RigidLink[],
+        WallMesh(),
         Dict{Symbol, DesignSnapshot{T, P}}(),
     )
 end

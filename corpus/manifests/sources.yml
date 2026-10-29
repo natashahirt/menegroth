@@ -105,6 +105,17 @@
   encrypted: false
   notes: "ASCE/SEI 7-22 Minimum Design Loads and Associated Criteria for Buildings and Other Structures."
 
+- id: sei-asce-37-02
+  origin: "corpus/sources/unsorted/Design Loads During Construction.pdf"
+  source_path: corpus/sources/codes/asce/SEI-ASCE-37-02.pdf
+  text_path:   corpus/text/codes/asce/SEI-ASCE-37-02.txt
+  family: asce
+  role: codes
+  edition: SEI/ASCE 37-02
+  tier: 1
+  encrypted: false
+  notes: "Design Loads on Structures During Construction (SEI/ASCE 37-02). Load factors calibrated to ASCE 7-95 (Commentary C2.2). AISC 360-22 Commentary I3.1b cites the 2014 edition (ASCE/SEI 37-14), which is NOT in the corpus; cite 37-02 only as the older edition and flag it. Text is OCR (macOS Vision) because the PDF has no usable text layer; tables, equations, and load-factor values must be confirmed against the rendered page before use."
+
 # ── Tier 1 — official guides / committee reports ──────────────────────────
 - id: aci-421-3r-15
   origin: "StructuralSizer/src/slabs/codes/concrete/reference/ACI 421-3R-15.pdf"

@@ -1931,12 +1931,11 @@ The estimate is intentionally conservative (tends to undersize) so that:
 - For rectangular, returns (c1, c2) tuple with c2 = 1.5 × c1
 
 # Method
-Uses simplified capacity formula:
+ACI 318-11 Eq. (10-2), the same form the workflow uses to grow and check columns:
     Pu ≈ At × qu × n_stories_above
-    Ag_required ≈ Pu / (φ × 0.80 × [0.85 f'c (1-ρg) + ρg × fy])
-    
-Assumes ρg ≈ 2% (typical), φ = 0.65 (compression-controlled)
-Simplifies to: Ag ≈ Pu / (0.40 × f'c)  for f'c ≤ 6000 psi
+    Ag_required = Pu / (0.80 φ [0.85 f'c (1-ρg) + ρg × fy])
+
+with ρg = 1% (§10.9.1 minimum) and φ = 0.65 (tied, compression-controlled).
 
 # Reference
 - ACI 318-11 §10.3.6 (nominal axial strength)
@@ -1948,7 +1947,7 @@ At = 100u"m^2"      # 100 m² tributary
 qu = 10u"kPa"       # ~200 psf factored
 n = 5               # 5 stories above
 fc = 4000u"psi"
-c = estimate_column_size(At, qu, n, fc)  # ≈ 16-18 inches
+c = estimate_column_size(At, qu, n, fc)  # ≈ 24 inches
 ```
 """
 function estimate_column_size(
@@ -1959,17 +1958,18 @@ function estimate_column_size(
     fy::Pressure = 60000u"psi",
     shape::Symbol = :square,
     span::Union{Length, Nothing} = nothing,  # For punching-based minimum
-    span_ratio::Float64 = 15.0  # c = span / ratio for punching adequacy
+    span_ratio::Float64 = 15.0,  # c = span / ratio for punching adequacy
+    min_size::Union{Length, Nothing} = nothing,  # overrides the 14"/10" minimum
 )
     # Estimated factored axial load
     Pu = At * qu * n_stories_above
     
-    # Required gross area (simplified for typical reinforcement)
-    # Full formula: φPn = φ × 0.80 × [0.85f'c(Ag - As) + fy×As]
-    # Simplified with ρg ≈ 2%, φ = 0.65:
-    # Ag ≈ Pu / (0.65 × 0.80 × [0.85×f'c×0.98 + fy×0.02])
-    # For fc=4ksi, fy=60ksi: ≈ Pu / (0.40 × f'c)
-    Ag_axial = Pu / (0.40 * fc)
+    # Required gross area, ACI 318-11 Eq. (10-2) (§10.3.6.2; corpus aci-318-11,
+    # p. 143): φPn,max = 0.80φ[0.85f'c(Ag − Ast) + fy Ast], φ = 0.65 tied,
+    # Ast = 0.01Ag (§10.9.1 minimum). The same form sizes and checks columns
+    # in the workflow, so the estimate matches the axial check.
+    ρg = 0.01
+    Ag_axial = Pu / (0.80 * 0.65 * (0.85 * fc * (1 - ρg) + fy * ρg))
     
     # For flat plate design, punching shear often governs column size
     # Use span-based estimate: c ≈ span / 15 (per StructurePoint guidance)
@@ -1982,7 +1982,7 @@ function estimate_column_size(
     end
     
     # Apply minimum column size (14" for flat plates, 10" otherwise)
-    c_min = isnothing(span) ? 10.0u"inch" : 14.0u"inch"
+    c_min = something(min_size, isnothing(span) ? 10.0u"inch" : 14.0u"inch")
     Ag = max(Ag, c_min^2)
     
     if shape == :square
@@ -2017,8 +2017,9 @@ Common practice for preliminary design:
 """
 function estimate_column_size_from_span(span::Length; ratio::Float64=15.0)
     c = span / ratio
-    # Round up to nearest inch
-    return ceil(ustrip(u"inch", c)) * u"inch"
+    # Round up to nearest inch. The 0.1" tolerance keeps a metric bay stored
+    # as 6.1 m (20.01 ft → 16.01") at 16", not 17".
+    return ceil(ustrip(u"inch", c) - 0.1) * u"inch"
 end
 
 

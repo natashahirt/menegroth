@@ -359,6 +359,8 @@ function run_moment_analysis(
         column_moments = sec_column_moments,
         column_shears = forces.Vu,
         unbalanced_moments = sec_Mub,
+        # Same simple-span basis as the primary `Vu_max`, on the transverse spans
+        Vu_max = uconvert(kip, qu * sec_setup.l2 * sec_setup.ln / 2),
     )
 
     return MomentAnalysisResult(

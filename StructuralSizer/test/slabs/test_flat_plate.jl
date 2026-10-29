@@ -350,6 +350,30 @@ using StructuralSizer
         
         # 18 ft / 15 = 1.2 ft = 14.4" → 15"
         @test ustrip(u"inch", c_span) ≈ 15 atol=2
+
+        # A 20 ft bay stored as 6.1 m (16.01") rounds to 16", not 17"
+        @test estimate_column_size_from_span(6.1u"m") == 16.0u"inch"
+        @test estimate_column_size_from_span(20u"ft") == 16.0u"inch"
+
+        # Axial estimate is ACI 318-11 Eq. (10-2) with ρg = 1%, φ = 0.65
+        Ag = 480000u"lbf" /(0.80 * 0.65 * (0.85 * 6000u"psi" * 0.99 + 60000u"psi" * 0.01))
+        c_ax = estimate_column_size(400u"ft^2", 200u"psf", 6, 6000u"psi"; min_size=10u"inch")
+        @test c_ax == ceil(ustrip(u"inch", sqrt(Ag))) * u"inch"
+        @test estimate_column_size(1u"ft^2", 200u"psf", 1, 6000u"psi"; min_size=14u"inch") == 14.0u"inch"
+    end
+
+    @testset "Column span minimum switch" begin
+        on  = FlatPlateOptions(max_column_size = 16u"inch")
+        off = FlatPlateOptions(max_column_size = 16u"inch", column_span_minimum = false)
+        @test on.column_span_minimum
+        @test !off.column_span_minimum
+        # span/15 is clamped to the cap
+        @test StructuralSizer._column_span_minimum(30u"ft", on) == 16.0u"inch"
+        @test StructuralSizer._column_span_minimum(18u"ft", on) == 15.0u"inch"
+        @test StructuralSizer._column_span_minimum(30u"ft", off) == 0.0u"inch"
+        # Punching may thicken the slab unless a single-lever study turns it off
+        @test on.punching_thickening
+        @test !FlatPlateOptions(punching_thickening = false).punching_thickening
     end
     
     @testset "Reinforcement Table Validation (StructurePoint Table 3)" begin

@@ -192,7 +192,7 @@ end
             29000.0 / 3644.0,
             uconvert(u"m", 3.0u"inch"), uconvert(u"m", 6.0u"inch"), :perpendicular,
             uconvert(u"m", 10.0u"ft"), uconvert(u"m", 10.0u"ft"), nothing, nothing,
-            nothing, nothing
+            nothing, nothing, π / 2, nothing
         )
         anchor = HeadedStudAnchor(0.75u"inch", 5.0u"inch", 65.0ksi, 50.0ksi,
                                   7850.0u"kg/m^3"; n_per_row=1)
@@ -1161,7 +1161,7 @@ end
             29000.0 / 3644.0,
             uconvert(u"m", 3.0u"inch"), uconvert(u"m", 6.0u"inch"), :perpendicular,
             uconvert(u"m", 10.0u"ft"), uconvert(u"m", 10.0u"ft"), nothing, nothing,
-            nothing, nothing)
+            nothing, nothing, π / 2, nothing)
         @test_throws ArgumentError validate_stud_diameter(one_inch, fix.section.tf; slab=deck)
     end
 
@@ -1461,4 +1461,148 @@ end
     @test_throws ArgumentError DeckAttachment(sidelap_per_span = -1)
     kept = CompositeContext(deck.slab, deck.anchor, deck.L_beam; deck_attachment = custom)
     @test kept.deck_attachment.support_pattern == "36/7"
+end
+
+# ==============================================================================
+# Skewed deck ribs: perpendicular stud rules, studs only at rib crossings
+# ==============================================================================
+
+@testset "Skewed deck ribs" begin
+    fix = _aisc_example_I1_deck_setup()
+    deck(θ; pitch=12.0u"inch", kw...) =
+        DeckSlabOnBeam(4.5u"inch", 4.0ksi, 3644.0ksi, 145.0u"lb/ft^3", 29000.0ksi,
+                       3.0u"inch", 6.0u"inch", rib_orientation(θ), 10.0u"ft", 10.0u"ft";
+                       rib_angle=θ, rib_pitch=pitch, kw...)
+    stud(n) = HeadedStudAnchor(0.75u"inch", 5.0u"inch", 65.0ksi, 50.0ksi,
+                               7850.0u"kg/m^3"; n_per_row=n)
+
+    @testset "Angle and classification" begin
+        @test rib_angle_between((1.0, 0.0), (0.0, 2.0)) ≈ π / 2
+        @test isapprox(rib_angle_between((1.0, 0.0), (-3.0, 0.0)), 0.0; atol=1e-12)
+        @test rib_angle_between((1.0, 1.0), (1.0, 0.0)) ≈ π / 4
+        @test rib_orientation(0.0) === :parallel
+        @test rib_orientation(π / 2) === :perpendicular
+        # Only truly parallel ribs are parallel; 1° is skewed.
+        @test rib_orientation(deg2rad(1.0)) === :skewed
+        @test deck(deg2rad(30)).deck_orientation === :skewed
+        @test deck(deg2rad(30)).rib_angle ≈ deg2rad(30)
+        @test_throws ArgumentError DeckSlabOnBeam(4.5u"inch", 4.0ksi, 3644.0ksi,
+            145.0u"lb/ft^3", 29000.0ksi, 3.0u"inch", 6.0u"inch", :perpendicular,
+            10.0u"ft", 10.0u"ft"; rib_angle=deg2rad(30))
+        @test_throws ArgumentError DeckSlabOnBeam(4.5u"inch", 4.0ksi, 3644.0ksi,
+            145.0u"lb/ft^3", 29000.0ksi, 3.0u"inch", 6.0u"inch", :skewed,
+            10.0u"ft", 10.0u"ft")
+        @test fix.slab.rib_angle ≈ π / 2
+        @test fix.slab.rib_pitch === nothing
+    end
+
+    @testset "Skewed ribs take the perpendicular Rg and Rp" begin
+        for n in 1:3
+            @test StructuralSizer._Rg_Rp(stud(n), deck(deg2rad(30))) ==
+                  StructuralSizer._Rg_Rp(stud(n), deck(π / 2))
+        end
+        # e_mid-ht is measured perpendicular to the rib, not scaled by 1/sin θ.
+        @test StructuralSizer._Rg_Rp(stud(1), deck(deg2rad(30); e_mid_ht=1.5u"inch"))[2] == 0.6
+        @test StructuralSizer._Rg_Rp(stud(1), deck(deg2rad(30); e_mid_ht=2.0u"inch"))[2] == 0.75
+        @test get_Qn(stud(1), deck(deg2rad(30))) < get_Qn(stud(1), deck(0.0))
+    end
+
+    @testset "Rib crossings along the beam" begin
+        @test isapprox(rib_crossing_spacing(deck(π / 2)), 12.0u"inch"; rtol=1e-9)
+        @test isapprox(rib_crossing_spacing(deck(deg2rad(30))), 24.0u"inch"; rtol=1e-9)
+        @test rib_crossing_spacing(deck(0.0)) === nothing
+        @test rib_crossing_spacing(deck(deg2rad(30); pitch=nothing)) === :unknown
+        @test rib_crossing_spacing(fix.slab) === :unknown
+        s_min, s_max = 4.5u"inch", 36.0u"inch"
+        L = 270.0u"inch"
+        # 90°: crossings every 12 in; every third one keeps 36 in.
+        @test rib_row_bounds(L, 12.0u"inch", s_min, s_max) == (8, 22)
+        # 30°: crossings every 24 in; every one is needed.
+        @test rib_row_bounds(L, 24.0u"inch", s_min, s_max) == (11, 11)
+        # 12 in pitch is at the 36 in limit at asin(1/3) = 19.47°.
+        @test rib_row_bounds(L, rib_crossing_spacing(deck(deg2rad(20))), s_min, s_max) == (7, 7)
+        @test rib_row_bounds(L, rib_crossing_spacing(deck(deg2rad(19))), s_min, s_max) == (1, 0)
+        # A shear span shorter than one crossing holds no guaranteed crossing.
+        @test rib_row_bounds(20.0u"inch", 24.0u"inch", s_min, s_max) == (1, 0)
+    end
+
+    @testset "Studs on a skewed rib lie along the rib" begin
+        narrow = W("W12X14")   # bf = 3.97 in
+        three = stud(3)        # needs 2 · 4 d_sa = 6 in along the rib
+        @test StructuralSizer._transverse_studs_fit(narrow, three, deck(π / 2)) == false
+        @test StructuralSizer._transverse_studs_fit(narrow, three, deck(deg2rad(30))) == true
+    end
+
+    @testset "Stud layout and bare-steel fallback" begin
+        L = 45.0u"ft"
+        lay(θ; kw...) = design_shear_anchors(fix.section, fix.material, deck(θ; kw...),
+                                             fix.anchor, get_b_eff(deck(θ; kw...), L), L,
+                                             10.0u"kip*ft"; ϕMn_steel=0.0u"N*m",
+                                             slip_checked=true)
+        @test lay(π / 2).ok && lay(π / 2).n_rows == 8 && lay(π / 2).n_rows_max == 22
+        @test lay(deg2rad(30)).ok && lay(deg2rad(30)).n_rows == 11
+        bad = lay(deg2rad(15))
+        @test bad.ok == false && bad.reason === :rib_spacing && bad.n_half == 0
+        unknown = lay(deg2rad(30); pitch=nothing)
+        @test unknown.ok == false && unknown.reason === :rib_pitch_unknown
+        # Parallel deck is not tied to crossings.
+        @test lay(0.0).ok
+    end
+
+    @testset "Checker reports the skew and falls back to steel alone" begin
+        L = 45.0u"ft"
+        ϕ_steel = ustrip(u"N*m", get_ϕMn(fix.section, fix.material; Lb=L, Cb=1.0, axis=:strong))
+        checker = AISCChecker(; max_depth=Inf)
+        cache = StructuralSizer.create_cache(checker, 1)
+        StructuralSizer.precompute_capacities!(checker, cache, [fix.section], fix.material, MinWeight())
+        geom = SteelMemberGeometry(L; Lb=L)
+        above = MemberDemand(1; Mux=1.05 * ϕ_steel, Mux_neg=0.0, Vu_strong=0.0)
+        below = MemberDemand(1; Mux=0.5 * ϕ_steel, Mux_neg=0.0, Vu_strong=0.0)
+        ctx15 = CompositeContext(deck(deg2rad(15)), fix.anchor, L; shored=true)
+        @test StructuralSizer.is_feasible(checker, cache, 1, fix.section, fix.material,
+                                          below, geom, ctx15) == true
+        @test StructuralSizer.is_feasible(checker, cache, 1, fix.section, fix.material,
+                                          above, geom, ctx15) == false
+        ex = StructuralSizer.explain_feasibility(checker, cache, 1, fix.section, fix.material,
+                                                 above, geom, ctx15)
+        studs = only(filter(c -> c.name == "shear_anchors", ex.checks))
+        @test occursin("rib_spacing", studs.code_clause)
+        @test occursin("skewed 15.0°", studs.code_clause)
+        @test occursin("perpendicular Rg/Rp", studs.code_clause)
+        ctx30 = CompositeContext(deck(deg2rad(30)), fix.anchor, L; shored=true)
+        ex30 = StructuralSizer.explain_feasibility(checker, cache, 1, fix.section, fix.material,
+                                                   above, geom, ctx30)
+        studs30 = only(filter(c -> c.name == "shear_anchors", ex30.checks))
+        @test occursin("24.0 inch", studs30.code_clause)
+    end
+end
+
+# AISC 360-22 Commentary Eq. C-I3-5 (corpus: aisc-360-22, PDF p. 502).
+# I = 0.6 I_pos + 0.4 I_neg for a continuous gravity beam.
+# I_pos = 1000 in⁴, I_neg = 400 in⁴ → I = 760 in⁴.
+# Drift uses 0.5 and 0.5 → 700 in⁴.
+# The I_pos that produces 760 is (760 − 0.4×400) / 0.6 = 1000 in⁴.
+@testset "Continuous composite service inertia" begin
+    I_pos = 1000.0u"inch^4"
+    I_neg = 400.0u"inch^4"
+    @test composite_service_inertia(I_pos, I_neg) ≈ I_pos
+    @test composite_service_inertia(I_pos, I_neg; continuous=true) ≈ 760.0u"inch^4"
+    @test composite_service_inertia(I_pos, I_neg; continuous=true, for_drift=true) ≈ 700.0u"inch^4"
+    @test positive_inertia_for_service(760.0u"inch^4", I_neg; continuous=true) ≈ I_pos
+
+    @test StructuralSizer.moment_field_has_negative(s -> 1000.0) == false
+    @test StructuralSizer.moment_field_has_negative(s -> s < 0.2 ? -500.0 : 1000.0) == true
+
+    fix = _example_I1_setup()
+    b_eff = get_b_eff(fix.slab, fix.L_beam)
+    Cf = StructuralSizer._Cf_max(fix.section, fix.material, fix.slab, b_eff)
+    simple = check_composite_deflection(fix.section, fix.material, fix.slab, b_eff, Cf,
+                                         fix.L_beam, 0.5kip/u"ft", 1.0kip/u"ft")
+    continuous = check_composite_deflection(fix.section, fix.material, fix.slab, b_eff, Cf,
+                                             fix.L_beam, 0.5kip/u"ft", 1.0kip/u"ft";
+                                             continuous=true)
+    I_hand = 0.6 * simple.I_LB + 0.4 * fix.section.Ix
+    @test continuous.I_service ≈ I_hand
+    @test continuous.δ_LL > simple.δ_LL
+    @test continuous.δ_DL ≈ simple.δ_DL
 end

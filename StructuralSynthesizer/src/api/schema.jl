@@ -108,7 +108,7 @@ function api_input_schema()
                 "composite_cp_class" => "SEI/ASCE 37-02 personnel class: very_light, light, medium, or heavy. Default: medium.",
                 "composite_deck_hr_in" => "Deck rib height, inches. Required when composite_slab_type is deck.",
                 "composite_deck_wr_in" => "Average deck rib width, inches. Required when composite_slab_type is deck.",
-                "composite_deck_orientation" => "perpendicular or parallel. Default: perpendicular.",
+                "composite_deck_orientation" => "from_slab, perpendicular, or parallel. from_slab reads each beam's rib angle from the slab span axis; skewed ribs use the perpendicular stud rules. Default: from_slab.",
                 "beam_catalog_bounds" => "Required when beam_catalog is custom. Object: min_width_in, max_width_in, min_depth_in, max_depth_in, resolution_in (all in inches).",
                 "pixelframe_options" => "When column_type or beam_type is pixelframe. Object: fc_preset (standard | low | high | extended | custom) or fc_min_ksi, fc_max_ksi, fc_resolution_ksi when custom. Default: standard.",
                 "fire_rating" => "Fire rating (hours): 0, 1, 1.5, 2, 3, or 4. Default: 0.",
@@ -373,9 +373,9 @@ function api_params_schema_structured()
             "guidance" => "Average deck rib width. Required when composite_slab_type is deck.",
         ),
         "composite_deck_orientation" => Dict(
-            "type" => "enum", "default" => "perpendicular",
-            "allowed" => ["perpendicular", "parallel"],
-            "guidance" => "Deck ribs relative to the beam.",
+            "type" => "enum", "default" => "from_slab",
+            "allowed" => ["from_slab", "perpendicular", "parallel"],
+            "guidance" => "Deck ribs relative to the beam. from_slab reads each beam's angle from the slab span axis; perpendicular or parallel asserts it for every beam.",
         ),
         "beam_catalog_bounds" => Dict(
             "type" => "object_or_null", "default" => "null",
@@ -901,7 +901,7 @@ Base.@kwdef mutable struct APIParams
     composite_cp_class::String = "medium"
     composite_deck_hr_in::Union{Float64, Nothing} = nothing
     composite_deck_wr_in::Union{Float64, Nothing} = nothing
-    composite_deck_orientation::String = "perpendicular"
+    composite_deck_orientation::String = "from_slab"
     pixelframe_options::Union{APIPixelFrameOptions, Nothing} = nothing  # When column_type or beam_type is pixelframe.
     fire_rating::Float64 = 0.0
     optimize_for::String = "weight"

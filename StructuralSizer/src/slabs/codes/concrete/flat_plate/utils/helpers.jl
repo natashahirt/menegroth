@@ -336,7 +336,8 @@ analyses reflect the actual column sizes.  `I_factor` is the cracking
 reduction per ACI 318-11 §10.10.4.1 (default 0.70 for columns).
 """
 function update_asap_column_sections!(struc, columns, material::Concrete;
-                                      I_factor::Real = 0.70)
+                                      I_factor::Real = 0.70,
+                                      reprocess::Bool = true)
     model = struc.asap_model
     
     for col in columns
@@ -353,8 +354,10 @@ function update_asap_column_sections!(struc, columns, material::Concrete;
         end
     end
     
-    # Re-process model with updated sections
-    if model.processed
+    # Re-process model with updated sections. Callers that sync the building
+    # model immediately afterward pass reprocess=false; the section
+    # assignments above are the only input that sync reads.
+    if reprocess && model.processed
         Asap.process!(model)
     end
 end

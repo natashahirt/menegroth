@@ -51,10 +51,10 @@ Verified against StructurePoint spWall (corpus: sp-de-shear-wall-aci19 Step 5).
 """
 function wall_shear_capacity_si(fc::Real, fy::Real, lw::Real, t::Real, ρt::Real, hw::Real; λ::Real=1.0)
     # Convert to ACI customary units (psi, in) for the empirical √f'c formula.
-    fc_psi = fc / 6894.757
-    fy_psi = fy / 6894.757
-    lw_in  = lw / 0.0254
-    t_in   = t / 0.0254
+    fc_psi = fc / Asap.PSI_TO_PA
+    fy_psi = fy / Asap.PSI_TO_PA
+    lw_in  = lw / Asap.IN_TO_M
+    t_in   = t / Asap.IN_TO_M
     Acv_in2 = t_in * lw_in
 
     αc = wall_alpha_c(lw > 0 ? hw / lw : Inf)
@@ -73,7 +73,7 @@ function wall_shear_capacity_si(fc::Real, fy::Real, lw::Real, t::Real, ρt::Real
     Vn_max_lb = 8.0 * λ * sqrt_fc * Acv_in2
     Vn_lb = min(Vn_lb, Vn_max_lb)
 
-    lb_to_N = 4.4482216
+    lb_to_N = Asap.LBF_TO_N
     return (Vn = Vn_lb * lb_to_N,
             ϕVn = WALL_PHI_SHEAR * Vn_lb * lb_to_N,
             Vn_max = Vn_max_lb * lb_to_N,

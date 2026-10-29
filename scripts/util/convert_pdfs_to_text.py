@@ -78,6 +78,284 @@ GAP_BIN_WIDTH      = 2.0  # pts — histogram bin width for gap detection
 MIN_GAP_BINS       = 4    # consecutive empty bins to qualify as a gap
 MARGIN_FRACTION    = 0.2  # ignore gaps in the outer 20 % of page width
 
+# Glyph names the ASCE 7-22 equation fonts use for delimiters and operators.
+# They are not in the Adobe glyph list, so pdfminer emits "(cid:N)". Each
+# value was read off the drawn glyph: C18/C19 fence Eq. 6.6-3, C20/C21 fence
+# Eq. 6.12-1, C24/C25 fence Eq. 12.8-17, C26/C27 fence Eq. 19.3-2, C12 is the
+# absolute-value extender, C6 is "±22.5", C3 is the asterisk of h*, C138
+# closes the bracket in Eq. 6.5-2b.
+_EQUATION_GLYPH = {
+    "C18": "(",
+    "C19": ")",
+    "C20": "[",
+    "C21": "]",
+    "C24": "[",
+    "C25": "]",
+    "C16": "[",
+    "C17": "]",
+    "C26": "{",
+    "C27": "}",
+    "C12": "|",
+    "C6": "±",
+    "C3": "*",
+    "C138": "]",
+}
+
+# Character 129 is a list bullet in these two fonts. In Helvetica the same
+# code is a map mark, so the font name is part of the match.
+_BULLET_FONTS = ("AdvOTf9433e2d+20", "Times-Roman")
+
+_FRACTION_REACH = 12.0   # pt from a hairline rule to the glyphs it binds
+_SPACE_GAP = 1.2         # pt; a gap wider than this splits a fraction side
+
+
+def _install_glyph_fallback() -> None:
+    """Decode private equation glyphs and list bullets.
+
+    pdfminer already falls back from ToUnicode to the font's encoding, and
+    then gives up when the glyph name is not in the Adobe list. This fills
+    in the names above and the two bullet fonts. Installed once per process.
+    """
+    from pdfminer.encodingdb import EncodingDB
+    from pdfminer.pdffont import PDFSimpleFont, PDFUnicodeNotDefined
+    from pdfminer.psparser import PSLiteral
+
+    if getattr(EncodingDB.get_encoding, "_menegroth_glyphs", False):
+        return
+
+    failed_by_map: dict[int, dict[int, str]] = {}
+    orig_get = EncodingDB.get_encoding.__func__
+    orig_unichr = PDFSimpleFont.to_unichr
+
+    def get_encoding(cls, name, diff=None):
+        cid2unicode = orig_get(cls, name, diff)
+        failed: dict[int, str] = {}
+        if diff:
+            cid = 0
+            for item in diff:
+                if isinstance(item, int):
+                    cid = item
+                elif isinstance(item, PSLiteral) and item.name in _EQUATION_GLYPH:
+                    failed[cid] = item.name
+                    cid += 1
+                elif isinstance(item, PSLiteral):
+                    cid += 1
+        if failed:
+            failed_by_map[id(cid2unicode)] = failed
+        return cid2unicode
+
+    def to_unichr(self, cid: int) -> str:
+        names = failed_by_map.get(id(getattr(self, "cid2unicode", None)), {})
+        gname = names.get(cid)
+        if gname is not None:
+            return _EQUATION_GLYPH[gname]
+        try:
+            return orig_unichr(self, cid)
+        except PDFUnicodeNotDefined:
+            base = getattr(self, "basefont", "") or ""
+            if cid == 129 and any(marker in base for marker in _BULLET_FONTS):
+                return "•"
+            raise
+
+    get_encoding._menegroth_glyphs = True
+    EncodingDB.get_encoding = classmethod(get_encoding)
+    PDFSimpleFont.to_unichr = to_unichr
+
+
+def _hairline_rules(page) -> list[dict]:
+    """Fraction bars are hairline rectangles, not characters."""
+    found: list[dict] = []
+    seen: set[tuple] = set()
+    for src in (getattr(page, "rects", None) or [], getattr(page, "lines", None) or []):
+        for rule in src:
+            width = float(rule["width"])
+            height = float(rule["height"])
+            if height > 0.75 or not (3.0 <= width <= 90.0):
+                continue
+            key = (round(float(rule["x0"]), 1), round(float(rule["top"]), 1), round(width, 1))
+            if key in seen:
+                continue
+            seen.add(key)
+            found.append(rule)
+    return found
+
+
+def _fraction_text(numerator: str, denominator: str) -> str:
+    """``Sa/(R/Ie)``. Parentheses go on a side that is itself a sum or a fraction."""
+    def wrap(side: str) -> str:
+        if " " in side or "/" in side or "∕" in side:
+            return f"({side})"
+        return side
+    return f"{wrap(numerator)}/{wrap(denominator)}"
+
+
+def _inline(glyphs: list[dict]) -> str:
+    """Reading order along one side of a fraction bar."""
+    ordered = sorted(glyphs, key=lambda g: (g["x0"], g["top"]))
+    parts = [ordered[0]["text"]]
+    for prev, cur in zip(ordered, ordered[1:]):
+        parts.append(" " if cur["x0"] - prev["x1"] > _SPACE_GAP else "")
+        parts.append(cur["text"])
+    return "".join(parts)
+
+
+def _join_fraction_bars(chars: list[dict], rules: list[dict]) -> list[dict]:
+    """Replace a hairline rule and the glyphs it separates with ``(num)/(den)``.
+
+    Narrower rules are joined first, so a nested bar becomes one glyph of the
+    outer fraction. A rule with a sentence on either side is left alone.
+    """
+    items = []
+    for char in chars:
+        item = dict(char)
+        item["_src"] = id(char)
+        items.append(item)
+    for rule in sorted(rules, key=lambda r: float(r["width"])):
+        rule_y = float(rule["top"])
+        above: list[dict] = []
+        below: list[dict] = []
+        for item in items:
+            width = max(float(item["x1"]) - float(item["x0"]), 0.1)
+            overlap = min(float(item["x1"]), float(rule["x1"]) + 1.0) - max(
+                float(item["x0"]), float(rule["x0"]) - 1.0
+            )
+            if overlap < 0.45 * width:
+                continue
+            mid = (float(item["top"]) + float(item["bottom"])) / 2.0
+            if rule_y - _FRACTION_REACH <= float(item["bottom"]) <= rule_y + 1.5 and mid <= rule_y:
+                above.append(item)
+            elif rule_y - 1.5 <= float(item["top"]) <= rule_y + _FRACTION_REACH and mid >= rule_y:
+                below.append(item)
+        if not above or not below or len(above) > 12 or len(below) > 12:
+            continue
+        consumed = set(map(id, above + below))
+        sources: list[int] = []
+        for item in above + below:
+            if "_src" in item:
+                sources.append(item["_src"])
+            else:
+                sources.extend(item.get("sources", []))
+        items = [item for item in items if id(item) not in consumed]
+        items.append({
+            "text": _fraction_text(_inline(above), _inline(below)),
+            "x0": float(rule["x0"]),
+            "x1": float(rule["x1"]),
+            # Sit on the lowest numerator glyph so a nested bar stays within
+            # reach of the bar above it. Reading order uses the equals sign.
+            "top": max(float(item["top"]) for item in above),
+            "bottom": max(float(item["bottom"]) for item in below),
+            "bar_top": rule_y,
+            "fraction": True,
+            "sources": sources,
+        })
+    return items
+
+
+def _baseline_anchor(fraction: dict, chars: list[dict]) -> dict | None:
+    """The glyph that shares the fraction's baseline, preferably the equals sign."""
+    bar = float(fraction["bar_top"])
+    x0 = float(fraction["x0"])
+
+    def midpoint(char: dict) -> float:
+        return (float(char["top"]) + float(char["bottom"])) / 2.0
+
+    left = [
+        char for char in chars
+        if char.get("upright", True)
+        and float(char["x1"]) <= x0 + 2.0
+        and abs(midpoint(char) - bar) <= 10.0
+    ]
+    if left:
+        equals = [char for char in left if char.get("text") == "="]
+        return max(equals or left, key=lambda char: float(char["x1"]))
+    right = [
+        char for char in chars
+        if char.get("upright", True)
+        and float(char["x0"]) >= float(fraction["x1"]) - 2.0
+        and abs(midpoint(char) - bar) <= 10.0
+    ]
+    if right:
+        return min(right, key=lambda char: float(char["x0"]))
+    return None
+
+
+def _place_fraction(fraction: dict, anchor: dict) -> dict:
+    """One character on ``anchor``'s line, spanning the fraction bar."""
+    placed = dict(anchor)
+    placed["text"] = fraction["text"]
+    placed["x0"] = float(fraction["x0"])
+    placed["x1"] = float(fraction["x1"])
+    placed["width"] = placed["x1"] - placed["x0"]
+    placed["upright"] = True
+    return placed
+
+
+# Bottoms within this many points share a baseline. On ASCE 7-22 a subscript
+# sits about 1.3 pt below its line, and the next line is about 7 pt further
+# down. Wider than 1.5 pt starts joining those lines.
+_BASELINE_TOLERANCE = 1.5
+
+
+def _snap_baselines(chars: list[dict]) -> None:
+    """Give every glyph on a baseline the top of the tallest glyph there.
+
+    pdfplumber starts a new line when glyph tops differ by more than its
+    y tolerance, which drops a subscript onto its own line. The bottom of
+    the subscript still sits on the line.
+    """
+    if not chars:
+        return
+    ordered = sorted(chars, key=lambda char: float(char["bottom"]))
+    clusters: list[list[dict]] = [[ordered[0]]]
+    for char in ordered[1:]:
+        if float(char["bottom"]) - float(clusters[-1][-1]["bottom"]) <= _BASELINE_TOLERANCE:
+            clusters[-1].append(char)
+        else:
+            clusters.append([char])
+    for cluster in clusters:
+        top = min(float(char["top"]) for char in cluster)
+        for char in cluster:
+            delta = top - float(char["top"])
+            if delta == 0.0:
+                continue
+            char["top"] = top
+            if "doctop" in char:
+                char["doctop"] = float(char["doctop"]) + delta
+            char["height"] = float(char["bottom"]) - top
+
+
+def _column_text(page, x0: float, x1: float, *, use_fractions: bool, text_kw: dict) -> str:
+    """Text of one column.
+
+    Rotated watermark glyphs are dropped. Subscripts are snapped onto their
+    baseline. A hairline that joins a numerator to a denominator replaces
+    those glyphs with one fraction on the equals-sign line. The remaining
+    glyphs stay in pdfplumber's line breaking.
+    """
+    cropped = page.crop((x0, 0, x1, page.height))
+    objects = cropped.objects
+    chars = [char for char in objects.get("char", []) if char.get("upright", True)]
+    if use_fractions:
+        rules = [
+            rule for rule in _hairline_rules(page)
+            if x0 - 0.5 <= float(rule["x0"]) < x1
+        ]
+        joined = _join_fraction_bars(chars, rules)
+        placed = []
+        for fraction in (item for item in joined if item.get("fraction")):
+            drop = set(fraction.get("sources", []))
+            pool = [char for char in chars if id(char) not in drop]
+            anchor = _baseline_anchor(fraction, pool)
+            if anchor is None:
+                continue
+            chars = pool
+            placed.append(_place_fraction(fraction, anchor))
+        chars.extend(placed)
+    _snap_baselines(chars)
+    chars.sort(key=lambda char: (float(char["top"]), float(char["x0"])))
+    objects["char"] = chars
+    return cropped.extract_text(**text_kw) or ""
+
 
 def _detect_column_split(page) -> float | None:
     """
@@ -145,7 +423,13 @@ def _extract_page_text(page, *, detect_columns: bool = True,
     "wordswithoutspaces" at the default).  ``None`` keeps pdfplumber's
     defaults, so existing corpus texts are unaffected unless re-run with an
     explicit tolerance.
+
+    A hairline that joins a numerator to a denominator becomes one glyph,
+    ``(numerator)/(denominator)``, on the surrounding line. Other pages, and
+    the prose around a fraction, keep pdfplumber's line breaking. Private
+    equation glyphs are decoded either way.
     """
+    _install_glyph_fallback()
     # Only pass tolerances when set, so None preserves pdfplumber defaults.
     text_kw: dict[str, float] = {}
     if x_tolerance is not None:
@@ -154,16 +438,19 @@ def _extract_page_text(page, *, detect_columns: bool = True,
         text_kw["y_tolerance"] = y_tolerance
 
     split_x = _detect_column_split(page) if detect_columns else None
+    use_fractions = bool(_hairline_rules(page))
 
     if split_x is not None:
-        left  = page.crop((0, 0, split_x, page.height))
-        right = page.crop((split_x, 0, page.width, page.height))
-        left_text  = left.extract_text(**text_kw)  or ""
-        right_text = right.extract_text(**text_kw) or ""
+        left_text = _column_text(page, 0, split_x, use_fractions=use_fractions, text_kw=text_kw)
+        right_text = _column_text(
+            page, split_x, page.width, use_fractions=use_fractions, text_kw=text_kw
+        )
         page_text = left_text.rstrip() + "\n" + right_text.lstrip()
         col_tag = "  (two-column)"
     else:
-        page_text = page.extract_text(**text_kw) or ""
+        page_text = _column_text(
+            page, 0, page.width, use_fractions=use_fractions, text_kw=text_kw
+        )
         col_tag = ""
 
     # Tables (extracted from the full page to avoid splitting a table)
@@ -193,6 +480,8 @@ def _extract_text_layer(pdf_path: Path, *,
     open_kw = {"password": password} if password else {}
     with pdfplumber.open(pdf_path, **open_kw) as pdf:
         for i, page in enumerate(pdf.pages, 1):
+            if i == 1 or i % 100 == 0:
+                print(f"    page {i}/{len(pdf.pages)}", flush=True)
             combined, col_tag = _extract_page_text(
                 page, detect_columns=detect_columns,
                 x_tolerance=x_tolerance, y_tolerance=y_tolerance,

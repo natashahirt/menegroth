@@ -174,6 +174,30 @@ function classify_diaphragm_idealization(;
     return _classify_wind_diaphragm(construction, ratio)
 end
 
+"""
+    deck_floor_diaphragm(; loading, span, depth, horizontal_irregularity_types, kwargs...)
+
+Idealization of a concrete-filled steel deck floor.
+
+The construction is fixed to `:concrete_filled_metal_deck`. ASCE 7-22 §12.3.1.2
+and §26.2 both name that deck (corpus: asce-7-22, PDF pp. 179, 324). This
+classifies the analysis model only. It does not compute a diaphragm shear
+strength. SDI C-2017 §2.4 item 7 (corpus: sdi-c-2017, PDF p. 10) sends that
+strength to AISI S310.
+"""
+function deck_floor_diaphragm(;
+        loading,
+        span,
+        depth,
+        horizontal_irregularity_types,
+        kwargs...)
+    return classify_diaphragm_idealization(;
+        loading,
+        construction=:concrete_filled_metal_deck,
+        span, depth, horizontal_irregularity_types,
+        kwargs...)
+end
+
 """Seismic idealization. `disp_ratio` is `nothing` when Eq. 12.3-1 was not supplied."""
 function _classify_seismic_diaphragm(;
         construction, ratio, irregularities, vertical_elements,

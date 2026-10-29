@@ -59,8 +59,12 @@ Uses TributaryLoads for accurate load distribution based on tributary polygons.
     A single master node is elected per story and every other frame node on
     that story is `Asap.RigidLink`-ed to it, tying `(u_x, u_y, θ_z)` and
     leaving `(u_z, θ_x, θ_y)` free. Kinematic constraint is exact (Bathe §4.4;
-    see `external/Asap/src/Elements/rigidlink.jl`) and keeps `K` SPD. This
-    link is the drift authority. A penalty shell is not.
+    see `external/Asap/src/Elements/rigidlink.jl`) and keeps `K` SPD when
+    every tied node already sits on a column, beam, or wall shell.
+    [`require_diaphragm_node_stiffness`](@ref) throws if one does not: a node
+    created only to hold the diaphragm has no stiffness in the free DOFs, and
+    the reduced model is singular. This link is the drift authority. A
+    penalty shell is not.
   - `:shell` — Semirigid shell elements from slab geometry, at the slab's real
     modulus (Phase 9a: shells join the assembled `K` via the 4-argument
     `Asap.Model` constructor). The modulus is not a penalty value.
@@ -133,7 +137,9 @@ function to_asap!(struc::BuildingStructure{T, A, P};
                   params::DesignParameters=DesignParameters(),
                   diaphragms::Union{Symbol, Nothing}=nothing,
                   shell_props::Union{Nothing, NamedTuple}=nothing,
-                  load_routing::Symbol=:auto) where {T, A, P}
+                  load_routing::Symbol=:auto,
+                  mesh_div::Int=WALL_MESH_DIV,
+                  mesh_rows::Int=WALL_MESH_ROWS) where {T, A, P}
     
     # Determine diaphragm mode: explicit argument overrides params
     diaphragm_mode = isnothing(diaphragms) ? params.diaphragm_mode : diaphragms
@@ -234,7 +240,10 @@ function to_asap!(struc::BuildingStructure{T, A, P};
         @debug "Created shell diaphragm" n_shells=length(shell_elements)
     end
 
-    wall_shells, wall_nodes = _mesh_wall_shells(struc, params, nodes, shell_elements)
+    wall_shells, wall_nodes, shells_by_wall = _mesh_wall_shells(
+        struc, params, nodes, shell_elements;
+        mesh_div=mesh_div, mesh_rows=mesh_rows)
+    struc.wall_mesh = WallMesh(shells_by_wall, wall_assemblies(struc.walls))
 
     if diaphragm_mode == :rigid && !isempty(struc.slabs)
         # Frame nodes are built with θz fixed. The rigid-link release then
@@ -270,6 +279,7 @@ function to_asap!(struc::BuildingStructure{T, A, P};
     routing = _resolve_load_routing(load_routing, shell_elements)
     # Diaphragm shells only were visible to routing. Wall shells join the
     # model here; they are not a second diaphragm and they are not a line load.
+    # Their weight is a separate area load on the triangles, added below.
     append!(shell_elements, wall_shells)
 
     if routing === :shell_area
@@ -321,6 +331,13 @@ function to_asap!(struc::BuildingStructure{T, A, P};
         end
     end
 
+    # Wall self-weight is dead load on the wall triangles only. The pressure
+    # is ρ t g per triangle, then multiplied by the same dead factor the slab
+    # dead load in this solve already carries. Slab shells are not in this load.
+    if !isempty(wall_shells)
+        _append_factored_wall_self_weight!(loads, wall_shells, params; patterned=use_patterns)
+    end
+
     # 7. Build unified Asap.Model (Phase 9a — diaphragm shells now contribute
     # to the assembled stiffness). The 4-argument constructor merges shell
     # mesh nodes into the node list via _merge_shell_nodes (which reuses the
@@ -342,6 +359,8 @@ function to_asap!(struc::BuildingStructure{T, A, P};
     if isempty(struc.asap_rigid_links)
         Asap.solve!(struc.asap_model)
     else
+        require_diaphragm_node_stiffness(struc.asap_rigid_links,
+            struc.asap_model.frame_elements, struc.asap_model.shell_elements)
         Asap.solve!(struc.asap_model, struc.asap_rigid_links; reprocess=false)
     end
 
@@ -461,6 +480,11 @@ Story membership is read from `struc.skeleton.stories[k].vertices`
 (rebuilt by `rebuild_stories!`). Stories with fewer than two frame nodes
 produce no links — a single-node story has no rigid tie to enforce.
 
+The master is one of those frame nodes. It is not a new node. A node tied
+only in plan still needs its own `u_z`, `θ_x`, and `θ_y` stiffness;
+[`require_diaphragm_node_stiffness`](@ref) refuses the link set when either
+end lacks it.
+
 Slave DOFs that are already fixed at their `Asap.Node` (i.e. a support at
 that story) are silently skipped by `_build_rigidlink_reduction` with a
 warning; this is by design (`external/Asap/src/Elements/rigidlink.jl:132`).
@@ -565,12 +589,14 @@ end
 
 """
     _mesh_wall_shells(struc, params, frame_nodes, existing_shells)
-      -> (shells, wall_nodes)
+      -> (shells, wall_nodes, shells_by_wall)
 
 Mesh `struc.walls` into `ShellTri3` elements on `frame_nodes`.
 
-Same panel split as `StructuralSizer` `_build_asap_wall_model`: `mesh_div = 2`
-(two quads along the wall, two triangles each). A placed wall node reuses an
+Same panel split as `StructuralSizer` `_build_asap_wall_model`. `mesh_div`
+quads run along the wall and `mesh_rows` quads run up the story; each quad is
+two triangles. The defaults are [`WALL_MESH_DIV`](@ref) and
+[`WALL_MESH_ROWS`](@ref). A placed wall node reuses an
 existing frame, slab-mesh, or wall node when the 3D distance is at most 1 mm.
 A node farther than 1 mm stays separate. Two existing nodes at the same
 nearest distance within that tolerance throw `ArgumentError`.
@@ -585,12 +611,15 @@ frame joint, and no diaphragm is intentionally left unattached; the resulting
 model is singular, which is the correct signal that the wall is not connected.
 
 An empty `walls` vector returns empty collections and does not read materials.
+`shells_by_wall[i]` is the triangles of `struc.walls[i]`, in mesh order.
 """
 function _mesh_wall_shells(struc::BuildingStructure,
                            params::DesignParameters,
                            frame_nodes::Vector{Asap.Node},
-                           existing_shells)
-    isempty(struc.walls) && return Asap.ShellTri3[], Asap.Node[]
+                           existing_shells;
+                           mesh_div::Int=WALL_MESH_DIV,
+                           mesh_rows::Int=WALL_MESH_ROWS)
+    isempty(struc.walls) && return Asap.ShellTri3[], Asap.Node[], Vector{Asap.ShellTri3}[]
 
     # Geometry and material are checked before any node is created, so a throw
     # does not leave a half-mutated frame node.
@@ -620,9 +649,14 @@ function _mesh_wall_shells(struc::BuildingStructure,
     end
 
     shells = Asap.ShellTri3[]
+    shells_by_wall = [Asap.ShellTri3[] for _ in struc.walls]
     wall_nodes = Asap.Node[]
     seen = Set{UInt64}()
-    nx = 2    # columns along the wall; FEMLateralEvaluator mesh_div default
+    (mesh_div >= 1 && mesh_rows >= 1) || throw(ArgumentError(
+        "to_asap!: wall mesh_div and mesh_rows must be ≥ 1 " *
+        "(got $mesh_div × $mesh_rows)."))
+    nx = mesh_div
+    ny = mesh_rows
 
     """Nearest existing node within `tol`, or `nothing` when all are farther."""
     function _nearest_existing(x, y, z)
@@ -666,27 +700,29 @@ function _mesh_wall_shells(struc::BuildingStructure,
         return nd
     end
 
-    for (span, conc) in zip(spans, concretes)
+    for (iw, (span, conc)) in enumerate(zip(spans, concretes))
         sec_t = span.t_m * u"m"
         sec_E = uconvert(u"Pa", conc.E)
         ν = conc.ν
         ρ = ustrip(u"kg/m^3", conc.ρ)
-        for c in 0:(nx - 1)
-            s0 = c / nx
-            s1 = (c + 1) / nx
+        for (s0, s1, r0, r1) in wall_panel_quads(nx, ny)
             x0 = span.x1 + (span.x2 - span.x1) * s0
             y0 = span.y1 + (span.y2 - span.y1) * s0
             x1 = span.x1 + (span.x2 - span.x1) * s1
             y1 = span.y1 + (span.y2 - span.y1) * s1
-            nb0 = wall_node!(x0, y0, span.z_bot)
-            nb1 = wall_node!(x1, y1, span.z_bot)
-            nt1 = wall_node!(x1, y1, span.z_top)
-            nt0 = wall_node!(x0, y0, span.z_top)
-            push!(shells, Asap.ShellTri3((nb0, nb1, nt1), sec_t, sec_E, ν; id=:wall, ρ=ρ))
-            push!(shells, Asap.ShellTri3((nb0, nt1, nt0), sec_t, sec_E, ν; id=:wall, ρ=ρ))
+            z0 = span.z_bot + (span.z_top - span.z_bot) * r0
+            z1 = span.z_bot + (span.z_top - span.z_bot) * r1
+            nb0 = wall_node!(x0, y0, z0)
+            nb1 = wall_node!(x1, y1, z0)
+            nt1 = wall_node!(x1, y1, z1)
+            nt0 = wall_node!(x0, y0, z1)
+            t1 = Asap.ShellTri3((nb0, nb1, nt1), sec_t, sec_E, ν; id=:wall, ρ=ρ)
+            t2 = Asap.ShellTri3((nb0, nt1, nt0), sec_t, sec_E, ν; id=:wall, ρ=ρ)
+            push!(shells, t1, t2)
+            push!(shells_by_wall[iw], t1, t2)
         end
     end
-    return shells, wall_nodes
+    return shells, wall_nodes, shells_by_wall
 end
 
 """Story elevations present on the skeleton, as 1 mm keys."""
@@ -742,6 +778,73 @@ function _join_wall_nodes_to_rigid_diaphragm!(links::Vector{Asap.RigidLink},
         push!(linked, objectid(nd))
     end
     return links
+end
+
+"""
+    require_diaphragm_node_stiffness(links, elements, shells)
+
+Throw if a plan-only rigid link uses a node that is not already on a
+column, beam, or wall shell.
+
+The diaphragm ties `(u_x, u_y, θ_z)` and leaves `(u_z, θ_x, θ_y)` free on
+both ends. Those three DOFs are not carried by the constraint, so each end
+needs stiffness of its own. A node created only to be the master has none,
+and the reduced stiffness is singular. A wall-line frame edge with zero
+area and zero inertia does not count. A node whose vertical and bending
+DOFs are already supported does.
+"""
+function require_diaphragm_node_stiffness(links, elements, shells)
+    stiff = Set{UInt64}()
+    for el in elements
+        _frame_stabilizes_free_gravity_dofs(el) || continue
+        push!(stiff, objectid(el.nodeStart))
+        push!(stiff, objectid(el.nodeEnd))
+    end
+    for sh in shells
+        (sh.thickness > 0 && sh.E > 0) || continue
+        for nd in sh.nodes
+            push!(stiff, objectid(nd))
+        end
+    end
+    for link in links
+        _plan_only_diaphragm_tie(link) || continue
+        for nd in (link.nodeA, link.nodeB)
+            _gravity_dofs_already_supported(nd) && continue
+            objectid(nd) in stiff && continue
+            p = nd.position
+            x = ustrip(u"m", p[1])
+            y = ustrip(u"m", p[2])
+            z = ustrip(u"m", p[3])
+            throw(ArgumentError(
+                "rigid diaphragm node at ($x, $y, $z) m keeps u_z, θ_x, and " *
+                "θ_y free and is not a node of a column, beam, or wall shell. " *
+                "A node created only to hold the diaphragm makes the model singular."))
+        end
+    end
+    return nothing
+end
+
+"Column or beam with area and bending stiffness. A zero wall-line section does not."
+function _frame_stabilizes_free_gravity_dofs(el)
+    sec = el.section
+    ustrip(u"m^2", sec.A) > 0 || return false
+    return ustrip(u"m^4", sec.Ix) > 0 || ustrip(u"m^4", sec.Iy) > 0
+end
+
+"True when the link ties plan motion and leaves vertical and bending DOFs free."
+function _plan_only_diaphragm_tie(link::Asap.RigidLink)
+    rel = link.release
+    length(rel) == 6 || return false
+    ties_plan = !rel[1] || !rel[2] || !rel[6]
+    releases_gravity = rel[3] && rel[4] && rel[5]
+    return ties_plan && releases_gravity
+end
+
+"True when u_z, θ_x, and θ_y are supports, so they are not free unknowns."
+function _gravity_dofs_already_supported(nd::Asap.Node)
+    dof = nd.dof
+    length(dof) >= 5 || return false
+    return !dof[3] && !dof[4] && !dof[5]
 end
 
 """
@@ -1036,6 +1139,7 @@ function sync_asap!(struc::BuildingStructure;
     # `Element.eccentricity` (external/Asap/src/Elements/K.jl §global_K!).
     _sync_edge_eccentricity!(struc, params)
     _sync_shell_area_pressures!(struc, params)
+    _sync_wall_self_weight!(struc, params)
     _sync_vault_thrust_line_loads!(struc, params)
 
     # 3. Re-process stiffness and loads (topology unchanged). When the caller
@@ -1058,6 +1162,8 @@ function sync_asap!(struc::BuildingStructure;
         _solve_with_patterns!(struc, params)
     elseif !isempty(struc.asap_rigid_links)
         _clear_pattern_solve_cache!(struc)
+        require_diaphragm_node_stiffness(struc.asap_rigid_links,
+            struc.asap_model.frame_elements, struc.asap_model.shell_elements)
         Asap.solve!(struc.asap_model, struc.asap_rigid_links; reprocess=false)
     else
         _clear_pattern_solve_cache!(struc)
@@ -1089,15 +1195,17 @@ end
 Refresh shell-area `Asap.AreaLoad` pressures from current cell self-weights
 (Phase 7 rebuild parity for [`sync_asap!`](@ref)), mirroring the per-cell
 tributary pressure refresh. `_create_shell_area_loads!` pushes exactly one
-`AreaLoad` per non-grade slab in slab order, so the refresh is applied only when
-that 1:1 correspondence holds (equal counts); otherwise it is skipped to avoid
-assigning a pressure to the wrong slab. When shell-area routing was not used
-there are no `AreaLoad`s and this is a no-op.
+`AreaLoad` per non-grade slab in slab order. `:wall_self_weight` loads are
+not slab pressures and are excluded. The refresh runs only when the
+remaining loads are 1:1 with the eligible slabs; otherwise it is skipped.
+When shell-area routing was not used there are no slab `AreaLoad`s and
+this is a no-op.
 """
 function _sync_shell_area_pressures!(struc::BuildingStructure, params::DesignParameters)
     model = struc.asap_model
     isnothing(model) && return
-    area_loads = Asap.AreaLoad[ld for ld in model.loads if ld isa Asap.AreaLoad]
+    area_loads = Asap.AreaLoad[ld for ld in model.loads
+                               if ld isa Asap.AreaLoad && ld.id !== :wall_self_weight]
     isempty(area_loads) && return
 
     eligible = [slab for slab in struc.slabs
@@ -1349,6 +1457,50 @@ function _pattern_dead_factor(struc::BuildingStructure)
     return 1.0
 end
 
+"""
+Dead factor for wall self-weight.
+
+Pattern solves store slab dead as `combo.D * D`. The single gravity solve
+stores an envelope. Wall weight uses that same choice: `combo.D` when the
+dead and live tributaries are split, and the dead-only envelope otherwise.
+The envelope of a pure dead load is the largest `D` factor in the set.
+"""
+function _wall_self_weight_dead_factor(params::DesignParameters; patterned::Bool)
+    patterned && return Float64(governing_combo(params).D)
+    combos = params.load_combinations
+    isempty(combos) && throw(ArgumentError(
+        "wall self-weight: load_combinations is empty, so the dead factor " *
+        "cannot be taken from the envelope."))
+    return ustrip(u"Pa", envelope_pressure(combos, 1.0u"Pa", 0.0u"Pa"))
+end
+
+"""Append wall-triangle self-weight, factored as dead load."""
+function _append_factored_wall_self_weight!(loads, shells, params::DesignParameters;
+                                           patterned::Bool)
+    factor = _wall_self_weight_dead_factor(params; patterned)
+    for ld in wall_self_weight_loads(shells)
+        ld.pressure = factor * ld.pressure
+        push!(loads, ld)
+    end
+    return loads
+end
+
+"""Rewrite `:wall_self_weight` pressures from the shells and the current dead factor."""
+function _sync_wall_self_weight!(struc::BuildingStructure, params::DesignParameters)
+    model = struc.asap_model
+    isnothing(model) && return
+    patterned = params.pattern_loading != :none &&
+                !isempty(struc.cell_dead_loads) &&
+                any(!isempty, values(struc.cell_dead_loads))
+    factor = _wall_self_weight_dead_factor(params; patterned)
+    for ld in model.loads
+        (ld isa Asap.AreaLoad && ld.id === :wall_self_weight) || continue
+        isempty(ld.shells) && continue
+        ld.pressure = factor * unfactored_wall_self_weight_pressure(first(ld.shells))
+    end
+    return
+end
+
 # Module-level cache for checkerboard partition (geometry-only, computed once per model)
 const _CHECKERBOARD_CACHE = Ref{Tuple{UInt, Tuple{Vector{Int}, Vector{Int}}}}((UInt(0), (Int[], Int[])))
 
@@ -1439,6 +1591,15 @@ function _generate_pattern_cases(struc::BuildingStructure)
             case_full = Asap.AbstractLoad[case_full; gloads]
             case_a = Asap.AbstractLoad[case_a; gloads]
             case_b = Asap.AbstractLoad[case_b; gloads]
+        end
+        # Wall self-weight is already multiplied by the dead factor. It stays
+        # with dead in every pattern case. It is not a live load.
+        wsw = Asap.AbstractLoad[ld for ld in model.loads
+                                if ld isa Asap.AreaLoad && ld.id === :wall_self_weight]
+        if !isempty(wsw)
+            case_full = Asap.AbstractLoad[case_full; wsw]
+            case_a = Asap.AbstractLoad[case_a; wsw]
+            case_b = Asap.AbstractLoad[case_b; wsw]
         end
     end
     
@@ -3636,7 +3797,6 @@ function add_coating_loads!(struc::BuildingStructure, params::DesignParameters;
                    member_edge_group == :struts ? struc.struts : struc.beams
 
     model = struc.asap_model
-    g = 9.80665  # m/s²
     n_added = 0
 
     for m in member_array
@@ -3658,7 +3818,7 @@ function add_coating_loads!(struc::BuildingStructure, params::DesignParameters;
 
         # Weight per unit length: thickness(in) × perimeter(in) / 144 → ft² per ft × density (pcf) → lb/ft
         w_lbft = StructuralSizer.coating_weight_per_foot(coating, perimeter_in)
-        w_Nm = w_lbft * 4.44822 / 0.3048  # lb/ft → N/m
+        w_Nm = to_newtons_per_meter(w_lbft * u"lbf/ft")
 
         # Apply as downward (-Z) line load on each segment of this member
         for seg_idx in segment_indices(m)

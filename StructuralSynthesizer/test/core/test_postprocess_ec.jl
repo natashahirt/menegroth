@@ -208,3 +208,22 @@ end
         StructuralSynthesizer.MaterialVolumes(stud => v))
     @test studs.rebar ≈ uconvert(u"kg", v * stud.ρ)
 end
+
+@testset "column axial strength uses the column concrete and Eq. (10-2)" begin
+    slab = StructuralSizer.NWC_4000
+    col = StructuralSizer.RC_6000_60
+    mats = MaterialOptions(concrete = slab, rebar = StructuralSizer.Rebar_60, column = col)
+    @test StructuralSynthesizer.resolve_column_concrete(mats) === StructuralSizer.NWC_6000
+    @test StructuralSynthesizer.resolve_column_rebar(mats) === StructuralSizer.Rebar_60
+    @test resolve_concrete(DesignParameters(materials = mats)) === slab
+    @test StructuralSynthesizer._get_design_fc(DesignParameters(materials = mats)) ==
+          StructuralSizer.NWC_6000.fc′
+
+    fc = ustrip(u"Pa", StructuralSizer.NWC_6000.fc′)
+    fy = ustrip(u"Pa", StructuralSizer.Rebar_60.Fy)
+    Pu = 2.5e6
+    Ag = StructuralSynthesizer._tied_ag_for_pu(Pu, fc, fy)
+    @test StructuralSynthesizer._tied_pn_max(Ag, fc, fy) ≈ Pu
+    # Eq. (10-2) at ρg = 0.01 is below 0.65×0.80×f′c×Ag, so the required area is larger.
+    @test Ag > Pu / (0.65 * 0.80 * fc)
+end

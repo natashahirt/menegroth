@@ -99,9 +99,11 @@ unshored, so the pre-cure check runs.
 - `composite`: Enable composite beam sizing via AISC 360 Chapter I (default: false)
 - `composite_slab_type`: `:solid` or `:deck` (default: `:solid`)
 - `composite_t_slab`: Slab thickness override. `nothing` reads the sized slab.
-- `composite_deck_hr`, `composite_deck_wr`, `composite_deck_orientation`: required for `:deck` unless `composite_deck_profile` is set
-- `composite_deck_profile`: Vulcraft profile name (`"1.5VL"`, `"2VLI"`, `"3VLI"`, or a side-lap variant). Supplies `hr` and `wr`; an explicit `hr`/`wr` must agree with it.
-- `composite_deck_e_mid_ht`: AISC 360-22 §I8.2a `e_mid-ht` for perpendicular deck. `nothing` keeps `Rp = 0.6`.
+- `composite_deck_hr`, `composite_deck_wr`: required for `:deck` unless `composite_deck_profile` is set
+- `composite_deck_orientation`: `:from_slab` (default) takes each beam's rib angle from its direction and the span axis of the slabs it supports. `:perpendicular` or `:parallel` asserts that orientation for every beam.
+- `composite_deck_profile`: Vulcraft profile name (`"1.5VL"`, `"2VLI"`, `"3VLI"`, or a side-lap variant). Supplies `hr`, `wr`, and rib pitch; an explicit `hr`/`wr`/pitch must agree with it.
+- `composite_deck_pitch`: rib spacing, perpendicular to the ribs, when no profile is named. Needed to place studs on skewed deck.
+- `composite_deck_e_mid_ht`: AISC 360-22 §I8.2a `e_mid-ht` for perpendicular or skewed deck, measured perpendicular to the rib. `nothing` keeps `Rp = 0.6`.
 - `composite_deck_anchorage_spacing`: deck attachment spacing, §I3.2c(d) (≤ 18 in). `nothing` reports it unchecked.
 - `composite_anchor_d`, `composite_anchor_length`, `composite_anchor_Fu`: the stud. All unset uses the named default stud.
 - `composite_twist_spacing`: spacing of twist restraints for the hogging check and Commentary Eq. C-F1-5. `nothing` uses the member span.
@@ -129,8 +131,9 @@ Base.@kwdef struct SteelBeamOptions
     composite_t_slab::Union{Nothing, Length} = nothing
     composite_deck_hr::Union{Nothing, Length} = nothing
     composite_deck_wr::Union{Nothing, Length} = nothing
-    composite_deck_orientation::Symbol = :perpendicular
+    composite_deck_orientation::Symbol = :from_slab
     composite_deck_profile::Union{Nothing, String} = nothing
+    composite_deck_pitch::Union{Nothing, Length} = nothing
     composite_deck_e_mid_ht::Union{Nothing, Length} = nothing
     composite_deck_anchorage_spacing::Union{Nothing, Length} = nothing
     composite_anchor_d::Union{Nothing, Length} = nothing

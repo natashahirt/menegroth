@@ -122,15 +122,15 @@ mutable struct IncrementalEngine
     # (`NodeWarmState` / `WarmContext`) for why the CHOLMOD factorization stays out
     # of these snapshots (it lives only on the live `struc.asap_model`).
     warm_memo::Dict{NodeKey, NodeWarmState}
-    # P0-2 Step B memo-shrink mode. `:whole` (default) captures an independent
-    # whole-struc snapshot per node. `:shared` captures ONE post-level snapshot
-    # and shares it by reference across the level's co-recomputed nodes (the
-    # snapshot is immutable and only ever `deepcopy`ed on restore), collapsing an
-    # N-slab level's memo from N whole-struc copies to 1 with byte-identical
-    # results. `:composable` stores a `SlabNodeSnapshot` per fine slab node and
-    # rebuilds a clean slab level from the baseline + overlay + one `sync_asap!`
-    # (drops the solved Asap model from the slab memo; exact-first gated, not
-    # the default).
+    # P0-2 Step B memo-shrink mode. `:shared` (default) captures ONE post-level
+    # snapshot and shares it by reference across the level's co-recomputed
+    # nodes (the snapshot is immutable and only ever `deepcopy`ed on restore),
+    # collapsing an N-slab level's memo from N whole-struc copies to 1 with
+    # byte-identical results. `:whole` captures an independent whole-struc
+    # snapshot per node. `:composable` stores a `SlabNodeSnapshot` per fine
+    # slab node and rebuilds a clean slab level from the baseline + overlay +
+    # one `sync_asap!` (drops the solved Asap model from the slab memo;
+    # exact-first gated, not the default).
     snapshot_mode::Symbol
 end
 
@@ -179,14 +179,14 @@ const SNAPSHOT_MODES = (:whole, :shared, :composable)
 """
     _default_snapshot_mode() -> Symbol
 
-The default `snapshot_mode` for new engines. `:whole` (today's byte-identical
-per-node capture) unless the `SS_SNAPSHOT_MODE` environment variable opts into an
-alternative — the single switch the exact-first gates flip to A/B a shrink mode
-over the WHOLE invalidation matrix without touching any call site. Production
-never sets the var, so the default is always `:whole`.
+The default `snapshot_mode` for new engines. `:shared` (one immutable
+post-level snapshot, restored by deepcopy, byte-identical to `:whole`) unless
+the `SS_SNAPSHOT_MODE` environment variable opts into `:whole` or
+`:composable`. The exact-first gates flip that variable to A/B a mode over
+the invalidation matrix without touching any call site.
 """
 function _default_snapshot_mode()
-    mode = Symbol(get(ENV, "SS_SNAPSHOT_MODE", "whole"))
+    mode = Symbol(get(ENV, "SS_SNAPSHOT_MODE", "shared"))
     mode in SNAPSHOT_MODES || throw(ArgumentError(
         "SS_SNAPSHOT_MODE=$(mode) is not a valid snapshot mode; expected one of $(SNAPSHOT_MODES)."))
     return mode
@@ -631,8 +631,8 @@ function run_target!(engine::IncrementalEngine, params::DesignParameters;
         #     snapshot is immutable and only ever `deepcopy`ed on restore
         #     (`restore_node_state`) or read field-wise (`restore_slab_node_writes!`),
         #     so sharing can never let one node's restore corrupt another. In
-        #     `:whole` mode (default) each node captures its own copy, exactly as
-        #     before. Either way the RESTORED state is identical.
+        #     `:whole` mode each node captures its own copy. Either way the
+        #     RESTORED state is identical. `:shared` is the default.
         shared_state = engine.snapshot_mode === :shared ? capture_node_state(engine.struc) : nothing
         for key in dirty_keys
             node = get_node(engine.graph, key)

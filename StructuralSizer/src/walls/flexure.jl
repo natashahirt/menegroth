@@ -45,8 +45,6 @@
 
 using Unitful
 
-# 1 ksi = 6.894757e6 Pa; 1 kip = 4.4482216e3 N; 1 in = 0.0254 m.
-const _KSI_TO_PA = 6.894757e6
 
 # ------------------------------------------------------------------------------
 # φ for wall axial–flexure (ACI 318-19 Table 21.2.2)
@@ -104,7 +102,7 @@ loads use the strain-compatibility diagram instead (see `wall_pm_at_c_si`).
 function wall_axial_flexure_capacity_si(fc::Real, fy::Real, Es::Real,
                                         lw::Real, t::Real, ρl::Real, Nu::Real;
                                         εcu::Real=0.003)
-    β1  = _beta1_from_fc_psi(fc / _KSI_TO_PA * 1000.0)  # f'c psi → β1 (Table 22.2.2.4.3)
+    β1  = _beta1_from_fc_psi(fc / Asap.PSI_TO_PA)  # f'c psi → β1 (Table 22.2.2.4.3)
     Ast = ρl * lw * t
     ω   = ρl * fy / fc
     α   = Nu / (lw * t * fc)
@@ -160,7 +158,7 @@ in N·m about the section mid-length, `εt` the extreme-tension layer strain.
 """
 function wall_pm_at_c_si(fc::Real, fy::Real, Es::Real, lw::Real, t::Real,
                          Ast::Real, c::Real; εcu::Real=0.003, nlayers::Int=40)
-    β1 = _beta1_from_fc_psi(fc / _KSI_TO_PA * 1000.0)
+    β1 = _beta1_from_fc_psi(fc / Asap.PSI_TO_PA)
     a  = min(β1 * c, lw)
     Cc = 0.85 * fc * t * a                     # concrete compression resultant (N)
     y_Cc  = a / 2                              # from compression face (x = lw end)

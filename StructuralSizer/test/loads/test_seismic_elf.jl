@@ -283,6 +283,21 @@ const _RTOL = 1e-12
         hFx, _, _ = factored_lateral_components(half, [10.0], [0.0], [0.0]; load=:W)
         @test hFx == [5.0]
 
+        # ASCE 7-22 §2.3.1 2a and 4a use 0.3S, not 0.5S. §2.3.6 uses 0.15S.
+        # Combination 6 adds Ev. Combination 7 subtracts it. Eh stays at 1.0.
+        @test strength_1_2D_1_6L.S == 0.3
+        @test strength_1_2D_1_0W.S == 0.3
+        @test strength_1_2D_1_6Lr.S == 1.0
+        @test strength_1_2D_1_0E.S == 0.15 && strength_1_2D_1_0E.Ev == 1.0
+        @test strength_0_9D_1_0E.E == 1.0 && strength_0_9D_1_0E.Ev == -1.0
+        @test strength_0_9D_1_0E.L == 0.0 && strength_0_9D_1_0W.L == 0.0
+        # Eq. 12.4-4a: Ev = 0.2 * SDS * D. SDS = 1, D = 10 → 2.
+        @test vertical_seismic_load_effect(1.0, 10.0) ≈ 2.0 atol=_ATOL rtol=_RTOL
+        down = factored_pressure(strength_1_2D_1_0E; D=10.0, E=4.0, Ev=2.0, S=1.0)
+        @test down ≈ 1.2 * 10.0 + 2.0 + 4.0 + 0.15 * 1.0 atol=_ATOL rtol=_RTOL
+        up = factored_pressure(strength_0_9D_1_0E; D=10.0, L=6.0, E=4.0, Ev=2.0)
+        @test up ≈ 0.9 * 10.0 - 2.0 + 4.0 atol=_ATOL rtol=_RTOL
+
         # HAND CHECK, computed from ASCE 7-22 §12.8.6.1. Not a published example.
         # Exactly 100 lb/ft² does not exceed 100, so the factor is 0.4.
         # 100.1 lb/ft² exceeds 100, so the factor is 0.8.

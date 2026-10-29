@@ -254,7 +254,7 @@ function design_footing(::StripFooting,
 
     # Round up to increment, then stay in ft. Mixing the ceil result (inch)
     # with x_bar (ft) promotes through SI; converting that Quantity back
-    # to inch is 0.3048/0.0254, not ×12 — including when the leftover is
+    # to inch is FT_TO_M/IN_TO_M, not ×12 — including when the leftover is
     # already inch-tagged. Convert after ustrip(inch) for every unit; the
     # helper snaps |overhang| ≤ 1e-12 in after face subtraction so a
     # flush 1 ft / 24 in face stays exact zero (ACI 318-11 §10.14.1,

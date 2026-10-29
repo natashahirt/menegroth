@@ -93,126 +93,145 @@ end
 # FEA-Based One-Way Shear Demand  (ACI 318-11 §22.5)
 # =============================================================================
 
+"""Empty diagnostic for a cut that cannot be formed."""
+function _empty_one_way_shear_cut()
+    return (
+        Vu = 0.0kip,
+        cut_length = 0.0u"m",
+        band_width = 0.0u"m",
+        n_elements = 0,
+    )
+end
+
 """
-    _extract_fea_one_way_shear(cache, columns, span_axis, d; verbose=false) -> Force
+    _integrate_one_way_shear_cut(element_data, cx, cy, c1_m, nx, ny, d_m, δ, half_width)
 
-Extract the maximum factored one-way shear demand from the FEA element data.
+Integrate transverse shear on the two faces at `c1/2 + d` from a column.
 
-For each interior column, a section cut is placed at distance `d` from the
-column face, perpendicular to the span axis.  The transverse shear resultant
-`Q_n` (N/m) at each element centroid is projected onto the span-normal
-direction and integrated (area-weighted) across all elements within a narrow
-band at the critical section.
+The cut is bounded to the frame-strip half-width `half_width` measured from
+the column line. An unbounded cut on a multi-bay mesh integrates the whole
+slab width and compares it with the one-bay `l2` capacity.
 
-Returns the maximum `Vu` (Unitful Force) across all columns and both faces
-(left/right of each column along the span axis).
+Signed `Q_n` is summed first. The section resultant is the absolute value of
+that sum. Taking the absolute value element by element prevents cancellation
+and inflates the demand.
 
-# Method
-1. For each column, define two section cuts at ±(c₁/2 + d) from the column
-   centre along the span axis.
-2. Select elements whose centroid falls within a band of width `δ` centred
-   on each cut line (δ = median mesh edge length from the cache).
-3. For each selected element, the shear contribution is
-   `Q_n × area` where `Q_n = |Qxz × nx + Qyz × ny|` and `(nx, ny)` is the
-   span-axis unit vector (the cut is perpendicular to the span, so the
-   normal to the cut is the span direction).
-4. Sum contributions across the band to approximate `∫ Q_n ds × bw`.
+For a uniform intensity the band of depth `2δ` has area `L · 2δ`, so
+`Vu = Σ(Q_n · A) / (2δ)`.
 
 # Reference
-- ACI 318-11 §22.5.1.1: Vu at critical section d from face of support
+ACI 318-11 §11.1.3.1 — critical section at `d` from the face of support
+(corpus: aci-318-11, via `one_way_shear_demand`).
+"""
+function _integrate_one_way_shear_cut(
+    element_data,
+    cx::Float64, cy::Float64,
+    c1_m::Float64,
+    nx::Float64, ny::Float64,
+    d_m::Float64,
+    δ::Float64,
+    half_width::Float64,
+)
+    δ < 1e-9 && return (Vu_N = 0.0, n_elements = 0)
+    tx, ty = -ny, nx
+    n_ed = length(element_data)
+    projs = Vector{Float64}(undef, n_ed)
+    for i in 1:n_ed
+        ed = element_data[i]
+        projs[i] = ed.cx * nx + ed.cy * ny
+    end
+    order = sortperm(projs)
+    sorted_proj = projs[order]
+    band_pad = 1e-6
+    Vu_max = 0.0
+    n_used = 0
+
+    for sign in (-1.0, 1.0)
+        cut_dist = sign * (c1_m / 2 + d_m)
+        cut_s = (cx + cut_dist * nx) * nx + (cy + cut_dist * ny) * ny
+        lo = searchsortedfirst(sorted_proj, cut_s - δ - band_pad)
+        hi = searchsortedlast(sorted_proj, cut_s + δ + band_pad)
+        lo > hi && continue
+        Vu_band = 0.0
+        n_in_band = 0
+        for k in lo:hi
+            ed = element_data[order[k]]
+            proj = (ed.cx * nx + ed.cy * ny) - cut_s
+            abs(proj) > δ && continue
+            t = (ed.cx - cx) * tx + (ed.cy - cy) * ty
+            abs(t) > half_width && continue
+            Qgx = ed.Qxz * ed.ex[1] + ed.Qyz * ed.ey[1]
+            Qgy = ed.Qxz * ed.ex[2] + ed.Qyz * ed.ey[2]
+            Q_n = Qgx * nx + Qgy * ny
+            Vu_band += Q_n * ed.area
+            n_in_band += 1
+        end
+        if n_in_band > 0
+            Vu_section = abs(Vu_band) / (2 * δ)
+            if Vu_section > Vu_max
+                Vu_max = Vu_section
+                n_used = n_in_band
+            end
+        end
+    end
+    return (Vu_N = Vu_max, n_elements = n_used)
+end
+
+"""
+    _extract_fea_one_way_shear(cache, columns, span_axis, d, bw; verbose=false)
+
+Diagnostic FEA one-way shear. `bw` is the frame-strip width (`l2`). The
+result does not govern thickness; `check_one_way_shear` uses the analytical
+demand shared with DDM and EFM.
+
+# Reference
+ACI 318-11 §11.1.3.1, critical section at `d` from the support face.
 """
 function _extract_fea_one_way_shear(
     cache::FEAModelCache,
     columns,
     span_axis::NTuple{2, Float64},
-    d::Length;
+    d::Length,
+    bw::Length;
     verbose::Bool = false,
 )
     ax_len = hypot(span_axis...)
-    ax_len < 1e-9 && return 0.0kip
+    ax_len < 1e-9 && return _empty_one_way_shear_cut()
     nx = span_axis[1] / ax_len
     ny = span_axis[2] / ax_len
+    δ = cache.mesh_edge_length
+    δ < 1e-9 && return _empty_one_way_shear_cut()
 
     d_m = ustrip(u"m", d)
-    δ = cache.mesh_edge_length   # band half-width (m)
-    δ < 1e-9 && return 0.0kip
+    half_width = ustrip(u"m", bw) / 2
+    half_width < 1e-9 && return _empty_one_way_shear_cut()
 
-    Vu_max = 0.0  # N
-
-    for col in columns
-        # Column centroid in mesh coordinates (m)
-        skel = nothing  # not needed — we use the col_stubs slab_node position
-        stubs = get(cache.col_stubs, findfirst(c -> c === col, columns), nothing)
-        # Fall back to getting column position from the stub's slab node
-        col_idx = findfirst(c -> c === col, columns)
-        col_idx === nothing && continue
+    Vu_max = 0.0
+    n_elements = 0
+    for (col_idx, col) in enumerate(columns)
         stub_data = get(cache.col_stubs, col_idx, nothing)
         stub_data === nothing && continue
         slab_node = stub_data.below.slab_node
         cx = ustrip(u"m", slab_node.position[1])
         cy = ustrip(u"m", slab_node.position[2])
-
-        c1_m = ustrip(u"m", col.c1)
-
-        # Two section cuts: one on each side of the column along the span axis
-        for sign in (-1.0, 1.0)
-            cut_dist = sign * (c1_m / 2 + d_m)
-            cut_x = cx + cut_dist * nx
-            cut_y = cy + cut_dist * ny
-
-            # Integrate Q_n across elements in the band
-            Vu_band = 0.0  # N
-            n_in_band = 0
-
-            for ed in cache.element_data
-                # Signed distance from element centroid to cut line
-                # Cut line passes through (cut_x, cut_y) with normal (nx, ny)
-                proj = (ed.cx - cut_x) * nx + (ed.cy - cut_y) * ny
-                abs(proj) > δ && continue
-
-                # Transverse shear projected onto span axis (N/m)
-                # Qxz, Qyz are in the element LCS; project to global span direction
-                # using the element's LCS → GCS mapping.
-                # For a flat slab (z up), the element LCS x̂/ŷ are in the XY plane:
-                #   Q_global_x = Qxz × ex[1] + Qyz × ey[1]
-                #   Q_global_y = Qxz × ex[2] + Qyz × ey[2]
-                Qgx = ed.Qxz * ed.ex[1] + ed.Qyz * ed.ey[1]
-                Qgy = ed.Qxz * ed.ex[2] + ed.Qyz * ed.ey[2]
-
-                # Project onto span axis to get shear normal to the cut
-                Q_n = abs(Qgx * nx + Qgy * ny)   # N/m
-
-                # Contribution = Q_n × element area / δ_band ≈ Q_n × (area / 2δ) × 2δ = Q_n × area
-                # More precisely: we integrate Q_n over the band width.
-                # Each element contributes Q_n × area (N·m), and we divide by
-                # the band depth (2δ) to get force per unit length, then multiply
-                # by the cut length.  But since we want the total shear force
-                # across the full strip width, the area-weighted sum gives:
-                #   V ≈ Σ(Q_n_k × A_k) / (2δ)  × (2δ) = Σ(Q_n_k × A_k)
-                # This works because the band captures one row of elements
-                # perpendicular to the span, and Q_n × A / edge_length ≈ V per element.
-                Vu_band += Q_n * ed.area   # N·m ... but Q_n is N/m, area is m² → N·m
-                n_in_band += 1
-            end
-
-            # Vu_band has units of N·m (shear intensity × area).
-            # Divide by band depth to get the total shear force across the section:
-            # V = Σ(Q_n × A) / (2δ) ... but this isn't quite right.
-            # Actually: for a uniform Q_n field, the total shear across a cut of
-            # length L is V = Q_n × L.  Our band captures elements of total area
-            # A_band ≈ L × 2δ.  So V = Σ(Q_n × A) / (2δ) is correct.
-            if n_in_band > 0
-                Vu_section = Vu_band / (2 * δ)   # N
-                Vu_section > Vu_max && (Vu_max = Vu_section)
-            end
+        cut = _integrate_one_way_shear_cut(
+            cache.element_data, cx, cy, ustrip(u"m", col.c1),
+            nx, ny, d_m, δ, half_width,
+        )
+        if cut.Vu_N > Vu_max
+            Vu_max = cut.Vu_N
+            n_elements = cut.n_elements
         end
     end
 
     Vu_result = uconvert(kip, Vu_max * u"N")
-
     if verbose
-        @debug "FEA ONE-WAY SHEAR" Vu_max=Vu_result δ_band=round(δ * 1000, digits=1) * u"mm"
+        @debug "FEA ONE-WAY SHEAR (diagnostic)" Vu=Vu_result bw=bw δ_mm=round(δ * 1000, digits=1) n=n_elements
     end
-
-    return Vu_result
+    return (
+        Vu = Vu_result,
+        cut_length = bw,
+        band_width = (2 * δ) * u"m",
+        n_elements = n_elements,
+    )
 end

@@ -102,6 +102,25 @@ function check_result(r, min_plan_ft; label="")
     @test abs(V_act - V_exp) / V_exp < 0.01
 end
 
+# The punching start is not allowed to open the thickness grid above
+# min_depth when the estimate itself is thinner than min_depth.
+@testset "Mat punching start does not raise min_depth" begin
+    light = [FoundationDemand(1; Pu=10.0kip, Ps=8.0kip,
+                              c1=18.0u"inch", c2=18.0u"inch")]
+    h_seed = StructuralSizer._mat_punching_h_seed(
+        light, 4000.0u"psi", 1.0, 0.75, 3.0u"inch", 0.5u"inch")
+    @test h_seed < 24.0u"inch"
+    @test StructuralSizer._mat_depth_index(24.0u"inch", 1.0u"inch", h_seed) == 0
+    @test StructuralSizer._mat_depth_index(24.0u"inch", 1.0u"inch", 24.0u"inch") == 0
+    @test StructuralSizer._mat_depth_index(24.0u"inch", 1.0u"inch", 1000.0u"inch") == 59
+
+    # Zero column load: no shear demand, seed stays at cover + db/2.
+    idle = [FoundationDemand(1; Pu=0.0kip, Ps=0.0kip)]
+    h_idle = StructuralSizer._mat_punching_h_seed(
+        idle, 4000.0u"psi", 1.0, 0.75, 3.0u"inch", 0.5u"inch")
+    @test uconvert(u"inch", h_idle) ≈ 3.5u"inch" atol=1e-6u"inch"
+end
+
 # =============================================================================
 # SCENARIO A — Moderate Office Loading
 # =============================================================================

@@ -118,7 +118,7 @@ function _build_or_update_fea!(
     col_I_factor::Float64 = 0.70,
     qD::Union{Nothing, Pressure} = nothing,
     qL::Union{Nothing, Pressure} = nothing,
-    patch_stiffness_factor::Float64 = 1.0,
+    patch_stiffness_factor::Float64 = 100.0,
     edge_beam_βt::Float64 = 0.0,
     edge_beam_l2::Union{Nothing, Length} = nothing,
     edge_beam_c1_avg::Union{Nothing, Length} = nothing,
@@ -188,14 +188,21 @@ function _build_or_update_fea!(
         cache.drop_panel  = drop_panel  # may have changed between iterations (same topology)
         cache.edge_beam_βt = edge_beam_βt  # refresh the stored target for this iteration
         if split_dl
-            # Update section/stubs (use qu for the initial update), then D/L split
+            # Update section/stubs (use qu for the initial update), then D/L split.
+            # The update solve is already the factored envelope when `qu` is
+            # bitwise the pressure `_solve_dl_cases!` would restore
+            # (`max(1.2D+1.6L, 1.4D)`). Snapshot that displacement and skip
+            # the third solve. A mismatch re-solves.
             _update_and_resolve!(cache, h, Ecs, ν_concrete, qu, columns, Lc;
                                  Ecc=Ecc, verbose=verbose, col_I_factor=col_I_factor,
                                  patch_stiffness_factor=patch_stiffness_factor,
                                  edge_beam_l2=edge_beam_l2,
                                  edge_beam_c1_avg=edge_beam_c1_avg)
+            qu_restore = max(1.2 * qD + 1.6 * qL, 1.4 * qD)
+            U_qu = ustrip(u"Pa", qu) == ustrip(u"Pa", qu_restore) ?
+                copy(cache.model.u) : nothing
             _precompute_element_data!(cache, cache.model, struc, slab)
-            _solve_dl_cases!(cache, qD, qL; verbose=verbose)
+            _solve_dl_cases!(cache, qD, qL; verbose=verbose, U_qu=U_qu)
             _combine_element_moments!(cache; verbose=verbose)
         else
             _update_and_resolve!(cache, h, Ecs, ν_concrete, qu, columns, Lc;

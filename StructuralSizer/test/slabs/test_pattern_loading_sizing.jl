@@ -145,8 +145,11 @@ end
         pattern = [:dead_plus_live, :dead_only, :dead_plus_live]
         loads = SR.factored_pattern_loads(pattern, qD, qL)
         
-        # Loaded spans: max(1.2D + 1.6L, 1.4D) = max(280, 140) = 280 psf
-        qu_loaded = max(1.2 * qD + 1.6 * qL, 1.4 * qD)
+        # Loaded spans: max(1.2D + 0.75·1.6L, 1.4D) = max(240, 140) = 240 psf.
+        # ACI 318-11 §13.7.6.3 (corpus: aci-318-11, page 261).
+        qu_loaded = max(1.2 * qD + SR.PATTERN_FACTORED_LIVE_FRACTION * 1.6 * qL, 1.4 * qD)
+        qu_full = max(1.2 * qD + 1.6 * qL, 1.4 * qD)
+        @test ustrip(psf, qu_loaded) < ustrip(psf, qu_full)
         @test ustrip(psf, loads[1]) ≈ ustrip(psf, qu_loaded) rtol=0.01
         @test ustrip(psf, loads[3]) ≈ ustrip(psf, qu_loaded) rtol=0.01
         
@@ -463,6 +466,57 @@ end
         @test 0.5 < ratio_1 < 1.5
         @test 0.5 < ratio_2 < 1.5
     end
+end
+
+@testset "Pattern envelope keeps the full-load demand" begin
+    # Two equal end moments: full-load unbalanced moment is zero.
+    # A checkerboard makes them unequal. Enveloping the end moments first
+    # and then subtracting would hide that transfer. The envelope must
+    # keep the larger unbalanced moment and must not drop the shear.
+    columns = [
+        (position=:edge, corner_kind=:convex),
+        (position=:interior, corner_kind=:convex),
+        (position=:edge, corner_kind=:convex),
+    ]
+    full_spans = [
+        (M_neg_left=100.0kip*u"ft", M_pos=40.0kip*u"ft", M_neg_right=80.0kip*u"ft"),
+        (M_neg_left=80.0kip*u"ft", M_pos=40.0kip*u"ft", M_neg_right=100.0kip*u"ft"),
+    ]
+    pattern_spans = [
+        (M_neg_left=70.0kip*u"ft", M_pos=55.0kip*u"ft", M_neg_right=90.0kip*u"ft"),
+        (M_neg_left=50.0kip*u"ft", M_pos=30.0kip*u"ft", M_neg_right=60.0kip*u"ft"),
+    ]
+    qu = 280.0psf
+    l2 = 20.0u"ft"
+    ln = 18.0u"ft"
+    cm, cs, ub = SR._compute_efm_column_demands(nothing, columns, full_spans, qu, l2, ln)
+    qu_ps = [200.0psf, 120.0psf]
+    cm_p, cs_p, ub_p = SR._compute_efm_column_demands(
+        nothing, columns, pattern_spans, qu, l2, ln; qu_per_span=qu_ps,
+    )
+    @test ustrip(kip*u"ft", ub[2]) ≈ 0.0 atol=1e-8
+    @test ustrip(kip*u"ft", ub_p[2]) ≈ 40.0 atol=1e-6
+    @test ustrip(kip, cs[2]) > ustrip(kip, cs_p[2])
+    SR._raise_abs_vector!(ub, ub_p)
+    SR._raise_abs_vector!(cs, cs_p)
+    SR._raise_abs_vector!(cm, cm_p)
+    @test ustrip(kip*u"ft", ub[2]) ≈ 40.0 atol=1e-6
+    @test ustrip(kip*u"ft", cm[2]) ≥ 90.0 - 1e-6
+    @test ustrip(kip, cs[2]) > ustrip(kip, cs_p[2])
+end
+
+@testset "FEA pattern ratio stays finite" begin
+    # Checkerboard: full-load transfer is almost zero. The ratio must not
+    # scale the shell moment by pattern/full. The pattern moment is a floor.
+    near_zero = SR._fea_pattern_demand(20.0kip*u"ft", 40.0kip*u"ft", 0.01kip*u"ft")
+    @test ustrip(kip*u"ft", near_zero) ≈ 40.0 atol=1e-6
+    @test SR._fea_pattern_ratio(40.0kip*u"ft", 0.01kip*u"ft") == 1.0
+
+    # Comparable frame demands use the ratio, floored at 1.
+    raised = SR._fea_pattern_demand(100.0kip*u"ft", 80.0kip*u"ft", 70.0kip*u"ft")
+    @test ustrip(kip*u"ft", raised) ≈ 100.0 * 80.0 / 70.0 atol=1e-6
+    held = SR._fea_pattern_demand(50.0kip*u"ft", 10.0kip*u"ft", 30.0kip*u"ft")
+    @test ustrip(kip*u"ft", held) ≈ 50.0 atol=1e-6
 end
 
 println("\n✓ Pattern loading diagnostic tests complete!")

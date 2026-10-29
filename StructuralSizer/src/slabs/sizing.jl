@@ -148,6 +148,7 @@ function size_slab!(
     verbose::Bool = false,
     _col_cache = nothing,
     fire_rating::Real = 0.0,
+    defer_asap_process::Bool = false,
     tc::Union{Nothing, TraceCollector} = nothing,
 )
     slab = struc.slabs[slab_idx]
@@ -159,7 +160,8 @@ function size_slab!(
     result = _size_slab!(ft, struc, slab, slab_idx;
                          options=options, column_opts=column_opts,
                          max_iterations=max_iterations, verbose=verbose,
-                         _col_cache=_col_cache, fire_rating=fire_rating, tc=tc)
+                         _col_cache=_col_cache, fire_rating=fire_rating,
+                         defer_asap_process=defer_asap_process, tc=tc)
     emit!(tc, :slab, "size_slab!", string(slab_idx), :exit;
           result_type=string(typeof(result)))
     return result
@@ -187,6 +189,7 @@ function _size_slab!(::FlatPlate, struc, slab, slab_idx;
                      verbose::Bool = false,
                      _col_cache = nothing,
                      fire_rating::Real = 0.0,
+                     defer_asap_process::Bool = false,
                      tc::Union{Nothing, TraceCollector} = nothing)
     col_opts = isnothing(column_opts) ? ConcreteColumnOptions() : column_opts
     fp_opts = options isa FlatSlabOptions ? options.base : options
@@ -202,6 +205,7 @@ function _size_slab!(::FlatPlate, struc, slab, slab_idx;
                               _col_cache=_col_cache,
                               slab_idx=slab_idx,
                               fire_rating=fire_rating,
+                              defer_asap_process=defer_asap_process,
                               tc=tc)
     
     # Handle non-convergence gracefully
@@ -230,6 +234,7 @@ function _size_slab!(::FlatSlab, struc, slab, slab_idx;
                      verbose::Bool = false,
                      _col_cache = nothing,
                      fire_rating::Real = 0.0,
+                     defer_asap_process::Bool = false,
                      tc::Union{Nothing, TraceCollector} = nothing)
     col_opts = isnothing(column_opts) ? ConcreteColumnOptions() : column_opts
 
@@ -254,6 +259,7 @@ function _size_slab!(::FlatSlab, struc, slab, slab_idx;
                               slab_idx=slab_idx,
                               drop_panel=drop_panel,
                               fire_rating=fire_rating,
+                              defer_asap_process=defer_asap_process,
                               tc=tc)
     
     # Always persist drop panel geometry (pipeline adjusts it for ACI compliance

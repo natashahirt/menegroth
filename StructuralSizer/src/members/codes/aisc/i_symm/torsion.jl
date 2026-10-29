@@ -75,7 +75,7 @@ function _torsion_props_in(s::ISymmSection)
     ho_in  = ustrip(u"inch", s.ho)
     J_in4  = ustrip(u"inch^4", s.J)
     # Convert Cw via m→inch factor to avoid Unitful Int64 overflow on inch^6
-    Cw_in6 = ustrip(u"m^6", s.Cw) * (1.0 / 0.0254)^6
+    Cw_in6 = ustrip(u"m^6", s.Cw) / Asap.IN6_TO_M6
     Ix_in4 = ustrip(u"inch^4", s.Ix)
     Sx_in3 = ustrip(u"inch^3", s.Sx)
     Wno_in2 = bf_in * ho_in / 4

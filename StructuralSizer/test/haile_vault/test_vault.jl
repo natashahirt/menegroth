@@ -366,7 +366,7 @@ const TEST_PARAMS = (
         )
         
         # Self-weight for shell only: thickness * density * g
-        g = 9.80665u"m/s^2"
+        g = GRAVITY
         sw_expected = thickness * density * g
         @test ustrip(u"kN/m^2", result.self_weight) ≈ ustrip(u"kN/m^2", sw_expected) rtol=0.01
         

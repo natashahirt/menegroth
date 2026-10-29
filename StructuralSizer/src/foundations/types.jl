@@ -331,7 +331,7 @@ utilization(r::AbstractFoundationResult) = r.utilization
 # Imperial length canonicalize (bearing / strip stations)
 # =============================================================================
 
-# SI m↔inch of 1 ft is 0.3048/0.0254 = 12 + ~1.78e-15, not Unitful's exact
+# SI m↔inch of 1 ft is FT_TO_M/IN_TO_M = 12 + ~1.78e-15, not Unitful's exact
 # ×12. That ulp is conversion noise, not a construction leftover (0.01 in
 # is ~1e10× larger) and not an ε-not-wider rule. Do not grid-round the
 # station onto a 1e-12 leftover: `round(x/1e-12)*1e-12` sends 12+6e-13 to
@@ -348,7 +348,7 @@ const _SI_INCH_ULP = 1e-12
 Convert a length to inches before mixed-unit arithmetic.
 
 Every unit, including already-tagged inch/ft: an inch-tagged SI leftover
-is still 0.3048/0.0254, not ×12. Do not grid-round onto leftover (6e-13
+is still FT_TO_M/IN_TO_M, not ×12. Do not grid-round onto leftover (6e-13
 must not become 1e-12). SI residuals are snapped on the four overhangs
 after face subtraction (`_snap_si_overhang`). A true leftover (e.g.
 0.01 in) is unchanged. Not a construction tolerance and not an

@@ -124,12 +124,13 @@ function check_flat_plate_at_thickness!(
     bar_dia    = bar_diameter(bar_size)
     d          = effective_depth(h; cover=cover, bar_diameter=bar_dia)
     sw_estimate = slab_sw(h)
-    c_span_min = estimate_column_size_from_span(ln_max)
+    c_span_min = _column_span_minimum(ln_max, opts)
+    c_init = min(estimate_column_size_from_span(ln_max), opts.max_column_size)
 
     for col in columns
         if isnothing(col.c1) || col.c1 <= 0u"inch"
-            col.c1 = c_span_min
-            col.c2 = c_span_min
+            col.c1 = c_init
+            col.c2 = c_init
         end
     end
 
@@ -179,7 +180,9 @@ function check_flat_plate_at_thickness!(
         if inner isa EFM && inner.solver == :asap
             get!(slab_caches, :efm, EFMModelCache())
         elseif inner isa FEA
-            get!(slab_caches, :fea, FEAModelCache())
+            acquire_fea_cache!(slab_caches, fea_mesh_key(
+                struc, slab, columns;
+                target_edge=inner.target_edge, drop_panel=drop_panel))
         else
             nothing
         end
@@ -336,17 +339,19 @@ function check_flat_plate_at_thickness!(
         push!(failures, "two_way_deflection")
     end
 
-    # 5e. One-way shear
-    # Extract FEA-based one-way shear demand when available
-    _fea_Vu = if analysis_cache isa FEAModelCache && analysis_cache.initialized
+    # 5e. One-way shear. Analytical demand governs. The FEA cut is diagnostic.
+    _fea_diag = if analysis_cache isa FEAModelCache && analysis_cache.initialized
         _span_ax = _get_span_axis(slab)
-        _extract_fea_one_way_shear(analysis_cache, columns, _span_ax, d; verbose=verbose)
+        _extract_fea_one_way_shear(
+            analysis_cache, columns, _span_ax, d, moment_results.l2;
+            verbose=verbose,
+        )
     else
         nothing
     end
     shear_result = check_one_way_shear(moment_results, d, fc;
                                         verbose=verbose, λ=λ, φ_shear=φ_shear,
-                                        fea_Vu=_fea_Vu)
+                                        fea_diag=_fea_diag)
     if !shear_result.ok
         push!(failures, "one_way_shear")
     end
@@ -487,6 +492,9 @@ function check_flat_plate_at_thickness!(
         converged        = converged,
         failure_reason   = converged ? "" : join(failures, ", "),
         failing_check    = isempty(failures) ? "" : first(failures),
+        governing_check  = _governing_check_label(
+            isempty(failures) ? "" : first(failures), opts.min_h),
+        one_way_shear    = shear_result,
         failures         = failures,
         iterations       = 1,
         h_final          = h,

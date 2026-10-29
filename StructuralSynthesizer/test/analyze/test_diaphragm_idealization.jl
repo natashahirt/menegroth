@@ -178,4 +178,21 @@ end
         # No story force was written onto the model.
         @test all(l -> !(l isa Asap.NodeForce), model.loads)
     end
+
+    @testset "Concrete-filled deck floor" begin
+        # The construction is fixed. Seismic §12.3.1.2 (PDF p. 179):
+        # span/depth of 3 is rigid; above 3 is a shell. Wind §26.2
+        # (PDF p. 324) uses 2, not the seismic 3.
+        @test deck_floor_diaphragm(; loading=:seismic, span=30.0u"ft", depth=10.0u"ft",
+                horizontal_irregularity_types=Int[]) === :rigid
+        @test deck_floor_diaphragm(; loading=:seismic, span=40.0u"ft", depth=10.0u"ft",
+                horizontal_irregularity_types=Int[]) === :shell
+        @test deck_floor_diaphragm(; loading=:wind, span=20.0u"ft", depth=10.0u"ft",
+                horizontal_irregularity_types=Int[]) === :rigid
+        @test deck_floor_diaphragm(; loading=:wind, span=30.0u"ft", depth=10.0u"ft",
+                horizontal_irregularity_types=Int[]) === :shell
+        # A type 2 horizontal irregularity blocks the seismic rigid permission.
+        @test deck_floor_diaphragm(; loading=:seismic, span=30.0u"ft", depth=10.0u"ft",
+                horizontal_irregularity_types=[2]) === :shell
+    end
 end

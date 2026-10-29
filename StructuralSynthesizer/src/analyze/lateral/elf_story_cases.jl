@@ -13,6 +13,11 @@
 # multiplier are computed from this linear solution. θ > θmax throws,
 # which is the code's redesign limit.
 #
+# Wall design does not read these cases until
+# `require_seismic_wall_demand_provisions` accepts them. Cracked stiffness,
+# ρ on Eh, Ax on Mta, the orthogonal combination, and P-delta on strength
+# are not applied in this file.
+#
 # Not done here, on purpose:
 # - Wind story forces.
 # - The §12.7.2 items a Cell cannot carry (storage live, snow, equipment).
@@ -47,10 +52,12 @@ struct ElfLevel
     master::Asap.Node
     "Center of mass [m], the §12.8.6.5 drift point."
     center_of_mass::NTuple{2, Float64}
-    "Full plan dimensions of the story bounding box, (X, Y) [m]."
+    "Projected plan widths (X extent, Y extent) [m], from the floor outline."
     plan_m::NTuple{2, Float64}
-    "Story bounding box, (xmin, xmax, ymin, ymax) [m]."
+    "Vertex extent of the floor outline, (xmin, xmax, ymin, ymax) [m]."
     bounds_m::NTuple{4, Float64}
+    "Closed floor loops [m], from the story's slab faces. Open rings."
+    outline::Vector{Vector{NTuple{2, Float64}}}
 end
 
 """
@@ -237,11 +244,21 @@ function _elf_levels(struc)
     for (idx, story) in skel.stories
         isempty(story.faces) && continue
         z = ustrip(u"m", story.elevation)
-        center, half = story_plate_geometry(skel, story)
-        xmin = center[1] - half[1]
-        xmax = center[1] + half[1]
-        ymin = center[2] - half[2]
-        ymax = center[2] + half[2]
+        # The floor outline, not the axis-aligned box, is the plan the
+        # accidental eccentricity is measured on. For a rectangle the
+        # projected widths equal the box.
+        outline = story_floor_outline(skel, story)
+        pts = Tuple{Float64,Float64}[]
+        for loop in outline
+            append!(pts, loop)
+        end
+        xs = [p[1] for p in pts]
+        ys = [p[2] for p in pts]
+        xmin, xmax = extrema(xs)
+        ymin, ymax = extrema(ys)
+        # (0, 1) measures the width perpendicular to Y, which is the X extent.
+        x_extent = projected_plan_width(pts, (0.0, 1.0))
+        y_extent = projected_plan_width(pts, (1.0, 0.0))
         weight = 0.0
         gravity = 0.0
         n_cells = 0
@@ -260,8 +277,9 @@ function _elf_levels(struc)
             gravity += drift_expected_gravity_load(D, L0, psf)
         end
         push!(raw, (; idx, z, weight, gravity, n_cells,
-            plan=(xmax - xmin, ymax - ymin),
-            bounds=(xmin, xmax, ymin, ymax)))
+            plan=(x_extent, y_extent),
+            bounds=(xmin, xmax, ymin, ymax),
+            outline=outline))
     end
     isempty(raw) && throw(ArgumentError(
         "elf_story_analysis: the skeleton has no story with faces."))
@@ -286,7 +304,8 @@ function _elf_levels(struc)
         master = master_at[zk]
         cm = story_center_of_mass(skel, skel.stories[item.idx], struc.cells)
         push!(levels, ElfLevel(item.idx, item.z, item.z - z_base, hsx,
-            item.weight, item.gravity, 0.0, master, cm, item.plan, item.bounds))
+            item.weight, item.gravity, 0.0, master, cm, item.plan, item.bounds,
+            item.outline))
     end
 
     # Px is the expected gravity at the level and above, same accumulation
@@ -297,7 +316,7 @@ function _elf_levels(struc)
         levels[i] = ElfLevel(levels[i].story, levels[i].elevation_m,
             levels[i].height_m, levels[i].story_height_m, levels[i].weight_kN,
             levels[i].gravity_kN, px, levels[i].master, levels[i].center_of_mass,
-            levels[i].plan_m, levels[i].bounds_m)
+            levels[i].plan_m, levels[i].bounds_m, levels[i].outline)
     end
     return levels
 end
@@ -305,8 +324,8 @@ end
 """
 Accidental torsion `Mz = ±F·e` at each level [kN·m].
 
-`e` is 5% of the plan dimension perpendicular to the force, taken from that
-story's bounding box. `:none` is a zero moment. `:plus` is `+F·e`.
+`e` is 5% of the plan dimension perpendicular to the force, the projected
+width of that story's floor outline. `:none` is a zero moment. `:plus` is `+F·e`.
 """
 function _elf_moments(levels, Fx, direction, torsion)
     sign = torsion == :plus ? 1.0 : torsion == :minus ? -1.0 : 0.0

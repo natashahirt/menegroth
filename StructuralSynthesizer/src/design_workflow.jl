@@ -381,6 +381,11 @@ function build_design_graph(struc::BuildingStructure, params::DesignParameters;
         floor_opts      = resolve_floor_options(params)
         column_opts     = _get_column_opts(params)
         slab_floor_type = _infer_floor_type(floor_opts)
+        # One read-only P-M cache for every slab node. `_precompute` returns
+        # nothing for NLP and for non-concrete columns, which is the same
+        # cache the coarse `size_slabs!` would share. FINDING 5: the cache is
+        # not written after `precompute_capacities!`.
+        shared_col_cache = StructuralSizer._precompute_flat_plate_col_cache(column_opts)
 
         # ── EXACT-FIRST slab ordering (Finding 1, P0) ──────────────────────────
         # Emit the fine per-slab nodes as ROOTS (no inter-slab edges) in ascending
@@ -398,8 +403,10 @@ function build_design_graph(struc::BuildingStructure, params::DesignParameters;
         # `el.forces`), so there is no intermediate sync to reproduce.
         for sidx in 1:n_slabs
             key      = slab_node_key(sidx)
-            base_fn     = _make_slab_node_fn(sidx, floor_opts, column_opts, params, tc)
-            base_fn_ctx = _make_slab_node_fn_ctx(sidx, floor_opts, column_opts, params, tc)
+            base_fn     = _make_slab_node_fn(sidx, floor_opts, column_opts, params, tc,
+                                             shared_col_cache)
+            base_fn_ctx = _make_slab_node_fn_ctx(sidx, floor_opts, column_opts, params, tc,
+                                                 shared_col_cache)
             is_first = sidx == 1
             is_last  = sidx == n_slabs
             # Finding 2: reproduce the legacy `stage_1_slabs` + `size_slabs!` trace
@@ -469,64 +476,64 @@ function build_design_graph(struc::BuildingStructure, params::DesignParameters;
 end
 
 """
-    _make_slab_node_fn(slab_idx, floor_opts, column_opts, params, tc) -> Function
+    _make_slab_node_fn(slab_idx, floor_opts, column_opts, params, tc, col_cache=nothing) -> Function
 
 Closure for a fine per-slab [`StageNode`](@ref): size exactly `slab_idx` and update
 its volume. Byte-identical to the coarse `size_slabs!` per-slab body — same
-`size_slab!` arguments (`max_iterations`, `fire_rating`, `column_opts`), except
-`_col_cache=nothing` — followed by [`_update_one_slab_volume!`](@ref) (the per-slab
-body of `update_slab_volumes!`).
+`size_slab!` arguments (`max_iterations`, `fire_rating`, `column_opts`) and the
+same shared `_col_cache` — followed by [`_update_one_slab_volume!`](@ref) (the
+per-slab body of `update_slab_volumes!`).
 
 FINDING 5 — `_col_cache` purity. The coarse `size_slabs!` builds ONE
-`_col_cache` (an `ACIColumnCapacityCache`) and shares it across every slab;
-each fine node instead passes `_col_cache=nothing`, so every slab rebuilds its
-own. This is result-neutral because the cache is READ-ONLY after
-`precompute_capacities!`: source read confirms the cache's mutable fields
+`_col_cache` (an `ACIColumnCapacityCache`) and shares it across every slab.
+The fine nodes close over that same object (`shared_col_cache`), which is
+`nothing` for NLP and for non-concrete columns. This is result-neutral because
+the cache is READ-ONLY after `precompute_capacities!`: its mutable fields
 (`diagrams`, `diagrams_y`, `depths`, `is_square`, `obj_coeffs`, `fc_ksi`, …) are
 written ONLY in `precompute_capacities!` / `_precompute_diagrams!`
 (`StructuralSizer/src/members/codes/aci/columns/checker.jl`), and the discrete
 MIP consumes a PROVIDED cache exclusively through read accessors —
 `is_feasible`, `check_capacity`, `get_objective_coeff`, `explain_feasibility`
 (`StructuralSizer/src/optimize/solvers/discrete_mip.jl`; the sole write path is
-its `cache === nothing` precompute branch). Rebuilding therefore yields identical
-P-M capacities. This is proved end-to-end by the exact-first gate
-(`verify_design_graph.jl`): `design_building`'s fine path (`_col_cache=nothing`)
-is byte-identical to the coarse shared-cache reference.
+its `cache === nothing` precompute branch). Sharing therefore yields the same
+P-M capacities as rebuilding. `verify_design_graph.jl` is the exact-first check.
 """
 function _make_slab_node_fn(slab_idx::Int, floor_opts, column_opts,
                             params::DesignParameters,
-                            tc::Union{Nothing, StructuralSizer.TraceCollector})
+                            tc::Union{Nothing, StructuralSizer.TraceCollector},
+                            col_cache = nothing)
     return function (struc)
         StructuralSizer.size_slab!(struc, slab_idx;
             options=floor_opts, column_opts=column_opts,
             max_iterations=params.max_iterations, verbose=false,
-            _col_cache=nothing, fire_rating=params.fire_rating, tc=tc)
+            _col_cache=col_cache, fire_rating=params.fire_rating,
+            defer_asap_process=true, tc=tc)
         _update_one_slab_volume!(struc, slab_idx, floor_opts)
         return nothing
     end
 end
 
 """
-    _make_slab_node_fn_ctx(slab_idx, floor_opts, column_opts, params, tc) -> Function
+    _make_slab_node_fn_ctx(slab_idx, floor_opts, column_opts, params, tc, col_cache=nothing) -> Function
 
 Warm-state (Run 6) counterpart to [`_make_slab_node_fn`](@ref): a `(struc, ctx)`
 closure that passes the shared read-only column P-M cache from the warm context
-([`warm_col_cache`](@ref)) as `_col_cache` instead of `nothing`, so a warm rerun
-reuses one precomputed cache across all slab nodes rather than rebuilding it per
-slab. This is byte-identical to the cold `_col_cache=nothing` path: the cache is
-written only by `precompute_capacities!` and read-only thereafter (FINDING 5
-above), the same result-neutrality the coarse `size_slabs!` shared-cache path
-already relies on. When the context carries no cache (`nothing`), this degrades
-to exactly the cold per-slab rebuild.
+([`warm_col_cache`](@ref)) as `_col_cache`. When the context carries no cache,
+the cold graph cache is used. Both are read-only after `precompute_capacities!`
+(FINDING 5).
 """
 function _make_slab_node_fn_ctx(slab_idx::Int, floor_opts, column_opts,
                                 params::DesignParameters,
-                                tc::Union{Nothing, StructuralSizer.TraceCollector})
+                                tc::Union{Nothing, StructuralSizer.TraceCollector},
+                                col_cache = nothing)
     return function (struc, ctx)
+        warm = warm_col_cache(ctx)
         StructuralSizer.size_slab!(struc, slab_idx;
             options=floor_opts, column_opts=column_opts,
             max_iterations=params.max_iterations, verbose=false,
-            _col_cache=warm_col_cache(ctx), fire_rating=params.fire_rating, tc=tc)
+            _col_cache=(warm === nothing ? col_cache : warm),
+            fire_rating=params.fire_rating,
+            defer_asap_process=true, tc=tc)
         _update_one_slab_volume!(struc, slab_idx, floor_opts)
         return nothing
     end
@@ -730,7 +737,13 @@ function prepare!(struc::BuildingStructure, params::DesignParameters;
     populate_levels!(struc; opts=opts)
 
     fc = _get_design_fc(params)
-    estimate_column_sizes!(struc; fc=fc, input_is_centerline=params.geometry_is_centerline)
+    fp_opts = floor_opts isa StructuralSizer.FlatSlabOptions ? floor_opts.base : floor_opts
+    col_cap = hasproperty(fp_opts, :max_column_size) ? fp_opts.max_column_size : nothing
+    # The floor's span/15 switch also sets the starting estimate, so the two agree.
+    col_start = hasproperty(fp_opts, :column_span_minimum) && !fp_opts.column_span_minimum ?
+        :axial : :span
+    estimate_column_sizes!(struc; fc=fc, input_is_centerline=params.geometry_is_centerline,
+                           start=col_start, max_size=col_cap)
 
     # Set column shape for flat plate/slab when RC circular (punching, stiffness, output)
     if floor_type in (:flat_plate, :flat_slab)
@@ -846,7 +859,8 @@ compare_designs(d1, d2)
 """
 function design_building(struc::BuildingStructure, params::DesignParameters;
                          tc::Union{Nothing, StructuralSizer.TraceCollector} = nothing,
-                         framing_opts::NamedTuple = NamedTuple())
+                         framing_opts::NamedTuple = NamedTuple(),
+                         restore::Bool = true)
     t_start = time()
     
     StructuralSizer.emit!(tc, :pipeline, "design_building", "", :enter;
@@ -906,8 +920,10 @@ function design_building(struc::BuildingStructure, params::DesignParameters;
     # Skip sync_asap! — prepare! rebuilds the Asap model from scratch on the
     # next design_building call, and the API route never reads struc.asap_model
     # after this point (serialization uses design.asap_model).
+    # `restore = false` keeps the designed state (slab design details, sized
+    # columns) on `struc` for callers that read it after the run.
     t0 = time()
-    restore!(struc; geometry_is_centerline=params.geometry_is_centerline)
+    restore && restore!(struc; geometry_is_centerline=params.geometry_is_centerline)
     t_restore = time() - t0
 
     design.phase_timings["prepare"] = round(t_prepare; digits=3)
@@ -1008,8 +1024,8 @@ Least standard bar layout with 0.01Ag ≤ As ≤ 0.08Ag.
 
 ACI 318-11 §10.9.1 (corpus: aci-318-11, page 148). Used when a column has no
 section, or its previous bars fall outside that window on a grown cross-section.
-The axial grow check already set Ag from ϕPn = 0.65·0.80·f′c·Ag, so this only
-restores the reinforcement limits. Bar counts are even, matching the column
+The axial grow check already set Ag from ACI 318-11 Eq. (10-2) at ρg = 0.01,
+so this only restores the reinforcement limits. Bar counts are even, matching the column
 reinforcement designer, and at least 4 for tied columns or 6 for spiral.
 """
 function _minimum_longitudinal_section(col, existing)
@@ -1098,15 +1114,34 @@ StructuralSizer.TRACE_REGISTRY[(:_reconcile_columns!, :workflow)] =
     )
 
 """
+Tied-column design axial strength by ACI 318-11 Eq. (10-2), in newtons.
+
+φPn,max = 0.80 φ [0.85 f′c (Ag − Ast) + fy Ast], with φ = 0.65 for a
+compression-controlled tied member (§9.3.2.2(b); corpus aci-318-11, p. 127)
+and Ast = 0.01 Ag (§10.9.1; p. 148). Eq. (10-2) is §10.3.6.2, p. 143.
+`Ag_m2` is gross area in m²; stresses are in Pa.
+"""
+function _tied_pn_max(Ag_m2, fc_Pa, fy_Pa; ρg::Float64 = 0.01, φ::Float64 = 0.65)
+    Ast = ρg * Ag_m2
+    return 0.80 * φ * (0.85 * fc_Pa * (Ag_m2 - Ast) + fy_Pa * Ast)
+end
+
+"""Gross area (m²) at which [`_tied_pn_max`](@ref) equals `Pu_N`."""
+function _tied_ag_for_pu(Pu_N, fc_Pa, fy_Pa; ρg::Float64 = 0.01, φ::Float64 = 0.65)
+    denom = 0.80 * φ * (0.85 * fc_Pa * (1.0 - ρg) + fy_Pa * ρg)
+    return Pu_N / denom
+end
+
+"""
     _reconcile_columns!(struc, params) -> (struc=struc, n_reconciled=Int)
 
 Reconcile column sizes after flat-plate slab sizing.
 
 The slab loop designs columns from tributary Pu (single-floor tributary).
 For multi-story buildings, Asap model forces may be larger due to load
-accumulation from upper floors.  This stage grows any column whose
-Asap-model axial demand exceeds slab-design capacity, using pure
-compression capacity: ϕPn = 0.65 × 0.80 × f′c × Ag  (ACI 318-11 §10.3.6.2).
+accumulation from upper floors. This stage grows any column whose
+Asap-model axial demand exceeds ACI 318-11 Eq. (10-2) at ρg = 0.01,
+using the column concrete and rebar rather than the slab's.
 
 Returns the mutated structure and the number of columns that grew.
 """
@@ -1116,8 +1151,10 @@ function _reconcile_columns!(
     tc::Union{Nothing, StructuralSizer.TraceCollector} = nothing,
 )
     _col_opts = _get_column_opts(params)
-    conc = resolve_concrete(params)
+    conc = resolve_column_concrete(params.materials)
+    reb = resolve_column_rebar(params.materials)
     fc_Pa = ustrip(u"Pa", conc.fc′)
+    fy_Pa = ustrip(u"Pa", reb.Fy)
     E_Pa = ustrip(u"Pa", conc.E)
     ν_c = conc.ν
     G_Pa = E_Pa / (2.0 * (1.0 + ν_c))
@@ -1140,8 +1177,8 @@ function _reconcile_columns!(
         # Check if column needs to grow for axial capacity
         needs_growth = false
         if Pu_N > 0
-            # Required area: ϕ Pn = 0.65 × 0.80 × f'c × Ag  (ACI 318 pure compression)
-            Ag_required_m2 = Pu_N / (0.65 * 0.80 * fc_Pa)
+            # ACI 318-11 Eq. (10-2) at ρg = 0.01. Same expression as the axial check.
+            Ag_required_m2 = _tied_ag_for_pu(Pu_N, fc_Pa, fy_Pa)
             Ag_required = Ag_required_m2 * u"m^2"
             c_required = sqrt(Ag_required_m2) * u"m"
             if c_required > col.c1 || c_required > col.c2
@@ -1572,7 +1609,8 @@ function _size_beams_columns!(struc::BuildingStructure, params::DesignParameters
         iters_used = iter
         size_beams!(struc, beam_opts; reanalyze=false, tc=tc,
                     member_group_overrides=mgo, I_factor=params.beam_I_factor,
-                    composite_concrete=resolve_slab_concrete(params.materials))
+                    composite_concrete=resolve_slab_concrete(params.materials),
+                    composite_option_kwargs(beam_opts)...)
         
         _reanalyze_after_section_change!(struc)
         
@@ -1707,10 +1745,9 @@ end
 """Infer floor type from floor options."""
 _infer_floor_type(opts::StructuralSizer.AbstractFloorOptions) = StructuralSizer.floor_symbol(opts)
 
-"""Get concrete f'c from design parameters (uses material cascade)."""
+"""Column f′c for the initial size estimate. Not the slab concrete."""
 function _get_design_fc(params::DesignParameters)
-    fc = resolve_concrete(params)
-    return fc.fc′
+    return resolve_column_concrete(params.materials).fc′
 end
 
 """Size foundations using FoundationParameters.
@@ -2050,9 +2087,9 @@ function _populate_column_results!(design::BuildingDesign, struc::BuildingStruct
         end
     end
     
-    # ─── Material properties for capacity estimate ───
-    conc = resolve_concrete(params)
-    reb  = resolve_rebar(params)
+    # Column concrete and rebar. The slab grade is a different material.
+    conc = resolve_column_concrete(params.materials)
+    reb  = resolve_column_rebar(params.materials)
     fc′_Pa = ustrip(u"Pa", conc.fc′)
     fy_Pa  = ustrip(u"Pa", reb.Fy)
 
@@ -2241,14 +2278,12 @@ function _populate_column_results!(design::BuildingDesign, struc::BuildingStruct
             result.interaction_ratio = NaN
 
         elseif !is_steel && !isnothing(col.c1) && !isnothing(col.c2)
-            # ACI 318-19 §22.4.2 — RC columns (rectangular or circular)
+            # ACI 318-11 Eq. (10-2) — tied RC columns (rectangular or circular)
             Ag = result.shape == :circular ?
                  ustrip(u"m^2", π / 4 * col.c1^2) :
                  ustrip(u"m^2", col.c1 * col.c2)
-            ρg = 0.01  # ACI 318 minimum
-            Ast = ρg * Ag
-            φ = 0.65  # tied column
-            φPn0 = 0.80 * φ * (0.85 * fc′_Pa * (Ag - Ast) + fy_Pa * Ast)  # N
+            Ast = 0.01 * Ag  # §10.9.1 minimum, same assumption as column growth
+            φPn0 = _tied_pn_max(Ag, fc′_Pa, fy_Pa)  # N
 
             result.axial_ratio = φPn0 > 0 ? Pu_N_val / φPn0 : 0.0
 

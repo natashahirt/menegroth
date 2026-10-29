@@ -589,8 +589,9 @@ Composite-aware feasibility check. When `CompositeContext` is provided:
 1. **Construction stage** (I3.1b): bare steel under the SEI/ASCE 37-02 pre-cure load at `Lb_const` (skipped if shored). Not the final envelope.
 2. **Composite ϕMn** (I3.2a / I8.2c): plastic stress distribution at the stud
    strength that fits on the shear span. Full composite is not assumed.
-3. **Deflection** (Commentary I3.2): uses `I_LB` (partial composite) for live-load
-   deflection instead of bare-steel `Ix`.
+3. **Deflection** (Commentary I3.2): live load uses `I_LB`. A member whose
+   moment field has a negative region uses Eq. C-I3-5, `0.6 I_LB + 0.4 I_s`,
+   passed in as `service_continuous`. Unshored dead load stays on `Ix`.
 4. **Shear and weak-axis** checks remain the same as bare steel.
 5. **H1 interaction**: compression uses the larger of composite ϕMn and
    bare-steel ϕMn for sagging; hogging uses I3.2b ϕMn_neg with Pu via H1.
@@ -608,6 +609,7 @@ function is_feasible(
     strength_Mux_pos::Union{Nothing, Float64} = nothing,
     shear_spans=nothing,
     Cb_neg=nothing,
+    service_continuous::Bool=false,
 )::Bool
     Mux = to_newton_meters(demand.Mux)
     # Envelope stays on construction (§I3.1b). `strength_Mux_pos` is the
@@ -700,6 +702,11 @@ function is_feasible(
     δ_max_total = to_meters(demand.δ_max_total)
     I_ref = to_meters_fourth(demand.I_ref)
     I_need = _I_required_for_composite(checker, ctx.shored, L_m, I_ref, δ_max_LL, δ_max_total)
+    if service_continuous && I_need !== nothing
+        # Eq. C-I3-5 is checked on 0.6 I_LB + 0.4 I_s. Ask the stud layout for
+        # the I_LB that produces the required service inertia.
+        I_need = positive_inertia_for_service(I_need, section.Ix; continuous=true)
+    end
     function h1_ok(lay)
         ϕMnx = max(ustrip(u"N*m", lay.ϕMn), ϕMnx_steel)
         urs = _h1_pm_utilizations(Pu_c, Pu_t, Mux_pos, Mux_neg, Muy,
@@ -723,19 +730,23 @@ function is_feasible(
     ϕMnx = max(ustrip(u"N*m", layout.ϕMn), ϕMnx_steel)
 
     # --- Deflection Checks (Commentary I3.2) ---
-    I_LB_m4 = ustrip(u"m^4", layout.I_LB)
+    # Live load, and shored total load, use I_LB. A continuous member uses
+    # Eq. C-I3-5 (corpus: aisc-360-22, PDF p. 502): 0.6 I_LB + 0.4 I_s.
+    I_service = composite_service_inertia(layout.I_LB, section.Ix;
+                                          continuous=service_continuous)
+    I_svc_m4 = ustrip(u"m^4", uconvert(u"m^4", I_service))
     I_steel_m4 = cache.Ix[j]
 
-    # LL deflection check (e.g. L/360) — uses I_LB for composite
+    # LL deflection check (e.g. L/360)
     if !isnothing(checker.deflection_limit) && I_ref > 0 && δ_max_LL > 0
-        δ_scaled = δ_max_LL * I_ref / I_LB_m4
+        δ_scaled = δ_max_LL * I_ref / I_svc_m4
         δ_ratio = δ_scaled / L_m
         δ_ratio <= checker.deflection_limit || return false
     end
 
-    # Total deflection check (e.g. L/240) — DL uses I_steel (unshored) or I_LB (shored)
+    # Total deflection check (e.g. L/240). Unshored dead load stays on Ix.
     if !isnothing(checker.total_deflection_limit) && I_ref > 0 && δ_max_total > 0
-        I_total_eff = ctx.shored ? I_LB_m4 : I_steel_m4
+        I_total_eff = ctx.shored ? I_svc_m4 : I_steel_m4
         δ_scaled = δ_max_total * I_ref / I_total_eff
         δ_ratio = δ_scaled / L_m
         δ_ratio <= checker.total_deflection_limit || return false
@@ -785,6 +796,7 @@ function is_feasible(
         spans = adjacent_shear_spans(field.demand_of_s, g.s_star, L_i)
         is_feasible(checker, cache, j, section, material, demand, geometry, ctx_i;
                     strength_Mux_pos = g.M_pos, shear_spans = spans,
+                    service_continuous = moment_field_has_negative(field.demand_of_s),
                     Cb_neg = cb_neg_from_moment_field(field.demand_of_s;
                                                                    L = L_i, L_twist = psc.ctx.L_twist)) || return false
     end
@@ -1076,6 +1088,7 @@ function explain_feasibility(
     strength_Mux_pos::Union{Nothing, Float64} = nothing,
     shear_spans=nothing,
     Cb_neg=nothing,
+    service_continuous::Bool=false,
 )::FeasibilityExplanation
     checks = CheckResult[]
 
@@ -1195,6 +1208,9 @@ function explain_feasibility(
     end
 
     I_need = _I_required_for_composite(checker, ctx.shored, L_m, I_ref, δ_max_LL, δ_max_total)
+    if service_continuous && I_need !== nothing
+        I_need = positive_inertia_for_service(I_need, section.Ix; continuous=true)
+    end
     function h1_ok(lay)
         mcx = max(ustrip(u"N*m", lay.ϕMn), ϕMnx_steel)
         trial = _h1_pm_utilizations(Pu_c, Pu_t, Mux_pos, Mux_neg, Muy,
@@ -1223,6 +1239,8 @@ function explain_feasibility(
     for msg in vcat(deck.failures, deck.unchecked)
         stud_clause *= "; " * msg
     end
+    rib_note = deck_rib_note(ctx.slab)
+    isempty(rib_note) || (stud_clause *= "; " * rib_note)
     push!(checks, CheckResult("shear_anchors", layout.ok,
           layout.ok ? pos_ratio : Inf, Float64(layout.n_half),
           Float64(layout.n_rows_max * ctx.anchor.n_per_row), stud_clause))
@@ -1247,25 +1265,28 @@ function explain_feasibility(
     push!(checks, CheckResult("flexure_neg", neg_ok,
           neg_ratio, Mux_neg, ϕMn_neg, clause))
 
-    # --- Deflection (Commentary I3.2) ---
-    I_LB_m4 = ustrip(u"m^4", layout.I_LB)
+    # --- Deflection (Commentary I3.2, Eq. C-I3-5 when the span changes sign) ---
+    I_service = composite_service_inertia(layout.I_LB, section.Ix;
+                                          continuous=service_continuous)
+    I_svc_m4 = ustrip(u"m^4", uconvert(u"m^4", I_service))
     I_steel_m4 = cache.Ix[j]
+    defl_clause = service_continuous ? "AISC 360-22 Comm. C-I3-5" : "AISC 360-22 Comm. I3.2"
 
     if !isnothing(checker.deflection_limit) && I_ref > 0 && δ_max_LL > 0
-        δ_scaled = δ_max_LL * I_ref / I_LB_m4
+        δ_scaled = δ_max_LL * I_ref / I_svc_m4
         δ_ratio = δ_scaled / L_m
         limit_val = checker.deflection_limit
         push!(checks, CheckResult("deflection_ll", δ_ratio <= limit_val,
-              δ_ratio / limit_val, δ_ratio, limit_val, "AISC 360-16 I3.2"))
+              δ_ratio / limit_val, δ_ratio, limit_val, defl_clause))
     end
 
     if !isnothing(checker.total_deflection_limit) && I_ref > 0 && δ_max_total > 0
-        I_total_eff = ctx.shored ? I_LB_m4 : I_steel_m4
+        I_total_eff = ctx.shored ? I_svc_m4 : I_steel_m4
         δ_scaled = δ_max_total * I_ref / I_total_eff
         δ_ratio = δ_scaled / L_m
         limit_val = checker.total_deflection_limit
         push!(checks, CheckResult("deflection_total", δ_ratio <= limit_val,
-              δ_ratio / limit_val, δ_ratio, limit_val, "AISC 360-16 I3.2"))
+              δ_ratio / limit_val, δ_ratio, limit_val, defl_clause))
     end
 
     capacity_checks = filter(c -> c.name != "b1_amplification", checks)
@@ -1316,6 +1337,7 @@ function explain_feasibility(
         spans = adjacent_shear_spans(field.demand_of_s, g.s_star, L_i)
         ex = explain_feasibility(checker, cache, j, section, material, demand, geometry, ctx_i;
                                  strength_Mux_pos = g.M_pos, shear_spans = spans,
+                                 service_continuous = moment_field_has_negative(field.demand_of_s),
                                  Cb_neg = cb_neg_from_moment_field(field.demand_of_s;
                                                                    L = L_i, L_twist = psc.ctx.L_twist))
         if best === nothing || (!ex.passed && best.passed) ||

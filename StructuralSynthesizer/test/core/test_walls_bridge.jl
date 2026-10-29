@@ -315,4 +315,157 @@ end
               story_plate_geometry(sskel, sstory)
     end
 
+    # ── (12) FLOOR OUTLINE: the boundary of the story faces, not the box.
+    # Two cells share the vertical edge at x = 6. That edge is interior.
+    # The outline is one loop of area 32 m², and its projected widths match
+    # the box because this floor is a rectangle.
+    @testset "Two-cell outline drops the shared edge" begin
+        skel, story = _wb_build_skeleton()
+        loops = story_floor_outline(skel, story)
+        @test length(loops) == 1
+        loop = only(loops)
+        @test length(loop) == 6
+        _, _, area = StructuralSynthesizer._polygon_area_centroid(loop)
+        @test isapprox(area, 32.0; atol = 1e-9)
+        pts = loop
+        @test isapprox(projected_plan_width(pts, (0.0, 1.0)), 8.0; atol = 1e-9)
+        @test isapprox(projected_plan_width(pts, (1.0, 0.0)), 4.0; atol = 1e-9)
+        @test isapprox(projected_plan_width(pts, (0, 1)), 8.0; atol = 1e-9)
+        @test isapprox(projected_plan_width(pts, (1, 0)), 4.0; atol = 1e-9)
+        @test StructuralSynthesizer._ring_signed_area(loop) > 0
+        @test loop[1] == (2.0, 0.0)
+        @test story_floor_outline(skel, story) == loops
+        shared = false
+        for i in eachindex(loop)
+            a = loop[i]
+            b = loop[mod1(i + 1, length(loop))]
+            vertical = isapprox(a[1], 6.0; atol = 1e-9) && isapprox(b[1], 6.0; atol = 1e-9)
+            spans = abs(a[2] - b[2]) > 3.0
+            shared |= vertical && spans
+        end
+        @test !shared
+    end
+
+    # L: bottom 2×1 and a 1×1 sitting on its left half. The box corner (2, 2)
+    # is not on the floor. The outline area is 3, not the box area 4.
+    @testset "L-shaped outline keeps the notch" begin
+        skel = BuildingSkeleton{Float64}()
+        skel.face_vertex_indices = [[1, 2, 3, 4, 5], [5, 4, 6, 7]]
+        vc = [0.0  0.0  0.0;
+              2.0  0.0  0.0;
+              2.0  1.0  0.0;
+              1.0  1.0  0.0;
+              0.0  1.0  0.0;
+              1.0  2.0  0.0;
+              0.0  2.0  0.0]
+        skel.geometry = GeometryCache(vc,
+                                      Vector{typeof(1.0u"m")}(),
+                                      Vector{typeof(1.0u"m^2")}(),
+                                      Dict{Int,Int}(), Dict{Int,Int}())
+        story = Story{Float64}(0.0)
+        story.faces = [1, 2]
+        loops = story_floor_outline(skel, story)
+        @test length(loops) == 1
+        _, _, area = StructuralSynthesizer._polygon_area_centroid(only(loops))
+        @test isapprox(area, 3.0; atol = 1e-9)
+        @test all(p -> !(isapprox(p[1], 2.0; atol = 1e-9) && isapprox(p[2], 2.0; atol = 1e-9)),
+                  only(loops))
+        @test isapprox(projected_plan_width(only(loops), (1.0, 0.0)), 2.0; atol = 1e-9)
+        @test isapprox(projected_plan_width(only(loops), (0.0, 1.0)), 2.0; atol = 1e-9)
+        @test StructuralSynthesizer._ring_signed_area(only(loops)) > 0
+    end
+
+    # Two quads that touch at a corner are not one floor surface.
+    @testset "Corner-only contact is not a closed outline" begin
+        skel = BuildingSkeleton{Float64}()
+        skel.face_vertex_indices = [[1, 2, 3, 4], [3, 5, 6, 7]]
+        vc = [0.0  0.0  0.0;
+              1.0  0.0  0.0;
+              1.0  1.0  0.0;
+              0.0  1.0  0.0;
+              2.0  1.0  0.0;
+              2.0  2.0  0.0;
+              1.0  2.0  0.0]
+        skel.geometry = GeometryCache(vc,
+                                      Vector{typeof(1.0u"m")}(),
+                                      Vector{typeof(1.0u"m^2")}(),
+                                      Dict{Int,Int}(), Dict{Int,Int}())
+        story = Story{Float64}(0.0)
+        story.faces = [1, 2]
+        @test_throws ArgumentError story_floor_outline(skel, story)
+    end
+
+    # The right face spans x = 1 from y = 0 to y = 2. The two left faces split
+    # that edge at (1, 1). The outline is the 2 m × 2 m rectangle, and the
+    # T-junction vertex is interior.
+    @testset "Split shared edge resolves to the outer rectangle" begin
+        skel = BuildingSkeleton{Float64}()
+        skel.face_vertex_indices = [[1, 2, 3, 4], [5, 1, 6, 7], [7, 6, 4, 8]]
+        vc = [1.0  0.0  0.0;
+              2.0  0.0  0.0;
+              2.0  2.0  0.0;
+              1.0  2.0  0.0;
+              0.0  0.0  0.0;
+              1.0  1.0  0.0;
+              0.0  1.0  0.0;
+              0.0  2.0  0.0]
+        skel.geometry = GeometryCache(vc,
+                                      Vector{typeof(1.0u"m")}(),
+                                      Vector{typeof(1.0u"m^2")}(),
+                                      Dict{Int,Int}(), Dict{Int,Int}())
+        story = Story{Float64}(0.0)
+        story.faces = [1, 2, 3]
+        loops = story_floor_outline(skel, story)
+        @test length(loops) == 1
+        _, _, area = StructuralSynthesizer._polygon_area_centroid(only(loops))
+        @test isapprox(area, 4.0; atol = 1e-9)
+        @test all(p -> !(isapprox(p[1], 1.0; atol = 1e-9) && isapprox(p[2], 1.0; atol = 1e-9)),
+                  only(loops))
+        @test StructuralSynthesizer._ring_signed_area(only(loops)) > 0
+        @test isapprox(projected_plan_width(only(loops), (1, 0)), 2.0; atol = 1e-9)
+        @test isapprox(projected_plan_width(only(loops), (0, 1)), 2.0; atol = 1e-9)
+    end
+
+    # Four faces around a 1 m courtyard in a 3 m square. The hole is clockwise,
+    # so the right-hand normal of its left edge points into the courtyard.
+    @testset "Courtyard hole winds opposite the exterior" begin
+        skel = BuildingSkeleton{Float64}()
+        skel.face_vertex_indices = [
+            [1, 2, 3, 4, 5, 6],
+            [4, 3, 10, 9],
+            [12, 11, 10, 9, 8, 7],
+            [6, 5, 8, 7],
+        ]
+        vc = [0.0  0.0  0.0;
+              3.0  0.0  0.0;
+              3.0  1.0  0.0;
+              2.0  1.0  0.0;
+              1.0  1.0  0.0;
+              0.0  1.0  0.0;
+              0.0  2.0  0.0;
+              1.0  2.0  0.0;
+              2.0  2.0  0.0;
+              3.0  2.0  0.0;
+              3.0  3.0  0.0;
+              0.0  3.0  0.0]
+        skel.geometry = GeometryCache(vc,
+                                      Vector{typeof(1.0u"m")}(),
+                                      Vector{typeof(1.0u"m^2")}(),
+                                      Dict{Int,Int}(), Dict{Int,Int}())
+        story = Story{Float64}(0.0)
+        story.faces = [1, 2, 3, 4]
+        loops = story_floor_outline(skel, story)
+        @test length(loops) == 2
+        outer, hole = loops
+        @test isapprox(StructuralSynthesizer._ring_signed_area(outer), 9.0; atol = 1e-9)
+        @test isapprox(StructuralSynthesizer._ring_signed_area(hole), -1.0; atol = 1e-9)
+        @test hole[1] == (1.0, 1.0)
+        a = hole[1]
+        b = hole[2]
+        dx, dy = b[1] - a[1], b[2] - a[2]
+        # Right-hand normal of the directed edge.
+        rx, ry = dy, -dx
+        @test rx > 0 && isapprox(ry, 0.0; atol = 1e-9)
+    end
+
 end

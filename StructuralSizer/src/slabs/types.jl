@@ -645,8 +645,11 @@ struct ProfileResult{L, F} <: AbstractFloorResult
     self_weight::F
 end
 
-"""Composite deck result."""
-struct CompositeDeckResult{L, F} <: AbstractFloorResult
+"""
+Composite deck result. `deck_depth` is the rib height, `fill_depth` the
+concrete above the deck, and `checks` the record from `deck_slab_candidate`.
+"""
+struct CompositeDeckResult{L, F, C<:NamedTuple} <: AbstractFloorResult
     deck_profile::String
     deck_depth::L
     deck_gauge::Int
@@ -655,6 +658,7 @@ struct CompositeDeckResult{L, F} <: AbstractFloorResult
     steel_vol_per_area::L
     concrete_vol_per_area::L
     self_weight::F
+    checks::C
 end
 
 """Steel joist + deck result."""

@@ -138,20 +138,23 @@ function _binary_search_feasible(
     sorted_idx::Vector{Int},
 )::Int
     n = length(sorted_idx)
+    n == 0 && return 0
 
-    # Quick check: is the heaviest section feasible?
+    # The heaviest section can fail a depth limit while a lighter section
+    # passes. Feasibility is not monotone in catalog order, so that case is
+    # a full scan. When the heaviest does pass, binary search still finds a
+    # feasible section and the scan below it keeps the lightest feasible one.
     heaviest = sorted_idx[n]
     if !is_feasible(checker, cache, heaviest, catalog[heaviest], material, demand, geometry)
-        return 0
+        return _lightest_feasible(checker, cache, catalog, material, demand, geometry,
+                                   sorted_idx, 1, n)
     end
 
-    # Quick check: is the lightest section feasible?
     lightest = sorted_idx[1]
     if is_feasible(checker, cache, lightest, catalog[lightest], material, demand, geometry)
         return lightest
     end
 
-    # Binary search: find the smallest index in sorted_idx where section is feasible.
     # Invariant: sorted_idx[lo] is infeasible, sorted_idx[hi] is feasible.
     lo, hi = 1, n
     while hi - lo > 1
@@ -164,21 +167,24 @@ function _binary_search_feasible(
         end
     end
 
-    # hi is the binary search answer, but feasibility may not be perfectly monotonic.
-    # Scan backwards from hi to find a potentially lighter feasible section that
-    # the binary search may have skipped due to non-monotonicity.
-    best = sorted_idx[hi]
-    best_obj = get_objective_coeff(checker, cache, best)
+    return _lightest_feasible(checker, cache, catalog, material, demand, geometry,
+                              sorted_idx, 1, hi)
+end
 
-    scan_start = max(1, hi - 5)
-    for k in scan_start:(hi - 1)
+"""Lightest feasible catalog index in `sorted_idx[lo:hi]`, or 0."""
+function _lightest_feasible(
+    checker, cache, catalog, material, demand, geometry,
+    sorted_idx::Vector{Int}, lo::Int, hi::Int,
+)::Int
+    best = 0
+    best_obj = Inf
+    for k in lo:hi
         j = sorted_idx[k]
-        if get_objective_coeff(checker, cache, j) < best_obj &&
-           is_feasible(checker, cache, j, catalog[j], material, demand, geometry)
-            best = j
-            best_obj = get_objective_coeff(checker, cache, j)
-        end
+        obj = get_objective_coeff(checker, cache, j)
+        obj >= best_obj && continue
+        is_feasible(checker, cache, j, catalog[j], material, demand, geometry) || continue
+        best = j
+        best_obj = obj
     end
-
     return best
 end

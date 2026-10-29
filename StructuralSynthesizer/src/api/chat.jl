@@ -1307,8 +1307,8 @@ end
 """Unit string → scale factor to meters.  Falls back to 1.0 (assume meters)."""
 function _chat_geo_unit_to_m(units::String)::Float64
     s = lowercase(strip(units))
-    s in ("feet", "ft")        && return 0.3048
-    s in ("inches", "in")      && return 0.0254
+    s in ("feet", "ft")        && return Asap.FT_TO_M
+    s in ("inches", "in")      && return Asap.IN_TO_M
     s in ("meters", "m", "")   && return 1.0
     s in ("millimeters", "mm") && return 0.001
     s in ("centimeters", "cm") && return 0.01

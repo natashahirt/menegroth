@@ -9,10 +9,10 @@
 # (φVc = 204.92, φVs = 243.00, φVn = 447.92 kips) are reproduced to <0.2 %.
 
 # US-customary → SI conversion factors used by the corpus-oracle tests.
-const _PSI = 6894.757      # Pa per psi
-const _KIP = 4448.2216     # N per kip (1000 lbf)
-const _IN  = 0.0254        # m per inch
-const _FT  = 0.3048        # m per foot
+const _PSI = PSI_TO_PA
+const _KIP = KIP_TO_N
+const _IN  = IN_TO_M
+const _FT  = FT_TO_M
 
 @testset "analytic wall stiffness (S1)" begin
     E = 25e9; ν = 0.2; lw = 4.0; H = 3.0
@@ -497,13 +497,15 @@ end
         return P * lc / abs(δ)
     end
 
-    # Frame beam-column elastic buckling (pinned-pinned, weak axis).
+    # Frame beam-column elastic buckling (pinned-pinned bending). Twist is fixed
+    # at the base: both ends free in rz is a rigid spin, and the factorizer
+    # drops that pivot once E is the exact psi conversion.
     function frame_buckling_Pcr(lc, A, Ix, Iy, E, G, P_applied; n_elem=12)
         sec = Asap.Section(A*u"m^2", E*u"Pa", G*u"Pa", Ix*u"m^4", Iy*u"m^4", 1e-4*u"m^4")
         nodes = Asap.Node[]
         for i in 0:n_elem
             z  = i * lc / n_elem
-            fx = i == 0      ? :pinned :
+            fx = i == 0      ? [false, false, false, true, true, false] :
                  i == n_elem ? [false, false, true, true, true, true] : :free
             push!(nodes, Asap.Node([0.0u"m", 0.0u"m", z*u"m"], fx))
         end

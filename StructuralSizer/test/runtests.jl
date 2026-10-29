@@ -24,6 +24,7 @@ using Asap  # custom units (kip, ksi, ksf, psf, etc.)
     @testset "Loads" begin
         include("loads/test_seismic_elf.jl")
         include("loads/test_seismic_nehrp_examples.jl")
+        include("loads/test_wind_chapter27.jl")
     end
 
     # ─── Vault ───────────────────────────────────────────────────────────
@@ -106,6 +107,7 @@ using Asap  # custom units (kip, ksi, ksf, psf, etc.)
         include("slabs/test_flat_plate_methods.jl")
         include("slabs/test_size_flat_plate.jl")
         include("slabs/test_method_comparison.jl")
+        include("slabs/test_efm_frame_lines.jl")
         # DDM / EFM analysis
         include("slabs/test_frameline_ddm.jl")
         include("slabs/test_hardy_cross_larger.jl")
@@ -126,6 +128,7 @@ using Asap  # custom units (kip, ksi, ksf, psf, etc.)
         # re-entrant, circular, I-/odd supports via true principal axes
         include("slabs/test_general_critical_section.jl")
         include("slabs/test_fea_combo_envelope.jl")
+        include("slabs/test_fea_mesh_key.jl")
         # Punching / shear
         include("slabs/test_shear_transfer.jl")
         include("slabs/test_shear_studs.jl")
@@ -136,8 +139,13 @@ using Asap  # custom units (kip, ksi, ksf, psf, etc.)
         include("slabs/test_column_growth.jl")
         # Pattern loading
         include("slabs/test_pattern_loading_sizing.jl")
+        include("slabs/test_fea_one_way_shear_cut.jl")
         # Stud catalogs
         include("slabs/test_stud_catalog.jl")
+        include("slabs/test_composite_deck_shear.jl")
+        include("slabs/test_deck_form.jl")
+        include("slabs/test_deck_hogging.jl")
+        include("slabs/test_deck_floor.jl")
         # Waffle geometry
         include("slabs/test_waffle_geometry.jl")
         # Optimizer
@@ -171,6 +179,7 @@ using Asap  # custom units (kip, ksi, ksf, psf, etc.)
         include("optimize/test_hss_column_nlp.jl")
         include("optimize/test_w_column_nlp.jl")
         include("optimize/test_multi_material_mip.jl")
+        include("optimize/test_binary_search_depth.jl")
     end
 
     # ─── Structural Walls (lateral system) ───────────────────────────────

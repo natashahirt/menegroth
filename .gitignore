@@ -19,6 +19,7 @@ secrets/
 
 # Transient run artifacts (test/smoke logs, scratch files, Python caches)
 logs/
+/build/
 .tmp_*
 **/__pycache__/
 

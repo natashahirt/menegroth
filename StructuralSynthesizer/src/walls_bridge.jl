@@ -307,8 +307,9 @@ end
 
 Closed plan loops of one story's floor, in metres, from the skeleton vertices.
 
-Each loop is the exterior of `story.faces`: an edge shared by two of those
-faces is interior and is dropped. Coordinates are `GeometryCache.vertex_coords`,
+Each loop is the exterior of the story's slab faces (`story.faces` filtered by
+[`slab_face_indices`](@ref)): an edge shared by two of those faces is interior
+and is dropped. A detected face with no slab is a courtyard hole. Coordinates are `GeometryCache.vertex_coords`,
 the same datum as [`story_plate_geometry`](@ref) and [`to_wall_line`](@ref).
 A courtyard or a disconnected floor returns more than one loop. The loops are
 open rings (the first vertex is not repeated at the end).
@@ -340,7 +341,12 @@ function story_floor_outline(skeleton::BuildingSkeleton, story::Story)
         "story_floor_outline: story has no faces — empty floor"))
     vc = geo.vertex_coords
 
-    counts = _atomic_edge_counts(vc, skeleton, story.faces)
+    # A face with no slab (a courtyard left out of the face polygons) is a hole.
+    slab_faces = slab_face_indices(skeleton)
+    faces = slab_faces === nothing ? story.faces : filter(in(slab_faces), story.faces)
+    isempty(faces) && throw(ArgumentError(
+        "story_floor_outline: no face on this story carries a slab — empty floor"))
+    counts = _atomic_edge_counts(vc, skeleton, faces)
     for (key, c) in counts
         c <= 2 || throw(ArgumentError(
             "story_floor_outline: edge $key belongs to $c faces — the floor is not a surface"))

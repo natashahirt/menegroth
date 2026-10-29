@@ -315,14 +315,37 @@ end
 # Geometry Cache
 # =============================================================================
 
+"""Face groups that carry a slab and its loads (the `initialize_cells!` groups)."""
+const SLAB_FACE_GROUPS = (:grade, :floor, :roof)
+
+"""
+    slab_face_indices(skel) -> Union{Set{Int}, Nothing}
+
+Faces that carry a slab: the union of the `:grade`, `:floor`, and `:roof`
+face groups. A detected face outside them (a courtyard or void that the input
+face polygons leave out) has no slab. Returns `nothing` when none of those
+groups has a face yet, meaning every detected face is a slab.
+"""
+function slab_face_indices(skel::BuildingSkeleton)
+    out = Set{Int}()
+    for g in SLAB_FACE_GROUPS
+        union!(out, get(skel.groups_faces, g, Int[]))
+    end
+    return isempty(out) ? nothing : out
+end
+
 """
     rebuild_geometry_cache!(skel::BuildingSkeleton)
 
 Precompute and cache all derived geometric properties on the skeleton.
 
-Call once after the skeleton is fully populated (vertices, edges, faces, stories).
-All downstream code should read from `skel.geometry` instead of calling
-`Meshes.measure` / `Meshes.coords` per-element.
+Call once after the skeleton is fully populated (vertices, edges, faces, stories),
+and again after the slab face groups change. All downstream code should read
+from `skel.geometry` instead of calling `Meshes.measure` / `Meshes.coords`
+per-element.
+
+`edge_face_counts` counts only slab faces ([`slab_face_indices`](@ref)), so an
+edge between a slab and a courtyard is a boundary edge (count 1).
 """
 function rebuild_geometry_cache!(skel::BuildingSkeleton{T}) where T
     n_verts = length(skel.vertices)
@@ -357,9 +380,11 @@ function rebuild_geometry_cache!(skel::BuildingSkeleton{T}) where T
                                                            Meshes.Point(0,1,0))))[]
     end
 
-    # ── Edge → face adjacency counts ──
+    # ── Edge → face adjacency counts (slab faces only; a void is a slab edge) ──
     efc = Dict{Int, Int}()
-    for face_edges in skel.face_edge_indices
+    counted = slab_face_indices(skel)
+    for (f, face_edges) in enumerate(skel.face_edge_indices)
+        (counted === nothing || f in counted) || continue
         for e in face_edges
             efc[e] = get(efc, e, 0) + 1
         end

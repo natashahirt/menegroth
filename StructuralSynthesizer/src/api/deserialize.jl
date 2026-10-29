@@ -184,6 +184,8 @@ function _add_faces!(skel::BuildingSkeleton, input::APIInput, coord_unit, _to_m)
     rebuild_geometry_cache!(skel)
     if has_explicit
         _apply_explicit_face_groups!(skel, input.faces, _to_m)
+        # A face the polygons leave out is a void; its edges become slab edges.
+        rebuild_geometry_cache!(skel)
     end
 end
 
@@ -593,8 +595,8 @@ function _resolve_sizing_strategy(s::String)
     key == "nlp" && return :nlp
     key == "discrete" && return :discrete
     key == "mip" && return :discrete  # legacy GH wire value; same as discrete (catalog MIP)
-    @warn "Unknown sizing_strategy '$s' — defaulting to discrete"
-    return :discrete
+    throw(ArgumentError(
+        "Unknown sizing_strategy '$s'; expected \"discrete\", \"nlp\", or legacy \"mip\""))
 end
 
 """Resolve all three material names from API params. Returns `(concrete, rebar, steel)`."""
@@ -808,6 +810,7 @@ function _resolve_column_options(api_params::APIParams)
     ct = lowercase(strip(api_params.column_type))
     _, rebar, steel = _resolve_materials(api_params)
     column_conc = _resolve_concrete_name(api_params.materials.column_concrete)
+    strat = _resolve_sizing_strategy(api_params.column_sizing_strategy)
 
     # column_catalog is optional; resolve a safe default by column_type.
     # This prevents defaults from failing validation (e.g. rc_rect + "preferred").
@@ -825,6 +828,8 @@ function _resolve_column_options(api_params::APIParams)
     end
 
     if ct == "pixelframe"
+        strat === :discrete || throw(ArgumentError(
+            "PixelFrame column sizing requires column_sizing_strategy=\"discrete\""))
         fc_vals = _resolve_pixelframe_fc_values(api_params)
         return StructuralSizer.PixelFrameColumnOptions(
             fc_values = fc_vals .* u"MPa",
@@ -832,7 +837,6 @@ function _resolve_column_options(api_params::APIParams)
     elseif startswith(ct, "rc_")
         shape = ct == "rc_circular" ? :circular : :rect
         catalog_sym = Symbol(_effective_column_catalog_str())
-        strat = _resolve_sizing_strategy(api_params.column_sizing_strategy)
         return StructuralSizer.ConcreteColumnOptions(
             material = column_conc,
             rebar_material = rebar,
@@ -852,7 +856,8 @@ function _resolve_column_options(api_params::APIParams)
             :w  # default
         end
         catalog_sym = Symbol(_effective_column_catalog_str())
-        strat = _resolve_sizing_strategy(api_params.column_sizing_strategy)
+        strat === :nlp && !(section_type in (:w, :hss)) && throw(ArgumentError(
+            "Steel column NLP sizing supports only steel_w and steel_hss"))
         return StructuralSizer.SteelColumnOptions(
             material = steel,
             section_type = section_type,
@@ -1045,6 +1050,7 @@ function _resolve_beam_options(api_params::APIParams)
     end
 
     tlim = something(api_params.mip_time_limit_sec, 30.0)
+    strat = _resolve_sizing_strategy(api_params.beam_sizing_strategy)
     if startswith(bt, "steel_")
         section_type = if bt == "steel_w"
             :w
@@ -1053,7 +1059,8 @@ function _resolve_beam_options(api_params::APIParams)
         else
             :w  # default
         end
-        strat = _resolve_sizing_strategy(api_params.beam_sizing_strategy)
+        strat === :nlp && api_params.composite && throw(ArgumentError(
+            "Composite steel beam sizing requires beam_sizing_strategy=\"discrete\""))
         return StructuralSizer.SteelBeamOptions(;
             material = steel,
             section_type = section_type,
@@ -1062,7 +1069,8 @@ function _resolve_beam_options(api_params::APIParams)
             _composite_beam_fields(api_params)...,
         )
     elseif bt == "rc_rect"
-        strat = _resolve_sizing_strategy(api_params.beam_sizing_strategy)
+        strat === :discrete || throw(ArgumentError(
+            "RC beam sizing requires beam_sizing_strategy=\"discrete\""))
         return StructuralSizer.ConcreteBeamOptions(
             material = concrete,
             rebar_material = rebar,
@@ -1073,7 +1081,8 @@ function _resolve_beam_options(api_params::APIParams)
             time_limit_sec = tlim,
         )
     elseif bt == "rc_tbeam"
-        strat = _resolve_sizing_strategy(api_params.beam_sizing_strategy)
+        strat === :discrete || throw(ArgumentError(
+            "RC T-beam sizing requires beam_sizing_strategy=\"discrete\""))
         return StructuralSizer.ConcreteBeamOptions(
             material = concrete,
             rebar_material = rebar,
@@ -1084,6 +1093,8 @@ function _resolve_beam_options(api_params::APIParams)
             time_limit_sec = tlim,
         )
     elseif bt == "pixelframe"
+        strat === :discrete || throw(ArgumentError(
+            "PixelFrame beam sizing requires beam_sizing_strategy=\"discrete\""))
         fc_vals = _resolve_pixelframe_fc_values(api_params)
         return StructuralSizer.PixelFrameBeamOptions(
             fc_values = fc_vals .* u"MPa",

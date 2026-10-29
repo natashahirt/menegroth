@@ -715,7 +715,10 @@ function _with_concrete_material(opts::StructuralSizer.FlatPlateOptions, concret
         stirrup_bar_size=opts.stirrup_bar_size,
         min_h=opts.min_h,
         objective=opts.objective,
-        col_I_factor=opts.col_I_factor)
+        col_I_factor=opts.col_I_factor,
+        on_inapplicable=opts.on_inapplicable,
+        column_span_minimum=opts.column_span_minimum,
+        punching_thickening=opts.punching_thickening)
 end
 
 function _with_concrete_material(opts::StructuralSizer.FlatSlabOptions, concrete::Concrete)

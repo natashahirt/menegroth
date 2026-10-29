@@ -777,7 +777,7 @@ end
 
 """Build fc_values [MPa] from PixelFrame options. 1 ksi ≈ 6.895 MPa."""
 function _resolve_pixelframe_fc_values(api_params::APIParams)
-    ksi_to_MPa = 6.894757  # 1 ksi = 6.894757 MPa
+    ksi_to_MPa = Asap.KSI_TO_PA / 1e6
     opts = api_params.pixelframe_options
     preset = opts !== nothing ? lowercase(strip(opts.fc_preset)) : "standard"
 

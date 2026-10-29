@@ -2564,7 +2564,7 @@ function size_steel_members!(
     solver::Symbol=:auto,
     resolution::Int=200,
     reanalyze::Bool=true,
-    gravity_factor::Quantity=GRAVITY,  # standard gravity (9.80665 m/s²)
+    gravity_factor::Quantity=GRAVITY,
     deflection_limit::Union{Nothing, Real}=nothing,  # e.g., 1/360
     skel = struc.skeleton,
     edge_ids_in_group = Set(get(skel.groups_edges, member_edge_group, Int[])))
@@ -3343,6 +3343,7 @@ function _size_beams_impl!(
             deck_orientation = orient,
             deck_e_mid_ht = opts.composite_deck_e_mid_ht,
             deck_anchorage_spacing = opts.composite_deck_anchorage_spacing,
+            deck_pitch = slab_type === :deck ? composite_deck_pitch(opts) : nothing,
             L_twist = opts.composite_twist_spacing,
             deck_attachment = deck_attachment_from_options(opts))
     else
@@ -4676,7 +4677,7 @@ end
 
 """
     estimate_column_sizes!(struc; fc=4000u"psi", qu_default=200psf, method=:tributary,
-                           input_is_centerline=false)
+                           input_is_centerline=false, start=:span, max_size=nothing)
 
 Estimate initial column sizes and store in Column.c1, Column.c2.
 
@@ -4692,6 +4693,12 @@ from architectural vertices to structural centerlines for edge/corner columns.
 - `qu_default`: Default factored floor load if not available from cells (default 200 psf)
 - `method`: :tributary (from Voronoi area) or :span (from span rule of thumb)
 - `input_is_centerline`: forwarded to `update_structural_offsets!`; when `true`, all offsets are zero
+- `start`: `:span` sizes for axial load and at least span/15 (StructurePoint).
+  `:axial` sizes for axial load only, with a 14" minimum. Column sizing only
+  grows, so the start is the smallest column the design can return; `:axial`
+  leaves punching growth to the slab loop.
+- `max_size`: the floor's column cap. The estimate never starts above it,
+  so the cap is not silently raised to the estimate.
 
 # Requires
 - Columns initialized with `initialize_members!()`
@@ -4718,7 +4725,12 @@ function estimate_column_sizes!(struc::BuildingStructure;
                                  fc::Unitful.Pressure = 4000u"psi",
                                  qu_default::Unitful.Pressure = 200psf,
                                  method::Symbol = :tributary,
-                                 input_is_centerline::Bool = false)
+                                 input_is_centerline::Bool = false,
+                                 start::Symbol = :span,
+                                 max_size::Union{Nothing, Unitful.Length} = nothing)
+    start in (:span, :axial) ||
+        throw(ArgumentError("start must be :span or :axial, got $(start)"))
+    c_axial_min = 14.0u"inch"
     skel = struc.skeleton
     n_total_stories = length(skel.stories_z) - 1  # stories_z includes ground (0)
     
@@ -4742,8 +4754,9 @@ function estimate_column_sizes!(struc::BuildingStructure;
             At = column_tributary_area(struc, col)
             
             if isnothing(At) || ustrip(u"m^2", At) <= 0
-                # Fall back to span-based estimate
-                c = StructuralSizer.estimate_column_size_from_span(avg_span)
+                # Fall back to span-based estimate, or the minimum for :axial
+                c = start === :axial ? c_axial_min :
+                    StructuralSizer.estimate_column_size_from_span(avg_span)
                 col.c1 = c
                 col.c2 = c
             else
@@ -4752,7 +4765,10 @@ function estimate_column_sizes!(struc::BuildingStructure;
                 
                 # Estimate column size considering both axial load AND punching shear
                 # Pass span for punching-based minimum (c ≥ span/15 per StructurePoint)
-                c = StructuralSizer.estimate_column_size(At, qu, n_above, fc; span=avg_span)
+                c = start === :axial ?
+                    StructuralSizer.estimate_column_size(At, qu, n_above, fc;
+                                                         min_size=c_axial_min) :
+                    StructuralSizer.estimate_column_size(At, qu, n_above, fc; span=avg_span)
                 
                 # Rectangular for edge/corner columns (optional)
                 if col.position == :interior
@@ -4770,7 +4786,12 @@ function estimate_column_sizes!(struc::BuildingStructure;
             col.c1 = c
             col.c2 = c
         end
-        
+
+        if !isnothing(max_size)
+            col.c1 = min(col.c1, max_size)
+            col.c2 = min(col.c2, max_size)
+        end
+
         estimated_count += 1
     end
     

@@ -271,10 +271,16 @@ function composite_context_from_beam(
         SolidSlabOnBeam(t_slab, fc′, Ec, wc, Es, bsl, bsr;
                         edge_dist_left = edl, edge_dist_right = edr)
     else
-        DeckSlabOnBeam(t_slab, fc′, Ec, wc, Es, deck.hr, deck.wr, deck.orientation,
+        θ = get(deck, :rib_angle, nothing)
+        if deck.orientation === :from_slab
+            θ = beam_rib_angle(struc, beam)
+        end
+        orient = θ === nothing ? deck.orientation : StructuralSizer.rib_orientation(θ)
+        DeckSlabOnBeam(t_slab, fc′, Ec, wc, Es, deck.hr, deck.wr, orient,
                        bsl, bsr; edge_dist_left = edl, edge_dist_right = edr,
                        e_mid_ht = get(deck, :e_mid_ht, nothing),
-                       anchorage_spacing = get(deck, :anchorage_spacing, nothing))
+                       anchorage_spacing = get(deck, :anchorage_spacing, nothing),
+                       rib_angle = θ, rib_pitch = get(deck, :rib_pitch, nothing))
     end
 
     return CompositeContext(slab_built, anchor, L; shored = shored, Lb_const = Lb_const,
@@ -345,8 +351,9 @@ function beam_signed_moment_field(struc::BuildingStructure, beam::Beam)
         el = struc.asap_model.elements[seg.edge_idx]
         push!(els, el)
         push!(loads_per, element_loads[el.elementID])
-        L = seg.L
-        push!(len_m, L isa Unitful.Quantity ? ustrip(u"m", L) : Float64(L))
+        # The element's own length: the force recovery asserts 0 ≤ x ≤ that length,
+        # and the segment's stored length can differ from it.
+        push!(len_m, Float64(Asap.ElementProps(el).L))
         ly_z = el.LCS[2][3]
         push!(sag_sign, ly_z >= 0 ? 1.0 : -1.0)   # map My → sagging-positive
     end
@@ -395,8 +402,11 @@ Per-station composite flexural check for `beam` per AISC 360-16 §I3.1a / §I3.2
 `ΣQn` is the available shear transfer at the governing section (v1: one scalar
 value with a continuity-ready interface — full per-station stud/shear-flow
 accumulation is DEFERRED). Returns the governing record (`s_star`, `dcr_max`,
-`b_eff`, `ϕMn`, `Mn`, `sense`, `M`) plus the composite stiffness `I_LB` at the
-governing section for FEM-δ scaling (see [`composite_deflection_scale`]).
+`b_eff`, `ϕMn`, `Mn`, `sense`, `M`) plus `I_LB` and `I_service`.
+
+`I_LB` is the positive-moment lower-bound inertia at the peak sagging station.
+`I_service` is the constant stiffness used to scale the steel-model deflection
+([`composite_deflection_scale`](@ref)).
 """
 function check_composite_beam(struc::BuildingStructure, beam::Beam, section, material,
                               ctx::CompositeContext; ΣQn,
@@ -411,28 +421,40 @@ function check_composite_beam(struc::BuildingStructure, beam::Beam, section, mat
                                     neg_moment = ctx.neg_moment,
                                     extra_breakpoints = demand_bps)
 
-    I_LB = get_I_LB(section, material, ctx.slab, g.b_eff, ΣQn)
-    return (; g..., I_LB = I_LB, left = left, right = right)
+    # I_pos at the peak sagging station. A hogging governing station is not
+    # the positive-moment section Eq. C-I3-5 names. A very large steel φMn
+    # makes the sagging search follow M⁺, because φMn is then constant.
+    sag = governing_sagging_station(section, material, ctx.slab, ctx.L_beam,
+                                    M_of_s, 1.0e30;
+                                    left = left, right = right,
+                                    extra_breakpoints = demand_bps)
+    I_pos = sag.M_pos > 0 ?
+        get_I_LB(section, material, ctx.slab, sag.b_eff, ΣQn) : section.Ix
+    # AISC 360-22 Commentary Eq. C-I3-5 (corpus: aisc-360-22, PDF p. 502):
+    # I = 0.6 I_pos + 0.4 I_neg for a continuous beam under gravity.
+    # A beam with no negative moment keeps I_pos. I_neg is the steel Ix:
+    # the commentary names it and does not give its equation
+    # (see composite_service_inertia).
+    continuous = StructuralSizer.moment_field_has_negative(M_of_s)
+    I_service = composite_service_inertia(I_pos, section.Ix; continuous = continuous)
+    return (; g..., I_LB = I_pos, I_service = I_service, left = left, right = right)
 end
 
 """
-    composite_deflection_scale(section, I_LB) -> Float64
+    composite_deflection_scale(section, I_service) -> Float64
 
-Multiplier that converts a BARE-STEEL FEM deflection (the analysis model carries
-steel sections) into a composite deflection: `δ_composite = δ_steel · (Ix / I_LB)`.
+Multiplier that converts a bare-steel FEM deflection into the deflection of
+the commentary's constant composite stiffness:
+`δ_composite = δ_steel · (Ix / I_service)`.
 
-ENGINEERING JUDGMENT (not an AISC clause): the building is analysed with the steel
-section stiffness `EIx`, so the continuity-correct FEM deflection `δ_FEM` (from
-`member_group_demands`, valid for continuous members) is scaled by the ratio of
-the steel to the composite lower-bound moment of inertia `I_LB` (AISC 360-16
-Commentary §I3.2 / Manual Table 3-20). For a continuous member the composite `I`
-varies along the span (full composite in sagging regions, cracked/steel in
-hogging regions); using the governing-section `I_LB` for the whole member is a
-single-stiffness approximation of that variation, conservative where the hogging
-region is short. This replaces the simply-supported `5wL⁴/384EI` form, which is
-invalid under continuity.
+`I_service` is `I_LB` when the moment does not change sign. For a continuous
+beam it is AISC 360-22 Commentary Eq. C-I3-5 (corpus: aisc-360-22, PDF p. 502),
+`0.6 I_pos + 0.4 I_neg`, from [`check_composite_beam`](@ref). The analysis
+model carries the steel section, so one ratio applies that inertia to the
+whole member. The commentary specifies this constant stiffness for the
+elastic analysis.
 """
-composite_deflection_scale(section, I_LB) = ustrip(section.Ix / I_LB)
+composite_deflection_scale(section, I_service) = ustrip(section.Ix / I_service)
 
 # -----------------------------------------------------------------------------
 # Production payload for size_beams! (one PerStationComposite per group)
@@ -487,6 +509,63 @@ function composite_deck_hr_wr(opts)
             "($(round(u"inch", cat; digits=3)), $(prof.source))."))
     end
     return (hr = hr, wr = wr)
+end
+
+"""
+    composite_deck_pitch(opts) -> Length or nothing
+
+Rib pitch from `composite_deck_profile`, or `composite_deck_pitch` when no
+profile is named. An explicit pitch that differs from the profile by more
+than 1/32 in. throws.
+"""
+function composite_deck_pitch(opts)
+    given = opts.composite_deck_pitch
+    name = opts.composite_deck_profile
+    name === nothing && return given === nothing ? nothing : uconvert(u"m", given)
+    prof = StructuralSizer.composite_deck_profile(name)
+    if given !== nothing && abs(uconvert(u"m", given) - prof.pitch) > (1 / 32) * u"inch"
+        throw(ArgumentError(
+            "composite_deck_pitch = $given does not match deck profile $(prof.name) " *
+            "($(round(u"inch", prof.pitch; digits=3)), $(prof.source))."))
+    end
+    return prof.pitch
+end
+
+"""
+    beam_rib_angle(struc, beam) -> Float64
+
+Angle in radians, in `[0, π/2]`, between `beam` and the deck ribs of the slabs
+it bears on. The ribs run along each slab's span axis (`slab.spans.axis`); the
+beam direction runs from its first to its last chain vertex in plan.
+
+With slabs at different angles on one beam, the result is the smallest angle
+among the slabs that are not parallel to the beam, or `0` when every slab is
+parallel. That pairs the perpendicular `Rg`/`Rp` with the sparsest rib
+crossings, the lower bound over the decks that may sit on the flange.
+
+Throws when the beam bears on no slab or has no plan length.
+"""
+function beam_rib_angle(struc::BuildingStructure, beam)
+    skel = struc.skeleton
+    edges = [struc.segments[si].edge_idx for si in segment_indices(beam)]
+    isempty(edges) && throw(ArgumentError("Beam has no segments."))
+    verts = _ordered_chain_vertices(skel, edges)
+    a = _vertex_xy_m(skel, first(verts))
+    b = _vertex_xy_m(skel, last(verts))
+    dir = (b[1] - a[1], b[2] - a[2])
+    hypot(dir...) > 1e-9 || throw(ArgumentError(
+        "Beam has no plan length, so its deck rib angle is undefined."))
+    slabs = _slabs_on_beam(struc, beam)
+    isempty(slabs) && throw(ArgumentError(
+        "composite_deck_orientation = :from_slab needs a slab on the beam to read " *
+        "the deck span axis. Set :perpendicular or :parallel to assert it."))
+    θ_skew = Inf
+    for slab in slabs
+        θ = StructuralSizer.rib_angle_between(slab.spans.axis, dir)
+        StructuralSizer.rib_orientation(θ) === :parallel && continue
+        θ_skew = min(θ_skew, θ)
+    end
+    return isfinite(θ_skew) ? θ_skew : 0.0
 end
 
 """
@@ -558,10 +637,49 @@ function _solid_slab_thickness(result)
             "A shaped slab has no single solid thickness for a composite beam. " *
             "Volume per area is not a thickness."))
     end
+    # Concrete above the deck: the `t_slab` of `DeckSlabOnBeam`.
+    result isa StructuralSizer.CompositeDeckResult && return uconvert(u"m", result.fill_depth)
     hasproperty(result, :thickness) || throw(ArgumentError(
         "Slab result $(typeof(result)) has no solid thickness for a composite beam."))
     t = result.thickness
     return t isa Unitful.Quantity ? uconvert(u"m", t) : t * u"m"
+end
+
+"""
+Deck profile of the sized composite deck floor a beam bears on, or `nothing`
+when it bears on no deck floor. A beam between a deck floor and another slab
+type, or between two different profiles, throws: one `DeckSlabOnBeam` cannot
+represent both sides.
+"""
+function _beam_floor_deck(struc::BuildingStructure, beam)
+    slabs = _slabs_on_beam(struc, beam)
+    decks = [s.result for s in slabs if s.result isa StructuralSizer.CompositeDeckResult]
+    isempty(decks) && return nothing
+    length(decks) == length(slabs) || throw(ArgumentError(
+        "A beam bears on a composite deck floor and on another slab type. " *
+        "Mixed slab types on one beam are not modeled."))
+    names = unique(d.deck_profile for d in decks)
+    length(names) == 1 || throw(ArgumentError(
+        "A beam bears on deck floors of different profiles ($(join(names, ", ")))."))
+    return StructuralSizer.composite_deck_profile(only(names))
+end
+
+"""
+`(hr, wr, pitch)` of a deck floor profile. Beam-option values that are set
+must match the profile within 1/32 in.
+"""
+function _floor_deck_geometry(prof, deck_hr, deck_wr, deck_pitch)
+    tol = (1 / 32) * u"inch"
+    hr, wr, pitch = prof.hr, StructuralSizer.deck_wr(prof), prof.pitch
+    for (lbl, given, cat) in (("composite_deck_hr", deck_hr, hr),
+                              ("composite_deck_wr", deck_wr, wr),
+                              ("composite_deck_pitch", deck_pitch, pitch))
+        given === nothing && continue
+        abs(uconvert(u"m", given) - cat) <= tol || throw(ArgumentError(
+            "$lbl = $given does not match the deck floor profile $(prof.name) " *
+            "($(round(u"inch", cat; digits=3)))."))
+    end
+    return (hr, wr, pitch)
 end
 
 """The `Concrete` stored on a slab's volume map, or `nothing`."""
@@ -705,7 +823,8 @@ end
         anchor, shored=false, Lb_const=nothing,
         Asr=0.0u"mm^2", Fysr=0.0u"MPa", neg_moment=false,
         cp_class=:medium, slab_type=:solid,
-        deck_hr=nothing, deck_wr=nothing, deck_orientation=:perpendicular) -> PerStationComposite
+        deck_hr=nothing, deck_wr=nothing, deck_orientation=:from_slab,
+        deck_pitch=nothing) -> PerStationComposite
 
 One [`PerStationComposite`](@ref) for a beam group. Each beam keeps its own
 center-to-center span (AISC 360-22 §I3.1, the `L/8` cap; corpus: aisc-360-22,
@@ -722,8 +841,13 @@ each beam uses its own adjacent solid slab. Concrete comes from that slab's
 volume map when the map names one concrete; otherwise from `concrete`.
 
 `slab_type = :deck` builds a `DeckSlabOnBeam` and requires `deck_hr` and
-`deck_wr`. `deck_e_mid_ht` and `deck_anchorage_spacing` are optional. The
-§I3.2c deck limits are applied by the stud design in the checker.
+`deck_wr`. A beam bearing on a sized composite deck floor is always a deck
+beam: rib height, rib width, and pitch come from the floor's profile, the
+topping from its `fill_depth`, and any of `deck_hr`, `deck_wr`, `deck_pitch`
+that is set must match. `deck_e_mid_ht`, `deck_anchorage_spacing`, and
+`deck_pitch` are optional. The §I3.2c deck limits are applied by the stud design in the checker.
+`deck_orientation = :from_slab` gives each beam its own rib angle from
+[`beam_rib_angle`](@ref); `:perpendicular` or `:parallel` applies to every beam.
 `L_twist` is the optional twist-restraint spacing for the hogging check.
 
 `Asr` stays caller-supplied. `neg_moment` defaults to false, so hogging uses
@@ -743,9 +867,10 @@ function composite_group_payload(
     slab_type::Symbol = :solid,
     deck_hr = nothing,
     deck_wr = nothing,
-    deck_orientation::Symbol = :perpendicular,
+    deck_orientation::Symbol = :from_slab,
     deck_e_mid_ht = nothing,
     deck_anchorage_spacing = nothing,
+    deck_pitch = nothing,
     L_twist = nothing,
     deck_attachment = :auto,
 )
@@ -754,14 +879,9 @@ function composite_group_payload(
         "length (composite_anchor_length), and Fu (composite_anchor_Fu)."))
     slab_type in (:solid, :deck) || throw(ArgumentError(
         "composite_slab_type must be :solid or :deck, got :$slab_type."))
-    if slab_type === :deck
-        deck_hr === nothing && throw(ArgumentError(
-            "Composite beam design needs the deck rib height (composite_deck_hr)."))
-        deck_wr === nothing && throw(ArgumentError(
-            "Composite beam design needs the deck rib width (composite_deck_wr)."))
-        deck_orientation in (:perpendicular, :parallel) || throw(ArgumentError(
-            "composite_deck_orientation must be :perpendicular or :parallel, got :$deck_orientation."))
-    end
+    deck_orientation in (:from_slab, :perpendicular, :parallel) || throw(ArgumentError(
+        "composite_deck_orientation must be :from_slab, :perpendicular, or :parallel, " *
+        "got :$deck_orientation."))
     L = _as_length(L_beam)
     # One dead-load solve for the group. A beam whose dead load is not a
     # uniform line load keeps `pre_cure = nothing` and the simple-span check.
@@ -776,13 +896,25 @@ function composite_group_payload(
         if t_slab !== nothing
             t_i = _as_length(t_slab)
         end
+        # A sized deck floor sets the rib geometry; the options must agree with it.
+        floor_deck = _beam_floor_deck(struc, beam)
         # Zero spacing: a side with no profile contributes no width. Real sides
         # come from the profiles, and the checker restuffs spacing at the station.
-        slab_i = if slab_type === :deck
+        slab_i = if floor_deck !== nothing || slab_type === :deck
+            hr_i, wr_i, pitch_i = floor_deck === nothing ? (deck_hr, deck_wr, deck_pitch) :
+                _floor_deck_geometry(floor_deck, deck_hr, deck_wr, deck_pitch)
+            hr_i === nothing && throw(ArgumentError(
+                "Composite beam design needs the deck rib height (composite_deck_hr)."))
+            wr_i === nothing && throw(ArgumentError(
+                "Composite beam design needs the deck rib width (composite_deck_wr)."))
+            θ = deck_orientation === :from_slab ? beam_rib_angle(struc, beam) :
+                deck_orientation === :parallel ? 0.0 : π / 2
             DeckSlabOnBeam(t_i, conc_i.fc′, conc_i.E, conc_i.ρ, Es,
-                           deck_hr, deck_wr, deck_orientation, 0.0u"m", 0.0u"m";
+                           hr_i, wr_i, StructuralSizer.rib_orientation(θ),
+                           0.0u"m", 0.0u"m";
                            e_mid_ht = deck_e_mid_ht,
-                           anchorage_spacing = deck_anchorage_spacing)
+                           anchorage_spacing = deck_anchorage_spacing,
+                           rib_angle = θ, rib_pitch = pitch_i)
         else
             SolidSlabOnBeam(t_i, conc_i.fc′, conc_i.E, conc_i.ρ, Es,
                             0.0u"m", 0.0u"m")
@@ -806,9 +938,10 @@ end
 
 """
     composite_payloads_for_groups(struc, group_ids, L_totals, concrete, Es;
-        t_slab=nothing, anchor=nothing) -> Vector{PerStationComposite}
+        t_slab=nothing, anchor=nothing) -> Vector
 
-One payload per steel beam group. `L_totals[i]` may be the sum of the beams
+One payload per steel beam group. A group with no slab on any of its beams,
+and no `t_slab`, gets `false`: the sizer designs it as bare steel. `L_totals[i]` may be the sum of the beams
 in the group; each beam is still checked at its own span. `t_slab`, when
 given, overrides every beam. Otherwise each beam uses the solid thickness of
 the slab it bears on. `concrete` is the fallback when that slab's volume map
@@ -821,14 +954,20 @@ function composite_payloads_for_groups(
     shored::Bool = false, cp_class::Symbol = :medium,
     slab_type::Symbol = :solid,
     deck_hr = nothing, deck_wr = nothing,
-    deck_orientation::Symbol = :perpendicular,
+    deck_orientation::Symbol = :from_slab,
     deck_e_mid_ht = nothing, deck_anchorage_spacing = nothing,
+    deck_pitch = nothing,
     L_twist = nothing,
     deck_attachment = :auto,
 )
     map(enumerate(group_ids)) do (g_idx, gid)
         mg = struc.member_groups[gid]
         beams = [struc.beams[i] for i in mg.member_indices]
+        # No slab on any beam of the group and no thickness override: there is
+        # nothing to act compositely with, so the group is bare steel (Chapter F).
+        if t_slab === nothing && all(b -> isempty(_slabs_on_beam(struc, b)), beams)
+            return false
+        end
         composite_group_payload(struc, beams, L_totals[g_idx] * u"m",
                                 concrete, t_slab, Es; anchor = anchor,
                                 shored = shored, cp_class = cp_class,
@@ -836,6 +975,7 @@ function composite_payloads_for_groups(
                                 deck_wr = deck_wr, deck_orientation = deck_orientation,
                                 deck_e_mid_ht = deck_e_mid_ht,
                                 deck_anchorage_spacing = deck_anchorage_spacing,
+                                deck_pitch = deck_pitch,
                                 L_twist = L_twist,
                                 deck_attachment = deck_attachment)
     end

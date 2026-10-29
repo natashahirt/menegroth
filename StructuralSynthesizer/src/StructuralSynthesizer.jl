@@ -223,11 +223,24 @@ export Support, Foundation, FoundationGroup, FoundationDemand
 
 # --- Building operations ---
 export add_vertex!, add_element!, find_faces!, rebuild_stories!, to_asap!
+export require_diaphragm_node_stiffness
 export classify_diaphragm_idealization, distribute_flexible_diaphragm_story_force
 export elf_story_analysis
 export wind_story_analysis
 export check_seismic_story_drift, wind_story_drift_report
 export factored_wind_cases, factored_seismic_cases
+export WallMesh, WallPierMesh, WallAssembly, WallCut, StoryCutEquilibrium
+export wall_assemblies, wall_pier_cut, check_story_cut_equilibrium
+export WALL_MESH_DIV, WALL_MESH_ROWS, wall_panel_quads
+export wall_self_weight_loads
+export GravityBasicCases, solve_gravity_basic_cases
+export WallAction, PierGravityActions, CombinedWallAction
+export wall_action_from_global, pier_wall_action, pier_gravity_actions
+export assembly_wall_action, combine_wall_action, wall_strength_actions
+export wind_pier_actions, seismic_strength_pier_actions
+export WallCheckRecord, check_ordinary_wall
+export refuse_joined_wall_design
+export require_seismic_wall_demand_provisions
 export SeismicStoryDriftCheck, WindStoryDriftReport, FactoredLateralCase
 export initialize!, size!
 export create_slab_diaphragm_shells

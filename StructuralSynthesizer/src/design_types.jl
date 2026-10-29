@@ -1333,20 +1333,38 @@ end
 """
     WallCheckRecord
 
-Identity of one wall check. Later phases store one record per wall, story,
-direction, and load combination. This is intentionally not a utilization,
-capacity, or demand.
+One ordinary-wall check on one pier, one basic case, and one strength
+combination. Several records share a wall, story, direction, and combination:
+shear, axial-flexure, bearing, and each minimum-reinforcement limit.
 
 # Fields
+- `wall_index::Int`: index into `BuildingStructure.walls`.
 - `story::Int`: 0-based story index, matching `Wall.story` (ground = 0).
   `WallLine.story` is 1-based and is not this field.
-- `direction::Symbol`: plan direction, `:X` or `:Y`.
-- `combination::Symbol`: load combination this record belongs to.
+- `direction::Symbol`: plan direction of the pier, `:X` or `:Y`.
+- `case::Symbol`: basic case the combination was built from (`:D`, `:wind`, `:QE`, ...).
+- `combination::Symbol`: strength combination.
+- `alternative::Symbol`: `:only`, or `:L` / `:W` when combination 3 is split.
+- `check::String`: check name from the existing wall checker.
+- `passed::Bool`: whether that check passed. A failure is reported; the section is not changed.
+- `ratio::Float64`: demand / capacity.
+- `demand::Float64`: demand in the checker's units (newtons, N·m, or a reinforcement ratio).
+- `capacity::Float64`: capacity in those same units.
+- `clause::String`: governing clause reported by the checker.
 """
 struct WallCheckRecord
-    story::Int          # 0-based, matching Wall.story
-    direction::Symbol   # :X or :Y
+    wall_index::Int
+    story::Int
+    direction::Symbol
+    case::Symbol
     combination::Symbol
+    alternative::Symbol
+    check::String
+    passed::Bool
+    ratio::Float64
+    demand::Float64
+    capacity::Float64
+    clause::String
 end
 
 """
@@ -1358,9 +1376,9 @@ enabling a clean API: `visualize(design)` works without passing structure separa
 Multiple BuildingDesign instances can reference the same BuildingStructure,
 enabling comparison of different material choices or optimization targets.
 
-`walls` is keyed by index into `structure.walls`. The dict exists so later
-phases can store one [`WallCheckRecord`](@ref) per wall, story, direction, and
-combination. It is intentionally not a single utilization.
+`walls` is keyed by index into `structure.walls`. Each entry holds one
+[`WallCheckRecord`](@ref) per check of that wall, story, direction, and
+combination.
 
 # Example
 ```julia
@@ -1392,8 +1410,7 @@ mutable struct BuildingDesign{T, A, P}
     slabs::Dict{Int, SlabDesignResult}
     columns::Dict{Int, ColumnDesignResult}
     beams::Dict{Int, BeamDesignResult}
-    # Sidecar keyed by index into `structure.walls`. One record per
-    # wall / story / direction / combination — not a single utilization.
+    # Sidecar keyed by index into `structure.walls`. One record per check.
     walls::Dict{Int, Vector{WallCheckRecord}}
     foundations::Dict{Int, FoundationDesignResult}
     

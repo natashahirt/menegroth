@@ -138,15 +138,15 @@ end
 """
     factored_seismic_cases(analysis, combo) -> Vector{FactoredLateralCase}
 
-Scale each `:strength` ELF case by `combo.E`. `:drift` cases are omitted:
-their coefficient is for drift, not for the strength combination. The story
-force is placed on global X or Y according to the case direction. An empty
-vector means `combo.E` is zero.
+Scale each `:strength` ELF case by `combo.E`, the factor on Eh. `:drift`
+cases are omitted: their coefficient is for drift, not for the strength
+combination. The story force is placed on global X or Y according to the
+case direction. An empty vector means `combo.E` is zero. `Ev` is not part
+of this horizontal story force.
 
 # Citation
-ASCE 7-22 §2.3.6 (corpus: asce-7-22, PDF page 69). The horizontal factor is
-the `E` field of `combo`. `Ev` and the 0.15 snow companion are not applied
-to these story forces.
+ASCE 7-22 §2.3.6 and Eqs. 12.4-1 and 12.4-3 (corpus: asce-7-22, PDF pages
+69 and 182–183). The horizontal factor is the `E` field of `combo`.
 """
 function factored_seismic_cases(analysis::ElfStoryAnalysis, combo::LoadCombination)
     out = FactoredLateralCase[]

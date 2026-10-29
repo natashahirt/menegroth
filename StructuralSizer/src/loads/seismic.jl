@@ -491,6 +491,31 @@ function story_drift_is_allowed(Δ, hsx, risk_category, system; rho=nothing)
 end
 
 """
+    vertical_seismic_load_effect(SDS, D) -> Float64
+
+Vertical seismic load effect `Ev = 0.2 * SDS * D`.
+
+`SDS` is dimensionless. `D` is a dead-load effect in the caller's unit, and
+`Ev` comes back in that unit. The result is the downward effect. Combination
+7 subtracts it through `LoadCombination.Ev = -1`.
+
+This is Eq. 12.4-4a. It does not apply Eq. 12.4-4b (`0.3 Sav D`) and it does
+not take `Ev` as zero for Seismic Design Category B. Those are the caller's
+choice of which equation applies.
+
+# Citation
+ASCE 7-22 Eq. 12.4-4a (corpus: asce-7-22, PDF page 183). The exceptions are
+on the same page.
+"""
+function vertical_seismic_load_effect(SDS, D)
+    SDS = _as_finite("SDS", SDS)
+    D = _as_finite("D", D)
+    SDS >= 0 || throw(ArgumentError("SDS must be >= 0; got $SDS"))
+    # ASCE 7-22 Eq. 12.4-4a (corpus: asce-7-22, PDF page 183).
+    return 0.2 * SDS * D
+end
+
+"""
     drift_live_load_factor(unreduced_live_load_psf) -> Float64
 
 Ratio `L/L0` of the live load `L` to the unreduced design live load `L0`

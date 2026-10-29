@@ -8,9 +8,9 @@
 # 1 mm and must not invent a support: a node it creates is free, and a node it
 # reuses keeps the dof vector the frame already gave it.
 #
-# Fixture is the 1×1 office from test/core/test_wall_data_model.jl. These
-# checks stop at assembly. An isolated wall may be singular; nothing here
-# calls solve!.
+# Fixture is the 1×1 office. `to_asap!` solves it. The ownership testset then
+# replaces those loads with one horizontal node force and checks the base
+# free-body cut on that same mesh.
 
 using Test
 using Unitful
@@ -253,8 +253,8 @@ end
         @test !iszero(nsec.A)
 
         shells = model.shell_elements
-        # mesh_div = 2 → two quads, two triangles each.
-        @test length(shells) == 4
+        # Two triangles per quad, on the production mesh.
+        @test length(shells) == 2 * WALL_MESH_DIV * WALL_MESH_ROWS
         @test all(s -> s isa Asap.ShellTri3 && s.id == :wall, shells)
 
         t_m = ustrip(u"m", w.thickness)
@@ -288,7 +288,9 @@ end
         @test all(n -> n !== mid, frames)
 
         created = [n for n in shell_nodes if n.id == :wall]
-        @test length(created) == 2
+        # Four corners reuse the frame. Every other grid node is created.
+        n_grid = (WALL_MESH_DIV + 1) * (WALL_MESH_ROWS + 1)
+        @test length(created) == n_grid - 4
         @test all(n -> n.dof == _ALL_FREE, created)
 
         n_support = length(get(skel.groups_vertices, :support, Int[]))
@@ -436,5 +438,44 @@ end
         @test _xyz(sh2.nodes[1]) == c2
         @test _xyz(sh2.nodes[2]) == c1
         @test token() != t_moved
+    end
+
+    # ── (7) Every wall triangle belongs to one pier.
+    @testset "wall mesh records one owner per triangle" begin
+        struc, _ = _walled()
+        model = _assemble!(struc, _wall_params())
+        mesh = struc.wall_mesh
+        @test length(mesh.piers) == 1
+        @test length(mesh.piers[1].shells) == 2 * WALL_MESH_DIV * WALL_MESH_ROWS
+        @test all(s.id === :wall for s in mesh.piers[1].shells)
+        @test length(mesh.assemblies) == 1
+        @test mesh.assemblies[1].joined == false
+        @test mesh.assemblies[1].wall_indices == [1]
+        owned = [objectid(s) for p in mesh.piers for s in p.shells]
+        @test length(owned) == length(unique(owned))
+        tagged = [objectid(s) for s in struc.asap_model.shell_elements if s.id === :wall]
+        @test sort(owned) == sort(tagged)
+
+        # One horizontal force on a free node above the pier base. The story
+        # cut is the wall plus every frame element that crosses that elevation.
+        # Roof frame nodes have their rotations fixed, so those support
+        # moments are part of the free body above the cut.
+        pier = mesh.piers[1]
+        z = minimum(ustrip(u"m", nd.position[3]) for sh in pier.shells for nd in sh.nodes)
+        loaded = nothing
+        for sh in pier.shells, nd in sh.nodes
+            ustrip(u"m", nd.position[3]) > z + 1e-3 || continue
+            length(nd.dof) >= 1 && nd.dof[1] || continue
+            loaded = nd
+            break
+        end
+        @test loaded !== nothing
+        P = 1.0e5
+        Asap.solve!(model, Asap.AbstractLoad[
+            Asap.NodeForce(loaded, [P, 0.0, 0.0] .* u"N")])
+        eq = check_story_cut_equilibrium(model, model.u, mesh, model.loads, z)
+        @test eq.passed
+        @test eq.applied[1] ≈ P
+        @test eq.cut[1] ≈ P atol = 1.0
     end
 end

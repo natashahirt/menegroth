@@ -20,15 +20,16 @@ A load combination for structural design.
 - `S::Float64`: Snow load factor (default 0)
 - `R::Float64`: Rain load factor (default 0)
 - `W::Float64`: Wind load factor (default 0)
-- `E::Float64`: Earthquake load factor (default 0)
+- `E::Float64`: Factor on Eh, the horizontal seismic effect (default 0)
+- `Ev::Float64`: Factor on the vertical seismic effect. +1 adds it, −1 subtracts it (default 0)
 
-# Standard Combinations (ASCE 7-22 §2.3.1)
+# Standard Combinations (ASCE 7-22 §2.3.1 and §2.3.6)
 - `strength_1_4D`: 1.4D
-- `strength_1_2D_1_6L`: 1.2D + 1.6L + 0.5(Lr or S or R)
-- `strength_1_2D_1_0W`: 1.2D + 1.0W + L + 0.5(Lr or S or R)
-- `strength_1_2D_1_0E`: 1.2D + 1.0E + L + 0.2S
+- `strength_1_2D_1_6L`: 1.2D + 1.6L + (0.5Lr or 0.3S or 0.5R)
+- `strength_1_2D_1_0W`: 1.2D + 1.0W + L + (0.5Lr or 0.3S or 0.5R)
+- `strength_1_2D_1_0E`: 1.2D + Ev + Eh + L + 0.15S
 - `strength_0_9D_1_0W`: 0.9D + 1.0W
-- `strength_0_9D_1_0E`: 0.9D + 1.0E
+- `strength_0_9D_1_0E`: 0.9D − Ev + Eh
 - `ASD`: 1.0D + 1.0L (Allowable Stress Design)
 - `service`: 1.0D + 1.0L (Serviceability checks)
 
@@ -50,7 +51,10 @@ Base.@kwdef struct LoadCombination
     S::Float64 = 0.0    # Snow
     R::Float64 = 0.0    # Rain
     W::Float64 = 0.0    # Wind
-    E::Float64 = 0.0    # Earthquake
+    "Factor on Eh, the horizontal seismic effect. ASCE 7-22 Eq. 12.4-3."
+    E::Float64 = 0.0
+    "Factor on Ev, the vertical seismic effect. +1 adds Ev, −1 subtracts it."
+    Ev::Float64 = 0.0
 end
 
 # =============================================================================
@@ -64,59 +68,99 @@ const strength_1_4D = LoadCombination(
     L = 0.0
 )
 
-"""ASCE 7-22 §2.3.1 Combination 2: 1.2D + 1.6L + 0.5(Lr or S or R)."""
+"""
+ASCE 7-22 §2.3.1 combination 2a: 1.2D + 1.6L + (0.5Lr or 0.3S or 0.5R).
+
+`Lr`, `S`, and `R` are alternatives (corpus: asce-7-22, PDF page 68).
+[`factored_pressure`](@ref) adds every load that is passed, so pass one of them.
+"""
 const strength_1_2D_1_6L = LoadCombination(
     name = :strength_1_2D_1_6L,
     D = 1.2,
     L = 1.6,
     Lr = 0.5,
-    S = 0.5,
+    S = 0.3,
     R = 0.5
 )
 
-"""ASCE 7-22 §2.3.1 Combination 3: 1.2D + 1.6(Lr or S or R) + (L or 0.5W)."""
+"""
+ASCE 7-22 §2.3.1 combination 3a: 1.2D + (1.6Lr or 1.0S or 1.6R) + (L or 0.5W).
+
+The roof loads are alternatives, and so are `L` and `0.5W` (corpus:
+asce-7-22, PDF page 68). Pass one from each group.
+"""
 const strength_1_2D_1_6Lr = LoadCombination(
     name = :strength_1_2D_1_6Lr,
     D = 1.2,
     L = 1.0,
     Lr = 1.6,
-    S = 1.6,
+    S = 1.0,
     R = 1.6,
     W = 0.5
 )
 
-"""ASCE 7-22 §2.3.1 Combination 4: 1.2D + 1.0W + L + 0.5(Lr or S or R)."""
+"""
+ASCE 7-22 §2.3.1 combination 4a: 1.2D + 1.0W + L + (0.5Lr or 0.3S or 0.5R).
+
+Tornado load `WT` may replace `W`. It is not a field here. The factor on `L`
+is permitted to be 0.5 for some occupancies (corpus: asce-7-22, PDF page 68,
+exception 1). This constant uses 1.0.
+"""
 const strength_1_2D_1_0W = LoadCombination(
     name = :strength_1_2D_1_0W,
     D = 1.2,
     L = 1.0,
     Lr = 0.5,
-    S = 0.5,
+    S = 0.3,
     R = 0.5,
     W = 1.0
 )
 
-"""ASCE 7-22 §2.3.1 Combination 5: 1.2D + 1.0E + L + 0.2S."""
+"""
+ASCE 7-22 §2.3.6 combination 6: 1.2D + Ev + Eh + L + 0.15S.
+
+`E` is the factor on Eh. `Ev` is the factor on the vertical effect, so
+`+Ev` is `Ev = 1`. Ev itself is `0.2 SDS D` from Eq. 12.4-4a, computed by
+[`vertical_seismic_load_effect`](@ref) and passed separately. The factor on
+`L` is permitted to be 0.5 for some occupancies (corpus: asce-7-22, PDF
+page 69). This constant uses 1.0. Overstrength `Emh` is not this constant.
+"""
 const strength_1_2D_1_0E = LoadCombination(
     name = :strength_1_2D_1_0E,
     D = 1.2,
     L = 1.0,
-    S = 0.2,
-    E = 1.0
+    S = 0.15,
+    E = 1.0,
+    Ev = 1.0
 )
 
-"""ASCE 7-22 §2.3.1 Combination 6: 0.9D + 1.0W."""
+"""
+ASCE 7-22 §2.3.1 Combination 5: 0.9D + 1.0W.
+
+`L` is set to 0. The struct default is 1.6, and this combination has no
+live load (corpus: asce-7-22, PDF page 68).
+"""
 const strength_0_9D_1_0W = LoadCombination(
     name = :strength_0_9D_1_0W,
     D = 0.9,
+    L = 0.0,
     W = 1.0
 )
 
-"""ASCE 7-22 §2.3.1 Combination 7: 0.9D + 1.0E."""
+"""
+ASCE 7-22 §2.3.6 combination 7: 0.9D − Ev + Eh.
+
+`E` is the factor on Eh. `Ev = -1` subtracts the vertical effect. Ev itself
+is `0.2 SDS D` (corpus: asce-7-22, PDF page 69 and Eq. 12.4-4a, PDF page 183).
+`L` is set to 0. The struct default is 1.6, and this combination has no
+live load.
+"""
 const strength_0_9D_1_0E = LoadCombination(
     name = :strength_0_9D_1_0E,
     D = 0.9,
-    E = 1.0
+    L = 0.0,
+    E = 1.0,
+    Ev = -1.0
 )
 
 """Allowable Stress Design: 1.0D + 1.0L."""
@@ -157,7 +201,7 @@ function factored_pressure(combo::LoadCombination, dead, live)
 end
 
 """
-    factored_pressure(combo::LoadCombination; D=0, L=0, Lr=0, S=0, R=0, W=0, E=0)
+    factored_pressure(combo::LoadCombination; D=0, L=0, Lr=0, S=0, R=0, W=0, E=0, Ev=0)
 
 Apply load combination with all load types.
 
@@ -169,10 +213,14 @@ p_u = factored_pressure(strength_1_2D_1_0W;
 ```
 """
 function factored_pressure(combo::LoadCombination; 
-    D=0.0, L=0.0, Lr=0.0, S=0.0, R=0.0, W=0.0, E=0.0
+    D=0.0, L=0.0, Lr=0.0, S=0.0, R=0.0, W=0.0, E=0.0, Ev=0.0
 )
+    # `E` is Eh. `Ev` is the vertical seismic effect from Eq. 12.4-4a.
+    # Lr, S, and R are alternatives in §2.3.1. This sum includes every
+    # load that is passed, so pass one companion from each "or" group.
     return (combo.D * D + combo.L * L + combo.Lr * Lr + 
-            combo.S * S + combo.R * R + combo.W * W + combo.E * E)
+            combo.S * S + combo.R * R + combo.W * W + combo.E * E +
+            combo.Ev * Ev)
 end
 
 """
@@ -207,14 +255,14 @@ function envelope_pressure(combos::AbstractVector{LoadCombination}, dead::P, liv
 end
 
 """
-    envelope_pressure(combos; D=0, L=0, Lr=0, S=0, R=0, W=0, E=0)
+    envelope_pressure(combos; D=0, L=0, Lr=0, S=0, R=0, W=0, E=0, Ev=0)
 
 Full envelope with all load types.
 """
 function envelope_pressure(combos::AbstractVector{LoadCombination};
-    D::T=0.0, L::T=0.0, Lr::T=0.0, S::T=0.0, R::T=0.0, W::T=0.0, E::T=0.0
+    D::T=0.0, L::T=0.0, Lr::T=0.0, S::T=0.0, R::T=0.0, W::T=0.0, E::T=0.0, Ev::T=0.0
 ) where T
-    return maximum(factored_pressure(c; D=D, L=L, Lr=Lr, S=S, R=R, W=W, E=E) for c in combos)
+    return maximum(factored_pressure(c; D=D, L=L, Lr=Lr, S=S, R=R, W=W, E=E, Ev=Ev) for c in combos)
 end
 
 """Single-combo convenience: treat a single `LoadCombination` as a length-1 vector."""
@@ -263,10 +311,10 @@ or 0.5R)` and `0.9D + 1.0W`. Earthquake is §2.3.6 combinations 6 and 7:
 `1.2D + Ev + Eh + L + 0.15S` and `0.9D − Ev + Eh`. Wind and earthquake
 need not act together.
 
-The `W` and `E` fields on these constants are 1.0. That is the horizontal
-factor applied to a story force. The constants do not split `E` into `Ev`
-and `Eh`, and their snow companion is 0.2 rather than the §2.3.6 value
-0.15. Gravity factors, `Ev`, and the snow companion are not applied here.
+The `W` and `E` fields are 1.0. `E` multiplies Eh, the horizontal story
+force. `Ev` on the two seismic constants is +1 and −1, and it multiplies
+the vertical effect `0.2 SDS D`, which is not part of the story shear.
+Gravity factors and the 0.15 snow companion stay on the gravity load path.
 
 # Citation
 ASCE 7-22 §2.3.1 (corpus: asce-7-22, PDF page 68) and §2.3.6

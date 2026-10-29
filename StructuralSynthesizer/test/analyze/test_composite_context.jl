@@ -239,6 +239,38 @@ _half_scalar(L, bs, ed) = ed === nothing ? min(L / 8, bs / 2) : min(L / 8, bs / 
         # The one adjacent-cell side is present; the slab-edge side is empty.
         @test (left === nothing) ⊻ (right === nothing)
     end
+
+    # ======================================================================
+    # 6. §I3.1a L/8 uses the span between supports, not the chained length
+    #    (AISC 360-22 §I3.1a(a), corpus: aisc-360-22, PDF p. 168).
+    # ======================================================================
+    @testset "6. Interior supports of a chained beam" begin
+        s2, ib, eb = _build_two_bay()
+        sk = s2.skeleton
+        s12 = only(segment_indices(beam_on_edge(s2, 1, 2)))
+        s23 = only(segment_indices(beam_on_edge(s2, 2, 3)))
+        chained = Beam([s12, s23], 4.0; role = :girder)
+
+        # v2 only carries the end of the v2–v5 beam: that beam is supported
+        # by the chain, so the chain still has one 4 m span.
+        @test beam_interior_supports(s2, chained) == Float64[]
+
+        # Another beam passing straight through v2 supports the chain there.
+        through = (; fixed = Set{Int}(), through = Dict(2 => 2))
+        @test beam_interior_supports(s2, chained; lookup = through) ≈ [0.5]
+
+        # A column under v2 splits the chain into two 2 m spans.
+        vb = add_vertex!(sk, [6.0, 0.0, 0.0])
+        add_element!(sk, vb, 2; group = :columns)
+        sup = beam_interior_supports(s2, chained)
+        @test sup ≈ [0.5]
+
+        # Per-side cap: L/8 of the 2 m bay is 0.25 m, not 0.5 m of the chain.
+        slab = SolidSlabOnBeam(_T_SLAB, _FC, _EC, _WC, _ES, 10.0u"m", 10.0u"m")
+        L = 4.0u"m"
+        @test b_eff_at_station(slab, L, 0.25) ≈ 2 * 0.5u"m"
+        @test b_eff_at_station(slab, L, 0.25; supports = sup) ≈ 2 * 0.25u"m"
+    end
 end
 
 # =============================================================================
@@ -502,6 +534,71 @@ end
 end
 
 # =============================================================================
+# T2c. SERVICE INERTIA — AISC 360-22 Commentary Eq. C-I3-5 (PDF p. 502).
+#   A beam with no negative moment keeps I_LB. A continuous beam uses
+#   I = 0.6 I_pos + 0.4 I_s. I_pos is I_LB at the peak sagging station.
+#   I_s is the steel Ix. The deflection scale is Ix / I.
+# =============================================================================
+@testset "T2c. Continuous service inertia is Eq. C-I3-5" begin
+    section  = W("W21X55")
+    material = A992_Steel
+    slab = SolidSlabOnBeam(7.5u"inch", 4.0u"ksi", 3644.0u"ksi", 145.0u"lb/ft^3",
+                           29000.0u"ksi", 10.0u"ft", 10.0u"ft")
+    anchor = HeadedStudAnchor(0.75u"inch", 5.0u"inch", 65.0u"ksi", 50.0u"ksi",
+                              7850.0u"kg/m^3")
+    L = 10.0
+    w = 12_000.0
+    nel = 16
+    ΣQn = 292.0u"kip"
+    sec_asap = StructuralSizer.to_asap_section(section, material)
+
+    # One skeleton edge per finite element, in the same order as the model.
+    # `beam_signed_moment_field` reads `segment.edge_idx` as the element index.
+    function checked(model, nseg, Lseg)
+        skel = BuildingSkeleton{Float64}()
+        xs = cumsum([0.0; fill(Lseg, nseg)])
+        verts = [add_vertex!(skel, [xs[i], 0.0, 0.0]) for i in 1:(nseg + 1)]
+        for i in 1:nseg
+            add_element!(skel, verts[i], verts[i + 1]; group = :beams)
+        end
+        rebuild_stories!(skel)
+        find_faces!(skel)
+        rebuild_geometry_cache!(skel)
+        struc = BuildingStructure(skel)
+        for i in 1:nseg
+            push!(struc.segments, Segment(i, Lseg))
+        end
+        beam = Beam(collect(1:nseg), nseg * Lseg; role = :girder, level = 0)
+        push!(struc.beams, beam)
+        struc.asap_model = model
+        ctx = CompositeContext(slab, anchor, (nseg * Lseg) * u"m")
+        check_composite_beam(struc, beam, section, material, ctx; ΣQn = ΣQn)
+    end
+
+    # No negative moment: Eq. C-I3-5 is not applied. I_service stays I_pos.
+    @test composite_service_inertia(2.0u"m^4", 1.0u"m^4") ≈ 2.0u"m^4"
+
+    simple = checked(_solve_ss_beam(; L = L, w = w, nel = nel, sec = sec_asap), nel, L / nel)
+    @test simple.I_LB > section.Ix
+    # The pin-end moment recovered on this mesh is below −1 N·m, which is the
+    # zero in moment_field_has_negative, so the span takes Eq. C-I3-5.
+    I_simple = 0.6 * simple.I_LB + 0.4 * section.Ix
+    @test simple.I_service ≈ I_simple
+    @test composite_deflection_scale(section, simple.I_service) ≈
+          ustrip(section.Ix / I_simple)
+
+    cont = checked(_solve_two_span(; L = L, w = w, nel_span = nel, sec = sec_asap),
+                   2 * nel, L / nel)
+    # Eq. C-I3-5, gravity: a = 0.6, b = 0.4. I_neg = Ix.
+    I_hand = 0.6 * cont.I_LB + 0.4 * section.Ix
+    @test cont.I_LB > I_hand > section.Ix
+    @test cont.I_service ≈ I_hand
+    scale = composite_deflection_scale(section, cont.I_service)
+    @test scale ≈ ustrip(section.Ix / I_hand)
+    @test composite_deflection_scale(section, cont.I_LB) < scale < 1
+end
+
+# =============================================================================
 # T3. END-TO-END on a solved column-supported two-bay building. Tributaries +
 #     solve + `composite_context_from_beam` + `check_composite_beam` on an
 #     INTERIOR beam (tributary both sides) and an EDGE beam (one-sided).
@@ -589,6 +686,13 @@ end
             @test ustrip(u"m", res.b_eff) > 0
             @test res.I_LB > section.Ix
         end
+        # Eq. C-I3-5. These beams have a fixed end, so the service inertia is
+        # 0.6 I_pos + 0.4 Ix, not the positive-region I_LB alone.
+        I_hand = 0.6 * res.I_LB + 0.4 * section.Ix
+        @test res.I_service ≈ I_hand
+        @test composite_deflection_scale(section, res.I_LB) <
+              composite_deflection_scale(section, res.I_service) < 1
+
         # The sagging region still has slab. A corner station can have none.
         b_mid = b_eff_at_station(ctx.slab, ctx.L_beam, 0.5; left = left, right = right)
         @test ustrip(u"m", b_mid) > 0
@@ -653,6 +757,61 @@ end
     struc_bare.asap_model.loads = bare_loads
     @test_throws ArgumentError size_beams!(struc_bare, SteelBeamOptions(composite = true);
                                            reanalyze = false)
+end
+
+# =============================================================================
+# A sized composite deck floor sets the beam's deck slab.
+# =============================================================================
+
+@testset "Deck floor sets the beam's deck slab" begin
+    struc, ibeam, _ebeam = _build_two_bay()
+    _solve_two_bay_frame!(struc)
+    conc = Concrete(_EC, _FC, _WC, 0.20, 0.1)
+    # 2 m = 6.56 ft deck span, 2VLI: gage 22 at 4 in (shortest unshored column 7'-10").
+    deck = StructuralSizer._size_span_floor(StructuralSizer.CompositeDeck(), 2.0u"m",
+        2.0u"kN/m^2", 3.0u"kN/m^2"; material = conc,
+        options = CompositeDeckOptions(deck_profile = "2VLI"))
+    @test deck.deck_gauge == 22
+    for s in struc.slabs
+        s.result = deck
+    end
+    L = member_length(ibeam)
+    pay(; kw...) = composite_group_payload(struc, [ibeam], L, conc, nothing, _ES;
+                                           anchor = _ANCHOR, kw...)
+    slab = only(pay().fields).slab
+    @test slab isa DeckSlabOnBeam
+    @test isapprox(slab.t_slab, 2.0u"inch"; rtol = 1e-9)
+    @test isapprox(slab.hr, 2.0u"inch"; rtol = 1e-9)
+    @test isapprox(slab.wr, 6.0u"inch"; rtol = 1e-9)
+    @test isapprox(slab.rib_pitch, 12.0u"inch"; rtol = 1e-9)
+    # Fixture slabs span along x; the interior beam runs along y.
+    @test slab.deck_orientation === :perpendicular
+    # Options that agree are accepted; ones that disagree throw.
+    @test only(pay(slab_type = :deck, deck_hr = 2.0u"inch").fields).slab isa DeckSlabOnBeam
+    @test_throws ArgumentError pay(deck_hr = 3.0u"inch")
+    @test_throws ArgumentError pay(deck_pitch = 6.0u"inch")
+    # A beam between a deck floor and a solid slab is not modeled.
+    struc.slabs[2].result = CIPSlabResult(0.2, 0.2, 5.0)
+    @test_throws ArgumentError pay()
+end
+
+@testset "A beam group with no slab is bare steel" begin
+    struc, ibeam, _ebeam = _build_two_bay()
+    _solve_two_bay_frame!(struc)
+    conc = Concrete(_EC, _FC, _WC, 0.20, 0.1)
+    empty!(struc.slabs)
+    gid = UInt64(1)
+    struc.member_groups[gid] = StructuralSynthesizer.MemberGroup(gid)
+    push!(struc.member_groups[gid].member_indices, findfirst(b -> b === ibeam, struc.beams))
+    L = member_length(ibeam)
+    Lm = L isa Unitful.Quantity ? ustrip(u"m", L) : Float64(L)
+    out = StructuralSynthesizer.composite_payloads_for_groups(
+        struc, [gid], [Lm], conc, _ES; anchor = _ANCHOR)
+    @test out == [false]
+    # A thickness override still builds a composite payload.
+    out_t = StructuralSynthesizer.composite_payloads_for_groups(
+        struc, [gid], [Lm], conc, _ES; anchor = _ANCHOR, t_slab = _T_SLAB)
+    @test only(out_t) isa PerStationComposite
 end
 
 # =============================================================================
@@ -861,4 +1020,65 @@ end
     @test isapprox(opts.composite_deck_wr, 6.0u"inch"; rtol = 1e-6)
     schema = StructuralSynthesizer.api_input_schema()
     @test haskey(schema["params"]["fields"], "composite_anchor_d_in")
+end
+
+@testset "Deck rib angle from the slab span axis" begin
+    struc, ibeam, ebeam = _build_two_bay()
+    skel = struc.skeleton
+    # Fixture slabs span along x. The interior and edge beams run along y.
+    @test StructuralSynthesizer.beam_rib_angle(struc, ibeam) ≈ π / 2
+    along_x = only(filter(b -> begin
+        e = struc.segments[only(segment_indices(b))].edge_idx
+        a, c = skel.edge_indices[e]
+        abs(Meshes.coords(skel.vertices[a]).y - Meshes.coords(skel.vertices[c]).y) < 1e-9u"m" &&
+            ustrip(u"m", Meshes.coords(skel.vertices[a]).y) ≈ 0.0 &&
+            min(ustrip(u"m", Meshes.coords(skel.vertices[a]).x),
+                ustrip(u"m", Meshes.coords(skel.vertices[c]).x)) ≈ 4.0
+    end, struc.beams))
+    @test isapprox(StructuralSynthesizer.beam_rib_angle(struc, along_x), 0.0; atol = 1e-12)
+
+    set_axis!(slab, ax) = (slab.spans = SpanInfo{Float64}(2.0, 12.0, ax, 7.0))
+    skew30 = (sind(30.0), cosd(30.0))   # 30° from the y-running beams
+    foreach(s -> set_axis!(s, skew30), struc.slabs)
+    @test StructuralSynthesizer.beam_rib_angle(struc, ibeam) ≈ deg2rad(30)
+
+    # Mixed: one slab parallel to the beam, the other skewed. The skewed slab governs.
+    set_axis!(struc.slabs[1], (0.0, 1.0))
+    @test StructuralSynthesizer.beam_rib_angle(struc, ibeam) ≈ deg2rad(30)
+    foreach(s -> set_axis!(s, (0.0, 1.0)), struc.slabs)
+    @test isapprox(StructuralSynthesizer.beam_rib_angle(struc, ibeam), 0.0; atol = 1e-12)
+
+    # Payload: each beam gets its own angle; an explicit orientation overrides.
+    foreach(s -> set_axis!(s, skew30), struc.slabs)
+    _solve_two_bay_frame!(struc)
+    conc = Concrete(_EC, _FC, _WC, 0.20, 0.1)
+    L = member_length(ibeam)
+    pay(orient) = composite_group_payload(struc, [ibeam], L, conc, 4.5u"inch", _ES;
+        anchor = _ANCHOR, slab_type = :deck, deck_hr = 3.0u"inch", deck_wr = 6.0u"inch",
+        deck_orientation = orient, deck_pitch = 12.0u"inch")
+    slab_auto = only(pay(:from_slab).fields).slab
+    @test slab_auto.deck_orientation === :skewed
+    @test slab_auto.rib_angle ≈ deg2rad(30)
+    @test isapprox(slab_auto.rib_pitch, 12.0u"inch"; rtol = 1e-9)
+    @test only(pay(:perpendicular).fields).slab.deck_orientation === :perpendicular
+    @test only(pay(:parallel).fields).slab.rib_angle == 0.0
+    @test_throws ArgumentError pay(:sideways)
+
+    # A beam with no slab cannot read the deck direction.
+    empty!(struc.slabs)
+    @test_throws ArgumentError StructuralSynthesizer.beam_rib_angle(struc, ibeam)
+
+    # Pitch comes from the profile; an explicit pitch must agree with it.
+    @test SteelBeamOptions().composite_deck_orientation === :from_slab
+    prof = SteelBeamOptions(composite = true, composite_slab_type = :deck,
+                            composite_deck_profile = "1.5VL")
+    @test isapprox(StructuralSynthesizer.composite_deck_pitch(prof), 6.0u"inch"; rtol = 1e-9)
+    @test StructuralSynthesizer.composite_deck_pitch(SteelBeamOptions()) === nothing
+    @test isapprox(StructuralSynthesizer.composite_deck_pitch(
+        SteelBeamOptions(composite_deck_pitch = 12.0u"inch")), 12.0u"inch"; rtol = 1e-9)
+    @test_throws ArgumentError StructuralSynthesizer.composite_deck_pitch(
+        SteelBeamOptions(composite_deck_profile = "3VLI", composite_deck_pitch = 6.0u"inch"))
+    @test StructuralSynthesizer.APIParams().composite_deck_orientation == "from_slab"
+    @test occursin("from_slab", StructuralSynthesizer.api_input_schema()["params"]["fields"][
+        "composite_deck_orientation"])
 end

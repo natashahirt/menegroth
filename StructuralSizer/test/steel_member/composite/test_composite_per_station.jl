@@ -442,4 +442,37 @@ end
                                          env, geom, PerStationComposite(ctx, [field_sum]))
     @test ok_own == false
     @test ok_sum == true
+
+    # One 80 ft member over four interior supports: five 16 ft bays. Each
+    # station's L/8 is the bay's, so the member fails like the single bay.
+    bays = [0.2, 0.4, 0.6, 0.8]
+    field_bays = BeamSaggingField(side, side, demand, Float64[0.0, 1.0], L_sum, nothing;
+                                  supports = bays)
+    ok_bays = StructuralSizer.is_feasible(checker, cache, 1, fix.section, fix.material,
+                                          env, geom, PerStationComposite(ctx, [field_bays]))
+    @test ok_bays == false
+end
+
+# =============================================================================
+# §I3.1a — span between supports (AISC 360-22 §I3.1a(a), PDF p. 168)
+# =============================================================================
+
+@testset "Span at a station is the support-to-support bay" begin
+    L = 30.0u"ft"
+    @test span_at_station(L, 0.3, Float64[]) == L
+    # Bays 0–0.4, 0.4–1.0 → 12 ft and 18 ft.
+    @test span_at_station(L, 0.1, [0.4]) ≈ 12.0u"ft"
+    @test span_at_station(L, 0.7, [0.4]) ≈ 18.0u"ft"
+    # On the support: the smaller adjacent bay.
+    @test span_at_station(L, 0.4, [0.4]) ≈ 12.0u"ft"
+    @test span_at_station(L, 0.0, [0.4]) ≈ 12.0u"ft"
+    @test span_at_station(L, 1.0, [0.4]) ≈ 18.0u"ft"
+
+    # Width follows the bay: per-side L/8 of 12 ft is 1.5 ft, of 18 ft 2.25 ft.
+    fix = _per_station_fixture(; bsl = 20.0u"ft", bsr = 20.0u"ft")
+    @test b_eff_at_station(fix.slab, L, 0.1; supports = [0.4]) ≈ 3.0u"ft"
+    @test b_eff_at_station(fix.slab, L, 0.7; supports = [0.4]) ≈ 4.5u"ft"
+
+    @test_throws ArgumentError BeamSaggingField(nothing, nothing, _ -> 0.0, [0.0, 1.0],
+                                                L, nothing; supports = [1.0])
 end

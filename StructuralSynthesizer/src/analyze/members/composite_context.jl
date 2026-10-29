@@ -326,6 +326,83 @@ function _element_signed_moment_at(el, loads, x_m::Float64)
     return My[1]
 end
 
+# -----------------------------------------------------------------------------
+# Interior supports of a chained beam (§I3.1a span, center-to-center of supports)
+# -----------------------------------------------------------------------------
+
+"""
+    beam_support_lookup(struc) -> NamedTuple
+
+Vertices that can support a beam, built once per structure for
+[`beam_interior_supports`](@ref): `fixed` holds vertices where a column or
+wall edge ends, or that are in the `:support` group. `through` counts, per
+vertex, the beams that pass through it (the vertex is interior to the beam's
+chain).
+"""
+function beam_support_lookup(struc::BuildingStructure)
+    skel = struc.skeleton
+    fixed = Set{Int}(get(skel.groups_vertices, :support, Int[]))
+    for grp in (:columns, :walls)
+        for e in get(skel.groups_edges, grp, Int[])
+            a, b = skel.edge_indices[e]
+            push!(fixed, a, b)
+        end
+    end
+    through = Dict{Int, Int}()
+    for beam in struc.beams
+        verts = _beam_chain_vertices(struc, beam)
+        for v in @view verts[2:end-1]
+            through[v] = get(through, v, 0) + 1
+        end
+    end
+    return (; fixed, through)
+end
+
+"""Ordered skeleton vertices along `beam`, matching `segment_indices(beam)`."""
+function _beam_chain_vertices(struc::BuildingStructure, beam::Beam)
+    edges = [struc.segments[si].edge_idx for si in segment_indices(beam)]
+    return _ordered_chain_vertices(struc.skeleton, edges)
+end
+
+"""
+    beam_interior_supports(struc, beam; lookup=beam_support_lookup(struc)) -> Vector{Float64}
+
+Fractions of the beam length at its interior supports. A beam drawn as one
+line across several bays is one member; AISC 360-22 §I3.1a(a) (corpus:
+aisc-360-22, PDF p. 168) measures `L/8` on "the beam span, center-to-center
+of supports", so each bay needs its own span.
+
+# ENGINEERING JUDGMENT
+An interior chain vertex is a support when a column, a wall, or a `:support`
+vertex is there, or when another beam passes straight through it. A beam that
+only ends on this one is carried by it and is not a support. Where two
+continuous beams cross, each counts the other as a support; more supports
+give shorter spans and smaller effective widths.
+"""
+function beam_interior_supports(struc::BuildingStructure, beam::Beam;
+                                lookup = beam_support_lookup(struc))
+    verts = _beam_chain_vertices(struc, beam)
+    length(verts) <= 2 && return Float64[]
+    skel = struc.skeleton
+    xyz(v) = (c = Meshes.coords(skel.vertices[v]);
+              (ustrip(u"m", c.x), ustrip(u"m", c.y), ustrip(u"m", c.z)))
+    cum = zeros(length(verts))
+    for k in 2:length(verts)
+        a, b = xyz(verts[k - 1]), xyz(verts[k])
+        cum[k] = cum[k - 1] + sqrt(sum(abs2, a .- b))
+    end
+    total = cum[end]
+    out = Float64[]
+    for k in 2:(length(verts) - 1)
+        v = verts[k]
+        # This beam counts itself once in `through`.
+        if v in lookup.fixed || get(lookup.through, v, 0) >= 2
+            push!(out, cum[k] / total)
+        end
+    end
+    return out
+end
+
 """
     beam_signed_moment_field(struc, beam) -> (M_of_s, breakpoints)
 
@@ -414,12 +491,14 @@ function check_composite_beam(struc::BuildingStructure, beam::Beam, section, mat
                               d_rebar = 0.0u"m", ϕ = 0.9)
     left, right = beam_side_profiles(struc, beam)
     M_of_s, demand_bps = beam_signed_moment_field(struc, beam)
+    supports = beam_interior_supports(struc, beam)
 
     g = governing_composite_station(section, material, ctx.slab, ctx.L_beam,
                                     M_of_s, ΣQn; left = left, right = right,
                                     Asr = Asr, Fysr = Fysr, d_rebar = d_rebar, ϕ = ϕ,
                                     neg_moment = ctx.neg_moment,
-                                    extra_breakpoints = demand_bps)
+                                    extra_breakpoints = demand_bps,
+                                    supports = supports)
 
     # I_pos at the peak sagging station. A hogging governing station is not
     # the positive-moment section Eq. C-I3-5 names. A very large steel φMn
@@ -427,7 +506,8 @@ function check_composite_beam(struc::BuildingStructure, beam::Beam, section, mat
     sag = governing_sagging_station(section, material, ctx.slab, ctx.L_beam,
                                     M_of_s, 1.0e30;
                                     left = left, right = right,
-                                    extra_breakpoints = demand_bps)
+                                    extra_breakpoints = demand_bps,
+                                    supports = supports)
     I_pos = sag.M_pos > 0 ?
         get_I_LB(section, material, ctx.slab, sag.b_eff, ΣQn) : section.Ix
     # AISC 360-22 Commentary Eq. C-I3-5 (corpus: aisc-360-22, PDF p. 502):
@@ -890,6 +970,7 @@ function composite_group_payload(
     # uniform line load keeps `pre_cure = nothing` and the simple-span check.
     u_dead = _dead_load_displacement(struc)
     by_element = u_dead === nothing ? nothing : _dead_loads_by_element(struc)
+    supports_lookup = beam_support_lookup(struc)
     fields = map(beams) do beam
         t_i, conc_i = _beam_slab_inputs(struc, beam,
                                         t_slab === nothing ? nothing : t_slab,
@@ -928,7 +1009,9 @@ function composite_group_payload(
         pre = u_dead === nothing ? nothing :
             beam_pre_cure_shape(struc, beam, u_dead, by_element)
         BeamSaggingField(left, right, M_of_s, collect(Float64, bps), L_i, slab_i;
-                         pre_cure = pre)
+                         pre_cure = pre,
+                         supports = beam_interior_supports(struc, beam;
+                                                           lookup = supports_lookup))
     end
     isempty(fields) && throw(ArgumentError("composite_group_payload needs at least one beam"))
     ctx = CompositeContext(first(fields).slab, anchor, L; shored = shored, Lb_const = Lb_const,

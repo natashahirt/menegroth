@@ -789,6 +789,7 @@ function is_feasible(
                                       field.demand_of_s, ϕMnx_steel;
                                       left = field.left, right = field.right,
                                       extra_breakpoints = field.breakpoints,
+                                      supports = field.supports,
                                       ϕ = checker.ϕ_b)
         g.dcr <= 1.0 || return false
         st = CompositeSaggingStation(g.b_eff, g.M_pos * u"N*m",
@@ -1332,6 +1333,7 @@ function explain_feasibility(
                                       field.demand_of_s, ϕMnx_steel;
                                       left = field.left, right = field.right,
                                       extra_breakpoints = field.breakpoints,
+                                      supports = field.supports,
                                       ϕ = checker.ϕ_b)
         st = CompositeSaggingStation(g.b_eff, g.M_pos * u"N*m",
                                      g.spacing_left, g.spacing_right)

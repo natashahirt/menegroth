@@ -74,6 +74,10 @@ include("building_types.jl")
 # helper VERIFIES walls ⊆ plate (assert_walls_enclosed) rather than assuming it.
 include("walls_bridge.jl")
 
+# Lateral design vocabulary, named by DesignParameters.lateral. Behavior is in
+# analyze/lateral/approaches/.
+include("analyze/lateral/approaches/types.jl")
+
 # Design types (BuildingDesign, DesignParameters, result structs)
 include("design_types.jl")
 
@@ -146,7 +150,8 @@ export cell_edge_tributaries, cell_strip_geometry, has_cell_tributaries
 export clear_geometry_caches!
 
 # --- Design types ---
-export DesignParameters, MaterialOptions, FoundationParameters
+export DesignParameters, ResolvedDesignContext, resolve_design_context
+export MaterialOptions, FoundationParameters
 export MemberGroupSizingOverride, resolve_member_group_override
 export BuildingDesign, SlabDesignResult, ColumnDesignResult, BeamDesignResult, FoundationDesignResult
 export PunchingDesignResult, StripReinforcementDesign, DesignSummary
@@ -214,6 +219,7 @@ export compute_member_tributaries!
 # Building → composite check (AISC Ch. I): per-side §I3.1a profiles, scalar
 # context, exact FEM demand field, and the per-station governing check.
 export beam_side_profiles, composite_context_from_beam
+export beam_interior_supports, beam_support_lookup
 export beam_signed_moment_field, check_composite_beam, composite_deflection_scale
 export composite_group_payload, composite_payloads_for_groups, composite_anchor_from_options
 export classify_column_position, is_exterior_support  # Column position classification for DDM/EFM
@@ -241,6 +247,9 @@ export wind_pier_actions, seismic_strength_pier_actions
 export WallCheckRecord, check_ordinary_wall
 export refuse_joined_wall_design
 export require_seismic_wall_demand_provisions
+export LateralDesign, LateralSystem, DemandAssignment
+export WallsSeismicSystem, OutriggerSystem, BuildingUnit, IsolatedWallShare
+export prepare_lateral_model!, seismic_members, system_checks, assign_lateral_demands
 export SeismicStoryDriftCheck, WindStoryDriftReport, FactoredLateralCase
 export initialize!, size!
 export create_slab_diaphragm_shells

@@ -127,11 +127,40 @@ end
 # ------------------------------------------------------------------------------
 
 """
-    b_eff_at_station(slab, L_beam, s; left=nothing, right=nothing) -> Length
+    span_at_station(L_beam, s, supports) -> Length
+
+Center-to-center span containing normalized station `s` on a member of length
+`L_beam` whose interior supports sit at the sorted fractions `supports`.
+
+AISC 360-22 §I3.1a(a) (corpus: aisc-360-22, PDF p. 168) caps each side at
+"one-eighth of the beam span, center-to-center of supports". A member drawn
+across several bays has one span per bay. No interior supports returns
+`L_beam`.
+
+# ENGINEERING JUDGMENT
+A station exactly on an interior support belongs to both adjacent spans; the
+smaller span is returned, which gives the smaller effective width.
+"""
+function span_at_station(L_beam, s::Real, supports::AbstractVector{<:Real})
+    isempty(supports) && return L_beam
+    sc = clamp(Float64(s), 0.0, 1.0)
+    bounds = vcat(0.0, Float64.(supports), 1.0)
+    k = findfirst(p -> isapprox(p, sc; atol = 1e-9), supports)
+    if k !== nothing
+        return L_beam * min(bounds[k + 1] - bounds[k], bounds[k + 2] - bounds[k + 1])
+    end
+    i = clamp(searchsortedlast(bounds, sc), 1, length(bounds) - 1)
+    return L_beam * (bounds[i + 1] - bounds[i])
+end
+
+"""
+    b_eff_at_station(slab, L_beam, s; left=nothing, right=nothing, supports=Float64[]) -> Length
 
 Effective slab width at normalized station `s` per AISC 360-16 §I3.1a (corpus:
 aisc-360-16, PDF p. 150): the sum over the two sides of the beam centerline of
-the per-side effective width, each capped at `L/8` (§I3.1a(a)).
+the per-side effective width, each capped at `L/8` (§I3.1a(a)). `L` is the
+span containing `s` ([`span_at_station`](@ref)); `supports` are the interior
+support fractions of a member that runs over several bays.
 
 Each side's governing distance comes from its [`SideExtentProfile`](@ref) (the
 local per-side tributary extent `d(s)`, which already embeds caps (b)/(c)); a
@@ -143,13 +172,15 @@ reduces BYTE-IDENTICALLY to the scalar path.
 """
 function b_eff_at_station(slab::AbstractSlabOnBeam, L_beam, s::Real;
                           left::Union{SideExtentProfile, Nothing} = nothing,
-                          right::Union{SideExtentProfile, Nothing} = nothing)
+                          right::Union{SideExtentProfile, Nothing} = nothing,
+                          supports::AbstractVector{<:Real} = Float64[])
+    L = span_at_station(L_beam, s, supports)
     bl = left === nothing ?
-        _effective_half_width(L_beam, slab.beam_spacing_left, slab.edge_dist_left) :
-        _effective_half_width(L_beam, 2 * _sample_extent(left, s) * u"m", nothing)
+        _effective_half_width(L, slab.beam_spacing_left, slab.edge_dist_left) :
+        _effective_half_width(L, 2 * _sample_extent(left, s) * u"m", nothing)
     br = right === nothing ?
-        _effective_half_width(L_beam, slab.beam_spacing_right, slab.edge_dist_right) :
-        _effective_half_width(L_beam, 2 * _sample_extent(right, s) * u"m", nothing)
+        _effective_half_width(L, slab.beam_spacing_right, slab.edge_dist_right) :
+        _effective_half_width(L, 2 * _sample_extent(right, s) * u"m", nothing)
     return bl + br
 end
 
@@ -168,6 +199,14 @@ function beff_breakpoints(left::Union{SideExtentProfile, Nothing},
     left  === nothing || append!(pts, left.positions)
     right === nothing || append!(pts, right.positions)
     return _unique_sorted(pts)
+end
+
+"""Width breakpoints, demand breakpoints, and interior supports, where `b_eff`
+jumps because the span changes."""
+function _station_breakpoints(left, right, extra, supports)
+    bp = beff_breakpoints(left, right)
+    (isempty(extra) && isempty(supports)) && return bp
+    return _unique_sorted(vcat(bp, collect(Float64, extra), collect(Float64, supports)))
 end
 
 """Sorted unique values with a small absolute tolerance (collapses near-duplicates)."""
@@ -339,8 +378,10 @@ function composite_dcr_at_station(section::ISymmSection, material,
                                   Asr = 0.0u"mm^2", Fysr = 0.0u"MPa",
                                   d_rebar = 0.0u"m", ϕ = 0.9,
                                   neg_moment::Bool = false,
-                                  ΣQn_neg = nothing)
-    b_eff = b_eff_at_station(slab, L_beam, s; left = left, right = right)
+                                  ΣQn_neg = nothing,
+                                  supports::AbstractVector{<:Real} = Float64[])
+    b_eff = b_eff_at_station(slab, L_beam, s; left = left, right = right,
+                             supports = supports)
     sagging = ustrip(u"N*m", uconvert(u"N*m", M_s)) >= 0.0
     # Hogging Lb is this member's span, not a group sum of spans.
     cap = phiMn_at_station(section, material, slab, b_eff, ΣQn, sagging;
@@ -383,6 +424,7 @@ function governing_composite_station(section::ISymmSection, material,
                                      neg_moment::Bool = false,
                                      ΣQn_neg = nothing,
                                      extra_breakpoints::AbstractVector{Float64} = Float64[],
+                                     supports::AbstractVector{<:Real} = Float64[],
                                      n_bracket::Int = 9)
     dcr_of_s = s -> composite_dcr_at_station(section, material, slab, L_beam, s,
                                              demand_of_s(s), ΣQn;
@@ -390,17 +432,17 @@ function governing_composite_station(section::ISymmSection, material,
                                              Asr = Asr, Fysr = Fysr,
                                              d_rebar = d_rebar, ϕ = ϕ,
                                              neg_moment = neg_moment,
-                                             ΣQn_neg = ΣQn_neg).dcr
+                                             ΣQn_neg = ΣQn_neg,
+                                             supports = supports).dcr
 
-    bp = beff_breakpoints(left, right)
-    isempty(extra_breakpoints) || (bp = _unique_sorted(vcat(bp, collect(Float64, extra_breakpoints))))
+    bp = _station_breakpoints(left, right, extra_breakpoints, supports)
 
     s_star, dcr_max = governing_station(dcr_of_s, bp; n_bracket = n_bracket)
     rec = composite_dcr_at_station(section, material, slab, L_beam, s_star,
                                    demand_of_s(s_star), ΣQn;
                                    left = left, right = right, Asr = Asr, Fysr = Fysr,
                                    d_rebar = d_rebar, ϕ = ϕ, neg_moment = neg_moment,
-                                   ΣQn_neg = ΣQn_neg)
+                                   ΣQn_neg = ΣQn_neg, supports = supports)
     return (; s_star = s_star, dcr_max = dcr_max, rec...)
 end
 
@@ -418,11 +460,13 @@ One beam's exact sagging demand field and per-side tributary profiles.
 `demand_of_s(s)` returns the signed moment (sagging positive). `breakpoints`
 are the demand-field segment boundaries merged into the governing-station search.
 
-`L_beam` is this member's center-to-center span. It is the §I3.1a `L/8` length
-and the default construction unbraced length. `nothing` falls back to the
-group context span. `slab` is this beam's solid slab; `nothing` falls back to
-the group context slab. A design group must not share one summed length or one
-minimum thickness across members that differ.
+`L_beam` is this member's length and the default construction unbraced
+length. `nothing` falls back to the group context span. `supports` are the
+fractions of `L_beam` at interior supports; the §I3.1a `L/8` length at a
+station is the support-to-support span containing it
+([`span_at_station`](@ref)). Empty means one span. `slab` is this beam's solid
+slab; `nothing` falls back to the group context slab. A design group must not
+share one summed length or one minimum thickness across members that differ.
 """
 struct BeamSaggingField{F}
     left::Union{SideExtentProfile, Nothing}
@@ -432,19 +476,24 @@ struct BeamSaggingField{F}
     L_beam::Union{Nothing, typeof(1.0u"m")}
     slab::Union{Nothing, AbstractSlabOnBeam}
     pre_cure::Union{Nothing, PreCureShape}
+    supports::Vector{Float64}
 end
 
 """Field with no per-beam span or slab. The checker uses the group context."""
-function BeamSaggingField(left, right, demand_of_s, breakpoints; pre_cure=nothing)
+function BeamSaggingField(left, right, demand_of_s, breakpoints; pre_cure=nothing,
+                          supports=Float64[])
     BeamSaggingField(left, right, demand_of_s, collect(Float64, breakpoints),
-                     nothing, nothing; pre_cure = pre_cure)
+                     nothing, nothing; pre_cure = pre_cure, supports = supports)
 end
 
 """Accept a span in any length unit and store it in meters."""
 function BeamSaggingField(left, right, demand_of_s::F, breakpoints::Vector{Float64},
-                          L_beam, slab; pre_cure=nothing) where {F}
+                          L_beam, slab; pre_cure=nothing, supports=Float64[]) where {F}
     L = L_beam === nothing ? nothing : uconvert(u"m", L_beam)
-    return BeamSaggingField{F}(left, right, demand_of_s, breakpoints, L, slab, pre_cure)
+    sup = sort!(collect(Float64, supports))
+    all(p -> 0.0 < p < 1.0, sup) || throw(ArgumentError(
+        "BeamSaggingField supports must be interior fractions in (0, 1), got $sup"))
+    return BeamSaggingField{F}(left, right, demand_of_s, breakpoints, L, slab, pre_cure, sup)
 end
 
 """Member span used for §I3.1a `L/8`. A missing field span uses the context."""
@@ -500,7 +549,7 @@ function _slab_at_spacings(slab::DeckSlabOnBeam, bsl, bsr)
     DeckSlabOnBeam(slab.t_slab, slab.fc′, slab.Ec, slab.wc, slab.n,
                    slab.hr, slab.wr, slab.deck_orientation,
                    uconvert(u"m", bsl), uconvert(u"m", bsr), nothing, nothing,
-                   slab.e_mid_ht, slab.anchorage_spacing)
+                   slab.e_mid_ht, slab.anchorage_spacing, slab.rib_angle, slab.rib_pitch)
 end
 
 """
@@ -573,6 +622,24 @@ function _context_for_construction(ctx::CompositeContext, slab, left, right)
 end
 
 """
+    moment_field_has_negative(demand_of_s) -> Bool
+
+True when the signed moment, sagging positive, is negative anywhere on the
+member. `demand_of_s` takes the position as a fraction of the span, in
+`[0, 1]`, the same convention as [`adjacent_shear_spans`](@ref). A moment
+smaller than 1 N·m is treated as zero.
+"""
+function moment_field_has_negative(demand_of_s)
+    for s in 0.0:0.05:1.0
+        raw = demand_of_s(float(s))
+        M = raw isa Unitful.Quantity ?
+            ustrip(u"N*m", uconvert(u"N*m", raw)) : Float64(raw)
+        M < -1.0 && return true
+    end
+    return false
+end
+
+"""
 Distance from a sagging station to the adjacent zero moment on each side.
 
 AISC 360-22 §I8.2c (corpus: aisc-360-22, PDF p. 183). `demand_of_s` returns
@@ -628,8 +695,9 @@ function governing_sagging_station(section::ISymmSection, material,
                                    left::Union{SideExtentProfile, Nothing} = nothing,
                                    right::Union{SideExtentProfile, Nothing} = nothing,
                                    extra_breakpoints::AbstractVector{Float64} = Float64[],
+                                   supports::AbstractVector{<:Real} = Float64[],
                                    ϕ::Real = 0.9)
-    L = uconvert(u"m", L_beam)
+    L_member = uconvert(u"m", L_beam)
 
     function _moment_Nm(s)
         raw = demand_of_s(s)
@@ -640,7 +708,8 @@ function governing_sagging_station(section::ISymmSection, material,
     function dcr_of_s(s)
         Mv = _moment_Nm(s)
         Mv <= 0 && return 0.0
-        b = b_eff_at_station(slab, L, s; left = left, right = right)
+        b = b_eff_at_station(slab, L_member, s; left = left, right = right,
+                             supports = supports)
         ϕMn = ϕMnx_steel
         if ustrip(u"m", b) > 1e-6
             try
@@ -653,12 +722,11 @@ function governing_sagging_station(section::ISymmSection, material,
         return ϕMn > 0 ? Mv / ϕMn : Inf
     end
 
-    bp = beff_breakpoints(left, right)
-    isempty(extra_breakpoints) ||
-        (bp = _unique_sorted(vcat(bp, collect(Float64, extra_breakpoints))))
+    bp = _station_breakpoints(left, right, extra_breakpoints, supports)
     s_star, dcr = governing_station(dcr_of_s, bp)
     dcr == 0.0 && (s_star = 0.5)
 
+    L = span_at_station(L_member, s_star, supports)
     bl = left === nothing ?
         _effective_half_width(L, slab.beam_spacing_left, slab.edge_dist_left) :
         _effective_half_width(L, 2 * _sample_extent(left, s_star) * u"m", nothing)

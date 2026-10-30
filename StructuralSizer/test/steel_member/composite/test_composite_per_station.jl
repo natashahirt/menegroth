@@ -476,3 +476,67 @@ end
     @test_throws ArgumentError BeamSaggingField(nothing, nothing, _ -> 0.0, [0.0, 1.0],
                                                 L, nothing; supports = [1.0])
 end
+
+# =============================================================================
+# §I8.2c / Eq. C-I3-1 — each sagging region has its own anchors
+# =============================================================================
+
+@testset "Each sagging region keeps its own studs" begin
+    # Two positive lobes and a negative gap. The short lobe is [0, 0.08].
+    shape(s) = 0.0 <= s <= 0.08 ? sin(π * s / 0.08) :
+               0.20 <= s <= 1.0 ? sin(π * (s - 0.20) / 0.80) : -1.0
+    # 1 N·m is the zero band, so the shape has to be a real moment.
+    regions = positive_moment_regions(s -> 1.0e6 * shape(float(s)))
+    @test length(regions) == 2
+    @test regions[1].s_left ≈ 0.0 atol = 1e-2
+    @test regions[1].s_right ≈ 0.08 atol = 1e-2
+    @test regions[2].s_left ≈ 0.20 atol = 1e-2
+    @test regions[2].s_right ≈ 1.0 atol = 1e-2
+    # 60 ft member: the short lobe is under 5 ft, the long lobe is over 15 ft.
+    @test maximum(region_shear_spans(regions[1], 60.0u"ft")) < 5.0u"ft"
+    @test maximum(region_shear_spans(regions[2], 60.0u"ft")) > 15.0u"ft"
+
+    fix = _per_station_fixture()
+    L = 60.0u"ft"
+    b_eff = get_b_eff(fix.slab, L)
+    Cf = StructuralSizer._Cf_max(fix.section, fix.material, fix.slab, b_eff)
+    Mu = 0.85 * get_ϕMn_composite(fix.section, fix.material, fix.slab, b_eff, Cf).ϕMn
+    demand(s) = Mu * shape(float(s))
+    long_only(s) = (ss = float(s); 0.20 <= ss <= 1.0 ? Mu * sin(π * (ss - 0.20) / 0.80) :
+                                     -0.01 * Mu)
+
+    anchor = HeadedStudAnchor(0.75u"inch", 5.0u"inch", 65.0u"ksi", 51.0u"ksi",
+                              490.0u"lb/ft^3")
+    ctx = CompositeContext(fix.slab, anchor, L; shored = true)
+    checker = AISCChecker(; deflection_limit = nothing,
+                          total_deflection_limit = nothing, max_depth = Inf)
+    cache = StructuralSizer.create_cache(checker, 1)
+    StructuralSizer.precompute_capacities!(checker, cache, [fix.section],
+                                           fix.material, MinWeight())
+    geom = SteelMemberGeometry(L; Lb = L)
+    env = MemberDemand(1; Mux = 0.0, Mux_pos = 0.0, Mux_neg = 0.0,
+                       Vu_strong = ustrip(u"N", 1.0u"N"))
+    both = BeamSaggingField(nothing, nothing, demand, Float64[0.0, 1.0], L, nothing)
+    only_long = BeamSaggingField(nothing, nothing, long_only, Float64[0.0, 1.0], L, nothing)
+    ok(field) = StructuralSizer.is_feasible(checker, cache, 1, fix.section, fix.material,
+                                            env, geom, PerStationComposite(ctx, [field]))
+    # The long bay can carry Mu. The short bay cannot fit the anchors Mu needs,
+    # so the member fails even though the larger bay passes on its own.
+    @test ok(only_long) == true
+    @test ok(both) == false
+
+    # The station inertia uses the anchors of the region it sits in.
+    # Hogging uses the cracked section, not either bay's I_LB.
+    moment(s) = 1.0e6 * shape(float(s))
+    Σ(region) = region.s_peak < 0.5 ? 20.0u"kip" : Cf
+    I_short = composite_inertia_at_station(fix.section, fix.material, fix.slab, L,
+                                           0.04, moment, Σ)
+    I_long = composite_inertia_at_station(fix.section, fix.material, fix.slab, L,
+                                          0.60, moment, Σ)
+    I_hog = composite_inertia_at_station(fix.section, fix.material, fix.slab, L,
+                                         0.14, moment, Σ;
+                                         Asr = 1.0u"inch^2", d_rebar = 3.0u"inch")
+    @test I_short > fix.section.Ix
+    @test I_long > I_short
+    @test I_hog ≈ get_I_cracked_negative(fix.section, 1.0u"inch^2"; d_rebar = 3.0u"inch")
+end

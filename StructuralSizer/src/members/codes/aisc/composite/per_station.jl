@@ -639,6 +639,88 @@ function moment_field_has_negative(demand_of_s)
     return false
 end
 
+# A moment inside this band is zero, matching `moment_field_has_negative`.
+const _MOMENT_ZERO_NM = 1.0
+
+function _demand_Nm(demand_of_s, s)
+    raw = demand_of_s(clamp(float(s), 0.0, 1.0))
+    return raw isa Unitful.Quantity ?
+        ustrip(u"N*m", uconvert(u"N*m", raw)) : Float64(raw)
+end
+
+"""
+    positive_moment_regions(demand_of_s; breakpoints=Float64[])
+        -> Vector of (; s_left, s_right, s_peak, M_peak)
+
+One entry per stretch where the signed moment (sagging positive) exceeds
+1 N·m. `s_left` and `s_right` are the zero crossings, or the member ends.
+`s_peak` is the maximum inside the stretch and `M_peak` is that moment, in N·m.
+
+AISC 360-22 Commentary Eq. C-I3-1 (corpus: aisc-360-22, PDF p. 502) and
+§I8.2c (PDF p. 183) count the anchors between the maximum positive moment and
+the adjacent zero. A continuous beam has one such stretch per bay. Anchors in
+another stretch are not this stretch's `ΣQn`.
+"""
+function positive_moment_regions(demand_of_s; breakpoints=Float64[])
+    moment(s) = _demand_Nm(demand_of_s, s)
+    sagging(s) = moment(s) > _MOMENT_ZERO_NM
+    pts = _unique_sorted(vcat(collect(0.0:0.01:1.0), Float64.(breakpoints), [0.0, 1.0]))
+    regions = NamedTuple[]
+    s_left = sagging(pts[1]) ? 0.0 : nothing
+    prev = pts[1]
+    for s in @view pts[2:end]
+        was, now = sagging(prev), sagging(s)
+        if now && !was
+            s_left = _crossing(moment, prev, s)
+        elseif !now && was && s_left !== nothing
+            push_region!(regions, moment, s_left, _crossing(moment, prev, s), breakpoints)
+            s_left = nothing
+        end
+        prev = s
+    end
+    s_left === nothing || push_region!(regions, moment, s_left, 1.0, breakpoints)
+    return regions
+end
+
+"""Bisect a sign change. `moment(a)` and `moment(b)` are on opposite sides of the 1 N·m band."""
+function _crossing(moment, a, b)
+    lo, hi = float(a), float(b)
+    for _ in 1:50
+        mid = (lo + hi) / 2
+        if (moment(lo) > _MOMENT_ZERO_NM) == (moment(mid) > _MOMENT_ZERO_NM)
+            lo = mid
+        else
+            hi = mid
+        end
+    end
+    return (lo + hi) / 2
+end
+
+function push_region!(regions, moment, s_left, s_right, breakpoints)
+    s_right - s_left < 1e-4 && return regions
+    bp = Float64[s_left, s_right]
+    for p in breakpoints
+        s_left < p < s_right && push!(bp, float(p))
+    end
+    s_peak, M_peak = governing_station(moment, bp)
+    push!(regions, (; s_left, s_right, s_peak, M_peak))
+    return regions
+end
+
+"""
+Distances from a region's maximum moment to its two zeros.
+
+Same filtering as [`adjacent_shear_spans`](@ref): a side shorter than 0.1 mm
+is not a shear span. `L` is the member length.
+"""
+function region_shear_spans(region, L)
+    L_m = uconvert(u"m", L isa Unitful.Quantity ? L : L * u"m")
+    left = (region.s_peak - region.s_left) * L_m
+    right = (region.s_right - region.s_peak) * L_m
+    kept = filter(s -> ustrip(u"m", s) > 1e-4, (left, right))
+    return isempty(kept) ? (L_m,) : Tuple(kept)
+end
+
 """
 Distance from a sagging station to the adjacent zero moment on each side.
 
@@ -742,4 +824,35 @@ function governing_sagging_station(section::ISymmSection, material,
         spacing_left = uconvert(u"m", 2 * bl),
         spacing_right = uconvert(u"m", 2 * br),
     )
+end
+
+"""
+    composite_inertia_at_station(section, material, slab, L, s, demand_of_s, ΣQn_at;
+        left=nothing, right=nothing, supports=Float64[], Asr=0.0u"mm^2", d_rebar=0.0u"m")
+
+Strong-axis inertia at normalized station `s`.
+
+A station inside a sagging region uses [`get_I_LB`](@ref) with that region's
+anchor strength `ΣQn_at(region)` and the effective width at `s`. A station
+outside every sagging region is hogging and uses [`get_I_cracked_negative`](@ref).
+
+# ENGINEERING JUDGMENT
+AISC 360-22 Commentary Eq. C-I3-5 (corpus: aisc-360-22, PDF p. 502) permits
+one constant inertia, `a I_pos + b I_neg`. Giving each station its own inertia
+is a refinement of that constant value. `I_neg` itself has no equation in the
+commentary; the cracked section is the judgment recorded on
+[`get_I_cracked_negative`](@ref).
+"""
+function composite_inertia_at_station(section::ISymmSection, material,
+                                      slab::AbstractSlabOnBeam, L, s, demand_of_s, ΣQn_at;
+                                      left::Union{SideExtentProfile, Nothing} = nothing,
+                                      right::Union{SideExtentProfile, Nothing} = nothing,
+                                      supports::AbstractVector{<:Real} = Float64[],
+                                      Asr = 0.0u"mm^2", d_rebar = 0.0u"m")
+    regions = positive_moment_regions(demand_of_s)
+    sc = float(s)
+    k = findfirst(r -> r.s_left - 1e-9 <= sc <= r.s_right + 1e-9, regions)
+    k === nothing && return get_I_cracked_negative(section, Asr; d_rebar = d_rebar)
+    b = b_eff_at_station(slab, L, sc; left = left, right = right, supports = supports)
+    return get_I_LB(section, material, slab, b, ΣQn_at(regions[k]))
 end

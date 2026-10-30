@@ -764,6 +764,12 @@ Each beam in the group is checked at the sagging station that maximizes
 corpus: aisc-360-16, PDF pp. 150–151). The scalar composite check then runs
 at that station's width and moment. Construction (§I3.1b) uses this member's
 pre-cure load. Hogging (§I3.2b) keeps the demand envelope.
+
+A moment field with more than one sagging region (a continuous beam) designs
+the anchors of each region from that region's own maximum moment and the
+zeros on either side (AISC 360-22 §I8.2c and Commentary Eq. C-I3-1, corpus:
+aisc-360-22, PDF pp. 183 and 502). The service inertia uses the region of
+greatest positive moment. One region keeps the single-station path.
 """
 function is_feasible(
     checker::AISCChecker,
@@ -785,24 +791,96 @@ function is_feasible(
         # span may be a group total; that total is not this beam's L.
         slab_i = _station_slab(psc.ctx, field)
         L_i = _station_span(psc.ctx, field)
-        g = governing_sagging_station(section, material, slab_i, L_i,
-                                      field.demand_of_s, ϕMnx_steel;
-                                      left = field.left, right = field.right,
-                                      extra_breakpoints = field.breakpoints,
-                                      supports = field.supports,
-                                      ϕ = checker.ϕ_b)
-        g.dcr <= 1.0 || return false
-        st = CompositeSaggingStation(g.b_eff, g.M_pos * u"N*m",
-                                     g.spacing_left, g.spacing_right)
-        ctx_i = construction_context(psc.ctx, field, st, L_i, slab_i)
-        spans = adjacent_shear_spans(field.demand_of_s, g.s_star, L_i)
-        is_feasible(checker, cache, j, section, material, demand, geometry, ctx_i;
-                    strength_Mux_pos = g.M_pos, shear_spans = spans,
-                    service_continuous = moment_field_has_negative(field.demand_of_s),
-                    Cb_neg = cb_neg_from_moment_field(field.demand_of_s;
-                                                                   L = L_i, L_twist = psc.ctx.L_twist)) || return false
+        regions = positive_moment_regions(field.demand_of_s;
+                                          breakpoints = field.breakpoints)
+        if length(regions) <= 1
+            _one_sagging_region(checker, cache, j, section, material, demand,
+                                geometry, psc, field, slab_i, L_i, ϕMnx_steel) ||
+                return false
+        else
+            primary = argmax(r -> r.M_peak, regions)
+            _region_service(checker, cache, j, section, material, demand, geometry,
+                            psc, field, slab_i, L_i, ϕMnx_steel, primary) || return false
+            for region in regions
+                region.s_peak == primary.s_peak && continue
+                _region_strength(section, material, slab_i, psc.ctx, field, L_i,
+                                 ϕMnx_steel, checker.ϕ_b, region) || return false
+            end
+        end
     end
     return true
+end
+
+"""The single sagging region: one governing station, one pair of shear spans."""
+function _one_sagging_region(checker, cache, j, section, material, demand, geometry,
+                             psc, field, slab_i, L_i, ϕMnx_steel)
+    g = governing_sagging_station(section, material, slab_i, L_i,
+                                  field.demand_of_s, ϕMnx_steel;
+                                  left = field.left, right = field.right,
+                                  extra_breakpoints = field.breakpoints,
+                                  supports = field.supports,
+                                  ϕ = checker.ϕ_b)
+    g.dcr <= 1.0 || return false
+    return _service_at_station(checker, cache, j, section, material, demand, geometry,
+                               psc, field, slab_i, L_i, g,
+                               adjacent_shear_spans(field.demand_of_s, g.s_star, L_i),
+                               g.M_pos)
+end
+
+"""Service check on the region of greatest positive moment, studs on its own zeros."""
+function _region_service(checker, cache, j, section, material, demand, geometry,
+                         psc, field, slab_i, L_i, ϕMnx_steel, region)
+    g = _region_governing(section, material, slab_i, L_i, field, ϕMnx_steel,
+                          checker.ϕ_b, region)
+    g.dcr <= 1.0 || return false
+    return _service_at_station(checker, cache, j, section, material, demand, geometry,
+                               psc, field, slab_i, L_i, g,
+                               region_shear_spans(region, L_i),
+                               max(g.M_pos, region.M_peak))
+end
+
+function _service_at_station(checker, cache, j, section, material, demand, geometry,
+                             psc, field, slab_i, L_i, g, spans, M_pos)
+    st = CompositeSaggingStation(g.b_eff, g.M_pos * u"N*m",
+                                 g.spacing_left, g.spacing_right)
+    ctx_i = construction_context(psc.ctx, field, st, L_i, slab_i)
+    return is_feasible(checker, cache, j, section, material, demand, geometry, ctx_i;
+                       strength_Mux_pos = M_pos, shear_spans = spans,
+                       service_continuous = moment_field_has_negative(field.demand_of_s),
+                       Cb_neg = cb_neg_from_moment_field(field.demand_of_s;
+                                                         L = L_i, L_twist = psc.ctx.L_twist))
+end
+
+"""Strength only: this region's anchors, not the service inertia of another bay."""
+function _region_strength(section, material, slab, ctx, field, L, ϕMn_steel, ϕ, region)
+    g = _region_governing(section, material, slab, L, field, ϕMn_steel, ϕ, region)
+    g.dcr <= 1.0 || return false
+    spans = region_shear_spans(region, L)
+    for (s, M) in ((region.s_peak, region.M_peak), (g.s_star, g.M_pos))
+        M <= 0 && continue
+        b = b_eff_at_station(slab, L, s; left = field.left, right = field.right,
+                             supports = field.supports)
+        lay = design_shear_anchors(section, material, slab, ctx.anchor, b, L,
+                                   M * u"N*m";
+                                   ϕMn_steel = ϕMn_steel * u"N*m",
+                                   shear_spans = spans,
+                                   slip_checked = ctx.slip_checked,
+                                   ϕ = ϕ)
+        lay.ok || return false
+    end
+    return true
+end
+
+function _region_governing(section, material, slab, L, field, ϕMn_steel, ϕ, region)
+    lo, hi = region.s_left, region.s_right
+    masked = s -> (lo - 1e-9 <= float(s) <= hi + 1e-9) ?
+        field.demand_of_s(float(s)) : 0 * field.demand_of_s(float(s))
+    return governing_sagging_station(section, material, slab, L, masked, ϕMn_steel;
+                                     left = field.left, right = field.right,
+                                     extra_breakpoints = vcat(field.breakpoints,
+                                                              [region.s_left, region.s_right]),
+                                     supports = field.supports,
+                                     ϕ = ϕ)
 end
 
 # ==============================================================================
@@ -1325,29 +1403,67 @@ function explain_feasibility(
 
     ϕMnx_steel = _get_ϕMnx_cached!(cache, j, to_meters(geometry.Lb), geometry.Cb,
                                    section, material, checker.ϕ_b)
+    # Secondary regions are strength only. Their inertia is not the member's
+    # service inertia, so a deflection limit must not govern their report.
+    strength_only = AISCChecker(; ϕ_b = checker.ϕ_b, ϕ_c = checker.ϕ_c,
+                                ϕ_v = checker.ϕ_v, ϕ_t = checker.ϕ_t,
+                                max_depth = checker.max_depth,
+                                prefer_penalty = checker.prefer_penalty)
     best = nothing
     for field in psc.fields
         slab_i = _station_slab(psc.ctx, field)
         L_i = _station_span(psc.ctx, field)
-        g = governing_sagging_station(section, material, slab_i, L_i,
-                                      field.demand_of_s, ϕMnx_steel;
-                                      left = field.left, right = field.right,
-                                      extra_breakpoints = field.breakpoints,
-                                      supports = field.supports,
-                                      ϕ = checker.ϕ_b)
-        st = CompositeSaggingStation(g.b_eff, g.M_pos * u"N*m",
-                                     g.spacing_left, g.spacing_right)
-        ctx_i = construction_context(psc.ctx, field, st, L_i, slab_i)
-        spans = adjacent_shear_spans(field.demand_of_s, g.s_star, L_i)
-        ex = explain_feasibility(checker, cache, j, section, material, demand, geometry, ctx_i;
-                                 strength_Mux_pos = g.M_pos, shear_spans = spans,
-                                 service_continuous = moment_field_has_negative(field.demand_of_s),
-                                 Cb_neg = cb_neg_from_moment_field(field.demand_of_s;
-                                                                   L = L_i, L_twist = psc.ctx.L_twist))
-        if best === nothing || (!ex.passed && best.passed) ||
-                (ex.passed == best.passed && ex.governing_ratio > best.governing_ratio)
-            best = ex
+        regions = positive_moment_regions(field.demand_of_s;
+                                          breakpoints = field.breakpoints)
+        if length(regions) <= 1
+            g = governing_sagging_station(section, material, slab_i, L_i,
+                                          field.demand_of_s, ϕMnx_steel;
+                                          left = field.left, right = field.right,
+                                          extra_breakpoints = field.breakpoints,
+                                          supports = field.supports,
+                                          ϕ = checker.ϕ_b)
+            best = _worse_explanation(best, _explain_station(
+                checker, cache, j, section, material, demand, geometry, psc,
+                field, slab_i, L_i, g,
+                adjacent_shear_spans(field.demand_of_s, g.s_star, L_i), g.M_pos))
+        else
+            primary = argmax(r -> r.M_peak, regions)
+            g = _region_governing(section, material, slab_i, L_i, field, ϕMnx_steel,
+                                  checker.ϕ_b, primary)
+            best = _worse_explanation(best, _explain_station(
+                checker, cache, j, section, material, demand, geometry, psc,
+                field, slab_i, L_i, g, region_shear_spans(primary, L_i),
+                max(g.M_pos, primary.M_peak)))
+            for region in regions
+                region.s_peak == primary.s_peak && continue
+                gr = _region_governing(section, material, slab_i, L_i, field,
+                                       ϕMnx_steel, checker.ϕ_b, region)
+                best = _worse_explanation(best, _explain_station(
+                    strength_only, cache, j, section, material, demand, geometry, psc,
+                    field, slab_i, L_i, gr, region_shear_spans(region, L_i),
+                    max(gr.M_pos, region.M_peak)))
+            end
         end
+    end
+    return best
+end
+
+function _explain_station(checker, cache, j, section, material, demand, geometry,
+                          psc, field, slab_i, L_i, g, spans, M_pos)
+    st = CompositeSaggingStation(g.b_eff, g.M_pos * u"N*m",
+                                 g.spacing_left, g.spacing_right)
+    ctx_i = construction_context(psc.ctx, field, st, L_i, slab_i)
+    return explain_feasibility(checker, cache, j, section, material, demand, geometry, ctx_i;
+                               strength_Mux_pos = M_pos, shear_spans = spans,
+                               service_continuous = moment_field_has_negative(field.demand_of_s),
+                               Cb_neg = cb_neg_from_moment_field(field.demand_of_s;
+                                                                 L = L_i, L_twist = psc.ctx.L_twist))
+end
+
+function _worse_explanation(best, ex)
+    if best === nothing || (!ex.passed && best.passed) ||
+            (ex.passed == best.passed && ex.governing_ratio > best.governing_ratio)
+        return ex
     end
     return best
 end

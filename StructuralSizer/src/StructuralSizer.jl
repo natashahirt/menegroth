@@ -314,6 +314,7 @@ export SideExtentProfile, b_eff_at_station, span_at_station, beff_breakpoints, p
 export governing_station, composite_dcr_at_station, governing_composite_station
 export BeamSaggingField, CompositeSaggingStation, PerStationComposite
 export governing_sagging_station, context_at_sagging_station
+export positive_moment_regions, region_shear_spans, composite_inertia_at_station
 
 # --- ACI 318: material utilities ---
 export beta1, Ec, Ec_ksi, fr, fc_ksi, fy_ksi, Es_ksi, εcu, β1
@@ -489,6 +490,13 @@ export AbstractFloorOptions
 export FlatPlateOptions, FlatSlabOptions, OneWayOptions, VaultOptions, CompositeDeckOptions, TimberOptions
 export flat_slab  # convenience constructor for FlatSlabOptions
 export result_materials
+
+# --- Floor package-boundary contracts ---
+export FloorSource, FloorDesignRequest, FloorDesignWorkspace, prepare_floor_design_workspace
+export FloorDesignStatus, FLOOR_DESIGN_SUCCEEDED, FLOOR_DESIGN_NOT_CONVERGED, FLOOR_DESIGN_INFEASIBLE
+export FloorDesignDiagnostic, FloorCellLoadUpdate, FloorSupportUpdate
+export FloorDesignProposal, FloorDesignOutcome
+export UnsupportedFloorSystemError, is_installable
 
 # --- Floor result types ---
 export AbstractFloorResult

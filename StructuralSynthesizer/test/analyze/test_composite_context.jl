@@ -599,6 +599,55 @@ end
 end
 
 # =============================================================================
+# T2d. PER-ELEMENT STIFFNESS. A two-span beam meshed at 4 elements per span.
+#     The inner quarter of each span hogs, so the element nearest the center
+#     support takes the cracked inertia. A midspan element takes I_LB.
+#     ENGINEERING JUDGMENT against AISC 360-22 Commentary Eq. C-I3-5.
+# =============================================================================
+@testset "T2d. Per-element stiffness follows the midpoint moment" begin
+    section  = W("W21X55")
+    material = A992_Steel
+    slab = SolidSlabOnBeam(7.5u"inch", 4.0u"ksi", 3644.0u"ksi", 145.0u"lb/ft^3",
+                           29000.0u"ksi", 10.0u"ft", 10.0u"ft")
+    L = 10.0
+    w = 12_000.0
+    nel = 4
+    Asr = 1.0u"inch^2"
+    d_rebar = 3.0u"inch"
+    sec_asap = StructuralSizer.to_asap_section(section, material)
+    model = _solve_two_span(; L = L, w = w, nel_span = nel, sec = sec_asap)
+    struc, beam = _wrap_beam_building(model, fill(L / nel, 2 * nel))
+
+    M_of_s, _ = beam_signed_moment_field(struc, beam)
+    # Element midpoints on the 8-element mesh. 0.1875 is midspan of the first
+    # bay's second element (sagging). 0.4375 is the element against the
+    # center support (hogging: the inflection of two equal spans is at 0.75L).
+    @test ustrip(u"N*m", M_of_s(0.1875)) > 0
+    @test ustrip(u"N*m", M_of_s(0.4375)) < 0
+
+    Σ(_) = 292.0u"kip"
+    I_sag = composite_inertia_at_station(section, material, slab, (2 * L) * u"m",
+                                         0.1875, M_of_s, Σ; Asr = Asr, d_rebar = d_rebar)
+    I_hog = composite_inertia_at_station(section, material, slab, (2 * L) * u"m",
+                                         0.4375, M_of_s, Σ; Asr = Asr, d_rebar = d_rebar)
+    @test I_hog ≈ get_I_cracked_negative(section, Asr; d_rebar = d_rebar)
+    @test I_sag > section.Ix
+    @test !(I_sag ≈ I_hog)
+
+    apply_composite_element_stiffness!(struc, beam, section, material, slab, Σ;
+                                       Asr = Asr, d_rebar = d_rebar)
+    @test model.elements[2].section.Ix ≈ I_sag
+    @test model.elements[4].section.Ix ≈ I_hog
+    @test model.elements[5].section.Ix ≈ I_hog
+
+    refined = refine_composite_stiffness!(struc, beam, section, material, slab, Σ;
+                                          Asr = Asr, d_rebar = d_rebar, tol = 0.02)
+    @test refined.converged
+    @test 1 <= refined.iterations <= 6
+    @test !(model.elements[2].section.Ix ≈ model.elements[4].section.Ix)
+end
+
+# =============================================================================
 # T3. END-TO-END on a solved column-supported two-bay building. Tributaries +
 #     solve + `composite_context_from_beam` + `check_composite_beam` on an
 #     INTERIOR beam (tributary both sides) and an EDGE beam (one-sided).

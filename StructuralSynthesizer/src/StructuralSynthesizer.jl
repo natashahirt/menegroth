@@ -14,7 +14,7 @@ import StructuralSizer: self_weight, total_depth, structural_effects
 import Meshes
 import Graphs
 import Asap
-import LinearAlgebra: norm, normalize
+import LinearAlgebra: norm, normalize, diag, eigmin, Symmetric
 using Unitful
 
 function __init__()
@@ -77,12 +77,16 @@ include("walls_bridge.jl")
 # Lateral design vocabulary, named by DesignParameters.lateral. Behavior is in
 # analyze/lateral/approaches/.
 include("analyze/lateral/approaches/types.jl")
+include("analyze/lateral/ordinary_wall_inputs.jl")
 
 # Design types (BuildingDesign, DesignParameters, result structs)
 include("design_types.jl")
 
 # Core functionality (includes tributary_accessors.jl)
 include("core/_core.jl")
+
+# Typed floor-design adapter and transactional installation boundary
+include("floor_design_contracts.jl")
 
 # Design graph scaffolding (node interface + container + executor). Included
 # before design_workflow.jl so `build_design_graph` / `execute_graph!` and the
@@ -163,6 +167,7 @@ export has_analysis_model, build_analysis_model!
 # --- Design workflow ---
 export design_building, compare_designs, build_pipeline, PipelineStage, sync_asap!
 export prepare!, capture_design
+export floor_design_request, design_floor, design_floor!, design_floors!, install_floor_design!
 
 # --- Design graph (Run 1: node layer wrapping the pipeline) ---
 export DesignNode, StageNode, NodeKey, DesignGraph
@@ -177,7 +182,7 @@ export DesignSnapshot, SlabSnapshot
 export param_slice, struc_reads, struc_writes, code_version, node_provenance
 export canonical_node_keys, pipeline_provenance
 export NODE_INITIALIZE, NODE_POPULATE_FRAMING, NODE_ESTIMATE_COLUMNS, NODE_BUILD_ASAP
-export NODE_SLAB_SIZING, NODE_MEMBERS, NODE_FOUNDATIONS, NODE_CAPTURE
+export NODE_SLAB_SIZING, NODE_MEMBERS, NODE_FOUNDATIONS, NODE_ORDINARY_WALLS, NODE_CAPTURE
 # Graph queries
 export transitive_dependencies, descendants
 # Fingerprinting
@@ -221,6 +226,7 @@ export compute_member_tributaries!
 export beam_side_profiles, composite_context_from_beam
 export beam_interior_supports, beam_support_lookup
 export beam_signed_moment_field, check_composite_beam, composite_deflection_scale
+export apply_composite_element_stiffness!, refine_composite_stiffness!
 export composite_group_payload, composite_payloads_for_groups, composite_anchor_from_options
 export classify_column_position, is_exterior_support  # Column position classification for DDM/EFM
 export slab_material_angle, classify_corner_kind       # Corner refinement (convex vs re-entrant)
@@ -245,6 +251,7 @@ export wall_action_from_global, pier_wall_action, pier_gravity_actions
 export assembly_wall_action, combine_wall_action, wall_strength_actions
 export wind_pier_actions, seismic_strength_pier_actions
 export WallCheckRecord, check_ordinary_wall
+export OrdinaryWallInputs, OrdinaryWallResult, design_ordinary_walls!
 export refuse_joined_wall_design
 export require_seismic_wall_demand_provisions
 export LateralDesign, LateralSystem, DemandAssignment

@@ -15,6 +15,7 @@ import Meshes
 import Graphs
 import Asap
 import LinearAlgebra: norm, normalize, diag, eigmin, Symmetric
+import SparseArrays: sparse
 using Unitful
 
 function __init__()
@@ -227,6 +228,7 @@ export beam_side_profiles, composite_context_from_beam
 export beam_interior_supports, beam_support_lookup
 export beam_signed_moment_field, check_composite_beam, composite_deflection_scale
 export apply_composite_element_stiffness!, refine_composite_stiffness!
+export set_slab_openings!
 export composite_group_payload, composite_payloads_for_groups, composite_anchor_from_options
 export classify_column_position, is_exterior_support  # Column position classification for DDM/EFM
 export slab_material_angle, classify_corner_kind       # Corner refinement (convex vs re-entrant)

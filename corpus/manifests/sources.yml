@@ -105,6 +105,17 @@
   encrypted: false
   notes: "ASCE/SEI 7-22 Minimum Design Loads and Associated Criteria for Buildings and Other Structures."
 
+- id: sei-asce-37-02
+  origin: "corpus/sources/unsorted/Design Loads During Construction.pdf"
+  source_path: corpus/sources/codes/asce/SEI-ASCE-37-02.pdf
+  text_path:   corpus/text/codes/asce/SEI-ASCE-37-02.txt
+  family: asce
+  role: codes
+  edition: SEI/ASCE 37-02
+  tier: 1
+  encrypted: false
+  notes: "Design Loads on Structures During Construction (SEI/ASCE 37-02). Load factors calibrated to ASCE 7-95 (Commentary C2.2). AISC 360-22 Commentary I3.1b cites the 2014 edition (ASCE/SEI 37-14), which is NOT in the corpus; cite 37-02 only as the older edition and flag it. Text is OCR (macOS Vision) because the PDF has no usable text layer; tables, equations, and load-factor values must be confirmed against the rendered page before use."
+
 # ── Tier 1 — official guides / committee reports ──────────────────────────
 - id: aci-421-3r-15
   origin: "StructuralSizer/src/slabs/codes/concrete/reference/ACI 421-3R-15.pdf"
@@ -235,6 +246,17 @@
   tier: 2
   encrypted: false
   notes: "Zhang & Mueller (MIT), 'Shear wall layout optimization for conceptual design of tall buildings' — algorithmic / topology-optimization reference for shear-wall placement."
+
+- id: wilson-habibullah-1987-pdelta
+  origin: "corpus/sources/unsorted/P-Delta Effects.pdf"
+  source_path: corpus/sources/research/lateral/Wilson-Habibullah-1987-PDelta-Multistory-Buildings.pdf
+  text_path:   corpus/text/research/lateral/Wilson-Habibullah-1987-PDelta-Multistory-Buildings.txt
+  family: lateral
+  role: research
+  edition: "Earthquake Spectra 3(2), May 1987, pp. 289–298"
+  tier: 2
+  encrypted: false
+  notes: "Wilson & Habibullah, 'Static and Dynamic Analysis of Multi-Story Buildings, Including P-Delta Effects'. Non-iterative floor-level geometric stiffness: story couple (W_j/h_j)[1 -1; -1 1] on story displacements (Eq. 7), 3D form at the center of mass with torsion term w_i r_i^2 / h_j (Eqs. 8-12), transformation to each level's centroid (Eqs. 13-14), dummy-column equivalent I = -W_j h_j^2/12E and J = -w_i r_i^2/G (Eqs. 15-17). PDF p. N = journal p. 286+N (PDF pp. 1-2 are the journal cover/masthead). Image-only scan; the .txt was transcribed from 150 dpi page renders (2026-10-30) because tesseract was not installed, so re-check any equation against the PDF page before promotion. ERRATUM: Eq. 12 prints the torsion entries as 'r', but Eq. 11, Eq. 17, and units require r_i^2 (radius of gyration squared). Research, not normative."
 
 # ── Tier 2 — vendor design guides / technical notes (StructurePoint) ──────
 # StructurePoint (publisher of spWall / spColumn / spMats) commentaries and

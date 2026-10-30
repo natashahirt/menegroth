@@ -54,8 +54,10 @@ using Asap  # ensures `u"kip"`, `u"ksi"`, etc resolve via Asap unit module
         include("analyze/test_wall_cuts.jl")
         include("analyze/test_seismic_wall_gates.jl")
         include("analyze/test_wall_story_cuts.jl")
+        include("analyze/test_story_pdelta.jl")
         include("analyze/test_wall_combinations.jl")
         include("analyze/test_wall_ordinary.jl")
+        include("analyze/test_ordinary_wall_stage.jl")
         include("analyze/test_lateral_approaches.jl")
         include("analyze/test_node_rotations.jl")
         include("analyze/test_diaphragm_idealization.jl")
@@ -89,6 +91,8 @@ using Asap  # ensures `u"kip"`, `u"ksi"`, etc resolve via Asap unit module
 
     # ─── Slab Sizing (non-report tests) ──────────────────────────────────
     @testset "Slab Sizing" begin
+        include("sizing/slabs/test_floor_design_contracts.jl")
+        include("sizing/slabs/test_flat_plate_pure_methods.jl")
         include("sizing/slabs/test_vault_pipeline.jl")
     end
 

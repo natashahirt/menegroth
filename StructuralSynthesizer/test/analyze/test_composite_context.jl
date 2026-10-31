@@ -100,6 +100,57 @@ function _build_two_bay()
     return (struc, beam_on(v2, v5), beam_on(v6, v1))
 end
 
+"""One square bay of side `L` meters. Every beam is an edge of that bay."""
+function _build_square_bay(L::Float64)
+    skel = BuildingSkeleton{Float64}()
+    z = 3.0
+    v1 = add_vertex!(skel, [0.0, 0.0, z])
+    v2 = add_vertex!(skel, [L, 0.0, z])
+    v3 = add_vertex!(skel, [L, L, z])
+    v4 = add_vertex!(skel, [0.0, L, z])
+    add_element!(skel, v1, v2; group = :beams)
+    add_element!(skel, v2, v3; group = :beams)
+    add_element!(skel, v3, v4; group = :beams)
+    add_element!(skel, v4, v1; group = :beams)
+    rebuild_stories!(skel)
+    find_faces!(skel)
+    rebuild_geometry_cache!(skel)
+    struc = BuildingStructure(skel)
+    want = Set((v1, v2, v3, v4))
+    fidx = findfirst(vs -> Set(vs) == want, skel.face_vertex_indices)
+    fidx === nothing && error("no face for the square bay")
+    spans = SpanInfo{Float64}(L, L, (1.0, 0.0), L)
+    cell = Cell(fidx, (L * L) * u"m^2", spans, 2.0u"kN/m^2", 3.0u"kN/m^2")
+    cell.floor_type = :two_way
+    push!(struc.cells, cell)
+    slab = Slab{Float64}([1], CIPSlabResult(0.2, 0.2, 5.0), :two_way, spans,
+                         :interior, nothing, MaterialVolumes(), nothing, nothing,
+                         FramingLevel{Float64}[])
+    push!(struc.slabs, slab)
+    compute_cell_tributaries!(struc)
+    for e in sort(collect(skel.groups_edges[:beams]))
+        Lb = ustrip(u"m", skel.geometry.edge_lengths[e])
+        push!(struc.segments, Segment(e, Lb))
+        push!(struc.beams, Beam([length(struc.segments)], Lb; role = :girder, level = 0))
+    end
+    return struc
+end
+
+"""Largest solved δ/L on the composite children after `size_beams!`."""
+function _composite_deflection_ratio(struc, L::Float64)
+    mesh = StructuralSynthesizer._composite_mesh(struc)
+    mesh === nothing && error("composite mesh was not installed")
+    model = struc.asap_model
+    δs = Asap.element_max_deflections(model, model.u; resolution = 20)
+    δ = 0.0
+    for idxs in values(mesh[:children])
+        for i in idxs
+            δ = max(δ, get(δs, model.frame_elements[i].elementID, 0.0))
+        end
+    end
+    return δ / L
+end
+
 """Build a context for `beam`, supplying the fixed material/anchor inputs."""
 _mkctx(struc, beam; kwargs...) = composite_context_from_beam(
     struc, beam; t_slab = _T_SLAB, fc′ = _FC, Ec = _EC, wc = _WC, Es = _ES,
@@ -636,15 +687,15 @@ end
 
     apply_composite_element_stiffness!(struc, beam, section, material, slab, Σ;
                                        Asr = Asr, d_rebar = d_rebar)
-    @test model.elements[2].section.Ix ≈ I_sag
-    @test model.elements[4].section.Ix ≈ I_hog
-    @test model.elements[5].section.Ix ≈ I_hog
+    @test model.frame_elements[2].section.Ix ≈ I_sag
+    @test model.frame_elements[4].section.Ix ≈ I_hog
+    @test model.frame_elements[5].section.Ix ≈ I_hog
 
     refined = refine_composite_stiffness!(struc, beam, section, material, slab, Σ;
                                           Asr = Asr, d_rebar = d_rebar, tol = 0.02)
     @test refined.converged
     @test 1 <= refined.iterations <= 6
-    @test !(model.elements[2].section.Ix ≈ model.elements[4].section.Ix)
+    @test !(model.frame_elements[2].section.Ix ≈ model.frame_elements[4].section.Ix)
 end
 
 # =============================================================================
@@ -799,6 +850,46 @@ end
         @test g.section.name == (Lmax > 10 ? "W14X90" : "W21X55")
     end
 
+    # Pass 2 confirms the pass-1 section on its own deflection. A third
+    # sizing runs only when that confirmation failed and the catalog chose
+    # another section, which is then confirmed on its own solve.
+    passes = StructuralSynthesizer._composite_mesh(struc)[:section_passes]
+    @test length(passes) in (2, 3)
+    @test passes[1][1] == 1 && passes[2][1] == 2
+    changed = passes[1][2] != passes[2][2]
+    @test length(passes) == (changed ? 3 : 2)
+    if changed
+        @test passes[3][1] == 3
+        @test passes[3][2] == passes[1][2] || passes[3][2] == passes[2][2]
+    end
+
+    # Shored, so the pre-cure steel check does not lock the heavy shape.
+    # Pass 2 confirms the pass-1 section. A different section is kept only
+    # after it passes on its own solved deflection.
+    struc_shored, _, _ = _build_two_bay()
+    _solve_two_bay_frame!(struc_shored)
+    shored_loads = Asap.AbstractLoad[]
+    append!(shored_loads, struc_shored.asap_model.loads)
+    struc_shored.asap_model.loads = shored_loads
+    opts_shored = SteelBeamOptions(composite = true, composite_shored = true,
+                                    composite_anchor_d = 0.75u"inch",
+                                    composite_anchor_length = 5.0u"inch",
+                                    composite_anchor_Fu = 65.0u"ksi",
+                                    custom_catalog = [W("W21X55"), W("W14X90")],
+                                    deflection_limit = 1 / 360,
+                                    total_deflection_limit = nothing)
+    size_beams!(struc_shored, opts_shored; reanalyze = false,
+                composite_concrete = conc, composite_t_slab = _T_SLAB)
+    shored_passes = StructuralSynthesizer._composite_mesh(struc_shored)[:section_passes]
+    @test length(shored_passes) in (2, 3)
+    shored_changed = shored_passes[1][2] != shored_passes[2][2]
+    @test length(shored_passes) == (shored_changed ? 3 : 2)
+    @test shored_passes[end][1] == length(shored_passes)
+    if shored_changed
+        @test shored_passes[end][2] == shored_passes[1][2] ||
+              shored_passes[end][2] == shored_passes[2][2]
+    end
+
     struc_bare, _, _ = _build_two_bay()
     _solve_two_bay_frame!(struc_bare)
     bare_loads = Asap.AbstractLoad[]
@@ -806,6 +897,42 @@ end
     struc_bare.asap_model.loads = bare_loads
     @test_throws ArgumentError size_beams!(struc_bare, SteelBeamOptions(composite = true);
                                            reanalyze = false)
+end
+
+@testset "A lighter section is not kept on the previous deflection" begin
+    conc = Concrete(_EC, _FC, _WC, 0.20, 0.1)
+    L = 4.0
+    function sized(names; limit = nothing)
+        struc = _build_square_bay(L)
+        _solve_two_bay_frame!(struc)
+        loads = Asap.AbstractLoad[]
+        append!(loads, struc.asap_model.loads)
+        struc.asap_model.loads = loads
+        opts = SteelBeamOptions(composite = true,
+                                 composite_anchor_d = 0.75u"inch",
+                                 composite_anchor_length = 5.0u"inch",
+                                 composite_anchor_Fu = 65.0u"ksi",
+                                 custom_catalog = [W(n) for n in names],
+                                 deflection_limit = limit,
+                                 total_deflection_limit = nothing)
+        size_beams!(struc, opts; reanalyze = false,
+                    composite_concrete = conc, composite_t_slab = _T_SLAB)
+        return struc
+    end
+    # The flexible shape's own composite deflection is the larger one.
+    # The limit sits between the two solved ratios.
+    r_light = _composite_deflection_ratio(sized(["W16X26"]), L)
+    r_stiff = _composite_deflection_ratio(sized(["W21X55"]), L)
+    @test r_light > r_stiff
+    both = sized(["W16X26", "W21X55"]; limit = (r_light + r_stiff) / 2)
+    passes = StructuralSynthesizer._composite_mesh(both)[:section_passes]
+    # Two passes when the first section confirms. Three when it fails and
+    # the replacement confirms on its own deflection.
+    @test length(passes) in (2, 3)
+    @test all(==("W21X55"), passes[end][2])
+    @test passes[end][2] == passes[1][2] || passes[end][2] == passes[2][2]
+    @test all(g -> g.section !== nothing && g.section.name == "W21X55",
+              values(both.member_groups))
 end
 
 # =============================================================================
@@ -1032,7 +1159,7 @@ end
     @test 0.5 * simple_M < ustrip(u"N*m", shape.M_ref) <= simple_M * 1.001
     @test simple_V * 0.99 <= ustrip(u"N", shape.V_ref) <= (5 / 8) * 10_000.0 * Lm * 1.01
 
-    el = struc.asap_model.elements[struc.segments[only(segment_indices(ibeam))].edge_idx]
+    el = struc.asap_model.frame_elements[struc.segments[only(segment_indices(ibeam))].edge_idx]
     varied = Asap.TributaryLoad(el, [0.0, 1.0], [1.0u"m", 2.0u"m"], 10_000.0u"Pa")
     struc.cell_dead_loads[1] = [varied]
     @test StructuralSynthesizer.beam_pre_cure_shape(
@@ -1130,4 +1257,212 @@ end
     @test StructuralSynthesizer.APIParams().composite_deck_orientation == "from_slab"
     @test occursin("from_slab", StructuralSynthesizer.api_input_schema()["params"]["fields"][
         "composite_deck_orientation"])
+end
+
+@testset "One bay splits so hogging and sagging take different inertias" begin
+    section = W("W21X55")
+    material = A992_Steel
+    sec = StructuralSizer.to_asap_section(section, material)
+    L = 10.0
+    w = 12_000.0
+    model = _solve_two_span(; L = L, w = w, nel_span = 1, sec = sec)
+    struc, beam = _wrap_beam_building(model, [L, L])
+    for edge in (1, 2)
+        StructuralSynthesizer._subdivide_composite_edge!(struc, edge)
+    end
+    Asap.process!(struc.asap_model)
+    Asap.solve!(struc.asap_model)
+    @test length(struc.asap_model.frame_elements) == 10
+    @test ustrip(struc.asap_model.frame_elements[1].section.Ix) == 0.0
+    slab = SolidSlabOnBeam(7.5u"inch", 4.0u"ksi", 3644.0u"ksi", 145.0u"lb/ft^3",
+                           29000.0u"ksi", 10.0u"ft", 10.0u"ft")
+    Asr = 1.0u"inch^2"
+    apply_composite_element_stiffness!(struc, beam, section, material, slab,
+                                       _ -> 292.0u"kip"; Asr = Asr, d_rebar = 3.0u"inch")
+    I_cr = get_I_cracked_negative(section, Asr; d_rebar = 3.0u"inch")
+    # Span 1's four children are elements 3:6. The inner one (local 0.875) hogs.
+    I_mid = struc.asap_model.frame_elements[4].section.Ix
+    I_inner = struc.asap_model.frame_elements[6].section.Ix
+    @test isapprox(I_inner, I_cr; rtol = 1e-6)
+    @test I_mid > section.Ix
+end
+
+function _extent_at_profile(p, s)
+    pos, ext = p.positions, p.extents_m
+    s <= pos[1] && return ext[1]
+    s >= pos[end] && return ext[end]
+    i = searchsortedlast(pos, s)
+    i >= length(pos) && return ext[end]
+    denom = pos[i + 1] - pos[i]
+    t = denom == 0 ? 0.0 : (s - pos[i]) / denom
+    return ext[i] + t * (ext[i + 1] - ext[i])
+end
+
+@testset "A slab opening cuts the flange width" begin
+    struc, ibeam, _ = _build_two_bay()
+    left0, right0 = beam_side_profiles(struc, ibeam)
+    # Interior beam at x = 6. The opening sits 0.3 m off its +x face.
+    set_slab_openings!(struc, [[(6.3, 2.0), (7.5, 2.0), (7.5, 10.0), (6.3, 10.0)]])
+    left1, right1 = beam_side_profiles(struc, ibeam)
+    # The tributary pinches to zero at the columns. Compare midspan.
+    ext(p) = p === nothing ? 0.0 : _extent_at_profile(p, 0.5)
+    @test min(ext(left1), ext(right1)) < 0.5
+    @test min(ext(left1), ext(right1)) < min(ext(left0), ext(right0))
+    @test max(ext(left1), ext(right1)) > 0.5
+end
+
+@testset "Patterned live load stays off the steel section" begin
+    # AISC 360-22 Commentary §I3.1b (corpus: aisc-360-22, PDF p. 500):
+    # dead load on the steel section, live load on the composite section.
+    # ACI 318-11 §13.7.6.3–13.7.6.4 (corpus: aci-318-11, page 261) still
+    # chooses which bays carry live load.
+    struc, _ibeam, _ebeam = _build_two_bay()
+    _solve_two_bay_frame!(struc)
+    model = struc.asap_model
+    # The solver's load vector is concrete in the beam release. Children of a
+    # subdivided edge do not all keep that release, so the list has to accept
+    # every TributaryLoad before the mesh is split.
+    widened = Asap.AbstractLoad[]
+    append!(widened, model.loads)
+    model.loads = widened
+    skel = struc.skeleton
+    nbeam = length(skel.groups_edges[:beams])
+    els = model.frame_elements[1:nbeam]
+    dead = Asap.TributaryLoad[]
+    live = Asap.TributaryLoad[]
+    for el in els
+        push!(dead, Asap.TributaryLoad(el, [0.0, 1.0], [1.0u"m", 1.0u"m"],
+                                       20_000.0u"Pa", (0.0, 0.0, -1.0)))
+        push!(live, Asap.TributaryLoad(el, [0.0, 1.0], [1.0u"m", 1.0u"m"],
+                                       30_000.0u"Pa", (0.0, 0.0, -1.0)))
+    end
+    mid = cld(nbeam, 2)
+    struc.cell_dead_loads[1] = dead
+    struc.cell_dead_loads[2] = Asap.TributaryLoad[]
+    struc.cell_live_loads[1] = live[1:mid]
+    struc.cell_live_loads[2] = live[mid + 1:end]
+    for e in skel.groups_edges[:beams]
+        StructuralSynthesizer._subdivide_composite_edge!(struc, e)
+    end
+    mesh = StructuralSynthesizer._composite_mesh(struc)
+    mesh[:shored] = false
+    Asap.process!(model)
+    Asap.solve!(model)
+    StructuralSynthesizer._store_pattern_solve_cache!(
+        struc, [Asap.AbstractLoad[]], [zeros(model.nDOFs)])
+    StructuralSynthesizer._capture_pattern_dead!(struc; resolution = 200)
+
+    function peak_my(forces)
+        m = 0.0
+        for idxs in values(mesh[:children])
+            for i in idxs
+                id = model.frame_elements[i].elementID
+                f = get(forces, id, nothing)
+                f === nothing && continue
+                m = max(m, maximum(abs, f.My))
+            end
+        end
+        return m
+    end
+
+    dead_state = mesh[:pattern_dead]
+    steel_peak = peak_my(dead_state.forces)
+    @test steel_peak > 0
+    for idxs in values(mesh[:children])
+        for i in idxs
+            el = model.frame_elements[i]
+            el.section = StructuralSynthesizer._section_with_Ix(el.section, 50 * el.section.Ix)
+        end
+    end
+    Asap.update!(model; values_only = true)
+    on_new_k = StructuralSynthesizer._sample_frame_forces(
+        model, dead_state.u, StructuralSynthesizer._partition_pattern_loads(
+            struc, StructuralSynthesizer._generate_pattern_cases(struc)[1])[1];
+        resolution = 200)
+    # The stored dead-load moments were taken on the steel stiffness.
+    @test !isapprox(peak_my(on_new_k), steel_peak; rtol = 1e-4)
+
+    split = StructuralSynthesizer._unshored_pattern_forces(struc; resolution = 200)
+    @test split !== nothing && length(split) == 3
+    cases = StructuralSynthesizer._generate_pattern_cases(struc)
+    _dead, live_full = StructuralSynthesizer._partition_pattern_loads(struc, cases[1])
+    u_live = Asap.solve(model, live_full)
+    live_forces = StructuralSynthesizer._sample_frame_forces(
+        model, u_live, live_full; resolution = 200)
+    manual = Dict{Int, NamedTuple}()
+    for (id, dforce) in dead_state.forces
+        manual[id] = StructuralSynthesizer._add_stage_forces(dforce, live_forces[id])
+    end
+    @test isapprox(peak_my(split[1]), peak_my(manual); rtol = 1e-8)
+
+    u_mono = Asap.solve(model, cases[1])
+    mono = StructuralSynthesizer._sample_frame_forces(
+        model, u_mono, cases[1]; resolution = 200)
+    # Solving dead and live together on the composite stiffness is a different case.
+    @test !isapprox(peak_my(split[1]), peak_my(mono); rtol = 1e-3)
+
+    mesh[:stage] = (u_D = zeros(model.nDOFs), u_L = zeros(model.nDOFs),
+                    forces = Dict{Int, NamedTuple}(), resolution = 200)
+    _gids, demands, _Ls, _Lb, _Cb, _Kx, _Ky =
+        StructuralSynthesizer.member_group_demands(struc; resolution = 200)
+    env = maximum(peak_my(case) for case in split)
+    @test isapprox(maximum(d.Mux for d in demands), env; rtol = 1e-6)
+end
+
+@testset "Analysis studs use the group's unbraced length and Cb" begin
+    struc, ibeam, ebeam = _build_two_bay()
+    _solve_two_bay_frame!(struc)
+    section = W("W21X55")
+    material = A992_Steel
+    i_idx = findfirst(==(ibeam), struc.beams)
+    e_idx = findfirst(==(ebeam), struc.beams)
+    i_seg = only(segment_indices(ibeam))
+    e_seg = only(segment_indices(ebeam))
+    L_m = StructuralSynthesizer._beam_span_length(ibeam)
+
+    # The group's steel strength is the longest Lb and the smallest Cb,
+    # the same pair member_group_demands stores on the geometry.
+    struc.segments[i_seg].Lb = 4.0
+    struc.segments[i_seg].Cb = 1.4
+    struc.segments[e_seg].Lb = 9.0
+    struc.segments[e_seg].Cb = 1.1
+    brace = StructuralSynthesizer._group_flexure_bracing(struc, [i_idx, e_idx])
+    @test brace.Lb ≈ 9.0u"m"
+    @test brace.Cb ≈ 1.1
+
+    # One element, so its midpoint decides the inertia. On this propped beam
+    # the midpoint is sagging. A short Lb raises ϕMn of the steel alone above
+    # the positive moment, the stud search places nothing, and I_LB falls
+    # back to the steel inertia (Eq. C-I3-1 with ΣQn = 0).
+    struc.segments[i_seg].Lb = ustrip(u"m", L_m)
+    struc.segments[i_seg].Cb = 1.0
+    conc = Concrete(_EC, _FC, _WC, 0.20, 0.1)
+    pay = composite_group_payload(struc, [ibeam], member_length(ibeam), conc,
+                                  _T_SLAB, _ES; anchor = _ANCHOR)
+    field = only(pay.fields)
+    M_of_s, _ = beam_signed_moment_field(struc, ibeam)
+    @test ustrip(u"N*m", M_of_s(0.5)) > 0
+    region = only(positive_moment_regions(M_of_s))
+    ϕ_span = get_ϕMn(section, material; Lb = L_m, Cb = 1.0, axis = :strong, ϕ = 0.9)
+    ϕ_short = get_ϕMn(section, material; Lb = 0.5u"m", Cb = 1.0, axis = :strong, ϕ = 0.9)
+    @test ustrip(u"N*m", ϕ_span) < region.M_peak < ustrip(u"N*m", ϕ_short)
+
+    edge = struc.segments[i_seg].edge_idx
+    span_brace = StructuralSynthesizer._group_flexure_bracing(struc, [i_idx])
+    StructuralSynthesizer._write_beam_composite_ix!(
+        struc, ibeam, section, material, field, pay.ctx;
+        Lb = span_brace.Lb, Cb = span_brace.Cb)
+    Ix_span = struc.asap_model.frame_elements[edge].section.Ix
+    @test Ix_span > section.Ix
+
+    struc.segments[i_seg].Lb = 0.5
+    short_brace = StructuralSynthesizer._group_flexure_bracing(struc, [i_idx])
+    @test short_brace.Lb ≈ 0.5u"m"
+    @test short_brace.Cb == 1.0
+    StructuralSynthesizer._write_beam_composite_ix!(
+        struc, ibeam, section, material, field, pay.ctx;
+        Lb = short_brace.Lb, Cb = short_brace.Cb)
+    Ix_short = struc.asap_model.frame_elements[edge].section.Ix
+    @test Ix_short ≈ section.Ix
+    @test Ix_span > Ix_short
 end

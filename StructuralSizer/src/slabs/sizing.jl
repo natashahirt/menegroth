@@ -135,9 +135,24 @@ function _precompute_flat_plate_col_cache(column_opts)
 end
 
 """
-    size_slab!(struc, slab_idx; options, kwargs...) -> Any
+    prepare_floor_design_workspace(request) -> FloorDesignWorkspace
+
+Prepare read-only data that may be shared across compatible floor requests.
+"""
+function prepare_floor_design_workspace(request::FloorDesignRequest)
+    cache = request.system isa Union{FlatPlate, FlatSlab} ?
+        _precompute_flat_plate_col_cache(request.column_options) :
+        nothing
+    return FloorDesignWorkspace(cache)
+end
+
+"""
+    size_slab!(struc, slab_idx; options, kwargs...) -> FloorDesignOutcome
 
 Size/design a single slab in `struc` by index. Intended for debugging and scripting.
+
+This is the low-level mutating kernel used by owning-package adapters. Its
+return value always uses the normalized floor-design outcome contract.
 """
 function size_slab!(
     struc,
@@ -148,6 +163,7 @@ function size_slab!(
     verbose::Bool = false,
     _col_cache = nothing,
     fire_rating::Real = 0.0,
+    defer_asap_process::Bool = false,
     tc::Union{Nothing, TraceCollector} = nothing,
 )
     slab = struc.slabs[slab_idx]
@@ -156,23 +172,125 @@ function size_slab!(
           floor_type=string(slab.floor_type),
           dispatch_type=string(typeof(ft)),
           options_type=string(typeof(options)))
-    result = _size_slab!(ft, struc, slab, slab_idx;
-                         options=options, column_opts=column_opts,
-                         max_iterations=max_iterations, verbose=verbose,
-                         _col_cache=_col_cache, fire_rating=fire_rating, tc=tc)
+    raw_result = _size_slab!(ft, struc, slab, slab_idx;
+                             options=options, column_opts=column_opts,
+                             max_iterations=max_iterations, verbose=verbose,
+                             _col_cache=_col_cache, fire_rating=fire_rating,
+                             defer_asap_process=defer_asap_process, tc=tc)
+    outcome = _floor_design_outcome(raw_result, slab)
     emit!(tc, :slab, "size_slab!", string(slab_idx), :exit;
-          result_type=string(typeof(result)))
-    return result
+          result_type=string(typeof(outcome)),
+          status=string(outcome.status))
+    return outcome
+end
+
+"""
+    size_slab!(struc, request::FloorDesignRequest; kwargs...) -> FloorDesignOutcome
+
+Execute a normalized request against a mutable working structure. The owning
+package is responsible for running this kernel on isolated state and installing
+only successful proposals.
+"""
+function size_slab!(
+    struc,
+    request::FloorDesignRequest;
+    verbose::Bool = false,
+    _col_cache = nothing,
+    defer_asap_process::Bool = true,
+    tc::Union{Nothing, TraceCollector} = nothing,
+)
+    slab_idx = request.source.index
+    slab_idx <= length(struc.slabs) ||
+        throw(BoundsError(struc.slabs, slab_idx))
+    actual_system = floor_type(struc.slabs[slab_idx].floor_type)
+    typeof(actual_system) === typeof(request.system) ||
+        throw(ArgumentError(
+            "floor source $slab_idx resolves to $(typeof(actual_system)), " *
+            "but the request declares $(typeof(request.system))",
+        ))
+    return size_slab!(
+        struc,
+        slab_idx;
+        options = request.options,
+        column_opts = request.column_options,
+        max_iterations = request.max_iterations,
+        verbose = verbose,
+        _col_cache = _col_cache,
+        fire_rating = request.fire_rating,
+        defer_asap_process = defer_asap_process,
+        tc = tc,
+    )
 end
 
 # =============================================================================
 # Internal dispatch hook
 # =============================================================================
 
-"""Fallback `_size_slab!`: no-op for floor types without a sizing implementation."""
-_size_slab!(::AbstractFloorSystem, struc, slab, slab_idx; verbose::Bool=false, kwargs...) = begin
-    verbose && @debug "Skipping slab (no sizing implementation)" slab_idx floor_type=slab.floor_type
-    return nothing
+"""Reject floor types without a sizing implementation."""
+function _size_slab!(
+    system::AbstractFloorSystem,
+    struc,
+    slab,
+    slab_idx;
+    kwargs...,
+)
+    throw(UnsupportedFloorSystemError(typeof(system)))
+end
+
+function _floor_design_outcome(raw_result, slab)
+    iterations = raw_result isa NamedTuple ? get(raw_result, :iterations, 0) : 0
+
+    if raw_result isa AbstractFloorResult
+        proposal = FloorDesignProposal(
+            slab.result,
+            hasproperty(slab, :design_details) ? slab.design_details : raw_result,
+            hasproperty(slab, :drop_panel) ? slab.drop_panel : nothing,
+            FloorCellLoadUpdate[],
+            FloorSupportUpdate[],
+        )
+        return FloorDesignOutcome(
+            FLOOR_DESIGN_SUCCEEDED,
+            proposal,
+            raw_result,
+            FloorDesignDiagnostic[],
+            iterations,
+        )
+    end
+
+    if raw_result isa NamedTuple && get(raw_result, :converged, false)
+        proposal = FloorDesignProposal(
+            slab.result,
+            hasproperty(slab, :design_details) ? slab.design_details : raw_result,
+            hasproperty(slab, :drop_panel) ? slab.drop_panel : nothing,
+            FloorCellLoadUpdate[],
+            FloorSupportUpdate[],
+        )
+        return FloorDesignOutcome(
+            FLOOR_DESIGN_SUCCEEDED,
+            proposal,
+            raw_result,
+            FloorDesignDiagnostic[],
+            iterations,
+        )
+    end
+
+    reason = raw_result isa NamedTuple ?
+        String(get(raw_result, :failure_reason, "design_failed")) :
+        "design_failed"
+    failing_check = raw_result isa NamedTuple ?
+        String(get(raw_result, :failing_check, "")) :
+        ""
+    status = reason == "non_convergence" ?
+        FLOOR_DESIGN_NOT_CONVERGED :
+        FLOOR_DESIGN_INFEASIBLE
+    message = isempty(failing_check) ? reason : "$reason ($failing_check)"
+    return FloorDesignOutcome{Nothing, typeof(raw_result)}(
+        status,
+        nothing,
+        raw_result,
+        [FloorDesignDiagnostic(Symbol(reason), message)],
+        iterations,
+    )
 end
 
 # =============================================================================
@@ -187,6 +305,7 @@ function _size_slab!(::FlatPlate, struc, slab, slab_idx;
                      verbose::Bool = false,
                      _col_cache = nothing,
                      fire_rating::Real = 0.0,
+                     defer_asap_process::Bool = false,
                      tc::Union{Nothing, TraceCollector} = nothing)
     col_opts = isnothing(column_opts) ? ConcreteColumnOptions() : column_opts
     fp_opts = options isa FlatSlabOptions ? options.base : options
@@ -202,6 +321,7 @@ function _size_slab!(::FlatPlate, struc, slab, slab_idx;
                               _col_cache=_col_cache,
                               slab_idx=slab_idx,
                               fire_rating=fire_rating,
+                              defer_asap_process=defer_asap_process,
                               tc=tc)
     
     # Handle non-convergence gracefully
@@ -230,6 +350,7 @@ function _size_slab!(::FlatSlab, struc, slab, slab_idx;
                      verbose::Bool = false,
                      _col_cache = nothing,
                      fire_rating::Real = 0.0,
+                     defer_asap_process::Bool = false,
                      tc::Union{Nothing, TraceCollector} = nothing)
     col_opts = isnothing(column_opts) ? ConcreteColumnOptions() : column_opts
 
@@ -254,6 +375,7 @@ function _size_slab!(::FlatSlab, struc, slab, slab_idx;
                               slab_idx=slab_idx,
                               drop_panel=drop_panel,
                               fire_rating=fire_rating,
+                              defer_asap_process=defer_asap_process,
                               tc=tc)
     
     # Always persist drop panel geometry (pipeline adjusts it for ACI compliance
@@ -284,6 +406,11 @@ Auto-sizes dimensions when not explicitly provided:
 - `a_drop`: ACI minimum extent of l/6 from column center
 """
 function _build_drop_panel_geometry(opts::FlatSlabOptions, struc, slab)
+    return _build_drop_panel_geometry(opts, slab)
+end
+
+"""Construct normalized drop-panel geometry without a building dependency."""
+function _build_drop_panel_geometry(opts::FlatSlabOptions, slab)
     # Get representative span lengths for drop panel sizing
     l1 = slab.spans.primary
     l2 = slab.spans.secondary

@@ -139,6 +139,15 @@ Options for flat plate / flat slab / waffle / PT slab sizing per ACI 318 Chapter
   - `:shear_caps` — Localized slab thickening at columns (§13.2.6)
   - `:column_capitals` — Flared column head enlargement (§13.1.2)
 - `max_column_size`: Maximum column size before considering reinforcement (default: 30")
+- `column_span_minimum`: Hold every column at least span/15 (StructurePoint),
+  clamped to `max_column_size` (default: `true`). `false` sizes columns from
+  axial load and P-M design, and leaves punching growth to the slab loop up
+  to `max_column_size`. Column sizing only grows, so this minimum is also
+  the smallest column a design can return.
+- `punching_thickening`: When columns and reinforcement cannot resolve
+  punching, thicken the slab (default: `true`). `false` stops the design as a
+  punching failure instead, so a punching strategy can be tested on its own.
+  The slab still thickens for deflection, flexure and one-way shear.
 - `stud_material`: Shear stud / stirrup steel material (default: `Stud_51`)
 - `stud_diameter`: Stud diameter (default: 1/2"; ignored for non-stud types)
 - `stirrup_bar_size`: Stirrup bar size (default: 4; only used for `:closed_stirrups`)
@@ -213,6 +222,10 @@ struct FlatPlateOptions <: AbstractFloorOptions
     col_I_factor::Float64
     # DDM/EFM not permitted for the layout: :fallback (to FEA) or :error
     on_inapplicable::Symbol
+    # Hold columns at span/15 (clamped to max_column_size); false = axial/P-M only
+    column_span_minimum::Bool
+    # Thicken the slab when punching levers run out; false = fail instead
+    punching_thickening::Bool
 end
 
 """Valid values of `FlatPlateOptions.on_inapplicable`."""
@@ -269,6 +282,8 @@ function _build_flat_plate_options(;
     objective::AbstractObjective = MinVolume(),
     col_I_factor::Float64 = 0.70,
     on_inapplicable::Symbol = :fallback,
+    column_span_minimum::Bool = true,
+    punching_thickening::Bool = true,
 )
     _validate_on_inapplicable(on_inapplicable)
     # Call the positional (inner) constructor — field order must match struct definition
@@ -276,7 +291,8 @@ function _build_flat_plate_options(;
                      method, grouping, φ_flexure, φ_shear, λ, deflection_limit,
                      punching_strategy, punching_reinforcement, max_column_size,
                      stud_material, stud_diameter, stirrup_bar_size,
-                     min_h, objective, col_I_factor, on_inapplicable)
+                     min_h, objective, col_I_factor, on_inapplicable,
+                     column_span_minimum, punching_thickening)
 end
 
 """
@@ -568,11 +584,23 @@ end
 """Return the canonical floor system symbol for `VaultOptions`."""
 floor_symbol(::VaultOptions) = :vault
 
-"""Composite deck options (steel deck + concrete fill)."""
+"""
+Composite deck options (steel deck + concrete fill).
+
+- `deck_profile`: Vulcraft profile name (`"1.5VL"`, `"2VLI"`, `"3VLI"`, or a side-lap variant)
+- `total_depth`: a tabulated total slab depth; `nothing` tries every tabulated depth
+- `n_spans`: deck spans in the construction table (1, 2, 3); `nothing` takes the shortest column
+- `live_deflection_limit`: live-load deflection over span (default 1/360)
+- `superimposed_deflection_limit`: optional limit on `sdl + live` deflection over span
+"""
 Base.@kwdef struct CompositeDeckOptions <: AbstractFloorOptions
     deck_material::Metal = A992_Steel
     fill_material::Union{Concrete, Nothing} = nothing  # Uses primary if nothing
     deck_profile::String = "2VLI"
+    total_depth::Union{Nothing, Length} = nothing
+    n_spans::Union{Nothing, Int} = nothing
+    live_deflection_limit::Float64 = 1 / 360
+    superimposed_deflection_limit::Union{Nothing, Float64} = nothing
 end
 
 """Return the canonical floor system symbol for `CompositeDeckOptions`."""

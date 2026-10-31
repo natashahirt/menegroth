@@ -13,7 +13,8 @@
 #   3. Beam schedule
 #   4. Column schedule
 #   5. Foundation schedule
-#   6. Material takeoff + embodied carbon
+#   6. Ordinary walls and seismic story drift, when the design has them
+#   7. Material takeoff + embodied carbon
 # =============================================================================
 
 """Convert a Unitful value to display units and return Float64. Uses du.units[cat]."""
@@ -65,6 +66,7 @@ function engineering_report(design::BuildingDesign; io::IO=stdout, report_units=
     _report_beams(io, design; du=du)
     _report_columns(io, design; conc=conc, reb=reb, du=du)
     _report_foundations(io, design; du=du)
+    _report_ordinary_walls(io, design; du=du)
     _report_takeoff(io, design; du=du)
     _report_status(io, design)
 end
@@ -126,10 +128,11 @@ function _report_header(io::IO, design::BuildingDesign;
     n_cols  = length(struc.columns)
     n_beams = length(struc.beams)
     n_fdns  = length(struc.foundations)
+    n_walls = length(struc.walls)
 
     println(io, "  BUILDING")
-    Printf.@printf(io, "    Stories: %d,  Slabs: %d,  Columns: %d,  Beams: %d,  Foundations: %d\n",
-                   n_stories, n_slabs, n_cols, n_beams, n_fdns)
+    Printf.@printf(io, "    Stories: %d,  Slabs: %d,  Columns: %d,  Beams: %d,  Foundations: %d,  Walls: %d\n",
+                   n_stories, n_slabs, n_cols, n_beams, n_fdns, n_walls)
 
     # Floor system
     floor = params.floor
@@ -238,7 +241,7 @@ function _report_flat_plate_panel(io::IO, design::BuildingDesign,
     # Self-weight from sizer result (includes drop panel contribution for flat slabs)
     w_sw = hasproperty(r, :self_weight) ?
            _to_report(du, :pressure, r.self_weight; digits=1) :
-           _to_report(du, :pressure, conc.ρ * 9.80665u"m/s^2" * r.thickness; digits=1)
+           _to_report(du, :pressure, conc.ρ * GRAVITY * r.thickness; digits=1)
     w_sdl = _to_report(du, :pressure, loads.floor_SDL; digits=1)
     w_ll  = _to_report(du, :pressure, loads.floor_LL; digits=1)
     qu    = _to_report(du, :pressure, r.qu; digits=1)
@@ -731,7 +734,123 @@ function _report_foundations(io::IO, design::BuildingDesign; du::DisplayUnits=de
 end
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 6. Material Takeoff
+# 6. Ordinary walls and seismic story drift
+# ─────────────────────────────────────────────────────────────────────────────
+
+"""
+What a wall-check demand and capacity measure.
+
+Shear, axial, and bearing strength are newtons. Flexure and the §6.2.5.3
+moment are newton-metres. Minimum reinforcement is a reinforcement ratio.
+Thickness and the middle-third eccentricity are metres. The names are the
+checker's `CheckResult` names.
+"""
+function _wall_check_measure(check::AbstractString)
+    check == "in-plane shear" && return :force
+    check == "in-plane axial-flexure (P-M): axial cap" && return :force
+    check == "bearing wall axial (§11.5.3 simplified)" && return :force
+    startswith(check, "bearing wall (§11.5.3): net axial") && return :force
+    check == "in-plane axial-flexure (P-M)" && return :moment
+    check == "second-order moment" && return :moment
+    startswith(check, "min longitudinal") && return :ratio
+    startswith(check, "min transverse") && return :ratio
+    check == "bearing wall (§11.5.3): thickness below minimum" && return :length
+    check == "bearing wall (§11.5.3): resultant outside middle third" && return :length
+    check == "bearing wall (§11.5.3): too slender for simplified method" && return :slenderness
+    return :raw
+end
+
+"""Format one checker quantity. `value` is in the checker's SI units."""
+function _format_wall_quantity(du::DisplayUnits, measure::Symbol, value::Real)
+    isfinite(value) || return (fv(Float64(value); d=3), "")
+    if measure === :force
+        return (fv(_to_report(du, :force, Float64(value) * u"N"; digits=1); d=1), _ul(du, :force))
+    elseif measure === :moment
+        return (fv(_to_report(du, :moment, Float64(value) * u"N*m"; digits=1); d=1), _ul(du, :moment))
+    elseif measure === :length
+        return (fv(_to_report(du, :length, Float64(value) * u"m"; digits=3); d=3), _ul(du, :length))
+    elseif measure === :ratio
+        return (fv(Float64(value); d=4), "ρ")
+    elseif measure === :slenderness
+        return (fv(Float64(value); d=3), "k·lc/(32·h)")
+    else
+        return (fv(Float64(value); d=3), "")
+    end
+end
+
+"""Governing record, then any other record that failed."""
+function _wall_report_rows(records::AbstractVector{WallCheckRecord})
+    isempty(records) && return WallCheckRecord[]
+    gov = records[1]
+    gov_ratio = isfinite(gov.ratio) ? gov.ratio : Inf
+    for rec in records
+        r = isfinite(rec.ratio) ? rec.ratio : Inf
+        if r > gov_ratio
+            gov = rec
+            gov_ratio = r
+        end
+    end
+    rows = WallCheckRecord[gov]
+    for rec in records
+        rec == gov && continue
+        rec.passed && continue
+        push!(rows, rec)
+    end
+    return rows
+end
+
+"""
+Print ordinary-wall checks and seismic story drift.
+
+A gravity-only design has neither, and this section is omitted. Each wall
+shows its governing check. A failing check that is not the governing one is
+listed as well. Demand and capacity use the checker's units, converted to the
+report's display units. Every check remains on the design JSON.
+"""
+function _report_ordinary_walls(io::IO, design::BuildingDesign;
+                               du::DisplayUnits=design.params.display_units)
+    isempty(design.walls) && isempty(design.seismic_story_drift) && return
+
+    if !isempty(design.walls)
+        println(io, section_break("ORDINARY WALLS"))
+        println(io, "  Governing check per wall. Other failing checks follow it.")
+        println(io, "  Passing checks that do not govern are in the design JSON.")
+        println(io)
+        for idx in sort!(collect(keys(design.walls)))
+            for rec in _wall_report_rows(design.walls[idx])
+                measure = _wall_check_measure(rec.check)
+                dem, unit = _format_wall_quantity(du, measure, rec.demand)
+                cap, _ = _format_wall_quantity(du, measure, rec.capacity)
+                Printf.@printf(io, "  W-%-4d %-5d %-3s %-8s %s  ratio %s  demand %s %s  capacity %s %s  %s\n",
+                    idx, rec.story, string(rec.direction), string(rec.case), rec.check,
+                    fv(rec.ratio; d=3), dem, unit, cap, unit, pass_fail(rec.passed))
+            end
+        end
+        println(io)
+    end
+
+    isempty(design.seismic_story_drift) && return
+    len_u = _ul(du, :length)
+    println(io, section_break("SEISMIC STORY DRIFT"))
+    println(io, "  Design story drift against the allowable already stored on the check.")
+    println(io)
+    Printf.@printf(io, "  %-5s %-3s %-8s %10s %10s %s\n",
+        "Story", "Dir", "Torsion", "Δ($len_u)", "Δa($len_u)", "OK?")
+    Printf.@printf(io, "  %-5s %-3s %-8s %10s %10s %s\n",
+        "─"^5, "─"^3, "─"^8, "─"^10, "─"^10, "─"^3)
+    for drift in design.seismic_story_drift
+        drift isa SeismicStoryDriftCheck || continue
+        Δ = _to_report(du, :length, drift.drift_m * u"m"; digits=4)
+        Δa = _to_report(du, :length, drift.allowable_m * u"m"; digits=4)
+        Printf.@printf(io, "  %-5d %-3s %-8s %10.4f %10.4f %s\n",
+            drift.story, string(drift.direction), string(drift.torsion),
+            Δ, Δa, pass_fail(drift.passes))
+    end
+    println(io)
+end
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 7. Material Takeoff
 # ─────────────────────────────────────────────────────────────────────────────
 
 """Print the material takeoff (concrete volumes, floor area, embodied carbon)."""
@@ -847,7 +966,7 @@ function _report_takeoff(io::IO, design::BuildingDesign; du::DisplayUnits=design
 end
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 7. Overall Status
+# 8. Overall Status
 # ─────────────────────────────────────────────────────────────────────────────
 
 """Print the overall pass/fail status and critical element."""

@@ -55,6 +55,68 @@ function _elf_building()
     return struc
 end
 
+"""Slab dead load [kN] on stories strictly above the lowest story with faces."""
+function _elf_cells_above_base_kN(struc)
+    skel = struc.skeleton
+    z_base = Inf
+    for (_, story) in skel.stories
+        isempty(story.faces) && continue
+        z_base = min(z_base, ustrip(u"m", story.elevation))
+    end
+    by_face = Dict(cell.face_idx => cell for cell in struc.cells)
+    total = 0.0
+    for (_, story) in skel.stories
+        isempty(story.faces) && continue
+        ustrip(u"m", story.elevation) > z_base + 1e-6 || continue
+        for face in story.faces
+            cell = get(by_face, face, nothing)
+            cell === nothing && continue
+            total += ustrip(u"kN", effective_seismic_weight(cell))
+        end
+    end
+    return total
+end
+
+"""Downward force [kN] of the unfactored dead-load vector."""
+function _elf_downward_kN(loads)
+    total_N = 0.0
+    for ld in loads
+        if ld isa Asap.AreaLoad
+            p = ustrip(u"Pa", ld.pressure)
+            for sh in ld.shells
+                total_N += p * sh.area * (-ld.direction[3])
+            end
+        elseif ld isa Asap.TributaryLoad
+            L = ustrip(u"m", length(ld.element))
+            s = ld.positions
+            w = ld._widths_m
+            area = 0.0
+            for i in 1:(length(s) - 1)
+                area += 0.5 * (w[i] + w[i + 1]) * (s[i + 1] - s[i]) * L
+            end
+            total_N += ld._pressure_Pa * area * (-ld.direction[3])
+        elseif ld isa Asap.GravityLoad
+            total_N += StructuralSynthesizer._gravity_load_weight_kN(ld) * 1000
+        else
+            error("elf dead-load check: unhandled $(typeof(ld))")
+        end
+    end
+    return total_N / 1000
+end
+
+"""A frame column from the base to the story above, not a wall edge."""
+function _elf_base_column(struc)
+    wall_edges = Set(get(struc.skeleton.groups_edges, :walls, Int[]))
+    for (i, el) in enumerate(struc.asap_model.frame_elements)
+        i in wall_edges && continue
+        z1 = ustrip(u"m", el.nodeStart.position[3])
+        z2 = ustrip(u"m", el.nodeEnd.position[3])
+        z_bot, z_top = minmax(z1, z2)
+        abs(z_bot) <= 1e-6 && z_top > 1.0 && return el
+    end
+    error("elf fixture: no base column")
+end
+
 function _elf_case(result, direction, purpose, torsion)
     hits = [c for c in result.cases
             if c.direction == direction && c.purpose == purpose && c.torsion == torsion]
@@ -141,6 +203,49 @@ end
     masonry = check_seismic_story_drift(result; risk_category=:II, system=:masonry_other)
     @test all(c -> c.allowable_m ≈ 0.007 * 4.0, masonry)
     @test all(c -> c.passes == (c.drift_m <= c.allowable_m), masonry)
+    # Ground-story wall: half its self-weight is on the levels, half stays at
+    # the base. ASCE 7-22 §12.7.2 counts dead load above the base.
+    w_wall = 0.0
+    for pier in struc.wall_mesh.piers
+        for sh in pier.shells
+            w_wall += StructuralSynthesizer._shell_self_weight_kN(sh)
+        end
+    end
+    @test w_wall > 0
+    @test length(struc.wall_mesh.piers) == 1
+    cells_above = _elf_cells_above_base_kN(struc)
+    @test sum(lv.weight_kN for lv in result.levels) ≈ cells_above + 0.5 * w_wall rtol=1e-9
+    # The unfactored dead case includes the whole wall and the slabs above the
+    # base, and omits the :grade slab at the base. Equilibrium makes this
+    # resultant the vertical base reaction.
+    dead = solve_gravity_basic_cases(struc)
+    @test dead.symbols[1] === :D
+    @test _elf_downward_kN(dead.loads[1]) ≈ cells_above + w_wall rtol=1e-6 atol=1e-3
+
+    # A base column's GravityLoad is unfactored ρAg. Half is above the base.
+    struc2 = _elf_building()
+    col = _elf_base_column(struc2)
+    push!(struc2.asap_model.loads, Asap.GravityLoad(col, Asap.GRAVITY))
+    w_col = StructuralSynthesizer._gravity_load_weight_kN(only(
+        ld for ld in struc2.asap_model.loads if ld isa Asap.GravityLoad))
+    @test w_col > 0
+    result2 = elf_story_analysis(struc2;
+        method=:sds, SDS=0.05, S1=0.02, R=8, Ie=1.0, T=0.4, Cd=4.0, β=1.0,
+        SD1=0.02, TL=8.0)
+    @test sum(lv.weight_kN for lv in result2.levels) ≈
+          sum(lv.weight_kN for lv in result.levels) + 0.5 * w_col rtol=1e-9
+    z_top = max(ustrip(u"m", col.nodeStart.position[3]),
+                ustrip(u"m", col.nodeEnd.position[3]))
+    i_top = findfirst(lv -> abs(lv.elevation_m - z_top) <= 1e-6, result2.levels)
+    i_top_0 = findfirst(lv -> abs(lv.elevation_m - z_top) <= 1e-6, result.levels)
+    @test i_top !== nothing
+    @test result2.levels[i_top].weight_kN ≈
+          result.levels[i_top_0].weight_kN + 0.5 * w_col rtol=1e-9
+    @test result2.levels[i_top].gravity_kN ≈
+          result.levels[i_top_0].gravity_kN + 0.5 * w_col rtol=1e-9
+    @test result2.levels[i_top].px_kN ≈
+          result.levels[i_top_0].px_kN + 0.5 * w_col rtol=1e-9
+
     seismic = factored_seismic_cases(result, strength_1_2D_1_0E)
     @test length(seismic) == 6
     xnone = only(c for c in seismic if result.cases[c.case_index].direction === :x &&

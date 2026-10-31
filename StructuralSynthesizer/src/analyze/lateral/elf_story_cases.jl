@@ -24,6 +24,9 @@
 # - Wind story forces.
 # - The §12.7.2 items a Cell cannot carry (storage live, snow, equipment).
 #   The caller augments `sdl` before this runs. See `effective_seismic_weight`.
+#   Wall self-weight and frame GravityLoad self-weight are included. A member
+#   that spans a story is split half to each end. The half that lands on the
+#   base is not above the base, so it stays out of W and Px.
 # - Ie, R, SDS, S1, SD1, T, TL, Cd, and β are arguments. `SiteConditions` is
 #   not read. Method :sa does not check §11.4.5 Exception 2; that is the
 #   caller's, same as `seismic_response_coefficient`.
@@ -45,14 +48,14 @@ struct ElfLevel
     height_m::Float64
     "Story height below this level, hsx [m]. ASCE 7-22 Eq. 12.8-18."
     story_height_m::Float64
-    "Effective seismic weight of this level [kN]. Dead load only."
+    "Effective seismic weight of this level [kN]. Slab dead load plus the wall and frame self-weight assigned here."
     weight_kN::Float64
-    "Expected gravity on this level alone [kN]. 1.0D + 0.5L."
+    "Expected gravity on this level alone [kN]. 1.0D + 0.5L, including the same self-weight."
     gravity_kN::Float64
     "Expected gravity at this level and above [kN]. Px in Eq. 12.8-18."
     px_kN::Float64
     master::Asap.Node
-    "Center of mass [m], the §12.8.6.5 drift point."
+    "Center of mass [m], the §12.8.6.5 drift point. Slab cells plus the self-weight assigned to this level."
     center_of_mass::NTuple{2, Float64}
     "Projected plan widths (X extent, Y extent) [m], from the floor outline."
     plan_m::NTuple{2, Float64}
@@ -224,6 +227,192 @@ function _elf_masters(struc)
     return master_at
 end
 
+"""Story elevations [m], one per skeleton story, in dict order."""
+function _elf_story_elevations(skel)
+    zs = Float64[]
+    for (_, story) in skel.stories
+        push!(zs, ustrip(u"m", story.elevation))
+    end
+    return zs
+end
+
+"""
+Millimetre key of the story elevation within 1 mm of `z_m`.
+
+Two story elevations inside that window throw. An elevation that matches
+none throws. Self-weight is not left on a height that is not a floor.
+"""
+function _elf_elevation_key(z_m, elevs)
+    best = 0
+    best_d = Inf
+    for (i, z) in pairs(elevs)
+        d = abs(z - z_m)
+        if d < best_d
+            best_d = d
+            best = i
+        end
+    end
+    best_d <= 1e-3 || throw(ArgumentError(
+        "elf_story_analysis: elevation $(z_m) m is more than 1 mm from every " *
+        "story elevation ($(join(elevs, ", ")) m). Self-weight is assigned to " *
+        "story levels only."))
+    nclose = count(z -> abs(z - z_m) <= 1e-3, elevs)
+    nclose == 1 || throw(ArgumentError(
+        "elf_story_analysis: elevation $(z_m) m is within 1 mm of $(nclose) " *
+        "story elevations."))
+    return round(Int, elevs[best] * 1000)
+end
+
+"""Add `w` kN at plan `(x, y)` on story key `key`."""
+function _elf_deposit!(acc, key, w, x, y, allowed)
+    key in allowed || throw(ArgumentError(
+        "elf_story_analysis: self-weight at elevation $(key) mm is neither the " *
+        "base nor a level above the base."))
+    prev = get(acc, key, (0.0, 0.0, 0.0))
+    acc[key] = (prev[1] + w, prev[2] + w * x, prev[3] + w * y)
+    return nothing
+end
+
+"""Unfactored `ρ t g A` of one wall triangle [kN]. `g` is [`Asap.GRAVITY`](@ref)."""
+function _shell_self_weight_kN(sh::Asap.ShellTri3)
+    sh.area > 0 || throw(ArgumentError(
+        "elf_story_analysis: a wall shell has no area. Self-weight is ρ t g times area."))
+    sh.ρ >= 0 || throw(ArgumentError(
+        "elf_story_analysis: a wall shell has density $(sh.ρ) kg/m^3."))
+    sh.thickness >= 0 || throw(ArgumentError(
+        "elf_story_analysis: a wall shell has thickness $(sh.thickness) m."))
+    # Same pressure as the unfactored dead case (`wall_self_weight_loads`).
+    p = unfactored_wall_self_weight_pressure(sh)
+    return ustrip(u"kN", p * sh.area * u"m^2")
+end
+
+"""
+Unfactored `ρ A g L` of one frame [`Asap.GravityLoad`](@ref) [kN].
+
+`load.factor` is the acceleration, the same value the dead case applies.
+Asap accumulates `w = ρ A g` along the member (`accumulate_force!`).
+"""
+function _gravity_load_weight_kN(ld::Asap.GravityLoad)
+    el = ld.element
+    sec = el.section
+    isnothing(sec) && throw(ArgumentError(
+        "elf_story_analysis: a GravityLoad has no section. Frame self-weight is ρ A g L."))
+    ρ = ustrip(u"kg/m^3", sec.ρ)
+    A = ustrip(u"m^2", sec.A)
+    ρ >= 0 || throw(ArgumentError(
+        "elf_story_analysis: a GravityLoad section has density $(sec.ρ)."))
+    A >= 0 || throw(ArgumentError(
+        "elf_story_analysis: a GravityLoad section has area $(sec.A)."))
+    g = ustrip(u"m/s^2", ld.factor)
+    g >= 0 || throw(ArgumentError(
+        "elf_story_analysis: a GravityLoad factor is $(ld.factor). The dead " *
+        "case uses this acceleration unfactored."))
+    L = ustrip(u"m", length(el))
+    L > 0 || throw(ArgumentError(
+        "elf_story_analysis: a GravityLoad member has length $(L) m."))
+    return ρ * A * g * L / 1000
+end
+
+"""Plan coordinates and elevation of a frame node [m]."""
+function _elf_node_xyz(node)
+    p = node.position
+    return (ustrip(u"m", p[1]), ustrip(u"m", p[2]), ustrip(u"m", p[3]))
+end
+
+"""
+Wall-shell and frame self-weight lumped onto story elevations.
+
+Returns `(lumps, total_kN)`. `lumps` is a dict of millimetre elevation key to
+`(weight_kN, weight·x, weight·y)`. `total_kN` is the sum before lumping.
+
+# Engineering judgment
+ASCE 7-22 §12.7.2 (corpus: asce-7-22, PDF page 184) includes the dead load
+above the base and does not say how to assign a member that spans a story.
+§12.8.7 (PDF page 188) likewise defines Px as the total vertical design load
+at and above the level. User decision 2026-10-31: half of each wall, and half
+of each frame member, goes to the story elevation at each end. A beam has
+both ends at one elevation, so this places its whole weight on that floor.
+The share that lands on the base elevation is not above the base.
+"""
+function _elf_self_weight(struc, elevs, allowed)
+    _require_wall_shells_accounted(struc)
+    acc = Dict{Int, NTuple{3, Float64}}()
+    total = 0.0
+
+    for pier in struc.wall_mesh.piers
+        (1 <= pier.wall_index <= length(struc.walls)) || throw(ArgumentError(
+            "elf_story_analysis: pier wall index $(pier.wall_index) is outside " *
+            "1:$(length(struc.walls))."))
+        wall = struc.walls[pier.wall_index]
+        span = _wall_pier_geometry(wall, struc.skeleton)
+        w = 0.0
+        for sh in pier.shells
+            w += _shell_self_weight_kN(sh)
+        end
+        x = (span.x1 + span.x2) / 2
+        y = (span.y1 + span.y2) / 2
+        k_bot = _elf_elevation_key(span.z_bot, elevs)
+        k_top = _elf_elevation_key(span.z_top, elevs)
+        # Half the pier to the floor at each end. Both halves act at the
+        # plan midpoint: the wall's mass does not move in plan over the story.
+        _elf_deposit!(acc, k_bot, 0.5 * w, x, y, allowed)
+        _elf_deposit!(acc, k_top, 0.5 * w, x, y, allowed)
+        total += w
+    end
+
+    model = struc.asap_model
+    for ld in model.loads
+        ld isa Asap.GravityLoad || continue
+        w = _gravity_load_weight_kN(ld)
+        x1, y1, z1 = _elf_node_xyz(ld.element.nodeStart)
+        x2, y2, z2 = _elf_node_xyz(ld.element.nodeEnd)
+        k1 = _elf_elevation_key(z1, elevs)
+        k2 = _elf_elevation_key(z2, elevs)
+        _elf_deposit!(acc, k1, 0.5 * w, x1, y1, allowed)
+        _elf_deposit!(acc, k2, 0.5 * w, x2, y2, allowed)
+        total += w
+    end
+
+    lumped = 0.0
+    for (w, _, _) in values(acc)
+        lumped += w
+    end
+    abs(lumped - total) <= 1e-6 || throw(ArgumentError(
+        "elf_story_analysis: lumped self-weight $(lumped) kN does not match " *
+        "the wall and frame sources $(total) kN."))
+    return acc, total
+end
+
+"""
+Every `:wall` shell on the model belongs to one pier, and every wall was meshed.
+
+The dead case sums those shells. A shell missing from `wall_mesh` would be
+missing from W.
+"""
+function _require_wall_shells_accounted(struc)
+    if !isempty(struc.walls) && length(struc.wall_mesh.piers) != length(struc.walls)
+        throw(ArgumentError(
+            "elf_story_analysis: the building has $(length(struc.walls)) walls and " *
+            "$(length(struc.wall_mesh.piers)) meshed piers. Run to_asap! so wall " *
+            "self-weight is on the same mesh as the dead case."))
+    end
+    owned = Set{UInt64}()
+    for pier in struc.wall_mesh.piers
+        for sh in pier.shells
+            push!(owned, objectid(sh))
+        end
+    end
+    model = struc.asap_model
+    isnothing(model) && return nothing
+    for sh in model.shell_elements
+        (sh isa Asap.ShellTri3 && sh.id === :wall) || continue
+        objectid(sh) in owned || throw(ArgumentError(
+            "elf_story_analysis: a :wall shell is not in wall_mesh. Its self-weight " *
+            "would be in the dead case and missing from W. Run to_asap!."))
+    end
+    return nothing
+end
+
 """
 Levels above the base, lowest first.
 
@@ -231,6 +420,8 @@ The base is the lowest story elevation. A story at that elevation is the
 base, not a level, and its weight is not given an `Fx` (the height from the
 base would be zero, which Eq. 12.8-13 rejects). `Px` is the expected gravity
 at the level and above it.
+
+Wall and frame self-weight are added here. See [`_elf_self_weight`](@ref).
 """
 function _elf_levels(struc)
     skel = struc.skeleton
@@ -264,10 +455,16 @@ function _elf_levels(struc)
         weight = 0.0
         gravity = 0.0
         n_cells = 0
+        # :grade and :unknown are omitted from the unfactored dead case. A cell
+        # of either type above the base would be in W and absent from that case.
+        omitted_floor = false
         for face in story.faces
             cell = get(cell_by_face, face, nothing)
             cell === nothing && continue
             n_cells += 1
+            if cell.floor_type == :grade || cell.floor_type == :unknown
+                omitted_floor = true
+            end
             # ASCE 7-22 §12.7.2 (corpus: asce-7-22, PDF page 184): dead load.
             # The items a Cell cannot carry are not invented here.
             weight += ustrip(u"kN", effective_seismic_weight(cell))
@@ -278,7 +475,7 @@ function _elf_levels(struc)
             # ASCE 7-22 §12.8.6.1 (corpus: asce-7-22, PDF page 187).
             gravity += drift_expected_gravity_load(D, L0, psf)
         end
-        push!(raw, (; idx, z, weight, gravity, n_cells,
+        push!(raw, (; idx, z, weight, gravity, n_cells, omitted_floor,
             plan=(x_extent, y_extent),
             bounds=(xmin, xmax, ymin, ymax),
             outline=outline))
@@ -291,6 +488,24 @@ function _elf_levels(struc)
     isempty(above) && throw(ArgumentError(
         "elf_story_analysis: no story sits above the base elevation $(z_base) m."))
     sort!(above; by=item -> item.z)
+    for item in above
+        item.omitted_floor && throw(ArgumentError(
+            "elf_story_analysis: story $(item.idx) at $(item.z) m has a :grade or " *
+            ":unknown cell. That dead load would be in W and is omitted from the " *
+            "unfactored dead case."))
+    end
+
+    elevs = _elf_story_elevations(skel)
+    base_key = _elf_elevation_key(z_base, elevs)
+    allowed = Set{Int}([base_key])
+    for item in above
+        push!(allowed, _elf_elevation_key(item.z, elevs))
+    end
+    # ASCE 7-22 §12.7.2 (corpus: asce-7-22, PDF page 184): dead load above the
+    # base, including walls and frames. §12.8.6.1 and §12.8.7 (PDF pages 187–188):
+    # the same dead load is in Px. The half-story split is `_elf_self_weight`.
+    lumps, total_sw = _elf_self_weight(struc, elevs, allowed)
+    base_sw = get(lumps, base_key, (0.0, 0.0, 0.0))[1]
 
     levels = ElfLevel[]
     for (i, item) in enumerate(above)
@@ -304,11 +519,28 @@ function _elf_levels(struc)
         hsx > 0 || throw(ArgumentError(
             "elf_story_analysis: story height below story $(item.idx) is $(hsx) m."))
         master = master_at[zk]
-        cm = story_center_of_mass(skel, skel.stories[item.idx], struc.cells)
+        key = _elf_elevation_key(item.z, elevs)
+        w_sw, mx, my = get(lumps, key, (0.0, 0.0, 0.0))
+        w_cell = item.weight
+        # Self-weight is dead load and carries no floor live load, so 0.5L is
+        # zero on this share. ASCE 7-22 §12.8.6.1 (corpus: asce-7-22, PDF page 187).
+        weight = w_cell + w_sw
+        gravity = item.gravity + w_sw
+        cm_cell = story_center_of_mass(skel, skel.stories[item.idx], struc.cells)
+        cm = ((w_cell * cm_cell[1] + mx) / weight, (w_cell * cm_cell[2] + my) / weight)
         push!(levels, ElfLevel(item.idx, item.z, item.z - z_base, hsx,
-            item.weight, item.gravity, 0.0, master, cm, item.plan, item.bounds,
+            weight, gravity, 0.0, master, cm, item.plan, item.bounds,
             item.outline))
     end
+
+    above_cells = sum(item.weight for item in above)
+    above_w = sum(lv.weight_kN for lv in levels)
+    # Slab dead above the base, plus every wall and frame kilogram, equals the
+    # level weights plus the share left at the base.
+    expected = above_cells + (total_sw - base_sw)
+    abs(above_w - expected) <= 1e-6 || throw(ArgumentError(
+        "elf_story_analysis: level dead load $(above_w) kN does not match " *
+        "slab dead above the base plus self-weight above the base ($(expected) kN)."))
 
     # Px is the expected gravity at the level and above, same accumulation
     # as story shear. Walk from the top down.

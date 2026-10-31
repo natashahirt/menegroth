@@ -91,8 +91,12 @@ Vertical member forces through each story from the full displacement `u`.
 
 `masters` pairs each floor elevation [m] with its rigid-diaphragm master.
 The story under a master runs from the next master below, or from
-`base_z_m` for the lowest one. The base must be fixed in `u_x` and `u_y` at
-every member node on it.
+`base_z_m` for the lowest one. Pass `base_master` when that elevation has
+its own rigid diaphragm; the lowest story then couples the two masters.
+Without one, a column that crosses the base must be fixed there in plan,
+and each wall pier that crosses it must share at least one fixed node.
+Mesh nodes between those anchors may be free: the story bottom does not
+translate as a floor.
 
 The cut is the one `check_story_cut_equilibrium` sums: pier triangles whose
 bottom is on the elevation and frame members with one node on it and the
@@ -101,7 +105,8 @@ frame fixed-end forces come from that case.
 """
 function story_axial_profiles(model, u::AbstractVector{<:Real}, mesh::WallMesh,
                               masters::AbstractVector{<:Tuple{Real, Asap.Node}},
-                              base_z_m::Real; loads=nothing)
+                              base_z_m::Real; loads=nothing,
+                              base_master::Union{Nothing, Asap.Node}=nothing)
     isempty(masters) && throw(ArgumentError(
         "story_axial_profiles: no rigid-diaphragm masters were given."))
     sorted = sort(collect(masters); by=first)
@@ -109,11 +114,19 @@ function story_axial_profiles(model, u::AbstractVector{<:Real}, mesh::WallMesh,
     Float64(first(sorted)[1]) > zbase + WALL_CUT_ZTOL_M || throw(ArgumentError(
         "story_axial_profiles: the lowest master at $(first(sorted)[1]) m is not above " *
         "the base at $(zbase) m."))
-    _require_fixed_base_in_plan(model, mesh, zbase)
+    if base_master === nothing
+        _require_fixed_base_in_plan(model, mesh, zbase)
+    else
+        zb = _node_xyz(base_master)[3]
+        abs(zb - zbase) <= WALL_CUT_ZTOL_M || throw(ArgumentError(
+            "story_axial_profiles: the base master is at $(zb) m, not the base " *
+            "at $(zbase) m."))
+    end
     qmap = loads === nothing ? nothing : _fixed_end_by_element(loads)
     profiles = StoryAxialProfile[]
     for (k, (ztop, mtop)) in enumerate(sorted)
-        zbot, mbot = k == 1 ? (zbase, nothing) : (Float64(sorted[k - 1][1]), sorted[k - 1][2])
+        zbot, mbot = k == 1 ? (zbase, base_master) :
+                     (Float64(sorted[k - 1][1]), sorted[k - 1][2])
         contrib = _story_cut_contributions(model, u, mesh, zbot; qmap=qmap)
         isempty(contrib) && throw(ArgumentError(
             "story_axial_profiles: no wall or frame member crosses z = $(zbot) m."))
@@ -123,9 +136,91 @@ function story_axial_profiles(model, u::AbstractVector{<:Real}, mesh::WallMesh,
     return profiles
 end
 
+"""
+Gravity factors that share one story stiffness.
+
+`D`, `L`, and `roof` are the factors on the unfactored dead, floor-live, and
+roof-companion cases. Two combinations with the same three numbers produce
+the same factored vertical force, so they use one `K_G`.
+"""
+struct GravityStiffnessKey
+    D::Float64
+    L::Float64
+    roof::Float64
+end
+
+"""
+    scale_story_loads(loads, factor) -> Vector{AbstractLoad}
+
+Copies of `loads` with magnitudes multiplied by `factor`. The originals are
+not changed. A zero factor returns an empty vector.
+
+Used so a factored-gravity displacement can be checked against the loads that
+produced it. Tributary, area, gravity, line, and nodal loads are the ones
+the gravity cases carry.
+"""
+function scale_story_loads(loads, factor::Real)
+    f = Float64(factor)
+    f == 0.0 && return Asap.AbstractLoad[]
+    return Asap.AbstractLoad[_scale_story_load(ld, f) for ld in loads]
+end
+
+"""
+    require_second_order_moment(M2, M1; case="") 
+
+Throw when the factored moment including second-order effects exceeds 1.4
+times the first-order moment.
+
+# Citation
+ACI 318-19 §6.2.5.3 (corpus: aci-318-19, PDF page 72): Mu including
+second-order effects shall not exceed 1.4 Mu due to first-order effects.
+§11.4.1.3 (PDF page 169) sends wall slenderness to §6.6.4, §6.7, or §6.8,
+and §6.2.5.3 is the limit on that moment. A moment below 1 N·m is not a
+ratio; both sides that small are accepted.
+"""
+function require_second_order_moment(M2::Real, M1::Real; case::AbstractString="")
+    # ACI 318-19 §6.2.5.3 (corpus: aci-318-19, PDF page 72).
+    limit = 1.4
+    a2 = abs(Float64(M2))
+    a1 = abs(Float64(M1))
+    (a2 <= 1.0 && a1 <= 1.0) && return nothing
+    a2 <= limit * a1 + 1.0 && return nothing
+    where_ = isempty(case) ? "" : " on $case"
+    throw(ArgumentError(
+        "second-order moment $(a2) N·m exceeds 1.4 times the first-order " *
+        "moment $(a1) N·m$(where_). ACI 318-19 §6.2.5.3 (corpus: aci-318-19, " *
+        "PDF page 72)."))
+end
+
 # ------------------------------------------------------------------------------
 # Internals
 # ------------------------------------------------------------------------------
+
+function _scale_story_load(ld, f::Float64)
+    if ld isa Asap.NodeForce
+        return Asap.NodeForce(ld.node, [v * f for v in ld.value], ld.id)
+    elseif ld isa Asap.NodeMoment
+        return Asap.NodeMoment(ld.node, [v * f for v in ld.value], ld.id)
+    elseif ld isa Asap.LineLoad
+        return Asap.LineLoad(ld.element, [v * f for v in ld.value], ld.id)
+    elseif ld isa Asap.GravityLoad
+        return Asap.GravityLoad(ld.element, ld.factor * f, ld.id)
+    elseif ld isa Asap.TributaryLoad
+        return Asap.TributaryLoad(ld.element, copy(ld.positions), copy(ld.widths),
+                                   ld.pressure * f, ld.direction, ld.id)
+    elseif ld isa Asap.AreaLoad
+        return Asap.AreaLoad(ld.shells, ld.pressure * f;
+                              direction=ld.direction,
+                              distribute_to=ld.distribute_to,
+                              interior_beams=ld.interior_beams,
+                              axis=ld.axis,
+                              id=ld.id)
+    else
+        throw(ArgumentError(
+            "scale_story_loads: no scaling is defined for $(typeof(ld))."))
+    end
+end
+
 
 function _pdelta_master_dofs(node::Asap.Node)
     gid = node.globalID
@@ -147,22 +242,48 @@ function _story_cut_contributions(model, u, mesh::WallMesh, z::Float64; qmap=not
     return contrib
 end
 
-"""Throw when a member node on the base can translate in plan."""
+"""
+Throw when the base can sway and no base master was given.
+
+A frame member that crosses the base must be fixed there in plan: that node
+is the story bottom. Wall mesh nodes along the base may be free. The mesh
+adds no supports, and a free node between fixed frame joints is not a story
+translation. A wall pier that crosses the base with no fixed frame anywhere
+on that cut is refused, because nothing then holds the story bottom.
+"""
 function _require_fixed_base_in_plan(model, mesh::WallMesh, z::Float64)
-    function check(nd)
-        abs(_node_xyz(nd)[3] - z) <= WALL_CUT_ZTOL_M || return nothing
-        (nd.dof[1] || nd.dof[2]) && throw(ArgumentError(
-            "story_axial_profiles: a member node at the base z = $(z) m is free in plan. " *
-            "The lowest story is taken with a base that does not move; give the base a " *
-            "master or fix it."))
-        return nothing
-    end
-    for pier in mesh.piers, sh in pier.shells, nd in sh.nodes
-        check(nd)
-    end
+    tol = WALL_CUT_ZTOL_M
+    on(zz) = abs(zz - z) <= tol
+    above(zz) = zz > z + tol
+    fixed_in_plan(nd) = !(nd.dof[1] || nd.dof[2])
+    frame_anchored = false
     for el in _frame_elements(model)
-        check(el.nodeStart)
-        check(el.nodeEnd)
+        z1 = _node_xyz(el.nodeStart)[3]
+        z2 = _node_xyz(el.nodeEnd)[3]
+        base = nothing
+        if on(z1) && above(z2)
+            base = el.nodeStart
+        elseif on(z2) && above(z1)
+            base = el.nodeEnd
+        end
+        base === nothing && continue
+        if fixed_in_plan(base)
+            frame_anchored = true
+        else
+            throw(ArgumentError(
+                "story_axial_profiles: a frame member at the base z = $(z) m is " *
+                "free in plan. The lowest story is taken with a base that does " *
+                "not move; give the base a master or fix it."))
+        end
     end
-    return nothing
+    frame_anchored && return nothing
+    for pier in mesh.piers, sh in pier.shells
+        zs = ntuple(i -> _node_xyz(sh.nodes[i])[3], length(sh.nodes))
+        any(above, zs) || continue
+        any(nd -> on(_node_xyz(nd)[3]) && fixed_in_plan(nd), sh.nodes) &&
+            return nothing
+    end
+    throw(ArgumentError(
+        "story_axial_profiles: nothing at the base z = $(z) m is fixed in plan. " *
+        "Give the base a master or fix the members that cross it."))
 end

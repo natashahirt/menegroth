@@ -170,12 +170,20 @@ which is not this case when `u` came from another load vector.
 
 A miss does not invent a demand. The caller withholds the walls at that cut.
 Without the flag, `model.reactions` must already be filled (`solve!` does this).
+
+`geometric_stiffness` is the signed story matrix the displacement was solved
+with. The element stiffness does not contain it, so `K_e u` is larger than
+the applied story shear by the story couple. Those fictitious forces,
+`−K_G u`, are added to the applied side at nodes strictly above the cut
+(Wilson & Habibullah 1987, Eq. 1–2, corpus: wilson-habibullah-1987-pdelta,
+PDF page 5). A node on the cut is not added.
 """
 function check_story_cut_equilibrium(model, u::AbstractVector{<:Real}, mesh::WallMesh,
                                     loads, z_m::Real;
                                     rtol::Real=1e-6, atol_force::Real=1.0,
                                     atol_moment::Real=1.0,
-                                    fixed_end_from_loads::Bool=false)
+                                    fixed_end_from_loads::Bool=false,
+                                    geometric_stiffness=nothing)
     z = Float64(z_m)
     qmap = fixed_end_from_loads ? _fixed_end_by_element(loads) : nothing
     reactions = fixed_end_from_loads ? _case_reactions(model, u, qmap) : model.reactions
@@ -195,6 +203,10 @@ function check_story_cut_equilibrium(model, u::AbstractVector{<:Real}, mesh::Wal
     applied6 = _loads_above(loads, origin, z)
     react6 = _reactions_above(model, reactions, origin, z)
     applied6 = ntuple(i -> applied6[i] + react6[i], 6)
+    if geometric_stiffness !== nothing
+        geo6 = _geometric_above(model, geometric_stiffness, u, origin, z)
+        applied6 = ntuple(i -> applied6[i] + geo6[i], 6)
+    end
     residual = ntuple(i -> cut6[i] - applied6[i], 6)
     scale = max(maximum(abs, cut6), maximum(abs, applied6))
     passed = true
@@ -399,6 +411,47 @@ function _sum_about(contrib, origin::NTuple{3, Float64})
         Mx += ry * c.fz - rz * c.fy + c.mx
         My += rz * c.fx - rx * c.fz + c.my
         Mz += rx * c.fy - ry * c.fx + c.mz
+    end
+    return (Fx, Fy, Fz, Mx, My, Mz)
+end
+
+"""
+Fictitious story forces `−K_G u` at nodes strictly above `z`.
+
+`K_G` is signed: compression is negative, so `−K_G u` points with the
+displacement and is the couple Wilson & Habibullah add to the applied load
+(Eq. 1, `KU = F + LU`, with `K_G = −L`).
+"""
+function _geometric_above(model, Kg, u::AbstractVector{<:Real},
+                          origin::NTuple{3, Float64}, z::Float64)
+    n = model.nDOFs
+    length(u) == n || throw(ArgumentError(
+        "story cut: displacement length $(length(u)) does not match $(n) DOFs."))
+    size(Kg) == (n, n) || throw(ArgumentError(
+        "story cut: geometric stiffness is $(size(Kg)); the model has $n DOFs."))
+    Ff = Vector{Float64}(-(Kg * collect(Float64, u)))
+    ox, oy, oz = origin
+    Fx = Fy = Fz = Mx = My = Mz = 0.0
+    for nd in model.nodes
+        x, y, zz = _node_xyz(nd)
+        zz > z + WALL_CUT_ZTOL_M || continue
+        gid = nd.globalID
+        (length(gid) == 6 && all(i -> 1 <= i <= n, gid)) || continue
+        fx = Ff[gid[1]]
+        fy = Ff[gid[2]]
+        fz = Ff[gid[3]]
+        mx = Ff[gid[4]]
+        my = Ff[gid[5]]
+        mz = Ff[gid[6]]
+        rx = x - ox
+        ry = y - oy
+        rz = zz - oz
+        Fx += fx
+        Fy += fy
+        Fz += fz
+        Mx += ry * fz - rz * fy + mx
+        My += rz * fx - rx * fz + my
+        Mz += rx * fy - ry * fx + mz
     end
     return (Fx, Fy, Fz, Mx, My, Mz)
 end

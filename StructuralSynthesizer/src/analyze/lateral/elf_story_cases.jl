@@ -15,8 +15,10 @@
 #
 # Wall design does not read these cases until
 # `require_seismic_wall_demand_provisions` accepts them. Cracked stiffness,
-# ρ on Eh, Ax on Mta, the orthogonal combination, and P-delta on strength
-# are not applied in this file.
+# ρ on Eh, Ax on Mta, and the orthogonal combination are not applied in
+# this file. This solve stays first-order so θ uses Δxe. The ordinary-wall
+# stage multiplies these design story drifts by the §12.8.7 factor 1/(1−θ)
+# and takes member forces from its own story geometric stiffness.
 #
 # Not done here, on purpose:
 # - Wind story forces.

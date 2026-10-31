@@ -110,10 +110,34 @@ end
 
         lateral = Asap.AbstractLoad[Asap.NodeForce(master, [H, 0.0, 0.0] .* u"N")]
         Δ0 = Asap.solve(model, [lateral], links)[1][gx]
-        Δ = Asap.solve(model, [lateral], links; geometric_stiffness=Kg)[1][gx]
+        u = Asap.solve(model, [lateral], links; geometric_stiffness=Kg)[1]
+        Δ = u[gx]
         θ = 4P * Δ0 / (H * h)           # ASCE 7-22 Eq. 12.8-16 with Ie = Cd
         @test 0.10 < θ < 0.3
         @test Δ ≈ Δ0 / (1 - θ) rtol=1e-9
+
+        # K_e u exceeds the applied shear by the story couple. Without −K_G u
+        # the cut residual is that couple; with it the cut closes.
+        bare = _SS.check_story_cut_equilibrium(model, u, _SS.WallMesh(), lateral, 0.0;
+                                              fixed_end_from_loads=true)
+        @test bare.residual[1] ≈ (4P / h) * Δ rtol=1e-6 atol=1.0
+        @test !bare.passed
+        closed = _SS.check_story_cut_equilibrium(model, u, _SS.WallMesh(), lateral, 0.0;
+                                                fixed_end_from_loads=true,
+                                                geometric_stiffness=Kg)
+        @test closed.passed
+    end
+
+    @testset "§6.2.5.3 moment cap and load scaling" begin
+        _SS.require_second_order_moment(1.4, 1.0)
+        _SS.require_second_order_moment(0.4, 0.2)
+        @test_throws ArgumentError _SS.require_second_order_moment(1.4 + 2.0, 1.0)
+        node = Asap.Node([0.0, 0.0, 0.0] .* u"m", :free)
+        ld = Asap.NodeForce(node, [2.0, 0.0, -4.0] .* u"N")
+        scaled = _SS.scale_story_loads([ld], 1.2)
+        @test ustrip.(u"N", only(scaled).value) ≈ [2.4, 0.0, -4.8]
+        @test isempty(_SS.scale_story_loads([ld], 0.0))
+        @test ld.value[1] == 2.0u"N"
     end
 
     @testset "A base free in plan is refused" begin

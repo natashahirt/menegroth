@@ -69,6 +69,9 @@ mutable struct BuildingStructure{T, A, P} <: AbstractBuildingStructure
     # that call. Not a design group: forces stay on the pier, the section group
     # is a later step.
     wall_mesh::WallMesh
+    # Ordinary-wall stage output. `nothing` until [`design_ordinary_walls!`](@ref)
+    # runs. The value is an `OrdinaryWallResult`.
+    ordinary_wall_result::Any
 
     # ─── Design Snapshots (for parametric studies) ───
     _snapshots::Dict{Symbol, DesignSnapshot{T, P}}
@@ -100,6 +103,7 @@ function BuildingStructure(skel::BuildingSkeleton{T}) where T
         Dict{Int, Vector{Asap.TributaryLoad}}(),
         Asap.RigidLink[],
         WallMesh(),
+        nothing,
         Dict{Symbol, DesignSnapshot{T, P}}(),
     )
 end
@@ -124,6 +128,7 @@ function BuildingStructure{T, A, P}(skel::BuildingSkeleton{T}) where {T, A, P}
         Dict{Int, Vector{Asap.TributaryLoad}}(),
         Asap.RigidLink[],
         WallMesh(),
+        nothing,
         Dict{Symbol, DesignSnapshot{T, P}}(),
     )
 end

@@ -41,6 +41,9 @@ const NODE_MEMBERS          = :members
 "Sizing stage: foundation sizing (`_size_foundations!`)."
 const NODE_FOUNDATIONS      = :foundations
 
+"Ordinary concrete wall checks. Present when lateral design was requested."
+const NODE_ORDINARY_WALLS   = :ordinary_walls
+
 "Result capture (`capture_design`)."
 const NODE_CAPTURE          = :capture
 
@@ -90,14 +93,15 @@ end
     canonical_node_keys() -> Vector{NodeKey}
 
 The full, stable identity vocabulary of the design pipeline, in pipeline order:
-prepare sub-steps, the three sizing stages, and capture. Content-stable — these
-symbols never depend on stage position, params, or branch taken. The incremental
-engine and the invalidation-matrix tests can enumerate the design's work units
-from this list.
+prepare sub-steps, the sizing stages, ordinary walls, and capture. Content-stable —
+these symbols never depend on stage position, params, or branch taken. The
+incremental engine and the invalidation-matrix tests can enumerate the design's
+work units from this list. Ordinary walls are listed even when a gravity-only
+graph omits that node.
 """
 canonical_node_keys() = NodeKey[
     NODE_INITIALIZE, NODE_POPULATE_FRAMING, NODE_ESTIMATE_COLUMNS, NODE_BUILD_ASAP,
-    NODE_SLAB_SIZING, NODE_MEMBERS, NODE_FOUNDATIONS,
+    NODE_SLAB_SIZING, NODE_MEMBERS, NODE_FOUNDATIONS, NODE_ORDINARY_WALLS,
     NODE_CAPTURE,
 ]
 
@@ -182,6 +186,12 @@ const PIPELINE_PROVENANCE = Dict{NodeKey, @NamedTuple{
         reads        = Symbol[:supports, :foundations, :columns, :asap_model],
         writes       = Symbol[:supports, :foundations],
         code_version = :foundations_v1,
+    ),
+    NODE_ORDINARY_WALLS => (
+        param_slice  = Symbol[:lateral, :wall_inputs],
+        reads        = Symbol[:walls, :wall_mesh, :asap_model, :asap_rigid_links],
+        writes       = Symbol[:ordinary_wall_result],
+        code_version = :ordinary_walls_v1,
     ),
 )
 

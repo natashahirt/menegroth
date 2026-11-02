@@ -112,6 +112,80 @@ function build_slab_shell_patches(
     return patches
 end
 
+"""Plan loops of the unframed openings that meet this slab's faces. `face_idx` keeps one face."""
+function slab_opening_loops(struc, slab; face_idx::Union{Nothing, Int} = nothing)
+    skel = struc.skeleton
+    hasproperty(skel, :openings) || return Vector{NTuple{2, Float64}}[]
+    ops = getfield(skel, :openings)
+    isempty(ops) && return Vector{NTuple{2, Float64}}[]
+    face_loops = Vector{NTuple{2, Float64}}[]
+    for ci in slab.cell_indices
+        f = struc.cells[ci].face_idx
+        (face_idx === nothing || f == face_idx) || continue
+        push!(face_loops, NTuple{2, Float64}[_vertex_xy_m(skel, vi) for vi in skel.face_vertex_indices[f]])
+    end
+    out = Vector{NTuple{2, Float64}}[]
+    seen = Set{Vector{Tuple{Int, Int}}}()
+    for op in ops
+        _opening_meets_face(op.loop, face_loops) || continue
+        key = [(round(Int, 1e6 * p[1]), round(Int, 1e6 * p[2])) for p in op.loop]
+        key in seen && continue
+        push!(seen, key)
+        push!(out, op.loop)
+    end
+    return out
+end
+
+function _pip_xy(x, y, poly)
+    inside = false
+    n = length(poly)
+    j = n
+    for i in 1:n
+        xi, yi = poly[i]
+        xj, yj = poly[j]
+        if ((yi > y) != (yj > y)) && (x < (xj - xi) * (y - yi) / (yj - yi + 1e-30) + xi)
+            inside = !inside
+        end
+        j = i
+    end
+    return inside
+end
+
+function _opening_meets_face(opening, faces)
+    for face in faces
+        for (x, y) in opening
+            _pip_xy(x, y, face) && return true
+        end
+        for (x, y) in face
+            _pip_xy(x, y, opening) && return true
+        end
+        n = length(opening)
+        cx = sum(p[1] for p in opening) / n
+        cy = sum(p[2] for p in opening) / n
+        _pip_xy(cx, cy, face) && return true
+    end
+    return false
+end
+
+"""
+Opening arguments for one column's §11.11.6 punching reduction.
+
+The column-strip half-width is `0.25 * min(l1, l2)` (ACI 318-11 §13.2.1,
+corpus: aci-318-11, page 244). The spans used are the slab's governing spans.
+
+# ENGINEERING JUDGMENT
+§11.11.6 names flat slabs for the column-strip trigger. A flat plate is
+checked with the `10h` rule only.
+"""
+function column_opening_punching(struc, slab, col)
+    loops = slab_opening_loops(struc, slab)
+    isempty(loops) && return (;)
+    xy = _vertex_xy_m(struc.skeleton, col.vertex_idx)
+    half = 0.25 * min(slab.spans.primary, slab.spans.secondary)
+    return (openings = loops, column_xy = (xy[1], xy[2]),
+            flat_slab = slab.floor_type == :flat_slab, column_strip_half = half)
+end
+
 """
     build_slab_shell_mesh(struc, slab, columns, section;
         target_edge=nothing, drop_panel=nothing,
@@ -201,6 +275,7 @@ function build_slab_shell_mesh(
 
     # ─── 6. Build shell mesh ───
     shells = Asap.Shell(corner_nodes, section;
+                        holes=slab_opening_loops(struc, slab),
                         id=id,
                         interior_nodes=interior_nodes,
                         interior_patches=patches,

@@ -307,8 +307,14 @@ function _report_vault_panel(io::IO, design::BuildingDesign,
     h = _to_report(du, :thickness, r.thickness; digits=1)
     rise = _to_report(du, :length, r.rise; digits=2)
     arc = _to_report(du, :length, r.arc_length; digits=1)
-    span = hasproperty(slab, :spans) && !isnothing(slab.spans) ?
-           _to_report(du, :length, slab.spans.isotropic * u"m"; digits=1) : 0.0
+    # `SpanInfo.isotropic` is already a length. A bare number is metres.
+    span = if hasproperty(slab, :spans) && !isnothing(slab.spans)
+        raw = slab.spans.isotropic
+        span_len = raw isa Unitful.Quantity ? raw : raw * u"m"
+        _to_report(du, :length, span_len; digits=1)
+    else
+        0.0
+    end
     λ = rise > 0 ? round(span / rise; digits=1) : 0.0
 
     slab_area = sum(struc.cells[ci].area for ci in slab.cell_indices)

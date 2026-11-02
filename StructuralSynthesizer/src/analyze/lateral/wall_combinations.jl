@@ -71,6 +71,9 @@ end
 
 In-plane `(N, V, M)` from this pier's shells at its bottom nodes.
 
+The tangent is the meshed bottom edge, oriented with `(x2 - x1, y2 - y1)`.
+A column centerline offset moves that edge onto the frame nodes.
+
 `fixed_end_from_loads` reads fixed-end forces from `loads` instead of the
 `Q` stored on the element. A basic-case displacement is not the load set
 last processed onto the model.
@@ -86,7 +89,11 @@ function pier_wall_action(wall::Wall, pier::WallPierMesh, u::AbstractVector{<:Re
         "bottom at z = $(z) m."))
     origin = _cut_origin(contrib, z)
     Fx, Fy, Fz, Mx, My, Mz = _sum_about(contrib, origin)
-    return wall_action_from_global(wall, Fx, Fy, Fz, Mx, My, Mz)
+    tx, ty, nx, ny = _meshed_plan_axes(wall, pier)
+    return WallAction(
+        -Float64(Fz),
+        Float64(Fx) * tx + Float64(Fy) * ty,
+        Float64(Mx) * nx + Float64(My) * ny)
 end
 
 """
@@ -282,6 +289,48 @@ function _pier_plan_axes(wall)
     tx = dx / L
     ty = dy / L
     return tx, ty, -ty, tx
+end
+
+"""
+In-plane axes of the meshed pier, oriented with the architectural wall.
+
+The tangent is the bottom edge of the shells. A column offset can move that
+edge off `(x1, y1)–(x2, y2)` without changing which end is the start. The
+architectural tangent breaks a tie so shear keeps its sign.
+"""
+function _meshed_plan_axes(wall, pier::WallPierMesh)
+    tx, ty, nx, ny = _pier_plan_axes(wall)
+    z = _pier_bottom(pier)
+    pts = Tuple{Float64, Float64}[]
+    for sh in pier.shells, nd in sh.nodes
+        xyz = _node_xyz(nd)
+        abs(xyz[3] - z) > 1e-6 && continue
+        xy = (xyz[1], xyz[2])
+        any(p -> hypot(p[1] - xy[1], p[2] - xy[2]) <= 1e-9, pts) && continue
+        push!(pts, xy)
+    end
+    length(pts) < 2 && return tx, ty, nx, ny
+    best = -1.0
+    a = pts[1]
+    b = pts[2]
+    for i in eachindex(pts), j in (i + 1):length(pts)
+        d = hypot(pts[j][1] - pts[i][1], pts[j][2] - pts[i][2])
+        d <= best && continue
+        best = d
+        a = pts[i]
+        b = pts[j]
+    end
+    dx = b[1] - a[1]
+    dy = b[2] - a[2]
+    L = hypot(dx, dy)
+    L > 0 || return tx, ty, nx, ny
+    mx = dx / L
+    my = dy / L
+    if mx * tx + my * ty < 0
+        mx = -mx
+        my = -my
+    end
+    return mx, my, -my, mx
 end
 
 function _pier_by_wall_index(mesh::WallMesh, wall_index::Int)

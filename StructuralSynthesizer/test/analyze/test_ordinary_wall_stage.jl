@@ -4,9 +4,9 @@
 # They are not a Table 12.2-1 lookup for an ordinary bearing wall. The stage
 # passes them through and does not choose them.
 #
-# Wall-shell E is multiplied by 0.35 before the successful call, and the
-# inputs state that the model uses cracked-section stiffness. The stage
-# itself does not scale E.
+# When the inputs state cracked stiffness, to_asap! multiplies wall-shell E
+# by 0.35. The stage itself does not scale E. Thickness and length stay
+# fixed. ρl and ρt may be raised above the ratios the wall already carries.
 #
 # Three stories on a 12 m square, two bays each way. Four piers per story,
 # two along X and two along Y, chosen so no two walls share an end. That
@@ -153,6 +153,15 @@ const _STAGE_BOTH_AXES = (
     (0.0, 6.0, 0.0, 12.0),
 )
 
+# 12 m square, 4 m bays. Same isolation rule. Three bays is the smallest
+# grid the direct design method accepts.
+const _STAGE_THREE_BAY = (
+    (0.0, 0.0, 4.0, 0.0),
+    (8.0, 12.0, 12.0, 12.0),
+    (12.0, 0.0, 12.0, 4.0),
+    (0.0, 8.0, 0.0, 12.0),
+)
+
 """Office with isolated piers. Defaults are the 12 m square, stiff in both axes."""
 function _stage_office(; x=12.0u"m", y=12.0u"m", x_bays=2, y_bays=2,
                        segments=_STAGE_BOTH_AXES, thickness=0.3u"m")
@@ -174,8 +183,8 @@ end
 """
 10 m × 6 m, two X piers and one Y pier, ends not shared.
 
-Used where 0.10 < θ ≤ θmax. After `_stage_crack_wall_shells!`, call
-[`_stage_soften_y_piers!`](@ref) with `0.001`.
+Used where 0.10 < θ ≤ θmax. `to_asap!` applies the stated 0.35 cracked-wall
+factor. Then call [`_stage_soften_y_piers!`](@ref) with `0.001`.
 """
 function _stage_office_pdelta()
     return _stage_office(;
@@ -217,16 +226,6 @@ end
 function _stage_wall_shells(struc)
     return [sh for sh in struc.asap_model.shell_elements
             if sh isa Asap.ShellTri3 && sh.id === :wall]
-end
-
-function _stage_crack_wall_shells!(struc)
-    shells = _stage_wall_shells(struc)
-    isempty(shells) && error("ordinary-wall fixture: no wall shells to reduce")
-    for sh in shells
-        sh.E *= 0.35
-    end
-    Asap.process!(struc.asap_model)
-    return length(shells)
 end
 
 """
@@ -397,9 +396,13 @@ end
 
     to_asap!(struc; params=lateral, diaphragms=:rigid)
     @test !isempty(struc.asap_rigid_links)
-    n_shells = _stage_crack_wall_shells!(struc)
-    @test n_shells > 0
-    E_cracked = [sh.E for sh in _stage_wall_shells(struc)]
+    shells = _stage_wall_shells(struc)
+    @test !isempty(shells)
+    # ShellTri3 stores E as pascals, not a quantity.
+    E_gross = ustrip(u"Pa", RC_4000_60.concrete.E)
+    @test shells[1].E ≈ 0.35 * E_gross
+    @test all(sh -> sh.E == shells[1].E, shells)
+    E_cracked = [sh.E for sh in shells]
 
     result = design_ordinary_walls!(struc, lateral)
     @test result isa OrdinaryWallResult
@@ -422,7 +425,9 @@ end
     @test result.max_story_stability <= 0.10
     @test length(result.pdelta_multipliers) == length(result.drift)
     @test all(m -> m ≈ 1.0, result.pdelta_multipliers)
-    @test [(w.thickness, w.ρl, w.ρt) for w in struc.walls] == sections
+    @test all(i -> struc.walls[i].thickness == sections[i][1], eachindex(struc.walls))
+    @test all(i -> struc.walls[i].ρl + 1e-12 >= sections[i][2] &&
+                   struc.walls[i].ρt + 1e-12 >= sections[i][3], eachindex(struc.walls))
     @test [sh.E for sh in _stage_wall_shells(struc)] == E_cracked
 
     design = capture_design(struc, lateral)
@@ -459,7 +464,6 @@ end
         skip_visualization=true,
     )
     to_asap!(struc; params=lateral, diaphragms=:rigid)
-    _stage_crack_wall_shells!(struc)
     # Fixture knob, not an ACI factor. See `_stage_soften_y_piers!`.
     _stage_soften_y_piers!(struc, 0.001)
     sections = [(w.thickness, w.ρl, w.ρt) for w in struc.walls]
@@ -477,7 +481,9 @@ end
     @test any(r -> r.check == "second-order moment" && !r.passed &&
                    r.clause == "ACI 318-19 §6.2.5.3",
               Iterators.flatten(values(result.checks)))
-    @test [(w.thickness, w.ρl, w.ρt) for w in struc.walls] == sections
+    @test all(i -> struc.walls[i].thickness == sections[i][1], eachindex(struc.walls))
+    @test all(i -> struc.walls[i].ρl + 1e-12 >= sections[i][2] &&
+                   struc.walls[i].ρt + 1e-12 >= sections[i][3], eachindex(struc.walls))
 end
 
 @testset "Y-weak office exceeds θmax" begin
@@ -489,7 +495,6 @@ end
         skip_visualization=true,
     )
     to_asap!(struc; params=lateral, diaphragms=:rigid)
-    _stage_crack_wall_shells!(struc)
     err = try
         design_ordinary_walls!(struc, lateral)
         nothing
@@ -498,4 +503,232 @@ end
     end
     @test err isa ArgumentError
     @test occursin("redesigned", sprint(showerror, err))
+end
+
+"""Node above `bn` on a column, or `nothing` when the story ends."""
+function _stage_node_above(model, bn)
+    z0 = ustrip(u"m", bn.position[3])
+    above = nothing
+    for el in model.frame_elements
+        (el.nodeStart === bn || el.nodeEnd === bn) || continue
+        other = el.nodeStart === bn ? el.nodeEnd : el.nodeStart
+        ustrip(u"m", other.position[3]) > z0 + 0.5 || continue
+        above = other
+        break
+    end
+    return above
+end
+
+@testset "wall shells share offset column joints" begin
+    struc = _stage_office()
+    for col in struc.columns
+        # The story above is smaller, so the shared floor joint is not a
+        # vertical extrusion of the grid line.
+        c = col.story == 0 ? 0.8u"m" : 0.4u"m"
+        col.c1 = c
+        col.c2 = c
+    end
+    update_structural_offsets!(struc; input_is_centerline=false)
+    @test any(c -> hypot(c.structural_offset...) > 0.05, struc.columns)
+    to_asap!(struc; params=DesignParameters(diaphragm_mode=:rigid), diaphragms=:rigid)
+    model = struc.asap_model
+    @test maximum(abs, model.u) < 1.0
+    for (iw, wall) in enumerate(struc.walls)
+        eidx = struc.segments[first(segment_indices(wall))].edge_idx
+        el = model.frame_elements[eidx]
+        pier = only(p for p in struc.wall_mesh.piers if p.wall_index == iw)
+        owned = Set(objectid(nd) for sh in pier.shells for nd in sh.nodes)
+        for nd in (el.nodeStart, el.nodeEnd)
+            @test objectid(nd) in owned
+            d = min(hypot(ustrip(u"m", nd.position[1]) - wall.x1,
+                          ustrip(u"m", nd.position[2]) - wall.y1),
+                    hypot(ustrip(u"m", nd.position[1]) - wall.x2,
+                          ustrip(u"m", nd.position[2]) - wall.y2))
+            @test 1e-3 < d < 1.0
+            top = _stage_node_above(model, nd)
+            @test top !== nothing
+            @test objectid(top) in owned
+        end
+    end
+end
+
+@testset "design_building publishes ordinary-wall records" begin
+    # Three bays each way. ACI 318-11 §13.6.1.1 requires three continuous
+    # spans for the direct design method.
+    struc = _stage_office(; x_bays=3, y_bays=3, segments=_STAGE_THREE_BAY)
+    floor = FlatPlateOptions(method=DDM())
+    materials = MaterialOptions(concrete=RC_4000_60.concrete, rebar=Rebar_60)
+    # Concrete framing stays fixed. Column centerline offsets stay on.
+    beams = ConcreteBeamOptions(material=RC_4000_60.concrete, rebar_material=Rebar_60)
+    columns = ConcreteColumnOptions(material=RC_4000_60.concrete, rebar_material=Rebar_60)
+    gravity = DesignParameters(
+        name="gravity-walls",
+        floor=floor,
+        materials=materials,
+        beams=beams,
+        columns=columns,
+        wall_thickness=0.3u"m",
+        diaphragm_mode=:rigid,
+        max_iterations=3,
+        skip_visualization=true,
+    )
+    gdesign = design_building(struc, gravity)
+    @test isempty(gdesign.walls)
+    @test isempty(gdesign.seismic_story_drift)
+    gjson = design_to_json(gdesign)
+    @test isempty(gjson.walls)
+    @test isempty(gjson.seismic_story_drift)
+    gbuf = IOBuffer()
+    engineering_report(gdesign; io=gbuf, report_units=:metric)
+    greport = String(take!(gbuf))
+    @test !occursin("ORDINARY WALLS", greport)
+    @test !occursin("SEISMIC STORY DRIFT", greport)
+
+    lateral = DesignParameters(
+        name="ordinary-walls",
+        floor=floor,
+        materials=materials,
+        beams=beams,
+        columns=columns,
+        wall_thickness=0.3u"m",
+        diaphragm_mode=:rigid,
+        max_iterations=3,
+        skip_visualization=true,
+        lateral=LateralDesign(; system=WallsSeismicSystem(), assignment=BuildingUnit()),
+        wall_inputs=_stage_inputs(),
+    )
+    design = design_building(struc, lateral)
+    @test sort(collect(keys(design.walls))) == collect(1:length(struc.walls))
+    @test all(records -> !isempty(records), values(design.walls))
+    @test !isempty(design.seismic_story_drift)
+    payload = design_to_json(design)
+    @test length(payload.walls) == sum(length, values(design.walls); init=0)
+    @test any(w -> w.check == "in-plane shear", payload.walls)
+    @test length(payload.seismic_story_drift) == length(design.seismic_story_drift)
+    @test all(d -> d.drift_m isa Float64 && d.allowable_m isa Float64, payload.seismic_story_drift)
+    buf = IOBuffer()
+    engineering_report(design; io=buf, report_units=:metric)
+    report = String(take!(buf))
+    @test occursin("ORDINARY WALLS", report)
+    @test occursin("SEISMIC STORY DRIFT", report)
+end
+
+function _ratio_wall(; ρl=0.0025, ρt=0.0025, lw=6.0, t=0.3, h=4.0)
+    return Wall([1], h * u"m"; thickness=t * u"m",
+                x1=0.0, y1=0.0, x2=lw, y2=0.0, story=0, ρl=ρl, ρt=ρt)
+end
+
+_ratio_action(N, V, M) = CombinedWallAction(:strength_1_2D_1_6L, :only, N, V, M)
+
+"First grid ratio at or above `floor` whose in-plane flexure passes, else nothing."
+function _first_passing_ρl(floor, lw, t, material, N, M)
+    candidates = [floor]
+    for r in StructuralSynthesizer.ORDINARY_WALL_RHO_GRID
+        r > floor + 1e-12 && push!(candidates, r)
+    end
+    for ρl in candidates
+        section = WallSection(lw * u"m", t * u"m"; ρl=ρl, ρt=0.0025)
+        check_wall_inplane_flexure(section, material, N, M).passed && return ρl
+    end
+    return nothing
+end
+
+@testset "ordinary wall reinforcement selection" begin
+    mat = RC_4000_60
+    hw = 12.0u"m"
+    select! = StructuralSynthesizer.select_ordinary_wall_reinforcement!
+
+    # A demand the minimum ratios already cover is left alone.
+    light = _ratio_wall()
+    ρ_light = select!(light, [_ratio_action(1e3, 1e3, 1e3)], mat; hw)
+    @test light.ρl == 0.0025
+    @test light.ρt == 0.0025
+    @test ρ_light == 0.0
+
+    # Shear sets ρt. A 1 kN·m moment does not push ρl above the §11.6.2 floor.
+    fc = ustrip(u"Pa", mat.concrete.fc′)
+    fyt = ustrip(u"Pa", mat.transverse.Fy)
+    λ = mat.concrete.λ
+    cap0 = wall_shear_capacity_si(fc, fyt, 6.0, 0.3, 0.0, 12.0; λ=λ)
+    cap_p = wall_shear_capacity_si(fc, fyt, 6.0, 0.3, 1e-4, 12.0; λ=λ)
+    slope = (cap_p.ϕVn - cap0.ϕVn) / 1e-4
+    Vu = cap0.ϕVn + 0.0045 * slope
+    sheared = _ratio_wall()
+    ρ_shear = select!(sheared, [_ratio_action(1e3, Vu, 1e3)], mat; hw)
+    @test isapprox(ρ_shear, 0.0045; rtol=1e-6)
+    @test isapprox(sheared.ρt, 0.0045; atol=1e-6)
+    shear_at = check_wall_inplane_shear(
+        WallSection(6.0u"m", 0.3u"m"; ρl=sheared.ρl, ρt=sheared.ρt), mat, Vu, hw)
+    @test shear_at.passed
+    shear_below = check_wall_inplane_shear(
+        WallSection(6.0u"m", 0.3u"m"; ρl=sheared.ρl, ρt=sheared.ρt - 0.0005), mat, Vu, hw)
+    @test !shear_below.passed
+    # hw/lw = 2: Eq. (11.6.2) = 0.0025 + 0.25·(ρt − 0.0025) = 0.0030,
+    # and it need not exceed ρt required for strength.
+    @test isapprox(sheared.ρl, 0.0030; atol=1e-6)
+
+    # Flexure sets ρl. Shear stays at the 0.0025 floor. The value kept is the
+    # first ratio, walking upward, that the recorded flexure check accepts.
+    Nflex = 1.0e5
+    φ_min = check_wall_inplane_flexure(
+        WallSection(6.0u"m", 0.3u"m"; ρl=0.0025, ρt=0.0025), mat, Nflex, 0.0).capacity
+    best = maximum(check_wall_inplane_flexure(
+                       WallSection(6.0u"m", 0.3u"m"; ρl=ρ, ρt=0.0025), mat, Nflex, 0.0).capacity
+                   for ρ in StructuralSynthesizer.ORDINARY_WALL_RHO_GRID)
+    # φMn is not monotone in ρl, so the moment sits between the minimum-ratio
+    # capacity and the best capacity on the grid. The selector must stop at
+    # the first ratio that passes, not at the ratio with the largest φMn.
+    @test best > φ_min
+    Mu = φ_min + 0.5 * (best - φ_min)
+    bent = _ratio_wall()
+    select!(bent, [_ratio_action(Nflex, 1e3, Mu)], mat; hw)
+    @test bent.ρt == 0.0025
+    expected = _first_passing_ρl(0.0025, 6.0, 0.3, mat, Nflex, Mu)
+    @test expected !== nothing
+    @test bent.ρl == expected
+    @test bent.ρl > 0.0025
+
+    # A caller ratio that already meets the requirement is kept, including
+    # one that is not on the grid. Here the §11.6.2 formula would ask for
+    # about 0.0039, and the strength cap brings that back to 0.0025, so the
+    # caller's 0.0030 is not raised.
+    kept = _ratio_wall(; ρl=0.0030, ρt=0.0081)
+    select!(kept, [_ratio_action(1e3, 1e3, 1e3)], mat; hw)
+    @test kept.ρl == 0.0030
+    @test kept.ρt == 0.0081
+
+    # Shear above φ·Vn,max does not throw. ρt goes to the top of the grid and
+    # the recorded shear check fails.
+    above = _ratio_wall()
+    Vu_over = 2 * WALL_PHI_SHEAR * cap0.Vn_max
+    ρ_over = select!(above, [_ratio_action(1e3, Vu_over, 1e3)], mat; hw)
+    @test ρ_over === nothing
+    @test above.ρt == StructuralSynthesizer.ORDINARY_WALL_RHO_GRID[end]
+    over_records = check_ordinary_wall(above, [_ratio_action(1e3, Vu_over, 1e3)];
+                                       material=mat, wall_index=1, case=:D,
+                                       boundary=:pinned, hw, ρt_strength=ρ_over)
+    @test any(r -> r.check == "in-plane shear" && !r.passed, over_records)
+
+    # A caller ratio already above the grid is kept when the cap is exceeded.
+    above_caller = _ratio_wall(; ρt=0.03)
+    select!(above_caller, [_ratio_action(1e3, Vu_over, 1e3)], mat; hw)
+    @test above_caller.ρt == 0.03
+
+    # Squat wall: Eq. (11.6.2) at ρt = 0.005 and hw/lw = 1 is 0.004375.
+    # ρt required for strength is 0.003, so ρl stops at 0.003, and the
+    # recorded minimum check uses that same cap.
+    cap0s = wall_shear_capacity_si(fc, fyt, 4.0, 0.3, 0.0, 4.0; λ=λ)
+    capps = wall_shear_capacity_si(fc, fyt, 4.0, 0.3, 1e-4, 4.0; λ=λ)
+    Vu_squat = cap0s.ϕVn + 0.003 * (capps.ϕVn - cap0s.ϕVn) / 1e-4
+    squat = _ratio_wall(; ρt=0.005, lw=4.0, h=4.0)
+    ρ_squat = select!(squat, [_ratio_action(1e3, Vu_squat, 1e3)], mat; hw=4.0u"m")
+    @test isapprox(ρ_squat, 0.003; rtol=1e-4)
+    @test squat.ρt == 0.005
+    @test isapprox(squat.ρl, 0.003; atol=1e-6)
+    squat_records = check_ordinary_wall(squat, [_ratio_action(1e3, Vu_squat, 1e3)];
+                                        material=mat, wall_index=1, case=:D,
+                                        boundary=:pinned, hw=4.0u"m", ρt_strength=ρ_squat)
+    min_l = only(r for r in squat_records if r.check == "min longitudinal reinf ρl")
+    @test min_l.passed
+    @test isapprox(min_l.demand, 0.003; atol=1e-6)
 end

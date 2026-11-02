@@ -6,7 +6,7 @@
 
 """
     check_ordinary_wall(wall, actions; material, wall_index, case, boundary,
-                        assembly=nothing, hw=nothing) -> Vector{WallCheckRecord}
+                        assembly=nothing, hw=nothing, ρt_strength=nothing) -> Vector{WallCheckRecord}
 
 Run the ordinary checks on one isolated pier for each strength combination in
 `actions`. Each action is one concurrent `(N, M, V)`.
@@ -36,6 +36,10 @@ out-of-plane moment, so the resultant is taken through the thickness (`e = 0`).
 The in-plane moment is the axial-flexure check. A tensile axial force makes
 the bearing method inapplicable; that result is recorded as a failure.
 
+`ρt_strength`, when passed, is the transverse ratio required for shear
+strength. §11.6.2(a) says the vertical minimum need not exceed it. The
+default leaves the existing equation unchanged.
+
 A joined `assembly` is refused. A failing check is recorded. The wall is not resized.
 """
 function check_ordinary_wall(wall::Wall, actions::AbstractVector{CombinedWallAction};
@@ -44,7 +48,8 @@ function check_ordinary_wall(wall::Wall, actions::AbstractVector{CombinedWallAct
                              case::Symbol,
                              boundary::Symbol,
                              assembly::Union{Nothing,WallAssembly}=nothing,
-                             hw::Union{Nothing,Unitful.Length}=nothing)
+                             hw::Union{Nothing,Unitful.Length}=nothing,
+                             ρt_strength::Union{Nothing,Real}=nothing)
     material isa ReinforcedConcreteMaterial || throw(ArgumentError(
         "ordinary wall check: material must be a ReinforcedConcreteMaterial " *
         "(concrete plus rebar). A plain concrete has no fy or fyt, and this " *
@@ -71,7 +76,7 @@ function check_ordinary_wall(wall::Wall, actions::AbstractVector{CombinedWallAct
         # Shear strength is unsigned. The sign of V is the pier tangent.
         shear = check_wall_inplane_shear(section, material, abs(action.V), height)
         push!(records, _ordinary_record(wall_index, wall.story, direction, case, action, shear))
-        for reinf in check_wall_min_reinforcement(section; hw=height)
+        for reinf in check_wall_min_reinforcement(section; hw=height, ρt_strength)
             push!(records, _ordinary_record(wall_index, wall.story, direction, case, action, reinf))
         end
         flexure = check_wall_inplane_flexure(section, material, action.N, action.M)
@@ -131,4 +136,185 @@ function _require_wall_concrete(wall, material)
         "ordinary wall check: wall.concrete f'c does not match the " *
         "reinforced-concrete material."))
     return nothing
+end
+
+# Search grid for ordinary-wall reinforcement ratios. Not an ACI maximum.
+# 0.0025 is §11.6.2. Steps of 0.0005 run through 0.0200.
+const ORDINARY_WALL_RHO_GRID = collect(0.0025:0.0005:0.0200)
+
+"""
+Transverse ratio that makes φVn equal `Vu`, before the 0.0025 floor.
+
+`nothing` when `Vu` is above the §11.5.4.2 cap, so no ratio works.
+Zero when the concrete term alone covers `Vu`.
+
+# Citation
+ACI 318-19 Eq. (11.5.4.3) (corpus: aci-318-19, PDF page 172):
+`Vn = (αc·λ·√f'c + ρt·fyt)·Acv`, with `Vn` limited by §11.5.4.2.
+"""
+function _rho_t_for_shear_strength(fc, fyt, λ, lw, t, hw, Vu)
+    Vu = abs(Float64(Vu))
+    cap0 = wall_shear_capacity_si(fc, fyt, lw, t, 0.0, hw; λ=λ)
+    # ACI 318-19 §11.5.4.2. φ = 0.75, §21.2.1.
+    ϕmax = WALL_PHI_SHEAR * cap0.Vn_max
+    Vu <= cap0.ϕVn && return 0.0
+    Vu > ϕmax + 1.0 && return nothing
+    # Eq. (11.5.4.3) is linear in ρt below the cap. The probe sits below it.
+    ρ_probe = 1e-4
+    cap_p = wall_shear_capacity_si(fc, fyt, lw, t, ρ_probe, hw; λ=λ)
+    slope = (cap_p.ϕVn - cap0.ϕVn) / ρ_probe
+    slope > 0 || return nothing
+    return max(0.0, (Vu - cap0.ϕVn) / slope)
+end
+
+"""Next grid ratio at or above `target`, or the caller's ratio when it already is."""
+function _rho_on_grid(required::Float64, floor::Float64)
+    target = max(required, 0.0025)
+    floor >= target - 1e-12 && return floor
+    for r in ORDINARY_WALL_RHO_GRID
+        r >= target - 1e-12 && return r
+    end
+    return nothing
+end
+
+"""
+Grid ratio at or above `chosen` whose shear check passes.
+
+The solved ratio can sit a rounding step under the grid point that was
+selected. The next grid value is used only when that point still fails
+`check_wall_inplane_shear`.
+"""
+function _rho_t_covering_shear(chosen::Float64, material, lw, t, hw, Vu)
+    function covers(ρ)
+        section = WallSection(lw * u"m", t * u"m"; ρl=0.0025, ρt=ρ)
+        return check_wall_inplane_shear(section, material, Vu, hw).passed
+    end
+    covers(chosen) && return chosen
+    for r in ORDINARY_WALL_RHO_GRID
+        r > chosen + 1e-12 || continue
+        covers(r) && return r
+    end
+    return max(chosen, ORDINARY_WALL_RHO_GRID[end])
+end
+
+"""
+Vertical-ratio floor from §11.6.2(a).
+
+The equation is `0.0025 + 0.5·(2.5 − hw/lw)·(ρt − 0.0025)`, and not less
+than 0.0025. It need not exceed `ρt_strength`. A caller ratio above that
+floor is kept.
+"""
+function _rho_l_floor(ρt::Float64, ρt_strength, hw, lw, caller::Float64)
+    hwlw = lw > 0 ? hw / lw : Inf
+    # ACI 318-19 Eq. (11.6.2) (corpus: aci-318-19, PDF page 173).
+    formula = max(0.0025, 0.0025 + 0.5 * (2.5 - hwlw) * (ρt - 0.0025))
+    if ρt_strength !== nothing
+        formula = min(formula, max(Float64(ρt_strength), 0.0025))
+    end
+    return max(caller, formula)
+end
+
+function _rho_l_candidates(floor::Float64)
+    out = Float64[floor]
+    for r in ORDINARY_WALL_RHO_GRID
+        r > floor + 1e-12 && push!(out, r)
+    end
+    return out
+end
+
+"Move the failing action to the front so the next ratio rejects it first."
+function _promote_action!(actions, i::Int)
+    i == 1 && return actions
+    failed = actions[i]
+    deleteat!(actions, i)
+    pushfirst!(actions, failed)
+    return actions
+end
+
+"""
+True when every action's axial-flexure check passes at `ρl`.
+
+The closed form screens each action. The strain-compatibility check runs
+only after that screen passes, because the recorded check uses the lesser
+of the two capacities.
+"""
+function _flexure_passes!(lw, t, ρl, material, actions)
+    fc = ustrip(u"Pa", material.concrete.fc′)
+    fy = ustrip(u"Pa", material.rebar.Fy)
+    Es = ustrip(u"Pa", material.rebar.E)
+    section = WallSection(lw * u"m", t * u"m"; ρl=ρl, ρt=0.0025)
+    screened = Int[]
+    for i in eachindex(actions)
+        Nu = Float64(actions[i].N)
+        Mu = abs(Float64(actions[i].M))
+        ax = wall_pure_axial_capacity_si(fc, fy, lw, t, ρl)
+        # ACI 318-19 §22.4.2.1, φ = 0.65 for non-spiral transverse steel.
+        if Nu > 0.65 * ax.Pn_max
+            _promote_action!(actions, i)
+            return false
+        end
+        card = wall_axial_flexure_capacity_si(fc, fy, Es, lw, t, ρl, Nu)
+        if Mu > max(card.φMn, 0.0)
+            _promote_action!(actions, i)
+            return false
+        end
+        push!(screened, i)
+    end
+    for i in screened
+        a = actions[i]
+        chk = check_wall_inplane_flexure(section, material, a.N, a.M)
+        chk.passed && continue
+        _promote_action!(actions, i)
+        return false
+    end
+    return true
+end
+
+"""
+    select_ordinary_wall_reinforcement!(wall, actions, material; hw) -> ρt_strength
+
+Raise `wall.ρt`, then `wall.ρl`, to the lightest ratios on the grid that
+the pier's strength checks can pass. Thickness and length are unchanged.
+
+`ρt` is solved from the largest `|V|` and rounded up on the grid. `ρl`
+then walks upward from the §11.6.2 floor and stops at the first value
+that passes every action. Returns the transverse ratio required for
+shear strength, or `nothing` when the shear is above the §11.5.4.2 cap.
+
+A ratio the wall already carries is not reduced. A demand the grid cannot
+cover leaves the wall at the top of the grid.
+"""
+function select_ordinary_wall_reinforcement!(wall::Wall, actions, material; hw::Unitful.Length)
+    material isa ReinforcedConcreteMaterial || throw(ArgumentError(
+        "ordinary wall reinforcement: material must be a ReinforcedConcreteMaterial."))
+    isempty(actions) && throw(ArgumentError(
+        "ordinary wall reinforcement: there is no strength combination."))
+    lw = wall_length(wall)
+    lw > 0 || throw(ArgumentError("ordinary wall reinforcement: the pier has no length."))
+    t = ustrip(u"m", wall.thickness)
+    t > 0 || throw(ArgumentError("ordinary wall reinforcement: the thickness must be positive."))
+    hw_m = ustrip(u"m", hw)
+    hw_m > 0 || throw(ArgumentError("ordinary wall reinforcement: the wall height must be positive."))
+    fc = ustrip(u"Pa", material.concrete.fc′)
+    fyt = ustrip(u"Pa", material.transverse.Fy)
+    λ = material.concrete.λ
+    Vu = maximum(a -> abs(Float64(a.V)), actions)
+    ρt_strength = _rho_t_for_shear_strength(fc, fyt, λ, lw, t, hw_m, Vu)
+    required_t = ρt_strength === nothing ? Inf : ρt_strength
+    chosen_t = _rho_on_grid(required_t, wall.ρt)
+    if chosen_t === nothing
+        chosen_t = max(wall.ρt, ORDINARY_WALL_RHO_GRID[end])
+    elseif ρt_strength !== nothing
+        chosen_t = _rho_t_covering_shear(chosen_t, material, lw, t, hw, Vu)
+    end
+    wall.ρt = chosen_t
+    floor_l = _rho_l_floor(chosen_t, ρt_strength, hw_m, lw, wall.ρl)
+    order = collect(actions)
+    chosen_l = floor_l
+    for ρl in _rho_l_candidates(floor_l)
+        chosen_l = ρl
+        _flexure_passes!(lw, t, ρl, material, order) && break
+    end
+    wall.ρl = chosen_l
+    return ρt_strength
 end

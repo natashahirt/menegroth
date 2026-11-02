@@ -1,7 +1,8 @@
 # Ordinary concrete wall checks inside design_building.
 #
 # One isolated straight pier, checked at the section the building already has.
-# Thickness, length, and ρl / ρt stay fixed. A failing check is recorded.
+# Thickness and length stay fixed. ρl and ρt are raised on a fixed grid
+# when the given ratios fail a strength check. A failing check is recorded.
 
 """Checks and seismic story-drift comparisons for one ordinary-wall run."""
 struct OrdinaryWallResult
@@ -34,8 +35,11 @@ When lateral design was requested:
   wind, and ELF strength cases. Each strength combination is applied once per
   group (gravity with wind and earthquake omitted, each wind case, each `QE`
   case). Wind cases are not crossed with `QE` cases.
-- The given `wall.ρl` and `wall.ρt` are checked. The section is not resized,
-  and shell `E` is not scaled. Cracked stiffness is the caller's statement.
+- Thickness and length are not changed. `ρt` is set from the largest
+  shear, then `ρl` walks up the grid until axial-flexure passes. A ratio
+  already on the wall is not reduced. This function does not scale shell
+  `E`. When `wall_inputs` states cracked stiffness, `to_asap!` has already
+  applied it.
 - Member forces include second-order story sway. Each distinct factored
   gravity `(D, L, roof)` builds one story stiffness from the vertical forces
   of that gravity, and the unfactored cases are solved on it and superposed
@@ -162,6 +166,9 @@ function design_ordinary_walls!(struc::BuildingStructure, params::DesignParamete
 
     second = _build_story_second_order(struc, basic, wind, elf)
     checks = Dict{Int, Vector{WallCheckRecord}}()
+    n_raised = 0
+    max_ρl = 0.0
+    max_ρt = 0.0
     for pier in struc.wall_mesh.piers
         wall_index = pier.wall_index
         haskey(checks, wall_index) && throw(ArgumentError(
@@ -169,40 +176,66 @@ function design_ordinary_walls!(struc::BuildingStructure, params::DesignParamete
         wall = struc.walls[wall_index]
         assembly = _assembly_of(struc.wall_mesh, wall_index)
         gravity = pier_gravity_actions(struc, basic, pier)
-        records = WallCheckRecord[]
-        _each_second_order(records, wall,
-            _gravity_strength_actions(gravity),
-            _second_order_gravity_actions(struc, pier, basic, second);
-            material=inputs.material, wall_index, case=:D,
-            boundary=inputs.boundary, assembly, what="gravity")
-        wind1 = wind_pier_actions(struc, wind, pier)
-        for (i, action) in enumerate(wind1)
-            _each_second_order(records, wall,
-                _wind_strength_actions(gravity, action),
-                _second_order_wind_actions(struc, pier, basic, second, i);
-                material=inputs.material, wall_index,
-                case=_wind_case_symbol(i, wind.cases[i]),
-                boundary=inputs.boundary, assembly, what="wind case $i")
+        batches = _pier_action_batches(struc, pier, basic, wind, elf, second,
+                                       gravity, inputs)
+        grown = CombinedWallAction[]
+        for (_, _, growns, _) in batches
+            append!(grown, growns)
         end
-        qe_indices, qe_actions = seismic_strength_pier_actions(struc, elf, pier)
-        for (k, action) in enumerate(qe_actions)
-            elf_case = elf.cases[qe_indices[k]]
-            _each_second_order(records, wall,
-                _seismic_strength_actions(gravity, action, inputs.rho, inputs.SDS),
-                _second_order_seismic_actions(struc, pier, basic, second, k,
-                                              inputs.rho, inputs.SDS);
-                material=inputs.material, wall_index,
-                case=_qe_case_symbol(qe_indices[k], elf_case),
-                boundary=inputs.boundary, assembly, what="QE case $(qe_indices[k])")
+        ρl0 = wall.ρl
+        ρt0 = wall.ρt
+        ρt_strength = select_ordinary_wall_reinforcement!(
+            wall, grown, inputs.material; hw=_stacked_wall_height(wall))
+        (wall.ρl > ρl0 + 1e-12 || wall.ρt > ρt0 + 1e-12) && (n_raised += 1)
+        max_ρl = max(max_ρl, wall.ρl)
+        max_ρt = max(max_ρt, wall.ρt)
+        records = WallCheckRecord[]
+        for (case, firsts, growns, what) in batches
+            _each_second_order(records, wall, firsts, growns;
+                material=inputs.material, wall_index, case,
+                boundary=inputs.boundary, assembly, what, ρt_strength)
         end
         checks[wall_index] = records
     end
+    @info "Ordinary wall reinforcement" n_piers=length(checks) n_raised max_ρl max_ρt
 
     result = OrdinaryWallResult(checks, drift, θmax, pdelta_multipliers)
     struc.ordinary_wall_result = result
     StructuralSizer.emit!(tc, :pipeline, "design_ordinary_walls!", "stage_ordinary_walls", :exit;
                           n_walls=length(checks), n_drift=length(drift))
     return result
+end
+
+"""
+First-order and second-order strength actions for one pier.
+
+Each entry is `(case, first-order actions, second-order actions, label)`.
+The second-order actions are the ones the reinforcement search and the
+recorded checks both use.
+"""
+function _pier_action_batches(struc, pier, basic, wind, elf, second, gravity, inputs)
+    batches = Tuple{Symbol, Vector{CombinedWallAction}, Vector{CombinedWallAction}, String}[]
+    push!(batches, (:D,
+        _gravity_strength_actions(gravity),
+        _second_order_gravity_actions(struc, pier, basic, second),
+        "gravity"))
+    wind1 = wind_pier_actions(struc, wind, pier)
+    for (i, action) in enumerate(wind1)
+        push!(batches, (_wind_case_symbol(i, wind.cases[i]),
+            _wind_strength_actions(gravity, action),
+            _second_order_wind_actions(struc, pier, basic, second, i),
+            "wind case $i"))
+    end
+    qe_indices, qe_actions = seismic_strength_pier_actions(struc, elf, pier)
+    for (k, action) in enumerate(qe_actions)
+        elf_case = elf.cases[qe_indices[k]]
+        push!(batches, (_qe_case_symbol(qe_indices[k], elf_case),
+            _seismic_strength_actions(gravity, action, inputs.rho, inputs.SDS),
+            _second_order_seismic_actions(struc, pier, basic, second, k,
+                                          inputs.rho, inputs.SDS),
+            "QE case $(qe_indices[k])"))
+    end
+    return batches
 end
 
 """Gravity combinations, once. Combination 3 is the floor-live reading (`:L`)."""
@@ -425,27 +458,31 @@ function _second_order_seismic_actions(struc, pier, basic, second, k::Int, rho, 
 end
 
 function _each_second_order(records, wall, first_actions, second_actions;
-                             material, wall_index, case, boundary, assembly, what)
+                             material, wall_index, case, boundary, assembly, what,
+                             ρt_strength=nothing)
     length(first_actions) == length(second_actions) || throw(ArgumentError(
         "ordinary wall stage: $what has $(length(first_actions)) first-order " *
         "combinations and $(length(second_actions)) second-order combinations."))
     for (first, grown) in zip(first_actions, second_actions)
         _accept_second_order!(records, wall, first, grown;
-                              material, wall_index, case, boundary, assembly)
+                              material, wall_index, case, boundary, assembly,
+                              ρt_strength)
     end
     return records
 end
 
 function _accept_second_order!(records, wall, first::CombinedWallAction,
                                grown::CombinedWallAction;
-                               material, wall_index, case, boundary, assembly)
+                               material, wall_index, case, boundary, assembly,
+                               ρt_strength=nothing)
     (first.combination === grown.combination && first.alternative === grown.alternative) ||
         throw(ArgumentError(
             "ordinary wall stage: first-order $(first.combination)/$(first.alternative) " *
             "does not match second-order $(grown.combination)/$(grown.alternative)."))
     _record_second_order_moment!(records, wall, first, grown; wall_index, case)
     append!(records, check_ordinary_wall(wall, CombinedWallAction[grown];
-                                         material, wall_index, case, boundary, assembly))
+                                         material, wall_index, case, boundary, assembly,
+                                         ρt_strength))
     return records
 end
 

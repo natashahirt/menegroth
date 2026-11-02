@@ -50,7 +50,8 @@ function prepare!(struc::BuildingStructure, params::DesignParameters;
                 scoped_floor_overrides=params.scoped_floor_overrides,
                 # ACI 318-11 §10.10.4.1 — scoped-override cells inherit the global column cracking factor
                 col_I_factor = params.column_I_factor,
-                tributary_axis=params.tributary_axis)
+                tributary_axis=params.tributary_axis,
+                wall_thickness=params.wall_thickness)
 
     # Auto-generate the framing hierarchy above each slab (plan
     # `joists-roles-materials`, Phase 5). Runs immediately after

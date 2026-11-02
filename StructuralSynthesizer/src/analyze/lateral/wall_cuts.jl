@@ -171,6 +171,10 @@ which is not this case when `u` came from another load vector.
 A miss does not invent a demand. The caller withholds the walls at that cut.
 Without the flag, `model.reactions` must already be filled (`solve!` does this).
 
+A member that crosses the cut carries its own fixed-end, including self-weight,
+at the node on the cut. That share is not load from above. It is removed from
+the reported interface, so the cut equals the load strictly above it.
+
 `geometric_stiffness` is the signed story matrix the displacement was solved
 with. The element stiffness does not contain it, so `K_e u` is larger than
 the applied story shear by the story couple. Those fictitious forces,
@@ -265,6 +269,16 @@ function _element_nodal_force(elem, u::AbstractVector{<:Real}; Qfixed=nothing)
 end
 
 """
+Force at one cut node with that node's own fixed-end removed.
+
+`f` is `-(K u + Q)`. `Q` at this node is load applied on the cut, including
+the member's self-weight there. It is not load from above the cut.
+"""
+function _interface_at_cut_node(f, Q, i0::Int)
+    ntuple(k -> f[i0 + k] + (Q === nothing ? 0.0 : Q[i0 + k]), 6)
+end
+
+"""
 Fixed-end forces of `loads`, in the element's global DOF order.
 
 `nothing` means the caller keeps the fixed-end vector stored on the element.
@@ -335,14 +349,15 @@ function _cut_contributions(shells, u, z::Float64; qmap=nothing)
     out = NamedTuple{(:x, :y, :z, :fx, :fy, :fz, :mx, :my, :mz),
                      NTuple{9, Float64}}[]
     for sh in shells
-        f = _element_nodal_force(sh, u; Qfixed=_case_fixed_end(sh, qmap))
+        Q = _case_fixed_end(sh, qmap)
+        f = _element_nodal_force(sh, u; Qfixed=Q)
         for (k, nd) in enumerate(sh.nodes)
             x, y, zz = _node_xyz(nd)
             abs(zz - z) <= WALL_CUT_ZTOL_M || continue
             i0 = (k - 1) * 6
+            fx, fy, fz, mx, my, mz = _interface_at_cut_node(f, Q, i0)
             push!(out, (x=x, y=y, z=zz,
-                        fx=f[i0 + 1], fy=f[i0 + 2], fz=f[i0 + 3],
-                        mx=f[i0 + 4], my=f[i0 + 5], mz=f[i0 + 6]))
+                        fx=fx, fy=fy, fz=fz, mx=mx, my=my, mz=mz))
         end
     end
     return out
@@ -362,12 +377,13 @@ function _frame_cut_contributions(model, u, z::Float64; qmap=nothing)
         else
             continue
         end
-        f = _element_nodal_force(el, u; Qfixed=_case_fixed_end(el, qmap))
+        Q = _case_fixed_end(el, qmap)
+        f = _element_nodal_force(el, u; Qfixed=Q)
         nd, i0 = lower
         x, y, zz = _node_xyz(nd)
+        fx, fy, fz, mx, my, mz = _interface_at_cut_node(f, Q, i0)
         push!(out, (x=x, y=y, z=zz,
-                    fx=f[i0 + 1], fy=f[i0 + 2], fz=f[i0 + 3],
-                    mx=f[i0 + 4], my=f[i0 + 5], mz=f[i0 + 6]))
+                    fx=fx, fy=fy, fz=fz, mx=mx, my=my, mz=mz))
     end
     return out
 end

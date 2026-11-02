@@ -51,10 +51,10 @@ Verified against StructurePoint spWall (corpus: sp-de-shear-wall-aci19 Step 5).
 """
 function wall_shear_capacity_si(fc::Real, fy::Real, lw::Real, t::Real, ρt::Real, hw::Real; λ::Real=1.0)
     # Convert to ACI customary units (psi, in) for the empirical √f'c formula.
-    fc_psi = fc / 6894.757
-    fy_psi = fy / 6894.757
-    lw_in  = lw / 0.0254
-    t_in   = t / 0.0254
+    fc_psi = fc / Asap.PSI_TO_PA
+    fy_psi = fy / Asap.PSI_TO_PA
+    lw_in  = lw / Asap.IN_TO_M
+    t_in   = t / Asap.IN_TO_M
     Acv_in2 = t_in * lw_in
 
     αc = wall_alpha_c(lw > 0 ? hw / lw : Inf)
@@ -73,7 +73,7 @@ function wall_shear_capacity_si(fc::Real, fy::Real, lw::Real, t::Real, ρt::Real
     Vn_max_lb = 8.0 * λ * sqrt_fc * Acv_in2
     Vn_lb = min(Vn_lb, Vn_max_lb)
 
-    lb_to_N = 4.4482216
+    lb_to_N = Asap.LBF_TO_N
     return (Vn = Vn_lb * lb_to_N,
             ϕVn = WALL_PHI_SHEAR * Vn_lb * lb_to_N,
             Vn_max = Vn_max_lb * lb_to_N,
@@ -150,7 +150,11 @@ function check_wall_inplane_shear(ws::WallSection, material, Vu, hw::Unitful.Len
     cap = wall_shear_capacity_si(fc, fy, lw, t, ws.ρt, hw_m; λ=λ)
     Vu_N = Vu isa Unitful.Quantity ? ustrip(u"N", Vu) : Float64(Vu)
     ratio = Vu_N / max(cap.ϕVn, 1e-9)
-    return CheckResult("in-plane shear", ratio <= 1.0, ratio, Vu_N, cap.ϕVn,
+    # Eq. (11.5.4.3) is evaluated in psi and inches, then converted to newtons.
+    # A demand built from that same value can come back a few ulps high.
+    # One part in 1e9 is that roundoff. It is not a strength credit.
+    passed = Vu_N <= cap.ϕVn * (1 + 1e-9)
+    return CheckResult("in-plane shear", passed, ratio, Vu_N, cap.ϕVn,
                        "ACI 318-19 11.5.4.3")  # (corpus: sp-wall-shear-strength-flowchart; VERIFY)
 end
 
@@ -168,10 +172,15 @@ Minimum distributed web reinforcement for walls governed by in-plane shear
 omitted, the §11.6.2(a) coupling term collapses to the 0.0025 floor, which is
 exact for `hw/lw ≥ 2.5`. For squat walls (`hw/lw < 2.5`) with `ρt > 0.0025` the
 longitudinal minimum is raised accordingly.
-(corpus: sp-de-shear-wall-aci19 Step 2, sp-structural-wall-reinforcement-design)
+
+`ρt_strength`, when given, is the transverse ratio required for in-plane
+shear strength. §11.6.2(a) says ρl need not exceed that ratio. The cap does
+not drop ρl below 0.0025.
+(corpus: aci-318-19, PDF page 173; sp-de-shear-wall-aci19 Step 2)
 """
 function check_wall_min_reinforcement(ws::WallSection;
-                                      hw::Union{Nothing,Real,Unitful.Length}=nothing)
+                                      hw::Union{Nothing,Real,Unitful.Length}=nothing,
+                                      ρt_strength::Union{Nothing,Real}=nothing)
     ρt_min = 0.0025
     ρl_min = if hw === nothing
         0.0025
@@ -179,7 +188,14 @@ function check_wall_min_reinforcement(ws::WallSection;
         hw_m = hw isa Unitful.Length ? ustrip(u"m", hw) : Float64(hw)
         lw_m = ustrip(u"m", ws.lw)
         hwlw = lw_m > 0 ? hw_m / lw_m : Inf
-        max(0.0025, 0.0025 + 0.5 * (2.5 - hwlw) * (ws.ρt - 0.0025))
+        # ACI 318-19 Eq. (11.6.2) (corpus: aci-318-19, PDF page 173).
+        formula = max(0.0025, 0.0025 + 0.5 * (2.5 - hwlw) * (ws.ρt - 0.0025))
+        if ρt_strength === nothing
+            formula
+        else
+            # Need not exceed ρt required for strength by §11.5.4.3.
+            min(formula, max(Float64(ρt_strength), 0.0025))
+        end
     end
     rl = ρl_min / max(ws.ρl, 1e-9)
     rt = ρt_min / max(ws.ρt, 1e-9)

@@ -100,8 +100,8 @@ function initialize_members!(struc::BuildingStructure{T};
             join(others, ", ") * "."))
     end
     # Nothing when :walls is empty. Throws if the group is non-empty and
-    # wall_thickness is nothing — no default thickness. DesignParameters
-    # has no wall-thickness field; the throw is on purpose.
+    # wall_thickness is nothing — no default thickness. `prepare!` forwards
+    # `DesignParameters.wall_thickness`.
     thickness = _require_wall_thickness(T, wall_edges, wall_thickness)
     
     # Build reverse lookup: edge_idx → chain_id (for shattered edges)

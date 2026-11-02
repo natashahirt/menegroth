@@ -15,9 +15,9 @@ the building. It is not the Figure 27.3-1 roof shape: that analysis stays on
 a flat roof, and a sloped roof is refused there.
 
 `SD1` and `TL` are required by ELF method `:sds`. `Sa` is required by `:sa`.
-`between` is required when `0.5 < T < 2.5`. `Ω0`, when given, is the
-overstrength factor the ELF stability check uses. `extra_directions` defaults
-to no directions beyond the two principal axes.
+`between` is required when `0.5 < T < 2.5`. `R`, `Cd`, and `Ω0` come from the
+Table 12.2-1 row on `DesignParameters.lateral`, not from these inputs.
+`extra_directions` defaults to no directions beyond the two principal axes.
 
 `qi` is not a field. The wind analysis uses `qh` for the internal pressure.
 `drift_system` is the Table 12.12-1 symbol (`:other`, `:masonry_other`), not
@@ -42,10 +42,8 @@ Base.@kwdef struct OrdinaryWallInputs
     method::Symbol
     SDS::Float64
     S1::Float64
-    R::Float64
     Ie::Float64
     T::Float64
-    Cd::Float64
     β::Float64
     rho::Float64
     sdc::Symbol
@@ -65,7 +63,6 @@ Base.@kwdef struct OrdinaryWallInputs
     SD1::Union{Float64, Nothing} = nothing
     TL::Union{Float64, Nothing} = nothing
     Sa::Union{Float64, Nothing} = nothing
-    Ω0::Union{Float64, Nothing} = nothing
     between::Union{Symbol, Nothing} = nothing
     extra_directions::Vector{NTuple{2, Float64}} = NTuple{2, Float64}[]
 end

@@ -13,8 +13,10 @@
 #
 # Not implemented, and not to be inferred here:
 #   §12.7.2 seismic weight, §12.8.1.3 (the permission to use SDS = 1.0),
-#   §12.8.2 approximate period, the redundancy factor ρ itself, Table 12.2-1
-#   values of R or Cd, diaphragm classification, and wind.
+#   §12.8.2 approximate period, the redundancy factor ρ itself, diaphragm
+#   classification, and wind. Table 12.2-1 values for the ordinary concrete
+#   rows are `ordinary_concrete_seismic_system`, not a default of these
+#   functions.
 # =============================================================================
 
 """

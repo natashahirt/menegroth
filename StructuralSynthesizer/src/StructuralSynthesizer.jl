@@ -15,7 +15,7 @@ import Meshes
 import Graphs
 import Asap
 import LinearAlgebra: norm, normalize, diag, eigmin, Symmetric
-import SparseArrays: sparse
+import SparseArrays: sparse, SparseMatrixCSC
 using Unitful
 
 function __init__()
@@ -257,7 +257,8 @@ export OrdinaryWallInputs, OrdinaryWallResult, design_ordinary_walls!
 export refuse_joined_wall_design
 export require_seismic_wall_demand_provisions
 export LateralDesign, LateralSystem, DemandAssignment
-export WallsSeismicSystem, OutriggerSystem, BuildingUnit, IsolatedWallShare
+export WallsSeismicSystem, InteractiveShearWallFrameSystem
+export OutriggerSystem, BuildingUnit, IsolatedWallShare
 export prepare_lateral_model!, seismic_members, system_checks, assign_lateral_demands
 export SeismicStoryDriftCheck, WindStoryDriftReport, FactoredLateralCase
 export initialize!, size!

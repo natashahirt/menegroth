@@ -23,12 +23,13 @@ const SS = StructuralSynthesizer
 function probe(label, struc; wind_index::Int=4, soften_y::Bool=false)
     println("\n================ $label ================")
     params = DesignParameters(
-        lateral=LateralDesign(; system=WallsSeismicSystem(), assignment=BuildingUnit()),
+        lateral=LateralDesign(; system=WallsSeismicSystem(:A3), assignment=BuildingUnit()),
         wall_inputs=_stage_inputs(), skip_visualization=true)
     to_asap!(struc; params=params, diaphragms=:rigid)
-    _stage_crack_wall_shells!(struc)
     soften_y && _stage_soften_y_piers!(struc, 0.001)
     inputs = params.wall_inputs
+    sys = SS.StructuralSizer.ordinary_concrete_seismic_system(
+        params.lateral.system.row, inputs.sdc)
     SS.prepare_lateral_model!(struc, params.lateral.system)
     model = struc.asap_model
     links = struc.asap_rigid_links
@@ -38,8 +39,8 @@ function probe(label, struc; wind_index::Int=4, soften_y::Bool=false)
         qh=inputs.qh, Kd=inputs.Kd, G=inputs.G, GCpi=inputs.GCpi,
         extra_directions=inputs.extra_directions)
     elf = SS.elf_story_analysis(struc; method=inputs.method, SDS=inputs.SDS, S1=inputs.S1,
-        R=inputs.R, Ie=inputs.Ie, T=inputs.T, Cd=inputs.Cd, β=inputs.β, SD1=inputs.SD1,
-        TL=inputs.TL, Sa=inputs.Sa, Ω0=inputs.Ω0, between=inputs.between)
+        R=sys.R, Ie=inputs.Ie, T=inputs.T, Cd=sys.Cd, β=inputs.β, SD1=inputs.SD1,
+        TL=inputs.TL, Sa=inputs.Sa, Ω0=sys.Ω0, between=inputs.between)
     second = SS._build_story_second_order(struc, basic, wind, elf)
 
     key = SS.GravityStiffnessKey(1.2, 0.0, 1.6)

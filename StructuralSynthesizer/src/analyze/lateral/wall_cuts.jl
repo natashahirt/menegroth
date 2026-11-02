@@ -187,17 +187,20 @@ function check_story_cut_equilibrium(model, u::AbstractVector{<:Real}, mesh::Wal
                                     rtol::Real=1e-6, atol_force::Real=1.0,
                                     atol_moment::Real=1.0,
                                     fixed_end_from_loads::Bool=false,
-                                    geometric_stiffness=nothing)
+                                    geometric_stiffness=nothing,
+                                    include_walls::Bool=true)
     z = Float64(z_m)
     qmap = fixed_end_from_loads ? _fixed_end_by_element(loads) : nothing
     reactions = fixed_end_from_loads ? _case_reactions(model, u, qmap) : model.reactions
     contrib = NamedTuple{(:x, :y, :z, :fx, :fy, :fz, :mx, :my, :mz),
                          NTuple{9, Float64}}[]
-    for pier in mesh.piers
-        isempty(pier.shells) && continue
-        _pier_bottom(pier) <= z + WALL_CUT_ZTOL_M &&
-            _pier_bottom(pier) >= z - WALL_CUT_ZTOL_M || continue
-        append!(contrib, _cut_contributions(pier.shells, u, z; qmap=qmap))
+    if include_walls
+        for pier in mesh.piers
+            isempty(pier.shells) && continue
+            _pier_bottom(pier) <= z + WALL_CUT_ZTOL_M &&
+                _pier_bottom(pier) >= z - WALL_CUT_ZTOL_M || continue
+            append!(contrib, _cut_contributions(pier.shells, u, z; qmap=qmap))
+        end
     end
     append!(contrib, _frame_cut_contributions(model, u, z; qmap=qmap))
     isempty(contrib) && throw(ArgumentError(

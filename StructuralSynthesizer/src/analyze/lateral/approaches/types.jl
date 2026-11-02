@@ -19,10 +19,51 @@ abstract type LateralSystem end
 abstract type DemandAssignment end
 
 """
-Walls are the seismic force-resisting system. Column-to-column girders are
-modeled without moment connections so the frame is not a moment frame.
+    WallsSeismicSystem(row) -> WallsSeismicSystem
+
+Walls are the seismic force-resisting system. `row` is Table 12.2-1 `:A3`
+(bearing wall) or `:B6` (building frame). There is no default: the two rows
+do not carry the same `R` and `Cd`.
+
+A row that includes a moment frame is not this type. `:F` is
+[`InteractiveShearWallFrameSystem`](@ref). `:C7` and `:E8` are not ordinary-wall
+systems here.
+
+Releases stay on the material defaults. Concrete framing remains monolithic in
+the analysis model. This type does not treat those beams as the seismic system.
+
+# Citation
+ASCE 7-22 Table 12.2-1 (corpus: asce-7-22, PDF page 173).
 """
-struct WallsSeismicSystem <: LateralSystem end
+struct WallsSeismicSystem <: LateralSystem
+    row::Symbol
+    function WallsSeismicSystem(row::Symbol)
+        row in (:A3, :B6) || throw(ArgumentError(
+            "WallsSeismicSystem: :$row is not a walls-only row of Table 12.2-1. " *
+            "Use :A3 (bearing wall, ordinary reinforced concrete shear walls) or " *
+            ":B6 (building frame, ordinary reinforced concrete shear walls). " *
+            ":F is InteractiveShearWallFrameSystem. ASCE 7-22 Table 12.2-1 " *
+            "(corpus: asce-7-22, PDF page 173)."))
+        return new(row)
+    end
+end
+
+WallsSeismicSystem() = throw(ArgumentError(
+    "WallsSeismicSystem needs a Table 12.2-1 row, :A3 or :B6. There is no default. " *
+    "ASCE 7-22 Table 12.2-1 (corpus: asce-7-22, PDF page 173)."))
+
+"""
+Shear wall–frame interactive system, Table 12.2-1 row F.
+
+Ordinary reinforced concrete moment frames and ordinary reinforced concrete
+shear walls. The row is fixed: `R`, `Ω0`, and `Cd` come from that one row.
+§12.2.5.8 is checked by the ordinary-wall stage, not by this type.
+
+# Citation
+ASCE 7-22 Table 12.2-1 row F (corpus: asce-7-22, PDF page 175) and §12.2.5.8
+(PDF page 179).
+"""
+struct InteractiveShearWallFrameSystem <: LateralSystem end
 
 """Core, outrigger or belt truss, and perimeter columns. Not implemented."""
 struct OutriggerSystem <: LateralSystem end

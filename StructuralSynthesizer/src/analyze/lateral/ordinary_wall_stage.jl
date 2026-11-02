@@ -12,6 +12,12 @@ struct OrdinaryWallResult
     max_story_stability::Float64
     "§12.8.7 factor 1/(1−θ) for each entry of `drift`, in the same order."
     pdelta_multipliers::Vector{Float64}
+    "Wall share of the unfactored dead vertical force, one entry per story."
+    gravity_shares::Vector{WallGravityShare}
+    "Empty unless the lateral system is row F."
+    interactive_shear::Vector{InteractiveStoryShearCheck}
+    "Empty unless the lateral system is row F."
+    frame_members::Vector{FrameMemberCheck}
 end
 
 """
@@ -24,11 +30,20 @@ gravity-only building is not given wind or seismic cases.
 
 When lateral design was requested:
 
-- `wall_inputs` is required. Pressures, `R`, `ρ`, and the seismic statements
-  are not assumed.
-- The system must be [`WallsSeismicSystem`](@ref) and the assignment
+- `wall_inputs` is required. Pressures, `ρ`, and the seismic statements are
+  not assumed. `R`, `Cd`, and `Ω0` come from the Table 12.2-1 row on the
+  lateral system. A Seismic Design Category that row marks NP is refused.
+- The system is [`WallsSeismicSystem`](@ref) (`:A3` or `:B6`) or
+  [`InteractiveShearWallFrameSystem`](@ref) (row F). The assignment is
   [`BuildingUnit`](@ref). [`OutriggerSystem`](@ref) and
   [`IsolatedWallShare`](@ref) are refused rather than given a pier fallback.
+- Row B.6 is refused when the walls carry more than 20% of a story's
+  unfactored dead vertical force. The 20% is a project limit for commentary
+  C12.2.1. The share is reported for every row.
+- Row F checks §12.2.5.8. The walls' Σ φVn must be at least 75% of the design
+  story shear, and ρt is raised on the grid when it is short. The frames are
+  solved without the wall shells at 25% of the story shear. A frame member
+  with no reinforced-concrete section is recorded as failing.
 - A joined assembly is refused. The special-wall flange width is not applied.
 - Story forces need rigid-diaphragm masters (`diaphragm_mode = :rigid`).
 - Demands are the unified frame-shell solution: unfactored gravity, Chapter 27
@@ -77,10 +92,11 @@ function design_ordinary_walls!(struc::BuildingStructure, params::DesignParamete
         "missing. Wind pressures, ELF inputs, and the seismic-provision " *
         "statements are not assumed."))
     system = params.lateral.system
-    system isa WallsSeismicSystem || throw(ArgumentError(
-        "ordinary wall stage: the lateral system is $(typeof(system)). " *
-        "This stage checks ordinary concrete walls. Another system is not " *
-        "given a wall-pier fallback."))
+    (system isa WallsSeismicSystem || system isa InteractiveShearWallFrameSystem) ||
+        throw(ArgumentError(
+            "ordinary wall stage: the lateral system is $(typeof(system)). " *
+            "This stage checks ordinary concrete walls. Another system is not " *
+            "given a wall-pier fallback."))
     params.lateral.assignment isa BuildingUnit || throw(ArgumentError(
         "ordinary wall stage: the demand assignment is " *
         "$(typeof(params.lateral.assignment)). Only BuildingUnit, the pier " *
@@ -98,6 +114,8 @@ function design_ordinary_walls!(struc::BuildingStructure, params::DesignParamete
             "are not also multiplied by 1/(1−θ) (ASCE 7-22 §12.8.7, corpus: " *
             "asce-7-22, PDF page 188). Set the flag to false."))
     end
+    # R, Cd, and Ω0 are the row's. A category the row marks NP stops here.
+    seismic_system = ordinary_concrete_seismic_system(table_12_2_1_row(system), inputs.sdc)
 
     prepare_lateral_model!(struc, system)
     for assembly in struc.wall_mesh.assemblies
@@ -130,15 +148,15 @@ function design_ordinary_walls!(struc::BuildingStructure, params::DesignParamete
         method=inputs.method,
         SDS=inputs.SDS,
         S1=inputs.S1,
-        R=inputs.R,
+        R=seismic_system.R,
         Ie=inputs.Ie,
         T=inputs.T,
-        Cd=inputs.Cd,
+        Cd=seismic_system.Cd,
         β=inputs.β,
         SD1=inputs.SD1,
         TL=inputs.TL,
         Sa=inputs.Sa,
-        Ω0=inputs.Ω0,
+        Ω0=seismic_system.Ω0,
         between=inputs.between)
     θmax = _max_drift_theta(elf)
     # Eh is multiplied by ρ. Member forces come from the story stiffness, so
@@ -165,13 +183,17 @@ function design_ordinary_walls!(struc::BuildingStructure, params::DesignParamete
         system=inputs.drift_system)
 
     second = _build_story_second_order(struc, basic, wind, elf)
-    checks = Dict{Int, Vector{WallCheckRecord}}()
+    shares = _wall_dead_load_shares(struc, basic, elf)
+    _refuse_building_frame_gravity!(seismic_system.row, shares)
+    prepared = Tuple{Int, Any, Vector{CombinedWallAction}, Any, Vector}[]
+    grown_by_wall = Dict{Int, Vector{CombinedWallAction}}()
+    ρt_by_wall = Dict{Int, Union{Nothing, Float64}}()
     n_raised = 0
     max_ρl = 0.0
     max_ρt = 0.0
     for pier in struc.wall_mesh.piers
         wall_index = pier.wall_index
-        haskey(checks, wall_index) && throw(ArgumentError(
+        haskey(grown_by_wall, wall_index) && throw(ArgumentError(
             "ordinary wall stage: wall $wall_index has more than one pier."))
         wall = struc.walls[wall_index]
         assembly = _assembly_of(struc.wall_mesh, wall_index)
@@ -187,6 +209,21 @@ function design_ordinary_walls!(struc::BuildingStructure, params::DesignParamete
         ρt_strength = select_ordinary_wall_reinforcement!(
             wall, grown, inputs.material; hw=_stacked_wall_height(wall))
         (wall.ρl > ρl0 + 1e-12 || wall.ρt > ρt0 + 1e-12) && (n_raised += 1)
+        grown_by_wall[wall_index] = grown
+        ρt_by_wall[wall_index] = ρt_strength
+        push!(prepared, (wall_index, assembly, grown, ρt_strength, batches))
+    end
+    interactive = InteractiveStoryShearCheck[]
+    frame_members = FrameMemberCheck[]
+    if system isa InteractiveShearWallFrameSystem
+        interactive = _enforce_interactive_wall_shear!(
+            struc, elf, inputs.material, grown_by_wall, ρt_by_wall)
+        frame_members = _check_interactive_frames!(
+            struc, basic, elf, second, inputs, seismic_system)
+    end
+    checks = Dict{Int, Vector{WallCheckRecord}}()
+    for (wall_index, assembly, _, ρt_strength, batches) in prepared
+        wall = struc.walls[wall_index]
         max_ρl = max(max_ρl, wall.ρl)
         max_ρt = max(max_ρt, wall.ρt)
         records = WallCheckRecord[]
@@ -197,9 +234,12 @@ function design_ordinary_walls!(struc::BuildingStructure, params::DesignParamete
         end
         checks[wall_index] = records
     end
+    _record_story_shear!(checks, interactive, struc)
+    _record_frame_members!(checks, struc, frame_members)
     @info "Ordinary wall reinforcement" n_piers=length(checks) n_raised max_ρl max_ρt
 
-    result = OrdinaryWallResult(checks, drift, θmax, pdelta_multipliers)
+    result = OrdinaryWallResult(checks, drift, θmax, pdelta_multipliers,
+                                shares, interactive, frame_members)
     struc.ordinary_wall_result = result
     StructuralSizer.emit!(tc, :pipeline, "design_ordinary_walls!", "stage_ordinary_walls", :exit;
                           n_walls=length(checks), n_drift=length(drift))
@@ -307,6 +347,8 @@ struct StorySecondOrderSet
     u::Vector{Vector{Float64}}
     nwind::Int
     nqe::Int
+    "Story geometric stiffness this displacement was solved on."
+    Kg::SparseMatrixCSC{Float64, Int}
 end
 
 """
@@ -386,7 +428,7 @@ function _build_story_second_order(struc, basic, wind, elf)
         _require_gravity_cut_equilibrium(struc, ug, loads,
             "factored gravity D=$(key.D) L=$(key.L) $(roof)=$(key.roof)";
             geometric_stiffness=Kg)
-        sets[key] = StorySecondOrderSet(key, u2, length(wind_cases), length(qe_cases))
+        sets[key] = StorySecondOrderSet(key, u2, length(wind_cases), length(qe_cases), Kg)
     end
     return sets
 end

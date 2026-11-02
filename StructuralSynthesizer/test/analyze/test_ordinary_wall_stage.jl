@@ -1,8 +1,9 @@
 # Ordinary-wall stage: one isolated pier from the unified model.
 #
 # The ELF and wind numbers below are fixture wiring so the stage can run.
-# They are not a Table 12.2-1 lookup for an ordinary bearing wall. The stage
-# passes them through and does not choose them.
+# The lateral system is Table 12.2-1 row A.3, so R, Cd, and Ω0 are that row's.
+# Cd is 4, the same as row F, so the θ band of a fixture does not move with
+# the row. Row F is a separate test.
 #
 # When the inputs state cracked stiffness, to_asap! multiplies wall-shell E
 # by 0.35. The stage itself does not scale E. Thickness and length stay
@@ -32,7 +33,7 @@ using StructuralSizer
 
 const _STAGE_VAULT = VaultOptions(rise=1.0u"m", thickness=0.05u"m")
 
-function _stage_inputs(; cracked::Bool=true, pdelta::Bool=false)
+function _stage_inputs(; cracked::Bool=true, pdelta::Bool=false, sdc::Symbol=:B)
     return OrdinaryWallInputs(;
         directions=((1.0, 0.0), (0.0, 1.0)),
         qz=[1.0, 1.5, 2.0],
@@ -44,15 +45,13 @@ function _stage_inputs(; cracked::Bool=true, pdelta::Bool=false)
         method=:sds,
         SDS=0.05,
         S1=0.02,
-        R=8.0,
         Ie=1.0,
         T=0.4,
-        Cd=4.0,
         β=1.0,
         SD1=0.02,
         TL=8.0,
         rho=1.0,
-        sdc=:B,
+        sdc=sdc,
         risk_category=:II,
         drift_system=:other,
         boundary=:pinned,
@@ -262,7 +261,7 @@ end
 
     inputs = _stage_inputs()
     lateral = DesignParameters(
-        lateral=LateralDesign(; system=WallsSeismicSystem(), assignment=BuildingUnit()),
+        lateral=LateralDesign(; system=WallsSeismicSystem(:A3), assignment=BuildingUnit()),
         wall_inputs=inputs,
         skip_visualization=true,
     )
@@ -276,7 +275,7 @@ end
     @test :ordinary_wall_result in struc_writes(wall_node)
 
     missing = DesignParameters(
-        lateral=LateralDesign(; system=WallsSeismicSystem(), assignment=BuildingUnit()))
+        lateral=LateralDesign(; system=WallsSeismicSystem(:A3), assignment=BuildingUnit()))
     err = try
         design_ordinary_walls!(bare, missing)
         nothing
@@ -285,6 +284,23 @@ end
     end
     @test err isa ArgumentError
     @test occursin("wall_inputs", sprint(showerror, err))
+
+    # Row F is NP in Category C. The refusal is the table, before any solve.
+    refused = DesignParameters(
+        lateral=LateralDesign(; system=InteractiveShearWallFrameSystem(),
+                               assignment=BuildingUnit()),
+        wall_inputs=_stage_inputs(; sdc=:C),
+        skip_visualization=true,
+    )
+    err = try
+        design_ordinary_walls!(bare, refused)
+        nothing
+    catch e
+        e
+    end
+    @test err isa ArgumentError
+    @test occursin("NP", sprint(showerror, err))
+    @test occursin("F", sprint(showerror, err))
 
     err = try
         design_ordinary_walls!(bare, lateral)
@@ -308,7 +324,7 @@ end
     @test occursin("OutriggerSystem", sprint(showerror, err))
 
     share = DesignParameters(
-        lateral=LateralDesign(; system=WallsSeismicSystem(),
+        lateral=LateralDesign(; system=WallsSeismicSystem(:A3),
                                assignment=IsolatedWallShare(0.5)),
         wall_inputs=inputs)
     err = try
@@ -321,7 +337,7 @@ end
     @test occursin("BuildingUnit", sprint(showerror, err))
 
     claimed = DesignParameters(
-        lateral=LateralDesign(; system=WallsSeismicSystem(), assignment=BuildingUnit()),
+        lateral=LateralDesign(; system=WallsSeismicSystem(:A3), assignment=BuildingUnit()),
         wall_inputs=_stage_inputs(; pdelta=true))
     err = try
         design_ordinary_walls!(bare, claimed)
@@ -423,6 +439,10 @@ end
     @test all(c -> c isa SeismicStoryDriftCheck, result.drift)
     @test length(unique(c.story for c in result.drift)) == 3
     @test result.max_story_stability <= 0.10
+    @test length(result.gravity_shares) == 3
+    @test all(s -> isfinite(s.share) && s.total_N > 0, result.gravity_shares)
+    @test isempty(result.interactive_shear)
+    @test isempty(result.frame_members)
     @test length(result.pdelta_multipliers) == length(result.drift)
     @test all(m -> m ≈ 1.0, result.pdelta_multipliers)
     @test all(i -> struc.walls[i].thickness == sections[i][1], eachindex(struc.walls))
@@ -459,7 +479,7 @@ end
     @test sort([w.story for w in struc.walls]) == [0, 0, 0, 1, 1, 1, 2, 2, 2]
     @test all(a -> !a.joined, wall_assemblies(struc.walls))
     lateral = DesignParameters(
-        lateral=LateralDesign(; system=WallsSeismicSystem(), assignment=BuildingUnit()),
+        lateral=LateralDesign(; system=WallsSeismicSystem(:A3), assignment=BuildingUnit()),
         wall_inputs=_stage_inputs(),
         skip_visualization=true,
     )
@@ -490,7 +510,7 @@ end
     struc = _stage_office_unstable()
     @test length(struc.walls) == 3
     lateral = DesignParameters(
-        lateral=LateralDesign(; system=WallsSeismicSystem(), assignment=BuildingUnit()),
+        lateral=LateralDesign(; system=WallsSeismicSystem(:A3), assignment=BuildingUnit()),
         wall_inputs=_stage_inputs(),
         skip_visualization=true,
     )
@@ -594,7 +614,7 @@ end
         diaphragm_mode=:rigid,
         max_iterations=3,
         skip_visualization=true,
-        lateral=LateralDesign(; system=WallsSeismicSystem(), assignment=BuildingUnit()),
+        lateral=LateralDesign(; system=WallsSeismicSystem(:A3), assignment=BuildingUnit()),
         wall_inputs=_stage_inputs(),
     )
     design = design_building(struc, lateral)
@@ -731,4 +751,46 @@ end
     min_l = only(r for r in squat_records if r.check == "min longitudinal reinf ρl")
     @test min_l.passed
     @test isapprox(min_l.demand, 0.003; atol=1e-6)
+end
+
+@testset "Building frame gravity share" begin
+    ok = [StructuralSynthesizer.WallGravityShare(1, 10.0, 100.0, 0.10)]
+    @test StructuralSynthesizer._refuse_building_frame_gravity!(:A3, ok) === ok
+    @test StructuralSynthesizer._refuse_building_frame_gravity!(:B6, ok) === ok
+    at = [StructuralSynthesizer.WallGravityShare(1, 20.0, 100.0, 0.20)]
+    @test StructuralSynthesizer._refuse_building_frame_gravity!(:B6, at) === at
+    over = [StructuralSynthesizer.WallGravityShare(2, 30.0, 100.0, 0.30)]
+    err = try
+        StructuralSynthesizer._refuse_building_frame_gravity!(:B6, over)
+        nothing
+    catch e
+        e
+    end
+    @test err isa ArgumentError
+    @test occursin("20%", sprint(showerror, err))
+    @test occursin("C12.2.1", sprint(showerror, err))
+end
+
+@testset "Interactive system, row F" begin
+    struc = _stage_office()
+    params = DesignParameters(
+        lateral=LateralDesign(; system=InteractiveShearWallFrameSystem(),
+                               assignment=BuildingUnit()),
+        wall_inputs=_stage_inputs(),
+        skip_visualization=true)
+    to_asap!(struc; params=params, diaphragms=:rigid)
+    # The unsized vault frame, without the wall shells, drifts far enough that
+    # story-1 θ/(1+θ) exceeds θmax. §12.8.7 requires a redesign, so the stage
+    # throws instead of reporting member results.
+    err = try
+        design_ordinary_walls!(struc, params)
+        nothing
+    catch e
+        e
+    end
+    @test err isa ArgumentError
+    msg = sprint(showerror, err)
+    @test occursin("redesigned", msg)
+    @test occursin("12.2.5.8", msg)
+    @test occursin("12.8.7", msg)
 end

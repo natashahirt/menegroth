@@ -188,6 +188,17 @@ function gross_centroid_from_top(s::RCTBeamSection)
     return (Af * s.hf / 2 + Aw * (s.hf + (s.h - s.hf) / 2)) / Ag
 end
 
+"""Distance from the top of the flange to the gross T centroid."""
+centroid_from_top(s::RCTBeamSection) = gross_centroid_from_top(s)
+
+"""
+Distance from the slab soffit to the stem centroid.
+
+The flange is the slab. The frame piece is the stem, and its centroid is
+halfway down the stem.
+"""
+soffit_to_centroid(s::RCTBeamSection) = (s.h - s.hf) / 2
+
 """
     gross_moment_of_inertia(s::RCTBeamSection)
 

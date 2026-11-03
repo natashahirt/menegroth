@@ -145,9 +145,11 @@ section_width(s::PixelFrameSection) = (s.section.xmax - s.section.xmin) * u"mm"
 """
 Centroid y-coordinate distance from top fiber [mm].
 """
-function _centroid_from_top(s::PixelFrameSection)
+function centroid_from_top(s::PixelFrameSection)
     (s.section.ymax - s.section.centroid[2]) * u"mm"
 end
+
+_centroid_from_top(s::PixelFrameSection) = centroid_from_top(s)
 
 """
 Tendon depth from top fiber [mm].

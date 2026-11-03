@@ -47,3 +47,24 @@ bounding_box(s::AbstractSection) = (width = section_width(s), depth = section_de
 
 # T-beam: bounding box uses full flange width, not web width
 bounding_box(s::RCTBeamSection) = (width = s.bf, depth = s.h)
+
+"""
+    centroid_from_top(s) -> Length
+
+Distance from the top fibre of the stored section to its centroid.
+
+A section that is symmetric about mid-depth uses half [`section_depth`](@ref).
+A T-beam and a pixel frame override this with the centroid of their own shape.
+"""
+centroid_from_top(s::AbstractSection) = section_depth(s) / 2
+
+"""
+    soffit_to_centroid(s) -> Length
+
+Distance from the slab soffit down to the centroid of the frame piece.
+
+The frame piece is the concrete below the slab. For a stored section that is
+already that piece, this is [`centroid_from_top`](@ref). A T-beam stores the
+flange as well, and the flange is the slab, so the override is half the stem.
+"""
+soffit_to_centroid(s::AbstractSection) = centroid_from_top(s)

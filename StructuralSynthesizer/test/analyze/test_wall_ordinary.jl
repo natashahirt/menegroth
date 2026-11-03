@@ -81,7 +81,9 @@ end
     @test _named(stacked, "in-plane shear").capacity <
           _named(story_only, "in-plane shear").capacity
 
-    @test_throws ArgumentError _check(_pier(; along=:skew), [modest])
+    skewed = _check(_pier(; along=:skew), [modest])
+    @test all(r.direction === :skew for r in skewed)
+    @test all(r.passed for r in skewed)
     @test_throws ArgumentError _check(wall, CombinedWallAction[])
     @test_throws ArgumentError check_ordinary_wall(
         wall, [modest]; wall_index=1, material=NWC_4000, case=:D, boundary=:restrained)

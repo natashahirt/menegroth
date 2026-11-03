@@ -51,6 +51,7 @@ function prepare!(struc::BuildingStructure, params::DesignParameters;
                 # ACI 318-11 §10.10.4.1 — scoped-override cells inherit the global column cracking factor
                 col_I_factor = params.column_I_factor,
                 tributary_axis=params.tributary_axis,
+                plan_axis=isnothing(params.lateral) ? (1.0, 0.0) : params.lateral.plan_axis,
                 wall_thickness=params.wall_thickness)
 
     # Auto-generate the framing hierarchy above each slab (plan
@@ -91,7 +92,7 @@ function prepare!(struc::BuildingStructure, params::DesignParameters;
     # Releases stay on the material defaults. A gravity-only building skips this.
     struc.ordinary_wall_result = nothing
     if params.lateral !== nothing
-        prepare_lateral_model!(struc, params.lateral.system)
+        prepare_lateral_model!(struc, params.lateral)
     end
 
     to_asap!(struc; params=params)

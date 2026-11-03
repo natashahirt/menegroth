@@ -15,6 +15,11 @@ outside the story's floor faces throws `ArgumentError`. A `Wall.story`
 that is not a skeleton story key also throws.
 
 Called at the end of [`initialize!`](@ref), after [`initialize_members!`](@ref).
+
+A wall center must lie in one of the story's floor faces, or within a
+boundary tolerance of a face edge. The axis-aligned plate from
+[`story_plate_geometry`](@ref) is the drift plate. A center in that box but
+outside every face, such as an L-notch, fails this check.
 """
 function assert_story_walls_enclosed!(struc::BuildingStructure)
     skel = struc.skeleton
@@ -29,7 +34,7 @@ function assert_story_walls_enclosed!(struc::BuildingStructure)
     for (story_idx, story) in skel.stories
         walls = get(walls_by_story, story_idx, nothing)
         (walls === nothing || isempty(walls)) && continue
-        story_plate_geometry(skel, story; walls=walls)
+        assert_walls_on_floor!(skel, story, walls)
     end
     return nothing
 end

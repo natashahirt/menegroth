@@ -24,8 +24,8 @@ end
 """
 One story and one direction of the §12.2.5.8 wall check.
 
-`demand_N` is 75% of the design story shear. `capacity_N` is Σ φVn of the
-walls in that direction. Both are newtons.
+`demand_N` is 75% of the design story shear. `capacity_N` is Σ φVn·|cos α|
+of the walls, with α between the wall and that plan axis. Both are newtons.
 """
 struct InteractiveStoryShearCheck
     story::Int
@@ -175,11 +175,19 @@ end
 """
     _enforce_interactive_wall_shear!(...) -> Vector{InteractiveStoryShearCheck}
 
-For each story and each principal direction, Σ φVn must be at least 75% of
+For each story and each plan axis, Σ φVn·|cos α| must be at least 75% of
 the design story shear. Design story shear is the strength-level ELF Vx times
 that story's `1/(1−θ)` factor. Where the sum is short, ρt walks up the grid
-on the wall with the smallest ratio. A wall that has reached the shear cap
-is left there, and the check fails.
+on the contributing wall with the smallest ratio. A wall that has reached the
+shear cap is left there, and the check fails.
+
+A wall along the axis has `|cos α| = 1`. A wall across it contributes nothing
+and is not raised for that axis.
+
+# Engineering judgment
+§12.2.5.8 does not say how a wall at an angle to the axis counts. User
+decision 2026-11-03: its in-plane φVn counts by `|cos α|`, the share of that
+strength along the axis, on each axis separately.
 
 # Citation
 ASCE 7-22 §12.2.5.8 (corpus: asce-7-22, PDF page 179): the shear strength of
@@ -187,23 +195,30 @@ the shear walls shall be at least 75% of the design story shear at each story.
 φVn is ACI 318-19 §11.5.4.3 (corpus: aci-318-19, PDF page 172). The `1/(1−θ)`
 factor is ASCE 7-22 §12.8.7 (corpus: asce-7-22, PDF page 188).
 """
-function _enforce_interactive_wall_shear!(struc, elf, material, grown_by_wall, ρt_strength)
-    groups = Dict{Tuple{Int, Symbol}, Vector{Int}}()
+function _enforce_interactive_wall_shear!(struc, elf, material, grown_by_wall, ρt_strength,
+                                        directions::AbstractVector{Symbol})
+    axis = elf.plan_axis
+    by_level = Dict{Int, Vector{Int}}()
     for pier in struc.wall_mesh.piers
         wall = struc.walls[pier.wall_index]
-        level = _elf_level_index(struc, elf, wall)
-        dir = _pier_principal_direction(wall)
-        push!(get!(groups, (level, dir), Int[]), pier.wall_index)
+        push!(get!(by_level, _elf_level_index(struc, elf, wall), Int[]), pier.wall_index)
     end
     checks = InteractiveStoryShearCheck[]
-    for level in eachindex(elf.levels), dir in (:X, :Y)
-        idxs = get(groups, (level, dir), Int[])
+    wall_dirs = [_wall_direction(d) for d in directions]
+    for level in eachindex(elf.levels), dir in wall_dirs
+        cosine = Dict{Int, Float64}()
+        for i in get(by_level, level, Int[])
+            c = _pier_axis_cosine(struc.walls[i], axis, dir)
+            c > 1e-8 && (cosine[i] = c)
+        end
+        idxs = collect(keys(cosine))
         V = _design_story_shear_N(elf, dir, level)
         # ASCE 7-22 §12.2.5.8 (corpus: asce-7-22, PDF page 179).
         target = _INTERACTIVE_WALL_SHEAR_FRACTION * V
         stalled = Set{Int}()
         function capacity()
-            return sum(_wall_phi_vn(struc.walls[i], material) for i in idxs; init=0.0)
+            return sum(cosine[i] * _wall_phi_vn(struc.walls[i], material) for i in idxs;
+                       init=0.0)
         end
         cap = capacity()
         while cap + 1.0 < target
@@ -234,12 +249,23 @@ function _enforce_interactive_wall_shear!(struc, elf, material, grown_by_wall, �
     return checks
 end
 
-"""Put a failing story-shear check on one wall so the design summary sees it."""
-function _record_story_shear!(checks, shear, struc)
+"""
+Put a failing story-shear check on one wall so the design summary sees it.
+
+The wall is the one on that story most nearly along the axis.
+"""
+function _record_story_shear!(checks, shear, struc, plan_axis::NTuple{2, Float64}=(1.0, 0.0))
     for s in shear
         s.passed && continue
-        idx = findfirst(w -> w.story == s.story &&
-            _pier_principal_direction(w) === s.direction, struc.walls)
+        idx = nothing
+        best = 1e-8
+        for (i, w) in enumerate(struc.walls)
+            w.story == s.story || continue
+            c = _pier_axis_cosine(w, plan_axis, s.direction)
+            c > best || continue
+            best = c
+            idx = i
+        end
         idx === nothing && (idx = first(eachindex(struc.walls)))
         ratio = s.capacity_N > 0 ? s.demand_N / s.capacity_N : Inf
         push!(checks[idx], WallCheckRecord(
@@ -279,13 +305,14 @@ function _missing_frame_sections(struc)
     return out
 end
 
-function _record_frame_members!(checks, struc, members::Vector{FrameMemberCheck})
+function _record_frame_members!(checks, struc, members::Vector{FrameMemberCheck},
+                                plan_axis::NTuple{2, Float64}=(1.0, 0.0))
     isempty(members) && return checks
     any(!c.passed, members) || return checks
     idx = first(eachindex(struc.walls))
     wall = struc.walls[idx]
     push!(checks[idx], WallCheckRecord(
-        idx, wall.story, _pier_principal_direction(wall), :frame_quarter,
+        idx, wall.story, _pier_axis_direction(wall, plan_axis), :frame_quarter,
         :strength_1_2D_1_0E, :only, "interactive frame strength", false, 1.0,
         0.0, 0.0, "ASCE 7-22 12.2.5.8"))
     return checks
@@ -307,16 +334,29 @@ function _member_frame_elements(struc, member)
     return els
 end
 
-"""Strength ELF cases scaled to 25% of the story forces, accidental torsion included."""
-function _quarter_story_cases(elf)
-    out = Tuple{Symbol, Symbol, Vector{Asap.AbstractLoad}}[]
-    for case in elf.cases
-        case.purpose === :strength || continue
-        full = _elf_loads(elf.levels, case.Fx_kN, case.Mz_kN_m, case.direction)
+"""`:x` / `:y` as the wall in-plane symbol `:X` / `:Y`."""
+function _wall_direction(direction::Symbol)
+    direction === :x && return :X
+    direction === :y && return :Y
+    throw(ArgumentError("interactive system: direction must be :x or :y, got :$direction."))
+end
+
+"""
+Seismic effects scaled to 25% of the story forces, accidental torsion included.
+
+Only effects whose 100% axis is in `directions` are kept. Each entry is
+`(direction, torsion, label, loads)`.
+"""
+function _quarter_story_cases(elf, directions::AbstractVector{Symbol},
+                              effects::AbstractVector{SeismicEffectCase})
+    out = Tuple{Symbol, Symbol, Symbol, Vector{Asap.AbstractLoad}}[]
+    for effect in effects
+        effect.direction in directions || continue
+        full = seismic_effect_loads(elf, effect)
         # ASCE 7-22 §12.2.5.8 (corpus: asce-7-22, PDF page 179): the frames
         # shall be capable of resisting at least 25% of the design story shear.
-        push!(out, (case.direction, case.torsion, scale_story_loads(full,
-            _INTERACTIVE_FRAME_SHEAR_FRACTION)))
+        push!(out, (effect.direction, effect.torsion, effect.label,
+                    scale_story_loads(full, _INTERACTIVE_FRAME_SHEAR_FRACTION)))
     end
     isempty(out) && throw(ArgumentError(
         "interactive system: the ELF analysis has no strength case."))
@@ -333,14 +373,13 @@ function _earthquake_gravity_keys(roof::Symbol)
     return keys
 end
 
-"""Center-of-mass story drifts from a master displacement, in metres."""
-function _master_story_drifts(levels, u, direction::Symbol)
-    dof = direction === :x ? 1 : direction === :y ? 2 :
-          throw(ArgumentError("drift direction must be :x or :y, got :$direction."))
+"""Master story drifts along the unit plan vector `d`, in metres."""
+function _master_story_drifts(levels, u, d::NTuple{2, Float64})
     prev = 0.0
     drifts = Float64[]
     for lv in levels
-        top = u[lv.master.globalID[dof]]
+        gid = lv.master.globalID
+        top = u[gid[1]] * d[1] + u[gid[2]] * d[2]
         push!(drifts, top - prev)
         prev = top
     end
@@ -348,21 +387,26 @@ function _master_story_drifts(levels, u, direction::Symbol)
 end
 
 """
-Solve the frame alone at 25% of each strength story force, on each earthquake
-story stiffness. Equilibrium of the frame cut is required. θ from that solve,
-divided by `(1+θ)`, must be within θmax.
+Solve the frame alone at 25% of each seismic effect, on each earthquake story
+stiffness. Equilibrium of the frame cut is required for every effect. θ from
+the 25% one-direction case without torsion, divided by `(1+θ)`, must be within
+θmax on each axis in `directions`.
 
 # Citation
 ASCE 7-22 §12.2.5.8 (corpus: asce-7-22, PDF page 179) and §12.8.7 (PDF page
 188). The last sentence of §12.8.7 permits dividing θ from a P-delta analysis
-by `(1 + θ)` before the θmax check.
+by `(1 + θ)` before the θmax check. θ is defined there for one direction of
+story shear, so the orthogonal sums are not given a θ.
 """
-function _check_frame_only_stability!(struc, elf, second, inputs, seismic_system)
+function _check_frame_only_stability!(struc, elf, second, inputs, seismic_system, directions,
+                                      effects::AbstractVector{SeismicEffectCase})
     _refuse_flat_plate(struc)
     model = struc.asap_model
     links = struc.asap_rigid_links
-    cases = _quarter_story_cases(elf)
-    loads = [c[3] for c in cases]
+    cases = _quarter_story_cases(elf, directions, effects)
+    stability = _quarter_story_cases(elf, directions,
+        [e for e in seismic_effect_cases(elf; orthogonal=false) if e.torsion === :none])
+    loads = vcat([c[4] for c in cases], [c[4] for c in stability])
     θmax = stability_coefficient_limit(inputs.β, seismic_system.Cd; Ω0=seismic_system.Ω0)
     for key in _earthquake_gravity_keys(inputs.roof)
         haskey(second, key) || throw(ArgumentError(
@@ -370,7 +414,7 @@ function _check_frame_only_stability!(struc, elf, second, inputs, seismic_system
             "L=$(key.L) roof=$(key.roof)."))
         Kg = second[key].Kg
         solved = Asap.solve(model, loads, links; geometric_stiffness=Kg, exclude_shells=true)
-        for (i, (direction, torsion, case_loads)) in enumerate(cases)
+        for (i, (_, _, label, case_loads)) in enumerate(cases)
             for lv in elf.levels
                 z = lv.elevation_m - lv.story_height_m
                 eq = check_story_cut_equilibrium(model, solved[i], struc.wall_mesh,
@@ -378,11 +422,13 @@ function _check_frame_only_stability!(struc, elf, second, inputs, seismic_system
                     include_walls=false)
                 eq.passed || throw(ArgumentError(
                     "interactive system: the frame-only cut at story $(lv.story) " *
-                    "($direction, $torsion) is not in equilibrium (residual " *
+                    "($label) is not in equilibrium (residual " *
                     "$(eq.residual)). The 25% check is not reported on that result."))
             end
-            torsion === :none || continue
-            drifts = _master_story_drifts(elf.levels, solved[i], direction)
+        end
+        for (s, (direction, _, _, _)) in enumerate(stability)
+            u = solved[length(cases) + s]
+            drifts = _master_story_drifts(elf.levels, u, elf_direction_vector(elf, direction))
             for (k, lv) in enumerate(elf.levels)
                 Vx = _INTERACTIVE_FRAME_SHEAR_FRACTION * abs(elf.cases[_strength_case_index(elf, direction)].Vx_kN[k])
                 θ = stability_coefficient(lv.px_kN, lv.story_height_m, Vx, abs(drifts[k]))
@@ -470,7 +516,8 @@ elastic second-order analysis. The moment magnifier of §6.6 is the other method
 Returns one result per member. An empty section list is the caller's problem:
 this function is only called when every section is a reinforced-concrete one.
 """
-function _check_frame_member_strength(struc, basic, elf, second, inputs)
+function _check_frame_member_strength(struc, basic, elf, second, inputs, directions,
+                                      effects::AbstractVector{SeismicEffectCase})
     material = inputs.material
     material isa ReinforcedConcreteMaterial || throw(ArgumentError(
         "interactive system: the frame check needs a ReinforcedConcreteMaterial."))
@@ -483,8 +530,8 @@ function _check_frame_member_strength(struc, basic, elf, second, inputs)
     beam_checker = ACIBeamChecker(; fy_ksi=fy, fyt_ksi=fyt, Es_ksi=Es, λ=λ)
     col_cache = Dict{UInt, ACIColumnCapacityCache}()
     beam_cache = Dict{UInt, ACIBeamCapacityCache}()
-    cases = _quarter_story_cases(elf)
-    loads = [c[3] for c in cases]
+    cases = _quarter_story_cases(elf, directions, effects)
+    loads = [c[4] for c in cases]
     solved = Dict{GravityStiffnessKey, Vector{Vector{Float64}}}()
     for key in _earthquake_gravity_keys(inputs.roof)
         solved[key] = Asap.solve(struc.asap_model, loads, struc.asap_rigid_links;
@@ -534,7 +581,7 @@ function _member_resists(kind, index, member, els, struc, basic, second, solved,
         key = _gravity_key(combo, inputs.roof)
         set = second[key]
         lateral = solved[key]
-        for (k, (direction, torsion, _)) in enumerate(cases)
+        for (k, (_, _, label, _)) in enumerate(cases)
             for el in els
                 D = _element_forces_from_u(el, set.u[1], basic.loads[1])
                 L = _element_forces_from_u(el, set.u[2], basic.loads[2])
@@ -557,7 +604,7 @@ function _member_resists(kind, index, member, els, struc, basic, second, solved,
                     is_feasible(beam_checker, cache, 1, section, material.concrete, demand, geometry)
                 end
                 passed && continue
-                return false, "$(combo.name) $direction $torsion does not pass"
+                return false, "$(combo.name) $label does not pass"
             end
         end
     end
@@ -573,11 +620,12 @@ check. When every section is sized, the frame-only model is solved and each
 beam and column is checked. θ above θmax throws: §12.8.7 says the structure
 shall be redesigned.
 """
-function _check_interactive_frames!(struc, basic, elf, second, inputs, seismic_system)
+function _check_interactive_frames!(struc, basic, elf, second, inputs, seismic_system, directions,
+                                    effects::AbstractVector{SeismicEffectCase})
     missing = _missing_frame_sections(struc)
     # The frame-only solve runs either way. A missing section means the
     # strength check has nothing to use; the story shear and θ are still real.
-    _check_frame_only_stability!(struc, elf, second, inputs, seismic_system)
+    _check_frame_only_stability!(struc, elf, second, inputs, seismic_system, directions, effects)
     isempty(missing) || return missing
-    return _check_frame_member_strength(struc, basic, elf, second, inputs)
+    return _check_frame_member_strength(struc, basic, elf, second, inputs, directions, effects)
 end

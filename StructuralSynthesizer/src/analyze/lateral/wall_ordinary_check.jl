@@ -40,6 +40,9 @@ the bearing method inapplicable; that result is recorded as a failure.
 strength. §11.6.2(a) says the vertical minimum need not exceed it. The
 default leaves the existing equation unchanged.
 
+`plan_axis` only sets the `direction` label: `:X`, `:Y`, or `:skew` for a
+pier on neither plan axis. The checks use the pier's own in-plane axes.
+
 A joined `assembly` is refused. A failing check is recorded. The wall is not resized.
 """
 function check_ordinary_wall(wall::Wall, actions::AbstractVector{CombinedWallAction};
@@ -49,7 +52,8 @@ function check_ordinary_wall(wall::Wall, actions::AbstractVector{CombinedWallAct
                              boundary::Symbol,
                              assembly::Union{Nothing,WallAssembly}=nothing,
                              hw::Union{Nothing,Unitful.Length}=nothing,
-                             ρt_strength::Union{Nothing,Real}=nothing)
+                             ρt_strength::Union{Nothing,Real}=nothing,
+                             plan_axis::NTuple{2, Float64}=(1.0, 0.0))
     material isa ReinforcedConcreteMaterial || throw(ArgumentError(
         "ordinary wall check: material must be a ReinforcedConcreteMaterial " *
         "(concrete plus rebar). A plain concrete has no fy or fyt, and this " *
@@ -62,7 +66,7 @@ function check_ordinary_wall(wall::Wall, actions::AbstractVector{CombinedWallAct
     lw = wall_length(wall) * u"m"
     lw_m = ustrip(u"m", lw)
     lw_m > 0 || throw(ArgumentError("ordinary wall check: the pier has no length."))
-    direction = _pier_principal_direction(wall)
+    direction = _pier_axis_direction(wall, plan_axis)
     section = WallSection(lw, wall.thickness; ρl=wall.ρl, ρt=wall.ρt)
     height = hw === nothing ? _stacked_wall_height(wall) : hw
     ustrip(u"m", height) > 0 || throw(ArgumentError(
@@ -98,18 +102,22 @@ function _ordinary_record(wall_index, story, direction, case, action, result::Ch
                            result.demand, result.capacity, result.code_clause)
 end
 
-"""`:X` or `:Y` from the pier tangent. A skewed pier is outside this check."""
-function _pier_principal_direction(wall)
+"""
+`:X` or `:Y` when the pier tangent is parallel to the first or second plan
+axis, otherwise `:skew`. This is the label on the record. The in-plane
+checks themselves use the pier's own tangent at any angle.
+"""
+function _pier_axis_direction(wall, plan_axis::NTuple{2, Float64}=(1.0, 0.0))
     tx, ty, _, _ = _pier_plan_axes(wall)
-    if abs(tx) >= 1 - 1e-8 && abs(ty) <= 1e-8
-        return :X
-    elseif abs(ty) >= 1 - 1e-8 && abs(tx) <= 1e-8
-        return :Y
-    else
-        throw(ArgumentError(
-            "ordinary wall check: pier is not on a principal axis " *
-            "(tangent ($tx, $ty))."))
-    end
+    return _plan_vector_direction((tx, ty), plan_axis)
+end
+
+"""`|cos α|` between the pier tangent and plan axis `:X` or `:Y`."""
+function _pier_axis_cosine(wall, plan_axis::NTuple{2, Float64}, direction::Symbol)
+    tx, ty, _, _ = _pier_plan_axes(wall)
+    e = plan_axis_vector(plan_axis, direction === :X ? :x : direction === :Y ? :y :
+        throw(ArgumentError("wall axis direction must be :X or :Y, got :$direction.")))
+    return abs(tx * e[1] + ty * e[2])
 end
 
 """This pier plus every wall stacked above it. A cycle is refused."""

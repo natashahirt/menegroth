@@ -17,6 +17,7 @@ using Asap  # ensures `u"kip"`, `u"ksi"`, etc resolve via Asap unit module
         include("core/test_design_api.jl")
         include("core/test_api_units_faces.jl")
         include("core/test_courtyard_void.jl")
+        include("core/test_slab_openings.jl")
         include("core/test_api_scoped_overrides_payload.jl")
         include("core/test_api_sizing_strategy_contract.jl")
         include("core/test_chat_api.jl")
@@ -58,12 +59,14 @@ using Asap  # ensures `u"kip"`, `u"ksi"`, etc resolve via Asap unit module
         include("analyze/test_wall_combinations.jl")
         include("analyze/test_wall_ordinary.jl")
         include("analyze/test_ordinary_wall_stage.jl")
+        include("analyze/test_skew_plan_walls.jl")
         include("analyze/test_lateral_approaches.jl")
         include("analyze/test_node_rotations.jl")
         include("analyze/test_diaphragm_idealization.jl")
         include("analyze/test_elf_story_cases.jl")
         include("analyze/test_wind_story_cases.jl")
         include("analyze/test_composite_context.jl")
+        include("analyze/test_story_shell.jl")
     end
 
     # ─── Visualization ───────────────────────────────────────────────────
@@ -92,6 +95,7 @@ using Asap  # ensures `u"kip"`, `u"ksi"`, etc resolve via Asap unit module
     # ─── Slab Sizing (non-report tests) ──────────────────────────────────
     @testset "Slab Sizing" begin
         include("sizing/slabs/test_floor_design_contracts.jl")
+        include("sizing/slabs/test_panel_classification.jl")
         include("sizing/slabs/test_flat_plate_pure_methods.jl")
         include("sizing/slabs/test_vault_pipeline.jl")
     end
@@ -109,6 +113,7 @@ using Asap  # ensures `u"kip"`, `u"ksi"`, etc resolve via Asap unit module
     # ─── Workflow Integration ────────────────────────────────────────────
     @testset "Workflow Integration" begin
         include("integration/test_structuralsizer_workflow_integration.jl")
+        include("integration/test_deck_floor_building.jl")
     end
 
 end

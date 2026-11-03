@@ -160,8 +160,9 @@ Horizontal member (gravity framing system).
   (the primary column-to-column frame); auto-generated members from higher
   framing levels use `1, 2, …`.
 - `lateral_role::Symbol`: lateral-system participation. `:gravity` (default)
-  means gravity-only; `:moment_frame` means part of a moment frame. Other
-  values are reserved for later phases.
+  means the material's gravity connection (pinned for steel and timber girders
+  and beams, fixed for cast-in-place concrete). `:moment_frame` means part of a
+  moment frame (fixed ends).
 - `torsion_released::Union{Nothing, Bool}`: whole-member torsion selector used by
   the release resolver to pick between Asap's `:joist` and `:freefree` element
   releases when both member ends resolve to `:pinned`. `nothing` (default) defers
@@ -312,8 +313,9 @@ populate the `story_properties` field with:
     # For :circular, c1 = c2 = diameter D.
     shape::Symbol = :rectangular
     # Orientation angle (radians, CCW from global X).
-    # c1 is measured along the rotated local-x axis, c2 along local-y.
-    # Default 0.0 → axis-aligned (c1 ∥ X, c2 ∥ Y).
+    # c1 is measured along this direction, c2 along it turned 90° CCW.
+    # Independent of which way the slabs span. `initialize_members!` sets it
+    # from the building plan axis; 0 is global X (c1 ∥ X, c2 ∥ Y).
     θ::Float64 = 0.0
     # Per-column concrete material (nothing → use ConcreteColumnOptions.material).
     # Set when columns on different stories use different f'c.
@@ -483,7 +485,7 @@ function Column(seg_indices::Vector{Int}, L::T; Lb=L, Kx=1.0, Ky=1.0, Cb=1.0,
                 group_id=nothing, vertex_idx=0, c1=nothing, c2=nothing,
                 story=0, position=:interior, boundary_edge_dirs=NTuple{2, Float64}[],
                 braced=true, story_properties=nothing,
-                corner_kind=:none, corner_angle=0.0) where T
+                corner_kind=:none, corner_angle=0.0, θ=0.0) where T
     base = MemberBase{T}(
         segment_indices=seg_indices, L=L, Lb=Lb,
         Kx=Float64(Kx), Ky=Float64(Ky), Cb=Float64(Cb),
@@ -492,7 +494,8 @@ function Column(seg_indices::Vector{Int}, L::T; Lb=L, Kx=1.0, Ky=1.0, Cb=1.0,
     Column{T}(base=base, vertex_idx=vertex_idx, c1=c1, c2=c2,
               story=story, position=position, boundary_edge_dirs=boundary_edge_dirs,
               braced=braced, story_properties=story_properties,
-              corner_kind=corner_kind, corner_angle=Float64(corner_angle))
+              corner_kind=corner_kind, corner_angle=Float64(corner_angle),
+              θ=Float64(θ))
 end
 
 """Single-segment column convenience: wraps the index in a vector."""

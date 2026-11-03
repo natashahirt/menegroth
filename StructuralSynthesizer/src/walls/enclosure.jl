@@ -161,3 +161,71 @@ function story_plate_geometry(skeleton::BuildingSkeleton, story::Story;
 
     return (plate_center, plan_halfwidth)
 end
+
+"""
+    assert_walls_on_floor!(skeleton, story, walls) -> Nothing
+
+Fail closed unless every wall center lies in one of `story`'s floor faces.
+
+On a face edge counts as inside: the tolerance is `1e-9` plus `1e-9` of the
+floor's plan diagonal, the same scale as [`assert_walls_enclosed`](@ref).
+A center in the axis-aligned bounding box but in a notch, or past a rotated
+edge, throws. An empty `walls` passes.
+"""
+function assert_walls_on_floor!(skeleton::BuildingSkeleton, story::Story, walls)
+    isempty(walls) && return nothing
+    isempty(story.faces) && throw(ArgumentError(
+        "assert_walls_on_floor!: the story has walls and no floor faces."))
+    polys = [_face_plan_vertices(skeleton, f) for f in story.faces]
+    minx = minimum(p[1] for poly in polys for p in poly)
+    maxx = maximum(p[1] for poly in polys for p in poly)
+    miny = minimum(p[2] for poly in polys for p in poly)
+    maxy = maximum(p[2] for poly in polys for p in poly)
+    tol = 1e-9 + 1e-9 * hypot(maxx - minx, maxy - miny)
+    for w in walls
+        wx, wy = _wall_plan_center(w)
+        enclosed = any(poly -> _point_on_polygon(poly, wx, wy, tol), polys)
+        enclosed || throw(ArgumentError(
+            "assert_walls_on_floor!: wall plan center ($(wx), $(wy)) m lies OUTSIDE " *
+            "every floor face of this story. The drift plate is the bounding box; " *
+            "this check is the floor itself."))
+    end
+    return nothing
+end
+
+"""Inside `poly`, or within `tol` of an edge. `poly` is an open ring."""
+function _point_on_polygon(poly, x, y, tol)
+    n = length(poly)
+    n < 3 && return false
+    for i in 1:n
+        _segment_distance(x, y, poly[i], poly[mod1(i + 1, n)]) <= tol && return true
+    end
+    return _polygon_winding(poly, x, y) != 0
+end
+
+function _segment_distance(x, y, a, b)
+    dx = b[1] - a[1]
+    dy = b[2] - a[2]
+    len2 = dx * dx + dy * dy
+    len2 <= 0 && return hypot(x - a[1], y - a[2])
+    t = clamp(((x - a[1]) * dx + (y - a[2]) * dy) / len2, 0.0, 1.0)
+    return hypot(x - (a[1] + t * dx), y - (a[2] + t * dy))
+end
+
+"""Winding number of an open ring about `(x, y)`."""
+function _polygon_winding(poly, x, y)
+    w = 0
+    n = length(poly)
+    @inbounds for i in 1:n
+        x1, y1 = poly[i]
+        x2, y2 = poly[mod1(i + 1, n)]
+        if y1 <= y
+            if y2 > y && (x2 - x1) * (y - y1) > (x - x1) * (y2 - y1)
+                w += 1
+            end
+        elseif y2 <= y && (x2 - x1) * (y - y1) < (x - x1) * (y2 - y1)
+            w -= 1
+        end
+    end
+    return w
+end

@@ -61,7 +61,7 @@ function _stage_inputs(; cracked::Bool=true, pdelta::Bool=false, sdc::Symbol=:B)
         sustained_lateral_divisor_applied=false,
         type1_horizontal_irregularity=false,
         type5_horizontal_irregularity=false,
-        orthogonal_combination_applied=false,
+        orthogonal_combination=false,
         orthogonal_12_5_4_conditions_absent=false,
         ax_applied_to_accidental_torsion=false,
         pdelta_included_in_member_forces=pdelta,

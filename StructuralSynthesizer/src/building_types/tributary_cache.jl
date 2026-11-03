@@ -112,14 +112,27 @@ mutable struct TributaryCache
     # Timestamps for cache management
     edge_computed::Dict{TributaryCacheKey, DateTime}
     vertex_computed::Dict{Int, DateTime}
+
+    # The `tributary_axis` override the edge tributaries were computed with
+    # (`nothing`, `:isotropic`, or an `(x, y)` direction). Every lookup resolves
+    # its key with this, so a later recompute or read uses the same partition.
+    # A setting, not a result: `clear!` keeps it.
+    axis_override::Union{Nothing, Symbol, NTuple{2, Float64}}
+
+    # Cells whose span direction was set explicitly (a direction
+    # `tributary_axis`, or `ScopedFloorOverride.span_axis`). The direction
+    # wins over `axis_override` for that cell. A setting: `clear!` keeps it.
+    cell_axes::Dict{Int, NTuple{2, Float64}}
 end
 
-"""Create an empty `TributaryCache` with no stored results."""
+"""Create an empty `TributaryCache` with no stored results and no axis override."""
 TributaryCache() = TributaryCache(
     Dict{TributaryCacheKey, Dict{Int, CellTributaryResult}}(),
     Dict{Int, Dict{Int, ColumnTributaryResult}}(),
     Dict{TributaryCacheKey, DateTime}(),
-    Dict{Int, DateTime}()
+    Dict{Int, DateTime}(),
+    nothing,
+    Dict{Int, NTuple{2, Float64}}()
 )
 
 # -----------------------------------------------------------------------------

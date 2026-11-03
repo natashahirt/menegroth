@@ -9,7 +9,13 @@
 # Seismic design story drift is judged against Table 12.12-1. Wind story
 # displacement is reported and is not judged against that table.
 
-"""One seismic design-story-drift comparison against Table 12.12-1."""
+"""
+One seismic design-story-drift comparison against Table 12.12-1.
+
+`direction` is the plan axis the drift is measured along. `effect` is
+`:independent` for one ELF case, or the §12.5.1.2 combination label, whose
+100% axis may differ from `direction`.
+"""
 struct SeismicStoryDriftCheck
     "Story index from the ELF level."
     story::Int
@@ -20,7 +26,11 @@ struct SeismicStoryDriftCheck
     "Allowable story drift Δa, or Δa/ρ when rho was passed [m]."
     allowable_m::Float64
     passes::Bool
+    effect::Symbol
 end
+
+SeismicStoryDriftCheck(story, direction, torsion, drift_m, allowable_m, passes) =
+    SeismicStoryDriftCheck(story, direction, torsion, drift_m, allowable_m, passes, :independent)
 
 """
     check_seismic_story_drift(analysis; risk_category, system, rho=nothing)
@@ -140,9 +150,9 @@ end
 
 Scale each `:strength` ELF case by `combo.E`, the factor on Eh. `:drift`
 cases are omitted: their coefficient is for drift, not for the strength
-combination. The story force is placed on global X or Y according to the
-case direction. An empty vector means `combo.E` is zero. `Ev` is not part
-of this horizontal story force.
+combination. The story force is split into global X and Y along the case's
+plan axis. An empty vector means `combo.E` is zero. `Ev` is not part of this
+horizontal story force.
 
 # Citation
 ASCE 7-22 §2.3.6 and Eqs. 12.4-1 and 12.4-3 (corpus: asce-7-22, PDF pages
@@ -152,17 +162,9 @@ function factored_seismic_cases(analysis::ElfStoryAnalysis, combo::LoadCombinati
     out = FactoredLateralCase[]
     for (j, case) in enumerate(analysis.cases)
         case.purpose === :strength || continue
-        n = length(case.Fx_kN)
-        if case.direction === :x
-            Fx_in = case.Fx_kN
-            Fy_in = zeros(Float64, n)
-        elseif case.direction === :y
-            Fx_in = zeros(Float64, n)
-            Fy_in = case.Fx_kN
-        else
-            throw(ArgumentError(
-                "factored_seismic_cases: direction must be :x or :y; got $(repr(case.direction))."))
-        end
+        d = elf_direction_vector(analysis, case.direction)
+        Fx_in = case.Fx_kN .* d[1]
+        Fy_in = case.Fx_kN .* d[2]
         Fx, Fy, Mz = factored_lateral_components(combo, Fx_in, Fy_in, case.Mz_kN_m; load=:E)
         isempty(Fx) && continue
         push!(out, FactoredLateralCase(combo.name, :E, j, Fx, Fy, Mz))

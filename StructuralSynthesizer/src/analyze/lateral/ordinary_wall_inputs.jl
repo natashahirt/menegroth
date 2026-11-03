@@ -28,6 +28,11 @@ linear, and the stage multiplies seismic member forces and design story
 drifts by `1/(1−θ)` from ASCE 7-22 §12.8.7. A true value would count that
 effect twice.
 
+`orthogonal_combination` asks the stage to use the §12.5.1.2(a) 100% + 30%
+effects. The stage also uses them, whatever this field says, when §12.5.3 or
+§12.5.4 does not permit the independent procedure. `type5_horizontal_irregularity`
+is the caller's statement; a wall on neither plan axis makes it true.
+
 The other Bool fields are the caller's statements for the seismic-provision
 gate. This struct does not decide them.
 """
@@ -56,7 +61,7 @@ Base.@kwdef struct OrdinaryWallInputs
     sustained_lateral_divisor_applied::Bool
     type1_horizontal_irregularity::Bool
     type5_horizontal_irregularity::Bool
-    orthogonal_combination_applied::Bool
+    orthogonal_combination::Bool
     orthogonal_12_5_4_conditions_absent::Bool
     ax_applied_to_accidental_torsion::Bool
     pdelta_included_in_member_forces::Bool

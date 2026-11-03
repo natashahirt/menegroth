@@ -142,6 +142,51 @@ function _zero_wall_frame_section(E, G)
 end
 
 """
+    _apply_column_roll!(element, θ)
+
+Add `θ` to a vertical member's Asap roll `Ψ`.
+
+`θ` is [`Column`](@ref)`.θ`: the angle of c1 from global X. Asap's default
+`Ψ = π/2` is the θ = 0 orientation, so this adds to it and a zero angle
+changes nothing. A member drawn bottom to top turns counterclockwise by `θ`;
+one drawn top to bottom turns by `-θ`. A member that is not vertical is left
+alone.
+
+`θ = 0` keeps Asap's default. In that orientation `Ix` (with `h = c2`) resists
+global-X sway, while c1 is the X dimension and c2 the Y dimension. A
+rectangular column's analysis axes are therefore swapped relative to c1 and
+c2. Changing the base roll would turn every existing column section by 90°.
+"""
+function _apply_column_roll!(element, θ::Real)
+    θ == 0 && return element
+    a = ustrip.(u"m", element.nodeStart.position)
+    b = ustrip.(u"m", element.nodeEnd.position)
+    dz = b[3] - a[3]
+    hypot(b[1] - a[1], b[2] - a[2]) <= 1e-9 * max(abs(dz), 1.0) || return element
+    dz == 0 && return element
+    element.Ψ += sign(dz) * Float64(θ)
+    return element
+end
+
+"""
+    _roll_columns_to_section_axes!(frame_elements, struc)
+
+Roll each column's frame elements by `Column.θ`. Beams and braces stay as
+Asap built them. See [`_apply_column_roll!`](@ref).
+"""
+function _roll_columns_to_section_axes!(frame_elements, struc)
+    for col in struc.columns
+        col.θ == 0 && continue
+        for si in segment_indices(col)
+            eidx = struc.segments[si].edge_idx
+            1 <= eidx <= length(frame_elements) || continue
+            _apply_column_roll!(frame_elements[eidx], col.θ)
+        end
+    end
+    return frame_elements
+end
+
+"""
     to_asap!(struc; params=DesignParameters(), diaphragms=nothing, shell_props=nothing)
 
 Converts a BuildingStructure into an Asap.Model.
@@ -312,6 +357,7 @@ function to_asap!(struc::BuildingStructure{T, A, P};
         section = (!isnothing(wall_edges) && edge_idx in wall_edges) ? wall_section : default_section
         return Asap.Element(nodes[v1], nodes[v2], section; release=release, eccentricity=ecc)
     end
+    _roll_columns_to_section_axes!(frame_elements, struc)
     
     # 3. Diaphragm construction (Phase 9).
     #  :shell    → semirigid: real slab shells contribute to K (Phase 9a).

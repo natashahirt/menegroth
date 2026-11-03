@@ -188,13 +188,15 @@ end
     cell_edge_tributaries(struc, cell_idx)
 
 Get edge tributaries for a cell using its floor_type to determine behavior/axis.
+The axis honours the `tributary_axis` override stored on the cache by
+[`compute_cell_tributaries!`](@ref).
 Returns Vector{TributaryPolygon} or nothing if not computed.
 """
 function cell_edge_tributaries(struc::BuildingStructure, cell_idx::Int)
     cell = struc.cells[cell_idx]
     ft = StructuralSizer.floor_type(cell.floor_type)
     behavior = StructuralSizer.spanning_behavior(ft)
-    axis = StructuralSizer.resolve_tributary_axis(ft, cell.spans)
+    axis = _cell_partition_axis(struc, cell_idx, struc._tributary_caches.axis_override)
     return cell_edge_tributaries(struc, cell_idx, behavior, axis)
 end
 

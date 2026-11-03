@@ -5,7 +5,8 @@ Uses the top vertex (highest Z) of the last edge in the chain for position
 classification and story assignment.
 """
 function _create_chain_column!(struc, skel, chain_seg_indices, chain_edge_indices,
-                                L_total, Lb_gov, Cb_gov, default_Kx, default_Ky, vc, efc)
+                                L_total, Lb_gov, Cb_gov, default_Kx, default_Ky, vc, efc,
+                                column_θ::Float64=0.0)
     # Use the top vertex of the chain (highest Z) for classification
     last_edge = chain_edge_indices[end]
     v1, v2 = skel.edge_indices[last_edge]
@@ -22,7 +23,7 @@ function _create_chain_column!(struc, skel, chain_seg_indices, chain_edge_indice
                 Lb=Lb_gov, Kx=default_Kx, Ky=default_Ky, Cb=Cb_gov,
                 vertex_idx=vertex_idx, story=story, position=position,
                 corner_kind=corner_kind, corner_angle=corner_angle,
-                boundary_edge_dirs=boundary_edge_dirs)
+                boundary_edge_dirs=boundary_edge_dirs, θ=column_θ)
     push!(struc.columns, col)
 end
 

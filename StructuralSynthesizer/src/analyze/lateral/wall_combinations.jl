@@ -266,14 +266,22 @@ omitted. `indices[k]` is the case in `analysis.cases` that produced
 function seismic_strength_pier_actions(struc::BuildingStructure,
                                        analysis::ElfStoryAnalysis,
                                        pier::WallPierMesh)
-    cases = Vector{Vector{Asap.AbstractLoad}}()
-    indices = Int[]
-    for (j, case) in enumerate(analysis.cases)
-        case.purpose === :strength || continue
-        push!(cases, _elf_loads(analysis.levels, case.Fx_kN, case.Mz_kN_m, case.direction))
-        push!(indices, j)
-    end
-    return indices, _story_case_pier_actions(struc, cases, pier)
+    effects = seismic_effect_cases(analysis; orthogonal=false)
+    indices = [only(e.terms)[1] for e in effects]
+    return indices, seismic_strength_pier_actions(struc, analysis, pier, effects)
+end
+
+"""
+    seismic_strength_pier_actions(struc, analysis, pier, effects) -> Vector{WallAction}
+
+One `QE` action per [`SeismicEffectCase`](@ref), in the order of `effects`.
+"""
+function seismic_strength_pier_actions(struc::BuildingStructure,
+                                       analysis::ElfStoryAnalysis,
+                                       pier::WallPierMesh,
+                                       effects::AbstractVector{SeismicEffectCase})
+    cases = [seismic_effect_loads(analysis, e) for e in effects]
+    return _story_case_pier_actions(struc, cases, pier)
 end
 
 # ------------------------------------------------------------------------------

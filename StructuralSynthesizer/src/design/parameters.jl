@@ -18,6 +18,9 @@ Base.@kwdef struct ScopedFloorOverride
     concrete::Union{Concrete, Nothing} = nothing
     vault_lambda::Union{Float64, Nothing} = nothing
     faces::Vector{Vector{NTuple{3, Float64}}} = Vector{NTuple{3, Float64}}[]
+    # Direction the matched cells span, `(x, y)`. `nothing` leaves the
+    # building rule. Wins over `DesignParameters.tributary_axis`.
+    span_axis::Union{Nothing, NTuple{2, Float64}} = nothing
 end
 
 """

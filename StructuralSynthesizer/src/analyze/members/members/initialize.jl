@@ -65,7 +65,8 @@ same way as beams.
 """
 function initialize_members!(struc::BuildingStructure{T};
                              default_Kx=1.0, default_Ky=1.0,
-                             wall_thickness=nothing) where T
+                             wall_thickness=nothing,
+                             plan_axis::NTuple{2, <:Real}=(1.0, 0.0)) where T
     skel = struc.skeleton
     
     # Clear existing members
@@ -103,6 +104,9 @@ function initialize_members!(struc::BuildingStructure{T};
     # wall_thickness is nothing — no default thickness. `prepare!` forwards
     # `DesignParameters.wall_thickness`.
     thickness = _require_wall_thickness(T, wall_edges, wall_thickness)
+    # c1 lies along the plan axis. (1, 0) gives θ = 0, the previous default.
+    e1 = unit_plan_axis(plan_axis)
+    column_θ = atan(e1[2], e1[1])
     
     # Build reverse lookup: edge_idx → chain_id (for shattered edges)
     edge_to_chain = Dict{Int, UInt64}()
@@ -163,7 +167,8 @@ function initialize_members!(struc::BuildingStructure{T};
 
                 if first_edge in column_edges
                     _create_chain_column!(struc, skel, chain_seg_indices, chain_edge_indices,
-                                          L_total, Lb_gov, Cb_gov, default_Kx, default_Ky, vc, efc)
+                                          L_total, Lb_gov, Cb_gov, default_Kx, default_Ky, vc, efc,
+                                          column_θ)
                 elseif first_edge in brace_edges
                     strut = Strut(chain_seg_indices, L_total;
                                  Lb=Lb_gov, Kx=default_Kx, Ky=default_Ky, Cb=Cb_gov,
@@ -199,7 +204,7 @@ function initialize_members!(struc::BuildingStructure{T};
                             Lb=seg.Lb, Kx=default_Kx, Ky=default_Ky, Cb=seg.Cb,
                             vertex_idx=vertex_idx, story=story, position=position,
                             corner_kind=corner_kind, corner_angle=corner_angle,
-                            boundary_edge_dirs=boundary_edge_dirs)
+                            boundary_edge_dirs=boundary_edge_dirs, θ=column_θ)
                 push!(struc.columns, col)
                 
             elseif edge_idx in brace_edges

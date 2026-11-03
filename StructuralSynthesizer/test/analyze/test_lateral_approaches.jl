@@ -20,7 +20,25 @@ end
     @test WallsSeismicSystem(:B6).row === :B6
     design = LateralDesign(; system=WallsSeismicSystem(:A3), assignment=BuildingUnit())
     @test DesignParameters(lateral=design).lateral.system isa WallsSeismicSystem
+    @test design.system_x.row === :A3 && design.system_y.row === :A3
     @test_throws UndefKeywordError LateralDesign(; system=WallsSeismicSystem(:A3))
+    split = LateralDesign(; system_x=WallsSeismicSystem(:A3),
+                          system_y=InteractiveShearWallFrameSystem(),
+                          assignment=BuildingUnit())
+    @test split.system_x isa WallsSeismicSystem
+    @test split.system_y isa InteractiveShearWallFrameSystem
+    @test_throws ArgumentError split.system
+    @test_throws ArgumentError LateralDesign(; system_x=WallsSeismicSystem(:A3),
+                                            system_y=WallsSeismicSystem(:B6),
+                                            assignment=BuildingUnit())
+    @test_throws ArgumentError StructuralSynthesizer._elf_direction_factors(
+        :y, 4.0, 4.0, 2.5, 5.0, nothing, 2.5)
+    Ry, Cy, Ωy = StructuralSynthesizer._elf_direction_factors(
+        :y, 4.0, 4.0, 2.5, 4.5, 4.0, 2.5)
+    @test (Ry, Cy, Ωy) == (4.5, 4.0, 2.5)
+    Rx, Cx, Ωx = StructuralSynthesizer._elf_direction_factors(
+        :x, 4.0, 4.0, 2.5, 4.5, 4.0, 2.5)
+    @test (Rx, Cx, Ωx) == (4.0, 4.0, 2.5)
     @test :lateral in StructuralSynthesizer.PREPARE_AFFECTING_FIELDS
 
     struc = _girder_struc()
@@ -31,6 +49,7 @@ end
     @test seismic_members(framed, InteractiveShearWallFrameSystem()) ==
           (walls=[1], beams=[1, 2], columns=Int[])
     prepare_lateral_model!(struc, InteractiveShearWallFrameSystem())
+    prepare_lateral_model!(struc, split)
     @test_throws ArgumentError prepare_lateral_model!(
         _girder_struc(; with_wall=false), InteractiveShearWallFrameSystem())
 

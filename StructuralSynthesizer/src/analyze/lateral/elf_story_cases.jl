@@ -57,9 +57,9 @@ struct ElfLevel
     master::Asap.Node
     "Center of mass [m], the §12.8.6.5 drift point. Slab cells plus the self-weight assigned to this level."
     center_of_mass::NTuple{2, Float64}
-    "Projected plan widths (X extent, Y extent) [m], from the floor outline."
+    "Projected plan widths (extent along the first plan axis, along the second) [m], from the floor outline."
     plan_m::NTuple{2, Float64}
-    "Vertex extent of the floor outline, (xmin, xmax, ymin, ymax) [m]."
+    "Outline extent in plan-axis coordinates, (min, max) along the first axis then the second [m]."
     bounds_m::NTuple{4, Float64}
     "Closed floor loops [m], from the story's slab faces. Open rings."
     outline::Vector{Vector{NTuple{2, Float64}}}
@@ -79,6 +79,10 @@ not assign which side is positive.
 
 `θ` and `multiplier` are filled for `:drift` cases. A `:strength` case
 leaves them `nothing`. The drift limit itself is not judged here.
+
+`direction` is `:x` or `:y`, the first or second plan axis of the analysis.
+Displacements and drifts are along that axis. `design_cross_drift_m` is the
+design story drift along the other axis, at the same center of mass.
 """
 struct ElfCase
     direction::Symbol
@@ -102,19 +106,43 @@ struct ElfCase
     multiplier::Vector{Union{Float64, Nothing}}
     "Ax from this case's edge drifts, or `nothing` when δavg is not positive."
     Ax::Vector{Union{Float64, Nothing}}
+    "Design story drift at the center of mass along the other plan axis [m]."
+    design_cross_drift_m::Vector{Float64}
 end
 
-"""Levels above the base, lowest first, and every solved ELF case."""
+ElfCase(direction, purpose, torsion, Cs, V_kN, k, Fx_kN, Vx_kN, Mz_kN_m, elastic_m,
+        design_m, elastic_drift_m, design_drift_m, θ, multiplier, Ax) =
+    ElfCase(direction, purpose, torsion, Cs, V_kN, k, Fx_kN, Vx_kN, Mz_kN_m, elastic_m,
+            design_m, elastic_drift_m, design_drift_m, θ, multiplier, Ax,
+            zeros(length(design_drift_m)))
+
+"""
+Levels above the base, lowest first, every solved ELF case, and the plan
+axis the case directions refer to.
+"""
 struct ElfStoryAnalysis
     levels::Vector{ElfLevel}
     cases::Vector{ElfCase}
+    "Unit vector of the first plan axis. `:y` cases act along it turned 90° counterclockwise."
+    plan_axis::NTuple{2, Float64}
 end
 
+ElfStoryAnalysis(levels, cases) = ElfStoryAnalysis(levels, cases, (1.0, 0.0))
+
+"""Unit force vector of one case direction."""
+elf_direction_vector(analysis::ElfStoryAnalysis, direction::Symbol) =
+    plan_axis_vector(analysis.plan_axis, direction)
+
 """
-    elf_story_analysis(struc; method, SDS, S1, R, Ie, T, Cd, β, ...) -> ElfStoryAnalysis
+    elf_story_analysis(struc; method, SDS, S1, R, Ie, T, Cd, β, ...,
+                       Ry=nothing, Cdy=nothing, Ω0y=nothing) -> ElfStoryAnalysis
 
 Apply ASCE 7-22 §12.8 story forces to the rigid-diaphragm masters and solve
 them as one batch on the reduced stiffness.
+
+`R`, `Cd`, and `Ω0` are the X-direction row. Pass `Ry`, `Cdy`, and `Ω0y`
+together when the Y-direction row differs. Omitting them uses the X row in
+both directions. ASCE 7-22 §12.2.2 (corpus: asce-7-22, PDF page 176).
 
 `struc` must already have been through `to_asap!(; diaphragms=:rigid)` with
 slabs, so `asap_rigid_links` is non-empty. Any other diaphragm throws.
@@ -123,6 +151,11 @@ slabs, so `asap_rigid_links` is non-empty. Any other diaphragm throws.
 (Eq. 12.8-2, which needs `Sa`). `between` is `:two` or `:interpolate` when
 `0.5 < T < 2.5`; there is no default. `β` is required and is not defaulted
 to 1.0. Pass `Ω0` when you want the `β >= 1.25/Ω0` check.
+
+`plan_axis` is the first principal plan axis (see [`LateralDesign`](@ref)).
+The `:x` cases act along it and the `:y` cases along it turned 90°
+counterclockwise. The 5% eccentricity uses the outline width perpendicular to
+the force, and drifts are measured along the force. The default is global X.
 
 # Citations
 ASCE 7-22 §12.8.3, §12.8.4.2, §12.8.6, §12.8.7 (corpus: asce-7-22,
@@ -142,7 +175,12 @@ function elf_story_analysis(struc::BuildingStructure;
                             TL::Union{Real, Nothing}=nothing,
                             Sa::Union{Real, Nothing}=nothing,
                             Ω0::Union{Real, Nothing}=nothing,
-                            between::Union{Symbol, Nothing}=nothing)
+                            between::Union{Symbol, Nothing}=nothing,
+                            Ry::Union{Real, Nothing}=nothing,
+                            Cdy::Union{Real, Nothing}=nothing,
+                            Ω0y::Union{Real, Nothing}=nothing,
+                            plan_axis::Tuple{Real, Real}=(1.0, 0.0))
+    axis = unit_plan_axis(plan_axis)
     isempty(struc.asap_rigid_links) && throw(ArgumentError(
         "elf_story_analysis: story forces and accidental torsion use the rigid-diaphragm " *
         "masters. asap_rigid_links is empty. Call to_asap!(struc; diaphragms=:rigid) " *
@@ -150,7 +188,7 @@ function elf_story_analysis(struc::BuildingStructure;
     struc.asap_model.processed || throw(ArgumentError(
         "elf_story_analysis: the Asap model is not processed. Call to_asap! first."))
 
-    levels = _elf_levels(struc)
+    levels = _elf_levels(struc, axis)
     weights = [lv.weight_kN for lv in levels]
     heights = [lv.height_m for lv in levels]
     W = sum(weights)
@@ -164,21 +202,25 @@ function elf_story_analysis(struc::BuildingStructure;
 
     cases = ElfCase[]
     load_cases = Vector{Vector{Asap.AbstractLoad}}()
+    recover = Tuple{Float64, Union{Float64, Nothing}}[]
     for purpose in (:strength, :drift)
         for_drift = purpose == :drift
-        Cs = _elf_cs(method, for_drift, SDS, S1, R, Ie, T, SD1, TL, Sa)
-        V = seismic_base_shear(Cs, W)
-        dist = vertical_distribution(weights, heights, V, k)
-        Vx = seismic_story_shear(dist.Fx, heights)
         for direction in (:x, :y)
+            Rd, Cdd, Ω0d = _elf_direction_factors(direction, R, Cd, Ω0, Ry, Cdy, Ω0y)
+            Cs = _elf_cs(method, for_drift, SDS, S1, Rd, Ie, T, SD1, TL, Sa)
+            V = seismic_base_shear(Cs, W)
+            dist = vertical_distribution(weights, heights, V, k)
+            Vx = seismic_story_shear(dist.Fx, heights)
             for torsion in (:none, :plus, :minus)
                 Mz = _elf_moments(levels, dist.Fx, direction, torsion)
-                push!(load_cases, _elf_loads(levels, dist.Fx, Mz, direction))
+                push!(load_cases, _elf_loads(levels, dist.Fx, Mz,
+                                             plan_axis_vector(axis, direction)))
                 push!(cases, ElfCase(direction, purpose, torsion, Cs, V, k,
                     copy(dist.Fx), copy(Vx), Mz,
                     Float64[], Float64[], Float64[], Float64[],
                     Union{Float64, Nothing}[], Union{Float64, Nothing}[],
                     Union{Float64, Nothing}[]))
+                push!(recover, (Cdd, Ω0d))
             end
         end
     end
@@ -189,9 +231,28 @@ function elf_story_analysis(struc::BuildingStructure;
 
     solved = ElfCase[]
     for (i, u) in enumerate(displacements)
-        push!(solved, _elf_recover(cases[i], levels, u, Ie, Cd, β, Ω0))
+        Cdd, Ω0d = recover[i]
+        push!(solved, _elf_recover(cases[i], levels, u, Ie, Cdd, β, Ω0d, axis))
     end
-    return ElfStoryAnalysis(levels, solved)
+    return ElfStoryAnalysis(levels, solved, axis)
+end
+
+"""
+R, Cd, and Ω0 of one direction.
+
+The Y row is used only when `Ry`, `Cdy`, and `Ω0y` are all passed.
+ASCE 7-22 §12.2.2 (corpus: asce-7-22, PDF page 176).
+"""
+function _elf_direction_factors(direction::Symbol, R, Cd, Ω0, Ry, Cdy, Ω0y)
+    yset = (Ry !== nothing, Cdy !== nothing, Ω0y !== nothing)
+    if any(yset) && !all(yset)
+        throw(ArgumentError(
+            "elf_story_analysis: Ry, Cdy, and Ω0y are one Table 12.2-1 row. " *
+            "Pass all three, or none to use R, Cd, and Ω0 in both directions. " *
+            "ASCE 7-22 §12.2.2 (corpus: asce-7-22, PDF page 176)."))
+    end
+    direction === :y && Ry !== nothing && return Ry, Cdy, Ω0y
+    return R, Cd, Ω0
 end
 
 """Cs for one purpose. Missing :sds / :sa inputs throw here, before any solve."""
@@ -422,8 +483,10 @@ base would be zero, which Eq. 12.8-13 rejects). `Px` is the expected gravity
 at the level and above it.
 
 Wall and frame self-weight are added here. See [`_elf_self_weight`](@ref).
+Plan widths and extents are along the plan axes of `axis`.
 """
-function _elf_levels(struc)
+function _elf_levels(struc, axis::NTuple{2, Float64}=(1.0, 0.0))
+    e1, e2 = plan_axes(axis)
     skel = struc.skeleton
     cell_by_face = Dict{Int, eltype(struc.cells)}()
     for cell in struc.cells
@@ -445,13 +508,11 @@ function _elf_levels(struc)
         for loop in outline
             append!(pts, loop)
         end
-        xs = [p[1] for p in pts]
-        ys = [p[2] for p in pts]
-        xmin, xmax = extrema(xs)
-        ymin, ymax = extrema(ys)
-        # (0, 1) measures the width perpendicular to Y, which is the X extent.
-        x_extent = projected_plan_width(pts, (0.0, 1.0))
-        y_extent = projected_plan_width(pts, (1.0, 0.0))
+        a1min, a1max = extrema(p[1] * e1[1] + p[2] * e1[2] for p in pts)
+        a2min, a2max = extrema(p[1] * e2[1] + p[2] * e2[2] for p in pts)
+        # The width perpendicular to e2 is the extent along e1, and the reverse.
+        x_extent = projected_plan_width(pts, e2)
+        y_extent = projected_plan_width(pts, e1)
         weight = 0.0
         gravity = 0.0
         n_cells = 0
@@ -477,7 +538,7 @@ function _elf_levels(struc)
         end
         push!(raw, (; idx, z, weight, gravity, n_cells, omitted_floor,
             plan=(x_extent, y_extent),
-            bounds=(xmin, xmax, ymin, ymax),
+            bounds=(a1min, a1max, a2min, a2max),
             outline=outline))
     end
     isempty(raw) && throw(ArgumentError(
@@ -574,13 +635,16 @@ function _elf_moments(levels, Fx, direction, torsion)
     return Mz
 end
 
-"""Nodal force, and the torsional moment when it is nonzero, at each master."""
-function _elf_loads(levels, Fx, Mz, direction)
+"""
+Nodal force along the unit plan vector `d`, and the torsional moment when it
+is nonzero, at each master.
+"""
+function _elf_loads(levels, Fx, Mz, d::NTuple{2, Float64})
     loads = Asap.AbstractLoad[]
     z = 0.0 * u"kN"
     for i in eachindex(levels)
-        fx = direction == :x ? Fx[i] * u"kN" : 0.0 * u"kN"
-        fy = direction == :y ? Fx[i] * u"kN" : 0.0 * u"kN"
+        fx = Fx[i] * d[1] * u"kN"
+        fy = Fx[i] * d[2] * u"kN"
         if Fx[i] != 0.0
             push!(loads, Asap.NodeForce(levels[i].master, [fx, fy, z], :elf_story))
         end
@@ -595,26 +659,25 @@ function _elf_loads(levels, Fx, Mz, direction)
 end
 
 """
-Displacement of the rigid floor at plan point `(x, y)`, in the force direction.
+Displacement of the rigid floor at plan point `(x, y)`, along the unit plan vector `d`.
 
 The rigid link enforces `u_B = u_A + θ_A × r_AB`, so
 `u_x = u_xm − θz·(y − ym)` and `u_y = u_ym + θz·(x − xm)`.
 """
-function _elf_disp_at(u, master, x, y, direction)
+function _elf_disp_at(u, master, x, y, d::NTuple{2, Float64})
     xm = ustrip(u"m", master.position[1])
     ym = ustrip(u"m", master.position[2])
     gid = master.globalID
-    ux = u[gid[1]]
-    uy = u[gid[2]]
     θz = u[gid[6]]
-    if direction == :x
-        return ux - θz * (y - ym)
-    end
-    return uy + θz * (x - xm)
+    ux = u[gid[1]] - θz * (y - ym)
+    uy = u[gid[2]] + θz * (x - xm)
+    return ux * d[1] + uy * d[2]
 end
 
 """Elastic and design drift, θ, and Ax for one solved case."""
-function _elf_recover(case, levels, u, Ie, Cd, β, Ω0)
+function _elf_recover(case, levels, u, Ie, Cd, β, Ω0, axis::NTuple{2, Float64}=(1.0, 0.0))
+    d = plan_axis_vector(axis, case.direction)
+    other = plan_axis_vector(axis, case.direction === :x ? :y : :x)
     n = length(levels)
     elastic = Vector{Float64}(undef, n)
     design = Vector{Float64}(undef, n)
@@ -623,6 +686,8 @@ function _elf_recover(case, levels, u, Ie, Cd, β, Ω0)
     theta = Vector{Union{Float64, Nothing}}(undef, n)
     mult = Vector{Union{Float64, Nothing}}(undef, n)
     Ax = Vector{Union{Float64, Nothing}}(undef, n)
+    cross_drift = Vector{Float64}(undef, n)
+    cross_below = 0.0
 
     # θmax does not depend on the story. A :drift case that exceeds it throws.
     θmax = case.purpose == :drift ? stability_coefficient_limit(β, Cd; Ω0=Ω0) : nothing
@@ -630,7 +695,12 @@ function _elf_recover(case, levels, u, Ie, Cd, β, Ω0)
     for i in 1:n
         lv = levels[i]
         ex, ey = lv.center_of_mass
-        δe = _elf_disp_at(u, lv.master, ex, ey, case.direction)
+        δe = _elf_disp_at(u, lv.master, ex, ey, d)
+        # The same center of mass, read along the other axis. This is what the
+        # §12.5.1.2 combinations add as the 30% share of story drift.
+        δc = design_earthquake_displacement(Cd, _elf_disp_at(u, lv.master, ex, ey, other), Ie, 0.0)
+        cross_drift[i] = design_story_drift(δc, cross_below)
+        cross_below = δc
         # δdi = 0: in-plane diaphragm deformation is neglected.
         # ASCE 7-22 Eq. 12.8-16 (corpus: asce-7-22, PDF page 187).
         δDE = design_earthquake_displacement(Cd, δe, Ie, 0.0)
@@ -662,7 +732,7 @@ function _elf_recover(case, levels, u, Ie, Cd, β, Ω0)
             mult[i] = nothing
         end
 
-        d1, d2 = _elf_edge_drifts(u, levels, i, case.direction)
+        d1, d2 = _elf_edge_drifts(u, levels, i, case.direction, axis)
         δmax = max(d1, d2)
         δavg = 0.5 * (d1 + d2)
         if δavg > 0 && δmax >= 0
@@ -675,25 +745,32 @@ function _elf_recover(case, levels, u, Ie, Cd, β, Ω0)
 
     return ElfCase(case.direction, case.purpose, case.torsion, case.Cs, case.V_kN,
         case.k, case.Fx_kN, case.Vx_kN, case.Mz_kN_m,
-        elastic, design, elastic_drift, design_drift, theta, mult, Ax)
+        elastic, design, elastic_drift, design_drift, theta, mult, Ax, cross_drift)
 end
 
-"""Story drifts at the two edges perpendicular to the force, from the rigid-floor field."""
-function _elf_edge_drifts(u, levels, i, direction)
+"""
+Story drifts at the two edges perpendicular to the force, from the rigid-floor field.
+
+The edges are the outline extremes across the force, on the line through the
+master. Coordinates are along the plan axes.
+"""
+function _elf_edge_drifts(u, levels, i, direction, axis::NTuple{2, Float64}=(1.0, 0.0))
+    e1, e2 = plan_axes(axis)
+    d = direction === :x ? e1 : e2
     lv = levels[i]
-    xmin, xmax, ymin, ymax = lv.bounds_m
+    a1min, a1max, a2min, a2max = lv.bounds_m
     xm = ustrip(u"m", lv.master.position[1])
     ym = ustrip(u"m", lv.master.position[2])
+    m1 = xm * e1[1] + ym * e1[2]
+    m2 = xm * e2[1] + ym * e2[2]
     below = i == 1 ? nothing : levels[i - 1]
-    if direction == :x
-        edges = ((xm, ymin), (xm, ymax))
-    else
-        edges = ((xmin, ym), (xmax, ym))
-    end
+    coords = direction === :x ? ((m1, a2min), (m1, a2max)) : ((a1min, m2), (a1max, m2))
     drifts = ntuple(2) do j
-        x, y = edges[j]
-        top = _elf_disp_at(u, lv.master, x, y, direction)
-        bot = below === nothing ? 0.0 : _elf_disp_at(u, below.master, x, y, direction)
+        c1, c2 = coords[j]
+        x = c1 * e1[1] + c2 * e2[1]
+        y = c1 * e1[2] + c2 * e2[2]
+        top = _elf_disp_at(u, lv.master, x, y, d)
+        bot = below === nothing ? 0.0 : _elf_disp_at(u, below.master, x, y, d)
         return top - bot
     end
     return drifts

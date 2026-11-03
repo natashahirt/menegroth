@@ -18,6 +18,12 @@ struct OrdinaryWallResult
     interactive_shear::Vector{InteractiveStoryShearCheck}
     "Empty unless the lateral system is row F."
     frame_members::Vector{FrameMemberCheck}
+    "Type 5 as used: the caller's statement, or a nonparallel element found in the geometry."
+    type5_horizontal_irregularity::Bool
+    "Walls (and row F beams) on neither plan axis."
+    nonparallel_elements::Vector{String}
+    "True when the §12.5.1.2(a) 100% + 30% effects were used instead of one direction at a time."
+    orthogonal_combination::Bool
 end
 
 """
@@ -31,12 +37,13 @@ gravity-only building is not given wind or seismic cases.
 When lateral design was requested:
 
 - `wall_inputs` is required. Pressures, `ρ`, and the seismic statements are
-  not assumed. `R`, `Cd`, and `Ω0` come from the Table 12.2-1 row on the
-  lateral system. A Seismic Design Category that row marks NP is refused.
-- The system is [`WallsSeismicSystem`](@ref) (`:A3` or `:B6`) or
+  not assumed. `R`, `Cd`, and `Ω0` come from the Table 12.2-1 row of each
+  direction. A Seismic Design Category that a row marks NP is refused.
+- Each direction is [`WallsSeismicSystem`](@ref) (`:A3` or `:B6`) or
   [`InteractiveShearWallFrameSystem`](@ref) (row F). The assignment is
   [`BuildingUnit`](@ref). [`OutriggerSystem`](@ref) and
   [`IsolatedWallShare`](@ref) are refused rather than given a pier fallback.
+  §12.2.5.8 runs only in a direction whose system is row F.
 - Row B.6 is refused when the walls carry more than 20% of a story's
   unfactored dead vertical force. The 20% is a project limit for commentary
   C12.2.1. The share is reported for every row.
@@ -68,6 +75,17 @@ When lateral design was requested:
   θ ≤ 0.10.
 - Seismic Design Categories D, E, and F still throw from
   [`system_checks`](@ref): deformation compatibility is not built.
+- "X" and "Y" are the plan axes of `params.lateral.plan_axis`. A wall or a
+  row F beam on neither axis is a Type 5 nonparallel system irregularity
+  (Table 12.3-1, corpus: asce-7-22, PDF page 180), whatever the caller stated.
+  Such an element is refused when the two axes have different systems:
+  §12.2.2 gives each orthogonal axis its own row, and the element is in both.
+- The 100% + 30% effects of §12.5.1.2(a) replace the one-direction cases
+  when `wall_inputs.orthogonal_combination` asks for them, or when §12.5.3 or
+  §12.5.4 does not permit the independent procedure. Wall forces, the row F
+  frame forces, and story drift then use those 16 effects. Story drift is
+  checked along both axes of every effect.
+- A skewed wall counts `φVn·|cos α|` toward the row F 75% sum on each axis.
 
 The story cut at each pier bottom is checked for the unfactored gravity cases,
 and again for each factored-gravity displacement on its story stiffness. A
@@ -91,12 +109,15 @@ function design_ordinary_walls!(struc::BuildingStructure, params::DesignParamete
         "ordinary wall stage: lateral design was requested and wall_inputs is " *
         "missing. Wind pressures, ELF inputs, and the seismic-provision " *
         "statements are not assumed."))
-    system = params.lateral.system
-    (system isa WallsSeismicSystem || system isa InteractiveShearWallFrameSystem) ||
-        throw(ArgumentError(
-            "ordinary wall stage: the lateral system is $(typeof(system)). " *
-            "This stage checks ordinary concrete walls. Another system is not " *
-            "given a wall-pier fallback."))
+    sx = params.lateral.system_x
+    sy = params.lateral.system_y
+    for system in (sx, sy)
+        (system isa WallsSeismicSystem || system isa InteractiveShearWallFrameSystem) ||
+            throw(ArgumentError(
+                "ordinary wall stage: the lateral system is $(typeof(system)). " *
+                "This stage checks ordinary concrete walls. Another system is not " *
+                "given a wall-pier fallback."))
+    end
     params.lateral.assignment isa BuildingUnit || throw(ArgumentError(
         "ordinary wall stage: the demand assignment is " *
         "$(typeof(params.lateral.assignment)). Only BuildingUnit, the pier " *
@@ -114,10 +135,11 @@ function design_ordinary_walls!(struc::BuildingStructure, params::DesignParamete
             "are not also multiplied by 1/(1−θ) (ASCE 7-22 §12.8.7, corpus: " *
             "asce-7-22, PDF page 188). Set the flag to false."))
     end
-    # R, Cd, and Ω0 are the row's. A category the row marks NP stops here.
-    seismic_system = ordinary_concrete_seismic_system(table_12_2_1_row(system), inputs.sdc)
+    # R, Cd, and Ω0 are each direction's row. A category a row marks NP stops here.
+    sysx = ordinary_concrete_seismic_system(table_12_2_1_row(sx), inputs.sdc)
+    sysy = ordinary_concrete_seismic_system(table_12_2_1_row(sy), inputs.sdc)
 
-    prepare_lateral_model!(struc, system)
+    prepare_lateral_model!(struc, params.lateral)
     for assembly in struc.wall_mesh.assemblies
         refuse_joined_wall_design(assembly)
     end
@@ -129,6 +151,26 @@ function design_ordinary_walls!(struc::BuildingStructure, params::DesignParamete
     end
     isempty(struc.wall_mesh.piers) && throw(ArgumentError(
         "ordinary wall stage: the wall mesh is empty. to_asap! has not meshed the walls."))
+
+    axis = params.lateral.plan_axis
+    row_f = sx isa InteractiveShearWallFrameSystem || sy isa InteractiveShearWallFrameSystem
+    nonparallel = nonparallel_system_elements(struc, axis; frames=row_f)
+    if !isempty(nonparallel) && !_systems_agree(sx, sy)
+        throw(ArgumentError(
+            "ordinary wall stage: $(first(nonparallel)) is on neither plan axis, and " *
+            "the two axes have different seismic systems. ASCE 7-22 §12.2.2 (corpus: " *
+            "asce-7-22, PDF page 176) assigns a system to each orthogonal axis. An " *
+            "element on neither axis resists both, so it has no single row. Use one " *
+            "system, or a plan axis the element is parallel to."))
+    end
+    # Table 12.3-1 Type 5 (corpus: asce-7-22, PDF page 180).
+    type5 = inputs.type5_horizontal_irregularity || !isempty(nonparallel)
+    # ASCE 7-22 §12.5.2–§12.5.4 (corpus: asce-7-22, PDF pages 183–184).
+    orthogonal = inputs.orthogonal_combination || orthogonal_combination_required(;
+        sdc=inputs.sdc,
+        type1_horizontal_irregularity=inputs.type1_horizontal_irregularity,
+        type5_horizontal_irregularity=type5,
+        orthogonal_12_5_4_conditions_absent=inputs.orthogonal_12_5_4_conditions_absent)
 
     basic = solve_gravity_basic_cases(struc; roof=inputs.roof, params=params)
     for (i, symbol) in enumerate(basic.symbols)
@@ -148,16 +190,21 @@ function design_ordinary_walls!(struc::BuildingStructure, params::DesignParamete
         method=inputs.method,
         SDS=inputs.SDS,
         S1=inputs.S1,
-        R=seismic_system.R,
+        R=sysx.R,
         Ie=inputs.Ie,
         T=inputs.T,
-        Cd=seismic_system.Cd,
+        Cd=sysx.Cd,
         β=inputs.β,
         SD1=inputs.SD1,
         TL=inputs.TL,
         Sa=inputs.Sa,
-        Ω0=seismic_system.Ω0,
-        between=inputs.between)
+        Ω0=sysx.Ω0,
+        between=inputs.between,
+        Ry=sysy.R,
+        Cdy=sysy.Cd,
+        Ω0y=sysy.Ω0,
+        plan_axis=axis)
+    effects = seismic_effect_cases(elf; orthogonal)
     θmax = _max_drift_theta(elf)
     # Eh is multiplied by ρ. Member forces come from the story stiffness, so
     # the gate is told P-delta is in the forces. Design story drifts still
@@ -168,23 +215,26 @@ function design_ordinary_walls!(struc::BuildingStructure, params::DesignParamete
         sustained_lateral_loads=inputs.sustained_lateral_loads,
         sustained_lateral_divisor_applied=inputs.sustained_lateral_divisor_applied,
         type1_horizontal_irregularity=inputs.type1_horizontal_irregularity,
-        type5_horizontal_irregularity=inputs.type5_horizontal_irregularity,
-        orthogonal_combination_applied=inputs.orthogonal_combination_applied,
+        type5_horizontal_irregularity=type5,
+        orthogonal_combination_applied=orthogonal,
         orthogonal_12_5_4_conditions_absent=inputs.orthogonal_12_5_4_conditions_absent,
         ax_applied_to_accidental_torsion=inputs.ax_applied_to_accidental_torsion,
         theta=θmax,
         pdelta_included_in_member_forces=true,
         rho_applied_to_eh=true)
-    system_checks(struc, system; seismic_design_category=inputs.sdc)
+    system_checks(struc, sx; seismic_design_category=inputs.sdc)
+    _systems_agree(sx, sy) || system_checks(struc, sy; seismic_design_category=inputs.sdc)
     # Δa/ρ is the moment-frame story-drift limit. This system does not pass ρ.
     # Design story drift uses 1/(1−θ). Member forces use the story stiffness.
     drift, pdelta_multipliers = _story_drift_with_pdelta(elf;
         risk_category=inputs.risk_category,
-        system=inputs.drift_system)
+        system=inputs.drift_system,
+        orthogonal)
 
-    second = _build_story_second_order(struc, basic, wind, elf)
+    second = _build_story_second_order(struc, basic, wind, elf, effects)
     shares = _wall_dead_load_shares(struc, basic, elf)
-    _refuse_building_frame_gravity!(seismic_system.row, shares)
+    gravity_row = sysx.row === :B6 || sysy.row === :B6 ? :B6 : sysx.row
+    _refuse_building_frame_gravity!(gravity_row, shares)
     prepared = Tuple{Int, Any, Vector{CombinedWallAction}, Any, Vector}[]
     grown_by_wall = Dict{Int, Vector{CombinedWallAction}}()
     ρt_by_wall = Dict{Int, Union{Nothing, Float64}}()
@@ -199,7 +249,7 @@ function design_ordinary_walls!(struc::BuildingStructure, params::DesignParamete
         assembly = _assembly_of(struc.wall_mesh, wall_index)
         gravity = pier_gravity_actions(struc, basic, pier)
         batches = _pier_action_batches(struc, pier, basic, wind, elf, second,
-                                       gravity, inputs)
+                                       gravity, inputs, effects)
         grown = CombinedWallAction[]
         for (_, _, growns, _) in batches
             append!(grown, growns)
@@ -215,11 +265,17 @@ function design_ordinary_walls!(struc::BuildingStructure, params::DesignParamete
     end
     interactive = InteractiveStoryShearCheck[]
     frame_members = FrameMemberCheck[]
-    if system isa InteractiveShearWallFrameSystem
+    directions = Symbol[]
+    sx isa InteractiveShearWallFrameSystem && push!(directions, :x)
+    sy isa InteractiveShearWallFrameSystem && push!(directions, :y)
+    if !isempty(directions)
+        # Both directions of row F share one Cd. A single interactive direction
+        # uses that direction's row.
+        frame_system = sx isa InteractiveShearWallFrameSystem ? sysx : sysy
         interactive = _enforce_interactive_wall_shear!(
-            struc, elf, inputs.material, grown_by_wall, ρt_by_wall)
+            struc, elf, inputs.material, grown_by_wall, ρt_by_wall, directions)
         frame_members = _check_interactive_frames!(
-            struc, basic, elf, second, inputs, seismic_system)
+            struc, basic, elf, second, inputs, frame_system, directions, effects)
     end
     checks = Dict{Int, Vector{WallCheckRecord}}()
     for (wall_index, assembly, _, ρt_strength, batches) in prepared
@@ -230,16 +286,18 @@ function design_ordinary_walls!(struc::BuildingStructure, params::DesignParamete
         for (case, firsts, growns, what) in batches
             _each_second_order(records, wall, firsts, growns;
                 material=inputs.material, wall_index, case,
-                boundary=inputs.boundary, assembly, what, ρt_strength)
+                boundary=inputs.boundary, assembly, what, ρt_strength,
+                plan_axis=axis)
         end
         checks[wall_index] = records
     end
-    _record_story_shear!(checks, interactive, struc)
-    _record_frame_members!(checks, struc, frame_members)
-    @info "Ordinary wall reinforcement" n_piers=length(checks) n_raised max_ρl max_ρt
+    _record_story_shear!(checks, interactive, struc, axis)
+    _record_frame_members!(checks, struc, frame_members, axis)
+    @info "Ordinary wall reinforcement" n_piers=length(checks) n_raised max_ρl max_ρt type5 orthogonal
 
     result = OrdinaryWallResult(checks, drift, θmax, pdelta_multipliers,
-                                shares, interactive, frame_members)
+                                shares, interactive, frame_members,
+                                type5, nonparallel, orthogonal)
     struc.ordinary_wall_result = result
     StructuralSizer.emit!(tc, :pipeline, "design_ordinary_walls!", "stage_ordinary_walls", :exit;
                           n_walls=length(checks), n_drift=length(drift))
@@ -253,7 +311,8 @@ Each entry is `(case, first-order actions, second-order actions, label)`.
 The second-order actions are the ones the reinforcement search and the
 recorded checks both use.
 """
-function _pier_action_batches(struc, pier, basic, wind, elf, second, gravity, inputs)
+function _pier_action_batches(struc, pier, basic, wind, elf, second, gravity, inputs,
+                              effects::AbstractVector{SeismicEffectCase})
     batches = Tuple{Symbol, Vector{CombinedWallAction}, Vector{CombinedWallAction}, String}[]
     push!(batches, (:D,
         _gravity_strength_actions(gravity),
@@ -266,14 +325,13 @@ function _pier_action_batches(struc, pier, basic, wind, elf, second, gravity, in
             _second_order_wind_actions(struc, pier, basic, second, i),
             "wind case $i"))
     end
-    qe_indices, qe_actions = seismic_strength_pier_actions(struc, elf, pier)
+    qe_actions = seismic_strength_pier_actions(struc, elf, pier, effects)
     for (k, action) in enumerate(qe_actions)
-        elf_case = elf.cases[qe_indices[k]]
-        push!(batches, (_qe_case_symbol(qe_indices[k], elf_case),
+        push!(batches, (effects[k].label,
             _seismic_strength_actions(gravity, action, inputs.rho, inputs.SDS),
             _second_order_seismic_actions(struc, pier, basic, second, k,
                                           inputs.rho, inputs.SDS),
-            "QE case $(qe_indices[k])"))
+            "QE $(effects[k].label)"))
     end
     return batches
 end
@@ -343,7 +401,7 @@ end
 """One factored gravity and the component displacements solved on its `K_G`."""
 struct StorySecondOrderSet
     key::GravityStiffnessKey
-    "Unfactored `D`, `L`, roof, then every wind case, then every strength `QE`."
+    "Unfactored `D`, `L`, roof, then every wind case, then every seismic effect `QE`."
     u::Vector{Vector{Float64}}
     nwind::Int
     nqe::Int
@@ -395,7 +453,8 @@ are not in that gravity, and the matrix is not iterated. The factored-gravity
 displacement on `K_G` is checked at each pier-bottom cut, with `−K_G u`
 counted on the applied side.
 """
-function _build_story_second_order(struc, basic, wind, elf)
+function _build_story_second_order(struc, basic, wind, elf,
+                                   effects::AbstractVector{SeismicEffectCase})
     roof = basic.symbols[3]
     model = struc.asap_model
     masters = [(lv.elevation_m, lv.master) for lv in elf.levels]
@@ -405,11 +464,7 @@ function _build_story_second_order(struc, basic, wind, elf)
     base = first(elf.levels).elevation_m - first(elf.levels).story_height_m
     base_master = get(_elf_masters(struc), round(Int, base * 1000), nothing)
     wind_cases = [_wind_loads(wind.levels, c.Fx_kN, c.Fy_kN, c.Mz_kN_m) for c in wind.cases]
-    qe_cases = Vector{Vector{Asap.AbstractLoad}}()
-    for case in elf.cases
-        case.purpose === :strength || continue
-        push!(qe_cases, _elf_loads(elf.levels, case.Fx_kN, case.Mz_kN_m, case.direction))
-    end
+    qe_cases = [seismic_effect_loads(elf, e) for e in effects]
     batch = Vector{Vector{Asap.AbstractLoad}}()
     append!(batch, basic.loads)
     append!(batch, wind_cases)
@@ -501,14 +556,14 @@ end
 
 function _each_second_order(records, wall, first_actions, second_actions;
                              material, wall_index, case, boundary, assembly, what,
-                             ρt_strength=nothing)
+                             ρt_strength=nothing, plan_axis=(1.0, 0.0))
     length(first_actions) == length(second_actions) || throw(ArgumentError(
         "ordinary wall stage: $what has $(length(first_actions)) first-order " *
         "combinations and $(length(second_actions)) second-order combinations."))
     for (first, grown) in zip(first_actions, second_actions)
         _accept_second_order!(records, wall, first, grown;
                               material, wall_index, case, boundary, assembly,
-                              ρt_strength)
+                              ρt_strength, plan_axis)
     end
     return records
 end
@@ -516,15 +571,15 @@ end
 function _accept_second_order!(records, wall, first::CombinedWallAction,
                                grown::CombinedWallAction;
                                material, wall_index, case, boundary, assembly,
-                               ρt_strength=nothing)
+                               ρt_strength=nothing, plan_axis=(1.0, 0.0))
     (first.combination === grown.combination && first.alternative === grown.alternative) ||
         throw(ArgumentError(
             "ordinary wall stage: first-order $(first.combination)/$(first.alternative) " *
             "does not match second-order $(grown.combination)/$(grown.alternative)."))
-    _record_second_order_moment!(records, wall, first, grown; wall_index, case)
+    _record_second_order_moment!(records, wall, first, grown; wall_index, case, plan_axis)
     append!(records, check_ordinary_wall(wall, CombinedWallAction[grown];
                                          material, wall_index, case, boundary, assembly,
-                                         ρt_strength))
+                                         ρt_strength, plan_axis))
     return records
 end
 
@@ -539,7 +594,8 @@ ACI 318-19 §6.2.5.3 (corpus: aci-318-19, PDF page 72): Mu including
 second-order effects shall not exceed 1.4 Mu due to first-order effects.
 """
 function _record_second_order_moment!(records, wall, first::CombinedWallAction,
-                                      grown::CombinedWallAction; wall_index, case)
+                                      grown::CombinedWallAction; wall_index, case,
+                                      plan_axis=(1.0, 0.0))
     a2 = abs(grown.M)
     a1 = abs(first.M)
     (a2 <= 1.0 && a1 <= 1.0) && return records
@@ -547,7 +603,7 @@ function _record_second_order_moment!(records, wall, first::CombinedWallAction,
     limit = 1.4 * a1
     a2 <= limit + 1.0 && return records
     push!(records, WallCheckRecord(
-        wall_index, wall.story, _pier_principal_direction(wall), case,
+        wall_index, wall.story, _pier_axis_direction(wall, plan_axis), case,
         grown.combination, grown.alternative, "second-order moment",
         false, a1 == 0.0 ? Inf : a2 / a1, a2, limit,
         "ACI 318-19 §6.2.5.3"))
@@ -586,10 +642,6 @@ function _wind_case_symbol(i::Int, case::WindStoryCase)
          "$(case.direction_2[1])_$(case.direction_2[2])"
     return Symbol("W$(i)_$(case.kind)_$(case.direction[1])_$(case.direction[2])_" *
                   "$(d2)_$(case.sign_1)_$(case.sign_2)")
-end
-
-function _qe_case_symbol(i::Int, case::ElfCase)
-    return Symbol("QE$(i)_$(case.direction)_$(case.torsion)")
 end
 
 """
@@ -667,19 +719,35 @@ function _elf_level_index(struc::BuildingStructure, elf::ElfStoryAnalysis, wall)
 end
 
 """
-    _story_drift_with_pdelta(analysis; risk_category, system) -> (checks, multipliers)
+    _story_drift_with_pdelta(analysis; risk_category, system, orthogonal=false)
+        -> (checks, multipliers)
 
 [`check_seismic_story_drift`](@ref), with each design story drift multiplied
 by that story's §12.8.7 factor. `rho` is not passed: Δa/ρ is the
 moment-frame limit.
 
+With `orthogonal = true` the drifts are those of the §12.5.1.2(a) effects:
+`QE(axis, ±AT) ± 0.3 QE(other axis)` on the drift cases. Each effect is read
+along both plan axes, and each reading is one check. The overall sign is not
+repeated, because the limit is on the magnitude.
+
+# Engineering judgment
+A combined drift along one axis is multiplied by the largest §12.8.7 factor
+of that axis's drift cases at that story. §12.8.7 defines θ for one story and
+one direction of force, not for a sum of two directions.
+
 # Citation
 ASCE 7-22 §12.8.7 (corpus: asce-7-22, PDF page 188) and §12.12.1
-(PDF page 194), Table 12.12-1 (PDF page 195).
+(PDF page 194), Table 12.12-1 (PDF page 195). §12.5.1.2 (PDF page 183):
+drift requirements shall be satisfied for all combinations. Commentary
+C12.5.1.2 (PDF page 720): use the combinations to determine the maximum story
+drift in each orthogonal axis.
 """
 function _story_drift_with_pdelta(analysis::ElfStoryAnalysis;
                                   risk_category::Symbol,
-                                  system::Symbol)
+                                  system::Symbol,
+                                  orthogonal::Bool=false)
+    orthogonal && return _orthogonal_story_drift(analysis; risk_category, system)
     checks = SeismicStoryDriftCheck[]
     multipliers = Float64[]
     for case in analysis.cases
@@ -701,6 +769,54 @@ function _story_drift_with_pdelta(analysis::ElfStoryAnalysis;
     end
     isempty(checks) && throw(ArgumentError(
         "ordinary wall stage: the ELF analysis has no drift case to amplify."))
+    return checks, multipliers
+end
+
+"""Largest §12.8.7 factor of the drift cases along `direction` at level `i`."""
+function _axis_drift_multiplier(analysis::ElfStoryAnalysis, direction::Symbol, i::Int)
+    m = 0.0
+    for case in analysis.cases
+        case.purpose === :drift && case.direction === direction || continue
+        mi = case.multiplier[i]
+        mi === nothing && throw(ArgumentError(
+            "ordinary wall stage: a drift case has no P-delta multiplier."))
+        m = max(m, Float64(mi))
+    end
+    m > 0 || throw(ArgumentError(
+        "ordinary wall stage: no drift case along $direction at level $i."))
+    return m
+end
+
+function _orthogonal_story_drift(analysis::ElfStoryAnalysis; risk_category::Symbol,
+                                 system::Symbol)
+    checks = SeismicStoryDriftCheck[]
+    multipliers = Float64[]
+    for effect in seismic_effect_cases(analysis; orthogonal=true, purpose=:drift)
+        # ±QE is the same magnitude. Keep the positive 100% term.
+        first(effect.terms)[2] > 0 || continue
+        for (i, lv) in enumerate(analysis.levels)
+            along = Dict(:x => 0.0, :y => 0.0)
+            for (j, f) in effect.terms
+                c = analysis.cases[j]
+                other = c.direction === :x ? :y : :x
+                along[c.direction] += f * c.design_drift_m[i]
+                along[other] += f * c.design_cross_drift_m[i]
+            end
+            Δa = allowable_story_drift(lv.story_height_m, risk_category, system)
+            for axis in (:x, :y)
+                m = _axis_drift_multiplier(analysis, axis, i)
+                # ASCE 7-22 §12.8.7 (corpus: asce-7-22, PDF page 188).
+                Δ = along[axis] * m
+                push!(multipliers, m)
+                push!(checks, SeismicStoryDriftCheck(
+                    lv.story, axis, effect.torsion, abs(Δ), Δa,
+                    story_drift_is_allowed(Δ, lv.story_height_m, risk_category, system),
+                    effect.label))
+            end
+        end
+    end
+    isempty(checks) && throw(ArgumentError(
+        "ordinary wall stage: the ELF analysis has no drift case to combine."))
     return checks, multipliers
 end
 

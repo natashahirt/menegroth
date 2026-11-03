@@ -77,6 +77,62 @@ function apply_composite_element_stiffness!(struc::BuildingStructure, beam::Beam
     return struc
 end
 
+"""Plan point, in metres, at station 0 of [`beam_signed_moment_field`](@ref)."""
+function _beam_field_origin(struc::BuildingStructure, beam::Beam)
+    segs = segment_indices(beam)
+    isempty(segs) && throw(ArgumentError("beam has no segments"))
+    idx = first(_frame_element_indices(struc, struc.segments[first(segs)].edge_idx))
+    p = struc.asap_model.frame_elements[idx].nodeStart.position
+    return (ustrip(u"m", p[1]), ustrip(u"m", p[2]))
+end
+
+"""
+Record what [`apply_composite_element_stiffness!`](@ref) used for `beam`, so the
+story shell can take the same inertia at its own stations.
+
+`regions` are the sagging regions of the moment field when the inertia was
+written. `ΣQn[k]` is the anchor strength of region `k`. `origin` is the plan
+point at station 0 of that field.
+"""
+function _record_composite_stiffness!(struc::BuildingStructure, beam::Beam,
+                                      section, material, slab, ΣQn_at;
+                                      left = nothing, right = nothing,
+                                      supports::AbstractVector{<:Real} = Float64[],
+                                      Asr = 0.0u"mm^2", d_rebar = 0.0u"m")
+    M_of_s, _ = beam_signed_moment_field(struc, beam)
+    regions = positive_moment_regions(M_of_s)
+    profiles = get!(() -> IdDict{Beam, NamedTuple}(), _composite_mesh!(struc),
+                    :stiffness_profiles)
+    profiles[beam] = (; section, material, slab, L = _beam_span_length(beam),
+                      left, right, supports = collect(Float64, supports),
+                      Asr, d_rebar, regions, ΣQn = [ΣQn_at(r) for r in regions],
+                      origin = _beam_field_origin(struc, beam))
+    return profiles[beam]
+end
+
+"""The recorded composite stiffness of `beam`, or `nothing`."""
+function composite_stiffness_profile(struc::BuildingStructure, beam::Beam)
+    mesh = _composite_mesh(struc)
+    mesh === nothing && return nothing
+    profiles = get(mesh, :stiffness_profiles, nothing)
+    profiles === nothing && return nothing
+    return get(profiles, beam, nothing)
+end
+
+"""
+    composite_stiffness_at(profile, s) -> SecondMomentOfArea
+
+Inertia at normalized station `s`, as [`composite_inertia_at_station`](@ref)
+gives it: `I_LB` with the region's anchors inside a sagging region, the
+cracked section outside.
+"""
+function composite_stiffness_at(p, s::Real)
+    return composite_inertia_at_station(p.section, p.material, p.slab, p.L, s, nothing,
+                                        r -> p.ΣQn[findfirst(==(r), p.regions)];
+                                        left = p.left, right = p.right, supports = p.supports,
+                                        Asr = p.Asr, d_rebar = p.d_rebar, regions = p.regions)
+end
+
 """Member length for the effective-width cap. A bare number is meters."""
 function _beam_span_length(beam::Beam)
     L = member_length(beam)

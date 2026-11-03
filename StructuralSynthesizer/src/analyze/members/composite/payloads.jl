@@ -253,6 +253,10 @@ that is set must match. `deck_e_mid_ht`, `deck_anchorage_spacing`, and
 `Asr` stays caller-supplied. `neg_moment` defaults to false, so hogging uses
 Chapter F until developed slab reinforcement and negative-region anchors are
 provided (AISC 360-22 §I3.2b).
+
+`shell_fields[i]`, when given, are the story-shell moment fields of
+`beams[i]`, one per load combination. They become the payload's
+`strength_fields`: sagging strength and anchors only, on each field's own zeros.
 """
 function composite_group_payload(
     struc::BuildingStructure, beams, L_beam, concrete, t_slab, Es;
@@ -275,7 +279,10 @@ function composite_group_payload(
     deck_attachment = :auto,
     d_rebar = 0.0u"m",
     variable_inertia::Bool = false,
+    shell_fields = nothing,
 )
+    shell_fields === nothing || length(shell_fields) == length(beams) || throw(ArgumentError(
+        "shell_fields must hold one vector of moment fields per beam"))
     anchor === nothing && throw(ArgumentError(
         "Composite beam design needs the stud anchor diameter (composite_anchor_d), " *
         "length (composite_anchor_length), and Fu (composite_anchor_Fu)."))
@@ -338,7 +345,15 @@ function composite_group_payload(
                            ΣQn_neg = ΣQn_neg, L_twist = L_twist,
                            deck_attachment = deck_attachment,
                            cp_class = cp_class, d_rebar = d_rebar)
-    return PerStationComposite(ctx, fields, variable_inertia)
+    # Same widths, span, slab, and supports as the beam's own field; only the moment differs.
+    strength = BeamSaggingField{ShellMomentField}[]
+    if shell_fields !== nothing
+        for (f, Ms) in zip(fields, shell_fields), M in Ms
+            push!(strength, BeamSaggingField(f.left, f.right, M, M.breakpoints,
+                                             f.L_beam, f.slab; supports = f.supports))
+        end
+    end
+    return PerStationComposite(ctx, fields, variable_inertia; strength_fields = strength)
 end
 
 """
@@ -351,7 +366,8 @@ in the group; each beam is still checked at its own span. `t_slab`, when
 given, overrides every beam. Otherwise each beam uses the solid thickness of
 the slab it bears on. `concrete` is the fallback when that slab's volume map
 does not name a concrete. It is not used in place of a concrete the slab
-already records.
+already records. `shell_fields` maps a beam index to its story-shell moment
+fields (see [`composite_group_payload`](@ref)).
 """
 function composite_payloads_for_groups(
     struc::BuildingStructure, group_ids, L_totals, concrete, Es;
@@ -366,6 +382,7 @@ function composite_payloads_for_groups(
     deck_attachment = :auto,
     d_rebar = 0.0u"m",
     variable_inertia::Bool = false,
+    shell_fields = nothing,
 )
     map(enumerate(group_ids)) do (g_idx, gid)
         mg = struc.member_groups[gid]
@@ -386,6 +403,9 @@ function composite_payloads_for_groups(
                                 L_twist = L_twist,
                                 deck_attachment = deck_attachment,
                                 d_rebar = d_rebar,
-                                variable_inertia = variable_inertia)
+                                variable_inertia = variable_inertia,
+                                shell_fields = shell_fields === nothing ? nothing :
+                                    [get(shell_fields, i, ShellMomentField[])
+                                     for i in mg.member_indices])
     end
 end

@@ -39,6 +39,13 @@ Thickness and concrete come from the sized slab unless the options override
 the thickness. There is no nominal stud. Hogging stays on Chapter F until
 `Asr` and negative-region anchors are provided.
 
+`shell_demands` (beam index → [`ShellBeamDemand`](@ref)) raises each group's
+sagging moment, hogging moment, and shear to the story-shell value where that
+is larger. See [`size_beams_with_story_shell!`](@ref). A composite beam's
+shell moment fields, one per load combination, are also checked for sagging
+strength and anchors on their own zeros (`strength_fields` of
+`PerStationComposite`).
+
 # Example
 ```julia
 # Steel beams with L/360 deflection check
@@ -76,6 +83,8 @@ function size_beams!(
     composite_deck_hr = nothing,
     composite_deck_wr = nothing,
     composite_deck_orientation = nothing,
+    # Beam index → ShellBeamDemand from `analyze_story_shell`. Raises, never lowers.
+    shell_demands = nothing,
 )
     dp = (hasproperty(struc, :design_parameters) && !isnothing(struc.design_parameters)) ?
          struc.design_parameters : nothing
@@ -189,11 +198,12 @@ function size_beams!(
                           member_group_overrides, I_factor,
                           composite_concrete, composite_t_slab, composite_anchor,
                           composite_shored, composite_cp_class, composite_slab_type,
-                          composite_deck_hr, composite_deck_wr, composite_deck_orientation)
+                          composite_deck_hr, composite_deck_wr, composite_deck_orientation,
+                          shell_demands)
     else
         _size_beams_impl!(struc, effective_opts, Val(strategy);
                           resolution, reanalyze, gravity_factor,
-                          member_group_overrides, I_factor)
+                          member_group_overrides, I_factor, shell_demands)
     end
     StructuralSizer.emit!(tc, :sizing, "size_beams!", "", :exit)
     return result
@@ -228,6 +238,7 @@ function _size_beams_impl!(
     composite_pass::Int = 1,
     prior_section_keys = nothing,
     composite_lock::Bool = false,
+    shell_demands = nothing,
 )
     if opts.composite && composite_anchor === nothing
         composite_anchor_from_options(opts)
@@ -243,7 +254,8 @@ function _size_beams_impl!(
     composite_pass == 1 && _add_gravity_loads!(struc, edge_ids_in_group, gravity_factor)
 
     group_ids, demands, L_totals, Lb_govs, Cb_govs, Kx_govs, Ky_govs =
-        member_group_demands(struc; member_edge_group=BEAM_GROUP_SYMBOLS, resolution=resolution)
+        member_group_demands(struc; member_edge_group=BEAM_GROUP_SYMBOLS, resolution=resolution,
+                             shell_demands=shell_demands)
 
     # DEFINITIVE size-time gid gate (Run 4 / Phase B, [P1-2] + [P2-3]). `group_ids`
     # here is the REAL steel-beam group set the sizer actually emits: collinear-MERGED
@@ -456,6 +468,7 @@ function _size_beams_impl!(
             L_twist = opts.composite_twist_spacing,
             deck_attachment = deck_attachment_from_options(opts),
             d_rebar = opts.composite_d_rebar === nothing ? 0.0u"m" : opts.composite_d_rebar,
+            shell_fields = _shell_moment_fields_by_beam(shell_demands),
             # The confirmation uses the solved deflection. A catalog search,
             # including the search after a failed confirmation, still scales
             # by inertia so a stiffer section can clear that deflection.
@@ -517,7 +530,7 @@ function _size_beams_impl!(
                           composite_deck_hr, composite_deck_wr,
                           composite_deck_orientation,
                           composite_pass = pass, prior_section_keys = keys,
-                          composite_lock = lock)
+                          composite_lock = lock, shell_demands)
     end
 
     shored_now = composite_shored === nothing ? opts.composite_shored : composite_shored
@@ -579,6 +592,16 @@ function _size_beams_impl!(
 
     @info "Sized $(length(group_ids)) steel beam groups via size_beams API"
     return struc
+end
+
+"""Beam index → its story-shell moment fields, or `nothing` when there are none."""
+function _shell_moment_fields_by_beam(shell_demands)
+    shell_demands === nothing && return nothing
+    out = Dict{Int, Vector{ShellMomentField}}()
+    for (i, d) in shell_demands
+        isempty(d.moment_fields) || (out[i] = d.moment_fields)
+    end
+    return isempty(out) ? nothing : out
 end
 
 """Steel NLP has no Chapter I path. A missing stud field is reported before that."""
@@ -981,6 +1004,7 @@ function _size_beams_impl!(
     # ACI 318-11 §10.10.4.1 — cracked-stiffness reduction for concrete beam sections,
     # threaded from params.beam_I_factor (default 0.35).
     I_factor::Real = 0.35,
+    shell_demands = nothing,
 )
     # DEFENSE-IN-DEPTH layer-symmetric guard (Phase B). This non-steel overload
     # ACCEPTS `member_group_overrides` for uniform `size_beams!` dispatch but does NOT
@@ -1011,7 +1035,8 @@ function _size_beams_impl!(
 
     # Extract demands from analysis (MemberDemand in SI: N, N·m, m)
     group_ids, demands, L_totals, Lb_govs, Cb_govs, Kx_govs, Ky_govs =
-        member_group_demands(struc; member_edge_group=BEAM_GROUP_SYMBOLS, resolution=resolution)
+        member_group_demands(struc; member_edge_group=BEAM_GROUP_SYMBOLS, resolution=resolution,
+                             shell_demands=shell_demands)
 
     isempty(group_ids) && return struc
 
@@ -1107,6 +1132,7 @@ function _size_beams_impl!(
     # threaded from params.beam_I_factor (default 0.35). All sections here are concrete
     # (ConcreteBeamOptions.material), so it is passed to every to_asap_section call below.
     I_factor::Real = 0.35,
+    shell_demands = nothing,
 )
     # DEFENSE-IN-DEPTH layer-symmetric guard (Phase B). This non-steel overload
     # ACCEPTS `member_group_overrides` for uniform `size_beams!` dispatch but does NOT
@@ -1137,7 +1163,8 @@ function _size_beams_impl!(
 
     # Extract demands from analysis (MemberDemand in SI: N, N·m, m)
     group_ids, demands, L_totals, Lb_govs, Cb_govs, Kx_govs, Ky_govs =
-        member_group_demands(struc; member_edge_group=BEAM_GROUP_SYMBOLS, resolution=resolution)
+        member_group_demands(struc; member_edge_group=BEAM_GROUP_SYMBOLS, resolution=resolution,
+                             shell_demands=shell_demands)
 
     isempty(group_ids) && return struc
 
@@ -1322,6 +1349,7 @@ function _size_beams_impl!(
     # builds its own ASAP sections (ACI 318-11 §10.10.4.1 cracked-stiffness factor is
     # applied internally by its own to_asap_section call), so the beam I_factor is unused.
     I_factor::Real = 0.35,
+    shell_demands = nothing,
 )
     # DEFENSE-IN-DEPTH layer-symmetric guard (Phase B). This non-steel overload
     # ACCEPTS `member_group_overrides` for uniform `size_beams!` dispatch but does NOT
@@ -1352,7 +1380,8 @@ function _size_beams_impl!(
 
     # Extract demands from analysis (MemberDemand in SI: N, N·m, m)
     group_ids, demands, L_totals, Lb_govs, Cb_govs, Kx_govs, Ky_govs =
-        member_group_demands(struc; member_edge_group=BEAM_GROUP_SYMBOLS, resolution=resolution)
+        member_group_demands(struc; member_edge_group=BEAM_GROUP_SYMBOLS, resolution=resolution,
+                             shell_demands=shell_demands)
 
     isempty(group_ids) && return struc
 

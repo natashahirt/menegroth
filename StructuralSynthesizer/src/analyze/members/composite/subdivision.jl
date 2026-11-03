@@ -173,7 +173,12 @@ function _subdivide_composite_edge!(struc::BuildingStructure, edge_idx::Int;
     for i in 1:(n - 1)
         t = i / n
         pos = [p1[k] + t * (p2[k] - p1[k]) for k in eachindex(p1)]
-        node = Asap.Node(pos, [true, true, true, true, true, true], :composite_split)
+        # Same start as every other frame node: translations free, rotations
+        # fixed. `_free_new_composite_rotations!` frees the bending rotations
+        # the children actually anchor. Leaving twist free on a released beam
+        # is a mechanism: a bending release drops torsion on the end piece,
+        # and the interior nodes then twist together.
+        node = Asap.Node(pos, [true, true, true, false, false, false], :composite_split)
         push!(model.nodes, node)
         push!(interior, node)
     end
@@ -202,6 +207,21 @@ function _subdivide_composite_edge!(struc::BuildingStructure, edge_idx::Int;
                                             :composite_parent; release = :fixedfixed)
     _clear_unshored_stage!(mesh)
     return idxs
+end
+
+"""
+Free bending rotations on composite split nodes.
+
+New split nodes are born with rotations fixed, matching
+[`_create_offset_nodes`](@ref). This applies the same rule as the model
+build: a rotation is freed only when the elements at the node couple it to
+a translation or to a support. Twist that a released end does not anchor
+stays fixed.
+"""
+function _free_new_composite_rotations!(model)
+    shells = hasproperty(model, :shell_elements) ? model.shell_elements : Asap.ShellElement[]
+    _free_restrained_node_rotations!(model.nodes, model.frame_elements, shells)
+    return model
 end
 
 include("openings.jl")
@@ -496,6 +516,8 @@ function _install_composite_analysis!(struc::BuildingStructure, result, group_id
     model = struc.asap_model
     # New nodes need a full process before the moment field can see the children.
     # Children are still steel. This solve places hogging and sagging.
+    # Free rotations before process! so the DOF map includes them.
+    grew && _free_new_composite_rotations!(model)
     if grew
         Asap.process!(model)
     else
@@ -730,6 +752,10 @@ function _write_beam_composite_ix!(struc, beam, section, material, field, ctx;
                                    slip_checked = ctx.slip_checked)
         return lay.ΣQn
     end
+    _record_composite_stiffness!(struc, beam, section, material, slab, ΣQn_at;
+                                 left = field.left, right = field.right,
+                                 supports = field.supports,
+                                 Asr = ctx.Asr, d_rebar = ctx.d_rebar)
     apply_composite_element_stiffness!(struc, beam, section, material, slab, ΣQn_at;
                                        left = field.left, right = field.right,
                                        supports = field.supports,

@@ -60,34 +60,33 @@ function section_with_strong_inertia(section::Asap.Section, Ix)
 end
 
 """
-    shell_beam_properties(section, h_slab, material; composite, I_service, b_eff, n)
-        -> NamedTuple
+    shell_beam_properties(section, h_slab, material) -> NamedTuple
 
 `(section, eccentricity)` for one frame beam on the story shell.
 
 A concrete beam is the gross web, hung below the soffit. A T-beam contributes
-its stem only: the flange is the shell. Steel sits on the shell nodes. When
-`composite` is set and `I_service` is given, the strong inertia is
-[`composite_beam_inertia`](@ref). Otherwise the steel section is the bare one.
-That bare section is the first pass, before the studs exist.
+its stem only: the flange is the shell. Steel sits on the shell nodes with
+its bare section. A composite beam's inertia varies along it, so the caller
+sets it piece by piece through `section_at` of [`story_shell`](@ref).
+
+That inertia is `I_LB` (AISC 360-22 Commentary Eq. C-I3-1, corpus:
+aisc-360-22, PDF p. 501) with nothing removed. Eq. C-I3-1 carries the
+concrete only as the force `ΣQn/Fy` at its centroid, with no bending of the
+slab about its own centre. The shell supplies exactly that bending, so the
+two add without overlap. With no anchors, `I_LB = I_s`, and the frame and
+shell are the bare beam beside its slab.
 
 # ENGINEERING JUDGMENT
 The story shell and the concrete web are both gross. `to_asap_section` of a
 concrete beam applies the 0.35 cracked-member factor, and that factor is not
 used here.
 """
-function shell_beam_properties(section::RCBeamSection, h_slab::Length, material::Concrete;
-                               composite::Bool = false, I_service = nothing,
-                               b_eff = nothing, n = nothing)
-    composite && throw(ArgumentError("a concrete beam is not a composite steel beam"))
+function shell_beam_properties(section::RCBeamSection, h_slab::Length, material::Concrete)
     asap = to_asap_section(section, material; I_factor = 1.0)
     return (section = asap, eccentricity = web_below_slab_eccentricity(h_slab, section))
 end
 
-function shell_beam_properties(section::RCTBeamSection, h_slab::Length, material::Concrete;
-                               composite::Bool = false, I_service = nothing,
-                               b_eff = nothing, n = nothing)
-    composite && throw(ArgumentError("a concrete beam is not a composite steel beam"))
+function shell_beam_properties(section::RCTBeamSection, h_slab::Length, material::Concrete)
     bw = ustrip(u"m", section.bw)
     hw = ustrip(u"m", section.h - section.hf)
     hw > 0 || throw(ArgumentError("a T-beam stem depth must be positive"))
@@ -104,50 +103,13 @@ function shell_beam_properties(section::RCTBeamSection, h_slab::Length, material
     return (section = asap, eccentricity = web_below_slab_eccentricity(h_slab, section))
 end
 
-function shell_beam_properties(section::PixelFrameSection, h_slab::Length, material;
-                               composite::Bool = false, I_service = nothing,
-                               b_eff = nothing, n = nothing)
-    composite && throw(ArgumentError("a concrete beam is not a composite steel beam"))
+function shell_beam_properties(section::PixelFrameSection, h_slab::Length, material)
     asap = to_asap_section(section, material; I_factor = 1.0)
     return (section = asap, eccentricity = web_below_slab_eccentricity(h_slab, section))
 end
 
-function shell_beam_properties(section::AbstractSection, h_slab::Length, material;
-                               composite::Bool = false, I_service = nothing,
-                               b_eff = nothing, n = nothing)
-    asap = to_asap_section(section, material)
-    ecc = (0.0, 0.0, 0.0, 0.0)
-    if !composite || I_service === nothing
-        return (section = asap, eccentricity = ecc)
-    end
-    (b_eff === nothing || n === nothing) && throw(ArgumentError(
-        "a composite shell beam needs b_eff and n = Es/Ec"))
-    Ix = composite_beam_inertia(I_service, b_eff, h_slab, n)
-    return (section = section_with_strong_inertia(asap, Ix), eccentricity = ecc)
-end
-
-"""
-    composite_beam_inertia(I_service, b_eff, t_slab, n) -> SecondMomentOfArea
-
-Strong-axis inertia to assign a composite steel frame that shares its nodes
-with the shell.
-
-`I_service` is the AISC inertia: `I_LB` from Commentary Eq. C-I3-1, or the
-cracked negative section (corpus: aisc-360-22, pages 501–502). `n` is
-`Es/Ec`. The shell already bends the slab about its own centre, and Eq. C-I3-1
-does not include that term, so it is removed here:
-
-    I_frame = I_service − b_eff t³ / (12 n)
-
-# ENGINEERING JUDGMENT
-The subtraction is the overlap between the shell and Eq. C-I3-1. It is floored
-at zero. The shell outside `b_eff` is the slab spanning between beams, and it
-is left in the shell.
-"""
-function composite_beam_inertia(I_service, b_eff::Length, t_slab::Length, n::Real)
-    n > 0 || throw(ArgumentError("modular ratio n = Es/Ec must be positive, got $n"))
-    I_slab = b_eff * t_slab^3 / (12 * n)
-    return max(I_service - I_slab, zero(I_service))
+function shell_beam_properties(section::AbstractSection, h_slab::Length, material)
+    return (section = to_asap_section(section, material), eccentricity = (0.0, 0.0, 0.0, 0.0))
 end
 
 """Points of `line` with no gap larger than `spacing`. Endpoints are kept."""

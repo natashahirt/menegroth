@@ -533,10 +533,32 @@ Per-group composite payload for beam sizing.
 re-solves the sagging governing station for each candidate section, because
 `ϕMn(b_eff)` is nonlinear in the section. Hogging stays on the demand envelope
 and the §I3.2b gates. Construction (§I3.1b) uses the pre-cure load on this span.
+
+`variable_inertia` is true when the solved deflection already used the
+per-element composite inertia. The checker then reports that deflection
+directly. Scaling it by `Ix / I_service` would count the composite stiffness twice.
+
+`strength_fields` are further moment fields on the same beams, one per load
+case, from another analysis of the floor. Each of their sagging regions is
+checked for strength and anchors on its own zeros (AISC 360-22 §I8.2c,
+corpus: aisc-360-22, PDF p. 183). They take no service, construction, or
+hogging check, and they do not set the analysis stiffness. A field per load
+case keeps each case's zeros: an envelope of the cases has the widest
+sagging regions and so the longest shear spans, which needs fewest anchors.
 """
-struct PerStationComposite{S<:AbstractSlabOnBeam, A<:AbstractSteelAnchor, TA, TP, BF}
+struct PerStationComposite{S<:AbstractSlabOnBeam, A<:AbstractSteelAnchor, TA, TP, BF, SF}
     ctx::CompositeContext{S, A, TA, TP}
     fields::Vector{BF}
+    variable_inertia::Bool
+    strength_fields::Vector{SF}
+end
+
+function PerStationComposite(ctx::CompositeContext, fields::Vector,
+                             variable_inertia::Bool = false;
+                             strength_fields::Vector = BeamSaggingField[])
+    isempty(fields) && !isempty(strength_fields) && throw(ArgumentError(
+        "strength_fields need at least one beam field"))
+    return PerStationComposite(ctx, fields, variable_inertia, strength_fields)
 end
 
 """Copy `slab` with new center-to-center spacings and no slab-edge distances."""
@@ -580,7 +602,8 @@ function context_at_sagging_station(ctx::CompositeContext, st::CompositeSaggingS
                             L_twist = ctx.L_twist,
                             deck_attachment = ctx.deck_attachment,
                             slip_checked = ctx.slip_checked,
-                            construction = ctx.construction)
+                            construction = ctx.construction,
+                            d_rebar = ctx.d_rebar)
 end
 
 """Copy `ctx` with this beam's analysis dead-load shape on the pre-cure stage."""
@@ -595,7 +618,8 @@ function _context_with_pre_cure(ctx::CompositeContext, shape)
                             L_twist = ctx.L_twist,
                             deck_attachment = ctx.deck_attachment,
                             slip_checked = ctx.slip_checked,
-                            construction = stage)
+                            construction = stage,
+                            d_rebar = ctx.d_rebar)
 end
 
 """Tributary width, then this beam's dead-load shape, then the station span."""
@@ -618,7 +642,8 @@ function _context_for_construction(ctx::CompositeContext, slab, left, right)
                             L_twist = ctx.L_twist,
                             deck_attachment = ctx.deck_attachment,
                             slip_checked = ctx.slip_checked,
-                            construction = stage)
+                            construction = stage,
+                            d_rebar = ctx.d_rebar)
 end
 
 """
@@ -828,7 +853,8 @@ end
 
 """
     composite_inertia_at_station(section, material, slab, L, s, demand_of_s, ΣQn_at;
-        left=nothing, right=nothing, supports=Float64[], Asr=0.0u"mm^2", d_rebar=0.0u"m")
+        left=nothing, right=nothing, supports=Float64[], Asr=0.0u"mm^2",
+        d_rebar=0.0u"m", regions=nothing)
 
 Strong-axis inertia at normalized station `s`.
 
@@ -848,8 +874,10 @@ function composite_inertia_at_station(section::ISymmSection, material,
                                       left::Union{SideExtentProfile, Nothing} = nothing,
                                       right::Union{SideExtentProfile, Nothing} = nothing,
                                       supports::AbstractVector{<:Real} = Float64[],
-                                      Asr = 0.0u"mm^2", d_rebar = 0.0u"m")
-    regions = positive_moment_regions(demand_of_s)
+                                      Asr = 0.0u"mm^2", d_rebar = 0.0u"m",
+                                      regions = nothing)
+    # Callers that stamp many stations pass the regions once.
+    regions = regions === nothing ? positive_moment_regions(demand_of_s) : regions
     sc = float(s)
     k = findfirst(r -> r.s_left - 1e-9 <= sc <= r.s_right + 1e-9, regions)
     k === nothing && return get_I_cracked_negative(section, Asr; d_rebar = d_rebar)

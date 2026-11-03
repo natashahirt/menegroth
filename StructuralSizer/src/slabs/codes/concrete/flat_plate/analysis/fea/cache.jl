@@ -134,11 +134,13 @@ end
 """
     fea_mesh_key(struc, slab, columns; target_edge=nothing, drop_panel=nothing) -> Tuple
 
-Topology inputs of the shell mesh: slab vertices, column centers and sizes,
-target edge, and drop-panel plan. Thickness and modulus are not included;
-those take the update path. Column sizes are the sizes at the start of a
-design. Later iterations of that same design keep this key, so a column that
-grows does not remesh mid-loop. The next design acquires a new key.
+Topology inputs of the shell mesh: slab vertices, column centers, sizes,
+position and orientation, the span axis, target edge, and drop-panel plan.
+The drop patch is clipped from those, so a change in any of them rebuilds
+the mesh. Thickness and modulus are not included;
+those take the update path. [`_build_or_update_fea!`](@ref) recomputes the key
+on every analysis, so a column that grows between iterations rebuilds the mesh
+and its patch matches the new column.
 """
 function fea_mesh_key(struc, slab, columns;
                       target_edge::Union{Nothing, Length} = nothing,
@@ -151,7 +153,8 @@ function fea_mesh_key(struc, slab, columns;
     edges = Tuple(sort!(collect(interior_edges)))
     cols = Tuple(
         let xy = _column_xy_m(skel, col)
-            (xy[1], xy[2], _m(col.c1), _m(col.c2))
+            pos = hasproperty(col, :position) ? col.position : :interior
+            (xy[1], xy[2], _m(col.c1), _m(col.c2), pos, col_orientation(col))
         end
         for col in columns
     )
@@ -162,7 +165,9 @@ function fea_mesh_key(struc, slab, columns;
     te = target_edge === nothing ? nothing : _m(target_edge)
     dp = drop_panel === nothing ? nothing :
         (_m(drop_panel.h_drop), _m(drop_panel.a_drop_1), _m(drop_panel.a_drop_2))
-    return (bxy, verts, edges, cols, spans, te, dp)
+    # The drop patch is clipped at free edges and aligned to the span, so both
+    # belong in the key.
+    return (bxy, verts, edges, cols, spans, te, dp, _get_span_axis(slab))
 end
 
 """
@@ -180,5 +185,20 @@ function acquire_fea_cache!(slab_caches::AbstractDict, key)
         slab_caches[:fea] = cache
     end
     cache.mesh_key = key
+    return cache
+end
+
+"""
+    _reset_fea_cache!(cache) -> FEAModelCache
+
+Return every field of `cache` to the state of a fresh `FEAModelCache()`.
+Element data, per-cell live-load fields, the dead-load displacement and the
+median edge length all belong to one mesh, so none of them survive a remesh.
+"""
+function _reset_fea_cache!(cache::FEAModelCache)
+    fresh = FEAModelCache()
+    for f in fieldnames(FEAModelCache)
+        setfield!(cache, f, getfield(fresh, f))
+    end
     return cache
 end

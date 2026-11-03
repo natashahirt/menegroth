@@ -22,7 +22,7 @@
 """
     build_slab_shell_patches(struc, columns, section;
         drop_panel=nothing, patch_stiffness_factor=100.0,
-        vertex_set=nothing) -> Vector{Asap.ShellPatch}
+        vertex_set=nothing, span_axis=(1.0, 0.0)) -> Vector{Asap.ShellPatch}
 
 Build ShellPatch objects for columns (and optionally drop panels) to enforce mesh
 conformity at column perimeters and drop panel boundaries.
@@ -40,6 +40,8 @@ mesh vertices respect patch boundaries and refinement happens around them.
 - `patch_stiffness_factor`: Multiplier for patch E (default 100, a rigid footprint)
 - `vertex_set`: Optional `Set{Int}` of slab vertex indices; columns with
   `vertex_idx ∉ vertex_set` are skipped. Pass `nothing` to include all columns.
+- `span_axis`: Unit vector of span direction 1. The drop is `±a1` along this
+  axis and `±a2` along its left normal, then clipped at a free edge.
 
 # Returns
 `Vector{Asap.ShellPatch}` — column patches (and drop panel patches when present).
@@ -49,6 +51,7 @@ function build_slab_shell_patches(
     drop_panel::Union{Nothing, DropPanelGeometry} = nothing,
     patch_stiffness_factor::Float64 = 100.0,
     vertex_set::Union{Nothing, Set{Int}} = nothing,
+    span_axis::NTuple{2, Float64} = (1.0, 0.0),
 )
     skel = struc.skeleton
     h_m = section.thickness
@@ -96,20 +99,30 @@ function build_slab_shell_patches(
         drop_section = Asap.ShellSection(
             uconvert(u"m", h_total), E_Pa * u"Pa", ν_val; name=:drop_panel_patch
         )
-        a1_m = ustrip(u"m", drop_panel.a_drop_1)
-        a2_m = ustrip(u"m", drop_panel.a_drop_2)
-        w_drop = 2 * a1_m
-        h_drop_m = 2 * a2_m
+        # Same outline the punching check uses: ±a1 along the span, ±a2 across
+        # it, clipped where a free edge cuts the drop. ACI 318-11 §11.11.1.2
+        # (corpus: aci-318-11, page 200).
         for col in columns
             vi = col.vertex_idx
             isnothing(vertex_set) || vi in vertex_set || continue
             xy = _column_xy_m(skel, col)
-            push!(patches, Asap.ShellPatch(xy[1], xy[2], w_drop, h_drop_m,
-                                           drop_section; id=:drop_panel))
+            outline = _column_drop_outline(col, drop_panel, span_axis)
+            verts = Tuple{Float64, Float64}[
+                (xy[1] + p[1], xy[2] + p[2]) for p in outline.polygon]
+            center = (xy[1] + outline.centroid[1], xy[2] + outline.centroid[2])
+            push!(patches, Asap.ShellPatch(verts, center, drop_section, :drop_panel))
         end
     end
 
     return patches
+end
+
+"""Clipped drop outline in the column-centre frame. Interior columns stay the full rectangle."""
+function _column_drop_outline(col, drop_panel::DropPanelGeometry, span_axis)
+    position = hasproperty(col, :position) ? col.position : :interior
+    swapped = position === :edge && _infer_free_edge_parallel(col) === :c1
+    return drop_outline(col.c1, col.c2, drop_panel.a_drop_1, drop_panel.a_drop_2,
+                        position, col_orientation(col), span_axis; swapped = swapped)
 end
 
 """Plan loops of the unframed openings that meet this slab's faces. `face_idx` keeps one face."""
@@ -168,10 +181,39 @@ function _opening_meets_face(opening, faces)
 end
 
 """
+Panels of `slab` that have a corner at `col`, each with its own column-strip
+half-width `0.25 * min(l1, l2)` (ACI 318-11 §13.2.1, corpus: aci-318-11, page 244).
+
+The polygon is in absolute plan metres. With no framing cell on the slab, one
+uncipped cross uses the slab's governing spans.
+"""
+function _column_strip_panels(struc, slab, col)
+    vi = hasproperty(col, :vertex_idx) ? Int(col.vertex_idx) : 0
+    panels = Any[]
+    skel = struc.skeleton
+    if vi > 0
+        for ci in slab.cell_indices
+            cell = struc.cells[ci]
+            hasproperty(cell, :spans) || continue
+            vis = skel.face_vertex_indices[cell.face_idx]
+            any(v -> Int(v) == vi, vis) || continue
+            half = 0.25 * min(cell.spans.primary, cell.spans.secondary)
+            poly = NTuple{2, Float64}[_vertex_xy_m(skel, Int(v)) for v in vis]
+            push!(panels, (half, poly))
+        end
+    end
+    if isempty(panels)
+        half = 0.25 * min(slab.spans.primary, slab.spans.secondary)
+        push!(panels, (half, nothing))
+    end
+    return panels
+end
+
+"""
 Opening arguments for one column's §11.11.6 punching reduction.
 
-The column-strip half-width is `0.25 * min(l1, l2)` (ACI 318-11 §13.2.1,
-corpus: aci-318-11, page 244). The spans used are the slab's governing spans.
+The column centre is the structural centre (vertex plus `structural_offset`).
+Column-strip half-widths come from the panels that frame the column.
 
 # ENGINEERING JUDGMENT
 §11.11.6 names flat slabs for the column-strip trigger. A flat plate is
@@ -180,10 +222,13 @@ checked with the `10h` rule only.
 function column_opening_punching(struc, slab, col)
     loops = slab_opening_loops(struc, slab)
     isempty(loops) && return (;)
-    xy = _vertex_xy_m(struc.skeleton, col.vertex_idx)
-    half = 0.25 * min(slab.spans.primary, slab.spans.secondary)
+    xy = _column_xy_m(struc.skeleton, col)
+    θcol = hasproperty(col, :θ) ? Float64(col.θ) : 0.0
     return (openings = loops, column_xy = (xy[1], xy[2]),
-            flat_slab = slab.floor_type == :flat_slab, column_strip_half = half)
+            flat_slab = slab.floor_type == :flat_slab,
+            column_strips = _column_strip_panels(struc, slab, col),
+            span_axis = _get_span_axis(slab),
+            θ = θcol)
 end
 
 """
@@ -238,7 +283,8 @@ function build_slab_shell_mesh(
     patches = build_slab_shell_patches(struc, columns, section;
         drop_panel=drop_panel,
         patch_stiffness_factor=patch_stiffness_factor,
-        vertex_set=vertex_set)
+        vertex_set=vertex_set,
+        span_axis=_get_span_axis(slab))
 
     # ─── 4. Interior nodes + conforming nodes along interior cell edges ───
     boundary_set = Set(boundary_vis)

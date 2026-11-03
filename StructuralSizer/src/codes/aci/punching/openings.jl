@@ -541,24 +541,22 @@ function _offset_drop_section(poly, d::Length, planes)
 end
 
 """
-    drop_plan_section(c1, c2, a1, a2, d, position, column_θ, span_axis; swapped=false)
+    drop_outline(c1, c2, a1, a2, position, column_θ, span_axis; swapped=false)
         -> NamedTuple
 
-`area` is the area inside the critical section (the `b1·b2` used to remove
-`qu·A` from the shear). It closes an open perimeter along the free edges.
+The drop panel in plan. `polygon` and `centroid` are metres with the column
+centre at the origin.
 
-The drop panel is the rectangle `±a1` along `span_axis` and `±a2` along its
-left normal, centred on the column, clipped to the slab's free edges. The
-critical section is `d/2` outside that outline. `centroid` is the centroid of
-the clipped drop, in the same frame (column centre at the origin).
-
-An edge or corner column whose drop crosses a free edge has that centroid off
-the column centre. `h` for the `10h` test at this section is the slab thickness
-outside the drop.
+The rectangle is `±a1` along `span_axis` and `±a2` along its left normal.
+An edge or corner column is clipped at the free edge, which passes through
+the column face, so the drop stops where the slab stops. That polygon is the
+region the shell thickens, and the outline the critical section is offset
+from (ACI 318-11 §11.11.1.2, corpus: aci-318-11, page 200; drop extents
+ACI 318-11 §13.2.5).
 """
-function drop_plan_section(c1::Length, c2::Length, a1::Length, a2::Length, d::Length,
-                          position::Symbol, column_θ::Float64, span_axis;
-                          swapped::Bool = false)
+function drop_outline(c1::Length, c2::Length, a1::Length, a2::Length,
+                     position::Symbol, column_θ::Float64, span_axis;
+                     swapped::Bool = false)
     φ = atan(_unit_axis(span_axis)[2], _unit_axis(span_axis)[1])
     ax, ay = ustrip(u"m", a1), ustrip(u"m", a2)
     rect = [_rot2(x, y, φ) for (x, y) in ((-ax, -ay), (ax, -ay), (ax, ay), (-ax, ay))]
@@ -574,17 +572,40 @@ function drop_plan_section(c1::Length, c2::Length, a1::Length, a2::Length, d::Le
     if position === :corner
         push!(planes, (_rot2(0.0, hy, ang), _rot2(0.0, -1.0, ang)))
     end
-    reaction = rect
+    polygon = rect
     for (pt, nrm) in planes
-        reaction = _clip_halfplane(reaction, pt, nrm)
+        polygon = _clip_halfplane(polygon, pt, nrm)
     end
-    length(reaction) < 3 && throw(ArgumentError(
+    length(polygon) < 3 && throw(ArgumentError(
         "the drop panel lies outside the slab; the free edges remove it"))
-    section, closed = _offset_drop_section(reaction, d, planes)
+    return (polygon = polygon, centroid = _poly_centroid(polygon), planes = planes)
+end
+
+"""
+    drop_plan_section(c1, c2, a1, a2, d, position, column_θ, span_axis; swapped=false)
+        -> NamedTuple
+
+`area` is the area inside the critical section (the `b1·b2` used to remove
+`qu·A` from the shear). It closes an open perimeter along the free edges.
+
+The drop panel is [`drop_outline`](@ref). The critical section is `d/2`
+outside that outline. `centroid` is the centroid of the clipped drop, in the
+same frame (column centre at the origin).
+
+An edge or corner column whose drop crosses a free edge has that centroid off
+the column centre. `h` for the `10h` test at this section is the slab thickness
+outside the drop.
+"""
+function drop_plan_section(c1::Length, c2::Length, a1::Length, a2::Length, d::Length,
+                          position::Symbol, column_θ::Float64, span_axis;
+                          swapped::Bool = false)
+    outline = drop_outline(c1, c2, a1, a2, position, column_θ, span_axis; swapped = swapped)
+    reaction = outline.polygon
+    section, closed = _offset_drop_section(reaction, d, outline.planes)
     pts = [(p[1] * u"m", p[2] * u"m") for p in section]
     return (points = pts, closed = closed, reaction = reaction,
-            centroid = _poly_centroid(reaction),
-            area = _drop_section_area(section, closed, planes) * u"m^2")
+            centroid = outline.centroid,
+            area = _drop_section_area(section, closed, outline.planes) * u"m^2")
 end
 
 """

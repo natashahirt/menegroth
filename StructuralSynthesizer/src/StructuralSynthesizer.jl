@@ -167,7 +167,6 @@ export has_analysis_model, build_analysis_model!
 
 # --- Design workflow ---
 export design_building, compare_designs, build_pipeline, PipelineStage, sync_asap!
-export analyze_story_shell, ShellBeamDemand, story_shell_beam_demands, size_beams_with_story_shell!
 export prepare!, capture_design
 export floor_design_request, design_floor, design_floor!, design_floors!, install_floor_design!
 
@@ -229,7 +228,7 @@ export beam_side_profiles, composite_context_from_beam
 export beam_interior_supports, beam_support_lookup
 export beam_signed_moment_field, check_composite_beam, composite_deflection_scale
 export apply_composite_element_stiffness!, refine_composite_stiffness!
-export set_slab_openings!, SlabOpening, add_slab_opening!, face_openings, face_opening_loops, face_net_area
+export set_slab_openings!
 export composite_group_payload, composite_payloads_for_groups, composite_anchor_from_options
 export classify_column_position, is_exterior_support  # Column position classification for DDM/EFM
 export slab_material_angle, classify_corner_kind       # Corner refinement (convex vs re-entrant)

@@ -17,9 +17,12 @@
 #         floor's wall nodes plus a centroid master, modulus `diaphragm_E`; or
 #       `:rigid` — in-plane `Asap.RigidLink`s tying `(u_x, u_y, θ_z)` only.
 #         The penalty shell is not built in `:rigid`.
-#   - Story lateral loads are `Asap.NodeForce`s at the floor master nodes.
-#   - `Asap.solve!` (linear static), then drift from master-node displacements
-#     and per-wall shear from `Asap.ShellInternalForces(...).Nxy`.
+#   - Story lateral loads act at `StoryLoad`'s `(ex, ey)`: the force goes on the
+#     floor master node plus the transfer couple (ex,ey − master) × F as a pair of
+#     nodal forces on that floor's wall nodes. No ASCE 7 accidental eccentricity
+#     is added in this tier.
+#   - `Asap.solve!` (linear static), then drift from the master-node displacement
+#     carried rigidly to the plan origin, and per-wall shear from base reactions.
 #
 # The reduced `ReducedDiaphragmEvaluator` is the known-answer oracle: on a
 # symmetric core the two tiers must agree on drift (see test/walls). FEM per-wall
@@ -106,6 +109,34 @@ end
 """Integer key (mm resolution) for sharing coincident `Node`s by identity."""
 @inline _nkey(x, y, z) = (round(Int, x * 1000), round(Int, y * 1000), round(Int, z * 1000))
 
+"""
+    _couple_forces(nodes, Mz) -> Vector{Asap.NodeForce}
+
+A plan couple `Mz` [N·m] (counterclockwise positive) as two equal and opposite
+in-plane nodal forces `∓(Mz/L)·n̂` on the two floor nodes farthest apart, where
+`L` is their distance and `n̂ = ẑ × (b − a)/L`. Nodal forces are used instead of
+a θz moment because the penalty-shell master hangs on drilling DOFs only. Empty
+when `Mz == 0`; throws if the floor has no two distinct nodes to carry it.
+"""
+function _couple_forces(nodes::Vector{Asap.Node}, Mz::Float64)
+    iszero(Mz) && return Asap.NodeForce[]
+    plan(nd) = (ustrip(u"m", nd.position[1]), ustrip(u"m", nd.position[2]))
+    best = (0.0, 0, 0)
+    for i in eachindex(nodes), j in (i+1):lastindex(nodes)
+        (xi, yi) = plan(nodes[i]); (xj, yj) = plan(nodes[j])
+        L = hypot(xj - xi, yj - yi)
+        L > best[1] && (best = (L, i, j))
+    end
+    L, i, j = best
+    L > 0 || throw(ArgumentError(
+        "FEMLateralEvaluator: a story load off the master needs two distinct floor nodes"))
+    (xa, ya) = plan(nodes[i]); (xb, yb) = plan(nodes[j])
+    f = Mz / L
+    nx = -(yb - ya) / L; ny = (xb - xa) / L
+    return [Asap.NodeForce(nodes[j], [f * nx, f * ny, 0.0] .* u"N"),
+            Asap.NodeForce(nodes[i], [-f * nx, -f * ny, 0.0] .* u"N")]
+end
+
 # ------------------------------------------------------------------------------
 # Model assembly
 # ------------------------------------------------------------------------------
@@ -170,6 +201,7 @@ function _build_asap_wall_model(ev::FEMLateralEvaluator,
     # :rigid ties the same in-plane DOFs as production and builds no fan.
     elevs = _elevations(ev)
     floor_master = Dict{Int,Asap.Node}()
+    floor_nodes = Dict{Int,Vector{Asap.Node}}()
     diaphragm_shells = Asap.ShellTri3[]
     rigid_links = Asap.RigidLink[]
     nstory = length(ev.story_heights)
@@ -178,6 +210,7 @@ function _build_asap_wall_model(ev::FEMLateralEvaluator,
         # wall nodes at this floor elevation
         fnodes = [nd for nd in all_nodes if isapprox(ustrip(u"m", nd.position[3]), zf; atol=1e-6)]
         length(fnodes) < 1 && continue
+        floor_nodes[s] = copy(fnodes)
         if ev.diaphragm_mode == :rigid
             # Elect one existing floor node as master (lowest plan position).
             # A new centroid node would be disconnected in the unreduced stiffness.
@@ -215,12 +248,15 @@ function _build_asap_wall_model(ev::FEMLateralEvaluator,
         end
     end
 
-    # --- story lateral loads at floor masters (accidental ecc → torsion moment) ---
+    # --- story lateral loads, statically equivalent to F acting at (ex, ey) ---
     asap_loads = Asap.NodeForce[]
     for ld in loads
         haskey(floor_master, ld.story) || continue
         m = floor_master[ld.story]
         push!(asap_loads, Asap.NodeForce(m, [ld.Fx, ld.Fy, 0.0] .* u"N"))
+        mx = ustrip(u"m", m.position[1]); my = ustrip(u"m", m.position[2])
+        Mz = (ld.ex - mx) * ld.Fy - (ld.ey - my) * ld.Fx
+        append!(asap_loads, _couple_forces(floor_nodes[ld.story], Mz))
     end
 
     shells = vcat(wall_shells, diaphragm_shells)
@@ -316,14 +352,19 @@ function evaluate_lateral(ev::FEMLateralEvaluator,
     wall_forces = Dict{Int,Float64}(p.id => 0.0 for p in panels)
     wall_forces_withheld = Set{Int}()   # upper-story ids with no validated demand
 
-    # master-node in-plane displacement per floor: u = [ux, uy, θz]
+    # Floor in-plane displacement at the plan origin, u = [ux, uy, θz]: the master
+    # displacement carried rigidly from the master position (mx, my), since the
+    # torsion metric and drift are referenced to the plan origin.
     master_u = zeros(nstory, 3)
     for s in 1:nstory
         haskey(floor_master, s) || continue
-        gid = floor_master[s].globalID
-        master_u[s, 1] = model.u[gid[1]]
-        master_u[s, 2] = model.u[gid[2]]
-        master_u[s, 3] = model.u[gid[6]]   # drilling / θz
+        m = floor_master[s]
+        gid = m.globalID
+        θz = model.u[gid[6]]
+        mx = ustrip(u"m", m.position[1]); my = ustrip(u"m", m.position[2])
+        master_u[s, 1] = model.u[gid[1]] + θz * my
+        master_u[s, 2] = model.u[gid[2]] - θz * mx
+        master_u[s, 3] = θz
     end
 
     for s in 1:nstory

@@ -637,12 +637,15 @@ end
     # Symmetric 4-wall core, 1 story. FEM (Asap shells + stiff diaphragm) must
     # equilibrate the applied shear and agree with the reduced model on the load
     # split; drift is the same order (FEM stiffer for these squat piers).
+    # Panels 2 and 4 run opposite to 1 and 3 so the triangle diagonals mirror
+    # and the meshed core is symmetric too; with all panels running the same way
+    # the mesh alone twists the floor (torsion ≈ 1.002 at mesh_div=3).
     E = 25e9; ν = 0.2; t = 0.3; H = 3.0; lw = 4.0
     panels = WallPanel[
         WallPanel(1, -2.0, -5.0,  2.0, -5.0, 0.0, H, t, E, ν, 1),
-        WallPanel(2, -2.0,  5.0,  2.0,  5.0, 0.0, H, t, E, ν, 1),
+        WallPanel(2,  2.0,  5.0, -2.0,  5.0, 0.0, H, t, E, ν, 1),
         WallPanel(3, -5.0, -2.0, -5.0,  2.0, 0.0, H, t, E, ν, 1),
-        WallPanel(4,  5.0, -2.0,  5.0,  2.0, 0.0, H, t, E, ν, 1),
+        WallPanel(4,  5.0,  2.0,  5.0, -2.0, 0.0, H, t, E, ν, 1),
     ]
     femev = FEMLateralEvaluator(story_heights=[H], mesh_div=3, plan_halfwidth=(5.0, 5.0))
     Fx = 1e5
@@ -652,7 +655,7 @@ end
     @test isapprox(res.wall_forces[1] + res.wall_forces[2], Fx; rtol=0.05)
     @test isapprox(res.wall_forces[1], res.wall_forces[2]; rtol=0.05)     # symmetric split
     @test res.wall_forces[3] < 0.02 * Fx && res.wall_forces[4] < 0.02 * Fx # transverse ~0
-    @test res.torsion[1] ≈ 1.0 atol=1e-3                                  # symmetric
+    @test res.torsion[1] ≈ 1.0 atol=1e-6                                  # symmetric
 
     # Cross-check drift against the reduced model (gross stiffness, same order).
     k = wall_stiffness_from_thickness_si(t, lw, E, ν, H; cracked=false)

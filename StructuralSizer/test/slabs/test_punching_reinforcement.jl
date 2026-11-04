@@ -47,8 +47,10 @@ const _vu_high = 350.0u"psi"     # High demand
 
         @test stirrups.required == true
         @test stirrups.bar_size == 4
-        @test stirrups.n_legs == 8   # Interior: 2 per face × 4 faces
-        @test stirrups.n_lines >= 3  # Minimum 3 peripheral lines
+        # 20" faces > 2d = 18" → 3 legs per face × 4 faces (§11.11.3.3)
+        @test stirrups.n_legs == 12
+        @test stirrups.n_lines >= 2  # ACI 421.1R-99 §3.4 Step 4: ≥ 2 lines
+        @test stirrups.outer_ok
 
         # vcs capped at 2λ√f'c = 2×1×√4000 ≈ 126.5 psi (§11.11.3.1)
         vcs_psi = ustrip(u"psi", stirrups.vcs)
@@ -63,8 +65,8 @@ const _vu_high = 350.0u"psi"     # High demand
         # vc_max = 6√f'c (§11.11.3.2)
         @test ustrip(u"psi", stirrups.vc_max) ≈ 6.0 * sqrt(4000) atol=1.0
 
-        # Av per line = n_legs × Ab(#4) = 8 × 0.20 = 1.60 in²
-        @test ustrip(u"inch^2", stirrups.Av_per_line) ≈ 8 * 0.20 atol=0.01
+        # Av per line = n_legs × Ab(#4) = 12 × 0.20 = 2.40 in²
+        @test ustrip(u"inch^2", stirrups.Av_per_line) ≈ 12 * 0.20 atol=0.01
     end
 
     @testset "Minimum depth check — d < 6 in." begin
@@ -111,7 +113,7 @@ const _vu_high = 350.0u"psi"     # High demand
             _vu_moderate, _fc, _β, 30, b0_edge, _d, :edge, _fyt, 4;
             λ=_λ, φ=_φ, c1=_c1, c2=_c2)
 
-        @test stirrups.n_legs == 6  # Edge: 2 per face × 3 faces
+        @test stirrups.n_legs == 9  # Edge: 3 per face × 3 faces (20" > 2d)
     end
 
     @testset "Corner column — fewest legs" begin
@@ -121,7 +123,7 @@ const _vu_high = 350.0u"psi"     # High demand
             _vu_moderate, _fc, _β, 20, b0_corner, _d, :corner, _fyt, 4;
             λ=_λ, φ=_φ, c1=_c1, c2=_c2)
 
-        @test stirrups.n_legs == 4  # Corner: 2 per face × 2 faces
+        @test stirrups.n_legs == 6  # Corner: 3 per face × 2 faces (20" > 2d)
     end
 
     @testset "check_punching_with_stirrups" begin

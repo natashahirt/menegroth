@@ -210,7 +210,7 @@ function solve_column_for_punching(col, ratio::Float64, b0_current::Length, d::L
 
         # Enforce aspect ratio constraint
         if shape_constraint == :bounded
-            _enforce_aspect_ratio!(c1, c2, max_ar, increment)
+            c1, c2 = _enforce_aspect_ratio!(c1, c2, max_ar, increment)
         end
 
         return (c1, c2)

@@ -10,6 +10,7 @@
 #   - Vn capped at 6√f'c·b0·d (vs 8√f'c for studs)       §11.11.3.2
 #   - Minimum d ≥ 6 in. AND d ≥ 16·d_b                    §11.11.3
 #   - Radial spacing ≤ d/2, tangential spacing ≤ 2d        §11.11.3.3
+#   - Outer section d/2 beyond the last line ≤ φ·2λ√f'c    §11.11.7.2(b)
 #   - Anchorage per §12.13 (difficult in slabs < 10 in.)
 #
 # Vs is computed per Eq. (11-15): Vs = Av·fyt·d / s
@@ -26,7 +27,9 @@ const STIRRUP_BAR_SIZES = [3, 4, 5]
 
 """
     design_closed_stirrups(vu, fc, β, αs, b0, d, position, fyt, bar_size;
-                           λ=1.0, φ=0.75, c1=nothing, c2=nothing, qu=nothing)
+                           λ=1.0, φ=0.75, c1=nothing, c2=nothing, qu=nothing,
+                           Vu=nothing, M_about_x=nothing, M_about_y=nothing,
+                           max_extent=nothing)
 
 Design closed stirrup reinforcement for a punching shear failure.
 
@@ -35,10 +38,11 @@ Design closed stirrup reinforcement for a punching shear failure.
 2. Compute vc with stirrups: min(Eq. 11-31, 11-32, 11-33), capped at 2λ√f'c
 3. Compute required vs = vu/φ − vcs
 4. Check Vn ≤ 6√f'c·b0·d
-5. Select number of legs based on position
+5. Place legs at both ends of each face, ≤ 2d apart on the first line (§11.11.3.3)
 6. Compute spacing s = Av·fyt / (b0·vs)
 7. Apply spacing limits: s ≤ d/2 radial, first line ≤ d/2 from face
-8. Determine number of peripheral lines for outer section adequacy
+8. Add peripheral lines until the section d/2 beyond the last line satisfies
+   vu ≤ φ·2λ√f'c (§11.11.7.2(b))
 
 # Arguments
 - `vu`: Factored shear stress demand
@@ -54,14 +58,14 @@ Design closed stirrup reinforcement for a punching shear failure.
 # Keyword Arguments
 - `λ`: Lightweight concrete factor (default: 1.0)
 - `φ`: Strength reduction factor (default: 0.75)
-- `c1`, `c2`: Column dimensions (for outer section geometry; optional)
-- `qu`: Factored uniform pressure (for outer section Vu reduction; optional)
+- `c1`, `c2`, `qu`, `Vu`, `M_about_x`, `M_about_y`, `max_extent`: outer section
+  geometry, demand, and extent limit, as in [`design_shear_studs`](@ref).
 
 # Returns
 `ClosedStirrupDesign` struct
 
 # Reference
-- ACI 318-11 §11.11.3
+- ACI 318-11 §11.11.3, §11.11.7.2(b) (corpus: aci-318-11, pages 202–204, 210)
 """
 function design_closed_stirrups(
     vu::Pressure,
@@ -77,7 +81,11 @@ function design_closed_stirrups(
     φ::Float64 = 0.75,
     c1::Union{Length, Nothing} = nothing,
     c2::Union{Length, Nothing} = nothing,
-    qu::Union{Pressure, Nothing} = nothing
+    qu::Union{Pressure, Nothing} = nothing,
+    Vu::Union{Force, Nothing} = nothing,
+    M_about_x::Union{Moment, Nothing} = nothing,
+    M_about_y::Union{Moment, Nothing} = nothing,
+    max_extent::Union{Length, Nothing} = nothing,
 )
     d_in = ustrip(u"inch", d)
     b0_in = ustrip(u"inch", b0)
@@ -141,12 +149,11 @@ function design_closed_stirrups(
     # ─── Required steel contribution ───
     vs_reqd = max(vu_psi / φ - vcs, 0.0)
 
-    # ─── Number of legs per peripheral line ───
-    # Closed stirrups: 2 legs per stirrup, multiple stirrups per line
-    # Minimum 2 legs per face → n_legs based on position
-    n_legs = position == :interior ? 8 :   # 2 per face × 4 faces
-             position == :edge ? 6 :       # 2 per face × 3 faces
-             4                             # 2 per face × 2 faces
+    outer = _outer_section_inputs(vu, b0, d, position, c1, c2, Vu, M_about_x, M_about_y)
+
+    # ─── Legs per peripheral line ───
+    # Legs at both ends of each face, ≤ 2d apart parallel to the face (§11.11.3.3)
+    n_legs = reinforcement_line_count(outer.c1, outer.c2, d, position)
 
     # Total Av per peripheral line
     Av_per_line = n_legs * Ab
@@ -170,50 +177,12 @@ function design_closed_stirrups(
     # Actual vs provided
     vs_provided = Av_per_line * fyt_psi / (b0_in * s)
 
-    # ─── Outer section check ───
-    # Beyond the last peripheral line, check at d/2
-    vc_out = punching_capacity_outer(fc, d; λ=λ)
-    vc_out_psi = ustrip(u"psi", vc_out)
-
-    n_lines_min = 3
-    n_lines = n_lines_min
-    stud_zone = s0 + (n_lines - 1) * s
-    total_offset_in = stud_zone + d_in / 2
-
-    if !isnothing(c1) && !isnothing(c2) && !isnothing(qu)
-        c1_in = ustrip(u"inch", c1)
-        c2_in_col = ustrip(u"inch", c2)
-
-        if position == :interior
-            b1_out = c1_in + 2 * total_offset_in
-            b2_out = c2_in_col + 2 * total_offset_in
-            b0_out = 2 * b1_out + 2 * b2_out
-            A_enclosed_in2 = b1_out * b2_out
-        elseif position == :edge
-            b1_out = c1_in / 2 + total_offset_in
-            b2_out = c2_in_col + 2 * total_offset_in
-            b0_out = 2 * b1_out + b2_out
-            A_enclosed_in2 = b1_out * b2_out
-        else  # :corner
-            b1_out = c1_in / 2 + total_offset_in
-            b2_out = c2_in_col / 2 + total_offset_in
-            b0_out = b1_out + b2_out
-            A_enclosed_in2 = b1_out * b2_out
-        end
-
-        Vu_total_psi_in = vu_psi * b0_in * d_in
-        qu_psi = ustrip(u"psi", qu)
-        load_in_zone = qu_psi * A_enclosed_in2
-        Vu_outer_lb = max(Vu_total_psi_in - load_in_zone, 0.0)
-        vu_out_psi = Vu_outer_lb / (b0_out * d_in)
-    else
-        n_sides = position == :interior ? 8 :
-                  position == :edge ? 6 : 4
-        b0_out = b0_in + n_sides * total_offset_in
-        vu_out_psi = vu_psi * b0_in / b0_out
-    end
-
-    outer_ok = φ * vc_out_psi >= vu_out_psi
+    # ─── Outer section check (§11.11.7.2(b)) ───
+    n_max = max_reinforcement_lines(s0 * u"inch", s * u"inch"; max_extent = max_extent)
+    lines = design_outer_lines(s0 * u"inch", s * u"inch", d, fc, position, outer;
+                               qu = qu, λ = λ, φ = φ, n_max = n_max)
+    n_lines = lines.n
+    outer_ok = lines.ok
 
     return ClosedStirrupDesign(
         required = true,

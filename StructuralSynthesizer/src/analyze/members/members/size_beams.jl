@@ -44,7 +44,8 @@ sagging moment, hogging moment, and shear to the story-shell value where that
 is larger. See [`size_beams_with_story_shell!`](@ref). A composite beam's
 shell moment fields, one per load combination, are also checked for sagging
 strength and anchors on their own zeros (`strength_fields` of
-`PerStationComposite`).
+`PerStationComposite`). A steel beam on simple connections at both ends
+(`ShellBeamDemand.simple`) takes neither the shell's hogging nor its fields.
 
 # Example
 ```julia
@@ -85,6 +86,10 @@ function size_beams!(
     composite_deck_orientation = nothing,
     # Beam index → ShellBeamDemand from `analyze_story_shell`. Raises, never lowers.
     shell_demands = nothing,
+    # Beam index → spans of the cracked service shell: `RCShellSpan`s for
+    # concrete, `SteelShellSpan`s for steel. A separate deflection check on
+    # discrete sizing; it never changes the frame-model deflection demand.
+    shell_spans = nothing,
 )
     dp = (hasproperty(struc, :design_parameters) && !isnothing(struc.design_parameters)) ?
          struc.design_parameters : nothing
@@ -199,11 +204,12 @@ function size_beams!(
                           composite_concrete, composite_t_slab, composite_anchor,
                           composite_shored, composite_cp_class, composite_slab_type,
                           composite_deck_hr, composite_deck_wr, composite_deck_orientation,
-                          shell_demands)
+                          shell_demands, shell_spans)
     else
         _size_beams_impl!(struc, effective_opts, Val(strategy);
                           resolution, reanalyze, gravity_factor,
-                          member_group_overrides, I_factor, shell_demands)
+                          member_group_overrides, I_factor, shell_demands,
+                          shell_spans)
     end
     StructuralSizer.emit!(tc, :sizing, "size_beams!", "", :exit)
     return result
@@ -239,6 +245,7 @@ function _size_beams_impl!(
     prior_section_keys = nothing,
     composite_lock::Bool = false,
     shell_demands = nothing,
+    shell_spans = nothing,
 )
     if opts.composite && composite_anchor === nothing
         composite_anchor_from_options(opts)
@@ -515,6 +522,8 @@ function _size_beams_impl!(
         catalog = catalog_kw,
         feasible = feasible_kw,
         composite = composite_kw,
+        shell_spans = _group_shell_spans(struc, group_ids, shell_spans,
+                                         StructuralSizer.SteelShellSpan),
     )
 
     member_array = struc.beams
@@ -530,7 +539,7 @@ function _size_beams_impl!(
                           composite_deck_hr, composite_deck_wr,
                           composite_deck_orientation,
                           composite_pass = pass, prior_section_keys = keys,
-                          composite_lock = lock, shell_demands)
+                          composite_lock = lock, shell_demands, shell_spans)
     end
 
     shored_now = composite_shored === nothing ? opts.composite_shored : composite_shored
@@ -594,12 +603,16 @@ function _size_beams_impl!(
     return struc
 end
 
-"""Beam index → its story-shell moment fields, or `nothing` when there are none."""
+"""
+Beam index → the story-shell moment fields that place its studs, or `nothing`
+when there are none. A simple-connection steel beam has none.
+"""
 function _shell_moment_fields_by_beam(shell_demands)
     shell_demands === nothing && return nothing
     out = Dict{Int, Vector{ShellMomentField}}()
     for (i, d) in shell_demands
-        isempty(d.moment_fields) || (out[i] = d.moment_fields)
+        fields = _design_moment_fields(d)
+        isempty(fields) || (out[i] = fields)
     end
     return isempty(out) ? nothing : out
 end
@@ -1005,6 +1018,7 @@ function _size_beams_impl!(
     # threaded from params.beam_I_factor (default 0.35).
     I_factor::Real = 0.35,
     shell_demands = nothing,
+    shell_spans = nothing,
 )
     # DEFENSE-IN-DEPTH layer-symmetric guard (Phase B). This non-steel overload
     # ACCEPTS `member_group_overrides` for uniform `size_beams!` dispatch but does NOT
@@ -1041,6 +1055,8 @@ function _size_beams_impl!(
     isempty(group_ids) && return struc
 
     member_array = struc.beams
+    grouped_spans = _group_shell_spans(struc, group_ids, shell_spans,
+                                       StructuralSizer.RCShellSpan)
 
     # Build demand vectors with Unitful SI units.
     # Mu = sagging (Mux_pos); Mu_neg = hogging. Nu is signed: tension
@@ -1079,6 +1095,8 @@ function _size_beams_impl!(
                 Mu_neg           = Mu_neg,
                 Nu               = Nu,
                 catalog_size     = opts.catalog_size_tbeam,
+                sustained_live_fraction = opts.sustained_live_fraction,
+                shell_spans      = grouped_spans,
             )
 
             _apply_beam_results!(struc, result, group_ids, member_array,
@@ -1100,7 +1118,8 @@ function _size_beams_impl!(
     end
 
     # ── Rectangular beam path (default) ──
-    result = StructuralSizer.size_beams(Mu, Vu, geoms, opts; Mu_neg=Mu_neg, Nu=Nu)
+    result = StructuralSizer.size_beams(Mu, Vu, geoms, opts; Mu_neg=Mu_neg, Nu=Nu,
+                                        shell_spans=grouped_spans)
 
     _apply_beam_results!(struc, result, group_ids, member_array,
                          edge_ids_in_group, opts.material; I_factor=I_factor,
@@ -1133,6 +1152,7 @@ function _size_beams_impl!(
     # (ConcreteBeamOptions.material), so it is passed to every to_asap_section call below.
     I_factor::Real = 0.35,
     shell_demands = nothing,
+    shell_spans = nothing,
 )
     # DEFENSE-IN-DEPTH layer-symmetric guard (Phase B). This non-steel overload
     # ACCEPTS `member_group_overrides` for uniform `size_beams!` dispatch but does NOT
@@ -1350,6 +1370,7 @@ function _size_beams_impl!(
     # applied internally by its own to_asap_section call), so the beam I_factor is unused.
     I_factor::Real = 0.35,
     shell_demands = nothing,
+    shell_spans = nothing,
 )
     # DEFENSE-IN-DEPTH layer-symmetric guard (Phase B). This non-steel overload
     # ACCEPTS `member_group_overrides` for uniform `size_beams!` dispatch but does NOT

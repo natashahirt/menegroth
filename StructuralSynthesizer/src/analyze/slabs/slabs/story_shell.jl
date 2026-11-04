@@ -57,6 +57,31 @@ end
 
 _story_metres(x) = x isa Quantity ? uconvert(u"m", x) : x * u"m"
 
+"""
+Whole-beam release for the story shell, start and end along `chain`.
+
+The frame model's per-element releases ([`resolve_edge_releases`](@ref)) put
+a released end at a skeleton vertex: the start vertex of an edge for
+`:freefixed`, its end vertex for `:fixedfree`, both for `:freefree` and
+`:joist`. The shell releases the same vertices, so both models give a beam
+the same end fixity. Only the two ends of `chain` can be released.
+"""
+function _story_beam_release(struc, beam, chain, material)
+    segs = [struc.segments[si] for si in segment_indices(beam)]
+    rels = resolve_edge_releases(beam, segs, material)
+    released = Set{Int}()
+    for (seg, rel) in zip(segs, rels)
+        a, b = struc.skeleton.edge_indices[seg.edge_idx]
+        rel in (:freefixed, :freefree, :joist) && push!(released, a)
+        rel in (:fixedfree, :freefree, :joist) && push!(released, b)
+    end
+    s, e = first(chain) in released, last(chain) in released
+    s && e && return (length(rels) == 1 && only(rels) === :joist) ? :joist : :freefree
+    s && return :freefixed
+    e && return :fixedfree
+    return :fixedfixed
+end
+
 """Largest slab thickness touching this beam, in metres. `nothing` when no slab touches it."""
 function _story_beam_thickness(struc, beam, thickness_of_face)
     hs = typeof(1.0u"m")[]
@@ -156,6 +181,100 @@ function _column_support_points(struc, level)
     return pts
 end
 
+"""Length of a column, in metres, from its segment."""
+function _column_length_m(struc, col)
+    si = first(segment_indices(col))
+    e = struc.segments[si].edge_idx
+    return ustrip(u"m", struc.skeleton.geometry.edge_lengths[e])
+end
+
+"""
+The Asap section the frame model would give `col`, or `nothing` when the
+column has no section this shell can turn into one.
+
+Concrete goes through [`StructuralSizer.to_asap_section`](@ref), which applies
+ACI 318-11 §10.10.4.1 (0.70 Ig) once. This function does not apply it again.
+"""
+function _column_asap_section(col, concrete, steel)
+    sec = section(col)
+    sec === nothing && return nothing
+    if sec isa RCColumnSection || sec isa RCCircularSection
+        mat = col.concrete === nothing ? concrete : col.concrete
+        return StructuralSizer.to_asap_section(sec, mat)
+    elseif sec isa ISymmSection || sec isa HSSRectSection || sec isa HSSRoundSection
+        mat = hasproperty(sec, :material) && getfield(sec, :material) !== nothing ?
+              getfield(sec, :material) : steel
+        mat === nothing && return nothing
+        return StructuralSizer.to_asap_section(sec, mat)
+    end
+    return nothing
+end
+
+"""
+Rotational stiffness `(krx, kry)` in N·m/rad that `col` gives the floor joint
+at one of its ends. `nothing` when the column has no usable section.
+
+# ENGINEERING JUDGMENT
+Slope-deflection stiffness of a prismatic member with the far end fixed and
+no sidesway: `4EI/L` about each bending axis. The far end of a column standing
+on a fixed base is fixed, so this is that column. A column whose far end is
+another floor joint can rotate there, and `4EI/L` is then an upper bound.
+`Ix` resists rotation about the axis perpendicular to c2, as
+[`_apply_column_roll!`](@ref) places it, and `θ` carries that into global X
+and Y. A diagonal spring has no cross term, so a column whose c1 is not along
+X or Y loses the product stiffness.
+"""
+function _column_end_stiffness(struc, col, concrete, steel)
+    asap = _column_asap_section(col, concrete, steel)
+    asap === nothing && return nothing
+    L = _column_length_m(struc, col)
+    L > 0 || return nothing
+    E = ustrip(u"Pa", asap.E)
+    Ix = ustrip(u"m^4", asap.Ix)
+    Iy = ustrip(u"m^4", asap.Iy)
+    s, c = sincos(col.θ)
+    klz = 4 * E * Ix / L
+    kly = 4 * E * Iy / L
+    return (kly * s^2 + klz * c^2, kly * c^2 + klz * s^2)
+end
+
+"""Shell node within 1 mm of `(x, y)`, or `nothing`."""
+function _shell_node_at(nodes, x, y)
+    best, bestd = nodes[1], Inf
+    for n in nodes
+        d = hypot(ustrip(u"m", n.position[1]) - x, ustrip(u"m", n.position[2]) - y)
+        d < bestd && ((best, bestd) = (n, d))
+    end
+    return bestd <= 1e-3 ? best : nothing
+end
+
+"""
+Grounded rotational springs for the columns below this story and the columns
+above it, on the shell nodes at those columns. Columns with no section are
+skipped. Stiffnesses at one node add.
+"""
+function _story_column_springs(struc, level, nodes, concrete, steel)
+    isempty(nodes) && return Asap.Spring[]
+    acc = Dict{Asap.Node, NTuple{2, Float64}}()
+    for col in struc.columns
+        col.story == level || col.story == level + 1 || continue
+        k = _column_end_stiffness(struc, col, concrete, steel)
+        k === nothing && continue
+        x, y = StructuralSizer._column_xy_m(struc.skeleton, col)
+        node = _shell_node_at(nodes, x, y)
+        node === nothing && continue
+        old = get(acc, node, (0.0, 0.0))
+        acc[node] = (old[1] + k[1], old[2] + k[2])
+    end
+    springs = Asap.Spring[]
+    for (node, (krx, kry)) in acc
+        (krx == 0.0 && kry == 0.0) && continue
+        push!(springs, Asap.Spring(node; krx = krx * u"N*m/rad", kry = kry * u"N*m/rad",
+                                   id = :column))
+    end
+    return springs
+end
+
 """Local end forces of each frame piece, grouped by beam id. Newtons and N·m."""
 function _shell_beam_forces(frames)
     grouped = Dict{Symbol, Vector{Vector{Float64}}}()
@@ -182,6 +301,35 @@ this story, unless `support_points` is given as `(x, y)` pairs in metres.
 `steel` is the material of a steel section that carries none, as catalog
 shapes chosen by `size_beams!` do.
 
+Each beam's ends take the frame model's release ([`resolve_edge_releases`](@ref)):
+a steel gravity beam on simple connections is pinned in both models, and
+the slab carries the hogging over its supports.
+
+# ENGINEERING JUDGMENT
+Asap frees rotation only. The beam hangs below the slab on a rigid offset,
+so a released end still passes the beam's axial force, and that force times
+the offset is a small end moment about the slab mid-plane. It is kept and is
+part of the shell demand.
+
+A steel beam released at both ends is marked `simple` in its
+[`ShellBeamDemand`](@ref). AISC 360-16 §B3.4a (corpus: aisc-360-16, page 69):
+a simple connection transmits a negligible moment and may be assumed to allow
+unrestrained relative rotation.
+
+# ENGINEERING JUDGMENT
+The release frees the beam only at the column node. At every other node the
+beam turns with the slab, so next to a support where the slab is continuous
+it follows the slab's hogging and carries a short negative-moment region
+(about one metre on a 6 m bay, and not mesh-dependent). The frame model's
+state, a simple-span beam under a slab that carries its own hogging, is
+also in equilibrium. A `simple` beam is sized on that state: the shell's
+`Mu_neg` and moment fields are kept for reporting but do not size the beam
+or place its studs. That hogging is then the slab's, over the support.
+
+Columns above and below the story are rotational springs at their shell
+nodes ([`_story_column_springs`](@ref)). A column with no section adds none,
+and that support stays a vertical pin.
+
 A composite steel beam whose studs are known (it has a
 [`composite_stiffness_profile`](@ref) for its current section) takes, on each
 piece, the inertia the building model uses at that station: `I_LB` in a
@@ -191,21 +339,30 @@ slab's bending about its own centre, which the shell supplies (see
 one moment field per load combination. Any other steel beam is bare.
 
 # ENGINEERING JUDGMENT
-Over a hogging region the shell slab is gross while the frame is cracked, so
-the slab's own bending there is uncracked. It is small beside the steel.
+The model returned here is the gross shell: factored demands and slab bars
+stay on it. Hogging plates are softened only while the service deflection is
+being solved, and that stiffness is restored before return.
 
 The shell forces are written onto each slab of the story as
 `design_details.shell_beam_forces`. `design_details.shell_reinforcement`
 is one `ElementRebarField` per panel of the story. `beam_demands` is one
 [`ShellBeamDemand`](@ref) per beam index, from the same factored load cases
-as the bars. Beam sections are not changed here.
+as the bars. Beam sections are not changed here. A cracked service
+solve, used for deflection, is restored to this gross shell before return.
+
+`service_spans` maps a beam index to its span records from that solve:
+`RCShellSpan`s for concrete, live-load `SteelShellSpan`s for steel. They are
+a deflection check of their own, not a replacement for the frame model's.
 """
 function analyze_story_shell(struc, level::Int;
                              target_edge::Length = 0.5u"m",
                              concrete = NWC_4000,
                              steel = nothing,
                              support_points = nothing,
-                             solve::Bool = true)
+                             solve::Bool = true,
+                             service::Bool = true,
+                             rebar = Rebar_60,
+                             sustained_live_fraction::Real = 0.0)
     haskey(struc.skeleton.stories, level) || throw(ArgumentError(
         "story $level is not in the skeleton"))
     story = struc.skeleton.stories[level]
@@ -249,6 +406,7 @@ function analyze_story_shell(struc, level::Int;
     composite_at = Dict{Symbol, NamedTuple}()
     origins = Dict{Int, NTuple{2, Float64}}()
     stale = Int[]
+    simple = Set{Int}()
     for (i, beam) in enumerate(struc.beams)
         chain = _story_vertex_chain(struc, beam)
         on_story = !isempty(chain) && all(v -> v in vertices, chain)
@@ -262,7 +420,11 @@ function analyze_story_shell(struc, level::Int;
         h = _story_beam_thickness(struc, beam, thickness_of_face)
         h === nothing && (h = _story_metres(thickness(slabs[1])))
         xy = NTuple{2, Float64}[StructuralSizer._vertex_xy_m(struc.skeleton, v) for v in chain]
-        props = StructuralSizer.shell_beam_properties(sec, h, _story_beam_material(sec, concrete, steel))
+        mat = _story_beam_material(sec, concrete, steel)
+        props = StructuralSizer.shell_beam_properties(sec, h, mat)
+        release = _story_beam_release(struc, beam, chain, mat)
+        mat isa StructuralSizer.StructuralSteel && release in (:freefree, :joist) &&
+            push!(simple, i)
         id = Symbol("beam_", i)
         profile = composite_stiffness_profile(struc, beam)
         if profile !== nothing
@@ -274,7 +436,8 @@ function analyze_story_shell(struc, level::Int;
             end
         end
         push!(beams, StructuralSizer.ShellFrameBeam(xy, props.section;
-                                                    eccentricity = props.eccentricity, id = id))
+                                                    eccentricity = props.eccentricity, id = id,
+                                                    release = release))
         push!(beam_ids, id)
         beam_index[id] = i
     end
@@ -291,6 +454,8 @@ function analyze_story_shell(struc, level::Int;
     forces = Dict{Symbol, Vector{Vector{Float64}}}()
     bars = StructuralSizer.ElementRebarField[]
     beam_demands = Dict{Int, ShellBeamDemand}()
+    service_spans = Dict{Int, Vector{Any}}()
+    service_converged = true
     model = nothing
     if solve
         if length(pts) < 3
@@ -313,6 +478,8 @@ function analyze_story_shell(struc, level::Int;
                 end
                 model = Asap.Model(built.nodes, built.frames, built.shells, loads)
                 Asap.process!(model)
+                springs = _story_column_springs(struc, level, built.nodes, concrete, steel)
+                isempty(springs) || Asap.add_springs!(model, springs)
                 Asap.solve!(model)
                 forces = _shell_beam_forces(built.frames)
                 cases = StructuralSizer.story_load_cases(model, built.panel_index, designs)
@@ -320,6 +487,24 @@ function analyze_story_shell(struc, level::Int;
                     model, built.panel_index, designs; cases = cases, fc = concrete.fc′)
                 beam_demands = story_shell_beam_demands(model, built.frames, beam_index, cases;
                                                         origins = origins)
+                for i in simple
+                    haskey(beam_demands, i) && (beam_demands[i] = _as_simple(beam_demands[i]))
+                end
+                if service && !isempty(beams)
+                    specs = service_beams(struc, beams, beam_index, beam_demands, pts,
+                                          thickness_of_face)
+                    cracked = story_cracked_service(
+                        model, built, designs, specs;
+                        concrete = concrete, rebar = rebar, bars = bars,
+                        sustained_live_fraction = sustained_live_fraction)
+                    for (id, spans) in cracked.spans
+                        i = get(beam_index, id, nothing)
+                        i === nothing && continue
+                        service_spans[i] = spans
+                    end
+                    service_converged = cracked.converged
+                    service_converged || @warn "Cracked service shell did not settle" level iterations=cracked.iterations
+                end
                 ran = true
             end
         end
@@ -345,6 +530,8 @@ function analyze_story_shell(struc, level::Int;
         beam_forces = forces,
         beam_demands = beam_demands,
         shell_reinforcement = bars,
+        service_spans = service_spans,
+        service_converged = service_converged,
         analysis_status = status,
         skipped_beams = skipped,
         reasons = reasons,

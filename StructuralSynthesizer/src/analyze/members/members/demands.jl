@@ -296,6 +296,10 @@ is the longest individual sub-segment (the actual deflection span between suppor
 `shell_demands` maps a beam index to its [`ShellBeamDemand`](@ref). Each beam
 group's sagging moment, hogging moment, and strong-axis shear become the larger
 of the frame-model value and the shell value. The shell never lowers a demand.
+A steel beam on simple connections takes no hogging from the shell
+(`ShellBeamDemand.simple`).
+Deflection here is the frame model's alone. Story-shell deflection is a
+separate per-span check and never enters these demands.
 
 Returns `(group_ids, demands, L_totals, Lb_govs, Cb_govs, Kx_govs, Ky_govs)`.
 """
@@ -537,9 +541,10 @@ function member_group_demands(struc::BuildingStructure;
             for m_idx in struc.member_groups[all_group_ids[g]].member_indices
                 d = get(shell_demands, m_idx, nothing)
                 d === nothing && continue
+                hog = _design_Mu_neg(d)
                 par_Mux_pos[g] = max(par_Mux_pos[g], d.Mu_pos)
-                par_Mux_neg[g] = max(par_Mux_neg[g], d.Mu_neg)
-                par_Mux[g] = max(par_Mux[g], d.Mu_pos, d.Mu_neg)
+                par_Mux_neg[g] = max(par_Mux_neg[g], hog)
+                par_Mux[g] = max(par_Mux[g], d.Mu_pos, hog)
                 par_Vus[g] = max(par_Vus[g], d.Vu)
             end
         end

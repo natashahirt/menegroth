@@ -13,16 +13,18 @@ using StructuralSizer
 const SY = StructuralSynthesizer
 const SZ = StructuralSizer
 
-function _edge_beam_bay(beam_section; Lx = 6.0, Ly = 4.0, h = 0.15)
+function _edge_beam_bay(beam_section; Lx = 6.0, Ly = 4.0, h = 0.15, release = :fixedfixed)
     conc = NWC_4000
     panel = SZ.StoryShellPanel([(0.0, 0.0), (Lx, 0.0), (Lx, Ly), (0.0, Ly)],
                                Asap.ShellSection(h * u"m", conc.E, conc.ν; ρ = conc.ρ))
     mat = beam_section isa RCBeamSection ? conc : A992_Steel
     props = SZ.shell_beam_properties(beam_section, h * u"m", mat)
     beams = [SZ.ShellFrameBeam([(0.0, 0.0), (Lx, 0.0)], props.section;
-                               eccentricity = props.eccentricity, id = :south),
+                               eccentricity = props.eccentricity, id = :south,
+                               release = release),
              SZ.ShellFrameBeam([(0.0, Ly), (Lx, Ly)], props.section;
-                               eccentricity = props.eccentricity, id = :north)]
+                               eccentricity = props.eccentricity, id = :north,
+                               release = release)]
     built = SZ.story_shell([panel], beams; target_edge = 0.5u"m")
     SY._pin_story_supports!(built.nodes, [(0.0, 0.0), (Lx, 0.0), (Lx, Ly), (0.0, Ly)])
     loads = Asap.AbstractLoad[Asap.AreaLoad(built.shells, 1.0u"Pa")]
@@ -105,8 +107,13 @@ function _one_bay_building(; Lx = 6.0, Ly = 4.0, z = 3.0)
     beam_sec = StructuralSizer.to_asap_section(W("W12X26"), A992_Steel)
     col_sec = Asap.Section(0.05u"m^2", 200e9u"Pa", 77e9u"Pa",
                            1e-3u"m^4", 1e-3u"m^4", 1e-3u"m^4", 7850.0u"kg/m^3")
-    beam_els = [Asap.Element(floor[findfirst(==(a), vs)], floor[findfirst(==(b), vs)], beam_sec)
-                for (a, b) in skel.edge_indices]
+    # Each beam takes the building's own release (steel gravity: pinned).
+    release_of = Dict(struc.segments[only(segment_indices(b))].edge_idx =>
+                      SY.resolve_release(b, [struc.segments[only(segment_indices(b))]], A992_Steel)
+                      for b in struc.beams)
+    beam_els = [Asap.Element(floor[findfirst(==(a), vs)], floor[findfirst(==(b), vs)], beam_sec;
+                             release = release_of[k])
+                for (k, (a, b)) in enumerate(skel.edge_indices)]
     col_els = [Asap.Element(ground[k], floor[k], col_sec) for k in 1:4]
     loads = Asap.AbstractLoad[Asap.TributaryLoad(el, [0.0, 1.0], [1.0u"m", 1.0u"m"],
                                                  10_000.0u"Pa", (0.0, 0.0, -1.0))
@@ -189,11 +196,56 @@ const _STUD_OPTS = (composite = true,
         @test raised[g1].Mux_pos == 1.0e9
         @test raised[g1].Mux_neg == 2.0e9
         @test raised[g1].Vu_strong == 3.0e9
+        # A simple-connection steel beam keeps the frame model's hogging.
+        simple = Dict(1 => SY._as_simple(ShellBeamDemand(1.0e9, 2.0e9, 3.0e9)))
+        _, sim = SY.member_group_demands(struc; member_edge_group = SY.BEAM_GROUP_SYMBOLS,
+                                         shell_demands = simple)
+        @test sim[g1].Mux_pos == 1.0e9
+        @test sim[g1].Mux_neg == base[g1].Mux_neg
+        @test sim[g1].Vu_strong == 3.0e9
+        merged = Dict(1 => simple[1])
+        SY._merge_shell_demand!(merged, Dict(1 => ShellBeamDemand(0.0, 0.0, 0.0)))
+        @test !merged[1].simple
+        @test merged[1].Mu_neg == 2.0e9
         zero_d = Dict(i => ShellBeamDemand(0.0, 0.0, 0.0) for i in 1:n_beams)
         _, same = SY.member_group_demands(struc; member_edge_group = SY.BEAM_GROUP_SYMBOLS,
                                           shell_demands = zero_d)
         @test [d.Mux_pos for d in same] == [d.Mux_pos for d in base]
         @test [d.Vu_strong for d in same] == [d.Vu_strong for d in base]
+        # Shell demands never touch the frame model's deflection.
+        @test [d.δ_max_LL for d in raised] == [d.δ_max_LL for d in base]
+        @test [d.δ_max_total for d in raised] == [d.δ_max_total for d in base]
+    end
+
+    @testset "Steel shell spans: each on its own length, scaled by inertia" begin
+        sec, big = W("W16X26"), W("W21X55")
+        mat = A992_Steel
+        Ix(s) = ustrip(u"m^4", s.Ix)
+        geom = SteelMemberGeometry(8.0u"m"; Lb = 1.0u"m")
+        dem = MemberDemand(1; Mux = 1.0e3, Vu_strong = 1.0e3)
+        function ok(spans, s)
+            chk = AISCChecker(; deflection_limit = 1 / 360, shell_spans = [spans])
+            cache = SZ.create_cache(chk, 1)
+            SZ.precompute_capacities!(chk, cache, [s], mat, MinWeight())
+            return SZ.is_feasible(chk, cache, 1, s, mat, dem, geom)
+        end
+        span(L, r; I = Ix(sec), name = "W16X26") =
+            SZ.SteelShellSpan(; L = L, Δ_LL = r * L / 360, I_solved = I, solved = name)
+
+        @test ok([span(8.0, 0.99)], sec)
+        @test !ok([span(8.0, 1.01)], sec)
+        # A short span past its own L/360 governs over a long span that passes.
+        @test !ok([span(8.0, 0.5), span(2.0, 1.05)], sec)
+        # A stiffer candidate scales the deflection down by I_solved / Ix.
+        @test ok([span(8.0, 1.5)], big)
+        @test Ix(sec) / Ix(big) * 1.5 < 1
+        # The solved section is checked unscaled, whatever I_solved says.
+        @test ok([span(8.0, 0.99; I = 2 * Ix(sec))], sec)
+        @test !ok([span(8.0, 0.99; I = 2 * Ix(sec), name = nothing)], sec)
+        # No spans, or no limit: no check.
+        @test ok(SZ.SteelShellSpan[], sec)
+        chk = AISCChecker(; deflection_limit = nothing, shell_spans = [[span(8.0, 5.0)]])
+        @test SZ._steel_shell_ratio(chk, 1, sec, Ix(sec)) == 0.0
     end
 
     @testset "A shell moment field per combination, from the building field's end" begin
@@ -248,6 +300,26 @@ const _STUD_OPTS = (composite = true,
         @test !feasible(PerStationComposite(ctx, [full]; strength_fields = [narrow]))
         @test_throws ArgumentError PerStationComposite(ctx, BeamSaggingField[];
                                                        strength_fields = [narrow])
+
+        # Shell spans on a composite candidate use its own service inertia.
+        Ls = 6.0
+        Ix_s = ustrip(u"m^4", sec.Ix)
+        svc(r; name) = [[SZ.SteelShellSpan(; L = Ls, Δ_LL = r * Ls / 360,
+                                           I_solved = Ix_s, solved = name)]]
+        # Near full composite, so the candidate has studs and I_LB > Ix.
+        studded = MemberDemand(1; Mux = M0, Mux_pos = M0, Mux_neg = 0.0, Vu_strong = 1.0e5)
+        function comp_ok(spans)
+            chk = AISCChecker(; deflection_limit = 1 / 360, total_deflection_limit = nothing,
+                              shell_spans = spans)
+            c = SZ.create_cache(chk, 1)
+            SZ.precompute_capacities!(chk, c, [sec], mat, MinWeight())
+            return SZ.is_feasible(chk, c, 1, sec, mat, studded, geom, ctx)
+        end
+        @test comp_ok(svc(0.99; name = sec.name))
+        @test !comp_ok(svc(1.01; name = sec.name))
+        # Recorded as if solved bare: the composite inertia is larger, so the
+        # same deflection scales down, once.
+        @test comp_ok(svc(1.01; name = nothing))
     end
 
     @testset "Composite steel on the shell: composite stiffness and per-case fields" begin
@@ -281,5 +353,118 @@ const _STUD_OPTS = (composite = true,
             s = hypot((a[1] + b[1]) / 2 - x0, (a[2] + b[2]) / 2 - y0) / total
             @test ustrip(u"m^4", el.section.Ix) ≈ ustrip(u"m^4", SY.composite_stiffness_at(prof, s)) rtol = 1e-9
         end
+
+        # Live-load span records carry the solved section's service inertia.
+        recs = res.service_spans[1]
+        @test !isempty(recs)
+        @test all(r -> r isa SZ.SteelShellSpan, recs)
+        @test all(r -> r.solved == section(beam).name, recs)
+        # Studs only where strength needs them: none here, so I_LB falls back to Ix.
+        @test all(r -> r.I_solved >= bare * (1 - 1e-12), recs)
+        @test all(r -> r.I_solved ≈ SY._solved_service_inertia(prof), recs)
+        @test all(r -> r.Δ_LL > 0, recs)
+
+        # Pinned steel beams in both models: the shell releases the end pieces,
+        # and the frame model and the shell sag over the same region.
+        @test pieces[1] isa Asap.Element{Asap.FreeFixed}
+        @test pieces[end] isa Asap.Element{Asap.FixedFree}
+        @test all(el -> el isa Asap.Element{Asap.FixedFixed}, pieces[2:end-1])
+        @test SY.composite_region_mismatch(prof, out.demands[1].moment_fields) < 0.05
+
+        # Simple connections: the frame model places the studs, so the shell's
+        # fields are reported but not checked, and no mismatch is reported.
+        @test all(d -> d.simple, values(out.demands))
+        @test res.beam_demands[1].simple
+        @test !haskey(out.region_mismatch, 1)
+        @test SY._shell_moment_fields_by_beam(out.demands) === nothing
+    end
+
+    @testset "Shell beam end releases" begin
+        @test SZ._piece_release(:freefree, 1, 1) === :freefree
+        @test SZ._piece_release(:joist, 1, 1) === :joist
+        @test SZ._piece_release(:freefree, 1, 4) === :freefixed
+        @test SZ._piece_release(:freefree, 4, 4) === :fixedfree
+        @test SZ._piece_release(:freefree, 2, 4) === :fixedfixed
+        @test SZ._piece_release(:freefixed, 4, 4) === :fixedfixed
+        @test SZ._piece_release(:fixedfree, 1, 4) === :fixedfixed
+        @test SZ._piece_release(:joist, 1, 3) === :freefixed
+        @test_throws ArgumentError SZ.ShellFrameBeam([(0.0, 0.0), (1.0, 0.0)],
+            SZ.to_asap_section(W("W12X26"), A992_Steel); release = :hinged)
+
+        # A pinned steel beam takes no end moment from its own bending: only
+        # the axial force through the offset reaches the shell node.
+        steel = ISymmSection(10u"inch", 8u"inch", 0.3u"inch", 0.5u"inch"; material = A992_Steel)
+        fixed = _edge_beam_bay(steel)
+        pinned = _edge_beam_bay(steel; release = :freefree)
+        f_end(bay) = maximum(c -> abs(_frame_moment_at(bay, c, 0.0)), bay.cases.combinations)
+        f_mid(bay) = maximum(c -> _frame_moment_at(bay, c, bay.Lx / 2), bay.cases.combinations)
+        @test f_end(pinned) < 0.05 * f_end(fixed)
+        @test f_mid(pinned) > f_mid(fixed)
+    end
+
+    @testset "Cracked service shell" begin
+        line = [(0.0, 0.0), (6.0, 0.0)]
+        simple = SZ.shell_service_spans(line, [(0.0, 0.0), (6.0, 0.0)])
+        @test length(simple) == 1
+        @test !simple[1].cantilever && simple[1].n_continuous == 0
+
+        two = SZ.shell_service_spans(line, [(0.0, 0.0), (3.0, 0.0), (6.0, 0.0)])
+        @test length(two) == 2
+        @test two[1].n_continuous == 1 && two[1].end1_continuous
+        @test two[2].n_continuous == 1 && two[2].end0_continuous
+
+        cants = SZ.shell_service_spans(line, [(3.0, 0.0)])
+        @test length(cants) == 2 && all(sp.cantilever for sp in cants)
+
+        @test SZ.chord_deflection([0.0, 0.5, 1.0], [0.0, -0.01, 0.0]) ≈ 0.01
+
+        conc = NWC_4000
+        Ec = ustrip(u"Pa", conc.E)
+        Es = ustrip(u"Pa", Rebar_60.E)
+        fr_ = ustrip(u"Pa", SZ.fr(conc.fc′)) * conc.λ
+        @test SZ.slab_strip_inertia_ratio(0.0, 1e-3, 0.15, 0.12, Ec, Es, fr_) == 1.0
+        @test SZ.slab_strip_inertia_ratio(1.0e6, 1e-3, 0.15, 0.12, Ec, Es, fr_) < 1.0
+
+        sec = RCBeamSection(; b = 12u"inch", h = 16u"inch", bar_size = 8, n_bars = 3)
+        bay = _edge_beam_bay(sec)
+        u0 = copy(bay.model.u)
+        E0 = [el.E for el in bay.built.shells]
+        spec = SY.ShellServiceBeam(:south, [(0.0, 0.0), (bay.Lx, 0.0)], sec,
+            [(0.0, 0.0), (bay.Lx, 0.0), (bay.Lx, bay.Ly), (0.0, bay.Ly)];
+            half_width = _ -> 1.0, flange_width = _ -> 1.2, hf = 0.15,
+            mu_neg = 5.0e4)
+        design = SZ.StoryPanelDesign(40.0u"kPa", 20.0u"kPa", 0.15u"m", (0.0, 1.0), OneWay())
+        out = SY.story_cracked_service(bay.model, bay.built, [design], [spec];
+                                       concrete = conc, rebar = Rebar_60)
+        @test out.converged
+        @test haskey(out.spans, :south)
+        span = only(out.spans[:south])
+        @test !span.cantilever
+        @test span.Δ_D > 0
+        @test span.Δ_DL > span.Δ_D
+        @test span.Δ_S == span.Δ_D
+        @test span.Ma_S_pos == span.Ma_D_pos
+        gross = SZ.rc_span_inertia(sec, span.bf, span.hf, 0.0, Float64[], span.Mu_neg;
+                                    Ec = span.Ec, Es = span.Es, fr = span.fr,
+                                    fc = span.fc, fy = span.fy)
+        @test span.Ie_D <= gross.Ig * (1 + 1e-9)
+        @test span.Ie_D < gross.Ig
+        @test span.Ie_DL <= span.Ie_D * (1 + 1e-6)
+        @test [el.E for el in bay.built.shells] == E0
+        @test bay.model.u ≈ u0 rtol = 1e-6 atol = 1e-9
+
+        # A shell deflection past L/360 rejects the section that was solved.
+        long = SZ.RCShellSpan(; L = span.L, bf = span.bf, hf = span.hf,
+            Ma_D_pos = span.Ma_D_pos, Ma_DL_pos = span.Ma_DL_pos,
+            Δ_D = 0.002, Δ_DL = 0.05,
+            Ie_D = span.Ie_D, Ie_DL = span.Ie_DL,
+            Ec = span.Ec, Es = span.Es, fr = span.fr, fc = span.fc, fy = span.fy)
+        @test !SZ.rc_shell_span_deflection(long, sec).ok
+        short = SZ.RCShellSpan(; L = span.L, bf = span.bf, hf = span.hf,
+            Ma_D_pos = span.Ma_D_pos, Ma_DL_pos = span.Ma_DL_pos,
+            Δ_D = 1e-6, Δ_DL = 2e-6,
+            Ie_D = span.Ie_D, Ie_DL = span.Ie_DL,
+            Ec = span.Ec, Es = span.Es, fr = span.fr, fc = span.fc, fy = span.fy)
+        @test SZ.rc_shell_span_deflection(short, sec).ok
     end
 end

@@ -110,8 +110,6 @@ Once the full API is loaded, the bootstrap `/status` endpoint returns `{"state":
 | `PORT` / `SIZER_PORT` | HTTP listen port | `8080` |
 | `SIZER_HOST` | Bind address | `0.0.0.0` |
 | `SS_ENABLE_VISUALIZATION` | Toggle heavy visualization dependencies in interactive tooling (e.g., GLMakie); does not currently control JSON `visualization` output | `false` |
-| `SS_ENABLE_HEAVY_PRECOMPILE_WORKLOAD` | Run a precompilation workload on startup to warm the JIT | `false` |
-
 ### Gurobi license (optional)
 
 To use Gurobi on the server instead of HiGHS, provide a license in one of these ways:
@@ -145,7 +143,7 @@ Store the value in AWS Secrets Manager and inject it as an environment variable 
 
 ### Performance Tuning
 
-- **`SS_ENABLE_HEAVY_PRECOMPILE_WORKLOAD`** — runs a representative design on startup to compile all code paths. Increases startup time by ~30s but eliminates first-request latency.
+- **Heavy precompile workload** (off by default) — runs representative designs while `StructuralSynthesizer` precompiles (i.e. at image build time), so the first request does not pay JIT latency, at the cost of a ~10 min longer precompile. Enable it with `heavy_precompile_workload = true` under `[StructuralSynthesizer]` in a `LocalPreferences.toml` next to `StructuralSynthesizer/Project.toml`. (This replaces the former `SS_ENABLE_HEAVY_PRECOMPILE_WORKLOAD` env var, which is no longer read.)
 - **Visualization payload size** — use `visualization_detail: "minimal"` in params to skip deflected slab meshes and reduce payload size, or set `skip_visualization: true` to omit visualization entirely (`visualization = null`).
 
 ### Response format

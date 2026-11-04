@@ -297,8 +297,6 @@ This significantly speeds up parameter studies where only loads, materials, or f
 | `PORT` / `SIZER_PORT` | HTTP listen port | `8080` |
 | `SIZER_HOST` | Bind address | `0.0.0.0` |
 | `SS_ENABLE_VISUALIZATION` | Toggle heavy interactive visualization dependencies (e.g., GLMakie) in tooling; JSON `visualization` output is controlled by request params like `skip_visualization` / `visualization_detail` | `false` |
-| `SS_ENABLE_HEAVY_PRECOMPILE_WORKLOAD` | Run the heavy precompile workload when `StructuralSynthesizer` loads | `false` for the API scripts (they set this unless already provided) |
-
 ## Limitations & Future Work
 
 - The API processes one design at a time; true concurrent execution is not supported.

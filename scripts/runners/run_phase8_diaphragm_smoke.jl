@@ -28,7 +28,7 @@
 #   type ships without a stiffness rule; today it is a no-op.
 #
 # Run:
-#   SS_ENABLE_VISUALIZATION=false SS_ENABLE_HEAVY_PRECOMPILE_WORKLOAD=false \
+#   SS_ENABLE_VISUALIZATION=false \
 #   julia --project=StructuralSynthesizer scripts/runners/run_phase8_diaphragm_smoke.jl
 
 using Test

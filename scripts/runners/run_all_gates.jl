@@ -72,8 +72,6 @@ function run_gate(gate::String, project::String)
     # Headless guards for the child (match the gate runners' own defaults).
     env   = copy(ENV)
     env["SS_ENABLE_VISUALIZATION"] = "false"
-    env["SS_ENABLE_HEAVY_PRECOMPILE_WORKLOAD"] =
-        get(env, "SS_ENABLE_HEAVY_PRECOMPILE_WORKLOAD", "false")
     proc = run(ignorestatus(setenv(cmd, env)); wait = true)
     return proc.exitcode
 end

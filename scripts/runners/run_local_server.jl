@@ -8,7 +8,6 @@
 # Some launchers set PORT to the hostname "localhost"; non-integer values are skipped.
 
 ENV["SS_ENABLE_VISUALIZATION"] = get(ENV, "SS_ENABLE_VISUALIZATION", "false")
-ENV["SS_ENABLE_HEAVY_PRECOMPILE_WORKLOAD"] = get(ENV, "SS_ENABLE_HEAVY_PRECOMPILE_WORKLOAD", "false")
 
 # Load LLM key from secrets file if not already in ENV
 let key_file = joinpath(@__DIR__, "..", "..", "secrets", "openai_api_key")

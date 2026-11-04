@@ -10,7 +10,7 @@
 #   4. FramingLevel.catalog_override (Phase 4) can hold a non-nothing value.
 #
 # Run:
-#   SS_ENABLE_VISUALIZATION=false SS_ENABLE_HEAVY_PRECOMPILE_WORKLOAD=false \
+#   SS_ENABLE_VISUALIZATION=false \
 #   julia --project=StructuralSynthesizer scripts/runners/run_phase6_catalog_smoke.jl
 
 using Test

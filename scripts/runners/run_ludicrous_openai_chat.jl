@@ -178,7 +178,6 @@ function main()
             "SIZER_PORT" => string(SPAWN_PORT),
             "SIZER_HOST" => "127.0.0.1",
             "SS_ENABLE_VISUALIZATION" => "false",
-            "SS_ENABLE_HEAVY_PRECOMPILE_WORKLOAD" => "false",
         )
         println(stderr, "[ludicrous_chat] spawning bootstrap on port $(SPAWN_PORT) ...")
         server_proc = run(pipeline(cmd, stdout = devnull, stderr = devnull), wait = false)

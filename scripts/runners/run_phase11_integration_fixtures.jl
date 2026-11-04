@@ -60,7 +60,7 @@
 # not the render mesh.
 #
 # Run:
-#   SS_ENABLE_VISUALIZATION=false SS_ENABLE_HEAVY_PRECOMPILE_WORKLOAD=false \
+#   SS_ENABLE_VISUALIZATION=false \
 #   julia --project=StructuralSynthesizer scripts/runners/run_phase11_integration_fixtures.jl
 
 using Test

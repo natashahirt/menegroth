@@ -1,5 +1,5 @@
 # Runner: execute the Eq. (13-7) cycle 13b regression suites in one process.
-# Usage: SS_ENABLE_VISUALIZATION=false SS_ENABLE_HEAVY_PRECOMPILE_WORKLOAD=false \
+# Usage: SS_ENABLE_VISUALIZATION=false \
 #        julia --project=StructuralSynthesizer scripts/runners/run_cycle13b_tests.jl
 using Test
 

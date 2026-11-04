@@ -20,7 +20,7 @@
 # (`_joist_offsets` walks q = pmin+sp, pmin+2sp, ... while q < pmax).
 #
 # Run:
-#   SS_ENABLE_VISUALIZATION=false SS_ENABLE_HEAVY_PRECOMPILE_WORKLOAD=false \
+#   SS_ENABLE_VISUALIZATION=false \
 #   julia --project=StructuralSynthesizer \
 #     scripts/runners/run_regression_slab_boundary_edges.jl
 

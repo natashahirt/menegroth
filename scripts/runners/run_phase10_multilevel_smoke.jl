@@ -30,7 +30,7 @@
 #   (5) Idempotence: a second `populate_levels!` adds no new members.
 #
 # Run:
-#   SS_ENABLE_VISUALIZATION=false SS_ENABLE_HEAVY_PRECOMPILE_WORKLOAD=false \
+#   SS_ENABLE_VISUALIZATION=false \
 #   julia --project=StructuralSynthesizer scripts/runners/run_phase10_multilevel_smoke.jl
 
 using Test

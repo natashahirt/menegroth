@@ -19,7 +19,7 @@
 #       contract: rigid links are retained across `sync_asap!`).
 #
 # Run:
-#   SS_ENABLE_VISUALIZATION=false SS_ENABLE_HEAVY_PRECOMPILE_WORKLOAD=false \
+#   SS_ENABLE_VISUALIZATION=false \
 #   julia --project=StructuralSynthesizer scripts/runners/run_regression_cross_phase.jl
 
 using Test

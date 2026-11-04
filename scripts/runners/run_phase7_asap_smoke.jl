@@ -25,7 +25,7 @@
 #   released-element stiffness belongs in Asap (Phase 8 / upstream), not here.
 #
 # Run:
-#   SS_ENABLE_VISUALIZATION=false SS_ENABLE_HEAVY_PRECOMPILE_WORKLOAD=false \
+#   SS_ENABLE_VISUALIZATION=false \
 #   julia --project=StructuralSynthesizer scripts/runners/run_phase7_asap_smoke.jl
 
 using Test

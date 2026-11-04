@@ -44,7 +44,7 @@
 # FAIL loudly on any mismatch, naming the field + fixture + signature label.
 #
 # Usage:
-#   SS_ENABLE_VISUALIZATION=false SS_ENABLE_HEAVY_PRECOMPILE_WORKLOAD=false \
+#   SS_ENABLE_VISUALIZATION=false \
 #       julia --project=StructuralSynthesizer \
 #       StructuralSynthesizer/test/design_graph/test_api_incremental_equivalence.jl
 #
@@ -52,8 +52,6 @@
 # =============================================================================
 
 ENV["SS_ENABLE_VISUALIZATION"] = get(ENV, "SS_ENABLE_VISUALIZATION", "false")
-ENV["SS_ENABLE_HEAVY_PRECOMPILE_WORKLOAD"] =
-    get(ENV, "SS_ENABLE_HEAVY_PRECOMPILE_WORKLOAD", "false")
 
 using Pkg
 Pkg.activate(joinpath(@__DIR__, "..", ".."))

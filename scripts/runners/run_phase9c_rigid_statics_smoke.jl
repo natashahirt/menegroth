@@ -35,7 +35,7 @@
 #       hold within numerical noise.
 #
 # Run:
-#   SS_ENABLE_VISUALIZATION=false SS_ENABLE_HEAVY_PRECOMPILE_WORKLOAD=false \
+#   SS_ENABLE_VISUALIZATION=false \
 #   julia --project=StructuralSynthesizer scripts/runners/run_phase9c_rigid_statics_smoke.jl
 
 using Test

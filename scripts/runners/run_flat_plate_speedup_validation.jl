@@ -47,8 +47,6 @@
 # `scripts/runners/run_smoke_medium_office_3storey.jl:9-14`: headless ENV guards
 # first, then activate `StructuralSynthesizer` (Asap is a direct path dep here).
 ENV["SS_ENABLE_VISUALIZATION"] = get(ENV, "SS_ENABLE_VISUALIZATION", "false")
-ENV["SS_ENABLE_HEAVY_PRECOMPILE_WORKLOAD"] =
-    get(ENV, "SS_ENABLE_HEAVY_PRECOMPILE_WORKLOAD", "false")
 
 using Pkg
 Pkg.activate(joinpath(@__DIR__, "..", "..", "StructuralSynthesizer"))

@@ -49,8 +49,6 @@
 # Headless ENV guards first (match run_flat_plate_speedup_validation.jl:49-51),
 # then activate `StructuralSynthesizer` (Asap is a direct path dep here).
 ENV["SS_ENABLE_VISUALIZATION"] = get(ENV, "SS_ENABLE_VISUALIZATION", "false")
-ENV["SS_ENABLE_HEAVY_PRECOMPILE_WORKLOAD"] =
-    get(ENV, "SS_ENABLE_HEAVY_PRECOMPILE_WORKLOAD", "false")
 
 using Pkg
 Pkg.activate(joinpath(@__DIR__, "..", "..", "StructuralSynthesizer"))

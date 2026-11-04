@@ -29,7 +29,7 @@
 #       equals slab pressure × panel area (within tolerance).
 #
 # Run:
-#   SS_ENABLE_VISUALIZATION=false SS_ENABLE_HEAVY_PRECOMPILE_WORKLOAD=false \
+#   SS_ENABLE_VISUALIZATION=false \
 #   julia --project=StructuralSynthesizer scripts/runners/run_joist_load_transfer_smoke.jl
 
 using Test

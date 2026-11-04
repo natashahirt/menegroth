@@ -1,6 +1,5 @@
 # TEMPORARY diagnostic (Run 3 design). Deleted after use.
 ENV["SS_ENABLE_VISUALIZATION"] = "false"
-ENV["SS_ENABLE_HEAVY_PRECOMPILE_WORKLOAD"] = "false"
 
 using Pkg
 Pkg.activate(joinpath(@__DIR__, "..", "..", "StructuralSynthesizer"))

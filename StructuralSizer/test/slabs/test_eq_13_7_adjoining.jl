@@ -571,6 +571,20 @@ end
         M_t, _ = _interior_mub(turned, qD, qL)
         @test ustrip(kip * u"ft", M_a[1]) ≈ ustrip(kip * u"ft", live_only(18.0u"ft")) rtol = 1e-3
         @test ustrip(kip * u"ft", M_t[1]) ≈ ustrip(kip * u"ft", live_only(19.0u"ft")) rtol = 1e-3
+
+        # θ = 45°: sides not parallel to the span, so R13.6.2.5 (page 253)
+        # takes the square of the same area, √(24·12) = 16.97 in.
+        skew = _two_bay(west_ft = 20.0, east_ft = 20.0, c_in = 24.0, c2_in = 12.0, θ = π / 4)
+        M_s, _ = _interior_mub(skew, qD, qL)
+        ln_s = 20.0u"ft" - sqrt(24.0 * 12.0) * u"inch"
+        @test ustrip(kip * u"ft", M_s[1]) ≈ ustrip(kip * u"ft", live_only(ln_s)) rtol = 1e-3
+    end
+
+    @testset "Eq. (13-4) clear span floor 0.65 ℓ1" begin
+        # ACI 318-11 §13.6.2.5 (page 253): ℓn in Eq. (13-4) ≥ 0.65 ℓ1.
+        @test SS.eq13_4_clear_span(10.0u"ft", 5.0u"ft") ≈ 6.5u"ft"
+        @test SS.eq13_4_clear_span(20.0u"ft", 18.0u"ft") == 18.0u"ft"
+        @test SS.eq13_4_clear_span(20.0u"ft", 13.0u"ft") ≈ 13.0u"ft"
     end
 
     @testset "one-sided interior column is an edge, not a repeated panel" begin
@@ -2352,8 +2366,12 @@ end
         kw = SS._edge_beam_analysis_kwargs(FlatPlateOptions(edge_beam_βt = 1.5))
         @test kw == (has_edge_beam = false, edge_beam_βt = 1.5)
         fp_dir = joinpath(pkgdir(SS), "src", "slabs", "codes", "concrete", "flat_plate")
-        for (file, n_calls) in (("pipeline.jl", 4), (joinpath("design", "rule_of_thumb.jl"), 2))
-            src = read(joinpath(fp_dir, file), String)
+        sources = (
+            ([joinpath("pipeline", file) for file in readdir(joinpath(fp_dir, "pipeline")) if endswith(file, ".jl")], 4),
+            ([joinpath("design", "rule_of_thumb.jl")], 2),
+        )
+        for (files, n_calls) in sources
+            src = join((read(joinpath(fp_dir, file), String) for file in files), "\n")
             @test count(r"\brun_(secondary_)?moment_analysis\(", src) == n_calls
             @test count("_edge_beam_analysis_kwargs(opts)...", src) == n_calls
         end
@@ -4742,4 +4760,18 @@ end
             end
         end
     end
+end
+
+@testset "§13.6.1.4 offset check that throws is a violation" begin
+    ok = SS._guarded_offset_violations(() -> String[])
+    @test isempty(ok)
+    found = SS._guarded_offset_violations(() -> ["§13.6.1.4: Column 2 offset"])
+    @test found == ["§13.6.1.4: Column 2 offset"]
+    failed = @test_logs (:warn, r"could not be checked") match_mode = :any begin
+        SS._guarded_offset_violations(() -> error("no vertex for column 3"))
+    end
+    @test length(failed) == 1
+    @test occursin("§13.6.1.4", failed[1])
+    @test occursin("could not be verified", failed[1])
+    @test occursin("no vertex for column 3", failed[1])
 end

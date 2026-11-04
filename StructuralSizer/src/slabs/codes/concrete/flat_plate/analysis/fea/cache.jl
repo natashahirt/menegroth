@@ -135,7 +135,9 @@ end
     fea_mesh_key(struc, slab, columns; target_edge=nothing, drop_panel=nothing) -> Tuple
 
 Topology inputs of the shell mesh: slab vertices, column centers, sizes,
-position and orientation, the span axis, target edge, and drop-panel plan.
+shape, position and orientation, the span axis, target edge, and drop-panel
+plan. A circle is meshed as the equivalent-area square, so shape is part of
+the key even when `c1` and `c2` are unchanged.
 The drop patch is clipped from those, so a change in any of them rebuilds
 the mesh. Thickness and modulus are not included;
 those take the update path. [`_build_or_update_fea!`](@ref) recomputes the key
@@ -154,7 +156,7 @@ function fea_mesh_key(struc, slab, columns;
     cols = Tuple(
         let xy = _column_xy_m(skel, col)
             pos = hasproperty(col, :position) ? col.position : :interior
-            (xy[1], xy[2], _m(col.c1), _m(col.c2), pos, col_orientation(col))
+            (xy[1], xy[2], _m(col.c1), _m(col.c2), col_shape(col), pos, col_orientation(col))
         end
         for col in columns
     )

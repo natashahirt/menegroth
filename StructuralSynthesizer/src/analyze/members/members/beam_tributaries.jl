@@ -113,7 +113,7 @@ function _accumulate_edge_width_profiles(struc::BuildingStructure)
     edge_profiles = Dict{Int, Vector{ProfT}}()
     for (cell_idx, cell) in enumerate(struc.cells)
         tribs = cell_edge_tributaries(struc, cell_idx)
-        isnothing(tribs) && continue
+        isnothing(tribs) && _omit_missing_tributary_cache(cell, cell_idx) && continue
         face_edges = skel.face_edge_indices[cell.face_idx]
         face_verts = skel.face_vertex_indices[cell.face_idx]
         (isempty(face_edges) || isempty(face_verts)) && continue

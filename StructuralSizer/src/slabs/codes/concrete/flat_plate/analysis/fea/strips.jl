@@ -56,8 +56,9 @@ function _build_cs_polygons_abs(cell_poly::Vector{NTuple{2,Float64}};
     # When a drop panel is present, widen the column strips to cover the
     # drop panel zone.  Pacoste §4.2.1 point 2 / Fig 4.4: the distribution
     # width must encompass the drop panel, with θ ≥ 30° from drop edge.
-    # ACI 318-14 §8.4.1.5 already uses l₂/4 column strip; we enforce that
-    # the strip is at least as wide as the drop panel half-extent.
+    # ACI 318-11 §13.2.1 (corpus: aci-318-11, page 244): each side of a
+    # column strip is 0.25ℓ₁ or 0.25ℓ₂, whichever is less. The widening
+    # below is the drop-panel extent, and it can be wider than that strip.
     if !isnothing(drop_panel_half_widths)
         tribs = _widen_tributaries_for_drop(tribs, drop_panel_half_widths, span_axis)
     end

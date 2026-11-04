@@ -350,6 +350,30 @@ using StructuralSizer
         
         # 18 ft / 15 = 1.2 ft = 14.4" → 15"
         @test ustrip(u"inch", c_span) ≈ 15 atol=2
+
+        # A 20 ft bay stored as 6.1 m (16.01") rounds to 16", not 17"
+        @test estimate_column_size_from_span(6.1u"m") == 16.0u"inch"
+        @test estimate_column_size_from_span(20u"ft") == 16.0u"inch"
+
+        # Axial estimate is ACI 318-11 Eq. (10-2) with ρg = 1%, φ = 0.65
+        Ag = 480000u"lbf" /(0.80 * 0.65 * (0.85 * 6000u"psi" * 0.99 + 60000u"psi" * 0.01))
+        c_ax = estimate_column_size(400u"ft^2", 200u"psf", 6, 6000u"psi"; min_size=10u"inch")
+        @test c_ax == ceil(ustrip(u"inch", sqrt(Ag))) * u"inch"
+        @test estimate_column_size(1u"ft^2", 200u"psf", 1, 6000u"psi"; min_size=14u"inch") == 14.0u"inch"
+    end
+
+    @testset "Column span minimum switch" begin
+        on  = FlatPlateOptions(max_column_size = 16u"inch")
+        off = FlatPlateOptions(max_column_size = 16u"inch", column_span_minimum = false)
+        @test on.column_span_minimum
+        @test !off.column_span_minimum
+        # span/15 is clamped to the cap
+        @test StructuralSizer._column_span_minimum(30u"ft", on) == 16.0u"inch"
+        @test StructuralSizer._column_span_minimum(18u"ft", on) == 15.0u"inch"
+        @test StructuralSizer._column_span_minimum(30u"ft", off) == 0.0u"inch"
+        # Punching may thicken the slab unless a single-lever study turns it off
+        @test on.punching_thickening
+        @test !FlatPlateOptions(punching_thickening = false).punching_thickening
     end
     
     @testset "Reinforcement Table Validation (StructurePoint Table 3)" begin
@@ -380,6 +404,44 @@ using StructuralSizer
                 @test ustrip(u"inch^2", As_calc) ≈ As_expected rtol=0.10
             end
         end
+    end
+
+    @testset "required_reinforcement: tension-controlled limit (§10.3.4)" begin
+        # ACI 318-11 §10.3.4 (page 142): εt = 0.005 ⇒ c/d = 0.375, a/d = 0.375β₁,
+        # ω = 0.85·a/d, Rn = ω·f'c·(1 − a/2d).  f'c = 4 ksi: β₁ = 0.85, Rn ≈ 911 psi.
+        fc4 = 4000.0u"psi"; fy60 = 60000.0u"psi"
+        b12 = 12.0u"inch"; d6 = 6.0u"inch"
+        a_d = 0.375 * 0.85
+        Rn_tc = 0.85 * a_d * fc4 * (1 - a_d / 2)
+        Mu_tc = 0.9 * Rn_tc * b12 * d6^2
+        @test isfinite(required_reinforcement(0.99 * Mu_tc, b12, d6, fc4, fy60))
+        @test isfinite(required_reinforcement(Mu_tc, b12, d6, fc4, fy60))
+        @test isinf(required_reinforcement(1.01 * Mu_tc, b12, d6, fc4, fy60))
+        @test isfinite(required_reinforcement(1.01 * Mu_tc, b12, d6, fc4, fy60;
+                                              require_tension_controlled = false))
+        # As at the limit: As·fy = 0.85 f'c·a·b.
+        As_tc = 0.85 * fc4 * a_d * d6 * b12 / fy60
+        @test ustrip(u"inch^2", required_reinforcement(Mu_tc, b12, d6, fc4, fy60)) ≈
+              ustrip(u"inch^2", As_tc) rtol = 1e-9
+
+        # §10.2.7.1 (page 140): block intensity is 0.85 f'c, independent of β₁.
+        fc6 = 6000.0u"psi"
+        Mu6 = 20.0kip * u"ft"
+        Rn6 = Mu6 / (0.9 * b12 * d6^2)
+        ρ6 = 0.85 * fc6 / fy60 * (1 - sqrt(1 - uconvert(NoUnits, 2Rn6 / (0.85 * fc6))))
+        @test ustrip(u"inch^2", required_reinforcement(Mu6, b12, d6, fc6, fy60)) ≈
+              ustrip(u"inch^2", ρ6 * b12 * d6) rtol = 1e-9
+
+        # The depth check uses the same εt = 0.005 limit. Positive moment only:
+        # column strip is min(ℓ1, ℓ2)/2 = 120 in and carries 60 % of M_pos.
+        cs_b = 120.0u"inch"
+        M_pos_tc = uconvert(kip * u"ft", Mu_tc * (cs_b / b12) / 0.60)
+        mr(M_pos) = (l1 = 20.0u"ft", l2 = 20.0u"ft", M0 = 0.0kip * u"ft",
+                     M_pos = M_pos, column_moments = typeof(M_pos)[])
+        at_limit = StructuralSizer.check_flexural_adequacy(mr(M_pos_tc), [], d6, fc4)
+        @test at_limit.governing_strip == :pos_cs
+        @test at_limit.max_ratio ≈ 1.0 rtol = 1e-9
+        @test !StructuralSizer.check_flexural_adequacy(mr(1.01 * M_pos_tc), [], d6, fc4).ok
     end
     
     @testset "Two-Way Deflection - StructurePoint Validation (Pages 48-57)" begin

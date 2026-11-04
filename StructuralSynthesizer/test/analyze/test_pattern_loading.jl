@@ -365,7 +365,7 @@ _make_flat_plate(; sdl=20.0u"psf", ll=50.0u"psf") =
         n_exceed = 0
         max_hog_env = 0.0
         beam_edges = Set(get(struc.skeleton.groups_edges, :beams, Int[]))
-        for (edge_idx, el) in enumerate(struc.asap_model.elements)
+        for (edge_idx, el) in enumerate(struc.asap_model.frame_elements)
             edge_idx in beam_edges || continue
             eid = el.elementID
             (1 <= eid <= length(cases[1][2])) || continue
@@ -453,6 +453,41 @@ _make_flat_plate(; sdl=20.0u"psf", ll=50.0u"psf") =
         cases_used = StructuralSynthesizer._pattern_demand_cases(struc, DesignParameters())
         @test cases_used !== nothing
         @test any(i -> cases_used[i][1] != u_before[i], eachindex(u_before))
+    end
+
+    @testset "A cell face with no edges cannot drop its load" begin
+        @test StructuralSynthesizer._require_face_edges([1, 2, 3], 4) == [1, 2, 3]
+        @test_throws ErrorException StructuralSynthesizer._require_face_edges(Int[], 4)
+    end
+
+    @testset "A missing tributary cache does not drop a faced cell's load" begin
+        SS = StructuralSynthesizer
+        struc = _make_flat_plate()
+        grade = findfirst(c -> c.floor_type == :grade, struc.cells)
+        @test SS._omit_missing_tributary_cache(struc.cells[grade], grade)
+
+        ci = findfirst(c -> c.floor_type == :flat_plate, struc.cells)
+        cell = struc.cells[ci]
+        @test_throws ErrorException SS._omit_missing_tributary_cache(cell, ci)
+
+        # Unknown with no slab load is omitted. The same face with SDL is not.
+        saved = (cell.floor_type, cell.sdl, cell.live_load, cell.self_weight)
+        cell.floor_type = :unknown
+        cell.sdl = zero(cell.sdl)
+        cell.live_load = zero(cell.live_load)
+        cell.self_weight = zero(cell.self_weight)
+        @test SS._omit_missing_tributary_cache(cell, ci)
+        cell.sdl = saved[2]
+        @test_throws ErrorException SS._omit_missing_tributary_cache(cell, ci)
+        cell.floor_type, cell.sdl, cell.live_load, cell.self_weight = saved
+
+        # to_asap! rebuilds the cache, so clear it afterwards and call the
+        # loader directly. That is the path that used to return no loads.
+        to_asap!(struc)
+        empty!(struc._tributary_caches.edge)
+        @test_throws ErrorException SS._create_cell_tributary_loads!(
+            Asap.AbstractLoad[], struc.asap_model.frame_elements, struc.skeleton,
+            struc, cell, ci)
     end
 
     println("\n✓ All pattern loading tests passed!")

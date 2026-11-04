@@ -225,9 +225,6 @@ function _sync_wall_self_weight!(struc::BuildingStructure, params::DesignParamet
     return
 end
 
-# Module-level cache for checkerboard partition (geometry-only, computed once per model)
-const _CHECKERBOARD_CACHE = Ref{Tuple{UInt, Tuple{Vector{Int}, Vector{Int}}}}((UInt(0), (Int[], Int[])))
-
 """
 Copy one factored tributary live load at three-quarters pressure.
 
@@ -270,14 +267,9 @@ function _generate_pattern_cases(struc::BuildingStructure)
     # Full loading
     case_full = Asap.AbstractLoad[dead_all; live_all]
     
-    # Checkerboard partition — cached (geometry never changes for a given skeleton)
-    skel_id = objectid(struc.skeleton)
-    if _CHECKERBOARD_CACHE[][1] == skel_id
-        set_a, set_b = _CHECKERBOARD_CACHE[][2]
-    else
-        set_a, set_b = _checkerboard_partition(struc)
-        _CHECKERBOARD_CACHE[] = (skel_id, (set_a, set_b))
-    end
+    # Recomputed each call: it depends on `struc.cells` as well as the
+    # skeleton, and it is linear in the cell count.
+    set_a, set_b = _checkerboard_partition(struc)
     
     live_a = Asap.TributaryLoad[]
     live_b = Asap.TributaryLoad[]

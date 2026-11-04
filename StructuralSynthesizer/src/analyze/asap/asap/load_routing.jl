@@ -1,4 +1,20 @@
 """
+    _omit_missing_tributary_cache(cell, cell_idx) -> Bool
+
+`compute_cell_tributaries!` stores nothing for a grade face, or for an
+unknown face that carries no slab load. Returns true so the caller omits
+that cell. A faced floor, or an unknown face with SDL, self-weight, or live
+load, would otherwise be designed with that load missing, so this throws.
+"""
+function _omit_missing_tributary_cache(cell, cell_idx::Integer)
+    cell.floor_type == :grade && return true
+    loaded = any(p -> !iszero(ustrip(p)), (cell.sdl, cell.self_weight, cell.live_load))
+    cell.floor_type == :unknown && !loaded && return true
+    error("Cell $cell_idx (floor_type=$(cell.floor_type)) has no tributary cache, " *
+          "so its slab load cannot be applied. Run compute_cell_tributaries! first.")
+end
+
+"""
     _require_face_edges(face_edges, face_idx) -> face_edges
 
 A loaded cell whose face has no edges has nowhere to send its slab load.
@@ -34,6 +50,7 @@ function _create_cell_tributary_loads!(
     # Get tributaries from cache
     tribs = cell_edge_tributaries(struc, cell_idx)
     if isnothing(tribs)
+        _omit_missing_tributary_cache(cell, cell_idx)
         return split_dead_live ? (dead_loads, live_loads) : dead_loads
     end
     

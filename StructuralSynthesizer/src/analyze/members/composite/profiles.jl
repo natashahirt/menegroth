@@ -60,7 +60,7 @@ function _edge_perside_canonical(struc::BuildingStructure, e::Int)
         local_idx === nothing && continue
 
         tribs = cell_edge_tributaries(struc, cell_idx)
-        tribs === nothing && continue
+        tribs === nothing && _omit_missing_tributary_cache(cell, cell_idx) && continue
         idx = findfirst(t -> t.local_edge_idx == local_idx, tribs)
         idx === nothing && continue
         trib = tribs[idx]

@@ -103,7 +103,8 @@ function run_moment_analysis(
     # Column concrete modulus (may differ from slab fc)
     fc_col = _get_column_fc(supporting_columns, fc)
     wc_pcf = ustrip(pcf, γ_concrete)
-    Ecc = Ec(fc_col, wc_pcf)   # ACI 318-11 §19.2.2.1.a
+    # ACI 318-11 §8.5.1 (corpus: aci-318-11, page 115): Ec = wc^1.5 · 33 · √f'c.
+    Ecc = Ec(fc_col, wc_pcf)
 
     if verbose
         @debug "═══════════════════════════════════════════════════════════════════"
@@ -359,6 +360,8 @@ function run_moment_analysis(
         column_moments = sec_column_moments,
         column_shears = forces.Vu,
         unbalanced_moments = sec_Mub,
+        # Same simple-span basis as the primary `Vu_max`, on the transverse spans
+        Vu_max = uconvert(kip, qu * sec_setup.l2 * sec_setup.ln / 2),
     )
 
     return MomentAnalysisResult(

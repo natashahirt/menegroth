@@ -880,6 +880,16 @@ end
         @test !StructuralSizer._rc_nlp_result_installable((; sections=[nothing], status=:nlp_complete))
     end
 
+    @testset "Multi-start fallback is infeasible unless it passes the check" begin
+        r = (minimizer = [1.0], objective_value = 2.0, constraints = [0.5], status = :optimal)
+        kept = StructuralSizer._multistart_fallback(r, _ -> true)
+        @test kept === r
+        marked = StructuralSizer._multistart_fallback(r, _ -> false)
+        @test marked.status === :infeasible
+        @test marked.minimizer == r.minimizer
+        @test !nlp_acceptable(marked.status)
+    end
+
 end
 
 println("\n✅ All RC Column NLP tests passed!")

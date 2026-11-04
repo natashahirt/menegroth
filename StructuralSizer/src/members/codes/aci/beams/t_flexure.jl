@@ -64,8 +64,8 @@ bf = effective_flange_width(bw=12u"inch", hf=5u"inch", sw=48u"inch", ln=240u"inc
 ```
 
 # Reference
-- ACI 318-11 §8.12.2, §8.12.3 (PDF p. 119)
-- ACI 318-14 §6.3.2.1 (per-side `ln/8` form)
+- ACI 318-11 §8.12.2, §8.12.3 (corpus: aci-318-11, page 119). The per-side
+  `ln/8` form is this clause. ACI 318-14 §6.3.2.1 is the same limit renumbered.
 - PCA EB712 (PCA Notes on ACI 318), Part 4
 """
 function effective_flange_width(;
@@ -212,7 +212,7 @@ function design_tbeam_flexure(Mu::Moment, bw::Length, d::Length,
     φ_assumed = 0.90
 
     # Try as rectangular beam with full flange width
-    As_trial = required_reinforcement(Mu, bf, d, fc, fy)
+    As_trial = required_reinforcement(Mu, bf, d, fc, fy; require_tension_controlled = false)
     if isinf(As_trial)
         error("T-beam section inadequate: moment demand exceeds capacity. Increase d or f'c.")
     end

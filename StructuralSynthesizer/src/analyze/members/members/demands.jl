@@ -293,12 +293,17 @@ For multi-segment members (shattered edges), the `δ_max` in the returned demand
 is pre-scaled so that `δ_max / L_total == δ_original / L_defl`, where `L_defl`
 is the longest individual sub-segment (the actual deflection span between supports).
 
+`shell_demands` maps a beam index to its [`ShellBeamDemand`](@ref). Each beam
+group's sagging moment, hogging moment, and strong-axis shear become the larger
+of the frame-model value and the shell value. The shell never lowers a demand.
+
 Returns `(group_ids, demands, L_totals, Lb_govs, Cb_govs, Kx_govs, Ky_govs)`.
 """
 function member_group_demands(struc::BuildingStructure;
     member_edge_group::Union{Symbol, AbstractVector{Symbol}, Tuple{Vararg{Symbol}}}=:beams,
     resolution::Int=200,
-    params::DesignParameters=DesignParameters())
+    params::DesignParameters=DesignParameters(),
+    shell_demands::Union{Nothing, AbstractDict{Int, ShellBeamDemand}}=nothing)
     isempty(struc.asap_model.frame_elements) && throw(ArgumentError("ASAP model is empty. Call `to_asap!(struc)` before sizing."))
 
     skel = struc.skeleton
@@ -523,6 +528,21 @@ function member_group_demands(struc::BuildingStructure;
         par_Ldefl[g] = L_defl
         par_M1x[g] = best_M1x; par_M2x[g] = best_M2x
         par_M1y[g] = best_M1y; par_M2y[g] = best_M2y
+    end
+
+    if shell_demands !== nothing && !isempty(shell_demands)
+        member_type === :beams || throw(ArgumentError("shell demands apply to beams only"))
+        for g in 1:n_groups
+            par_has[g] || continue
+            for m_idx in struc.member_groups[all_group_ids[g]].member_indices
+                d = get(shell_demands, m_idx, nothing)
+                d === nothing && continue
+                par_Mux_pos[g] = max(par_Mux_pos[g], d.Mu_pos)
+                par_Mux_neg[g] = max(par_Mux_neg[g], d.Mu_neg)
+                par_Mux[g] = max(par_Mux[g], d.Mu_pos, d.Mu_neg)
+                par_Vus[g] = max(par_Vus[g], d.Vu)
+            end
+        end
     end
 
     # ── Service-load deflection split (LL-only vs DL+LL) ──

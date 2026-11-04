@@ -41,4 +41,6 @@ SS_ENABLE_VISUALIZATION=false julia --project=StructuralSynthesizer scripts/api/
 ## Conventions
 
 - Runner scripts go in `scripts/runners/`; prefer Julia runners over shell one-liners.
-- Env vars: `SS_ENABLE_VISUALIZATION=false` (skip GLMakie), `SS_ENABLE_HEAVY_PRECOMPILE_WORKLOAD=false` (faster startup).
+- Env vars: `SS_ENABLE_VISUALIZATION=false` (skip GLMakie), `SS_SKIP_SOLVER_WARMUP=true` (skip JuMP warmup in short-lived processes).
+- Precompile workloads are set by preferences, not env vars: `julia scripts/runners/dev_precompile.jl off|on|heavy|status`. StructuralSynthesizer's heavy workload is opt-in (`heavy`); `SS_ENABLE_HEAVY_PRECOMPILE_WORKLOAD` is no longer read.
+- After changing dependencies, run `julia scripts/runners/compare_manifests.jl`; version mismatches between environments cause duplicate precompiles.

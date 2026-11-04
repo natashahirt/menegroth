@@ -753,13 +753,17 @@ checker's `CheckResult` names.
 """
 function _wall_check_measure(check::AbstractString)
     check == "in-plane shear" && return :force
+    check == "shear friction" && return :force
+    check == "out-of-plane shear (reported)" && return :force
     check == "in-plane axial-flexure (P-M): axial cap" && return :force
     check == "bearing wall axial (§11.5.3 simplified)" && return :force
     startswith(check, "bearing wall (§11.5.3): net axial") && return :force
     check == "in-plane axial-flexure (P-M)" && return :moment
     check == "second-order moment" && return :moment
+    check == "out-of-plane moment (reported)" && return :moment
     startswith(check, "min longitudinal") && return :ratio
     startswith(check, "min transverse") && return :ratio
+    check == "corner horizontal ratio (selected)" && return :ratio
     check == "bearing wall (§11.5.3): thickness below minimum" && return :length
     check == "bearing wall (§11.5.3): resultant outside middle third" && return :length
     check == "bearing wall (§11.5.3): too slender for simplified method" && return :slenderness
@@ -840,17 +844,17 @@ function _report_ordinary_walls(io::IO, design::BuildingDesign;
     println(io, section_break("SEISMIC STORY DRIFT"))
     println(io, "  Design story drift against the allowable already stored on the check.")
     println(io)
-    Printf.@printf(io, "  %-5s %-3s %-8s %10s %10s %s\n",
-        "Story", "Dir", "Torsion", "Δ($len_u)", "Δa($len_u)", "OK?")
-    Printf.@printf(io, "  %-5s %-3s %-8s %10s %10s %s\n",
-        "─"^5, "─"^3, "─"^8, "─"^10, "─"^10, "─"^3)
+    Printf.@printf(io, "  %-5s %-3s %-8s %10s %10s %-4s %s\n",
+        "Story", "Dir", "Torsion", "Δ($len_u)", "Δa($len_u)", "OK?", "Effect")
+    Printf.@printf(io, "  %-5s %-3s %-8s %10s %10s %-4s %s\n",
+        "─"^5, "─"^3, "─"^8, "─"^10, "─"^10, "─"^3, "─"^6)
     for drift in design.seismic_story_drift
         drift isa SeismicStoryDriftCheck || continue
         Δ = _to_report(du, :length, drift.drift_m * u"m"; digits=4)
         Δa = _to_report(du, :length, drift.allowable_m * u"m"; digits=4)
-        Printf.@printf(io, "  %-5d %-3s %-8s %10.4f %10.4f %s\n",
+        Printf.@printf(io, "  %-5d %-3s %-8s %10.4f %10.4f %-4s %s\n",
             drift.story, string(drift.direction), string(drift.torsion),
-            Δ, Δa, pass_fail(drift.passes))
+            Δ, Δa, pass_fail(drift.passes), string(drift.effect))
     end
     println(io)
 end

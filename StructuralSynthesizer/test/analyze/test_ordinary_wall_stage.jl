@@ -33,7 +33,8 @@ using StructuralSizer
 
 const _STAGE_VAULT = VaultOptions(rise=1.0u"m", thickness=0.05u"m")
 
-function _stage_inputs(; cracked::Bool=true, pdelta::Bool=false, sdc::Symbol=:B)
+function _stage_inputs(; cracked::Bool=true, pdelta::Bool=false, sdc::Symbol=:B,
+                       material=RC_4000_60)
     return OrdinaryWallInputs(;
         directions=((1.0, 0.0), (0.0, 1.0)),
         qz=[1.0, 1.5, 2.0],
@@ -55,7 +56,7 @@ function _stage_inputs(; cracked::Bool=true, pdelta::Bool=false, sdc::Symbol=:B)
         risk_category=:II,
         drift_system=:other,
         boundary=:pinned,
-        material=RC_4000_60,
+        material=material,
         model_uses_cracked_section_stiffness=cracked,
         sustained_lateral_loads=false,
         sustained_lateral_divisor_applied=false,
@@ -230,8 +231,9 @@ end
 """
 Multiply E of piers whose plan line runs in Y by `extra`, then reprocess.
 
-Fixture knob for the P-delta office. `0.001` after the 0.35 crack places θ
-in (0.10, θmax]. It is not an ACI cracked-section factor.
+Fixture knob for the P-delta office. `0.001` after the 0.35 crack takes the
+Y pier out of the story. Paired with [`_stage_put_weak_axis_in_y!`](@ref),
+θ lands in (0.10, θmax]. It is not an ACI cracked-section factor.
 """
 function _stage_soften_y_piers!(struc, extra)
     n = 0
@@ -244,6 +246,31 @@ function _stage_soften_y_piers!(struc, extra)
         end
     end
     n > 0 || error("ordinary-wall fixture: no Y pier to soften")
+    Asap.process!(struc.asap_model)
+    return n
+end
+
+"""
+Put the placeholder's weak inertia on Y sway.
+
+`Column.θ = 0` rolls section x onto global X, so `Ix` resists Y. The
+pre-sizing section is a W with `Ix` much larger than `Iy`. This fixture
+still needs a flexible Y direction. Swapping the two inertias on vertical
+frame members puts the weak axis there. Wall edges are left at zero.
+"""
+function _stage_put_weak_axis_in_y!(struc)
+    n = 0
+    for el in struc.asap_model.frame_elements
+        el isa Asap.Element || continue
+        s = el.section
+        ustrip(u"m^4", s.Ix) > 0 || continue
+        a = ustrip.(u"m", el.nodeStart.position)
+        b = ustrip.(u"m", el.nodeEnd.position)
+        hypot(b[1] - a[1], b[2] - a[2]) <= 1e-6 * max(abs(b[3] - a[3]), 1.0) || continue
+        el.section = Asap.Section(s.A, s.E, s.G, s.Iy, s.Ix, s.J, s.ρ; Ay=s.Ay, Az=s.Az)
+        n += 1
+    end
+    n > 0 || error("ordinary-wall fixture: no vertical frame member to weaken")
     Asap.process!(struc.asap_model)
     return n
 end
@@ -462,15 +489,6 @@ end
     @test length(payload.seismic_story_drift) == length(result.drift)
     @test payload.walls[1].check == result.checks[1][1].check
 
-    push!(struc.wall_mesh.assemblies, WallAssembly(0, [1, 2], true))
-    err = try
-        design_ordinary_walls!(struc, lateral)
-        nothing
-    catch e
-        e
-    end
-    @test err isa ArgumentError
-    @test occursin("Joined", sprint(showerror, err))
 end
 
 @testset "Ordinary wall stage includes P-delta" begin
@@ -484,8 +502,10 @@ end
         skip_visualization=true,
     )
     to_asap!(struc; params=lateral, diaphragms=:rigid)
-    # Fixture knob, not an ACI factor. See `_stage_soften_y_piers!`.
+    # Fixture knobs, not ACI factors. The Y pier is softened, and the
+    # placeholder's weak axis is put in Y. See the helpers above.
     _stage_soften_y_piers!(struc, 0.001)
+    _stage_put_weak_axis_in_y!(struc)
     sections = [(w.thickness, w.ρl, w.ρt) for w in struc.walls]
     result = design_ordinary_walls!(struc, lateral)
     θlim = stability_coefficient_limit(1.0, 4.0)
@@ -504,6 +524,72 @@ end
     @test all(i -> struc.walls[i].thickness == sections[i][1], eachindex(struc.walls))
     @test all(i -> struc.walls[i].ρl + 1e-12 >= sections[i][2] &&
                    struc.walls[i].ρt + 1e-12 >= sections[i][3], eachindex(struc.walls))
+end
+
+"""
+Design the joined L office with transverse steel of grade `fy_ksi`.
+
+Fixture knob, not a bar grade. Corner φVn is proportional to fy: 1.30 MN
+at 60 ksi and the 0.0025 floor on this corner. The wind corner demand is
+80–95 kN. Pier shear here is carried by the concrete term, so the piers do
+not depend on fy.
+"""
+function _stage_joined_l(fy_ksi)
+    ties = RebarSteel(29000.0u"ksi", 11200.0u"ksi", fy_ksi * u"ksi", 90.0u"ksi",
+                      490.0u"lb/ft^3", 0.30, 1.72u"kgCO2e/kg")
+    material = ReinforcedConcreteMaterial(NWC_4000, Rebar_60, ties)
+    struc = _stage_office(; segments=((0.0, 0.0, 6.0, 0.0), (0.0, 0.0, 0.0, 6.0)))
+    lateral = DesignParameters(
+        lateral=LateralDesign(; system=WallsSeismicSystem(:A3), assignment=BuildingUnit()),
+        wall_inputs=_stage_inputs(; material),
+        skip_visualization=true,
+    )
+    to_asap!(struc; params=lateral, diaphragms=:rigid)
+    result = design_ordinary_walls!(struc, lateral)
+    return struc, lateral, result
+end
+
+function _stage_corner_records(result, name)
+    return [(idx, r) for (idx, records) in result.checks for r in records if r.check == name]
+end
+
+@testset "A weak corner is given its own horizontal ratio" begin
+    # 1 ksi: about 22 kN at ρ = 0.0025, so each corner needs roughly ρ ≈ 0.011.
+    struc, lateral, result = _stage_joined_l(1.0)
+    @test length(struc.walls) == 6
+    @test all(a -> a.joined, struc.wall_mesh.assemblies)
+    friction = _stage_corner_records(result, "shear friction")
+    selected = _stage_corner_records(result, "corner horizontal ratio (selected)")
+    @test length(friction) == 3
+    @test length(selected) == 3
+    @test all(((_, r),) -> r.passed && r.ratio <= 1.0, friction)
+    @test all(((_, r),) -> occursin("22.9.5.1", r.clause), friction)
+    @test all(((_, r),) -> r.ratio == 0.0 && r.demand > r.capacity + 1e-12, selected)
+    @test all(((_, r),) -> any(g -> isapprox(r.demand, g; atol=1e-12),
+                                StructuralSynthesizer.ORDINARY_WALL_RHO_GRID), selected)
+    # The legs keep their own ratios. Only the corner was raised.
+    @test all(w -> w.ρt ≈ 0.0025, struc.walls)
+    hosts = sort([idx for (idx, _) in friction])
+    @test hosts == sort([minimum(a.wall_indices) for a in struc.wall_mesh.assemblies])
+    @test all(r -> r.passed, Iterators.flatten(values(result.checks)))
+end
+
+@testset "A corner the grid cannot reach fails the design" begin
+    # 0.1 ksi: about 17 kN at the 0.0200 top of the grid, below the demand.
+    struc, lateral, result = _stage_joined_l(0.1)
+    friction = _stage_corner_records(result, "shear friction")
+    selected = _stage_corner_records(result, "corner horizontal ratio (selected)")
+    @test length(friction) == 3
+    @test all(((_, r),) -> !r.passed && r.ratio > 1.0 && r.demand > r.capacity, friction)
+    @test all(((_, r),) -> !occursin("Table 22.9.4.4 limit", r.clause), friction)
+    top = last(StructuralSynthesizer.ORDINARY_WALL_RHO_GRID)
+    @test all(((_, r),) -> r.demand ≈ top, selected)
+    others = [r for records in values(result.checks) for r in records
+              if r.check != "shear friction"]
+    @test all(r -> r.passed, others)
+
+    design = capture_design(struc, lateral)
+    @test !design.summary.all_checks_pass
 end
 
 @testset "Y-weak office exceeds θmax" begin

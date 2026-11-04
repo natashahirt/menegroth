@@ -428,7 +428,10 @@ Fx = 1.0e5
 
 w_sub_header("4.1  Symmetric core, direct shear (Computed vs closed form)")
 w_table_head("Closed form")
-evr = ReducedDiaphragmEvaluator(story_heights=[H], plan_halfwidth=(5.0,5.0), accidental_ecc=0.0)
+# The core is centered on the origin, so the plate center is (0, 0). Without it
+# the reduced tier cannot locate the corners and reports torsion as Inf.
+evr = ReducedDiaphragmEvaluator(story_heights=[H], plan_halfwidth=(5.0,5.0),
+                                plate_center=(0.0, 0.0), accidental_ecc=0.0)
 r = evaluate_lateral(evr, core(kk), [StoryLoad(1, Fx, 0.0, 0.0, 0.0)])
 s2 = true
 s2 &= w_compare("Diaphragm drift", r.drift[1], (Fx/(2kk))/H; tol=1e-4)
@@ -439,7 +442,8 @@ s2 &= w_compare("Torsion amplification", r.torsion[1], 1.0; tol=1e-4)
 
 w_sub_header("4.2  Accidental eccentricity induces torsion (ASCE 7 §12.8.4)")
 re = evaluate_lateral(ReducedDiaphragmEvaluator(story_heights=[H], plan_halfwidth=(5.0,5.0),
-                                                accidental_ecc=0.05), core(kk), [StoryLoad(1,Fx,0.0,0.0,0.0)])
+                                                plate_center=(0.0, 0.0), accidental_ecc=0.05),
+                    core(kk), [StoryLoad(1,Fx,0.0,0.0,0.0)])
 tors_ok = re.torsion[1] > 1.0 && !isapprox(re.wall_forces[1], re.wall_forces[2]; rtol=1e-3) &&
           isapprox(re.wall_forces[1]+re.wall_forces[2], Fx; rtol=1e-4)
 @printf("    Wall-1/Wall-2 shear = %.1f / %.1f kN  (unequal ⇒ torsion, Σ=applied)  %s\n",
@@ -486,7 +490,8 @@ try
     w_sub_header("5.2  Drift cross-check vs reduced model (gross stiffness)")
     kg = wall_stiffness_from_thickness_si(t, lw, E, NU, H; cracked=false)
     rr = evaluate_lateral(ReducedDiaphragmEvaluator(story_heights=[H], plan_halfwidth=(5.0,5.0),
-                                                    accidental_ecc=0.0), core(kg), [StoryLoad(1,Fx,0.0,0.0,0.0)])
+                                                    plate_center=(0.0, 0.0), accidental_ecc=0.0),
+                          core(kg), [StoryLoad(1,Fx,0.0,0.0,0.0)])
     ratio = fem.drift[1]/rr.drift[1]
     @printf("    FEM drift = %.3e   Reduced drift = %.3e   ratio = %.2f\n", fem.drift[1], rr.drift[1], ratio)
     same_order = 0.3 < ratio < 1.3
@@ -510,7 +515,8 @@ mkcand(id,x,y,θ) = WallCandidate(id, x, y, θ, lw, H, 1, E, NU, FC, FY, RHOC, E
 cands = [mkcand(1,0.0,-5.0,0.0), mkcand(2,0.0,5.0,0.0),
          mkcand(3,-5.0,0.0,pi/2), mkcand(4,5.0,0.0,pi/2),
          mkcand(5,0.0,-3.0,0.0),  mkcand(6,0.0,3.0,0.0)]
-evL = ReducedDiaphragmEvaluator(story_heights=[H], plan_halfwidth=(5.0,5.0), accidental_ecc=0.05)
+evL = ReducedDiaphragmEvaluator(story_heights=[H], plan_halfwidth=(5.0,5.0),
+                                 plate_center=(0.0, 0.0), accidental_ecc=0.05)
 loadsL = [StoryLoad(1, 6.0e5, 4.0e5, 0.0, 0.0)]   # biaxial demand
 drift_lim = 0.002
 s4 = true

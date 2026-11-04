@@ -74,13 +74,16 @@ end
 """
 Plan corners of one pier on the frame nodes its ends belong to.
 
-`nothing` when either base end is not on an architectural vertex: the stated
-`wall.x1` … `wall.y2` line is meshed, and the 1 mm snap still applies.
+`nothing` when the skeleton has no geometry cache, or either base end is not
+on an architectural vertex: the stated `wall.x1` … `wall.y2` line is meshed,
+and the 1 mm snap still applies.
 Both base ends on vertices, with no vertex at the top of either column,
 throw. The shell would otherwise miss the column above.
 """
 function _structural_pier_corners(struc::BuildingStructure, span, frame_nodes)
-    vc = struc.skeleton.geometry.vertex_coords
+    geom = struc.skeleton.geometry
+    geom === nothing && return nothing
+    vc = geom.vertex_coords
     size(vc, 1) == length(frame_nodes) || return nothing
     bl = _vertex_at_architectural(vc, span.x1, span.y1, span.z_bot)
     br = _vertex_at_architectural(vc, span.x2, span.y2, span.z_bot)

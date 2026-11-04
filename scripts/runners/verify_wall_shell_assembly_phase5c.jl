@@ -61,7 +61,7 @@ const SS = StructuralSynthesizer
 const H   = 3.0          # story height [m]
 const T_W = 0.3          # wall thickness [m]
 const FX  = 5.0e5        # story lateral load, +x [N] (per story)
-const NX  = 2            # mesh columns per wall (matches mesher's hardcoded nx)
+const NX  = 2            # mesh columns per wall; one row, matching FEMLateralEvaluator
 const PLAN_HALFWIDTH = (5.0, 5.0)
 
 # Four plan lines shared by both stories: (x1, y1, x2, y2).
@@ -148,7 +148,10 @@ function run_tier_b()
     params = DesignParameters()
 
     # ----- mesh the walls (the function under test) -----
-    shells, wall_nodes = SS._mesh_wall_shells(struc, params, Asap.Node[], Asap.ShellTri3[])
+    # Production defaults are WALL_MESH_DIV × WALL_MESH_ROWS (8 × 8). Tier A
+    # is `mesh_div` columns and a single row, so the comparison uses that split.
+    shells, wall_nodes, _ = SS._mesh_wall_shells(
+        struc, params, Asap.Node[], Asap.ShellTri3[]; mesh_div = NX, mesh_rows = 1)
 
     # Position → node lookup for base-reaction recovery.
     node_at = Dict{NTuple{3,Int},Asap.Node}()

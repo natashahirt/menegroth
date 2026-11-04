@@ -196,17 +196,6 @@ const _STUD_OPTS = (composite = true,
         @test raised[g1].Mux_pos == 1.0e9
         @test raised[g1].Mux_neg == 2.0e9
         @test raised[g1].Vu_strong == 3.0e9
-        # A simple-connection steel beam keeps the frame model's hogging.
-        simple = Dict(1 => SY._as_simple(ShellBeamDemand(1.0e9, 2.0e9, 3.0e9)))
-        _, sim = SY.member_group_demands(struc; member_edge_group = SY.BEAM_GROUP_SYMBOLS,
-                                         shell_demands = simple)
-        @test sim[g1].Mux_pos == 1.0e9
-        @test sim[g1].Mux_neg == base[g1].Mux_neg
-        @test sim[g1].Vu_strong == 3.0e9
-        merged = Dict(1 => simple[1])
-        SY._merge_shell_demand!(merged, Dict(1 => ShellBeamDemand(0.0, 0.0, 0.0)))
-        @test !merged[1].simple
-        @test merged[1].Mu_neg == 2.0e9
         zero_d = Dict(i => ShellBeamDemand(0.0, 0.0, 0.0) for i in 1:n_beams)
         _, same = SY.member_group_demands(struc; member_edge_group = SY.BEAM_GROUP_SYMBOLS,
                                           shell_demands = zero_d)
@@ -370,13 +359,43 @@ const _STUD_OPTS = (composite = true,
         @test pieces[end] isa Asap.Element{Asap.FixedFree}
         @test all(el -> el isa Asap.Element{Asap.FixedFixed}, pieces[2:end-1])
         @test SY.composite_region_mismatch(prof, out.demands[1].moment_fields) < 0.05
+        # Converged: the regions the last shell placed the stiffness on held.
+        @test haskey(out.region_mismatch, 1)
+        @test all(<=(0.05), values(out.region_mismatch))
 
-        # Simple connections: the frame model places the studs, so the shell's
-        # fields are reported but not checked, and no mismatch is reported.
-        @test all(d -> d.simple, values(out.demands))
-        @test res.beam_demands[1].simple
-        @test !haskey(out.region_mismatch, 1)
-        @test SY._shell_moment_fields_by_beam(out.demands) === nothing
+        # Stiffness placed on given regions: a hogging end takes the cracked section.
+        hog = [merge(first(prof.regions), (; s_left = 0.0, s_right = 0.8))]
+        moved = analyze_story_shell(struc, 0; target_edge = 1.0u"m", support_points = corners,
+                                    steel = A992_Steel, service = false,
+                                    composite_regions = Dict(1 => hog))
+        @test moved.composite_regions[1] == hog
+        @test res.composite_regions[1] == prof.regions
+        on = SY.composite_profile_on_regions(prof, hog)
+        cracked = ustrip(u"m^4", SZ.get_I_cracked_negative(prof.section, prof.Asr;
+                                                         d_rebar = prof.d_rebar))
+        for el in (el for el in moved.built.frames if el.id === :beam_1)
+            a, b = SY._plan_xy(el.nodeStart), SY._plan_xy(el.nodeEnd)
+            s = hypot((a[1] + b[1]) / 2 - x0, (a[2] + b[2]) / 2 - y0) / total
+            Ix = ustrip(u"m^4", el.section.Ix)
+            @test Ix ≈ ustrip(u"m^4", SY.composite_stiffness_at(on, s)) rtol = 1e-9
+            s > 0.8 + 1e-6 && @test Ix ≈ cracked rtol = 1e-9
+        end
+    end
+
+    @testset "Composite regions: shift and anchor strength on new regions" begin
+        r(a, b; q = 1.0) = (s_left = a, s_right = b, s_peak = (a + b) / 2, M_peak = q)
+        @test SY._region_shift([r(0.0, 1.0)], nothing) == 0.0
+        @test SY._region_shift([r(0.0, 1.0)], [r(0.0, 0.85)]) ≈ 0.15
+        @test SY._region_shift([r(0.0, 1.0)], [r(0.0, 0.4), r(0.6, 1.0)]) == Inf
+        prof = (regions = NamedTuple[r(0.0, 0.5), r(0.5, 1.0)], ΣQn = [3.0, 2.0])
+        # Smallest overlapping anchor strength; no overlap drops the region.
+        on = SY.composite_profile_on_regions(prof, NamedTuple[r(0.2, 0.9)])
+        @test on.ΣQn == [2.0]
+        on = SY.composite_profile_on_regions(prof, NamedTuple[r(0.1, 0.4)])
+        @test on.ΣQn == [3.0]
+        none = SY.composite_profile_on_regions((regions = NamedTuple[r(0.0, 0.3)], ΣQn = [1.0]),
+                                               NamedTuple[r(0.5, 0.9)])
+        @test isempty(none.regions)
     end
 
     @testset "Shell beam end releases" begin

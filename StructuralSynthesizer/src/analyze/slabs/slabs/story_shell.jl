@@ -311,20 +311,18 @@ so a released end still passes the beam's axial force, and that force times
 the offset is a small end moment about the slab mid-plane. It is kept and is
 part of the shell demand.
 
-A steel beam released at both ends is marked `simple` in its
-[`ShellBeamDemand`](@ref). AISC 360-16 §B3.4a (corpus: aisc-360-16, page 69):
-a simple connection transmits a negligible moment and may be assumed to allow
-unrestrained relative rotation.
+AISC 360-16 §B3.4a (corpus: aisc-360-16, page 69): a simple connection
+transmits a negligible moment and may be assumed to allow unrestrained
+relative rotation. That is the release at the column node.
 
 # ENGINEERING JUDGMENT
 The release frees the beam only at the column node. At every other node the
 beam turns with the slab, so next to a support where the slab is continuous
 it follows the slab's hogging and carries a short negative-moment region
-(about one metre on a 6 m bay, and not mesh-dependent). The frame model's
-state, a simple-span beam under a slab that carries its own hogging, is
-also in equilibrium. A `simple` beam is sized on that state: the shell's
-`Mu_neg` and moment fields are kept for reporting but do not size the beam
-or place its studs. That hogging is then the slab's, over the support.
+(about one metre on a 6 m bay, and not mesh-dependent). That hogging is part
+of the beam's shell demand. The slab bars are sized from the slab's own
+shell moments, which do not hold it, so moving it onto the slab would leave
+it unreinforced.
 
 Columns above and below the story are rotational springs at their shell
 nodes ([`_story_column_springs`](@ref)). A column with no section adds none,
@@ -332,11 +330,15 @@ and that support stays a vertical pin.
 
 A composite steel beam whose studs are known (it has a
 [`composite_stiffness_profile`](@ref) for its current section) takes, on each
-piece, the inertia the building model uses at that station: `I_LB` in a
-sagging region, the cracked section in a hogging one. Neither holds the
-slab's bending about its own centre, which the shell supplies (see
+piece, `I_LB` in a sagging region and the cracked section in a hogging one.
+The regions are the frame model's, or `composite_regions[i]` when given (the
+shell's own from an earlier solve, placed by
+[`composite_profile_on_regions`](@ref)). Neither inertia holds the slab's
+bending about its own centre, which the shell supplies (see
 [`StructuralSizer.shell_beam_properties`](@ref)). Its demand also carries
 one moment field per load combination. Any other steel beam is bare.
+`composite_regions` in the result gives, for each such beam, the regions its
+stiffness was placed on.
 
 # ENGINEERING JUDGMENT
 The model returned here is the gross shell: factored demands and slab bars
@@ -362,7 +364,8 @@ function analyze_story_shell(struc, level::Int;
                              solve::Bool = true,
                              service::Bool = true,
                              rebar = Rebar_60,
-                             sustained_live_fraction::Real = 0.0)
+                             sustained_live_fraction::Real = 0.0,
+                             composite_regions = nothing)
     haskey(struc.skeleton.stories, level) || throw(ArgumentError(
         "story $level is not in the skeleton"))
     story = struc.skeleton.stories[level]
@@ -404,9 +407,9 @@ function analyze_story_shell(struc, level::Int;
     beam_index = Dict{Symbol, Int}()
     skipped = Int[]
     composite_at = Dict{Symbol, NamedTuple}()
+    regions_used = Dict{Int, Vector{NamedTuple}}()
     origins = Dict{Int, NTuple{2, Float64}}()
     stale = Int[]
-    simple = Set{Int}()
     for (i, beam) in enumerate(struc.beams)
         chain = _story_vertex_chain(struc, beam)
         on_story = !isempty(chain) && all(v -> v in vertices, chain)
@@ -423,13 +426,17 @@ function analyze_story_shell(struc, level::Int;
         mat = _story_beam_material(sec, concrete, steel)
         props = StructuralSizer.shell_beam_properties(sec, h, mat)
         release = _story_beam_release(struc, beam, chain, mat)
-        mat isa StructuralSizer.StructuralSteel && release in (:freefree, :joist) &&
-            push!(simple, i)
         id = Symbol("beam_", i)
         profile = composite_stiffness_profile(struc, beam)
         if profile !== nothing
             if _sections_identical(profile.section, sec)
-                composite_at[id] = (; profile, flip = _story_origin_at_end(xy, profile.origin))
+                regions = composite_regions === nothing ? nothing :
+                          get(composite_regions, i, nothing)
+                regions_used[i] = regions === nothing ? profile.regions : regions
+                placed = regions === nothing ? profile :
+                         composite_profile_on_regions(profile, regions)
+                composite_at[id] = (; profile = placed,
+                                    flip = _story_origin_at_end(xy, profile.origin))
                 origins[i] = profile.origin
             else
                 push!(stale, i)
@@ -487,9 +494,6 @@ function analyze_story_shell(struc, level::Int;
                     model, built.panel_index, designs; cases = cases, fc = concrete.fc′)
                 beam_demands = story_shell_beam_demands(model, built.frames, beam_index, cases;
                                                         origins = origins)
-                for i in simple
-                    haskey(beam_demands, i) && (beam_demands[i] = _as_simple(beam_demands[i]))
-                end
                 if service && !isempty(beams)
                     specs = service_beams(struc, beams, beam_index, beam_demands, pts,
                                           thickness_of_face)
@@ -532,6 +536,7 @@ function analyze_story_shell(struc, level::Int;
         shell_reinforcement = bars,
         service_spans = service_spans,
         service_converged = service_converged,
+        composite_regions = regions_used,
         analysis_status = status,
         skipped_beams = skipped,
         reasons = reasons,

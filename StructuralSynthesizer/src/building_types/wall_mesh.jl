@@ -15,9 +15,8 @@ end
 """
 Piers on one story that share corners.
 
-`joined` is true when more than one pier meets. A joined assembly is recorded
-so the cut can sum it. Designing it is refused until the ordinary-wall flange
-width is taken from the code.
+`joined` is true when more than one pier meets. Each leg is checked on its
+own cut. The assembly is the shared corner, not a flanged section.
 """
 struct WallAssembly
     "0-based story, matching `Wall.story`."

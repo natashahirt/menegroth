@@ -406,6 +406,8 @@ function _build_fea_slab_model(
         push!(fixed_nodes, base_below)
         sec_below = _col_asap_sec(col, Ecc, ν_concrete; I_factor=col_I_factor)
         elem_below = Asap.Element(base_below, slab_node, sec_below, :col_below)
+        # Drawn bottom to top, roll θ puts c1 (section x) at θ from global X.
+        elem_below.Ψ = col_orientation(col)
         push!(frame_elements, elem_below)
 
         col_above = col.column_above
@@ -417,6 +419,7 @@ function _build_fea_slab_model(
             push!(fixed_nodes, base_above)
             sec_above = _col_asap_sec(col_above, Ecc, ν_concrete; I_factor=col_I_factor)
             elem_above = Asap.Element(slab_node, base_above, sec_above, :col_above)
+            elem_above.Ψ = col_orientation(col_above)
             push!(frame_elements, elem_above)
         end
 

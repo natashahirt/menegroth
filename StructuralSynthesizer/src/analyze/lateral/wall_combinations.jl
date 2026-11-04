@@ -7,9 +7,9 @@
 # N is compression-positive, in newtons, matching the wall P–M checkers.
 # V is in-plane shear along the pier, in newtons. M is the in-plane moment
 # about the horizontal normal through the cut centroid, in newton-metres.
-# Out-of-plane shear and moment are not in this resultant.
+# Vo and Mo are the out-of-plane pair. They are reported and not checked.
 
-"""In-plane axial force, shear, and moment of one pier for one case."""
+"""In-plane and out-of-plane resultants of one pier for one case."""
 struct WallAction
     "Compression-positive axial force [N]."
     N::Float64
@@ -17,6 +17,13 @@ struct WallAction
     V::Float64
     "In-plane moment about the horizontal normal through the cut centroid [N·m]."
     M::Float64
+    "Out-of-plane shear, along the horizontal normal [N]."
+    Vo::Float64
+    "Out-of-plane moment about the pier tangent [N·m]."
+    Mo::Float64
+    function WallAction(N, V, M, Vo=0.0, Mo=0.0)
+        new(Float64(N), Float64(V), Float64(M), Float64(Vo), Float64(Mo))
+    end
 end
 
 WallAction() = WallAction(0.0, 0.0, 0.0)
@@ -43,6 +50,12 @@ struct CombinedWallAction
     N::Float64
     V::Float64
     M::Float64
+    Vo::Float64
+    Mo::Float64
+    function CombinedWallAction(combination, alternative, N, V, M, Vo=0.0, Mo=0.0)
+        new(combination, alternative, Float64(N), Float64(V), Float64(M),
+            Float64(Vo), Float64(Mo))
+    end
 end
 
 """
@@ -56,14 +69,18 @@ the pier delivers, so `N = -Fz`.
 
 The in-plane tangent is `(x2 - x1, y2 - y1)`. The horizontal normal is that
 tangent turned 90° counterclockwise. `V` is the shear along the tangent.
-`M` is the moment about the normal.
+`M` is the moment about the normal. `Vo` is the shear along the normal.
+`Mo` is the moment about the tangent. Out-of-plane values are reported and
+are not a strength check.
 """
 function wall_action_from_global(wall::Wall, Fx, Fy, Fz, Mx, My, Mz)
     tx, ty, nx, ny = _pier_plan_axes(wall)
     return WallAction(
         -Float64(Fz),
         Float64(Fx) * tx + Float64(Fy) * ty,
-        Float64(Mx) * nx + Float64(My) * ny)
+        Float64(Mx) * nx + Float64(My) * ny,
+        Float64(Fx) * nx + Float64(Fy) * ny,
+        Float64(Mx) * tx + Float64(My) * ty)
 end
 
 """
@@ -93,7 +110,9 @@ function pier_wall_action(wall::Wall, pier::WallPierMesh, u::AbstractVector{<:Re
     return WallAction(
         -Float64(Fz),
         Float64(Fx) * tx + Float64(Fy) * ty,
-        Float64(Mx) * nx + Float64(My) * ny)
+        Float64(Mx) * nx + Float64(My) * ny,
+        Float64(Fx) * nx + Float64(Fy) * ny,
+        Float64(Mx) * tx + Float64(My) * ty)
 end
 
 """
@@ -124,12 +143,17 @@ end
 """
     assembly_wall_action(struc, assembly, u; kwargs...) -> WallAction
 
-The single pier of an assembly that is not joined. A joined assembly throws
-[`refuse_joined_wall_design`](@ref): an ordinary wall has no flange width here.
+The single pier of an assembly that is not joined. A joined assembly has no
+single action; read each leg with [`pier_wall_action`](@ref).
 """
 function assembly_wall_action(struc::BuildingStructure, assembly::WallAssembly,
                               u::AbstractVector{<:Real}; kwargs...)
-    refuse_joined_wall_design(assembly)
+    if assembly.joined
+        throw(ArgumentError(
+            "assembly_wall_action: assembly on story $(assembly.story) joins " *
+            "walls $(join(assembly.wall_indices, ", ")). There is no single " *
+            "action. Read each pier with pier_wall_action."))
+    end
     idx = only(assembly.wall_indices)
     pier = _pier_by_wall_index(struc.wall_mesh, idx)
     return pier_wall_action(struc.walls[idx], pier, u; kwargs...)
@@ -201,14 +225,20 @@ function combine_wall_action(combo::LoadCombination, gravity::PierGravityActions
     end
     live = use_live ? gravity.L : WallAction()
     wind_a = use_wind ? wind : WallAction()
-    eh = use_eh ? WallAction(ρ * qe.N, ρ * qe.V, ρ * qe.M) : WallAction()
+    eh = use_eh ? WallAction(ρ * qe.N, ρ * qe.V, ρ * qe.M, ρ * qe.Vo, ρ * qe.Mo) :
+         WallAction()
     N = _factored_component(combo, roof, gravity.D.N, live.N, gravity.companion.N,
                             wind_a.N, eh.N, ev_N)
     V = _factored_component(combo, roof, gravity.D.V, live.V, gravity.companion.V,
                             wind_a.V, eh.V, 0.0)
     M = _factored_component(combo, roof, gravity.D.M, live.M, gravity.companion.M,
                             wind_a.M, eh.M, 0.0)
-    return CombinedWallAction(combo.name, alternative, N, V, M)
+    # Ev is an axial effect. Out-of-plane shear and moment follow V and M.
+    Vo = _factored_component(combo, roof, gravity.D.Vo, live.Vo, gravity.companion.Vo,
+                             wind_a.Vo, eh.Vo, 0.0)
+    Mo = _factored_component(combo, roof, gravity.D.Mo, live.Mo, gravity.companion.Mo,
+                             wind_a.Mo, eh.Mo, 0.0)
+    return CombinedWallAction(combo.name, alternative, N, V, M, Vo, Mo)
 end
 
 """

@@ -144,39 +144,35 @@ end
 """
     _apply_column_roll!(element, θ)
 
-Add `θ` to a vertical member's Asap roll `Ψ`.
+Set a vertical member's Asap roll so its section x axis is at `θ` from global X.
 
-`θ` is [`Column`](@ref)`.θ`: the angle of c1 from global X. Asap's default
-`Ψ = π/2` is the θ = 0 orientation, so this adds to it and a zero angle
-changes nothing. A member drawn bottom to top turns counterclockwise by `θ`;
-one drawn top to bottom turns by `-θ`. A member that is not vertical is left
-alone.
-
-`θ = 0` keeps Asap's default. In that orientation `Ix` (with `h = c2`) resists
-global-X sway, while c1 is the X dimension and c2 the Y dimension. A
-rectangular column's analysis axes are therefore swapped relative to c1 and
-c2. Changing the base roll would turn every existing column section by 90°.
+`θ` is [`Column`](@ref)`.θ`, the angle of c1 from global X. The section x axis
+is `b = c1` for an `RCColumnSection` and the flange width for a W shape, so
+`Ix` resists sway along c2 and `Iy` sway along c1. Asap's local y for a
+vertical member is `(-sin Ψ, cos Ψ, 0)` drawn upward and `(sin Ψ, cos Ψ, 0)`
+drawn downward, and its `Ix` acts with local y. The roll is therefore `θ` for
+a member drawn bottom to top and `-θ` for one drawn top to bottom. It replaces
+the constructor's `Ψ = π/2`, which would put c2 along global X. A member that
+is not vertical is left alone.
 """
 function _apply_column_roll!(element, θ::Real)
-    θ == 0 && return element
     a = ustrip.(u"m", element.nodeStart.position)
     b = ustrip.(u"m", element.nodeEnd.position)
     dz = b[3] - a[3]
     hypot(b[1] - a[1], b[2] - a[2]) <= 1e-9 * max(abs(dz), 1.0) || return element
     dz == 0 && return element
-    element.Ψ += sign(dz) * Float64(θ)
+    element.Ψ = sign(dz) * Float64(θ)
     return element
 end
 
 """
     _roll_columns_to_section_axes!(frame_elements, struc)
 
-Roll each column's frame elements by `Column.θ`. Beams and braces stay as
+Roll each column's frame elements to `Column.θ`. Beams and braces stay as
 Asap built them. See [`_apply_column_roll!`](@ref).
 """
 function _roll_columns_to_section_axes!(frame_elements, struc)
     for col in struc.columns
-        col.θ == 0 && continue
         for si in segment_indices(col)
             eidx = struc.segments[si].edge_idx
             1 <= eidx <= length(frame_elements) || continue
@@ -384,6 +380,9 @@ function to_asap!(struc::BuildingStructure{T, A, P};
         @debug "Created shell diaphragm" n_shells=length(shell_elements)
     end
 
+    # A stem that lands on another wall's interior is split first, so the
+    # mesh shares the corner nodes. A second to_asap! does not split again.
+    split_tee_junctions!(struc.walls)
     wall_shells, wall_nodes, shells_by_wall = _mesh_wall_shells(
         struc, params, nodes, shell_elements;
         mesh_div=mesh_div, mesh_rows=mesh_rows)

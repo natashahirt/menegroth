@@ -160,7 +160,7 @@ function _get_column_axial_from_analysis(struc, col)
         edge_idx = seg.edge_idx
         edge_idx > 0 || continue
 
-        el = model.elements[edge_idx]
+        el = model.frame_elements[edge_idx]
         el_loads = get(element_loads, el.elementID, nothing)
         isnothing(el_loads) && continue
 
@@ -215,7 +215,7 @@ function _estimate_Pc_sum(struc, cols; concrete::StructuralSizer.Concrete = NWC_
         end
         
         # Gross moment of inertia (assuming rectangular)
-        Ig = c1 * c2^3 / 12  # About weak axis (conservative)
+        Ig = min(c1 * c2^3, c2 * c1^3) / 12  # About weak axis (conservative)
         
         # Effective stiffness (simplified per ACI 6.6.4.4.4)
         EI_eff = 0.4 * Ec_val * Ig
@@ -256,9 +256,9 @@ function _estimate_story_shear(struc, cols, story::Int)
         for seg_idx in segment_indices(col)
             seg = struc.segments[seg_idx]
             eidx = seg.edge_idx
-            (eidx < 1 || eidx > length(model.elements)) && continue
+            (eidx < 1 || eidx > length(model.frame_elements)) && continue
 
-            el = model.elements[eidx]
+            el = model.frame_elements[eidx]
             isempty(el.forces) && continue
             n_dof = length(el.forces)
 
@@ -304,7 +304,7 @@ function _compute_story_drift(struc, cols, story::Int)
         for seg_idx in segment_indices(col)
             seg = struc.segments[seg_idx]
             eidx = seg.edge_idx
-            (eidx < 1 || eidx > length(model.elements)) && continue
+            (eidx < 1 || eidx > length(model.frame_elements)) && continue
 
             v1, v2 = skel.edge_indices[eidx]
             z1, z2 = vc[v1, 3], vc[v2, 3]
@@ -453,8 +453,8 @@ function p_delta_iterate!(struc;
                 for seg_idx in segment_indices(col)
                     seg = struc.segments[seg_idx]
                     eidx = seg.edge_idx
-                    (eidx < 1 || eidx > length(model.elements)) && continue
-                    el = model.elements[eidx]
+                    (eidx < 1 || eidx > length(model.frame_elements)) && continue
+                    el = model.frame_elements[eidx]
                     isempty(el.forces) && continue
                     # Axial: el.forces[1] (start), el.forces[7] (end); negative = compression
                     P_start = el.forces[1]
@@ -562,7 +562,7 @@ function _story_drift_m(struc, model, skel, vc, cols)
         for seg_idx in segment_indices(col)
             seg = struc.segments[seg_idx]
             eidx = seg.edge_idx
-            (eidx < 1 || eidx > length(model.elements)) && continue
+            (eidx < 1 || eidx > length(model.frame_elements)) && continue
 
             v1, v2 = skel.edge_indices[eidx]
             z1, z2 = vc[v1, 3], vc[v2, 3]
@@ -588,7 +588,7 @@ function _governing_drift_direction(struc, model, skel, vc, cols)
         for seg_idx in segment_indices(col)
             seg = struc.segments[seg_idx]
             eidx = seg.edge_idx
-            (eidx < 1 || eidx > length(model.elements)) && continue
+            (eidx < 1 || eidx > length(model.frame_elements)) && continue
 
             v1, v2 = skel.edge_indices[eidx]
             z1, z2 = vc[v1, 3], vc[v2, 3]
@@ -610,7 +610,7 @@ function _column_top_node(struc, model, skel, vc, col)
     for seg_idx in segment_indices(col)
         seg = struc.segments[seg_idx]
         eidx = seg.edge_idx
-        (eidx < 1 || eidx > length(model.elements)) && continue
+        (eidx < 1 || eidx > length(model.frame_elements)) && continue
 
         v1, v2 = skel.edge_indices[eidx]
         z1, z2 = vc[v1, 3], vc[v2, 3]

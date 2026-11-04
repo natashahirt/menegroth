@@ -1,14 +1,16 @@
-# Ordinary-wall checks for one isolated pier.
+# Ordinary-wall checks for one pier.
 #
 # The numerical checks already live in StructuralSizer. This file only maps one
 # pier's concurrent (N, M, V) onto those functions and keeps the record.
-# Thickness, length, and reinforcement are the wall's given values.
+# Thickness and reinforcement are the wall's given values. A joined leg is
+# checked on the clear length the caller passes.
 
 """
     check_ordinary_wall(wall, actions; material, wall_index, case, boundary,
-                        assembly=nothing, hw=nothing, ρt_strength=nothing) -> Vector{WallCheckRecord}
+                        assembly=nothing, hw=nothing, ρt_strength=nothing,
+                        lw=nothing) -> Vector{WallCheckRecord}
 
-Run the ordinary checks on one isolated pier for each strength combination in
+Run the ordinary checks on one pier for each strength combination in
 `actions`. Each action is one concurrent `(N, M, V)`.
 
 The checks are the existing ones:
@@ -18,7 +20,8 @@ The checks are the existing ones:
 - in-plane axial-flexure, `check_wall_inplane_flexure` (ACI 318-19 §22.2 and §22.4.2.1)
 - empirical bearing, `check_wall_bearing_empirical` (ACI 318-19 §11.5.3)
 
-Out-of-plane flexure is not run. The in-plane action has no out-of-plane demand.
+Out-of-plane shear and moment are reported on a joined leg and are not a
+strength check. An isolated pier does not record them.
 
 `material` is a `ReinforcedConcreteMaterial`. A plain concrete is refused:
 this check does not assume a rebar grade. `boundary` selects the bearing-wall
@@ -43,7 +46,9 @@ default leaves the existing equation unchanged.
 `plan_axis` only sets the `direction` label: `:X`, `:Y`, or `:skew` for a
 pier on neither plan axis. The checks use the pier's own in-plane axes.
 
-A joined `assembly` is refused. A failing check is recorded. The wall is not resized.
+`lw`, when passed, is that clear length. A joined `assembly` without it
+throws: the centerline would count the corner twice. A failing check is
+recorded. The wall is not resized.
 """
 function check_ordinary_wall(wall::Wall, actions::AbstractVector{CombinedWallAction};
                              material,
@@ -53,18 +58,24 @@ function check_ordinary_wall(wall::Wall, actions::AbstractVector{CombinedWallAct
                              assembly::Union{Nothing,WallAssembly}=nothing,
                              hw::Union{Nothing,Unitful.Length}=nothing,
                              ρt_strength::Union{Nothing,Real}=nothing,
-                             plan_axis::NTuple{2, Float64}=(1.0, 0.0))
+                             plan_axis::NTuple{2, Float64}=(1.0, 0.0),
+                             lw::Union{Nothing,Unitful.Length}=nothing)
     material isa ReinforcedConcreteMaterial || throw(ArgumentError(
         "ordinary wall check: material must be a ReinforcedConcreteMaterial " *
         "(concrete plus rebar). A plain concrete has no fy or fyt, and this " *
         "check does not assume a grade."))
     isempty(actions) && throw(ArgumentError(
         "ordinary wall check: there is no strength combination to check."))
-    assembly !== nothing && refuse_joined_wall_design(assembly)
+    if assembly !== nothing && assembly.joined && lw === nothing
+        throw(ArgumentError(
+            "ordinary wall check: wall $wall_index is part of a joined assembly. " *
+            "Pass lw from joined_clear_length. The centerline length counts " *
+            "the corner twice."))
+    end
     _require_wall_concrete(wall, material)
 
-    lw = wall_length(wall) * u"m"
-    lw_m = ustrip(u"m", lw)
+    lw_m = lw === nothing ? wall_length(wall) : ustrip(u"m", lw)
+    lw = lw_m * u"m"
     lw_m > 0 || throw(ArgumentError("ordinary wall check: the pier has no length."))
     direction = _pier_axis_direction(wall, plan_axis)
     section = WallSection(lw, wall.thickness; ρl=wall.ρl, ρt=wall.ρt)
@@ -91,6 +102,22 @@ function check_ordinary_wall(wall::Wall, actions::AbstractVector{CombinedWallAct
                                                e=0.0u"m", lc=story_height, lu=lw,
                                                boundary=boundary, foundation=false)
         push!(records, _ordinary_record(wall_index, wall.story, direction, case, action, bearing))
+        if assembly !== nothing && assembly.joined
+            # Reported only. ratio 0 keeps a passing design from treating
+            # this as the governing strength check.
+            push!(records, WallCheckRecord(
+                wall_index, wall.story, direction, case,
+                action.combination, action.alternative,
+                "out-of-plane shear (reported)", true, 0.0,
+                abs(action.Vo), 0.0,
+                "reported; out-of-plane design is not this check"))
+            push!(records, WallCheckRecord(
+                wall_index, wall.story, direction, case,
+                action.combination, action.alternative,
+                "out-of-plane moment (reported)", true, 0.0,
+                abs(action.Mo), 0.0,
+                "reported; out-of-plane design is not this check"))
+        end
     end
     return records
 end
@@ -279,10 +306,12 @@ function _flexure_passes!(lw, t, ρl, material, actions)
 end
 
 """
-    select_ordinary_wall_reinforcement!(wall, actions, material; hw) -> ρt_strength
+    select_ordinary_wall_reinforcement!(wall, actions, material; hw, lw=nothing) -> ρt_strength
 
 Raise `wall.ρt`, then `wall.ρl`, to the lightest ratios on the grid that
-the pier's strength checks can pass. Thickness and length are unchanged.
+the pier's strength checks can pass. Thickness is unchanged. `lw`, when
+passed, is the clear length of a joined leg. Otherwise the centerline
+length is used.
 
 `ρt` is solved from the largest `|V|` and rounded up on the grid. `ρl`
 then walks upward from the §11.6.2 floor and stops at the first value
@@ -292,12 +321,13 @@ shear strength, or `nothing` when the shear is above the §11.5.4.2 cap.
 A ratio the wall already carries is not reduced. A demand the grid cannot
 cover leaves the wall at the top of the grid.
 """
-function select_ordinary_wall_reinforcement!(wall::Wall, actions, material; hw::Unitful.Length)
+function select_ordinary_wall_reinforcement!(wall::Wall, actions, material; hw::Unitful.Length,
+                                              lw::Union{Nothing,Unitful.Length}=nothing)
     material isa ReinforcedConcreteMaterial || throw(ArgumentError(
         "ordinary wall reinforcement: material must be a ReinforcedConcreteMaterial."))
     isempty(actions) && throw(ArgumentError(
         "ordinary wall reinforcement: there is no strength combination."))
-    lw = wall_length(wall)
+    lw = lw === nothing ? wall_length(wall) : ustrip(u"m", lw)
     lw > 0 || throw(ArgumentError("ordinary wall reinforcement: the pier has no length."))
     t = ustrip(u"m", wall.thickness)
     t > 0 || throw(ArgumentError("ordinary wall reinforcement: the thickness must be positive."))

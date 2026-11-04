@@ -52,6 +52,7 @@ using Asap  # ensures `u"kip"`, `u"ksi"`, etc resolve via Asap unit module
         include("analyze/test_column_populate_ltb.jl")
         include("analyze/test_wall_phase5_assembly.jl")
         include("analyze/test_wall_cuts.jl")
+        include("analyze/test_wall_joints.jl")
         include("analyze/test_seismic_wall_gates.jl")
         include("analyze/test_wall_story_cuts.jl")
         include("analyze/test_story_pdelta.jl")

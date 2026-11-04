@@ -115,24 +115,6 @@ function wall_assemblies(walls::AbstractVector; tol::Real=WALL_CORNER_TOL_M)
 end
 
 """
-Throw when a joined assembly would be designed. The cut may still sum it.
-
-ACI 318-19 §18.10.5.2 (corpus: aci-318-19, PDF page 325) is the special
-structural wall flange: from the face of the web, the lesser of one-half the
-distance to an adjacent wall web and 25 percent of the total wall height
-above the section. That clause is not applied to an ordinary wall.
-"""
-function refuse_joined_wall_design(assembly::WallAssembly)
-    assembly.joined || return nothing
-    throw(ArgumentError(
-        "Joined wall assembly on story $(assembly.story) (walls " *
-        "$(join(assembly.wall_indices, ", "))) is not designed. ACI 318-19 " *
-        "§18.10.5.2 gives the effective flange width for a special structural " *
-        "wall (corpus: aci-318-19, PDF page 325). It is not applied to an " *
-        "ordinary wall."))
-end
-
-"""
     wall_pier_cut(shells, u, z_m; wall_indices=[]) -> WallCut
 
 Sum `K*u` of `shells` at nodes on elevation `z_m`. Moments are about the

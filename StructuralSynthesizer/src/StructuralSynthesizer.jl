@@ -257,7 +257,9 @@ export assembly_wall_action, combine_wall_action, wall_strength_actions
 export wind_pier_actions, seismic_strength_pier_actions
 export WallCheckRecord, check_ordinary_wall
 export OrdinaryWallInputs, OrdinaryWallResult, design_ordinary_walls!
-export refuse_joined_wall_design
+export split_tee_junctions!, joined_clear_length, assembly_corners, WallCorner
+export joint_vertical_shear, corner_vertical_shear, joined_assembly_cuts
+export select_corner_ratio
 export require_seismic_wall_demand_provisions
 export LateralDesign, LateralSystem, DemandAssignment
 export WallsSeismicSystem, InteractiveShearWallFrameSystem

@@ -1,8 +1,9 @@
 # Ordinary concrete wall checks inside design_building.
 #
-# One isolated straight pier, checked at the section the building already has.
-# Thickness and length stay fixed. ρl and ρt are raised on a fixed grid
-# when the given ratios fail a strength check. A failing check is recorded.
+# Each straight pier is checked on its own cut, including a leg of a joined
+# assembly. Thickness stays fixed. A joined leg uses its clear length.
+# ρl and ρt are raised on a fixed grid when the given ratios fail a strength
+# check. A failing check is recorded. The corner between legs is shear friction.
 
 """Checks and seismic story-drift comparisons for one ordinary-wall run."""
 struct OrdinaryWallResult
@@ -29,7 +30,8 @@ end
 """
     design_ordinary_walls!(struc, params; tc=nothing) -> OrdinaryWallResult or nothing
 
-Check every isolated ordinary pier when `params.lateral` is set.
+Check every ordinary pier when `params.lateral` is set. A joined assembly
+is checked leg by leg. The corner is shear friction.
 
 `lateral === nothing` clears `struc.ordinary_wall_result` and returns. A
 gravity-only building is not given wind or seismic cases.
@@ -51,7 +53,8 @@ When lateral design was requested:
   story shear, and ρt is raised on the grid when it is short. The frames are
   solved without the wall shells at 25% of the story shear. A frame member
   with no reinforced-concrete section is recorded as failing.
-- A joined assembly is refused. The special-wall flange width is not applied.
+- A joined assembly is checked leg by leg on the clear length. The corner is
+  shear friction. The special-wall flange width is not applied.
 - Story forces need rigid-diaphragm masters (`diaphragm_mode = :rigid`).
 - Demands are the unified frame-shell solution: unfactored gravity, Chapter 27
   wind, and ELF strength cases. Each strength combination is applied once per
@@ -140,9 +143,6 @@ function design_ordinary_walls!(struc::BuildingStructure, params::DesignParamete
     sysy = ordinary_concrete_seismic_system(table_12_2_1_row(sy), inputs.sdc)
 
     prepare_lateral_model!(struc, params.lateral)
-    for assembly in struc.wall_mesh.assemblies
-        refuse_joined_wall_design(assembly)
-    end
     if isempty(struc.asap_rigid_links)
         throw(ArgumentError(
             "ordinary wall stage: wind and seismic story forces need " *
@@ -237,6 +237,7 @@ function design_ordinary_walls!(struc::BuildingStructure, params::DesignParamete
     _refuse_building_frame_gravity!(gravity_row, shares)
     prepared = Tuple{Int, Any, Vector{CombinedWallAction}, Any, Vector}[]
     grown_by_wall = Dict{Int, Vector{CombinedWallAction}}()
+    lw_by_wall = Dict{Int, typeof(1.0u"m")}()
     ρt_by_wall = Dict{Int, Union{Nothing, Float64}}()
     n_raised = 0
     max_ρl = 0.0
@@ -256,8 +257,10 @@ function design_ordinary_walls!(struc::BuildingStructure, params::DesignParamete
         end
         ρl0 = wall.ρl
         ρt0 = wall.ρt
+        lw = joined_clear_length(wall, struc.walls, wall_index) * u"m"
+        lw_by_wall[wall_index] = lw
         ρt_strength = select_ordinary_wall_reinforcement!(
-            wall, grown, inputs.material; hw=_stacked_wall_height(wall))
+            wall, grown, inputs.material; hw=_stacked_wall_height(wall), lw=lw)
         (wall.ρl > ρl0 + 1e-12 || wall.ρt > ρt0 + 1e-12) && (n_raised += 1)
         grown_by_wall[wall_index] = grown
         ρt_by_wall[wall_index] = ρt_strength
@@ -287,10 +290,11 @@ function design_ordinary_walls!(struc::BuildingStructure, params::DesignParamete
             _each_second_order(records, wall, firsts, growns;
                 material=inputs.material, wall_index, case,
                 boundary=inputs.boundary, assembly, what, ρt_strength,
-                plan_axis=axis)
+                plan_axis=axis, lw=lw_by_wall[wall_index])
         end
         checks[wall_index] = records
     end
+    _record_joined_joints!(checks, struc, basic, wind, second, effects, inputs, axis)
     _record_story_shear!(checks, interactive, struc, axis)
     _record_frame_members!(checks, struc, frame_members, axis)
     @info "Ordinary wall reinforcement" n_piers=length(checks) n_raised max_ρl max_ρt type5 orthogonal
@@ -336,15 +340,53 @@ function _pier_action_batches(struc, pier, basic, wind, elf, second, gravity, in
     return batches
 end
 
+"""
+`(combination, alternative, gravity key)` for the gravity readings.
+
+Combination 3 is the floor-live reading (`:L`). Wind and earthquake are
+not in this list. First-order actions, second-order actions, and corner
+shear all walk this list.
+"""
+function _gravity_readings(roof::Symbol)
+    out = Tuple{LoadCombination, Symbol, GravityStiffnessKey}[]
+    for combo in asce7_strength_combinations
+        if combo.name === :strength_1_2D_1_6Lr
+            push!(out, (combo, :L, _gravity_key(combo, roof; live=true)))
+        elseif combo.W == 0.0 && combo.E == 0.0 && combo.Ev == 0.0
+            push!(out, (combo, :only, _gravity_key(combo, roof)))
+        end
+    end
+    return out
+end
+
+"""Wind readings. Combination 3 is the `0.5W` reading (`:W`)."""
+function _wind_readings(roof::Symbol)
+    out = Tuple{LoadCombination, Symbol, GravityStiffnessKey}[]
+    for combo in asce7_strength_combinations
+        if combo.name === :strength_1_2D_1_6Lr
+            push!(out, (combo, :W, _gravity_key(combo, roof; live=false)))
+        elseif combo.W != 0.0 && combo.E == 0.0 && combo.Ev == 0.0
+            push!(out, (combo, :only, _gravity_key(combo, roof)))
+        end
+    end
+    return out
+end
+
+"""Earthquake readings. `Eh = ρ QE` is applied by the caller. `Ev` is axial only."""
+function _seismic_readings(roof::Symbol)
+    out = Tuple{LoadCombination, Symbol, GravityStiffnessKey}[]
+    for combo in asce7_strength_combinations
+        (combo.E != 0.0 || combo.Ev != 0.0) || continue
+        push!(out, (combo, :only, _gravity_key(combo, roof)))
+    end
+    return out
+end
+
 """Gravity combinations, once. Combination 3 is the floor-live reading (`:L`)."""
 function _gravity_strength_actions(gravity::PierGravityActions)
     out = CombinedWallAction[]
-    for combo in asce7_strength_combinations
-        if combo.name === :strength_1_2D_1_6Lr
-            push!(out, combine_wall_action(combo, gravity; alternative=:L))
-        elseif combo.W == 0.0 && combo.E == 0.0 && combo.Ev == 0.0
-            push!(out, combine_wall_action(combo, gravity))
-        end
+    for (combo, alt, _) in _gravity_readings(gravity.roof)
+        push!(out, combine_wall_action(combo, gravity; alternative=alt))
     end
     isempty(out) && throw(ArgumentError(
         "ordinary wall stage: no gravity strength combination was selected."))
@@ -354,12 +396,8 @@ end
 """Wind combinations for one wind case. Combination 3 is the `0.5W` reading."""
 function _wind_strength_actions(gravity::PierGravityActions, wind::WallAction)
     out = CombinedWallAction[]
-    for combo in asce7_strength_combinations
-        if combo.name === :strength_1_2D_1_6Lr
-            push!(out, combine_wall_action(combo, gravity; wind, alternative=:W))
-        elseif combo.W != 0.0 && combo.E == 0.0 && combo.Ev == 0.0
-            push!(out, combine_wall_action(combo, gravity; wind))
-        end
+    for (combo, alt, _) in _wind_readings(gravity.roof)
+        push!(out, combine_wall_action(combo, gravity; wind, alternative=alt))
     end
     isempty(out) && throw(ArgumentError(
         "ordinary wall stage: no wind strength combination was selected."))
@@ -370,10 +408,8 @@ end
 function _seismic_strength_actions(gravity::PierGravityActions, qe::WallAction,
                                    rho::Real, SDS::Real)
     out = CombinedWallAction[]
-    for combo in asce7_strength_combinations
-        if combo.E != 0.0 || combo.Ev != 0.0
-            push!(out, combine_wall_action(combo, gravity; qe, rho, SDS))
-        end
+    for (combo, alt, _) in _seismic_readings(gravity.roof)
+        push!(out, combine_wall_action(combo, gravity; qe, rho, SDS, alternative=alt))
     end
     isempty(out) && throw(ArgumentError(
         "ordinary wall stage: no earthquake strength combination was selected."))
@@ -505,65 +541,48 @@ function _second_order_lateral(struc, pier, u)
 end
 
 function _second_order_gravity_actions(struc, pier, basic, second)
-    roof = basic.symbols[3]
     out = CombinedWallAction[]
-    for combo in asce7_strength_combinations
-        if combo.name === :strength_1_2D_1_6Lr
-            grown = _second_order_gravity(struc, pier, basic,
-                                          second[_gravity_key(combo, roof; live=true)])
-            push!(out, combine_wall_action(combo, grown; alternative=:L))
-        elseif combo.W == 0.0 && combo.E == 0.0 && combo.Ev == 0.0
-            grown = _second_order_gravity(struc, pier, basic,
-                                          second[_gravity_key(combo, roof)])
-            push!(out, combine_wall_action(combo, grown))
-        end
+    for (combo, alt, key) in _gravity_readings(basic.symbols[3])
+        grown = _second_order_gravity(struc, pier, basic, second[key])
+        push!(out, combine_wall_action(combo, grown; alternative=alt))
     end
     return out
 end
 
 function _second_order_wind_actions(struc, pier, basic, second, i::Int)
-    roof = basic.symbols[3]
     out = CombinedWallAction[]
-    for combo in asce7_strength_combinations
-        if combo.name === :strength_1_2D_1_6Lr
-            set = second[_gravity_key(combo, roof; live=false)]
-            grown = _second_order_gravity(struc, pier, basic, set)
-            wind = _second_order_lateral(struc, pier, set.u[3 + i])
-            push!(out, combine_wall_action(combo, grown; wind, alternative=:W))
-        elseif combo.W != 0.0 && combo.E == 0.0 && combo.Ev == 0.0
-            set = second[_gravity_key(combo, roof)]
-            grown = _second_order_gravity(struc, pier, basic, set)
-            wind = _second_order_lateral(struc, pier, set.u[3 + i])
-            push!(out, combine_wall_action(combo, grown; wind))
-        end
+    for (combo, alt, key) in _wind_readings(basic.symbols[3])
+        set = second[key]
+        grown = _second_order_gravity(struc, pier, basic, set)
+        wind = _second_order_lateral(struc, pier, set.u[3 + i])
+        push!(out, combine_wall_action(combo, grown; wind, alternative=alt))
     end
     return out
 end
 
 function _second_order_seismic_actions(struc, pier, basic, second, k::Int, rho, SDS)
-    roof = basic.symbols[3]
     nwind = first(values(second)).nwind
     out = CombinedWallAction[]
-    for combo in asce7_strength_combinations
-        (combo.E != 0.0 || combo.Ev != 0.0) || continue
-        set = second[_gravity_key(combo, roof)]
+    for (combo, alt, key) in _seismic_readings(basic.symbols[3])
+        set = second[key]
         grown = _second_order_gravity(struc, pier, basic, set)
         qe = _second_order_lateral(struc, pier, set.u[3 + nwind + k])
-        push!(out, combine_wall_action(combo, grown; qe, rho, SDS))
+        push!(out, combine_wall_action(combo, grown; qe, rho, SDS, alternative=alt))
     end
     return out
 end
 
 function _each_second_order(records, wall, first_actions, second_actions;
                              material, wall_index, case, boundary, assembly, what,
-                             ρt_strength=nothing, plan_axis=(1.0, 0.0))
+                             ρt_strength=nothing, plan_axis=(1.0, 0.0),
+                             lw::Union{Nothing,Unitful.Length}=nothing)
     length(first_actions) == length(second_actions) || throw(ArgumentError(
         "ordinary wall stage: $what has $(length(first_actions)) first-order " *
         "combinations and $(length(second_actions)) second-order combinations."))
     for (first, grown) in zip(first_actions, second_actions)
         _accept_second_order!(records, wall, first, grown;
                               material, wall_index, case, boundary, assembly,
-                              ρt_strength, plan_axis)
+                              ρt_strength, plan_axis, lw)
     end
     return records
 end
@@ -571,7 +590,8 @@ end
 function _accept_second_order!(records, wall, first::CombinedWallAction,
                                grown::CombinedWallAction;
                                material, wall_index, case, boundary, assembly,
-                               ρt_strength=nothing, plan_axis=(1.0, 0.0))
+                               ρt_strength=nothing, plan_axis=(1.0, 0.0),
+                               lw::Union{Nothing,Unitful.Length}=nothing)
     (first.combination === grown.combination && first.alternative === grown.alternative) ||
         throw(ArgumentError(
             "ordinary wall stage: first-order $(first.combination)/$(first.alternative) " *
@@ -579,7 +599,7 @@ function _accept_second_order!(records, wall, first::CombinedWallAction,
     _record_second_order_moment!(records, wall, first, grown; wall_index, case, plan_axis)
     append!(records, check_ordinary_wall(wall, CombinedWallAction[grown];
                                          material, wall_index, case, boundary, assembly,
-                                         ρt_strength, plan_axis))
+                                         ρt_strength, plan_axis, lw))
     return records
 end
 
@@ -663,7 +683,8 @@ function _scale_seismic_action(action::WallAction, multiplier::Real)
     (isfinite(m) && m > 0) || throw(ArgumentError(
         "ordinary wall stage: the P-delta multiplier must be a positive " *
         "finite number; got $multiplier."))
-    return WallAction(action.N * m, action.V * m, action.M * m)
+    return WallAction(action.N * m, action.V * m, action.M * m,
+                      action.Vo * m, action.Mo * m)
 end
 
 """

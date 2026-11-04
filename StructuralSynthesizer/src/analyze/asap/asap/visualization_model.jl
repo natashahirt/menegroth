@@ -252,6 +252,7 @@ function build_analysis_model!(design::BuildingDesign;
         ecc = get(edge_eccentricity, edge_idx, (0.0, 0.0, 0.0, 0.0))
         
         el = Asap.Element(nodes[v1], nodes[v2], section; release=release_sym, eccentricity=ecc)
+        el.Ψ = src_el.Ψ
         push!(frame_elements, el)
         push!(frame_edge_indices, edge_idx)
     end

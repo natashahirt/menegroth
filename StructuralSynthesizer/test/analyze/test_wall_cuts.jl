@@ -66,8 +66,6 @@ end
         @test length(joined) == 1
         @test only(joined).joined
         @test only(joined).wall_indices == [1, 2]
-        @test_throws msg -> occursin("flange width", msg) refuse_joined_wall_design(only(joined))
-        @test refuse_joined_wall_design(first(apart)) === nothing
 
         # Stacked walls share a plan line and stay two assemblies.
         above = _wall(0, 0, 6, 0; story=1)

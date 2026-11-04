@@ -65,6 +65,21 @@ function __init__()
     # Gurobi C-pointers and JuMP model state are not safe in that context.
     ccall(:jl_generating_output, Cint, ()) != 0 && return
 
+    # SS_SKIP_SOLVER_WARMUP=true (short-lived test processes) skips the JIT
+    # warmup below but still probes the Gurobi license, so `_HAS_GUROBI[]`
+    # (which gates Gurobi tests and the :auto fallback) is still accurate.
+    if lowercase(get(ENV, "SS_SKIP_SOLVER_WARMUP", "false")) == "true"
+        if _HAS_GUROBI[]
+            try
+                _get_gurobi_env()
+            catch e
+                @info "Gurobi unavailable (e.g. no license); :auto will use HiGHS" exception = e
+                _HAS_GUROBI[] = false
+            end
+        end
+        return
+    end
+
     # Eagerly initialize Gurobi so the license handshake (~5 s) happens during
     # `using StructuralSizer` rather than surprising users mid-pipeline.
     if _HAS_GUROBI[]

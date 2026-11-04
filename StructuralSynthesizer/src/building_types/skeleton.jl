@@ -53,7 +53,26 @@ struct GeometryCache{L, A}
 end
 
 """
+    SlabOpening
+
+An unframed opening through the slab on one story: a stair, duct, or shaft whose
+edges are free slab edges. An opening with beams on every side is modelled as a
+missing skeleton face instead, so its edges carry beams and act as supports.
+
+# Fields
+- `story::Int`: Story level index (a key of `skel.stories`, 0-based)
+- `loop::Vector{NTuple{2, Float64}}`: Plan outline in meters
+"""
+struct SlabOpening
+    story::Int
+    loop::Vector{NTuple{2, Float64}}
+end
+
+"""
 Geometric and topological representation of a building.
+
+`openings` holds the [`SlabOpening`](@ref)s; see [`face_openings`](@ref) for the
+openings that overlap one face.
 
 # Edge groups (`groups_edges`)
 `groups_edges::Dict{Symbol, Vector{Int}}` maps a group name to the edge indices
@@ -93,6 +112,7 @@ mutable struct BuildingSkeleton{T} <: AbstractBuildingSkeleton
     # one continuous member (populated by shatter logic in the API layer).
     # When empty, each edge is its own chain (1:1 mapping, the default).
     edge_chains::Dict{UInt64, Vector{Int}}
+    openings::Vector{SlabOpening}
 
     """Construct an empty `BuildingSkeleton` with no vertices, edges, faces, or lookup tables."""
     function BuildingSkeleton{T}() where T
@@ -105,6 +125,7 @@ mutable struct BuildingSkeleton{T} <: AbstractBuildingSkeleton
             nothing,  # lookup disabled by default
             nothing,  # geometry cache not yet built
             Dict{UInt64, Vector{Int}}(),  # edge_chains (empty = no shattering)
+            SlabOpening[],
         )
     end
 end

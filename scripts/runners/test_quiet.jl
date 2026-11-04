@@ -1,17 +1,22 @@
 #=
-Quiet test runner: runs tests in a child Julia process, writes the full output
-to a log file, and prints only the Test Summary table plus failure/error excerpts.
-Keeps precompile and test noise out of terminal (and agent) context.
+Quiet test runner: runs tests, writes the full output to a log file, and prints
+only the Test Summary table plus failure/error excerpts. Keeps precompile and
+test noise out of terminal (and agent) context.
+
+If a persistent test server for the package is running (`test_server.jl`), the
+tests run there, with no process startup or precompile cost. Otherwise they run
+in a fresh child Julia process.
 
 Usage (from repo root):
     julia scripts/runners/test_quiet.jl StructuralSynthesizer core/test_walls_bridge.jl [more files...]
     julia scripts/runners/test_quiet.jl StructuralSizer            # full suite (runtests.jl)
+    julia scripts/runners/test_quiet.jl --fresh StructuralSizer …  # bypass the server
 
 Test file paths are relative to `<Package>/test/`. Full log: `logs/test_<Package>_<timestamp>.log`.
-Exit code mirrors the child process (non-zero on any failure/error).
+Exit code mirrors the test run (non-zero on any failure/error).
 =#
 
-using Dates
+using Dates, Sockets
 
 """Max number of excerpt lines printed per failure/error block."""
 const EXCERPT_LINES = 15
@@ -19,6 +24,9 @@ const EXCERPT_LINES = 15
 const MAX_PRINTED = 250
 
 const FAILURE_PATTERN = r"Test Failed at|Error During Test at|^ERROR:|LoadError"
+
+"""Status code `test_server.jl` returns when Revise could not apply an edit."""
+const REVISE_FAILED = 2
 
 """
     build_child_code(pkg, files) -> String
@@ -36,6 +44,47 @@ function build_child_code(pkg::AbstractString, files::Vector{String})
         cd($(repr(abspath(testdir))))
         @testset "$pkg (selected)" begin $includes end
         """
+end
+
+"""
+    run_child(pkg, files, logpath) -> Int
+
+Run the tests in a fresh Julia process. A signalled child can report exit code 0,
+so a killed run maps to `128 + signal` rather than passing.
+"""
+function run_child(pkg::AbstractString, files::Vector{String}, logpath::AbstractString)
+    cmd = `$(Base.julia_cmd()) --color=no --project=$pkg -e $(build_child_code(pkg, files))`
+    env = merge(ENV, Dict("SS_ENABLE_VISUALIZATION" => get(ENV, "SS_ENABLE_VISUALIZATION", "false")))
+    proc = open(logpath, "w") do io
+        run(pipeline(ignorestatus(setenv(cmd, env)); stdout=io, stderr=io))
+    end
+    proc.termsignal != 0 && return 128 + proc.termsignal
+    return something(proc.exitcode, 1)
+end
+
+"""
+    run_on_server(pkg, files, logpath) -> Union{Int,Nothing}
+
+Send the request to a running `test_server.jl` for `pkg` and return its status
+code, or `nothing` when no server is reachable.
+"""
+function run_on_server(pkg::AbstractString, files::Vector{String}, logpath::AbstractString)
+    portfile = joinpath("logs", "test_server_$pkg.port")
+    isfile(portfile) || return nothing
+    port = tryparse(Int, strip(read(portfile, String)))
+    sock = port === nothing ? nothing : try connect(ip"127.0.0.1", port) catch; nothing end
+    if sock === nothing
+        println("Stale test-server port file ($portfile); using a fresh process.")
+        return nothing
+    end
+    println("Using $pkg test server on port $port.")
+    println(sock, join(["RUN", logpath, files...], '\t'))
+    reply = readline(sock)
+    close(sock)
+    m = match(r"^DONE (\d+)$", reply)
+    m === nothing || return parse(Int, m[1])
+    println("Test server closed the connection without a result (crashed or stopped).")
+    return 1
 end
 
 """
@@ -74,26 +123,29 @@ function summarize(logpath::AbstractString)
 end
 
 function main(args)
-    isempty(args) && error("usage: julia scripts/runners/test_quiet.jl <Package> [test files relative to <Package>/test/...]")
+    fresh = "--fresh" in args
+    args = filter(!=("--fresh"), args)
+    isempty(args) && error("usage: julia scripts/runners/test_quiet.jl [--fresh] <Package> [test files relative to <Package>/test/...]")
     pkg, files = args[1], args[2:end]
     isdir(joinpath(pkg, "test")) || error("no test directory at $(joinpath(pkg, "test")); run from repo root")
 
     mkpath("logs")
     logpath = abspath("logs", "test_$(pkg)_$(Dates.format(now(), "yyyymmdd_HHMMSS")).log")
-    cmd = `$(Base.julia_cmd()) --color=no --project=$pkg -e $(build_child_code(pkg, files))`
-    env = merge(ENV, Dict("SS_ENABLE_VISUALIZATION" => get(ENV, "SS_ENABLE_VISUALIZATION", "false")))
 
     println("Running $(isempty(files) ? "full suite" : join(files, ", ")) for $pkg …")
     t0 = time()
-    proc = open(logpath, "w") do io
-        run(pipeline(ignorestatus(setenv(cmd, env)); stdout=io, stderr=io))
-    end
+    code = fresh ? nothing : run_on_server(pkg, files, logpath)
+    code === nothing && (code = run_child(pkg, files, logpath))
     elapsed = round(time() - t0; digits=1)
 
     summarize(logpath)
-    status = proc.exitcode == 0 ? "PASS" : "FAIL (exit $(proc.exitcode))"
-    println("\n$status in $(elapsed)s — full log: $logpath")
-    exit(proc.exitcode)
+    if code != 0
+        why = code == REVISE_FAILED ? "Revise could not apply source changes" : "exit $code"
+        println("\nFAIL ($why) in $(elapsed)s — full log: $logpath")
+        exit(code)
+    end
+    println("\nPASS in $(elapsed)s — full log: $logpath")
+    exit(0)
 end
 
 main(ARGS)

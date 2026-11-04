@@ -13,6 +13,12 @@ julia scripts/runners/test_quiet.jl StructuralSynthesizer core/test_walls_bridge
 julia scripts/runners/test_quiet.jl StructuralSizer                                  # full suite
 ```
 
+**Persistent test server (avoids re-precompiling after every edit).** Start one per package in a long-lived terminal; `test_quiet.jl` then routes to it automatically and Revise applies source edits in seconds. Pass `--fresh` to `test_quiet.jl` to force a clean process (use it for final verification, since package-level state persists in the server). If Revise cannot apply an edit, the run fails without testing; fix the error or restart the server.
+
+```bash
+julia scripts/runners/test_server.jl StructuralSynthesizer   # leave running; Ctrl-C to stop
+```
+
 Raw `Pkg.test()` (verbose; avoid in agent sessions):
 
 ```bash

@@ -25,7 +25,7 @@ The `Project.toml` files use Windows-style backslash paths (`..\\external\\Asap`
 | Variable | Purpose | Default |
 |---|---|---|
 | `SS_ENABLE_VISUALIZATION` | Disable GLMakie loading (set `false` for headless) | `false` |
-| `SS_ENABLE_HEAVY_PRECOMPILE_WORKLOAD` | Skip heavy precompile (set `false` for faster startup) | `false` |
+| `SS_SKIP_SOLVER_WARMUP` | Skip the JuMP solver warmup in `StructuralSizer.__init__` (Gurobi license is still probed); `test_quiet.jl` sets it for child processes | `false` |
 | `GRB_LICENSE_FILE` | Gurobi license file path | `/opt/gurobi/gurobi.lic` |
 | `SLACK_BOT_TOKEN` | Slack Web API (bot user OAuth token, `xoxb-...`) for workflows and doc-audit notifications | — |
 

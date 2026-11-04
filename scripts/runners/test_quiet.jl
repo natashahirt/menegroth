@@ -54,7 +54,10 @@ so a killed run maps to `128 + signal` rather than passing.
 """
 function run_child(pkg::AbstractString, files::Vector{String}, logpath::AbstractString)
     cmd = `$(Base.julia_cmd()) --color=no --project=$pkg -e $(build_child_code(pkg, files))`
-    env = merge(ENV, Dict("SS_ENABLE_VISUALIZATION" => get(ENV, "SS_ENABLE_VISUALIZATION", "false")))
+    env = merge(ENV, Dict(
+        "SS_ENABLE_VISUALIZATION" => get(ENV, "SS_ENABLE_VISUALIZATION", "false"),
+        "SS_SKIP_SOLVER_WARMUP" => get(ENV, "SS_SKIP_SOLVER_WARMUP", "true"),
+    ))
     proc = open(logpath, "w") do io
         run(pipeline(ignorestatus(setenv(cmd, env)); stdout=io, stderr=io))
     end

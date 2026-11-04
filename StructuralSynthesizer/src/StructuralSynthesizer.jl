@@ -336,10 +336,21 @@ export register_chat_routes!
 #      one-way shear, rebar design] → result building)
 #   2. Full design_building EFM (Asap FrameModel build + solve for EFM)
 #   3. Steel member sizing (member_group_demands + AISC MIP from Asap model)
+#
+# Opt-in: it adds ~10 min to every rebuild. Enable it per environment with
+#   [StructuralSynthesizer]
+#   heavy_precompile_workload = true
+# in the LocalPreferences.toml next to the active Project.toml. A preference
+# (unlike an ENV var) is part of the precompile cache key, so toggling it
+# triggers a rebuild instead of silently reusing a cache built the other way.
+# `precompile_workload = false` (PrecompileTools) disables all workloads.
 
 using PrecompileTools
 
-const ENABLE_HEAVY_PRECOMPILE_WORKLOAD = lowercase(get(ENV, "SS_ENABLE_HEAVY_PRECOMPILE_WORKLOAD", "true")) == "true"
+# Same calls Preferences.@load_preference makes, without adding a dependency.
+Base.record_compiletime_preference(Base.PkgId(@__MODULE__).uuid, "heavy_precompile_workload")
+const ENABLE_HEAVY_PRECOMPILE_WORKLOAD =
+    get(Base.get_preferences(Base.PkgId(@__MODULE__).uuid), "heavy_precompile_workload", false)::Bool
 
 if ENABLE_HEAVY_PRECOMPILE_WORKLOAD
     @setup_workload begin

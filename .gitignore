@@ -19,6 +19,8 @@ secrets/
 
 # Transient run artifacts (test/smoke logs, scratch files, Python caches)
 logs/
+# Per-machine Julia preferences (e.g. dev_precompile.jl workload toggles)
+LocalPreferences.toml
 .tmp_*
 **/__pycache__/
 

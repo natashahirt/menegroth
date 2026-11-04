@@ -97,42 +97,46 @@ function _kern_min_square_side(P::Force, Mux::Torque, Muy::Torque)
 end
 
 """
-Compute required flexural reinforcement for a rectangular section.
+    _footing_tension_As(Mu, b, d, fc, fy, ϕf) -> Area
 
-Iterates on lever arm jd until convergence. Returns total As for width `b`.
+Tension steel for width `b` from the Whitney block (`required_reinforcement`
+with `φ = ϕf`). `Inf` when the section is inadequate or εt < 0.005
+(ACI 318-11 §10.3.4, corpus: aci-318-11, page 142), so a depth search can
+add thickness.
 """
-function _flexural_steel_footing(Mu::Torque, b::Length, d::Length,
-                                  fc::Pressure, fy::Pressure, ϕf::Float64)
+function _footing_tension_As(Mu::Torque, b::Length, d::Length,
+                             fc::Pressure, fy::Pressure, ϕf::Float64)
     to_kipft(Mu) ≤ 0.0 && return 0.0u"inch^2"
     ustrip(fy) > 0 || throw(ArgumentError("fy must be positive"))
     ustrip(fc) > 0 || throw(ArgumentError("fc must be positive"))
     ustrip(b) > 0 || throw(ArgumentError("b must be positive"))
     ustrip(d) > 0 || throw(ArgumentError("d must be positive"))
+    return uconvert(u"inch^2", required_reinforcement(Mu, b, d, fc, fy; φ = ϕf))
+end
 
-    jd = 0.95 * d
-    As = Mu / (ϕf * fy * jd)
+"""
+    _footing_flexure_ok(pairs, d, fc, fy, ϕf) -> Bool
 
-    for _ in 1:20
-        a = As * fy / (0.85 * fc * b)
-        jd_new = max(d - a / 2, 0.5d)
-        As_new = Mu / (ϕf * fy * jd_new)
-        if abs(ustrip(u"inch^2", As_new - As)) < 0.001
-            As = As_new
-            break
-        end
-        As = As_new
-    end
+True when every `(Mu, b)` in `pairs` is tension-controlled at depth `d`.
+Footing depth searches include this with their shear checks.
+"""
+_footing_flexure_ok(pairs, d::Length, fc::Pressure, fy::Pressure, ϕf::Float64) =
+    all(isfinite(_footing_tension_As(Mu, b, d, fc, fy, ϕf)) for (Mu, b) in pairs)
 
-    # Tension-controlled check (ACI 21.2.2)
-    a = As * fy / (0.85 * fc * b)
-    β1_val = beta1(fc)
-    c_depth = a / β1_val
-    if ustrip(u"inch", c_depth) > 0
-        εcu = 0.003  # ACI 318-11 §10.2.3
-        εt = εcu * (d / c_depth - 1.0)
-        εt < 0.005 && @warn "Section not tension-controlled (εt=$(round(εt, digits=4)))"
-    end
+"""
+    _flexural_steel_footing(Mu, b, d, fc, fy, ϕf) -> Area
 
+Required flexural reinforcement for a rectangular footing section of width
+`b`. Throws when the section is not tension-controlled; the depth searches
+call `_footing_flexure_ok` first, so this only fires if a search ended
+without a passing thickness.
+"""
+function _flexural_steel_footing(Mu::Torque, b::Length, d::Length,
+                                  fc::Pressure, fy::Pressure, ϕf::Float64)
+    As = _footing_tension_As(Mu, b, d, fc, fy, ϕf)
+    isfinite(As) || error("Footing flexure is not tension-controlled at d = $d " *
+                          "(ACI 318-11 §10.3.4, εt ≥ 0.005): Mu = $Mu over b = $b. " *
+                          "The depth search ended without a thickness that passes flexure.")
     return As
 end
 
@@ -260,6 +264,178 @@ function _bearing_check_footing(Pu::Force, c1::Length, c2::Length,
             footing_ok = Pu ≤ Bn_footing, sqA = sqA)
 end
 
+"""
+    _spread_depth_index(min_depth, depth_increment, h_target) → Int
+
+Grid index `k ∈ 0:59` of the first thickness
+
+    h_k = min_depth + k * depth_increment
+
+at or above `h_target`. A target at or below `min_depth` returns 0, so
+the search still opens on `h_0`. A target above `h_59` clamps to 59.
+"""
+function _spread_depth_index(min_depth, depth_increment, h_target)
+    tol = 1e-6u"inch"
+    h = min_depth
+    h_target <= h + tol && return 0
+    for k in 1:59
+        h += depth_increment
+        h + tol >= h_target && return k
+    end
+    return 59
+end
+
+"""
+    _spread_punching_depth_seed(qu, B, Lf, c1, c2, shape, fc, λ, ϕ, cover, db) → Length
+
+Closed-form thickness *start* from direct two-way shear. Not a design
+result and not a lower bound.
+
+ACI 318-11 §11.11.2.1(c) Eq. (11-33) (corpus: aci-318-11, page 201):
+
+    Vc = 4 λ √f'c · b0 · d
+
+with φ for shear from §9.3.2.3 (corpus: aci-318-11, page 128). Rearranged,
+
+    d ≈ Vu / (b0 · φ · 4 λ √f'c).
+
+Only Eq. (11-33) is used — not the lesser of Eq. (11-31) and (11-32) —
+and unbalanced-moment transfer (§11.11.7) is omitted. The critical
+perimeter is the section at d/2 from the column (§11.11.1.2, page 200;
+straight sides permitted by §11.11.1.3, page 201), so both `b0` and `Vu`
+depend on `d`. The value below is the fixed point of that direct-shear
+estimate. The grid search still accepts or rejects the thickness.
+"""
+function _spread_punching_depth_seed(qu, B, Lf, c1, c2, shape, fc, λ, ϕ, cover, db)
+    cover_db = cover + db / 2
+    s = ϕ * 4.0 * λ * sqrt(max(ustrip(u"psi", fc), 0.0))
+    (s <= 0 || !isfinite(s)) && return cover_db
+    qu_psi = ustrip(u"psi", qu)
+    qu_psi <= 0 && return cover_db
+    A = ustrip(u"inch", B) * ustrip(u"inch", Lf)
+    A <= 0 && return cover_db
+    d_in = if shape == :circular
+        _circular_direct_punch_d(ustrip(u"inch", c1), qu_psi, A, s)
+    else
+        _rect_direct_punch_d(ustrip(u"inch", c1), ustrip(u"inch", c2), qu_psi, A, s)
+    end
+    (!isfinite(d_in) || d_in <= 0) && return cover_db
+    return d_in * u"inch" + cover_db
+end
+
+# Fixed point of Eq. (11-33) for an interior rectangular section:
+# b0 = 2(c1 + c2 + 2d), Vu = qu (A − (c1 + d)(c2 + d)). Start only.
+function _rect_direct_punch_d(c1, c2, qu, A, s)
+    rhs = qu * (A - c1 * c2)
+    rhs <= 0 && return 0.0
+    P = c1 + c2
+    a = 4.0 * s + qu
+    b = P * (2.0 * s + qu)
+    a <= 0 && return 0.0
+    disc = b * b + 4.0 * a * rhs
+    disc < 0 && return 0.0
+    d = (-b + sqrt(disc)) / (2.0 * a)
+    return isfinite(d) ? max(d, 0.0) : 0.0
+end
+
+# Same fixed point for a circular column: b0 = π(D + d),
+# Ac = π(D + d)²/4. Start only.
+function _circular_direct_punch_d(D, qu, A, s)
+    a = (s + qu / 4.0) * π
+    b = -s * π * D
+    c = -qu * A
+    a <= 0 && return 0.0
+    disc = b * b - 4.0 * a * c
+    disc < 0 && return 0.0
+    u = (-b + sqrt(disc)) / (2.0 * a)
+    d = u - D
+    return isfinite(d) ? max(d, 0.0) : 0.0
+end
+
+"""
+    _smallest_spread_footing_depth(min_depth, depth_increment, passes; k_seed=0)
+
+Smallest thickness on the spread-footing depth grid
+
+    h_k = min_depth + k * depth_increment,   k = 0, 1, …, 59
+
+for which `passes(h_k)` is true. `passes(h)` returns a named tuple
+`(ok, punch, ow_ok)`. Each `h_k` is built by adding `depth_increment`
+exactly `k` times, which is the thickness the linear scan tested at
+that step (binary rounding included). The result is always one of
+those grid points.
+
+On a fixed plan the predicate improves with thickness: the effective-depth
+gate, punching shear, and one-way shear. The search brackets that
+predicate and bisects for the lowest passing index. `k_seed` is only the
+first index evaluated. A passing seed is bisected down to `h_0`; a
+failing seed is bisected up toward `h_59`. The accepted index is the
+same one a search from `k = 0` returns. If `h_0` already passes, it is
+returned without searching further.
+
+When no point through `k = 59` passes, `ok` is false, `h` is one
+increment past `h_59` (the scan's thickness after 60 increments), and
+`punch` / `ow_ok` are the `k = 59` evaluation. A point that never
+reached the shear checks because `d < 4 in` reports `punch === nothing`
+and `ow_ok = false`.
+"""
+function _smallest_spread_footing_depth(min_depth, depth_increment, passes;
+                                         k_seed::Int=0)
+    function h_at(k::Int)
+        h = min_depth
+        for _ in 1:k
+            h += depth_increment
+        end
+        return h
+    end
+
+    k_seed = clamp(k_seed, 0, 59)
+    h_seed = h_at(k_seed)
+    st_seed = passes(h_seed)
+    if st_seed.ok
+        if k_seed == 0
+            return (ok = true, h = h_seed, punch = st_seed.punch, ow_ok = st_seed.ow_ok)
+        end
+        st0 = passes(h_at(0))
+        if st0.ok
+            return (ok = true, h = h_at(0), punch = st0.punch, ow_ok = st0.ow_ok)
+        end
+        lo = 0
+        hi = k_seed
+        best_h = h_seed
+        best = st_seed
+    else
+        if k_seed >= 59
+            return (ok = false, h = h_seed + depth_increment,
+                    punch = st_seed.punch, ow_ok = st_seed.ow_ok)
+        end
+        h_last = h_at(59)
+        st_last = passes(h_last)
+        if !st_last.ok
+            return (ok = false, h = h_last + depth_increment,
+                    punch = st_last.punch, ow_ok = st_last.ow_ok)
+        end
+        lo = k_seed
+        hi = 59
+        best_h = h_last
+        best = st_last
+    end
+
+    while hi - lo > 1
+        mid = (lo + hi) ÷ 2
+        h_mid = h_at(mid)
+        st = passes(h_mid)
+        if st.ok
+            hi = mid
+            best_h = h_mid
+            best = st
+        else
+            lo = mid
+        end
+    end
+    return (ok = true, h = best_h, punch = best.punch, ow_ok = best.ow_ok)
+end
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Public API
 # ─────────────────────────────────────────────────────────────────────────────
@@ -267,8 +443,9 @@ end
 """
     design_footing(::SpreadFooting, demand, soil; opts) → SpreadFootingResult
 
-Design a spread (isolated) footing per ACI 318-11 with full unbalanced-moment
-punching shear transfer (ACI §8.4.4.2).
+Design a spread (isolated) footing per ACI 318-11. Unbalanced-moment
+punching transfer is §11.11.7.2 (corpus: aci-318-11, page 210).
+ACI 318-19 §8.4.4.2 is the later number for the same stress.
 
 Uses the StructurePoint 7-step workflow:
 1. Preliminary sizing from service loads and net allowable soil pressure
@@ -409,34 +586,44 @@ function design_footing(::SpreadFooting,
     qu = q_u.q_max
 
     # =====================================================================
-    # Step 2 & 3: Thickness Iteration (Punching + One-Way Shear)
+    # Step 2 & 3: Thickness (Punching + One-Way Shear)
     # =====================================================================
-    h = opts.min_depth
-    h_incr = opts.depth_increment
-    d = 0.0u"inch"
-    punch = nothing
-
     # Effective depth d per ACI 318-11 §2.2 — "distance from extreme
     # compression fiber to centroid of longitudinal tension reinforcement"
     # (corpus: aci-318-11, page 37).  For a single layer of bars in a
     # footing, the centroid sits db/2 above the bar's clear-cover face,
     # so d = h − cover − db/2.
-    for iter in 1:60
-        d = h - cover - db / 2
-        d < 4.0u"inch" && (h += h_incr; continue)
+    #
+    # Same discrete grid the linear scan walked, h_k = min_depth +
+    # k·depth_increment for k = 0..59.  The predicate improves with h
+    # on this fixed plan, so the lowest passing index is a bisection.
+    # The punching estimate is only the first index. It is not a lower
+    # bound: a seed above h_0 is still bisected back down.
+    # Face-of-column cantilever moments (Step 4) do not depend on h, so the
+    # flexure check joins the depth predicate.
+    arm_x = (Lf - c1) / 2
+    arm_y = (B  - c2) / 2
+    Mu_x = qu * B  * arm_x^2 / 2
+    Mu_y = qu * Lf * arm_y^2 / 2
+
+    function _depth_passes(h)
+        d_try = h - cover - db / 2
+        d_try < 4.0u"inch" && return (ok = false, punch = nothing, ow_ok = false)
+        _footing_flexure_ok(((Mu_x, B), (Mu_y, Lf)), d_try, fc, fy, ϕf) ||
+            return (ok = false, punch = nothing, ow_ok = false)
 
         # Two-way (punching) shear with biaxial moments
         Ac = col_shape == :circular ?
-             π * (c1 + d)^2 / 4 : (c1 + d) * (c2 + d)
+             π * (c1 + d_try)^2 / 4 : (c1 + d_try) * (c2 + d_try)
         Vu_p = qu * (B * Lf - Ac)
-        punch = punching_check(Vu_p, demand.Mux, demand.Muy, d, fc, c1, c2;
-                               position = :interior, shape = col_shape,
-                               λ = λ, ϕ = ϕv)
+        punch_try = punching_check(Vu_p, demand.Mux, demand.Muy, d_try, fc, c1, c2;
+                                    position = :interior, shape = col_shape,
+                                    λ = λ, ϕ = ϕv)
 
         # One-way shear in both directions
-        ϕVc = ϕv * one_way_shear_capacity(fc, B, d; λ = λ)
-        cant_x = (Lf - c1) / 2 - d
-        cant_y = (B  - c2) / 2 - d
+        ϕVc = ϕv * one_way_shear_capacity(fc, B, d_try; λ = λ)
+        cant_x = (Lf - c1) / 2 - d_try
+        cant_y = (B  - c2) / 2 - d_try
         ow_ok = true
         if cant_x > 0u"inch"
             Vu_x = uconvert(u"lbf", qu * B * cant_x)
@@ -447,29 +634,33 @@ function design_footing(::SpreadFooting,
             ow_ok = ow_ok && Vu_y ≤ ϕVc
         end
 
-        punch.ok && ow_ok && break
-        h += h_incr
-        if iter == 60
-            StructuralSizer.emit!(tc, :checker, "design_footing_spread_aci", "foundation_group_$(demand.group_idx)", :failure;
-                                  reason="depth_iteration_nonconvergence",
-                                  h_in=Float64(ustrip(u"inch", h)),
-                                  last_punch_ok=Bool(punch === nothing ? false : punch.ok),
-                                  last_punch_ratio=punch === nothing ? nothing : Float64(punch.utilization),
-                                  last_one_way_ok=Bool(ow_ok))
-            error("Spread footing depth did not converge after 60 iterations (h=$h). " *
-                  "Check bearing pressure, column dimensions, or increase max depth.")
-        end
+        return (ok = punch_try.ok && ow_ok, punch = punch_try, ow_ok = ow_ok)
     end
+
+    h_seed = _spread_punching_depth_seed(qu, B, Lf, c1, c2, col_shape, fc, λ, ϕv, cover, db)
+    k_seed = _spread_depth_index(opts.min_depth, opts.depth_increment, h_seed)
+    selected = _smallest_spread_footing_depth(opts.min_depth, opts.depth_increment,
+                                               _depth_passes; k_seed=k_seed)
+    if !selected.ok
+        h = selected.h
+        punch = selected.punch
+        ow_ok = selected.ow_ok
+        StructuralSizer.emit!(tc, :checker, "design_footing_spread_aci", "foundation_group_$(demand.group_idx)", :failure;
+                              reason="depth_iteration_nonconvergence",
+                              h_in=Float64(ustrip(u"inch", h)),
+                              last_punch_ok=Bool(punch === nothing ? false : punch.ok),
+                              last_punch_ratio=punch === nothing ? nothing : Float64(punch.utilization),
+                              last_one_way_ok=Bool(ow_ok))
+        error("Spread footing depth did not converge after 60 iterations (h=$h). " *
+              "Check bearing pressure, column dimensions, or increase max depth.")
+    end
+    h = selected.h
+    punch = selected.punch
     d = h - cover - db / 2  # ACI 318-11 §2.2 — centroid of tension reinforcement
 
     # =====================================================================
     # Step 4: Flexural Reinforcement (ACI 7.5)
     # =====================================================================
-    cant_x = (Lf - c1) / 2
-    cant_y = (B  - c2) / 2
-    Mu_x = qu * B  * cant_x^2 / 2
-    Mu_y = qu * Lf * cant_y^2 / 2
-
     As_x = max(_flexural_steel_footing(Mu_x, B,  d, fc, fy, ϕf),
                _min_steel_footing(B, h, fy))
     As_y = max(_flexural_steel_footing(Mu_y, Lf, d, fc, fy, ϕf),
@@ -490,7 +681,7 @@ function design_footing(::SpreadFooting,
     # =====================================================================
     if opts.check_development
         ld    = _development_length_footing(opts.bar_size, fc, fy, λ, db)
-        avail = min(cant_x, cant_y) - cover
+        avail = min(arm_x, arm_y) - cover
         ld > avail && @warn "Development length: ld=$ld > available=$avail"
     end
 

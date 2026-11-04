@@ -298,6 +298,17 @@ end
 # ==============================================================================
 
 """
+    _multistart_fallback(result, is_feasible) -> NamedTuple
+
+The x0 result returned when no start is feasible. Ipopt can report
+`:optimal` with constraints violated beyond the multi-start tolerance, so
+the result keeps its status only if `is_feasible(result)`; otherwise the
+status is `:infeasible` and callers that require a completed design refuse it.
+"""
+_multistart_fallback(result, is_feasible) =
+    is_feasible(result) ? result : merge(result, (status = :infeasible,))
+
+"""
     _multistart_ipopt(problem, objective; maxiter, tol, verbose, x0, n_starts)
 
 Run Ipopt from multiple starting points and return the best feasible result.
@@ -386,7 +397,8 @@ function _multistart_ipopt(problem::AbstractNLPProblem, objective::AbstractObjec
         if verbose
             @warn "Multi-start: no feasible solution from $n_starts starts, using x0 fallback"
         end
-        best_result = _optimize_ipopt(problem, objective; maxiter, tol, verbose, x0)
+        best_result = _multistart_fallback(
+            _optimize_ipopt(problem, objective; maxiter, tol, verbose, x0), _is_feasible)
     elseif verbose
         @info "Multi-start: best objective $best_obj from $n_starts starts"
     end

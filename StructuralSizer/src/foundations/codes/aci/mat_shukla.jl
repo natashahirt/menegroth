@@ -275,6 +275,52 @@ function _shukla_analysis(
     return M_x_tot, M_y_tot, Q_tot, δ_tot, q_pressure, L
 end
 
+"""
+    _shukla_flexure_pairs(M_x_f, M_y_f, plan, demands) -> NTuple{4}
+
+`(Mu, b)` for the four mat faces, in the order x-bottom, x-top, y-bottom,
+y-top. Each Mu is the face-by-face envelope (ACI 336.2R-88 §6.1.2 Steps 3+4)
+of the sampled Shukla peak and the rigid strip moment, both as a total
+moment over the full mat width perpendicular to the strip span.
+"""
+function _shukla_flexure_pairs(M_x_f, M_y_f, plan, demands)
+    B, Lm = plan.B, plan.Lm
+
+    # Step 4: sample the flexible moment field (per unit length, dim = Force).
+    x_res = max(4 * length(plan.x_spans), 5)
+    y_res = max(4 * length(plan.y_spans), 5)
+    x_range = range(plan.x_left, plan.x_left + B, length = x_res)
+    y_range = range(plan.y_bot, plan.y_bot + Lm, length = y_res)
+
+    Mx_pos = zero(demands[1].Pu)
+    Mx_neg = zero(demands[1].Pu)
+    My_pos = zero(demands[1].Pu)
+    My_neg = zero(demands[1].Pu)
+    for x in x_range, y in y_range
+        mx = M_x_f(x, y)
+        my = M_y_f(x, y)
+        Mx_pos = max(Mx_pos, mx)
+        Mx_neg = max(Mx_neg, -mx)
+        My_pos = max(My_pos, my)
+        My_neg = max(My_neg, -my)
+    end
+
+    # Shukla sign convention: positive → bottom tension (sagging).
+    # Step 3: rigid strip statics over the full perpendicular mat width
+    # (Lm for x-strips, B for y-strips), the same scale as the Shukla peaks;
+    # otherwise the rigid contribution would always be dominated by Shukla on
+    # multi-bay grids (corpus: aci-336-combined-footings-mats Chapter 6
+    # §6.1.2 Step 3).
+    qu_rigid = sum(d.Pu for d in demands) / (B * Lm)
+    mom_x_rigid = _rigid_mat_strip_moments(qu_rigid, Lm, plan.x_spans)
+    mom_y_rigid = _rigid_mat_strip_moments(qu_rigid, B,  plan.y_spans)
+
+    return ((max(Mx_pos * Lm, mom_x_rigid.M_pos), Lm),   # sagging → As_bot
+            (max(Mx_neg * Lm, mom_x_rigid.M_neg), Lm),   # hogging → As_top
+            (max(My_pos * B,  mom_y_rigid.M_pos), B),
+            (max(My_neg * B,  mom_y_rigid.M_neg), B))
+end
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Shukla design driver
 # ─────────────────────────────────────────────────────────────────────────────
@@ -316,7 +362,7 @@ function _design_mat_shukla(
     ϕv    = opts.ϕ_shear
     μ     = Float64(opts.material.concrete.ν)  # Poisson's ratio from material
 
-    # Concrete modulus — ACI 318 §19.2.2.1
+    # Concrete modulus — ACI 318-11 §8.5.1 (corpus: aci-318-11, page 115)
     Ec_c = Ec(fc)
 
     # ── Step 1: Plan Sizing (first-principles overhang) ──
@@ -396,7 +442,10 @@ function _design_mat_shukla(
         util_p = _mat_punching_util(demands, plan, qu_punch, d_eff, fc, λ, ϕv)
         punch_ok = util_p ≤ 1.0
 
-        (bearing_ok && punch_ok) && break
+        flex_ok = _footing_flexure_ok(_shukla_flexure_pairs(M_x_f, M_y_f, plan, demands),
+                                      d_eff, fc, fy, ϕf)
+
+        (bearing_ok && punch_ok && flex_ok) && break
         h += h_incr
         iter == 80 && @warn "Shukla mat thickness did not converge at h=$h"
     end
@@ -428,63 +477,10 @@ function _design_mat_shukla(
         "Shukla equilibrium: only $(round(100*eq_ratio, digits=1))% of total load " *
         "captured by soil pressure over mat (infinite-plate effect)")
 
-    # ── Step 5a: Shukla moments — sample flexible moment field ──
-    x_res = max(4 * length(plan.x_spans), 5)
-    y_res = max(4 * length(plan.y_spans), 5)
-
-    x_range = range(plan.x_left, plan.x_left + B, length = x_res)
-    y_range = range(plan.y_bot, plan.y_bot + Lm, length = y_res)
-
-    # Shukla moment functions return M per unit length (dim = Force).
-    Mx_pos = zero(demands[1].Pu)
-    Mx_neg = zero(demands[1].Pu)
-    My_pos = zero(demands[1].Pu)
-    My_neg = zero(demands[1].Pu)
-
-    for x in x_range, y in y_range
-        mx = M_x_f(x, y)
-        my = M_y_f(x, y)
-        Mx_pos = max(Mx_pos, mx)
-        Mx_neg = max(Mx_neg, -mx)
-        My_pos = max(My_pos, my)
-        My_neg = max(My_neg, -my)
-    end
-
-    # Convert Shukla per-unit-length peaks to total moments (Force × Length).
-    # Shukla sign convention: positive → bottom tension (sagging).
-    M_shukla_x_bot = Mx_pos * Lm    # sagging → As_bot
-    M_shukla_x_top = Mx_neg * Lm    # hogging → As_top
-    M_shukla_y_bot = My_pos * B
-    M_shukla_y_top = My_neg * B
-
-    # ── Step 5b: Rigid strip moments — ACI 336.2R §6.1.2 Step 3 ──
-    # These satisfy global statics exactly. Pass the full mat width
-    # perpendicular to the strip span (Lm for x-strips, B for y-strips)
-    # so the rigid moments share the same "total moment for full mat
-    # width at worst per-unit-width intensity" scale as the Shukla
-    # peaks below; otherwise the rigid contribution to the envelope
-    # would always be silently dominated by Shukla on multi-bay grids.
-    # (corpus: aci-336-combined-footings-mats Chapter 6 §6.1.2 Step 3)
-    qu_rigid = sum(d.Pu for d in demands) / (B * Lm)
-
-    mom_x_rigid = _rigid_mat_strip_moments(qu_rigid, Lm, plan.x_spans)
-    mom_y_rigid = _rigid_mat_strip_moments(qu_rigid, B,  plan.y_spans)
-
-    # ── Step 5c: Envelope — face-by-face max (ACI 336.2R §6.1.2 Steps 3+4) ──
-    M_env_x_bot = max(M_shukla_x_bot, mom_x_rigid.M_pos)   # sagging
-    M_env_x_top = max(M_shukla_x_top, mom_x_rigid.M_neg)   # hogging
-    M_env_y_bot = max(M_shukla_y_bot, mom_y_rigid.M_pos)
-    M_env_y_top = max(M_shukla_y_top, mom_y_rigid.M_neg)
-
-    # Design reinforcement from enveloped moments.
-    As_x_bot = max(_flexural_steel_footing(M_env_x_bot, Lm, d_eff, fc, fy, ϕf),
-                   _min_steel_footing(Lm, h, fy))
-    As_x_top = max(_flexural_steel_footing(M_env_x_top, Lm, d_eff, fc, fy, ϕf),
-                   _min_steel_footing(Lm, h, fy))
-    As_y_bot = max(_flexural_steel_footing(M_env_y_bot, B, d_eff, fc, fy, ϕf),
-                   _min_steel_footing(B, h, fy))
-    As_y_top = max(_flexural_steel_footing(M_env_y_top, B, d_eff, fc, fy, ϕf),
-                   _min_steel_footing(B, h, fy))
+    # ── Step 5: Reinforcement from the Shukla / rigid-strip envelope ──
+    As_x_bot, As_x_top, As_y_bot, As_y_top =
+        (max(_flexural_steel_footing(Mu, b, d_eff, fc, fy, ϕf), _min_steel_footing(b, h, fy))
+         for (Mu, b) in _shukla_flexure_pairs(M_x_f, M_y_f, plan, demands))
 
     # ── Utilization ──
     qu_final = sum(d.Pu for d in demands) / (B * Lm)

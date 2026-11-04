@@ -1,4 +1,16 @@
 """
+    _require_face_edges(face_edges, face_idx) -> face_edges
+
+A loaded cell whose face has no edges has nowhere to send its slab load.
+Throws instead of returning no loads, which would design with that load missing.
+"""
+function _require_face_edges(face_edges, face_idx::Integer)
+    isempty(face_edges) && error("Cell face $face_idx has no edges, so its slab load " *
+                                 "cannot be routed to framing. Check the skeleton geometry.")
+    return face_edges
+end
+
+"""
 Create TributaryLoads for a single cell from its tributary polygons.
 
 When `split_dead_live=true`, returns `(dead_loads, live_loads)` with separate
@@ -25,12 +37,8 @@ function _create_cell_tributary_loads!(
         return split_dead_live ? (dead_loads, live_loads) : dead_loads
     end
     
-    face_edges = skel.face_edge_indices[cell.face_idx]
+    face_edges = _require_face_edges(skel.face_edge_indices[cell.face_idx], cell.face_idx)
     face_verts = skel.face_vertex_indices[cell.face_idx]
-    if isempty(face_edges)
-        @warn "Cell face has no edges (face_idx=$(cell.face_idx)); skipping tributary loads"
-        return split_dead_live ? (dead_loads, live_loads) : dead_loads
-    end
 
     # Compute pressures
     if split_dead_live

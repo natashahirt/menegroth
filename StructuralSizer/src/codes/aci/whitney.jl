@@ -12,9 +12,17 @@
 Required tension steel area from Whitney stress block equilibrium.
 
 Uses the quadratic solution for As from moment equilibrium:
-    As = (β₁·f'c·b·d / fy) × (1 - √(1 - 2Rn/(β₁·f'c)))
+    As = (0.85·f'c·b·d / fy) × (1 - √(1 - 2Rn/(0.85·f'c)))
 
-where Rn = Mu / (φ·b·d²)
+where Rn = Mu / (φ·b·d²), φ = 0.9 by default (`φ` keyword; footings pass
+their `ϕ_flexure` option).
+
+With `require_tension_controlled = true` (default) the section must be
+tension-controlled for that φ: εt ≥ 0.005, with c = a/β₁ and
+εt = 0.003(d − c)/c.  A section that is not is reported as inadequate
+(`Inf`), the same as one whose demand exceeds the stress block, so the caller
+adds depth.  Pass `false` only when the caller computes εt and φ itself
+(beam designers using `flexure_phi`).
 
 # Arguments
 - `Mu`: Factored moment demand
@@ -25,41 +33,34 @@ where Rn = Mu / (φ·b·d²)
 
 # Returns
 Required steel area As (with units). Returns `Inf * u"m^2"` if the section is
-inadequate (demand exceeds capacity) — caller should increase depth.
+inadequate (demand exceeds the stress block, or εt < 0.005) — caller should
+increase depth.
 
 # Reference
-- ACI 318-11 §10.2.7 (Whitney rectangular stress block)
+- ACI 318-11 §10.2.7.1 (corpus: aci-318-11, page 140): 0.85 f'c over a = β₁c
+- ACI 318-11 §10.3.4 (corpus: aci-318-11, page 142): tension-controlled at εt ≥ 0.005
+- ACI 318-11 §9.3.2.1: φ = 0.90 for tension-controlled sections
 - Supplementary Document Section 1.7 (Setareh & Darvas derivation)
 """
-function required_reinforcement(Mu::Moment, b::Length, d::Length, fc::Pressure, fy::Pressure)
-    φ = 0.9  # Tension-controlled section (ACI 21.2.2)
+function required_reinforcement(Mu::Moment, b::Length, d::Length, fc::Pressure, fy::Pressure;
+                                require_tension_controlled::Bool = true,
+                                φ::Float64 = 0.9)
 
     # Resistance coefficient Rn = Mu/(φ·b·d²) — has units of pressure
     Rn = Mu / (φ * b * d^2)
 
-    # Stress block factor
-    β = beta1(fc)
+    term = uconvert(NoUnits, 2 * Rn / (0.85 * fc))
+    term > 1.0 && return Inf * u"m^2"
 
-    # Required steel ratio (from quadratic solution)
-    term = 2 * Rn / (β * fc)  # dimensionless
-    if term > 1.0
-        # Section inadequate: demand exceeds capacity. Return sentinel.
-        return Inf * u"m^2"
+    # Mechanical ratio ω = ρ·fy/f'c = 0.85·a/d
+    ω = 0.85 * (1 - sqrt(1 - term))
+
+    if require_tension_controlled && ω > 0
+        c_over_d = (ω / 0.85) / beta1(fc)
+        εt = 0.003 * (1 - c_over_d) / c_over_d
+        # Tolerance so a demand exactly at the εt = 0.005 capacity is not rejected by roundoff.
+        εt < 0.005 - 1e-12 && return Inf * u"m^2"
     end
 
-    # Check if section is tension-controlled (ACI limits)
-    # Rn_max corresponds to the tension-controlled strain limit εt = 0.005
-    Rn_max = 0.319 * β * fc
-    if Rn > Rn_max
-        ratio = ustrip(Rn / Rn_max)
-        @warn "Section not tension-controlled (Rn/Rn_max=$(round(ratio, digits=2))). " *
-              "φ=0.9 is unconservative; section needs more depth or the pipeline " *
-              "should have caught this. Rn=$(round(ustrip(u"psi", Rn), digits=1)) psi, " *
-              "Rn_max=$(round(ustrip(u"psi", Rn_max), digits=1)) psi"
-    end
-
-    ρ = (β * fc / fy) * (1 - sqrt(1 - term))  # dimensionless
-
-    # Required area: As = ρ·b·d
-    return ρ * b * d
+    return ω * fc / fy * b * d
 end

@@ -122,6 +122,25 @@ function _strip_c_across_along(c1, c2, strip_axis::Symbol)
 end
 
 """
+    _strip_flexure_pairs(diag, B, qu, d, demands, strip_axis) -> Vector
+
+`(Mu, b)` for every flexural section the strip design reinforces: the peak
+sagging and hogging moments over width `B` (Step 4), and each column's
+transverse band, width `c_along + d`, with Mu at the column face (§15.4.2,
+Step 5). The depth search checks all of them for tension control.
+"""
+function _strip_flexure_pairs(diag, B, qu, d, demands, strip_axis::Symbol)
+    pairs = Any[(maximum(diag.M_kipft) * kip * u"ft", B),
+                (-minimum(diag.M_kipft) * kip * u"ft", B)]
+    for dem in demands
+        c_across, c_along = _strip_c_across_along(dem.c1, dem.c2, strip_axis)
+        bw = c_along + d
+        push!(pairs, ((qu * ((B - c_across) / 2)^2 / 2) * bw, bw))
+    end
+    return pairs
+end
+
+"""
     _strip_tensile_As(demands, ϕ_tension, fy) → As
 
 Total tensile interface steel for columns with `Pu < 0`:
@@ -254,7 +273,7 @@ function design_footing(::StripFooting,
 
     # Round up to increment, then stay in ft. Mixing the ceil result (inch)
     # with x_bar (ft) promotes through SI; converting that Quantity back
-    # to inch is 0.3048/0.0254, not ×12 — including when the leftover is
+    # to inch is FT_TO_M/IN_TO_M, not ×12 — including when the leftover is
     # already inch-tagged. Convert after ustrip(inch) for every unit; the
     # helper snaps |overhang| ≤ 1e-12 in after face subtraction so a
     # flush 1 ft / 24 in face stays exact zero (ACI 318-11 §10.14.1,
@@ -357,8 +376,10 @@ function design_footing(::StripFooting,
                 end
             end
             ow_ok = Vu_max_kip ≤ ϕVc_kip
+            flex_ok = _footing_flexure_ok(
+                _strip_flexure_pairs(diag_t, B, qu, d, demands, strip_axis), d, fc, fy, ϕf)
 
-            if all_punch_ok && ow_ok
+            if all_punch_ok && ow_ok && flex_ok
                 depth_ok = true
                 break
             end

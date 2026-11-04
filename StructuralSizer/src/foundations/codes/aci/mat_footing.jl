@@ -161,10 +161,10 @@ function _mat_punching_util(demands, plan, qu, d_eff, fc, λ, ϕv)
     B, Lm = plan.B, plan.Lm
     xs_loc, ys_loc = plan.xs_loc, plan.ys_loc
 
-    # Geometric edge / corner detection per ACI 318-11 §22.6.4.1 (corpus:
-    # aci-318-11, page 397).  The critical section lies at d/2 from each
-    # column face; a column has full 4-sided critical perimeter iff the mat
-    # extends at least `c/2 + d/2` beyond the column face on that side.
+    # ACI 318-11 §11.11.1.2 (corpus: aci-318-11, page 200): the two-way
+    # critical section need not approach closer than d/2 to the column face.
+    # A column has a full 4-sided perimeter iff the mat extends at least
+    # `c/2 + d/2` beyond the column center on that side.
     # The earlier `overhang ± 0.5 ft` threshold conflated "leftmost column
     # in the grid" with "perimeter extends off the mat", which silently
     # misclassified centered single-column mats (overhang ≈ B/2) as corner.
@@ -449,12 +449,18 @@ function _design_mat_rigid(
     h_incr = opts.depth_increment
     db_eff = max(db_x, db_y) / 2
 
+    # Step 4 strip moments do not depend on h; the depth search also requires
+    # every flexural section to be tension-controlled.
+    mom_x = _rigid_mat_strip_moments(qu, Lm, plan.x_spans)
+    mom_y = _rigid_mat_strip_moments(qu, B,  plan.y_spans)
+    flex_pairs = ((mom_x.M_pos, Lm), (mom_x.M_neg, Lm), (mom_y.M_pos, B), (mom_y.M_neg, B))
+
     for iter in 1:60
         d_eff = h - cover - db_eff
         d_eff < 6.0u"inch" && (h += h_incr; continue)
 
         util_p = _mat_punching_util(demands, plan, qu, d_eff, fc, λ, ϕv)
-        util_p ≤ 1.0 && break
+        util_p ≤ 1.0 && _footing_flexure_ok(flex_pairs, d_eff, fc, fy, ϕf) && break
         h += h_incr
         iter == 60 && @warn "Mat footing thickness did not converge at h=$h"
     end
@@ -469,9 +475,8 @@ function _design_mat_rigid(
     # (qu × Ls²/coeff). This matches the convention used by the Shukla
     # and Winkler-FEA paths (per-unit-length moment × full mat width)
     # and is what `_mat_build_result` expects when it converts As to
-    # bar count distributed across the full mat width.
-    mom_x = _rigid_mat_strip_moments(qu, Lm, plan.x_spans)
-    mom_y = _rigid_mat_strip_moments(qu, B,  plan.y_spans)
+    # bar count distributed across the full mat width. `mom_x` / `mom_y`
+    # are computed before the depth search above.
 
     As_x_bot = max(_flexural_steel_footing(mom_x.M_pos, Lm, d_eff, fc, fy, ϕf),
                    _min_steel_footing(Lm, h, fy))

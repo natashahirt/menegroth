@@ -95,6 +95,7 @@ using Asap  # ensures `u"kip"`, `u"ksi"`, etc resolve via Asap unit module
         include("sizing/slabs/test_floor_design_contracts.jl")
         include("sizing/slabs/test_flat_plate_pure_methods.jl")
         include("sizing/slabs/test_vault_pipeline.jl")
+        include("sizing/slabs/test_fea_remesh.jl")
     end
 
     # ─── Member Sizing (non-report tests) ────────────────────────────────

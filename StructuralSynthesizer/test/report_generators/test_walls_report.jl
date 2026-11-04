@@ -464,11 +464,13 @@ _w_status["S2 distribution"] = _mark(s2)
 # 5. S3 — FEM validation (Asap shells) vs reduced oracle
 # ═══════════════════════════════════════════════════════════════════════════
 w_section_header("5.0  S3 — FEM Validation (Asap wall shells) vs Reduced Oracle")
+# Panels 2 and 4 run opposite to 1 and 3 so the triangle diagonals mirror and
+# the meshed core is symmetric too (otherwise the mesh alone gives torsion 1.002).
 panels = WallPanel[
     WallPanel(1, -2.0,-5.0,  2.0,-5.0, 0.0, H, t, E, NU, 1),
-    WallPanel(2, -2.0, 5.0,  2.0, 5.0, 0.0, H, t, E, NU, 1),
+    WallPanel(2,  2.0, 5.0, -2.0, 5.0, 0.0, H, t, E, NU, 1),
     WallPanel(3, -5.0,-2.0, -5.0, 2.0, 0.0, H, t, E, NU, 1),
-    WallPanel(4,  5.0,-2.0,  5.0, 2.0, 0.0, H, t, E, NU, 1),
+    WallPanel(4,  5.0, 2.0,  5.0,-2.0, 0.0, H, t, E, NU, 1),
 ]
 s3 = true
 local fem
@@ -479,7 +481,7 @@ try
     w_table_head("Equilibrium")
     s3 &= w_compare("ΣX-wall base shear vs applied", (fem.wall_forces[1]+fem.wall_forces[2])/1e3, Fx/1e3; tol=0.05, unit="kN")
     s3 &= w_compare("Wall-1 vs Wall-2 (symmetric)", fem.wall_forces[1]/1e3, fem.wall_forces[2]/1e3; tol=0.05, unit="kN")
-    s3 &= w_compare("Torsion (symmetric)", fem.torsion[1], 1.0; tol=1e-3)
+    s3 &= w_compare("Torsion (symmetric)", fem.torsion[1], 1.0; tol=1e-6)
 
     w_sub_header("5.2  Drift cross-check vs reduced model (gross stiffness)")
     kg = wall_stiffness_from_thickness_si(t, lw, E, NU, H; cracked=false)

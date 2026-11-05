@@ -743,12 +743,14 @@ begin
     # fc′=30 → φPu≈349 kN, φMu≈14.3 kN·m;  fc′=40 → φPu≈488 kN, φMu≈14.85 kN·m
     # (X4-125, 402mm², 930MPa, d_ps=0)
     #
-    # Governing demand: Pu=400 kN (> fc′=30 capacity 349 kN) → MIP picks fc′≥40.
+    # The checker combines P and M with the AISC 360-16 §H1.1 analog
+    # (H1-1a: Pu/φPn + 8/9·Mu/φMn ≤ 1). At Pu=400 kN, Mu=2 kN·m:
+    # fc′=30 → 1.27 (fails), fc′=40 → 0.94 → MIP picks fc′≥40.
     # Per-pixel: axial demand decreases from base (400 kN) to top (200 kN),
     # simulating accumulated floor loads in a multi-story column.
-    # Top pixels (Pu≈200 kN < 349 kN) can relax to fc′=30.
+    # Top pixel (Pu≈225 kN, Mu≈0.13 kN·m) → 0.65 at fc′=30, so it can relax.
     cwf_Pu = 400.0u"kN"
-    cwf_Mu = 10.0u"kN*m"
+    cwf_Mu = 2.0u"kN*m"
     cwf_L  = 4.0  # m  (4000 mm / 500 mm = 8 pixels)
 
     cwf_result = size_columns([cwf_Pu], [cwf_Mu],

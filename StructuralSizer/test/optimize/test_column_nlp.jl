@@ -774,6 +774,30 @@ end
             problem_cap, StructuralSizer._rc_column_nlp_checker(opts_cap), at_cap))
     end
 
+    @testset "Repair lowers a ρ_max start instead of skipping the size" begin
+        # Ipopt stops at ρ_opt = ρ_max = 0.06 on 8 × 13.1 in. Snapped to
+        # 8 × 14 in, the even count is 10 #8 (ρg ≈ 0.0705 > ρ_max). Repair
+        # used to skip every size until the 32-bar cap held ρg under 0.06,
+        # returning 18 × 24 in with 32 #8.
+        geometry = ConcreteMemberGeometry(4.0; k=1.0, braced=true)
+        opts = NLPColumnOptions(
+            material=NWC_4000, rebar_material=Rebar_60,
+            min_dim=8.0u"inch", max_dim=30.0u"inch", include_slenderness=false)
+        problem = RCColumnNLPProblem(
+            RCColumnDemand(1; Pu=180.0, Mux=74.0, βdns=opts.βdns), geometry, opts)
+        sec = StructuralSizer._build_nlp_trial_section(8.0, 14.0, 0.06, opts)
+        @test length(sec.bars) == 10
+        @test sec.ρg > opts.ρ_max
+        start = RCColumnNLPResult(sec, 8.0, 13.1, 0.06, 8.0, 14.0, 112.0, :optimal, 1)
+        checker = StructuralSizer._rc_column_nlp_checker(opts)
+        repaired = StructuralSizer._rc_column_nlp_repair(problem, checker, start)
+        @test !isnothing(repaired)
+        @test StructuralSizer._rc_column_as_built_ok(problem, checker, repaired.section)
+        @test repaired.section.ρg <= opts.ρ_max
+        @test length(repaired.section.bars) < StructuralSizer.RC_COLUMN_NLP_MAX_BARS
+        @test repaired.area <= 12.0 * 18.0
+    end
+
     @testset "ρ_max rejects a minimum bar layout above the cap" begin
         # Tied 8×8, 4 #8: ρg ≈ 0.049. ACI 318-19 §10.6.1.1 allows it
         # (0.01 ≤ ρg ≤ 0.08), but opts.ρ_max = 0.01 does not. Do not raise
@@ -793,8 +817,8 @@ end
         checker = StructuralSizer._rc_column_nlp_checker(opts)
         @test !StructuralSizer._rc_column_as_built_ok(problem, checker, sec)
         start = RCColumnNLPResult(sec, 8.0, 8.0, 0.01, 8.0, 8.0, 64.0, :optimal, 1)
-        # The first trial count is those 4 bars, already over the cap, so
-        # repair must not accept them. max_dim blocks growth.
+        # Even the 4-bar minimum is over the cap, so repair must not accept
+        # this size. max_dim blocks growth.
         @test isnothing(StructuralSizer._rc_column_nlp_repair(problem, checker, start))
         dead = StructuralSizer._rc_column_nlp_verify_as_built(problem, start)
         @test dead.status === :infeasible

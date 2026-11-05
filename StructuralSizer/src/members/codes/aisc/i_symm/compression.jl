@@ -50,14 +50,19 @@ p. 92):
         p. 93). May conservatively be taken as the full member length.
 """
 function get_Fe_torsional(s::ISymmSection, mat::Metal, Lz)
-    E, G = mat.E, mat.G
-    Cw, J = s.Cw, s.J
-    Ix, Iy = s.Ix, s.Iy
-
     # AISC 360-16 §E4(a), Eq. E4-2 (doubly symmetric shapes about shear center).
-    term1 = π^2 * E * Cw / Lz^2
-    term2 = G * J
-    return (term1 + term2) / (Ix + Iy)
+    # Catalogue shapes store Cw and J in metres; a plate girder from the beam
+    # NLP stores them in inches. Adding those two terms through Unitful builds
+    # an inch^6 ↔ metre factor that overflows Int64, so the sum is done in
+    # inches. `_torsion_props_in` converts Cw with a float inch factor.
+    p = _torsion_props_in(s)
+    Iy = ustrip(u"inch^4", s.Iy)
+    E = to_ksi(mat.E)
+    G = to_ksi(mat.G)
+    Lz_in = to_inches(Lz)
+    term1 = π^2 * E * p.Cw / Lz_in^2
+    term2 = G * p.J
+    return ((term1 + term2) / (p.Ix + Iy)) * u"ksi"
 end
 
 """

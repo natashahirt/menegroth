@@ -66,6 +66,27 @@ end
 # Internal helpers — kip/inch arithmetic (avoids Unitful overflow)
 # ==============================================================================
 
+"""
+    Warping constant in in⁶.
+
+Catalogue shapes store `Cw` in m⁶. A plate girder from the beam NLP stores it
+in in⁶. Either `ustrip` across that pair overflows `Int64`: the rational
+inch factor raised to the sixth power does not fit. Branch on the unit and
+scale with the float inch factor.
+"""
+function _cw_inches6(cw)::Float64
+    cw isa Real && return Float64(cw)
+    u = unit(cw)
+    val = Float64(ustrip(cw))
+    if u == u"inch^6"
+        return val
+    elseif u == u"m^6"
+        return val / Asap.IN6_TO_M6
+    else
+        error("Cw must be in inch^6 or m^6, got $u")
+    end
+end
+
 """Extract torsion-relevant section properties as raw numbers in inch units."""
 function _torsion_props_in(s::ISymmSection)
     d_in   = ustrip(u"inch", s.d)
@@ -74,8 +95,7 @@ function _torsion_props_in(s::ISymmSection)
     tf_in  = ustrip(u"inch", s.tf)
     ho_in  = ustrip(u"inch", s.ho)
     J_in4  = ustrip(u"inch^4", s.J)
-    # Convert Cw via m→inch factor to avoid Unitful Int64 overflow on inch^6
-    Cw_in6 = ustrip(u"m^6", s.Cw) * (1.0 / 0.0254)^6
+    Cw_in6 = _cw_inches6(s.Cw)
     Ix_in4 = ustrip(u"inch^4", s.Ix)
     Sx_in3 = ustrip(u"inch^3", s.Sx)
     Wno_in2 = bf_in * ho_in / 4

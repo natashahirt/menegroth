@@ -229,42 +229,55 @@ end
 # Helper: Build Trial Circular Section from Continuous Variables
 # ==============================================================================
 
-"""
-    _build_nlp_trial_circular_section(D_in, ρg, opts) -> Union{RCCircularSection, Nothing}
+"""Bar centers fall inside the section. Matches the spiral-diameter assumption in `RCCircularSection`."""
+function _circular_bars_fit(D_in::Real, opts::NLPColumnOptions)
+    cover = ustrip(u"inch", opts.cover)
+    db = ustrip(u"inch", rebar(opts.bar_size).diameter)
+    R_bar = D_in / 2 - cover - 0.5 - db / 2
+    return R_bar > 0
+end
 
-Build an `RCCircularSection` from continuous design variables (D, ρg).
-Returns `nothing` if the configuration is invalid.
 """
-function _build_nlp_trial_circular_section(
-    D_in::Real, ρg::Real,
-    opts::NLPColumnOptions
-)
+    _circular_trial_bar_count(D_in, ρg, opts) -> Int
+
+Even bar count for `ρg` at diameter `D_in` (inches): `ceil(ρg·Ag / A_bar)`,
+at least the tie-type minimum, then capped at `RC_COLUMN_NLP_MAX_BARS`.
+"""
+function _circular_trial_bar_count(D_in::Real, ρg::Real, opts::NLPColumnOptions)
+    Ag = π * D_in^2 / 4
+    As_bar = ustrip(u"inch^2", rebar(opts.bar_size).A)
+    n_bars = max(_nlp_min_bars(opts), ceil(Int, ρg * Ag / As_bar))
+    n_bars = iseven(n_bars) ? n_bars : n_bars + 1
+    return min(n_bars, RC_COLUMN_NLP_MAX_BARS)
+end
+
+"""
+    _build_nlp_circular_section(D_in, n_bars, opts) -> Union{RCCircularSection, Nothing}
+
+`nothing` when the bars do not fit or the constructor rejects the layout.
+"""
+function _build_nlp_circular_section(D_in::Real, n_bars::Int, opts::NLPColumnOptions)
+    n_bars <= RC_COLUMN_NLP_MAX_BARS || return nothing
+    n_bars >= _nlp_min_bars(opts) || return nothing
+    _circular_bars_fit(D_in, opts) || return nothing
     try
-        Ag = π * D_in^2 / 4
-        As_required = ρg * Ag
-
-        bar = rebar(opts.bar_size)
-        As_bar = ustrip(u"inch^2", bar.A)
-
-        min_bars = opts.tie_type == :spiral ? 6 : 4
-        n_bars_raw = As_required / As_bar
-        n_bars = max(min_bars, ceil(Int, n_bars_raw))
-
-        # Round to even for symmetric placement
-        n_bars = iseven(n_bars) ? n_bars : n_bars + 1
-
-        n_bars = min(n_bars, 32)
-
         return RCCircularSection(
             D = D_in * u"inch",
             bar_size = opts.bar_size,
             n_bars = n_bars,
             cover = opts.cover,
-            tie_type = opts.tie_type
+            tie_type = opts.tie_type,
         )
-    catch e
+    catch
         return nothing
     end
+end
+
+function _build_nlp_trial_circular_section(
+    D_in::Real, ρg::Real,
+    opts::NLPColumnOptions
+)
+    return _build_nlp_circular_section(D_in, _circular_trial_bar_count(D_in, ρg, opts), opts)
 end
 
 # ==============================================================================

@@ -175,8 +175,7 @@ function is_feasible(
     bw_in  = ustrip(u"inch", section.bw)
     d_in   = ustrip(u"inch", section.d)
     As_in  = ustrip(u"inch^2", section.As)
-    As_min = max(3.0 * sqrt(fc_psi) * bw_in * d_in / fy_psi,
-                 200.0 * bw_in * d_in / fy_psi)
+    As_min = _as_min_aci_1051(bw_in, d_in, fc_psi, fy_psi)
     As_in ≥ As_min || return false
 
     # 6. Deflection check (ACI §24.2) — only when service loads are provided
@@ -191,6 +190,7 @@ function is_feasible(
             checker.w_live_kplf * kip / u"ft";
             support = checker.defl_support,
             ξ = checker.defl_ξ,
+            sustained_live_fraction = checker.defl_sustained_live,
         )
         defl_result.ok || return false
     end
@@ -211,6 +211,9 @@ function is_feasible(
                                      λ=checker.λ) || return false
         end
     end
+
+    # 8. Story-shell deflection (ACI 318-11 §9.5.2) — when the shell gave spans
+    _shell_deflection_ratio(checker, demand.member_idx, section) <= 1 || return false
 
     return true
 end
@@ -306,6 +309,8 @@ function diagnose_infeasibility(
     elseif cache.φVn_max[best_j] < Vu
         return "Shear: φVn_max=$(round(cache.φVn_max[best_j], digits=1)) < Vu=$(round(Vu, digits=1)) kip"
     end
+    msg = _shell_deflection_message(checker, demand.member_idx, sec)
+    msg === nothing || return msg
     return "All checks passed for best T-beam section — possible threading/cache inconsistency"
 end
 
@@ -351,6 +356,23 @@ function explain_feasibility(
     shear_clause = Nu_kip < 0 ? "ACI 318-11 11.2.2.3" : (Nu_kip > 0 ? "ACI 318-11 11.2.1.2" : "ACI 318-11 11.2.1.1")
     push!(checks, CheckResult("shear", φVn_kip >= Vu,
           φVn_kip > 0 ? Vu / φVn_kip : (Vu > 0 ? Inf : 0.0), Vu, φVn_kip, shear_clause))
+
+    # Same two checks as `is_feasible`. Bar rounding can pass flexure and
+    # still land below εt = 0.004.
+    εt = cache.εt[j]
+    push!(checks, CheckResult("net_tensile_strain", εt >= 0.004,
+          0.004 / max(εt, 1e-10), 0.004, εt, "ACI 318-11 10.3.5"))
+
+    fc_psi = cache.fc_ksi * 1000.0
+    fy_psi = cache.fy_ksi * 1000.0
+    bw_in = ustrip(u"inch", section.bw)
+    d_in = ustrip(u"inch", section.d)
+    As_in = ustrip(u"inch^2", section.As)
+    As_min = _as_min_aci_1051(bw_in, d_in, fc_psi, fy_psi)
+    push!(checks, CheckResult("min_reinforcement", As_in >= As_min,
+          As_min / max(As_in, 1e-10), As_min, As_in, "ACI 318-11 10.5.1"))
+
+    _push_shell_deflection_check!(checks, checker, demand.member_idx, section)
 
     all_pass = all(c -> c.passed, checks)
     gov_idx = argmax([c.ratio for c in checks])

@@ -353,7 +353,9 @@ using Asap: kip, ksi, psf
         )
 
         @test result isa RCTBeamNLPResult
-        @test result.status ∈ [:optimal, :feasible]
+        # Ceil-to-bar on this near-rectangular section drops εt below 0.004
+        # (ACI 318-11 §10.3.5, page 142). The catalog checker rejects it.
+        @test result.status === :infeasible
         @test result.bw_final ≤ 14.0
     end
 

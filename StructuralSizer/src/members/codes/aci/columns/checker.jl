@@ -243,6 +243,21 @@ function _check_square_and_generate_y_diagram(section::RCColumnSection, mat, inc
     return is_square, diagram_y
 end
 
+"""P-M diagram for `axis`. Square and circular sections use the strong-axis diagram.
+
+A non-square section whose weak-axis diagram was not precomputed (biaxial
+off) is generated here, so the weak-axis slenderness check does not borrow
+the strong-axis capacity.
+"""
+function _column_axis_diagram(cache::ACIColumnCapacityCache, j::Int, section, mat, ::StrongAxis)
+    return cache.diagrams[j]
+end
+function _column_axis_diagram(cache::ACIColumnCapacityCache, j::Int, section, mat, ::WeakAxis)
+    cache.is_square[j] && return cache.diagrams[j]
+    isnothing(cache.diagrams_y[j]) || return cache.diagrams_y[j]
+    return generate_PM_diagram(section, mat, WeakAxis(); n_intermediate=PM_DIAGRAM_N_INTERMEDIATE)
+end
+
 """Circular sections are axisymmetric; always returns `(true, nothing)`."""
 function _check_square_and_generate_y_diagram(section::RCCircularSection, mat, include_biaxial::Bool)
     return true, nothing
@@ -334,29 +349,35 @@ function _is_feasible_rc_column(
         
         transverse_load = demand.transverse_load
 
-        # Magnify moment if slender — strong-axis (bending about x).
-        # Uses geometry.kx, r ≈ 0.3·h, Ig = b·h³/12.
+        # Same nonsway procedure on both axes. ACI 318-19 §6.2.5.3
+        # (corpus: aci-318-19, printed page 70) rejects a magnifier result
+        # whose δns exceeds 1.4, before the section is checked for strength.
         result = magnify_moment_nonsway(
             section, mat, geometry,
             Pu, M1x, M2x, StrongAxis();
             βdns = βdns,
             transverse_load = transverse_load,
         )
+        result.permitted || return false
         Mux = result.Mc
 
-        # Also magnify Muy if biaxial — weak-axis (bending about y).
-        # WeakAxis() forces the slenderness path to use geometry.ky,
-        # r ≈ 0.3·b, and Ig = h·b³/12, which differs from the strong axis
-        # for non-square columns (e.g., a 16×32 column non-slender about
-        # x can still be slender about y).
+        # Weak axis uses geometry.ky, r ≈ 0.3·b, Ig = h·b³/12. A column
+        # that is stocky about x can still be past the §6.2.5.3 cap about y.
+        result_y = magnify_moment_nonsway(
+            section, mat, geometry,
+            Pu, M1y, M2y, WeakAxis();
+            βdns = βdns,
+            transverse_load = transverse_load,
+        )
+        result_y.permitted || return false
         if Muy > 0 && checker.include_biaxial
-            result_y = magnify_moment_nonsway(
-                section, mat, geometry,
-                Pu, M1y, M2y, WeakAxis();
-                βdns = βdns,
-                transverse_load = transverse_load,
-            )
             Muy = result_y.Mc
+        elseif result_y.slender
+            # Uniaxial check of the weak-axis design moment. R6.6.4.5.4:
+            # the minimum eccentricity is not applied about both axes at once,
+            # so this moment is not added to the Bresler combination.
+            diagram_y = _column_axis_diagram(cache, j, section, mat, WeakAxis())
+            check_PM_capacity(diagram_y, Pu, result_y.Mc).adequate || return false
         end
     end
     
@@ -575,18 +596,34 @@ function explain_feasibility(
                                           StrongAxis();
                                           βdns=βdns,
                                           transverse_load=transverse_load)
-        Mux = result_x.Mc
+        # Keep a finite moment in the strength rows when §6.2.5.3 rejects δns.
+        Mux = result_x.permitted ? result_x.Mc : Mux
 
-        if Muy > 0 && checker.include_biaxial
-            # Weak axis (about y): geometry.ky, r ≈ 0.3·b, Ig = h·b³/12.
-            result_y = magnify_moment_nonsway(section, mat, geometry, Pu, M1y, M2y,
-                                              WeakAxis();
-                                              βdns=βdns,
-                                              transverse_load=transverse_load)
+        result_y = magnify_moment_nonsway(section, mat, geometry, Pu, M1y, M2y,
+                                          WeakAxis();
+                                          βdns=βdns,
+                                          transverse_load=transverse_load)
+        if Muy > 0 && checker.include_biaxial && result_y.permitted
             Muy = result_y.Mc
+        elseif result_y.slender && result_y.permitted
+            diagram_y = _column_axis_diagram(cache, j, section, mat, WeakAxis())
+            check_y_uni = check_PM_capacity(diagram_y, Pu, result_y.Mc)
+            y_ratio = check_y_uni.φMn_at_Pu > 0 ? result_y.Mc / check_y_uni.φMn_at_Pu : Inf
+            push!(checks, CheckResult("pm_interaction_y", check_y_uni.adequate,
+                  y_ratio, result_y.Mc, check_y_uni.φMn_at_Pu, "ACI 318-19 22.4"))
         end
 
-        # Report slenderness amplification ratio (Mc/M2)
+        # ACI 318-19 §6.2.5.3. δns / 1.4 on axes where slenderness is not
+        # neglected. This is a strength limit of the magnifier method, so it
+        # stays in the governing set. A non-slender axis contributes 0.
+        δ_gov = max(result_x.slender ? result_x.δns : 0.0,
+                    result_y.slender ? result_y.δns : 0.0)
+        cap = SECOND_ORDER_MOMENT_RATIO_LIMIT
+        push!(checks, CheckResult("second_order_limit",
+              result_x.permitted && result_y.permitted,
+              δ_gov == 0 ? 0.0 : δ_gov / cap, δ_gov, cap, "ACI 318-19 6.2.5.3"))
+
+        # Informational amplification (Mc/M2). Not a demand/capacity ratio.
         slend_ratio = M2x > 0 ? Mux / M2x : 1.0
         push!(checks, CheckResult("slenderness_magnification", true,
               slend_ratio, Mux, M2x > 0 ? M2x : Mux, "ACI 318-19 6.6.4"))

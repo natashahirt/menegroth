@@ -184,35 +184,41 @@ function constraint_fns(p::RCCircularNLPProblem, x::Vector{Float64})
     # Number of bars for smooth P-M (match typical circular arrangement)
     n_bars = p.opts.tie_type == :spiral ? 12 : 8
 
-    # Slenderness magnification (smooth analytical version)
+    # Slenderness. Same simplified stiffness and §6.2.5.3 cap as the
+    # rectangular NLP. A circular section has one radius; the larger of kx
+    # and ky governs. The as-built checker applies the §6.2.5.1 neglect test.
     Mux_design = p.Mux_kipft
     stab = 0.0
+    δ_ratio = 0.0
     if p.opts.include_slenderness
         R = D / 2.0
         Ig = π * R^4 / 4.0   # in⁴
         Ec_ksi = 57.0 * sqrt(p.mat.fc * 1000.0)
+        # ACI 318-19 §6.6.4.4.4(a) (corpus: aci-318-19, printed page 79).
         EI = 0.4 * Ec_ksi * Ig / (1.0 + p.opts.βdns)
 
         Lu_in = ustrip(u"inch", p.geometry.Lu)
-        # Circular sections are axisymmetric, so kx and ky give the same
-        # geometry; use kx to mirror the convention in the rectangular NLP.
-        k = Float64(p.geometry.kx)
+        k = max(Float64(p.geometry.kx), Float64(p.geometry.ky), 1e-6)
         Pc = π^2 * EI / (k * Lu_in)^2
 
-        M1x = to_kipft(p.demand.M1x)
-        M2x = to_kipft(p.demand.M2x)
-        Cm = abs(M2x) > 1e-6 ? max(0.6 - 0.4 * M1x / M2x, 0.4) : 1.0
+        Cm = calc_Cm(to_kipft(p.demand.M1x), to_kipft(p.demand.M2x);
+                     transverse_load=p.demand.transverse_load)
 
-        # ACI 318-11 §10.10.6 Eq. (10-12). See `_rc_nlp_delta_ns`.
+        # ACI 318-19 §6.6.4.5.2. See `_rc_nlp_delta_ns` for the smooth pole.
         stab = p.Pu_kip / (0.75 * max(Pc, 1e-6))
         δns = _rc_nlp_delta_ns(Cm, stab)
+        δ_ratio = δns / SECOND_ORDER_MOMENT_RATIO_LIMIT
         Mux_design = δns * p.Mux_kipft
     end
 
     # Smooth analytical P-M utilization (replaces piecewise-linear P-M diagram)
     util = _smooth_rc_pm_util(D, ρ, p.Pu_kip, Mux_design, p.mat;
                                     cover, n_bars, tie_type=p.opts.tie_type)
-    # Eq. (10-12) is undefined for Pu ≥ 0.75 Pc.
+    # ACI 318-19 §6.2.5.3: δns ≤ 1.4. Eq. (6.6.4.5.2) is undefined for
+    # Pu ≥ 0.75 Pc; that ratio stays in the same row.
+    if δ_ratio >= 1.0
+        util = _smooth_max(util, δ_ratio; k=80.0)
+    end
     if stab >= 1.0
         util = _smooth_max(util, stab; k=80.0)
     end

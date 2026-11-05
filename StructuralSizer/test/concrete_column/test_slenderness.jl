@@ -201,6 +201,29 @@ include("test_data/slenderness_sway_18x18.jl")
         @test δns_calc ≈ ref.slenderness.δns rtol=0.01
         @test δns_calc >= 1.0
     end
+
+    # =========================================================================
+    @testset "Second-order moment ratio (ACI 318-19 §6.2.5.3)" begin
+        # δns ≤ 1.4, and δns finite. The cap is the magnifier, not M2,min/M2.
+        @test StructuralSizer.second_order_magnifier_permitted(1.0)
+        @test StructuralSizer.second_order_magnifier_permitted(1.4)
+        @test !StructuralSizer.second_order_magnifier_permitted(1.4 + 1e-4)
+        @test !StructuralSizer.second_order_magnifier_permitted(Inf)
+
+        section = RCColumnSection(
+            b = 12.0u"inch", h = 12.0u"inch", cover = 1.5u"inch",
+            bar_size = 8, n_bars = 4, tie_type = :tied,
+        )
+        mat = RC_3000_60
+        # 30 m, k = 1: kℓu/r is far past §6.2.5.1, and Pu is past 0.75 Pc,
+        # so Eq. (6.6.4.5.2) is undefined and the magnifier is not permitted.
+        geometry = ConcreteMemberGeometry(30.0; k = 1.0, braced = true)
+        result = StructuralSizer.magnify_moment_nonsway(
+            section, mat, geometry, 400.0, 0.0, 50.0; βdns = 0.6)
+        @test result.slender
+        @test !isfinite(result.δns)
+        @test !result.permitted
+    end
     
     # =========================================================================
     @testset "Minimum Moment" begin
@@ -242,8 +265,10 @@ include("test_data/slenderness_sway_18x18.jl")
         # function returns Mc = |M2| unmodified.
         @test result.slender == false
 
-        # When slender=false, Cm and δns are defaults (1.0)
+        # When slender=false, Cm and δns are defaults (1.0) and §6.2.5.3
+        # does not apply.
         @test result.δns ≈ 1.0
+        @test result.permitted
 
         # Mc = |M2| = 105 (the SP example happens to have M2 > M_min anyway,
         # so the regression value is the same as before the M_min fix).

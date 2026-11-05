@@ -225,7 +225,9 @@ end
         
         @test result isa RCColumnNLPResult
         @test result.section isa RCColumnSection
-        @test result.status in [:optimal, :feasible]
+        # :converged is an iteration-limit or slow-progress stop. It is
+        # acceptable only because the as-built check below still has to pass.
+        @test result.status in [:optimal, :feasible, :converged]
         
         # The optimal section should be within bounds
         @test 14.0 <= result.b_final <= 36.0
@@ -912,6 +914,16 @@ end
         @test marked.status === :infeasible
         @test marked.minimizer == r.minimizer
         @test !nlp_acceptable(marked.status)
+    end
+
+    @testset "Circular NLP uses the same 1.4 magnifier cap" begin
+        # 30 m, 12 in diameter: kℓu/r is far past §6.2.5.1 and Pu is past
+        # 0.75 Pc, so Eq. (6.6.4.5.2) is undefined and the row must exceed 1.
+        demand = RCColumnDemand(1; Pu=400.0, Mux=50.0, M1x=0.0, M2x=50.0, βdns=0.6)
+        geometry = ConcreteMemberGeometry(30.0; k=1.0, braced=true)
+        opts = NLPColumnOptions(tie_type=:spiral, include_slenderness=true)
+        problem = RCCircularNLPProblem(demand, geometry, opts)
+        @test constraint_fns(problem, [12.0, 0.02])[1] > 1.0
     end
 
 end

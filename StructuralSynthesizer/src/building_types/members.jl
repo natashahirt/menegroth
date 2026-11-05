@@ -374,6 +374,24 @@ Diagonal member (lateral bracing system).
 end
 
 """
+Width of a wall's slab tributary along the wall.
+
+`u0` and `u1` are metres from the wall start `(x1, y1)` toward `(x2, y2)`.
+On `[u0, u1]`, the width in metres is
+
+    w(u) = a (u - u0)² + b (u - u0) + c
+
+A straight edge has `a == 0`. A column–wall parabola has `a != 0`.
+"""
+struct WallWidthPiece
+    u0::Float64
+    u1::Float64
+    a::Float64
+    b::Float64
+    c::Float64
+end
+
+"""
     Wall{T} <: AbstractMember{T}
 
 Planar vertical member (shear wall / structural wall) — part of the lateral-
@@ -398,6 +416,14 @@ without reworking `Wall`.
   (ACI 318-19 §11.6, min 0.0025; corpus: sp-structural-wall-reinforcement-design; VERIFY)
 - `concrete`: wall concrete material (`nothing` → use a default at sizing)
 - `wall_above`: the stacked wall on the story above (populated like `column_above`)
+- `openings`: rectangular holes in this pier, in wall coordinates
+  ([`WallOpening`](@ref)). Empty for a solid wall. Copied from the skeleton
+  by [`initialize_members!`](@ref).
+- `tributary_cell_areas`: slab area (m²) this wall takes from each cell, the
+  complement of the column regions ([`split_cell_supports`](@ref)).
+- `tributary_widths`: that complement as a width along the wall, one list of
+  [`WallWidthPiece`](@ref) per cell. `w(u) = a (u-u0)² + b (u-u0) + c` with
+  `u` in metres from `(x1, y1)` toward `(x2, y2)`.
 
 # Analytic stiffness
 Use [`wall_lateral_stiffness`](@ref) to get the in-plane lateral stiffness
@@ -418,6 +444,9 @@ Table 6.6.3.1.1(a) (corpus: sp-effective-flexural-stiffness-aci318-14; VERIFY).
     ρt::Float64 = 0.0025
     concrete::Union{Nothing, StructuralSizer.Concrete} = nothing
     wall_above::Union{Nothing, Wall{T}} = nothing
+    openings::Vector{WallOpening} = WallOpening[]
+    tributary_cell_areas::Dict{Int, Float64} = Dict{Int, Float64}()
+    tributary_widths::Dict{Int, Vector{WallWidthPiece}} = Dict{Int, Vector{WallWidthPiece}}()
 end
 
 # -----------------------------------------------------------------------------
@@ -527,14 +556,16 @@ story (pier) height and becomes `base.L`; `thickness` is required.
 """
 function Wall(seg_indices::Vector{Int}, height::T; thickness::T,
               x1=0.0, y1=0.0, x2=0.0, y2=0.0, story=0,
-              ρl=0.0025, ρt=0.0025, concrete=nothing, group_id=nothing) where T
+              ρl=0.0025, ρt=0.0025, concrete=nothing, group_id=nothing,
+              openings=WallOpening[]) where T
     base = MemberBase{T}(
         segment_indices=seg_indices, L=height, Lb=height,
         group_id=group_id, section=nothing, volumes=MaterialVolumes()
     )
     Wall{T}(base=base, thickness=thickness,
             x1=Float64(x1), y1=Float64(y1), x2=Float64(x2), y2=Float64(y2),
-            story=story, ρl=Float64(ρl), ρt=Float64(ρt), concrete=concrete)
+            story=story, ρl=Float64(ρl), ρt=Float64(ρt), concrete=concrete,
+            openings=openings)
 end
 
 """Single-segment wall convenience: wraps the index in a vector."""
@@ -563,6 +594,10 @@ Extends the sizer's `wall_lateral_stiffness` to the building `Wall` type.
 function StructuralSizer.wall_lateral_stiffness(w::Wall, concrete;
                                                 cracked::Bool=true,
                                                 boundary::Symbol=:cantilever)
+    isempty(w.openings) || throw(ArgumentError(
+        "wall_lateral_stiffness: this wall has $(length(w.openings)) opening(s). " *
+        "The closed-form pier stiffness is for a solid wall, and no reduced " *
+        "stiffness is assumed."))
     lw = wall_length(w)
     t  = ustrip(u"m", w.thickness)
     H  = ustrip(u"m", w.base.L)

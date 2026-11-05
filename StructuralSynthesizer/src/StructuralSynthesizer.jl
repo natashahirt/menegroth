@@ -119,9 +119,17 @@ include("postprocess/_postprocess.jl")
 # API server (Oxygen routes, JSON serialization)
 include("api/_api.jl")
 
+# Binary scene packets for the web viewer (docs/src/reference/scene_format.md).
+include("scene/_scene.jl")
+
 # =============================================================================
 # Exports
 # =============================================================================
+
+# --- Scene packets (web viewer) ---
+export build_scene, write_scene, read_scene, export_scene, ScenePacket
+export scene_buffer, scene_f32, scene_u32, scene_u16, scene_u8
+export scene_station_displacement, hermite_local, demo_frame_model
 
 # --- Geometry generation ---
 export gen_medium_office
@@ -151,6 +159,8 @@ export tributary_cache_key
 export get_cached_edge_tributaries, cache_edge_tributaries!
 export get_cached_column_tributary, cache_column_tributary!
 export column_tributary_area, column_tributary_by_cell, column_tributary_polygons
+export split_cell_supports, ColumnSupportShare, WallSupportShare, WallWidthPiece
+export wall_edge_nodal_forces, wall_tributary_area
 export cell_edge_tributaries, cell_strip_geometry, has_cell_tributaries
 export clear_geometry_caches!
 
@@ -167,6 +177,7 @@ export has_analysis_model, build_analysis_model!
 
 # --- Design workflow ---
 export design_building, compare_designs, build_pipeline, PipelineStage, sync_asap!
+export analyze_story_shell, ShellBeamDemand, story_shell_beam_demands, size_beams_with_story_shell!
 export prepare!, capture_design
 export floor_design_request, design_floor, design_floor!, design_floors!, install_floor_design!
 
@@ -228,7 +239,8 @@ export beam_side_profiles, composite_context_from_beam
 export beam_interior_supports, beam_support_lookup
 export beam_signed_moment_field, check_composite_beam, composite_deflection_scale
 export apply_composite_element_stiffness!, refine_composite_stiffness!
-export set_slab_openings!
+export set_slab_openings!, SlabOpening, add_slab_opening!, face_openings, face_opening_loops, face_net_area
+export WallOpening, WallOpeningSpec, add_wall_opening!
 export composite_group_payload, composite_payloads_for_groups, composite_anchor_from_options
 export classify_column_position, is_exterior_support  # Column position classification for DDM/EFM
 export slab_material_angle, classify_corner_kind       # Corner refinement (convex vs re-entrant)
@@ -248,6 +260,12 @@ export check_seismic_story_drift, wind_story_drift_report
 export factored_wind_cases, factored_seismic_cases
 export WallMesh, WallPierMesh, WallAssembly, WallCut, StoryCutEquilibrium
 export wall_assemblies, wall_pier_cut, check_story_cut_equilibrium
+export check_opening_row_equilibrium
+export SpandrelEndAction, PierSegmentActions, SpandrelSegmentActions
+export VerticalSegmentForces, HorizontalSegmentForces, SegmentForceReport, OpeningRowGate
+export pier_segment_actions, spandrel_segment_actions
+export segment_opening_forces, opening_row_equilibria
+export segment_end_strength, check_pier_segment, column_one_way_shear_capacity
 export WALL_MESH_DIV, WALL_MESH_ROWS, wall_panel_quads
 export wall_self_weight_loads
 export GravityBasicCases, solve_gravity_basic_cases

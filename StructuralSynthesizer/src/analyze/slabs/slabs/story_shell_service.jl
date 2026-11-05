@@ -342,6 +342,9 @@ function _soften_hogging!(shell_k, shells, moments, samples, beam, as_top, depth
     return shell_k
 end
 
+"""Next service scales: a cracked plate or piece stays cracked (see [`story_cracked_service`](@ref))."""
+_ratchet_scales(k, reading) = min.(k, reading)
+
 function _scales_settled(a, b, tol)
     length(a) == length(b) || return false
     return maximum(abs.(a .- b); init = 0.0) <= tol
@@ -416,6 +419,15 @@ sustains dead plus all live load, so neither is a third factorization
 and drops grounded springs. [`_restore_column_springs!`](@ref) puts the column
 springs back before each solve.
 
+# ENGINEERING JUDGMENT
+Within one service level a plate or piece that has cracked stays cracked: its
+scale only goes down from one iteration to the next. ACI 318-11 defines `Ma`
+as the maximum service moment at the stage deflection is computed (notation,
+corpus: aci-318-11, PDF p. 27), and does not say whether that is before or
+after cracked parts shed moment. Recomputing each scale from scratch lets a
+softened plate shed enough moment to read uncracked, and the next solve
+cracks it again. The one-way scale settles, on the soft side.
+
 Returns `spans`, one vector per beam id: [`StructuralSizer.RCShellSpan`](@ref)s
 for reinforced concrete and [`StructuralSizer.SteelShellSpan`](@ref)s (live
 load only) for steel and composite. Also `iterations` and `converged`.
@@ -456,13 +468,15 @@ function story_cracked_service(model, built, designs, beams::AbstractVector{Shel
                 Asap.solve!(model)
                 reading = _service_reading(model, built, beams, mat, as_top, depth_at)
                 iterations = max(iterations, iter)
-                if _scales_settled(shell_k, reading.shell_k, tol) &&
-                        _scales_settled(frame_k, reading.frame_k, tol)
+                next_shell = _ratchet_scales(shell_k, reading.shell_k)
+                next_frame = _ratchet_scales(frame_k, reading.frame_k)
+                if _scales_settled(shell_k, next_shell, tol) &&
+                        _scales_settled(frame_k, next_frame, tol)
                     settled = true
                     break
                 end
-                shell_k = reading.shell_k
-                frame_k = reading.frame_k
+                shell_k = next_shell
+                frame_k = next_frame
             end
             converged &= settled
             levels_of[name] = reading.beams

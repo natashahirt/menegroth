@@ -437,6 +437,21 @@ const _STUD_OPTS = (composite = true,
 
         @test SZ.chord_deflection([0.0, 0.5, 1.0], [0.0, -0.01, 0.0]) ≈ 0.01
 
+        # A plate that reads cracked, then uncracked once softened, stays cracked.
+        readings = ([1.0, 0.64], [1.0, 1.0], [1.0, 0.64], [1.0, 1.0])
+        k = ones(2)
+        settled_at = nothing
+        for (it, r) in enumerate(readings)
+            nxt = SY._ratchet_scales(k, r)
+            if SY._scales_settled(k, nxt, 0.02)
+                settled_at = it
+                break
+            end
+            k = nxt
+        end
+        @test settled_at == 2
+        @test k == [1.0, 0.64]
+
         conc = NWC_4000
         Ec = ustrip(u"Pa", conc.E)
         Es = ustrip(u"Pa", Rebar_60.E)

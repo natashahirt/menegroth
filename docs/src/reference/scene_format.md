@@ -130,6 +130,29 @@ Present for a `BuildingDesign` whose column or beam results carry a section.
 
 Each solid is `StructuralSizer.section_polygon(section)` swept between the element's end nodes by `_build_frame_element_mesh`, the same mesh as the JSON sized mode, rotated by the column's `θ`. Hollow sections are not swept and keep their centerline only. The header list `element_section` has one section name per frame element, empty when none was sized.
 
+## Component records and the solve trace
+
+`build_scene` on a `BuildingDesign` adds two header objects. A model-only scene does not.
+
+`components` is one dossier per designed column, beam, slab, wall, and spread footing. `design_trace` is the solve: `event_count`, `converged`, `diagnostics`, `phase_timings_s`, a short `summary`, and `events`, every `TraceEvent` in order. `components[].path` is the subset of those events whose `element_id` or `data.lookup` names that component.
+
+Numbers are SI, taken from the design result. A missing value is JSON `null`. A ratio that the solve left unverified (`NaN`) is `null`, and the governing check is `axial_compression_unverified` rather than a stand-in. Clauses are the ones the diagnose path already selects for that section (`_column_code_clauses`, `_beam_code_clauses`). Slab deflection is ACI 318-19 §24.2 and slab punching is ACI 318-19 §22.6, the same clauses as `_diagnose_slab`. An unknown section has an empty clause. Wall clauses are the checker's own `clause` string. Footing checks have no clause in `FoundationDesignResult`, so theirs is empty.
+
+Trace payloads are copied. A vector longer than 80 entries keeps `length` and the first eight values (`truncated: true`). Nested values deeper than eight levels become a type name.
+
+`bind` is how a click finds the dossier. Coordinates are structural, Z up. The viewer swaps Y and Z.
+
+| Kind | `bind` |
+| --- | --- |
+| column, beam | `frame_elements`: 0-based analysis-model elements, via `asap_model_frame_edge_indices` |
+| slab | `shell_kinds` `[0, 2]` (slab and drop panel) and `elevation_m`, the story elevation of the slab's cells |
+| wall | `shell_kinds` `[1]`, `plane.origin` and `plane.normal` in plan, and `z0_m` / `z1_m` for that story |
+| footing | `footing`: 0-based index in `footing_center`, same order as the buffer |
+
+Each dossier also has `governing` (`check`, `ratio`, `ok`, `clause`), `drawing`, and `checks`. The drawing is the sized geometry and the strip schedule (`bar_size`, `spacing_m`, areas, `Mu_kNm`). It is not a placing drawing: bar coordinates are not in the result. A column `outline_m` is `section_polygon` in the section's local frame, or `null` when there is no section. Wall `drawing.note` records that a failed ordinary-wall check does not change the section.
+
+Slab `method` holds `requested`, `used`, `fallback`, `iterations`, `failure_reason`, `failing_check`, `M0_kNm`, and `qu_kPa`.
+
 ## Unknown values
 
 `build_scene` rejects an unknown stage name, a station count below 2, a frame element whose release has no `etype2DOF` mask, and a frame element shorter than `1e-9` m. It does not substitute a default.

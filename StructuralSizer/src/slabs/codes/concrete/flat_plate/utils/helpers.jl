@@ -137,6 +137,90 @@ function find_supporting_columns(struc, slab_cell_indices::Set{Int})
     return supporting
 end
 
+"""
+    supporting_wall_segments(struc, slab)
+        -> Vector{Tuple{NTuple{2,Float64},NTuple{2,Float64}}}
+
+Plan segments, in metres, of walls that meet this slab. A wall's plan line
+is at its story elevation and the pier runs up to the next story, so the
+wall meets the slab at either end. Stacked piers on the same line are one
+segment. Empty when the structure has no walls or the skeleton has no stories.
+
+A floor that already carries `wall_segments` (the design kernel, which has
+no wall objects) returns that list. The building resolves the list.
+"""
+function supporting_wall_segments(struc, slab)
+    empty = Tuple{NTuple{2,Float64},NTuple{2,Float64}}[]
+    hasproperty(slab, :wall_segments) && return slab.wall_segments
+    hasproperty(struc, :walls) || return empty
+    walls = struc.walls
+    isempty(walls) && return empty
+    skel = struc.skeleton
+    hasproperty(skel, :stories) || return empty
+    hasproperty(skel, :geometry) || return empty
+    skel.geometry === nothing && return empty
+    z = _slab_elevation_m(struc, slab)
+    z === nothing && return empty
+    out = Tuple{NTuple{2,Float64},NTuple{2,Float64}}[]
+    seen = Set{NTuple{4,Int}}()
+    for w in walls
+        hasproperty(w, :x1) || continue
+        any(zw -> abs(zw - z) <= 0.1, _wall_end_elevations_m(skel, w.story)) || continue
+        seg = ((Float64(w.x1), Float64(w.y1)), (Float64(w.x2), Float64(w.y2)))
+        key = _segment_key(seg)
+        key in seen && continue
+        push!(seen, key)
+        push!(out, seg)
+    end
+    return out
+end
+
+"""Story elevation and the next story that has faces, in metres."""
+function _wall_end_elevations_m(skel, story)::Vector{Float64}
+    haskey(skel.stories, story) || return Float64[]
+    zs = Float64[ustrip(u"m", skel.stories[story].elevation)]
+    above = nothing
+    for k in sort!(collect(keys(skel.stories)))
+        k <= story && continue
+        if !isempty(skel.stories[k].faces)
+            above = k
+            break
+        end
+    end
+    above === nothing || push!(zs, ustrip(u"m", skel.stories[above].elevation))
+    return zs
+end
+
+function _segment_key(seg)
+    a = (round(Int, 1e3 * seg[1][1]), round(Int, 1e3 * seg[1][2]))
+    b = (round(Int, 1e3 * seg[2][1]), round(Int, 1e3 * seg[2][2]))
+    return a <= b ? (a..., b...) : (b..., a...)
+end
+
+"""Elevation (metres) of the slab's cells. `nothing` when a cell has no face."""
+function _slab_elevation_m(struc, slab)
+    hasproperty(slab, :cell_indices) || return nothing
+    isempty(slab.cell_indices) && return nothing
+    skel = struc.skeleton
+    cell = struc.cells[first(slab.cell_indices)]
+    hasproperty(cell, :face_idx) || return nothing
+    vis = skel.face_vertex_indices[cell.face_idx]
+    isempty(vis) && return nothing
+    return skel.geometry.vertex_coords[first(vis), 3]
+end
+
+"""True when `pt` is within `tol` metres of segment `a`–`b`."""
+function _point_on_segment(pt::NTuple{2,Float64}, a::NTuple{2,Float64}, b::NTuple{2,Float64};
+                           tol::Float64 = 1e-3)
+    abx, aby = b[1] - a[1], b[2] - a[2]
+    len2 = abx * abx + aby * aby
+    if len2 == 0
+        return hypot(pt[1] - a[1], pt[2] - a[2]) <= tol
+    end
+    s = clamp(((pt[1] - a[1]) * abx + (pt[2] - a[2]) * aby) / len2, 0.0, 1.0)
+    return hypot(pt[1] - (a[1] + s * abx), pt[2] - (a[2] + s * aby)) <= tol
+end
+
 # =============================================================================
 # Column Moment Distribution (ACI 318-11 §13.6.9.2)
 # =============================================================================
@@ -254,7 +338,10 @@ function build_frame_line(struc, columns, l2, direction::Symbol=:x)
     # Position accessor: structural centerline (applies inward offset for edge/corner)
     function get_position(col)
         off = hasproperty(col, :structural_offset) ? col.structural_offset : (0.0, 0.0)
-        (vc[col.vertex_idx, 1] + off[1], vc[col.vertex_idx, 2] + off[2])
+        # vertex_coords and structural_offset are meters. Carry the unit so
+        # FrameLine subtracts column widths as lengths.
+        ((vc[col.vertex_idx, 1] + off[1]) * u"m",
+         (vc[col.vertex_idx, 2] + off[2]) * u"m")
     end
     
     # Width accessor: returns column width in frame direction
@@ -336,7 +423,8 @@ analyses reflect the actual column sizes.  `I_factor` is the cracking
 reduction per ACI 318-11 §10.10.4.1 (default 0.70 for columns).
 """
 function update_asap_column_sections!(struc, columns, material::Concrete;
-                                      I_factor::Real = 0.70)
+                                      I_factor::Real = 0.70,
+                                      reprocess::Bool = true)
     model = struc.asap_model
     
     for col in columns
@@ -347,14 +435,16 @@ function update_asap_column_sections!(struc, columns, material::Concrete;
         
         for seg_idx in col.base.segment_indices
             edge_idx = struc.segments[seg_idx].edge_idx
-            if edge_idx > 0 && edge_idx <= length(model.elements)
-                model.elements[edge_idx].section = asap_sec
+            if edge_idx > 0 && edge_idx <= length(model.frame_elements)
+                model.frame_elements[edge_idx].section = asap_sec
             end
         end
     end
     
-    # Re-process model with updated sections
-    if model.processed
+    # Re-process model with updated sections. Callers that sync the building
+    # model immediately afterward pass reprocess=false; the section
+    # assignments above are the only input that sync reads.
+    if reprocess && model.processed
         Asap.process!(model)
     end
 end
@@ -454,7 +544,34 @@ function resolve_analysis_method(method, struc, slab, columns, on_inapplicable::
                                      verbose = verbose, ρ_concrete = ρ_concrete)
         return fallback, reasons
     end
+    # ACI 318-11 §13.4.1 (corpus: aci-318-11, page 248): an opening that is
+    # outside §13.4.2 is shown by analysis. The shell is that analysis.
+    if !(method isa FEA)
+        opening_reasons = _flat_plate_opening_reasons(struc, slab)
+        if !isempty(opening_reasons)
+            fallback = FEA()
+            @warn "Openings require analysis — falling back to FEA" violations = join(opening_reasons, "; ")
+            emit!(tc, :slab, "resolve_analysis_method", slab_id, :fallback;
+                  reason = "openings_require_analysis", caller = caller,
+                  method_requested = method_name(method), method_used = method_name(fallback),
+                  violations = opening_reasons, n_violations = length(opening_reasons))
+            return fallback, opening_reasons
+        end
+    end
     return method, String[]
+end
+
+function _flat_plate_opening_reasons(struc, slab)
+    reasons = String[]
+    for ci in slab.cell_indices
+        face = struc.cells[ci].face_idx
+        pts = [_vertex_xy_m(struc.skeleton, Int(vi))
+               for vi in struc.skeleton.face_vertex_indices[face]]
+        holes = slab_opening_loops(struc, slab; face_idx = face)
+        needs, rs = two_way_opening_needs_analysis(pts, holes; has_beams = false)
+        needs && append!(reasons, rs)
+    end
+    return unique(reasons)
 end
 
 """

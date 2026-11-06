@@ -30,6 +30,16 @@ _loop_area(loop) = 0.5 * sum(loop[k][1] * loop[mod1(k + 1, length(loop))][2] -
 @testset "Core shaft below the roof" begin
     skel = core_office_skeleton()
 
+    @testset "Two elevator doors and a stair door on each core story" begin
+        doors = filter(s -> s.opening.kind === :door, skel.wall_openings)
+        @test length(doors) == 3 * CORE_STORIES
+        elevators = filter(s -> s.opening.width ≈ 1.1, doors)
+        stairs = filter(s -> s.opening.width ≈ 1.0, doors)
+        @test length(elevators) == 2 * CORE_STORIES
+        @test length(stairs) == CORE_STORIES
+        @test all(s -> s.opening.z0 == 0.0 && s.opening.height ≈ 2.1, doors)
+    end
+
     @testset "The center bay is a slab only on the roof" begin
         roof = _core_face(skel, 14.4)
         @test roof !== nothing
@@ -77,7 +87,10 @@ _loop_area(loop) = 0.5 * sum(loop[k][1] * loop[mod1(k + 1, length(loop))][2] -
             struc, open_slab, cols; throw_on_failure = false)
         @test !appl.ok
         @test any(v -> occursin("13.6.1.1", v), appl.violations)
-        @test any(v -> occursin("ends at a wall", v), appl.violations)
+        @test !any(v -> occursin("ends at a wall", v), appl.violations)
+        efm = StructuralSizer.check_efm_applicability(
+            struc, open_slab, cols; throw_on_failure = false)
+        @test !any(v -> occursin("a wall supports this slab", v), efm.violations)
         @test length(StructuralSizer.supporting_wall_segments(struc, open_slab)) == 4
         # The roof is closed, and the piers below still land on it.
         @test length(StructuralSizer.supporting_wall_segments(struc, roof_slab)) == 4
@@ -94,7 +107,7 @@ _loop_area(loop) = 0.5 * sum(loop[k][1] * loop[mod1(k + 1, length(loop))][2] -
         kcols = StructuralSizer.find_supporting_columns(state, Set(kslab.cell_indices))
         appl = StructuralSizer.check_ddm_applicability(
             state, kslab, kcols; throw_on_failure = false)
-        @test any(v -> occursin("ends at a wall", v), appl.violations)
+        @test !any(v -> occursin("ends at a wall", v), appl.violations)
         sec = Asap.ShellSection(0.2u"m", 30u"GPa", 0.2)
         mesh = StructuralSizer.build_slab_shell_mesh(
             state, kslab, typeof(state.columns)(), sec; target_edge = 2.0u"m")
@@ -119,6 +132,8 @@ _loop_area(loop) = 0.5 * sum(loop[k][1] * loop[mod1(k + 1, length(loop))][2] -
                 x, y = ustrip(u"m", n.position[1]), ustrip(u"m", n.position[2])
                 if abs(y - 8.0) <= 1e-3 && 8.0 - 1e-6 <= x <= 16.0 + 1e-6
                     @test n.dof[3] == false
+                    @test n.dof[4] == false
+                    @test n.dof[5] == true
                     held += 1
                 elseif 1.0 < x < 7.0 && 1.0 < y < 7.0
                     @test n.dof[3] == true

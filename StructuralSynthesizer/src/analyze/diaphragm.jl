@@ -174,6 +174,254 @@ function classify_diaphragm_idealization(;
     return _classify_wind_diaphragm(construction, ratio)
 end
 
+"""
+    stricter_diaphragm_idealization(; kwargs...) -> Symbol
+
+The idealization that satisfies both chapters at once.
+
+Calls [`classify_diaphragm_idealization`](@ref) for `:seismic` and for
+`:wind` with the same arguments. When the two agree, that answer is
+returned. When they disagree, the answer is `:shell`.
+
+# Engineering judgment
+ASCE 7-22 §12.3.1 (corpus: asce-7-22, PDF page 179) and §26.2 (PDF page 324)
+each permit an idealization for their own loading. They do not say what to do
+when one model serves both. An idealization is used only when both chapters
+permit it. A disagreement models the diaphragm stiffness, which §12.3.1
+requires whenever the flexible and rigid permissions do not apply.
+"""
+function stricter_diaphragm_idealization(; kwargs...)
+    seismic = classify_diaphragm_idealization(; loading=:seismic, kwargs...)
+    wind = classify_diaphragm_idealization(; loading=:wind, kwargs...)
+    seismic === wind && return seismic
+    return :shell
+end
+
+"""
+    governing_diaphragm_span_depth(struc; plan_axis, walls) -> (span, depth, type5)
+
+The span and depth, in metres, of the diaphragm bay with the largest
+span-to-depth ratio, and whether a measured wall is Table 12.3-1 Type 5.
+
+For each plan axis, the walls parallel to that axis form lines. The span is
+the longest distance between adjacent lines, and the depth is the floor
+outline's width along the lines. An axis with fewer than two lines is
+skipped. The pair with the largest ratio is returned, so one classification
+covers every floor and both directions.
+
+A wall that [`_pier_axis_direction`](@ref) calls `:skew` is Type 5. It is
+left out of the axis-aligned lines. Two or more skewed walls parallel to
+each other form their own lines, and the span is the perpendicular distance
+between those lines. One skewed wall, with no wall parallel to it, defines
+no span.
+
+`walls` defaults to every wall. Pass the seismic-system walls when a system
+is declared. A wall outside that list is neither a line nor Type 5.
+
+# Engineering judgment
+§12.3.1.2 and §26.2 state the ratio and not how to measure it on a floor.
+Commentary C12.3.1.2 (corpus: asce-7-22, PDF page 713) calls it an indirect
+measure of diaphragm flexure, and C12.3.1.3 describes the span as the
+distance between lines of vertical elements. That distance, measured
+perpendicular to a family of parallel walls, is used for a skewed family
+as well. ASCE 7-22 Table 12.3-1 Type 5 (PDF page 180) is the vertical
+elements that are not parallel to the major orthogonal axes. The parallel
+test is the same 1e-8 test as [`_plan_vector_direction`](@ref).
+"""
+function governing_diaphragm_span_depth(struc::BuildingStructure;
+                                       plan_axis::Tuple{Real,Real}=(1.0, 0.0),
+                                       walls=nothing)
+    axis = unit_plan_axis(plan_axis)
+    e1, e2 = plan_axes(axis)
+    ids = walls === nothing ? collect(eachindex(struc.walls)) : collect(walls)
+    isempty(ids) && throw(ArgumentError(
+        "diaphragm span: there are no walls to form lines, so the span between " *
+        "vertical elements is not measured."))
+    best = nothing
+    type5 = false
+    reached = false
+    for (_, story) in struc.skeleton.stories
+        isempty(story.faces) && continue
+        z = ustrip(u"m", story.elevation)
+        reaching = Int[]
+        for i in ids
+            g = _wall_pier_geometry(struc.walls[i], struc.skeleton)
+            abs(g.z_top - z) <= WALL_CUT_ZTOL_M && push!(reaching, i)
+        end
+        isempty(reaching) && continue
+        reached = true
+        orthogonal = Int[]
+        skewed = Int[]
+        for i in reaching
+            if _pier_axis_direction(struc.walls[i], axis) === :skew
+                type5 = true
+                push!(skewed, i)
+            else
+                push!(orthogonal, i)
+            end
+        end
+        outline = story_floor_outline(struc.skeleton, story)
+        pts = NTuple{2,Float64}[]
+        for loop in outline
+            append!(pts, loop)
+        end
+        isempty(pts) && throw(ArgumentError(
+            "diaphragm span: the floor at $(z) m has faces and no outline."))
+        for (direction, along, across) in ((:x, e1, e2), (:y, e2, e1))
+            offsets = _diaphragm_line_offsets(struc, orthogonal, along, across)
+            length(offsets) < 2 && continue
+            span = maximum(offsets[k + 1] - offsets[k] for k in 1:(length(offsets) - 1))
+            # Width along the lines: the extent perpendicular to `across`.
+            depth = projected_plan_width(pts, across)
+            depth > 0 || throw(ArgumentError(
+                "diaphragm span: the floor at $(z) m has no width along $direction."))
+            best = _wider_diaphragm_span(best, span, depth)
+        end
+        for (span, depth) in _skewed_diaphragm_spans(struc, skewed, pts)
+            depth > 0 || throw(ArgumentError(
+                "diaphragm span: the floor at $(z) m has no width along a skewed wall."))
+            best = _wider_diaphragm_span(best, span, depth)
+        end
+    end
+    best === nothing && throw(ArgumentError(
+        reached ?
+        "diaphragm span: every direction has fewer than two lines of walls, " *
+        "so there is no span to classify." :
+        "diaphragm span: no floor is reached by a wall, so there is no span to classify."))
+    return best[1], best[2], type5
+end
+
+"Keep the pair with the larger span-to-depth ratio."
+_wider_diaphragm_span(best, span, depth) =
+    (best === nothing || span / depth > best[1] / best[2]) ? (span, depth) : best
+
+"""
+Perpendicular spans of skewed walls that share a direction.
+
+Walls whose tangents agree within 1e-8 are one family, the same tolerance
+as [`_plan_vector_direction`](@ref). Offsets within 1 mm are one line. A
+family with one line contributes no span.
+"""
+function _skewed_diaphragm_spans(struc, ids, pts)
+    families = Tuple{NTuple{2,Float64}, Vector{Int}}[]
+    for i in ids
+        tx, ty, _, _ = _pier_plan_axes(struc.walls[i])
+        # One representative direction, so a reversed wall joins its family.
+        if tx < 0 || (abs(tx) <= 1e-12 && ty < 0)
+            tx, ty = -tx, -ty
+        end
+        k = findfirst(f -> abs(f[1][1] * tx + f[1][2] * ty) >= 1 - 1e-8, families)
+        if k === nothing
+            push!(families, ((tx, ty), [i]))
+        else
+            push!(families[k][2], i)
+        end
+    end
+    pairs = Tuple{Float64,Float64}[]
+    for (u, members) in families
+        across = (-u[2], u[1])
+        offsets = Float64[]
+        for i in members
+            g = _wall_pier_geometry(struc.walls[i], struc.skeleton)
+            push!(offsets, 0.5 * ((g.x1 + g.x2) * across[1] + (g.y1 + g.y2) * across[2]))
+        end
+        sort!(offsets)
+        lines = Float64[offsets[1]]
+        for s in offsets
+            s - lines[end] > _DIAPHRAGM_LINE_TOL_M && push!(lines, s)
+        end
+        length(lines) < 2 && continue
+        span = maximum(lines[k + 1] - lines[k] for k in 1:(length(lines) - 1))
+        # Width along the family: the extent perpendicular to `across`.
+        push!(pairs, (span, projected_plan_width(pts, across)))
+    end
+    return pairs
+end
+
+"""Sorted offsets [m] of the walls parallel to `along`. The others are skipped."""
+function _diaphragm_line_offsets(struc, ids, along, across)
+    offsets = Float64[]
+    for i in ids
+        g = _wall_pier_geometry(struc.walls[i], struc.skeleton)
+        dx, dy = g.x2 - g.x1, g.y2 - g.y1
+        L = hypot(dx, dy)
+        ux, uy = dx / L, dy / L
+        abs(ux * along[1] + uy * along[2]) >= 1 - _DIAPHRAGM_AXIS_TOL || continue
+        push!(offsets, 0.5 * ((g.x1 + g.x2) * across[1] + (g.y1 + g.y2) * across[2]))
+    end
+    isempty(offsets) && return offsets
+    sort!(offsets)
+    lines = Float64[offsets[1]]
+    for s in offsets
+        s - lines[end] > _DIAPHRAGM_LINE_TOL_M && push!(lines, s)
+    end
+    return lines
+end
+
+"""
+    resolve_auto_diaphragm(struc, params) -> Symbol
+
+`:rigid`, `:flexible`, or `:semirigid` for `diaphragm_mode = :auto`.
+
+The span and depth are [`governing_diaphragm_span_depth`](@ref), using the
+declared seismic-system walls when `params.lateral` is set. A skewed wall
+among those adds Table 12.3-1 Type 5 to the stated irregularities. Types
+1 through 4 stay as stated, and the caller's vector is not modified. The
+idealization is [`stricter_diaphragm_idealization`](@ref). `:shell` is
+built as the `:semirigid` membrane.
+"""
+function resolve_auto_diaphragm(struc::BuildingStructure, params::DesignParameters)
+    params.diaphragm_construction === nothing && throw(ArgumentError(
+        "to_asap!: diaphragm_mode :auto needs diaphragm_construction " *
+        "(:concrete_slab, :concrete_filled_metal_deck, :concrete_filled_steel_deck, " *
+        ":untopped_steel_deck, or :wood_structural_panels). It is not assumed."))
+    params.diaphragm_irregularities === nothing && throw(ArgumentError(
+        "to_asap!: diaphragm_mode :auto needs diaphragm_irregularities, the " *
+        "Table 12.3-1 type numbers the caller states. An empty vector means " *
+        "the caller states none. A wall that is not parallel to the plan axes " *
+        "adds Type 5. Types 1, 2, 3, and 4 stay as stated."))
+    wall_ids = nothing
+    axis = (1.0, 0.0)
+    if params.lateral !== nothing
+        axis = params.lateral.plan_axis
+        mx = seismic_members(struc, params.lateral.system_x).walls
+        my = seismic_members(struc, params.lateral.system_y).walls
+        wall_ids = unique(vcat(mx, my))
+    end
+    span, depth, type5 = governing_diaphragm_span_depth(struc; plan_axis=axis, walls=wall_ids)
+    irregularities = copy(params.diaphragm_irregularities)
+    type5 && (5 in irregularities || push!(irregularities, 5))
+    ideal = stricter_diaphragm_idealization(;
+        construction=params.diaphragm_construction,
+        span, depth,
+        horizontal_irregularity_types=irregularities)
+    return ideal === :shell ? :semirigid : ideal
+end
+
+"""
+    deck_floor_diaphragm(; loading, span, depth, horizontal_irregularity_types, kwargs...)
+
+Idealization of a concrete-filled steel deck floor.
+
+The construction is fixed to `:concrete_filled_metal_deck`. ASCE 7-22 §12.3.1.2
+and §26.2 both name that deck (corpus: asce-7-22, PDF pp. 179, 324). This
+classifies the analysis model only. It does not compute a diaphragm shear
+strength. SDI C-2017 §2.4 item 7 (corpus: sdi-c-2017, PDF p. 10) sends that
+strength to AISI S310.
+"""
+function deck_floor_diaphragm(;
+        loading,
+        span,
+        depth,
+        horizontal_irregularity_types,
+        kwargs...)
+    return classify_diaphragm_idealization(;
+        loading,
+        construction=:concrete_filled_metal_deck,
+        span, depth, horizontal_irregularity_types,
+        kwargs...)
+end
+
 """Seismic idealization. `disp_ratio` is `nothing` when Eq. 12.3-1 was not supplied."""
 function _classify_seismic_diaphragm(;
         construction, ratio, irregularities, vertical_elements,
@@ -408,110 +656,278 @@ function _positive_displacement(value, name::AbstractString)::Float64
 end
 
 # ------------------------------------------------------------------------------
-# Flexible idealization: tributary split of a caller-supplied story force.
-# to_asap! does not apply that force to a building.
+# Story forces: the rigid master, or the wall lines of a flexible floor.
 # ------------------------------------------------------------------------------
 
 """
-    distribute_flexible_diaphragm_story_force(story_force, tributary_areas)
-        -> Vector{NTuple{2}}
+    _require_flexible_diaphragm_support!(struc)
 
-Split one story force among vertical elements by tributary area.
+Require what a `:flexible` diaphragm needs from the building before the model
+is built: vertical elements, and no strut.
 
-`story_force` is `(Fx, Fy)`. Each element `i` receives
-`story_force * (A_i / Σ A)`. A missing area (`nothing`), an empty list, a
-negative area, or a non-positive total throws. A zero area is kept and
-receives no force when some other area is positive.
-
-ENGINEERING JUDGMENT: ASCE 7-22 §12.3.1.1 (corpus: asce-7-22, PDF p. 179)
-permits the flexible idealization and does not state this split. The split
-is the tributary distribution specified for `:flexible`. No additional factor
-is applied. This function does not write loads onto a building.
-
-The two components of `story_force` must already be in one unit. The areas
-must already be in one unit. A `nothing` entry is missing geometry, not zero.
+The story force goes to lines of seismic-system walls
+([`flexible_diaphragm_layout!`](@ref)). The lateral stage builds those lines
+from the declared system, so no tributary area is required here. A strut is a
+brace: its force comes from the frame it braces, and no share is guessed for it.
 """
-function distribute_flexible_diaphragm_story_force(story_force, tributary_areas)
-    (story_force isa Tuple && length(story_force) == 2) || throw(ArgumentError(
-        "story_force must be an (Fx, Fy) tuple, got $(typeof(story_force))"))
-    areas = _tributary_area_values(tributary_areas)
-    total = sum(areas)
-    isfinite(total) && total > 0 || throw(ArgumentError(
-        "flexible-diaphragm tributary areas sum to $total; the story force is not distributed"))
-    Fx, Fy = story_force
-    return [(Fx * (a / total), Fy * (a / total)) for a in areas]
-end
-
-"""Numeric areas in the caller's unit. `nothing` and NaN throw."""
-function _tributary_area_values(tributary_areas)::Vector{Float64}
-    tributary_areas isa AbstractVector || throw(ArgumentError(
-        "tributary_areas must be a vector of areas"))
-    isempty(tributary_areas) && throw(ArgumentError(
-        "flexible diaphragm has no tributary areas"))
-    areas = Float64[]
-    saw_quantity = false
-    saw_bare = false
-    for area in tributary_areas
-        area === nothing && throw(ArgumentError(
-            "a vertical element's tributary area is missing"))
-        if area isa Quantity
-            saw_quantity = true
-        elseif area isa Real && !(area isa Bool)
-            saw_bare = true
-        else
-            throw(ArgumentError(
-                "tributary area must be a number or a length², got $(typeof(area))"))
-        end
-    end
-    saw_quantity && saw_bare && throw(ArgumentError(
-        "tributary areas must all be lengths² or all be numbers in the same unit"))
-    for area in tributary_areas
-        value = if area isa Quantity
-            ustrip(u"m^2", area)
-        else
-            float(area)
-        end
-        isfinite(value) || throw(ArgumentError("tributary area is not finite ($area)"))
-        value < 0 && throw(ArgumentError("tributary area is negative ($area)"))
-        push!(areas, value)
-    end
-    return areas
-end
-
-"""
-    _require_flexible_diaphragm_tributaries!(struc)
-
-Require the geometry a `:flexible` diaphragm needs, and call the existing
-column tributary path when that path can supply every vertical element's area.
-
-Does not apply a story force and does not build a rigid link or a shell.
-
-Throws when there are no floor cells, when there are no columns, when any
-column has no positive tributary area, or when walls or struts are present.
-No tributary-area path exists for walls or struts, so those buildings are
-not given the column areas in their place.
-"""
-function _require_flexible_diaphragm_tributaries!(struc)
-    isempty(struc.cells) && throw(ArgumentError(
-        "to_asap!: :flexible needs floor cells to compute a tributary area. None are present."))
-    if !isempty(struc.walls) || !isempty(struc.struts)
+function _require_flexible_diaphragm_support!(struc)
+    if !isempty(struc.struts)
         throw(ArgumentError(
-            "to_asap!: :flexible needs a tributary area for each vertical element. " *
-            "No tributary-area path exists for walls or struts. " *
-            "A rigid link or a shell is not substituted."))
+            "to_asap!: a :flexible diaphragm sends the story force to lines of " *
+            "seismic-system walls. A strut is a brace and is not on such a line. " *
+            "No share or guessed fraction is assigned to it."))
     end
-    isempty(struc.columns) && throw(ArgumentError(
-        "to_asap!: :flexible needs vertical elements with tributary areas. " *
-        "This structure has no columns."))
-    # Existing gravity-tributary path. It does not apply a story force.
-    compute_column_tributaries!(struc)
-    for col in struc.columns
-        area = column_tributary_area(struc, col)
-        if area === nothing || !(ustrip(u"m^2", area) > 0)
-            throw(ArgumentError(
-                "to_asap!: :flexible is missing a positive tributary area for a column " *
-                "(story $(col.story), vertex $(col.vertex_idx))."))
+    isempty(struc.columns) && isempty(struc.walls) && throw(ArgumentError(
+        "to_asap!: :flexible needs vertical elements. " *
+        "This structure has no columns and no walls."))
+    return struc
+end
+
+"""
+    diaphragm_story_loads(struc, levels, Fx, Fy, Mz; force_id, moment_id)
+        -> Vector{Asap.AbstractLoad}
+
+Place one story force at each level.
+
+`levels` are the ELF or wind levels, lowest first. `Fx`, `Fy`, and `Mz` are
+kilonewtons and kilonewton-metres, one entry per level.
+
+Rigid links present: the force and the moment go on each level's master. A
+zero force is omitted and a zero moment is omitted. Drift stays on the
+rigid link.
+
+No rigid links: the floor is flexible, and the force goes to the lines of
+seismic-system walls in `struc.diaphragm_layout`
+([`flexible_diaphragm_layout!`](@ref)). Each component along a plan axis
+is split among the lines parallel to that axis as simple spans between
+adjacent lines: a line takes what lies between the midpoints to its
+neighbours, and the outermost line takes everything beyond it. ELF levels
+measure that by effective seismic weight; wind levels by the floor width
+facing the wind. Within a line, each wall takes a share in proportion to
+its length on a uniform top line load; the collector ties along the line
+then set the split by stiffness.
+
+`Mz` is not applied to a flexible floor. ASCE 7-22 §12.8.4.2.1 (corpus:
+asce-7-22, PDF page 187) requires accidental torsion only where diaphragms
+are not flexible, and C12.8.4.1 (PDF page 727) has the tributary mass
+resisted with no explicitly computed torsion. The moment is not replaced
+by a couple.
+
+A `:semirigid` membrane floor takes the force on its mesh nodes, with `Mz`
+as nodal torsion forces ([`_semirigid_story_loads`](@ref)). Wind levels pass
+`centroids`, the point each level's `Mz` is about. A full-plate `:shell`
+floor throws.
+
+# Citation
+ASCE 7-22 §12.8.4 and §12.8.4.1 (corpus: asce-7-22, PDF page 187): the story
+shear goes to the vertical elements of the seismic force-resisting system,
+and for flexible diaphragms the distribution accounts for the position and
+distribution of the supported masses.
+"""
+function diaphragm_story_loads(struc::BuildingStructure, levels::AbstractVector,
+                               Fx::AbstractVector{<:Real},
+                               Fy::AbstractVector{<:Real},
+                               Mz::AbstractVector{<:Real};
+                               force_id::Symbol,
+                               moment_id::Symbol,
+                               centroids=nothing)
+    n = length(levels)
+    (length(Fx) == n && length(Fy) == n && length(Mz) == n) || throw(ArgumentError(
+        "diaphragm story loads: levels, Fx, Fy, and Mz must be one entry per level."))
+    if !isempty(struc.asap_rigid_links)
+        return _rigid_story_loads([lv.master for lv in levels], Fx, Fy, Mz;
+                                  force_id, moment_id)
+    end
+    if struc.diaphragm_layout isa SemirigidDiaphragmLayout
+        return _semirigid_story_loads(struc, levels, Fx, Fy, Mz; force_id, centroids)
+    end
+    if _has_semirigid_diaphragm(struc)
+        throw(ArgumentError(
+            "diaphragm story loads: a full-plate :shell floor is not a rigid " *
+            "master, not a split among wall lines, and not the :semirigid membrane."))
+    end
+    return _flexible_story_loads(struc, levels, Fx, Fy, Mz; force_id)
+end
+
+function _has_semirigid_diaphragm(struc)
+    model = struc.asap_model
+    model === nothing && return false
+    for sh in model.shell_elements
+        sh.id === :wall && continue
+        return true
+    end
+    return false
+end
+
+function _rigid_story_loads(masters, Fx, Fy, Mz; force_id::Symbol, moment_id::Symbol)
+    loads = Asap.AbstractLoad[]
+    z = 0.0 * u"kN"
+    for i in eachindex(masters)
+        master = masters[i]
+        master === nothing && throw(ArgumentError(
+            "diaphragm story loads: level $i has rigid links and no master."))
+        if Fx[i] != 0.0 || Fy[i] != 0.0
+            push!(loads, Asap.NodeForce(master,
+                [Fx[i] * u"kN", Fy[i] * u"kN", z], force_id))
+        end
+        if Mz[i] != 0.0
+            push!(loads, Asap.NodeMoment(master,
+                [0.0 * u"kN*m", 0.0 * u"kN*m", Mz[i] * u"kN*m"], moment_id))
         end
     end
-    return struc
+    isempty(loads) && throw(ArgumentError(
+        "diaphragm story loads: a case produced no story force and no torsion."))
+    return loads
+end
+
+function _flexible_story_loads(struc, levels, Fx, Fy, Mz; force_id::Symbol)
+    if !isempty(struc.struts)
+        throw(ArgumentError(
+            "flexible diaphragm: a strut is a brace and is not on a wall line. " *
+            "No share or guessed fraction is assigned to it."))
+    end
+    layout = _require_flexible_layout(struc)
+    loads = Asap.AbstractLoad[]
+    for i in eachindex(levels)
+        (Fx[i] == 0.0 && Fy[i] == 0.0) && continue
+        append!(loads, _flexible_floor_loads(struc, layout, levels[i],
+            Float64(Fx[i]), Float64(Fy[i]), force_id))
+    end
+    if isempty(loads)
+        torsion = any(!iszero, Mz)
+        throw(ArgumentError(
+            torsion ?
+            "flexible diaphragm: the 5% accidental eccentricity is not applied, " *
+            "and this case has no story force to distribute." :
+            "flexible diaphragm: a case produced no story force."))
+    end
+    return loads
+end
+
+"""
+Story force of one level on its wall lines.
+
+Each plan-axis component of `(Fx, Fy)` goes to the lines parallel to that
+axis. A component that is zero to rounding is skipped, so a force along one
+axis does not require lines along the other.
+"""
+function _flexible_floor_loads(struc, layout, level, Fx, Fy, force_id::Symbol)
+    e1, e2 = plan_axes(layout.plan_axis)
+    total = hypot(Fx, Fy)
+    loads = Asap.AbstractLoad[]
+    for (direction, d, n) in ((:x, e1, e2), (:y, e2, e1))
+        F = Fx * d[1] + Fy * d[2]
+        abs(F) <= 1e-12 * total && continue
+        lines = _diaphragm_lines_at(layout, level.elevation_m, direction)
+        isempty(lines) && throw(ArgumentError(
+            "flexible diaphragm: no seismic-system wall line along $direction " *
+            "reaches the floor at $(level.elevation_m) m, and the story force " *
+            "has a component along it. ASCE 7-22 §12.8.4 (corpus: asce-7-22, " *
+            "PDF page 187) sends the story shear to the vertical elements of " *
+            "the seismic force-resisting system."))
+        shares = _diaphragm_line_shares(lines, _strip_measure(struc, level, n))
+        for (line, share) in zip(lines, shares)
+            share == 0.0 && continue
+            append!(loads, _diaphragm_line_loads(struc, line,
+                F * share * d[1], F * share * d[2], force_id))
+        end
+    end
+    return loads
+end
+
+"""
+Fraction of a component each line takes, lines ordered by offset.
+
+`measure(lo, hi)` is the weight or width between two offsets on the axis
+across the lines. Line `k` takes the strip from the midpoint to the line
+before it to the midpoint to the line after it; the first and last strips
+are open, so the floor beyond the outermost lines goes to them.
+"""
+function _diaphragm_line_shares(lines, measure)
+    n = length(lines)
+    bounds = Vector{Float64}(undef, n + 1)
+    bounds[1] = -Inf
+    bounds[end] = Inf
+    for k in 1:(n - 1)
+        bounds[k + 1] = 0.5 * (lines[k].offset_m + lines[k + 1].offset_m)
+    end
+    parts = [measure(bounds[k], bounds[k + 1]) for k in 1:n]
+    for p in parts
+        (isfinite(p) && p >= 0) || throw(ArgumentError(
+            "flexible diaphragm: a wall line's tributary measure is $p."))
+    end
+    total = sum(parts)
+    total > 0 || throw(ArgumentError(
+        "flexible diaphragm: the floor has no tributary weight or width for its wall lines."))
+    return parts ./ total
+end
+
+"""Line force `(fx, fy)` [kN] on the walls of one line, each in proportion to its length."""
+function _diaphragm_line_loads(struc, line, fx, fy, force_id::Symbol)
+    lengths = Float64[]
+    for i in line.walls
+        g = _wall_pier_geometry(struc.walls[i], struc.skeleton)
+        push!(lengths, hypot(g.x2 - g.x1, g.y2 - g.y1))
+    end
+    total = sum(lengths)
+    loads = Asap.AbstractLoad[]
+    for (i, L) in zip(line.walls, lengths)
+        s = L / total
+        append!(loads, _wall_floor_loads(struc, i, line.elevation_m,
+            fx * s, fy * s, force_id))
+    end
+    return loads
+end
+
+"""
+Uniform line load along the wall top whose resultant is `(fx, fy)` kilonewtons.
+
+The stations are the wall-shell nodes at the floor, in order along the wall.
+[`wall_edge_nodal_forces`](@ref) integrates a unit width at pressure `1/L`,
+so the weights sum to 1 and each node takes that fraction of the share.
+"""
+function _wall_floor_loads(struc, wall_index::Int, elevation_m, fx, fy, force_id::Symbol)
+    wall = struc.walls[wall_index]
+    pier = _pier_by_wall_index(struc.wall_mesh, wall_index)
+    geom = _wall_pier_geometry(wall, struc.skeleton)
+    dx = geom.x2 - geom.x1
+    dy = geom.y2 - geom.y1
+    L = hypot(dx, dy)
+    L > 0 || throw(ArgumentError(
+        "flexible diaphragm: wall $wall_index has no plan length."))
+    ux, uy = dx / L, dy / L
+    seen = Set{UInt64}()
+    edge = Tuple{Float64, Asap.Node}[]
+    for sh in pier.shells
+        for nd in sh.nodes
+            abs(ustrip(u"m", nd.position[3]) - elevation_m) <= WALL_CUT_ZTOL_M || continue
+            id = objectid(nd)
+            id in seen && continue
+            push!(seen, id)
+            x = ustrip(u"m", nd.position[1])
+            y = ustrip(u"m", nd.position[2])
+            s = (x - geom.x1) * ux + (y - geom.y1) * uy
+            push!(edge, (s, nd))
+        end
+    end
+    length(edge) >= 2 || throw(ArgumentError(
+        "flexible diaphragm: wall $wall_index has fewer than two shell nodes " *
+        "at $(elevation_m) m. The share is not placed on one node."))
+    sort!(edge; by=first)
+    stations = [s for (s, _) in edge]
+    span = stations[end] - stations[1]
+    span > 1e-9 || throw(ArgumentError(
+        "flexible diaphragm: wall $wall_index top nodes have no length."))
+    # Width 1 over the stations, pressure 1/span: the integral is 1.
+    weights = wall_edge_nodal_forces(stations,
+        [WallWidthPiece(stations[1], stations[end], 0.0, 0.0, 1.0)],
+        1.0 / span)
+    loads = Asap.AbstractLoad[]
+    for (k, (_, nd)) in enumerate(edge)
+        w = weights[k]
+        abs(w) <= 1e-12 && continue
+        push!(loads, Asap.NodeForce(nd,
+            [w * fx * u"kN", w * fy * u"kN", 0.0 * u"kN"], force_id))
+    end
+    return loads
 end

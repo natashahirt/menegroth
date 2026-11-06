@@ -40,11 +40,10 @@ batched steel-beam stage ([`size_beams!`](@ref) → `_size_beams_impl!` →
 Per-knob precedence DIFFERS by path ([A-revert]):
 
 - `size_member_group!` (highest first): this override's field
-  (`member_group_overrides[gid]`) > `MemberGroup.catalog_override` (for `catalog`) >
-  the caller's global default kwarg.
-- batched `size_beams!` (Phase B): this override's field > the caller's global
-  default kwarg. `MemberGroup.catalog_override` is a documented NO-OP on the batched
-  `design_building` / incremental path — it is honored ONLY by `size_member_group!`.
+  (`member_group_overrides[gid]`) > the caller's global default kwarg.
+- batched `size_beams!`: this override's field > the caller's global default
+  kwarg. A framing level's own catalog is `FramingLevel.beam_options`, sized
+  in that level's pass.
 
 Field types are validated at construction: `deflection_limit` must be a
 dimensionless `Real` L/δ ratio and `max_depth` a Unitful length, else the
@@ -169,8 +168,7 @@ Base.@kwdef mutable struct DesignParameters
     # change DIRTIES the member frontier — but it is NOT prepare-affecting (it never
     # alters the prepared model), so the incremental engine is reused, not rebuilt.
     #
-    # `MemberGroup.catalog_override` (the Phase 6 seam) is honored ONLY by the
-    # `size_member_group!` path, NOT by the batched path ([A-revert]). Un-honorable
+    # A framing level's catalog is `FramingLevel.beam_options`. Un-honorable
     # effective targets (column/strut groups, flat-plate/flat-slab floors, non-steel
     # beam sizing, `n_max_sections > 0`, or a LOOSER-than-global knob) are refused
     # fail-loud by [`_assert_member_group_overrides_unsupported`](@ref). See
@@ -230,12 +228,30 @@ Base.@kwdef mutable struct DesignParameters
     
     # Diaphragm model. `:none` is off; it is not an ASCE 7 category.
     # `:rigid` is the in-plane rigid link (u_x, u_y, θ_z). `:shell` is a
-    # semirigid slab at its real modulus. `:flexible` distributes story force
-    # by tributary area and adds no link and no shell. The choice among
-    # `:rigid`, `:flexible`, and `:shell` is `classify_diaphragm_idealization`.
+    # full-plate slab. `:semirigid` is the in-plane membrane floor.
+    # `:flexible` sends story force to the lines of seismic-system walls and
+    # ties each line along itself. `:auto` measures the span and depth and
+    # uses `stricter_diaphragm_idealization`: rigid or flexible only when both
+    # wind and seismic permit it, and the membrane otherwise. `:auto` requires
+    # `diaphragm_construction` and `diaphragm_irregularities`. A wall that is
+    # not parallel to the plan axes adds Table 12.3-1 Type 5.
     diaphragm_mode::Symbol = :none
     diaphragm_E::Union{typeof(1.0u"Pa"), Nothing} = nothing
     diaphragm_ν::Float64 = 0.2
+    diaphragm_construction::Union{Nothing, Symbol} = nothing
+    # Table 12.3-1 type numbers. `nothing` means they were not stated.
+    # An empty vector means the caller states there are none. `:auto` appends
+    # type 5 when a wall used for the span is skewed, and leaves this vector
+    # unchanged.
+    diaphragm_irregularities::Union{Nothing, Vector{Int}} = nothing
+    # `:semirigid` membrane modulus = slab modulus × factor. ACI 318-19
+    # §12.4.2.4(c) (corpus: aci-318-19, PDF page 183) permits design values
+    # from the envelope of upper- and lower-bound in-plane stiffness.
+    # ENGINEERING JUDGMENT: upper bound 1.0 (gross section). Lower bound 0.35,
+    # the cracked-wall Ig factor of ACI 318-19 Table 6.6.3.1.1(a) (PDF page 78)
+    # borrowed for a slab acting in its plane; no code gives an in-plane
+    # diaphragm factor. The model is meshed at the first entry.
+    semirigid_stiffness_factors::NTuple{2, Float64} = (1.0, 0.35)
 
     # Lateral system and demand assignment. `nothing` means no lateral design:
     # a gravity-only building is unchanged. There is no default system.

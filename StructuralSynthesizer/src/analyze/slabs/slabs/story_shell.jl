@@ -97,14 +97,30 @@ function _story_beam_thickness(struc, beam, thickness_of_face)
     return isempty(hs) ? nothing : maximum(hs)
 end
 
-"""Concrete for RC sections; otherwise the section's own material, then `steel`."""
-function _story_beam_material(sec, concrete, steel)
+"""Structural steel recorded on the beam's material volumes, or `nothing`."""
+function _recorded_structural_steel(beam)
+    for mat in keys(volumes(beam))
+        mat isa StructuralSizer.StructuralSteel && return mat
+    end
+    return nothing
+end
+
+"""
+Concrete for RC sections. Otherwise the section's own material, then the steel
+recorded on the beam when it was sized, then the story-wide `steel`.
+
+A catalog shape carries no material. The beam's volume key is the material its
+sizing options used, so a framing level sized in a different steel than the
+girders keeps that steel in the shell.
+"""
+function _story_beam_material(sec, concrete, steel, recorded = nothing)
     if sec isa RCBeamSection || sec isa RCTBeamSection
         return concrete
     end
     if hasproperty(sec, :material) && getfield(sec, :material) !== nothing
         return getfield(sec, :material)
     end
+    recorded isa StructuralSizer.StructuralSteel && return recorded
     steel === nothing || return steel
     throw(ArgumentError("$(typeof(sec)) has no material for the story shell; pass `steel`"))
 end
@@ -292,6 +308,11 @@ Mesh every slab on `level` as one shell and connect the beams that have a
 section. A beam with no section is skipped. The story is `analyzed` only
 when every beam on the story had a section and the shell solved.
 
+This is [`build_story_shell`](@ref) followed by [`solve_story_shell!`](@ref).
+A caller that solves the same story again, as beam or column sections
+change, keeps the [`StoryShell`](@ref) (`shell` in the result) and calls
+`solve_story_shell!` on it instead of meshing again.
+
 The beam-force solve uses [`total_factored_pressure`](@ref) on each panel.
 Each beam also takes its own weight. Slab bars use the service dead and
 live pressures, patterned and factored inside
@@ -347,7 +368,8 @@ being solved, and that stiffness is restored before return.
 
 The shell forces are written onto each slab of the story as
 `design_details.shell_beam_forces`. `design_details.shell_reinforcement`
-is one `ElementRebarField` per panel of the story. `beam_demands` is one
+is one `ElementRebarField` per panel of the story, and
+`design_details.shell_panels` indexes that slab's own panels in it. `beam_demands` is one
 [`ShellBeamDemand`](@ref) per beam index, from the same factored load cases
 as the bars. Beam sections are not changed here. A cracked service
 solve, used for deflection, is restored to this gross shell before return.
@@ -366,6 +388,128 @@ function analyze_story_shell(struc, level::Int;
                              rebar = Rebar_60,
                              sustained_live_fraction::Real = 0.0,
                              composite_regions = nothing)
+    shell = build_story_shell(struc, level; target_edge, concrete, steel, support_points,
+                              composite_regions)
+    return solve_story_shell!(shell, struc; composite_regions, service, rebar,
+                              sustained_live_fraction, solve)
+end
+
+"""
+    StoryShell
+
+One story's shell, meshed once by [`build_story_shell`](@ref) and solved in
+place by [`solve_story_shell!`](@ref).
+
+The mesh, the supports and the beam lines stay. Each solve puts every beam
+piece's current section and web offset, the panel pressures and the column
+springs on the model, then refactors on the stored sparsity pattern. A
+different slab thickness, a different set of beams with a section, or a
+different end release is another model, and the solve meshes it again.
+"""
+mutable struct StoryShell
+    level::Int
+    target_edge::typeof(1.0u"m")
+    concrete::Any
+    steel::Any
+    support_points::Vector{NTuple{2, Float64}}
+    built::NamedTuple
+    model::Union{Nothing, Asap.Model}
+    frame_station::Vector{Float64}
+    signature::UInt
+    reasons::Vector{String}
+end
+
+"""
+    build_story_shell(struc, level; target_edge, concrete, steel,
+                      support_points, composite_regions) -> StoryShell
+
+Mesh every slab on `level` as one shell with the beams that have a section,
+and pin its supports. Nothing is solved. Supports are the column centres on
+this story, unless `support_points` is given as `(x, y)` pairs in metres.
+`steel` is the material of a steel section that carries none.
+"""
+function build_story_shell(struc, level::Int;
+                           target_edge::Length = 0.5u"m",
+                           concrete = NWC_4000,
+                           steel = nothing,
+                           support_points = nothing,
+                           composite_regions = nothing)
+    inp = _story_shell_inputs(struc, level, concrete, steel, composite_regions)
+    pts = support_points === nothing ? _column_support_points(struc, level) :
+          NTuple{2, Float64}[(Float64(p[1]), Float64(p[2])) for p in support_points]
+    shell = StoryShell(level, uconvert(u"m", target_edge), concrete, steel, pts,
+                       NamedTuple(), nothing, Float64[], UInt(0), String[])
+    return _mesh_story_shell!(shell, inp)
+end
+
+"""
+What the mesh and the element types depend on: each panel's thickness, the
+beams in the shell, and their end releases.
+"""
+_story_shell_signature(inp) =
+    hash((inp.thickness_of_face, inp.beam_ids, [b.release for b in inp.beams]))
+
+"""Station of the middle of each frame piece, in metres along its beam's line."""
+function _story_frame_stations(frames, beams)
+    line = Dict(b.id => b.xy for b in beams)
+    at(n, xy) = StructuralSizer._station_on_polyline(
+        ustrip(u"m", n.position[1]), ustrip(u"m", n.position[2]), xy)[2]
+    return Float64[0.5 * (at(el.nodeStart, line[el.id]) + at(el.nodeEnd, line[el.id]))
+                   for el in frames]
+end
+
+"""Factored pressure on each panel's plates, and each beam piece's own weight."""
+function _story_shell_loads(built, pressures)
+    loads = Asap.AbstractLoad[]
+    by_panel = Dict{Int, Vector{Asap.ShellElement}}()
+    for (el, i) in zip(built.shells, built.panel_index)
+        push!(get!(() -> Asap.ShellElement[], by_panel, i), el)
+    end
+    for (i, els) in by_panel
+        push!(loads, Asap.AreaLoad(els, pressures[i]))
+    end
+    for el in built.frames
+        push!(loads, Asap.GravityLoad(el, 9.80665u"m/s^2"))
+    end
+    return loads
+end
+
+"""Mesh `inp` onto `shell` and pin its supports. The solve sets beam sections."""
+function _mesh_story_shell!(shell::StoryShell, inp)
+    built = StructuralSizer.story_shell(inp.panels, inp.beams; target_edge = shell.target_edge)
+    shell.built = built
+    shell.frame_station = _story_frame_stations(built.frames, inp.beams)
+    shell.signature = _story_shell_signature(inp)
+    shell.model = nothing
+    empty!(shell.reasons)
+    if length(shell.support_points) < 3
+        push!(shell.reasons, "the story shell needs at least three supports")
+    elseif _pin_story_supports!(built.nodes, shell.support_points) < 3
+        push!(shell.reasons, "fewer than three shell nodes were supported")
+    else
+        shell.model = Asap.Model(built.nodes, built.frames, built.shells,
+                                 _story_shell_loads(built, inp.pressures))
+    end
+    return shell
+end
+
+"""Put each beam's current section and web offset on its frame pieces."""
+function _set_story_beams!(shell::StoryShell, inp)
+    beam_of = Dict(b.id => b for b in inp.beams)
+    section_at = _story_composite_section_at(inp.composite_at)
+    for (el, s) in zip(shell.built.frames, shell.frame_station)
+        b = beam_of[el.id]
+        el.section = section_at === nothing ? b.section : section_at(b, s)
+        el.eccentricity = b.eccentricity
+    end
+    return shell
+end
+
+"""
+Panels, panel designs and beam lines of story `level` from the slabs and
+sections the structure holds now. Meshes nothing.
+"""
+function _story_shell_inputs(struc, level::Int, concrete, steel, composite_regions)
     haskey(struc.skeleton.stories, level) || throw(ArgumentError(
         "story $level is not in the skeleton"))
     story = struc.skeleton.stories[level]
@@ -377,6 +521,7 @@ function analyze_story_shell(struc, level::Int;
     pressures = []
     thickness_of_face = Pair{Int, typeof(1.0u"m")}[]
     slabs = Slab[]
+    panel_slab = Int[]
     for slab in struc.slabs
         h = _story_metres(thickness(slab))
         h > zero(h) || throw(ArgumentError("a story shell slab needs a positive thickness"))
@@ -397,6 +542,7 @@ function analyze_story_shell(struc, level::Int;
                 cell.self_weight + cell.sdl, cell.live_load, h, cell.spans.axis,
                 StructuralSizer.floor_type(sym)))
             push!(thickness_of_face, face => h)
+            push!(panel_slab, length(slabs) + 1)
         end
         touched && push!(slabs, slab)
     end
@@ -423,7 +569,7 @@ function analyze_story_shell(struc, level::Int;
         h = _story_beam_thickness(struc, beam, thickness_of_face)
         h === nothing && (h = _story_metres(thickness(slabs[1])))
         xy = NTuple{2, Float64}[StructuralSizer._vertex_xy_m(struc.skeleton, v) for v in chain]
-        mat = _story_beam_material(sec, concrete, steel)
+        mat = _story_beam_material(sec, concrete, steel, _recorded_structural_steel(beam))
         props = StructuralSizer.shell_beam_properties(sec, h, mat)
         release = _story_beam_release(struc, beam, chain, mat)
         id = Symbol("beam_", i)
@@ -448,15 +594,38 @@ function analyze_story_shell(struc, level::Int;
         push!(beam_ids, id)
         beam_index[id] = i
     end
+    return (; panels, designs, pressures, thickness_of_face, slabs, panel_slab, beams,
+            beam_ids, beam_index, skipped, composite_at, regions_used, origins, stale)
+end
 
-    built = StructuralSizer.story_shell(panels, beams; target_edge = target_edge,
-                                        section_at = _story_composite_section_at(composite_at))
-    pts = support_points === nothing ? _column_support_points(struc, level) : support_points
+"""
+    solve_story_shell!(shell, struc; composite_regions, service, rebar,
+                       sustained_live_fraction, solve=true) -> NamedTuple
+
+Solve `shell` with the structure's current beam sections, panel loads and
+column springs, and write the results onto its slabs. The result is the one
+[`analyze_story_shell`](@ref) documents, plus `shell`.
+
+The mesh is reused. Only a change in slab thickness, in which beams have a
+section, or in a beam's end release meshes the story again. `solve = false`
+records the panels as meshed and not solved.
+"""
+function solve_story_shell!(shell::StoryShell, struc;
+                            composite_regions = nothing,
+                            service::Bool = true,
+                            rebar = Rebar_60,
+                            sustained_live_fraction::Real = 0.0,
+                            solve::Bool = true)
+    level = shell.level
+    concrete, steel = shell.concrete, shell.steel
+    inp = _story_shell_inputs(struc, level, concrete, steel, composite_regions)
+    _story_shell_signature(inp) == shell.signature || _mesh_story_shell!(shell, inp)
+    built = shell.built
     reasons = String[]
-    isempty(skipped) || push!(reasons,
-        "beams with no section were left out of the shell: $(skipped)")
-    isempty(stale) || push!(reasons,
-        "composite beams whose stiffness was recorded for another section are bare steel: $(stale)")
+    isempty(inp.skipped) || push!(reasons,
+        "beams with no section were left out of the shell: $(inp.skipped)")
+    isempty(inp.stale) || push!(reasons,
+        "composite beams whose stiffness was recorded for another section are bare steel: $(inp.stale)")
     ran = false
     forces = Dict{Symbol, Vector{Vector{Float64}}}()
     bars = StructuralSizer.ElementRebarField[]
@@ -464,81 +633,73 @@ function analyze_story_shell(struc, level::Int;
     service_spans = Dict{Int, Vector{Any}}()
     service_converged = true
     model = nothing
-    if solve
-        if length(pts) < 3
-            push!(reasons, "the story shell needs at least three supports")
-        else
-            nfixed = _pin_story_supports!(built.nodes, pts)
-            if nfixed < 3
-                push!(reasons, "fewer than three shell nodes were supported")
-            else
-                loads = Asap.AbstractLoad[]
-                by_panel = Dict{Int, Vector{Asap.ShellElement}}()
-                for (el, i) in zip(built.shells, built.panel_index)
-                    push!(get!(() -> Asap.ShellElement[], by_panel, i), el)
-                end
-                for (i, els) in by_panel
-                    push!(loads, Asap.AreaLoad(els, pressures[i]))
-                end
-                for el in built.frames
-                    push!(loads, Asap.GravityLoad(el, 9.80665u"m/s^2"))
-                end
-                model = Asap.Model(built.nodes, built.frames, built.shells, loads)
-                Asap.process!(model)
-                springs = _story_column_springs(struc, level, built.nodes, concrete, steel)
-                isempty(springs) || Asap.add_springs!(model, springs)
-                Asap.solve!(model)
-                forces = _shell_beam_forces(built.frames)
-                cases = StructuralSizer.story_load_cases(model, built.panel_index, designs)
-                bars = StructuralSizer.story_panel_reinforcement(
-                    model, built.panel_index, designs; cases = cases, fc = concrete.fc′)
-                beam_demands = story_shell_beam_demands(model, built.frames, beam_index, cases;
-                                                        origins = origins)
-                if service && !isempty(beams)
-                    specs = service_beams(struc, beams, beam_index, beam_demands, pts,
-                                          thickness_of_face)
-                    cracked = story_cracked_service(
-                        model, built, designs, specs;
-                        concrete = concrete, rebar = rebar, bars = bars,
-                        sustained_live_fraction = sustained_live_fraction)
-                    for (id, spans) in cracked.spans
-                        i = get(beam_index, id, nothing)
-                        i === nothing && continue
-                        service_spans[i] = spans
-                    end
-                    service_converged = cracked.converged
-                    service_converged || @warn "Cracked service shell did not settle" level iterations=cracked.iterations
-                end
-                ran = true
-            end
-        end
-    else
+    if !solve
         push!(reasons, "the story shell was meshed and not solved")
+    elseif shell.model === nothing
+        append!(reasons, shell.reasons)
+    else
+        model = shell.model
+        _set_story_beams!(shell, inp)
+        model.loads = _story_shell_loads(built, inp.pressures)
+        if model.processed
+            Asap.update!(model; values_only = true)
+        else
+            Asap.process!(model)
+        end
+        empty!(model.springs)
+        springs = _story_column_springs(struc, level, built.nodes, concrete, steel)
+        isempty(springs) || Asap.add_springs!(model, springs)
+        Asap.solve!(model)
+        forces = _shell_beam_forces(built.frames)
+        cases = StructuralSizer.story_load_cases(model, built.panel_index, inp.designs)
+        bars = StructuralSizer.story_panel_reinforcement(
+            model, built.panel_index, inp.designs; cases = cases, fc = concrete.fc′,
+            fy = rebar.Fy)
+        beam_demands = story_shell_beam_demands(model, built.frames, inp.beam_index, cases;
+                                                origins = inp.origins)
+        if service && !isempty(inp.beams)
+            specs = service_beams(struc, inp.beams, inp.beam_index, beam_demands,
+                                  shell.support_points, inp.thickness_of_face)
+            cracked = story_cracked_service(
+                model, built, inp.designs, specs;
+                concrete = concrete, rebar = rebar, bars = bars,
+                sustained_live_fraction = sustained_live_fraction)
+            for (id, spans) in cracked.spans
+                i = get(inp.beam_index, id, nothing)
+                i === nothing && continue
+                service_spans[i] = spans
+            end
+            service_converged = cracked.converged
+            service_converged || @warn "Cracked service shell did not settle" level iterations=cracked.iterations
+        end
+        ran = true
     end
-    status = (ran && isempty(skipped)) ? :analyzed : :not_analyzed
+    status = (ran && isempty(inp.skipped)) ? :analyzed : :not_analyzed
     extra = (
         analysis_status = status,
         analysis_source = :story_shell,
         analysis_reasons = reasons,
         shell_beam_forces = forces,
-        shell_beam_ids = beam_ids,
+        shell_beam_ids = inp.beam_ids,
         shell_reinforcement = bars,
     )
-    for slab in slabs
+    for (k, slab) in enumerate(inp.slabs)
+        own = merge(extra, (shell_panels = findall(==(k), inp.panel_slab),))
         existing = slab.design_details
-        slab.design_details = existing isa NamedTuple ? merge(existing, extra) : extra
+        slab.design_details = existing isa NamedTuple ? merge(existing, own) : own
     end
     return (
         model = model,
         built = built,
+        shell = shell,
         beam_forces = forces,
         beam_demands = beam_demands,
         shell_reinforcement = bars,
         service_spans = service_spans,
         service_converged = service_converged,
-        composite_regions = regions_used,
+        composite_regions = inp.regions_used,
         analysis_status = status,
-        skipped_beams = skipped,
+        skipped_beams = inp.skipped,
         reasons = reasons,
     )
 end

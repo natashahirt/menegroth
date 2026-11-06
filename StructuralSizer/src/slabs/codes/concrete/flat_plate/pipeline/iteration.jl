@@ -108,7 +108,7 @@ function _size_flat_plate!(
     # PHASE 3: INITIAL ESTIMATES
     # =========================================================================
     
-    has_edge = any(col.position != :interior for col in columns)
+    has_edge = slab_discontinuous_edge(struc, slab, columns)
     if !isnothing(opts.min_h)
         h = opts.min_h  # User override — bypass ACI minimum
     elseif !isnothing(drop_panel)
@@ -485,7 +485,7 @@ function _size_flat_plate!(
             _l2_defl = moment_results.l2
             ρ_prime_est = try
                 _As_neg = required_reinforcement(
-                    0.75 * moment_results.M_neg_int, _l2_defl / 2, d, fc, fy
+                    0.75 * _top_bar_moment(moment_results), _l2_defl / 2, d, fc, fy
                 )
                 # Inadequate section: ρ′ = 0 keeps the long-term multiplier conservative.
                 if isfinite(_As_neg)
@@ -592,8 +592,11 @@ function _size_flat_plate!(
             shear_result = check_one_way_shear(moment_results, d, fc;
                 verbose=verbose, λ=λ, φ_shear=φ_shear, fea_diag=_fea_diag)
             one_way_shear_report = shear_result
-            
-            if !shear_result.ok
+            wall_shear = wall_one_way_shear(
+                struc, slab, d, fc, moment_results.qu; λ = λ, ϕ = φ_shear)
+            wall_shear_ok = all(c -> c.ok, wall_shear)
+
+            if !shear_result.ok || !wall_shear_ok
                 h = round_up_thickness(h + h_increment, h_increment)
                 verbose && @warn "One-way shear FAILED. Increasing h → $h"
                 emit!(tc, :slab, "size_flat_plate!", _slab_id, :iteration;
@@ -606,7 +609,9 @@ function _size_flat_plate!(
             verbose && @debug "FLEXURAL ADEQUACY CHECK (ACI 21.2.2)"
             
             flexure_result = check_flexural_adequacy(moment_results, columns, d, fc;
-                                                     βt=_βt, verbose=verbose)
+                                                     βt=_βt, verbose=verbose,
+                                                     struc=struc, slab=slab,
+                                                     span_axis=_get_span_axis(slab))
             
             if !flexure_result.ok
                 h = round_up_thickness(h + h_increment, h_increment)
@@ -790,6 +795,43 @@ function _size_flat_plate!(
             end
             for i in 1:n_cols_ps
                 punching_local[i] = punch_check(i)
+            end
+
+            # Wall reactions: one critical section per connected wall
+            # (§11.11.1.2). Column growth does not change that section.
+            # A failing wall thickens the slab, the same last resort as a
+            # column the punching levers cannot clear.
+            if hasproperty(moment_results, :qu)
+                wall_checks = wall_reaction_punching(
+                    struc, slab, d, fc, moment_results.qu; λ = λ, ϕ = φ_shear)
+                if any(c -> !c.ok, wall_checks)
+                    if !opts.punching_thickening
+                        emit!(tc, :slab, "size_flat_plate!", _slab_id, :failure;
+                              reason="wall_punching", failing_check="punching_shear",
+                              h_final=string(h), iterations=total_iters)
+                        return (
+                            converged       = false,
+                            failure_reason  = "punching_levers_exhausted",
+                            failing_check   = "punching_shear",
+                            iterations      = total_iters,
+                            h_final         = h,
+                            pattern_loading = false,
+                            slab_result     = nothing,
+                            column_results  = nothing,
+                            drop_panel      = drop_panel,
+                            integrity       = nothing,
+                            integrity_check = nothing,
+                            transfer_results = nothing,
+                            ρ_prime         = nothing,
+                        )
+                    end
+                    h = round_up_thickness(h + h_increment, h_increment)
+                    last_failing_check = "punching_shear"
+                    emit!(tc, :slab, "size_flat_plate!", _slab_id, :fallback;
+                          phase="B", reason="wall_punching_h_bump", h_new=string(h),
+                          n_wall_checks=length(wall_checks))
+                    break
+                end
             end
             
             # ── B3: Classify failures ──

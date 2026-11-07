@@ -16,15 +16,6 @@ Note: member_indices in MemberGroup refer to indices within the specific member 
 (e.g., struc.beams[idx] for beams).
 """
 function build_member_groups!(struc::BuildingStructure; member_type::Symbol=:beams)
-    # Preserve per-group catalog overrides (Phase 6) across the rebuild.
-    # build_member_groups! is re-run on every sizing pass (via
-    # member_group_demands), so a catalog_override set by materialize_level!
-    # (Phase 5) — keyed on the stable group_id — must survive the
-    # empty!/recreate cycle rather than being reset to `nothing`.
-    prev_overrides = Dict{UInt64, Any}()
-    for (gid, mg) in struc.member_groups
-        mg.catalog_override === nothing || (prev_overrides[gid] = mg.catalog_override)
-    end
     empty!(struc.member_groups)
     
     members = if member_type == :beams
@@ -45,7 +36,7 @@ function build_member_groups!(struc::BuildingStructure; member_type::Symbol=:bea
         set_group_id!(m, gid)
 
         mg = get!(struc.member_groups, gid) do
-            MemberGroup(gid; catalog_override = get(prev_overrides, gid, nothing))
+            MemberGroup(gid)
         end
         push!(mg.member_indices, m_idx)
     end
@@ -184,6 +175,41 @@ function _asap_signed_My_envelopes(el, My)
 end
 
 """
+    _strong_weak_peaks(My, Vy, Mz, Vz) -> (Mu, Vu, Mu_weak, Vu_weak)
+    _strong_weak_peaks(f::AbstractVector) -> (Mu, Vu)
+
+Peak strong- and weak-axis forces on one Asap frame element.
+
+Asap pairs `My` with `Vy` (transverse load along local y) and `Mz` with `Vz`
+(load along local z); see `accumulate_force!`. A beam's default roll is
+`Ψ = π/2`, so local y is vertical and gravity is the `My`/`Vy` pair — the
+strong axis, same pairing as [`_asap_signed_My_envelopes`](@ref). `Mz`/`Vz`
+is the weak axis. Reading `Vz` as the design shear drops gravity shear.
+
+The 12-vector method reads `element.forces` (local end forces, no member
+load). Slots 2 and 8 are `Vy`; slots 6 and 12 are the end moments Asap
+integrates into `My`.
+"""
+function _strong_weak_peaks(My, Vy, Mz, Vz)
+    mu = isempty(My) ? 0.0 : mapreduce(abs, max, My)
+    vu = isempty(Vy) ? 0.0 : mapreduce(abs, max, Vy)
+    mu_w = isempty(Mz) ? 0.0 : mapreduce(abs, max, Mz)
+    vu_w = isempty(Vz) ? 0.0 : mapreduce(abs, max, Vz)
+    return (Mu = mu, Vu = vu, Mu_weak = mu_w, Vu_weak = vu_w)
+end
+
+function _strong_weak_peaks(f::AbstractVector{<:Real})
+    n = length(f)
+    mu = 0.0
+    vu = 0.0
+    n >= 2 && (vu = max(vu, abs(f[2])))
+    n >= 8 && (vu = max(vu, abs(f[8])))
+    n >= 6 && (mu = max(mu, abs(f[6])))
+    n >= 12 && (mu = max(mu, abs(f[12])))
+    return (Mu = mu, Vu = vu)
+end
+
+"""
 Station forces for `el` from a caller-supplied global displacement vector.
 
 Mirrors `Asap.ElementForceAndDisplacement`'s force path (`R * K * u_e` then
@@ -296,8 +322,6 @@ is the longest individual sub-segment (the actual deflection span between suppor
 `shell_demands` maps a beam index to its [`ShellBeamDemand`](@ref). Each beam
 group's sagging moment, hogging moment, and strong-axis shear become the larger
 of the frame-model value and the shell value. The shell never lowers a demand.
-A steel beam on simple connections takes no hogging from the shell
-(`ShellBeamDemand.simple`).
 Deflection here is the frame model's alone. Story-shell deflection is a
 separate per-span check and never enters these demands.
 
@@ -474,15 +498,16 @@ function member_group_demands(struc::BuildingStructure;
                     if min_P < 0; Pu_comp = max(Pu_comp, abs(min_P)); end
                     if max_P > 0; Pu_tens = max(Pu_tens, max_P); end
 
-                    Mux = max(Mux, mapreduce(abs, max, f.My))
+                    peaks = _strong_weak_peaks(f.My, f.Vy, f.Mz, f.Vz)
+                    Mux = max(Mux, peaks.Mu)
                     sag, hog = _asap_signed_My_envelopes(el, f.My)
                     if member_type === :beams
                         Mux_pos = max(Mux_pos, sag)
                         Mux_neg = max(Mux_neg, hog)
                     end
-                    Vu_strong = max(Vu_strong, mapreduce(abs, max, f.Vz))
-                    Muy = max(Muy, mapreduce(abs, max, f.Mz))
-                    Vu_weak = max(Vu_weak, mapreduce(abs, max, f.Vy))
+                    Vu_strong = max(Vu_strong, peaks.Vu)
+                    Muy = max(Muy, peaks.Mu_weak)
+                    Vu_weak = max(Vu_weak, peaks.Vu_weak)
 
                     if extract_end_moments && ci <= n_pat
                         if seg_pos == 1 && child_pos == 1
@@ -541,10 +566,9 @@ function member_group_demands(struc::BuildingStructure;
             for m_idx in struc.member_groups[all_group_ids[g]].member_indices
                 d = get(shell_demands, m_idx, nothing)
                 d === nothing && continue
-                hog = _design_Mu_neg(d)
                 par_Mux_pos[g] = max(par_Mux_pos[g], d.Mu_pos)
-                par_Mux_neg[g] = max(par_Mux_neg[g], hog)
-                par_Mux[g] = max(par_Mux[g], d.Mu_pos, hog)
+                par_Mux_neg[g] = max(par_Mux_neg[g], d.Mu_neg)
+                par_Mux[g] = max(par_Mux[g], d.Mu_pos, d.Mu_neg)
                 par_Vus[g] = max(par_Vus[g], d.Vu)
             end
         end
@@ -746,7 +770,7 @@ function size_steel_members!(
             L_total = L_raw isa Unitful.Quantity ? L_raw : L_raw * u"m"
             set_section!(m, chosen)
             set_volumes!(m, MaterialVolumes(
-                _volume_key(material) => StructuralSizer.section_area(chosen) * L_total))
+                _volume_key(material) => StructuralSizer.self_weight_area(chosen) * L_total))
 
             # Update ASAP elements
             for seg_idx in segment_indices(m)

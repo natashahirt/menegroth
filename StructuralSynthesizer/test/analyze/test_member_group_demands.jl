@@ -81,3 +81,62 @@ using StructuralSynthesizer
         @test 34 + 12 * M1 / M2 ≈ 46.0  # raw value before min(., 40) clamp
     end
 end
+
+# Default beam roll Ψ = π/2 puts local y along +global Z, so a downward load
+# is Vy and its moment is My. Design shear has to follow that pair. A
+# fixed-fixed (or simple) span of length L under uniform w has end shear wL/2.
+@testset "gravity shear is the strong-axis shear" begin
+    Asap = StructuralSynthesizer.Asap
+    sec = Asap.Section(0.01u"m^2", 200e9u"Pa", 77e9u"Pa",
+                       1e-4u"m^4", 1e-4u"m^4", 1e-4u"m^4")
+    pin = [false, false, false, false, true, true]
+    roller = [true, false, false, false, true, true]
+    L = 8.0
+    w = 1000.0   # N/m = 1000 Pa × 1 m
+    n1 = Asap.Node([0.0u"m", 0.0u"m", 0.0u"m"], pin)
+    n2 = Asap.Node([L * u"m", 0.0u"m", 0.0u"m"], roller)
+    el = Asap.Element(n1, n2, sec)
+    @test el.Ψ ≈ π / 2
+    load = Asap.TributaryLoad(el, [0.0, 1.0], [1.0u"m", 1.0u"m"], w * u"Pa",
+                              (0.0, 0.0, -1.0))
+    model = Asap.Model([n1, n2], [el], [load])
+    Asap.solve!(model)
+
+    fd = Asap.ElementForceAndDisplacement(el, [load]; resolution = 21)
+    peaks = StructuralSynthesizer._strong_weak_peaks(fd.forces.My, fd.forces.Vy,
+                                                     fd.forces.Mz, fd.forces.Vz)
+    # End shear of a full-span uniform load is wL/2 for both end conditions
+    # Asap integrates. The strong-axis peak must be that shear, not Vz.
+    @test peaks.Vu ≈ w * L / 2 rtol = 1e-6
+    @test peaks.Vu ≈ maximum(abs, fd.forces.Vy)
+    @test peaks.Mu > 0
+    @test peaks.Vu_weak < 1.0
+    @test peaks.Mu_weak < 1.0
+
+    # Along global Y the rotation matrix is a special case. Same pairing.
+    # Both ends fixed: releasing θy would free torsion on a Y-aligned member.
+    fixed = fill(false, 6)
+    n3 = Asap.Node([0.0u"m", 0.0u"m", 0.0u"m"], fixed)
+    n4 = Asap.Node([0.0u"m", L * u"m", 0.0u"m"], fixed)
+    ely = Asap.Element(n3, n4, sec)
+    loady = Asap.TributaryLoad(ely, [0.0, 1.0], [1.0u"m", 1.0u"m"], w * u"Pa",
+                               (0.0, 0.0, -1.0))
+    modely = Asap.Model([n3, n4], [ely], [loady])
+    Asap.solve!(modely)
+    fdy = Asap.ElementForceAndDisplacement(ely, [loady]; resolution = 21)
+    peaksy = StructuralSynthesizer._strong_weak_peaks(fdy.forces.My, fdy.forces.Vy,
+                                                      fdy.forces.Mz, fdy.forces.Vz)
+    @test peaksy.Vu ≈ w * L / 2 rtol = 1e-6
+    @test peaksy.Vu_weak < 1.0
+
+    # Raw local end-force slots: 2 = Vy, 3 = Vz, 6 = My, 5 = Mz.
+    raw = zeros(12)
+    raw[2] = 10.0
+    raw[3] = 99.0
+    raw[6] = 20.0
+    raw[5] = 77.0
+    raw[8] = -4.0
+    ends = StructuralSynthesizer._strong_weak_peaks(raw)
+    @test ends.Vu ≈ 10.0
+    @test ends.Mu ≈ 20.0
+end

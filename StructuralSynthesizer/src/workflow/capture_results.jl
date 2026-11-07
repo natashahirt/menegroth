@@ -95,6 +95,22 @@ function _copy_method_notice!(result::SlabDesignResult, dd)
 end
 
 """
+Copy this slab's story-shell bars onto `result`. A panel whose section
+cannot carry its shell moments fails the slab as `reinforcement_design`.
+"""
+function _capture_shell_reinforcement!(result::SlabDesignResult, dd)
+    hasproperty(dd, :shell_reinforcement) && hasproperty(dd, :shell_panels) || return result
+    fields = dd.shell_reinforcement[dd.shell_panels]
+    result.shell_reinforcement = fields
+    if !all(f -> f.section_adequate, fields)
+        result.converged = false
+        result.failure_reason = "section_inadequate"
+        result.failing_check = "reinforcement_design"
+    end
+    return result
+end
+
+"""
 Populate slab design results from struc.slabs (all values normalized to SI).
 
 Uses `slab.design_details` (the full `size_flat_plate!` NamedTuple) when
@@ -191,6 +207,8 @@ function _populate_slab_results!(design::BuildingDesign, struc::BuildingStructur
             hasproperty(dd, :failing_check)   && !isnothing(dd.failing_check)   && (result.failing_check   = dd.failing_check)
             hasproperty(dd, :iterations)      && !isnothing(dd.iterations)      && (result.iterations      = dd.iterations)
             hasproperty(dd, :pattern_loading) && !isnothing(dd.pattern_loading) && (result.pattern_loading = dd.pattern_loading)
+            hasproperty(dd, :analysis_status) && (result.analysis_status = string(dd.analysis_status))
+            _capture_shell_reinforcement!(result, dd)
         end
         
         # ── Rich design details (column ρg, integrity, transfer, etc.) ───
@@ -607,6 +625,17 @@ function _populate_column_results!(design::BuildingDesign, struc::BuildingStruct
     end
 end
 
+"""
+    _section_label(sec) -> String
+
+Display name of a sized section: its catalog or generated `name` when it has
+one (e.g. `"W16X40"`, `"10x12-2#5"`), otherwise `string(sec)`.
+"""
+function _section_label(sec)
+    name = hasproperty(sec, :name) ? getproperty(sec, :name) : nothing
+    return name isa AbstractString && !isempty(name) ? String(name) : string(sec)
+end
+
 """Populate beam design results from struc.beams with forces from the Asap model."""
 function _populate_beam_results!(design::BuildingDesign, struc::BuildingStructure)
     has_model = !isnothing(struc.asap_model) && !isempty(struc.asap_model.frame_elements)
@@ -617,7 +646,7 @@ function _populate_beam_results!(design::BuildingDesign, struc::BuildingStructur
         sec = section(beam)
         result.section_obj = sec
         if !isnothing(sec)
-            result.section_size = string(sec)
+            result.section_size = _section_label(sec)
         end
 
         # Member length for material takeoff
@@ -636,14 +665,15 @@ function _populate_beam_results!(design::BuildingDesign, struc::BuildingStructur
                 loads = (eid >= 1 && eid <= length(el_loads_map)) ? el_loads_map[eid] : Asap.AbstractLoad[]
                 if !isempty(loads)
                     fd = Asap.ElementForceAndDisplacement(el, loads; resolution=20)
-                    Mu_Nm = max(Mu_Nm, maximum(abs, fd.forces.My))
-                    Vu_N  = max(Vu_N,  maximum(abs, fd.forces.Vz))
+                    fr = fd.forces
+                    peaks = _strong_weak_peaks(fr.My, fr.Vy, fr.Mz, fr.Vz)
+                    Mu_Nm = max(Mu_Nm, peaks.Mu)
+                    Vu_N  = max(Vu_N,  peaks.Vu)
                 elseif !isempty(el.forces)
-                    f = el.forces; n = length(f)
-                    if n >= 5;  Mu_Nm = max(Mu_Nm, abs(f[5])); end
-                    if n >= 11; Mu_Nm = max(Mu_Nm, abs(f[11])); end
-                    if n >= 3;  Vu_N  = max(Vu_N,  abs(f[3])); end
-                    if n >= 9;  Vu_N  = max(Vu_N,  abs(f[9])); end
+                    # Local end forces only (member loads are absent on this branch).
+                    peaks = _strong_weak_peaks(el.forces)
+                    Mu_Nm = max(Mu_Nm, peaks.Mu)
+                    Vu_N  = max(Vu_N,  peaks.Vu)
                 end
             end
             result.Mu = Mu_Nm * u"N*m" |> u"kN*m"

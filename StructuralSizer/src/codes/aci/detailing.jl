@@ -221,7 +221,8 @@ end
                                    confined=false, side_cover=false) -> Length
 
 ACI 318-19 §25.4.3.1 and Table 25.4.3.2 (corpus: aci-318-19, printed pp. 474–475).
-The greater of `(fy ψe ψr ψo ψc / (55 λ √f′c)) d_b`, `8d_b`, and 6 in.
+The greater of `(fy ψe ψr ψo ψc / (55 λ √f′c)) d_b^1.5`, `8d_b`, and 6 in.
+Eq. 25.4.3.1(a) is empirical: fy and f′c in psi, d_b in inches, ℓdh in inches.
 
 ψe is 1.2 for any epoxy coating and 1.0 otherwise; the straight-bar 1.5 factor
 is not in this table. ψr is 1.0 for No. 11 and smaller when `confined` (Ath at
@@ -242,7 +243,7 @@ function hooked_bar_development_length(bar_size::Int, fc::Pressure, fy::Pressure
     ψo = bar_size <= 11 && side_cover ? 1.0 : 1.25
     ψc = fc_psi < 6000 ? fc_psi / 15_000 + 0.6 : 1.0
     ldh = (fy_psi * ψe * ψr * ψo * ψc) /
-          (55 * _development_λ(λ) * _development_sqrt_fc(fc)) * db
+          (55 * _development_λ(λ) * _development_sqrt_fc(fc)) * db^1.5
     return max(ldh, 8 * db, 6.0) * u"inch"
 end
 

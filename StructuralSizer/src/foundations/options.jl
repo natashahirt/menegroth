@@ -168,7 +168,11 @@ Base.@kwdef struct StripParams
     max_depth_ratio::Float64  = 0.5              # Widen B if h > ratio × B (typical h/B ≈ 0.3–0.5)
 
     # Analysis
-    analysis::Symbol         = :rigid            # :rigid (K_r > 0.5) — only option for now
+    analysis::Symbol         = :rigid            # :rigid (K_r ≥ 0.5) — column strips
+    # A wall footing whose relative stiffness is below 0.5 (ACI 336.2R §5.2)
+    # is redesigned as a beam on elastic foundation (§5.4) when this is
+    # `:fallback`, matching slab `on_inapplicable`. `:error` refuses.
+    on_inapplicable::Symbol  = :fallback
 
     # Strength reduction
     ϕ_flexure::Float64       = 0.90
@@ -215,6 +219,9 @@ Base.@kwdef struct MatParams
 
     # Analysis method
     analysis_method::AbstractMatMethod = RigidMat()
+    # Rigid mat outside ACI 336.2R §6.1.2 Step 3: `:fallback` redesigns with
+    # `WinklerFEA` and records it, `:error` refuses. Same choice as slabs.
+    on_inapplicable::Symbol  = :fallback
 
     # Strength reduction
     ϕ_flexure::Float64       = 0.90

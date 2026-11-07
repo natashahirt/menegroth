@@ -60,12 +60,27 @@ function _mat_plan_sizing(
     opts::MatParams;
     demands::Union{Vector{<:FoundationDemand}, Nothing} = nothing,
     soil::Union{Soil, Nothing} = nothing,
+    walls::Vector{<:WallLineDemand} = WallLineDemand[],
 )
     xs = [p[1] for p in positions]
     ys = [p[2] for p in positions]
+    # Column coordinates stay `xs`/`ys`. Wall endpoints widen the plan only.
+    box_x = typeof(1.0u"m")[]
+    box_y = typeof(1.0u"m")[]
+    for x in xs
+        push!(box_x, uconvert(u"m", x))
+    end
+    for y in ys
+        push!(box_y, uconvert(u"m", y))
+    end
+    for leg in walls
+        push!(box_x, uconvert(u"m", leg.p1[1]), uconvert(u"m", leg.p2[1]))
+        push!(box_y, uconvert(u"m", leg.p1[2]), uconvert(u"m", leg.p2[2]))
+    end
+    isempty(box_x) && throw(ArgumentError("A mat needs at least one column or one wall"))
 
-    x_min, x_max = extrema(xs)
-    y_min, y_max = extrema(ys)
+    x_min, x_max = extrema(box_x)
+    y_min, y_max = extrema(box_y)
 
     if opts.edge_overhang !== nothing
         # ── User-specified overhang ──
@@ -78,17 +93,25 @@ function _mat_plan_sizing(
         #     Full 4-sided critical perimeter requires overhang ≥ c_max/2 + d/2
         #     beyond the column face (half column + half effective depth).
         #     ACI 318 §22.6.4.1 — critical section at d/2 from column face.
-        c_max = maximum(max(d.c1, d.c2) for d in demands)
         db_max = bar_diameter(max(opts.bar_size_x, opts.bar_size_y))
         # d per ACI 318-11 §2.2 (corpus: aci-318-11, page 37): d = h − cover − db/2.
         d_est  = opts.min_depth - opts.cover - db_max / 2
         d_est  = max(d_est, 6.0u"inch")
-        oh_punch = c_max / 2 + d_est / 2   # ACI 318 §22.6.4.1
+        if isempty(demands)
+            oh_punch = 0.0u"ft"
+            Ps_total = 0.0u"N"
+        else
+            c_max = maximum(max(d.c1, d.c2) for d in demands)
+            oh_punch = c_max / 2 + d_est / 2   # ACI 318 §22.6.4.1
+            Ps_total = sum(d.Ps for d in demands)
+        end
+        for leg in walls, smp in leg.samples
+            Ps_total += smp.Ps
+        end
 
         # (b) Bearing: A_mat ≥ Ps_total / qa  (service-level check).
         #     Mat area = (gx + 2·oh) × (gy + 2·oh) where gx, gy = grid extent.
         #     Solve quadratic: 4·oh² + 2(gx+gy)·oh + (gx·gy − A_req) ≥ 0.
-        Ps_total = sum(d.Ps for d in demands)
         ustrip(soil.qa) > 0 || error("Allowable soil bearing pressure (qa) must be positive")
         A_req = Ps_total / soil.qa    # required area (Length²)
         gx = x_max - x_min
@@ -134,11 +157,18 @@ function _mat_plan_sizing(
 
     x_left = x_min - overhang
     y_bot  = y_min - overhang
-    xs_loc = xs .- x_left
-    ys_loc = ys .- y_bot
+    xs_loc = isempty(xs) ? typeof(x_left)[] : xs .- x_left
+    ys_loc = isempty(ys) ? typeof(y_bot)[] : ys .- y_bot
 
-    x_spans = _unique_spans(xs_loc)
-    y_spans = _unique_spans(ys_loc)
+    # A wall line is a support of the strip, so it splits the span. With no
+    # walls the spans stay the column spans.
+    if isempty(walls)
+        x_spans = _unique_spans(xs_loc)
+        y_spans = _unique_spans(ys_loc)
+    else
+        x_spans = _unique_spans([x - x_left for x in box_x])
+        y_spans = _unique_spans([y - y_bot for y in box_y])
+    end
 
     return (
         B = B, Lm = Lm, overhang = overhang,
@@ -231,7 +261,8 @@ function _mat_build_result(
     plan, demands, opts,
     h, d_eff,
     As_x_bot, As_x_top, As_y_bot, As_y_top,
-    utilization
+    utilization;
+    analysis::Symbol = :rigid,
 )
     B, Lm = plan.B, plan.Lm
     cover = opts.cover
@@ -263,10 +294,13 @@ function _mat_build_result(
         (n_xb + n_xt) * Ab_x * len_x +
         (n_yb + n_yt) * Ab_y * len_y)
 
+    # `F` is unused as a field. A wall cell with no enclosed column has an
+    # empty demand vector; the force parameter is then a newton.
+    Pu_type = isempty(demands) ? typeof(1.0u"N") : typeof(demands[1].Pu)
     return MatFootingResult{typeof(uconvert(u"m", B)),
                             typeof(uconvert(u"m^2", As_x_bot)),
                             typeof(V_conc),
-                            typeof(demands[1].Pu)}(
+                            Pu_type}(
         uconvert(u"m", B),
         uconvert(u"m", Lm),
         uconvert(u"m", h),
@@ -278,6 +312,7 @@ function _mat_build_result(
         N,
         V_conc, V_steel,
         utilization,
+        analysis,
     )
 end
 
@@ -310,6 +345,7 @@ function design_footing(::MatFoundation,
     soil::Soil;
     opts::MatParams = MatParams(),
     tc::Union{Nothing, TraceCollector} = nothing,
+    walls::Vector{<:WallLineDemand} = WallLineDemand[],
 )
     N = length(demands)
     length(positions) == N ||
@@ -321,7 +357,17 @@ function design_footing(::MatFoundation,
                           analysis_method=string(typeof(method)),
                           qa_kPa=Float64(ustrip(u"kPa", soil.qa)))
     if method isa RigidMat
-        result = _design_mat_rigid(demands, positions, soil; opts = opts)
+        _check_on_inapplicable(opts.on_inapplicable)
+        result = _design_mat_rigid(demands, positions, soil; opts = opts, walls = walls)
+        reason = _rigid_mat_inapplicable(result, demands, positions, soil, walls, opts)
+        if reason !== nothing
+            opts.on_inapplicable == :error && throw(ArgumentError(reason))
+            soil.ks === nothing && throw(ArgumentError(
+                reason * " Soil.ks is required to redesign the mat as a beam on elastic foundation."))
+            @info "Rigid mat not used ($reason). Redesigning with Winkler, ACI 336.2R §6.1.2 Step 4."
+            result = _design_mat_winkler_fea(demands, positions, soil, WinklerFEA();
+                                             opts = opts, walls = walls)
+        end
         StructuralSizer.emit!(tc, :checker, "design_footing_mat_aci", "", :exit;
                               status="ok",
                               B_m=Float64(ustrip(u"m", result.B)),
@@ -330,6 +376,8 @@ function design_footing(::MatFoundation,
                               utilization=Float64(result.utilization))
         return result
     elseif method isa ShuklaAFM
+        isempty(walls) || throw(ArgumentError(
+            "Shukla's column formula does not take a wall line. Choose the rigid method or Winkler."))
         result = _design_mat_shukla(demands, positions, soil, method; opts = opts)
         StructuralSizer.emit!(tc, :checker, "design_footing_mat_aci", "", :exit;
                               status="ok",
@@ -339,7 +387,7 @@ function design_footing(::MatFoundation,
                               utilization=Float64(result.utilization))
         return result
     elseif method isa WinklerFEA
-        result = _design_mat_winkler_fea(demands, positions, soil, method; opts = opts)
+        result = _design_mat_winkler_fea(demands, positions, soil, method; opts = opts, walls = walls)
         StructuralSizer.emit!(tc, :checker, "design_footing_mat_aci", "", :exit;
                               status="ok",
                               B_m=Float64(ustrip(u"m", result.B)),
@@ -405,16 +453,165 @@ function _rigid_mat_strip_moments(qu::Pressure, trib_width::Length,
 end
 
 """
-    _design_mat_rigid(demands, positions, soil; opts) → MatFootingResult
+Cantilevers from a wall face out to a mat edge that has nothing else between.
 
-Rigid mat analysis: uniform pressure, strip statics for moments, punching
-shear at each column.  Reference: ACI 336.2R-88 §4.2.
+ACI 318-11 §15.5.2 (corpus: aci-318-11, page 273) puts one-way shear at `d`
+from the face. An interior wall, with a column or another wall between it
+and the edge, is left to the strip shear. Returns `(dir, lip)` with `dir`
+`:x` for a vertical wall and `lip` the clear projection in metres.
 """
+function _mat_clear_lips(walls, plan)
+    x0 = ustrip(u"m", plan.x_left)
+    y0 = ustrip(u"m", plan.y_bot)
+    Bm = ustrip(u"m", plan.B)
+    Lm = ustrip(u"m", plan.Lm)
+    col_x = [ustrip(u"m", x) for x in plan.xs]
+    col_y = [ustrip(u"m", y) for y in plan.ys]
+    vx = Float64[]
+    hy = Float64[]
+    for leg in walls
+        dx = ustrip(u"m", leg.p2[1] - leg.p1[1])
+        dy = ustrip(u"m", leg.p2[2] - leg.p1[2])
+        (abs(dx) <= 1e-3 || abs(dy) <= 1e-3) || throw(ArgumentError(
+            "Mat wall $(leg.idx) is not axis-aligned, so the shear at its face is not a straight projection"))
+        abs(dx) <= 1e-3 && push!(vx, ustrip(u"m", (leg.p1[1] + leg.p2[1]) / 2))
+        abs(dy) <= 1e-3 && push!(hy, ustrip(u"m", (leg.p1[2] + leg.p2[2]) / 2))
+    end
+    lips = Tuple{Symbol, Float64}[]
+    for leg in walls
+        dx = ustrip(u"m", leg.p2[1] - leg.p1[1])
+        tw = ustrip(u"m", leg.tw)
+        if abs(dx) <= 1e-3
+            xw = ustrip(u"m", (leg.p1[1] + leg.p2[1]) / 2)
+            _push_lip!(lips, :x, xw, tw, x0, x0 + Bm, col_x, vx)
+        else
+            yw = ustrip(u"m", (leg.p1[2] + leg.p2[2]) / 2)
+            _push_lip!(lips, :y, yw, tw, y0, y0 + Lm, col_y, hy)
+        end
+    end
+    return lips
+end
+
+function _push_lip!(lips, dir, coord, tw, lo, hi, columns, walls_at)
+    face_lo = coord - tw / 2
+    face_hi = coord + tw / 2
+    _side_clear(lo, face_lo, columns, walls_at, coord) &&
+        push!(lips, (dir, face_lo - lo))
+    _side_clear(face_hi, hi, columns, walls_at, coord) &&
+        push!(lips, (dir, hi - face_hi))
+end
+
+function _side_clear(lo, hi, columns, walls_at, self)
+    hi - lo <= 1e-3 && return false
+    for c in columns
+        c > lo + 1e-3 && c < hi - 1e-3 && return false
+    end
+    for w in walls_at
+        abs(w - self) <= 1e-3 && continue
+        w > lo + 1e-3 && w < hi - 1e-3 && return false
+    end
+    return true
+end
+
+function _mat_wall_cantilever_util(walls, plan, qu, d_eff, fc, λ, ϕv)
+    util = 0.0
+    d = ustrip(u"m", d_eff)
+    bw = 1.0u"m"
+    Vc = ϕv * one_way_shear_capacity(fc, bw, d_eff; λ = λ)
+    Vc_N = ustrip(u"N", Vc)
+    Vc_N <= 0 && return Inf
+    for (_, lip) in _mat_clear_lips(walls, plan)
+        proj = max(lip - d, 0.0)
+        proj <= 0 && continue
+        Vu = ustrip(u"N", qu * (proj * u"m") * bw)
+        util = max(util, Vu / Vc_N)
+    end
+    return util
+end
+
+"""Bottom-tension moment of a clear cantilever, `qu · lip² / 2` over the mat width."""
+function _mat_cantilever_moments(walls, plan, qu)
+    Mx = zero(qu * plan.B^2 * plan.Lm)
+    My = Mx
+    for (dir, lip) in _mat_clear_lips(walls, plan)
+        lip <= 0 && continue
+        width = dir == :x ? plan.Lm : plan.B
+        M = qu * (lip * u"m")^2 / 2 * width
+        if dir == :x
+            Mx = max(Mx, M)
+        else
+            My = max(My, M)
+        end
+    end
+    return Mx, My
+end
+
+"""
+Nothing when the rigid strip method may be used.
+
+ACI 336.2R Eq. (5-1) and §5.2 (pages 8–9): rigid at Kr ≥ 0.5, checked on
+both plan widths and governed by the smaller. §6.1.2 Step 3 (page 11):
+column spans stay under `1.75/λ` and column loads and adjacent spans vary
+by at most 20%. A mat with no columns is gated on Kr alone.
+"""
+function _rigid_mat_inapplicable(result, demands, positions, soil, walls, opts)
+    fc = opts.material.concrete.fc′
+    Ec_c = Ec(fc)
+    h, B, Lm = result.D, result.B, result.L_ftg
+    Kr = min(ustrip(wall_footing_kr(Ec_c, soil.Es, B, h, walls)),
+             ustrip(wall_footing_kr(Ec_c, soil.Es, Lm, h, walls)))
+    if Kr < 0.5
+        return "Kr = $(round(Kr, sigdigits = 3)) < 0.5 (ACI 336.2R Eq. 5-1 and §5.2, pages 8–9)"
+    end
+    length(demands) < 2 && return nothing
+    if soil.ks === nothing
+        return "Soil.ks is missing, so column spacing cannot be compared with 1.75/λ (ACI 336.2R §6.1.2 Step 3, page 11)"
+    end
+    return _column_spacing_reason(demands, positions, soil.ks, Ec_c, B, Lm, h)
+end
+
+function _column_spacing_reason(demands, positions, ks, Ec_c, B, Lm, h)
+    limx = 1.75 / ustrip(u"m^-1", footing_lambda(ks, Ec_c, B, h))
+    limy = 1.75 / ustrip(u"m^-1", footing_lambda(ks, Ec_c, Lm, h))
+    xs = sort(unique(round.([ustrip(u"m", p[1]) for p in positions], digits = 4)))
+    ys = sort(unique(round.([ustrip(u"m", p[2]) for p in positions], digits = 4)))
+    sx, sy = diff(xs), diff(ys)
+    if any(s -> s >= limx - 1e-6, sx) || any(s -> s >= limy - 1e-6, sy)
+        return "a column span is not below 1.75/λ (ACI 336.2R §6.1.2 Step 3, page 11)"
+    end
+    if _adjacent_varies(sx) || _adjacent_varies(sy)
+        return "adjacent column spans vary by more than 20% (ACI 336.2R §6.1.2 Step 3, page 11)"
+    end
+    Pus = [ustrip(u"N", d.Pu) for d in demands if ustrip(u"N", d.Pu) > 0]
+    _varies_over_20(Pus) &&
+        return "column loads vary by more than 20% (ACI 336.2R §6.1.2 Step 3, page 11)"
+    return nothing
+end
+
+function _varies_over_20(xs)
+    length(xs) < 2 && return false
+    hi, lo = maximum(xs), minimum(xs)
+    hi <= 0 && return false
+    return (hi - lo) / hi > 0.20 + 1e-9
+end
+
+function _adjacent_varies(xs)
+    length(xs) < 2 && return false
+    for i in 1:(length(xs) - 1)
+        hi = max(xs[i], xs[i + 1])
+        lo = min(xs[i], xs[i + 1])
+        hi <= 0 && continue
+        (hi - lo) / hi > 0.20 + 1e-9 && return true
+    end
+    return false
+end
+
 function _design_mat_rigid(
     demands::Vector{<:FoundationDemand},
     positions::Vector{<:NTuple{2, <:Length}},
     soil::Soil;
-    opts::MatParams = MatParams()
+    opts::MatParams = MatParams(),
+    walls::Vector{<:WallLineDemand} = WallLineDemand[],
 )
     N = length(demands)
 
@@ -429,11 +626,15 @@ function _design_mat_rigid(
     ϕv    = opts.ϕ_shear
 
     # ── Step 1: Plan Sizing (first-principles overhang) ──
-    plan = _mat_plan_sizing(positions, opts; demands = demands, soil = soil)
+    plan = _mat_plan_sizing(positions, opts; demands = demands, soil = soil, walls = walls)
     B, Lm = plan.B, plan.Lm
 
-    Pu_total = sum(d.Pu for d in demands)
-    Ps_total = sum(d.Ps for d in demands)
+    Pu_total = isempty(demands) ? 0.0u"N" : sum(d.Pu for d in demands)
+    Ps_total = isempty(demands) ? 0.0u"N" : sum(d.Ps for d in demands)
+    for leg in walls, smp in leg.samples
+        Pu_total += smp.Pu
+        Ps_total += smp.Ps
+    end
     qu = Pu_total / (B * Lm)
 
     # Bearing utilization
@@ -451,8 +652,19 @@ function _design_mat_rigid(
 
     # Step 4 strip moments do not depend on h; the depth search also requires
     # every flexural section to be tension-controlled.
-    mom_x = _rigid_mat_strip_moments(qu, Lm, plan.x_spans)
-    mom_y = _rigid_mat_strip_moments(qu, B,  plan.y_spans)
+    x_spans = plan.x_spans
+    y_spans = plan.y_spans
+    if !isempty(walls)
+        isempty(x_spans) && (x_spans = [B])
+        isempty(y_spans) && (y_spans = [Lm])
+    end
+    mom_x = _rigid_mat_strip_moments(qu, Lm, x_spans)
+    mom_y = _rigid_mat_strip_moments(qu, B,  y_spans)
+    if !isempty(walls)
+        Mx, My = _mat_cantilever_moments(walls, plan, qu)
+        mom_x = (M_pos = max(mom_x.M_pos, Mx), M_neg = mom_x.M_neg)
+        mom_y = (M_pos = max(mom_y.M_pos, My), M_neg = mom_y.M_neg)
+    end
     flex_pairs = ((mom_x.M_pos, Lm), (mom_x.M_neg, Lm), (mom_y.M_pos, B), (mom_y.M_neg, B))
 
     for iter in 1:60
@@ -460,6 +672,9 @@ function _design_mat_rigid(
         d_eff < 6.0u"inch" && (h += h_incr; continue)
 
         util_p = _mat_punching_util(demands, plan, qu, d_eff, fc, λ, ϕv)
+        if !isempty(walls)
+            util_p = max(util_p, _mat_wall_cantilever_util(walls, plan, qu, d_eff, fc, λ, ϕv))
+        end
         util_p ≤ 1.0 && _footing_flexure_ok(flex_pairs, d_eff, fc, fy, ϕf) && break
         h += h_incr
         iter == 60 && @warn "Mat footing thickness did not converge at h=$h"
@@ -487,17 +702,14 @@ function _design_mat_rigid(
     As_y_top = max(_flexural_steel_footing(mom_y.M_neg, B, d_eff, fc, fy, ϕf),
                    _min_steel_footing(B, h, fy))
 
-    # ── Step 5: Relative Stiffness (Kr) — informational ──
-    if soil.ks !== nothing
-        Ec_psi = ustrip(u"psi", Ec(fc))
-        Ig_in4 = ustrip(u"inch", B) * ustrip(u"inch", h)^3 / 12.0
-        ks_pci = ustrip(u"lbf/inch^3", soil.ks)
-        Kr = Ec_psi * Ig_in4 / (ks_pci * ustrip(u"inch", B) * ustrip(u"inch", Lm)^3)
-        Kr < 0.5 && @warn "Kr=$(round(Kr, digits=3)) < 0.5 — flexible analysis may be needed"
-    end
+    # Kr is Eq. (5-1), applied by `design_footing` after this result exists.
+    # The previous `Ec·Ig/(ks·B·L³)` warning was not that equation.
 
     # ── Utilization ──
     util_punch = _mat_punching_util(demands, plan, qu, d_eff, fc, λ, ϕv)
+    if !isempty(walls)
+        util_punch = max(util_punch, _mat_wall_cantilever_util(walls, plan, qu, d_eff, fc, λ, ϕv))
+    end
     utilization = max(util_bearing, util_punch)
 
     return _mat_build_result(plan, demands, opts, h, d_eff,

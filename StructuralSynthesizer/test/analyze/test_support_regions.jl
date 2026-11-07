@@ -57,6 +57,16 @@ _by_xy(shares, xy) = only(s for s in shares if hypot(s.xy[1] - xy[1], s.xy[2] - 
         @test piece.a ≈ 1 / 16 atol=1e-8
         @test piece.b ≈ 0 atol=1e-6
         @test piece.c ≈ 4 atol=1e-6
+        # w = u²/16 + 4, so the stored loop follows the parabola (w(4) = 5), not the chord.
+        loops = StructuralSynthesizer._wall_share_polygons(0.0, 0.0, 8.0, 0.0, wall.pieces, _CELL)
+        loop = only(loops)
+        inner = filter(p -> p[2] > 1.0, loop)
+        i = argmin(k -> abs(inner[k][1] - 4.0), eachindex(inner))
+        @test length(loop) > 4
+        @test inner[i][2] > 4.5
+        @test inner[i][2] ≈ inner[i][1]^2 / 16 + 4 atol = 1e-6
+        # The column boundary is the same parabola, already sampled on the share.
+        @test length(col.polygon) > 4
     end
 
     @testset "two walls and one column still fill the cell" begin

@@ -120,7 +120,7 @@ Global displacement is `dx lx + dy ly + dz lz`. Between stations the particular 
 
 `shell_axial` is the vertical component of that same membrane force, `v · N · v` with `v` the global Z axis projected onto the shell. On a wall it is the axial force per unit length. On a floor the in-plane axes are horizontal, so the value is zero. An unsolved model omits it.
 
-On a column-supported cell the loops are the column polygons and wall-width regions stored by `compute_column_tributaries!`. On a beam-supported cell they are the straight-skeleton polygon of each cell edge. Kind is column, beam, or wall. `tributary_cell` names the cell, and a slab's `bind.cell_indices` lists the cells it owns, so the picture is that slab. A design with an empty cache omits the buffers. The loops lie on the slab; a viewer lifts them slightly so they read above the surface.
+The loops are copied from `slab.tributary_polygons`: each column share and each wall share of that slab's cells, with a parabolic edge already sampled into the loop. A beam-supported cell with no such share keeps the straight-skeleton polygon of each edge. Kind is column, beam, or wall. `tributary_cell` names the cell, and a slab's `bind.cell_indices` lists the cells it owns, so the picture is that slab. A design with an empty cache omits the buffers. The loops lie on the slab; a viewer lifts them slightly so they read above the surface.
 
 ### Shells and footings
 

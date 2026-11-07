@@ -300,6 +300,12 @@ end
         @test length(sides) == 4
         @test all(s -> s >= 4, sides)
         @test area ≈ CORE_BAY * CORE_BAY atol = 0.5
+        host = only(s for s in struc.slabs if cell_idx in s.cell_indices)
+        stored = filter(p -> p.cell_idx == cell_idx, host.tributary_polygons)
+        @test length(stored) == 4
+        @test all(p -> p.kind === :column && length(p.xy) >= 4, stored)
+        @test any(p -> p.kind === :wall && length(p.xy) >= 4,
+                  Iterators.flatten(s.tributary_polygons for s in struc.slabs))
 
         design = BuildingDesign(struc)
         packet = StructuralSynthesizer.ScenePacket(String[], (0.0, 0.0, 0.0),

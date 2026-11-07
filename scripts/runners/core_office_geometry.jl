@@ -43,9 +43,8 @@ function core_office_skeleton()
     end
     claimed == 4 * CORE_STORIES ||
         error("core: claimed $claimed wall edges, expected $(4 * CORE_STORIES)")
-    # The grid still has a column at each core corner. The walls are the
-    # vertical structure there, so those stacks leave the column group.
-    _drop_core_corner_columns!(skel)
+    # The grid column at each core corner stays. The walls carry the bay
+    # edges; the column stack is still designed.
     # Lobby slab along the south of the core, three shafts north of it, and
     # the walls between them. The roof stays one face.
     _shape_core!(skel)
@@ -274,26 +273,6 @@ function _retarget_lobby!(skel, fi, z)
     skel.face_edge_indices[fi] = edges
     skel.faces[fi] = Meshes.Ngon(skel.vertices[vids]...)
     return fi
-end
-
-function _drop_core_corner_columns!(skel)
-    corners = ((CORE_BAY, CORE_BAY), (2 * CORE_BAY, CORE_BAY),
-               (2 * CORE_BAY, 2 * CORE_BAY), (CORE_BAY, 2 * CORE_BAY))
-    drop = Int[]
-    for eidx in skel.groups_edges[:columns]
-        a, b = skel.edge_indices[eidx]
-        ca = Meshes.coords(skel.vertices[a])
-        cb = Meshes.coords(skel.vertices[b])
-        pa = (ustrip(u"m", ca.x), ustrip(u"m", ca.y))
-        pb = (ustrip(u"m", cb.x), ustrip(u"m", cb.y))
-        any(c -> _near(pa, c, 1e-3) && _near(pb, c, 1e-3), corners) || continue
-        push!(drop, eidx)
-    end
-    length(drop) == 4 * CORE_STORIES ||
-        error("core: found $(length(drop)) corner columns, expected $(4 * CORE_STORIES)")
-    gone = Set(drop)
-    filter!(e -> e ∉ gone, skel.groups_edges[:columns])
-    return length(drop)
 end
 
 function _find_plan_edge(skel, x1, y1, z, x2, y2; tol = 1e-3)

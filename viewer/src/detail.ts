@@ -17,6 +17,7 @@ export interface ComponentRecord {
     frame_elements?: number[]
     shell_kinds?: number[]
     elevation_m?: number | null
+    cell_indices?: number[]
     footing?: number
     plane?: { origin?: number[]; normal?: number[] }
     z0_m?: number | null
@@ -563,8 +564,19 @@ function drawingFacts(kind: string, drawing: Record<string, unknown>): [string, 
   }
   add("ρl", fixed(drawing.rho_l, 4))
   add("ρt", fixed(drawing.rho_t, 4))
+  add("Type", label(text(drawing.foundation_type)))
+  add("Analysis", text(drawing.analysis))
+  add("Utilization", drawing.utilization == null ? "" : Number(drawing.utilization).toFixed(2))
+  add("Columns", drawing.n_columns == null ? "" : String(drawing.n_columns))
+  const walls = Array.isArray(drawing.walls) ? drawing.walls as Record<string, unknown>[] : []
+  if (walls.length > 0) {
+    const openings = walls.reduce((n, wall) => n + (Array.isArray(wall.openings) ? wall.openings.length : 0), 0)
+    add("Walls", String(walls.length))
+    if (openings > 0) add("Openings", String(openings))
+  }
   add("Concrete", volume(drawing.concrete_m3))
   add("Steel", volume(drawing.steel_m3))
+  if (kind === "footing" && drawing.note) add("Note", text(drawing.note))
   if (kind === "wall" && drawing.note) add("Note", text(drawing.note))
   const punching = drawing.punching
   if (punching && typeof punching === "object") {

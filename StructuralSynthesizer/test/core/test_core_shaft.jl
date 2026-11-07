@@ -83,6 +83,25 @@ end
 
     shaft_area = CORE_BAY * (2 * CORE_BAY - CORE_LOBBY_Y)
 
+    @testset "Top-story wall ends have a roof vertex on the same column line" begin
+        roof_z = ustrip(u"m", skel.stories_z[end])
+        top_z = roof_z - CORE_STORY_H
+        vc = skel.geometry.vertex_coords
+        n = 0
+        for ei in skel.groups_edges[:walls]
+            for v in skel.edge_indices[ei]
+                abs(vc[v, 3] - top_z) <= 1e-3 || continue
+                x, y = vc[v, 1], vc[v, 2]
+                found = any(i -> abs(vc[i, 3] - roof_z) <= 1e-3 &&
+                                 hypot(vc[i, 1] - x, vc[i, 2] - y) <= 1e-3,
+                            axes(vc, 1))
+                @test found
+                n += 1
+            end
+        end
+        @test n > 0
+    end
+
     @testset "A floor outline has the three shafts as one hole; the roof does not" begin
         floor = skel.stories[1]   # z = 3.6 m
         loops = story_floor_outline(skel, floor)
@@ -124,10 +143,9 @@ end
             struc, open_slab, cols; throw_on_failure = false)
         @test !appl.ok
         # The lobby is 2.5 m against an 8 m bay, so successive spans on the
-        # shaft wall fail §13.6.1.3. Dropping the core-corner columns leaves
-        # a 24 m panel, which fails §13.6.1.2.
+        # shaft wall fail §13.6.1.3. The core-corner columns stay in the
+        # frame, so the floor is not one 24 m panel.
         @test any(v -> occursin("13.6.1.3", v), appl.violations)
-        @test any(v -> occursin("13.6.1.2", v), appl.violations)
         @test !any(v -> occursin("ends at a wall", v), appl.violations)
         efm = StructuralSizer.check_efm_applicability(
             struc, open_slab, cols; throw_on_failure = false)
@@ -246,5 +264,54 @@ end
             @test _has_end(CORE_STAIR_X, CORE_LOBBY_Y)
             @test _has_end(CORE_STAIR_X, 2 * CORE_BAY)
         end
+    end
+
+    @testset "Core corners stay columns, and a column bay draws their stored areas" begin
+        corners = ((CORE_BAY, CORE_BAY), (2 * CORE_BAY, CORE_BAY),
+                   (2 * CORE_BAY, 2 * CORE_BAY), (CORE_BAY, 2 * CORE_BAY))
+        n = 0
+        for col in struc.columns
+            c = Meshes.coords(struc.skeleton.vertices[col.vertex_idx])
+            p = (ustrip(u"m", c.x), ustrip(u"m", c.y))
+            any(q -> hypot(p[1] - q[1], p[2] - q[2]) < 1e-3, corners) && (n += 1)
+        end
+        @test n == 4 * CORE_STORIES
+
+        vc = struc.skeleton.geometry.vertex_coords
+        cell_idx = findfirst(eachindex(struc.cells)) do i
+            vis = struc.skeleton.face_vertex_indices[struc.cells[i].face_idx]
+            zs = [vc[v, 3] for v in vis]
+            xs = [vc[v, 1] for v in vis]
+            ys = [vc[v, 2] for v in vis]
+            all(z -> abs(z - 3.6) < 1e-3, zs) &&
+                all(x -> -1e-3 <= x <= CORE_BAY + 1e-3, xs) &&
+                all(y -> -1e-3 <= y <= CORE_BAY + 1e-3, ys)
+        end
+        cell_idx === nothing && error("no column bay at the origin")
+        sides = Int[]
+        area = 0.0
+        for col in struc.columns
+            poly = get(column_tributary_polygons(struc, col), cell_idx, nothing)
+            poly === nothing && continue
+            push!(sides, length(poly))
+            xy = [(ustrip(u"m", x), ustrip(u"m", y)) for (x, y) in poly]
+            area += abs(_loop_area(xy))
+        end
+        @test length(sides) == 4
+        @test all(s -> s >= 4, sides)
+        @test area ≈ CORE_BAY * CORE_BAY atol = 0.5
+
+        design = BuildingDesign(struc)
+        packet = StructuralSynthesizer.ScenePacket(String[], (0.0, 0.0, 0.0),
+            Dict{String, Any}("counts" => Dict{String, Any}()),
+            StructuralSynthesizer.SceneBuffer[])
+        drawn = StructuralSynthesizer._with_tributaries(packet, design)
+        kinds = scene_u8(drawn, "tributary_kind")
+        cells = scene_u32(drawn, "tributary_cell")
+        counts = scene_u32(drawn, "tributary_count")
+        @test length(kinds) == length(cells) == length(counts)
+        bay = [i for i in eachindex(cells) if cells[i] == UInt32(cell_idx - 1)]
+        @test length(bay) == 4
+        @test all(i -> kinds[i] == 0x00 && counts[i] >= 4, bay)
     end
 end

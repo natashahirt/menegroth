@@ -209,7 +209,8 @@ function _detail_column(design::BuildingDesign, geo, idx::Int)
         slab_cover = depth > 0 ? slab_cover : 0.0u"m",
         continues = !isnothing(col.column_above),
         fc = conc.fc′, fy = rebar.Fy, fyt = transverse.Fy, λ = conc.λ,
-        coating = rebar.coating)
+        coating = rebar.coating,
+        tie_spacing = cr.tie_spacing > 0u"m" ? cr.tie_spacing : nothing)
     depth > 0 || push!(md.notes, "No slab or beam found at the column top; ties run to the top.")
     return md
 end
@@ -277,13 +278,40 @@ function _detail_wall(design::BuildingDesign, _geo, idx::Int)
     end
     _, slab_cover = _slab_materials(design.params)
     openings = [(o.s0 * u"m", o.z0 * u"m", o.width * u"m", o.height * u"m") for o in wall.openings]
-    return StructuralSizer.detail_wall(;
+    md = StructuralSizer.detail_wall(;
         length = wall_length(wall) * u"m", height = wall.base.L, thickness = wall.thickness,
         ρl = wall.ρl, ρt = wall.ρt, openings = openings,
         Vu = Vu, ends = _wall_detail_ends(struc, idx), below = below, above = above,
         slab_above = slab, slab_cover = slab > 0u"m" ? slab_cover : 0.0u"m",
         fc = conc.fc′, fy = rebar.Fy, λ = conc.λ, coating = rebar.coating,
         hw = hw)
+    note = _jamb_tie_note(records)
+    note === nothing || push!(md.notes, note)
+    return md
+end
+
+"""
+Quote the tightest column-tie spacing the jamb checks asked for.
+
+Those segments are columns (§2.3). Their ties are not the distributed wall
+bars, and they are not drawn on the wall elevation.
+"""
+function _jamb_tie_note(records)
+    best_in = Inf
+    bar = 0
+    for rec in records
+        found = match(r"No\. (\d+) ties at ([0-9.]+) in", rec.clause)
+        found === nothing && continue
+        spacing = parse(Float64, found.captures[2])
+        if spacing < best_in
+            best_in = spacing
+            bar = parse(Int, found.captures[1])
+        end
+    end
+    isfinite(best_in) || return nothing
+    return "Segments beside openings are designed as columns (ACI 318-19 §2.3). " *
+           "They need No. $(bar) ties at $(round(best_in; digits = 2)) in. for shear " *
+           "(§22.5). The distributed wall bars are not those ties."
 end
 
 """True when two piers are the same plan line, including a reversed tracing."""

@@ -50,20 +50,9 @@ and any other bar farther than 6 in. clear along the tie from a supported bar.
 Returns the number of supported bars between the two corners.
 """
 function _face_crossties(positions::Vector{Float64}, db::Float64)
-    n = length(positions)
-    n <= 2 && return 0
-    supported = falses(n)
-    supported[1] = supported[n] = true
-    for i in 3:2:(n - 1)
-        supported[i] = true
-    end
-    six = ustrip(u"m", 6.0u"inch")
-    for i in 2:(n - 1)
-        supported[i] && continue
-        gap = minimum(abs(positions[i] - positions[k]) for k in 1:n if supported[k]) - db
-        gap > six + 1e-9 && (supported[i] = true)
-    end
-    return count(supported) - 2
+    # Same count the shear design uses, so the drawn crossties are the legs
+    # that Av was computed from. Positions here are metres.
+    return _bars_needing_crosstie(positions, db, ustrip(u"m", 6.0u"inch"))
 end
 
 """
@@ -78,6 +67,9 @@ Bars of one story of a rectangular or circular RC column.
 - `continues`: `true` when a column of the story above splices onto these
   bars; `false` at the roof, where the bars end in a 90-degree hook.
 - `fc`, `fy`, `fyt`, `λ`, `coating`: materials.
+- `tie_spacing`: shear spacing from [`design_column_shear`](@ref). The ties
+  are placed at the lesser of this and §25.7.2.1. A larger value does not
+  relax the code spacing.
 
 # Bars
 - Longitudinal: from the floor to the floor above plus a lap when the column
@@ -96,7 +88,8 @@ Bars of one story of a rectangular or circular RC column.
 function detail_column(sec::Union{RCColumnSection, RCCircularSection}; height::Length,
                        slab_above::Length, slab_cover::Length = 0.75u"inch",
                        continues::Bool = true, fc, fy, fyt = fy, λ::Real = 1.0,
-                       coating::Symbol = :uncoated, stock::Length = 60.0u"ft")
+                       coating::Symbol = :uncoated, stock::Length = 60.0u"ft",
+                       tie_spacing::Union{Nothing, Length} = nothing)
     md = MemberDetail(:column)
     m(x) = ustrip(u"m", x)
     lam = _detailing_λ(λ)
@@ -150,9 +143,17 @@ function detail_column(sec::Union{RCColumnSection, RCCircularSection}; height::L
     # ── Transverse bars ────────────────────────────────────────────────────
     top_limit = H - hs + cs            # lowest slab bars above
     if circular && sec.tie_type == :spiral
-        _add_spiral!(md, sec, H, top_limit, fc, fyt; cover = cov, db = db)
+        _add_spiral!(md, sec, H, top_limit, fc, fyt; cover = cov, db = db,
+                     shear_spacing = tie_spacing)
     else
-        s = m(column_tie_spacing(bs, tie_bar, least * u"m"))
+        s_code = m(column_tie_spacing(bs, tie_bar, least * u"m"))
+        s = s_code
+        # Shear may need the ties closer. It cannot space them farther than
+        # §25.7.2.1.
+        if tie_spacing !== nothing
+            s_shear = m(tie_spacing)
+            s_shear > 1e-9 && (s = min(s, s_shear))
+        end
         xs = _spaced_positions(s / 2, top_limit - s / 2, s)
         if circular
             dcl = width - 2cov - dt
@@ -169,9 +170,11 @@ function detail_column(sec::Union{RCColumnSection, RCCircularSection}; height::L
                                   shape = shape, path = [(0.0, -width / 2 + cov + dt / 2),
                                                          (0.0, width / 2 - cov - dt / 2)],
                                   x_positions = xs,
-                                  note = "at $(round(s / 0.0254; digits = 1)) in. (§25.7.2.1)"))
+                                  note = s < s_code - 1e-6 ?
+                                      "at $(round(s / 0.0254; digits = 1)) in. (§25.7.2.1, §10.7.6.5.2)" :
+                                      "at $(round(s / 0.0254; digits = 1)) in. (§25.7.2.1)"))
         if !circular
-            _add_crossties!(md, sec, xs, tie_bar, cov, dt, db)
+            _add_crossties!(md, sec, xs, tie_bar, cov, dt)
         end
     end
 
@@ -189,21 +192,13 @@ function detail_column(sec::Union{RCColumnSection, RCCircularSection}; height::L
     return md
 end
 
-function _add_crossties!(md, sec::RCColumnSection, xs, tie_bar, cov, dt, db)
+function _add_crossties!(md, sec::RCColumnSection, xs, tie_bar, cov, dt)
     m(x) = ustrip(u"m", x)
-    bx = [m(b.x) for b in sec.bars]
-    by = [m(b.y) for b in sec.bars]
-    tol = 1e-4
-    xmin, xmax, ymin, ymax = minimum(bx), maximum(bx), minimum(by), maximum(by)
-    face(sel, coord) = sort([coord[i] for i in eachindex(bx) if sel(i)])
-    left = face(i -> abs(bx[i] - xmin) < tol, by)
-    right = face(i -> abs(bx[i] - xmax) < tol, by)
-    bottom = face(i -> abs(by[i] - ymin) < tol, bx)
-    top = face(i -> abs(by[i] - ymax) < tol, bx)
     hook = m(hook_centerline_length(tie_bar; angle = 135, role = :stirrup))
-    # Crossties across the depth hold bars on the bottom and top faces.
-    n_v = max(_face_crossties(bottom, db), _face_crossties(top, db))
-    n_h = max(_face_crossties(left, db), _face_crossties(right, db))
+    # The same leg count design_column_shear used for Av.
+    legs = column_tie_legs(sec)
+    n_v = legs.y - 2
+    n_h = legs.x - 2
     for (k, (nct, across)) in enumerate(((n_v, m(sec.h) - 2cov - dt), (n_h, m(sec.b) - 2cov - dt)))
         nct > 0 || continue
         push!(md.groups, BarGroup(; mark = "C$(2 + k)", role = :crosstie, direction = :transverse,
@@ -214,7 +209,8 @@ function _add_crossties!(md, sec::RCColumnSection, xs, tie_bar, cov, dt, db)
     end
 end
 
-function _add_spiral!(md, sec::RCCircularSection, H, top_limit, fc, fyt; cover, db)
+function _add_spiral!(md, sec::RCCircularSection, H, top_limit, fc, fyt; cover, db,
+                      shear_spacing = nothing)
     m(x) = ustrip(u"m", x)
     D = m(sec.D)
     Dc = D - 2cover                       # out-to-out of the spiral
@@ -238,6 +234,20 @@ function _add_spiral!(md, sec::RCCircularSection, H, top_limit, fc, fyt; cover, 
         return
     end
     bsp, dsp, s = chosen
+    shear_note = ""
+    if shear_spacing !== nothing
+        s_sh = m(shear_spacing)
+        if s_sh + 1e-12 < s
+            if s_sh - dsp < clear_min - 1e-9
+                push!(md.warnings,
+                    "shear needs a spiral pitch of $(round(s_sh / 0.0254; digits = 2)) in., " *
+                    "tighter than the 1 in. clear of §25.7.3; the confinement pitch is kept")
+            else
+                s = s_sh
+                shear_note = ", closed to the shear spacing (§22.5)"
+            end
+        end
+    end
     Dsp = Dc - dsp
     turns = top_limit / s + 3.0           # 1.5 extra turns at each end
     per_turn = sqrt((π * Dsp)^2 + s^2)
@@ -248,5 +258,5 @@ function _add_spiral!(md, sec::RCCircularSection, H, top_limit, fc, fyt; cover, 
                               shape = :spiral, path = path,
                               x_positions = collect(0.0:s:top_limit),
                               note = "pitch $(round(s / 0.0254; digits = 2)) in., ρs ≥ $(round(ρs; digits = 4)) " *
-                                     "(Eq. 25.7.3.3), 1.5 extra turns each end"))
+                                     "(Eq. 25.7.3.3), 1.5 extra turns each end$(shear_note)"))
 end

@@ -420,6 +420,16 @@ function _populate_column_results!(design::BuildingDesign, struc::BuildingStruct
         # Sign convention: compression is negative in Asap.
         if has_model
             Pu_N = 0.0; Mu_x_Nm = 0.0; Mu_y_Nm = 0.0
+            # Shear. Fy (indices 2, 8) and Fz (indices 3, 9). Compression is
+            # negative, so Nu = −max(Fx1, Fx2) is the lesser end compression,
+            # compression-positive. The peaks are enveloped across segments
+            # and are not required to be concurrent; that pairing is
+            # conservative. Which of Fy and Fz is parallel to the section
+            # width is not stored on the element, so both assignments are
+            # checked below and the worse one is kept. That axis choice is
+            # engineering judgment, not a code rule. A square section makes
+            # the two assignments the same.
+            Vu_fy = 0.0; Vu_fz = 0.0; Nu_N = Inf; saw_force = false
             for seg_idx in segment_indices(col)
                 seg = struc.segments[seg_idx]
                 eidx = seg.edge_idx
@@ -428,6 +438,7 @@ function _populate_column_results!(design::BuildingDesign, struc::BuildingStruct
                 isempty(el.forces) && continue
                 f = el.forces
                 n = length(f)
+                saw_force = true
                 
                 # Axial (max compression magnitude)
                 Pu_N = max(Pu_N, abs(f[1]))
@@ -440,7 +451,21 @@ function _populate_column_results!(design::BuildingDesign, struc::BuildingStruct
                 # Weak-axis moment Mz (indices 6, 12)
                 if n >= 6;  Mu_y_Nm = max(Mu_y_Nm, abs(f[6])); end
                 if n >= 12; Mu_y_Nm = max(Mu_y_Nm, abs(f[12])); end
+
+                # Shears, and the least compression (a tensile end is negative).
+                if n >= 3
+                    Vu_fy = max(Vu_fy, abs(f[2]))
+                    Vu_fz = max(Vu_fz, abs(f[3]))
+                    Nu_N = min(Nu_N, -f[1])
+                end
+                if n >= 9
+                    Vu_fy = max(Vu_fy, abs(f[8]))
+                    Vu_fz = max(Vu_fz, abs(f[9]))
+                    Nu_N = min(Nu_N, -f[7])
+                end
             end
+            saw_force || (Nu_N = 0.0)
+            isfinite(Nu_N) || (Nu_N = 0.0)
             
             result.Pu   = Pu_N * u"N" |> u"kN"
             result.Mu_x = Mu_x_Nm * u"N*m" |> u"kN*m"
@@ -616,13 +641,61 @@ function _populate_column_results!(design::BuildingDesign, struc::BuildingStruct
             )
         end
         
+        # ─── One-way shear for an RC section (ACI 318-19 §10.5.3.1) ───
+        # Steel keeps the default shear_ok = true. There is no AISC shear
+        # check on this path.
+        if has_model && (col_sec isa StructuralSizer.RCColumnSection ||
+                         col_sec isa StructuralSizer.RCCircularSection)
+            _assign_column_shear!(result, col_sec, col, params, Vu_fy, Vu_fz, Nu_N)
+        end
+
         # ─── Overall ok ───
         result.ok = result.axial_ratio ≤ 1.0 &&
                     result.interaction_ratio ≤ 1.0 &&
+                    result.shear_ok &&
                     (isnothing(result.punching) || result.punching.ok)
         
         design.columns[col_idx] = result
     end
+end
+
+"""
+Store ACI 318-19 §22.5 shear on an RC column result.
+
+`Vu_fy` and `Vu_fz` are the enveloped `|Fy|` and `|Fz|` from the frame
+element. The section's local axes are not on that element, so both ways of
+lining them up with `(b, h)` are designed and the higher ratio is kept.
+"""
+function _assign_column_shear!(result::ColumnDesignResult, col_sec, col, params,
+                               Vu_fy::Float64, Vu_fz::Float64, Nu_N::Float64)
+    if isempty(col_sec.bars)
+        result.shear_ok = false
+        result.shear_ratio = 1.0
+        result.shear_clause = "ACI 318-19 §22.5; no longitudinal bars, shear was not checked"
+        return result
+    end
+    conc, reb, trans = _column_materials(params, col)
+    mat = StructuralSizer.ReinforcedConcreteMaterial(conc, reb, trans)
+    Nu = Nu_N * u"N"
+    along = StructuralSizer.design_column_shear(col_sec, Vu_fy * u"N", Vu_fz * u"N", Nu, mat)
+    swapped = StructuralSizer.design_column_shear(col_sec, Vu_fz * u"N", Vu_fy * u"N", Nu, mat)
+    if along.ratio >= swapped.ratio
+        shear = along
+        result.Vu_x = (Vu_fy * u"N") |> u"kN"
+        result.Vu_y = (Vu_fz * u"N") |> u"kN"
+    else
+        shear = swapped
+        result.Vu_x = (Vu_fz * u"N") |> u"kN"
+        result.Vu_y = (Vu_fy * u"N") |> u"kN"
+    end
+    result.ϕVn_x = uconvert(u"kN", shear.ϕVn_x)
+    result.ϕVn_y = uconvert(u"kN", shear.ϕVn_y)
+    result.shear_ratio = shear.ratio
+    result.shear_ok = shear.ok
+    result.tie_spacing = uconvert(u"m", shear.spacing)
+    result.tie_bar_size = shear.tie_bar_size
+    result.shear_clause = shear.clause
+    return result
 end
 
 """

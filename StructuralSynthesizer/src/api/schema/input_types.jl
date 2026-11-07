@@ -63,6 +63,9 @@ Base.@kwdef mutable struct APIMaterials
     concrete::String = "NWC_4000"           # Slab/floor concrete (default 4 ksi)
     column_concrete::String = "NWC_6000"   # Column concrete (default 6 ksi)
     rebar::String = "Rebar_60"
+    # Bar coating for every rebar in the project: uncoated, galvanized, epoxy,
+    # or zinc_epoxy. Sets ψe in ACI 318-19 development and lap lengths.
+    rebar_coating::String = "uncoated"
     steel::String = "A992"
     # Optional named timber preset for framing_levels material "timber". No
     # NDS-grounded presets ship yet (see TIMBER_MAP in deserialize.jl), so this
@@ -154,9 +157,10 @@ girders (index 2, 3, …).
 - `end_fixity`: optional 2-element per-end release override, e.g.
   `["pinned", "pinned"]`. Accepted values: `"default"`, `"pinned"`, `"fixed"`,
   `"free"`. `"default"` defers to the `(role, material, lateral_role)` dispatch.
-- `catalog_override`: optional per-level steel section catalog name — one of
-  `"all_W"`, `"preferred_W"`, `"all_HSS"`, `"all_HSSRound"`. Restricts the group's
-  sizing catalog (steel members only).
+
+A level's sizing options (`beam_options`) are set on the Julia `framing_opts`
+NamedTuple, not on this wire struct. A restricted catalog is
+`beam_options.custom_catalog`.
 """
 Base.@kwdef mutable struct APIFramingLevel
     material::String = "steel"
@@ -165,7 +169,6 @@ Base.@kwdef mutable struct APIFramingLevel
     axis::Union{Vector{Float64}, Nothing} = nothing
     count::Union{Int, Nothing} = nothing
     end_fixity::Union{Vector{String}, Nothing} = nothing
-    catalog_override::Union{String, Nothing} = nothing
 end
 
 """Design parameters block from JSON."""
@@ -212,7 +215,7 @@ Base.@kwdef mutable struct APIParams
     # slab outward (index 1 = joists). Empty (default) is a strict no-op.
     framing_levels::Vector{APIFramingLevel} = APIFramingLevel[]
     uniform_column_sizing::String = "off"  # off | per_story | building. Force uniform column sizes.
-    geometry_is_centerline::Bool = false
+    geometry_is_centerline::Bool = true
     visualization_target_edge_m::Union{Float64, Nothing} = nothing  # Viz shell mesh target edge (m). Default: FEA or adaptive.
     skip_visualization::Bool = false  # Skip shell mesh + viz serialization for faster response.
     visualization_detail::String = "full"  # "minimal" | "full". minimal = no deflected slab meshes.
@@ -226,6 +229,8 @@ Base.@kwdef mutable struct APIInput
     supports::Vector{Int} = Int[]
     stories_z::Vector{Float64} = Float64[]
     faces::APIFaceGroups = APIFaceGroups()
+    # Unframed slab openings: polylines [[x, y, z], ...]; z picks the story.
+    openings::Vector{Vector{Vector{Float64}}} = Vector{Vector{Float64}}[]
     params::APIParams = APIParams()
 end
 

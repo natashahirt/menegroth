@@ -74,12 +74,15 @@ Reinforced concrete column section for rectangular/square tied or spiral columns
 - `ρg`: Gross reinforcement ratio (As_total / Ag)
 - `cover`: Clear cover to ties/spirals
 - `tie_type`: Confinement type (:tied or :spiral)
+- `tie_bar_size`: Tie/spiral bar number used to place the longitudinal bars
 
 # Design Notes
 - For square columns: b = h
 - For rectangular: h is typically the direction of primary bending
 - Bars are positioned from section bottom-left corner
 - ρg must satisfy ACI limits: 0.01 ≤ ρg ≤ 0.08
+- Construction rejects tie bars below ACI 318-19 §25.7.2.2 and longitudinal
+  bars closer than the §25.2.3 clear spacing (see `_check_column_bar_spacing`)
 
 # Example
 ```julia
@@ -102,6 +105,7 @@ struct RCColumnSection{T<:Length, A<:Area} <: AbstractSection
     ρg::Float64                       # Reinforcement ratio
     cover::T                          # Clear cover
     tie_type::Symbol                  # :tied or :spiral
+    tie_bar_size::Int                 # Tie/spiral bar number
 end
 
 # ==============================================================================
@@ -109,7 +113,7 @@ end
 # ==============================================================================
 
 """
-    RCColumnSection(; b, h, bar_size, n_bars, cover, tie_type, name, arrangement)
+    RCColumnSection(; b, h, bar_size, n_bars, cover, tie_type, tie_bar_size, d_agg, name, arrangement)
 
 Construct an RC column section with automatic bar placement.
 
@@ -120,11 +124,15 @@ Construct an RC column section with automatic bar placement.
 - `n_bars`: Total number of longitudinal bars
 - `cover`: Clear cover to ties (default 1.5")
 - `tie_type`: :tied (default) or :spiral
+- `tie_bar_size`: Tie/spiral bar number (default 4, which meets ACI 318-19
+  §25.7.2.2 for every longitudinal bar size)
+- `d_agg`: Nominal maximum aggregate size for the §25.2.3 clear-spacing check
 - `name`: Optional section name
 - `arrangement`: Bar arrangement (:perimeter, :two_layer, :corners_only)
 
 # Returns
-RCColumnSection with bars automatically placed
+RCColumnSection with bars automatically placed. Throws `ArgumentError` when
+the tie bar is below §25.7.2.2 or adjacent bars violate §25.2.3.
 """
 function RCColumnSection(;
     b::Length,
@@ -133,9 +141,12 @@ function RCColumnSection(;
     n_bars::Int,
     cover::Length = 1.5u"inch",
     tie_type::Symbol = :tied,
+    tie_bar_size::Int = 4,
+    d_agg::Length = DEFAULT_AGGREGATE_SIZE,
     name::Union{String, Nothing} = nothing,
     arrangement::Symbol = :perimeter
 )
+    _check_tie_bar_size(bar_size, tie_bar_size)
     # Step 1: Convert ALL inputs to inches first (ensure correct unit conversion)
     b_inch = uconvert(u"inch", b)
     h_inch = uconvert(u"inch", h)
@@ -158,13 +169,16 @@ function RCColumnSection(;
     As_bar = float(As_bar_inch)
     d_bar = float(d_bar_inch)
     
-    # Distance from edge to bar center
-    # cover + tie diameter (assume #4 tie ≈ 0.5") + half bar diameter
-    tie_diam = 0.5u"inch"  # Already in inches, but let's be explicit
-    edge_to_center = cover_in + float(tie_diam) + d_bar / 2
+    # Distance from edge to bar center: clear cover + tie diameter + half bar diameter
+    tie_diam = float(uconvert(u"inch", rebar(tie_bar_size).diameter))
+    edge_to_center = cover_in + tie_diam + d_bar / 2
     
     # Generate bar positions
-    bars = _generate_bar_positions(b_in, h_in, edge_to_center, n_bars, As_bar, arrangement)
+    d_bar_in = ustrip(u"inch", d_bar)
+    pitch_min = d_bar_in + _required_clear_spacing_in(d_bar_in, d_agg)
+    bars = _generate_bar_positions(b_in, h_in, edge_to_center, n_bars, As_bar, arrangement;
+                                   pitch_min = pitch_min)
+    _check_column_bar_spacing(bars, d_agg)
     
     # Total steel area
     As_total = n_bars * As_bar
@@ -183,14 +197,16 @@ function RCColumnSection(;
     end
     
     RCColumnSection{typeof(b_in), typeof(Ag)}(
-        name, b_in, h_in, Ag, bars, As_total, ρg, cover_in, tie_type
+        name, b_in, h_in, Ag, bars, As_total, ρg, cover_in, tie_type, tie_bar_size
     )
 end
 
 """
-    RCColumnSection(b, h, bars; cover, tie_type, name)
+    RCColumnSection(b, h, bars; cover, tie_type, tie_bar_size, d_agg, name)
 
-Construct an RC column section with explicit bar positions.
+Construct an RC column section with explicit bar positions. The §25.2.3
+clear-spacing check uses each bar's nominal diameter when its area matches
+the catalog, and the equivalent-area diameter otherwise.
 """
 function RCColumnSection(
     b::Length,
@@ -198,6 +214,8 @@ function RCColumnSection(
     bars::Vector{<:RebarLocation};
     cover::Length = 1.5u"inch",
     tie_type::Symbol = :tied,
+    tie_bar_size::Int = 4,
+    d_agg::Length = DEFAULT_AGGREGATE_SIZE,
     name::Union{String, Nothing} = nothing
 )
     # Step 1: Convert to inches
@@ -222,23 +240,93 @@ function RCColumnSection(
         float(uconvert(u"inch", bar.y)),
         float(uconvert(u"inch^2", bar.As))
     ) for bar in bars]
+    _check_tie_bar_size(infer_bar_size(maximum(bar.As for bar in bars_converted)), tie_bar_size)
+    _check_column_bar_spacing(bars_converted, d_agg)
     
     RCColumnSection{typeof(b_in), typeof(Ag)}(
-        name, b_in, h_in, Ag, bars_converted, As_total, ρg, cover_in, tie_type
+        name, b_in, h_in, Ag, bars_converted, As_total, ρg, cover_in, tie_type, tie_bar_size
     )
+end
+
+# ==============================================================================
+# Detailing Checks
+# ==============================================================================
+
+# ENGINEERING JUDGMENT: 3/4 in. nominal maximum aggregate, the same assumption
+# the beam catalogs use. Not a code value; it only enters (4/3)·d_agg = 1 in.,
+# which never governs over the 1.5 in. floor of §25.2.3.
+const DEFAULT_AGGREGATE_SIZE = 0.75u"inch"
+
+"""
+    _check_tie_bar_size(long_bar_size, tie_bar_size)
+
+Throw unless the tie bar meets ACI 318-19 §25.7.2.2 (corpus: aci-318-19,
+p. 501): No. 3 enclosing No. 10 or smaller longitudinal bars, No. 4 enclosing
+No. 11 or larger.
+"""
+function _check_tie_bar_size(long_bar_size::Int, tie_bar_size::Int)
+    tie_min = long_bar_size <= 10 ? 3 : 4
+    tie_bar_size >= tie_min || throw(ArgumentError(
+        "Tie bar #$tie_bar_size is below ACI 318-19 §25.7.2.2: #$long_bar_size " *
+        "longitudinal bars need at least #$tie_min ties."))
+    return nothing
+end
+
+"""
+    _check_column_bar_spacing(bars, d_agg)
+
+Throw unless every pair of longitudinal bars has clear spacing of at least the
+greatest of 1.5 in., 1.5·d_b, and (4/3)·d_agg — ACI 318-19 §25.2.3 (corpus:
+aci-318-19, p. 469). `d_b` is the nominal bar diameter. Catalog areas are not
+`π/4·d_b²`, so the equivalent-area diameter is slightly larger and would reject
+a layout placed with the nominal diameter. A bar area that is not in the
+catalog falls back to that equivalent diameter.
+"""
+function _spacing_db_in(As_in2::Real)
+    for sz in rebar_sizes()
+        r = rebar(sz)
+        a = ustrip(u"inch^2", r.A)
+        abs(a - As_in2) <= 1e-5 && return ustrip(u"inch", r.diameter)
+    end
+    return sqrt(4 * float(As_in2) / π)
+end
+
+"""§25.2.3 minimum clear spacing (inches): the greatest of 1.5 in., 1.5·d_b, and (4/3)·d_agg."""
+_required_clear_spacing_in(db_in::Real, d_agg::Length) =
+    max(1.5, 1.5 * db_in, 4 / 3 * ustrip(u"inch", d_agg))
+
+function _check_column_bar_spacing(bars::AbstractVector{<:RebarLocation}, d_agg::Length)
+    pts = [(ustrip(u"inch", bar.x), ustrip(u"inch", bar.y),
+            _spacing_db_in(ustrip(u"inch^2", bar.As))) for bar in bars]
+    for i in eachindex(pts), j in (i + 1):lastindex(pts)
+        (xi, yi, di), (xj, yj, dj) = pts[i], pts[j]
+        clear = hypot(xi - xj, yi - yj) - (di + dj) / 2
+        required = _required_clear_spacing_in(max(di, dj), d_agg)
+        # 1e-6 in. is floating-point room in the placed coordinates. The
+        # required spacing itself is the code value.
+        clear + 1e-6 >= required || throw(ArgumentError(
+            "Longitudinal bar clear spacing $(round(clear, digits=3)) in. is below " *
+            "$(round(required, digits=3)) in. (ACI 318-19 §25.2.3)."))
+    end
+    return nothing
 end
 
 # ==============================================================================
 # Bar Placement Helpers
 # ==============================================================================
 
-"""Generate bar positions for standard arrangements."""
+"""
+Generate bar positions for standard arrangements. `pitch_min` (inches) is the
+smallest center-to-center pitch; `:perimeter` uses it to keep interior bars
+off a face that cannot hold them.
+"""
 function _generate_bar_positions(
     b::Length, h::Length, 
     edge_dist::Length,
     n_bars::Int, 
     As_bar::Area,
-    arrangement::Symbol
+    arrangement::Symbol;
+    pitch_min::Real = 0.0
 )
     # Inputs should already be in inches from the calling constructor
     # Ensure Float64 for consistent arithmetic (no unit conversion needed here)
@@ -312,7 +400,10 @@ function _generate_bar_positions(
             L_b_in = ustrip(u"inch", x_right - x_left)   # top/bottom face length
             L_h_in = ustrip(u"inch", y_top   - y_bot)    # left/right face length
 
-            n_tb_pair, n_lr_pair, extra_bottom = _split_perimeter(n_int, L_b_in, L_h_in)
+            n_tb_pair, n_lr_pair, extra_bottom = _split_perimeter(
+                n_int, L_b_in, L_h_in;
+                cap_tb = _face_capacity(L_b_in, pitch_min),
+                cap_lr = _face_capacity(L_h_in, pitch_min))
 
             # Top/bottom interior bars (n_tb_pair on each, plus extra_bottom on bottom).
             n_bottom = n_tb_pair + extra_bottom
@@ -346,7 +437,21 @@ function _generate_bar_positions(
 end
 
 """
-    _split_perimeter(n_int, L_b, L_h) -> (n_tb_pair, n_lr_pair, extra_bottom)
+    _face_capacity(L, pitch_min) -> Int
+
+Interior bars a face can hold between its two corner bars when `L` is the
+center-to-center distance between those corners and `pitch_min` is the
+smallest allowed center-to-center pitch. `k` interior bars give a pitch of
+`L/(k+1)`, so `k ≤ L/pitch_min − 1`. `pitch_min ≤ 0` means no limit.
+"""
+function _face_capacity(L::Real, pitch_min::Real)
+    pitch_min > 0 || return typemax(Int) ÷ 4
+    # 1e-9 keeps an exact fit (pitch equal to the limit) from rounding down.
+    return max(floor(Int, L / pitch_min - 1 + 1e-9), 0)
+end
+
+"""
+    _split_perimeter(n_int, L_b, L_h; cap_tb, cap_lr) -> (n_tb_pair, n_lr_pair, extra_bottom)
 
 Allocate `n_int` interior bars (i.e. `n_bars - 4` after corner placement)
 across the four faces of a rectangular column proportional to face length.
@@ -362,10 +467,31 @@ Symmetry is enforced where possible:
 The function maintains the invariant
 `2*n_tb_pair + 2*n_lr_pair + extra_bottom == n_int`
 and biases interior bars onto the *longer* pair of faces.
+
+`cap_tb` and `cap_lr` are the interior bars each face can hold at the §25.2.3
+clear spacing ([`_face_capacity`](@ref)). When the proportional split puts
+more on a face than it holds, the excess pairs move to the other faces if
+they have room. Otherwise the split is returned unchanged and the spacing
+check rejects the section.
 """
-function _split_perimeter(n_int::Int, L_b::Real, L_h::Real)
+function _split_perimeter(n_int::Int, L_b::Real, L_h::Real;
+                          cap_tb::Int=typemax(Int) ÷ 4, cap_lr::Int=typemax(Int) ÷ 4)
     @assert n_int >= 0 "negative interior bar count: $n_int"
     n_int == 0 && return (0, 0, 0)
+    n_tb, n_lr, extra = _split_perimeter_proportional(n_int, L_b, L_h)
+    if n_tb + extra > cap_tb && n_lr < cap_lr
+        move = min(n_tb + extra - cap_tb, cap_lr - n_lr, n_tb)
+        n_tb -= move
+        n_lr += move
+    elseif n_lr > cap_lr && n_tb + extra < cap_tb
+        move = min(n_lr - cap_lr, cap_tb - n_tb - extra)
+        n_lr -= move
+        n_tb += move
+    end
+    return (n_tb, n_lr, extra)
+end
+
+function _split_perimeter_proportional(n_int::Int, L_b::Real, L_h::Real)
 
     # Reserve one extra bar for the bottom face when n_int is odd. The
     # remaining (even) count is split symmetrically across the four faces.
@@ -557,6 +683,7 @@ function scale_column_section(
         bar_size = bar_size,
         n_bars = n_bars_val,
         cover = section.cover,
-        tie_type = section.tie_type
+        tie_type = section.tie_type,
+        tie_bar_size = section.tie_bar_size
     )
 end

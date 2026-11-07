@@ -58,8 +58,15 @@ register_material!(Stud_51, "Stud51")
 """_fallback_material_name for unregistered `StructuralSteel`: formats as "Steel (Fy=XX ksi)"."""
 _fallback_material_name(mat::StructuralSteel) = "Steel (Fy=$(round(Int, ustrip(ksi, mat.Fy))) ksi)"
 
-"""_fallback_material_name for unregistered `RebarSteel`: formats as "Rebar (Fy=XX ksi)"."""
-_fallback_material_name(mat::RebarSteel) = "Rebar (Fy=$(round(Int, ustrip(ksi, mat.Fy))) ksi)"
+"""
+_fallback_material_name for unregistered `RebarSteel`: "Rebar (Fy=XX ksi)", with
+the coating appended when it is not `:uncoated` (e.g. "Rebar (Fy=60 ksi, epoxy)").
+"""
+function _fallback_material_name(mat::RebarSteel)
+    fy = round(Int, ustrip(ksi, mat.Fy))
+    mat.coating === :uncoated && return "Rebar (Fy=$fy ksi)"
+    return "Rebar (Fy=$fy ksi, $(mat.coating))"
+end
 
 # =============================================================================
 # (role, material, lateral_role) connection defaults for structural steel
@@ -94,22 +101,26 @@ default_seat_eccentricity(::Val{:joist}, ::StructuralSteel, host_depth, member_d
     (0.0, 0.0, (to_meters(host_depth) + to_meters(member_depth)) / 2, 0.0)
 
 # --- Steel girder (column-to-column primary frame) ---------------------------
-# Fully-restrained (moment) end connections idealized as fixed for analysis.
-# AISC 360-16 Commentary §B3.4 (corpus: aisc-360-16, page 331): fully restrained
-# (FR) connections "may often be idealized as ... fixed ... for the purposes of
-# structural analysis." `:moment_frame` uses the same release as `:gravity`; the
-# lateral distinction is handled downstream (lateral analysis), not by fixity.
-default_release(::Val{:girder}, ::StructuralSteel, ::Val{:gravity}) = (:fixed, :fixed)
+# ENGINEERING JUDGMENT (common practice): a gravity girder frames into its
+# columns through a simple shear connection (shear tab, clip angles), modeled as
+# pinned. AISC 360-16 §B3.4a (corpus: aisc-360-16, page 69): simple connections
+# "may be assumed to allow unrestrained relative rotation"; §J1.2 (page 169):
+# they "are permitted to be proportioned for the reaction shears only." A
+# moment connection is a lateral-system choice: `:moment_frame` girders are
+# fully restrained (FR), idealized as fixed per AISC 360-16 Commentary §B3.4
+# (page 331).
+default_release(::Val{:girder}, ::StructuralSteel, ::Val{:gravity}) = (:pinned, :pinned)
 default_release(::Val{:girder}, ::StructuralSteel, ::Val{:moment_frame}) = (:fixed, :fixed)
 default_torsion_released(::Val{:girder}, ::StructuralSteel) = false
 default_seat_eccentricity(::Val{:girder}, ::StructuralSteel, host_depth, member_depth) =
     (0.0, 0.0, 0.0, 0.0)
 
 # --- Steel beam (catch-all secondary member) ---------------------------------
-# Default to fixed ends (FR idealization, AISC 360-16 Commentary §B3.4, page 331);
-# a designer overrides per-end via the `Segment` release symbols when a beam is
-# actually simply supported. No seat offset by default.
-default_release(::Val{:beam}, ::StructuralSteel, ::Val{:gravity}) = (:fixed, :fixed)
+# Same simple-shear-connection idealization as the gravity girder (AISC 360-16
+# §B3.4a, page 69; §J1.2, page 169), whether the end lands on a column or a
+# girder. A designer overrides per-end via the `Segment` release symbols for an
+# actual moment connection. No seat offset by default.
+default_release(::Val{:beam}, ::StructuralSteel, ::Val{:gravity}) = (:pinned, :pinned)
 default_torsion_released(::Val{:beam}, ::StructuralSteel) = false
 default_seat_eccentricity(::Val{:beam}, ::StructuralSteel, host_depth, member_depth) =
     (0.0, 0.0, 0.0, 0.0)

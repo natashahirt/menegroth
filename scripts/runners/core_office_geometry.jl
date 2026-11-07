@@ -137,8 +137,38 @@ function _shape_core!(skel)
         _add_wall!(skel, CORE_STAIR_X, CORE_LOBBY_Y, CORE_STAIR_X, x1, z, story)
         _retarget_lobby!(skel, fi, z)
     end
+    # Interior walls and the west/east lobby splits live only below the roof,
+    # so those plan points are missing at the roof elevation. The top-story
+    # pier still reaches z = roof, and to_asap! will not mesh it unless each
+    # column line has a vertex there.
+    _seed_roof_wall_vertices!(skel)
     rebuild_geometry_cache!(skel)
     return length(bays)
+end
+
+"""
+Copy every top-story wall endpoint onto the roof.
+
+The roof face stays the full bay. These vertices are the column-line ends of
+the piers below, including tee points that `split_tee_junctions!` will cut.
+"""
+function _seed_roof_wall_vertices!(skel)
+    roof_z = ustrip(u"m", skel.stories_z[end])
+    roof_story = length(skel.stories_z) - 1
+    top_z = roof_z - CORE_STORY_H
+    seen = NTuple{2, Float64}[]
+    for ei in get(skel.groups_edges, :walls, Int[])
+        v1, v2 = skel.edge_indices[ei]
+        for v in (v1, v2)
+            c = Meshes.coords(skel.vertices[v])
+            abs(ustrip(u"m", c.z) - top_z) <= 1e-3 || continue
+            xy = (ustrip(u"m", c.x), ustrip(u"m", c.y))
+            any(p -> hypot(p[1] - xy[1], p[2] - xy[2]) <= 1e-3, seen) && continue
+            push!(seen, xy)
+            add_vertex!(skel, _point_m(skel, xy[1], xy[2], roof_z); level_idx=roof_story)
+        end
+    end
+    return length(seen)
 end
 
 """Plan coordinates of a face's vertices, in metres."""

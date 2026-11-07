@@ -50,14 +50,19 @@ end
 
 "Plan match for an architectural vertex. A 0.9 mm move is a different point."
 const _WALL_VERTEX_PLAN_TOL_M = 1e-6
-"Elevation match for a story vertex. Same floor as the plan-edge check."
-const _WALL_VERTEX_Z_TOL_M = 1e-4
+"""
+Elevation match for a story, a wall cut, and a diaphragm floor node.
+
+0.1 mm. The wall mesh, the story cut, and the flexible-floor receiver use
+this one tolerance.
+"""
+const WALL_CUT_ZTOL_M = 1e-4
 
 """Vertex whose architectural coordinates are `x, y, z`, or `nothing`."""
 function _vertex_at_architectural(vc::Matrix{Float64}, x, y, z)
     hit = nothing
     for i in 1:size(vc, 1)
-        abs(vc[i, 3] - z) <= _WALL_VERTEX_Z_TOL_M || continue
+        abs(vc[i, 3] - z) <= WALL_CUT_ZTOL_M || continue
         hypot(vc[i, 1] - x, vc[i, 2] - y) <= _WALL_VERTEX_PLAN_TOL_M || continue
         hit === nothing || return nothing
         hit = i
@@ -115,9 +120,172 @@ function _pier_plan_at(corners, s::Real, r::Real)
     return ((1 - r) * xb + r * xt, (1 - r) * yb + r * yt)
 end
 
+"True when the plan endpoints of `a` and `b` match, in the same direction."
+function _walls_plan_same(a, b; tol::Float64=1e-3)
+    return hypot(a.x1 - b.x1, a.y1 - b.y1) <= tol &&
+           hypot(a.x2 - b.x2, a.y2 - b.y2) <= tol
+end
+
+"True when the plan endpoints of `a` and `b` match, in opposite directions."
+function _walls_plan_reversed(a, b; tol::Float64=1e-3)
+    return hypot(a.x1 - b.x2, a.y1 - b.y2) <= tol &&
+           hypot(a.x2 - b.x1, a.y2 - b.y1) <= tol
+end
+
+"""Walls linked by `wall_above` that still share a plan line, one list per wall."""
+function _wall_plan_stack_members(walls)
+    n = length(walls)
+    parent = collect(1:n)
+    function find(i)
+        while parent[i] != i
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        end
+        return i
+    end
+    function unite(a, b)
+        ra, rb = find(a), find(b)
+        ra != rb && (parent[rb] = ra)
+        return nothing
+    end
+    by_id = Dict{UInt64, Int}(objectid(w) => i for (i, w) in enumerate(walls))
+    for (i, w) in enumerate(walls)
+        above = w.wall_above
+        above === nothing && continue
+        j = get(by_id, objectid(above), 0)
+        j == 0 && continue
+        (_walls_plan_same(w, walls[j]) || _walls_plan_reversed(w, walls[j])) || continue
+        unite(i, j)
+    end
+    groups = [Int[] for _ in 1:n]
+    for i in 1:n
+        push!(groups[find(i)], i)
+    end
+    return [groups[find(i)] for i in 1:n]
+end
+
+"Opening edges along `me`, in metres, from every wall in `members`."
+function _stack_s_breaks(walls, members, i::Int)
+    me = walls[i]
+    ss = Float64[]
+    for j in members
+        w = walls[j]
+        if _walls_plan_same(me, w)
+            for op in w.openings
+                push!(ss, op.s0, op.s0 + op.width)
+            end
+        elseif _walls_plan_reversed(me, w)
+            Lj = wall_length(w)
+            for op in w.openings
+                push!(ss, Lj - op.s0 - op.width, Lj - op.s0)
+            end
+        else
+            throw(ArgumentError(
+                "to_asap!: stacked walls $i and $j do not share a plan line, " *
+                "so their opening lines cannot be shared."))
+        end
+    end
+    return ss
+end
+
+"Opening edges up the story, in metres, from every leg of a joined assembly."
+function _assembly_z_breaks(walls, assemblies, i::Int)
+    asm = nothing
+    for a in assemblies
+        i in a.wall_indices || continue
+        asm = a
+        break
+    end
+    idxs = asm !== nothing && asm.joined ? asm.wall_indices : [i]
+    hs = [ustrip(u"m", walls[j].base.L) for j in idxs]
+    if maximum(hs) - minimum(hs) > 1e-3
+        throw(ArgumentError(
+            "to_asap!: joined walls on story $(walls[i].story) differ in height " *
+            "by more than 1 mm ($(minimum(hs)) m to $(maximum(hs)) m), so " *
+            "opening lines cannot be shared."))
+    end
+    zs = Float64[]
+    for j in idxs, op in walls[j].openings
+        push!(zs, op.z0, op.z0 + op.height)
+    end
+    return zs
+end
+
+"""
+Fractions in `[0, 1]`: the uniform division plus `breaks_m`, snapped to 1 mm.
+
+`breaks_m` outside the wall, or within 1 mm of a line already chosen, is not
+added. The first fraction is 0 and the last is 1.
+"""
+function _mesh_stations(breaks_m, length_m::Real, n::Int; tol::Float64=1e-3)
+    length_m = Float64(length_m)
+    lines = Float64[k / n for k in 0:n]
+    for b in breaks_m
+        (b < -tol || b > length_m + tol) && continue
+        b = clamp(Float64(b), 0.0, length_m)
+        any(f -> abs(b - f * length_m) <= tol, lines) && continue
+        push!(lines, b / length_m)
+    end
+    sort!(lines)
+    out = Float64[0.0]
+    for f in lines
+        abs(f - out[end]) * length_m <= tol && continue
+        push!(out, f)
+    end
+    out[end] = 1.0
+    length(out) >= 2 || throw(ArgumentError(
+        "to_asap!: the wall division has no length."))
+    return out
+end
+
+"True when `(s, z)` is strictly inside the opening."
+function _opening_contains(op::WallOpening, s::Float64, z::Float64)
+    return op.s0 < s < op.s0 + op.width && op.z0 < z < op.z0 + op.height
+end
+
+"""
+Quads for every wall: `(s0, s1, r0, r1, column, row)`.
+
+A wall with no openings, and no opening on a wall it stacks with or joins,
+uses [`wall_panel_quads`](@ref). Any other wall adds the opening edges and
+drops a quad whose centre is inside one of its own openings.
+"""
+function _wall_opening_quads(walls, nx::Int, ny::Int)
+    stacks = _wall_plan_stack_members(walls)
+    assemblies = wall_assemblies(walls)
+    quads = Vector{Tuple{Float64, Float64, Float64, Float64, Int, Int}}[]
+    for i in eachindex(walls)
+        s_breaks = _stack_s_breaks(walls, stacks[i], i)
+        z_breaks = _assembly_z_breaks(walls, assemblies, i)
+        if isempty(s_breaks) && isempty(z_breaks)
+            row = Tuple{Float64, Float64, Float64, Float64, Int, Int}[]
+            for (s0, s1, r0, r1) in wall_panel_quads(nx, ny)
+                push!(row, (s0, s1, r0, r1, round(Int, s0 * nx) + 1, round(Int, r0 * ny) + 1))
+            end
+            push!(quads, row)
+            continue
+        end
+        L = wall_length(walls[i])
+        H = ustrip(u"m", walls[i].base.L)
+        s = _mesh_stations(s_breaks, L, nx)
+        r = _mesh_stations(z_breaks, H, ny)
+        row = Tuple{Float64, Float64, Float64, Float64, Int, Int}[]
+        for j in 1:(length(r) - 1), c in 1:(length(s) - 1)
+            s0, s1 = s[c], s[c + 1]
+            r0, r1 = r[j], r[j + 1]
+            sm = (s0 + s1) / 2 * L
+            zm = (r0 + r1) / 2 * H
+            any(op -> _opening_contains(op, sm, zm), walls[i].openings) && continue
+            push!(row, (s0, s1, r0, r1, c, j))
+        end
+        push!(quads, row)
+    end
+    return quads
+end
+
 """
     _mesh_wall_shells(struc, params, frame_nodes, existing_shells)
-      -> (shells, wall_nodes, shells_by_wall)
+      -> (shells, wall_nodes, shells_by_wall, cells_by_wall)
 
 Mesh `struc.walls` into `ShellTri3` elements on `frame_nodes`.
 
@@ -147,6 +315,12 @@ model is singular, which is the correct signal that the wall is not connected.
 
 An empty `walls` vector returns empty collections and does not read materials.
 `shells_by_wall[i]` is the triangles of `struc.walls[i]`, in mesh order.
+`cells_by_wall[i][t]` is the `(column, row)` cell of triangle `t`, 1-based.
+A solid wall uses [`wall_panel_quads`](@ref) and nothing else, so its nodes
+are the 8 × 8 grid. A wall with openings, or a wall stacked or joined with
+one, adds a grid line at every opening edge. Lines along the wall are shared
+up the stack. Lines up the wall are shared across a joined assembly. A cell
+whose centre lies inside an opening is not meshed.
 """
 function _mesh_wall_shells(struc::BuildingStructure,
                            params::DesignParameters,
@@ -154,12 +328,21 @@ function _mesh_wall_shells(struc::BuildingStructure,
                            existing_shells;
                            mesh_div::Int=WALL_MESH_DIV,
                            mesh_rows::Int=WALL_MESH_ROWS)
-    isempty(struc.walls) && return Asap.ShellTri3[], Asap.Node[], Vector{Asap.ShellTri3}[]
+    isempty(struc.walls) && return Asap.ShellTri3[], Asap.Node[],
+                                   Vector{Asap.ShellTri3}[], Vector{NTuple{2, Int}}[]
 
     # Geometry and material are checked before any node is created, so a throw
     # does not leave a half-mutated frame node.
     spans = map(w -> _wall_pier_geometry(w, struc.skeleton), struc.walls)
     concretes = map(w -> _wall_shell_concrete(w, params), struc.walls)
+    for wall in struc.walls
+        check_wall_openings(wall)
+    end
+    refuse_openings_in_joined_corners!(struc.walls)
+    (mesh_div >= 1 && mesh_rows >= 1) || throw(ArgumentError(
+        "to_asap!: wall mesh_div and mesh_rows must be ≥ 1 " *
+        "(got $mesh_div × $mesh_rows)."))
+    quads_by_wall = _wall_opening_quads(struc.walls, mesh_div, mesh_rows)
 
     # Node-share tolerance.
     tol = 1e-3
@@ -185,13 +368,9 @@ function _mesh_wall_shells(struc::BuildingStructure,
 
     shells = Asap.ShellTri3[]
     shells_by_wall = [Asap.ShellTri3[] for _ in struc.walls]
+    cells_by_wall = [NTuple{2, Int}[] for _ in struc.walls]
     wall_nodes = Asap.Node[]
     seen = Set{UInt64}()
-    (mesh_div >= 1 && mesh_rows >= 1) || throw(ArgumentError(
-        "to_asap!: wall mesh_div and mesh_rows must be ≥ 1 " *
-        "(got $mesh_div × $mesh_rows)."))
-    nx = mesh_div
-    ny = mesh_rows
 
     """Nearest existing node within `tol`, or `nothing` when all are farther."""
     function _nearest_existing(x, y, z)
@@ -243,7 +422,10 @@ function _mesh_wall_shells(struc::BuildingStructure,
         # Column offsets live on the frame nodes. Follow those nodes when the
         # wall still ends on its architectural vertices.
         corners = _structural_pier_corners(struc, span, frame_nodes)
-        for (s0, s1, r0, r1) in wall_panel_quads(nx, ny)
+        isempty(quads_by_wall[iw]) && throw(ArgumentError(
+            "to_asap!: wall $iw has no shell outside its openings. " *
+            "The openings cover the wall."))
+        for (s0, s1, r0, r1, cell_i, cell_j) in quads_by_wall[iw]
             # Top and base share a plan line when the wall is not on frame
             # vertices. On frame vertices the top offset can differ, so each
             # corner of the quad takes its own plan position.
@@ -270,9 +452,10 @@ function _mesh_wall_shells(struc::BuildingStructure,
             t2 = Asap.ShellTri3((nb0, nt1, nt0), sec_t, sec_E, ν; id=:wall, ρ=ρ)
             push!(shells, t1, t2)
             push!(shells_by_wall[iw], t1, t2)
+            push!(cells_by_wall[iw], (cell_i, cell_j), (cell_i, cell_j))
         end
     end
-    return shells, wall_nodes, shells_by_wall
+    return shells, wall_nodes, shells_by_wall, cells_by_wall
 end
 
 """

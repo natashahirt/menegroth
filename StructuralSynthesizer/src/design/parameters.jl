@@ -278,11 +278,12 @@ Base.@kwdef mutable struct DesignParameters
     max_iterations::Int = 20
     
     # ─── Geometry Interpretation ───
-    # When false (default), input vertex coordinates are architectural reference
-    # points (panel corners / facade line).  Edge and corner columns are offset
-    # inward by half the column dimension to their structural centerlines.
-    # When true, vertices are already structural centerlines — no offset is applied.
-    geometry_is_centerline::Bool = false
+    # When true (default), vertices are column and beam centerlines. The slab
+    # edge sits outside them, flush with the largest column face on each side,
+    # and moves when the columns are resized. The grid does not.
+    # When false, vertices are a drawn slab edge. Preparation shifts the
+    # boundary in by a fixed setback, once, and the same rule applies after that.
+    geometry_is_centerline::Bool = true
     
     # ─── Display Preferences ───
     display_units::DisplayUnits = imperial

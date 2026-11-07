@@ -220,6 +220,10 @@ Design result for a strip (combined) footing supporting N ≥ 2 columns.
   compression column is checked.
 - `sqA`: √(A2/A1) ≤ 2 used for that Bn (1 when the support is not
   wider on all sides than the loaded area).
+- `analysis`: `:rigid` for linear soil pressure (ACI 336.2R §3.2 / §5.2).
+  A wall footing that is not rigid records `:winkler` (ACI 336.2R §5.4).
+  For a wall footing, `n_columns` is 0, `B` is the leg width, and
+  `B * L_ftg` is the contact area with a shared corner counted once.
 """
 struct StripFootingResult{L, A, V, F} <: AbstractFoundationResult
     B::L
@@ -236,6 +240,7 @@ struct StripFootingResult{L, A, V, F} <: AbstractFoundationResult
     As_tensile::A    # §15.8.1.2(b) tensile interface steel
     Bn::F            # φBn_footing at governing (min sqA) column
     sqA::Float64     # √(A2/A1) ≤ 2 at that column
+    analysis::Symbol
 end
 
 """
@@ -254,6 +259,9 @@ Design result for a mat foundation.
 - `concrete_volume`: Total concrete volume
 - `steel_volume`: Total rebar volume
 - `utilization`: Governing utilization ratio
+- `analysis`: `:rigid`, `:shukla`, or `:winkler`, the method that produced
+  the moments. A rigid mat that failed its applicability check and was
+  redesigned records `:winkler`.
 """
 struct MatFootingResult{L, A, V, F} <: AbstractFoundationResult
     B::L
@@ -268,6 +276,7 @@ struct MatFootingResult{L, A, V, F} <: AbstractFoundationResult
     concrete_volume::V
     steel_volume::V
     utilization::Float64
+    analysis::Symbol
 end
 
 """
@@ -331,7 +340,7 @@ utilization(r::AbstractFoundationResult) = r.utilization
 # Imperial length canonicalize (bearing / strip stations)
 # =============================================================================
 
-# SI m↔inch of 1 ft is 0.3048/0.0254 = 12 + ~1.78e-15, not Unitful's exact
+# SI m↔inch of 1 ft is FT_TO_M/IN_TO_M = 12 + ~1.78e-15, not Unitful's exact
 # ×12. That ulp is conversion noise, not a construction leftover (0.01 in
 # is ~1e10× larger) and not an ε-not-wider rule. Do not grid-round the
 # station onto a 1e-12 leftover: `round(x/1e-12)*1e-12` sends 12+6e-13 to
@@ -348,7 +357,7 @@ const _SI_INCH_ULP = 1e-12
 Convert a length to inches before mixed-unit arithmetic.
 
 Every unit, including already-tagged inch/ft: an inch-tagged SI leftover
-is still 0.3048/0.0254, not ×12. Do not grid-round onto leftover (6e-13
+is still FT_TO_M/IN_TO_M, not ×12. Do not grid-round onto leftover (6e-13
 must not become 1e-12). SI residuals are snapped on the four overhangs
 after face subtraction (`_snap_si_overhang`). A true leftover (e.g.
 0.01 in) is unchanged. Not a construction tolerance and not an
@@ -418,6 +427,60 @@ struct FoundationDemand{F, M, L}
     c2::L       # Column dim 2 (= c1 for circular)
     shape::Symbol   # :rectangular or :circular
     uplift::Bool    # factored vertical reaction is tension
+end
+
+"""
+    WallLineSample{L, F}
+
+One vertical reaction on a wall line, at station `s` measured from `p1`
+toward `p2`. Compression is positive. Samples are the base nodes of the
+wall; they are not columns, and they are not punched.
+"""
+struct WallLineSample{L, F}
+    s::L
+    Pu::F
+    Ps::F
+end
+
+"""
+    WallLineDemand{L, F}
+
+A grade wall (or one leg of an L or T) as a line load on a footing.
+
+# Fields
+- `idx`: Index assigned by the caller. Not used in the design equations.
+- `p1`, `p2`: Plan endpoints of the wall centerline.
+- `tw`: Wall thickness.
+- `hw`: Wall height, for the shear-wall term of ACI 336.2R Eq. (5-2).
+- `samples`: Base reactions along the wall. A node shared with another leg
+  belongs to exactly one leg.
+"""
+struct WallLineDemand{L, F}
+    idx::Int
+    p1::NTuple{2, L}
+    p2::NTuple{2, L}
+    tw::L
+    hw::L
+    samples::Vector{WallLineSample{L, F}}
+end
+
+"""
+    WallLineDemand(idx, p1, p2, tw, hw, samples) → WallLineDemand
+
+`p1` and `p2` are `(x, y)` plan coordinates. Lengths are stored in metres
+and forces in newtons, so a wall in feet and a thickness in inches are
+the same demand.
+"""
+function WallLineDemand(idx::Int, p1, p2, tw, hw, samples)
+    isempty(samples) && throw(ArgumentError(
+        "Wall line $idx has no base reactions"))
+    xy(p) = (uconvert(u"m", p[1]), uconvert(u"m", p[2]))
+    normed = [WallLineSample(uconvert(u"m", s.s),
+                             uconvert(u"N", s.Pu),
+                             uconvert(u"N", s.Ps)) for s in samples]
+    p1m, p2m = xy(p1), xy(p2)
+    WallLineDemand{typeof(p1m[1]), typeof(normed[1].Pu)}(
+        idx, p1m, p2m, uconvert(u"m", tw), uconvert(u"m", hw), normed)
 end
 
 """

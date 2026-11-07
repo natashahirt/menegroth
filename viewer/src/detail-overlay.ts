@@ -1,7 +1,7 @@
 /** Colored pictures for one component, from the scene buffers. No value is invented. */
 
 import * as THREE from "three"
-import { deflectionColor, signedColor } from "./building"
+import { deflectionColor, signedColor, stressColor } from "./building"
 import { displacementAt } from "./frame"
 import type { ComponentRecord } from "./detail"
 
@@ -29,16 +29,15 @@ export interface OverlayScene {
   tributaryPosition: Float32Array
   tributaryCount: Uint32Array
   tributaryKind: Uint8Array
+  tributaryElement: Uint32Array
   tributaryPresent: boolean
   footingDisp: Float32Array
 }
 
 const SVG = "http://www.w3.org/2000/svg"
-const CERULEAN = "#00aeef"
-const GOLD = "#df7e00"
 const ink = new THREE.Color()
 
-interface Poly { pts: [number, number][]; color: string }
+interface Poly { pts: [number, number][]; color: string; stroke?: string }
 
 /** The picture that replaces the line drawing. A sentence when the field is absent or does not belong here. */
 export function overlayPicture(record: ComponentRecord, mode: OverlayMode, scene: OverlayScene): HTMLElement {
@@ -58,12 +57,12 @@ function deflectionPicture(record: ComponentRecord, scene: OverlayScene): HTMLEl
       return ramp(mag / Math.max(ids.length, 1), scale)
     })
     if (polys.length === 0) return sentence(record.kind === "wall" ? "This wall has no shell in the scene." : "This slab has no shell in the scene.")
-    return sheet(record.kind === "wall" ? "Elevation" : "Plan", polys, "0", `${(scale * 1000).toFixed(1)} mm`, "Deflection magnitude", true)
+    return sheet(record.kind === "wall" ? "Elevation" : "Plan", polys, "0", `${(scale * 1000).toFixed(1)} mm`, "Deflection magnitude", "ramp")
   }
   if (record.kind === "column" || record.kind === "beam") {
     const bar = memberBar(record, scene, (element, t, length, rows) => ramp(memberMag(scene, element, t, length, rows), scale))
     if (!bar) return sentence("This member is not in the analysis model.")
-    return sheet("Along the member", bar, "0", `${(scale * 1000).toFixed(1)} mm`, "Deflection magnitude", true)
+    return sheet("Along the member", bar, "0", `${(scale * 1000).toFixed(1)} mm`, "Deflection magnitude", "ramp")
   }
   if (record.kind === "footing") return footingFill(record, scene, scale)
   return sentence("Deflection is not recorded for this component.")
@@ -74,11 +73,11 @@ function stressPicture(record: ComponentRecord, scene: OverlayScene): HTMLElemen
   if (!scene.stressPresent) return sentence("Stress is not in this scene.")
   const polys = shellPolys(record, scene, (t) => {
     const value = scene.shellStress[t]
-    return value === undefined ? "" : signed(value, scene.maxStress)
+    return value === undefined ? "" : stressHex(value, scene.maxStress)
   })
   if (polys.length === 0) return sentence(record.kind === "wall" ? "This wall has no shell in the scene." : "This slab has no shell in the scene.")
   const end = `${(scene.maxStress / 1e6).toFixed(2)} MPa`
-  return sheet(record.kind === "wall" ? "Elevation" : "Plan", polys, `−${end}`, `+${end}`, "Surface stress · tension positive", true)
+  return sheet(record.kind === "wall" ? "Elevation" : "Plan", polys, `−${end}`, `+${end}`, "Compression is magenta. Tension is blue.", "stress")
 }
 
 function axialPicture(record: ComponentRecord, scene: OverlayScene): HTMLElement {
@@ -98,7 +97,7 @@ function axialPicture(record: ComponentRecord, scene: OverlayScene): HTMLElement
   }
   if (polys.length === 0) return sentence("Axial load is not recorded for this member.")
   const end = `${(scene.maxAxial / 1000).toFixed(1)} kN`
-  return sheet("Along the member", polys, `−${end}`, `+${end}`, "Axial force · tension positive", true)
+  return sheet("Along the member", polys, `−${end}`, `+${end}`, "Axial force · tension positive", "ramp")
 }
 
 function tributaryPicture(record: ComponentRecord, scene: OverlayScene): HTMLElement {
@@ -124,11 +123,10 @@ function tributaryPicture(record: ComponentRecord, scene: OverlayScene): HTMLEle
     cursor += count
     if (pts.length < 3) continue
     if (Math.abs(y / pts.length - elevation) > 0.5) continue
-    const kind = scene.tributaryKind[loop] ?? 0
-    polys.push({ pts, color: kind === 1 ? GOLD : CERULEAN })
+    polys.push({ pts, color: tributaryKindColor(scene.tributaryKind[loop]), stroke: "#ffffff" })
   }
   if (polys.length === 0) return sentence("No tributary area was recorded on this slab.")
-  return sheet("Plan", polys, "", "", "Column areas are cerulean. Beam areas are gold.", false)
+  return sheet("Plan", polys, "", "", "Column areas are cerulean. Wall areas are iris. Beam areas are gold.", "none")
 }
 
 function footingFill(record: ComponentRecord, scene: OverlayScene, scale: number): HTMLElement {
@@ -141,7 +139,7 @@ function footingFill(record: ComponentRecord, scene: OverlayScene, scale: number
   if (length === null || width === null) return sentence("The footing size is not in this scene.")
   const mag = Math.hypot(scene.footingDisp[index * 3] ?? 0, scene.footingDisp[index * 3 + 1] ?? 0, scene.footingDisp[index * 3 + 2] ?? 0)
   const polys = [{ pts: [[0, 0], [length, 0], [length, -width], [0, -width]] as [number, number][], color: ramp(mag, scale) }]
-  return sheet("Plan", polys, "0", `${(scale * 1000).toFixed(1)} mm`, "Deflection magnitude", true)
+  return sheet("Plan", polys, "0", `${(scale * 1000).toFixed(1)} mm`, "Deflection magnitude", "ramp")
 }
 
 function shellPolys(record: ComponentRecord, scene: OverlayScene, colorOf: (triangle: number, ids: number[]) => string): Poly[] {
@@ -299,7 +297,17 @@ function signed(value: number, scale: number): string {
   return `#${signedColor(value, scale, ink).getHexString()}`
 }
 
-function sheet(caption: string, polys: Poly[], min: string, max: string, note: string, rampBar: boolean): HTMLElement {
+function stressHex(value: number, scale: number): string {
+  return `#${stressColor(value, scale, ink).getHexString()}`
+}
+
+function tributaryKindColor(kind: number | undefined): string {
+  if (kind === 1) return "#df7e00"
+  if (kind === 2) return "#4c2563"
+  return "#00aeef"
+}
+
+function sheet(caption: string, polys: Poly[], min: string, max: string, note: string, scaleKind: "ramp" | "stress" | "none"): HTMLElement {
   let minX = Infinity
   let minY = Infinity
   let maxX = -Infinity
@@ -318,19 +326,25 @@ function sheet(caption: string, polys: Poly[], min: string, max: string, note: s
   svg.setAttribute("class", "sheet")
   svg.setAttribute("viewBox", `${minX - pad} ${minY - pad} ${maxX - minX + 2 * pad} ${maxY - minY + 2 * pad}`)
   for (const poly of polys) {
-    svg.append(el("polygon", {
+    const polygon: Record<string, string> = {
       points: poly.pts.map(([x, y]) => `${x},${y}`).join(" "),
       fill: poly.color,
-      stroke: "none",
-    }))
+      stroke: poly.stroke ?? "none",
+    }
+    if (poly.stroke) {
+      polygon["stroke-width"] = "1.25"
+      polygon["stroke-linejoin"] = "round"
+      polygon["vector-effect"] = "non-scaling-stroke"
+    }
+    svg.append(el("polygon", polygon))
   }
   const fig = document.createElement("figure")
   const cap = document.createElement("figcaption")
   cap.textContent = caption
   fig.append(cap, svg)
-  if (rampBar) {
+  if (scaleKind !== "none") {
     const scale = document.createElement("div")
-    scale.className = "scale"
+    scale.className = scaleKind === "stress" ? "scale stress" : "scale"
     const bar = document.createElement("div")
     bar.className = "bar"
     const ends = document.createElement("div")

@@ -134,6 +134,9 @@ include("walls/_walls.jl")
 # Foundations (types, soils, design codes)
 include("foundations/_foundations.jl")
 
+# Bar placement after sizing (after members, slabs, and foundations)
+include("detailing/_detailing.jl")
+
 # Visualization interface (traits for section geometry - no GLMakie dependency)
 include("visualization/_visualization.jl")
 
@@ -607,6 +610,13 @@ export punching_check
 
 # --- Rebar catalog (ACI, shared) ---
 export bar_diameter, bar_area, infer_bar_size, select_bars
+export standard_hook, hook_centerline_length, BarSet, bar_set_mass, bar_set_ec
+export straight_development_length, hooked_bar_development_length
+export compression_development_length, tension_lap_length, compression_lap_length
+export BarGroup, MemberDetail, StripBars, StripLayout, bar_set, detail_mass, detail_ec
+export bar_schedule, stock_splices, bar_size_from_string, column_tie_spacing, column_lap_length
+export detail_flat_plate_line, detail_flat_plate_slab, detail_beam, detail_column
+export detail_spread_footing, detail_wall
 export select_bars_for_size, select_bars_candidates
 
 # --- EFM stiffnesses (ACI 318 Section 8.11) ---

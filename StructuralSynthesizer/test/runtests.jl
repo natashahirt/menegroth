@@ -63,6 +63,7 @@ using Asap  # ensures `u"kip"`, `u"ksi"`, etc resolve via Asap unit module
         include("analyze/test_wall_combinations.jl")
         include("analyze/test_wall_ordinary.jl")
         include("analyze/test_ordinary_wall_stage.jl")
+        include("analyze/test_wall_detailing.jl")
         include("analyze/test_skew_plan_walls.jl")
         include("analyze/test_lateral_approaches.jl")
         include("analyze/test_node_rotations.jl")
@@ -124,6 +125,7 @@ using Asap  # ensures `u"kip"`, `u"ksi"`, etc resolve via Asap unit module
     @testset "Workflow Integration" begin
         include("integration/test_structuralsizer_workflow_integration.jl")
         include("integration/test_deck_floor_building.jl")
+        include("integration/test_building_detailing.jl")
     end
 
 end

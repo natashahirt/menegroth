@@ -171,6 +171,7 @@ export MemberGroupSizingOverride, resolve_member_group_override
 export BuildingDesign, SlabDesignResult, ColumnDesignResult, BeamDesignResult, FoundationDesignResult
 export PunchingDesignResult, StripReinforcementDesign, DesignSummary
 export DisplayUnits, imperial, metric, fmt
+export BuildingDetail, detail_building, building_detail_mass
 export structure, skeleton  # BuildingDesign accessors
 export slab_design, column_design, beam_design, foundation_design, all_ok, critical_ratio
 export has_analysis_model, build_analysis_model!

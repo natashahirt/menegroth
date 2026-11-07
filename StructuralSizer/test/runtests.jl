@@ -93,6 +93,11 @@ using Asap  # custom units (kip, ksi, ksf, psf, etc.)
         include("concrete_column/test_slenderness.jl")
     end
 
+    # Bar placement
+    @testset "Detailing" begin
+        include("detailing/test_member_detailing.jl")
+    end
+
     # ─── Slabs ───────────────────────────────────────────────────────────
     @testset "Slabs" begin
         # Geometry & tributary

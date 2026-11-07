@@ -230,6 +230,17 @@
   encrypted: false
   notes: "742-page textbook with an embedded text layer (pdftotext -layout succeeded; a few flate-stream syntax errors on image XObjects are benign). Ch. 18 'Walls' §18.3 + Example 18.1 is the empirical/simplified load-bearing wall method (ACI 318 §14.5.2 Eq. 14-1 = ACI 318-19 §11.5.3.1) — the independent numeric oracle (φPnw = 230.6 k) for StructuralSizer/src/walls/bearing.jl. ZK extraction: mccormac-de-bearing-wall-empirical-aci318-11."
 
+- id: textbook-bowles-foundation-analysis-design-5e
+  origin: "corpus/sources/unsorted/Bowles Foundation Analysis and Design.pdf"
+  source_path: corpus/sources/textbooks/foundations/Bowles-Foundation-Analysis-and-Design-5e.pdf
+  text_path:   corpus/text/textbooks/foundations/Bowles-Foundation-Analysis-and-Design-5e.txt
+  family: foundations
+  role: textbooks
+  edition: "Bowles, Foundation Analysis and Design, 5th ed. (McGraw-Hill, 1996; International Edition 1997)"
+  tier: 2
+  encrypted: false
+  notes: "1241-page textbook. Copyright page is © 1996; title page says Fifth Edition and International Edition 1997. The .txt was built with pdftotext -layout and PAGE markers, because pdfplumber rejects this file's MediaBox (it does not start at the origin) and splits subscripts. convert_pdfs_to_text.py now clamps crops to the page box. Printed page = PDF page − 28 (§9-6 at printed p. 501 is PDF p. 529; §10-5 at printed p. 544 is PDF p. 572). Table 9-1, range of ks (kN/m³), is §9-6, PDF p. 533 / printed p. 505. Bowles says the ranges are guides for order of magnitude and not to use a range average as the estimate. Textbook, not normative."
+
 # ── Tier 2 — research papers ──────────────────────────────────────────────
 # Peer-reviewed academic papers with grounded citations. Tier 2 because the
 # methods are not normative but are widely used as references for algorithmic

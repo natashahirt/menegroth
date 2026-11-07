@@ -79,64 +79,90 @@ function Soil(qa, γ, ϕ, c, Es; qs=nothing, qp=nothing, ks=nothing)
     Soil{typeof(qa), typeof(γ)}(qa, γ, Float64(ϕ), c, Es, qs, qp, ks)
 end
 
-"""Preset: loose sand — qa = 75 kPa, ks = 5 000 kN/m³ (Bowles 1996 Table 9-1)."""
+"""Preset: loose sand — qa = 75 kPa. `ks` = 5 000 kN/m³ is judgment inside Bowles Table 9-1 loose sand (4 800–16 000)."""
 const loose_sand = Soil(
     75.0u"kPa",         # qa
     16.0u"kN/m^3",      # γ
     28.0,               # ϕ
     0.0u"kPa",          # c
     10.0u"MPa";         # Es
-    ks = 5000.0u"kN/m^3"  # Bowles Table 9-1: loose sand
+    # ENGINEERING JUDGMENT: inside Bowles 5th ed. Table 9-1, loose sand
+    # 4800–16000 kN/m³ (corpus: textbook-bowles-foundation-analysis-design-5e,
+    # §9-6, PDF p. 533 / printed p. 505). The table gives a range, not this value.
+    ks = 5000.0u"kN/m^3"
 )
 
-"""Preset: medium sand — qa = 150 kPa, ks = 25 000 kN/m³ (Bowles 1996 Table 9-1)."""
+"""Preset: medium sand — qa = 150 kPa. `ks` = 25 000 kN/m³ is judgment inside Bowles Table 9-1 medium dense sand (9 600–80 000)."""
 const medium_sand = Soil(
     150.0u"kPa",        # qa
     18.0u"kN/m^3",      # γ
     32.0,               # ϕ
     0.0u"kPa",          # c
     25.0u"MPa";         # Es
-    ks = 25000.0u"kN/m^3"  # Bowles Table 9-1: medium sand
+    # ENGINEERING JUDGMENT: inside Bowles 5th ed. Table 9-1, medium dense sand
+    # 9600–80000 kN/m³ (corpus: textbook-bowles-foundation-analysis-design-5e,
+    # §9-6, PDF p. 533 / printed p. 505). The table row is "medium dense sand",
+    # not "medium sand", and it gives a range, not this value.
+    ks = 25000.0u"kN/m^3"
 )
 
-"""Preset: dense sand — qa = 300 kPa, ks = 100 000 kN/m³ (Bowles 1996 Table 9-1)."""
+"""Preset: dense sand — qa = 300 kPa. `ks` = 100 000 kN/m³ is judgment inside Bowles Table 9-1 dense sand (64 000–128 000)."""
 const dense_sand = Soil(
     300.0u"kPa",        # qa
     20.0u"kN/m^3",      # γ
     38.0,               # ϕ
     0.0u"kPa",          # c
     50.0u"MPa";         # Es
-    ks = 100000.0u"kN/m^3"  # Bowles Table 9-1: dense sand
+    # ENGINEERING JUDGMENT: inside Bowles 5th ed. Table 9-1, dense sand
+    # 64000–128000 kN/m³ (corpus: textbook-bowles-foundation-analysis-design-5e,
+    # §9-6, PDF p. 533 / printed p. 505). The table gives a range, not this value.
+    ks = 100000.0u"kN/m^3"
 )
 
-"""Preset: soft clay — qa = 50 kPa, ks = 12 000 kN/m³ (Bowles 1996 Table 9-1)."""
+"""Preset: soft clay — qa = 50 kPa. `ks` = 12 000 kN/m³ is the low end of Bowles Table 9-1 for clayey soil with qa < 200 kPa (12 000–24 000)."""
 const soft_clay = Soil(
     50.0u"kPa",         # qa
     16.0u"kN/m^3",      # γ
     0.0,                # ϕ
     25.0u"kPa",         # c (undrained shear strength)
     5.0u"MPa";          # Es
-    ks = 12000.0u"kN/m^3"  # Bowles Table 9-1: soft clay
+    # ENGINEERING JUDGMENT: low end of Bowles 5th ed. Table 9-1, clayey soil
+    # with qa < 200 kPa, 12000–24000 kN/m³ (corpus:
+    # textbook-bowles-foundation-analysis-design-5e, §9-6, PDF p. 533 /
+    # printed p. 505). The table has no "soft clay" row.
+    ks = 12000.0u"kN/m^3"
 )
 
-"""Preset: stiff clay — qa = 150 kPa, ks = 50 000 kN/m³ (Bowles 1996 Table 9-1)."""
+"""Preset: stiff clay — qa = 150 kPa. `ks` = 50 000 kN/m³ is outside the Bowles Table 9-1 band for this qa."""
 const stiff_clay = Soil(
     150.0u"kPa",        # qa
     19.0u"kN/m^3",      # γ
     0.0,                # ϕ
     75.0u"kPa",         # c
     20.0u"MPa";         # Es
-    ks = 50000.0u"kN/m^3"  # Bowles Table 9-1: stiff clay
+    # ENGINEERING JUDGMENT, and outside the table band for this qa.
+    # Bowles 5th ed. Table 9-1, clayey soil qa < 200 kPa: 12000–24000 kN/m³;
+    # 200 < qa < 800 kPa: 24000–48000; qa > 800 kPa: > 48000
+    # (corpus: textbook-bowles-foundation-analysis-design-5e, §9-6,
+    # PDF p. 533 / printed p. 505). This preset's qa is 150 kPa, so 50000
+    # is above every finite band. There is no "stiff clay" row.
+    ks = 50000.0u"kN/m^3"
 )
 
-"""Preset: hard clay — qa = 300 kPa, ks = 150 000 kN/m³ (Bowles 1996 Table 9-1)."""
+"""Preset: hard clay — qa = 300 kPa. `ks` = 150 000 kN/m³ is outside the Bowles Table 9-1 band for this qa."""
 const hard_clay = Soil(
     300.0u"kPa",        # qa
     21.0u"kN/m^3",      # γ
     0.0,                # ϕ
     150.0u"kPa",        # c
     50.0u"MPa";         # Es
-    ks = 150000.0u"kN/m^3"  # Bowles Table 9-1: hard clay
+    # ENGINEERING JUDGMENT, and outside the table band for this qa.
+    # Bowles 5th ed. Table 9-1, clayey soil 200 < qa < 800 kPa: 24000–48000
+    # kN/m³; qa > 800 kPa: > 48000 (corpus:
+    # textbook-bowles-foundation-analysis-design-5e, §9-6, PDF p. 533 /
+    # printed p. 505). This preset's qa is 300 kPa, so 150000 is not a
+    # tabulated value. There is no "hard clay" row.
+    ks = 150000.0u"kN/m^3"
 )
 
 # =============================================================================

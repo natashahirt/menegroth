@@ -263,6 +263,7 @@ function _mat_build_result(
     As_x_bot, As_x_top, As_y_bot, As_y_top,
     utilization;
     analysis::Symbol = :rigid,
+    As_dowel = 0.0u"m^2",
 )
     B, Lm = plan.B, plan.Lm
     cover = opts.cover
@@ -290,9 +291,16 @@ function _mat_build_result(
     n_yt = max(ceil(Int, As_y_top / Ab_y), ceil(Int, B  / max_s_flex))
     len_x = B  - 2cover
     len_y = Lm - 2cover
+    # Vertical dowels across a wall joint, developed in the thickness.
+    # ACI 318-11 §15.8.2 (corpus: aci-318-11, page 275).
+    n_dowel = 0
+    if As_dowel > zero(As_dowel)
+        n_dowel = ceil(Int, As_dowel / Ab_x)
+    end
     V_steel = uconvert(u"m^3",
         (n_xb + n_xt) * Ab_x * len_x +
-        (n_yb + n_yt) * Ab_y * len_y)
+        (n_yb + n_yt) * Ab_y * len_y +
+        n_dowel * Ab_x * max(h - cover, zero(h)))
 
     # `F` is unused as a field. A wall cell with no enclosed column has an
     # empty demand vector; the force parameter is then a newton.
@@ -675,7 +683,10 @@ function _design_mat_rigid(
         if !isempty(walls)
             util_p = max(util_p, _mat_wall_cantilever_util(walls, plan, qu, d_eff, fc, λ, ϕv))
         end
-        util_p ≤ 1.0 && _footing_flexure_ok(flex_pairs, d_eff, fc, fy, ϕf) && break
+        embeds = isempty(walls) || _bar_develops_in(
+            opts.bar_size_x, h - cover, fc, fy, λ, cover)
+        util_p ≤ 1.0 && _footing_flexure_ok(flex_pairs, d_eff, fc, fy, ϕf) &&
+            embeds && break
         h += h_incr
         iter == 60 && @warn "Mat footing thickness did not converge at h=$h"
     end
@@ -714,5 +725,27 @@ function _design_mat_rigid(
 
     return _mat_build_result(plan, demands, opts, h, d_eff,
                              As_x_bot, As_x_top, As_y_bot, As_y_top,
-                             utilization)
+                             utilization;
+                             As_dowel = _mat_wall_dowels(walls, opts, fc, fy, ϕf))
+end
+
+"""
+Wall dowels on a mat: the greatest of joint tension, bearing excess, and
+the §14.3.2 minimum.
+
+Bearing is the supported wall's ϕ·0.85·f′c·A1 (ACI 318-11 §10.14.1 and
+§9.3.2.4, corpus: aci-318-11, pages 162 and 128). The mat's f′c is used for
+the wall. A1 is `solid × tw`.
+"""
+function _mat_wall_dowels(walls, opts, fc, fy, ϕf)
+    isempty(walls) && return 0.0u"m^2"
+    ϕb = 0.65
+    As_b = 0.0u"m^2"
+    for leg in walls
+        Pu = sum(max(smp.Pu, zero(smp.Pu)) for smp in leg.samples; init = 0.0u"N")
+        As_b += _interface_dowel_area(Pu, leg.solid * leg.tw, fc, fy, ϕb)
+    end
+    return max(_wall_tension_steel(walls, ϕf, fy),
+               As_b,
+               _wall_min_dowel(walls, opts.bar_size_x, fy))
 end

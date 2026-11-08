@@ -187,8 +187,10 @@ Rigid analysis: uniform soil pressure when the footing centroid aligns with
 the resultant of column loads.  Punching check at each column includes
 unbalanced moments from `FoundationDemand.Mux`/`Muy`.
 
-Includes development length verification (ACI 25.4.2) and column-footing
-bearing check with dowel design (ACI 22.8) at each column.
+Development is a limit state (ACI 318-11 §15.6.3 / Eq. (12-1)): a bar
+that does not fit steps down, then a 90-degree hook, then a longer or
+wider plan, and the shear and flexure checks run again. Column-footing
+bearing and dowels follow ACI 318-11 §10.14.1.
 
 # Arguments
 - `demands::Vector{FoundationDemand}`: Factored & service loads per column.
@@ -253,7 +255,8 @@ function design_footing(::StripFooting,
     # ld / V_steel — do not leave it as a log-only field.
     As_tensile_tot = _strip_tensile_As(demands, ϕf, fy)
     ld_tensile = As_tensile_tot > zero(As_tensile_tot) ?
-        _development_length_footing(opts.bar_size_long, fc, fy, λ, db_l) :
+        _development_length_footing(opts.bar_size_long, fc, fy, λ, db_l;
+                                    clear_cover = cover) :
         0.0u"inch"
 
     # Load resultant of signed service loads (negative = tension). Do not zero
@@ -280,9 +283,27 @@ function design_footing(::StripFooting,
     # corpus: aci-318-11, page 162).
     L = _canonical_ft(ceil(ustrip(u"inch", L) / ustrip(u"inch", w_incr)) * w_incr)
 
-    # Column positions relative to left edge of footing
+    # Column positions relative to left edge of footing. Recomputed when
+    # development lengthens the strip, which stays centered on the resultant.
     x_left = _canonical_ft(x_bar) - L / 2
     col_pos_local = [_canonical_ft(p) - x_left for p in positions]
+
+    bar_long = opts.bar_size_long
+    bar_trans = opts.bar_size_trans
+    anchorage = :straight
+    developed = false
+    B = 0.0u"inch"
+    # Assigned inside the attempt loop. Declared here so the sized
+    # section is visible after the loop.
+    h = opts.min_depth
+    d = h - cover - db_l / 2
+    qu = Pu_total / (L * L)
+    As_top = As_bot = As_trans = 0.0u"inch^2"
+    band_w = 0.0u"inch"
+    band_ws = typeof(band_w)[]
+    for dev_attempt in 1:40
+        x_left = _canonical_ft(x_bar) - L / 2
+        col_pos_local = [_canonical_ft(p) - x_left for p in positions]
 
     # Across-strip face is named c1 on a Y-layout (B ∥ X); named c2 on an X-layout.
     c_across_max = maximum(first(_strip_c_across_along(dem.c1, dem.c2, strip_axis))
@@ -296,7 +317,9 @@ function design_footing(::StripFooting,
     B_min = Ps_total / (soil.qa * L)
     B_min = ceil(ustrip(u"inch", B_min) / ustrip(u"inch", w_incr)) * w_incr
     # max(inch, 2 ft, c_across) would promote through SI; keep B imperial.
-    B = _canonical_inch(max(B_min, 2.0u"ft", c_across_max))
+    # A later attempt keeps a width already grown for shear or development.
+    B_floor = _canonical_inch(max(B_min, 2.0u"ft", c_across_max))
+    B = dev_attempt == 1 ? B_floor : _canonical_inch(max(B, B_floor))
 
     # =====================================================================
     # Steps 2–3: Iterate (B, h) — widen B when h exceeds practical limits
@@ -456,30 +479,61 @@ function design_footing(::StripFooting,
     band_w = maximum(band_ws)
 
     # =====================================================================
-    # Step 6: Development Length (ACI 25.4.2 / ACI 318-11 §15.6.3)
+    # Step 6: Development (ACI 318-11 §15.6.3)
     # =====================================================================
-    # ACI 318-11 §15.6.3 (corpus: aci-318-11, page 274): critical sections
-    # for development are the same faces as §15.4.2. Along-strip face for
-    # longitudinal ld; across-strip face for transverse ld.
-    if opts.check_development
-        ld_long = _development_length_footing(opts.bar_size_long, fc, fy, λ, db_l)
-        ld_trans = _development_length_footing(opts.bar_size_trans, fc, fy, λ, db_t)
-
-        # Longitudinal bars: available = distance from column face to nearer footing end
-        for (j, xc) in enumerate(col_pos_local)
-            _, c_along = _strip_c_across_along(demands[j].c1, demands[j].c2, strip_axis)
-            avail_long = min(xc, L - xc) - c_along / 2 - cover
-            ld_long > avail_long && @warn(
-                "Strip col #$j: longitudinal ld=$ld_long > available=$avail_long")
-        end
-
-        # Transverse bars: available = cantilever beyond smallest column (most critical)
-        c_across_min = minimum(first(_strip_c_across_along(dem.c1, dem.c2, strip_axis))
-                               for dem in demands)
-        avail_trans = (B - c_across_min) / 2 - cover
-        ld_trans > avail_trans && @warn(
-            "Strip transverse: ld=$ld_trans > available=$avail_trans")
+    # Critical section is the column face (§15.4.2). The short projection
+    # governs: longitudinal, the nearer end; transverse, the largest column.
+    if !opts.check_development
+        anchorage = dev_attempt == 1 ? :straight : :larger_plan
+        developed = true
+        break
     end
+    max_s = min(3h, 18.0u"inch")
+    avail_long = zero(cover)
+    avail_trans = zero(cover)
+    for (j, xc) in enumerate(col_pos_local)
+        c_across, c_along = _strip_c_across_along(demands[j].c1, demands[j].c2, strip_axis)
+        face_to_end = min(xc, L - xc) - c_along / 2 - cover
+        proj = (B - c_across) / 2 - cover
+        if j == 1
+            avail_long = face_to_end
+            avail_trans = proj
+        else
+            avail_long = min(avail_long, face_to_end)
+            avail_trans = min(avail_trans, proj)
+        end
+    end
+    long_fit = _one_way_anchorage(opts.bar_size_long, max(As_top, As_bot), B,
+                                  h, cover, fc, fy, λ, avail_long, max_s)
+    trans_fit = _one_way_anchorage(opts.bar_size_trans, As_trans, band_w,
+                                   h, cover, fc, fy, λ, avail_trans, max_s)
+    if long_fit.ok && trans_fit.ok
+        bar_long = long_fit.size
+        bar_trans = trans_fit.size
+        # d stays the depth the flexure and shear checks used. A smaller
+        # bar raises the true centroid; the reported d is the smaller one.
+        bar_long == opts.bar_size_long || (db_l = bar_diameter(bar_long))
+        db_t = bar_diameter(bar_trans)
+        grew = dev_attempt > 1
+        anchorage = if grew
+            :larger_plan
+        elseif long_fit.how == :hook || trans_fit.how == :hook
+            :hook
+        elseif long_fit.how == :smaller_bar || trans_fit.how == :smaller_bar
+            :smaller_bar
+        else
+            :straight
+        end
+        developed = true
+        break
+    end
+    long_fit.ok || (L = _canonical_ft(L + w_incr))
+    trans_fit.ok || (B = _canonical_inch(B + w_incr))
+    end
+    developed || error(
+        "Strip footing bars do not develop from the column face after 40 " *
+        "plan increments (ACI 318-11 §15.6.3, corpus: aci-318-11, page 274). " *
+        "L=$L, B=$B.")
 
     # =====================================================================
     # Step 7: Bearing & Dowels at Each Column (ACI 22.8)
@@ -490,7 +544,10 @@ function design_footing(::StripFooting,
     Bn_gov = 0.0u"N"
     have_brg = false
     if As_tensile_tot > zero(As_tensile_tot)
-        Ab_l_sched = bar_area(opts.bar_size_long)
+        Ab_l_sched = bar_area(bar_long)
+        db_l = bar_diameter(bar_long)
+        ld_tensile = _development_length_footing(bar_long, fc, fy, λ, db_l;
+                                                  clear_cover = cover)
         n_tensile = max(ceil(Int, As_tensile_tot / Ab_l_sched), 1)
         if opts.check_development
             avail_dowel = h - cover
@@ -582,8 +639,8 @@ function design_footing(::StripFooting,
     V_conc = uconvert(u"m^3", B * L * h)
 
     # Approximate steel volume
-    Ab_l = bar_area(opts.bar_size_long)
-    Ab_t = bar_area(opts.bar_size_trans)
+    Ab_l = bar_area(bar_long)
+    Ab_t = bar_area(bar_trans)
 
     # Maximum spacing for primary flexural reinforcement in slabs / footings:
     # ACI 318-11 §7.6.5 (corpus: aci-318-11, page 96) — `min(3h, 18 in.)`.
@@ -634,12 +691,16 @@ function design_footing(::StripFooting,
         uconvert(u"m^2", As_tensile_tot),
         Bn_gov,
         sqA_gov,
+        :rigid,
     )
     StructuralSizer.emit!(tc, :checker, "design_footing_strip_aci", "", :exit;
                           B_m=Float64(ustrip(u"m", result.B)),
                           L_m=Float64(ustrip(u"m", result.L_ftg)),
                           D_m=Float64(ustrip(u"m", result.D)),
-                          utilization=Float64(result.utilization))
+                          utilization=Float64(result.utilization),
+                          anchorage=String(anchorage),
+                          bar_size_long=bar_long,
+                          bar_size_trans=bar_trans)
     return result
 end
 

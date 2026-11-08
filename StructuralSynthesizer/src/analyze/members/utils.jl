@@ -8,6 +8,9 @@ include("members/slab_edge.jl")
 include("members/releases.jl")
 include("members/demands.jl")
 include("members/grouping.jl")
+# Flange geometry for `size_beams!` (`_verify_tbeam_flanges`,
+# `_compute_flange_params`) and the story-shell service widths.
+include("members/tbeam_flange.jl")
 include("members/size_beams.jl")
 include("members/size_beams_story_shell.jl")
 include("members/size_columns.jl")

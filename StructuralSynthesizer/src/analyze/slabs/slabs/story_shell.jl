@@ -192,7 +192,7 @@ function _column_support_points(struc, level)
     for col in struc.columns
         hasproperty(col, :story) || continue
         col.story == level || continue
-        push!(pts, StructuralSizer._column_xy_m(skel, col))
+        push!(pts, StructuralSizer._vertex_xy_m(skel, col.vertex_idx))
     end
     return pts
 end
@@ -276,7 +276,7 @@ function _story_column_springs(struc, level, nodes, concrete, steel)
         col.story == level || col.story == level + 1 || continue
         k = _column_end_stiffness(struc, col, concrete, steel)
         k === nothing && continue
-        x, y = StructuralSizer._column_xy_m(struc.skeleton, col)
+        x, y = StructuralSizer._vertex_xy_m(struc.skeleton, col.vertex_idx)
         node = _shell_node_at(nodes, x, y)
         node === nothing && continue
         old = get(acc, node, (0.0, 0.0))
@@ -405,6 +405,9 @@ piece's current section and web offset, the panel pressures and the column
 springs on the model, then refactors on the stored sparsity pattern. A
 different slab thickness, a different set of beams with a section, or a
 different end release is another model, and the solve meshes it again.
+
+The slab continues past the centerline to the column faces. That band is
+meshed once. A later column size moves only its outer nodes.
 """
 mutable struct StoryShell
     level::Int
@@ -417,6 +420,11 @@ mutable struct StoryShell
     frame_station::Vector{Float64}
     signature::UInt
     reasons::Vector{String}
+    # Outer nodes of the slab-edge band, and where each one sits on the centerline.
+    edge_outer::Vector{Asap.Node}
+    edge_anchor::Vector{NTuple{2, Float64}}
+    edge_run::Vector{Int}
+    edge_corner::Vector{Bool}
 end
 
 """
@@ -438,8 +446,9 @@ function build_story_shell(struc, level::Int;
     pts = support_points === nothing ? _column_support_points(struc, level) :
           NTuple{2, Float64}[(Float64(p[1]), Float64(p[2])) for p in support_points]
     shell = StoryShell(level, uconvert(u"m", target_edge), concrete, steel, pts,
-                       NamedTuple(), nothing, Float64[], UInt(0), String[])
-    return _mesh_story_shell!(shell, inp)
+                       NamedTuple(), nothing, Float64[], UInt(0), String[],
+                       Asap.Node[], NTuple{2, Float64}[], Int[], Bool[])
+    return _mesh_story_shell!(shell, inp, struc)
 end
 
 """
@@ -447,7 +456,8 @@ What the mesh and the element types depend on: each panel's thickness, the
 beams in the shell, and their end releases.
 """
 _story_shell_signature(inp) =
-    hash((inp.thickness_of_face, inp.beam_ids, [b.release for b in inp.beams]))
+    hash((inp.thickness_of_face, inp.beam_ids, [b.release for b in inp.beams],
+          inp.wall_lines))
 
 """Station of the middle of each frame piece, in metres along its beam's line."""
 function _story_frame_stations(frames, beams)
@@ -475,22 +485,157 @@ function _story_shell_loads(built, pressures)
 end
 
 """Mesh `inp` onto `shell` and pin its supports. The solve sets beam sections."""
-function _mesh_story_shell!(shell::StoryShell, inp)
-    built = StructuralSizer.story_shell(inp.panels, inp.beams; target_edge = shell.target_edge)
+function _mesh_story_shell!(shell::StoryShell, inp, struc)
+    built = StructuralSizer.story_shell(inp.panels, inp.beams;
+                                       target_edge = shell.target_edge,
+                                       support_lines = inp.wall_lines)
     shell.built = built
     shell.frame_station = _story_frame_stations(built.frames, inp.beams)
     shell.signature = _story_shell_signature(inp)
     shell.model = nothing
     empty!(shell.reasons)
-    if length(shell.support_points) < 3
-        push!(shell.reasons, "the story shell needs at least three supports")
-    elseif _pin_story_supports!(built.nodes, shell.support_points) < 3
-        push!(shell.reasons, "fewer than three shell nodes were supported")
+    # Walls first, so the in-plane anchor in the pin sees nodes already held.
+    _hold_story_walls!(built.nodes, inp.wall_lines)
+    n_pin = _pin_story_supports!(built.nodes, shell.support_points)
+    if n_pin < 3 && isempty(inp.wall_lines)
+        push!(shell.reasons, n_pin == 0 && length(shell.support_points) < 3 ?
+            "the story shell needs at least three supports" :
+            "fewer than three shell nodes were supported")
     else
+        _append_slab_edge!(shell, built, inp, struc)
         shell.model = Asap.Model(built.nodes, built.frames, built.shells,
                                  _story_shell_loads(built, inp.pressures))
     end
     return shell
+end
+
+"""
+Place the stored slab-edge nodes for the columns `struc` has now.
+
+Returns whether any node moved. The centerline anchors do not.
+"""
+function _place_slab_edge!(shell::StoryShell, struc)
+    isempty(shell.edge_outer) && return false
+    edge = StructuralSizer.story_slab_edge(shell.built.boundary,
+                                           _edge_column_samples(struc, shell.level))
+    length(edge.runs) == maximum(shell.edge_run) || return false
+    moved = false
+    for i in eachindex(shell.edge_outer)
+        run = edge.runs[shell.edge_run[i]]
+        xy = if shell.edge_corner[i]
+            edge.outline[shell.edge_run[i]]
+        else
+            a = shell.edge_anchor[i]
+            (a[1] + run.outward[1] * run.width, a[2] + run.outward[2] * run.width)
+        end
+        node = shell.edge_outer[i]
+        x0 = ustrip(u"m", node.position[1])
+        y0 = ustrip(u"m", node.position[2])
+        (abs(x0 - xy[1]) > 1e-9 || abs(y0 - xy[2]) > 1e-9) && (moved = true)
+        node.position[1] = xy[1] * u"m"
+        node.position[2] = xy[2] * u"m"
+    end
+    return moved
+end
+
+"""One outer node per centerline boundary node, and a triangle pair across the band."""
+function _append_slab_edge!(shell::StoryShell, built, inp, struc)
+    empty!(shell.edge_outer)
+    empty!(shell.edge_anchor)
+    empty!(shell.edge_run)
+    empty!(shell.edge_corner)
+    boundary = built.boundary
+    samples = _edge_column_samples(struc, shell.level)
+    isempty(samples) && return shell
+    edge = StructuralSizer.story_slab_edge(boundary, samples)
+    maximum(r.width for r in edge.runs) > 1e-6 || return shell
+    chain, anchors, poly_edge, station = _boundary_node_chain(built.nodes, boundary)
+    length(chain) < 3 && return shell
+
+    outers = Asap.Node[]
+    sizehint!(outers, length(chain))
+    for i in eachindex(chain)
+        r = edge.edge_run[poly_edge[i]]
+        run = edge.runs[r]
+        corner = station[i] <= 1e-5 && poly_edge[i] == run.edges[1]
+        xy = if corner
+            edge.outline[r]
+        else
+            a = anchors[i]
+            (a[1] + run.outward[1] * run.width, a[2] + run.outward[2] * run.width)
+        end
+        push!(outers, Asap.Node([xy[1] * u"m", xy[2] * u"m", 0.0u"m"], :free))
+        push!(shell.edge_anchor, anchors[i])
+        push!(shell.edge_run, r)
+        push!(shell.edge_corner, corner)
+    end
+
+    n = length(chain)
+    used = falses(n)
+    for i in 1:n
+        j = mod1(i + 1, n)
+        _band_span(chain[i], outers[i]) < 1e-6 &&
+            _band_span(chain[j], outers[j]) < 1e-6 && continue
+        used[i] = used[j] = true
+        b0, b1 = chain[i], chain[j]
+        o0, o1 = outers[i], outers[j]
+        mid = (0.5 * (anchors[i][1] + anchors[j][1]), 0.5 * (anchors[i][2] + anchors[j][2]))
+        nrm = edge.runs[edge.edge_run[poly_edge[i]]].outward
+        probe = (mid[1] - nrm[1] * 1e-3, mid[2] - nrm[2] * 1e-3)
+        panel = StructuralSizer._owning_panel(probe[1], probe[2], inp.panels)
+        sec = inp.panels[panel].section
+        for nodes in ((b0, o0, b1), (o0, o1, b1))
+            el = Asap.ShellTri3(nodes, sec.thickness * u"m", sec.E * u"Pa", sec.ν;
+                                ρ = sec.ρ, id = :slab_edge)
+            push!(built.shells, el)
+            push!(built.panel_index, panel)
+        end
+    end
+    for i in eachindex(outers)
+        used[i] || continue
+        push!(shell.edge_outer, outers[i])
+    end
+    # Drop the bookkeeping of unused nodes so a later move touches only the band.
+    if length(shell.edge_outer) != length(outers)
+        keep = findall(used)
+        shell.edge_anchor = shell.edge_anchor[keep]
+        shell.edge_run = shell.edge_run[keep]
+        shell.edge_corner = shell.edge_corner[keep]
+    end
+    return shell
+end
+
+_band_span(a::Asap.Node, b::Asap.Node) = hypot(
+    ustrip(u"m", a.position[1]) - ustrip(u"m", b.position[1]),
+    ustrip(u"m", a.position[2]) - ustrip(u"m", b.position[2]))
+
+"""Boundary mesh nodes in walk order, with the polygon edge and station of each."""
+function _boundary_node_chain(nodes, polygon)
+    chain = Asap.Node[]
+    anchors = NTuple{2, Float64}[]
+    poly_edge = Int[]
+    station = Float64[]
+    n = length(polygon)
+    for i in 1:n
+        a = polygon[i]
+        b = polygon[mod1(i + 1, n)]
+        hits = Tuple{Float64, Asap.Node, NTuple{2, Float64}}[]
+        for node in nodes
+            xy = (ustrip(u"m", node.position[1]), ustrip(u"m", node.position[2]))
+            s = StructuralSizer._segment_station(xy, a, b; tol = 1e-4)
+            s === nothing && continue
+            s > 1 - 1e-5 && continue
+            push!(hits, (s, node, xy))
+        end
+        sort!(hits, by = first)
+        for (s, node, xy) in hits
+            push!(chain, node)
+            push!(anchors, xy)
+            push!(poly_edge, i)
+            push!(station, s)
+        end
+    end
+    return chain, anchors, poly_edge, station
 end
 
 """Put each beam's current section and web offset on its frame pieces."""
@@ -595,7 +740,140 @@ function _story_shell_inputs(struc, level::Int, concrete, steel, composite_regio
         beam_index[id] = i
     end
     return (; panels, designs, pressures, thickness_of_face, slabs, panel_slab, beams,
-            beam_ids, beam_index, skipped, composite_at, regions_used, origins, stale)
+            beam_ids, beam_index, skipped, composite_at, regions_used, origins, stale,
+            wall_lines = _story_wall_supports(struc, level))
+end
+
+"""
+Plan pieces of walls that hold this story's slab up, in metres.
+
+A wall meets the slab at a story elevation ([`supporting_wall_segments`](@ref)
+uses the same test). An opening whose top reaches the pier top breaks the
+line: there is no wall under the soffit across that width. A window that
+stops short of the soffit leaves the line whole.
+"""
+function _story_wall_supports(struc, level)
+    out = NTuple{2, NTuple{2, Float64}}[]
+    hasproperty(struc, :walls) || return out
+    z = ustrip(u"m", _story_metres(struc.skeleton.stories[level].elevation))
+    for wall in struc.walls
+        zs = StructuralSizer._wall_end_elevations_m(struc.skeleton, wall.story)
+        any(zw -> abs(zw - z) <= 0.1, zs) || continue
+        append!(out, _solid_wall_pieces(wall))
+    end
+    return out
+end
+
+"""Solid pieces of `wall`'s plan line. A full-height opening is a gap."""
+function _solid_wall_pieces(wall; tol::Float64 = 1e-6)
+    x1, y1, x2, y2 = wall.x1, wall.y1, wall.x2, wall.y2
+    L = hypot(x2 - x1, y2 - y1)
+    L <= tol && return NTuple{2, NTuple{2, Float64}}[]
+    H = wall.base.L
+    Hm = H isa Unitful.Quantity ? ustrip(u"m", H) : Float64(H)
+    gaps = Tuple{Float64, Float64}[]
+    for op in wall.openings
+        op.z0 + op.height >= Hm - 1e-3 || continue
+        s0 = clamp(op.s0, 0.0, L)
+        s1 = clamp(op.s0 + op.width, 0.0, L)
+        s1 - s0 > tol && push!(gaps, (s0, s1))
+    end
+    sort!(gaps)
+    merged = Tuple{Float64, Float64}[]
+    for (a, b) in gaps
+        if isempty(merged) || a > merged[end][2] + tol
+            push!(merged, (a, b))
+        else
+            merged[end] = (merged[end][1], max(merged[end][2], b))
+        end
+    end
+    cuts = [0.0]
+    for (a, b) in merged
+        push!(cuts, a, b)
+    end
+    push!(cuts, L)
+    point(s) = (x1 + (x2 - x1) * s / L, y1 + (y2 - y1) * s / L)
+    pieces = NTuple{2, NTuple{2, Float64}}[]
+    for i in 1:2:length(cuts) - 1
+        cuts[i + 1] - cuts[i] > tol || continue
+        push!(pieces, (point(cuts[i]), point(cuts[i + 1])))
+    end
+    return pieces
+end
+
+"""
+Fix the slab on each wall line.
+
+ACI 318-11 R13.6.3.3 (corpus: aci-318-11, page 254): a slab cast integrally
+with a concrete wall of large flexural stiffness has little rotation at the
+joint. uz is fixed. Rotation about the wall's own axis is fixed too: rx
+when the wall runs along x, ry when it runs along y. A skewed wall keeps
+both global rotations free here; [`_story_wall_springs`](@ref) restrains the
+rotation about that wall's axis.
+"""
+function _hold_story_walls!(nodes, segments)
+    isempty(segments) && return 0
+    n = 0
+    for node in nodes
+        pt = (ustrip(u"m", node.position[1]), ustrip(u"m", node.position[2]))
+        hit = findfirst(seg -> StructuralSizer._point_on_segment(pt, seg[1], seg[2]), segments)
+        hit === nothing && continue
+        seg = segments[hit]
+        dof = copy(node.dof)
+        dof[3] && (n += 1)
+        dof[3] = false
+        dx = abs(seg[2][1] - seg[1][1])
+        dy = abs(seg[2][2] - seg[1][2])
+        if dx >= 4 * dy
+            dof[4] = false
+        elseif dy >= 4 * dx
+            dof[5] = false
+        end
+        node.dof = dof
+    end
+    return n
+end
+
+"""
+Grounded springs that restrain rotation about a skewed wall's axis.
+
+# ENGINEERING JUDGMENT
+R13.6.3.3 gives no stiffness. The spring is one thousand times the plate
+rigidity `E t³/12` times the mesh spacing, so the rotation about the wall
+is small beside the slab's own flexibility, and the value stays finite.
+An axis-aligned wall is fixed by its degrees of freedom instead.
+"""
+function _story_wall_springs(shell::StoryShell, segments)
+    springs = Asap.Spring[]
+    isempty(segments) && return springs
+    built = shell.built
+    built === nothing && return springs
+    isempty(built.shells) && return springs
+    el = built.shells[1]
+    spacing = ustrip(u"m", shell.target_edge)
+    k = 1.0e3 * el.E * el.thickness^3 / 12 * spacing
+    seen = IdDict{Asap.Node, Nothing}()
+    for node in built.nodes
+        haskey(seen, node) && continue
+        pt = (ustrip(u"m", node.position[1]), ustrip(u"m", node.position[2]))
+        hit = findfirst(seg -> StructuralSizer._point_on_segment(pt, seg[1], seg[2]), segments)
+        hit === nothing && continue
+        seg = segments[hit]
+        dx = seg[2][1] - seg[1][1]
+        dy = seg[2][2] - seg[1][2]
+        L = hypot(dx, dy)
+        L > 1e-9 || continue
+        (abs(dx) >= 4 * abs(dy) || abs(dy) >= 4 * abs(dx)) && continue
+        seen[node] = nothing
+        tx, ty = dx / L, dy / L
+        spring = Asap.Spring(node; id = :wall_axis)
+        spring.K[4, 4] = k * tx * tx
+        spring.K[4, 5] = k * tx * ty
+        spring.K[5, 4] = k * ty * tx
+        spring.K[5, 5] = k * ty * ty
+        push!(springs, spring)
+    end
+    return springs
 end
 
 """
@@ -619,7 +897,7 @@ function solve_story_shell!(shell::StoryShell, struc;
     level = shell.level
     concrete, steel = shell.concrete, shell.steel
     inp = _story_shell_inputs(struc, level, concrete, steel, composite_regions)
-    _story_shell_signature(inp) == shell.signature || _mesh_story_shell!(shell, inp)
+    _story_shell_signature(inp) == shell.signature || _mesh_story_shell!(shell, inp, struc)
     built = shell.built
     reasons = String[]
     isempty(inp.skipped) || push!(reasons,
@@ -640,14 +918,19 @@ function solve_story_shell!(shell::StoryShell, struc;
     else
         model = shell.model
         _set_story_beams!(shell, inp)
+        moved = _place_slab_edge!(shell, struc)
         model.loads = _story_shell_loads(built, inp.pressures)
-        if model.processed
+        if model.processed && moved
+            # The edge nodes moved. Connectivity did not, so the pattern stands.
+            Asap.update!(model; geometry = true)
+        elseif model.processed
             Asap.update!(model; values_only = true)
         else
             Asap.process!(model)
         end
         empty!(model.springs)
         springs = _story_column_springs(struc, level, built.nodes, concrete, steel)
+        append!(springs, _story_wall_springs(shell, inp.wall_lines))
         isempty(springs) || Asap.add_springs!(model, springs)
         Asap.solve!(model)
         forces = _shell_beam_forces(built.frames)

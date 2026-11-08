@@ -12,6 +12,18 @@ include("waffle/_waffle.jl")
 # Calculations and analysis (loads before sizing)
 include("flat_plate/_flat_plate.jl")
 
+# One-way coefficients, or the shell for any other panel.
+include("panel_analysis.jl")
+
+# Frame beams sharing nodes with that shell. Wall lines are supports of it.
+include("panel_shell_beams.jl")
+
+# Slab edge outside the column centerlines. The centerline polygon stays put.
+include("slab_edge.jl")
+
+# Slab bars from that shell's moment tensor.
+include("story_shell_bars.jl")
+
 # CIP sizing for all cast-in-place types (FlatPlate, FlatSlab, TwoWay, OneWay, Waffle, PTBanded)
 include("sizing.jl")
 

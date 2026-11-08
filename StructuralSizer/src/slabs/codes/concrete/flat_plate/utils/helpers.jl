@@ -175,10 +175,13 @@ function supporting_wall_segments(struc, slab)
     return out
 end
 
+"""A story elevation as metres. A bare number is already metres."""
+_story_elevation_m(x) = x isa Unitful.Quantity ? ustrip(u"m", x) : Float64(x)
+
 """Story elevation and the next story that has faces, in metres."""
 function _wall_end_elevations_m(skel, story)::Vector{Float64}
     haskey(skel.stories, story) || return Float64[]
-    zs = Float64[ustrip(u"m", skel.stories[story].elevation)]
+    zs = Float64[_story_elevation_m(skel.stories[story].elevation)]
     above = nothing
     for k in sort!(collect(keys(skel.stories)))
         k <= story && continue
@@ -187,7 +190,7 @@ function _wall_end_elevations_m(skel, story)::Vector{Float64}
             break
         end
     end
-    above === nothing || push!(zs, ustrip(u"m", skel.stories[above].elevation))
+    above === nothing || push!(zs, _story_elevation_m(skel.stories[above].elevation))
     return zs
 end
 

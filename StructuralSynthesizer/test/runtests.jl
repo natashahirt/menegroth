@@ -74,6 +74,7 @@ using Asap  # ensures `u"kip"`, `u"ksi"`, etc resolve via Asap unit module
         include("analyze/test_composite_context.jl")
         include("analyze/test_story_shell.jl")
         include("analyze/test_story_shell_beams.jl")
+        include("analyze/test_story_shell_walls.jl")
     end
 
     # ─── Scene packets (web viewer) ──────────────────────────────────────

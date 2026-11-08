@@ -37,14 +37,10 @@ end
 
 """
 Stories that `design_building` designs with the story shell: every slab
-panel on the story is a one-way or two-way concrete slab, and no wall takes
-load from any of them.
+panel on the story is a one-way or two-way concrete slab.
 
-# ENGINEERING JUDGMENT
-The story shell holds the slab up at column centres and on beams only. A
-wall-supported edge would be free in it, so the slab would sag where it
-hogs over the wall and the top bars there would be missed. Such a story
-keeps its panels `:not_analyzed`.
+A wall that carries the story is a line support of that shell
+([`_story_wall_supports`](@ref)), so the story is not skipped for having walls.
 """
 function _story_shell_design_levels(struc)
     level_of = Dict(f => lvl for (lvl, story) in struc.skeleton.stories for f in story.faces)
@@ -56,13 +52,7 @@ function _story_shell_design_levels(struc)
         sym = cell.floor_type === :unknown ? slab.floor_type : cell.floor_type
         push!(get!(Set{Symbol}, kinds, lvl), sym)
     end
-    on_walls = Set{Int}()
-    for wall in struc.walls, ci in keys(wall.tributary_cell_areas)
-        lvl = get(level_of, struc.cells[ci].face_idx, nothing)
-        lvl === nothing || push!(on_walls, lvl)
-    end
-    return sort!([lvl for (lvl, ks) in kinds
-                  if ks ⊆ (:one_way, :two_way) && !(lvl in on_walls)])
+    return sort!([lvl for (lvl, ks) in kinds if ks ⊆ (:one_way, :two_way)])
 end
 
 """

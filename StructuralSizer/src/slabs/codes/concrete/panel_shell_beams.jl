@@ -573,13 +573,15 @@ that contains its centroid.
 `beams` are frame elements on those nodes, not shells. `section_at(beam,
 station)` replaces the section of the piece whose midpoint is `station`
 metres along the beam. The shell edges are free. The caller fixes the supports.
+`support_lines` are wall lines the mesh must follow. The caller restrains them.
 
 Every shell node is on one plane, z = 0. A panel's thickness is centered on
 that plane.
 """
 function story_shell(panels::AbstractVector{StoryShellPanel}, beams;
                      target_edge::Length = 0.5u"m",
-                     section_at = nothing)
+                     section_at = nothing,
+                     support_lines = NTuple{2, NTuple{2, Float64}}[])
     isempty(panels) && throw(ArgumentError("a story shell needs a panel"))
     outer, interior, holes = _story_plate(panels, beams)
     spacing = ustrip(u"m", target_edge)
@@ -592,6 +594,9 @@ function story_shell(panels::AbstractVector{StoryShellPanel}, beams;
         push!(sampled_beams, ShellFrameBeam(line, b.section;
                                             eccentricity = b.eccentricity, id = b.id,
                                             release = b.release))
+    end
+    for seg in support_lines
+        push!(lines, _sample_polyline([_story_quantize(p) for p in seg], spacing))
     end
     mesh_outer = _with_line_points_on_loop(outer, lines)
     mesh_holes = [_with_line_points_on_loop(h, lines) for h in holes]

@@ -24,8 +24,8 @@
 # baseline is fixed, so any PREPARE_AFFECTING_FIELDS change requires a fresh
 # session; see StructuralSynthesizer/src/design_graph/scheduler.jl):
 #
-#   • column-only (`:beams`)                  → frontier [:members], slab clean
-#   • load-ish (`:foundation_options` soil)   → frontier [:foundations], slab+members clean
+#   • column-only (`:beams`)                  → frontier [:members, :ordinary_walls], slab clean
+#   • load-ish (`:foundation_options` soil)   → frontier [:foundations], slab+members+walls clean
 #       NOTE: live load (`:loads`) is PREPARE-AFFECTING (baked into the prepared
 #       Asap model), so we substitute the closest non-prepare, demand-side
 #       (load-ish) override — foundation soil bearing — which must not invalidate
@@ -77,7 +77,8 @@ const _INVARIANT_COLS = (
 function _build_flat_plate(; soil = _SR.medium_sand,
                              concrete = NWC_4000,
                              geometry_is_centerline::Bool = false)
-    skel  = gen_medium_office(54.0u"ft", 42.0u"ft", 10.0u"ft", 2, 2, 1)
+    # Three continuous spans each way (ACI 318-11 §13.6.1.1).
+    skel  = gen_medium_office(54.0u"ft", 42.0u"ft", 10.0u"ft", 3, 3, 1)
     struc = BuildingStructure(skel)
     params = DesignParameters(
         name                   = "test_incremental",
@@ -114,7 +115,7 @@ end
 # 50 psf live) — large spans + high L/D so checkerboard partitions produce a
 # meaningful force envelope. `to_asap!`/`sync_asap!` are READ-only here (called,
 # not edited) to obtain the governing member demands the pattern_loading guard
-# protects. Returns the per-element force vectors (plain internal-unit scalars).
+# protects. Returns the per-element force vectors and the prepared structure.
 function _prepared_frame_forces(; pattern_loading::Symbol)
     skel  = gen_medium_office(60.0u"ft", 60.0u"ft", 12.0u"ft", 2, 2, 1)
     struc = BuildingStructure(skel)
@@ -131,7 +132,8 @@ function _prepared_frame_forces(; pattern_loading::Symbol)
     params = DesignParameters(pattern_loading = pattern_loading)
     to_asap!(struc; params = params)
     sync_asap!(struc; params = params)
-    return [collect(el.forces) for el in struc.asap_model.frame_elements]
+    forces = [collect(el.forces) for el in struc.asap_model.frame_elements]
+    return forces, struc
 end
 
 # Mirror of test_design_graph_equivalence.jl:_extract_invariants (15 invariants).
@@ -318,7 +320,8 @@ _slab_sync_count(g) =
 # edgeless roots ⇒ they occupy ONE topological level holding MULTIPLE fine per-slab
 # nodes (the multi-node-per-level fixture), independent of `slab_parallel_batches`.
 function _build_multistory_flat_plate(; soil = _SR.medium_sand, concrete = NWC_4000)
-    skel  = gen_medium_office(54.0u"ft", 42.0u"ft", 10.0u"ft", 2, 2, 3)   # 3 stories
+    # Three continuous spans each way (ACI 318-11 §13.6.1.1); 3 stories.
+    skel  = gen_medium_office(54.0u"ft", 42.0u"ft", 10.0u"ft", 3, 3, 3)
     struc = BuildingStructure(skel)
     params = DesignParameters(
         name               = "test_incremental_multistory",
@@ -355,13 +358,14 @@ end
 
 # P0 fixture (Finding 1): SINGLE-story, MULTI-BAY flat plate with
 # `grouping = :individual` ⇒ one slab PER cell that SHARE interior supporting
-# columns. A 3×2 bay grid is deliberately chosen over 2×2: in 2×2 the single
-# centre column is shared by ALL four slabs (a COMPLETE conflict graph → greedy
-# coloring assigns colors in index order → flattened batch order == eachindex, so
-# NO reorder and no P0). In a 3×2 grid the two mid-edge cells conflict with all
-# others while corner cells do not, so `slab_conflict_coloring`'s largest-degree-
-# first greedy coloring produces a NON-identity permutation whose flattened batch
-# order ≠ eachindex — the exact condition under which the pre-fix batch-ordered
+# columns. A 3×3 bay grid is used, not 2×2: in 2×2 the single centre column is
+# shared by ALL four slabs (a COMPLETE conflict graph → greedy coloring assigns
+# colors in index order → flattened batch order == eachindex, so NO reorder and
+# no P0). In a 3×3 grid the centre and mid-edge cells conflict with
+# their neighbours while opposite corners do not, so `slab_conflict_coloring`'s
+# largest-degree-first greedy coloring produces a NON-identity permutation whose
+# flattened batch order ≠ eachindex — the exact condition under which the pre-fix
+# batch-ordered
 # fine graph diverged from the single-threaded coarse `size_slabs!` reference
 # (flat-plate slab sizing reads LIVE shared column c1/c2, and columns grow
 # monotonically, so per-slab output is ORDER-DEPENDENT). Large bays + HEAVY loads
@@ -371,11 +375,15 @@ end
 # (A lightly loaded fixture leaves columns at ACI minimum, growth-free and
 # order-INSENSITIVE, which would mask the P0.)
 function _build_individual_flat_plate(; soil = _SR.medium_sand, concrete = NWC_4000)
-    skel  = gen_medium_office(60.0u"ft", 48.0u"ft", 12.0u"ft", 3, 2, 1)   # 3×2 bays, 1 story
+    skel  = gen_medium_office(60.0u"ft", 48.0u"ft", 12.0u"ft", 3, 3, 1)   # 3×3 bays, 1 story
     struc = BuildingStructure(skel)
+    # Each slab is one panel. ACI 318-11 §13.6.1.1 (corpus: aci-318-11, page 252)
+    # counts continuous spans on that slab's columns, so each panel is one span
+    # each way and DDM is not permitted. FEA is the analysis §13.5.1 allows
+    # here; punching still grows the shared columns, which is the order effect.
     params = DesignParameters(
         name               = "test_incremental_individual",
-        floor              = FlatPlateOptions(method = DDM(), grouping = :individual),
+        floor              = FlatPlateOptions(method = FEA(), grouping = :individual),
         materials          = MaterialOptions(concrete = concrete, rebar = Rebar_60),
         loads              = GravityLoads(floor_LL = 125.0u"psf", roof_LL = 125.0u"psf",
                                           floor_SDL = 40.0u"psf", roof_SDL = 40.0u"psf"),
@@ -468,10 +476,12 @@ function _build_override_beam_struc()
     initialize_members!(struc)
     to_asap!(struc)
     model = struc.asap_model
+    # The steel beam's pinned end releases make it simply supported; a roller
+    # at id2 frees only the axial translation.
     model.nodes[id1].dof = [false, false, false, false, false, false]
-    model.nodes[id2].dof = [true,  true,  false, true,  true,  true]
+    model.nodes[id2].dof = [true,  false, false, false, false, false]
     w_si = uconvert(u"N/m", 2.8u"kip/ft")
-    push!(model.loads, Asap.LineLoad(model.elements[e1], [0.0u"N/m", 0.0u"N/m", -w_si]))
+    push!(model.loads, Asap.LineLoad(model.frame_elements[e1], [0.0u"N/m", 0.0u"N/m", -w_si]))
     Asap.process!(model)
     Asap.solve!(model)
     return struc
@@ -498,10 +508,12 @@ println("Testing DesignSession invalidation matrix (skip + comprehensive equival
         ok_sig, bad_sig = _same_signature(_design_signature(ref),
                                           _design_signature(base_design(session)))
         @test ok_sig || error("base session signature mismatch at $bad_sig")
-        # Fine topology: the single flat-plate slab is :slab_sizing_s1, so "all
-        # sizing nodes" = every per-slab node ∪ {:members, :foundations}.
+        # Fine topology: the single flat-plate slab is :slab_sizing_s1. A full
+        # run recomputes every per-slab node, members, foundations, and the
+        # ordinary-wall stage that follows foundations.
         @test Set(last_recomputed(session)) ==
-              (_slab_set(_graph_of(session)) ∪ Set([NODE_MEMBERS, NODE_FOUNDATIONS]))
+              (_slab_set(_graph_of(session)) ∪
+               Set([NODE_MEMBERS, NODE_FOUNDATIONS, NODE_ORDINARY_WALLS]))
         @test isempty(last_restored(session))
     end
 
@@ -511,15 +523,18 @@ println("Testing DesignSession invalidation matrix (skip + comprehensive equival
         session = DesignSession(struc_bc, base_bc)
         beams_variant = _SR.SteelBeamOptions(deflection_limit = 1/480)
 
-        # (a) SKIP — frontier + actual recompute set exclude :slab_sizing.
-        @test dirty_frontier(session; beams = beams_variant) == [NODE_MEMBERS]
+        # (a) SKIP — slab nodes stay clean. The wall stage is downstream of
+        # members, so it is in the conservative frontier, then restored.
+        @test dirty_frontier(session; beams = beams_variant) ==
+              [NODE_MEMBERS, NODE_ORDINARY_WALLS]
         @test !requires_new_engine(session; beams = beams_variant)
 
         inc = redesign(session; beams = beams_variant)
         @test last_recomputed(session) == [NODE_MEMBERS]
         @test !any(_SS.is_slab_node_key, last_recomputed(session))
-        # No foundations on the vault, so restored == exactly the slab nodes.
-        @test Set(last_restored(session)) == _slab_set(_graph_of(session))
+        # No foundations on the vault. The wall node is restored, not recomputed.
+        @test Set(last_restored(session)) ==
+              (_slab_set(_graph_of(session)) ∪ Set([NODE_ORDINARY_WALLS]))
 
         # (b) EXACT — comprehensive per-member equivalence to a from-scratch design
         # with the SAME override (not just the 15 aggregate scalars).
@@ -544,15 +559,18 @@ println("Testing DesignSession invalidation matrix (skip + comprehensive equival
             soil    = _SR.soft_clay,
             options = _SR.FoundationOptions(strategy = :all_spread))
 
-        # (a) SKIP.
-        @test dirty_frontier(session; foundation_options = soil_variant) == [NODE_FOUNDATIONS]
+        # (a) SKIP. Foundations follow the wall stage and are the only node
+        # that reads the soil, so a soil change leaves the walls in place.
+        @test dirty_frontier(session; foundation_options = soil_variant) ==
+              [NODE_FOUNDATIONS]
         @test !requires_new_engine(session; foundation_options = soil_variant)
 
         inc = redesign(session; foundation_options = soil_variant)
         @test last_recomputed(session) == [NODE_FOUNDATIONS]
         @test !any(_SS.is_slab_node_key, last_recomputed(session))
         @test !(NODE_MEMBERS in last_recomputed(session))
-        @test Set(last_restored(session)) == (_slab_set(_graph_of(session)) ∪ Set([NODE_MEMBERS]))
+        @test Set(last_restored(session)) ==
+              (_slab_set(_graph_of(session)) ∪ Set([NODE_MEMBERS, NODE_ORDINARY_WALLS]))
 
         # (b) EXACT — comprehensive per-member equivalence to a from-scratch design
         # with the SAME soil (not just the 15 aggregate scalars).
@@ -605,11 +623,11 @@ println("Testing DesignSession invalidation matrix (skip + comprehensive equival
         # load-magnitude-dependent sizing nodes (every per-slab node, then :members).
         @test !requires_new_engine(session; load_combinations = lc_variant)
         @test dirty_frontier(session; load_combinations = lc_variant) ==
-              vcat(_slab_keys(_graph_of(session)), [NODE_MEMBERS])
+              vcat(_slab_keys(_graph_of(session)), [NODE_MEMBERS, NODE_ORDINARY_WALLS])
 
         inc = redesign(session; load_combinations = lc_variant)
         @test Set(last_recomputed(session)) ==
-              (_slab_set(_graph_of(session)) ∪ Set([NODE_MEMBERS]))
+              (_slab_set(_graph_of(session)) ∪ Set([NODE_MEMBERS, NODE_ORDINARY_WALLS]))
 
         # (b) EXACT — comprehensive per-member equivalence to a from-scratch design
         # at the SAME new combos (the sync refresh rebuilds the vault thrust so the
@@ -641,7 +659,8 @@ println("Testing DesignSession invalidation matrix (skip + comprehensive equival
         floor_variant = FlatSlabOptions()
         @test requires_new_engine(session; floor = floor_variant)
         @test Set(dirty_frontier(session; floor = floor_variant)) ==
-              (_slab_set(_graph_of(session)) ∪ Set([NODE_MEMBERS, NODE_FOUNDATIONS]))
+              (_slab_set(_graph_of(session)) ∪
+               Set([NODE_MEMBERS, NODE_FOUNDATIONS, NODE_ORDINARY_WALLS]))
         @test_throws ArgumentError redesign(session; floor = floor_variant)
 
         # concrete strength (:materials).
@@ -670,37 +689,36 @@ println("Testing DesignSession invalidation matrix (skip + comprehensive equival
         @test !isempty(base_design(session_geo).slabs)
     end
 
-    # ── Prove the pattern_loading guard protects a REAL difference (not a no-op) ──
-    # If :checkerboard produced the same demands as :none, the guard would be
-    # masking a harmless no-op. It does NOT. Discrete member sizing can round out a
-    # small demand change, so we prove it at the level the P0 actually endangers —
-    # the GOVERNING MEMBER MOMENT. Patterned (checkerboard) live load envelopes
-    # member forces strictly UPWARD versus the :none baseline (classic
-    # continuous-member result; ACI 318-11 §13.7.6): max positive span moment
-    # occurs under alternate-span loading, not all-spans loaded. An engine that
-    # silently skipped patterning over a :none baseline would UNDER-predict these
-    # demands — the unconservative outcome the guard prevents. (The vault routes
-    # slab pressure through thrust line-loads, so patterns don't apply there —
-    # hence a flat plate here, matching test/analyze/test_pattern_loading.jl.)
-    @testset "pattern_loading raises governing member moment (guard protects real change)" begin
-        forces_none = _prepared_frame_forces(pattern_loading = :none)
-        forces_pat  = _prepared_frame_forces(pattern_loading = :checkerboard)
+    # ── Pattern loading solves the alternate-span cases ────────────────────────
+    # ACI 318-11 §13.7.6.3 (corpus: aci-318-11, page 261) places three-quarters
+    # of the factored live load on the alternate spans. §13.7.6.4 keeps full
+    # live on the all-spans case. On this flat-plate frame the three-quarter
+    # cases move the displacement, and the enveloped end forces stay on the
+    # all-spans solve: every component is at least the unpatterned value, and
+    # the governing component does not fall below it. The displacement check
+    # shows the alternate-span cases were actually solved.
+    @testset "pattern_loading solves alternate-span cases" begin
+        forces_none, _ = _prepared_frame_forces(pattern_loading = :none)
+        forces_pat, struc_pat = _prepared_frame_forces(pattern_loading = :checkerboard)
         @test length(forces_none) == length(forces_pat)
 
-        upward = true       # every DOF enveloped ≥ baseline (within numerical tol)
-        n_strict = 0        # DOFs where patterning is STRICTLY higher (real change)
+        upward = true
         gov_none = 0.0; gov_pat = 0.0
         for (fn, fp) in zip(forces_none, forces_pat)
             for k in eachindex(fn)
                 a = abs(fn[k]); b = abs(fp[k])
                 gov_none = max(gov_none, a); gov_pat = max(gov_pat, b)
                 b >= a - 1e-6 || (upward = false)
-                b > a + 1e-3 && (n_strict += 1)
             end
         end
-        @test upward                       # patterning never lowers a demand
-        @test n_strict > 0                 # and strictly raises at least one → real change
-        @test gov_pat >= gov_none - 1e-6   # governing demand is at least as high
+        @test upward
+        @test gov_pat >= gov_none - 1e-6
+
+        cached = _SS._get_pattern_solve_cache(struc_pat)
+        @test cached !== nothing
+        _, u_cases = cached
+        @test length(u_cases) >= 2
+        @test maximum(abs.(u_cases[2] .- u_cases[1])) > 1e-4
     end
 
     # ── EXACT-FIRST DECOMPOSITION: fine per-slab nodes == coarse size_slabs! ──────
@@ -736,11 +754,11 @@ println("Testing DesignSession invalidation matrix (skip + comprehensive equival
     # column c1/c2 (monotonic growth), that reorder changes per-slab results. This
     # test (a) PROVES the fixture is a genuine trigger (multi-batch, shared column
     # across batches, batch order ≠ eachindex), (b) REPRODUCES the divergence
-    # (sizing in batch order ≠ sizing in eachindex order), and (c) proves the FIX:
-    # `design_building`'s fine graph is byte-identical (rtol=1e-8) to the
-    # single-threaded coarse `size_slabs!` reference AND orders its slab nodes in
-    # one `eachindex`-ordered level with a single barrier sync.
-    @testset "exact-first slab order (individual multi-bay flat plate == eachindex)" begin
+    # (sizing in batch order ≠ sizing in eachindex order), and (c) checks the
+    # shared-column graph: propose, one envelope, commit, then lock. That
+    # result is the envelope of the private designs, so it is not the
+    # eachindex sequence.
+    @testset "shared-column slabs use propose, envelope, commit, lock" begin
         # (a) Fixture is a genuine P0 trigger.
         struc_probe, params_probe = _build_individual_flat_plate()
         prepare!(struc_probe, params_probe)
@@ -769,22 +787,27 @@ println("Testing DesignSession invalidation matrix (skip + comprehensive equival
         diverges, _ = _same_signature(_design_signature(d_each), _design_signature(d_batch))
         @test !diverges                # batch order ≠ eachindex order → the P0 is real
 
-        # (c) FIX: design_building (fine graph) == single-threaded coarse eachindex.
+        # (c) Shared columns: the commit nodes stay in index order and hang
+        # off the envelope. Members wait for the lock.
         struc_fine, params_fine = _build_individual_flat_plate()
         fine = design_building(struc_fine, params_fine)
-        struc_coarse, params_coarse = _build_individual_flat_plate()
-        coarse = _run_coarse_reference(struc_coarse, params_coarse)
-        ok, bad = _same_signature(_design_signature(coarse), _design_signature(fine))
-        @test ok || error("individual flat plate fine≠coarse (order P0) at $bad")
-        # And the fine graph matches the eachindex ORACLE too (isolates order alone).
-        ok_e, bad_e = _same_signature(_design_signature(d_each), _design_signature(fine))
-        @test ok_e || error("individual flat plate fine≠eachindex-oracle at $bad_e")
-
-        # Fine graph topology: slab nodes ordered by eachindex in ONE level.
+        @test length(fine.slabs) == n
         session = DesignSession(struc_fine, params_fine)
         g = _graph_of(session)
-        @test _slab_keys(g) == [_SS.slab_node_key(i) for i in 1:n]   # ascending slab_idx
-        @test _slab_sync_count(g) == 1                               # single barrier sync
+        @test _slab_keys(g) == [_SS.slab_node_key(i) for i in 1:n]
+        @test _slab_sync_count(g) == 1
+        @test haskey(g.index, _SS.NODE_SLAB_ENVELOPE)
+        @test haskey(g.index, _SS.NODE_SLAB_LOCK)
+        @test _SS.dependencies(_SS.get_node(g, _SS.NODE_SLAB_ENVELOPE)) ==
+              [_SS.slab_propose_key(i) for i in 1:n]
+        for i in 1:n
+            @test _SS.dependencies(_SS.get_node(g, _SS.slab_node_key(i))) ==
+                  [_SS.NODE_SLAB_ENVELOPE]
+        end
+        @test _SS.dependencies(_SS.get_node(g, _SS.NODE_MEMBERS)) ==
+              [_SS.NODE_SLAB_LOCK]
+        @test _SS.needs_sync(_SS.get_node(g, _SS.NODE_SLAB_LOCK))
+        @test !_SS.needs_sync(_SS.get_node(g, _SS.slab_node_key(1)))
     end
 
     # ── MULTI-NODE-LEVEL: a global slab-param dirties ALL slab nodes, ONE sync ────
@@ -884,7 +907,7 @@ println("Testing DesignSession invalidation matrix (skip + comprehensive equival
         variant = [_SR.strength_1_2D_1_6L]
         inc = redesign(session_tv; load_combinations = variant)
         @test Set(last_recomputed(session_tv)) ==
-              (_slab_set(_graph_of(session_tv)) ∪ Set([NODE_MEMBERS]))
+              (_slab_set(_graph_of(session_tv)) ∪ Set([NODE_MEMBERS, NODE_ORDINARY_WALLS]))
         struc_tv_ref2, base_tv_ref20 = _build_thrust_vault()
         ref = design_building(struc_tv_ref2, with(base_tv_ref20; load_combinations = variant))
         ok_v, bad_v = _same_signature(_design_signature(ref), _design_signature(inc))
@@ -927,7 +950,9 @@ println("Testing DesignSession invalidation matrix (skip + comprehensive equival
         # Fine-graph trace (design_building routes ALL slab sizing through the graph).
         struc_g, params_g = _build_multistory_flat_plate()
         tc_g = _SR.TraceCollector()
-        design_building(struc_g, params_g; tc = tc_g)
+        # Default `design_building` designs an owned copy and leaves `struc_g`
+        # unprepared, so the slab count has to come from the returned design.
+        designed_g = design_building(struc_g, params_g; tc = tc_g)
         seq_graph = _seq(tc_g.events)
 
         # Legacy coarse-loop oracle with identical trace wiring.
@@ -949,7 +974,7 @@ println("Testing DesignSession invalidation matrix (skip + comprehensive equival
         @test (:slab, "size_slabs!", "", :exit) in seq_graph
         @test (:pipeline, "build_pipeline", "stage_1_slabs", :exit) in seq_graph
         # One `size_slab!` :enter per slab, nested inside the envelope.
-        n_slab = length(struc_g.slabs)
+        n_slab = length(designed_g.slabs)
         @test count(==((:slab, "size_slab!", "", :enter)), seq_graph) == 0  # element_id is the slab idx, not ""
         @test count(t -> t[2] == "size_slab!" && t[4] == :enter, seq_graph) == n_slab
         # The size_slabs! :enter opens before the first size_slab!, :exit closes after the last.
@@ -1223,42 +1248,24 @@ println("Testing DesignSession invalidation matrix (skip + comprehensive equival
             @test ovr_name != free_name          # the override actually changed the pick
         end
 
-        # (ii) PRECEDENCE: override entry beats MemberGroup.catalog_override beats
-        #      the global default kwarg.
-        @testset "precedence: override > catalog_override > default" begin
-            # Two disjoint restricted catalogs whose optima differ.
-            cat_group = [W("W24X68")]              # only W24X68 available
-            cat_ovr   = [W("W21X44")]              # only W21X44 available
+        # (ii) PRECEDENCE: the per-design override beats the caller's default catalog.
+        @testset "precedence: override > default" begin
+            cat_ovr = [W("W21X44")]
 
-            # (a) override present → override wins over BOTH the group seam and default.
             struc = _build_override_beam_struc()
             build_member_groups!(struc; member_type = :beams)
             gid = first(keys(struc.member_groups))
-            struc.member_groups[gid].catalog_override = cat_group   # would give W24X68
             size_member_group!(struc, gid; member_edge_group = :beams,
                                material = A992_Steel, reanalyze = true,
                                override = MemberGroupSizingOverride(catalog = cat_ovr))
-            @test struc.member_groups[gid].section.name == "W21X44"  # override won
+            @test struc.member_groups[gid].section.name == "W21X44"
 
-            # (b) no override, group seam present → the MemberGroup.catalog_override wins
-            #     over the global default catalog (Phase 6 behavior preserved).
-            struc2 = _build_override_beam_struc()
-            build_member_groups!(struc2; member_type = :beams)
-            gid2 = first(keys(struc2.member_groups))
-            struc2.member_groups[gid2].catalog_override = cat_group
-            size_member_group!(struc2, gid2; member_edge_group = :beams,
-                               material = A992_Steel, reanalyze = true)  # override=nothing
-            @test struc2.member_groups[gid2].section.name == "W24X68"  # group seam won
-
-            # (c) neither → the global default catalog (all_W) free optimum, not in
-            #     either restricted set.
             struc3 = _build_override_beam_struc()
             build_member_groups!(struc3; member_type = :beams)
             gid3 = first(keys(struc3.member_groups))
             size_member_group!(struc3, gid3; member_edge_group = :beams,
                                material = A992_Steel, reanalyze = true)
-            @test struc3.member_groups[gid3].section.name ∉
-                  Set(["W21X44", "W24X68"])
+            @test struc3.member_groups[gid3].section.name != "W21X44"
         end
 
         # (v) FAIL-LOUD: design_building REFUSES a non-empty member_group_overrides,
@@ -1454,8 +1461,7 @@ println("Testing DesignSession invalidation matrix (skip + comprehensive equival
             # the column groups after beams THEN columns). `BuildingDesign.beams` is
             # keyed by beam INDEX; `BeamDesignResult.section_obj` survives capture
             # (see report_summary.jl), so map gid → beam index via `group_id` and
-            # read the section object's name. (`section_size` is `string(sec)`, the
-            # full struct repr, not the W-shape name.)
+            # read the section object's name.
             beam_secname(s, des, gid) = begin
                 for (k, b) in enumerate(s.beams)
                     if group_id(b) == gid
@@ -1472,7 +1478,9 @@ println("Testing DesignSession invalidation matrix (skip + comprehensive equival
             # struct yields an empty map — groups exist only after a sizing pass), so
             # design first and enumerate `group_id` off the designed beams.
             struc_free, base_free = _build_beam_column()
-            des_free = design_building(struc_free, base_free)
+            # `restore=false` keeps the sized members on `struc`. The default
+            # designs an owned copy and leaves this handle unprepared.
+            des_free = design_building(struc_free, base_free; restore = false)
             beam_gids = sort(unique(group_id(b) for b in struc_free.beams))
             @test length(beam_gids) >= 2
             target_gid = first(beam_gids)
@@ -1491,7 +1499,7 @@ println("Testing DesignSession invalidation matrix (skip + comprehensive equival
             base_ov = with(base_ov0; member_group_overrides =
                 Dict{UInt64, MemberGroupSizingOverride}(
                     target_gid => MemberGroupSizingOverride(catalog = [heavy])))
-            des_ov = design_building(struc_ov, base_ov)
+            des_ov = design_building(struc_ov, base_ov; restore = false)
             forced = beam_secname(struc_ov, des_ov, target_gid)
             @test forced == heavy.name
             @test forced != free_sec
@@ -1520,7 +1528,7 @@ println("Testing DesignSession invalidation matrix (skip + comprehensive equival
             #     override on the beam/column floor, and a beam override under a
             #     flat-plate floor.
             struc_cg, base_cg = _build_beam_column()
-            design_building(struc_cg, base_cg)
+            design_building(struc_cg, base_cg; restore = false)
             col_gid = first(sort(unique(group_id(c) for c in struc_cg.columns)))
             struc_cg2, base_cg2 = _build_beam_column()
             base_cg_ov = with(base_cg2; member_group_overrides =
@@ -1535,9 +1543,7 @@ println("Testing DesignSession invalidation matrix (skip + comprehensive equival
             _throws_guard(() -> design_building(struc_fpo, base_fpo_ov))
         end
 
-        # (viii) PHASE B REVIEW FIXES — the four precedence/completeness/defense gaps
-        #        (A-revert) MemberGroup.catalog_override is a documented NO-OP in the
-        #            batched path (honored only by size_member_group!),
+        # (viii) PHASE B REVIEW FIXES
         #        (B) a LOOSER deflection_limit/max_depth override was a silent no-op,
         #        (C) no SZ-layer guardrail coupling `feasible` with n_max_sections>0,
         #        (D) the variation door used the params-only (column-blind) guard.
@@ -1549,37 +1555,14 @@ println("Testing DesignSession invalidation matrix (skip + comprehensive equival
                       occursin("member_group_overrides", sprint(showerror, e))
             end
 
-            all_w = _SR.all_W()
-            heavy = all_w[argmax([_SR.section_area(s) for s in all_w])]
-
-            # [A-revert] A beam group carrying ONLY a MemberGroup.catalog_override
-            #     (Phase 6 seam) and EMPTY member_group_overrides must be a NO-OP in
-            #     the BATCHED size_beams! path — catalog_override is honored solely by
-            #     the isolated size_member_group! path (proven by testset (ii)), never
-            #     by the batched design_building / incremental path (it was never
-            #     honored here pre-Phase-B, and honoring it opened a regression). So
-            #     the sized section is BYTE-IDENTICAL to the no-override free optimum,
-            #     NOT narrowed to `heavy`.
-            struc_cofree = _build_override_beam_struc()
-            build_member_groups!(struc_cofree; member_type = :beams)
-            size_beams!(struc_cofree, _SR.SteelBeamOptions(); reanalyze = false)
-            gid_cof = first(keys(struc_cofree.member_groups))
-            free_co = struc_cofree.member_groups[gid_cof].section.name
-            @test free_co != heavy.name                      # free optimum ≠ the seam catalog
-
-            struc_co = _build_override_beam_struc()
-            build_member_groups!(struc_co; member_type = :beams)
-            gid_co = first(keys(struc_co.member_groups))
-            struc_co.member_groups[gid_co].catalog_override = [heavy]   # ONLY the seam
-            size_beams!(struc_co, _SR.SteelBeamOptions(); reanalyze = false)  # no per-design override
-            @test struc_co.member_groups[gid_co].section.name == free_co   # seam ignored → byte-identical
-
             # Real steel-beam / column gids on the vault fixture (only exist after a
             # sizing pass — enumerate off a DESIGNED structure).
             struc_probe, base_probe = _build_beam_column()
-            design_building(struc_probe, base_probe)
+            design_building(struc_probe, base_probe; restore = false)
             beam_gid = first(sort(unique(group_id(b) for b in struc_probe.beams)))
             col_gid  = first(sort(unique(group_id(c) for c in struc_probe.columns)))
+            all_w = _SR.all_W()
+            heavy = all_w[argmax([_SR.section_area(s) for s in all_w])]
 
             # [B] A LOOSER override is refused fail-loud (the batched mask only tightens,
             #     so a looser knob is a silent no-op). deflection_limit is an L/δ ratio:
@@ -1756,7 +1739,7 @@ println("Testing DesignSession invalidation matrix (skip + comprehensive equival
                 # (build_member_groups! persists it) — the verified data model.
                 struc_a, base_a0 = _build_beam_column()
                 base_a = with(base_a0; collinear_grouping = true)
-                design_building(struc_a, base_a)
+                design_building(struc_a, base_a; restore = false)
                 beam_gids = unique(group_id(b) for b in struc_a.beams)
                 @test !isempty(beam_gids)
                 target_cl = first(beam_gids)
@@ -1791,7 +1774,7 @@ println("Testing DesignSession invalidation matrix (skip + comprehensive equival
                 # (c) UN-HONORABLE under collinear_grouping: a COLUMN-group gid (never in
                 #     the beam honorable set) is refused fail-loud at the size-time gate.
                 struc_col, base_col0 = _build_beam_column()
-                design_building(struc_col, base_col0)
+                design_building(struc_col, base_col0; restore = false)
                 col_gid_cl = first(sort(unique(group_id(c) for c in struc_col.columns)))
                 struc_clc, base_clc0 = _build_beam_column()
                 base_clc_ov = with(base_clc0; collinear_grouping = true,
@@ -1867,7 +1850,7 @@ println("Testing DesignSession invalidation matrix (skip + comprehensive equival
             #    byte-identically (no throw, real design).
             @testset "P2 name-colliding override section with differing props refused" begin
                 struc_free, base_free = _build_beam_column()
-                design_building(struc_free, base_free)
+                design_building(struc_free, base_free; restore = false)
                 target_gid = first(sort(unique(group_id(b) for b in struc_free.beams)))
 
                 dflt_opts = _SR.SteelBeamOptions()
@@ -1965,7 +1948,7 @@ println("Testing DesignSession invalidation matrix (skip + comprehensive equival
             # no materialized member groups). gids are stable across identical
             # `_build_beam_column()` fixtures (see testset (vii)).
             struc_ref, base_ref = _build_beam_column()
-            des_ref = design_building(struc_ref, base_ref)
+            des_ref = design_building(struc_ref, base_ref; restore = false)
             beam_gids = sort(unique(group_id(b) for b in struc_ref.beams))
             @test length(beam_gids) >= 2
             target_gid = first(beam_gids)

@@ -71,6 +71,19 @@ indexing, so the key is stable across params and rebuilds.
 """
 slab_node_key(slab_idx::Integer) = Symbol(SLAB_NODE_PREFIX, slab_idx)
 
+"Prefix for a propose node (`:slab_propose_s3` sizes slab 3 on a private copy)."
+const SLAB_PROPOSE_PREFIX = "slab_propose_s"
+
+"""Propose-node key for slab `slab_idx`. Not a [`slab_node_key`](@ref): the
+commit node keeps that key, because it is the one that writes the slab."""
+slab_propose_key(slab_idx::Integer) = Symbol(SLAB_PROPOSE_PREFIX, slab_idx)
+
+"One node. Adopts the governing column size from every propose result."
+const NODE_SLAB_ENVELOPE = :slab_column_envelope
+
+"One node after the commit level. Adopts any further column growth."
+const NODE_SLAB_LOCK = :slab_column_lock
+
 """
     is_slab_node_key(key::NodeKey) -> Bool
 
@@ -128,7 +141,8 @@ canonical_node_keys() = NodeKey[
 #                    materials, geometry_is_centerline, load_combinations) and
 #                    _size_beams_columns! (beams, columns, materials,
 #                    max_iterations, fire_rating, fire_protection) + sync_asap!.
-#   • foundations  — _size_foundations!(params.foundation_options).
+#   • foundations  — _size_foundations!(params.foundation_options), after
+#                    ordinary walls so a thickness jump is already solved.
 #
 # NOTE — `:pattern_loading` is intentionally ABSENT from these slices: it is a
 # prepare-affecting, build-time structural decision (it selects which load objects
@@ -188,10 +202,10 @@ const PIPELINE_PROVENANCE = Dict{NodeKey, @NamedTuple{
         code_version = :foundations_v1,
     ),
     NODE_ORDINARY_WALLS => (
-        param_slice  = Symbol[:lateral, :wall_inputs],
+        param_slice  = Symbol[:lateral, :wall_inputs, :materials, :diaphragm_mode],
         reads        = Symbol[:walls, :wall_mesh, :asap_model, :asap_rigid_links],
-        writes       = Symbol[:ordinary_wall_result],
-        code_version = :ordinary_walls_v1,
+        writes       = Symbol[:ordinary_wall_result, :diaphragm_layout],
+        code_version = :ordinary_walls_v2,
     ),
 )
 

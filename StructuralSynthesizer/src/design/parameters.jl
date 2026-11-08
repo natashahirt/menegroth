@@ -262,6 +262,14 @@ Base.@kwdef mutable struct DesignParameters
     # Pier thickness for skeleton `:walls` edges. Required when that group is
     # non-empty. There is no default thickness.
     wall_thickness::Union{Nothing, typeof(1.0u"m")} = nothing
+    # After a failed ordinary-wall check, jump to a thicker inch predicted
+    # from this analysis and confirm. `:all` moves every wall together, so
+    # one analysis can predict the next inch. A finer grouping re-solves,
+    # because the walls no longer share one stiffness. A test that must
+    # record the failure at the given t sets this false.
+    jump_wall_thickness::Bool = true
+    # Which walls share a thickness. See `WALL_THICKNESS_GROUPINGS`.
+    wall_thickness_grouping::Symbol = :all
     
     # Default frame element properties (before member sizing).
     # Use precomputed SI constants to avoid runtime Unitful conversion of ksi → Pa,

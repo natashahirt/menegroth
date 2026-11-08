@@ -291,6 +291,33 @@ function _size_flat_plate!(
     
     d = effective_depth(h; cover=cover, bar_diameter=bar_dia)
     _prev_h = h  # Track h to avoid redundant recomputation
+    _βt = 0.0
+
+    # One analysis, then the thinnest half-inch the scaled checks accept.
+    # Column sizes stay frozen across that scan. A column-size change still
+    # re-runs the analysis before this is called.
+    function _jumped_depth(h_now, mrs, srs; punching::Bool = false)
+        edge_stiffness = opts.has_edge_beam && isnothing(opts.edge_beam_βt)
+        return propose_slab_thickness(
+            h_now, h_increment, ln_max / 10, mrs, srs, γ_concrete;
+            drop_panel = drop_panel,
+            stiffness_depends_on_h = edge_stiffness,
+            passes = (hh, scaled_p, scaled_s) -> begin
+                dd = effective_depth(hh; cover = cover, bar_diameter = bar_dia)
+                Ie_method = method isa FEA ? method.deflection_Ie_method : :aci318_19
+                ok = phase_a_depth_passes(
+                    scaled_p, scaled_s, hh, dd, fc, fy, Es, Ecs, slab.spans,
+                    γ_concrete, columns;
+                    struc = struc, slab = slab, limit_type = opts.deflection_limit,
+                    deflection_Ie_method = Ie_method, λ = λ, φ_shear = φ_shear,
+                    βt = _βt, span_axis = _get_span_axis(slab))
+                punching || return ok
+                return ok && punching_depth_passes(
+                    scaled_p, scaled_s, columns, hh, dd, fc, struc, slab;
+                    λ = λ, φ_shear = φ_shear)
+            end,
+        )
+    end
     
     # Shared mutable state across phases
     deflection_result = nothing
@@ -444,8 +471,7 @@ function _size_flat_plate!(
                                               Muy=Mu_secondary, cache=_col_cache)
             catch e
                 e isa ArgumentError || rethrow()
-                verbose && @warn "Column P-M infeasible at h=$h: $(e.msg)"
-                @warn "Column P-M design infeasible — no catalog section satisfies demand" h=h
+                @warn "Column P-M design infeasible — no catalog section satisfies demand" h=h reason=e.msg
                 return (
                     converged        = false,
                     failure_reason   = "column_pm_infeasible",
@@ -485,7 +511,7 @@ function _size_flat_plate!(
             _l2_defl = moment_results.l2
             ρ_prime_est = try
                 _As_neg = required_reinforcement(
-                    0.75 * _top_bar_moment(moment_results), _l2_defl / 2, d, fc, fy
+                    0.75 * _top_bar_moment(moment_results), _l2_defl / 2, d, fc, fy; εt_min = tension_controlled_strain(fy)
                 )
                 # Inadequate section: ρ′ = 0 keeps the long-term multiplier conservative.
                 if isfinite(_As_neg)
@@ -502,7 +528,7 @@ function _size_flat_plate!(
             
             verbose && @debug "ρ' estimate for long-term deflection" ρ_prime=round(ρ_prime_est, digits=5)
             
-            _Ie_method = method isa FEA ? method.deflection_Ie_method : :branson
+            _Ie_method = method isa FEA ? method.deflection_Ie_method : :aci318_19
             _defl_ok = try
                 deflection_result = if !isnothing(drop_panel)
                     check_two_way_deflection(
@@ -527,7 +553,7 @@ function _size_flat_plate!(
             end
             
             if !_defl_ok
-                h = round_up_thickness(h + h_increment, h_increment)
+                h = _jumped_depth(h, moment_results, secondary_results)
                 verbose && @warn "Deflection FAILED (primary). Increasing h → $h"
                 emit!(tc, :slab, "size_flat_plate!", _slab_id, :iteration;
                       phase="A", check="two_way_deflection", passed=false, h_new=string(h))
@@ -568,7 +594,7 @@ function _size_flat_plate!(
                     false
                 end
                 if !_sec_defl_ok
-                    h = round_up_thickness(h + h_increment, h_increment)
+                    h = _jumped_depth(h, moment_results, secondary_results)
                     verbose && @warn "Deflection FAILED (secondary direction). Increasing h → $h"
                     last_failing_check = "two_way_deflection_secondary"
                     continue
@@ -589,15 +615,15 @@ function _size_flat_plate!(
             else
                 nothing
             end
-            shear_result = check_one_way_shear(moment_results, d, fc;
+            shear_result = check_one_way_shear(moment_results, d, fc; h = h, fy = fy,
                 verbose=verbose, λ=λ, φ_shear=φ_shear, fea_diag=_fea_diag)
             one_way_shear_report = shear_result
             wall_shear = wall_one_way_shear(
-                struc, slab, d, fc, moment_results.qu; λ = λ, ϕ = φ_shear)
+                struc, slab, d, fc, moment_results.qu; h = h, fy = fy, λ = λ, ϕ = φ_shear)
             wall_shear_ok = all(c -> c.ok, wall_shear)
 
             if !shear_result.ok || !wall_shear_ok
-                h = round_up_thickness(h + h_increment, h_increment)
+                h = _jumped_depth(h, moment_results, secondary_results)
                 verbose && @warn "One-way shear FAILED. Increasing h → $h"
                 emit!(tc, :slab, "size_flat_plate!", _slab_id, :iteration;
                       phase="A", check="one_way_shear", passed=false, h_new=string(h))
@@ -608,13 +634,13 @@ function _size_flat_plate!(
             # ─── A5: Flexural Adequacy (Tension-Controlled) ───
             verbose && @debug "FLEXURAL ADEQUACY CHECK (ACI 21.2.2)"
             
-            flexure_result = check_flexural_adequacy(moment_results, columns, d, fc;
+            flexure_result = check_flexural_adequacy(moment_results, columns, d, fc; fy = fy,
                                                      βt=_βt, verbose=verbose,
                                                      struc=struc, slab=slab,
                                                      span_axis=_get_span_axis(slab))
             
             if !flexure_result.ok
-                h = round_up_thickness(h + h_increment, h_increment)
+                h = _jumped_depth(h, moment_results, secondary_results)
                 verbose && @warn "Flexure not tension-controlled (Rn/Rn_max=$(round(flexure_result.max_ratio, digits=2)) at $(flexure_result.governing_strip)). Increasing h → $h"
                 emit!(tc, :slab, "size_flat_plate!", _slab_id, :iteration;
                       phase="A", check="flexural_adequacy", passed=false,
@@ -629,7 +655,7 @@ function _size_flat_plate!(
             # and can be the thickness that governs.
             if !_transfer_sections_adequate(columns, moment_results, secondary_results,
                                             h, d, fc, fy)
-                h = round_up_thickness(h + h_increment, h_increment)
+                h = _jumped_depth(h, moment_results, secondary_results)
                 verbose && @warn "Moment transfer section inadequate. Increasing h → $h"
                 emit!(tc, :slab, "size_flat_plate!", _slab_id, :iteration;
                       phase="A", check="transfer_reinforcement", passed=false,
@@ -825,7 +851,7 @@ function _size_flat_plate!(
                             ρ_prime         = nothing,
                         )
                     end
-                    h = round_up_thickness(h + h_increment, h_increment)
+                    h = _jumped_depth(h, moment_results, secondary_results; punching = true)
                     last_failing_check = "punching_shear"
                     emit!(tc, :slab, "size_flat_plate!", _slab_id, :fallback;
                           phase="B", reason="wall_punching_h_bump", h_new=string(h),
@@ -903,6 +929,7 @@ function _size_flat_plate!(
             # If h was bumped (last resort), break to outer loop → restart Phase A
             if h != h_before_punch
                 last_failing_check = "punching_shear"
+                h = _jumped_depth(h_before_punch, moment_results, secondary_results; punching = true)
                 verbose && @warn "Phase B bumped h → $h (last resort). Restarting Phase A."
                 emit!(tc, :slab, "size_flat_plate!", _slab_id, :fallback;
                       phase="B", reason="punching_h_bump", h_new=string(h))

@@ -178,11 +178,11 @@ end
 # sections + forces ⇒ identical downstream analysis. Deliberately excludes the
 # recomputable factorization cache and topology (fixed after `prepare!`).
 function _asap_fingerprint(model)
-    (isnothing(model) || isempty(model.elements)) && return Any[]
+    (isnothing(model) || isempty(model.frame_elements)) && return Any[]
     # Keep raw element/global vectors (may be plain Float64 or dimensionful) and
     # let the recursive content hasher serialize each element; forcing Float64
     # would throw on unit-ful entries.
-    els = Any[(collect(el.forces), repr(el.section)) for el in model.elements]
+    els = Any[(collect(el.forces), repr(el.section)) for el in model.frame_elements]
     return Any[els, collect(model.u), collect(model.reactions)]
 end
 

@@ -315,6 +315,9 @@ envelope STRENGTH from per-case station forces (signed M+/M− and shears).
 Deflection stays on the full-load solve (`model.u`). The per-DOF abs envelope
 on `el.forces` is not used as a sizing source.
 
+`L_totals[g]` is the length of the longest member in group `g` (the sum of
+that member's segments), not the sum over the group's members.
+
 For multi-segment members (shattered edges), the `δ_max` in the returned demand
 is pre-scaled so that `δ_max / L_total == δ_original / L_defl`, where `L_defl`
 is the longest individual sub-segment (the actual deflection span between supports).
@@ -440,6 +443,7 @@ function member_group_demands(struc::BuildingStructure;
             m = member_array[m_idx]
             Kx_gov = max(Kx_gov, m.base.Kx)
             Ky_gov = max(Ky_gov, m.base.Ky)
+            L_member = 0.0
 
             seg_list = segment_indices(m)
             n_segs = length(seg_list)
@@ -459,7 +463,7 @@ function member_group_demands(struc::BuildingStructure;
                 has_any = true
                 len_val = to_meters(seg.L)
                 lb_val  = to_meters(seg.Lb)
-                L_total += len_val
+                L_member += len_val
                 Lb_gov = max(Lb_gov, lb_val)
                 L_defl = max(L_defl, len_val)  # track longest sub-segment
                 Cb_gov = min(Cb_gov, seg.Cb)
@@ -530,6 +534,9 @@ function member_group_demands(struc::BuildingStructure;
                 I_ref = max(I_ref, I_current)
                 end
             end
+            # Every member in the group gets the same section, so the group is
+            # checked at its longest member (AISC 360-16 §E2 Lc = K·L; F2.2 Lb).
+            L_total = max(L_total, L_member)
 
             if extract_end_moments && saw_first_seg && saw_last_seg
                 for ci in 1:n_pat

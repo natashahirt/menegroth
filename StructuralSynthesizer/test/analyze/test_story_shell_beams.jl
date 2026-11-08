@@ -97,7 +97,7 @@ function _one_bay_building(; Lx = 6.0, Ly = 4.0, z = 3.0)
                                      FramingLevel{Float64}[]))
     for e in sort(collect(skel.groups_edges[:beams]))
         L = ustrip(u"m", skel.geometry.edge_lengths[e])
-        push!(struc.segments, Segment(e, L))
+        push!(struc.segments, StructuralSynthesizer.Segment(e, L))
         push!(struc.beams, Beam([length(struc.segments)], L; role = :girder, level = 0))
     end
 
@@ -175,6 +175,36 @@ const _STUD_OPTS = (composite = true,
         @test demands[1].Mu_pos ≈ demands[2].Mu_pos rtol = 0.02
     end
 
+    @testset "A kept story shell re-solves in place and matches a fresh mesh" begin
+        struc, corners = _one_bay_building()
+        kw = (target_edge = 1.0u"m", support_points = corners, steel = A992_Steel)
+        foreach(b -> set_section!(b, W("W12X26")), struc.beams)
+        shell = build_story_shell(struc, 0; kw...)
+        light = solve_story_shell!(shell, struc; service = false)
+        model, nodes = shell.model, shell.built.nodes
+        factor = model._factorization
+
+        foreach(b -> set_section!(b, W("W21X55")), struc.beams)
+        heavy = solve_story_shell!(shell, struc; service = false)
+        @test shell.model === model
+        @test shell.built.nodes === nodes
+        # Refactored numerically on the stored symbolic analysis.
+        @test model._factorization === factor
+
+        fresh = analyze_story_shell(struc, 0; kw..., service = false)
+        @test keys(heavy.beam_demands) == keys(fresh.beam_demands)
+        for (i, d) in fresh.beam_demands
+            @test heavy.beam_demands[i].Mu_pos ≈ d.Mu_pos rtol = 1e-8
+            @test heavy.beam_demands[i].Mu_neg ≈ d.Mu_neg rtol = 1e-8 atol = 1e-6
+            @test heavy.beam_demands[i].Vu ≈ d.Vu rtol = 1e-8
+        end
+        # A stiffer beam draws more of the floor.
+        @test heavy.beam_demands[1].Mu_pos > light.beam_demands[1].Mu_pos
+        As(r) = [e.As_x_bot + e.As_y_bot + e.As_x_top + e.As_y_top
+                 for f in r.shell_reinforcement for e in f.elements]
+        @test As(heavy) ≈ As(fresh) rtol = 1e-8
+    end
+
     @testset "Beam sizing loops on the shell until sections hold" begin
         struc, corners = _one_bay_building()
         n_beams = length(struc.beams)
@@ -183,13 +213,51 @@ const _STUD_OPTS = (composite = true,
         out = size_beams_with_story_shell!(struc, opts; levels = [0],
             shell_kwargs = (target_edge = 1.0u"m", support_points = corners))
         @test out.converged
-        @test 1 <= out.passes <= 4
+        @test 2 <= out.passes <= 6
         @test Set(keys(out.demands)) == Set(1:n_beams)
+        @test !isempty(out.spans)
         @test all(b -> section(b) !== nothing, struc.beams)
+        @test collect(keys(out.shells)) == [0]
+
+        # A second call on the kept meshes, seeded with the first one's demands,
+        # starts with the service solve and holds at once.
+        mesh = out.shells[0].built
+        again = size_beams_with_story_shell!(struc, opts; levels = [0], shells = out.shells,
+            shell_demands = out.demands, shell_spans = out.spans, shell_regions = out.regions,
+            shell_kwargs = (target_edge = 1.0u"m", support_points = corners))
+        @test again.converged
+        @test again.passes == 1
+        @test again.shells[0].built === mesh
+
+        # A floor keeps a heavier section that still passes. An exact floor
+        # on a section that cannot pass is refused, not swapped.
+        gids = unique(group_id(b) for b in struc.beams)
+        heavy = Dict(g => (section = W("W21X55"), exact = false) for g in gids)
+        SY.size_beams!(struc, opts; shell_demands = out.demands, section_floor = heavy)
+        @test all(b -> section(b).name == "W21X55", struc.beams)
+        big_d = Dict(i => ShellBeamDemand(1.0e7, 1.0e7, 1.0e5) for i in 1:n_beams)
+        light = Dict(g => (section = W("W12X26"), exact = true) for g in gids)
+        @test_throws ArgumentError SY.size_beams!(struc, opts; shell_demands = big_d,
+                                                  section_floor = light)
+        SY.size_beams!(struc, opts; shell_demands = out.demands, shell_spans = out.spans)
 
         # The shell raises a demand. It never lowers one.
-        groups, base = SY.member_group_demands(struc; member_edge_group = SY.BEAM_GROUP_SYMBOLS)
+        groups, base, L_groups = SY.member_group_demands(struc; member_edge_group = SY.BEAM_GROUP_SYMBOLS)
         g1 = findfirst(==(group_id(struc.beams[1])), groups)
+
+        # A group is checked at its longest member, never the sum of its members.
+        len_m(b) = (L = SY.member_length(b); L isa Unitful.Quantity ? ustrip(u"m", L) : Float64(L))
+        for (g, gid) in enumerate(groups)
+            lens = [len_m(struc.beams[i]) for i in struc.member_groups[gid].member_indices]
+            @test L_groups[g] ≈ maximum(lens) rtol = 1e-9
+        end
+        own_ids = [group_id(b) for b in struc.beams]
+        foreach(b -> SY.set_group_id!(b, UInt64(0xbeef)), struc.beams)
+        one_group, _, L_one = SY.member_group_demands(struc; member_edge_group = SY.BEAM_GROUP_SYMBOLS)
+        @test length(one_group) == 1
+        @test L_one[1] ≈ maximum(len_m, struc.beams) rtol = 1e-9
+        @test L_one[1] < sum(len_m, struc.beams)
+        foreach(((b, id),) -> SY.set_group_id!(b, id), zip(struc.beams, own_ids))
         big = Dict(1 => ShellBeamDemand(1.0e9, 2.0e9, 3.0e9))
         _, raised = SY.member_group_demands(struc; member_edge_group = SY.BEAM_GROUP_SYMBOLS,
                                             shell_demands = big)
@@ -501,4 +569,46 @@ const _STUD_OPTS = (composite = true,
             Ec = span.Ec, Es = span.Es, fr = span.fr, fc = span.fc, fy = span.fy)
         @test SZ.rc_shell_span_deflection(short, sec).ok
     end
+end
+
+@testset "The slab edge moves and the column nodes stay" begin
+    struc, corners = _one_bay_building()
+    # The four floor vertices were added in `corners` order.
+    for v in 1:4
+        push!(struc.columns, Column(Int[], 3.0; c1 = 0.30, c2 = 0.30,
+                                    vertex_idx = v, story = 0, position = :corner, θ = 0.0))
+    end
+    foreach(b -> set_section!(b, W("W12X26")), struc.beams)
+    shell = build_story_shell(struc, 0; target_edge = 1.0u"m",
+                              support_points = corners, steel = A992_Steel)
+    @test !isempty(shell.edge_outer)
+    support = SY._shell_node_at(shell.built.nodes, 0.0, 0.0)
+    @test support !== nothing
+    x_support = ustrip(u"m", support.position[1])
+    y_support = ustrip(u"m", support.position[2])
+    outer = shell.edge_outer[argmin([ustrip(u"m", n.position[1]) + ustrip(u"m", n.position[2])
+                                    for n in shell.edge_outer])]
+    x0 = ustrip(u"m", outer.position[1])
+    y0 = ustrip(u"m", outer.position[2])
+    @test x0 < -0.1
+    @test y0 < -0.1
+    n_nodes = length(shell.model.nodes)
+    n_shells = length(shell.model.shell_elements)
+
+    solve_story_shell!(shell, struc; service = false)
+    factor = shell.model._factorization
+    matrix = shell.model.S
+
+    # The south-west column grows. The edge follows it. The support does not.
+    struc.columns[1].c1 = 0.80
+    struc.columns[1].c2 = 0.80
+    solve_story_shell!(shell, struc; service = false)
+    @test shell.model.S === matrix
+    @test shell.model._factorization === factor
+    @test length(shell.model.nodes) == n_nodes
+    @test length(shell.model.shell_elements) == n_shells
+    @test ustrip(u"m", support.position[1]) ≈ x_support
+    @test ustrip(u"m", support.position[2]) ≈ y_support
+    @test ustrip(u"m", outer.position[1]) < x0 - 0.1
+    @test ustrip(u"m", outer.position[2]) < y0 - 0.1
 end

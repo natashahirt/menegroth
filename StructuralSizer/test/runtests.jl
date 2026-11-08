@@ -126,6 +126,7 @@ using Asap  # custom units (kip, ksi, ksf, psf, etc.)
         include("slabs/test_aci_audit_tier1.jl")
         include("slabs/test_ddm_edge_mub.jl")
         include("slabs/test_eq_13_7_adjoining.jl")
+        include("slabs/test_story_shell.jl")
         include("slabs/test_corner_punching.jl")
         # General-shape critical sections (ACI 421.1R-99 App. B): non-orthogonal,
         # re-entrant, circular, I-/odd supports via true principal axes

@@ -49,6 +49,7 @@ using Asap  # ensures `u"kip"`, `u"ksi"`, etc resolve via Asap unit module
         include("analyze/test_corner_kind.jl")
         include("analyze/test_mesh_refinement.jl")
         include("analyze/test_member_group_demands.jl")
+        include("analyze/test_section_floor.jl")
         include("analyze/test_foundation_demands.jl")
         include("analyze/test_column_populate_ltb.jl")
         include("analyze/test_wall_phase5_assembly.jl")
@@ -72,6 +73,7 @@ using Asap  # ensures `u"kip"`, `u"ksi"`, etc resolve via Asap unit module
         include("analyze/test_wind_story_cases.jl")
         include("analyze/test_composite_context.jl")
         include("analyze/test_story_shell.jl")
+        include("analyze/test_story_shell_beams.jl")
     end
 
     # ─── Scene packets (web viewer) ──────────────────────────────────────

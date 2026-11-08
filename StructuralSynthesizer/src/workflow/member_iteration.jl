@@ -225,6 +225,24 @@ function _reanalyze_after_section_change!(struc::BuildingStructure)
     return struc
 end
 
+"""Columns for a floor with no beam edges.
+
+A wall-supported two-way slab is concrete, and its columns are that floor's
+concrete. Any other beamless floor keeps the steel default. An explicit
+`params.columns` is applied by the caller and never reaches here.
+"""
+function _beamless_column_options(struc::BuildingStructure, params::DesignParameters)
+    floor_types = Set(s.floor_type for s in struc.slabs)
+    if :two_way in floor_types &&
+       all(ft -> ft in (:two_way, :grade, :roof), floor_types)
+        return StructuralSizer.ConcreteColumnOptions(
+            material = resolve_slab_concrete(params.materials),
+            rebar_material = resolve_slab_rebar(params.materials),
+        )
+    end
+    return StructuralSizer.SteelColumnOptions()
+end
+
 """
 Iterative beam + column sizing for beam-based floor systems.
 
@@ -293,6 +311,7 @@ function _size_beams_columns!(struc::BuildingStructure, params::DesignParameters
                 "(sizing columns only), so no steel beam group is sized and the " *
                 "per-group override cannot be honored")))
         end
+        column_opts = something(params.columns, _beamless_column_options(struc, params))
         @warn "Skipping beam sizing: no beam edges in geometry. Sizing columns only."
         StructuralSizer.emit!(tc, :workflow, "_size_beams_columns!", "", :decision;
                               outcome="skipped_beams", reason="no_beam_edges")
@@ -314,19 +333,8 @@ function _size_beams_columns!(struc::BuildingStructure, params::DesignParameters
         return struc
     end
 
-    tol = 0.05
-    max_iter = params.max_iterations
-    verbose = false
-
-    n_cols_bc = length(struc.columns)
-    prev_demands = Vector{Float64}(undef, n_cols_bc)
-    curr_demands = Vector{Float64}(undef, n_cols_bc)
-    first_iter = true
-    converged = false
-    iters_used = 0
-    
     StructuralSizer.emit!(tc, :workflow, "_size_beams_columns!", "", :enter;
-                          n_beams=length(beam_edge_ids), n_columns=n_cols_bc,
+                          n_beams=length(beam_edge_ids), n_columns=length(struc.columns),
                           beam_type=string(typeof(beam_opts)),
                           column_type=string(typeof(column_opts)))
 
@@ -335,38 +343,26 @@ function _size_beams_columns!(struc::BuildingStructure, params::DesignParameters
     # (byte-identical); an effective steel-beam-group override narrows only that
     # group. Un-honorable targets are already refused upstream by the guard.
     mgo = isempty(params.member_group_overrides) ? nothing : params.member_group_overrides
+    beam_kwargs = (; reanalyze = false, tc = tc, member_group_overrides = mgo,
+                   I_factor = params.beam_I_factor,
+                   composite_concrete = resolve_slab_concrete(params.materials),
+                   composite_option_kwargs(beam_opts)...)
 
-    for iter in 1:max_iter
-        iters_used = iter
-        size_beams!(struc, beam_opts; reanalyze=false, tc=tc,
-                    member_group_overrides=mgo, I_factor=params.beam_I_factor,
-                    composite_concrete=resolve_slab_concrete(params.materials),
-                    composite_option_kwargs(beam_opts)...)
-        
-        _reanalyze_after_section_change!(struc)
-        
-        size_columns!(struc, column_opts; reanalyze=false, tc=tc,
-                      I_factor=params.column_I_factor)
-        
-        _reanalyze_after_section_change!(struc)
-        
-        _extract_column_demands!(curr_demands, struc)
-        if !first_iter && _max_demand_change(prev_demands, curr_demands) < tol
-            StructuralSizer.emit!(tc, :workflow, "_size_beams_columns!", "", :decision;
-                                  outcome="converged", iterations=iter)
-            converged = true
-            break
-        end
-        copyto!(prev_demands, curr_demands)
-        first_iter = false
+    shell_levels = _story_shell_design_levels(struc)
+    if isempty(shell_levels)
+        converged, iters_used = _iterate_beams_columns!(struc, params, beam_opts,
+                                                        column_opts, beam_kwargs; tc = tc)
+        # ─── P-Δ second-order analysis (ACI 318-11 §10.10) ───
+        # After first-order sizing converges, check if any story has δs > 1.5.
+        # If so, run iterative P-Δ to capture second-order effects, then re-size
+        # columns with the updated forces.
+        _run_p_delta_if_needed!(struc, column_opts; verbose=false, tc=tc,
+                                I_factor=params.column_I_factor)  # ACI 318-11 §10.10.4.1
+    else
+        converged, iters_used = _size_with_story_shell!(struc, params, beam_opts,
+                                                        column_opts, beam_kwargs,
+                                                        shell_levels; tc = tc)
     end
-    
-    # ─── P-Δ second-order analysis (ACI 318-11 §10.10) ───
-    # After first-order sizing converges, check if any story has δs > 1.5.
-    # If so, run iterative P-Δ to capture second-order effects, then re-size
-    # columns with the updated forces.
-    _run_p_delta_if_needed!(struc, column_opts; verbose=verbose, tc=tc,
-                            I_factor=params.column_I_factor)  # ACI 318-11 §10.10.4.1
     
     # ─── Fire protection coating loads (steel members only) ───
     # After sizing, add SFRM/intumescent self-weight and re-solve.
@@ -387,6 +383,136 @@ function _size_beams_columns!(struc::BuildingStructure, params::DesignParameters
     StructuralSizer.emit!(tc, :workflow, "_size_beams_columns!", "", :exit;
                           converged=converged,
                           iterations=iters_used)
+    return struc
+end
+
+"""
+Size beams, re-solve the frame model, size columns and re-solve, until the
+column demands change by less than 5 % between iterations. `shell_demands`
+and `shell_spans` go to every `size_beams!` call. Returns
+`(converged, iterations)`.
+"""
+function _iterate_beams_columns!(struc, params, beam_opts, column_opts, beam_kwargs;
+                                 tc = nothing, shell_demands = nothing,
+                                 shell_spans = nothing, upward_only::Bool = false)
+    tol = 0.05
+    max_iter = params.max_iterations
+    n = length(struc.columns)
+    prev_demands = Vector{Float64}(undef, n)
+    curr_demands = Vector{Float64}(undef, n)
+    for iter in 1:max_iter
+        size_beams!(struc, beam_opts; shell_demands = shell_demands,
+                    shell_spans = shell_spans,
+                    section_floor = upward_only ? _section_floors(struc) : nothing,
+                    beam_kwargs...)
+        _reanalyze_after_section_change!(struc)
+        size_columns!(struc, column_opts; reanalyze=false, tc=tc,
+                      I_factor=params.column_I_factor)
+        _reanalyze_after_section_change!(struc)
+        _extract_column_demands!(curr_demands, struc)
+        if iter > 1 && _max_demand_change(prev_demands, curr_demands) < tol
+            StructuralSizer.emit!(tc, :workflow, "_size_beams_columns!", "", :decision;
+                                  outcome="converged", iterations=iter)
+            return (true, iter)
+        end
+        copyto!(prev_demands, curr_demands)
+    end
+    return (false, max_iter)
+end
+
+"""
+Beam and column sizing for the stories in `levels`, which the story shell
+designs (see [`_story_shell_design_levels`](@ref)).
+
+Each round resizes the beams against the story shell
+([`size_beams_with_story_shell!`](@ref)), then runs the beam and column loop
+and P-Δ with those shell demands held. Columns are rotational springs on the
+shell and beam stiffness sets the shell's beam demands, so a round that
+changed a beam section after the shell, or a column section the shell
+solved with, is followed by another. The next round starts from this one's
+shell demands. Each story is meshed once for all rounds.
+
+When the rounds settle, the slab bars on each story come from a shell solve
+with the final beam and column sections. Each slab on those stories records
+`converged` and, when the rounds did not settle, why.
+"""
+function _size_with_story_shell!(struc, params, beam_opts, column_opts, beam_kwargs,
+                                 levels; tc = nothing, max_rounds::Int = 3)
+    shells = Dict{Int, StoryShell}()
+    shell_kwargs = (; concrete = resolve_slab_concrete(params.materials),
+                    rebar = resolve_slab_rebar(params.materials))
+    seed = (demands = nothing, spans = nothing, regions = nothing)
+    converged, iters = false, 0
+    held = false
+    # Steel discrete beams only move up once the first shell call settles, so a
+    # beam that attracts load and fails cannot trade places with a lighter one.
+    upward_only = _shell_ratchet_ok(struc, beam_opts, beam_kwargs)
+    floor = nothing
+    for round in 1:max_rounds
+        columns_before = [section(c) for c in struc.columns]
+        sb = size_beams_with_story_shell!(struc, beam_opts; levels = levels, shells = shells,
+                                          shell_kwargs = shell_kwargs,
+                                          shell_demands = seed.demands,
+                                          shell_spans = seed.spans,
+                                          shell_regions = seed.regions,
+                                          section_floor = floor,
+                                          beam_kwargs...)
+        beams_after_shell = [_story_beam_section(struc, b) for b in struc.beams]
+        converged, n = _iterate_beams_columns!(struc, params, beam_opts, column_opts,
+                                               beam_kwargs; tc = tc,
+                                               shell_demands = sb.demands,
+                                               shell_spans = sb.spans,
+                                               upward_only = upward_only)
+        iters += n
+        _run_p_delta_if_needed!(struc, column_opts; verbose=false, tc=tc,
+                                I_factor=params.column_I_factor)  # ACI 318-11 §10.10.4.1
+        beams_held = all(_sections_identical(a, _story_beam_section(struc, b))
+                         for (a, b) in zip(beams_after_shell, struc.beams))
+        columns_held = all(_sections_identical(a, section(c))
+                           for (a, c) in zip(columns_before, struc.columns))
+        held = sb.converged && sb.service_converged && beams_held && columns_held
+        get(ENV, "SS_TRACE_SHELL_PASSES", "") == "1" &&
+            println("story-shell round $round  shell_converged=$(sb.converged)  " *
+                    "service_converged=$(sb.service_converged)  beams_held=$beams_held  " *
+                    "columns_held=$columns_held  frame_loop_converged=$converged")
+        if get(ENV, "SS_TRACE_SHELL_PASSES", "") == "1" && !columns_held
+            for (k, (a, c)) in enumerate(zip(columns_before, struc.columns))
+                b = section(c)
+                _sections_identical(a, b) && continue
+                diff = a === nothing || b === nothing || typeof(a) !== typeof(b) ? [:type] :
+                       [f for f in fieldnames(typeof(a))
+                        if !_field_identical(getfield(a, f), getfield(b, f))]
+                dims(s) = hasproperty(s, :b) && hasproperty(s, :h) ? "$(s.b)×$(s.h)" : _section_tag(s)
+                println("  column $k  $(a === nothing ? "none" : dims(a)) → $(dims(b))  fields=$(diff)")
+            end
+        end
+        StructuralSizer.emit!(tc, :workflow, "_size_beams_columns!", "", :decision;
+                              outcome = "story_shell_round",
+                              round = round, shell_passes = sb.passes,
+                              shell_converged = sb.converged, beams_held = beams_held,
+                              columns_held = columns_held)
+        held && break
+        seed = (demands = sb.demands, spans = sb.spans, regions = sb.regions)
+        upward_only && (floor = _section_floors(struc))
+    end
+    held || @warn "Story-shell sizing did not settle after $max_rounds rounds" levels
+    _record_story_shell_convergence!(struc, held)
+    return (converged, iters)
+end
+
+"""
+Write `converged` onto every slab the story shell designed. A slab that did
+not settle also records `failure_reason` and `failing_check`.
+"""
+function _record_story_shell_convergence!(struc, held::Bool)
+    extra = held ? (converged = true,) :
+            (converged = false, failure_reason = "non_convergence",
+             failing_check = "story_shell")
+    for slab in struc.slabs
+        dd = slab.design_details
+        dd isa NamedTuple && get(dd, :analysis_source, nothing) === :story_shell || continue
+        slab.design_details = merge(dd, extra)
+    end
     return struc
 end
 

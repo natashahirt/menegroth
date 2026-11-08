@@ -80,7 +80,8 @@ function _merge_shell_demand!(into::Dict{Int, ShellBeamDemand}, from)
 end
 
 """
-    size_beams_with_story_shell!(struc, opts=nothing; levels, max_passes=6,
+    size_beams_with_story_shell!(struc, opts=nothing; levels, max_passes=10,
+                                 free_passes=2, trim=true, section_floor=nothing,
                                  shell_kwargs=(;), shells, shell_demands,
                                  shell_spans, shell_regions, kwargs...) -> NamedTuple
 
@@ -114,6 +115,26 @@ before (the combination with the greatest sagging peak); the first pass uses
 the frame model's. Each beam's service-shell spans are a separate deflection
 check (see the ownership table at the top of this file).
 
+Steel discrete beams (see [`_shell_ratchet_ok`](@ref)) settle in three steps:
+
+1. **Settle.** The first `free_passes` passes pick freely.
+2. **Upward only.** Each later pass floors every group at its current
+   section: the group keeps it while it passes and otherwise takes the
+   lightest heavier section that does (see `_apply_section_floor`). The
+   catalog is finite, so this stops. A beam's stiffness draws load to it, and
+   free picks can cycle between a stiff shape that attracts load and fails
+   and a flexible one that sheds it.
+3. **Trim** (`trim = true`). One free pick on the converged demands, then
+   upward-only passes again. The trimmed design is kept only when it
+   converges lighter by the sizing objective. Otherwise the converged
+   sections are put back and checked on a fresh shell solve.
+
+Every step ends on a pass that changed no section, so each section was
+checked against a shell solved with those same sections. `section_floor`
+(group id → `(section, exact)`) starts upward-only from the first pass and
+skips the trim, for a caller continuing an earlier call. Other beam options
+keep the free passes throughout.
+
 Returns `(converged, passes, demands, spans, regions, shells,
 service_converged, region_mismatch)`. `converged` is true when a pass that
 ran the service solve changed no section and moved no composite beam's
@@ -127,19 +148,26 @@ regions the solve produced.
 `region_tol = 0.05` is a convergence threshold, not a code limit. Deferring
 the service solve until strength holds changes no converged section: the
 loop stops only on a pass where both strength and service hold.
+`free_passes = 2` and the trim are search choices; neither relaxes a check.
+`max_passes = 10` caps each step. Upward-only passes stop on their own; the
+cap guards the free passes and the composite regions.
 """
 function size_beams_with_story_shell!(struc::BuildingStructure,
                                       opts::Union{StructuralSizer.BeamOptions, Nothing} = nothing;
                                       levels = nothing,
-                                      max_passes::Int = 6,
+                                      max_passes::Int = 10,
+                                      free_passes::Int = 2,
+                                      trim::Bool = true,
                                       shell_kwargs = (;),
                                       region_tol::Real = 0.05,
                                       shells::AbstractDict{Int, StoryShell} = Dict{Int, StoryShell}(),
                                       shell_demands = nothing,
                                       shell_spans = nothing,
                                       shell_regions = nothing,
+                                      section_floor = nothing,
                                       kwargs...)
     max_passes >= 1 || throw(ArgumentError("max_passes must be at least 1"))
+    free_passes >= 0 || throw(ArgumentError("free_passes must not be negative"))
     lvls = levels === nothing ? _story_shell_levels(struc) : collect(levels)
     isempty(lvls) && throw(ArgumentError("no story has a slab panel for the story shell"))
     # Catalog shapes carry no material. The shell uses each beam's recorded
@@ -156,16 +184,13 @@ function size_beams_with_story_shell!(struc::BuildingStructure,
     end
 
     build_kwargs, solve_kwargs, want_service = _split_shell_kwargs(shell_kwargs)
+    ratchet = _shell_ratchet_ok(struc, opts, kwargs)
+    section_floor === nothing || ratchet || throw(ArgumentError(
+        "section_floor needs steel :discrete beam options with n_max_sections = 0 " *
+        "and one material on every framing level"))
 
     size_beams!(struc, opts; shell_demands = shell_demands, shell_spans = shell_spans,
-                kwargs...)
-    demands = Dict{Int, ShellBeamDemand}()
-    spans = Dict{Int, Vector{Any}}()
-    service_on = want_service && shell_spans !== nothing
-    service_converged = true
-    next_regions = shell_regions === nothing ? Dict{Int, Vector{NamedTuple}}() :
-                   Dict{Int, Vector{NamedTuple}}(shell_regions)
-    shifts = Dict{Int, Float64}()
+                section_floor = section_floor, kwargs...)
     # Diagnosis only. SS_TRACE_SHELL_PASSES=1 prints each pass's section
     # changes and whether the section vector repeats an earlier pass.
     tracing = get(ENV, "SS_TRACE_SHELL_PASSES", "") == "1"
@@ -177,17 +202,70 @@ function size_beams_with_story_shell!(struc::BuildingStructure,
                            fill!(Vector{Any}(undef, length(tributary)), nothing), tributary,
                            Dict{Int, ShellBeamDemand}(), false)
     end
-    for pass in 1:max_passes
+
+    run = (struc = struc, opts = opts, levels = lvls, shells = shells,
+           build_kwargs = build_kwargs, solve_kwargs = solve_kwargs,
+           want_service = want_service, region_tol = region_tol,
+           max_passes = max_passes, kwargs = kwargs, history = history)
+    continuing = section_floor !== nothing
+    floor = if !ratchet
+        nothing
+    elseif continuing
+        section_floor
+    else
+        free_passes == 0 ? _section_floors(struc) : nothing
+    end
+    r = _story_shell_passes!(run;
+        service_on = want_service && shell_spans !== nothing,
+        regions = shell_regions === nothing ? Dict{Int, Vector{NamedTuple}}() :
+                  Dict{Int, Vector{NamedTuple}}(shell_regions),
+        floor = floor,
+        ratchet_from = !ratchet ? typemax(Int) : continuing ? 0 : free_passes,
+        first_pass = 1)
+    if ratchet && trim && !continuing && r.converged
+        r = _trim_story_shell!(run, r)
+    end
+    if !r.converged
+        moving = sort!([i for (i, m) in r.region_mismatch if m > region_tol])
+        @warn "Beam sections or composite sagging regions still changed after " *
+              "$(r.passes) story-shell passes" regions_moving = moving
+    end
+    return (converged = r.converged, passes = r.passes, demands = r.demands,
+            spans = r.spans, regions = r.regions, shells = shells,
+            service_converged = r.service_converged, region_mismatch = r.region_mismatch)
+end
+
+"""
+Up to `run.max_passes` story-shell passes: solve every story's shell with the
+current sections, then resize. `floor` floors each group's next pick (see
+`_apply_section_floor`); after pass `k ≥ ratchet_from` of this call it
+becomes the sections just chosen. `first_pass` numbers the passes for the
+trace and the returned count.
+
+Stops on a pass that changed no section and moved no composite region, once
+the service solve is on (when wanted).
+"""
+function _story_shell_passes!(run; service_on::Bool, regions, floor,
+                              ratchet_from::Int, first_pass::Int)
+    struc = run.struc
+    demands = Dict{Int, ShellBeamDemand}()
+    spans = Dict{Int, Vector{Any}}()
+    service_converged = true
+    next_regions = regions
+    shifts = Dict{Int, Float64}()
+    last_pass = first_pass + run.max_passes - 1
+    for k in 1:run.max_passes
+        pass = first_pass + k - 1
         empty!(demands)
         empty!(spans)
         used = Dict{Int, Vector{NamedTuple}}()
-        for level in lvls
-            shell = get!(shells, level) do
+        for level in run.levels
+            shell = get!(run.shells, level) do
                 build_story_shell(struc, level; composite_regions = next_regions,
-                                  build_kwargs...)
+                                  run.build_kwargs...)
             end
             res = solve_story_shell!(shell, struc; composite_regions = next_regions,
-                                     solve_kwargs..., service = service_on)
+                                     run.solve_kwargs..., service = service_on)
             res.analysis_status === :analyzed || throw(ArgumentError(
                 "story $level shell was not analyzed: $(join(res.reasons, "; "))"))
             _merge_shell_demand!(demands, res.beam_demands)
@@ -196,29 +274,121 @@ function size_beams_with_story_shell!(struc::BuildingStructure,
             service_on && (service_converged &= res.service_converged)
         end
         before = [_story_beam_section(struc, b) for b in struc.beams]
-        size_beams!(struc, opts; shell_demands = demands,
-                    shell_spans = service_on ? spans : nothing, kwargs...)
+        size_beams!(struc, run.opts; shell_demands = demands,
+                    shell_spans = service_on ? spans : nothing,
+                    section_floor = floor, run.kwargs...)
         after = [_story_beam_section(struc, b) for b in struc.beams]
         shifts = _region_shifts(demands, used)
         next_regions = _next_shell_regions(demands, used)
         held = all(_sections_identical(a, b) for (a, b) in zip(before, after))
-        settled = all(<=(region_tol), values(shifts))
-        tracing && _trace_shell_pass!(history, pass, struc.beams, before, after,
-                                      demands, service_on)
+        settled = all(<=(run.region_tol), values(shifts))
+        run.history === nothing ||
+            _trace_shell_pass!(run.history, pass, struc.beams, before, after,
+                               demands, service_on)
         if held && settled
-            (service_on || !want_service) &&
+            (service_on || !run.want_service) &&
                 return (converged = true, passes = pass, demands = demands, spans = spans,
-                        regions = next_regions, shells = shells,
+                        regions = next_regions, service_on = service_on,
                         service_converged = service_converged, region_mismatch = shifts)
             service_on = true
         end
+        k >= ratchet_from && (floor = _section_floors(struc))
     end
-    moving = sort!([i for (i, m) in shifts if m > region_tol])
-    @warn "Beam sections or composite sagging regions still changed after " *
-          "$max_passes story-shell passes" regions_moving = moving
-    return (converged = false, passes = max_passes, demands = demands, spans = spans,
-            regions = next_regions, shells = shells,
+    return (converged = false, passes = last_pass, demands = demands, spans = spans,
+            regions = next_regions, service_on = service_on,
             service_converged = service_converged, region_mismatch = shifts)
+end
+
+"""
+Try a lighter design after the upward-only passes converged (`r`).
+
+One free pick on `r`'s demands, then upward-only passes. The result is kept
+only when it converges with a smaller sizing objective than `r`. Otherwise
+`r`'s sections go back on, exactly, and upward-only passes check them on a
+fresh shell solve. When the frame demand under the trimmed stiffness no
+longer lets an exact section pass, the put-back floors at `r`'s sections
+instead.
+"""
+function _trim_story_shell!(run, r)
+    struc, opts = run.struc, run.opts
+    kept = _section_floors(struc)
+    obj_kept = _beams_objective(struc, opts)
+    spans_kw = r.service_on ? r.spans : nothing
+    before = [_story_beam_section(struc, b) for b in struc.beams]
+    size_beams!(struc, opts; shell_demands = r.demands, shell_spans = spans_kw, run.kwargs...)
+    after = [_story_beam_section(struc, b) for b in struc.beams]
+    if run.history !== nothing
+        println("—— trim: free pick on the converged demands ——")
+        _trace_shell_pass!(run.history, r.passes, struc.beams, before, after,
+                           r.demands, r.service_on)
+    end
+    all(_sections_identical(a, b) for (a, b) in zip(before, after)) && return r
+
+    t = _story_shell_passes!(run; service_on = r.service_on, regions = r.regions,
+                             floor = _section_floors(struc), ratchet_from = 0,
+                             first_pass = r.passes + 1)
+    obj_trim = _beams_objective(struc, opts)
+    if t.converged && obj_trim < obj_kept
+        run.history === nothing ||
+            println("—— trim kept: objective $(obj_trim) < $(obj_kept) ——")
+        return t
+    end
+    run.history === nothing ||
+        println("—— trim dropped (converged=$(t.converged), objective $(obj_trim) vs $(obj_kept)) ——")
+    exact = Dict(gid => (section = f.section, exact = true) for (gid, f) in kept)
+    try
+        size_beams!(struc, opts; shell_demands = r.demands, shell_spans = spans_kw,
+                    section_floor = exact, run.kwargs...)
+    catch e
+        (e isa ArgumentError && occursin("No feasible sections", e.msg)) || rethrow()
+        size_beams!(struc, opts; shell_demands = r.demands, shell_spans = spans_kw,
+                    section_floor = kept, run.kwargs...)
+    end
+    return _story_shell_passes!(run; service_on = r.service_on, regions = r.regions,
+                                floor = _section_floors(struc), ratchet_from = 0,
+                                first_pass = t.passes + 1)
+end
+
+"""
+Whether the story-shell loop can floor sections (see `_apply_section_floor`):
+steel discrete beam options with `n_max_sections = 0` and one material, on
+the building-wide options and on every framing level's own options.
+"""
+function _shell_ratchet_ok(struc, opts, kwargs = (;))
+    opts isa StructuralSizer.SteelBeamOptions || return false
+    m = get(kwargs, :method, nothing)
+    (m === nothing || m === :discrete) || return false
+    return all(_beam_sizing_passes(struc, opts)) do p
+        o = p.opts
+        o isa StructuralSizer.SteelBeamOptions && o.sizing_strategy === :discrete &&
+            o.n_max_sections == 0 && o.materials === nothing
+    end
+end
+
+"""Group id → `(section, exact)` floor at each sized beam group's current section."""
+function _section_floors(struc; exact::Bool = false)
+    floors = Dict{UInt64, @NamedTuple{section::Any, exact::Bool}}()
+    for b in struc.beams
+        gid = group_id(b)
+        gid === nothing && continue
+        s = _story_beam_section(struc, b)
+        s === nothing && continue
+        floors[gid] = (section = s, exact = exact)
+    end
+    return floors
+end
+
+"""Sizing objective of every beam: its section's objective per length × its length."""
+function _beams_objective(struc, opts)
+    total = 0.0
+    for b in struc.beams
+        s = _story_beam_section(struc, b)
+        s === nothing && continue
+        L = member_length(b)
+        L_m = L isa Unitful.Quantity ? ustrip(u"m", L) : Float64(L)
+        total += ustrip(_section_objective(opts, s)) * L_m
+    end
+    return total
 end
 
 const _SHELL_BUILD_KEYS = (:target_edge, :concrete, :steel, :support_points)

@@ -276,12 +276,27 @@ function _size_flat_plate!(
     Mu = Vector{Float64}(undef, n_cols)
     Mu_secondary = Vector{Float64}(undef, n_cols)
     
-    # ACI 318-11 §13.6.9.2 (Eq. 13-7): distribute unbalanced moment between columns above
-    # and below the slab in proportion to their flexural stiffnesses.
-    # Factor = K_below / (K_below + K_above); 1.0 when no column above (roof/single-story).
-    _dist_factors = column_moment_distribution_factors(struc, columns, column_opts)
-    if verbose && any(f -> f < 1.0, _dist_factors)
-        @debug "Column moment distribution factors (§13.6.9.2)" factors=_dist_factors
+    # Recomputed at each assignment. Column growth changes c1 and c2, and
+    # the §13.6.9.2 factor is K_below / (K_below + K_above). A shell result
+    # carries its own below-stub moment and does not use the factor.
+    function _assign_column_design_moments!(moment_results, secondary_results)
+        dist = column_moment_distribution_factors(struc, columns, column_opts)
+        own = hasproperty(moment_results, :column_design_moments) ?
+            moment_results.column_design_moments : nothing
+        if verbose && own === nothing && any(f -> f < 1.0, dist)
+            @debug "Column moment distribution factors (§13.6.9.2)" factors=dist
+        end
+        @inbounds for i in eachindex(Mu)
+            Mu[i] = column_design_moment(moment_results, i, dist[i])
+        end
+        if !isnothing(secondary_results)
+            @inbounds for i in 1:n_cols
+                Mu_secondary[i] = column_design_moment(secondary_results, i, dist[i])
+            end
+        else
+            fill!(Mu_secondary, 0.0)
+        end
+        return nothing
     end
     
     # Track which check is currently failing (for structured failure diagnostics)
@@ -292,6 +307,12 @@ function _size_flat_plate!(
     d = effective_depth(h; cover=cover, bar_diameter=bar_dia)
     _prev_h = h  # Track h to avoid redundant recomputation
     _βt = 0.0
+
+    # ACI 318-11 §13.5.3.3 at the column face. The flat-slab check uses the
+    # thickness at the drop while the transfer steel uses the slab depth, so
+    # the increase is limited to flat plates.
+    _moment_transfer = opts.moment_transfer_increase && isnothing(drop_panel) ?
+        (fy = fy, span_axis = _get_span_axis(slab)) : nothing
 
     # One analysis, then the thinnest half-inch the scaled checks accept.
     # Column sizes stay frozen across that scan. A column-size change still
@@ -314,7 +335,7 @@ function _size_flat_plate!(
                 punching || return ok
                 return ok && punching_depth_passes(
                     scaled_p, scaled_s, columns, hh, dd, fc, struc, slab;
-                    λ = λ, φ_shear = φ_shear)
+                    λ = λ, φ_shear = φ_shear, moment_transfer = _moment_transfer)
             end,
         )
     end
@@ -499,18 +520,9 @@ function _size_flat_plate!(
             
             check_pattern_loading_requirement(moment_results; verbose=verbose)
             
-            # Column design moments = unbalanced moments × distribution factor
-            # (ACI 318-11 §13.5.3.2 + §13.6.9.2)
-            @inbounds for i in eachindex(Mu)
-                Mu[i] = ustrip(kip*u"ft", moment_results.unbalanced_moments[i]) * _dist_factors[i]
-            end
-            if !isnothing(secondary_results)
-                @inbounds for i in 1:n_cols
-                    Mu_secondary[i] = ustrip(kip*u"ft", secondary_results.unbalanced_moments[i]) * _dist_factors[i]
-                end
-            else
-                fill!(Mu_secondary, 0.0)
-            end
+            # Column below the slab. FEA reads its stub. DDM and EFM take a
+            # fresh stiffness share of the joint moment.
+            _assign_column_design_moments!(moment_results, secondary_results)
             
             # ─── A2: Column P-M Design ───
             verbose && @debug "COLUMN P-M DESIGN"
@@ -546,7 +558,7 @@ function _size_flat_plate!(
 
             columns_changed = _update_column_sizes!(
                 columns, column_result, Pu, Mu, c_span_min, material, column_tol;
-                verbose=verbose
+                Muy=Mu_secondary, verbose=verbose
             )
             
             if columns_changed
@@ -784,17 +796,9 @@ function _size_flat_plate!(
                 )
             end
             
-            # Update Mu buffers — unbalanced × distribution (§13.5.3.2 + §13.6.9.2)
-            @inbounds for i in eachindex(Mu)
-                Mu[i] = ustrip(kip*u"ft", moment_results.unbalanced_moments[i]) * _dist_factors[i]
-            end
-            if !isnothing(secondary_results)
-                @inbounds for i in 1:n_cols
-                    Mu_secondary[i] = ustrip(kip*u"ft", secondary_results.unbalanced_moments[i]) * _dist_factors[i]
-                end
-            else
-                fill!(Mu_secondary, 0.0)
-            end
+            # Column sizes may have grown since the last analysis. The
+            # stiffness share is recomputed inside the assignment.
+            _assign_column_design_moments!(moment_results, secondary_results)
             
             # Re-run column P-M with updated moments (column sizes may have grown)
             try
@@ -824,7 +828,7 @@ function _size_flat_plate!(
             isnothing(rejected) || return rejected
             _update_column_sizes!(
                 columns, column_result, Pu, Mu, c_span_min, material, column_tol;
-                verbose=verbose
+                Muy=Mu_secondary, verbose=verbose
             )
             
             # ── B2: Punching shear check ──
@@ -854,6 +858,7 @@ function _size_flat_plate!(
                         verbose=false, col_idx=i, λ=λ, φ_shear=φ_shear,
                         Muy=isnothing(sr) ? nothing : sr.unbalanced_moments[i],
                         _geom_cache=_punch_geom_cache,
+                        moment_transfer=_moment_transfer,
                         column_opening_punching(struc, slab, columns[i])...
                     )
                 end

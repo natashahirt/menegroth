@@ -1,4 +1,54 @@
 """
+    _column_top_steel_minimum(col, Vu, b0, d, h, fc, fy; λ=1.0, φ=0.75, drop=nothing)
+        -> (As, bslab, vuv)
+
+ACI 318-19 §8.6.1.2 (corpus: aci-318-19, printed p. 111) top steel at a
+column, from [`punching_minimum_top_steel`](@ref). `vuv = Vu / (b0 d)` is the
+two-way shear stress without moment transfer, on the column critical section
+whose perimeter is `b0`.
+
+`bslab` is Table 8.4.2.2.3 (printed p. 105) across `c2`: each side the lesser
+of 1.5h and the distance to the slab edge. The column is taken flush with the
+slab edge. Corner columns have a free edge on one side (`c2 + 1.5h`). Edge
+columns take `c2 + 3h` whichever way the edge runs; that is exact when the
+edge is perpendicular to the span and asks for more steel than the code when
+the edge is parallel to it. With a drop panel, each side is the lesser of 1.5
+times the thickness at the drop and the drop extent past the column face plus
+1.5h.
+"""
+function _column_top_steel_minimum(col, Vu, b0, d, h, fc, fy;
+                                   λ::Float64 = 1.0, φ::Float64 = 0.75, drop = nothing)
+    side = if drop === nothing
+        1.5h
+    else
+        min(1.5 * total_depth_at_drop(h, drop), drop.a_drop_2 - col.c2 / 2 + 1.5h)
+    end
+    bslab = col.position == :corner ? col.c2 + side : col.c2 + 2side
+    vuv = uconvert(u"psi", Vu / (b0 * d))
+    As = punching_minimum_top_steel(vuv, bslab, b0, fc, fy, punching_αs(col.position);
+                                    λ = λ, λs = size_effect_factor(d), φ = φ)
+    return (As = As, bslab = bslab, vuv = vuv)
+end
+
+"""
+    _column_face_punching(punching, columns, d_punch, drop) -> Vector
+
+Per-column `(b0 = ...)` of the critical section at d/2 from the column face.
+Without a drop panel that is the punching result itself, openings included.
+With one, a result governed by the column section is used as is. Where the
+drop edge governed, the column-face perimeter is rebuilt from the column at
+`d_punch` without openings.
+"""
+function _column_face_punching(punching, columns, d_punch, drop)
+    drop === nothing && return punching
+    return map(enumerate(columns)) do (i, col)
+        r = punching[i]
+        r !== nothing && get(r, :governing_section, :column) === :column && return r
+        (b0 = punching_geometry(col.c1, col.c2, d_punch; position = col.position).b0,)
+    end
+end
+
+"""
     _transfer_reinforcement_pass(columns, moment_results, secondary_results,
                                  rebar_design, h, d, fc, fy;
                                  results, on_inadequate, on_result) -> (results, column)
@@ -23,12 +73,29 @@ includes a non-finite transfer moment), invokes `on_inadequate(i, reason)`:
 adequate column, and `on_result(i, col, gov, transfer)` runs afterwards for any
 site-specific reporting.  Returns `(results, column)` where `column` is the
 index that triggered an early stop, or `0` when every column was scanned.
+
+When `punching` (per-column results carrying `b0`) is given, the ACI 318-19
+§8.6.1.2 steel from [`_column_top_steel_minimum`](@ref) is also checked, at
+every column including those with no transfer moment. The column gets
+whichever of the two requirements adds more steel; `results[i]` then carries
+`governs = :min_top_steel_8_6_1_2` instead of `:moment_transfer`. `d_punch`
+and `drop` describe the column-face section (`d_total` and the drop panel
+for a flat slab).
+
+When the punching result carries `moment_transfer` (ACI 318-11 §13.5.3.3
+fractions, corpus: aci-318-11, page 250), the transfer steel is sized with
+those γf, and every axis that used §13.5.3.3(b) is re-checked for εt ≥ 0.010
+with the steel placed in its band (`_placed_band_strain_ok`). A failure
+invokes `on_inadequate(i, "gamma_f_increase_strain")`.
 """
 function _transfer_reinforcement_pass(columns, moment_results, secondary_results,
                                       rebar_design, h, d, fc, fy;
                                       results = Union{Nothing, NamedTuple}[nothing for _ in columns],
                                       on_inadequate,
-                                      on_result = (i, col, gov, transfer) -> nothing)
+                                      on_result = (i, col, gov, transfer) -> nothing,
+                                      punching = nothing, d_punch = d, drop = nothing,
+                                      secondary_rebar_design = nothing,
+                                      λ::Float64 = 1.0, φ_shear::Float64 = 0.75)
     for (i, col) in enumerate(columns)
         Mub_i = moment_results.unbalanced_moments[i]
         Muy_i = isnothing(secondary_results) ? zero(Mub_i) :
@@ -38,14 +105,23 @@ function _transfer_reinforcement_pass(columns, moment_results, secondary_results
                 return (results = results, column = i)
             continue
         end
-        abs(ustrip(kip * u"ft", Mub_i)) < 1e-6 &&
-            abs(ustrip(kip * u"ft", Muy_i)) < 1e-6 && continue
+        top_min = punching === nothing || punching[i] === nothing ? nothing :
+            _column_top_steel_minimum(col, moment_results.column_shears[i], punching[i].b0,
+                                      d_punch, h, fc, fy; λ = λ, φ = φ_shear, drop = drop)
+        needs_top_min = top_min !== nothing && ustrip(u"inch^2", top_min.As) > 0
+        no_transfer = abs(ustrip(kip * u"ft", Mub_i)) < 1e-6 &&
+                      abs(ustrip(kip * u"ft", Muy_i)) < 1e-6
+        no_transfer && !needs_top_min && continue
 
-        gov = governing_transfer_reinforcement(
+        mt = punching === nothing || punching[i] === nothing ? nothing :
+            get(punching[i], :moment_transfer, nothing)
+        gov = no_transfer ? nothing : governing_transfer_reinforcement(
             Mub_i, Muy_i, col.c1, col.c2, h, d, fc, fy;
             position = col.position,
-            free_edge_parallel = _infer_free_edge_parallel(col))
-        if transfer_section_inadequate(gov.As)
+            free_edge_parallel = _infer_free_edge_parallel(col),
+            γf_x = mt === nothing ? nothing : mt.γf_x,
+            γf_y = mt === nothing ? nothing : mt.γf_y)
+        if gov !== nothing && transfer_section_inadequate(gov.As)
             on_inadequate(i, "transfer_section_inadequate") ||
                 return (results = results, column = i)
             continue
@@ -57,13 +133,65 @@ function _transfer_reinforcement_pass(columns, moment_results, secondary_results
         selected = select_bars(As_provided_cs, rebar_design.column_strip_width;
                                max_spacing=max_bar_spacing(h))
         Ab = bar_area(selected.bar_size)
+        cs_width = rebar_design.column_strip_width
 
-        transfer = additional_transfer_bars(gov.As, As_provided_cs, gov.bb,
-                                            rebar_design.column_strip_width, Ab)
+        transfer = gov === nothing ? nothing :
+            (; additional_transfer_bars(gov.As, As_provided_cs, gov.bb, cs_width, Ab)...,
+             governs = :moment_transfer)
+        if needs_top_min
+            top = (; additional_transfer_bars(top_min.As, As_provided_cs, top_min.bslab,
+                                              cs_width, Ab)...,
+                   governs = :min_top_steel_8_6_1_2)
+            if transfer === nothing || top.As_additional > transfer.As_additional
+                transfer = top
+            end
+        end
+        if gov !== nothing && mt !== nothing &&
+           !_placed_band_strain_ok(mt, gov, transfer, Ab, rebar_design,
+                                   secondary_rebar_design, cs_neg_idx, d, fc, fy)
+            on_inadequate(i, "gamma_f_increase_strain") ||
+                return (results = results, column = i)
+            continue
+        end
         results[i] = transfer
-        on_result(i, col, gov, transfer)
+        gov === nothing || on_result(i, col, gov, transfer)
     end
     return (results = results, column = 0)
+end
+
+"""
+    _placed_band_strain_ok(mt, gov, transfer, Ab, rebar_design, secondary_rebar_design,
+                           cs_neg_idx, d, fc, fy) -> Bool
+
+ACI 318-11 §13.5.3.3(b) (corpus: aci-318-11, page 250): εt in the §13.5.3.2
+effective width is not less than 0.010. Checked on each axis that used (b),
+with the steel placed in that band:
+
+- the column-strip top steel of that direction (`rebar_design` for x,
+  `secondary_rebar_design` for y) in proportion to `bb / strip width`;
+- plus every bar this pass adds at the column, whichever band it was sized
+  for, which can only lower εt;
+- and never less than the band's required transfer steel.
+
+An axis with no transfer moment is skipped. A y-axis (b) increase with no
+secondary-direction design cannot be checked and fails.
+"""
+function _placed_band_strain_ok(mt, gov, transfer, Ab, rebar_design,
+                                secondary_rebar_design, cs_neg_idx, d, fc, fy)
+    added = transfer === nothing ? 0.0u"inch^2" : transfer.n_bars_additional * Ab
+    for (provision, As_req, bb, design) in
+            ((mt.provision_x, gov.As_x, gov.bb_x, rebar_design),
+             (mt.provision_y, gov.As_y, gov.bb_y, secondary_rebar_design))
+        provision === :aci_13_5_3_3b || continue
+        ustrip(u"inch^2", As_req) > 0 || continue
+        design === nothing && return false
+        As_cs = design.column_strip_reinf[cs_neg_idx].As_provided
+        As_band = As_cs * (bb / design.column_strip_width) + added
+        As_placed = max(As_band, As_req)
+        transfer_band_net_tensile_strain(As_placed, bb, d, fc, fy) >= 0.010 - 1e-12 ||
+            return false
+    end
+    return true
 end
 
 """
@@ -112,9 +240,10 @@ early-stop inadequacy policy and the verbose per-column debug.
 """
 function _pipeline_transfer_reinforcement(columns, moment_results, secondary_results,
                                           rebar_design, h, d, fc, fy;
-                                          verbose::Bool = false)
+                                          verbose::Bool = false, kwargs...)
     pass = _transfer_reinforcement_pass(
         columns, moment_results, secondary_results, rebar_design, h, d, fc, fy;
+        kwargs...,
         on_inadequate = (i, reason) -> false,
         on_result = (i, col, gov, transfer) -> begin
             if verbose && transfer.n_bars_additional > 0

@@ -51,10 +51,14 @@ function punching_capacity_with_studs(
     
     # ACI 318-11 §11.11.5.1: Vc with studs ≤ 3λ√f'c × b0 × d
     # Compute vc from §11.11.2.1, then cap at 3λ√f'c
-    vc_a = (2 + 4 / β) * λ * sqrt_fc               # Eq. (11-31)
-    vc_b = (αs * d_in / b0_in + 2) * λ * sqrt_fc   # Eq. (11-32)
-    vc_c = 4 * λ * sqrt_fc                          # Eq. (11-33)
-    vcs = min(min(vc_a, vc_b, vc_c), 3.0 * λ * sqrt_fc)
+    # ACI 318-19 Table 22.6.6.1: concrete terms carry λs (Eq. 22.5.5.1.3) and
+    # √f'c ≤ 100 psi (§22.6.3.1). λs = 1 is permitted by §22.6.6.2 and not used.
+    λs_v = size_effect_factor(d)
+    sqrt_fc_v = _shear_sqrt_fc(fc)
+    vc_a = (2 + 4 / β) * λs_v * λ * sqrt_fc_v               # Eq. (11-31)
+    vc_b = (αs * d_in / b0_in + 2) * λs_v * λ * sqrt_fc_v   # Eq. (11-32)
+    vc_c = 4 * λs_v * λ * sqrt_fc_v                          # Eq. (11-33)
+    vcs = min(min(vc_a, vc_b, vc_c), 3.0 * λs_v * λ * sqrt_fc_v)
     
     # Steel contribution: vs = Av × fyt / (b0 × s)
     vs = s_in > 0 ? Av_in2 * fyt_psi / (b0_in * s_in) : 0.0
@@ -81,17 +85,14 @@ end
 
 Punching capacity at outer critical section (beyond shear studs).
 
-    vc,out = 2λ√f'c  (psi)
+    vc,out = 2 λs λ √f'c  (psi)
 
 At d/2 beyond the outermost peripheral line of studs, the concrete is
-unreinforced. ACI 318-11 §11.11.5.4 requires vu ≤ φ × 2λ√f'c at this section.
-
-# Reference
-- ACI 318-11 §11.11.5.4
+unreinforced. ACI 318-19 Table 22.6.6.1(e) (corpus: aci-318-19, printed
+p. 418): vc = 2 λs λ √f'c, λs from `size_effect_factor(d)`, √f'c ≤ 100 psi.
 """
 function punching_capacity_outer(fc::Pressure, d::Length; λ::Float64 = 1.0)
-    sqrt_fc = sqrt(ustrip(u"psi", fc))
-    vc_out = 2.0 * λ * sqrt_fc
+    vc_out = 2.0 * size_effect_factor(d) * λ * _shear_sqrt_fc(fc)
     return vc_out * u"psi"
 end
 
@@ -245,10 +246,14 @@ function design_shear_studs(
     
     # ACI 318-11 §11.11.5.1: Vc with studs ≤ 3λ√f'c × b0 × d
     # Compute vc from §11.11.2.1, then cap at 3λ√f'c
-    vc_a = (2 + 4 / β) * λ * sqrt_fc               # Eq. (11-31)
-    vc_b = (αs * d_in / b0_in + 2) * λ * sqrt_fc   # Eq. (11-32)
-    vc_c = 4 * λ * sqrt_fc                          # Eq. (11-33)
-    vcs = min(min(vc_a, vc_b, vc_c), 3.0 * λ * sqrt_fc)
+    # ACI 318-19 Table 22.6.6.1: concrete terms carry λs (Eq. 22.5.5.1.3) and
+    # √f'c ≤ 100 psi (§22.6.3.1). λs = 1 is permitted by §22.6.6.2 and not used.
+    λs_v = size_effect_factor(d)
+    sqrt_fc_v = _shear_sqrt_fc(fc)
+    vc_a = (2 + 4 / β) * λs_v * λ * sqrt_fc_v               # Eq. (11-31)
+    vc_b = (αs * d_in / b0_in + 2) * λs_v * λ * sqrt_fc_v   # Eq. (11-32)
+    vc_c = 4 * λs_v * λ * sqrt_fc_v                          # Eq. (11-33)
+    vcs = min(min(vc_a, vc_b, vc_c), 3.0 * λs_v * λ * sqrt_fc_v)
     
     # Required steel contribution
     vs_reqd = max(vu_psi / φ - vcs, 0.0)
@@ -372,6 +377,12 @@ A non-finite input (moment, dimension or material) returns `As = NaN`, and
 a non-finite `As` in either direction is returned as is (Inf before NaN),
 so `transfer_section_inadequate` rejects it on every caller.  A NaN in one
 direction must not lose the comparison to a finite `As` in the other.
+
+`γf_x` / `γf_y` replace Eq. (13-1) for `Mux` / `Muy` when the punching check
+took a §13.5.3.3 value for that moment (`moment_transfer_gamma_f`), so the
+flexural fraction placed in the band is the complement of the γv the
+punching check used.  The result also carries `As_x`, `As_y`, `bb_x`, `bb_y`
+for the final §13.5.3.3(b) strain check on the placed steel.
 """
 function governing_transfer_reinforcement(
     Mux::Moment, Muy::Moment,
@@ -379,44 +390,66 @@ function governing_transfer_reinforcement(
     fc::Pressure, fy::Pressure;
     position::Symbol = :interior,
     free_edge_parallel::Symbol = :c2,
+    γf_x::Union{Nothing, Float64} = nothing,
+    γf_y::Union{Nothing, Float64} = nothing,
 )
     if !all(isfinite, (Mux, Muy, c1, c2, h, d, fc, fy))
         Mu_bad = isfinite(Mux) ? Muy : Mux
         return (As = NaN * u"inch^2", Mu = Mu_bad, γf = NaN, bb = NaN * u"inch")
     end
-    function _as_for(Mu, b1, b2, bb)
+    bands = transfer_bands(c1, c2, h, d; position, free_edge_parallel)
+    γfx = something(γf_x, gamma_f(bands.b1_x, bands.b2_x))
+    γfy = something(γf_y, gamma_f(bands.b1_y, bands.b2_y))
+    function _as_for(Mu, γf, bb)
         abs(ustrip(kip * u"ft", Mu)) < 1e-6 && return 0.0 * u"inch^2"
-        γf = gamma_f(b1, b2)
         transfer_reinforcement(abs(Mu), γf, bb, d, fc, fy)
     end
-    if position === :edge
-        ori = _orient_edge_column(c1, c2, Mux, Muy; free_edge_parallel)
-        c1 = ori.c1
-        c2 = ori.c2
-    end
-    edge = position != :interior
-    b1_x = edge ? c1 + d / 2 : c1 + d
-    b2_x = edge ? c2 + d     : c2 + d
-    b1_y = edge ? c2 + d / 2 : c2 + d
-    b2_y = edge ? c1 + d     : c1 + d
-    bb_x = edge ? c2 + 1.5h : c2 + 3h
-    bb_y = edge ? c1 + 1.5h : c1 + 3h
-    As_x = _as_for(Mux, b1_x, b2_x, bb_x)
-    As_y = _as_for(Muy, b1_y, b2_y, bb_y)
+    bb_x, bb_y = bands.bb_x, bands.bb_y
+    As_x = _as_for(Mux, γfx, bb_x)
+    As_y = _as_for(Muy, γfy, bb_y)
     if isinf(As_x)
-        return (As = Inf * u"inch^2", Mu = Mux, γf = gamma_f(b1_x, b2_x), bb = bb_x)
+        return (As = Inf * u"inch^2", Mu = Mux, γf = γfx, bb = bb_x)
     end
     if isinf(As_y)
-        return (As = Inf * u"inch^2", Mu = Muy, γf = gamma_f(b1_y, b2_y), bb = bb_y)
+        return (As = Inf * u"inch^2", Mu = Muy, γf = γfy, bb = bb_y)
     end
     if isnan(As_x) || isnan(As_y)
         return (As = NaN * u"inch^2", Mu = isnan(As_x) ? Mux : Muy,
                 γf = NaN, bb = isnan(As_x) ? bb_x : bb_y)
     end
+    per_axis = (As_x = As_x, As_y = As_y, bb_x = bb_x, bb_y = bb_y)
     if ustrip(u"inch^2", As_y) > ustrip(u"inch^2", As_x)
-        return (As = As_y, Mu = Muy, γf = gamma_f(b1_y, b2_y), bb = bb_y)
+        return (As = As_y, Mu = Muy, γf = γfy, bb = bb_y, axis = :y, per_axis...)
     end
-    return (As = As_x, Mu = Mux, γf = gamma_f(b1_x, b2_x), bb = bb_x)
+    return (As = As_x, Mu = Mux, γf = γfx, bb = bb_x, axis = :x, per_axis...)
+end
+
+"""
+    transfer_bands(c1, c2, h, d; position=:interior, free_edge_parallel=:c2)
+        -> (b1_x, b2_x, b1_y, b2_y, bb_x, bb_y)
+
+Critical-section sides and §13.5.3.2 effective widths used for the transfer
+steel of `Mux` (`_x`) and `Muy` (`_y`) in `governing_transfer_reinforcement`.
+`bb` is the column face plus 1.5h on each slab side (ACI 318-11 §13.5.3.2,
+corpus: aci-318-11, page 250); edge and corner columns have slab on one side.
+`:edge` geometry is first oriented by `_orient_edge_column`.
+"""
+function transfer_bands(c1::Length, c2::Length, h::Length, d::Length;
+                        position::Symbol = :interior,
+                        free_edge_parallel::Symbol = :c2)
+    if position === :edge
+        ori = _orient_edge_column(c1, c2, 0.0kip * u"ft", 0.0kip * u"ft";
+                                  free_edge_parallel)
+        c1 = ori.c1
+        c2 = ori.c2
+    end
+    edge = position != :interior
+    return (b1_x = edge ? c1 + d / 2 : c1 + d,
+            b2_x = edge ? c2 + d     : c2 + d,
+            b1_y = edge ? c2 + d / 2 : c2 + d,
+            b2_y = edge ? c1 + d     : c1 + d,
+            bb_x = edge ? c2 + 1.5h : c2 + 3h,
+            bb_y = edge ? c1 + 1.5h : c1 + 3h)
 end
 
 """
@@ -447,7 +480,7 @@ function transfer_reinforcement(
     Mu_transfer = γf * Mu
     
     # Required reinforcement within effective width
-    As_req = required_reinforcement(Mu_transfer, bb, d, fc, fy)
+    As_req = required_reinforcement(Mu_transfer, bb, d, fc, fy; εt_min = tension_controlled_strain(fy))
     
     return As_req
 end

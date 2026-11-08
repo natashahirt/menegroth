@@ -15,7 +15,7 @@
 # =============================================================================
 
 # =============================================================================
-# Punching Shear Check (ACI 318-11 §11.11)
+# Punching Shear Check (geometry ACI 318-11 §11.11; vc ACI 318-19 Table 22.6.5.2)
 # =============================================================================
 
 """
@@ -54,9 +54,15 @@ section centroid, `e = (b_section − cAB) − c_col/2`
   `:interior` superposes both axes.
 - `free_edge_parallel`: `:c1` or `:c2`.  Default inferred from
   `col.boundary_edge_dirs` when present, otherwise `:c2`.
+- `moment_transfer`: `(fy, span_axis)` to apply ACI 318-11 §13.5.3.3
+  (corpus: aci-318-11, page 250) on the closed-form rectangular section;
+  `nothing` (default) keeps Eq. (13-1). See `_increased_transfer_stress`.
+  Sections with openings, circular columns and skew or re-entrant corners
+  keep Eq. (13-1).
 
 # Returns
-Named tuple with `(ok, ratio, vu, φvc, b0, Jc, Mub)`
+Named tuple with `(ok, ratio, vu, φvc, b0, Jc, Mub)`; the closed-form path
+adds `moment_transfer`, the §13.5.3.3 fractions used or `nothing`.
 """
 function check_punching_for_column(col, Vu, Mub, d, h, fc;
                                    verbose=false, col_idx=1, λ=1.0, φ_shear=0.75,
@@ -68,7 +74,8 @@ function check_punching_for_column(col, Vu, Mub, d, h, fc;
                                    column_strip_half=nothing,
                                    column_strips=nothing,
                                    span_axis::NTuple{2, Float64} = (1.0, 0.0),
-                                   θ::Union{Nothing, Real} = nothing)
+                                   θ::Union{Nothing, Real} = nothing,
+                                   moment_transfer = nothing)
     edge_par = something(free_edge_parallel, _infer_free_edge_parallel(col))
     c1 = col.c1
     c2 = col.c2
@@ -150,7 +157,8 @@ function check_punching_for_column(col, Vu, Mub, d, h, fc;
                                             column_strip_half = column_strip_half,
                                             span_axis = span_axis,
                                             αs = is_reentrant ? punching_αs(:interior) : punching_αs(:corner),
-                                            shape = geom_shape, λ = λ, ϕ = φ_shear, Mub_out = Mub)
+                                            shape = geom_shape, λ = λ, λs = size_effect_factor(d),
+                                            ϕ = φ_shear, Mub_out = Mub)
             opened !== nothing && return opened
         end
     elseif has_openings
@@ -163,7 +171,8 @@ function check_punching_for_column(col, Vu, Mub, d, h, fc;
                                         column_strip_half = column_strip_half,
                                         span_axis = span_axis,
                                         αs = punching_αs(col.position),
-                                        shape = geom_shape, λ = λ, ϕ = φ_shear, Mub_out = Mub)
+                                        shape = geom_shape, λ = λ, λs = size_effect_factor(d),
+                                            ϕ = φ_shear, Mub_out = Mub)
         opened !== nothing && return opened
     end
     if route_general
@@ -208,7 +217,7 @@ function check_punching_for_column(col, Vu, Mub, d, h, fc;
         αs_g = is_reentrant ? punching_αs(:interior) : punching_αs(:corner)
         g = punching_check_general(Vu, M_about_x, M_about_y, d, fc, pts;
                                    closed = closed, β = β_g,
-                                   αs = αs_g, λ = λ, ϕ = φ_shear)
+                                   αs = αs_g, λ = λ, λs = size_effect_factor(d), ϕ = φ_shear)
         if verbose
             status = g.ok ? "✓ PASS" : "✗ FAIL"
             @debug "Column $col_idx ($(kind) corner → general App. B)" c1=c1 c2=c2 b0=g.b0 β=round(β_g, digits=2) angle=round(col_corner_angle, digits=3)
@@ -283,6 +292,9 @@ function check_punching_for_column(col, Vu, Mub, d, h, fc;
     end
 
     b0 = geom.b0
+    vc = punching_capacity_stress(fc, β, αs, b0, d; λ=λ, λs=size_effect_factor(d))
+    φvc = φ_shear * vc
+
     if col.position == :corner
         # Parity with punching_check: γv Mu c / Jc on each axis.
         # `Mub` is the span-direction (b1) transfer moment; optional `Muy`
@@ -306,10 +318,18 @@ function check_punching_for_column(col, Vu, Mub, d, h, fc;
     else
         vu = combined_punching_stress(Vu, Mub_adjusted, b0, d, γv_val, Jc, cAB)
     end
-    
-    vc = punching_capacity_stress(fc, β, αs, b0, d; λ=λ)
-    φvc = φ_shear * vc
-    
+
+    transfer = nothing
+    if moment_transfer !== nothing && col_shape_val != :circular
+        alt = _increased_transfer_stress(col, geom, Jc, cAB, Vu, M_span, M_perp,
+                                         Mub_adjusted, d, h, fc, φvc * b0 * d,
+                                         edge_par, moment_transfer)
+        if alt !== nothing && alt.vu < vu
+            vu = alt.vu
+            transfer = alt.transfer
+        end
+    end
+
     ok = vu <= φvc
     ratio = ustrip(u"psi", vu) / ustrip(u"psi", φvc)
     
@@ -320,10 +340,113 @@ function check_punching_for_column(col, Vu, Mub, d, h, fc;
             @debug "  Mub correction" Mub_original=Mub Mub_adjusted=Mub_adjusted e_centroid=e_centroid
         end
         @debug "  Demand" Vu=Vu γv=round(γv_val, digits=3) Mub=Mub_adjusted
-        @debug "  Stress" vu=round(ustrip(u"psi", vu), digits=1) φvc=round(ustrip(u"psi", φvc), digits=1) ratio=round(ratio, digits=2) status=status
+        @debug "  Stress" vu=round(ustrip(u"psi", vu), digits=1) φvc=round(ustrip(u"psi", φvc), digits=1) ratio=round(ratio, digits=2) status=status moment_transfer=transfer
     end
     
-    return (ok=ok, ratio=ratio, vu=vu, φvc=φvc, b0=b0, Jc=Jc, Mub=Mub)
+    return (ok=ok, ratio=ratio, vu=vu, φvc=φvc, b0=b0, Jc=Jc, Mub=Mub,
+            moment_transfer=transfer)
+end
+
+"""
+    _increased_transfer_stress(col, geom, Jc, cAB, Vu, M_span, M_perp, Mub_adjusted,
+                               d, h, fc, φVc, edge_par, mt) -> Union{Nothing, NamedTuple}
+
+Column-face punching stress with the flexural fractions of ACI 318-11
+§13.5.3.3 (corpus: aci-318-11, page 250), from `moment_transfer_gamma_f`.
+Returns `(vu, transfer)`, where `transfer = (γf_x, γf_y, provision_x,
+provision_y)` holds the fractions applied to the span-direction (`Mub`, x)
+and perpendicular (`Muy`, y) moments, or `nothing` when no increase applies. The caller keeps the Eq. (13-1) result unless this
+stress is lower; the transfer steel then uses the same fractions.
+
+`mt` is `(fy, span_axis)`; `span_axis` is the slab's plan span direction,
+the direction of `M_span`. The effective widths are the ones
+`governing_transfer_reinforcement` sizes the steel in (`transfer_bands`).
+
+- Interior: (b) on each axis, the same superposition as the Eq. (13-1) check.
+- Corner: (a) on each axis (0.5φVc), with the R11.11.7.2 centroid shift.
+- Edge: (a) sets γv = 0 for the moment about the axis parallel to the edge
+  (0.75φVc). The other moment is then checked on the 3-sided section about
+  its symmetry axis, `polar_moment_Jc_edge_perpendicular`, with γf from (b)
+  or Eq. (13-1). Which moment is parallel is found from the free-edge
+  direction and `span_axis`; when the column has no edge direction, or the
+  edge is skew to the span, (a) is not applied.
+"""
+function _increased_transfer_stress(col, geom, Jc, cAB, Vu, M_span, M_perp, Mub_adjusted,
+                                    d, h, fc, φVc, edge_par, mt)
+    fy = mt.fy
+    v_direct = uconvert(u"psi", Vu / (geom.b0 * d))
+    if col.position == :interior
+        bands = transfer_bands(col.c1, col.c2, h, d; position = :interior)
+        gx = moment_transfer_gamma_f(geom.b1, geom.b2, :interior, Vu, φVc, M_span,
+                                     bands.bb_x, d, fc, fy)
+        gy = moment_transfer_gamma_f(geom.b2, geom.b1, :interior, Vu, φVc, M_perp,
+                                     bands.bb_y, d, fc, fy)
+        gx.provision === :eq_13_1 && gy.provision === :eq_13_1 && return nothing
+        Jc_y = polar_moment_Jc_interior(geom.b2, geom.b1, d)
+        vu = v_direct +
+             uconvert(u"psi", (1 - gx.γf) * abs(M_span) * cAB / Jc) +
+             uconvert(u"psi", (1 - gy.γf) * abs(M_perp) * (geom.b2 / 2) / Jc_y)
+        return (vu = vu, transfer = _transfer_fractions(gx, gy))
+    elseif col.position == :corner
+        bands = transfer_bands(col.c1, col.c2, h, d; position = :corner)
+        gx = moment_transfer_gamma_f(geom.b1, geom.b2, :corner, Vu, φVc, M_span,
+                                     bands.bb_x, d, fc, fy)
+        gy = moment_transfer_gamma_f(geom.b2, geom.b1, :corner, Vu, φVc, M_perp,
+                                     bands.bb_y, d, fc, fy)
+        gx.provision === :eq_13_1 && gy.provision === :eq_13_1 && return nothing
+        e_y = eccentricity_to_critical_centroid(geom.b2, col.c2, geom.cAB_y)
+        Muy_adj = max(0.0kip*u"ft", abs(M_perp) - Vu * e_y)
+        Jc_y = polar_moment_Jc_corner(geom.b2, geom.b1, d, geom.cAB_y)
+        vu = v_direct +
+             uconvert(u"psi", (1 - gx.γf) * Mub_adjusted * geom.cAB_x / Jc) +
+             uconvert(u"psi", (1 - gy.γf) * Muy_adj * geom.cAB_y / Jc_y)
+        return (vu = vu, transfer = _transfer_fractions(gx, gy))
+    elseif col.position == :edge
+        span_is_parallel = _span_moment_parallel_to_edge(col, mt.span_axis)
+        span_is_parallel === nothing && return nothing
+        M_par, M_other = span_is_parallel ? (M_span, M_perp) : (M_perp, M_span)
+        bands = transfer_bands(col.c1, col.c2, h, d; position = :edge,
+                               free_edge_parallel = edge_par)
+        bb_par, bb_other = span_is_parallel ? (bands.bb_x, bands.bb_y) :
+                                              (bands.bb_y, bands.bb_x)
+        ga = moment_transfer_gamma_f(geom.b1, geom.b2, :edge_parallel, Vu, φVc, M_par,
+                                     bb_par, d, fc, fy)
+        ga.provision === :aci_13_5_3_3a || return nothing
+        gb = moment_transfer_gamma_f(geom.b2, geom.b1, :edge_perpendicular, Vu, φVc,
+                                     M_other, bb_other, d, fc, fy)
+        Jc_p = polar_moment_Jc_edge_perpendicular(geom.b1, geom.b2, d)
+        vu = v_direct + uconvert(u"psi", (1 - gb.γf) * abs(M_other) * (geom.b2 / 2) / Jc_p)
+        transfer = span_is_parallel ? _transfer_fractions(ga, gb) : _transfer_fractions(gb, ga)
+        return (vu = vu, transfer = transfer)
+    end
+    return nothing
+end
+
+"""Fractions for `Mub` (`_x`) and `Muy` (`_y`) in `governing_transfer_reinforcement` naming."""
+_transfer_fractions(gx, gy) = (γf_x = gx.γf, γf_y = gy.γf,
+                               provision_x = gx.provision, provision_y = gy.provision)
+
+"""
+    _span_moment_parallel_to_edge(col, span_axis) -> Union{Bool, Nothing}
+
+`true` when the span-direction moment of an edge column acts about an axis
+parallel to its free edge (span perpendicular to the edge), `false` when the
+span runs along the edge, `nothing` when the column has no stored edge
+direction or the edge is skew to the span (more than about 6° off either).
+"""
+function _span_moment_parallel_to_edge(col, span_axis)
+    hasproperty(col, :boundary_edge_dirs) || return nothing
+    dirs = getfield(col, :boundary_edge_dirs)
+    isempty(dirs) && return nothing
+    ex, ey = dirs[1]
+    sx, sy = span_axis
+    ne = hypot(ex, ey)
+    ns = hypot(sx, sy)
+    (ne > 0 && ns > 0) || return nothing
+    c = abs(ex * sx + ey * sy) / (ne * ns)
+    c < 0.1 && return true
+    c > 0.995 && return false
+    return nothing
 end
 
 # =============================================================================
@@ -405,7 +528,7 @@ function check_punching_at_drop_edge(col, Vu, Mub, h_slab, d_slab, fc,
     β = max(ustrip(β_drop), 1.0)
     αs = punching_αs(col.position)
     
-    vc = punching_capacity_stress(fc, β, αs, b0, d_slab; λ=λ)
+    vc = punching_capacity_stress(fc, β, αs, b0, d_slab; λ=λ, λs=size_effect_factor(d_slab))
     φvc = φ_shear * vc
     
     ok = vu <= φvc
@@ -432,7 +555,7 @@ function check_punching_at_drop_edge(col, Vu, Mub, h_slab, d_slab, fc,
     if b0_open !== nothing
         b0 = b0_open
         # §11.11.2.1(c) depends on b0/d, so the capacity moves with the cut.
-        vc = punching_capacity_stress(fc, β, αs, b0, d_slab; λ=λ)
+        vc = punching_capacity_stress(fc, β, αs, b0, d_slab; λ=λ, λs=size_effect_factor(d_slab))
         φvc = φ_shear * vc
         vu = uconvert(u"psi", Vu_net / (b0 * d_slab))
         ok = vu <= φvc
@@ -511,5 +634,260 @@ function check_punching(col, Vu, Mub, h_slab, d_slab, h_total, d_total,
                 φvc=check_col.φvc, b0=check_col.b0, Jc=check_col.Jc,
                 Mub=Mub, governing_section=:column)
     end
+end
+
+# =============================================================================
+# Punching at wall reactions (ACI 318-11 §11.11.1.2)
+# =============================================================================
+
+"""
+    wall_reaction_punching(struc, slab, d, fc, qu; λ=1.0, ϕ=0.75)
+
+Two-way shear at each wall reaction that meets `slab`.
+
+One section per connected reaction, at `d/2` from the wall faces
+(§11.11.1.2, corpus: aci-318-11, page 200). A closed rectangular shaft is
+one loop. Two walls that meet are the re-entrant corner or the outside
+corner, whichever quadrant has slab. A wall on its own is the rectangular
+section: four sides when the slab is on both faces, three sides when the
+slab is on one face and both ends.
+
+`Vu` is `qu` times the walls' tributary area, the same demand as a column.
+Moment transfer (§11.11.7) is not added: the slab support on a wall fixes
+the vertical displacement and leaves the rotation free, so no unbalanced
+moment is assigned. `β` is the long side over the thickness of the reaction
+(§11.11.2.1). `αs` is 40 on a re-entrant corner, 20 on an outside corner,
+30 on an edge or a shaft loop, 40 when the slab surrounds the wall.
+
+A wall with no tributary area is omitted. A diagonal wall is omitted.
+"""
+function wall_reaction_punching(struc, slab, d::Length, fc::Pressure, qu::Pressure;
+                                λ::Float64 = 1.0, ϕ::Float64 = 0.75)
+    walls = _walls_meeting_slab(struc, slab)
+    isempty(walls) && return NamedTuple[]
+    in_slab = _slab_plan_contains(struc, slab)
+    in_slab === nothing && return NamedTuple[]
+    checks = NamedTuple[]
+    for cluster in _wall_clusters(walls)
+        if _push_loop_check!(checks, cluster, d, fc, qu, in_slab; λ, ϕ)
+            continue
+        end
+        paired = _push_corner_checks!(checks, cluster, d, fc, qu, in_slab; λ, ϕ)
+        for (i, w) in enumerate(cluster)
+            paired[i] && continue
+            chk = _single_wall_punching(w, d, fc, qu, in_slab; λ, ϕ)
+            chk === nothing || push!(checks, chk)
+        end
+    end
+    return checks
+end
+
+"""Walls that share an endpoint, within a millimetre, are one reaction."""
+function _wall_clusters(walls)
+    n = length(walls)
+    parent = collect(1:n)
+    function root(i)
+        parent[i] == i && return i
+        parent[i] = root(parent[i])
+        return parent[i]
+    end
+    ends = Dict{NTuple{2,Int}, Int}()
+    for i in 1:n
+        w = walls[i]
+        for (x, y) in ((w.x1, w.y1), (w.x2, w.y2))
+            key = (round(Int, 1000 * x), round(Int, 1000 * y))
+            if haskey(ends, key)
+                parent[root(i)] = root(ends[key])
+            else
+                ends[key] = i
+            end
+        end
+    end
+    groups = Dict{Int, Vector{Any}}()
+    for i in 1:n
+        push!(get!(groups, root(i), Any[]), walls[i])
+    end
+    return collect(values(groups))
+end
+
+function _walls_meeting_slab(struc, slab)
+    hasproperty(struc, :walls) || return Any[]
+    walls = struc.walls
+    isempty(walls) && return Any[]
+    skel = struc.skeleton
+    hasproperty(skel, :stories) || return Any[]
+    z = _slab_elevation_m(struc, slab)
+    z === nothing && return Any[]
+    out = Any[]
+    for w in walls
+        hasproperty(w, :x1) || continue
+        any(zw -> abs(zw - z) <= 0.1, _wall_end_elevations_m(skel, w.story)) || continue
+        push!(out, w)
+    end
+    return out
+end
+
+"""Point-in-slab test in plan metres, or `nothing` when the slab has no outline."""
+function _slab_plan_contains(struc, slab; boundary::Bool = false)
+    skel = struc.skeleton
+    vis, _, _ = _get_slab_face_boundary(struc, slab)
+    isempty(vis) && return nothing
+    exterior = [_vertex_xy_m(skel, vi) for vi in vis]
+    holes = slab_void_loops(struc, slab)
+    return function (pt)
+        # The crossing test is strict, and it is not consistent on an edge:
+        # one side of a rectangle counts as inside and the other as outside.
+        # An edge frame sits on that line. `boundary` keeps the edge and
+        # still rejects a point in the opening.
+        inside = _eq137_point_in_poly(pt, exterior) ||
+            (boundary && _eq137_on_boundary(pt, exterior))
+        inside || return false
+        for hole in holes
+            in_hole = _eq137_point_in_poly(pt, hole)
+            boundary && in_hole && _eq137_on_boundary(pt, hole) && (in_hole = false)
+            in_hole && return false
+        end
+        return true
+    end
+end
+
+function _wall_trib_m2(w)
+    hasproperty(w, :tributary_cell_areas) || return 0.0
+    return sum(values(w.tributary_cell_areas); init = 0.0)
+end
+
+function _reaction_punch(points, closed, Vu, d, fc, β, αs; λ, ϕ, kind)
+    r = punching_check_general(Vu, 0.0u"kip*ft", 0.0u"kip*ft", d, fc, points;
+                               closed = closed, β = Float64(β), αs = Int(αs), λ = λ,
+                               λs = size_effect_factor(d), ϕ = ϕ)
+    return (ok = r.ok, utilization = r.utilization, b0 = r.b0, vu = r.vu,
+            ϕvc = r.ϕvc, kind = kind)
+end
+
+function _vu_from_area(qu, area_m2)
+    area_m2 > 0 || return nothing
+    return uconvert(kip, qu * (area_m2 * u"m^2"))
+end
+
+_wall_len_m(w) = hypot(w.x2 - w.x1, w.y2 - w.y1)
+
+function _axis_aligned(w)
+    return abs(w.x1 - w.x2) <= 1e-6 || abs(w.y1 - w.y2) <= 1e-6
+end
+
+function _same_point(x1, y1, x2, y2)
+    return hypot(x1 - x2, y1 - y2) <= 1e-3
+end
+
+function _push_loop_check!(checks, walls, d, fc, qu, in_slab; λ, ϕ)
+    length(walls) == 4 || return false
+    all(_axis_aligned, walls) || return false
+    xs = Float64[]
+    ys = Float64[]
+    for w in walls
+        append!(xs, (w.x1, w.x2))
+        append!(ys, (w.y1, w.y2))
+    end
+    ux = unique(round.(xs, digits = 4))
+    uy = unique(round.(ys, digits = 4))
+    (length(ux) == 2 && length(uy) == 2) || return false
+    t = walls[1].thickness
+    all(w -> w.thickness == t, walls) || return false
+    Wx = abs(ux[2] - ux[1]) * u"m"
+    Wy = abs(uy[2] - uy[1]) * u"m"
+    outward = !in_slab(((ux[1] + ux[2]) / 2, (uy[1] + uy[2]) / 2))
+    pts, closed = try
+        closed_wall_loop_section(Wx, Wy, t, d; outward = outward)
+    catch
+        return false
+    end
+    Vu = _vu_from_area(qu, sum(_wall_trib_m2, walls))
+    Vu === nothing && return true
+    β = punching_β(max(Wx, Wy), t)
+    push!(checks, _reaction_punch(pts, closed, Vu, d, fc, β, 30; λ, ϕ, kind = :wall_loop))
+    return true
+end
+
+function _push_corner_checks!(checks, walls, d, fc, qu, in_slab; λ, ϕ)
+    n = length(walls)
+    paired = falses(n)
+    for i in 1:n, j in (i + 1):n
+        w1, w2 = walls[i], walls[j]
+        (_axis_aligned(w1) && _axis_aligned(w2)) || continue
+        h1 = abs(w1.y1 - w1.y2) <= 1e-6
+        h2 = abs(w2.y1 - w2.y2) <= 1e-6
+        h1 == h2 && continue
+        horiz, vert = h1 ? (w1, w2) : (w2, w1)
+        corner = nothing
+        for (x, y) in ((horiz.x1, horiz.y1), (horiz.x2, horiz.y2))
+            if _same_point(x, y, vert.x1, vert.y1) || _same_point(x, y, vert.x2, vert.y2)
+                corner = (x, y)
+                break
+            end
+        end
+        corner === nothing && continue
+        cx, cy = corner
+        Lx = _wall_len_m(horiz) * u"m"
+        Ly = _wall_len_m(vert) * u"m"
+        tx, ty = horiz.thickness, vert.thickness
+        ux = (abs(horiz.x1 - cx) <= 1e-3 && abs(horiz.y1 - cy) <= 1e-3) ?
+             sign(horiz.x2 - horiz.x1) : sign(horiz.x1 - horiz.x2)
+        uy = (abs(vert.x1 - cx) <= 1e-3 && abs(vert.y1 - cy) <= 1e-3) ?
+             sign(vert.y2 - vert.y1) : sign(vert.y1 - vert.y2)
+        ux == 0 && (ux = 1.0)
+        uy == 0 && (uy = 1.0)
+        offx = ustrip(u"m", ty) / 2 + 0.05
+        offy = ustrip(u"m", tx) / 2 + 0.05
+        between = in_slab((cx + ux * offx, cy + uy * offy))
+        outside = in_slab((cx - ux * offx, cy - uy * offy))
+        Vu = _vu_from_area(qu, _wall_trib_m2(horiz) + _wall_trib_m2(vert))
+        Vu === nothing && (paired[i] = true; paired[j] = true; continue)
+        β = max(ustrip(u"m", Lx), ustrip(u"m", Ly)) /
+            max(min(ustrip(u"m", tx), ustrip(u"m", ty)), 1e-6)
+        ox, oy = ty / 2 + d / 2, tx / 2 + d / 2
+        pushed = false
+        if between && Lx > ox && Ly > oy
+            pts, closed = reentrant_wall_corner_section(tx, Lx, ty, Ly, d)
+            push!(checks, _reaction_punch(pts, closed, Vu, d, fc, β, 40; λ, ϕ, kind = :reentrant_corner))
+            pushed = true
+        end
+        if outside
+            pts, closed = convex_wall_corner_section(tx, Lx, ty, Ly, d)
+            push!(checks, _reaction_punch(pts, closed, Vu, d, fc, β, 20; λ, ϕ, kind = :convex_corner))
+            pushed = true
+        end
+        if pushed
+            paired[i] = true
+            paired[j] = true
+        end
+    end
+    return paired
+end
+
+function _single_wall_punching(w, d, fc, qu, in_slab; λ, ϕ)
+    _axis_aligned(w) || return nothing
+    L = _wall_len_m(w) * u"m"
+    t = w.thickness
+    L > zero(L) && t > zero(t) || return nothing
+    dx, dy = w.x2 - w.x1, w.y2 - w.y1
+    len = hypot(dx, dy)
+    nx, ny = -dy / len, dx / len
+    mx, my = (w.x1 + w.x2) / 2, (w.y1 + w.y2) / 2
+    off = ustrip(u"m", t) / 2 + 0.05
+    sides = (in_slab((mx + nx * off, my + ny * off)) ? 1 : 0) +
+            (in_slab((mx - nx * off, my - ny * off)) ? 1 : 0)
+    sides == 0 && return nothing
+    Vu = _vu_from_area(qu, _wall_trib_m2(w))
+    Vu === nothing && return nothing
+    if sides == 2
+        pts, closed = rectangular_critical_section(L, t, d; position = :interior)
+        αs = 40
+        kind = :wall_interior
+    else
+        pts, closed = wall_face_critical_section(t, L, d)
+        αs = 30
+        kind = :wall_end
+    end
+    return _reaction_punch(pts, closed, Vu, d, fc, punching_β(L, t), αs; λ, ϕ, kind)
 end
 

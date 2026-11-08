@@ -82,6 +82,25 @@ end
 floor_symbol(::OneWayOptions) = :one_way
 
 """
+    TwoWayOptions <: AbstractFloorOptions
+
+Options for a beam-supported two-way slab. The type is the floor system:
+`DesignParameters(floor = TwoWayOptions())` asks for `:two_way`.
+
+A panel with no beams is not designed with these options. Initialization
+redesigns it as a flat plate (ACI 318-11 §9.5.3.1). These fields carry the
+concrete and the bar size onto that flat plate.
+"""
+Base.@kwdef struct TwoWayOptions <: AbstractFloorOptions
+    material::ReinforcedConcreteMaterial = RC_4000_60
+    cover::Length = 19.05u"mm"
+    bar_size::Int = 5
+end
+
+"""Return the canonical floor system symbol for `TwoWayOptions`."""
+floor_symbol(::TwoWayOptions) = :two_way
+
+"""
     FlatPlateOptions <: AbstractFloorOptions
 
 Options for flat plate / flat slab / waffle / PT slab sizing per ACI 318 Chapter 8.
@@ -140,14 +159,20 @@ Options for flat plate / flat slab / waffle / PT slab sizing per ACI 318 Chapter
   - `:column_capitals` — Flared column head enlargement (§13.1.2)
 - `max_column_size`: Maximum column size before considering reinforcement (default: 30")
 - `column_span_minimum`: Hold every column at least span/15 (StructurePoint),
-  clamped to `max_column_size` (default: `true`). `false` sizes columns from
-  axial load and P-M design, and leaves punching growth to the slab loop up
-  to `max_column_size`. Column sizing only grows, so this minimum is also
-  the smallest column a design can return.
+  clamped to `max_column_size` (default: `false`). span/15 is a
+  preliminary-design rule of thumb, not an ACI requirement. `false` sizes
+  columns from axial load and P-M design, and leaves punching growth to the
+  slab loop up to `max_column_size`. Column sizing only grows, so when `true`
+  this minimum is also the smallest column a design can return.
 - `punching_thickening`: When columns and reinforcement cannot resolve
   punching, thicken the slab (default: `true`). `false` stops the design as a
   punching failure instead, so a punching strategy can be tested on its own.
   The slab still thickens for deflection, flexure and one-way shear.
+- `moment_transfer_increase`: Raise the flexural fraction γf of the
+  unbalanced moment above Eq. (13-1) where ACI 318-11 §13.5.3.3(a)/(b)
+  permits it (default: `true`). Applied to the column-face punching check and
+  to the matching §13.5.3.2 transfer reinforcement; see
+  [`moment_transfer_gamma_f`](@ref).
 - `stud_material`: Shear stud / stirrup steel material (default: `Stud_51`)
 - `stud_diameter`: Stud diameter (default: 1/2"; ignored for non-stud types)
 - `stirrup_bar_size`: Stirrup bar size (default: 4; only used for `:closed_stirrups`)
@@ -226,6 +251,8 @@ struct FlatPlateOptions <: AbstractFloorOptions
     column_span_minimum::Bool
     # Thicken the slab when punching levers run out; false = fail instead
     punching_thickening::Bool
+    # ACI 318-11 §13.5.3.3 increase of γf at the column face
+    moment_transfer_increase::Bool
 end
 
 """Valid values of `FlatPlateOptions.on_inapplicable`."""
@@ -282,8 +309,9 @@ function _build_flat_plate_options(;
     objective::AbstractObjective = MinVolume(),
     col_I_factor::Float64 = 0.70,
     on_inapplicable::Symbol = :fallback,
-    column_span_minimum::Bool = true,
+    column_span_minimum::Bool = false,
     punching_thickening::Bool = true,
+    moment_transfer_increase::Bool = true,
 )
     _validate_on_inapplicable(on_inapplicable)
     # Call the positional (inner) constructor — field order must match struct definition
@@ -292,7 +320,8 @@ function _build_flat_plate_options(;
                      punching_strategy, punching_reinforcement, max_column_size,
                      stud_material, stud_diameter, stirrup_bar_size,
                      min_h, objective, col_I_factor, on_inapplicable,
-                     column_span_minimum, punching_thickening)
+                     column_span_minimum, punching_thickening,
+                     moment_transfer_increase)
 end
 
 """
@@ -686,6 +715,11 @@ result_materials(r::FlatPlatePanelResult, pm, opts::FlatSlabOptions) = result_ma
 
 """Return concrete + rebar materials for a one-way CIP slab result."""
 function result_materials(::CIPSlabResult, primary_mat, opts::OneWayOptions)
+    Dict{Symbol, AbstractMaterial}(:concrete => opts.material.concrete, :steel => opts.material.rebar)
+end
+
+"""Return concrete + rebar materials for a two-way CIP slab result."""
+function result_materials(::CIPSlabResult, primary_mat, opts::TwoWayOptions)
     Dict{Symbol, AbstractMaterial}(:concrete => opts.material.concrete, :steel => opts.material.rebar)
 end
 

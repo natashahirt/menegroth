@@ -334,12 +334,62 @@ function _size_flat_plate!(
           punching_strategy=string(opts.punching_strategy),
           has_drop_panel=!isnothing(drop_panel))
 
+    # A still-growing design may take one step per remaining increment, at
+    # least `max_iterations`, and never more than the growth ceiling. The
+    # `stop` on a failure says whether that budget ran out (`:budget`) or
+    # the thickness limit was reached (`:at_limit`).
+    function _fea_passes()
+        analysis_cache isa FEAModelCache || return (fea_rebuilds = 0, fea_updates = 0)
+        return (fea_rebuilds = analysis_cache.n_rebuilds,
+                fea_updates = analysis_cache.n_updates)
+    end
+
+    function _stopped(check, h_now, stop)
+        emit!(tc, :slab, "size_flat_plate!", _slab_id, :failure;
+              reason="non_convergence", failing_check=check, stop=string(stop),
+              h_final=string(h_now), iterations=total_iters, _fea_passes()...)
+        return (
+            converged       = false,
+            failure_reason  = "non_convergence",
+            failing_check   = check,
+            iterations      = total_iters,
+            h_final         = h_now,
+            pattern_loading = false,
+            slab_result     = nothing,
+            column_results  = nothing,
+            drop_panel      = drop_panel,
+            integrity       = nothing,
+            integrity_check = nothing,
+            transfer_results = nothing,
+            ρ_prime         = nothing,
+            stop            = stop,
+        )
+    end
+
+    h_max = ln_max / 10
+    _thick_steps() = growth_steps(
+        _growth_meters(h), _growth_meters(h_max), _growth_meters(h_increment))
+    function _column_steps()
+        inc = hasproperty(column_opts, :size_increment) ?
+            column_opts.size_increment : h_increment
+        cmax = opts.max_column_size
+        span = 0
+        for col in columns
+            c0 = max(_growth_meters(col.c1), _growth_meters(col.c2))
+            span = max(span, growth_steps(c0, _growth_meters(cmax), _growth_meters(inc)))
+        end
+        return span
+    end
+
     # =====================================================================
     # OUTER LOOP: ties Phase A → B → C together.
     # Phase B (punching) or C (rebar) may signal "need more depth", which
     # bumps h and restarts from Phase A.  This is the rare last-resort path.
+    # The bound is the thickness steps still available, not only the caller's
+    # iteration count, so a slab that is still thickening is not stopped early.
     # =====================================================================
-    for outer in 1:max_iterations
+    outer_budget = monotone_budget(max_iterations, _thick_steps())
+    for outer in 1:outer_budget
         
         # =================================================================
         # PHASE A — DEPTH CONVERGENCE
@@ -348,14 +398,14 @@ function _size_flat_plate!(
         # =================================================================
         depth_converged = false
         
-        for iter_a in 1:max_iterations
+        a_budget = monotone_budget(max_iterations, _thick_steps())
+        for iter_a in 1:a_budget
             total_iters += 1
 
             # Guard against runaway thickness (h > ln/10 is impractical)
-            h_max = ln_max / 10
             if h > h_max
                 @warn "Slab thickness h=$h exceeds practical limit (ln/10 = $h_max). Aborting."
-                break
+                return _stopped(last_failing_check, h, :at_limit)
             end
             
             if verbose
@@ -673,22 +723,8 @@ function _size_flat_plate!(
         end  # Phase A loop
         
         if !depth_converged
-            @warn "Phase A (depth) did not converge in $max_iterations iterations" h=h last_check=last_failing_check
-            return (
-                converged       = false,
-                failure_reason  = "non_convergence",
-                failing_check   = last_failing_check,
-                iterations      = total_iters,
-                h_final         = h,
-                pattern_loading = false,
-                slab_result     = nothing,
-                column_results  = nothing,
-                drop_panel      = drop_panel,
-                integrity       = nothing,
-                integrity_check = nothing,
-                transfer_results = nothing,
-                ρ_prime         = nothing,
-            )
+            @warn "Phase A (depth) did not converge" h=h last_check=last_failing_check stop=:budget
+            return _stopped(last_failing_check, h, :budget)
         end
         
         # =================================================================
@@ -700,7 +736,10 @@ function _size_flat_plate!(
         punching_resolved = false
         h_before_punch = h  # detect if _resolve_punching_failures! bumped h
         
-        for iter_b in 1:max_iterations
+        # Each confirm can ask for another column step, because a larger
+        # column draws more moment. Allow one confirm per remaining step.
+        b_budget = monotone_budget(max_iterations, _column_steps())
+        for iter_b in 1:b_budget
             total_iters += 1
             
             if verbose
@@ -958,22 +997,10 @@ function _size_flat_plate!(
                 _prev_h = h
                 continue  # outer loop → Phase A
             end
-            @warn "Phase B (punching) did not converge in $max_iterations iterations" h=h
-            return (
-                converged       = false,
-                failure_reason  = "non_convergence",
-                failing_check   = "punching_shear",
-                iterations      = total_iters,
-                h_final         = h,
-                pattern_loading = false,
-                slab_result     = nothing,
-                column_results  = nothing,
-                drop_panel      = drop_panel,
-                integrity       = nothing,
-                integrity_check = nothing,
-                transfer_results = nothing,
-                ρ_prime         = nothing,
-            )
+            ratios = [punching_local[i].ratio for i in eachindex(columns)]
+            worst = argmax(ratios)
+            @warn "Phase B (punching) did not converge" h=h stop=:budget iterations=total_iters column=worst ratio=ratios[worst] c1=columns[worst].c1 c2=columns[worst].c2
+            return _stopped("punching_shear", h, :budget)
         end
         
         # =================================================================
@@ -1004,7 +1031,8 @@ function _size_flat_plate!(
                   converged=true, h_final=string(h), h_initial=string(h_initial),
                   iterations=total_iters,
                   governing_check=governing,
-                  column_sizes=[string(col.c1) * "×" * string(col.c2) for col in columns])
+                  column_sizes=[string(col.c1) * "×" * string(col.c2) for col in columns],
+                  _fea_passes()...)
         end
         if hasproperty(result, :needs_more_depth) && result.needs_more_depth
             h = round_up_thickness(h + h_increment, h_increment)
@@ -1021,24 +1049,7 @@ function _size_flat_plate!(
         return result
     end  # outer loop
     
-    # ─── Non-convergence: return structured failure ───
-    emit!(tc, :slab, "size_flat_plate!", _slab_id, :failure;
-          reason="non_convergence", failing_check=last_failing_check,
-          h_final=string(h), iterations=total_iters)
-    @warn "Flat plate design did not converge in $max_iterations outer iterations" last_check=last_failing_check h_final=h
-    return (
-        converged       = false,
-        failure_reason  = "non_convergence",
-        failing_check   = last_failing_check,
-        iterations      = total_iters,
-        h_final         = h,
-        pattern_loading = false,
-        slab_result     = nothing,
-        column_results  = nothing,
-        drop_panel      = drop_panel,
-        integrity       = nothing,
-        integrity_check = nothing,
-        transfer_results = nothing,
-        ρ_prime         = nothing,
-    )
+    # ─── Non-convergence: the outer budget ran out while depth was still moving ───
+    @warn "Flat plate design did not converge" last_check=last_failing_check h_final=h stop=:budget
+    return _stopped(last_failing_check, h, :budget)
 end

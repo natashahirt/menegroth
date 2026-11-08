@@ -175,6 +175,42 @@ function supporting_wall_segments(struc, slab)
     return out
 end
 
+"""Unit vector of a span axis, or `nothing` when the axis has no length."""
+function _span_unit_axis(span_axis)
+    span_axis === nothing && return nothing
+    length(span_axis) == 2 || return nothing
+    L = hypot(Float64(span_axis[1]), Float64(span_axis[2]))
+    L < 1e-9 && return nothing
+    return (span_axis[1] / L, span_axis[2] / L)
+end
+
+"""True when a wall segment lies along `ax` rather than across it."""
+function _wall_parallel_to_axis(seg, ax)
+    dx = seg[2][1] - seg[1][1]
+    dy = seg[2][2] - seg[1][2]
+    L = hypot(dx, dy)
+    L < 1e-6 && return false
+    return abs(dx * ax[2] - dy * ax[1]) / L < 0.05
+end
+
+"""
+Thickness of the wall on `seg`, or `nothing` when the model has only the
+plan line. A design kernel carries segments and no wall objects.
+"""
+function _wall_thickness(struc, seg)
+    hasproperty(struc, :walls) || return nothing
+    for w in struc.walls
+        hasproperty(w, :thickness) || continue
+        hasproperty(w, :x1) || continue
+        ends = ((Float64(w.x1), Float64(w.y1)), (Float64(w.x2), Float64(w.y2)))
+        same = (_segment_key((ends[1], ends[2])) == _segment_key(seg))
+        same || continue
+        t = w.thickness
+        return t isa Unitful.Quantity ? t : t * u"m"
+    end
+    return nothing
+end
+
 """A story elevation as metres. A bare number is already metres."""
 _story_elevation_m(x) = x isa Unitful.Quantity ? ustrip(u"m", x) : Float64(x)
 
@@ -210,6 +246,59 @@ function _slab_elevation_m(struc, slab)
     vis = skel.face_vertex_indices[cell.face_idx]
     isempty(vis) && return nothing
     return skel.geometry.vertex_coords[first(vis), 3]
+end
+
+"""
+    slab_discontinuous_edge(struc, slab, columns) -> Bool
+
+True when ACI 318-11 Table 9.5(c) uses the exterior-without-edge-beams
+thickness (corpus: aci-318-11, page 134).
+
+A column that is not interior is that case. So is a wall that lies on the
+slab outline, including a courtyard. A wall is not footnote §'s edge beam.
+An interior wall, or a free edge with only interior columns and no wall on
+it, leaves the interior column.
+"""
+function slab_discontinuous_edge(struc, slab, columns)
+    any(c -> hasproperty(c, :position) && c.position != :interior, columns) && return true
+    return _wall_on_slab_boundary(struc, slab)
+end
+
+function _wall_on_slab_boundary(struc, slab)
+    segs = supporting_wall_segments(struc, slab)
+    isempty(segs) && return false
+    edges = _slab_outline_edges(struc, slab)
+    isempty(edges) && return false
+    for (a, b) in segs
+        hypot(b[1] - a[1], b[2] - a[2]) < 1e-3 && continue
+        mid = ((a[1] + b[1]) / 2, (a[2] + b[2]) / 2)
+        on(p) = any(e -> _point_on_segment(p, e[1], e[2]), edges)
+        on(a) && on(b) && on(mid) && return true
+    end
+    return false
+end
+
+"""Boundary edges of the slab outline, in metres, exterior and courtyards."""
+function _slab_outline_edges(struc, slab)
+    hasproperty(struc, :skeleton) || return NTuple{2, NTuple{2, Float64}}[]
+    hasproperty(struc, :cells) || return NTuple{2, NTuple{2, Float64}}[]
+    exterior, _, _, holes = _slab_boundary_topology(struc, slab)
+    skel = struc.skeleton
+    edges = NTuple{2, NTuple{2, Float64}}[]
+    function add(loop)
+        n = length(loop)
+        n < 2 && return
+        for i in 1:n
+            a = _vertex_xy_m(skel, loop[i])
+            b = _vertex_xy_m(skel, loop[mod1(i + 1, n)])
+            push!(edges, (a, b))
+        end
+    end
+    add(exterior)
+    for hole in holes
+        add(hole)
+    end
+    return edges
 end
 
 """True when `pt` is within `tol` metres of segment `a`–`b`."""

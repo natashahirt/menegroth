@@ -209,6 +209,12 @@ end
     @test total ≈ q * Lx * Ly rtol = 0.01
     @test bottom > 0.4 * total
     @test top > 0.4 * total
+    by_wall = SY._factored_wall_reactions(model.nodes,
+                                          SY._story_wall_support_pieces(struc, 0))
+    @test length(by_wall) == 2
+    @test sum(values(by_wall)) ≈ total rtol = 0.01
+    @test by_wall[1] ≈ bottom rtol = 0.01
+    @test by_wall[2] ≈ top rtol = 0.01
 end
 
 @testset "wall and column reactions" begin

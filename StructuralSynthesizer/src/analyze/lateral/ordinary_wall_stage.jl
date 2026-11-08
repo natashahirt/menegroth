@@ -277,7 +277,8 @@ function design_ordinary_walls!(struc::BuildingStructure, params::DesignParamete
         wall_index = pier.wall_index
         wall = struc.walls[wall_index]
         assembly = _assembly_of(struc.wall_mesh, wall_index)
-        gravity = pier_gravity_actions(struc, basic, pier)
+        gravity = _gravity_raised_to_shell(struc,
+            pier_gravity_actions(struc, basic, pier), wall_index)
         batches = _pier_action_batches(struc, pier, basic, wind, elf, second,
                                        gravity, inputs, effects)
         grown = CombinedWallAction[]
@@ -407,7 +408,8 @@ function _design_gravity_walls!(struc::BuildingStructure, params::DesignParamete
         wall = struc.walls[wall_index]
         assembly = _assembly_of(struc.wall_mesh, wall_index)
         material = _gravity_wall_material(wall, params)
-        gravity = pier_gravity_actions(struc, basic, pier)
+        gravity = _gravity_raised_to_shell(struc,
+            pier_gravity_actions(struc, basic, pier), wall_index)
         firsts = _gravity_strength_actions(gravity)
         growns = second === nothing ? firsts :
                  _second_order_gravity_actions(struc, pier, basic, second)
@@ -793,7 +795,8 @@ function _second_order_gravity(struc, pier, basic, set::StorySecondOrderSet)
         pier_wall_action(wall, pier, set.u[i];
                          loads=basic.loads[i], fixed_end_from_loads=true)
     end
-    return PierGravityActions(basic.symbols[3], actions...)
+    return _gravity_raised_to_shell(struc,
+        PierGravityActions(basic.symbols[3], actions...), pier.wall_index)
 end
 
 """Lateral pier action from a component solved on `K_G`. Nodal story forces have no element `Q`."""

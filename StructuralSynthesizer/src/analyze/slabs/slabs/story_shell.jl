@@ -744,25 +744,105 @@ function _story_shell_inputs(struc, level::Int, concrete, steel, composite_regio
             wall_lines = _story_wall_supports(struc, level))
 end
 
+# Reserved `_analysis_caches` key. Not a slab index. The value is
+# `wall index => factored vertical reaction [N]` from the last story-shell
+# sizing. `clear_geometry_caches!` drops it with the other caches.
+const _STORY_SHELL_WALL_AXIAL_KEY = -2
+
 """
-Plan pieces of walls that hold this story's slab up, in metres.
+Plan pieces of walls that hold this story's slab up, with the wall's index.
 
 A wall meets the slab at a story elevation ([`supporting_wall_segments`](@ref)
 uses the same test). An opening whose top reaches the pier top breaks the
 line: there is no wall under the soffit across that width. A window that
-stops short of the soffit leaves the line whole.
+stops short of the soffit leaves the line whole. Pieces stay in wall order,
+which is the order a shared node is given to one wall.
 """
-function _story_wall_supports(struc, level)
-    out = NTuple{2, NTuple{2, Float64}}[]
+function _story_wall_support_pieces(struc, level)
+    out = Tuple{Int, NTuple{2, NTuple{2, Float64}}}[]
     hasproperty(struc, :walls) || return out
     z = ustrip(u"m", _story_metres(struc.skeleton.stories[level].elevation))
-    for wall in struc.walls
+    for (i, wall) in enumerate(struc.walls)
         zs = StructuralSizer._wall_end_elevations_m(struc.skeleton, wall.story)
         any(zw -> abs(zw - z) <= 0.1, zs) || continue
-        append!(out, _solid_wall_pieces(wall))
+        for piece in _solid_wall_pieces(wall)
+            push!(out, (i, piece))
+        end
     end
     return out
 end
+
+"""Plan lines of [`_story_wall_support_pieces`](@ref), without the wall index."""
+function _story_wall_supports(struc, level)
+    return NTuple{2, NTuple{2, Float64}}[piece for (_, piece) in
+                                          _story_wall_support_pieces(struc, level)]
+end
+
+"""
+Factored upward reaction on each wall, in newtons.
+
+`pieces` are `(wall index, segment)` in assignment order. A node on several
+segments is counted on the first. The reaction is the upward force the wall
+delivers to the slab (`node.reaction[3]`), the same sign as a compression-
+positive pier axial. A node with no reaction vector is skipped.
+"""
+function _factored_wall_reactions(nodes, pieces)
+    totals = Dict{Int, Float64}()
+    isempty(pieces) && return totals
+    segments = [piece for (_, piece) in pieces]
+    for node in nodes
+        rxn = node.reaction
+        (rxn isa AbstractVector && length(rxn) >= 3) || continue
+        pt = (ustrip(u"m", node.position[1]), ustrip(u"m", node.position[2]))
+        hit = findfirst(seg -> StructuralSizer._point_on_segment(pt, seg[1], seg[2]),
+                        segments)
+        hit === nothing && continue
+        nz = ustrip(u"N", rxn[3])
+        isfinite(nz) || continue
+        w = pieces[hit][1]
+        totals[w] = get(totals, w, 0.0) + nz
+    end
+    return totals
+end
+
+"""
+Store each wall's factored shell reaction from the last solve of `shells`.
+
+The number is the upward support force under the story shell's factored
+panel pressure (`1.2D + 1.6L`). Stories add. A wall that holds no solved
+shell is absent, so a later design does not scale it.
+"""
+function _record_story_shell_wall_axials!(struc, shells)
+    totals = Dict{Int, Float64}()
+    for (level, shell) in shells
+        shell.model === nothing && continue
+        pieces = _story_wall_support_pieces(struc, level)
+        isempty(pieces) && continue
+        for (w, n) in _factored_wall_reactions(shell.model.nodes, pieces)
+            totals[w] = get(totals, w, 0.0) + n
+        end
+    end
+    inner = get!(() -> Dict{Symbol, Any}(), struc._analysis_caches,
+                 _STORY_SHELL_WALL_AXIAL_KEY)
+    inner[:axial] = totals
+    return totals
+end
+
+"""Drop a stored shell reaction. A design with no story shell calls this."""
+function _clear_story_shell_wall_axials!(struc)
+    delete!(struc._analysis_caches, _STORY_SHELL_WALL_AXIAL_KEY)
+    return struc
+end
+
+"""Factored shell reaction [N] stored for `wall_index`, or `nothing`."""
+function _story_shell_wall_axial(struc, wall_index::Int)
+    inner = get(struc._analysis_caches, _STORY_SHELL_WALL_AXIAL_KEY, nothing)
+    inner === nothing && return nothing
+    stored = get(inner, :axial, nothing)
+    stored === nothing && return nothing
+    return get(stored, wall_index, nothing)
+end
+
 
 """Solid pieces of `wall`'s plan line. A full-height opening is a gap."""
 function _solid_wall_pieces(wall; tol::Float64 = 1e-6)

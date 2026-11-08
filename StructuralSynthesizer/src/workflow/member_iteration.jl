@@ -350,6 +350,7 @@ function _size_beams_columns!(struc::BuildingStructure, params::DesignParameters
 
     shell_levels = _story_shell_design_levels(struc)
     if isempty(shell_levels)
+        _clear_story_shell_wall_axials!(struc)
         converged, iters_used = _iterate_beams_columns!(struc, params, beam_opts,
                                                         column_opts, beam_kwargs; tc = tc)
         # ─── P-Δ second-order analysis (ACI 318-11 §10.10) ───
@@ -496,6 +497,7 @@ function _size_with_story_shell!(struc, params, beam_opts, column_opts, beam_kwa
         upward_only && (floor = _section_floors(struc))
     end
     held || @warn "Story-shell sizing did not settle after $max_rounds rounds" levels
+    _record_story_shell_wall_axials!(struc, shells)
     _record_story_shell_convergence!(struc, held)
     return (converged, iters)
 end

@@ -115,6 +115,49 @@ function pier_wall_action(wall::Wall, pier::WallPierMesh, u::AbstractVector{<:Re
         Float64(Mx) * tx + Float64(My) * ty)
 end
 
+# A factored tributary axial below this is not a dead/live split to scale.
+const _WALL_AXIAL_SCALE_FLOOR_N = 1.0
+
+"""
+    raise_wall_axial_to_shell(gravity, n_shell; combo=default_combo) -> PierGravityActions
+
+Raise dead and live axial so `combo`'s `D` and `L` terms match the story shell
+when that shell reaction is larger.
+
+`n_shell` is one factored vertical force, the same combination the story
+shell puts on the panels: [`total_factored_pressure`](@ref) is
+`factored_pressure(default_combo, dead, live)`, so the comparison is
+`combo.D * D.N + combo.L * L.N`. The roof companion is not in that pressure
+and is not scaled. Shear and moment stay on the tributary cut. The dead and
+live proportion stays the proportion already on the pier.
+
+# ENGINEERING JUDGMENT
+The shell reports one factored reaction. ACI 318 does not split it back into
+dead and live. Scaling both axials by the same ratio keeps the split the
+tributary analysis already made, and leaves a pier whose factored dead-plus-live
+axial is about zero untouched: there is no proportion to apply.
+"""
+function raise_wall_axial_to_shell(gravity::PierGravityActions, n_shell::Real;
+                                   combo::LoadCombination = default_combo)
+    n_trib = combo.D * gravity.D.N + combo.L * gravity.L.N
+    if !(isfinite(n_shell) && isfinite(n_trib) &&
+         n_trib > _WALL_AXIAL_SCALE_FLOOR_N && n_shell > n_trib)
+        return gravity
+    end
+    r = n_shell / n_trib
+    return PierGravityActions(gravity.roof,
+        WallAction(gravity.D.N * r, gravity.D.V, gravity.D.M, gravity.D.Vo, gravity.D.Mo),
+        WallAction(gravity.L.N * r, gravity.L.V, gravity.L.M, gravity.L.Vo, gravity.L.Mo),
+        gravity.companion)
+end
+
+"""The pier cut, with dead and live axial raised to a stored shell reaction."""
+function _gravity_raised_to_shell(struc, gravity::PierGravityActions, wall_index::Int)
+    n = _story_shell_wall_axial(struc, wall_index)
+    n === nothing && return gravity
+    return raise_wall_axial_to_shell(gravity, n)
+end
+
 """
     pier_gravity_actions(struc, basic, pier) -> PierGravityActions
 

@@ -40,13 +40,17 @@ function _column_span_minimum(ln_max, opts)
 end
 
 """
-    _update_column_sizes!(columns, column_result, Pu, Mu, c_span_min, material, column_tol; verbose)
+    _update_column_sizes!(columns, column_result, Pu, Mu, c_span_min, material, column_tol; Muy, verbose)
 
 Update column dimensions from P-M design results. Returns `true` if any
 column size changed by more than `column_tol`.
+
+When a column is held larger than the catalog section, its bars are
+redesigned for `Mu` and `Muy`. `Muy` defaults to zeros, which keeps the
+uniaxial redesign.
 """
 function _update_column_sizes!(columns, column_result, Pu, Mu, c_span_min, material, column_tol;
-                                verbose::Bool = false)
+                                Muy = nothing, verbose::Bool = false)
     if !_rc_nlp_result_installable(column_result)
         @warn "Column NLP result is not a completed design; leaving column sizes unchanged" status=column_result.status
         return false
@@ -66,8 +70,9 @@ function _update_column_sizes!(columns, column_result, Pu, Mu, c_span_min, mater
         if col.c1 ≈ c1_pm && col.c2 ≈ c2_pm
             col.base.section = section
         else
+            muy = Muy === nothing ? 0.0 : Muy[i]
             col.base.section = resize_column_with_reinforcement(
-                section, col.c1, col.c2, Pu[i], Mu[i], material
+                section, col.c1, col.c2, Pu[i], Mu[i], material; Muy = muy
             )
         end
 

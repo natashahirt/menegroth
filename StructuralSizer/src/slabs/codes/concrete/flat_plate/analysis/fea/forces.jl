@@ -47,8 +47,16 @@ end
 """
     _extract_fea_column_forces(col_stubs, span_axis, n_cols)
 
-Extract Vu, Mu, Mub from solved column stubs.  Sums contributions from
-both below and above stubs at each column location.  Returns Unitful vectors.
+Extract column forces from solved stubs. Returns Unitful vectors.
+
+`Vu`, `Mu`, `Mub`, `Mx`, and `My` sum the stub below the slab and the stub
+above it. That sum is the joint unbalanced moment. Punching uses it
+(ACI 318-11 §13.5.3.1, corpus: aci-318-11, page 250).
+
+`Mub_below`, `Mx_below`, and `My_below` are the same components from the
+stub below the slab only. The column under the slab is designed for that
+moment. The shell already includes the stub above, so the §13.6.9.2
+stiffness split is not applied again.
 """
 function _extract_fea_column_forces(col_stubs, span_axis::NTuple{2, Float64}, n_cols::Int)
     ax_len = hypot(span_axis...)
@@ -61,6 +69,9 @@ function _extract_fea_column_forces(col_stubs, span_axis::NTuple{2, Float64}, n_
     Mub = Vector{MomentT}(undef, n_cols)
     Mx  = Vector{MomentT}(undef, n_cols)
     My  = Vector{MomentT}(undef, n_cols)
+    Mub_below = Vector{MomentT}(undef, n_cols)
+    Mx_below  = Vector{MomentT}(undef, n_cols)
+    My_below  = Vector{MomentT}(undef, n_cols)
 
     for i in 1:n_cols
         stubs = col_stubs[i]
@@ -81,12 +92,20 @@ function _extract_fea_column_forces(col_stubs, span_axis::NTuple{2, Float64}, n_
 
         Vu[i]  = uconvert(kip, abs(Fz_total))
         Mu[i]  = uconvert(kip * u"ft", hypot(Mx_total, My_total))
+        # Joint moment, both stubs. Punching and the stored transfer use this.
         Mub[i] = uconvert(kip * u"ft", abs(ax[1] * My_total - ax[2] * Mx_total))
         Mx[i]  = uconvert(kip * u"ft", Mx_total)
         My[i]  = uconvert(kip * u"ft", My_total)
+        # Column under the slab. Not a replacement for Mub.
+        Mub_below[i] = uconvert(kip * u"ft", abs(ax[1] * fb.My - ax[2] * fb.Mx))
+        Mx_below[i]  = uconvert(kip * u"ft", fb.Mx)
+        My_below[i]  = uconvert(kip * u"ft", fb.My)
     end
 
-    return (Vu=Vu, Mu=Mu, Mub=Mub, Mx=Mx, My=My)
+    return (
+        Vu=Vu, Mu=Mu, Mub=Mub, Mx=Mx, My=My,
+        Mub_below=Mub_below, Mx_below=Mx_below, My_below=My_below,
+    )
 end
 
 # =============================================================================

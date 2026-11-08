@@ -360,21 +360,31 @@ end
 """
     column_moment_distribution_factors(struc, columns, column_opts) -> Vector{Float64}
 
-Compute the fraction of joint unbalanced moment resisted by each supporting
-column (below the slab), per ACI 318-11 §13.6.9.2.
+Fraction of the joint unbalanced moment assigned to the column below the
+slab.
 
-The unbalanced moment at a slab–column joint is distributed to the columns
-above and below in proportion to their flexural stiffnesses:
+ACI 318-11 §13.6.9.2 (Eq. 13-7; corpus: aci-318-11, page 258): at an
+interior support, the columns above and below the slab resist the moment
+from Eq. (13-7) in direct proportion to their stiffnesses, unless a
+general analysis is made.
 
-    K = 4·E·I / L    (far-end fixed, standard gravity assumption)
+    K = 4·E·I / L    (far-end fixed)
 
-Returns a vector of factors ∈ (0, 1] — one per supporting column.
-Factor = 1.0 when no column exists above (roof level or single-story).
-Factor ≈ 0.5 for equal columns above and below (typical interior floor).
+Factor = K_below / (K_below + K_above). The factor is 1 when no column
+exists above (roof or a single story) and about 1/2 for equal stories.
+A column that still has no `c1` or `c2` also keeps 1, because its
+stiffness is not known yet.
 
-Handles unequal columns (different dimensions, lengths, or shapes) and
-per-column concrete grades (via `col.concrete`). When a column has no
-per-column material, falls back to `column_opts.material`.
+§13.5.3.2 is the slab width that takes γ_f M_u in flexure (corpus:
+aci-318-11, page 250). It is not this split.
+
+ENGINEERING JUDGMENT: the same factor is also applied to an edge or
+corner column, including the §13.6.3.6 exterior transfer 0.3 M0 (corpus:
+aci-318-11, page 255). §13.6.9.2 states the split for an interior support.
+
+A shell analysis does not use this factor. The moment in the stub below
+the slab is read directly (`column_design_moment`). §13.6.9.2 allows
+that: the stiffness split applies unless a general analysis is made.
 
 # Arguments
 - `struc`: BuildingStructure with all columns
@@ -407,6 +417,29 @@ function column_moment_distribution_factors(struc, columns, column_opts)
     end
 
     return factors
+end
+
+"""
+    column_design_moment(results, i, dist) -> Float64
+
+Moment, in kip·ft, that the column below the slab is designed for.
+
+`results.column_design_moments[i]` is that moment when a shell analysis
+stored the end moment of the stub below the slab. The joint moment stays
+in `unbalanced_moments` for punching (ACI 318-11 §13.5.3.1, corpus:
+aci-318-11, page 250) and for the later split in the full-building check.
+
+DDM and EFM leave the field unset. The column's share is then
+`unbalanced_moments[i] * dist`, with `dist` from
+[`column_moment_distribution_factors`](@ref).
+"""
+function column_design_moment(results, i::Int, dist::Real)
+    own = hasproperty(results, :column_design_moments) ?
+        getproperty(results, :column_design_moments) : nothing
+    if own !== nothing
+        return ustrip(kip * u"ft", own[i])
+    end
+    return ustrip(kip * u"ft", results.unbalanced_moments[i]) * dist
 end
 
 # =============================================================================

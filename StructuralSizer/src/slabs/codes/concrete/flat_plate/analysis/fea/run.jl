@@ -184,7 +184,12 @@ function run_moment_analysis(
     Pz_kN  = round(total_Pz / 1e3, digits=2)
     res_kN = round(fe_residual / 1e3, digits=4)
     @debug "EQUILIBRIUM (direct FE)" ΣRz_kN=Rz_kN ΣPz_kN=Pz_kN residual_kN=res_kN FE_err_pct=round(fe_equil_err, digits=4) A_from_P_m²=round(A_mesh_from_P, digits=3) A_elem_m²=round(A_elem_data, digits=3) area_Δ_pct=round(area_mismatch, digits=2)
-    if fe_equil_err > 5.0
+    # NaN compares false against every limit below, so it is rejected first.
+    if !all(isfinite, model.u)
+        error("FEA solution has $(count(!isfinite, model.u)) non-finite displacements " *
+              "out of $(length(model.u)) — singular stiffness. Check for degenerate " *
+              "shell elements or an unsupported mesh region.")
+    elseif fe_equil_err > 5.0
         error("FEA equilibrium error $(round(fe_equil_err, digits=2))% exceeds 5 % — results unreliable. Check mesh / BCs.")
     elseif fe_equil_err > 1.0
         @warn "FEA direct equilibrium error $(round(fe_equil_err, digits=2))%"
@@ -286,6 +291,10 @@ function run_moment_analysis(
                     column_moments[i], pon.column_moments[i], poff.column_moments[i])
                 forces.Mub[i] = _fea_pattern_demand(
                     forces.Mub[i], pon.unbalanced_moments[i], poff.unbalanced_moments[i])
+                # Same pattern ratio as the joint moment, so the below-stub
+                # share of the amplified joint stays the shell's share.
+                forces.Mub_below[i] = _fea_pattern_demand(
+                    forces.Mub_below[i], pon.unbalanced_moments[i], poff.unbalanced_moments[i])
                 forces.Vu[i] = _fea_pattern_demand(
                     forces.Vu[i], pon.column_shears[i], poff.column_shears[i])
             end
@@ -333,8 +342,11 @@ function run_moment_analysis(
     sec_ax = sec_ax_len > 1e-9 ? (sec_span_axis[1]/sec_ax_len, sec_span_axis[2]/sec_ax_len) : (0.0, 1.0)
     MomentT = typeof(1.0kip * u"ft")
     sec_Mub = Vector{MomentT}(undef, n_cols)
+    sec_Mub_below = Vector{MomentT}(undef, n_cols)
     for i in 1:n_cols
         sec_Mub[i] = uconvert(kip * u"ft", abs(sec_ax[1] * forces.My[i] - sec_ax[2] * forces.Mx[i]))
+        sec_Mub_below[i] = uconvert(kip * u"ft",
+            abs(sec_ax[1] * forces.My_below[i] - sec_ax[2] * forces.Mx_below[i]))
     end
     if !isnothing(sec_pattern)
         son, soff = sec_pattern.secondary_on, sec_pattern.secondary_off
@@ -344,6 +356,8 @@ function run_moment_analysis(
         for i in eachindex(sec_Mub)
             sec_Mub[i] = _fea_pattern_demand(
                 sec_Mub[i], son.unbalanced_moments[i], soff.unbalanced_moments[i])
+            sec_Mub_below[i] = _fea_pattern_demand(
+                sec_Mub_below[i], son.unbalanced_moments[i], soff.unbalanced_moments[i])
             sec_column_moments[i] = _fea_pattern_demand(
                 sec_column_moments[i], son.column_moments[i], soff.column_moments[i])
         end
@@ -360,8 +374,14 @@ function run_moment_analysis(
         column_moments = sec_column_moments,
         column_shears = forces.Vu,
         unbalanced_moments = sec_Mub,
+        column_design_moments = sec_Mub_below,
+        # Same factored load as the primary strip. Short-wall moments in the
+        # transverse direction read it.
+        qu = qu,
         # Same simple-span basis as the primary `Vu_max`, on the transverse spans
         Vu_max = uconvert(kip, qu * sec_setup.l2 * sec_setup.ln / 2),
+        M_wall_ext = _max_wall_face_moment(cache, struc, slab, sec_span_axis, M0_u),
+        M_wall_int = zero(M0_u),
     )
 
     return MomentAnalysisResult(
@@ -378,6 +398,9 @@ function run_moment_analysis(
         secondary = secondary_data,
         fea_Δ_panel = fea_Δ_panel,
         pattern_loading = use_pattern,
+        M_wall_ext = _max_wall_face_moment(cache, struc, slab, span_axis, M0_u),
+        M_wall_int = zero(M0_u),
+        column_design_moments = forces.Mub_below,
     )
 end
 

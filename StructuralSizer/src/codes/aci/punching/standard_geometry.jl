@@ -199,16 +199,24 @@ function gamma_v(b1::Length, b2::Length)
 end
 
 """
-    effective_slab_width(c2, h; position=:interior)
+    effective_slab_width(c_transverse, h; position=:interior)
 
-Effective slab width for moment transfer by flexure.
+§13.5.3.2 width of the band that transfers one unbalanced moment: 1.5h
+outside each column face that has slab (corpus: aci-318-11, page 250;
+R13.5.3, "1.5h on each side of the column").
 
-- Interior: bb = c2 + 3h (1.5h each side)
-- Edge/corner: bb = c2 + 1.5h (slab side only)
+`c_transverse` is the column face perpendicular to the bars in the band.
 
-Reference: ACI 318-11 §13.5.3.2
+- `:interior`, and an edge column's moment about the axis parallel to the
+  edge: slab on both sides, `c_transverse + 3h`. The StructurePoint exterior
+  column is this case, `16 + 3×7 = 37` in
+  (corpus: sp-de-two-way-flat-plate-aci318-14, page 18).
+- `:edge` here is the other moment, the one spanning along the edge, and a
+  corner moment: the free edge removes one side, `c_transverse + 1.5h`.
+
+[`transfer_bands`](@ref) picks which of the two an edge column uses.
 """
-function effective_slab_width(c2::Length, h::Length; position::Symbol = :interior)
-    position == :interior ? c2 + 3h : c2 + 1.5h
+function effective_slab_width(c_transverse::Length, h::Length; position::Symbol = :interior)
+    position == :interior ? c_transverse + 3h : c_transverse + 1.5h
 end
 

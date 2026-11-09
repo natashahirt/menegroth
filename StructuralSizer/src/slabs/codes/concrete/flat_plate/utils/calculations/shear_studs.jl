@@ -364,14 +364,14 @@ end
 ACI 318-11 §13.5.3.1 (corpus: aci-318-11, page 250): a fraction of the
 unbalanced moment at the slab-column connection is transferred by flexure
 in each direction.  γf from Eq. (13-1) / §13.5.3.2 uses `b1`, `b2` in the
-direction of that moment; effective width is `c_face + 3h` (or `+ 1.5h`
-at a free edge).  Returns the governing `As` and the moment/γf that sized it.
+direction of that moment.  `Mux` spans along the named `c1` and `Muy`
+along the named `c2`; a free edge does not reassign those moments.
+[`transfer_bands`](@ref) gives each its `b1`, `b2` and effective width.
+Returns the governing `As` and the moment/γf that sized it.
 
-For `:edge`, named `c1`/`c2` are run through `_orient_edge_column` before
-`b1`/`b2`/`bb` so ACI c1 is perpendicular to the free edge
-(R11.11.7.2, corpus: aci-318-11, pages 209–211).  Both moment axes are
-still sized; the larger `As` governs.  Interior / corner geometry is
-unchanged.
+`d` is the depth of the `Mux` layer.  `d_y` is the depth of the `Muy`
+layer, the inner bar layer when `Muy` is the secondary span
+(`inner_layer_effective_depth`); it defaults to `d`.
 
 A non-finite input (moment, dimension or material) returns `As = NaN`, and
 a non-finite `As` in either direction is returned as is (Inf before NaN),
@@ -392,21 +392,23 @@ function governing_transfer_reinforcement(
     free_edge_parallel::Symbol = :c2,
     γf_x::Union{Nothing, Float64} = nothing,
     γf_y::Union{Nothing, Float64} = nothing,
+    d_y::Union{Nothing, Length} = nothing,
 )
-    if !all(isfinite, (Mux, Muy, c1, c2, h, d, fc, fy))
+    dy = something(d_y, d)
+    if !all(isfinite, (Mux, Muy, c1, c2, h, d, dy, fc, fy))
         Mu_bad = isfinite(Mux) ? Muy : Mux
         return (As = NaN * u"inch^2", Mu = Mu_bad, γf = NaN, bb = NaN * u"inch")
     end
     bands = transfer_bands(c1, c2, h, d; position, free_edge_parallel)
     γfx = something(γf_x, gamma_f(bands.b1_x, bands.b2_x))
     γfy = something(γf_y, gamma_f(bands.b1_y, bands.b2_y))
-    function _as_for(Mu, γf, bb)
+    function _as_for(Mu, γf, bb, depth)
         abs(ustrip(kip * u"ft", Mu)) < 1e-6 && return 0.0 * u"inch^2"
-        transfer_reinforcement(abs(Mu), γf, bb, d, fc, fy)
+        transfer_reinforcement(abs(Mu), γf, bb, depth, fc, fy)
     end
     bb_x, bb_y = bands.bb_x, bands.bb_y
-    As_x = _as_for(Mux, γfx, bb_x)
-    As_y = _as_for(Muy, γfy, bb_y)
+    As_x = _as_for(Mux, γfx, bb_x, d)
+    As_y = _as_for(Muy, γfy, bb_y, dy)
     if isinf(As_x)
         return (As = Inf * u"inch^2", Mu = Mux, γf = γfx, bb = bb_x)
     end
@@ -428,28 +430,39 @@ end
     transfer_bands(c1, c2, h, d; position=:interior, free_edge_parallel=:c2)
         -> (b1_x, b2_x, b1_y, b2_y, bb_x, bb_y)
 
-Critical-section sides and §13.5.3.2 effective widths used for the transfer
-steel of `Mux` (`_x`) and `Muy` (`_y`) in `governing_transfer_reinforcement`.
-`bb` is the column face plus 1.5h on each slab side (ACI 318-11 §13.5.3.2,
-corpus: aci-318-11, page 250); edge and corner columns have slab on one side.
-`:edge` geometry is first oriented by `_orient_edge_column`.
+Critical-section sides and §13.5.3.2 effective widths for `Mux` (`_x`,
+spanning along the named `c1`) and `Muy` (`_y`, along the named `c2`).
+The moments stay on those axes. `b1` is the critical-section side in the
+span of that moment (ACI 318-11 §13.5.3.2, corpus: aci-318-11, page 250).
+
+`bb` is 1.5h beyond each column face that has slab (R13.5.3). A moment
+spanning perpendicular to a free edge has slab on both sides of its band
+(`c_parallel + 3h`; StructurePoint exterior column, corpus:
+sp-de-two-way-flat-plate-aci318-14, page 18). A moment spanning along a
+free edge, and both moments at a corner, have slab on one side
+(`c_transverse + 1.5h`).
 """
 function transfer_bands(c1::Length, c2::Length, h::Length, d::Length;
                         position::Symbol = :interior,
                         free_edge_parallel::Symbol = :c2)
-    if position === :edge
-        ori = _orient_edge_column(c1, c2, 0.0kip * u"ft", 0.0kip * u"ft";
-                                  free_edge_parallel)
-        c1 = ori.c1
-        c2 = ori.c2
+    if position === :interior
+        return (b1_x = c1 + d, b2_x = c2 + d, bb_x = c2 + 3h,
+                b1_y = c2 + d, b2_y = c1 + d, bb_y = c1 + 3h)
+    elseif position === :corner
+        return (b1_x = c1 + d / 2, b2_x = c2 + d / 2, bb_x = c2 + 1.5h,
+                b1_y = c2 + d / 2, b2_y = c1 + d / 2, bb_y = c1 + 1.5h)
+    elseif position === :edge
+        free_edge_parallel in (:c1, :c2) ||
+            throw(ArgumentError("free_edge_parallel must be :c1 or :c2; got :$free_edge_parallel"))
+        # The moment spanning perpendicular to the edge takes the full band.
+        if free_edge_parallel === :c1
+            return (b1_x = c1 + d,     b2_x = c2 + d / 2, bb_x = c2 + 1.5h,
+                    b1_y = c2 + d / 2, b2_y = c1 + d,     bb_y = c1 + 3h)
+        end
+        return (b1_x = c1 + d / 2, b2_x = c2 + d,     bb_x = c2 + 3h,
+                b1_y = c2 + d,     b2_y = c1 + d / 2, bb_y = c1 + 1.5h)
     end
-    edge = position != :interior
-    return (b1_x = edge ? c1 + d / 2 : c1 + d,
-            b2_x = edge ? c2 + d     : c2 + d,
-            b1_y = edge ? c2 + d / 2 : c2 + d,
-            b2_y = edge ? c1 + d     : c1 + d,
-            bb_x = edge ? c2 + 1.5h : c2 + 3h,
-            bb_y = edge ? c1 + 1.5h : c1 + 3h)
+    throw(ArgumentError("position must be :interior, :edge or :corner; got :$position"))
 end
 
 """

@@ -95,6 +95,8 @@ function _transfer_reinforcement_pass(columns, moment_results, secondary_results
                                       on_result = (i, col, gov, transfer) -> nothing,
                                       punching = nothing, d_punch = d, drop = nothing,
                                       secondary_rebar_design = nothing,
+                                      span_axis::NTuple{2, Float64} = (1.0, 0.0),
+                                      d_secondary = nothing,
                                       λ::Float64 = 1.0, φ_shear::Float64 = 0.75)
     for (i, col) in enumerate(columns)
         Mub_i = moment_results.unbalanced_moments[i]
@@ -115,12 +117,19 @@ function _transfer_reinforcement_pass(columns, moment_results, secondary_results
 
         mt = punching === nothing || punching[i] === nothing ? nothing :
             get(punching[i], :moment_transfer, nothing)
+        # Moments and layer depths in the named column axes. `Mub` spans
+        # along `span_axis`; the inner layer is the other direction.
+        along = _span_along_c1(col, span_axis)
+        d2 = something(d_secondary, d)
+        Mx, My = along ? (Mub_i, Muy_i) : (Muy_i, Mub_i)
+        dx, dy = along ? (d, d2) : (d2, d)
         gov = no_transfer ? nothing : governing_transfer_reinforcement(
-            Mub_i, Muy_i, col.c1, col.c2, h, d, fc, fy;
+            Mx, My, col.c1, col.c2, h, dx, fc, fy;
             position = col.position,
             free_edge_parallel = _infer_free_edge_parallel(col),
             γf_x = mt === nothing ? nothing : mt.γf_x,
-            γf_y = mt === nothing ? nothing : mt.γf_y)
+            γf_y = mt === nothing ? nothing : mt.γf_y,
+            d_y = dy)
         if gov !== nothing && transfer_section_inadequate(gov.As)
             on_inadequate(i, "transfer_section_inadequate") ||
                 return (results = results, column = i)
@@ -147,8 +156,10 @@ function _transfer_reinforcement_pass(columns, moment_results, secondary_results
             end
         end
         if gov !== nothing && mt !== nothing &&
-           !_placed_band_strain_ok(mt, gov, transfer, Ab, rebar_design,
-                                   secondary_rebar_design, cs_neg_idx, d, fc, fy)
+           !_placed_band_strain_ok(mt, gov, transfer, Ab,
+                                   along ? rebar_design : secondary_rebar_design,
+                                   along ? secondary_rebar_design : rebar_design,
+                                   cs_neg_idx, dx, fc, fy; d_y = dy)
             on_inadequate(i, "gamma_f_increase_strain") ||
                 return (results = results, column = i)
             continue
@@ -167,8 +178,9 @@ ACI 318-11 §13.5.3.3(b) (corpus: aci-318-11, page 250): εt in the §13.5.3.2
 effective width is not less than 0.010. Checked on each axis that used (b),
 with the steel placed in that band:
 
-- the column-strip top steel of that direction (`rebar_design` for x,
-  `secondary_rebar_design` for y) in proportion to `bb / strip width`;
+- the column-strip top steel of that column axis (`rebar_design` for the
+  `c1` moment, `secondary_rebar_design` for `c2`) in proportion to
+  `bb / strip width`;
 - plus every bar this pass adds at the column, whichever band it was sized
   for, which can only lower εt;
 - and never less than the band's required transfer steel.
@@ -177,18 +189,19 @@ An axis with no transfer moment is skipped. A y-axis (b) increase with no
 secondary-direction design cannot be checked and fails.
 """
 function _placed_band_strain_ok(mt, gov, transfer, Ab, rebar_design,
-                                secondary_rebar_design, cs_neg_idx, d, fc, fy)
+                                secondary_rebar_design, cs_neg_idx, d, fc, fy;
+                                d_y = d)
     added = transfer === nothing ? 0.0u"inch^2" : transfer.n_bars_additional * Ab
-    for (provision, As_req, bb, design) in
-            ((mt.provision_x, gov.As_x, gov.bb_x, rebar_design),
-             (mt.provision_y, gov.As_y, gov.bb_y, secondary_rebar_design))
+    for (provision, As_req, bb, design, depth) in
+            ((mt.provision_x, gov.As_x, gov.bb_x, rebar_design, d),
+             (mt.provision_y, gov.As_y, gov.bb_y, secondary_rebar_design, d_y))
         provision === :aci_13_5_3_3b || continue
         ustrip(u"inch^2", As_req) > 0 || continue
         design === nothing && return false
         As_cs = design.column_strip_reinf[cs_neg_idx].As_provided
         As_band = As_cs * (bb / design.column_strip_width) + added
         As_placed = max(As_band, As_req)
-        transfer_band_net_tensile_strain(As_placed, bb, d, fc, fy) >= 0.010 - 1e-12 ||
+        transfer_band_net_tensile_strain(As_placed, bb, depth, fc, fy) >= 0.010 - 1e-12 ||
             return false
     end
     return true

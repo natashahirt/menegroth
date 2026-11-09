@@ -322,7 +322,7 @@ function check_punching_for_column(col, Vu, Mub, d, h, fc;
     transfer = nothing
     if moment_transfer !== nothing && col_shape_val != :circular
         alt = _increased_transfer_stress(col, geom, Jc, cAB, Vu, M_span, M_perp,
-                                         Mub_adjusted, d, h, fc, φvc * b0 * d,
+                                         d, h, fc, φvc * b0 * d,
                                          edge_par, moment_transfer)
         if alt !== nothing && alt.vu < vu
             vu = alt.vu
@@ -348,19 +348,20 @@ function check_punching_for_column(col, Vu, Mub, d, h, fc;
 end
 
 """
-    _increased_transfer_stress(col, geom, Jc, cAB, Vu, M_span, M_perp, Mub_adjusted,
+    _increased_transfer_stress(col, geom, Jc, cAB, Vu, M_span, M_perp,
                                d, h, fc, φVc, edge_par, mt) -> Union{Nothing, NamedTuple}
 
 Column-face punching stress with the flexural fractions of ACI 318-11
 §13.5.3.3 (corpus: aci-318-11, page 250), from `moment_transfer_gamma_f`.
 Returns `(vu, transfer)`, where `transfer = (γf_x, γf_y, provision_x,
-provision_y)` holds the fractions applied to the span-direction (`Mub`, x)
-and perpendicular (`Muy`, y) moments, or `nothing` when no increase applies. The caller keeps the Eq. (13-1) result unless this
-stress is lower; the transfer steel then uses the same fractions.
+provision_y)` is in the named column axes (`γf_x` for the moment spanning
+along `c1`), or `nothing` when no increase applies. That is the frame
+`governing_transfer_reinforcement` sizes the steel in. The caller keeps the
+Eq. (13-1) stress unless this one is lower.
 
-`mt` is `(fy, span_axis)`; `span_axis` is the slab's plan span direction,
-the direction of `M_span`. The effective widths are the ones
-`governing_transfer_reinforcement` sizes the steel in (`transfer_bands`).
+`mt` is `(fy, span_axis)` and, when the secondary layer depth should gate
+the strain, `(bar_diameter, cover)`. `span_axis` is the plan direction of
+`M_span`. Widths come from `transfer_bands`.
 
 - Interior: (b) on each axis, the same superposition as the Eq. (13-1) check.
 - Corner: (a) on each axis (0.5φVc), with the R11.11.7.2 centroid shift.
@@ -371,60 +372,94 @@ the direction of `M_span`. The effective widths are the ones
   direction and `span_axis`; when the column has no edge direction, or the
   edge is skew to the span, (a) is not applied.
 """
-function _increased_transfer_stress(col, geom, Jc, cAB, Vu, M_span, M_perp, Mub_adjusted,
+function _increased_transfer_stress(col, geom, Jc, cAB, Vu, M_span, M_perp,
                                     d, h, fc, φVc, edge_par, mt)
     fy = mt.fy
+    d2 = _secondary_layer_depth(mt, h, d)
+    along = _span_along_c1(col, mt.span_axis)
     v_direct = uconvert(u"psi", Vu / (geom.b0 * d))
-    if col.position == :interior
-        bands = transfer_bands(col.c1, col.c2, h, d; position = :interior)
-        gx = moment_transfer_gamma_f(geom.b1, geom.b2, :interior, Vu, φVc, M_span,
-                                     bands.bb_x, d, fc, fy)
-        gy = moment_transfer_gamma_f(geom.b2, geom.b1, :interior, Vu, φVc, M_perp,
-                                     bands.bb_y, d, fc, fy)
-        gx.provision === :eq_13_1 && gy.provision === :eq_13_1 && return nothing
-        Jc_y = polar_moment_Jc_interior(geom.b2, geom.b1, d)
-        vu = v_direct +
-             uconvert(u"psi", (1 - gx.γf) * abs(M_span) * cAB / Jc) +
-             uconvert(u"psi", (1 - gy.γf) * abs(M_perp) * (geom.b2 / 2) / Jc_y)
-        return (vu = vu, transfer = _transfer_fractions(gx, gy))
-    elseif col.position == :corner
-        bands = transfer_bands(col.c1, col.c2, h, d; position = :corner)
-        gx = moment_transfer_gamma_f(geom.b1, geom.b2, :corner, Vu, φVc, M_span,
-                                     bands.bb_x, d, fc, fy)
-        gy = moment_transfer_gamma_f(geom.b2, geom.b1, :corner, Vu, φVc, M_perp,
-                                     bands.bb_y, d, fc, fy)
-        gx.provision === :eq_13_1 && gy.provision === :eq_13_1 && return nothing
-        e_y = eccentricity_to_critical_centroid(geom.b2, col.c2, geom.cAB_y)
-        Muy_adj = max(0.0kip*u"ft", abs(M_perp) - Vu * e_y)
-        Jc_y = polar_moment_Jc_corner(geom.b2, geom.b1, d, geom.cAB_y)
-        vu = v_direct +
-             uconvert(u"psi", (1 - gx.γf) * Mub_adjusted * geom.cAB_x / Jc) +
-             uconvert(u"psi", (1 - gy.γf) * Muy_adj * geom.cAB_y / Jc_y)
-        return (vu = vu, transfer = _transfer_fractions(gx, gy))
+    if col.position == :interior || col.position == :corner
+        bands = transfer_bands(col.c1, col.c2, h, d; position = col.position)
+        M_c1, M_c2 = along ? (M_span, M_perp) : (M_perp, M_span)
+        d_c1, d_c2 = along ? (d, d2) : (d2, d)
+        case = col.position == :interior ? :interior : :corner
+        g_c1 = moment_transfer_gamma_f(bands.b1_x, bands.b2_x, case, Vu, φVc, M_c1,
+                                       bands.bb_x, d_c1, fc, fy)
+        g_c2 = moment_transfer_gamma_f(bands.b1_y, bands.b2_y, case, Vu, φVc, M_c2,
+                                       bands.bb_y, d_c2, fc, fy)
+        g_c1.provision === :eq_13_1 && g_c2.provision === :eq_13_1 && return nothing
+        if col.position == :interior
+            Jc_y = polar_moment_Jc_interior(geom.b2, geom.b1, d)
+            vu = v_direct +
+                 uconvert(u"psi", (1 - g_c1.γf) * abs(M_c1) * cAB / Jc) +
+                 uconvert(u"psi", (1 - g_c2.γf) * abs(M_c2) * (geom.b2 / 2) / Jc_y)
+        else
+            e_x = eccentricity_to_critical_centroid(geom.b1, col.c1, geom.cAB_x)
+            e_y = eccentricity_to_critical_centroid(geom.b2, col.c2, geom.cAB_y)
+            M_c1_adj = max(0.0kip*u"ft", abs(M_c1) - Vu * e_x)
+            M_c2_adj = max(0.0kip*u"ft", abs(M_c2) - Vu * e_y)
+            Jc_y = polar_moment_Jc_corner(geom.b2, geom.b1, d, geom.cAB_y)
+            vu = v_direct +
+                 uconvert(u"psi", (1 - g_c1.γf) * M_c1_adj * geom.cAB_x / Jc) +
+                 uconvert(u"psi", (1 - g_c2.γf) * M_c2_adj * geom.cAB_y / Jc_y)
+        end
+        return (vu = vu, transfer = _transfer_fractions(g_c1, g_c2))
     elseif col.position == :edge
         span_is_parallel = _span_moment_parallel_to_edge(col, mt.span_axis)
         span_is_parallel === nothing && return nothing
         M_par, M_other = span_is_parallel ? (M_span, M_perp) : (M_perp, M_span)
+        d_par, d_other = span_is_parallel ? (d, d2) : (d2, d)
         bands = transfer_bands(col.c1, col.c2, h, d; position = :edge,
                                free_edge_parallel = edge_par)
-        bb_par, bb_other = span_is_parallel ? (bands.bb_x, bands.bb_y) :
-                                              (bands.bb_y, bands.bb_x)
-        ga = moment_transfer_gamma_f(geom.b1, geom.b2, :edge_parallel, Vu, φVc, M_par,
-                                     bb_par, d, fc, fy)
+        # The moment about the axis parallel to the edge spans perpendicular
+        # to it: along c1 when the edge runs along c2.
+        perp_is_c1 = edge_par === :c2
+        b_par = perp_is_c1 ? (bands.b1_x, bands.b2_x, bands.bb_x) :
+                             (bands.b1_y, bands.b2_y, bands.bb_y)
+        b_oth = perp_is_c1 ? (bands.b1_y, bands.b2_y, bands.bb_y) :
+                             (bands.b1_x, bands.b2_x, bands.bb_x)
+        ga = moment_transfer_gamma_f(b_par[1], b_par[2], :edge_parallel, Vu, φVc, M_par,
+                                     b_par[3], d_par, fc, fy)
         ga.provision === :aci_13_5_3_3a || return nothing
-        gb = moment_transfer_gamma_f(geom.b2, geom.b1, :edge_perpendicular, Vu, φVc,
-                                     M_other, bb_other, d, fc, fy)
+        gb = moment_transfer_gamma_f(b_oth[1], b_oth[2], :edge_perpendicular, Vu, φVc,
+                                     M_other, b_oth[3], d_other, fc, fy)
         Jc_p = polar_moment_Jc_edge_perpendicular(geom.b1, geom.b2, d)
         vu = v_direct + uconvert(u"psi", (1 - gb.γf) * abs(M_other) * (geom.b2 / 2) / Jc_p)
-        transfer = span_is_parallel ? _transfer_fractions(ga, gb) : _transfer_fractions(gb, ga)
-        return (vu = vu, transfer = transfer)
+        g_span, g_perp = span_is_parallel ? (ga, gb) : (gb, ga)
+        return (vu = vu, transfer = _fractions_named_axes(col, mt.span_axis, g_span, g_perp))
     end
     return nothing
 end
 
-"""Fractions for `Mub` (`_x`) and `Muy` (`_y`) in `governing_transfer_reinforcement` naming."""
+"""Fractions for the moments spanning the named `c1` (`_x`) and `c2` (`_y`)."""
 _transfer_fractions(gx, gy) = (γf_x = gx.γf, γf_y = gy.γf,
                                provision_x = gx.provision, provision_y = gy.provision)
+
+"""Map span-frame fractions onto the named column axes."""
+function _fractions_named_axes(col, span_axis, g_span, g_perp)
+    _span_along_c1(col, span_axis) ? _transfer_fractions(g_span, g_perp) :
+                                     _transfer_fractions(g_perp, g_span)
+end
+
+"""
+    _span_along_c1(col, span_axis) -> Bool
+
+`true` when the slab span lies along the column's `c1` (its local x, rotated
+by `col.θ`). A column with no `θ` is taken as aligned with global x.
+"""
+function _span_along_c1(col, span_axis)
+    θ = hasproperty(col, :θ) ? Float64(getfield(col, :θ)) : 0.0
+    sx, sy = span_axis
+    along = abs(sx * cos(θ) + sy * sin(θ))
+    across = abs(-sx * sin(θ) + sy * cos(θ))
+    return along >= across
+end
+
+"""Inner-layer depth for the secondary span, or `d` when `mt` has no bar size."""
+function _secondary_layer_depth(mt, h, d)
+    hasproperty(mt, :bar_diameter) || return d
+    return inner_layer_effective_depth(h, mt.cover, mt.bar_diameter, mt.bar_diameter)
+end
 
 """
     _span_moment_parallel_to_edge(col, span_axis) -> Union{Bool, Nothing}

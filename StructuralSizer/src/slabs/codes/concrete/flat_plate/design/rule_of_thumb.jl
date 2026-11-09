@@ -48,6 +48,7 @@ function check_flat_plate_at_thickness!(
     _col_cache = nothing,
     slab_idx::Int = 0,
     drop_panel::Union{Nothing, DropPanelGeometry} = nothing,
+    update_analysis_model::Bool = true,
     tc::Union{Nothing, TraceCollector} = nothing,
     _method_record::Base.RefValue{NamedTuple} = Ref{NamedTuple}(
         (method_requested = method, method_used = method, method_fallback_reasons = String[])),
@@ -82,7 +83,7 @@ function check_flat_plate_at_thickness!(
     # =====================================================================
     # 3. THICKNESS — fixed at ACI minimum (no iteration)
     # =====================================================================
-    has_edge = any(col.position != :interior for col in columns)
+    has_edge = slab_discontinuous_edge(struc, slab, columns)
     h = if !isnothing(opts.min_h)
         opts.min_h
     elseif !isnothing(drop_panel)
@@ -124,19 +125,13 @@ function check_flat_plate_at_thickness!(
     bar_dia    = bar_diameter(bar_size)
     d          = effective_depth(h; cover=cover, bar_diameter=bar_dia)
     sw_estimate = slab_sw(h)
-    c_span_min = estimate_column_size_from_span(ln_max)
-
-    for col in columns
-        if isnothing(col.c1) || col.c1 <= 0u"inch"
-            col.c1 = c_span_min
-            col.c2 = c_span_min
-        end
-    end
+    c_span_min = _column_span_minimum(ln_max, opts)
 
     # =====================================================================
     # 4. AXIAL LOADS & P-M CACHE
     # =====================================================================
     Pu = compute_column_axial_loads(struc, columns, slab_cell_indices, sw_estimate)
+    _initialize_unsized_columns!(columns, Pu, ln_max, opts, column_opts)
 
     if isnothing(_col_cache)
         _col_cat = isnothing(column_opts.custom_catalog) ?
@@ -179,7 +174,9 @@ function check_flat_plate_at_thickness!(
         if inner isa EFM && inner.solver == :asap
             get!(slab_caches, :efm, EFMModelCache())
         elseif inner isa FEA
-            get!(slab_caches, :fea, FEAModelCache())
+            acquire_fea_cache!(slab_caches, fea_mesh_key(
+                struc, slab, columns;
+                target_edge=inner.target_edge, drop_panel=drop_panel))
         else
             nothing
         end
@@ -235,37 +232,29 @@ function check_flat_plate_at_thickness!(
 
     check_pattern_loading_requirement(moment_results; verbose=verbose)
 
-    # Column design moments = unbalanced × distribution (§13.5.3.2 + §13.6.9.2)
+    # Column below the slab. FEA reads its stub. DDM and EFM take a
+    # stiffness share of the joint moment (§13.6.9.2, not §13.5.3.2).
     _dist_factors = column_moment_distribution_factors(struc, columns, column_opts)
-    Mu = [ustrip(kip * u"ft", moment_results.unbalanced_moments[i]) * _dist_factors[i] for i in 1:n_cols]
+    Mu = [column_design_moment(moment_results, i, _dist_factors[i]) for i in 1:n_cols]
+    Mu_secondary = if isnothing(secondary_results)
+        zeros(n_cols)
+    else
+        [column_design_moment(secondary_results, i, _dist_factors[i]) for i in 1:n_cols]
+    end
 
     # 5b. Column P-M design — pinned-pinned about both axes (rule-of-thumb pass).
     geometries = [
         ConcreteMemberGeometry(col.base.L; Lu=col.base.L, kx=1.0, ky=1.0, braced=true)
         for col in columns
     ]
-    column_result = size_columns(Pu, Mu, geometries, column_opts; cache=_col_cache)
+    column_result = size_columns(Pu, Mu, geometries, column_opts;
+                                 Muy=Mu_secondary, cache=_col_cache)
 
-    if !_rc_nlp_result_installable(column_result)
-        @warn "Column NLP result is not a completed design; leaving column sizes unchanged" status=column_result.status
-        push!(failures, "column_pm")
-    else
-        for (i, col) in enumerate(columns)
-            section = column_result.sections[i]
-            bb = bounding_box(section)
-            c1_pm = bb.width
-            c2_pm = bb.depth
-            col.c1 = max(c_span_min, c1_pm, col.c1)
-            col.c2 = max(c_span_min, c2_pm, col.c2)
-            if col.c1 ≈ c1_pm && col.c2 ≈ c2_pm
-                col.base.section = section
-            else
-                col.base.section = resize_column_with_reinforcement(
-                    section, col.c1, col.c2, Pu[i], Mu[i], material
-                )
-            end
-        end
-    end
+    # Same update as the iterative pipeline. A rejected NLP result writes
+    # nothing and is a failure of this pass.
+    _rc_nlp_result_installable(column_result) || push!(failures, "column_pm")
+    _update_column_sizes!(columns, column_result, Pu, Mu, c_span_min, material, 0.0;
+                          Muy = Mu_secondary, verbose = verbose)
 
     # 5c. Punching shear
     punching_local = Vector{NamedTuple}(undef, n_cols)
@@ -282,7 +271,8 @@ function check_flat_plate_at_thickness!(
                 moment_results.unbalanced_moments[i],
                 h, d, h_total, d_total, fc, drop_panel;
                 qu=moment_results.qu, Muy=Muy_i,
-                verbose=false, col_idx=i, λ=λ, φ_shear=φ_shear
+                verbose=false, col_idx=i, λ=λ, φ_shear=φ_shear,
+                punching_axis_kwargs(struc, slab, columns[i])...
             )
         end
     else
@@ -294,6 +284,7 @@ function check_flat_plate_at_thickness!(
                 moment_results.unbalanced_moments[i], d, h, fc;
                 verbose=false, col_idx=i, λ=λ, φ_shear=φ_shear,
                 Muy=Muy_i,
+                punching_axis_kwargs(struc, slab, columns[i])...
             )
         end
     end
@@ -306,11 +297,16 @@ function check_flat_plate_at_thickness!(
     _l2_defl = moment_results.l2
     ρ_prime_est = try
         _As_neg = required_reinforcement(
-            0.75 * moment_results.M_neg_int, _l2_defl / 2, d, fc, fy
+            0.75 * _top_bar_moment(moment_results), _l2_defl / 2, d, fc, fy; εt_min = tension_controlled_strain(fy)
         )
-        _As_neg = max(_As_neg, minimum_reinforcement(_l2_defl / 2, h, fy))
-        0.5 * ustrip(u"inch^2", _As_neg) /
-            (ustrip(u"inch", _l2_defl / 2) * ustrip(u"inch", d))
+        # Inadequate section: ρ′ = 0 keeps the long-term multiplier conservative.
+        if isfinite(_As_neg)
+            _As_neg = max(_As_neg, minimum_reinforcement(_l2_defl / 2, h, fy))
+            0.5 * ustrip(u"inch^2", _As_neg) /
+                (ustrip(u"inch", _l2_defl / 2) * ustrip(u"inch", d))
+        else
+            0.0
+        end
     catch
         0.0
     end
@@ -336,24 +332,30 @@ function check_flat_plate_at_thickness!(
         push!(failures, "two_way_deflection")
     end
 
-    # 5e. One-way shear
-    # Extract FEA-based one-way shear demand when available
-    _fea_Vu = if analysis_cache isa FEAModelCache && analysis_cache.initialized
+    # 5e. One-way shear. Analytical demand governs. The FEA cut is diagnostic.
+    _fea_diag = if analysis_cache isa FEAModelCache && analysis_cache.initialized
         _span_ax = _get_span_axis(slab)
-        _extract_fea_one_way_shear(analysis_cache, columns, _span_ax, d; verbose=verbose)
+        _extract_fea_one_way_shear(
+            analysis_cache, columns, _span_ax, d, moment_results.l2;
+            verbose=verbose,
+        )
     else
         nothing
     end
-    shear_result = check_one_way_shear(moment_results, d, fc;
+    shear_result = check_one_way_shear(moment_results, d, fc; h = h, fy = fy,
                                         verbose=verbose, λ=λ, φ_shear=φ_shear,
-                                        fea_Vu=_fea_Vu)
-    if !shear_result.ok
+                                        fea_diag=_fea_diag)
+    wall_shear = wall_one_way_shear(
+        struc, slab, d, fc, moment_results.qu; h = h, fy = fy, λ = λ, ϕ = φ_shear)
+    if !shear_result.ok || any(c -> !c.ok, wall_shear)
         push!(failures, "one_way_shear")
     end
 
     # 5f. Flexural adequacy
-    flexure_result = check_flexural_adequacy(moment_results, columns, d, fc;
-                                              βt=_βt, verbose=verbose)
+    flexure_result = check_flexural_adequacy(moment_results, columns, d, fc; fy = fy,
+                                              βt=_βt, verbose=verbose,
+                                              struc=struc, slab=slab,
+                                              span_axis=_get_span_axis(slab))
     if !flexure_result.ok
         push!(failures, "flexural_adequacy")
     end
@@ -399,19 +401,28 @@ function check_flat_plate_at_thickness!(
             moment_results.unbalanced_moments,
             moment_results.Vu_max;
             pattern_loading = moment_results.pattern_loading,
+            M_wall_ext = moment_results.M_wall_ext,
+            M_wall_int = moment_results.M_wall_int,
         )
     end
 
     rebar_design = try
         result = design_strip_reinforcement(
             moment_results, columns, h, d, fc, fy, cover;
-            βt=_βt, verbose=verbose
+            βt=_βt, verbose=verbose,
+            struc=struc, slab=slab, span_axis=_get_span_axis(slab),
         )
         # Check for inadequate section (new graceful failure mode)
         if !result.section_adequate
             push!(failures, "reinforcement_design")
             nothing
         else
+            anchorage = wall_face_bar_anchorage(
+                result, moment_results, struc, slab, columns,
+                fc, fy, λ, cover, _get_span_axis(slab))
+            if anchorage !== nothing && !anchorage.ok
+                push!(failures, "wall_bar_development")
+            end
             result
         end
     catch
@@ -421,9 +432,13 @@ function check_flat_plate_at_thickness!(
 
     # Moment transfer
     transfer_results = Union{Nothing, NamedTuple}[nothing for _ in 1:n_cols]
+    d_punch = isnothing(drop_panel) ? d : d + (total_depth_at_drop(h, drop_panel) - h)
     transfer_ok = isnothing(rebar_design) || _rot_transfer_reinforcement!(
         transfer_results, failures, columns, moment_results, secondary_results,
-        rebar_design, h, d, fc, fy; tc = tc, slab_id = "slab_$(slab_idx)")
+        rebar_design, h, d, fc, fy; tc = tc, slab_id = "slab_$(slab_idx)",
+        punching = _column_face_punching(punching_local, columns, d_punch, drop_panel),
+        d_punch = d_punch, drop = drop_panel, λ = Float64(λ), φ_shear = φ_shear,
+        span_axis = _get_span_axis(slab))
 
     # Integrity reinforcement
     cell = struc.cells[first(slab.cell_indices)]
@@ -459,7 +474,7 @@ function check_flat_plate_at_thickness!(
     end
     # A rejected NLP column is already in `failures`. Do not write its
     # preliminary section into the analysis model as a completed design.
-    if _rc_nlp_result_installable(column_result)
+    if update_analysis_model && _rc_nlp_result_installable(column_result)
         update_asap_column_sections!(struc, columns, column_opts.material)
     end
 
@@ -480,13 +495,20 @@ function check_flat_plate_at_thickness!(
     end
 
     column_results_out = build_column_results(
-        struc, columns, column_result, Pu, moment_results.unbalanced_moments, punching_results
+        struc, columns, column_result, Pu, moment_results.unbalanced_moments, punching_results;
+        Mu_secondary = isnothing(secondary_results) ? nothing :
+                       secondary_results.unbalanced_moments,
+        stubs = stub_moments(moment_results),
+        stubs_secondary = stub_moments(secondary_results),
     )
 
     return (
         converged        = converged,
         failure_reason   = converged ? "" : join(failures, ", "),
         failing_check    = isempty(failures) ? "" : first(failures),
+        governing_check  = _governing_check_label(
+            isempty(failures) ? "" : first(failures), opts.min_h),
+        one_way_shear    = shear_result,
         failures         = failures,
         iterations       = 1,
         h_final          = h,
@@ -521,7 +543,7 @@ caller must not build a design from it (the iterative pipeline returns
 function _rot_transfer_reinforcement!(transfer_results, failures, columns,
                                       moment_results, secondary_results,
                                       rebar_design, h, d, fc, fy;
-                                      tc = nothing, slab_id::String = "")
+                                      tc = nothing, slab_id::String = "", kwargs...)
     ok = true
     # Retry policy: record every failing column (push once, emit a per-column
     # trace) and keep scanning, so the pass reports all inadequate columns.
@@ -534,6 +556,7 @@ function _rot_transfer_reinforcement!(transfer_results, failures, columns,
     end
     _transfer_reinforcement_pass(columns, moment_results, secondary_results,
                                  rebar_design, h, d, fc, fy;
-                                 results = transfer_results, on_inadequate = fail!)
+                                 results = transfer_results, on_inadequate = fail!,
+                                 kwargs...)
     return ok
 end

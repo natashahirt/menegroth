@@ -33,7 +33,7 @@ section centroid, `e = (b_section − cAB) − c_col/2`
 # Arguments
 - `col`: Column with position (:interior, :edge, :corner) and dimensions (c1, c2)
 - `Vu`: Factored shear demand
-- `Mub`: Unbalanced moment
+- `Mub`: Unbalanced moment spanning along `span_axis`
 - `d`: Effective slab depth
 - `h`: Total slab thickness
 - `fc`: Concrete compressive strength
@@ -52,11 +52,16 @@ section centroid, `e = (b_section − cAB) − c_col/2`
   `max(|Mux|, |Muy|)` on both `:c1` and `:c2` after any c1↔c2 geometry
   swap so the uniaxial check cannot drop the governing transfer moment;
   `:interior` superposes both axes.
+- `span_axis`, `θ`: plan direction of `Mub` and the column rotation
+  (default `col.θ`). Interior and corner moments are put on the column's
+  `c1` / `c2` from these, so each meets the `b1`, `b2` and Jc of its own span.
 - `free_edge_parallel`: `:c1` or `:c2`.  Default inferred from
   `col.boundary_edge_dirs` when present, otherwise `:c2`.
-- `moment_transfer`: `(fy, span_axis)` to apply ACI 318-11 §13.5.3.3
-  (corpus: aci-318-11, page 250) on the closed-form rectangular section;
-  `nothing` (default) keeps Eq. (13-1). See `_increased_transfer_stress`.
+- `moment_transfer`: `(fy,)`, optionally with `(bar_diameter, cover)` for
+  the inner-layer depth, to apply ACI 318-11 §13.5.3.3 (corpus: aci-318-11,
+  page 250) on the closed-form rectangular section; `nothing` (default)
+  keeps Eq. (13-1). The increase is permitted, not required, so it is used
+  only at a column that fails with Eq. (13-1). See `_increased_transfer_stress`.
   Sections with openings, circular columns and skew or re-entrant corners
   keep Eq. (13-1).
 
@@ -275,10 +280,13 @@ function check_punching_for_column(col, Vu, Mub, d, h, fc;
     # ── Eccentricity correction (load-dependent — not cached) ──
     # ACI 318-11 §11.11.7.1 (corpus: aci-318-11, page 209) — remainder γv Mu
     # transferred by eccentricity of shear about the §11.11.1.2 centroid.
-    muy_present = !isnothing(Muy) && abs(ustrip(kip * u"ft", Muy_val)) > 1e-10
+    # `geom.b1` and `Jc` belong to the moment spanning along `c1`. Interior
+    # and corner moments are mapped onto `c1` / `c2` from the span direction.
+    along = _span_along_c1(col_θ, span_axis)
+    M_c1, M_c2 = along ? (Mub, Muy_val) : (Muy_val, Mub)
 
     if col.position == :interior
-        Mub_adjusted = Mub
+        Mub_adjusted = abs(M_c1)
         e_centroid = zero(c1)
     elseif col.position == :edge
         # ACI 318-11 R11.11.7.2 (pages 209–211): moment about the axis
@@ -288,7 +296,7 @@ function check_punching_for_column(col, Vu, Mub, d, h, fc;
         Mub_adjusted = max(0.0kip*u"ft", abs(Mub) - Vu * e_centroid)
     else  # :corner — same centroid shift as punching_check (R11.11.7.2)
         e_centroid = eccentricity_to_critical_centroid(geom.b1, c1, geom.cAB_x)
-        Mub_adjusted = max(0.0kip*u"ft", abs(Mub) - Vu * e_centroid)
+        Mub_adjusted = max(0.0kip*u"ft", abs(M_c1) - Vu * e_centroid)
     end
 
     b0 = geom.b0
@@ -296,34 +304,35 @@ function check_punching_for_column(col, Vu, Mub, d, h, fc;
     φvc = φ_shear * vc
 
     if col.position == :corner
-        # Parity with punching_check: γv Mu c / Jc on each axis.
-        # `Mub` is the span-direction (b1) transfer moment; optional `Muy`
-        # is the perpendicular-axis moment when the caller has it.
+        # Parity with punching_check: γv Mu c / Jc on each axis, each moment
+        # shifted to the section centroid along its own span.
         e_y = eccentricity_to_critical_centroid(geom.b2, c2, geom.cAB_y)
-        Muy_adj = max(0.0kip*u"ft", abs(Muy_val) - Vu * e_y)
+        M_c2_adj = max(0.0kip*u"ft", abs(M_c2) - Vu * e_y)
         γv_y = gamma_v(geom.b2, geom.b1)
         Jc_y = polar_moment_Jc_corner(geom.b2, geom.b1, d, geom.cAB_y)
         vu = uconvert(u"psi", Vu / (b0 * d)) +
              uconvert(u"psi", γv_val * Mub_adjusted * geom.cAB_x / Jc) +
-             uconvert(u"psi", γv_y * Muy_adj * geom.cAB_y / Jc_y)
-    elseif col.position == :interior && muy_present
+             uconvert(u"psi", γv_y * M_c2_adj * geom.cAB_y / Jc_y)
+    elseif col.position == :interior
         # Superpose both axes to match punching_check(; position=:interior).
-        # Jc_x / γv_x from the cached 4-sided section; Jc_y / γv_y swap b1, b2.
-        γv_y = gamma_v(geom.b2, geom.b1)
-        Jc_y = polar_moment_Jc_interior(geom.b2, geom.b1, d)
-        cAB_y = geom.b2 / 2
-        vu = uconvert(u"psi", Vu / (b0 * d)) +
-             uconvert(u"psi", γv_val * abs(Mub) * cAB / Jc) +
-             uconvert(u"psi", γv_y * abs(Muy_val) * cAB_y / Jc_y)
+        # Jc_y / γv_y swap b1, b2.
+        vu = uconvert(u"psi", combined_punching_stress(Vu, Mub_adjusted, b0, d, γv_val, Jc, cAB))
+        if abs(ustrip(kip * u"ft", M_c2)) > 1e-10
+            γv_y = gamma_v(geom.b2, geom.b1)
+            Jc_y = polar_moment_Jc_interior(geom.b2, geom.b1, d)
+            vu += uconvert(u"psi", γv_y * abs(M_c2) * (geom.b2 / 2) / Jc_y)
+        end
     else
         vu = combined_punching_stress(Vu, Mub_adjusted, b0, d, γv_val, Jc, cAB)
     end
 
+    # §13.5.3.3 is permitted, not required: it is taken only at a column that
+    # fails with Eq. (13-1), where it moves moment into flexural steel.
     transfer = nothing
-    if moment_transfer !== nothing && col_shape_val != :circular
+    if moment_transfer !== nothing && col_shape_val != :circular && vu > φvc
         alt = _increased_transfer_stress(col, geom, Jc, cAB, Vu, M_span, M_perp,
                                          d, h, fc, φvc * b0 * d,
-                                         edge_par, moment_transfer)
+                                         edge_par, moment_transfer, span_axis, along)
         if alt !== nothing && alt.vu < vu
             vu = alt.vu
             transfer = alt.transfer
@@ -349,19 +358,22 @@ end
 
 """
     _increased_transfer_stress(col, geom, Jc, cAB, Vu, M_span, M_perp,
-                               d, h, fc, φVc, edge_par, mt) -> Union{Nothing, NamedTuple}
+                               d, h, fc, φVc, edge_par, mt, span_axis, along)
+        -> Union{Nothing, NamedTuple}
 
 Column-face punching stress with the flexural fractions of ACI 318-11
 §13.5.3.3 (corpus: aci-318-11, page 250), from `moment_transfer_gamma_f`.
 Returns `(vu, transfer)`, where `transfer = (γf_x, γf_y, provision_x,
 provision_y)` is in the named column axes (`γf_x` for the moment spanning
 along `c1`), or `nothing` when no increase applies. That is the frame
-`governing_transfer_reinforcement` sizes the steel in. The caller keeps the
-Eq. (13-1) stress unless this one is lower.
+`governing_transfer_reinforcement` sizes the steel in. The caller only asks
+for it where Eq. (13-1) fails, and keeps the Eq. (13-1) stress unless this
+one is lower.
 
-`mt` is `(fy, span_axis)` and, when the secondary layer depth should gate
-the strain, `(bar_diameter, cover)`. `span_axis` is the plan direction of
-`M_span`. Widths come from `transfer_bands`.
+`mt` is `(fy,)` and, when the secondary layer depth should gate the strain,
+`(bar_diameter, cover)`. `span_axis` is the plan direction of `M_span`;
+`along` is true when that direction is the column's `c1`. Widths come from
+`transfer_bands`.
 
 - Interior: (b) on each axis, the same superposition as the Eq. (13-1) check.
 - Corner: (a) on each axis (0.5φVc), with the R11.11.7.2 centroid shift.
@@ -373,10 +385,9 @@ the strain, `(bar_diameter, cover)`. `span_axis` is the plan direction of
   edge is skew to the span, (a) is not applied.
 """
 function _increased_transfer_stress(col, geom, Jc, cAB, Vu, M_span, M_perp,
-                                    d, h, fc, φVc, edge_par, mt)
+                                    d, h, fc, φVc, edge_par, mt, span_axis, along)
     fy = mt.fy
     d2 = _secondary_layer_depth(mt, h, d)
-    along = _span_along_c1(col, mt.span_axis)
     v_direct = uconvert(u"psi", Vu / (geom.b0 * d))
     if col.position == :interior || col.position == :corner
         bands = transfer_bands(col.c1, col.c2, h, d; position = col.position)
@@ -405,7 +416,7 @@ function _increased_transfer_stress(col, geom, Jc, cAB, Vu, M_span, M_perp,
         end
         return (vu = vu, transfer = _transfer_fractions(g_c1, g_c2))
     elseif col.position == :edge
-        span_is_parallel = _span_moment_parallel_to_edge(col, mt.span_axis)
+        span_is_parallel = _span_moment_about_edge_axis(col, span_axis)
         span_is_parallel === nothing && return nothing
         M_par, M_other = span_is_parallel ? (M_span, M_perp) : (M_perp, M_span)
         d_par, d_other = span_is_parallel ? (d, d2) : (d2, d)
@@ -426,7 +437,9 @@ function _increased_transfer_stress(col, geom, Jc, cAB, Vu, M_span, M_perp,
         Jc_p = polar_moment_Jc_edge_perpendicular(geom.b1, geom.b2, d)
         vu = v_direct + uconvert(u"psi", (1 - gb.γf) * abs(M_other) * (geom.b2 / 2) / Jc_p)
         g_span, g_perp = span_is_parallel ? (ga, gb) : (gb, ga)
-        return (vu = vu, transfer = _fractions_named_axes(col, mt.span_axis, g_span, g_perp))
+        transfer = along ? _transfer_fractions(g_span, g_perp) :
+                           _transfer_fractions(g_perp, g_span)
+        return (vu = vu, transfer = transfer)
     end
     return nothing
 end
@@ -435,20 +448,17 @@ end
 _transfer_fractions(gx, gy) = (γf_x = gx.γf, γf_y = gy.γf,
                                provision_x = gx.provision, provision_y = gy.provision)
 
-"""Map span-frame fractions onto the named column axes."""
-function _fractions_named_axes(col, span_axis, g_span, g_perp)
-    _span_along_c1(col, span_axis) ? _transfer_fractions(g_span, g_perp) :
-                                     _transfer_fractions(g_perp, g_span)
-end
-
 """
     _span_along_c1(col, span_axis) -> Bool
+    _span_along_c1(θ, span_axis) -> Bool
 
 `true` when the slab span lies along the column's `c1` (its local x, rotated
-by `col.θ`). A column with no `θ` is taken as aligned with global x.
+by `θ`). A column with no `θ` is taken as aligned with global x.
 """
-function _span_along_c1(col, span_axis)
-    θ = hasproperty(col, :θ) ? Float64(getfield(col, :θ)) : 0.0
+_span_along_c1(col, span_axis) =
+    _span_along_c1(hasproperty(col, :θ) ? Float64(getfield(col, :θ)) : 0.0, span_axis)
+
+function _span_along_c1(θ::Real, span_axis)
     sx, sy = span_axis
     along = abs(sx * cos(θ) + sy * sin(θ))
     across = abs(-sx * sin(θ) + sy * cos(θ))
@@ -462,14 +472,15 @@ function _secondary_layer_depth(mt, h, d)
 end
 
 """
-    _span_moment_parallel_to_edge(col, span_axis) -> Union{Bool, Nothing}
+    _span_moment_about_edge_axis(col, span_axis) -> Union{Bool, Nothing}
 
 `true` when the span-direction moment of an edge column acts about an axis
-parallel to its free edge (span perpendicular to the edge), `false` when the
-span runs along the edge, `nothing` when the column has no stored edge
-direction or the edge is skew to the span (more than about 6° off either).
+parallel to its free edge, i.e. the span runs perpendicular to the edge
+(§13.5.3.3(a)). `false` when the span runs along the edge (§13.5.3.3(b)).
+`nothing` when the column has no stored edge direction or the edge is skew
+to the span (more than about 6° off either).
 """
-function _span_moment_parallel_to_edge(col, span_axis)
+function _span_moment_about_edge_axis(col, span_axis)
     hasproperty(col, :boundary_edge_dirs) || return nothing
     dirs = getfield(col, :boundary_edge_dirs)
     isempty(dirs) && return nothing

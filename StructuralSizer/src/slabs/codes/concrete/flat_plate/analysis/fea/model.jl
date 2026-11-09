@@ -232,6 +232,16 @@ function column_opening_punching(struc, slab, col)
 end
 
 """
+    punching_axis_kwargs(struc, slab, col) -> NamedTuple
+
+Keywords for `check_punching_for_column` / `check_punching`: the slab span
+direction, so the unbalanced moments meet the column's own `c1` / `c2`, plus
+the opening data from [`column_opening_punching`](@ref).
+"""
+punching_axis_kwargs(struc, slab, col) =
+    merge((span_axis = _get_span_axis(slab),), column_opening_punching(struc, slab, col))
+
+"""
     build_slab_shell_mesh(struc, slab, columns, section;
         target_edge=nothing, drop_panel=nothing,
         patch_stiffness_factor=100.0, id=:slab,
@@ -240,6 +250,13 @@ end
 Build triangulated shell elements for a slab with ShellPatch mesh conformity at
 each column.  This is the **single source of truth** for slab shell meshing —
 used by both the FEA design pipeline and the visualization analysis model.
+
+The centerline polygon is the frame. Outside it, and inside a courtyard, a
+band of triangles runs out to the largest column face on each straight edge.
+Those elements are part of `shells`, so the caller's single area load covers
+the strip. Column nodes and edge-beam nodes stay on the centerline. A column
+that grows changes [`fea_mesh_key`](@ref), and the rebuilt mesh carries the
+new width.
 
 Returns a NamedTuple `(shells, patches, interior_nodes, node_map, target_edge)`.
 The caller is responsible for adding column stubs, loads, and assembling/solving.
@@ -320,8 +337,10 @@ function build_slab_shell_mesh(
     refine_edge = clamp(min_col_dim_m / 2.0, 0.04, target_m / 2.0) * u"m"
 
     # ─── 6. Build shell mesh ───
+    # Openings cut into a face, plus bays that were never a slab (a core shaft).
+    holes = vcat(slab_opening_loops(struc, slab), slab_void_loops(struc, slab))
     shells = Asap.Shell(corner_nodes, section;
-                        holes=slab_opening_loops(struc, slab),
+                        holes=holes,
                         id=id,
                         interior_nodes=interior_nodes,
                         interior_patches=patches,
@@ -330,8 +349,195 @@ function build_slab_shell_mesh(
                         target_edge_length=target_edge,
                         refinement_edge_length=refine_edge)
 
+    # Slab past the centerline, out to the largest column face. The area load
+    # is built from `shells`, so the strip is loaded with the rest of the slab.
+    _append_flat_plate_edge_strip!(shells, section, struc, slab, node_map, boundary_vis)
+
     return (shells=shells, patches=patches, interior_nodes=interior_nodes,
             node_map=node_map, target_edge=target_edge)
+end
+
+"""
+    _append_flat_plate_edge_strip!(shells, section, struc, slab, node_map, boundary_vis)
+
+Add the centerline-to-slab-edge band along the slab's free edges.
+
+The band is the floor's slab edge ([`floor_slab_edges`](@ref)), so it matches
+the story shell: a straight run is as wide as the largest column face on it,
+anywhere on the floor. An edge shared with another slab gets no band, and
+neither does an opening. No sized column leaves the mesh unchanged.
+"""
+function _append_flat_plate_edge_strip!(shells, section, struc, slab, node_map, boundary_vis)
+    isempty(boundary_vis) && return shells
+    skel = struc.skeleton
+    z = _edge_m(skel.geometry.vertex_coords[first(boundary_vis), 3])
+    off = slab_edge_offsets(floor_slab_edges(struc, z))
+    isempty(off.side) && return shells
+    _, _, _, holes = _slab_boundary_topology(struc, slab)
+    nodes = _slab_mesh_nodes(shells)
+    outer = Dict{Int, Asap.Node}()
+    for loop in Iterators.flatten(((boundary_vis,), holes))
+        n = length(loop)
+        for i in 1:n
+            va, vb = loop[i], loop[mod1(i + 1, n)]
+            side = get(off.side, minmax(va, vb), nothing)
+            side === nothing && continue
+            haskey(node_map, va) && haskey(node_map, vb) || continue
+            _append_edge_strip_segment!(shells, section, nodes, outer, off.shift, side,
+                                        skel, va, vb, node_map)
+        end
+    end
+    return shells
+end
+
+"""
+Band triangles on the boundary edge `va`→`vb`, walked with the slab on the left.
+
+An end vertex moves by `shift` (a corner goes to the outline corner); a mesh
+node inside the edge moves along the run's outward normal by its width. The
+centerline nodes are not moved. `outer` shares the moved vertex nodes between
+the two edges that meet there.
+"""
+function _append_edge_strip_segment!(shells, section, nodes, outer, shift, side,
+                                     skel, va, vb, node_map)
+    a = _vertex_xy_m(skel, va)
+    b = _vertex_xy_m(skel, vb)
+    sa = get(shift, va, (0.0, 0.0))
+    sb = get(shift, vb, (0.0, 0.0))
+    hypot(sa...) < 1e-6 && hypot(sb...) < 1e-6 && return shells
+    chain = collect(Asap.Node, _nodes_along(nodes, node_map[va], node_map[vb]))
+    outers = Asap.Node[_moved_vertex_node!(outer, va, node_map[va], a, sa)]
+    for node in @view chain[2:end-1]
+        if side.width < 1e-6
+            push!(outers, node)
+        else
+            x = ustrip(u"m", node.position[1]) + side.outward[1] * side.width
+            y = ustrip(u"m", node.position[2]) + side.outward[2] * side.width
+            push!(outers, Asap.Node([x * u"m", y * u"m", 0.0u"m"], :free))
+        end
+    end
+    push!(outers, _moved_vertex_node!(outer, vb, node_map[vb], b, sb))
+    n_quads = length(chain) - 1
+    for i in 1:n_quads
+        b0, b1 = chain[i], chain[i + 1]
+        o0, o1 = outers[i], outers[i + 1]
+        _node_span(b0, b1) < 1e-6 && continue
+        # A moved end vertex can slide along the next boundary run when that
+        # run has no band. Mesh nodes of that run then sit on the band's end
+        # edge; fanning through them keeps the mesh conforming.
+        start = i == 1 ? _nodes_along(nodes, b0, o0) : (b0, o0)
+        stop = i == n_quads ? _nodes_along(nodes, b1, o1) : (b1, o1)
+        for k in 1:(length(start) - 1)
+            _push_band_tri!(shells, section, (start[k], start[k + 1], b1))
+        end
+        for k in 1:(length(stop) - 1)
+            _push_band_tri!(shells, section, (o0, stop[k + 1], stop[k]))
+        end
+    end
+    return shells
+end
+
+"""
+`from`, the mesh nodes strictly inside the segment `from`→`to` in order, then
+`to`. Just the two ends when the segment has no length.
+"""
+function _nodes_along(nodes, from::Asap.Node, to::Asap.Node)
+    _node_span(from, to) < 1e-6 && return (from, to)
+    a = _xy_m(from)
+    b = _xy_m(to)
+    hits = Tuple{Float64, Asap.Node}[]
+    for node in nodes
+        s = _segment_station(_xy_m(node), a, b; tol = 1e-4)
+        (s === nothing || s <= 1e-5 || s >= 1 - 1e-5) && continue
+        push!(hits, (s, node))
+    end
+    isempty(hits) && return (from, to)
+    sort!(hits; by = first)
+    return (from, (last(h) for h in hits)..., to)
+end
+
+_xy_m(node::Asap.Node) = (ustrip(u"m", node.position[1]), ustrip(u"m", node.position[2]))
+
+"""Add one band triangle, unless its three corners are collinear or coincide."""
+function _push_band_tri!(shells, section, tri)
+    p1, p2, p3 = _xy_m.(tri)
+    twice_area = (p2[1] - p1[1]) * (p3[2] - p1[2]) - (p3[1] - p1[1]) * (p2[2] - p1[2])
+    abs(twice_area) < 2e-9 && return shells
+    push!(shells, Asap.ShellTri3(
+        tri, section.thickness * u"m", section.E * u"Pa", section.ν;
+        ρ = section.ρ, id = :slab_edge))
+    return shells
+end
+
+"""
+The node at boundary vertex `v` moved to the slab edge, made once per vertex.
+A vertex that does not move keeps its centerline `node`, so the mesh stays joined.
+"""
+function _moved_vertex_node!(outer, v::Int, node, xy, shift)
+    hypot(shift[1], shift[2]) < 1e-6 && return node
+    get!(outer, v) do
+        Asap.Node([(xy[1] + shift[1]) * u"m", (xy[2] + shift[2]) * u"m", 0.0u"m"], :free)
+    end
+end
+
+"""Plan distance between two nodes, in metres."""
+_node_span(a::Asap.Node, b::Asap.Node) = hypot(
+    ustrip(u"m", a.position[1]) - ustrip(u"m", b.position[1]),
+    ustrip(u"m", a.position[2]) - ustrip(u"m", b.position[2]))
+
+"""Distinct shell nodes, in first-seen order."""
+function _slab_mesh_nodes(shells)
+    seen = IdDict{Asap.Node, Nothing}()
+    nodes = Asap.Node[]
+    for el in shells
+        for node in el.nodes
+            haskey(seen, node) && continue
+            seen[node] = nothing
+            push!(nodes, node)
+        end
+    end
+    return nodes
+end
+
+"""
+Restrain a shell node that lies on a wall cast with the slab.
+
+ACI 318-11 R13.6.3.3 (corpus: aci-318-11, page 254): that joint has little
+rotation. `false` in `node.dof` is fixed (Asap `fixDict`). uz is fixed, and
+so is rotation about the wall's longitudinal axis (rx for a wall along x,
+ry for a wall along y). Rotation about the axis normal to the wall stays
+free. The dof vector is replaced, because nodes may share one array.
+"""
+function _hold_slab_on_walls!(shells, segments)
+    isempty(segments) && return 0
+    seen = Set{UInt64}()
+    n = 0
+    for sh in shells
+        for node in sh.nodes
+            id = objectid(node)
+            id in seen && continue
+            push!(seen, id)
+            pt = (ustrip(u"m", node.position[1]), ustrip(u"m", node.position[2]))
+            hit = findfirst(seg -> _point_on_segment(pt, seg[1], seg[2]), segments)
+            hit === nothing && continue
+            seg = segments[hit]
+            dof = copy(node.dof)
+            dof[3] && (n += 1)
+            dof[3] = false
+            dx = abs(seg[2][1] - seg[1][1])
+            dy = abs(seg[2][2] - seg[1][2])
+            if dx >= 4 * dy
+                dof[4] = false
+            elseif dy >= 4 * dx
+                dof[5] = false
+            else
+                dof[4] = false
+                dof[5] = false
+            end
+            node.dof = dof
+        end
+    end
+    return n
 end
 
 """
@@ -385,6 +591,11 @@ function _build_fea_slab_model(
     node_map = mesh.node_map
     target_edge = mesh.target_edge
 
+    # R13.1 (corpus: aci-318-11, page 243): a wall supporting the panel edge
+    # holds that edge. Vertical displacement is fixed, and so is rotation
+    # about the wall axis.
+    _hold_slab_on_walls!(shells, supporting_wall_segments(struc, slab))
+
     # ─── Column stub frame elements ───
     col_stubs = Dict{Int, Any}()
     frame_elements = Asap.FrameElement[]
@@ -417,7 +628,8 @@ function _build_fea_slab_model(
             Lc_above = col_above.base.L
             base_above = Asap.Node([xy[1] * u"m", xy[2] * u"m", Lc_above], :fixed)
             push!(fixed_nodes, base_above)
-            sec_above = _col_asap_sec(col_above, Ecc, ν_concrete; I_factor=col_I_factor)
+            sec_above = _col_asap_sec(col_above, Ecc, ν_concrete;
+                I_factor=col_I_factor, fallback=(col.c1, col.c2))
             elem_above = Asap.Element(slab_node, base_above, sec_above, :col_above)
             elem_above.Ψ = col_orientation(col_above)
             push!(frame_elements, elem_above)
@@ -479,7 +691,7 @@ function _build_fea_slab_model(
         end
     end
 
-    # ─── Load ───
+    # One area load on every shell, including the edge strip already in `shells`.
     loads = Asap.AbstractLoad[Asap.AreaLoad(shells, uconvert(u"Pa", qu))]
 
     # ─── Build, process, solve ───
@@ -563,7 +775,9 @@ function _update_and_resolve!(
         stubs = cache.col_stubs[i]
         stubs.below.element.section = _col_asap_sec(col, Ecc, ν_concrete; I_factor=col_I_factor)
         if !isnothing(stubs.above) && !isnothing(col.column_above)
-            stubs.above.element.section = _col_asap_sec(col.column_above, Ecc, ν_concrete; I_factor=col_I_factor)
+            stubs.above.element.section = _col_asap_sec(
+                col.column_above, Ecc, ν_concrete;
+                I_factor=col_I_factor, fallback=(col.c1, col.c2))
         end
     end
 

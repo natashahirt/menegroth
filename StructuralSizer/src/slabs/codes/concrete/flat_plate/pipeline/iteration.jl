@@ -168,15 +168,6 @@ function _size_flat_plate!(
     bar_dia = bar_diameter(bar_size)
     c_span_min = _column_span_minimum(ln_max, opts)
     
-    # Initialize column sizes (only when nothing set them before the slab loop)
-    c_init = min(estimate_column_size_from_span(ln_max), opts.max_column_size)
-    for col in columns
-        if isnothing(col.c1) || col.c1 <= 0u"inch"
-            col.c1 = c_init
-            col.c2 = c_init
-        end
-    end
-    
     if verbose
         @debug "INITIAL ESTIMATES" h_min=h sw=sw_estimate c_span_min=c_span_min
     end
@@ -186,6 +177,7 @@ function _size_flat_plate!(
     # =========================================================================
     
     Pu = compute_column_axial_loads(struc, columns, slab_cell_indices, sw_estimate)
+    _initialize_unsized_columns!(columns, Pu, ln_max, opts, column_opts)
     
     if verbose
         @debug "COLUMN AXIAL LOADS (Pu = max(1.2D+1.6L, 1.4D))"
@@ -281,9 +273,7 @@ function _size_flat_plate!(
     # carries its own below-stub moment and does not use the factor.
     function _assign_column_design_moments!(moment_results, secondary_results)
         dist = column_moment_distribution_factors(struc, columns, column_opts)
-        own = hasproperty(moment_results, :column_design_moments) ?
-            moment_results.column_design_moments : nothing
-        if verbose && own === nothing && any(f -> f < 1.0, dist)
+        if verbose && stub_moments(moment_results) === nothing && any(f -> f < 1.0, dist)
             @debug "Column moment distribution factors (§13.6.9.2)" factors=dist
         end
         @inbounds for i in eachindex(Mu)
@@ -312,7 +302,7 @@ function _size_flat_plate!(
     # thickness at the drop while the transfer steel uses the slab depth, so
     # the increase is limited to flat plates.
     _moment_transfer = opts.moment_transfer_increase && isnothing(drop_panel) ?
-        (fy = fy, span_axis = _get_span_axis(slab)) : nothing
+        (fy = fy, bar_diameter = bar_dia, cover = cover) : nothing
 
     # One analysis, then the thinnest half-inch the scaled checks accept.
     # Column sizes stay frozen across that scan. A column-size change still
@@ -331,7 +321,8 @@ function _size_flat_plate!(
                     γ_concrete, columns;
                     struc = struc, slab = slab, limit_type = opts.deflection_limit,
                     deflection_Ie_method = Ie_method, λ = λ, φ_shear = φ_shear,
-                    βt = _βt, span_axis = _get_span_axis(slab))
+                    βt = _βt, span_axis = _get_span_axis(slab),
+                    cover = cover, bar_diameter = bar_dia)
                 punching || return ok
                 return ok && punching_depth_passes(
                     scaled_p, scaled_s, columns, hh, dd, fc, struc, slab;
@@ -715,8 +706,10 @@ function _size_flat_plate!(
             # §13.5.3 transfer steel at the column face. The strip check above
             # uses the full column-strip width; the transfer band is narrower
             # and can be the thickness that governs.
-            if !_transfer_sections_adequate(columns, moment_results, secondary_results,
-                                            h, d, fc, fy)
+            if !_transfer_sections_adequate(
+                    columns, moment_results, secondary_results, h, d, fc, fy;
+                    span_axis = _get_span_axis(slab),
+                    d_secondary = inner_layer_effective_depth(h, cover, bar_dia, bar_dia))
                 h = _jumped_depth(h, moment_results, secondary_results)
                 verbose && @warn "Moment transfer section inadequate. Increasing h → $h"
                 emit!(tc, :slab, "size_flat_plate!", _slab_id, :iteration;
@@ -850,7 +843,7 @@ function _size_flat_plate!(
                         h, d, h_total, d_total, fc, drop_panel;
                         qu=mr.qu, Muy=isnothing(sr) ? nothing : sr.unbalanced_moments[i],
                         verbose=false, col_idx=i, λ=λ, φ_shear=φ_shear,
-                        column_opening_punching(struc, slab, columns[i])...
+                        punching_axis_kwargs(struc, slab, columns[i])...
                     )
                 else
                     i -> check_punching_for_column(
@@ -859,7 +852,7 @@ function _size_flat_plate!(
                         Muy=isnothing(sr) ? nothing : sr.unbalanced_moments[i],
                         _geom_cache=_punch_geom_cache,
                         moment_transfer=_moment_transfer,
-                        column_opening_punching(struc, slab, columns[i])...
+                        punching_axis_kwargs(struc, slab, columns[i])...
                     )
                 end
             end

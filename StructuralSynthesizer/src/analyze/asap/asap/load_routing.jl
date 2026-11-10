@@ -32,6 +32,11 @@ Create TributaryLoads for a single cell from its tributary polygons.
 When `split_dead_live=true`, returns `(dead_loads, live_loads)` with separate
 pressures for pattern loading. When `false` (default), returns combined loads
 with enveloped pressure, as a single vector.
+
+The slab past the centerline on the cell's free edges ([`slab_edge_strips`](@ref))
+is loaded with the same pressures, as a uniform `:slab_edge_strip` load on the
+edge member. `edge_strips` is [`slab_edge_strips_by_cell`](@ref); pass it when
+looping over many cells, since computing it walks the whole floor.
 """
 function _create_cell_tributary_loads!(
     loads::Vector{Asap.AbstractLoad},
@@ -42,7 +47,8 @@ function _create_cell_tributary_loads!(
     cell_idx::Int,
     params::DesignParameters=DesignParameters();
     split_dead_live::Bool=false,
-    combo::LoadCombination=governing_combo(params)
+    combo::LoadCombination=governing_combo(params),
+    edge_strips=nothing,
 )
     dead_loads = Asap.TributaryLoad[]
     live_loads = Asap.TributaryLoad[]
@@ -73,9 +79,7 @@ function _create_cell_tributary_loads!(
     for trib in tribs
         # Skip empty tributaries
         trib.area < 1e-12 && continue
-        length(trib.s) < 2 && continue
         
-        # Extract width profile from tributary polygon
         positions, widths_m = _extract_width_profile(trib)
         length(positions) < 2 && continue
         
@@ -110,44 +114,132 @@ function _create_cell_tributary_loads!(
             push!(dead_loads, tload)
         end
     end
-    
+
+    strips = edge_strips === nothing ? slab_edge_strips_by_cell(struc) : edge_strips
+    cell_strips = get(strips, cell_idx, NamedTuple[])
+    if split_dead_live
+        _append_edge_strip_loads!(loads, dead_loads, elements, cell_strips, dead_pressure)
+        _append_edge_strip_loads!(loads, live_loads, elements, cell_strips, live_pressure)
+    else
+        _append_edge_strip_loads!(loads, dead_loads, elements, cell_strips, combined_pressure)
+    end
+
     return split_dead_live ? (dead_loads, live_loads) : dead_loads
 end
 
 """
-Extract a sorted width profile from a TributaryPolygon.
+    _append_edge_strip_loads!(loads, record, elements, strips, pressure)
 
-The polygon vertices trace the boundary, but TributaryLoad needs positions
-sorted along the beam with corresponding widths.
-
-Returns (positions, widths) where positions are in [0,1] sorted order.
+One uniform `:slab_edge_strip` load per strip on its edge member, at
+`pressure`, pushed to both `loads` and `record`.
 """
-function _extract_width_profile(trib::TributaryPolygon)
-    isempty(trib.s) && return (Float64[], Float64[])
-    
-    # Collect (s, |d|) pairs and sort by s
-    pairs = [(trib.s[i], abs(trib.d[i])) for i in eachindex(trib.s)]
-    sort!(pairs, by=first)
-    
-    # Remove duplicates (keep max width at each position)
-    merged = Tuple{Float64, Float64}[]
-    for (s, w) in pairs
-        if isempty(merged) || abs(s - merged[end][1]) > 1e-9
-            push!(merged, (s, w))
+function _append_edge_strip_loads!(loads, record, elements, strips, pressure)
+    for strip in strips
+        w = slab_edge_line_width(strip)
+        (w > 1e-9 && 1 <= strip.edge <= length(elements)) || continue
+        ld = Asap.TributaryLoad(elements[strip.edge], [0.0, 1.0], [w * u"m", w * u"m"],
+                                pressure, (0.0, 0.0, -1.0), :slab_edge_strip)
+        push!(loads, ld)
+        push!(record, ld)
+    end
+    return loads
+end
+
+"""
+    _append_unrouted_edge_strip_loads!(loads, frame_elements, struc, strips, skip, params; use_patterns, combo)
+
+Edge strips for cells whose pressure did not go through
+[`_create_cell_tributary_loads!`](@ref): shell-area routing and joist-framed
+slabs. `skip` are the cells that did. Each load is recorded under its own cell
+so `sync_asap!` refreshes its pressure. Shell-area routing has no pattern
+split, so its strips carry the enveloped pressure like the rest of that slab.
+"""
+function _append_unrouted_edge_strip_loads!(loads, frame_elements, struc::BuildingStructure,
+                                            strips, skip, params::DesignParameters;
+                                            use_patterns::Bool, combo::LoadCombination)
+    for (ci, cell_strips) in strips
+        ci in skip && continue
+        cell = struc.cells[ci]
+        cell.floor_type == :grade && continue
+        if use_patterns
+            dead_p = uconvert(u"Pa", combo.D * (cell.sdl + cell.self_weight))
+            live_p = uconvert(u"Pa", combo.L * cell.live_load)
+            dead = get!(() -> Asap.TributaryLoad[], struc.cell_dead_loads, ci)
+            live = get!(() -> Asap.TributaryLoad[], struc.cell_live_loads, ci)
+            all_loads = get!(() -> Asap.TributaryLoad[], struc.cell_tributary_loads, ci)
+            n0 = length(loads)
+            _append_edge_strip_loads!(loads, dead, frame_elements, cell_strips, dead_p)
+            _append_edge_strip_loads!(loads, live, frame_elements, cell_strips, live_p)
+            append!(all_loads, @view loads[(n0 + 1):end])
         else
-            # Same position - keep max width
-            merged[end] = (merged[end][1], max(merged[end][2], w))
+            p = uconvert(u"Pa", envelope_pressure(params.load_combinations,
+                                                  cell.sdl + cell.self_weight, cell.live_load))
+            _append_edge_strip_loads!(loads, get!(() -> Asap.TributaryLoad[],
+                                                  struc.cell_tributary_loads, ci),
+                                      frame_elements, cell_strips, p)
         end
     end
-    
-    # Extract separate vectors
-    positions = [p[1] for p in merged]
-    widths = [p[2] for p in merged]
-    
-    # Ensure positions are clamped to [0, 1]
-    positions = clamp.(positions, 0.0, 1.0)
-    
-    return (positions, widths)
+    return loads
+end
+
+"""
+    _sync_slab_edge_strip_widths!(struc)
+
+Reset the width of every `:slab_edge_strip` load from the current slab edge.
+
+Columns that grew since `to_asap!` widen the strip. A load is matched to its
+strip by the midpoint of its element, so a subdivided edge member keeps its
+share. A load whose edge no longer has a strip goes to zero width.
+"""
+function _sync_slab_edge_strip_widths!(struc::BuildingStructure)
+    model = struc.asap_model
+    isnothing(model) && return
+    strips = nothing
+    for ld in model.loads
+        (ld isa Asap.TributaryLoad && ld.id === :slab_edge_strip) || continue
+        strips === nothing && (strips = slab_edge_strips(struc))
+        _set_tributary_width!(ld, _strip_width_at_element(strips, ld.element))
+    end
+    for dict in (struc.cell_tributary_loads, struc.cell_dead_loads, struc.cell_live_loads),
+        lds in values(dict), ld in lds
+        ld.id === :slab_edge_strip || continue
+        strips === nothing && (strips = slab_edge_strips(struc))
+        _set_tributary_width!(ld, _strip_width_at_element(strips, ld.element))
+    end
+    return
+end
+
+"""Line-load width (m) of the strip whose edge holds the midpoint of `el`."""
+function _strip_width_at_element(strips, el)
+    p1, p2 = el.nodeStart.position, el.nodeEnd.position
+    mid = ((ustrip(u"m", p1[1]) + ustrip(u"m", p2[1])) / 2,
+           (ustrip(u"m", p1[2]) + ustrip(u"m", p2[2])) / 2)
+    z = (ustrip(u"m", p1[3]) + ustrip(u"m", p2[3])) / 2
+    for s in strips
+        abs(s.z - z) <= 0.01 || continue
+        StructuralSizer._segment_station(mid, s.a, s.b) === nothing && continue
+        return slab_edge_line_width(s)
+    end
+    return 0.0
+end
+
+"""Set a uniform width on every breakpoint of `ld`."""
+function _set_tributary_width!(ld::Asap.TributaryLoad, w::Float64)
+    fill!(ld.widths, w * u"m")
+    fill!(ld._widths_m, w)
+    return ld
+end
+
+"""
+    _extract_width_profile(trib) -> (positions, widths_m)
+
+The tributary's load profile from the partition: positions on `[0, 1]` along
+the edge in face order, widths in meters, `∫ w ds × edge length = trib.area`.
+A repeated position is a step.
+"""
+function _extract_width_profile(trib::TributaryPolygon)
+    trib.area > 0 || return (Float64[], Float64[])
+    return (copy(trib.profile_s), copy(trib.profile_w))
 end
 
 # =============================================================================
@@ -520,10 +612,7 @@ function _slab_area_load_geometry(struc::BuildingStructure, slab::Slab,
     framing_edges = Int[]
     joist_edges = Int[]
     for fl in slab.framing_levels
-        fl.group_id === nothing && continue
-        grp = get(struc.member_groups, fl.group_id, nothing)
-        grp === nothing && continue
-        for mi in grp.member_indices
+        for mi in level_member_indices(struc, fl)
             (mi >= 1 && mi <= length(struc.beams)) || continue
             beam = struc.beams[mi]
             for si in segment_indices(beam)
@@ -558,10 +647,7 @@ historical per-cell tributary loads byte-for-byte.
 """
 function _slab_has_joist_framing(struc::BuildingStructure, slab::Slab)
     for fl in slab.framing_levels
-        fl.group_id === nothing && continue
-        grp = get(struc.member_groups, fl.group_id, nothing)
-        grp === nothing && continue
-        for mi in grp.member_indices
+        for mi in level_member_indices(struc, fl)
             (mi >= 1 && mi <= length(struc.beams)) || continue
             struc.beams[mi].role === :joist && return true
         end
@@ -825,10 +911,7 @@ function _framed_slab_strip_geometry(struc::BuildingStructure, slab::Slab,
     # Level-1 joist beams for this slab.
     joist_beams = Int[]
     for fl in slab.framing_levels
-        fl.group_id === nothing && continue
-        grp = get(struc.member_groups, fl.group_id, nothing)
-        grp === nothing && continue
-        for mi in grp.member_indices
+        for mi in level_member_indices(struc, fl)
             (1 <= mi <= length(struc.beams)) || continue
             struc.beams[mi].role === :joist && push!(joist_beams, mi)
         end
@@ -1159,6 +1242,41 @@ function _create_framed_slab_loads!(loads::Vector{Asap.AbstractLoad},
     combos = params.load_combinations
     dir = (0.0, 0.0, -1.0)
     for slab in struc.slabs
+        grill = _grillage_level(slab)
+        if grill !== nothing
+            isempty(slab.cell_indices) && throw(ArgumentError(
+                "a grillage slab has no cells"))
+            c0 = first(slab.cell_indices)
+            cell0 = struc.cells[c0]
+            if use_patterns
+                dead_p = uconvert(u"Pa", combo.D * (cell0.sdl + cell0.self_weight))
+                live_p = uconvert(u"Pa", combo.L * cell0.live_load)
+                dead_loads = Asap.TributaryLoad[]
+                live_loads = Asap.TributaryLoad[]
+                _emit_grillage_loads!(loads, dead_loads, frame_elements, struc, slab, grill, dead_p)
+                _emit_grillage_loads!(loads, live_loads, frame_elements, struc, slab, grill, live_p)
+                struc.cell_dead_loads[c0] = dead_loads
+                struc.cell_live_loads[c0] = live_loads
+                struc.cell_tributary_loads[c0] = vcat(dead_loads, live_loads)
+            else
+                combined_p = uconvert(u"Pa", envelope_pressure(combos,
+                                cell0.sdl + cell0.self_weight, cell0.live_load))
+                combined_loads = Asap.TributaryLoad[]
+                _emit_grillage_loads!(loads, combined_loads, frame_elements, struc,
+                                      slab, grill, combined_p)
+                struc.cell_dead_loads[c0] = Asap.TributaryLoad[]
+                struc.cell_live_loads[c0] = Asap.TributaryLoad[]
+                struc.cell_tributary_loads[c0] = combined_loads
+            end
+            for ci in slab.cell_indices
+                push!(handled, ci)
+                ci == c0 && continue
+                struc.cell_dead_loads[ci] = Asap.TributaryLoad[]
+                struc.cell_live_loads[ci] = Asap.TributaryLoad[]
+                struc.cell_tributary_loads[ci] = Asap.TributaryLoad[]
+            end
+            continue
+        end
         _slab_has_joist_framing(struc, slab) || continue
         isempty(slab.cell_indices) && continue
         c0 = first(slab.cell_indices)

@@ -74,18 +74,26 @@ Geometric and topological representation of a building.
 `openings` holds the [`SlabOpening`](@ref)s; see [`face_openings`](@ref) for the
 openings that overlap one face.
 
+`face_holes` maps a face to the plan outlines (meters, counterclockwise) of the
+beam networks that sit inside it without touching its boundary, such as a ring
+of beams around an atrium. [`find_faces!`](@ref) fills it. The nested network
+has faces of its own, so the hole is the outer face's void, not an opening in
+the slab inside the ring.
+
 # Edge groups (`groups_edges`)
 `groups_edges::Dict{Symbol, Vector{Int}}` maps a group name to the edge indices
 in that group (used for member grouping, e.g. `:beams`, `:columns`). Symbol keys
-are arbitrary, but two names are **reserved** for the framing hierarchy
-(plan `joists-roles-materials`):
+are arbitrary. These names are reserved:
 
 - `:joists` — auto-generated **level-1** members (joists that directly support
   the slab), produced from a slab's [`FramingLevel`](@ref)s.
 - `:secondary` — auto-generated **level-2+** members (secondary beams and
   deeper framing levels).
+- `:absent` — an edge that stays in the skeleton and keeps its frame slot,
+  but is not a member. `to_asap!` gives it a zero section. Move the index
+  back into `:columns`, `:beams`, `:braces`, or `:walls` to restore it.
 
-These two groups are **populated only by Phase 5's `materialize_level!`** (which
+`:joists` and `:secondary` are **populated only by Phase 5's `materialize_level!`** (which
 also inserts the joist landings as skeleton vertices via `edge_chains`). Nothing
 in Phase 4 writes to them — the names are reserved here so downstream code can
 rely on the convention. Do not repurpose `:joists` / `:secondary` for manually
@@ -113,6 +121,10 @@ mutable struct BuildingSkeleton{T} <: AbstractBuildingSkeleton
     # When empty, each edge is its own chain (1:1 mapping, the default).
     edge_chains::Dict{UInt64, Vector{Int}}
     openings::Vector{SlabOpening}
+    face_holes::Dict{Int, Vector{Vector{NTuple{2, Float64}}}}
+    # Rectangular holes in wall edges, one spec per story. Copied onto `Wall`
+    # by `initialize_members!`. See `add_wall_opening!`.
+    wall_openings::Vector{WallOpeningSpec}
 
     """Construct an empty `BuildingSkeleton` with no vertices, edges, faces, or lookup tables."""
     function BuildingSkeleton{T}() where T
@@ -126,6 +138,8 @@ mutable struct BuildingSkeleton{T} <: AbstractBuildingSkeleton
             nothing,  # geometry cache not yet built
             Dict{UInt64, Vector{Int}}(),  # edge_chains (empty = no shattering)
             SlabOpening[],
+            Dict{Int, Vector{Vector{NTuple{2, Float64}}}}(),
+            WallOpeningSpec[],
         )
     end
 end

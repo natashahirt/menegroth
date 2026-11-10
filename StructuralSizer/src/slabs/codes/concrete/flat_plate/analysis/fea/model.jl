@@ -125,22 +125,31 @@ function _column_drop_outline(col, drop_panel::DropPanelGeometry, span_axis)
                         position, col_orientation(col), span_axis; swapped = swapped)
 end
 
-"""Plan loops of the unframed openings that meet this slab's faces. `face_idx` keeps one face."""
+"""
+Plan loops of the unframed openings that meet this slab's faces. `face_idx`
+keeps one face. An opening inside a nested beam network (`skel.face_holes`)
+belongs to the slab within that network and is left out; the network's
+outline itself is a framed void, see [`slab_void_loops`](@ref).
+"""
 function slab_opening_loops(struc, slab; face_idx::Union{Nothing, Int} = nothing)
     skel = struc.skeleton
     hasproperty(skel, :openings) || return Vector{NTuple{2, Float64}}[]
     ops = getfield(skel, :openings)
     isempty(ops) && return Vector{NTuple{2, Float64}}[]
+    nested = hasproperty(skel, :face_holes) ? getfield(skel, :face_holes) : nothing
     face_loops = Vector{NTuple{2, Float64}}[]
+    holes = Vector{NTuple{2, Float64}}[]
     for ci in slab.cell_indices
         f = struc.cells[ci].face_idx
         (face_idx === nothing || f == face_idx) || continue
         push!(face_loops, NTuple{2, Float64}[_vertex_xy_m(skel, vi) for vi in skel.face_vertex_indices[f]])
+        nested === nothing || append!(holes, get(nested, f, ()))
     end
     out = Vector{NTuple{2, Float64}}[]
     seen = Set{Vector{Tuple{Int, Int}}}()
     for op in ops
         _opening_meets_face(op.loop, face_loops) || continue
+        any(h -> all(p -> _pip_xy(p[1], p[2], h), op.loop), holes) && continue
         key = [(round(Int, 1e6 * p[1]), round(Int, 1e6 * p[2])) for p in op.loop]
         key in seen && continue
         push!(seen, key)
@@ -576,6 +585,7 @@ function _build_fea_slab_model(
     edge_beam_βt::Float64 = 0.0,
     edge_beam_l2::Union{Nothing, Length} = nothing,
     edge_beam_c1_avg::Union{Nothing, Length} = nothing,
+    q_drop::Pressure = 0.0u"Pa",
 )
     skel = struc.skeleton
     shell_section = Asap.ShellSection(uconvert(u"m", h), uconvert(u"Pa", Ecs), ν_concrete)
@@ -693,6 +703,12 @@ function _build_fea_slab_model(
 
     # One area load on every shell, including the edge strip already in `shells`.
     loads = Asap.AbstractLoad[Asap.AreaLoad(shells, uconvert(u"Pa", qu))]
+    # Flat slab: the drop projection's self-weight on the drop patches only.
+    if !isnothing(drop_panel)
+        drop_shells = [s for s in shells if s.id === :drop_panel]
+        isempty(drop_shells) || push!(loads, Asap.AreaLoad(
+            drop_shells, uconvert(u"Pa", q_drop); id = FEA_DROP_LOAD_ID))
+    end
 
     # ─── Build, process, solve ───
     all_nodes = vcat(collect(values(node_map)), fixed_nodes)
@@ -730,6 +746,7 @@ function _update_and_resolve!(
     patch_stiffness_factor::Float64 = 100.0,
     edge_beam_l2::Union{Nothing, Length} = nothing,
     edge_beam_c1_avg::Union{Nothing, Length} = nothing,
+    q_drop::Pressure = 0.0u"Pa",
 )
     model = cache.model
     t_m = ustrip(u"m", h)
@@ -762,12 +779,8 @@ function _update_and_resolve!(
         end
     end
 
-    # 2. Update load magnitude
-    for load in model.loads
-        if load isa Asap.AreaLoad
-            load.pressure = uconvert(u"Pa", qu)
-        end
-    end
+    # 2. Update load magnitude (slab, and the drop patches' extra self-weight)
+    _set_fea_area_loads!(model, qu, q_drop)
 
     # 3. Update column sections
     for (i, col) in enumerate(columns)

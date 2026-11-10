@@ -1,19 +1,37 @@
 # =============================================================================
-# Tests for Slab Geometry Validation
+# Tests for Slab Geometry
 # =============================================================================
 #
-# Tests convexity detection, rectangular decomposition, and frame line creation
-# for various slab geometries.
+# Tests convexity detection, face detection on awkward beam layouts, and frame
+# line creation.
 #
 # =============================================================================
 
 using Test
+using Unitful
 
 # Add the project to the load path (standalone execution)
 push!(LOAD_PATH, joinpath(@__DIR__, "..", "..", ".."))
 using StructuralSynthesizer
 
-@testset "Slab Geometry Validation" begin
+"""Square of beams (or `group` members) with its lower-left corner at `(x0, y0)`."""
+function _member_square!(skel, x0, y0, L, z; group = :beams)
+    vs = [add_vertex!(skel, [x0, y0, z]), add_vertex!(skel, [x0 + L, y0, z]),
+          add_vertex!(skel, [x0 + L, y0 + L, z]), add_vertex!(skel, [x0, y0 + L, z])]
+    for i in 1:4
+        add_element!(skel, vs[i], vs[mod1(i + 1, 4)]; group = group)
+    end
+    return vs
+end
+
+function _faces_of!(skel)
+    rebuild_stories!(skel)
+    find_faces!(skel)
+    rebuild_geometry_cache!(skel)
+    return skel
+end
+
+@testset "Slab Geometry" begin
     
     # =========================================================================
     # Convexity Tests
@@ -111,234 +129,93 @@ using StructuralSynthesizer
             @test is_convex_polygon(square_vec) == true
         end
     end
-    
+
     # =========================================================================
-    # Cell Grid Tests
+    # Face detection on awkward member layouts
     # =========================================================================
-    @testset "Cell Grid Construction" begin
-        
-        @testset "3x3 grid" begin
-            # 9 cells in a 3x3 grid
-            cell_indices = [1, 2, 3, 4, 5, 6, 7, 8, 9]
-            
-            # Centroids: cell i at ((i-1)%3 + 0.5, (i-1)÷3 + 0.5)
-            get_centroid(idx) = (
-                ((idx - 1) % 3) + 0.5,
-                ((idx - 1) ÷ 3) + 0.5
-            )
-            
-            grid = build_cell_grid(cell_indices, get_centroid)
-            
-            @test size(grid.grid) == (3, 3)
-            @test grid.grid[1, 1] == 1  # Bottom-left
-            @test grid.grid[1, 3] == 3  # Bottom-right
-            @test grid.grid[3, 1] == 7  # Top-left
-            @test grid.grid[3, 3] == 9  # Top-right
-            @test grid.grid[2, 2] == 5  # Center
-        end
-        
-        @testset "L-shaped cell group" begin
-            # L-shape: cells 1,2,3 (bottom row) + 4,7 (left column)
-            #   7
-            #   4
-            # 1 2 3
-            cell_indices = [1, 2, 3, 4, 7]
-            
-            get_centroid(idx) = (
-                ((idx - 1) % 3) + 0.5,
-                ((idx - 1) ÷ 3) + 0.5
-            )
-            
-            grid = build_cell_grid(cell_indices, get_centroid)
-            
-            # Should be 3x3 grid with zeros for missing cells
-            @test grid.grid[1, 1] == 1
-            @test grid.grid[1, 2] == 2
-            @test grid.grid[1, 3] == 3
-            @test grid.grid[2, 1] == 4
-            @test grid.grid[2, 2] == 0  # Missing cell 5
-            @test grid.grid[2, 3] == 0  # Missing cell 6
-            @test grid.grid[3, 1] == 7
-            @test grid.grid[3, 2] == 0  # Missing cell 8
-            @test grid.grid[3, 3] == 0  # Missing cell 9
-        end
-    end
-    
-    # =========================================================================
-    # Rectangular Decomposition Tests
-    # =========================================================================
-    @testset "Rectangular Decomposition" begin
-        
-        # Helper: centroid function for 3x3 grid
-        get_centroid_3x3(idx) = (
-            ((idx - 1) % 3) + 0.5,
-            ((idx - 1) ÷ 3) + 0.5
-        )
-        
-        @testset "Already rectangular" begin
-            # Full 3x3 grid (already rectangular)
-            cells = [1, 2, 3, 4, 5, 6, 7, 8, 9]
-            result = decompose_to_rectangles(cells, get_centroid_3x3)
-            
-            @test length(result) == 1
-            @test Set(result[1]) == Set(cells)
-        end
-        
-        @testset "Single cell" begin
-            cells = [5]
-            result = decompose_to_rectangles(cells, get_centroid_3x3)
-            
-            @test length(result) == 1
-            @test result[1] == [5]
-        end
-        
-        @testset "L-shaped decomposition" begin
-            # L-shape:
-            #   7
-            #   4
-            # 1 2 3
-            cells = [1, 2, 3, 4, 7]
-            result = decompose_to_rectangles(cells, get_centroid_3x3)
-            
-            # Should split into rectangles
-            @test length(result) >= 1
-            
-            # All cells should be covered
-            all_cells = reduce(union, Set.(result))
-            @test all_cells == Set(cells)
-            
-            # Each result should be rectangular (no gaps in grid)
-            for rect in result
-                # A rectangle in grid has no holes
-                grid = build_cell_grid(rect, get_centroid_3x3)
-                rows_used = unique([grid.cell_positions[c][1] for c in rect])
-                cols_used = unique([grid.cell_positions[c][2] for c in rect])
-                expected_count = length(rows_used) * length(cols_used)
-                @test length(rect) == expected_count
+    @testset "Face detection" begin
+        z = 3.0
+
+        @testset "A beam ending inside a bay throws" begin
+            skel = BuildingSkeleton{Float64}()
+            vs = _member_square!(skel, 0.0, 0.0, 6.0, z)
+            tip = add_vertex!(skel, [3.0, 2.0, z])
+            add_element!(skel, vs[1], tip; group = :beams)
+            rebuild_stories!(skel)
+            err = try
+                find_faces!(skel)
+                nothing
+            catch e
+                e
             end
+            @test err isa ArgumentError
+            @test occursin("bound no face", err.msg)
+            @test occursin("(3.0, 2.0) m", err.msg)
         end
-        
-        @testset "U-shaped decomposition" begin
-            # U-shape (missing center-top):
-            # 7   9
-            # 4 5 6
-            # 1 2 3
-            cells = [1, 2, 3, 4, 5, 6, 7, 9]  # Missing cell 8
-            result = decompose_to_rectangles(cells, get_centroid_3x3)
-            
-            # Should split into at least 2 rectangles
-            @test length(result) >= 1
-            
-            # All cells should be covered
-            all_cells = reduce(union, Set.(result))
-            @test all_cells == Set(cells)
+
+        @testset "A beam floating in a bay throws" begin
+            skel = BuildingSkeleton{Float64}()
+            _member_square!(skel, 0.0, 0.0, 6.0, z)
+            a = add_vertex!(skel, [2.0, 2.0, z])
+            b = add_vertex!(skel, [4.0, 2.0, z])
+            add_element!(skel, a, b; group = :beams)
+            rebuild_stories!(skel)
+            @test_throws ArgumentError find_faces!(skel)
         end
-        
-        @testset "Diagonal cells (worst case)" begin
-            # Diagonal: only cells 1, 5, 9 (not adjacent)
-            cells = [1, 5, 9]
-            result = decompose_to_rectangles(cells, get_centroid_3x3)
-            
-            # Each cell should be its own rectangle (no expansion possible)
-            @test length(result) == 3
-            @test all(length(r) == 1 for r in result)
+
+        @testset "A free-standing beam ring is a hole of the outer face" begin
+            skel = _faces_of!(let s = BuildingSkeleton{Float64}()
+                _member_square!(s, 0.0, 0.0, 10.0, z)
+                _member_square!(s, 4.0, 4.0, 2.0, z)
+                s
+            end)
+            @test length(skel.face_vertex_indices) == 2
+            outer = argmax(f -> ustrip(u"m^2", face_area(skel, f)), 1:2)
+            inner = 3 - outer
+            @test length(face_hole_loops(skel, outer)) == 1
+            @test isempty(face_hole_loops(skel, inner))
+            @test ustrip(u"m^2", face_net_area(skel, outer)) ≈ 96.0
+            @test ustrip(u"m^2", face_net_area(skel, inner)) ≈ 4.0
+            @test face_opening_loops(skel, outer) == face_hole_loops(skel, outer)
         end
-        
-        @testset "Two separate rectangles" begin
-            # Two 1x2 rectangles with gap:
-            # cells 1,2 and cells 7,8
-            cells = [1, 2, 7, 8]
-            
-            # Need a 3x3 grid centroid function
-            get_centroid(idx) = (
-                ((idx - 1) % 3) + 0.5,
-                ((idx - 1) ÷ 3) + 0.5
-            )
-            
-            result = decompose_to_rectangles(cells, get_centroid)
-            
-            # Should find 2 rectangles (possibly merged if algorithm finds larger)
-            @test length(result) >= 1
-            
-            all_cells = reduce(union, Set.(result))
-            @test all_cells == Set(cells)
+
+        @testset "Nested rings attach to the nearest enclosing face" begin
+            skel = _faces_of!(let s = BuildingSkeleton{Float64}()
+                _member_square!(s, 0.0, 0.0, 12.0, z)
+                _member_square!(s, 2.0, 2.0, 8.0, z)
+                _member_square!(s, 5.0, 5.0, 2.0, z)
+                s
+            end)
+            nets = sort([ustrip(u"m^2", face_net_area(skel, f)) for f in 1:3])
+            @test nets ≈ [4.0, 60.0, 80.0]
         end
-    end
-    
-    # =========================================================================
-    # Connectivity-Based Grouping Tests
-    # =========================================================================
-    @testset "Connectivity Grouping" begin
-        
-        @testset "Single connected component" begin
-            # Linear chain: 1-2-3
-            cells = [1, 2, 3]
-            get_neighbors(idx) = begin
-                idx == 1 && return [2]
-                idx == 2 && return [1, 3]
-                idx == 3 && return [2]
-                return Int[]
-            end
-            
-            result = group_by_connectivity(cells, get_neighbors)
-            
-            @test length(result) == 1
-            @test Set(result[1]) == Set(cells)
+
+        @testset "An opening inside the ring belongs to the inner face" begin
+            skel = BuildingSkeleton{Float64}()
+            _member_square!(skel, 0.0, 0.0, 10.0, z)
+            _member_square!(skel, 4.0, 4.0, 2.0, z)
+            _faces_of!(skel)
+            add_slab_opening!(skel, [(4.5, 4.5), (5.5, 4.5), (5.5, 5.5), (4.5, 5.5)],
+                              only(keys(skel.stories)))
+            outer = argmax(f -> ustrip(u"m^2", face_area(skel, f)), 1:2)
+            inner = 3 - outer
+            @test isempty(face_openings(skel, outer))
+            @test face_openings(skel, inner) == [1]
+            @test ustrip(u"m^2", face_net_area(skel, outer)) ≈ 96.0
+            @test ustrip(u"m^2", face_net_area(skel, inner)) ≈ 3.0
         end
-        
-        @testset "Two disconnected components" begin
-            # Two separate pairs: 1-2 and 5-6
-            cells = [1, 2, 5, 6]
-            get_neighbors(idx) = begin
-                idx == 1 && return [2]
-                idx == 2 && return [1]
-                idx == 5 && return [6]
-                idx == 6 && return [5]
-                return Int[]
-            end
-            
-            result = group_by_connectivity(cells, get_neighbors)
-            
-            @test length(result) == 2
-            @test Set([Set(r) for r in result]) == Set([Set([1, 2]), Set([5, 6])])
-        end
-        
-        @testset "Isolated cells" begin
-            cells = [1, 5, 9]
-            get_neighbors(idx) = Int[]  # No connections
-            
-            result = group_by_connectivity(cells, get_neighbors)
-            
-            @test length(result) == 3
-            @test all(length(r) == 1 for r in result)
-        end
-        
-        @testset "Grid connectivity" begin
-            # 3x3 grid with 4-connectivity (orthogonal neighbors only)
-            cells = collect(1:9)
-            
-            # In a 3x3 grid (row-major): neighbors are ±1 (horizontal) and ±3 (vertical)
-            get_neighbors(idx) = begin
-                neighbors = Int[]
-                row = (idx - 1) ÷ 3
-                col = (idx - 1) % 3
-                
-                # Left
-                col > 0 && push!(neighbors, idx - 1)
-                # Right
-                col < 2 && push!(neighbors, idx + 1)
-                # Down
-                row > 0 && push!(neighbors, idx - 3)
-                # Up
-                row < 2 && push!(neighbors, idx + 3)
-                
-                return neighbors
-            end
-            
-            result = group_by_connectivity(cells, get_neighbors)
-            
-            @test length(result) == 1
-            @test Set(result[1]) == Set(cells)
+
+        @testset "Walls inside a bay stay line supports" begin
+            skel = BuildingSkeleton{Float64}()
+            vs = _member_square!(skel, 0.0, 0.0, 6.0, z)
+            tip = add_vertex!(skel, [3.0, 2.0, z])
+            add_element!(skel, vs[1], tip; group = :walls)
+            a = add_vertex!(skel, [2.0, 4.0, z])
+            b = add_vertex!(skel, [4.0, 4.0, z])
+            add_element!(skel, a, b; group = :walls)
+            _faces_of!(skel)
+            @test length(skel.face_vertex_indices) == 1
+            @test isempty(skel.face_holes)
         end
     end
     
@@ -462,57 +339,19 @@ using StructuralSynthesizer
             @test is_end_span(fl, 2) == false  # Interior span
             @test is_end_span(fl, 3) == true   # Last span
         end
-    end
-    
-    # =========================================================================
-    # Integration Test: validate_and_split_slab
-    # =========================================================================
-    @testset "validate_and_split_slab Integration" begin
-        
-        # 3x3 grid centroid function
-        get_centroid(idx) = (
-            ((idx - 1) % 3) + 0.5,
-            ((idx - 1) ÷ 3) + 0.5
-        )
-        
-        @testset "Convex slab (no split)" begin
-            cells = [1, 2, 3, 4, 5, 6, 7, 8, 9]  # Full 3x3 = rectangle = convex
-            
-            # Boundary is the outer square
-            get_boundary(indices) = [
-                (0.0, 0.0), (3.0, 0.0), (3.0, 3.0), (0.0, 3.0)
-            ]
-            
-            result = validate_and_split_slab(cells, get_centroid, get_boundary)
-            
-            @test length(result) == 1
-            @test Set(result[1]) == Set(cells)
-        end
-        
-        @testset "Concave slab (L-shape)" begin
-            cells = [1, 2, 3, 4, 7]  # L-shape
-            
-            # L-shaped boundary (concave)
-            get_boundary(indices) = [
-                (0.0, 0.0), (3.0, 0.0), (3.0, 1.0),
-                (1.0, 1.0), (1.0, 3.0), (0.0, 3.0)
-            ]
-            
-            # This should warn and split
-            result = @test_logs (:warn,) validate_and_split_slab(cells, get_centroid, get_boundary)
-            
-            # Should have split into multiple rectangles
-            @test length(result) >= 1
-            
-            # All cells covered
-            all_cells = reduce(union, Set.(result))
-            @test all_cells == Set(cells)
+
+        @testset "Length widths convert from meters" begin
+            # 18 ft centers, 16 inch columns → ℓn = 16.667 ft. Feet and meters
+            # are both lengths, so Unitful converts either one.
+            stations = (0.0u"ft", 18.0u"ft", 36.0u"ft")
+            for xs in (stations, uconvert.(u"m", stations))
+                cols = [(x = x, width = 16.0u"inch") for x in xs]
+                fl = FrameLine(:x, cols, 14.0u"ft", c -> (c.x, zero(c.x)), (c, dir) -> c.width)
+                @test ustrip(u"ft", fl.center_spans[1]) ≈ 18.0 rtol=1e-9
+                @test ustrip(u"ft", fl.span_lengths[1]) ≈ 18.0 - 16.0 / 12 rtol=1e-9
+                @test ustrip(u"ft", fl.column_projections[2]) ≈ 18.0 rtol=1e-9
+            end
         end
     end
     
 end  # Main testset
-
-# Run the tests
-println("\n" * "="^60)
-println("Running Slab Geometry Validation Tests")
-println("="^60 * "\n")

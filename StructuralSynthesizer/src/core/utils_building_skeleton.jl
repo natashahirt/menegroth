@@ -186,6 +186,15 @@ end
 
 Detect planar faces (slab panels) at each story by traversing directed half-edges
 in the planar graph. Found faces are added with group `:slabs`.
+
+Each connected beam network also traces its outer boundary clockwise. When that
+boundary lies inside a face of another network, it becomes a hole of the
+smallest such face (`skel.face_holes`), so the area inside a free-standing
+ring of beams is not counted twice.
+
+Throws when a face boundary is not a simple polygon, i.e. a beam ends inside
+a bay, a single beam is the only link to an inner ring, or two networks touch
+at one vertex. Such a beam bounds no face, so it would carry no slab load.
 """
 function find_faces!(skel::BuildingSkeleton{T}) where T
     for (level_idx, story) in skel.stories
@@ -207,6 +216,8 @@ function find_faces!(skel::BuildingSkeleton{T}) where T
         # traverse faces using directed half-edges
         visited_half_edges = Set{Tuple{Int, Int}}()
         faces_found = 0
+        story_faces = Int[]
+        boundaries = Vector{Int}[]
         
         for u in v_indices
             for v in adj[u]
@@ -227,17 +238,20 @@ function find_faces!(skel::BuildingSkeleton{T}) where T
                     end
                     
                     # add valid internal slabs (CCW order)
-                    if length(cycle) >= 3
-                        area = calculate_signed_area(skel, cycle)
-                        if area > 0
-                            polygon = Meshes.Ngon(skel.vertices[cycle]...)
-                            add_face!(skel, polygon, group=:slabs, level_idx=level_idx, v_indices=cycle)
-                            faces_found += 1
-                        end
+                    area = length(cycle) >= 3 ? calculate_signed_area(skel, cycle) : 0.0
+                    if area > 0
+                        _require_simple_face(skel, cycle)
+                        polygon = Meshes.Ngon(skel.vertices[cycle]...)
+                        f = add_face!(skel, polygon, group=:slabs, level_idx=level_idx, v_indices=cycle)
+                        push!(story_faces, f)
+                        faces_found += 1
+                    else
+                        push!(boundaries, cycle)
                     end
                 end
             end
         end
+        _assign_face_holes!(skel, story_faces, boundaries)
         @debug "Face detection complete" story=level_idx faces=faces_found
     end
 end
@@ -252,6 +266,100 @@ function calculate_signed_area(skel, indices)
         area += (ustrip(p1.x) * ustrip(p2.y) - ustrip(p2.x) * ustrip(p1.y))
     end
     return area / 2.0
+end
+
+"""Plan position of skeleton vertex `v` in meters."""
+function _skel_xy_m(skel::BuildingSkeleton, v::Int)
+    c = Meshes.coords(skel.vertices[v])
+    return (Float64(ustrip(u"m", c.x)), Float64(ustrip(u"m", c.y)))
+end
+
+_fmt_xy(p) = "($(round(p[1]; digits = 3)), $(round(p[2]; digits = 3))) m"
+
+"""`true` when the skeleton edge between `a` and `b` is a wall."""
+function _is_wall_edge(skel::BuildingSkeleton, walls::Set{Int}, a::Int, b::Int)
+    e = find_edge(skel, a, b)
+    return e !== nothing && e in walls
+end
+
+_wall_edge_set(skel::BuildingSkeleton) = Set{Int}(get(skel.groups_edges, :walls, Int[]))
+
+"""
+Throw unless the face boundary `cycle` visits each vertex once.
+
+A beam walked in both directions bounds no face: it ends inside the bay, or
+it is the only link to an inner ring. A vertex visited twice without such a
+beam is two networks touching at one point. A wall walked both ways is left
+alone: the slab takes a wall inside a bay as a line support.
+"""
+function _require_simple_face(skel::BuildingSkeleton, cycle::Vector{Int})
+    allunique(cycle) && return nothing
+    n = length(cycle)
+    walls = _wall_edge_set(skel)
+    steps = Set((cycle[i], cycle[mod1(i + 1, n)]) for i in 1:n)
+    twice = [(a, b) for (a, b) in steps if a < b && (b, a) in steps]
+    beams = filter(((a, b),) -> !_is_wall_edge(skel, walls, a, b), twice)
+    if !isempty(beams)
+        where = join(("$(_fmt_xy(_skel_xy_m(skel, a))) to $(_fmt_xy(_skel_xy_m(skel, b)))"
+                      for (a, b) in beams), "; ")
+        throw(ArgumentError(
+            "a slab bay contains beams that bound no face: $where. " *
+            "Such a beam ends inside the bay or is the only link to an inner ring, " *
+            "so no slab load reaches it. Extend it to another member, add a second " *
+            "link, or remove it."))
+    end
+    isempty(twice) || return nothing
+    seen = Set{Int}()
+    pinch = 0
+    for v in cycle
+        v in seen && (pinch = v; break)
+        push!(seen, v)
+    end
+    throw(ArgumentError(
+        "a slab bay's boundary touches itself at $(_fmt_xy(_skel_xy_m(skel, pinch))). " *
+        "Two beam networks meet at that single vertex; connect them with a member " *
+        "or separate them."))
+end
+
+"""
+Record each network boundary in `boundaries` as a hole of the smallest face in
+`story_faces` that contains it. A boundary inside no face is the outline of
+the floor and is skipped.
+
+A contained boundary that does not enclose an area, or that walks a member in
+both directions, is a member or a tree of members floating in a bay. Beams
+there throw, because no slab load reaches them. Walls there are skipped: the
+slab takes them as line supports.
+"""
+function _assign_face_holes!(skel::BuildingSkeleton, story_faces::Vector{Int},
+                             boundaries::Vector{Vector{Int}})
+    isempty(boundaries) && return skel
+    walls = _wall_edge_set(skel)
+    loops = Dict(f => [_skel_xy_m(skel, v) for v in skel.face_vertex_indices[f]] for f in story_faces)
+    areas = Dict(f => abs(calculate_signed_area(skel, skel.face_vertex_indices[f])) for f in story_faces)
+    for cycle in boundaries
+        own = Set(cycle)
+        p = _skel_xy_m(skel, cycle[1])
+        host = nothing
+        for f in story_faces
+            any(v -> v in own, skel.face_vertex_indices[f]) && continue
+            _point_in_polygon_xy(p[1], p[2], loops[f]) || continue
+            (host === nothing || areas[f] < areas[host]) && (host = f)
+        end
+        host === nothing && continue
+        area = length(cycle) >= 3 ? calculate_signed_area(skel, cycle) : 0.0
+        if area >= 0 || !allunique(cycle)
+            n = length(cycle)
+            all(i -> _is_wall_edge(skel, walls, cycle[i], cycle[mod1(i + 1, n)]), 1:n) && continue
+            throw(ArgumentError(
+                "beams near $(_fmt_xy(p)) sit inside a slab bay without enclosing an " *
+                "area or touching the bay's boundary, so no slab load reaches them. " *
+                "Connect them to the surrounding members or remove them."))
+        end
+        hole = [_skel_xy_m(skel, v) for v in Iterators.reverse(cycle)]
+        push!(get!(Vector{Vector{NTuple{2, Float64}}}, skel.face_holes, host), hole)
+    end
+    return skel
 end
 
 """

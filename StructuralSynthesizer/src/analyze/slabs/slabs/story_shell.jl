@@ -381,6 +381,7 @@ a deflection check of their own, not a replacement for the frame model's.
 function analyze_story_shell(struc, level::Int;
                              target_edge::Length = 0.5u"m",
                              concrete = NWC_4000,
+                             column_concrete = concrete,
                              steel = nothing,
                              support_points = nothing,
                              solve::Bool = true,
@@ -388,8 +389,8 @@ function analyze_story_shell(struc, level::Int;
                              rebar = Rebar_60,
                              sustained_live_fraction::Real = 0.0,
                              composite_regions = nothing)
-    shell = build_story_shell(struc, level; target_edge, concrete, steel, support_points,
-                              composite_regions)
+    shell = build_story_shell(struc, level; target_edge, concrete, column_concrete, steel,
+                              support_points, composite_regions)
     return solve_story_shell!(shell, struc; composite_regions, service, rebar,
                               sustained_live_fraction, solve)
 end
@@ -413,6 +414,7 @@ mutable struct StoryShell
     level::Int
     target_edge::typeof(1.0u"m")
     concrete::Any
+    column_concrete::Any
     steel::Any
     support_points::Vector{NTuple{2, Float64}}
     built::NamedTuple
@@ -434,18 +436,21 @@ end
 Mesh every slab on `level` as one shell with the beams that have a section,
 and pin its supports. Nothing is solved. Supports are the column centres on
 this story, unless `support_points` is given as `(x, y)` pairs in metres.
-`steel` is the material of a steel section that carries none.
+`steel` is the material of a steel section that carries none. The column
+springs use `column_concrete` (default: the slab `concrete`) for an RC column
+without its own `concrete`.
 """
 function build_story_shell(struc, level::Int;
                            target_edge::Length = 0.5u"m",
                            concrete = NWC_4000,
+                           column_concrete = concrete,
                            steel = nothing,
                            support_points = nothing,
                            composite_regions = nothing)
     inp = _story_shell_inputs(struc, level, concrete, steel, composite_regions)
     pts = support_points === nothing ? _column_support_points(struc, level) :
           NTuple{2, Float64}[(Float64(p[1]), Float64(p[2])) for p in support_points]
-    shell = StoryShell(level, uconvert(u"m", target_edge), concrete, steel, pts,
+    shell = StoryShell(level, uconvert(u"m", target_edge), concrete, column_concrete, steel, pts,
                        NamedTuple(), nothing, Float64[], UInt(0), String[],
                        Asap.Node[], NTuple{2, Float64}[], Int[], Bool[])
     return _mesh_story_shell!(shell, inp, struc)
@@ -538,7 +543,17 @@ function _place_slab_edge!(shell::StoryShell, struc)
     return moved
 end
 
-"""One outer node per centerline boundary node, and a triangle pair across the band."""
+"""
+One outer node per centerline boundary node that is not already in the mesh,
+and triangles across the band.
+
+A moved corner can slide along the next run when that run has no width. Mesh
+nodes of that run then sit on the band's end; fanning through them keeps the
+mesh joined. An offset that lands on a mesh node reuses it, so the centerline
+is not given a second node that a later column size would move. Collinear
+triangles are not emitted. [`Asap.collapse_degenerate_shells!`](@ref) welds
+any corners that still sit on each other.
+"""
 function _append_slab_edge!(shell::StoryShell, built, inp, struc)
     empty!(shell.edge_outer)
     empty!(shell.edge_anchor)
@@ -552,7 +567,9 @@ function _append_slab_edge!(shell::StoryShell, built, inp, struc)
     chain, anchors, poly_edge, station = _boundary_node_chain(built.nodes, boundary)
     length(chain) < 3 && return shell
 
+    index = _band_node_index(built.nodes)
     outers = Asap.Node[]
+    created = Bool[]
     sizehint!(outers, length(chain))
     for i in eachindex(chain)
         r = edge.edge_run[poly_edge[i]]
@@ -564,19 +581,19 @@ function _append_slab_edge!(shell::StoryShell, built, inp, struc)
             a = anchors[i]
             (a[1] + run.outward[1] * run.width, a[2] + run.outward[2] * run.width)
         end
-        push!(outers, Asap.Node([xy[1] * u"m", xy[2] * u"m", 0.0u"m"], :free))
+        node, is_new = _band_node_at!(index, xy)
+        push!(outers, node)
+        push!(created, is_new)
         push!(shell.edge_anchor, anchors[i])
         push!(shell.edge_run, r)
         push!(shell.edge_corner, corner)
     end
 
     n = length(chain)
-    used = falses(n)
     for i in 1:n
         j = mod1(i + 1, n)
         _band_span(chain[i], outers[i]) < 1e-6 &&
             _band_span(chain[j], outers[j]) < 1e-6 && continue
-        used[i] = used[j] = true
         b0, b1 = chain[i], chain[j]
         o0, o1 = outers[i], outers[j]
         mid = (0.5 * (anchors[i][1] + anchors[j][1]), 0.5 * (anchors[i][2] + anchors[j][2]))
@@ -584,25 +601,96 @@ function _append_slab_edge!(shell::StoryShell, built, inp, struc)
         probe = (mid[1] - nrm[1] * 1e-3, mid[2] - nrm[2] * 1e-3)
         panel = StructuralSizer._owning_panel(probe[1], probe[2], inp.panels)
         sec = inp.panels[panel].section
-        for nodes in ((b0, o0, b1), (o0, o1, b1))
-            el = Asap.ShellTri3(nodes, sec.thickness * u"m", sec.E * u"Pa", sec.ν;
-                                ρ = sec.ρ, id = :slab_edge)
-            push!(built.shells, el)
-            push!(built.panel_index, panel)
+        # Both radial edges, not only the first and last of the loop. The
+        # corner that slides can sit anywhere on the perimeter.
+        start = _band_nodes_along(built.nodes, b0, o0)
+        stop = _band_nodes_along(built.nodes, b1, o1)
+        for k in 1:(length(start) - 1)
+            _push_story_band!(built, sec, panel, (start[k], start[k + 1], b1))
+        end
+        for k in 1:(length(stop) - 1)
+            _push_story_band!(built, sec, panel, (o0, stop[k + 1], stop[k]))
         end
     end
+    Asap.collapse_degenerate_shells!(built.shells; alongside = built.panel_index)
+
+    referenced = Set{UInt64}()
+    for el in built.shells, node in el.nodes
+        push!(referenced, objectid(node))
+    end
+    keep = Int[]
     for i in eachindex(outers)
-        used[i] || continue
+        # A reused mesh node stays where the mesher put it.
+        created[i] || continue
+        objectid(outers[i]) in referenced || continue
+        push!(keep, i)
         push!(shell.edge_outer, outers[i])
     end
-    # Drop the bookkeeping of unused nodes so a later move touches only the band.
-    if length(shell.edge_outer) != length(outers)
-        keep = findall(used)
-        shell.edge_anchor = shell.edge_anchor[keep]
-        shell.edge_run = shell.edge_run[keep]
-        shell.edge_corner = shell.edge_corner[keep]
-    end
+    shell.edge_anchor = shell.edge_anchor[keep]
+    shell.edge_run = shell.edge_run[keep]
+    shell.edge_corner = shell.edge_corner[keep]
     return shell
+end
+
+_band_xy(n::Asap.Node) = (ustrip(u"m", n.position[1]), ustrip(u"m", n.position[2]))
+
+_band_key(x, y) = (round(Float64(x); digits = 6), round(Float64(y); digits = 6))
+
+function _band_node_index(nodes)
+    index = Dict{NTuple{2, Float64}, Asap.Node}()
+    for n in nodes
+        x, y = _band_xy(n)
+        index[_band_key(x, y)] = n
+    end
+    return index
+end
+
+"""The mesh node at `xy`, or a new one. The boolean is true when it was created."""
+function _band_node_at!(index, xy)
+    key = _band_key(xy[1], xy[2])
+    haskey(index, key) && return index[key], false
+    node = Asap.Node([xy[1] * u"m", xy[2] * u"m", 0.0u"m"], :free)
+    index[key] = node
+    return node, true
+end
+
+"""
+`from`, the mesh nodes strictly inside the segment `from`→`to` in order, then
+`to`. Just `from` when the segment has no length.
+"""
+function _band_nodes_along(nodes, from::Asap.Node, to::Asap.Node)
+    _band_span(from, to) < 1e-6 && return Asap.Node[from]
+    a = _band_xy(from)
+    b = _band_xy(to)
+    hits = Tuple{Float64, Asap.Node}[]
+    for node in nodes
+        node === from && continue
+        node === to && continue
+        s = StructuralSizer._segment_station(_band_xy(node), a, b; tol = 1e-4)
+        (s === nothing || s <= 1e-5 || s >= 1 - 1e-5) && continue
+        push!(hits, (s, node))
+    end
+    sort!(hits; by = first)
+    out = Asap.Node[from]
+    for (_, node) in hits
+        push!(out, node)
+    end
+    push!(out, to)
+    return out
+end
+
+"""Add one band triangle, unless its corners coincide or are collinear."""
+function _push_story_band!(built, sec, panel, tri)
+    n1, n2, n3 = tri
+    (n1 === n2 || n2 === n3 || n3 === n1) && return built
+    p1, p2, p3 = _band_xy(n1), _band_xy(n2), _band_xy(n3)
+    twice = (p2[1] - p1[1]) * (p3[2] - p1[2]) - (p3[1] - p1[1]) * (p2[2] - p1[2])
+    abs(twice) < 2e-9 && return built
+    push!(built.shells, Asap.ShellTri3(
+        (n1, n2, n3), sec.thickness * u"m", sec.E * u"Pa", sec.ν;
+        ρ = sec.ρ, id = :slab_edge))
+    push!(built.panel_index, panel)
+    return built
 end
 
 _band_span(a::Asap.Node, b::Asap.Node) = hypot(
@@ -679,7 +767,8 @@ function _story_shell_inputs(struc, level::Int, concrete, steel, composite_regio
             touched = true
             poly = NTuple{2, Float64}[StructuralSizer._vertex_xy_m(struc.skeleton, vi)
                                        for vi in struc.skeleton.face_vertex_indices[face]]
-            holes = StructuralSizer.slab_opening_loops(struc, slab; face_idx = face)
+            holes = vcat(StructuralSizer.slab_opening_loops(struc, slab; face_idx = face),
+                         face_hole_loops(struc.skeleton, face))
             push!(panels, StructuralSizer.StoryShellPanel(poly, sec; holes = holes))
             push!(pressures, total_factored_pressure(cell))
             sym = cell.floor_type === :unknown ? slab.floor_type : cell.floor_type
@@ -842,7 +931,6 @@ function _story_shell_wall_axial(struc, wall_index::Int)
     stored === nothing && return nothing
     return get(stored, wall_index, nothing)
 end
-
 
 """Solid pieces of `wall`'s plan line. A full-height opening is a gap."""
 function _solid_wall_pieces(wall; tol::Float64 = 1e-6)
@@ -1009,7 +1097,7 @@ function solve_story_shell!(shell::StoryShell, struc;
             Asap.process!(model)
         end
         empty!(model.springs)
-        springs = _story_column_springs(struc, level, built.nodes, concrete, steel)
+        springs = _story_column_springs(struc, level, built.nodes, shell.column_concrete, steel)
         append!(springs, _story_wall_springs(shell, inp.wall_lines))
         isempty(springs) || Asap.add_springs!(model, springs)
         Asap.solve!(model)

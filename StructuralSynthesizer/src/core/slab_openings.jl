@@ -83,12 +83,25 @@ end
 # Per-face queries
 # =============================================================================
 
+"""Outlines (meters) of the nested beam networks that are voids of `face_idx`."""
+face_hole_loops(skel::BuildingSkeleton, face_idx::Int) =
+    get(skel.face_holes, face_idx, Vector{NTuple{2, Float64}}[])
+
+"""Plan area (m²) of `loop` that lies on the face, outside its [`face_hole_loops`](@ref)."""
+function _area_on_face(skel::BuildingSkeleton, face_idx::Int, face, loop)
+    a = _overlap_area(face, loop)
+    for hole in face_hole_loops(skel, face_idx)
+        a -= _overlap_area(hole, loop)
+    end
+    return a
+end
+
 """
     face_openings(skel, face_idx) -> Vector{Int}
 
 Indices into `skel.openings` of the openings on the face's story that overlap
-the face by more than `OPENING_OVERLAP_TOL_M2`. An opening straddling a cell
-edge is listed for every face it overlaps.
+the face, outside its holes, by more than `OPENING_OVERLAP_TOL_M2`. An opening
+straddling a cell edge is listed for every face it overlaps.
 """
 function face_openings(skel::BuildingSkeleton, face_idx::Int)
     isempty(skel.openings) && return Int[]
@@ -96,25 +109,29 @@ function face_openings(skel::BuildingSkeleton, face_idx::Int)
     level === nothing && return Int[]
     face = _face_loop_m(skel, face_idx)
     return [k for (k, op) in enumerate(skel.openings)
-            if op.story == level && _overlap_area(face, op.loop) > OPENING_OVERLAP_TOL_M2]
+            if op.story == level &&
+               _area_on_face(skel, face_idx, face, op.loop) > OPENING_OVERLAP_TOL_M2]
 end
 
-"""Plan outlines (meters) of the openings overlapping `face_idx`."""
+"""Plan outlines (meters) of the voids in `face_idx`: its openings, then its holes."""
 face_opening_loops(skel::BuildingSkeleton, face_idx::Int) =
-    [skel.openings[k].loop for k in face_openings(skel, face_idx)]
+    vcat([skel.openings[k].loop for k in face_openings(skel, face_idx)],
+         face_hole_loops(skel, face_idx))
 
 """
     face_net_area(skel, face_idx)
 
-Face area minus the parts of its openings that fall inside it (same units as
-[`face_area`](@ref)).
+Face area minus its holes and the parts of its openings that fall on it (same
+units as [`face_area`](@ref)).
 """
 function face_net_area(skel::BuildingSkeleton, face_idx::Int)
     gross = face_area(skel, face_idx)
+    holes = face_hole_loops(skel, face_idx)
     ks = face_openings(skel, face_idx)
-    isempty(ks) && return gross
+    (isempty(ks) && isempty(holes)) && return gross
     face = _face_loop_m(skel, face_idx)
-    cut = sum(_overlap_area(face, skel.openings[k].loop) for k in ks)
+    cut = sum((abs(_shoelace_area(h)) for h in holes); init = 0.0) +
+          sum((_area_on_face(skel, face_idx, face, skel.openings[k].loop) for k in ks); init = 0.0)
     return max(gross - cut * u"m^2", zero(gross))
 end
 

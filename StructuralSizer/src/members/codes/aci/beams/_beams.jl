@@ -15,6 +15,10 @@ include("torsion.jl")
 # T-beam flexural design (effective flange width, T-beam decomposition)
 include("t_flexure.jl")
 
+# Story-shell span deflection (ACI 318-11 §9.5.2). Included before the checker,
+# which stores the spans and calls `rc_shell_span_deflection`.
+include("shell_deflection.jl")
+
 # Capacity checker (implements AbstractCapacityChecker for optimize_discrete)
 include("checker.jl")
 

@@ -37,6 +37,9 @@ with `optimize_discrete`.
 - `Es_ksi`: Rebar elastic modulus (ksi)
 - `λ`: Lightweight concrete factor (1.0 for NWC)
 - `max_depth`: Maximum section depth constraint (meters, Inf = no limit)
+- `shell_spans`: Per demand, the [`RCShellSpan`](@ref)s of its beams. Empty
+  means no story-shell deflection check.
+- `shell_limits`: Limit types for those spans (`:immediate_ll`, `:total`)
 
 # Usage
 ```julia
@@ -60,6 +63,11 @@ struct ACIBeamChecker <: AbstractCapacityChecker
     w_live_kplf::Float64    # Service live load (kip/ft)
     defl_support::Symbol    # :simply_supported, :cantilever, etc.
     defl_ξ::Float64         # Time-dependent factor (2.0 = 5+ years)
+
+    # ── Optional story-shell deflection (ACI 318-11 §9.5.2) ──
+    # `shell_spans[i]` are the spans of demand `i`. Empty means no shell check.
+    shell_spans::Vector{Vector{RCShellSpan}}
+    shell_limits::Vector{Symbol}
 end
 
 function ACIBeamChecker(;
@@ -72,12 +80,43 @@ function ACIBeamChecker(;
     w_live_kplf::Real = 0.0,
     defl_support::Symbol = :simply_supported,
     defl_ξ::Real = 2.0,
+    shell_spans::AbstractVector = Vector{RCShellSpan}[],
+    shell_limits::AbstractVector{Symbol} = [:immediate_ll, :total],
 )
     max_d = isa(max_depth, Length) ? ustrip(u"m", max_depth) : Float64(max_depth)
     ACIBeamChecker(Float64(fy_ksi), Float64(fyt_ksi), Float64(Es_ksi),
                    Float64(λ), max_d,
                    Float64(w_dead_kplf), Float64(w_live_kplf),
-                   defl_support, Float64(defl_ξ))
+                   defl_support, Float64(defl_ξ),
+                   Vector{RCShellSpan}[collect(RCShellSpan, s) for s in shell_spans],
+                   collect(Symbol, shell_limits))
+end
+
+"""Worst story-shell deflection ratio of `section` over demand `i`'s spans; 0 with none."""
+function _shell_deflection_ratio(checker::ACIBeamChecker, i::Int, section)
+    isempty(checker.shell_spans) && return 0.0
+    worst = 0.0
+    for sp in checker.shell_spans[i]
+        r = rc_shell_span_deflection(sp, section; ξ = checker.defl_ξ,
+                                     limits = checker.shell_limits).ratio
+        worst = max(worst, r)
+    end
+    return worst
+end
+
+"""Append the story-shell deflection check when demand `i` has spans. ACI 318-11 §9.5.2 (corpus: aci-318-11, PDF p. 131)."""
+function _push_shell_deflection_check!(checks, checker::ACIBeamChecker, i::Int, section)
+    (isempty(checker.shell_spans) || isempty(checker.shell_spans[i])) && return checks
+    r = _shell_deflection_ratio(checker, i, section)
+    push!(checks, CheckResult("shell_deflection", r <= 1, r, r, 1.0, "ACI 318-11 9.5.2"))
+    return checks
+end
+
+"""Message for a failed story-shell deflection check, or `nothing`."""
+function _shell_deflection_message(checker::ACIBeamChecker, i::Int, section)
+    r = _shell_deflection_ratio(checker, i, section)
+    r <= 1 && return nothing
+    return "Deflection (story shell): Δ/limit = $(round(r, digits = 2)) > 1 (ACI 318-11 §9.5.2)"
 end
 
 # ==============================================================================

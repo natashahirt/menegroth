@@ -195,6 +195,21 @@ end
 # ==============================================================================
 
 """
+    tbeam_gross_inertia(bw, bf, hf, h) -> (Ig, ȳ)
+
+Gross moment of inertia of a T-section about its centroid, and the centroid
+depth `ȳ` from the top of the flange.
+"""
+function tbeam_gross_inertia(bw::Length, bf::Length, hf::Length, h::Length)
+    Af = bf * hf
+    Aw = bw * (h - hf)
+    ȳ  = (Af * hf / 2 + Aw * (hf + (h - hf) / 2)) / (Af + Aw)
+    Ig = bf * hf^3 / 12 + Af * (ȳ - hf / 2)^2 +
+         bw * (h - hf)^3 / 12 + Aw * (hf + (h - hf) / 2 - ȳ)^2
+    return Ig, ȳ
+end
+
+"""
     design_tbeam_deflection(bw, bf, hf, h, d, As, fc, fy, Es, L, w_dead, w_live;
                             support, wc_pcf, As_prime, ξ, limits) -> NamedTuple
 

@@ -8,12 +8,12 @@ title: Row F reporting, per-level beam floors, uniform-group floors, and per-cas
 node_label: Row F ratios and per-case NLP
 tags: row-f,frame-section-floors,nlp,columns,beams,asce-7-22,plan
 status: active
-open_threads: 0
+open_threads: 2
 success: 'null'
 files: ''
 session_id: sess-2274119a
 created_at: '2026-11-10T20:33:49.366248+00:00'
-updated_at: '2026-11-10T20:33:49.366248+00:00'
+updated_at: '2026-11-11T11:23:09.658170+00:00'
 has_child_rationale: User confirmed the pipeline-audit plan and asked to build it.
 ---
 Confirmed plan (2026-11-10). No new code equations; reuse existing ACI and ASCE checks.

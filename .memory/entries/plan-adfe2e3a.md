@@ -7,12 +7,12 @@ title: Wall corners are walls, and the plan shows the solve's reactions
 node_label: Wall corners and solve plan
 tags: walls,columns,tributary,scene,punching,story-shell
 status: active
-open_threads: 0
+open_threads: 2
 success: 'null'
 files: ''
 session_id: sess-35033ef5
 created_at: '2026-11-08T13:12:20.466504+00:00'
-updated_at: '2026-11-08T13:12:20.466504+00:00'
+updated_at: '2026-11-08T21:12:02.075888+00:00'
 has_child_rationale: The user wants wall corners designed as walls, and the plan colored
   from the solve rather than the geometric catchment.
 ---

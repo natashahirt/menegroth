@@ -8,12 +8,12 @@ title: 'Wiring cleanup: story-shell convergence, SPD warning, placed-bar takeoff
 node_label: 'Wiring cleanup: story-shell convergence, SPD warni'
 tags: wiring,efficiency,story-shell,detailing,ribs,waffle,nervi,asap
 status: active
-open_threads: 0
+open_threads: 4
 success: 'null'
 files: ''
 session_id: sess-f5dfe580
 created_at: '2026-11-07T15:45:29.795387+00:00'
-updated_at: '2026-11-07T15:45:29.795387+00:00'
+updated_at: '2026-11-08T21:30:40.129353+00:00'
 ---
 2026-11-07. Order: (1) story-shell sizing that settles, (2) the not-SPD stiffness warning, (3) placed-bar takeoff in the design output, (4) rib geometry as polylines, (5) rib API and options, (6) rib deflection without a story shell.
 

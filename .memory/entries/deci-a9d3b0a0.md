@@ -7,12 +7,12 @@ title: Slab bars come from the story shell; beams stay on tributary loads
 node_label: Shell sizes slab bars
 tags: story-shell,slab,reinforcement,wood-armer,tributary
 status: active
-open_threads: 0
+open_threads: 1
 success: 'null'
 files: ''
 session_id: sess-8d0fdf55
 created_at: '2026-11-03T18:55:38.223750+00:00'
-updated_at: '2026-11-03T18:55:38.223750+00:00'
+updated_at: '2026-11-03T19:28:13.980543+00:00'
 has_child_rationale: The shell moment tensor is the slab demand. The same shell under-assigns
   force to the beam.
 ---

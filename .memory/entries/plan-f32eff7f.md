@@ -8,12 +8,12 @@ title: 'F2 fix: active-wall mask for the enclosure proxy (stop over-rejecting so
 node_label: 'F2 fix: active-wall mask for the enclosure proxy ('
 tags: ''
 status: active
-open_threads: 0
+open_threads: 1
 success: 'null'
 files: StructuralSizer/src/walls/lateral_evaluator.jl@2a0b2c4, StructuralSizer/src/walls/layout_problem.jl@2a0b2c4
 session_id: sess-d5d2bc96
 created_at: '2026-10-22T13:39:18.026461+00:00'
-updated_at: '2026-10-22T13:39:18.026461+00:00'
+updated_at: '2026-10-22T14:28:56.119843+00:00'
 ---
 GOAL: close guard F2 (crit2) — the enclosure proxy _plate_encloses_walls runs over ALL candidates (incl. density-removed ones at rho_min), so a removed phantom candidate parked outside the plate over-rejects an otherwise-sound layout with :geometry_inconsistent. Over-rejection is safe but distorts the optimizer.
 

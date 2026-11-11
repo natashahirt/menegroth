@@ -7,12 +7,12 @@ title: Ordinary-wall stage in design_building for one isolated pier
 node_label: ordinary wall stage
 tags: phase7,walls,design-pipeline
 status: active
-open_threads: 0
+open_threads: 10
 success: 'null'
 files: ''
 session_id: sess-9027b67d
 created_at: '2026-10-29T20:57:41.712302+00:00'
-updated_at: '2026-10-29T20:57:41.712302+00:00'
+updated_at: '2026-11-05T20:20:57.141134+00:00'
 ---
 Add design_ordinary_walls! and run it from design_building only when DesignParameters.lateral is set. A gravity-only building (lateral nothing) keeps the two-stage pipeline and writes no wall checks.
 

@@ -8,12 +8,12 @@ title: Column/slab pipeline re-audit fixes implemented (uncommitted); Phase B it
 node_label: Column/slab pipeline re-audit fixes implemented (u
 tags: ''
 status: active
-open_threads: 0
+open_threads: 1
 success: 'null'
 files: ''
 session_id: sess-9127bb29
 created_at: '2026-11-09T02:23:45.174564+00:00'
-updated_at: '2026-11-09T02:23:45.174564+00:00'
+updated_at: '2026-11-09T02:53:49.197761+00:00'
 ---
 Done (uncommitted, tests pass: StructuralSizer 1384/1384 targeted + punching/integrity/foundation files; StructuralSynthesizer core/test_flat_plate_member_stage.jl 322/322):
 - φPn,max cap (ACI 318-11 §10.3.6) in biaxial checks (`_axial_design_cap`); checker uses |Muy| and rejects non-finite demands.

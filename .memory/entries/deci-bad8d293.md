@@ -8,13 +8,13 @@ title: Active-wall-ID mask + penalized-stiffness-fraction activity test (Guard F
 node_label: Active-wall-ID mask + penalized-stiffness-fraction
 tags: guard-f2, walls, lateral, enclosure, fail-open, p0
 status: active
-open_threads: 0
+open_threads: 3
 success: 'null'
 files: StructuralSizer/src/walls/lateral_evaluator.jl@7847655, StructuralSizer/src/walls/layout_problem.jl@7847655,
   StructuralSizer/test/walls/test_walls.jl@7847655
 session_id: sess-fdd3423a
 created_at: '2026-10-22T14:28:56.119843+00:00'
-updated_at: '2026-10-22T14:28:56.119843+00:00'
+updated_at: '2026-10-22T14:30:49.014407+00:00'
 ---
 Guard F2: stop the reduced-tier enclosure proxy from over-rejecting a sound wall layout when a density-removed candidate sits outside the plate.
 

@@ -7,7 +7,7 @@ title: Studs stay in their sagging region; per-element inertia started
 node_label: region studs + element I
 tags: composite, aisc, studs, stiffness, I_LB
 status: active
-open_threads: 0
+open_threads: 1
 success: 'null'
 files: StructuralSizer/src/members/codes/aisc/checker.jl@4a1b084, StructuralSizer/src/members/codes/aisc/composite/per_station.jl@4a1b084,
   StructuralSizer/src/StructuralSizer.jl@4a1b084, StructuralSizer/test/steel_member/composite/test_composite_per_station.jl@4a1b084,
@@ -15,7 +15,7 @@ files: StructuralSizer/src/members/codes/aisc/checker.jl@4a1b084, StructuralSize
   StructuralSynthesizer/test/analyze/test_composite_context.jl@4a1b084
 session_id: sess-24065292
 created_at: '2026-10-30T02:30:05.855745+00:00'
-updated_at: '2026-10-30T02:30:05.855745+00:00'
+updated_at: '2026-11-06T22:23:37.294259+00:00'
 ---
 Step 4 of the variable-stiffness plan. A continuous member with more than one sagging region no longer designs studs for a single governing station and then credits that total to the whole member. The region of greatest positive moment still owns the service check (Commentary Eq. C-I3-1: ΣQn between the maximum positive moment and the adjacent zero; Eq. C-I3-5: I_pos is that region). Every other sagging region is strength-checked on its own shear spans (I8.2c), with its own stud count. A long bay that passes and a short bay that carries the same moment now fails the member. StructuralSizer per-station tests: 85/85, log logs/test_StructuralSizer_20261029_165830.log.
 

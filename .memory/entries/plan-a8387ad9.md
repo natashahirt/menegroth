@@ -7,12 +7,12 @@ title: 'Next special-boundary development: flange, spacing, continuity, then a c
 node_label: Next boundary development
 tags: walls,aci-318-19,18.10,boundary-element,plan
 status: active
-open_threads: 0
+open_threads: 3
 success: 'null'
 files: ''
 session_id: sess-f21322f7
 created_at: '2026-11-10T14:54:47.458702+00:00'
-updated_at: '2026-11-10T14:54:47.458702+00:00'
+updated_at: '2026-11-10T17:10:33.262407+00:00'
 has_child_rationale: The geometry, drift, stress, and confinement-amount checks are
   in, so the next work is the remaining §18.10.6 limits before any bars or building
   wiring.

@@ -8,12 +8,12 @@ title: 'Beam end releases default by material: steel/timber pinned, concrete fix
 node_label: Material release defaults
 tags: releases,lateral,walls,steel,timber,concrete,decision
 status: active
-open_threads: 0
+open_threads: 1
 success: 'null'
 files: ''
 session_id: sess-fd45019b
 created_at: '2026-10-29T13:07:08.277893+00:00'
-updated_at: '2026-10-29T13:07:08.277893+00:00'
+updated_at: '2026-10-29T15:04:49.613713+00:00'
 has_child_rationale: User wants smart defaults so users make few granular decisions
 ---
 User decision (2026-10-29): defaults should be smart so the user rarely sets releases.

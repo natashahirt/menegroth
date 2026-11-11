@@ -8,12 +8,12 @@ title: 'Composite Phase 6a: default stud, §I3.2c deck limits, e_mid-ht Rp, twis
 node_label: 'Phase 6a: stud default, deck limits, Rp, L_twist'
 tags: composite,phase-6,stud,deck,aisc,cb
 status: active
-open_threads: 0
+open_threads: 2
 success: 'null'
 files: ''
 session_id: sess-08c0b2ae
 created_at: '2026-10-27T13:42:06.320300+00:00'
-updated_at: '2026-10-27T13:42:06.320300+00:00'
+updated_at: '2026-10-27T15:14:55.489132+00:00'
 has_child_rationale: User chose 1a (named default stud) and 2a (Phase 6 plus optional
   twist spacing).
 ---

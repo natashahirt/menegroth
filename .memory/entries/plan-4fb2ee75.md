@@ -7,12 +7,12 @@ title: Remaining irregular-geometry fixes, stubs left alone
 node_label: Remaining geometry fixes
 tags: irregular,openings,diaphragm,ingest
 status: active
-open_threads: 0
+open_threads: 1
 success: 'null'
 files: ''
 session_id: sess-9c8dccae
 created_at: '2026-11-11T11:25:17.896151+00:00'
-updated_at: '2026-11-11T11:25:17.896151+00:00'
+updated_at: '2026-11-11T15:49:02.700641+00:00'
 has_child_rationale: User asked to work through every remaining irregular-geometry
   fix except the stubs.
 ---

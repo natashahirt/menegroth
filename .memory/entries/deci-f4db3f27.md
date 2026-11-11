@@ -8,7 +8,7 @@ title: Flat plates raise γf by ACI 318-11 §13.5.3.3 (a) and (b) at the column 
 node_label: §13.5.3.3 γf increase
 tags: flat-plate,punching,moment-transfer,aci-318-11,13.5.3.3
 status: active
-open_threads: 0
+open_threads: 1
 success: 'null'
 files: StructuralSizer/src/codes/aci/punching/moment_transfer.jl@d01eb68, StructuralSizer/src/slabs/codes/concrete/flat_plate/design/checks/punching.jl@d01eb68,
   StructuralSizer/src/slabs/codes/concrete/flat_plate/pipeline/transfer_reinforcement.jl@d01eb68,
@@ -18,7 +18,7 @@ files: StructuralSizer/src/codes/aci/punching/moment_transfer.jl@d01eb68, Struct
   scripts/runners/compare_moment_transfer_13_5_3_3.jl@d01eb68
 session_id: sess-7818df49
 created_at: '2026-11-08T23:32:57.351704+00:00'
-updated_at: '2026-11-08T23:32:57.351704+00:00'
+updated_at: '2026-11-09T00:02:50.107875+00:00'
 has_child_rationale: 'First step of the slab-ratchet plan: corner punching drove column
   growth toward the cap'
 ---

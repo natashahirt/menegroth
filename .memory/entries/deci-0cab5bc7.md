@@ -7,12 +7,12 @@ title: Seismic wall provisions are required inputs or refusals
 node_label: Seismic wall provisions are required inputs or ref
 tags: walls,asce-7-22,aci-318-19,phase-7
 status: active
-open_threads: 0
+open_threads: 1
 success: 'null'
 files: ''
 session_id: sess-416e6404
 created_at: '2026-10-28T21:34:24.901790+00:00'
-updated_at: '2026-10-28T21:34:24.901790+00:00'
+updated_at: '2026-10-28T21:45:55.833576+00:00'
 has_child_rationale: Corpus gate before seismic wall factors
 ---
 Corpus gate before any new seismic-wall factor. Each item is a required caller statement or a refusal. `require_seismic_wall_demand_provisions` does not apply a number. ELF story cases are unchanged.

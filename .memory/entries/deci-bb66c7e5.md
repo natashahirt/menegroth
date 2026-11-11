@@ -7,12 +7,12 @@ title: ACI 318-11 §8.13 joist limits and the 10 percent Vc increase
 node_label: §8.13 joist limits
 tags: aci-318-11,joists,shear,waffle
 status: active
-open_threads: 0
+open_threads: 1
 success: 'null'
 files: ''
 session_id: sess-e28f7ab7
 created_at: '2026-11-06T02:27:35.013372+00:00'
-updated_at: '2026-11-06T02:27:35.013372+00:00'
+updated_at: '2026-11-06T03:01:36.793118+00:00'
 has_child_rationale: Joist geometry and the shear increase are now code checks, separate
   from the sizing-pass architecture.
 ---

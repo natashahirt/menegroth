@@ -7,12 +7,12 @@ title: Land the Row F commit without the other session's split
 node_label: Land Row F commit
 tags: row-f,commit,worktree,provenance,nlp
 status: active
-open_threads: 0
+open_threads: 3
 success: 'null'
 files: ''
 session_id: sess-1d752b4c
 created_at: '2026-11-11T11:23:09.658170+00:00'
-updated_at: '2026-11-11T11:23:09.658170+00:00'
+updated_at: '2026-11-11T18:29:46.597998+00:00'
 has_child_rationale: The sensitivity suite passed. The commit is blocked by another
   session's uncommitted file split, rib-bay prepare edits, and mixed provenance.
 ---

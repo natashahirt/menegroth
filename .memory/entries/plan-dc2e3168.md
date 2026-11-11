@@ -7,12 +7,12 @@ title: Opening bands, one deep beam, then the rigid office
 node_label: Opening bands, one deep beam, then the rigid offic
 tags: walls,openings,deep-beam,diaphragm
 status: active
-open_threads: 0
+open_threads: 4
 success: 'null'
 files: ''
 session_id: sess-51fed68a
 created_at: '2026-11-06T11:16:11.258269+00:00'
-updated_at: '2026-11-06T11:16:11.258269+00:00'
+updated_at: '2026-11-06T14:19:23.456196+00:00'
 ---
 Three wall items, in order, ahead of applying a flexible-diaphragm story force.
 

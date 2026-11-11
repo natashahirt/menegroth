@@ -8,12 +8,12 @@ title: 'Walls as slab supports: open core gap, support list, FEA wall supports, 
 node_label: Walls as slab supports
 tags: slabs,walls,ddm,fea,core,supports,aci318-11
 status: active
-open_threads: 0
+open_threads: 8
 success: 'null'
 files: ''
 session_id: sess-7cfe7560
 created_at: '2026-11-05T01:17:55.067673+00:00'
-updated_at: '2026-11-05T01:17:55.067673+00:00'
+updated_at: '2026-11-05T20:35:35.098546+00:00'
 has_child_rationale: Flat-plate design sees only columns; the core office fails §13.6.1.2
   after core-corner columns were dropped.
 ---

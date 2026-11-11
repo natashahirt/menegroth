@@ -8,12 +8,12 @@ title: Extra transfer bars are credited to the column strip of the moment that n
 node_label: Transfer bars use their own strip
 tags: flat-plate,moment-transfer,aci-318-11,13.5.3.2
 status: active
-open_threads: 0
+open_threads: 1
 success: 'null'
 files: ''
 session_id: sess-bdc81220
 created_at: '2026-11-09T00:15:45.408577+00:00'
-updated_at: '2026-11-09T00:15:45.408577+00:00'
+updated_at: '2026-11-09T00:55:21.390233+00:00'
 has_child_rationale: The band fix left the additional-bar count on the primary strip.
 ---
 Additional bars at a column are counted against the column strip of the moment that still needs steel, not always the primary strip.

@@ -7,12 +7,12 @@ title: Story shell wired to walls, and a grillage frame path for rib networks
 node_label: Story shell wired to walls, and a grillage frame p
 tags: story-shell,walls,grillage,waffle,ribs,tributary,efficiency
 status: active
-open_threads: 0
+open_threads: 3
 success: 'null'
 files: ''
 session_id: sess-f5dfe580
 created_at: '2026-11-07T15:49:55.312023+00:00'
-updated_at: '2026-11-07T15:49:55.312023+00:00'
+updated_at: '2026-11-08T02:42:50.479344+00:00'
 ---
 2026-11-07. Additions to plan-2dcf41ac, with the user's choices.
 

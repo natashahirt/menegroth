@@ -7,12 +7,12 @@ title: Hogging rebar counts only with the negative-region anchor strength
 node_label: Hogging rebar counts only with the negative-region
 tags: composite,phase-5,asr,hogging,aisc
 status: active
-open_threads: 0
+open_threads: 2
 success: 'null'
 files: ''
 session_id: sess-138f33cf
 created_at: '2026-10-26T20:43:54.683563+00:00'
-updated_at: '2026-10-26T20:43:54.683563+00:00'
+updated_at: '2026-10-27T13:42:06.320300+00:00'
 ---
 Phase 5 closes on these calls.
 

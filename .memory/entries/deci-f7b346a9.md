@@ -7,12 +7,12 @@ title: 'P0-2 Step A: lazy memo restore — collapse N clean-level deepcopies int
 node_label: 'P0-2 Step A: lazy memo restore — collapse N clean-'
 tags: ''
 status: active
-open_threads: 0
+open_threads: 1
 success: 'null'
 files: StructuralSynthesizer/src/design_graph/scheduler.jl@cc17472, scripts/runners/verify_design_graph_incremental.jl@cc17472
 session_id: sess-a9cb6177
 created_at: '2026-10-22T15:48:56.836011+00:00'
-updated_at: '2026-10-22T15:48:56.836011+00:00'
+updated_at: '2026-10-22T16:12:29.592609+00:00'
 ---
 Implemented the interim P0-2 memo-shrink (Step A) in scheduler.jl `run_target!`: instead of eagerly `engine.struc = restore_node_state(rep.state)` (a deepcopy) at every all-clean topological level, hold `pending_rep = engine.memo[first(level_keys)].state` and materialize `engine.struc = restore_node_state(pending_rep)` exactly ONCE — immediately before the first dirty level executes, or at walk end if it terminated on clean levels. Relies on invariant R7: classification + clean levels only read/write `pass_output` and `engine.memo`, never reading or mutating `engine.struc`. This collapses N clean-level deepcopies into a single materialization with no change to `core/snapshot.jl`.
 

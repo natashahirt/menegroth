@@ -8,12 +8,12 @@ title: 'F2 follow-up: resolve the three residual enclosure-guard P2s (endpoint c
 node_label: 'F2 follow-up: resolve the three residual enclosure'
 tags: ''
 status: active
-open_threads: 0
+open_threads: 1
 success: 'null'
 files: StructuralSizer/src/walls/lateral_evaluator.jl@7847655, StructuralSizer/src/walls/layout_problem.jl@7847655
 session_id: sess-fdd3423a
 created_at: '2026-10-22T14:30:49.014407+00:00'
-updated_at: '2026-10-22T14:30:49.014407+00:00'
+updated_at: '2026-10-22T15:11:36.571710+00:00'
 ---
 Addresses the three P2 findings the critic left open after the F2 P0 fix (note-2db2d960):
 

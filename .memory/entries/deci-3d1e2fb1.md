@@ -7,7 +7,7 @@ title: Design the core-corner columns, and draw the stored tributary split
 node_label: Core columns and stored tributaries
 tags: core,columns,tributary,flat-plate,scene
 status: active
-open_threads: 0
+open_threads: 2
 success: 'null'
 files: scripts/runners/core_office_geometry.jl@4ecef8e, StructuralSynthesizer/src/scene/fields.jl@4ecef8e,
   StructuralSynthesizer/src/scene/components.jl@4ecef8e, StructuralSynthesizer/src/scene/variants.jl@4ecef8e,
@@ -15,7 +15,7 @@ files: scripts/runners/core_office_geometry.jl@4ecef8e, StructuralSynthesizer/sr
   viewer/src/main.ts@4ecef8e, viewer/src/detail.ts@4ecef8e, docs/src/reference/scene_format.md@4ecef8e
 session_id: sess-e94deb7b
 created_at: '2026-11-07T22:29:52.664913+00:00'
-updated_at: '2026-11-07T22:29:52.664913+00:00'
+updated_at: '2026-11-08T13:03:30.940313+00:00'
 has_child_rationale: The office picture was painting straight-skeleton edge polygons
   as column and wall areas, and the four core-corner stacks had been removed from
   the column group so they were never designed.

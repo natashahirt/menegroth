@@ -7,14 +7,14 @@ title: Slab Design Factors plans as a StructuralStudies run
 node_label: Slab Design Factors plans as a StructuralStudies r
 tags: slab,geometry,etabs,study
 status: active
-open_threads: 0
+open_threads: 1
 success: 'null'
 files: StructuralStudies/src/slab_design_factors/geometry.jl@d427ab4, StructuralStudies/src/slab_design_factors/systems.jl@d427ab4,
   StructuralStudies/src/slab_design_factors/study.jl@d427ab4, scripts/runners/run_slab_design_factors.jl@d427ab4,
   StructuralStudies/test/test_slab_design_factors.jl@d427ab4
 session_id: sess-95fa218c
 created_at: '2026-11-06T17:49:25.801684+00:00'
-updated_at: '2026-11-06T17:49:25.801684+00:00'
+updated_at: '2026-11-06T21:37:01.757906+00:00'
 ---
 The 2024 Slab Design Factors plans are a StructuralStudies run: one-way slab on RC T-beams, two-way slab on RC T-beams, and composite 3VLI deck on composite steel beams.
 

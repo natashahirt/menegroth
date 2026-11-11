@@ -7,12 +7,12 @@ title: How the 12.2.5.8 interactive-system checks and the A.3/B.6 gate work
 node_label: How the 12.2.5.8 interactive-system checks and the
 tags: walls,phase-7,12.2.5.8,seismic-system,decision
 status: active
-open_threads: 0
+open_threads: 1
 success: 'null'
 files: ''
 session_id: sess-8c698d00
 created_at: '2026-11-02T16:11:18.217640+00:00'
-updated_at: '2026-11-02T16:11:18.217640+00:00'
+updated_at: '2026-11-02T16:13:28.589126+00:00'
 ---
 User choices (2026-11-02):
 - 75% check: sum the design strength (phi Vn) of the walls in each story and direction. Compare with the design story shear Vx.

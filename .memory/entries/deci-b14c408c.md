@@ -7,13 +7,13 @@ title: Wall thickness jumps from one lateral analysis
 node_label: Wall thickness jumps from one lateral analysis
 tags: walls,thickness,efficiency,ordinary-walls
 status: active
-open_threads: 0
+open_threads: 2
 success: 'null'
 files: StructuralSynthesizer/src/analyze/lateral/wall_thickness_jump.jl@709f198, StructuralSynthesizer/src/analyze/lateral/ordinary_wall_stage.jl@709f198,
   StructuralSynthesizer/src/design/parameters.jl@709f198, StructuralSynthesizer/test/analyze/test_wall_thickness_jump.jl@709f198
 session_id: sess-70a4df14
 created_at: '2026-11-07T01:46:15.435862+00:00'
-updated_at: '2026-11-07T01:46:15.435862+00:00'
+updated_at: '2026-11-08T01:59:42.191909+00:00'
 has_child_rationale: 'The wall-building loop still only records a failing pier. The
   user asked for the slab-thickness jump applied to walls, at the same computational
   cost: invert from one analysis, confirm once.'

@@ -8,12 +8,12 @@ title: Pre-cure demand uses the bare-steel tributary solve the unshored stage al
 node_label: Pre-cure demand uses the bare-steel tributary solv
 tags: ''
 status: active
-open_threads: 0
+open_threads: 1
 success: 'null'
 files: ''
 session_id: sess-03a06543
 created_at: '2026-11-05T01:42:41.216740+00:00'
-updated_at: '2026-11-05T01:42:41.216740+00:00'
+updated_at: '2026-11-05T02:46:52.924235+00:00'
 ---
 The §I3.1b check already exists (SEI/ASCE 37-02 Eqs. 2-2 and 2-3). It does not follow the rest of the composite path: after the first sizing pass the frame elements are composite children, and beam_pre_cure_shape still reads the parent edge, so the analysis shape is dropped and the check falls back to wL^2/8. The solve also uses whatever stiffness is on the model, while unshored deflection swaps back to the stored steel section.
 

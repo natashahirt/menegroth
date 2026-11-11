@@ -8,12 +8,12 @@ title: 'Asap speed: profiled design_building; Asap only matters on flat-plate FE
 node_label: 'Asap speed: profiled design_building; Asap only ma'
 tags: ''
 status: active
-open_threads: 0
+open_threads: 1
 success: 'null'
 files: ''
 session_id: sess-a2743bae
 created_at: '2026-10-26T15:49:51.347933+00:00'
-updated_at: '2026-10-26T15:49:51.347933+00:00'
+updated_at: '2026-10-26T15:57:37.344877+00:00'
 ---
 Profile (scripts/runners/profile_design_building_asap.jl, 8 threads, 159x108 ft 8x5-bay medium office):
 - DDM / default / steel cases: ~3.75 s warm design_building, Asap <1% (MIP column sizing ~63%, DDM eq13.7 transfer ~18%). Cold first call 145 s (compile) + 12 s package load -> sweeps are dominated by process start + compile, not Asap.

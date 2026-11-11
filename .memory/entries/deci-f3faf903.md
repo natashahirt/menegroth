@@ -7,14 +7,14 @@ title: Report element-by-material takeoff and keep the designed column bars
 node_label: Report element-by-material takeoff and keep the de
 tags: embodied-carbon, takeoff, rebar, columns
 status: active
-open_threads: 0
+open_threads: 1
 success: 'null'
 files: StructuralSynthesizer/src/StructuralSynthesizer.jl@9921c53, StructuralSynthesizer/src/design_types.jl@9921c53,
   StructuralSynthesizer/src/design_workflow.jl@9921c53, StructuralSynthesizer/src/postprocess/ec.jl@9921c53,
   StructuralSynthesizer/test/core/test_postprocess_ec.jl@9921c53, scripts/runners/sweep_case_runner.jl@9921c53
 session_id: sess-797711ba
 created_at: '2026-10-27T19:34:22.158330+00:00'
-updated_at: '2026-10-27T19:34:22.158330+00:00'
+updated_at: '2026-10-28T01:20:02.951823+00:00'
 ---
 DesignSummary now carries a MaterialTakeoff for slabs, columns, beams, struts, and foundations. Each holds concrete volume, rebar mass, structural-steel mass, and the embodied carbon of those three, summed from the same element volumes as the carbon split. The sweep CSV writes those fields.
 

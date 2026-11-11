@@ -7,12 +7,12 @@ title: Finish steel deck sizing, then plan concrete rib systems
 node_label: Deck then concrete ribs
 tags: roadmap,composite,deck,ribs,waffle,one-way
 status: active
-open_threads: 0
+open_threads: 3
 success: 'null'
 files: ''
 session_id: sess-d804d15c
 created_at: '2026-10-28T22:10:00.355201+00:00'
-updated_at: '2026-10-28T22:10:00.355201+00:00'
+updated_at: '2026-10-29T11:59:22.870311+00:00'
 has_child_rationale: 'User set the sequence: close the steel deck before planning
   reinforced-concrete rib floors.'
 ---

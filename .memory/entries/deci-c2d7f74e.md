@@ -8,7 +8,7 @@ title: Edge transfer bands follow the moment, and the secondary moment uses the 
 node_label: Transfer bands follow the moment
 tags: flat-plate,moment-transfer,aci-318-11,13.5.3.2
 status: active
-open_threads: 0
+open_threads: 1
 success: 'null'
 files: StructuralSizer/src/slabs/codes/concrete/flat_plate/utils/calculations/shear_studs.jl@6ccb6a0,
   StructuralSizer/src/slabs/codes/concrete/flat_plate/design/checks/punching.jl@6ccb6a0,
@@ -16,7 +16,7 @@ files: StructuralSizer/src/slabs/codes/concrete/flat_plate/utils/calculations/sh
   StructuralSizer/src/codes/aci/punching/standard_geometry.jl@6ccb6a0
 session_id: sess-b0cc41a9
 created_at: '2026-11-09T00:02:50.107875+00:00'
-updated_at: '2026-11-09T00:02:50.107875+00:00'
+updated_at: '2026-11-09T00:15:45.408577+00:00'
 has_child_rationale: The §13.5.3.3 fractions were landing on the wrong band, and the
   edge width dropped a side that has slab
 ---

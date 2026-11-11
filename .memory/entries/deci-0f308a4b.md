@@ -7,12 +7,12 @@ title: Variant scenes are content-addressed blocks with per-design manifests
 node_label: Variant storage
 tags: viewer,scene-format,variants,compression
 status: active
-open_threads: 0
+open_threads: 1
 success: 'null'
 files: ''
 session_id: sess-3666303e
 created_at: '2026-11-07T00:09:17.798918+00:00'
-updated_at: '2026-11-07T00:09:17.798918+00:00'
+updated_at: '2026-11-07T00:10:35.125425+00:00'
 has_child_rationale: Shared vs per-variant must change as designs are added without
   moving data
 ---

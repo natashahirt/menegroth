@@ -7,12 +7,12 @@ title: 'Story-shell sections: one hogging spike, then neighbor-shape swaps'
 node_label: 'Story-shell sections: one hogging spike, then neig'
 tags: story-shell,convergence,oscillation,auto-framing
 status: active
-open_threads: 0
+open_threads: 1
 success: 'true'
 files: scripts/runners/diag_story_shell_sections.jl@731837c, StructuralSynthesizer/src/analyze/members/members/size_beams_story_shell.jl@731837c
 session_id: sess-c2530395
 created_at: '2026-11-07T16:21:25.418692+00:00'
-updated_at: '2026-11-07T16:21:25.418692+00:00'
+updated_at: '2026-11-07T19:03:15.419164+00:00'
 ---
 2026-11-07. Runner scripts/runners/diag_story_shell_sections.jl on the auto-framing floor (54x42 ft, 3x3 bays, one story, steel joists at 24 in, concrete girders), SS_TRACE_SHELL_PASSES=1.
 

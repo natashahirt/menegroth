@@ -7,12 +7,12 @@ title: Columns and walls share each cell's straight-skeleton edge polygons
 node_label: Skeleton supports
 tags: slabs,walls,columns,tributary,straight-skeleton
 status: active
-open_threads: 0
+open_threads: 1
 success: 'null'
 files: ''
 session_id: sess-8f6d4b5d
 created_at: '2026-11-08T21:12:02.075888+00:00'
-updated_at: '2026-11-08T21:12:02.075888+00:00'
+updated_at: '2026-11-08T22:21:29.471081+00:00'
 invalidates: deci-01b4dd14
 ---
 User decision (Nov 8): replace the larger-region rule (corner Voronoi vs parabola, wall gets the complement) with the straight-skeleton edge polygons that beams already use (`compute_cell_tributaries!`).

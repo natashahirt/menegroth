@@ -7,12 +7,12 @@ title: 'Phase 7 scope: one ordinary wall, analyzed demands, existing checks'
 node_label: 'P7 scope: one ordinary wall'
 tags: walls,phase-7,scope,ordinary,drift,combinations,plan
 status: active
-open_threads: 0
+open_threads: 7
 success: 'null'
 files: ''
 session_id: sess-15a7322a
 created_at: '2026-10-26T17:27:12.892727+00:00'
-updated_at: '2026-10-26T17:27:12.892727+00:00'
+updated_at: '2026-11-04T15:59:40.688276+00:00'
 ---
 Phase 7 is the next implementation phase. It is the vertical slice in todo-3b10ee83: one solid ordinary wall, one simple building, one seismic direction and the two perpendicular wind principal axes, from `:walls` geometry through the unified rigid-diaphragm model to serialized wall results. Openings, §18.10, layout search, leaning walls, sloped-roof wind, and the perimeter-frame iteration (note-8072f72a) stay out.
 

@@ -7,12 +7,12 @@ title: Composite beam checks finish before the ribbed-floor steel arm
 node_label: Beam checks before PR 9
 tags: composite,ribbed-floor,phase-4b,aisc
 status: active
-open_threads: 0
+open_threads: 4
 success: 'null'
 files: ''
 session_id: sess-c69b064a
 created_at: '2026-10-26T15:07:51.661157+00:00'
-updated_at: '2026-10-26T15:07:51.661157+00:00'
+updated_at: '2026-10-28T22:10:00.355201+00:00'
 ---
 The ribbed-floor plan's steel arm (PR 9, AISCCompositeRibProvisions) wraps the composite beam checker. It does not re-derive studs, pour-stage bracing, the pre-cure moment, or hogging. Concrete pan joists in that plan do not wait on it.
 

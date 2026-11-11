@@ -7,14 +7,14 @@ title: Column NLP repair lowers a ρ_max start instead of skipping the size
 node_label: 'Column NLP repair lowers a ρ_max start instead of '
 tags: column-nlp,as-built,repair,pixelframe,tests
 status: active
-open_threads: 0
+open_threads: 1
 success: 'null'
 files: StructuralSizer/src/members/optimize/api/rc_columns_nlp.jl@9434b4c, StructuralSizer/test/optimize/test_column_nlp.jl@9434b4c,
   StructuralSynthesizer/test/optimization/test_nlp_vs_catalog_convergence.jl@9434b4c,
   StructuralSynthesizer/test/report_generators/test_column_sizing_report.jl@9434b4c
 session_id: sess-5a3b65c9
 created_at: '2026-11-05T15:17:55.842305+00:00'
-updated_at: '2026-11-05T15:17:55.842305+00:00'
+updated_at: '2026-11-05T15:58:37.238417+00:00'
 ---
 RC column NLP was returning sections 2-3x the catalog's (e.g. 18x24 with 32 #8 for 180 kip / 74 kip-ft, where 12x12 with 6 bars passes ACIColumnChecker).
 

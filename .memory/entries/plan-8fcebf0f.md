@@ -8,14 +8,14 @@ title: 'Joined ordinary walls (L, T, C, box cores): check each leg on its own me
 node_label: Joined walls per-leg
 tags: walls,joined,core,flange,ordinary,phase7,plan
 status: active
-open_threads: 0
+open_threads: 5
 success: 'null'
 files: StructuralSynthesizer/src/analyze/lateral/wall_cuts.jl@c841c83, StructuralSynthesizer/src/analyze/lateral/wall_combinations.jl@1b29a66,
   StructuralSynthesizer/src/analyze/lateral/wall_ordinary_check.jl@1b29a66, StructuralSynthesizer/src/analyze/lateral/ordinary_wall_stage.jl@1b29a66,
   StructuralSynthesizer/src/analyze/asap/asap/wall_mesh.jl@c841c83
 session_id: sess-9bd5aa01
 created_at: '2026-11-04T15:59:40.688276+00:00'
-updated_at: '2026-11-04T15:59:40.688276+00:00'
+updated_at: '2026-11-04T20:22:29.425144+00:00'
 has_child_rationale: Removes refuse_joined_wall_design for ordinary walls before Phase
   8 openings
 ---

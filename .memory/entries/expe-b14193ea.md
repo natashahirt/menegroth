@@ -8,12 +8,12 @@ title: 'FEA flat-plate mesh convergence: M⁻ mesh dependence is from section-cu
 node_label: 'FEA flat-plate mesh convergence: M⁻ mesh dependenc'
 tags: fea,mesh,flat-plate,safety,performance
 status: active
-open_threads: 0
+open_threads: 2
 success: 'null'
 files: scripts/runners/study_fea_mesh_convergence.jl@ea295d4
 session_id: sess-b4afcaf1
 created_at: '2026-10-26T16:20:32.790083+00:00'
-updated_at: '2026-10-26T16:20:32.790083+00:00'
+updated_at: '2026-10-26T17:56:55.602393+00:00'
 ---
 Runner: scripts/runners/study_fea_mesh_convergence.jl (logs/fea_mesh_convergence*.csv).
 

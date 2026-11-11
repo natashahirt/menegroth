@@ -7,13 +7,13 @@ title: 'Faster sizing convergence: spread bisection, mat hoist, warm starts'
 node_label: 'Sizing convergence: bisection + starts'
 tags: sizing,performance,foundations,spread-footing,mat-footing,nlp,coordinator
 status: active
-open_threads: 0
+open_threads: 4
 success: 'null'
 files: StructuralSizer/src/foundations/codes/aci/spread_footing.jl@e96053b, StructuralSizer/src/foundations/codes/aci/mat_winkler_fea.jl@e96053b,
   StructuralSizer/src/members/optimize/problems.jl@e96053b
 session_id: sess-6ba8dff8
 created_at: '2026-10-25T13:38:27.887809+00:00'
-updated_at: '2026-10-25T13:38:27.887809+00:00'
+updated_at: '2026-10-25T20:47:50.108891+00:00'
 has_child_rationale: User approved the graph for items 2, 1a, and 7.
 ---
 Approved coordinator run for three items from the faster-sizing-convergence plan.

@@ -7,7 +7,7 @@ title: Walls assemble into the building model without invented supports
 node_label: Walls assemble into the building model without inv
 tags: ''
 status: active
-open_threads: 0
+open_threads: 1
 success: 'null'
 files: StructuralSynthesizer/src/analyze/_analyze.jl@3a66ee3, StructuralSynthesizer/src/analyze/asap/utils.jl@3a66ee3,
   StructuralSynthesizer/src/analyze/lateral/wall_cache_contract.jl@3a66ee3, StructuralSynthesizer/src/api/deserialize.jl@3a66ee3,
@@ -18,7 +18,7 @@ files: StructuralSynthesizer/src/analyze/_analyze.jl@3a66ee3, StructuralSynthesi
   external/Asap@3a66ee3
 session_id: sess-4412100a
 created_at: '2026-10-23T02:08:29.483735+00:00'
-updated_at: '2026-10-23T02:08:29.483735+00:00'
+updated_at: '2026-10-23T02:09:09.342947+00:00'
 has_child_rationale: Pin the Phase 5 wall-assembly commit
 ---
 Commit of the concrete-wall model through Phase 5 assembly. Not a design pipeline: design_building still stops until a wall thickness lives on DesignParameters and lateral checks exist.

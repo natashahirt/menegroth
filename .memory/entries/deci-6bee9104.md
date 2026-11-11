@@ -8,13 +8,13 @@ title: 'Re-entrant corner punching: accurate axis-mapping + centroid-transfer co
 node_label: Accurate re-entrant wiring convention
 tags: punching, reentrant, aci-421.1r-99, convention, moment-transfer, safety-critical
 status: active
-open_threads: 0
+open_threads: 2
 success: 'null'
 files: StructuralSizer/src/slabs/codes/concrete/flat_plate/design/checks.jl@dc50857,
   StructuralSizer/test/slabs/test_general_critical_section.jl@dc50857
 session_id: sess-e035b394
 created_at: '2026-10-23T00:24:10.148244+00:00'
-updated_at: '2026-10-23T00:24:10.148244+00:00'
+updated_at: '2026-10-23T01:12:27.388417+00:00'
 ---
 User chose **accurate mapping** (over conservative envelope) for routing re-entrant corner columns through the general App. B engine.
 

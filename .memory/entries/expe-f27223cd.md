@@ -20,4 +20,4 @@ A door cut into the south ground wall leaves two 0.8 m piers (length/thickness =
 
 The same door with no rigid diaphragm records "column segment withheld" on both piers, clause ACI 318-19 6.6.4.3, and does not run the slenderness or strength checks. The wide piers stay on the first-order cut.
 
-analyze/test_rigid_office_piers.jl passed 116/116 (log test rerun after the two-record assertion). The ground-story lintel split passed in the stage suite, 406/406. The deep-beam unit suite passed 112/112.
+analyze/test_rigid_office_piers.jl passed 115/115 (log test_StructuralSynthesizer_20261106_065921.log). The ground-story lintel split passed in the stage suite, 406/406. The deep-beam unit suite passed 112/112.

@@ -8,13 +8,13 @@ title: 'Whole-building sizing architecture: requirements, owners, round controll
 node_label: Sizing architecture
 tags: sizing,architecture,optimization,carbon,path-independence,verification,walls,columns,slabs,foundations,plan
 status: active
-open_threads: 1
+open_threads: 2
 success: 'null'
 files: docs/sizing-map/architecture.md@b4ef79f, docs/sizing-map/plan.md@b4ef79f, docs/sizing-map/README.md@b4ef79f,
   docs/sizing-map/phase1-benchmarks.md@b4ef79f, docs/sizing-map/raw/vertical-floor-interaction.md@b4ef79f
 session_id: sess-4672ff25
 created_at: '2026-11-11T21:55:19.569839+00:00'
-updated_at: '2026-11-11T21:55:48.327599+00:00'
+updated_at: '2026-11-11T22:42:11.981914+00:00'
 has_child_rationale: Global sizing redesign spanning slabs, members, walls and foundations
 related_to: plan-2d4158d0
 ---

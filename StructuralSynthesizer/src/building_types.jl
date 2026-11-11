@@ -48,6 +48,7 @@ include("building_types/tributary_cache.jl")
 # referenced by Slab{T}.framing_levels — must precede cells.jl.
 include("building_types/framing.jl")
 include("building_types/cells.jl")
+include("building_types/wall_openings.jl")
 include("building_types/members.jl")
 include("building_types/wall_mesh.jl")
 include("building_types/foundations.jl")

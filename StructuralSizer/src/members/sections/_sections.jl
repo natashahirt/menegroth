@@ -8,6 +8,17 @@ weight_per_length(s::AbstractSection, mat::AbstractMaterial) = section_area(s) *
 # Asap CompoundSection — bare Float64 in mm², return with units
 section_area(s::CompoundSection) = s.area * u"mm^2"
 
+"""
+    self_weight_area(s) -> Area
+
+Cross-section area the member adds to the floor's weight and material takeoff.
+
+A section that shares no concrete with a slab is all its own. A T-beam's flange
+is the slab, which is weighed and taken off with the slab, so its override is
+the stem below the slab.
+"""
+self_weight_area(s::AbstractSection) = section_area(s)
+
 # ==============================================================================
 # Material-Organized Sections
 # ==============================================================================

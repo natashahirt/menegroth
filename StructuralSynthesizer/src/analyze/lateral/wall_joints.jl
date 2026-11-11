@@ -488,3 +488,55 @@ function _record_joined_joints!(checks, struc, basic, wind, second, effects, inp
     end
     return checks
 end
+
+"""
+Overlap, in metres, of this wall's end with a wall it frames into.
+`(t_other / 2) / sin(φ)`. Zero when the end meets no other wall.
+"""
+function _joined_end_overlap(wall, walls, wall_index::Int, x::Float64, y::Float64,
+                             tol::Float64)
+    worst = 0.0
+    for (j, other) in enumerate(walls)
+        j == wall_index && continue
+        other.story == wall.story || continue
+        _end_meets_wall(other, x, y, tol) || continue
+        φ = _folded_angle(_wall_dir(wall), _wall_dir(other))
+        φ <= _WALL_COLINEAR_RAD && continue
+        t_other = ustrip(u"m", other.thickness)
+        worst = max(worst, (t_other / 2) / sin(φ))
+    end
+    return worst
+end
+
+"""
+    refuse_openings_in_joined_corners!(walls; tol=WALL_CORNER_TOL_M) -> nothing
+
+Throw when an opening enters the strip of a leg that lies inside the wall
+it frames into.
+
+The strip is the same overlap [`joined_clear_length`](@ref) subtracts:
+`(t_other / 2) / sin(φ)` at each joined end. An opening there is not a pier
+between the walls; it cuts the joint. A wall with no openings is left alone.
+"""
+function refuse_openings_in_joined_corners!(walls::AbstractVector;
+                                           tol::Real=WALL_CORNER_TOL_M)
+    tol_m = Float64(tol)
+    for (i, wall) in enumerate(walls)
+        isempty(wall.openings) && continue
+        L = wall_length(wall)
+        for (x, y, at_start) in ((wall.x1, wall.y1, true), (wall.x2, wall.y2, false))
+            zone = _joined_end_overlap(wall, walls, i, x, y, tol_m)
+            zone > tol_m || continue
+            z0 = at_start ? 0.0 : L - zone
+            z1 = at_start ? zone : L
+            for op in wall.openings
+                _interval_separation(op.s0, op.s0 + op.width, z0, z1) < tol_m || continue
+                throw(ArgumentError(
+                    "wall opening: an opening at s = $(op.s0) m on wall $i enters " *
+                    "the joined corner at ($(x), $(y)) m. That strip is $(zone) m " *
+                    "of this leg lying inside the wall it frames into."))
+            end
+        end
+    end
+    return nothing
+end

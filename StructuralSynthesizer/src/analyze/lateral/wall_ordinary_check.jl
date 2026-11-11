@@ -59,7 +59,8 @@ function check_ordinary_wall(wall::Wall, actions::AbstractVector{CombinedWallAct
                              hw::Union{Nothing,Unitful.Length}=nothing,
                              ρt_strength::Union{Nothing,Real}=nothing,
                              plan_axis::NTuple{2, Float64}=(1.0, 0.0),
-                             lw::Union{Nothing,Unitful.Length}=nothing)
+                             lw::Union{Nothing,Unitful.Length}=nothing,
+                             Moop::Unitful.Quantity=0.0u"N*m")
     material isa ReinforcedConcreteMaterial || throw(ArgumentError(
         "ordinary wall check: material must be a ReinforcedConcreteMaterial " *
         "(concrete plus rebar). A plain concrete has no fy or fyt, and this " *
@@ -96,10 +97,11 @@ function check_ordinary_wall(wall::Wall, actions::AbstractVector{CombinedWallAct
         end
         flexure = check_wall_inplane_flexure(section, material, action.N, action.M)
         push!(records, _ordinary_record(wall_index, wall.story, direction, case, action, flexure))
-        # e = 0: no out-of-plane eccentricity is in this action. lu is the plan
-        # length; a shorter unsupported length is not known here.
+        # e = M/N from the slab moment. §11.5.3.1 applies inside the middle
+        # third and records a failure outside it. lu is the plan length.
         bearing = check_wall_bearing_empirical(section, material.concrete, action.N;
-                                               e=0.0u"m", lc=story_height, lu=lw,
+                                               e=_out_of_plane_eccentricity(action.N, Moop),
+                                               lc=story_height, lu=lw,
                                                boundary=boundary, foundation=false)
         push!(records, _ordinary_record(wall_index, wall.story, direction, case, action, bearing))
         if assembly !== nothing && assembly.joined
@@ -305,6 +307,37 @@ function _flexure_passes!(lw, t, ρl, material, actions)
     return true
 end
 
+"""e = M/N. No moment is concentric. Moment with no compression is outside the wall."""
+function _out_of_plane_eccentricity(N, Moop)
+    M = abs(Moop)
+    M <= 1.0u"N*m" && return 0.0u"m"
+    N_N = N isa Unitful.Quantity ? ustrip(u"N", N) : Float64(N)
+    N_N > 1.0 || return M / 1.0u"N"
+    return M / (N_N * u"N")
+end
+
+"""
+True when `Moop` keeps every action's resultant in the middle third.
+
+A moment of 1 N·m or less is concentric. Compression of 1 N or less, with
+a real moment, is outside the wall: `e = M/N` uses a 1 N floor so a pure
+moment is not divided by zero.
+
+# Citation
+ACI 318-19 §11.5.3.1 (corpus: aci-318-19, PDF page 170).
+"""
+function _resultant_in_middle_third(t_m::Real, actions, Moop)
+    M = abs(ustrip(u"N*m", Moop))
+    M <= 1.0 && return true
+    limit = t_m / 6
+    for a in actions
+        N = a.N isa Unitful.Quantity ? ustrip(u"N", a.N) : Float64(a.N)
+        e = M / max(N, 1.0)
+        e <= limit || return false
+    end
+    return true
+end
+
 """
     select_ordinary_wall_reinforcement!(wall, actions, material; hw, lw=nothing) -> ρt_strength
 
@@ -318,11 +351,17 @@ then walks upward from the §11.6.2 floor and stops at the first value
 that passes every action. Returns the transverse ratio required for
 shear strength, or `nothing` when the shear is above the §11.5.4.2 cap.
 
+`Moop` is the factored slab moment about the weak axis. The search uses
+the in-plane checks when that resultant stays in the middle third of the
+thickness. Outside that third, ACI 318-19 §11.5.3.1 does not apply and
+this slice throws rather than size the magnified weak-axis moment.
+
 A ratio the wall already carries is not reduced. A demand the grid cannot
 cover leaves the wall at the top of the grid.
 """
 function select_ordinary_wall_reinforcement!(wall::Wall, actions, material; hw::Unitful.Length,
-                                              lw::Union{Nothing,Unitful.Length}=nothing)
+                                              lw::Union{Nothing,Unitful.Length}=nothing,
+                                              Moop::Unitful.Quantity=0.0u"N*m")
     material isa ReinforcedConcreteMaterial || throw(ArgumentError(
         "ordinary wall reinforcement: material must be a ReinforcedConcreteMaterial."))
     isempty(actions) && throw(ArgumentError(
@@ -333,6 +372,13 @@ function select_ordinary_wall_reinforcement!(wall::Wall, actions, material; hw::
     t > 0 || throw(ArgumentError("ordinary wall reinforcement: the thickness must be positive."))
     hw_m = ustrip(u"m", hw)
     hw_m > 0 || throw(ArgumentError("ordinary wall reinforcement: the wall height must be positive."))
+    # ACI 318-19 §11.5.3.1 (corpus: aci-318-19, PDF page 170): the simplified
+    # method applies when the resultant lies in the middle third, e ≤ t/6.
+    _resultant_in_middle_third(t, actions, Moop) || throw(ArgumentError(
+        "ordinary wall reinforcement: the factored resultant is outside the middle " *
+        "third of the wall thickness, so ACI 318-19 §11.5.3.1 does not apply, and " *
+        "the magnified weak-axis check is not in this slice " *
+        "(corpus: aci-318-19, PDF page 170)."))
     fc = ustrip(u"Pa", material.concrete.fc′)
     fyt = ustrip(u"Pa", material.transverse.Fy)
     λ = material.concrete.λ

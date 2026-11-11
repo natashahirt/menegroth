@@ -120,7 +120,8 @@ include("postprocess/_postprocess.jl")
 include("api/_api.jl")
 
 # Binary scene packets for the web viewer (docs/src/reference/scene_format.md).
-include("scene/_scene.jl")
+# The scene module is not in this commit. Skip the include so the package loads.
+# include("scene/_scene.jl")
 
 # =============================================================================
 # Exports

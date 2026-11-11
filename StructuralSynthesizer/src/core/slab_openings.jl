@@ -113,6 +113,28 @@ function face_openings(skel::BuildingSkeleton, face_idx::Int)
                _area_on_face(skel, face_idx, face, op.loop) > OPENING_OVERLAP_TOL_M2]
 end
 
+"""
+Warn for every vault face that contains an opening.
+
+The opening is not framed and is not part of the vault span, stress, or
+thrust. Framing and the vault check come later; until then the result is
+for the full bay.
+"""
+function warn_vault_openings!(struc, only::Union{Nothing,Int}=nothing)
+    idxs = only === nothing ? eachindex(struc.slabs) : (only,)
+    for slab_idx in idxs
+        slab = struc.slabs[slab_idx]
+        slab.floor_type === :vault || continue
+        for ci in slab.cell_indices
+            face = struc.cells[ci].face_idx
+            n = length(face_openings(struc.skeleton, face))
+            n == 0 && continue
+            @warn "vault slab $slab_idx face $face has $n unframed opening(s); they are left out of the vault check"
+        end
+    end
+    return struc
+end
+
 """Plan outlines (meters) of the voids in `face_idx`: its openings, then its holes."""
 face_opening_loops(skel::BuildingSkeleton, face_idx::Int) =
     vcat([skel.openings[k].loop for k in face_openings(skel, face_idx)],

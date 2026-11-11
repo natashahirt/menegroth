@@ -129,10 +129,48 @@ function build_pipeline(params::DesignParameters;
     # building keeps the two stages above.
     if params.lateral !== nothing
         push!(stages, PipelineStage(
-            struc -> design_ordinary_walls!(struc, params; tc=tc), false))
+            struc -> _walls_with_member_recheck!(struc, params; tc=tc), false))
     end
     
     StructuralSizer.emit!(tc, :pipeline, "build_pipeline", "", :exit;
                           n_stages=length(stages))
     return stages
+end
+
+"""
+Run the ordinary-wall stage. When the row F frame check sets a new section
+floor, size the members again and check the frame on those sections. Wall
+thickness is left to the wall stage itself. `max_rounds` is a backstop; when
+it is reached, `stage_diagnostics[:wall_members]` says so and the last
+analysis stands.
+"""
+function _walls_with_member_recheck!(struc::BuildingStructure, params::DesignParameters;
+                                     tc::Union{Nothing, StructuralSizer.TraceCollector} = nothing,
+                                     max_rounds::Int = 4)
+    delete!(struc.stage_diagnostics, :wall_members)
+    floors() = copy(struc.frame_section_floors)
+    floors_same(a, b) = keys(a) == keys(b) &&
+                        all(_sections_identical(a[k], b[k]) for k in keys(a))
+    member_sections() = vcat(Any[b.base.section for b in struc.beams],
+                             Any[c.base.section for c in struc.columns])
+    flat = _infer_floor_type(resolve_floor_options(params)) in (:flat_plate, :flat_slab)
+    for round in 1:max_rounds
+        f_before = floors()
+        result = design_ordinary_walls!(struc, params; tc=tc)
+        floors_same(f_before, floors()) && return result
+        before = member_sections()
+        if flat
+            _reconcile_columns!(struc, params; tc=tc)
+        else
+            _size_beams_columns!(struc, params; tc=tc)
+        end
+        held = all(_sections_identical(a, b) for (a, b) in zip(before, member_sections()))
+        StructuralSizer.emit!(tc, :workflow, "_walls_with_member_recheck!", "", :decision;
+                              round = round, members_changed = !held)
+        held && return result
+    end
+    struc.stage_diagnostics[:wall_members] =
+        "Walls and members were still changing each other after $max_rounds rounds " *
+        "of row F frame resizing; the last analysis stands."
+    return struc.ordinary_wall_result
 end

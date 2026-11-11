@@ -65,6 +65,10 @@ mutable struct BuildingStructure{T, A, P} <: AbstractBuildingStructure
     # `Asap.solve!(model, links)` (Bathe §4.4 master/slave DOF reduction, see
     # external/Asap/src/Elements/rigidlink.jl). Empty for :none / :shell.
     asap_rigid_links::Vector{Asap.RigidLink}
+    # Flexible floor: the lines of seismic-system walls and the collector ties
+    # along them. `nothing` until the lateral stage builds it; `to_asap!`
+    # clears it with the model it points into.
+    diaphragm_layout::Any
     # Pier triangles and story assemblies from the last `to_asap!`. Empty before
     # that call. Not a design group: forces stay on the pier, the section group
     # is a later step.
@@ -72,6 +76,12 @@ mutable struct BuildingStructure{T, A, P} <: AbstractBuildingStructure
     # Ordinary-wall stage output. `nothing` until [`design_ordinary_walls!`](@ref)
     # runs. The value is an `OrdinaryWallResult`.
     ordinary_wall_result::Any
+    # Stage outcomes that leave a design unverified without failing a member
+    # check, keyed by stage. Cleared when a design is prepared.
+    stage_diagnostics::Dict{Symbol, String}
+    # Member group id → the section the row F frame check requires. Concrete
+    # discrete member sizing keeps that section or a heavier one.
+    frame_section_floors::Dict{UInt64, Any}
 
     # ─── Design Snapshots (for parametric studies) ───
     _snapshots::Dict{Symbol, DesignSnapshot{T, P}}
@@ -102,8 +112,11 @@ function BuildingStructure(skel::BuildingSkeleton{T}) where T
         Dict{Int, Vector{Asap.TributaryLoad}}(),
         Dict{Int, Vector{Asap.TributaryLoad}}(),
         Asap.RigidLink[],
+        nothing,
         WallMesh(),
         nothing,
+        Dict{Symbol, String}(),
+        Dict{UInt64, Any}(),
         Dict{Symbol, DesignSnapshot{T, P}}(),
     )
 end
@@ -127,8 +140,11 @@ function BuildingStructure{T, A, P}(skel::BuildingSkeleton{T}) where {T, A, P}
         Dict{Int, Vector{Asap.TributaryLoad}}(),
         Dict{Int, Vector{Asap.TributaryLoad}}(),
         Asap.RigidLink[],
+        nothing,
         WallMesh(),
         nothing,
+        Dict{Symbol, String}(),
+        Dict{UInt64, Any}(),
         Dict{Symbol, DesignSnapshot{T, P}}(),
     )
 end

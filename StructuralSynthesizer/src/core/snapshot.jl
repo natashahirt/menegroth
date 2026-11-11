@@ -38,6 +38,8 @@ function snapshot!(struc::BuildingStructure{T, A, P}, key::Symbol = :prepare) wh
         P[cell.self_weight for cell in struc.cells],
         P[cell.live_load for cell in struc.cells],
         slab_snaps,
+        copy(struc.stage_diagnostics),
+        copy(struc.frame_section_floors),
     )
     return struc
 end
@@ -91,6 +93,11 @@ function restore!(struc::BuildingStructure, key::Symbol = :prepare;
         # restoring the tuple keeps the FEA-fallback notice on the slab.
         hasproperty(slab, :design_details) && (slab.design_details = ss.design_details)
     end
+
+    empty!(struc.stage_diagnostics)
+    merge!(struc.stage_diagnostics, snap.stage_diagnostics)
+    empty!(struc.frame_section_floors)
+    merge!(struc.frame_section_floors, snap.frame_section_floors)
 
     # Recompute structural offsets for restored column dimensions
     !isnothing(struc.skeleton.geometry) && update_structural_offsets!(struc; input_is_centerline=geometry_is_centerline)

@@ -1483,8 +1483,21 @@ function floor_symbol(t::AbstractFloorSystem)
     return floor_symbol_map[T]
 end
 
-"""Infer slab type from aspect ratio."""
-function infer_floor_type(span_x, span_y)
-    ratio = max(span_x, span_y) / min(span_x, span_y)
-    return ratio > 2.0 ? :one_way : :two_way
+"""
+    infer_floor_type(span_x, span_y; axis=nothing) -> Symbol
+
+One-way or two-way from the two spans.
+
+ACI 318-19 R8.3.1.2 (corpus: aci-318-19, PDF p. 103): a panel whose
+long-to-short span is greater than 2 uses the one-way rules. At 2 or
+below, the panel is two-way. A supplied `axis` forces one-way; two-way
+is the automatic result, not a second flag. The span along that axis is
+the caller's responsibility (`SpanInfo` with the same axis).
+"""
+function infer_floor_type(span_x, span_y; axis=nothing)
+    axis !== nothing && return :one_way
+    short = min(span_x, span_y)
+    short > zero(short) || throw(ArgumentError(
+        "A panel span must be positive to classify one-way or two-way."))
+    return max(span_x, span_y) / short > 2.0 ? :one_way : :two_way
 end

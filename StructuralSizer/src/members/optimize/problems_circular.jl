@@ -45,6 +45,8 @@ D_opt, ρ_opt = result.minimizer
 """
 struct RCCircularNLPProblem <: AbstractNLPProblem
     demand::RCColumnDemand
+    # Every load case. One entry for a single demand. Scalars below start the solver.
+    cases::Vector{RCColumnDemand}
     geometry::ConcreteMemberGeometry
     opts::NLPColumnOptions
 
@@ -70,19 +72,34 @@ function RCCircularNLPProblem(
     geometry::ConcreteMemberGeometry,
     opts::NLPColumnOptions
 )
+    return _assemble_rc_circular_nlp(
+        RCColumnDemand[demand], demand, geometry, opts,
+        Float64(to_kip(demand.Pu)), Float64(to_kipft(demand.Mux)))
+end
+
+function _assemble_rc_circular_nlp(cases::Vector{RCColumnDemand}, demand::RCColumnDemand,
+                                  geometry::ConcreteMemberGeometry, opts::NLPColumnOptions,
+                                  Pu_kip::Float64, Mux_kipft::Float64)
     mat = to_material_tuple(opts.material, fy_ksi(opts.rebar_material), Es_ksi(opts.rebar_material))
-
-    Pu_kip = to_kip(demand.Pu)
-    Mux_kipft = to_kipft(demand.Mux)
-
     D_min = ustrip(u"inch", opts.min_dim)
     D_max = ustrip(u"inch", opts.max_dim)
-
-    RCCircularNLPProblem(
-        demand, geometry, opts, mat,
+    return RCCircularNLPProblem(
+        demand, cases, geometry, opts, mat,
         Pu_kip, Mux_kipft,
-        D_min, D_max
+        D_min, D_max,
     )
+end
+
+function RCCircularNLPProblem(
+    set::RCColumnDemandSet,
+    geometry::ConcreteMemberGeometry,
+    opts::NLPColumnOptions,
+)
+    cases = _unique_rc_nlp_cases(set.cases)
+    Pu = maximum(Float64(to_kip(d.Pu)) for d in cases)
+    Mux = maximum(abs(Float64(to_kipft(d.Mux))) for d in cases)
+    rep = cases[argmax([Float64(to_kip(d.Pu)) for d in cases])]
+    return _assemble_rc_circular_nlp(cases, rep, geometry, opts, Pu, Mux)
 end
 
 # ==============================================================================
@@ -157,15 +174,19 @@ end
 # AbstractNLPProblem Interface: Constraints
 # ==============================================================================
 
-"""Single constraint: P-M interaction utilization."""
-n_constraints(::RCCircularNLPProblem) = 1
+"""One P-M row per load case."""
+n_constraints(p::RCCircularNLPProblem) = length(p.cases)
 
 """Constraint name for solver diagnostics."""
-constraint_names(::RCCircularNLPProblem) = ["P-M utilization"]
+function constraint_names(p::RCCircularNLPProblem)
+    length(p.cases) == 1 && return ["P-M utilization"]
+    return ["P-M utilization case $i" for i in eachindex(p.cases)]
+end
 
 """Constraint bounds: P-M utilization ≤ 1.0."""
 function constraint_bounds(p::RCCircularNLPProblem)
-    return ([-Inf], [1.0])
+    n = n_constraints(p)
+    return (fill(-Inf, n), fill(1.0, n))
 end
 
 """
@@ -175,7 +196,14 @@ Evaluate smooth P-M utilization for circular column at design point `x`.
 Includes optional ACI 318 slenderness magnification (moment magnifier δns).
 """
 function constraint_fns(p::RCCircularNLPProblem, x::Vector{Float64})
+    return [_rc_circular_nlp_util(p, x, d) for d in p.cases]
+end
+
+"""Smooth P-M utilization of one circular-column load case."""
+function _rc_circular_nlp_util(p::RCCircularNLPProblem, x::Vector{Float64}, demand::RCColumnDemand)
     D, ρ = x
+    Pu_kip = Float64(to_kip(demand.Pu))
+    Mux_kipft = Float64(to_kipft(demand.Mux))
 
     # Effective cover to bar centroid (inches)
     db = ustrip(u"inch", rebar(p.opts.bar_size).diameter)
@@ -187,7 +215,7 @@ function constraint_fns(p::RCCircularNLPProblem, x::Vector{Float64})
     # Slenderness. Same simplified stiffness and §6.2.5.3 cap as the
     # rectangular NLP. A circular section has one radius; the larger of kx
     # and ky governs. The as-built checker applies the §6.2.5.1 neglect test.
-    Mux_design = p.Mux_kipft
+    Mux_design = Mux_kipft
     stab = 0.0
     δ_ratio = 0.0
     if p.opts.include_slenderness
@@ -201,18 +229,18 @@ function constraint_fns(p::RCCircularNLPProblem, x::Vector{Float64})
         k = max(Float64(p.geometry.kx), Float64(p.geometry.ky), 1e-6)
         Pc = π^2 * EI / (k * Lu_in)^2
 
-        Cm = calc_Cm(to_kipft(p.demand.M1x), to_kipft(p.demand.M2x);
-                     transverse_load=p.demand.transverse_load)
+        Cm = calc_Cm(to_kipft(demand.M1x), to_kipft(demand.M2x);
+                     transverse_load=demand.transverse_load)
 
         # ACI 318-19 §6.6.4.5.2. See `_rc_nlp_delta_ns` for the smooth pole.
-        stab = p.Pu_kip / (0.75 * max(Pc, 1e-6))
+        stab = Pu_kip / (0.75 * max(Pc, 1e-6))
         δns = _rc_nlp_delta_ns(Cm, stab)
         δ_ratio = δns / SECOND_ORDER_MOMENT_RATIO_LIMIT
-        Mux_design = δns * p.Mux_kipft
+        Mux_design = δns * Mux_kipft
     end
 
     # Smooth analytical P-M utilization (replaces piecewise-linear P-M diagram)
-    util = _smooth_rc_pm_util(D, ρ, p.Pu_kip, Mux_design, p.mat;
+    util = _smooth_rc_pm_util(D, ρ, Pu_kip, Mux_design, p.mat;
                                     cover, n_bars, tie_type=p.opts.tie_type)
     # ACI 318-19 §6.2.5.3: δns ≤ 1.4. Eq. (6.6.4.5.2) is undefined for
     # Pu ≥ 0.75 Pc; that ratio stays in the same row.
@@ -222,7 +250,7 @@ function constraint_fns(p::RCCircularNLPProblem, x::Vector{Float64})
     if stab >= 1.0
         util = _smooth_max(util, stab; k=80.0)
     end
-    return [util]
+    return util
 end
 
 # ==============================================================================

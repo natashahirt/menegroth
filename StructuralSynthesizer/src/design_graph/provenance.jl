@@ -191,9 +191,12 @@ const PIPELINE_PROVENANCE = Dict{NodeKey, @NamedTuple{
                               :fire_rating, :fire_protection, :geometry_is_centerline,
                               :load_combinations, :optimize_for, :collinear_grouping,
                               :member_group_overrides, :beam_I_factor],
-        reads        = Symbol[:columns, :beams, :slabs, :asap_model],
+        reads        = Symbol[:columns, :beams, :slabs, :asap_model,
+                              :frame_section_floors],
         writes       = Symbol[:columns, :beams, :asap_model],
-        code_version = :members_v1,
+        # v2: a row F section floor narrows the concrete catalog, and concrete
+        # column NLP is constrained on every load case, not the envelope.
+        code_version = :members_v2,
     ),
     NODE_FOUNDATIONS => (
         param_slice  = Symbol[:foundation_options],
@@ -202,10 +205,17 @@ const PIPELINE_PROVENANCE = Dict{NodeKey, @NamedTuple{
         code_version = :foundations_v1,
     ),
     NODE_ORDINARY_WALLS => (
-        param_slice  = Symbol[:lateral, :wall_inputs, :materials, :diaphragm_mode],
-        reads        = Symbol[:walls, :wall_mesh, :asap_model, :asap_rigid_links],
-        writes       = Symbol[:ordinary_wall_result, :diaphragm_layout],
-        code_version = :ordinary_walls_v2,
+        param_slice  = Symbol[:lateral, :wall_inputs, :materials, :diaphragm_mode,
+                              :columns, :beams, :uniform_column_sizing],
+        reads        = Symbol[:walls, :wall_mesh, :asap_model, :asap_rigid_links,
+                              :columns, :beams, :frame_section_floors],
+        writes       = Symbol[:ordinary_wall_result, :diaphragm_layout,
+                              :frame_section_floors],
+        # v3: each frame member carries its governing check. A failing group
+        # gets a section floor from that level's beam options, or from the
+        # whole uniformity group. Station diagrams use only the loads on
+        # that element.
+        code_version = :ordinary_walls_v3,
     ),
 )
 

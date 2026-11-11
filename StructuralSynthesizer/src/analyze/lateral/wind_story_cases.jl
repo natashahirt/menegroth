@@ -52,7 +52,20 @@ end
 struct WindStoryAnalysis
     levels::Vector{WindStoryLevel}
     cases::Vector{WindStoryCase}
+    "Full displacement of each case, same order as `cases`. Empty when no solve was stored."
+    displacements::Vector{Vector{Float64}}
+    "Plan point each level's moment is taken about. Empty on a hand-built analysis."
+    centroids::Vector{NTuple{2,Float64}}
 end
+
+"""
+Two-field analysis for a hand-built case list.
+
+`displacements` and `centroids` are empty. A solved
+[`wind_story_analysis`](@ref) fills both.
+"""
+WindStoryAnalysis(levels, cases) =
+    WindStoryAnalysis(levels, cases, Vector{Float64}[], NTuple{2,Float64}[])
 
 """
     wind_story_analysis(struc; directions, qz, qh, Kd, G, GCpi, ...) -> WindStoryAnalysis
@@ -178,6 +191,7 @@ function wind_story_analysis(struc::BuildingStructure;
     ncase = length(story_cases[1])
     built = WindStoryCase[]
     load_cases = Vector{Vector{Asap.AbstractLoad}}()
+    centroids = _wind_level_centroids(calcs)
     for j in 1:ncase
         template = story_cases[1][j]
         Fx = Float64[story_cases[i][j].Fx for i in 1:n]
@@ -209,8 +223,12 @@ function wind_story_analysis(struc::BuildingStructure;
         push!(solved, WindStoryCase(c.kind, c.direction, c.direction_2,
             c.sign_1, c.sign_2, c.Fx_kN, c.Fy_kN, c.Mz_kN_m, ux, uy))
     end
-    return WindStoryAnalysis(levels, solved)
+    return WindStoryAnalysis(levels, solved, displacements, centroids)
 end
+
+"Plan centroid of each level's first wind resultant."
+_wind_level_centroids(calcs) =
+    NTuple{2,Float64}[c.resultants[1].centroid for c in calcs]
 
 function _wind_append_minima!(built, load_cases, levels, calcs)
     n = length(levels)
@@ -317,6 +335,30 @@ function _wind_loads(levels, Fx, Fy, Mz)
     isempty(loads) && throw(ArgumentError(
         "wind_story_analysis: a case produced no story force and no torsion."))
     return loads
+end
+
+"""
+    _wind_loads(struc, levels, Fx, Fy, Mz, centroids)
+
+Rigid-diaphragm story loads on each level's master.
+
+`Mz` is already the moment at the master ([`_wind_master_moments`](@ref)),
+so `centroids` is not used to place it. The ordinary-wall stage passes the
+centroid anyway: a later semirigid placement will take the moment about
+that point, and this call has the same arguments. An empty `centroids`
+is a hand-built analysis. No rigid links throws: this is not the flexible
+or semirigid distribution.
+"""
+function _wind_loads(struc::BuildingStructure, levels, Fx, Fy, Mz, centroids)
+    n = length(levels)
+    (length(Fx) == n && length(Fy) == n && length(Mz) == n) || throw(ArgumentError(
+        "wind story loads: levels, Fx, Fy, and Mz must be one entry per level."))
+    (isempty(centroids) || length(centroids) == n) || throw(ArgumentError(
+        "wind story loads: $(length(centroids)) centroids for $n levels."))
+    isempty(struc.asap_rigid_links) && throw(ArgumentError(
+        "wind story loads: this placement puts the force and the moment on the " *
+        "rigid-diaphragm master. asap_rigid_links is empty."))
+    return _wind_loads(levels, Fx, Fy, Mz)
 end
 
 function _wind_master_disp(u, master)

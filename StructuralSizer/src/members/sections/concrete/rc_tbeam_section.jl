@@ -153,6 +153,9 @@ end
 """Gross T-shaped cross-sectional area: Ag = bf × hf + bw × (h − hf)."""
 section_area(s::RCTBeamSection) = s.bf * s.hf + s.bw * (s.h - s.hf)
 
+"""Stem below the flange, `bw × (h − hf)`: the flange is the slab's concrete."""
+self_weight_area(s::RCTBeamSection) = s.bw * (s.h - s.hf)
+
 """Total depth."""
 section_depth(s::RCTBeamSection) = s.h
 

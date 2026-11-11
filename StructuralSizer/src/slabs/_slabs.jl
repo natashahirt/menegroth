@@ -4,6 +4,9 @@ include("types.jl")
 # User-facing sizing options + guidance
 include("options.jl")
 
+# Immutable package-boundary requests. The flat-plate kernel names these types.
+include("contracts.jl")
+
 # Sizing codes (must come before dispatcher)
 include("codes/_codes.jl")
 

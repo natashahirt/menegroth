@@ -308,7 +308,10 @@ function design_ordinary_walls!(struc::BuildingStructure, params::DesignParamete
         interactive = _enforce_interactive_wall_shear!(
             struc, elf, inputs.material, grown_by_wall, ρt_by_wall, directions)
         frame_members = _check_interactive_frames!(
-            struc, basic, elf, second, inputs, frame_system, directions, effects)
+            struc, basic, elf, second, inputs, frame_system, directions, effects;
+            member_opts = (columns = params.columns, beams = params.beams),
+            beam_opts_by_group = _beam_opts_by_group(struc, params.beams),
+            uniform_columns = params.uniform_column_sizing)
     end
     checks = Dict{Int, Vector{WallCheckRecord}}()
     for (wall_index, assembly, _, ρt_strength, batches, Moop) in prepared
@@ -966,5 +969,57 @@ function _capture_ordinary_walls!(design::BuildingDesign, struc::BuildingStructu
     end
     design.seismic_story_drift = Vector{Any}(result.drift)
     return nothing
+end
+
+"""Meters from a length or a plain number."""
+_wall_stage_m(x::Unitful.Quantity) = ustrip(u"m", x)
+_wall_stage_m(x::Real) = Float64(x)
+
+"""Bottom and top elevations of a story, in metres."""
+function _story_range_m(struc::BuildingStructure, story::Int, height)
+    stories = struc.skeleton.stories
+    z0 = haskey(stories, story) ? _wall_stage_m(stories[story].elevation) : nothing
+    above = nothing
+    for k in sort!(collect(keys(stories)))
+        k <= story && continue
+        isempty(stories[k].faces) && continue
+        above = k
+        break
+    end
+    z1 = above === nothing ? nothing : _wall_stage_m(stories[above].elevation)
+    if z1 === nothing && z0 !== nothing && height !== nothing
+        z1 = z0 + height
+    end
+    return z0, z1
+end
+
+"""Slab elevation in metres from the story that owns its cells."""
+function _slab_elevation_m(struc::BuildingStructure, slab)
+    faces = Set{Int}()
+    for ci in slab.cell_indices
+        1 <= ci <= length(struc.cells) || continue
+        push!(faces, struc.cells[ci].face_idx)
+    end
+    isempty(faces) && return nothing
+    for story in values(struc.skeleton.stories)
+        any(f -> f in faces, story.faces) || continue
+        return _wall_stage_m(story.elevation)
+    end
+    return nothing
+end
+
+"""
+Solid walls stay on the gross-pier path. A wall with openings is not
+designed on this branch: the segment check is a separate change.
+"""
+function _design_pierced_segments!(checks, struc, basic, second;
+                                  material_of, boundary::Symbol, plan_axis,
+                                  max_ρl::Real, max_ρt::Real,
+                                  wind=nothing, elf=nothing, effects=nothing,
+                                  rho=nothing, SDS=nothing)
+    any(!isempty(wall.openings) for wall in struc.walls) && throw(ArgumentError(
+        "ordinary wall stage: a wall has openings, and opening-segment design " *
+        "is not in this build."))
+    return (0, Float64(max_ρl), Float64(max_ρt))
 end
 

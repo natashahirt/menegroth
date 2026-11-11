@@ -380,6 +380,26 @@ function _beam_sizing_passes(struc::BuildingStructure, default_opts)
     return passes
 end
 
+"""
+    _beam_opts_by_group(struc, default_opts) -> Dict{UInt64, Any}
+
+The beam options each sizing group actually uses. A framing level with its
+own `beam_options` owns its groups; every other group uses `default_opts`.
+The same split as [`_beam_sizing_passes`](@ref).
+"""
+function _beam_opts_by_group(struc::BuildingStructure, default_opts)
+    out = Dict{UInt64, Any}()
+    for pass in _beam_sizing_passes(struc, default_opts)
+        for beam in struc.beams
+            gid = group_id(beam)
+            gid === nothing && continue
+            pass.accept === nothing || pass.accept(gid) || continue
+            out[gid] = pass.opts
+        end
+    end
+    return out
+end
+
 """Overrides whose group this pass sizes, or `nothing` when it sizes none."""
 function _overrides_in(overrides, accept)
     overrides === nothing && return nothing
@@ -1001,6 +1021,48 @@ function _field_identical(x, y, depth::Int = 0)
     return false
 end
 
+"""
+    _frame_floor_mask(struc, group_ids, catalog, objective_of) -> Union{Nothing, Vector{Vector{Int}}}
+
+`struc.frame_section_floors` as a per-group catalog mask. A floored group
+keeps its floor section and every section whose objective is strictly
+greater. The optimizer still checks each one against the group's own demands.
+`nothing` when no group in `group_ids` has a floor.
+"""
+function _frame_floor_mask(struc, group_ids, catalog, objective_of)
+    floors = struc.frame_section_floors
+    any(gid -> haskey(floors, gid), group_ids) || return nothing
+    obj = [objective_of(s) for s in catalog]
+    out = Vector{Vector{Int}}(undef, length(group_ids))
+    for (i, gid) in enumerate(group_ids)
+        fl = get(floors, gid, nothing)
+        if fl === nothing
+            out[i] = collect(eachindex(catalog))
+            continue
+        end
+        o_floor = objective_of(fl)
+        same = [j for j in eachindex(catalog) if _sections_identical(catalog[j], fl)]
+        if isempty(same)
+            _refuse_frame_floors(struc, [gid],
+                "this sizing catalog (the row F floor is not in it)")
+        end
+        out[i] = sort!(union(same, [j for j in eachindex(catalog)
+                                    if obj[j] > o_floor * (1 + 1e-9)]))
+    end
+    return out
+end
+
+"""Refuse a sizing path that cannot keep the row F section floors of `group_ids`."""
+function _refuse_frame_floors(struc, group_ids, path::AbstractString)
+    for gid in group_ids
+        haskey(struc.frame_section_floors, gid) || continue
+        throw(ArgumentError(
+            "member group $gid has a row F section floor, and $path cannot keep it. " *
+            "Use :discrete sizing with a single-material catalog and n_max_sections = 0."))
+    end
+    return nothing
+end
+
 function _sections_identical(a, b)
     a === b && return true
     typeof(a) === typeof(b) || return false
@@ -1394,8 +1456,17 @@ function _size_beams_impl!(
     end
 
     # ── Rectangular beam path (default) ──
+    floor_kw = (;)
+    if any(gid -> haskey(struc.frame_section_floors, gid), group_ids)
+        (opts.materials === nothing && opts.n_max_sections == 0) ||
+            _refuse_frame_floors(struc, group_ids, "this concrete beam sizing")
+        cat = isnothing(opts.custom_catalog) ?
+            StructuralSizer.rc_beam_catalog(opts.catalog) : opts.custom_catalog
+        obj = s -> StructuralSizer.objective_value(opts.objective, s, opts.material, 1.0u"m")
+        floor_kw = (; catalog = cat, feasible = _frame_floor_mask(struc, group_ids, cat, obj))
+    end
     result = StructuralSizer.size_beams(Mu, Vu, geoms, opts; Mu_neg=Mu_neg, Nu=Nu,
-                                        shell_spans=grouped_spans)
+                                        shell_spans=grouped_spans, floor_kw...)
 
     _apply_beam_results!(struc, result, group_ids, member_array,
                          edge_ids_in_group, opts.material; I_factor=I_factor,

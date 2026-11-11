@@ -106,6 +106,23 @@ function seismic_effect_loads(analysis::ElfStoryAnalysis, effect::SeismicEffectC
 end
 
 """
+    seismic_effect_loads(struc, analysis, effect)
+
+Rigid-diaphragm story loads of one effect.
+
+The ordinary-wall stage passes the building. The forces and moments are the
+master loads from [`seismic_effect_loads(analysis, effect)`](@ref). No rigid
+links throws: this is not the flexible or semirigid distribution.
+"""
+function seismic_effect_loads(struc::BuildingStructure, analysis::ElfStoryAnalysis,
+                              effect::SeismicEffectCase)
+    isempty(struc.asap_rigid_links) && throw(ArgumentError(
+        "seismic effect loads: this placement puts the force and the moment on the " *
+        "rigid-diaphragm master. asap_rigid_links is empty."))
+    return seismic_effect_loads(analysis, effect)
+end
+
+"""
     orthogonal_combination_required(; sdc, type1_horizontal_irregularity,
         type5_horizontal_irregularity, orthogonal_12_5_4_conditions_absent) -> Bool
 

@@ -232,6 +232,28 @@ function RCColumnDemand(idx::Int;
                       Float64(βdns), transverse_load)
 end
 
+"""
+    RCColumnDemandSet(member_idx, cases) <: AbstractDemand
+
+Every load case one RC column group must resist. Each case carries the axial
+force and the end moments of one analysis case, so they act together. A
+section is feasible when it passes every case.
+
+An envelope that pairs the largest axial force of any case with the largest
+moment of any case is not a bound for a reinforced concrete section. Below
+the balanced point more axial compression raises the moment capacity
+(ACI 318-19 §22.4, P–M interaction), so a case with less axial force and the
+same moment can fail while the envelope passes.
+"""
+struct RCColumnDemandSet{D <: RCColumnDemand} <: AbstractDemand
+    member_idx::Int
+    cases::Vector{D}
+    function RCColumnDemandSet(member_idx::Int, cases::Vector{D}) where {D <: RCColumnDemand}
+        isempty(cases) && throw(ArgumentError("RCColumnDemandSet needs at least one case"))
+        return new{D}(member_idx, cases)
+    end
+end
+
 # ==============================================================================
 # RC Beam Demand (ACI-style)
 # ==============================================================================

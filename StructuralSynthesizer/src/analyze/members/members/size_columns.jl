@@ -190,8 +190,10 @@ function _size_columns_impl!(
 
     _add_gravity_loads!(struc, edge_ids_in_group, gravity_factor)
 
+    case_rows = Vector{ColumnCaseRow}[]
     group_ids, demands, L_totals, Lb_govs, Cb_govs, Kx_govs, Ky_govs =
-        member_group_demands(struc; member_edge_group=member_edge_group, resolution=resolution)
+        member_group_demands(struc; member_edge_group=member_edge_group, resolution=resolution,
+                             case_rows=case_rows)
 
     # Concrete columns now carry per-axis effective length factors so the ACI
     # 318 slenderness check evaluates the strong (kx, h, b·h³/12) and weak
@@ -207,27 +209,44 @@ function _size_columns_impl!(
     # `size_columns` overload preserves the signed end moments end-to-end so
     # the slenderness path can compute `Cm = 0.6 − 0.4·(M1/M2)` instead of
     # the conservative `M1 = 0` stand-in.
-    rc_demands = StructuralSizer.RCColumnDemand[]
-    for (i, d) in enumerate(demands)
-        Pu_kip   = ustrip(uconvert(Asap.kip,         d.Pu_c * u"N"))
-        Mux_kipf = ustrip(uconvert(Asap.kip*u"ft",   d.Mux  * u"N*m"))
-        Muy_kipf = ustrip(uconvert(Asap.kip*u"ft",   d.Muy  * u"N*m"))
-        M1x_kipf = ustrip(uconvert(Asap.kip*u"ft",   d.M1x  * u"N*m"))
-        M2x_kipf = ustrip(uconvert(Asap.kip*u"ft",   d.M2x  * u"N*m"))
-        M1y_kipf = ustrip(uconvert(Asap.kip*u"ft",   d.M1y  * u"N*m"))
-        M2y_kipf = ustrip(uconvert(Asap.kip*u"ft",   d.M2y  * u"N*m"))
-
-        push!(rc_demands, StructuralSizer.RCColumnDemand(i;
-            Pu  = Pu_kip,
-            Mux = Mux_kipf, Muy = Muy_kipf,
-            M1x = M1x_kipf, M2x = M2x_kipf,
-            M1y = M1y_kipf, M2y = M2y_kipf,
-            βdns = opts.βdns,
-            transverse_load = d.transverse_load,
-        ))
+    #
+    # Each group is checked against the envelope and against every pattern
+    # case on its own, including the NLP path. Below the balance point, less
+    # compression means less moment capacity, so the envelope (max P with
+    # max M) can pass a section that fails a case with the same moment and
+    # lower axial load.
+    kipft = Asap.kip * u"ft"
+    to_kipft(M) = ustrip(uconvert(kipft, M * u"N*m"))
+    rc_row(i, d, Pu, Mux, Muy, M1x, M2x, M1y, M2y) = StructuralSizer.RCColumnDemand(i;
+        Pu  = ustrip(uconvert(Asap.kip, Pu * u"N")),
+        Mux = to_kipft(Mux), Muy = to_kipft(Muy),
+        M1x = to_kipft(M1x), M2x = to_kipft(M2x),
+        M1y = to_kipft(M1y), M2y = to_kipft(M2y),
+        βdns = opts.βdns,
+        transverse_load = d.transverse_load,
+    )
+    rc_demands = map(enumerate(demands)) do (i, d)
+        envelope = rc_row(i, d, d.Pu_c, d.Mux, d.Muy, d.M1x, d.M2x, d.M1y, d.M2y)
+        cases = [envelope]
+        for r in case_rows[i]
+            push!(cases, rc_row(i, d, r.Pu_c, r.Mux, r.Muy, r.M1x, r.M2x, r.M1y, r.M2y))
+        end
+        StructuralSizer.RCColumnDemandSet(i, cases)
     end
 
-    result = StructuralSizer.size_columns(rc_demands, geometries, opts)
+    floor_kw = (;)
+    if any(gid -> haskey(struc.frame_section_floors, gid), group_ids)
+        # NLP has no catalog, so it cannot keep a section floor.
+        (opts.sizing_strategy !== :nlp && opts.materials === nothing &&
+         opts.n_max_sections == 0) ||
+            _refuse_frame_floors(struc, group_ids, "this concrete column sizing")
+        cat = isnothing(opts.custom_catalog) ?
+            StructuralSizer.rc_column_catalog(opts.section_shape, opts.catalog) :
+            opts.custom_catalog
+        obj = s -> StructuralSizer.objective_value(opts.objective, s, opts.material, 1.0u"m")
+        floor_kw = (; catalog = cat, feasible = _frame_floor_mask(struc, group_ids, cat, obj))
+    end
+    result = StructuralSizer.size_columns(rc_demands, geometries, opts; floor_kw...)
 
     _apply_column_results!(struc, result, group_ids, opts.material, :concrete, edge_ids_in_group;
                            I_factor=I_factor, rebar=opts.rebar_material)

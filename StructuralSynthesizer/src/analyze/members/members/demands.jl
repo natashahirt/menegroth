@@ -3,6 +3,23 @@
 # =============================================================================
 
 """
+    ColumnCaseRow
+
+One column's demands in one pattern case, all from that case [N, N·m].
+`Pu_c` is the largest compression along the member, `Mux`/`Muy` the largest
+moments, and `M1`/`M2` the signed end moments (ACI 318-19 convention).
+"""
+struct ColumnCaseRow
+    Pu_c::Float64
+    Mux::Float64
+    Muy::Float64
+    M1x::Float64
+    M2x::Float64
+    M1y::Float64
+    M2y::Float64
+end
+
+"""
     build_member_groups!(struc::BuildingStructure; member_type::Symbol=:beams)
 
 Populate `struc.member_groups` from the specified member collection.
@@ -334,7 +351,8 @@ function member_group_demands(struc::BuildingStructure;
     member_edge_group::Union{Symbol, AbstractVector{Symbol}, Tuple{Vararg{Symbol}}}=:beams,
     resolution::Int=200,
     params::DesignParameters=DesignParameters(),
-    shell_demands::Union{Nothing, AbstractDict{Int, ShellBeamDemand}}=nothing)
+    shell_demands::Union{Nothing, AbstractDict{Int, ShellBeamDemand}}=nothing,
+    case_rows::Union{Nothing, Vector{Vector{ColumnCaseRow}}}=nothing)
     isempty(struc.asap_model.frame_elements) && throw(ArgumentError("ASAP model is empty. Call `to_asap!(struc)` before sizing."))
 
     skel = struc.skeleton
@@ -390,6 +408,9 @@ function member_group_demands(struc::BuildingStructure;
     # Whether to extract signed end moments for ACI 318-19 slenderness Cm.
     # Only meaningful for columns; beams/struts use the conservative M1=0 default.
     extract_end_moments = member_type === :columns
+    case_rows === nothing || extract_end_moments || throw(ArgumentError(
+        "case_rows are per-case column demands; member_edge_group must be :columns"))
+    par_rows = case_rows === nothing ? nothing : [ColumnCaseRow[] for _ in 1:n_groups]
 
     # Preallocated per-group parallel storage
     par_has  = Vector{Bool}(undef, n_groups)
@@ -454,6 +475,9 @@ function member_group_demands(struc::BuildingStructure;
             case_My_s = zeros(Float64, n_pat); case_My_e = zeros(Float64, n_pat)
             case_Mz_s = zeros(Float64, n_pat); case_Mz_e = zeros(Float64, n_pat)
             saw_first_seg = false; saw_last_seg = false
+            # Per-case compression and moment peaks for `case_rows`.
+            case_Pc = zeros(Float64, n_pat)
+            case_Mx = zeros(Float64, n_pat); case_Myw = zeros(Float64, n_pat)
 
             for (seg_pos, seg_idx) in enumerate(seg_list)
                 seg = struc.segments[seg_idx]
@@ -514,6 +538,9 @@ function member_group_demands(struc::BuildingStructure;
                     Vu_weak = max(Vu_weak, peaks.Vu_weak)
 
                     if extract_end_moments && ci <= n_pat
+                        case_Pc[ci] = max(case_Pc[ci], -min_P)
+                        case_Mx[ci] = max(case_Mx[ci], peaks.Mu)
+                        case_Myw[ci] = max(case_Myw[ci], peaks.Mu_weak)
                         if seg_pos == 1 && child_pos == 1
                             case_My_s[ci] = Float64(f.My[1])
                             case_Mz_s[ci] = Float64(f.Mz[1])
@@ -548,6 +575,15 @@ function member_group_demands(struc::BuildingStructure;
                     if M2y_m > best_M2y
                         best_M2y = M2y_m; best_M1y = M1y_m
                     end
+                    par_rows === nothing || push!(par_rows[g], ColumnCaseRow(
+                        case_Pc[ci], case_Mx[ci], case_Myw[ci], M1x_m, M2x_m, M1y_m, M2y_m))
+                end
+            elseif par_rows !== nothing && L_member > 0
+                # No end moments for Cm: the case peaks stand in for M2 with
+                # M1 = 0, as in the group envelope.
+                for ci in 1:n_pat
+                    push!(par_rows[g], ColumnCaseRow(case_Pc[ci], case_Mx[ci], case_Myw[ci],
+                                                     0.0, case_Mx[ci], 0.0, case_Myw[ci]))
                 end
             end
         end
@@ -630,10 +666,12 @@ function member_group_demands(struc::BuildingStructure;
     Ky_govs   = Float64[]
     Ldefl_govs = Float64[]
 
+    case_rows === nothing || empty!(case_rows)
     for g in 1:n_groups
         par_has[g] || continue
         push!(group_ids, all_group_ids[g])
         g_idx = length(group_ids)
+        case_rows === nothing || push!(case_rows, par_rows[g])
 
         L_t = par_L[g]
         L_d = par_Ldefl[g]

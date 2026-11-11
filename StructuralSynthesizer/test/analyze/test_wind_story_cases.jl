@@ -144,6 +144,9 @@ end
 
     @test length(result.levels) == 2
     @test length(result.cases) == 13
+    @test length(result.centroids) == length(result.levels)
+    @test length(result.displacements) == length(result.cases)
+    @test all(u -> length(u) == struc.asap_model.nDOFs, result.displacements)
     @test issorted(result.levels; by=lv -> lv.elevation_m)
     zmin = minimum(ustrip(u"m", story.elevation) for (_, story) in struc.skeleton.stories)
     @test all(lv -> lv.elevation_m > zmin + 1e-6, result.levels)

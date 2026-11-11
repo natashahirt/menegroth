@@ -1,5 +1,6 @@
 include("asap/diaphragm_mesh.jl")
 include("asap/wall_mesh.jl")
+include("asap/semirigid_mesh.jl")
 include("asap/load_routing.jl")
 include("asap/pattern_cases.jl")
 include("asap/model_sync.jl")

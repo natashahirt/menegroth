@@ -311,6 +311,28 @@ function is_feasible(
 end
 
 """
+    is_feasible(checker::ACIColumnChecker, cache, j, section, material, demand::RCColumnDemandSet, geometry) -> Bool
+
+True when the section passes every case in the set. Stops at the first case
+that fails.
+"""
+function is_feasible(
+    checker::ACIColumnChecker,
+    cache::ACIColumnCapacityCache,
+    j::Int,
+    section::Union{RCColumnSection, RCCircularSection},
+    material::Concrete,
+    demand::RCColumnDemandSet,
+    geometry::ConcreteMemberGeometry
+)::Bool
+    for case in demand.cases
+        _is_feasible_rc_column(checker, cache, j, section, material, case, geometry) ||
+            return false
+    end
+    return true
+end
+
+"""
     _is_feasible_rc_column(checker, cache, j, section, material, demand, geometry) -> Bool
 
 Shared implementation for rectangular and circular columns. Checks:
@@ -436,6 +458,17 @@ function get_feasibility_error_msg(
     
     "No feasible RC sections: Pu=$(Pu) kip, Mux=$(Mux) kip·ft, Muy=$(Muy) kip·ft, " *
     "Lu=$(geometry.Lu), kx=$(geometry.kx), ky=$(geometry.ky)"
+end
+
+"""Error message for a demand set: the case with the largest moment, and the case count."""
+function get_feasibility_error_msg(
+    checker::ACIColumnChecker,
+    demand::RCColumnDemandSet,
+    geometry::ConcreteMemberGeometry
+)
+    worst = argmax(c -> abs(to_kipft(c.Mux)) + abs(to_kipft(c.Muy)), demand.cases)
+    return get_feasibility_error_msg(checker, worst, geometry) *
+           " (worst of $(length(demand.cases)) load cases)"
 end
 
 # ==============================================================================
@@ -674,5 +707,27 @@ function explain_feasibility(
     end
 
     FeasibilityExplanation(all_pass, checks, gov.name, gov.ratio)
+end
+
+"""
+    explain_feasibility(checker::ACIColumnChecker, cache, j, section, material, demand::RCColumnDemandSet, geometry)
+
+The explanation of the governing case: a failing case if any, else the case
+with the highest governing ratio. `passed` is true only when every case passes.
+"""
+function explain_feasibility(
+    checker::ACIColumnChecker,
+    cache::ACIColumnCapacityCache,
+    j::Int,
+    section::Union{RCColumnSection, RCCircularSection},
+    material::Concrete,
+    demand::RCColumnDemandSet,
+    geometry::ConcreteMemberGeometry
+)::FeasibilityExplanation
+    expls = [explain_feasibility(checker, cache, j, section, material, c, geometry)
+             for c in demand.cases]
+    worst = argmax(e -> (!e.passed, e.governing_ratio), expls)
+    return FeasibilityExplanation(all(e -> e.passed, expls), worst.checks,
+                                  worst.governing_check, worst.governing_ratio)
 end
 

@@ -171,3 +171,136 @@ function factored_seismic_cases(analysis::ElfStoryAnalysis, combo::LoadCombinati
     end
     return out
 end
+
+"""Largest stability coefficient on the ELF drift cases. ASCE 7-22 §12.8.7."""
+function _max_drift_theta(analysis::ElfStoryAnalysis)
+    θmax = 0.0
+    found = false
+    for case in analysis.cases
+        case.purpose === :drift || continue
+        for θ in case.θ
+            θ === nothing && throw(ArgumentError(
+                "ordinary wall stage: a drift case has no stability coefficient θ."))
+            isfinite(θ) || throw(ArgumentError(
+                "ordinary wall stage: a drift case has a non-finite θ ($θ)."))
+            θmax = max(θmax, Float64(θ))
+            found = true
+        end
+    end
+    found || throw(ArgumentError(
+        "ordinary wall stage: the ELF analysis has no drift case, so θ is unknown."))
+    return θmax
+end
+
+"""
+    _story_drift_with_pdelta(analysis; risk_category, system, orthogonal=false)
+        -> (checks, multipliers)
+
+Design story drift multiplied by that story's §12.8.7 factor. `rho` is not
+passed: Δa/ρ is the moment-frame limit.
+
+ASCE 7-22 §12.8.7 (corpus: asce-7-22, PDF page 188) and §12.12.1
+(PDF page 194), Table 12.12-1 (PDF page 195).
+"""
+function _story_drift_with_pdelta(analysis::ElfStoryAnalysis;
+                                  risk_category::Symbol,
+                                  system::Symbol,
+                                  orthogonal::Bool=false)
+    orthogonal && return _orthogonal_story_drift(analysis; risk_category, system)
+    checks = SeismicStoryDriftCheck[]
+    multipliers = Float64[]
+    for case in analysis.cases
+        case.purpose === :drift || continue
+        for (i, lv) in enumerate(analysis.levels)
+            m = case.multiplier[i]
+            m === nothing && throw(ArgumentError(
+                "ordinary wall stage: a drift case has no P-delta multiplier."))
+            # ASCE 7-22 §12.8.7 (corpus: asce-7-22, PDF page 188):
+            # displacements may be multiplied by 1.0/(1−θ). The factor is
+            # already 1 where θ ≤ 0.10.
+            Δ = case.design_drift_m[i] * Float64(m)
+            Δa = allowable_story_drift(lv.story_height_m, risk_category, system)
+            push!(multipliers, Float64(m))
+            push!(checks, SeismicStoryDriftCheck(
+                lv.story, case.direction, case.torsion, abs(Δ), Δa,
+                story_drift_is_allowed(Δ, lv.story_height_m, risk_category, system)))
+        end
+    end
+    isempty(checks) && throw(ArgumentError(
+        "ordinary wall stage: the ELF analysis has no drift case to amplify."))
+    return checks, multipliers
+end
+
+"""Largest §12.8.7 factor of the drift cases along `direction` at level `i`."""
+function _axis_drift_multiplier(analysis::ElfStoryAnalysis, direction::Symbol, i::Int)
+    m = 0.0
+    for case in analysis.cases
+        case.purpose === :drift && case.direction === direction || continue
+        mi = case.multiplier[i]
+        mi === nothing && throw(ArgumentError(
+            "ordinary wall stage: a drift case has no P-delta multiplier."))
+        m = max(m, Float64(mi))
+    end
+    m > 0 || throw(ArgumentError(
+        "ordinary wall stage: no drift case along $direction at level $i."))
+    return m
+end
+
+function _orthogonal_story_drift(analysis::ElfStoryAnalysis; risk_category::Symbol,
+                                 system::Symbol)
+    checks = SeismicStoryDriftCheck[]
+    multipliers = Float64[]
+    for effect in seismic_effect_cases(analysis; orthogonal=true, purpose=:drift)
+        # ±QE is the same magnitude. Keep the positive 100% term.
+        first(effect.terms)[2] > 0 || continue
+        for (i, lv) in enumerate(analysis.levels)
+            along = Dict(:x => 0.0, :y => 0.0)
+            for (j, f) in effect.terms
+                c = analysis.cases[j]
+                other = c.direction === :x ? :y : :x
+                along[c.direction] += f * c.design_drift_m[i]
+                along[other] += f * c.design_cross_drift_m[i]
+            end
+            Δa = allowable_story_drift(lv.story_height_m, risk_category, system)
+            for axis in (:x, :y)
+                m = _axis_drift_multiplier(analysis, axis, i)
+                # ASCE 7-22 §12.8.7 (corpus: asce-7-22, PDF page 188).
+                Δ = along[axis] * m
+                push!(multipliers, m)
+                push!(checks, SeismicStoryDriftCheck(
+                    lv.story, axis, effect.torsion, abs(Δ), Δa,
+                    story_drift_is_allowed(Δ, lv.story_height_m, risk_category, system),
+                    effect.label))
+            end
+        end
+    end
+    isempty(checks) && throw(ArgumentError(
+        "ordinary wall stage: the ELF analysis has no drift case to combine."))
+    return checks, multipliers
+end
+
+"""
+ELF level whose story height is this pier.
+
+`Wall.story` is the skeleton story at the bottom of the pier. The matching
+level is the lowest ELF level above that elevation. Its θ is the stability
+coefficient of the story between the two.
+"""
+function _elf_level_index(struc::BuildingStructure, elf::ElfStoryAnalysis, wall)
+    haskey(struc.skeleton.stories, wall.story) || throw(ArgumentError(
+        "ordinary wall stage: wall story $(wall.story) is not on the skeleton."))
+    z_bot = ustrip(u"m", struc.skeleton.stories[wall.story].elevation)
+    best = 0
+    best_z = Inf
+    for (i, lv) in enumerate(elf.levels)
+        lv.elevation_m > z_bot + 1e-6 || continue
+        if lv.elevation_m < best_z
+            best = i
+            best_z = lv.elevation_m
+        end
+    end
+    best == 0 && throw(ArgumentError(
+        "ordinary wall stage: wall story $(wall.story) at z = $(z_bot) m " *
+        "has no ELF level above it."))
+    return best
+end

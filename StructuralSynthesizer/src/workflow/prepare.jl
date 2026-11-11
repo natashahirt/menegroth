@@ -91,6 +91,8 @@ function prepare!(struc::BuildingStructure, params::DesignParameters;
     # Walls as the seismic system are validated before the model is built.
     # Releases stay on the material defaults. A gravity-only building skips this.
     struc.ordinary_wall_result = nothing
+    empty!(struc.stage_diagnostics)
+    empty!(struc.frame_section_floors)
     if params.lateral !== nothing
         prepare_lateral_model!(struc, params.lateral)
     end

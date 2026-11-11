@@ -188,6 +188,7 @@ export allowable_story_drift, story_drift_is_allowed, vertical_seismic_load_effe
 export drift_live_load_factor, drift_expected_gravity_load
 export stability_coefficient, stability_coefficient_limit
 export pdelta_displacement_multiplier
+export OrdinaryConcreteSeismicSystem, ordinary_concrete_seismic_system
 
 # --- Directional-procedure MWFRS wind (ASCE 7-22 Chapter 27) ---
 export wind_figure_2731_roof, wind_wall_cp, wind_design_pressure, wind_surface
@@ -228,7 +229,7 @@ export min_dimension_fire_column, min_cover_fire_column
 export sfrm_thickness_x772, intumescent_thickness_n643, compute_surface_coating
 
 # --- Section interface ---
-export section_area, section_depth, section_width, weight_per_length, bounding_box
+export section_area, self_weight_area, section_depth, section_width, weight_per_length, bounding_box
 export Ix, Iy, Sx, Sy
 export to_asap_section, column_asap_section
 
@@ -257,7 +258,7 @@ export RCCircularSection, circular_compression_zone
 export PixelFrameSection, generate_pixelframe_catalog
 export make_pixelframe_section, make_pixelframe_Y_section, make_pixelframe_X2_section, make_pixelframe_X4_section
 export n_arms
-export RCColumnDemand, RCBeamDemand
+export RCColumnDemand, RCColumnDemandSet, RCBeamDemand
 export standard_rc_columns, standard_rc_circular_columns
 export square_rc_columns, rectangular_rc_columns, low_capacity_rc_columns, high_capacity_rc_columns, all_rc_rect_columns
 export standard_circular_columns, low_capacity_circular_columns, high_capacity_circular_columns

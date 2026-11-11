@@ -1,5 +1,7 @@
 include("lookup_utils.jl")
 include("utils_building_skeleton.jl")
+include("slab_openings.jl")
+include("wall_openings.jl")
 include("initialize.jl")
 include("size.jl")
 include("tributary_accessors.jl")

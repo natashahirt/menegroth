@@ -321,7 +321,7 @@ Routes to the NLP path when `opts.sizing_strategy == :nlp`; otherwise runs the
 discrete MIP catalog optimisation.
 """
 function size_columns(
-    demands::Vector{<:RCColumnDemand},
+    demands::Vector{<:Union{RCColumnDemand,RCColumnDemandSet}},
     geometries::Vector,
     opts::ConcreteColumnOptions;
     catalog::Union{Nothing, AbstractVector} = nothing,
@@ -329,6 +329,7 @@ function size_columns(
     output_flag::Integer = 0,
     cache::Union{Nothing, AbstractCapacityCache} = nothing,
     tc::Union{Nothing, TraceCollector} = nothing,
+    feasible::Union{Nothing, Vector{Vector{Int}}} = nothing,
 )
     n = length(demands)
     n == length(geometries) || throw(ArgumentError("demands and geometries must have same length"))
@@ -385,6 +386,7 @@ function size_columns(
             output_flag = output_flag,
             time_limit_sec = opts.time_limit_sec,
             tc = tc,
+            feasible = feasible,
         )
     else
         result = optimize_discrete(
@@ -397,6 +399,7 @@ function size_columns(
             time_limit_sec = opts.time_limit_sec,
             cache = cache,
             tc = tc,
+            feasible = feasible,
         )
     end
     emit!(tc, :sizing, "size_columns", "", :exit; status=string(result.status))
@@ -420,7 +423,7 @@ installed as a completed design. [`_rc_nlp_result_installable`](@ref) is the
 predicate installers use.
 """
 function _size_columns_nlp(
-    demands::Vector{<:RCColumnDemand},
+    demands::Vector{<:Union{RCColumnDemand,RCColumnDemandSet}},
     geometries::Vector,
     opts::ConcreteColumnOptions,
 )
@@ -734,6 +737,7 @@ function size_beams(
     mip_gap::Real = 1e-4,
     output_flag::Integer = 0,
     tc::Union{Nothing, TraceCollector} = nothing,
+    feasible::Union{Nothing, Vector{Vector{Int}}} = nothing,
 )
     n = length(Mu)
     n == length(Vu)          || throw(ArgumentError("Mu and Vu must have same length"))
@@ -792,6 +796,7 @@ function size_beams(
             output_flag    = output_flag,
             time_limit_sec = opts.time_limit_sec,
             tc             = tc,
+            feasible       = feasible,
         )
     else
         result = optimize_discrete(
@@ -803,6 +808,7 @@ function size_beams(
             output_flag    = output_flag,
             time_limit_sec = opts.time_limit_sec,
             tc             = tc,
+            feasible       = feasible,
         )
     end
     emit!(tc, :sizing, "size_beams", "", :exit; status=string(result.status))
@@ -1374,10 +1380,14 @@ function size_rc_column_nlp(
     opts::NLPColumnOptions;
     Muy = 0.0,
     x0::Union{Nothing,Vector{Float64}} = nothing,
-    demand::Union{Nothing,RCColumnDemand} = nothing,
+    demand::Union{Nothing,RCColumnDemand,RCColumnDemandSet} = nothing,
 )
-    demand = _rc_column_nlp_use_demand(Pu, Mux, Muy, opts, demand)
-    problem = RCColumnNLPProblem(demand, geometry, opts)
+    problem = if demand isa RCColumnDemandSet
+        RCColumnNLPProblem(demand, geometry, opts)
+    else
+        RCColumnNLPProblem(
+            _rc_column_nlp_use_demand(Pu, Mux, Muy, opts, demand), geometry, opts)
+    end
 
     # Grid / NLopt / NonConvex do not consume x0. One solve matches the
     # previous path. Ipopt is local, so try the axial-only basin too.
@@ -1542,9 +1552,9 @@ True when the built `section` can be returned:
 3. `0.01 ≤ ρg ≤ 0.08` — ACI 318-19 §10.6.1.1 (aci-318-19, p. 158) — and
    `ρg ≤ opts.ρ_max`. The practical cap does not replace the ACI limits.
    The checker does not test either ratio; this gate does.
-4. `is_feasible` of the real `ACIColumnChecker` with `problem.demand`
-   (the caller demand when one was supplied, including `M1`/`M2` and
-   `transverse_load`) and `problem.geometry`, on a one-section capacity cache.
+4. `is_feasible` of the real `ACIColumnChecker` with every case on the
+   problem (the caller demand when one was supplied, including `M1`/`M2`
+   and `transverse_load`) and `problem.geometry`, on a one-section capacity cache.
 """
 function _rc_column_as_built_ok(
     problem::RCColumnNLPProblem,
@@ -1567,7 +1577,13 @@ function _rc_column_as_built_ok(
     # Objective coefficients are not used here; MinVolume needs no material data.
     precompute_capacities!(checker, cache, [section], opts.material, MinVolume())
     return is_feasible(checker, cache, 1, section, opts.material,
-                       problem.demand, problem.geometry)
+                       _rc_nlp_checked_demand(problem), problem.geometry)
+end
+
+"""One demand, or a set when the problem carries more than one case."""
+function _rc_nlp_checked_demand(problem::RCColumnNLPProblem)
+    length(problem.cases) == 1 && return problem.demand
+    return RCColumnDemandSet(problem.demand.member_idx, problem.cases)
 end
 
 """Copy of `built` with a different status."""
@@ -1758,7 +1774,7 @@ Size each column from its [`RCColumnDemand`](@ref), keeping `M1`/`M2` and
 `transverse_load` on the NLP problem and the as-built check.
 """
 function size_rc_columns_nlp(
-    demands::Vector{<:RCColumnDemand},
+    demands::Vector{<:Union{RCColumnDemand,RCColumnDemandSet}},
     geometries::Vector{<:ConcreteMemberGeometry},
     opts::NLPColumnOptions,
 )
@@ -1767,8 +1783,10 @@ function size_rc_columns_nlp(
     results = Vector{RCColumnNLPResult}(undef, n)
     for i in 1:n
         d = demands[i]
+        anchor = d isa RCColumnDemandSet ?
+            d.cases[argmax([Float64(to_kip(c.Pu)) for c in d.cases])] : d
         results[i] = size_rc_column_nlp(
-            d.Pu, d.Mux, geometries[i], opts; Muy=d.Muy, demand=d)
+            anchor.Pu, anchor.Mux, geometries[i], opts; Muy=anchor.Muy, demand=d)
     end
     return results
 end

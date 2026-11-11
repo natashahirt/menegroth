@@ -151,6 +151,11 @@ store `section::Union{AbstractSection, Nothing}` non-parametrically).
   (Phase 6); `nothing` ⇒ the material's standard catalog.
 - `supports::Vector{Int}` (= `Int[]`): indices of the host members this level
   lands on; populated by Phase 5's `materialize_level!`.
+- `beam_options::Union{Nothing, BeamOptions}` (= `nothing`): sizing options for
+  this level's member group. `nothing` ⇒ the building-wide `params.beams`.
+  Nothing is merged: the object is used whole. Set it when the level differs
+  from the girders in material, catalog, depth, or deflection limit.
+  See [`size_beams!`](@ref).
 """
 @kwdef mutable struct FramingLevel{T}
     slab_idx::Int
@@ -163,7 +168,15 @@ store `section::Union{AbstractSection, Nothing}` non-parametrically).
     group_id::Union{UInt64, Nothing} = nothing
     catalog_override::Any = nothing
     supports::Vector{Int} = Int[]
+    beam_options::Union{Nothing, StructuralSizer.BeamOptions} = nothing
 end
+
+"""Member-group id of a framing level, or empty when the level is not materialized."""
+level_group_ids(fl::FramingLevel) =
+    fl.group_id === nothing ? UInt64[] : UInt64[fl.group_id]
+
+"""No level on this branch is a rib grillage, so the grillage load path stays off."""
+_grillage_level(slab) = nothing
 
 # -----------------------------------------------------------------------------
 # joist_geometry trait overrides — DERIVED from data-bearing objects

@@ -202,6 +202,9 @@ function compute_column_tributaries!(struc::BuildingStructure{T}) where T
     return struc
 end
 
+"""A flat plate or flat slab carries its area on columns and walls, not on the grid beams."""
+_cell_is_beamless(cell) = cell.floor_type === :flat_plate || cell.floor_type === :flat_slab
+
 """Copy the column and wall shares onto the slabs that own those cells.
 
 A column loop is the polygon [`split_cell_supports`](@ref) already sampled,

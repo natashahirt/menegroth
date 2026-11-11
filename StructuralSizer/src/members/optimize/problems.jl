@@ -1,3 +1,13 @@
+# Fail before solver construction when a continuous problem does not implement
+# the requested public objective. Equivalent optima are not enough: accepting
+# an objective implies that the reported objective has that objective's scale.
+function _require_nlp_objective(objective, supported::Tuple; problem::AbstractString)
+    any(T -> objective isa T, supported) || throw(ArgumentError(
+        "$problem does not support objective=$(nameof(typeof(objective))); " *
+        "expected one of $(nameof.(supported))"))
+    return objective
+end
+
 # ==============================================================================
 # RC Column NLP Problem
 # ==============================================================================
@@ -20,6 +30,9 @@ constraint in [`constraint_fns`](@ref) and by
 than the built section can carry.
 """
 const RC_COLUMN_NLP_MAX_BARS = 32
+
+"""Tie bar number of NLP-built rectangular sections (the `RCColumnSection` default)."""
+const RC_COLUMN_NLP_TIE_BAR = 4
 
 """
     _rc_nlp_delta_ns(Cm, stab) -> Float64
@@ -84,6 +97,9 @@ b_opt, h_opt, ρ_opt = result.minimizer
 """
 struct RCColumnNLPProblem <: AbstractNLPProblem
     demand::RCColumnDemand
+    # Every load case the section must satisfy. One entry for a single demand.
+    # Exact duplicates are dropped. The scalars below are the start guess only.
+    cases::Vector{RCColumnDemand}
     geometry::ConcreteMemberGeometry
     opts::NLPColumnOptions
     
@@ -100,33 +116,72 @@ struct RCColumnNLPProblem <: AbstractNLPProblem
     b_max::Float64
 end
 
+"""Key of the forces one NLP case constrains. Exact duplicates share a key."""
+function _rc_nlp_case_key(d::RCColumnDemand)
+    return (
+        Float64(to_kip(d.Pu)), Float64(to_kipft(d.Mux)), Float64(to_kipft(d.Muy)),
+        Float64(to_kipft(d.M1x)), Float64(to_kipft(d.M2x)),
+        Float64(to_kipft(d.M1y)), Float64(to_kipft(d.M2y)),
+        Float64(d.βdns), d.transverse_load,
+    )
+end
+
+"""Drop exact duplicate cases. Order of the first occurrence is kept."""
+function _unique_rc_nlp_cases(cases)
+    seen = Set{Tuple}()
+    out = RCColumnDemand[]
+    for d in cases
+        k = _rc_nlp_case_key(d)
+        k in seen && continue
+        push!(seen, k)
+        push!(out, d)
+    end
+    isempty(out) && throw(ArgumentError("RC column NLP needs at least one load case"))
+    return out
+end
+
+function _assemble_rc_column_nlp(cases::Vector{RCColumnDemand}, demand::RCColumnDemand,
+                                 geometry::ConcreteMemberGeometry, opts::NLPColumnOptions,
+                                 Pu_kip::Float64, Mux_kipft::Float64, Muy_kipft::Float64)
+    mat = to_material_tuple(opts.material, fy_ksi(opts.rebar_material), Es_ksi(opts.rebar_material))
+    b_min = ustrip(u"inch", opts.min_dim)
+    b_max = ustrip(u"inch", opts.max_dim)
+    return RCColumnNLPProblem(
+        demand, cases, geometry, opts, mat,
+        Pu_kip, Mux_kipft, Muy_kipft,
+        b_min, b_max,
+    )
+end
+
 """
     RCColumnNLPProblem(demand, geometry, opts)
 
-Construct an RC column NLP problem from demand, geometry, and options.
+Construct an RC column NLP problem from one demand, or from every case of an
+[`RCColumnDemandSet`](@ref). A set keeps a separate constraint row for each
+case. The stored `Pu`/`Mu` scalars are the largest compression and the largest
+absolute moments, and they are used only to start the solver.
 """
 function RCColumnNLPProblem(
     demand::RCColumnDemand,
     geometry::ConcreteMemberGeometry,
     opts::NLPColumnOptions
 )
-    # Build material tuple for P-M calculations (from material types)
-    mat = to_material_tuple(opts.material, fy_ksi(opts.rebar_material), Es_ksi(opts.rebar_material))
-    
-    # Convert demands to ACI units (kip, kip-ft)
-    Pu_kip = to_kip(demand.Pu)
-    Mux_kipft = to_kipft(demand.Mux)
-    Muy_kipft = to_kipft(demand.Muy)
-    
-    # Convert dimension bounds to inches
-    b_min = ustrip(u"inch", opts.min_dim)
-    b_max = ustrip(u"inch", opts.max_dim)
-    
-    RCColumnNLPProblem(
-        demand, geometry, opts, mat,
-        Pu_kip, Mux_kipft, Muy_kipft,
-        b_min, b_max
-    )
+    return _assemble_rc_column_nlp(
+        RCColumnDemand[demand], demand, geometry, opts,
+        Float64(to_kip(demand.Pu)), Float64(to_kipft(demand.Mux)), Float64(to_kipft(demand.Muy)))
+end
+
+function RCColumnNLPProblem(
+    set::RCColumnDemandSet,
+    geometry::ConcreteMemberGeometry,
+    opts::NLPColumnOptions,
+)
+    cases = _unique_rc_nlp_cases(set.cases)
+    Pu = maximum(Float64(to_kip(d.Pu)) for d in cases)
+    Mux = maximum(abs(Float64(to_kipft(d.Mux))) for d in cases)
+    Muy = maximum(abs(Float64(to_kipft(d.Muy))) for d in cases)
+    rep = cases[argmax([Float64(to_kip(d.Pu)) for d in cases])]
+    return _assemble_rc_column_nlp(cases, rep, geometry, opts, Pu, Mux, Muy)
 end
 
 
@@ -258,33 +313,66 @@ end
 # AbstractNLPProblem Interface: Constraints
 # ==============================================================================
 
-"""Number of constraints: P-Mx, biaxial Bresler if Muy > 0, then placeable steel."""
+"""P-M rows for one case, before the shared placeable-steel row. Biaxial only when Muy > 0, matching a single-demand problem."""
+function _rc_nlp_case_row_count(d::RCColumnDemand)
+    return to_kipft(d.Muy) > 1e-6 ? 2 : 1
+end
+
+"""Number of constraints: each case's P-M rows, then one placeable-steel row."""
 function n_constraints(p::RCColumnNLPProblem)
-    # P-Mx, +1 for biaxial if Muy > 0, +1 placeable steel (always last)
-    return p.Muy_kipft > 1e-6 ? 3 : 2
+    return sum(_rc_nlp_case_row_count, p.cases; init = 0) + 1
 end
 
 """Human-readable constraint names for solver diagnostics."""
 function constraint_names(p::RCColumnNLPProblem)
-    if p.Muy_kipft > 1e-6
-        return ["P-Mx utilization", "biaxial utilization", "placeable steel"]
-    else
-        return ["P-M utilization", "placeable steel"]
+    names = String[]
+    several = length(p.cases) > 1
+    for (i, d) in enumerate(p.cases)
+        tag = several ? " case $i" : ""
+        if to_kipft(d.Muy) > 1e-6
+            push!(names, "P-Mx utilization$tag", "biaxial utilization$tag")
+        else
+            push!(names, "P-M utilization$tag")
+        end
     end
+    push!(names, "placeable steel")
+    return names
 end
 
 """
-    _rc_column_placeable_steel_util(b, h, ρ, bar_size) -> Float64
+    _rc_column_nlp_fit_bars(b, h, opts) -> Float64
+
+Smooth upper bound on the perimeter bar count that fits a `b × h` section
+(inches), capped at `RC_COLUMN_NLP_MAX_BARS`. Bars sit `cover + d_tie + d_b/2`
+from each face at a center-to-center pitch of at least `d_b` plus the
+ACI 318-19 §25.2.3 clear spacing (corpus: aci-318-19, p. 469). A face of
+center-line length `L` holds at most `L/pitch − 1` bars between its corners,
+so the four faces hold at most `2(L_b + L_h)/pitch`. The proportional split
+in `_generate_bar_positions` can place fewer; [`_nlp_trial_bar_count`](@ref)
+caps at the count that actually builds.
+"""
+function _rc_column_nlp_fit_bars(b, h, opts::NLPColumnOptions)
+    db = ustrip(u"inch", rebar(opts.bar_size).diameter)
+    edge = ustrip(u"inch", opts.cover) +
+           ustrip(u"inch", rebar(RC_COLUMN_NLP_TIE_BAR).diameter) + db / 2
+    pitch = db + _required_clear_spacing_in(db, DEFAULT_AGGREGATE_SIZE)
+    L_b = max(b - 2 * edge, 0.0)
+    L_h = max(h - 2 * edge, 0.0)
+    return min(Float64(RC_COLUMN_NLP_MAX_BARS), 2 * (L_b + L_h) / pitch)
+end
+
+"""
+    _rc_column_placeable_steel_util(b, h, ρ, opts) -> Float64
 
 Required steel over the most steel the built section can carry:
-`ρ·b·h / (RC_COLUMN_NLP_MAX_BARS · A_bar)`. `b`, `h` in inches, `ρ`
-dimensionless, `A_bar` in in², so the ratio is dimensionless. Values above
-1.0 mean [`_build_nlp_trial_section`](@ref) would cap the bar count and
-place less steel than `ρ` asks for.
+`ρ·b·h / (n_fit · A_bar)` with `n_fit` from [`_rc_column_nlp_fit_bars`](@ref).
+`b`, `h` in inches, `ρ` dimensionless, `A_bar` in in², so the ratio is
+dimensionless. Values above 1.0 mean [`_build_nlp_trial_section`](@ref) would
+cap the bar count and place less steel than `ρ` asks for.
 """
-function _rc_column_placeable_steel_util(b, h, ρ, bar_size::Int)
-    A_bar = ustrip(u"inch^2", rebar(bar_size).A)
-    return ρ * b * h / (RC_COLUMN_NLP_MAX_BARS * A_bar)
+function _rc_column_placeable_steel_util(b, h, ρ, opts::NLPColumnOptions)
+    A_bar = ustrip(u"inch^2", rebar(opts.bar_size).A)
+    return ρ * b * h / (_rc_column_nlp_fit_bars(b, h, opts) * A_bar)
 end
 
 """Constraint bounds: all utilizations ≤ 1.0, no lower bound."""
@@ -298,66 +386,104 @@ end
 """
     constraint_fns(p::RCColumnNLPProblem, x) -> Vector{Float64}
 
-Evaluate smooth ACI 318 P-M constraint utilizations for RC column.
-Includes optional slenderness magnification and Bresler biaxial interaction.
-The last entry is the placeable-steel ratio
-([`_rc_column_placeable_steel_util`](@ref)).
+One smooth ACI 318 P-M row per load case (and a biaxial row when that case
+has Muy > 0), then the placeable-steel ratio
+([`_rc_column_placeable_steel_util`](@ref)). Cases are not folded into one
+smooth maximum: below the balance point a lower axial load can govern.
 """
 function constraint_fns(p::RCColumnNLPProblem, x::Vector{Float64})
     b, h, ρ = x
-    steel_util = _rc_column_placeable_steel_util(b, h, ρ, p.opts.bar_size)
+    rows = Float64[]
+    for d in p.cases
+        append!(rows, _rc_rect_nlp_case_rows(p, b, h, ρ, d))
+    end
+    push!(rows, _rc_column_placeable_steel_util(b, h, ρ, p.opts))
+    return rows
+end
 
-    # Effective cover to bar centroid (inches)
-    db = ustrip(u"inch", rebar(p.opts.bar_size).diameter)
-    cover = 1.5 + (p.opts.tie_type == :spiral ? 0.375 : 0.5) + db / 2.0
+"""P-M rows for one case. The placeable-steel row is added once, by [`constraint_fns`](@ref)."""
+function _rc_rect_nlp_case_rows(p::RCColumnNLPProblem, b, h, ρ, demand::RCColumnDemand)
+    Pu_kip = Float64(to_kip(demand.Pu))
+    Mux_kipft = Float64(to_kipft(demand.Mux))
+    Muy_kipft = Float64(to_kipft(demand.Muy))
 
-    # Slenderness magnification (smooth analytical version)
-    Mux_design = p.Mux_kipft
+    # Face to bar centroid (inches), the same edge distance the built section uses.
+    bar = rebar(p.opts.bar_size)
+    db = ustrip(u"inch", bar.diameter)
+    As_bar = ustrip(u"inch^2", bar.A)
+    cover = ustrip(u"inch", p.opts.cover) +
+            ustrip(u"inch", rebar(RC_COLUMN_NLP_TIE_BAR).diameter) + db / 2.0
+
+    # Slenderness. Both axes are magnified with the simplified stiffness of
+    # ACI 318-19 §6.6.4.4.4(a) (corpus: aci-318-19, printed page 79) so this
+    # row stays differentiable. The as-built checker applies the §6.2.5.1
+    # neglect test and the §6.2.5.3 cap (δns ≤ 1.4) with the section's real EI.
+    Mux_design = Mux_kipft
+    Muy_design = Muy_kipft
     stab = 0.0
+    δ_ratio = 0.0
     if p.opts.include_slenderness
-        Ig = b * h^3 / 12.0   # in⁴
         Ec_ksi = 57.0 * sqrt(p.mat.fc * 1000.0)
-        EI = 0.4 * Ec_ksi * Ig / (1.0 + p.opts.βdns)   # kip·in²
-
         Lu_in = ustrip(u"inch", p.geometry.Lu)
-        # Strong-axis NLP path: Mux is bending about x, so use kx (matches
-        # the b·h³/12 Ig used a few lines above).
-        k = Float64(p.geometry.kx)
-        Pc = π^2 * EI / (k * Lu_in)^2   # Euler buckling (kip)
-
-        # Cm factor from end moments
-        M1x = to_kipft(p.demand.M1x)
-        M2x = to_kipft(p.demand.M2x)
-        Cm = abs(M2x) > 1e-6 ? max(0.6 - 0.4 * M1x / M2x, 0.4) : 1.0
-
-        # ACI 318-11 §10.10.6 Eq. (10-12). See `_rc_nlp_delta_ns`.
-        stab = p.Pu_kip / (0.75 * max(Pc, 1e-6))
-        δns = _rc_nlp_delta_ns(Cm, stab)
-        Mux_design = δns * p.Mux_kipft
+        transverse = demand.transverse_load
+        # (Ig, k, end moments). Strong axis first (bending about x).
+        axes = (
+            (b * h^3 / 12.0, Float64(p.geometry.kx),
+             to_kipft(demand.M1x), to_kipft(demand.M2x)),
+            (h * b^3 / 12.0, Float64(p.geometry.ky),
+             to_kipft(demand.M1y), to_kipft(demand.M2y)),
+        )
+        for (i, (Ig, k, M1, M2)) in enumerate(axes)
+            EI = 0.4 * Ec_ksi * Ig / (1.0 + p.opts.βdns)   # kip·in²
+            Pc = π^2 * EI / (max(k, 1e-6) * Lu_in)^2
+            Cm = calc_Cm(M1, M2; transverse_load=transverse)
+            # ACI 318-19 §6.6.4.5.2. See `_rc_nlp_delta_ns` for the smooth pole.
+            stab_i = Pu_kip / (0.75 * max(Pc, 1e-6))
+            δns = _rc_nlp_delta_ns(Cm, stab_i)
+            ratio_i = δns / SECOND_ORDER_MOMENT_RATIO_LIMIT
+            if i == 1
+                Mux_design = δns * Mux_kipft
+                stab = stab_i
+                δ_ratio = ratio_i
+            else
+                Muy_design = δns * Muy_kipft
+                stab = _smooth_max(stab, stab_i; k=80.0)
+                δ_ratio = _smooth_max(δ_ratio, ratio_i; k=80.0)
+            end
+        end
     end
 
     # Smooth analytical P-M utilization (replaces piecewise-linear P-M diagram)
-    util_x = _smooth_rc_pm_util(b, h, ρ, p.Pu_kip, Mux_design, p.mat;
-                                      cover, n_layers=10, tie_type=p.opts.tie_type)
-    # Eq. (10-12) is undefined for Pu ≥ 0.75 Pc. Keep that ratio in the
-    # strength row so an unstable section cannot look nearly feasible.
+    util_x = _smooth_rc_pm_util(b, h, ρ, Pu_kip, Mux_design, p.mat;
+                                      cover, n_layers=10, tie_type=p.opts.tie_type, As_bar)
+    # ACI 318-19 §6.2.5.3: δns ≤ 1.4. Eq. (6.6.4.5.2) is undefined for
+    # Pu ≥ 0.75 Pc; that ratio stays in the same row.
+    if δ_ratio >= 1.0
+        util_x = _smooth_max(util_x, δ_ratio; k=80.0)
+    end
     if stab >= 1.0
         util_x = _smooth_max(util_x, stab; k=80.0)
     end
 
-    if p.Muy_kipft > 1e-6
+    if Muy_kipft > 1e-6
         # Biaxial: Bresler load contour
-        cap = _smooth_rc_pm_capacity(b, h, ρ, p.Pu_kip, p.mat;
-                                           cover, n_layers=10, tie_type=p.opts.tie_type)
+        cap = _smooth_rc_pm_capacity(b, h, ρ, Pu_kip, p.mat;
+                                           cover, n_layers=10, tie_type=p.opts.tie_type, As_bar)
         φMnx = max(cap.φMn_kipft, 1e-6)
-        φMny = φMnx   # Symmetric assumption (conservative for b < h)
-        util_biax = (abs(Mux_design) / φMnx)^1.5 + (abs(p.Muy_kipft) / φMny)^1.5
+        # Weak axis: bending depth is b, compression-block width is h.
+        cap_y = _smooth_rc_pm_capacity(h, b, ρ, Pu_kip, p.mat;
+                                       cover, n_layers=10, tie_type=p.opts.tie_type, As_bar)
+        φMny = max(cap_y.φMn_kipft, 1e-6)
+        util_biax = (abs(Mux_design) / φMnx)^1.5 + (abs(Muy_design) / φMny)^1.5
+        if δ_ratio >= 1.0
+            util_biax = _smooth_max(util_biax, δ_ratio; k=80.0)
+        end
         if stab >= 1.0
             util_biax = _smooth_max(util_biax, stab; k=80.0)
         end
-        return [util_x, util_biax, steel_util]
+        return [util_x, util_biax]
     else
-        return [util_x, steel_util]
+        return [util_x]
     end
 end
 
@@ -388,14 +514,30 @@ end
 
 Bar count [`_build_nlp_trial_section`](@ref) uses for `ρg` at `b_in × h_in`
 (inches): `ceil(ρg·b·h / A_bar)`, at least the tie-type minimum, rounded up
-to even, then capped at `RC_COLUMN_NLP_MAX_BARS`.
+to even, then capped at [`_nlp_max_buildable_bars`](@ref).
 """
 function _nlp_trial_bar_count(b_in::Real, h_in::Real, ρg::Real, opts::NLPColumnOptions)
     As_bar = ustrip(u"inch^2", rebar(opts.bar_size).A)
     n_bars = max(_nlp_min_bars(opts), ceil(Int, ρg * b_in * h_in / As_bar))
     # Even count for a symmetric perimeter arrangement
     n_bars = iseven(n_bars) ? n_bars : n_bars + 1
-    return min(n_bars, RC_COLUMN_NLP_MAX_BARS)
+    return min(n_bars, _nlp_max_buildable_bars(b_in, h_in, opts))
+end
+
+"""
+    _nlp_max_buildable_bars(b_in, h_in, opts) -> Int
+
+Largest even bar count up to `RC_COLUMN_NLP_MAX_BARS` that
+[`_build_nlp_column_section`](@ref) accepts at `b_in × h_in` — in practice the
+ACI 318-19 §25.2.3 clear-spacing limit. Below the tie-type minimum when not
+even that count fits.
+"""
+function _nlp_max_buildable_bars(b_in::Real, h_in::Real, opts::NLPColumnOptions)
+    n_min = _nlp_min_bars(opts)
+    for n in RC_COLUMN_NLP_MAX_BARS:-2:n_min
+        isnothing(_build_nlp_column_section(b_in, h_in, n, opts)) || return n
+    end
+    return n_min - 2
 end
 
 """Minimum bar count for the tie type (4 tied, 6 spiral), as in `_validate_column_section`."""
@@ -419,13 +561,16 @@ function _build_nlp_column_section(
             bar_size = opts.bar_size,
             n_bars = n_bars,
             cover = opts.cover,
-            tie_type = opts.tie_type
+            tie_type = opts.tie_type,
+            tie_bar_size = RC_COLUMN_NLP_TIE_BAR
         )
     catch e
-        # Invalid configuration (spacing too tight, etc.)
+        # Invalid configuration (§25.2.3 spacing, ρg, bar count)
+        (e isa ArgumentError || e isa ErrorException) || rethrow()
         return nothing
     end
 end
+
 
 # ==============================================================================
 # Result Conversion

@@ -23,6 +23,46 @@ using Asap: kip, ksi, to_kip, to_kipft, to_inches, to_sqinches
 # Problem Type
 # ==============================================================================
 
+"""One shear row of an RC beam NLP. `Nu_kip` is compression-positive."""
+struct RCBeamNLPShearCase
+    Vu_kip::Float64
+    Nu_kip::Float64
+    Tu_kipin::Float64
+end
+
+"""`Tu` as kip·in. A bare number is already kip·in."""
+function _torsion_kipin(Tu)
+    Tu isa Unitful.Quantity && return abs(ustrip(u"lbf*inch", Tu)) / 1000.0
+    return abs(Float64(Tu))
+end
+
+"""
+Shear rows the beam NLP constrains.
+
+`shear_cases === nothing` keeps today's single row, built from the scalar
+`Vu`, `Nu`, and `Tu`. A vector is one row per load case: `(Vu, Nu, Tu)`,
+each a bare kip value or a unitful force / moment. `Nu` stays signed.
+"""
+function _beam_nlp_shear_cases(Vu_kip, Nu_kip, Tu_kipin, shear_cases)
+    shear_cases === nothing &&
+        return [RCBeamNLPShearCase(Vu_kip, Nu_kip, Tu_kipin)]
+    out = RCBeamNLPShearCase[]
+    for c in shear_cases
+        if c isa RCBeamNLPShearCase
+            push!(out, c)
+            continue
+        end
+        Vu, Nu, Tu = c
+        push!(out, RCBeamNLPShearCase(
+            Vu isa Unitful.Quantity ? to_kip(Vu) : Float64(Vu),
+            Nu isa Unitful.Quantity ? to_kip(Nu) : Float64(Nu),
+            _torsion_kipin(Tu),
+        ))
+    end
+    isempty(out) && throw(ArgumentError("RC beam NLP shear_cases is empty"))
+    return out
+end
+
 """
     RCBeamNLPProblem <: AbstractNLPProblem
 
@@ -75,17 +115,23 @@ struct RCBeamNLPProblem <: AbstractNLPProblem
     # Signed axial (kip). Positive = compression (Eq. 11-4); negative = tension
     # (Eq. 11-8, Vc ≥ 0). 0.0 = shear and flexure only (Eq. 11-3).
     Nu_kip::Float64
+    # One shear (and, when `Tu_kipin > 0`, torsion) row per load case.
+    # The scalars above are the first case, kept for the single-row API.
+    shear_cases::Vector{RCBeamNLPShearCase}
 end
 
 """
-    RCBeamNLPProblem(Mu, Vu, opts; Tu=0.0, Nu=0.0)
+    RCBeamNLPProblem(Mu, Vu, opts; Tu=0.0, Nu=0.0, shear_cases=nothing)
 
 Construct an RC beam NLP problem from factored demands and options.
 Converts Unitful inputs to bare ACI units (kip, kip-ft, inches, psi).
 `Nu` is signed: compression positive (ACI 318-11 Eq. 11-4), tension
 negative (Eq. 11-8). Public default is `Nu = 0` (no axial modifier).
+`shear_cases` replaces that one shear row with one row per load case.
+Each case is `(Vu, Nu, Tu)`. Flexure stays the single `Mu` envelope.
 """
-function RCBeamNLPProblem(Mu, Vu, opts::NLPBeamOptions; Tu=0.0, Nu=0.0)
+function RCBeamNLPProblem(Mu, Vu, opts::NLPBeamOptions; Tu=0.0, Nu=0.0,
+                          shear_cases=nothing)
     fc = fc_ksi(opts.material)
     fy = fy_ksi(opts.rebar_material)
     Es = Es_ksi(opts.rebar_material)
@@ -113,15 +159,11 @@ function RCBeamNLPProblem(Mu, Vu, opts::NLPBeamOptions; Tu=0.0, Nu=0.0)
     fyt_psi = fy_psi  # Assume stirrup grade = main rebar grade for NLP
     ρ_min_aci = max(3.0 * sqrt(fc_psi) / fy_psi, 200.0 / fy_psi)
 
-    # Torsion demand
-    Tu_kipin_val = if Tu isa Unitful.Quantity
-        abs(ustrip(u"lbf*inch", Tu)) / 1000.0
-    else
-        abs(Float64(Tu))
-    end
+    Tu_kipin_val = _torsion_kipin(Tu)
 
     # Signed axial: preserve sign (tension is negative).
     Nu_kip_val = Nu isa Unitful.Quantity ? to_kip(Nu) : Float64(Nu)
+    cases = _beam_nlp_shear_cases(Vu_kip, Nu_kip_val, Tu_kipin_val, shear_cases)
 
     RCBeamNLPProblem(
         Mu_kipft, Vu_kip, opts,
@@ -131,6 +173,7 @@ function RCBeamNLPProblem(Mu, Vu, opts::NLPBeamOptions; Tu=0.0, Nu=0.0)
         b_min, b_max, h_min, h_max,
         Tu_kipin_val,
         Nu_kip_val,
+        cases,
     )
 end
 
@@ -185,22 +228,28 @@ end
 # AbstractNLPProblem Interface: Constraints
 # ==============================================================================
 
-"""Number of constraints: 4 base + 1 torsion (if Tu > 0)."""
+"""Number of constraints: flexure, one shear per case, strain, ρmin, plus torsion per case with Tu > 0."""
 function n_constraints(p::RCBeamNLPProblem)
-    nc = 4
-    p.Tu_kipin > 0 && (nc += 1)  # torsion adequacy (ACI §11.5.3.1)
-    return nc
+    return 3 + length(p.shear_cases) + count(c -> c.Tu_kipin > 0, p.shear_cases)
 end
 
 """Human-readable constraint names for solver diagnostics."""
 function constraint_names(p::RCBeamNLPProblem)
-    names = [
-        "flexure utilization",
-        "shear adequacy",
-        "net tensile strain (εt ≥ 0.005)",
-        "min reinforcement (§10.5.1)",
-    ]
-    p.Tu_kipin > 0 && push!(names, "torsion adequacy (§11.5.3.1)")
+    names = String["flexure utilization"]
+    if length(p.shear_cases) == 1
+        push!(names, "shear adequacy")
+    else
+        for i in eachindex(p.shear_cases)
+            push!(names, "shear adequacy (case $i)")
+        end
+    end
+    push!(names, "net tensile strain (εt ≥ 0.005)")
+    push!(names, "min reinforcement (§10.5.1)")
+    for (i, c) in enumerate(p.shear_cases)
+        c.Tu_kipin > 0 || continue
+        push!(names, length(p.shear_cases) == 1 ?
+            "torsion adequacy (§11.5.3.1)" : "torsion adequacy (case $i)")
+    end
     return names
 end
 
@@ -242,14 +291,18 @@ function constraint_fns(p::RCBeamNLPProblem, x::Vector{Float64})
 
     util_flexure = p.Mu_kipft / max(φMn_kipft, 1e-6)
 
-    # --- Shear adequacy (signed Nu via Eq. 11-4 / 11-8) ---
+    # --- Shear adequacy, one row per load case (signed Nu via Eq. 11-4 / 11-8) ---
     # ACI 318-11 §11.2.1.2 Eq. (11-4) / §11.2.2.3 Eq. (11-8) —
     # corpus: aci-318-11, pages 168 / 170. Vc ≥ 0.
+    # Each case pairs its own Vu with the axial at that case. Pairing the
+    # largest compression with the largest shear raises Vc and is unconservative.
     sqrt_fc = sqrt(p.fc_psi)
     Ag_in2 = b * h
-    φVn_max_kip = _φVn_with_axial(b, d, Ag_in2, Ag_in2, p.fc_psi, p.λ, p.Nu_kip)
-
-    util_shear = p.Vu_kip / max(φVn_max_kip, 1e-6)
+    constraints = Float64[util_flexure]
+    for sc in p.shear_cases
+        φVn_max_kip = _φVn_with_axial(b, d, Ag_in2, Ag_in2, p.fc_psi, p.λ, sc.Nu_kip)
+        push!(constraints, sc.Vu_kip / max(φVn_max_kip, 1e-6))
+    end
 
     # --- Net tensile strain (ACI 318-11 §10.3.5) ---
     # Beams must have εt ≥ 0.004 (absolute min).  We target εt ≥ 0.005
@@ -260,21 +313,21 @@ function constraint_fns(p::RCBeamNLPProblem, x::Vector{Float64})
     # --- Minimum reinforcement (ACI 318-11 §10.5.1) ---
     # ρ_min = max(3√f'c / fy, 200 / fy)  (precomputed in constructor)
     util_as_min = p.ρ_min_aci / max(ρ, 1e-8)
-
-    constraints = [util_flexure, util_shear, util_strain, util_as_min]
+    push!(constraints, util_strain, util_as_min)
 
     # --- Torsion adequacy (ACI 318-11 §11.5.3.1) ---
     # Shear-torsion interaction: √[(Vu/(bw·d))² + (Tu·ph/(1.7·Aoh²))²] ≤ φ·(Vc/(bw·d) + 8·√f'c)
-    # Already a smooth function (sqrt of sum of squares).
-    if p.Tu_kipin > 0
-        c_ctr = p.cover_to_stirrup_ctr_in
+    # One row per case that has torsion, using that case's Vu and Tu.
+    c_ctr = p.cover_to_stirrup_ctr_in
+    for sc in p.shear_cases
+        sc.Tu_kipin > 0 || continue
         xo = max(b - 2*c_ctr, 0.1)   # inner width to stirrup centerline
         yo = max(h - 2*c_ctr, 0.1)   # inner height to stirrup centerline
         Aoh = xo * yo
         ph  = 2 * (xo + yo)
 
-        Vu_lb   = p.Vu_kip * 1000.0
-        Tu_lbin = p.Tu_kipin * 1000.0
+        Vu_lb   = sc.Vu_kip * 1000.0
+        Tu_lbin = sc.Tu_kipin * 1000.0
 
         τv = Vu_lb / max(b * d, 0.01)
         τt = Tu_lbin * ph / max(1.7 * Aoh^2, 0.01)
@@ -283,8 +336,7 @@ function constraint_fns(p::RCBeamNLPProblem, x::Vector{Float64})
         Vc_stress = 2 * p.λ * sqrt_fc        # Vc/(bw·d) per unit area
         rhs = 0.75 * (Vc_stress + 8 * sqrt_fc)
 
-        util_torsion = lhs / max(rhs, 1e-6)
-        push!(constraints, util_torsion)
+        push!(constraints, lhs / max(rhs, 1e-6))
     end
 
     return constraints

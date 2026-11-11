@@ -33,11 +33,14 @@ reinforcement checks. When omitted, the height is this pier plus every
 `wall_above`. The bearing unsupported height stays this story's height: the
 floors brace the pier, and `boundary` supplies `k`.
 
-The empirical method's eccentricity is out of plane (the resultant within the
-middle third of the thickness, §11.5.3.1). This action does not carry an
-out-of-plane moment, so the resultant is taken through the thickness (`e = 0`).
-The in-plane moment is the axial-flexure check. A tensile axial force makes
-the bearing method inapplicable; that result is recorded as a failure.
+`Moop` is the factored slab moment about the weak axis, at this story.
+Inside the middle third (`e ≤ t/6`) the empirical bearing method applies
+with that eccentricity (ACI 318-19 §11.5.3.1). Outside it, the recorded
+check is the nonsway magnified moment of §6.6.4.5, then out-of-plane
+axial-flexure. The unsupported length of that magnifier is this story's
+height. A tensile axial force makes the bearing method inapplicable when
+the resultant is still inside the middle third; that result is recorded
+as a failure.
 
 `ρt_strength`, when passed, is the transverse ratio required for shear
 strength. §11.6.2(a) says the vertical minimum need not exceed it. The
@@ -97,13 +100,20 @@ function check_ordinary_wall(wall::Wall, actions::AbstractVector{CombinedWallAct
         end
         flexure = check_wall_inplane_flexure(section, material, action.N, action.M)
         push!(records, _ordinary_record(wall_index, wall.story, direction, case, action, flexure))
-        # e = M/N from the slab moment. §11.5.3.1 applies inside the middle
-        # third and records a failure outside it. lu is the plan length.
-        bearing = check_wall_bearing_empirical(section, material.concrete, action.N;
-                                               e=_out_of_plane_eccentricity(action.N, Moop),
-                                               lc=story_height, lu=lw,
-                                               boundary=boundary, foundation=false)
-        push!(records, _ordinary_record(wall_index, wall.story, direction, case, action, bearing))
+        e = _out_of_plane_eccentricity(action.N, Moop)
+        # Inside t/6 the simplified method applies with this eccentricity.
+        # Outside it, §11.5.3.1 does not, and the magnified weak-axis moment does.
+        # lu of the bearing check is the plan length. The magnifier uses the story height.
+        if e <= section.t / 6
+            bearing = check_wall_bearing_empirical(section, material.concrete, action.N;
+                                                   e=e, lc=story_height, lu=lw,
+                                                   boundary=boundary, foundation=false)
+            push!(records, _ordinary_record(wall_index, wall.story, direction, case, action, bearing))
+        else
+            push!(records, _ordinary_record(
+                wall_index, wall.story, direction, case, action,
+                _out_of_plane_strength(section, material, action.N, Moop, story_height)))
+        end
         if assembly !== nothing && assembly.joined
             # Reported only. ratio 0 keeps a passing design from treating
             # this as the governing strength check.
@@ -317,23 +327,40 @@ function _out_of_plane_eccentricity(N, Moop)
 end
 
 """
-True when `Moop` keeps every action's resultant in the middle third.
-
-A moment of 1 N·m or less is concentric. Compression of 1 N or less, with
-a real moment, is outside the wall: `e = M/N` uses a 1 N floor so a pure
-moment is not divided by zero.
-
-# Citation
-ACI 318-19 §11.5.3.1 (corpus: aci-318-19, PDF page 170).
+Magnified weak-axis strength. Instability of §6.6.4.5.2 is a failure.
+`Ig` is the pier bent through its thickness, `lw · t³ / 12`. `Ec` comes from
+the concrete's density (ACI 318-19 §19.2.2.1(a)), so lightweight concrete
+is not given normalweight stiffness.
 """
-function _resultant_in_middle_third(t_m::Real, actions, Moop)
-    M = abs(ustrip(u"N*m", Moop))
-    M <= 1.0 && return true
-    limit = t_m / 6
+function _out_of_plane_strength(section::WallSection, material, N, Moop, lu)
+    lw = ustrip(u"m", section.lw)
+    t = ustrip(u"m", section.t)
+    Ig = lw * t^3 / 12
+    fc = ustrip(u"Pa", material.concrete.fc′)
+    Ec = StructuralSizer.wall_modulus_si(fc, ustrip(u"kg/m^3", material.concrete.ρ))
+    Pu = N isa Unitful.Quantity ? ustrip(u"N", N) : Float64(N)
+    M = ustrip(u"N*m", Moop)
+    mag = StructuralSizer.nonsway_slenderness_moment(Pu, M, Ec, Ig, ustrip(u"m", lu))
+    if !mag.stable
+        return CheckResult("out-of-plane slenderness: Pu ≥ 0.75 Pc", false,
+                           Inf, Pu, 0.75 * mag.Pc, "ACI 318-19 6.6.4.5.2")
+    end
+    return StructuralSizer.check_wall_out_of_plane_axial_flexure(
+        section, material, N, mag.Mc * u"N*m")
+end
+
+"""
+True when every action is inside the middle third, or the magnified
+weak-axis strength passes for each action outside it.
+
+A moment of 1 N·m or less is concentric. The unsupported length is `hw`.
+"""
+function _out_of_plane_passes(lw, t, ρl, ρt, material, actions, Moop, hw)
+    ustrip(u"N*m", Moop) <= 1.0 && return true
+    section = WallSection(lw * u"m", t * u"m"; ρl=ρl, ρt=ρt)
     for a in actions
-        N = a.N isa Unitful.Quantity ? ustrip(u"N", a.N) : Float64(a.N)
-        e = M / max(N, 1.0)
-        e <= limit || return false
+        _out_of_plane_eccentricity(a.N, Moop) <= section.t / 6 && continue
+        _out_of_plane_strength(section, material, a.N, Moop, hw).passed || return false
     end
     return true
 end
@@ -351,10 +378,10 @@ then walks upward from the §11.6.2 floor and stops at the first value
 that passes every action. Returns the transverse ratio required for
 shear strength, or `nothing` when the shear is above the §11.5.4.2 cap.
 
-`Moop` is the factored slab moment about the weak axis. The search uses
-the in-plane checks when that resultant stays in the middle third of the
-thickness. Outside that third, ACI 318-19 §11.5.3.1 does not apply and
-this slice throws rather than size the magnified weak-axis moment.
+`Moop` is the factored slab moment about the weak axis. Inside the middle
+third the search uses the in-plane checks. Outside it, `ρl` also has to
+pass the magnified weak-axis strength (ACI 318-19 §6.6.4.5). The
+unsupported length of that magnifier is `hw`.
 
 A ratio the wall already carries is not reduced. A demand the grid cannot
 cover leaves the wall at the top of the grid.
@@ -372,13 +399,6 @@ function select_ordinary_wall_reinforcement!(wall::Wall, actions, material; hw::
     t > 0 || throw(ArgumentError("ordinary wall reinforcement: the thickness must be positive."))
     hw_m = ustrip(u"m", hw)
     hw_m > 0 || throw(ArgumentError("ordinary wall reinforcement: the wall height must be positive."))
-    # ACI 318-19 §11.5.3.1 (corpus: aci-318-19, PDF page 170): the simplified
-    # method applies when the resultant lies in the middle third, e ≤ t/6.
-    _resultant_in_middle_third(t, actions, Moop) || throw(ArgumentError(
-        "ordinary wall reinforcement: the factored resultant is outside the middle " *
-        "third of the wall thickness, so ACI 318-19 §11.5.3.1 does not apply, and " *
-        "the magnified weak-axis check is not in this slice " *
-        "(corpus: aci-318-19, PDF page 170)."))
     fc = ustrip(u"Pa", material.concrete.fc′)
     fyt = ustrip(u"Pa", material.transverse.Fy)
     λ = material.concrete.λ
@@ -397,7 +417,8 @@ function select_ordinary_wall_reinforcement!(wall::Wall, actions, material; hw::
     chosen_l = floor_l
     for ρl in _rho_l_candidates(floor_l)
         chosen_l = ρl
-        _flexure_passes!(lw, t, ρl, material, order) && break
+        _flexure_passes!(lw, t, ρl, material, order) || continue
+        _out_of_plane_passes(lw, t, ρl, wall.ρt, material, order, Moop, hw) && break
     end
     wall.ρl = chosen_l
     return ρt_strength

@@ -20,6 +20,22 @@ struct ColumnCaseRow
 end
 
 """
+    BeamShearCase
+
+One beam's shear in one pattern case, all from that case [N, N·m].
+
+`Vu` is the largest |Vy| (strong-axis shear). `Nu` is the axial at that
+same station, compression-positive, so a gravity case is not credited with
+another case's compression. `Tu` is torsion; station diagrams carry none,
+so gravity rows are 0.
+"""
+struct BeamShearCase
+    Vu::Float64
+    Nu::Float64
+    Tu::Float64
+end
+
+"""
     build_member_groups!(struc::BuildingStructure; member_type::Symbol=:beams)
 
 Populate `struc.member_groups` from the specified member collection.
@@ -215,6 +231,39 @@ function _strong_weak_peaks(My, Vy, Mz, Vz)
     return (Mu = mu, Vu = vu, Mu_weak = mu_w, Vu_weak = vu_w)
 end
 
+"""Largest |Vy| and the axial at that station. `Nu` is compression-positive."""
+function _concurrent_strong_shear(P, Vy)
+    isempty(Vy) && return 0.0, 0.0
+    i_at = first(eachindex(Vy))
+    vu = abs(Float64(Vy[i_at]))
+    for i in eachindex(Vy)
+        a = abs(Float64(Vy[i]))
+        a > vu || continue
+        vu = a
+        i_at = i
+    end
+    # Asap axial is tension-positive. RC shear Nu is compression-positive.
+    Nu = checkbounds(Bool, P, i_at) ? -Float64(P[i_at]) : 0.0
+    return vu, Nu
+end
+
+"""
+Drop shear rows another row covers: no more `Vu`, no less compression `Nu`,
+and the same `Tu`. Vc rises with compression in ACI 318-11 Eq. (11-4) and
+Eq. (11-8), so a covered row never governs a shear constraint.
+"""
+function _prune_covered_shear(rows::Vector{BeamShearCase})
+    kept = BeamShearCase[]
+    for (i, r) in enumerate(rows)
+        covered = any(enumerate(rows)) do (j, o)
+            j != i && o.Tu == r.Tu && o.Vu >= r.Vu && o.Nu <= r.Nu &&
+                (o.Vu > r.Vu || o.Nu < r.Nu || j < i)
+        end
+        covered || push!(kept, r)
+    end
+    return kept
+end
+
 function _strong_weak_peaks(f::AbstractVector{<:Real})
     n = length(f)
     mu = 0.0
@@ -352,7 +401,8 @@ function member_group_demands(struc::BuildingStructure;
     resolution::Int=200,
     params::DesignParameters=DesignParameters(),
     shell_demands::Union{Nothing, AbstractDict{Int, ShellBeamDemand}}=nothing,
-    case_rows::Union{Nothing, Vector{Vector{ColumnCaseRow}}}=nothing)
+    case_rows::Union{Nothing, Vector{Vector{ColumnCaseRow}}}=nothing,
+    beam_shear_cases::Union{Nothing, Vector{Vector{BeamShearCase}}}=nothing)
     isempty(struc.asap_model.frame_elements) && throw(ArgumentError("ASAP model is empty. Call `to_asap!(struc)` before sizing."))
 
     skel = struc.skeleton
@@ -410,7 +460,11 @@ function member_group_demands(struc::BuildingStructure;
     extract_end_moments = member_type === :columns
     case_rows === nothing || extract_end_moments || throw(ArgumentError(
         "case_rows are per-case column demands; member_edge_group must be :columns"))
+    beam_shear_cases === nothing || member_type === :beams || throw(ArgumentError(
+        "beam_shear_cases are per-case beam shears; member_edge_group must be beams"))
     par_rows = case_rows === nothing ? nothing : [ColumnCaseRow[] for _ in 1:n_groups]
+    par_shear = beam_shear_cases === nothing ? nothing :
+        [BeamShearCase[] for _ in 1:n_groups]
 
     # Preallocated per-group parallel storage
     par_has  = Vector{Bool}(undef, n_groups)
@@ -478,6 +532,11 @@ function member_group_demands(struc::BuildingStructure;
             # Per-case compression and moment peaks for `case_rows`.
             case_Pc = zeros(Float64, n_pat)
             case_Mx = zeros(Float64, n_pat); case_Myw = zeros(Float64, n_pat)
+            # Per-case shear for `beam_shear_cases`. An unshored composite
+            # diagram is one more case past n_pat. -1 marks a case not seen.
+            n_shear = n_pat + (staged === nothing ? 0 : 1)
+            case_Vu = fill(-1.0, n_shear)
+            case_Nu = zeros(Float64, n_shear)
 
             for (seg_pos, seg_idx) in enumerate(seg_list)
                 seg = struc.segments[seg_idx]
@@ -534,6 +593,13 @@ function member_group_demands(struc::BuildingStructure;
                         Mux_neg = max(Mux_neg, hog)
                     end
                     Vu_strong = max(Vu_strong, peaks.Vu)
+                    if par_shear !== nothing && member_type === :beams
+                        vu_i, Nu_i = _concurrent_strong_shear(f.P, f.Vy)
+                        if vu_i > case_Vu[ci]
+                            case_Vu[ci] = vu_i
+                            case_Nu[ci] = Nu_i
+                        end
+                    end
                     Muy = max(Muy, peaks.Mu_weak)
                     Vu_weak = max(Vu_weak, peaks.Vu_weak)
 
@@ -586,6 +652,12 @@ function member_group_demands(struc::BuildingStructure;
                                                      0.0, case_Mx[ci], 0.0, case_Myw[ci]))
                 end
             end
+            if par_shear !== nothing && member_type === :beams
+                for ci in eachindex(case_Vu)
+                    case_Vu[ci] < 0 && continue
+                    push!(par_shear[g], BeamShearCase(case_Vu[ci], case_Nu[ci], 0.0))
+                end
+            end
         end
 
         par_has[g]  = has_any
@@ -613,6 +685,14 @@ function member_group_demands(struc::BuildingStructure;
                 par_Mux_neg[g] = max(par_Mux_neg[g], d.Mu_neg)
                 par_Mux[g] = max(par_Mux[g], d.Mu_pos, d.Mu_neg)
                 par_Vus[g] = max(par_Vus[g], d.Vu)
+            end
+            # Shell demands have no axial. A shear they raise above the frame
+            # cases is one row with Nu = 0, so it is not credited with frame
+            # compression.
+            if par_shear !== nothing
+                peak = isempty(par_shear[g]) ? 0.0 : maximum(c.Vu for c in par_shear[g])
+                par_Vus[g] > peak + 1.0 &&
+                    push!(par_shear[g], BeamShearCase(par_Vus[g], 0.0, 0.0))
             end
         end
     end
@@ -667,11 +747,14 @@ function member_group_demands(struc::BuildingStructure;
     Ldefl_govs = Float64[]
 
     case_rows === nothing || empty!(case_rows)
+    beam_shear_cases === nothing || empty!(beam_shear_cases)
     for g in 1:n_groups
         par_has[g] || continue
         push!(group_ids, all_group_ids[g])
         g_idx = length(group_ids)
         case_rows === nothing || push!(case_rows, par_rows[g])
+        beam_shear_cases === nothing ||
+            push!(beam_shear_cases, _prune_covered_shear(par_shear[g]))
 
         L_t = par_L[g]
         L_d = par_Ldefl[g]

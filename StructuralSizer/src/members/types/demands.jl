@@ -176,12 +176,15 @@ struct RCColumnDemand{T} <: AbstractDemand
     M2y::T                 # Larger signed end moment about y-axis
     βdns::Float64          # Sustained load ratio (slenderness)
     transverse_load::Bool  # ACI 318-19 §6.6.4.5.3 — forces Cm = 1.0
+    # `false` skips the §6.6 moment magnifier. Row F forces already include
+    # story P-delta (ACI 318-19 §6.7); magnifying them again double-counts.
+    magnify::Bool
 end
 
 """
     RCColumnDemand(idx; Pu=0.0, Mux=nothing, Muy=nothing,
                    M1x=0.0, M2x=nothing, M1y=0.0, M2y=nothing,
-                   βdns=0.6, transverse_load=false) -> RCColumnDemand
+                   βdns=0.6, transverse_load=false, magnify=true) -> RCColumnDemand
 
 Keyword constructor with defaults for [`RCColumnDemand`](@ref).
 
@@ -191,6 +194,8 @@ When `M2x`/`M2y` are `nothing`, they default to `Mux`/`Muy`.
 ACI 318-19 §6.6.4.4.4 / historically ACI 318-11 §10.10.6.2).
 `transverse_load` defaults to `false`; set `true` for columns with
 transverse loads between supports so `calc_Cm` returns 1.0.
+`magnify` defaults to `true`. Set `false` when the moments already come
+from a second-order analysis (ACI 318-19 §6.7) so §6.6 is not applied again.
 """
 function RCColumnDemand(idx::Int;
     Pu = 0.0,
@@ -202,6 +207,7 @@ function RCColumnDemand(idx::Int;
     M2y = nothing,
     βdns = 0.6,
     transverse_load::Bool = false,
+    magnify::Bool = true,
 )
     if isnothing(Mux)
         if isnothing(M2x)
@@ -229,7 +235,7 @@ function RCColumnDemand(idx::Int;
                      typeof(M1x), typeof(M2x), typeof(M1y), typeof(M2y))
     RCColumnDemand{T}(idx, T(Pu), T(Mux), T(Muy),
                       T(M1x), T(M2x), T(M1y), T(M2y),
-                      Float64(βdns), transverse_load)
+                      Float64(βdns), transverse_load, magnify)
 end
 
 """

@@ -163,6 +163,7 @@ _rf_worst(members) = maximum(c.governing_ratio for c in members)
     shears = Float64[]
     for sds in (0.5, 1.0)
         empty!(struc.frame_section_floors)
+        empty!(struc.frame_floor_demands)
         result = design_ordinary_walls!(struc, _rf_params(sds))
         members = result.frame_members
         @test !isempty(members)
@@ -184,6 +185,7 @@ _rf_worst(members) = maximum(c.governing_ratio for c in members)
     fail_sds = nothing
     for sds in (2.0, 3.0, 4.0, 5.0)
         empty!(struc.frame_section_floors)
+        empty!(struc.frame_floor_demands)
         result = design_ordinary_walls!(struc, _rf_params(sds))
         members = result.frame_members
         r = _rf_worst(members)
@@ -205,9 +207,14 @@ _rf_worst(members) = maximum(c.governing_ratio for c in members)
 
     _RF.snapshot!(struc, :row_f_floor)
     saved = copy(struc.frame_section_floors)
+    saved_rows = Dict(gid => copy(rows) for (gid, rows) in struc.frame_floor_demands)
     empty!(struc.frame_section_floors)
+    empty!(struc.frame_floor_demands)
     _RF.restore!(struc, :row_f_floor)
     @test keys(struc.frame_section_floors) == keys(saved)
+    @test keys(struc.frame_floor_demands) == keys(saved)
+    @test keys(struc.frame_floor_demands) == keys(saved_rows)
+    @test all(!isempty(rows) for rows in values(struc.frame_floor_demands))
     for k in keys(saved)
         @test _RF._sections_identical(struc.frame_section_floors[k], saved[k])
     end
@@ -232,6 +239,7 @@ _rf_worst(members) = maximum(c.governing_ratio for c in members)
     # The same light sections, with a catalog that has nowhere to go, stay failing.
     _rf_install!(struc, colsec, beamsec)
     empty!(struc.frame_section_floors)
+    empty!(struc.frame_floor_demands)
     capped = _rf_params(fail_sds;
         columns=ConcreteColumnOptions(material=NWC_4000, rebar_material=Rebar_60,
                                       custom_catalog=[colsec]),
@@ -242,4 +250,61 @@ _rf_worst(members) = maximum(c.governing_ratio for c in members)
     @test isempty(struc.frame_section_floors)
     @test any(c -> !c.passed && occursin("not resized", c.detail), held.frame_members)
     @test !haskey(struc.stage_diagnostics, :wall_members)
+end
+
+@testset "Row F rows constrain NLP member sizing" begin
+    struc = _rf_office()
+    cat = _RQ.square_rc_columns()
+    colsec = cat[argmin(ustrip(u"inch^2", s.Ag) + 1000.0 * s.ρg for s in cat)]
+    beamsec = RCBeamSection(b=12.0u"inch", h=24.0u"inch", bar_size=8, n_bars=3)
+    nlp_params(sds) = _rf_params(sds;
+        columns=ConcreteColumnOptions(material=NWC_4000, rebar_material=Rebar_60,
+                                      sizing_strategy=:nlp),
+        beams=ConcreteBeamOptions(material=NWC_4000, rebar_material=Rebar_60,
+                                  sizing_strategy=:nlp))
+    to_asap!(struc; params=nlp_params(1.0), diaphragms=:rigid)
+    _rf_install!(struc, colsec, beamsec)
+
+    failed = nothing
+    fail_sds = nothing
+    for sds in (2.0, 3.0, 4.0, 5.0)
+        empty!(struc.frame_floor_demands)
+        result = design_ordinary_walls!(struc, nlp_params(sds))
+        any(!c.passed for c in result.frame_members) || continue
+        failed = result.frame_members
+        fail_sds = sds
+        break
+    end
+    @test fail_sds !== nothing
+
+    # NLP has no catalog: no section floor, only the rows, kept as constraints.
+    @test isempty(struc.frame_section_floors)
+    @test !isempty(struc.frame_floor_demands)
+    @test all(!isempty(rows) for rows in values(struc.frame_floor_demands))
+    for c in failed
+        c.passed && continue
+        @test occursin("NLP member sizing", c.detail)
+    end
+    column_rows = [d for rows in values(struc.frame_floor_demands)
+                   for (_, d) in rows if d isa RCColumnDemand]
+    @test all(d -> !d.magnify, column_rows)
+
+    # A second check adds rows and keeps the earlier ones.
+    before = Dict(gid => copy(rows) for (gid, rows) in struc.frame_floor_demands)
+    design_ordinary_walls!(struc, nlp_params(fail_sds))
+    for (gid, rows) in before
+        @test all(row -> row in struc.frame_floor_demands[gid], rows)
+    end
+
+    # The NLP resize must pass every stored row (it throws otherwise) and
+    # lowers the worst row F ratio.
+    worst_before = _rf_worst(failed)
+    params = nlp_params(fail_sds)
+    haskey(struc.frame_floor_demands, UInt64(1)) &&
+        size_columns!(struc, params.columns; reanalyze=false)
+    haskey(struc.frame_floor_demands, UInt64(2)) &&
+        size_beams!(struc, params.beams; reanalyze=false)
+    Asap.process!(struc.asap_model)
+    again = design_ordinary_walls!(struc, params)
+    @test _rf_worst(again.frame_members) < worst_before
 end

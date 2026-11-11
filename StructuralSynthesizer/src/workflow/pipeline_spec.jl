@@ -139,7 +139,8 @@ end
 
 """
 Run the ordinary-wall stage. When the row F frame check sets a new section
-floor, size the members again and check the frame on those sections. Wall
+floor, or stores new rows for NLP sizing, size the members again and check
+the frame on those sections. Wall
 thickness is left to the wall stage itself. `max_rounds` is a backstop; when
 it is reached, `stage_diagnostics[:wall_members]` says so and the last
 analysis stands.
@@ -148,9 +149,10 @@ function _walls_with_member_recheck!(struc::BuildingStructure, params::DesignPar
                                      tc::Union{Nothing, StructuralSizer.TraceCollector} = nothing,
                                      max_rounds::Int = 4)
     delete!(struc.stage_diagnostics, :wall_members)
-    floors() = copy(struc.frame_section_floors)
-    floors_same(a, b) = keys(a) == keys(b) &&
-                        all(_sections_identical(a[k], b[k]) for k in keys(a))
+    floors() = (copy(struc.frame_section_floors),
+                Dict(gid => copy(r) for (gid, r) in struc.frame_floor_demands))
+    floors_same((fa, ra), (fb, rb)) = ra == rb && keys(fa) == keys(fb) &&
+                                      all(_sections_identical(fa[k], fb[k]) for k in keys(fa))
     member_sections() = vcat(Any[b.base.section for b in struc.beams],
                              Any[c.base.section for c in struc.columns])
     flat = _infer_floor_type(resolve_floor_options(params)) in (:flat_plate, :flat_slab)

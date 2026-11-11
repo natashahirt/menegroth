@@ -122,7 +122,7 @@ function _rc_nlp_case_key(d::RCColumnDemand)
         Float64(to_kip(d.Pu)), Float64(to_kipft(d.Mux)), Float64(to_kipft(d.Muy)),
         Float64(to_kipft(d.M1x)), Float64(to_kipft(d.M2x)),
         Float64(to_kipft(d.M1y)), Float64(to_kipft(d.M2y)),
-        Float64(d.βdns), d.transverse_load,
+        Float64(d.βdns), d.transverse_load, d.magnify,
     )
 end
 
@@ -418,11 +418,13 @@ function _rc_rect_nlp_case_rows(p::RCColumnNLPProblem, b, h, ρ, demand::RCColum
     # ACI 318-19 §6.6.4.4.4(a) (corpus: aci-318-19, printed page 79) so this
     # row stays differentiable. The as-built checker applies the §6.2.5.1
     # neglect test and the §6.2.5.3 cap (δns ≤ 1.4) with the section's real EI.
+    # `demand.magnify == false` is a case whose moments already include
+    # second-order effects (ACI 318-19 §6.7), so §6.6 is not applied again.
     Mux_design = Mux_kipft
     Muy_design = Muy_kipft
     stab = 0.0
     δ_ratio = 0.0
-    if p.opts.include_slenderness
+    if p.opts.include_slenderness && demand.magnify
         Ec_ksi = 57.0 * sqrt(p.mat.fc * 1000.0)
         Lu_in = ustrip(u"inch", p.geometry.Lu)
         transverse = demand.transverse_load

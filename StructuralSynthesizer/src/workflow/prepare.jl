@@ -93,6 +93,7 @@ function prepare!(struc::BuildingStructure, params::DesignParameters;
     struc.ordinary_wall_result = nothing
     empty!(struc.stage_diagnostics)
     empty!(struc.frame_section_floors)
+    empty!(struc.frame_floor_demands)
     if params.lateral !== nothing
         prepare_lateral_model!(struc, params.lateral)
     end

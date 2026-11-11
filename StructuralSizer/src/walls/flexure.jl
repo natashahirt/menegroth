@@ -104,7 +104,9 @@ loads use the strain-compatibility diagram instead (see `wall_pm_at_c_si`).
 function wall_axial_flexure_capacity_si(fc::Real, fy::Real, Es::Real,
                                         lw::Real, t::Real, ρl::Real, Nu::Real;
                                         εcu::Real=0.003)
-    β1  = _beta1_from_fc_psi(fc / _KSI_TO_PA * 1000.0)  # f'c psi → β1 (Table 22.2.2.4.3)
+    # Same psi factor the catalogs and tests use, so 4000 psi and 6000 psi
+    # land on the Table 22.2.2.4.3 boundaries instead of a fraction of a psi over.
+    β1  = _beta1_from_fc_psi(fc / PSI_TO_PA)
     Ast = ρl * lw * t
     ω   = ρl * fy / fc
     α   = Nu / (lw * t * fc)
@@ -160,7 +162,7 @@ in N·m about the section mid-length, `εt` the extreme-tension layer strain.
 """
 function wall_pm_at_c_si(fc::Real, fy::Real, Es::Real, lw::Real, t::Real,
                          Ast::Real, c::Real; εcu::Real=0.003, nlayers::Int=40)
-    β1 = _beta1_from_fc_psi(fc / _KSI_TO_PA * 1000.0)
+    β1 = _beta1_from_fc_psi(fc / PSI_TO_PA)
     a  = min(β1 * c, lw)
     Cc = 0.85 * fc * t * a                     # concrete compression resultant (N)
     y_Cc  = a / 2                              # from compression face (x = lw end)

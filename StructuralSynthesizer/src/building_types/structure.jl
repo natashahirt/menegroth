@@ -82,6 +82,10 @@ mutable struct BuildingStructure{T, A, P} <: AbstractBuildingStructure
     # Member group id → the section the row F frame check requires. Concrete
     # discrete member sizing keeps that section or a heavier one.
     frame_section_floors::Dict{UInt64, Any}
+    # Member group id → the row F demand rows that section was required to
+    # pass. Each entry is `(label, RCColumnDemand or RCBeamDemand)`, the union
+    # of that group's members. Column and beam NLP read these later.
+    frame_floor_demands::Dict{UInt64, Vector{Tuple{String, Any}}}
 
     # ─── Design Snapshots (for parametric studies) ───
     _snapshots::Dict{Symbol, DesignSnapshot{T, P}}
@@ -117,6 +121,7 @@ function BuildingStructure(skel::BuildingSkeleton{T}) where T
         nothing,
         Dict{Symbol, String}(),
         Dict{UInt64, Any}(),
+        Dict{UInt64, Vector{Tuple{String, Any}}}(),
         Dict{Symbol, DesignSnapshot{T, P}}(),
     )
 end
@@ -145,6 +150,7 @@ function BuildingStructure{T, A, P}(skel::BuildingSkeleton{T}) where {T, A, P}
         nothing,
         Dict{Symbol, String}(),
         Dict{UInt64, Any}(),
+        Dict{UInt64, Vector{Tuple{String, Any}}}(),
         Dict{Symbol, DesignSnapshot{T, P}}(),
     )
 end

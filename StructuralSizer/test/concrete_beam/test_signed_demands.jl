@@ -253,6 +253,20 @@ end
         # Floor: large tension zeros Vc (Eq. 11-8, Vc ≥ 0) so φVn = φ Vs,max.
         p_floor = RCBeamNLPProblem(1.0kip * u"ft", Vu_mid * kip, opts; Nu=-200.0kip)
         @test constraint_fns(p_floor, x)[2] ≈ Vu_mid / φVs_max rtol=1e-6
+        @test n_constraints(p0) == 4
+        @test constraint_names(p0)[2] == "shear adequacy"
+
+        # Two load cases stay separate rows. The same Vu with tension is a
+        # higher utilization than that Vu with compression. Pairing the
+        # compression onto the tension case's shear would hide it.
+        both = RCBeamNLPProblem(1.0kip * u"ft", Vu_mid * kip, opts;
+                                shear_cases=[(Vu_mid * kip, 50.0kip, 0.0),
+                                             (Vu_mid * kip, -120.0kip, 0.0)])
+        cb = constraint_fns(both, x)
+        @test n_constraints(both) == 5
+        @test cb[2] < 1.0
+        @test cb[3] > 1.0
+        @test cb[3] > cb[2]
 
         # Batch API accepts signed Nu; public default Mu_neg = Mu is unchanged.
         rs = size_rc_beams_nlp([1.0kip * u"ft"], [1.0kip], opts;

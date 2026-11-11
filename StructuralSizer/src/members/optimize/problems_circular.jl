@@ -215,10 +215,12 @@ function _rc_circular_nlp_util(p::RCCircularNLPProblem, x::Vector{Float64}, dema
     # Slenderness. Same simplified stiffness and §6.2.5.3 cap as the
     # rectangular NLP. A circular section has one radius; the larger of kx
     # and ky governs. The as-built checker applies the §6.2.5.1 neglect test.
+    # `demand.magnify == false` skips §6.6 when the moments already include
+    # second-order effects (ACI 318-19 §6.7).
     Mux_design = Mux_kipft
     stab = 0.0
     δ_ratio = 0.0
-    if p.opts.include_slenderness
+    if p.opts.include_slenderness && demand.magnify
         R = D / 2.0
         Ig = π * R^4 / 4.0   # in⁴
         Ec_ksi = 57.0 * sqrt(p.mat.fc * 1000.0)

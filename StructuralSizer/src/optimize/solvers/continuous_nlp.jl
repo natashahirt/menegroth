@@ -149,6 +149,28 @@ function _numeric_gradient(f, x::Vector{Float64}; ε::Float64=1e-6)
 end
 
 """
+    _constraint_cache(problem, n_vars) -> Function
+
+Memoized `constraint_fns(problem, x)`. Each JuMP constraint operator needs one
+row, so without the cache every row recomputes the whole vector and an
+iteration costs O(n_constraints²) row evaluations. Keys are copies because
+[`_numeric_gradient`](@ref) perturbs `x` in place. The cache holds a base
+point plus its central-difference points, then starts over.
+"""
+function _constraint_cache(problem, n_vars::Int)
+    cache = Dict{Vector{Float64}, Vector{Float64}}()
+    cap = 4 * n_vars + 4
+    return function (xv::Vector{Float64})
+        hit = get(cache, xv, nothing)
+        hit === nothing || return hit
+        length(cache) >= cap && empty!(cache)
+        c = constraint_fns(problem, xv)
+        cache[copy(xv)] = c
+        return c
+    end
+end
+
+"""
     _optimize_ipopt(problem, objective; maxiter, tol, verbose)
 
 Ipopt solver via JuMP for nonlinear constrained optimization.
@@ -214,10 +236,11 @@ function _optimize_ipopt(problem::AbstractNLPProblem, objective::AbstractObjecti
     # Register and add constraint functions
     if nc > 0
         c_lb, c_ub = constraint_bounds(problem)
+        all_cons = _constraint_cache(problem, n_vars)
         
         for j in 1:nc
             # Constraint j function (Float64 vector input)
-            _con_f(xv::Vector{Float64}) = constraint_fns(problem, xv)[j]
+            _con_f(xv::Vector{Float64}) = all_cons(xv)[j]
             
             # Register constraint operator - different signatures for 1D vs nD
             con_op = if n_vars == 1

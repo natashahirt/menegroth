@@ -235,10 +235,13 @@ function _size_columns_impl!(
     end
 
     floor_kw = (;)
-    if any(gid -> haskey(struc.frame_section_floors, gid), group_ids)
-        # NLP has no catalog, so it cannot keep a section floor.
-        (opts.sizing_strategy !== :nlp && opts.materials === nothing &&
-         opts.n_max_sections == 0) ||
+    if opts.sizing_strategy === :nlp
+        # The stored rows are already in kip. Magnification stays off on
+        # those rows: the forces include story P-delta (ACI 318-19 §6.7).
+        rc_demands = _append_frame_floor_column_cases(rc_demands, group_ids,
+                                                      struc.frame_floor_demands)
+    elseif any(gid -> haskey(struc.frame_section_floors, gid), group_ids)
+        (opts.materials === nothing && opts.n_max_sections == 0) ||
             _refuse_frame_floors(struc, group_ids, "this concrete column sizing")
         cat = isnothing(opts.custom_catalog) ?
             StructuralSizer.rc_column_catalog(opts.section_shape, opts.catalog) :
@@ -247,6 +250,9 @@ function _size_columns_impl!(
         floor_kw = (; catalog = cat, feasible = _frame_floor_mask(struc, group_ids, cat, obj))
     end
     result = StructuralSizer.size_columns(rc_demands, geometries, opts; floor_kw...)
+    if opts.sizing_strategy === :nlp
+        _assert_column_nlp_meets_floors!(struc, group_ids, result, opts)
+    end
 
     _apply_column_results!(struc, result, group_ids, opts.material, :concrete, edge_ids_in_group;
                            I_factor=I_factor, rebar=opts.rebar_material)
@@ -258,6 +264,77 @@ function _size_columns_impl!(
 
     @info "Sized $(length(group_ids)) column groups" material=StructuralSizer.material_name(opts.material)
     return struc
+end
+
+"""Append stored row F column rows onto each group's NLP demand set.
+
+Gravity cases keep `magnify = true`. Stored rows are forced to
+`magnify = false`: those forces already include story P-delta
+(ACI 318-19 §6.7, PDF page 84).
+"""
+function _append_frame_floor_column_cases(demands, group_ids, floors)
+    any(gid -> haskey(floors, gid), group_ids) || return demands
+    out = Vector{StructuralSizer.RCColumnDemandSet}(undef, length(demands))
+    for (i, set) in enumerate(demands)
+        rows = get(floors, group_ids[i], nothing)
+        if rows === nothing
+            out[i] = set
+            continue
+        end
+        cases = StructuralSizer.RCColumnDemand[]
+        append!(cases, set.cases)
+        for (_, demand) in rows
+            demand isa StructuralSizer.RCColumnDemand || continue
+            push!(cases, demand.magnify ? _column_demand_unmagnified(demand) : demand)
+        end
+        out[i] = StructuralSizer.RCColumnDemandSet(set.member_idx, cases)
+    end
+    return out
+end
+
+function _column_demand_unmagnified(d::StructuralSizer.RCColumnDemand)
+    return StructuralSizer.RCColumnDemand(d.member_idx;
+        Pu=d.Pu, Mux=d.Mux, Muy=d.Muy,
+        M1x=d.M1x, M2x=d.M2x, M1y=d.M1y, M2y=d.M2y,
+        βdns=d.βdns, transverse_load=d.transverse_load, magnify=false)
+end
+
+"""
+Throw before install when a floored column group has no installable NLP
+section, or the rounded section fails the stored rows.
+
+The checker bundle has slenderness off, matching the row F check.
+"""
+function _assert_column_nlp_meets_floors!(struc, group_ids, result, opts)
+    any(gid -> haskey(struc.frame_floor_demands, gid), group_ids) || return
+    StructuralSizer._rc_nlp_result_installable(result) || throw(ArgumentError(
+        "row F section floor: column NLP did not produce an installable section"))
+    bundle = _column_checker_bundle(nothing, opts)
+    frame = (column = bundle,)
+    for (i, gid) in enumerate(group_ids)
+        rows = get(struc.frame_floor_demands, gid, nothing)
+        rows === nothing && continue
+        section = result.sections[i]
+        checked = 0
+        for (j, member) in enumerate(struc.columns)
+            group_id(member) == gid || continue
+            member_rows = Tuple{String, Any}[]
+            for (label, demand) in rows
+                demand isa StructuralSizer.RCColumnDemand || continue
+                demand.member_idx == j || continue
+                push!(member_rows, (label, demand))
+            end
+            isempty(member_rows) && continue
+            checked += 1
+            ok, detail = _member_resists(:column, member, section, member_rows, frame)
+            ok || throw(ArgumentError(
+                "row F section floor: column group $gid does not pass its stored demand rows ($detail)"))
+        end
+        has_column_row = any(d -> d isa StructuralSizer.RCColumnDemand, (d for (_, d) in rows))
+        has_column_row && checked == 0 && throw(ArgumentError(
+            "row F section floor: column group $gid stored rows do not match a column"))
+    end
+    return nothing
 end
 
 # PixelFrame column implementation

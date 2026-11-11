@@ -46,12 +46,19 @@ end
     out = _FF._raise_frame_floors!(checks, struc, rows, (columns = nothing, beams = nothing),
                                    frame())
     @test isempty(struc.frame_section_floors)
+    @test isempty(struc.frame_floor_demands)
     @test occursin("not resized", out[1].detail)
     @test !out[1].passed
 
     out = _FF._raise_frame_floors!(checks, struc, rows, member_opts, frame())
     @test collect(keys(struc.frame_section_floors)) == [UInt64(1)]
     floor = struc.frame_section_floors[UInt64(1)]
+    # Group 1's stored rows are the union of its two members.
+    demands = struc.frame_floor_demands[UInt64(1)]
+    @test length(demands) == length(heavy) + length(small)
+    @test any(row -> row[2].Mux == 148.0, demands)
+    @test any(row -> row[2].Mux == 1.0, demands)
+    @test !haskey(struc.frame_floor_demands, UInt64(2))
     @test occursin("floor", out[1].detail)
     @test !out[1].passed
     @test out[2] == checks[2]
@@ -82,11 +89,15 @@ end
     @test_throws ArgumentError _FF._refuse_frame_floors(struc, [UInt64(1)], "test sizing")
     @test _FF._refuse_frame_floors(struc, [UInt64(2)], "test sizing") === nothing
 
-    # Floors are design state: snapshots carry them.
+    # Floors are design state: snapshots carry the section and its demand rows.
     _FF.snapshot!(struc, :with_floor)
     empty!(struc.frame_section_floors)
+    empty!(struc.frame_floor_demands)
     _FF.restore!(struc, :with_floor)
     @test _FF._sections_identical(struc.frame_section_floors[UInt64(1)], floor)
+    restored = struc.frame_floor_demands[UInt64(1)]
+    @test length(restored) == length(heavy) + length(small)
+    @test any(row -> row[2].Mux == 148.0, restored)
 end
 
 @testset "Row F frame members are checked with their own materials" begin
@@ -366,4 +377,25 @@ end
     on = _FF._loads_on_element(loads, a)
     @test length(on) == 1
     @test on[1].tag === :on_a
+end
+
+@testset "Beam NLP shear rows pair Vu with its own axial" begin
+    # Asap P is tension-positive; the row's Nu is compression-positive.
+    vu, nu = _FF._concurrent_strong_shear([-5.0, -50.0, 20.0], [10.0, -3.0, -40.0])
+    @test vu == 40.0
+    @test nu == -20.0
+    @test _FF._concurrent_strong_shear(Float64[], Float64[]) == (0.0, 0.0)
+
+    S = _FF.BeamShearCase
+    rows = [S(100.0, 10.0, 0.0),   # covered by the next row: same Vu, less compression there
+            S(100.0, 0.0, 0.0),
+            S(80.0, -5.0, 0.0),    # less shear but more tension (lower Vc): kept
+            S(120.0, 50.0, 0.0),   # most shear, with compression: kept
+            S(100.0, 0.0, 0.0),    # duplicate: one copy kept
+            S(60.0, -30.0, 0.0),   # covered by the next row: same tension, less shear
+            S(70.0, -30.0, 0.0),   # most tension: kept
+            S(90.0, 0.0, 5.0)]     # torsion row is never pruned against Tu = 0
+    kept = _FF._prune_covered_shear(rows)
+    @test kept == [S(100.0, 0.0, 0.0), S(80.0, -5.0, 0.0), S(120.0, 50.0, 0.0),
+                   S(70.0, -30.0, 0.0), S(90.0, 0.0, 5.0)]
 end

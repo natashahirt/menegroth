@@ -683,7 +683,9 @@ function _member_demand_rows(kind, index, els, basic, second, solved, cases, inp
                                                     inputs.SDS, rho)
                 demand = if kind === :column
                     Pu, Mux, Muy = _column_demand_values(stations)
-                    RCColumnDemand(index; Pu=kip(Pu), Mux=kipft(Mux), Muy=kipft(Muy))
+                    # Story P-delta is already in these forces (ACI 318-19 §6.7).
+                    RCColumnDemand(index; Pu=kip(Pu), Mux=kipft(Mux), Muy=kipft(Muy),
+                                   magnify=false)
                 else
                     sag, hog, Vu, Nu = _beam_demand_values(el, stations)
                     RCBeamDemand(index; Mu=kipft(sag), Mu_neg=kipft(hog),
@@ -751,15 +753,23 @@ end
 
 """
 Sizing catalog and objective of `opts` when it can keep a row F section floor,
-else a reason string. Mirrors the concrete discrete sizing paths.
+`:nlp` when NLP sizing takes the row F rows as constraints instead, else a
+reason string. Mirrors the concrete discrete and NLP sizing paths.
 """
 function _frame_floor_catalog(kind::Symbol, opts)
     expected = kind === :column ? StructuralSizer.ConcreteColumnOptions :
                                   StructuralSizer.ConcreteBeamOptions
     opts isa expected ||
         return "the $(kind) options are not $(nameof(expected)), so it is not resized"
+    if opts.sizing_strategy === :nlp
+        # The frame check refuses T-sections, so a T-beam group never gets here
+        # with a section to compare.
+        kind === :beam && opts.include_flange &&
+            return "T-beam sizing cannot keep a section floor, so it is not resized"
+        return :nlp
+    end
     opts.sizing_strategy === :discrete ||
-        return "the $(kind) options are not :discrete, so it is not resized"
+        return "the $(kind) options are not :discrete or :nlp, so it is not resized"
     (opts.materials === nothing && opts.n_max_sections == 0) ||
         return "the $(kind) options use several materials or n_max_sections, so it is not resized"
     if kind === :beam && opts.include_flange
@@ -777,11 +787,36 @@ function _frame_floor_catalog(kind::Symbol, opts)
 end
 
 """
+Store the row F rows of group `gid`'s members in `cohort` as that group's
+floor demands. `accumulate` keeps the rows stored in earlier rounds, so an
+NLP group's constraints only grow.
+"""
+function _store_frame_floor_rows!(struc, kind, members, cohort, gid, rows;
+                                  accumulate::Bool = false)
+    stored = accumulate ? copy(get(struc.frame_floor_demands, gid, Tuple{String, Any}[])) :
+                          Tuple{String, Any}[]
+    for i in cohort
+        group_id(members[i]) == gid || continue
+        for row in rows[(kind, i)]
+            row in stored || push!(stored, row)
+        end
+    end
+    struc.frame_floor_demands[gid] = stored
+    return nothing
+end
+
+"""
 Give each failing member group the lightest catalog section, no lighter than
 its current one, that passes the row F rows of every member in the group. The
-section goes in `struc.frame_section_floors`, and concrete discrete sizing
-keeps it or a heavier one from then on. Sections only move up, so repeated
+section goes in `struc.frame_section_floors`. The rows that section was
+required to pass go in `struc.frame_floor_demands`, one vector per group:
+the union of that group's members. Concrete discrete sizing keeps the
+section or a heavier one from then on. Sections only move up, so repeated
 rounds end.
+
+NLP options have no catalog. A failing NLP group gets no section, only its
+rows in `struc.frame_floor_demands`, added to the rows of earlier rounds.
+Column and beam NLP constrain every stored row, so the constraints only grow.
 
 The walk uses the checker of the row F check itself. The member sizer checks
 the gravity combinations, with slenderness, on whatever it chooses. A group
@@ -858,6 +893,15 @@ function _raise_frame_floors!(checks, struc, rows, member_opts, frame;
             foreach(i -> note[(kind, i)] = source, failing)
             continue
         end
+        if source === :nlp
+            for gid in gids
+                _store_frame_floor_rows!(struc, kind, members_of[kind], cohort, gid, rows;
+                                         accumulate = true)
+            end
+            foreach(i -> note[(kind, i)] =
+                "the row F rows are kept as constraints for NLP member sizing", failing)
+            continue
+        end
         currents = [members_of[kind][i].base.section for i in cohort]
         o_now = maximum(source.objective(s) for s in currents)
         order = sort([j for j in eachindex(source.catalog)
@@ -876,6 +920,7 @@ function _raise_frame_floors!(checks, struc, rows, member_opts, frame;
         else
             for gid in gids
                 struc.frame_section_floors[gid] = chosen
+                _store_frame_floor_rows!(struc, kind, members_of[kind], cohort, gid, rows)
             end
             "a heavier section that passes is set as the group's floor for member sizing"
         end

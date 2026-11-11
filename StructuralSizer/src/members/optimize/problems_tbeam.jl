@@ -99,6 +99,8 @@ struct RCTBeamNLPProblem <: AbstractNLPProblem
     # Signed axial (kip). Positive = compression (Eq. 11-4); negative = tension
     # (Eq. 11-8, Vc ≥ 0). 0.0 = shear and flexure only (Eq. 11-3).
     Nu_kip::Float64
+    # One shear (and, when `Tu_kipin > 0`, torsion) row per load case.
+    shear_cases::Vector{RCBeamNLPShearCase}
 end
 
 """
@@ -112,7 +114,7 @@ negative (Eq. 11-8). Public default is `Nu = 0`.
 function RCTBeamNLPProblem(Mu, Vu, bf, hf, opts::NLPBeamOptions;
                            w_dead=nothing, w_live=nothing, L_span=nothing,
                            support::Symbol=:simply_supported, ξ::Float64=2.0,
-                           Tu=0.0, Nu=0.0)
+                           Tu=0.0, Nu=0.0, shear_cases=nothing)
     fc = fc_ksi(opts.material)
     fy = fy_ksi(opts.rebar_material)
     Es = Es_ksi(opts.rebar_material)
@@ -157,15 +159,11 @@ function RCTBeamNLPProblem(Mu, Vu, bf, hf, opts::NLPBeamOptions;
         fr_psi_val = 0.0
     end
 
-    # Torsion demand
-    Tu_kipin_val = if Tu isa Unitful.Quantity
-        abs(ustrip(u"lbf*inch", Tu)) / 1000.0
-    else
-        abs(Float64(Tu))
-    end
+    Tu_kipin_val = _torsion_kipin(Tu)
 
     # Signed axial: preserve sign (tension is negative).
     Nu_kip_val = Nu isa Unitful.Quantity ? to_kip(Nu) : Float64(Nu)
+    cases = _beam_nlp_shear_cases(Vu_kip, Nu_kip_val, Tu_kipin_val, shear_cases)
 
     RCTBeamNLPProblem(
         Mu_kipft, Vu_kip, opts,
@@ -178,6 +176,7 @@ function RCTBeamNLPProblem(Mu, Vu, bf, hf, opts::NLPBeamOptions;
         support, ξ,
         Tu_kipin_val, c_ctr,
         Nu_kip_val,
+        cases,
     )
 end
 
@@ -236,27 +235,34 @@ end
 # AbstractNLPProblem Interface: Constraints
 # ==============================================================================
 
-"""Number of constraints: 4 base + 2 deflection (if service loads) + 1 torsion (if Tu > 0)."""
+"""Number of constraints: flexure, one shear per case, strain, ρmin, optional deflection, plus torsion per case with Tu > 0."""
 function n_constraints(p::RCTBeamNLPProblem)
-    nc = 4
+    nc = 3 + length(p.shear_cases)
     p.w_dead_kiplf > 0 && (nc += 2)  # LL + total deflection
-    p.Tu_kipin > 0 && (nc += 1)       # torsion adequacy (ACI §11.5.3.1)
-    return nc
+    return nc + count(c -> c.Tu_kipin > 0, p.shear_cases)
 end
 
 """Human-readable constraint names for solver diagnostics."""
 function constraint_names(p::RCTBeamNLPProblem)
-    names = [
-        "flexure utilization",
-        "shear adequacy",
-        "net tensile strain (εt ≥ 0.005)",
-        "min reinforcement (§10.5.1)",
-    ]
+    names = String["flexure utilization"]
+    if length(p.shear_cases) == 1
+        push!(names, "shear adequacy")
+    else
+        for i in eachindex(p.shear_cases)
+            push!(names, "shear adequacy (case $i)")
+        end
+    end
+    push!(names, "net tensile strain (εt ≥ 0.005)")
+    push!(names, "min reinforcement (§10.5.1)")
     if p.w_dead_kiplf > 0
         push!(names, "deflection LL (L/360)")
         push!(names, "deflection total (L/240)")
     end
-    p.Tu_kipin > 0 && push!(names, "torsion adequacy (§11.5.3.1)")
+    for (i, c) in enumerate(p.shear_cases)
+        c.Tu_kipin > 0 || continue
+        push!(names, length(p.shear_cases) == 1 ?
+            "torsion adequacy (§11.5.3.1)" : "torsion adequacy (case $i)")
+    end
     return names
 end
 
@@ -334,16 +340,18 @@ function constraint_fns(p::RCTBeamNLPProblem, x::Vector{Float64})
     hw = max(h - hf, 0.0)
     Ag_comp = Af + bw * hw
     Ag_tens = bw * h
-    φVn_max_kip = _φVn_with_axial(bw, d, Ag_comp, Ag_tens, p.fc_psi, p.λ, p.Nu_kip)
-    util_shear = p.Vu_kip / max(φVn_max_kip, 1e-6)
+    constraints = Float64[util_flexure]
+    for sc in p.shear_cases
+        φVn_max_kip = _φVn_with_axial(bw, d, Ag_comp, Ag_tens, p.fc_psi, p.λ, sc.Nu_kip)
+        push!(constraints, sc.Vu_kip / max(φVn_max_kip, 1e-6))
+    end
 
     # --- Net tensile strain ---
     util_strain = 0.005 / max(εt, 1e-8)
 
     # --- Minimum reinforcement (uses bw) ---
     util_as_min = p.ρ_min_aci / max(ρ, 1e-8)
-
-    constraints = [util_flexure, util_shear, util_strain, util_as_min]
+    push!(constraints, util_strain, util_as_min)
 
     # --- Deflection constraints (ACI §24.2) ---
     if p.w_dead_kiplf > 0
@@ -427,16 +435,18 @@ function constraint_fns(p::RCTBeamNLPProblem, x::Vector{Float64})
     end
 
     # --- Torsion adequacy (ACI 318-11 §11.5.3.1) ---
-    # For T-beams: Aoh/ph based on web rectangle (closed stirrups in web)
-    if p.Tu_kipin > 0
-        c_ctr = p.cover_to_stirrup_ctr_in
+    # For T-beams: Aoh/ph based on web rectangle (closed stirrups in web).
+    # One row per case that has torsion, using that case's Vu and Tu.
+    c_ctr = p.cover_to_stirrup_ctr_in
+    for sc in p.shear_cases
+        sc.Tu_kipin > 0 || continue
         xo = max(bw - 2*c_ctr, 0.1)   # inner width to stirrup centerline
         yo = max(h - 2*c_ctr, 0.1)    # inner height to stirrup centerline
         Aoh = xo * yo
         ph  = 2 * (xo + yo)
 
-        Vu_lb   = p.Vu_kip * 1000.0
-        Tu_lbin = p.Tu_kipin * 1000.0
+        Vu_lb   = sc.Vu_kip * 1000.0
+        Tu_lbin = sc.Tu_kipin * 1000.0
 
         τv = Vu_lb / max(bw * d, 0.01)
         τt = Tu_lbin * ph / max(1.7 * Aoh^2, 0.01)
@@ -445,8 +455,7 @@ function constraint_fns(p::RCTBeamNLPProblem, x::Vector{Float64})
         Vc_stress = 2 * p.λ * sqrt_fc
         rhs = 0.75 * (Vc_stress + 8 * sqrt_fc)
 
-        util_torsion = lhs / max(rhs, 1e-6)
-        push!(constraints, util_torsion)
+        push!(constraints, lhs / max(rhs, 1e-6))
     end
 
     return constraints

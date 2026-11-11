@@ -24,6 +24,7 @@ using Asap  # custom units (kip, ksi, ksf, psf, etc.)
     @testset "Loads" begin
         include("loads/test_seismic_elf.jl")
         include("loads/test_seismic_nehrp_examples.jl")
+        include("loads/test_wind_chapter27.jl")
     end
 
     # ─── Vault ───────────────────────────────────────────────────────────
@@ -61,6 +62,7 @@ using Asap  # custom units (kip, ksi, ksf, psf, etc.)
     # ─── Members: connection defaults ────────────────────────────────────
     @testset "Member Defaults" begin
         include("members/test_defaults.jl")
+        include("members/test_up_eccentricity.jl")
     end
 
     # ─── Concrete Beams ──────────────────────────────────────────────────
@@ -68,6 +70,8 @@ using Asap  # custom units (kip, ksi, ksf, psf, etc.)
         include("concrete_beam/test_beam_section.jl")
         include("concrete_beam/test_beam_flexure.jl")
         include("concrete_beam/test_beam_shear.jl")
+        include("concrete_beam/test_joist_construction.jl")
+        include("concrete_beam/test_joist_ribs.jl")
         include("concrete_beam/test_beam_design.jl")
         include("concrete_beam/test_beam_deflection.jl")
         include("concrete_beam/test_deflection.jl")
@@ -87,13 +91,16 @@ using Asap  # custom units (kip, ksi, ksf, psf, etc.)
     # ─── Concrete Columns ────────────────────────────────────────────────
     @testset "Concrete Columns" begin
         include("concrete_column/test_rc_column_section.jl")
+        include("concrete_column/test_bar_detailing.jl")
         include("concrete_column/test_column_pm.jl")
         include("concrete_column/test_circular_column_pm.jl")
         include("concrete_column/test_biaxial.jl")
         include("concrete_column/test_slenderness.jl")
+        include("concrete_column/test_column_shear.jl")
+        include("concrete_column/test_floor_transmission.jl")
     end
 
-    # Bar placement
+    # ─── Bar placement ───────────────────────────────────────────────────
     @testset "Detailing" begin
         include("detailing/test_member_detailing.jl")
     end
@@ -103,6 +110,8 @@ using Asap  # custom units (kip, ksi, ksf, psf, etc.)
         # Geometry & tributary
         include("slabs/test_strip_geometry.jl")
         include("slabs/test_spanning_behavior.jl")
+        include("slabs/test_panel_analysis.jl")
+        include("slabs/test_two_way_thickness.jl")
         include("slabs/test_tributary_workflow.jl")
         # One-way
         include("slabs/test_one_way_slab_reference.jl")
@@ -110,7 +119,12 @@ using Asap  # custom units (kip, ksi, ksf, psf, etc.)
         include("slabs/test_flat_plate.jl")
         include("slabs/test_flat_plate_methods.jl")
         include("slabs/test_size_flat_plate.jl")
+        include("slabs/test_thickness_jump.jl")
+        include("slabs/test_joint_search.jl")
+        include("slabs/test_flat_plate_safety_regressions.jl")
+        include("slabs/test_aci318_19_slab_provisions.jl")
         include("slabs/test_method_comparison.jl")
+        include("slabs/test_efm_frame_lines.jl")
         # DDM / EFM analysis
         include("slabs/test_frameline_ddm.jl")
         include("slabs/test_hardy_cross_larger.jl")
@@ -126,12 +140,19 @@ using Asap  # custom units (kip, ksi, ksf, psf, etc.)
         include("slabs/test_aci_audit_tier1.jl")
         include("slabs/test_ddm_edge_mub.jl")
         include("slabs/test_eq_13_7_adjoining.jl")
-        include("slabs/test_story_shell.jl")
         include("slabs/test_corner_punching.jl")
+        include("slabs/test_moment_transfer_13_5_3_3.jl")
+        include("slabs/test_opening_punching.jl")
+        include("slabs/test_panel_shell_beams.jl")
+        include("slabs/test_slab_edge.jl")
+        include("slabs/test_story_shell.jl")
         # General-shape critical sections (ACI 421.1R-99 App. B): non-orthogonal,
         # re-entrant, circular, I-/odd supports via true principal axes
         include("slabs/test_general_critical_section.jl")
+        include("slabs/test_wall_punching.jl")
+        include("slabs/test_wall_supports.jl")
         include("slabs/test_fea_combo_envelope.jl")
+        include("slabs/test_fea_mesh_key.jl")
         # Punching / shear
         include("slabs/test_shear_transfer.jl")
         include("slabs/test_shear_studs.jl")
@@ -142,10 +163,19 @@ using Asap  # custom units (kip, ksi, ksf, psf, etc.)
         include("slabs/test_column_growth.jl")
         # Pattern loading
         include("slabs/test_pattern_loading_sizing.jl")
+        include("slabs/test_fea_one_way_shear_cut.jl")
         # Stud catalogs
         include("slabs/test_stud_catalog.jl")
+        include("slabs/test_composite_deck_shear.jl")
+        include("slabs/test_deck_form.jl")
+        include("slabs/test_deck_hogging.jl")
+        include("slabs/test_deck_floor.jl")
         # Waffle geometry
         include("slabs/test_waffle_geometry.jl")
+        include("slabs/test_rib_arrangement.jl")
+        include("slabs/test_solid_head_modules.jl")
+        include("slabs/test_solid_head_punching.jl")
+        include("slabs/test_rib_deflection.jl")
         # Optimizer
         include("slabs/test_flat_plate_optimizer.jl")
         # `test_fea_flat_plate.jl` is intentionally NOT included here — it
@@ -159,6 +189,8 @@ using Asap  # custom units (kip, ksi, ksf, psf, etc.)
         include("foundations/test_spread_footing.jl")
         include("foundations/test_spread_aci.jl")
         include("foundations/test_strip_aci.jl")
+        include("foundations/test_wall_footing.jl")
+        include("foundations/test_mat_walls.jl")
         include("foundations/test_strip_unequal_c_across.jl")
         include("foundations/test_mat_aci.jl")
         include("foundations/test_corner_punching.jl")
@@ -177,11 +209,17 @@ using Asap  # custom units (kip, ksi, ksf, psf, etc.)
         include("optimize/test_hss_column_nlp.jl")
         include("optimize/test_w_column_nlp.jl")
         include("optimize/test_multi_material_mip.jl")
+        include("optimize/test_binary_search_depth.jl")
+        include("optimize/test_sizing_strategy_contract.jl")
+        include("optimize/test_explain_agreement.jl")
     end
 
     # ─── Structural Walls (lateral system) ───────────────────────────────
     @testset "Walls" begin
         include("walls/test_walls.jl")
+        include("walls/test_special_boundary.jl")
+        include("walls/test_special_wall.jl")
+        include("walls/test_flanged_section.jl")
         include("walls/test_fem_rigid_diaphragm.jl")
     end
 

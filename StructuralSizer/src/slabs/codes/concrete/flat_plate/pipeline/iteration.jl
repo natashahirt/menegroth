@@ -62,7 +62,11 @@ function _size_flat_plate!(
     
     # Slab geometry
     slab_cell_indices = Set(slab.cell_indices)
-    ln_max = max(slab.spans.primary, slab.spans.secondary)
+    # ACI 318-11 §9.5.3.2 and Table 9.5(c) (corpus: aci-318-11, page 134)
+    # take the minimum thickness from the longer span. The table is written
+    # for a rectangular panel and does not define that span otherwise, so it
+    # is the longer of the two reinforcement-axis spans, not the diagonal.
+    ln_max = longer_axis_span(slab.spans)
     
     # Self-weight helper
     slab_sw(h) = slab_self_weight(h, γ_concrete)
@@ -113,9 +117,9 @@ function _size_flat_plate!(
         h = opts.min_h  # User override — bypass ACI minimum
     elseif !isnothing(drop_panel)
         # Flat slab: reduced minimum thickness (ACI Table 8.3.1.1 Row 2)
-        h = min_thickness(FlatSlab(), ln_max; discontinuous_edge=has_edge)
+        h = min_thickness(FlatSlab(), ln_max; discontinuous_edge=has_edge, fy)
     else
-        h = min_thickness(FlatPlate(), ln_max; discontinuous_edge=has_edge)
+        h = min_thickness(FlatPlate(), ln_max; discontinuous_edge=has_edge, fy)
     end
 
     # Fire minimum thickness (ACI 216.1-14 Table 4.2) — takes precedence if larger
@@ -176,7 +180,8 @@ function _size_flat_plate!(
     # PHASE 4: COMPUTE INITIAL AXIAL LOADS
     # =========================================================================
     
-    Pu = compute_column_axial_loads(struc, columns, slab_cell_indices, sw_estimate)
+    Pu = slab_column_axial_loads(struc, slab, columns, slab_cell_indices, sw_estimate,
+        drop_panel, γ_concrete)
     _initialize_unsized_columns!(columns, Pu, ln_max, opts, column_opts)
     
     if verbose
@@ -255,33 +260,31 @@ function _size_flat_plate!(
     # Cleared when h changes (d changes) — column size changes auto-miss
     _punch_geom_cache = Dict{Tuple{Float64,Float64,Float64,Symbol,Symbol,Symbol}, NamedTuple}()
     
-    # Preallocate column geometries (only column height matters; updated if it changes).
-    # Slab pipeline assumes pinned-pinned about both axes, so kx = ky = 1.0
-    # is set explicitly (rather than relying on the legacy single-axis `k`)
-    # to make the pinned-pinned assumption obvious to readers.
-    geometries = [
-        ConcreteMemberGeometry(col.base.L; Lu=col.base.L, kx=1.0, ky=1.0, braced=true)
-        for col in columns
-    ]
+    # §10.10.5 designation and Fig. R10.10.1.1 k, at the current thickness.
+    # Rebuilt each iteration: column size and h both move ψ.
+    geometries = flat_plate_column_geometries(columns, slab, struc; h = h)
     
     # Preallocate Mu and Mu_secondary buffers (reused each iteration)
     Mu = Vector{Float64}(undef, n_cols)
     Mu_secondary = Vector{Float64}(undef, n_cols)
     
     # Recomputed at each assignment. Column growth changes c1 and c2, and
-    # the §13.6.9.2 factor is K_below / (K_below + K_above). A shell result
-    # carries its own below-stub moment and does not use the factor.
+    # the §13.6.9.2 factor is K_below / (K_below + K_above), with K for the
+    # bending direction of each analysis. A shell result carries its own
+    # below-stub moment and does not use the factor.
     function _assign_column_design_moments!(moment_results, secondary_results)
-        dist = column_moment_distribution_factors(struc, columns, column_opts)
-        if verbose && stub_moments(moment_results) === nothing && any(f -> f < 1.0, dist)
-            @debug "Column moment distribution factors (§13.6.9.2)" factors=dist
+        dist = column_moment_distribution_factors(struc, columns, column_opts;
+                                                  span_axis = _get_span_axis(slab))
+        if verbose && stub_moments(moment_results) === nothing &&
+           any(f -> f < 1.0, dist.primary)
+            @debug "Column moment distribution factors (§13.6.9.2)" primary=dist.primary secondary=dist.secondary
         end
         @inbounds for i in eachindex(Mu)
-            Mu[i] = column_design_moment(moment_results, i, dist[i])
+            Mu[i] = column_design_moment(moment_results, i, dist.primary[i])
         end
         if !isnothing(secondary_results)
             @inbounds for i in 1:n_cols
-                Mu_secondary[i] = column_design_moment(secondary_results, i, dist[i])
+                Mu_secondary[i] = column_design_moment(secondary_results, i, dist.secondary[i])
             end
         else
             fill!(Mu_secondary, 0.0)
@@ -322,11 +325,12 @@ function _size_flat_plate!(
                     struc = struc, slab = slab, limit_type = opts.deflection_limit,
                     deflection_Ie_method = Ie_method, λ = λ, φ_shear = φ_shear,
                     βt = _βt, span_axis = _get_span_axis(slab),
-                    cover = cover, bar_diameter = bar_dia)
+                    cover = cover, bar_diameter = bar_dia, drop_panel = drop_panel)
                 punching || return ok
                 return ok && punching_depth_passes(
                     scaled_p, scaled_s, columns, hh, dd, fc, struc, slab;
-                    λ = λ, φ_shear = φ_shear, moment_transfer = _moment_transfer)
+                    λ = λ, φ_shear = φ_shear, moment_transfer = _moment_transfer,
+                    drop_panel = drop_panel, cover = cover, bar_diameter = bar_dia)
             end,
         )
     end
@@ -393,6 +397,36 @@ function _size_flat_plate!(
         return span
     end
 
+    # ── :joint_search state (docs/flat-plate-joint-sizing-plan.md) ──
+    _joint = opts.punching_strategy === :joint_search
+    if _joint && opts.joint_studs && !_is_headed_stud_reinforcement(opts.punching_reinforcement)
+        throw(ArgumentError(
+            "punching_strategy = :joint_search with joint_studs = true needs a headed-stud " *
+            "punching_reinforcement; got :$(opts.punching_reinforcement)"))
+    end
+    joint_scanned = false
+    joint_stud_cols = Set{Int}()
+    n_joint_scans = 0
+    _edge_stiffness_h = opts.has_edge_beam && isnothing(opts.edge_beam_βt)
+    function _joint_ctx(βt)
+        (struc = struc, slab = slab, columns = columns, opts = opts,
+         column_opts = column_opts, fc = fc, fy = fy, λ = λ, φ_shear = φ_shear,
+         cover = cover, bar_dia = bar_dia, γ = γ_concrete, h_increment = h_increment,
+         h_max = h_max, βt = βt, slab_area_m2 = _joint_slab_area_m2(struc, slab),
+         c_floor = [(c.c1, c.c2) for c in columns],
+         Ast_floor = [_joint_section_steel(c) for c in columns],
+         geom_cache = _punch_geom_cache, moment_transfer = _moment_transfer,
+         depth_passes = (hh, sp, ss) -> phase_a_depth_passes(
+             sp, ss, hh, effective_depth(hh; cover = cover, bar_diameter = bar_dia),
+             fc, fy, Es, Ecs, slab.spans, γ_concrete, columns;
+             struc = struc, slab = slab, limit_type = opts.deflection_limit,
+             deflection_Ie_method = method isa FEA ? method.deflection_Ie_method : :aci318_19,
+             λ = λ, φ_shear = φ_shear, βt = βt, span_axis = _get_span_axis(slab),
+             cover = cover, bar_diameter = bar_dia, drop_panel = drop_panel),
+         studs = opts.joint_studs, thicken = opts.punching_thickening,
+         concrete = material.concrete, rebar = material.rebar, preferred = nothing)
+    end
+
     # =====================================================================
     # OUTER LOOP: ties Phase A → B → C together.
     # Phase B (punching) or C (rebar) may signal "need more depth", which
@@ -413,6 +447,7 @@ function _size_flat_plate!(
         a_budget = monotone_budget(max_iterations, _thick_steps())
         for iter_a in 1:a_budget
             total_iters += 1
+            geometries = flat_plate_column_geometries(columns, slab, struc; h = h)
 
             # Guard against runaway thickness (h > ln/10 is impractical)
             if h > h_max
@@ -430,7 +465,8 @@ function _size_flat_plate!(
             if h != _prev_h
                 d = effective_depth(h; cover=cover, bar_diameter=bar_dia)
                 sw_estimate = slab_sw(h)
-                Pu = compute_column_axial_loads(struc, columns, slab_cell_indices, sw_estimate)
+                Pu = slab_column_axial_loads(struc, slab, columns, slab_cell_indices, sw_estimate,
+                    drop_panel, γ_concrete)
                 _prev_h = h
             end
             
@@ -463,6 +499,8 @@ function _size_flat_plate!(
                 if needs_resize
                     drop_panel = DropPanelGeometry(h_drop, a1, a2)
                     verbose && @debug "Drop panel re-sized for ACI compliance" h_drop=h_drop a1=a1 a2=a2 h=h
+                    Pu = slab_column_axial_loads(struc, slab, columns, slab_cell_indices, sw_estimate,
+                        drop_panel, γ_concrete)
                 end
             end
             
@@ -494,6 +532,7 @@ function _size_flat_plate!(
                 _edge_beam_analysis_kwargs(opts)...,
                 col_I_factor = opts.col_I_factor,
                 tc = tc,
+                column_concrete = column_opts.material,
             )
             
             secondary_results = if method isa FEA && !isnothing(moment_results.secondary)
@@ -506,6 +545,7 @@ function _size_flat_plate!(
                     # ACI 318-11 §10.10.4.1 — cracked column-stub stiffness from caller (default 0.70)
                     col_I_factor = opts.col_I_factor,
                     tc = tc,
+                    column_concrete = column_opts.material,
                 )
             end
             
@@ -548,8 +588,8 @@ function _size_flat_plate!(
             isnothing(rejected) || return rejected
 
             columns_changed = _update_column_sizes!(
-                columns, column_result, Pu, Mu, c_span_min, material, column_tol;
-                Muy=Mu_secondary, verbose=verbose
+                columns, column_result, Pu, Mu, c_span_min, column_opts, column_tol;
+                Muy=Mu_secondary, verbose=verbose, geometries=geometries
             )
             
             if columns_changed
@@ -561,47 +601,20 @@ function _size_flat_plate!(
             # ─── A3: Two-Way Deflection Check ───
             verbose && @debug "TWO-WAY DEFLECTION CHECK (ACI 24.2)"
             
-            _l2_defl = moment_results.l2
-            ρ_prime_est = try
-                _As_neg = required_reinforcement(
-                    0.75 * _top_bar_moment(moment_results), _l2_defl / 2, d, fc, fy; εt_min = tension_controlled_strain(fy)
-                )
-                # Inadequate section: ρ′ = 0 keeps the long-term multiplier conservative.
-                if isfinite(_As_neg)
-                    _As_neg = max(_As_neg, minimum_reinforcement(_l2_defl / 2, h, fy))
-                    0.5 * ustrip(u"inch^2", _As_neg) /
-                        (ustrip(u"inch", _l2_defl / 2) * ustrip(u"inch", d))
-                else
-                    0.0
-                end
-            catch e
-                @debug "ρ' estimation failed, using 0.0" exception=(e, catch_backtrace())
-                0.0
-            end
-            
-            verbose && @debug "ρ' estimate for long-term deflection" ρ_prime=round(ρ_prime_est, digits=5)
-            
+            ρ_prime_est = FLAT_PLATE_MIDSPAN_RHO_PRIME
+
+            # Inner (secondary) bar layer: secondary deflection, shear and flexure.
+            d_inner_a = inner_layer_effective_depth(h, cover, bar_dia, bar_dia)
             _Ie_method = method isa FEA ? method.deflection_Ie_method : :aci318_19
+            _defl_kw = (; drop_panel = drop_panel, verbose = verbose, λ = λ,
+                        limit_type = opts.deflection_limit, deflection_Ie_method = _Ie_method)
             _defl_ok = try
-                deflection_result = if !isnothing(drop_panel)
-                    check_two_way_deflection(
-                        moment_results, h, d, fc, fy, Es, Ecs, slab.spans, γ_concrete, columns,
-                        drop_panel;
-                        verbose=verbose, limit_type=opts.deflection_limit,
-                        ρ_prime=ρ_prime_est,
-                        deflection_Ie_method=_Ie_method,
-                    )
-                else
-                    check_two_way_deflection(
-                        moment_results, h, d, fc, fy, Es, Ecs, slab.spans, γ_concrete, columns;
-                        verbose=verbose, limit_type=opts.deflection_limit,
-                        ρ_prime=ρ_prime_est,
-                        deflection_Ie_method=_Ie_method,
-                    )
-                end
+                deflection_result = two_way_deflection(
+                    moment_results, h, d, fc, fy, Es, Ecs, slab.spans, γ_concrete, columns;
+                    ρ_prime = ρ_prime_est, _defl_kw...)
                 deflection_result.ok
             catch e
-                @debug "Deflection check (primary) failed" exception=(e, catch_backtrace())
+                @warn "Deflection check (primary) threw; treated as a failure" exception=(e, catch_backtrace())
                 false
             end
             
@@ -615,35 +628,15 @@ function _size_flat_plate!(
             end
             
             # ─── A3b: Secondary Direction Deflection Check ───
-            # The primary check uses primary-direction moments for Ie.  For slabs
-            # where the secondary span is longer or has higher cracking, the
-            # secondary direction may govern.  Run a separate check with swapped
-            # spans and secondary-direction moments.
+            # Swapped spans, secondary moments, inner-layer depth.
             if !isnothing(secondary_results)
                 verbose && @debug "SECONDARY DEFLECTION CHECK (ACI 24.2)"
-                _sec_spans = (primary = slab.spans.secondary, secondary = slab.spans.primary)
-                # Build a lightweight proxy with secondary moments + shared loads
-                _sec_proxy = (
-                    M_pos     = secondary_results.M_pos,
-                    M_neg_ext = secondary_results.M_neg_ext,
-                    M_neg_int = secondary_results.M_neg_int,
-                    qu        = moment_results.qu,
-                    qD        = moment_results.qD,
-                    qL        = moment_results.qL,
-                    # FEA: same 2D panel displacement, but Ie uses secondary moments
-                    fea_Δ_panel = hasproperty(moment_results, :fea_Δ_panel) ?
-                                  moment_results.fea_Δ_panel : nothing,
-                )
                 _sec_defl_ok = try
-                    _sec_defl = check_two_way_deflection(
-                        _sec_proxy, h, d, fc, fy, Es, Ecs, _sec_spans, γ_concrete, columns;
-                        verbose=verbose, limit_type=opts.deflection_limit,
-                        ρ_prime=ρ_prime_est,
-                        deflection_Ie_method=_Ie_method,
-                    )
-                    _sec_defl.ok
+                    secondary_two_way_deflection(
+                        moment_results, secondary_results, h, d_inner_a, fc, fy, Es, Ecs,
+                        slab.spans, γ_concrete, columns; _defl_kw...).ok
                 catch e
-                    @debug "Deflection check (secondary) failed" exception=(e, catch_backtrace())
+                    @warn "Deflection check (secondary) threw; treated as a failure" exception=(e, catch_backtrace())
                     false
                 end
                 if !_sec_defl_ok
@@ -674,8 +667,11 @@ function _size_flat_plate!(
             wall_shear = wall_one_way_shear(
                 struc, slab, d, fc, moment_results.qu; h = h, fy = fy, λ = λ, ϕ = φ_shear)
             wall_shear_ok = all(c -> c.ok, wall_shear)
+            sec_shear_ok = !_has_frame_strip(secondary_results) ||
+                check_one_way_shear(secondary_results, d_inner_a, fc; h = h, fy = fy,
+                                    λ = λ, φ_shear = φ_shear).ok
 
-            if !shear_result.ok || !wall_shear_ok
+            if !shear_result.ok || !wall_shear_ok || !sec_shear_ok
                 h = _jumped_depth(h, moment_results, secondary_results)
                 verbose && @warn "One-way shear FAILED. Increasing h → $h"
                 emit!(tc, :slab, "size_flat_plate!", _slab_id, :iteration;
@@ -690,7 +686,14 @@ function _size_flat_plate!(
             flexure_result = check_flexural_adequacy(moment_results, columns, d, fc; fy = fy,
                                                      βt=_βt, verbose=verbose,
                                                      struc=struc, slab=slab,
-                                                     span_axis=_get_span_axis(slab))
+                                                     span_axis=_get_span_axis(slab),
+                                                     drop=drop_panel)
+            if flexure_result.ok
+                flexure_result = secondary_flexural_adequacy(
+                    secondary_results, columns, d_inner_a, fc, fy; βt = _βt,
+                    struc = struc, slab = slab, span_axis = _get_span_axis(slab),
+                    verbose = verbose, drop = drop_panel)
+            end
             
             if !flexure_result.ok
                 h = _jumped_depth(h, moment_results, secondary_results)
@@ -709,7 +712,7 @@ function _size_flat_plate!(
             if !_transfer_sections_adequate(
                     columns, moment_results, secondary_results, h, d, fc, fy;
                     span_axis = _get_span_axis(slab),
-                    d_secondary = inner_layer_effective_depth(h, cover, bar_dia, bar_dia))
+                    d_secondary = d_inner_a)
                 h = _jumped_depth(h, moment_results, secondary_results)
                 verbose && @warn "Moment transfer section inadequate. Increasing h → $h"
                 emit!(tc, :slab, "size_flat_plate!", _slab_id, :iteration;
@@ -740,12 +743,14 @@ function _size_flat_plate!(
         # =================================================================
         punching_resolved = false
         h_before_punch = h  # detect if _resolve_punching_failures! bumped h
+        b_last_check = "punching_shear"
         
         # Each confirm can ask for another column step, because a larger
         # column draws more moment. Allow one confirm per remaining step.
         b_budget = monotone_budget(max_iterations, _column_steps())
         for iter_b in 1:b_budget
             total_iters += 1
+            geometries = flat_plate_column_geometries(columns, slab, struc; h = h)
             
             if verbose
                 @debug "═══════════════════════════════════════════════════════════════════"
@@ -774,6 +779,7 @@ function _size_flat_plate!(
                 _edge_beam_analysis_kwargs(opts)...,
                 col_I_factor = opts.col_I_factor,
                 tc = tc,
+                column_concrete = column_opts.material,
             )
             
             secondary_results = if method isa FEA && !isnothing(moment_results.secondary)
@@ -786,6 +792,7 @@ function _size_flat_plate!(
                     # ACI 318-11 §10.10.4.1 — cracked column-stub stiffness from caller (default 0.70)
                     col_I_factor = opts.col_I_factor,
                     tc = tc,
+                    column_concrete = column_opts.material,
                 )
             end
             
@@ -819,10 +826,19 @@ function _size_flat_plate!(
             end
             rejected = _flat_plate_column_pm_failure(column_result, h, total_iters, drop_panel)
             isnothing(rejected) || return rejected
-            _update_column_sizes!(
-                columns, column_result, Pu, Mu, c_span_min, material, column_tol;
-                Muy=Mu_secondary, verbose=verbose
+            pm_grew = _update_column_sizes!(
+                columns, column_result, Pu, Mu, c_span_min, column_opts, column_tol;
+                Muy=Mu_secondary, verbose=verbose, geometries=geometries
             )
+            # The moments above came from the smaller columns' stiffness.
+            # Punching is checked only against an analysis of the installed sizes.
+            if pm_grew
+                b_last_check = "column_pm"
+                emit!(tc, :slab, "size_flat_plate!", _slab_id, :iteration;
+                      phase="B", check="column_pm", outcome="columns_grew_reanalyze")
+                continue
+            end
+            b_last_check = "punching_shear"
             
             # ── B2: Punching shear check ──
             verbose && @debug "PUNCHING SHEAR CHECK (ACI 22.6)"
@@ -863,11 +879,17 @@ function _size_flat_plate!(
             # Wall reactions: one critical section per connected wall
             # (§11.11.1.2). Column growth does not change that section.
             # A failing wall thickens the slab, the same last resort as a
-            # column the punching levers cannot clear.
+            # column the punching levers cannot clear. Under :joint_search
+            # the rescan below rejects this thickness instead.
+            joint_applies = _joint && thickness_scale_applies(
+                moment_results, drop_panel, h, γ_concrete; stiffness_depends_on_h = _edge_stiffness_h)
+            walls_fail = false
             if hasproperty(moment_results, :qu)
                 wall_checks = wall_reaction_punching(
-                    struc, slab, d, fc, moment_results.qu; λ = λ, ϕ = φ_shear)
-                if any(c -> !c.ok, wall_checks)
+                    struc, slab, d, fc, moment_results.qu; λ = λ, ϕ = φ_shear,
+                    wall_transfer = wall_transfer_of(moment_results, secondary_results))
+                walls_fail = any(c -> !c.ok, wall_checks)
+                if walls_fail && !joint_applies
                     if !opts.punching_thickening
                         emit!(tc, :slab, "size_flat_plate!", _slab_id, :failure;
                               reason="wall_punching", failing_check="punching_shear",
@@ -916,7 +938,83 @@ function _size_flat_plate!(
             end
             
             all_fails = vcat(interior_fails, edge_corner_fails)
-            
+
+            # ── :joint_search: thickness, columns, and studs chosen together ──
+            if joint_applies
+                # This analysis is at the installed sizes. Studs confirm only
+                # where the search chose them; any other failure, or a failing
+                # wall, is rescanned.
+                failing = Int[]
+                for i in all_fails
+                    if i in joint_stud_cols
+                        pr = punching_local[i]
+                        dem = (Vu = moment_results.column_shears[i],
+                               Mub = moment_results.unbalanced_moments[i],
+                               Muy = isnothing(secondary_results) ? nothing :
+                                     secondary_results.unbalanced_moments[i])
+                        r = _try_reinforcement(opts.punching_reinforcement, pr.vu, fc, pr.b0,
+                                               d, h, columns[i], opts, moment_results, dem;
+                                               λ = λ, φ = φ_shear,
+                                               punch_kwargs = punching_axis_kwargs(struc, slab, columns[i]))
+                        if r.ok
+                            punching_local[i] = _merge_reinforcement_result(pr, r)
+                            continue
+                        end
+                    end
+                    push!(failing, i)
+                end
+                if joint_scanned && isempty(failing) && !walls_fail
+                    punching_resolved = true
+                    emit!(tc, :slab, "size_flat_plate!", _slab_id, :decision;
+                          phase="B", outcome="joint_confirmed", h=string(h),
+                          n_studs=count(i -> get(punching_local[i], :studs, nothing) !== nothing,
+                                        1:n_cols_ps),
+                          punching_ratios=[round(punching_local[i].ratio, digits=3) for i in 1:n_cols_ps])
+                    break
+                end
+
+                # Scan from this analysis. Columns never go below their installed size.
+                scan = joint_search(moment_results, secondary_results, h, _joint_ctx(_βt))
+                joint_scanned = true
+                n_joint_scans += 1
+                best = scan.best
+                emit!(tc, :slab, "size_flat_plate!", _slab_id, :decision;
+                      phase="B", outcome="joint_search", scan=n_joint_scans,
+                      objective=string(nameof(typeof(opts.objective))),
+                      h_analyzed=string(h),
+                      h_chosen=best === nothing ? "none" : string(best.h),
+                      J=best === nothing ? NaN : best.J,
+                      n_feasible=length(scan.feasible), n_rejected=length(scan.rejected),
+                      candidates=[(h=string(c.h), J=c.J) for c in scan.feasible],
+                      column_sizes=best === nothing ? String[] :
+                          [string(o.c1) * "×" * string(o.c2) for o in best.columns],
+                      n_studs=best === nothing ? 0 : count(o -> o.studs !== nothing, best.columns))
+                if best === nothing
+                    @warn "Joint search: no thickness up to ln/10 passes with columns within $(opts.max_column_size)" h=h
+                    return _stopped("punching_shear", h, :at_limit)
+                end
+                empty!(joint_stud_cols)
+                cols_changed = false
+                for (i, o) in enumerate(best.columns)
+                    o.studs === nothing || push!(joint_stud_cols, i)
+                    if !(columns[i].c1 ≈ o.c1 && columns[i].c2 ≈ o.c2)
+                        columns[i].c1, columns[i].c2 = o.c1, o.c2
+                        cols_changed = true
+                    end
+                end
+                last_failing_check = "punching_shear"
+                if !(best.h ≈ h)
+                    h = best.h   # restart Phase A at the chosen thickness
+                    break
+                end
+                cols_changed && continue   # confirm at the chosen sizes
+                for (i, o) in enumerate(best.columns)
+                    punching_local[i] = o.punching
+                end
+                punching_resolved = true
+                break
+            end
+
             if isempty(all_fails)
                 punching_resolved = true
                 verbose && @debug "Phase B converged: all punching OK (iter=$iter_b)"
@@ -939,6 +1037,8 @@ function _size_flat_plate!(
                 h, d, fc, h_increment;
                 λ=λ, φ_shear=φ_shear, verbose=verbose,
                 recheck=punch_check,
+                punch_kwargs=i -> punching_axis_kwargs(struc, slab, columns[i]),
+                drop=_drop_depths(drop_panel, h, cover, bar_dia),
             )
             
             # Punching levers exhausted and thickening not allowed: stop as a failure
@@ -991,14 +1091,16 @@ function _size_flat_plate!(
                 # h was bumped — update d and restart Phase A
                 d = effective_depth(h; cover=cover, bar_diameter=bar_dia)
                 sw_estimate = slab_sw(h)
-                Pu = compute_column_axial_loads(struc, columns, slab_cell_indices, sw_estimate)
+                Pu = slab_column_axial_loads(struc, slab, columns, slab_cell_indices, sw_estimate,
+                    drop_panel, γ_concrete)
                 _prev_h = h
                 continue  # outer loop → Phase A
             end
-            ratios = [punching_local[i].ratio for i in eachindex(columns)]
+            ratios = [isassigned(punching_local, i) ? punching_local[i].ratio : -Inf
+                      for i in eachindex(columns)]
             worst = argmax(ratios)
-            @warn "Phase B (punching) did not converge" h=h stop=:budget iterations=total_iters column=worst ratio=ratios[worst] c1=columns[worst].c1 c2=columns[worst].c2
-            return _stopped("punching_shear", h, :budget)
+            @warn "Phase B did not converge" h=h stop=:budget last_check=b_last_check iterations=total_iters column=worst ratio=ratios[worst] c1=columns[worst].c1 c2=columns[worst].c2
+            return _stopped(b_last_check, h, :budget)
         end
         
         # =================================================================
@@ -1039,7 +1141,8 @@ function _size_flat_plate!(
             # Update h-dependent state for next Phase A
             d = effective_depth(h; cover=cover, bar_diameter=bar_dia)
             sw_estimate = slab_sw(h)
-            Pu = compute_column_axial_loads(struc, columns, slab_cell_indices, sw_estimate)
+            Pu = slab_column_axial_loads(struc, slab, columns, slab_cell_indices, sw_estimate,
+                drop_panel, γ_concrete)
             _prev_h = h
             continue  # outer loop → Phase A
         end

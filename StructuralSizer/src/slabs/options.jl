@@ -44,6 +44,18 @@ floor_symbol(opts)  # → :flat_slab
 """
 abstract type AbstractFloorOptions end
 
+"""
+    _require_options(T, options, system) -> T
+
+Return `options` when it is a `T`. Otherwise throw: options built for another
+floor system would size `system` with silently substituted defaults.
+"""
+function _require_options(::Type{T}, options, system) where {T <: AbstractFloorOptions}
+    options isa T && return options
+    throw(ArgumentError(
+        "$(nameof(typeof(system))) floors need $(nameof(T)); got $(nameof(typeof(options)))"))
+end
+
 # floor_symbol(::AbstractFloorOptions) methods defined below each struct.
 # The generic floor_symbol(::AbstractFloorSystem) is in types.jl.
 
@@ -150,6 +162,14 @@ Options for flat plate / flat slab / waffle / PT slab sizing per ACI 318 Chapter
   - `:grow_columns` — Only grow columns; error if maxed (default)
   - `:reinforce_last` — Try columns first, reinforce if columns max out
   - `:reinforce_first` — Try reinforcement first, grow columns if reinf. fails
+  - `:joint_search` — Choose slab thickness, column sizes, and headed studs
+    together by `objective` from one scaled analysis, then confirm with a real
+    one (docs/flat-plate-joint-sizing-plan.md). Drop panels, pattern loading,
+    and an edge-beam βt recomputed from h fall back to `:grow_columns`.
+- `joint_studs`: `:joint_search` may place headed studs (default: `true`).
+  Requires a headed-stud `punching_reinforcement`.
+- `stud_weight`: Multiplier on the studs' objective term in `:joint_search`
+  (default: 1.0). Larger values make studs win less often.
 - `punching_reinforcement`: *What type* of reinforcement to use
   - `:headed_studs_generic` — Generic headed studs (π d²/4 area, §11.11.5)
   - `:headed_studs_incon` — INCON ISS catalog dimensions (§11.11.5)
@@ -179,8 +199,9 @@ Options for flat plate / flat slab / waffle / PT slab sizing per ACI 318 Chapter
 - `shear_studs`: **Deprecated** — backward compat alias for punching_strategy
 
 # Optimization
-- `objective`: Objective for `size_flat_plate_optimized` grid search
-  - `MinVolume()` (default), `MinWeight()`, `MinCost()`, `MinCarbon()`
+- `objective`: Objective for `:joint_search` and the `size_flat_plate_optimized`
+  grid search
+  - `MinCarbon()` (default), `MinVolume()`, `MinWeight()`, `MinCost()`
 
 # Column Cracking (FEA)
 - `col_I_factor`: Cracking reduction for FEA column stubs (default: 0.70 per ACI 318-11 §10.10.4.1).
@@ -253,6 +274,9 @@ struct FlatPlateOptions <: AbstractFloorOptions
     punching_thickening::Bool
     # ACI 318-11 §13.5.3.3 increase of γf at the column face
     moment_transfer_increase::Bool
+    # :joint_search may place headed studs; weight on their objective term
+    joint_studs::Bool
+    stud_weight::Float64
 end
 
 """Valid values of `FlatPlateOptions.on_inapplicable`."""
@@ -306,14 +330,18 @@ function _build_flat_plate_options(;
     stud_diameter::Length = 0.5u"inch",
     stirrup_bar_size::Int = 4,
     min_h::Union{Length, Nothing} = nothing,
-    objective::AbstractObjective = MinVolume(),
+    objective::AbstractObjective = MinCarbon(),
     col_I_factor::Float64 = 0.70,
     on_inapplicable::Symbol = :fallback,
     column_span_minimum::Bool = false,
     punching_thickening::Bool = true,
     moment_transfer_increase::Bool = true,
+    joint_studs::Bool = true,
+    stud_weight::Float64 = 1.0,
 )
     _validate_on_inapplicable(on_inapplicable)
+    validate_two_way_deflection_limit(deflection_limit)
+    stud_weight >= 0 || throw(ArgumentError("stud_weight must be ≥ 0; got $stud_weight"))
     # Call the positional (inner) constructor — field order must match struct definition
     FlatPlateOptions(material, cover, bar_size, has_edge_beam, edge_beam_βt,
                      method, grouping, φ_flexure, φ_shear, λ, deflection_limit,
@@ -321,7 +349,7 @@ function _build_flat_plate_options(;
                      stud_material, stud_diameter, stirrup_bar_size,
                      min_h, objective, col_I_factor, on_inapplicable,
                      column_span_minimum, punching_thickening,
-                     moment_transfer_increase)
+                     moment_transfer_increase, joint_studs, stud_weight)
 end
 
 """
@@ -530,7 +558,6 @@ Note: Provide at most ONE of: `lambda_bounds`, `rise_bounds`, `lambda`, or `rise
 # Design Checks
 - `allowable_stress`: Max stress in MPa (default: 0.45 fc')
 - `deflection_limit`: Max rise reduction (default: span/240)
-- `check_asymmetric`: Check half-span live load (default: true)
 
 # Optimization
 - `objective`: MinVolume(), MinWeight(), MinCarbon(), MinCost()
@@ -595,7 +622,6 @@ Base.@kwdef struct VaultOptions <: AbstractFloorOptions
     # ─── Design Checks ───
     allowable_stress::Union{Real, Nothing} = nothing  # MPa (computed: 0.45 fc')
     deflection_limit::Union{Length, Nothing} = nothing  # (computed: span/240)
-    check_asymmetric::Bool = true                # check half-span live load case
     
     # ─── Optimization ───
     objective::AbstractObjective = MinVolume()
@@ -624,7 +650,7 @@ Composite deck options (steel deck + concrete fill).
 """
 Base.@kwdef struct CompositeDeckOptions <: AbstractFloorOptions
     deck_material::Metal = A992_Steel
-    fill_material::Union{Concrete, Nothing} = nothing  # Uses primary if nothing
+    fill_material::Union{Concrete, Nothing} = nothing  # NWC_4000_145 if nothing; must be 145 lb/ft³
     deck_profile::String = "2VLI"
     total_depth::Union{Nothing, Length} = nothing
     n_spans::Union{Nothing, Int} = nothing
@@ -727,11 +753,11 @@ end
 result_materials(::VaultResult, primary_mat, opts::VaultOptions) =
     Dict{Symbol, AbstractMaterial}(:concrete => opts.material)
 
-"""Return steel + concrete materials for a composite deck result."""
-function result_materials(::CompositeDeckResult, primary_mat, opts::CompositeDeckOptions)
+"""Return steel + concrete materials for a composite deck result (the concrete it was sized with)."""
+function result_materials(r::CompositeDeckResult, primary_mat, opts::CompositeDeckOptions)
     Dict{Symbol, AbstractMaterial}(
         :steel => opts.deck_material,
-        :concrete => something(opts.fill_material, primary_mat)
+        :concrete => something(fill_concrete(r), opts.fill_material, primary_mat)
     )
 end
 

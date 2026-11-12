@@ -9,7 +9,7 @@ import { buildFrame, type FrameView } from "./frame"
 import { buildGlyphs, type GlyphSet } from "./glyphs"
 import { buildBuilding, buildMemberSolids, buildShellVolumes, buildStressMesh, buildTributary, deflectionColor, SHELL_KIND_NAME, type BuildingParts } from "./building"
 import { applyDimensionCuts, buildDimensions, disposeDimensions, type DimensionGroups, type DimensionView } from "./dimensions"
-import { matchFooting, matchFrame, matchShell, readComponents, renderDetail, type ComponentRecord } from "./detail"
+import { matchFooting, matchFrame, matchShell, matchWall, readComponents, renderDetail, type ComponentRecord } from "./detail"
 import type { OverlayMode, OverlayScene } from "./detail-overlay"
 import { SectionHatch } from "./section"
 import { analysisCut } from "./cut-lines"
@@ -98,7 +98,9 @@ scene.add(cutXFrame, cutZFrame, cutXMarks, cutZMarks, cutLineX, cutLineZ)
 const sectionHatch = new SectionHatch(clipX, clipZ)
 scene.add(sectionHatch.group)
 
-const camera = new THREE.PerspectiveCamera(45, 1, 0.01, 5000)
+// Vertical field of a 50 mm lens. Fit backs the camera up so the building still
+// fills the frame, and the near corner stays close in size to the far one.
+const camera = new THREE.PerspectiveCamera(27, 1, 0.01, 5000)
 const ortho = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.01, 5000)
 let activeCamera: THREE.PerspectiveCamera | THREE.OrthographicCamera = camera
 let controls = makeControls(camera)
@@ -146,6 +148,8 @@ let shellFaces = new Uint32Array()
 let shellKinds = new Uint8Array()
 let shellStress = new Float32Array()
 let shellAxial = new Float32Array()
+/** `struc.walls` index of each shell triangle (the wall record's design_index), 0 off a wall. Empty in older scenes. */
+let shellWall = new Uint32Array()
 let stressPresent = false
 let tributaryPosition = new Float32Array()
 let tributaryCount = new Uint32Array()
@@ -223,7 +227,7 @@ function syncOrthoFrustum() {
   const target = new THREE.Vector3()
   controls.getTarget(target)
   const dist = Math.max(activeCamera.position.distanceTo(target), 0.1)
-  const height = dist * Math.tan(THREE.MathUtils.degToRad(22.5)) * 2
+  const height = dist * Math.tan(THREE.MathUtils.degToRad(camera.fov / 2)) * 2
   const aspect = canvas.clientWidth / Math.max(canvas.clientHeight, 1)
   ortho.top = height / 2
   ortho.bottom = -height / 2
@@ -734,6 +738,10 @@ function show(decoded: DecodedScene, refit = true) {
     throw new Error(`shell_axial has ${shellAxial.length} values for ${triangleCount} shell triangles`)
   }
   shellAxialPresent = Boolean(decoded.arrays.shell_axial) && shellAxial.length === triangleCount && triangleCount > 0
+  shellWall = typed(decoded.arrays, "shell_wall", "u32") as Uint32Array<ArrayBuffer>
+  if (decoded.arrays.shell_wall && shellWall.length !== triangleCount) {
+    throw new Error(`shell_wall has ${shellWall.length} values for ${triangleCount} shell triangles`)
+  }
   if (shellStress.length > 0 && !(maxStress > 0)) {
     for (const value of shellStress) maxStress = Math.max(maxStress, Math.abs(value))
   }
@@ -962,7 +970,7 @@ function lookAtExtent(values: Float32Array, padding: number, minRadius = 0) {
   const dz = ext.max[2] - ext.min[2]
   const radius = Math.max(0.5 * Math.hypot(dx, dy, dz) * padding, minRadius, 1)
   const aspect = Math.max(camera.aspect || 1, 0.5)
-  const vFov = THREE.MathUtils.degToRad(camera.fov || 45)
+  const vFov = THREE.MathUtils.degToRad(camera.fov)
   const hFov = 2 * Math.atan(Math.tan(vFov * 0.5) * aspect)
   const distance = radius / Math.sin((aspect >= 1 ? vFov : hFov) * 0.5)
   const dir = new THREE.Vector3(1, 0.72, 1).normalize().multiplyScalar(distance)
@@ -1161,26 +1169,53 @@ async function chooseDesign(id: string) {
   if (previous) reselect(previous)
 }
 
+/** Every other solved design of this plan, named by its `name` parameter. */
+function floorSystemLabel(current: SceneVariant, other: SceneVariant): string {
+  const name = other.params.name?.label
+  const title = name && name !== "none" ? name : other.id
+  const bits: string[] = []
+  const change = (key: string, unit: string, digits: number) => {
+    const from = current.summary?.[key]
+    const to = other.summary?.[key]
+    if (typeof from !== "number" || typeof to !== "number") return
+    const delta = to - from
+    bits.push(`${delta > 0 ? "+" : ""}${delta.toFixed(digits)}${unit ? ` ${unit}` : ""}`)
+  }
+  change("concrete_m3", "m³", 1)
+  change("embodied_carbon_kgco2e", "kg", 0)
+  change("critical_ratio", "", 2)
+  return bits.length ? `${title} · ${bits.join(" · ")}` : title
+}
+
 function showVariantMenu(clientX: number, clientY: number, anchor: string) {
   if (!variantFile || !variantId) return
   const current = variantFile.variants.find((item) => item.id === variantId)
   if (!current) return
-  const neighbors = variantNeighbors(variantFile, variantId, anchor)
+  // A floor system brings its own beams, columns, and material. A right-click
+  // on the slab lists every solved system of this plan. A right-click on a
+  // member still lists only the designs that change that member alone.
+  const neighbors = anchor === "slab"
+    ? variantFile.variants.filter((item) => item.id !== variantId)
+    : variantNeighbors(variantFile, variantId, anchor)
   variantMenu.replaceChildren()
   if (neighbors.length === 0) {
     const note = document.createElement("p")
-    note.textContent = "No other solved design changes only this."
+    note.textContent = anchor === "slab"
+      ? "No other solved design of this plan."
+      : "No other solved design changes only this."
     variantMenu.append(note)
   }
   for (const other of neighbors) {
     const button = document.createElement("button")
     button.type = "button"
-    button.textContent = optionLabel(current, other, anchor)
+    button.textContent = anchor === "slab"
+      ? floorSystemLabel(current, other)
+      : optionLabel(current, other, anchor)
     button.addEventListener("click", () => { void chooseDesign(other.id) })
     variantMenu.append(button)
   }
   variantMenu.hidden = false
-  const width = 280
+  const width = 420
   variantMenu.style.left = `${Math.min(clientX, window.innerWidth - width - 8)}px`
   variantMenu.style.top = `${Math.min(clientY, window.innerHeight - 80)}px`
 }
@@ -1473,6 +1508,18 @@ function levelNodes(kind: number, ids: number[]): number[] {
   return [...seen]
 }
 
+/** Nodes of every shell triangle the scene assigns to wall `wallIndex`. */
+function wallNodes(wallIndex: number): number[] {
+  const seen = new Set<number>()
+  for (let t = 0; t < shellWall.length; t++) {
+    if (shellWall[t] !== wallIndex) continue
+    seen.add(shellFaces[t * 3])
+    seen.add(shellFaces[t * 3 + 1])
+    seen.add(shellFaces[t * 3 + 2])
+  }
+  return [...seen]
+}
+
 function coplanarNodes(ids: number[]): number[] {
   if (ids.length < 3) return []
   const ax = nodePosition[ids[0] * 3]
@@ -1551,13 +1598,15 @@ function pickComponent(clientX: number, clientY: number): ComponentHit | null {
     const kind = hit.object.userData.kinds[tri]
     const ids = [faces[tri * 3], faces[tri * 3 + 1], faces[tri * 3 + 2]]
     const mm = ids.map(nodeDispMm)
-    return shellComponentHit(kind, ids, `Vertices ${ids.join(", ")}\nDeflection ${mm.map((v) => v.toFixed(2)).join(", ")} mm\nMaximum ${Math.max(...mm).toFixed(2)} mm`)
+    return shellComponentHit(kind, ids, `Vertices ${ids.join(", ")}\nDeflection ${mm.map((v) => v.toFixed(2)).join(", ")} mm\nMaximum ${Math.max(...mm).toFixed(2)} mm`, tri)
   }
   if (role === "shell" && hit.face) {
     const kind = Number(hit.object.userData.kind)
     const ids = [hit.face.a, hit.face.b, hit.face.c]
+    const source = hit.object.userData.source as Uint32Array | undefined
+    const tri = hit.faceIndex !== undefined && hit.faceIndex !== null ? source?.[hit.faceIndex] : undefined
     const mm = ids.map(nodeDispMm)
-    return shellComponentHit(kind, ids, `Vertices ${ids.join(", ")}\nDeflection ${mm.map((v) => v.toFixed(2)).join(", ")} mm\nMaximum ${Math.max(...mm).toFixed(2)} mm`)
+    return shellComponentHit(kind, ids, `Vertices ${ids.join(", ")}\nDeflection ${mm.map((v) => v.toFixed(2)).join(", ")} mm\nMaximum ${Math.max(...mm).toFixed(2)} mm`, tri)
   }
   if (role === "footing" && hit.instanceId !== undefined) {
     const i = hit.instanceId
@@ -1619,12 +1668,15 @@ function memberHit(element: number): ComponentHit | null {
   }
 }
 
-function shellComponentHit(kind: number, ids: number[], facts: string): ComponentHit {
+function shellComponentHit(kind: number, ids: number[], facts: string, triangle?: number): ComponentHit {
   const normalized = shellKindOf(kind)
   const elevation = ids.reduce((sum, id) => sum + (nodePosition[id * 3 + 1] ?? 0), 0) / Math.max(ids.length, 1)
   const anchor = nodePoint(ids[0], false)
-  const record = matchShell(componentRecords, normalized, elevation, { x: anchor.x, y: anchor.y, z: anchor.z })
-  const nodeIds = componentNodes(record, normalized, ids)
+  const wall = triangle !== undefined && shellWall.length > 0 ? shellWall[triangle] ?? 0 : 0
+  const record = wall > 0
+    ? matchWall(componentRecords, wall)
+    : matchShell(componentRecords, normalized, elevation, { x: anchor.x, y: anchor.y, z: anchor.z })
+  const nodeIds = wall > 0 ? wallNodes(wall) : componentNodes(record, normalized, ids)
   return {
     title: record?.title ?? SHELL_KIND_NAME[normalized] ?? "Shell",
     facts,
@@ -2112,6 +2164,7 @@ function overlayScene(): OverlayScene {
     maxStress,
     shellAxial,
     shellAxialPresent,
+    shellWall,
     elementNodes,
     elementAxial,
     axialPresent: elementAxial.length > 0 && elementAxial.length === (frameView?.elementCount ?? -1),
@@ -2164,7 +2217,7 @@ resize()
 loop()
 
 async function loadDefault() {
-  for (const name of ["core_office.mgscene", "demo.mgscene"]) {
+  for (const name of ["core_office_v7.mgscene", "core_office.mgscene", "demo.mgscene"]) {
     const response = await fetch(`/${name}`)
     if (response.ok) {
       await openBuffer(await response.arrayBuffer(), name)

@@ -7,12 +7,12 @@ title: Foundation lateral combinations and mat strip statics are blocked
 node_label: Foundation and mat blocked
 tags: foundations,mats,asce,aci-336,blocked
 status: active
-open_threads: 0
+open_threads: 1
 success: 'null'
 files: ''
 session_id: sess-d9205b69
 created_at: '2026-11-12T02:40:14.507561+00:00'
-updated_at: '2026-11-12T02:40:14.507561+00:00'
+updated_at: '2026-11-12T11:36:07.558636+00:00'
 ---
 These two sizing-map sign-off items were not implemented. The clauses do not fix the formulas, and the research notes list the choices as user decisions.
 

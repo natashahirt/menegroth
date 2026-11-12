@@ -21,7 +21,7 @@ Gap review (2026-11-09): waffle rib layout, grillage, and solid-head cut stop at
 
 User decisions:
 - Rib layout: orthogonal module grid (two families, angle + spacings) clipped to any outline (concave, holes), PLUS arbitrary user rib lines (any direction, curved) through the same general network. Isoparametric stays for quads.
-- Partial bays: cut bays < 1/2 full module cast solid; larger cut bays stay ribbed and are checked per bay against ACI 318-11 §8.13 (corpus check at implementation).
+- Partial bays: a cut bay smaller than half a module stays a ribbed void unless a column head claims it (form it with a smaller pan). Larger cut bays stay ribbed and are checked per bay against ACI 318-11 §8.13 (corpus check at implementation).
 - Solid heads: demand-driven growth of whole modules around each column, only in the direction where a check fails (rib one-way shear at head face, punching at d/2 outside head outline with gamma_v, rib hogging compression just outside head). Monotone growth, frame re-solved each step. Not tied to panel corners.
 - Openings in joist/ribbed floors: opening edges become trimmer/header members; joists and ribs clipped to them.
 - One-way strip routing (rectangle-only shortcut in load_routing.jl): compare to per-cell path on rectangles; delete if identical.

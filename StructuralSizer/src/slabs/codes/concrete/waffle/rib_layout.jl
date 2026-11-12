@@ -82,6 +82,37 @@ function is_in_solid_head(ξ::Real, η::Real, solid_head::Real)
     return (near_ξ_0 || near_ξ_1) && (near_η_0 || near_η_1)
 end
 
+"""
+    snapped_solid_head(requested, nξ, nη) -> Float64
+
+Whole rib modules that cover `requested`.
+
+The solid head grows by the piece between crossings, so the fraction on
+the grid is `k / n` and is at least the request. A positive request covers
+at least one module. The same fraction is used both ways, and it stays
+below 1/2 so the corner heads do not meet.
+"""
+function snapped_solid_head(requested::Real, nξ::Integer, nη::Integer)
+    (nξ >= 1 && nη >= 1) || throw(ArgumentError(
+        "a rib grid needs at least one bay each way, got $nξ by $nη"))
+    r = Float64(requested)
+    r >= 0 || throw(ArgumentError(
+        "solid_head is a fraction of the panel and cannot be negative, got $r"))
+    r == 0.0 && return 0.0
+    function cover(n)
+        k = max(1, ceil(Int, r * n - 1e-12))
+        return k, k / n
+    end
+    kξ, sξ = cover(Int(nξ))
+    kη, sη = cover(Int(nη))
+    s = max(sξ, sη)
+    s < 0.5 || throw(ArgumentError(
+        "solid_head $r grows to $kξ modules of $nξ and $kη modules of $nη " *
+        "($s of the panel). Opposite corner heads would meet. " *
+        "Use more bays or a smaller head."))
+    return s
+end
+
 # =============================================================================
 # Void / Module Enumeration
 # =============================================================================

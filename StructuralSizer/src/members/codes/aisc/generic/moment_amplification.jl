@@ -5,7 +5,7 @@
     compute_Cm(M1, M2; transverse_loading=false)
 
 Equivalent uniform moment factor `Cm` per AISC 360-16 Appendix 8, Eq. A-8-4
-(corpus aisc-360-16, p. 244).
+(corpus: aisc-360-16, PDF page 306).
 
 For beam-columns **without** transverse loading between supports:
 

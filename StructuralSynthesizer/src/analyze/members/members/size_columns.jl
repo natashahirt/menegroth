@@ -158,8 +158,12 @@ function _size_columns_impl!(
     Pu_t = [d.Pu_t for d in demands]
     Mux = [d.Mux for d in demands]
     Muy = [d.Muy for d in demands]
-
-    result = StructuralSizer.size_columns(Pu, Mux, geometries, opts; Muy=Muy, Pu_t=Pu_t)
+    # Eq. A-8-4 uses the frame end moments. Dropping them rebuilds each
+    # demand at M1 = 0 (Cm = 0.6). AISC 360-16 App. 8 §8.2.1(a)
+    # (corpus: aisc-360-16, PDF page 306).
+    result = StructuralSizer.size_columns(Pu, Mux, geometries, opts; Muy=Muy, Pu_t=Pu_t,
+        M1x=[d.M1x for d in demands], M2x=[d.M2x for d in demands],
+        M1y=[d.M1y for d in demands], M2y=[d.M2y for d in demands])
     
     # Apply results
     _apply_column_results!(struc, result, group_ids, opts.material, :steel, edge_ids_in_group)

@@ -134,6 +134,47 @@ function size_columns end
 # Steel Implementation
 # ==============================================================================
 
+"""Throw unless an optional end-moment vector matches the member count."""
+function _check_moment_vector(name::Symbol, vec, n::Int)
+    vec === nothing && return
+    length(vec) == n || throw(ArgumentError("$name must have one entry per member"))
+    return
+end
+
+_moment_vector_nm(::Nothing) = nothing
+_moment_vector_nm(vec) = [to_newton_meters(m) for m in vec]
+
+"""True when the caller supplied curvature or a span load for Appendix 8."""
+function _steel_b1_requested(M1x, M2x, M1y, M2y, transverse_load)
+    (M1x !== nothing || M2x !== nothing || M1y !== nothing || M2y !== nothing) &&
+        return true
+    transverse_load isa Bool && return transverse_load
+    transverse_load isa AbstractVector && return any(transverse_load)
+    return false
+end
+
+"""One steel `MemberDemand` from the array API, in newtons and newton-metres."""
+function _steel_array_demand(i, Pu_N, Pu_t_N, Mux_Nm, Mux_pos_Nm, Mux_neg_Nm,
+                             Muy_Nm, Vus_N, δ_m, δ_tot, Ir_m4,
+                             M1x_Nm, M2x_Nm, M1y_Nm, M2y_Nm, transverse_load, composite)
+    tl = transverse_load === nothing ? false :
+         transverse_load isa Bool ? transverse_load : Bool(transverse_load[i])
+    return MemberDemand(i; Pu_c=Pu_N[i], Pu_t=Pu_t_N[i], Mux=Mux_Nm[i],
+                        Mux_pos=Mux_pos_Nm[i], Mux_neg=Mux_neg_Nm[i],
+                        Muy=Muy_Nm[i],
+                        M1x=M1x_Nm === nothing ? nothing : M1x_Nm[i],
+                        M2x=M2x_Nm === nothing ? nothing : M2x_Nm[i],
+                        M1y=M1y_Nm === nothing ? nothing : M1y_Nm[i],
+                        M2y=M2y_Nm === nothing ? nothing : M2y_Nm[i],
+                        Vu_strong=Vus_N[i],
+                        δ_max_LL=δ_m[i], δ_max_total=δ_tot[i],
+                        I_ref=Ir_m4[i],
+                        transverse_load=tl,
+                        composite=composite)
+end
+
+
+
 function size_columns(
     Pu::Vector,
     Mux::Vector,
@@ -157,11 +198,27 @@ function size_columns(
     mip_gap::Real = 1e-4,
     output_flag::Integer = 0,
     tc::Union{Nothing, TraceCollector} = nothing,
+    # AISC 360-16 App. 8 §8.2.1 (corpus: aisc-360-16, PDF page 306).
+    # Omitted end moments keep M1 = 0. `transverse_load` selects Cm = 1.0
+    # for a member with load between its supports (§8.2.1(b)).
+    M1x::Union{Nothing, Vector} = nothing,
+    M2x::Union{Nothing, Vector} = nothing,
+    M1y::Union{Nothing, Vector} = nothing,
+    M2y::Union{Nothing, Vector} = nothing,
+    transverse_load::Union{Nothing, Bool, AbstractVector} = nothing,
 )
     n = length(Pu)
     n == length(Mux) || throw(ArgumentError("Pu and Mux must have same length"))
     n == length(geometries) || throw(ArgumentError("demands and geometries must have same length"))
     n == length(Pu_t) || throw(ArgumentError("Pu and Pu_t must have same length"))
+    _check_moment_vector(:M1x, M1x, n)
+    _check_moment_vector(:M2x, M2x, n)
+    _check_moment_vector(:M1y, M1y, n)
+    _check_moment_vector(:M2y, M2y, n)
+    if transverse_load isa AbstractVector
+        length(transverse_load) == n || throw(ArgumentError(
+            "transverse_load must have one entry per member"))
+    end
 
     emit!(tc, :sizing, "size_columns", "", :enter;
           material="steel",
@@ -181,6 +238,17 @@ function size_columns(
     if opts.sizing_strategy == :nlp && opts.section_type in (:w, :hss) &&
             !_has_composite_context(opts, composite, n) &&
             all(iszero, Pu_t)
+        # The continuous H1 constraint uses the first-order moment. Appendix 8
+        # B1 depends on the section stiffness, which that constraint does not
+        # carry. A compressed member with end moments or span load stays on
+        # the discrete checker, where B1 is applied.
+        if _steel_b1_requested(M1x, M2x, M1y, M2y, transverse_load) &&
+                any(!iszero, Pu)
+            throw(ArgumentError(
+                "steel NLP does not apply Appendix 8 B1. Use sizing_strategy=:discrete " *
+                "when a compressed member has end moments or transverse load. " *
+                "AISC 360-16 App. 8 §8.2.1 (corpus: aisc-360-16, PDF page 306)."))
+        end
         emit!(tc, :sizing, "size_columns", "", :decision; path="nlp")
         return _size_steel_columns_nlp(Pu, Mux, steel_geoms, opts;
                                        Muy=Muy, Mux_neg=Mux_neg, composite=composite)
@@ -215,13 +283,14 @@ function size_columns(
     # flexure + tension, with Pc = φt·Pn per Section D2 (page 134),
     # on the sagging face and on the hogging face. Tension Mr is first-order.
     Pu_t_N = [to_newtons(p) for p in Pu_t]
-    demands = [MemberDemand(i; Pu_c=Pu_N[i], Pu_t=Pu_t_N[i], Mux=Mux_Nm[i],
-                               Mux_pos=Mux_pos_Nm[i], Mux_neg=Mux_neg_Nm[i],
-                               Muy=Muy_Nm[i],
-                               Vu_strong=Vus_N[i],
-                               δ_max_LL=δ_m[i], δ_max_total=δ_tot[i],
-                               I_ref=Ir_m4[i],
-                               composite=_resolve_demand_composite(opts, composite, i))
+    M1x_Nm = _moment_vector_nm(M1x)
+    M2x_Nm = _moment_vector_nm(M2x)
+    M1y_Nm = _moment_vector_nm(M1y)
+    M2y_Nm = _moment_vector_nm(M2y)
+    demands = [_steel_array_demand(i, Pu_N, Pu_t_N, Mux_Nm, Mux_pos_Nm, Mux_neg_Nm,
+                                   Muy_Nm, Vus_N, δ_m, δ_tot, Ir_m4,
+                                   M1x_Nm, M2x_Nm, M1y_Nm, M2y_Nm, transverse_load,
+                                   _resolve_demand_composite(opts, composite, i))
                for i in 1:n]
     
     checker = AISCChecker(; max_depth = opts.max_depth,
@@ -962,11 +1031,18 @@ function size_beams(
     mip_gap::Real = 1e-4,
     output_flag::Integer = 0,
     tc::Union{Nothing, TraceCollector} = nothing,
+    M1x::Union{Nothing, Vector} = nothing,
+    M2x::Union{Nothing, Vector} = nothing,
+    M1y::Union{Nothing, Vector} = nothing,
+    M2y::Union{Nothing, Vector} = nothing,
+    transverse_load::Union{Nothing, Bool, AbstractVector} = nothing,
 )
     length(Pu) == length(Mu) || throw(ArgumentError("Pu and Mu must have same length"))
     length(Pu_t) == length(Mu) || throw(ArgumentError("Pu_t and Mu must have same length"))
     # AISC 360-16 §H1.1 (compression, page 133) and §H1.2 (tension, page 134)
     # — corpus: aisc-360-16. `Pu` is Pu_c; `Pu_t` is the tension magnitude.
+    # App. 8 §8.2.1 (PDF page 306): end moments for Eq. A-8-4, or
+    # `transverse_load` for Cm = 1.0 on a member loaded between supports.
     return size_columns(Pu, Mu, geometries, opts;
                         Pu_t=Pu_t,
                         Mux_pos=Mux_pos, Mux_neg=Mux_neg,
@@ -979,7 +1055,9 @@ function size_beams(
                         mip_start=mip_start,
                         composite=composite,
                         mip_gap=mip_gap, output_flag=output_flag,
-                        tc=tc)
+                        tc=tc,
+                        M1x=M1x, M2x=M2x, M1y=M1y, M2y=M2y,
+                        transverse_load=transverse_load)
 end
 
 # ==============================================================================

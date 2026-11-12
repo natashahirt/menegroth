@@ -740,6 +740,9 @@ function _size_beams_impl!(
         catalog = catalog_kw,
         feasible = feasible_kw,
         composite = composite_kw,
+        # Floor load acts between the supports. App. 8 §8.2.1(b) takes
+        # Cm = 1.0 (corpus: aisc-360-16, PDF page 306).
+        transverse_load = true,
         shell_spans = _group_shell_spans(struc, group_ids, shell_spans,
                                          StructuralSizer.SteelShellSpan),
     )

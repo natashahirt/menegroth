@@ -40,8 +40,11 @@ Unified demand for framing members (beams, columns, beam-columns).
 - Used by both `Cm = 0.6 − 0.4·(M1/M2)` and the slenderness limit
   `34 + 12·(M1/M2)` (capped at 40); see `calc_Cm` and
   `should_consider_slenderness` in `slenderness.jl`.
-- If `M1`/`M2` are not provided, defaults to `M1 = 0`, `M2 = Mux`/`Muy`
-  (conservative single-curvature stand-in: `Cm = 0.6`).
+- If `M1`/`M2` are not provided, defaults to `M1 = 0`, `M2 = Mux`/`Muy`.
+  Eq. A-8-4 then gives `Cm = 0.6`. That is not single curvature. Single
+  curvature is `M1 = −M2` and `Cm = 1.0`. A member loaded between its
+  supports sets `transverse_load` so `Cm = 1.0` (AISC 360-16 App. 8
+  §8.2.1(b), corpus: aisc-360-16, PDF page 306).
 """
 struct MemberDemand{T, C} <: AbstractDemand
     member_idx::Int
@@ -75,7 +78,9 @@ end
 Keyword constructor with defaults for [`MemberDemand`](@ref).
 
 When `M1x`/`M2x` (or `M1y`/`M2y`) are `nothing`, defaults to `M1=0`, `M2=Mux`
-(conservative single-curvature assumption, Cm = 0.6 per AISC 360-16 Appendix 8).
+(Eq. A-8-4 at a zero ratio, Cm = 0.6). Single curvature is `M1 = −M2`
+(Cm = 1.0). Span load uses `transverse_load` (Cm = 1.0, AISC 360-16
+App. 8 §8.2.1(b), corpus: aisc-360-16, PDF page 306).
 When `Mux_pos` / `Mux_neg` are omitted, both default to `Mux` so a caller that
 only has an unsigned envelope still checks both faces at full magnitude
 (hogging Chapter F at `Lb=L`, `Cb=1.0` — AISC 360-16 §F2.2, page 103).

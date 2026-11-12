@@ -455,8 +455,10 @@ function member_group_demands(struc::BuildingStructure;
         length(pattern_cases)
     end
 
-    # Whether to extract signed end moments for ACI 318-19 slenderness Cm.
-    # Only meaningful for columns; beams/struts use the conservative M1=0 default.
+    # Signed end moments are the column curvature for Eq. A-8-4. Beams and
+    # struts carry load between their supports, so they use §8.2.1(b)
+    # (Cm = 1.0) instead of that ratio. AISC 360-16 App. 8 §8.2.1
+    # (corpus: aisc-360-16, PDF page 306).
     extract_end_moments = member_type === :columns
     case_rows === nothing || extract_end_moments || throw(ArgumentError(
         "case_rows are per-case column demands; member_edge_group must be :columns"))
@@ -763,10 +765,9 @@ function member_group_demands(struc::BuildingStructure;
         δ_ll_adj    = has_split ? par_δ_LL[g] * scale    : par_δ[g] * scale
         δ_total_adj = has_split ? par_δ_total[g] * scale  : 0.0
 
-        # For column groups, par_M*x/par_M*y carry signed (M1, M2) per ACI
-        # 318-19 from FEA. For other member types we leave M1/M2 unset so
-        # the `MemberDemand` constructor falls back to its conservative
-        # default (`M1 = 0`, `M2 = Mux/Muy` ⇒ Cm = 0.6).
+        # Column groups carry signed (M1, M2) from the frame analysis.
+        # Beams and struts are loaded between supports, so Cm = 1.0
+        # (AISC 360-16 App. 8 §8.2.1(b), corpus: aisc-360-16, PDF page 306).
         if extract_end_moments
             d = StructuralSizer.MemberDemand(g_idx;
                 Pu_c=par_Pu_c[g], Pu_t=par_Pu_t[g],
@@ -785,7 +786,8 @@ function member_group_demands(struc::BuildingStructure;
                 Muy=par_Muy[g],
                 Vu_strong=par_Vus[g], Vu_weak=par_Vuw[g],
                 δ_max_LL=δ_ll_adj, δ_max_total=δ_total_adj,
-                I_ref=par_Ir[g])
+                I_ref=par_Ir[g],
+                transverse_load=true)
         end
 
         push!(demands, d)

@@ -227,8 +227,9 @@ end
 
 Size a cast-in-place two-way slab with beams per ACI 318.
 
-Two-way slabs have beams on all sides, which provide additional support
-and allow for thinner slabs than flat plates.
+Beams on all sides may reduce the thickness once their stiffness ratio
+αfm is known. This span sizing does not have the beam sections, so it
+uses §9.5.3.3(a): the slab is treated as αfm ≤ 0.2.
 """
 function _size_span_floor(::TwoWay, span::L, sdl::F, live::F;
                     material::Concrete = NWC_4000,
@@ -238,11 +239,18 @@ function _size_span_floor(::TwoWay, span::L, sdl::F, live::F;
     
     l2_val = isnothing(l2) ? span : l2
     
-    # Two-way with beams: ACI Table 8.3.1.2
-    ln = min(span, l2_val)
+    # ln is the long clear span. ACI 318-11 §9.5.3.3 (corpus: aci-318-11,
+    # PDF page 135). These spans are the caller’s panel dimensions.
+    # Panels with a long-to-short ratio above 2 are one-way
+    # (`infer_floor_type`). Passing β keeps Table 9.5(c) inside §9.5.3.2.
+    short_m = ustrip(u"m", min(span, l2_val))
+    ln = max(span, l2_val)
+    short_m > 0 || throw(ArgumentError(
+        "A two-way panel span must be positive."))
+    β = ustrip(u"m", ln) / short_m
     fp = options isa FlatSlabOptions ? options.base : options
     fy = fp.material.rebar.Fy
-    h_min = min_thickness(TwoWay(), ln; fy)
+    h_min = min_thickness(TwoWay(), ln; fy, β=β)
     
     # Round up to nearest 0.5"
     h = ceil(ustrip(u"inch", h_min) * 2) / 2 * u"inch"

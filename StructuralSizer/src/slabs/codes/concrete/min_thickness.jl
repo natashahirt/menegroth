@@ -12,7 +12,7 @@
 # References
 # ----------
 # ACI 318-11 Table 9.5(c)    → flat plate, flat slab
-# ACI 318-11 §9.5.3.3        → two-way slabs with beams
+# ACI 318-11 §9.5.3.3        → two-way slabs with beams (αfm)
 # ACI 318-11 Table 9.5(a)    → one-way slabs
 # ACI 318-11 §9.8            → waffle (two-way joist)
 # PTI DC20.9                 → PT banded slabs
@@ -66,19 +66,87 @@ end
 # -----------------------------------------------------------------------------
 
 """
-    min_thickness(::TwoWay, ln; fy=60000psi)
+Divisor of `ln` from ACI 318-11 Table 9.5(c), exterior panel, no drop, no edge beam.
 
-Minimum two-way slab thickness with beams on all sides.
-
-    h = ln × (0.8 + fy / 200 000 psi) / 36
-
-Absolute minimum: 3.5 in.
-
-Ref: ACI 318-11 §9.5.3.3(c), Eq. (9-13) (αfm > 2.0 row, simplified).
+The row is the thickest in the table. `fy` is interpolated between 40, 60,
+and 75 ksi. ACI 318-11 §9.5.3.2 (corpus: aci-318-11, PDF page 134).
 """
-function min_thickness(::TwoWay, ln::Length; fy::Pressure=60000u"psi")
-    h = ln * (0.8 + fy / (200_000u"psi")) / 36
-    return max(h, 3.5u"inch")
+function _table_9_5c_exterior_divisor(fy::Pressure)
+    fy_ksi = ustrip(u"ksi", fy)
+    (40.0 <= fy_ksi <= 75.0) || throw(ArgumentError(
+        "Table 9.5(c) interpolates fy between 40 and 75 ksi, got $(fy). " *
+        "ACI 318-11 §9.5.3.2 (corpus: aci-318-11, PDF page 134)."))
+    if fy_ksi <= 60.0
+        t = (fy_ksi - 40.0) / 20.0
+        return 33.0 + (30.0 - 33.0) * t
+    end
+    t = (fy_ksi - 60.0) / 15.0
+    return 30.0 + (28.0 - 30.0) * t
+end
+
+"""
+    min_thickness(::TwoWay, ln; fy=60000psi, αfm=nothing, β=nothing,
+                  discontinuous_edge=false)
+
+Minimum thickness of a slab with beams on all sides.
+
+`αfm` is the average beam-to-slab stiffness ratio. Until it is known, the
+slab is treated as αfm ≤ 0.2 and uses Table 9.5(c) through §9.5.3.3(a).
+The exterior panel without an edge beam is the thickest column of that table.
+
+When `αfm` is given, `β` is the long clear span divided by the short clear
+span and must be at least 1.
+
+- αfm ≤ 0.2: Table 9.5(c), and not less than 5 in. §9.5.3.3(a), §9.5.3.2.
+  The table applies when the long-to-short ratio is not greater than 2.
+  A larger ratio is classified one-way before this function runs.
+- 0.2 < αfm ≤ 2.0: Eq. (9-12), and not less than 5 in. §9.5.3.3(b).
+- αfm > 2.0: Eq. (9-13), and not less than 3.5 in. §9.5.3.3(c).
+
+`discontinuous_edge` increases the Eq. (9-12) or Eq. (9-13) value by
+10 percent, and the inch floor still applies. §9.5.3.3(d).
+
+ACI 318-11 §9.5.3.3 (corpus: aci-318-11, PDF pages 134–135).
+"""
+function min_thickness(::TwoWay, ln::Length;
+                       fy::Pressure=60000u"psi",
+                       αfm::Union{Nothing, Real}=nothing,
+                       β::Union{Nothing, Real}=nothing,
+                       discontinuous_edge::Bool=false)
+    if αfm === nothing || αfm <= 0.2
+        αfm !== nothing && αfm < 0 && throw(ArgumentError(
+            "αfm is $(αfm). The stiffness ratio cannot be negative. " *
+            "ACI 318-11 §9.5.3.3 (corpus: aci-318-11, PDF page 134)."))
+        if β !== nothing && β > 2
+            throw(ArgumentError(
+                "Table 9.5(c) applies when the long-to-short span ratio is " *
+                "not greater than 2 (got β = $(β)). ACI 318-11 §9.5.3.2 " *
+                "(corpus: aci-318-11, PDF page 134)."))
+        end
+        divisor = _table_9_5c_exterior_divisor(fy)
+        return max(ln / divisor, 5.0u"inch")
+    end
+    β === nothing && throw(ArgumentError(
+        "two-way thickness with αfm = $(αfm) needs β, the long clear span " *
+        "divided by the short clear span. ACI 318-11 §9.5.3.3 " *
+        "(corpus: aci-318-11, PDF page 135)."))
+    β >= 1 || throw(ArgumentError(
+        "β is $(β). It is the long clear span divided by the short clear span, " *
+        "so it is at least 1. ACI 318-11 §9.5.3.3 (corpus: aci-318-11, PDF page 135)."))
+    # ACI 318-11 Eq. (9-12) and Eq. (9-13), PDF page 134.
+    # h = ln · (0.8 + fy / 200,000) / denominator.
+    factor = 0.8 + ustrip(u"psi", fy) / 200_000
+    if αfm <= 2.0
+        h = ln * factor / (36 + 5 * β * (Float64(αfm) - 0.2))
+        floor_h = 5.0u"inch"
+    else
+        h = ln * factor / (36 + 9 * β)
+        floor_h = 3.5u"inch"
+    end
+    # §9.5.3.3(d), PDF page 135. Ten percent applies to the equation
+    # value. The inch floor is a separate lower bound.
+    discontinuous_edge && (h *= 1.10)
+    return max(h, floor_h)
 end
 
 # -----------------------------------------------------------------------------
